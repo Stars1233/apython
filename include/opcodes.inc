@@ -1,0 +1,179 @@
+; opcodes.inc - Python 3.12 opcode definitions
+
+%ifndef OPCODES_INC
+%define OPCODES_INC
+
+; Python 3.12 opcodes
+OP_CACHE                     equ 0
+OP_POP_TOP                   equ 1
+OP_PUSH_NULL                 equ 2
+OP_INTERPRETER_EXIT          equ 3
+OP_END_FOR                   equ 4
+OP_END_SEND                  equ 5
+OP_NOP                       equ 9
+OP_UNARY_NEGATIVE            equ 11
+OP_UNARY_NOT                 equ 12
+OP_UNARY_INVERT              equ 15
+OP_RESERVED                  equ 17
+OP_BINARY_SUBSCR             equ 25
+OP_BINARY_SLICE              equ 26
+OP_STORE_SLICE               equ 27
+OP_GET_LEN                   equ 30
+OP_MATCH_MAPPING             equ 31
+OP_MATCH_SEQUENCE            equ 32
+OP_MATCH_KEYS                equ 33
+OP_PUSH_EXC_INFO             equ 35
+OP_CHECK_EXC_MATCH           equ 36
+OP_CHECK_EG_MATCH            equ 37
+OP_WITH_EXCEPT_START         equ 49
+OP_GET_AITER                 equ 50
+OP_GET_ANEXT                 equ 51
+OP_BEFORE_ASYNC_WITH         equ 52
+OP_BEFORE_WITH               equ 53
+OP_END_ASYNC_FOR             equ 54
+OP_CLEANUP_THROW             equ 55
+OP_STORE_SUBSCR              equ 60
+OP_DELETE_SUBSCR              equ 61
+OP_GET_ITER                  equ 68
+OP_GET_YIELD_FROM_ITER       equ 69
+OP_LOAD_BUILD_CLASS          equ 71
+OP_LOAD_ASSERTION_ERROR      equ 74
+OP_RETURN_GENERATOR          equ 75
+OP_RETURN_VALUE              equ 83
+OP_SETUP_ANNOTATIONS         equ 85
+OP_LOAD_LOCALS               equ 87
+OP_POP_EXCEPT                equ 89
+OP_HAVE_ARGUMENT             equ 90
+OP_STORE_NAME                equ 90
+OP_DELETE_NAME               equ 91
+OP_UNPACK_SEQUENCE           equ 92
+OP_FOR_ITER                  equ 93
+OP_UNPACK_EX                 equ 94
+OP_STORE_ATTR                equ 95
+OP_DELETE_ATTR               equ 96
+OP_STORE_GLOBAL              equ 97
+OP_DELETE_GLOBAL              equ 98
+OP_SWAP                      equ 99
+OP_LOAD_CONST                equ 100
+OP_LOAD_NAME                 equ 101
+OP_BUILD_TUPLE               equ 102
+OP_BUILD_LIST                equ 103
+OP_BUILD_SET                 equ 104
+OP_BUILD_MAP                 equ 105
+OP_LOAD_ATTR                 equ 106
+OP_COMPARE_OP                equ 107
+OP_IMPORT_NAME               equ 108
+OP_IMPORT_FROM               equ 109
+OP_JUMP_FORWARD              equ 110
+OP_POP_JUMP_IF_FALSE         equ 114
+OP_POP_JUMP_IF_TRUE          equ 115
+OP_LOAD_GLOBAL               equ 116
+OP_IS_OP                     equ 117
+OP_CONTAINS_OP               equ 118
+OP_RERAISE                   equ 119
+OP_COPY                      equ 120
+OP_RETURN_CONST              equ 121
+OP_BINARY_OP                 equ 122
+OP_SEND                      equ 123
+OP_LOAD_FAST                 equ 124
+OP_STORE_FAST                equ 125
+OP_DELETE_FAST               equ 126
+OP_LOAD_FAST_CHECK           equ 127
+OP_POP_JUMP_IF_NOT_NONE      equ 128
+OP_POP_JUMP_IF_NONE          equ 129
+OP_RAISE_VARARGS             equ 130
+OP_GET_AWAITABLE             equ 131
+OP_MAKE_FUNCTION             equ 132
+OP_BUILD_SLICE               equ 133
+OP_JUMP_BACKWARD_NO_INTERRUPT equ 134
+OP_MAKE_CELL                 equ 135
+OP_LOAD_CLOSURE              equ 136
+OP_LOAD_DEREF                equ 137
+OP_STORE_DEREF               equ 138
+OP_DELETE_DEREF              equ 139
+OP_JUMP_BACKWARD             equ 140
+OP_LOAD_SUPER_ATTR           equ 141
+OP_CALL_FUNCTION_EX          equ 142
+OP_LOAD_FAST_AND_CLEAR       equ 143
+OP_EXTENDED_ARG              equ 144
+OP_LIST_APPEND               equ 145
+OP_SET_ADD                   equ 146
+OP_MAP_ADD                   equ 147
+OP_COPY_FREE_VARS            equ 149
+OP_YIELD_VALUE               equ 150
+OP_RESUME                    equ 151
+OP_MATCH_CLASS               equ 152
+OP_FORMAT_VALUE              equ 155
+OP_BUILD_CONST_KEY_MAP       equ 156
+OP_BUILD_STRING              equ 157
+OP_LIST_EXTEND               equ 162
+OP_SET_UPDATE                equ 163
+OP_DICT_MERGE                equ 164
+OP_DICT_UPDATE               equ 165
+OP_CALL                      equ 171
+OP_KW_NAMES                  equ 172
+OP_CALL_INTRINSIC_1          equ 173
+OP_CALL_INTRINSIC_2          equ 174
+OP_LOAD_FROM_DICT_OR_GLOBALS equ 175
+OP_LOAD_FROM_DICT_OR_DEREF   equ 176
+
+; BINARY_OP argument constants
+NB_ADD              equ 0
+NB_AND              equ 1
+NB_FLOOR_DIVIDE     equ 2
+NB_LSHIFT           equ 3
+NB_MATRIX_MULTIPLY  equ 4
+NB_MULTIPLY         equ 5
+NB_REMAINDER        equ 6
+NB_OR               equ 7
+NB_POWER            equ 8
+NB_RSHIFT           equ 9
+NB_SUBTRACT         equ 10
+NB_TRUE_DIVIDE      equ 11
+NB_XOR              equ 12
+NB_INPLACE_ADD      equ 13
+NB_INPLACE_AND      equ 14
+NB_INPLACE_FLOOR_DIVIDE equ 15
+NB_INPLACE_LSHIFT   equ 16
+NB_INPLACE_MATRIX_MULTIPLY equ 17
+NB_INPLACE_MULTIPLY equ 18
+NB_INPLACE_REMAINDER equ 19
+NB_INPLACE_OR       equ 20
+NB_INPLACE_POWER    equ 21
+NB_INPLACE_RSHIFT   equ 22
+NB_INPLACE_SUBTRACT equ 23
+NB_INPLACE_TRUE_DIVIDE equ 24
+NB_INPLACE_XOR      equ 25
+
+; Number of CACHE entries following each opcode
+; (inline cache slots, each 2 bytes)
+CACHE_BINARY_SUBSCR   equ 1
+CACHE_STORE_SUBSCR    equ 1
+CACHE_UNPACK_SEQUENCE equ 1
+CACHE_FOR_ITER        equ 1
+CACHE_STORE_ATTR      equ 4
+CACHE_LOAD_ATTR       equ 9
+CACHE_COMPARE_OP      equ 1
+CACHE_LOAD_GLOBAL     equ 4
+CACHE_BINARY_OP       equ 1
+CACHE_SEND            equ 1
+CACHE_LOAD_SUPER_ATTR equ 1
+CACHE_CALL            equ 3
+
+; COMPARE_OP argument encoding in Python 3.12
+; The argument is (comparison_op << 4) | predicate_mask
+; But for the basic comparison ops:
+CMP_LT equ 0
+CMP_LE equ 1
+CMP_EQ equ 2
+CMP_NE equ 3
+CMP_GT equ 4
+CMP_GE equ 5
+
+; MAKE_FUNCTION flags
+MAKE_FUNC_DEFAULTS  equ 0x01
+MAKE_FUNC_KWDEFAULTS equ 0x02
+MAKE_FUNC_ANNOTATIONS equ 0x04
+MAKE_FUNC_CLOSURE   equ 0x08
+
+%endif ; OPCODES_INC
