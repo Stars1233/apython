@@ -30,6 +30,8 @@ extern none_singleton
 extern bool_true
 extern bool_false
 extern int_type
+extern float_type
+extern float_number_methods
 
 ;; ============================================================================
 ;; op_return_value - Return TOS from current frame
@@ -91,6 +93,21 @@ op_binary_op:
     lea rax, [rel binary_op_offsets]
     mov r8, [rax + rcx*8]      ; r8 = offset into PyNumberMethods
 
+    ; Float coercion: if either operand is float, use float methods
+    ; This handles int+float, float+int, float+float
+    test rdi, rdi
+    js .check_right_float      ; SmallInt left → can't be float, check right
+    lea rcx, [rel float_type]
+    cmp [rdi + PyObject.ob_type], rcx
+    je .use_float_methods
+.check_right_float:
+    test rsi, rsi
+    js .no_float_coerce        ; SmallInt right → no float
+    lea rcx, [rel float_type]
+    cmp [rsi + PyObject.ob_type], rcx
+    je .use_float_methods
+
+.no_float_coerce:
     ; Get type's tp_as_number method table from left operand
     ; SmallInt check: bit 63 set means tagged int, use int_type directly
     test rdi, rdi
@@ -101,6 +118,12 @@ op_binary_op:
     lea rax, [rel int_type]
 .binop_have_type:
     mov rax, [rax + PyTypeObject.tp_as_number]
+    jmp .binop_call_method
+
+.use_float_methods:
+    lea rax, [rel float_number_methods]
+
+.binop_call_method:
     ; Get the specific method function pointer
     mov rax, [rax + r8]
 
@@ -261,6 +284,20 @@ op_compare_op:
     push rdi                   ; save left
     push rsi                   ; save right
 
+    ; Float coercion: if either operand is float, use float_compare
+    test rdi, rdi
+    js .cmp_check_right_float  ; SmallInt can't be float
+    lea rax, [rel float_type]
+    cmp [rdi + PyObject.ob_type], rax
+    je .cmp_use_float
+.cmp_check_right_float:
+    test rsi, rsi
+    js .cmp_no_float           ; SmallInt can't be float
+    lea rax, [rel float_type]
+    cmp [rsi + PyObject.ob_type], rax
+    je .cmp_use_float
+
+.cmp_no_float:
     ; Get type's tp_richcompare (SmallInt-aware)
     test rdi, rdi
     js .cmp_smallint_type
@@ -270,6 +307,13 @@ op_compare_op:
     lea rax, [rel int_type]
 .cmp_have_type:
     mov rax, [rax + PyTypeObject.tp_richcompare]
+    jmp .cmp_do_call
+
+.cmp_use_float:
+    extern float_compare
+    lea rax, [rel float_compare]
+
+.cmp_do_call:
 
     ; Call tp_richcompare(left, right, op)
     ; rdi = left, rsi = right (already set)

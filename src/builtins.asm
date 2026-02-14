@@ -546,6 +546,86 @@ builtin_repr:
     call raise_exception
 
 ;; ============================================================================
+;; builtin_bool(PyObject **args, int64_t nargs) -> PyObject*
+;; bool()    -> False
+;; bool(x)   -> True if x is truthy, False otherwise
+;; ============================================================================
+global builtin_bool
+builtin_bool:
+    push rbp
+    mov rbp, rsp
+
+    cmp rsi, 0
+    je .bool_no_args
+    cmp rsi, 1
+    jne .bool_error
+
+    ; bool(x) - test truthiness
+    mov rdi, [rdi]             ; rdi = x
+    extern obj_is_true
+    call obj_is_true           ; eax = 0 or 1
+    test eax, eax
+    jz .bool_ret_false
+    lea rax, [rel bool_true]
+    inc qword [rax + PyObject.ob_refcnt]
+    pop rbp
+    ret
+.bool_ret_false:
+    lea rax, [rel bool_false]
+    inc qword [rax + PyObject.ob_refcnt]
+    pop rbp
+    ret
+
+.bool_no_args:
+    ; bool() -> False
+    lea rax, [rel bool_false]
+    inc qword [rax + PyObject.ob_refcnt]
+    pop rbp
+    ret
+
+.bool_error:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "bool() takes at most 1 argument"
+    call raise_exception
+
+;; ============================================================================
+;; builtin_float(PyObject **args, int64_t nargs) -> PyObject*
+;; float()    -> 0.0
+;; float(x)   -> convert x to float
+;; ============================================================================
+global builtin_float
+builtin_float:
+    push rbp
+    mov rbp, rsp
+
+    cmp rsi, 0
+    je .float_no_args
+    cmp rsi, 1
+    jne .float_error
+
+    ; float(x) - convert x
+    mov rdi, [rdi]             ; rdi = x
+    extern float_to_f64
+    call float_to_f64          ; xmm0 = double
+    extern float_from_f64
+    call float_from_f64        ; rax = new float
+
+    pop rbp
+    ret
+
+.float_no_args:
+    ; float() -> 0.0
+    xorpd xmm0, xmm0
+    call float_from_f64
+    pop rbp
+    ret
+
+.float_error:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "float() takes at most 1 argument"
+    call raise_exception
+
+;; ============================================================================
 ;; builtin___build_class__(PyObject **args, int64_t nargs) -> PyObject*
 ;; __build_class__(body_func, class_name, *bases)
 ;;
@@ -797,6 +877,16 @@ builtins_init:
     lea rdx, [rel builtin_repr]
     call add_builtin
 
+    mov rdi, rbx
+    lea rsi, [rel bi_name_float]
+    lea rdx, [rel builtin_float]
+    call add_builtin
+
+    mov rdi, rbx
+    lea rsi, [rel bi_name_bool]
+    lea rdx, [rel builtin_bool]
+    call add_builtin
+
     ; Register exception types as builtins
     mov rdi, rbx
     lea rsi, [rel bi_name_BaseException]
@@ -967,6 +1057,8 @@ bi_name_range:        db "range", 0
 bi_name_type:         db "type", 0
 bi_name_isinstance:   db "isinstance", 0
 bi_name_repr:         db "repr", 0
+bi_name_float:        db "float", 0
+bi_name_bool:         db "bool", 0
 bi_name_build_class:  db "__build_class__", 0
 
 ; Exception type names

@@ -352,6 +352,110 @@ obj_print:
     pop rbp
     ret
 
+;; ============================================================================
+;; type_repr(PyObject *type_obj) -> PyStrObject*
+;; Formats "<class 'name'>" for a type object.
+;; ============================================================================
+global type_repr
+type_repr:
+    push rbp
+    mov rbp, rsp
+    push rbx
+    sub rsp, 72                ; 64 bytes buffer + 8 alignment
+
+    ; rdi = type object ptr
+    mov rax, [rdi + PyTypeObject.tp_name]  ; C string pointer
+    test rax, rax
+    jz .type_repr_unknown
+
+    ; Build "<class 'NAME'>" in stack buffer
+    mov rbx, rax               ; rbx = tp_name C string
+
+    ; Calculate name length
+    xor ecx, ecx
+.name_len:
+    cmp byte [rbx + rcx], 0
+    je .name_len_done
+    inc ecx
+    jmp .name_len
+.name_len_done:
+    ; ecx = name len; buffer at [rsp]
+    lea rdi, [rsp]
+
+    ; Write "<class '"
+    mov byte [rdi], '<'
+    mov byte [rdi+1], 'c'
+    mov byte [rdi+2], 'l'
+    mov byte [rdi+3], 'a'
+    mov byte [rdi+4], 's'
+    mov byte [rdi+5], 's'
+    mov byte [rdi+6], ' '
+    mov byte [rdi+7], 0x27     ; single quote
+
+    ; Copy name bytes
+    xor r8d, r8d
+.copy_name:
+    cmp r8d, ecx
+    je .copy_name_done
+    mov al, [rbx + r8]
+    mov [rdi + 8 + r8], al
+    inc r8d
+    jmp .copy_name
+.copy_name_done:
+    ; Append "'>" and null terminator
+    lea eax, [r8d + 8]
+    mov byte [rdi + rax], 0x27  ; single quote
+    mov byte [rdi + rax + 1], '>'
+    mov byte [rdi + rax + 2], 0
+
+    ; Create string from buffer
+    ; rdi already = [rsp] = buffer start
+    call str_from_cstr
+
+    add rsp, 72
+    pop rbx
+    pop rbp
+    ret
+
+.type_repr_unknown:
+    lea rdi, [rel type_repr_unknown_str]
+    call str_from_cstr
+    add rsp, 72
+    pop rbx
+    pop rbp
+    ret
+
 section .rodata
 obj_print_newline: db 10
 obj_print_null_str: db "<NULL>", 10
+type_repr_unknown_str: db "<class '?'>", 0
+type_type_name: db "type", 0
+
+section .data
+align 8
+global type_type
+type_type:
+    dq 1                      ; ob_refcnt (immortal)
+    dq type_type              ; ob_type (self-referential)
+    dq type_type_name         ; tp_name
+    dq TYPE_OBJECT_SIZE       ; tp_basicsize
+    dq 0                      ; tp_dealloc
+    dq type_repr              ; tp_repr
+    dq type_repr              ; tp_str
+    dq 0                      ; tp_hash
+    dq 0                      ; tp_call
+    dq 0                      ; tp_getattr
+    dq 0                      ; tp_setattr
+    dq 0                      ; tp_richcompare
+    dq 0                      ; tp_iter
+    dq 0                      ; tp_iternext
+    dq 0                      ; tp_init
+    dq 0                      ; tp_new
+    dq 0                      ; tp_as_number
+    dq 0                      ; tp_as_sequence
+    dq 0                      ; tp_as_mapping
+    dq 0                      ; tp_base
+    dq 0                      ; tp_dict
+    dq 0                      ; tp_mro
+    dq 0                      ; tp_flags
+    dq 0                      ; tp_bases

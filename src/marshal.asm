@@ -401,9 +401,10 @@ mdo_long:
 ; Stub: skip 8 bytes and return None
 ;--------------------------------------------------------------------------
 mdo_binary_float:
-    mov rdi, 8
-    call marshal_read_bytes    ; skip 8 bytes
-    lea rax, [rel none_singleton]  ; stub: return None
+    call marshal_read_long64   ; rax = 8 bytes (IEEE 754 double bits)
+    movq xmm0, rax            ; move int64 bits to xmm0 as double
+    extern float_from_f64
+    call float_from_f64
     jmp mfinish
 
 ;--------------------------------------------------------------------------
