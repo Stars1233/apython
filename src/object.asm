@@ -10,13 +10,13 @@ section .text
 
 extern ap_malloc
 extern ap_free
-extern puts
+extern sys_write
+extern strlen
 extern str_from_cstr
 extern none_singleton
 extern bool_false
 extern int_repr
 extern int_type
-extern snprintf
 
 ; obj_alloc(size_t size, PyTypeObject *type) -> PyObject*
 ; Allocate a new object with refcount=1 and given type
@@ -309,7 +309,7 @@ obj_is_true:
     ret
 
 ; obj_print(PyObject *obj)
-; Print an object's string representation to stdout
+; Print an object's string representation to stdout followed by newline
 global obj_print
 obj_print:
     push rbp
@@ -322,22 +322,39 @@ obj_print:
     test rax, rax
     jz .print_null
 
-    ; rax is a PyStrObject* - print its inline data
-    push rax
-    lea rdi, [rax + PyStrObject.data]
-    call puts wrt ..plt
-    pop rax
+    mov rbx, rax            ; rbx = str obj
+
+    ; strlen on inline data
+    lea rdi, [rbx + PyStrObject.data]
+    call strlen wrt ..plt
+
+    ; sys_write(1, str_data, len)
+    mov edi, 1
+    lea rsi, [rbx + PyStrObject.data]
+    mov rdx, rax
+    call sys_write
+
+    ; sys_write(1, "\n", 1)
+    mov edi, 1
+    lea rsi, [rel obj_print_newline]
+    mov edx, 1
+    call sys_write
 
     pop rbx
     pop rbp
     ret
 
 .print_null:
-    lea rdi, [rel obj_print_null_str]
-    call puts wrt ..plt
+    ; sys_write(1, "<NULL>\n", 7)
+    mov edi, 1
+    lea rsi, [rel obj_print_null_str]
+    mov edx, 7
+    call sys_write
+
     pop rbx
     pop rbp
     ret
 
 section .rodata
-obj_print_null_str: db "<NULL>", 0
+obj_print_newline: db 10
+obj_print_null_str: db "<NULL>", 10

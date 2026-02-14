@@ -1,16 +1,15 @@
 ; error.asm - Error handling and reporting
+; Uses raw Linux syscalls instead of libc stdio
 
 %include "macros.inc"
 
 section .text
 
-extern fprintf
-extern exit
-extern fflush
-extern stderr
+extern sys_write
+extern sys_exit
 
 ; fatal_error(const char *msg)
-; Prints message to stderr and exits with code 1. Never returns.
+; Prints "Error: <msg>\n" to stderr and exits with code 1. Never returns.
 global fatal_error
 fatal_error:
     push rbp
@@ -18,22 +17,37 @@ fatal_error:
     push rbx
     mov rbx, rdi            ; save msg
 
-    ; fprintf(stderr, "Error: %s\n", msg)
-    mov rax, [rel stderr wrt ..got]
-    mov rdi, [rax]          ; FILE *stderr
-    lea rsi, [rel err_fmt]
-    mov rdx, rbx
-    xor eax, eax            ; no float args
-    call fprintf wrt ..plt
+    ; sys_write(2, "Error: ", 7)
+    mov edi, 2
+    lea rsi, [rel err_prefix]
+    mov edx, 7
+    call sys_write
 
-    ; fflush(stderr)
-    mov rax, [rel stderr wrt ..got]
-    mov rdi, [rax]
-    call fflush wrt ..plt
+    ; strlen(msg) inline
+    mov rdi, rbx
+    xor ecx, ecx
+.strlen_loop:
+    cmp byte [rdi + rcx], 0
+    je .strlen_done
+    inc rcx
+    jmp .strlen_loop
+.strlen_done:
 
-    ; exit(1)
+    ; sys_write(2, msg, len)
+    mov edi, 2
+    mov rsi, rbx
+    mov rdx, rcx
+    call sys_write
+
+    ; sys_write(2, "\n", 1)
+    mov edi, 2
+    lea rsi, [rel err_newline]
+    mov edx, 1
+    call sys_write
+
+    ; sys_exit(1)
     mov edi, 1
-    call exit wrt ..plt
+    call sys_exit
 
 ; runtime_error(const char *msg)
 ; For now, same as fatal_error
@@ -47,26 +61,53 @@ global error_unimplemented_opcode
 error_unimplemented_opcode:
     push rbp
     mov rbp, rsp
-    push rbx
-    mov ebx, edi            ; save opcode
+    sub rsp, 32             ; space for decimal digits
 
-    ; fprintf(stderr, "Error: unimplemented opcode %d\n", opcode)
-    mov rax, [rel stderr wrt ..got]
-    mov rdi, [rax]          ; FILE *stderr
-    lea rsi, [rel err_op_fmt]
-    mov edx, ebx            ; opcode
-    xor eax, eax
-    call fprintf wrt ..plt
+    mov eax, edi            ; opcode value
 
-    ; fflush(stderr)
-    mov rax, [rel stderr wrt ..got]
-    mov rdi, [rax]
-    call fflush wrt ..plt
+    ; Convert opcode int to decimal string on stack
+    lea rdi, [rbp - 1]     ; write digits right-to-left
+    mov byte [rdi], 10      ; trailing newline
+    lea rcx, [rbp - 1]     ; rcx = end (points at newline)
+    mov r8d, 10
 
-    ; exit(1)
+.digit_loop:
+    xor edx, edx
+    div r8d                 ; eax = quot, edx = rem
+    dec rdi
+    add dl, '0'
+    mov [rdi], dl
+    test eax, eax
+    jnz .digit_loop
+
+    ; rdi = start of digits, rcx = newline position
+    ; length = rcx - rdi + 1 (include newline)
+    mov r8, rcx
+    sub r8, rdi
+    inc r8                  ; r8 = length of digits + newline
+
+    ; Save digit start and length
+    mov rbx, rdi
+    mov r9, r8
+
+    ; sys_write(2, prefix, prefix_len)
+    mov edi, 2
+    lea rsi, [rel err_op_prefix]
+    mov edx, err_op_prefix_len
+    call sys_write
+
+    ; sys_write(2, digits_and_newline, len)
+    mov edi, 2
+    mov rsi, rbx
+    mov rdx, r9
+    call sys_write
+
+    ; sys_exit(1)
     mov edi, 1
-    call exit wrt ..plt
+    call sys_exit
 
 section .rodata
-err_fmt: db "Error: %s", 10, 0
-err_op_fmt: db "Error: unimplemented opcode %d", 10, 0
+err_prefix: db "Error: "
+err_newline: db 10
+err_op_prefix: db "Error: unimplemented opcode "
+err_op_prefix_len equ $ - err_op_prefix

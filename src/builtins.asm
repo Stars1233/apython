@@ -22,9 +22,7 @@ extern str_type
 extern ap_malloc
 extern ap_free
 extern fatal_error
-extern fputs
-extern putchar
-extern stdout
+extern sys_write
 extern range_new
 extern int_to_i64
 extern init_iter_types
@@ -32,9 +30,7 @@ extern obj_repr
 extern eval_frame
 extern frame_new
 extern frame_free
-extern fwrite
 extern memcpy
-extern strlen
 extern instance_dealloc
 extern instance_repr
 extern instance_getattr
@@ -219,22 +215,18 @@ builtin_print:
     ; First flush buffer
     test r15, r15
     jz .write_direct
-    lea rdi, [rbp - 4120]       ; buf
-    mov rsi, 1                  ; size
-    mov rdx, r15                ; count
-    mov rax, [rel stdout wrt ..got]
-    mov rcx, [rax]              ; FILE *stdout
-    call fwrite wrt ..plt
+    mov edi, 1                  ; fd = stdout
+    lea rsi, [rbp - 4120]      ; buf
+    mov rdx, r15                ; len
+    call sys_write
     xor r15d, r15d              ; reset offset
 
 .write_direct:
     ; Write this string directly
-    lea rdi, [r14 + PyStrObject.data]
-    mov rsi, 1                  ; size
-    mov rdx, [r14 + PyStrObject.ob_size]  ; count
-    mov rax, [rel stdout wrt ..got]
-    mov rcx, [rax]              ; FILE *stdout
-    call fwrite wrt ..plt
+    mov edi, 1                  ; fd = stdout
+    lea rsi, [r14 + PyStrObject.data]
+    mov rdx, [r14 + PyStrObject.ob_size]  ; len
+    call sys_write
 
     ; DECREF the string representation
     mov rdi, r14
@@ -246,13 +238,11 @@ builtin_print:
     mov byte [rbp - 4120 + r15], 10
     inc r15
 
-    ; Single fwrite for entire output
-    lea rdi, [rbp - 4120]       ; buf
-    mov rsi, 1                  ; size
-    mov rdx, r15                ; count
-    mov rax, [rel stdout wrt ..got]
-    mov rcx, [rax]              ; FILE *stdout
-    call fwrite wrt ..plt
+    ; Single sys_write for entire output
+    mov edi, 1                  ; fd = stdout
+    lea rsi, [rbp - 4120]      ; buf
+    mov rdx, r15                ; len
+    call sys_write
 
     ; Return None (with INCREF)
     lea rax, [rel none_singleton]

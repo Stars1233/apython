@@ -18,8 +18,6 @@ extern pyc_read_file
 extern fatal_error
 extern obj_decref
 extern str_from_cstr
-extern fprintf
-extern stderr
 
 ; main(int argc, char **argv) -> int
 global main
