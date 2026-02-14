@@ -27,6 +27,7 @@ extern obj_is_true
 extern fatal_error
 extern raise_exception
 extern exc_TypeError_type
+extern exc_ValueError_type
 extern int_to_i64
 extern tuple_new
 extern list_new
@@ -38,6 +39,7 @@ extern slice_type
 extern slice_indices
 extern none_singleton
 extern obj_incref
+extern dict_get
 
 ;; ============================================================================
 ;; op_binary_subscr - obj[key]
@@ -959,4 +961,335 @@ op_store_slice:
     DECREF_REG rdi
 
     leave
+    DISPATCH
+
+;; ============================================================================
+;; op_map_add - Add key:value to dict at stack position
+;;
+;; MAP_ADD (147): used by dict comprehensions
+;; TOS = value, TOS1 = key
+;; dict is at stack[-(ecx+2)] relative to current TOS (before pops)
+;; ============================================================================
+global op_map_add
+op_map_add:
+    push rbp
+    mov rbp, rsp
+    push rcx                   ; save oparg
+
+    VPOP rdx                   ; rdx = value (TOS)
+    VPOP rsi                   ; rsi = key (TOS1)
+
+    ; dict is at stack[-(ecx)] after the 2 pops
+    pop rcx                    ; restore oparg
+    neg rcx
+    mov rdi, [r13 + rcx*8]    ; rdi = dict
+
+    ; Save key and value for DECREF
+    push rsi
+    push rdx
+    call dict_set
+
+    ; DECREF key and value (dict_set INCREF'd them)
+    pop rdi                    ; value
+    DECREF_REG rdi
+    pop rdi                    ; key
+    DECREF_REG rdi
+
+    leave
+    DISPATCH
+
+;; ============================================================================
+;; op_dict_update - Update dict with another mapping
+;;
+;; DICT_UPDATE (165): dict.update(mapping)
+;; TOS = mapping, dict at stack[-(ecx+1)] after pop
+;; Pop TOS, merge all key:value pairs into dict.
+;; ============================================================================
+extern dict_type
+
+global op_dict_update
+op_dict_update:
+    push rbp
+    mov rbp, rsp
+    push rbx
+    push r14                   ; extra callee-saved
+    sub rsp, 32                ; locals + alignment
+
+    VPOP rsi                   ; rsi = mapping to merge from
+    mov [rbp-24], rsi
+
+    ; dict is at stack[-(ecx)] after pop
+    neg rcx
+    mov rdi, [r13 + rcx*8]
+    mov [rbp-32], rdi          ; target dict
+
+    ; mapping must be a dict (for now)
+    mov rax, [rsi + PyObject.ob_type]
+    lea rdx, [rel dict_type]
+    cmp rax, rdx
+    jne .du_type_error
+
+    ; Iterate over source dict entries and copy to target
+    ; Source dict: entries at [rsi + PyDictObject.entries], capacity at +24
+    mov rax, [rsi + PyDictObject.capacity]
+    mov [rbp-40], rax          ; capacity
+    mov rax, [rsi + PyDictObject.entries]
+    mov [rbp-48], rax          ; entries ptr
+    xor ebx, ebx              ; index
+
+.du_loop:
+    cmp rbx, [rbp-40]
+    jge .du_done
+
+    ; Check if entry has a key
+    mov rax, [rbp-48]
+    imul rcx, rbx, DictEntry_size
+    add rax, rcx
+    mov rsi, [rax + DictEntry.key]
+    test rsi, rsi
+    jz .du_next
+
+    mov rdx, [rax + DictEntry.value]
+    test rdx, rdx
+    jz .du_next
+
+    ; dict_set(target, key, value)
+    push rbx
+    mov rdi, [rbp-32]
+    call dict_set
+    pop rbx
+
+.du_next:
+    inc rbx
+    jmp .du_loop
+
+.du_done:
+    ; DECREF the mapping
+    mov rdi, [rbp-24]
+    call obj_decref
+
+    add rsp, 32
+    pop r14
+    pop rbx
+    leave
+    DISPATCH
+
+.du_type_error:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "dict.update() argument must be a dict"
+    call raise_exception
+
+;; ============================================================================
+;; op_dict_merge - Merge dict (like dict_update but for **kwargs)
+;;
+;; DICT_MERGE (164): same as DICT_UPDATE but raises on duplicate keys
+;; For simplicity, just delegate to dict_update logic (no dup check).
+;; ============================================================================
+global op_dict_merge
+op_dict_merge:
+    jmp op_dict_update         ; same behavior for now
+
+;; ============================================================================
+;; op_unpack_ex - Unpack with *rest
+;;
+;; UNPACK_EX (94): arg encodes (count_before | count_after << 8)
+;; Pop iterable from TOS, push count_after items, then a list of remaining,
+;; then count_before items (in reverse order on stack).
+;; ============================================================================
+extern list_type
+extern list_getitem
+extern tuple_getitem
+
+global op_unpack_ex
+op_unpack_ex:
+    push rbp
+    mov rbp, rsp
+    push rbx
+    push r14
+    push r15
+    sub rsp, 24                ; locals: [rbp-32]=total_len, [rbp-40]=rest_count
+
+    ; Decode arg: count_before = ecx & 0xFF, count_after = ecx >> 8
+    mov eax, ecx
+    and eax, 0xFF
+    mov ebx, eax               ; ebx = count_before
+    mov eax, ecx
+    shr eax, 8
+    mov r14d, eax              ; r14 = count_after
+
+    ; Pop iterable
+    VPOP rdi
+    mov r15, rdi               ; r15 = iterable
+
+    ; Get length
+    mov rax, [r15 + PyObject.ob_type]
+    lea rcx, [rel list_type]
+    cmp rax, rcx
+    je .ue_list
+
+    extern tuple_type
+    lea rcx, [rel tuple_type]
+    cmp rax, rcx
+    je .ue_tuple
+
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "cannot unpack non-sequence"
+    call raise_exception
+
+.ue_list:
+    mov rax, [r15 + PyListObject.ob_size]
+    jmp .ue_have_len
+.ue_tuple:
+    mov rax, [r15 + PyTupleObject.ob_size]
+
+.ue_have_len:
+    ; rax = total length
+    ; We need: count_before + count_after <= total_length
+    lea rcx, [rbx + r14]      ; count_before + count_after
+    cmp rax, rcx
+    jl .ue_not_enough
+
+    mov [rbp-32], rax          ; save total_len
+
+    ; Compute rest_count = total_len - count_before - count_after
+    sub rax, rbx
+    sub rax, r14
+    mov [rbp-40], rax          ; rest_count
+
+    ; Push in reverse order (top of stack = last pushed = first in sequence)
+    ; Stack order (bottom to top):
+    ;   last after_item, ..., first after_item, rest_list, last before_item, ..., first before_item
+    ; Wait, Python actually pushes in this order:
+    ;   Push count_after items in reverse (items from end)
+    ;   Push rest list
+    ;   Push count_before items in reverse (items from start)
+    ; So TOS = first_before, TOS1 = second_before, ..., then rest, then after items
+
+    ; 1. Push count_after items (from end, in reverse)
+    mov rcx, r14
+    test rcx, rcx
+    jz .ue_no_after
+
+    ; after items are at indices [total_len - count_after .. total_len - 1]
+    ; Push them in reverse: index total_len-1, total_len-2, ..., total_len-count_after
+    mov rax, [rbp-32]          ; total_len
+    dec rax                    ; start from total_len - 1
+.ue_after_loop:
+    test rcx, rcx
+    jz .ue_no_after
+    push rcx
+    push rax
+
+    ; Get item at index rax from iterable
+    mov rdi, r15
+    mov rsi, rax
+    call .ue_getitem           ; rax = item (borrowed)
+    INCREF rax
+    VPUSH rax
+
+    pop rax
+    pop rcx
+    dec rax
+    dec rcx
+    jmp .ue_after_loop
+
+.ue_no_after:
+    ; 2. Build rest list
+    mov rdi, [rbp-40]          ; rest_count as initial capacity
+    call list_new
+    push rax                   ; save rest list
+
+    ; Add items at indices [count_before .. count_before + rest_count - 1]
+    mov rcx, [rbp-40]          ; rest_count
+    test rcx, rcx
+    jz .ue_rest_done
+    mov rax, rbx               ; start index = count_before
+.ue_rest_loop:
+    test rcx, rcx
+    jz .ue_rest_done
+    push rcx
+    push rax
+
+    mov rdi, r15
+    mov rsi, rax
+    call .ue_getitem           ; rax = item (borrowed)
+    mov rsi, rax
+    mov rdi, [rsp + 16]        ; rest list (2 pushes deep)
+    push rsi
+    call list_append           ; list_append does INCREF
+    pop rsi                    ; discard
+    pop rax
+    pop rcx
+    inc rax
+    dec rcx
+    jmp .ue_rest_loop
+
+.ue_rest_done:
+    pop rax                    ; rest list
+    VPUSH rax                  ; push rest list
+
+    ; 3. Push count_before items in reverse (from index count_before-1 down to 0)
+    mov rcx, rbx
+    test rcx, rcx
+    jz .ue_no_before
+    dec rcx                    ; start from count_before - 1
+.ue_before_loop:
+    push rcx
+
+    mov rdi, r15
+    mov rsi, rcx
+    call .ue_getitem           ; rax = item (borrowed)
+    INCREF rax
+    VPUSH rax
+
+    pop rcx
+    test rcx, rcx
+    jz .ue_no_before
+    dec rcx
+    jmp .ue_before_loop
+
+.ue_no_before:
+    ; DECREF iterable
+    mov rdi, r15
+    DECREF_REG rdi
+
+    add rsp, 24
+    pop r15
+    pop r14
+    pop rbx
+    leave
+    DISPATCH
+
+.ue_not_enough:
+    lea rdi, [rel exc_ValueError_type]
+    CSTRING rsi, "not enough values to unpack"
+    call raise_exception
+
+; Helper: get item at index rsi from iterable r15 (returns borrowed ref in rax)
+.ue_getitem:
+    mov rax, [r15 + PyObject.ob_type]
+    lea rcx, [rel list_type]
+    cmp rax, rcx
+    je .ue_gi_list
+    ; tuple
+    mov rax, [r15 + PyTupleObject.ob_item + rsi*8]
+    ret
+.ue_gi_list:
+    mov rax, [r15 + PyListObject.ob_item]
+    mov rax, [rax + rsi*8]
+    ret
+
+;; ============================================================================
+;; op_kw_names - Store keyword argument names for next CALL
+;;
+;; KW_NAMES (172): Store co_consts[arg] as pending kw_names tuple.
+;; The next CALL opcode will use this tuple.
+;; ============================================================================
+extern kw_names_pending
+
+global op_kw_names
+op_kw_names:
+    ; ecx = arg (index into co_consts)
+    mov rax, [r14 + rcx*8]     ; rax = tuple of kw names from co_consts
+    mov [rel kw_names_pending], rax
     DISPATCH

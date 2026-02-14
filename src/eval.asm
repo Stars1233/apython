@@ -51,6 +51,11 @@ extern op_for_iter
 extern op_end_for
 extern op_list_append
 extern op_list_extend
+extern op_map_add
+extern op_dict_update
+extern op_dict_merge
+extern op_unpack_ex
+extern op_kw_names
 extern op_is_op
 extern op_contains_op
 extern op_load_build_class
@@ -842,7 +847,7 @@ opcode_table:
     dq op_delete_name        ; 91  = DELETE_NAME
     dq op_unpack_sequence    ; 92  = UNPACK_SEQUENCE
     dq op_for_iter           ; 93  = FOR_ITER
-    dq op_unimplemented      ; 94  = UNPACK_EX
+    dq op_unpack_ex          ; 94  = UNPACK_EX
     dq op_store_attr         ; 95  = STORE_ATTR
     dq op_delete_attr        ; 96  = DELETE_ATTR
     dq op_store_global       ; 97  = STORE_GLOBAL
@@ -895,7 +900,7 @@ opcode_table:
     dq op_extended_arg       ; 144 = EXTENDED_ARG
     dq op_list_append        ; 145 = LIST_APPEND
     dq op_unimplemented      ; 146 = SET_ADD
-    dq op_unimplemented      ; 147 = MAP_ADD
+    dq op_map_add            ; 147 = MAP_ADD
     dq op_unimplemented      ; 148
     dq op_copy_free_vars     ; 149 = COPY_FREE_VARS
     dq op_unimplemented      ; 150 = YIELD_VALUE
@@ -912,15 +917,15 @@ opcode_table:
     dq op_unimplemented      ; 161
     dq op_list_extend        ; 162 = LIST_EXTEND
     dq op_unimplemented      ; 163 = SET_UPDATE
-    dq op_unimplemented      ; 164 = DICT_MERGE
-    dq op_unimplemented      ; 165 = DICT_UPDATE
+    dq op_dict_merge         ; 164 = DICT_MERGE
+    dq op_dict_update        ; 165 = DICT_UPDATE
     dq op_unimplemented      ; 166
     dq op_unimplemented      ; 167
     dq op_unimplemented      ; 168
     dq op_unimplemented      ; 169
     dq op_unimplemented      ; 170
     dq op_call               ; 171 = CALL
-    dq op_unimplemented      ; 172 = KW_NAMES
+    dq op_kw_names           ; 172 = KW_NAMES
     dq op_unimplemented      ; 173 = CALL_INTRINSIC_1
     dq op_unimplemented      ; 174 = CALL_INTRINSIC_2
     dq op_unimplemented      ; 175 = LOAD_FROM_DICT_OR_GLOBALS
@@ -1014,6 +1019,9 @@ current_exception: resq 1    ; PyExceptionObject* or NULL
 eval_base_rsp: resq 1        ; machine stack pointer at eval dispatch level
 eval_saved_rbx: resq 1       ; bytecode IP saved at dispatch (for exception unwind)
 eval_saved_r12: resq 1       ; frame pointer saved at frame entry (for exception unwind)
+
+global kw_names_pending
+kw_names_pending: resq 1     ; tuple of kw names for next CALL, or NULL
 
 ; ============================================================================
 ; Read-only data for traceback printing

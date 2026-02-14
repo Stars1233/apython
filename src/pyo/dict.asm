@@ -20,6 +20,8 @@ extern ap_memset
 extern fatal_error
 extern raise_exception
 extern exc_KeyError_type
+extern obj_incref
+extern str_from_cstr
 
 ; Initial capacity (must be power of 2)
 DICT_INIT_CAP equ 8
@@ -681,11 +683,116 @@ dict_repr:
     jmp str_from_cstr
 
 ;; ============================================================================
+;; dict_tp_iter(PyDictObject *dict) -> PyDictIterObject*
+;; Create a new dict key iterator.
+;; rdi = dict
+;; ============================================================================
+global dict_tp_iter
+dict_tp_iter:
+    push rbp
+    mov rbp, rsp
+    push rbx
+
+    mov rbx, rdi               ; save dict
+
+    mov edi, PyDictIterObject_size
+    call ap_malloc
+
+    mov qword [rax + PyObject.ob_refcnt], 1
+    lea rcx, [rel dict_iter_type]
+    mov [rax + PyObject.ob_type], rcx
+    mov [rax + PyDictIterObject.it_dict], rbx
+    mov qword [rax + PyDictIterObject.it_index], 0
+    mov qword [rax + PyDictIterObject.it_kind], 0  ; 0 = keys
+
+    ; INCREF the dict
+    mov rdi, rbx
+    call obj_incref
+
+    pop rbx
+    pop rbp
+    ret
+
+;; ============================================================================
+;; dict_iter_next(PyDictIterObject *self) -> PyObject* or NULL
+;; Return next key, or NULL if exhausted.
+;; Scans entries for next non-empty slot.
+;; rdi = iterator
+;; ============================================================================
+global dict_iter_next
+dict_iter_next:
+    mov rax, [rdi + PyDictIterObject.it_dict]      ; dict
+    mov rcx, [rdi + PyDictIterObject.it_index]      ; current index
+    mov rdx, [rax + PyDictObject.capacity]          ; capacity
+    mov rsi, [rax + PyDictObject.entries]            ; entries ptr
+
+.di_scan:
+    cmp rcx, rdx
+    jge .di_exhausted
+
+    ; Check if entry at index has a key
+    imul rax, rcx, DictEntry_size
+    add rax, rsi
+    mov r8, [rax + DictEntry.key]
+    test r8, r8
+    jz .di_skip
+    ; Also check value (deleted entries have NULL value)
+    mov r9, [rax + DictEntry.value]
+    test r9, r9
+    jz .di_skip
+
+    ; Found a valid entry — return the key
+    inc rcx
+    mov [rdi + PyDictIterObject.it_index], rcx
+    mov rax, r8
+    INCREF rax
+    ret
+
+.di_skip:
+    inc rcx
+    jmp .di_scan
+
+.di_exhausted:
+    mov [rdi + PyDictIterObject.it_index], rcx
+    xor eax, eax
+    ret
+
+;; ============================================================================
+;; dict_iter_dealloc(PyObject *self)
+;; ============================================================================
+dict_iter_dealloc:
+    push rbp
+    mov rbp, rsp
+    push rbx
+    mov rbx, rdi
+
+    ; DECREF the dict
+    mov rdi, [rbx + PyDictIterObject.it_dict]
+    call obj_decref
+
+    ; Free self
+    mov rdi, rbx
+    call ap_free
+
+    pop rbx
+    pop rbp
+    ret
+
+;; ============================================================================
+;; dict_iter_self(PyObject *self) -> self with INCREF
+;; ============================================================================
+dict_iter_self:
+    inc qword [rdi + PyObject.ob_refcnt]
+    mov rax, rdi
+    ret
+
+;; ============================================================================
 ;; Data section
 ;; ============================================================================
 section .data
 
 dict_repr_str: db "{...}", 0
+dict_iter_name: db "dict_keyiterator", 0
 
 dict_name_str: db "dict", 0
 
@@ -713,7 +820,7 @@ dict_type:
     dq 0                        ; tp_getattr
     dq 0                        ; tp_setattr
     dq 0                        ; tp_richcompare
-    dq 0                        ; tp_iter
+    dq dict_tp_iter             ; tp_iter
     dq 0                        ; tp_iternext
     dq 0                        ; tp_init
     dq 0                        ; tp_new
@@ -724,4 +831,33 @@ dict_type:
     dq 0                        ; tp_dict
     dq 0                        ; tp_mro
     dq TYPE_FLAG_DICT_SUBCLASS  ; tp_flags
+    dq 0                        ; tp_bases
+
+; Dict key iterator type
+align 8
+global dict_iter_type
+dict_iter_type:
+    dq 1                        ; ob_refcnt (immortal)
+    dq 0                        ; ob_type
+    dq dict_iter_name           ; tp_name
+    dq PyDictIterObject_size    ; tp_basicsize
+    dq dict_iter_dealloc        ; tp_dealloc
+    dq 0                        ; tp_repr
+    dq 0                        ; tp_str
+    dq 0                        ; tp_hash
+    dq 0                        ; tp_call
+    dq 0                        ; tp_getattr
+    dq 0                        ; tp_setattr
+    dq 0                        ; tp_richcompare
+    dq dict_iter_self           ; tp_iter (return self)
+    dq dict_iter_next           ; tp_iternext
+    dq 0                        ; tp_init
+    dq 0                        ; tp_new
+    dq 0                        ; tp_as_number
+    dq 0                        ; tp_as_sequence
+    dq 0                        ; tp_as_mapping
+    dq 0                        ; tp_base
+    dq 0                        ; tp_dict
+    dq 0                        ; tp_mro
+    dq 0                        ; tp_flags
     dq 0                        ; tp_bases
