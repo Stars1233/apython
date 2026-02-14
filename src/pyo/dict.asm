@@ -780,6 +780,22 @@ dict_iter_self:
     ret
 
 ;; ============================================================================
+;; dict_contains(PyDictObject *self, PyObject *key) -> int (0 or 1)
+;; For the 'in' operator: checks if key exists in dict.
+;; ============================================================================
+global dict_contains
+dict_contains:
+    ; Simply call dict_get and return 0/1 based on result
+    call dict_get
+    test rax, rax
+    jz .dc_no
+    mov eax, 1
+    ret
+.dc_no:
+    xor eax, eax
+    ret
+
+;; ============================================================================
 ;; Data section
 ;; ============================================================================
 section .data
@@ -796,6 +812,18 @@ dict_mapping_methods:
     dq dict_len                 ; mp_length
     dq dict_subscript           ; mp_subscript
     dq dict_ass_subscript       ; mp_ass_subscript
+
+; Dict sequence methods (for 'in' operator)
+align 8
+dict_sequence_methods:
+    dq dict_len                 ; sq_length
+    dq 0                        ; sq_concat
+    dq 0                        ; sq_repeat
+    dq 0                        ; sq_item
+    dq 0                        ; sq_ass_item
+    dq dict_contains            ; sq_contains
+    dq 0                        ; sq_inplace_concat
+    dq 0                        ; sq_inplace_repeat
 
 ; Dict type object
 align 8
@@ -818,7 +846,7 @@ dict_type:
     dq 0                        ; tp_init
     dq 0                        ; tp_new
     dq 0                        ; tp_as_number
-    dq 0                        ; tp_as_sequence
+    dq dict_sequence_methods    ; tp_as_sequence (for 'in' operator)
     dq dict_mapping_methods     ; tp_as_mapping
     dq 0                        ; tp_base
     dq 0                        ; tp_dict
