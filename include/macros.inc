@@ -1,5 +1,35 @@
 ; macros.inc - Common NASM macros for apython
 ; System V AMD64 ABI conventions
+;
+; ==========================================================================
+; REGISTER CONVENTION STANDARD
+; ==========================================================================
+;
+; 1. EVAL LOOP REGISTERS (callee-saved, global interpreter state)
+;    rbx  = bytecode instruction pointer (IP into co_code[])
+;    r12  = current frame pointer (PyFrame*)
+;    r13  = value stack top pointer
+;    r14  = co_consts tuple data pointer (&tuple.ob_item[0])
+;    r15  = co_names tuple data pointer (&tuple.ob_item[0])
+;    ecx  = opcode arg on handler entry (set by eval_dispatch)
+;
+; 2. OPCODE HANDLER RULE
+;    Never hold live values in caller-saved registers (rax, rcx, rdx,
+;    rsi, rdi, r8-r11) across any `call` instruction or DECREF/DECREF_REG
+;    macro.  Two safe patterns for preserving values across calls:
+;      a) Machine stack: push val before call, pop val after
+;      b) Callee-saved reg or rbp-frame local [rbp-N]
+;
+; 3. DECREF SAFETY
+;    DECREF_REG contains `call obj_dealloc` which clobbers ALL caller-saved
+;    regs.  DECREF saves/restores rdi only.  Any value in rax, rcx, rdx,
+;    rsi, r8-r11 is destroyed if the refcount reaches zero.
+;
+; 4. REGULAR FUNCTION CONVENTION (SysV ABI)
+;    rdi = self/first arg.  Use callee-saved regs (rbx, r12-r15) or
+;    machine stack to preserve values across calls.  Prefer tail calls
+;    (jmp) over call+ret when no cleanup is needed after the call.
+; ==========================================================================
 
 %ifndef MACROS_INC
 %define MACROS_INC

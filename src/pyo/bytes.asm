@@ -89,12 +89,8 @@ bytes_dealloc:
 ; Stub: returns "b'...'"
 global bytes_repr
 bytes_repr:
-    push rbp
-    mov rbp, rsp
     lea rdi, [rel bytes_repr_str]
-    call str_from_cstr
-    pop rbp
-    ret
+    jmp str_from_cstr
 
 section .data
 

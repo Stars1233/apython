@@ -91,13 +91,15 @@ op_binary_subscr:
 
 .subscr_done:
     ; rax = result
-    mov r8, rax                ; save result
-    pop rdi                    ; key
+    push rax                   ; save result on machine stack
+    mov rdi, [rsp + 8]        ; key
     DECREF_REG rdi
-    pop rdi                    ; obj
+    mov rdi, [rsp + 16]       ; obj
     DECREF_REG rdi
+    pop rax                    ; restore result
+    add rsp, 16                ; discard saved operands
 
-    VPUSH r8
+    VPUSH rax
 
     ; Skip 1 CACHE entry = 2 bytes
     add rbx, 2
@@ -512,13 +514,15 @@ op_get_iter:
 
     ; Call tp_iter(obj) -> iterator
     call rax
-    mov r8, rax                ; save iterator
+    push rax                   ; save iterator on machine stack
 
     ; DECREF the original iterable
-    pop rdi
+    mov rdi, [rsp + 8]        ; reload iterable
     DECREF_REG rdi
+    pop rax                    ; restore iterator
+    add rsp, 8                 ; discard saved iterable
 
-    VPUSH r8
+    VPUSH rax
     DISPATCH
 
 .not_iterable:
@@ -537,7 +541,7 @@ op_get_iter:
 global op_for_iter
 align 16
 op_for_iter:
-    mov r8d, ecx               ; save jump offset
+    push rcx                   ; save jump offset on machine stack
 
     ; Peek at iterator (don't pop yet)
     VPEEK rdi
@@ -552,6 +556,7 @@ op_for_iter:
     jz .exhausted
 
     ; Got a value - push it (iterator stays on stack)
+    add rsp, 8                 ; discard saved jump offset
     VPUSH rax
 
     ; Skip 1 CACHE entry = 2 bytes
@@ -561,10 +566,10 @@ op_for_iter:
 .exhausted:
     ; CPython 3.12: FOR_ITER exhausted pops the iterator and jumps by (arg + 1)
     ; instruction words past the CACHE. The +1 skips the END_FOR instruction.
-    ; Calculate jump target first (r8 is caller-saved, may be clobbered by DECREF)
-    lea r8, [r8 + 1]          ; arg + 1 (skip END_FOR too)
+    pop rcx                    ; restore jump offset
+    lea rcx, [rcx + 1]        ; arg + 1 (skip END_FOR too)
     add rbx, 2                 ; skip cache first
-    lea rbx, [rbx + r8*2]     ; then jump forward
+    lea rbx, [rbx + rcx*2]    ; then jump forward
 
     ; Now pop and DECREF the iterator (safe: rbx/r13 are callee-saved)
     VPOP rdi
@@ -759,20 +764,23 @@ op_contains_op:
     mov rdi, [rsp]             ; container
     mov rsi, [rsp + 8]        ; value
     call rax
-    mov r9d, eax               ; result
+    push rax                   ; save result on machine stack
 
     ; DECREF both
-    pop rdi                    ; right
+    ; Stack: [rsp]=result, [rsp+8]=right, [rsp+16]=left, [rsp+24]=invert
+    mov rdi, [rsp + 8]        ; right
     call obj_decref
-    pop rdi                    ; left
+    mov rdi, [rsp + 16]       ; left
     call obj_decref
-    pop r8                     ; invert
+    pop rax                    ; result
+    add rsp, 16                ; discard right, left
+    pop rcx                    ; invert
 
     ; Invert if 'not in'
-    xor r9d, r8d
+    xor eax, ecx
 
     ; Push bool
-    test r9d, r9d
+    test eax, eax
     jz .contains_false
     lea rax, [rel bool_true]
     jmp .contains_push

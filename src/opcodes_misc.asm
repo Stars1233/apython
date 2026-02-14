@@ -109,14 +109,16 @@ op_binary_op:
     ; rax = result
 
     ; Save result, DECREF operands
-    mov r8, rax                ; r8 = result (caller-saved, but we control flow)
-    pop rdi                    ; rdi = right operand
+    push rax                   ; save result on machine stack
+    mov rdi, [rsp + 8]        ; rdi = right operand
     DECREF_REG rdi
-    pop rdi                    ; rdi = left operand
+    mov rdi, [rsp + 16]       ; rdi = left operand
     DECREF_REG rdi
+    pop rax                    ; restore result
+    add rsp, 16                ; discard saved operands
 
     ; Push result
-    VPUSH r8
+    VPUSH rax
 
     ; Skip 1 CACHE entry = 2 bytes
     add rbx, 2
@@ -276,14 +278,16 @@ op_compare_op:
     ; rax = result (a bool object)
 
     ; Save result, DECREF operands
-    mov r8, rax                ; r8 = result
-    pop rdi                    ; rdi = right operand
+    push rax                   ; save result on machine stack
+    mov rdi, [rsp + 8]        ; rdi = right operand
     DECREF_REG rdi
-    pop rdi                    ; rdi = left operand
+    mov rdi, [rsp + 16]       ; rdi = left operand
     DECREF_REG rdi
+    pop rax                    ; restore result
+    add rsp, 16                ; discard saved operands
 
     ; Push result
-    VPUSH r8
+    VPUSH rax
 
     ; Skip 1 CACHE entry = 2 bytes
     add rbx, 2
@@ -317,12 +321,14 @@ op_unary_negative:
     ; rax = result
 
     ; DECREF old operand
-    mov r8, rax                ; save result
-    pop rdi                    ; rdi = old operand
+    push rax                   ; save result on machine stack
+    mov rdi, [rsp + 8]        ; rdi = old operand
     DECREF_REG rdi
+    pop rax                    ; restore result
+    add rsp, 8                 ; discard saved operand
 
     ; Push result
-    VPUSH r8
+    VPUSH rax
     DISPATCH
 
 ;; ============================================================================
@@ -339,14 +345,16 @@ op_unary_not:
 
     ; Call obj_is_true(operand) -> 0 or 1
     call obj_is_true
-    mov r8d, eax               ; r8d = truthiness result
+    push rax                   ; save truthiness result
 
     ; DECREF operand
-    pop rdi
+    mov rdi, [rsp + 8]        ; reload operand
     DECREF_REG rdi
+    pop rax                    ; restore truthiness
+    add rsp, 8                 ; discard saved operand
 
     ; NOT inverts: if truthy (1), push False; if falsy (0), push True
-    test r8d, r8d
+    test eax, eax
     jnz .push_false
     lea rax, [rel bool_true]
     jmp .push_bool
@@ -366,7 +374,7 @@ op_unary_not:
 global op_pop_jump_if_false
 op_pop_jump_if_false:
     ; Save arg (target offset) before call
-    mov r8d, ecx               ; r8d = target offset in instruction words
+    push rcx                   ; save target offset on machine stack
 
     VPOP rdi                   ; rdi = value to test
 
@@ -375,18 +383,21 @@ op_pop_jump_if_false:
 
     ; Call obj_is_true(value) -> 0 (false) or 1 (true)
     call obj_is_true
-    mov r9d, eax               ; r9d = truthiness
+    push rax                   ; save truthiness on machine stack
 
     ; DECREF the popped value
-    pop rdi
+    mov rdi, [rsp + 8]        ; reload value
     DECREF_REG rdi
+    pop rax                    ; restore truthiness
+    add rsp, 8                 ; discard saved value
+    pop rcx                    ; restore target offset
 
     ; If false (result == 0), jump to target
-    test r9d, r9d
+    test eax, eax
     jnz .no_jump
 
     ; Jump: relative from current rbx (delta in instruction words)
-    lea rbx, [rbx + r8*2]
+    lea rbx, [rbx + rcx*2]
 
 .no_jump:
     DISPATCH
@@ -397,7 +408,7 @@ op_pop_jump_if_false:
 global op_pop_jump_if_true
 op_pop_jump_if_true:
     ; Save arg (delta in instruction words)
-    mov r8d, ecx
+    push rcx                   ; save target offset on machine stack
 
     VPOP rdi
 
@@ -406,18 +417,21 @@ op_pop_jump_if_true:
 
     ; Call obj_is_true(value)
     call obj_is_true
-    mov r9d, eax
+    push rax                   ; save truthiness on machine stack
 
     ; DECREF the popped value
-    pop rdi
+    mov rdi, [rsp + 8]        ; reload value
     DECREF_REG rdi
+    pop rax                    ; restore truthiness
+    add rsp, 8                 ; discard saved value
+    pop rcx                    ; restore target offset
 
     ; If true (result != 0), jump to target
-    test r9d, r9d
+    test eax, eax
     jz .no_jump
 
     ; Jump: relative from current rbx
-    lea rbx, [rbx + r8*2]
+    lea rbx, [rbx + rcx*2]
 
 .no_jump:
     DISPATCH
@@ -427,28 +441,23 @@ op_pop_jump_if_true:
 ;; ============================================================================
 global op_pop_jump_if_none
 op_pop_jump_if_none:
-    ; Save arg (delta in instruction words)
-    mov r8d, ecx
-
     VPOP rax                   ; rax = value
 
     ; Compare with none_singleton
     lea rdx, [rel none_singleton]
     cmp rax, rdx
-    ; Save comparison result before DECREF
-    sete cl                    ; cl = 1 if None
+    jne .not_none
 
-    ; DECREF the popped value
+    ; IS None: save jump offset, DECREF, jump
+    push rcx                   ; save jump offset
     DECREF rax
+    pop rcx                    ; restore jump offset
+    lea rbx, [rbx + rcx*2]
+    DISPATCH
 
-    ; If was None (cl == 1), jump to target
-    test cl, cl
-    jz .no_jump
-
-    ; Jump: relative from current rbx
-    lea rbx, [rbx + r8*2]
-
-.no_jump:
+.not_none:
+    ; NOT None: just DECREF and continue
+    DECREF rax
     DISPATCH
 
 ;; ============================================================================
@@ -456,28 +465,23 @@ op_pop_jump_if_none:
 ;; ============================================================================
 global op_pop_jump_if_not_none
 op_pop_jump_if_not_none:
-    ; Save arg (delta in instruction words)
-    mov r8d, ecx
-
     VPOP rax                   ; rax = value
 
     ; Compare with none_singleton
     lea rdx, [rel none_singleton]
     cmp rax, rdx
-    ; Save comparison result before DECREF
-    setne cl                   ; cl = 1 if NOT None
+    je .is_none
 
-    ; DECREF the popped value
+    ; NOT None: save jump offset, DECREF, jump
+    push rcx                   ; save jump offset
     DECREF rax
+    pop rcx                    ; restore jump offset
+    lea rbx, [rbx + rcx*2]
+    DISPATCH
 
-    ; If was NOT None (cl == 1), jump to target
-    test cl, cl
-    jz .no_jump
-
-    ; Jump: relative from current rbx
-    lea rbx, [rbx + r8*2]
-
-.no_jump:
+.is_none:
+    ; IS None: just DECREF and continue
+    DECREF rax
     DISPATCH
 
 ;; ============================================================================

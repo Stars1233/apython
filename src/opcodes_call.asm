@@ -210,10 +210,12 @@ op_make_function:
     ; rax = new function object
 
     ; DECREF the code object (func_new INCREFed it)
-    mov r8, rax                ; save func obj
-    pop rdi                    ; code object
+    push rax                   ; save func obj on machine stack
+    mov rdi, [rsp + 8]        ; code object (saved earlier)
     DECREF_REG rdi
+    pop rax                    ; restore func obj
+    add rsp, 8                 ; discard saved code object
 
     ; Push function onto value stack
-    VPUSH r8
+    VPUSH rax
     DISPATCH

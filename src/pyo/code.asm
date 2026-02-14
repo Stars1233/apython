@@ -88,12 +88,8 @@ code_dealloc:
 ; code_repr(PyObject *self) -> PyStrObject*
 global code_repr
 code_repr:
-    push rbp
-    mov rbp, rsp
     lea rdi, [rel code_repr_str]
-    call str_from_cstr
-    pop rbp
-    ret
+    jmp str_from_cstr
 
 section .data
 

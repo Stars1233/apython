@@ -14,12 +14,8 @@ extern str_from_cstr
 ; Returns a new string "None"
 global none_repr
 none_repr:
-    push rbp
-    mov rbp, rsp
     lea rdi, [rel none_str]
-    call str_from_cstr
-    pop rbp
-    ret
+    jmp str_from_cstr
 
 ; none_hash(PyObject *self) -> int64
 ; Returns a fixed hash value for None

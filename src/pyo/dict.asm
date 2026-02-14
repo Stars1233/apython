@@ -581,13 +581,9 @@ dict_ass_subscript:
 ;; ============================================================================
 global dict_repr
 dict_repr:
-    push rbp
-    mov rbp, rsp
     extern str_from_cstr
     lea rdi, [rel dict_repr_str]
-    call str_from_cstr
-    pop rbp
-    ret
+    jmp str_from_cstr
 
 ;; ============================================================================
 ;; Data section

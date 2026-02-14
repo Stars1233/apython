@@ -342,12 +342,8 @@ list_dealloc:
 ;; ============================================================================
 global list_repr
 list_repr:
-    push rbp
-    mov rbp, rsp
     lea rdi, [rel list_repr_str]
-    call str_from_cstr
-    pop rbp
-    ret
+    jmp str_from_cstr
 
 ;; ============================================================================
 ;; list_bool(PyObject *self) -> int (0/1)

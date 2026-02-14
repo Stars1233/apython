@@ -182,12 +182,8 @@ instance_dealloc:
 ;; ============================================================================
 global instance_repr
 instance_repr:
-    push rbp
-    mov rbp, rsp
     lea rdi, [rel instance_repr_cstr]
-    call str_from_cstr
-    pop rbp
-    ret
+    jmp str_from_cstr
 
 ;; ============================================================================
 ;; type_call(PyTypeObject *type, PyObject **args, int64_t nargs) -> PyObject*

@@ -212,12 +212,8 @@ func_dealloc:
 ; ---------------------------------------------------------------------------
 global func_repr
 func_repr:
-    push rbp
-    mov rbp, rsp
     lea rdi, [rel func_repr_str]
-    call str_from_cstr
-    pop rbp
-    ret
+    jmp str_from_cstr
 
 ; ---------------------------------------------------------------------------
 ; Data section

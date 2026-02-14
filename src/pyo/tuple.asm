@@ -143,12 +143,8 @@ tuple_dealloc:
 ; Stub: returns "(....)"
 global tuple_repr
 tuple_repr:
-    push rbp
-    mov rbp, rsp
     lea rdi, [rel tuple_repr_str]
-    call str_from_cstr
-    pop rbp
-    ret
+    jmp str_from_cstr
 
 ; tuple_hash(PyObject *self) -> int64
 ; Combines item hashes using a simple multiply-xor scheme
