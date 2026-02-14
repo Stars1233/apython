@@ -567,14 +567,8 @@ set_dealloc:
     pop rbp
     ret
 
-;; ============================================================================
-;; set_repr(PyObject *self) -> PyStrObject*
-;; Returns "{...}" placeholder
-;; ============================================================================
-global set_repr
-set_repr:
-    lea rdi, [rel set_repr_str]
-    jmp str_from_cstr
+; set_repr is in src/repr.asm
+extern set_repr
 
 ;; ============================================================================
 ;; set_len(PyObject *self) -> int64_t
@@ -693,7 +687,7 @@ set_iter_self:
 ;; ============================================================================
 section .data
 
-set_repr_str: db "{...}", 0
+; set_repr_str removed - repr now in src/repr.asm
 set_iter_name: db "set_iterator", 0
 
 set_name_str: db "set", 0

@@ -38,6 +38,7 @@ extern raise_exception
 extern exc_RuntimeError_type
 extern exc_TypeError_type
 extern obj_incref
+extern obj_decref
 extern tuple_new
 extern list_type
 
@@ -1040,4 +1041,177 @@ op_call_intrinsic_1:
     pop rdi
     DECREF_REG rdi
 
+    DISPATCH
+
+;; ============================================================================
+;; op_get_len - Push len(TOS) without popping TOS
+;;
+;; Opcode 30: GET_LEN
+;; Used by match statements: push len, keep original on stack.
+;; ============================================================================
+extern obj_len
+
+global op_get_len
+op_get_len:
+    ; PEEK TOS (don't pop)
+    mov rdi, [r13 - 8]
+    push rdi                    ; save obj
+
+    ; Get length
+    mov rax, [rdi + PyObject.ob_type]
+    mov rax, [rax + PyTypeObject.tp_as_sequence]
+    test rax, rax
+    jz .gl_try_mapping
+    mov rax, [rax + PySequenceMethods.sq_length]
+    test rax, rax
+    jz .gl_try_mapping
+    call rax
+    jmp .gl_got_len
+
+.gl_try_mapping:
+    pop rdi
+    push rdi
+    mov rax, [rdi + PyObject.ob_type]
+    mov rax, [rax + PyTypeObject.tp_as_mapping]
+    test rax, rax
+    jz .gl_error
+    mov rax, [rax + PyMappingMethods.mp_length]
+    test rax, rax
+    jz .gl_error
+    call rax
+
+.gl_got_len:
+    pop rdi                     ; discard saved obj
+    ; Convert length (in rax) to SmallInt and push
+    bts rax, 63                 ; encode as SmallInt
+    VPUSH rax
+    DISPATCH
+
+.gl_error:
+    pop rdi
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "object has no len()"
+    call raise_exception
+
+;; ============================================================================
+;; op_setup_annotations - Create __annotations__ dict in locals
+;;
+;; Opcode 85: SETUP_ANNOTATIONS
+;; ============================================================================
+extern dict_new
+extern dict_set
+extern str_from_cstr
+
+global op_setup_annotations
+op_setup_annotations:
+    push rbp
+    mov rbp, rsp
+    push rbx
+    push r12                    ; save eval loop r12
+
+    ; Check if locals dict exists
+    mov rbx, [r12 + PyFrame.locals]
+    test rbx, rbx
+    jz .sa_done
+
+    ; Create __annotations__ dict
+    call dict_new
+    mov r12, rax                ; r12 = new annotations dict (saved)
+
+    ; Create key string
+    lea rdi, [rel .str_annotations]
+    call str_from_cstr
+    ; rax = key string
+
+    ; dict_set(locals, key, value)
+    mov rdi, rbx                ; dict = locals
+    mov rsi, rax                ; key = "__annotations__"
+    mov rdx, r12                ; value = new annotations dict
+    push rax                    ; save key for DECREF
+    push rdx                    ; save value for DECREF
+    call dict_set
+    pop rdi
+    call obj_decref             ; DECREF value (dict_set INCREFs)
+    pop rdi
+    call obj_decref             ; DECREF key
+
+.sa_done:
+    pop r12
+    pop rbx
+    pop rbp
+    DISPATCH
+
+section .rodata
+.str_annotations: db "__annotations__", 0
+section .text
+
+;; ============================================================================
+;; op_load_locals - Push locals dict
+;;
+;; Opcode 87: LOAD_LOCALS
+;; ============================================================================
+global op_load_locals
+op_load_locals:
+    mov rax, [r12 + PyFrame.locals]
+    test rax, rax
+    jz .ll_error
+    INCREF rax
+    VPUSH rax
+    DISPATCH
+.ll_error:
+    lea rdi, [rel exc_RuntimeError_type]
+    CSTRING rsi, "no locals dict"
+    call raise_exception
+
+;; ============================================================================
+;; op_load_from_dict_or_globals - Load from dict on TOS, fallback to globals
+;;
+;; Opcode 175: LOAD_FROM_DICT_OR_GLOBALS
+;; Used in class body comprehensions.
+;; ============================================================================
+extern dict_get
+
+global op_load_from_dict_or_globals
+op_load_from_dict_or_globals:
+    ; ecx = name index
+    mov rsi, [r15 + rcx*8]     ; name string
+    push rsi
+
+    ; Pop dict from TOS
+    VPOP rdi
+    push rdi                    ; save dict
+
+    ; Try dict first
+    mov rsi, [rsp + 8]         ; name
+    call dict_get
+    test rax, rax
+    jnz .lfdg_found
+
+    ; Try globals
+    mov rdi, [r12 + PyFrame.globals]
+    mov rsi, [rsp + 8]         ; name
+    call dict_get
+    test rax, rax
+    jnz .lfdg_found
+
+    ; Try builtins
+    mov rdi, [r12 + PyFrame.builtins]
+    pop rdi                     ; discard saved dict (builtins from frame)
+    pop rsi                     ; name
+    mov rdi, [r12 + PyFrame.builtins]
+    call dict_get
+    test rax, rax
+    jnz .lfdg_found_no_pop
+
+    ; Not found
+    extern exc_NameError_type
+    lea rdi, [rel exc_NameError_type]
+    CSTRING rsi, "name not found"
+    call raise_exception
+
+.lfdg_found:
+    add rsp, 16                 ; pop saved dict + name
+.lfdg_found_no_pop:
+    INCREF rax
+    VPUSH rax
     DISPATCH

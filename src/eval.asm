@@ -91,6 +91,10 @@ extern op_with_except_start
 extern op_build_set
 extern op_set_add
 extern op_set_update
+extern op_get_len
+extern op_setup_annotations
+extern op_load_locals
+extern op_load_from_dict_or_globals
 
 ; External error handler
 extern error_unimplemented_opcode
@@ -803,7 +807,7 @@ opcode_table:
     dq op_store_slice        ; 27  = STORE_SLICE
     dq op_unimplemented      ; 28
     dq op_unimplemented      ; 29
-    dq op_unimplemented      ; 30  = GET_LEN
+    dq op_get_len            ; 30  = GET_LEN
     dq op_unimplemented      ; 31  = MATCH_MAPPING
     dq op_unimplemented      ; 32  = MATCH_SEQUENCE
     dq op_unimplemented      ; 33  = MATCH_KEYS
@@ -858,9 +862,9 @@ opcode_table:
     dq op_unimplemented      ; 82
     dq op_return_value       ; 83  = RETURN_VALUE
     dq op_unimplemented      ; 84
-    dq op_unimplemented      ; 85  = SETUP_ANNOTATIONS
+    dq op_setup_annotations  ; 85  = SETUP_ANNOTATIONS
     dq op_unimplemented      ; 86
-    dq op_unimplemented      ; 87  = LOAD_LOCALS
+    dq op_load_locals        ; 87  = LOAD_LOCALS
     dq op_unimplemented      ; 88
     dq op_pop_except         ; 89  = POP_EXCEPT
     dq op_store_name         ; 90  = STORE_NAME
@@ -948,7 +952,7 @@ opcode_table:
     dq op_kw_names           ; 172 = KW_NAMES
     dq op_call_intrinsic_1   ; 173 = CALL_INTRINSIC_1
     dq op_unimplemented      ; 174 = CALL_INTRINSIC_2
-    dq op_unimplemented      ; 175 = LOAD_FROM_DICT_OR_GLOBALS
+    dq op_load_from_dict_or_globals ; 175 = LOAD_FROM_DICT_OR_GLOBALS
     dq op_unimplemented      ; 176 = LOAD_FROM_DICT_OR_DEREF
     dq op_unimplemented      ; 177
     dq op_unimplemented      ; 178

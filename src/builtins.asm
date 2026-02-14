@@ -39,6 +39,7 @@ extern instance_repr
 extern instance_getattr
 extern instance_setattr
 extern type_call
+extern user_type_metatype
 extern func_type
 
 ; New builtin function implementations (in builtins_extra.asm)
@@ -723,8 +724,9 @@ builtin___build_class__:
     ; Fill type fields
     mov qword [r12 + PyTypeObject.ob_refcnt], 1
 
-    ; ob_type = self (type is its own metatype, so tp_call can be found)
-    mov [r12 + PyTypeObject.ob_type], r12
+    ; ob_type = user_type_metatype (metatype handles class variable access + instantiation)
+    lea rax, [rel user_type_metatype]
+    mov [r12 + PyTypeObject.ob_type], rax
 
     ; tp_name: point to class_name string's data area
     lea rax, [r14 + PyStrObject.data]

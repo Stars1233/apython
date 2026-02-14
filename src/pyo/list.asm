@@ -378,14 +378,8 @@ list_dealloc:
     pop rbp
     ret
 
-;; ============================================================================
-;; list_repr(PyObject *self) -> PyStrObject*
-;; Returns "[...]" placeholder
-;; ============================================================================
-global list_repr
-list_repr:
-    lea rdi, [rel list_repr_str]
-    jmp str_from_cstr
+; list_repr is in src/repr.asm
+extern list_repr
 
 ;; ============================================================================
 ;; list_bool(PyObject *self) -> int (0/1)
@@ -501,7 +495,7 @@ list_getslice:
 section .data
 
 list_name_str: db "list", 0
-list_repr_str: db "[...]", 0
+; list_repr_str removed - repr now in src/repr.asm
 
 ; List number methods (just bool)
 align 8

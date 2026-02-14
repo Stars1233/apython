@@ -314,6 +314,47 @@ type_call:
     ; does not return
 
 ;; ============================================================================
+;; type_getattr(PyTypeObject *self, PyObject *name) -> PyObject*
+;; Look up an attribute on a type object itself (class variables).
+;; Checks self->tp_dict.
+;; rdi = type object, rsi = name (PyStrObject*)
+;; Returns: owned reference to attribute value, or NULL
+;; ============================================================================
+global type_getattr
+type_getattr:
+    push rbp
+    mov rbp, rsp
+    push rbx
+
+    mov rbx, rsi                ; rbx = name
+
+    ; Check type->tp_dict
+    mov rdi, [rdi + PyTypeObject.tp_dict]
+    test rdi, rdi
+    jz .tga_not_found
+
+    mov rsi, rbx
+    call dict_get
+    test rax, rax
+    jz .tga_not_found
+
+    ; Found — INCREF and return
+    mov rbx, rax
+    mov rdi, rax
+    call obj_incref
+    mov rax, rbx
+
+    pop rbx
+    pop rbp
+    ret
+
+.tga_not_found:
+    xor eax, eax               ; return NULL
+    pop rbx
+    pop rbp
+    ret
+
+;; ============================================================================
 ;; Data section
 ;; ============================================================================
 section .data
@@ -321,6 +362,39 @@ section .data
 instance_repr_cstr: db "<instance>", 0
 init_name_cstr:     db "__init__", 0
 method_name_str:    db "method", 0
+user_type_name_str: db "type", 0
+
+; user_type_metatype - metatype for user-defined classes
+; When accessing Foo.x, we go through Foo->ob_type->tp_getattr = type_getattr
+; which looks in Foo->tp_dict. When calling Foo(), we go through
+; Foo->ob_type->tp_call = type_call which creates instances.
+align 8
+global user_type_metatype
+user_type_metatype:
+    dq 1                        ; ob_refcnt (immortal)
+    dq user_type_metatype       ; ob_type (self-referential)
+    dq user_type_name_str       ; tp_name
+    dq TYPE_OBJECT_SIZE         ; tp_basicsize
+    dq 0                        ; tp_dealloc
+    dq 0                        ; tp_repr
+    dq 0                        ; tp_str
+    dq 0                        ; tp_hash
+    dq type_call                ; tp_call — calling a class creates instances
+    dq type_getattr             ; tp_getattr — accessing class vars via tp_dict
+    dq 0                        ; tp_setattr
+    dq 0                        ; tp_richcompare
+    dq 0                        ; tp_iter
+    dq 0                        ; tp_iternext
+    dq 0                        ; tp_init
+    dq 0                        ; tp_new
+    dq 0                        ; tp_as_number
+    dq 0                        ; tp_as_sequence
+    dq 0                        ; tp_as_mapping
+    dq 0                        ; tp_base
+    dq 0                        ; tp_dict
+    dq 0                        ; tp_mro
+    dq 0                        ; tp_flags
+    dq 0                        ; tp_bases
 
 ; method_type - placeholder type descriptor for bound methods
 ; (Not used in current implementation; method binding uses CALL null_or_self)

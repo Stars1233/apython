@@ -163,12 +163,8 @@ tuple_dealloc:
     pop rbp
     ret
 
-; tuple_repr(PyObject *self) -> PyStrObject*
-; Stub: returns "(....)"
-global tuple_repr
-tuple_repr:
-    lea rdi, [rel tuple_repr_str]
-    jmp str_from_cstr
+; tuple_repr is in src/repr.asm
+extern tuple_repr
 
 ; tuple_hash(PyObject *self) -> int64
 ; Combines item hashes using a simple multiply-xor scheme
@@ -322,7 +318,7 @@ tuple_getslice:
 section .data
 
 tuple_name_str: db "tuple", 0
-tuple_repr_str: db "(...)", 0
+; tuple_repr_str removed - repr now in src/repr.asm
 
 ; Tuple sequence methods
 align 8

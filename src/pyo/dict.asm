@@ -672,15 +672,8 @@ dict_del:
     pop rbp
     ret
 
-;; ============================================================================
-;; dict_repr(PyObject *self) -> PyStrObject*
-;; Returns "{...}" placeholder
-;; ============================================================================
-global dict_repr
-dict_repr:
-    extern str_from_cstr
-    lea rdi, [rel dict_repr_str]
-    jmp str_from_cstr
+; dict_repr is in src/repr.asm
+extern dict_repr
 
 ;; ============================================================================
 ;; dict_tp_iter(PyDictObject *dict) -> PyDictIterObject*
@@ -791,7 +784,7 @@ dict_iter_self:
 ;; ============================================================================
 section .data
 
-dict_repr_str: db "{...}", 0
+; dict_repr_str removed - repr now in src/repr.asm
 dict_iter_name: db "dict_keyiterator", 0
 
 dict_name_str: db "dict", 0
