@@ -5,6 +5,8 @@
 %include "object.inc"
 %include "types.inc"
 
+section .note.GNU-stack noalloc noexec nowrite progbits
+
 section .text
 
 extern ap_malloc
@@ -15,7 +17,6 @@ extern obj_dealloc
 extern str_from_cstr
 extern str_new
 extern obj_repr
-extern memcpy
 extern fatal_error
 extern int_to_i64
 extern bool_true

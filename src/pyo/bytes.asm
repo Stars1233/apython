@@ -5,12 +5,14 @@
 %include "object.inc"
 %include "types.inc"
 
+section .note.GNU-stack noalloc noexec nowrite progbits
+
 section .text
 
 extern ap_malloc
 extern ap_free
 extern str_from_cstr
-extern memcpy
+extern ap_memcpy
 
 ; bytes_new(int64_t size) -> PyBytesObject*
 ; Allocate a bytes object with room for 'size' bytes
@@ -68,7 +70,7 @@ bytes_from_data:
     lea rdi, [rbx + PyBytesObject.data]
     mov rsi, r12                ; source
     mov rdx, r13                ; length
-    call memcpy wrt ..plt
+    call ap_memcpy
 
     mov rax, rbx
     pop r13

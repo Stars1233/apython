@@ -6,6 +6,8 @@
 %include "types.inc"
 %include "builtins.inc"
 
+section .note.GNU-stack noalloc noexec nowrite progbits
+
 section .text
 
 extern dict_new
@@ -30,7 +32,7 @@ extern obj_repr
 extern eval_frame
 extern frame_new
 extern frame_free
-extern memcpy
+extern ap_memcpy
 extern instance_dealloc
 extern instance_repr
 extern instance_getattr
@@ -165,6 +167,7 @@ builtin_print:
     xor r13d, r13d              ; r13 = current arg index
     xor r15d, r15d              ; r15 = buffer write offset
 
+align 16
 .print_loop:
     cmp r13, r12
     jge .print_flush
@@ -192,7 +195,7 @@ builtin_print:
     ; Inline small copy (most strings are short)
     test rcx, rcx
     jz .copy_done
-    call memcpy wrt ..plt
+    call ap_memcpy
 .copy_done:
     add r15, [r14 + PyStrObject.ob_size]
 

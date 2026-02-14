@@ -6,6 +6,8 @@
 %include "frame.inc"
 %include "opcodes.inc"
 
+section .note.GNU-stack noalloc noexec nowrite progbits
+
 section .text
 
 ; External opcode handlers (defined in opcodes_*.asm files)
@@ -89,6 +91,7 @@ eval_frame:
 ; eval_dispatch - Main dispatch point
 ; Reads the next opcode and arg, advances rbx, and jumps to the handler.
 global eval_dispatch
+align 16
 eval_dispatch:
     movzx eax, byte [rbx]      ; load opcode
     movzx ecx, byte [rbx+1]    ; load arg into ecx

@@ -16,6 +16,8 @@
 %include "opcodes.inc"
 %include "frame.inc"
 
+section .note.GNU-stack noalloc noexec nowrite progbits
+
 section .text
 
 extern eval_dispatch
@@ -533,6 +535,7 @@ op_get_iter:
 ;; Followed by 1 CACHE entry (2 bytes).
 ;; ============================================================================
 global op_for_iter
+align 16
 op_for_iter:
     mov r8d, ecx               ; save jump offset
 

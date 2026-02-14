@@ -6,12 +6,13 @@
 %include "object.inc"
 %include "types.inc"
 
+section .note.GNU-stack noalloc noexec nowrite progbits
+
 section .text
 
 extern ap_malloc
 extern ap_free
 extern sys_write
-extern strlen
 extern str_from_cstr
 extern none_singleton
 extern bool_false
@@ -324,14 +325,10 @@ obj_print:
 
     mov rbx, rax            ; rbx = str obj
 
-    ; strlen on inline data
-    lea rdi, [rbx + PyStrObject.data]
-    call strlen wrt ..plt
-
-    ; sys_write(1, str_data, len)
+    ; sys_write(1, str_data, ob_size)
     mov edi, 1
     lea rsi, [rbx + PyStrObject.data]
-    mov rdx, rax
+    mov rdx, [rbx + PyStrObject.ob_size]
     call sys_write
 
     ; sys_write(1, "\n", 1)

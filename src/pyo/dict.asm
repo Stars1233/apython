@@ -5,6 +5,8 @@
 %include "object.inc"
 %include "types.inc"
 
+section .note.GNU-stack noalloc noexec nowrite progbits
+
 section .text
 
 extern ap_malloc
@@ -13,9 +15,8 @@ extern obj_hash
 extern obj_decref
 extern obj_dealloc
 extern str_type
-extern strcmp
-extern memset
-extern memcpy
+extern ap_strcmp
+extern ap_memset
 extern fatal_error
 
 ; Initial capacity (must be power of 2)
@@ -52,7 +53,7 @@ dict_new:
     mov rdi, rax
     xor esi, esi
     mov edx, DICT_INIT_CAP * DICT_ENTRY_SIZE
-    call memset wrt ..plt
+    call ap_memset
 
     mov rax, rbx
     pop rbx
@@ -90,7 +91,7 @@ dict_keys_equal:
     ; Both are strings - compare .data with strcmp
     lea rdi, [rbx + PyStrObject.data]
     lea rsi, [r12 + PyStrObject.data]
-    call strcmp wrt ..plt
+    call ap_strcmp
     test eax, eax
     jz .equal
 
@@ -141,6 +142,7 @@ dict_get:
     ; r14 reused as probe counter
     xor r14d, r14d              ; probes done
 
+align 16
 .probe_loop:
     ; Check if we've probed all slots
     cmp r14, [rbx + PyDictObject.capacity]
@@ -320,7 +322,7 @@ dict_resize:
     mov rdi, r15
     xor esi, esi
     imul rdx, r14, DICT_ENTRY_SIZE
-    call memset wrt ..plt
+    call ap_memset
 
     ; Store new entries pointer
     mov [rbx + PyDictObject.entries], r15

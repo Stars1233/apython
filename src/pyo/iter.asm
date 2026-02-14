@@ -5,6 +5,8 @@
 %include "object.inc"
 %include "types.inc"
 
+section .note.GNU-stack noalloc noexec nowrite progbits
+
 section .text
 
 extern ap_malloc

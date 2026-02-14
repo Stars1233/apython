@@ -6,6 +6,8 @@
 %include "types.inc"
 %include "marshal.inc"
 
+section .note.GNU-stack noalloc noexec nowrite progbits
+
 section .text
 
 extern none_singleton
@@ -20,7 +22,7 @@ extern ap_malloc
 extern ap_free
 extern ap_realloc
 extern fatal_error
-extern memcpy
+extern ap_memcpy
 extern code_type
 
 ; Initial capacity for the reference list
@@ -819,7 +821,7 @@ mdo_code:
     mov rax, [rsp + 16]        ; co_code bytes object
     lea rsi, [rax + PyBytesObject.data]
     mov rdx, r14
-    call memcpy wrt ..plt
+    call ap_memcpy
 .code_no_bytecode:
 
     ; Update ref placeholder if FLAG_REF was set

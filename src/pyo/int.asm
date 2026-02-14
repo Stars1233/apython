@@ -15,6 +15,8 @@
 %include "object.inc"
 %include "types.inc"
 
+section .note.GNU-stack noalloc noexec nowrite progbits
+
 section .text
 
 extern ap_malloc
@@ -37,14 +39,11 @@ extern __gmpz_sub
 extern __gmpz_mul
 extern __gmpz_tdiv_q
 extern __gmpz_tdiv_r
-extern __gmpz_pow_ui
 extern __gmpz_neg
 extern __gmpz_cmp
 extern __gmpz_cmp_si
-extern __gmpz_fits_slong_p
 extern __gmpz_sizeinbase
 extern __gmpz_set_str
-extern free
 
 ;; ============================================================================
 ;; int_new_from_mpz - internal: alloc int obj, init mpz, copy source

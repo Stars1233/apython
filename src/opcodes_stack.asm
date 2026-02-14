@@ -16,6 +16,8 @@
 %include "opcodes.inc"
 %include "frame.inc"
 
+section .note.GNU-stack noalloc noexec nowrite progbits
+
 section .text
 
 extern eval_dispatch

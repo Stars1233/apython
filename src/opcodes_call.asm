@@ -17,6 +17,8 @@
 %include "frame.inc"
 %include "builtins.inc"
 
+section .note.GNU-stack noalloc noexec nowrite progbits
+
 section .text
 
 extern eval_dispatch

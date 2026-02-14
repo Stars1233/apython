@@ -5,14 +5,15 @@
 %include "object.inc"
 %include "types.inc"
 
+section .note.GNU-stack noalloc noexec nowrite progbits
+
 section .text
 
 extern ap_malloc
 extern ap_free
-extern strlen
-extern memcpy
-extern memcmp
-extern strcmp
+extern ap_strlen
+extern ap_memcpy
+extern ap_strcmp
 extern bool_true
 extern bool_false
 extern int_from_i64
@@ -31,7 +32,7 @@ str_from_cstr:
     mov rbx, rdi            ; save cstr
 
     ; Get string length
-    call strlen wrt ..plt
+    call ap_strlen
     mov r12, rax             ; r12 = length
 
     ; Allocate: PyStrObject header + length + 1 (null terminator)
@@ -51,7 +52,7 @@ str_from_cstr:
     lea rdi, [rax + PyStrObject.data]
     mov rsi, rbx             ; source = cstr
     lea rdx, [r12 + 1]      ; length + null
-    call memcpy wrt ..plt
+    call ap_memcpy
     pop rax                  ; restore obj ptr
 
     pop r12
@@ -88,7 +89,7 @@ str_new:
     lea rdi, [r13 + PyStrObject.data]
     mov rsi, rbx
     mov rdx, r12
-    call memcpy wrt ..plt
+    call ap_memcpy
 
     ; Null-terminate
     mov byte [r13 + PyStrObject.data + r12], 0
@@ -141,7 +142,7 @@ str_repr:
     lea rdi, [rax + PyStrObject.data + 1]
     lea rsi, [rbx + PyStrObject.data]
     mov rdx, r12
-    call memcpy wrt ..plt
+    call ap_memcpy
     pop rax
 
     ; Write closing quote and null
@@ -184,6 +185,7 @@ str_hash:
     lea rsi, [rdi + PyStrObject.data]
     mov rax, 0xcbf29ce484222325     ; FNV offset basis
     mov rdx, 0x100000001b3          ; FNV prime
+align 16
 .loop:
     test rcx, rcx
     jz .store
@@ -239,7 +241,7 @@ str_concat:
     lea rdi, [rax + PyStrObject.data]
     lea rsi, [rbx + PyStrObject.data]
     mov rdx, [rbx + PyStrObject.ob_size]
-    call memcpy wrt ..plt
+    call ap_memcpy
 
     ; Copy second string
     mov rax, [rsp]          ; reload new str
@@ -247,7 +249,7 @@ str_concat:
     lea rdi, [rax + PyStrObject.data + rcx]
     lea rsi, [r12 + PyStrObject.data]
     mov rdx, [r12 + PyStrObject.ob_size]
-    call memcpy wrt ..plt
+    call ap_memcpy
 
     ; Null-terminate
     pop rax
@@ -309,7 +311,7 @@ str_repeat:
     push rdi
     lea rsi, [rbx + PyStrObject.data]
     mov rdx, r13
-    call memcpy wrt ..plt
+    call ap_memcpy
     pop rdi
     pop rcx
     add rdi, r13
@@ -346,7 +348,7 @@ str_compare:
     push rsi
     lea rdi, [rdi + PyStrObject.data]
     lea rsi, [rsi + PyStrObject.data]
-    call strcmp wrt ..plt
+    call ap_strcmp
     mov r12d, eax            ; r12d = strcmp result
     pop rsi
     pop rdi
@@ -488,10 +490,10 @@ str_contains:
     push rbp
     mov rbp, rsp
 
-    extern strstr
+    extern ap_strstr
     lea rdi, [rdi + PyStrObject.data]
     lea rsi, [rsi + PyStrObject.data]
-    call strstr wrt ..plt
+    call ap_strstr
     test rax, rax
     setnz al
     movzx eax, al

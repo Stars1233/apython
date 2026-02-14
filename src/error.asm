@@ -3,6 +3,8 @@
 
 %include "macros.inc"
 
+section .note.GNU-stack noalloc noexec nowrite progbits
+
 section .text
 
 extern sys_write
