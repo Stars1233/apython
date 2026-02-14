@@ -1,0 +1,8 @@
+t = (10, 20, 30)
+print(t[0])
+print(t[2])
+print(t[-1])
+print(len(t))
+a, b = (5, 6)
+print(a)
+print(b)

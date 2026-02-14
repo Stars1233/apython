@@ -1,0 +1,8 @@
+print(not True)
+print(not False)
+print(not 0)
+print(not 1)
+print(not None)
+print(-0)
+print(-(-5))
+print(-(3 - 7))
