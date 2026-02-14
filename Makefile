@@ -8,7 +8,8 @@ TARGET = apython
 
 # Source files
 SRCS = $(wildcard src/*.asm)
-OBJS = $(SRCS:src/%.asm=build/%.o)
+PYO_SRCS = $(wildcard src/pyo/*.asm)
+OBJS = $(SRCS:src/%.asm=build/%.o) $(PYO_SRCS:src/pyo/%.asm=build/%.o)
 
 # Python compiler for tests
 PYTHON = python3
@@ -21,6 +22,9 @@ $(TARGET): $(OBJS)
 	$(CC) -o $@ $^ $(LDFLAGS)
 
 build/%.o: src/%.asm | build
+	$(NASM) $(NASMFLAGS) -o $@ $<
+
+build/%.o: src/pyo/%.asm | build
 	$(NASM) $(NASMFLAGS) -o $@ $<
 
 build:
