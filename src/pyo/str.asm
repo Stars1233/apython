@@ -21,6 +21,8 @@ extern int_to_i64
 extern fatal_error
 extern raise_exception
 extern exc_IndexError_type
+extern slice_type
+extern slice_indices
 
 ; str_from_cstr(const char *cstr) -> PyStrObject*
 ; Creates a new string object from a C string
@@ -461,7 +463,7 @@ str_getitem:
 
 ;; ============================================================================
 ;; str_subscript(PyObject *self, PyObject *key) -> PyObject*
-;; mp_subscript: index with int key (for BINARY_SUBSCR)
+;; mp_subscript: index with int or slice key (for BINARY_SUBSCR)
 ;; ============================================================================
 global str_subscript
 str_subscript:
@@ -471,6 +473,15 @@ str_subscript:
 
     mov rbx, rdi            ; save self
 
+    ; Check if key is a slice
+    test rsi, rsi
+    js .ss_int               ; SmallInt -> int path
+    mov rax, [rsi + PyObject.ob_type]
+    lea rcx, [rel slice_type]
+    cmp rax, rcx
+    je .ss_slice
+
+.ss_int:
     ; Convert key to i64
     mov rdi, rsi
     call int_to_i64
@@ -480,6 +491,14 @@ str_subscript:
     mov rdi, rbx
     call str_getitem
 
+    pop rbx
+    pop rbp
+    ret
+
+.ss_slice:
+    mov rdi, rbx
+    ; rsi = slice
+    call str_getslice
     pop rbx
     pop rbp
     ret
@@ -513,6 +532,123 @@ str_bool:
     cmp qword [rdi + PyStrObject.ob_size], 0
     setne al
     movzx eax, al
+    ret
+
+;; ============================================================================
+;; str_getslice(PyStrObject *str, PySliceObject *slice) -> PyStrObject*
+;; Creates a new string from a slice of the original.
+;; ============================================================================
+global str_getslice
+str_getslice:
+    push rbp
+    mov rbp, rsp
+    push rbx
+    push r12
+    push r13
+    push r14
+    push r15
+    sub rsp, 8                 ; align
+
+    mov rbx, rdi               ; str
+    mov r12, rsi               ; slice
+
+    ; Get slice indices
+    mov rdi, r12
+    mov rsi, [rbx + PyStrObject.ob_size]
+    call slice_indices
+    mov r13, rax               ; start
+    mov r14, rdx               ; stop
+    mov r15, rcx               ; step
+
+    ; Compute slicelength
+    test r15, r15
+    jg .sgs_pos_step
+    ; Negative step
+    mov rax, r13
+    sub rax, r14
+    dec rax
+    mov rcx, r15
+    neg rcx
+    xor edx, edx
+    div rcx
+    inc rax
+    jmp .sgs_have_len
+
+.sgs_pos_step:
+    mov rax, r14
+    sub rax, r13
+    jle .sgs_empty
+    dec rax
+    xor edx, edx
+    div r15
+    inc rax
+    jmp .sgs_have_len
+
+.sgs_empty:
+    xor eax, eax
+
+.sgs_have_len:
+    ; rax = slicelength
+    push rax                   ; save slicelength
+
+    ; For step=1, fast path: use str_new with contiguous data
+    cmp r15, 1
+    jne .sgs_general
+
+    ; Fast path: contiguous slice
+    lea rdi, [rbx + PyStrObject.data]
+    add rdi, r13               ; data + start
+    mov rsi, rax               ; length = slicelength
+    call str_new
+    add rsp, 8                 ; discard slicelength
+    jmp .sgs_ret
+
+.sgs_general:
+    ; General case: build char by char on stack buffer
+    ; Allocate: header + slicelength + 1
+    mov rdi, rax
+    add rdi, PyStrObject.data + 1
+    call ap_malloc
+    push rax                   ; save new str obj
+
+    ; Fill header
+    mov rcx, [rsp + 8]        ; slicelength
+    mov qword [rax + PyObject.ob_refcnt], 1
+    lea rdx, [rel str_type]
+    mov [rax + PyObject.ob_type], rdx
+    mov [rax + PyStrObject.ob_size], rcx
+    mov qword [rax + PyStrObject.ob_hash], -1
+
+    ; Copy chars: for i=0..slicelength-1, dst[i] = src[start + i*step]
+    xor ecx, ecx
+.sgs_copy:
+    cmp rcx, [rsp + 8]        ; slicelength
+    jge .sgs_null_term
+    mov rax, rcx
+    imul rax, r15              ; i * step
+    add rax, r13               ; start + i*step
+    movzx edx, byte [rbx + PyStrObject.data + rax]
+    mov rax, [rsp]             ; new str
+    mov [rax + PyStrObject.data + rcx], dl
+    inc rcx
+    jmp .sgs_copy
+
+.sgs_null_term:
+    mov rax, [rsp]             ; new str
+    mov rcx, [rsp + 8]        ; slicelength
+    mov byte [rax + PyStrObject.data + rcx], 0
+
+    pop rax                    ; new str
+    add rsp, 8                 ; discard slicelength
+
+.sgs_ret:
+    add rsp, 8                 ; undo alignment
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    pop rbp
     ret
 
 ;; ============================================================================

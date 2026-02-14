@@ -33,6 +33,11 @@ extern list_new
 extern list_append
 extern dict_new
 extern dict_set
+extern slice_new
+extern slice_type
+extern slice_indices
+extern none_singleton
+extern obj_incref
 
 ;; ============================================================================
 ;; op_binary_subscr - obj[key]
@@ -802,3 +807,156 @@ op_contains_op:
     lea rdi, [rel exc_TypeError_type]
     CSTRING rsi, "argument of type is not iterable"
     call raise_exception
+
+;; ============================================================================
+;; op_build_slice - Build a slice object
+;;
+;; arg = 2: pop stop, pop start, step=None
+;; arg = 3: pop step, pop stop, pop start
+;; ============================================================================
+global op_build_slice
+op_build_slice:
+    cmp ecx, 3
+    je .bs_three
+
+    ; arg=2: TOS=stop, TOS1=start
+    VPOP rsi               ; stop
+    VPOP rdi               ; start
+    push rdi               ; save start
+    push rsi               ; save stop
+    lea rdx, [rel none_singleton]  ; step = None
+    call slice_new
+    push rax               ; save slice
+    mov rdi, [rsp + 8]    ; stop
+    DECREF_REG rdi
+    mov rdi, [rsp + 16]   ; start
+    DECREF_REG rdi
+    pop rax
+    add rsp, 16
+    VPUSH rax
+    DISPATCH
+
+.bs_three:
+    ; arg=3: TOS=step, TOS1=stop, TOS2=start
+    VPOP rdx               ; step
+    VPOP rsi               ; stop
+    VPOP rdi               ; start
+    push rdi
+    push rsi
+    push rdx
+    call slice_new
+    push rax               ; save slice
+    mov rdi, [rsp + 8]    ; step
+    DECREF_REG rdi
+    mov rdi, [rsp + 16]   ; stop
+    DECREF_REG rdi
+    mov rdi, [rsp + 24]   ; start
+    DECREF_REG rdi
+    pop rax
+    add rsp, 24
+    VPUSH rax
+    DISPATCH
+
+;; ============================================================================
+;; op_binary_slice - obj[start:stop]
+;;
+;; Python 3.12: pops stop, start, obj from stack.
+;; Creates a slice(start, stop), calls mp_subscript(obj, slice).
+;; ============================================================================
+global op_binary_slice
+op_binary_slice:
+    push rbp
+    mov rbp, rsp
+    sub rsp, 32
+
+    ; Pop stop (TOS), start (TOS1), obj (TOS2)
+    VPOP rsi               ; stop
+    VPOP rdi               ; start
+    mov [rbp-8], rdi       ; save start
+    mov [rbp-16], rsi      ; save stop
+    VPOP rax
+    mov [rbp-24], rax      ; save obj
+
+    ; Create slice(start, stop, None)
+    mov rdi, [rbp-8]       ; start
+    mov rsi, [rbp-16]      ; stop
+    lea rdx, [rel none_singleton]  ; step = None
+    call slice_new
+    mov [rbp-32], rax      ; save slice
+
+    ; Call mp_subscript(obj, slice)
+    mov rdi, [rbp-24]      ; obj
+    mov rsi, rax           ; slice as key
+    mov rax, [rdi + PyObject.ob_type]
+    mov rax, [rax + PyTypeObject.tp_as_mapping]
+    mov rax, [rax + PyMappingMethods.mp_subscript]
+    call rax
+    push rax               ; save result
+
+    ; DECREF slice
+    mov rdi, [rbp-32]
+    DECREF_REG rdi
+    ; DECREF start, stop, obj
+    mov rdi, [rbp-8]
+    DECREF_REG rdi
+    mov rdi, [rbp-16]
+    DECREF_REG rdi
+    mov rdi, [rbp-24]
+    DECREF_REG rdi
+
+    pop rax
+    VPUSH rax
+    leave
+    DISPATCH
+
+;; ============================================================================
+;; op_store_slice - obj[start:stop] = value
+;;
+;; Python 3.12: pops stop, start, obj, value from stack.
+;; ============================================================================
+global op_store_slice
+op_store_slice:
+    push rbp
+    mov rbp, rsp
+    sub rsp, 48
+
+    ; Pop stop (TOS), start (TOS1), obj (TOS2), value (TOS3)
+    VPOP rsi               ; stop
+    VPOP rdi               ; start
+    mov [rbp-8], rdi       ; start
+    mov [rbp-16], rsi      ; stop
+    VPOP rax
+    mov [rbp-24], rax      ; obj
+    VPOP rax
+    mov [rbp-32], rax      ; value
+
+    ; Create slice(start, stop, None)
+    mov rdi, [rbp-8]
+    mov rsi, [rbp-16]
+    lea rdx, [rel none_singleton]  ; step = None
+    call slice_new
+    mov [rbp-40], rax      ; save slice
+
+    ; Call mp_ass_subscript(obj, slice, value)
+    mov rdi, [rbp-24]      ; obj
+    mov rsi, rax           ; slice
+    mov rdx, [rbp-32]      ; value
+    mov rax, [rdi + PyObject.ob_type]
+    mov rax, [rax + PyTypeObject.tp_as_mapping]
+    mov rax, [rax + PyMappingMethods.mp_ass_subscript]
+    call rax
+
+    ; DECREF slice, start, stop, obj, value
+    mov rdi, [rbp-40]
+    DECREF_REG rdi
+    mov rdi, [rbp-8]
+    DECREF_REG rdi
+    mov rdi, [rbp-16]
+    DECREF_REG rdi
+    mov rdi, [rbp-24]
+    DECREF_REG rdi
+    mov rdi, [rbp-32]
+    DECREF_REG rdi
+
+    leave
+    DISPATCH

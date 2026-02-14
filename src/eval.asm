@@ -63,6 +63,9 @@ extern op_load_deref
 extern op_store_deref
 extern op_delete_deref
 extern op_copy_free_vars
+extern op_build_slice
+extern op_binary_slice
+extern op_store_slice
 
 ; External error handler
 extern error_unimplemented_opcode
@@ -736,8 +739,8 @@ opcode_table:
     dq op_unimplemented      ; 23
     dq op_unimplemented      ; 24
     dq op_binary_subscr      ; 25  = BINARY_SUBSCR
-    dq op_unimplemented      ; 26  = BINARY_SLICE
-    dq op_unimplemented      ; 27  = STORE_SLICE
+    dq op_binary_slice       ; 26  = BINARY_SLICE
+    dq op_store_slice        ; 27  = STORE_SLICE
     dq op_unimplemented      ; 28
     dq op_unimplemented      ; 29
     dq op_unimplemented      ; 30  = GET_LEN
@@ -843,7 +846,7 @@ opcode_table:
     dq op_raise_varargs      ; 130 = RAISE_VARARGS
     dq op_unimplemented      ; 131 = GET_AWAITABLE
     dq op_make_function      ; 132 = MAKE_FUNCTION
-    dq op_unimplemented      ; 133 = BUILD_SLICE
+    dq op_build_slice        ; 133 = BUILD_SLICE
     dq op_unimplemented      ; 134 = JUMP_BACKWARD_NO_INTERRUPT
     dq op_make_cell          ; 135 = MAKE_CELL
     dq op_load_closure       ; 136 = LOAD_CLOSURE

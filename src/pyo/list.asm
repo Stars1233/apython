@@ -23,6 +23,9 @@ extern exc_IndexError_type
 extern int_to_i64
 extern bool_true
 extern bool_false
+extern obj_incref
+extern slice_type
+extern slice_indices
 
 ;; ============================================================================
 ;; list_new(int64_t capacity) -> PyListObject*
@@ -197,7 +200,7 @@ list_setitem:
 
 ;; ============================================================================
 ;; list_subscript(PyListObject *list, PyObject *key) -> PyObject*
-;; mp_subscript: index with int key (for BINARY_SUBSCR)
+;; mp_subscript: index with int or slice key (for BINARY_SUBSCR)
 ;; ============================================================================
 global list_subscript
 list_subscript:
@@ -207,6 +210,15 @@ list_subscript:
 
     mov rbx, rdi               ; save list
 
+    ; Check if key is a slice
+    test rsi, rsi
+    js .ls_int                 ; SmallInt -> int path
+    mov rax, [rsi + PyObject.ob_type]
+    lea rcx, [rel slice_type]
+    cmp rax, rcx
+    je .ls_slice
+
+.ls_int:
     ; Convert key to i64
     mov rdi, rsi
     call int_to_i64
@@ -220,9 +232,18 @@ list_subscript:
     pop rbp
     ret
 
+.ls_slice:
+    ; Call list_getslice(list, slice)
+    mov rdi, rbx
+    ; rsi = slice (already set)
+    call list_getslice
+    pop rbx
+    pop rbp
+    ret
+
 ;; ============================================================================
 ;; list_ass_subscript(PyListObject *list, PyObject *key, PyObject *value)
-;; mp_ass_subscript: set with int key
+;; mp_ass_subscript: set with int or slice key
 ;; ============================================================================
 global list_ass_subscript
 list_ass_subscript:
@@ -234,6 +255,15 @@ list_ass_subscript:
     mov rbx, rdi               ; list
     mov r12, rdx               ; value
 
+    ; Check if key is a slice
+    test rsi, rsi
+    js .las_int                ; SmallInt -> int path
+    mov rax, [rsi + PyObject.ob_type]
+    lea rcx, [rel slice_type]
+    cmp rax, rcx
+    je .las_slice
+
+.las_int:
     ; Convert key to i64
     mov rdi, rsi
     call int_to_i64
@@ -248,6 +278,14 @@ list_ass_subscript:
     pop rbx
     pop rbp
     ret
+
+.las_slice:
+    ; Slice assignment: not yet supported, raise TypeError
+    lea rdi, [rel exc_IndexError_type]
+    extern exc_TypeError_type
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "slice assignment not yet supported"
+    call raise_exception
 
 ;; ============================================================================
 ;; list_len(PyObject *self) -> int64_t
@@ -357,6 +395,104 @@ list_bool:
     cmp qword [rdi + PyListObject.ob_size], 0
     setne al
     movzx eax, al
+    ret
+
+;; ============================================================================
+;; list_getslice(PyListObject *list, PySliceObject *slice) -> PyListObject*
+;; Creates a new list from a slice of the original.
+;; ============================================================================
+global list_getslice
+list_getslice:
+    push rbp
+    mov rbp, rsp
+    push rbx
+    push r12
+    push r13
+    push r14
+    push r15
+    sub rsp, 8                 ; align
+
+    mov rbx, rdi               ; list
+    mov r12, rsi               ; slice
+
+    ; Get slice indices
+    mov rdi, r12               ; slice
+    mov rsi, [rbx + PyListObject.ob_size]  ; length
+    call slice_indices
+    ; rax = start, rdx = stop, rcx = step
+    mov r13, rax               ; r13 = start
+    mov r14, rdx               ; r14 = stop
+    mov r15, rcx               ; r15 = step
+
+    ; Compute slicelength
+    test r15, r15
+    jg .lgs_pos_step
+    ; Negative step
+    mov rax, r13
+    sub rax, r14               ; start - stop
+    dec rax                    ; start - stop - 1
+    mov rcx, r15
+    neg rcx                    ; abs(step)
+    xor edx, edx
+    div rcx                    ; (start-stop-1) / abs(step)
+    inc rax                    ; +1
+    jmp .lgs_have_len
+
+.lgs_pos_step:
+    mov rax, r14
+    sub rax, r13               ; stop - start
+    jle .lgs_empty
+    dec rax                    ; stop - start - 1
+    xor edx, edx
+    div r15                    ; (stop-start-1) / step
+    inc rax                    ; +1
+    jmp .lgs_have_len
+
+.lgs_empty:
+    xor eax, eax
+
+.lgs_have_len:
+    ; rax = slicelength
+    push rax                   ; save slicelength [rbp-56]
+    mov rdi, rax
+    test rdi, rdi
+    jnz .lgs_alloc
+    mov rdi, 4                 ; min capacity
+.lgs_alloc:
+    call list_new
+    push rax                   ; save new list [rbp-64]
+
+    ; Fill items: for i = 0..slicelength-1, idx = start + i*step
+    xor ecx, ecx              ; i = 0
+.lgs_loop:
+    cmp rcx, [rsp + 8]        ; slicelength
+    jge .lgs_done
+    push rcx                   ; save i
+    ; idx = start + i * step
+    mov rax, rcx
+    imul rax, r15              ; i * step
+    add rax, r13               ; start + i * step
+    ; Get item from source list
+    mov rdx, [rbx + PyListObject.ob_item]
+    mov rsi, [rdx + rax*8]    ; item
+    ; Append to new list (list_append does INCREF)
+    mov rdi, [rsp + 8]        ; new list
+    call list_append
+    pop rcx
+    inc rcx
+    jmp .lgs_loop
+
+.lgs_done:
+    pop rax                    ; new list
+    add rsp, 8                 ; discard slicelength
+
+    add rsp, 8                 ; undo alignment
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    pop rbp
     ret
 
 ;; ============================================================================

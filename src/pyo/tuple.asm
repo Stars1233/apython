@@ -18,6 +18,9 @@ extern int_to_i64
 extern fatal_error
 extern raise_exception
 extern exc_IndexError_type
+extern obj_incref
+extern slice_type
+extern slice_indices
 
 ; tuple_new(int64_t size) -> PyTupleObject*
 ; Allocate a tuple with room for 'size' items, zero-filled
@@ -84,18 +87,36 @@ tuple_getitem:
     call raise_exception
 
 ; tuple_subscript(PyTupleObject *tuple, PyObject *key) -> PyObject*
-; mp_subscript: index with int key (for BINARY_SUBSCR)
+; mp_subscript: index with int or slice key (for BINARY_SUBSCR)
 global tuple_subscript
 tuple_subscript:
     push rbp
     mov rbp, rsp
     push rbx
     mov rbx, rdi               ; save tuple
+
+    ; Check if key is a slice
+    test rsi, rsi
+    js .ts_int                 ; SmallInt -> int path
+    mov rax, [rsi + PyObject.ob_type]
+    lea rcx, [rel slice_type]
+    cmp rax, rcx
+    je .ts_slice
+
+.ts_int:
     mov rdi, rsi               ; key
     call int_to_i64
     mov rsi, rax               ; index
     mov rdi, rbx
     call tuple_getitem
+    pop rbx
+    pop rbp
+    ret
+
+.ts_slice:
+    mov rdi, rbx
+    ; rsi = slice
+    call tuple_getslice
     pop rbx
     pop rbp
     ret
@@ -198,6 +219,99 @@ tuple_hash:
     mov [rbx + PyTupleObject.ob_hash], rax
 
 .cached:
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    pop rbp
+    ret
+
+;; ============================================================================
+;; tuple_getslice(PyTupleObject *tuple, PySliceObject *slice) -> PyTupleObject*
+;; Creates a new tuple from a slice of the original.
+;; ============================================================================
+global tuple_getslice
+tuple_getslice:
+    push rbp
+    mov rbp, rsp
+    push rbx
+    push r12
+    push r13
+    push r14
+    push r15
+    sub rsp, 16                ; [rbp-56]=slicelength, [rbp-48]=newtuple, align
+
+    mov rbx, rdi               ; tuple
+    mov r12, rsi               ; slice
+
+    ; Get slice indices
+    mov rdi, r12
+    mov rsi, [rbx + PyTupleObject.ob_size]
+    call slice_indices
+    mov r13, rax               ; start
+    mov r14, rdx               ; stop
+    mov r15, rcx               ; step
+
+    ; Compute slicelength
+    test r15, r15
+    jg .tgs_pos_step
+    ; Negative step
+    mov rax, r13
+    sub rax, r14
+    dec rax
+    mov rcx, r15
+    neg rcx
+    xor edx, edx
+    div rcx
+    inc rax
+    jmp .tgs_have_len
+
+.tgs_pos_step:
+    mov rax, r14
+    sub rax, r13
+    jle .tgs_empty
+    dec rax
+    xor edx, edx
+    div r15
+    inc rax
+    jmp .tgs_have_len
+
+.tgs_empty:
+    xor eax, eax
+
+.tgs_have_len:
+    mov [rbp-56], rax          ; slicelength
+    mov rdi, rax
+    call tuple_new
+    mov [rbp-48], rax          ; new tuple
+
+    ; Fill items
+    xor ecx, ecx
+.tgs_loop:
+    cmp rcx, [rbp-56]
+    jge .tgs_done
+    ; idx = start + i * step
+    mov rax, rcx
+    imul rax, r15
+    add rax, r13
+    ; Get item
+    mov rdx, [rbx + PyTupleObject.ob_item + rax*8]
+    ; Store in new tuple
+    mov rsi, [rbp-48]
+    mov [rsi + PyTupleObject.ob_item + rcx*8], rdx
+    ; INCREF item
+    push rcx
+    mov rdi, rdx
+    call obj_incref
+    pop rcx
+    inc rcx
+    jmp .tgs_loop
+
+.tgs_done:
+    mov rax, [rbp-48]
+
+    add rsp, 16
+    pop r15
     pop r14
     pop r13
     pop r12
