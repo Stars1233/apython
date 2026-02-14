@@ -268,12 +268,14 @@ op_load_attr:
 
 .la_method_load:
     ; flag=1: method-style load
-    ; Check if attr is a function
+    ; Check if attr is callable (has tp_call) — works for func_type AND builtin methods
     mov rax, [rbp-32]
+    test rax, rax
+    js .la_not_method              ; SmallInt can't be a method
     mov rcx, [rax + PyObject.ob_type]
-    lea rdx, [rel func_type]
-    cmp rcx, rdx
-    jne .la_not_method
+    mov rcx, [rcx + PyTypeObject.tp_call]
+    test rcx, rcx
+    jz .la_not_method
 
     ; It's a function -> method call pattern
     ; Push self (obj), then push func

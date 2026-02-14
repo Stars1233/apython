@@ -84,6 +84,7 @@ extern op_return_generator
 extern op_yield_value
 extern op_end_send
 extern op_jump_backward_no_interrupt
+extern op_call_intrinsic_1
 
 ; External error handler
 extern error_unimplemented_opcode
@@ -939,7 +940,7 @@ opcode_table:
     dq op_unimplemented      ; 170
     dq op_call               ; 171 = CALL
     dq op_kw_names           ; 172 = KW_NAMES
-    dq op_unimplemented      ; 173 = CALL_INTRINSIC_1
+    dq op_call_intrinsic_1   ; 173 = CALL_INTRINSIC_1
     dq op_unimplemented      ; 174 = CALL_INTRINSIC_2
     dq op_unimplemented      ; 175 = LOAD_FROM_DICT_OR_GLOBALS
     dq op_unimplemented      ; 176 = LOAD_FROM_DICT_OR_DEREF

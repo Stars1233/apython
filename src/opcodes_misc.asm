@@ -34,6 +34,12 @@ extern float_type
 extern float_number_methods
 extern cell_new
 extern gen_new
+extern raise_exception
+extern exc_RuntimeError_type
+extern exc_TypeError_type
+extern obj_incref
+extern tuple_new
+extern list_type
 
 ;; ============================================================================
 ;; op_return_value - Return TOS from current frame
@@ -946,4 +952,92 @@ op_jump_backward_no_interrupt:
     mov rax, rcx
     shl rax, 1                 ; arg * 2 = byte offset
     sub rbx, rax
+    DISPATCH
+
+;; ============================================================================
+;; op_call_intrinsic_1 - Call 1-arg intrinsic function
+;;
+;; CALL_INTRINSIC_1 (173): arg selects the intrinsic.
+;; Pop TOS, call intrinsic, push result.
+;; Key intrinsics:
+;;   3 = INTRINSIC_STOPITERATION_ERROR (convert StopIteration to RuntimeError)
+;;   5 = INTRINSIC_UNARY_POSITIVE (+x)
+;;   6 = INTRINSIC_LIST_TO_TUPLE
+;; ============================================================================
+global op_call_intrinsic_1
+op_call_intrinsic_1:
+    cmp ecx, 3
+    je .ci1_stopiter_error
+    cmp ecx, 5
+    je .ci1_unary_positive
+    cmp ecx, 6
+    je .ci1_list_to_tuple
+
+    ; Unknown intrinsic — fatal
+    CSTRING rdi, "unimplemented CALL_INTRINSIC_1"
+    call fatal_error
+
+.ci1_stopiter_error:
+    ; Convert StopIteration to RuntimeError
+    ; Pop the exception, raise RuntimeError instead
+    VPOP rdi
+    DECREF_REG rdi
+    lea rdi, [rel exc_RuntimeError_type]
+    CSTRING rsi, "generator raised StopIteration"
+    call raise_exception
+
+.ci1_unary_positive:
+    ; +x — for ints/floats, just return x (no-op for numeric types)
+    ; TOS is already the value, just leave it
+    DISPATCH
+
+.ci1_list_to_tuple:
+    ; Convert list to tuple
+    VPOP rdi                   ; rdi = list
+    push rdi                   ; save for DECREF
+
+    ; Get list size and items
+    mov rcx, [rdi + PyListObject.ob_size]
+    mov rsi, [rdi + PyListObject.ob_item]
+    push rcx
+    push rsi
+
+    ; Create tuple of same size
+    mov rdi, rcx
+    call tuple_new
+    mov rbx, rax               ; CAREFUL: clobbers rbx! Save and restore
+    ; Actually rbx is the bytecode IP, don't clobber it
+    ; Use stack instead
+    pop rsi                    ; items ptr
+    pop rcx                    ; count
+    push rax                   ; save tuple
+
+    ; Copy items from list to tuple, INCREF each
+    xor edx, edx
+.ci1_l2t_loop:
+    cmp rdx, rcx
+    jge .ci1_l2t_done
+    push rcx
+    push rdx
+    push rsi
+
+    mov rdi, [rsi + rdx*8]    ; item
+    mov rax, [rsp + 24]       ; tuple
+    mov [rax + PyTupleObject.ob_item + rdx*8], rdi
+    INCREF rdi
+
+    pop rsi
+    pop rdx
+    pop rcx
+    inc rdx
+    jmp .ci1_l2t_loop
+
+.ci1_l2t_done:
+    pop rax                    ; tuple
+    VPUSH rax
+
+    ; DECREF list
+    pop rdi
+    DECREF_REG rdi
+
     DISPATCH
