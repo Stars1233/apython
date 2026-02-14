@@ -318,6 +318,8 @@ op_compare_op:
     lea rax, [rel int_type]
 .cmp_have_type:
     mov rax, [rax + PyTypeObject.tp_richcompare]
+    test rax, rax
+    jz .cmp_identity            ; no tp_richcompare → fall back to identity
     jmp .cmp_do_call
 
 .cmp_use_float:
@@ -345,6 +347,50 @@ op_compare_op:
     VPUSH rax
 
     ; Skip 1 CACHE entry = 2 bytes
+    add rbx, 2
+    DISPATCH
+
+.cmp_identity:
+    ; Fallback: identity comparison (pointer equality)
+    ; Stack: [rsp]=right, [rsp+8]=left; ecx=comparison op
+    pop rsi                    ; rsi = right
+    pop rdi                    ; rdi = left
+    cmp rdi, rsi
+    ; For EQ: equal pointers → True. For NE: unequal → True.
+    ; All other comparisons fall back to False for unsupported types.
+    je .cmp_id_equal
+    ; Not equal
+    cmp ecx, PY_NE
+    je .cmp_id_true
+    jmp .cmp_id_false
+.cmp_id_equal:
+    cmp ecx, PY_EQ
+    je .cmp_id_true
+    cmp ecx, PY_LE
+    je .cmp_id_true
+    cmp ecx, PY_GE
+    je .cmp_id_true
+.cmp_id_false:
+    ; DECREF both operands, push False
+    push rsi
+    mov rdi, rdi               ; left already in rdi
+    DECREF_REG rdi
+    pop rdi                    ; right
+    DECREF_REG rdi
+    lea rax, [rel bool_false]
+    inc qword [rax + PyObject.ob_refcnt]
+    VPUSH rax
+    add rbx, 2
+    DISPATCH
+.cmp_id_true:
+    ; DECREF both operands, push True
+    push rsi
+    DECREF_REG rdi
+    pop rdi
+    DECREF_REG rdi
+    lea rax, [rel bool_true]
+    inc qword [rax + PyObject.ob_refcnt]
+    VPUSH rax
     add rbx, 2
     DISPATCH
 
