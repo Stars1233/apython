@@ -18,6 +18,11 @@ extern str_from_cstr
 extern eval_frame
 extern frame_new
 extern frame_free
+extern tuple_new
+extern obj_incref
+
+; CO_FLAGS
+CO_VARARGS equ 0x04
 
 ; ---------------------------------------------------------------------------
 ; func_new(PyCodeObject *code, PyObject *globals) -> PyFuncObject*
@@ -116,19 +121,85 @@ func_call:
     ; Store function object in frame for COPY_FREE_VARS
     mov [r12 + PyFrame.func_obj], rbx
 
-    ; Bind positional args to frame->localsplus[0..nargs-1]
-    ; INCREF each arg as we store it
-    xor ecx, ecx            ; ecx = loop index
-    test r15d, r15d
-    jz .args_done
+    ; Get co_argcount and co_flags from code object
+    mov rdi, [rbx + PyFuncObject.func_code]
+    mov eax, [rdi + PyCodeObject.co_argcount]   ; eax = co_argcount
+    mov ecx, [rdi + PyCodeObject.co_flags]      ; ecx = co_flags
+
+    ; Bind positional args: localsplus[0..min(nargs, co_argcount)-1]
+    push rax                ; save co_argcount
+    push rcx                ; save co_flags
+
+    ; Determine how many regular args to bind
+    cmp r15d, eax
+    cmovb eax, r15d         ; eax = min(nargs, co_argcount)
+    xor ecx, ecx
+    test eax, eax
+    jz .regular_args_done
 
 .bind_args:
-    mov rax, [r14 + rcx*8]             ; rax = args[i]
-    mov [r12 + PyFrame.localsplus + rcx*8], rax
-    INCREF rax
+    mov rdx, [r14 + rcx*8]             ; rdx = args[i]
+    mov [r12 + PyFrame.localsplus + rcx*8], rdx
+    INCREF rdx
     inc ecx
-    cmp ecx, r15d
+    cmp ecx, eax
     jb .bind_args
+
+.regular_args_done:
+    pop rcx                 ; rcx = co_flags
+    pop rax                 ; rax = co_argcount
+
+    ; Check CO_VARARGS
+    test ecx, CO_VARARGS
+    jz .args_done
+
+    ; Pack excess args into a tuple at localsplus[co_argcount]
+    ; Number of excess args = max(0, nargs - co_argcount)
+    mov ecx, r15d           ; nargs
+    sub ecx, eax            ; excess = nargs - co_argcount
+    jle .empty_varargs
+
+    ; Create tuple of excess args
+    push rax                ; save co_argcount (= localsplus index for *args)
+    movsx rdi, ecx          ; tuple size = excess
+    push rdi                ; save excess count
+    call tuple_new          ; rax = new tuple
+    pop rcx                 ; rcx = excess count
+    pop rdx                 ; rdx = co_argcount
+
+    ; Fill tuple: tuple.ob_item[i] = args[co_argcount + i], INCREF each
+    xor esi, esi
+.fill_varargs:
+    cmp esi, ecx
+    jge .store_varargs_tuple
+    lea edi, [edx + esi]    ; index into args = co_argcount + i
+    mov r8, [r14 + rdi*8]   ; r8 = args[co_argcount + i]
+    mov [rax + PyTupleObject.ob_item + rsi*8], r8
+    push rax
+    push rcx
+    push rdx
+    push rsi
+    mov rdi, r8
+    call obj_incref
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rax
+    inc esi
+    jmp .fill_varargs
+
+.store_varargs_tuple:
+    ; Store tuple at localsplus[co_argcount]
+    mov [r12 + PyFrame.localsplus + rdx*8], rax
+    jmp .args_done
+
+.empty_varargs:
+    ; No excess args - create empty tuple
+    push rax                ; save co_argcount
+    xor edi, edi            ; size = 0
+    call tuple_new
+    pop rdx                 ; rdx = co_argcount
+    mov [r12 + PyFrame.localsplus + rdx*8], rax
 
 .args_done:
     ; Call eval_frame(frame)

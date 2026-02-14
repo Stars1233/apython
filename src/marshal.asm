@@ -24,6 +24,7 @@ extern ap_realloc
 extern fatal_error
 extern ap_memcpy
 extern code_type
+extern obj_decref
 
 ; Initial capacity for the reference list
 MARSHAL_REFS_INIT_CAP equ 64
@@ -259,6 +260,10 @@ marshal_read_object:
     je mdo_none                 ; stub: return None
     cmp ebx, MARSHAL_TYPE_NULL
     je mdo_null
+    cmp ebx, MARSHAL_TYPE_FROZENSET
+    je mdo_frozenset
+    cmp ebx, MARSHAL_TYPE_SET
+    je mdo_frozenset             ; deserialize set same as frozenset
 
     ; Unknown type
     lea rdi, [rel marshal_err_unknown]
@@ -848,6 +853,87 @@ mdo_code:
     pop rbx
     pop rbp
     ret
+
+;--------------------------------------------------------------------------
+; TYPE_FROZENSET / TYPE_SET handler: 4-byte count, then N objects
+; Deserialized as a set object (PyDictObject layout with set_type)
+;--------------------------------------------------------------------------
+extern set_new
+extern set_add
+
+mdo_frozenset:
+    push r12                   ; save FLAG_REF
+    push r13
+    push r14
+    push r15
+    sub rsp, 16                ; [rsp+0]=saved FLAG_REF, [rsp+8]=ref index
+
+    ; Reserve ref slot BEFORE reading children
+    mov [rsp + 0], r12
+    test r12d, r12d
+    jz .fset_no_reserve
+    xor edi, edi               ; NULL placeholder
+    call marshal_add_ref
+    mov rax, [rel marshal_ref_count]
+    dec rax
+    mov [rsp + 8], rax         ; save ref index for fixup
+.fset_no_reserve:
+
+    call marshal_read_long     ; eax = count
+    mov r13d, eax              ; r13 = count (unsigned)
+
+    ; Allocate set
+    call set_new
+    mov r14, rax               ; r14 = set
+
+    ; Read elements and add them
+    xor r15d, r15d             ; r15 = index
+.fset_loop:
+    cmp r15, r13
+    jge .fset_done
+    push r13
+    push r14
+    push r15
+    call marshal_read_object
+    pop r15
+    pop r14
+    pop r13
+
+    ; Add element to set (set_add does INCREF, marshal gave us owned ref)
+    push r13
+    push r14
+    push r15
+    push rax                   ; save element
+    mov rdi, r14               ; set
+    mov rsi, rax               ; element
+    call set_add
+    pop rdi                    ; element - DECREF to compensate for set_add's INCREF
+    ; since marshal_read_object gave us an owned ref and set_add INCREF'd
+    call obj_decref
+    pop r15
+    pop r14
+    pop r13
+
+    inc r15
+    jmp .fset_loop
+
+.fset_done:
+    ; Fix up reserved ref slot with the actual set
+    mov rax, [rsp + 0]        ; saved FLAG_REF
+    test eax, eax
+    jz .fset_no_fixup
+    mov rax, [rsp + 8]        ; ref index
+    mov rcx, [rel marshal_refs]
+    mov [rcx + rax * 8], r14  ; fix up placeholder with set
+.fset_no_fixup:
+    mov rax, r14               ; return the set
+    add rsp, 16
+    pop r15
+    pop r14
+    pop r13
+    pop r12                    ; restore original r12
+    xor r12d, r12d             ; clear FLAG_REF -- we handled it ourselves
+    jmp mfinish
 
 ;--------------------------------------------------------------------------
 ; BSS section: marshal global state

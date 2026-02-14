@@ -85,6 +85,12 @@ extern op_yield_value
 extern op_end_send
 extern op_jump_backward_no_interrupt
 extern op_call_intrinsic_1
+extern op_call_function_ex
+extern op_before_with
+extern op_with_except_start
+extern op_build_set
+extern op_set_add
+extern op_set_update
 
 ; External error handler
 extern error_unimplemented_opcode
@@ -816,11 +822,11 @@ opcode_table:
     dq op_unimplemented      ; 46
     dq op_unimplemented      ; 47
     dq op_unimplemented      ; 48
-    dq op_unimplemented      ; 49  = WITH_EXCEPT_START
+    dq op_with_except_start  ; 49  = WITH_EXCEPT_START
     dq op_unimplemented      ; 50  = GET_AITER
     dq op_unimplemented      ; 51  = GET_ANEXT
     dq op_unimplemented      ; 52  = BEFORE_ASYNC_WITH
-    dq op_unimplemented      ; 53  = BEFORE_WITH
+    dq op_before_with        ; 53  = BEFORE_WITH
     dq op_unimplemented      ; 54  = END_ASYNC_FOR
     dq op_unimplemented      ; 55  = CLEANUP_THROW
     dq op_unimplemented      ; 56
@@ -871,7 +877,7 @@ opcode_table:
     dq op_load_name          ; 101 = LOAD_NAME
     dq op_build_tuple        ; 102 = BUILD_TUPLE
     dq op_build_list         ; 103 = BUILD_LIST
-    dq op_unimplemented      ; 104 = BUILD_SET
+    dq op_build_set          ; 104 = BUILD_SET
     dq op_build_map          ; 105 = BUILD_MAP
     dq op_load_attr          ; 106 = LOAD_ATTR
     dq op_compare_op         ; 107 = COMPARE_OP
@@ -909,11 +915,11 @@ opcode_table:
     dq op_delete_deref       ; 139 = DELETE_DEREF
     dq op_jump_backward      ; 140 = JUMP_BACKWARD
     dq op_unimplemented      ; 141 = LOAD_SUPER_ATTR
-    dq op_unimplemented      ; 142 = CALL_FUNCTION_EX
+    dq op_call_function_ex   ; 142 = CALL_FUNCTION_EX
     dq op_load_fast_and_clear ; 143 = LOAD_FAST_AND_CLEAR
     dq op_extended_arg       ; 144 = EXTENDED_ARG
     dq op_list_append        ; 145 = LIST_APPEND
-    dq op_unimplemented      ; 146 = SET_ADD
+    dq op_set_add            ; 146 = SET_ADD
     dq op_map_add            ; 147 = MAP_ADD
     dq op_unimplemented      ; 148
     dq op_copy_free_vars     ; 149 = COPY_FREE_VARS
@@ -930,7 +936,7 @@ opcode_table:
     dq op_unimplemented      ; 160
     dq op_unimplemented      ; 161
     dq op_list_extend        ; 162 = LIST_EXTEND
-    dq op_unimplemented      ; 163 = SET_UPDATE
+    dq op_set_update         ; 163 = SET_UPDATE
     dq op_dict_merge         ; 164 = DICT_MERGE
     dq op_dict_update        ; 165 = DICT_UPDATE
     dq op_unimplemented      ; 166

@@ -62,6 +62,14 @@ extern builtin_getattr
 extern builtin_hasattr
 extern builtin_setattr
 
+; Iterator builtins (in itertools.asm)
+extern builtin_enumerate
+extern builtin_zip
+extern builtin_map
+extern builtin_filter
+extern builtin_reversed
+extern builtin_sorted
+
 ; Exception types
 extern exc_BaseException_type
 extern exc_Exception_type
@@ -1004,6 +1012,37 @@ builtins_init:
     lea rdx, [rel builtin_setattr]
     call add_builtin
 
+    ; Register iterator builtins (from itertools.asm)
+    mov rdi, rbx
+    lea rsi, [rel bi_name_enumerate]
+    lea rdx, [rel builtin_enumerate]
+    call add_builtin
+
+    mov rdi, rbx
+    lea rsi, [rel bi_name_zip]
+    lea rdx, [rel builtin_zip]
+    call add_builtin
+
+    mov rdi, rbx
+    lea rsi, [rel bi_name_map]
+    lea rdx, [rel builtin_map]
+    call add_builtin
+
+    mov rdi, rbx
+    lea rsi, [rel bi_name_filter]
+    lea rdx, [rel builtin_filter]
+    call add_builtin
+
+    mov rdi, rbx
+    lea rsi, [rel bi_name_reversed]
+    lea rdx, [rel builtin_reversed]
+    call add_builtin
+
+    mov rdi, rbx
+    lea rsi, [rel bi_name_sorted]
+    lea rdx, [rel builtin_sorted]
+    call add_builtin
+
     ; Register exception types as builtins
     mov rdi, rbx
     lea rsi, [rel bi_name_BaseException]
@@ -1198,6 +1237,14 @@ bi_name_max:          db "max", 0
 bi_name_getattr:      db "getattr", 0
 bi_name_hasattr:      db "hasattr", 0
 bi_name_setattr:      db "setattr", 0
+
+; Iterator builtin names
+bi_name_enumerate:    db "enumerate", 0
+bi_name_zip:          db "zip", 0
+bi_name_map:          db "map", 0
+bi_name_filter:       db "filter", 0
+bi_name_reversed:     db "reversed", 0
+bi_name_sorted:       db "sorted", 0
 
 ; Exception type names
 bi_name_BaseException:     db "BaseException", 0

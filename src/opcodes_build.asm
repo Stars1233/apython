@@ -1293,3 +1293,211 @@ op_kw_names:
     mov rax, [r14 + rcx*8]     ; rax = tuple of kw names from co_consts
     mov [rel kw_names_pending], rax
     DISPATCH
+
+;; ============================================================================
+;; op_build_set - Create set from TOS items
+;;
+;; ecx = count (number of items to pop)
+;; Items are on stack bottom-to-top: first item deepest.
+;; ============================================================================
+extern set_new
+extern set_add
+extern set_type
+
+global op_build_set
+op_build_set:
+    push rbp
+    mov rbp, rsp
+    sub rsp, 16
+
+    mov [rbp-8], rcx           ; save count
+
+    ; Allocate empty set
+    call set_new
+    mov [rbp-16], rax          ; save set
+
+    ; Pop items and add to set
+    mov rcx, [rbp-8]
+    test rcx, rcx
+    jz .build_set_done
+
+    ; Calculate base
+    mov rdi, rcx
+    shl rdi, 3
+    sub r13, rdi               ; pop all items
+
+    xor edx, edx
+.build_set_fill:
+    cmp rdx, [rbp-8]
+    jge .build_set_done
+    push rdx
+    mov rdi, [rbp-16]         ; set
+    mov rsi, [r13 + rdx*8]   ; item
+    call set_add               ; set_add does INCREF
+    pop rdx
+    inc rdx
+    jmp .build_set_fill
+
+.build_set_done:
+    ; set_add does INCREF on key, so DECREF all stack items to compensate
+    mov rcx, [rbp-8]
+    test rcx, rcx
+    jz .build_set_push
+    xor edx, edx
+.build_set_fixref:
+    cmp rdx, [rbp-8]
+    jge .build_set_push
+    mov rdi, [r13 + rdx*8]
+    push rdx
+    DECREF_REG rdi
+    pop rdx
+    inc rdx
+    jmp .build_set_fixref
+
+.build_set_push:
+    mov rax, [rbp-16]
+    VPUSH rax
+    leave
+    DISPATCH
+
+;; ============================================================================
+;; op_set_add - Add TOS to set at stack position
+;;
+;; SET_ADD (146): used by set comprehensions
+;; ecx = position (1-based from TOS before the value to add)
+;; Pop TOS (value), add to set.
+;; ============================================================================
+global op_set_add
+op_set_add:
+    ; TOS = value to add
+    VPOP rsi                   ; rsi = value
+
+    ; set is at stack[-(ecx)] after popping
+    ; That is: [r13 - ecx*8]
+    neg rcx
+    mov rdi, [r13 + rcx*8]    ; rdi = set
+
+    push rsi                   ; save value
+    call set_add
+    ; set_add does INCREF, so DECREF to compensate
+    pop rdi                    ; value
+    DECREF_REG rdi
+
+    DISPATCH
+
+;; ============================================================================
+;; op_set_update - Update set with iterable
+;;
+;; SET_UPDATE (163): set.update(iterable)
+;; ecx = position (set at stack[-(ecx)] after pop)
+;; Pop TOS (iterable), add each item to set.
+;; ============================================================================
+global op_set_update
+op_set_update:
+    push rbp
+    mov rbp, rsp
+    push rbx
+    push r14
+    sub rsp, 32                ; locals: [rbp-24]=set, [rbp-32]=iterable, [rbp-40]=iter
+
+    ; TOS = iterable
+    VPOP rsi                   ; rsi = iterable
+    mov [rbp-32], rsi          ; save iterable
+
+    ; set is at stack[-(ecx)] after popping
+    neg rcx
+    mov rdi, [r13 + rcx*8]    ; rdi = set
+    mov [rbp-24], rdi          ; save set
+
+    ; Check if iterable is a set (direct iteration over entries)
+    mov rax, [rsi + PyObject.ob_type]
+    lea rdx, [rel set_type]
+    cmp rax, rdx
+    je .su_from_set
+
+    ; Generic approach: get iterator via tp_iter, then loop tp_iternext
+    mov rdi, rsi
+    mov rax, [rdi + PyObject.ob_type]
+    mov rax, [rax + PyTypeObject.tp_iter]
+    test rax, rax
+    jz .su_type_error
+    call rax
+    mov [rbp-40], rax          ; save iterator
+
+.su_iter_loop:
+    mov rdi, [rbp-40]          ; iterator
+    mov rax, [rdi + PyObject.ob_type]
+    mov rax, [rax + PyTypeObject.tp_iternext]
+    call rax
+    test rax, rax
+    jz .su_iter_done
+
+    ; rax = next item (owned ref)
+    push rax                   ; save item
+    mov rdi, [rbp-24]          ; set
+    mov rsi, rax               ; item
+    call set_add               ; set_add does INCREF
+    pop rdi                    ; item - DECREF to compensate (set_add INCREF'd)
+    DECREF_REG rdi
+    jmp .su_iter_loop
+
+.su_iter_done:
+    ; DECREF iterator
+    mov rdi, [rbp-40]
+    call obj_decref
+
+    ; DECREF iterable
+    mov rdi, [rbp-32]
+    call obj_decref
+
+    add rsp, 32
+    pop r14
+    pop rbx
+    leave
+    DISPATCH
+
+.su_from_set:
+    ; Iterable is a set - iterate entries directly
+    mov rax, [rsi + PyDictObject.capacity]
+    mov [rbp-40], rax          ; capacity (reuse slot)
+    xor ebx, ebx              ; index
+
+.su_set_loop:
+    cmp rbx, [rbp-40]
+    jge .su_set_done
+
+    mov rax, [rbp-32]         ; source set
+    mov rax, [rax + PyDictObject.entries]
+    imul rcx, rbx, 16         ; SET_ENTRY_SIZE = 16
+    add rax, rcx
+
+    ; Check if entry has a key
+    mov rsi, [rax + 8]        ; SET_ENTRY_KEY offset = 8
+    test rsi, rsi
+    jz .su_set_next
+
+    ; set_add(target_set, key)
+    push rbx
+    mov rdi, [rbp-24]
+    call set_add
+    pop rbx
+
+.su_set_next:
+    inc rbx
+    jmp .su_set_loop
+
+.su_set_done:
+    ; DECREF iterable
+    mov rdi, [rbp-32]
+    call obj_decref
+
+    add rsp, 32
+    pop r14
+    pop rbx
+    leave
+    DISPATCH
+
+.su_type_error:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "object is not iterable"
+    call raise_exception
