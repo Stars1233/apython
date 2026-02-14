@@ -15,7 +15,8 @@ struc PyFrame
     .stack_base:    resq 1  ; +56: ptr to bottom of value stack
     .return_offset: resd 1  ; +64: return offset
     .nlocalsplus:   resd 1  ; +68: number of locals + cells + frees
-    .localsplus:             ; +72: PyObject*[] array (variable size)
+    .func_obj:      resq 1  ; +72: ptr to function object (for closures)
+    .localsplus:             ; +80: PyObject*[] array (variable size)
 endstruc
 
 FRAME_HEADER_SIZE equ PyFrame.localsplus

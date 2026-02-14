@@ -28,6 +28,7 @@ extern raise_exception
 extern obj_incref
 extern obj_decref
 extern func_type
+extern cell_type
 extern exc_NameError_type
 extern exc_AttributeError_type
 
@@ -296,3 +297,41 @@ op_load_attr:
     add rbx, 18            ; skip 9 CACHE entries
     leave
     DISPATCH
+
+;; ============================================================================
+;; op_load_closure - Load cell from localsplus[arg]
+;;
+;; Same as LOAD_FAST — loads the cell object itself (not its contents).
+;; In Python 3.12, LOAD_CLOSURE is same opcode behavior as LOAD_FAST.
+;; ============================================================================
+global op_load_closure
+op_load_closure:
+    lea rax, [r12 + PyFrame.localsplus]
+    mov rax, [rax + rcx*8]
+    INCREF rax
+    VPUSH rax
+    DISPATCH
+
+;; ============================================================================
+;; op_load_deref - Load value through cell in localsplus[arg]
+;;
+;; Gets cell from localsplus[arg], then loads cell.ob_ref.
+;; Raises NameError if cell is empty (ob_ref == NULL).
+;; ============================================================================
+global op_load_deref
+op_load_deref:
+    lea rax, [r12 + PyFrame.localsplus]
+    mov rax, [rax + rcx*8]        ; rax = cell object
+    test rax, rax
+    jz .deref_error
+    mov rax, [rax + PyCellObject.ob_ref]   ; rax = cell contents
+    test rax, rax
+    jz .deref_error
+    INCREF rax
+    VPUSH rax
+    DISPATCH
+
+.deref_error:
+    lea rdi, [rel exc_NameError_type]
+    CSTRING rsi, "free variable referenced before assignment"
+    call raise_exception

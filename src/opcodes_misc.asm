@@ -32,6 +32,7 @@ extern bool_false
 extern int_type
 extern float_type
 extern float_number_methods
+extern cell_new
 
 ;; ============================================================================
 ;; op_return_value - Return TOS from current frame
@@ -590,3 +591,108 @@ binary_op_offsets:
     dq 8    ; NB_INPLACE_SUBTRACT (23)         -> nb_subtract
     dq 152  ; NB_INPLACE_TRUE_DIVIDE (24)      -> nb_true_divide
     dq 112  ; NB_INPLACE_XOR (25)              -> nb_xor
+
+section .text
+
+;; ============================================================================
+;; op_make_cell - Wrap localsplus[arg] in a cell object
+;;
+;; If localsplus[arg] is not already a cell, create one and wrap the value.
+;; If localsplus[arg] is NULL, create an empty cell.
+;; ============================================================================
+global op_make_cell
+op_make_cell:
+    lea rdx, [r12 + PyFrame.localsplus]
+
+    ; Get current value
+    mov rdi, [rdx + rcx*8]        ; rdi = current value (or NULL)
+
+    ; Save slot address
+    push rdx
+    push rcx
+
+    ; cell_new(obj) - creates cell wrapping obj (INCREFs if non-NULL)
+    call cell_new
+    ; rax = new cell
+
+    pop rcx
+    pop rdx
+
+    ; XDECREF old value (cell_new already INCREFed it)
+    mov rdi, [rdx + rcx*8]
+    test rdi, rdi
+    jz .mc_store
+    push rax
+    push rdx
+    push rcx
+    DECREF_REG rdi
+    pop rcx
+    pop rdx
+    pop rax
+
+.mc_store:
+    ; Store cell in localsplus slot
+    mov [rdx + rcx*8], rax
+    DISPATCH
+
+;; ============================================================================
+;; op_copy_free_vars - Copy closure cells into frame's freevar slots
+;;
+;; arg = count of free vars to copy.
+;; Source: current function's func_closure tuple.
+;; Destination: localsplus[co_nlocals + ncellvars + i] for i in 0..arg-1
+;;
+;; In Python 3.12, the function being executed is NOT on the stack.
+;; We find it via the calling frame's CALL setup. However, the bytecode
+;; compiler ensures COPY_FREE_VARS is the first opcode, and the function
+;; object is passed to eval_frame. We need to get it from the frame.
+;;
+;; Actually, in Python 3.12: the closure tuple is stored in the function
+;; object. The function that owns the current frame can be found by
+;; looking at the frame's localsplus from the caller. But simpler:
+;; we stash the function object in the frame during func_call.
+;; ============================================================================
+global op_copy_free_vars
+op_copy_free_vars:
+    ; ecx = number of free vars to copy
+    test ecx, ecx
+    jz .cfv_done
+
+    ; Get the function object from frame's func_obj slot
+    mov rax, [r12 + PyFrame.func_obj]
+    test rax, rax
+    jz .cfv_done
+
+    ; Get closure tuple from function
+    mov rax, [rax + PyFuncObject.func_closure]
+    test rax, rax
+    jz .cfv_done
+
+    ; rax = closure tuple, ecx = count
+    ; Destination: localsplus starts at nlocalsplus - ecx (freevar slots at end)
+    ; Actually: Python 3.12 puts freevars after cellvars in localsplus
+    ; COPY_FREE_VARS arg tells us the count. The slots are at the END
+    ; of localsplus: index [nlocalsplus - arg ... nlocalsplus - 1]
+    mov edx, [r12 + PyFrame.nlocalsplus]
+    sub edx, ecx                   ; edx = first freevar index
+
+    ; Copy cells from closure tuple to freevar slots
+    xor r8d, r8d                   ; loop counter
+.cfv_loop:
+    cmp r8d, ecx
+    jge .cfv_done
+
+    ; Get cell from closure tuple item[i]
+    mov r9, [rax + PyTupleObject.ob_item + r8*8]
+    INCREF r9
+
+    ; Compute destination index: edx + r8d
+    mov r10d, edx
+    add r10d, r8d
+    mov [r12 + PyFrame.localsplus + r10*8], r9
+
+    inc r8d
+    jmp .cfv_loop
+
+.cfv_done:
+    DISPATCH

@@ -113,6 +113,9 @@ func_call:
     call frame_new
     mov r12, rax            ; r12 = new frame
 
+    ; Store function object in frame for COPY_FREE_VARS
+    mov [r12 + PyFrame.func_obj], rbx
+
     ; Bind positional args to frame->localsplus[0..nargs-1]
     ; INCREF each arg as we store it
     xor ecx, ecx            ; ecx = loop index

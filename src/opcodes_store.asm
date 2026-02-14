@@ -26,6 +26,7 @@ extern obj_decref
 extern dict_set
 extern fatal_error
 extern raise_exception
+extern obj_incref
 extern exc_AttributeError_type
 
 ;; ============================================================================
@@ -150,3 +151,54 @@ op_store_attr:
     lea rdi, [rel exc_AttributeError_type]
     CSTRING rsi, "cannot set attribute"
     call raise_exception
+
+;; ============================================================================
+;; op_store_deref - Store TOS into cell at localsplus[arg]
+;;
+;; Gets cell from localsplus[arg], sets cell.ob_ref = TOS.
+;; INCREFs new value, DECREFs old value.
+;; ============================================================================
+global op_store_deref
+op_store_deref:
+    VPOP rax                        ; rax = new value
+    lea rdx, [r12 + PyFrame.localsplus]
+    mov rdx, [rdx + rcx*8]         ; rdx = cell object
+
+    ; INCREF new value (may be SmallInt)
+    push rax
+    push rdx
+    mov rdi, rax
+    call obj_incref
+    pop rdx
+    pop rax
+
+    ; Get old value from cell
+    mov rdi, [rdx + PyCellObject.ob_ref]
+
+    ; Store new value in cell
+    mov [rdx + PyCellObject.ob_ref], rax
+
+    ; XDECREF old value
+    test rdi, rdi
+    jz .sd_done
+    DECREF_REG rdi
+.sd_done:
+    DISPATCH
+
+;; ============================================================================
+;; op_delete_deref - Set cell at localsplus[arg] to empty (NULL)
+;;
+;; DECREFs old value if present.
+;; ============================================================================
+global op_delete_deref
+op_delete_deref:
+    lea rax, [r12 + PyFrame.localsplus]
+    mov rax, [rax + rcx*8]         ; rax = cell object
+    mov rdi, [rax + PyCellObject.ob_ref]
+    mov qword [rax + PyCellObject.ob_ref], 0
+    ; XDECREF old value
+    test rdi, rdi
+    jz .dd_done
+    DECREF_REG rdi
+.dd_done:
+    DISPATCH

@@ -198,32 +198,76 @@ op_call:
 ;;
 ;; Python 3.12 MAKE_FUNCTION (opcode 132).
 ;; arg = flags: 0 = plain, 1 = defaults, 2 = kwdefaults, 4 = annotations, 8 = closure
-;; Currently supports arg=0 only (no defaults/closures).
 ;;
-;; Stack: ... | code_obj | -> ... | func_obj |
+;; Stack order (when flags set, bottom to top):
+;;   closure tuple (if flag 0x08)
+;;   annotations (if flag 0x04) - ignored
+;;   kwdefaults dict (if flag 0x02) - ignored
+;;   defaults tuple (if flag 0x01) - ignored
+;;   code_obj (always on top)
 ;; ============================================================================
 global op_make_function
 op_make_function:
-    ; Pop code object from value stack
-    VPOP rdi                   ; rdi = code object
+    push rbp
+    mov rbp, rsp
+    sub rsp, 32                    ; [rbp-8]=flags, [rbp-16]=code, [rbp-24]=closure
 
-    ; Get globals from current frame
-    mov rsi, [r12 + PyFrame.globals]  ; rsi = globals dict
+    mov [rbp-8], ecx               ; save flags
+    mov qword [rbp-24], 0          ; closure = NULL default
 
-    ; Save code obj for DECREF after func_new INCREFs it
-    push rdi
+    ; Pop code object from value stack (always TOS)
+    VPOP rdi
+    mov [rbp-16], rdi
+
+    ; Check flags for closure (must pop in reverse order of push)
+    ; Defaults (0x01) - pop and ignore for now
+    test ecx, MAKE_FUNC_DEFAULTS
+    jz .mf_no_defaults
+    VPOP rdi
+    DECREF_REG rdi                 ; discard defaults tuple
+    mov ecx, [rbp-8]
+.mf_no_defaults:
+
+    ; kwdefaults (0x02) - pop and ignore for now
+    test ecx, MAKE_FUNC_KWDEFAULTS
+    jz .mf_no_kwdefaults
+    VPOP rdi
+    DECREF_REG rdi
+    mov ecx, [rbp-8]
+.mf_no_kwdefaults:
+
+    ; annotations (0x04) - pop and ignore
+    test ecx, MAKE_FUNC_ANNOTATIONS
+    jz .mf_no_annotations
+    VPOP rdi
+    DECREF_REG rdi
+    mov ecx, [rbp-8]
+.mf_no_annotations:
+
+    ; closure (0x08) - pop and save
+    test ecx, MAKE_FUNC_CLOSURE
+    jz .mf_no_closure
+    VPOP rax
+    mov [rbp-24], rax              ; save closure tuple
+.mf_no_closure:
 
     ; Create function: func_new(code, globals)
+    mov rdi, [rbp-16]
+    mov rsi, [r12 + PyFrame.globals]
     call func_new
     ; rax = new function object
 
-    ; DECREF the code object (func_new INCREFed it)
-    push rax                   ; save func obj on machine stack
-    mov rdi, [rsp + 8]        ; code object (saved earlier)
+    ; Set closure if present
+    mov rcx, [rbp-24]
+    mov [rax + PyFuncObject.func_closure], rcx
+
+    ; Save func obj, DECREF the code object
+    push rax
+    mov rdi, [rbp-16]
     DECREF_REG rdi
-    pop rax                    ; restore func obj
-    add rsp, 8                 ; discard saved code object
+    pop rax
 
     ; Push function onto value stack
     VPUSH rax
+    leave
     DISPATCH

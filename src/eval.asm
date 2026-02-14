@@ -56,6 +56,12 @@ extern op_contains_op
 extern op_load_build_class
 extern op_store_attr
 extern op_load_attr
+extern op_make_cell
+extern op_load_closure
+extern op_load_deref
+extern op_store_deref
+extern op_delete_deref
+extern op_copy_free_vars
 
 ; External error handler
 extern error_unimplemented_opcode
@@ -838,11 +844,11 @@ opcode_table:
     dq op_make_function      ; 132 = MAKE_FUNCTION
     dq op_unimplemented      ; 133 = BUILD_SLICE
     dq op_unimplemented      ; 134 = JUMP_BACKWARD_NO_INTERRUPT
-    dq op_unimplemented      ; 135 = MAKE_CELL
-    dq op_unimplemented      ; 136 = LOAD_CLOSURE
-    dq op_unimplemented      ; 137 = LOAD_DEREF
-    dq op_unimplemented      ; 138 = STORE_DEREF
-    dq op_unimplemented      ; 139 = DELETE_DEREF
+    dq op_make_cell          ; 135 = MAKE_CELL
+    dq op_load_closure       ; 136 = LOAD_CLOSURE
+    dq op_load_deref         ; 137 = LOAD_DEREF
+    dq op_store_deref        ; 138 = STORE_DEREF
+    dq op_delete_deref       ; 139 = DELETE_DEREF
     dq op_jump_backward      ; 140 = JUMP_BACKWARD
     dq op_unimplemented      ; 141 = LOAD_SUPER_ATTR
     dq op_unimplemented      ; 142 = CALL_FUNCTION_EX
@@ -852,7 +858,7 @@ opcode_table:
     dq op_unimplemented      ; 146 = SET_ADD
     dq op_unimplemented      ; 147 = MAP_ADD
     dq op_unimplemented      ; 148
-    dq op_unimplemented      ; 149 = COPY_FREE_VARS
+    dq op_copy_free_vars     ; 149 = COPY_FREE_VARS
     dq op_unimplemented      ; 150 = YIELD_VALUE
     dq op_resume             ; 151 = RESUME
     dq op_unimplemented      ; 152 = MATCH_CLASS

@@ -51,9 +51,10 @@ frame_new:
     mov qword [rax + PyFrame.stack_ptr], 0
     mov dword [rax + PyFrame.return_offset], 0
 
-    ; Set nlocalsplus
+    ; Set nlocalsplus and func_obj
     mov ecx, [rbx + PyCodeObject.co_nlocalsplus]
     mov [rax + PyFrame.nlocalsplus], ecx
+    mov qword [rax + PyFrame.func_obj], 0
 
     ; stack_base = &localsplus[nlocalsplus]
     mov edx, ecx            ; edx = nlocalsplus
