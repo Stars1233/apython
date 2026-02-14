@@ -11,6 +11,7 @@ section .text
 
 extern bool_init
 extern builtins_init
+extern methods_init
 extern dict_new
 extern dict_set
 extern frame_new
@@ -51,6 +52,9 @@ main:
     ; Create builtins dict
     call builtins_init
     mov r13, rax             ; r13 = builtins dict
+
+    ; Initialize type methods (str, list, dict tp_dict)
+    call methods_init
 
     ; Create globals dict
     call dict_new
