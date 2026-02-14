@@ -19,6 +19,8 @@ extern dict_new
 extern dict_get
 extern dict_set
 extern str_from_cstr
+extern ap_strcmp
+extern type_repr
 extern fatal_error
 extern raise_exception
 extern exc_AttributeError_type
@@ -339,7 +341,7 @@ type_call:
 ;; ============================================================================
 ;; type_getattr(PyTypeObject *self, PyObject *name) -> PyObject*
 ;; Look up an attribute on a type object itself (class variables).
-;; Checks self->tp_dict.
+;; Also handles __name__ (from tp_name) and __bases__.
 ;; rdi = type object, rsi = name (PyStrObject*)
 ;; Returns: owned reference to attribute value, or NULL
 ;; ============================================================================
@@ -348,11 +350,20 @@ type_getattr:
     push rbp
     mov rbp, rsp
     push rbx
+    push r12
 
     mov rbx, rsi                ; rbx = name
+    mov r12, rdi                ; r12 = type
+
+    ; Check for __name__: compare name string data with "__name__"
+    lea rdi, [rbx + PyStrObject.data]
+    lea rsi, [rel tga_name_str]
+    call ap_strcmp
+    test eax, eax
+    jz .tga_return_name
 
     ; Check type->tp_dict
-    mov rdi, [rdi + PyTypeObject.tp_dict]
+    mov rdi, [r12 + PyTypeObject.tp_dict]
     test rdi, rdi
     jz .tga_not_found
 
@@ -367,12 +378,24 @@ type_getattr:
     call obj_incref
     mov rax, rbx
 
+    pop r12
+    pop rbx
+    pop rbp
+    ret
+
+.tga_return_name:
+    ; Return str from tp_name (C string)
+    mov rdi, [r12 + PyTypeObject.tp_name]
+    call str_from_cstr
+    ; rax = new string (already refcnt=1)
+    pop r12
     pop rbx
     pop rbp
     ret
 
 .tga_not_found:
     xor eax, eax               ; return NULL
+    pop r12
     pop rbx
     pop rbp
     ret
@@ -384,6 +407,7 @@ section .data
 
 instance_repr_cstr: db "<instance>", 0
 init_name_cstr:     db "__init__", 0
+tga_name_str:       db "__name__", 0
 method_name_str:    db "method", 0
 user_type_name_str: db "type", 0
 super_name_str:     db "super", 0
@@ -400,8 +424,8 @@ user_type_metatype:
     dq user_type_name_str       ; tp_name
     dq TYPE_OBJECT_SIZE         ; tp_basicsize
     dq 0                        ; tp_dealloc
-    dq 0                        ; tp_repr
-    dq 0                        ; tp_str
+    dq type_repr                ; tp_repr — <class 'Name'>
+    dq type_repr                ; tp_str — same as repr
     dq 0                        ; tp_hash
     dq type_call                ; tp_call — calling a class creates instances
     dq type_getattr             ; tp_getattr — accessing class vars via tp_dict
