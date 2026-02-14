@@ -575,8 +575,100 @@ dict_subscript:
 ;; ============================================================================
 global dict_ass_subscript
 dict_ass_subscript:
-    ; Simply delegate to dict_set
+    ; If value is NULL, this is a delete operation
+    test rdx, rdx
+    jz .das_delete
+    ; Otherwise delegate to dict_set
     jmp dict_set
+.das_delete:
+    ; dict_del(dict, key)
+    ; rdi = dict, rsi = key (already set)
+    jmp dict_del
+
+;; ============================================================================
+;; dict_del(PyDictObject *dict, PyObject *key) -> int (0=ok, -1=not found)
+;; Delete key from dict. DECREFs both key and value.
+;; ============================================================================
+global dict_del
+dict_del:
+    push rbp
+    mov rbp, rsp
+    push rbx
+    push r12
+    push r13
+    push r14
+    push r15
+
+    mov rbx, rdi                ; dict
+    mov r12, rsi                ; key
+
+    ; Hash the key
+    mov rdi, r12
+    call obj_hash
+    mov r13, rax                ; hash
+
+    ; capacity mask
+    mov r14, [rbx + PyDictObject.capacity]
+    lea r15, [r14 - 1]          ; mask
+
+    ; Starting slot
+    mov rcx, r13
+    and rcx, r15
+    xor r14d, r14d              ; probe counter
+
+.dd_probe:
+    cmp r14, [rbx + PyDictObject.capacity]
+    jge .dd_not_found
+
+    mov rax, [rbx + PyDictObject.entries]
+    imul rdx, rcx, DICT_ENTRY_SIZE
+    add rax, rdx
+
+    mov rdi, [rax + DictEntry.key]
+    test rdi, rdi
+    jz .dd_not_found
+
+    cmp r13, [rax + DictEntry.hash]
+    jne .dd_next
+
+    mov rsi, r12
+    push rcx
+    push rax
+    call dict_keys_equal
+    pop rdx                     ; entry ptr
+    pop rcx
+    test eax, eax
+    jz .dd_next
+
+    ; Found: null out entry, DECREF key and value, decrement size
+    mov rdi, [rdx + DictEntry.key]
+    mov qword [rdx + DictEntry.key], 0
+    push qword [rdx + DictEntry.value]
+    mov qword [rdx + DictEntry.value], 0
+    call obj_decref             ; DECREF key
+    pop rdi
+    call obj_decref             ; DECREF value
+    dec qword [rbx + PyDictObject.ob_size]
+    xor eax, eax               ; return 0 = success
+    jmp .dd_done
+
+.dd_next:
+    inc rcx
+    and rcx, r15
+    inc r14
+    jmp .dd_probe
+
+.dd_not_found:
+    mov eax, -1
+
+.dd_done:
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    pop rbp
+    ret
 
 ;; ============================================================================
 ;; dict_repr(PyObject *self) -> PyStrObject*

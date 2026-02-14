@@ -335,3 +335,24 @@ op_load_deref:
     lea rdi, [rel exc_NameError_type]
     CSTRING rsi, "free variable referenced before assignment"
     call raise_exception
+
+;; ============================================================================
+;; op_load_fast_check - Load local with NULL check
+;;
+;; Same as LOAD_FAST but raises UnboundLocalError if slot is NULL.
+;; Used after DELETE_FAST and in exception handlers.
+;; ============================================================================
+global op_load_fast_check
+op_load_fast_check:
+    lea rax, [r12 + PyFrame.localsplus]
+    mov rax, [rax + rcx*8]
+    test rax, rax
+    jz .lfc_error
+    INCREF rax
+    VPUSH rax
+    DISPATCH
+
+.lfc_error:
+    lea rdi, [rel exc_NameError_type]
+    CSTRING rsi, "cannot access local variable"
+    call raise_exception

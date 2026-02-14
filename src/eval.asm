@@ -68,6 +68,12 @@ extern op_binary_slice
 extern op_store_slice
 extern op_format_value
 extern op_build_string
+extern op_delete_fast
+extern op_delete_name
+extern op_delete_global
+extern op_delete_attr
+extern op_delete_subscr
+extern op_load_fast_check
 
 ; External error handler
 extern error_unimplemented_opcode
@@ -776,7 +782,7 @@ opcode_table:
     dq op_unimplemented      ; 58
     dq op_unimplemented      ; 59
     dq op_store_subscr       ; 60  = STORE_SUBSCR
-    dq op_unimplemented      ; 61  = DELETE_SUBSCR
+    dq op_delete_subscr      ; 61  = DELETE_SUBSCR
     dq op_unimplemented      ; 62
     dq op_unimplemented      ; 63
     dq op_unimplemented      ; 64
@@ -806,14 +812,14 @@ opcode_table:
     dq op_unimplemented      ; 88
     dq op_pop_except         ; 89  = POP_EXCEPT
     dq op_store_name         ; 90  = STORE_NAME
-    dq op_unimplemented      ; 91  = DELETE_NAME
+    dq op_delete_name        ; 91  = DELETE_NAME
     dq op_unpack_sequence    ; 92  = UNPACK_SEQUENCE
     dq op_for_iter           ; 93  = FOR_ITER
     dq op_unimplemented      ; 94  = UNPACK_EX
     dq op_store_attr         ; 95  = STORE_ATTR
-    dq op_unimplemented      ; 96  = DELETE_ATTR
+    dq op_delete_attr        ; 96  = DELETE_ATTR
     dq op_store_global       ; 97  = STORE_GLOBAL
-    dq op_unimplemented      ; 98  = DELETE_GLOBAL
+    dq op_delete_global      ; 98  = DELETE_GLOBAL
     dq op_swap               ; 99  = SWAP
     dq op_load_const         ; 100 = LOAD_CONST
     dq op_load_name          ; 101 = LOAD_NAME
@@ -841,8 +847,8 @@ opcode_table:
     dq op_unimplemented      ; 123 = SEND
     dq op_load_fast          ; 124 = LOAD_FAST
     dq op_store_fast         ; 125 = STORE_FAST
-    dq op_unimplemented      ; 126 = DELETE_FAST
-    dq op_load_fast          ; 127 = LOAD_FAST_CHECK (same handler as LOAD_FAST)
+    dq op_delete_fast        ; 126 = DELETE_FAST
+    dq op_load_fast_check    ; 127 = LOAD_FAST_CHECK
     dq op_pop_jump_if_not_none ; 128 = POP_JUMP_IF_NOT_NONE
     dq op_pop_jump_if_none   ; 129 = POP_JUMP_IF_NONE
     dq op_raise_varargs      ; 130 = RAISE_VARARGS

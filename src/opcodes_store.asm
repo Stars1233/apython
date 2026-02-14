@@ -28,6 +28,10 @@ extern fatal_error
 extern raise_exception
 extern obj_incref
 extern exc_AttributeError_type
+extern exc_TypeError_type
+extern exc_NameError_type
+extern dict_del
+extern dict_get
 
 ;; ============================================================================
 ;; op_store_fast - Store TOS into localsplus[arg]
@@ -202,3 +206,146 @@ op_delete_deref:
     DECREF_REG rdi
 .dd_done:
     DISPATCH
+
+;; ============================================================================
+;; op_delete_fast - Delete local variable (set localsplus[arg] = NULL)
+;;
+;; DECREF old value if present.
+;; ============================================================================
+global op_delete_fast
+op_delete_fast:
+    lea rax, [r12 + PyFrame.localsplus]
+    mov rdi, [rax + rcx*8]     ; old value
+    mov qword [rax + rcx*8], 0 ; set to NULL
+    test rdi, rdi
+    jz .df_done
+    DECREF_REG rdi
+.df_done:
+    DISPATCH
+
+;; ============================================================================
+;; op_delete_name - Delete name from locals or globals dict
+;; ============================================================================
+global op_delete_name
+op_delete_name:
+    mov rsi, [r15 + rcx*8]     ; name
+    ; Try locals first
+    mov rdi, [r12 + PyFrame.locals]
+    test rdi, rdi
+    jz .dn_globals
+    push rsi
+    call dict_del
+    pop rsi
+    test eax, eax
+    jz .dn_ok                  ; found and deleted
+.dn_globals:
+    mov rdi, [r12 + PyFrame.globals]
+    call dict_del
+    test eax, eax
+    jnz .dn_error
+.dn_ok:
+    DISPATCH
+.dn_error:
+    lea rdi, [rel exc_NameError_type]
+    CSTRING rsi, "name not defined"
+    call raise_exception
+
+;; ============================================================================
+;; op_delete_global - Delete name from globals dict
+;; ============================================================================
+global op_delete_global
+op_delete_global:
+    mov rsi, [r15 + rcx*8]     ; name
+    mov rdi, [r12 + PyFrame.globals]
+    call dict_del
+    test eax, eax
+    jnz .dg_error
+    DISPATCH
+.dg_error:
+    lea rdi, [rel exc_NameError_type]
+    CSTRING rsi, "name not defined"
+    call raise_exception
+
+;; ============================================================================
+;; op_delete_attr - Delete attribute from object
+;;
+;; Calls tp_setattr(obj, name, NULL) to delete.
+;; Followed by 4 CACHE entries (8 bytes) - WAIT, DELETE_ATTR has no CACHE in 3.12.
+;; ============================================================================
+global op_delete_attr
+op_delete_attr:
+    push rbp
+    mov rbp, rsp
+    sub rsp, 16
+
+    mov rax, [r15 + rcx*8]     ; name
+    mov [rbp-8], rax
+
+    VPOP rdi
+    mov [rbp-16], rdi           ; obj
+
+    ; Call tp_setattr(obj, name, NULL) to delete attr
+    mov rax, [rdi + PyObject.ob_type]
+    mov rax, [rax + PyTypeObject.tp_setattr]
+    test rax, rax
+    jz .da_error
+
+    mov rdi, [rbp-16]
+    mov rsi, [rbp-8]
+    xor edx, edx               ; value = NULL means delete
+    call rax
+
+    ; DECREF obj
+    mov rdi, [rbp-16]
+    call obj_decref
+
+    leave
+    DISPATCH
+
+.da_error:
+    lea rdi, [rel exc_AttributeError_type]
+    CSTRING rsi, "cannot delete attribute"
+    call raise_exception
+
+;; ============================================================================
+;; op_delete_subscr - Delete obj[key]
+;;
+;; Pops key (TOS), pops obj (TOS1).
+;; Calls mp_ass_subscript(obj, key, NULL) to delete.
+;; ============================================================================
+global op_delete_subscr
+op_delete_subscr:
+    push rbp
+    mov rbp, rsp
+    sub rsp, 16
+
+    VPOP rsi                    ; key
+    VPOP rdi                    ; obj
+    mov [rbp-8], rdi            ; save obj
+    mov [rbp-16], rsi           ; save key
+
+    ; Call mp_ass_subscript(obj, key, NULL)
+    mov rax, [rdi + PyObject.ob_type]
+    mov rax, [rax + PyTypeObject.tp_as_mapping]
+    test rax, rax
+    jz .ds_error
+    mov rax, [rax + PyMappingMethods.mp_ass_subscript]
+    test rax, rax
+    jz .ds_error
+
+    xor edx, edx               ; value = NULL (delete)
+    call rax
+
+    ; DECREF key and obj
+    mov rdi, [rbp-16]
+    DECREF_REG rdi
+    mov rdi, [rbp-8]
+    DECREF_REG rdi
+
+    leave
+    DISPATCH
+
+.ds_error:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "object does not support item deletion"
+    call raise_exception
