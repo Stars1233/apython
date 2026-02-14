@@ -24,7 +24,6 @@ extern bool_true
 extern bool_false
 extern none_singleton
 extern bool_from_int
-extern snprintf
 
 ; GMP functions
 extern __gmpz_init
@@ -241,26 +240,48 @@ int_repr:
     ret
 
 .smallint:
-    ; Decode SmallInt → temp GMP int → recursive int_repr → cleanup
+    ; Direct SmallInt repr: manual int-to-string, no GMP allocation
     push rbp
     mov rbp, rsp
-    push rbx
-    push r12
-    ; RSP is 16-byte aligned (3 pushes from 8-aligned entry)
+    sub rsp, 32                ; 24 bytes buffer + alignment
     mov rax, rdi
-    SMALLINT_DECODE rax
-    mov rdi, rax
-    call int_from_i64_gmp      ; rax = temp GMP PyIntObject*
-    mov rbx, rax               ; rbx = temp (callee-saved)
-    mov rdi, rax
-    call int_repr              ; rax = str object (heap obj, won't recurse here)
-    mov r12, rax               ; r12 = str result
-    mov rdi, rbx
-    call int_dealloc           ; free temp GMP int
-    mov rax, r12               ; return str object
-    pop r12
-    pop rbx
-    pop rbp
+    SMALLINT_DECODE rax        ; rax = decoded signed value
+
+    ; Convert int64 to decimal string in stack buffer
+    ; Write digits backwards from buf[23], then reverse
+    lea rdi, [rbp - 32]       ; rdi = buffer start
+    xor ecx, ecx              ; ecx = 0 (negative flag)
+    test rax, rax
+    jns .si_positive
+    neg rax
+    mov ecx, 1                ; mark negative
+.si_positive:
+    ; rax = absolute value, ecx = negative flag
+    lea rsi, [rbp - 9]        ; rsi = write position (end of buffer area)
+    mov byte [rsi], 0          ; null terminator
+    dec rsi
+
+    mov r8, 10
+.si_digit_loop:
+    xor edx, edx
+    div r8                     ; rax = quotient, rdx = remainder
+    add dl, '0'
+    mov [rsi], dl
+    dec rsi
+    test rax, rax
+    jnz .si_digit_loop
+
+    ; Add minus sign if negative
+    test ecx, ecx
+    jz .si_no_minus
+    mov byte [rsi], '-'
+    dec rsi
+.si_no_minus:
+    ; rsi+1 points to start of string
+    inc rsi
+    mov rdi, rsi
+    call str_from_cstr
+    leave
     ret
 
 ;; ============================================================================
@@ -901,9 +922,6 @@ int_dealloc:
 section .data
 
 int_name_str: db "int", 0
-
-section .rodata
-int_fmt_str: db "%ld", 0
 
 section .data
 

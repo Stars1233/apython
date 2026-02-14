@@ -32,6 +32,9 @@ extern obj_repr
 extern eval_frame
 extern frame_new
 extern frame_free
+extern fwrite
+extern memcpy
+extern strlen
 extern instance_dealloc
 extern instance_repr
 extern instance_getattr
@@ -148,6 +151,7 @@ section .text
 ;; ============================================================================
 ;; builtin_print(PyObject **args, int64_t nargs) -> PyObject*
 ;; Print each arg separated by spaces, followed by newline
+;; Buffered: builds output in stack buffer, single fwrite() at end
 ;; ============================================================================
 global builtin_print
 builtin_print:
@@ -157,14 +161,17 @@ builtin_print:
     push r12
     push r13
     push r14
+    push r15
+    sub rsp, 4104               ; 4096 byte buffer + 8 alignment
 
     mov rbx, rdi                ; args array
     mov r12, rsi                ; nargs
-    xor r13d, r13d              ; r13 = current index
+    xor r13d, r13d              ; r13 = current arg index
+    xor r15d, r15d              ; r15 = buffer write offset
 
 .print_loop:
     cmp r13, r12
-    jge .print_newline
+    jge .print_flush
 
     ; Get string representation: obj_str(args[i])
     mov rdi, [rbx + r13 * 8]
@@ -174,34 +181,85 @@ builtin_print:
     test r14, r14
     jz .skip_arg
 
-    ; Print the string data using fputs(str, stdout)
-    lea rdi, [r14 + PyStrObject.data]
-    mov rax, [rel stdout wrt ..got]
-    mov rsi, [rax]              ; FILE *stdout
-    call fputs wrt ..plt
+    ; Get string length from ob_size
+    mov rcx, [r14 + PyStrObject.ob_size]
+
+    ; Check if it fits in buffer (need room for data + possible space)
+    lea rax, [r15 + rcx + 2]   ; +2 for space and newline
+    cmp rax, 4096
+    jae .flush_and_write_direct
+
+    ; Copy string data into buffer
+    lea rdi, [rbp - 4120 + r15] ; dest = buf + offset
+    lea rsi, [r14 + PyStrObject.data]  ; src = str data
+    mov rdx, rcx                ; len
+    ; Inline small copy (most strings are short)
+    test rcx, rcx
+    jz .copy_done
+    call memcpy wrt ..plt
+.copy_done:
+    add r15, [r14 + PyStrObject.ob_size]
 
     ; DECREF the string representation
     mov rdi, r14
     call obj_decref
 
 .skip_arg:
-    ; Print space separator if not the last arg
+    ; Append space separator if not the last arg
     inc r13
     cmp r13, r12
-    jge .print_newline
+    jge .print_flush
 
-    mov edi, ' '
-    call putchar wrt ..plt
+    mov byte [rbp - 4120 + r15], ' '
+    inc r15
     jmp .print_loop
 
-.print_newline:
-    mov edi, 10                 ; '\n'
-    call putchar wrt ..plt
+.flush_and_write_direct:
+    ; Buffer full - flush what we have, then write this string directly
+    ; First flush buffer
+    test r15, r15
+    jz .write_direct
+    lea rdi, [rbp - 4120]       ; buf
+    mov rsi, 1                  ; size
+    mov rdx, r15                ; count
+    mov rax, [rel stdout wrt ..got]
+    mov rcx, [rax]              ; FILE *stdout
+    call fwrite wrt ..plt
+    xor r15d, r15d              ; reset offset
+
+.write_direct:
+    ; Write this string directly
+    lea rdi, [r14 + PyStrObject.data]
+    mov rsi, 1                  ; size
+    mov rdx, [r14 + PyStrObject.ob_size]  ; count
+    mov rax, [rel stdout wrt ..got]
+    mov rcx, [rax]              ; FILE *stdout
+    call fwrite wrt ..plt
+
+    ; DECREF the string representation
+    mov rdi, r14
+    call obj_decref
+    jmp .skip_arg
+
+.print_flush:
+    ; Append newline
+    mov byte [rbp - 4120 + r15], 10
+    inc r15
+
+    ; Single fwrite for entire output
+    lea rdi, [rbp - 4120]       ; buf
+    mov rsi, 1                  ; size
+    mov rdx, r15                ; count
+    mov rax, [rel stdout wrt ..got]
+    mov rcx, [rax]              ; FILE *stdout
+    call fwrite wrt ..plt
 
     ; Return None (with INCREF)
     lea rax, [rel none_singleton]
     inc qword [rax + PyObject.ob_refcnt]
 
+    add rsp, 4104
+    pop r15
     pop r14
     pop r13
     pop r12

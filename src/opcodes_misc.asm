@@ -66,6 +66,19 @@ op_binary_op:
     VPOP rsi                   ; rsi = right operand (b)
     VPOP rdi                   ; rdi = left operand (a)
 
+    ; Fast path: SmallInt add (NB_ADD=0, NB_INPLACE_ADD=13)
+    cmp ecx, 0                 ; NB_ADD
+    je .binop_try_smallint_add
+    cmp ecx, 13                ; NB_INPLACE_ADD
+    je .binop_try_smallint_add
+
+    ; Fast path: SmallInt subtract (NB_SUBTRACT=10, NB_INPLACE_SUBTRACT=23)
+    cmp ecx, 10                ; NB_SUBTRACT
+    je .binop_try_smallint_sub
+    cmp ecx, 23                ; NB_INPLACE_SUBTRACT
+    je .binop_try_smallint_sub
+
+.binop_generic:
     ; Save operands for DECREF after call (push on machine stack)
     push rdi                   ; save left
     push rsi                   ; save right
@@ -107,6 +120,50 @@ op_binary_op:
     add rbx, 2
     DISPATCH
 
+.binop_try_smallint_add:
+    ; Check both SmallInt (bit 63 set on both)
+    mov rax, rdi
+    and rax, rsi
+    jns .binop_generic         ; at least one is NOT SmallInt
+
+    ; Both SmallInt: decode, add, check overflow
+    mov rax, rdi
+    shl rax, 1
+    sar rax, 1                 ; decode left
+    mov rdx, rsi
+    shl rdx, 1
+    sar rdx, 1                 ; decode right
+    add rax, rdx
+    jo .binop_generic          ; overflow → fall back to generic
+    ; Encode as SmallInt
+    bts rax, 63
+    ; No DECREF needed (SmallInt are not refcounted)
+    VPUSH rax
+    add rbx, 2
+    DISPATCH
+
+.binop_try_smallint_sub:
+    ; Check both SmallInt (bit 63 set on both)
+    mov rax, rdi
+    and rax, rsi
+    jns .binop_generic         ; at least one is NOT SmallInt
+
+    ; Both SmallInt: decode, subtract, check overflow
+    mov rax, rdi
+    shl rax, 1
+    sar rax, 1                 ; decode left
+    mov rdx, rsi
+    shl rdx, 1
+    sar rdx, 1                 ; decode right
+    sub rax, rdx
+    jo .binop_generic          ; overflow → fall back to generic
+    ; Encode as SmallInt
+    bts rax, 63
+    ; No DECREF needed (SmallInt are not refcounted)
+    VPUSH rax
+    add rbx, 2
+    DISPATCH
+
 ;; ============================================================================
 ;; op_compare_op - Rich comparison
 ;;
@@ -123,6 +180,79 @@ op_compare_op:
     VPOP rsi                   ; rsi = right operand
     VPOP rdi                   ; rdi = left operand
 
+    ; Fast path: both SmallInt — inline compare, no type dispatch
+    mov rax, rdi
+    and rax, rsi
+    jns .cmp_slow_path         ; at least one is NOT SmallInt
+
+    ; Both SmallInt: decode and compare
+    mov rax, rdi
+    shl rax, 1
+    sar rax, 1                 ; decode left
+    mov rdx, rsi
+    shl rdx, 1
+    sar rdx, 1                 ; decode right
+    cmp rax, rdx
+
+    ; Save comparison result: r8d = -1/0/1
+    mov r8d, 0
+    jz .cmp_dispatch
+    mov r8d, -1
+    jl .cmp_dispatch
+    mov r8d, 1
+
+.cmp_dispatch:
+    ; Dispatch on comparison op (ecx)
+    cmp ecx, PY_LT
+    je .cmp_do_lt
+    cmp ecx, PY_LE
+    je .cmp_do_le
+    cmp ecx, PY_EQ
+    je .cmp_do_eq
+    cmp ecx, PY_NE
+    je .cmp_do_ne
+    cmp ecx, PY_GT
+    je .cmp_do_gt
+    ; else PY_GE
+    test r8d, r8d
+    jge .cmp_push_true
+    jmp .cmp_push_false
+.cmp_do_lt:
+    test r8d, r8d
+    js .cmp_push_true
+    jmp .cmp_push_false
+.cmp_do_le:
+    test r8d, r8d
+    jle .cmp_push_true
+    jmp .cmp_push_false
+.cmp_do_eq:
+    test r8d, r8d
+    jz .cmp_push_true
+    jmp .cmp_push_false
+.cmp_do_ne:
+    test r8d, r8d
+    jnz .cmp_push_true
+    jmp .cmp_push_false
+.cmp_do_gt:
+    test r8d, r8d
+    jg .cmp_push_true
+    jmp .cmp_push_false
+
+.cmp_push_true:
+    lea rax, [rel bool_true]
+    inc qword [rax + PyObject.ob_refcnt]
+    VPUSH rax
+    add rbx, 2
+    DISPATCH
+
+.cmp_push_false:
+    lea rax, [rel bool_false]
+    inc qword [rax + PyObject.ob_refcnt]
+    VPUSH rax
+    add rbx, 2
+    DISPATCH
+
+.cmp_slow_path:
     ; Save operands and comparison op
     push rdi                   ; save left
     push rsi                   ; save right
