@@ -356,3 +356,18 @@ op_load_fast_check:
     lea rdi, [rel exc_NameError_type]
     CSTRING rsi, "cannot access local variable"
     call raise_exception
+
+;; ============================================================================
+;; op_load_fast_and_clear - Load local and set slot to NULL
+;;
+;; Used by comprehensions to save/restore iteration variable.
+;; If slot is NULL, pushes NULL (no error).
+;; ============================================================================
+global op_load_fast_and_clear
+op_load_fast_and_clear:
+    lea rax, [r12 + PyFrame.localsplus]
+    mov rdx, [rax + rcx*8]     ; current value (may be NULL)
+    mov qword [rax + rcx*8], 0 ; clear slot
+    ; Push value (or NULL) - no INCREF needed since we're transferring ownership
+    VPUSH rdx
+    DISPATCH

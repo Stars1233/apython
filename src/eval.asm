@@ -74,6 +74,7 @@ extern op_delete_global
 extern op_delete_attr
 extern op_delete_subscr
 extern op_load_fast_check
+extern op_load_fast_and_clear
 
 ; External error handler
 extern error_unimplemented_opcode
@@ -715,6 +716,32 @@ op_interpreter_exit:
     call sys_exit
 
 ; ---------------------------------------------------------------------------
+; op_extended_arg - Extend the arg of the NEXT instruction
+;
+; Shifts current arg left 8 bits, combines with next instruction's arg,
+; then dispatches next instruction with the combined arg.
+; Can chain: multiple EXTENDED_ARGs shift 8 more bits each time.
+; ---------------------------------------------------------------------------
+op_extended_arg:
+    shl ecx, 8                 ; shift current arg left 8
+    movzx eax, byte [rbx]     ; next opcode
+    movzx edx, byte [rbx+1]   ; next arg
+    or ecx, edx               ; combine args
+    add rbx, 2                 ; advance past next instruction
+    lea rdx, [rel opcode_table]
+    jmp [rdx + rax*8]         ; dispatch with combined arg in ecx
+
+; ---------------------------------------------------------------------------
+; op_load_assertion_error - Push AssertionError type
+; ---------------------------------------------------------------------------
+extern exc_AssertionError_type
+op_load_assertion_error:
+    lea rax, [rel exc_AssertionError_type]
+    INCREF rax
+    VPUSH rax
+    DISPATCH
+
+; ---------------------------------------------------------------------------
 ; Opcode dispatch table (256 entries, section .data for potential patching)
 ; ---------------------------------------------------------------------------
 section .data
@@ -795,7 +822,7 @@ opcode_table:
     dq op_load_build_class   ; 71  = LOAD_BUILD_CLASS
     dq op_unimplemented      ; 72
     dq op_unimplemented      ; 73
-    dq op_unimplemented      ; 74  = LOAD_ASSERTION_ERROR
+    dq op_load_assertion_error ; 74  = LOAD_ASSERTION_ERROR
     dq op_unimplemented      ; 75  = RETURN_GENERATOR
     dq op_unimplemented      ; 76
     dq op_unimplemented      ; 77
@@ -864,8 +891,8 @@ opcode_table:
     dq op_jump_backward      ; 140 = JUMP_BACKWARD
     dq op_unimplemented      ; 141 = LOAD_SUPER_ATTR
     dq op_unimplemented      ; 142 = CALL_FUNCTION_EX
-    dq op_unimplemented      ; 143 = LOAD_FAST_AND_CLEAR
-    dq op_unimplemented      ; 144 = EXTENDED_ARG
+    dq op_load_fast_and_clear ; 143 = LOAD_FAST_AND_CLEAR
+    dq op_extended_arg       ; 144 = EXTENDED_ARG
     dq op_list_append        ; 145 = LIST_APPEND
     dq op_unimplemented      ; 146 = SET_ADD
     dq op_unimplemented      ; 147 = MAP_ADD
