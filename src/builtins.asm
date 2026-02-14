@@ -40,6 +40,7 @@ extern instance_getattr
 extern instance_setattr
 extern type_call
 extern user_type_metatype
+extern super_type
 extern func_type
 
 ; New builtin function implementations (in builtins_extra.asm)
@@ -491,6 +492,7 @@ builtin_type:
 ;; ============================================================================
 ;; builtin_isinstance(PyObject **args, int64_t nargs) -> PyObject*
 ;; isinstance(obj, type) -> True/False
+;; Walks the full tp_base chain for inheritance.
 ;; ============================================================================
 global builtin_isinstance
 builtin_isinstance:
@@ -500,18 +502,11 @@ builtin_isinstance:
     cmp rsi, 2
     jne .isinstance_error
 
-    mov rdi, [rdi]             ; obj = args[0]
-    mov rsi, [rdi + 8]        ; WRONG - need to re-read args
-    ; Fix: need original args ptr
-    pop rbp
-    push rbp
-    mov rbp, rsp
-
-    mov rax, [rdi]             ; obj
-    mov rcx, [rdi + 8]        ; type_to_check
-
     extern bool_true
     extern bool_false
+
+    mov rax, [rdi]             ; rax = args[0] = obj
+    mov rcx, [rdi + 8]        ; rcx = args[1] = type_to_check
 
     ; Get obj's type (SmallInt-aware)
     test rax, rax
@@ -523,26 +518,21 @@ builtin_isinstance:
     lea rdx, [rel int_type]
 
 .isinstance_check:
-    ; Walk the type chain
+    ; Walk the full type chain: rdx = current type, rcx = target type
     cmp rdx, rcx
     je .isinstance_true
-
-    ; Check base type
     mov rdx, [rdx + PyTypeObject.tp_base]
     test rdx, rdx
-    jz .isinstance_false
-    cmp rdx, rcx
-    je .isinstance_true
-    jmp .isinstance_false
+    jnz .isinstance_check
 
-.isinstance_true:
-    lea rax, [rel bool_true]
+.isinstance_false:
+    lea rax, [rel bool_false]
     inc qword [rax + PyObject.ob_refcnt]
     pop rbp
     ret
 
-.isinstance_false:
-    lea rax, [rel bool_false]
+.isinstance_true:
+    lea rax, [rel bool_true]
     inc qword [rax + PyObject.ob_refcnt]
     pop rbp
     ret
@@ -674,7 +664,7 @@ builtin___build_class__:
     push r13
     push r14
     push r15
-    sub rsp, 8              ; align stack (5 pushes + push rbp = 48, +8 = 56 -> 64)
+    sub rsp, 24             ; 3 slots: [rbp-48]=base_class, [rbp-56]=unused, [rbp-64]=align
 
     ; Check nargs >= 2
     cmp rsi, 2
@@ -682,6 +672,14 @@ builtin___build_class__:
 
     mov rbx, rdi            ; rbx = args
     ; r12 will be used later for the type object
+
+    ; Save base class if present (args[2])
+    xor eax, eax
+    cmp rsi, 3
+    jl .bc_no_base
+    mov rax, [rbx + 16]    ; base = args[2]
+.bc_no_base:
+    mov [rbp-48], rax       ; save base_class (or NULL)
 
     mov r13, [rbx]          ; r13 = body_func (args[0])
     mov r14, [rbx + 8]      ; r14 = class_name (args[1])
@@ -779,10 +777,38 @@ builtin___build_class__:
     ; Store tp_init (func ptr or 0)
     mov [r12 + PyTypeObject.tp_init], rbx
 
+    ; Set tp_base if we have a base class
+    mov rax, [rbp-48]
+    test rax, rax
+    jz .bc_no_set_base
+    mov [r12 + PyTypeObject.tp_base], rax
+    mov rdi, rax
+    call obj_incref
+.bc_no_set_base:
+
+    ; Handle __classcell__: look in class_dict for the cell, set its ob_ref to the new type
+    lea rdi, [rel .bc_classcell_name]
+    call str_from_cstr
+    push rax                ; save key str
+    mov rdi, r15            ; class_dict
+    mov rsi, rax
+    call dict_get           ; returns cell or NULL
+    pop rdi                 ; key str
+    push rax                ; save cell
+    call obj_decref         ; DECREF key str
+    pop rax                 ; restore cell
+    test rax, rax
+    jz .bc_no_classcell
+    ; cell.ob_ref = new type (r12)
+    mov [rax + PyCellObject.ob_ref], r12
+    mov rdi, r12
+    call obj_incref         ; cell holds a ref to the type
+.bc_no_classcell:
+
     ; Return the new type object
     mov rax, r12
 
-    add rsp, 8
+    add rsp, 24
     pop r15
     pop r14
     pop r13
@@ -798,6 +824,7 @@ builtin___build_class__:
 
 section .rodata
 .bc_init_name: db "__init__", 0
+.bc_classcell_name: db "__classcell__", 0
 section .text
 
 ;; ============================================================================
@@ -1045,6 +1072,12 @@ builtins_init:
     lea rdx, [rel builtin_sorted]
     call add_builtin
 
+    ; Register super type as builtin (LOAD_SUPER_ATTR needs it loadable)
+    mov rdi, rbx
+    lea rsi, [rel bi_name_super]
+    lea rdx, [rel super_type]
+    call add_exc_type_builtin
+
     ; Register exception types as builtins
     mov rdi, rbx
     lea rsi, [rel bi_name_BaseException]
@@ -1247,6 +1280,7 @@ bi_name_map:          db "map", 0
 bi_name_filter:       db "filter", 0
 bi_name_reversed:     db "reversed", 0
 bi_name_sorted:       db "sorted", 0
+bi_name_super:        db "super", 0
 
 ; Exception type names
 bi_name_BaseException:     db "BaseException", 0

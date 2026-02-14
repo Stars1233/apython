@@ -99,6 +99,7 @@ extern op_match_mapping
 extern op_match_sequence
 extern op_match_keys
 extern op_call_intrinsic_2
+extern op_load_super_attr
 
 ; External error handler
 extern error_unimplemented_opcode
@@ -922,7 +923,7 @@ opcode_table:
     dq op_store_deref        ; 138 = STORE_DEREF
     dq op_delete_deref       ; 139 = DELETE_DEREF
     dq op_jump_backward      ; 140 = JUMP_BACKWARD
-    dq op_unimplemented      ; 141 = LOAD_SUPER_ATTR
+    dq op_load_super_attr    ; 141 = LOAD_SUPER_ATTR
     dq op_call_function_ex   ; 142 = CALL_FUNCTION_EX
     dq op_load_fast_and_clear ; 143 = LOAD_FAST_AND_CLEAR
     dq op_extended_arg       ; 144 = EXTENDED_ARG

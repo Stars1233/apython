@@ -98,16 +98,26 @@ instance_getattr:
     test rax, rax
     jnz .found
 
-    ; Not in inst_dict -- check type->tp_dict
-    mov rax, [rbx + PyObject.ob_type]   ; rax = type (the class)
-    mov rdi, [rax + PyTypeObject.tp_dict]
+    ; Not in inst_dict -- walk type MRO: check type->tp_dict, then tp_base chain
+    mov rcx, [rbx + PyObject.ob_type]   ; rcx = type (the class)
+.walk_mro:
+    mov rdi, [rcx + PyTypeObject.tp_dict]
     test rdi, rdi
-    jz .not_found
+    jz .try_base
 
+    push rcx                            ; save current type
     mov rsi, r12
     call dict_get
+    pop rcx                             ; restore current type
     test rax, rax
-    jz .not_found
+    jnz .found                          ; found in this type's dict
+
+.try_base:
+    mov rcx, [rcx + PyTypeObject.tp_base]
+    test rcx, rcx
+    jnz .walk_mro
+
+    jmp .not_found
 
     ; Found in type dict. Return it (INCREF below).
     ; (If it's a function, the caller/LOAD_ATTR handles method binding.)
@@ -222,29 +232,42 @@ type_call:
     call instance_new
     mov r14, rax                ; r14 = instance
 
-    ; Look up __init__ in type->tp_dict
-    mov rdi, [rbx + PyTypeObject.tp_dict]
-    test rdi, rdi
-    jz .no_init
-
+    ; Look up __init__ walking the MRO (type + tp_base chain)
     ; Create "__init__" string for lookup
     lea rdi, [rel init_name_cstr]
     call str_from_cstr
     mov r15, rax                ; r15 = "__init__" str object
 
-    ; dict_get(type->tp_dict, "__init__" str)
-    mov rdi, [rbx + PyTypeObject.tp_dict]
+    ; Walk MRO: check type->tp_dict, then tp_base chain
+    mov rcx, rbx                ; rcx = current type to check
+.init_mro_walk:
+    mov rdi, [rcx + PyTypeObject.tp_dict]
+    test rdi, rdi
+    jz .init_try_base
+
+    push rcx                    ; save current type
     mov rsi, r15
     call dict_get
-    mov rbx, rax                ; rbx = __init__ func or NULL
+    pop rcx                     ; restore current type
+    test rax, rax
+    jnz .init_found
+
+.init_try_base:
+    mov rcx, [rcx + PyTypeObject.tp_base]
+    test rcx, rcx
+    jnz .init_mro_walk
+
+    ; __init__ not found anywhere — DECREF name string, skip
+    mov rdi, r15
+    call obj_decref
+    jmp .no_init
+
+.init_found:
+    mov rbx, rax                ; rbx = __init__ func
 
     ; DECREF the "__init__" string (no longer needed)
     mov rdi, r15
     call obj_decref
-
-    ; If __init__ not found, skip calling it
-    test rbx, rbx
-    jz .no_init
 
     ; === Call __init__(instance, *args) ===
     ; Build args array on machine stack: [instance, arg0, arg1, ...]
@@ -363,6 +386,7 @@ instance_repr_cstr: db "<instance>", 0
 init_name_cstr:     db "__init__", 0
 method_name_str:    db "method", 0
 user_type_name_str: db "type", 0
+super_name_str:     db "super", 0
 
 ; user_type_metatype - metatype for user-defined classes
 ; When accessing Foo.x, we go through Foo->ob_type->tp_getattr = type_getattr
@@ -395,6 +419,17 @@ user_type_metatype:
     dq 0                        ; tp_mro
     dq 0                        ; tp_flags
     dq 0                        ; tp_bases
+
+; super_type - placeholder for the 'super' builtin
+; LOAD_SUPER_ATTR pops and discards this; it just needs to be loadable.
+align 8
+global super_type
+super_type:
+    dq 1                        ; ob_refcnt (immortal)
+    dq super_type               ; ob_type (self-referential)
+    dq super_name_str           ; tp_name
+    dq TYPE_OBJECT_SIZE         ; tp_basicsize
+    times 20 dq 0               ; remaining tp_* fields
 
 ; method_type - placeholder type descriptor for bound methods
 ; (Not used in current implementation; method binding uses CALL null_or_self)

@@ -373,3 +373,111 @@ op_load_fast_and_clear:
     ; Push value (or NULL) - no INCREF needed since we're transferring ownership
     VPUSH rdx
     DISPATCH
+
+;; ============================================================================
+;; op_load_super_attr - Load attribute via super()
+;;
+;; Opcode 141: LOAD_SUPER_ATTR
+;; Stack: TOS=self, TOS1=class, TOS2=global_super
+;; arg encoding: name_index = arg >> 2, method = arg & 1
+;; Followed by 1 CACHE entry (2 bytes).
+;;
+;; Pops all three stack values, looks up attribute in class->tp_base->tp_dict
+;; (walking the MRO chain), and pushes result.
+;; If method flag: push self + func. Otherwise: push NULL + attr.
+;; ============================================================================
+global op_load_super_attr
+op_load_super_attr:
+    push rbp
+    mov rbp, rsp
+    sub rsp, 32                    ; [rbp-8]=self, [rbp-16]=class, [rbp-24]=name, [rbp-32]=method_flag
+
+    ; Save method flag
+    mov eax, ecx
+    and eax, 1
+    mov [rbp-32], rax
+
+    ; Get name from co_names
+    shr ecx, 2
+    mov rax, [r15 + rcx*8]        ; name string
+    mov [rbp-24], rax
+
+    ; Pop self, class, global_super
+    VPOP rax                       ; self
+    mov [rbp-8], rax
+    VPOP rax                       ; class
+    mov [rbp-16], rax
+    VPOP rdi                       ; global_super — DECREF and discard
+    DECREF_REG rdi
+
+    ; Walk from class->tp_base up the chain looking for name
+    mov rax, [rbp-16]              ; class
+    mov rax, [rax + PyTypeObject.tp_base]
+    test rax, rax
+    jz .lsa_not_found
+
+.lsa_walk:
+    ; Check this type's tp_dict
+    mov rdi, [rax + PyTypeObject.tp_dict]
+    test rdi, rdi
+    jz .lsa_next_base
+
+    push rax                       ; save current type
+    mov rsi, [rbp-24]              ; name
+    call dict_get
+    pop rcx                        ; restore current type
+    test rax, rax
+    jnz .lsa_found
+
+.lsa_next_base:
+    mov rax, [rcx + PyTypeObject.tp_base]
+    test rax, rax
+    jnz .lsa_walk
+
+.lsa_not_found:
+    ; DECREF class and self
+    mov rdi, [rbp-16]
+    call obj_decref
+    mov rdi, [rbp-8]
+    call obj_decref
+    lea rdi, [rel exc_AttributeError_type]
+    CSTRING rsi, "super: attribute not found"
+    call raise_exception
+
+.lsa_found:
+    ; rax = attribute value (borrowed ref from dict_get)
+    INCREF rax
+    push rax                       ; save attr
+
+    ; DECREF class
+    mov rdi, [rbp-16]
+    call obj_decref
+
+    pop rax                        ; restore attr
+
+    ; Check method flag
+    cmp qword [rbp-32], 0
+    je .lsa_attr_mode
+
+    ; Method mode: push self + func
+    mov rdx, [rbp-8]              ; self (already has ref from stack)
+    VPUSH rdx                     ; push self
+    VPUSH rax                     ; push func
+    jmp .lsa_done
+
+.lsa_attr_mode:
+    ; Attr mode: DECREF self, push NULL + attr
+    push rax                      ; save attr
+    mov rdi, [rbp-8]
+    call obj_decref
+    xor eax, eax
+    VPUSH rax                     ; push NULL
+    pop rax
+    VPUSH rax                     ; push attr
+    jmp .lsa_done
+
+.lsa_done:
+    ; Skip 1 CACHE entry = 2 bytes
+    add rbx, 2
+    leave
+    DISPATCH
