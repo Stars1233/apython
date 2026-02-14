@@ -80,6 +80,10 @@ extern op_delete_attr
 extern op_delete_subscr
 extern op_load_fast_check
 extern op_load_fast_and_clear
+extern op_return_generator
+extern op_yield_value
+extern op_end_send
+extern op_jump_backward_no_interrupt
 
 ; External error handler
 extern error_unimplemented_opcode
@@ -120,12 +124,21 @@ eval_frame:
     ; Load code object from frame
     mov rax, [r12 + PyFrame.code]
 
-    ; rbx = &code->co_code (bytecode instruction pointer)
+    ; Check for generator resume (instr_ptr != 0 means resume)
+    mov rbx, [r12 + PyFrame.instr_ptr]
+    test rbx, rbx
+    jnz .eval_resume
+
+    ; Normal entry: start from co_code beginning
     lea rbx, [rax + PyCodeObject.co_code]
-
-    ; r13 = frame->stack_base (value stack top pointer)
     mov r13, [r12 + PyFrame.stack_base]
+    jmp .eval_setup_consts
 
+.eval_resume:
+    ; Generator resume: use saved IP and stack pointer
+    mov r13, [r12 + PyFrame.stack_ptr]
+
+.eval_setup_consts:
     ; r14 = &co_consts->ob_item (co_consts tuple data pointer)
     mov rcx, [rax + PyCodeObject.co_consts]
     lea r14, [rcx + PyTupleObject.ob_item]
@@ -758,7 +771,7 @@ opcode_table:
     dq op_push_null          ; 2   = PUSH_NULL
     dq op_interpreter_exit   ; 3   = INTERPRETER_EXIT
     dq op_end_for            ; 4   = END_FOR
-    dq op_unimplemented      ; 5   = END_SEND
+    dq op_end_send           ; 5   = END_SEND
     dq op_unimplemented      ; 6
     dq op_unimplemented      ; 7
     dq op_unimplemented      ; 8
@@ -828,7 +841,7 @@ opcode_table:
     dq op_unimplemented      ; 72
     dq op_unimplemented      ; 73
     dq op_load_assertion_error ; 74  = LOAD_ASSERTION_ERROR
-    dq op_unimplemented      ; 75  = RETURN_GENERATOR
+    dq op_return_generator   ; 75  = RETURN_GENERATOR
     dq op_unimplemented      ; 76
     dq op_unimplemented      ; 77
     dq op_unimplemented      ; 78
@@ -887,7 +900,7 @@ opcode_table:
     dq op_unimplemented      ; 131 = GET_AWAITABLE
     dq op_make_function      ; 132 = MAKE_FUNCTION
     dq op_build_slice        ; 133 = BUILD_SLICE
-    dq op_unimplemented      ; 134 = JUMP_BACKWARD_NO_INTERRUPT
+    dq op_jump_backward_no_interrupt ; 134 = JUMP_BACKWARD_NO_INTERRUPT
     dq op_make_cell          ; 135 = MAKE_CELL
     dq op_load_closure       ; 136 = LOAD_CLOSURE
     dq op_load_deref         ; 137 = LOAD_DEREF
@@ -903,7 +916,7 @@ opcode_table:
     dq op_map_add            ; 147 = MAP_ADD
     dq op_unimplemented      ; 148
     dq op_copy_free_vars     ; 149 = COPY_FREE_VARS
-    dq op_unimplemented      ; 150 = YIELD_VALUE
+    dq op_yield_value        ; 150 = YIELD_VALUE
     dq op_resume             ; 151 = RESUME
     dq op_unimplemented      ; 152 = MATCH_CLASS
     dq op_unimplemented      ; 153

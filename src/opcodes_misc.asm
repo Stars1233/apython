@@ -33,6 +33,7 @@ extern int_type
 extern float_type
 extern float_number_methods
 extern cell_new
+extern gen_new
 
 ;; ============================================================================
 ;; op_return_value - Return TOS from current frame
@@ -43,6 +44,7 @@ extern cell_new
 global op_return_value
 op_return_value:
     VPOP rax                    ; rax = return value
+    mov qword [r12 + PyFrame.instr_ptr], 0  ; mark frame as "returned" (not yielded)
     jmp eval_return
 
 ;; ============================================================================
@@ -55,6 +57,7 @@ op_return_const:
     ; ecx = arg (index into co_consts)
     mov rax, [r14 + rcx*8]     ; rax = co_consts[arg]
     INCREF rax
+    mov qword [r12 + PyFrame.instr_ptr], 0  ; mark frame as "returned" (not yielded)
     jmp eval_return
 
 ;; ============================================================================
@@ -877,4 +880,70 @@ op_copy_free_vars:
     jmp .cfv_loop
 
 .cfv_done:
+    DISPATCH
+
+;; ============================================================================
+;; op_return_generator - Create generator from current frame
+;;
+;; RETURN_GENERATOR (75): First instruction in a generator function.
+;; Creates a PyGenObject holding the current frame, returns it from eval_frame.
+;; The frame is NOT freed by func_call (instr_ptr != 0 signals this).
+;; ============================================================================
+global op_return_generator
+op_return_generator:
+    ; Save current execution state in frame for later resumption
+    mov [r12 + PyFrame.instr_ptr], rbx
+    mov [r12 + PyFrame.stack_ptr], r13
+
+    ; Create generator object: gen_new(frame)
+    mov rdi, r12
+    call gen_new
+    ; rax = new generator object
+
+    ; Return the generator from eval_frame
+    ; frame->instr_ptr is non-zero, so func_call will skip frame_free
+    jmp eval_return
+
+;; ============================================================================
+;; op_yield_value - Yield a value from generator
+;;
+;; YIELD_VALUE (150): Pop TOS (value to yield), save frame state,
+;; return value from eval_frame. The generator is suspended.
+;; ============================================================================
+global op_yield_value
+op_yield_value:
+    ; Pop the value to yield
+    VPOP rax
+
+    ; Save frame state for resumption
+    mov [r12 + PyFrame.instr_ptr], rbx
+    mov [r12 + PyFrame.stack_ptr], r13
+
+    ; Return yielded value from eval_frame
+    jmp eval_return
+
+;; ============================================================================
+;; op_end_send - End of send operation
+;;
+;; END_SEND (5): Pop TOS1 (receiver/generator), keep TOS (value).
+;; ============================================================================
+global op_end_send
+op_end_send:
+    ; TOS = value, TOS1 = receiver
+    VPOP rax                   ; rax = value (TOS)
+    VPOP rdi                   ; rdi = receiver (TOS1)
+    DECREF_REG rdi             ; DECREF receiver
+    VPUSH rax                  ; push value back
+    DISPATCH
+
+;; ============================================================================
+;; op_jump_backward_no_interrupt - Jump backward (no interrupt check)
+;;
+;; JUMP_BACKWARD_NO_INTERRUPT (134): Same as JUMP_BACKWARD for us.
+;; ============================================================================
+global op_jump_backward_no_interrupt
+op_jump_backward_no_interrupt:
+    mov rax, rcx
+    shl rax, 1                 ; arg * 2 = byte offset
+    sub rbx, rax
     DISPATCH

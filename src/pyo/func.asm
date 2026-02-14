@@ -136,9 +136,12 @@ func_call:
     call eval_frame
     mov r13, rax            ; r13 = return value
 
-    ; Free the frame
+    ; Free the frame (unless generator owns it: instr_ptr != 0)
+    cmp qword [r12 + PyFrame.instr_ptr], 0
+    jne .skip_frame_free
     mov rdi, r12
     call frame_free
+.skip_frame_free:
 
     ; Return result
     mov rax, r13
