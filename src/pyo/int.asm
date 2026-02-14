@@ -44,6 +44,20 @@ extern __gmpz_cmp
 extern __gmpz_cmp_si
 extern __gmpz_sizeinbase
 extern __gmpz_set_str
+extern __gmpz_and
+extern __gmpz_ior
+extern __gmpz_xor
+extern __gmpz_com
+extern __gmpz_mul_2exp
+extern __gmpz_fdiv_q_2exp
+extern __gmpz_pow_ui
+extern __gmpz_get_d
+
+extern raise_exception
+extern exc_TypeError_type
+extern exc_ValueError_type
+extern exc_ZeroDivisionError_type
+extern float_from_f64
 
 ;; ============================================================================
 ;; int_new_from_mpz - internal: alloc int obj, init mpz, copy source
@@ -916,9 +930,589 @@ int_dealloc:
     ret
 
 ;; ============================================================================
+;; Bitwise AND: int_and(PyObject *a, PyObject *b) -> PyObject*
+;; ============================================================================
+global int_and
+int_and:
+    mov rax, rdi
+    or rax, rsi
+    jns .gmp
+
+    ; Both SmallInt
+    mov rax, rdi
+    and rax, rsi           ; AND preserves tag bit, result is valid SmallInt
+    ret
+
+.gmp:
+    push rbp
+    mov rbp, rsp
+    push rbx
+    push r12
+    push r13
+    mov rbx, rdi
+    mov r12, rsi
+    test rbx, rbx
+    jns .a_ok
+    mov rdi, rbx
+    call smallint_to_pyint
+    mov rbx, rax
+    mov r13b, 1
+    jmp .chk_b
+.a_ok:
+    xor r13d, r13d
+.chk_b:
+    test r12, r12
+    jns .b_ok
+    mov rdi, r12
+    call smallint_to_pyint
+    mov r12, rax
+    or r13b, 2
+.b_ok:
+    mov edi, PyIntObject_size
+    call ap_malloc
+    push rax
+    mov qword [rax + PyObject.ob_refcnt], 1
+    lea rcx, [rel int_type]
+    mov [rax + PyObject.ob_type], rcx
+    lea rdi, [rax + PyIntObject.mpz]
+    call __gmpz_init wrt ..plt
+    mov rax, [rsp]
+    lea rdi, [rax + PyIntObject.mpz]
+    lea rsi, [rbx + PyIntObject.mpz]
+    lea rdx, [r12 + PyIntObject.mpz]
+    call __gmpz_and wrt ..plt
+    test r13b, 1
+    jz .na
+    mov rdi, rbx
+    call int_dealloc
+.na:
+    test r13b, 2
+    jz .nb
+    mov rdi, r12
+    call int_dealloc
+.nb:
+    pop rax
+    pop r13
+    pop r12
+    pop rbx
+    pop rbp
+    ret
+
+;; ============================================================================
+;; Bitwise OR: int_or(PyObject *a, PyObject *b) -> PyObject*
+;; ============================================================================
+global int_or
+int_or:
+    mov rax, rdi
+    or rax, rsi
+    jns .gmp
+
+    ; Both SmallInt
+    mov rax, rdi
+    or rax, rsi            ; OR preserves tag bit
+    ret
+
+.gmp:
+    push rbp
+    mov rbp, rsp
+    push rbx
+    push r12
+    push r13
+    mov rbx, rdi
+    mov r12, rsi
+    test rbx, rbx
+    jns .a_ok
+    mov rdi, rbx
+    call smallint_to_pyint
+    mov rbx, rax
+    mov r13b, 1
+    jmp .chk_b
+.a_ok:
+    xor r13d, r13d
+.chk_b:
+    test r12, r12
+    jns .b_ok
+    mov rdi, r12
+    call smallint_to_pyint
+    mov r12, rax
+    or r13b, 2
+.b_ok:
+    mov edi, PyIntObject_size
+    call ap_malloc
+    push rax
+    mov qword [rax + PyObject.ob_refcnt], 1
+    lea rcx, [rel int_type]
+    mov [rax + PyObject.ob_type], rcx
+    lea rdi, [rax + PyIntObject.mpz]
+    call __gmpz_init wrt ..plt
+    mov rax, [rsp]
+    lea rdi, [rax + PyIntObject.mpz]
+    lea rsi, [rbx + PyIntObject.mpz]
+    lea rdx, [r12 + PyIntObject.mpz]
+    call __gmpz_ior wrt ..plt
+    test r13b, 1
+    jz .na
+    mov rdi, rbx
+    call int_dealloc
+.na:
+    test r13b, 2
+    jz .nb
+    mov rdi, r12
+    call int_dealloc
+.nb:
+    pop rax
+    pop r13
+    pop r12
+    pop rbx
+    pop rbp
+    ret
+
+;; ============================================================================
+;; Bitwise XOR: int_xor(PyObject *a, PyObject *b) -> PyObject*
+;; ============================================================================
+global int_xor
+int_xor:
+    mov rax, rdi
+    or rax, rsi
+    jns .gmp
+
+    ; Both SmallInt: XOR values, must re-set tag bit
+    mov rax, rdi
+    SMALLINT_DECODE rax
+    mov rcx, rsi
+    SMALLINT_DECODE rcx
+    xor rax, rcx
+    bts rax, 63
+    ret
+
+.gmp:
+    push rbp
+    mov rbp, rsp
+    push rbx
+    push r12
+    push r13
+    mov rbx, rdi
+    mov r12, rsi
+    test rbx, rbx
+    jns .a_ok
+    mov rdi, rbx
+    call smallint_to_pyint
+    mov rbx, rax
+    mov r13b, 1
+    jmp .chk_b
+.a_ok:
+    xor r13d, r13d
+.chk_b:
+    test r12, r12
+    jns .b_ok
+    mov rdi, r12
+    call smallint_to_pyint
+    mov r12, rax
+    or r13b, 2
+.b_ok:
+    mov edi, PyIntObject_size
+    call ap_malloc
+    push rax
+    mov qword [rax + PyObject.ob_refcnt], 1
+    lea rcx, [rel int_type]
+    mov [rax + PyObject.ob_type], rcx
+    lea rdi, [rax + PyIntObject.mpz]
+    call __gmpz_init wrt ..plt
+    mov rax, [rsp]
+    lea rdi, [rax + PyIntObject.mpz]
+    lea rsi, [rbx + PyIntObject.mpz]
+    lea rdx, [r12 + PyIntObject.mpz]
+    call __gmpz_xor wrt ..plt
+    test r13b, 1
+    jz .na
+    mov rdi, rbx
+    call int_dealloc
+.na:
+    test r13b, 2
+    jz .nb
+    mov rdi, r12
+    call int_dealloc
+.nb:
+    pop rax
+    pop r13
+    pop r12
+    pop rbx
+    pop rbp
+    ret
+
+;; ============================================================================
+;; Bitwise NOT: int_invert(PyObject *a, PyObject *b_unused) -> PyObject*
+;; ~x = -(x+1)
+;; ============================================================================
+global int_invert
+int_invert:
+    test rdi, rdi
+    js .smallint
+
+    ; GMP path
+    push rbp
+    mov rbp, rsp
+    push rbx
+    mov rbx, rdi
+    mov edi, PyIntObject_size
+    call ap_malloc
+    push rax
+    mov qword [rax + PyObject.ob_refcnt], 1
+    lea rcx, [rel int_type]
+    mov [rax + PyObject.ob_type], rcx
+    lea rdi, [rax + PyIntObject.mpz]
+    call __gmpz_init wrt ..plt
+    mov rax, [rsp]
+    lea rdi, [rax + PyIntObject.mpz]
+    lea rsi, [rbx + PyIntObject.mpz]
+    call __gmpz_com wrt ..plt
+    pop rax
+    pop rbx
+    pop rbp
+    ret
+
+.smallint:
+    mov rax, rdi
+    SMALLINT_DECODE rax
+    not rax                ; ~x = -(x+1), works for all 62-bit values
+    bts rax, 63
+    ret
+
+;; ============================================================================
+;; Left shift: int_lshift(PyObject *a, PyObject *b) -> PyObject*
+;; ============================================================================
+global int_lshift
+int_lshift:
+    push rbp
+    mov rbp, rsp
+    push rbx
+    push r12
+    push r13
+
+    mov rbx, rdi           ; left operand
+    mov r12, rsi           ; right operand (shift amount)
+
+    ; Get shift amount as int64
+    test r12, r12
+    js .shift_smallint
+    ; GMP right operand: get as int64
+    lea rdi, [r12 + PyIntObject.mpz]
+    call __gmpz_get_si wrt ..plt
+    mov r13, rax
+    jmp .have_shift
+.shift_smallint:
+    mov r13, r12
+    shl r13, 1
+    sar r13, 1             ; decode SmallInt
+
+.have_shift:
+    ; r13 = shift amount
+    test r13, r13
+    js .neg_shift
+
+    ; Convert left to GMP if needed
+    xor ecx, ecx           ; flag: converted
+    test rbx, rbx
+    jns .a_gmp
+    mov rdi, rbx
+    call smallint_to_pyint
+    mov rbx, rax
+    mov cl, 1
+.a_gmp:
+    push rcx
+    mov edi, PyIntObject_size
+    call ap_malloc
+    push rax
+    mov qword [rax + PyObject.ob_refcnt], 1
+    lea rcx, [rel int_type]
+    mov [rax + PyObject.ob_type], rcx
+    lea rdi, [rax + PyIntObject.mpz]
+    call __gmpz_init wrt ..plt
+    mov rax, [rsp]
+    lea rdi, [rax + PyIntObject.mpz]
+    lea rsi, [rbx + PyIntObject.mpz]
+    mov rdx, r13           ; shift count
+    call __gmpz_mul_2exp wrt ..plt
+    pop rax
+    pop rcx
+    test cl, cl
+    jz .lsh_done
+    push rax
+    mov rdi, rbx
+    call int_dealloc
+    pop rax
+.lsh_done:
+    pop r13
+    pop r12
+    pop rbx
+    pop rbp
+    ret
+
+.neg_shift:
+    lea rdi, [rel exc_ValueError_type]
+    CSTRING rsi, "negative shift count"
+    call raise_exception
+
+;; ============================================================================
+;; Right shift: int_rshift(PyObject *a, PyObject *b) -> PyObject*
+;; ============================================================================
+global int_rshift
+int_rshift:
+    push rbp
+    mov rbp, rsp
+    push rbx
+    push r12
+    push r13
+
+    mov rbx, rdi
+    mov r12, rsi
+
+    ; Get shift amount
+    test r12, r12
+    js .shift_smallint
+    lea rdi, [r12 + PyIntObject.mpz]
+    call __gmpz_get_si wrt ..plt
+    mov r13, rax
+    jmp .have_shift
+.shift_smallint:
+    mov r13, r12
+    shl r13, 1
+    sar r13, 1
+
+.have_shift:
+    test r13, r13
+    js .neg_shift
+
+    ; SmallInt fast path
+    test rbx, rbx
+    jns .gmp_path
+    mov rax, rbx
+    SMALLINT_DECODE rax
+    ; Arithmetic right shift
+    mov rcx, r13
+    cmp rcx, 63
+    jge .max_shift
+    sar rax, cl
+    bts rax, 63
+    pop r13
+    pop r12
+    pop rbx
+    pop rbp
+    ret
+.max_shift:
+    ; Shift >= 63: result is 0 or -1 depending on sign
+    sar rax, 63
+    bts rax, 63
+    pop r13
+    pop r12
+    pop rbx
+    pop rbp
+    ret
+
+.gmp_path:
+    mov edi, PyIntObject_size
+    call ap_malloc
+    push rax
+    mov qword [rax + PyObject.ob_refcnt], 1
+    lea rcx, [rel int_type]
+    mov [rax + PyObject.ob_type], rcx
+    lea rdi, [rax + PyIntObject.mpz]
+    call __gmpz_init wrt ..plt
+    mov rax, [rsp]
+    lea rdi, [rax + PyIntObject.mpz]
+    lea rsi, [rbx + PyIntObject.mpz]
+    mov rdx, r13
+    call __gmpz_fdiv_q_2exp wrt ..plt
+    pop rax
+    pop r13
+    pop r12
+    pop rbx
+    pop rbp
+    ret
+
+.neg_shift:
+    lea rdi, [rel exc_ValueError_type]
+    CSTRING rsi, "negative shift count"
+    call raise_exception
+
+;; ============================================================================
+;; Power: int_power(PyObject *a, PyObject *b) -> PyObject*
+;; For small positive exponents, use GMP mpz_pow_ui
+;; ============================================================================
+global int_power
+int_power:
+    push rbp
+    mov rbp, rsp
+    push rbx
+    push r12
+    push r13
+
+    mov rbx, rdi           ; base
+    mov r12, rsi           ; exponent
+
+    ; Get exponent as int64
+    test r12, r12
+    js .exp_smallint
+    lea rdi, [r12 + PyIntObject.mpz]
+    call __gmpz_get_si wrt ..plt
+    mov r13, rax
+    jmp .have_exp
+.exp_smallint:
+    mov r13, r12
+    shl r13, 1
+    sar r13, 1
+
+.have_exp:
+    ; Negative exponent: return float (int ** -n = 1/int**n)
+    test r13, r13
+    js .neg_exp
+
+    ; Convert base to GMP if needed
+    xor ecx, ecx
+    test rbx, rbx
+    jns .base_gmp
+    mov rdi, rbx
+    call smallint_to_pyint
+    mov rbx, rax
+    mov cl, 1
+.base_gmp:
+    push rcx
+    mov edi, PyIntObject_size
+    call ap_malloc
+    push rax
+    mov qword [rax + PyObject.ob_refcnt], 1
+    lea rcx, [rel int_type]
+    mov [rax + PyObject.ob_type], rcx
+    lea rdi, [rax + PyIntObject.mpz]
+    call __gmpz_init wrt ..plt
+    mov rax, [rsp]
+    lea rdi, [rax + PyIntObject.mpz]
+    lea rsi, [rbx + PyIntObject.mpz]
+    mov rdx, r13           ; exponent (unsigned)
+    call __gmpz_pow_ui wrt ..plt
+    pop rax
+    pop rcx
+    test cl, cl
+    jz .pow_done
+    push rax
+    mov rdi, rbx
+    call int_dealloc
+    pop rax
+.pow_done:
+    pop r13
+    pop r12
+    pop rbx
+    pop rbp
+    ret
+
+.neg_exp:
+    ; int ** negative → float result (1.0 / base**abs(exp))
+    ; For simplicity, convert both to double and use pow
+    ; Actually, just raise a TypeError for now (like many impls)
+    ; Python returns float for negative int power
+    ; Convert base to double
+    test rbx, rbx
+    js .neg_exp_smallint
+    lea rdi, [rbx + PyIntObject.mpz]
+    call __gmpz_get_d wrt ..plt
+    jmp .neg_exp_have_base
+.neg_exp_smallint:
+    mov rax, rbx
+    shl rax, 1
+    sar rax, 1
+    cvtsi2sd xmm0, rax
+.neg_exp_have_base:
+    ; xmm0 = base as double
+    ; Compute base ** exp using repeated multiply (simple)
+    ; For now: 1.0 / (base ** abs(exp))
+    neg r13                ; abs(exp)
+    movsd xmm1, [rel one_double]    ; xmm1 = result = 1.0
+.pow_loop:
+    test r13, r13
+    jz .pow_loop_done
+    mulsd xmm1, xmm0
+    dec r13
+    jmp .pow_loop
+.pow_loop_done:
+    ; result = 1.0 / xmm1
+    movsd xmm0, [rel one_double]
+    divsd xmm0, xmm1
+    call float_from_f64
+    pop r13
+    pop r12
+    pop rbx
+    pop rbp
+    ret
+
+;; ============================================================================
+;; True divide: int_true_divide(PyObject *a, PyObject *b) -> PyObject* (float)
+;; int / int always returns float in Python
+;; ============================================================================
+global int_true_divide
+int_true_divide:
+    push rbp
+    mov rbp, rsp
+    and rsp, -16           ; align for potential libc calls
+    push rbx
+    push r12
+
+    mov rbx, rdi           ; left
+    mov r12, rsi           ; right
+
+    ; Convert left to double
+    test rbx, rbx
+    js .td_left_small
+    lea rdi, [rbx + PyIntObject.mpz]
+    call __gmpz_get_d wrt ..plt
+    jmp .td_have_left
+.td_left_small:
+    mov rax, rbx
+    shl rax, 1
+    sar rax, 1
+    cvtsi2sd xmm0, rax
+.td_have_left:
+    movsd [rsp-8], xmm0   ; save left double
+
+    ; Convert right to double
+    test r12, r12
+    js .td_right_small
+    lea rdi, [r12 + PyIntObject.mpz]
+    call __gmpz_get_d wrt ..plt
+    jmp .td_have_right
+.td_right_small:
+    mov rax, r12
+    shl rax, 1
+    sar rax, 1
+    cvtsi2sd xmm0, rax
+.td_have_right:
+    ; xmm0 = right double
+    ; Check division by zero
+    xorpd xmm1, xmm1
+    ucomisd xmm0, xmm1
+    je .td_divzero
+
+    movsd xmm1, xmm0      ; xmm1 = right
+    movsd xmm0, [rsp-8]   ; xmm0 = left
+    divsd xmm0, xmm1
+    call float_from_f64
+
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.td_divzero:
+    lea rdi, [rel exc_ZeroDivisionError_type]
+    CSTRING rsi, "division by zero"
+    call raise_exception
+
+;; ============================================================================
 ;; Data
 ;; ============================================================================
 section .data
+
+align 8
+one_double: dq 0x3FF0000000000000  ; 1.0
 
 int_name_str: db "int", 0
 
@@ -932,21 +1526,21 @@ int_number_methods:
     dq int_mul              ; nb_multiply     +16
     dq int_mod              ; nb_remainder    +24
     dq 0                    ; nb_divmod       +32
-    dq 0                    ; nb_power        +40
+    dq int_power            ; nb_power        +40
     dq int_neg              ; nb_negative     +48
     dq 0                    ; nb_positive     +56
     dq 0                    ; nb_absolute     +64
     dq int_bool             ; nb_bool         +72
-    dq 0                    ; nb_invert       +80
-    dq 0                    ; nb_lshift       +88
-    dq 0                    ; nb_rshift       +96
-    dq 0                    ; nb_and          +104
-    dq 0                    ; nb_xor          +112
-    dq 0                    ; nb_or           +120
+    dq int_invert           ; nb_invert       +80
+    dq int_lshift           ; nb_lshift       +88
+    dq int_rshift           ; nb_rshift       +96
+    dq int_and              ; nb_and          +104
+    dq int_xor              ; nb_xor          +112
+    dq int_or               ; nb_or           +120
     dq 0                    ; nb_int          +128
     dq 0                    ; nb_float        +136
     dq int_floordiv         ; nb_floor_divide +144
-    dq 0                    ; nb_true_divide  +152
+    dq int_true_divide      ; nb_true_divide  +152
     dq 0                    ; nb_index        +160
 
 align 8

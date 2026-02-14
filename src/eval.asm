@@ -56,6 +56,7 @@ extern op_contains_op
 extern op_load_build_class
 extern op_store_attr
 extern op_load_attr
+extern op_unary_invert
 extern op_make_cell
 extern op_load_closure
 extern op_load_deref
@@ -724,7 +725,7 @@ opcode_table:
     dq op_unary_not          ; 12  = UNARY_NOT
     dq op_unimplemented      ; 13
     dq op_unimplemented      ; 14
-    dq op_unimplemented      ; 15  = UNARY_INVERT
+    dq op_unary_invert       ; 15  = UNARY_INVERT
     dq op_unimplemented      ; 16
     dq op_unimplemented      ; 17  = RESERVED
     dq op_unimplemented      ; 18

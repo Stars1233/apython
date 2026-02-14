@@ -377,6 +377,37 @@ op_unary_negative:
     DISPATCH
 
 ;; ============================================================================
+;; op_unary_invert - Bitwise NOT of TOS (~x)
+;;
+;; Calls type's nb_invert from tp_as_number.
+;; ============================================================================
+global op_unary_invert
+op_unary_invert:
+    VPOP rdi                   ; rdi = operand
+    push rdi
+
+    test rdi, rdi
+    js .inv_smallint_type
+    mov rax, [rdi + PyObject.ob_type]
+    jmp .inv_have_type
+.inv_smallint_type:
+    lea rax, [rel int_type]
+.inv_have_type:
+    mov rax, [rax + PyTypeObject.tp_as_number]
+    mov rax, [rax + PyNumberMethods.nb_invert]
+
+    ; Call nb_invert(operand, NULL) — binary op signature, second arg unused
+    xor esi, esi
+    call rax
+    push rax
+    mov rdi, [rsp + 8]
+    DECREF_REG rdi
+    pop rax
+    add rsp, 8
+    VPUSH rax
+    DISPATCH
+
+;; ============================================================================
 ;; op_unary_not - Logical NOT of TOS
 ;;
 ;; Calls obj_is_true, then pushes the inverted boolean.
