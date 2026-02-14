@@ -41,6 +41,27 @@ extern instance_setattr
 extern type_call
 extern func_type
 
+; New builtin function implementations (in builtins_extra.asm)
+extern builtin_abs
+extern builtin_int_fn
+extern builtin_str_fn
+extern builtin_ord
+extern builtin_chr
+extern builtin_hex
+extern builtin_id
+extern builtin_hash_fn
+extern builtin_callable
+extern builtin_iter_fn
+extern builtin_next_fn
+extern builtin_any
+extern builtin_all
+extern builtin_sum
+extern builtin_min
+extern builtin_max
+extern builtin_getattr
+extern builtin_hasattr
+extern builtin_setattr
+
 ; Exception types
 extern exc_BaseException_type
 extern exc_Exception_type
@@ -887,6 +908,102 @@ builtins_init:
     lea rdx, [rel builtin_bool]
     call add_builtin
 
+    ; Register new builtins (from builtins_extra.asm)
+    mov rdi, rbx
+    lea rsi, [rel bi_name_abs]
+    lea rdx, [rel builtin_abs]
+    call add_builtin
+
+    mov rdi, rbx
+    lea rsi, [rel bi_name_int]
+    lea rdx, [rel builtin_int_fn]
+    call add_builtin
+
+    mov rdi, rbx
+    lea rsi, [rel bi_name_str]
+    lea rdx, [rel builtin_str_fn]
+    call add_builtin
+
+    mov rdi, rbx
+    lea rsi, [rel bi_name_ord]
+    lea rdx, [rel builtin_ord]
+    call add_builtin
+
+    mov rdi, rbx
+    lea rsi, [rel bi_name_chr]
+    lea rdx, [rel builtin_chr]
+    call add_builtin
+
+    mov rdi, rbx
+    lea rsi, [rel bi_name_hex]
+    lea rdx, [rel builtin_hex]
+    call add_builtin
+
+    mov rdi, rbx
+    lea rsi, [rel bi_name_id]
+    lea rdx, [rel builtin_id]
+    call add_builtin
+
+    mov rdi, rbx
+    lea rsi, [rel bi_name_hash]
+    lea rdx, [rel builtin_hash_fn]
+    call add_builtin
+
+    mov rdi, rbx
+    lea rsi, [rel bi_name_callable]
+    lea rdx, [rel builtin_callable]
+    call add_builtin
+
+    mov rdi, rbx
+    lea rsi, [rel bi_name_iter]
+    lea rdx, [rel builtin_iter_fn]
+    call add_builtin
+
+    mov rdi, rbx
+    lea rsi, [rel bi_name_next]
+    lea rdx, [rel builtin_next_fn]
+    call add_builtin
+
+    mov rdi, rbx
+    lea rsi, [rel bi_name_any]
+    lea rdx, [rel builtin_any]
+    call add_builtin
+
+    mov rdi, rbx
+    lea rsi, [rel bi_name_all]
+    lea rdx, [rel builtin_all]
+    call add_builtin
+
+    mov rdi, rbx
+    lea rsi, [rel bi_name_sum]
+    lea rdx, [rel builtin_sum]
+    call add_builtin
+
+    mov rdi, rbx
+    lea rsi, [rel bi_name_min]
+    lea rdx, [rel builtin_min]
+    call add_builtin
+
+    mov rdi, rbx
+    lea rsi, [rel bi_name_max]
+    lea rdx, [rel builtin_max]
+    call add_builtin
+
+    mov rdi, rbx
+    lea rsi, [rel bi_name_getattr]
+    lea rdx, [rel builtin_getattr]
+    call add_builtin
+
+    mov rdi, rbx
+    lea rsi, [rel bi_name_hasattr]
+    lea rdx, [rel builtin_hasattr]
+    call add_builtin
+
+    mov rdi, rbx
+    lea rsi, [rel bi_name_setattr]
+    lea rdx, [rel builtin_setattr]
+    call add_builtin
+
     ; Register exception types as builtins
     mov rdi, rbx
     lea rsi, [rel bi_name_BaseException]
@@ -1060,6 +1177,27 @@ bi_name_repr:         db "repr", 0
 bi_name_float:        db "float", 0
 bi_name_bool:         db "bool", 0
 bi_name_build_class:  db "__build_class__", 0
+
+; New builtin names
+bi_name_abs:          db "abs", 0
+bi_name_int:          db "int", 0
+bi_name_str:          db "str", 0
+bi_name_ord:          db "ord", 0
+bi_name_chr:          db "chr", 0
+bi_name_hex:          db "hex", 0
+bi_name_id:           db "id", 0
+bi_name_hash:         db "hash", 0
+bi_name_callable:     db "callable", 0
+bi_name_iter:         db "iter", 0
+bi_name_next:         db "next", 0
+bi_name_any:          db "any", 0
+bi_name_all:          db "all", 0
+bi_name_sum:          db "sum", 0
+bi_name_min:          db "min", 0
+bi_name_max:          db "max", 0
+bi_name_getattr:      db "getattr", 0
+bi_name_hasattr:      db "hasattr", 0
+bi_name_setattr:      db "setattr", 0
 
 ; Exception type names
 bi_name_BaseException:     db "BaseException", 0

@@ -126,10 +126,12 @@ instance_getattr:
     ret
 
 .not_found:
-    lea rdi, [rel exc_AttributeError_type]
-    CSTRING rsi, "attribute not found"
-    call raise_exception
-    ; does not return
+    xor eax, eax               ; return NULL (caller handles raise)
+    pop r13
+    pop r12
+    pop rbx
+    pop rbp
+    ret
 
 ;; ============================================================================
 ;; instance_setattr(PyInstanceObject *self, PyObject *name, PyObject *value)
