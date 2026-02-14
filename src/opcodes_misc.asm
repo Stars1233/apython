@@ -253,11 +253,7 @@ op_pop_jump_if_false:
     test r9d, r9d
     jnz .no_jump
 
-    ; Jump: compute target bytecode address
-    ; target = &code->co_code[arg * 2]  (arg in instruction words, each 2 bytes)
-    mov rax, [r12 + PyFrame.code]
-    lea rbx, [rax + PyCodeObject.co_code]
-    movzx r8d, r8w             ; zero-extend to be safe
+    ; Jump: relative from current rbx (delta in instruction words)
     lea rbx, [rbx + r8*2]
 
 .no_jump:
@@ -268,7 +264,7 @@ op_pop_jump_if_false:
 ;; ============================================================================
 global op_pop_jump_if_true
 op_pop_jump_if_true:
-    ; Save arg (target offset)
+    ; Save arg (delta in instruction words)
     mov r8d, ecx
 
     VPOP rdi
@@ -288,10 +284,7 @@ op_pop_jump_if_true:
     test r9d, r9d
     jz .no_jump
 
-    ; Jump: compute target bytecode address
-    mov rax, [r12 + PyFrame.code]
-    lea rbx, [rax + PyCodeObject.co_code]
-    movzx r8d, r8w
+    ; Jump: relative from current rbx
     lea rbx, [rbx + r8*2]
 
 .no_jump:
@@ -302,7 +295,7 @@ op_pop_jump_if_true:
 ;; ============================================================================
 global op_pop_jump_if_none
 op_pop_jump_if_none:
-    ; Save arg (target offset)
+    ; Save arg (delta in instruction words)
     mov r8d, ecx
 
     VPOP rax                   ; rax = value
@@ -320,10 +313,7 @@ op_pop_jump_if_none:
     test cl, cl
     jz .no_jump
 
-    ; Jump: compute target bytecode address
-    mov rax, [r12 + PyFrame.code]
-    lea rbx, [rax + PyCodeObject.co_code]
-    movzx r8d, r8w
+    ; Jump: relative from current rbx
     lea rbx, [rbx + r8*2]
 
 .no_jump:
@@ -334,7 +324,7 @@ op_pop_jump_if_none:
 ;; ============================================================================
 global op_pop_jump_if_not_none
 op_pop_jump_if_not_none:
-    ; Save arg (target offset)
+    ; Save arg (delta in instruction words)
     mov r8d, ecx
 
     VPOP rax                   ; rax = value
@@ -352,10 +342,7 @@ op_pop_jump_if_not_none:
     test cl, cl
     jz .no_jump
 
-    ; Jump: compute target bytecode address
-    mov rax, [r12 + PyFrame.code]
-    lea rbx, [rax + PyCodeObject.co_code]
-    movzx r8d, r8w
+    ; Jump: relative from current rbx
     lea rbx, [rbx + r8*2]
 
 .no_jump:
