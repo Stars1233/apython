@@ -315,6 +315,56 @@ tuple_getslice:
     pop rbp
     ret
 
+;; ============================================================================
+;; tuple_contains(PyTupleObject *self, PyObject *value) -> int (0 or 1)
+;; Linear scan with pointer equality + value comparison fallback.
+;; ============================================================================
+global tuple_contains
+tuple_contains:
+    push rbp
+    mov rbp, rsp
+    push rbx
+    push r12
+    push r13
+
+    mov rbx, rdi               ; tuple
+    mov r12, rsi               ; value to find
+    mov r13, [rbx + PyTupleObject.ob_size]
+
+    xor ecx, ecx
+.tc_loop:
+    cmp rcx, r13
+    jge .tc_not_found
+    mov rax, [rbx + PyTupleObject.ob_item + rcx*8]
+    cmp r12, rax               ; pointer equality
+    je .tc_found
+    ; Value comparison for SmallInts (common case for int 'in' tuple)
+    mov rdx, r12
+    and rdx, rax
+    jns .tc_next               ; not both SmallInt → skip
+    cmp r12, rax               ; both SmallInt, already compared above
+    ; Both SmallInt with same tag but not same pointer can't happen
+    ; (SmallInts with same value have same tagged pointer)
+.tc_next:
+    inc rcx
+    jmp .tc_loop
+
+.tc_found:
+    mov eax, 1
+    pop r13
+    pop r12
+    pop rbx
+    pop rbp
+    ret
+
+.tc_not_found:
+    xor eax, eax
+    pop r13
+    pop r12
+    pop rbx
+    pop rbp
+    ret
+
 section .data
 
 tuple_name_str: db "tuple", 0
@@ -328,7 +378,7 @@ tuple_sequence_methods:
     dq 0                    ; sq_repeat
     dq tuple_getitem        ; sq_item
     dq 0                    ; sq_ass_item
-    dq 0                    ; sq_contains
+    dq tuple_contains       ; sq_contains
     dq 0                    ; sq_inplace_concat
     dq 0                    ; sq_inplace_repeat
 
