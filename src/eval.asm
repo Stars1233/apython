@@ -95,6 +95,10 @@ extern op_get_len
 extern op_setup_annotations
 extern op_load_locals
 extern op_load_from_dict_or_globals
+extern op_match_mapping
+extern op_match_sequence
+extern op_match_keys
+extern op_call_intrinsic_2
 
 ; External error handler
 extern error_unimplemented_opcode
@@ -808,9 +812,9 @@ opcode_table:
     dq op_unimplemented      ; 28
     dq op_unimplemented      ; 29
     dq op_get_len            ; 30  = GET_LEN
-    dq op_unimplemented      ; 31  = MATCH_MAPPING
-    dq op_unimplemented      ; 32  = MATCH_SEQUENCE
-    dq op_unimplemented      ; 33  = MATCH_KEYS
+    dq op_match_mapping      ; 31  = MATCH_MAPPING
+    dq op_match_sequence     ; 32  = MATCH_SEQUENCE
+    dq op_match_keys         ; 33  = MATCH_KEYS
     dq op_unimplemented      ; 34
     dq op_push_exc_info      ; 35  = PUSH_EXC_INFO
     dq op_check_exc_match    ; 36  = CHECK_EXC_MATCH
@@ -951,7 +955,7 @@ opcode_table:
     dq op_call               ; 171 = CALL
     dq op_kw_names           ; 172 = KW_NAMES
     dq op_call_intrinsic_1   ; 173 = CALL_INTRINSIC_1
-    dq op_unimplemented      ; 174 = CALL_INTRINSIC_2
+    dq op_call_intrinsic_2   ; 174 = CALL_INTRINSIC_2
     dq op_load_from_dict_or_globals ; 175 = LOAD_FROM_DICT_OR_GLOBALS
     dq op_unimplemented      ; 176 = LOAD_FROM_DICT_OR_DEREF
     dq op_unimplemented      ; 177

@@ -1215,3 +1215,202 @@ op_load_from_dict_or_globals:
     INCREF rax
     VPUSH rax
     DISPATCH
+
+;; ============================================================================
+;; op_match_mapping - Check if TOS is a mapping type
+;;
+;; Opcode 31: MATCH_MAPPING
+;; Push True if TOS is dict/mapping, False otherwise. Don't pop TOS.
+;; ============================================================================
+extern dict_type
+
+global op_match_mapping
+op_match_mapping:
+    mov rdi, [r13 - 8]            ; peek TOS
+    test rdi, rdi
+    js .mm_false                   ; SmallInt → not a mapping
+    mov rax, [rdi + PyObject.ob_type]
+    ; Check if it's a dict or has tp_as_mapping with mp_subscript
+    lea rcx, [rel dict_type]
+    cmp rax, rcx
+    je .mm_true
+    mov rax, [rax + PyTypeObject.tp_as_mapping]
+    test rax, rax
+    jz .mm_false
+    mov rax, [rax + PyMappingMethods.mp_subscript]
+    test rax, rax
+    jz .mm_false
+.mm_true:
+    lea rax, [rel bool_true]
+    INCREF rax
+    VPUSH rax
+    DISPATCH
+.mm_false:
+    lea rax, [rel bool_false]
+    INCREF rax
+    VPUSH rax
+    DISPATCH
+
+;; ============================================================================
+;; op_match_sequence - Check if TOS is a sequence type
+;;
+;; Opcode 32: MATCH_SEQUENCE
+;; Push True if TOS is list/tuple/sequence (not str/bytes/dict). Don't pop TOS.
+;; ============================================================================
+extern tuple_type
+extern str_type
+extern bytes_type
+
+global op_match_sequence
+op_match_sequence:
+    mov rdi, [r13 - 8]            ; peek TOS
+    test rdi, rdi
+    js .ms_false                   ; SmallInt → not a sequence
+    mov rax, [rdi + PyObject.ob_type]
+    ; Exclude str, bytes, dict
+    lea rcx, [rel str_type]
+    cmp rax, rcx
+    je .ms_false
+    lea rcx, [rel bytes_type]
+    cmp rax, rcx
+    je .ms_false
+    lea rcx, [rel dict_type]
+    cmp rax, rcx
+    je .ms_false
+    ; Check list or tuple type directly
+    lea rcx, [rel list_type]
+    cmp rax, rcx
+    je .ms_true
+    lea rcx, [rel tuple_type]
+    cmp rax, rcx
+    je .ms_true
+    ; Check tp_as_sequence with sq_item
+    mov rax, [rax + PyTypeObject.tp_as_sequence]
+    test rax, rax
+    jz .ms_false
+    mov rax, [rax + PySequenceMethods.sq_item]
+    test rax, rax
+    jz .ms_false
+.ms_true:
+    lea rax, [rel bool_true]
+    INCREF rax
+    VPUSH rax
+    DISPATCH
+.ms_false:
+    lea rax, [rel bool_false]
+    INCREF rax
+    VPUSH rax
+    DISPATCH
+
+;; ============================================================================
+;; op_match_keys - Match mapping keys
+;;
+;; Opcode 33: MATCH_KEYS
+;; TOS = keys tuple, TOS1 = subject (mapping)
+;; If all keys in tuple exist in subject, push tuple of values + True
+;; Otherwise push False
+;; ============================================================================
+global op_match_keys
+op_match_keys:
+    push rbp
+    mov rbp, rsp
+    sub rsp, 32                    ; [rbp-8]=keys, [rbp-16]=subject, [rbp-24]=values, [rbp-32]=nkeys
+
+    ; TOS = keys tuple, TOS1 = subject
+    ; Peek at both — don't pop either! Push result on top.
+    mov rax, [r13 - 8]            ; keys tuple (TOS)
+    mov [rbp-8], rax
+    mov rax, [r13 - 16]           ; subject (TOS1)
+    mov [rbp-16], rax
+
+    ; Allocate values tuple
+    mov rax, [rbp-8]
+    mov rdi, [rax + PyTupleObject.ob_size]
+    mov [rbp-32], rdi              ; save nkeys
+    call tuple_new
+    mov [rbp-24], rax              ; values tuple
+
+    xor edx, edx                   ; index
+
+.mk_loop:
+    cmp rdx, [rbp-32]
+    jge .mk_success
+
+    push rdx
+
+    ; Get key
+    mov rax, [rbp-8]
+    lea rax, [rax + PyTupleObject.ob_item]
+    mov rsi, [rax + rdx*8]        ; key
+
+    ; Look up in subject
+    mov rdi, [rbp-16]
+    call dict_get
+    test rax, rax
+    jz .mk_fail
+
+    ; Store value in values tuple
+    pop rdx
+    push rdx
+    INCREF rax
+    mov rcx, [rbp-24]
+    mov [rcx + PyTupleObject.ob_item + rdx*8], rax
+
+    pop rdx
+    inc rdx
+    jmp .mk_loop
+
+.mk_success:
+    ; Push values tuple on top (stack: subject, keys, values_tuple)
+    mov rax, [rbp-24]
+    VPUSH rax
+    jmp .mk_done
+
+.mk_fail:
+    pop rdx
+    ; DECREF partial values tuple
+    mov rdi, [rbp-24]
+    call obj_decref
+    ; Push None on top to indicate failure (stack: subject, keys, None)
+    lea rax, [rel none_singleton]
+    INCREF rax
+    VPUSH rax
+
+.mk_done:
+    leave
+    DISPATCH
+
+;; ============================================================================
+;; op_call_intrinsic_2 - Call 2-arg intrinsic function
+;;
+;; Opcode 174: CALL_INTRINSIC_2
+;; arg selects the intrinsic.
+;; TOS = arg2, TOS1 = arg1
+;; Key intrinsics:
+;;   1 = INTRINSIC_PREP_RERAISE - set __traceback__
+;;   2 = INTRINSIC_TYPEVAR_WITH_BOUND
+;;   3 = INTRINSIC_TYPEVAR_WITH_CONSTRAINTS
+;;   4 = INTRINSIC_SET_FUNCTION_TYPE_PARAMS
+;; ============================================================================
+global op_call_intrinsic_2
+op_call_intrinsic_2:
+    cmp ecx, 1
+    je .ci2_prep_reraise
+
+    ; For type parameter intrinsics, just keep TOS1 and discard TOS
+    ; (a simplification — full type parameter support would need more)
+    VPOP rdi                       ; discard TOS (arg2)
+    DECREF_REG rdi
+    ; TOS1 stays
+    DISPATCH
+
+.ci2_prep_reraise:
+    ; INTRINSIC_PREP_RERAISE: TOS = exc, TOS1 = traceback
+    ; For now, discard traceback and keep exception
+    VPOP rax                       ; exc
+    VPOP rdi                       ; traceback
+    push rax
+    DECREF_REG rdi
+    pop rax
+    VPUSH rax
+    DISPATCH
