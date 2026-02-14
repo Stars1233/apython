@@ -66,6 +66,8 @@ extern op_copy_free_vars
 extern op_build_slice
 extern op_binary_slice
 extern op_store_slice
+extern op_format_value
+extern op_build_string
 
 ; External error handler
 extern error_unimplemented_opcode
@@ -868,9 +870,9 @@ opcode_table:
     dq op_unimplemented      ; 152 = MATCH_CLASS
     dq op_unimplemented      ; 153
     dq op_unimplemented      ; 154
-    dq op_unimplemented      ; 155 = FORMAT_VALUE
+    dq op_format_value       ; 155 = FORMAT_VALUE
     dq op_build_const_key_map ; 156 = BUILD_CONST_KEY_MAP
-    dq op_unimplemented      ; 157 = BUILD_STRING
+    dq op_build_string       ; 157 = BUILD_STRING
     dq op_unimplemented      ; 158
     dq op_unimplemented      ; 159
     dq op_unimplemented      ; 160

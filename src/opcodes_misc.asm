@@ -587,6 +587,157 @@ op_jump_backward:
     DISPATCH
 
 ;; ============================================================================
+;; op_format_value - Format a value for f-strings
+;;
+;; arg & 0x03: conversion (0=none, 1=!s, 2=!r, 3=!a)
+;; arg & 0x04: format spec present on stack below value
+;; Pops value (and optional fmt_spec), pushes formatted string.
+;; ============================================================================
+global op_format_value
+op_format_value:
+    push rbp
+    mov rbp, rsp
+    sub rsp, 16
+
+    mov [rbp-8], rcx           ; save arg
+    mov rax, rcx
+    and eax, 4
+    mov [rbp-16], rax          ; has_fmt_spec
+
+    ; If format spec present, pop it first (it's under the value)
+    test qword [rbp-16], 4
+    jz .fv_no_spec
+    ; TOS = fmt_spec, TOS1 = value
+    VPOP rax                   ; fmt_spec (ignored for now)
+    push rax                   ; save for DECREF
+.fv_no_spec:
+
+    VPOP rdi                   ; value
+    push rdi                   ; save for DECREF
+
+    ; Apply conversion based on arg & 3
+    mov eax, [rbp-8]
+    and eax, 3
+    cmp eax, 2
+    je .fv_repr
+    ; Default: str() — conversion 0 (none) and 1 (!s) both use str()
+    extern obj_str
+    call obj_str
+    jmp .fv_have_result
+
+.fv_repr:
+    extern obj_repr
+    call obj_repr
+
+.fv_have_result:
+    push rax                   ; save result
+
+    ; DECREF original value
+    mov rdi, [rsp + 8]
+    DECREF_REG rdi
+
+    ; DECREF fmt_spec if present
+    test qword [rbp-16], 4
+    jz .fv_push
+    mov rdi, [rsp + 16]
+    DECREF_REG rdi
+    pop rax                    ; result
+    add rsp, 16                ; discard saved value and fmt_spec
+    jmp .fv_done
+
+.fv_push:
+    pop rax                    ; result
+    add rsp, 8                 ; discard saved value
+
+.fv_done:
+    VPUSH rax
+    leave
+    DISPATCH
+
+;; ============================================================================
+;; op_build_string - Concatenate N strings from the stack
+;;
+;; ecx = number of string fragments
+;; Pops ecx strings, concatenates in order, pushes result.
+;; ============================================================================
+global op_build_string
+op_build_string:
+    push rbp
+    mov rbp, rsp
+    sub rsp, 16
+
+    mov [rbp-8], rcx           ; count
+
+    test ecx, ecx
+    jz .bs_zero
+    cmp ecx, 1
+    je .bs_one
+
+    ; General case: iterate and concatenate
+    ; Pop all items, keeping base pointer
+    mov rdi, rcx
+    shl rdi, 3                 ; count * 8
+    sub r13, rdi               ; pop all at once (r13 = base of items)
+
+    ; Start with first string
+    mov rax, [r13]             ; first fragment
+    INCREF rax                 ; we'll DECREF all originals later
+    mov [rbp-16], rax          ; accumulator
+
+    ; Concatenate remaining
+    mov rcx, 1                 ; start from index 1
+.bs_loop:
+    cmp rcx, [rbp-8]
+    jge .bs_decref
+    push rcx
+    extern str_concat
+    mov rdi, [rbp-16]         ; accumulator
+    mov rsi, [r13 + rcx*8]   ; next fragment
+    call str_concat
+    ; DECREF old accumulator
+    push rax                   ; save new result
+    mov rdi, [rbp-16]
+    DECREF_REG rdi
+    pop rax
+    mov [rbp-16], rax          ; new accumulator
+    pop rcx
+    inc rcx
+    jmp .bs_loop
+
+.bs_decref:
+    ; DECREF all original fragments
+    xor ecx, ecx
+.bs_decref_loop:
+    cmp rcx, [rbp-8]
+    jge .bs_push
+    mov rdi, [r13 + rcx*8]
+    push rcx
+    DECREF_REG rdi
+    pop rcx
+    inc rcx
+    jmp .bs_decref_loop
+
+.bs_push:
+    mov rax, [rbp-16]
+    VPUSH rax
+    leave
+    DISPATCH
+
+.bs_zero:
+    ; Empty f-string: push empty string
+    extern str_from_cstr
+    CSTRING rdi, ""
+    call str_from_cstr
+    VPUSH rax
+    leave
+    DISPATCH
+
+.bs_one:
+    ; Shortcut: 1 fragment, just leave it on stack
+    leave
+    DISPATCH
+
+;; ============================================================================
 ;; Data section - binary op offset lookup table
 ;; ============================================================================
 section .data
