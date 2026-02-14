@@ -22,6 +22,7 @@ extern ap_strstr
 extern obj_incref
 extern obj_decref
 extern obj_dealloc
+extern obj_repr
 extern str_from_cstr
 extern str_new
 extern str_type
@@ -882,6 +883,246 @@ str_method_split:
     lea rdi, [rel exc_ValueError_type]
     CSTRING rsi, "empty separator"
     call raise_exception
+
+
+;; ============================================================================
+;; str_method_format(args, nargs) -> new formatted string
+;; args[0]=self (format string), args[1..]=positional arguments
+;; Handles {} (auto-index) and {N} (explicit index).
+;; ============================================================================
+global str_method_format
+str_method_format:
+    push rbp
+    mov rbp, rsp
+    push rbx
+    push r12
+    push r13
+    push r14
+    push r15
+    sub rsp, 24             ; [rbp-48]=buf, [rbp-56]=buf_used, [rbp-64]=buf_cap
+
+    mov rbx, rdi            ; args array
+    mov r14, rsi            ; nargs
+
+    ; Get format string data
+    mov rax, [rbx]          ; self = format string
+    lea r12, [rax + PyStrObject.data]  ; r12 = fmt data ptr
+    mov r13d, [rax + PyStrObject.ob_size] ; r13 = fmt length
+
+    ; Allocate initial output buffer
+    lea rdi, [r13 + 64]    ; generous initial size
+    call ap_malloc
+    mov [rbp-48], rax       ; buf
+    mov qword [rbp-56], 0   ; buf_used = 0
+    lea rax, [r13 + 64]
+    mov [rbp-64], rax       ; buf_cap
+
+    xor ecx, ecx            ; ecx = source index
+    xor r15d, r15d          ; r15d = auto-index counter
+
+.fmt_loop:
+    cmp ecx, r13d
+    jge .fmt_done
+    movzx eax, byte [r12 + rcx]
+    cmp al, '{'
+    je .fmt_brace
+    cmp al, '}'
+    je .fmt_close_brace
+    ; Regular char — append to buffer
+    push rcx
+    ; Ensure space
+    mov rdi, [rbp-56]       ; used
+    inc rdi                 ; need 1 more
+    cmp rdi, [rbp-64]
+    jbe .fmt_char_ok
+    ; Grow buffer
+    mov rdi, [rbp-64]
+    shl rdi, 1
+    mov [rbp-64], rdi
+    mov rsi, rdi
+    mov rdi, [rbp-48]
+    call ap_realloc
+    mov [rbp-48], rax
+.fmt_char_ok:
+    pop rcx
+    mov rdi, [rbp-48]
+    mov rax, [rbp-56]
+    movzx edx, byte [r12 + rcx]
+    mov [rdi + rax], dl
+    inc qword [rbp-56]
+    inc ecx
+    jmp .fmt_loop
+
+.fmt_brace:
+    inc ecx                 ; skip '{'
+    cmp ecx, r13d
+    jge .fmt_done
+    movzx eax, byte [r12 + rcx]
+    ; Check for {{ (literal brace)
+    cmp al, '{'
+    je .fmt_literal_brace
+    ; Check for } (empty placeholder = auto-index)
+    cmp al, '}'
+    je .fmt_auto_index
+    ; Check for digit (explicit index)
+    cmp al, '0'
+    jb .fmt_done            ; unexpected char, bail
+    cmp al, '9'
+    ja .fmt_done
+    ; Parse number
+    xor edx, edx            ; edx = arg_index
+.fmt_parse_num:
+    movzx eax, byte [r12 + rcx]
+    cmp al, '}'
+    je .fmt_have_index
+    sub al, '0'
+    imul edx, 10
+    movzx eax, al
+    add edx, eax
+    inc ecx
+    cmp ecx, r13d
+    jl .fmt_parse_num
+    jmp .fmt_done
+.fmt_have_index:
+    inc ecx                 ; skip '}'
+    jmp .fmt_insert_arg
+
+.fmt_auto_index:
+    inc ecx                 ; skip '}'
+    mov edx, r15d           ; edx = auto-index
+    inc r15d
+    ; fall through to .fmt_insert_arg
+
+.fmt_insert_arg:
+    ; edx = arg index (0-based among format args, which are args[1..])
+    lea eax, [edx + 1]     ; args index (skip self)
+    cmp rax, r14
+    jge .fmt_loop           ; out of range, skip
+    push rcx
+    push rdx
+    ; Get the arg object and convert to string
+    mov rdi, [rbx + rax*8]  ; arg object
+    ; Call obj_repr or tp_str
+    push rdi
+    test rdi, rdi
+    js .fmt_smallint_str
+    mov rax, [rdi + PyObject.ob_type]
+    mov rax, [rax + PyTypeObject.tp_str]
+    test rax, rax
+    jz .fmt_use_repr
+    pop rdi
+    call rax
+    jmp .fmt_have_str
+.fmt_use_repr:
+    pop rdi
+    mov rax, [rdi + PyObject.ob_type]
+    mov rax, [rax + PyTypeObject.tp_repr]
+    test rax, rax
+    jz .fmt_skip_arg
+    call rax
+    jmp .fmt_have_str
+.fmt_smallint_str:
+    pop rdi
+    call obj_repr          ; SmallInt → repr is fine
+.fmt_have_str:
+    ; rax = string object; append its data to buffer
+    push rax                ; save str obj for DECREF
+    mov edx, [rax + PyStrObject.ob_size]
+    lea rsi, [rax + PyStrObject.data]
+    ; Ensure buffer has space
+    mov rdi, [rbp-56]
+    add rdi, rdx
+    cmp rdi, [rbp-64]
+    jbe .fmt_copy_ok
+    mov rdi, [rbp-64]
+.fmt_grow_copy:
+    shl rdi, 1
+    mov rax, [rbp-56]
+    add rax, rdx
+    cmp rdi, rax
+    jb .fmt_grow_copy
+    mov [rbp-64], rdi
+    mov rsi, rdi
+    mov rdi, [rbp-48]
+    call ap_realloc
+    mov [rbp-48], rax
+    ; Re-read str data (rax was clobbered)
+    mov rax, [rsp]          ; str obj
+    mov edx, [rax + PyStrObject.ob_size]
+    lea rsi, [rax + PyStrObject.data]
+.fmt_copy_ok:
+    ; Copy string data
+    mov rdi, [rbp-48]
+    add rdi, [rbp-56]
+    xor ecx, ecx
+.fmt_copy_str:
+    cmp ecx, edx
+    jge .fmt_copy_done
+    mov al, [rsi + rcx]
+    mov [rdi + rcx], al
+    inc ecx
+    jmp .fmt_copy_str
+.fmt_copy_done:
+    movzx eax, dx
+    add [rbp-56], rax
+
+    ; DECREF the temporary string
+    pop rdi                 ; str obj
+    call obj_decref
+.fmt_skip_arg:
+    pop rdx
+    pop rcx
+    jmp .fmt_loop
+
+.fmt_literal_brace:
+    ; {{ → output single {
+    push rcx
+    mov rdi, [rbp-48]
+    mov rax, [rbp-56]
+    mov byte [rdi + rax], '{'
+    inc qword [rbp-56]
+    pop rcx
+    inc ecx                 ; skip second {
+    jmp .fmt_loop
+
+.fmt_close_brace:
+    ; }} → output single }
+    inc ecx                 ; skip first }
+    cmp ecx, r13d
+    jge .fmt_done
+    movzx eax, byte [r12 + rcx]
+    cmp al, '}'
+    jne .fmt_loop           ; lone } — ignore (CPython raises error, we skip)
+    push rcx
+    mov rdi, [rbp-48]
+    mov rax, [rbp-56]
+    mov byte [rdi + rax], '}'
+    inc qword [rbp-56]
+    pop rcx
+    inc ecx                 ; skip second }
+    jmp .fmt_loop
+
+.fmt_done:
+    ; NUL-terminate and create string
+    mov rdi, [rbp-48]
+    mov rax, [rbp-56]
+    mov byte [rdi + rax], 0
+    call str_from_cstr
+    push rax
+
+    ; Free buffer
+    mov rdi, [rbp-48]
+    call ap_free
+
+    pop rax
+    add rsp, 24
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    pop rbp
+    ret
 
 
 ;; ############################################################################
@@ -1928,6 +2169,11 @@ methods_init:
     lea rdx, [rel str_method_split]
     call add_method_to_dict
 
+    mov rdi, rbx
+    lea rsi, [rel mn_format]
+    lea rdx, [rel str_method_format]
+    call add_method_to_dict
+
     ; Store dict in str_type.tp_dict
     lea rax, [rel str_type]
     mov [rax + PyTypeObject.tp_dict], rbx
@@ -2056,6 +2302,7 @@ mn_find:        db "find", 0
 mn_replace:     db "replace", 0
 mn_join:        db "join", 0
 mn_split:       db "split", 0
+mn_format:      db "format", 0
 mn_append:      db "append", 0
 mn_pop:         db "pop", 0
 mn_insert:      db "insert", 0

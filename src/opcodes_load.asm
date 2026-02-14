@@ -31,6 +31,7 @@ extern func_type
 extern cell_type
 extern exc_NameError_type
 extern exc_AttributeError_type
+extern method_new
 
 ;; ============================================================================
 ;; op_load_const - Load constant from co_consts[arg]
@@ -194,12 +195,13 @@ global op_load_attr
 op_load_attr:
     push rbp
     mov rbp, rsp
-    sub rsp, 32             ; [rbp-8]=flag, [rbp-16]=obj, [rbp-24]=name, [rbp-32]=attr
+    sub rsp, 48             ; [rbp-8]=flag, [rbp-16]=obj, [rbp-24]=name, [rbp-32]=attr, [rbp-40]=from_type_dict
 
     ; Extract flag and name_index
     mov eax, ecx
     and eax, 1
     mov [rbp-8], rax        ; flag
+    mov qword [rbp-40], 0   ; from_type_dict = 0
 
     shr ecx, 1              ; name_index
     mov rsi, [r15 + rcx*8]  ; name string
@@ -244,6 +246,7 @@ op_load_attr:
     mov [rbp-32], rax
     mov rdi, rax
     call obj_incref
+    mov qword [rbp-40], 1   ; from_type_dict = 1
     jmp .la_got_attr
 
 .la_attr_error:
@@ -257,6 +260,32 @@ op_load_attr:
     jne .la_method_load
 
     ; flag=0: simple attribute load
+    ; If attr came from type dict and is callable, create bound method
+    cmp qword [rbp-40], 0
+    je .la_simple_push
+    mov rax, [rbp-32]
+    test rax, rax
+    js .la_simple_push          ; SmallInt
+    mov rcx, [rax + PyObject.ob_type]
+    mov rcx, [rcx + PyTypeObject.tp_call]
+    test rcx, rcx
+    jz .la_simple_push
+
+    ; Create bound method(func=attr, self=obj)
+    mov rdi, [rbp-32]          ; func
+    mov rsi, [rbp-16]          ; self
+    call method_new
+    VPUSH rax
+
+    ; DECREF the raw func (method_new INCREFed it)
+    mov rdi, [rbp-32]
+    call obj_decref
+    ; DECREF obj (method_new INCREFed it)
+    mov rdi, [rbp-16]
+    call obj_decref
+    jmp .la_done
+
+.la_simple_push:
     mov rax, [rbp-32]
     VPUSH rax
 

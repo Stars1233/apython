@@ -401,6 +401,123 @@ type_getattr:
     ret
 
 ;; ============================================================================
+;; method_new(func, self) -> PyMethodObject*
+;; Create a bound method wrapping func+self.
+;; rdi = func (callable), rsi = self (instance)
+;; ============================================================================
+global method_new
+method_new:
+    push rbp
+    mov rbp, rsp
+    push rbx
+    push r12
+
+    mov rbx, rdi                ; func
+    mov r12, rsi                ; self
+
+    mov edi, PyMethodObject_size
+    call ap_malloc
+    mov qword [rax + PyMethodObject.ob_refcnt], 1
+    lea rcx, [rel method_type]
+    mov [rax + PyMethodObject.ob_type], rcx
+    mov [rax + PyMethodObject.im_func], rbx
+    mov [rax + PyMethodObject.im_self], r12
+
+    ; INCREF func and self
+    push rax
+    mov rdi, rbx
+    call obj_incref
+    mov rdi, r12
+    call obj_incref
+    pop rax
+
+    pop r12
+    pop rbx
+    pop rbp
+    ret
+
+;; ============================================================================
+;; method_call(self_method, args, nargs) -> PyObject*
+;; Call a bound method: prepend im_self to args, dispatch to im_func's tp_call.
+;; rdi = PyMethodObject*, rsi = args, rdx = nargs
+;; ============================================================================
+method_call:
+    push rbp
+    mov rbp, rsp
+    push rbx
+    push r12
+    push r13
+    push r14
+
+    mov rbx, rdi                ; method obj
+    mov r12, rsi                ; original args
+    mov r13, rdx                ; original nargs
+
+    ; Allocate new args array: (nargs+1) * 8
+    lea rdi, [rdx + 1]
+    shl rdi, 3
+    call ap_malloc
+    mov r14, rax                ; new args array
+
+    ; new_args[0] = im_self
+    mov rcx, [rbx + PyMethodObject.im_self]
+    mov [r14], rcx
+
+    ; Copy original args to new_args[1..]
+    xor ecx, ecx
+.mc_copy:
+    cmp rcx, r13
+    jge .mc_copy_done
+    mov rax, [r12 + rcx*8]
+    mov [r14 + rcx*8 + 8], rax
+    inc rcx
+    jmp .mc_copy
+.mc_copy_done:
+
+    ; Call im_func's tp_call(im_func, new_args, nargs+1)
+    mov rdi, [rbx + PyMethodObject.im_func]
+    mov rax, [rdi + PyObject.ob_type]
+    mov rax, [rax + PyTypeObject.tp_call]
+    mov rsi, r14
+    lea rdx, [r13 + 1]
+    call rax
+    push rax                    ; save result
+
+    ; Free temp args array
+    mov rdi, r14
+    call ap_free
+
+    pop rax
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    pop rbp
+    ret
+
+;; ============================================================================
+;; method_dealloc(PyObject *self)
+;; Free a bound method, DECREF func and self.
+;; ============================================================================
+method_dealloc:
+    push rbp
+    mov rbp, rsp
+    push rbx
+
+    mov rbx, rdi
+
+    mov rdi, [rbx + PyMethodObject.im_func]
+    call obj_decref
+    mov rdi, [rbx + PyMethodObject.im_self]
+    call obj_decref
+    mov rdi, rbx
+    call ap_free
+
+    pop rbx
+    pop rbp
+    ret
+
+;; ============================================================================
 ;; Data section
 ;; ============================================================================
 section .data
@@ -455,8 +572,7 @@ super_type:
     dq TYPE_OBJECT_SIZE         ; tp_basicsize
     times 20 dq 0               ; remaining tp_* fields
 
-; method_type - placeholder type descriptor for bound methods
-; (Not used in current implementation; method binding uses CALL null_or_self)
+; method_type - type descriptor for bound methods
 align 8
 global method_type
 method_type:
@@ -464,11 +580,11 @@ method_type:
     dq 0                        ; ob_type
     dq method_name_str          ; tp_name
     dq PyMethodObject_size      ; tp_basicsize
-    dq 0                        ; tp_dealloc
+    dq method_dealloc           ; tp_dealloc
     dq 0                        ; tp_repr
     dq 0                        ; tp_str
     dq 0                        ; tp_hash
-    dq 0                        ; tp_call
+    dq method_call              ; tp_call
     dq 0                        ; tp_getattr
     dq 0                        ; tp_setattr
     dq 0                        ; tp_richcompare
