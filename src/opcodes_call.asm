@@ -23,6 +23,7 @@ extern eval_dispatch
 extern obj_dealloc
 extern obj_decref
 extern fatal_error
+extern func_new
 
 ;; ============================================================================
 ;; op_call - Call a callable object (Phase 4: builtin functions only)
@@ -134,3 +135,36 @@ op_call:
     CSTRING rdi, "TypeError: object is not callable"
     call fatal_error
     ; does not return
+
+;; ============================================================================
+;; op_make_function - Create a function from code object on TOS
+;;
+;; Python 3.12 MAKE_FUNCTION (opcode 132).
+;; arg = flags: 0 = plain, 1 = defaults, 2 = kwdefaults, 4 = annotations, 8 = closure
+;; Currently supports arg=0 only (no defaults/closures).
+;;
+;; Stack: ... | code_obj | -> ... | func_obj |
+;; ============================================================================
+global op_make_function
+op_make_function:
+    ; Pop code object from value stack
+    VPOP rdi                   ; rdi = code object
+
+    ; Get globals from current frame
+    mov rsi, [r12 + PyFrame.globals]  ; rsi = globals dict
+
+    ; Save code obj for DECREF after func_new INCREFs it
+    push rdi
+
+    ; Create function: func_new(code, globals)
+    call func_new
+    ; rax = new function object
+
+    ; DECREF the code object (func_new INCREFed it)
+    mov r8, rax                ; save func obj
+    pop rdi                    ; code object
+    DECREF_REG rdi
+
+    ; Push function onto value stack
+    VPUSH r8
+    DISPATCH

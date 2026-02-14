@@ -31,6 +31,7 @@ extern op_unary_negative
 extern op_unary_not
 extern op_pop_jump_if_none
 extern op_pop_jump_if_not_none
+extern op_make_function
 
 ; External error handler
 extern error_unimplemented_opcode
@@ -251,7 +252,7 @@ opcode_table:
     dq op_pop_jump_if_none   ; 129 = POP_JUMP_IF_NONE
     dq op_unimplemented      ; 130 = RAISE_VARARGS
     dq op_unimplemented      ; 131 = GET_AWAITABLE
-    dq op_unimplemented      ; 132 = MAKE_FUNCTION
+    dq op_make_function      ; 132 = MAKE_FUNCTION
     dq op_unimplemented      ; 133 = BUILD_SLICE
     dq op_unimplemented      ; 134 = JUMP_BACKWARD_NO_INTERRUPT
     dq op_unimplemented      ; 135 = MAKE_CELL
