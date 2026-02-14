@@ -16,6 +16,8 @@ extern str_from_cstr
 extern obj_hash
 extern int_to_i64
 extern fatal_error
+extern raise_exception
+extern exc_IndexError_type
 
 ; tuple_new(int64_t size) -> PyTupleObject*
 ; Allocate a tuple with room for 'size' items, zero-filled
@@ -77,8 +79,9 @@ tuple_getitem:
     INCREF rax
     ret
 .index_error:
-    CSTRING rdi, "IndexError: tuple index out of range"
-    call fatal_error
+    lea rdi, [rel exc_IndexError_type]
+    CSTRING rsi, "tuple index out of range"
+    call raise_exception
 
 ; tuple_subscript(PyTupleObject *tuple, PyObject *key) -> PyObject*
 ; mp_subscript: index with int key (for BINARY_SUBSCR)

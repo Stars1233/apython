@@ -18,6 +18,8 @@ extern str_type
 extern ap_strcmp
 extern ap_memset
 extern fatal_error
+extern raise_exception
+extern exc_KeyError_type
 
 ; Initial capacity (must be power of 2)
 DICT_INIT_CAP equ 8
@@ -563,8 +565,9 @@ dict_subscript:
     ret
 
 .key_error:
-    CSTRING rdi, "KeyError"
-    call fatal_error
+    lea rdi, [rel exc_KeyError_type]
+    CSTRING rsi, "key not found"
+    call raise_exception
 
 ;; ============================================================================
 ;; dict_ass_subscript(PyDictObject *dict, PyObject *key, PyObject *value)

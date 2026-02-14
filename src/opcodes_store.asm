@@ -25,6 +25,8 @@ extern obj_dealloc
 extern obj_decref
 extern dict_set
 extern fatal_error
+extern raise_exception
+extern exc_AttributeError_type
 
 ;; ============================================================================
 ;; op_store_fast - Store TOS into localsplus[arg]
@@ -145,5 +147,6 @@ op_store_attr:
     DISPATCH
 
 .sa_no_setattr:
-    CSTRING rdi, "AttributeError: cannot set attribute"
-    call fatal_error
+    lea rdi, [rel exc_AttributeError_type]
+    CSTRING rsi, "cannot set attribute"
+    call raise_exception

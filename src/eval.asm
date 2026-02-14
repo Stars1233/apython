@@ -1,10 +1,13 @@
 ; eval.asm - Bytecode evaluation loop
 ; Core dispatch loop and opcode table for the Python 3.12 interpreter
+; Includes exception unwind mechanism
 
 %include "macros.inc"
 %include "object.inc"
 %include "frame.inc"
 %include "opcodes.inc"
+%include "types.inc"
+%include "errcodes.inc"
 
 section .note.GNU-stack noalloc noexec nowrite progbits
 
@@ -57,8 +60,29 @@ extern op_load_attr
 ; External error handler
 extern error_unimplemented_opcode
 
+; Exception infrastructure
+extern exc_table_find_handler
+extern exc_isinstance
+extern exc_new
+extern exc_from_cstr
+extern obj_decref
+extern obj_incref
+extern obj_dealloc
+extern obj_str
+extern sys_write
+extern sys_exit
+extern str_type
+extern none_singleton
+
+; Exception type singletons (for raising)
+extern exc_TypeError_type
+extern exc_ValueError_type
+extern exc_BaseException_type
+extern exc_Exception_type
+
 ; eval_frame(PyFrame *frame) -> PyObject*
 ; Main entry point: sets up registers from the frame and enters the dispatch loop.
+; Returns NULL if an unhandled exception propagated out.
 ; rdi = frame
 global eval_frame
 eval_frame:
@@ -86,6 +110,17 @@ eval_frame:
     mov rcx, [rax + PyCodeObject.co_names]
     lea r15, [rcx + PyTupleObject.ob_item]
 
+    ; Save caller's eval_saved_r12 (for nested eval_frame calls)
+    mov rax, [rel eval_saved_r12]
+    push rax
+    mov [rel eval_saved_r12], r12
+
+    ; Save caller's eval_base_rsp (for nested eval_frame calls)
+    mov rax, [rel eval_base_rsp]
+    push rax
+    ; Save machine stack pointer for exception unwind cleanup
+    mov [rel eval_base_rsp], rsp
+
     ; Fall through to eval_dispatch
 
 ; eval_dispatch - Main dispatch point
@@ -93,6 +128,7 @@ eval_frame:
 global eval_dispatch
 align 16
 eval_dispatch:
+    mov [rel eval_saved_rbx], rbx  ; save bytecode IP for exception unwind
     movzx eax, byte [rbx]      ; load opcode
     movzx ecx, byte [rbx+1]    ; load arg into ecx
     add rbx, 2                  ; advance past instruction word
@@ -103,9 +139,405 @@ eval_dispatch:
 ; rax contains the return value. Restores callee-saved regs and returns.
 global eval_return
 eval_return:
+    ; Restore caller's eval_base_rsp and eval_saved_r12
+    pop rdx
+    mov [rel eval_base_rsp], rdx
+    pop rdx
+    mov [rel eval_saved_r12], rdx
     RESTORE_EVAL_REGS
     pop rbp
     ret
+
+; ============================================================================
+; Exception unwind mechanism
+; ============================================================================
+
+; eval_exception_unwind - Called when an exception is raised
+; The exception object must already be stored in [current_exception].
+; This routine searches the exception table for a handler. If found,
+; it adjusts the value stack and jumps to the handler. If not found,
+; it returns NULL from eval_frame to propagate to the caller.
+global eval_exception_unwind
+eval_exception_unwind:
+    ; Restore machine stack to eval frame level (discard intermediate frames)
+    mov rsp, [rel eval_base_rsp]
+
+    ; Restore eval loop registers that may have been corrupted.
+    ; When raise_exception is called from inside a function that saved/modified
+    ; callee-saved regs (e.g. list_subscript saves rbx for temp use), the
+    ; non-local jump to here bypasses the restore, leaving regs corrupted.
+    ; rbx: use saved copy from eval_dispatch (pre-advance, points to instruction)
+    ; r12: reload from frame pointer (saved in eval_frame_r12)
+    ; r14/r15: re-derive from code object
+    mov rbx, [rel eval_saved_rbx]   ; restore bytecode IP (pre-advance copy)
+    mov r12, [rel eval_saved_r12]   ; restore frame pointer
+
+    ; Re-derive r14/r15 from the code object
+    mov rax, [r12 + PyFrame.code]
+    mov rcx, [rax + PyCodeObject.co_consts]
+    lea r14, [rcx + PyTupleObject.ob_item]
+    mov rcx, [rax + PyCodeObject.co_names]
+    lea r15, [rcx + PyTupleObject.ob_item]
+
+    ; Compute bytecode offset in instruction units (halfwords)
+    ; eval_saved_rbx points to the instruction word (before add rbx, 2)
+    lea rcx, [rax + PyCodeObject.co_code]
+    mov rdi, rax             ; rdi = code object for exc_table_find_handler
+    mov rsi, rbx             ; rbx = saved pre-advance bytecode IP
+    sub rsi, rcx             ; rsi = byte offset from co_code start
+    shr esi, 1               ; rsi = offset in instruction units (halfwords)
+
+    ; Call exc_table_find_handler(code, offset)
+    ; Returns: rax = handler target (in halfwords), edx = depth, ecx = push_lasti
+    ; Or rax = -1 if no handler
+    call exc_table_find_handler
+
+    cmp rax, -1
+    je .no_handler
+
+    ; Handler found!
+    ; rax = handler target in instruction units
+    ; edx = stack depth (number of items on value stack relative to stack_base)
+    ; ecx = push_lasti flag
+
+    ; Save handler info
+    push rax                 ; save target
+    push rcx                 ; save push_lasti flag
+
+    ; Adjust value stack to target depth
+    ; target r13 = stack_base + depth * 8
+    mov rdi, [r12 + PyFrame.stack_base]
+    mov eax, edx
+    shl rax, 3               ; depth * 8
+    add rdi, rax
+    ; DECREF any items being popped from stack
+    cmp r13, rdi
+    jbe .stack_adjusted
+.pop_stack:
+    sub r13, 8
+    cmp r13, rdi
+    jb .stack_adjusted
+    push rdi                 ; save target stack ptr
+    mov rdi, [r13]
+    test rdi, rdi
+    jz .pop_next
+    call obj_decref
+.pop_next:
+    pop rdi
+    cmp r13, rdi
+    ja .pop_stack
+.stack_adjusted:
+    mov r13, rdi             ; set stack to target depth
+
+    ; Check push_lasti flag
+    pop rcx                  ; restore push_lasti
+    pop rax                  ; restore target
+
+    ; If push_lasti, push the instruction offset (as SmallInt)
+    test ecx, ecx
+    jz .no_lasti
+    ; Push a dummy lasti value (we don't use it for now)
+    mov rdx, 0
+    bts rdx, 63             ; SmallInt 0
+    VPUSH rdx
+.no_lasti:
+
+    ; Push the exception onto the value stack (transfer ownership)
+    mov rdx, [rel current_exception]
+    mov qword [rel current_exception], 0   ; clear: ownership moves to value stack
+    VPUSH rdx
+
+    ; Set rbx to handler target
+    ; target is in instruction units (halfwords), so bytes = target * 2
+    mov rcx, [r12 + PyFrame.code]
+    lea rbx, [rcx + PyCodeObject.co_code]
+    shl rax, 1               ; target * 2 = byte offset
+    add rbx, rax
+
+    DISPATCH
+
+.no_handler:
+    ; No handler found - return NULL to propagate exception to caller
+    xor eax, eax
+    jmp eval_return
+
+; raise_exception(PyTypeObject *type, const char *msg_cstr)
+; Create an exception from a C string and begin unwinding.
+; Callable from opcode handlers - uses eval loop registers.
+global raise_exception
+raise_exception:
+    push rbp
+    mov rbp, rsp
+
+    ; Create exception: exc_from_cstr(type, msg)
+    call exc_from_cstr
+    ; rax = exception object
+
+    ; Store in current_exception
+    ; First XDECREF any existing exception
+    push rax
+    mov rdi, [rel current_exception]
+    test rdi, rdi
+    jz .no_prev
+    call obj_decref
+.no_prev:
+    pop rax
+    mov [rel current_exception], rax
+
+    leave
+    jmp eval_exception_unwind
+
+; raise_exception_obj(PyExceptionObject *exc)
+; Set exception and begin unwinding.
+global raise_exception_obj
+raise_exception_obj:
+    push rbp
+    mov rbp, rsp
+
+    ; INCREF the exception (we're taking ownership)
+    push rdi
+    INCREF rdi
+    pop rdi
+
+    ; XDECREF any existing exception
+    push rdi
+    mov rax, [rel current_exception]
+    test rax, rax
+    jz .no_prev2
+    push rdi
+    mov rdi, rax
+    call obj_decref
+    pop rdi
+.no_prev2:
+    pop rdi
+    mov [rel current_exception], rdi
+
+    leave
+    jmp eval_exception_unwind
+
+; ============================================================================
+; Exception-related opcode handlers (inline in eval.asm for access to globals)
+; ============================================================================
+
+; op_push_exc_info (35) - Push exception info for try/except
+; TOS has the exception. Save current exception state, install new one.
+; Stack effect: exc -> prev_exc, exc
+global op_push_exc_info
+op_push_exc_info:
+    ; TOS = new exception
+    VPOP rax                 ; rax = new exception
+
+    ; Push the previous current_exception (or None if NULL)
+    mov rdx, [rel current_exception]
+    test rdx, rdx
+    jnz .have_prev
+    lea rdx, [rel none_singleton]
+    INCREF rdx
+.have_prev:
+    VPUSH rdx                ; push prev_exc
+
+    ; Set new exception as current and push it too
+    ; INCREF for the value stack copy
+    INCREF rax
+    mov [rel current_exception], rax
+    VPUSH rax                ; push new exc
+
+    DISPATCH
+
+; op_pop_except (89) - Restore previous exception state
+; TOS = the exception to restore as current
+global op_pop_except
+op_pop_except:
+    VPOP rax                 ; rax = exception to restore
+
+    ; XDECREF old current_exception
+    push rax
+    mov rdi, [rel current_exception]
+    test rdi, rdi
+    jz .no_old
+    call obj_decref
+.no_old:
+    pop rax
+
+    ; Set restored exception as current (or NULL if None)
+    lea rdx, [rel none_singleton]
+    cmp rax, rdx
+    jne .set_exc
+    ; It's None - set current to NULL and DECREF the None
+    mov qword [rel current_exception], 0
+    DECREF rax
+    DISPATCH
+.set_exc:
+    mov [rel current_exception], rax
+    DISPATCH
+
+; op_check_exc_match (36) - Check if exception matches a type
+; TOS = type to match against, TOS1 = exception
+; Push True/False, don't pop the exception
+global op_check_exc_match
+op_check_exc_match:
+    VPOP rsi                 ; rsi = type to match
+    VPEEK rdi                ; rdi = exception (don't pop)
+
+    ; Save type for DECREF
+    push rsi
+
+    ; Call exc_isinstance(exc, type)
+    call exc_isinstance
+    ; eax = 0 or 1
+
+    ; DECREF the type
+    push rax
+    mov rdi, [rsp + 8]
+    call obj_decref
+    pop rax
+    add rsp, 8
+
+    ; Push bool result
+    test eax, eax
+    jz .no_match
+    extern bool_true
+    lea rax, [rel bool_true]
+    jmp .push_result
+.no_match:
+    extern bool_false
+    lea rax, [rel bool_false]
+.push_result:
+    INCREF rax
+    VPUSH rax
+    DISPATCH
+
+; op_raise_varargs (130) - Raise an exception
+; arg 0: reraise current exception
+; arg 1: raise TOS
+; arg 2: raise TOS1 from TOS (chaining, simplified)
+global op_raise_varargs
+op_raise_varargs:
+    cmp ecx, 0
+    je .reraise
+    cmp ecx, 1
+    je .raise_exc
+    cmp ecx, 2
+    je .raise_from
+
+    ; Invalid arg
+    CSTRING rdi, "SystemError: bad RAISE_VARARGS arg"
+    extern fatal_error
+    call fatal_error
+
+.reraise:
+    ; Re-raise current exception
+    mov rax, [rel current_exception]
+    test rax, rax
+    jnz .do_reraise
+    ; No current exception - raise RuntimeError
+    lea rdi, [rel exc_RuntimeError_type]
+    extern exc_RuntimeError_type
+    CSTRING rsi, "No active exception to re-raise"
+    call raise_exception
+    ; does not return here
+
+.do_reraise:
+    ; current_exception is already set, just unwind
+    jmp eval_exception_unwind
+
+.raise_exc:
+    ; TOS is the exception to raise
+    VPOP rdi
+
+    ; Check if it's already an exception object or a type
+    ; If it's a type, create an instance with no args
+    test rdi, rdi
+    js .raise_bad             ; SmallInt can't be an exception
+    jz .raise_bad             ; NULL can't be an exception
+
+    ; First check if rdi is an exception TYPE (has exc_dealloc as tp_dealloc)
+    ; Exception type objects have tp_dealloc = exc_dealloc
+    extern exc_dealloc
+    lea rdx, [rel exc_dealloc]
+    mov rcx, [rdi + PyTypeObject.tp_dealloc]
+    cmp rcx, rdx
+    je .raise_type
+
+    ; Check if rdi is an exception INSTANCE (ob_type->tp_dealloc == exc_dealloc)
+    mov rax, [rdi + PyObject.ob_type]
+    test rax, rax
+    jz .raise_bad
+    mov rcx, [rax + PyTypeObject.tp_dealloc]
+    cmp rcx, rdx
+    je .raise_exc_obj
+
+    jmp .raise_bad
+
+.raise_type:
+    ; rdi = exception type - create instance with no message
+    push rdi
+    mov rsi, 0               ; no message
+    call exc_new
+    pop rdi                  ; discard type (immortal, no DECREF needed)
+    mov rdi, rax
+    jmp .raise_exc_obj
+
+.raise_exc_obj:
+    ; rdi = exception object
+    ; Store as current_exception
+    push rdi
+    mov rax, [rel current_exception]
+    test rax, rax
+    jz .no_prev_raise
+    push rdi
+    mov rdi, rax
+    call obj_decref
+    pop rdi
+.no_prev_raise:
+    pop rdi
+    mov [rel current_exception], rdi
+    ; Don't DECREF rdi - we transferred ownership from value stack to current_exception
+    jmp eval_exception_unwind
+
+.raise_bad:
+    ; DECREF the bad value and raise TypeError
+    call obj_decref
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "exceptions must derive from BaseException"
+    call raise_exception
+
+.raise_from:
+    ; TOS = cause, TOS1 = exception
+    VPOP rsi                 ; cause (simplified: just DECREF it)
+    push rsi
+    VPOP rdi                 ; exception
+    push rdi
+
+    ; DECREF cause (we don't support __cause__ yet)
+    mov rdi, [rsp + 8]
+    call obj_decref
+
+    ; Raise the exception
+    pop rdi
+    add rsp, 8
+    jmp .raise_exc_obj
+
+; op_reraise (119) - Re-raise the current exception
+; TOS = exception to re-raise
+global op_reraise
+op_reraise:
+    ; Pop the exception from value stack
+    VPOP rdi
+
+    ; Store it as current exception
+    push rdi
+    mov rax, [rel current_exception]
+    test rax, rax
+    jz .no_prev_rr
+    push rdi
+    mov rdi, rax
+    call obj_decref
+    pop rdi
+.no_prev_rr:
+    pop rdi
+    mov [rel current_exception], rdi
+    jmp eval_exception_unwind
 
 ; op_unimplemented - Handler for unimplemented opcodes
 ; The opcode is in eax (set by dispatch). Calls fatal error.
@@ -132,8 +564,137 @@ op_resume:
 ; op_interpreter_exit - INTERPRETER_EXIT opcode (3)
 ; Pop the return value from the value stack and return from eval_frame.
 op_interpreter_exit:
+    ; Check for unhandled exception
+    mov rax, [rel current_exception]
+    test rax, rax
+    jnz .unhandled_exception
     VPOP rax
     jmp eval_return
+
+.unhandled_exception:
+    ; Print traceback and exit
+    ; For now, print "Traceback (most recent call last):" and the exception
+    push rbp
+    mov rbp, rsp
+
+    ; Print traceback header
+    mov edi, 2
+    lea rsi, [rel tb_header]
+    mov edx, tb_header_len
+    call sys_write
+
+    ; Print "  File "<filename>", line N, in <name>\n"
+    ; Get filename and function name from code object
+    mov rax, [r12 + PyFrame.code]
+    mov rdi, [rax + PyCodeObject.co_filename]
+    test rdi, rdi
+    jz .no_filename
+
+    ; Print "  File \""
+    push rax
+    mov edi, 2
+    lea rsi, [rel tb_file_prefix]
+    mov edx, tb_file_prefix_len
+    call sys_write
+    pop rax
+
+    ; Print filename
+    push rax
+    mov rdi, [rax + PyCodeObject.co_filename]
+    mov esi, 2
+    lea rdx, [rdi + PyStrObject.data]
+    mov rcx, [rdi + PyStrObject.ob_size]
+    mov rdi, rsi
+    mov rsi, rdx
+    mov rdx, rcx
+    call sys_write
+    pop rax
+
+    ; Print "\", line ???, in "
+    push rax
+    mov edi, 2
+    lea rsi, [rel tb_line_prefix]
+    mov edx, tb_line_prefix_len
+    call sys_write
+    pop rax
+
+    ; Print function name
+    mov rdi, [rax + PyCodeObject.co_name]
+    test rdi, rdi
+    jz .no_funcname
+    push rax
+    lea rsi, [rdi + PyStrObject.data]
+    mov rdx, [rdi + PyStrObject.ob_size]
+    mov edi, 2
+    call sys_write
+    pop rax
+.no_funcname:
+    ; Print newline
+    mov edi, 2
+    lea rsi, [rel tb_newline]
+    mov edx, 1
+    call sys_write
+
+.no_filename:
+    ; Print exception: "TypeName: message\n"
+    mov rdi, [rel current_exception]
+    test rdi, rdi
+    jz .exit_now
+
+    ; Get type name
+    mov rax, [rdi + PyExceptionObject.ob_type]
+    mov rsi, [rax + PyTypeObject.tp_name]
+    ; Print type name
+    push rdi
+    ; strlen of type name
+    mov rdi, rsi
+    xor ecx, ecx
+.strlen1:
+    cmp byte [rdi + rcx], 0
+    je .strlen1_done
+    inc ecx
+    jmp .strlen1
+.strlen1_done:
+    mov edx, ecx
+    mov edi, 2
+    call sys_write
+    pop rdi
+
+    ; Check for message
+    mov rax, [rdi + PyExceptionObject.exc_value]
+    test rax, rax
+    jz .no_message
+
+    ; Print ": "
+    push rax
+    mov edi, 2
+    lea rsi, [rel tb_colon]
+    mov edx, 2
+    call sys_write
+    pop rax
+
+    ; Print message (must be a string)
+    mov rcx, [rax + PyObject.ob_type]
+    lea rdx, [rel str_type]
+    cmp rcx, rdx
+    jne .no_message
+
+    lea rsi, [rax + PyStrObject.data]
+    mov rdx, [rax + PyStrObject.ob_size]
+    mov edi, 2
+    call sys_write
+
+.no_message:
+    ; Print final newline
+    mov edi, 2
+    lea rsi, [rel tb_newline]
+    mov edx, 1
+    call sys_write
+
+.exit_now:
+    ; Exit with code 1
+    mov edi, 1
+    call sys_exit
 
 ; ---------------------------------------------------------------------------
 ; Opcode dispatch table (256 entries, section .data for potential patching)
@@ -177,8 +738,8 @@ opcode_table:
     dq op_unimplemented      ; 32  = MATCH_SEQUENCE
     dq op_unimplemented      ; 33  = MATCH_KEYS
     dq op_unimplemented      ; 34
-    dq op_unimplemented      ; 35  = PUSH_EXC_INFO
-    dq op_unimplemented      ; 36  = CHECK_EXC_MATCH
+    dq op_push_exc_info      ; 35  = PUSH_EXC_INFO
+    dq op_check_exc_match    ; 36  = CHECK_EXC_MATCH
     dq op_unimplemented      ; 37  = CHECK_EG_MATCH
     dq op_unimplemented      ; 38
     dq op_unimplemented      ; 39
@@ -231,7 +792,7 @@ opcode_table:
     dq op_unimplemented      ; 86
     dq op_unimplemented      ; 87  = LOAD_LOCALS
     dq op_unimplemented      ; 88
-    dq op_unimplemented      ; 89  = POP_EXCEPT
+    dq op_pop_except         ; 89  = POP_EXCEPT
     dq op_store_name         ; 90  = STORE_NAME
     dq op_unimplemented      ; 91  = DELETE_NAME
     dq op_unpack_sequence    ; 92  = UNPACK_SEQUENCE
@@ -261,7 +822,7 @@ opcode_table:
     dq op_load_global        ; 116 = LOAD_GLOBAL
     dq op_is_op              ; 117 = IS_OP
     dq op_contains_op        ; 118 = CONTAINS_OP
-    dq op_unimplemented      ; 119 = RERAISE
+    dq op_reraise            ; 119 = RERAISE
     dq op_copy               ; 120 = COPY
     dq op_return_const       ; 121 = RETURN_CONST
     dq op_binary_op          ; 122 = BINARY_OP
@@ -272,7 +833,7 @@ opcode_table:
     dq op_load_fast          ; 127 = LOAD_FAST_CHECK (same handler as LOAD_FAST)
     dq op_pop_jump_if_not_none ; 128 = POP_JUMP_IF_NOT_NONE
     dq op_pop_jump_if_none   ; 129 = POP_JUMP_IF_NONE
-    dq op_unimplemented      ; 130 = RAISE_VARARGS
+    dq op_raise_varargs      ; 130 = RAISE_VARARGS
     dq op_unimplemented      ; 131 = GET_AWAITABLE
     dq op_make_function      ; 132 = MAKE_FUNCTION
     dq op_unimplemented      ; 133 = BUILD_SLICE
@@ -398,3 +959,29 @@ opcode_table:
     dq op_unimplemented      ; 253
     dq op_unimplemented      ; 254
     dq op_unimplemented      ; 255
+
+; ============================================================================
+; Global exception state (BSS)
+; ============================================================================
+section .bss
+global current_exception
+current_exception: resq 1    ; PyExceptionObject* or NULL
+eval_base_rsp: resq 1        ; machine stack pointer at eval dispatch level
+eval_saved_rbx: resq 1       ; bytecode IP saved at dispatch (for exception unwind)
+eval_saved_r12: resq 1       ; frame pointer saved at frame entry (for exception unwind)
+
+; ============================================================================
+; Read-only data for traceback printing
+; ============================================================================
+section .rodata
+tb_header: db "Traceback (most recent call last):", 10
+tb_header_len equ $ - tb_header
+
+tb_file_prefix: db '  File "', 0
+tb_file_prefix_len equ $ - tb_file_prefix - 1
+
+tb_line_prefix: db '", line ?, in '
+tb_line_prefix_len equ $ - tb_line_prefix
+
+tb_colon: db ": "
+tb_newline: db 10

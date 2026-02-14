@@ -18,6 +18,8 @@ extern str_from_cstr
 extern str_new
 extern obj_repr
 extern fatal_error
+extern raise_exception
+extern exc_IndexError_type
 extern int_to_i64
 extern bool_true
 extern bool_false
@@ -140,8 +142,9 @@ list_getitem:
     ret
 
 .index_error:
-    CSTRING rdi, "IndexError: list index out of range"
-    call fatal_error
+    lea rdi, [rel exc_IndexError_type]
+    CSTRING rsi, "list index out of range"
+    call raise_exception
 
 ;; ============================================================================
 ;; list_setitem(PyListObject *list, int64_t index, PyObject *value)
@@ -188,8 +191,9 @@ list_setitem:
     ret
 
 .index_error:
-    CSTRING rdi, "IndexError: list assignment index out of range"
-    call fatal_error
+    lea rdi, [rel exc_IndexError_type]
+    CSTRING rsi, "list assignment index out of range"
+    call raise_exception
 
 ;; ============================================================================
 ;; list_subscript(PyListObject *list, PyObject *key) -> PyObject*

@@ -24,9 +24,12 @@ extern eval_dispatch
 extern obj_dealloc
 extern dict_get
 extern fatal_error
+extern raise_exception
 extern obj_incref
 extern obj_decref
 extern func_type
+extern exc_NameError_type
+extern exc_AttributeError_type
 
 ;; ============================================================================
 ;; op_load_const - Load constant from co_consts[arg]
@@ -92,9 +95,10 @@ op_load_global:
     test rax, rax
     jnz .found_no_pop
 
-    ; Not found in either dict - fatal error
-    CSTRING rdi, "NameError: name not found"
-    call fatal_error
+    ; Not found in either dict - raise NameError
+    lea rdi, [rel exc_NameError_type]
+    CSTRING rsi, "name not found"
+    call raise_exception
 
 .found:
     add rsp, 8                 ; discard saved name
@@ -142,9 +146,10 @@ op_load_name:
     test rax, rax
     jnz .found_no_pop
 
-    ; Not found in any dict - fatal error
-    CSTRING rdi, "NameError: name not found"
-    call fatal_error
+    ; Not found in any dict - raise NameError
+    lea rdi, [rel exc_NameError_type]
+    CSTRING rsi, "name not found"
+    call raise_exception
 
 .found:
     add rsp, 8                 ; discard saved name
@@ -241,8 +246,9 @@ op_load_attr:
     jmp .la_got_attr
 
 .la_attr_error:
-    CSTRING rdi, "AttributeError: object has no attribute"
-    call fatal_error
+    lea rdi, [rel exc_AttributeError_type]
+    CSTRING rsi, "object has no attribute"
+    call raise_exception
 
 .la_got_attr:
     ; Check flag

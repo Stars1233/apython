@@ -26,7 +26,9 @@ extern obj_dealloc
 extern obj_decref
 extern obj_incref
 extern fatal_error
+extern raise_exception
 extern func_new
+extern exc_TypeError_type
 
 ;; ============================================================================
 ;; op_call - Call a callable object
@@ -113,7 +115,12 @@ op_call:
 .setup_call:
     ; Get tp_call from the callable's type
     mov rdi, [rbp-16]              ; callable
+    test rdi, rdi
+    jz .not_callable               ; NULL check
+    js .not_callable               ; SmallInt check (bit 63 set)
     mov rax, [rdi + PyObject.ob_type]
+    test rax, rax
+    jz .not_callable               ; no type (shouldn't happen)
     mov rax, [rax + PyTypeObject.tp_call]
     test rax, rax
     jz .not_callable
@@ -181,8 +188,9 @@ op_call:
     DISPATCH
 
 .not_callable:
-    CSTRING rdi, "TypeError: object is not callable"
-    call fatal_error
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "object is not callable"
+    call raise_exception
     ; does not return
 
 ;; ============================================================================

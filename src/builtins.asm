@@ -24,6 +24,7 @@ extern str_type
 extern ap_malloc
 extern ap_free
 extern fatal_error
+extern raise_exception
 extern sys_write
 extern range_new
 extern int_to_i64
@@ -39,6 +40,31 @@ extern instance_getattr
 extern instance_setattr
 extern type_call
 extern func_type
+
+; Exception types
+extern exc_BaseException_type
+extern exc_Exception_type
+extern exc_TypeError_type
+extern exc_ValueError_type
+extern exc_KeyError_type
+extern exc_IndexError_type
+extern exc_AttributeError_type
+extern exc_NameError_type
+extern exc_RuntimeError_type
+extern exc_StopIteration_type
+extern exc_ZeroDivisionError_type
+extern exc_ImportError_type
+extern exc_NotImplementedError_type
+extern exc_OverflowError_type
+extern exc_AssertionError_type
+extern exc_OSError_type
+extern exc_LookupError_type
+extern exc_ArithmeticError_type
+extern exc_RecursionError_type
+extern exc_MemoryError_type
+extern exc_KeyboardInterrupt_type
+extern exc_SystemExit_type
+extern exc_UnicodeError_type
 
 ;; ============================================================================
 ;; builtin_func_new(void *func_ptr, const char *name_cstr) -> PyBuiltinObject*
@@ -321,12 +347,9 @@ builtin_len:
     ret
 
 .len_error:
-    lea rdi, [rel .len_err_msg]
-    call fatal_error
-
-section .rodata
-.len_err_msg: db "TypeError: len() takes exactly one argument", 0
-section .text
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "len() takes exactly one argument"
+    call raise_exception
 
 ;; ============================================================================
 ;; builtin_range(PyObject **args, int64_t nargs) -> PyObject*
@@ -350,8 +373,9 @@ builtin_range:
     cmp r12, 3
     je .range_3
 
-    CSTRING rdi, "TypeError: range expected 1 to 3 arguments"
-    call fatal_error
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "range expected 1 to 3 arguments"
+    call raise_exception
 
 .range_1:
     ; range(stop): start=0, stop=args[0], step=1
@@ -430,8 +454,9 @@ builtin_type:
     ret
 
 .type_error:
-    CSTRING rdi, "TypeError: type() takes 1 argument"
-    call fatal_error
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "type() takes 1 argument"
+    call raise_exception
 
 ;; ============================================================================
 ;; builtin_isinstance(PyObject **args, int64_t nargs) -> PyObject*
@@ -493,8 +518,9 @@ builtin_isinstance:
     ret
 
 .isinstance_error:
-    CSTRING rdi, "TypeError: isinstance() takes 2 arguments"
-    call fatal_error
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "isinstance() takes 2 arguments"
+    call raise_exception
 
 ;; ============================================================================
 ;; builtin_repr(PyObject **args, int64_t nargs) -> PyObject*
@@ -515,8 +541,9 @@ builtin_repr:
     ret
 
 .repr_error:
-    CSTRING rdi, "TypeError: repr() takes 1 argument"
-    call fatal_error
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "repr() takes 1 argument"
+    call raise_exception
 
 ;; ============================================================================
 ;; builtin___build_class__(PyObject **args, int64_t nargs) -> PyObject*
@@ -654,8 +681,9 @@ builtin___build_class__:
     ret
 
 .build_class_error:
-    CSTRING rdi, "TypeError: __build_class__ requires 2+ arguments"
-    call fatal_error
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "__build_class__ requires 2+ arguments"
+    call raise_exception
 
 section .rodata
 .bc_init_name: db "__init__", 0
@@ -728,46 +756,162 @@ builtins_init:
 
     ; Create __build_class__ wrapper and store globally
     lea rdi, [rel builtin___build_class__]
-    lea rsi, [rel .name_build_class]
+    lea rsi, [rel bi_name_build_class]
     call builtin_func_new
     mov [rel build_class_obj], rax
 
     ; Register __build_class__ in builtins dict
     mov rdi, rbx
-    lea rsi, [rel .name_build_class]
+    lea rsi, [rel bi_name_build_class]
     lea rdx, [rel builtin___build_class__]
     call add_builtin
 
     ; Add builtins using helper
     mov rdi, rbx
-    lea rsi, [rel .name_print]
+    lea rsi, [rel bi_name_print]
     lea rdx, [rel builtin_print]
     call add_builtin
 
     mov rdi, rbx
-    lea rsi, [rel .name_len]
+    lea rsi, [rel bi_name_len]
     lea rdx, [rel builtin_len]
     call add_builtin
 
     mov rdi, rbx
-    lea rsi, [rel .name_range]
+    lea rsi, [rel bi_name_range]
     lea rdx, [rel builtin_range]
     call add_builtin
 
     mov rdi, rbx
-    lea rsi, [rel .name_type]
+    lea rsi, [rel bi_name_type]
     lea rdx, [rel builtin_type]
     call add_builtin
 
     mov rdi, rbx
-    lea rsi, [rel .name_isinstance]
+    lea rsi, [rel bi_name_isinstance]
     lea rdx, [rel builtin_isinstance]
     call add_builtin
 
     mov rdi, rbx
-    lea rsi, [rel .name_repr]
+    lea rsi, [rel bi_name_repr]
     lea rdx, [rel builtin_repr]
     call add_builtin
+
+    ; Register exception types as builtins
+    mov rdi, rbx
+    lea rsi, [rel bi_name_BaseException]
+    lea rdx, [rel exc_BaseException_type]
+    call add_exc_type_builtin
+
+    mov rdi, rbx
+    lea rsi, [rel bi_name_Exception]
+    lea rdx, [rel exc_Exception_type]
+    call add_exc_type_builtin
+
+    mov rdi, rbx
+    lea rsi, [rel bi_name_TypeError]
+    lea rdx, [rel exc_TypeError_type]
+    call add_exc_type_builtin
+
+    mov rdi, rbx
+    lea rsi, [rel bi_name_ValueError]
+    lea rdx, [rel exc_ValueError_type]
+    call add_exc_type_builtin
+
+    mov rdi, rbx
+    lea rsi, [rel bi_name_KeyError]
+    lea rdx, [rel exc_KeyError_type]
+    call add_exc_type_builtin
+
+    mov rdi, rbx
+    lea rsi, [rel bi_name_IndexError]
+    lea rdx, [rel exc_IndexError_type]
+    call add_exc_type_builtin
+
+    mov rdi, rbx
+    lea rsi, [rel bi_name_AttributeError]
+    lea rdx, [rel exc_AttributeError_type]
+    call add_exc_type_builtin
+
+    mov rdi, rbx
+    lea rsi, [rel bi_name_NameError]
+    lea rdx, [rel exc_NameError_type]
+    call add_exc_type_builtin
+
+    mov rdi, rbx
+    lea rsi, [rel bi_name_RuntimeError]
+    lea rdx, [rel exc_RuntimeError_type]
+    call add_exc_type_builtin
+
+    mov rdi, rbx
+    lea rsi, [rel bi_name_StopIteration]
+    lea rdx, [rel exc_StopIteration_type]
+    call add_exc_type_builtin
+
+    mov rdi, rbx
+    lea rsi, [rel bi_name_ZeroDivisionError]
+    lea rdx, [rel exc_ZeroDivisionError_type]
+    call add_exc_type_builtin
+
+    mov rdi, rbx
+    lea rsi, [rel bi_name_NotImplementedError]
+    lea rdx, [rel exc_NotImplementedError_type]
+    call add_exc_type_builtin
+
+    mov rdi, rbx
+    lea rsi, [rel bi_name_OverflowError]
+    lea rdx, [rel exc_OverflowError_type]
+    call add_exc_type_builtin
+
+    mov rdi, rbx
+    lea rsi, [rel bi_name_AssertionError]
+    lea rdx, [rel exc_AssertionError_type]
+    call add_exc_type_builtin
+
+    mov rdi, rbx
+    lea rsi, [rel bi_name_OSError]
+    lea rdx, [rel exc_OSError_type]
+    call add_exc_type_builtin
+
+    mov rdi, rbx
+    lea rsi, [rel bi_name_LookupError]
+    lea rdx, [rel exc_LookupError_type]
+    call add_exc_type_builtin
+
+    mov rdi, rbx
+    lea rsi, [rel bi_name_ArithmeticError]
+    lea rdx, [rel exc_ArithmeticError_type]
+    call add_exc_type_builtin
+
+    mov rdi, rbx
+    lea rsi, [rel bi_name_RecursionError]
+    lea rdx, [rel exc_RecursionError_type]
+    call add_exc_type_builtin
+
+    mov rdi, rbx
+    lea rsi, [rel bi_name_ImportError]
+    lea rdx, [rel exc_ImportError_type]
+    call add_exc_type_builtin
+
+    mov rdi, rbx
+    lea rsi, [rel bi_name_MemoryError]
+    lea rdx, [rel exc_MemoryError_type]
+    call add_exc_type_builtin
+
+    mov rdi, rbx
+    lea rsi, [rel bi_name_KeyboardInterrupt]
+    lea rdx, [rel exc_KeyboardInterrupt_type]
+    call add_exc_type_builtin
+
+    mov rdi, rbx
+    lea rsi, [rel bi_name_SystemExit]
+    lea rdx, [rel exc_SystemExit_type]
+    call add_exc_type_builtin
+
+    mov rdi, rbx
+    lea rsi, [rel bi_name_UnicodeError]
+    lea rdx, [rel exc_UnicodeError_type]
+    call add_exc_type_builtin
 
     ; Return builtins dict
     mov rax, rbx
@@ -777,17 +921,78 @@ builtins_init:
     ret
 
 ;; ============================================================================
+;; add_exc_type_builtin(dict, name_cstr, type_ptr)
+;; Register an exception type object in the builtins dict.
+;; Types are immortal, so no DECREF needed on the value.
+;; rdi=dict, rsi=name_cstr, rdx=type_ptr
+;; ============================================================================
+add_exc_type_builtin:
+    push rbp
+    mov rbp, rsp
+    push rbx
+    push r12
+
+    mov rbx, rdi               ; dict
+    mov r12, rdx               ; type_ptr
+
+    ; Create key string
+    mov rdi, rsi
+    call str_from_cstr
+    push rax                   ; save key
+
+    ; dict_set(dict, key, type_ptr)
+    ; INCREF the type (dict_set will INCREF it, types are immortal anyway)
+    mov rdi, rbx
+    mov rsi, rax               ; key
+    mov rdx, r12               ; type object
+    call dict_set
+
+    ; DECREF key
+    pop rdi
+    call obj_decref
+
+    pop r12
+    pop rbx
+    pop rbp
+    ret
+
+;; ============================================================================
 ;; Data section
 ;; ============================================================================
 section .rodata
 
-.name_print:        db "print", 0
-.name_len:          db "len", 0
-.name_range:        db "range", 0
-.name_type:         db "type", 0
-.name_isinstance:   db "isinstance", 0
-.name_repr:         db "repr", 0
-.name_build_class:  db "__build_class__", 0
+bi_name_print:        db "print", 0
+bi_name_len:          db "len", 0
+bi_name_range:        db "range", 0
+bi_name_type:         db "type", 0
+bi_name_isinstance:   db "isinstance", 0
+bi_name_repr:         db "repr", 0
+bi_name_build_class:  db "__build_class__", 0
+
+; Exception type names
+bi_name_BaseException:     db "BaseException", 0
+bi_name_Exception:         db "Exception", 0
+bi_name_TypeError:         db "TypeError", 0
+bi_name_ValueError:        db "ValueError", 0
+bi_name_KeyError:          db "KeyError", 0
+bi_name_IndexError:        db "IndexError", 0
+bi_name_AttributeError:    db "AttributeError", 0
+bi_name_NameError:         db "NameError", 0
+bi_name_RuntimeError:      db "RuntimeError", 0
+bi_name_StopIteration:     db "StopIteration", 0
+bi_name_ZeroDivisionError: db "ZeroDivisionError", 0
+bi_name_NotImplementedError: db "NotImplementedError", 0
+bi_name_OverflowError:     db "OverflowError", 0
+bi_name_AssertionError:    db "AssertionError", 0
+bi_name_OSError:           db "OSError", 0
+bi_name_LookupError:       db "LookupError", 0
+bi_name_ArithmeticError:   db "ArithmeticError", 0
+bi_name_RecursionError:    db "RecursionError", 0
+bi_name_ImportError:       db "ImportError", 0
+bi_name_MemoryError:       db "MemoryError", 0
+bi_name_KeyboardInterrupt: db "KeyboardInterrupt", 0
+bi_name_SystemExit:        db "SystemExit", 0
+bi_name_UnicodeError:      db "UnicodeError", 0
 
 section .data
 

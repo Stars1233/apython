@@ -19,6 +19,8 @@ extern bool_false
 extern int_from_i64
 extern int_to_i64
 extern fatal_error
+extern raise_exception
+extern exc_IndexError_type
 
 ; str_from_cstr(const char *cstr) -> PyStrObject*
 ; Creates a new string object from a C string
@@ -453,8 +455,9 @@ str_getitem:
     ret
 
 .index_error:
-    CSTRING rdi, "IndexError: string index out of range"
-    call fatal_error
+    lea rdi, [rel exc_IndexError_type]
+    CSTRING rsi, "string index out of range"
+    call raise_exception
 
 ;; ============================================================================
 ;; str_subscript(PyObject *self, PyObject *key) -> PyObject*

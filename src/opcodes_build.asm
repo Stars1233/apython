@@ -25,6 +25,8 @@ extern obj_dealloc
 extern obj_decref
 extern obj_is_true
 extern fatal_error
+extern raise_exception
+extern exc_TypeError_type
 extern int_to_i64
 extern tuple_new
 extern list_new
@@ -86,8 +88,9 @@ op_binary_subscr:
     jmp .subscr_done
 
 .no_subscript:
-    CSTRING rdi, "TypeError: object is not subscriptable"
-    call fatal_error
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "object is not subscriptable"
+    call raise_exception
 
 .subscr_done:
     ; rax = result
@@ -161,8 +164,9 @@ op_store_subscr:
     jmp .store_done
 
 .store_error:
-    CSTRING rdi, "TypeError: object does not support item assignment"
-    call fatal_error
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "object does not support item assignment"
+    call raise_exception
 
 .store_done:
     pop rdi                    ; value
@@ -460,8 +464,9 @@ op_unpack_sequence:
     je .unpack_list
 
     ; Unknown type
-    CSTRING rdi, "TypeError: cannot unpack non-sequence"
-    call fatal_error
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "cannot unpack non-sequence"
+    call raise_exception
 
 .unpack_tuple:
     ; Items are inline at ob_item
@@ -526,8 +531,9 @@ op_get_iter:
     DISPATCH
 
 .not_iterable:
-    CSTRING rdi, "TypeError: object is not iterable"
-    call fatal_error
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "object is not iterable"
+    call raise_exception
 
 ;; ============================================================================
 ;; op_for_iter - Advance iterator, or jump if exhausted
@@ -652,8 +658,9 @@ op_list_extend:
     cmp rax, rdx
     je .extend_list
 
-    CSTRING rdi, "TypeError: list.extend() argument must be a list or tuple"
-    call fatal_error
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "list.extend() argument must be a list or tuple"
+    call raise_exception
 
 .extend_tuple:
     mov rcx, [rsi + PyTupleObject.ob_size]
@@ -792,5 +799,6 @@ op_contains_op:
     DISPATCH
 
 .contains_error:
-    CSTRING rdi, "TypeError: argument of type is not iterable"
-    call fatal_error
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "argument of type is not iterable"
+    call raise_exception

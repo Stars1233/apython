@@ -20,6 +20,9 @@ extern dict_get
 extern dict_set
 extern str_from_cstr
 extern fatal_error
+extern raise_exception
+extern exc_AttributeError_type
+extern exc_TypeError_type
 extern func_type
 extern eval_frame
 extern frame_new
@@ -123,8 +126,9 @@ instance_getattr:
     ret
 
 .not_found:
-    CSTRING rdi, "AttributeError: attribute not found"
-    call fatal_error
+    lea rdi, [rel exc_AttributeError_type]
+    CSTRING rsi, "attribute not found"
+    call raise_exception
     ; does not return
 
 ;; ============================================================================
@@ -302,8 +306,9 @@ type_call:
     ret
 
 .init_not_callable:
-    CSTRING rdi, "TypeError: __init__ is not callable"
-    call fatal_error
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "__init__ is not callable"
+    call raise_exception
     ; does not return
 
 ;; ============================================================================
