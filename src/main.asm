@@ -10,12 +10,14 @@ section .text
 extern bool_init
 extern builtins_init
 extern dict_new
+extern dict_set
 extern frame_new
 extern frame_free
 extern eval_frame
 extern pyc_read_file
 extern fatal_error
 extern obj_decref
+extern str_from_cstr
 extern fprintf
 extern stderr
 
@@ -50,9 +52,20 @@ main:
     call builtins_init
     mov r13, rax             ; r13 = builtins dict
 
-    ; Create globals dict (empty)
+    ; Create globals dict
     call dict_new
     mov r14, rax             ; r14 = globals dict
+
+    ; Set __name__ = "__main__" in globals
+    lea rdi, [rel __name__cstr]
+    call str_from_cstr
+    push rax                 ; save key str
+    lea rdi, [rel __main__cstr]
+    call str_from_cstr
+    mov rdx, rax             ; value = "__main__" str
+    pop rsi                  ; key = "__name__" str
+    mov rdi, r14             ; dict = globals
+    call dict_set
 
     ; Create execution frame
     ; frame_new(code, globals, builtins, locals)
@@ -89,3 +102,7 @@ main:
 .load_failed:
     CSTRING rdi, "Error: failed to load .pyc file"
     call fatal_error
+
+section .rodata
+__name__cstr: db "__name__", 0
+__main__cstr: db "__main__", 0

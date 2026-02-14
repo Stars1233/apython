@@ -538,18 +538,71 @@ dict_len:
     ret
 
 ;; ============================================================================
+;; dict_subscript(PyDictObject *dict, PyObject *key) -> PyObject*
+;; mp_subscript: look up key, fatal KeyError if not found
+;; ============================================================================
+global dict_subscript
+dict_subscript:
+    push rbp
+    mov rbp, rsp
+    push rbx
+
+    mov rbx, rsi               ; save key for error msg
+
+    ; dict_get(dict, key)
+    call dict_get
+    test rax, rax
+    jz .key_error
+
+    ; INCREF the returned value (dict_get returns borrowed ref)
+    INCREF rax
+    pop rbx
+    pop rbp
+    ret
+
+.key_error:
+    CSTRING rdi, "KeyError"
+    call fatal_error
+
+;; ============================================================================
+;; dict_ass_subscript(PyDictObject *dict, PyObject *key, PyObject *value)
+;; mp_ass_subscript: set key=value in dict
+;; ============================================================================
+global dict_ass_subscript
+dict_ass_subscript:
+    ; Simply delegate to dict_set
+    jmp dict_set
+
+;; ============================================================================
+;; dict_repr(PyObject *self) -> PyStrObject*
+;; Returns "{...}" placeholder
+;; ============================================================================
+global dict_repr
+dict_repr:
+    push rbp
+    mov rbp, rsp
+    extern str_from_cstr
+    lea rdi, [rel dict_repr_str]
+    call str_from_cstr
+    pop rbp
+    ret
+
+;; ============================================================================
 ;; Data section
 ;; ============================================================================
 section .data
+
+dict_repr_str: db "{...}", 0
 
 dict_name_str: db "dict", 0
 
 ; Dict mapping methods
 align 8
+global dict_mapping_methods
 dict_mapping_methods:
     dq dict_len                 ; mp_length
-    dq 0                        ; mp_subscript (TODO)
-    dq 0                        ; mp_ass_subscript (TODO)
+    dq dict_subscript           ; mp_subscript
+    dq dict_ass_subscript       ; mp_ass_subscript
 
 ; Dict type object
 align 8
@@ -560,8 +613,8 @@ dict_type:
     dq dict_name_str            ; tp_name
     dq PyDictObject_size        ; tp_basicsize
     dq dict_dealloc             ; tp_dealloc
-    dq 0                        ; tp_repr (TODO)
-    dq 0                        ; tp_str (TODO)
+    dq dict_repr                ; tp_repr
+    dq dict_repr                ; tp_str
     dq 0                        ; tp_hash (unhashable)
     dq 0                        ; tp_call
     dq 0                        ; tp_getattr

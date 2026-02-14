@@ -497,6 +497,19 @@ mdo_small_tuple:
     push r13
     push r14
     push r15
+    sub rsp, 16                ; [rsp+0]=saved FLAG_REF, [rsp+8]=ref index
+
+    ; Reserve ref slot BEFORE reading children (CPython does the same).
+    ; Children will get ref indices after this slot, matching CPython order.
+    mov [rsp + 0], r12         ; save FLAG_REF
+    test r12d, r12d
+    jz .stuple_no_reserve
+    xor edi, edi               ; NULL placeholder
+    call marshal_add_ref
+    mov rax, [rel marshal_ref_count]
+    dec rax
+    mov [rsp + 8], rax         ; save ref index for fixup
+.stuple_no_reserve:
 
     call marshal_read_byte     ; al = count
     movzx r13d, al             ; r13 = count
@@ -524,11 +537,21 @@ mdo_small_tuple:
     jmp .stuple_loop
 
 .stuple_done:
+    ; Fix up reserved ref slot with the actual tuple
+    mov rax, [rsp + 0]        ; saved FLAG_REF
+    test eax, eax
+    jz .stuple_no_fixup
+    mov rax, [rsp + 8]        ; ref index
+    mov rcx, [rel marshal_refs]
+    mov [rcx + rax * 8], r14  ; fix up placeholder with tuple
+.stuple_no_fixup:
     mov rax, r14               ; return the tuple
+    add rsp, 16
     pop r15
     pop r14
     pop r13
-    pop r12                    ; restore FLAG_REF
+    pop r12                    ; restore original r12
+    xor r12d, r12d             ; clear FLAG_REF — we handled it ourselves
     jmp mfinish
 
 ;--------------------------------------------------------------------------
@@ -539,6 +562,18 @@ mdo_tuple:
     push r13
     push r14
     push r15
+    sub rsp, 16                ; [rsp+0]=saved FLAG_REF, [rsp+8]=ref index
+
+    ; Reserve ref slot BEFORE reading children (same as CPython)
+    mov [rsp + 0], r12
+    test r12d, r12d
+    jz .tuple_no_reserve
+    xor edi, edi               ; NULL placeholder
+    call marshal_add_ref
+    mov rax, [rel marshal_ref_count]
+    dec rax
+    mov [rsp + 8], rax         ; save ref index for fixup
+.tuple_no_reserve:
 
     call marshal_read_long     ; eax = count
     mov r13d, eax              ; r13 = count (unsigned)
@@ -565,11 +600,21 @@ mdo_tuple:
     jmp .tuple_loop
 
 .tuple_done:
+    ; Fix up reserved ref slot with the actual tuple
+    mov rax, [rsp + 0]        ; saved FLAG_REF
+    test eax, eax
+    jz .tuple_no_fixup
+    mov rax, [rsp + 8]        ; ref index
+    mov rcx, [rel marshal_refs]
+    mov [rcx + rax * 8], r14  ; fix up placeholder with tuple
+.tuple_no_fixup:
     mov rax, r14
+    add rsp, 16
     pop r15
     pop r14
     pop r13
-    pop r12                    ; restore FLAG_REF
+    pop r12                    ; restore original r12
+    xor r12d, r12d             ; clear FLAG_REF — we handled it ourselves
     jmp mfinish
 
 ;--------------------------------------------------------------------------

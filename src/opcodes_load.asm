@@ -22,6 +22,9 @@ extern eval_dispatch
 extern obj_dealloc
 extern dict_get
 extern fatal_error
+extern obj_incref
+extern obj_decref
+extern func_type
 
 ;; ============================================================================
 ;; op_load_const - Load constant from co_consts[arg]
@@ -146,4 +149,142 @@ op_load_name:
 .found_no_pop:
     INCREF rax
     VPUSH rax
+    DISPATCH
+
+;; ============================================================================
+;; op_load_build_class - Push __build_class__ builtin onto the stack
+;;
+;; Opcode 71: LOAD_BUILD_CLASS
+;; Pushes the __build_class__ function from the global build_class_obj.
+;; ============================================================================
+extern build_class_obj
+
+global op_load_build_class
+op_load_build_class:
+    mov rax, [rel build_class_obj]
+    INCREF rax
+    VPUSH rax
+    DISPATCH
+
+;; ============================================================================
+;; op_load_attr - Load attribute from object
+;;
+;; Python 3.12 LOAD_ATTR (opcode 106):
+;;   ecx = arg
+;;   name_index = ecx >> 1
+;;   flag = ecx & 1
+;;
+;; Pop obj from value stack, look up attr by name on obj.
+;; flag=0: push attr, DECREF obj
+;; flag=1: method-style load:
+;;   If attr is a function: push obj as self, push attr
+;;   Else: push NULL, push attr, DECREF obj
+;;
+;; Followed by 9 CACHE entries (18 bytes) that must be skipped.
+;; ============================================================================
+global op_load_attr
+op_load_attr:
+    push rbp
+    mov rbp, rsp
+    sub rsp, 32             ; [rbp-8]=flag, [rbp-16]=obj, [rbp-24]=name, [rbp-32]=attr
+
+    ; Extract flag and name_index
+    mov eax, ecx
+    and eax, 1
+    mov [rbp-8], rax        ; flag
+
+    shr ecx, 1              ; name_index
+    mov rsi, [r15 + rcx*8]  ; name string
+    mov [rbp-24], rsi
+
+    ; Pop obj
+    VPOP rdi
+    mov [rbp-16], rdi
+
+    ; Look up attribute
+    ; Check if obj's type has tp_getattr
+    mov rax, [rdi + PyObject.ob_type]
+    mov rax, [rax + PyTypeObject.tp_getattr]
+    test rax, rax
+    jz .la_try_dict
+
+    ; Call tp_getattr(obj, name)
+    mov rdi, [rbp-16]
+    mov rsi, [rbp-24]
+    call rax
+    test rax, rax
+    jz .la_attr_error
+    mov [rbp-32], rax
+    jmp .la_got_attr
+
+.la_try_dict:
+    ; No tp_getattr - try obj's type's tp_dict directly
+    mov rdi, [rbp-16]
+    mov rax, [rdi + PyObject.ob_type]
+    mov rax, [rax + PyTypeObject.tp_dict]
+    test rax, rax
+    jz .la_attr_error
+
+    ; dict_get(type->tp_dict, name)
+    mov rdi, rax
+    mov rsi, [rbp-24]
+    call dict_get
+    test rax, rax
+    jz .la_attr_error
+
+    ; INCREF the result (dict_get returns borrowed ref)
+    mov [rbp-32], rax
+    mov rdi, rax
+    call obj_incref
+    jmp .la_got_attr
+
+.la_attr_error:
+    CSTRING rdi, "AttributeError: object has no attribute"
+    call fatal_error
+
+.la_got_attr:
+    ; Check flag
+    cmp qword [rbp-8], 0
+    jne .la_method_load
+
+    ; flag=0: simple attribute load
+    mov rax, [rbp-32]
+    VPUSH rax
+
+    ; DECREF obj
+    mov rdi, [rbp-16]
+    call obj_decref
+
+    jmp .la_done
+
+.la_method_load:
+    ; flag=1: method-style load
+    ; Check if attr is a function
+    mov rax, [rbp-32]
+    mov rcx, [rax + PyObject.ob_type]
+    lea rdx, [rel func_type]
+    cmp rcx, rdx
+    jne .la_not_method
+
+    ; It's a function -> method call pattern
+    ; Push self (obj), then push func
+    ; Don't DECREF obj since it stays on stack as self
+    mov rax, [rbp-16]
+    VPUSH rax              ; push self (obj already has a ref from the pop)
+    mov rax, [rbp-32]
+    VPUSH rax              ; push func
+    jmp .la_done
+
+.la_not_method:
+    ; Non-function attr with flag=1: push NULL then attr
+    mov rdi, [rbp-16]
+    call obj_decref        ; DECREF obj
+    xor eax, eax
+    VPUSH rax              ; push NULL
+    mov rax, [rbp-32]
+    VPUSH rax              ; push attr
+
+.la_done:
+    add rbx, 18            ; skip 9 CACHE entries
+    leave
     DISPATCH

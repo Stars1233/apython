@@ -22,11 +22,12 @@ section .text
 extern eval_dispatch
 extern obj_dealloc
 extern obj_decref
+extern obj_incref
 extern fatal_error
 extern func_new
 
 ;; ============================================================================
-;; op_call - Call a callable object (Phase 4: builtin functions only)
+;; op_call - Call a callable object
 ;;
 ;; Python 3.12 CALL opcode (171).
 ;;
@@ -41,86 +42,132 @@ extern func_new
 ;;   callable     = [r13 - (nargs+1)*8]
 ;;   null_or_self = [r13 - (nargs+2)*8]
 ;;
+;; Method calls (null_or_self != NULL):
+;;   self is inserted as the first argument by overwriting the callable's
+;;   value stack slot, and nargs is incremented by 1.
+;;
 ;; After the call:
-;;   1. DECREF each argument
-;;   2. DECREF callable
-;;   3. DECREF null_or_self (no-op if NULL via obj_decref)
-;;   4. Pop all consumed items (nargs + 2) from value stack
-;;   5. Push return value
-;;   6. Skip 3 CACHE entries (6 bytes): add rbx, 6
+;;   1. DECREF each argument (including self copy for method calls)
+;;   2. For method calls: DECREF original self_or_null, DECREF saved callable
+;;      For function calls: DECREF callable, DECREF null_or_self (NULL)
+;;   3. Pop all consumed items from value stack
+;;   4. Push return value
+;;   5. Skip 3 CACHE entries (6 bytes): add rbx, 6
 ;;
 ;; Followed by 3 CACHE entries (6 bytes) that must be skipped.
 ;; ============================================================================
 global op_call
 op_call:
-    ; ecx = nargs
-    ; We enter from dispatch with rsp at 8-mod-16 (misaligned for calls).
-    ; Use a frame pointer to manage stack alignment and local storage.
     push rbp
     mov rbp, rsp
-    ; rsp is now 16-byte aligned (8-mod-16 + push rbp = 0-mod-16)
+    ; Locals:
+    ;   [rbp-8]  = nargs (possibly incremented for method calls)
+    ;   [rbp-16] = callable ptr (saved before overwriting stack slot)
+    ;   [rbp-24] = return value from tp_call
+    ;   [rbp-32] = is_method (0 or 1)
+    ;   [rbp-40] = original nargs (before increment)
+    sub rsp, 48                     ; allocate locals (48 keeps 16-byte alignment)
 
-    ; Save nargs in a callee-saved location (use the stack frame)
-    ; We cannot use r8-r11 across calls (caller-saved).
-    ; Use rbp-relative locals instead.
-    ; [rbp-8]  = nargs
-    ; [rbp-16] = callable ptr
-    ; [rbp-24] = return value from tp_call
-    sub rsp, 32                     ; allocate locals (32 keeps 16-byte alignment)
+    mov [rbp-8], rcx                ; save nargs
+    mov [rbp-40], rcx               ; save original nargs
 
-    mov [rbp-8], rcx                ; save nargs (zero-extended, qword)
-
-    ; Compute callable address: [r13 - (nargs+1)*8]
+    ; Extract callable: [r13 - (nargs+1)*8]
     lea rax, [rcx + 1]
     neg rax
-    mov rdi, [r13 + rax*8]         ; rdi = callable
+    mov rdi, [r13 + rax*8]
     mov [rbp-16], rdi               ; save callable
 
+    ; Extract self_or_null: [r13 - (nargs+2)*8]
+    lea rax, [rcx + 2]
+    neg rax
+    mov r8, [r13 + rax*8]          ; r8 = self_or_null
+    mov qword [rbp-32], 0          ; is_method = 0
+
+    test r8, r8
+    jz .setup_call
+
+    ; === Method call: self_or_null is non-NULL ===
+    mov qword [rbp-32], 1          ; is_method = 1
+
+    ; INCREF self for the copy we're about to place in callable's slot
+    mov rdi, r8
+    call obj_incref
+
+    ; Reload self from value stack (registers may be clobbered by call)
+    mov rcx, [rbp-40]              ; original nargs
+    lea rax, [rcx + 2]
+    neg rax
+    mov r8, [r13 + rax*8]          ; r8 = self (reload)
+
+    ; Overwrite callable's value stack slot with self
+    mov rcx, [rbp-8]
+    lea rax, [rcx + 1]
+    neg rax
+    mov [r13 + rax*8], r8          ; callable slot now holds self
+
+    ; Increment nargs (self becomes first arg)
+    inc qword [rbp-8]
+
+.setup_call:
     ; Get tp_call from the callable's type
+    mov rdi, [rbp-16]              ; callable
     mov rax, [rdi + PyObject.ob_type]
     mov rax, [rax + PyTypeObject.tp_call]
     test rax, rax
     jz .not_callable
 
-    ; Set up args for tp_call(callable, args_ptr, nargs)
-    ;   rdi = callable (already set)
-    ;   rsi = pointer to first arg = r13 - nargs*8
-    ;   edx = nargs
-    mov rcx, [rbp-8]               ; reload nargs
-    mov rdx, rcx                    ; rdx = nargs
+    ; Set up args: tp_call(callable, args_ptr, nargs)
+    mov rcx, [rbp-8]
+    mov rdx, rcx                    ; total nargs (may include self)
     neg rcx
-    lea rsi, [r13 + rcx*8]         ; rsi = &args[0]
+    lea rsi, [r13 + rcx*8]         ; args_ptr
 
-    ; rdi = callable (already set above)
-    call rax                        ; call tp_call
+    mov rdi, [rbp-16]              ; callable
+    call rax
     mov [rbp-24], rax               ; save return value
 
-    ; --- Cleanup: DECREF all args, callable, and null_or_self ---
-
-    ; DECREF each argument (from top of stack downward)
-    mov rcx, [rbp-8]               ; rcx = nargs (loop counter)
+    ; === Cleanup ===
+    ; Pop nargs items (may include self copy for method calls), DECREF each
+    mov rcx, [rbp-8]
     test rcx, rcx
     jz .args_done
 .decref_args:
-    sub r13, 8                      ; pop from value stack
-    mov rdi, [r13]                  ; rdi = arg object
+    sub r13, 8
+    mov rdi, [r13]
     call obj_decref
-    dec qword [rbp-8]              ; decrement counter in memory
-    mov rcx, [rbp-8]
-    test rcx, rcx
+    dec qword [rbp-8]
+    cmp qword [rbp-8], 0
     jnz .decref_args
 .args_done:
 
-    ; DECREF callable
-    sub r13, 8                      ; pop callable from value stack
+    ; Branch based on whether this was a method call
+    cmp qword [rbp-32], 0
+    je .func_cleanup
+
+    ; === Method cleanup ===
+    ; Pop the original self_or_null slot and DECREF it
+    sub r13, 8
     mov rdi, [r13]
     call obj_decref
 
-    ; DECREF null_or_self (obj_decref is NULL-safe)
-    sub r13, 8                      ; pop null_or_self from value stack
+    ; DECREF saved callable (its stack slot was overwritten with self)
+    mov rdi, [rbp-16]
+    call obj_decref
+    jmp .push_result
+
+.func_cleanup:
+    ; === Function cleanup (original path) ===
+    ; Pop callable from value stack and DECREF
+    sub r13, 8
     mov rdi, [r13]
     call obj_decref
 
+    ; Pop null_or_self (NULL, obj_decref is null-safe) and DECREF
+    sub r13, 8
+    mov rdi, [r13]
+    call obj_decref
+
+.push_result:
     ; Push return value onto value stack
     mov rax, [rbp-24]
     VPUSH rax

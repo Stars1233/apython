@@ -12,6 +12,8 @@ extern ap_free
 extern obj_decref
 extern str_from_cstr
 extern obj_hash
+extern int_to_i64
+extern fatal_error
 
 ; tuple_new(int64_t size) -> PyTupleObject*
 ; Allocate a tuple with room for 'size' items, zero-filled
@@ -56,10 +58,41 @@ tuple_new:
     ret
 
 ; tuple_getitem(PyTupleObject *tuple, int64_t index) -> PyObject*
-; Return tuple->ob_item[index] (no bounds check)
+; sq_item: Return tuple->ob_item[index] with bounds check and INCREF
 global tuple_getitem
 tuple_getitem:
+    ; Handle negative index
+    test rsi, rsi
+    jns .positive
+    add rsi, [rdi + PyTupleObject.ob_size]
+.positive:
+    ; Bounds check
+    cmp rsi, [rdi + PyTupleObject.ob_size]
+    jge .index_error
+    cmp rsi, 0
+    jl .index_error
     mov rax, [rdi + PyTupleObject.ob_item + rsi*8]
+    INCREF rax
+    ret
+.index_error:
+    CSTRING rdi, "IndexError: tuple index out of range"
+    call fatal_error
+
+; tuple_subscript(PyTupleObject *tuple, PyObject *key) -> PyObject*
+; mp_subscript: index with int key (for BINARY_SUBSCR)
+global tuple_subscript
+tuple_subscript:
+    push rbp
+    mov rbp, rsp
+    push rbx
+    mov rbx, rdi               ; save tuple
+    mov rdi, rsi               ; key
+    call int_to_i64
+    mov rsi, rax               ; index
+    mov rdi, rbx
+    call tuple_getitem
+    pop rbx
+    pop rbp
     ret
 
 ; tuple_len(PyTupleObject *tuple) -> int64_t
@@ -176,6 +209,25 @@ section .data
 tuple_name_str: db "tuple", 0
 tuple_repr_str: db "(...)", 0
 
+; Tuple sequence methods
+align 8
+tuple_sequence_methods:
+    dq tuple_len            ; sq_length
+    dq 0                    ; sq_concat
+    dq 0                    ; sq_repeat
+    dq tuple_getitem        ; sq_item
+    dq 0                    ; sq_ass_item
+    dq 0                    ; sq_contains
+    dq 0                    ; sq_inplace_concat
+    dq 0                    ; sq_inplace_repeat
+
+; Tuple mapping methods
+align 8
+tuple_mapping_methods:
+    dq tuple_len            ; mp_length
+    dq tuple_subscript      ; mp_subscript
+    dq 0                    ; mp_ass_subscript
+
 ; tuple type object
 align 8
 global tuple_type
@@ -192,13 +244,13 @@ tuple_type:
     dq 0                    ; tp_getattr
     dq 0                    ; tp_setattr
     dq 0                    ; tp_richcompare
-    dq 0                    ; tp_iter
+    dq 0                    ; tp_iter (set by init_iter_types)
     dq 0                    ; tp_iternext
     dq 0                    ; tp_init
     dq 0                    ; tp_new
     dq 0                    ; tp_as_number
-    dq 0                    ; tp_as_sequence
-    dq 0                    ; tp_as_mapping
+    dq tuple_sequence_methods ; tp_as_sequence
+    dq tuple_mapping_methods ; tp_as_mapping
     dq 0                    ; tp_base
     dq 0                    ; tp_dict
     dq 0                    ; tp_mro

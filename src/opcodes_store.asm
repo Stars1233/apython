@@ -20,7 +20,9 @@ section .text
 
 extern eval_dispatch
 extern obj_dealloc
+extern obj_decref
 extern dict_set
+extern fatal_error
 
 ;; ============================================================================
 ;; op_store_fast - Store TOS into localsplus[arg]
@@ -68,3 +70,78 @@ op_store_name:
     mov rdx, r9                ; rdx = value
     call dict_set
     DISPATCH
+
+;; ============================================================================
+;; op_store_global - Store TOS under co_names[arg] in globals dict
+;;
+;; Same as store_name but always uses globals.
+;; ============================================================================
+global op_store_global
+op_store_global:
+    ; ecx = arg (index into co_names)
+    mov r8, [r15 + rcx*8]      ; r8 = name (key)
+    VPOP r9                    ; r9 = value to store
+
+    ; Always store in globals
+    mov rdi, [r12 + PyFrame.globals]
+    mov rsi, r8                ; rsi = name (key)
+    mov rdx, r9                ; rdx = value
+    call dict_set
+    DISPATCH
+
+;; ============================================================================
+;; op_store_attr - Store TOS-1 as attribute of TOS
+;;
+;; Python 3.12 STORE_ATTR (opcode 95):
+;;   ecx = name index in co_names
+;;
+;; Stack: ... | value | obj |  (obj=TOS, value=TOS-1)
+;; Pops obj, pops value, sets obj.name = value via tp_setattr.
+;; DECREF obj and value after the store.
+;; Followed by 4 CACHE entries (8 bytes) that must be skipped.
+;; ============================================================================
+global op_store_attr
+op_store_attr:
+    push rbp
+    mov rbp, rsp
+    sub rsp, 32               ; [rbp-8]=obj, [rbp-16]=value, [rbp-24]=name
+
+    ; Get name
+    mov rax, [r15 + rcx*8]
+    mov [rbp-24], rax
+
+    ; Pop obj (TOS)
+    VPOP rdi
+    mov [rbp-8], rdi
+
+    ; Pop value
+    VPOP rdi
+    mov [rbp-16], rdi
+
+    ; Check tp_setattr
+    mov rdi, [rbp-8]
+    mov rax, [rdi + PyObject.ob_type]
+    mov rax, [rax + PyTypeObject.tp_setattr]
+    test rax, rax
+    jz .sa_no_setattr
+
+    ; Call tp_setattr(obj, name, value)
+    mov rdi, [rbp-8]
+    mov rsi, [rbp-24]
+    mov rdx, [rbp-16]
+    call rax
+
+    ; DECREF value
+    mov rdi, [rbp-16]
+    call obj_decref
+    ; DECREF obj
+    mov rdi, [rbp-8]
+    call obj_decref
+
+    add rbx, 8                ; skip 4 CACHE entries
+    leave
+    DISPATCH
+
+.sa_no_setattr:
+    CSTRING rdi, "AttributeError: cannot set attribute"
+    call fatal_error

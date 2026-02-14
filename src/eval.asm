@@ -19,6 +19,7 @@ extern op_store_fast
 extern op_load_global
 extern op_load_name
 extern op_store_name
+extern op_store_global
 extern op_binary_op
 extern op_call
 extern op_compare_op
@@ -27,11 +28,29 @@ extern op_pop_jump_if_true
 extern op_jump_forward
 extern op_jump_backward
 extern op_copy
+extern op_swap
 extern op_unary_negative
 extern op_unary_not
 extern op_pop_jump_if_none
 extern op_pop_jump_if_not_none
 extern op_make_function
+extern op_binary_subscr
+extern op_store_subscr
+extern op_build_tuple
+extern op_build_list
+extern op_build_map
+extern op_build_const_key_map
+extern op_unpack_sequence
+extern op_get_iter
+extern op_for_iter
+extern op_end_for
+extern op_list_append
+extern op_list_extend
+extern op_is_op
+extern op_contains_op
+extern op_load_build_class
+extern op_store_attr
+extern op_load_attr
 
 ; External error handler
 extern error_unimplemented_opcode
@@ -124,7 +143,7 @@ opcode_table:
     dq op_pop_top            ; 1   = POP_TOP
     dq op_push_null          ; 2   = PUSH_NULL
     dq op_interpreter_exit   ; 3   = INTERPRETER_EXIT
-    dq op_unimplemented      ; 4   = END_FOR
+    dq op_end_for            ; 4   = END_FOR
     dq op_unimplemented      ; 5   = END_SEND
     dq op_unimplemented      ; 6
     dq op_unimplemented      ; 7
@@ -145,7 +164,7 @@ opcode_table:
     dq op_unimplemented      ; 22
     dq op_unimplemented      ; 23
     dq op_unimplemented      ; 24
-    dq op_unimplemented      ; 25  = BINARY_SUBSCR
+    dq op_binary_subscr      ; 25  = BINARY_SUBSCR
     dq op_unimplemented      ; 26  = BINARY_SLICE
     dq op_unimplemented      ; 27  = STORE_SLICE
     dq op_unimplemented      ; 28
@@ -180,7 +199,7 @@ opcode_table:
     dq op_unimplemented      ; 57
     dq op_unimplemented      ; 58
     dq op_unimplemented      ; 59
-    dq op_unimplemented      ; 60  = STORE_SUBSCR
+    dq op_store_subscr       ; 60  = STORE_SUBSCR
     dq op_unimplemented      ; 61  = DELETE_SUBSCR
     dq op_unimplemented      ; 62
     dq op_unimplemented      ; 63
@@ -188,10 +207,10 @@ opcode_table:
     dq op_unimplemented      ; 65
     dq op_unimplemented      ; 66
     dq op_unimplemented      ; 67
-    dq op_unimplemented      ; 68  = GET_ITER
+    dq op_get_iter           ; 68  = GET_ITER
     dq op_unimplemented      ; 69  = GET_YIELD_FROM_ITER
     dq op_unimplemented      ; 70
-    dq op_unimplemented      ; 71  = LOAD_BUILD_CLASS
+    dq op_load_build_class   ; 71  = LOAD_BUILD_CLASS
     dq op_unimplemented      ; 72
     dq op_unimplemented      ; 73
     dq op_unimplemented      ; 74  = LOAD_ASSERTION_ERROR
@@ -212,21 +231,21 @@ opcode_table:
     dq op_unimplemented      ; 89  = POP_EXCEPT
     dq op_store_name         ; 90  = STORE_NAME
     dq op_unimplemented      ; 91  = DELETE_NAME
-    dq op_unimplemented      ; 92  = UNPACK_SEQUENCE
-    dq op_unimplemented      ; 93  = FOR_ITER
+    dq op_unpack_sequence    ; 92  = UNPACK_SEQUENCE
+    dq op_for_iter           ; 93  = FOR_ITER
     dq op_unimplemented      ; 94  = UNPACK_EX
-    dq op_unimplemented      ; 95  = STORE_ATTR
+    dq op_store_attr         ; 95  = STORE_ATTR
     dq op_unimplemented      ; 96  = DELETE_ATTR
-    dq op_unimplemented      ; 97  = STORE_GLOBAL
+    dq op_store_global       ; 97  = STORE_GLOBAL
     dq op_unimplemented      ; 98  = DELETE_GLOBAL
-    dq op_unimplemented      ; 99  = SWAP
+    dq op_swap               ; 99  = SWAP
     dq op_load_const         ; 100 = LOAD_CONST
     dq op_load_name          ; 101 = LOAD_NAME
-    dq op_unimplemented      ; 102 = BUILD_TUPLE
-    dq op_unimplemented      ; 103 = BUILD_LIST
+    dq op_build_tuple        ; 102 = BUILD_TUPLE
+    dq op_build_list         ; 103 = BUILD_LIST
     dq op_unimplemented      ; 104 = BUILD_SET
-    dq op_unimplemented      ; 105 = BUILD_MAP
-    dq op_unimplemented      ; 106 = LOAD_ATTR
+    dq op_build_map          ; 105 = BUILD_MAP
+    dq op_load_attr          ; 106 = LOAD_ATTR
     dq op_compare_op         ; 107 = COMPARE_OP
     dq op_unimplemented      ; 108 = IMPORT_NAME
     dq op_unimplemented      ; 109 = IMPORT_FROM
@@ -237,8 +256,8 @@ opcode_table:
     dq op_pop_jump_if_false  ; 114 = POP_JUMP_IF_FALSE
     dq op_pop_jump_if_true   ; 115 = POP_JUMP_IF_TRUE
     dq op_load_global        ; 116 = LOAD_GLOBAL
-    dq op_unimplemented      ; 117 = IS_OP
-    dq op_unimplemented      ; 118 = CONTAINS_OP
+    dq op_is_op              ; 117 = IS_OP
+    dq op_contains_op        ; 118 = CONTAINS_OP
     dq op_unimplemented      ; 119 = RERAISE
     dq op_copy               ; 120 = COPY
     dq op_return_const       ; 121 = RETURN_CONST
@@ -265,7 +284,7 @@ opcode_table:
     dq op_unimplemented      ; 142 = CALL_FUNCTION_EX
     dq op_unimplemented      ; 143 = LOAD_FAST_AND_CLEAR
     dq op_unimplemented      ; 144 = EXTENDED_ARG
-    dq op_unimplemented      ; 145 = LIST_APPEND
+    dq op_list_append        ; 145 = LIST_APPEND
     dq op_unimplemented      ; 146 = SET_ADD
     dq op_unimplemented      ; 147 = MAP_ADD
     dq op_unimplemented      ; 148
@@ -276,13 +295,13 @@ opcode_table:
     dq op_unimplemented      ; 153
     dq op_unimplemented      ; 154
     dq op_unimplemented      ; 155 = FORMAT_VALUE
-    dq op_unimplemented      ; 156 = BUILD_CONST_KEY_MAP
+    dq op_build_const_key_map ; 156 = BUILD_CONST_KEY_MAP
     dq op_unimplemented      ; 157 = BUILD_STRING
     dq op_unimplemented      ; 158
     dq op_unimplemented      ; 159
     dq op_unimplemented      ; 160
     dq op_unimplemented      ; 161
-    dq op_unimplemented      ; 162 = LIST_EXTEND
+    dq op_list_extend        ; 162 = LIST_EXTEND
     dq op_unimplemented      ; 163 = SET_UPDATE
     dq op_unimplemented      ; 164 = DICT_MERGE
     dq op_unimplemented      ; 165 = DICT_UPDATE
