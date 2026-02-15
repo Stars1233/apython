@@ -264,11 +264,230 @@ DEF_FUNC list_ass_subscript
     ret
 
 .las_slice:
-    ; Slice assignment: not yet supported, raise TypeError
-    lea rdi, [rel exc_IndexError_type]
-    extern exc_TypeError_type
+    ; Slice assignment: a[start:stop] = value
+    ; rbx = list, rsi = slice key, r12 = value (new items)
+    push r13
+    push r14
+    push r15
+    sub rsp, 8             ; align
+
+    ; Get slice indices relative to list length
+    mov rdi, rsi           ; slice
+    mov rsi, [rbx + PyListObject.ob_size]
+    call slice_indices
+    ; rax = start, rdx = stop, rcx = step
+    mov r13, rax           ; r13 = start
+    mov r14, rdx           ; r14 = stop
+    mov r15, rcx           ; r15 = step
+
+    ; Only support step=1 for now
+    cmp r15, 1
+    jne .las_step_error
+
+    ; Clamp: if stop < start, set stop = start
+    cmp r14, r13
+    jge .las_stop_ok
+    mov r14, r13
+.las_stop_ok:
+
+    ; old_len = stop - start (number of items being replaced)
+    mov rcx, r14
+    sub rcx, r13           ; rcx = old_len
+
+    ; Get new items from value (must be a list)
+    ; r12 = value (the new items list/iterable)
+    ; For simplicity, require value to be a list
+    test r12, r12
+    js .las_type_error
+    mov rax, [r12 + PyObject.ob_type]
+    lea rdx, [rel list_type]
+    cmp rax, rdx
+    jne .las_try_tuple
+
+    ; Value is a list
+    mov r8, [r12 + PyListObject.ob_size]   ; r8 = new_len
+    mov r9, [r12 + PyListObject.ob_item]   ; r9 = new items ptr
+    jmp .las_have_items
+
+.las_try_tuple:
+    extern tuple_type
+    lea rdx, [rel tuple_type]
+    cmp rax, rdx
+    jne .las_type_error
+
+    ; Value is a tuple
+    mov r8, [r12 + PyTupleObject.ob_size]
+    lea r9, [r12 + PyTupleObject.ob_item]
+    jmp .las_have_items
+
+.las_have_items:
+    ; rcx = old_len (items being removed)
+    ; r8 = new_len (items being inserted)
+    ; r9 = pointer to new items array
+    ; r13 = start, r14 = stop
+    ; rbx = list
+
+    ; Save new items info on stack
+    push r8                ; [rsp+0] = new_len
+    push r9                ; [rsp+0] = new_items_ptr, [rsp+8] = new_len
+    push rcx               ; [rsp+0] = old_len
+
+    ; 1. DECREF old items in slice range [start..stop)
+    mov rcx, r13           ; i = start
+.las_decref_loop:
+    cmp rcx, r14           ; i < stop?
+    jge .las_decref_done
+    push rcx
+    mov rax, [rbx + PyListObject.ob_item]
+    mov rdi, [rax + rcx*8]
+    DECREF_REG rdi
+    pop rcx
+    inc rcx
+    jmp .las_decref_loop
+.las_decref_done:
+
+    ; 2. Shift elements if old_len != new_len
+    pop rcx                ; old_len
+    pop r9                 ; new_items_ptr
+    pop r8                 ; new_len
+
+    mov rax, r8
+    sub rax, rcx           ; delta = new_len - old_len
+    test rax, rax
+    jz .las_no_shift
+
+    ; New list size
+    mov rdi, [rbx + PyListObject.ob_size]
+    add rdi, rax           ; new_size = ob_size + delta
+    push rdi               ; save new_size
+    push r8                ; save new_len
+    push r9                ; save new_items_ptr
+    push rax               ; save delta
+
+    ; Ensure capacity
+    cmp rdi, [rbx + PyListObject.allocated]
+    jle .las_no_realloc
+
+    ; Grow: at least new_size, double if bigger
+    mov rsi, [rbx + PyListObject.allocated]
+    shl rsi, 1             ; double
+    cmp rdi, rsi
+    jle .las_use_double
+    mov rsi, rdi           ; use new_size if larger
+.las_use_double:
+    mov [rbx + PyListObject.allocated], rsi
+    mov rdi, [rbx + PyListObject.ob_item]
+    shl rsi, 3             ; bytes
+    call ap_realloc
+    mov [rbx + PyListObject.ob_item], rax
+
+.las_no_realloc:
+    pop rax                ; delta
+    pop r9                 ; new_items_ptr
+    pop r8                 ; new_len
+    pop rdi                ; new_size
+
+    ; Shift tail: memmove(items[start+new_len], items[stop], tail_count * 8)
+    ; tail_count = ob_size - stop
+    push r8
+    push r9
+    push rdi               ; new_size
+
+    mov rcx, [rbx + PyListObject.ob_size]
+    sub rcx, r14           ; tail_count = ob_size - stop
+
+    test rcx, rcx
+    jz .las_shift_done
+
+    mov rdi, [rbx + PyListObject.ob_item]
+    ; dst = items + (start + new_len) * 8
+    mov rax, r13
+    add rax, r8
+    lea rdi, [rdi + rax*8]
+    ; src = items + stop * 8
+    mov rsi, [rbx + PyListObject.ob_item]
+    lea rsi, [rsi + r14*8]
+    ; count in qwords
+    ; Use forward or backward copy depending on direction
+    push rcx
+    cmp rdi, rsi
+    jb .las_copy_fwd
+    ; Backward copy (dst > src, overlap)
+    dec rcx
+.las_copy_bwd_loop:
+    cmp rcx, 0
+    jl .las_copy_done
+    mov rax, [rsi + rcx*8]
+    mov [rdi + rcx*8], rax
+    dec rcx
+    jmp .las_copy_bwd_loop
+.las_copy_fwd:
+    xor edx, edx
+.las_copy_fwd_loop:
+    cmp rdx, rcx
+    jge .las_copy_done
+    mov rax, [rsi + rdx*8]
+    mov [rdi + rdx*8], rax
+    inc rdx
+    jmp .las_copy_fwd_loop
+.las_copy_done:
+    pop rcx
+
+.las_shift_done:
+    pop rdi                ; new_size
+    mov [rbx + PyListObject.ob_size], rdi
+    pop r9
+    pop r8
+    jmp .las_copy_new
+
+.las_no_shift:
+    ; Size stays the same, already correct
+
+.las_copy_new:
+    ; 3. Copy new items into [start..start+new_len), INCREF each
+    xor ecx, ecx          ; i = 0
+.las_insert_loop:
+    cmp rcx, r8            ; i < new_len?
+    jge .las_insert_done
+    push rcx
+    mov rax, [r9 + rcx*8] ; new item
+    INCREF rax
+    mov rdx, [rbx + PyListObject.ob_item]
+    mov rdi, r13
+    add rdi, rcx           ; start + i
+    mov [rdx + rdi*8], rax
+    pop rcx
+    inc rcx
+    jmp .las_insert_loop
+
+.las_insert_done:
+    add rsp, 8             ; undo alignment
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.las_step_error:
+    extern exc_ValueError_type
+    add rsp, 8
+    pop r15
+    pop r14
+    pop r13
     lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "slice assignment not yet supported"
+    CSTRING rsi, "extended slice assignment not supported"
+    call raise_exception
+
+.las_type_error:
+    extern exc_TypeError_type
+    add rsp, 8
+    pop r15
+    pop r14
+    pop r13
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "can only assign an iterable"
     call raise_exception
 END_FUNC list_ass_subscript
 
