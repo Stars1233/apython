@@ -32,6 +32,9 @@ extern dict_del
 extern dict_get
 extern property_type
 extern property_descr_set
+extern dunder_set
+extern dunder_call_3
+extern dunder_lookup
 
 ;; ============================================================================
 ;; op_store_fast - Store TOS into localsplus[arg]
@@ -124,33 +127,76 @@ DEF_FUNC op_store_attr, 32
     VPOP rdi
     mov [rbp-16], rdi
 
-    ; Check for property descriptor in type dict before regular setattr
+    ; Check for property/descriptor in type dict (walk MRO) before regular setattr
     mov rdi, [rbp-8]              ; obj
-    mov rax, [rdi + PyObject.ob_type]
-    mov rax, [rax + PyTypeObject.tp_dict]
-    test rax, rax
+    mov rcx, [rdi + PyObject.ob_type]  ; rcx = type (walks chain)
+
+.sa_walk_mro:
+    test rcx, rcx
     jz .sa_no_property
 
-    ; dict_get(type->tp_dict, name)
-    mov rdi, rax
-    mov rsi, [rbp-24]
+    mov rdi, [rcx + PyTypeObject.tp_dict]
+    test rdi, rdi
+    jz .sa_walk_next
+
+    push rcx                      ; save current type
+    mov rsi, [rbp-24]             ; name
     call dict_get
+    pop rcx
     test rax, rax
-    jz .sa_no_property
+    jnz .sa_found_in_type         ; found attr in type dict
+.sa_walk_next:
+    mov rcx, [rcx + PyTypeObject.tp_base]
+    jmp .sa_walk_mro
 
-    ; Check if it's a property
+.sa_found_in_type:
+
+    ; Check if it's a descriptor
     test rax, rax
     js .sa_no_property            ; SmallInt
     mov rcx, [rax + PyObject.ob_type]
+
+    ; Check property first (fast path)
     lea rdx, [rel property_type]
     cmp rcx, rdx
-    jne .sa_no_property
+    jne .sa_check_general_set
 
     ; Found property descriptor — call fset(obj, value)
     mov rdi, rax                  ; property
     mov rsi, [rbp-8]              ; obj
     mov rdx, [rbp-16]             ; value
     call property_descr_set
+    jmp .sa_descr_cleanup
+
+.sa_check_general_set:
+    ; Check for general __set__ on heaptype descriptor
+    mov rdx, [rcx + PyTypeObject.tp_flags]
+    test rdx, TYPE_FLAG_HEAPTYPE
+    jz .sa_no_property
+
+    ; Save the descriptor for potential __set__ call
+    mov [rbp-32], rax             ; save descriptor (borrowed ref, still in dict)
+
+    ; Check if descriptor's type has __set__
+    mov rdi, rcx                  ; descriptor's type
+    lea rsi, [rel dunder_set]
+    call dunder_lookup
+    test rax, rax
+    jz .sa_no_property
+
+    ; Has __set__! Call descriptor.__set__(obj, value)
+    mov rdi, [rbp-32]            ; descriptor
+    mov rsi, [rbp-8]             ; obj
+    mov rdx, [rbp-16]            ; value
+    lea rcx, [rel dunder_set]
+    call dunder_call_3
+    ; DECREF result if non-NULL
+    test rax, rax
+    jz .sa_descr_cleanup
+    mov rdi, rax
+    call obj_decref
+
+.sa_descr_cleanup:
 
     ; DECREF value
     mov rdi, [rbp-16]

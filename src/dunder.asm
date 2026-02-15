@@ -188,6 +188,64 @@ DEF_FUNC dunder_call_2
     ret
 END_FUNC dunder_call_2
 
+; ---------------------------------------------------------------------------
+; dunder_call_3(PyObject *self, PyObject *arg1, PyObject *arg2, const char *name) -> PyObject*
+;
+; Look up dunder on self's type, call with (self, arg1, arg2).
+; rdi = self, rsi = arg1, rdx = arg2, rcx = dunder name C string
+; Returns: result object, or NULL if dunder not found.
+; ---------------------------------------------------------------------------
+DEF_FUNC dunder_call_3
+    push rbx
+    push r12
+    push r13
+    push r14
+
+    mov rbx, rdi            ; rbx = self
+    mov r12, rsi            ; r12 = arg1
+    mov r13, rdx            ; r13 = arg2
+
+    ; Lookup dunder on self's type
+    mov rdi, [rbx + PyObject.ob_type]
+    mov rsi, rcx            ; name
+    call dunder_lookup
+    test rax, rax
+    jz .not_found
+
+    ; Call: tp_call(dunder_func, &[self, arg1, arg2], 3)
+    mov r14, rax            ; r14 = dunder func
+    mov rax, [r14 + PyObject.ob_type]
+    mov rax, [rax + PyTypeObject.tp_call]
+    test rax, rax
+    jz .not_found
+
+    push r13                ; args[2] = arg2
+    push r12                ; args[1] = arg1
+    push rbx                ; args[0] = self
+    mov rdi, r14            ; callable
+    mov rsi, rsp            ; args ptr
+    mov edx, 3              ; nargs
+    call rax
+    add rsp, 24             ; pop args
+    ; rax = result
+
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.not_found:
+    xor eax, eax
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC dunder_call_3
+
 section .data
 ; Pre-defined dunder name strings (C strings for convenience)
 global dunder_eq
@@ -232,6 +290,9 @@ global dunder_imul
 global dunder_repr
 global dunder_str
 global dunder_matmul
+global dunder_get
+global dunder_set
+global dunder_delete
 
 dunder_eq:       db "__eq__", 0
 dunder_ne:       db "__ne__", 0
@@ -275,6 +336,9 @@ dunder_imul:     db "__imul__", 0
 dunder_repr:     db "__repr__", 0
 dunder_str:      db "__str__", 0
 dunder_matmul:   db "__matmul__", 0
+dunder_get:      db "__get__", 0
+dunder_set:      db "__set__", 0
+dunder_delete:   db "__delete__", 0
 
 ; Compare op -> dunder name lookup table
 global cmp_dunder_table

@@ -36,6 +36,9 @@ extern classmethod_type
 extern property_type
 extern property_descr_get
 extern user_type_metatype
+extern dunder_get
+extern dunder_call_3
+extern dunder_lookup
 
 ;; ============================================================================
 ;; op_load_const - Load constant from co_consts[arg]
@@ -391,6 +394,49 @@ DEF_FUNC op_load_attr, 48
     lea rdx, [rel property_type]
     cmp rcx, rdx
     je .la_handle_property
+
+    ; General descriptor protocol: check for __get__ on attr's type
+    ; Only check if attr's type is a heaptype (user-defined descriptor)
+    mov rdx, [rcx + PyTypeObject.tp_flags]
+    test rdx, TYPE_FLAG_HEAPTYPE
+    jz .la_check_flag
+
+    ; Check if attr's type has __get__
+    mov rdi, rcx               ; attr's type
+    lea rsi, [rel dunder_get]
+    call dunder_lookup
+    test rax, rax
+    jz .la_check_flag          ; no __get__, treat normally
+
+    ; Has __get__! Call descriptor.__get__(obj, type(obj))
+    mov rdi, [rbp-32]          ; descriptor (attr)
+    mov rsi, [rbp-16]          ; obj (instance)
+    mov rdx, [rsi + PyObject.ob_type] ; type(obj)
+    lea rcx, [rel dunder_get]
+    call dunder_call_3
+
+    ; rax = result from __get__
+    push rax                   ; save result
+
+    ; DECREF descriptor wrapper
+    mov rdi, [rbp-32]
+    call obj_decref
+    ; DECREF obj
+    mov rdi, [rbp-16]
+    call obj_decref
+
+    pop rax                    ; restore result
+    cmp qword [rbp-8], 0
+    jne .la_descr_get_flag1
+    VPUSH rax
+    jmp .la_done
+
+.la_descr_get_flag1:
+    ; flag=1: push NULL + result
+    xor ecx, ecx
+    VPUSH rcx
+    VPUSH rax
+    jmp .la_done
 
 .la_check_flag:
     ; Check flag
