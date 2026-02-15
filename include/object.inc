@@ -202,6 +202,29 @@ struc PyMethodObject
     .im_self:   resq 1    ; +24: instance
 endstruc
 
+; StaticMethod wrapper (descriptor)
+struc PyStaticMethodObject
+    .ob_refcnt:   resq 1  ; +0
+    .ob_type:     resq 1  ; +8
+    .sm_callable: resq 1  ; +16: wrapped function
+endstruc
+
+; ClassMethod wrapper (descriptor)
+struc PyClassMethodObject
+    .ob_refcnt:   resq 1  ; +0
+    .ob_type:     resq 1  ; +8
+    .cm_callable: resq 1  ; +16: wrapped function
+endstruc
+
+; Property descriptor
+struc PyPropertyObject
+    .ob_refcnt:   resq 1  ; +0
+    .ob_type:     resq 1  ; +8
+    .prop_get:    resq 1  ; +16: fget function or NULL
+    .prop_set:    resq 1  ; +24: fset function or NULL
+    .prop_del:    resq 1  ; +32: fdel function or NULL
+endstruc
+
 ; Generator object
 struc PyGenObject
     .ob_refcnt: resq 1

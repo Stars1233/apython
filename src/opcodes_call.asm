@@ -67,44 +67,35 @@ DEF_FUNC op_call, 48
     ;   [rbp-40] = original nargs (before increment)
 
     mov [rbp-8], rcx                ; save nargs
-    mov [rbp-40], rcx               ; save original nargs
+    mov qword [rbp-32], 0          ; is_method = 0
 
-    ; Extract callable: [r13 - (nargs+1)*8]
+    ; CPython 3.12 stack layout (bottom to top):
+    ;   ... | func_or_null | callable_or_self | arg0 | ... | argN-1
+    ; func_or_null = PEEK(nargs+2) — deeper slot
+    ; callable_or_self = PEEK(nargs+1) — shallower slot
+    ;
+    ; Method call (func_or_null != NULL): callable=func_or_null, self=callable_or_self
+    ; Function call (func_or_null == NULL): callable=callable_or_self
+
+    ; Read func_or_null from deeper slot
+    lea rax, [rcx + 2]
+    neg rax
+    mov rdi, [r13 + rax*8]
+
+    test rdi, rdi
+    jz .func_call
+
+    ; === Method call: callable is in the deeper slot ===
+    mov [rbp-16], rdi               ; callable = func_or_null
+    mov qword [rbp-32], 1          ; is_method = 1
+    jmp .setup_call
+
+.func_call:
+    ; === Function call: callable is in the shallower slot ===
     lea rax, [rcx + 1]
     neg rax
     mov rdi, [r13 + rax*8]
-    mov [rbp-16], rdi               ; save callable
-
-    ; Extract self_or_null: [r13 - (nargs+2)*8]
-    lea rax, [rcx + 2]
-    neg rax
-    mov r8, [r13 + rax*8]          ; r8 = self_or_null
-    mov qword [rbp-32], 0          ; is_method = 0
-
-    test r8, r8
-    jz .setup_call
-
-    ; === Method call: self_or_null is non-NULL ===
-    mov qword [rbp-32], 1          ; is_method = 1
-
-    ; INCREF self for the copy we're about to place in callable's slot
-    mov rdi, r8
-    call obj_incref
-
-    ; Reload self from value stack (registers may be clobbered by call)
-    mov rcx, [rbp-40]              ; original nargs
-    lea rax, [rcx + 2]
-    neg rax
-    mov r8, [r13 + rax*8]          ; r8 = self (reload)
-
-    ; Overwrite callable's value stack slot with self
-    mov rcx, [rbp-8]
-    lea rax, [rcx + 1]
-    neg rax
-    mov [r13 + rax*8], r8          ; callable slot now holds self
-
-    ; Increment nargs (self becomes first arg)
-    inc qword [rbp-8]
+    mov [rbp-16], rdi               ; callable = callable_or_self
 
 .setup_call:
     ; Get tp_call from the callable's type
@@ -170,18 +161,26 @@ DEF_FUNC op_call, 48
 
 .have_tp_call:
     ; Set up args: tp_call(callable, args_ptr, nargs)
-    mov rcx, [rbp-8]
-    mov rdx, rcx                    ; total nargs (may include self)
+    mov rcx, [rbp-8]               ; original nargs
+    mov rdx, rcx                    ; rdx = nargs for tp_call
     neg rcx
-    lea rsi, [r13 + rcx*8]         ; args_ptr
+    lea rsi, [r13 + rcx*8]        ; rsi = &arg0
 
+    cmp qword [rbp-32], 0
+    je .call_now
+
+    ; Method call: include self (shallower slot) as first arg
+    sub rsi, 8
+    inc rdx
+
+.call_now:
     mov rdi, [rbp-16]              ; callable
     call rax
     mov [rbp-24], rax               ; save return value
 
 .cleanup:
-    ; === Cleanup ===
-    ; Pop nargs items (may include self copy for method calls), DECREF each
+    ; === Unified cleanup ===
+    ; Pop nargs args and DECREF each
     mov rcx, [rbp-8]
     test rcx, rcx
     jz .args_done
@@ -194,34 +193,15 @@ DEF_FUNC op_call, 48
     jnz .decref_args
 .args_done:
 
-    ; Branch based on whether this was a method call
-    cmp qword [rbp-32], 0
-    je .func_cleanup
-
-    ; === Method cleanup ===
-    ; Pop the original self_or_null slot and DECREF it
+    ; Pop shallower slot (self for method, callable for function) and DECREF
     sub r13, 8
     mov rdi, [r13]
     call obj_decref
 
-    ; DECREF saved callable (its stack slot was overwritten with self)
-    mov rdi, [rbp-16]
-    call obj_decref
-    jmp .push_result
-
-.func_cleanup:
-    ; === Function cleanup (original path) ===
-    ; Pop callable from value stack and DECREF
+    ; Pop deeper slot (callable for method, NULL for function) and DECREF
     sub r13, 8
     mov rdi, [r13]
     call obj_decref
-
-    ; Pop null_or_self (NULL, obj_decref is null-safe) and DECREF
-    sub r13, 8
-    mov rdi, [r13]
-    call obj_decref
-
-.push_result:
     ; Push return value onto value stack
     mov rax, [rbp-24]
     VPUSH rax

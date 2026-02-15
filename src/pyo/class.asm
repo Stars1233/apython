@@ -247,6 +247,15 @@ END_FUNC instance_str
 ;; Returns: new instance
 ;; ============================================================================
 DEF_FUNC type_call
+    ; Check if type has its own tp_call (built-in constructor, e.g. staticmethod)
+    mov rax, [rdi + PyTypeObject.tp_call]
+    test rax, rax
+    jz .normal_type_call
+    ; Tail-call the constructor: tp_call(type, args, nargs)
+    leave
+    jmp rax
+
+.normal_type_call:
     push rbx
     push r12
     push r13
@@ -386,16 +395,24 @@ DEF_FUNC type_getattr
     test eax, eax
     jz .tga_return_name
 
-    ; Check type->tp_dict
+    ; Check type->tp_dict, then walk tp_base chain
+.tga_walk:
     mov rdi, [r12 + PyTypeObject.tp_dict]
     test rdi, rdi
-    jz .tga_not_found
+    jz .tga_next_base
 
     mov rsi, rbx
     call dict_get
     test rax, rax
-    jz .tga_not_found
+    jnz .tga_found
 
+.tga_next_base:
+    mov r12, [r12 + PyTypeObject.tp_base]
+    test r12, r12
+    jnz .tga_walk
+    jmp .tga_not_found
+
+.tga_found:
     ; Found — INCREF and return
     mov rbx, rax
     mov rdi, rax

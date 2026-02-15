@@ -37,6 +37,8 @@ extern instance_setattr
 extern type_call
 extern user_type_metatype
 extern super_type
+extern staticmethod_type
+extern classmethod_type
 extern func_type
 extern type_type
 
@@ -793,8 +795,8 @@ DEF_FUNC builtin___build_class__
     lea rax, [rel instance_str]
     mov [r12 + PyTypeObject.tp_str], rax
 
-    lea rax, [rel type_call]
-    mov [r12 + PyTypeObject.tp_call], rax
+    ; tp_call left NULL: calling the type goes through metatype.tp_call (type_call).
+    ; Calling instances falls through to __call__ dunder dispatch.
 
     lea rax, [rel instance_getattr]
     mov [r12 + PyTypeObject.tp_getattr], rax
@@ -1146,6 +1148,17 @@ DEF_FUNC builtins_init
     lea rdx, [rel super_type]
     call add_exc_type_builtin
 
+    ; Register descriptor types as builtins
+    mov rdi, rbx
+    lea rsi, [rel bi_name_staticmethod]
+    lea rdx, [rel staticmethod_type]
+    call add_exc_type_builtin
+
+    mov rdi, rbx
+    lea rsi, [rel bi_name_classmethod]
+    lea rdx, [rel classmethod_type]
+    call add_exc_type_builtin
+
     ; Register exception types as builtins
     mov rdi, rbx
     lea rsi, [rel bi_name_BaseException]
@@ -1352,6 +1365,8 @@ bi_name_sorted:       db "sorted", 0
 bi_name_globals:      db "globals", 0
 bi_name_locals:       db "locals", 0
 bi_name_super:        db "super", 0
+bi_name_staticmethod: db "staticmethod", 0
+bi_name_classmethod:  db "classmethod", 0
 
 ; Exception type names
 bi_name_BaseException:     db "BaseException", 0

@@ -31,6 +31,9 @@ extern cell_type
 extern exc_NameError_type
 extern exc_AttributeError_type
 extern method_new
+extern staticmethod_type
+extern classmethod_type
+extern user_type_metatype
 
 ;; ============================================================================
 ;; op_load_const - Load constant from co_consts[arg]
@@ -369,6 +372,21 @@ DEF_FUNC op_load_attr, 48
     call raise_exception
 
 .la_got_attr:
+    ; === Descriptor protocol: check for staticmethod/classmethod ===
+    mov rax, [rbp-32]          ; attr
+    test rax, rax
+    js .la_check_flag          ; SmallInt, skip descriptor check
+    mov rcx, [rax + PyObject.ob_type]
+
+    lea rdx, [rel staticmethod_type]
+    cmp rcx, rdx
+    je .la_handle_staticmethod
+
+    lea rdx, [rel classmethod_type]
+    cmp rcx, rdx
+    je .la_handle_classmethod
+
+.la_check_flag:
     ; Check flag
     cmp qword [rbp-8], 0
     jne .la_method_load
@@ -444,12 +462,12 @@ DEF_FUNC op_load_attr, 48
 
 .la_method_push:
     ; It's a function -> method call pattern
-    ; Push self (obj), then push func
+    ; CPython order: push func (deeper), then self (TOS)
     ; Don't DECREF obj since it stays on stack as self
-    mov rax, [rbp-16]
-    VPUSH rax              ; push self (obj already has a ref from the pop)
     mov rax, [rbp-32]
-    VPUSH rax              ; push func
+    VPUSH rax              ; push func (deeper slot = callable)
+    mov rax, [rbp-16]
+    VPUSH rax              ; push self/obj (shallower = TOS)
     jmp .la_done
 
 .la_not_method:
@@ -460,6 +478,104 @@ DEF_FUNC op_load_attr, 48
     VPUSH rax              ; push NULL
     mov rax, [rbp-32]
     VPUSH rax              ; push attr
+    jmp .la_done
+
+.la_handle_staticmethod:
+    ; Unwrap: extract sm_callable from wrapper
+    mov rdi, [rax + PyStaticMethodObject.sm_callable]
+    push rdi                   ; save unwrapped func
+    call obj_incref            ; INCREF unwrapped func
+
+    ; DECREF wrapper
+    mov rdi, [rbp-32]
+    call obj_decref
+
+    ; Update attr to unwrapped func
+    pop rax
+    mov [rbp-32], rax
+
+    ; DECREF obj (not binding it as self)
+    mov rdi, [rbp-16]
+    call obj_decref
+
+    cmp qword [rbp-8], 0
+    jne .la_sm_flag1
+
+    ; flag=0: push just the unwrapped func
+    mov rax, [rbp-32]
+    VPUSH rax
+    jmp .la_done
+
+.la_sm_flag1:
+    ; flag=1: push NULL + func (no self binding)
+    xor eax, eax
+    VPUSH rax
+    mov rax, [rbp-32]
+    VPUSH rax
+    jmp .la_done
+
+.la_handle_classmethod:
+    ; Unwrap: extract cm_callable from wrapper
+    mov rdi, [rax + PyClassMethodObject.cm_callable]
+    push rdi                   ; save unwrapped func
+    call obj_incref            ; INCREF unwrapped func
+
+    ; DECREF wrapper
+    mov rdi, [rbp-32]
+    call obj_decref
+
+    ; Update attr to unwrapped func
+    pop rax
+    mov [rbp-32], rax
+
+    ; Determine class: if obj is a type, class=obj. Else class=type(obj).
+    mov rdi, [rbp-16]          ; obj
+    mov rax, [rdi + PyObject.ob_type]
+    lea rcx, [rel user_type_metatype]
+    cmp rax, rcx
+    je .la_cm_obj_is_type
+
+    ; obj is an instance -> class = ob_type
+    mov [rbp-48], rax          ; save class
+    mov rdi, rax
+    call obj_incref
+    jmp .la_cm_have_class
+
+.la_cm_obj_is_type:
+    ; obj is a type -> class = obj itself
+    mov [rbp-48], rdi          ; save class (= obj)
+    call obj_incref
+
+.la_cm_have_class:
+    ; DECREF obj
+    mov rdi, [rbp-16]
+    call obj_decref
+
+    ; Now [rbp-32] = unwrapped func (owned), [rbp-48] = class (owned)
+    cmp qword [rbp-8], 0
+    jne .la_cm_flag1
+
+    ; flag=0: create bound method(func, class) and push
+    mov rdi, [rbp-32]          ; func
+    mov rsi, [rbp-48]          ; class (as self)
+    call method_new            ; INCREFs both func and class
+    ; DECREF our refs to func and class
+    push rax                   ; save method
+    mov rdi, [rbp-32]
+    call obj_decref
+    mov rdi, [rbp-48]
+    call obj_decref
+    pop rax
+    VPUSH rax
+    jmp .la_done
+
+.la_cm_flag1:
+    ; flag=1: CPython order: push func (deeper), then class (TOS as self)
+    mov rax, [rbp-32]          ; func
+    VPUSH rax
+    mov rax, [rbp-48]          ; class
+    VPUSH rax
+    jmp .la_done
 
 .la_done:
     add rbx, 18            ; skip 9 CACHE entries
@@ -497,10 +613,13 @@ DEF_FUNC_BARE op_load_attr_method
     cmp ax, word [rbx]             ; compare low 16 bits at CACHE[+0]
     jne .lam_deopt
 
-    ; Guards passed! obj stays on stack as self, push cached method
+    ; Guards passed! CPython order: method (deeper), obj/self (TOS)
+    ; obj is currently at [r13-8]; overwrite it with method, push obj on top
     mov rax, [rbx + 10]           ; cached descriptor (method ptr)
     INCREF rax
-    VPUSH rax                     ; push method on top of self
+    mov rcx, [r13 - 8]            ; save obj
+    mov [r13 - 8], rax            ; overwrite obj position with method
+    VPUSH rcx                     ; push obj on top as self
 
     ; Skip 9 CACHE entries = 18 bytes
     add rbx, 18
@@ -669,10 +788,10 @@ DEF_FUNC op_load_super_attr, 32
     cmp qword [rbp-32], 0
     je .lsa_attr_mode
 
-    ; Method mode: push self + func
+    ; Method mode: CPython order: push func (deeper), then self (TOS)
+    VPUSH rax                     ; push func (deeper = callable)
     mov rdx, [rbp-8]              ; self (already has ref from stack)
-    VPUSH rdx                     ; push self
-    VPUSH rax                     ; push func
+    VPUSH rdx                     ; push self (TOS)
     jmp .lsa_done
 
 .lsa_attr_mode:
