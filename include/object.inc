@@ -120,7 +120,7 @@ struc PyCodeObject
     .co_qualname:       resq 1  ; +88: ptr to str
     .co_exceptiontable: resq 1  ; +96: ptr to bytes
     .co_code_len:       resd 1  ; +104: bytecode length in bytes
-    .co_padding:        resd 1  ; +108
+    .co_posonlyargcount: resd 1 ; +108: positional-only arg count
     .co_code:                   ; +112: bytecode (variable)
 endstruc
 

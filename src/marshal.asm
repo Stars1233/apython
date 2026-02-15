@@ -656,7 +656,8 @@ mdo_ref_oob:
 ;   [rsp + 88] co_exceptiontable ptr (8 bytes)
 ;   [rsp + 96] saved FLAG_REF (8 bytes)
 ;   [rsp +104] ref index placeholder (8 bytes, used only if FLAG_REF)
-; Total: 112 bytes needed, using 128 for alignment.
+;   [rsp +112] co_posonlyargcount (4 bytes)
+; Total: 116 bytes needed, using 128 for alignment.
 ;--------------------------------------------------------------------------
 mdo_code:
     push r13                   ; r13 = code object pointer (after alloc)
@@ -681,7 +682,8 @@ mdo_code:
     call marshal_read_long     ; co_argcount
     mov [rsp + 0], eax
 
-    call marshal_read_long     ; co_posonlyargcount (discard)
+    call marshal_read_long     ; co_posonlyargcount
+    mov [rsp + 112], eax       ; save for later
 
     call marshal_read_long     ; co_kwonlyargcount
     mov [rsp + 4], eax
@@ -798,9 +800,10 @@ mdo_code:
     mov rax, [rsp + 88]        ; co_exceptiontable
     mov [r13 + PyCodeObject.co_exceptiontable], rax
 
-    ; Bytecode length and padding
+    ; Bytecode length and positional-only arg count
     mov dword [r13 + PyCodeObject.co_code_len], r14d
-    mov dword [r13 + PyCodeObject.co_padding], 0
+    mov eax, [rsp + 112]
+    mov [r13 + PyCodeObject.co_posonlyargcount], eax
 
     ; Copy bytecode from co_code bytes object into inline area
     test r14, r14

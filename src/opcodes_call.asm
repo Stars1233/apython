@@ -195,46 +195,25 @@ END_FUNC op_call
 ;; arg = flags: 0 = plain, 1 = defaults, 2 = kwdefaults, 4 = annotations, 8 = closure
 ;;
 ;; Stack order (when flags set, bottom to top):
-;;   closure tuple (if flag 0x08)
+;;   defaults tuple (if flag 0x01)
+;;   kwdefaults dict (if flag 0x02)
 ;;   annotations (if flag 0x04) - ignored
-;;   kwdefaults dict (if flag 0x02) - ignored
-;;   defaults tuple (if flag 0x01) - ignored
+;;   closure tuple (if flag 0x08)
 ;;   code_obj (always on top)
 ;; ============================================================================
-DEF_FUNC op_make_function, 32
-    ; [rbp-8]=flags, [rbp-16]=code, [rbp-24]=closure
+DEF_FUNC op_make_function, 48
+    ; [rbp-8]=flags, [rbp-16]=code, [rbp-24]=closure, [rbp-32]=defaults, [rbp-40]=kwdefaults
 
     mov [rbp-8], ecx               ; save flags
     mov qword [rbp-24], 0          ; closure = NULL default
+    mov qword [rbp-32], 0          ; defaults = NULL default
+    mov qword [rbp-40], 0          ; kwdefaults = NULL default
 
     ; Pop code object from value stack (always TOS)
     VPOP rdi
     mov [rbp-16], rdi
 
-    ; Check flags for closure (must pop in reverse order of push)
-    ; Defaults (0x01) - pop and ignore for now
-    test ecx, MAKE_FUNC_DEFAULTS
-    jz .mf_no_defaults
-    VPOP rdi
-    DECREF_REG rdi                 ; discard defaults tuple
-    mov ecx, [rbp-8]
-.mf_no_defaults:
-
-    ; kwdefaults (0x02) - pop and ignore for now
-    test ecx, MAKE_FUNC_KWDEFAULTS
-    jz .mf_no_kwdefaults
-    VPOP rdi
-    DECREF_REG rdi
-    mov ecx, [rbp-8]
-.mf_no_kwdefaults:
-
-    ; annotations (0x04) - pop and ignore
-    test ecx, MAKE_FUNC_ANNOTATIONS
-    jz .mf_no_annotations
-    VPOP rdi
-    DECREF_REG rdi
-    mov ecx, [rbp-8]
-.mf_no_annotations:
+    ; Pop in CPython 3.12 order (reverse of push): 0x08, 0x04, 0x02, 0x01
 
     ; closure (0x08) - pop and save
     test ecx, MAKE_FUNC_CLOSURE
@@ -242,6 +221,28 @@ DEF_FUNC op_make_function, 32
     VPOP rax
     mov [rbp-24], rax              ; save closure tuple
 .mf_no_closure:
+
+    ; annotations (0x04) - pop and discard
+    test ecx, MAKE_FUNC_ANNOTATIONS
+    jz .mf_no_annotations
+    VPOP rdi
+    DECREF_REG rdi
+    mov ecx, [rbp-8]              ; reload flags (DECREF clobbers ecx)
+.mf_no_annotations:
+
+    ; kwdefaults (0x02) - pop and save (transfer ownership to func)
+    test ecx, MAKE_FUNC_KWDEFAULTS
+    jz .mf_no_kwdefaults
+    VPOP rdi
+    mov [rbp-40], rdi
+.mf_no_kwdefaults:
+
+    ; defaults (0x01) - pop and save (transfer ownership to func)
+    test ecx, MAKE_FUNC_DEFAULTS
+    jz .mf_no_defaults
+    VPOP rdi
+    mov [rbp-32], rdi
+.mf_no_defaults:
 
     ; Create function: func_new(code, globals)
     mov rdi, [rbp-16]
@@ -252,6 +253,14 @@ DEF_FUNC op_make_function, 32
     ; Set closure if present
     mov rcx, [rbp-24]
     mov [rax + PyFuncObject.func_closure], rcx
+
+    ; Set defaults if present (transfer ownership, no INCREF needed)
+    mov rcx, [rbp-32]
+    mov [rax + PyFuncObject.func_defaults], rcx
+
+    ; Set kwdefaults if present (transfer ownership, no INCREF needed)
+    mov rcx, [rbp-40]
+    mov [rax + PyFuncObject.func_kwdefaults], rcx
 
     ; Save func obj, DECREF the code object
     push rax

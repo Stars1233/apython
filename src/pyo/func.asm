@@ -19,6 +19,7 @@ extern obj_incref
 
 ; CO_FLAGS
 CO_VARARGS equ 0x04
+CO_VARKEYWORDS equ 0x08
 
 ; ---------------------------------------------------------------------------
 ; func_new(PyCodeObject *code, PyObject *globals) -> PyFuncObject*
@@ -84,87 +85,135 @@ END_FUNC func_new
 ;
 ; r12 still holds the CALLER's frame pointer (callee-saved, set by eval loop,
 ; preserved through op_call).
+;
+; Full argument binding following CPython initialize_locals:
+;   1. Create **kwargs dict if CO_VARKEYWORDS
+;   2. Copy positional args
+;   3. Handle *args (CO_VARARGS)
+;   4. Match keyword args (from kw_names_pending)
+;   5. Apply positional defaults (func_defaults)
+;   6. Apply kw-only defaults (func_kwdefaults)
 ; ---------------------------------------------------------------------------
+extern kw_names_pending
+extern dict_new
+extern dict_set
+extern dict_get
+extern ap_strcmp
+
 DEF_FUNC func_call
     push rbx
     push r12
     push r13
     push r14
     push r15
-    sub rsp, 8              ; align stack to 16 bytes (5 pushes + push rbp = 48, +8 = 56, 56 mod 16 = 8, need -8 more)
+    sub rsp, 56             ; 48 bytes locals + 8 alignment
+    ; Locals layout:
+    ;   [rsp+0]  = kw_names_pending tuple (or NULL)
+    ;   [rsp+8]  = positional_count
+    ;   [rsp+16] = return value from eval_frame
+    ;   [rsp+24] = kwargs_dict ptr (or NULL)
+    ;   [rsp+32] = (scratch)
+    ;   [rsp+40] = (scratch)
 
     mov rbx, rdi            ; rbx = function object
     mov r13, r12            ; r13 = caller's frame (r12 on entry from eval loop)
     mov r14, rsi            ; r14 = args_ptr
     mov r15d, edx           ; r15d = nargs
 
+    ; Read and clear kw_names_pending
+    mov rax, [rel kw_names_pending]
+    mov [rsp+0], rax
+    mov qword [rel kw_names_pending], 0
+
+    ; Compute positional_count = nargs - len(kw_names) or nargs if no kw
+    mov ecx, r15d
+    test rax, rax
+    jz .no_kw_adjust
+    mov rdx, [rax + PyTupleObject.ob_size]
+    sub ecx, edx
+.no_kw_adjust:
+    mov [rsp+8], ecx        ; save positional_count
+    mov qword [rsp+24], 0   ; kwargs_dict = NULL
+
     ; Get builtins from caller's frame
-    mov rdx, [r13 + PyFrame.builtins]  ; rdx = builtins
+    mov rdx, [r13 + PyFrame.builtins]
 
     ; Create new frame: frame_new(code, globals, builtins, locals=NULL)
-    mov rdi, [rbx + PyFuncObject.func_code]     ; rdi = code
-    mov rsi, [rbx + PyFuncObject.func_globals]   ; rsi = globals
-    ; rdx = builtins (already set)
-    xor ecx, ecx            ; rcx = locals = NULL
+    mov rdi, [rbx + PyFuncObject.func_code]
+    mov rsi, [rbx + PyFuncObject.func_globals]
+    xor ecx, ecx
     call frame_new
     mov r12, rax            ; r12 = new frame
 
     ; Store function object in frame for COPY_FREE_VARS
     mov [r12 + PyFrame.func_obj], rbx
 
-    ; Get co_argcount and co_flags from code object
+    ; === Phase 1: Create **kwargs dict if CO_VARKEYWORDS ===
     mov rdi, [rbx + PyFuncObject.func_code]
-    mov eax, [rdi + PyCodeObject.co_argcount]   ; eax = co_argcount
-    mov ecx, [rdi + PyCodeObject.co_flags]      ; ecx = co_flags
+    mov ecx, [rdi + PyCodeObject.co_flags]
+    test ecx, CO_VARKEYWORDS
+    jz .no_kwargs_dict
 
-    ; Bind positional args: localsplus[0..min(nargs, co_argcount)-1]
-    push rax                ; save co_argcount
-    push rcx                ; save co_flags
+    call dict_new
+    mov [rsp+24], rax       ; save kwargs_dict
 
-    ; Determine how many regular args to bind
-    cmp r15d, eax
-    cmovb eax, r15d         ; eax = min(nargs, co_argcount)
+    ; Place kwargs dict at localsplus[co_argcount + co_kwonlyargcount + varargs_offset]
+    mov rdi, [rbx + PyFuncObject.func_code]
+    mov ecx, [rdi + PyCodeObject.co_argcount]
+    add ecx, [rdi + PyCodeObject.co_kwonlyargcount]
+    mov edx, [rdi + PyCodeObject.co_flags]
+    test edx, CO_VARARGS
+    jz .no_varargs_offset
+    inc ecx
+.no_varargs_offset:
+    movsxd rcx, ecx
+    mov [r12 + PyFrame.localsplus + rcx*8], rax
+
+.no_kwargs_dict:
+    ; === Phase 2: Copy positional args ===
+    mov rdi, [rbx + PyFuncObject.func_code]
+    mov eax, [rdi + PyCodeObject.co_argcount]
+    mov ecx, [rsp+8]       ; positional_count
+    cmp ecx, eax
+    cmovb eax, ecx         ; min(positional_count, co_argcount)
     xor ecx, ecx
     test eax, eax
-    jz .regular_args_done
+    jz .positional_done
 
-.bind_args:
-    mov rdx, [r14 + rcx*8]             ; rdx = args[i]
+.bind_positional:
+    mov rdx, [r14 + rcx*8]
     mov [r12 + PyFrame.localsplus + rcx*8], rdx
     INCREF rdx
     inc ecx
     cmp ecx, eax
-    jb .bind_args
+    jb .bind_positional
 
-.regular_args_done:
-    pop rcx                 ; rcx = co_flags
-    pop rax                 ; rax = co_argcount
-
-    ; Check CO_VARARGS
+.positional_done:
+    ; === Phase 3: Handle *args (CO_VARARGS) ===
+    mov rdi, [rbx + PyFuncObject.func_code]
+    mov eax, [rdi + PyCodeObject.co_argcount]
+    mov ecx, [rdi + PyCodeObject.co_flags]
     test ecx, CO_VARARGS
-    jz .args_done
+    jz .varargs_done
 
-    ; Pack excess args into a tuple at localsplus[co_argcount]
-    ; Number of excess args = max(0, nargs - co_argcount)
-    mov ecx, r15d           ; nargs
-    sub ecx, eax            ; excess = nargs - co_argcount
+    ; excess = positional_count - co_argcount
+    mov ecx, [rsp+8]       ; positional_count
+    sub ecx, eax
     jle .empty_varargs
 
-    ; Create tuple of excess args
-    push rax                ; save co_argcount (= localsplus index for *args)
-    movsx rdi, ecx          ; tuple size = excess
-    push rdi                ; save excess count
-    call tuple_new          ; rax = new tuple
-    pop rcx                 ; rcx = excess count
-    pop rdx                 ; rdx = co_argcount
+    push rax
+    movsx rdi, ecx
+    push rdi
+    call tuple_new
+    pop rcx
+    pop rdx
 
-    ; Fill tuple: tuple.ob_item[i] = args[co_argcount + i], INCREF each
     xor esi, esi
 .fill_varargs:
     cmp esi, ecx
-    jge .store_varargs_tuple
-    lea edi, [edx + esi]    ; index into args = co_argcount + i
-    mov r8, [r14 + rdi*8]   ; r8 = args[co_argcount + i]
+    jge .store_varargs
+    lea edi, [edx + esi]
+    mov r8, [r14 + rdi*8]
     mov [rax + PyTupleObject.ob_item + rsi*8], r8
     push rax
     push rcx
@@ -179,24 +228,141 @@ DEF_FUNC func_call
     inc esi
     jmp .fill_varargs
 
-.store_varargs_tuple:
-    ; Store tuple at localsplus[co_argcount]
+.store_varargs:
     mov [r12 + PyFrame.localsplus + rdx*8], rax
-    jmp .args_done
+    jmp .varargs_done
 
 .empty_varargs:
-    ; No excess args - create empty tuple
-    push rax                ; save co_argcount
-    xor edi, edi            ; size = 0
+    push rax
+    xor edi, edi
     call tuple_new
-    pop rdx                 ; rdx = co_argcount
+    pop rdx
     mov [r12 + PyFrame.localsplus + rdx*8], rax
 
-.args_done:
-    ; Call eval_frame(frame)
+.varargs_done:
+    ; === Phase 4: Match keyword args ===
+    mov rax, [rsp+0]       ; kw_names_pending
+    test rax, rax
+    jz .kw_done
+
+    ; Call helper: func_bind_kwargs(func, frame, args, positional_count, kw_names, kwargs_dict)
+    mov rdi, rbx            ; function object
+    mov rsi, r12            ; frame
+    mov rdx, r14            ; args_ptr
+    mov ecx, [rsp+8]        ; positional_count
+    mov r8, rax              ; kw_names tuple
+    mov r9, [rsp+24]         ; kwargs_dict (NULL if no CO_VARKEYWORDS)
+    call func_bind_kwargs
+
+.kw_done:
+    ; === Phase 5: Apply positional defaults ===
+    mov rax, [rbx + PyFuncObject.func_defaults]
+    test rax, rax
+    jz .pos_defaults_done
+
+    mov rdi, [rbx + PyFuncObject.func_code]
+    mov edx, [rdi + PyCodeObject.co_argcount]
+
+    ; If all positional slots already filled, skip
+    mov ecx, [rsp+8]       ; positional_count
+    cmp ecx, edx
+    jge .pos_defaults_done
+
+    ; defcount = len(defaults)
+    mov rcx, [rax + PyTupleObject.ob_size]
+    ; m = co_argcount - defcount
+    mov esi, edx
+    sub rsi, rcx
+
+    ; Fill localsplus[i] for unfilled slots with defaults
+    xor edi, edi            ; i = 0 (check all positional slots)
+.defaults_loop:
+    cmp edi, edx
+    jge .pos_defaults_done
+
+    cmp qword [r12 + PyFrame.localsplus + rdi*8], 0
+    jne .defaults_next
+
+    ; Must have a default (i >= m)
+    movsxd r8, edi
+    cmp r8, rsi
+    jl .defaults_next
+
+    ; defaults[i - m]
+    mov r8, rdi
+    sub r8, rsi
+    mov r9, [rax + PyTupleObject.ob_item + r8*8]
+    movsxd r8, edi
+    mov [r12 + PyFrame.localsplus + r8*8], r9
+    INCREF r9
+
+.defaults_next:
+    inc edi
+    jmp .defaults_loop
+
+.pos_defaults_done:
+    ; === Phase 6: Apply kw-only defaults ===
+    mov rax, [rbx + PyFuncObject.func_kwdefaults]
+    test rax, rax
+    jz .kw_defaults_done
+
+    mov rdi, [rbx + PyFuncObject.func_code]
+    mov ecx, [rdi + PyCodeObject.co_argcount]       ; ecx = co_argcount
+    mov edx, [rdi + PyCodeObject.co_kwonlyargcount] ; edx = co_kwonlyargcount
+    test edx, edx
+    jz .kw_defaults_done
+
+    ; For i in [co_argcount..co_argcount+co_kwonlyargcount):
+    ;   if localsplus[i] is NULL: look up name in kwdefaults dict
+    mov esi, ecx            ; esi = i = co_argcount
+    add edx, ecx            ; edx = co_argcount + co_kwonlyargcount (end)
+
+.kw_defaults_loop:
+    cmp esi, edx
+    jge .kw_defaults_done
+
+    movsxd r8, esi
+    cmp qword [r12 + PyFrame.localsplus + r8*8], 0
+    jne .kw_defaults_next
+
+    ; Slot is NULL - look up param name in kwdefaults dict
+    ; rax = kwdefaults dict, esi = param index
+    ; Get param name from co_localsplusnames[i]
+    push rax
+    push rdx
+    push rsi
+
+    mov rdi, [rbx + PyFuncObject.func_code]
+    mov rdi, [rdi + PyCodeObject.co_localsplusnames]
+    movsxd r8, esi
+    mov rsi, [rdi + PyTupleObject.ob_item + r8*8]   ; param name string
+
+    ; dict_get(kwdefaults, param_name) -> borrowed ref or NULL
+    mov rdi, rax            ; kwdefaults dict
+    call dict_get
+
+    pop rsi
+    pop rdx
+    mov r8, rax             ; r8 = value (or NULL)
+    pop rax                 ; rax = kwdefaults dict
+
+    test r8, r8
+    jz .kw_defaults_next    ; not in kwdefaults, skip (would be error)
+
+    ; Assign and INCREF
+    movsxd r9, esi
+    mov [r12 + PyFrame.localsplus + r9*8], r8
+    INCREF r8
+
+.kw_defaults_next:
+    inc esi
+    jmp .kw_defaults_loop
+
+.kw_defaults_done:
+    ; === Phase 7: Call eval_frame ===
     mov rdi, r12
     call eval_frame
-    mov r13, rax            ; r13 = return value
+    mov [rsp+16], rax       ; save return value
 
     ; Free the frame (unless generator owns it: instr_ptr != 0)
     cmp qword [r12 + PyFrame.instr_ptr], 0
@@ -205,10 +371,9 @@ DEF_FUNC func_call
     call frame_free
 .skip_frame_free:
 
-    ; Return result
-    mov rax, r13
+    mov rax, [rsp+16]       ; return value
 
-    add rsp, 8
+    add rsp, 56
     pop r15
     pop r14
     pop r13
@@ -217,6 +382,144 @@ DEF_FUNC func_call
     leave
     ret
 END_FUNC func_call
+
+; ---------------------------------------------------------------------------
+; func_bind_kwargs - Bind keyword arguments to frame locals
+;
+; rdi = function object
+; rsi = frame
+; rdx = args_ptr
+; ecx = positional_count
+; r8  = kw_names tuple (NOT NULL)
+; r9  = kwargs_dict (or NULL if no CO_VARKEYWORDS)
+; ---------------------------------------------------------------------------
+DEF_FUNC func_bind_kwargs
+    push rbx
+    push r12
+    push r13
+    push r14
+    push r15
+    sub rsp, 40             ; 32 bytes locals + 8 alignment
+    ; Locals:
+    ;   [rsp+0]  = kwargs_dict (or NULL)
+    ;   [rsp+8]  = kw_count
+    ;   [rsp+16] = kw_index
+    ;   [rsp+24] = value_index (index into args for current kw value)
+
+    mov rbx, rdi            ; function object
+    mov r12, rsi            ; frame
+    mov r13, rdx            ; args_ptr
+    mov r14, r8             ; kw_names tuple
+    mov r15d, ecx           ; positional_count
+
+    mov [rsp+0], r9         ; kwargs_dict
+
+    mov rax, [r14 + PyTupleObject.ob_size]
+    mov [rsp+8], rax        ; kw_count
+
+    mov qword [rsp+16], 0   ; kw_index = 0
+
+.kw_outer:
+    mov rcx, [rsp+16]
+    cmp rcx, [rsp+8]
+    jge .kw_outer_done
+
+    ; kw_name = kw_names[kw_index]
+    mov rsi, [r14 + PyTupleObject.ob_item + rcx*8]
+
+    ; value_index = positional_count + kw_index
+    lea eax, [r15d + ecx]
+    movsxd rax, eax
+    mov [rsp+24], rax
+
+    ; Search co_localsplusnames[co_posonlyargcount..co_argcount+co_kwonlyargcount]
+    mov rdi, [rbx + PyFuncObject.func_code]
+    mov r8, [rdi + PyCodeObject.co_localsplusnames]
+    mov r9d, [rdi + PyCodeObject.co_posonlyargcount]
+    mov r10d, [rdi + PyCodeObject.co_argcount]
+    add r10d, [rdi + PyCodeObject.co_kwonlyargcount]
+
+    mov ecx, r9d            ; j = co_posonlyargcount
+
+.kw_inner:
+    cmp ecx, r10d
+    jge .kw_not_found
+
+    movsxd rdx, ecx
+    mov rax, [r8 + PyTupleObject.ob_item + rdx*8]
+
+    ; Fast path: pointer equality (interned strings)
+    cmp rax, rsi
+    je .kw_found
+
+    ; Slow path: compare string content
+    ; Check lengths first
+    mov rdi, [rax + PyStrObject.ob_size]
+    cmp rdi, [rsi + PyStrObject.ob_size]
+    jne .kw_inner_next
+
+    ; Compare string data (both null-terminated)
+    push rcx
+    push rsi
+    push r8
+    push r10
+    lea rdi, [rax + PyStrObject.data]
+    lea rsi, [rsi + PyStrObject.data]
+    call ap_strcmp
+    pop r10
+    pop r8
+    pop rsi
+    pop rcx
+
+    test eax, eax
+    jz .kw_found
+
+.kw_inner_next:
+    inc ecx
+    jmp .kw_inner
+
+.kw_found:
+    ; ecx = j (param index in localsplus)
+    movsxd rdx, ecx
+
+    ; Check if slot already filled (would be "multiple values" error)
+    cmp qword [r12 + PyFrame.localsplus + rdx*8], 0
+    jne .kw_next            ; skip silently (TODO: error)
+
+    ; Assign: localsplus[j] = args[value_index], INCREF
+    mov rax, [rsp+24]
+    mov rdi, [r13 + rax*8]
+    mov [r12 + PyFrame.localsplus + rdx*8], rdi
+    INCREF rdi
+    jmp .kw_next
+
+.kw_not_found:
+    ; Add to **kwargs if available
+    mov rdi, [rsp+0]
+    test rdi, rdi
+    jz .kw_next             ; no **kwargs, skip (TODO: error)
+
+    ; dict_set(kwargs_dict, key, value)
+    mov rcx, [rsp+16]
+    mov rsi, [r14 + PyTupleObject.ob_item + rcx*8]  ; key = kw_name
+    mov rax, [rsp+24]
+    mov rdx, [r13 + rax*8]  ; value
+    call dict_set
+
+.kw_next:
+    inc qword [rsp+16]
+    jmp .kw_outer
+
+.kw_outer_done:
+    add rsp, 40
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC func_bind_kwargs
 
 ; ---------------------------------------------------------------------------
 ; func_dealloc(PyFuncObject *self)
