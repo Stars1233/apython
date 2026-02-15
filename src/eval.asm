@@ -82,6 +82,8 @@ extern op_load_fast_and_clear
 extern op_return_generator
 extern op_yield_value
 extern op_end_send
+extern op_send
+extern op_get_yield_from_iter
 extern op_jump_backward_no_interrupt
 extern op_call_intrinsic_1
 extern op_call_function_ex
@@ -849,7 +851,7 @@ opcode_table:
     dq op_unimplemented      ; 66
     dq op_unimplemented      ; 67
     dq op_get_iter           ; 68  = GET_ITER
-    dq op_unimplemented      ; 69  = GET_YIELD_FROM_ITER
+    dq op_get_yield_from_iter ; 69  = GET_YIELD_FROM_ITER
     dq op_unimplemented      ; 70
     dq op_load_build_class   ; 71  = LOAD_BUILD_CLASS
     dq op_unimplemented      ; 72
@@ -903,7 +905,7 @@ opcode_table:
     dq op_copy               ; 120 = COPY
     dq op_return_const       ; 121 = RETURN_CONST
     dq op_binary_op          ; 122 = BINARY_OP
-    dq op_unimplemented      ; 123 = SEND
+    dq op_send               ; 123 = SEND
     dq op_load_fast          ; 124 = LOAD_FAST
     dq op_store_fast         ; 125 = STORE_FAST
     dq op_delete_fast        ; 126 = DELETE_FAST

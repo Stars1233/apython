@@ -1116,10 +1116,158 @@ DEF_FUNC_BARE op_end_send
     ; TOS = value, TOS1 = receiver
     VPOP rax                   ; rax = value (TOS)
     VPOP rdi                   ; rdi = receiver (TOS1)
+    push rax                   ; save value (DECREF_REG clobbers caller-saved)
     DECREF_REG rdi             ; DECREF receiver
+    pop rax                    ; restore value
     VPUSH rax                  ; push value back
     DISPATCH
 END_FUNC op_end_send
+
+;; ============================================================================
+;; op_send - Send value to generator/coroutine
+;;
+;; SEND (123): TOS = value_to_send, TOS1 = receiver (generator)
+;; arg = jump offset (relative, used if generator exhausted)
+;; Calls gen_send(receiver, value). If yielded: push result.
+;; If exhausted (StopIteration): jump forward by arg.
+;; Followed by 1 CACHE entry (2 bytes).
+;; ============================================================================
+extern gen_send
+extern gen_type
+
+DEF_FUNC op_send, 32
+    ; ecx = arg (jump offset in instructions for StopIteration)
+    ; Stack: ... | receiver | sent_value |
+    mov [rbp-8], rcx           ; save arg
+
+    VPOP rsi                   ; rsi = sent_value (TOS)
+    mov [rbp-16], rsi          ; save sent_value
+    VPEEK rdi                  ; rdi = receiver (TOS1, stay on stack)
+    mov [rbp-24], rdi          ; save receiver
+
+    ; Check if receiver is a generator with iternext
+    test rdi, rdi
+    js .send_error
+    mov rax, [rdi + PyObject.ob_type]
+    mov rax, [rax + PyTypeObject.tp_iternext]
+    test rax, rax
+    jz .send_error
+
+    ; Check if sent value is None — use iternext, otherwise gen_send
+    mov rsi, [rbp-16]
+    lea rcx, [rel none_singleton]
+    cmp rsi, rcx
+    je .send_use_iternext
+
+    ; gen_send(receiver, value)
+    mov rdi, [rbp-24]
+    call gen_send
+    jmp .send_check_result
+
+.send_use_iternext:
+    ; tp_iternext(receiver)
+    mov rdi, [rbp-24]
+    mov rax, [rdi + PyObject.ob_type]
+    mov rax, [rax + PyTypeObject.tp_iternext]
+    call rax
+
+.send_check_result:
+    mov [rbp-32], rax          ; save result
+
+    ; DECREF sent value
+    mov rdi, [rbp-16]
+    DECREF_REG rdi
+
+    mov rax, [rbp-32]
+    test rax, rax
+    jz .send_exhausted
+
+    ; Yielded: push result on top (receiver stays below)
+    ; Stack becomes: ... | receiver | yielded_value |
+    VPUSH rax
+
+    ; Skip 1 CACHE entry = 2 bytes
+    add rbx, 2
+    leave
+    DISPATCH
+
+.send_exhausted:
+    ; Generator exhausted. Push None as return value.
+    ; Stack: ... | receiver | → becomes ... | receiver | None |
+    ; Then jump to END_SEND which will handle cleanup.
+    lea rax, [rel none_singleton]
+    INCREF rax
+    VPUSH rax
+
+    ; Skip 1 CACHE entry = 2 bytes, then jump forward by arg * 2 bytes
+    add rbx, 2
+    mov rcx, [rbp-8]
+    shl rcx, 1
+    add rbx, rcx
+    leave
+    DISPATCH
+
+.send_error:
+    ; Unsupported receiver — just push None and continue
+    mov rdi, [rbp-16]
+    DECREF_REG rdi
+    lea rax, [rel none_singleton]
+    INCREF rax
+    VPUSH rax
+    add rbx, 2
+    leave
+    DISPATCH
+END_FUNC op_send
+
+;; ============================================================================
+;; op_get_yield_from_iter - Get iterator for yield-from
+;;
+;; GET_YIELD_FROM_ITER (69): TOS should be an iterable.
+;; If TOS is already a generator, leave it. Otherwise call iter().
+;; ============================================================================
+DEF_FUNC_BARE op_get_yield_from_iter
+    ; TOS = iterable
+    VPEEK rdi                  ; rdi = TOS (don't pop)
+
+    ; If it's already a generator, done
+    test rdi, rdi
+    js .gyfi_call_iter
+    mov rax, [rdi + PyObject.ob_type]
+    lea rcx, [rel gen_type]
+    cmp rax, rcx
+    je .gyfi_done              ; already a generator, leave on stack
+
+.gyfi_call_iter:
+    ; Not a generator — call tp_iter to get an iterator
+    VPOP rdi                   ; pop iterable
+    push rdi                   ; save for DECREF
+
+    mov rax, [rdi + PyObject.ob_type]
+    mov rax, [rax + PyTypeObject.tp_iter]
+    test rax, rax
+    jz .gyfi_error
+
+    call rax                   ; tp_iter(iterable) -> iterator
+    push rax                   ; save iterator
+
+    ; DECREF original iterable
+    mov rdi, [rsp + 8]
+    DECREF_REG rdi
+
+    pop rax                    ; restore iterator
+    add rsp, 8                 ; discard saved iterable
+    VPUSH rax                  ; push iterator as new TOS
+
+.gyfi_done:
+    DISPATCH
+
+.gyfi_error:
+    add rsp, 8
+    extern exc_TypeError_type
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "object is not iterable"
+    call raise_exception
+END_FUNC op_get_yield_from_iter
 
 ;; ============================================================================
 ;; op_jump_backward_no_interrupt - Jump backward (no interrupt check)
