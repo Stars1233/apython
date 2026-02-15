@@ -16,6 +16,7 @@ extern frame_new
 extern frame_free
 extern tuple_new
 extern obj_incref
+extern type_type
 
 ; CO_FLAGS
 CO_VARARGS equ 0x04
@@ -598,7 +599,7 @@ align 8
 global func_type
 func_type:
     dq 1                    ; ob_refcnt (immortal)
-    dq 0                    ; ob_type (simplified: no metatype)
+    dq type_type            ; ob_type
     dq func_name_str        ; tp_name
     dq PyFuncObject_size    ; tp_basicsize
     dq func_dealloc         ; tp_dealloc

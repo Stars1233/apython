@@ -25,6 +25,7 @@ extern list_append
 extern int_from_i64
 extern int_to_i64
 extern list_method_sort
+extern type_type
 
 ;; ============================================================================
 ;; Struct definitions (inline, 32 bytes each)
@@ -922,7 +923,7 @@ align 8
 global enumerate_iter_type
 enumerate_iter_type:
     dq 1                        ; ob_refcnt (immortal)
-    dq 0                        ; ob_type
+    dq type_type                ; ob_type
     dq enumerate_iter_name      ; tp_name
     dq ITER_OBJ_SIZE            ; tp_basicsize
     dq enumerate_dealloc        ; tp_dealloc
@@ -951,7 +952,7 @@ align 8
 global zip_iter_type
 zip_iter_type:
     dq 1                        ; ob_refcnt (immortal)
-    dq 0                        ; ob_type
+    dq type_type                ; ob_type
     dq zip_iter_name            ; tp_name
     dq ITER_OBJ_SIZE            ; tp_basicsize
     dq zip_dealloc              ; tp_dealloc
@@ -980,7 +981,7 @@ align 8
 global map_iter_type
 map_iter_type:
     dq 1                        ; ob_refcnt (immortal)
-    dq 0                        ; ob_type
+    dq type_type                ; ob_type
     dq map_iter_name            ; tp_name
     dq ITER_OBJ_SIZE            ; tp_basicsize
     dq map_dealloc              ; tp_dealloc
@@ -1009,7 +1010,7 @@ align 8
 global filter_iter_type
 filter_iter_type:
     dq 1                        ; ob_refcnt (immortal)
-    dq 0                        ; ob_type
+    dq type_type                ; ob_type
     dq filter_iter_name         ; tp_name
     dq ITER_OBJ_SIZE            ; tp_basicsize
     dq filter_dealloc           ; tp_dealloc
@@ -1038,7 +1039,7 @@ align 8
 global reversed_iter_type
 reversed_iter_type:
     dq 1                        ; ob_refcnt (immortal)
-    dq 0                        ; ob_type
+    dq type_type                ; ob_type
     dq reversed_iter_name       ; tp_name
     dq ITER_OBJ_SIZE            ; tp_basicsize
     dq reversed_dealloc         ; tp_dealloc

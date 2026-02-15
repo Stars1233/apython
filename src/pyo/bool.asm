@@ -10,6 +10,7 @@ extern __gmpz_set_si
 extern int_add
 extern int_sub
 extern int_mul
+extern type_type
 
 ; bool_repr(PyObject *self) -> PyObject*
 ; Returns "True" or "False" string
@@ -103,7 +104,7 @@ align 8
 global bool_type
 bool_type:
     dq 1                    ; ob_refcnt
-    dq 0                    ; ob_type (simplified: no metatype)
+    dq type_type            ; ob_type
     dq bool_name_str        ; tp_name
     dq PyIntObject_size     ; tp_basicsize (bool is subtype of int)
     dq 0                    ; tp_dealloc

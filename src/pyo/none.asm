@@ -5,6 +5,7 @@
 %include "types.inc"
 
 extern str_from_cstr
+extern type_type
 
 ; none_repr(PyObject *self) -> PyObject*
 ; Returns a new string "None"
@@ -63,7 +64,7 @@ align 8
 global none_type
 none_type:
     dq 1                    ; ob_refcnt (immortal)
-    dq 0                    ; ob_type (simplified: no metatype)
+    dq type_type            ; ob_type
     dq none_name_str        ; tp_name
     dq PyObject_size        ; tp_basicsize
     dq 0                    ; tp_dealloc (never deallocated)

@@ -19,6 +19,7 @@ extern raise_exception
 extern exc_IndexError_type
 extern slice_type
 extern slice_indices
+extern type_type
 
 ; str_from_cstr(const char *cstr) -> PyStrObject*
 ; Creates a new string object from a C string
@@ -681,7 +682,7 @@ align 8
 global str_type
 str_type:
     dq 1                ; ob_refcnt
-    dq 0                ; ob_type
+    dq type_type        ; ob_type
     dq str_name         ; tp_name
     dq PyStrObject.data ; tp_basicsize (minimum, without data)
     dq str_dealloc      ; tp_dealloc

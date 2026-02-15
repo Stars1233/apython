@@ -22,6 +22,7 @@ extern bool_true
 extern bool_false
 extern none_singleton
 extern bool_from_int
+extern type_type
 
 ; GMP functions
 extern __gmpz_init
@@ -1528,7 +1529,7 @@ align 8
 global int_type
 int_type:
     dq 1                    ; ob_refcnt (immortal)
-    dq 0                    ; ob_type
+    dq type_type            ; ob_type
     dq int_name_str         ; tp_name
     dq PyIntObject_size     ; tp_basicsize
     dq int_dealloc          ; tp_dealloc

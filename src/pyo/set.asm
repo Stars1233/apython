@@ -16,6 +16,7 @@ extern ap_strcmp
 extern ap_memset
 extern fatal_error
 extern str_from_cstr
+extern type_type
 
 ; Set entry layout constants
 SET_ENTRY_HASH equ 0
@@ -687,7 +688,7 @@ align 8
 global set_type
 set_type:
     dq 1                        ; ob_refcnt (immortal)
-    dq 0                        ; ob_type
+    dq type_type                ; ob_type
     dq set_name_str             ; tp_name
     dq PyDictObject_size        ; tp_basicsize (reuse dict layout)
     dq set_dealloc              ; tp_dealloc
@@ -716,7 +717,7 @@ align 8
 global set_iter_type
 set_iter_type:
     dq 1                        ; ob_refcnt (immortal)
-    dq 0                        ; ob_type
+    dq type_type                ; ob_type
     dq set_iter_name            ; tp_name
     dq PyDictIterObject_size    ; tp_basicsize
     dq set_iter_dealloc         ; tp_dealloc

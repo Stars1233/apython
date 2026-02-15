@@ -13,6 +13,7 @@ extern int_from_i64
 extern fatal_error
 extern list_type
 extern tuple_type
+extern type_type
 
 ;; ============================================================================
 ;; list_iter_new(PyListObject *list) -> PyListIterObject*
@@ -314,7 +315,7 @@ align 8
 global list_iter_type
 list_iter_type:
     dq 1                    ; ob_refcnt
-    dq 0                    ; ob_type
+    dq type_type            ; ob_type
     dq list_iter_name       ; tp_name
     dq PyListIterObject_size ; tp_basicsize
     dq list_iter_dealloc    ; tp_dealloc
@@ -343,7 +344,7 @@ align 8
 global tuple_iter_type
 tuple_iter_type:
     dq 1
-    dq 0
+    dq type_type
     dq tuple_iter_name
     dq PyTupleIterObject_size
     dq tuple_iter_dealloc
@@ -372,7 +373,7 @@ align 8
 global range_iter_type
 range_iter_type:
     dq 1
-    dq 0
+    dq type_type
     dq range_iter_name
     dq PyRangeIterObject_size
     dq range_iter_dealloc

@@ -14,6 +14,7 @@ extern none_singleton
 extern bool_false
 extern int_repr
 extern int_type
+extern type_getattr
 
 ; obj_alloc(size_t size, PyTypeObject *type) -> PyObject*
 ; Allocate a new object with refcount=1 and given type
@@ -478,7 +479,7 @@ type_type:
     dq type_repr              ; tp_str
     dq 0                      ; tp_hash
     dq 0                      ; tp_call
-    dq 0                      ; tp_getattr
+    dq type_getattr           ; tp_getattr — __name__, tp_dict lookups
     dq 0                      ; tp_setattr
     dq 0                      ; tp_richcompare
     dq 0                      ; tp_iter

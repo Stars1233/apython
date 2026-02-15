@@ -15,6 +15,7 @@ extern ap_free
 extern obj_incref
 extern obj_dealloc
 extern str_from_cstr
+extern type_type
 
 ;; ============================================================================
 ;; cell_new(PyObject *obj) -> PyCellObject*
@@ -133,7 +134,7 @@ align 8
 global cell_type
 cell_type:
     dq 1                      ; ob_refcnt (immortal)
-    dq 0                      ; ob_type
+    dq type_type              ; ob_type
     dq cell_name_str          ; tp_name
     dq PyCellObject_size      ; tp_basicsize
     dq cell_dealloc           ; tp_dealloc

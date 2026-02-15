@@ -38,6 +38,7 @@ extern type_call
 extern user_type_metatype
 extern super_type
 extern func_type
+extern type_type
 
 ; New builtin function implementations (in builtins_extra.asm)
 extern builtin_abs
@@ -1378,7 +1379,7 @@ align 8
 global builtin_func_type
 builtin_func_type:
     dq 1                        ; ob_refcnt (immortal)
-    dq 0                        ; ob_type
+    dq type_type                ; ob_type
     dq builtin_func_name_str    ; tp_name
     dq PyBuiltinObject_size     ; tp_basicsize
     dq builtin_func_dealloc     ; tp_dealloc

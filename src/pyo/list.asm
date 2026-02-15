@@ -22,6 +22,7 @@ extern bool_false
 extern obj_incref
 extern slice_type
 extern slice_indices
+extern type_type
 
 ;; ============================================================================
 ;; list_new(int64_t capacity) -> PyListObject*
@@ -658,7 +659,7 @@ align 8
 global list_type
 list_type:
     dq 1                    ; ob_refcnt (immortal)
-    dq 0                    ; ob_type
+    dq type_type            ; ob_type
     dq list_name_str        ; tp_name
     dq PyListObject_size    ; tp_basicsize
     dq list_dealloc         ; tp_dealloc

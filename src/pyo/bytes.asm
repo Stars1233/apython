@@ -9,6 +9,7 @@ extern ap_malloc
 extern ap_free
 extern str_from_cstr
 extern ap_memcpy
+extern type_type
 
 ; bytes_new(int64_t size) -> PyBytesObject*
 ; Allocate a bytes object with room for 'size' bytes
@@ -94,7 +95,7 @@ align 8
 global bytes_type
 bytes_type:
     dq 1                    ; ob_refcnt
-    dq 0                    ; ob_type
+    dq type_type            ; ob_type
     dq bytes_name_str       ; tp_name
     dq PyBytesObject.data   ; tp_basicsize (header, without data)
     dq bytes_dealloc        ; tp_dealloc

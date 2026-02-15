@@ -17,6 +17,7 @@ extern exc_IndexError_type
 extern obj_incref
 extern slice_type
 extern slice_indices
+extern type_type
 
 ; tuple_new(int64_t size) -> PyTupleObject*
 ; Allocate a tuple with room for 'size' items, zero-filled
@@ -496,7 +497,7 @@ align 8
 global tuple_type
 tuple_type:
     dq 1                    ; ob_refcnt
-    dq 0                    ; ob_type
+    dq type_type            ; ob_type
     dq tuple_name_str       ; tp_name
     dq PyTupleObject.ob_item ; tp_basicsize (header, without items)
     dq tuple_dealloc        ; tp_dealloc

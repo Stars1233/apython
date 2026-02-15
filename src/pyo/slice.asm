@@ -20,6 +20,7 @@ extern obj_decref
 extern str_from_cstr
 extern none_singleton
 extern int_type
+extern type_type
 
 ;; ============================================================================
 ;; slice_new(PyObject *start, PyObject *stop, PyObject *step) -> PySliceObject*
@@ -236,7 +237,7 @@ align 8
 global slice_type
 slice_type:
     dq 1                      ; ob_refcnt (immortal)
-    dq 0                      ; ob_type
+    dq type_type              ; ob_type
     dq slice_name_str         ; tp_name
     dq PySliceObject_size     ; tp_basicsize
     dq slice_dealloc          ; tp_dealloc

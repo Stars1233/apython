@@ -420,6 +420,29 @@ DEF_FUNC op_load_attr, 48
     test rcx, rcx
     jz .la_not_method
 
+    ; === IC: try to specialize as LOAD_ATTR_METHOD (203) ===
+    ; Only when attr came from type dict (no tp_getattr path)
+    cmp qword [rbp-40], 0
+    je .la_method_push             ; not from type dict, skip IC
+
+    ; Verify type has tp_dict with valid dk_version
+    mov rdi, [rbp-16]             ; obj
+    test rdi, rdi
+    js .la_method_push             ; SmallInt obj, skip
+    mov rcx, [rdi + PyObject.ob_type]
+    mov rdx, [rcx + PyTypeObject.tp_dict]
+    test rdx, rdx
+    jz .la_method_push             ; no tp_dict, skip
+
+    ; Write CACHE: [+0]=dk_version(16b), [+2]=type_ptr(64b), [+10]=descr(64b)
+    mov rdx, [rdx + PyDictObject.dk_version]
+    mov word [rbx], dx             ; CACHE[0] = dk_version (low 16 bits)
+    mov [rbx + 2], rcx             ; CACHE[1..4] = type_ptr (8 bytes unaligned)
+    mov rax, [rbp-32]
+    mov [rbx + 10], rax            ; CACHE[5..8] = descr (8 bytes unaligned)
+    mov byte [rbx - 2], 203       ; rewrite opcode to LOAD_ATTR_METHOD
+
+.la_method_push:
     ; It's a function -> method call pattern
     ; Push self (obj), then push func
     ; Don't DECREF obj since it stays on stack as self
@@ -443,6 +466,52 @@ DEF_FUNC op_load_attr, 48
     leave
     DISPATCH
 END_FUNC op_load_attr
+
+;; ============================================================================
+;; op_load_attr_method (203) - Specialized LOAD_ATTR for method-style loads
+;;
+;; Fast path for flag=1 method loads from type dict (no tp_getattr path).
+;; Guards: ob_type matches cached type_ptr, tp_dict dk_version matches.
+;; CACHE layout at rbx: [+0]=dk_version(16b), [+2]=type_ptr(64b), [+10]=descr(64b)
+;;
+;; Stack effect: ..., obj → ..., obj(self), method
+;; (obj stays as self, cached method pushed on top)
+;; ============================================================================
+DEF_FUNC_BARE op_load_attr_method
+    ; ecx = arg (name_index << 1 | flag=1)
+    ; VPEEK obj (don't pop — stays as self if guards pass, or for deopt)
+    VPEEK rdi
+
+    ; SmallInt check
+    test rdi, rdi
+    js .lam_deopt
+
+    ; Guard 1: ob_type == cached type_ptr
+    mov rax, [rdi + PyObject.ob_type]
+    cmp rax, [rbx + 2]            ; compare 8 bytes at CACHE[+2]
+    jne .lam_deopt
+
+    ; Guard 2: type->tp_dict->dk_version == cached dk_version
+    mov rax, [rax + PyTypeObject.tp_dict]
+    mov rax, [rax + PyDictObject.dk_version]
+    cmp ax, word [rbx]             ; compare low 16 bits at CACHE[+0]
+    jne .lam_deopt
+
+    ; Guards passed! obj stays on stack as self, push cached method
+    mov rax, [rbx + 10]           ; cached descriptor (method ptr)
+    INCREF rax
+    VPUSH rax                     ; push method on top of self
+
+    ; Skip 9 CACHE entries = 18 bytes
+    add rbx, 18
+    DISPATCH
+
+.lam_deopt:
+    ; Deopt: rewrite to LOAD_ATTR (106), re-execute
+    mov byte [rbx - 2], 106
+    sub rbx, 2
+    DISPATCH
+END_FUNC op_load_attr_method
 
 ;; ============================================================================
 ;; op_load_closure - Load cell from localsplus[arg]

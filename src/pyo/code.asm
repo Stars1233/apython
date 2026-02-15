@@ -7,6 +7,7 @@
 extern ap_free
 extern obj_decref
 extern str_from_cstr
+extern type_type
 
 ; code_dealloc(PyObject *self)
 ; Free code object and decref contained objects
@@ -95,7 +96,7 @@ align 8
 global code_type
 code_type:
     dq 1                ; ob_refcnt
-    dq 0                ; ob_type
+    dq type_type        ; ob_type
     dq code_type_name   ; tp_name
     dq PyCodeObject_size ; tp_basicsize
     dq code_dealloc     ; tp_dealloc

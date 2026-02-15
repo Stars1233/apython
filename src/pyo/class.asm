@@ -22,6 +22,7 @@ extern raise_exception
 extern exc_AttributeError_type
 extern exc_TypeError_type
 extern func_type
+extern type_type
 extern eval_frame
 extern frame_new
 extern frame_free
@@ -597,7 +598,7 @@ align 8
 global method_type
 method_type:
     dq 1                        ; ob_refcnt (immortal)
-    dq 0                        ; ob_type
+    dq type_type                ; ob_type
     dq method_name_str          ; tp_name
     dq PyMethodObject_size      ; tp_basicsize
     dq method_dealloc           ; tp_dealloc

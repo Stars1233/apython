@@ -29,6 +29,7 @@ extern obj_incref
 extern str_type
 extern type_getattr
 extern type_repr
+extern type_type
 
 ; exc_new(PyTypeObject *type, PyObject *msg_str) -> PyExceptionObject*
 ; Creates a new exception with given type and message string.
@@ -326,7 +327,7 @@ align 8
 global exc_metatype
 exc_metatype:
     dq 1                    ; ob_refcnt (immortal)
-    dq 0                    ; ob_type (no meta-metatype needed)
+    dq type_type            ; ob_type
     dq exc_meta_name        ; tp_name
     dq 192                  ; tp_basicsize (PyTypeObject size)
     dq 0                    ; tp_dealloc (types are immortal)

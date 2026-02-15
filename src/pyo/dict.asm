@@ -18,6 +18,7 @@ extern raise_exception
 extern exc_KeyError_type
 extern obj_incref
 extern str_from_cstr
+extern type_type
 
 ; Initial capacity (must be power of 2)
 DICT_INIT_CAP equ 8
@@ -892,7 +893,7 @@ align 8
 global dict_type
 dict_type:
     dq 1                        ; ob_refcnt (immortal)
-    dq 0                        ; ob_type
+    dq type_type                ; ob_type
     dq dict_name_str            ; tp_name
     dq PyDictObject_size        ; tp_basicsize
     dq dict_dealloc             ; tp_dealloc
@@ -921,7 +922,7 @@ align 8
 global dict_iter_type
 dict_iter_type:
     dq 1                        ; ob_refcnt (immortal)
-    dq 0                        ; ob_type
+    dq type_type                ; ob_type
     dq dict_iter_name           ; tp_name
     dq PyDictIterObject_size    ; tp_basicsize
     dq dict_iter_dealloc        ; tp_dealloc

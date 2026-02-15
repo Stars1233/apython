@@ -15,6 +15,7 @@ extern frame_free
 extern none_singleton
 extern str_from_cstr
 extern obj_dealloc
+extern type_type
 
 ;; ============================================================================
 ;; gen_new(PyFrame *frame) -> PyGenObject*
@@ -204,7 +205,7 @@ align 8
 global gen_type
 gen_type:
     dq 1                        ; ob_refcnt (immortal)
-    dq 0                        ; ob_type
+    dq type_type                ; ob_type
     dq gen_name_str             ; tp_name
     dq PyGenObject_size         ; tp_basicsize
     dq gen_dealloc              ; tp_dealloc

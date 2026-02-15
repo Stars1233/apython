@@ -20,6 +20,7 @@ extern op_store_fast
 extern op_load_global
 extern op_load_global_module
 extern op_load_global_builtin
+extern op_load_attr_method
 extern op_load_name
 extern op_store_name
 extern op_store_global
@@ -977,7 +978,7 @@ opcode_table:
     dq op_load_global_module ; 200 = LOAD_GLOBAL_MODULE (IC)
     dq op_load_global_builtin ; 201 = LOAD_GLOBAL_BUILTIN (IC)
     dq op_unimplemented      ; 202
-    dq op_unimplemented      ; 203
+    dq op_load_attr_method   ; 203 = LOAD_ATTR_METHOD (IC)
     dq op_unimplemented      ; 204
     dq op_unimplemented      ; 205
     dq op_unimplemented      ; 206
