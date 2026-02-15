@@ -242,6 +242,15 @@ struc PyGenObject
     .gi_name:   resq 1    ; +40: name string
 endstruc
 
+; File object (for sys.stdout, sys.stderr, sys.stdin)
+struc PyFileObject
+    .ob_refcnt:   resq 1  ; +0
+    .ob_type:     resq 1  ; +8
+    .file_fd:     resq 1  ; +16: OS file descriptor
+    .file_name:   resq 1  ; +24: name string ('<stdout>' etc)
+    .file_mode:   resq 1  ; +32: mode string ('w', 'r')
+endstruc
+
 ; Sentinel values
 NULL_OBJ equ 0
 

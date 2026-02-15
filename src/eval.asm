@@ -101,6 +101,8 @@ extern op_match_sequence
 extern op_match_keys
 extern op_call_intrinsic_2
 extern op_load_super_attr
+extern op_import_name
+extern op_import_from
 extern op_binary_op_add_int
 extern op_binary_op_sub_int
 extern op_compare_op_int
@@ -888,8 +890,8 @@ opcode_table:
     dq op_build_map          ; 105 = BUILD_MAP
     dq op_load_attr          ; 106 = LOAD_ATTR
     dq op_compare_op         ; 107 = COMPARE_OP
-    dq op_unimplemented      ; 108 = IMPORT_NAME
-    dq op_unimplemented      ; 109 = IMPORT_FROM
+    dq op_import_name        ; 108 = IMPORT_NAME
+    dq op_import_from        ; 109 = IMPORT_FROM
     dq op_jump_forward       ; 110 = JUMP_FORWARD
     dq op_unimplemented      ; 111
     dq op_unimplemented      ; 112

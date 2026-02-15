@@ -8,6 +8,8 @@
 extern bool_init
 extern builtins_init
 extern methods_init
+extern import_init
+extern sys_path_add_script_dir
 extern dict_new
 extern dict_set
 extern frame_new
@@ -17,6 +19,7 @@ extern pyc_read_file
 extern fatal_error
 extern obj_decref
 extern str_from_cstr
+extern none_singleton
 
 ; main(int argc, char **argv) -> int
 DEF_FUNC main
@@ -24,13 +27,18 @@ DEF_FUNC main
     push r12
     push r13
     push r14
+    push r15
 
     ; Check argc >= 2
     cmp edi, 2
     jl .usage
 
+    ; Save argc/argv early
+    mov r14d, edi               ; r14 = argc
+    mov r15, rsi                ; r15 = argv
+
     ; Save argv[1] (the .pyc filename)
-    mov rbx, [rsi + 8]      ; rbx = argv[1]
+    mov rbx, [rsi + 8]         ; rbx = argv[1]
 
     ; Initialize subsystems
     call bool_init
@@ -40,39 +48,74 @@ DEF_FUNC main
     call pyc_read_file
     test rax, rax
     jz .load_failed
-    mov r12, rax             ; r12 = code object
+    mov r12, rax                ; r12 = code object
 
     ; Create builtins dict
     call builtins_init
-    mov r13, rax             ; r13 = builtins dict
+    mov r13, rax                ; r13 = builtins dict
 
     ; Initialize type methods (str, list, dict tp_dict)
     call methods_init
 
+    ; Initialize import system (sys module, sys.modules, etc.)
+    mov edi, r14d               ; argc
+    mov rsi, r15                ; argv
+    call import_init
+
+    ; Set sys.path[0] to script directory
+    mov rdi, rbx                ; pyc filename
+    call sys_path_add_script_dir
+
     ; Create globals dict
     call dict_new
-    mov r14, rax             ; r14 = globals dict
+    push rax                    ; save globals dict on stack
 
     ; Set __name__ = "__main__" in globals
     lea rdi, [rel __name__cstr]
     call str_from_cstr
-    push rax                 ; save key str
+    push rax                    ; save key str
     lea rdi, [rel __main__cstr]
     call str_from_cstr
-    mov rdx, rax             ; value = "__main__" str
-    pop rsi                  ; key = "__name__" str
-    mov rdi, r14             ; dict = globals
+    mov rdx, rax                ; value = "__main__" str
+    pop rsi                     ; key = "__name__" str
+    mov rdi, [rsp]              ; dict = globals (from stack)
     call dict_set
+
+    ; Set __package__ = None in globals (top-level module has no package)
+    lea rdi, [rel __package__cstr]
+    call str_from_cstr
+    push rax
+    mov rdi, [rsp + 8]         ; globals dict
+    mov rsi, rax
+    lea rdx, [rel none_singleton]
+    call dict_set
+    pop rdi
+    call obj_decref
+
+    ; Set __builtins__ in globals
+    extern builtins_dict_global
+    lea rdi, [rel __builtins__cstr]
+    call str_from_cstr
+    push rax
+    mov rdi, [rsp + 8]         ; globals dict
+    mov rsi, rax
+    mov rdx, [rel builtins_dict_global]
+    call dict_set
+    pop rdi
+    call obj_decref
+
+    pop rax                     ; rax = globals dict
+    mov r14, rax                ; r14 = globals dict
 
     ; Create execution frame
     ; frame_new(code, globals, builtins, locals)
     ; For module-level code, locals == globals
-    mov rdi, r12             ; code
-    mov rsi, r14             ; globals
-    mov rdx, r13             ; builtins
-    mov rcx, r14             ; locals = globals
+    mov rdi, r12                ; code
+    mov rsi, r14                ; globals
+    mov rdx, r13                ; builtins
+    mov rcx, r14                ; locals = globals
     call frame_new
-    mov rbx, rax             ; rbx = frame
+    mov rbx, rax                ; rbx = frame
 
     ; Execute the bytecode
     mov rdi, rbx
@@ -85,6 +128,7 @@ DEF_FUNC main
 
     ; Exit 0
     xor eax, eax
+    pop r15
     pop r14
     pop r13
     pop r12
@@ -104,3 +148,5 @@ END_FUNC main
 section .rodata
 __name__cstr: db "__name__", 0
 __main__cstr: db "__main__", 0
+__package__cstr: db "__package__", 0
+__builtins__cstr: db "__builtins__", 0

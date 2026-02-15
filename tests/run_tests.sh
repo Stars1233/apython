@@ -18,6 +18,14 @@ GREEN='\033[0;32m'
 YELLOW='\033[0;33m'
 NC='\033[0m'
 
+# Pre-compile all non-test .py files (helper modules)
+for helper_py in "$TESTDIR"/*.py; do
+    case "$(basename "$helper_py")" in
+        test_*) continue ;;
+    esac
+    $PYTHON -m py_compile "$helper_py" 2>/dev/null || true
+done
+
 for test_py in "$TESTDIR"/test_*.py; do
     test_name=$(basename "$test_py" .py)
 
