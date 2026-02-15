@@ -21,6 +21,7 @@ section .text
 extern eval_dispatch
 extern obj_dealloc
 extern dict_get
+extern dict_get_index
 extern fatal_error
 extern raise_exception
 extern obj_incref
@@ -80,34 +81,152 @@ DEF_FUNC_BARE op_load_global
     ; Save name on the regular stack for retry
     push rdi
 
-    ; Try globals first: dict_get(globals, name) -> value or NULL
+    ; Try globals first: dict_get_index(globals, name) -> slot or -1
     mov rdi, [r12 + PyFrame.globals]
     mov rsi, [rsp]             ; rsi = name
-    call dict_get
-    test rax, rax
-    jnz .found
+    call dict_get_index
+    cmp rax, -1
+    je .try_builtins
 
-    ; Try builtins: dict_get(builtins, name)
+    ; Found in globals — try to specialize to LOAD_GLOBAL_MODULE
+    ; rax = slot index, rbx points at CACHE[0]
+    mov word [rbx + 2], ax     ; CACHE[1] = index (low 16 bits)
+    mov rdi, [r12 + PyFrame.globals]
+    mov rdi, [rdi + PyDictObject.dk_version]
+    mov word [rbx + 4], di     ; CACHE[2] = module_keys_version
+    mov byte [rbx - 2], 200    ; rewrite opcode to LOAD_GLOBAL_MODULE
+
+    ; Load the value now (via entry slot)
+    mov rdi, [r12 + PyFrame.globals]
+    mov rdi, [rdi + PyDictObject.entries]
+    movzx eax, word [rbx + 2]  ; index
+    imul rax, rax, DICT_ENTRY_SIZE
+    mov rax, [rdi + rax + DictEntry.value]
+    add rsp, 8                 ; discard saved name
+    jmp .lg_push_result
+
+.try_builtins:
+    ; Try builtins: dict_get_index(builtins, name) -> slot or -1
     mov rdi, [r12 + PyFrame.builtins]
     pop rsi                    ; rsi = name
-    call dict_get
-    test rax, rax
-    jnz .found_no_pop
+    call dict_get_index
+    cmp rax, -1
+    je .not_found
 
-    ; Not found in either dict - raise NameError
+    ; Found in builtins — specialize to LOAD_GLOBAL_BUILTIN
+    mov word [rbx + 2], ax     ; CACHE[1] = index
+    mov rdi, [r12 + PyFrame.globals]
+    mov rdi, [rdi + PyDictObject.dk_version]
+    mov word [rbx + 4], di     ; CACHE[2] = module_keys_version (guard globals hasn't added it)
+    mov rdi, [r12 + PyFrame.builtins]
+    mov rdi, [rdi + PyDictObject.dk_version]
+    mov word [rbx + 6], di     ; CACHE[3] = builtin_keys_version
+
+    mov byte [rbx - 2], 201    ; rewrite opcode to LOAD_GLOBAL_BUILTIN
+
+    ; Load the value now
+    mov rdi, [r12 + PyFrame.builtins]
+    mov rdi, [rdi + PyDictObject.entries]
+    movzx eax, word [rbx + 2]
+    imul rax, rax, DICT_ENTRY_SIZE
+    mov rax, [rdi + rax + DictEntry.value]
+    jmp .lg_push_result
+
+.not_found:
     lea rdi, [rel exc_NameError_type]
     CSTRING rsi, "name not found"
     call raise_exception
 
-.found:
-    add rsp, 8                 ; discard saved name
-.found_no_pop:
+.lg_push_result:
     INCREF rax
     VPUSH rax
     ; Skip 4 CACHE entries = 8 bytes
     add rbx, 8
     DISPATCH
 END_FUNC op_load_global
+
+;; ============================================================================
+;; op_load_global_module (200) - Specialized LOAD_GLOBAL for globals dict hit
+;;
+;; Fast path: check globals dict version, load by cached index.
+;; CACHE layout at rbx: [+0]=counter [+2]=index [+4]=mod_ver [+6]=bi_ver
+;; ============================================================================
+DEF_FUNC_BARE op_load_global_module
+    ; Version guard FIRST (before any stack modification)
+    mov rdi, [r12 + PyFrame.globals]
+    mov rax, [rdi + PyDictObject.dk_version]
+    cmp ax, word [rbx + 4]     ; compare low 16 bits with CACHE[2]
+    jne .lgm_deopt
+
+    ; Fast path: load from globals entries by cached index
+    mov rdi, [rdi + PyDictObject.entries]
+    movzx eax, word [rbx + 2]  ; CACHE[1] = index
+    imul rax, rax, DICT_ENTRY_SIZE
+    mov rax, [rdi + rax + DictEntry.value]
+    test rax, rax
+    jz .lgm_deopt              ; value slot cleared (deleted entry)
+
+    ; Guards passed — now push NULL if needed
+    test ecx, 1
+    jz .lgm_no_null
+    mov qword [r13], 0
+    add r13, 8
+.lgm_no_null:
+    INCREF rax
+    VPUSH rax
+    add rbx, 8
+    DISPATCH
+
+.lgm_deopt:
+    ; Deopt: rewrite back to LOAD_GLOBAL (116), re-execute cleanly
+    mov byte [rbx - 2], 116
+    sub rbx, 2
+    DISPATCH
+END_FUNC op_load_global_module
+
+;; ============================================================================
+;; op_load_global_builtin (201) - Specialized LOAD_GLOBAL for builtins dict hit
+;;
+;; Fast path: guard both globals AND builtins versions, load by cached index.
+;; ============================================================================
+DEF_FUNC_BARE op_load_global_builtin
+    ; Guards FIRST (before any stack modification)
+    ; Guard 1: globals version must not have changed (name might now be in globals)
+    mov rdi, [r12 + PyFrame.globals]
+    mov rax, [rdi + PyDictObject.dk_version]
+    cmp ax, word [rbx + 4]     ; CACHE[2] = module_keys_version
+    jne .lgb_deopt
+
+    ; Guard 2: builtins version must match
+    mov rdi, [r12 + PyFrame.builtins]
+    mov rax, [rdi + PyDictObject.dk_version]
+    cmp ax, word [rbx + 6]     ; CACHE[3] = builtin_keys_version
+    jne .lgb_deopt
+
+    ; Fast path: load from builtins entries by cached index
+    mov rdi, [rdi + PyDictObject.entries]
+    movzx eax, word [rbx + 2]  ; CACHE[1] = index
+    imul rax, rax, DICT_ENTRY_SIZE
+    mov rax, [rdi + rax + DictEntry.value]
+    test rax, rax
+    jz .lgb_deopt
+
+    ; Guards passed — now push NULL if needed
+    test ecx, 1
+    jz .lgb_no_null
+    mov qword [r13], 0
+    add r13, 8
+.lgb_no_null:
+    INCREF rax
+    VPUSH rax
+    add rbx, 8
+    DISPATCH
+
+.lgb_deopt:
+    mov byte [rbx - 2], 116
+    sub rbx, 2
+    DISPATCH
+END_FUNC op_load_global_builtin
 
 ;; ============================================================================
 ;; op_load_name - Load name from locals -> globals -> builtins

@@ -78,6 +78,7 @@ struc PyDictObject
     .ob_size:   resq 1    ; +16: item count
     .capacity:  resq 1    ; +24: hash table capacity
     .entries:   resq 1    ; +32: ptr to entry array
+    .dk_version: resq 1   ; +40: version counter (bumped on mutation)
 endstruc
 
 ; Dict entry

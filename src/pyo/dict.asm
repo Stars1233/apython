@@ -40,6 +40,7 @@ DEF_FUNC dict_new
     mov [rbx + PyObject.ob_type], rax
     mov qword [rbx + PyDictObject.ob_size], 0
     mov qword [rbx + PyDictObject.capacity], DICT_INIT_CAP
+    mov qword [rbx + PyDictObject.dk_version], 1
 
     ; Allocate entries array: capacity * DICT_ENTRY_SIZE
     mov edi, DICT_INIT_CAP * DICT_ENTRY_SIZE
@@ -190,6 +191,77 @@ align 16
     leave
     ret
 END_FUNC dict_get
+
+;; ============================================================================
+;; dict_get_index(PyDictObject *dict, PyObject *key) -> int64
+;; Like dict_get but returns the slot index (for IC caching), -1 if not found.
+;; ============================================================================
+DEF_FUNC dict_get_index
+    push rbx
+    push r12
+    push r13
+    push r14
+    push r15
+
+    mov rbx, rdi                ; rbx = dict
+    mov r12, rsi                ; r12 = key
+
+    mov rdi, r12
+    call obj_hash
+    mov r13, rax                ; r13 = hash
+
+    mov r14, [rbx + PyDictObject.capacity]
+    lea r15, [r14 - 1]          ; r15 = mask
+
+    mov rcx, r13
+    and rcx, r15                ; rcx = slot index
+
+    xor r14d, r14d              ; probes done
+
+.gi_probe:
+    cmp r14, [rbx + PyDictObject.capacity]
+    jge .gi_not_found
+
+    mov rax, [rbx + PyDictObject.entries]
+    imul rdx, rcx, DICT_ENTRY_SIZE
+    add rax, rdx
+
+    mov rdi, [rax + DictEntry.key]
+    test rdi, rdi
+    jz .gi_not_found
+
+    cmp r13, [rax + DictEntry.hash]
+    jne .gi_next
+
+    mov rsi, r12
+    push rcx
+    call dict_keys_equal
+    pop rcx
+    test eax, eax
+    jz .gi_next
+
+    ; Found: return slot index
+    mov rax, rcx
+    jmp .gi_done
+
+.gi_next:
+    inc rcx
+    and rcx, r15
+    inc r14
+    jmp .gi_probe
+
+.gi_not_found:
+    mov rax, -1
+
+.gi_done:
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC dict_get_index
 
 ;; ============================================================================
 ;; dict_find_slot(PyDictObject *dict, PyObject *key, int64_t hash)
@@ -454,6 +526,12 @@ DEF_FUNC dict_set
     INCREF r13
 
 .done:
+    ; Bump version counter (skip 0 on wrap)
+    inc qword [rbx + PyDictObject.dk_version]
+    cmp qword [rbx + PyDictObject.dk_version], 0
+    jne .ver_ok
+    mov qword [rbx + PyDictObject.dk_version], 1
+.ver_ok:
     pop r14
     pop r13
     pop r12
@@ -631,6 +709,12 @@ DEF_FUNC dict_del
     pop rdi
     call obj_decref             ; DECREF value
     dec qword [rbx + PyDictObject.ob_size]
+    ; Bump version counter
+    inc qword [rbx + PyDictObject.dk_version]
+    cmp qword [rbx + PyDictObject.dk_version], 0
+    jne .dd_ver_ok
+    mov qword [rbx + PyDictObject.dk_version], 1
+.dd_ver_ok:
     xor eax, eax               ; return 0 = success
     jmp .dd_done
 
