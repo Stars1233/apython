@@ -30,6 +30,8 @@ extern exc_TypeError_type
 extern exc_NameError_type
 extern dict_del
 extern dict_get
+extern property_type
+extern property_descr_set
 
 ;; ============================================================================
 ;; op_store_fast - Store TOS into localsplus[arg]
@@ -122,6 +124,46 @@ DEF_FUNC op_store_attr, 32
     VPOP rdi
     mov [rbp-16], rdi
 
+    ; Check for property descriptor in type dict before regular setattr
+    mov rdi, [rbp-8]              ; obj
+    mov rax, [rdi + PyObject.ob_type]
+    mov rax, [rax + PyTypeObject.tp_dict]
+    test rax, rax
+    jz .sa_no_property
+
+    ; dict_get(type->tp_dict, name)
+    mov rdi, rax
+    mov rsi, [rbp-24]
+    call dict_get
+    test rax, rax
+    jz .sa_no_property
+
+    ; Check if it's a property
+    test rax, rax
+    js .sa_no_property            ; SmallInt
+    mov rcx, [rax + PyObject.ob_type]
+    lea rdx, [rel property_type]
+    cmp rcx, rdx
+    jne .sa_no_property
+
+    ; Found property descriptor — call fset(obj, value)
+    mov rdi, rax                  ; property
+    mov rsi, [rbp-8]              ; obj
+    mov rdx, [rbp-16]             ; value
+    call property_descr_set
+
+    ; DECREF value
+    mov rdi, [rbp-16]
+    call obj_decref
+    ; DECREF obj
+    mov rdi, [rbp-8]
+    call obj_decref
+
+    add rbx, 8
+    leave
+    DISPATCH
+
+.sa_no_property:
     ; Check tp_setattr
     mov rdi, [rbp-8]
     mov rax, [rdi + PyObject.ob_type]

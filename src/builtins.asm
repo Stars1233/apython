@@ -39,6 +39,7 @@ extern user_type_metatype
 extern super_type
 extern staticmethod_type
 extern classmethod_type
+extern property_type
 extern func_type
 extern type_type
 
@@ -1159,6 +1160,11 @@ DEF_FUNC builtins_init
     lea rdx, [rel classmethod_type]
     call add_exc_type_builtin
 
+    mov rdi, rbx
+    lea rsi, [rel bi_name_property]
+    lea rdx, [rel property_type]
+    call add_exc_type_builtin
+
     ; Register exception types as builtins
     mov rdi, rbx
     lea rsi, [rel bi_name_BaseException]
@@ -1367,6 +1373,7 @@ bi_name_locals:       db "locals", 0
 bi_name_super:        db "super", 0
 bi_name_staticmethod: db "staticmethod", 0
 bi_name_classmethod:  db "classmethod", 0
+bi_name_property:     db "property", 0
 
 ; Exception type names
 bi_name_BaseException:     db "BaseException", 0

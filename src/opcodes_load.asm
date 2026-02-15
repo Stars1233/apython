@@ -33,6 +33,8 @@ extern exc_AttributeError_type
 extern method_new
 extern staticmethod_type
 extern classmethod_type
+extern property_type
+extern property_descr_get
 extern user_type_metatype
 
 ;; ============================================================================
@@ -386,6 +388,10 @@ DEF_FUNC op_load_attr, 48
     cmp rcx, rdx
     je .la_handle_classmethod
 
+    lea rdx, [rel property_type]
+    cmp rcx, rdx
+    je .la_handle_property
+
 .la_check_flag:
     ; Check flag
     cmp qword [rbp-8], 0
@@ -511,6 +517,38 @@ DEF_FUNC op_load_attr, 48
     xor eax, eax
     VPUSH rax
     mov rax, [rbp-32]
+    VPUSH rax
+    jmp .la_done
+
+.la_handle_property:
+    ; Property descriptor: always intercept and call fget(obj)
+    ; (property objects found via instance_getattr still need descriptor invocation)
+
+    ; Call property_descr_get(property, obj)
+    mov rdi, [rbp-32]          ; property descriptor
+    mov rsi, [rbp-16]          ; obj
+    call property_descr_get
+    push rax                   ; save result
+
+    ; DECREF property wrapper
+    mov rdi, [rbp-32]
+    call obj_decref
+    ; DECREF obj
+    mov rdi, [rbp-16]
+    call obj_decref
+
+    pop rax
+    ; Push result (property_descr_get already returns owned ref)
+    ; For flag=1, we still just push the result (property access, not method)
+    cmp qword [rbp-8], 0
+    jne .la_prop_flag1
+    VPUSH rax
+    jmp .la_done
+
+.la_prop_flag1:
+    ; flag=1: push NULL + result (it's a value, not a method)
+    xor ecx, ecx
+    VPUSH rcx
     VPUSH rax
     jmp .la_done
 
