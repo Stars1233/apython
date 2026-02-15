@@ -178,6 +178,13 @@ struc PyStrIterObject
     .it_index:  resq 1
 endstruc
 
+struc PyBytesIterObject
+    .ob_refcnt: resq 1
+    .ob_type:   resq 1
+    .it_seq:    resq 1    ; +16: ptr to bytes obj
+    .it_index:  resq 1    ; +24: current index
+endstruc
+
 ; Slice object
 struc PySliceObject
     .ob_refcnt: resq 1

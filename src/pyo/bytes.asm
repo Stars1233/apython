@@ -8,11 +8,27 @@
 extern ap_malloc
 extern ap_free
 extern str_from_cstr
+extern str_new
 extern ap_memcpy
 extern type_type
+extern obj_incref
+extern obj_decref
+extern raise_exception
+extern exc_IndexError_type
+extern exc_TypeError_type
+extern int_to_i64
+extern slice_type
+extern slice_indices
+extern ap_strcmp
+extern builtin_func_new
+extern method_new
 
-; bytes_new(int64_t size) -> PyBytesObject*
-; Allocate a bytes object with room for 'size' bytes
+section .text
+
+;; ============================================================================
+;; bytes_new(int64_t size) -> PyBytesObject*
+;; Allocate a bytes object with room for 'size' bytes
+;; ============================================================================
 DEF_FUNC bytes_new
     push rbx
     push r12
@@ -37,8 +53,10 @@ DEF_FUNC bytes_new
     ret
 END_FUNC bytes_new
 
-; bytes_from_data(const void *data, int64_t size) -> PyBytesObject*
-; Allocate a bytes object and copy data into it
+;; ============================================================================
+;; bytes_from_data(const void *data, int64_t size) -> PyBytesObject*
+;; Allocate a bytes object and copy data into it
+;; ============================================================================
 DEF_FUNC bytes_from_data
     push rbx
     push r12
@@ -72,23 +90,549 @@ DEF_FUNC bytes_from_data
     ret
 END_FUNC bytes_from_data
 
-; bytes_dealloc(PyObject *self)
-; Data is inline, just free the object
+;; ============================================================================
+;; bytes_dealloc(PyObject *self)
+;; Data is inline, just free the object
+;; ============================================================================
 DEF_FUNC_BARE bytes_dealloc
     jmp ap_free
 END_FUNC bytes_dealloc
 
-; bytes_repr(PyObject *self) -> PyStrObject*
-; Stub: returns "b'...'"
-DEF_FUNC_BARE bytes_repr
-    lea rdi, [rel bytes_repr_str]
-    jmp str_from_cstr
+;; ============================================================================
+;; bytes_len(PyObject *self) -> int64_t
+;; ============================================================================
+DEF_FUNC_BARE bytes_len
+    mov rax, [rdi + PyBytesObject.ob_size]
+    ret
+END_FUNC bytes_len
+
+;; ============================================================================
+;; bytes_getitem(PyBytesObject *self, int64_t index) -> PyObject* (SmallInt 0-255)
+;; sq_item: return byte at index as integer
+;; ============================================================================
+DEF_FUNC_BARE bytes_getitem
+    ; Handle negative index
+    test rsi, rsi
+    jns .positive
+    add rsi, [rdi + PyBytesObject.ob_size]
+.positive:
+    ; Bounds check
+    cmp rsi, [rdi + PyBytesObject.ob_size]
+    jge .index_error
+    cmp rsi, 0
+    jl .index_error
+
+    ; Get byte and return as SmallInt
+    movzx eax, byte [rdi + PyBytesObject.data + rsi]
+    bts rax, 63               ; encode as SmallInt
+    ret
+
+.index_error:
+    push rdi
+    lea rdi, [rel exc_IndexError_type]
+    CSTRING rsi, "index out of range"
+    call raise_exception
+END_FUNC bytes_getitem
+
+;; ============================================================================
+;; bytes_subscript(PyBytesObject *self, PyObject *key) -> PyObject*
+;; mp_subscript: handles both int and slice keys
+;; ============================================================================
+DEF_FUNC bytes_subscript
+    push rbx
+    push r12
+
+    mov rbx, rdi               ; bytes obj
+    mov r12, rsi               ; key
+
+    ; Check if key is slice
+    test r12, r12
+    js .bs_int                 ; SmallInt → int path
+    mov rax, [r12 + PyObject.ob_type]
+    lea rcx, [rel slice_type]
+    cmp rax, rcx
+    je .bs_slice
+
+.bs_int:
+    ; Convert key to i64
+    mov rdi, r12
+    call int_to_i64
+    ; Call bytes_getitem
+    mov rdi, rbx
+    mov rsi, rax
+    call bytes_getitem
+
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.bs_slice:
+    ; Slice: create new bytes from slice
+    push r13
+    push r14
+    push r15
+
+    mov rdi, r12               ; slice
+    mov rsi, [rbx + PyBytesObject.ob_size]
+    call slice_indices
+    ; rax = start, rdx = stop, rcx = step
+    mov r13, rax               ; start
+    mov r14, rdx               ; stop
+    mov r15, rcx               ; step
+
+    ; For step=1, simple case
+    cmp r15, 1
+    jne .bs_step_slice
+
+    ; Compute length
+    mov rdi, r14
+    sub rdi, r13
+    jle .bs_empty
+
+    ; Create new bytes
+    push rdi                   ; save length
+    call bytes_new
+    pop rdi                    ; length
+    push rax                   ; save new bytes
+
+    ; Copy data
+    lea rsi, [rbx + PyBytesObject.data]
+    add rsi, r13               ; src = data + start
+    lea rdi, [rax + PyBytesObject.data]  ; dst
+    mov rdx, r14
+    sub rdx, r13               ; count
+    call ap_memcpy
+
+    pop rax                    ; new bytes
+    jmp .bs_slice_done
+
+.bs_step_slice:
+    ; Extended slice: compute length
+    test r15, r15
+    jg .bs_pos_step
+    ; Negative step
+    mov rax, r13
+    sub rax, r14
+    dec rax
+    mov rcx, r15
+    neg rcx
+    xor edx, edx
+    div rcx
+    inc rax
+    jmp .bs_have_slen
+
+.bs_pos_step:
+    mov rax, r14
+    sub rax, r13
+    jle .bs_empty
+    dec rax
+    xor edx, edx
+    div r15
+    inc rax
+    jmp .bs_have_slen
+
+.bs_have_slen:
+    push rax                   ; slicelength
+    mov rdi, rax
+    call bytes_new
+    push rax                   ; new bytes obj
+
+    ; Fill items
+    xor ecx, ecx              ; i = 0
+.bs_step_loop:
+    cmp rcx, [rsp + 8]        ; slicelength
+    jge .bs_step_done
+    ; idx = start + i * step
+    mov rax, rcx
+    imul rax, r15
+    add rax, r13
+    movzx edx, byte [rbx + PyBytesObject.data + rax]
+    mov rdi, [rsp]             ; new bytes obj
+    mov [rdi + PyBytesObject.data + rcx], dl
+    inc rcx
+    jmp .bs_step_loop
+
+.bs_step_done:
+    pop rax                    ; new bytes
+    add rsp, 8                 ; discard slicelength
+    jmp .bs_slice_done
+
+.bs_empty:
+    xor edi, edi
+    call bytes_new
+
+.bs_slice_done:
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC bytes_subscript
+
+;; ============================================================================
+;; bytes_contains(PyBytesObject *self, PyObject *value) -> int (0/1)
+;; sq_contains: check if byte value is in bytes
+;; ============================================================================
+DEF_FUNC bytes_contains
+    push rbx
+
+    mov rbx, rdi               ; bytes obj
+
+    ; Value must be an int (0-255)
+    mov rdi, rsi
+    call int_to_i64
+    ; rax = byte value
+
+    ; Search
+    mov rcx, [rbx + PyBytesObject.ob_size]
+    lea rdx, [rbx + PyBytesObject.data]
+    xor r8d, r8d               ; index
+.bc_loop:
+    cmp r8, rcx
+    jge .bc_not_found
+    movzx edi, byte [rdx + r8]
+    cmp rdi, rax
+    je .bc_found
+    inc r8
+    jmp .bc_loop
+
+.bc_found:
+    mov eax, 1
+    pop rbx
+    leave
+    ret
+
+.bc_not_found:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+END_FUNC bytes_contains
+
+;; ============================================================================
+;; bytes_repr(PyObject *self) -> PyStrObject*
+;; Returns b'...' representation with hex escapes for non-printable bytes
+;; ============================================================================
+DEF_FUNC bytes_repr, 1024
+    push rbx
+    push r12
+    push r13
+
+    mov rbx, rdi               ; bytes obj
+    mov r12, [rbx + PyBytesObject.ob_size]  ; length
+
+    ; Build repr in local buffer
+    lea r13, [rbp - 1024]      ; buffer on stack
+
+    ; Write "b'"
+    mov byte [r13], 'b'
+    mov byte [r13 + 1], 0x27   ; single quote
+    mov ecx, 2                 ; output pos
+
+    ; Iterate bytes
+    xor edx, edx               ; input pos
+.br_loop:
+    cmp rdx, r12
+    jge .br_close
+    cmp ecx, 1000
+    jge .br_close              ; safety limit
+
+    movzx eax, byte [rbx + PyBytesObject.data + rdx]
+
+    ; Printable ASCII (32-126, excluding backslash and quote)?
+    cmp eax, 32
+    jl .br_hex
+    cmp eax, 127
+    jge .br_hex
+    cmp eax, 0x27              ; single quote
+    je .br_escape_quote
+    cmp eax, 0x5C              ; backslash
+    je .br_escape_bs
+
+    ; Printable: emit directly
+    mov [r13 + rcx], al
+    inc ecx
+    inc edx
+    jmp .br_loop
+
+.br_escape_quote:
+    mov byte [r13 + rcx], 0x5C     ; backslash
+    mov byte [r13 + rcx + 1], 0x27 ; quote
+    add ecx, 2
+    inc edx
+    jmp .br_loop
+
+.br_escape_bs:
+    mov byte [r13 + rcx], 0x5C
+    mov byte [r13 + rcx + 1], 0x5C
+    add ecx, 2
+    inc edx
+    jmp .br_loop
+
+.br_hex:
+    ; Non-printable: emit \xHH
+    ; Common escapes first
+    cmp eax, 0x0A
+    je .br_escape_n
+    cmp eax, 0x0D
+    je .br_escape_r
+    cmp eax, 0x09
+    je .br_escape_t
+    cmp eax, 0x00
+    je .br_escape_0
+
+    ; General \xHH
+    mov byte [r13 + rcx], 0x5C     ; backslash
+    mov byte [r13 + rcx + 1], 'x'
+    push rdx
+    ; High nibble
+    mov edx, eax
+    shr edx, 4
+    lea rsi, [rel hex_digits]
+    movzx edx, byte [rsi + rdx]
+    mov [r13 + rcx + 2], dl
+    ; Low nibble
+    and eax, 0x0F
+    movzx eax, byte [rsi + rax]
+    mov [r13 + rcx + 3], al
+    pop rdx
+    add ecx, 4
+    inc edx
+    jmp .br_loop
+
+.br_escape_n:
+    mov byte [r13 + rcx], 0x5C
+    mov byte [r13 + rcx + 1], 'n'
+    add ecx, 2
+    inc edx
+    jmp .br_loop
+.br_escape_r:
+    mov byte [r13 + rcx], 0x5C
+    mov byte [r13 + rcx + 1], 'r'
+    add ecx, 2
+    inc edx
+    jmp .br_loop
+.br_escape_t:
+    mov byte [r13 + rcx], 0x5C
+    mov byte [r13 + rcx + 1], 't'
+    add ecx, 2
+    inc edx
+    jmp .br_loop
+.br_escape_0:
+    mov byte [r13 + rcx], 0x5C
+    mov byte [r13 + rcx + 1], 'x'
+    mov byte [r13 + rcx + 2], '0'
+    mov byte [r13 + rcx + 3], '0'
+    add ecx, 4
+    inc edx
+    jmp .br_loop
+
+.br_close:
+    mov byte [r13 + rcx], 0x27     ; closing quote
+    mov byte [r13 + rcx + 1], 0    ; null terminator
+
+    ; Create str from buffer
+    mov rdi, r13
+    call str_from_cstr
+
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
 END_FUNC bytes_repr
 
+;; ============================================================================
+;; bytes_decode(PyBytesObject *self) -> PyStrObject*
+;; Decode bytes as UTF-8 string
+;; ============================================================================
+DEF_FUNC bytes_decode
+    ; Simply create a string from the bytes data
+    ; Assumes UTF-8 encoding
+    lea rdi, [rdi + PyBytesObject.data]
+    mov rsi, [rdi - PyBytesObject.data + PyBytesObject.ob_size]
+    ; rdi = data ptr, rsi = length
+    ; str_new(data, length)
+    call str_new
+    leave
+    ret
+END_FUNC bytes_decode
+
+;; ============================================================================
+;; bytes_getattr(PyBytesObject *self, PyObject *name) -> PyObject*
+;; Attribute lookup for bytes: handles decode, hex, etc.
+;; ============================================================================
+DEF_FUNC bytes_getattr
+    push rbx
+    push r12
+
+    mov rbx, rdi               ; self
+    mov r12, rsi               ; name
+
+    lea rdi, [r12 + PyStrObject.data]
+
+    ; Check "decode"
+    CSTRING rsi, "decode"
+    call ap_strcmp
+    test eax, eax
+    jz .bga_decode
+
+    ; Not found
+    xor eax, eax
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.bga_decode:
+    call _get_bytes_decode_builtin
+    mov rdi, rax
+    call obj_incref
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC bytes_getattr
+
+;; ============================================================================
+;; _bytes_decode_impl(args, nargs) — b.decode()
+;; ============================================================================
+DEF_FUNC _bytes_decode_impl
+    ; nargs should be 1 (just self)
+    mov rdi, [rdi]             ; self = args[0]
+    call bytes_decode
+    leave
+    ret
+END_FUNC _bytes_decode_impl
+
+;; ============================================================================
+;; Lazy-init helper for bytes.decode builtin
+;; ============================================================================
+DEF_FUNC_LOCAL _get_bytes_decode_builtin
+    mov rax, [rel _bytes_decode_cache]
+    test rax, rax
+    jnz .ret
+    lea rdi, [rel _bytes_decode_impl]
+    CSTRING rsi, "decode"
+    call builtin_func_new
+    mov [rel _bytes_decode_cache], rax
+.ret:
+    leave
+    ret
+END_FUNC _get_bytes_decode_builtin
+
+;; ============================================================================
+;; bytes_tp_iter(PyBytesObject *self) -> PyBytesIterObject*
+;; Create an iterator for bytes
+;; ============================================================================
+DEF_FUNC bytes_tp_iter
+    push rbx
+
+    mov rbx, rdi               ; save bytes obj
+
+    mov edi, PyBytesIterObject_size
+    call ap_malloc
+
+    mov qword [rax + PyObject.ob_refcnt], 1
+    lea rcx, [rel bytes_iter_type]
+    mov [rax + PyObject.ob_type], rcx
+    mov [rax + PyBytesIterObject.it_seq], rbx
+    mov qword [rax + PyBytesIterObject.it_index], 0
+
+    INCREF rbx
+
+    pop rbx
+    leave
+    ret
+END_FUNC bytes_tp_iter
+
+;; ============================================================================
+;; bytes_iter_next(PyBytesIterObject *self) -> PyObject* or NULL
+;; Return next byte as SmallInt, or NULL if exhausted
+;; ============================================================================
+DEF_FUNC_BARE bytes_iter_next
+    mov rax, [rdi + PyBytesIterObject.it_seq]   ; bytes obj
+    mov rcx, [rdi + PyBytesIterObject.it_index] ; index
+
+    ; Check bounds
+    cmp rcx, [rax + PyBytesObject.ob_size]
+    jge .exhausted
+
+    ; Get byte and return as SmallInt
+    movzx eax, byte [rax + PyBytesObject.data + rcx]
+    bts rax, 63
+
+    ; Advance index
+    inc qword [rdi + PyBytesIterObject.it_index]
+    ret
+
+.exhausted:
+    xor eax, eax
+    ret
+END_FUNC bytes_iter_next
+
+;; ============================================================================
+;; bytes_iter_dealloc(PyObject *self)
+;; ============================================================================
+DEF_FUNC bytes_iter_dealloc
+    push rbx
+    mov rbx, rdi
+
+    ; DECREF the bytes obj
+    mov rdi, [rbx + PyBytesIterObject.it_seq]
+    call obj_decref
+
+    ; Free self
+    mov rdi, rbx
+    call ap_free
+
+    pop rbx
+    leave
+    ret
+END_FUNC bytes_iter_dealloc
+
+;; ============================================================================
+;; iter_self - tp_iter for iterators: return self with INCREF
+;; ============================================================================
+bytes_iter_self:
+    inc qword [rdi + PyObject.ob_refcnt]
+    mov rax, rdi
+    ret
+END_FUNC bytes_iter_self
+
+;; ============================================================================
+;; Data section
+;; ============================================================================
 section .data
 
 bytes_name_str: db "bytes", 0
-bytes_repr_str: db "b'...'", 0
+bytes_iter_name_str: db "bytes_iterator", 0
+hex_digits: db "0123456789abcdef"
+
+; Cached builtin for bytes.decode
+_bytes_decode_cache: dq 0
+
+; bytes sequence methods
+align 8
+bytes_sequence_methods:
+    dq bytes_len            ; sq_length       +0
+    dq 0                    ; sq_concat       +8
+    dq 0                    ; sq_repeat       +16
+    dq bytes_getitem        ; sq_item         +24
+    dq 0                    ; sq_ass_item     +32
+    dq bytes_contains       ; sq_contains     +40
+    dq 0                    ; sq_inplace_concat +48
+    dq 0                    ; sq_inplace_repeat +56
+
+; bytes mapping methods (for subscript with int/slice)
+align 8
+bytes_mapping_methods:
+    dq bytes_len            ; mp_length       +0
+    dq bytes_subscript      ; mp_subscript    +8
+    dq 0                    ; mp_ass_subscript +16
 
 ; bytes type object
 align 8
@@ -103,18 +647,46 @@ bytes_type:
     dq bytes_repr           ; tp_str
     dq 0                    ; tp_hash
     dq 0                    ; tp_call
-    dq 0                    ; tp_getattr
+    dq bytes_getattr        ; tp_getattr
     dq 0                    ; tp_setattr
     dq 0                    ; tp_richcompare
-    dq 0                    ; tp_iter
+    dq bytes_tp_iter        ; tp_iter
     dq 0                    ; tp_iternext
     dq 0                    ; tp_init
     dq 0                    ; tp_new
     dq 0                    ; tp_as_number
-    dq 0                    ; tp_as_sequence
-    dq 0                    ; tp_as_mapping
+    dq bytes_sequence_methods ; tp_as_sequence
+    dq bytes_mapping_methods  ; tp_as_mapping
     dq 0                    ; tp_base
     dq 0                    ; tp_dict
     dq 0                    ; tp_mro
     dq 0                    ; tp_flags
     dq 0                    ; tp_bases
+
+; bytes_iter type object
+align 8
+bytes_iter_type:
+    dq 1                        ; ob_refcnt
+    dq type_type                ; ob_type
+    dq bytes_iter_name_str      ; tp_name
+    dq PyBytesIterObject_size   ; tp_basicsize
+    dq bytes_iter_dealloc       ; tp_dealloc
+    dq 0                        ; tp_repr
+    dq 0                        ; tp_str
+    dq 0                        ; tp_hash
+    dq 0                        ; tp_call
+    dq 0                        ; tp_getattr
+    dq 0                        ; tp_setattr
+    dq 0                        ; tp_richcompare
+    dq bytes_iter_self          ; tp_iter
+    dq bytes_iter_next          ; tp_iternext
+    dq 0                        ; tp_init
+    dq 0                        ; tp_new
+    dq 0                        ; tp_as_number
+    dq 0                        ; tp_as_sequence
+    dq 0                        ; tp_as_mapping
+    dq 0                        ; tp_base
+    dq 0                        ; tp_dict
+    dq 0                        ; tp_mro
+    dq 0                        ; tp_flags
+    dq 0                        ; tp_bases
