@@ -562,6 +562,43 @@ DEF_FUNC builtin_isinstance
 END_FUNC builtin_isinstance
 
 ;; ============================================================================
+;; builtin_issubclass(PyObject **args, int64_t nargs) -> PyObject*
+;; issubclass(cls, parent) -> True/False
+;; Walks the full tp_base chain for inheritance.
+;; ============================================================================
+DEF_FUNC builtin_issubclass
+
+    cmp rsi, 2
+    jne .issubclass_error
+
+    mov rdx, [rdi]             ; rdx = args[0] = cls (child type)
+    mov rcx, [rdi + 8]        ; rcx = args[1] = parent type
+
+.issubclass_check:
+    cmp rdx, rcx
+    je .issubclass_true
+    mov rdx, [rdx + PyTypeObject.tp_base]
+    test rdx, rdx
+    jnz .issubclass_check
+
+    lea rax, [rel bool_false]
+    inc qword [rax + PyObject.ob_refcnt]
+    leave
+    ret
+
+.issubclass_true:
+    lea rax, [rel bool_true]
+    inc qword [rax + PyObject.ob_refcnt]
+    leave
+    ret
+
+.issubclass_error:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "issubclass() takes 2 arguments"
+    call raise_exception
+END_FUNC builtin_issubclass
+
+;; ============================================================================
 ;; builtin_repr(PyObject **args, int64_t nargs) -> PyObject*
 ;; repr(obj)
 ;; ============================================================================
@@ -944,6 +981,11 @@ DEF_FUNC builtins_init
     call add_builtin
 
     mov rdi, rbx
+    lea rsi, [rel bi_name_issubclass]
+    lea rdx, [rel builtin_issubclass]
+    call add_builtin
+
+    mov rdi, rbx
     lea rsi, [rel bi_name_repr]
     lea rdx, [rel builtin_repr]
     call add_builtin
@@ -1260,6 +1302,7 @@ bi_name_len:          db "len", 0
 bi_name_range:        db "range", 0
 bi_name_type:         db "type", 0
 bi_name_isinstance:   db "isinstance", 0
+bi_name_issubclass:   db "issubclass", 0
 bi_name_repr:         db "repr", 0
 bi_name_float:        db "float", 0
 bi_name_bool:         db "bool", 0

@@ -117,6 +117,38 @@ DEF_FUNC_BARE op_binary_op
     je .use_float_methods
 
 .no_float_coerce:
+    ; For NB_ADD (0/13) and NB_MULTIPLY (5/18): if left is int/SmallInt
+    ; and right has sq_concat/sq_repeat, use sequence method instead.
+    ; This handles: 3 * "ab", 3 * [1,2], etc.
+    test rdi, rdi
+    jns .binop_not_smallint_left
+    ; Left is SmallInt — check if right has sequence methods
+    cmp r9d, 5              ; NB_MULTIPLY
+    je .binop_try_right_seq
+    cmp r9d, 18             ; NB_INPLACE_MULTIPLY
+    je .binop_try_right_seq
+    jmp .binop_left_type
+
+.binop_try_right_seq:
+    ; Check right operand's tp_as_sequence->sq_repeat
+    test rsi, rsi
+    js .binop_left_type     ; right is SmallInt, skip
+    mov rax, [rsi + PyObject.ob_type]
+    mov rax, [rax + PyTypeObject.tp_as_sequence]
+    test rax, rax
+    jz .binop_left_type
+    mov rax, [rax + PySequenceMethods.sq_repeat]
+    test rax, rax
+    jz .binop_left_type
+    ; Call sq_repeat(right=sequence, left=count): swap args
+    xchg rdi, rsi
+    call rax
+    jmp .binop_have_result
+
+.binop_not_smallint_left:
+    mov rax, [rdi + PyObject.ob_type]
+    jmp .binop_have_type
+.binop_left_type:
     ; Get type's tp_as_number method table from left operand
     ; SmallInt check: bit 63 set means tagged int, use int_type directly
     test rdi, rdi

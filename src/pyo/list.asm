@@ -468,6 +468,140 @@ DEF_FUNC list_getslice
 END_FUNC list_getslice
 
 ;; ============================================================================
+;; list_concat(PyListObject *a, PyObject *b) -> PyListObject*
+;; Concatenate two lists: [1,2] + [3,4] -> [1,2,3,4]
+;; ============================================================================
+DEF_FUNC list_concat
+    push rbx
+    push r12
+    push r13
+    push r14
+
+    mov rbx, rdi            ; rbx = list a
+    mov r12, rsi            ; r12 = list b
+
+    ; Get sizes
+    mov r13, [rbx + PyListObject.ob_size]   ; r13 = len(a)
+    mov r14, [r12 + PyListObject.ob_size]   ; r14 = len(b)
+
+    ; Allocate new list with total capacity
+    lea rdi, [r13 + r14]
+    call list_new
+    push rax                ; save new list
+
+    ; Set size
+    lea rcx, [r13 + r14]
+    mov [rax + PyListObject.ob_size], rcx
+
+    ; Copy items from a
+    mov rdi, [rax + PyListObject.ob_item]   ; dest
+    mov rsi, [rbx + PyListObject.ob_item]   ; src
+    xor ecx, ecx
+.copy_a:
+    cmp rcx, r13
+    jge .copy_b_start
+    mov rdx, [rsi + rcx*8]
+    mov [rdi + rcx*8], rdx
+    INCREF rdx
+    inc rcx
+    jmp .copy_a
+
+.copy_b_start:
+    ; Copy items from b
+    mov rsi, [r12 + PyListObject.ob_item]
+    xor ecx, ecx
+.copy_b:
+    cmp rcx, r14
+    jge .concat_done
+    mov rdx, [rsi + rcx*8]
+    lea rax, [r13 + rcx]
+    mov r8, [rsp]           ; get new list
+    mov r8, [r8 + PyListObject.ob_item]
+    mov [r8 + rax*8], rdx
+    INCREF rdx
+    inc rcx
+    jmp .copy_b
+
+.concat_done:
+    pop rax                 ; return new list
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC list_concat
+
+;; ============================================================================
+;; list_repeat(PyListObject *list, PyObject *count) -> PyListObject*
+;; Repeat a list: [1,2] * 3 -> [1,2,1,2,1,2]
+;; ============================================================================
+DEF_FUNC list_repeat
+    push rbx
+    push r12
+    push r13
+    push r14
+
+    mov rbx, rdi            ; rbx = list
+    mov rdi, rsi            ; count (int obj)
+    call int_to_i64
+    mov r12, rax             ; r12 = repeat count
+
+    ; Clamp negative to 0
+    test r12, r12
+    jg .rep_positive
+    xor r12d, r12d
+.rep_positive:
+
+    mov r13, [rbx + PyListObject.ob_size]   ; r13 = len(list)
+    imul r14, r13, 1                         ; r14 = original length
+    imul r14, r12                            ; r14 = total items
+
+    ; Allocate new list
+    mov rdi, r14
+    test rdi, rdi
+    jnz .rep_has_size
+    mov rdi, 1              ; min capacity
+.rep_has_size:
+    call list_new
+    push rax                ; save new list
+    mov [rax + PyListObject.ob_size], r14
+
+    ; Copy list r12 times
+    mov rdi, [rax + PyListObject.ob_item]
+    xor ecx, ecx            ; ecx = repeat counter
+.rep_outer:
+    cmp rcx, r12
+    jge .rep_done
+    push rcx
+    ; Copy all items from source list
+    mov rsi, [rbx + PyListObject.ob_item]
+    xor edx, edx
+.rep_inner:
+    cmp rdx, r13
+    jge .rep_inner_done
+    mov rax, [rsi + rdx*8]
+    mov [rdi], rax
+    INCREF rax
+    add rdi, 8
+    inc rdx
+    jmp .rep_inner
+.rep_inner_done:
+    pop rcx
+    inc rcx
+    jmp .rep_outer
+
+.rep_done:
+    pop rax                 ; return new list
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC list_repeat
+
+;; ============================================================================
 ;; Data section
 ;; ============================================================================
 section .data
@@ -478,9 +612,9 @@ list_name_str: db "list", 0
 ; List number methods (just bool)
 align 8
 list_number_methods:
-    dq 0                    ; nb_add
+    dq list_concat          ; nb_add (list concatenation)
     dq 0                    ; nb_subtract
-    dq 0                    ; nb_multiply
+    dq list_repeat          ; nb_multiply (list repetition)
     dq 0                    ; nb_remainder
     dq 0                    ; nb_divmod
     dq 0                    ; nb_power
@@ -504,8 +638,8 @@ list_number_methods:
 align 8
 list_sequence_methods:
     dq list_len             ; sq_length
-    dq 0                    ; sq_concat
-    dq 0                    ; sq_repeat
+    dq list_concat          ; sq_concat
+    dq list_repeat          ; sq_repeat
     dq list_getitem         ; sq_item
     dq list_setitem         ; sq_ass_item
     dq list_contains        ; sq_contains

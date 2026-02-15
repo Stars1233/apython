@@ -349,6 +349,124 @@ DEF_FUNC tuple_contains
     ret
 END_FUNC tuple_contains
 
+;; ============================================================================
+;; tuple_concat(PyTupleObject *a, PyObject *b) -> PyTupleObject*
+;; Concatenate two tuples: (1,2) + (3,4) -> (1,2,3,4)
+;; ============================================================================
+DEF_FUNC tuple_concat
+    push rbx
+    push r12
+    push r13
+    push r14
+
+    mov rbx, rdi            ; rbx = tuple a
+    mov r12, rsi            ; r12 = tuple b
+
+    mov r13, [rbx + PyTupleObject.ob_size]   ; r13 = len(a)
+    mov r14, [r12 + PyTupleObject.ob_size]   ; r14 = len(b)
+
+    ; Allocate new tuple
+    lea rdi, [r13 + r14]
+    call tuple_new
+    push rax                ; save new tuple
+
+    ; Copy items from a
+    xor ecx, ecx
+.copy_a:
+    cmp rcx, r13
+    jge .copy_b_start
+    mov rdx, [rbx + PyTupleObject.ob_item + rcx*8]
+    mov rax, [rsp]
+    mov [rax + PyTupleObject.ob_item + rcx*8], rdx
+    INCREF rdx
+    inc rcx
+    jmp .copy_a
+
+.copy_b_start:
+    xor ecx, ecx
+.copy_b:
+    cmp rcx, r14
+    jge .concat_done
+    mov rdx, [r12 + PyTupleObject.ob_item + rcx*8]
+    lea rax, [r13 + rcx]
+    mov r8, [rsp]
+    mov [r8 + PyTupleObject.ob_item + rax*8], rdx
+    INCREF rdx
+    inc rcx
+    jmp .copy_b
+
+.concat_done:
+    pop rax
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC tuple_concat
+
+;; ============================================================================
+;; tuple_repeat(PyTupleObject *tuple, PyObject *count) -> PyTupleObject*
+;; Repeat a tuple: (1,2) * 3 -> (1,2,1,2,1,2)
+;; ============================================================================
+DEF_FUNC tuple_repeat
+    push rbx
+    push r12
+    push r13
+    push r14
+
+    mov rbx, rdi            ; rbx = tuple
+    mov rdi, rsi            ; count
+    call int_to_i64
+    mov r12, rax             ; r12 = repeat count
+
+    test r12, r12
+    jg .rep_positive
+    xor r12d, r12d
+.rep_positive:
+
+    mov r13, [rbx + PyTupleObject.ob_size]   ; r13 = len(tuple)
+    imul r14, r13, 1
+    imul r14, r12            ; r14 = total items
+
+    ; Allocate new tuple
+    mov rdi, r14
+    call tuple_new
+    push rax                ; save new tuple
+
+    ; Copy tuple r12 times
+    xor ecx, ecx            ; repeat counter
+    xor r8d, r8d            ; dest index
+.rep_outer:
+    cmp rcx, r12
+    jge .rep_done
+    push rcx
+    xor edx, edx
+.rep_inner:
+    cmp rdx, r13
+    jge .rep_inner_done
+    mov rax, [rbx + PyTupleObject.ob_item + rdx*8]
+    mov rcx, [rsp + 8]     ; get new tuple (past pushed rcx)
+    mov [rcx + PyTupleObject.ob_item + r8*8], rax
+    INCREF rax
+    inc r8
+    inc rdx
+    jmp .rep_inner
+.rep_inner_done:
+    pop rcx
+    inc rcx
+    jmp .rep_outer
+
+.rep_done:
+    pop rax
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC tuple_repeat
+
 section .data
 
 tuple_name_str: db "tuple", 0
@@ -358,8 +476,8 @@ tuple_name_str: db "tuple", 0
 align 8
 tuple_sequence_methods:
     dq tuple_len            ; sq_length
-    dq 0                    ; sq_concat
-    dq 0                    ; sq_repeat
+    dq tuple_concat         ; sq_concat
+    dq tuple_repeat         ; sq_repeat
     dq tuple_getitem        ; sq_item
     dq 0                    ; sq_ass_item
     dq tuple_contains       ; sq_contains

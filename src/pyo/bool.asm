@@ -7,6 +7,9 @@
 extern str_from_cstr
 extern __gmpz_init
 extern __gmpz_set_si
+extern int_add
+extern int_sub
+extern int_mul
 
 ; bool_repr(PyObject *self) -> PyObject*
 ; Returns "True" or "False" string
@@ -73,9 +76,9 @@ bool_name_str:  db "bool", 0
 ; Bool number methods (only nb_bool is set)
 align 8
 bool_number_methods:
-    dq 0                    ; nb_add (TODO: inherit from int)
-    dq 0                    ; nb_subtract
-    dq 0                    ; nb_multiply
+    dq int_add              ; nb_add (inherited from int)
+    dq int_sub              ; nb_subtract
+    dq int_mul              ; nb_multiply
     dq 0                    ; nb_remainder
     dq 0                    ; nb_divmod
     dq 0                    ; nb_power
