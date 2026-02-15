@@ -5,6 +5,7 @@
 %include "macros.inc"
 %include "object.inc"
 %include "types.inc"
+%include "frame.inc"
 
 ; External symbols used
 extern int_from_i64
@@ -23,6 +24,7 @@ extern obj_decref
 extern dict_get
 extern raise_exception
 extern none_singleton
+extern eval_saved_r12
 
 extern int_type
 extern float_type
@@ -1434,3 +1436,60 @@ DEF_FUNC builtin_setattr
     CSTRING rsi, "setattr() takes exactly 3 arguments"
     call raise_exception
 END_FUNC builtin_setattr
+
+; ============================================================================
+; builtin_globals(args, nargs) - globals()
+; Returns the globals dict of the current frame.
+; ============================================================================
+DEF_FUNC builtin_globals
+    cmp rsi, 0
+    jne .globals_error
+
+    ; Get current eval frame from saved r12
+    mov rax, [rel eval_saved_r12]
+    mov rax, [rax + PyFrame.globals]
+    INCREF rax
+    leave
+    ret
+
+.globals_error:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "globals() takes no arguments"
+    call raise_exception
+END_FUNC builtin_globals
+
+; ============================================================================
+; builtin_locals(args, nargs) - locals()
+; Returns the locals dict if available, otherwise globals.
+; In module scope, locals() == globals().
+; In class body, returns the class dict.
+; In function scope, returns globals as approximation.
+; ============================================================================
+DEF_FUNC builtin_locals
+    cmp rsi, 0
+    jne .locals_error
+
+    ; Get current eval frame
+    mov rax, [rel eval_saved_r12]
+    ; Check if frame has a locals dict
+    mov rcx, [rax + PyFrame.locals]
+    test rcx, rcx
+    jz .locals_use_globals
+    ; Has locals dict - return it
+    mov rax, rcx
+    INCREF rax
+    leave
+    ret
+
+.locals_use_globals:
+    ; No locals dict - return globals (module scope)
+    mov rax, [rax + PyFrame.globals]
+    INCREF rax
+    leave
+    ret
+
+.locals_error:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "locals() takes no arguments"
+    call raise_exception
+END_FUNC builtin_locals

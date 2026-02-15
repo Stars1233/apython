@@ -68,6 +68,8 @@ extern builtin_map
 extern builtin_filter
 extern builtin_reversed
 extern builtin_sorted
+extern builtin_globals
+extern builtin_locals
 
 ; Exception types
 extern exc_BaseException_type
@@ -1128,6 +1130,16 @@ DEF_FUNC builtins_init
     lea rdx, [rel builtin_sorted]
     call add_builtin
 
+    mov rdi, rbx
+    lea rsi, [rel bi_name_globals]
+    lea rdx, [rel builtin_globals]
+    call add_builtin
+
+    mov rdi, rbx
+    lea rsi, [rel bi_name_locals]
+    lea rdx, [rel builtin_locals]
+    call add_builtin
+
     ; Register super type as builtin (LOAD_SUPER_ATTR needs it loadable)
     mov rdi, rbx
     lea rsi, [rel bi_name_super]
@@ -1337,6 +1349,8 @@ bi_name_map:          db "map", 0
 bi_name_filter:       db "filter", 0
 bi_name_reversed:     db "reversed", 0
 bi_name_sorted:       db "sorted", 0
+bi_name_globals:      db "globals", 0
+bi_name_locals:       db "locals", 0
 bi_name_super:        db "super", 0
 
 ; Exception type names

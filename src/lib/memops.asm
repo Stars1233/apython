@@ -22,3 +22,18 @@ DEF_FUNC_BARE ap_memset
     mov rax, r8             ; return original dst
     ret
 END_FUNC ap_memset
+
+; ap_memcmp(const void *s1, const void *s2, size_t n) -> int
+; Returns 0 if equal, <0 if s1<s2, >0 if s1>s2
+DEF_FUNC_BARE ap_memcmp
+    mov rcx, rdx            ; rcx = count
+    repe cmpsb              ; rdi=s1, rsi=s2
+    je .memcmp_equal
+    movzx eax, byte [rdi - 1]
+    movzx ecx, byte [rsi - 1]
+    sub eax, ecx
+    ret
+.memcmp_equal:
+    xor eax, eax
+    ret
+END_FUNC ap_memcmp

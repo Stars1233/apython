@@ -1040,6 +1040,7 @@ global current_exception
 current_exception: resq 1    ; PyExceptionObject* or NULL
 eval_base_rsp: resq 1        ; machine stack pointer at eval dispatch level
 eval_saved_rbx: resq 1       ; bytecode IP saved at dispatch (for exception unwind)
+global eval_saved_r12
 eval_saved_r12: resq 1       ; frame pointer saved at frame entry (for exception unwind)
 
 global kw_names_pending

@@ -16,6 +16,7 @@ extern ap_memset
 extern ap_strcmp
 extern ap_strlen
 extern ap_strstr
+extern ap_memcmp
 extern obj_incref
 extern obj_decref
 extern obj_dealloc
@@ -1100,6 +1101,478 @@ DEF_FUNC str_method_format
     ret
 END_FUNC str_method_format
 
+;; ============================================================================
+;; str_method_lstrip(args, nargs) -> new string with left whitespace removed
+;; args[0] = self (PyStrObject*)
+;; ============================================================================
+DEF_FUNC str_method_lstrip
+    push rbx
+    push r12
+    push r13
+
+    mov rax, [rdi]          ; self = args[0]
+    mov rbx, rax            ; rbx = self
+    mov r12, [rbx + PyStrObject.ob_size]  ; r12 = length
+
+    ; Find start (skip leading whitespace)
+    xor r13d, r13d          ; r13 = start index
+.lstrip_left:
+    cmp r13, r12
+    jge .lstrip_empty
+    movzx eax, byte [rbx + PyStrObject.data + r13]
+    cmp al, ' '
+    je .lstrip_left_next
+    cmp al, 9              ; tab
+    je .lstrip_left_next
+    cmp al, 10             ; newline
+    je .lstrip_left_next
+    cmp al, 13             ; carriage return
+    je .lstrip_left_next
+    jmp .lstrip_make
+.lstrip_left_next:
+    inc r13
+    jmp .lstrip_left
+
+.lstrip_empty:
+    ; All whitespace - return empty string
+    lea rdi, [rel empty_str_cstr]
+    call str_from_cstr
+    jmp .lstrip_ret
+
+.lstrip_make:
+    ; Create new string from [start, end)
+    lea rdi, [rbx + PyStrObject.data]
+    add rdi, r13
+    mov rsi, r12
+    sub rsi, r13            ; length = len - start
+    call str_new
+
+.lstrip_ret:
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC str_method_lstrip
+
+;; ============================================================================
+;; str_method_rstrip(args, nargs) -> new string with right whitespace removed
+;; args[0] = self (PyStrObject*)
+;; ============================================================================
+DEF_FUNC str_method_rstrip
+    push rbx
+    push r12
+    push r13
+
+    mov rax, [rdi]          ; self = args[0]
+    mov rbx, rax            ; rbx = self
+    mov r12, [rbx + PyStrObject.ob_size]  ; r12 = length
+
+    ; Find end (skip trailing whitespace)
+    mov r13, r12            ; r13 = end (exclusive)
+.rstrip_right:
+    cmp r13, 0
+    jle .rstrip_empty
+    movzx eax, byte [rbx + PyStrObject.data + r13 - 1]
+    cmp al, ' '
+    je .rstrip_right_next
+    cmp al, 9              ; tab
+    je .rstrip_right_next
+    cmp al, 10             ; newline
+    je .rstrip_right_next
+    cmp al, 13             ; carriage return
+    je .rstrip_right_next
+    jmp .rstrip_make
+.rstrip_right_next:
+    dec r13
+    jmp .rstrip_right
+
+.rstrip_empty:
+    ; All whitespace - return empty string
+    lea rdi, [rel empty_str_cstr]
+    call str_from_cstr
+    jmp .rstrip_ret
+
+.rstrip_make:
+    ; Create new string from [0, end)
+    lea rdi, [rbx + PyStrObject.data]
+    mov rsi, r13            ; length = end
+    call str_new
+
+.rstrip_ret:
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC str_method_rstrip
+
+;; ============================================================================
+;; str_method_count(args, nargs) -> SmallInt count of occurrences
+;; args[0]=self, args[1]=sub
+;; ============================================================================
+DEF_FUNC str_method_count
+    push rbx
+    push r12
+    push r13
+    push r14
+
+    mov rbx, [rdi]          ; self
+    mov r12, [rdi + 8]      ; substr
+    xor r13d, r13d          ; r13 = count
+    mov r14, [r12 + PyStrObject.ob_size]  ; sub length
+
+    ; If sub is empty, return len+1
+    test r14, r14
+    jz .count_empty_sub
+
+    ; Start scanning from self.data
+    lea rdi, [rbx + PyStrObject.data]
+
+.count_scan:
+    lea rsi, [r12 + PyStrObject.data]
+    push rdi
+    call ap_strstr
+    pop rdi                 ; restore (not needed, but stack balance)
+    test rax, rax
+    jz .count_done
+
+    ; Found one occurrence
+    inc r13
+    ; Advance past this match
+    lea rdi, [rax + r14]    ; move past the match
+    jmp .count_scan
+
+.count_empty_sub:
+    ; Empty substring: count = len(self) + 1
+    mov r13, [rbx + PyStrObject.ob_size]
+    inc r13
+
+.count_done:
+    mov rdi, r13
+    call int_from_i64
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC str_method_count
+
+;; ============================================================================
+;; str_method_index(args, nargs) -> SmallInt index (raises ValueError if not found)
+;; args[0]=self, args[1]=substr
+;; ============================================================================
+DEF_FUNC str_method_index
+    push rbx
+    push r12
+
+    mov rbx, [rdi]          ; self
+    mov r12, [rdi + 8]      ; substr
+
+    ; Use ap_strstr to find substring
+    lea rdi, [rbx + PyStrObject.data]
+    lea rsi, [r12 + PyStrObject.data]
+    call ap_strstr
+
+    test rax, rax
+    jz .str_index_not_found
+
+    ; Compute index: result_ptr - self.data
+    lea rcx, [rbx + PyStrObject.data]
+    sub rax, rcx
+    ; rax = index
+    mov rdi, rax
+    call int_from_i64
+
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.str_index_not_found:
+    lea rdi, [rel exc_ValueError_type]
+    CSTRING rsi, "substring not found"
+    call raise_exception
+END_FUNC str_method_index
+
+;; ============================================================================
+;; str_method_rfind(args, nargs) -> SmallInt index or -1
+;; args[0]=self, args[1]=substr
+;; Find rightmost occurrence of substr in self.
+;; ============================================================================
+DEF_FUNC str_method_rfind
+    push rbx
+    push r12
+    push r13
+    push r14
+
+    mov rbx, [rdi]          ; self
+    mov r12, [rdi + 8]      ; substr
+    mov r13, [rbx + PyStrObject.ob_size]   ; self length
+    mov r14, [r12 + PyStrObject.ob_size]   ; sub length
+
+    ; If sub_len > self_len, return -1
+    cmp r14, r13
+    jg .rfind_not_found
+
+    ; If sub_len == 0, return self_len
+    test r14, r14
+    jz .rfind_empty_sub
+
+    ; Walk backward from (self_len - sub_len) down to 0
+    mov rcx, r13
+    sub rcx, r14            ; rcx = last possible start position
+
+.rfind_loop:
+    cmp rcx, 0
+    jl .rfind_not_found
+
+    ; Compare sub with self[rcx..rcx+sub_len]
+    push rcx
+    lea rdi, [rbx + PyStrObject.data]
+    add rdi, rcx
+    lea rsi, [r12 + PyStrObject.data]
+    mov rdx, r14
+    call ap_memcmp
+    pop rcx
+
+    test eax, eax
+    jz .rfind_found
+
+    dec rcx
+    jmp .rfind_loop
+
+.rfind_found:
+    mov rdi, rcx
+    call int_from_i64
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.rfind_empty_sub:
+    mov rdi, r13
+    call int_from_i64
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.rfind_not_found:
+    mov rdi, -1
+    call int_from_i64
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC str_method_rfind
+
+;; ============================================================================
+;; str_method_isdigit(args, nargs) -> bool_true/bool_false
+;; args[0] = self
+;; Returns True if all chars are digits and len>0, else False
+;; ============================================================================
+DEF_FUNC str_method_isdigit
+    mov rax, [rdi]          ; self
+    mov rcx, [rax + PyStrObject.ob_size]
+
+    ; Empty string -> False
+    test rcx, rcx
+    jz .isdigit_false
+
+    xor edx, edx            ; index
+.isdigit_loop:
+    cmp rdx, rcx
+    jge .isdigit_true
+    movzx esi, byte [rax + PyStrObject.data + rdx]
+    cmp sil, '0'
+    jb .isdigit_false
+    cmp sil, '9'
+    ja .isdigit_false
+    inc rdx
+    jmp .isdigit_loop
+
+.isdigit_true:
+    lea rax, [rel bool_true]
+    inc qword [rax + PyObject.ob_refcnt]
+    leave
+    ret
+
+.isdigit_false:
+    lea rax, [rel bool_false]
+    inc qword [rax + PyObject.ob_refcnt]
+    leave
+    ret
+END_FUNC str_method_isdigit
+
+;; ============================================================================
+;; str_method_isalpha(args, nargs) -> bool_true/bool_false
+;; args[0] = self
+;; Returns True if all chars are alphabetic and len>0, else False
+;; ============================================================================
+DEF_FUNC str_method_isalpha
+    mov rax, [rdi]          ; self
+    mov rcx, [rax + PyStrObject.ob_size]
+
+    ; Empty string -> False
+    test rcx, rcx
+    jz .isalpha_false
+
+    xor edx, edx            ; index
+.isalpha_loop:
+    cmp rdx, rcx
+    jge .isalpha_true
+    movzx esi, byte [rax + PyStrObject.data + rdx]
+    cmp sil, 'A'
+    jb .isalpha_false
+    cmp sil, 'Z'
+    jbe .isalpha_next        ; A-Z is alpha
+    cmp sil, 'a'
+    jb .isalpha_false
+    cmp sil, 'z'
+    ja .isalpha_false
+.isalpha_next:
+    inc rdx
+    jmp .isalpha_loop
+
+.isalpha_true:
+    lea rax, [rel bool_true]
+    inc qword [rax + PyObject.ob_refcnt]
+    leave
+    ret
+
+.isalpha_false:
+    lea rax, [rel bool_false]
+    inc qword [rax + PyObject.ob_refcnt]
+    leave
+    ret
+END_FUNC str_method_isalpha
+
+;; ============================================================================
+;; str_method_removeprefix(args, nargs) -> new string
+;; args[0]=self, args[1]=prefix
+;; If self starts with prefix, return self[len(prefix):], else return self.
+;; ============================================================================
+DEF_FUNC str_method_removeprefix
+    push rbx
+    push r12
+    push r13
+    push r14
+
+    mov rbx, [rdi]          ; self
+    mov r12, [rdi + 8]      ; prefix
+    mov r13, [rbx + PyStrObject.ob_size]   ; self len
+    mov r14, [r12 + PyStrObject.ob_size]   ; prefix len
+
+    ; If prefix longer than self, return self (INCREF)
+    cmp r14, r13
+    jg .rmpfx_return_self
+
+    ; Compare first prefix_len bytes
+    xor ecx, ecx
+.rmpfx_cmp:
+    cmp rcx, r14
+    jge .rmpfx_match
+    movzx eax, byte [rbx + PyStrObject.data + rcx]
+    cmp al, [r12 + PyStrObject.data + rcx]
+    jne .rmpfx_return_self
+    inc rcx
+    jmp .rmpfx_cmp
+
+.rmpfx_match:
+    ; Prefix matches - return str_new(data+preflen, len-preflen)
+    lea rdi, [rbx + PyStrObject.data]
+    add rdi, r14
+    mov rsi, r13
+    sub rsi, r14
+    call str_new
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.rmpfx_return_self:
+    mov rax, rbx
+    INCREF rax
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC str_method_removeprefix
+
+;; ============================================================================
+;; str_method_removesuffix(args, nargs) -> new string
+;; args[0]=self, args[1]=suffix
+;; If self ends with suffix, return self[:len(self)-len(suffix)], else return self.
+;; ============================================================================
+DEF_FUNC str_method_removesuffix
+    push rbx
+    push r12
+    push r13
+    push r14
+
+    mov rbx, [rdi]          ; self
+    mov r12, [rdi + 8]      ; suffix
+    mov r13, [rbx + PyStrObject.ob_size]   ; self len
+    mov r14, [r12 + PyStrObject.ob_size]   ; suffix len
+
+    ; If suffix longer than self, return self (INCREF)
+    cmp r14, r13
+    jg .rmsfx_return_self
+
+    ; If suffix is empty, return self (INCREF)
+    test r14, r14
+    jz .rmsfx_return_self
+
+    ; Compare last suffix_len bytes of self with suffix
+    mov rcx, r13
+    sub rcx, r14            ; offset = self_len - suffix_len
+    xor edx, edx
+.rmsfx_cmp:
+    cmp rdx, r14
+    jge .rmsfx_match
+    movzx eax, byte [rbx + PyStrObject.data + rcx]
+    cmp al, [r12 + PyStrObject.data + rdx]
+    jne .rmsfx_return_self
+    inc rcx
+    inc rdx
+    jmp .rmsfx_cmp
+
+.rmsfx_match:
+    ; Suffix matches - return str_new(data, len-suffixlen)
+    lea rdi, [rbx + PyStrObject.data]
+    mov rsi, r13
+    sub rsi, r14
+    call str_new
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.rmsfx_return_self:
+    mov rax, rbx
+    INCREF rax
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC str_method_removesuffix
+
 
 ;; ############################################################################
 ;;                         LIST METHODS
@@ -2046,6 +2519,395 @@ DEF_FUNC dict_method_update
     ret
 END_FUNC dict_method_update
 
+;; ============================================================================
+;; dict_method_setdefault(args, nargs) -> value
+;; args[0]=self, args[1]=key, args[2]=default (optional, default=None)
+;; ============================================================================
+DEF_FUNC dict_method_setdefault
+    push rbx
+    push r12
+    push r13
+
+    mov rbx, [rdi]          ; self (dict)
+    mov r12, [rdi + 8]      ; key
+    mov r13, rsi            ; nargs
+
+    ; Save args ptr for default value access
+    push rdi
+
+    ; dict_get(self, key)
+    mov rdi, rbx
+    mov rsi, r12
+    call dict_get
+
+    test rax, rax
+    jnz .sd_found
+
+    ; Not found - determine default value
+    pop rdi                 ; restore args ptr
+    cmp r13, 3
+    jl .sd_use_none
+    mov r13, [rdi + 16]     ; default = args[2]
+    jmp .sd_set_default
+
+.sd_use_none:
+    lea r13, [rel none_singleton]
+
+.sd_set_default:
+    ; dict_set(self, key, default_val)
+    mov rdi, rbx
+    mov rsi, r12
+    mov rdx, r13
+    call dict_set
+
+    ; INCREF and return default_val
+    INCREF r13
+    mov rax, r13
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.sd_found:
+    add rsp, 8              ; discard saved args ptr
+    ; INCREF the found value (dict_get returns borrowed ref)
+    INCREF rax
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC dict_method_setdefault
+
+;; ============================================================================
+;; dict_method_copy(args, nargs) -> new dict (shallow copy)
+;; args[0]=self
+;; ============================================================================
+DEF_FUNC dict_method_copy
+    push rbx
+    push r12
+    push r13
+    push r14
+
+    mov rbx, [rdi]          ; self (dict)
+
+    ; Create new dict
+    call dict_new
+    mov r12, rax            ; r12 = new dict
+
+    ; Iterate over self's entries
+    mov r13, [rbx + PyDictObject.capacity]
+    xor r14d, r14d          ; index
+
+.dcopy_loop:
+    cmp r14, r13
+    jge .dcopy_done
+
+    mov rax, [rbx + PyDictObject.entries]
+    imul rcx, r14, DICT_ENTRY_SIZE
+    add rax, rcx
+
+    mov rdi, [rax + DictEntry.key]
+    test rdi, rdi
+    jz .dcopy_next
+    mov rsi, [rax + DictEntry.value]
+    test rsi, rsi
+    jz .dcopy_next
+
+    ; dict_set(new_dict, key, value)
+    push r14
+    mov rdx, rsi            ; value
+    mov rsi, rdi            ; key
+    mov rdi, r12            ; new dict
+    call dict_set
+    pop r14
+
+.dcopy_next:
+    inc r14
+    jmp .dcopy_loop
+
+.dcopy_done:
+    mov rax, r12
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC dict_method_copy
+
+;; ============================================================================
+;; dict_method_popitem(args, nargs) -> (key, value) tuple
+;; args[0]=self. Removes and returns last inserted item.
+;; ============================================================================
+DEF_FUNC dict_method_popitem
+    push rbx
+    push r12
+    push r13
+    push r14
+
+    mov rbx, [rdi]          ; self (dict)
+
+    ; Check if dict is empty
+    cmp qword [rbx + PyDictObject.ob_size], 0
+    je .dpopitem_empty
+
+    ; Find last non-NULL entry by scanning backward
+    mov r12, [rbx + PyDictObject.capacity]
+    dec r12                  ; start from capacity-1
+
+.dpopitem_scan:
+    cmp r12, 0
+    jl .dpopitem_empty       ; shouldn't happen, but safety
+    mov rax, [rbx + PyDictObject.entries]
+    imul rcx, r12, DICT_ENTRY_SIZE
+    add rax, rcx
+
+    mov r13, [rax + DictEntry.key]
+    test r13, r13
+    jz .dpopitem_prev
+    mov r14, [rax + DictEntry.value]
+    test r14, r14
+    jz .dpopitem_prev
+    jmp .dpopitem_found
+
+.dpopitem_prev:
+    dec r12
+    jmp .dpopitem_scan
+
+.dpopitem_found:
+    ; r13 = key, r14 = value
+    ; Create 2-tuple
+    mov rdi, 2
+    call tuple_new
+    mov r12, rax             ; r12 = tuple
+
+    ; Set tuple[0] = key, tuple[1] = value
+    mov [r12 + PyTupleObject.ob_item], r13
+    INCREF r13
+    mov [r12 + PyTupleObject.ob_item + 8], r14
+    INCREF r14
+
+    ; Delete key from dict
+    mov rdi, rbx
+    mov rsi, r13
+    call dict_del
+
+    mov rax, r12
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.dpopitem_empty:
+    lea rdi, [rel exc_KeyError_type]
+    CSTRING rsi, "dictionary is empty"
+    call raise_exception
+END_FUNC dict_method_popitem
+
+;; ============================================================================
+;; list_method_remove(args, nargs) -> None
+;; args[0]=self, args[1]=value
+;; Removes first occurrence of value. Raises ValueError if not found.
+;; ============================================================================
+DEF_FUNC list_method_remove
+    push rbx
+    push r12
+    push r13
+    push r14
+
+    mov rbx, [rdi]          ; self (list)
+    mov r12, [rdi + 8]      ; value to remove
+    mov r13, [rbx + PyListObject.ob_size]
+
+    xor r14d, r14d          ; index = 0
+
+.lremove_loop:
+    cmp r14, r13
+    jge .lremove_not_found
+
+    mov rax, [rbx + PyListObject.ob_item]
+    mov rcx, [rax + r14*8]
+
+    ; Check pointer equality
+    cmp rcx, r12
+    je .lremove_found
+
+    ; Check SmallInt equality: if both have bit 63 set, compare values
+    test rcx, rcx
+    jns .lremove_next        ; list item not SmallInt
+    test r12, r12
+    jns .lremove_next        ; value not SmallInt
+    ; Both SmallInts - same tagged representation means same value
+    ; (already compared above by pointer), so no match
+    jmp .lremove_next
+
+.lremove_next:
+    inc r14
+    jmp .lremove_loop
+
+.lremove_found:
+    ; r14 = index of found item
+    ; Get the item for DECREF
+    mov rax, [rbx + PyListObject.ob_item]
+    mov r12, [rax + r14*8]  ; item to remove (save for DECREF)
+
+    ; Shift remaining items left
+    mov rcx, r14
+    mov rdx, r13
+    dec rdx                  ; size - 1
+.lremove_shift:
+    cmp rcx, rdx
+    jge .lremove_shrink
+    mov rax, [rbx + PyListObject.ob_item]
+    mov r8, [rax + rcx*8 + 8]  ; items[i+1]
+    mov [rax + rcx*8], r8
+    inc rcx
+    jmp .lremove_shift
+
+.lremove_shrink:
+    dec qword [rbx + PyListObject.ob_size]
+
+    ; DECREF the removed item
+    mov rdi, r12
+    call obj_decref
+
+    ; Return None
+    lea rax, [rel none_singleton]
+    inc qword [rax + PyObject.ob_refcnt]
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.lremove_not_found:
+    lea rdi, [rel exc_ValueError_type]
+    CSTRING rsi, "list.remove(x): x not in list"
+    call raise_exception
+END_FUNC list_method_remove
+
+;; ============================================================================
+;; tuple_method_index(args, nargs) -> SmallInt index
+;; args[0]=self (tuple), args[1]=value
+;; ============================================================================
+DEF_FUNC tuple_method_index
+    push rbx
+    push r12
+    push r13
+
+    mov rbx, [rdi]          ; self (tuple)
+    mov r12, [rdi + 8]      ; value to find
+    mov r13, [rbx + PyTupleObject.ob_size]
+
+    xor ecx, ecx
+.tindex_loop:
+    cmp rcx, r13
+    jge .tindex_not_found
+
+    ; Tuple items are inline at [self + PyTupleObject.ob_item + i*8]
+    mov rax, [rbx + PyTupleObject.ob_item + rcx*8]
+
+    ; Check pointer equality
+    cmp rax, r12
+    je .tindex_found
+
+    ; Check SmallInt equality
+    test rax, rax
+    jns .tindex_check_str
+    test r12, r12
+    jns .tindex_next
+    ; Both SmallInts - already compared by pointer above
+    jmp .tindex_next
+
+.tindex_check_str:
+    ; Try string comparison: if both are str_type, compare data
+    mov rsi, rax             ; tuple item
+    test r12, r12
+    js .tindex_next          ; value is SmallInt, item is not
+    mov rax, [r12 + PyObject.ob_type]
+    lea r8, [rel str_type]
+    cmp rax, r8
+    jne .tindex_next
+    mov rax, [rsi + PyObject.ob_type]
+    cmp rax, r8
+    jne .tindex_next
+    ; Both strings - compare
+    push rcx
+    push rsi
+    lea rdi, [r12 + PyStrObject.data]
+    lea rsi, [rsi + PyStrObject.data]
+    call ap_strcmp
+    pop rsi
+    pop rcx
+    test eax, eax
+    jz .tindex_found
+
+.tindex_next:
+    inc rcx
+    jmp .tindex_loop
+
+.tindex_found:
+    mov rdi, rcx
+    call int_from_i64
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.tindex_not_found:
+    lea rdi, [rel exc_ValueError_type]
+    CSTRING rsi, "tuple.index(x): x not in tuple"
+    call raise_exception
+END_FUNC tuple_method_index
+
+;; ============================================================================
+;; tuple_method_count(args, nargs) -> SmallInt
+;; args[0]=self (tuple), args[1]=value
+;; ============================================================================
+DEF_FUNC tuple_method_count
+    push rbx
+    push r12
+    push r13
+    push r14
+
+    mov rbx, [rdi]          ; self (tuple)
+    mov r12, [rdi + 8]      ; value
+    mov r13, [rbx + PyTupleObject.ob_size]
+    xor r14d, r14d          ; count = 0
+
+    xor ecx, ecx
+.tcount_loop:
+    cmp rcx, r13
+    jge .tcount_done
+
+    mov rax, [rbx + PyTupleObject.ob_item + rcx*8]
+
+    ; Check pointer equality
+    cmp rax, r12
+    jne .tcount_next
+    inc r14
+
+.tcount_next:
+    inc rcx
+    jmp .tcount_loop
+
+.tcount_done:
+    mov rdi, r14
+    call int_from_i64
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC tuple_method_count
+
 
 ;; ############################################################################
 ;;                       METHODS_INIT
@@ -2113,6 +2975,51 @@ DEF_FUNC methods_init
     lea rdx, [rel str_method_format]
     call add_method_to_dict
 
+    mov rdi, rbx
+    lea rsi, [rel mn_lstrip]
+    lea rdx, [rel str_method_lstrip]
+    call add_method_to_dict
+
+    mov rdi, rbx
+    lea rsi, [rel mn_rstrip]
+    lea rdx, [rel str_method_rstrip]
+    call add_method_to_dict
+
+    mov rdi, rbx
+    lea rsi, [rel mn_count]
+    lea rdx, [rel str_method_count]
+    call add_method_to_dict
+
+    mov rdi, rbx
+    lea rsi, [rel mn_index]
+    lea rdx, [rel str_method_index]
+    call add_method_to_dict
+
+    mov rdi, rbx
+    lea rsi, [rel mn_rfind]
+    lea rdx, [rel str_method_rfind]
+    call add_method_to_dict
+
+    mov rdi, rbx
+    lea rsi, [rel mn_isdigit]
+    lea rdx, [rel str_method_isdigit]
+    call add_method_to_dict
+
+    mov rdi, rbx
+    lea rsi, [rel mn_isalpha]
+    lea rdx, [rel str_method_isalpha]
+    call add_method_to_dict
+
+    mov rdi, rbx
+    lea rsi, [rel mn_removeprefix]
+    lea rdx, [rel str_method_removeprefix]
+    call add_method_to_dict
+
+    mov rdi, rbx
+    lea rsi, [rel mn_removesuffix]
+    lea rdx, [rel str_method_removesuffix]
+    call add_method_to_dict
+
     ; Store dict in str_type.tp_dict
     lea rax, [rel str_type]
     mov [rax + PyTypeObject.tp_dict], rbx
@@ -2172,6 +3079,11 @@ DEF_FUNC methods_init
     lea rdx, [rel list_method_extend]
     call add_method_to_dict
 
+    mov rdi, rbx
+    lea rsi, [rel mn_remove]
+    lea rdx, [rel list_method_remove]
+    call add_method_to_dict
+
     ; Store in list_type.tp_dict
     lea rax, [rel list_type]
     mov [rax + PyTypeObject.tp_dict], rbx
@@ -2215,8 +3127,41 @@ DEF_FUNC methods_init
     lea rdx, [rel dict_method_update]
     call add_method_to_dict
 
+    mov rdi, rbx
+    lea rsi, [rel mn_setdefault]
+    lea rdx, [rel dict_method_setdefault]
+    call add_method_to_dict
+
+    mov rdi, rbx
+    lea rsi, [rel mn_copy]
+    lea rdx, [rel dict_method_copy]
+    call add_method_to_dict
+
+    mov rdi, rbx
+    lea rsi, [rel mn_popitem]
+    lea rdx, [rel dict_method_popitem]
+    call add_method_to_dict
+
     ; Store in dict_type.tp_dict
     lea rax, [rel dict_type]
+    mov [rax + PyTypeObject.tp_dict], rbx
+
+    ;; --- tuple methods ---
+    call dict_new
+    mov rbx, rax
+
+    mov rdi, rbx
+    lea rsi, [rel mn_index]
+    lea rdx, [rel tuple_method_index]
+    call add_method_to_dict
+
+    mov rdi, rbx
+    lea rsi, [rel mn_count]
+    lea rdx, [rel tuple_method_count]
+    call add_method_to_dict
+
+    ; Store in tuple_type.tp_dict
+    lea rax, [rel tuple_type]
     mov [rax + PyTypeObject.tp_dict], rbx
 
     pop r12
@@ -2258,3 +3203,13 @@ mn_keys:        db "keys", 0
 mn_values:      db "values", 0
 mn_items:       db "items", 0
 mn_update:      db "update", 0
+mn_lstrip:      db "lstrip", 0
+mn_rstrip:      db "rstrip", 0
+mn_rfind:       db "rfind", 0
+mn_isdigit:     db "isdigit", 0
+mn_isalpha:     db "isalpha", 0
+mn_removeprefix: db "removeprefix", 0
+mn_removesuffix: db "removesuffix", 0
+mn_setdefault:  db "setdefault", 0
+mn_popitem:     db "popitem", 0
+mn_remove:      db "remove", 0
