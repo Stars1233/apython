@@ -787,25 +787,50 @@ END_FUNC op_jump_backward
 ;; arg & 0x04: format spec present on stack below value
 ;; Pops value (and optional fmt_spec), pushes formatted string.
 ;; ============================================================================
-DEF_FUNC op_format_value, 16
+DEF_FUNC op_format_value, 32
 
     mov [rbp-8], rcx           ; save arg
     mov rax, rcx
     and eax, 4
     mov [rbp-16], rax          ; has_fmt_spec
+    mov qword [rbp-24], 0      ; fmt_spec ptr (0 if absent)
 
-    ; If format spec present, pop it first (it's under the value)
+    ; If format spec present, pop it first
+    ; Stack order: TOS = fmt_spec, TOS1 = value
     test qword [rbp-16], 4
     jz .fv_no_spec
-    ; TOS = fmt_spec, TOS1 = value
-    VPOP rax                   ; fmt_spec (ignored for now)
-    push rax                   ; save for DECREF
+    VPOP rax                   ; fmt_spec string
+    mov [rbp-24], rax          ; save fmt_spec
 .fv_no_spec:
 
     VPOP rdi                   ; value
-    push rdi                   ; save for DECREF
+    mov [rbp-32], rdi          ; save value
 
+    ; If format spec present AND value is float, use float_format_spec
+    test qword [rbp-16], 4
+    jz .fv_no_format_spec
+
+    ; Check if value is a float
+    extern float_type
+    test rdi, rdi
+    js .fv_no_format_spec      ; SmallInt → not float
+    mov rax, [rdi + PyObject.ob_type]
+    lea rcx, [rel float_type]
+    cmp rax, rcx
+    jne .fv_no_format_spec
+
+    ; Float with format spec: call float_format_spec(float, spec_data, spec_len)
+    extern float_format_spec
+    ; rdi = float obj (still set)
+    mov rax, [rbp-24]         ; fmt_spec string
+    lea rsi, [rax + PyStrObject.data]  ; spec data
+    mov rdx, [rax + PyStrObject.ob_size]  ; spec length
+    call float_format_spec
+    jmp .fv_have_result
+
+.fv_no_format_spec:
     ; Apply conversion based on arg & 3
+    mov rdi, [rbp-32]         ; reload value
     mov eax, [rbp-8]
     and eax, 3
     cmp eax, 2
@@ -823,23 +848,17 @@ DEF_FUNC op_format_value, 16
     push rax                   ; save result
 
     ; DECREF original value
-    mov rdi, [rsp + 8]
+    mov rdi, [rbp-32]
     DECREF_REG rdi
 
     ; DECREF fmt_spec if present
-    test qword [rbp-16], 4
-    jz .fv_push
-    mov rdi, [rsp + 16]
+    cmp qword [rbp-24], 0
+    je .fv_push
+    mov rdi, [rbp-24]
     DECREF_REG rdi
-    pop rax                    ; result
-    add rsp, 16                ; discard saved value and fmt_spec
-    jmp .fv_done
 
 .fv_push:
     pop rax                    ; result
-    add rsp, 8                 ; discard saved value
-
-.fv_done:
     VPUSH rax
     leave
     DISPATCH

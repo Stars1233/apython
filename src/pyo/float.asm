@@ -206,6 +206,104 @@ DEF_FUNC float_repr
 END_FUNC float_repr
 
 ;; ============================================================================
+;; float_format_spec(PyFloatObject *self, const char *spec, int spec_len) -> PyStrObject*
+;; Format float using a format spec string like ".2f", ".4e", etc.
+;; rdi = float obj, rsi = spec data ptr, edx = spec length
+;; ============================================================================
+global float_format_spec
+DEF_FUNC float_format_spec, 80
+    and rsp, -16              ; ensure alignment
+
+    movsd xmm0, [rdi + PyFloatObject.value]
+    movsd [rbp-8], xmm0      ; save value
+
+    ; Parse spec: look for optional '.', digits, then type char (f/e/g)
+    ; Simple parser: find precision and type
+    mov [rbp-16], rsi         ; spec data
+    mov [rbp-20], edx         ; spec len
+
+    ; Default: precision=6, type='f'
+    mov dword [rbp-24], 6     ; precision
+    mov byte [rbp-25], 'g'    ; type
+
+    ; Scan spec
+    xor ecx, ecx              ; pos
+    mov rsi, [rbp-16]
+
+    ; Skip fill/align/sign/width for now — just look for '.' and type
+.ffs_scan:
+    cmp ecx, edx
+    jge .ffs_have_spec
+    movzx eax, byte [rsi + rcx]
+    cmp al, '.'
+    je .ffs_dot
+    ; Check if it's a type char at the end
+    cmp ecx, edx
+    jge .ffs_have_spec
+    inc ecx
+    jmp .ffs_scan
+
+.ffs_dot:
+    ; Found '.': read precision digits
+    inc ecx                   ; skip '.'
+    xor eax, eax              ; precision = 0
+.ffs_prec_loop:
+    cmp ecx, edx
+    jge .ffs_store_prec
+    movzx edi, byte [rsi + rcx]
+    sub edi, '0'
+    cmp edi, 9
+    ja .ffs_prec_done         ; not a digit
+    imul eax, eax, 10
+    add eax, edi
+    inc ecx
+    jmp .ffs_prec_loop
+.ffs_prec_done:
+    ; Next char should be type
+    cmp ecx, edx
+    jge .ffs_store_prec
+    movzx edi, byte [rsi + rcx]
+    mov [rbp-25], dil         ; type char
+.ffs_store_prec:
+    mov [rbp-24], eax
+
+.ffs_have_spec:
+    ; Format using snprintf with appropriate format string
+    lea rdi, [rbp-76]         ; buffer (48 bytes)
+    mov esi, 48               ; bufsz
+
+    movzx eax, byte [rbp-25]  ; type char
+    cmp al, 'f'
+    je .ffs_use_f
+    cmp al, 'e'
+    je .ffs_use_e
+    cmp al, 'E'
+    je .ffs_use_E
+    ; Default: use %.*g
+    lea rdx, [rel fmt_g]
+    jmp .ffs_do_snprintf
+.ffs_use_f:
+    lea rdx, [rel fmt_f]
+    jmp .ffs_do_snprintf
+.ffs_use_e:
+    lea rdx, [rel fmt_e]
+    jmp .ffs_do_snprintf
+.ffs_use_E:
+    lea rdx, [rel fmt_E]
+
+.ffs_do_snprintf:
+    mov ecx, [rbp-24]         ; precision
+    movsd xmm0, [rbp-8]      ; value
+    mov eax, 1                ; 1 xmm register
+    call snprintf wrt ..plt
+
+    lea rdi, [rbp-76]
+    call str_from_cstr
+    leave
+    ret
+END_FUNC float_format_spec
+
+;; ============================================================================
 ;; float_hash(PyObject *self) -> int64 in rax
 ;; ============================================================================
 DEF_FUNC_BARE float_hash
@@ -500,6 +598,9 @@ str_nan: db "nan", 0
 str_inf: db "inf", 0
 str_neg_inf: db "-inf", 0
 fmt_g: db "%.*g", 0
+fmt_f: db "%.*f", 0
+fmt_e: db "%.*e", 0
+fmt_E: db "%.*E", 0
 
 align 8
 sign_mask: dq 0x8000000000000000
