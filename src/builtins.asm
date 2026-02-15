@@ -845,6 +845,40 @@ DEF_FUNC builtin___build_class__
     call obj_incref
 .bc_no_set_base:
 
+    ; Call parent's __init_subclass__ if present
+    mov rax, [rbp-48]          ; base class
+    test rax, rax
+    jz .bc_no_init_subclass
+
+    ; Look up __init_subclass__ on the base class (walk MRO)
+    extern dunder_lookup
+    mov rdi, rax               ; base class (as type)
+    CSTRING rsi, "__init_subclass__"
+    call dunder_lookup
+    test rax, rax
+    jz .bc_no_init_subclass
+
+    ; Call __init_subclass__(new_class)
+    ; rax = the dunder function (borrowed ref)
+    mov rcx, [rax + PyObject.ob_type]
+    mov rcx, [rcx + PyTypeObject.tp_call]
+    test rcx, rcx
+    jz .bc_no_init_subclass
+
+    push r12                   ; args[0] = new class (r12)
+    mov rdi, rax               ; callable = __init_subclass__ func
+    mov rsi, rsp               ; args
+    mov edx, 1                 ; nargs = 1
+    call rcx
+    add rsp, 8                 ; pop args
+    ; DECREF result if non-NULL
+    test rax, rax
+    jz .bc_no_init_subclass
+    mov rdi, rax
+    call obj_decref
+
+.bc_no_init_subclass:
+
     ; Handle __classcell__: look in class_dict for the cell, set its ob_ref to the new type
     lea rdi, [rel bc_classcell_name]
     call str_from_cstr

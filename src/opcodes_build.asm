@@ -94,6 +94,21 @@ DEF_FUNC_BARE op_binary_subscr
     jmp .subscr_done
 
 .no_subscript:
+    ; Try __class_getitem__ on type objects FIRST (for MyClass[args] syntax)
+    mov rdi, [rsp+8]              ; obj
+    test rdi, rdi
+    js .try_getitem_dunder
+    mov rax, [rdi + PyObject.ob_type]
+    extern user_type_metatype
+    extern type_type
+    lea rcx, [rel user_type_metatype]
+    cmp rax, rcx
+    je .try_class_getitem
+    lea rcx, [rel type_type]
+    cmp rax, rcx
+    je .try_class_getitem
+
+.try_getitem_dunder:
     ; Try __getitem__ on heaptype
     mov rdi, [rsp+8]          ; obj
     test rdi, rdi
@@ -109,6 +124,47 @@ DEF_FUNC_BARE op_binary_subscr
     call dunder_call_2
     test rax, rax
     jnz .subscr_done
+    jmp .subscr_error
+
+.try_class_getitem:
+    ; obj is a type — look up __class_getitem__ in its tp_dict (walk MRO)
+    ; Stack: [rsp]=key, [rsp+8]=obj
+    extern dunder_lookup
+    extern classmethod_type
+    mov rdi, [rsp+8]              ; obj (the type itself)
+    CSTRING rsi, "__class_getitem__"
+    call dunder_lookup
+    test rax, rax
+    jz .subscr_error
+
+    ; rax = __class_getitem__ attr (borrowed ref)
+    ; Check if it's a classmethod wrapper — unwrap if so
+    mov rcx, [rax + PyObject.ob_type]
+    lea rdx, [rel classmethod_type]
+    cmp rcx, rdx
+    jne .cgi_not_classmethod
+
+    ; Unwrap classmethod: get cm_callable, call with (cls, key)
+    mov rax, [rax + PyClassMethodObject.cm_callable]
+
+.cgi_not_classmethod:
+    ; Call func(cls, key): tp_call(func, &[cls, key], 2)
+    mov rdi, rax
+    mov rcx, [rdi + PyObject.ob_type]
+    mov rcx, [rcx + PyTypeObject.tp_call]
+    test rcx, rcx
+    jz .subscr_error
+
+    ; Build args: [cls, key]
+    mov rax, [rsp]                ; key
+    push rax                      ; args[1] = key
+    mov rax, [rsp + 16]           ; obj (type/cls) — shifted by push
+    push rax                      ; args[0] = cls
+    mov rsi, rsp                  ; args ptr
+    mov edx, 2                    ; nargs = 2
+    call rcx
+    add rsp, 16                   ; pop args
+    jmp .subscr_done
 
 .subscr_error:
     lea rdi, [rel exc_TypeError_type]
