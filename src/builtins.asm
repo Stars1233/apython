@@ -342,12 +342,49 @@ DEF_FUNC builtin_len
     mov rax, [rbx + PyObject.ob_type]
     mov rcx, [rax + PyTypeObject.tp_as_sequence]
     test rcx, rcx
-    jz .try_ob_size
+    jz .try_dunder_len
     mov rcx, [rcx + PySequenceMethods.sq_length]
     test rcx, rcx
-    jz .try_ob_size
+    jz .try_dunder_len
     mov rdi, rbx
     call rcx
+    jmp .make_int
+
+.try_dunder_len:
+    ; Try __len__ dunder on heaptype
+    mov rax, [rbx + PyObject.ob_type]
+    mov rdx, [rax + PyTypeObject.tp_flags]
+    test rdx, TYPE_FLAG_HEAPTYPE
+    jz .try_ob_size
+
+    extern dunder_len
+    extern dunder_call_1
+    mov rdi, rbx
+    lea rsi, [rel dunder_len]
+    call dunder_call_1
+    test rax, rax
+    jz .try_ob_size
+
+    ; __len__ returned a result — extract integer value
+    push rax                ; save result for DECREF
+    ; Check if SmallInt
+    test rax, rax
+    js .len_smallint
+    ; Heap int — read value (assume fits in 64 bits)
+    extern int_to_i64
+    mov rdi, rax
+    call int_to_i64
+    pop rdi                 ; DECREF the int result
+    push rax                ; save extracted value
+    call obj_decref
+    pop rax
+    jmp .make_int
+
+.len_smallint:
+    ; Decode SmallInt
+    shl rax, 1
+    sar rax, 1
+    add rsp, 8              ; discard saved (SmallInt, no DECREF needed)
     jmp .make_int
 
 .try_ob_size:
@@ -711,6 +748,9 @@ DEF_FUNC builtin___build_class__
 
     lea rax, [rel instance_repr]
     mov [r12 + PyTypeObject.tp_repr], rax
+
+    extern instance_str
+    lea rax, [rel instance_str]
     mov [r12 + PyTypeObject.tp_str], rax
 
     lea rax, [rel type_call]
@@ -721,6 +761,9 @@ DEF_FUNC builtin___build_class__
 
     lea rax, [rel instance_setattr]
     mov [r12 + PyTypeObject.tp_setattr], rax
+
+    ; tp_flags = HEAPTYPE (enables dunder dispatch fallbacks)
+    mov qword [r12 + PyTypeObject.tp_flags], TYPE_FLAG_HEAPTYPE
 
     ; tp_dict = class_dict
     mov [r12 + PyTypeObject.tp_dict], r15

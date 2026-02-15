@@ -116,7 +116,6 @@ DEF_FUNC func_call
     ;   [rsp+40] = (scratch)
 
     mov rbx, rdi            ; rbx = function object
-    mov r13, r12            ; r13 = caller's frame (r12 on entry from eval loop)
     mov r14, rsi            ; r14 = args_ptr
     mov r15d, edx           ; r15d = nargs
 
@@ -135,8 +134,9 @@ DEF_FUNC func_call
     mov [rsp+8], ecx        ; save positional_count
     mov qword [rsp+24], 0   ; kwargs_dict = NULL
 
-    ; Get builtins from caller's frame
-    mov rdx, [r13 + PyFrame.builtins]
+    ; Get builtins from global (avoids r12 caller-frame assumption)
+    extern builtins_dict_global
+    mov rdx, [rel builtins_dict_global]
 
     ; Create new frame: frame_new(code, globals, builtins, locals=NULL)
     mov rdi, [rbx + PyFuncObject.func_code]

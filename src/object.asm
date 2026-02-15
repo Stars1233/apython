@@ -265,14 +265,64 @@ DEF_FUNC_BARE obj_is_true
     mov rax, [rbx + PyObject.ob_type]
     mov rax, [rax + PyTypeObject.tp_as_mapping]
     test rax, rax
-    jz .true                ; default: objects are truthy
+    jz .check_dunder_bool
     mov rax, [rax + PyMappingMethods.mp_length]
     test rax, rax
-    jz .true
+    jz .check_dunder_bool
     mov rdi, rbx
     call rax
     test rax, rax
     jnz .true
+    jmp .false
+
+.check_dunder_bool:
+    ; Try __bool__ dunder on heaptype
+    mov rax, [rbx + PyObject.ob_type]
+    mov rdx, [rax + PyTypeObject.tp_flags]
+    test rdx, TYPE_FLAG_HEAPTYPE
+    jz .true                ; default: objects are truthy
+
+    extern dunder_bool
+    extern dunder_call_1
+    mov rdi, rbx
+    lea rsi, [rel dunder_bool]
+    call dunder_call_1
+    test rax, rax
+    jz .check_dunder_len
+
+    ; __bool__ returned a result — convert to int (check if it's True/False)
+    push rax
+    extern obj_is_true
+    mov rdi, rax
+    call obj_is_true
+    mov ecx, eax
+    pop rdi
+    DECREF_REG rdi
+    mov eax, ecx
+    pop rbx
+    pop rbp
+    ret
+
+.check_dunder_len:
+    ; Try __len__ dunder
+    extern dunder_len
+    mov rdi, rbx
+    lea rsi, [rel dunder_len]
+    call dunder_call_1
+    test rax, rax
+    jz .true                ; no __len__ → truthy by default
+
+    ; __len__ returned a result — truthy if > 0
+    push rax
+    mov rdi, rax
+    call obj_is_true
+    mov ecx, eax
+    pop rdi
+    DECREF_REG rdi
+    mov eax, ecx
+    pop rbx
+    pop rbp
+    ret
 
 .false:
     xor eax, eax

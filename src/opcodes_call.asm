@@ -115,10 +115,60 @@ DEF_FUNC op_call, 48
     mov rax, [rdi + PyObject.ob_type]
     test rax, rax
     jz .not_callable               ; no type (shouldn't happen)
+    mov rcx, rax                    ; save type for dunder check
+    mov rax, [rax + PyTypeObject.tp_call]
+    test rax, rax
+    jnz .have_tp_call
+
+    ; tp_call NULL — try __call__ on heaptype
+    mov rdx, [rcx + PyTypeObject.tp_flags]
+    test rdx, TYPE_FLAG_HEAPTYPE
+    jz .not_callable
+    extern dunder_lookup
+    extern dunder_call
+    mov rdi, rcx              ; type
+    lea rsi, [rel dunder_call]
+    call dunder_lookup
+    test rax, rax
+    jz .not_callable
+    ; Found __call__ — use its tp_call to dispatch
+    mov rcx, rax              ; __call__ func
+    mov rax, [rcx + PyObject.ob_type]
     mov rax, [rax + PyTypeObject.tp_call]
     test rax, rax
     jz .not_callable
+    ; Rewrite callable: we need to call __call__(self, *args)
+    ; The self is the original callable, prepend it to args
+    ; Actually, we can just call dunder_func's tp_call with [callable, args...]
+    ; But that requires restructuring the args. For simplicity, call it as
+    ; tp_call(dunder_func, args_including_self, nargs+1)
+    ; where args_including_self starts at the callable's slot on the value stack
+    ; The callable is at [r13 - (nargs+1)*8], and args start at [r13 - nargs*8]
+    ; We already have self in the callable's slot... actually this is tricky.
+    ; Let's use a simpler approach: save dunder_func in [rbp-16], store original
+    ; callable as first arg by shifting the args pointer back by 1
+    mov [rbp-16], rcx         ; replace callable with __call__ func
+    ; args_ptr should now include the original callable as self
+    ; The original callable is already on the value stack at the right position
+    ; We just need to point args_ptr one slot earlier and increment nargs
+    ; Actually, let's just use the value stack directly:
+    ; Stack: ... | NULL_or_self | original_callable | arg0 | arg1 | ...
+    ; We want: tp_call(__call_func__, &[original_callable, arg0, ...], nargs+1)
+    ; The original_callable is at [r13 - (nargs+1)*8], which is exactly where
+    ; args_ptr - 8 would be. So we can just decrement args_ptr and inc nargs.
+    ; But wait, we need to read nargs first...
+    mov rcx, [rbp-8]
+    mov rdx, rcx
+    inc rdx                    ; nargs + 1 (include self/callable)
+    inc rcx
+    neg rcx
+    lea rsi, [r13 + rcx*8]   ; args_ptr includes original callable as first arg
+    mov rdi, [rbp-16]         ; __call__ func
+    call rax
+    mov [rbp-24], rax
+    jmp .cleanup
 
+.have_tp_call:
     ; Set up args: tp_call(callable, args_ptr, nargs)
     mov rcx, [rbp-8]
     mov rdx, rcx                    ; total nargs (may include self)
@@ -129,6 +179,7 @@ DEF_FUNC op_call, 48
     call rax
     mov [rbp-24], rax               ; save return value
 
+.cleanup:
     ; === Cleanup ===
     ; Pop nargs items (may include self copy for method calls), DECREF each
     mov rcx, [rbp-8]

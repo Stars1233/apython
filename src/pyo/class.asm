@@ -183,13 +183,57 @@ END_FUNC instance_dealloc
 
 ;; ============================================================================
 ;; instance_repr(PyObject *self) -> PyStrObject*
-;; Return a simple "<instance>" string.
+;; Try __repr__ dunder, fall back to "<instance>".
 ;; rdi = instance
 ;; ============================================================================
-DEF_FUNC_BARE instance_repr
+DEF_FUNC instance_repr
+    push rbx
+    mov rbx, rdi
+
+    ; Try __repr__ dunder
+    extern dunder_repr
+    extern dunder_call_1
+    lea rsi, [rel dunder_repr]
+    ; r12 is callee-saved and still holds eval frame from caller chain
+    call dunder_call_1
+    test rax, rax
+    jnz .done
+
+    ; Fall back to "<instance>"
     lea rdi, [rel instance_repr_cstr]
-    jmp str_from_cstr
+    call str_from_cstr
+
+.done:
+    pop rbx
+    leave
+    ret
 END_FUNC instance_repr
+
+;; ============================================================================
+;; instance_str(PyObject *self) -> PyStrObject*
+;; Try __str__ dunder, fall back to instance_repr.
+;; rdi = instance
+;; ============================================================================
+DEF_FUNC instance_str
+    push rbx
+    mov rbx, rdi
+
+    ; Try __str__ dunder
+    extern dunder_str
+    lea rsi, [rel dunder_str]
+    call dunder_call_1
+    test rax, rax
+    jnz .done
+
+    ; Fall back to instance_repr
+    mov rdi, rbx
+    call instance_repr
+
+.done:
+    pop rbx
+    leave
+    ret
+END_FUNC instance_str
 
 ;; ============================================================================
 ;; type_call(PyTypeObject *type, PyObject **args, int64_t nargs) -> PyObject*
@@ -284,10 +328,6 @@ DEF_FUNC type_call
     mov rax, [rax + PyTypeObject.tp_call]
     test rax, rax
     jz .init_not_callable
-
-    ; Restore r12 to the caller's eval frame (saved at [rbp-16] by prologue)
-    ; so that func_call can read builtins from it correctly.
-    mov r12, [rbp - 16]
 
     ; Call tp_call(__init_func, args_with_instance, nargs+1)
     mov rdi, rbx                ; callable = __init__ func

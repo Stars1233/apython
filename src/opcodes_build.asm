@@ -92,6 +92,23 @@ DEF_FUNC_BARE op_binary_subscr
     jmp .subscr_done
 
 .no_subscript:
+    ; Try __getitem__ on heaptype
+    mov rdi, [rsp+8]          ; obj
+    test rdi, rdi
+    js .subscr_error
+    mov rax, [rdi + PyObject.ob_type]
+    mov rdx, [rax + PyTypeObject.tp_flags]
+    test rdx, TYPE_FLAG_HEAPTYPE
+    jz .subscr_error
+    extern dunder_getitem
+    extern dunder_call_2
+    mov rsi, [rsp]            ; key = other
+    lea rdx, [rel dunder_getitem]
+    call dunder_call_2
+    test rax, rax
+    jnz .subscr_done
+
+.subscr_error:
     lea rdi, [rel exc_TypeError_type]
     CSTRING rsi, "object is not subscriptable"
     call raise_exception
@@ -168,6 +185,43 @@ DEF_FUNC_BARE op_store_subscr
     jmp .store_done
 
 .store_error:
+    ; Try __setitem__ on heaptype
+    mov rdi, [rsp+16]         ; obj
+    mov rax, [rdi + PyObject.ob_type]
+    mov rdx, [rax + PyTypeObject.tp_flags]
+    test rdx, TYPE_FLAG_HEAPTYPE
+    jz .store_type_error
+
+    ; Look up __setitem__
+    extern dunder_setitem
+    extern dunder_lookup
+    mov rdi, [rsp+16]         ; obj
+    mov rdi, [rdi + PyObject.ob_type]
+    lea rsi, [rel dunder_setitem]
+    call dunder_lookup
+    test rax, rax
+    jz .store_type_error
+
+    ; Call __setitem__(self, key, value) via tp_call
+    mov rcx, rax              ; func
+    mov rax, [rcx + PyObject.ob_type]
+    mov rax, [rax + PyTypeObject.tp_call]
+    test rax, rax
+    jz .store_type_error
+
+    ; Build args array on machine stack: [self, key, value]
+    push qword [rsp+0]       ; args[2] = value  (at original [rsp+0])
+    push qword [rsp+16]      ; args[1] = key    (at original [rsp+8], shifted by push)
+    push qword [rsp+32]      ; args[0] = self   (at original [rsp+16], shifted by 2 pushes)
+    mov rdi, rcx              ; callable
+    mov rsi, rsp              ; args ptr
+    mov edx, 3                ; nargs
+    call rax
+    add rsp, 24               ; pop args array
+    ; rax = result (discard — __setitem__ returns None)
+    jmp .store_done
+
+.store_type_error:
     lea rdi, [rel exc_TypeError_type]
     CSTRING rsi, "object does not support item assignment"
     call raise_exception
@@ -506,12 +560,28 @@ DEF_FUNC_BARE op_get_iter
 
     ; Get tp_iter from type
     mov rax, [rdi + PyObject.ob_type]
+    mov rcx, rax               ; save type
     mov rax, [rax + PyTypeObject.tp_iter]
     test rax, rax
-    jz .not_iterable
+    jnz .have_iter
 
+    ; tp_iter NULL — try __iter__ on heaptype
+    mov rdx, [rcx + PyTypeObject.tp_flags]
+    test rdx, TYPE_FLAG_HEAPTYPE
+    jz .not_iterable
+    extern dunder_iter
+    lea rsi, [rel dunder_iter]
+    extern dunder_call_1
+    call dunder_call_1
+    test rax, rax
+    jz .not_iterable
+    ; rax = iterator from __iter__, skip the tp_iter call
+    jmp .have_iter_result
+
+.have_iter:
     ; Call tp_iter(obj) -> iterator
     call rax
+.have_iter_result:
     push rax                   ; save iterator on machine stack
 
     ; DECREF the original iterable
@@ -547,8 +617,25 @@ DEF_FUNC_BARE op_for_iter
 
     ; Call tp_iternext(iterator)
     mov rax, [rdi + PyObject.ob_type]
+    mov rcx, rax               ; save type
     mov rax, [rax + PyTypeObject.tp_iternext]
+    test rax, rax
+    jnz .have_iternext
+
+    ; tp_iternext NULL — try __next__ on heaptype
+    mov rdx, [rcx + PyTypeObject.tp_flags]
+    test rdx, TYPE_FLAG_HEAPTYPE
+    jz .exhausted
+    extern dunder_next
+    lea rsi, [rel dunder_next]
+    extern dunder_call_1
+    call dunder_call_1
+    ; rax = value or NULL (if __next__ not found)
+    jmp .check_next_result
+
+.have_iternext:
     call rax
+.check_next_result:
     ; rax = next value, or NULL if exhausted
 
     test rax, rax
@@ -790,6 +877,48 @@ DEF_FUNC_BARE op_contains_op
     DISPATCH
 
 .contains_error:
+    ; Try __contains__ on heaptype
+    mov rdi, [rsp]            ; container
+    mov rax, [rdi + PyObject.ob_type]
+    mov rdx, [rax + PyTypeObject.tp_flags]
+    test rdx, TYPE_FLAG_HEAPTYPE
+    jz .contains_type_error
+
+    extern dunder_contains
+    extern dunder_call_2
+    mov rdi, [rsp]            ; container = self
+    mov rsi, [rsp+8]          ; value = other
+    lea rdx, [rel dunder_contains]
+    call dunder_call_2
+    test rax, rax
+    jz .contains_type_error
+
+    ; Convert result to boolean (obj_is_true)
+    push rax
+    mov rdi, rax
+    extern obj_is_true
+    call obj_is_true
+    mov ecx, eax              ; save truthiness
+    pop rdi
+    DECREF_REG rdi             ; DECREF the __contains__ result
+    mov eax, ecx
+
+    ; Continue with result in eax — jump to DECREF + invert logic
+    push rax
+    mov rdi, [rsp + 8]       ; right (container)
+    call obj_decref
+    mov rdi, [rsp + 16]      ; left (value)
+    call obj_decref
+    pop rax
+    add rsp, 16
+    pop rcx                    ; invert
+    xor eax, ecx
+    test eax, eax
+    jz .contains_false
+    lea rax, [rel bool_true]
+    jmp .contains_push
+
+.contains_type_error:
     lea rdi, [rel exc_TypeError_type]
     CSTRING rsi, "argument of type is not iterable"
     call raise_exception

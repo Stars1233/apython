@@ -100,6 +100,7 @@ DEF_FUNC_BARE op_binary_op
     ; The table already has entries for indices 0-25
     lea rax, [rel binary_op_offsets]
     mov r8, [rax + rcx*8]      ; r8 = offset into PyNumberMethods
+    mov r9d, ecx               ; r9d = save binary op code (survives float check)
 
     ; Float coercion: if either operand is float, use float methods
     ; This handles int+float, float+int, float+float
@@ -126,6 +127,8 @@ DEF_FUNC_BARE op_binary_op
     lea rax, [rel int_type]
 .binop_have_type:
     mov rax, [rax + PyTypeObject.tp_as_number]
+    test rax, rax
+    jz .binop_try_dunder
     jmp .binop_call_method
 
 .use_float_methods:
@@ -134,11 +137,14 @@ DEF_FUNC_BARE op_binary_op
 .binop_call_method:
     ; Get the specific method function pointer
     mov rax, [rax + r8]
+    test rax, rax
+    jz .binop_try_dunder
 
     ; Call the method: rdi=left (a), rsi=right (b) - already set
     call rax
-    ; rax = result
 
+.binop_have_result:
+    ; rax = result
     ; Save result, DECREF operands
     push rax                   ; save result on machine stack
     mov rdi, [rsp + 8]        ; rdi = right operand
@@ -154,6 +160,76 @@ DEF_FUNC_BARE op_binary_op
     ; Skip 1 CACHE entry = 2 bytes
     add rbx, 2
     DISPATCH
+
+.binop_try_dunder:
+    ; Try dunder method on heaptype objects
+    ; r9d = binary op code, stack: [rsp]=right, [rsp+8]=left
+    extern binop_dunder_table
+    extern binop_rdunder_table
+    extern dunder_call_2
+
+    ; Check if left is heaptype
+    mov rdi, [rsp+8]          ; left
+    test rdi, rdi
+    js .binop_try_right_dunder ; SmallInt has no dunders
+    mov rax, [rdi + PyObject.ob_type]
+    mov rdx, [rax + PyTypeObject.tp_flags]
+    test rdx, TYPE_FLAG_HEAPTYPE
+    jz .binop_try_right_dunder
+
+    ; Map op code to dunder name
+    mov eax, r9d
+    cmp eax, 13
+    jl .binop_dunder_idx
+    sub eax, 13               ; inplace → base op
+.binop_dunder_idx:
+    lea rdx, [rel binop_dunder_table]
+    mov rdx, [rdx + rax*8]
+    test rdx, rdx
+    jz .binop_try_right_dunder
+
+    ; dunder_call_2(left, right, name)
+    push r9                    ; save op code
+    mov rdi, [rsp+16]         ; left (shifted by push)
+    mov rsi, [rsp+8]          ; right
+    call dunder_call_2
+    pop r9
+    test rax, rax
+    jnz .binop_have_result
+
+.binop_try_right_dunder:
+    ; Try reflected dunder on right operand
+    mov rdi, [rsp]            ; right
+    test rdi, rdi
+    js .binop_no_method
+    mov rax, [rdi + PyObject.ob_type]
+    mov rdx, [rax + PyTypeObject.tp_flags]
+    test rdx, TYPE_FLAG_HEAPTYPE
+    jz .binop_no_method
+
+    mov eax, r9d
+    cmp eax, 13
+    jl .binop_rdunder_idx
+    sub eax, 13
+.binop_rdunder_idx:
+    lea rdx, [rel binop_rdunder_table]
+    mov rdx, [rdx + rax*8]
+    test rdx, rdx
+    jz .binop_no_method
+
+    ; dunder_call_2(right, left, rname) — right is self for reflected
+    mov rdi, [rsp]            ; right
+    mov rsi, [rsp+8]          ; left
+    call dunder_call_2
+    test rax, rax
+    jnz .binop_have_result
+
+.binop_no_method:
+    ; No method found — raise TypeError
+    extern raise_exception
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "unsupported operand type(s)"
+    call raise_exception
 
 .binop_try_smallint_add:
     ; Check both SmallInt (bit 63 set on both)
@@ -314,10 +390,34 @@ DEF_FUNC_BARE op_compare_op
 .cmp_smallint_type:
     lea rax, [rel int_type]
 .cmp_have_type:
+    mov r9, rax                 ; r9 = type (save for dunder check)
     mov rax, [rax + PyTypeObject.tp_richcompare]
     test rax, rax
-    jz .cmp_identity            ; no tp_richcompare → fall back to identity
-    jmp .cmp_do_call
+    jnz .cmp_do_call
+
+    ; No tp_richcompare — try dunder on heaptype
+    mov rdx, [r9 + PyTypeObject.tp_flags]
+    test rdx, TYPE_FLAG_HEAPTYPE
+    jz .cmp_identity
+
+    ; Map compare op to dunder name via lookup table
+    extern cmp_dunder_table
+    extern dunder_call_2
+    lea rax, [rel cmp_dunder_table]
+    movsxd rdx, ecx
+    mov rdx, [rax + rdx*8]     ; rdx = dunder name C string
+
+    ; Save ecx (comparison op) since dunder_call_2 clobbers it
+    push rcx
+    ; dunder_call_2(self=left, other=right, name)
+    ; rdi = left (still set from above)
+    ; rsi = right (still set)
+    call dunder_call_2
+    pop rcx
+
+    test rax, rax
+    jz .cmp_identity            ; dunder not found → identity fallback
+    jmp .cmp_do_call_result     ; rax = result object
 
 .cmp_use_float:
     extern float_compare
@@ -331,6 +431,7 @@ DEF_FUNC_BARE op_compare_op
     call rax
     ; rax = result (a bool object)
 
+.cmp_do_call_result:
     ; Save result, DECREF operands
     push rax                   ; save result on machine stack
     mov rdi, [rsp + 8]        ; rdi = right operand
