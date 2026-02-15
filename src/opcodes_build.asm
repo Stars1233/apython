@@ -38,6 +38,8 @@ extern slice_indices
 extern none_singleton
 extern obj_incref
 extern dict_get
+extern range_iter_type
+extern list_iter_type
 
 ;; ============================================================================
 ;; op_binary_subscr - obj[key]
@@ -615,6 +617,25 @@ DEF_FUNC_BARE op_for_iter
     ; Peek at iterator (don't pop yet)
     VPEEK rdi
 
+    ; Try to specialize (first execution)
+    mov rax, [rdi + PyObject.ob_type]
+    lea rdx, [rel range_iter_type]
+    cmp rax, rdx
+    je .fi_specialize_range
+    lea rdx, [rel list_iter_type]
+    cmp rax, rdx
+    je .fi_specialize_list
+    jmp .fi_no_specialize
+
+.fi_specialize_range:
+    mov byte [rbx - 2], 214    ; rewrite to FOR_ITER_RANGE
+    jmp .fi_no_specialize      ; continue with normal execution this time
+
+.fi_specialize_list:
+    mov byte [rbx - 2], 213    ; rewrite to FOR_ITER_LIST
+    ; fall through to normal execution
+
+.fi_no_specialize:
     ; Call tp_iternext(iterator)
     mov rax, [rdi + PyObject.ob_type]
     mov rcx, rax               ; save type
@@ -1599,3 +1620,129 @@ DEF_FUNC op_set_update
     CSTRING rsi, "object is not iterable"
     call raise_exception
 END_FUNC op_set_update
+
+;; ============================================================================
+;; op_for_iter_range - Specialized range iterator (opcode 214)
+;;
+;; Guard: TOS ob_type == range_iter_type
+;; Inlines range_iter_next logic: decode current/stop/step, check bounds,
+;; return SmallInt, advance current.
+;; ecx = jump offset. Followed by 1 CACHE entry (2 bytes).
+;; ============================================================================
+DEF_FUNC_BARE op_for_iter_range
+    VPEEK rdi                      ; iterator (don't pop)
+    ; Guard: must be range_iter_type
+    lea rax, [rel range_iter_type]
+    cmp [rdi + PyObject.ob_type], rax
+    jne .fir_deopt
+
+    ; Inline range_iter_next
+    mov rax, [rdi + PyRangeIterObject.it_current]
+    shl rax, 1
+    sar rax, 1                     ; current (decoded)
+
+    mov r8, [rdi + PyRangeIterObject.it_stop]
+    shl r8, 1
+    sar r8, 1                      ; stop (decoded)
+
+    mov r9, [rdi + PyRangeIterObject.it_step]
+    shl r9, 1
+    sar r9, 1                      ; step (decoded)
+
+    ; Check exhaustion
+    test r9, r9
+    js .fir_neg_step
+    ; Positive step: current >= stop -> exhausted
+    cmp rax, r8
+    jge .fir_exhausted
+    jmp .fir_has_value
+.fir_neg_step:
+    ; Negative step: current <= stop -> exhausted
+    cmp rax, r8
+    jle .fir_exhausted
+
+.fir_has_value:
+    ; Return current as SmallInt (no INCREF needed for SmallInt)
+    mov rdx, rax
+    bts rdx, 63                    ; encode return value
+
+    ; Advance: current += step
+    add rax, r9
+    bts rax, 63
+    mov [rdi + PyRangeIterObject.it_current], rax
+
+    VPUSH rdx                      ; push value
+    add rbx, 2                     ; skip CACHE
+    DISPATCH
+
+.fir_exhausted:
+    ; Pop iterator, skip CACHE + jump by (arg + 1)
+    ; ecx = saved arg (from instruction word)
+    lea rcx, [rcx + 1]            ; arg + 1
+    add rbx, 2                     ; skip CACHE
+    lea rbx, [rbx + rcx*2]        ; jump forward
+    VPOP rdi                       ; pop iterator
+    DECREF_REG rdi
+    DISPATCH
+
+.fir_deopt:
+    ; Type mismatch: rewrite to FOR_ITER (93) and re-execute
+    mov byte [rbx - 2], 93
+    sub rbx, 2
+    DISPATCH
+END_FUNC op_for_iter_range
+
+;; ============================================================================
+;; op_for_iter_list - Specialized list iterator (opcode 213)
+;;
+;; Guard: TOS ob_type == list_iter_type
+;; Inlines list_iter_next: check index < list.ob_size, load item, INCREF,
+;; advance index.
+;; ecx = jump offset. Followed by 1 CACHE entry (2 bytes).
+;; ============================================================================
+DEF_FUNC_BARE op_for_iter_list
+    push rcx                       ; save jump offset (ecx will be clobbered)
+    VPEEK rdi                      ; iterator (don't pop)
+    ; Guard: must be list_iter_type
+    lea rax, [rel list_iter_type]
+    cmp [rdi + PyObject.ob_type], rax
+    jne .fil_deopt
+
+    ; Inline list_iter_next
+    mov rax, [rdi + PyListIterObject.it_seq]       ; list ptr
+    mov rcx, [rdi + PyListIterObject.it_index]     ; current index
+
+    ; Check bounds
+    cmp rcx, [rax + PyListObject.ob_size]
+    jge .fil_exhausted
+
+    ; Get item and INCREF
+    mov rdx, [rax + PyListObject.ob_item]
+    mov rax, [rdx + rcx*8]
+    INCREF rax
+
+    ; Advance index
+    inc qword [rdi + PyListIterObject.it_index]
+
+    add rsp, 8                     ; discard saved jump offset
+    VPUSH rax                      ; push value
+    add rbx, 2                     ; skip CACHE
+    DISPATCH
+
+.fil_exhausted:
+    ; Restore the original arg (jump offset)
+    pop rcx                        ; restore jump offset
+    lea rcx, [rcx + 1]            ; arg + 1
+    add rbx, 2                     ; skip CACHE
+    lea rbx, [rbx + rcx*2]        ; jump forward
+    VPOP rdi                       ; pop iterator
+    DECREF_REG rdi
+    DISPATCH
+
+.fil_deopt:
+    pop rcx                        ; restore jump offset (for re-execute)
+    ; Type mismatch: rewrite to FOR_ITER (93) and re-execute
+    mov byte [rbx - 2], 93
+    sub rbx, 2
+    DISPATCH
+END_FUNC op_for_iter_list

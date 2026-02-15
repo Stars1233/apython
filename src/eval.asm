@@ -99,6 +99,11 @@ extern op_match_sequence
 extern op_match_keys
 extern op_call_intrinsic_2
 extern op_load_super_attr
+extern op_binary_op_add_int
+extern op_binary_op_sub_int
+extern op_compare_op_int
+extern op_for_iter_list
+extern op_for_iter_range
 
 ; External error handler
 extern error_unimplemented_opcode
@@ -984,12 +989,12 @@ opcode_table:
     dq op_unimplemented      ; 206
     dq op_unimplemented      ; 207
     dq op_unimplemented      ; 208
-    dq op_unimplemented      ; 209
+    dq op_compare_op_int     ; 209 = COMPARE_OP_INT (specialized)
     dq op_unimplemented      ; 210
-    dq op_unimplemented      ; 211
-    dq op_unimplemented      ; 212
-    dq op_unimplemented      ; 213
-    dq op_unimplemented      ; 214
+    dq op_binary_op_add_int  ; 211 = BINARY_OP_ADD_INT (specialized)
+    dq op_binary_op_sub_int  ; 212 = BINARY_OP_SUBTRACT_INT (specialized)
+    dq op_for_iter_list      ; 213 = FOR_ITER_LIST (specialized)
+    dq op_for_iter_range     ; 214 = FOR_ITER_RANGE (specialized)
     dq op_unimplemented      ; 215
     dq op_unimplemented      ; 216
     dq op_unimplemented      ; 217

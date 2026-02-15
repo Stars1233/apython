@@ -280,6 +280,8 @@ DEF_FUNC_BARE op_binary_op
     jo .binop_generic          ; overflow → fall back to generic
     ; Encode as SmallInt
     bts rax, 63
+    ; Specialize: rewrite opcode to BINARY_OP_ADD_INT (211)
+    mov byte [rbx - 2], 211
     ; No DECREF needed (SmallInt are not refcounted)
     VPUSH rax
     add rbx, 2
@@ -302,6 +304,8 @@ DEF_FUNC_BARE op_binary_op
     jo .binop_generic          ; overflow → fall back to generic
     ; Encode as SmallInt
     bts rax, 63
+    ; Specialize: rewrite opcode to BINARY_OP_SUBTRACT_INT (212)
+    mov byte [rbx - 2], 212
     ; No DECREF needed (SmallInt are not refcounted)
     VPUSH rax
     add rbx, 2
@@ -327,6 +331,9 @@ DEF_FUNC_BARE op_compare_op
     mov rax, rdi
     and rax, rsi
     jns .cmp_slow_path         ; at least one is NOT SmallInt
+
+    ; Both SmallInt: specialize to COMPARE_OP_INT (209)
+    mov byte [rbx - 2], 209
 
     ; Both SmallInt: decode and compare
     mov rax, rdi
@@ -1576,3 +1583,169 @@ DEF_FUNC_BARE op_call_intrinsic_2
     VPUSH rax
     DISPATCH
 END_FUNC op_call_intrinsic_2
+
+;; ============================================================================
+;; op_binary_op_add_int - Specialized SmallInt add (opcode 211)
+;;
+;; Guard: both TOS and TOS1 must be SmallInt (bit 63 set).
+;; On guard failure: deopt back to BINARY_OP (122).
+;; Followed by 1 CACHE entry (2 bytes).
+;; ============================================================================
+DEF_FUNC_BARE op_binary_op_add_int
+    VPOP rsi                   ; right
+    VPOP rdi                   ; left
+    ; Guard: both SmallInt
+    mov rax, rdi
+    and rax, rsi
+    jns .add_int_deopt
+    ; Decode, add, check overflow
+    mov rax, rdi
+    shl rax, 1
+    sar rax, 1
+    mov rdx, rsi
+    shl rdx, 1
+    sar rdx, 1
+    add rax, rdx
+    jo .add_int_deopt_repush
+    ; Encode as SmallInt
+    bts rax, 63
+    VPUSH rax
+    add rbx, 2                 ; skip CACHE
+    DISPATCH
+.add_int_deopt_repush:
+    ; Overflow: re-push operands and deopt
+    VPUSH rdi
+    VPUSH rsi
+.add_int_deopt:
+    ; Rewrite opcode back to BINARY_OP (122)
+    mov byte [rbx - 2], 122
+    sub rbx, 2                 ; back up to re-execute as BINARY_OP
+    DISPATCH
+END_FUNC op_binary_op_add_int
+
+;; ============================================================================
+;; op_binary_op_sub_int - Specialized SmallInt subtract (opcode 212)
+;;
+;; Guard: both TOS and TOS1 must be SmallInt (bit 63 set).
+;; On guard failure: deopt back to BINARY_OP (122).
+;; Followed by 1 CACHE entry (2 bytes).
+;; ============================================================================
+DEF_FUNC_BARE op_binary_op_sub_int
+    VPOP rsi                   ; right
+    VPOP rdi                   ; left
+    ; Guard: both SmallInt
+    mov rax, rdi
+    and rax, rsi
+    jns .sub_int_deopt
+    ; Decode, sub, check overflow
+    mov rax, rdi
+    shl rax, 1
+    sar rax, 1
+    mov rdx, rsi
+    shl rdx, 1
+    sar rdx, 1
+    sub rax, rdx
+    jo .sub_int_deopt_repush
+    ; Encode as SmallInt
+    bts rax, 63
+    VPUSH rax
+    add rbx, 2                 ; skip CACHE
+    DISPATCH
+.sub_int_deopt_repush:
+    ; Overflow: re-push operands and deopt
+    VPUSH rdi
+    VPUSH rsi
+.sub_int_deopt:
+    ; Rewrite opcode back to BINARY_OP (122)
+    mov byte [rbx - 2], 122
+    sub rbx, 2                 ; back up to re-execute as BINARY_OP
+    DISPATCH
+END_FUNC op_binary_op_sub_int
+
+;; ============================================================================
+;; op_compare_op_int - Specialized SmallInt comparison (opcode 209)
+;;
+;; Guard: both TOS and TOS1 must be SmallInt (bit 63 set).
+;; On guard failure: deopt back to COMPARE_OP (107).
+;; ecx = arg (comparison op = arg >> 4)
+;; Followed by 1 CACHE entry (2 bytes).
+;; ============================================================================
+DEF_FUNC_BARE op_compare_op_int
+    shr ecx, 4                 ; ecx = comparison op (0-5)
+    VPOP rsi                   ; right
+    VPOP rdi                   ; left
+    ; Guard: both SmallInt
+    mov rax, rdi
+    and rax, rsi
+    jns .cmp_int_deopt
+    ; Decode
+    mov rax, rdi
+    shl rax, 1
+    sar rax, 1                 ; decoded left
+    mov rdx, rsi
+    shl rdx, 1
+    sar rdx, 1                 ; decoded right
+    cmp rax, rdx
+    ; Save comparison result: r8d = -1/0/1
+    mov r8d, 0
+    jz .ci_dispatch
+    mov r8d, -1
+    jl .ci_dispatch
+    mov r8d, 1
+.ci_dispatch:
+    ; Dispatch on comparison op (ecx)
+    cmp ecx, PY_LT
+    je .ci_do_lt
+    cmp ecx, PY_LE
+    je .ci_do_le
+    cmp ecx, PY_EQ
+    je .ci_do_eq
+    cmp ecx, PY_NE
+    je .ci_do_ne
+    cmp ecx, PY_GT
+    je .ci_do_gt
+    ; else PY_GE
+    test r8d, r8d
+    jge .ci_true
+    jmp .ci_false
+.ci_do_lt:
+    test r8d, r8d
+    js .ci_true
+    jmp .ci_false
+.ci_do_le:
+    test r8d, r8d
+    jle .ci_true
+    jmp .ci_false
+.ci_do_eq:
+    test r8d, r8d
+    jz .ci_true
+    jmp .ci_false
+.ci_do_ne:
+    test r8d, r8d
+    jnz .ci_true
+    jmp .ci_false
+.ci_do_gt:
+    test r8d, r8d
+    jg .ci_true
+    jmp .ci_false
+.ci_true:
+    lea rax, [rel bool_true]
+    inc qword [rax + PyObject.ob_refcnt]
+    VPUSH rax
+    add rbx, 2                 ; skip CACHE
+    DISPATCH
+.ci_false:
+    lea rax, [rel bool_false]
+    inc qword [rax + PyObject.ob_refcnt]
+    VPUSH rax
+    add rbx, 2                 ; skip CACHE
+    DISPATCH
+.cmp_int_deopt:
+    ; Re-push operands
+    VPUSH rdi
+    VPUSH rsi
+    ; Rewrite back to COMPARE_OP (107) and re-execute
+    mov byte [rbx - 2], 107
+    sub rbx, 2
+    DISPATCH
+END_FUNC op_compare_op_int
