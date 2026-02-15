@@ -28,6 +28,46 @@ extern raise_exception
 extern func_new
 extern exc_TypeError_type
 
+; --- Named frame-layout constants ---
+
+; op_call locals (DEF_FUNC op_call, CL_FRAME)
+CL_NARGS     equ 8
+CL_CALLABLE  equ 16
+CL_RETVAL    equ 24
+CL_IS_METHOD equ 32
+CL_TOTAL     equ 40
+CL_SAVED_RSP equ 48
+CL_TPCALL    equ 56
+CL_FRAME     equ 64
+
+; op_make_function locals (DEF_FUNC op_make_function, MF_FRAME)
+MF_FLAGS   equ 8
+MF_CODE    equ 16
+MF_CLOSURE equ 24
+MF_DEFAULTS equ 32
+MF_KWDEFS  equ 40
+MF_CTAG    equ 48
+MF_FRAME   equ 48
+
+; op_call_function_ex locals (manual frame, push rbx; push r12; sub rsp, 48)
+CFX_FUNC    equ 32
+CFX_ARGS    equ 40
+CFX_KWARGS  equ 48
+CFX_RESULT  equ 56
+CFX_OPARG   equ 64
+
+; op_before_with locals (manual frame, push rbx; push r12; sub rsp, 32)
+BW_MGR     equ 32
+BW_EXIT    equ 40
+BW_ENTER   equ 48
+
+; op_with_except_start locals (DEF_FUNC op_with_except_start, WES_FRAME)
+WES_FUNC   equ 8
+WES_SELF   equ 16
+WES_VAL    equ 24
+WES_RESULT equ 32
+WES_FRAME  equ 48
+
 ;; ============================================================================
 ;; op_call - Call a callable object
 ;;
@@ -58,16 +98,10 @@ extern exc_TypeError_type
 ;;
 ;; Followed by 3 CACHE entries (6 bytes) that must be skipped.
 ;; ============================================================================
-DEF_FUNC op_call, 48
-    ; Locals:
-    ;   [rbp-8]  = nargs (possibly incremented for method calls)
-    ;   [rbp-16] = callable ptr (saved before overwriting stack slot)
-    ;   [rbp-24] = return value from tp_call
-    ;   [rbp-32] = is_method (0 or 1)
-    ;   [rbp-40] = original nargs (before increment)
+DEF_FUNC op_call, CL_FRAME
 
-    mov [rbp-8], rcx                ; save nargs
-    mov qword [rbp-32], 0          ; is_method = 0
+    mov [rbp - CL_NARGS], rcx                ; save nargs
+    mov qword [rbp - CL_IS_METHOD], 0          ; is_method = 0
 
     ; CPython 3.12 stack layout (bottom to top):
     ;   ... | func_or_null | callable_or_self | arg0 | ... | argN-1
@@ -80,26 +114,28 @@ DEF_FUNC op_call, 48
     ; Read func_or_null from deeper slot
     lea rax, [rcx + 2]
     neg rax
-    mov rdi, [r13 + rax*8]
+    shl rax, 4                     ; * 16 bytes/slot
+    mov rdi, [r13 + rax]
 
     test rdi, rdi
     jz .func_call
 
     ; === Method call: callable is in the deeper slot ===
-    mov [rbp-16], rdi               ; callable = func_or_null
-    mov qword [rbp-32], 1          ; is_method = 1
+    mov [rbp - CL_CALLABLE], rdi               ; callable = func_or_null
+    mov qword [rbp - CL_IS_METHOD], 1          ; is_method = 1
     jmp .setup_call
 
 .func_call:
     ; === Function call: callable is in the shallower slot ===
     lea rax, [rcx + 1]
     neg rax
-    mov rdi, [r13 + rax*8]
-    mov [rbp-16], rdi               ; callable = callable_or_self
+    shl rax, 4                     ; * 16 bytes/slot
+    mov rdi, [r13 + rax]
+    mov [rbp - CL_CALLABLE], rdi               ; callable = callable_or_self
 
 .setup_call:
     ; Get tp_call from the callable's type
-    mov rdi, [rbp-16]              ; callable
+    mov rdi, [rbp - CL_CALLABLE]              ; callable
     test rdi, rdi
     jz .not_callable               ; NULL check
     js .not_callable               ; SmallInt check (bit 63 set)
@@ -138,7 +174,7 @@ DEF_FUNC op_call, 48
     ; We already have self in the callable's slot... actually this is tricky.
     ; Let's use a simpler approach: save dunder_func in [rbp-16], store original
     ; callable as first arg by shifting the args pointer back by 1
-    mov [rbp-16], rcx         ; replace callable with __call__ func
+    mov [rbp - CL_CALLABLE], rcx         ; replace callable with __call__ func
     ; args_ptr should now include the original callable as self
     ; The original callable is already on the value stack at the right position
     ; We just need to point args_ptr one slot earlier and increment nargs
@@ -148,62 +184,114 @@ DEF_FUNC op_call, 48
     ; The original_callable is at [r13 - (nargs+1)*8], which is exactly where
     ; args_ptr - 8 would be. So we can just decrement args_ptr and inc nargs.
     ; But wait, we need to read nargs first...
-    mov rcx, [rbp-8]
+    mov rcx, [rbp - CL_NARGS]
     mov rdx, rcx
     inc rdx                    ; nargs + 1 (include self/callable)
-    inc rcx
+    ; Build contiguous 8-byte args buffer (value stack has 16-byte stride)
+    mov [rbp - CL_TPCALL], rax          ; save tp_call
+    mov [rbp - CL_TOTAL], rdx          ; save total nargs
+    mov [rbp - CL_SAVED_RSP], rsp          ; save rsp
+    lea r8, [rdx*8 + 15]
+    and r8, ~15
+    sub rsp, r8
+    ; Copy payloads from value stack to contiguous buffer
+    mov rcx, rdx
     neg rcx
-    lea rsi, [r13 + rcx*8]   ; args_ptr includes original callable as first arg
-    mov rdi, [rbp-16]         ; __call__ func
+    shl rcx, 4                ; -total_nargs * 16
+    lea r8, [r13 + rcx]       ; base in value stack
+    xor ecx, ecx
+.dunder_copy_args:
+    cmp rcx, rdx
+    jge .dunder_args_copied
+    mov r9, rcx
+    shl r9, 4
+    mov r9, [r8 + r9]         ; payload from 16-byte slot
+    mov [rsp + rcx*8], r9
+    inc rcx
+    jmp .dunder_copy_args
+.dunder_args_copied:
+    mov rdi, [rbp - CL_CALLABLE]         ; __call__ func
+    mov rsi, rsp              ; contiguous args
+    mov rdx, [rbp - CL_TOTAL]         ; total nargs
+    mov rax, [rbp - CL_TPCALL]         ; tp_call
     call rax
-    mov [rbp-24], rax
+    mov rsp, [rbp - CL_SAVED_RSP]
+    mov [rbp - CL_RETVAL], rax
     jmp .cleanup
 
 .have_tp_call:
     ; Set up args: tp_call(callable, args_ptr, nargs)
-    mov rcx, [rbp-8]               ; original nargs
+    mov [rbp - CL_TPCALL], rax               ; save tp_call function ptr
+    mov rcx, [rbp - CL_NARGS]               ; original nargs
     mov rdx, rcx                    ; rdx = nargs for tp_call
-    neg rcx
-    lea rsi, [r13 + rcx*8]        ; rsi = &arg0
 
-    cmp qword [rbp-32], 0
-    je .call_now
+    cmp qword [rbp - CL_IS_METHOD], 0
+    je .no_method_adj
 
     ; Method call: include self (shallower slot) as first arg
-    sub rsi, 8
     inc rdx
 
-.call_now:
-    mov rdi, [rbp-16]              ; callable
+.no_method_adj:
+    ; Build contiguous 8-byte args buffer (value stack has 16-byte stride)
+    mov [rbp - CL_TOTAL], rdx               ; save total nargs
+    mov [rbp - CL_SAVED_RSP], rsp               ; save rsp
+    lea r8, [rdx*8 + 15]
+    and r8, ~15
+    sub rsp, r8
+
+    ; Copy payloads from value stack to contiguous buffer
+    mov rcx, rdx                    ; total nargs
+    neg rcx
+    shl rcx, 4                     ; -total_nargs * 16
+    lea r8, [r13 + rcx]            ; base in value stack (16-byte stride)
+    xor ecx, ecx
+    mov r9, [rbp - CL_TOTAL]               ; loop limit
+.copy_args:
+    cmp rcx, r9
+    jge .args_copied
+    mov r10, rcx
+    shl r10, 4                     ; source offset = i * 16
+    mov r10, [r8 + r10]            ; payload
+    mov [rsp + rcx*8], r10         ; store in contiguous buffer
+    inc rcx
+    jmp .copy_args
+.args_copied:
+
+    ; Call tp_call(callable, args, nargs)
+    mov rdi, [rbp - CL_CALLABLE]              ; callable
+    mov rsi, rsp                    ; contiguous args ptr
+    mov rdx, [rbp - CL_TOTAL]              ; total nargs
+    mov rax, [rbp - CL_TPCALL]              ; tp_call
     call rax
-    mov [rbp-24], rax               ; save return value
+    mov rsp, [rbp - CL_SAVED_RSP]              ; restore rsp
+    mov [rbp - CL_RETVAL], rax               ; save return value
 
 .cleanup:
     ; === Unified cleanup ===
     ; Pop nargs args and DECREF each
-    mov rcx, [rbp-8]
+    mov rcx, [rbp - CL_NARGS]
     test rcx, rcx
     jz .args_done
 .decref_args:
-    sub r13, 8
+    sub r13, 16
     mov rdi, [r13]
     call obj_decref
-    dec qword [rbp-8]
-    cmp qword [rbp-8], 0
+    dec qword [rbp - CL_NARGS]
+    cmp qword [rbp - CL_NARGS], 0
     jnz .decref_args
 .args_done:
 
     ; Pop shallower slot (self for method, callable for function) and DECREF
-    sub r13, 8
+    sub r13, 16
     mov rdi, [r13]
     call obj_decref
 
     ; Pop deeper slot (callable for method, NULL for function) and DECREF
-    sub r13, 8
+    sub r13, 16
     mov rdi, [r13]
     call obj_decref
     ; Push return value onto value stack
-    mov rax, [rbp-24]
+    mov rax, [rbp - CL_RETVAL]
     VPUSH rax
 
     ; Skip 3 CACHE entries (6 bytes)
@@ -232,17 +320,18 @@ END_FUNC op_call
 ;;   closure tuple (if flag 0x08)
 ;;   code_obj (always on top)
 ;; ============================================================================
-DEF_FUNC op_make_function, 48
-    ; [rbp-8]=flags, [rbp-16]=code, [rbp-24]=closure, [rbp-32]=defaults, [rbp-40]=kwdefaults
+DEF_FUNC op_make_function, MF_FRAME
 
-    mov [rbp-8], ecx               ; save flags
-    mov qword [rbp-24], 0          ; closure = NULL default
-    mov qword [rbp-32], 0          ; defaults = NULL default
-    mov qword [rbp-40], 0          ; kwdefaults = NULL default
+    mov [rbp - MF_FLAGS], ecx               ; save flags
+    mov qword [rbp - MF_CLOSURE], 0          ; closure = NULL default
+    mov qword [rbp - MF_DEFAULTS], 0          ; defaults = NULL default
+    mov qword [rbp - MF_KWDEFS], 0          ; kwdefaults = NULL default
 
     ; Pop code object from value stack (always TOS)
     VPOP rdi
-    mov [rbp-16], rdi
+    mov rax, [r13 + 8]            ; code tag
+    mov [rbp - MF_CODE], rdi
+    mov [rbp - MF_CTAG], rax              ; save code tag
 
     ; Pop in CPython 3.12 order (reverse of push): 0x08, 0x04, 0x02, 0x01
 
@@ -250,53 +339,56 @@ DEF_FUNC op_make_function, 48
     test ecx, MAKE_FUNC_CLOSURE
     jz .mf_no_closure
     VPOP rax
-    mov [rbp-24], rax              ; save closure tuple
+    mov [rbp - MF_CLOSURE], rax              ; save closure tuple
 .mf_no_closure:
 
     ; annotations (0x04) - pop and discard
     test ecx, MAKE_FUNC_ANNOTATIONS
     jz .mf_no_annotations
-    VPOP rdi
-    DECREF_REG rdi
-    mov ecx, [rbp-8]              ; reload flags (DECREF clobbers ecx)
+    sub r13, 16
+    mov rdi, [r13]
+    mov rsi, [r13 + 8]
+    DECREF_VAL rdi, rsi
+    mov ecx, [rbp - MF_FLAGS]              ; reload flags (DECREF clobbers ecx)
 .mf_no_annotations:
 
     ; kwdefaults (0x02) - pop and save (transfer ownership to func)
     test ecx, MAKE_FUNC_KWDEFAULTS
     jz .mf_no_kwdefaults
     VPOP rdi
-    mov [rbp-40], rdi
+    mov [rbp - MF_KWDEFS], rdi
 .mf_no_kwdefaults:
 
     ; defaults (0x01) - pop and save (transfer ownership to func)
     test ecx, MAKE_FUNC_DEFAULTS
     jz .mf_no_defaults
     VPOP rdi
-    mov [rbp-32], rdi
+    mov [rbp - MF_DEFAULTS], rdi
 .mf_no_defaults:
 
     ; Create function: func_new(code, globals)
-    mov rdi, [rbp-16]
+    mov rdi, [rbp - MF_CODE]
     mov rsi, [r12 + PyFrame.globals]
     call func_new
     ; rax = new function object
 
     ; Set closure if present
-    mov rcx, [rbp-24]
+    mov rcx, [rbp - MF_CLOSURE]
     mov [rax + PyFuncObject.func_closure], rcx
 
     ; Set defaults if present (transfer ownership, no INCREF needed)
-    mov rcx, [rbp-32]
+    mov rcx, [rbp - MF_DEFAULTS]
     mov [rax + PyFuncObject.func_defaults], rcx
 
     ; Set kwdefaults if present (transfer ownership, no INCREF needed)
-    mov rcx, [rbp-40]
+    mov rcx, [rbp - MF_KWDEFS]
     mov [rax + PyFuncObject.func_kwdefaults], rcx
 
-    ; Save func obj, DECREF the code object
+    ; Save func obj, DECREF the code object (tag-aware)
     push rax
-    mov rdi, [rbp-16]
-    DECREF_REG rdi
+    mov rdi, [rbp - MF_CODE]
+    mov rsi, [rbp - MF_CTAG]
+    DECREF_VAL rdi, rsi
     pop rax
 
     ; Push function onto value stack
@@ -322,31 +414,31 @@ extern dict_type
 DEF_FUNC op_call_function_ex
     push rbx                        ; save (clobbered by eval convention save)
     push r12
-    sub rsp, 48                     ; [rbp-32]=func, [rbp-40]=args, [rbp-48]=kwargs, [rbp-56]=result, [rbp-64]=oparg
+    sub rsp, 48
 
-    mov [rbp-64], ecx               ; save oparg
+    mov [rbp - CFX_OPARG], ecx               ; save oparg
 
     ; Pop kwargs if present
-    mov qword [rbp-48], 0
+    mov qword [rbp - CFX_KWARGS], 0
     test ecx, 1
     jz .cfex_no_kwargs
     VPOP rax
-    mov [rbp-48], rax               ; kwargs dict
+    mov [rbp - CFX_KWARGS], rax               ; kwargs dict
 .cfex_no_kwargs:
 
     ; Pop args tuple
     VPOP rax
-    mov [rbp-40], rax
+    mov [rbp - CFX_ARGS], rax
 
     ; Pop func
     VPOP rax
-    mov [rbp-32], rax
+    mov [rbp - CFX_FUNC], rax
 
-    ; Pop NULL (unused)
-    sub r13, 8
+    ; Pop NULL (unused, 16 bytes/slot)
+    sub r13, 16
 
     ; Get tp_call from func's type
-    mov rdi, [rbp-32]
+    mov rdi, [rbp - CFX_FUNC]
     test rdi, rdi
     jz .cfex_not_callable
     js .cfex_not_callable
@@ -358,7 +450,7 @@ DEF_FUNC op_call_function_ex
     ; Call tp_call(func, args_ptr, nargs)
     ; Determine args_ptr based on type (tuple vs list)
     ; Tuple: inline items at obj+32, List: pointer to items at [obj+32]
-    mov rsi, [rbp-40]                  ; args sequence
+    mov rsi, [rbp - CFX_ARGS]                  ; args sequence
     mov rcx, [rsi + PyObject.ob_type]
     lea rdx, [rel tuple_type]
     cmp rcx, rdx
@@ -369,29 +461,29 @@ DEF_FUNC op_call_function_ex
 .cfex_tuple_args:
     lea rsi, [rsi + PyTupleObject.ob_item]  ; inline items
 .cfex_args_ready:
-    mov rdx, [rbp-40]
+    mov rdx, [rbp - CFX_ARGS]
     mov rdx, [rdx + PyVarObject.ob_size]   ; nargs (ob_size at +16 for both)
-    mov rdi, [rbp-32]                  ; callable
+    mov rdi, [rbp - CFX_FUNC]                  ; callable
     call rax
-    mov [rbp-56], rax                  ; save result
+    mov [rbp - CFX_RESULT], rax                  ; save result
 
     ; DECREF args tuple
-    mov rdi, [rbp-40]
+    mov rdi, [rbp - CFX_ARGS]
     call obj_decref
 
     ; DECREF kwargs if present
-    mov rdi, [rbp-48]
+    mov rdi, [rbp - CFX_KWARGS]
     test rdi, rdi
     jz .cfex_no_kwargs_decref
     call obj_decref
 .cfex_no_kwargs_decref:
 
     ; DECREF func
-    mov rdi, [rbp-32]
+    mov rdi, [rbp - CFX_FUNC]
     call obj_decref
 
     ; Push result
-    mov rax, [rbp-56]
+    mov rax, [rbp - CFX_RESULT]
     VPUSH rax
 
     add rsp, 48
@@ -425,11 +517,11 @@ extern exc_AttributeError_type
 DEF_FUNC op_before_with
     push rbx
     push r12
-    sub rsp, 32                     ; [rbp-32]=mgr, [rbp-40]=exit_method, [rbp-48]=enter_result
+    sub rsp, 32
 
     ; Pop mgr
     VPOP rax
-    mov [rbp-32], rax
+    mov [rbp - BW_MGR], rax
     mov rbx, rax                    ; rbx = mgr
 
     ; Look up __exit__ on mgr's type
@@ -451,7 +543,7 @@ DEF_FUNC op_before_with
     jz .bw_no_exit_decref_name
 
     ; Got __exit__ function - INCREF it
-    mov [rbp-40], rax
+    mov [rbp - BW_EXIT], rax
     mov rdi, rax
     call obj_incref
 
@@ -461,10 +553,10 @@ DEF_FUNC op_before_with
 
     ; Push __exit__ onto value stack (with self bound below)
     ; For method-style: push self first, then __exit__
-    mov rax, [rbp-32]              ; mgr (self)
+    mov rax, [rbp - BW_MGR]              ; mgr (self)
     INCREF rax
     VPUSH rax                      ; push self for __exit__
-    mov rax, [rbp-40]
+    mov rax, [rbp - BW_EXIT]
     VPUSH rax                      ; push __exit__ func
 
     ; Now look up __enter__ on mgr's type
@@ -496,20 +588,20 @@ DEF_FUNC op_before_with
     jz .bw_no_enter
 
     ; Set up call: push mgr as arg on stack temporarily
-    push qword [rbp-32]            ; &mgr on machine stack
+    push qword [rbp - BW_MGR]            ; &mgr on machine stack
     mov rdi, rax                   ; callable = __enter__
     mov rsi, rsp                   ; args ptr = &mgr
     mov rdx, 1                     ; nargs = 1
     call rcx
     add rsp, 8                     ; pop mgr arg
-    mov [rbp-48], rax              ; save __enter__ result
+    mov [rbp - BW_ENTER], rax              ; save __enter__ result
 
     ; DECREF mgr
-    mov rdi, [rbp-32]
+    mov rdi, [rbp - BW_MGR]
     call obj_decref
 
     ; Push __enter__ result
-    mov rax, [rbp-48]
+    mov rax, [rbp - BW_ENTER]
     VPUSH rax
 
     add rsp, 32
@@ -554,26 +646,24 @@ section .text
 ;; ============================================================================
 extern none_singleton
 
-DEF_FUNC op_with_except_start, 48
+DEF_FUNC op_with_except_start, WES_FRAME
 
-    ; Stack layout (TOS is rightmost):
-    ; PEEK(1) = val (exception)
-    ; PEEK(2) = exc_or_none (lasti in some docs)
-    ; PEEK(3) = lasti
-    ; PEEK(4) = exit_func
-    ; PEEK(5) = exit_self
-    ; Actually the order is: exit_self | exit_func | lasti | exc_or_none | val
-    ; val = [r13-8], exc_or_none = [r13-16], lasti = [r13-24], exit_func = [r13-32], exit_self = [r13-40]
+    ; Stack layout (TOS is rightmost, 16 bytes/slot):
+    ; PEEK(1) = val (exception)          = [r13-16]
+    ; PEEK(2) = exc_or_none             = [r13-32]
+    ; PEEK(3) = lasti                    = [r13-48]
+    ; PEEK(4) = exit_func               = [r13-64]
+    ; PEEK(5) = exit_self               = [r13-80]
 
-    mov rax, [r13-32]               ; exit_func
-    mov [rbp-8], rax
-    mov rax, [r13-40]               ; exit_self
-    mov [rbp-16], rax
-    mov rax, [r13-8]                ; val (exception value)
-    mov [rbp-24], rax
+    mov rax, [r13-64]               ; exit_func
+    mov [rbp - WES_FUNC], rax
+    mov rax, [r13-80]               ; exit_self
+    mov [rbp - WES_SELF], rax
+    mov rax, [r13-16]               ; val (exception value)
+    mov [rbp - WES_VAL], rax
 
     ; Get tp_call on exit_func
-    mov rdi, [rbp-8]
+    mov rdi, [rbp - WES_FUNC]
     mov rax, [rdi + PyObject.ob_type]
     mov rax, [rax + PyTypeObject.tp_call]
     test rax, rax
@@ -582,9 +672,9 @@ DEF_FUNC op_with_except_start, 48
     ; Build args array on machine stack: [self, exc_type, exc_val, exc_tb]
     ; exc_type = type(val), exc_val = val, exc_tb = None
     ; For simplicity: [self, val, val, None]
-    mov rcx, [rbp-24]               ; val
+    mov rcx, [rbp - WES_VAL]               ; val
     sub rsp, 32                      ; 4 args
-    mov rdx, [rbp-16]               ; self
+    mov rdx, [rbp - WES_SELF]               ; self
     mov [rsp], rdx
     ; Get type of exception
     test rcx, rcx
@@ -601,15 +691,15 @@ DEF_FUNC op_with_except_start, 48
     mov [rsp+24], rdx                ; exc_tb = None
 
     ; Call exit_func(self, exc_type, exc_val, exc_tb)
-    mov rdi, [rbp-8]                 ; callable = exit_func
+    mov rdi, [rbp - WES_FUNC]                 ; callable = exit_func
     mov rsi, rsp                     ; args ptr
     mov rdx, 4                       ; nargs
     call rax
     add rsp, 32
-    mov [rbp-32], rax                ; save result
+    mov [rbp - WES_RESULT], rax                ; save result
 
     ; Push result onto value stack
-    mov rax, [rbp-32]
+    mov rax, [rbp - WES_RESULT]
     VPUSH rax
 
     leave

@@ -8,6 +8,7 @@
 extern ap_malloc
 extern ap_free
 extern obj_decref
+extern obj_dealloc
 
 ; frame_new(PyCodeObject *code, PyObject *globals, PyObject *builtins, PyObject *locals) -> PyFrame*
 ; Allocates and initializes a new execution frame.
@@ -24,11 +25,11 @@ DEF_FUNC frame_new
     mov r13, rdx            ; r13 = builtins
     mov r14, rcx            ; r14 = locals
 
-    ; Calculate frame size: FRAME_HEADER_SIZE + (nlocalsplus + stacksize) * 8
+    ; Calculate frame size: FRAME_HEADER_SIZE + (nlocalsplus + stacksize) * 16
     mov eax, [rbx + PyCodeObject.co_nlocalsplus]
     add eax, [rbx + PyCodeObject.co_stacksize]
     mov r15d, eax           ; r15d = nlocalsplus + stacksize (total slots)
-    shl rax, 3              ; * 8 bytes per slot
+    shl rax, 4              ; * 16 bytes per slot (128-bit fat values)
     add rax, FRAME_HEADER_SIZE
     mov rdi, rax
     call ap_malloc
@@ -49,13 +50,14 @@ DEF_FUNC frame_new
     mov [rax + PyFrame.nlocalsplus], ecx
     mov qword [rax + PyFrame.func_obj], 0
 
-    ; stack_base = &localsplus[nlocalsplus]
+    ; stack_base = &localsplus[nlocalsplus] (16 bytes/slot)
     mov edx, ecx            ; edx = nlocalsplus
     lea rdi, [rax + PyFrame.localsplus]
-    lea rsi, [rdi + rdx*8]  ; rsi = &localsplus[nlocalsplus]
+    shl rdx, 4              ; nlocalsplus * 16
+    lea rsi, [rdi + rdx]    ; rsi = &localsplus[nlocalsplus]
     mov [rax + PyFrame.stack_base], rsi
 
-    ; Zero all localsplus entries (set to NULL)
+    ; Zero all localsplus entries (set to NULL, 16 bytes/slot = 2 qwords each)
     ; ecx still holds nlocalsplus
     test ecx, ecx
     jz .done
@@ -64,6 +66,7 @@ DEF_FUNC frame_new
     lea rdi, [rdi + PyFrame.localsplus]
     xor eax, eax
     mov ecx, ecx            ; zero-extend ecx (already done but be explicit)
+    shl ecx, 1              ; 2 qwords per 16-byte slot
     rep stosq               ; store ecx qwords of 0 at [rdi]
     pop rax                 ; restore frame pointer
 
@@ -94,13 +97,13 @@ DEF_FUNC frame_free
     cmp r13d, r12d
     jge .free_frame
 
-    ; Load localsplus[r13]
-    mov rdi, [rbx + PyFrame.localsplus + r13*8]
-    test rdi, rdi
-    jz .next
-
-    ; DECREF non-NULL entry
-    call obj_decref
+    ; Load localsplus[r13] (16 bytes/slot — payload + tag)
+    mov rax, r13
+    shl rax, 4              ; r13 * 16
+    mov rdi, [rbx + PyFrame.localsplus + rax]
+    mov rsi, [rbx + PyFrame.localsplus + rax + 8]  ; tag
+    ; XDECREF_VAL: tag-aware, handles TAG_NULL, TAG_SMALLINT etc.
+    XDECREF_VAL rdi, rsi
 
 .next:
     inc r13d

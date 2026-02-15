@@ -168,7 +168,9 @@ DEF_FUNC func_call
     inc ecx
 .no_varargs_offset:
     movsxd rcx, ecx
-    mov [r12 + PyFrame.localsplus + rcx*8], rax
+    shl rcx, 4                 ; localsplus 16 bytes/slot
+    mov [r12 + PyFrame.localsplus + rcx], rax
+    mov qword [r12 + PyFrame.localsplus + rcx + 8], TAG_PTR  ; dict is always heap ptr
 
 .no_kwargs_dict:
     ; === Phase 2: Copy positional args ===
@@ -182,8 +184,22 @@ DEF_FUNC func_call
     jz .positional_done
 
 .bind_positional:
-    mov rdx, [r14 + rcx*8]
-    mov [r12 + PyFrame.localsplus + rcx*8], rdx
+    mov rdx, [r14 + rcx*8]         ; args at 8-byte stride
+    mov r8, rcx
+    shl r8, 4                      ; localsplus at 16-byte stride
+    mov [r12 + PyFrame.localsplus + r8], rdx
+    ; Classify tag for arg value
+    test rdx, rdx
+    js .fc_pt_si
+    jz .fc_pt_null
+    mov qword [r12 + PyFrame.localsplus + r8 + 8], TAG_PTR
+    jmp .fc_pt_done
+.fc_pt_si:
+    mov qword [r12 + PyFrame.localsplus + r8 + 8], TAG_SMALLINT
+    jmp .fc_pt_done
+.fc_pt_null:
+    mov qword [r12 + PyFrame.localsplus + r8 + 8], TAG_NULL
+.fc_pt_done:
     INCREF rdx
     inc ecx
     cmp ecx, eax
@@ -230,7 +246,9 @@ DEF_FUNC func_call
     jmp .fill_varargs
 
 .store_varargs:
-    mov [r12 + PyFrame.localsplus + rdx*8], rax
+    shl rdx, 4                 ; localsplus 16 bytes/slot
+    mov [r12 + PyFrame.localsplus + rdx], rax
+    mov qword [r12 + PyFrame.localsplus + rdx + 8], TAG_PTR  ; tuple is heap ptr
     jmp .varargs_done
 
 .empty_varargs:
@@ -238,7 +256,9 @@ DEF_FUNC func_call
     xor edi, edi
     call tuple_new
     pop rdx
-    mov [r12 + PyFrame.localsplus + rdx*8], rax
+    shl rdx, 4                 ; localsplus 16 bytes/slot
+    mov [r12 + PyFrame.localsplus + rdx], rax
+    mov qword [r12 + PyFrame.localsplus + rdx + 8], TAG_PTR  ; tuple is heap ptr
 
 .varargs_done:
     ; === Phase 4: Match keyword args ===
@@ -281,7 +301,9 @@ DEF_FUNC func_call
     cmp edi, edx
     jge .pos_defaults_done
 
-    cmp qword [r12 + PyFrame.localsplus + rdi*8], 0
+    mov r10, rdi
+    shl r10, 4                 ; localsplus 16 bytes/slot
+    cmp qword [r12 + PyFrame.localsplus + r10], 0
     jne .defaults_next
 
     ; Must have a default (i >= m)
@@ -294,7 +316,20 @@ DEF_FUNC func_call
     sub r8, rsi
     mov r9, [rax + PyTupleObject.ob_item + r8*8]
     movsxd r8, edi
-    mov [r12 + PyFrame.localsplus + r8*8], r9
+    shl r8, 4                  ; localsplus 16 bytes/slot
+    mov [r12 + PyFrame.localsplus + r8], r9
+    ; Classify tag for default value
+    test r9, r9
+    js .fc_dt_si
+    jz .fc_dt_null
+    mov qword [r12 + PyFrame.localsplus + r8 + 8], TAG_PTR
+    jmp .fc_dt_done
+.fc_dt_si:
+    mov qword [r12 + PyFrame.localsplus + r8 + 8], TAG_SMALLINT
+    jmp .fc_dt_done
+.fc_dt_null:
+    mov qword [r12 + PyFrame.localsplus + r8 + 8], TAG_NULL
+.fc_dt_done:
     INCREF r9
 
 .defaults_next:
@@ -323,7 +358,8 @@ DEF_FUNC func_call
     jge .kw_defaults_done
 
     movsxd r8, esi
-    cmp qword [r12 + PyFrame.localsplus + r8*8], 0
+    shl r8, 4                  ; localsplus 16 bytes/slot
+    cmp qword [r12 + PyFrame.localsplus + r8], 0
     jne .kw_defaults_next
 
     ; Slot is NULL - look up param name in kwdefaults dict
@@ -352,7 +388,20 @@ DEF_FUNC func_call
 
     ; Assign and INCREF
     movsxd r9, esi
-    mov [r12 + PyFrame.localsplus + r9*8], r8
+    shl r9, 4                  ; localsplus 16 bytes/slot
+    mov [r12 + PyFrame.localsplus + r9], r8
+    ; Classify tag for kw default value
+    test r8, r8
+    js .fc_kwdt_si
+    jz .fc_kwdt_null
+    mov qword [r12 + PyFrame.localsplus + r9 + 8], TAG_PTR
+    jmp .fc_kwdt_done
+.fc_kwdt_si:
+    mov qword [r12 + PyFrame.localsplus + r9 + 8], TAG_SMALLINT
+    jmp .fc_kwdt_done
+.fc_kwdt_null:
+    mov qword [r12 + PyFrame.localsplus + r9 + 8], TAG_NULL
+.fc_kwdt_done:
     INCREF r8
 
 .kw_defaults_next:
@@ -482,15 +531,28 @@ DEF_FUNC func_bind_kwargs
 .kw_found:
     ; ecx = j (param index in localsplus)
     movsxd rdx, ecx
+    shl rdx, 4                ; localsplus 16 bytes/slot
 
     ; Check if slot already filled (would be "multiple values" error)
-    cmp qword [r12 + PyFrame.localsplus + rdx*8], 0
+    cmp qword [r12 + PyFrame.localsplus + rdx], 0
     jne .kw_next            ; skip silently (TODO: error)
 
     ; Assign: localsplus[j] = args[value_index], INCREF
     mov rax, [rsp+24]
-    mov rdi, [r13 + rax*8]
-    mov [r12 + PyFrame.localsplus + rdx*8], rdi
+    mov rdi, [r13 + rax*8]    ; args at 8-byte stride
+    mov [r12 + PyFrame.localsplus + rdx], rdi
+    ; Classify tag for kw arg value
+    test rdi, rdi
+    js .kwarg_tag_si
+    jz .kwarg_tag_null
+    mov qword [r12 + PyFrame.localsplus + rdx + 8], TAG_PTR
+    jmp .kwarg_tag_done
+.kwarg_tag_si:
+    mov qword [r12 + PyFrame.localsplus + rdx + 8], TAG_SMALLINT
+    jmp .kwarg_tag_done
+.kwarg_tag_null:
+    mov qword [r12 + PyFrame.localsplus + rdx + 8], TAG_NULL
+.kwarg_tag_done:
     INCREF rdi
     jmp .kw_next
 

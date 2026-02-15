@@ -85,11 +85,12 @@ DEF_FUNC gen_iternext
     mov qword [rbx + PyGenObject.gi_running], 1
 
     ; Push None as the "sent" value onto the frame's value stack
-    ; The value stack top is at frame->stack_ptr
+    ; The value stack top is at frame->stack_ptr (16 bytes/slot)
     mov rax, [r12 + PyFrame.stack_ptr]
     lea rcx, [rel none_singleton]
     mov [rax], rcx
-    add rax, 8
+    mov qword [rax + 8], TAG_PTR    ; None singleton is a heap pointer
+    add rax, 16
     mov [r12 + PyFrame.stack_ptr], rax
 
     ; INCREF None (it's now on the value stack)
@@ -225,10 +226,22 @@ DEF_FUNC gen_send
     ; Mark as running
     mov qword [rbx + PyGenObject.gi_running], 1
 
-    ; Push sent value onto the frame's value stack
+    ; Push sent value onto the frame's value stack (16 bytes/slot)
     mov rax, [r12 + PyFrame.stack_ptr]
     mov [rax], r13
-    add rax, 8
+    ; Auto-classify tag for sent value
+    test r13, r13
+    js .gs_tag_smallint
+    jz .gs_tag_null
+    mov qword [rax + 8], TAG_PTR
+    jmp .gs_tag_done
+.gs_tag_smallint:
+    mov qword [rax + 8], TAG_SMALLINT
+    jmp .gs_tag_done
+.gs_tag_null:
+    mov qword [rax + 8], TAG_NULL
+.gs_tag_done:
+    add rax, 16
     mov [r12 + PyFrame.stack_ptr], rax
 
     ; INCREF sent value

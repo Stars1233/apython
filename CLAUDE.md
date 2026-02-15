@@ -76,6 +76,25 @@ op_example:
 
 Stack macros: `VPUSH reg`, `VPOP reg`, `VPEEK reg`, `VPEEK_AT reg, offset`
 
+## Named Frame-Layout Constants
+
+**Never use raw numeric offsets** like `[rbp-8]`, `[rbp-16]`, `[rsp+32]` in handler code. Instead, define named `equ` constants at the top of the file and reference them as `[rbp - SA_OBJ]`, `[rsp + BO_LEFT]`, etc.
+
+```nasm
+; At top of file, after externs:
+SA_OBJ    equ 8
+SA_VAL    equ 16
+SA_NAME   equ 24
+SA_FRAME  equ 24
+
+; In handler:
+DEF_FUNC op_store_attr, SA_FRAME
+    mov [rbp - SA_OBJ], rdi
+    mov rsi, [rbp - SA_NAME]
+```
+
+Convention: 2-3 letter handler prefix + field name (e.g., `SA_OBJ`, `CL_NARGS`, `LA_ATTR`). Use `XX_FRAME equ N` for the `DEF_FUNC` frame size argument. For push-based layouts, use offsets relative to `rsp`.
+
 ## Python 3.12 CACHE Entries
 
 Opcodes have trailing CACHE words that must be skipped. Key counts (each = 2 bytes):

@@ -75,26 +75,38 @@
     section .text
 %endmacro
 
-; Value stack push (r13 = stack top pointer)
+; Value stack push (r13 = stack top pointer, 16 bytes/slot)
+; Auto-classifies payload: SmallInt (bit 63) → TAG_SMALLINT, NULL → TAG_NULL, else → TAG_PTR
 %macro VPUSH 1
     mov [r13], %1
-    add r13, 8
+    test %1, %1
+    js %%smallint
+    jz %%null
+    mov qword [r13 + 8], TAG_PTR
+    jmp %%done
+%%smallint:
+    mov qword [r13 + 8], TAG_SMALLINT
+    jmp %%done
+%%null:
+    mov qword [r13 + 8], TAG_NULL
+%%done:
+    add r13, 16
 %endmacro
 
-; Value stack pop
+; Value stack pop (16 bytes/slot)
 %macro VPOP 1
-    sub r13, 8
+    sub r13, 16
     mov %1, [r13]
 %endmacro
 
-; Value stack peek (top of stack without popping)
+; Value stack peek (top of stack without popping, 16 bytes/slot)
 %macro VPEEK 1
-    mov %1, [r13 - 8]
+    mov %1, [r13 - 16]
 %endmacro
 
-; Value stack peek at offset (0 = top, 1 = second, etc.)
+; Value stack peek at offset (0 = top, 1 = second, etc.; 16 bytes/slot)
 %macro VPEEK_AT 2
-    mov %1, [r13 - 8 - %2*8]
+    mov %1, [r13 - 16 - %2*16]
 %endmacro
 
 ; SmallInt tagged pointer support
@@ -184,6 +196,154 @@ SMALLINT_TAG equ 0x8000000000000000
     %%str: db %2, 0
     section .text
     lea %1, [rel %%str]
+%endmacro
+
+; ==========================================================================
+; 128-BIT FAT VALUE SUPPORT
+; ==========================================================================
+;
+; Fat values: 64-bit payload + 64-bit tag. Used on value stack and localsplus.
+; Heap containers remain 64-bit (use val_widen/val_narrow at boundaries).
+;
+; Tag word encoding (two modes, distinguished by bit 63):
+;
+;   bit 63 = 0:  Normal tag mode
+;     bits 0-7:   type tag (TAG_SMALLINT..TAG_PTR)
+;     bit  8:     refcounted flag (1 = payload is heap pointer needing INCREF/DECREF)
+;     bits 9-62:  reserved (0)
+;     bit  63:    0
+;
+;   bit 63 = 1:  SmallStr mode (inline string <= 15 bytes)
+;     bits 0-55:  string bytes 8-14 (7 bytes, zero-padded)
+;     bits 56-62: string length (0-15)
+;     bit  63:    1 (SmallStr marker)
+;     payload:    string bytes 0-7 (8 bytes, zero-padded)
+
+; Tag constants (normal mode, bit 63 = 0)
+TAG_NULL     equ 0           ; null/empty slot
+TAG_SMALLINT equ 1           ; payload = int64_t (full 64-bit range)
+TAG_FLOAT    equ 2           ; payload = double bits (IEEE 754)
+TAG_NONE     equ 3           ; payload = 0 (unused)
+TAG_BOOL     equ 4           ; payload = 0 (False) or 1 (True)
+TAG_PTR      equ 0x105       ; 5 | TAG_RC_BIT — heap PyObject*, refcounted
+TAG_RC_BIT   equ (1 << 8)    ; bit 8: refcounted flag
+
+; 128-bit value stack push (r13 = stack top pointer, 16 bytes/slot)
+%macro VPUSH_VAL 2              ; %1 = payload reg, %2 = tag reg
+    mov [r13], %1
+    mov [r13 + 8], %2
+    add r13, 16
+%endmacro
+
+; 128-bit value stack pop
+%macro VPOP_VAL 2               ; %1 = payload dest reg, %2 = tag dest reg
+    sub r13, 16
+    mov %1, [r13]
+    mov %2, [r13 + 8]
+%endmacro
+
+; Push SmallInt (payload = raw int64, no encode needed)
+%macro VPUSH_INT 1              ; %1 = payload reg containing int64
+    mov [r13], %1
+    mov qword [r13 + 8], TAG_SMALLINT
+    add r13, 16
+%endmacro
+
+; Push float (payload = IEEE 754 double bits)
+%macro VPUSH_FLOAT 1            ; %1 = payload reg containing double bits
+    mov [r13], %1
+    mov qword [r13 + 8], TAG_FLOAT
+    add r13, 16
+%endmacro
+
+; Push None (payload = 0, tag = TAG_NONE)
+%macro VPUSH_NONE 0
+    mov qword [r13], 0
+    mov qword [r13 + 8], TAG_NONE
+    add r13, 16
+%endmacro
+
+; Push bool (payload = 0 or 1)
+%macro VPUSH_BOOL 1             ; %1 = payload reg (0=False, 1=True)
+    mov [r13], %1
+    mov qword [r13 + 8], TAG_BOOL
+    add r13, 16
+%endmacro
+
+; Push heap pointer (refcounted)
+%macro VPUSH_PTR 1              ; %1 = payload reg containing PyObject*
+    mov [r13], %1
+    mov qword [r13 + 8], TAG_PTR
+    add r13, 16
+%endmacro
+
+; Push null/empty slot (16 bytes of zero, tag = TAG_NULL = 0)
+%macro VPUSH_NULL128 0
+    mov qword [r13], 0
+    mov qword [r13 + 8], TAG_NULL
+    add r13, 16
+%endmacro
+
+; Push SmallStr (caller must pre-build payload + tag with SmallStr encoding)
+%macro VPUSH_STR 2              ; %1 = payload reg, %2 = tag reg (pre-built)
+    mov [r13], %1
+    mov [r13 + 8], %2
+    add r13, 16
+%endmacro
+
+; Peek tag of top-of-stack (without popping)
+%macro VPEEK_TAG 1              ; %1 = dest reg
+    mov %1, [r13 - 8]
+%endmacro
+
+; Peek payload of top-of-stack (without popping)
+%macro VPEEK_PAYLOAD 1          ; %1 = dest reg
+    mov %1, [r13 - 16]
+%endmacro
+
+; Peek 128-bit value at offset from TOS (0 = TOS, 1 = second, etc.)
+%macro VPEEK_AT_VAL 3           ; %1 = payload dest, %2 = tag dest, %3 = offset (0=TOS)
+    mov %1, [r13 - 16 - %3*16]
+    mov %2, [r13 - 8 - %3*16]
+%endmacro
+
+; 128-bit INCREF — only if refcounted (tag bit 8 set, bit 63 clear)
+; SmallStr (bit 63=1) and inline tags (bit 8=0) skip.
+%macro INCREF_VAL 2             ; %1 = payload, %2 = tag
+    test %2, %2
+    js %%skip                   ; bit 63 set = SmallStr, skip
+    test %2, TAG_RC_BIT
+    jz %%skip                   ; bit 8 clear = not refcounted, skip
+    inc qword [%1 + PyObject.ob_refcnt]
+    %%skip:
+%endmacro
+
+; 128-bit DECREF — only if refcounted (tag bit 8 set, bit 63 clear)
+; Calls obj_dealloc if refcount reaches zero. Clobbers rdi + all caller-saved.
+%macro DECREF_VAL 2             ; %1 = payload, %2 = tag
+    test %2, %2
+    js %%skip                   ; bit 63 set = SmallStr, skip
+    test %2, TAG_RC_BIT
+    jz %%skip                   ; bit 8 clear = not refcounted, skip
+    dec qword [%1 + PyObject.ob_refcnt]
+    jnz %%skip
+    mov rdi, %1
+    call obj_dealloc
+    %%skip:
+%endmacro
+
+; 128-bit XDECREF — NULL-safe DECREF_VAL (checks tag==TAG_NULL first)
+%macro XDECREF_VAL 2            ; %1 = payload, %2 = tag
+    test %2, %2
+    jz %%skip                   ; tag == TAG_NULL (0), skip
+    js %%skip                   ; bit 63 set = SmallStr, skip
+    test %2, TAG_RC_BIT
+    jz %%skip                   ; bit 8 clear = not refcounted, skip
+    dec qword [%1 + PyObject.ob_refcnt]
+    jnz %%skip
+    mov rdi, %1
+    call obj_dealloc
+    %%skip:
 %endmacro
 
 ; Mark stack as non-executable and reset to .text section

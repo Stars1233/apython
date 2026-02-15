@@ -40,6 +40,44 @@ extern obj_decref
 extern tuple_new
 extern list_type
 
+;; Stack layout constants for binary_op / compare_op generic paths.
+;; After 4 pushes: right, right_tag, left, left_tag
+;; Offsets relative to rsp immediately after the 4 pushes.
+BO_RIGHT equ 0
+BO_RTAG  equ 8
+BO_LEFT  equ 16
+BO_LTAG  equ 24
+BO_SIZE  equ 32
+
+;; Stack layout constants for op_format_value (DEF_FUNC, 48 bytes).
+FV_ARG     equ 8
+FV_HASSPEC equ 16
+FV_SPEC    equ 24
+FV_VALUE   equ 32
+FV_STAG    equ 40    ; fmt_spec tag
+FV_VTAG    equ 48    ; value tag
+FV_FRAME   equ 48
+
+;; Stack layout constants for op_build_string (DEF_FUNC, 16 bytes).
+BS_COUNT   equ 8
+BS_ACCUM   equ 16
+BS_FRAME   equ 16
+
+;; Stack layout constants for op_send (DEF_FUNC, 40 bytes).
+SND_ARG    equ 8
+SND_SENT   equ 16
+SND_RECV   equ 24
+SND_RESULT equ 32
+SND_STAG   equ 40    ; sent_value tag
+SND_FRAME  equ 40
+
+;; Stack layout constants for op_match_keys (DEF_FUNC, 32 bytes).
+MK_KEYS    equ 8
+MK_SUBJ    equ 16
+MK_VALS    equ 24
+MK_NKEYS   equ 32
+MK_FRAME   equ 32
+
 ;; ============================================================================
 ;; op_return_value - Return TOS from current frame
 ;;
@@ -76,7 +114,9 @@ DEF_FUNC_BARE op_binary_op
     ; ecx = NB_* op code
     ; Save the op index before pops (VPOP doesn't clobber ecx)
     VPOP rsi                   ; rsi = right operand (b)
+    mov r8, [r13 + 8]         ; r8 = right tag
     VPOP rdi                   ; rdi = left operand (a)
+    mov r9, [r13 + 8]         ; r9 = left tag
 
     ; Fast path: SmallInt add (NB_ADD=0, NB_INPLACE_ADD=13)
     cmp ecx, 0                 ; NB_ADD
@@ -91,8 +131,11 @@ DEF_FUNC_BARE op_binary_op
     je .binop_try_smallint_sub
 
 .binop_generic:
-    ; Save operands for DECREF after call (push on machine stack)
+    ; Save operands + tags for DECREF after call (push on machine stack)
+    ; Stack layout: [rsp+BO_RIGHT], [rsp+BO_RTAG], [rsp+BO_LEFT], [rsp+BO_LTAG]
+    push r9                    ; save left tag
     push rdi                   ; save left
+    push r8                    ; save right tag
     push rsi                   ; save right
 
     ; Look up offset in binary_op_offsets table
@@ -177,14 +220,16 @@ DEF_FUNC_BARE op_binary_op
 
 .binop_have_result:
     ; rax = result
-    ; Save result, DECREF operands
-    push rax                   ; save result on machine stack
-    mov rdi, [rsp + 8]        ; rdi = right operand
-    DECREF_REG rdi
-    mov rdi, [rsp + 16]       ; rdi = left operand
-    DECREF_REG rdi
+    ; Save result, DECREF operands (tag-aware)
+    push rax                   ; save result (+8 shifts all BO_ offsets)
+    mov rdi, [rsp + 8 + BO_RIGHT]
+    mov rsi, [rsp + 8 + BO_RTAG]
+    DECREF_VAL rdi, rsi
+    mov rdi, [rsp + 8 + BO_LEFT]
+    mov rsi, [rsp + 8 + BO_LTAG]
+    DECREF_VAL rdi, rsi
     pop rax                    ; restore result
-    add rsp, 16                ; discard saved operands
+    add rsp, BO_SIZE           ; discard saved operands + tags
 
     ; Push result
     VPUSH rax
@@ -195,13 +240,12 @@ DEF_FUNC_BARE op_binary_op
 
 .binop_try_dunder:
     ; Try dunder method on heaptype objects
-    ; r9d = binary op code, stack: [rsp]=right, [rsp+8]=left
     extern binop_dunder_table
     extern binop_rdunder_table
     extern dunder_call_2
 
     ; Check if left is heaptype
-    mov rdi, [rsp+8]          ; left
+    mov rdi, [rsp + BO_LEFT]
     test rdi, rdi
     js .binop_try_right_dunder ; SmallInt has no dunders
     mov rax, [rdi + PyObject.ob_type]
@@ -221,9 +265,9 @@ DEF_FUNC_BARE op_binary_op
     jz .binop_try_right_dunder
 
     ; dunder_call_2(left, right, name)
-    push r9                    ; save op code
-    mov rdi, [rsp+16]         ; left (shifted by push)
-    mov rsi, [rsp+8]          ; right
+    push r9                    ; save op code (+8 shifts BO_ offsets)
+    mov rdi, [rsp + 8 + BO_LEFT]
+    mov rsi, [rsp + 8 + BO_RIGHT]
     call dunder_call_2
     pop r9
     test rax, rax
@@ -231,7 +275,7 @@ DEF_FUNC_BARE op_binary_op
 
 .binop_try_right_dunder:
     ; Try reflected dunder on right operand
-    mov rdi, [rsp]            ; right
+    mov rdi, [rsp + BO_RIGHT]
     test rdi, rdi
     js .binop_no_method
     mov rax, [rdi + PyObject.ob_type]
@@ -250,8 +294,8 @@ DEF_FUNC_BARE op_binary_op
     jz .binop_no_method
 
     ; dunder_call_2(right, left, rname) — right is self for reflected
-    mov rdi, [rsp]            ; right
-    mov rsi, [rsp+8]          ; left
+    mov rdi, [rsp + BO_RIGHT]
+    mov rsi, [rsp + BO_LEFT]
     call dunder_call_2
     test rax, rax
     jnz .binop_have_result
@@ -325,7 +369,9 @@ DEF_FUNC_BARE op_compare_op
     shr ecx, 4                 ; ecx = PY_LT/LE/EQ/NE/GT/GE (0-5)
 
     VPOP rsi                   ; rsi = right operand
+    mov r8, [r13 + 8]         ; r8 = right tag
     VPOP rdi                   ; rdi = left operand
+    mov r9, [r13 + 8]         ; r9 = left tag
 
     ; Fast path: both SmallInt — inline compare, no type dispatch
     mov rax, rdi
@@ -403,8 +449,11 @@ DEF_FUNC_BARE op_compare_op
     DISPATCH
 
 .cmp_slow_path:
-    ; Save operands and comparison op
+    ; Save operands + tags and comparison op
+    ; Stack layout: [rsp+BO_RIGHT], [rsp+BO_RTAG], [rsp+BO_LEFT], [rsp+BO_LTAG]
+    push r9                    ; save left tag
     push rdi                   ; save left
+    push r8                    ; save right tag
     push rsi                   ; save right
 
     ; Float coercion: if either operand is float, use float_compare
@@ -471,14 +520,16 @@ DEF_FUNC_BARE op_compare_op
     ; rax = result (a bool object)
 
 .cmp_do_call_result:
-    ; Save result, DECREF operands
-    push rax                   ; save result on machine stack
-    mov rdi, [rsp + 8]        ; rdi = right operand
-    DECREF_REG rdi
-    mov rdi, [rsp + 16]       ; rdi = left operand
-    DECREF_REG rdi
+    ; Save result, DECREF operands (tag-aware)
+    push rax                   ; save result (+8 shifts all BO_ offsets)
+    mov rdi, [rsp + 8 + BO_RIGHT]
+    mov rsi, [rsp + 8 + BO_RTAG]
+    DECREF_VAL rdi, rsi
+    mov rdi, [rsp + 8 + BO_LEFT]
+    mov rsi, [rsp + 8 + BO_LTAG]
+    DECREF_VAL rdi, rsi
     pop rax                    ; restore result
-    add rsp, 16                ; discard saved operands
+    add rsp, BO_SIZE           ; discard saved operands + tags
 
     ; Push result
     VPUSH rax
@@ -489,9 +540,8 @@ DEF_FUNC_BARE op_compare_op
 
 .cmp_identity:
     ; Fallback: identity comparison (pointer equality)
-    ; Stack: [rsp]=right, [rsp+8]=left; ecx=comparison op
-    pop rsi                    ; rsi = right
-    pop rdi                    ; rdi = left
+    mov rsi, [rsp + BO_RIGHT]
+    mov rdi, [rsp + BO_LEFT]
     cmp rdi, rsi
     ; For EQ: equal pointers → True. For NE: unequal → True.
     ; All other comparisons fall back to False for unsupported types.
@@ -508,23 +558,28 @@ DEF_FUNC_BARE op_compare_op
     cmp ecx, PY_GE
     je .cmp_id_true
 .cmp_id_false:
-    ; DECREF both operands, push False
-    push rsi
-    mov rdi, rdi               ; left already in rdi
-    DECREF_REG rdi
-    pop rdi                    ; right
-    DECREF_REG rdi
+    ; DECREF both operands (tag-aware), push False
+    mov rdi, [rsp + BO_LEFT]
+    mov rsi, [rsp + BO_LTAG]
+    DECREF_VAL rdi, rsi
+    mov rdi, [rsp + BO_RIGHT]
+    mov rsi, [rsp + BO_RTAG]
+    DECREF_VAL rdi, rsi
+    add rsp, BO_SIZE
     lea rax, [rel bool_false]
     inc qword [rax + PyObject.ob_refcnt]
     VPUSH rax
     add rbx, 2
     DISPATCH
 .cmp_id_true:
-    ; DECREF both operands, push True
-    push rsi
-    DECREF_REG rdi
-    pop rdi
-    DECREF_REG rdi
+    ; DECREF both operands (tag-aware), push True
+    mov rdi, [rsp + BO_LEFT]
+    mov rsi, [rsp + BO_LTAG]
+    DECREF_VAL rdi, rsi
+    mov rdi, [rsp + BO_RIGHT]
+    mov rsi, [rsp + BO_RTAG]
+    DECREF_VAL rdi, rsi
+    add rsp, BO_SIZE
     lea rax, [rel bool_true]
     inc qword [rax + PyObject.ob_refcnt]
     VPUSH rax
@@ -539,8 +594,10 @@ END_FUNC op_compare_op
 ;; ============================================================================
 DEF_FUNC_BARE op_unary_negative
     VPOP rdi                   ; rdi = operand
+    mov r8, [r13 + 8]         ; r8 = operand tag
 
-    ; Save operand for DECREF after call
+    ; Save operand + tag for DECREF after call
+    push r8
     push rdi
 
     ; Get nb_negative: type -> tp_as_number -> nb_negative (SmallInt-aware)
@@ -558,12 +615,13 @@ DEF_FUNC_BARE op_unary_negative
     call rax
     ; rax = result
 
-    ; DECREF old operand
+    ; DECREF old operand (tag-aware)
     push rax                   ; save result on machine stack
     mov rdi, [rsp + 8]        ; rdi = old operand
-    DECREF_REG rdi
+    mov rsi, [rsp + 16]       ; rsi = operand tag
+    DECREF_VAL rdi, rsi
     pop rax                    ; restore result
-    add rsp, 8                 ; discard saved operand
+    add rsp, 16                ; discard saved operand + tag
 
     ; Push result
     VPUSH rax
@@ -577,6 +635,8 @@ END_FUNC op_unary_negative
 ;; ============================================================================
 DEF_FUNC_BARE op_unary_invert
     VPOP rdi                   ; rdi = operand
+    mov r8, [r13 + 8]         ; r8 = operand tag
+    push r8
     push rdi
 
     test rdi, rdi
@@ -594,9 +654,10 @@ DEF_FUNC_BARE op_unary_invert
     call rax
     push rax
     mov rdi, [rsp + 8]
-    DECREF_REG rdi
+    mov rsi, [rsp + 16]       ; tag
+    DECREF_VAL rdi, rsi
     pop rax
-    add rsp, 8
+    add rsp, 16
     VPUSH rax
     DISPATCH
 END_FUNC op_unary_invert
@@ -608,19 +669,22 @@ END_FUNC op_unary_invert
 ;; ============================================================================
 DEF_FUNC_BARE op_unary_not
     VPOP rdi                   ; rdi = operand
+    mov r8, [r13 + 8]         ; r8 = operand tag
 
-    ; Save operand for DECREF
+    ; Save operand + tag for DECREF
+    push r8
     push rdi
 
     ; Call obj_is_true(operand) -> 0 or 1
     call obj_is_true
     push rax                   ; save truthiness result
 
-    ; DECREF operand
+    ; DECREF operand (tag-aware)
     mov rdi, [rsp + 8]        ; reload operand
-    DECREF_REG rdi
+    mov rsi, [rsp + 16]       ; tag
+    DECREF_VAL rdi, rsi
     pop rax                    ; restore truthiness
-    add rsp, 8                 ; discard saved operand
+    add rsp, 16                ; discard saved operand + tag
 
     ; NOT inverts: if truthy (1), push False; if falsy (0), push True
     test eax, eax
@@ -646,19 +710,22 @@ DEF_FUNC_BARE op_pop_jump_if_false
     push rcx                   ; save target offset on machine stack
 
     VPOP rdi                   ; rdi = value to test
+    mov r8, [r13 + 8]         ; r8 = value tag
 
-    ; Save value for DECREF
+    ; Save value + tag for DECREF
+    push r8
     push rdi
 
     ; Call obj_is_true(value) -> 0 (false) or 1 (true)
     call obj_is_true
     push rax                   ; save truthiness on machine stack
 
-    ; DECREF the popped value
+    ; DECREF the popped value (tag-aware)
     mov rdi, [rsp + 8]        ; reload value
-    DECREF_REG rdi
+    mov rsi, [rsp + 16]       ; tag
+    DECREF_VAL rdi, rsi
     pop rax                    ; restore truthiness
-    add rsp, 8                 ; discard saved value
+    add rsp, 16                ; discard saved value + tag
     pop rcx                    ; restore target offset
 
     ; If false (result == 0), jump to target
@@ -680,19 +747,22 @@ DEF_FUNC_BARE op_pop_jump_if_true
     push rcx                   ; save target offset on machine stack
 
     VPOP rdi
+    mov r8, [r13 + 8]         ; r8 = value tag
 
-    ; Save value for DECREF
+    ; Save value + tag for DECREF
+    push r8
     push rdi
 
     ; Call obj_is_true(value)
     call obj_is_true
     push rax                   ; save truthiness on machine stack
 
-    ; DECREF the popped value
+    ; DECREF the popped value (tag-aware)
     mov rdi, [rsp + 8]        ; reload value
-    DECREF_REG rdi
+    mov rsi, [rsp + 16]       ; tag
+    DECREF_VAL rdi, rsi
     pop rax                    ; restore truthiness
-    add rsp, 8                 ; discard saved value
+    add rsp, 16                ; discard saved value + tag
     pop rcx                    ; restore target offset
 
     ; If true (result != 0), jump to target
@@ -711,6 +781,7 @@ END_FUNC op_pop_jump_if_true
 ;; ============================================================================
 DEF_FUNC_BARE op_pop_jump_if_none
     VPOP rax                   ; rax = value
+    mov r8, [r13 + 8]         ; r8 = value tag
 
     ; Compare with none_singleton
     lea rdx, [rel none_singleton]
@@ -719,14 +790,16 @@ DEF_FUNC_BARE op_pop_jump_if_none
 
     ; IS None: save jump offset, DECREF, jump
     push rcx                   ; save jump offset
-    DECREF rax
+    mov rsi, r8
+    DECREF_VAL rax, rsi
     pop rcx                    ; restore jump offset
     lea rbx, [rbx + rcx*2]
     DISPATCH
 
 .not_none:
     ; NOT None: just DECREF and continue
-    DECREF rax
+    mov rsi, r8
+    DECREF_VAL rax, rsi
     DISPATCH
 END_FUNC op_pop_jump_if_none
 
@@ -735,6 +808,7 @@ END_FUNC op_pop_jump_if_none
 ;; ============================================================================
 DEF_FUNC_BARE op_pop_jump_if_not_none
     VPOP rax                   ; rax = value
+    mov r8, [r13 + 8]         ; r8 = value tag
 
     ; Compare with none_singleton
     lea rdx, [rel none_singleton]
@@ -743,14 +817,16 @@ DEF_FUNC_BARE op_pop_jump_if_not_none
 
     ; NOT None: save jump offset, DECREF, jump
     push rcx                   ; save jump offset
-    DECREF rax
+    mov rsi, r8
+    DECREF_VAL rax, rsi
     pop rcx                    ; restore jump offset
     lea rbx, [rbx + rcx*2]
     DISPATCH
 
 .is_none:
     ; IS None: just DECREF and continue
-    DECREF rax
+    mov rsi, r8
+    DECREF_VAL rax, rsi
     DISPATCH
 END_FUNC op_pop_jump_if_not_none
 
@@ -787,27 +863,32 @@ END_FUNC op_jump_backward
 ;; arg & 0x04: format spec present on stack below value
 ;; Pops value (and optional fmt_spec), pushes formatted string.
 ;; ============================================================================
-DEF_FUNC op_format_value, 32
+DEF_FUNC op_format_value, FV_FRAME
 
-    mov [rbp-8], rcx           ; save arg
+    mov [rbp - FV_ARG], rcx    ; save arg
     mov rax, rcx
     and eax, 4
-    mov [rbp-16], rax          ; has_fmt_spec
-    mov qword [rbp-24], 0      ; fmt_spec ptr (0 if absent)
+    mov [rbp - FV_HASSPEC], rax ; has_fmt_spec
+    mov qword [rbp - FV_SPEC], 0 ; fmt_spec ptr (0 if absent)
+    mov qword [rbp - FV_STAG], 0 ; fmt_spec tag (0 if absent)
 
     ; If format spec present, pop it first
     ; Stack order: TOS = fmt_spec, TOS1 = value
-    test qword [rbp-16], 4
+    test qword [rbp - FV_HASSPEC], 4
     jz .fv_no_spec
     VPOP rax                   ; fmt_spec string
-    mov [rbp-24], rax          ; save fmt_spec
+    mov rcx, [r13 + 8]        ; fmt_spec tag
+    mov [rbp - FV_SPEC], rax   ; save fmt_spec
+    mov [rbp - FV_STAG], rcx   ; save fmt_spec tag
 .fv_no_spec:
 
     VPOP rdi                   ; value
-    mov [rbp-32], rdi          ; save value
+    mov rax, [r13 + 8]        ; value tag
+    mov [rbp - FV_VALUE], rdi  ; save value
+    mov [rbp - FV_VTAG], rax   ; save value tag
 
     ; If format spec present AND value is float, use float_format_spec
-    test qword [rbp-16], 4
+    test qword [rbp - FV_HASSPEC], 4
     jz .fv_no_format_spec
 
     ; Check if value is a float
@@ -822,7 +903,7 @@ DEF_FUNC op_format_value, 32
     ; Float with format spec: call float_format_spec(float, spec_data, spec_len)
     extern float_format_spec
     ; rdi = float obj (still set)
-    mov rax, [rbp-24]         ; fmt_spec string
+    mov rax, [rbp - FV_SPEC]  ; fmt_spec string
     lea rsi, [rax + PyStrObject.data]  ; spec data
     mov rdx, [rax + PyStrObject.ob_size]  ; spec length
     call float_format_spec
@@ -830,8 +911,8 @@ DEF_FUNC op_format_value, 32
 
 .fv_no_format_spec:
     ; Apply conversion based on arg & 3
-    mov rdi, [rbp-32]         ; reload value
-    mov eax, [rbp-8]
+    mov rdi, [rbp - FV_VALUE]  ; reload value
+    mov eax, [rbp - FV_ARG]
     and eax, 3
     cmp eax, 2
     je .fv_repr
@@ -847,15 +928,17 @@ DEF_FUNC op_format_value, 32
 .fv_have_result:
     push rax                   ; save result
 
-    ; DECREF original value
-    mov rdi, [rbp-32]
-    DECREF_REG rdi
+    ; DECREF original value (tag-aware)
+    mov rdi, [rbp - FV_VALUE]
+    mov rsi, [rbp - FV_VTAG]
+    DECREF_VAL rdi, rsi
 
-    ; DECREF fmt_spec if present
-    cmp qword [rbp-24], 0
+    ; DECREF fmt_spec if present (tag-aware)
+    cmp qword [rbp - FV_SPEC], 0
     je .fv_push
-    mov rdi, [rbp-24]
-    DECREF_REG rdi
+    mov rdi, [rbp - FV_SPEC]
+    mov rsi, [rbp - FV_STAG]
+    DECREF_VAL rdi, rsi
 
 .fv_push:
     pop rax                    ; result
@@ -870,9 +953,9 @@ END_FUNC op_format_value
 ;; ecx = number of string fragments
 ;; Pops ecx strings, concatenates in order, pushes result.
 ;; ============================================================================
-DEF_FUNC op_build_string, 16
+DEF_FUNC op_build_string, BS_FRAME
 
-    mov [rbp-8], rcx           ; count
+    mov [rbp - BS_COUNT], rcx  ; count
 
     test ecx, ecx
     jz .bs_zero
@@ -882,30 +965,32 @@ DEF_FUNC op_build_string, 16
     ; General case: iterate and concatenate
     ; Pop all items, keeping base pointer
     mov rdi, rcx
-    shl rdi, 3                 ; count * 8
+    shl rdi, 4                 ; count * 16 bytes/slot
     sub r13, rdi               ; pop all at once (r13 = base of items)
 
     ; Start with first string
-    mov rax, [r13]             ; first fragment
+    mov rax, [r13]             ; first fragment (payload at slot base)
     INCREF rax                 ; we'll DECREF all originals later
-    mov [rbp-16], rax          ; accumulator
+    mov [rbp - BS_ACCUM], rax  ; accumulator
 
     ; Concatenate remaining
     mov rcx, 1                 ; start from index 1
 .bs_loop:
-    cmp rcx, [rbp-8]
+    cmp rcx, [rbp - BS_COUNT]
     jge .bs_decref
     push rcx
     extern str_concat
-    mov rdi, [rbp-16]         ; accumulator
-    mov rsi, [r13 + rcx*8]   ; next fragment
+    mov rdi, [rbp - BS_ACCUM] ; accumulator
+    mov rax, rcx
+    shl rax, 4                ; index * 16
+    mov rsi, [r13 + rax]     ; next fragment (payload)
     call str_concat
     ; DECREF old accumulator
     push rax                   ; save new result
-    mov rdi, [rbp-16]
+    mov rdi, [rbp - BS_ACCUM]
     DECREF_REG rdi
     pop rax
-    mov [rbp-16], rax          ; new accumulator
+    mov [rbp - BS_ACCUM], rax  ; new accumulator
     pop rcx
     inc rcx
     jmp .bs_loop
@@ -914,17 +999,20 @@ DEF_FUNC op_build_string, 16
     ; DECREF all original fragments
     xor ecx, ecx
 .bs_decref_loop:
-    cmp rcx, [rbp-8]
+    cmp rcx, [rbp - BS_COUNT]
     jge .bs_push
-    mov rdi, [r13 + rcx*8]
+    mov rax, rcx
+    shl rax, 4                ; index * 16
+    mov rdi, [r13 + rax]
+    mov rsi, [r13 + rax + 8]  ; tag
     push rcx
-    DECREF_REG rdi
+    DECREF_VAL rdi, rsi
     pop rcx
     inc rcx
     jmp .bs_decref_loop
 
 .bs_push:
-    mov rax, [rbp-16]
+    mov rax, [rbp - BS_ACCUM]
     VPUSH rax
     leave
     DISPATCH
@@ -991,9 +1079,10 @@ section .text
 ;; ============================================================================
 DEF_FUNC_BARE op_make_cell
     lea rdx, [r12 + PyFrame.localsplus]
+    shl rcx, 4                    ; slot * 16 bytes
 
     ; Get current value
-    mov rdi, [rdx + rcx*8]        ; rdi = current value (or NULL)
+    mov rdi, [rdx + rcx]          ; rdi = current value (or NULL)
 
     ; Save slot address
     push rdx
@@ -1007,7 +1096,7 @@ DEF_FUNC_BARE op_make_cell
     pop rdx
 
     ; XDECREF old value (cell_new already INCREFed it)
-    mov rdi, [rdx + rcx*8]
+    mov rdi, [rdx + rcx]
     test rdi, rdi
     jz .mc_store
     push rax
@@ -1020,7 +1109,7 @@ DEF_FUNC_BARE op_make_cell
 
 .mc_store:
     ; Store cell in localsplus slot
-    mov [rdx + rcx*8], rax
+    mov [rdx + rcx], rax
     DISPATCH
 END_FUNC op_make_cell
 
@@ -1074,10 +1163,11 @@ DEF_FUNC_BARE op_copy_free_vars
     mov r9, [rax + PyTupleObject.ob_item + r8*8]
     INCREF r9
 
-    ; Compute destination index: edx + r8d
+    ; Compute destination index: edx + r8d, then * 16
     mov r10d, edx
     add r10d, r8d
-    mov [r12 + PyFrame.localsplus + r10*8], r9
+    shl r10, 4                     ; slot * 16 bytes
+    mov [r12 + PyFrame.localsplus + r10], r9
 
     inc r8d
     jmp .cfv_loop
@@ -1135,8 +1225,9 @@ DEF_FUNC_BARE op_end_send
     ; TOS = value, TOS1 = receiver
     VPOP rax                   ; rax = value (TOS)
     VPOP rdi                   ; rdi = receiver (TOS1)
-    push rax                   ; save value (DECREF_REG clobbers caller-saved)
-    DECREF_REG rdi             ; DECREF receiver
+    mov rsi, [r13 + 8]        ; rsi = receiver tag
+    push rax                   ; save value (DECREF_VAL clobbers caller-saved)
+    DECREF_VAL rdi, rsi        ; DECREF receiver (tag-aware)
     pop rax                    ; restore value
     VPUSH rax                  ; push value back
     DISPATCH
@@ -1154,15 +1245,17 @@ END_FUNC op_end_send
 extern gen_send
 extern gen_type
 
-DEF_FUNC op_send, 32
+DEF_FUNC op_send, SND_FRAME
     ; ecx = arg (jump offset in instructions for StopIteration)
     ; Stack: ... | receiver | sent_value |
-    mov [rbp-8], rcx           ; save arg
+    mov [rbp - SND_ARG], rcx   ; save arg
 
     VPOP rsi                   ; rsi = sent_value (TOS)
-    mov [rbp-16], rsi          ; save sent_value
+    mov rax, [r13 + 8]        ; sent_value tag
+    mov [rbp - SND_SENT], rsi  ; save sent_value
+    mov [rbp - SND_STAG], rax  ; save sent_value tag
     VPEEK rdi                  ; rdi = receiver (TOS1, stay on stack)
-    mov [rbp-24], rdi          ; save receiver
+    mov [rbp - SND_RECV], rdi  ; save receiver
 
     ; Check if receiver is a generator with iternext
     test rdi, rdi
@@ -1173,31 +1266,32 @@ DEF_FUNC op_send, 32
     jz .send_error
 
     ; Check if sent value is None — use iternext, otherwise gen_send
-    mov rsi, [rbp-16]
+    mov rsi, [rbp - SND_SENT]
     lea rcx, [rel none_singleton]
     cmp rsi, rcx
     je .send_use_iternext
 
     ; gen_send(receiver, value)
-    mov rdi, [rbp-24]
+    mov rdi, [rbp - SND_RECV]
     call gen_send
     jmp .send_check_result
 
 .send_use_iternext:
     ; tp_iternext(receiver)
-    mov rdi, [rbp-24]
+    mov rdi, [rbp - SND_RECV]
     mov rax, [rdi + PyObject.ob_type]
     mov rax, [rax + PyTypeObject.tp_iternext]
     call rax
 
 .send_check_result:
-    mov [rbp-32], rax          ; save result
+    mov [rbp - SND_RESULT], rax ; save result
 
-    ; DECREF sent value
-    mov rdi, [rbp-16]
-    DECREF_REG rdi
+    ; DECREF sent value (tag-aware)
+    mov rdi, [rbp - SND_SENT]
+    mov rsi, [rbp - SND_STAG]
+    DECREF_VAL rdi, rsi
 
-    mov rax, [rbp-32]
+    mov rax, [rbp - SND_RESULT]
     test rax, rax
     jz .send_exhausted
 
@@ -1220,7 +1314,7 @@ DEF_FUNC op_send, 32
 
     ; Skip 1 CACHE entry = 2 bytes, then jump forward by arg * 2 bytes
     add rbx, 2
-    mov rcx, [rbp-8]
+    mov rcx, [rbp - SND_ARG]
     shl rcx, 1
     add rbx, rcx
     leave
@@ -1228,8 +1322,9 @@ DEF_FUNC op_send, 32
 
 .send_error:
     ; Unsupported receiver — just push None and continue
-    mov rdi, [rbp-16]
-    DECREF_REG rdi
+    mov rdi, [rbp - SND_SENT]
+    mov rsi, [rbp - SND_STAG]
+    DECREF_VAL rdi, rsi
     lea rax, [rel none_singleton]
     INCREF rax
     VPUSH rax
@@ -1259,7 +1354,9 @@ DEF_FUNC_BARE op_get_yield_from_iter
 .gyfi_call_iter:
     ; Not a generator — call tp_iter to get an iterator
     VPOP rdi                   ; pop iterable
-    push rdi                   ; save for DECREF
+    mov r8, [r13 + 8]         ; iterable tag
+    push r8                    ; save tag (deeper)
+    push rdi                   ; save payload
 
     mov rax, [rdi + PyObject.ob_type]
     mov rax, [rax + PyTypeObject.tp_iter]
@@ -1269,19 +1366,20 @@ DEF_FUNC_BARE op_get_yield_from_iter
     call rax                   ; tp_iter(iterable) -> iterator
     push rax                   ; save iterator
 
-    ; DECREF original iterable
-    mov rdi, [rsp + 8]
-    DECREF_REG rdi
+    ; DECREF original iterable (tag-aware)
+    mov rdi, [rsp + 8]        ; iterable payload
+    mov rsi, [rsp + 16]       ; iterable tag
+    DECREF_VAL rdi, rsi
 
     pop rax                    ; restore iterator
-    add rsp, 8                 ; discard saved iterable
+    add rsp, 16                ; discard iterable payload + tag
     VPUSH rax                  ; push iterator as new TOS
 
 .gyfi_done:
     DISPATCH
 
 .gyfi_error:
-    add rsp, 8
+    add rsp, 16                ; discard iterable payload + tag
     extern exc_TypeError_type
     lea rdi, [rel exc_TypeError_type]
     CSTRING rsi, "object is not iterable"
@@ -1325,8 +1423,10 @@ DEF_FUNC_BARE op_call_intrinsic_1
 .ci1_stopiter_error:
     ; Convert StopIteration to RuntimeError
     ; Pop the exception, raise RuntimeError instead
-    VPOP rdi
-    DECREF_REG rdi
+    sub r13, 16
+    mov rdi, [r13]
+    mov rsi, [r13 + 8]
+    DECREF_VAL rdi, rsi
     lea rdi, [rel exc_RuntimeError_type]
     CSTRING rsi, "generator raised StopIteration"
     call raise_exception
@@ -1397,8 +1497,8 @@ END_FUNC op_call_intrinsic_1
 extern obj_len
 
 DEF_FUNC_BARE op_get_len
-    ; PEEK TOS (don't pop)
-    mov rdi, [r13 - 8]
+    ; PEEK TOS (don't pop, 16 bytes/slot)
+    mov rdi, [r13 - 16]
     push rdi                    ; save obj
 
     ; Get length
@@ -1564,7 +1664,7 @@ END_FUNC op_load_from_dict_or_globals
 extern dict_type
 
 DEF_FUNC_BARE op_match_mapping
-    mov rdi, [r13 - 8]            ; peek TOS
+    mov rdi, [r13 - 16]           ; peek TOS (16 bytes/slot)
     test rdi, rdi
     js .mm_false                   ; SmallInt → not a mapping
     mov rax, [rdi + PyObject.ob_type]
@@ -1601,7 +1701,7 @@ extern str_type
 extern bytes_type
 
 DEF_FUNC_BARE op_match_sequence
-    mov rdi, [r13 - 8]            ; peek TOS
+    mov rdi, [r13 - 16]           ; peek TOS (16 bytes/slot)
     test rdi, rdi
     js .ms_false                   ; SmallInt → not a sequence
     mov rax, [rdi + PyObject.ob_type]
@@ -1649,37 +1749,37 @@ END_FUNC op_match_sequence
 ;; If all keys in tuple exist in subject, push tuple of values + True
 ;; Otherwise push False
 ;; ============================================================================
-DEF_FUNC op_match_keys, 32
+DEF_FUNC op_match_keys, MK_FRAME
 
-    ; TOS = keys tuple, TOS1 = subject
+    ; TOS = keys tuple, TOS1 = subject (16 bytes/slot)
     ; Peek at both — don't pop either! Push result on top.
-    mov rax, [r13 - 8]            ; keys tuple (TOS)
-    mov [rbp-8], rax
-    mov rax, [r13 - 16]           ; subject (TOS1)
-    mov [rbp-16], rax
+    mov rax, [r13 - 16]           ; keys tuple (TOS)
+    mov [rbp - MK_KEYS], rax
+    mov rax, [r13 - 32]           ; subject (TOS1)
+    mov [rbp - MK_SUBJ], rax
 
     ; Allocate values tuple
-    mov rax, [rbp-8]
+    mov rax, [rbp - MK_KEYS]
     mov rdi, [rax + PyTupleObject.ob_size]
-    mov [rbp-32], rdi              ; save nkeys
+    mov [rbp - MK_NKEYS], rdi     ; save nkeys
     call tuple_new
-    mov [rbp-24], rax              ; values tuple
+    mov [rbp - MK_VALS], rax      ; values tuple
 
     xor edx, edx                   ; index
 
 .mk_loop:
-    cmp rdx, [rbp-32]
+    cmp rdx, [rbp - MK_NKEYS]
     jge .mk_success
 
     push rdx
 
     ; Get key
-    mov rax, [rbp-8]
+    mov rax, [rbp - MK_KEYS]
     lea rax, [rax + PyTupleObject.ob_item]
     mov rsi, [rax + rdx*8]        ; key
 
     ; Look up in subject
-    mov rdi, [rbp-16]
+    mov rdi, [rbp - MK_SUBJ]
     call dict_get
     test rax, rax
     jz .mk_fail
@@ -1688,7 +1788,7 @@ DEF_FUNC op_match_keys, 32
     pop rdx
     push rdx
     INCREF rax
-    mov rcx, [rbp-24]
+    mov rcx, [rbp - MK_VALS]
     mov [rcx + PyTupleObject.ob_item + rdx*8], rax
 
     pop rdx
@@ -1697,14 +1797,14 @@ DEF_FUNC op_match_keys, 32
 
 .mk_success:
     ; Push values tuple on top (stack: subject, keys, values_tuple)
-    mov rax, [rbp-24]
+    mov rax, [rbp - MK_VALS]
     VPUSH rax
     jmp .mk_done
 
 .mk_fail:
     pop rdx
     ; DECREF partial values tuple
-    mov rdi, [rbp-24]
+    mov rdi, [rbp - MK_VALS]
     call obj_decref
     ; Push None on top to indicate failure (stack: subject, keys, None)
     lea rax, [rel none_singleton]
@@ -1734,8 +1834,10 @@ DEF_FUNC_BARE op_call_intrinsic_2
 
     ; For type parameter intrinsics, just keep TOS1 and discard TOS
     ; (a simplification — full type parameter support would need more)
-    VPOP rdi                       ; discard TOS (arg2)
-    DECREF_REG rdi
+    sub r13, 16
+    mov rdi, [r13]
+    mov rsi, [r13 + 8]
+    DECREF_VAL rdi, rsi
     ; TOS1 stays
     DISPATCH
 
@@ -1744,8 +1846,9 @@ DEF_FUNC_BARE op_call_intrinsic_2
     ; For now, discard traceback and keep exception
     VPOP rax                       ; exc
     VPOP rdi                       ; traceback
+    mov rsi, [r13 + 8]            ; traceback tag
     push rax
-    DECREF_REG rdi
+    DECREF_VAL rdi, rsi
     pop rax
     VPUSH rax
     DISPATCH

@@ -40,6 +40,24 @@ extern dunder_get
 extern dunder_call_3
 extern dunder_lookup
 
+; --- Named frame-layout constants ---
+
+; op_load_attr frame layout (DEF_FUNC op_load_attr, LA_FRAME)
+LA_FLAG      equ 8
+LA_OBJ       equ 16
+LA_NAME      equ 24
+LA_ATTR      equ 32
+LA_FROM_TYPE equ 40
+LA_CLASS     equ 48   ; used by classmethod path
+LA_FRAME     equ 48
+
+; op_load_super_attr frame layout (DEF_FUNC op_load_super_attr, LSA_FRAME)
+LSA_SELF     equ 8
+LSA_CLASS    equ 16
+LSA_NAME     equ 24
+LSA_FLAG     equ 32
+LSA_FRAME    equ 32
+
 ;; ============================================================================
 ;; op_load_const - Load constant from co_consts[arg]
 ;; ============================================================================
@@ -55,11 +73,14 @@ END_FUNC op_load_const
 ;; op_load_fast - Load local variable from frame localsplus[arg]
 ;; ============================================================================
 DEF_FUNC_BARE op_load_fast
-    ; ecx = arg (slot index in localsplus)
-    lea rax, [r12 + PyFrame.localsplus]
-    mov rax, [rax + rcx*8]
-    INCREF rax
-    VPUSH rax
+    ; ecx = arg (slot index in localsplus, 16 bytes/slot)
+    shl ecx, 4              ; slot * 16 (zero-extends to rcx)
+    mov rdx, [r12 + PyFrame.localsplus + rcx + 8]  ; tag
+    mov rax, [r12 + PyFrame.localsplus + rcx]       ; payload
+    INCREF_VAL rax, rdx     ; tag-aware INCREF
+    mov [r13], rax
+    mov [r13 + 8], rdx
+    add r13, 16
     DISPATCH
 END_FUNC op_load_fast
 
@@ -79,7 +100,8 @@ DEF_FUNC_BARE op_load_global
     test ecx, 1
     jz .no_push_null
     mov qword [r13], 0
-    add r13, 8
+    mov qword [r13 + 8], TAG_NULL
+    add r13, 16
 .no_push_null:
     ; Name index = arg >> 1
     shr ecx, 1
@@ -178,7 +200,8 @@ DEF_FUNC_BARE op_load_global_module
     test ecx, 1
     jz .lgm_no_null
     mov qword [r13], 0
-    add r13, 8
+    mov qword [r13 + 8], TAG_NULL
+    add r13, 16
 .lgm_no_null:
     INCREF rax
     VPUSH rax
@@ -223,7 +246,8 @@ DEF_FUNC_BARE op_load_global_builtin
     test ecx, 1
     jz .lgb_no_null
     mov qword [r13], 0
-    add r13, 8
+    mov qword [r13 + 8], TAG_NULL
+    add r13, 16
 .lgb_no_null:
     INCREF rax
     VPUSH rax
@@ -316,22 +340,21 @@ END_FUNC op_load_build_class
 ;;
 ;; Followed by 9 CACHE entries (18 bytes) that must be skipped.
 ;; ============================================================================
-DEF_FUNC op_load_attr, 48
-    ; [rbp-8]=flag, [rbp-16]=obj, [rbp-24]=name, [rbp-32]=attr, [rbp-40]=from_type_dict
+DEF_FUNC op_load_attr, LA_FRAME
 
     ; Extract flag and name_index
     mov eax, ecx
     and eax, 1
-    mov [rbp-8], rax        ; flag
-    mov qword [rbp-40], 0   ; from_type_dict = 0
+    mov [rbp - LA_FLAG], rax
+    mov qword [rbp - LA_FROM_TYPE], 0
 
     shr ecx, 1              ; name_index
     mov rsi, [r15 + rcx*8]  ; name string
-    mov [rbp-24], rsi
+    mov [rbp - LA_NAME], rsi
 
     ; Pop obj
     VPOP rdi
-    mov [rbp-16], rdi
+    mov [rbp - LA_OBJ], rdi
 
     ; Look up attribute
     ; Check if obj's type has tp_getattr
@@ -341,17 +364,17 @@ DEF_FUNC op_load_attr, 48
     jz .la_try_dict
 
     ; Call tp_getattr(obj, name)
-    mov rdi, [rbp-16]
-    mov rsi, [rbp-24]
+    mov rdi, [rbp - LA_OBJ]
+    mov rsi, [rbp - LA_NAME]
     call rax
     test rax, rax
     jz .la_attr_error
-    mov [rbp-32], rax
+    mov [rbp - LA_ATTR], rax
     jmp .la_got_attr
 
 .la_try_dict:
     ; No tp_getattr - try obj's type's tp_dict directly
-    mov rdi, [rbp-16]
+    mov rdi, [rbp - LA_OBJ]
     mov rax, [rdi + PyObject.ob_type]
     mov rax, [rax + PyTypeObject.tp_dict]
     test rax, rax
@@ -359,16 +382,16 @@ DEF_FUNC op_load_attr, 48
 
     ; dict_get(type->tp_dict, name)
     mov rdi, rax
-    mov rsi, [rbp-24]
+    mov rsi, [rbp - LA_NAME]
     call dict_get
     test rax, rax
     jz .la_attr_error
 
     ; INCREF the result (dict_get returns borrowed ref)
-    mov [rbp-32], rax
+    mov [rbp - LA_ATTR], rax
     mov rdi, rax
     call obj_incref
-    mov qword [rbp-40], 1   ; from_type_dict = 1
+    mov qword [rbp - LA_FROM_TYPE], 1
     jmp .la_got_attr
 
 .la_attr_error:
@@ -378,7 +401,7 @@ DEF_FUNC op_load_attr, 48
 
 .la_got_attr:
     ; === Descriptor protocol: check for staticmethod/classmethod ===
-    mov rax, [rbp-32]          ; attr
+    mov rax, [rbp - LA_ATTR]   ; attr
     test rax, rax
     js .la_check_flag          ; SmallInt, skip descriptor check
     mov rcx, [rax + PyObject.ob_type]
@@ -409,8 +432,8 @@ DEF_FUNC op_load_attr, 48
     jz .la_check_flag          ; no __get__, treat normally
 
     ; Has __get__! Call descriptor.__get__(obj, type(obj))
-    mov rdi, [rbp-32]          ; descriptor (attr)
-    mov rsi, [rbp-16]          ; obj (instance)
+    mov rdi, [rbp - LA_ATTR]   ; descriptor (attr)
+    mov rsi, [rbp - LA_OBJ]    ; obj (instance)
     mov rdx, [rsi + PyObject.ob_type] ; type(obj)
     lea rcx, [rel dunder_get]
     call dunder_call_3
@@ -419,14 +442,14 @@ DEF_FUNC op_load_attr, 48
     push rax                   ; save result
 
     ; DECREF descriptor wrapper
-    mov rdi, [rbp-32]
+    mov rdi, [rbp - LA_ATTR]
     call obj_decref
     ; DECREF obj
-    mov rdi, [rbp-16]
+    mov rdi, [rbp - LA_OBJ]
     call obj_decref
 
     pop rax                    ; restore result
-    cmp qword [rbp-8], 0
+    cmp qword [rbp - LA_FLAG], 0
     jne .la_descr_get_flag1
     VPUSH rax
     jmp .la_done
@@ -440,14 +463,14 @@ DEF_FUNC op_load_attr, 48
 
 .la_check_flag:
     ; Check flag
-    cmp qword [rbp-8], 0
+    cmp qword [rbp - LA_FLAG], 0
     jne .la_method_load
 
     ; flag=0: simple attribute load
     ; If attr came from type dict and is callable, create bound method
-    cmp qword [rbp-40], 0
+    cmp qword [rbp - LA_FROM_TYPE], 0
     je .la_simple_push
-    mov rax, [rbp-32]
+    mov rax, [rbp - LA_ATTR]
     test rax, rax
     js .la_simple_push          ; SmallInt
     mov rcx, [rax + PyObject.ob_type]
@@ -456,25 +479,25 @@ DEF_FUNC op_load_attr, 48
     jz .la_simple_push
 
     ; Create bound method(func=attr, self=obj)
-    mov rdi, [rbp-32]          ; func
-    mov rsi, [rbp-16]          ; self
+    mov rdi, [rbp - LA_ATTR]   ; func
+    mov rsi, [rbp - LA_OBJ]    ; self
     call method_new
     VPUSH rax
 
     ; DECREF the raw func (method_new INCREFed it)
-    mov rdi, [rbp-32]
+    mov rdi, [rbp - LA_ATTR]
     call obj_decref
     ; DECREF obj (method_new INCREFed it)
-    mov rdi, [rbp-16]
+    mov rdi, [rbp - LA_OBJ]
     call obj_decref
     jmp .la_done
 
 .la_simple_push:
-    mov rax, [rbp-32]
+    mov rax, [rbp - LA_ATTR]
     VPUSH rax
 
     ; DECREF obj
-    mov rdi, [rbp-16]
+    mov rdi, [rbp - LA_OBJ]
     call obj_decref
 
     jmp .la_done
@@ -482,7 +505,7 @@ DEF_FUNC op_load_attr, 48
 .la_method_load:
     ; flag=1: method-style load
     ; Check if attr is callable (has tp_call) — works for func_type AND builtin methods
-    mov rax, [rbp-32]
+    mov rax, [rbp - LA_ATTR]
     test rax, rax
     js .la_not_method              ; SmallInt can't be a method
     mov rcx, [rax + PyObject.ob_type]
@@ -492,11 +515,11 @@ DEF_FUNC op_load_attr, 48
 
     ; === IC: try to specialize as LOAD_ATTR_METHOD (203) ===
     ; Only when attr came from type dict (no tp_getattr path)
-    cmp qword [rbp-40], 0
+    cmp qword [rbp - LA_FROM_TYPE], 0
     je .la_method_push             ; not from type dict, skip IC
 
     ; Verify type has tp_dict with valid dk_version
-    mov rdi, [rbp-16]             ; obj
+    mov rdi, [rbp - LA_OBJ]       ; obj
     test rdi, rdi
     js .la_method_push             ; SmallInt obj, skip
     mov rcx, [rdi + PyObject.ob_type]
@@ -508,7 +531,7 @@ DEF_FUNC op_load_attr, 48
     mov rdx, [rdx + PyDictObject.dk_version]
     mov word [rbx], dx             ; CACHE[0] = dk_version (low 16 bits)
     mov [rbx + 2], rcx             ; CACHE[1..4] = type_ptr (8 bytes unaligned)
-    mov rax, [rbp-32]
+    mov rax, [rbp - LA_ATTR]
     mov [rbx + 10], rax            ; CACHE[5..8] = descr (8 bytes unaligned)
     mov byte [rbx - 2], 203       ; rewrite opcode to LOAD_ATTR_METHOD
 
@@ -516,19 +539,19 @@ DEF_FUNC op_load_attr, 48
     ; It's a function -> method call pattern
     ; CPython order: push func (deeper), then self (TOS)
     ; Don't DECREF obj since it stays on stack as self
-    mov rax, [rbp-32]
+    mov rax, [rbp - LA_ATTR]
     VPUSH rax              ; push func (deeper slot = callable)
-    mov rax, [rbp-16]
+    mov rax, [rbp - LA_OBJ]
     VPUSH rax              ; push self/obj (shallower = TOS)
     jmp .la_done
 
 .la_not_method:
     ; Non-function attr with flag=1: push NULL then attr
-    mov rdi, [rbp-16]
+    mov rdi, [rbp - LA_OBJ]
     call obj_decref        ; DECREF obj
     xor eax, eax
     VPUSH rax              ; push NULL
-    mov rax, [rbp-32]
+    mov rax, [rbp - LA_ATTR]
     VPUSH rax              ; push attr
     jmp .la_done
 
@@ -539,22 +562,22 @@ DEF_FUNC op_load_attr, 48
     call obj_incref            ; INCREF unwrapped func
 
     ; DECREF wrapper
-    mov rdi, [rbp-32]
+    mov rdi, [rbp - LA_ATTR]
     call obj_decref
 
     ; Update attr to unwrapped func
     pop rax
-    mov [rbp-32], rax
+    mov [rbp - LA_ATTR], rax
 
     ; DECREF obj (not binding it as self)
-    mov rdi, [rbp-16]
+    mov rdi, [rbp - LA_OBJ]
     call obj_decref
 
-    cmp qword [rbp-8], 0
+    cmp qword [rbp - LA_FLAG], 0
     jne .la_sm_flag1
 
     ; flag=0: push just the unwrapped func
-    mov rax, [rbp-32]
+    mov rax, [rbp - LA_ATTR]
     VPUSH rax
     jmp .la_done
 
@@ -562,7 +585,7 @@ DEF_FUNC op_load_attr, 48
     ; flag=1: push NULL + func (no self binding)
     xor eax, eax
     VPUSH rax
-    mov rax, [rbp-32]
+    mov rax, [rbp - LA_ATTR]
     VPUSH rax
     jmp .la_done
 
@@ -571,22 +594,22 @@ DEF_FUNC op_load_attr, 48
     ; (property objects found via instance_getattr still need descriptor invocation)
 
     ; Call property_descr_get(property, obj)
-    mov rdi, [rbp-32]          ; property descriptor
-    mov rsi, [rbp-16]          ; obj
+    mov rdi, [rbp - LA_ATTR]   ; property descriptor
+    mov rsi, [rbp - LA_OBJ]    ; obj
     call property_descr_get
     push rax                   ; save result
 
     ; DECREF property wrapper
-    mov rdi, [rbp-32]
+    mov rdi, [rbp - LA_ATTR]
     call obj_decref
     ; DECREF obj
-    mov rdi, [rbp-16]
+    mov rdi, [rbp - LA_OBJ]
     call obj_decref
 
     pop rax
     ; Push result (property_descr_get already returns owned ref)
     ; For flag=1, we still just push the result (property access, not method)
-    cmp qword [rbp-8], 0
+    cmp qword [rbp - LA_FLAG], 0
     jne .la_prop_flag1
     VPUSH rax
     jmp .la_done
@@ -605,49 +628,48 @@ DEF_FUNC op_load_attr, 48
     call obj_incref            ; INCREF unwrapped func
 
     ; DECREF wrapper
-    mov rdi, [rbp-32]
+    mov rdi, [rbp - LA_ATTR]
     call obj_decref
 
     ; Update attr to unwrapped func
     pop rax
-    mov [rbp-32], rax
+    mov [rbp - LA_ATTR], rax
 
     ; Determine class: if obj is a type, class=obj. Else class=type(obj).
-    mov rdi, [rbp-16]          ; obj
+    mov rdi, [rbp - LA_OBJ]    ; obj
     mov rax, [rdi + PyObject.ob_type]
     lea rcx, [rel user_type_metatype]
     cmp rax, rcx
     je .la_cm_obj_is_type
 
     ; obj is an instance -> class = ob_type
-    mov [rbp-48], rax          ; save class
+    mov [rbp - LA_CLASS], rax  ; save class
     mov rdi, rax
     call obj_incref
     jmp .la_cm_have_class
 
 .la_cm_obj_is_type:
     ; obj is a type -> class = obj itself
-    mov [rbp-48], rdi          ; save class (= obj)
+    mov [rbp - LA_CLASS], rdi  ; save class (= obj)
     call obj_incref
 
 .la_cm_have_class:
     ; DECREF obj
-    mov rdi, [rbp-16]
+    mov rdi, [rbp - LA_OBJ]
     call obj_decref
 
-    ; Now [rbp-32] = unwrapped func (owned), [rbp-48] = class (owned)
-    cmp qword [rbp-8], 0
+    cmp qword [rbp - LA_FLAG], 0
     jne .la_cm_flag1
 
     ; flag=0: create bound method(func, class) and push
-    mov rdi, [rbp-32]          ; func
-    mov rsi, [rbp-48]          ; class (as self)
+    mov rdi, [rbp - LA_ATTR]   ; func
+    mov rsi, [rbp - LA_CLASS]  ; class (as self)
     call method_new            ; INCREFs both func and class
     ; DECREF our refs to func and class
     push rax                   ; save method
-    mov rdi, [rbp-32]
+    mov rdi, [rbp - LA_ATTR]
     call obj_decref
-    mov rdi, [rbp-48]
+    mov rdi, [rbp - LA_CLASS]
     call obj_decref
     pop rax
     VPUSH rax
@@ -655,9 +677,9 @@ DEF_FUNC op_load_attr, 48
 
 .la_cm_flag1:
     ; flag=1: CPython order: push func (deeper), then class (TOS as self)
-    mov rax, [rbp-32]          ; func
+    mov rax, [rbp - LA_ATTR]   ; func
     VPUSH rax
-    mov rax, [rbp-48]          ; class
+    mov rax, [rbp - LA_CLASS]  ; class
     VPUSH rax
     jmp .la_done
 
@@ -698,11 +720,11 @@ DEF_FUNC_BARE op_load_attr_method
     jne .lam_deopt
 
     ; Guards passed! CPython order: method (deeper), obj/self (TOS)
-    ; obj is currently at [r13-8]; overwrite it with method, push obj on top
+    ; obj is currently at [r13-16]; overwrite it with method, push obj on top
     mov rax, [rbx + 10]           ; cached descriptor (method ptr)
     INCREF rax
-    mov rcx, [r13 - 8]            ; save obj
-    mov [r13 - 8], rax            ; overwrite obj position with method
+    mov rcx, [r13 - 16]           ; save obj (payload of TOS)
+    mov [r13 - 16], rax           ; overwrite obj position with method
     VPUSH rcx                     ; push obj on top as self
 
     ; Skip 9 CACHE entries = 18 bytes
@@ -723,10 +745,13 @@ END_FUNC op_load_attr_method
 ;; In Python 3.12, LOAD_CLOSURE is same opcode behavior as LOAD_FAST.
 ;; ============================================================================
 DEF_FUNC_BARE op_load_closure
-    lea rax, [r12 + PyFrame.localsplus]
-    mov rax, [rax + rcx*8]
-    INCREF rax
-    VPUSH rax
+    shl ecx, 4              ; slot * 16 (zero-extends to rcx)
+    mov rdx, [r12 + PyFrame.localsplus + rcx + 8]  ; tag
+    mov rax, [r12 + PyFrame.localsplus + rcx]       ; payload
+    INCREF_VAL rax, rdx     ; tag-aware INCREF
+    mov [r13], rax
+    mov [r13 + 8], rdx
+    add r13, 16
     DISPATCH
 END_FUNC op_load_closure
 
@@ -738,7 +763,8 @@ END_FUNC op_load_closure
 ;; ============================================================================
 DEF_FUNC_BARE op_load_deref
     lea rax, [r12 + PyFrame.localsplus]
-    mov rax, [rax + rcx*8]        ; rax = cell object
+    shl rcx, 4                    ; slot * 16
+    mov rax, [rax + rcx]          ; rax = cell object (payload)
     test rax, rax
     jz .deref_error
     mov rax, [rax + PyCellObject.ob_ref]   ; rax = cell contents
@@ -761,12 +787,15 @@ END_FUNC op_load_deref
 ;; Used after DELETE_FAST and in exception handlers.
 ;; ============================================================================
 DEF_FUNC_BARE op_load_fast_check
-    lea rax, [r12 + PyFrame.localsplus]
-    mov rax, [rax + rcx*8]
+    shl ecx, 4              ; slot * 16 (zero-extends to rcx)
+    mov rax, [r12 + PyFrame.localsplus + rcx]       ; payload
     test rax, rax
     jz .lfc_error
-    INCREF rax
-    VPUSH rax
+    mov rdx, [r12 + PyFrame.localsplus + rcx + 8]  ; tag
+    INCREF_VAL rax, rdx     ; tag-aware INCREF
+    mov [r13], rax
+    mov [r13 + 8], rdx
+    add r13, 16
     DISPATCH
 
 .lfc_error:
@@ -782,11 +811,15 @@ END_FUNC op_load_fast_check
 ;; If slot is NULL, pushes NULL (no error).
 ;; ============================================================================
 DEF_FUNC_BARE op_load_fast_and_clear
-    lea rax, [r12 + PyFrame.localsplus]
-    mov rdx, [rax + rcx*8]     ; current value (may be NULL)
-    mov qword [rax + rcx*8], 0 ; clear slot
-    ; Push value (or NULL) - no INCREF needed since we're transferring ownership
-    VPUSH rdx
+    shl ecx, 4                 ; slot * 16 (zero-extends to rcx)
+    mov rax, [r12 + PyFrame.localsplus + rcx]       ; payload (may be NULL)
+    mov rdx, [r12 + PyFrame.localsplus + rcx + 8]   ; tag
+    mov qword [r12 + PyFrame.localsplus + rcx], 0   ; clear payload
+    mov qword [r12 + PyFrame.localsplus + rcx + 8], 0 ; clear tag
+    ; Push with preserved tag - no INCREF needed (transferring ownership)
+    mov [r13], rax
+    mov [r13 + 8], rdx
+    add r13, 16
     DISPATCH
 END_FUNC op_load_fast_and_clear
 
@@ -802,29 +835,29 @@ END_FUNC op_load_fast_and_clear
 ;; (walking the MRO chain), and pushes result.
 ;; If method flag: push self + func. Otherwise: push NULL + attr.
 ;; ============================================================================
-DEF_FUNC op_load_super_attr, 32
-    ; [rbp-8]=self, [rbp-16]=class, [rbp-24]=name, [rbp-32]=method_flag
+DEF_FUNC op_load_super_attr, LSA_FRAME
 
     ; Save method flag
     mov eax, ecx
     and eax, 1
-    mov [rbp-32], rax
+    mov [rbp - LSA_FLAG], rax
 
     ; Get name from co_names
     shr ecx, 2
     mov rax, [r15 + rcx*8]        ; name string
-    mov [rbp-24], rax
+    mov [rbp - LSA_NAME], rax
 
     ; Pop self, class, global_super
     VPOP rax                       ; self
-    mov [rbp-8], rax
+    mov [rbp - LSA_SELF], rax
     VPOP rax                       ; class
-    mov [rbp-16], rax
+    mov [rbp - LSA_CLASS], rax
     VPOP rdi                       ; global_super — DECREF and discard
-    DECREF_REG rdi
+    mov rsi, [r13 + 8]            ; global_super tag
+    DECREF_VAL rdi, rsi
 
     ; Walk from class->tp_base up the chain looking for name
-    mov rax, [rbp-16]              ; class
+    mov rax, [rbp - LSA_CLASS]     ; class
     mov rax, [rax + PyTypeObject.tp_base]
     test rax, rax
     jz .lsa_not_found
@@ -836,7 +869,7 @@ DEF_FUNC op_load_super_attr, 32
     jz .lsa_next_base
 
     push rax                       ; save current type
-    mov rsi, [rbp-24]              ; name
+    mov rsi, [rbp - LSA_NAME]      ; name
     call dict_get
     pop rcx                        ; restore current type
     test rax, rax
@@ -849,9 +882,9 @@ DEF_FUNC op_load_super_attr, 32
 
 .lsa_not_found:
     ; DECREF class and self
-    mov rdi, [rbp-16]
+    mov rdi, [rbp - LSA_CLASS]
     call obj_decref
-    mov rdi, [rbp-8]
+    mov rdi, [rbp - LSA_SELF]
     call obj_decref
     lea rdi, [rel exc_AttributeError_type]
     CSTRING rsi, "super: attribute not found"
@@ -863,25 +896,25 @@ DEF_FUNC op_load_super_attr, 32
     push rax                       ; save attr
 
     ; DECREF class
-    mov rdi, [rbp-16]
+    mov rdi, [rbp - LSA_CLASS]
     call obj_decref
 
     pop rax                        ; restore attr
 
     ; Check method flag
-    cmp qword [rbp-32], 0
+    cmp qword [rbp - LSA_FLAG], 0
     je .lsa_attr_mode
 
     ; Method mode: CPython order: push func (deeper), then self (TOS)
     VPUSH rax                     ; push func (deeper = callable)
-    mov rdx, [rbp-8]              ; self (already has ref from stack)
+    mov rdx, [rbp - LSA_SELF]     ; self (already has ref from stack)
     VPUSH rdx                     ; push self (TOS)
     jmp .lsa_done
 
 .lsa_attr_mode:
     ; Attr mode: DECREF self, push NULL + attr
     push rax                      ; save attr
-    mov rdi, [rbp-8]
+    mov rdi, [rbp - LSA_SELF]
     call obj_decref
     xor eax, eax
     VPUSH rax                     ; push NULL

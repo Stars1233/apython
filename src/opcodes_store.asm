@@ -36,6 +36,29 @@ extern dunder_set
 extern dunder_call_3
 extern dunder_lookup
 
+;; --- Named frame-layout constants ---
+
+; op_store_attr: rbp-frame (48 bytes)
+SA_OBJ    equ 8
+SA_VAL    equ 16
+SA_NAME   equ 24
+SA_DESC   equ 32    ; general descriptor (MRO walk)
+SA_OTAG   equ 40
+SA_VTAG   equ 48
+SA_FRAME  equ 48
+
+; op_delete_attr: rbp-frame (16 bytes)
+DA_NAME   equ 8
+DA_OBJ    equ 16
+DA_FRAME  equ 16
+
+; op_delete_subscr: rbp-frame (32 bytes)
+DS_OBJ    equ 8
+DS_KEY    equ 16
+DS_OTAG   equ 24
+DS_KTAG   equ 32
+DS_FRAME  equ 32
+
 ;; ============================================================================
 ;; op_store_fast - Store TOS into localsplus[arg]
 ;;
@@ -43,16 +66,17 @@ extern dunder_lookup
 ;; VPOP does not clobber ecx (it only does sub r13,8 / mov reg,[r13]).
 ;; ============================================================================
 DEF_FUNC_BARE op_store_fast
-    ; ecx = arg (slot index)
-    VPOP rax                    ; rax = new value
+    ; ecx = arg (slot index, 16 bytes/slot)
+    VPOP rax                    ; rax = new value payload
+    mov r8, [r13 + 8]          ; r8 = new value tag (from just-popped slot)
     lea rdx, [r12 + PyFrame.localsplus]
-    mov rdi, [rdx + rcx*8]     ; rdi = old value
-    mov [rdx + rcx*8], rax     ; store new value
-    ; XDECREF old value
-    test rdi, rdi
-    jz .done
-    DECREF_REG rdi
-.done:
+    shl rcx, 4                 ; slot * 16
+    mov rdi, [rdx + rcx]       ; rdi = old value (payload)
+    mov r9, [rdx + rcx + 8]    ; r9 = old value tag
+    mov [rdx + rcx], rax       ; store new payload
+    mov [rdx + rcx + 8], r8    ; store new tag
+    ; XDECREF_VAL old value (tag-aware)
+    XDECREF_VAL rdi, r9
     DISPATCH
 END_FUNC op_store_fast
 
@@ -112,23 +136,26 @@ END_FUNC op_store_global
 ;; DECREF obj and value after the store.
 ;; Followed by 4 CACHE entries (8 bytes) that must be skipped.
 ;; ============================================================================
-DEF_FUNC op_store_attr, 32
-    ; [rbp-8]=obj, [rbp-16]=value, [rbp-24]=name
+DEF_FUNC op_store_attr, SA_FRAME
 
     ; Get name
     mov rax, [r15 + rcx*8]
-    mov [rbp-24], rax
+    mov [rbp - SA_NAME], rax
 
     ; Pop obj (TOS)
     VPOP rdi
-    mov [rbp-8], rdi
+    mov rax, [r13 + 8]        ; obj tag
+    mov [rbp - SA_OBJ], rdi
+    mov [rbp - SA_OTAG], rax
 
     ; Pop value
     VPOP rdi
-    mov [rbp-16], rdi
+    mov rax, [r13 + 8]        ; value tag
+    mov [rbp - SA_VAL], rdi
+    mov [rbp - SA_VTAG], rax
 
     ; Check for property/descriptor in type dict (walk MRO) before regular setattr
-    mov rdi, [rbp-8]              ; obj
+    mov rdi, [rbp - SA_OBJ]       ; obj
     mov rcx, [rdi + PyObject.ob_type]  ; rcx = type (walks chain)
 
 .sa_walk_mro:
@@ -140,7 +167,7 @@ DEF_FUNC op_store_attr, 32
     jz .sa_walk_next
 
     push rcx                      ; save current type
-    mov rsi, [rbp-24]             ; name
+    mov rsi, [rbp - SA_NAME]      ; name
     call dict_get
     pop rcx
     test rax, rax
@@ -163,8 +190,8 @@ DEF_FUNC op_store_attr, 32
 
     ; Found property descriptor — call fset(obj, value)
     mov rdi, rax                  ; property
-    mov rsi, [rbp-8]              ; obj
-    mov rdx, [rbp-16]             ; value
+    mov rsi, [rbp - SA_OBJ]      ; obj
+    mov rdx, [rbp - SA_VAL]      ; value
     call property_descr_set
     jmp .sa_descr_cleanup
 
@@ -175,7 +202,7 @@ DEF_FUNC op_store_attr, 32
     jz .sa_no_property
 
     ; Save the descriptor for potential __set__ call
-    mov [rbp-32], rax             ; save descriptor (borrowed ref, still in dict)
+    mov [rbp - SA_DESC], rax      ; save descriptor (borrowed ref, still in dict)
 
     ; Check if descriptor's type has __set__
     mov rdi, rcx                  ; descriptor's type
@@ -185,9 +212,9 @@ DEF_FUNC op_store_attr, 32
     jz .sa_no_property
 
     ; Has __set__! Call descriptor.__set__(obj, value)
-    mov rdi, [rbp-32]            ; descriptor
-    mov rsi, [rbp-8]             ; obj
-    mov rdx, [rbp-16]            ; value
+    mov rdi, [rbp - SA_DESC]     ; descriptor
+    mov rsi, [rbp - SA_OBJ]     ; obj
+    mov rdx, [rbp - SA_VAL]     ; value
     lea rcx, [rel dunder_set]
     call dunder_call_3
     ; DECREF result if non-NULL
@@ -198,12 +225,14 @@ DEF_FUNC op_store_attr, 32
 
 .sa_descr_cleanup:
 
-    ; DECREF value
-    mov rdi, [rbp-16]
-    call obj_decref
-    ; DECREF obj
-    mov rdi, [rbp-8]
-    call obj_decref
+    ; DECREF value (tag-aware)
+    mov rdi, [rbp - SA_VAL]
+    mov rsi, [rbp - SA_VTAG]
+    DECREF_VAL rdi, rsi
+    ; DECREF obj (tag-aware)
+    mov rdi, [rbp - SA_OBJ]
+    mov rsi, [rbp - SA_OTAG]
+    DECREF_VAL rdi, rsi
 
     add rbx, 8
     leave
@@ -211,24 +240,26 @@ DEF_FUNC op_store_attr, 32
 
 .sa_no_property:
     ; Check tp_setattr
-    mov rdi, [rbp-8]
+    mov rdi, [rbp - SA_OBJ]
     mov rax, [rdi + PyObject.ob_type]
     mov rax, [rax + PyTypeObject.tp_setattr]
     test rax, rax
     jz .sa_no_setattr
 
     ; Call tp_setattr(obj, name, value)
-    mov rdi, [rbp-8]
-    mov rsi, [rbp-24]
-    mov rdx, [rbp-16]
+    mov rdi, [rbp - SA_OBJ]
+    mov rsi, [rbp - SA_NAME]
+    mov rdx, [rbp - SA_VAL]
     call rax
 
-    ; DECREF value
-    mov rdi, [rbp-16]
-    call obj_decref
-    ; DECREF obj
-    mov rdi, [rbp-8]
-    call obj_decref
+    ; DECREF value (tag-aware)
+    mov rdi, [rbp - SA_VAL]
+    mov rsi, [rbp - SA_VTAG]
+    DECREF_VAL rdi, rsi
+    ; DECREF obj (tag-aware)
+    mov rdi, [rbp - SA_OBJ]
+    mov rsi, [rbp - SA_OTAG]
+    DECREF_VAL rdi, rsi
 
     add rbx, 8                ; skip 4 CACHE entries
     leave
@@ -249,7 +280,8 @@ END_FUNC op_store_attr
 DEF_FUNC_BARE op_store_deref
     VPOP rax                        ; rax = new value
     lea rdx, [r12 + PyFrame.localsplus]
-    mov rdx, [rdx + rcx*8]         ; rdx = cell object
+    shl rcx, 4                     ; slot * 16
+    mov rdx, [rdx + rcx]           ; rdx = cell object (payload)
 
     ; INCREF new value (may be SmallInt)
     push rax
@@ -280,7 +312,8 @@ END_FUNC op_store_deref
 ;; ============================================================================
 DEF_FUNC_BARE op_delete_deref
     lea rax, [r12 + PyFrame.localsplus]
-    mov rax, [rax + rcx*8]         ; rax = cell object
+    shl rcx, 4                     ; slot * 16
+    mov rax, [rax + rcx]           ; rax = cell object (payload)
     mov rdi, [rax + PyCellObject.ob_ref]
     mov qword [rax + PyCellObject.ob_ref], 0
     ; XDECREF old value
@@ -298,12 +331,12 @@ END_FUNC op_delete_deref
 ;; ============================================================================
 DEF_FUNC_BARE op_delete_fast
     lea rax, [r12 + PyFrame.localsplus]
-    mov rdi, [rax + rcx*8]     ; old value
-    mov qword [rax + rcx*8], 0 ; set to NULL
-    test rdi, rdi
-    jz .df_done
-    DECREF_REG rdi
-.df_done:
+    shl rcx, 4                 ; slot * 16
+    mov rdi, [rax + rcx]       ; old value (payload)
+    mov rsi, [rax + rcx + 8]   ; old value tag
+    mov qword [rax + rcx], 0   ; clear payload
+    mov qword [rax + rcx + 8], 0 ; clear tag
+    XDECREF_VAL rdi, rsi
     DISPATCH
 END_FUNC op_delete_fast
 
@@ -356,13 +389,13 @@ END_FUNC op_delete_global
 ;; Calls tp_setattr(obj, name, NULL) to delete.
 ;; Followed by 4 CACHE entries (8 bytes) - WAIT, DELETE_ATTR has no CACHE in 3.12.
 ;; ============================================================================
-DEF_FUNC op_delete_attr, 16
+DEF_FUNC op_delete_attr, DA_FRAME
 
     mov rax, [r15 + rcx*8]     ; name
-    mov [rbp-8], rax
+    mov [rbp - DA_NAME], rax
 
     VPOP rdi
-    mov [rbp-16], rdi           ; obj
+    mov [rbp - DA_OBJ], rdi
 
     ; Call tp_setattr(obj, name, NULL) to delete attr
     mov rax, [rdi + PyObject.ob_type]
@@ -370,13 +403,13 @@ DEF_FUNC op_delete_attr, 16
     test rax, rax
     jz .da_error
 
-    mov rdi, [rbp-16]
-    mov rsi, [rbp-8]
+    mov rdi, [rbp - DA_OBJ]
+    mov rsi, [rbp - DA_NAME]
     xor edx, edx               ; value = NULL means delete
     call rax
 
     ; DECREF obj
-    mov rdi, [rbp-16]
+    mov rdi, [rbp - DA_OBJ]
     call obj_decref
 
     leave
@@ -394,12 +427,16 @@ END_FUNC op_delete_attr
 ;; Pops key (TOS), pops obj (TOS1).
 ;; Calls mp_ass_subscript(obj, key, NULL) to delete.
 ;; ============================================================================
-DEF_FUNC op_delete_subscr, 16
+DEF_FUNC op_delete_subscr, DS_FRAME
 
     VPOP rsi                    ; key
+    mov rax, [r13 + 8]        ; key tag
     VPOP rdi                    ; obj
-    mov [rbp-8], rdi            ; save obj
-    mov [rbp-16], rsi           ; save key
+    mov rcx, [r13 + 8]        ; obj tag
+    mov [rbp - DS_OBJ], rdi     ; save obj
+    mov [rbp - DS_KEY], rsi     ; save key
+    mov [rbp - DS_OTAG], rcx    ; save obj tag
+    mov [rbp - DS_KTAG], rax    ; save key tag
 
     ; Call mp_ass_subscript(obj, key, NULL)
     mov rax, [rdi + PyObject.ob_type]
@@ -413,11 +450,13 @@ DEF_FUNC op_delete_subscr, 16
     xor edx, edx               ; value = NULL (delete)
     call rax
 
-    ; DECREF key and obj
-    mov rdi, [rbp-16]
-    DECREF_REG rdi
-    mov rdi, [rbp-8]
-    DECREF_REG rdi
+    ; DECREF key and obj (tag-aware)
+    mov rdi, [rbp - DS_KEY]
+    mov rsi, [rbp - DS_KTAG]
+    DECREF_VAL rdi, rsi
+    mov rdi, [rbp - DS_OBJ]
+    mov rsi, [rbp - DS_OTAG]
+    DECREF_VAL rdi, rsi
 
     leave
     DISPATCH

@@ -25,8 +25,10 @@ extern obj_dealloc
 ;; op_pop_top - Pop and discard top of stack, DECREF it
 ;; ============================================================================
 DEF_FUNC_BARE op_pop_top
-    VPOP rax
-    DECREF rax
+    sub r13, 16
+    mov rax, [r13]              ; payload
+    mov rdx, [r13 + 8]         ; tag
+    DECREF_VAL rax, rdx
     DISPATCH
 END_FUNC op_pop_top
 
@@ -37,7 +39,8 @@ END_FUNC op_pop_top
 ;; ============================================================================
 DEF_FUNC_BARE op_push_null
     mov qword [r13], 0
-    add r13, 8
+    mov qword [r13 + 8], TAG_NULL
+    add r13, 16
     DISPATCH
 END_FUNC op_push_null
 
@@ -50,14 +53,17 @@ END_FUNC op_push_null
 ;; ============================================================================
 DEF_FUNC_BARE op_copy
     ; ecx = position (1-indexed from top)
-    ; Compute address: r13 - ecx*8
+    ; Compute address: r13 - ecx*16 (16 bytes/slot)
     mov rax, rcx
-    shl rax, 3                 ; rax = ecx * 8
+    shl rax, 4                 ; rax = ecx * 16
     mov rdx, r13
-    sub rdx, rax               ; rdx = r13 - ecx*8
-    mov rax, [rdx]             ; peek at position i
-    INCREF rax
-    VPUSH rax
+    sub rdx, rax               ; rdx = r13 - ecx*16
+    mov rax, [rdx]             ; peek payload at position i
+    mov rsi, [rdx + 8]        ; peek tag at position i
+    INCREF_VAL rax, rsi
+    mov [r13], rax
+    mov [r13 + 8], rsi
+    add r13, 16
     DISPATCH
 END_FUNC op_copy
 
@@ -71,15 +77,20 @@ END_FUNC op_copy
 ;; ============================================================================
 DEF_FUNC_BARE op_swap
     ; ecx = position (1-indexed from top)
-    ; Compute address of i-th item: r13 - ecx*8
+    ; Compute address of i-th item: r13 - ecx*16 (16 bytes/slot)
     mov rax, rcx
-    shl rax, 3                 ; rax = ecx * 8
+    shl rax, 4                 ; rax = ecx * 16
     mov rdx, r13
-    sub rdx, rax               ; rdx = &stack[top - i] (i-th from top)
-    ; Swap [r13-8] (TOS) and [rdx] (i-th item)
-    mov rax, [r13 - 8]         ; rax = TOS
-    mov r8, [rdx]              ; r8 = item at position i
-    mov [rdx], rax             ; store TOS into position i
-    mov [r13 - 8], r8          ; store old position i into TOS
+    sub rdx, rax               ; rdx = &stack[top - i] (i-th from top, payload)
+    ; Swap payloads: [r13-16] (TOS) and [rdx] (i-th item)
+    mov rax, [r13 - 16]        ; rax = TOS payload
+    mov r8, [rdx]              ; r8 = item payload at position i
+    mov [rdx], rax             ; store TOS payload into position i
+    mov [r13 - 16], r8         ; store old position i payload into TOS
+    ; Swap tags: [r13-8] (TOS tag) and [rdx+8] (i-th tag)
+    mov rax, [r13 - 8]
+    mov r8, [rdx + 8]
+    mov [rdx + 8], rax
+    mov [r13 - 8], r8
     DISPATCH
 END_FUNC op_swap

@@ -261,24 +261,22 @@ DEF_FUNC_BARE eval_exception_unwind
     push rcx                 ; save push_lasti flag
 
     ; Adjust value stack to target depth
-    ; target r13 = stack_base + depth * 8
+    ; target r13 = stack_base + depth * 16 (128-bit slots)
     mov rdi, [r12 + PyFrame.stack_base]
     mov eax, edx
-    shl rax, 3               ; depth * 8
+    shl rax, 4               ; depth * 16
     add rdi, rax
     ; DECREF any items being popped from stack
     cmp r13, rdi
     jbe .stack_adjusted
 .pop_stack:
-    sub r13, 8
+    sub r13, 16
     cmp r13, rdi
     jb .stack_adjusted
     push rdi                 ; save target stack ptr
-    mov rdi, [r13]
-    test rdi, rdi
-    jz .pop_next
-    call obj_decref
-.pop_next:
+    mov rdi, [r13]           ; payload
+    mov rsi, [r13 + 8]      ; tag
+    XDECREF_VAL rdi, rsi    ; tag-aware NULL-safe DECREF
     pop rdi
     cmp r13, rdi
     ja .pop_stack
