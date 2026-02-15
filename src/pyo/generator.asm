@@ -6,10 +6,6 @@
 %include "types.inc"
 %include "frame.inc"
 
-section .note.GNU-stack noalloc noexec nowrite progbits
-
-section .text
-
 extern ap_malloc
 extern ap_free
 extern obj_decref
@@ -25,10 +21,7 @@ extern obj_dealloc
 ;; Create a new generator object that owns the given frame.
 ;; rdi = frame (ownership transfers to generator)
 ;; ============================================================================
-global gen_new
-gen_new:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC gen_new
     push rbx
     push r12
 
@@ -56,8 +49,9 @@ gen_new:
     mov rax, r12               ; return gen object
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
+END_FUNC gen_new
 
 ;; ============================================================================
 ;; gen_iternext(PyGenObject *self) -> PyObject* or NULL
@@ -65,10 +59,7 @@ gen_new:
 ;; Returns yielded value, or NULL if generator is exhausted.
 ;; rdi = generator
 ;; ============================================================================
-global gen_iternext
-gen_iternext:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC gen_iternext
     push rbx
     push r12
 
@@ -128,7 +119,7 @@ gen_iternext:
     xor eax, eax              ; return NULL (StopIteration)
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
 
 .yielded:
@@ -136,31 +127,29 @@ gen_iternext:
     mov rax, r12
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
 
 .exhausted:
     xor eax, eax              ; return NULL
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
 
 .running_error:
     xor eax, eax              ; return NULL
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
+END_FUNC gen_iternext
 
 ;; ============================================================================
 ;; gen_dealloc(PyObject *self)
 ;; Free generator: free frame if still held, DECREF code.
 ;; ============================================================================
-global gen_dealloc
-gen_dealloc:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC gen_dealloc
     push rbx
 
     mov rbx, rdi
@@ -181,8 +170,9 @@ gen_dealloc:
     call ap_free
 
     pop rbx
-    pop rbp
+    leave
     ret
+END_FUNC gen_dealloc
 
 ;; ============================================================================
 ;; gen_iter_self(PyObject *self) -> self with INCREF
@@ -192,6 +182,7 @@ gen_iter_self:
     inc qword [rdi + PyObject.ob_refcnt]
     mov rax, rdi
     ret
+END_FUNC gen_iter_self
 
 ;; ============================================================================
 ;; gen_repr(PyObject *self) -> PyStrObject*
@@ -199,6 +190,7 @@ gen_iter_self:
 gen_repr:
     lea rdi, [rel gen_repr_str]
     jmp str_from_cstr
+END_FUNC gen_repr
 
 ;; ============================================================================
 ;; Data section

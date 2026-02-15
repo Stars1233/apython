@@ -1,14 +1,12 @@
 ; string.asm - PLT-free string operations
 ; Replaces libc strlen, strcmp, strstr
 
-section .note.GNU-stack noalloc noexec nowrite progbits
+%include "macros.inc"
 
-section .text
 
 ; ap_strlen(const char *s) -> size_t
 ; Uses repne scasb (fast on modern x86-64 with FAST_SHORT_REP)
-global ap_strlen
-ap_strlen:
+DEF_FUNC_BARE ap_strlen
     mov rdi, rdi            ; s already in rdi
     xor eax, eax            ; search for NUL byte
     mov rcx, -1             ; max search length
@@ -17,11 +15,11 @@ ap_strlen:
     dec rcx                 ; rcx = length (not counting NUL)
     mov rax, rcx
     ret
+END_FUNC ap_strlen
 
 ; ap_strcmp(const char *a, const char *b) -> int
 ; Byte-by-byte compare, returns <0 / 0 / >0
-global ap_strcmp
-ap_strcmp:
+DEF_FUNC_BARE ap_strcmp
     ; rdi = a, rsi = b
 .loop:
     movzx eax, byte [rdi]
@@ -35,11 +33,11 @@ ap_strcmp:
     jmp .loop
 .done:
     ret
+END_FUNC ap_strcmp
 
 ; ap_strstr(const char *haystack, const char *needle) -> char* or NULL
 ; Simple O(n*m) search. Returns pointer to first match or NULL.
-global ap_strstr
-ap_strstr:
+DEF_FUNC_BARE ap_strstr
     ; rdi = haystack, rsi = needle
     ; If needle is empty, return haystack
     cmp byte [rsi], 0
@@ -74,3 +72,4 @@ ap_strstr:
 .not_found:
     xor eax, eax
     ret
+END_FUNC ap_strstr

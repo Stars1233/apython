@@ -5,10 +5,6 @@
 %include "object.inc"
 %include "types.inc"
 
-section .note.GNU-stack noalloc noexec nowrite progbits
-
-section .text
-
 extern ap_malloc
 extern ap_free
 extern ap_strlen
@@ -26,10 +22,7 @@ extern slice_indices
 
 ; str_from_cstr(const char *cstr) -> PyStrObject*
 ; Creates a new string object from a C string
-global str_from_cstr
-str_from_cstr:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC str_from_cstr
     push rbx
     push r12
 
@@ -61,15 +54,13 @@ str_from_cstr:
 
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
+END_FUNC str_from_cstr
 
 ; str_new(const char *data, int64_t len) -> PyStrObject*
 ; Creates a new string object from data with given length (need not be null-terminated)
-global str_new
-str_new:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC str_new
     push rbx
     push r12
     push r13
@@ -102,23 +93,21 @@ str_new:
     pop r13
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
+END_FUNC str_new
 
 ; str_dealloc(PyObject *self)
-global str_dealloc
-str_dealloc:
+DEF_FUNC_BARE str_dealloc
     ; String data is inline, just free the object
     jmp ap_free
+END_FUNC str_dealloc
 
 ;; ============================================================================
 ;; str_repr(PyObject *self) -> PyObject*
 ;; Returns string with surrounding single quotes: 'hello'
 ;; ============================================================================
-global str_repr
-str_repr:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC str_repr
     push rbx
     push r12
 
@@ -157,27 +146,25 @@ str_repr:
 
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
+END_FUNC str_repr
 
 ;; ============================================================================
 ;; str_str(PyObject *self) -> PyObject*
 ;; tp_str: returns self with INCREF (no quotes)
 ;; ============================================================================
-global str_str
-str_str:
+DEF_FUNC_BARE str_str
     inc qword [rdi + PyObject.ob_refcnt]
     mov rax, rdi
     ret
+END_FUNC str_str
 
 ;; ============================================================================
 ;; str_hash(PyObject *self) -> int64
 ;; FNV-1a hash
 ;; ============================================================================
-global str_hash
-str_hash:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC str_hash
 
     ; Check cached hash
     mov rax, [rdi + PyStrObject.ob_hash]
@@ -207,17 +194,15 @@ align 16
 .cache:
     mov [rdi + PyStrObject.ob_hash], rax
 .done:
-    pop rbp
+    leave
     ret
+END_FUNC str_hash
 
 ;; ============================================================================
 ;; str_concat(PyObject *a, PyObject *b) -> PyObject*
 ;; String concatenation via nb_add
 ;; ============================================================================
-global str_concat
-str_concat:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC str_concat
     push rbx
     push r12
     push r13
@@ -262,17 +247,15 @@ str_concat:
     pop r13
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
+END_FUNC str_concat
 
 ;; ============================================================================
 ;; str_repeat(PyObject *str_obj, PyObject *int_obj) -> PyObject*
 ;; String repetition via nb_multiply
 ;; ============================================================================
-global str_repeat
-str_repeat:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC str_repeat
     push rbx
     push r12
     push r13
@@ -331,17 +314,15 @@ str_repeat:
     pop r13
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
+END_FUNC str_repeat
 
 ;; ============================================================================
 ;; str_compare(PyObject *a, PyObject *b, int op) -> PyObject*
 ;; Rich comparison for strings
 ;; ============================================================================
-global str_compare
-str_compare:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC str_compare
     push rbx
     push r12
 
@@ -400,33 +381,31 @@ str_compare:
     inc qword [rax + PyObject.ob_refcnt]
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
 .ret_false:
     lea rax, [rel bool_false]
     inc qword [rax + PyObject.ob_refcnt]
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
+END_FUNC str_compare
 
 ;; ============================================================================
 ;; str_len(PyObject *self) -> int64_t
 ;; sq_length: returns ob_size
 ;; ============================================================================
-global str_len
-str_len:
+DEF_FUNC_BARE str_len
     mov rax, [rdi + PyStrObject.ob_size]
     ret
+END_FUNC str_len
 
 ;; ============================================================================
 ;; str_getitem(PyObject *self, int64_t index) -> PyObject*
 ;; sq_item: return single-char string at index
 ;; ============================================================================
-global str_getitem
-str_getitem:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC str_getitem
     push rbx
     push r12
 
@@ -453,22 +432,20 @@ str_getitem:
 
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
 
 .index_error:
     lea rdi, [rel exc_IndexError_type]
     CSTRING rsi, "string index out of range"
     call raise_exception
+END_FUNC str_getitem
 
 ;; ============================================================================
 ;; str_subscript(PyObject *self, PyObject *key) -> PyObject*
 ;; mp_subscript: index with int or slice key (for BINARY_SUBSCR)
 ;; ============================================================================
-global str_subscript
-str_subscript:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC str_subscript
     push rbx
 
     mov rbx, rdi            ; save self
@@ -492,7 +469,7 @@ str_subscript:
     call str_getitem
 
     pop rbx
-    pop rbp
+    leave
     ret
 
 .ss_slice:
@@ -500,17 +477,15 @@ str_subscript:
     ; rsi = slice
     call str_getslice
     pop rbx
-    pop rbp
+    leave
     ret
+END_FUNC str_subscript
 
 ;; ============================================================================
 ;; str_contains(PyObject *self, PyObject *substr) -> int (0/1)
 ;; sq_contains: check if substr is in self using strstr
 ;; ============================================================================
-global str_contains
-str_contains:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC str_contains
 
     extern ap_strstr
     lea rdi, [rdi + PyStrObject.data]
@@ -520,28 +495,26 @@ str_contains:
     setnz al
     movzx eax, al
 
-    pop rbp
+    leave
     ret
+END_FUNC str_contains
 
 ;; ============================================================================
 ;; str_bool(PyObject *self) -> int (0/1)
 ;; nb_bool: true if len > 0
 ;; ============================================================================
-global str_bool
-str_bool:
+DEF_FUNC_BARE str_bool
     cmp qword [rdi + PyStrObject.ob_size], 0
     setne al
     movzx eax, al
     ret
+END_FUNC str_bool
 
 ;; ============================================================================
 ;; str_getslice(PyStrObject *str, PySliceObject *slice) -> PyStrObject*
 ;; Creates a new string from a slice of the original.
 ;; ============================================================================
-global str_getslice
-str_getslice:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC str_getslice
     push rbx
     push r12
     push r13
@@ -648,8 +621,9 @@ str_getslice:
     pop r13
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
+END_FUNC str_getslice
 
 ;; ============================================================================
 ;; Data section

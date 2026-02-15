@@ -10,10 +10,6 @@
 %include "object.inc"
 %include "types.inc"
 
-section .note.GNU-stack noalloc noexec nowrite progbits
-
-section .text
-
 extern ap_malloc
 extern ap_free
 extern obj_incref
@@ -25,10 +21,7 @@ extern str_from_cstr
 ;; Create a new cell containing obj (may be NULL for empty cell).
 ;; If obj is non-NULL, INCREFs it.
 ;; ============================================================================
-global cell_new
-cell_new:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC cell_new
     push rbx
     mov rbx, rdi               ; save obj
 
@@ -51,26 +44,24 @@ cell_new:
 
 .done:
     pop rbx
-    pop rbp
+    leave
     ret
+END_FUNC cell_new
 
 ;; ============================================================================
 ;; cell_get(PyCellObject *cell) -> PyObject*
 ;; Returns the contained object (may be NULL). Does NOT INCREF.
 ;; ============================================================================
-global cell_get
-cell_get:
+DEF_FUNC_BARE cell_get
     mov rax, [rdi + PyCellObject.ob_ref]
     ret
+END_FUNC cell_get
 
 ;; ============================================================================
 ;; cell_set(PyCellObject *cell, PyObject *obj)
 ;; Sets the contained object, DECREFs old, INCREFs new.
 ;; ============================================================================
-global cell_set
-cell_set:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC cell_set
     push rbx
     push r12
 
@@ -96,16 +87,14 @@ cell_set:
 
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
+END_FUNC cell_set
 
 ;; ============================================================================
 ;; cell_dealloc(PyCellObject *self)
 ;; ============================================================================
-global cell_dealloc
-cell_dealloc:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC cell_dealloc
     push rbx
     mov rbx, rdi
 
@@ -120,16 +109,17 @@ cell_dealloc:
     call ap_free
 
     pop rbx
-    pop rbp
+    leave
     ret
+END_FUNC cell_dealloc
 
 ;; ============================================================================
 ;; cell_repr(PyCellObject *self) -> PyStrObject*
 ;; ============================================================================
-global cell_repr
-cell_repr:
+DEF_FUNC_BARE cell_repr
     lea rdi, [rel cell_repr_str]
     jmp str_from_cstr
+END_FUNC cell_repr
 
 ;; ============================================================================
 ;; Data

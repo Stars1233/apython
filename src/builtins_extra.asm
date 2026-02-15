@@ -6,8 +6,6 @@
 %include "object.inc"
 %include "types.inc"
 
-section .note.GNU-stack noalloc noexec nowrite progbits
-
 ; External symbols used
 extern int_from_i64
 extern int_to_i64
@@ -38,15 +36,10 @@ extern exc_ValueError_type
 extern exc_AttributeError_type
 extern exc_StopIteration_type
 
-section .text
-
 ; ============================================================================
 ; 1. builtin_abs(args, nargs) - abs(x)
 ; ============================================================================
-global builtin_abs
-builtin_abs:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC builtin_abs
     push rbx
     sub rsp, 8
 
@@ -76,7 +69,7 @@ builtin_abs:
     mov rax, rbx
     add rsp, 8
     pop rbx
-    pop rbp
+    leave
     ret
 
 .abs_gmp_neg:
@@ -84,7 +77,7 @@ builtin_abs:
     call int_neg
     add rsp, 8
     pop rbx
-    pop rbp
+    leave
     ret
 
 .abs_smallint:
@@ -98,7 +91,7 @@ builtin_abs:
     bts rax, 63
     add rsp, 8
     pop rbx
-    pop rbp
+    leave
     ret
 
 .abs_float:
@@ -109,7 +102,7 @@ builtin_abs:
     call float_from_f64
     add rsp, 8
     pop rbx
-    pop rbp
+    leave
     ret
 
 .abs_type_error:
@@ -121,14 +114,12 @@ builtin_abs:
     lea rdi, [rel exc_TypeError_type]
     CSTRING rsi, "abs() takes exactly one argument"
     call raise_exception
+END_FUNC builtin_abs
 
 ; ============================================================================
 ; 2. builtin_int_fn(args, nargs) - int(x)
 ; ============================================================================
-global builtin_int_fn
-builtin_int_fn:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC builtin_int_fn
     push rbx
     sub rsp, 8
 
@@ -168,14 +159,14 @@ builtin_int_fn:
     bts rax, 63
     add rsp, 8
     pop rbx
-    pop rbp
+    leave
     ret
 
 .int_return_smallint:
     mov rax, rbx
     add rsp, 8
     pop rbx
-    pop rbp
+    leave
     ret
 
 .int_from_int:
@@ -183,7 +174,7 @@ builtin_int_fn:
     mov rax, rbx
     add rsp, 8
     pop rbx
-    pop rbp
+    leave
     ret
 
 .int_from_float:
@@ -191,7 +182,7 @@ builtin_int_fn:
     call float_int
     add rsp, 8
     pop rbx
-    pop rbp
+    leave
     ret
 
 .int_from_str:
@@ -202,7 +193,7 @@ builtin_int_fn:
     jz .int_str_parse_error
     add rsp, 8
     pop rbx
-    pop rbp
+    leave
     ret
 
 .int_str_parse_error:
@@ -218,14 +209,14 @@ builtin_int_fn:
     bts rax, 63
     add rsp, 8
     pop rbx
-    pop rbp
+    leave
     ret
 .int_bool_true:
     mov rax, 1
     bts rax, 63
     add rsp, 8
     pop rbx
-    pop rbp
+    leave
     ret
 
 .int_type_error:
@@ -237,14 +228,12 @@ builtin_int_fn:
     lea rdi, [rel exc_TypeError_type]
     CSTRING rsi, "int() takes at most 1 argument"
     call raise_exception
+END_FUNC builtin_int_fn
 
 ; ============================================================================
 ; 3. builtin_str_fn(args, nargs) - str(x)
 ; ============================================================================
-global builtin_str_fn
-builtin_str_fn:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC builtin_str_fn
 
     test rsi, rsi
     jz .str_no_args
@@ -254,27 +243,25 @@ builtin_str_fn:
 
     mov rdi, [rdi]
     call obj_str
-    pop rbp
+    leave
     ret
 
 .str_no_args:
     CSTRING rdi, ""
     call str_from_cstr
-    pop rbp
+    leave
     ret
 
 .str_error:
     lea rdi, [rel exc_TypeError_type]
     CSTRING rsi, "str() takes at most 1 argument"
     call raise_exception
+END_FUNC builtin_str_fn
 
 ; ============================================================================
 ; 4. builtin_ord(args, nargs) - ord(c)
 ; ============================================================================
-global builtin_ord
-builtin_ord:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC builtin_ord
 
     cmp rsi, 1
     jne .ord_nargs_error
@@ -294,7 +281,7 @@ builtin_ord:
 
     movzx eax, byte [rdi + PyStrObject.data]
     bts rax, 63
-    pop rbp
+    leave
     ret
 
 .ord_type_error:
@@ -311,15 +298,12 @@ builtin_ord:
     lea rdi, [rel exc_TypeError_type]
     CSTRING rsi, "ord() takes exactly one argument"
     call raise_exception
+END_FUNC builtin_ord
 
 ; ============================================================================
 ; 5. builtin_chr(args, nargs) - chr(n)
 ; ============================================================================
-global builtin_chr
-builtin_chr:
-    push rbp
-    mov rbp, rsp
-    sub rsp, 16
+DEF_FUNC builtin_chr, 16
 
     cmp rsi, 1
     jne .chr_nargs_error
@@ -421,15 +405,12 @@ builtin_chr:
     lea rdi, [rel exc_TypeError_type]
     CSTRING rsi, "chr() takes exactly one argument"
     call raise_exception
+END_FUNC builtin_chr
 
 ; ============================================================================
 ; 6. builtin_hex(args, nargs) - hex(n)
 ; ============================================================================
-global builtin_hex
-builtin_hex:
-    push rbp
-    mov rbp, rsp
-    sub rsp, 80
+DEF_FUNC builtin_hex, 80
 
     cmp rsi, 1
     jne .hex_nargs_error
@@ -514,14 +495,12 @@ builtin_hex:
     lea rdi, [rel exc_TypeError_type]
     CSTRING rsi, "hex() takes exactly one argument"
     call raise_exception
+END_FUNC builtin_hex
 
 ; ============================================================================
 ; 7. builtin_id(args, nargs) - id(x)
 ; ============================================================================
-global builtin_id
-builtin_id:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC builtin_id
 
     cmp rsi, 1
     jne .id_error
@@ -532,28 +511,26 @@ builtin_id:
     js .id_smallint
 
     call int_from_i64
-    pop rbp
+    leave
     ret
 
 .id_smallint:
     shl rdi, 1
     sar rdi, 1
     call int_from_i64
-    pop rbp
+    leave
     ret
 
 .id_error:
     lea rdi, [rel exc_TypeError_type]
     CSTRING rsi, "id() takes exactly one argument"
     call raise_exception
+END_FUNC builtin_id
 
 ; ============================================================================
 ; 8. builtin_hash_fn(args, nargs) - hash(x)
 ; ============================================================================
-global builtin_hash_fn
-builtin_hash_fn:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC builtin_hash_fn
     push rbx
     sub rsp, 8
 
@@ -576,7 +553,7 @@ builtin_hash_fn:
     call int_from_i64
     add rsp, 8
     pop rbx
-    pop rbp
+    leave
     ret
 
 .hash_smallint:
@@ -587,7 +564,7 @@ builtin_hash_fn:
     call int_from_i64
     add rsp, 8
     pop rbx
-    pop rbp
+    leave
     ret
 
 .hash_type_error:
@@ -599,14 +576,12 @@ builtin_hash_fn:
     lea rdi, [rel exc_TypeError_type]
     CSTRING rsi, "hash() takes exactly one argument"
     call raise_exception
+END_FUNC builtin_hash_fn
 
 ; ============================================================================
 ; 9. builtin_callable(args, nargs) - callable(x)
 ; ============================================================================
-global builtin_callable
-builtin_callable:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC builtin_callable
 
     cmp rsi, 1
     jne .callable_error
@@ -623,27 +598,25 @@ builtin_callable:
 
     lea rax, [rel bool_true]
     inc qword [rax + PyObject.ob_refcnt]
-    pop rbp
+    leave
     ret
 
 .callable_false:
     lea rax, [rel bool_false]
     inc qword [rax + PyObject.ob_refcnt]
-    pop rbp
+    leave
     ret
 
 .callable_error:
     lea rdi, [rel exc_TypeError_type]
     CSTRING rsi, "callable() takes exactly one argument"
     call raise_exception
+END_FUNC builtin_callable
 
 ; ============================================================================
 ; 10. builtin_iter_fn(args, nargs) - iter(x)
 ; ============================================================================
-global builtin_iter_fn
-builtin_iter_fn:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC builtin_iter_fn
 
     cmp rsi, 1
     jne .iter_error
@@ -659,7 +632,7 @@ builtin_iter_fn:
     jz .iter_type_error
 
     call rcx
-    pop rbp
+    leave
     ret
 
 .iter_type_error:
@@ -671,14 +644,12 @@ builtin_iter_fn:
     lea rdi, [rel exc_TypeError_type]
     CSTRING rsi, "iter() takes exactly one argument"
     call raise_exception
+END_FUNC builtin_iter_fn
 
 ; ============================================================================
 ; 11. builtin_next_fn(args, nargs) - next(x)
 ; ============================================================================
-global builtin_next_fn
-builtin_next_fn:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC builtin_next_fn
 
     cmp rsi, 1
     jne .next_error
@@ -697,7 +668,7 @@ builtin_next_fn:
     test rax, rax
     jz .next_stop
 
-    pop rbp
+    leave
     ret
 
 .next_stop:
@@ -714,14 +685,12 @@ builtin_next_fn:
     lea rdi, [rel exc_TypeError_type]
     CSTRING rsi, "next() takes exactly one argument"
     call raise_exception
+END_FUNC builtin_next_fn
 
 ; ============================================================================
 ; 12. builtin_any(args, nargs) - any(iterable)
 ; ============================================================================
-global builtin_any
-builtin_any:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC builtin_any
     push rbx
     push r12
     push r13
@@ -780,7 +749,7 @@ builtin_any:
     pop r13
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
 
 .any_false:
@@ -792,7 +761,7 @@ builtin_any:
     pop r13
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
 
 .any_type_error:
@@ -804,14 +773,12 @@ builtin_any:
     lea rdi, [rel exc_TypeError_type]
     CSTRING rsi, "any() takes exactly one argument"
     call raise_exception
+END_FUNC builtin_any
 
 ; ============================================================================
 ; 13. builtin_all(args, nargs) - all(iterable)
 ; ============================================================================
-global builtin_all
-builtin_all:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC builtin_all
     push rbx
     push r12
     push r13
@@ -870,7 +837,7 @@ builtin_all:
     pop r13
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
 
 .all_true:
@@ -882,7 +849,7 @@ builtin_all:
     pop r13
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
 
 .all_type_error:
@@ -894,14 +861,12 @@ builtin_all:
     lea rdi, [rel exc_TypeError_type]
     CSTRING rsi, "all() takes exactly one argument"
     call raise_exception
+END_FUNC builtin_all
 
 ; ============================================================================
 ; 14. builtin_sum(args, nargs) - sum(iterable[, start])
 ; ============================================================================
-global builtin_sum
-builtin_sum:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC builtin_sum
     push rbx
     push r12
     push r13
@@ -984,7 +949,7 @@ builtin_sum:
     pop r13
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
 
 .sum_type_error:
@@ -996,14 +961,12 @@ builtin_sum:
     lea rdi, [rel exc_TypeError_type]
     CSTRING rsi, "sum expected 1-2 arguments"
     call raise_exception
+END_FUNC builtin_sum
 
 ; ============================================================================
 ; 15. builtin_min(args, nargs) - min(a, b, ...)
 ; ============================================================================
-global builtin_min
-builtin_min:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC builtin_min
     push rbx
     push r12
     push r13
@@ -1102,21 +1065,19 @@ builtin_min:
     pop r13
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
 
 .min_error:
     lea rdi, [rel exc_TypeError_type]
     CSTRING rsi, "min expected at least 1 argument"
     call raise_exception
+END_FUNC builtin_min
 
 ; ============================================================================
 ; 16. builtin_max(args, nargs) - max(a, b, ...)
 ; ============================================================================
-global builtin_max
-builtin_max:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC builtin_max
     push rbx
     push r12
     push r13
@@ -1231,21 +1192,19 @@ builtin_max:
     pop r13
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
 
 .max_error:
     lea rdi, [rel exc_TypeError_type]
     CSTRING rsi, "max expected at least 1 argument"
     call raise_exception
+END_FUNC builtin_max
 
 ; ============================================================================
 ; 17. builtin_getattr(args, nargs) - getattr(obj, name[, default])
 ; ============================================================================
-global builtin_getattr
-builtin_getattr:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC builtin_getattr
     push rbx
     push r12
     push r13
@@ -1303,7 +1262,7 @@ builtin_getattr:
     pop r13
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
 
 .getattr_found:
@@ -1311,7 +1270,7 @@ builtin_getattr:
     pop r13
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
 
 .getattr_not_found:
@@ -1327,7 +1286,7 @@ builtin_getattr:
     pop r13
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
 
 .getattr_raise:
@@ -1339,13 +1298,12 @@ builtin_getattr:
     lea rdi, [rel exc_TypeError_type]
     CSTRING rsi, "getattr expected 2 or 3 arguments"
     call raise_exception
+END_FUNC builtin_getattr
 
 ; ============================================================================
 ; 18. builtin_hasattr(args, nargs) - hasattr(obj, name)
 ; ============================================================================
-global builtin_hasattr
-builtin_hasattr:
-    push rbp
+DEF_FUNC builtin_hasattr
     mov rbp, rsp
     push rbx
     push r12
@@ -1384,7 +1342,7 @@ builtin_hasattr:
     pop r13
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
 
 .hasattr_try_type_dict:
@@ -1413,7 +1371,7 @@ builtin_hasattr:
     pop r13
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
 
 .hasattr_not_found:
@@ -1423,20 +1381,19 @@ builtin_hasattr:
     pop r13
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
 
 .hasattr_error:
     lea rdi, [rel exc_TypeError_type]
     CSTRING rsi, "hasattr() takes exactly 2 arguments"
     call raise_exception
+END_FUNC builtin_hasattr
 
 ; ============================================================================
 ; 19. builtin_setattr(args, nargs) - setattr(obj, name, value)
 ; ============================================================================
-global builtin_setattr
-builtin_setattr:
-    push rbp
+DEF_FUNC builtin_setattr
     mov rbp, rsp
     push rbx
     sub rsp, 8
@@ -1464,7 +1421,7 @@ builtin_setattr:
     inc qword [rax + PyObject.ob_refcnt]
     add rsp, 8
     pop rbx
-    pop rbp
+    leave
     ret
 
 .setattr_type_error:
@@ -1476,3 +1433,4 @@ builtin_setattr:
     lea rdi, [rel exc_TypeError_type]
     CSTRING rsi, "setattr() takes exactly 3 arguments"
     call raise_exception
+END_FUNC builtin_setattr

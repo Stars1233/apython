@@ -5,10 +5,6 @@
 %include "object.inc"
 %include "types.inc"
 
-section .note.GNU-stack noalloc noexec nowrite progbits
-
-section .text
-
 extern ap_malloc
 extern ap_free
 extern obj_hash
@@ -33,10 +29,7 @@ SET_INIT_CAP equ 8
 ;; set_new() -> PySetObject* (uses PyDictObject layout)
 ;; Allocate a new empty set with initial capacity 8
 ;; ============================================================================
-global set_new
-set_new:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC set_new
     push rbx
 
     ; Allocate set header (reuses PyDictObject layout)
@@ -64,16 +57,15 @@ set_new:
 
     mov rax, rbx
     pop rbx
-    pop rbp
+    leave
     ret
+END_FUNC set_new
 
 ;; ============================================================================
 ;; set_keys_equal(PyObject *a, PyObject *b) -> int (1=equal, 0=not)
 ;; Internal helper: pointer equality or string comparison
 ;; ============================================================================
-set_keys_equal:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC_LOCAL set_keys_equal
     push rbx
     push r12
 
@@ -124,24 +116,23 @@ set_keys_equal:
     xor eax, eax
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
 
 .equal:
     mov eax, 1
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
+END_FUNC set_keys_equal
 
 ;; ============================================================================
 ;; set_find_slot(set, key, hash)
 ;;   -> rax = entry ptr, rdx = 1 if existing key found, 0 if empty slot
 ;; Internal helper used by set_add and set_contains
 ;; ============================================================================
-set_find_slot:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC_LOCAL set_find_slot
     push rbx
     push r12
     push r13
@@ -205,7 +196,7 @@ set_find_slot:
     pop r13
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
 
 .found_existing:
@@ -216,25 +207,20 @@ set_find_slot:
     pop r13
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
 
 .table_full:
     ; Should never happen if load factor is maintained
-    lea rdi, [rel .err_full]
+    CSTRING rdi, "set: hash table full"
     call fatal_error
-
-section .rodata
-.err_full: db "set: hash table full", 0
-section .text
+END_FUNC set_find_slot
 
 ;; ============================================================================
 ;; set_resize(set)
 ;; Double capacity and rehash all entries
 ;; ============================================================================
-set_resize:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC_LOCAL set_resize
     push rbx
     push r12
     push r13
@@ -326,17 +312,15 @@ set_resize:
     pop r13
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
+END_FUNC set_resize
 
 ;; ============================================================================
 ;; set_add(set, key) -> void
 ;; Add a key to the set
 ;; ============================================================================
-global set_add
-set_add:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC set_add
     push rbx
     push r12
     push r13
@@ -386,17 +370,15 @@ set_add:
     pop r13
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
+END_FUNC set_add
 
 ;; ============================================================================
 ;; set_contains(set, key) -> int (0/1)
 ;; Check if key is in the set
 ;; ============================================================================
-global set_contains
-set_contains:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC set_contains
     push rbx
     push r12
     push r13
@@ -421,25 +403,23 @@ set_contains:
     pop r13
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
+END_FUNC set_contains
 
 ;; ============================================================================
 ;; set_contains_sq(self, key) -> int (0/1)
 ;; sq_contains wrapper for the sequence methods (for "in" operator)
 ;; ============================================================================
-global set_contains_sq
-set_contains_sq:
+DEF_FUNC_BARE set_contains_sq
     jmp set_contains
+END_FUNC set_contains_sq
 
 ;; ============================================================================
 ;; set_remove(set, key) -> int (0=ok, -1=not found)
 ;; Remove a key from the set
 ;; ============================================================================
-global set_remove
-set_remove:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC set_remove
     push rbx
     push r12
     push r13
@@ -510,17 +490,15 @@ set_remove:
     pop r13
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
+END_FUNC set_remove
 
 ;; ============================================================================
 ;; set_dealloc(PyObject *self)
 ;; Free all entries, then free set
 ;; ============================================================================
-global set_dealloc
-set_dealloc:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC set_dealloc
     push rbx
     push r12
     push r13
@@ -564,8 +542,9 @@ set_dealloc:
     pop r13
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
+END_FUNC set_dealloc
 
 ; set_repr is in src/repr.asm
 extern set_repr
@@ -574,20 +553,17 @@ extern set_repr
 ;; set_len(PyObject *self) -> int64_t
 ;; Returns ob_size (number of items)
 ;; ============================================================================
-global set_len
-set_len:
+DEF_FUNC_BARE set_len
     mov rax, [rdi + PyDictObject.ob_size]
     ret
+END_FUNC set_len
 
 ;; ============================================================================
 ;; set_tp_iter(set) -> SetIterObject*
 ;; Create a new set iterator.
 ;; rdi = set
 ;; ============================================================================
-global set_tp_iter
-set_tp_iter:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC set_tp_iter
     push rbx
 
     mov rbx, rdi               ; save set
@@ -610,8 +586,9 @@ set_tp_iter:
     pop rax
 
     pop rbx
-    pop rbp
+    leave
     ret
+END_FUNC set_tp_iter
 
 ;; ============================================================================
 ;; set_iter_next(iter) -> PyObject* or NULL
@@ -619,8 +596,7 @@ set_tp_iter:
 ;; Scans entries for next non-empty slot.
 ;; rdi = iterator
 ;; ============================================================================
-global set_iter_next
-set_iter_next:
+DEF_FUNC_BARE set_iter_next
     mov rax, [rdi + PyDictIterObject.it_dict]      ; set
     mov rcx, [rdi + PyDictIterObject.it_index]      ; current index
     mov rdx, [rax + PyDictObject.capacity]          ; capacity
@@ -652,13 +628,12 @@ set_iter_next:
     mov [rdi + PyDictIterObject.it_index], rcx
     xor eax, eax
     ret
+END_FUNC set_iter_next
 
 ;; ============================================================================
 ;; set_iter_dealloc(PyObject *self)
 ;; ============================================================================
-set_iter_dealloc:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC_LOCAL set_iter_dealloc
     push rbx
     mov rbx, rdi
 
@@ -671,8 +646,9 @@ set_iter_dealloc:
     call ap_free
 
     pop rbx
-    pop rbp
+    leave
     ret
+END_FUNC set_iter_dealloc
 
 ;; ============================================================================
 ;; set_iter_self(PyObject *self) -> self with INCREF
@@ -681,6 +657,7 @@ set_iter_self:
     inc qword [rdi + PyObject.ob_refcnt]
     mov rax, rdi
     ret
+END_FUNC set_iter_self
 
 ;; ============================================================================
 ;; Data section

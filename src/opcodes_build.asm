@@ -16,8 +16,6 @@
 %include "opcodes.inc"
 %include "frame.inc"
 
-section .note.GNU-stack noalloc noexec nowrite progbits
-
 section .text
 
 extern eval_dispatch
@@ -47,8 +45,7 @@ extern dict_get
 ;; Pop key, pop obj, call mp_subscript or sq_item, push result.
 ;; Followed by 1 CACHE entry (2 bytes).
 ;; ============================================================================
-global op_binary_subscr
-op_binary_subscr:
+DEF_FUNC_BARE op_binary_subscr
     VPOP rsi                   ; rsi = key
     VPOP rdi                   ; rdi = obj
 
@@ -114,6 +111,7 @@ op_binary_subscr:
     ; Skip 1 CACHE entry = 2 bytes
     add rbx, 2
     DISPATCH
+END_FUNC op_binary_subscr
 
 ;; ============================================================================
 ;; op_store_subscr - obj[key] = value
@@ -122,8 +120,7 @@ op_binary_subscr:
 ;; Pop key, pop obj, pop value.
 ;; Followed by 1 CACHE entry (2 bytes).
 ;; ============================================================================
-global op_store_subscr
-op_store_subscr:
+DEF_FUNC_BARE op_store_subscr
     VPOP rsi                   ; rsi = key (TOS)
     VPOP rdi                   ; rdi = obj
     VPOP rdx                   ; rdx = value
@@ -186,6 +183,7 @@ op_store_subscr:
     ; Skip 1 CACHE entry = 2 bytes
     add rbx, 2
     DISPATCH
+END_FUNC op_store_subscr
 
 ;; ============================================================================
 ;; op_build_tuple - Create tuple from TOS items
@@ -193,11 +191,8 @@ op_store_subscr:
 ;; ecx = count (number of items to pop)
 ;; Items are on stack bottom-to-top: first item deepest.
 ;; ============================================================================
-global op_build_tuple
-op_build_tuple:
-    push rbp
-    mov rbp, rsp
-    sub rsp, 16                ; [rbp-8] = count
+DEF_FUNC op_build_tuple, 16
+    ; [rbp-8] = count
 
     mov [rbp-8], rcx           ; save count
 
@@ -232,17 +227,14 @@ op_build_tuple:
     VPUSH rax
     leave
     DISPATCH
+END_FUNC op_build_tuple
 
 ;; ============================================================================
 ;; op_build_list - Create list from TOS items
 ;;
 ;; ecx = count
 ;; ============================================================================
-global op_build_list
-op_build_list:
-    push rbp
-    mov rbp, rsp
-    sub rsp, 16
+DEF_FUNC op_build_list, 16
 
     mov [rbp-8], rcx           ; save count
 
@@ -302,6 +294,7 @@ op_build_list:
     VPUSH rax
     leave
     DISPATCH
+END_FUNC op_build_list
 
 ;; ============================================================================
 ;; op_build_map - Create dict from TOS key/value pairs
@@ -309,11 +302,7 @@ op_build_list:
 ;; ecx = count (number of key/value pairs)
 ;; Stack (bottom to top): key0, val0, key1, val1, ...
 ;; ============================================================================
-global op_build_map
-op_build_map:
-    push rbp
-    mov rbp, rsp
-    sub rsp, 16
+DEF_FUNC op_build_map, 16
 
     mov [rbp-8], rcx           ; save count
 
@@ -370,6 +359,7 @@ op_build_map:
     VPUSH rax
     leave
     DISPATCH
+END_FUNC op_build_map
 
 ;; ============================================================================
 ;; op_build_const_key_map - Build dict from const keys tuple + TOS values
@@ -377,11 +367,7 @@ op_build_map:
 ;; ecx = count
 ;; Stack: val0, val1, ..., valN-1, keys_tuple (TOS)
 ;; ============================================================================
-global op_build_const_key_map
-op_build_const_key_map:
-    push rbp
-    mov rbp, rsp
-    sub rsp, 32
+DEF_FUNC op_build_const_key_map, 32
 
     mov [rbp-8], rcx           ; count
 
@@ -443,6 +429,7 @@ op_build_const_key_map:
     VPUSH rax
     leave
     DISPATCH
+END_FUNC op_build_const_key_map
 
 ;; ============================================================================
 ;; op_unpack_sequence - Unpack iterable into N items on stack
@@ -451,8 +438,7 @@ op_build_const_key_map:
 ;; Pop TOS (tuple/list), push items[count-1], ..., items[0] (reverse order)
 ;; Followed by 1 CACHE entry (2 bytes).
 ;; ============================================================================
-global op_unpack_sequence
-op_unpack_sequence:
+DEF_FUNC_BARE op_unpack_sequence
     VPOP rdi                   ; rdi = sequence (tuple or list)
 
     ; Determine if tuple or list and get item array + size
@@ -506,14 +492,14 @@ op_unpack_sequence:
     ; Skip 1 CACHE entry = 2 bytes
     add rbx, 2
     DISPATCH
+END_FUNC op_unpack_sequence
 
 ;; ============================================================================
 ;; op_get_iter - Get iterator from TOS
 ;;
 ;; Pop obj, call tp_iter, push iterator.
 ;; ============================================================================
-global op_get_iter
-op_get_iter:
+DEF_FUNC_BARE op_get_iter
     VPOP rdi                   ; rdi = iterable obj
 
     push rdi                   ; save for DECREF
@@ -541,6 +527,7 @@ op_get_iter:
     lea rdi, [rel exc_TypeError_type]
     CSTRING rsi, "object is not iterable"
     call raise_exception
+END_FUNC op_get_iter
 
 ;; ============================================================================
 ;; op_for_iter - Advance iterator, or jump if exhausted
@@ -551,9 +538,8 @@ op_get_iter:
 ;; If exhausted: pop iterator, jump forward by arg
 ;; Followed by 1 CACHE entry (2 bytes).
 ;; ============================================================================
-global op_for_iter
 align 16
-op_for_iter:
+DEF_FUNC_BARE op_for_iter
     push rcx                   ; save jump offset on machine stack
 
     ; Peek at iterator (don't pop yet)
@@ -589,6 +575,7 @@ op_for_iter:
     DECREF_REG rdi
 
     DISPATCH
+END_FUNC op_for_iter
 
 ;; ============================================================================
 ;; op_end_for - End of for loop cleanup
@@ -596,8 +583,7 @@ op_for_iter:
 ;; In Python 3.12, END_FOR (opcode 4) pops TOS (the exhausted iterator value).
 ;; Actually END_FOR pops 2 items in 3.12.
 ;; ============================================================================
-global op_end_for
-op_end_for:
+DEF_FUNC_BARE op_end_for
     ; Pop TOS (end-of-iteration sentinel / last value)
     VPOP rdi
     DECREF_REG rdi
@@ -605,6 +591,7 @@ op_end_for:
     VPOP rdi
     DECREF_REG rdi
     DISPATCH
+END_FUNC op_end_for
 
 ;; ============================================================================
 ;; op_list_append - Append TOS to list at stack position
@@ -613,8 +600,7 @@ op_end_for:
 ;; list is at stack[-(ecx+1)] relative to current TOS
 ;; Pop TOS (value), append to list.
 ;; ============================================================================
-global op_list_append
-op_list_append:
+DEF_FUNC_BARE op_list_append
     ; TOS = value to append
     VPOP rsi                   ; rsi = value
 
@@ -630,6 +616,7 @@ op_list_append:
     DECREF_REG rdi
 
     DISPATCH
+END_FUNC op_list_append
 
 ;; ============================================================================
 ;; op_list_extend - Extend list with iterable
@@ -637,11 +624,8 @@ op_list_append:
 ;; ecx = position (list at stack[-(ecx)] after pop)
 ;; Pop TOS (iterable), extend list.
 ;; ============================================================================
-global op_list_extend
-op_list_extend:
-    push rbp
-    mov rbp, rsp
-    sub rsp, 32                ; locals: [rbp-8]=list, [rbp-16]=iterable, [rbp-24]=count, [rbp-32]=items
+DEF_FUNC op_list_extend, 32
+    ; locals: [rbp-8]=list, [rbp-16]=iterable, [rbp-24]=count, [rbp-32]=items
 
     ; TOS = iterable
     VPOP rsi                   ; rsi = iterable (tuple or list)
@@ -703,6 +687,7 @@ op_list_extend:
 
     leave
     DISPATCH
+END_FUNC op_list_extend
 
 ;; ============================================================================
 ;; op_is_op - Identity comparison (is / is not)
@@ -710,8 +695,7 @@ op_list_extend:
 ;; ecx = 0 for 'is', 1 for 'is not'
 ;; Pop right, pop left, push True/False.
 ;; ============================================================================
-global op_is_op
-op_is_op:
+DEF_FUNC_BARE op_is_op
     mov r8d, ecx               ; save invert flag
 
     VPOP rsi                   ; right
@@ -746,6 +730,7 @@ op_is_op:
     INCREF rax
     VPUSH rax
     DISPATCH
+END_FUNC op_is_op
 
 ;; ============================================================================
 ;; op_contains_op - 'in' / 'not in' test
@@ -754,8 +739,7 @@ op_is_op:
 ;; Stack: right (container), left (value)
 ;; Pop right (container), pop left (value to find).
 ;; ============================================================================
-global op_contains_op
-op_contains_op:
+DEF_FUNC_BARE op_contains_op
     mov r8d, ecx               ; save invert flag
 
     VPOP rsi                   ; rsi = right (container)
@@ -809,6 +793,7 @@ op_contains_op:
     lea rdi, [rel exc_TypeError_type]
     CSTRING rsi, "argument of type is not iterable"
     call raise_exception
+END_FUNC op_contains_op
 
 ;; ============================================================================
 ;; op_build_slice - Build a slice object
@@ -816,8 +801,7 @@ op_contains_op:
 ;; arg = 2: pop stop, pop start, step=None
 ;; arg = 3: pop step, pop stop, pop start
 ;; ============================================================================
-global op_build_slice
-op_build_slice:
+DEF_FUNC_BARE op_build_slice
     cmp ecx, 3
     je .bs_three
 
@@ -858,6 +842,7 @@ op_build_slice:
     add rsp, 24
     VPUSH rax
     DISPATCH
+END_FUNC op_build_slice
 
 ;; ============================================================================
 ;; op_binary_slice - obj[start:stop]
@@ -865,11 +850,7 @@ op_build_slice:
 ;; Python 3.12: pops stop, start, obj from stack.
 ;; Creates a slice(start, stop), calls mp_subscript(obj, slice).
 ;; ============================================================================
-global op_binary_slice
-op_binary_slice:
-    push rbp
-    mov rbp, rsp
-    sub rsp, 32
+DEF_FUNC op_binary_slice, 32
 
     ; Pop stop (TOS), start (TOS1), obj (TOS2)
     VPOP rsi               ; stop
@@ -910,17 +891,14 @@ op_binary_slice:
     VPUSH rax
     leave
     DISPATCH
+END_FUNC op_binary_slice
 
 ;; ============================================================================
 ;; op_store_slice - obj[start:stop] = value
 ;;
 ;; Python 3.12: pops stop, start, obj, value from stack.
 ;; ============================================================================
-global op_store_slice
-op_store_slice:
-    push rbp
-    mov rbp, rsp
-    sub rsp, 48
+DEF_FUNC op_store_slice, 48
 
     ; Pop stop (TOS), start (TOS1), obj (TOS2), value (TOS3)
     VPOP rsi               ; stop
@@ -962,6 +940,7 @@ op_store_slice:
 
     leave
     DISPATCH
+END_FUNC op_store_slice
 
 ;; ============================================================================
 ;; op_map_add - Add key:value to dict at stack position
@@ -970,10 +949,7 @@ op_store_slice:
 ;; TOS = value, TOS1 = key
 ;; dict is at stack[-(ecx+2)] relative to current TOS (before pops)
 ;; ============================================================================
-global op_map_add
-op_map_add:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC op_map_add
     push rcx                   ; save oparg
 
     VPOP rdx                   ; rdx = value (TOS)
@@ -997,6 +973,7 @@ op_map_add:
 
     leave
     DISPATCH
+END_FUNC op_map_add
 
 ;; ============================================================================
 ;; op_dict_update - Update dict with another mapping
@@ -1007,10 +984,7 @@ op_map_add:
 ;; ============================================================================
 extern dict_type
 
-global op_dict_update
-op_dict_update:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC op_dict_update
     push rbx
     push r14                   ; extra callee-saved
     sub rsp, 32                ; locals + alignment
@@ -1078,6 +1052,7 @@ op_dict_update:
     lea rdi, [rel exc_TypeError_type]
     CSTRING rsi, "dict.update() argument must be a dict"
     call raise_exception
+END_FUNC op_dict_update
 
 ;; ============================================================================
 ;; op_dict_merge - Merge dict (like dict_update but for **kwargs)
@@ -1085,9 +1060,9 @@ op_dict_update:
 ;; DICT_MERGE (164): same as DICT_UPDATE but raises on duplicate keys
 ;; For simplicity, just delegate to dict_update logic (no dup check).
 ;; ============================================================================
-global op_dict_merge
-op_dict_merge:
+DEF_FUNC_BARE op_dict_merge
     jmp op_dict_update         ; same behavior for now
+END_FUNC op_dict_merge
 
 ;; ============================================================================
 ;; op_unpack_ex - Unpack with *rest
@@ -1100,10 +1075,7 @@ extern list_type
 extern list_getitem
 extern tuple_getitem
 
-global op_unpack_ex
-op_unpack_ex:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC op_unpack_ex
     push rbx
     push r14
     push r15
@@ -1278,6 +1250,7 @@ op_unpack_ex:
     mov rax, [r15 + PyListObject.ob_item]
     mov rax, [rax + rsi*8]
     ret
+END_FUNC op_unpack_ex
 
 ;; ============================================================================
 ;; op_kw_names - Store keyword argument names for next CALL
@@ -1287,12 +1260,12 @@ op_unpack_ex:
 ;; ============================================================================
 extern kw_names_pending
 
-global op_kw_names
-op_kw_names:
+DEF_FUNC_BARE op_kw_names
     ; ecx = arg (index into co_consts)
     mov rax, [r14 + rcx*8]     ; rax = tuple of kw names from co_consts
     mov [rel kw_names_pending], rax
     DISPATCH
+END_FUNC op_kw_names
 
 ;; ============================================================================
 ;; op_build_set - Create set from TOS items
@@ -1304,11 +1277,7 @@ extern set_new
 extern set_add
 extern set_type
 
-global op_build_set
-op_build_set:
-    push rbp
-    mov rbp, rsp
-    sub rsp, 16
+DEF_FUNC op_build_set, 16
 
     mov [rbp-8], rcx           ; save count
 
@@ -1359,6 +1328,7 @@ op_build_set:
     VPUSH rax
     leave
     DISPATCH
+END_FUNC op_build_set
 
 ;; ============================================================================
 ;; op_set_add - Add TOS to set at stack position
@@ -1367,8 +1337,8 @@ op_build_set:
 ;; ecx = position (1-based from TOS before the value to add)
 ;; Pop TOS (value), add to set.
 ;; ============================================================================
-global op_set_add
-op_set_add:
+DEF_FUNC_BARE op_set_add
+
     ; TOS = value to add
     VPOP rsi                   ; rsi = value
 
@@ -1384,6 +1354,7 @@ op_set_add:
     DECREF_REG rdi
 
     DISPATCH
+END_FUNC op_set_add
 
 ;; ============================================================================
 ;; op_set_update - Update set with iterable
@@ -1392,10 +1363,7 @@ op_set_add:
 ;; ecx = position (set at stack[-(ecx)] after pop)
 ;; Pop TOS (iterable), add each item to set.
 ;; ============================================================================
-global op_set_update
-op_set_update:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC op_set_update
     push rbx
     push r14
     sub rsp, 32                ; locals: [rbp-24]=set, [rbp-32]=iterable, [rbp-40]=iter
@@ -1501,3 +1469,4 @@ op_set_update:
     lea rdi, [rel exc_TypeError_type]
     CSTRING rsi, "object is not iterable"
     call raise_exception
+END_FUNC op_set_update

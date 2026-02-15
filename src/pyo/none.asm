@@ -4,32 +4,28 @@
 %include "object.inc"
 %include "types.inc"
 
-section .note.GNU-stack noalloc noexec nowrite progbits
-
-section .text
-
 extern str_from_cstr
 
 ; none_repr(PyObject *self) -> PyObject*
 ; Returns a new string "None"
-global none_repr
-none_repr:
+DEF_FUNC_BARE none_repr
     lea rdi, [rel none_str]
     jmp str_from_cstr
+END_FUNC none_repr
 
 ; none_hash(PyObject *self) -> int64
 ; Returns a fixed hash value for None
-global none_hash
-none_hash:
+DEF_FUNC_BARE none_hash
     mov rax, 0x48FA9B36     ; arbitrary fixed hash
     ret
+END_FUNC none_hash
 
 ; none_bool(PyObject *self) -> int
 ; None is always falsy
-global none_bool
-none_bool:
+DEF_FUNC_BARE none_bool
     xor eax, eax
     ret
+END_FUNC none_bool
 
 section .data
 

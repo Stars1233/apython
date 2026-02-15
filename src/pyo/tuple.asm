@@ -5,10 +5,6 @@
 %include "object.inc"
 %include "types.inc"
 
-section .note.GNU-stack noalloc noexec nowrite progbits
-
-section .text
-
 extern ap_malloc
 extern ap_free
 extern obj_decref
@@ -24,10 +20,7 @@ extern slice_indices
 
 ; tuple_new(int64_t size) -> PyTupleObject*
 ; Allocate a tuple with room for 'size' items, zero-filled
-global tuple_new
-tuple_new:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC tuple_new
     push rbx
     push r12
 
@@ -61,13 +54,13 @@ tuple_new:
     mov rax, rbx
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
+END_FUNC tuple_new
 
 ; tuple_getitem(PyTupleObject *tuple, int64_t index) -> PyObject*
 ; sq_item: Return tuple->ob_item[index] with bounds check and INCREF
-global tuple_getitem
-tuple_getitem:
+DEF_FUNC_BARE tuple_getitem
     ; Handle negative index
     test rsi, rsi
     jns .positive
@@ -85,13 +78,11 @@ tuple_getitem:
     lea rdi, [rel exc_IndexError_type]
     CSTRING rsi, "tuple index out of range"
     call raise_exception
+END_FUNC tuple_getitem
 
 ; tuple_subscript(PyTupleObject *tuple, PyObject *key) -> PyObject*
 ; mp_subscript: index with int or slice key (for BINARY_SUBSCR)
-global tuple_subscript
-tuple_subscript:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC tuple_subscript
     push rbx
     mov rbx, rdi               ; save tuple
 
@@ -110,7 +101,7 @@ tuple_subscript:
     mov rdi, rbx
     call tuple_getitem
     pop rbx
-    pop rbp
+    leave
     ret
 
 .ts_slice:
@@ -118,22 +109,20 @@ tuple_subscript:
     ; rsi = slice
     call tuple_getslice
     pop rbx
-    pop rbp
+    leave
     ret
+END_FUNC tuple_subscript
 
 ; tuple_len(PyTupleObject *tuple) -> int64_t
 ; Return tuple->ob_size
-global tuple_len
-tuple_len:
+DEF_FUNC_BARE tuple_len
     mov rax, [rdi + PyTupleObject.ob_size]
     ret
+END_FUNC tuple_len
 
 ; tuple_dealloc(PyObject *self)
 ; DECREF each item, then free self
-global tuple_dealloc
-tuple_dealloc:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC tuple_dealloc
     push rbx
     push r12
     push r13
@@ -160,18 +149,16 @@ tuple_dealloc:
     pop r13
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
+END_FUNC tuple_dealloc
 
 ; tuple_repr is in src/repr.asm
 extern tuple_repr
 
 ; tuple_hash(PyObject *self) -> int64
 ; Combines item hashes using a simple multiply-xor scheme
-global tuple_hash
-tuple_hash:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC tuple_hash
     push rbx
     push r12
     push r13
@@ -219,17 +206,15 @@ tuple_hash:
     pop r13
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
+END_FUNC tuple_hash
 
 ;; ============================================================================
 ;; tuple_getslice(PyTupleObject *tuple, PySliceObject *slice) -> PyTupleObject*
 ;; Creates a new tuple from a slice of the original.
 ;; ============================================================================
-global tuple_getslice
-tuple_getslice:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC tuple_getslice
     push rbx
     push r12
     push r13
@@ -312,17 +297,15 @@ tuple_getslice:
     pop r13
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
+END_FUNC tuple_getslice
 
 ;; ============================================================================
 ;; tuple_contains(PyTupleObject *self, PyObject *value) -> int (0 or 1)
 ;; Linear scan with pointer equality + value comparison fallback.
 ;; ============================================================================
-global tuple_contains
-tuple_contains:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC tuple_contains
     push rbx
     push r12
     push r13
@@ -354,7 +337,7 @@ tuple_contains:
     pop r13
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
 
 .tc_not_found:
@@ -362,8 +345,9 @@ tuple_contains:
     pop r13
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
+END_FUNC tuple_contains
 
 section .data
 

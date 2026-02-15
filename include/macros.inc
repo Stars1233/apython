@@ -34,23 +34,45 @@
 %ifndef MACROS_INC
 %define MACROS_INC
 
-; Function prologue
-%macro FUNC_PROLOG 0
+; Standard global function with RBP frame
+%macro DEF_FUNC 1
+    global %1:function (%1 %+ .end - %1)
+%1:
     push rbp
     mov rbp, rsp
 %endmacro
 
-; Function prologue with local space
-%macro FUNC_PROLOG 1
+; Global function with RBP frame + local space
+%macro DEF_FUNC 2
+    global %1:function (%1 %+ .end - %1)
+%1:
     push rbp
     mov rbp, rsp
-    sub rsp, %1
+    sub rsp, %2
 %endmacro
 
-; Function epilogue
-%macro FUNC_EPILOG 0
-    leave
-    ret
+; Global function without prologue (opcode handlers, leaf, tail-call)
+%macro DEF_FUNC_BARE 1
+    global %1:function (%1 %+ .end - %1)
+%1:
+%endmacro
+
+; File-local function with RBP frame (not exported)
+%macro DEF_FUNC_LOCAL 1
+%1:
+    push rbp
+    mov rbp, rsp
+%endmacro
+
+; End any function — emits .end label for ELF size
+%macro END_FUNC 1
+%1 %+ .end:
+%endmacro
+
+; File initialization (GNU-stack + text section reset)
+%macro ASM_INIT 0
+    section .note.GNU-stack noalloc noexec nowrite progbits
+    section .text
 %endmacro
 
 ; Value stack push (r13 = stack top pointer)
@@ -164,10 +186,7 @@ SMALLINT_TAG equ 0x8000000000000000
     lea %1, [rel %%str]
 %endmacro
 
-; Mark stack as non-executable (include in every .asm file via macros.inc)
-section .note.GNU-stack noalloc noexec nowrite progbits
-
-; Reset to .text section so files including macros.inc start in .text
-section .text
+; Mark stack as non-executable and reset to .text section
+ASM_INIT
 
 %endif ; MACROS_INC

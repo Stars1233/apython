@@ -17,8 +17,6 @@
 %include "frame.inc"
 %include "builtins.inc"
 
-section .note.GNU-stack noalloc noexec nowrite progbits
-
 section .text
 
 extern eval_dispatch
@@ -60,17 +58,13 @@ extern exc_TypeError_type
 ;;
 ;; Followed by 3 CACHE entries (6 bytes) that must be skipped.
 ;; ============================================================================
-global op_call
-op_call:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC op_call, 48
     ; Locals:
     ;   [rbp-8]  = nargs (possibly incremented for method calls)
     ;   [rbp-16] = callable ptr (saved before overwriting stack slot)
     ;   [rbp-24] = return value from tp_call
     ;   [rbp-32] = is_method (0 or 1)
     ;   [rbp-40] = original nargs (before increment)
-    sub rsp, 48                     ; allocate locals (48 keeps 16-byte alignment)
 
     mov [rbp-8], rcx                ; save nargs
     mov [rbp-40], rcx               ; save original nargs
@@ -192,6 +186,7 @@ op_call:
     CSTRING rsi, "object is not callable"
     call raise_exception
     ; does not return
+END_FUNC op_call
 
 ;; ============================================================================
 ;; op_make_function - Create a function from code object on TOS
@@ -206,11 +201,8 @@ op_call:
 ;;   defaults tuple (if flag 0x01) - ignored
 ;;   code_obj (always on top)
 ;; ============================================================================
-global op_make_function
-op_make_function:
-    push rbp
-    mov rbp, rsp
-    sub rsp, 32                    ; [rbp-8]=flags, [rbp-16]=code, [rbp-24]=closure
+DEF_FUNC op_make_function, 32
+    ; [rbp-8]=flags, [rbp-16]=code, [rbp-24]=closure
 
     mov [rbp-8], ecx               ; save flags
     mov qword [rbp-24], 0          ; closure = NULL default
@@ -271,6 +263,7 @@ op_make_function:
     VPUSH rax
     leave
     DISPATCH
+END_FUNC op_make_function
 
 ;; ============================================================================
 ;; op_call_function_ex - Call with *args and optional **kwargs
@@ -286,10 +279,7 @@ op_make_function:
 extern tuple_type
 extern dict_type
 
-global op_call_function_ex
-op_call_function_ex:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC op_call_function_ex
     push rbx                        ; save (clobbered by eval convention save)
     push r12
     sub rsp, 48                     ; [rbp-32]=func, [rbp-40]=args, [rbp-48]=kwargs, [rbp-56]=result, [rbp-64]=oparg
@@ -374,6 +364,7 @@ op_call_function_ex:
     lea rdi, [rel exc_TypeError_type]
     CSTRING rsi, "object is not callable"
     call raise_exception
+END_FUNC op_call_function_ex
 
 ;; ============================================================================
 ;; op_before_with - Set up context manager
@@ -391,10 +382,7 @@ extern dict_get
 extern str_from_cstr
 extern exc_AttributeError_type
 
-global op_before_with
-op_before_with:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC op_before_with
     push rbx
     push r12
     sub rsp, 32                     ; [rbp-32]=mgr, [rbp-40]=exit_method, [rbp-48]=enter_result
@@ -412,7 +400,7 @@ op_before_with:
 
     ; Get "__exit__" from type dict
     mov rdi, rax
-    lea rsi, [rel .str_exit]
+    lea rsi, [rel bw_str_exit]
     call str_from_cstr
     mov r12, rax                    ; r12 = exit name str
     mov rdi, [rbx + PyObject.ob_type]
@@ -445,7 +433,7 @@ op_before_with:
     test rdi, rdi
     jz .bw_no_enter
 
-    lea rdi, [rel .str_enter]
+    lea rdi, [rel bw_str_enter]
     call str_from_cstr
     mov r12, rax                    ; r12 = enter name str
     mov rdi, [rbx + PyObject.ob_type]
@@ -505,10 +493,11 @@ op_before_with:
     lea rdi, [rel exc_AttributeError_type]
     CSTRING rsi, "__enter__"
     call raise_exception
+END_FUNC op_before_with
 
 section .rodata
-.str_exit:  db "__exit__", 0
-.str_enter: db "__enter__", 0
+bw_str_exit:  db "__exit__", 0
+bw_str_enter: db "__enter__", 0
 section .text
 
 ;; ============================================================================
@@ -525,11 +514,7 @@ section .text
 ;; ============================================================================
 extern none_singleton
 
-global op_with_except_start
-op_with_except_start:
-    push rbp
-    mov rbp, rsp
-    sub rsp, 48
+DEF_FUNC op_with_except_start, 48
 
     ; Stack layout (TOS is rightmost):
     ; PEEK(1) = val (exception)
@@ -594,3 +579,4 @@ op_with_except_start:
     lea rdi, [rel exc_TypeError_type]
     CSTRING rsi, "__exit__ is not callable"
     call raise_exception
+END_FUNC op_with_except_start

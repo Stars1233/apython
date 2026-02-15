@@ -6,9 +6,6 @@
 %include "types.inc"
 %include "marshal.inc"
 
-section .note.GNU-stack noalloc noexec nowrite progbits
-
-section .text
 
 extern none_singleton
 extern bool_true
@@ -33,10 +30,7 @@ MARSHAL_REFS_INIT_CAP equ 64
 ; marshal_read_byte() -> byte in al
 ; Read one byte from marshal_buf[marshal_pos], increment marshal_pos.
 ;--------------------------------------------------------------------------
-global marshal_read_byte
-marshal_read_byte:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC marshal_read_byte
 
     mov rax, [rel marshal_pos]
     cmp rax, [rel marshal_len]
@@ -46,8 +40,9 @@ marshal_read_byte:
     movzx eax, byte [rcx + rax]
     inc qword [rel marshal_pos]
 
-    pop rbp
+    leave
     ret
+END_FUNC marshal_read_byte
 
 mread_byte_eof:
     lea rdi, [rel marshal_err_eof]
@@ -57,10 +52,7 @@ mread_byte_eof:
 ; marshal_read_long() -> int32 in eax
 ; Read 4 bytes little-endian from buffer.
 ;--------------------------------------------------------------------------
-global marshal_read_long
-marshal_read_long:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC marshal_read_long
 
     mov rax, [rel marshal_pos]
     lea rcx, [rax + 4]
@@ -71,8 +63,9 @@ marshal_read_long:
     mov eax, [rcx + rax]       ; little-endian read (x86 native)
     add qword [rel marshal_pos], 4
 
-    pop rbp
+    leave
     ret
+END_FUNC marshal_read_long
 
 mread_long_eof:
     lea rdi, [rel marshal_err_eof]
@@ -82,10 +75,7 @@ mread_long_eof:
 ; marshal_read_long64() -> int64 in rax
 ; Read 8 bytes little-endian from buffer.
 ;--------------------------------------------------------------------------
-global marshal_read_long64
-marshal_read_long64:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC marshal_read_long64
 
     mov rax, [rel marshal_pos]
     lea rcx, [rax + 8]
@@ -96,8 +86,9 @@ marshal_read_long64:
     mov rax, [rcx + rax]       ; little-endian read (x86 native)
     add qword [rel marshal_pos], 8
 
-    pop rbp
+    leave
     ret
+END_FUNC marshal_read_long64
 
 mread_long64_eof:
     lea rdi, [rel marshal_err_eof]
@@ -107,10 +98,7 @@ mread_long64_eof:
 ; marshal_read_bytes(int64_t n) -> pointer to bytes in buffer (rax)
 ; Returns pointer to current position in buffer, advances pos by n.
 ;--------------------------------------------------------------------------
-global marshal_read_bytes
-marshal_read_bytes:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC marshal_read_bytes
 
     mov rsi, rdi               ; rsi = n
     mov rax, [rel marshal_pos]
@@ -122,8 +110,9 @@ marshal_read_bytes:
     lea rax, [rcx + rax]       ; rax = &buf[pos]
     add [rel marshal_pos], rsi
 
-    pop rbp
+    leave
     ret
+END_FUNC marshal_read_bytes
 
 mread_bytes_eof:
     lea rdi, [rel marshal_err_eof]
@@ -132,10 +121,7 @@ mread_bytes_eof:
 ;--------------------------------------------------------------------------
 ; marshal_init_refs() - Initialize the reference list
 ;--------------------------------------------------------------------------
-global marshal_init_refs
-marshal_init_refs:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC marshal_init_refs
 
     mov qword [rel marshal_ref_count], 0
 
@@ -150,16 +136,14 @@ marshal_init_refs:
     mov qword [rel marshal_ref_cap], MARSHAL_REFS_INIT_CAP
 
 .already_allocated:
-    pop rbp
+    leave
     ret
+END_FUNC marshal_init_refs
 
 ;--------------------------------------------------------------------------
 ; marshal_add_ref(PyObject *obj) - Add object to reference list
 ;--------------------------------------------------------------------------
-global marshal_add_ref
-marshal_add_ref:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC marshal_add_ref
     push rbx
 
     mov rbx, rdi               ; rbx = obj
@@ -185,8 +169,9 @@ marshal_add_ref:
     inc qword [rel marshal_ref_count]
 
     pop rbx
-    pop rbp
+    leave
     ret
+END_FUNC marshal_add_ref
 
 ;--------------------------------------------------------------------------
 ; marshal_read_object() -> PyObject*
@@ -197,10 +182,7 @@ marshal_add_ref:
 ;   r12 = FLAG_REF indicator (0 or 1)
 ; Both are callee-saved and pushed in the prologue.
 ;--------------------------------------------------------------------------
-global marshal_read_object
-marshal_read_object:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC marshal_read_object
     push rbx
     push r12
 
@@ -284,7 +266,7 @@ mfinish:
 .no_add_ref:
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
 
 ;--------------------------------------------------------------------------
@@ -851,8 +833,9 @@ mdo_code:
     ; We still need to pop those and return.
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
+END_FUNC marshal_read_object
 
 ;--------------------------------------------------------------------------
 ; TYPE_FROZENSET / TYPE_SET handler: 4-byte count, then N objects

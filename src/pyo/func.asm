@@ -6,10 +6,6 @@
 %include "types.inc"
 %include "frame.inc"
 
-section .note.GNU-stack noalloc noexec nowrite progbits
-
-section .text
-
 extern ap_malloc
 extern ap_free
 extern obj_decref
@@ -29,10 +25,7 @@ CO_VARARGS equ 0x04
 ; Allocate and initialize a new function object.
 ; rdi = code object, rsi = globals dict
 ; ---------------------------------------------------------------------------
-global func_new
-func_new:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC func_new
     push rbx
     push r12
     push r13
@@ -80,8 +73,9 @@ func_new:
     pop r13
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
+END_FUNC func_new
 
 ; ---------------------------------------------------------------------------
 ; func_call(PyFuncObject *callable, PyObject **args_ptr, int nargs) -> PyObject*
@@ -91,10 +85,7 @@ func_new:
 ; r12 still holds the CALLER's frame pointer (callee-saved, set by eval loop,
 ; preserved through op_call).
 ; ---------------------------------------------------------------------------
-global func_call
-func_call:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC func_call
     push rbx
     push r12
     push r13
@@ -223,18 +214,16 @@ func_call:
     pop r13
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
+END_FUNC func_call
 
 ; ---------------------------------------------------------------------------
 ; func_dealloc(PyFuncObject *self)
 ; Releases references to internal objects and frees the function.
 ; rdi = function object
 ; ---------------------------------------------------------------------------
-global func_dealloc
-func_dealloc:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC func_dealloc
     push rbx
     push r12                ; alignment padding (3 pushes = RSP aligned)
 
@@ -279,18 +268,19 @@ func_dealloc:
 
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
+END_FUNC func_dealloc
 
 ; ---------------------------------------------------------------------------
 ; func_repr(PyFuncObject *self) -> PyStrObject*
 ; Returns the string "<function>"
 ; rdi = function object
 ; ---------------------------------------------------------------------------
-global func_repr
-func_repr:
+DEF_FUNC_BARE func_repr
     lea rdi, [rel func_repr_str]
     jmp str_from_cstr
+END_FUNC func_repr
 
 ; ---------------------------------------------------------------------------
 ; Data section

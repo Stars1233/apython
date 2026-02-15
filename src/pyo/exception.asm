@@ -21,10 +21,6 @@
 %include "types.inc"
 %include "errcodes.inc"
 
-section .note.GNU-stack noalloc noexec nowrite progbits
-
-section .text
-
 extern ap_malloc
 extern ap_free
 extern str_from_cstr
@@ -37,10 +33,7 @@ extern type_repr
 ; exc_new(PyTypeObject *type, PyObject *msg_str) -> PyExceptionObject*
 ; Creates a new exception with given type and message string.
 ; msg_str is INCREFed. type is stored but not INCREFed (types are immortal).
-global exc_new
-exc_new:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC exc_new
     push rbx
     push r12
 
@@ -68,15 +61,13 @@ exc_new:
 .done:
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
+END_FUNC exc_new
 
 ; exc_from_cstr(PyTypeObject *type, const char *msg) -> PyExceptionObject*
 ; Creates exception with a C string message (converted to PyStrObject).
-global exc_from_cstr
-exc_from_cstr:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC exc_from_cstr
     push rbx
 
     mov rbx, rdi            ; save type
@@ -98,15 +89,13 @@ exc_from_cstr:
     pop rax
 
     pop rbx
-    pop rbp
+    leave
     ret
+END_FUNC exc_from_cstr
 
 ; exc_dealloc(PyExceptionObject *exc)
 ; Free exception and DECREF its fields.
-global exc_dealloc
-exc_dealloc:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC exc_dealloc
     push rbx
 
     mov rbx, rdi
@@ -144,15 +133,13 @@ exc_dealloc:
     call ap_free
 
     pop rbx
-    pop rbp
+    leave
     ret
+END_FUNC exc_dealloc
 
 ; exc_repr(PyExceptionObject *exc) -> PyObject* (string)
 ; Returns "TypeName(msg)" or just "TypeName()" if no message.
-global exc_repr
-exc_repr:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC exc_repr
     push rbx
     push r12
     sub rsp, 256            ; buffer for formatting
@@ -213,15 +200,13 @@ exc_repr:
     add rsp, 256
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
+END_FUNC exc_repr
 
 ; exc_str(PyExceptionObject *exc) -> PyObject* (string)
 ; Returns the message string, or type name if no message.
-global exc_str
-exc_str:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC exc_str
 
     ; Return exc_value if it's a string
     mov rax, [rdi + PyExceptionObject.exc_value]
@@ -236,7 +221,7 @@ exc_str:
 
     ; INCREF and return the message
     INCREF rax
-    pop rbp
+    leave
     ret
 
 .use_type_name:
@@ -244,13 +229,13 @@ exc_str:
     mov rax, [rdi + PyExceptionObject.ob_type]
     mov rdi, [rax + PyTypeObject.tp_name]
     call str_from_cstr
-    pop rbp
+    leave
     ret
+END_FUNC exc_str
 
 ; exc_isinstance(PyExceptionObject *exc, PyTypeObject *type) -> int (0/1)
 ; Check if exception is an instance of type, walking tp_base chain.
-global exc_isinstance
-exc_isinstance:
+DEF_FUNC_BARE exc_isinstance
     ; rdi = exc, rsi = target type
     mov rax, [rdi + PyExceptionObject.ob_type]
 .walk:
@@ -266,24 +251,22 @@ exc_isinstance:
 .not_match:
     xor eax, eax
     ret
+END_FUNC exc_isinstance
 
 ; exc_type_from_id(int exc_id) -> PyTypeObject*
 ; Look up exception type from EXC_* constant.
-global exc_type_from_id
-exc_type_from_id:
+DEF_FUNC_BARE exc_type_from_id
     lea rax, [rel exception_type_table]
     mov rax, [rax + rdi*8]
     ret
+END_FUNC exc_type_from_id
 
 ; exc_type_call(PyTypeObject *type, PyObject **args, int64_t nargs) -> PyObject*
 ; tp_call for exception metatype. Creates an exception instance.
 ; rdi = exception type (the class being called, e.g. ValueError)
 ; rsi = args array
 ; rdx = nargs
-global exc_type_call
-exc_type_call:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC exc_type_call
     push rbx
 
     mov rbx, rdi            ; rbx = type
@@ -302,8 +285,9 @@ exc_type_call:
     ; rax = new exception object
 
     pop rbx
-    pop rbp
+    leave
     ret
+END_FUNC exc_type_call
 
 ; ============================================================================
 ; Data section - Exception type objects and name strings

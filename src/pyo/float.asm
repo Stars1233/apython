@@ -10,10 +10,6 @@
 %include "object.inc"
 %include "types.inc"
 
-section .note.GNU-stack noalloc noexec nowrite progbits
-
-section .text
-
 extern ap_malloc
 extern ap_free
 extern str_from_cstr
@@ -41,11 +37,7 @@ extern __gmpz_get_d
 ;; Input:  xmm0 = double value
 ;; Output: rax = new PyFloatObject*
 ;; ============================================================================
-global float_from_f64
-float_from_f64:
-    push rbp
-    mov rbp, rsp
-    sub rsp, 16
+DEF_FUNC float_from_f64, 16
 
     movsd [rbp-8], xmm0       ; save double value
 
@@ -61,6 +53,7 @@ float_from_f64:
 
     leave
     ret
+END_FUNC float_from_f64
 
 ;; ============================================================================
 ;; float_to_f64 - Convert numeric PyObject to double
@@ -68,8 +61,7 @@ float_from_f64:
 ;; Output: xmm0 = double value
 ;; Clobbers: rax, rcx, rdx, rdi, rsi, r8-r11
 ;; ============================================================================
-global float_to_f64
-float_to_f64:
+DEF_FUNC_BARE float_to_f64
     ; Check SmallInt first (bit 63 set)
     test rdi, rdi
     js .from_smallint
@@ -108,15 +100,13 @@ float_to_f64:
     ; result in xmm0
     leave
     ret
+END_FUNC float_to_f64
 
 ;; ============================================================================
 ;; float_repr(PyObject *self) -> PyStrObject*
 ;; Uses shortest representation that round-trips.
 ;; ============================================================================
-global float_repr
-float_repr:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC float_repr
     and rsp, -16              ; ensure 16-byte alignment for libc calls
     sub rsp, 80
     ; Stack layout:
@@ -213,12 +203,12 @@ float_repr:
     call str_from_cstr
     leave
     ret
+END_FUNC float_repr
 
 ;; ============================================================================
 ;; float_hash(PyObject *self) -> int64 in rax
 ;; ============================================================================
-global float_hash
-float_hash:
+DEF_FUNC_BARE float_hash
     mov rax, [rdi + PyFloatObject.value]  ; raw bits
     ; Ensure hash is never -1 (Python convention)
     cmp rax, -1
@@ -226,12 +216,12 @@ float_hash:
     mov rax, -2
 .ok:
     ret
+END_FUNC float_hash
 
 ;; ============================================================================
 ;; float_bool(PyObject *self) -> int (0 or 1) in eax
 ;; ============================================================================
-global float_bool
-float_bool:
+DEF_FUNC_BARE float_bool
     movsd xmm0, [rdi + PyFloatObject.value]
     xorpd xmm1, xmm1         ; xmm1 = 0.0
     ucomisd xmm0, xmm1
@@ -242,14 +232,15 @@ float_bool:
     ; Also check for -0.0 (which is also falsy)
     xor eax, eax
     ret
+END_FUNC float_bool
 
 ;; ============================================================================
 ;; float_dealloc(PyObject *self)
 ;; ============================================================================
-global float_dealloc
-float_dealloc:
+DEF_FUNC_BARE float_dealloc
     ; rdi = self
     jmp ap_free                ; tail call
+END_FUNC float_dealloc
 
 ;; ============================================================================
 ;; Binary arithmetic: float_add, float_sub, float_mul, float_truediv,
@@ -269,47 +260,34 @@ float_dealloc:
     movsd [rbp-16], xmm0
 %endmacro
 
-global float_add
-float_add:
-    push rbp
-    mov rbp, rsp
-    sub rsp, 32
+DEF_FUNC float_add, 32
     FLOAT_BINOP_SETUP
     movsd xmm0, [rbp-8]
     addsd xmm0, [rbp-16]
     call float_from_f64
     leave
     ret
+END_FUNC float_add
 
-global float_sub
-float_sub:
-    push rbp
-    mov rbp, rsp
-    sub rsp, 32
+DEF_FUNC float_sub, 32
     FLOAT_BINOP_SETUP
     movsd xmm0, [rbp-8]
     subsd xmm0, [rbp-16]
     call float_from_f64
     leave
     ret
+END_FUNC float_sub
 
-global float_mul
-float_mul:
-    push rbp
-    mov rbp, rsp
-    sub rsp, 32
+DEF_FUNC float_mul, 32
     FLOAT_BINOP_SETUP
     movsd xmm0, [rbp-8]
     mulsd xmm0, [rbp-16]
     call float_from_f64
     leave
     ret
+END_FUNC float_mul
 
-global float_truediv
-float_truediv:
-    push rbp
-    mov rbp, rsp
-    sub rsp, 32
+DEF_FUNC float_truediv, 32
     FLOAT_BINOP_SETUP
 
     ; Check for division by zero
@@ -328,12 +306,9 @@ float_truediv:
     lea rdi, [rel exc_ZeroDivisionError_type]
     CSTRING rsi, "float division by zero"
     call raise_exception
+END_FUNC float_truediv
 
-global float_floordiv
-float_floordiv:
-    push rbp
-    mov rbp, rsp
-    sub rsp, 32
+DEF_FUNC float_floordiv, 32
     FLOAT_BINOP_SETUP
 
     ; Check for division by zero
@@ -354,12 +329,9 @@ float_floordiv:
     lea rdi, [rel exc_ZeroDivisionError_type]
     CSTRING rsi, "float floor division by zero"
     call raise_exception
+END_FUNC float_floordiv
 
-global float_mod
-float_mod:
-    push rbp
-    mov rbp, rsp
-    sub rsp, 32
+DEF_FUNC float_mod, 32
     FLOAT_BINOP_SETUP
 
     ; Check for division by zero
@@ -385,12 +357,9 @@ float_mod:
     lea rdi, [rel exc_ZeroDivisionError_type]
     CSTRING rsi, "float modulo"
     call raise_exception
+END_FUNC float_mod
 
-global float_neg
-float_neg:
-    push rbp
-    mov rbp, rsp
-    sub rsp, 16
+DEF_FUNC float_neg, 16
 
     ; rdi = self (only one operand for unary ops)
     call float_to_f64
@@ -401,15 +370,13 @@ float_neg:
 
     leave
     ret
+END_FUNC float_neg
 
 ;; ============================================================================
 ;; float_int(PyObject *self) -> PyIntObject*
 ;; Convert float to int by truncation.
 ;; ============================================================================
-global float_int
-float_int:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC float_int
 
     movsd xmm0, [rdi + PyFloatObject.value]
 
@@ -427,24 +394,21 @@ float_int:
     ; Truncate to int64
     cvttsd2si rdi, xmm0
     call int_from_i64
-    pop rbp
+    leave
     ret
 
 .not_finite:
     lea rdi, [rel exc_ValueError_type]
     CSTRING rsi, "cannot convert float NaN or infinity to integer"
     call raise_exception
+END_FUNC float_int
 
 ;; ============================================================================
 ;; float_compare(PyObject *a, PyObject *b, int op) -> PyObject*
 ;; op: PY_LT=0, PY_LE=1, PY_EQ=2, PY_NE=3, PY_GT=4, PY_GE=5
 ;; Handles mixed int/float comparisons.
 ;; ============================================================================
-global float_compare
-float_compare:
-    push rbp
-    mov rbp, rsp
-    sub rsp, 32
+DEF_FUNC float_compare, 32
     mov [rbp-24], edx          ; save op
 
     ; Convert both to doubles
@@ -524,6 +488,7 @@ float_compare:
     inc qword [rax + PyObject.ob_refcnt]
     leave
     ret
+END_FUNC float_compare
 
 ;; ============================================================================
 ;; Data

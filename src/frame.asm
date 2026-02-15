@@ -5,10 +5,6 @@
 %include "object.inc"
 %include "frame.inc"
 
-section .note.GNU-stack noalloc noexec nowrite progbits
-
-section .text
-
 extern ap_malloc
 extern ap_free
 extern obj_decref
@@ -16,10 +12,7 @@ extern obj_decref
 ; frame_new(PyCodeObject *code, PyObject *globals, PyObject *builtins, PyObject *locals) -> PyFrame*
 ; Allocates and initializes a new execution frame.
 ; rdi = code, rsi = globals, rdx = builtins, rcx = locals
-global frame_new
-frame_new:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC frame_new
     push rbx
     push r12
     push r13
@@ -80,16 +73,14 @@ frame_new:
     pop r13
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
+END_FUNC frame_new
 
 ; frame_free(PyFrame *frame)
 ; XDECREF all non-NULL localsplus entries, then free the frame.
 ; rdi = frame
-global frame_free
-frame_free:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC frame_free
     push rbx
     push r12
     push r13
@@ -122,5 +113,6 @@ frame_free:
     pop r13
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
+END_FUNC frame_free

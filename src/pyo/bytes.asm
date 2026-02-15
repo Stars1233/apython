@@ -5,10 +5,6 @@
 %include "object.inc"
 %include "types.inc"
 
-section .note.GNU-stack noalloc noexec nowrite progbits
-
-section .text
-
 extern ap_malloc
 extern ap_free
 extern str_from_cstr
@@ -16,10 +12,7 @@ extern ap_memcpy
 
 ; bytes_new(int64_t size) -> PyBytesObject*
 ; Allocate a bytes object with room for 'size' bytes
-global bytes_new
-bytes_new:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC bytes_new
     push rbx
     push r12
 
@@ -39,15 +32,13 @@ bytes_new:
     mov rax, rbx
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
+END_FUNC bytes_new
 
 ; bytes_from_data(const void *data, int64_t size) -> PyBytesObject*
 ; Allocate a bytes object and copy data into it
-global bytes_from_data
-bytes_from_data:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC bytes_from_data
     push rbx
     push r12
     push r13
@@ -76,21 +67,22 @@ bytes_from_data:
     pop r13
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
+END_FUNC bytes_from_data
 
 ; bytes_dealloc(PyObject *self)
 ; Data is inline, just free the object
-global bytes_dealloc
-bytes_dealloc:
+DEF_FUNC_BARE bytes_dealloc
     jmp ap_free
+END_FUNC bytes_dealloc
 
 ; bytes_repr(PyObject *self) -> PyStrObject*
 ; Stub: returns "b'...'"
-global bytes_repr
-bytes_repr:
+DEF_FUNC_BARE bytes_repr
     lea rdi, [rel bytes_repr_str]
     jmp str_from_cstr
+END_FUNC bytes_repr
 
 section .data
 

@@ -6,10 +6,6 @@
 %include "object.inc"
 %include "types.inc"
 
-section .note.GNU-stack noalloc noexec nowrite progbits
-
-section .text
-
 extern ap_malloc
 extern ap_free
 extern sys_write
@@ -21,10 +17,7 @@ extern int_type
 
 ; obj_alloc(size_t size, PyTypeObject *type) -> PyObject*
 ; Allocate a new object with refcount=1 and given type
-global obj_alloc
-obj_alloc:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC obj_alloc
     push rbx
     push r12
     mov rbx, rdi            ; size
@@ -39,24 +32,24 @@ obj_alloc:
 
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
+END_FUNC obj_alloc
 
 ; obj_incref(PyObject *obj)
 ; Increment reference count; NULL-safe, SmallInt-safe
-global obj_incref
-obj_incref:
+DEF_FUNC_BARE obj_incref
     test rdi, rdi
     jz .skip
     js .skip                ; SmallInt - no refcount
     inc qword [rdi + PyObject.ob_refcnt]
 .skip:
     ret
+END_FUNC obj_incref
 
 ; obj_decref(PyObject *obj)
 ; Decrement reference count; deallocate if zero; NULL-safe, SmallInt-safe
-global obj_decref
-obj_decref:
+DEF_FUNC_BARE obj_decref
     test rdi, rdi
     jz .skip
     js .skip                ; SmallInt - no refcount
@@ -66,11 +59,11 @@ obj_decref:
     jmp obj_dealloc
 .skip:
     ret
+END_FUNC obj_decref
 
 ; obj_dealloc(PyObject *obj)
 ; Calls type's tp_dealloc if present, else just frees
-global obj_dealloc
-obj_dealloc:
+DEF_FUNC_BARE obj_dealloc
     ; Guard against SmallInt (should never happen)
     test rdi, rdi
     js .bail
@@ -102,13 +95,11 @@ obj_dealloc:
     pop rbp
 .bail:
     ret
+END_FUNC obj_dealloc
 
 ; obj_repr(PyObject *obj) -> PyObject* (string)
 ; Calls type's tp_repr. SmallInt → int_repr.
-global obj_repr
-obj_repr:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC obj_repr
 
     test rdi, rdi
     jz .null_obj
@@ -122,27 +113,25 @@ obj_repr:
     jz .no_repr
 
     ; tail-call tp_repr(obj)
-    pop rbp
+    leave
     jmp rax
 
 .smallint:
     ; Delegate to int_repr which handles SmallInts
     call int_repr
-    pop rbp
+    leave
     ret
 
 .null_obj:
 .no_repr:
     xor eax, eax
-    pop rbp
+    leave
     ret
+END_FUNC obj_repr
 
 ; obj_str(PyObject *obj) -> PyObject* (string)
 ; Calls type's tp_str, falls back to tp_repr. SmallInt → int_repr.
-global obj_str
-obj_str:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC obj_str
     push rbx
     mov rbx, rdi
 
@@ -161,7 +150,7 @@ obj_str:
     mov rdi, rbx
     call rax
     pop rbx
-    pop rbp
+    leave
     ret
 
 .smallint:
@@ -169,22 +158,20 @@ obj_str:
     mov rdi, rbx
     call int_repr
     pop rbx
-    pop rbp
+    leave
     ret
 
 .fallback:
     mov rdi, rbx
     call obj_repr
     pop rbx
-    pop rbp
+    leave
     ret
+END_FUNC obj_str
 
 ; obj_hash(PyObject *obj) -> int64
 ; Calls type's tp_hash, falls back to address hash. SmallInt → decoded value.
-global obj_hash
-obj_hash:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC obj_hash
 
     test rdi, rdi
     jz .default_hash
@@ -198,7 +185,7 @@ obj_hash:
     jz .default_hash
 
     ; tail-call tp_hash(obj)
-    pop rbp
+    leave
     jmp rax
 
 .smallint_hash:
@@ -210,19 +197,19 @@ obj_hash:
     jne .hash_done
     mov rax, -2
 .hash_done:
-    pop rbp
+    leave
     ret
 
 .default_hash:
     ; Default: hash is the object address
     mov rax, rdi
-    pop rbp
+    leave
     ret
+END_FUNC obj_hash
 
 ; obj_is_true(PyObject *obj) -> int (0 or 1)
 ; Tests truthiness of an object. SmallInt → decoded value != 0.
-global obj_is_true
-obj_is_true:
+DEF_FUNC_BARE obj_is_true
     ; Check SmallInt before any stack setup
     test rdi, rdi
     js .smallint
@@ -308,13 +295,11 @@ obj_is_true:
     setnz al
     movzx eax, al
     ret
+END_FUNC obj_is_true
 
 ; obj_print(PyObject *obj)
 ; Print an object's string representation to stdout followed by newline
-global obj_print
-obj_print:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC obj_print
     push rbx
     mov rbx, rdi
 
@@ -338,7 +323,7 @@ obj_print:
     call sys_write
 
     pop rbx
-    pop rbp
+    leave
     ret
 
 .print_null:
@@ -349,17 +334,15 @@ obj_print:
     call sys_write
 
     pop rbx
-    pop rbp
+    leave
     ret
+END_FUNC obj_print
 
 ;; ============================================================================
 ;; type_repr(PyObject *type_obj) -> PyStrObject*
 ;; Formats "<class 'name'>" for a type object.
 ;; ============================================================================
-global type_repr
-type_repr:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC type_repr
     push rbx
     sub rsp, 72                ; 64 bytes buffer + 8 alignment
 
@@ -414,7 +397,7 @@ type_repr:
 
     add rsp, 72
     pop rbx
-    pop rbp
+    leave
     ret
 
 .type_repr_unknown:
@@ -422,8 +405,9 @@ type_repr:
     call str_from_cstr
     add rsp, 72
     pop rbx
-    pop rbp
+    leave
     ret
+END_FUNC type_repr
 
 section .rodata
 obj_print_newline: db 10

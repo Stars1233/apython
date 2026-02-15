@@ -6,10 +6,6 @@
 %include "types.inc"
 %include "builtins.inc"
 
-section .note.GNU-stack noalloc noexec nowrite progbits
-
-section .text
-
 extern dict_new
 extern dict_get
 extern dict_set
@@ -101,10 +97,7 @@ extern exc_UnicodeError_type
 ;; builtin_func_new(void *func_ptr, const char *name_cstr) -> PyBuiltinObject*
 ;; Create a new builtin function wrapper object
 ;; ============================================================================
-global builtin_func_new
-builtin_func_new:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC builtin_func_new
     push rbx
     push r12
     push r13
@@ -135,15 +128,15 @@ builtin_func_new:
     pop r13
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
+END_FUNC builtin_func_new
 
 ;; ============================================================================
 ;; builtin_func_call(PyObject *self, PyObject **args, int64_t nargs) -> PyObject*
 ;; Dispatch to the underlying C function: func_ptr(args, nargs)
 ;; ============================================================================
-global builtin_func_call
-builtin_func_call:
+DEF_FUNC_BARE builtin_func_call
     ; self = rdi, args = rsi, nargs = rdx
     ; Extract func_ptr from self
     mov rax, [rdi + PyBuiltinObject.func_ptr]
@@ -151,14 +144,13 @@ builtin_func_call:
     mov rdi, rsi                ; args
     mov rsi, rdx                ; nargs
     jmp rax                     ; tail call
+END_FUNC builtin_func_call
 
 ;; ============================================================================
 ;; builtin_func_dealloc(PyObject *self)
 ;; Free the builtin function wrapper
 ;; ============================================================================
-builtin_func_dealloc:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC_LOCAL builtin_func_dealloc
     push rbx
     mov rbx, rdi
 
@@ -174,33 +166,33 @@ builtin_func_dealloc:
     call ap_free
 
     pop rbx
-    pop rbp
+    leave
     ret
+END_FUNC builtin_func_dealloc
 
 ;; ============================================================================
 ;; builtin_func_repr(PyObject *self) -> PyObject*
 ;; Returns "<built-in function NAME>"
 ;; ============================================================================
-builtin_func_repr:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC_LOCAL builtin_func_repr
 
     ; For simplicity, just return the name string with INCREF
     mov rax, [rdi + PyBuiltinObject.func_name]
     test rax, rax
     jz .fallback
     inc qword [rax + PyObject.ob_refcnt]
-    pop rbp
+    leave
     ret
 
 .fallback:
-    lea rdi, [rel .unknown_str]
+    lea rdi, [rel builtin_func_repr_unknown_str]
     call str_from_cstr
-    pop rbp
+    leave
     ret
+END_FUNC builtin_func_repr
 
 section .rodata
-.unknown_str: db "<built-in function>", 0
+builtin_func_repr_unknown_str: db "<built-in function>", 0
 section .text
 
 ;; ============================================================================
@@ -208,10 +200,7 @@ section .text
 ;; Print each arg separated by spaces, followed by newline
 ;; Buffered: builds output in stack buffer, single fwrite() at end
 ;; ============================================================================
-global builtin_print
-builtin_print:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC builtin_print
     push rbx
     push r12
     push r13
@@ -314,18 +303,16 @@ align 16
     pop r13
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
+END_FUNC builtin_print
 
 ;; ============================================================================
 ;; builtin_len(PyObject **args, int64_t nargs) -> PyObject*
 ;; Returns len() of the first argument
 ;; Phase 4 stub: checks ob_size for variable-size objects
 ;; ============================================================================
-global builtin_len
-builtin_len:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC builtin_len
     push rbx
 
     ; Check nargs == 1
@@ -374,22 +361,20 @@ builtin_len:
     call int_from_i64
 
     pop rbx
-    pop rbp
+    leave
     ret
 
 .len_error:
     lea rdi, [rel exc_TypeError_type]
     CSTRING rsi, "len() takes exactly one argument"
     call raise_exception
+END_FUNC builtin_len
 
 ;; ============================================================================
 ;; builtin_range(PyObject **args, int64_t nargs) -> PyObject*
 ;; range(stop) or range(start, stop) or range(start, stop, step)
 ;; ============================================================================
-global builtin_range
-builtin_range:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC builtin_range
     push rbx
     push r12
     push r13
@@ -450,17 +435,15 @@ builtin_range:
     pop r13
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
+END_FUNC builtin_range
 
 ;; ============================================================================
 ;; builtin_type(PyObject **args, int64_t nargs) -> PyObject*
 ;; type(obj) -> returns obj's type
 ;; ============================================================================
-global builtin_type
-builtin_type:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC builtin_type
 
     cmp rsi, 1
     jne .type_error
@@ -474,30 +457,28 @@ builtin_type:
     mov rax, [rdi + PyObject.ob_type]
     INCREF rax
 
-    pop rbp
+    leave
     ret
 
 .type_smallint:
     extern int_type
     lea rax, [rel int_type]
     INCREF rax
-    pop rbp
+    leave
     ret
 
 .type_error:
     lea rdi, [rel exc_TypeError_type]
     CSTRING rsi, "type() takes 1 argument"
     call raise_exception
+END_FUNC builtin_type
 
 ;; ============================================================================
 ;; builtin_isinstance(PyObject **args, int64_t nargs) -> PyObject*
 ;; isinstance(obj, type) -> True/False
 ;; Walks the full tp_base chain for inheritance.
 ;; ============================================================================
-global builtin_isinstance
-builtin_isinstance:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC builtin_isinstance
 
     cmp rsi, 2
     jne .isinstance_error
@@ -528,28 +509,26 @@ builtin_isinstance:
 .isinstance_false:
     lea rax, [rel bool_false]
     inc qword [rax + PyObject.ob_refcnt]
-    pop rbp
+    leave
     ret
 
 .isinstance_true:
     lea rax, [rel bool_true]
     inc qword [rax + PyObject.ob_refcnt]
-    pop rbp
+    leave
     ret
 
 .isinstance_error:
     lea rdi, [rel exc_TypeError_type]
     CSTRING rsi, "isinstance() takes 2 arguments"
     call raise_exception
+END_FUNC builtin_isinstance
 
 ;; ============================================================================
 ;; builtin_repr(PyObject **args, int64_t nargs) -> PyObject*
 ;; repr(obj)
 ;; ============================================================================
-global builtin_repr
-builtin_repr:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC builtin_repr
 
     cmp rsi, 1
     jne .repr_error
@@ -557,23 +536,21 @@ builtin_repr:
     mov rdi, [rdi]
     call obj_repr
 
-    pop rbp
+    leave
     ret
 
 .repr_error:
     lea rdi, [rel exc_TypeError_type]
     CSTRING rsi, "repr() takes 1 argument"
     call raise_exception
+END_FUNC builtin_repr
 
 ;; ============================================================================
 ;; builtin_bool(PyObject **args, int64_t nargs) -> PyObject*
 ;; bool()    -> False
 ;; bool(x)   -> True if x is truthy, False otherwise
 ;; ============================================================================
-global builtin_bool
-builtin_bool:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC builtin_bool
 
     cmp rsi, 0
     je .bool_no_args
@@ -588,35 +565,33 @@ builtin_bool:
     jz .bool_ret_false
     lea rax, [rel bool_true]
     inc qword [rax + PyObject.ob_refcnt]
-    pop rbp
+    leave
     ret
 .bool_ret_false:
     lea rax, [rel bool_false]
     inc qword [rax + PyObject.ob_refcnt]
-    pop rbp
+    leave
     ret
 
 .bool_no_args:
     ; bool() -> False
     lea rax, [rel bool_false]
     inc qword [rax + PyObject.ob_refcnt]
-    pop rbp
+    leave
     ret
 
 .bool_error:
     lea rdi, [rel exc_TypeError_type]
     CSTRING rsi, "bool() takes at most 1 argument"
     call raise_exception
+END_FUNC builtin_bool
 
 ;; ============================================================================
 ;; builtin_float(PyObject **args, int64_t nargs) -> PyObject*
 ;; float()    -> 0.0
 ;; float(x)   -> convert x to float
 ;; ============================================================================
-global builtin_float
-builtin_float:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC builtin_float
 
     cmp rsi, 0
     je .float_no_args
@@ -630,20 +605,21 @@ builtin_float:
     extern float_from_f64
     call float_from_f64        ; rax = new float
 
-    pop rbp
+    leave
     ret
 
 .float_no_args:
     ; float() -> 0.0
     xorpd xmm0, xmm0
     call float_from_f64
-    pop rbp
+    leave
     ret
 
 .float_error:
     lea rdi, [rel exc_TypeError_type]
     CSTRING rsi, "float() takes at most 1 argument"
     call raise_exception
+END_FUNC builtin_float
 
 ;; ============================================================================
 ;; builtin___build_class__(PyObject **args, int64_t nargs) -> PyObject*
@@ -655,10 +631,7 @@ builtin_float:
 ;; 4. Create a new type object with class_dict as tp_dict
 ;; 5. Return the new type
 ;; ============================================================================
-global builtin___build_class__
-builtin___build_class__:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC builtin___build_class__
     push rbx
     push r12
     push r13
@@ -761,7 +734,7 @@ builtin___build_class__:
     call obj_incref
 
     ; Look up "__init__" in class_dict for tp_init
-    lea rdi, [rel .bc_init_name]
+    lea rdi, [rel bc_init_name]
     call str_from_cstr
     push rax                ; save __init__ str obj
 
@@ -787,7 +760,7 @@ builtin___build_class__:
 .bc_no_set_base:
 
     ; Handle __classcell__: look in class_dict for the cell, set its ob_ref to the new type
-    lea rdi, [rel .bc_classcell_name]
+    lea rdi, [rel bc_classcell_name]
     call str_from_cstr
     push rax                ; save key str
     mov rdi, r15            ; class_dict
@@ -814,17 +787,18 @@ builtin___build_class__:
     pop r13
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
 
 .build_class_error:
     lea rdi, [rel exc_TypeError_type]
     CSTRING rsi, "__build_class__ requires 2+ arguments"
     call raise_exception
+END_FUNC builtin___build_class__
 
 section .rodata
-.bc_init_name: db "__init__", 0
-.bc_classcell_name: db "__classcell__", 0
+bc_init_name: db "__init__", 0
+bc_classcell_name: db "__classcell__", 0
 section .text
 
 ;; ============================================================================
@@ -832,9 +806,7 @@ section .text
 ;; Adds a builtin to the dict. Used by builtins_init.
 ;; rdi=dict, rsi=name_cstr, rdx=func_ptr
 ;; ============================================================================
-add_builtin:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC_LOCAL add_builtin
     push rbx
     push r12
     push r13
@@ -869,17 +841,15 @@ add_builtin:
     pop r13
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
+END_FUNC add_builtin
 
 ;; ============================================================================
 ;; builtins_init() -> PyDictObject*
 ;; Create and populate the builtins dictionary
 ;; ============================================================================
-global builtins_init
-builtins_init:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC builtins_init
     push rbx
 
     ; Initialize iterator types (patches list/tuple tp_iter)
@@ -1198,8 +1168,9 @@ builtins_init:
     mov rax, rbx
 
     pop rbx
-    pop rbp
+    leave
     ret
+END_FUNC builtins_init
 
 ;; ============================================================================
 ;; add_exc_type_builtin(dict, name_cstr, type_ptr)
@@ -1207,9 +1178,7 @@ builtins_init:
 ;; Types are immortal, so no DECREF needed on the value.
 ;; rdi=dict, rsi=name_cstr, rdx=type_ptr
 ;; ============================================================================
-add_exc_type_builtin:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC_LOCAL add_exc_type_builtin
     push rbx
     push r12
 
@@ -1234,8 +1203,9 @@ add_exc_type_builtin:
 
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
+END_FUNC add_exc_type_builtin
 
 ;; ============================================================================
 ;; Data section

@@ -23,9 +23,6 @@
 %include "object.inc"
 %include "errcodes.inc"
 
-section .note.GNU-stack noalloc noexec nowrite progbits
-
-section .text
 
 ; exc_table_find_handler(PyCodeObject *code, int bytecode_offset_halfwords)
 ;   -> rax = handler target (in halfwords), rdx = stack depth, rcx = push_lasti
@@ -35,10 +32,7 @@ section .text
 ;
 ; rdi = code object
 ; esi = bytecode offset in instruction units (halfwords, i.e., 2-byte units)
-global exc_table_find_handler
-exc_table_find_handler:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC exc_table_find_handler
     push rbx
     push r12
     push r13
@@ -101,7 +95,7 @@ exc_table_find_handler:
     pop r13
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
 
 .not_found:
@@ -111,7 +105,7 @@ exc_table_find_handler:
     pop r13
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
 
 ; Internal: read an unsigned varint from table at r14+r15
@@ -143,3 +137,4 @@ exc_table_find_handler:
     xor eax, eax
 .varint_done:
     ret
+END_FUNC exc_table_find_handler

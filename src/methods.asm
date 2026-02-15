@@ -6,9 +6,6 @@
 %include "types.inc"
 %include "builtins.inc"
 
-section .note.GNU-stack noalloc noexec nowrite progbits
-
-section .text
 
 ; External functions
 extern ap_malloc
@@ -54,9 +51,7 @@ extern exc_KeyError_type
 ;; rdi=dict, rsi=name_cstr, rdx=func_ptr
 ;; Creates a builtin func wrapper and stores it in the dict.
 ;; ============================================================================
-add_method_to_dict:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC_LOCAL add_method_to_dict
     push rbx
     push r12
     push r13
@@ -93,8 +88,9 @@ add_method_to_dict:
     pop r13
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
+END_FUNC add_method_to_dict
 
 ;; ############################################################################
 ;;                         STRING METHODS
@@ -104,10 +100,7 @@ add_method_to_dict:
 ;; str_method_upper(args, nargs) -> new uppercase string
 ;; args[0] = self (PyStrObject*)
 ;; ============================================================================
-global str_method_upper
-str_method_upper:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC str_method_upper
     push rbx
     push r12
     push r13
@@ -142,16 +135,14 @@ str_method_upper:
     pop r13
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
+END_FUNC str_method_upper
 
 ;; ============================================================================
 ;; str_method_lower(args, nargs) -> new lowercase string
 ;; ============================================================================
-global str_method_lower
-str_method_lower:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC str_method_lower
     push rbx
     push r12
     push r13
@@ -184,17 +175,15 @@ str_method_lower:
     pop r13
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
+END_FUNC str_method_lower
 
 ;; ============================================================================
 ;; str_method_strip(args, nargs) -> new stripped string
 ;; Strip whitespace (space, tab, newline, cr) from both ends
 ;; ============================================================================
-global str_method_strip
-str_method_strip:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC str_method_strip
     push rbx
     push r12
     push r13
@@ -262,17 +251,15 @@ str_method_strip:
     pop r13
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
+END_FUNC str_method_strip
 
 ;; ============================================================================
 ;; str_method_startswith(args, nargs) -> bool_true/bool_false
 ;; args[0]=self, args[1]=prefix
 ;; ============================================================================
-global str_method_startswith
-str_method_startswith:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC str_method_startswith
     push rbx
     push r12
     push r13
@@ -307,7 +294,7 @@ str_method_startswith:
     pop r13
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
 
 .sw_false:
@@ -316,17 +303,15 @@ str_method_startswith:
     pop r13
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
+END_FUNC str_method_startswith
 
 ;; ============================================================================
 ;; str_method_endswith(args, nargs) -> bool_true/bool_false
 ;; args[0]=self, args[1]=suffix
 ;; ============================================================================
-global str_method_endswith
-str_method_endswith:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC str_method_endswith
     push rbx
     push r12
     push r13
@@ -364,7 +349,7 @@ str_method_endswith:
     pop r13
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
 
 .ew_false:
@@ -374,17 +359,15 @@ str_method_endswith:
     pop r13
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
+END_FUNC str_method_endswith
 
 ;; ============================================================================
 ;; str_method_find(args, nargs) -> SmallInt index or -1
 ;; args[0]=self, args[1]=substr
 ;; ============================================================================
-global str_method_find
-str_method_find:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC str_method_find
     push rbx
     push r12
 
@@ -408,7 +391,7 @@ str_method_find:
 
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
 
 .find_not_found:
@@ -417,18 +400,16 @@ str_method_find:
 
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
+END_FUNC str_method_find
 
 ;; ============================================================================
 ;; str_method_replace(args, nargs) -> new string with replacements
 ;; args[0]=self, args[1]=old, args[2]=new
 ;; Uses callee-saved regs for key state, stack locals for buffer management.
 ;; ============================================================================
-global str_method_replace
-str_method_replace:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC str_method_replace
     push rbx
     push r12
     push r13
@@ -565,7 +546,7 @@ str_method_replace:
     pop r13
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
 
 .replace_copy_self:
@@ -578,8 +559,9 @@ str_method_replace:
     pop r13
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
+END_FUNC str_method_replace
 
 ;; ============================================================================
 ;; str_method_join(args, nargs) -> new string
@@ -588,10 +570,7 @@ str_method_replace:
 ;; Regs: rbx=self(sep), r12=list, r13=count, r14=sep_len
 ;; Stack: [rbp-48]=total_len, [rbp-56]=buf_ptr, [rbp-64]=write_pos
 ;; ============================================================================
-global str_method_join
-str_method_join:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC str_method_join
     push rbx
     push r12
     push r13
@@ -690,7 +669,7 @@ str_method_join:
     pop r13
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
 
 .join_empty:
@@ -702,18 +681,16 @@ str_method_join:
     pop r13
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
+END_FUNC str_method_join
 
 ;; ============================================================================
 ;; str_method_split(args, nargs) -> list of strings
 ;; If nargs==1: split by whitespace
 ;; If nargs==2: split by args[1]
 ;; ============================================================================
-global str_method_split
-str_method_split:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC str_method_split
     push rbx
     push r12
     push r13
@@ -802,7 +779,7 @@ str_method_split:
     pop r13
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
 
 .split_by_sep:
@@ -876,13 +853,14 @@ str_method_split:
     pop r13
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
 
 .split_empty_sep:
     lea rdi, [rel exc_ValueError_type]
     CSTRING rsi, "empty separator"
     call raise_exception
+END_FUNC str_method_split
 
 
 ;; ============================================================================
@@ -890,10 +868,7 @@ str_method_split:
 ;; args[0]=self (format string), args[1..]=positional arguments
 ;; Handles {} (auto-index) and {N} (explicit index).
 ;; ============================================================================
-global str_method_format
-str_method_format:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC str_method_format
     push rbx
     push r12
     push r13
@@ -1121,8 +1096,9 @@ str_method_format:
     pop r13
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
+END_FUNC str_method_format
 
 
 ;; ############################################################################
@@ -1133,10 +1109,7 @@ str_method_format:
 ;; list_method_append(args, nargs) -> None
 ;; args[0]=self, args[1]=item
 ;; ============================================================================
-global list_method_append
-list_method_append:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC list_method_append
 
     mov rax, [rdi]          ; self (list)
     mov rsi, [rdi + 8]      ; item
@@ -1145,17 +1118,15 @@ list_method_append:
 
     lea rax, [rel none_singleton]
     inc qword [rax + PyObject.ob_refcnt]
-    pop rbp
+    leave
     ret
+END_FUNC list_method_append
 
 ;; ============================================================================
 ;; list_method_pop(args, nargs) -> removed item
 ;; args[0]=self, optionally args[1]=index (default: last)
 ;; ============================================================================
-global list_method_pop
-list_method_pop:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC list_method_pop
     push rbx
     push r12
     push r13
@@ -1215,22 +1186,20 @@ list_method_pop:
     pop r13
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
 
 .pop_error:
     lea rdi, [rel exc_IndexError_type]
     CSTRING rsi, "pop index out of range"
     call raise_exception
+END_FUNC list_method_pop
 
 ;; ============================================================================
 ;; list_method_insert(args, nargs) -> None
 ;; args[0]=self, args[1]=index, args[2]=item
 ;; ============================================================================
-global list_method_insert
-list_method_insert:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC list_method_insert
     push rbx
     push r12
     push r13
@@ -1304,17 +1273,15 @@ list_method_insert:
     pop r13
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
+END_FUNC list_method_insert
 
 ;; ============================================================================
 ;; list_method_reverse(args, nargs) -> None
 ;; args[0]=self, reverse in place
 ;; ============================================================================
-global list_method_reverse
-list_method_reverse:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC list_method_reverse
 
     mov rax, [rdi]          ; self
     mov rcx, [rax + PyListObject.ob_size]
@@ -1338,18 +1305,16 @@ list_method_reverse:
 .rev_done:
     lea rax, [rel none_singleton]
     inc qword [rax + PyObject.ob_refcnt]
-    pop rbp
+    leave
     ret
+END_FUNC list_method_reverse
 
 ;; ============================================================================
 ;; list_method_sort(args, nargs) -> None
 ;; Simple bubble sort (ints only via int_to_i64 comparison)
 ;; args[0]=self
 ;; ============================================================================
-global list_method_sort
-list_method_sort:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC list_method_sort
     push rbx
     push r12
     push r13
@@ -1412,18 +1377,16 @@ list_method_sort:
     pop r13
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
+END_FUNC list_method_sort
 
 ;; ============================================================================
 ;; list_method_index(args, nargs) -> SmallInt index
 ;; args[0]=self, args[1]=value
 ;; Linear scan with pointer equality
 ;; ============================================================================
-global list_method_index
-list_method_index:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC list_method_index
     push rbx
     push r12
     push r13
@@ -1488,22 +1451,20 @@ list_method_index:
     pop r13
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
 
 .index_not_found:
     lea rdi, [rel exc_ValueError_type]
     CSTRING rsi, "x not in list"
     call raise_exception
+END_FUNC list_method_index
 
 ;; ============================================================================
 ;; list_method_count(args, nargs) -> SmallInt
 ;; args[0]=self, args[1]=value
 ;; ============================================================================
-global list_method_count
-list_method_count:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC list_method_count
     push rbx
     push r12
     push r13
@@ -1533,17 +1494,15 @@ list_method_count:
     pop r13
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
+END_FUNC list_method_count
 
 ;; ============================================================================
 ;; list_method_copy(args, nargs) -> new list (shallow copy)
 ;; args[0]=self
 ;; ============================================================================
-global list_method_copy
-list_method_copy:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC list_method_copy
     push rbx
     push r12
     push r13
@@ -1579,17 +1538,15 @@ list_method_copy:
     pop r13
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
+END_FUNC list_method_copy
 
 ;; ============================================================================
 ;; list_method_clear(args, nargs) -> None
 ;; args[0]=self
 ;; ============================================================================
-global list_method_clear
-list_method_clear:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC list_method_clear
     push rbx
     push r12
     push r13
@@ -1618,17 +1575,15 @@ list_method_clear:
     pop r13
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
+END_FUNC list_method_clear
 
 ;; ============================================================================
 ;; list_method_extend(args, nargs) -> None
 ;; args[0]=self, args[1]=iterable (must be a list for now)
 ;; ============================================================================
-global list_method_extend
-list_method_extend:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC list_method_extend
     push rbx
     push r12
     push r13
@@ -1658,8 +1613,9 @@ list_method_extend:
     pop r13
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
+END_FUNC list_method_extend
 
 
 ;; ############################################################################
@@ -1670,10 +1626,7 @@ list_method_extend:
 ;; dict_method_get(args, nargs) -> value or None
 ;; args[0]=self, args[1]=key, optionally args[2]=default
 ;; ============================================================================
-global dict_method_get
-dict_method_get:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC dict_method_get
     push rbx
     push r12
 
@@ -1699,7 +1652,7 @@ dict_method_get:
     INCREF rax
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
 
 .dg_ret_none:
@@ -1707,7 +1660,7 @@ dict_method_get:
     inc qword [rax + PyObject.ob_refcnt]
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
 
 .dg_found:
@@ -1716,17 +1669,15 @@ dict_method_get:
     INCREF rax
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
+END_FUNC dict_method_get
 
 ;; ============================================================================
 ;; dict_method_keys(args, nargs) -> list of keys
 ;; args[0]=self
 ;; ============================================================================
-global dict_method_keys
-dict_method_keys:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC dict_method_keys
     push rbx
     push r12
     push r13
@@ -1779,17 +1730,15 @@ dict_method_keys:
     pop r13
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
+END_FUNC dict_method_keys
 
 ;; ============================================================================
 ;; dict_method_values(args, nargs) -> list of values
 ;; args[0]=self
 ;; ============================================================================
-global dict_method_values
-dict_method_values:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC dict_method_values
     push rbx
     push r12
     push r13
@@ -1839,17 +1788,15 @@ dict_method_values:
     pop r13
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
+END_FUNC dict_method_values
 
 ;; ============================================================================
 ;; dict_method_items(args, nargs) -> list of (key, value) tuples
 ;; args[0]=self
 ;; ============================================================================
-global dict_method_items
-dict_method_items:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC dict_method_items
     push rbx
     push r12
     push r13
@@ -1923,18 +1870,16 @@ dict_method_items:
     pop r13
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
+END_FUNC dict_method_items
 
 ;; ============================================================================
 ;; dict_method_pop(args, nargs) -> value
 ;; args[0]=self, args[1]=key, optionally args[2]=default
 ;; ============================================================================
-global dict_method_pop
-dict_method_pop:
-dict_method_pop_v2:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC dict_method_pop
+dict_method_pop_v2 equ dict_method_pop
     push rbx
     push r12
     push r13
@@ -1964,7 +1909,7 @@ dict_method_pop_v2:
     pop r13
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
 
 .dpop2_not_found:
@@ -1976,22 +1921,20 @@ dict_method_pop_v2:
     pop r13
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
 
 .dpop2_error:
     lea rdi, [rel exc_KeyError_type]
     CSTRING rsi, "key not found"
     call raise_exception
+END_FUNC dict_method_pop
 
 ;; ============================================================================
 ;; dict_method_clear(args, nargs) -> None
 ;; args[0]=self
 ;; ============================================================================
-global dict_method_clear
-dict_method_clear:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC dict_method_clear
     push rbx
     push r12
     push r13
@@ -2044,18 +1987,16 @@ dict_method_clear:
     pop r13
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
+END_FUNC dict_method_clear
 
 ;; ============================================================================
 ;; dict_method_update(args, nargs) -> None
 ;; args[0]=self, args[1]=other_dict
 ;; Merge other_dict into self
 ;; ============================================================================
-global dict_method_update
-dict_method_update:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC dict_method_update
     push rbx
     push r12
     push r13
@@ -2101,8 +2042,9 @@ dict_method_update:
     pop r13
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
+END_FUNC dict_method_update
 
 
 ;; ############################################################################
@@ -2113,10 +2055,7 @@ dict_method_update:
 ;; methods_init()
 ;; Populate tp_dict for str_type, list_type, dict_type
 ;; ============================================================================
-global methods_init
-methods_init:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC methods_init
     push rbx
     push r12
 
@@ -2282,8 +2221,9 @@ methods_init:
 
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
+END_FUNC methods_init
 
 ;; ============================================================================
 ;; Data section

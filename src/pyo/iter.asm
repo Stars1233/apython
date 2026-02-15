@@ -5,10 +5,6 @@
 %include "object.inc"
 %include "types.inc"
 
-section .note.GNU-stack noalloc noexec nowrite progbits
-
-section .text
-
 extern ap_malloc
 extern ap_free
 extern obj_decref
@@ -22,10 +18,7 @@ extern tuple_type
 ;; list_iter_new(PyListObject *list) -> PyListIterObject*
 ;; Create a new list iterator
 ;; ============================================================================
-global list_iter_new
-list_iter_new:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC list_iter_new
     push rbx
 
     mov rbx, rdi               ; save list
@@ -43,15 +36,15 @@ list_iter_new:
     INCREF rbx
 
     pop rbx
-    pop rbp
+    leave
     ret
+END_FUNC list_iter_new
 
 ;; ============================================================================
 ;; list_iter_next(PyListIterObject *self) -> PyObject* or NULL
 ;; Return next item or NULL if exhausted
 ;; ============================================================================
-global list_iter_next
-list_iter_next:
+DEF_FUNC_BARE list_iter_next
     mov rax, [rdi + PyListIterObject.it_seq]      ; list
     mov rcx, [rdi + PyListIterObject.it_index]     ; index
 
@@ -71,13 +64,12 @@ list_iter_next:
 .exhausted:
     xor eax, eax
     ret
+END_FUNC list_iter_next
 
 ;; ============================================================================
 ;; list_iter_dealloc(PyObject *self)
 ;; ============================================================================
-list_iter_dealloc:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC_LOCAL list_iter_dealloc
     push rbx
     mov rbx, rdi
 
@@ -90,8 +82,9 @@ list_iter_dealloc:
     call ap_free
 
     pop rbx
-    pop rbp
+    leave
     ret
+END_FUNC list_iter_dealloc
 
 ;; ============================================================================
 ;; list_iter_self(PyObject *self) -> PyObject*
@@ -101,24 +94,22 @@ iter_self:
     inc qword [rdi + PyObject.ob_refcnt]
     mov rax, rdi
     ret
+END_FUNC iter_self
 
 ;; ============================================================================
 ;; list_tp_iter(PyListObject *list) -> PyListIterObject*
 ;; tp_iter for list type: create a new list iterator
 ;; This is called when GET_ITER is used on a list.
 ;; ============================================================================
-global list_tp_iter
-list_tp_iter:
+DEF_FUNC_BARE list_tp_iter
     jmp list_iter_new
+END_FUNC list_tp_iter
 
 ;; ============================================================================
 ;; tuple_iter_new(PyTupleObject *tuple) -> PyTupleIterObject*
 ;; Create a new tuple iterator
 ;; ============================================================================
-global tuple_iter_new
-tuple_iter_new:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC tuple_iter_new
     push rbx
 
     mov rbx, rdi
@@ -135,14 +126,14 @@ tuple_iter_new:
     INCREF rbx
 
     pop rbx
-    pop rbp
+    leave
     ret
+END_FUNC tuple_iter_new
 
 ;; ============================================================================
 ;; tuple_iter_next(PyTupleIterObject *self) -> PyObject* or NULL
 ;; ============================================================================
-global tuple_iter_next
-tuple_iter_next:
+DEF_FUNC_BARE tuple_iter_next
     mov rax, [rdi + PyTupleIterObject.it_seq]
     mov rcx, [rdi + PyTupleIterObject.it_index]
 
@@ -159,13 +150,12 @@ tuple_iter_next:
 .exhausted:
     xor eax, eax
     ret
+END_FUNC tuple_iter_next
 
 ;; ============================================================================
 ;; tuple_iter_dealloc(PyObject *self)
 ;; ============================================================================
-tuple_iter_dealloc:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC_LOCAL tuple_iter_dealloc
     push rbx
     mov rbx, rdi
 
@@ -176,25 +166,23 @@ tuple_iter_dealloc:
     call ap_free
 
     pop rbx
-    pop rbp
+    leave
     ret
+END_FUNC tuple_iter_dealloc
 
 ;; ============================================================================
 ;; tuple_tp_iter(PyTupleObject *tuple) -> PyTupleIterObject*
 ;; tp_iter for tuple type
 ;; ============================================================================
-global tuple_tp_iter
-tuple_tp_iter:
+DEF_FUNC_BARE tuple_tp_iter
     jmp tuple_iter_new
+END_FUNC tuple_tp_iter
 
 ;; ============================================================================
 ;; range_new(int64_t start, int64_t stop, int64_t step) -> PyRangeIterObject*
 ;; Create a range iterator directly (simplified: range IS its own iterator)
 ;; ============================================================================
-global range_new
-range_new:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC range_new
     push rbx
 
     mov rbx, rdi               ; start
@@ -222,15 +210,15 @@ range_new:
     mov [rax + PyRangeIterObject.it_stop], rcx
 
     pop rbx
-    pop rbp
+    leave
     ret
+END_FUNC range_new
 
 ;; ============================================================================
 ;; range_iter_next(PyRangeIterObject *self) -> PyObject* or NULL
 ;; Returns SmallInt for current value, advances by step
 ;; ============================================================================
-global range_iter_next
-range_iter_next:
+DEF_FUNC_BARE range_iter_next
     ; Decode current, stop, step
     mov rax, [rdi + PyRangeIterObject.it_current]
     shl rax, 1
@@ -274,12 +262,14 @@ range_iter_next:
 .exhausted:
     xor eax, eax
     ret
+END_FUNC range_iter_next
 
 ;; ============================================================================
 ;; range_iter_dealloc(PyObject *self)
 ;; ============================================================================
 range_iter_dealloc:
     jmp ap_free                ; no references to DECREF, just free
+END_FUNC range_iter_dealloc
 
 ;; ============================================================================
 ;; range_tp_iter(PyObject *self) -> PyObject*
@@ -289,14 +279,14 @@ range_tp_iter:
     inc qword [rdi + PyObject.ob_refcnt]
     mov rax, rdi
     ret
+END_FUNC range_tp_iter
 
 ;; ============================================================================
 ;; init_iter_types
 ;; Patches list_type.tp_iter and tuple_type.tp_iter at startup
 ;; Called from main.asm or builtins_init
 ;; ============================================================================
-global init_iter_types
-init_iter_types:
+DEF_FUNC_BARE init_iter_types
     ; Set list_type.tp_iter = list_tp_iter
     lea rax, [rel list_tp_iter]
     lea rcx, [rel list_type]
@@ -308,6 +298,7 @@ init_iter_types:
     mov [rcx + PyTypeObject.tp_iter], rax
 
     ret
+END_FUNC init_iter_types
 
 ;; ============================================================================
 ;; Data section

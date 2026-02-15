@@ -98,6 +98,45 @@ Opcodes have trailing CACHE words that must be skipped. Key counts (each = 2 byt
 
 Create `tests/test_feature.py` using only implemented Python features. `make check` auto-discovers `test_*.py` files.
 
-## Debug
+## Debug Strategy
 
-Build includes DWARF symbols (`-g -F dwarf`). GDB: `gdb ./apython` then `run tests/__pycache__/test_foo.cpython-312.pyc`. Write debug scripts to `/tmp/` and run with `bash /tmp/script.sh`.
+Build includes DWARF symbols (`-g -F dwarf`) and ELF function metadata (STT_FUNC type + size via `DEF_FUNC`/`END_FUNC` macros). All functions use RBP frame pointers, enabling GDB frame-pointer-based unwinding. Zero runtime overhead.
+
+**What works in GDB:**
+- `bt` — full backtraces via RBP chain
+- `break func_name` — breakpoints on any global function
+- `info functions` — lists all functions with correct boundaries
+- `disassemble func_name` — disassembly with proper function bounds
+- `step`/`next`/`finish` — source-level stepping (maps to .asm lines)
+- `info registers` — inspect VM state (rbx=bytecode IP, r12=frame, r13=stack top, r14=consts, r15=names)
+
+**GDB quick start:**
+```
+gdb ./apython
+break eval_frame
+run tests/__pycache__/test_foo.cpython-312.pyc
+bt                    # backtrace
+info registers        # VM state: rbx, r12-r15
+print (char*)[r12+8]  # inspect frame->code
+break str_from_cstr   # break on runtime function
+continue
+```
+
+**VM register inspection in GDB:**
+
+| Expression | Meaning |
+|------------|---------|
+| `$rbx` | Current bytecode IP |
+| `$r12` | Current PyFrame* |
+| `$r13` | Value stack top |
+| `$r14` | co_consts data ptr |
+| `$r15` | co_names data ptr |
+
+**Function definition macros** (include/macros.inc):
+- `DEF_FUNC name` — global function with RBP frame (push rbp + mov rbp,rsp)
+- `DEF_FUNC name, N` — same + allocate N bytes of local space
+- `DEF_FUNC_BARE name` — global function, no prologue (opcode handlers, leaf functions)
+- `DEF_FUNC_LOCAL name` — file-local function with RBP frame
+- `END_FUNC name` — marks function end (required, emits .end label for ELF size)
+
+Write debug scripts to `/tmp/` and run with `bash /tmp/script.sh`.

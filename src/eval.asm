@@ -9,10 +9,6 @@
 %include "types.inc"
 %include "errcodes.inc"
 
-section .note.GNU-stack noalloc noexec nowrite progbits
-
-section .text
-
 ; External opcode handlers (defined in opcodes_*.asm files)
 extern op_pop_top
 extern op_push_null
@@ -128,10 +124,7 @@ extern exc_Exception_type
 ; Main entry point: sets up registers from the frame and enters the dispatch loop.
 ; Returns NULL if an unhandled exception propagated out.
 ; rdi = frame
-global eval_frame
-eval_frame:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC eval_frame
     SAVE_EVAL_REGS
 
     ; r12 = frame
@@ -175,23 +168,23 @@ eval_frame:
     mov [rel eval_base_rsp], rsp
 
     ; Fall through to eval_dispatch
+END_FUNC eval_frame
 
 ; eval_dispatch - Main dispatch point
 ; Reads the next opcode and arg, advances rbx, and jumps to the handler.
-global eval_dispatch
 align 16
-eval_dispatch:
+DEF_FUNC_BARE eval_dispatch
     mov [rel eval_saved_rbx], rbx  ; save bytecode IP for exception unwind
     movzx eax, byte [rbx]      ; load opcode
     movzx ecx, byte [rbx+1]    ; load arg into ecx
     add rbx, 2                  ; advance past instruction word
     lea rdx, [rel opcode_table]
     jmp [rdx + rax*8]              ; dispatch to handler
+END_FUNC eval_dispatch
 
 ; eval_return - Return from eval_frame
 ; rax contains the return value. Restores callee-saved regs and returns.
-global eval_return
-eval_return:
+DEF_FUNC_BARE eval_return
     ; Restore caller's eval_base_rsp and eval_saved_r12
     pop rdx
     mov [rel eval_base_rsp], rdx
@@ -200,6 +193,7 @@ eval_return:
     RESTORE_EVAL_REGS
     pop rbp
     ret
+END_FUNC eval_return
 
 ; ============================================================================
 ; Exception unwind mechanism
@@ -210,8 +204,7 @@ eval_return:
 ; This routine searches the exception table for a handler. If found,
 ; it adjusts the value stack and jumps to the handler. If not found,
 ; it returns NULL from eval_frame to propagate to the caller.
-global eval_exception_unwind
-eval_exception_unwind:
+DEF_FUNC_BARE eval_exception_unwind
     ; Restore machine stack to eval frame level (discard intermediate frames)
     mov rsp, [rel eval_base_rsp]
 
@@ -313,14 +306,12 @@ eval_exception_unwind:
     ; No handler found - return NULL to propagate exception to caller
     xor eax, eax
     jmp eval_return
+END_FUNC eval_exception_unwind
 
 ; raise_exception(PyTypeObject *type, const char *msg_cstr)
 ; Create an exception from a C string and begin unwinding.
 ; Callable from opcode handlers - uses eval loop registers.
-global raise_exception
-raise_exception:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC raise_exception
 
     ; Create exception: exc_from_cstr(type, msg)
     call exc_from_cstr
@@ -339,13 +330,11 @@ raise_exception:
 
     leave
     jmp eval_exception_unwind
+END_FUNC raise_exception
 
 ; raise_exception_obj(PyExceptionObject *exc)
 ; Set exception and begin unwinding.
-global raise_exception_obj
-raise_exception_obj:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC raise_exception_obj
 
     ; INCREF the exception (we're taking ownership)
     push rdi
@@ -367,6 +356,7 @@ raise_exception_obj:
 
     leave
     jmp eval_exception_unwind
+END_FUNC raise_exception_obj
 
 ; ============================================================================
 ; Exception-related opcode handlers (inline in eval.asm for access to globals)
@@ -375,8 +365,7 @@ raise_exception_obj:
 ; op_push_exc_info (35) - Push exception info for try/except
 ; TOS has the exception. Save current exception state, install new one.
 ; Stack effect: exc -> prev_exc, exc
-global op_push_exc_info
-op_push_exc_info:
+DEF_FUNC_BARE op_push_exc_info
     ; TOS = new exception
     VPOP rax                 ; rax = new exception
 
@@ -396,11 +385,11 @@ op_push_exc_info:
     VPUSH rax                ; push new exc
 
     DISPATCH
+END_FUNC op_push_exc_info
 
 ; op_pop_except (89) - Restore previous exception state
 ; TOS = the exception to restore as current
-global op_pop_except
-op_pop_except:
+DEF_FUNC_BARE op_pop_except
     VPOP rax                 ; rax = exception to restore
 
     ; XDECREF old current_exception
@@ -423,12 +412,12 @@ op_pop_except:
 .set_exc:
     mov [rel current_exception], rax
     DISPATCH
+END_FUNC op_pop_except
 
 ; op_check_exc_match (36) - Check if exception matches a type
 ; TOS = type to match against, TOS1 = exception
 ; Push True/False, don't pop the exception
-global op_check_exc_match
-op_check_exc_match:
+DEF_FUNC_BARE op_check_exc_match
     VPOP rsi                 ; rsi = type to match
     VPEEK rdi                ; rdi = exception (don't pop)
 
@@ -459,13 +448,13 @@ op_check_exc_match:
     INCREF rax
     VPUSH rax
     DISPATCH
+END_FUNC op_check_exc_match
 
 ; op_raise_varargs (130) - Raise an exception
 ; arg 0: reraise current exception
 ; arg 1: raise TOS
 ; arg 2: raise TOS1 from TOS (chaining, simplified)
-global op_raise_varargs
-op_raise_varargs:
+DEF_FUNC_BARE op_raise_varargs
     cmp ecx, 0
     je .reraise
     cmp ecx, 1
@@ -570,11 +559,11 @@ op_raise_varargs:
     pop rdi
     add rsp, 8
     jmp .raise_exc_obj
+END_FUNC op_raise_varargs
 
 ; op_reraise (119) - Re-raise the current exception
 ; TOS = exception to re-raise
-global op_reraise
-op_reraise:
+DEF_FUNC_BARE op_reraise
     ; Pop the exception from value stack
     VPOP rdi
 
@@ -591,6 +580,7 @@ op_reraise:
     pop rdi
     mov [rel current_exception], rdi
     jmp eval_exception_unwind
+END_FUNC op_reraise
 
 ; op_unimplemented - Handler for unimplemented opcodes
 ; The opcode is in eax (set by dispatch). Calls fatal error.

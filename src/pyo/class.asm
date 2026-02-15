@@ -6,10 +6,6 @@
 %include "types.inc"
 %include "frame.inc"
 
-section .note.GNU-stack noalloc noexec nowrite progbits
-
-section .text
-
 extern ap_malloc
 extern ap_free
 extern obj_decref
@@ -36,10 +32,7 @@ extern frame_free
 ;; rdi = type (the class)
 ;; Returns: new instance with refcnt=1, ob_type=type, inst_dict=new dict
 ;; ============================================================================
-global instance_new
-instance_new:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC instance_new
     push rbx
     push r12
 
@@ -67,8 +60,9 @@ instance_new:
     mov rax, r12                ; return instance
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
+END_FUNC instance_new
 
 ;; ============================================================================
 ;; instance_getattr(PyInstanceObject *self, PyObject *name) -> PyObject*
@@ -82,10 +76,7 @@ instance_new:
 ;; rdi = instance, rsi = name (PyStrObject*)
 ;; Returns: borrowed-turned-owned reference to attribute value
 ;; ============================================================================
-global instance_getattr
-instance_getattr:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC instance_getattr
     push rbx
     push r12
     push r13
@@ -134,7 +125,7 @@ instance_getattr:
     pop r13
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
 
 .not_found:
@@ -142,18 +133,16 @@ instance_getattr:
     pop r13
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
+END_FUNC instance_getattr
 
 ;; ============================================================================
 ;; instance_setattr(PyInstanceObject *self, PyObject *name, PyObject *value)
 ;; Set an attribute on an instance's __dict__.
 ;; rdi = instance, rsi = name, rdx = value
 ;; ============================================================================
-global instance_setattr
-instance_setattr:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC instance_setattr
 
     ; dict_set(self->inst_dict, name, value)
     mov rdi, [rdi + PyInstanceObject.inst_dict]
@@ -161,18 +150,16 @@ instance_setattr:
     ; rdx = value (already set)
     call dict_set
 
-    pop rbp
+    leave
     ret
+END_FUNC instance_setattr
 
 ;; ============================================================================
 ;; instance_dealloc(PyObject *self)
 ;; Deallocate an instance: DECREF inst_dict, DECREF ob_type, free self.
 ;; rdi = instance
 ;; ============================================================================
-global instance_dealloc
-instance_dealloc:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC instance_dealloc
     push rbx
 
     mov rbx, rdi                ; rbx = self
@@ -190,18 +177,19 @@ instance_dealloc:
     call ap_free
 
     pop rbx
-    pop rbp
+    leave
     ret
+END_FUNC instance_dealloc
 
 ;; ============================================================================
 ;; instance_repr(PyObject *self) -> PyStrObject*
 ;; Return a simple "<instance>" string.
 ;; rdi = instance
 ;; ============================================================================
-global instance_repr
-instance_repr:
+DEF_FUNC_BARE instance_repr
     lea rdi, [rel instance_repr_cstr]
     jmp str_from_cstr
+END_FUNC instance_repr
 
 ;; ============================================================================
 ;; type_call(PyTypeObject *type, PyObject **args, int64_t nargs) -> PyObject*
@@ -213,10 +201,7 @@ instance_repr:
 ;; edx = nargs
 ;; Returns: new instance
 ;; ============================================================================
-global type_call
-type_call:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC type_call
     push rbx
     push r12
     push r13
@@ -329,7 +314,7 @@ type_call:
     pop r13
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
 
 .init_not_callable:
@@ -337,6 +322,7 @@ type_call:
     CSTRING rsi, "__init__ is not callable"
     call raise_exception
     ; does not return
+END_FUNC type_call
 
 ;; ============================================================================
 ;; type_getattr(PyTypeObject *self, PyObject *name) -> PyObject*
@@ -345,10 +331,7 @@ type_call:
 ;; rdi = type object, rsi = name (PyStrObject*)
 ;; Returns: owned reference to attribute value, or NULL
 ;; ============================================================================
-global type_getattr
-type_getattr:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC type_getattr
     push rbx
     push r12
 
@@ -380,7 +363,7 @@ type_getattr:
 
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
 
 .tga_return_name:
@@ -390,25 +373,23 @@ type_getattr:
     ; rax = new string (already refcnt=1)
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
 
 .tga_not_found:
     xor eax, eax               ; return NULL
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
+END_FUNC type_getattr
 
 ;; ============================================================================
 ;; method_new(func, self) -> PyMethodObject*
 ;; Create a bound method wrapping func+self.
 ;; rdi = func (callable), rsi = self (instance)
 ;; ============================================================================
-global method_new
-method_new:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC method_new
     push rbx
     push r12
 
@@ -433,17 +414,16 @@ method_new:
 
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
+END_FUNC method_new
 
 ;; ============================================================================
 ;; method_call(self_method, args, nargs) -> PyObject*
 ;; Call a bound method: prepend im_self to args, dispatch to im_func's tp_call.
 ;; rdi = PyMethodObject*, rsi = args, rdx = nargs
 ;; ============================================================================
-method_call:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC_LOCAL method_call
     push rbx
     push r12
     push r13
@@ -492,16 +472,15 @@ method_call:
     pop r13
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
+END_FUNC method_call
 
 ;; ============================================================================
 ;; method_dealloc(PyObject *self)
 ;; Free a bound method, DECREF func and self.
 ;; ============================================================================
-method_dealloc:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC_LOCAL method_dealloc
     push rbx
 
     mov rbx, rdi
@@ -514,8 +493,9 @@ method_dealloc:
     call ap_free
 
     pop rbx
-    pop rbp
+    leave
     ret
+END_FUNC method_dealloc
 
 ;; ============================================================================
 ;; Data section

@@ -5,9 +5,6 @@
 %include "macros.inc"
 %include "marshal.inc"
 
-section .note.GNU-stack noalloc noexec nowrite progbits
-
-section .text
 
 extern sys_open
 extern sys_close
@@ -34,10 +31,7 @@ O_RDONLY        equ 0
 ; pyc_read_file(const char *filename) -> PyObject*
 ; Opens a .pyc file, reads it into memory, validates the header,
 ; and returns the code object via marshal_read_object.
-global pyc_read_file
-pyc_read_file:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC pyc_read_file
     push rbx
     push r12
     push r13
@@ -117,8 +111,9 @@ pyc_read_file:
     pop r13
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
+END_FUNC pyc_read_file
 
 pyc_open_failed:
     lea rdi, [rel pyc_err_open]

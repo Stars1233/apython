@@ -4,38 +4,31 @@
 %include "object.inc"
 %include "types.inc"
 
-section .note.GNU-stack noalloc noexec nowrite progbits
-
-section .text
-
 extern str_from_cstr
 extern __gmpz_init
 extern __gmpz_set_si
 
 ; bool_repr(PyObject *self) -> PyObject*
 ; Returns "True" or "False" string
-global bool_repr
-bool_repr:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC bool_repr
     ; Check if this is True or False
     lea rax, [rel bool_true]
     cmp rdi, rax
     je .is_true
     lea rdi, [rel bool_false_str]
     call str_from_cstr
-    pop rbp
+    leave
     ret
 .is_true:
     lea rdi, [rel bool_true_str]
     call str_from_cstr
-    pop rbp
+    leave
     ret
+END_FUNC bool_repr
 
 ; bool_hash(PyObject *self) -> int64
 ; True -> 1, False -> 0
-global bool_hash
-bool_hash:
+DEF_FUNC_BARE bool_hash
     lea rax, [rel bool_true]
     cmp rdi, rax
     je .hash_true
@@ -44,11 +37,11 @@ bool_hash:
 .hash_true:
     mov eax, 1              ; True -> hash 1
     ret
+END_FUNC bool_hash
 
 ; bool_bool(PyObject *self) -> int
 ; True -> 1, False -> 0
-global bool_bool
-bool_bool:
+DEF_FUNC_BARE bool_bool
     lea rax, [rel bool_true]
     cmp rdi, rax
     je .ret_true
@@ -57,11 +50,11 @@ bool_bool:
 .ret_true:
     mov eax, 1
     ret
+END_FUNC bool_bool
 
 ; bool_from_int(int value) -> PyObject*
 ; Returns True if value != 0, else False
-global bool_from_int
-bool_from_int:
+DEF_FUNC_BARE bool_from_int
     test edi, edi
     jnz .true
     lea rax, [rel bool_false]
@@ -69,6 +62,7 @@ bool_from_int:
 .true:
     lea rax, [rel bool_true]
     ret
+END_FUNC bool_from_int
 
 section .data
 
@@ -154,10 +148,7 @@ bool_false:
 ; bool_init() - Initialize True/False singletons' mpz values
 ; Must be called once at startup
 section .text
-global bool_init
-bool_init:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC bool_init
 
     ; Init True's mpz to 1
     lea rdi, [rel bool_true + PyIntObject.mpz]
@@ -173,5 +164,6 @@ bool_init:
     xor esi, esi
     call __gmpz_set_si wrt ..plt
 
-    pop rbp
+    leave
     ret
+END_FUNC bool_init

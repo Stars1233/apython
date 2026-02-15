@@ -5,10 +5,6 @@
 %include "object.inc"
 %include "types.inc"
 
-section .note.GNU-stack noalloc noexec nowrite progbits
-
-section .text
-
 extern ap_malloc
 extern ap_free
 extern ap_realloc
@@ -31,10 +27,7 @@ extern slice_indices
 ;; list_new(int64_t capacity) -> PyListObject*
 ;; Allocate a new empty list with given initial capacity
 ;; ============================================================================
-global list_new
-list_new:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC list_new
     push rbx
     push r12
 
@@ -64,17 +57,15 @@ list_new:
     mov rax, rbx
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
+END_FUNC list_new
 
 ;; ============================================================================
 ;; list_append(PyListObject *list, PyObject *item)
 ;; Append item, grow if needed. INCREF item.
 ;; ============================================================================
-global list_append
-list_append:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC list_append
     push rbx
     push r12
 
@@ -112,17 +103,15 @@ list_append:
 
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
+END_FUNC list_append
 
 ;; ============================================================================
 ;; list_getitem(PyListObject *list, int64_t index) -> PyObject*
 ;; sq_item: return item at index with bounds check and negative index support
 ;; ============================================================================
-global list_getitem
-list_getitem:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC list_getitem
 
     ; Handle negative index
     test rsi, rsi
@@ -141,22 +130,20 @@ list_getitem:
     mov rax, [rax + rsi*8]
     INCREF rax
 
-    pop rbp
+    leave
     ret
 
 .index_error:
     lea rdi, [rel exc_IndexError_type]
     CSTRING rsi, "list index out of range"
     call raise_exception
+END_FUNC list_getitem
 
 ;; ============================================================================
 ;; list_setitem(PyListObject *list, int64_t index, PyObject *value)
 ;; sq_ass_item: set item at index, DECREF old, INCREF new
 ;; ============================================================================
-global list_setitem
-list_setitem:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC list_setitem
     push rbx
     push r12
 
@@ -190,22 +177,20 @@ list_setitem:
 
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
 
 .index_error:
     lea rdi, [rel exc_IndexError_type]
     CSTRING rsi, "list assignment index out of range"
     call raise_exception
+END_FUNC list_setitem
 
 ;; ============================================================================
 ;; list_subscript(PyListObject *list, PyObject *key) -> PyObject*
 ;; mp_subscript: index with int or slice key (for BINARY_SUBSCR)
 ;; ============================================================================
-global list_subscript
-list_subscript:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC list_subscript
     push rbx
 
     mov rbx, rdi               ; save list
@@ -229,7 +214,7 @@ list_subscript:
     call list_getitem
 
     pop rbx
-    pop rbp
+    leave
     ret
 
 .ls_slice:
@@ -238,17 +223,15 @@ list_subscript:
     ; rsi = slice (already set)
     call list_getslice
     pop rbx
-    pop rbp
+    leave
     ret
+END_FUNC list_subscript
 
 ;; ============================================================================
 ;; list_ass_subscript(PyListObject *list, PyObject *key, PyObject *value)
 ;; mp_ass_subscript: set with int or slice key
 ;; ============================================================================
-global list_ass_subscript
-list_ass_subscript:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC list_ass_subscript
     push rbx
     push r12
 
@@ -276,7 +259,7 @@ list_ass_subscript:
 
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
 
 .las_slice:
@@ -286,23 +269,21 @@ list_ass_subscript:
     lea rdi, [rel exc_TypeError_type]
     CSTRING rsi, "slice assignment not yet supported"
     call raise_exception
+END_FUNC list_ass_subscript
 
 ;; ============================================================================
 ;; list_len(PyObject *self) -> int64_t
 ;; ============================================================================
-global list_len
-list_len:
+DEF_FUNC_BARE list_len
     mov rax, [rdi + PyListObject.ob_size]
     ret
+END_FUNC list_len
 
 ;; ============================================================================
 ;; list_contains(PyListObject *list, PyObject *value) -> int (0/1)
 ;; sq_contains: linear scan with pointer equality
 ;; ============================================================================
-global list_contains
-list_contains:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC list_contains
     push rbx
     push r12
     push r13
@@ -326,7 +307,7 @@ list_contains:
     pop r13
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
 
 .not_found:
@@ -334,17 +315,15 @@ list_contains:
     pop r13
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
+END_FUNC list_contains
 
 ;; ============================================================================
 ;; list_dealloc(PyObject *self)
 ;; DECREF all items, free items array, free list
 ;; ============================================================================
-global list_dealloc
-list_dealloc:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC list_dealloc
     push rbx
     push r12
     push r13
@@ -375,8 +354,9 @@ list_dealloc:
     pop r13
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
+END_FUNC list_dealloc
 
 ; list_repr is in src/repr.asm
 extern list_repr
@@ -384,21 +364,18 @@ extern list_repr
 ;; ============================================================================
 ;; list_bool(PyObject *self) -> int (0/1)
 ;; ============================================================================
-global list_bool
-list_bool:
+DEF_FUNC_BARE list_bool
     cmp qword [rdi + PyListObject.ob_size], 0
     setne al
     movzx eax, al
     ret
+END_FUNC list_bool
 
 ;; ============================================================================
 ;; list_getslice(PyListObject *list, PySliceObject *slice) -> PyListObject*
 ;; Creates a new list from a slice of the original.
 ;; ============================================================================
-global list_getslice
-list_getslice:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC list_getslice
     push rbx
     push r12
     push r13
@@ -486,8 +463,9 @@ list_getslice:
     pop r13
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
+END_FUNC list_getslice
 
 ;; ============================================================================
 ;; Data section

@@ -16,8 +16,6 @@
 %include "opcodes.inc"
 %include "frame.inc"
 
-section .note.GNU-stack noalloc noexec nowrite progbits
-
 section .text
 
 extern eval_dispatch
@@ -39,8 +37,7 @@ extern dict_get
 ;; Pops value from stack, stores in fast local slot, XDECREF old value.
 ;; VPOP does not clobber ecx (it only does sub r13,8 / mov reg,[r13]).
 ;; ============================================================================
-global op_store_fast
-op_store_fast:
+DEF_FUNC_BARE op_store_fast
     ; ecx = arg (slot index)
     VPOP rax                    ; rax = new value
     lea rdx, [r12 + PyFrame.localsplus]
@@ -52,6 +49,7 @@ op_store_fast:
     DECREF_REG rdi
 .done:
     DISPATCH
+END_FUNC op_store_fast
 
 ;; ============================================================================
 ;; op_store_name - Store TOS under co_names[arg] in locals or globals dict
@@ -60,8 +58,7 @@ op_store_fast:
 ;; Uses dict_set(dict, key, value) extern.
 ;; dict_set signature: dict_set(PyDictObject *dict, PyObject *key, PyObject *value)
 ;; ============================================================================
-global op_store_name
-op_store_name:
+DEF_FUNC_BARE op_store_name
     ; ecx = arg (index into co_names)
     ; Get name string before popping (VPOP does not clobber ecx)
     mov r8, [r15 + rcx*8]      ; r8 = name (key) - caller-saved, safe temp
@@ -79,14 +76,14 @@ op_store_name:
     mov rdx, r9                ; rdx = value
     call dict_set
     DISPATCH
+END_FUNC op_store_name
 
 ;; ============================================================================
 ;; op_store_global - Store TOS under co_names[arg] in globals dict
 ;;
 ;; Same as store_name but always uses globals.
 ;; ============================================================================
-global op_store_global
-op_store_global:
+DEF_FUNC_BARE op_store_global
     ; ecx = arg (index into co_names)
     mov r8, [r15 + rcx*8]      ; r8 = name (key)
     VPOP r9                    ; r9 = value to store
@@ -97,6 +94,7 @@ op_store_global:
     mov rdx, r9                ; rdx = value
     call dict_set
     DISPATCH
+END_FUNC op_store_global
 
 ;; ============================================================================
 ;; op_store_attr - Store TOS-1 as attribute of TOS
@@ -109,11 +107,8 @@ op_store_global:
 ;; DECREF obj and value after the store.
 ;; Followed by 4 CACHE entries (8 bytes) that must be skipped.
 ;; ============================================================================
-global op_store_attr
-op_store_attr:
-    push rbp
-    mov rbp, rsp
-    sub rsp, 32               ; [rbp-8]=obj, [rbp-16]=value, [rbp-24]=name
+DEF_FUNC op_store_attr, 32
+    ; [rbp-8]=obj, [rbp-16]=value, [rbp-24]=name
 
     ; Get name
     mov rax, [r15 + rcx*8]
@@ -155,6 +150,7 @@ op_store_attr:
     lea rdi, [rel exc_AttributeError_type]
     CSTRING rsi, "cannot set attribute"
     call raise_exception
+END_FUNC op_store_attr
 
 ;; ============================================================================
 ;; op_store_deref - Store TOS into cell at localsplus[arg]
@@ -162,8 +158,7 @@ op_store_attr:
 ;; Gets cell from localsplus[arg], sets cell.ob_ref = TOS.
 ;; INCREFs new value, DECREFs old value.
 ;; ============================================================================
-global op_store_deref
-op_store_deref:
+DEF_FUNC_BARE op_store_deref
     VPOP rax                        ; rax = new value
     lea rdx, [r12 + PyFrame.localsplus]
     mov rdx, [rdx + rcx*8]         ; rdx = cell object
@@ -188,14 +183,14 @@ op_store_deref:
     DECREF_REG rdi
 .sd_done:
     DISPATCH
+END_FUNC op_store_deref
 
 ;; ============================================================================
 ;; op_delete_deref - Set cell at localsplus[arg] to empty (NULL)
 ;;
 ;; DECREFs old value if present.
 ;; ============================================================================
-global op_delete_deref
-op_delete_deref:
+DEF_FUNC_BARE op_delete_deref
     lea rax, [r12 + PyFrame.localsplus]
     mov rax, [rax + rcx*8]         ; rax = cell object
     mov rdi, [rax + PyCellObject.ob_ref]
@@ -206,14 +201,14 @@ op_delete_deref:
     DECREF_REG rdi
 .dd_done:
     DISPATCH
+END_FUNC op_delete_deref
 
 ;; ============================================================================
 ;; op_delete_fast - Delete local variable (set localsplus[arg] = NULL)
 ;;
 ;; DECREF old value if present.
 ;; ============================================================================
-global op_delete_fast
-op_delete_fast:
+DEF_FUNC_BARE op_delete_fast
     lea rax, [r12 + PyFrame.localsplus]
     mov rdi, [rax + rcx*8]     ; old value
     mov qword [rax + rcx*8], 0 ; set to NULL
@@ -222,12 +217,12 @@ op_delete_fast:
     DECREF_REG rdi
 .df_done:
     DISPATCH
+END_FUNC op_delete_fast
 
 ;; ============================================================================
 ;; op_delete_name - Delete name from locals or globals dict
 ;; ============================================================================
-global op_delete_name
-op_delete_name:
+DEF_FUNC_BARE op_delete_name
     mov rsi, [r15 + rcx*8]     ; name
     ; Try locals first
     mov rdi, [r12 + PyFrame.locals]
@@ -249,12 +244,12 @@ op_delete_name:
     lea rdi, [rel exc_NameError_type]
     CSTRING rsi, "name not defined"
     call raise_exception
+END_FUNC op_delete_name
 
 ;; ============================================================================
 ;; op_delete_global - Delete name from globals dict
 ;; ============================================================================
-global op_delete_global
-op_delete_global:
+DEF_FUNC_BARE op_delete_global
     mov rsi, [r15 + rcx*8]     ; name
     mov rdi, [r12 + PyFrame.globals]
     call dict_del
@@ -265,6 +260,7 @@ op_delete_global:
     lea rdi, [rel exc_NameError_type]
     CSTRING rsi, "name not defined"
     call raise_exception
+END_FUNC op_delete_global
 
 ;; ============================================================================
 ;; op_delete_attr - Delete attribute from object
@@ -272,11 +268,7 @@ op_delete_global:
 ;; Calls tp_setattr(obj, name, NULL) to delete.
 ;; Followed by 4 CACHE entries (8 bytes) - WAIT, DELETE_ATTR has no CACHE in 3.12.
 ;; ============================================================================
-global op_delete_attr
-op_delete_attr:
-    push rbp
-    mov rbp, rsp
-    sub rsp, 16
+DEF_FUNC op_delete_attr, 16
 
     mov rax, [r15 + rcx*8]     ; name
     mov [rbp-8], rax
@@ -306,6 +298,7 @@ op_delete_attr:
     lea rdi, [rel exc_AttributeError_type]
     CSTRING rsi, "cannot delete attribute"
     call raise_exception
+END_FUNC op_delete_attr
 
 ;; ============================================================================
 ;; op_delete_subscr - Delete obj[key]
@@ -313,11 +306,7 @@ op_delete_attr:
 ;; Pops key (TOS), pops obj (TOS1).
 ;; Calls mp_ass_subscript(obj, key, NULL) to delete.
 ;; ============================================================================
-global op_delete_subscr
-op_delete_subscr:
-    push rbp
-    mov rbp, rsp
-    sub rsp, 16
+DEF_FUNC op_delete_subscr, 16
 
     VPOP rsi                    ; key
     VPOP rdi                    ; obj
@@ -349,3 +338,4 @@ op_delete_subscr:
     lea rdi, [rel exc_TypeError_type]
     CSTRING rsi, "object does not support item deletion"
     call raise_exception
+END_FUNC op_delete_subscr

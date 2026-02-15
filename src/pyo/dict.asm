@@ -5,10 +5,6 @@
 %include "object.inc"
 %include "types.inc"
 
-section .note.GNU-stack noalloc noexec nowrite progbits
-
-section .text
-
 extern ap_malloc
 extern ap_free
 extern obj_hash
@@ -30,10 +26,7 @@ DICT_INIT_CAP equ 8
 ;; dict_new() -> PyDictObject*
 ;; Allocate a new empty dict with initial capacity 8
 ;; ============================================================================
-global dict_new
-dict_new:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC dict_new
     push rbx
 
     ; Allocate PyDictObject header
@@ -61,16 +54,15 @@ dict_new:
 
     mov rax, rbx
     pop rbx
-    pop rbp
+    leave
     ret
+END_FUNC dict_new
 
 ;; ============================================================================
 ;; dict_keys_equal(PyObject *a, PyObject *b) -> int (1=equal, 0=not)
 ;; Internal helper: pointer equality or string comparison
 ;; ============================================================================
-dict_keys_equal:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC_LOCAL dict_keys_equal
     push rbx
     push r12
 
@@ -103,24 +95,22 @@ dict_keys_equal:
     xor eax, eax
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
 
 .equal:
     mov eax, 1
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
+END_FUNC dict_keys_equal
 
 ;; ============================================================================
 ;; dict_get(PyDictObject *dict, PyObject *key) -> PyObject* or NULL
 ;; Linear probing lookup
 ;; ============================================================================
-global dict_get
-dict_get:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC dict_get
     push rbx
     push r12
     push r13
@@ -197,17 +187,16 @@ align 16
     pop r13
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
+END_FUNC dict_get
 
 ;; ============================================================================
 ;; dict_find_slot(PyDictObject *dict, PyObject *key, int64_t hash)
 ;;   -> rax = entry ptr, rdx = 1 if existing key found, 0 if empty slot
 ;; Internal helper used by dict_set
 ;; ============================================================================
-dict_find_slot:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC_LOCAL dict_find_slot
     push rbx
     push r12
     push r13
@@ -271,7 +260,7 @@ dict_find_slot:
     pop r13
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
 
 .found_existing:
@@ -282,7 +271,7 @@ dict_find_slot:
     pop r13
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
 
 .table_full:
@@ -293,14 +282,13 @@ dict_find_slot:
 section .rodata
 .err_full: db "dict: hash table full", 0
 section .text
+END_FUNC dict_find_slot
 
 ;; ============================================================================
 ;; dict_resize(PyDictObject *dict)
 ;; Double capacity and rehash all entries
 ;; ============================================================================
-dict_resize:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC_LOCAL dict_resize
     push rbx
     push r12
     push r13
@@ -394,17 +382,15 @@ dict_resize:
     pop r13
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
+END_FUNC dict_resize
 
 ;; ============================================================================
 ;; dict_set(PyDictObject *dict, PyObject *key, PyObject *value)
 ;; Insert or update a key-value pair
 ;; ============================================================================
-global dict_set
-dict_set:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC dict_set
     push rbx
     push r12
     push r13
@@ -472,17 +458,15 @@ dict_set:
     pop r13
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
+END_FUNC dict_set
 
 ;; ============================================================================
 ;; dict_dealloc(PyObject *self)
 ;; Free all entries, then free dict
 ;; ============================================================================
-global dict_dealloc
-dict_dealloc:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC dict_dealloc
     push rbx
     push r12
     push r13
@@ -532,8 +516,9 @@ dict_dealloc:
     pop r13
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
+END_FUNC dict_dealloc
 
 ;; ============================================================================
 ;; dict_len(PyObject *self) -> int64_t
@@ -547,10 +532,7 @@ dict_len:
 ;; dict_subscript(PyDictObject *dict, PyObject *key) -> PyObject*
 ;; mp_subscript: look up key, fatal KeyError if not found
 ;; ============================================================================
-global dict_subscript
-dict_subscript:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC dict_subscript
     push rbx
 
     mov rbx, rsi               ; save key for error msg
@@ -563,20 +545,20 @@ dict_subscript:
     ; INCREF the returned value (dict_get returns borrowed ref)
     INCREF rax
     pop rbx
-    pop rbp
+    leave
     ret
 
 .key_error:
     lea rdi, [rel exc_KeyError_type]
     CSTRING rsi, "key not found"
     call raise_exception
+END_FUNC dict_subscript
 
 ;; ============================================================================
 ;; dict_ass_subscript(PyDictObject *dict, PyObject *key, PyObject *value)
 ;; mp_ass_subscript: set key=value in dict
 ;; ============================================================================
-global dict_ass_subscript
-dict_ass_subscript:
+DEF_FUNC_BARE dict_ass_subscript
     ; If value is NULL, this is a delete operation
     test rdx, rdx
     jz .das_delete
@@ -586,15 +568,13 @@ dict_ass_subscript:
     ; dict_del(dict, key)
     ; rdi = dict, rsi = key (already set)
     jmp dict_del
+END_FUNC dict_ass_subscript
 
 ;; ============================================================================
 ;; dict_del(PyDictObject *dict, PyObject *key) -> int (0=ok, -1=not found)
 ;; Delete key from dict. DECREFs both key and value.
 ;; ============================================================================
-global dict_del
-dict_del:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC dict_del
     push rbx
     push r12
     push r13
@@ -669,8 +649,9 @@ dict_del:
     pop r13
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
+END_FUNC dict_del
 
 ; dict_repr is in src/repr.asm
 extern dict_repr
@@ -680,10 +661,7 @@ extern dict_repr
 ;; Create a new dict key iterator.
 ;; rdi = dict
 ;; ============================================================================
-global dict_tp_iter
-dict_tp_iter:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC dict_tp_iter
     push rbx
 
     mov rbx, rdi               ; save dict
@@ -703,8 +681,9 @@ dict_tp_iter:
     call obj_incref
 
     pop rbx
-    pop rbp
+    leave
     ret
+END_FUNC dict_tp_iter
 
 ;; ============================================================================
 ;; dict_iter_next(PyDictIterObject *self) -> PyObject* or NULL
@@ -712,8 +691,7 @@ dict_tp_iter:
 ;; Scans entries for next non-empty slot.
 ;; rdi = iterator
 ;; ============================================================================
-global dict_iter_next
-dict_iter_next:
+DEF_FUNC_BARE dict_iter_next
     mov rax, [rdi + PyDictIterObject.it_dict]      ; dict
     mov rcx, [rdi + PyDictIterObject.it_index]      ; current index
     mov rdx, [rax + PyDictObject.capacity]          ; capacity
@@ -749,13 +727,12 @@ dict_iter_next:
     mov [rdi + PyDictIterObject.it_index], rcx
     xor eax, eax
     ret
+END_FUNC dict_iter_next
 
 ;; ============================================================================
 ;; dict_iter_dealloc(PyObject *self)
 ;; ============================================================================
-dict_iter_dealloc:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC_LOCAL dict_iter_dealloc
     push rbx
     mov rbx, rdi
 
@@ -768,8 +745,9 @@ dict_iter_dealloc:
     call ap_free
 
     pop rbx
-    pop rbp
+    leave
     ret
+END_FUNC dict_iter_dealloc
 
 ;; ============================================================================
 ;; dict_iter_self(PyObject *self) -> self with INCREF
@@ -783,8 +761,7 @@ dict_iter_self:
 ;; dict_contains(PyDictObject *self, PyObject *key) -> int (0 or 1)
 ;; For the 'in' operator: checks if key exists in dict.
 ;; ============================================================================
-global dict_contains
-dict_contains:
+DEF_FUNC_BARE dict_contains
     ; Simply call dict_get and return 0/1 based on result
     call dict_get
     test rax, rax
@@ -794,6 +771,7 @@ dict_contains:
 .dc_no:
     xor eax, eax
     ret
+END_FUNC dict_contains
 
 ;; ============================================================================
 ;; Data section

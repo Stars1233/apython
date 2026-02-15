@@ -12,10 +12,6 @@
 %include "object.inc"
 %include "types.inc"
 
-section .note.GNU-stack noalloc noexec nowrite progbits
-
-section .text
-
 extern ap_malloc
 extern ap_free
 extern obj_incref
@@ -29,10 +25,7 @@ extern int_type
 ;; slice_new(PyObject *start, PyObject *stop, PyObject *step) -> PySliceObject*
 ;; INCREFs all three args. Caller should pass none_singleton for missing values.
 ;; ============================================================================
-global slice_new
-slice_new:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC slice_new
     push rbx
     push r12
     push r13
@@ -64,16 +57,14 @@ slice_new:
     pop r13
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
+END_FUNC slice_new
 
 ;; ============================================================================
 ;; slice_dealloc(PySliceObject *self)
 ;; ============================================================================
-global slice_dealloc
-slice_dealloc:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC slice_dealloc
     push rbx
     mov rbx, rdi
 
@@ -87,16 +78,17 @@ slice_dealloc:
     call ap_free
 
     pop rbx
-    pop rbp
+    leave
     ret
+END_FUNC slice_dealloc
 
 ;; ============================================================================
 ;; slice_repr(PySliceObject *self) -> PyStrObject*
 ;; ============================================================================
-global slice_repr
-slice_repr:
+DEF_FUNC_BARE slice_repr
     lea rdi, [rel slice_repr_str]
     jmp str_from_cstr
+END_FUNC slice_repr
 
 ;; ============================================================================
 ;; pyobj_to_i64(PyObject *obj) -> int64 in rax
@@ -115,7 +107,7 @@ pyobj_to_i64:
     lea rdi, [rdi + PyIntObject.mpz]
     extern __gmpz_get_si
     call __gmpz_get_si wrt ..plt
-    pop rbp
+    leave
     ret
 .smallint:
     mov rax, rdi
@@ -125,16 +117,14 @@ pyobj_to_i64:
 .is_none:
     mov rax, 0x7FFFFFFFFFFFFFFF  ; sentinel for "not specified"
     ret
+END_FUNC pyobj_to_i64
 
 ;; ============================================================================
 ;; slice_indices(PySliceObject *slice, int64 length)
 ;;   -> (start, stop, step) in rax, rdx, rcx
 ;; Resolves None values, handles negatives, clamps to bounds.
 ;; ============================================================================
-global slice_indices
-slice_indices:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC slice_indices
     push rbx
     push r12
     push r13
@@ -230,8 +220,9 @@ slice_indices:
     pop r13
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
+END_FUNC slice_indices
 
 ;; ============================================================================
 ;; Data

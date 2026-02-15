@@ -17,8 +17,6 @@
 %include "opcodes.inc"
 %include "frame.inc"
 
-section .note.GNU-stack noalloc noexec nowrite progbits
-
 section .text
 
 extern eval_dispatch
@@ -48,24 +46,24 @@ extern list_type
 ;; Phase 4 (simple case): module-level code, no previous frame.
 ;; Pop return value and jump to eval_return.
 ;; ============================================================================
-global op_return_value
-op_return_value:
+DEF_FUNC_BARE op_return_value
     VPOP rax                    ; rax = return value
     mov qword [r12 + PyFrame.instr_ptr], 0  ; mark frame as "returned" (not yielded)
     jmp eval_return
+END_FUNC op_return_value
 
 ;; ============================================================================
 ;; op_return_const - Return co_consts[arg] without popping the stack
 ;;
 ;; Load constant, INCREF, and jump to eval_return.
 ;; ============================================================================
-global op_return_const
-op_return_const:
+DEF_FUNC_BARE op_return_const
     ; ecx = arg (index into co_consts)
     mov rax, [r14 + rcx*8]     ; rax = co_consts[arg]
     INCREF rax
     mov qword [r12 + PyFrame.instr_ptr], 0  ; mark frame as "returned" (not yielded)
     jmp eval_return
+END_FUNC op_return_const
 
 ;; ============================================================================
 ;; op_binary_op - Perform a binary operation
@@ -74,8 +72,7 @@ op_return_const:
 ;; Pops right (b) then left (a), dispatches through type's tp_as_number.
 ;; Followed by 1 CACHE entry (2 bytes) that must be skipped.
 ;; ============================================================================
-global op_binary_op
-op_binary_op:
+DEF_FUNC_BARE op_binary_op
     ; ecx = NB_* op code
     ; Save the op index before pops (VPOP doesn't clobber ecx)
     VPOP rsi                   ; rsi = right operand (b)
@@ -201,6 +198,7 @@ op_binary_op:
     VPUSH rax
     add rbx, 2
     DISPATCH
+END_FUNC op_binary_op
 
 ;; ============================================================================
 ;; op_compare_op - Rich comparison
@@ -210,8 +208,7 @@ op_binary_op:
 ;; Calls type's tp_richcompare(left, right, op).
 ;; Followed by 1 CACHE entry (2 bytes) that must be skipped.
 ;; ============================================================================
-global op_compare_op
-op_compare_op:
+DEF_FUNC_BARE op_compare_op
     ; ecx = arg; comparison op = arg >> 4
     shr ecx, 4                 ; ecx = PY_LT/LE/EQ/NE/GT/GE (0-5)
 
@@ -393,14 +390,14 @@ op_compare_op:
     VPUSH rax
     add rbx, 2
     DISPATCH
+END_FUNC op_compare_op
 
 ;; ============================================================================
 ;; op_unary_negative - Negate TOS
 ;;
 ;; Calls type's nb_negative from tp_as_number.
 ;; ============================================================================
-global op_unary_negative
-op_unary_negative:
+DEF_FUNC_BARE op_unary_negative
     VPOP rdi                   ; rdi = operand
 
     ; Save operand for DECREF after call
@@ -431,14 +428,14 @@ op_unary_negative:
     ; Push result
     VPUSH rax
     DISPATCH
+END_FUNC op_unary_negative
 
 ;; ============================================================================
 ;; op_unary_invert - Bitwise NOT of TOS (~x)
 ;;
 ;; Calls type's nb_invert from tp_as_number.
 ;; ============================================================================
-global op_unary_invert
-op_unary_invert:
+DEF_FUNC_BARE op_unary_invert
     VPOP rdi                   ; rdi = operand
     push rdi
 
@@ -462,14 +459,14 @@ op_unary_invert:
     add rsp, 8
     VPUSH rax
     DISPATCH
+END_FUNC op_unary_invert
 
 ;; ============================================================================
 ;; op_unary_not - Logical NOT of TOS
 ;;
 ;; Calls obj_is_true, then pushes the inverted boolean.
 ;; ============================================================================
-global op_unary_not
-op_unary_not:
+DEF_FUNC_BARE op_unary_not
     VPOP rdi                   ; rdi = operand
 
     ; Save operand for DECREF
@@ -496,6 +493,7 @@ op_unary_not:
     INCREF rax
     VPUSH rax
     DISPATCH
+END_FUNC op_unary_not
 
 ;; ============================================================================
 ;; op_pop_jump_if_false - Pop TOS, jump if falsy
@@ -503,8 +501,7 @@ op_unary_not:
 ;; Python 3.12: arg is the absolute target offset in instruction words
 ;; (2-byte units from start of co_code).
 ;; ============================================================================
-global op_pop_jump_if_false
-op_pop_jump_if_false:
+DEF_FUNC_BARE op_pop_jump_if_false
     ; Save arg (target offset) before call
     push rcx                   ; save target offset on machine stack
 
@@ -533,12 +530,12 @@ op_pop_jump_if_false:
 
 .no_jump:
     DISPATCH
+END_FUNC op_pop_jump_if_false
 
 ;; ============================================================================
 ;; op_pop_jump_if_true - Pop TOS, jump if truthy
 ;; ============================================================================
-global op_pop_jump_if_true
-op_pop_jump_if_true:
+DEF_FUNC_BARE op_pop_jump_if_true
     ; Save arg (delta in instruction words)
     push rcx                   ; save target offset on machine stack
 
@@ -567,12 +564,12 @@ op_pop_jump_if_true:
 
 .no_jump:
     DISPATCH
+END_FUNC op_pop_jump_if_true
 
 ;; ============================================================================
 ;; op_pop_jump_if_none - Pop TOS, jump if None
 ;; ============================================================================
-global op_pop_jump_if_none
-op_pop_jump_if_none:
+DEF_FUNC_BARE op_pop_jump_if_none
     VPOP rax                   ; rax = value
 
     ; Compare with none_singleton
@@ -591,12 +588,12 @@ op_pop_jump_if_none:
     ; NOT None: just DECREF and continue
     DECREF rax
     DISPATCH
+END_FUNC op_pop_jump_if_none
 
 ;; ============================================================================
 ;; op_pop_jump_if_not_none - Pop TOS, jump if NOT None
 ;; ============================================================================
-global op_pop_jump_if_not_none
-op_pop_jump_if_not_none:
+DEF_FUNC_BARE op_pop_jump_if_not_none
     VPOP rax                   ; rax = value
 
     ; Compare with none_singleton
@@ -615,6 +612,7 @@ op_pop_jump_if_not_none:
     ; IS None: just DECREF and continue
     DECREF rax
     DISPATCH
+END_FUNC op_pop_jump_if_not_none
 
 ;; ============================================================================
 ;; op_jump_forward - Unconditional forward jump
@@ -622,11 +620,11 @@ op_pop_jump_if_not_none:
 ;; arg = number of instruction words to skip
 ;; Each instruction word is 2 bytes, so advance rbx by arg*2 bytes.
 ;; ============================================================================
-global op_jump_forward
-op_jump_forward:
+DEF_FUNC_BARE op_jump_forward
     ; ecx = arg (instruction words to skip)
     lea rbx, [rbx + rcx*2]
     DISPATCH
+END_FUNC op_jump_forward
 
 ;; ============================================================================
 ;; op_jump_backward - Unconditional backward jump
@@ -634,13 +632,13 @@ op_jump_forward:
 ;; arg = number of instruction words to go back
 ;; Subtract arg*2 bytes from rbx.
 ;; ============================================================================
-global op_jump_backward
-op_jump_backward:
+DEF_FUNC_BARE op_jump_backward
     ; ecx = arg (instruction words to go back)
     mov rax, rcx
     shl rax, 1                 ; rax = arg * 2
     sub rbx, rax
     DISPATCH
+END_FUNC op_jump_backward
 
 ;; ============================================================================
 ;; op_format_value - Format a value for f-strings
@@ -649,11 +647,7 @@ op_jump_backward:
 ;; arg & 0x04: format spec present on stack below value
 ;; Pops value (and optional fmt_spec), pushes formatted string.
 ;; ============================================================================
-global op_format_value
-op_format_value:
-    push rbp
-    mov rbp, rsp
-    sub rsp, 16
+DEF_FUNC op_format_value, 16
 
     mov [rbp-8], rcx           ; save arg
     mov rax, rcx
@@ -709,6 +703,7 @@ op_format_value:
     VPUSH rax
     leave
     DISPATCH
+END_FUNC op_format_value
 
 ;; ============================================================================
 ;; op_build_string - Concatenate N strings from the stack
@@ -716,11 +711,7 @@ op_format_value:
 ;; ecx = number of string fragments
 ;; Pops ecx strings, concatenates in order, pushes result.
 ;; ============================================================================
-global op_build_string
-op_build_string:
-    push rbp
-    mov rbp, rsp
-    sub rsp, 16
+DEF_FUNC op_build_string, 16
 
     mov [rbp-8], rcx           ; count
 
@@ -792,6 +783,7 @@ op_build_string:
     ; Shortcut: 1 fragment, just leave it on stack
     leave
     DISPATCH
+END_FUNC op_build_string
 
 ;; ============================================================================
 ;; Data section - binary op offset lookup table
@@ -838,8 +830,7 @@ section .text
 ;; If localsplus[arg] is not already a cell, create one and wrap the value.
 ;; If localsplus[arg] is NULL, create an empty cell.
 ;; ============================================================================
-global op_make_cell
-op_make_cell:
+DEF_FUNC_BARE op_make_cell
     lea rdx, [r12 + PyFrame.localsplus]
 
     ; Get current value
@@ -872,6 +863,7 @@ op_make_cell:
     ; Store cell in localsplus slot
     mov [rdx + rcx*8], rax
     DISPATCH
+END_FUNC op_make_cell
 
 ;; ============================================================================
 ;; op_copy_free_vars - Copy closure cells into frame's freevar slots
@@ -890,8 +882,7 @@ op_make_cell:
 ;; looking at the frame's localsplus from the caller. But simpler:
 ;; we stash the function object in the frame during func_call.
 ;; ============================================================================
-global op_copy_free_vars
-op_copy_free_vars:
+DEF_FUNC_BARE op_copy_free_vars
     ; ecx = number of free vars to copy
     test ecx, ecx
     jz .cfv_done
@@ -934,6 +925,7 @@ op_copy_free_vars:
 
 .cfv_done:
     DISPATCH
+END_FUNC op_copy_free_vars
 
 ;; ============================================================================
 ;; op_return_generator - Create generator from current frame
@@ -942,8 +934,7 @@ op_copy_free_vars:
 ;; Creates a PyGenObject holding the current frame, returns it from eval_frame.
 ;; The frame is NOT freed by func_call (instr_ptr != 0 signals this).
 ;; ============================================================================
-global op_return_generator
-op_return_generator:
+DEF_FUNC_BARE op_return_generator
     ; Save current execution state in frame for later resumption
     mov [r12 + PyFrame.instr_ptr], rbx
     mov [r12 + PyFrame.stack_ptr], r13
@@ -956,6 +947,7 @@ op_return_generator:
     ; Return the generator from eval_frame
     ; frame->instr_ptr is non-zero, so func_call will skip frame_free
     jmp eval_return
+END_FUNC op_return_generator
 
 ;; ============================================================================
 ;; op_yield_value - Yield a value from generator
@@ -963,8 +955,7 @@ op_return_generator:
 ;; YIELD_VALUE (150): Pop TOS (value to yield), save frame state,
 ;; return value from eval_frame. The generator is suspended.
 ;; ============================================================================
-global op_yield_value
-op_yield_value:
+DEF_FUNC_BARE op_yield_value
     ; Pop the value to yield
     VPOP rax
 
@@ -974,32 +965,33 @@ op_yield_value:
 
     ; Return yielded value from eval_frame
     jmp eval_return
+END_FUNC op_yield_value
 
 ;; ============================================================================
 ;; op_end_send - End of send operation
 ;;
 ;; END_SEND (5): Pop TOS1 (receiver/generator), keep TOS (value).
 ;; ============================================================================
-global op_end_send
-op_end_send:
+DEF_FUNC_BARE op_end_send
     ; TOS = value, TOS1 = receiver
     VPOP rax                   ; rax = value (TOS)
     VPOP rdi                   ; rdi = receiver (TOS1)
     DECREF_REG rdi             ; DECREF receiver
     VPUSH rax                  ; push value back
     DISPATCH
+END_FUNC op_end_send
 
 ;; ============================================================================
 ;; op_jump_backward_no_interrupt - Jump backward (no interrupt check)
 ;;
 ;; JUMP_BACKWARD_NO_INTERRUPT (134): Same as JUMP_BACKWARD for us.
 ;; ============================================================================
-global op_jump_backward_no_interrupt
-op_jump_backward_no_interrupt:
+DEF_FUNC_BARE op_jump_backward_no_interrupt
     mov rax, rcx
     shl rax, 1                 ; arg * 2 = byte offset
     sub rbx, rax
     DISPATCH
+END_FUNC op_jump_backward_no_interrupt
 
 ;; ============================================================================
 ;; op_call_intrinsic_1 - Call 1-arg intrinsic function
@@ -1011,8 +1003,7 @@ op_jump_backward_no_interrupt:
 ;;   5 = INTRINSIC_UNARY_POSITIVE (+x)
 ;;   6 = INTRINSIC_LIST_TO_TUPLE
 ;; ============================================================================
-global op_call_intrinsic_1
-op_call_intrinsic_1:
+DEF_FUNC_BARE op_call_intrinsic_1
     cmp ecx, 3
     je .ci1_stopiter_error
     cmp ecx, 5
@@ -1088,6 +1079,7 @@ op_call_intrinsic_1:
     DECREF_REG rdi
 
     DISPATCH
+END_FUNC op_call_intrinsic_1
 
 ;; ============================================================================
 ;; op_get_len - Push len(TOS) without popping TOS
@@ -1097,8 +1089,7 @@ op_call_intrinsic_1:
 ;; ============================================================================
 extern obj_len
 
-global op_get_len
-op_get_len:
+DEF_FUNC_BARE op_get_len
     ; PEEK TOS (don't pop)
     mov rdi, [r13 - 8]
     push rdi                    ; save obj
@@ -1138,6 +1129,7 @@ op_get_len:
     lea rdi, [rel exc_TypeError_type]
     CSTRING rsi, "object has no len()"
     call raise_exception
+END_FUNC op_get_len
 
 ;; ============================================================================
 ;; op_setup_annotations - Create __annotations__ dict in locals
@@ -1148,10 +1140,7 @@ extern dict_new
 extern dict_set
 extern str_from_cstr
 
-global op_setup_annotations
-op_setup_annotations:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC op_setup_annotations
     push rbx
     push r12                    ; save eval loop r12
 
@@ -1165,7 +1154,7 @@ op_setup_annotations:
     mov r12, rax                ; r12 = new annotations dict (saved)
 
     ; Create key string
-    lea rdi, [rel .str_annotations]
+    CSTRING rdi, "__annotations__"
     call str_from_cstr
     ; rax = key string
 
@@ -1186,18 +1175,14 @@ op_setup_annotations:
     pop rbx
     pop rbp
     DISPATCH
-
-section .rodata
-.str_annotations: db "__annotations__", 0
-section .text
+END_FUNC op_setup_annotations
 
 ;; ============================================================================
 ;; op_load_locals - Push locals dict
 ;;
 ;; Opcode 87: LOAD_LOCALS
 ;; ============================================================================
-global op_load_locals
-op_load_locals:
+DEF_FUNC_BARE op_load_locals
     mov rax, [r12 + PyFrame.locals]
     test rax, rax
     jz .ll_error
@@ -1208,6 +1193,7 @@ op_load_locals:
     lea rdi, [rel exc_RuntimeError_type]
     CSTRING rsi, "no locals dict"
     call raise_exception
+END_FUNC op_load_locals
 
 ;; ============================================================================
 ;; op_load_from_dict_or_globals - Load from dict on TOS, fallback to globals
@@ -1217,8 +1203,7 @@ op_load_locals:
 ;; ============================================================================
 extern dict_get
 
-global op_load_from_dict_or_globals
-op_load_from_dict_or_globals:
+DEF_FUNC_BARE op_load_from_dict_or_globals
     ; ecx = name index
     mov rsi, [r15 + rcx*8]     ; name string
     push rsi
@@ -1261,6 +1246,7 @@ op_load_from_dict_or_globals:
     INCREF rax
     VPUSH rax
     DISPATCH
+END_FUNC op_load_from_dict_or_globals
 
 ;; ============================================================================
 ;; op_match_mapping - Check if TOS is a mapping type
@@ -1270,8 +1256,7 @@ op_load_from_dict_or_globals:
 ;; ============================================================================
 extern dict_type
 
-global op_match_mapping
-op_match_mapping:
+DEF_FUNC_BARE op_match_mapping
     mov rdi, [r13 - 8]            ; peek TOS
     test rdi, rdi
     js .mm_false                   ; SmallInt → not a mapping
@@ -1296,6 +1281,7 @@ op_match_mapping:
     INCREF rax
     VPUSH rax
     DISPATCH
+END_FUNC op_match_mapping
 
 ;; ============================================================================
 ;; op_match_sequence - Check if TOS is a sequence type
@@ -1307,8 +1293,7 @@ extern tuple_type
 extern str_type
 extern bytes_type
 
-global op_match_sequence
-op_match_sequence:
+DEF_FUNC_BARE op_match_sequence
     mov rdi, [r13 - 8]            ; peek TOS
     test rdi, rdi
     js .ms_false                   ; SmallInt → not a sequence
@@ -1347,6 +1332,7 @@ op_match_sequence:
     INCREF rax
     VPUSH rax
     DISPATCH
+END_FUNC op_match_sequence
 
 ;; ============================================================================
 ;; op_match_keys - Match mapping keys
@@ -1356,11 +1342,7 @@ op_match_sequence:
 ;; If all keys in tuple exist in subject, push tuple of values + True
 ;; Otherwise push False
 ;; ============================================================================
-global op_match_keys
-op_match_keys:
-    push rbp
-    mov rbp, rsp
-    sub rsp, 32                    ; [rbp-8]=keys, [rbp-16]=subject, [rbp-24]=values, [rbp-32]=nkeys
+DEF_FUNC op_match_keys, 32
 
     ; TOS = keys tuple, TOS1 = subject
     ; Peek at both — don't pop either! Push result on top.
@@ -1425,6 +1407,7 @@ op_match_keys:
 .mk_done:
     leave
     DISPATCH
+END_FUNC op_match_keys
 
 ;; ============================================================================
 ;; op_call_intrinsic_2 - Call 2-arg intrinsic function
@@ -1438,8 +1421,7 @@ op_match_keys:
 ;;   3 = INTRINSIC_TYPEVAR_WITH_CONSTRAINTS
 ;;   4 = INTRINSIC_SET_FUNCTION_TYPE_PARAMS
 ;; ============================================================================
-global op_call_intrinsic_2
-op_call_intrinsic_2:
+DEF_FUNC_BARE op_call_intrinsic_2
     cmp ecx, 1
     je .ci2_prep_reraise
 
@@ -1460,3 +1442,4 @@ op_call_intrinsic_2:
     pop rax
     VPUSH rax
     DISPATCH
+END_FUNC op_call_intrinsic_2

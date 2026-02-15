@@ -5,10 +5,6 @@
 %include "object.inc"
 %include "frame.inc"
 
-section .note.GNU-stack noalloc noexec nowrite progbits
-
-section .text
-
 extern bool_init
 extern builtins_init
 extern methods_init
@@ -23,10 +19,7 @@ extern obj_decref
 extern str_from_cstr
 
 ; main(int argc, char **argv) -> int
-global main
-main:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC main
     push rbx
     push r12
     push r13
@@ -96,7 +89,7 @@ main:
     pop r13
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
 
 .usage:
@@ -106,6 +99,7 @@ main:
 .load_failed:
     CSTRING rdi, "Error: failed to load .pyc file"
     call fatal_error
+END_FUNC main
 
 section .rodata
 __name__cstr: db "__name__", 0

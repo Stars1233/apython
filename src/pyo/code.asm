@@ -4,20 +4,13 @@
 %include "object.inc"
 %include "types.inc"
 
-section .note.GNU-stack noalloc noexec nowrite progbits
-
-section .text
-
 extern ap_free
 extern obj_decref
 extern str_from_cstr
 
 ; code_dealloc(PyObject *self)
 ; Free code object and decref contained objects
-global code_dealloc
-code_dealloc:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC code_dealloc
     push rbx
     mov rbx, rdi
 
@@ -82,14 +75,15 @@ code_dealloc:
     call ap_free
 
     pop rbx
-    pop rbp
+    leave
     ret
+END_FUNC code_dealloc
 
 ; code_repr(PyObject *self) -> PyStrObject*
-global code_repr
-code_repr:
+DEF_FUNC_BARE code_repr
     lea rdi, [rel code_repr_str]
     jmp str_from_cstr
+END_FUNC code_repr
 
 section .data
 

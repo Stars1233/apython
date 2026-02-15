@@ -11,9 +11,6 @@
 %include "object.inc"
 %include "types.inc"
 
-section .note.GNU-stack noalloc noexec nowrite progbits
-
-section .text
 
 extern ap_malloc
 extern ap_free
@@ -64,11 +61,7 @@ extern str_repr
 ;; list_repr(PyListObject *self) -> PyStrObject*
 ;; Returns string like "[1, 2, 3]"
 ;; ============================================================================
-global list_repr
-list_repr:
-    push rbp
-    mov rbp, rsp
-    sub rsp, 24                ; buf ptr, used, capacity
+DEF_FUNC list_repr, 24                ; buf ptr, used, capacity
     push rbx                   ; self
     push r12                   ; index
     push r13                   ; count
@@ -157,16 +150,13 @@ list_repr:
     pop rbx
     leave
     ret
+END_FUNC list_repr
 
 ;; ============================================================================
 ;; tuple_repr(PyTupleObject *self) -> PyStrObject*
 ;; Returns string like "(1, 2, 3)" or "(1,)" for single-element
 ;; ============================================================================
-global tuple_repr
-tuple_repr:
-    push rbp
-    mov rbp, rsp
-    sub rsp, 24
+DEF_FUNC tuple_repr, 24
     push rbx
     push r12
     push r13
@@ -249,17 +239,14 @@ tuple_repr:
     pop rbx
     leave
     ret
+END_FUNC tuple_repr
 
 ;; ============================================================================
 ;; dict_repr(PyDictObject *self) -> PyStrObject*
 ;; Returns string like "{'a': 1, 'b': 2}"
 ;; Iterates the entries array directly.
 ;; ============================================================================
-global dict_repr
-dict_repr:
-    push rbp
-    mov rbp, rsp
-    sub rsp, 24
+DEF_FUNC dict_repr, 24
     push rbx                   ; self
     push r12                   ; entry index
     push r13                   ; capacity
@@ -380,16 +367,13 @@ dict_repr:
     pop rbx
     leave
     ret
+END_FUNC dict_repr
 
 ;; ============================================================================
 ;; set_repr(PySetObject *self) -> PyStrObject*
 ;; Returns string like "{1, 2, 3}" or "set()" for empty
 ;; ============================================================================
-global set_repr
-set_repr:
-    push rbp
-    mov rbp, rsp
-    sub rsp, 24
+DEF_FUNC set_repr, 24
     push rbx
     push r12
     push r13
@@ -400,7 +384,7 @@ set_repr:
     ; Check empty set
     cmp qword [rbx + PyDictObject.ob_size], 0
     jne .sr_notempty
-    lea rdi, [rel .sr_empty_str]
+    lea rdi, [rel set_repr_empty_str]
     call str_from_cstr
     pop r14
     pop r13
@@ -489,6 +473,7 @@ set_repr:
     pop rbx
     leave
     ret
+END_FUNC set_repr
 
 section .rodata
-.sr_empty_str: db "set()", 0
+set_repr_empty_str: db "set()", 0

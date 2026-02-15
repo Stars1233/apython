@@ -16,8 +16,6 @@
 %include "opcodes.inc"
 %include "frame.inc"
 
-section .note.GNU-stack noalloc noexec nowrite progbits
-
 section .text
 
 extern eval_dispatch
@@ -36,25 +34,25 @@ extern method_new
 ;; ============================================================================
 ;; op_load_const - Load constant from co_consts[arg]
 ;; ============================================================================
-global op_load_const
-op_load_const:
+DEF_FUNC_BARE op_load_const
     ; ecx = arg (index into co_consts)
     mov rax, [r14 + rcx*8]     ; r14 = &co_consts.ob_item[0]
     INCREF rax
     VPUSH rax
     DISPATCH
+END_FUNC op_load_const
 
 ;; ============================================================================
 ;; op_load_fast - Load local variable from frame localsplus[arg]
 ;; ============================================================================
-global op_load_fast
-op_load_fast:
+DEF_FUNC_BARE op_load_fast
     ; ecx = arg (slot index in localsplus)
     lea rax, [r12 + PyFrame.localsplus]
     mov rax, [rax + rcx*8]
     INCREF rax
     VPUSH rax
     DISPATCH
+END_FUNC op_load_fast
 
 ;; ============================================================================
 ;; op_load_global - Load global (or builtin) variable by name
@@ -66,8 +64,7 @@ op_load_fast:
 ;; Search order: globals dict -> builtins dict
 ;; Followed by 4 CACHE entries (8 bytes) that must be skipped.
 ;; ============================================================================
-global op_load_global
-op_load_global:
+DEF_FUNC_BARE op_load_global
     ; ecx = arg
     ; Check bit 0: if set, push NULL first
     test ecx, 1
@@ -110,14 +107,14 @@ op_load_global:
     ; Skip 4 CACHE entries = 8 bytes
     add rbx, 8
     DISPATCH
+END_FUNC op_load_global
 
 ;; ============================================================================
 ;; op_load_name - Load name from locals -> globals -> builtins
 ;;
 ;; Similar to LOAD_GLOBAL but checks locals dict first.
 ;; ============================================================================
-global op_load_name
-op_load_name:
+DEF_FUNC_BARE op_load_name
     ; ecx = arg (index into co_names)
     mov rsi, [r15 + rcx*8]     ; rsi = name (PyStrObject*)
     push rsi                   ; save name
@@ -159,6 +156,7 @@ op_load_name:
     INCREF rax
     VPUSH rax
     DISPATCH
+END_FUNC op_load_name
 
 ;; ============================================================================
 ;; op_load_build_class - Push __build_class__ builtin onto the stack
@@ -168,12 +166,12 @@ op_load_name:
 ;; ============================================================================
 extern build_class_obj
 
-global op_load_build_class
-op_load_build_class:
+DEF_FUNC_BARE op_load_build_class
     mov rax, [rel build_class_obj]
     INCREF rax
     VPUSH rax
     DISPATCH
+END_FUNC op_load_build_class
 
 ;; ============================================================================
 ;; op_load_attr - Load attribute from object
@@ -191,11 +189,8 @@ op_load_build_class:
 ;;
 ;; Followed by 9 CACHE entries (18 bytes) that must be skipped.
 ;; ============================================================================
-global op_load_attr
-op_load_attr:
-    push rbp
-    mov rbp, rsp
-    sub rsp, 48             ; [rbp-8]=flag, [rbp-16]=obj, [rbp-24]=name, [rbp-32]=attr, [rbp-40]=from_type_dict
+DEF_FUNC op_load_attr, 48
+    ; [rbp-8]=flag, [rbp-16]=obj, [rbp-24]=name, [rbp-32]=attr, [rbp-40]=from_type_dict
 
     ; Extract flag and name_index
     mov eax, ecx
@@ -328,6 +323,7 @@ op_load_attr:
     add rbx, 18            ; skip 9 CACHE entries
     leave
     DISPATCH
+END_FUNC op_load_attr
 
 ;; ============================================================================
 ;; op_load_closure - Load cell from localsplus[arg]
@@ -335,13 +331,13 @@ op_load_attr:
 ;; Same as LOAD_FAST — loads the cell object itself (not its contents).
 ;; In Python 3.12, LOAD_CLOSURE is same opcode behavior as LOAD_FAST.
 ;; ============================================================================
-global op_load_closure
-op_load_closure:
+DEF_FUNC_BARE op_load_closure
     lea rax, [r12 + PyFrame.localsplus]
     mov rax, [rax + rcx*8]
     INCREF rax
     VPUSH rax
     DISPATCH
+END_FUNC op_load_closure
 
 ;; ============================================================================
 ;; op_load_deref - Load value through cell in localsplus[arg]
@@ -349,8 +345,7 @@ op_load_closure:
 ;; Gets cell from localsplus[arg], then loads cell.ob_ref.
 ;; Raises NameError if cell is empty (ob_ref == NULL).
 ;; ============================================================================
-global op_load_deref
-op_load_deref:
+DEF_FUNC_BARE op_load_deref
     lea rax, [r12 + PyFrame.localsplus]
     mov rax, [rax + rcx*8]        ; rax = cell object
     test rax, rax
@@ -366,6 +361,7 @@ op_load_deref:
     lea rdi, [rel exc_NameError_type]
     CSTRING rsi, "free variable referenced before assignment"
     call raise_exception
+END_FUNC op_load_deref
 
 ;; ============================================================================
 ;; op_load_fast_check - Load local with NULL check
@@ -373,8 +369,7 @@ op_load_deref:
 ;; Same as LOAD_FAST but raises UnboundLocalError if slot is NULL.
 ;; Used after DELETE_FAST and in exception handlers.
 ;; ============================================================================
-global op_load_fast_check
-op_load_fast_check:
+DEF_FUNC_BARE op_load_fast_check
     lea rax, [r12 + PyFrame.localsplus]
     mov rax, [rax + rcx*8]
     test rax, rax
@@ -387,6 +382,7 @@ op_load_fast_check:
     lea rdi, [rel exc_NameError_type]
     CSTRING rsi, "cannot access local variable"
     call raise_exception
+END_FUNC op_load_fast_check
 
 ;; ============================================================================
 ;; op_load_fast_and_clear - Load local and set slot to NULL
@@ -394,14 +390,14 @@ op_load_fast_check:
 ;; Used by comprehensions to save/restore iteration variable.
 ;; If slot is NULL, pushes NULL (no error).
 ;; ============================================================================
-global op_load_fast_and_clear
-op_load_fast_and_clear:
+DEF_FUNC_BARE op_load_fast_and_clear
     lea rax, [r12 + PyFrame.localsplus]
     mov rdx, [rax + rcx*8]     ; current value (may be NULL)
     mov qword [rax + rcx*8], 0 ; clear slot
     ; Push value (or NULL) - no INCREF needed since we're transferring ownership
     VPUSH rdx
     DISPATCH
+END_FUNC op_load_fast_and_clear
 
 ;; ============================================================================
 ;; op_load_super_attr - Load attribute via super()
@@ -415,11 +411,8 @@ op_load_fast_and_clear:
 ;; (walking the MRO chain), and pushes result.
 ;; If method flag: push self + func. Otherwise: push NULL + attr.
 ;; ============================================================================
-global op_load_super_attr
-op_load_super_attr:
-    push rbp
-    mov rbp, rsp
-    sub rsp, 32                    ; [rbp-8]=self, [rbp-16]=class, [rbp-24]=name, [rbp-32]=method_flag
+DEF_FUNC op_load_super_attr, 32
+    ; [rbp-8]=self, [rbp-16]=class, [rbp-24]=name, [rbp-32]=method_flag
 
     ; Save method flag
     mov eax, ecx
@@ -510,3 +503,4 @@ op_load_super_attr:
     add rbx, 2
     leave
     DISPATCH
+END_FUNC op_load_super_attr

@@ -15,10 +15,6 @@
 %include "object.inc"
 %include "types.inc"
 
-section .note.GNU-stack noalloc noexec nowrite progbits
-
-section .text
-
 extern ap_malloc
 extern ap_free
 extern str_from_cstr
@@ -64,9 +60,7 @@ extern float_from_f64
 ;; Input:  rdi = ptr to source mpz_t
 ;; Output: rax = new PyIntObject*
 ;; ============================================================================
-int_new_from_mpz:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC_LOCAL int_new_from_mpz
     push rbx
     push r12
     mov rbx, rdi
@@ -84,8 +78,9 @@ int_new_from_mpz:
     mov rax, r12
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
+END_FUNC int_new_from_mpz
 
 ;; ============================================================================
 ;; SMALLINT_DECODE - decode SmallInt tagged pointer to int64
@@ -101,8 +96,7 @@ int_new_from_mpz:
 ;; int_from_i64(int64_t val) -> PyObject* (SmallInt or PyIntObject*)
 ;; Creates SmallInt if value fits in 62-bit signed range, else GMP int
 ;; ============================================================================
-global int_from_i64
-int_from_i64:
+DEF_FUNC_BARE int_from_i64
     ; Check if value fits in SmallInt range: -2^62 .. 2^62-1
     mov rax, rdi
     sar rax, 62            ; rax = sign-extension of bits 63:62
@@ -113,15 +107,13 @@ int_from_i64:
     mov rax, rdi
     bts rax, 63            ; set tag bit
     ret
+END_FUNC int_from_i64
 
 ;; ============================================================================
 ;; int_from_i64_gmp(int64_t val) -> PyIntObject*
 ;; Always creates a GMP-backed integer (no SmallInt)
 ;; ============================================================================
-global int_from_i64_gmp
-int_from_i64_gmp:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC int_from_i64_gmp
     push rbx
     push r12
     mov rbx, rdi
@@ -139,26 +131,24 @@ int_from_i64_gmp:
     mov rax, r12
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
+END_FUNC int_from_i64_gmp
 
 ;; ============================================================================
 ;; smallint_to_pyint(SmallInt val) -> PyIntObject*
 ;; Decode SmallInt and create GMP-backed int
 ;; ============================================================================
-global smallint_to_pyint
-smallint_to_pyint:
+DEF_FUNC_BARE smallint_to_pyint
     SMALLINT_DECODE rdi
     jmp int_from_i64_gmp
+END_FUNC smallint_to_pyint
 
 ;; ============================================================================
 ;; int_from_cstr(const char *str, int base) -> PyIntObject*
 ;; Create integer from C string. Returns NULL on parse failure.
 ;; ============================================================================
-global int_from_cstr
-int_from_cstr:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC int_from_cstr
     push rbx
     push r12
     push r13
@@ -182,7 +172,7 @@ int_from_cstr:
     pop r13
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
 .parse_fail:
     lea rdi, [r12 + PyIntObject.mpz]
@@ -193,15 +183,15 @@ int_from_cstr:
     pop r13
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
+END_FUNC int_from_cstr
 
 ;; ============================================================================
 ;; int_to_i64(PyObject *obj) -> int64_t
 ;; Extract integer value as C int64. Handles SmallInt.
 ;; ============================================================================
-global int_to_i64
-int_to_i64:
+DEF_FUNC_BARE int_to_i64
     test rdi, rdi
     js .smallint
     push rbp
@@ -214,13 +204,13 @@ int_to_i64:
     mov rax, rdi
     SMALLINT_DECODE rax
     ret
+END_FUNC int_to_i64
 
 ;; ============================================================================
 ;; int_repr(PyObject *self) -> PyStrObject*
 ;; String representation. SmallInt uses snprintf, GMP uses gmpz_get_str.
 ;; ============================================================================
-global int_repr
-int_repr:
+DEF_FUNC_BARE int_repr
     test rdi, rdi
     js .smallint
 
@@ -296,13 +286,13 @@ int_repr:
     call str_from_cstr
     leave
     ret
+END_FUNC int_repr
 
 ;; ============================================================================
 ;; int_hash(PyObject *self) -> int64
 ;; SmallInt: decoded value. GMP: low bits via get_si. Never returns -1.
 ;; ============================================================================
-global int_hash
-int_hash:
+DEF_FUNC_BARE int_hash
     test rdi, rdi
     js .smallint
 
@@ -328,13 +318,13 @@ int_hash:
     mov rax, -2
 .si_done:
     ret
+END_FUNC int_hash
 
 ;; ============================================================================
 ;; int_bool(PyObject *self) -> int (0 or 1)
 ;; SmallInt: decoded != 0. GMP: cmp_si(0) != 0.
 ;; ============================================================================
-global int_bool
-int_bool:
+DEF_FUNC_BARE int_bool
     test rdi, rdi
     js .smallint
 
@@ -356,13 +346,13 @@ int_bool:
     setnz al
     movzx eax, al
     ret
+END_FUNC int_bool
 
 ;; ============================================================================
 ;; int_add(PyObject *a, PyObject *b) -> PyObject*
 ;; SmallInt x SmallInt fast path with overflow check.
 ;; ============================================================================
-global int_add
-int_add:
+DEF_FUNC_BARE int_add
     ; Check both SmallInt
     mov rax, rdi
     or rax, rsi
@@ -439,12 +429,12 @@ int_add:
     pop rbx
     pop rbp
     ret
+END_FUNC int_add
 
 ;; ============================================================================
 ;; int_sub(PyObject *a, PyObject *b) -> PyObject*
 ;; ============================================================================
-global int_sub
-int_sub:
+DEF_FUNC_BARE int_sub
     mov rax, rdi
     or rax, rsi
     jns .gmp_path
@@ -512,13 +502,13 @@ int_sub:
     pop rbx
     pop rbp
     ret
+END_FUNC int_sub
 
 ;; ============================================================================
 ;; int_mul(PyObject *a, PyObject *b) -> PyObject*
 ;; SmallInt x SmallInt: use imul with overflow detection
 ;; ============================================================================
-global int_mul
-int_mul:
+DEF_FUNC_BARE int_mul
     mov rax, rdi
     or rax, rsi
     jns .gmp_path
@@ -592,12 +582,12 @@ int_mul:
     pop rbx
     pop rbp
     ret
+END_FUNC int_mul
 
 ;; ============================================================================
 ;; int_floordiv(PyObject *a, PyObject *b) -> PyObject*
 ;; ============================================================================
-global int_floordiv
-int_floordiv:
+DEF_FUNC_BARE int_floordiv
     mov rax, rdi
     or rax, rsi
     jns .gmp_path
@@ -669,12 +659,12 @@ int_floordiv:
     pop rbx
     pop rbp
     ret
+END_FUNC int_floordiv
 
 ;; ============================================================================
 ;; int_mod(PyObject *a, PyObject *b) -> PyObject*
 ;; ============================================================================
-global int_mod
-int_mod:
+DEF_FUNC_BARE int_mod
     mov rax, rdi
     or rax, rsi
     jns .gmp_path
@@ -745,12 +735,12 @@ int_mod:
     pop rbx
     pop rbp
     ret
+END_FUNC int_mod
 
 ;; ============================================================================
 ;; int_neg(PyObject *a) -> PyObject*
 ;; ============================================================================
-global int_neg
-int_neg:
+DEF_FUNC_BARE int_neg
     test rdi, rdi
     js .smallint
 
@@ -793,15 +783,13 @@ int_neg:
     ; Value is 2^62, doesn't fit SmallInt. Create GMP int.
     mov rdi, rax
     jmp int_from_i64_gmp
+END_FUNC int_neg
 
 ;; ============================================================================
 ;; int_compare(PyObject *a, PyObject *b, int op) -> PyObject*
 ;; op: PY_LT=0 PY_LE=1 PY_EQ=2 PY_NE=3 PY_GT=4 PY_GE=5
 ;; ============================================================================
-global int_compare
-int_compare:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC int_compare
     push rbx
     push r12
 
@@ -896,22 +884,22 @@ int_compare:
     inc qword [rax + PyObject.ob_refcnt]
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
 .ret_false:
     lea rax, [rel bool_false]
     inc qword [rax + PyObject.ob_refcnt]
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
+END_FUNC int_compare
 
 ;; ============================================================================
 ;; int_dealloc(PyObject *self)
 ;; Free GMP data + object. SmallInt guard.
 ;; ============================================================================
-global int_dealloc
-int_dealloc:
+DEF_FUNC_BARE int_dealloc
     ; SmallInt should never be deallocated
     test rdi, rdi
     js .bail
@@ -928,12 +916,12 @@ int_dealloc:
     pop rbp
 .bail:
     ret
+END_FUNC int_dealloc
 
 ;; ============================================================================
 ;; Bitwise AND: int_and(PyObject *a, PyObject *b) -> PyObject*
 ;; ============================================================================
-global int_and
-int_and:
+DEF_FUNC_BARE int_and
     mov rax, rdi
     or rax, rsi
     jns .gmp
@@ -997,12 +985,12 @@ int_and:
     pop rbx
     pop rbp
     ret
+END_FUNC int_and
 
 ;; ============================================================================
 ;; Bitwise OR: int_or(PyObject *a, PyObject *b) -> PyObject*
 ;; ============================================================================
-global int_or
-int_or:
+DEF_FUNC_BARE int_or
     mov rax, rdi
     or rax, rsi
     jns .gmp
@@ -1066,12 +1054,12 @@ int_or:
     pop rbx
     pop rbp
     ret
+END_FUNC int_or
 
 ;; ============================================================================
 ;; Bitwise XOR: int_xor(PyObject *a, PyObject *b) -> PyObject*
 ;; ============================================================================
-global int_xor
-int_xor:
+DEF_FUNC_BARE int_xor
     mov rax, rdi
     or rax, rsi
     jns .gmp
@@ -1139,13 +1127,13 @@ int_xor:
     pop rbx
     pop rbp
     ret
+END_FUNC int_xor
 
 ;; ============================================================================
 ;; Bitwise NOT: int_invert(PyObject *a, PyObject *b_unused) -> PyObject*
 ;; ~x = -(x+1)
 ;; ============================================================================
-global int_invert
-int_invert:
+DEF_FUNC_BARE int_invert
     test rdi, rdi
     js .smallint
 
@@ -1177,14 +1165,12 @@ int_invert:
     not rax                ; ~x = -(x+1), works for all 62-bit values
     bts rax, 63
     ret
+END_FUNC int_invert
 
 ;; ============================================================================
 ;; Left shift: int_lshift(PyObject *a, PyObject *b) -> PyObject*
 ;; ============================================================================
-global int_lshift
-int_lshift:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC int_lshift
     push rbx
     push r12
     push r13
@@ -1245,21 +1231,19 @@ int_lshift:
     pop r13
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
 
 .neg_shift:
     lea rdi, [rel exc_ValueError_type]
     CSTRING rsi, "negative shift count"
     call raise_exception
+END_FUNC int_lshift
 
 ;; ============================================================================
 ;; Right shift: int_rshift(PyObject *a, PyObject *b) -> PyObject*
 ;; ============================================================================
-global int_rshift
-int_rshift:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC int_rshift
     push rbx
     push r12
     push r13
@@ -1297,7 +1281,7 @@ int_rshift:
     pop r13
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
 .max_shift:
     ; Shift >= 63: result is 0 or -1 depending on sign
@@ -1306,7 +1290,7 @@ int_rshift:
     pop r13
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
 
 .gmp_path:
@@ -1327,22 +1311,20 @@ int_rshift:
     pop r13
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
 
 .neg_shift:
     lea rdi, [rel exc_ValueError_type]
     CSTRING rsi, "negative shift count"
     call raise_exception
+END_FUNC int_rshift
 
 ;; ============================================================================
 ;; Power: int_power(PyObject *a, PyObject *b) -> PyObject*
 ;; For small positive exponents, use GMP mpz_pow_ui
 ;; ============================================================================
-global int_power
-int_power:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC int_power
     push rbx
     push r12
     push r13
@@ -1402,7 +1384,7 @@ int_power:
     pop r13
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
 
 .neg_exp:
@@ -1441,17 +1423,15 @@ int_power:
     pop r13
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
+END_FUNC int_power
 
 ;; ============================================================================
 ;; True divide: int_true_divide(PyObject *a, PyObject *b) -> PyObject* (float)
 ;; int / int always returns float in Python
 ;; ============================================================================
-global int_true_divide
-int_true_divide:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC int_true_divide
     and rsp, -16           ; align for potential libc calls
     push rbx
     push r12
@@ -1505,6 +1485,7 @@ int_true_divide:
     lea rdi, [rel exc_ZeroDivisionError_type]
     CSTRING rsi, "division by zero"
     call raise_exception
+END_FUNC int_true_divide
 
 ;; ============================================================================
 ;; Data

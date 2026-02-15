@@ -7,9 +7,6 @@
 %include "object.inc"
 %include "types.inc"
 
-section .note.GNU-stack noalloc noexec nowrite progbits
-
-section .text
 
 extern ap_malloc
 extern ap_free
@@ -57,9 +54,7 @@ itertools_iter_self:
 ;; Calls tp_iter on obj, returns iterator. Raises TypeError if no tp_iter.
 ;; Clobbers caller-saved regs.
 ;; ============================================================================
-get_iterator:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC_LOCAL get_iterator
 
     ; Check SmallInt (cannot iterate)
     test rdi, rdi
@@ -72,13 +67,14 @@ get_iterator:
     test rax, rax
     jz .no_iter
     call rax
-    pop rbp
+    leave
     ret
 
 .no_iter:
     lea rdi, [rel exc_TypeError_type]
     CSTRING rsi, "object is not iterable"
     call raise_exception
+END_FUNC get_iterator
 
 ;; ============================================================================
 ;; ENUMERATE
@@ -87,10 +83,7 @@ get_iterator:
 ;; builtin_enumerate(args, nargs) -> EnumerateIterObject*
 ;; nargs=1: enumerate(iterable), start=0
 ;; nargs=2: enumerate(iterable, start)
-global builtin_enumerate
-builtin_enumerate:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC builtin_enumerate
     push rbx
     push r12
     push r13
@@ -134,18 +127,17 @@ builtin_enumerate:
     pop r13
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
 
 .enum_error:
     lea rdi, [rel exc_TypeError_type]
     CSTRING rsi, "enumerate() requires 1 or 2 arguments"
     call raise_exception
+END_FUNC builtin_enumerate
 
 ;; enumerate_iternext(self) -> PyObject* (2-tuple) or NULL
-enumerate_iternext:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC_LOCAL enumerate_iternext
     push rbx
     push r12
     push r13
@@ -180,7 +172,7 @@ enumerate_iternext:
     pop r13
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
 
 .enum_exhausted:
@@ -188,13 +180,12 @@ enumerate_iternext:
     pop r13
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
+END_FUNC enumerate_iternext
 
 ;; enumerate_dealloc(self)
-enumerate_dealloc:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC_LOCAL enumerate_dealloc
     push rbx
     mov rbx, rdi
 
@@ -207,18 +198,16 @@ enumerate_dealloc:
     call ap_free
 
     pop rbx
-    pop rbp
+    leave
     ret
+END_FUNC enumerate_dealloc
 
 ;; ============================================================================
 ;; ZIP
 ;; ============================================================================
 
 ;; builtin_zip(args, nargs) -> ZipIterObject*
-global builtin_zip
-builtin_zip:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC builtin_zip
     push rbx
     push r12
     push r13
@@ -268,7 +257,7 @@ builtin_zip:
     pop r13
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
 
 .zip_zero:
@@ -286,13 +275,12 @@ builtin_zip:
     pop r13
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
+END_FUNC builtin_zip
 
 ;; zip_iternext(self) -> PyObject* (tuple) or NULL
-zip_iternext:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC_LOCAL zip_iternext
     push rbx
     push r12
     push r13
@@ -338,7 +326,7 @@ zip_iternext:
     pop r13
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
 
 .zip_partial_cleanup:
@@ -375,13 +363,12 @@ zip_iternext:
     pop r13
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
+END_FUNC zip_iternext
 
 ;; zip_dealloc(self)
-zip_dealloc:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC_LOCAL zip_dealloc
     push rbx
     push r12
     push r13
@@ -416,8 +403,9 @@ zip_dealloc:
     pop r13
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
+END_FUNC zip_dealloc
 
 ;; ============================================================================
 ;; MAP
@@ -425,10 +413,7 @@ zip_dealloc:
 
 ;; builtin_map(args, nargs) -> MapIterObject*
 ;; nargs=2: map(func, iterable)
-global builtin_map
-builtin_map:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC builtin_map
     push rbx
     push r12
     push r13
@@ -461,20 +446,19 @@ builtin_map:
     pop r13
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
 
 .map_error:
     lea rdi, [rel exc_TypeError_type]
     CSTRING rsi, "map() requires exactly 2 arguments"
     call raise_exception
+END_FUNC builtin_map
 
 ;; map_iternext(self) -> PyObject* or NULL
 ;; IMPORTANT: Do not clobber r12 before calling tp_call, because func_call
 ;; reads r12 expecting the eval loop's current frame pointer.
-map_iternext:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC_LOCAL map_iternext
     push rbx
     push r13
     push r14
@@ -512,7 +496,7 @@ map_iternext:
     pop r14
     pop r13
     pop rbx
-    pop rbp
+    leave
     ret
 
 .map_exhausted:
@@ -521,13 +505,12 @@ map_iternext:
     pop r14
     pop r13
     pop rbx
-    pop rbp
+    leave
     ret
+END_FUNC map_iternext
 
 ;; map_dealloc(self)
-map_dealloc:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC_LOCAL map_dealloc
     push rbx
     mov rbx, rdi
 
@@ -544,8 +527,9 @@ map_dealloc:
     call ap_free
 
     pop rbx
-    pop rbp
+    leave
     ret
+END_FUNC map_dealloc
 
 ;; ============================================================================
 ;; FILTER
@@ -553,10 +537,7 @@ map_dealloc:
 
 ;; builtin_filter(args, nargs) -> FilterIterObject*
 ;; nargs=2: filter(func_or_none, iterable)
-global builtin_filter
-builtin_filter:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC builtin_filter
     push rbx
     push r12
     push r13
@@ -599,20 +580,19 @@ builtin_filter:
     pop r13
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
 
 .filter_error:
     lea rdi, [rel exc_TypeError_type]
     CSTRING rsi, "filter() requires exactly 2 arguments"
     call raise_exception
+END_FUNC builtin_filter
 
 ;; filter_iternext(self) -> PyObject* or NULL
 ;; IMPORTANT: Do not clobber r12 before calling tp_call, because func_call
 ;; reads r12 expecting the eval loop's current frame pointer.
-filter_iternext:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC_LOCAL filter_iternext
     push rbx
     push r13
     push r14
@@ -681,7 +661,7 @@ filter_iternext:
     pop r14
     pop r13
     pop rbx
-    pop rbp
+    leave
     ret
 
 .filter_exhausted:
@@ -690,13 +670,12 @@ filter_iternext:
     pop r14
     pop r13
     pop rbx
-    pop rbp
+    leave
     ret
+END_FUNC filter_iternext
 
 ;; filter_dealloc(self)
-filter_dealloc:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC_LOCAL filter_dealloc
     push rbx
     mov rbx, rdi
 
@@ -716,8 +695,9 @@ filter_dealloc:
     call ap_free
 
     pop rbx
-    pop rbp
+    leave
     ret
+END_FUNC filter_dealloc
 
 ;; ============================================================================
 ;; REVERSED
@@ -725,10 +705,7 @@ filter_dealloc:
 
 ;; builtin_reversed(args, nargs) -> ReversedIterObject*
 ;; nargs=1: reversed(sequence)
-global builtin_reversed
-builtin_reversed:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC builtin_reversed
     push rbx
     push r12
     push r13
@@ -782,7 +759,7 @@ builtin_reversed:
     pop r13
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
 
 .rev_error:
@@ -794,11 +771,10 @@ builtin_reversed:
     lea rdi, [rel exc_TypeError_type]
     CSTRING rsi, "argument to reversed() must be a sequence"
     call raise_exception
+END_FUNC builtin_reversed
 
 ;; reversed_iternext(self) -> PyObject* or NULL
-reversed_iternext:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC_LOCAL reversed_iternext
     push rbx
 
     mov rbx, rdi            ; self
@@ -825,19 +801,18 @@ reversed_iternext:
     dec qword [rbx + IT_FIELD2]
 
     pop rbx
-    pop rbp
+    leave
     ret
 
 .rev_exhausted:
     xor eax, eax
     pop rbx
-    pop rbp
+    leave
     ret
+END_FUNC reversed_iternext
 
 ;; reversed_dealloc(self)
-reversed_dealloc:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC_LOCAL reversed_dealloc
     push rbx
     mov rbx, rdi
 
@@ -850,8 +825,9 @@ reversed_dealloc:
     call ap_free
 
     pop rbx
-    pop rbp
+    leave
     ret
+END_FUNC reversed_dealloc
 
 ;; ============================================================================
 ;; SORTED
@@ -859,10 +835,7 @@ reversed_dealloc:
 
 ;; builtin_sorted(args, nargs) -> PyListObject*
 ;; nargs=1: sorted(iterable) -> new sorted list
-global builtin_sorted
-builtin_sorted:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC builtin_sorted
     push rbx
     push r12
 
@@ -924,13 +897,14 @@ builtin_sorted:
 
     pop r12
     pop rbx
-    pop rbp
+    leave
     ret
 
 .sorted_error:
     lea rdi, [rel exc_TypeError_type]
     CSTRING rsi, "sorted() requires exactly 1 argument"
     call raise_exception
+END_FUNC builtin_sorted
 
 ;; ============================================================================
 ;; Data section - type name strings and type objects

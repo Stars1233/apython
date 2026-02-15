@@ -3,19 +3,13 @@
 
 %include "macros.inc"
 
-section .note.GNU-stack noalloc noexec nowrite progbits
-
-section .text
 
 extern sys_write
 extern sys_exit
 
 ; fatal_error(const char *msg)
 ; Prints "Error: <msg>\n" to stderr and exits with code 1. Never returns.
-global fatal_error
-fatal_error:
-    push rbp
-    mov rbp, rsp
+DEF_FUNC fatal_error
     push rbx
     mov rbx, rdi            ; save msg
 
@@ -50,20 +44,17 @@ fatal_error:
     ; sys_exit(1)
     mov edi, 1
     call sys_exit
+END_FUNC fatal_error
 
 ; runtime_error(const char *msg)
 ; For now, same as fatal_error
-global runtime_error
-runtime_error:
+DEF_FUNC_BARE runtime_error
     jmp fatal_error
+END_FUNC runtime_error
 
 ; error_unimplemented_opcode(int opcode)
 ; Reports unimplemented bytecode opcode and exits
-global error_unimplemented_opcode
-error_unimplemented_opcode:
-    push rbp
-    mov rbp, rsp
-    sub rsp, 32             ; space for decimal digits
+DEF_FUNC error_unimplemented_opcode, 32             ; space for decimal digits
 
     mov eax, edi            ; opcode value
 
@@ -107,6 +98,7 @@ error_unimplemented_opcode:
     ; sys_exit(1)
     mov edi, 1
     call sys_exit
+END_FUNC error_unimplemented_opcode
 
 section .rodata
 err_prefix: db "Error: "
