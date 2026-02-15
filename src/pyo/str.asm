@@ -20,6 +20,7 @@ extern exc_IndexError_type
 extern slice_type
 extern slice_indices
 extern type_type
+extern obj_dealloc
 
 ; str_from_cstr(const char *cstr) -> PyStrObject*
 ; Creates a new string object from a C string
@@ -318,6 +319,197 @@ DEF_FUNC str_repeat
     leave
     ret
 END_FUNC str_repeat
+
+;; ============================================================================
+;; str_mod(PyStrObject *fmt, PyObject *args) -> PyStrObject*
+;; nb_remainder: implements "fmt % args" string formatting
+;; Handles: %s, %d, %i, %r, %f, %%
+;; args can be a single value or a tuple
+;; ============================================================================
+extern obj_str
+extern obj_repr
+extern tuple_type
+extern obj_decref
+
+DEF_FUNC str_mod, 1280
+    ; Stack layout:
+    ; [rbp-8]    = fmt string
+    ; [rbp-16]   = args (single value or tuple)
+    ; [rbp-24]   = output buffer (lea into stack)
+    ; [rbp-32]   = output position (int)
+    ; [rbp-40]   = arg index (int)
+    ; [rbp-48]   = nargs (int)
+    ; [rbp-56]   = is_tuple (bool)
+    ; [rbp-1280] = buffer start
+
+    push rbx
+    push r12
+    push r13
+    push r14
+    push r15
+
+    mov [rbp-8], rdi           ; fmt
+    mov [rbp-16], rsi          ; args
+
+    ; Determine if args is a tuple
+    mov qword [rbp-56], 0      ; is_tuple = false
+    mov qword [rbp-48], 1      ; nargs = 1 (single value)
+    test rsi, rsi
+    js .sm_not_tuple            ; SmallInt → single value
+    mov rax, [rsi + PyObject.ob_type]
+    lea rcx, [rel tuple_type]
+    cmp rax, rcx
+    jne .sm_not_tuple
+    mov qword [rbp-56], 1      ; is_tuple = true
+    mov rax, [rsi + PyTupleObject.ob_size]
+    mov [rbp-48], rax           ; nargs = tuple size
+.sm_not_tuple:
+
+    ; Initialize
+    lea r13, [rbp - 1280]      ; r13 = output buffer
+    xor r14d, r14d             ; r14 = output pos
+    xor r15d, r15d             ; r15 = arg index
+
+    ; Walk format string
+    mov rbx, [rbp-8]           ; fmt string
+    mov r12, [rbx + PyStrObject.ob_size]  ; fmt length
+    lea rbx, [rbx + PyStrObject.data]     ; fmt data
+    xor ecx, ecx               ; input pos
+
+.sm_loop:
+    cmp rcx, r12
+    jge .sm_done
+    cmp r14, 1200
+    jge .sm_done               ; safety limit
+
+    movzx eax, byte [rbx + rcx]
+    cmp al, '%'
+    je .sm_format
+    ; Regular char: copy to output
+    mov [r13 + r14], al
+    inc r14
+    inc rcx
+    jmp .sm_loop
+
+.sm_format:
+    ; '%' found — check next char
+    inc rcx
+    cmp rcx, r12
+    jge .sm_done
+
+    movzx eax, byte [rbx + rcx]
+    inc rcx                    ; consume format char
+
+    cmp al, '%'
+    je .sm_percent
+    cmp al, 's'
+    je .sm_str
+    cmp al, 'd'
+    je .sm_int
+    cmp al, 'i'
+    je .sm_int
+    cmp al, 'r'
+    je .sm_repr
+    cmp al, 'f'
+    je .sm_str                 ; %f: use str() for now (float.__str__)
+    ; Unknown: just output the char
+    mov byte [r13 + r14], '%'
+    inc r14
+    mov [r13 + r14], al
+    inc r14
+    jmp .sm_loop
+
+.sm_percent:
+    mov byte [r13 + r14], '%'
+    inc r14
+    jmp .sm_loop
+
+.sm_str:
+    ; Get next arg
+    push rcx
+    call .sm_get_arg
+    ; rax = arg value
+    mov rdi, rax
+    call obj_str
+    ; rax = str result
+    jmp .sm_copy_str
+
+.sm_int:
+    push rcx
+    call .sm_get_arg
+    mov rdi, rax
+    call obj_str               ; int.__str__ = int_repr
+    jmp .sm_copy_str
+
+.sm_repr:
+    push rcx
+    call .sm_get_arg
+    mov rdi, rax
+    call obj_repr
+    jmp .sm_copy_str
+
+.sm_copy_str:
+    ; rax = PyStrObject* to copy into output
+    push rax                   ; save for DECREF
+    mov rcx, [rax + PyStrObject.ob_size]
+    lea rsi, [rax + PyStrObject.data]
+    ; Copy chars
+    xor edx, edx
+.sm_copy_loop:
+    cmp rdx, rcx
+    jge .sm_copy_done
+    cmp r14, 1200
+    jge .sm_copy_done
+    movzx eax, byte [rsi + rdx]
+    mov [r13 + r14], al
+    inc r14
+    inc rdx
+    jmp .sm_copy_loop
+.sm_copy_done:
+    pop rdi                    ; DECREF temp str
+    DECREF_REG rdi
+    pop rcx                    ; restore input pos
+    jmp .sm_loop
+
+.sm_get_arg:
+    ; Get arg at index r15, increment r15
+    ; Returns arg in rax (borrowed ref)
+    cmp qword [rbp-56], 1
+    je .sm_arg_tuple
+    ; Single value
+    mov rax, [rbp-16]
+    inc r15
+    ret
+.sm_arg_tuple:
+    mov rax, [rbp-16]          ; tuple
+    mov rdx, r15
+    cmp rdx, [rax + PyTupleObject.ob_size]
+    jge .sm_arg_none
+    mov rax, [rax + PyTupleObject.ob_item + rdx*8]
+    inc r15
+    ret
+.sm_arg_none:
+    extern none_singleton
+    lea rax, [rel none_singleton]
+    inc r15
+    ret
+
+.sm_done:
+    ; Null-terminate and create string
+    mov byte [r13 + r14], 0
+
+    mov rdi, r13
+    mov rsi, r14
+    call str_new
+
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC str_mod
 
 ;; ============================================================================
 ;; str_compare(PyObject *a, PyObject *b, int op) -> PyObject*
@@ -639,7 +831,7 @@ str_number_methods:
     dq str_concat           ; nb_add          +0
     dq 0                    ; nb_subtract     +8
     dq str_repeat           ; nb_multiply     +16
-    dq 0                    ; nb_remainder    +24
+    dq str_mod              ; nb_remainder    +24
     dq 0                    ; nb_divmod       +32
     dq 0                    ; nb_power        +40
     dq 0                    ; nb_negative     +48
