@@ -40,6 +40,7 @@ extern exc_RuntimeError_type
 extern exc_TypeError_type
 extern obj_incref
 extern obj_decref
+extern prep_reraise_star
 extern tuple_new
 extern list_type
 
@@ -2136,15 +2137,12 @@ DEF_FUNC_BARE op_call_intrinsic_2
     DISPATCH
 
 .ci2_prep_reraise:
-    ; INTRINSIC_PREP_RERAISE: TOS = exc, TOS1 = traceback
-    ; For now, discard traceback and keep exception
-    VPOP rax                       ; exc
-    VPOP rdi                       ; traceback
-    mov rsi, [r13 + 8]            ; traceback tag
-    push rax
-    DECREF_VAL rdi, rsi
-    pop rax
-    VPUSH_BRANCHLESS rax
+    ; INTRINSIC_PREP_RERAISE_STAR: TOS = exc_list, TOS1 = orig_exc
+    ; Delegate to prep_reraise_star(orig, excs_list)
+    VPOP rsi                       ; rsi = exc_list
+    VPOP rdi                       ; rdi = orig_exc
+    call prep_reraise_star
+    VPUSH_PTR rax
     DISPATCH
 END_FUNC op_call_intrinsic_2
 

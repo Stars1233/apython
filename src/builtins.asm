@@ -119,6 +119,8 @@ extern exc_UnicodeError_type
 extern exc_Warning_type
 extern exc_DeprecationWarning_type
 extern exc_UserWarning_type
+extern exc_BaseExceptionGroup_type
+extern exc_ExceptionGroup_type
 
 ;; ============================================================================
 ;; builtin_func_new(void *func_ptr, const char *name_cstr) -> PyBuiltinObject*
@@ -1543,6 +1545,16 @@ DEF_FUNC builtins_init
     lea rdx, [rel exc_UserWarning_type]
     call add_exc_type_builtin
 
+    mov rdi, rbx
+    lea rsi, [rel bi_name_BaseExceptionGroup]
+    lea rdx, [rel exc_BaseExceptionGroup_type]
+    call add_exc_type_builtin
+
+    mov rdi, rbx
+    lea rsi, [rel bi_name_ExceptionGroup]
+    lea rdx, [rel exc_ExceptionGroup_type]
+    call add_exc_type_builtin
+
     ; Register data types as builtins
     mov rdi, rbx
     lea rsi, [rel bi_name_list]
@@ -1715,6 +1727,8 @@ bi_name_UnicodeError:      db "UnicodeError", 0
 bi_name_Warning:           db "Warning", 0
 bi_name_DeprecationWarning: db "DeprecationWarning", 0
 bi_name_UserWarning:       db "UserWarning", 0
+bi_name_BaseExceptionGroup: db "BaseExceptionGroup", 0
+bi_name_ExceptionGroup:    db "ExceptionGroup", 0
 bi_name_list:              db "list", 0
 bi_name_dict:              db "dict", 0
 bi_name_tuple:             db "tuple", 0

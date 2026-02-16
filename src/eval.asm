@@ -126,13 +126,22 @@ extern obj_str
 extern sys_write
 extern sys_exit
 extern str_type
+extern str_from_cstr
 extern none_singleton
 
 ; Exception type singletons (for raising)
 extern exc_TypeError_type
 extern exc_ValueError_type
 extern exc_BaseException_type
+extern exc_BaseExceptionGroup_type
 extern exc_Exception_type
+extern exc_ExceptionGroup_type
+
+; ExceptionGroup support
+extern eg_is_base_exception_group
+extern eg_new
+extern eg_split
+extern tuple_new
 
 ; eval_frame(PyFrame *frame) -> PyObject*
 ; Main entry point: sets up registers from the frame and enters the dispatch loop.
@@ -555,6 +564,200 @@ DEF_FUNC_BARE op_check_exc_match
     DISPATCH
 END_FUNC op_check_exc_match
 
+;; op_check_eg_match (37) - Check exception group match for except*
+;; Stack in:  [..., exc_value, match_type]
+;; On match:  [..., rest_or_None, match_eg]  (pop exc_value, push rest, push match)
+;; No match:  [..., exc_value, None]          (keep exc_value, push None)
+;;
+;; Cases:
+;; 1. exc_value isinstance match_type AND is ExceptionGroup → eg_split
+;; 2. exc_value isinstance match_type AND is NOT ExceptionGroup → wrap in EG, rest=None
+;; 3. exc_value is ExceptionGroup but NOT isinstance → eg_split (may return NULL match)
+;; 4. No match at all → push None
+
+CEM_EXC    equ 8
+CEM_MTYPE  equ 16
+CEM_MATCH  equ 24
+CEM_REST   equ 32
+CEM_TMP1   equ 40
+CEM_TMP2   equ 48
+CEM_FRAME  equ 48
+DEF_FUNC op_check_eg_match, CEM_FRAME
+
+    VPOP rsi                 ; rsi = match_type
+    VPEEK rdi                ; rdi = exc_value (don't pop yet)
+    mov [rbp - CEM_EXC], rdi
+    mov [rbp - CEM_MTYPE], rsi
+
+    ; Check if exc_value is None → no match
+    lea rax, [rel none_singleton]
+    cmp rdi, rax
+    je .cem_no_match
+
+    ; Case 1/2: isinstance(exc_value, match_type)?
+    ; rdi = exc, rsi = type already set
+    call exc_isinstance
+    test eax, eax
+    jz .cem_check_group_split
+
+    ; Match! Check if exc_value is an ExceptionGroup
+    mov rdi, [rbp - CEM_EXC]
+    call eg_is_base_exception_group
+    test eax, eax
+    jnz .cem_full_group_match
+
+    ; Case 2: Naked exception matches — wrap in ExceptionGroup
+    ; Create a 1-element tuple containing the exception
+    mov edi, 1
+    call tuple_new
+    mov [rbp - CEM_TMP1], rax ; TMP1 = tuple
+    mov rcx, [rbp - CEM_EXC]
+    INCREF rcx
+    mov [rax + PyTupleObject.ob_item], rcx
+
+    ; Create empty message string
+    CSTRING rdi, ""
+    call str_from_cstr
+    mov [rbp - CEM_TMP2], rax ; TMP2 = empty msg str
+
+    ; eg_new(ExceptionGroup_type, empty_str, tuple)
+    lea rdi, [rel exc_ExceptionGroup_type]
+    mov rsi, [rbp - CEM_TMP2]
+    mov rdx, [rbp - CEM_TMP1]
+    call eg_new
+    mov [rbp - CEM_MATCH], rax  ; match_eg
+
+    ; DECREF temp empty str (eg_new INCREFed it)
+    mov rdi, [rbp - CEM_TMP2]
+    call obj_decref
+    ; DECREF temp tuple (eg_new INCREFed it)
+    mov rdi, [rbp - CEM_TMP1]
+    call obj_decref
+
+    ; Pop exc_value from stack, push None (rest), push match_eg
+    VPOP rdi                 ; pop exc_value
+    call obj_decref
+
+    lea rax, [rel none_singleton]
+    INCREF rax
+    VPUSH_PTR rax            ; push rest = None
+
+    mov rax, [rbp - CEM_MATCH]
+    VPUSH_PTR rax            ; push match_eg (owns ref from eg_new)
+
+    ; DECREF match_type
+    mov rdi, [rbp - CEM_MTYPE]
+    call obj_decref
+
+    leave
+    DISPATCH
+
+.cem_full_group_match:
+    ; Case 1: exc_value is ExceptionGroup and isinstance matches entirely
+    ; Do eg_split to separate matching from non-matching
+    mov rdi, [rbp - CEM_EXC]
+    mov rsi, [rbp - CEM_MTYPE]
+    call eg_split
+    ; rax = match_eg (or NULL), rdx = rest_eg (or NULL)
+    mov [rbp - CEM_MATCH], rax
+    mov [rbp - CEM_REST], rdx
+
+    ; Pop exc_value, push rest, push match
+    VPOP rdi
+    call obj_decref
+
+    ; Push rest (or None if NULL)
+    mov rax, [rbp - CEM_REST]
+    test rax, rax
+    jnz .cem_push_rest
+    lea rax, [rel none_singleton]
+    INCREF rax
+.cem_push_rest:
+    VPUSH_PTR rax
+
+    ; Push match (or None if NULL — shouldn't happen since isinstance matched)
+    mov rax, [rbp - CEM_MATCH]
+    test rax, rax
+    jnz .cem_push_match
+    lea rax, [rel none_singleton]
+    INCREF rax
+.cem_push_match:
+    VPUSH_PTR rax
+
+    ; DECREF match_type
+    mov rdi, [rbp - CEM_MTYPE]
+    call obj_decref
+
+    leave
+    DISPATCH
+
+.cem_check_group_split:
+    ; Not a direct isinstance match. Check if exc_value is an ExceptionGroup
+    ; and split by match_type.
+    mov rdi, [rbp - CEM_EXC]
+    call eg_is_base_exception_group
+    test eax, eax
+    jz .cem_no_match
+
+    ; It IS an ExceptionGroup — split it
+    mov rdi, [rbp - CEM_EXC]
+    mov rsi, [rbp - CEM_MTYPE]
+    call eg_split
+    ; rax = match_eg (or NULL), rdx = rest_eg (or NULL)
+    mov [rbp - CEM_MATCH], rax
+    mov [rbp - CEM_REST], rdx
+
+    ; If match is NULL, no match at all
+    test rax, rax
+    jz .cem_split_no_match
+
+    ; Pop exc_value, push rest, push match
+    VPOP rdi
+    call obj_decref
+
+    ; Push rest (or None if NULL)
+    mov rax, [rbp - CEM_REST]
+    test rax, rax
+    jnz .cem_split_push_rest
+    lea rax, [rel none_singleton]
+    INCREF rax
+.cem_split_push_rest:
+    VPUSH_PTR rax
+
+    ; Push match
+    mov rax, [rbp - CEM_MATCH]
+    VPUSH_PTR rax
+
+    ; DECREF match_type
+    mov rdi, [rbp - CEM_MTYPE]
+    call obj_decref
+
+    leave
+    DISPATCH
+
+.cem_split_no_match:
+    ; Split returned no match — clean up and push None
+    ; rest_eg might be non-NULL, DECREF it
+    mov rdi, [rbp - CEM_REST]
+    test rdi, rdi
+    jz .cem_no_match
+    call obj_decref
+    ; Fall through to no_match
+
+.cem_no_match:
+    ; No match — keep exc_value on stack, push None
+    lea rax, [rel none_singleton]
+    INCREF rax
+    VPUSH_PTR rax
+
+    ; DECREF match_type
+    mov rdi, [rbp - CEM_MTYPE]
+    call obj_decref
+
+    leave
+    DISPATCH
+END_FUNC op_check_eg_match
+
 ; op_raise_varargs (130) - Raise an exception
 ; arg 0: reraise current exception
 ; arg 1: raise TOS
@@ -919,7 +1122,7 @@ opcode_table:
     dq op_unimplemented      ; 34
     dq op_push_exc_info      ; 35  = PUSH_EXC_INFO
     dq op_check_exc_match    ; 36  = CHECK_EXC_MATCH
-    dq op_unimplemented      ; 37  = CHECK_EG_MATCH
+    dq op_check_eg_match     ; 37  = CHECK_EG_MATCH
     dq op_unimplemented      ; 38
     dq op_unimplemented      ; 39
     dq op_unimplemented      ; 40

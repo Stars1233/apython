@@ -36,6 +36,9 @@ extern ap_strcmp
 extern dict_get
 extern dict_new
 extern dict_set
+extern eg_dealloc
+extern exc_BaseExceptionGroup_type
+extern exc_ExceptionGroup_type
 
 ; exc_new(PyTypeObject *type, PyObject *msg_str) -> PyExceptionObject*
 ; Creates a new exception with given type and message string.
@@ -416,10 +419,14 @@ END_FUNC exc_isinstance
 global type_is_exc_subclass
 DEF_FUNC_BARE type_is_exc_subclass
     lea rdx, [rel exc_dealloc]
+    lea rcx, [rel eg_dealloc]
 .tie_walk:
     test rdi, rdi
     jz .tie_no
-    cmp [rdi + PyTypeObject.tp_dealloc], rdx
+    mov rax, [rdi + PyTypeObject.tp_dealloc]
+    cmp rax, rdx
+    je .tie_yes
+    cmp rax, rcx
     je .tie_yes
     mov rdi, [rdi + PyTypeObject.tp_base]
     jmp .tie_walk
@@ -456,6 +463,20 @@ DEF_FUNC exc_type_call, ETC_FRAME
     mov [rbp - ETC_ARGS], rsi
     mov [rbp - ETC_NARGS], rdx
 
+    ; Check if the type has its own tp_call (e.g., ExceptionGroup)
+    mov rax, [rbx + PyTypeObject.tp_call]
+    test rax, rax
+    jz .default_exc_create
+    ; Delegate to type's own tp_call
+    mov rdi, rbx
+    mov rsi, [rbp - ETC_ARGS]
+    mov rdx, [rbp - ETC_NARGS]
+    pop r12
+    pop rbx
+    leave
+    jmp rax
+
+.default_exc_create:
     ; Get message from args[0] if nargs >= 1
     test edx, edx
     jz .no_args
@@ -667,3 +688,5 @@ exception_type_table:
     dq exc_LookupError_type          ; EXC_LOOKUP_ERROR = 21
     dq exc_ArithmeticError_type      ; EXC_ARITHMETIC_ERROR = 22
     dq exc_UnicodeError_type         ; EXC_UNICODE_ERROR = 23
+    dq exc_BaseExceptionGroup_type   ; EXC_BASE_EXCEPTION_GROUP = 24
+    dq exc_ExceptionGroup_type       ; EXC_EXCEPTION_GROUP = 25

@@ -27,8 +27,10 @@ EXC_SYSTEM_EXIT        equ 19
 EXC_OS_ERROR           equ 20
 EXC_LOOKUP_ERROR       equ 21
 EXC_ARITHMETIC_ERROR   equ 22
-EXC_UNICODE_ERROR      equ 23
-EXC_COUNT              equ 24  ; total
+EXC_UNICODE_ERROR          equ 23
+EXC_BASE_EXCEPTION_GROUP   equ 24
+EXC_EXCEPTION_GROUP        equ 25
+EXC_COUNT                  equ 26  ; total
 
 ; Exception object
 struc PyExceptionObject
@@ -40,6 +42,19 @@ struc PyExceptionObject
     .exc_context: resq 1  ; +40: ptr to __context__ or NULL
     .exc_cause:   resq 1  ; +48: ptr to __cause__ or NULL
     .exc_args:    resq 1  ; +56: ptr to args tuple or NULL
+endstruc
+
+; Exception group object (extends PyExceptionObject with eg_exceptions)
+struc PyExceptionGroupObject
+    .ob_refcnt:     resq 1  ; +0
+    .ob_type:       resq 1  ; +8
+    .exc_type:      resq 1  ; +16
+    .exc_value:     resq 1  ; +24 (message string)
+    .exc_tb:        resq 1  ; +32
+    .exc_context:   resq 1  ; +40
+    .exc_cause:     resq 1  ; +48
+    .exc_args:      resq 1  ; +56
+    .eg_exceptions: resq 1  ; +64: tuple of sub-exceptions
 endstruc
 
 ; Fatal error codes (non-Python, internal)
