@@ -1857,6 +1857,260 @@ DEF_FUNC op_match_keys, MK_FRAME
 END_FUNC op_match_keys
 
 ;; ============================================================================
+;; op_match_class - Structural pattern matching: match class
+;;
+;; Opcode 152: MATCH_CLASS
+;; Stack before: subject(TOS2), class(TOS1), kw_attrs_tuple(TOS)
+;; Arg (ecx) = npos (number of positional sub-patterns)
+;; Stack after: attrs_tuple (success) or None (failure)
+;; All 3 inputs consumed.
+;; ============================================================================
+
+;; Stack layout constants (MC_ prefix)
+MC_SUBJ      equ 8
+MC_CLASS     equ 16
+MC_KWATTRS   equ 24
+MC_NPOS      equ 32
+MC_RESULT    equ 40
+MC_MATCHARGS equ 48
+MC_IDX       equ 56
+MC_FRAME     equ 64
+
+extern none_type
+extern str_type
+
+DEF_FUNC op_match_class, MC_FRAME
+
+    ; Pop all 3 inputs
+    VPOP rax                        ; kw_attrs tuple (TOS)
+    mov [rbp - MC_KWATTRS], rax
+    VPOP rax                        ; class (TOS1)
+    mov [rbp - MC_CLASS], rax
+    VPOP rax                        ; subject (TOS2)
+    mov [rbp - MC_SUBJ], rax
+
+    mov [rbp - MC_NPOS], rcx        ; save npos
+    mov qword [rbp - MC_RESULT], 0  ; result tuple (NULL initially)
+    mov qword [rbp - MC_MATCHARGS], 0  ; __match_args__ (NULL initially)
+
+    ;; --- isinstance check ---
+    ;; Get subject's type (SmallInt/None-aware)
+    mov rax, [rbp - MC_SUBJ]
+    test rax, rax
+    js .mc_smallint_type
+    jz .mc_none_type
+    mov rdx, [rax + PyObject.ob_type]
+    jmp .mc_got_type
+
+.mc_smallint_type:
+    lea rdx, [rel int_type]
+    jmp .mc_got_type
+
+.mc_none_type:
+    lea rdx, [rel none_type]
+
+.mc_got_type:
+    ; rdx = subject's type, walk tp_base chain vs class
+    mov rcx, [rbp - MC_CLASS]
+.mc_isinstance_walk:
+    cmp rdx, rcx
+    je .mc_isinstance_ok
+    mov rdx, [rdx + PyTypeObject.tp_base]
+    test rdx, rdx
+    jnz .mc_isinstance_walk
+    ; Not an instance of class — fail
+    jmp .mc_fail
+
+.mc_isinstance_ok:
+    ;; --- Get __match_args__ if npos > 0 ---
+    mov rcx, [rbp - MC_NPOS]
+    test rcx, rcx
+    jz .mc_no_matchargs_needed
+
+    ; Look up __match_args__ on the class via tp_dict chain
+    mov r8, [rbp - MC_CLASS]       ; start at class
+.mc_matchargs_walk:
+    mov rdi, [r8 + PyTypeObject.tp_dict]
+    test rdi, rdi
+    jz .mc_matchargs_next_base
+
+    ; Look up "__match_args__" in dict
+    push r8
+    push rdi                        ; save dict
+    lea rdi, [rel .mc_matchargs_cstr]
+    call str_from_cstr
+    mov rsi, rax                    ; rsi = "__match_args__" str obj
+    pop rdi                         ; restore dict
+    push rsi                        ; save string for DECREF
+    call dict_get
+    pop rsi                         ; rsi = string to DECREF
+    push rax                        ; save dict_get result
+    mov rdi, rsi
+    call obj_decref
+    pop rax                         ; restore dict_get result
+    pop r8                          ; restore type pointer
+
+    test rax, rax
+    jnz .mc_matchargs_found
+
+.mc_matchargs_next_base:
+    mov r8, [r8 + PyTypeObject.tp_base]
+    test r8, r8
+    jnz .mc_matchargs_walk
+
+    ; __match_args__ not found and npos > 0 — fail
+    jmp .mc_fail
+
+.mc_matchargs_found:
+    ; rax = __match_args__ tuple (borrowed ref from dict_get)
+    INCREF rax
+    mov [rbp - MC_MATCHARGS], rax
+
+    ; Verify length >= npos
+    mov rcx, [rbp - MC_NPOS]
+    mov rdx, [rax + PyTupleObject.ob_size]
+    cmp rdx, rcx
+    jl .mc_fail                     ; not enough match_args
+
+.mc_no_matchargs_needed:
+    ;; --- Allocate result tuple: npos + len(kw_attrs) ---
+    mov rdi, [rbp - MC_NPOS]
+    mov rax, [rbp - MC_KWATTRS]
+    add rdi, [rax + PyTupleObject.ob_size]
+    call tuple_new
+    mov [rbp - MC_RESULT], rax
+
+    ;; --- Positional loop: i=0..npos-1 ---
+    mov qword [rbp - MC_IDX], 0
+.mc_pos_loop:
+    mov rcx, [rbp - MC_IDX]
+    cmp rcx, [rbp - MC_NPOS]
+    jge .mc_kw_start
+
+    ; Get attr name from __match_args__[i]
+    mov rax, [rbp - MC_MATCHARGS]
+    mov rsi, [rax + PyTupleObject.ob_item + rcx*8]  ; name string
+
+    ; Call subject's tp_getattr(subject, name)
+    mov rdi, [rbp - MC_SUBJ]
+    test rdi, rdi
+    js .mc_fail                     ; SmallInt has no attrs
+    mov rax, [rdi + PyObject.ob_type]
+    mov rax, [rax + PyTypeObject.tp_getattr]
+    test rax, rax
+    jz .mc_fail
+    call rax
+    test rax, rax
+    jz .mc_fail                     ; attr not found
+
+    ; Store in result tuple[i] (already owns a ref from tp_getattr)
+    mov rcx, [rbp - MC_IDX]
+    mov rdx, [rbp - MC_RESULT]
+    mov [rdx + PyTupleObject.ob_item + rcx*8], rax
+
+    inc qword [rbp - MC_IDX]
+    jmp .mc_pos_loop
+
+.mc_kw_start:
+    ;; --- Keyword loop: j=0..nkw-1 ---
+    mov qword [rbp - MC_IDX], 0
+.mc_kw_loop:
+    mov rcx, [rbp - MC_IDX]
+    mov rax, [rbp - MC_KWATTRS]
+    cmp rcx, [rax + PyTupleObject.ob_size]
+    jge .mc_success
+
+    ; Get attr name from kw_attrs[j]
+    mov rsi, [rax + PyTupleObject.ob_item + rcx*8]  ; name string
+
+    ; Call subject's tp_getattr(subject, name)
+    mov rdi, [rbp - MC_SUBJ]
+    test rdi, rdi
+    js .mc_fail                     ; SmallInt has no attrs
+    mov rax, [rdi + PyObject.ob_type]
+    mov rax, [rax + PyTypeObject.tp_getattr]
+    test rax, rax
+    jz .mc_fail
+    call rax
+    test rax, rax
+    jz .mc_fail                     ; attr not found
+
+    ; Store in result tuple[npos + j]
+    mov rcx, [rbp - MC_IDX]
+    add rcx, [rbp - MC_NPOS]
+    mov rdx, [rbp - MC_RESULT]
+    mov [rdx + PyTupleObject.ob_item + rcx*8], rax
+
+    inc qword [rbp - MC_IDX]
+    jmp .mc_kw_loop
+
+.mc_success:
+    ; Push result tuple, DECREF inputs
+    mov rax, [rbp - MC_RESULT]
+    push rax                        ; save result
+
+    ; DECREF __match_args__ if held
+    mov rdi, [rbp - MC_MATCHARGS]
+    test rdi, rdi
+    jz .mc_success_decref_inputs
+    call obj_decref
+
+.mc_success_decref_inputs:
+    ; DECREF subject
+    mov rdi, [rbp - MC_SUBJ]
+    DECREF_REG rdi
+    ; DECREF class
+    mov rdi, [rbp - MC_CLASS]
+    DECREF_REG rdi
+    ; DECREF kw_attrs tuple
+    mov rdi, [rbp - MC_KWATTRS]
+    DECREF_REG rdi
+
+    pop rax                         ; restore result tuple
+    VPUSH_PTR rax
+    leave
+    DISPATCH
+
+.mc_fail:
+    ; DECREF partial result tuple if allocated (tuple_new zeros items,
+    ; tuple_dealloc skips NULLs, so partial is safe)
+    mov rdi, [rbp - MC_RESULT]
+    test rdi, rdi
+    jz .mc_fail_matchargs
+    call obj_decref
+
+.mc_fail_matchargs:
+    ; XDECREF __match_args__ if held
+    mov rdi, [rbp - MC_MATCHARGS]
+    test rdi, rdi
+    jz .mc_fail_decref_inputs
+    call obj_decref
+
+.mc_fail_decref_inputs:
+    ; DECREF subject
+    mov rdi, [rbp - MC_SUBJ]
+    DECREF_REG rdi
+    ; DECREF class
+    mov rdi, [rbp - MC_CLASS]
+    DECREF_REG rdi
+    ; DECREF kw_attrs tuple
+    mov rdi, [rbp - MC_KWATTRS]
+    DECREF_REG rdi
+
+    ; Push None
+    lea rax, [rel none_singleton]
+    INCREF rax
+    VPUSH_PTR rax
+    leave
+    DISPATCH
+
+section .rodata
+.mc_matchargs_cstr: db "__match_args__", 0
+section .text
+
+END_FUNC op_match_class
+
+;; ============================================================================
 ;; op_call_intrinsic_2 - Call 2-arg intrinsic function
 ;;
 ;; Opcode 174: CALL_INTRINSIC_2

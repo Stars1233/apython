@@ -100,6 +100,7 @@ extern op_load_from_dict_or_deref
 extern op_match_mapping
 extern op_match_sequence
 extern op_match_keys
+extern op_match_class
 extern op_call_intrinsic_2
 extern op_load_super_attr
 extern op_import_name
@@ -1033,7 +1034,7 @@ opcode_table:
     dq op_copy_free_vars     ; 149 = COPY_FREE_VARS
     dq op_yield_value        ; 150 = YIELD_VALUE
     dq op_resume             ; 151 = RESUME
-    dq op_unimplemented      ; 152 = MATCH_CLASS
+    dq op_match_class        ; 152 = MATCH_CLASS
     dq op_unimplemented      ; 153
     dq op_unimplemented      ; 154
     dq op_format_value       ; 155 = FORMAT_VALUE
