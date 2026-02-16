@@ -19,6 +19,9 @@
 section .text
 
 extern eval_dispatch
+extern eval_saved_rbx
+extern trace_opcodes
+extern opcode_table
 extern obj_dealloc
 
 ;; ============================================================================

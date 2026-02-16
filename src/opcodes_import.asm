@@ -6,6 +6,9 @@
 %include "frame.inc"
 
 extern eval_dispatch
+extern eval_saved_rbx
+extern trace_opcodes
+extern opcode_table
 extern import_module
 extern obj_decref
 extern obj_dealloc
@@ -67,7 +70,7 @@ DEF_FUNC_BARE op_import_name
     ; Push module onto value stack
     test rax, rax
     jz .import_failed
-    VPUSH rax
+    VPUSH_PTR rax
     DISPATCH
 
 .import_failed:
@@ -142,12 +145,12 @@ DEF_FUNC op_import_from, IF2_FRAME
 
 .if_found_in_dict:
     inc qword [rax + PyObject.ob_refcnt]
-    VPUSH rax
+    VPUSH_PTR rax
     leave
     DISPATCH
 
 .if_got_attr:
-    VPUSH rax
+    VPUSH_BRANCHLESS rax
     leave
     DISPATCH
 
@@ -209,7 +212,7 @@ DEF_FUNC op_import_from, IF2_FRAME
     jz .if_error
 
     ; Got the submodule — push it
-    VPUSH rax
+    VPUSH_PTR rax
     leave
     DISPATCH
 

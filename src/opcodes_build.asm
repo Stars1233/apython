@@ -19,6 +19,9 @@
 section .text
 
 extern eval_dispatch
+extern eval_saved_rbx
+extern trace_opcodes
+extern opcode_table
 extern obj_dealloc
 extern obj_decref
 extern obj_is_true
@@ -261,7 +264,7 @@ DEF_FUNC_BARE op_binary_subscr
     pop rax                    ; restore result
     add rsp, BSUB_SIZE
 
-    VPUSH rax
+    VPUSH_BRANCHLESS rax
 
     ; Skip 1 CACHE entry = 2 bytes
     add rbx, 2
@@ -429,7 +432,7 @@ DEF_FUNC op_build_tuple, 16
 
 .build_tuple_done:
     mov rax, [rbp-16]
-    VPUSH rax
+    VPUSH_PTR rax
     leave
     DISPATCH
 END_FUNC op_build_tuple
@@ -501,7 +504,7 @@ DEF_FUNC op_build_list, 16
 
 .build_list_push:
     mov rax, [rbp-16]
-    VPUSH rax
+    VPUSH_PTR rax
     leave
     DISPATCH
 END_FUNC op_build_list
@@ -568,7 +571,7 @@ DEF_FUNC op_build_map, 16
 
 .build_map_push:
     mov rax, [rbp-16]
-    VPUSH rax
+    VPUSH_PTR rax
     leave
     DISPATCH
 END_FUNC op_build_map
@@ -643,7 +646,7 @@ DEF_FUNC op_build_const_key_map, 32
 
 .bckm_push:
     mov rax, [rbp-24]
-    VPUSH rax
+    VPUSH_PTR rax
     leave
     DISPATCH
 END_FUNC op_build_const_key_map
@@ -699,7 +702,11 @@ DEF_FUNC_BARE op_unpack_sequence
     js .unpack_done
     mov rax, [rsi + rdx*8]
     INCREF rax
-    VPUSH rax
+    push rdx
+    push rsi
+    VPUSH_BRANCHLESS rax
+    pop rsi
+    pop rdx
     dec edx
     jmp .unpack_loop
 
@@ -759,7 +766,7 @@ DEF_FUNC_BARE op_get_iter
     pop rax                    ; restore iterator
     add rsp, 16                ; discard iterable payload + tag
 
-    VPUSH rax
+    VPUSH_PTR rax
     DISPATCH
 
 .not_iterable:
@@ -831,7 +838,7 @@ DEF_FUNC_BARE op_for_iter
 
     ; Got a value - push it (iterator stays on stack)
     add rsp, 8                 ; discard saved jump offset
-    VPUSH rax
+    VPUSH_BRANCHLESS rax
 
     ; Skip 1 CACHE entry = 2 bytes
     add rbx, 2
@@ -1019,7 +1026,7 @@ DEF_FUNC_BARE op_is_op
     lea rax, [rel bool_false]
 .is_push:
     INCREF rax
-    VPUSH rax
+    VPUSH_PTR rax
     DISPATCH
 END_FUNC op_is_op
 
@@ -1083,7 +1090,7 @@ DEF_FUNC_BARE op_contains_op
     lea rax, [rel bool_false]
 .contains_push:
     INCREF rax
-    VPUSH rax
+    VPUSH_PTR rax
     DISPATCH
 
 .contains_error:
@@ -1167,7 +1174,7 @@ DEF_FUNC_BARE op_build_slice
     DECREF_VAL rdi, rsi
     pop rax
     add rsp, BSL2_SIZE
-    VPUSH rax
+    VPUSH_PTR rax
     DISPATCH
 
 .bs_three:
@@ -1198,7 +1205,7 @@ DEF_FUNC_BARE op_build_slice
     DECREF_VAL rdi, rsi
     pop rax
     add rsp, BSL3_SIZE
-    VPUSH rax
+    VPUSH_PTR rax
     DISPATCH
 END_FUNC op_build_slice
 
@@ -1255,7 +1262,7 @@ DEF_FUNC op_binary_slice, BSLC_FRAME
     DECREF_VAL rdi, rsi
 
     pop rax
-    VPUSH rax
+    VPUSH_BRANCHLESS rax
     leave
     DISPATCH
 END_FUNC op_binary_slice
@@ -1548,7 +1555,7 @@ DEF_FUNC op_unpack_ex
     mov rsi, rax
     call .ue_getitem           ; rax = item (borrowed)
     INCREF rax
-    VPUSH rax
+    VPUSH_BRANCHLESS rax
 
     pop rax
     pop rcx
@@ -1589,7 +1596,7 @@ DEF_FUNC op_unpack_ex
 
 .ue_rest_done:
     pop rax                    ; rest list
-    VPUSH rax                  ; push rest list
+    VPUSH_PTR rax              ; push rest list
 
     ; 3. Push count_before items in reverse (from index count_before-1 down to 0)
     mov rcx, rbx
@@ -1603,7 +1610,7 @@ DEF_FUNC op_unpack_ex
     mov rsi, rcx
     call .ue_getitem           ; rax = item (borrowed)
     INCREF rax
-    VPUSH rax
+    VPUSH_BRANCHLESS rax
 
     pop rcx
     test rcx, rcx
@@ -1722,7 +1729,7 @@ DEF_FUNC op_build_set, 16
 
 .build_set_push:
     mov rax, [rbp-16]
-    VPUSH rax
+    VPUSH_PTR rax
     leave
     DISPATCH
 END_FUNC op_build_set
@@ -1926,7 +1933,7 @@ DEF_FUNC_BARE op_for_iter_range
     bts rax, 63
     mov [rdi + PyRangeIterObject.it_current], rax
 
-    VPUSH rdx                      ; push value
+    VPUSH_INT rdx                  ; push value
     add rbx, 2                     ; skip CACHE
     DISPATCH
 
@@ -1982,7 +1989,7 @@ DEF_FUNC_BARE op_for_iter_list
     inc qword [rdi + PyListIterObject.it_index]
 
     add rsp, 8                     ; discard saved jump offset
-    VPUSH rax                      ; push value
+    VPUSH_BRANCHLESS rax           ; push value
     add rbx, 2                     ; skip CACHE
     DISPATCH
 

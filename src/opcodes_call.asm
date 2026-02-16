@@ -20,6 +20,9 @@
 section .text
 
 extern eval_dispatch
+extern eval_saved_rbx
+extern trace_opcodes
+extern opcode_table
 extern obj_dealloc
 extern obj_decref
 extern obj_incref
@@ -316,7 +319,7 @@ DEF_FUNC op_call, CL_FRAME
 
 .push_result:
     ; Push return value onto value stack
-    VPUSH rax
+    VPUSH_BRANCHLESS rax
 
     ; Skip 3 CACHE entries (6 bytes)
     add rbx, 6
@@ -422,7 +425,7 @@ DEF_FUNC op_make_function, MF_FRAME
     pop rax
 
     ; Push function onto value stack
-    VPUSH rax
+    VPUSH_PTR rax
     leave
     DISPATCH
 END_FUNC op_make_function
@@ -655,7 +658,7 @@ DEF_FUNC op_call_function_ex
 
     ; Push result
     mov rax, [rbp - CFX_RESULT]
-    VPUSH rax
+    VPUSH_BRANCHLESS rax
 
     add rsp, CFX_FRAME2 - 16
     pop r12
@@ -723,7 +726,7 @@ DEF_FUNC op_before_with
     mov [rbp - BW_EXIT], rax
 
     ; Push bound __exit__ method (single item, matching CPython)
-    VPUSH rax
+    VPUSH_PTR rax
 
     ; Now look up __enter__ on mgr's type
     mov rdi, [rbx + PyObject.ob_type]
@@ -768,7 +771,7 @@ DEF_FUNC op_before_with
 
     ; Push __enter__ result
     mov rax, [rbp - BW_ENTER]
-    VPUSH rax
+    VPUSH_BRANCHLESS rax
 
     add rsp, 32
     pop r12
@@ -861,7 +864,7 @@ DEF_FUNC op_with_except_start, WES_FRAME
 
     ; Push result onto value stack
     mov rax, [rbp - WES_RESULT]
-    VPUSH rax
+    VPUSH_BRANCHLESS rax
 
     leave
     DISPATCH

@@ -390,13 +390,13 @@ DEF_FUNC_BARE eval_exception_unwind
     ; Push a dummy lasti value (we don't use it for now)
     mov rdx, 0
     bts rdx, 63             ; SmallInt 0
-    VPUSH rdx
+    VPUSH_INT rdx
 .no_lasti:
 
     ; Push the exception onto the value stack (transfer ownership)
     mov rdx, [rel current_exception]
     mov qword [rel current_exception], 0   ; clear: ownership moves to value stack
-    VPUSH rdx
+    VPUSH_PTR rdx
 
     ; Set rbx to handler target
     ; target is in instruction units (halfwords), so bytes = target * 2
@@ -481,13 +481,13 @@ DEF_FUNC_BARE op_push_exc_info
     lea rdx, [rel none_singleton]
     INCREF rdx
 .have_prev:
-    VPUSH rdx                ; push prev_exc
+    VPUSH_PTR rdx            ; push prev_exc
 
     ; Set new exception as current and push it too
     ; INCREF for the value stack copy
     INCREF rax
     mov [rel current_exception], rax
-    VPUSH rax                ; push new exc
+    VPUSH_PTR rax            ; push new exc
 
     DISPATCH
 END_FUNC op_push_exc_info
@@ -551,7 +551,7 @@ DEF_FUNC_BARE op_check_exc_match
     lea rax, [rel bool_false]
 .push_result:
     INCREF rax
-    VPUSH rax
+    VPUSH_PTR rax
     DISPATCH
 END_FUNC op_check_exc_match
 
@@ -872,7 +872,7 @@ extern exc_AssertionError_type
 op_load_assertion_error:
     lea rax, [rel exc_AssertionError_type]
     INCREF rax
-    VPUSH rax
+    VPUSH_PTR rax
     DISPATCH
 
 ; ---------------------------------------------------------------------------
@@ -1146,6 +1146,7 @@ section .bss
 global current_exception
 current_exception: resq 1    ; PyExceptionObject* or NULL
 eval_base_rsp: resq 1        ; machine stack pointer at eval dispatch level
+global eval_saved_rbx
 eval_saved_rbx: resq 1       ; bytecode IP saved at dispatch (for exception unwind)
 global eval_saved_r12
 eval_saved_r12: resq 1       ; frame pointer saved at frame entry (for exception unwind)

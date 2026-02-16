@@ -159,9 +159,18 @@ SMALLINT_TAG equ 0x8000000000000000
     %%skip:
 %endmacro
 
-; Opcode dispatch - jump back to eval loop
+; Opcode dispatch - inline decode + jump (direct threading)
+; Each DISPATCH site gets its own BTB entry for better branch prediction.
+; Falls back to centralized eval_dispatch when tracing is enabled.
 %macro DISPATCH 0
-    jmp eval_dispatch
+    mov [rel eval_saved_rbx], rbx  ; save bytecode IP for exception unwind
+    cmp byte [rel trace_opcodes], 0
+    jnz eval_dispatch              ; cold: centralized trace handler
+    movzx eax, byte [rbx]         ; load opcode
+    movzx ecx, byte [rbx+1]      ; load arg into ecx
+    add rbx, 2                     ; advance past instruction word
+    lea rdx, [rel opcode_table]
+    jmp [rdx + rax*8]             ; dispatch to handler
 %endmacro
 
 ; Declare extern libc function
@@ -284,6 +293,21 @@ TAG_RC_BIT   equ (1 << 8)    ; bit 8: refcounted flag
     add r13, 16
 %endmacro
 
+; Push unknown/polymorphic value: branchless tag classification (clobbers r8, r9)
+; Classifies: NULL -> TAG_NULL, SmallInt (bit63) -> TAG_SMALLINT, else -> TAG_PTR
+; Safe for any payload register including rax, rdx.
+%macro VPUSH_BRANCHLESS 1      ; %1 = payload reg (clobbers r8, r9)
+    mov [r13], %1
+    xor r9d, r9d               ; TAG_NULL = 0 (before test to avoid flag clobber)
+    test %1, %1                ; set ZF/SF based on payload
+    mov r8d, TAG_PTR
+    cmovz r8d, r9d             ; null -> TAG_NULL
+    mov r9d, TAG_SMALLINT
+    cmovs r8d, r9d             ; bit63 set -> TAG_SMALLINT
+    mov [r13 + 8], r8
+    add r13, 16
+%endmacro
+
 ; Push SmallStr (caller must pre-build payload + tag with SmallStr encoding)
 %macro VPUSH_STR 2              ; %1 = payload reg, %2 = tag reg (pre-built)
     mov [r13], %1
@@ -309,22 +333,24 @@ TAG_RC_BIT   equ (1 << 8)    ; bit 8: refcounted flag
 
 ; 128-bit INCREF — only if refcounted (tag bit 8 set, bit 63 clear)
 ; SmallStr (bit 63=1) and inline tags (bit 8=0) skip.
+; Hot path: TAG_PTR (bit 8 set, bit 63 clear) falls through to inc.
 %macro INCREF_VAL 2             ; %1 = payload, %2 = tag
-    test %2, %2
-    js %%skip                   ; bit 63 set = SmallStr, skip
     test %2, TAG_RC_BIT
-    jz %%skip                   ; bit 8 clear = not refcounted, skip
+    jz %%skip                   ; not refcounted: skip (not-taken for TAG_PTR)
+    test %2, %2
+    js %%skip                   ; SmallStr: skip (very cold)
     inc qword [%1 + PyObject.ob_refcnt]
     %%skip:
 %endmacro
 
 ; 128-bit DECREF — only if refcounted (tag bit 8 set, bit 63 clear)
 ; Calls obj_dealloc if refcount reaches zero. Clobbers rdi + all caller-saved.
+; Hot path: TAG_PTR (bit 8 set, bit 63 clear) falls through to dec.
 %macro DECREF_VAL 2             ; %1 = payload, %2 = tag
-    test %2, %2
-    js %%skip                   ; bit 63 set = SmallStr, skip
     test %2, TAG_RC_BIT
-    jz %%skip                   ; bit 8 clear = not refcounted, skip
+    jz %%skip                   ; not refcounted: skip
+    test %2, %2
+    js %%skip                   ; SmallStr: skip
     dec qword [%1 + PyObject.ob_refcnt]
     jnz %%skip
     mov rdi, %1

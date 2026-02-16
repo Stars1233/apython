@@ -20,6 +20,9 @@
 section .text
 
 extern eval_dispatch
+extern eval_saved_rbx
+extern trace_opcodes
+extern opcode_table
 extern eval_return
 extern obj_dealloc
 extern obj_is_true
@@ -232,7 +235,7 @@ DEF_FUNC_BARE op_binary_op
     add rsp, BO_SIZE           ; discard saved operands + tags
 
     ; Push result
-    VPUSH rax
+    VPUSH_BRANCHLESS rax
 
     ; Skip 1 CACHE entry = 2 bytes
     add rbx, 2
@@ -327,7 +330,7 @@ DEF_FUNC_BARE op_binary_op
     ; Specialize: rewrite opcode to BINARY_OP_ADD_INT (211)
     mov byte [rbx - 2], 211
     ; No DECREF needed (SmallInt are not refcounted)
-    VPUSH rax
+    VPUSH_INT rax
     add rbx, 2
     DISPATCH
 
@@ -351,7 +354,7 @@ DEF_FUNC_BARE op_binary_op
     ; Specialize: rewrite opcode to BINARY_OP_SUBTRACT_INT (212)
     mov byte [rbx - 2], 212
     ; No DECREF needed (SmallInt are not refcounted)
-    VPUSH rax
+    VPUSH_INT rax
     add rbx, 2
     DISPATCH
 END_FUNC op_binary_op
@@ -388,65 +391,50 @@ DEF_FUNC_BARE op_compare_op
     mov rdx, rsi
     shl rdx, 1
     sar rdx, 1                 ; decode right
-    cmp rax, rdx
+    cmp rax, rdx               ; flags survive LEA + jmp [mem]
+    lea r8, [rel .cmp_setcc_table]
+    jmp [r8 + rcx*8]          ; 1 indirect branch on comparison op
 
-    ; Save comparison result: r8d = -1/0/1
-    mov r8d, 0
-    jz .cmp_dispatch
-    mov r8d, -1
-    jl .cmp_dispatch
-    mov r8d, 1
+.cmp_set_lt:
+    setl al
+    jmp .cmp_push_bool
+.cmp_set_le:
+    setle al
+    jmp .cmp_push_bool
+.cmp_set_eq:
+    sete al
+    jmp .cmp_push_bool
+.cmp_set_ne:
+    setne al
+    jmp .cmp_push_bool
+.cmp_set_gt:
+    setg al
+    jmp .cmp_push_bool
+.cmp_set_ge:
+    setge al
+    ; fall through to .cmp_push_bool
 
-.cmp_dispatch:
-    ; Dispatch on comparison op (ecx)
-    cmp ecx, PY_LT
-    je .cmp_do_lt
-    cmp ecx, PY_LE
-    je .cmp_do_le
-    cmp ecx, PY_EQ
-    je .cmp_do_eq
-    cmp ecx, PY_NE
-    je .cmp_do_ne
-    cmp ecx, PY_GT
-    je .cmp_do_gt
-    ; else PY_GE
-    test r8d, r8d
-    jge .cmp_push_true
-    jmp .cmp_push_false
-.cmp_do_lt:
-    test r8d, r8d
-    js .cmp_push_true
-    jmp .cmp_push_false
-.cmp_do_le:
-    test r8d, r8d
-    jle .cmp_push_true
-    jmp .cmp_push_false
-.cmp_do_eq:
-    test r8d, r8d
-    jz .cmp_push_true
-    jmp .cmp_push_false
-.cmp_do_ne:
-    test r8d, r8d
-    jnz .cmp_push_true
-    jmp .cmp_push_false
-.cmp_do_gt:
-    test r8d, r8d
-    jg .cmp_push_true
-    jmp .cmp_push_false
-
-.cmp_push_true:
-    lea rax, [rel bool_true]
-    inc qword [rax + PyObject.ob_refcnt]
-    VPUSH rax
+.cmp_push_bool:
+    movzx eax, al             ; eax = 0 or 1
+    lea rdx, [rel bool_false]
+    lea r8, [rel bool_true]
+    test eax, eax
+    cmovnz rdx, r8            ; rdx = bool_true if true, else bool_false
+    inc qword [rdx + PyObject.ob_refcnt]
+    VPUSH_PTR rdx
     add rbx, 2
     DISPATCH
 
-.cmp_push_false:
-    lea rax, [rel bool_false]
-    inc qword [rax + PyObject.ob_refcnt]
-    VPUSH rax
-    add rbx, 2
-    DISPATCH
+section .data
+align 8
+.cmp_setcc_table:
+    dq .cmp_set_lt             ; PY_LT = 0
+    dq .cmp_set_le             ; PY_LE = 1
+    dq .cmp_set_eq             ; PY_EQ = 2
+    dq .cmp_set_ne             ; PY_NE = 3
+    dq .cmp_set_gt             ; PY_GT = 4
+    dq .cmp_set_ge             ; PY_GE = 5
+section .text
 
 .cmp_slow_path:
     ; Save operands + tags and comparison op
@@ -532,7 +520,7 @@ DEF_FUNC_BARE op_compare_op
     add rsp, BO_SIZE           ; discard saved operands + tags
 
     ; Push result
-    VPUSH rax
+    VPUSH_BRANCHLESS rax
 
     ; Skip 1 CACHE entry = 2 bytes
     add rbx, 2
@@ -568,7 +556,7 @@ DEF_FUNC_BARE op_compare_op
     add rsp, BO_SIZE
     lea rax, [rel bool_false]
     inc qword [rax + PyObject.ob_refcnt]
-    VPUSH rax
+    VPUSH_PTR rax
     add rbx, 2
     DISPATCH
 .cmp_id_true:
@@ -582,7 +570,7 @@ DEF_FUNC_BARE op_compare_op
     add rsp, BO_SIZE
     lea rax, [rel bool_true]
     inc qword [rax + PyObject.ob_refcnt]
-    VPUSH rax
+    VPUSH_PTR rax
     add rbx, 2
     DISPATCH
 END_FUNC op_compare_op
@@ -624,7 +612,7 @@ DEF_FUNC_BARE op_unary_negative
     add rsp, 16                ; discard saved operand + tag
 
     ; Push result
-    VPUSH rax
+    VPUSH_BRANCHLESS rax
     DISPATCH
 END_FUNC op_unary_negative
 
@@ -658,7 +646,7 @@ DEF_FUNC_BARE op_unary_invert
     DECREF_VAL rdi, rsi
     pop rax
     add rsp, 16
-    VPUSH rax
+    VPUSH_BRANCHLESS rax
     DISPATCH
 END_FUNC op_unary_invert
 
@@ -695,7 +683,7 @@ DEF_FUNC_BARE op_unary_not
     lea rax, [rel bool_false]
 .push_bool:
     INCREF rax
-    VPUSH rax
+    VPUSH_PTR rax
     DISPATCH
 END_FUNC op_unary_not
 
@@ -850,9 +838,8 @@ END_FUNC op_jump_forward
 ;; ============================================================================
 DEF_FUNC_BARE op_jump_backward
     ; ecx = arg (instruction words to go back)
-    mov rax, rcx
-    shl rax, 1                 ; rax = arg * 2
-    sub rbx, rax
+    shl ecx, 1                 ; ecx = arg * 2 (zero-extends to rcx)
+    sub rbx, rcx
     DISPATCH
 END_FUNC op_jump_backward
 
@@ -942,7 +929,7 @@ DEF_FUNC op_format_value, FV_FRAME
 
 .fv_push:
     pop rax                    ; result
-    VPUSH rax
+    VPUSH_PTR rax
     leave
     DISPATCH
 END_FUNC op_format_value
@@ -1013,7 +1000,7 @@ DEF_FUNC op_build_string, BS_FRAME
 
 .bs_push:
     mov rax, [rbp - BS_ACCUM]
-    VPUSH rax
+    VPUSH_PTR rax
     leave
     DISPATCH
 
@@ -1022,7 +1009,7 @@ DEF_FUNC op_build_string, BS_FRAME
     extern str_from_cstr
     CSTRING rdi, ""
     call str_from_cstr
-    VPUSH rax
+    VPUSH_PTR rax
     leave
     DISPATCH
 
@@ -1238,7 +1225,7 @@ DEF_FUNC_BARE op_end_send
     push rax                   ; save value (DECREF_VAL clobbers caller-saved)
     DECREF_VAL rdi, rsi        ; DECREF receiver (tag-aware)
     pop rax                    ; restore value
-    VPUSH rax                  ; push value back
+    VPUSH_BRANCHLESS rax       ; push value back
     DISPATCH
 END_FUNC op_end_send
 
@@ -1306,7 +1293,7 @@ DEF_FUNC op_send, SND_FRAME
 
     ; Yielded: push result on top (receiver stays below)
     ; Stack becomes: ... | receiver | yielded_value |
-    VPUSH rax
+    VPUSH_BRANCHLESS rax
 
     ; Skip 1 CACHE entry = 2 bytes
     add rbx, 2
@@ -1319,7 +1306,7 @@ DEF_FUNC op_send, SND_FRAME
     ; Then jump to END_SEND which will handle cleanup.
     lea rax, [rel none_singleton]
     INCREF rax
-    VPUSH rax
+    VPUSH_PTR rax
 
     ; Skip 1 CACHE entry = 2 bytes, then jump forward by arg * 2 bytes
     add rbx, 2
@@ -1336,7 +1323,7 @@ DEF_FUNC op_send, SND_FRAME
     DECREF_VAL rdi, rsi
     lea rax, [rel none_singleton]
     INCREF rax
-    VPUSH rax
+    VPUSH_PTR rax
     add rbx, 2
     leave
     DISPATCH
@@ -1382,7 +1369,7 @@ DEF_FUNC_BARE op_get_yield_from_iter
 
     pop rax                    ; restore iterator
     add rsp, 16                ; discard iterable payload + tag
-    VPUSH rax                  ; push iterator as new TOS
+    VPUSH_PTR rax              ; push iterator as new TOS
 
 .gyfi_done:
     DISPATCH
@@ -1401,9 +1388,8 @@ END_FUNC op_get_yield_from_iter
 ;; JUMP_BACKWARD_NO_INTERRUPT (134): Same as JUMP_BACKWARD for us.
 ;; ============================================================================
 DEF_FUNC_BARE op_jump_backward_no_interrupt
-    mov rax, rcx
-    shl rax, 1                 ; arg * 2 = byte offset
-    sub rbx, rax
+    shl ecx, 1                 ; arg * 2 = byte offset (zero-extends to rcx)
+    sub rbx, rcx
     DISPATCH
 END_FUNC op_jump_backward_no_interrupt
 
@@ -1488,7 +1474,7 @@ DEF_FUNC_BARE op_call_intrinsic_1
 
 .ci1_l2t_done:
     pop rax                    ; tuple
-    VPUSH rax
+    VPUSH_PTR rax
 
     ; DECREF list
     pop rdi
@@ -1537,7 +1523,7 @@ DEF_FUNC_BARE op_get_len
     pop rdi                     ; discard saved obj
     ; Convert length (in rax) to SmallInt and push
     bts rax, 63                 ; encode as SmallInt
-    VPUSH rax
+    VPUSH_INT rax
     DISPATCH
 
 .gl_error:
@@ -1603,7 +1589,7 @@ DEF_FUNC_BARE op_load_locals
     test rax, rax
     jz .ll_error
     INCREF rax
-    VPUSH rax
+    VPUSH_PTR rax
     DISPATCH
 .ll_error:
     lea rdi, [rel exc_RuntimeError_type]
@@ -1660,7 +1646,7 @@ DEF_FUNC_BARE op_load_from_dict_or_globals
     add rsp, 16                 ; pop saved dict + name
 .lfdg_found_no_pop:
     INCREF rax
-    VPUSH rax
+    VPUSH_PTR rax
     DISPATCH
 END_FUNC op_load_from_dict_or_globals
 
@@ -1706,7 +1692,7 @@ DEF_FUNC op_load_from_dict_or_deref, LFDOD_FRAME
 
 .lfdod_found:
     INCREF rax
-    VPUSH rax
+    VPUSH_PTR rax
     leave
     DISPATCH
 
@@ -1742,12 +1728,12 @@ DEF_FUNC_BARE op_match_mapping
 .mm_true:
     lea rax, [rel bool_true]
     INCREF rax
-    VPUSH rax
+    VPUSH_PTR rax
     DISPATCH
 .mm_false:
     lea rax, [rel bool_false]
     INCREF rax
-    VPUSH rax
+    VPUSH_PTR rax
     DISPATCH
 END_FUNC op_match_mapping
 
@@ -1793,12 +1779,12 @@ DEF_FUNC_BARE op_match_sequence
 .ms_true:
     lea rax, [rel bool_true]
     INCREF rax
-    VPUSH rax
+    VPUSH_PTR rax
     DISPATCH
 .ms_false:
     lea rax, [rel bool_false]
     INCREF rax
-    VPUSH rax
+    VPUSH_PTR rax
     DISPATCH
 END_FUNC op_match_sequence
 
@@ -1859,7 +1845,7 @@ DEF_FUNC op_match_keys, MK_FRAME
 .mk_success:
     ; Push values tuple on top (stack: subject, keys, values_tuple)
     mov rax, [rbp - MK_VALS]
-    VPUSH rax
+    VPUSH_PTR rax
     jmp .mk_done
 
 .mk_fail:
@@ -1870,7 +1856,7 @@ DEF_FUNC op_match_keys, MK_FRAME
     ; Push None on top to indicate failure (stack: subject, keys, None)
     lea rax, [rel none_singleton]
     INCREF rax
-    VPUSH rax
+    VPUSH_PTR rax
 
 .mk_done:
     leave
@@ -1911,7 +1897,7 @@ DEF_FUNC_BARE op_call_intrinsic_2
     push rax
     DECREF_VAL rdi, rsi
     pop rax
-    VPUSH rax
+    VPUSH_BRANCHLESS rax
     DISPATCH
 END_FUNC op_call_intrinsic_2
 
@@ -1940,13 +1926,13 @@ DEF_FUNC_BARE op_binary_op_add_int
     jo .add_int_deopt_repush
     ; Encode as SmallInt
     bts rax, 63
-    VPUSH rax
+    VPUSH_INT rax
     add rbx, 2                 ; skip CACHE
     DISPATCH
 .add_int_deopt_repush:
     ; Overflow: re-push operands and deopt
-    VPUSH rdi
-    VPUSH rsi
+    VPUSH_INT rdi
+    VPUSH_INT rsi
 .add_int_deopt:
     ; Rewrite opcode back to BINARY_OP (122)
     mov byte [rbx - 2], 122
@@ -1979,13 +1965,13 @@ DEF_FUNC_BARE op_binary_op_sub_int
     jo .sub_int_deopt_repush
     ; Encode as SmallInt
     bts rax, 63
-    VPUSH rax
+    VPUSH_INT rax
     add rbx, 2                 ; skip CACHE
     DISPATCH
 .sub_int_deopt_repush:
     ; Overflow: re-push operands and deopt
-    VPUSH rdi
-    VPUSH rsi
+    VPUSH_INT rdi
+    VPUSH_INT rsi
 .sub_int_deopt:
     ; Rewrite opcode back to BINARY_OP (122)
     mov byte [rbx - 2], 122
@@ -2016,65 +2002,54 @@ DEF_FUNC_BARE op_compare_op_int
     mov rdx, rsi
     shl rdx, 1
     sar rdx, 1                 ; decoded right
-    cmp rax, rdx
-    ; Save comparison result: r8d = -1/0/1
-    mov r8d, 0
-    jz .ci_dispatch
-    mov r8d, -1
-    jl .ci_dispatch
-    mov r8d, 1
-.ci_dispatch:
-    ; Dispatch on comparison op (ecx)
-    cmp ecx, PY_LT
-    je .ci_do_lt
-    cmp ecx, PY_LE
-    je .ci_do_le
-    cmp ecx, PY_EQ
-    je .ci_do_eq
-    cmp ecx, PY_NE
-    je .ci_do_ne
-    cmp ecx, PY_GT
-    je .ci_do_gt
-    ; else PY_GE
-    test r8d, r8d
-    jge .ci_true
-    jmp .ci_false
-.ci_do_lt:
-    test r8d, r8d
-    js .ci_true
-    jmp .ci_false
-.ci_do_le:
-    test r8d, r8d
-    jle .ci_true
-    jmp .ci_false
-.ci_do_eq:
-    test r8d, r8d
-    jz .ci_true
-    jmp .ci_false
-.ci_do_ne:
-    test r8d, r8d
-    jnz .ci_true
-    jmp .ci_false
-.ci_do_gt:
-    test r8d, r8d
-    jg .ci_true
-    jmp .ci_false
-.ci_true:
-    lea rax, [rel bool_true]
-    inc qword [rax + PyObject.ob_refcnt]
-    VPUSH rax
-    add rbx, 2                 ; skip CACHE
+    cmp rax, rdx               ; flags survive LEA + jmp [mem]
+    lea r8, [rel .ci_setcc_table]
+    jmp [r8 + rcx*8]          ; 1 indirect branch on comparison op
+
+.ci_set_lt:
+    setl al
+    jmp .ci_push_bool
+.ci_set_le:
+    setle al
+    jmp .ci_push_bool
+.ci_set_eq:
+    sete al
+    jmp .ci_push_bool
+.ci_set_ne:
+    setne al
+    jmp .ci_push_bool
+.ci_set_gt:
+    setg al
+    jmp .ci_push_bool
+.ci_set_ge:
+    setge al
+    ; fall through to .ci_push_bool
+
+.ci_push_bool:
+    movzx eax, al             ; eax = 0 or 1
+    lea rdx, [rel bool_false]
+    lea r8, [rel bool_true]
+    test eax, eax
+    cmovnz rdx, r8            ; rdx = bool_true if true, else bool_false
+    inc qword [rdx + PyObject.ob_refcnt]
+    VPUSH_PTR rdx
+    add rbx, 2                ; skip CACHE
     DISPATCH
-.ci_false:
-    lea rax, [rel bool_false]
-    inc qword [rax + PyObject.ob_refcnt]
-    VPUSH rax
-    add rbx, 2                 ; skip CACHE
-    DISPATCH
+
+section .data
+align 8
+.ci_setcc_table:
+    dq .ci_set_lt              ; PY_LT = 0
+    dq .ci_set_le              ; PY_LE = 1
+    dq .ci_set_eq              ; PY_EQ = 2
+    dq .ci_set_ne              ; PY_NE = 3
+    dq .ci_set_gt              ; PY_GT = 4
+    dq .ci_set_ge              ; PY_GE = 5
+section .text
 .cmp_int_deopt:
     ; Re-push operands
-    VPUSH rdi
-    VPUSH rsi
+    VPUSH_BRANCHLESS rdi
+    VPUSH_BRANCHLESS rsi
     ; Rewrite back to COMPARE_OP (107) and re-execute
     mov byte [rbx - 2], 107
     sub rbx, 2

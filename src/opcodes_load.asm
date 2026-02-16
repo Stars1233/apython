@@ -19,6 +19,9 @@
 section .text
 
 extern eval_dispatch
+extern eval_saved_rbx
+extern trace_opcodes
+extern opcode_table
 extern obj_dealloc
 extern dict_get
 extern dict_get_index
@@ -66,7 +69,7 @@ DEF_FUNC_BARE op_load_const
     ; ecx = arg (index into co_consts)
     mov rax, [r14 + rcx*8]     ; r14 = &co_consts.ob_item[0]
     INCREF rax
-    VPUSH rax
+    VPUSH_BRANCHLESS rax
     DISPATCH
 END_FUNC op_load_const
 
@@ -170,7 +173,7 @@ DEF_FUNC_BARE op_load_global
 
 .lg_push_result:
     INCREF rax
-    VPUSH rax
+    VPUSH_BRANCHLESS rax
     ; Skip 4 CACHE entries = 8 bytes
     add rbx, 8
     DISPATCH
@@ -205,7 +208,7 @@ DEF_FUNC_BARE op_load_global_module
     add r13, 16
 .lgm_no_null:
     INCREF rax
-    VPUSH rax
+    VPUSH_BRANCHLESS rax
     add rbx, 8
     DISPATCH
 
@@ -251,7 +254,7 @@ DEF_FUNC_BARE op_load_global_builtin
     add r13, 16
 .lgb_no_null:
     INCREF rax
-    VPUSH rax
+    VPUSH_BRANCHLESS rax
     add rbx, 8
     DISPATCH
 
@@ -306,7 +309,7 @@ DEF_FUNC_BARE op_load_name
     add rsp, 8                 ; discard saved name
 .found_no_pop:
     INCREF rax
-    VPUSH rax
+    VPUSH_BRANCHLESS rax
     DISPATCH
 END_FUNC op_load_name
 
@@ -321,7 +324,7 @@ extern build_class_obj
 DEF_FUNC_BARE op_load_build_class
     mov rax, [rel build_class_obj]
     INCREF rax
-    VPUSH rax
+    VPUSH_PTR rax
     DISPATCH
 END_FUNC op_load_build_class
 
@@ -455,14 +458,14 @@ DEF_FUNC op_load_attr, LA_FRAME
     pop rax                    ; restore result
     cmp qword [rbp - LA_FLAG], 0
     jne .la_descr_get_flag1
-    VPUSH rax
+    VPUSH_BRANCHLESS rax
     jmp .la_done
 
 .la_descr_get_flag1:
     ; flag=1: push NULL + result
     xor ecx, ecx
-    VPUSH rcx
-    VPUSH rax
+    VPUSH_NULL128
+    VPUSH_BRANCHLESS rax
     jmp .la_done
 
 .la_check_flag:
@@ -486,7 +489,7 @@ DEF_FUNC op_load_attr, LA_FRAME
     mov rdi, [rbp - LA_ATTR]   ; func
     mov rsi, [rbp - LA_OBJ]    ; self
     call method_new
-    VPUSH rax
+    VPUSH_PTR rax
 
     ; DECREF the raw func (method_new INCREFed it)
     mov rdi, [rbp - LA_ATTR]
@@ -498,7 +501,7 @@ DEF_FUNC op_load_attr, LA_FRAME
 
 .la_simple_push:
     mov rax, [rbp - LA_ATTR]
-    VPUSH rax
+    VPUSH_BRANCHLESS rax
 
     ; DECREF obj
     mov rdi, [rbp - LA_OBJ]
@@ -561,9 +564,9 @@ DEF_FUNC op_load_attr, LA_FRAME
     ; CPython order: push func (deeper), then self (TOS)
     ; Don't DECREF obj since it stays on stack as self
     mov rax, [rbp - LA_ATTR]
-    VPUSH rax              ; push func (deeper slot = callable)
+    VPUSH_PTR rax              ; push func (deeper slot = callable)
     mov rax, [rbp - LA_OBJ]
-    VPUSH rax              ; push self/obj (shallower = TOS)
+    VPUSH_PTR rax              ; push self/obj (shallower = TOS)
     jmp .la_done
 
 .la_unwrap_bound_method:
@@ -586,9 +589,9 @@ DEF_FUNC op_load_attr, LA_FRAME
 
     ; Push [im_func, im_self] then DECREF the method wrapper
     mov rcx, [rax + PyMethodObject.im_func]
-    VPUSH rcx                    ; func (deeper)
+    VPUSH_PTR rcx                    ; func (deeper)
     mov rcx, [rax + PyMethodObject.im_self]
-    VPUSH rcx                    ; self (TOS)
+    VPUSH_PTR rcx                    ; self (TOS)
 
     ; DECREF the method wrapper
     mov rdi, rax
@@ -600,9 +603,9 @@ DEF_FUNC op_load_attr, LA_FRAME
     mov rdi, [rbp - LA_OBJ]
     call obj_decref        ; DECREF obj
     xor eax, eax
-    VPUSH rax              ; push NULL
+    VPUSH_NULL128              ; push NULL
     mov rax, [rbp - LA_ATTR]
-    VPUSH rax              ; push attr
+    VPUSH_BRANCHLESS rax       ; push attr
     jmp .la_done
 
 .la_handle_staticmethod:
@@ -628,15 +631,15 @@ DEF_FUNC op_load_attr, LA_FRAME
 
     ; flag=0: push just the unwrapped func
     mov rax, [rbp - LA_ATTR]
-    VPUSH rax
+    VPUSH_PTR rax
     jmp .la_done
 
 .la_sm_flag1:
     ; flag=1: push NULL + func (no self binding)
     xor eax, eax
-    VPUSH rax
+    VPUSH_NULL128
     mov rax, [rbp - LA_ATTR]
-    VPUSH rax
+    VPUSH_PTR rax
     jmp .la_done
 
 .la_handle_property:
@@ -661,14 +664,14 @@ DEF_FUNC op_load_attr, LA_FRAME
     ; For flag=1, we still just push the result (property access, not method)
     cmp qword [rbp - LA_FLAG], 0
     jne .la_prop_flag1
-    VPUSH rax
+    VPUSH_BRANCHLESS rax
     jmp .la_done
 
 .la_prop_flag1:
     ; flag=1: push NULL + result (it's a value, not a method)
     xor ecx, ecx
-    VPUSH rcx
-    VPUSH rax
+    VPUSH_NULL128
+    VPUSH_BRANCHLESS rax
     jmp .la_done
 
 .la_handle_classmethod:
@@ -722,15 +725,15 @@ DEF_FUNC op_load_attr, LA_FRAME
     mov rdi, [rbp - LA_CLASS]
     call obj_decref
     pop rax
-    VPUSH rax
+    VPUSH_PTR rax
     jmp .la_done
 
 .la_cm_flag1:
     ; flag=1: CPython order: push func (deeper), then class (TOS as self)
     mov rax, [rbp - LA_ATTR]   ; func
-    VPUSH rax
+    VPUSH_PTR rax
     mov rax, [rbp - LA_CLASS]  ; class
-    VPUSH rax
+    VPUSH_PTR rax
     jmp .la_done
 
 .la_done:
@@ -746,12 +749,12 @@ END_FUNC op_load_attr
 ;; Guards: ob_type matches cached type_ptr, tp_dict dk_version matches.
 ;; CACHE layout at rbx: [+0]=dk_version(16b), [+2]=type_ptr(64b), [+10]=descr(64b)
 ;;
-;; Stack effect: ..., obj → ..., obj(self), method
+;; Stack effect: ..., obj -> ..., obj(self), method
 ;; (obj stays as self, cached method pushed on top)
 ;; ============================================================================
 DEF_FUNC_BARE op_load_attr_method
     ; ecx = arg (name_index << 1 | flag=1)
-    ; VPEEK obj (don't pop — stays as self if guards pass, or for deopt)
+    ; VPEEK obj (don't pop -- stays as self if guards pass, or for deopt)
     VPEEK rdi
 
     ; SmallInt check
@@ -775,7 +778,7 @@ DEF_FUNC_BARE op_load_attr_method
     INCREF rax
     mov rcx, [r13 - 16]           ; save obj (payload of TOS)
     mov [r13 - 16], rax           ; overwrite obj position with method
-    VPUSH rcx                     ; push obj on top as self
+    VPUSH_PTR rcx                  ; push obj on top as self
 
     ; Skip 9 CACHE entries = 18 bytes
     add rbx, 18
@@ -791,7 +794,7 @@ END_FUNC op_load_attr_method
 ;; ============================================================================
 ;; op_load_closure - Load cell from localsplus[arg]
 ;;
-;; Same as LOAD_FAST — loads the cell object itself (not its contents).
+;; Same as LOAD_FAST -- loads the cell object itself (not its contents).
 ;; In Python 3.12, LOAD_CLOSURE is same opcode behavior as LOAD_FAST.
 ;; ============================================================================
 DEF_FUNC_BARE op_load_closure
@@ -821,7 +824,7 @@ DEF_FUNC_BARE op_load_deref
     test rax, rax
     jz .deref_error
     INCREF rax
-    VPUSH rax
+    VPUSH_BRANCHLESS rax
     DISPATCH
 
 .deref_error:
@@ -902,7 +905,7 @@ DEF_FUNC op_load_super_attr, LSA_FRAME
     mov [rbp - LSA_SELF], rax
     VPOP rax                       ; class
     mov [rbp - LSA_CLASS], rax
-    VPOP rdi                       ; global_super — DECREF and discard
+    VPOP rdi                       ; global_super -- DECREF and discard
     mov rsi, [r13 + 8]            ; global_super tag
     DECREF_VAL rdi, rsi
 
@@ -956,9 +959,9 @@ DEF_FUNC op_load_super_attr, LSA_FRAME
     je .lsa_attr_mode
 
     ; Method mode: CPython order: push func (deeper), then self (TOS)
-    VPUSH rax                     ; push func (deeper = callable)
+    VPUSH_PTR rax                  ; push func (deeper = callable)
     mov rdx, [rbp - LSA_SELF]     ; self (already has ref from stack)
-    VPUSH rdx                     ; push self (TOS)
+    VPUSH_PTR rdx                  ; push self (TOS)
     jmp .lsa_done
 
 .lsa_attr_mode:
@@ -967,9 +970,9 @@ DEF_FUNC op_load_super_attr, LSA_FRAME
     mov rdi, [rbp - LSA_SELF]
     call obj_decref
     xor eax, eax
-    VPUSH rax                     ; push NULL
+    VPUSH_NULL128                  ; push NULL
     pop rax
-    VPUSH rax                     ; push attr
+    VPUSH_BRANCHLESS rax           ; push attr
     jmp .lsa_done
 
 .lsa_done:
