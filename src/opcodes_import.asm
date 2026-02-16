@@ -84,69 +84,142 @@ END_FUNC op_import_name
 ; Stack out: [module, attr]
 ;
 ; ecx = arg = index into co_names for attribute name
+;
+; If attr not found on module, tries importing <pkg_name>.<attr_name>
+; as a submodule (CPython submodule fallback).
 ; ============================================================================
-DEF_FUNC_BARE op_import_from
+extern dict_get
+extern str_from_cstr
+extern str_concat
+extern import_find_and_load
+
+IF_ATTR  equ 8
+IF2_MOD  equ 16
+IF2_FRAME equ 16
+
+DEF_FUNC op_import_from, IF2_FRAME
     ; Get attribute name from co_names[ecx]
     mov rsi, [r15 + rcx * 8]   ; attr name_str
+    mov [rbp - IF_ATTR], rsi
 
     ; Peek module (TOS, don't pop)
-    VPEEK rdi                   ; module
+    VPEEK rdi
+    mov [rbp - IF2_MOD], rdi
 
     ; Get module's type and tp_getattr
     mov rax, [rdi + PyObject.ob_type]
     mov rax, [rax + PyTypeObject.tp_getattr]
     test rax, rax
-    jz .no_getattr
+    jz .if_no_getattr
 
     ; Call tp_getattr(module, name_str)
-    push rsi                    ; save name for error message
     call rax
     test rax, rax
-    jnz .got_attr
+    jnz .if_got_attr
 
-    ; Attribute not found — try module's __dict__ directly
-    pop rsi                     ; restore name
-
-    ; For modules, try dict_get directly
-    VPEEK rdi                   ; module
-    extern dict_get
+    ; tp_getattr returned NULL — try dict_get directly
+    mov rdi, [rbp - IF2_MOD]
     mov rdi, [rdi + PyModuleObject.mod_dict]
     test rdi, rdi
-    jz .attr_error
+    jz .if_try_submodule
+    mov rsi, [rbp - IF_ATTR]
     call dict_get
     test rax, rax
-    jz .attr_error
-    inc qword [rax + PyObject.ob_refcnt]
-    VPUSH rax
-    DISPATCH
+    jnz .if_found_in_dict
+    jmp .if_try_submodule
 
-.got_attr:
-    add rsp, 8                  ; pop saved name
-    VPUSH rax
-    DISPATCH
-
-.no_getattr:
-    ; Try dict_get on module dict
-    push rsi
-    VPEEK rdi
+.if_no_getattr:
+    ; No tp_getattr — try dict_get on module dict
+    mov rdi, [rbp - IF2_MOD]
     mov rdi, [rdi + PyModuleObject.mod_dict]
     test rdi, rdi
-    jz .attr_error2
-
-    pop rsi
-    push rsi
+    jz .if_try_submodule
+    mov rsi, [rbp - IF_ATTR]
     call dict_get
     test rax, rax
-    jz .attr_error2
-    add rsp, 8
+    jnz .if_found_in_dict
+    jmp .if_try_submodule
+
+.if_found_in_dict:
     inc qword [rax + PyObject.ob_refcnt]
     VPUSH rax
+    leave
     DISPATCH
 
-.attr_error2:
-    pop rsi
-.attr_error:
+.if_got_attr:
+    VPUSH rax
+    leave
+    DISPATCH
+
+.if_try_submodule:
+    ; Submodule fallback: construct "<pkg_name>.<attr_name>" and try importing
+    ; Get module's __name__ from its dict
+    mov rdi, [rbp - IF2_MOD]
+    mov rdi, [rdi + PyModuleObject.mod_dict]
+    test rdi, rdi
+    jz .if_error
+
+    ; Look up "__name__" in module dict
+    lea rdi, [rel if_dunder_name]
+    call str_from_cstr
+    push rax                    ; save __name__ str key
+    mov rdi, [rbp - IF2_MOD]
+    mov rdi, [rdi + PyModuleObject.mod_dict]
+    mov rsi, rax
+    call dict_get
+    mov rcx, rax                ; rcx = pkg_name str (or NULL)
+    pop rdi                     ; __name__ str key
+    push rcx                    ; save pkg_name
+    call obj_decref             ; DECREF __name__ key
+    pop rcx                     ; restore pkg_name
+    test rcx, rcx
+    jz .if_error
+
+    ; Concat: pkg_name + "." + attr_name
+    ; First: pkg_name + "."
+    push rcx                    ; save pkg_name
+    lea rdi, [rel if_dot_str]
+    call str_from_cstr
+    pop rdi                     ; rdi = pkg_name
+    mov rsi, rax                ; rsi = "."
+    push rsi                    ; save dot str for decref
+    call str_concat             ; rax = pkg_name + "."
+    pop rdi                     ; dot str
+    push rax                    ; save intermediate
+    call obj_decref             ; DECREF "."
+    pop rdi                     ; rdi = "pkg."
+    mov rsi, [rbp - IF_ATTR]    ; rsi = attr_name
+    push rdi                    ; save "pkg." for decref
+    call str_concat             ; rax = "pkg.attr"
+    pop rdi                     ; "pkg."
+    push rax                    ; save full name
+    call obj_decref             ; DECREF "pkg."
+
+    ; Try import_find_and_load with full dotted name
+    pop rdi                     ; rdi = "pkg.attr" str
+    push rdi                    ; save for decref
+    call import_find_and_load
+    mov rcx, rax                ; rcx = submodule (or NULL)
+    pop rdi                     ; full name str
+    push rcx                    ; save submodule
+    call obj_decref             ; DECREF full name
+    pop rax                     ; restore submodule
+
+    test rax, rax
+    jz .if_error
+
+    ; Got the submodule — push it
+    VPUSH rax
+    leave
+    DISPATCH
+
+.if_error:
     lea rdi, [rel exc_ImportError_type]
     CSTRING rsi, "cannot import name"
     call raise_exception
 END_FUNC op_import_from
+
+section .rodata
+if_dunder_name: db "__name__", 0
+if_dot_str: db ".", 0
+section .text

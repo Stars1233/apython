@@ -58,33 +58,34 @@ extern sys_path_add_script_dir
 extern builtins_dict_global
 extern exc_ImportError_type
 
-; Named frame-layout constants
-IM_FRAME    equ 80
+; Builtin modules
+extern time_module_create
 
-IM_NAME     equ 8           ; import name str
-IM_FROMLIST equ 16          ; fromlist
-IM_LEVEL    equ 24          ; level (int)
-IM_DOTPOS   equ 32          ; dot position for dotted names
-IM_TOPMOD   equ 40          ; top-level module
-IM_MBUF     equ 48          ; saved marshal_buf
-IM_MPOS     equ 56          ; saved marshal_pos
-IM_MLEN     equ 64          ; saved marshal_len
-IM_MREFS    equ 72          ; saved marshal_refs
-IM_MRCNT    equ 80          ; saved marshal_ref_count (shares slot with frame... move to separate)
-
-; Re-layout to avoid collisions
-IF_NAME     equ 8
-IF_FROMLIST equ 16
-IF_LEVEL    equ 24
-IF_TOPMOD   equ 32
-IF_MBUF     equ 40
-IF_MPOS     equ 48
-IF_MLEN     equ 56
-IF_MREFS    equ 64
-IF_MRCNT    equ 72
-IF_MRCAP    equ 80
-
+; --- import_module frame layout ---
+IF_NAME     equ 8            ; import name str
+IF_FROMLIST equ 16           ; fromlist
+IF_LEVEL    equ 24           ; level (int)
+IF_TOPMOD   equ 32           ; top-level module
+IF_MBUF     equ 40           ; saved marshal_buf
+IF_MPOS     equ 48           ; saved marshal_pos
+IF_MLEN     equ 56           ; saved marshal_len
+IF_MREFS    equ 64           ; saved marshal_refs
+IF_MRCNT    equ 72           ; saved marshal_ref_count
+IF_MRCAP    equ 80           ; saved marshal_ref_cap
 IF_FRAME    equ 88
+
+; --- import_find_and_load frame layout ---
+; path_component buffer lives on stack below frame locals
+FL_NAME     equ 8            ; name_str (PyObject*)
+FL_LEAF     equ 16           ; leaf name cstr ptr
+FL_LEAFLEN  equ 24           ; leaf name length
+FL_PATHBUF  equ 32           ; path component buffer ptr (on stack)
+FL_PATHLEN  equ 40           ; path component length
+FL_FRAME    equ 48
+FL_STKSZ    equ 4096         ; stack buffer for path component
+
+; Path buffer size
+PATHBUF_SIZE equ 8192
 
 ; ============================================================================
 ; import_init(int argc, char **argv)
@@ -100,6 +101,26 @@ DEF_FUNC import_init
     mov rdi, rbx
     mov rsi, r12
     call sys_module_init
+
+    ; Add "lib" to sys.path for stdlib modules
+    lea rdi, [rel im_lib_path]
+    call str_from_cstr
+    push rax
+    mov rdi, [rel sys_path_list]
+    mov rsi, rax
+    call list_append
+    pop rdi
+    call obj_decref
+
+    ; Add "tests/cpython" to sys.path for test support
+    lea rdi, [rel im_tests_cpython_path]
+    call str_from_cstr
+    push rax
+    mov rdi, [rel sys_path_list]
+    mov rsi, rax
+    call list_append
+    pop rdi
+    call obj_decref
 
     ; Register builtins module in sys.modules
     lea rdi, [rel im_builtins]
@@ -126,6 +147,21 @@ DEF_FUNC import_init
     ; The key was popped and passed to dict_set as rsi. dict_set INCREFs key and value.
     ; We need to DECREF our references.
     mov rdi, rbx                ; builtins module
+    call obj_decref
+
+    ; Register time module in sys.modules
+    call time_module_create
+    mov rbx, rax                ; time module
+    lea rdi, [rel im_time_name]
+    call str_from_cstr
+    push rax                    ; save key for DECREF
+    mov rdi, [rel sys_modules_dict]
+    mov rsi, rax                ; key = "time"
+    mov rdx, rbx                ; value = time module
+    call dict_set
+    pop rdi                     ; DECREF key
+    call obj_decref
+    mov rdi, rbx                ; DECREF module (dict_set INCREF'd)
     call obj_decref
 
     pop r12
@@ -253,6 +289,33 @@ DEF_FUNC import_module, IF_FRAME
 .have_full_dotted:
     mov r13, rax                ; r13 = leaf module
 
+    ; Set submodule as attr on parent (CPython behavior)
+    ; Extract leaf name from full dotted name (after last dot)
+    mov rcx, r14                ; name length
+.find_leaf_dot:
+    dec rcx
+    js .skip_set_parent
+    cmp byte [rbx + rcx], '.'
+    jne .find_leaf_dot
+    ; leaf name starts at rbx + rcx + 1
+    lea rdi, [rbx + rcx + 1]
+    mov rsi, r14
+    sub rsi, rcx
+    dec rsi                     ; leaf name length
+    call str_new                ; rax = leaf name str
+    push rax                    ; save leaf name str
+    ; Set on parent's mod_dict
+    mov rdi, [r12 + PyModuleObject.mod_dict]
+    test rdi, rdi
+    jz .no_parent_dict
+    mov rsi, rax                ; key = leaf name
+    mov rdx, r13                ; value = leaf module
+    call dict_set
+.no_parent_dict:
+    pop rdi
+    call obj_decref             ; DECREF leaf name str
+
+.skip_set_parent:
     ; Decide what to return based on fromlist
     mov rax, [rbp - IF_FROMLIST]
     ; Check if fromlist is None
@@ -320,30 +383,144 @@ END_FUNC import_module
 
 ; ============================================================================
 ; import_find_and_load(PyObject *name_str) -> PyObject*
-; Find module on disk and load it
-; Returns module object or NULL
+; Find module on disk and load it.
+; For dotted names (e.g. "unittest.case"), searches parent package's __path__.
+; Returns module object or NULL.
 ; ============================================================================
-DEF_FUNC import_find_and_load, IF_FRAME
+DEF_FUNC import_find_and_load, FL_FRAME
     push rbx
     push r12
     push r13
     push r14
     push r15
 
-    mov rbx, rdi                ; name_str
-    mov [rbp - IF_NAME], rdi
+    mov [rbp - FL_NAME], rdi    ; save name_str
 
-    ; Convert dots to slashes for path lookup
-    ; name_str data -> "os.path" -> need to search for "os/path"
-    lea r14, [rbx + PyStrObject.data]  ; name cstr
-    mov r15, [rbx + PyStrObject.ob_size] ; name length
+    ; Check sys.modules first — avoid re-loading already-imported modules
+    mov rdi, [rel sys_modules_dict]
+    mov rsi, [rbp - FL_NAME]
+    call dict_get
+    test rax, rax
+    jnz .found_in_sysmod
 
-    ; Build a path buffer with dots replaced by slashes
-    ; Max path = 4096
-    sub rsp, 4096
+    ; Ensure path buffer is allocated
+    mov rdi, [rel import_path_buf_ptr]
+    test rdi, rdi
+    jnz .have_buf
+    mov edi, PATHBUF_SIZE
+    call ap_malloc
+    mov [rel import_path_buf_ptr], rax
+.have_buf:
+
+    ; Compute leaf name: last component after final '.'
+    ; e.g. "unittest.case" -> leaf="case", "unittest" -> leaf="unittest"
+    mov rbx, [rbp - FL_NAME]
+    lea r14, [rbx + PyStrObject.data]  ; full name cstr
+    mov r15, [rbx + PyStrObject.ob_size] ; full name length
+
+    ; Find last '.' to get leaf name
+    mov rcx, r15
+.find_last_dot:
+    dec rcx
+    js .no_dot_found
+    cmp byte [r14 + rcx], '.'
+    jne .find_last_dot
+    ; Found dot at position rcx; leaf starts at rcx+1
+    lea rax, [r14 + rcx + 1]
+    mov [rbp - FL_LEAF], rax
+    mov rax, r15
+    sub rax, rcx
+    dec rax                     ; leaf length
+    mov [rbp - FL_LEAFLEN], rax
+    jmp .have_leaf
+
+.no_dot_found:
+    ; No dot: leaf = full name
+    mov [rbp - FL_LEAF], r14
+    mov [rbp - FL_LEAFLEN], r15
+
+.have_leaf:
+    ; For dotted names, try parent package's __path__ first
+    ; Find last '.' position again to extract parent name
+    mov rcx, r15
+.find_parent_dot:
+    dec rcx
+    js .search_sys_path         ; no dot -> top-level, search sys.path
+    cmp byte [r14 + rcx], '.'
+    jne .find_parent_dot
+
+    ; Dotted name: parent = name[0..rcx]
+    ; Create parent name string and look up in sys.modules
+    lea rdi, [r14]              ; parent name cstr
+    mov rsi, rcx                ; parent name length
+    call str_new
+    mov r12, rax                ; r12 = parent name str
+
+    ; Look up parent in sys.modules
+    mov rdi, [rel sys_modules_dict]
+    mov rsi, r12
+    call dict_get
+    mov r13, rax                ; r13 = parent module (or NULL)
+
+    ; DECREF parent name str
+    mov rdi, r12
+    call obj_decref
+
+    ; If parent not found, fall through to sys.path search
+    test r13, r13
+    jz .search_sys_path
+
+    ; Get parent's __path__ attribute (from module dict)
+    ; Module dict is at module.ob_dict (PyModuleObject.ob_dict)
+    mov rax, [r13 + PyObject.ob_type]
+    mov rax, [rax + PyTypeObject.tp_getattr]
+    test rax, rax
+    jz .search_sys_path
+
+    ; getattr(parent_module, "__path__")
+    ; Save tp_getattr (caller-saved regs clobbered by str_from_cstr)
+    push rax                    ; save tp_getattr
+    push r13                    ; save parent module
+    lea rdi, [rel im_dunder_path]
+    call str_from_cstr
+    pop r13                     ; restore parent module
+    pop rcx                     ; restore tp_getattr
+    push rax                    ; save "__path__" str
+    mov rdi, r13                ; parent module
+    mov rsi, rax                ; "__path__" key
+    call rcx                    ; tp_getattr
+    mov r12, rax                ; r12 = __path__ list (or NULL)
+    pop rdi                     ; DECREF "__path__" str
+    call obj_decref
+
+    test r12, r12
+    jz .search_sys_path
+
+    ; r12 = parent's __path__ (a list). Search it for the leaf module.
+    mov rdi, r12                ; search_list = __path__
+    mov rsi, [rbp - FL_LEAF]    ; leaf cstr
+    mov rdx, [rbp - FL_LEAFLEN] ; leaf len
+    call import_search_dirs
+    ; DECREF __path__ (getattr returned new ref)
+    push rax                    ; save result
+    mov rdi, r12
+    call obj_decref
+    pop rax
+
+    test rax, rax
+    jnz .found_result           ; found it in parent's __path__
+    ; Fall through to sys.path
+
+.search_sys_path:
+    ; Build full path component: name with dots replaced by slashes
+    ; Stack buffer for path component
+    sub rsp, FL_STKSZ
     mov r12, rsp                ; r12 = path_component buffer
 
     ; Copy name, replacing '.' with '/'
+    mov rbx, [rbp - FL_NAME]
+    lea r14, [rbx + PyStrObject.data]
+    mov r15, [rbx + PyStrObject.ob_size]
     xor ecx, ecx
 .copy_name:
     cmp rcx, r15
@@ -359,298 +536,19 @@ DEF_FUNC import_find_and_load, IF_FRAME
 .copy_done:
     mov byte [r12 + rcx], 0    ; null-terminate
 
-    ; Search sys.path for the module
+    ; Search sys.path
     mov rdi, [rel sys_path_list]
-    mov r13, [rdi + PyListObject.ob_size]  ; r13 = number of paths
-    mov rdi, [rdi + PyListObject.ob_item]  ; rdi = paths array
-    mov [rbp - IF_TOPMOD], rdi  ; save paths array ptr
-    xor r15d, r15d              ; r15 = path index
+    mov rsi, [rbp - FL_LEAF]
+    mov rdx, [rbp - FL_LEAFLEN]
+    mov rcx, r12                ; full path component (with slashes)
+    call import_search_syspath
+    add rsp, FL_STKSZ
 
-.search_loop:
-    cmp r15, r13
-    jge .not_found
-
-    mov rdi, [rbp - IF_TOPMOD]
-    mov rdi, [rdi + r15 * 8]   ; path entry (str object)
-    ; Skip SmallInt entries
-    test rdi, rdi
-    js .next_path
-
-    ; Build full path: <dir>/<name>/__pycache__/__init__.cpython-312.pyc
-    ; Use a second stack buffer for full path
-    lea rsi, [rdi + PyStrObject.data]  ; dir cstr
-    mov rdx, [rdi + PyStrObject.ob_size] ; dir length
-    lea rdi, [rbp - IF_FRAME - 4096]   ; oops, can't reference below our alloc
-    ; Use a fixed BSS buffer instead
-    mov rdi, [rel import_path_buf_ptr]
-
-    ; Copy dir
-    push rdx
-    push rsi
-    mov rdi, [rel import_path_buf_ptr]
-    test rdi, rdi
-    jnz .have_buf
-    ; Allocate path buffer
-    mov edi, 8192
-    call ap_malloc
-    mov [rel import_path_buf_ptr], rax
-    mov rdi, rax
-.have_buf:
-    pop rsi
-    pop rdx
-
-    ; Copy dir to buffer
-    push rdx                    ; save dir length
-    mov rcx, rdx
-    test rcx, rcx
-    jz .no_dir_copy
-    push rdi
-    call ap_memcpy
-    pop rdi
-.no_dir_copy:
-    pop rdx                     ; restore dir length
-
-    ; Append '/' if dir is non-empty
-    test rdx, rdx
-    jz .no_slash
-    mov byte [rdi + rdx], '/'
-    inc rdx
-.no_slash:
-
-    ; Try 1: <dir>/<name>/__pycache__/__init__.cpython-312.pyc (package)
-    push rdx                    ; save offset
-    push rdi                    ; save buf
-
-    ; Append name_component
-    lea rsi, [r12]              ; name with slashes
-    mov rdi, [rsp]              ; buf
-    add rdi, [rsp + 8]         ; buf + offset
-    call ap_strlen
-    push rax                    ; save name len
-    lea rsi, [r12]
-    mov rdi, [rsp + 8]
-    add rdi, [rsp + 16]
-    mov rdx, rax
-    call ap_memcpy
-    pop rcx                     ; name len
-    pop rdi                     ; buf
-    pop rdx                     ; offset
-    add rdx, rcx
-
-    ; Append "/__pycache__/__init__.cpython-312.pyc"
-    push rdx
-    push rdi
-    lea rsi, [rel im_pkg_pyc_suffix]
-    add rdi, rdx
-    mov rdx, im_pkg_pyc_suffix_len
-    call ap_memcpy
-    pop rdi
-    pop rdx
-    add rdx, im_pkg_pyc_suffix_len
-    mov byte [rdi + rdx], 0
-
-    ; Try to open this path
-    push rdi                    ; save buf
-    mov esi, 0                  ; O_RDONLY
-    xor edx, edx
-    call sys_open
-    pop rdi
     test rax, rax
-    jns .found_package
+    jnz .found_result
 
-    ; Try 2: <dir>/__pycache__/<name>.cpython-312.pyc (module)
-    mov rdi, [rel import_path_buf_ptr]
-
-    ; Reload dir info from path entry
-    mov rax, [rbp - IF_TOPMOD]
-    mov rax, [rax + r15 * 8]
-    lea rsi, [rax + PyStrObject.data]
-    mov rdx, [rax + PyStrObject.ob_size]
-
-    ; Copy dir
-    push rdx
-    test rdx, rdx
-    jz .no_dir_copy2
-    push rdi
-    call ap_memcpy
-    pop rdi
-.no_dir_copy2:
-    pop rdx
-
-    ; Append '/' if needed
-    test rdx, rdx
-    jz .no_slash2
-    mov byte [rdi + rdx], '/'
-    inc rdx
-.no_slash2:
-
-    ; Append "__pycache__/"
-    push rdx
-    push rdi
-    lea rsi, [rel im_pycache_prefix]
-    add rdi, rdx
-    mov rdx, im_pycache_prefix_len
-    call ap_memcpy
-    pop rdi
-    pop rdx
-    add rdx, im_pycache_prefix_len
-
-    ; For dotted names, we need the last component only
-    ; e.g., "os.path" -> look for "path.cpython-312.pyc" in os/__pycache__/
-    ; But we need the parent's __pycache__. Actually for submodules,
-    ; the parent must already be imported and have __path__ set.
-    ; For simplicity, handle the leaf component name
-    ; Find last '/' in r12 (name component path)
-    lea rsi, [r12]
-    call ap_strlen
-    mov rcx, rax
-    mov r8, rsi                 ; start of name component
-.find_last_slash:
-    dec rcx
-    js .no_subdir
-    cmp byte [rsi + rcx], '/'
-    jne .find_last_slash
-    ; Found slash - leaf is after it
-    lea r8, [rsi + rcx + 1]
-    jmp .have_leaf
-.no_subdir:
-    mov r8, rsi                 ; whole name is the leaf
-.have_leaf:
-
-    ; Append leaf name
-    push rdx                    ; save offset
-    push rdi                    ; save buf
-    push r8                     ; save leaf ptr across strlen
-    mov rdi, r8
-    call ap_strlen
-    pop r8                      ; restore leaf ptr
-    pop rdi                     ; restore buf
-    pop rdx                     ; restore offset
-    ; rax = leaf name length
-    mov rcx, rax
-    push rdx                    ; save offset
-    push rdi                    ; save buf
-    push rcx                    ; save leaf len
-    lea rsi, [r8]               ; src = leaf name
-    add rdi, rdx                ; dst = buf + offset
-    mov rdx, rcx                ; count = leaf len
-    call ap_memcpy
-    pop rcx                     ; leaf len
-    pop rdi                     ; buf
-    pop rdx                     ; offset
-    add rdx, rcx
-
-    ; Append ".cpython-312.pyc"
-    push rdx
-    push rdi
-    lea rsi, [rel im_pyc_suffix]
-    mov rdi, [rsp]
-    add rdi, [rsp + 8]
-    mov rdx, im_pyc_suffix_len
-    call ap_memcpy
-    pop rdi
-    pop rdx
-    add rdx, im_pyc_suffix_len
-    mov byte [rdi + rdx], 0
-
-    ; Try to open
-    push rdi
-    mov esi, 0                  ; O_RDONLY
-    xor edx, edx
-    call sys_open
-    pop rdi
-    test rax, rax
-    jns .found_module
-
-    ; Try 3: <dir>/<name>.cpython-312.pyc (module, no __pycache__)
-    mov rdi, [rel import_path_buf_ptr]
-    mov rax, [rbp - IF_TOPMOD]
-    mov rax, [rax + r15 * 8]
-    lea rsi, [rax + PyStrObject.data]
-    mov rdx, [rax + PyStrObject.ob_size]
-    push rdx
-    test rdx, rdx
-    jz .no_dir_copy3
-    push rdi
-    call ap_memcpy
-    pop rdi
-.no_dir_copy3:
-    pop rdx
-    test rdx, rdx
-    jz .no_slash3
-    mov byte [rdi + rdx], '/'
-    inc rdx
-.no_slash3:
-    ; Append leaf name + ".cpython-312.pyc"
-    push rdx                    ; save offset
-    push rdi                    ; save buf
-    push r8                     ; save leaf ptr across strlen
-    mov rdi, r8
-    call ap_strlen
-    pop r8                      ; restore leaf ptr
-    pop rdi                     ; restore buf
-    pop rdx                     ; restore offset
-    mov rcx, rax                ; leaf name length
-    push rdx                    ; save offset
-    push rdi                    ; save buf
-    push rcx                    ; save leaf len
-    lea rsi, [r8]               ; src = leaf name
-    add rdi, rdx                ; dst = buf + offset
-    mov rdx, rcx                ; count = leaf len
-    call ap_memcpy
-    pop rcx                     ; leaf len
-    pop rdi                     ; buf
-    pop rdx                     ; offset
-    add rdx, rcx
-    push rdx
-    push rdi
-    lea rsi, [rel im_pyc_suffix]
-    mov rdi, [rsp]
-    add rdi, [rsp + 8]
-    mov rdx, im_pyc_suffix_len
-    call ap_memcpy
-    pop rdi
-    pop rdx
-    add rdx, im_pyc_suffix_len
-    mov byte [rdi + rdx], 0
-
-    push rdi
-    mov esi, 0
-    xor edx, edx
-    call sys_open
-    pop rdi
-    test rax, rax
-    jns .found_module
-
-.next_path:
-    inc r15
-    jmp .search_loop
-
-.found_package:
-    ; rax = fd, close it (we'll re-open via pyc_read_file)
-    mov rdi, rax
-    call sys_close
-
-    ; Load as package (is_package = 1)
-    mov rdi, [rbp - IF_NAME]
-    mov rsi, [rel import_path_buf_ptr]
-    mov edx, 1                  ; is_package
-    call import_load_module
-    jmp .load_done
-
-.found_module:
-    ; rax = fd, close it
-    mov rdi, rax
-    call sys_close
-
-    ; Load as module (is_package = 0)
-    mov rdi, [rbp - IF_NAME]
-    mov rsi, [rel import_path_buf_ptr]
-    xor edx, edx               ; is_package = 0
-    call import_load_module
-
-.load_done:
-    add rsp, 4096
+    ; Not found anywhere
+    xor eax, eax
     pop r15
     pop r14
     pop r13
@@ -659,9 +557,29 @@ DEF_FUNC import_find_and_load, IF_FRAME
     leave
     ret
 
-.not_found:
-    xor eax, eax
-    add rsp, 4096
+.found_in_sysmod:
+    ; Already imported — return INCREF'd reference
+    inc qword [rax + PyObject.ob_refcnt]
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.found_result:
+    ; rax = 1 (package) or 2 (module); path is in import_path_buf_ptr
+    mov r12d, eax               ; save type
+    mov rdi, [rbp - FL_NAME]
+    mov rsi, [rel import_path_buf_ptr]
+    xor edx, edx
+    cmp r12d, 1
+    jne .load_as_module
+    mov edx, 1                  ; is_package = 1
+.load_as_module:
+    call import_load_module
+
     pop r15
     pop r14
     pop r13
@@ -670,6 +588,425 @@ DEF_FUNC import_find_and_load, IF_FRAME
     leave
     ret
 END_FUNC import_find_and_load
+
+; ============================================================================
+; import_search_dirs(PyListObject *dirs, const char *leaf, int64_t leaf_len) -> int
+; Search a list of directory strings for a module named 'leaf'.
+; Tries: <dir>/<leaf>/__pycache__/__init__.cpython-312.pyc (package)
+;        <dir>/__pycache__/<leaf>.cpython-312.pyc (module)
+;        <dir>/<leaf>.cpython-312.pyc (module, no __pycache__)
+; On success, sets import_path_buf_ptr contents and returns 1 (package) or 2 (module).
+; On failure returns 0.
+; ============================================================================
+
+; Frame layout for import_search_dirs
+SD_DIRS     equ 8             ; dirs list
+SD_LEAF     equ 16            ; leaf cstr
+SD_LEAFLEN  equ 24            ; leaf length
+SD_FULLPATH equ 32            ; optional full path component (with slashes)
+SD_IDX      equ 40            ; current search index
+SD_COUNT    equ 48            ; number of dirs
+SD_FRAME    equ 56
+
+DEF_FUNC import_search_dirs, SD_FRAME
+    push rbx
+    push r12
+    push r13
+    push r14
+    push r15
+
+    mov [rbp - SD_DIRS], rdi
+    mov [rbp - SD_LEAF], rsi
+    mov [rbp - SD_LEAFLEN], rdx
+    mov qword [rbp - SD_FULLPATH], 0
+
+    ; Get list size and item array
+    mov r14, [rdi + PyListObject.ob_size]   ; count
+    mov [rbp - SD_COUNT], r14
+    mov qword [rbp - SD_IDX], 0
+
+.sd_loop:
+    mov rax, [rbp - SD_IDX]
+    cmp rax, [rbp - SD_COUNT]
+    jge .sd_not_found
+
+    ; Get dir string
+    mov rdi, [rbp - SD_DIRS]
+    mov rcx, [rdi + PyListObject.ob_item]
+    mov rax, [rbp - SD_IDX]
+    mov rbx, [rcx + rax * 8]   ; rbx = dir str obj
+    test rbx, rbx
+    js .sd_next                 ; skip SmallInts
+    test rbx, rbx
+    jz .sd_next
+
+    ; Build path in import_path_buf_ptr
+    mov r12, [rel import_path_buf_ptr]  ; r12 = dest buf
+
+    ; Copy dir to buffer
+    lea rsi, [rbx + PyStrObject.data]
+    mov r13, [rbx + PyStrObject.ob_size] ; r13 = offset (dir length)
+    test r13, r13
+    jz .sd_no_dir
+    mov rdi, r12
+    mov rdx, r13
+    call ap_memcpy
+.sd_no_dir:
+
+    ; Append '/' if dir non-empty
+    test r13, r13
+    jz .sd_no_slash
+    mov byte [r12 + r13], '/'
+    inc r13
+.sd_no_slash:
+    ; r13 = current write offset
+
+    ; --- Pattern 1: <dir>/<leaf>/__pycache__/__init__.cpython-312.pyc ---
+    ; Append leaf name
+    mov rdi, r12
+    add rdi, r13
+    mov rsi, [rbp - SD_LEAF]
+    mov rdx, [rbp - SD_LEAFLEN]
+    mov r15, rdx                ; save leaf len
+    call ap_memcpy
+    lea r14, [r13 + r15]       ; r14 = offset after leaf
+
+    ; Append suffix
+    mov rdi, r12
+    add rdi, r14
+    lea rsi, [rel im_pkg_pyc_suffix]
+    mov rdx, im_pkg_pyc_suffix_len
+    call ap_memcpy
+    add r14, im_pkg_pyc_suffix_len
+    mov byte [r12 + r14], 0
+
+    ; Try to open
+    mov rdi, r12
+    xor esi, esi                ; O_RDONLY
+    xor edx, edx
+    call sys_open
+    test rax, rax
+    jns .sd_found_package
+
+    ; --- Pattern 2: <dir>/__pycache__/<leaf>.cpython-312.pyc ---
+    ; Rebuild from dir offset (r13 already has dir+slash offset)
+    ; Re-read r13 from dir
+    mov r13, [rbx + PyStrObject.ob_size]
+    test r13, r13
+    jz .sd_p2_no_slash
+    inc r13                     ; account for '/'
+.sd_p2_no_slash:
+
+    ; Append "__pycache__/"
+    mov rdi, r12
+    add rdi, r13
+    lea rsi, [rel im_pycache_prefix]
+    mov rdx, im_pycache_prefix_len
+    call ap_memcpy
+    add r13, im_pycache_prefix_len
+
+    ; Append leaf name
+    mov rdi, r12
+    add rdi, r13
+    mov rsi, [rbp - SD_LEAF]
+    mov rdx, [rbp - SD_LEAFLEN]
+    call ap_memcpy
+    add r13, [rbp - SD_LEAFLEN]
+
+    ; Append ".cpython-312.pyc"
+    mov rdi, r12
+    add rdi, r13
+    lea rsi, [rel im_pyc_suffix]
+    mov rdx, im_pyc_suffix_len
+    call ap_memcpy
+    add r13, im_pyc_suffix_len
+    mov byte [r12 + r13], 0
+
+    ; Try to open
+    mov rdi, r12
+    xor esi, esi
+    xor edx, edx
+    call sys_open
+    test rax, rax
+    jns .sd_found_module
+
+    ; --- Pattern 3: <dir>/<leaf>.cpython-312.pyc ---
+    mov r13, [rbx + PyStrObject.ob_size]
+    test r13, r13
+    jz .sd_p3_no_slash
+    inc r13
+.sd_p3_no_slash:
+
+    ; Append leaf name
+    mov rdi, r12
+    add rdi, r13
+    mov rsi, [rbp - SD_LEAF]
+    mov rdx, [rbp - SD_LEAFLEN]
+    call ap_memcpy
+    add r13, [rbp - SD_LEAFLEN]
+
+    ; Append ".cpython-312.pyc"
+    mov rdi, r12
+    add rdi, r13
+    lea rsi, [rel im_pyc_suffix]
+    mov rdx, im_pyc_suffix_len
+    call ap_memcpy
+    add r13, im_pyc_suffix_len
+    mov byte [r12 + r13], 0
+
+    ; Try to open
+    mov rdi, r12
+    xor esi, esi
+    xor edx, edx
+    call sys_open
+    test rax, rax
+    jns .sd_found_module
+
+.sd_next:
+    inc qword [rbp - SD_IDX]
+    jmp .sd_loop
+
+.sd_found_package:
+    ; Close the test fd
+    mov rdi, rax
+    call sys_close
+    mov eax, 1                  ; return 1 = package
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.sd_found_module:
+    ; Close the test fd
+    mov rdi, rax
+    call sys_close
+    mov eax, 2                  ; return 2 = module
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.sd_not_found:
+    xor eax, eax               ; return 0 = not found
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC import_search_dirs
+
+; ============================================================================
+; import_search_syspath(PyListObject *sys_path, const char *leaf, int64_t leaf_len,
+;                       const char *full_component) -> int
+; Searches sys.path for a module. For dotted names, full_component has slashes.
+; Tries patterns:
+;   <dir>/<full_component>/__pycache__/__init__.cpython-312.pyc (package)
+;   <dir>/__pycache__/<leaf>.cpython-312.pyc (module)
+;   <dir>/<leaf>.cpython-312.pyc (module, no __pycache__)
+; Returns 1 (package), 2 (module), or 0 (not found).
+; ============================================================================
+
+SS_DIRS     equ 8
+SS_LEAF     equ 16
+SS_LEAFLEN  equ 24
+SS_FULL     equ 32            ; full path component (dots->slashes)
+SS_IDX      equ 40
+SS_COUNT    equ 48
+SS_FRAME    equ 56
+
+DEF_FUNC import_search_syspath, SS_FRAME
+    push rbx
+    push r12
+    push r13
+    push r14
+    push r15
+
+    mov [rbp - SS_DIRS], rdi
+    mov [rbp - SS_LEAF], rsi
+    mov [rbp - SS_LEAFLEN], rdx
+    mov [rbp - SS_FULL], rcx
+
+    mov r14, [rdi + PyListObject.ob_size]
+    mov [rbp - SS_COUNT], r14
+    mov qword [rbp - SS_IDX], 0
+
+.ss_loop:
+    mov rax, [rbp - SS_IDX]
+    cmp rax, [rbp - SS_COUNT]
+    jge .ss_not_found
+
+    ; Get dir string
+    mov rdi, [rbp - SS_DIRS]
+    mov rcx, [rdi + PyListObject.ob_item]
+    mov rax, [rbp - SS_IDX]
+    mov rbx, [rcx + rax * 8]
+    test rbx, rbx
+    js .ss_next
+    test rbx, rbx
+    jz .ss_next
+
+    mov r12, [rel import_path_buf_ptr]  ; dest buf
+
+    ; Copy dir to buffer
+    lea rsi, [rbx + PyStrObject.data]
+    mov r13, [rbx + PyStrObject.ob_size]
+    test r13, r13
+    jz .ss_no_dir
+    mov rdi, r12
+    mov rdx, r13
+    call ap_memcpy
+.ss_no_dir:
+    test r13, r13
+    jz .ss_no_slash
+    mov byte [r12 + r13], '/'
+    inc r13
+.ss_no_slash:
+
+    ; --- Pattern 1: <dir>/<full>/__pycache__/__init__.cpython-312.pyc ---
+    ; Append full component (dots->slashes)
+    mov rdi, r12
+    add rdi, r13
+    mov rsi, [rbp - SS_FULL]
+    push r13                    ; save dir offset
+    mov rdi, rsi                ; strlen(full)
+    call ap_strlen
+    mov r15, rax                ; r15 = full component length
+    pop r13
+
+    mov rdi, r12
+    add rdi, r13
+    mov rsi, [rbp - SS_FULL]
+    mov rdx, r15
+    call ap_memcpy
+    lea r14, [r13 + r15]       ; offset after full component
+
+    ; Append package suffix
+    mov rdi, r12
+    add rdi, r14
+    lea rsi, [rel im_pkg_pyc_suffix]
+    mov rdx, im_pkg_pyc_suffix_len
+    call ap_memcpy
+    add r14, im_pkg_pyc_suffix_len
+    mov byte [r12 + r14], 0
+
+    mov rdi, r12
+    xor esi, esi
+    xor edx, edx
+    call sys_open
+    test rax, rax
+    jns .ss_found_package
+
+    ; --- Pattern 2: <dir>/__pycache__/<leaf>.cpython-312.pyc ---
+    mov r13, [rbx + PyStrObject.ob_size]
+    test r13, r13
+    jz .ss_p2_no_slash
+    inc r13
+.ss_p2_no_slash:
+
+    mov rdi, r12
+    add rdi, r13
+    lea rsi, [rel im_pycache_prefix]
+    mov rdx, im_pycache_prefix_len
+    call ap_memcpy
+    add r13, im_pycache_prefix_len
+
+    mov rdi, r12
+    add rdi, r13
+    mov rsi, [rbp - SS_LEAF]
+    mov rdx, [rbp - SS_LEAFLEN]
+    call ap_memcpy
+    add r13, [rbp - SS_LEAFLEN]
+
+    mov rdi, r12
+    add rdi, r13
+    lea rsi, [rel im_pyc_suffix]
+    mov rdx, im_pyc_suffix_len
+    call ap_memcpy
+    add r13, im_pyc_suffix_len
+    mov byte [r12 + r13], 0
+
+    mov rdi, r12
+    xor esi, esi
+    xor edx, edx
+    call sys_open
+    test rax, rax
+    jns .ss_found_module
+
+    ; --- Pattern 3: <dir>/<leaf>.cpython-312.pyc ---
+    mov r13, [rbx + PyStrObject.ob_size]
+    test r13, r13
+    jz .ss_p3_no_slash
+    inc r13
+.ss_p3_no_slash:
+
+    mov rdi, r12
+    add rdi, r13
+    mov rsi, [rbp - SS_LEAF]
+    mov rdx, [rbp - SS_LEAFLEN]
+    call ap_memcpy
+    add r13, [rbp - SS_LEAFLEN]
+
+    mov rdi, r12
+    add rdi, r13
+    lea rsi, [rel im_pyc_suffix]
+    mov rdx, im_pyc_suffix_len
+    call ap_memcpy
+    add r13, im_pyc_suffix_len
+    mov byte [r12 + r13], 0
+
+    mov rdi, r12
+    xor esi, esi
+    xor edx, edx
+    call sys_open
+    test rax, rax
+    jns .ss_found_module
+
+.ss_next:
+    inc qword [rbp - SS_IDX]
+    jmp .ss_loop
+
+.ss_found_package:
+    mov rdi, rax
+    call sys_close
+    mov eax, 1
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.ss_found_module:
+    mov rdi, rax
+    call sys_close
+    mov eax, 2
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.ss_not_found:
+    xor eax, eax
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC import_search_syspath
 
 ; ============================================================================
 ; import_load_module(PyObject *name_str, const char *path_cstr, int is_package) -> PyObject*
@@ -700,12 +1037,24 @@ DEF_FUNC import_load_module, IF_FRAME
     mov rax, [rel marshal_ref_cap]
     mov [rbp - IF_MRCAP], rax
 
+    ; Reset marshal refs so inner import allocates fresh arrays
+    mov qword [rel marshal_refs], 0
+    mov qword [rel marshal_ref_count], 0
+    mov qword [rel marshal_ref_cap], 0
+
     ; Read .pyc file -> code object
     mov rdi, r12
     call pyc_read_file
     test rax, rax
     jz .load_failed
     mov r14, rax                ; r14 = code object
+
+    ; Free inner import's marshal refs array (if allocated)
+    mov rdi, [rel marshal_refs]
+    test rdi, rdi
+    jz .skip_inner_refs_free
+    call ap_free
+.skip_inner_refs_free:
 
     ; Restore marshal globals
     mov rax, [rbp - IF_MBUF]
@@ -952,6 +1301,13 @@ DEF_FUNC import_load_module, IF_FRAME
     ret
 
 .load_failed:
+    ; Free inner import's marshal refs array (if allocated)
+    mov rdi, [rel marshal_refs]
+    test rdi, rdi
+    jz .skip_fail_refs_free
+    call ap_free
+.skip_fail_refs_free:
+
     ; Restore marshal globals even on failure
     mov rax, [rbp - IF_MBUF]
     mov [rel marshal_buf], rax
@@ -981,6 +1337,9 @@ END_FUNC import_load_module
 ; ============================================================================
 section .rodata
 
+im_lib_path:        db "lib", 0
+im_tests_cpython_path: db "tests/cpython", 0
+im_time_name:       db "time", 0
 im_builtins:        db "builtins", 0
 im_dunder_name:     db "__name__", 0
 im_dunder_file:     db "__file__", 0

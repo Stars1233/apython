@@ -122,11 +122,8 @@ DEF_FUNC fileobj_write
     cmp rsi, 2
     jl .write_error
 
-    mov rdi, [rdi]              ; self = args[0]
-    mov rsi, [rdi + 8]         ; wait, rdi is args ptr...
-
-    ; Reload: rdi = args array
-    ; args[0] = self, args[1] = string
+    ; rdi = args array, rsi = nargs
+    ; args[0] = self (file obj), args[1] = string to write
     mov rax, rdi                ; rax = args
     mov rdi, [rax]              ; rdi = self (file obj)
     mov rsi, [rax + 8]         ; rsi = string arg

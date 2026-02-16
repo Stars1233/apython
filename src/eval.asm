@@ -96,6 +96,7 @@ extern op_get_len
 extern op_setup_annotations
 extern op_load_locals
 extern op_load_from_dict_or_globals
+extern op_load_from_dict_or_deref
 extern op_match_mapping
 extern op_match_sequence
 extern op_match_keys
@@ -168,14 +169,16 @@ DEF_FUNC eval_frame
     mov rcx, [rax + PyCodeObject.co_names]
     lea r15, [rcx + PyTupleObject.ob_item]
 
-    ; Save caller's eval_saved_r12 (for nested eval_frame calls)
+    ; Save caller's eval globals (for nested eval_frame calls)
+    mov rax, [rel eval_saved_rbx]
+    push rax
     mov rax, [rel eval_saved_r12]
     push rax
-    mov [rel eval_saved_r12], r12
-
-    ; Save caller's eval_base_rsp (for nested eval_frame calls)
     mov rax, [rel eval_base_rsp]
     push rax
+
+    ; Set up for this frame
+    mov [rel eval_saved_r12], r12
     ; Save machine stack pointer for exception unwind cleanup
     mov [rel eval_base_rsp], rsp
 
@@ -197,11 +200,13 @@ END_FUNC eval_dispatch
 ; eval_return - Return from eval_frame
 ; rax contains the return value. Restores callee-saved regs and returns.
 DEF_FUNC_BARE eval_return
-    ; Restore caller's eval_base_rsp and eval_saved_r12
+    ; Restore caller's eval globals (reverse of save order)
     pop rdx
     mov [rel eval_base_rsp], rdx
     pop rdx
     mov [rel eval_saved_r12], rdx
+    pop rdx
+    mov [rel eval_saved_rbx], rdx
     RESTORE_EVAL_REGS
     pop rbp
     ret
@@ -219,6 +224,10 @@ END_FUNC eval_return
 DEF_FUNC_BARE eval_exception_unwind
     ; Restore machine stack to eval frame level (discard intermediate frames)
     mov rsp, [rel eval_base_rsp]
+
+    ; Clear stale kw_names_pending — the non-local jump from raise_exception
+    ; bypasses CALL opcode cleanup, leaving kw_names_pending set.
+    mov qword [rel kw_names_pending], 0
 
     ; Restore eval loop registers that may have been corrupted.
     ; When raise_exception is called from inside a function that saved/modified
@@ -503,21 +512,26 @@ DEF_FUNC_BARE op_raise_varargs
     js .raise_bad             ; SmallInt can't be an exception
     jz .raise_bad             ; NULL can't be an exception
 
-    ; First check if rdi is an exception TYPE (has exc_dealloc as tp_dealloc)
-    ; Exception type objects have tp_dealloc = exc_dealloc
-    extern exc_dealloc
-    lea rdx, [rel exc_dealloc]
-    mov rcx, [rdi + PyTypeObject.tp_dealloc]
-    cmp rcx, rdx
-    je .raise_type
-
-    ; Check if rdi is an exception INSTANCE (ob_type->tp_dealloc == exc_dealloc)
+    ; Check INSTANCE first (most common case: raise SomeException("msg"))
+    ; An instance's ob_type chain might be an exception type
+    extern type_is_exc_subclass
     mov rax, [rdi + PyObject.ob_type]
     test rax, rax
     jz .raise_bad
-    mov rcx, [rax + PyTypeObject.tp_dealloc]
-    cmp rcx, rdx
-    je .raise_exc_obj
+    push rdi
+    mov rdi, rax
+    call type_is_exc_subclass
+    pop rdi
+    test eax, eax
+    jnz .raise_exc_obj
+
+    ; Check if rdi is an exception TYPE (e.g., bare "raise ValueError")
+    ; ob_type of a type object is type_type or user_type_metatype
+    push rdi
+    call type_is_exc_subclass
+    pop rdi
+    test eax, eax
+    jnz .raise_type
 
     jmp .raise_bad
 
@@ -958,7 +972,7 @@ opcode_table:
     dq op_call_intrinsic_1   ; 173 = CALL_INTRINSIC_1
     dq op_call_intrinsic_2   ; 174 = CALL_INTRINSIC_2
     dq op_load_from_dict_or_globals ; 175 = LOAD_FROM_DICT_OR_GLOBALS
-    dq op_unimplemented      ; 176 = LOAD_FROM_DICT_OR_DEREF
+    dq op_load_from_dict_or_deref ; 176 = LOAD_FROM_DICT_OR_DEREF
     dq op_unimplemented      ; 177
     dq op_unimplemented      ; 178
     dq op_unimplemented      ; 179

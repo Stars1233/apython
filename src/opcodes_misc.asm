@@ -1108,8 +1108,9 @@ DEF_FUNC_BARE op_make_cell
     pop rax
 
 .mc_store:
-    ; Store cell in localsplus slot
+    ; Store cell in localsplus slot (payload + tag)
     mov [rdx + rcx], rax
+    mov qword [rdx + rcx + 8], TAG_PTR
     DISPATCH
 END_FUNC op_make_cell
 
@@ -1161,7 +1162,6 @@ DEF_FUNC_BARE op_copy_free_vars
 
     ; Get cell from closure tuple item[i]
     mov r9, [rax + PyTupleObject.ob_item + r8*8]
-    INCREF r9
 
     ; Compute destination index: edx + r8d, then * 16
     mov r10d, edx
@@ -1169,6 +1169,15 @@ DEF_FUNC_BARE op_copy_free_vars
     shl r10, 4                     ; slot * 16 bytes
     mov [r12 + PyFrame.localsplus + r10], r9
 
+    ; Set tag and INCREF if non-NULL
+    test r9, r9
+    jz .cfv_null_item
+    INCREF r9
+    mov qword [r12 + PyFrame.localsplus + r10 + 8], TAG_PTR
+    jmp .cfv_next
+.cfv_null_item:
+    mov qword [r12 + PyFrame.localsplus + r10 + 8], TAG_NULL
+.cfv_next:
     inc r8d
     jmp .cfv_loop
 
@@ -1654,6 +1663,58 @@ DEF_FUNC_BARE op_load_from_dict_or_globals
     VPUSH rax
     DISPATCH
 END_FUNC op_load_from_dict_or_globals
+
+;; ============================================================================
+;; op_load_from_dict_or_deref - Load from dict on TOS, fallback to cell deref
+;;
+;; Opcode 176: LOAD_FROM_DICT_OR_DEREF
+;; Used in class bodies that access closure variables directly (e.g. val = x).
+;; Pop dict from TOS. Try dict[name] first. If not found, fall back to
+;; loading through cell at localsplus[arg] (same as LOAD_DEREF).
+;; ============================================================================
+global op_load_from_dict_or_deref
+
+LFDOD_DICT  equ 8
+LFDOD_ARG   equ 16
+LFDOD_FRAME equ 16
+
+DEF_FUNC op_load_from_dict_or_deref, LFDOD_FRAME
+    mov [rbp - LFDOD_ARG], ecx    ; save arg (localsplus index)
+
+    ; Get name from co_names
+    mov rsi, [r15 + rcx*8]        ; name string
+
+    ; Pop dict from TOS
+    VPOP rdi
+    mov [rbp - LFDOD_DICT], rdi   ; save dict
+
+    ; Try dict first
+    call dict_get
+    test rax, rax
+    jnz .lfdod_found
+
+    ; Not in dict — fall back to cell deref (like LOAD_DEREF)
+    mov ecx, [rbp - LFDOD_ARG]
+    lea rax, [r12 + PyFrame.localsplus]
+    shl ecx, 4                    ; slot * 16
+    mov rax, [rax + rcx]          ; cell object
+    test rax, rax
+    jz .lfdod_error
+    mov rax, [rax + PyCellObject.ob_ref]
+    test rax, rax
+    jz .lfdod_error
+
+.lfdod_found:
+    INCREF rax
+    VPUSH rax
+    leave
+    DISPATCH
+
+.lfdod_error:
+    lea rdi, [rel exc_NameError_type]
+    CSTRING rsi, "free variable referenced before assignment"
+    call raise_exception
+END_FUNC op_load_from_dict_or_deref
 
 ;; ============================================================================
 ;; op_match_mapping - Check if TOS is a mapping type

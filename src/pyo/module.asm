@@ -17,6 +17,7 @@ extern dict_get
 extern dict_set
 extern type_type
 extern none_singleton
+extern ap_strcmp
 
 ; ============================================================================
 ; module_new(PyObject *name_str, PyObject *dict) -> PyModuleObject*
@@ -100,23 +101,45 @@ END_FUNC module_dealloc
 ; ============================================================================
 DEF_FUNC module_getattr
     push rbx
+    push r12
     mov rbx, rdi                ; self
+    mov r12, rsi                ; save name_str
 
+    ; Check for __dict__ special attribute
+    lea rdi, [r12 + PyStrObject.data]
+    lea rsi, [rel ma_dunder_dict]
+    call ap_strcmp
+    test eax, eax
+    jnz .normal_lookup
+
+    ; Return the module's dict directly
+    mov rax, [rbx + PyModuleObject.mod_dict]
+    test rax, rax
+    jz .not_found
+    inc qword [rax + PyObject.ob_refcnt]
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.normal_lookup:
     ; dict_get(mod_dict, name_str)
     mov rdi, [rbx + PyModuleObject.mod_dict]
-    ; rsi already = name_str
+    mov rsi, r12
     call dict_get
 
     ; INCREF if found (dict_get returns borrowed ref)
     test rax, rax
     jz .not_found
     inc qword [rax + PyObject.ob_refcnt]
+    pop r12
     pop rbx
     leave
     ret
 
 .not_found:
     xor eax, eax
+    pop r12
     pop rbx
     leave
     ret
@@ -162,6 +185,7 @@ END_FUNC module_repr
 section .rodata
 module_repr_str: db "<module>", 0
 module_type_name: db "module", 0
+ma_dunder_dict: db "__dict__", 0
 
 section .data
 align 8

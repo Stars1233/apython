@@ -30,11 +30,20 @@ extern str_type
 extern type_getattr
 extern type_repr
 extern type_type
+extern tuple_new
+extern tuple_type
+extern ap_strcmp
+extern dict_get
+extern dict_new
+extern dict_set
 
 ; exc_new(PyTypeObject *type, PyObject *msg_str) -> PyExceptionObject*
 ; Creates a new exception with given type and message string.
 ; msg_str is INCREFed. type is stored but not INCREFed (types are immortal).
-DEF_FUNC exc_new
+EN_EXC equ 8
+EN_MSG equ 16
+EN_FRAME equ 16
+DEF_FUNC exc_new, EN_FRAME
     push rbx
     push r12
 
@@ -53,13 +62,31 @@ DEF_FUNC exc_new
     mov qword [rax + PyExceptionObject.exc_tb], 0
     mov qword [rax + PyExceptionObject.exc_context], 0
     mov qword [rax + PyExceptionObject.exc_cause], 0
+    mov qword [rax + PyExceptionObject.exc_args], 0
 
     ; INCREF the message string
     test r12, r12
-    jz .done
+    jz .no_msg_incref
     INCREF r12
+.no_msg_incref:
 
-.done:
+    ; Create args tuple: (msg_str,) if msg present, else ()
+    mov [rbp - EN_EXC], rax   ; save exc
+    test r12, r12
+    jz .empty_args
+    mov edi, 1
+    call tuple_new
+    INCREF r12
+    mov [rax + PyTupleObject.ob_item], r12
+    jmp .set_args
+.empty_args:
+    xor edi, edi
+    call tuple_new
+.set_args:
+    mov rcx, [rbp - EN_EXC]
+    mov [rcx + PyExceptionObject.exc_args], rax
+    mov rax, rcx
+
     pop r12
     pop rbx
     leave
@@ -128,6 +155,13 @@ DEF_FUNC exc_dealloc
     jz .no_cause
     call obj_decref
 .no_cause:
+
+    ; XDECREF exc_args
+    mov rdi, [rbx + PyExceptionObject.exc_args]
+    test rdi, rdi
+    jz .no_args
+    call obj_decref
+.no_args:
 
     ; Free the object
     mov rdi, rbx
@@ -234,6 +268,128 @@ DEF_FUNC exc_str
     ret
 END_FUNC exc_str
 
+; exc_getattr(PyExceptionObject *exc, PyStrObject *name) -> PyObject* or NULL
+; Handle attribute access on exception objects: args, __context__, __cause__, etc.
+global exc_getattr
+DEF_FUNC exc_getattr
+    push rbx
+    push r12
+
+    mov rbx, rdi            ; exc
+    mov r12, rsi            ; name str
+
+    ; Compare attribute name
+    lea rdi, [r12 + PyStrObject.data]
+
+    ; Check "args"
+    CSTRING rsi, "args"
+    call ap_strcmp
+    test eax, eax
+    jz .get_args
+
+    ; Check "__context__"
+    lea rdi, [r12 + PyStrObject.data]
+    CSTRING rsi, "__context__"
+    call ap_strcmp
+    test eax, eax
+    jz .get_context
+
+    ; Check "__cause__"
+    lea rdi, [r12 + PyStrObject.data]
+    CSTRING rsi, "__cause__"
+    call ap_strcmp
+    test eax, eax
+    jz .get_cause
+
+    ; Check "__traceback__"
+    lea rdi, [r12 + PyStrObject.data]
+    CSTRING rsi, "__traceback__"
+    call ap_strcmp
+    test eax, eax
+    jz .get_tb
+
+    ; Not found — try type dict (for user-defined exception subclass attrs)
+    mov rdi, [rbx + PyObject.ob_type]
+    mov rdi, [rdi + PyTypeObject.tp_dict]
+    test rdi, rdi
+    jz .not_found
+    mov rsi, r12
+    call dict_get
+    test rax, rax
+    jnz .found_in_type
+
+.not_found:
+    xor eax, eax
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.found_in_type:
+    INCREF rax
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.get_args:
+    mov rax, [rbx + PyExceptionObject.exc_args]
+    test rax, rax
+    jz .return_empty_tuple
+    INCREF rax
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.return_empty_tuple:
+    xor edi, edi
+    call tuple_new
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.get_context:
+    mov rax, [rbx + PyExceptionObject.exc_context]
+    test rax, rax
+    jz .return_none
+    INCREF rax
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.get_cause:
+    mov rax, [rbx + PyExceptionObject.exc_cause]
+    test rax, rax
+    jz .return_none
+    INCREF rax
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.get_tb:
+    mov rax, [rbx + PyExceptionObject.exc_tb]
+    test rax, rax
+    jz .return_none
+    INCREF rax
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.return_none:
+    extern none_singleton
+    lea rax, [rel none_singleton]
+    INCREF rax
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC exc_getattr
+
 ; exc_isinstance(PyExceptionObject *exc, PyTypeObject *type) -> int (0/1)
 ; Check if exception is an instance of type, walking tp_base chain.
 DEF_FUNC_BARE exc_isinstance
@@ -254,6 +410,27 @@ DEF_FUNC_BARE exc_isinstance
     ret
 END_FUNC exc_isinstance
 
+; type_is_exc_subclass(PyTypeObject *type) -> int (0/1)
+; Walk tp_base chain checking for a type with tp_dealloc == exc_dealloc.
+; Detects user-defined exception classes (e.g., class MyError(Exception): pass)
+global type_is_exc_subclass
+DEF_FUNC_BARE type_is_exc_subclass
+    lea rdx, [rel exc_dealloc]
+.tie_walk:
+    test rdi, rdi
+    jz .tie_no
+    cmp [rdi + PyTypeObject.tp_dealloc], rdx
+    je .tie_yes
+    mov rdi, [rdi + PyTypeObject.tp_base]
+    jmp .tie_walk
+.tie_yes:
+    mov eax, 1
+    ret
+.tie_no:
+    xor eax, eax
+    ret
+END_FUNC type_is_exc_subclass
+
 ; exc_type_from_id(int exc_id) -> PyTypeObject*
 ; Look up exception type from EXC_* constant.
 DEF_FUNC_BARE exc_type_from_id
@@ -267,10 +444,17 @@ END_FUNC exc_type_from_id
 ; rdi = exception type (the class being called, e.g. ValueError)
 ; rsi = args array
 ; rdx = nargs
-DEF_FUNC exc_type_call
+ETC_EXC   equ 8
+ETC_ARGS  equ 16
+ETC_NARGS equ 24
+ETC_FRAME equ 24
+DEF_FUNC exc_type_call, ETC_FRAME
     push rbx
+    push r12
 
     mov rbx, rdi            ; rbx = type
+    mov [rbp - ETC_ARGS], rsi
+    mov [rbp - ETC_NARGS], rdx
 
     ; Get message from args[0] if nargs >= 1
     test edx, edx
@@ -283,8 +467,46 @@ DEF_FUNC exc_type_call
     ; Create exception: exc_new(type, msg)
     mov rdi, rbx
     call exc_new
-    ; rax = new exception object
+    mov [rbp - ETC_EXC], rax
 
+    ; Build args tuple from all arguments (not just the first one)
+    ; exc_new already created a 0-or-1 element args tuple, replace if nargs > 1
+    mov rcx, [rbp - ETC_NARGS]
+    cmp rcx, 2
+    jl .done
+
+    ; Need to build a proper args tuple with all nargs items
+    mov rdi, rcx
+    call tuple_new
+    mov r12, rax             ; r12 = new args tuple
+    mov rcx, [rbp - ETC_NARGS]
+    mov rsi, [rbp - ETC_ARGS]
+    xor edx, edx
+.copy_args:
+    cmp rdx, rcx
+    jge .replace_args
+    mov rdi, [rsi + rdx*8]
+    INCREF rdi
+    mov [r12 + PyTupleObject.ob_item + rdx*8], rdi
+    inc rdx
+    jmp .copy_args
+.replace_args:
+    ; DECREF old args tuple
+    mov rdi, [rbp - ETC_EXC]
+    mov rax, [rdi + PyExceptionObject.exc_args]
+    test rax, rax
+    jz .set_new_args
+    push r12
+    mov rdi, rax
+    call obj_decref
+    pop r12
+.set_new_args:
+    mov rdi, [rbp - ETC_EXC]
+    mov [rdi + PyExceptionObject.exc_args], r12
+
+.done:
+    mov rax, [rbp - ETC_EXC]
+    pop r12
     pop rbx
     leave
     ret
@@ -320,6 +542,9 @@ exc_name_OSError:           db "OSError", 0
 exc_name_LookupError:       db "LookupError", 0
 exc_name_ArithmeticError:   db "ArithmeticError", 0
 exc_name_UnicodeError:      db "UnicodeError", 0
+exc_name_Warning:           db "Warning", 0
+exc_name_DeprecationWarning: db "DeprecationWarning", 0
+exc_name_UserWarning:       db "UserWarning", 0
 
 ; Exception metatype - provides tp_call so exception types can be called
 ; e.g., ValueError("msg") works via CALL opcode
@@ -368,7 +593,7 @@ global %1
     dq exc_str              ; tp_str
     dq 0                    ; tp_hash
     dq 0                    ; tp_call
-    dq 0                    ; tp_getattr
+    dq exc_getattr          ; tp_getattr
     dq 0                    ; tp_setattr
     dq 0                    ; tp_richcompare
     dq 0                    ; tp_iter
@@ -410,6 +635,9 @@ DEF_EXC_TYPE exc_OSError_type, exc_name_OSError, exc_Exception_type
 DEF_EXC_TYPE exc_LookupError_type, exc_name_LookupError, exc_Exception_type
 DEF_EXC_TYPE exc_ArithmeticError_type, exc_name_ArithmeticError, exc_Exception_type
 DEF_EXC_TYPE exc_UnicodeError_type, exc_name_UnicodeError, exc_ValueError_type
+DEF_EXC_TYPE exc_Warning_type, exc_name_Warning, exc_Exception_type
+DEF_EXC_TYPE exc_DeprecationWarning_type, exc_name_DeprecationWarning, exc_Warning_type
+DEF_EXC_TYPE exc_UserWarning_type, exc_name_UserWarning, exc_Warning_type
 
 ; Exception type lookup table indexed by EXC_* constants
 align 8

@@ -91,6 +91,7 @@ END_FUNC list_iter_dealloc
 ;; list_iter_self(PyObject *self) -> PyObject*
 ;; tp_iter for iterators: return self with INCREF
 ;; ============================================================================
+global iter_self
 iter_self:
     inc qword [rdi + PyObject.ob_refcnt]
     mov rax, rdi

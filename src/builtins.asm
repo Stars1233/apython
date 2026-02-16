@@ -4,6 +4,7 @@
 %include "macros.inc"
 %include "object.inc"
 %include "types.inc"
+%include "frame.inc"
 %include "builtins.inc"
 
 extern dict_new
@@ -17,6 +18,8 @@ extern obj_dealloc
 extern none_singleton
 extern int_from_i64
 extern str_type
+extern bool_type
+extern float_type
 extern ap_malloc
 extern ap_free
 extern fatal_error
@@ -42,10 +45,24 @@ extern classmethod_type
 extern property_type
 extern func_type
 extern type_type
+extern list_type
+extern dict_type
+extern tuple_type
+extern set_type
+extern bytes_type
 
 ; New builtin function implementations (in builtins_extra.asm)
 extern builtin_abs
+extern builtin_divmod
 extern builtin_int_fn
+extern int_type_call
+extern str_type_call
+extern bool_type_call
+extern float_type_call
+extern bytearray_type_call
+extern memoryview_type_call
+extern bytearray_type
+extern memoryview_type
 extern builtin_str_fn
 extern builtin_ord
 extern builtin_chr
@@ -73,6 +90,7 @@ extern builtin_reversed
 extern builtin_sorted
 extern builtin_globals
 extern builtin_locals
+extern builtin_dir
 
 ; Exception types
 extern exc_BaseException_type
@@ -98,6 +116,9 @@ extern exc_MemoryError_type
 extern exc_KeyboardInterrupt_type
 extern exc_SystemExit_type
 extern exc_UnicodeError_type
+extern exc_Warning_type
+extern exc_DeprecationWarning_type
+extern exc_UserWarning_type
 
 ;; ============================================================================
 ;; builtin_func_new(void *func_ptr, const char *name_cstr) -> PyBuiltinObject*
@@ -522,6 +543,8 @@ END_FUNC builtin_type
 ;; Walks the full tp_base chain for inheritance.
 ;; ============================================================================
 DEF_FUNC builtin_isinstance
+    push rbx
+    push r12
 
     cmp rsi, 2
     jne .isinstance_error
@@ -532,32 +555,84 @@ DEF_FUNC builtin_isinstance
     mov rax, [rdi]             ; rax = args[0] = obj
     mov rcx, [rdi + 8]        ; rcx = args[1] = type_to_check
 
-    ; Get obj's type (SmallInt-aware)
+    ; Get obj's type (SmallInt-aware, None-safe)
     test rax, rax
     js .isinstance_smallint
+    jz .isinstance_none
     mov rdx, [rax + PyObject.ob_type]
-    jmp .isinstance_check
+    jmp .isinstance_got_type
+
+.isinstance_none:
+    extern none_type
+    lea rdx, [rel none_type]
+    jmp .isinstance_got_type
 
 .isinstance_smallint:
     lea rdx, [rel int_type]
 
+.isinstance_got_type:
+    ; rdx = obj's type, rcx = type_to_check (may be tuple)
+    ; Check if type_to_check is a tuple
+    test rcx, rcx
+    js .isinstance_check       ; SmallInt → single type
+    mov rax, [rcx + PyObject.ob_type]
+    extern tuple_type
+    lea r8, [rel tuple_type]
+    cmp rax, r8
+    je .isinstance_tuple
+
 .isinstance_check:
     ; Walk the full type chain: rdx = current type, rcx = target type
+    mov rax, rdx               ; save original obj type
+.isinstance_walk:
     cmp rdx, rcx
     je .isinstance_true
     mov rdx, [rdx + PyTypeObject.tp_base]
     test rdx, rdx
-    jnz .isinstance_check
+    jnz .isinstance_walk
+    jmp .isinstance_false
+
+.isinstance_tuple:
+    ; rcx = tuple of types. Check obj against each.
+    mov rbx, rcx               ; rbx = tuple
+    mov r12, rdx               ; r12 = obj's type (saved)
+    mov rcx, [rbx + PyTupleObject.ob_size]
+    xor r8d, r8d               ; index
+.isinstance_tuple_loop:
+    cmp r8, rcx
+    jge .isinstance_false
+    mov rdx, r12               ; reset to obj's type
+    push rcx
+    push r8
+    mov rcx, [rbx + PyTupleObject.ob_item + r8*8]  ; type from tuple
+.isinstance_tuple_walk:
+    cmp rdx, rcx
+    je .isinstance_tuple_match
+    mov rdx, [rdx + PyTypeObject.tp_base]
+    test rdx, rdx
+    jnz .isinstance_tuple_walk
+    pop r8
+    pop rcx
+    inc r8
+    jmp .isinstance_tuple_loop
+
+.isinstance_tuple_match:
+    add rsp, 16                ; pop saved r8, rcx
+    jmp .isinstance_true
 
 .isinstance_false:
     lea rax, [rel bool_false]
     inc qword [rax + PyObject.ob_refcnt]
+    pop r12
+    pop rbx
     leave
     ret
 
 .isinstance_true:
     lea rax, [rel bool_true]
     inc qword [rax + PyObject.ob_refcnt]
+    pop r12
+    pop rbx
     leave
     ret
 
@@ -630,6 +705,7 @@ END_FUNC builtin_repr
 ;; bool()    -> False
 ;; bool(x)   -> True if x is truthy, False otherwise
 ;; ============================================================================
+global builtin_bool
 DEF_FUNC builtin_bool
 
     cmp rsi, 0
@@ -671,6 +747,7 @@ END_FUNC builtin_bool
 ;; float()    -> 0.0
 ;; float(x)   -> convert x to float
 ;; ============================================================================
+global builtin_float
 DEF_FUNC builtin_float
 
     cmp rsi, 0
@@ -749,6 +826,9 @@ DEF_FUNC builtin___build_class__
     mov rcx, r15                                ; class_dict as locals
     call frame_new
     mov r12, rax            ; r12 = new frame
+
+    ; Store body function in frame for COPY_FREE_VARS (closure support)
+    mov [r12 + PyFrame.func_obj], r13
 
     ; eval_frame(frame)
     mov rdi, r12
@@ -843,6 +923,78 @@ DEF_FUNC builtin___build_class__
     mov [r12 + PyTypeObject.tp_base], rax
     mov rdi, rax
     call obj_incref
+
+    ; Inherit type flag subclass bits from base type
+    mov rax, [rbp-48]
+    mov rax, [rax + PyTypeObject.tp_flags]
+    and rax, TYPE_FLAG_INT_SUBCLASS | TYPE_FLAG_STR_SUBCLASS
+    or [r12 + PyTypeObject.tp_flags], rax
+
+    ; If base is an exception type, inherit exception-compatible methods
+    extern type_is_exc_subclass
+    mov rdi, [rbp-48]
+    call type_is_exc_subclass
+    test eax, eax
+    jz .bc_check_int_sub
+
+    ; Exception subclass: override instance_* with exc_* methods
+    extern exc_dealloc
+    extern exc_repr
+    extern exc_str
+    lea rax, [rel exc_dealloc]
+    mov [r12 + PyTypeObject.tp_dealloc], rax
+    lea rax, [rel exc_repr]
+    mov [r12 + PyTypeObject.tp_repr], rax
+    lea rax, [rel exc_str]
+    mov [r12 + PyTypeObject.tp_str], rax
+    ; No getattr/setattr for exceptions (they're not instances)
+    mov qword [r12 + PyTypeObject.tp_getattr], 0
+    mov qword [r12 + PyTypeObject.tp_setattr], 0
+    jmp .bc_no_set_base
+
+.bc_check_int_sub:
+    ; Int subclass: inherit int-compatible repr/str and number methods
+    mov rax, [r12 + PyTypeObject.tp_flags]
+    test rax, TYPE_FLAG_INT_SUBCLASS
+    jz .bc_check_builtin_sub
+    extern int_type
+    mov rdi, [rel int_type + PyTypeObject.tp_repr]
+    mov [r12 + PyTypeObject.tp_repr], rdi
+    mov rdi, [rel int_type + PyTypeObject.tp_str]
+    mov [r12 + PyTypeObject.tp_str], rdi
+    mov rdi, [rel int_type + PyTypeObject.tp_as_number]
+    mov [r12 + PyTypeObject.tp_as_number], rdi
+    mov rdi, [rel int_type + PyTypeObject.tp_richcompare]
+    mov [r12 + PyTypeObject.tp_richcompare], rdi
+    mov rdi, [rel int_type + PyTypeObject.tp_hash]
+    mov [r12 + PyTypeObject.tp_hash], rdi
+    jmp .bc_no_set_base
+
+.bc_check_builtin_sub:
+    ; Check if base has a tp_call that should be inherited
+    ; (for bytearray, memoryview, bytes subclasses)
+    mov rax, [rbp-48]              ; base class
+    test rax, rax
+    jz .bc_no_set_base
+    mov rdi, [rax + PyTypeObject.tp_call]
+    test rdi, rdi
+    jz .bc_no_set_base
+    ; Don't inherit object_type_call or type_call
+    extern object_type_call
+    lea rcx, [rel object_type_call]
+    cmp rdi, rcx
+    je .bc_no_set_base
+    lea rcx, [rel type_call]
+    cmp rdi, rcx
+    je .bc_no_set_base
+    ; Inherit tp_call from base (for bytearray, etc.)
+    mov [r12 + PyTypeObject.tp_call], rdi
+    ; Use builtin_sub_dealloc instead of instance_dealloc
+    ; (builtin subclasses don't have inst_dict at +16)
+    extern builtin_sub_dealloc
+    lea rax, [rel builtin_sub_dealloc]
+    mov [r12 + PyTypeObject.tp_dealloc], rax
+
 .bc_no_set_base:
 
     ; Call parent's __init_subclass__ if present
@@ -965,6 +1117,43 @@ DEF_FUNC_LOCAL add_builtin
     ret
 END_FUNC add_builtin
 
+;; Helper: add_builtin_type(dict, name_cstr, type_obj, tp_call_fn)
+;; Registers a type object directly in builtins (for isinstance to work).
+;; Sets type_obj.tp_call = tp_call_fn so the type is callable.
+;; rdi=dict, rsi=name_cstr, rdx=type_obj, rcx=tp_call_fn
+DEF_FUNC_LOCAL add_builtin_type
+    push rbx
+    push r12
+
+    mov rbx, rdi               ; dict
+    mov r12, rdx               ; type_obj
+
+    ; Set tp_call on the type object
+    mov [r12 + PyTypeObject.tp_call], rcx
+
+    ; Create key string
+    push r12
+    mov rdi, rsi
+    call str_from_cstr
+    mov rcx, rax               ; key str
+
+    ; dict_set(dict, key, type_obj)
+    mov rdi, rbx
+    mov rsi, rcx
+    pop rdx                    ; type_obj
+    push rcx                   ; save key for DECREF
+    call dict_set
+
+    ; DECREF key
+    pop rdi
+    call obj_decref
+
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC add_builtin_type
+
 ;; ============================================================================
 ;; builtins_init() -> PyDictObject*
 ;; Create and populate the builtins dictionary
@@ -1012,8 +1201,8 @@ DEF_FUNC builtins_init
 
     mov rdi, rbx
     lea rsi, [rel bi_name_type]
-    lea rdx, [rel builtin_type]
-    call add_builtin
+    lea rdx, [rel type_type]
+    call add_exc_type_builtin
 
     mov rdi, rbx
     lea rsi, [rel bi_name_isinstance]
@@ -1032,13 +1221,23 @@ DEF_FUNC builtins_init
 
     mov rdi, rbx
     lea rsi, [rel bi_name_float]
-    lea rdx, [rel builtin_float]
-    call add_builtin
+    lea rdx, [rel float_type]
+    lea rcx, [rel float_type_call]
+    call add_builtin_type
 
     mov rdi, rbx
     lea rsi, [rel bi_name_bool]
-    lea rdx, [rel builtin_bool]
-    call add_builtin
+    lea rdx, [rel bool_type]
+    lea rcx, [rel bool_type_call]
+    call add_builtin_type
+
+    extern object_type
+    extern object_type_call
+    mov rdi, rbx
+    lea rsi, [rel bi_name_object]
+    lea rdx, [rel object_type]
+    lea rcx, [rel object_type_call]
+    call add_builtin_type
 
     ; Register new builtins (from builtins_extra.asm)
     mov rdi, rbx
@@ -1047,14 +1246,23 @@ DEF_FUNC builtins_init
     call add_builtin
 
     mov rdi, rbx
-    lea rsi, [rel bi_name_int]
-    lea rdx, [rel builtin_int_fn]
+    lea rsi, [rel bi_name_divmod]
+    lea rdx, [rel builtin_divmod]
     call add_builtin
+
+    ; Register int as the int_type object (not a function wrapper)
+    ; so isinstance(42, int) works correctly
+    mov rdi, rbx
+    lea rsi, [rel bi_name_int]
+    lea rdx, [rel int_type]
+    lea rcx, [rel int_type_call]
+    call add_builtin_type
 
     mov rdi, rbx
     lea rsi, [rel bi_name_str]
-    lea rdx, [rel builtin_str_fn]
-    call add_builtin
+    lea rdx, [rel str_type]
+    lea rcx, [rel str_type_call]
+    call add_builtin_type
 
     mov rdi, rbx
     lea rsi, [rel bi_name_ord]
@@ -1175,6 +1383,11 @@ DEF_FUNC builtins_init
     mov rdi, rbx
     lea rsi, [rel bi_name_locals]
     lea rdx, [rel builtin_locals]
+    call add_builtin
+
+    mov rdi, rbx
+    lea rsi, [rel bi_name_dir]
+    lea rdx, [rel builtin_dir]
     call add_builtin
 
     ; Register super type as builtin (LOAD_SUPER_ATTR needs it loadable)
@@ -1315,6 +1528,68 @@ DEF_FUNC builtins_init
     lea rdx, [rel exc_UnicodeError_type]
     call add_exc_type_builtin
 
+    mov rdi, rbx
+    lea rsi, [rel bi_name_Warning]
+    lea rdx, [rel exc_Warning_type]
+    call add_exc_type_builtin
+
+    mov rdi, rbx
+    lea rsi, [rel bi_name_DeprecationWarning]
+    lea rdx, [rel exc_DeprecationWarning_type]
+    call add_exc_type_builtin
+
+    mov rdi, rbx
+    lea rsi, [rel bi_name_UserWarning]
+    lea rdx, [rel exc_UserWarning_type]
+    call add_exc_type_builtin
+
+    ; Register data types as builtins
+    mov rdi, rbx
+    lea rsi, [rel bi_name_list]
+    lea rdx, [rel list_type]
+    call add_exc_type_builtin
+
+    mov rdi, rbx
+    lea rsi, [rel bi_name_dict]
+    lea rdx, [rel dict_type]
+    call add_exc_type_builtin
+
+    mov rdi, rbx
+    lea rsi, [rel bi_name_tuple]
+    lea rdx, [rel tuple_type]
+    call add_exc_type_builtin
+
+    mov rdi, rbx
+    lea rsi, [rel bi_name_set]
+    lea rdx, [rel set_type]
+    call add_exc_type_builtin
+
+    mov rdi, rbx
+    lea rsi, [rel bi_name_bytes]
+    lea rdx, [rel bytes_type]
+    extern bytes_type_call
+    lea rcx, [rel bytes_type_call]
+    call add_builtin_type
+
+    mov rdi, rbx
+    lea rsi, [rel bi_name_bytearray]
+    lea rdx, [rel bytearray_type]
+    lea rcx, [rel bytearray_type_call]
+    call add_builtin_type
+
+    mov rdi, rbx
+    lea rsi, [rel bi_name_memoryview]
+    lea rdx, [rel memoryview_type]
+    lea rcx, [rel memoryview_type_call]
+    call add_builtin_type
+
+    ; eval
+    mov rdi, rbx
+    lea rsi, [rel bi_name_eval]
+    extern builtin_eval_fn
+    lea rdx, [rel builtin_eval_fn]
+    call add_builtin
+
     ; Return builtins dict
     mov rax, rbx
 
@@ -1372,6 +1647,7 @@ bi_name_issubclass:   db "issubclass", 0
 bi_name_repr:         db "repr", 0
 bi_name_float:        db "float", 0
 bi_name_bool:         db "bool", 0
+bi_name_object:       db "object", 0
 bi_name_build_class:  db "__build_class__", 0
 
 ; New builtin names
@@ -1402,8 +1678,11 @@ bi_name_map:          db "map", 0
 bi_name_filter:       db "filter", 0
 bi_name_reversed:     db "reversed", 0
 bi_name_sorted:       db "sorted", 0
+bi_name_divmod:       db "divmod", 0
 bi_name_globals:      db "globals", 0
 bi_name_locals:       db "locals", 0
+bi_name_dir:          db "dir", 0
+bi_name_eval:         db "eval", 0
 bi_name_super:        db "super", 0
 bi_name_staticmethod: db "staticmethod", 0
 bi_name_classmethod:  db "classmethod", 0
@@ -1433,6 +1712,16 @@ bi_name_MemoryError:       db "MemoryError", 0
 bi_name_KeyboardInterrupt: db "KeyboardInterrupt", 0
 bi_name_SystemExit:        db "SystemExit", 0
 bi_name_UnicodeError:      db "UnicodeError", 0
+bi_name_Warning:           db "Warning", 0
+bi_name_DeprecationWarning: db "DeprecationWarning", 0
+bi_name_UserWarning:       db "UserWarning", 0
+bi_name_list:              db "list", 0
+bi_name_dict:              db "dict", 0
+bi_name_tuple:             db "tuple", 0
+bi_name_set:               db "set", 0
+bi_name_bytes:             db "bytes", 0
+bi_name_bytearray:         db "bytearray", 0
+bi_name_memoryview:        db "memoryview", 0
 
 section .data
 

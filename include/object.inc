@@ -53,6 +53,23 @@ struc PyBytesObject
     .data:                 ; +24: raw bytes (variable)
 endstruc
 
+; ByteArray object — same layout as bytes (variable-size inline data)
+struc PyByteArrayObject
+    .ob_refcnt: resq 1    ; +0
+    .ob_type:   resq 1    ; +8
+    .ob_size:   resq 1    ; +16: length in bytes
+    .data:                 ; +24: raw bytes (variable)
+endstruc
+
+; MemoryView object — reference to a slice of a bytes-like object
+struc PyMemoryViewObject
+    .ob_refcnt: resq 1    ; +0
+    .ob_type:   resq 1    ; +8
+    .mv_source: resq 1    ; +16: ptr to source bytes-like object (strong ref)
+    .mv_buf:    resq 1    ; +24: ptr to start of buffer data
+    .mv_len:    resq 1    ; +32: length of view in bytes
+endstruc
+
 ; List object
 struc PyListObject
     .ob_refcnt: resq 1    ; +0
@@ -100,6 +117,7 @@ struc PyFuncObject
     .func_defaults: resq 1  ; +40: ptr to defaults tuple or NULL
     .func_closure:  resq 1  ; +48: ptr to closure tuple or NULL
     .func_kwdefaults: resq 1 ; +56: ptr to kwdefaults dict or NULL
+    .func_dict:     resq 1  ; +64: ptr to __dict__ or NULL (arbitrary attrs)
 endstruc
 
 ; Code object
@@ -140,6 +158,14 @@ struc PyInstanceObject
     .inst_dict:   resq 1  ; +16: ptr to instance __dict__
 endstruc
 
+; Int subclass instance (class MyInt(int): ...)
+struc PyIntSubclassObject
+    .ob_refcnt:   resq 1  ; +0
+    .ob_type:     resq 1  ; +8  (type is the subclass)
+    .inst_dict:   resq 1  ; +16: ptr to instance __dict__
+    .int_value:   resq 1  ; +24: SmallInt tagged value or GMP pointer
+endstruc
+
 ; Iterator objects
 struc PyListIterObject
     .ob_refcnt: resq 1    ; +0
@@ -153,6 +179,13 @@ struc PyTupleIterObject
     .ob_type:   resq 1
     .it_seq:    resq 1
     .it_index:  resq 1
+endstruc
+
+struc PyStrIterObject
+    .ob_refcnt: resq 1    ; +0
+    .ob_type:   resq 1    ; +8
+    .it_seq:    resq 1    ; +16: ptr to str
+    .it_index:  resq 1    ; +24: current byte index
 endstruc
 
 struc PyDictIterObject

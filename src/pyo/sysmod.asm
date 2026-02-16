@@ -17,6 +17,7 @@ extern str_from_cstr
 extern str_new
 extern str_type
 extern int_from_i64
+extern int_to_i64
 extern none_singleton
 extern bool_true
 extern bool_false
@@ -49,6 +50,9 @@ DEF_FUNC sys_module_init, 32
     mov [rbp - 8], rdi          ; argc
     mov [rbp - 16], rsi         ; argv
 
+    ; Initialize int_max_str_digits to 4300 (CPython default)
+    mov qword [rel sys_int_max_str_digits], 4300
+
     ; Create sys.modules dict
     call dict_new
     mov [rel sys_modules_dict], rax
@@ -59,8 +63,7 @@ DEF_FUNC sys_module_init, 32
     mov r15, rax                ; r15 = sys dict
 
     ; --- sys.modules ---
-    mov rdi, r15
-    lea rsi, [rel sm_modules]
+    lea rdi, [rel sm_modules]
     call str_from_cstr
     push rax
     mov rdi, r15
@@ -385,6 +388,40 @@ DEF_FUNC sys_module_init, 32
     pop rdi
     call obj_decref
 
+    ; --- sys.get_int_max_str_digits function ---
+    lea rdi, [rel sys_get_int_max_str_digits_func]
+    lea rsi, [rel sm_get_int_max_str_digits]
+    call builtin_func_new
+    push rax
+    lea rdi, [rel sm_get_int_max_str_digits]
+    call str_from_cstr
+    push rax
+    mov rdi, r15
+    mov rsi, rax
+    mov rdx, [rsp + 8]
+    call dict_set
+    pop rdi
+    call obj_decref
+    pop rdi
+    call obj_decref
+
+    ; --- sys.set_int_max_str_digits function ---
+    lea rdi, [rel sys_set_int_max_str_digits_func]
+    lea rsi, [rel sm_set_int_max_str_digits]
+    call builtin_func_new
+    push rax
+    lea rdi, [rel sm_set_int_max_str_digits]
+    call str_from_cstr
+    push rax
+    mov rdi, r15
+    mov rsi, rax
+    mov rdx, [rsp + 8]
+    call dict_set
+    pop rdi
+    call obj_decref
+    pop rdi
+    call obj_decref
+
     ; --- Create the sys module object ---
     lea rdi, [rel sm_sys]
     call str_from_cstr
@@ -454,6 +491,59 @@ DEF_FUNC sys_getdefaultencoding_func
     leave
     ret
 END_FUNC sys_getdefaultencoding_func
+
+; ============================================================================
+; sys_get_int_max_str_digits_func(PyObject **args, int64_t nargs) -> PyObject*
+; Returns the current int max str digits limit
+; ============================================================================
+DEF_FUNC sys_get_int_max_str_digits_func
+    cmp rsi, 0
+    jne .get_imsd_error
+    mov rdi, [rel sys_int_max_str_digits]
+    call int_from_i64
+    leave
+    ret
+.get_imsd_error:
+    extern exc_TypeError_type
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "get_int_max_str_digits() takes no arguments"
+    call raise_exception
+END_FUNC sys_get_int_max_str_digits_func
+
+; ============================================================================
+; sys_set_int_max_str_digits_func(PyObject **args, int64_t nargs) -> PyObject*
+; Sets the int max str digits limit. 0 = unlimited, otherwise >= 640
+; ============================================================================
+DEF_FUNC sys_set_int_max_str_digits_func
+    cmp rsi, 1
+    jne .set_imsd_error
+
+    mov rdi, [rdi]
+    call int_to_i64
+    ; rax = new limit
+    test rax, rax
+    jz .set_imsd_ok         ; 0 = unlimited
+    cmp rax, 640
+    jl .set_imsd_value_error
+
+.set_imsd_ok:
+    mov [rel sys_int_max_str_digits], rax
+    lea rax, [rel none_singleton]
+    inc qword [rax + PyObject.ob_refcnt]
+    leave
+    ret
+
+.set_imsd_value_error:
+    extern exc_ValueError_type
+    lea rdi, [rel exc_ValueError_type]
+    CSTRING rsi, "set_int_max_str_digits: value must be 0 or >= 640"
+    call raise_exception
+
+.set_imsd_error:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "set_int_max_str_digits() takes exactly 1 argument"
+    call raise_exception
+END_FUNC sys_set_int_max_str_digits_func
 
 ; ============================================================================
 ; sys_path_add_script_dir(const char *pyc_path)
@@ -554,6 +644,8 @@ sm_exit:         db "exit", 0
 sm_byteorder:    db "byteorder", 0
 sm_little:       db "little", 0
 sm_getdefaultencoding: db "getdefaultencoding", 0
+sm_get_int_max_str_digits: db "get_int_max_str_digits", 0
+sm_set_int_max_str_digits: db "set_int_max_str_digits", 0
 sm_utf8:         db "utf-8", 0
 sm_empty:        db "", 0
 sm_slash:        db "/", 0
@@ -571,3 +663,6 @@ sys_module_obj: resq 1
 
 global sys_stdout_obj
 sys_stdout_obj: resq 1
+
+global sys_int_max_str_digits
+sys_int_max_str_digits: resq 1

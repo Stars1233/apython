@@ -39,6 +39,7 @@ struc PyExceptionObject
     .exc_tb:      resq 1  ; +32: ptr to traceback or NULL
     .exc_context: resq 1  ; +40: ptr to __context__ or NULL
     .exc_cause:   resq 1  ; +48: ptr to __cause__ or NULL
+    .exc_args:    resq 1  ; +56: ptr to args tuple or NULL
 endstruc
 
 ; Fatal error codes (non-Python, internal)

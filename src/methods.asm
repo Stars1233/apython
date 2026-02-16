@@ -46,6 +46,7 @@ extern exc_TypeError_type
 extern exc_ValueError_type
 extern exc_IndexError_type
 extern exc_KeyError_type
+extern int_type
 
 ;; ============================================================================
 ;; HELPER: add_method_to_dict(dict, name_cstr, func_ptr)
@@ -1573,6 +1574,35 @@ DEF_FUNC str_method_removesuffix
     ret
 END_FUNC str_method_removesuffix
 
+;; ============================================================================
+;; str_method_encode(args, nargs) -> bytes
+;; args[0]=self, args[1]=encoding (optional, default 'utf-8')
+;; For now, supports 'utf-8' and 'ascii' — both just copy raw bytes.
+;; ============================================================================
+DEF_FUNC str_method_encode
+    push rbx
+    push r12
+    ; args[0] = self (str)
+    mov rbx, [rdi]             ; rbx = self str obj
+    mov r12, [rbx + PyStrObject.ob_size]  ; r12 = length
+    ; Allocate bytes object
+    mov rdi, r12
+    extern bytes_new
+    call bytes_new
+    ; Copy string data into bytes object
+    lea rdi, [rax + PyBytesObject.data]
+    lea rsi, [rbx + PyStrObject.data]
+    mov rdx, r12
+    push rax                   ; save bytes obj
+    extern ap_memcpy
+    call ap_memcpy
+    pop rax                    ; return bytes obj
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC str_method_encode
+
 
 ;; ############################################################################
 ;;                         LIST METHODS
@@ -1784,15 +1814,16 @@ END_FUNC list_method_reverse
 
 ;; ============================================================================
 ;; list_method_sort(args, nargs) -> None
-;; Simple bubble sort (ints only via int_to_i64 comparison)
+;; Bubble sort using generic tp_richcompare (PY_GT) for comparison
 ;; args[0]=self
 ;; ============================================================================
-DEF_FUNC list_method_sort
+LS_I     equ 8
+LS_SWAP  equ 16
+LS_FRAME equ 16
+DEF_FUNC list_method_sort, LS_FRAME
     push rbx
     push r12
     push r13
-    push r14
-    push r15
 
     mov rbx, [rdi]          ; self
     mov r12, [rbx + PyListObject.ob_size]
@@ -1802,51 +1833,66 @@ DEF_FUNC list_method_sort
     jl .sort_done
 
 .sort_outer:
-    xor r13d, r13d          ; swapped = false
-    mov r14, 1              ; i = 1
+    mov qword [rbp - LS_SWAP], 0    ; swapped = false
+    mov r13, 1                       ; i = 1
 .sort_inner:
-    cmp r14, r12
+    cmp r13, r12
     jge .sort_check
-    ; Compare items[i-1] and items[i]
+    ; Compare items[i-1] and items[i] using tp_richcompare(left, right, PY_GT)
     mov rax, [rbx + PyListObject.ob_item]
-    mov rdi, [rax + r14*8 - 8]   ; items[i-1]
-    push r14
-    push r13
-    call int_to_i64
-    mov r15, rax                  ; val_a
+    mov rdi, [rax + r13*8 - 8]      ; left = items[i-1]
+    mov rsi, [rax + r13*8]           ; right = items[i]
+    mov [rbp - LS_I], r13            ; save i
 
-    mov rax, [rbx + PyListObject.ob_item]
-    mov r14, [rsp + 8]           ; reload i
-    mov rdi, [rax + r14*8]       ; items[i]
-    call int_to_i64
-    ; rax = val_b, r15 = val_a
-    pop r13
-    pop r14
+    ; Get left's type for tp_richcompare
+    test rdi, rdi
+    js .sort_smallint_type
+    mov rax, [rdi + PyObject.ob_type]
+    jmp .sort_have_type
+.sort_smallint_type:
+    lea rax, [rel int_type]
+.sort_have_type:
+    mov rax, [rax + PyTypeObject.tp_richcompare]
+    test rax, rax
+    jz .sort_no_swap                 ; no richcompare → don't swap
 
-    cmp r15, rax
-    jle .sort_no_swap
+    ; Call tp_richcompare(left, right, PY_GT)
+    mov edx, PY_GT
+    call rax
+    ; rax = bool result (bool_true or bool_false)
+    mov r13, [rbp - LS_I]           ; restore i
+
+    ; Check if result is bool_true (meaning left > right → swap)
+    lea rcx, [rel bool_true]
+    cmp rax, rcx
+    sete cl                          ; cl = 1 if swap needed
+    ; DECREF the bool result
+    push rcx
+    mov rdi, rax
+    call obj_decref
+    pop rcx
+    test cl, cl
+    jz .sort_no_swap
 
     ; Swap items[i-1] and items[i]
     mov rax, [rbx + PyListObject.ob_item]
-    mov r8, [rax + r14*8 - 8]
-    mov r9, [rax + r14*8]
-    mov [rax + r14*8 - 8], r9
-    mov [rax + r14*8], r8
-    mov r13d, 1             ; swapped = true
+    mov r8, [rax + r13*8 - 8]
+    mov r9, [rax + r13*8]
+    mov [rax + r13*8 - 8], r9
+    mov [rax + r13*8], r8
+    mov qword [rbp - LS_SWAP], 1    ; swapped = true
 
 .sort_no_swap:
-    inc r14
+    inc r13
     jmp .sort_inner
 
 .sort_check:
-    test r13d, r13d
+    cmp qword [rbp - LS_SWAP], 0
     jnz .sort_outer
 
 .sort_done:
     lea rax, [rel none_singleton]
     inc qword [rax + PyObject.ob_refcnt]
-    pop r15
-    pop r14
     pop r13
     pop r12
     pop rbx
@@ -3020,6 +3066,11 @@ DEF_FUNC methods_init
     lea rdx, [rel str_method_removesuffix]
     call add_method_to_dict
 
+    mov rdi, rbx
+    lea rsi, [rel mn_encode]
+    lea rdx, [rel str_method_encode]
+    call add_method_to_dict
+
     ; Store dict in str_type.tp_dict
     lea rax, [rel str_type]
     mov [rax + PyTypeObject.tp_dict], rbx
@@ -3210,6 +3261,7 @@ mn_isdigit:     db "isdigit", 0
 mn_isalpha:     db "isalpha", 0
 mn_removeprefix: db "removeprefix", 0
 mn_removesuffix: db "removesuffix", 0
+mn_encode:      db "encode", 0
 mn_setdefault:  db "setdefault", 0
 mn_popitem:     db "popitem", 0
 mn_remove:      db "remove", 0

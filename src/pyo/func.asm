@@ -70,6 +70,9 @@ DEF_FUNC func_new
     ; func_kwdefaults = NULL
     mov qword [r13 + PyFuncObject.func_kwdefaults], 0
 
+    ; func_dict = NULL
+    mov qword [r13 + PyFuncObject.func_dict], 0
+
     mov rax, r13            ; return func object
     pop r14
     pop r13
@@ -213,31 +216,43 @@ DEF_FUNC func_call
     test ecx, CO_VARARGS
     jz .varargs_done
 
+    ; *args slot = co_argcount + co_kwonlyargcount
+    ; (localsplus layout: [positional] [kw-only] [*args] [**kwargs])
+    mov ecx, [rdi + PyCodeObject.co_kwonlyargcount]
+    add eax, ecx             ; eax = slot index for *args
+
     ; excess = positional_count - co_argcount
-    mov ecx, [rsp+8]       ; positional_count
-    sub ecx, eax
+    mov rdi, [rbx + PyFuncObject.func_code]
+    mov ecx, [rsp+8]         ; positional_count
+    sub ecx, [rdi + PyCodeObject.co_argcount]
     jle .empty_varargs
 
     push rax
     movsx rdi, ecx
     push rdi
     call tuple_new
-    pop rcx
-    pop rdx
+    pop rcx                   ; rcx = excess count
+    pop rdx                   ; rdx = *args slot index
 
+    ; Fill tuple: copy excess positional args
+    mov rdi, [rbx + PyFuncObject.func_code]
+    mov r8d, [rdi + PyCodeObject.co_argcount] ; source start index
     xor esi, esi
 .fill_varargs:
     cmp esi, ecx
     jge .store_varargs
-    lea edi, [edx + esi]
-    mov r8, [r14 + rdi*8]
-    mov [rax + PyTupleObject.ob_item + rsi*8], r8
+    lea edi, [r8d + esi]
+    movsxd rdi, edi
+    mov r9, [r14 + rdi*8]
+    mov [rax + PyTupleObject.ob_item + rsi*8], r9
     push rax
     push rcx
     push rdx
     push rsi
-    mov rdi, r8
+    push r8
+    mov rdi, r9
     call obj_incref
+    pop r8
     pop rsi
     pop rdx
     pop rcx
@@ -248,17 +263,17 @@ DEF_FUNC func_call
 .store_varargs:
     shl rdx, 4                 ; localsplus 16 bytes/slot
     mov [r12 + PyFrame.localsplus + rdx], rax
-    mov qword [r12 + PyFrame.localsplus + rdx + 8], TAG_PTR  ; tuple is heap ptr
+    mov qword [r12 + PyFrame.localsplus + rdx + 8], TAG_PTR
     jmp .varargs_done
 
 .empty_varargs:
-    push rax
+    push rax                    ; save slot index
     xor edi, edi
     call tuple_new
-    pop rdx
+    pop rdx                     ; rdx = slot index
     shl rdx, 4                 ; localsplus 16 bytes/slot
     mov [r12 + PyFrame.localsplus + rdx], rax
-    mov qword [r12 + PyFrame.localsplus + rdx + 8], TAG_PTR  ; tuple is heap ptr
+    mov qword [r12 + PyFrame.localsplus + rdx + 8], TAG_PTR
 
 .varargs_done:
     ; === Phase 4: Match keyword args ===
@@ -628,6 +643,13 @@ DEF_FUNC func_dealloc
     call obj_decref
 .no_kwdefaults:
 
+    ; XDECREF func_dict (may be NULL)
+    mov rdi, [rbx + PyFuncObject.func_dict]
+    test rdi, rdi
+    jz .no_func_dict
+    call obj_decref
+.no_func_dict:
+
     ; Free the function object itself
     mov rdi, rbx
     call ap_free
@@ -637,6 +659,118 @@ DEF_FUNC func_dealloc
     leave
     ret
 END_FUNC func_dealloc
+
+; ---------------------------------------------------------------------------
+; func_setattr(PyFuncObject *self, PyObject *name, PyObject *value)
+; Set an arbitrary attribute on a function object.
+; Lazily creates func_dict on first use.
+; rdi = function, rsi = name, rdx = value
+; ---------------------------------------------------------------------------
+DEF_FUNC func_setattr
+    push rbx
+    push r12
+    push r13
+
+    mov rbx, rdi            ; rbx = func
+    mov r12, rsi            ; r12 = name
+    mov r13, rdx            ; r13 = value
+
+    ; Check if func_dict exists
+    mov rdi, [rbx + PyFuncObject.func_dict]
+    test rdi, rdi
+    jnz .have_dict
+
+    ; Create func_dict lazily
+    call dict_new
+    mov [rbx + PyFuncObject.func_dict], rax
+    mov rdi, rax
+
+.have_dict:
+    ; dict_set(func_dict, name, value)
+    mov rsi, r12
+    mov rdx, r13
+    call dict_set
+
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC func_setattr
+
+; ---------------------------------------------------------------------------
+; func_getattr(PyFuncObject *self, PyObject *name) -> PyObject* or NULL
+; Get an attribute from a function. Checks func_dict for arbitrary attrs.
+; rdi = function, rsi = name
+; ---------------------------------------------------------------------------
+extern ap_strcmp
+DEF_FUNC func_getattr
+    push rbx
+    push r12
+
+    mov rbx, rdi            ; rbx = func
+    mov r12, rsi            ; r12 = name
+
+    ; Check for __name__
+    lea rdi, [rel fn_attr_name]
+    lea rsi, [r12 + PyStrObject.data]
+    call ap_strcmp
+    test eax, eax
+    jz .return_name
+
+    ; Check for __dict__
+    lea rdi, [rel fn_attr_dict]
+    lea rsi, [r12 + PyStrObject.data]
+    call ap_strcmp
+    test eax, eax
+    jz .return_dict
+
+    ; Check func_dict for arbitrary attrs
+    mov rdi, [rbx + PyFuncObject.func_dict]
+    test rdi, rdi
+    jz .not_found
+
+    mov rsi, r12
+    call dict_get
+    test rax, rax
+    jz .not_found
+
+    ; Found in dict - INCREF and return
+    INCREF rax
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.return_name:
+    mov rax, [rbx + PyFuncObject.func_name]
+    INCREF rax
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.return_dict:
+    mov rax, [rbx + PyFuncObject.func_dict]
+    test rax, rax
+    jnz .return_dict_obj
+    ; Create empty dict if none exists
+    call dict_new
+    mov [rbx + PyFuncObject.func_dict], rax
+.return_dict_obj:
+    INCREF rax
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.not_found:
+    xor eax, eax
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC func_getattr
 
 ; ---------------------------------------------------------------------------
 ; func_repr(PyFuncObject *self) -> PyStrObject*
@@ -655,6 +789,8 @@ section .data
 
 func_name_str:  db "function", 0
 func_repr_str:  db "<function>", 0
+fn_attr_name:   db "__name__", 0
+fn_attr_dict:   db "__dict__", 0
 
 ; func_type - Type object for function objects
 align 8
@@ -669,8 +805,8 @@ func_type:
     dq func_repr            ; tp_str
     dq 0                    ; tp_hash
     dq func_call            ; tp_call
-    dq 0                    ; tp_getattr
-    dq 0                    ; tp_setattr
+    dq func_getattr         ; tp_getattr
+    dq func_setattr         ; tp_setattr
     dq 0                    ; tp_richcompare
     dq 0                    ; tp_iter
     dq 0                    ; tp_iternext

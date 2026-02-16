@@ -20,6 +20,8 @@ extern fatal_error
 extern obj_decref
 extern str_from_cstr
 extern none_singleton
+extern module_new
+extern sys_modules_dict
 
 ; main(int argc, char **argv) -> int
 DEF_FUNC main
@@ -106,6 +108,24 @@ DEF_FUNC main
 
     pop rax                     ; rax = globals dict
     mov r14, rax                ; r14 = globals dict
+
+    ; Create __main__ module and register in sys.modules
+    lea rdi, [rel __main__cstr]
+    call str_from_cstr
+    push rax                    ; save "__main__" name str
+    mov rdi, rax
+    mov rsi, r14                ; dict = globals
+    call module_new
+    push rax                    ; save module object
+    ; Register in sys.modules
+    mov rdi, [rel sys_modules_dict]
+    mov rsi, [rsp + 8]         ; key = "__main__" str
+    mov rdx, rax               ; value = module object
+    call dict_set
+    pop rdi                     ; module object (owned by sys.modules now)
+    call obj_decref
+    pop rdi                     ; "__main__" str
+    call obj_decref
 
     ; Create execution frame
     ; frame_new(code, globals, builtins, locals)

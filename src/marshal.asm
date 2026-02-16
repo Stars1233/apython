@@ -18,6 +18,8 @@ extern bytes_from_data
 extern ap_malloc
 extern ap_free
 extern ap_realloc
+extern __gmpz_init
+extern int_type
 extern fatal_error
 extern ap_memcpy
 extern code_type
@@ -319,7 +321,6 @@ mdo_int64:
 ; TYPE_LONG handler: read marshal multi-precision integer
 ; Format: ndigits (signed int32), then |ndigits| 16-bit "digits"
 ; Each digit is a base-2^15 digit. Sign from ndigits sign.
-; For simplicity, we only handle values that fit in int64.
 ;--------------------------------------------------------------------------
 mdo_long:
     push r13
@@ -337,7 +338,11 @@ mdo_long:
     neg r14                    ; r14 = |ndigits|
 .long_pos:
 
-    ; Reconstruct value from base-2^15 digits (little-endian)
+    ; If |ndigits| > 4, use GMP path (>60 bits, may overflow int64)
+    cmp r14, 4
+    ja .long_gmp_path
+
+    ; Small value: reconstruct into int64
     xor r15d, r15d             ; r15 = accumulated value
     mov qword [rsp + 0], 0    ; digit index = 0
     mov qword [rsp + 8], 0    ; shift amount = 0
@@ -377,6 +382,97 @@ mdo_long:
     mov rdi, r15
     call int_from_i64
 
+    add rsp, 16
+    pop r15
+    pop r14
+    pop r13
+    jmp mfinish
+
+; GMP path for large TYPE_LONG values (|ndigits| > 4)
+.long_gmp_path:
+    ; Allocate PyIntObject
+    mov edi, PyIntObject_size
+    call ap_malloc
+    mov r15, rax               ; r15 = PyIntObject*
+    mov qword [r15 + PyObject.ob_refcnt], 1
+    lea rax, [rel int_type]
+    mov [r15 + PyObject.ob_type], rax
+    lea rdi, [r15 + PyIntObject.mpz]
+    call __gmpz_init wrt ..plt
+
+    ; Read digits and accumulate with GMP
+    mov qword [rsp + 0], 0    ; digit index = 0
+    mov qword [rsp + 8], 0    ; shift amount = 0
+
+.long_gmp_digit_loop:
+    mov rax, [rsp + 0]
+    cmp rax, r14
+    jge .long_gmp_digits_done
+
+    ; Read one 16-bit digit
+    call marshal_read_byte
+    movzx r8d, al
+    call marshal_read_byte
+    movzx eax, al
+    shl eax, 8
+    or r8d, eax               ; r8d = 16-bit digit
+
+    ; Add digit << shift to the GMP accumulator:
+    ; gmpz_import to set a temp, then shift and add
+    ; Simpler: use gmpz_set_ui + gmpz_mul_2exp + gmpz_add
+    ; But we don't have a temp GMP var. Use gmpz_add_ui if shift=0,
+    ; or build via: result = result + (digit << shift)
+
+    ; Alternative approach: use __gmpz_import with the digit
+    ; Simplest: manually construct using GMP primitives
+    ; gmpz_mul_2exp(result, result, 15) then gmpz_add_ui(result, result, digit)
+    ; But digits are little-endian (digit 0 is LSB), so we need reverse order
+
+    ; Actually, digits are in order: digit[0] is least significant.
+    ; Accumulate: result += digit << (index * 15)
+    ; Using GMP: create temp, set to digit, shift left, add to result.
+
+    ; We'll use a stack-allocated mpz_t for temp
+    sub rsp, 16               ; space for temp mpz (16 bytes inline)
+    mov rdi, rsp
+    call __gmpz_init wrt ..plt
+    mov rdi, rsp
+    movzx esi, r8w            ; digit value (unsigned)
+    extern __gmpz_set_ui
+    extern __gmpz_mul_2exp
+    extern __gmpz_add
+    extern __gmpz_clear
+    extern __gmpz_neg
+    call __gmpz_set_ui wrt ..plt
+    ; Shift: gmpz_mul_2exp(temp, temp, shift_amount)
+    mov rdi, rsp
+    mov rsi, rsp
+    mov rdx, [rsp + 16 + 8]   ; shift amount (from outer stack frame)
+    call __gmpz_mul_2exp wrt ..plt
+    ; Add: gmpz_add(result, result, temp)
+    lea rdi, [r15 + PyIntObject.mpz]
+    lea rsi, [r15 + PyIntObject.mpz]
+    mov rdx, rsp
+    call __gmpz_add wrt ..plt
+    ; Clear temp
+    mov rdi, rsp
+    call __gmpz_clear wrt ..plt
+    add rsp, 16
+
+    ; Advance
+    add qword [rsp + 8], 15
+    inc qword [rsp + 0]
+    jmp .long_gmp_digit_loop
+
+.long_gmp_digits_done:
+    ; Apply sign
+    test r13, r13
+    jns .long_gmp_not_neg
+    lea rdi, [r15 + PyIntObject.mpz]
+    lea rsi, [r15 + PyIntObject.mpz]
+    call __gmpz_neg wrt ..plt
+.long_gmp_not_neg:
+    mov rax, r15
     add rsp, 16
     pop r15
     pop r14
@@ -618,6 +714,13 @@ mdo_ref:
     jge mdo_ref_oob
     mov rcx, [rel marshal_refs]
     mov rax, [rcx + rdi * 8]
+    ; Back-references return a new reference (INCREF the shared object)
+    test rax, rax
+    jz .ref_null
+    js .ref_smallint               ; SmallInt: no refcount
+    inc qword [rax + PyObject.ob_refcnt]
+.ref_smallint:
+.ref_null:
     jmp mfinish
 
 mdo_ref_oob:

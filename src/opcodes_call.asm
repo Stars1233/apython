@@ -27,6 +27,10 @@ extern fatal_error
 extern raise_exception
 extern func_new
 extern exc_TypeError_type
+extern kw_names_pending
+extern ap_malloc
+extern ap_free
+extern tuple_new
 
 ; --- Named frame-layout constants ---
 
@@ -186,7 +190,13 @@ DEF_FUNC op_call, CL_FRAME
     ; But wait, we need to read nargs first...
     mov rcx, [rbp - CL_NARGS]
     mov rdx, rcx
-    inc rdx                    ; nargs + 1 (include self/callable)
+    inc rdx                    ; nargs + 1 (include callable as self for __call__)
+    ; For method calls, the value stack has an extra slot (the original callable
+    ; in the deeper position, and method_self in the shallower). Include both.
+    cmp qword [rbp - CL_IS_METHOD], 0
+    je .dunder_not_method
+    inc rdx                    ; nargs + 2 for method calls
+.dunder_not_method:
     ; Build contiguous 8-byte args buffer (value stack has 16-byte stride)
     mov [rbp - CL_TPCALL], rax          ; save tp_call
     mov [rbp - CL_TOTAL], rdx          ; save total nargs
@@ -268,6 +278,11 @@ DEF_FUNC op_call, CL_FRAME
 
 .cleanup:
     ; === Unified cleanup ===
+    ; Clear kw_names_pending: func_call clears it for Python functions,
+    ; but builtins and other callables don't. Ensure it's always clean
+    ; after a call so it can't contaminate the next func_call.
+    mov qword [rel kw_names_pending], 0
+
     ; Pop nargs args and DECREF each
     mov rcx, [rbp - CL_NARGS]
     test rcx, rcx
@@ -290,8 +305,17 @@ DEF_FUNC op_call, CL_FRAME
     sub r13, 16
     mov rdi, [r13]
     call obj_decref
-    ; Push return value onto value stack
+    ; Check for exception (NULL return with current_exception set)
     mov rax, [rbp - CL_RETVAL]
+    test rax, rax
+    jnz .push_result
+    extern current_exception
+    mov rcx, [rel current_exception]
+    test rcx, rcx
+    jnz .propagate_exc
+
+.push_result:
+    ; Push return value onto value stack
     VPUSH rax
 
     ; Skip 3 CACHE entries (6 bytes)
@@ -299,6 +323,12 @@ DEF_FUNC op_call, CL_FRAME
 
     leave
     DISPATCH
+
+.propagate_exc:
+    ; Exception pending from callee — propagate to caller's handler
+    extern eval_exception_unwind
+    leave
+    jmp eval_exception_unwind
 
 .not_callable:
     lea rdi, [rel exc_TypeError_type]
@@ -411,10 +441,18 @@ END_FUNC op_make_function
 extern tuple_type
 extern dict_type
 
+; Additional frame slots for kwargs merging
+CFX_TPCALL  equ 72
+CFX_NPOS    equ 80
+CFX_NKW     equ 88
+CFX_MERGED  equ 96       ; merged args buffer (heap ptr)
+CFX_KWNAMES equ 104      ; kw_names tuple
+CFX_FRAME2  equ 112      ; new frame size (manual push, so offset from rbp-16)
+
 DEF_FUNC op_call_function_ex
     push rbx                        ; save (clobbered by eval convention save)
     push r12
-    sub rsp, 48
+    sub rsp, CFX_FRAME2 - 16       ; allocate local frame
 
     mov [rbp - CFX_OPARG], ecx               ; save oparg
 
@@ -446,27 +484,160 @@ DEF_FUNC op_call_function_ex
     mov rax, [rax + PyTypeObject.tp_call]
     test rax, rax
     jz .cfex_not_callable
+    mov [rbp - CFX_TPCALL], rax
 
-    ; Call tp_call(func, args_ptr, nargs)
-    ; Determine args_ptr based on type (tuple vs list)
-    ; Tuple: inline items at obj+32, List: pointer to items at [obj+32]
+    ; Check if we have kwargs to merge
+    mov rdi, [rbp - CFX_KWARGS]
+    test rdi, rdi
+    jnz .cfex_merge_kwargs
+
+.cfex_empty_kwargs:
+    ; No kwargs (or empty kwargs dict) — simple path: call with positional args only
     mov rsi, [rbp - CFX_ARGS]                  ; args sequence
     mov rcx, [rsi + PyObject.ob_type]
     lea rdx, [rel tuple_type]
     cmp rcx, rdx
     je .cfex_tuple_args
-    ; List (or other): ob_item is a pointer
-    mov rsi, [rsi + PyListObject.ob_item]  ; dereference pointer
+    mov rsi, [rsi + PyListObject.ob_item]
     jmp .cfex_args_ready
 .cfex_tuple_args:
-    lea rsi, [rsi + PyTupleObject.ob_item]  ; inline items
+    lea rsi, [rsi + PyTupleObject.ob_item]
 .cfex_args_ready:
     mov rdx, [rbp - CFX_ARGS]
-    mov rdx, [rdx + PyVarObject.ob_size]   ; nargs (ob_size at +16 for both)
-    mov rdi, [rbp - CFX_FUNC]                  ; callable
+    mov rdx, [rdx + PyVarObject.ob_size]
+    mov rdi, [rbp - CFX_FUNC]
+    mov rax, [rbp - CFX_TPCALL]
     call rax
-    mov [rbp - CFX_RESULT], rax                  ; save result
+    mov [rbp - CFX_RESULT], rax
+    jmp .cfex_cleanup
 
+.cfex_merge_kwargs:
+    ; --- Merge positional args + keyword args ---
+    ; Get n_kw from kwargs dict — if empty, take simple path
+    mov rax, [rbp - CFX_KWARGS]
+    mov rcx, [rax + PyDictObject.ob_size]
+    test rcx, rcx
+    jz .cfex_empty_kwargs          ; empty dict → treat as no kwargs
+    mov [rbp - CFX_NKW], rcx
+
+    ; Get n_pos from args tuple
+    mov rax, [rbp - CFX_ARGS]
+    mov rcx, [rax + PyVarObject.ob_size]
+    mov [rbp - CFX_NPOS], rcx
+
+    ; Allocate merged args buffer: (n_pos + n_kw) * 8
+    mov rdi, [rbp - CFX_NPOS]
+    add rdi, [rbp - CFX_NKW]
+    shl rdi, 3                    ; * 8 bytes per pointer
+    test rdi, rdi
+    jnz .cfex_alloc_merged
+    mov rdi, 8                    ; minimum 8 bytes
+.cfex_alloc_merged:
+    call ap_malloc
+    mov [rbp - CFX_MERGED], rax
+
+    ; Copy positional args from tuple to merged buffer
+    mov rsi, [rbp - CFX_ARGS]
+    mov rcx, [rsi + PyObject.ob_type]
+    lea rdx, [rel tuple_type]
+    cmp rcx, rdx
+    je .cfex_merge_tuple_src
+    mov rsi, [rsi + PyListObject.ob_item]
+    jmp .cfex_merge_copy_pos
+.cfex_merge_tuple_src:
+    lea rsi, [rsi + PyTupleObject.ob_item]
+.cfex_merge_copy_pos:
+    mov rdi, [rbp - CFX_MERGED]
+    mov rcx, [rbp - CFX_NPOS]
+    test rcx, rcx
+    jz .cfex_pos_copied
+    ; Copy rcx qwords from rsi to rdi
+    xor edx, edx
+.cfex_copy_pos_loop:
+    mov rax, [rsi + rdx*8]
+    mov [rdi + rdx*8], rax
+    inc rdx
+    cmp rdx, rcx
+    jb .cfex_copy_pos_loop
+.cfex_pos_copied:
+
+    ; Create kw_names tuple
+    mov rdi, [rbp - CFX_NKW]
+    call tuple_new
+    mov [rbp - CFX_KWNAMES], rax
+
+    ; Iterate kwargs dict entries, copy values to merged buffer and keys to kw_names
+    mov r12, [rbp - CFX_KWARGS]
+    mov rbx, [r12 + PyDictObject.entries]
+    mov ecx, 0                   ; dict scan index
+    xor edx, edx                 ; kw output index (0..n_kw-1)
+
+.cfex_dict_scan:
+    cmp rcx, [r12 + PyDictObject.capacity]
+    jge .cfex_dict_done
+
+    ; Check if entry at index has key and value
+    imul rax, rcx, DictEntry_size
+    add rax, rbx
+    mov rsi, [rax + DictEntry.key]
+    test rsi, rsi
+    jz .cfex_dict_skip
+    mov rdi, [rax + DictEntry.value]
+    test rdi, rdi
+    jz .cfex_dict_skip
+
+    ; Store value in merged buffer at position [n_pos + kw_idx]
+    push rcx
+    push rdx
+    mov rcx, [rbp - CFX_NPOS]
+    add rcx, rdx                 ; merged index = n_pos + kw_idx
+    mov rax, [rbp - CFX_MERGED]
+    mov [rax + rcx*8], rdi       ; merged[n_pos + kw_idx] = value
+
+    ; Store key in kw_names tuple at kw_idx
+    mov rax, [rbp - CFX_KWNAMES]
+    mov [rax + PyTupleObject.ob_item + rdx*8], rsi
+    INCREF rsi                   ; tuple owns a ref
+    pop rdx
+    pop rcx
+    inc edx                      ; next kw slot
+
+.cfex_dict_skip:
+    inc ecx
+    jmp .cfex_dict_scan
+
+.cfex_dict_done:
+    ; Set kw_names_pending for the callee
+    mov rax, [rbp - CFX_KWNAMES]
+    mov [rel kw_names_pending], rax
+
+    ; Call tp_call(func, merged_args, n_pos + n_kw)
+    mov rdi, [rbp - CFX_FUNC]
+    mov rsi, [rbp - CFX_MERGED]
+    mov rdx, [rbp - CFX_NPOS]
+    add rdx, [rbp - CFX_NKW]
+    mov rax, [rbp - CFX_TPCALL]
+    call rax
+    mov [rbp - CFX_RESULT], rax
+
+    ; Clear kw_names_pending
+    mov qword [rel kw_names_pending], 0
+
+    ; Free merged buffer
+    mov rdi, [rbp - CFX_MERGED]
+    call ap_free
+
+    ; DECREF kw_names tuple
+    mov rdi, [rbp - CFX_KWNAMES]
+    call obj_decref
+
+    jmp .cfex_cleanup_shared
+
+.cfex_cleanup:
+    ; Clear kw_names_pending (safety)
+    mov qword [rel kw_names_pending], 0
+
+.cfex_cleanup_shared:
     ; DECREF args tuple
     mov rdi, [rbp - CFX_ARGS]
     call obj_decref
@@ -486,7 +657,7 @@ DEF_FUNC op_call_function_ex
     mov rax, [rbp - CFX_RESULT]
     VPUSH rax
 
-    add rsp, 48
+    add rsp, CFX_FRAME2 - 16
     pop r12
     pop rbx
     pop rbp
@@ -503,16 +674,16 @@ END_FUNC op_call_function_ex
 ;;
 ;; Python 3.12 BEFORE_WITH (opcode 53).
 ;;
-;; Stack: ... | mgr  ->  ... | __exit__ | result_of___enter__()
+;; Stack: ... | mgr  ->  ... | bound_exit | result_of___enter__()
 ;;
-;; 1. Look up __exit__ on mgr, push it
-;; 2. Look up __enter__ on mgr, call it
-;; 3. Push result of __enter__
-;; 4. DECREF mgr
+;; CPython pushes a single bound method for __exit__ (not self+func separately).
+;; Stack effect: +1 (pop mgr, push exit_method + enter_result).
+;; Exception table depth=1 preserves just the exit_method.
 ;; ============================================================================
 extern dict_get
 extern str_from_cstr
 extern exc_AttributeError_type
+extern method_new
 
 DEF_FUNC op_before_with
     push rbx
@@ -531,8 +702,7 @@ DEF_FUNC op_before_with
     jz .bw_no_exit
 
     ; Get "__exit__" from type dict
-    mov rdi, rax
-    lea rsi, [rel bw_str_exit]
+    lea rdi, [rel bw_str_exit]
     call str_from_cstr
     mov r12, rax                    ; r12 = exit name str
     mov rdi, [rbx + PyObject.ob_type]
@@ -542,22 +712,18 @@ DEF_FUNC op_before_with
     test rax, rax
     jz .bw_no_exit_decref_name
 
-    ; Got __exit__ function - INCREF it
+    ; Got __exit__ function — create bound method(exit_func, mgr)
     mov [rbp - BW_EXIT], rax
-    mov rdi, rax
-    call obj_incref
-
-    ; DECREF exit name string
     mov rdi, r12
-    call obj_decref
+    call obj_decref                 ; DECREF exit name string
 
-    ; Push __exit__ onto value stack (with self bound below)
-    ; For method-style: push self first, then __exit__
-    mov rax, [rbp - BW_MGR]              ; mgr (self)
-    INCREF rax
-    VPUSH rax                      ; push self for __exit__
-    mov rax, [rbp - BW_EXIT]
-    VPUSH rax                      ; push __exit__ func
+    mov rdi, [rbp - BW_EXIT]       ; func
+    mov rsi, [rbp - BW_MGR]        ; self = mgr
+    call method_new                 ; rax = bound exit method
+    mov [rbp - BW_EXIT], rax
+
+    ; Push bound __exit__ method (single item, matching CPython)
+    VPUSH rax
 
     ; Now look up __enter__ on mgr's type
     mov rdi, [rbx + PyObject.ob_type]
@@ -637,11 +803,12 @@ section .text
 ;;
 ;; Python 3.12 WITH_EXCEPT_START (opcode 49).
 ;;
-;; Stack: ... | exit_self | exit_func | lasti | exc_or_none | val  ->
-;;        ... | exit_self | exit_func | lasti | exc_or_none | val | result
+;; Stack: ... | bound_exit | lasti | prev_exc | val  ->
+;;        ... | bound_exit | lasti | prev_exc | val | result
 ;;
-;; Calls exit_func(exit_self, exc_type, exc_val, exc_tb)
-;; For now: call exit_func(exit_self, val, val, None)
+;; bound_exit is a bound method (__exit__ with self baked in).
+;; Calls bound_exit(exc_type, exc_val, exc_tb) via tp_call (method_call
+;; prepends self automatically).
 ;; Push result of __exit__ call.
 ;; ============================================================================
 extern none_singleton
@@ -650,32 +817,26 @@ DEF_FUNC op_with_except_start, WES_FRAME
 
     ; Stack layout (TOS is rightmost, 16 bytes/slot):
     ; PEEK(1) = val (exception)          = [r13-16]
-    ; PEEK(2) = exc_or_none             = [r13-32]
+    ; PEEK(2) = prev_exc                = [r13-32]
     ; PEEK(3) = lasti                    = [r13-48]
-    ; PEEK(4) = exit_func               = [r13-64]
-    ; PEEK(5) = exit_self               = [r13-80]
+    ; PEEK(4) = bound_exit              = [r13-64]
 
-    mov rax, [r13-64]               ; exit_func
+    mov rax, [r13-64]               ; bound_exit method
     mov [rbp - WES_FUNC], rax
-    mov rax, [r13-80]               ; exit_self
-    mov [rbp - WES_SELF], rax
     mov rax, [r13-16]               ; val (exception value)
     mov [rbp - WES_VAL], rax
 
-    ; Get tp_call on exit_func
+    ; Get tp_call on bound_exit (should be method_call)
     mov rdi, [rbp - WES_FUNC]
     mov rax, [rdi + PyObject.ob_type]
     mov rax, [rax + PyTypeObject.tp_call]
     test rax, rax
     jz .wes_error
 
-    ; Build args array on machine stack: [self, exc_type, exc_val, exc_tb]
-    ; exc_type = type(val), exc_val = val, exc_tb = None
-    ; For simplicity: [self, val, val, None]
+    ; Build args array: [exc_type, exc_val, exc_tb]
+    ; method_call will prepend self automatically
     mov rcx, [rbp - WES_VAL]               ; val
-    sub rsp, 32                      ; 4 args
-    mov rdx, [rbp - WES_SELF]               ; self
-    mov [rsp], rdx
+    sub rsp, 24                      ; 3 args
     ; Get type of exception
     test rcx, rcx
     jz .wes_none_exc
@@ -685,17 +846,17 @@ DEF_FUNC op_with_except_start, WES_FRAME
 .wes_none_exc:
     lea rdx, [rel none_singleton]
 .wes_set_args:
-    mov [rsp+8], rdx                 ; exc_type
-    mov [rsp+16], rcx                ; exc_val
+    mov [rsp], rdx                   ; exc_type
+    mov [rsp+8], rcx                 ; exc_val
     lea rdx, [rel none_singleton]
-    mov [rsp+24], rdx                ; exc_tb = None
+    mov [rsp+16], rdx                ; exc_tb = None
 
-    ; Call exit_func(self, exc_type, exc_val, exc_tb)
-    mov rdi, [rbp - WES_FUNC]                 ; callable = exit_func
+    ; Call bound_exit(exc_type, exc_val, exc_tb)
+    mov rdi, [rbp - WES_FUNC]                 ; callable = bound method
     mov rsi, rsp                     ; args ptr
-    mov rdx, 4                       ; nargs
+    mov rdx, 3                       ; nargs = 3 (method_call adds self)
     call rax
-    add rsp, 32
+    add rsp, 24
     mov [rbp - WES_RESULT], rax                ; save result
 
     ; Push result onto value stack

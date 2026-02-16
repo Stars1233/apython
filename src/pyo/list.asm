@@ -822,6 +822,103 @@ DEF_FUNC list_repeat
 END_FUNC list_repeat
 
 ;; ============================================================================
+;; list_type_call(PyTypeObject *type, PyObject **args, int64_t nargs) -> PyListObject*
+;; Constructor: list() or list(iterable)
+;; ============================================================================
+; Frame layout
+LTC_LIST    equ 8       ; new list object
+LTC_ITER    equ 16      ; iterator object
+LTC_FRAME   equ 24
+
+DEF_FUNC list_type_call, LTC_FRAME
+    push rbx
+    push r12
+    push r13
+
+    mov r12, rsi            ; args
+    mov r13, rdx            ; nargs
+
+    ; list() — no args: return empty list
+    test r13, r13
+    jz .ltc_empty
+
+    ; list(iterable) — exactly 1 arg
+    cmp r13, 1
+    jne .ltc_error
+
+    ; Create empty list, then extend from iterable
+    xor edi, edi
+    call list_new
+    mov [rbp - LTC_LIST], rax
+    mov rbx, rax            ; rbx = new list
+
+    ; Get iterator from arg
+    mov rdi, [r12]          ; iterable
+    mov rax, [rdi + PyObject.ob_type]
+    mov rax, [rax + PyTypeObject.tp_iter]
+    test rax, rax
+    jz .ltc_not_iterable
+    call rax                ; tp_iter(iterable) -> iterator
+    test rax, rax
+    jz .ltc_not_iterable
+    mov [rbp - LTC_ITER], rax
+
+    ; Iterate and append
+.ltc_loop:
+    mov rdi, [rbp - LTC_ITER]
+    mov rax, [rdi + PyObject.ob_type]
+    mov rax, [rax + PyTypeObject.tp_iternext]
+    test rax, rax
+    jz .ltc_done
+    mov rdi, [rbp - LTC_ITER]
+    call rax                ; tp_iternext(iter) -> item or NULL
+    test rax, rax
+    jz .ltc_done            ; StopIteration
+
+    ; Append item to list
+    push rax                ; save item
+    mov rdi, rbx
+    mov rsi, rax
+    call list_append
+    ; DECREF item (list_append INCREFs internally)
+    pop rdi
+    call obj_decref
+    jmp .ltc_loop
+
+.ltc_done:
+    ; DECREF iterator
+    mov rdi, [rbp - LTC_ITER]
+    call obj_decref
+
+    mov rax, rbx            ; return the list
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.ltc_empty:
+    xor edi, edi
+    call list_new
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.ltc_not_iterable:
+    extern exc_TypeError_type
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "list() argument must be an iterable"
+    call raise_exception
+
+.ltc_error:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "list expected at most 1 argument"
+    call raise_exception
+END_FUNC list_type_call
+
+;; ============================================================================
 ;; Data section
 ;; ============================================================================
 section .data
@@ -885,7 +982,7 @@ list_type:
     dq list_repr            ; tp_repr
     dq list_repr            ; tp_str
     dq 0                    ; tp_hash (unhashable)
-    dq 0                    ; tp_call
+    dq list_type_call       ; tp_call
     dq 0                    ; tp_getattr
     dq 0                    ; tp_setattr
     dq 0                    ; tp_richcompare

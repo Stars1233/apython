@@ -13,6 +13,7 @@ extern ap_memcpy
 extern type_type
 extern obj_incref
 extern obj_decref
+extern obj_dealloc
 extern raise_exception
 extern exc_IndexError_type
 extern exc_TypeError_type
@@ -604,6 +605,77 @@ bytes_iter_self:
 END_FUNC bytes_iter_self
 
 ;; ============================================================================
+;; bytes_compare(PyObject *a, PyObject *b, int op) -> PyObject*
+;; Rich comparison for bytes (supports == and !=)
+;; ============================================================================
+extern bool_true
+extern bool_false
+DEF_FUNC bytes_compare
+    ; rdi=a, rsi=b, edx=op
+    push rbx
+    mov ebx, edx              ; save op in ebx
+
+    ; Check if b is also bytes
+    lea rax, [rel bytes_type]
+    cmp [rsi + PyObject.ob_type], rax
+    jne .bytes_cmp_not_impl
+
+    ; Compare lengths
+    mov rcx, [rdi + PyBytesObject.ob_size]
+    cmp rcx, [rsi + PyBytesObject.ob_size]
+    jne .bytes_cmp_neq
+
+    ; Same length — compare data
+    lea r8, [rdi + PyBytesObject.data]
+    lea r9, [rsi + PyBytesObject.data]
+    xor eax, eax
+.bytes_cmp_loop:
+    cmp rax, rcx
+    jge .bytes_cmp_eq
+    movzx edx, byte [r8 + rax]
+    cmp dl, [r9 + rax]
+    jne .bytes_cmp_neq
+    inc rax
+    jmp .bytes_cmp_loop
+
+.bytes_cmp_eq:
+    ; Equal: return True for ==, False for !=
+    cmp ebx, 2                ; PyCmp_EQ = 2
+    je .bytes_ret_true
+    cmp ebx, 3                ; PyCmp_NE = 3
+    je .bytes_ret_false
+    jmp .bytes_cmp_not_impl
+
+.bytes_cmp_neq:
+    ; Not equal: return False for ==, True for !=
+    cmp ebx, 2
+    je .bytes_ret_false
+    cmp ebx, 3
+    je .bytes_ret_true
+    jmp .bytes_cmp_not_impl
+
+.bytes_ret_true:
+    lea rax, [rel bool_true]
+    inc qword [rax + PyObject.ob_refcnt]
+    pop rbx
+    leave
+    ret
+.bytes_ret_false:
+    lea rax, [rel bool_false]
+    inc qword [rax + PyObject.ob_refcnt]
+    pop rbx
+    leave
+    ret
+.bytes_cmp_not_impl:
+    extern none_singleton
+    lea rax, [rel none_singleton]
+    inc qword [rax + PyObject.ob_refcnt]
+    pop rbx
+    leave
+    ret
+END_FUNC bytes_compare
+
+;; ============================================================================
 ;; Data section
 ;; ============================================================================
 section .data
@@ -627,12 +699,138 @@ bytes_sequence_methods:
     dq 0                    ; sq_inplace_concat +48
     dq 0                    ; sq_inplace_repeat +56
 
+section .text
+
+;; ============================================================================
+;; bytes_mod(PyBytesObject *fmt, PyObject *args) -> PyBytesObject*
+;; nb_remainder: implements b"fmt" % args
+;; Strategy: convert bytes fmt to str, call str_mod, convert result to bytes
+;; ============================================================================
+BM_FMT   equ 8
+BM_ARGS  equ 16
+BM_FRAME equ 16
+
+DEF_FUNC bytes_mod, BM_FRAME
+    push rbx
+    push r12
+
+    mov [rbp-BM_FMT], rdi     ; fmt bytes obj
+    mov [rbp-BM_ARGS], rsi    ; args
+    ; Convert bytes to str
+    mov rsi, [rdi + PyBytesObject.ob_size]
+    lea rdi, [rdi + PyBytesObject.data]
+    extern str_new
+    call str_new
+    mov rbx, rax               ; rbx = temp str
+
+    ; Call str_mod(temp_str, args)
+    extern str_mod
+    mov rdi, rbx               ; temp str
+    mov rsi, [rbp-BM_ARGS]    ; args
+    call str_mod
+    mov r12, rax               ; r12 = result str
+
+    ; DECREF temp fmt str
+    mov rdi, rbx
+    DECREF_REG rdi
+
+    ; Convert result str to bytes
+    mov rdi, [r12 + PyStrObject.ob_size]
+    extern bytes_new
+    call bytes_new
+    mov rbx, rax               ; rbx = bytes result
+    ; Copy str data into bytes
+    lea rdi, [rax + PyBytesObject.data]
+    lea rsi, [r12 + PyStrObject.data]
+    mov rdx, [r12 + PyStrObject.ob_size]
+    extern ap_memcpy
+    call ap_memcpy
+
+    ; DECREF result str
+    mov rdi, r12
+    DECREF_REG rdi
+
+    mov rax, rbx               ; return bytes
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC bytes_mod
+
+section .data
+
+; bytes number methods (for % formatting)
+align 8
+bytes_number_methods:
+    dq 0                    ; nb_add          +0
+    dq 0                    ; nb_subtract     +8
+    dq 0                    ; nb_multiply     +16
+    dq bytes_mod            ; nb_remainder    +24
+
 ; bytes mapping methods (for subscript with int/slice)
 align 8
 bytes_mapping_methods:
     dq bytes_len            ; mp_length       +0
     dq bytes_subscript      ; mp_subscript    +8
     dq 0                    ; mp_ass_subscript +16
+
+section .text
+
+;; ============================================================================
+;; bytes_type_call(type, args, nargs) -> PyBytesObject*
+;; Constructor: bytes(bytes_obj) — copies data, uses passed-in type for subclass
+;; ============================================================================
+global bytes_type_call
+BTC_TYPE  equ 8
+BTC_FRAME equ 8
+DEF_FUNC bytes_type_call, BTC_FRAME
+    ; rdi=type, rsi=args, rdx=nargs
+    mov [rbp - BTC_TYPE], rdi
+    cmp rdx, 1
+    jne .btc_error
+    mov rdi, [rsi]              ; arg0
+    test rdi, rdi
+    js .btc_error               ; SmallInt → error
+    mov rax, [rdi + PyObject.ob_type]
+    lea rcx, [rel bytes_type]
+    cmp rax, rcx
+    jne .btc_error
+
+    ; Copy bytes data into new object
+    mov rcx, [rdi + PyBytesObject.ob_size]
+    push rdi
+    push rcx
+    lea rdi, [rcx + PyBytesObject.data + 1]
+    call ap_malloc
+    pop rcx
+    pop rsi
+
+    mov qword [rax + PyBytesObject.ob_refcnt], 1
+    mov rdx, [rbp - BTC_TYPE]
+    mov [rax + PyBytesObject.ob_type], rdx
+    mov [rax + PyBytesObject.ob_size], rcx
+    ; INCREF the type (needed for heap type subclasses)
+    inc qword [rdx + PyObject.ob_refcnt]
+
+    push rax
+    lea rdi, [rax + PyBytesObject.data]
+    lea rsi, [rsi + PyBytesObject.data]
+    mov rdx, rcx
+    call ap_memcpy
+    ; Null-terminate (for C string compat)
+    pop rax
+    mov rcx, [rax + PyBytesObject.ob_size]
+    mov byte [rax + PyBytesObject.data + rcx], 0
+    leave
+    ret
+
+.btc_error:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "bytes() argument must be a bytes object"
+    call raise_exception
+END_FUNC bytes_type_call
+
+section .data
 
 ; bytes type object
 align 8
@@ -649,18 +847,18 @@ bytes_type:
     dq 0                    ; tp_call
     dq bytes_getattr        ; tp_getattr
     dq 0                    ; tp_setattr
-    dq 0                    ; tp_richcompare
+    dq bytes_compare        ; tp_richcompare
     dq bytes_tp_iter        ; tp_iter
     dq 0                    ; tp_iternext
     dq 0                    ; tp_init
     dq 0                    ; tp_new
-    dq 0                    ; tp_as_number
+    dq bytes_number_methods  ; tp_as_number
     dq bytes_sequence_methods ; tp_as_sequence
     dq bytes_mapping_methods  ; tp_as_mapping
     dq 0                    ; tp_base
     dq 0                    ; tp_dict
     dq 0                    ; tp_mro
-    dq 0                    ; tp_flags
+    dq TYPE_FLAG_BASETYPE   ; tp_flags
     dq 0                    ; tp_bases
 
 ; bytes_iter type object

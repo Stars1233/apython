@@ -23,6 +23,11 @@ extern exc_AttributeError_type
 extern exc_TypeError_type
 extern func_type
 extern type_type
+extern int_type
+extern staticmethod_type
+extern classmethod_type
+extern property_type
+extern property_descr_get
 extern eval_frame
 extern frame_new
 extern frame_free
@@ -68,14 +73,14 @@ END_FUNC instance_new
 ;; ============================================================================
 ;; instance_getattr(PyInstanceObject *self, PyObject *name) -> PyObject*
 ;; Look up an attribute on an instance.
-;; 1. Check self->inst_dict
-;; 2. If not found, check type->tp_dict
-;; 3. If found and it's a function, return it directly (caller handles binding)
+;; 1. Check self->inst_dict — return raw value
+;; 2. If not found, check type->tp_dict (walk tp_base chain)
+;; 3. If found in type dict and callable, create bound method
 ;; 4. If found, INCREF and return
-;; 5. If not found, fatal AttributeError
+;; 5. If not found, return NULL
 ;;
 ;; rdi = instance, rsi = name (PyStrObject*)
-;; Returns: borrowed-turned-owned reference to attribute value
+;; Returns: owned reference to attribute value, or NULL
 ;; ============================================================================
 DEF_FUNC instance_getattr
     push rbx
@@ -85,12 +90,16 @@ DEF_FUNC instance_getattr
     mov rbx, rdi                ; rbx = self (instance)
     mov r12, rsi                ; r12 = name
 
-    ; Check self->inst_dict first
+    ; Check self->inst_dict first (may be NULL for int subclass instances)
     mov rdi, [rbx + PyInstanceObject.inst_dict]
+    test rdi, rdi
+    jz .check_type_dict
     mov rsi, r12
     call dict_get
     test rax, rax
-    jnz .found
+    jnz .found_inst
+
+.check_type_dict:
 
     ; Not in inst_dict -- walk type MRO: check type->tp_dict, then tp_base chain
     mov rcx, [rbx + PyObject.ob_type]   ; rcx = type (the class)
@@ -104,7 +113,7 @@ DEF_FUNC instance_getattr
     call dict_get
     pop rcx                             ; restore current type
     test rax, rax
-    jnz .found                          ; found in this type's dict
+    jnz .found_type                     ; found in type's dict
 
 .try_base:
     mov rcx, [rcx + PyTypeObject.tp_base]
@@ -113,16 +122,73 @@ DEF_FUNC instance_getattr
 
     jmp .not_found
 
-    ; Found in type dict. Return it (INCREF below).
-    ; (If it's a function, the caller/LOAD_ATTR handles method binding.)
-
-.found:
-    ; INCREF the result (dict_get returns borrowed ref)
+.found_inst:
+    ; Found in instance dict — INCREF and return raw value
     mov r13, rax
     mov rdi, rax
     call obj_incref
     mov rax, r13
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
 
+.found_type:
+    ; Found in type dict — handle method binding.
+    ; Descriptors (staticmethod, classmethod, property) are returned as-is
+    ; for LOAD_ATTR to unwrap, since LOAD_ATTR knows the push convention.
+    ; Regular callables are bound to the instance.
+    mov r13, rax                ; r13 = attr (borrowed ref from dict_get)
+    test rax, rax
+    js .found_type_raw          ; SmallInt — return as-is
+
+    mov rcx, [rax + PyObject.ob_type]
+
+    ; Check for staticmethod/classmethod/property → return raw descriptor
+    ; LOAD_ATTR handles unwrapping with the correct push convention
+    lea rdx, [rel staticmethod_type]
+    cmp rcx, rdx
+    je .found_type_raw
+
+    lea rdx, [rel classmethod_type]
+    cmp rcx, rdx
+    je .found_type_raw
+
+    lea rdx, [rel property_type]
+    cmp rcx, rdx
+    je .found_type_raw
+
+    ; Only bind func_type and builtin_func_type as methods
+    ; Types, classes, and other callables are returned as-is
+    lea rdx, [rel func_type]
+    cmp rcx, rdx
+    je .bind_method
+
+    extern builtin_func_type
+    lea rdx, [rel builtin_func_type]
+    cmp rcx, rdx
+    je .bind_method
+
+    jmp .found_type_raw         ; not a function — return raw
+
+.bind_method:
+    ; Function found in type dict — create bound method
+    mov rdi, r13                ; func
+    mov rsi, rbx                ; self (instance)
+    call method_new
+    ; rax = bound method (method_new INCREFs func and self)
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.found_type_raw:
+    ; Not callable, SmallInt, or descriptor — INCREF and return
+    mov rdi, r13
+    call obj_incref
+    mov rax, r13
     pop r13
     pop r12
     pop rbx
@@ -144,13 +210,28 @@ END_FUNC instance_getattr
 ;; rdi = instance, rsi = name, rdx = value
 ;; ============================================================================
 DEF_FUNC instance_setattr
+    push rbx
+    mov rbx, rdi
+    ; Check if inst_dict is NULL (int subclass instances start with NULL dict)
+    mov rdi, [rbx + PyInstanceObject.inst_dict]
+    test rdi, rdi
+    jnz .sa_have_dict
 
-    ; dict_set(self->inst_dict, name, value)
-    mov rdi, [rdi + PyInstanceObject.inst_dict]
-    ; rsi = name (already set)
-    ; rdx = value (already set)
+    ; Allocate a new dict for this instance
+    push rsi
+    push rdx
+    call dict_new
+    mov [rbx + PyInstanceObject.inst_dict], rax
+    mov rdi, rax
+    pop rdx
+    pop rsi
+
+.sa_have_dict:
+    ; dict_set(inst_dict, name, value)
+    ; rdi = dict (already set), rsi = name, rdx = value
     call dict_set
 
+    pop rbx
     leave
     ret
 END_FUNC instance_setattr
@@ -165,9 +246,24 @@ DEF_FUNC instance_dealloc
 
     mov rbx, rdi                ; rbx = self
 
-    ; DECREF inst_dict
+    ; XDECREF inst_dict (may be NULL for int subclass instances)
     mov rdi, [rbx + PyInstanceObject.inst_dict]
+    test rdi, rdi
+    jz .no_dict
     call obj_decref
+.no_dict:
+
+    ; Check if this is an int subclass — XDECREF int_value
+    mov rax, [rbx + PyObject.ob_type]
+    mov rax, [rax + PyTypeObject.tp_flags]
+    test rax, TYPE_FLAG_INT_SUBCLASS
+    jz .no_int_value
+    mov rdi, [rbx + PyIntSubclassObject.int_value]
+    test rdi, rdi
+    js .no_int_value             ; SmallInt — no refcount
+    jz .no_int_value             ; NULL
+    call obj_decref
+.no_int_value:
 
     ; DECREF ob_type (the class)
     mov rdi, [rbx + PyObject.ob_type]
@@ -181,6 +277,29 @@ DEF_FUNC instance_dealloc
     leave
     ret
 END_FUNC instance_dealloc
+
+;; ============================================================================
+;; builtin_sub_dealloc(PyObject *self)
+;; Dealloc for heap-type subclasses of builtin types (bytes, bytearray, etc.)
+;; These don't have inst_dict — just DECREF the type and free.
+;; ============================================================================
+global builtin_sub_dealloc
+DEF_FUNC builtin_sub_dealloc
+    push rbx
+    mov rbx, rdi
+
+    ; DECREF ob_type (the heap type class)
+    mov rdi, [rbx + PyObject.ob_type]
+    call obj_decref
+
+    ; Free the object
+    mov rdi, rbx
+    call ap_free
+
+    pop rbx
+    leave
+    ret
+END_FUNC builtin_sub_dealloc
 
 ;; ============================================================================
 ;; instance_repr(PyObject *self) -> PyStrObject*
@@ -247,10 +366,36 @@ END_FUNC instance_str
 ;; Returns: new instance
 ;; ============================================================================
 DEF_FUNC type_call
+    ; Special case: type(x) with 1 arg when calling type itself
+    ; Returns x.__class__ (the type of x)
+    lea rax, [rel type_type]
+    cmp rdi, rax
+    jne .not_type_self
+    cmp edx, 1
+    jne .not_type_self
+    ; type(x) → return type of x
+    mov rax, [rsi]          ; args[0]
+    test rax, rax
+    js .type_smallint       ; SmallInt → int type
+    mov rax, [rax + PyObject.ob_type]
+    inc qword [rax + PyObject.ob_refcnt]
+    leave
+    ret
+.type_smallint:
+    lea rax, [rel int_type]
+    inc qword [rax + PyObject.ob_refcnt]
+    leave
+    ret
+
+.not_type_self:
     ; Check if type has its own tp_call (built-in constructor, e.g. staticmethod)
     mov rax, [rdi + PyTypeObject.tp_call]
     test rax, rax
     jz .normal_type_call
+    ; Avoid infinite recursion: don't tail-call if tp_call is type_call itself
+    lea rcx, [rel type_call]
+    cmp rax, rcx
+    je .normal_type_call
     ; Tail-call the constructor: tp_call(type, args, nargs)
     leave
     jmp rax
@@ -267,6 +412,18 @@ DEF_FUNC type_call
     mov r12, rsi                ; r12 = args
     mov r13d, edx               ; r13d = nargs
     movsxd r13, r13d            ; sign-extend to 64 bits
+
+    ; Check if this type inherits from an exception type
+    extern type_is_exc_subclass
+    mov rdi, rbx
+    call type_is_exc_subclass
+    test eax, eax
+    jnz .exc_subclass_call
+
+    ; Check if this type is an int subclass
+    mov rax, [rbx + PyTypeObject.tp_flags]
+    test rax, TYPE_FLAG_INT_SUBCLASS
+    jnz .int_subclass_call
 
     ; Create instance: instance_new(type)
     mov rdi, rbx
@@ -359,6 +516,80 @@ DEF_FUNC type_call
     mov rax, r14
 
     add rsp, 8                  ; undo alignment
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.exc_subclass_call:
+    ; User-defined exception subclass — create PyExceptionObject via exc_type_call
+    ; rbx = type, r12 = args, r13 = nargs
+    extern exc_type_call
+    mov rdi, rbx
+    mov rsi, r12
+    mov rdx, r13
+    call exc_type_call
+    ; rax = exception object (PyExceptionObject)
+    add rsp, 8                  ; undo alignment
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.int_subclass_call:
+    ; Int subclass: get int value via builtin_int_fn, then wrap in subclass instance
+    ; rbx = type, r12 = args, r13 = nargs
+    extern builtin_int_fn
+    mov rdi, r12                ; args
+    mov rsi, r13                ; nargs
+    call builtin_int_fn
+    ; rax = int result (SmallInt or GMP pointer)
+    test rax, rax
+    jz .int_sub_error           ; exception from builtin_int_fn
+    mov r14, rax                ; r14 = int value
+
+    ; If type is exactly int_type, return bare int (not a subclass)
+    lea rcx, [rel int_type]
+    cmp rbx, rcx
+    je .int_sub_return_bare
+
+    ; Allocate PyIntSubclassObject
+    push r14                     ; save int_value across malloc
+    mov edi, PyIntSubclassObject_size
+    call ap_malloc
+    pop r14
+    mov qword [rax + PyIntSubclassObject.ob_refcnt], 1
+    mov [rax + PyIntSubclassObject.ob_type], rbx
+    mov qword [rax + PyIntSubclassObject.inst_dict], 0
+    mov [rax + PyIntSubclassObject.int_value], r14
+    ; INCREF the type (subclass object holds a reference)
+    push rax
+    mov rdi, rbx
+    INCREF rdi
+    pop rax
+    ; int_value ownership: builtin_int_fn returns a new reference,
+    ; we transfer it directly into the subclass object (no INCREF needed).
+    jmp .int_sub_done
+
+.int_sub_return_bare:
+    mov rax, r14
+.int_sub_done:
+    add rsp, 8                  ; undo alignment
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+.int_sub_error:
+    add rsp, 8
     pop r15
     pop r14
     pop r13
@@ -556,6 +787,39 @@ DEF_FUNC_LOCAL method_dealloc
 END_FUNC method_dealloc
 
 ;; ============================================================================
+;; method_getattr(PyMethodObject *self, PyObject *name) -> PyObject* or NULL
+;; Delegate attribute lookup to the underlying im_func.
+;; rdi = bound method, rsi = name
+;; ============================================================================
+DEF_FUNC method_getattr
+    ; Delegate to the underlying function's getattr
+    mov rdi, [rdi + PyMethodObject.im_func]
+    extern func_getattr
+    call func_getattr
+    leave
+    ret
+END_FUNC method_getattr
+
+;; ============================================================================
+;; object_type_call(args, nargs) -> PyObject*
+;; object() returns a bare instance of object_type
+;; ============================================================================
+global object_type_call
+DEF_FUNC_BARE object_type_call
+    ; Create a bare instance with object_type
+    push rbp
+    mov rbp, rsp
+    mov edi, PyInstanceObject_size
+    call ap_malloc
+    mov qword [rax + PyObject.ob_refcnt], 1
+    lea rcx, [rel object_type]
+    mov [rax + PyObject.ob_type], rcx
+    mov qword [rax + PyInstanceObject.inst_dict], 0
+    pop rbp
+    ret
+END_FUNC object_type_call
+
+;; ============================================================================
 ;; Data section
 ;; ============================================================================
 section .data
@@ -564,6 +828,7 @@ instance_repr_cstr: db "<instance>", 0
 init_name_cstr:     db "__init__", 0
 tga_name_str:       db "__name__", 0
 method_name_str:    db "method", 0
+object_name_str:    db "object", 0
 user_type_name_str: db "type", 0
 super_name_str:     db "super", 0
 
@@ -584,6 +849,37 @@ user_type_metatype:
     dq 0                        ; tp_hash
     dq type_call                ; tp_call — calling a class creates instances
     dq type_getattr             ; tp_getattr — accessing class vars via tp_dict
+    dq 0                        ; tp_setattr
+    dq 0                        ; tp_richcompare
+    dq 0                        ; tp_iter
+    dq 0                        ; tp_iternext
+    dq 0                        ; tp_init
+    dq 0                        ; tp_new
+    dq 0                        ; tp_as_number
+    dq 0                        ; tp_as_sequence
+    dq 0                        ; tp_as_mapping
+    dq type_type                ; tp_base — metatype inherits from type
+    dq 0                        ; tp_dict
+    dq 0                        ; tp_mro
+    dq 0                        ; tp_flags
+    dq 0                        ; tp_bases
+
+; object_type - base type for all Python objects
+; Used as explicit base class: class Foo(object): pass
+; Also callable: object() returns a bare instance
+align 8
+global object_type
+object_type:
+    dq 1                        ; ob_refcnt (immortal)
+    dq type_type                ; ob_type
+    dq object_name_str          ; tp_name
+    dq PyInstanceObject_size    ; tp_basicsize
+    dq instance_dealloc         ; tp_dealloc
+    dq instance_repr            ; tp_repr
+    dq 0                        ; tp_str
+    dq 0                        ; tp_hash
+    dq 0                        ; tp_call  (set by add_builtin_type)
+    dq 0                        ; tp_getattr
     dq 0                        ; tp_setattr
     dq 0                        ; tp_richcompare
     dq 0                        ; tp_iter
@@ -623,7 +919,7 @@ method_type:
     dq 0                        ; tp_str
     dq 0                        ; tp_hash
     dq method_call              ; tp_call
-    dq 0                        ; tp_getattr
+    dq method_getattr           ; tp_getattr
     dq 0                        ; tp_setattr
     dq 0                        ; tp_richcompare
     dq 0                        ; tp_iter

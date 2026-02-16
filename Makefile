@@ -15,7 +15,7 @@ OBJS = $(SRCS:src/%.asm=build/%.o) $(PYO_SRCS:src/pyo/%.asm=build/%.o) $(LIB_SRC
 # Python compiler for tests
 PYTHON = python3
 
-.PHONY: all clean check
+.PHONY: all clean check gen-cpython-tests check-cpython
 
 all: $(TARGET)
 
@@ -44,3 +44,15 @@ check: $(TARGET)
 # Compile a single .py to .pyc
 tests/__pycache__/%.cpython-312.pyc: tests/%.py
 	$(PYTHON) -m py_compile $<
+
+# CPython test suite targets
+gen-cpython-tests:
+	@echo "Compiling lib/ tree..."
+	@find lib -name '*.py' -exec $(PYTHON) -m py_compile {} \;
+	@echo "Compiling tests/cpython/test_int.py..."
+	@$(PYTHON) -m py_compile tests/cpython/test_int.py
+	@echo "Done."
+
+check-cpython: $(TARGET) gen-cpython-tests
+	@echo "Running CPython test_int.py..."
+	@./apython tests/cpython/__pycache__/test_int.cpython-312.pyc

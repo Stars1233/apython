@@ -36,6 +36,8 @@ extern __gmpz_sub
 extern __gmpz_mul
 extern __gmpz_tdiv_q
 extern __gmpz_tdiv_r
+extern __gmpz_fdiv_q
+extern __gmpz_fdiv_r
 extern __gmpz_neg
 extern __gmpz_cmp
 extern __gmpz_cmp_si
@@ -51,6 +53,7 @@ extern __gmpz_pow_ui
 extern __gmpz_get_d
 
 extern raise_exception
+extern strlen
 extern exc_TypeError_type
 extern exc_ValueError_type
 extern exc_ZeroDivisionError_type
@@ -153,6 +156,7 @@ DEF_FUNC int_from_cstr
     push rbx
     push r12
     push r13
+    and rsp, -16           ; align for GMP calls
     mov rbx, rdi
     mov r13d, esi
     mov edi, PyIntObject_size
@@ -170,6 +174,7 @@ DEF_FUNC int_from_cstr
     test eax, eax
     jnz .parse_fail
     mov rax, r12
+    lea rsp, [rbp - 24]
     pop r13
     pop r12
     pop rbx
@@ -181,12 +186,643 @@ DEF_FUNC int_from_cstr
     mov rdi, r12
     call ap_free
     xor eax, eax
+    lea rsp, [rbp - 24]
     pop r13
     pop r12
     pop rbx
     leave
     ret
 END_FUNC int_from_cstr
+
+;; ============================================================================
+;; int_from_cstr_base(char *str, int base) -> PyObject* or NULL
+;; Parse integer from string with given base (0 = auto-detect, 2-36).
+;; Handles leading/trailing whitespace, sign, 0b/0o/0x prefixes, underscores.
+;; ============================================================================
+; Frame layout for int_from_cstr_base
+IB_SRC    equ 8          ; original string ptr
+IB_BASE   equ 16         ; resolved base
+IB_SIGN   equ 24         ; 0 = positive, 1 = negative
+IB_BUF    equ 32         ; cleaned buffer ptr
+IB_OBJ    equ 40         ; allocated PyIntObject ptr
+IB_FRAME  equ 48
+
+global int_from_cstr_base
+DEF_FUNC int_from_cstr_base, IB_FRAME
+
+    mov [rbp - IB_SRC], rdi
+    mov [rbp - IB_BASE], rsi
+    mov qword [rbp - IB_SIGN], 0
+
+    ; Step 1: Skip leading whitespace (ASCII + Unicode)
+.skip_ws:
+    movzx eax, byte [rdi]
+    cmp al, ' '
+    je .skip_ws_1
+    cmp al, 9             ; \t
+    je .skip_ws_1
+    cmp al, 10            ; \n
+    je .skip_ws_1
+    cmp al, 13            ; \r
+    je .skip_ws_1
+    cmp al, 12            ; \f
+    je .skip_ws_1
+    cmp al, 11            ; \v
+    je .skip_ws_1
+    ; Check for UTF-8 multi-byte Unicode whitespace
+    cmp al, 0xC2
+    je .skip_ws_2byte
+    cmp al, 0xE2
+    je .skip_ws_3byte_e2
+    cmp al, 0xE3
+    je .skip_ws_3byte_e3
+    cmp al, 0xE1
+    je .skip_ws_3byte_e1
+    jmp .ws_done
+.skip_ws_1:
+    inc rdi
+    jmp .skip_ws
+.skip_ws_2byte:
+    ; U+00A0 (NBSP): C2 A0
+    cmp byte [rdi + 1], 0xA0
+    jne .ws_done
+    add rdi, 2
+    jmp .skip_ws
+.skip_ws_3byte_e2:
+    ; U+2000-U+200A: E2 80 {80-8A}
+    ; U+2028-U+2029: E2 80 {A8-A9}
+    ; U+202F: E2 80 AF
+    ; U+205F: E2 81 9F
+    movzx ecx, byte [rdi + 1]
+    cmp cl, 0x80
+    je .skip_ws_e2_80
+    cmp cl, 0x81
+    jne .ws_done
+    ; E2 81 xx: check for U+205F (E2 81 9F)
+    cmp byte [rdi + 2], 0x9F
+    jne .ws_done
+    add rdi, 3
+    jmp .skip_ws
+.skip_ws_e2_80:
+    movzx ecx, byte [rdi + 2]
+    ; U+2000-U+200A: third byte 0x80-0x8A
+    cmp cl, 0x80
+    jb .ws_done
+    cmp cl, 0x8A
+    jbe .skip_ws_3
+    ; U+2028-U+2029: third byte 0xA8-0xA9
+    cmp cl, 0xA8
+    je .skip_ws_3
+    cmp cl, 0xA9
+    je .skip_ws_3
+    ; U+202F: third byte 0xAF
+    cmp cl, 0xAF
+    je .skip_ws_3
+    jmp .ws_done
+.skip_ws_3byte_e3:
+    ; U+3000 (IDEOGRAPHIC SPACE): E3 80 80
+    cmp byte [rdi + 1], 0x80
+    jne .ws_done
+    cmp byte [rdi + 2], 0x80
+    jne .ws_done
+    add rdi, 3
+    jmp .skip_ws
+.skip_ws_3byte_e1:
+    ; U+1680 (OGHAM SPACE): E1 9A 80
+    cmp byte [rdi + 1], 0x9A
+    jne .ws_done
+    cmp byte [rdi + 2], 0x80
+    jne .ws_done
+    add rdi, 3
+    jmp .skip_ws
+.skip_ws_3:
+    add rdi, 3
+    jmp .skip_ws
+.ws_done:
+
+    ; Step 2: Handle sign
+    movzx eax, byte [rdi]
+    cmp al, '+'
+    je .sign_plus
+    cmp al, '-'
+    je .sign_minus
+    jmp .sign_done
+.sign_plus:
+    inc rdi
+    jmp .sign_done
+.sign_minus:
+    mov qword [rbp - IB_SIGN], 1
+    inc rdi
+.sign_done:
+    mov [rbp - IB_SRC], rdi    ; update start past whitespace/sign
+
+    ; Step 3: Base 0 auto-detect or prefix handling
+    mov rsi, [rbp - IB_BASE]
+    movzx eax, byte [rdi]
+    cmp al, '0'
+    jne .no_prefix
+
+    ; Starts with '0' — check next char
+    movzx ecx, byte [rdi + 1]
+    or cl, 0x20            ; lowercase
+
+    cmp cl, 'b'
+    je .prefix_bin
+    cmp cl, 'o'
+    je .prefix_oct
+    cmp cl, 'x'
+    je .prefix_hex
+
+    ; No prefix: for base 0, check for leading zero ambiguity
+    test rsi, rsi
+    jz .base0_check_leading_zero
+    jmp .no_prefix
+
+.prefix_bin:
+    test rsi, rsi
+    jz .set_base2
+    cmp rsi, 2
+    jne .no_prefix         ; base != 2 and != 0: don't strip prefix
+.set_base2:
+    mov qword [rbp - IB_BASE], 2
+    add rdi, 2             ; skip "0b"
+    jmp .skip_prefix_underscore
+
+.prefix_oct:
+    test rsi, rsi
+    jz .set_base8
+    cmp rsi, 8
+    jne .no_prefix
+.set_base8:
+    mov qword [rbp - IB_BASE], 8
+    add rdi, 2             ; skip "0o"
+    jmp .skip_prefix_underscore
+
+.prefix_hex:
+    test rsi, rsi
+    jz .set_base16
+    cmp rsi, 16
+    jne .no_prefix
+.set_base16:
+    mov qword [rbp - IB_BASE], 16
+    add rdi, 2             ; skip "0x"
+    ; Fall through to skip_prefix_underscore
+
+.skip_prefix_underscore:
+    ; Allow (but don't require) underscore after base prefix: '0b_0', '0x_f'
+    cmp byte [rdi], '_'
+    jne .prefix_no_us
+    inc rdi
+.prefix_no_us:
+    mov [rbp - IB_SRC], rdi
+    jmp .no_prefix
+
+.base0_check_leading_zero:
+    ; Base 0, starts with '0' but no 0b/0o/0x prefix
+    ; CPython rejects '010', '0_7' etc. as ambiguous old-style octal
+    ; Only '0', '00...0', '0_0_0' etc. (all zeros) are allowed
+    ; Scan: accept '0' and '_' (between zeros), reject non-zero digits
+    inc rdi                ; skip first '0'
+    xor edx, edx          ; prev_was_underscore = false
+.base0_zero_loop:
+    movzx ecx, byte [rdi]
+    test cl, cl
+    jz .base0_check_trail  ; end of string → check trailing underscore
+    cmp cl, '0'
+    je .base0_zero_digit
+    cmp cl, '_'
+    je .base0_zero_us
+    ; Check for trailing whitespace
+    cmp cl, ' '
+    je .base0_return_zero
+    cmp cl, 9    ; \t
+    je .base0_return_zero
+    cmp cl, 10   ; \n
+    je .base0_return_zero
+    cmp cl, 13   ; \r
+    je .base0_return_zero
+    cmp cl, 12   ; \f
+    je .base0_return_zero
+    cmp cl, 11   ; \v
+    je .base0_return_zero
+    ; Non-zero digit or invalid char → error
+    xor eax, eax
+    leave
+    ret
+.base0_zero_digit:
+    xor edx, edx          ; prev_was_underscore = false
+    inc rdi
+    jmp .base0_zero_loop
+.base0_zero_us:
+    ; Reject double underscore
+    test edx, edx
+    jnz .base0_error
+    mov edx, 1            ; prev_was_underscore = true
+    inc rdi
+    jmp .base0_zero_loop
+.base0_error:
+    xor eax, eax
+    leave
+    ret
+.base0_check_trail:
+    ; Reject trailing underscore
+    test edx, edx
+    jnz .base0_error
+    jmp .base0_return_zero
+.base0_return_zero:
+    ; Free nothing (no buffer allocated yet), return SmallInt 0
+    xor eax, eax
+    bts rax, 63            ; SmallInt(0)
+    leave
+    ret
+
+.no_prefix:
+    ; If base was 0 and no prefix matched, default to 10
+    mov rsi, [rbp - IB_BASE]
+    test rsi, rsi
+    jnz .base_resolved
+    mov qword [rbp - IB_BASE], 10
+.base_resolved:
+
+    ; Step 4: Allocate buffer for cleaned string (strip underscores + trailing ws)
+    ; First calculate length
+    mov rdi, [rbp - IB_SRC]
+    call strlen wrt ..plt
+    inc rax                ; +1 for null terminator
+    mov rdi, rax
+    call ap_malloc
+    mov [rbp - IB_BUF], rax
+
+    ; Step 5: Copy digits, stripping underscores and trailing whitespace
+    mov rsi, [rbp - IB_SRC]   ; source
+    mov rdi, rax               ; dest buffer
+    xor ecx, ecx              ; dest index
+    xor edx, edx              ; prev_was_underscore flag
+    movzx r8d, byte [rsi]
+    test r8b, r8b
+    jz .copy_empty
+
+.copy_loop:
+    movzx r8d, byte [rsi]
+    test r8b, r8b
+    jz .copy_done
+
+    ; Check for whitespace (trailing) — ASCII
+    cmp r8b, ' '
+    je .copy_trail_ws
+    cmp r8b, 9
+    je .copy_trail_ws
+    cmp r8b, 10
+    je .copy_trail_ws
+    cmp r8b, 13
+    je .copy_trail_ws
+    cmp r8b, 12
+    je .copy_trail_ws
+    cmp r8b, 11
+    je .copy_trail_ws
+    ; Check for UTF-8 Unicode whitespace
+    cmp r8b, 0xC2
+    je .copy_trail_utf8_c2
+    cmp r8b, 0xE2
+    je .copy_trail_utf8_e2
+    cmp r8b, 0xE3
+    je .copy_trail_utf8_e3
+    cmp r8b, 0xE1
+    je .copy_trail_utf8_e1
+
+    ; Check for underscore
+    cmp r8b, '_'
+    je .copy_underscore
+
+    ; Check for Unicode digit (multi-byte UTF-8)
+    cmp r8b, 0xD9
+    je .copy_digit_arabic
+    cmp r8b, 0xE0
+    je .copy_digit_3byte
+
+    ; Regular digit: copy it
+    mov [rdi + rcx], r8b
+    inc rcx
+    xor edx, edx          ; prev_was_underscore = false
+    inc rsi
+    jmp .copy_loop
+
+.copy_digit_arabic:
+    ; Arabic-Indic digits U+0660-0669: D9 A0-A9 → '0'-'9'
+    movzx r9d, byte [rsi + 1]
+    cmp r9b, 0xA0
+    jb .copy_not_ws         ; not a digit, treat as regular byte
+    cmp r9b, 0xA9
+    ja .copy_not_ws
+    ; Convert to ASCII: r9b - 0xA0 + '0'
+    sub r9b, 0xA0
+    add r9b, '0'
+    mov [rdi + rcx], r9b
+    inc rcx
+    xor edx, edx
+    add rsi, 2              ; skip 2-byte UTF-8
+    jmp .copy_loop
+
+.copy_digit_3byte:
+    ; Devanagari digits U+0966-096F: E0 A5 A6-AF → '0'-'9'
+    cmp byte [rsi + 1], 0xA5
+    jne .copy_not_ws        ; not Devanagari, treat as regular byte
+    movzx r9d, byte [rsi + 2]
+    cmp r9b, 0xA6
+    jb .copy_not_ws
+    cmp r9b, 0xAF
+    ja .copy_not_ws
+    ; Convert to ASCII: r9b - 0xA6 + '0'
+    sub r9b, 0xA6
+    add r9b, '0'
+    mov [rdi + rcx], r9b
+    inc rcx
+    xor edx, edx
+    add rsi, 3              ; skip 3-byte UTF-8
+    jmp .copy_loop
+
+.copy_underscore:
+    ; Reject leading underscore (rcx == 0)
+    test ecx, ecx
+    jz .parse_error
+    ; Reject double underscore
+    test edx, edx
+    jnz .parse_error
+    mov edx, 1            ; prev_was_underscore = true
+    inc rsi
+    jmp .copy_loop
+
+.copy_trail_utf8_c2:
+    ; U+00A0 (NBSP): C2 A0
+    cmp byte [rsi + 1], 0xA0
+    jne .copy_not_ws
+    add rsi, 2
+    jmp .trail_loop
+.copy_trail_utf8_e2:
+    ; Check E2 80 xx or E2 81 9F
+    movzx r9d, byte [rsi + 1]
+    cmp r9b, 0x80
+    je .copy_trail_e2_80
+    cmp r9b, 0x81
+    jne .copy_not_ws
+    cmp byte [rsi + 2], 0x9F
+    jne .copy_not_ws
+    add rsi, 3
+    jmp .trail_loop
+.copy_trail_e2_80:
+    movzx r9d, byte [rsi + 2]
+    cmp r9b, 0x80
+    jb .copy_not_ws
+    cmp r9b, 0x8A
+    jbe .copy_trail_utf8_3
+    cmp r9b, 0xA8
+    je .copy_trail_utf8_3
+    cmp r9b, 0xA9
+    je .copy_trail_utf8_3
+    cmp r9b, 0xAF
+    je .copy_trail_utf8_3
+    jmp .copy_not_ws
+.copy_trail_utf8_e3:
+    ; U+3000: E3 80 80
+    cmp byte [rsi + 1], 0x80
+    jne .copy_not_ws
+    cmp byte [rsi + 2], 0x80
+    jne .copy_not_ws
+    add rsi, 3
+    jmp .trail_loop
+.copy_trail_utf8_e1:
+    ; U+1680: E1 9A 80
+    cmp byte [rsi + 1], 0x9A
+    jne .copy_not_ws
+    cmp byte [rsi + 2], 0x80
+    jne .copy_not_ws
+    add rsi, 3
+    jmp .trail_loop
+.copy_trail_utf8_3:
+    add rsi, 3
+    jmp .trail_loop
+.copy_not_ws:
+    ; Not whitespace — copy as regular byte
+    mov [rdi + rcx], r8b
+    inc rcx
+    xor edx, edx
+    inc rsi
+    jmp .copy_loop
+
+.copy_trail_ws:
+    ; Verify remaining chars are all whitespace (ASCII + Unicode)
+    inc rsi
+.trail_loop:
+    movzx r8d, byte [rsi]
+    test r8b, r8b
+    jz .copy_done
+    cmp r8b, ' '
+    je .trail_next
+    cmp r8b, 9
+    je .trail_next
+    cmp r8b, 10
+    je .trail_next
+    cmp r8b, 13
+    je .trail_next
+    cmp r8b, 12
+    je .trail_next
+    cmp r8b, 11
+    je .trail_next
+    ; Check for UTF-8 Unicode whitespace in trailing
+    cmp r8b, 0xC2
+    je .trail_utf8_c2
+    cmp r8b, 0xE2
+    je .trail_utf8_e2
+    cmp r8b, 0xE3
+    je .trail_utf8_e3
+    cmp r8b, 0xE1
+    je .trail_utf8_e1
+    ; Non-whitespace after whitespace: error
+    jmp .parse_error
+.trail_utf8_c2:
+    cmp byte [rsi + 1], 0xA0
+    jne .parse_error
+    add rsi, 2
+    jmp .trail_loop
+.trail_utf8_e2:
+    movzx r9d, byte [rsi + 1]
+    cmp r9b, 0x80
+    je .trail_e2_80
+    cmp r9b, 0x81
+    jne .parse_error
+    cmp byte [rsi + 2], 0x9F
+    jne .parse_error
+    add rsi, 3
+    jmp .trail_loop
+.trail_e2_80:
+    movzx r9d, byte [rsi + 2]
+    cmp r9b, 0x80
+    jb .parse_error
+    cmp r9b, 0x8A
+    jbe .trail_utf8_3
+    cmp r9b, 0xA8
+    je .trail_utf8_3
+    cmp r9b, 0xA9
+    je .trail_utf8_3
+    cmp r9b, 0xAF
+    je .trail_utf8_3
+    jmp .parse_error
+.trail_utf8_e3:
+    cmp byte [rsi + 1], 0x80
+    jne .parse_error
+    cmp byte [rsi + 2], 0x80
+    jne .parse_error
+    add rsi, 3
+    jmp .trail_loop
+.trail_utf8_e1:
+    cmp byte [rsi + 1], 0x9A
+    jne .parse_error
+    cmp byte [rsi + 2], 0x80
+    jne .parse_error
+    add rsi, 3
+    jmp .trail_loop
+.trail_utf8_3:
+    add rsi, 3
+    jmp .trail_loop
+.trail_next:
+    inc rsi
+    jmp .trail_loop
+
+.copy_done:
+    ; Reject trailing underscore
+    test edx, edx
+    jnz .parse_error
+    ; Reject empty string
+    test ecx, ecx
+    jz .parse_error
+    mov byte [rdi + rcx], 0    ; null terminate
+
+    ; Check int_max_str_digits limit (only for non-power-of-two bases)
+    ; Power-of-two bases (2, 4, 8, 16, 32) are exempt
+    mov rax, [rbp - IB_BASE]
+    cmp rax, 2
+    je .digits_ok
+    cmp rax, 4
+    je .digits_ok
+    cmp rax, 8
+    je .digits_ok
+    cmp rax, 16
+    je .digits_ok
+    cmp rax, 32
+    je .digits_ok
+    ; Non-power-of-two base — check limit
+    extern sys_int_max_str_digits
+    mov rax, [rel sys_int_max_str_digits]
+    test rax, rax
+    jz .digits_ok              ; limit=0 means unlimited
+    cmp rcx, rax
+    jg .digits_exceeded
+.digits_ok:
+    jmp .gmp_parse
+
+.copy_empty:
+    jmp .parse_error
+
+.gmp_parse:
+    ; Allocate PyIntObject
+    mov edi, PyIntObject_size
+    call ap_malloc
+    mov [rbp - IB_OBJ], rax
+    mov qword [rax + PyObject.ob_refcnt], 1
+    lea rcx, [rel int_type]
+    mov [rax + PyObject.ob_type], rcx
+    lea rdi, [rax + PyIntObject.mpz]
+    call __gmpz_init wrt ..plt
+
+    ; Parse with GMP
+    mov rax, [rbp - IB_OBJ]
+    lea rdi, [rax + PyIntObject.mpz]
+    mov rsi, [rbp - IB_BUF]
+    mov rdx, [rbp - IB_BASE]
+    call __gmpz_set_str wrt ..plt
+    test eax, eax
+    jnz .gmp_parse_fail
+
+    ; Apply sign
+    cmp qword [rbp - IB_SIGN], 0
+    je .no_negate
+    mov rax, [rbp - IB_OBJ]
+    lea rdi, [rax + PyIntObject.mpz]
+    lea rsi, [rax + PyIntObject.mpz]
+    call __gmpz_neg wrt ..plt
+.no_negate:
+
+    ; Free cleaned buffer
+    mov rdi, [rbp - IB_BUF]
+    call ap_free
+
+    ; Try to normalize to SmallInt if small enough
+    mov rax, [rbp - IB_OBJ]
+    lea rdi, [rax + PyIntObject.mpz]
+    call __gmpz_get_si wrt ..plt
+    mov rcx, rax
+
+    ; Check if value fits in SmallInt range and roundtrips
+    ; Save small int value now — rcx will be clobbered by call
+    mov [rbp - IB_SIGN], rcx
+    mov rdi, [rbp - IB_OBJ]
+    lea rdi, [rdi + PyIntObject.mpz]
+    mov rsi, rcx
+    call __gmpz_cmp_si wrt ..plt
+    test eax, eax
+    jnz .return_gmp         ; doesn't roundtrip: keep GMP
+
+    ; Also check 62-bit SmallInt range (bts rax,63 only works for -2^62..2^62-1)
+    mov rax, [rbp - IB_SIGN]
+    sar rax, 62             ; rax = sign-extension of bits 63:62
+    inc rax                 ; 0 or 1 if fits, else other
+    cmp rax, 2
+    jae .return_gmp         ; doesn't fit SmallInt range, keep GMP
+
+    ; Fits in SmallInt: free GMP object, return tagged int
+    mov rdi, [rbp - IB_OBJ]
+    lea rdi, [rdi + PyIntObject.mpz]
+    call __gmpz_clear wrt ..plt
+    mov rdi, [rbp - IB_OBJ]
+    call ap_free
+    mov rax, [rbp - IB_SIGN]
+    bts rax, 63
+    leave
+    ret
+
+.return_gmp:
+    mov rax, [rbp - IB_OBJ]
+    leave
+    ret
+
+.gmp_parse_fail:
+    ; Clean up allocated object and return parse error (NULL)
+    mov rdi, [rbp - IB_OBJ]
+    lea rdi, [rdi + PyIntObject.mpz]
+    call __gmpz_clear wrt ..plt
+    mov rdi, [rbp - IB_OBJ]
+    call ap_free
+    jmp .parse_error
+
+.digits_exceeded:
+    ; Free cleaned buffer, then raise ValueError for digit limit
+    mov rdi, [rbp - IB_BUF]
+    call ap_free
+    extern raise_exception
+    extern exc_ValueError_type
+    lea rdi, [rel exc_ValueError_type]
+    CSTRING rsi, "Exceeds the limit for integer string conversion"
+    call raise_exception
+
+.parse_error:
+    ; Free cleaned buffer if allocated
+    mov rdi, [rbp - IB_BUF]
+    call ap_free
+    xor eax, eax           ; return NULL
+    leave
+    ret
+
+END_FUNC int_from_cstr_base
 
 ;; ============================================================================
 ;; int_to_i64(PyObject *obj) -> int64_t
@@ -214,17 +850,36 @@ END_FUNC int_to_i64
 DEF_FUNC_BARE int_repr
     test rdi, rdi
     js .smallint
-
+    ; Check if int subclass (TYPE_FLAG_INT_SUBCLASS) — extract int_value
+    mov rax, [rdi + PyObject.ob_type]
+    lea rcx, [rel int_type]
+    cmp rax, rcx
+    je .repr_gmp                 ; exact int_type → proceed to GMP path
+    mov rax, [rax + PyTypeObject.tp_flags]
+    test rax, TYPE_FLAG_INT_SUBCLASS
+    jz .repr_gmp                 ; not int subclass → treat as GMP
+    ; Extract int_value from PyIntSubclassObject
+    mov rdi, [rdi + PyIntSubclassObject.int_value]
+    test rdi, rdi
+    js .smallint
+.repr_gmp:
     ; GMP path
     push rbp
     mov rbp, rsp
     push rbx
     push r12
-    ; RSP is 16-byte aligned here (3 pushes from 8-aligned entry)
+    and rsp, -16           ; dynamically align RSP to 16 bytes
     mov rbx, rdi
     lea rdi, [rbx + PyIntObject.mpz]
     mov esi, 10
     call __gmpz_sizeinbase wrt ..plt
+    ; Check int_max_str_digits limit
+    mov rcx, [rel sys_int_max_str_digits]
+    test rcx, rcx
+    jz .repr_no_limit              ; limit=0 means unlimited
+    cmp rax, rcx
+    ja .repr_limit_exceeded
+.repr_no_limit:
     lea rdi, [rax + 3]
     call ap_malloc
     mov r12, rax               ; r12 = C string buffer
@@ -238,6 +893,7 @@ DEF_FUNC_BARE int_repr
     mov rdi, r12
     call ap_free               ; free C buffer
     mov rax, rbx               ; return str object
+    lea rsp, [rbp - 16]   ; restore RSP to before alignment (rbp-16 = after push rbx, push r12)
     pop r12
     pop rbx
     pop rbp
@@ -287,6 +943,11 @@ DEF_FUNC_BARE int_repr
     call str_from_cstr
     leave
     ret
+
+.repr_limit_exceeded:
+    lea rdi, [rel exc_ValueError_type]
+    CSTRING rsi, "Exceeds the limit for integer string conversion"
+    call raise_exception
 END_FUNC int_repr
 
 ;; ============================================================================
@@ -294,6 +955,8 @@ END_FUNC int_repr
 ;; SmallInt: decoded value. GMP: low bits via get_si. Never returns -1.
 ;; ============================================================================
 DEF_FUNC_BARE int_hash
+    ; Unwrap int subclass instances
+    call int_unwrap
     test rdi, rdi
     js .smallint
 
@@ -326,6 +989,8 @@ END_FUNC int_hash
 ;; SmallInt: decoded != 0. GMP: cmp_si(0) != 0.
 ;; ============================================================================
 DEF_FUNC_BARE int_bool
+    ; Unwrap int subclass instances
+    call int_unwrap
     test rdi, rdi
     js .smallint
 
@@ -354,9 +1019,18 @@ END_FUNC int_bool
 ;; SmallInt x SmallInt fast path with overflow check.
 ;; ============================================================================
 DEF_FUNC_BARE int_add
+    ; Unwrap int subclass instances
+    push rsi
+    call int_unwrap
+    pop rsi
+    push rdi
+    mov rdi, rsi
+    call int_unwrap
+    mov rsi, rdi
+    pop rdi
     ; Check both SmallInt
     mov rax, rdi
-    or rax, rsi
+    and rax, rsi
     jns .gmp_path           ; either is heap ptr (bit 63 clear)
 
     ; Both SmallInt: decode and add
@@ -436,8 +1110,18 @@ END_FUNC int_add
 ;; int_sub(PyObject *a, PyObject *b) -> PyObject*
 ;; ============================================================================
 DEF_FUNC_BARE int_sub
+    ; Unwrap int subclass instances
+    push rsi
+    call int_unwrap
+    pop rsi
+    push rdi
+    mov rdi, rsi
+    call int_unwrap
+    mov rsi, rdi
+    pop rdi
+    ; Check both SmallInt
     mov rax, rdi
-    or rax, rsi
+    and rax, rsi
     jns .gmp_path
 
     mov rax, rdi
@@ -510,8 +1194,18 @@ END_FUNC int_sub
 ;; SmallInt x SmallInt: use imul with overflow detection
 ;; ============================================================================
 DEF_FUNC_BARE int_mul
+    ; Unwrap int subclass instances
+    push rsi
+    call int_unwrap
+    pop rsi
+    push rdi
+    mov rdi, rsi
+    call int_unwrap
+    mov rsi, rdi
+    pop rdi
+    ; Check both SmallInt
     mov rax, rdi
-    or rax, rsi
+    and rax, rsi
     jns .gmp_path
 
     mov rax, rdi
@@ -589,8 +1283,18 @@ END_FUNC int_mul
 ;; int_floordiv(PyObject *a, PyObject *b) -> PyObject*
 ;; ============================================================================
 DEF_FUNC_BARE int_floordiv
+    ; Unwrap int subclass instances
+    push rsi
+    call int_unwrap
+    pop rsi
+    push rdi
+    mov rdi, rsi
+    call int_unwrap
+    mov rsi, rdi
+    pop rdi
+    ; Check both SmallInt
     mov rax, rdi
-    or rax, rsi
+    and rax, rsi
     jns .gmp_path
 
     ; SmallInt fast path
@@ -602,7 +1306,14 @@ DEF_FUNC_BARE int_floordiv
     jz .gmp_path            ; div by zero -> let GMP handle/crash
     cqo
     idiv rcx
-    ; Check range (idiv result always fits if inputs fit)
+    ; Python floored division: if remainder != 0 and has different sign from divisor, adjust
+    test rdx, rdx
+    jz .smallint_done
+    mov r8, rdx
+    xor r8, rcx
+    jns .smallint_done
+    dec rax
+.smallint_done:
     bts rax, 63
     ret
 
@@ -643,7 +1354,7 @@ DEF_FUNC_BARE int_floordiv
     lea rdi, [rax + PyIntObject.mpz]
     lea rsi, [rbx + PyIntObject.mpz]
     lea rdx, [r12 + PyIntObject.mpz]
-    call __gmpz_tdiv_q wrt ..plt
+    call __gmpz_fdiv_q wrt ..plt
     test r13b, 1
     jz .no_free_a
     mov rdi, rbx
@@ -666,8 +1377,18 @@ END_FUNC int_floordiv
 ;; int_mod(PyObject *a, PyObject *b) -> PyObject*
 ;; ============================================================================
 DEF_FUNC_BARE int_mod
+    ; Unwrap int subclass instances
+    push rsi
+    call int_unwrap
+    pop rsi
+    push rdi
+    mov rdi, rsi
+    call int_unwrap
+    mov rsi, rdi
+    pop rdi
+    ; Check both SmallInt
     mov rax, rdi
-    or rax, rsi
+    and rax, rsi
     jns .gmp_path
 
     mov rax, rdi
@@ -679,6 +1400,14 @@ DEF_FUNC_BARE int_mod
     cqo
     idiv rcx
     mov rax, rdx            ; remainder is in rdx
+    ; Python floored mod: if remainder != 0 and has different sign from divisor, adjust
+    test rax, rax
+    jz .smallint_done
+    mov r8, rax
+    xor r8, rcx
+    jns .smallint_done
+    add rax, rcx            ; remainder += divisor
+.smallint_done:
     bts rax, 63
     ret
 
@@ -719,7 +1448,7 @@ DEF_FUNC_BARE int_mod
     lea rdi, [rax + PyIntObject.mpz]
     lea rsi, [rbx + PyIntObject.mpz]
     lea rdx, [r12 + PyIntObject.mpz]
-    call __gmpz_tdiv_r wrt ..plt
+    call __gmpz_fdiv_r wrt ..plt
     test r13b, 1
     jz .no_free_a
     mov rdi, rbx
@@ -742,6 +1471,10 @@ END_FUNC int_mod
 ;; int_neg(PyObject *a) -> PyObject*
 ;; ============================================================================
 DEF_FUNC_BARE int_neg
+    test rdi, rdi
+    js .smallint
+    ; Unwrap int subclass
+    call int_unwrap
     test rdi, rdi
     js .smallint
 
@@ -787,6 +1520,25 @@ DEF_FUNC_BARE int_neg
 END_FUNC int_neg
 
 ;; ============================================================================
+;; int_unwrap(rdi) -> rdi
+;; If rdi is a PyIntSubclassObject, extract the int_value.
+;; If rdi is a SmallInt or GMP int, leave unchanged.
+global int_unwrap
+DEF_FUNC_BARE int_unwrap
+    test rdi, rdi
+    js .iuw_done                 ; SmallInt
+    mov rax, [rdi + PyObject.ob_type]
+    lea rcx, [rel int_type]
+    cmp rax, rcx
+    je .iuw_done                 ; exact int_type
+    mov rax, [rax + PyTypeObject.tp_flags]
+    test rax, TYPE_FLAG_INT_SUBCLASS
+    jz .iuw_done                 ; not int subclass
+    mov rdi, [rdi + PyIntSubclassObject.int_value]
+.iuw_done:
+    ret
+END_FUNC int_unwrap
+
 ;; int_compare(PyObject *a, PyObject *b, int op) -> PyObject*
 ;; op: PY_LT=0 PY_LE=1 PY_EQ=2 PY_NE=3 PY_GT=4 PY_GE=5
 ;; ============================================================================
@@ -795,6 +1547,16 @@ DEF_FUNC int_compare
     push r12
 
     mov ebx, edx            ; save op
+
+    ; Unwrap int subclass instances
+    push rsi
+    call int_unwrap
+    pop rsi
+    push rdi
+    mov rdi, rsi
+    call int_unwrap
+    mov rsi, rdi
+    pop rdi
 
     ; Check if both SmallInt
     mov rax, rdi
@@ -923,8 +1685,18 @@ END_FUNC int_dealloc
 ;; Bitwise AND: int_and(PyObject *a, PyObject *b) -> PyObject*
 ;; ============================================================================
 DEF_FUNC_BARE int_and
+    ; Unwrap int subclass instances
+    push rsi
+    call int_unwrap
+    pop rsi
+    push rdi
+    mov rdi, rsi
+    call int_unwrap
+    mov rsi, rdi
+    pop rdi
+    ; Check both SmallInt
     mov rax, rdi
-    or rax, rsi
+    and rax, rsi
     jns .gmp
 
     ; Both SmallInt
@@ -992,8 +1764,18 @@ END_FUNC int_and
 ;; Bitwise OR: int_or(PyObject *a, PyObject *b) -> PyObject*
 ;; ============================================================================
 DEF_FUNC_BARE int_or
+    ; Unwrap int subclass instances
+    push rsi
+    call int_unwrap
+    pop rsi
+    push rdi
+    mov rdi, rsi
+    call int_unwrap
+    mov rsi, rdi
+    pop rdi
+    ; Check both SmallInt
     mov rax, rdi
-    or rax, rsi
+    and rax, rsi
     jns .gmp
 
     ; Both SmallInt
@@ -1061,8 +1843,18 @@ END_FUNC int_or
 ;; Bitwise XOR: int_xor(PyObject *a, PyObject *b) -> PyObject*
 ;; ============================================================================
 DEF_FUNC_BARE int_xor
+    ; Unwrap int subclass instances
+    push rsi
+    call int_unwrap
+    pop rsi
+    push rdi
+    mov rdi, rsi
+    call int_unwrap
+    mov rsi, rdi
+    pop rdi
+    ; Check both SmallInt
     mov rax, rdi
-    or rax, rsi
+    and rax, rsi
     jns .gmp
 
     ; Both SmallInt: XOR values, must re-set tag bit
@@ -1135,6 +1927,8 @@ END_FUNC int_xor
 ;; ~x = -(x+1)
 ;; ============================================================================
 DEF_FUNC_BARE int_invert
+    ; Unwrap int subclass instances
+    call int_unwrap
     test rdi, rdi
     js .smallint
 
@@ -1175,6 +1969,16 @@ DEF_FUNC int_lshift
     push rbx
     push r12
     push r13
+
+    ; Unwrap int subclass instances
+    push rsi
+    call int_unwrap
+    pop rsi
+    push rdi
+    mov rdi, rsi
+    call int_unwrap
+    mov rsi, rdi
+    pop rdi
 
     mov rbx, rdi           ; left operand
     mov r12, rsi           ; right operand (shift amount)
@@ -1248,6 +2052,16 @@ DEF_FUNC int_rshift
     push rbx
     push r12
     push r13
+
+    ; Unwrap int subclass instances
+    push rsi
+    call int_unwrap
+    pop rsi
+    push rdi
+    mov rdi, rsi
+    call int_unwrap
+    mov rsi, rdi
+    pop rdi
 
     mov rbx, rdi
     mov r12, rsi
@@ -1329,6 +2143,16 @@ DEF_FUNC int_power
     push rbx
     push r12
     push r13
+
+    ; Unwrap int subclass instances
+    push rsi
+    call int_unwrap
+    pop rsi
+    push rdi
+    mov rdi, rsi
+    call int_unwrap
+    mov rsi, rdi
+    pop rdi
 
     mov rbx, rdi           ; base
     mov r12, rsi           ; exponent

@@ -31,6 +31,7 @@ extern cell_type
 extern exc_NameError_type
 extern exc_AttributeError_type
 extern method_new
+extern method_type
 extern staticmethod_type
 extern classmethod_type
 extern property_type
@@ -364,12 +365,15 @@ DEF_FUNC op_load_attr, LA_FRAME
     jz .la_try_dict
 
     ; Call tp_getattr(obj, name)
+    ; tp_getattr handles all descriptor/binding logic (staticmethod, classmethod,
+    ; property, method binding). Result is fully resolved.
     mov rdi, [rbp - LA_OBJ]
     mov rsi, [rbp - LA_NAME]
     call rax
     test rax, rax
     jz .la_attr_error
     mov [rbp - LA_ATTR], rax
+    ; LA_FROM_TYPE stays 0 — tp_getattr already handled binding
     jmp .la_got_attr
 
 .la_try_dict:
@@ -504,14 +508,31 @@ DEF_FUNC op_load_attr, LA_FRAME
 
 .la_method_load:
     ; flag=1: method-style load
-    ; Check if attr is callable (has tp_call) — works for func_type AND builtin methods
     mov rax, [rbp - LA_ATTR]
     test rax, rax
     js .la_not_method              ; SmallInt can't be a method
     mov rcx, [rax + PyObject.ob_type]
-    mov rcx, [rcx + PyTypeObject.tp_call]
-    test rcx, rcx
-    jz .la_not_method
+
+    ; If attr is a bound method (returned by instance_getattr with binding),
+    ; unwrap into [im_func, im_self] push pattern
+    lea rdx, [rel method_type]
+    cmp rcx, rdx
+    je .la_unwrap_bound_method
+
+    ; Only bind func_type and builtin_func_type as methods
+    ; Types and other callables should NOT be bound
+    lea rdx, [rel func_type]
+    cmp rcx, rdx
+    je .la_is_method_func
+
+    extern builtin_func_type
+    lea rdx, [rel builtin_func_type]
+    cmp rcx, rdx
+    je .la_is_method_func
+
+    jmp .la_not_method
+
+.la_is_method_func:
 
     ; === IC: try to specialize as LOAD_ATTR_METHOD (203) ===
     ; Only when attr came from type dict (no tp_getattr path)
@@ -543,6 +564,35 @@ DEF_FUNC op_load_attr, LA_FRAME
     VPUSH rax              ; push func (deeper slot = callable)
     mov rax, [rbp - LA_OBJ]
     VPUSH rax              ; push self/obj (shallower = TOS)
+    jmp .la_done
+
+.la_unwrap_bound_method:
+    ; Attr is a bound method from instance_getattr.
+    ; Unwrap: push im_func (deeper), im_self (TOS).
+    ; DECREF obj (not used — method has its own self ref).
+    mov rdi, [rbp - LA_OBJ]
+    call obj_decref
+
+    mov rax, [rbp - LA_ATTR]    ; bound method
+    ; INCREF im_func and im_self (we're creating new refs on the value stack)
+    mov rdi, [rax + PyMethodObject.im_func]
+    push rax
+    call obj_incref
+    pop rax
+    mov rdi, [rax + PyMethodObject.im_self]
+    push rax
+    call obj_incref
+    pop rax
+
+    ; Push [im_func, im_self] then DECREF the method wrapper
+    mov rcx, [rax + PyMethodObject.im_func]
+    VPUSH rcx                    ; func (deeper)
+    mov rcx, [rax + PyMethodObject.im_self]
+    VPUSH rcx                    ; self (TOS)
+
+    ; DECREF the method wrapper
+    mov rdi, rax
+    call obj_decref
     jmp .la_done
 
 .la_not_method:

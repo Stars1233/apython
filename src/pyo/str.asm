@@ -331,16 +331,24 @@ extern obj_repr
 extern tuple_type
 extern obj_decref
 
-DEF_FUNC str_mod, 1280
+; str_mod stack offsets
+SM_FMT     equ 8
+SM_ARGS    equ 16
+SM_BUF     equ 24
+SM_CAP     equ 32
+SM_ISTUPLE equ 40
+SM_NARGS   equ 48
+SM_FRAME   equ 48
+
+DEF_FUNC str_mod, SM_FRAME
     ; Stack layout:
-    ; [rbp-8]    = fmt string
-    ; [rbp-16]   = args (single value or tuple)
-    ; [rbp-24]   = output buffer (lea into stack)
-    ; [rbp-32]   = output position (int)
-    ; [rbp-40]   = arg index (int)
-    ; [rbp-48]   = nargs (int)
-    ; [rbp-56]   = is_tuple (bool)
-    ; [rbp-1280] = buffer start
+    ; [rbp-SM_FMT]     = fmt string
+    ; [rbp-SM_ARGS]    = args (single value or tuple)
+    ; [rbp-SM_BUF]     = heap buffer ptr
+    ; [rbp-SM_CAP]     = buffer capacity
+    ; [rbp-SM_ISTUPLE] = is_tuple (bool)
+    ; [rbp-SM_NARGS]   = nargs (int)
+    ; r13 = buffer ptr, r14 = output pos, r15 = arg index
 
     push rbx
     push r12
@@ -348,30 +356,35 @@ DEF_FUNC str_mod, 1280
     push r14
     push r15
 
-    mov [rbp-8], rdi           ; fmt
-    mov [rbp-16], rsi          ; args
+    mov [rbp-SM_FMT], rdi      ; fmt
+    mov [rbp-SM_ARGS], rsi     ; args
 
     ; Determine if args is a tuple
-    mov qword [rbp-56], 0      ; is_tuple = false
-    mov qword [rbp-48], 1      ; nargs = 1 (single value)
+    mov qword [rbp-SM_ISTUPLE], 0  ; is_tuple = false
+    mov qword [rbp-SM_NARGS], 1   ; nargs = 1 (single value)
     test rsi, rsi
     js .sm_not_tuple            ; SmallInt → single value
     mov rax, [rsi + PyObject.ob_type]
     lea rcx, [rel tuple_type]
     cmp rax, rcx
     jne .sm_not_tuple
-    mov qword [rbp-56], 1      ; is_tuple = true
+    mov qword [rbp-SM_ISTUPLE], 1  ; is_tuple = true
     mov rax, [rsi + PyTupleObject.ob_size]
-    mov [rbp-48], rax           ; nargs = tuple size
+    mov [rbp-SM_NARGS], rax    ; nargs = tuple size
 .sm_not_tuple:
 
-    ; Initialize
-    lea r13, [rbp - 1280]      ; r13 = output buffer
+    ; Allocate initial heap buffer (8192 bytes)
+    extern ap_malloc, ap_free, ap_realloc
+    mov edi, 8192
+    call ap_malloc
+    mov r13, rax               ; r13 = output buffer
+    mov [rbp-SM_BUF], rax
+    mov qword [rbp-SM_CAP], 8192
     xor r14d, r14d             ; r14 = output pos
     xor r15d, r15d             ; r15 = arg index
 
     ; Walk format string
-    mov rbx, [rbp-8]           ; fmt string
+    mov rbx, [rbp-SM_FMT]     ; fmt string
     mov r12, [rbx + PyStrObject.ob_size]  ; fmt length
     lea rbx, [rbx + PyStrObject.data]     ; fmt data
     xor ecx, ecx               ; input pos
@@ -379,26 +392,82 @@ DEF_FUNC str_mod, 1280
 .sm_loop:
     cmp rcx, r12
     jge .sm_done
-    cmp r14, 1200
-    jge .sm_done               ; safety limit
 
     movzx eax, byte [rbx + rcx]
     cmp al, '%'
     je .sm_format
-    ; Regular char: copy to output
+    ; Regular char: ensure 1 byte of space
+    push rcx
+    lea rdi, [r14 + 1]
+    call .sm_ensure_cap
+    pop rcx
+    ; Copy char to output
+    movzx eax, byte [rbx + rcx]
     mov [r13 + r14], al
     inc r14
     inc rcx
     jmp .sm_loop
 
 .sm_format:
-    ; '%' found — check next char
+    ; '%' found — skip optional format spec, then dispatch on conversion char
+    ; Format: %[flags][width][.precision]conversion
+    ; Flags: -, +, 0, #, space
+    ; Width: digits
+    ; Precision: . followed by digits
     inc rcx
     cmp rcx, r12
     jge .sm_done
 
+.sm_skip_flags:
     movzx eax, byte [rbx + rcx]
-    inc rcx                    ; consume format char
+    cmp al, '-'
+    je .sm_skip_one
+    cmp al, '+'
+    je .sm_skip_one
+    cmp al, '0'
+    je .sm_skip_one
+    cmp al, '#'
+    je .sm_skip_one
+    cmp al, ' '
+    je .sm_skip_one
+    jmp .sm_skip_width
+.sm_skip_one:
+    inc rcx
+    cmp rcx, r12
+    jge .sm_done
+    jmp .sm_skip_flags
+
+.sm_skip_width:
+    movzx eax, byte [rbx + rcx]
+    cmp al, '0'
+    jb .sm_check_dot
+    cmp al, '9'
+    ja .sm_check_dot
+    inc rcx
+    cmp rcx, r12
+    jge .sm_done
+    jmp .sm_skip_width
+
+.sm_check_dot:
+    cmp al, '.'
+    jne .sm_dispatch
+    inc rcx                    ; skip '.'
+    cmp rcx, r12
+    jge .sm_done
+.sm_skip_prec:
+    movzx eax, byte [rbx + rcx]
+    cmp al, '0'
+    jb .sm_dispatch
+    cmp al, '9'
+    ja .sm_dispatch
+    inc rcx
+    cmp rcx, r12
+    jge .sm_done
+    jmp .sm_skip_prec
+
+.sm_dispatch:
+    movzx eax, byte [rbx + rcx]
+    inc rcx                    ; consume conversion char
 
     cmp al, '%'
     je .sm_percent
@@ -453,12 +522,17 @@ DEF_FUNC str_mod, 1280
     push rax                   ; save for DECREF
     mov rcx, [rax + PyStrObject.ob_size]
     lea rsi, [rax + PyStrObject.data]
-    ; Copy chars
+    ; Ensure enough space for the entire string
+    push rcx
+    push rsi
+    lea rdi, [r14 + rcx + 1]  ; need pos + len + 1 for null
+    call .sm_ensure_cap
+    pop rsi
+    pop rcx
+    ; Copy chars (memcpy-style)
     xor edx, edx
 .sm_copy_loop:
     cmp rdx, rcx
-    jge .sm_copy_done
-    cmp r14, 1200
     jge .sm_copy_done
     movzx eax, byte [rsi + rdx]
     mov [r13 + r14], al
@@ -474,14 +548,14 @@ DEF_FUNC str_mod, 1280
 .sm_get_arg:
     ; Get arg at index r15, increment r15
     ; Returns arg in rax (borrowed ref)
-    cmp qword [rbp-56], 1
+    cmp qword [rbp-SM_ISTUPLE], 1
     je .sm_arg_tuple
     ; Single value
-    mov rax, [rbp-16]
+    mov rax, [rbp-SM_ARGS]
     inc r15
     ret
 .sm_arg_tuple:
-    mov rax, [rbp-16]          ; tuple
+    mov rax, [rbp-SM_ARGS]     ; tuple
     mov rdx, r15
     cmp rdx, [rax + PyTupleObject.ob_size]
     jge .sm_arg_none
@@ -494,14 +568,41 @@ DEF_FUNC str_mod, 1280
     inc r15
     ret
 
+;; .sm_ensure_cap — ensure buffer can hold rdi bytes total
+;; rdi = required capacity. Preserves r14, r15, rbx, r12. Updates r13.
+.sm_ensure_cap:
+    cmp rdi, [rbp-SM_CAP]
+    jbe .sm_cap_ok
+    ; Double capacity until sufficient
+    mov rax, [rbp-SM_CAP]
+.sm_grow_loop:
+    shl rax, 1
+    cmp rdi, rax
+    ja .sm_grow_loop
+    ; rax = new capacity
+    mov [rbp-SM_CAP], rax
+    mov rdi, r13               ; old ptr
+    mov rsi, rax               ; new size
+    call ap_realloc
+    mov r13, rax
+    mov [rbp-SM_BUF], rax
+.sm_cap_ok:
+    ret
+
 .sm_done:
     ; Null-terminate and create string
     mov byte [r13 + r14], 0
 
+    push r13                   ; save buffer ptr for free
     mov rdi, r13
     mov rsi, r14
     call str_new
+    mov rbx, rax               ; save result
 
+    pop rdi                    ; free heap buffer
+    call ap_free
+
+    mov rax, rbx               ; return result
     pop r15
     pop r14
     pop r13
@@ -819,6 +920,95 @@ DEF_FUNC str_getslice
 END_FUNC str_getslice
 
 ;; ============================================================================
+;; String Iterator
+;; ============================================================================
+
+extern obj_decref
+extern obj_incref
+extern iter_self
+
+;; str_tp_iter(PyStrObject *self) -> PyStrIterObject*
+;; tp_iter for str type: create a new string iterator
+;; ============================================================================
+global str_tp_iter
+DEF_FUNC str_tp_iter
+    push rbx
+
+    mov rbx, rdi               ; save str
+
+    mov edi, PyStrIterObject_size
+    call ap_malloc
+
+    mov qword [rax + PyObject.ob_refcnt], 1
+    lea rcx, [rel str_iter_type]
+    mov [rax + PyObject.ob_type], rcx
+    mov [rax + PyStrIterObject.it_seq], rbx
+    mov qword [rax + PyStrIterObject.it_index], 0
+
+    ; INCREF the string
+    INCREF rbx
+
+    pop rbx
+    leave
+    ret
+END_FUNC str_tp_iter
+
+;; str_iter_next(PyStrIterObject *self) -> PyObject* or NULL
+;; Return next character as a 1-char string, or NULL if exhausted
+;; ============================================================================
+global str_iter_next
+DEF_FUNC str_iter_next
+    push rbx
+
+    mov rbx, rdi                                      ; self (iter)
+    mov rax, [rbx + PyStrIterObject.it_seq]            ; str
+    mov rcx, [rbx + PyStrIterObject.it_index]          ; index
+
+    ; Check bounds (byte index vs ob_size)
+    cmp rcx, [rax + PyStrObject.ob_size]
+    jge .si_exhausted
+
+    ; Create single-char string from current byte position
+    lea rdi, [rax + PyStrObject.data]
+    add rdi, rcx
+    mov rsi, 1
+    call str_new
+
+    ; Advance index
+    inc qword [rbx + PyStrIterObject.it_index]
+
+    pop rbx
+    leave
+    ret
+
+.si_exhausted:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+END_FUNC str_iter_next
+
+;; str_iter_dealloc(PyObject *self)
+;; ============================================================================
+global str_iter_dealloc
+DEF_FUNC str_iter_dealloc
+    push rbx
+    mov rbx, rdi
+
+    ; DECREF the string
+    mov rdi, [rbx + PyStrIterObject.it_seq]
+    call obj_decref
+
+    ; Free self
+    mov rdi, rbx
+    call ap_free
+
+    pop rbx
+    leave
+    ret
+END_FUNC str_iter_dealloc
+
+;; ============================================================================
 ;; Data section
 ;; ============================================================================
 section .data
@@ -885,7 +1075,7 @@ str_type:
     dq 0                ; tp_getattr
     dq 0                ; tp_setattr
     dq str_compare      ; tp_richcompare
-    dq 0                ; tp_iter
+    dq str_tp_iter      ; tp_iter
     dq 0                ; tp_iternext
     dq 0                ; tp_init
     dq 0                ; tp_new
@@ -897,3 +1087,34 @@ str_type:
     dq 0                ; tp_mro
     dq TYPE_FLAG_STR_SUBCLASS ; tp_flags
     dq 0                ; tp_bases
+
+; str_iter type data
+align 8
+str_iter_name: db "str_iterator", 0
+
+align 8
+str_iter_type:
+    dq 1                        ; ob_refcnt
+    dq type_type                ; ob_type
+    dq str_iter_name            ; tp_name
+    dq PyStrIterObject_size     ; tp_basicsize
+    dq str_iter_dealloc         ; tp_dealloc
+    dq 0                        ; tp_repr
+    dq 0                        ; tp_str
+    dq 0                        ; tp_hash
+    dq 0                        ; tp_call
+    dq 0                        ; tp_getattr
+    dq 0                        ; tp_setattr
+    dq 0                        ; tp_richcompare
+    dq iter_self                ; tp_iter (return self)
+    dq str_iter_next            ; tp_iternext
+    dq 0                        ; tp_init
+    dq 0                        ; tp_new
+    dq 0                        ; tp_as_number
+    dq 0                        ; tp_as_sequence
+    dq 0                        ; tp_as_mapping
+    dq 0                        ; tp_base
+    dq 0                        ; tp_dict
+    dq 0                        ; tp_mro
+    dq 0                        ; tp_flags
+    dq 0                        ; tp_bases
