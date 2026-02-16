@@ -39,8 +39,24 @@ DEF_FUNC main
     mov r14d, edi               ; r14 = argc
     mov r15, rsi                ; r15 = argv
 
-    ; Save argv[1] (the .pyc filename)
-    mov rbx, [rsi + 8]         ; rbx = argv[1]
+    ; Check for -t flag (opcode tracing)
+    mov rax, [r15 + 8]         ; rax = argv[1]
+    cmp byte [rax], '-'
+    jne .no_trace_flag
+    cmp byte [rax + 1], 't'
+    jne .no_trace_flag
+    cmp byte [rax + 2], 0
+    jne .no_trace_flag
+    extern trace_opcodes
+    mov byte [rel trace_opcodes], 1
+    add r15, 8                  ; skip -t in argv
+    dec r14d                    ; adjust argc
+    cmp r14d, 2
+    jl .usage
+.no_trace_flag:
+
+    ; Save argv[1] (the .pyc filename, after -t shift if any)
+    mov rbx, [r15 + 8]         ; rbx = argv[1]
 
     ; Initialize subsystems
     call bool_init
@@ -157,7 +173,7 @@ DEF_FUNC main
     ret
 
 .usage:
-    CSTRING rdi, "Usage: apython <file.pyc>"
+    CSTRING rdi, "Usage: apython [-t] <file.pyc>"
     call fatal_error
 
 .load_failed:

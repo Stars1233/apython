@@ -193,6 +193,16 @@ DEF_FUNC_BARE eval_dispatch
     movzx eax, byte [rbx]      ; load opcode
     movzx ecx, byte [rbx+1]    ; load arg into ecx
     add rbx, 2                  ; advance past instruction word
+    cmp byte [rel trace_opcodes], 0
+    jz .no_trace
+    push rax
+    push rcx
+    mov edi, eax
+    mov esi, ecx
+    call trace_print_opcode
+    pop rcx
+    pop rax
+.no_trace:
     lea rdx, [rel opcode_table]
     jmp [rdx + rax*8]              ; dispatch to handler
 END_FUNC eval_dispatch
@@ -211,6 +221,82 @@ DEF_FUNC_BARE eval_return
     pop rbp
     ret
 END_FUNC eval_return
+
+; ---------------------------------------------------------------------------
+; trace_print_opcode - Print opcode name and arg to stderr
+; Called from eval_dispatch when tracing is enabled.
+; edi = opcode number, esi = arg value
+; ---------------------------------------------------------------------------
+TP_OPCODE equ 8
+TP_ARG    equ 16
+TP_NAME   equ 24
+TP_FRAME  equ 48
+
+DEF_FUNC trace_print_opcode, TP_FRAME
+    mov dword [rbp - TP_OPCODE], edi
+    mov dword [rbp - TP_ARG], esi
+
+    ; Look up opcode name string
+    lea rax, [rel opcode_names]
+    movzx edi, dil
+    mov rax, [rax + rdi*8]
+    mov [rbp - TP_NAME], rax
+
+    ; Write "  " prefix to stderr
+    mov edi, 2
+    lea rsi, [rel trace_prefix]
+    mov edx, 2
+    call sys_write
+
+    ; Write opcode name (strlen + write)
+    mov rsi, [rbp - TP_NAME]
+    xor ecx, ecx
+.strlen:
+    cmp byte [rsi + rcx], 0
+    je .strlen_done
+    inc ecx
+    jmp .strlen
+.strlen_done:
+    mov edx, ecx
+    mov edi, 2
+    call sys_write
+
+    ; Write " " separator
+    mov edi, 2
+    lea rsi, [rel trace_space]
+    mov edx, 1
+    call sys_write
+
+    ; Convert arg to decimal string + newline in frame buffer
+    mov eax, dword [rbp - TP_ARG]
+    lea rdi, [rbp - 25]           ; newline position
+    mov byte [rdi], 10
+
+    test eax, eax
+    jnz .convert
+    dec rdi
+    mov byte [rdi], '0'
+    jmp .write_num
+.convert:
+    mov ecx, 10
+.div_loop:
+    xor edx, edx
+    div ecx
+    add dl, '0'
+    dec rdi
+    mov byte [rdi], dl
+    test eax, eax
+    jnz .div_loop
+.write_num:
+    lea rdx, [rbp - 24]           ; one past newline
+    sub rdx, rdi
+    mov rsi, rdi
+    mov edi, 2
+    call sys_write
+
+    leave
+    ret
+END_FUNC trace_print_opcode
 
 ; ============================================================================
 ; Exception unwind mechanism
@@ -1067,6 +1153,9 @@ eval_saved_r12: resq 1       ; frame pointer saved at frame entry (for exception
 global kw_names_pending
 kw_names_pending: resq 1     ; tuple of kw names for next CALL, or NULL
 
+global trace_opcodes
+trace_opcodes: resb 1           ; nonzero = trace opcodes to stderr
+
 ; ============================================================================
 ; Read-only data for traceback printing
 ; ============================================================================
@@ -1082,3 +1171,395 @@ tb_line_prefix_len equ $ - tb_line_prefix
 
 tb_colon: db ": "
 tb_newline: db 10
+
+; ============================================================================
+; Trace output helper strings
+; ============================================================================
+trace_prefix: db "  "
+trace_space: db " "
+
+; ============================================================================
+; Opcode name strings
+; ============================================================================
+opn_unknown: db "???", 0
+opn_CACHE: db "CACHE", 0
+opn_POP_TOP: db "POP_TOP", 0
+opn_PUSH_NULL: db "PUSH_NULL", 0
+opn_INTERPRETER_EXIT: db "INTERPRETER_EXIT", 0
+opn_END_FOR: db "END_FOR", 0
+opn_END_SEND: db "END_SEND", 0
+opn_NOP: db "NOP", 0
+opn_UNARY_NEGATIVE: db "UNARY_NEGATIVE", 0
+opn_UNARY_NOT: db "UNARY_NOT", 0
+opn_UNARY_INVERT: db "UNARY_INVERT", 0
+opn_BINARY_SUBSCR: db "BINARY_SUBSCR", 0
+opn_BINARY_SLICE: db "BINARY_SLICE", 0
+opn_STORE_SLICE: db "STORE_SLICE", 0
+opn_GET_LEN: db "GET_LEN", 0
+opn_MATCH_MAPPING: db "MATCH_MAPPING", 0
+opn_MATCH_SEQUENCE: db "MATCH_SEQUENCE", 0
+opn_MATCH_KEYS: db "MATCH_KEYS", 0
+opn_PUSH_EXC_INFO: db "PUSH_EXC_INFO", 0
+opn_CHECK_EXC_MATCH: db "CHECK_EXC_MATCH", 0
+opn_CHECK_EG_MATCH: db "CHECK_EG_MATCH", 0
+opn_WITH_EXCEPT_START: db "WITH_EXCEPT_START", 0
+opn_GET_AITER: db "GET_AITER", 0
+opn_GET_ANEXT: db "GET_ANEXT", 0
+opn_BEFORE_ASYNC_WITH: db "BEFORE_ASYNC_WITH", 0
+opn_BEFORE_WITH: db "BEFORE_WITH", 0
+opn_END_ASYNC_FOR: db "END_ASYNC_FOR", 0
+opn_CLEANUP_THROW: db "CLEANUP_THROW", 0
+opn_STORE_SUBSCR: db "STORE_SUBSCR", 0
+opn_DELETE_SUBSCR: db "DELETE_SUBSCR", 0
+opn_GET_ITER: db "GET_ITER", 0
+opn_GET_YIELD_FROM_ITER: db "GET_YIELD_FROM_ITER", 0
+opn_LOAD_BUILD_CLASS: db "LOAD_BUILD_CLASS", 0
+opn_LOAD_ASSERTION_ERROR: db "LOAD_ASSERTION_ERROR", 0
+opn_RETURN_GENERATOR: db "RETURN_GENERATOR", 0
+opn_RETURN_VALUE: db "RETURN_VALUE", 0
+opn_SETUP_ANNOTATIONS: db "SETUP_ANNOTATIONS", 0
+opn_LOAD_LOCALS: db "LOAD_LOCALS", 0
+opn_POP_EXCEPT: db "POP_EXCEPT", 0
+opn_STORE_NAME: db "STORE_NAME", 0
+opn_DELETE_NAME: db "DELETE_NAME", 0
+opn_UNPACK_SEQUENCE: db "UNPACK_SEQUENCE", 0
+opn_FOR_ITER: db "FOR_ITER", 0
+opn_UNPACK_EX: db "UNPACK_EX", 0
+opn_STORE_ATTR: db "STORE_ATTR", 0
+opn_DELETE_ATTR: db "DELETE_ATTR", 0
+opn_STORE_GLOBAL: db "STORE_GLOBAL", 0
+opn_DELETE_GLOBAL: db "DELETE_GLOBAL", 0
+opn_SWAP: db "SWAP", 0
+opn_LOAD_CONST: db "LOAD_CONST", 0
+opn_LOAD_NAME: db "LOAD_NAME", 0
+opn_BUILD_TUPLE: db "BUILD_TUPLE", 0
+opn_BUILD_LIST: db "BUILD_LIST", 0
+opn_BUILD_SET: db "BUILD_SET", 0
+opn_BUILD_MAP: db "BUILD_MAP", 0
+opn_LOAD_ATTR: db "LOAD_ATTR", 0
+opn_COMPARE_OP: db "COMPARE_OP", 0
+opn_IMPORT_NAME: db "IMPORT_NAME", 0
+opn_IMPORT_FROM: db "IMPORT_FROM", 0
+opn_JUMP_FORWARD: db "JUMP_FORWARD", 0
+opn_POP_JUMP_IF_FALSE: db "POP_JUMP_IF_FALSE", 0
+opn_POP_JUMP_IF_TRUE: db "POP_JUMP_IF_TRUE", 0
+opn_LOAD_GLOBAL: db "LOAD_GLOBAL", 0
+opn_IS_OP: db "IS_OP", 0
+opn_CONTAINS_OP: db "CONTAINS_OP", 0
+opn_RERAISE: db "RERAISE", 0
+opn_COPY: db "COPY", 0
+opn_RETURN_CONST: db "RETURN_CONST", 0
+opn_BINARY_OP: db "BINARY_OP", 0
+opn_SEND: db "SEND", 0
+opn_LOAD_FAST: db "LOAD_FAST", 0
+opn_STORE_FAST: db "STORE_FAST", 0
+opn_DELETE_FAST: db "DELETE_FAST", 0
+opn_LOAD_FAST_CHECK: db "LOAD_FAST_CHECK", 0
+opn_POP_JUMP_IF_NOT_NONE: db "POP_JUMP_IF_NOT_NONE", 0
+opn_POP_JUMP_IF_NONE: db "POP_JUMP_IF_NONE", 0
+opn_RAISE_VARARGS: db "RAISE_VARARGS", 0
+opn_GET_AWAITABLE: db "GET_AWAITABLE", 0
+opn_MAKE_FUNCTION: db "MAKE_FUNCTION", 0
+opn_BUILD_SLICE: db "BUILD_SLICE", 0
+opn_JUMP_BACKWARD_NO_INTERRUPT: db "JUMP_BACKWARD_NO_INTERRUPT", 0
+opn_MAKE_CELL: db "MAKE_CELL", 0
+opn_LOAD_CLOSURE: db "LOAD_CLOSURE", 0
+opn_LOAD_DEREF: db "LOAD_DEREF", 0
+opn_STORE_DEREF: db "STORE_DEREF", 0
+opn_DELETE_DEREF: db "DELETE_DEREF", 0
+opn_JUMP_BACKWARD: db "JUMP_BACKWARD", 0
+opn_LOAD_SUPER_ATTR: db "LOAD_SUPER_ATTR", 0
+opn_CALL_FUNCTION_EX: db "CALL_FUNCTION_EX", 0
+opn_LOAD_FAST_AND_CLEAR: db "LOAD_FAST_AND_CLEAR", 0
+opn_EXTENDED_ARG: db "EXTENDED_ARG", 0
+opn_LIST_APPEND: db "LIST_APPEND", 0
+opn_SET_ADD: db "SET_ADD", 0
+opn_MAP_ADD: db "MAP_ADD", 0
+opn_COPY_FREE_VARS: db "COPY_FREE_VARS", 0
+opn_YIELD_VALUE: db "YIELD_VALUE", 0
+opn_RESUME: db "RESUME", 0
+opn_MATCH_CLASS: db "MATCH_CLASS", 0
+opn_FORMAT_VALUE: db "FORMAT_VALUE", 0
+opn_BUILD_CONST_KEY_MAP: db "BUILD_CONST_KEY_MAP", 0
+opn_BUILD_STRING: db "BUILD_STRING", 0
+opn_LIST_EXTEND: db "LIST_EXTEND", 0
+opn_SET_UPDATE: db "SET_UPDATE", 0
+opn_DICT_MERGE: db "DICT_MERGE", 0
+opn_DICT_UPDATE: db "DICT_UPDATE", 0
+opn_CALL: db "CALL", 0
+opn_KW_NAMES: db "KW_NAMES", 0
+opn_CALL_INTRINSIC_1: db "CALL_INTRINSIC_1", 0
+opn_CALL_INTRINSIC_2: db "CALL_INTRINSIC_2", 0
+opn_LOAD_FROM_DICT_OR_GLOBALS: db "LOAD_FROM_DICT_OR_GLOBALS", 0
+opn_LOAD_FROM_DICT_OR_DEREF: db "LOAD_FROM_DICT_OR_DEREF", 0
+opn_LOAD_GLOBAL_MODULE: db "LOAD_GLOBAL_MODULE", 0
+opn_LOAD_GLOBAL_BUILTIN: db "LOAD_GLOBAL_BUILTIN", 0
+opn_LOAD_ATTR_METHOD: db "LOAD_ATTR_METHOD", 0
+opn_COMPARE_OP_INT: db "COMPARE_OP_INT", 0
+opn_BINARY_OP_ADD_INT: db "BINARY_OP_ADD_INT", 0
+opn_BINARY_OP_SUBTRACT_INT: db "BINARY_OP_SUBTRACT_INT", 0
+opn_FOR_ITER_LIST: db "FOR_ITER_LIST", 0
+opn_FOR_ITER_RANGE: db "FOR_ITER_RANGE", 0
+
+; ============================================================================
+; Opcode name lookup table (256 entries, in .data for relocations)
+; ============================================================================
+section .data
+align 8
+opcode_names:
+    dq opn_CACHE                      ; 0
+    dq opn_POP_TOP                    ; 1
+    dq opn_PUSH_NULL                  ; 2
+    dq opn_INTERPRETER_EXIT           ; 3
+    dq opn_END_FOR                    ; 4
+    dq opn_END_SEND                   ; 5
+    dq opn_unknown                    ; 6
+    dq opn_unknown                    ; 7
+    dq opn_unknown                    ; 8
+    dq opn_NOP                        ; 9
+    dq opn_unknown                    ; 10
+    dq opn_UNARY_NEGATIVE             ; 11
+    dq opn_UNARY_NOT                  ; 12
+    dq opn_unknown                    ; 13
+    dq opn_unknown                    ; 14
+    dq opn_UNARY_INVERT               ; 15
+    dq opn_unknown                    ; 16
+    dq opn_unknown                    ; 17
+    dq opn_unknown                    ; 18
+    dq opn_unknown                    ; 19
+    dq opn_unknown                    ; 20
+    dq opn_unknown                    ; 21
+    dq opn_unknown                    ; 22
+    dq opn_unknown                    ; 23
+    dq opn_unknown                    ; 24
+    dq opn_BINARY_SUBSCR              ; 25
+    dq opn_BINARY_SLICE               ; 26
+    dq opn_STORE_SLICE                ; 27
+    dq opn_unknown                    ; 28
+    dq opn_unknown                    ; 29
+    dq opn_GET_LEN                    ; 30
+    dq opn_MATCH_MAPPING              ; 31
+    dq opn_MATCH_SEQUENCE             ; 32
+    dq opn_MATCH_KEYS                 ; 33
+    dq opn_unknown                    ; 34
+    dq opn_PUSH_EXC_INFO              ; 35
+    dq opn_CHECK_EXC_MATCH            ; 36
+    dq opn_CHECK_EG_MATCH             ; 37
+    dq opn_unknown                    ; 38
+    dq opn_unknown                    ; 39
+    dq opn_unknown                    ; 40
+    dq opn_unknown                    ; 41
+    dq opn_unknown                    ; 42
+    dq opn_unknown                    ; 43
+    dq opn_unknown                    ; 44
+    dq opn_unknown                    ; 45
+    dq opn_unknown                    ; 46
+    dq opn_unknown                    ; 47
+    dq opn_unknown                    ; 48
+    dq opn_WITH_EXCEPT_START          ; 49
+    dq opn_GET_AITER                  ; 50
+    dq opn_GET_ANEXT                  ; 51
+    dq opn_BEFORE_ASYNC_WITH          ; 52
+    dq opn_BEFORE_WITH                ; 53
+    dq opn_END_ASYNC_FOR              ; 54
+    dq opn_CLEANUP_THROW              ; 55
+    dq opn_unknown                    ; 56
+    dq opn_unknown                    ; 57
+    dq opn_unknown                    ; 58
+    dq opn_unknown                    ; 59
+    dq opn_STORE_SUBSCR               ; 60
+    dq opn_DELETE_SUBSCR              ; 61
+    dq opn_unknown                    ; 62
+    dq opn_unknown                    ; 63
+    dq opn_unknown                    ; 64
+    dq opn_unknown                    ; 65
+    dq opn_unknown                    ; 66
+    dq opn_unknown                    ; 67
+    dq opn_GET_ITER                   ; 68
+    dq opn_GET_YIELD_FROM_ITER        ; 69
+    dq opn_unknown                    ; 70
+    dq opn_LOAD_BUILD_CLASS           ; 71
+    dq opn_unknown                    ; 72
+    dq opn_unknown                    ; 73
+    dq opn_LOAD_ASSERTION_ERROR       ; 74
+    dq opn_RETURN_GENERATOR           ; 75
+    dq opn_unknown                    ; 76
+    dq opn_unknown                    ; 77
+    dq opn_unknown                    ; 78
+    dq opn_unknown                    ; 79
+    dq opn_unknown                    ; 80
+    dq opn_unknown                    ; 81
+    dq opn_unknown                    ; 82
+    dq opn_RETURN_VALUE               ; 83
+    dq opn_unknown                    ; 84
+    dq opn_SETUP_ANNOTATIONS          ; 85
+    dq opn_unknown                    ; 86
+    dq opn_LOAD_LOCALS                ; 87
+    dq opn_unknown                    ; 88
+    dq opn_POP_EXCEPT                 ; 89
+    dq opn_STORE_NAME                 ; 90
+    dq opn_DELETE_NAME                ; 91
+    dq opn_UNPACK_SEQUENCE            ; 92
+    dq opn_FOR_ITER                   ; 93
+    dq opn_UNPACK_EX                  ; 94
+    dq opn_STORE_ATTR                 ; 95
+    dq opn_DELETE_ATTR                ; 96
+    dq opn_STORE_GLOBAL               ; 97
+    dq opn_DELETE_GLOBAL              ; 98
+    dq opn_SWAP                       ; 99
+    dq opn_LOAD_CONST                 ; 100
+    dq opn_LOAD_NAME                  ; 101
+    dq opn_BUILD_TUPLE                ; 102
+    dq opn_BUILD_LIST                 ; 103
+    dq opn_BUILD_SET                  ; 104
+    dq opn_BUILD_MAP                  ; 105
+    dq opn_LOAD_ATTR                  ; 106
+    dq opn_COMPARE_OP                 ; 107
+    dq opn_IMPORT_NAME                ; 108
+    dq opn_IMPORT_FROM                ; 109
+    dq opn_JUMP_FORWARD               ; 110
+    dq opn_unknown                    ; 111
+    dq opn_unknown                    ; 112
+    dq opn_unknown                    ; 113
+    dq opn_POP_JUMP_IF_FALSE          ; 114
+    dq opn_POP_JUMP_IF_TRUE           ; 115
+    dq opn_LOAD_GLOBAL                ; 116
+    dq opn_IS_OP                      ; 117
+    dq opn_CONTAINS_OP                ; 118
+    dq opn_RERAISE                    ; 119
+    dq opn_COPY                       ; 120
+    dq opn_RETURN_CONST               ; 121
+    dq opn_BINARY_OP                  ; 122
+    dq opn_SEND                       ; 123
+    dq opn_LOAD_FAST                  ; 124
+    dq opn_STORE_FAST                 ; 125
+    dq opn_DELETE_FAST                ; 126
+    dq opn_LOAD_FAST_CHECK            ; 127
+    dq opn_POP_JUMP_IF_NOT_NONE       ; 128
+    dq opn_POP_JUMP_IF_NONE           ; 129
+    dq opn_RAISE_VARARGS              ; 130
+    dq opn_GET_AWAITABLE              ; 131
+    dq opn_MAKE_FUNCTION              ; 132
+    dq opn_BUILD_SLICE                ; 133
+    dq opn_JUMP_BACKWARD_NO_INTERRUPT ; 134
+    dq opn_MAKE_CELL                  ; 135
+    dq opn_LOAD_CLOSURE               ; 136
+    dq opn_LOAD_DEREF                 ; 137
+    dq opn_STORE_DEREF                ; 138
+    dq opn_DELETE_DEREF               ; 139
+    dq opn_JUMP_BACKWARD              ; 140
+    dq opn_LOAD_SUPER_ATTR            ; 141
+    dq opn_CALL_FUNCTION_EX           ; 142
+    dq opn_LOAD_FAST_AND_CLEAR        ; 143
+    dq opn_EXTENDED_ARG               ; 144
+    dq opn_LIST_APPEND                ; 145
+    dq opn_SET_ADD                    ; 146
+    dq opn_MAP_ADD                    ; 147
+    dq opn_unknown                    ; 148
+    dq opn_COPY_FREE_VARS             ; 149
+    dq opn_YIELD_VALUE                ; 150
+    dq opn_RESUME                     ; 151
+    dq opn_MATCH_CLASS                ; 152
+    dq opn_unknown                    ; 153
+    dq opn_unknown                    ; 154
+    dq opn_FORMAT_VALUE               ; 155
+    dq opn_BUILD_CONST_KEY_MAP        ; 156
+    dq opn_BUILD_STRING               ; 157
+    dq opn_unknown                    ; 158
+    dq opn_unknown                    ; 159
+    dq opn_unknown                    ; 160
+    dq opn_unknown                    ; 161
+    dq opn_LIST_EXTEND                ; 162
+    dq opn_SET_UPDATE                 ; 163
+    dq opn_DICT_MERGE                 ; 164
+    dq opn_DICT_UPDATE                ; 165
+    dq opn_unknown                    ; 166
+    dq opn_unknown                    ; 167
+    dq opn_unknown                    ; 168
+    dq opn_unknown                    ; 169
+    dq opn_unknown                    ; 170
+    dq opn_CALL                       ; 171
+    dq opn_KW_NAMES                   ; 172
+    dq opn_CALL_INTRINSIC_1           ; 173
+    dq opn_CALL_INTRINSIC_2           ; 174
+    dq opn_LOAD_FROM_DICT_OR_GLOBALS  ; 175
+    dq opn_LOAD_FROM_DICT_OR_DEREF    ; 176
+    dq opn_unknown                    ; 177
+    dq opn_unknown                    ; 178
+    dq opn_unknown                    ; 179
+    dq opn_unknown                    ; 180
+    dq opn_unknown                    ; 181
+    dq opn_unknown                    ; 182
+    dq opn_unknown                    ; 183
+    dq opn_unknown                    ; 184
+    dq opn_unknown                    ; 185
+    dq opn_unknown                    ; 186
+    dq opn_unknown                    ; 187
+    dq opn_unknown                    ; 188
+    dq opn_unknown                    ; 189
+    dq opn_unknown                    ; 190
+    dq opn_unknown                    ; 191
+    dq opn_unknown                    ; 192
+    dq opn_unknown                    ; 193
+    dq opn_unknown                    ; 194
+    dq opn_unknown                    ; 195
+    dq opn_unknown                    ; 196
+    dq opn_unknown                    ; 197
+    dq opn_unknown                    ; 198
+    dq opn_unknown                    ; 199
+    dq opn_LOAD_GLOBAL_MODULE         ; 200
+    dq opn_LOAD_GLOBAL_BUILTIN        ; 201
+    dq opn_unknown                    ; 202
+    dq opn_LOAD_ATTR_METHOD           ; 203
+    dq opn_unknown                    ; 204
+    dq opn_unknown                    ; 205
+    dq opn_unknown                    ; 206
+    dq opn_unknown                    ; 207
+    dq opn_unknown                    ; 208
+    dq opn_COMPARE_OP_INT             ; 209
+    dq opn_unknown                    ; 210
+    dq opn_BINARY_OP_ADD_INT          ; 211
+    dq opn_BINARY_OP_SUBTRACT_INT     ; 212
+    dq opn_FOR_ITER_LIST              ; 213
+    dq opn_FOR_ITER_RANGE             ; 214
+    dq opn_unknown                    ; 215
+    dq opn_unknown                    ; 216
+    dq opn_unknown                    ; 217
+    dq opn_unknown                    ; 218
+    dq opn_unknown                    ; 219
+    dq opn_unknown                    ; 220
+    dq opn_unknown                    ; 221
+    dq opn_unknown                    ; 222
+    dq opn_unknown                    ; 223
+    dq opn_unknown                    ; 224
+    dq opn_unknown                    ; 225
+    dq opn_unknown                    ; 226
+    dq opn_unknown                    ; 227
+    dq opn_unknown                    ; 228
+    dq opn_unknown                    ; 229
+    dq opn_unknown                    ; 230
+    dq opn_unknown                    ; 231
+    dq opn_unknown                    ; 232
+    dq opn_unknown                    ; 233
+    dq opn_unknown                    ; 234
+    dq opn_unknown                    ; 235
+    dq opn_unknown                    ; 236
+    dq opn_unknown                    ; 237
+    dq opn_unknown                    ; 238
+    dq opn_unknown                    ; 239
+    dq opn_unknown                    ; 240
+    dq opn_unknown                    ; 241
+    dq opn_unknown                    ; 242
+    dq opn_unknown                    ; 243
+    dq opn_unknown                    ; 244
+    dq opn_unknown                    ; 245
+    dq opn_unknown                    ; 246
+    dq opn_unknown                    ; 247
+    dq opn_unknown                    ; 248
+    dq opn_unknown                    ; 249
+    dq opn_unknown                    ; 250
+    dq opn_unknown                    ; 251
+    dq opn_unknown                    ; 252
+    dq opn_unknown                    ; 253
+    dq opn_unknown                    ; 254
+    dq opn_unknown                    ; 255
