@@ -6,6 +6,7 @@
 
 extern ap_free
 extern obj_decref
+extern obj_dealloc
 extern str_from_cstr
 extern type_type
 
@@ -13,13 +14,31 @@ extern type_type
 ; Free code object and decref contained objects
 DEF_FUNC code_dealloc
     push rbx
+    push r12
+    push r13
     mov rbx, rdi
 
-    ; DECREF co_consts
-    mov rdi, [rbx + PyCodeObject.co_consts]
-    test rdi, rdi
+    ; Free co_consts fat array: iterate elements, DECREF_VAL each, ap_free
+    mov rax, [rbx + PyCodeObject.co_consts]
+    test rax, rax
     jz .skip_consts
-    call obj_decref
+    mov r12, rax                            ; r12 = fat array base (for ap_free)
+    mov r13, [rax]                          ; r13 = count
+    add rax, 8                              ; rax = data start
+.consts_decref_loop:
+    test r13, r13
+    jz .consts_decref_done
+    push rax                                ; save data pointer
+    mov rdi, [rax]                          ; payload
+    mov rsi, [rax + 8]                      ; tag
+    DECREF_VAL rdi, rsi
+    pop rax
+    add rax, 16
+    dec r13
+    jmp .consts_decref_loop
+.consts_decref_done:
+    mov rdi, r12
+    call ap_free
 .skip_consts:
 
     ; DECREF co_names
@@ -75,6 +94,8 @@ DEF_FUNC code_dealloc
     mov rdi, rbx
     call ap_free
 
+    pop r13
+    pop r12
     pop rbx
     leave
     ret

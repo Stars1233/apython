@@ -1660,8 +1660,9 @@ END_FUNC op_unpack_ex
 extern kw_names_pending
 
 DEF_FUNC_BARE op_kw_names
-    ; ecx = arg (index into co_consts)
-    mov rax, [r14 + rcx*8]     ; rax = tuple of kw names from co_consts
+    ; ecx = arg (index into co_consts fat array)
+    shl ecx, 4                 ; index * 16
+    mov rax, [r14 + rcx]       ; payload (always a tuple ptr for kw_names)
     mov [rel kw_names_pending], rax
     DISPATCH
 END_FUNC op_kw_names

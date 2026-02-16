@@ -66,10 +66,12 @@ LSA_FRAME    equ 32
 ;; op_load_const - Load constant from co_consts[arg]
 ;; ============================================================================
 DEF_FUNC_BARE op_load_const
-    ; ecx = arg (index into co_consts)
-    mov rax, [r14 + rcx*8]     ; r14 = &co_consts.ob_item[0]
-    INCREF rax
-    VPUSH_BRANCHLESS rax
+    ; ecx = arg (index into co_consts fat array)
+    shl ecx, 4                 ; index * 16
+    mov rax, [r14 + rcx]       ; payload
+    mov rdx, [r14 + rcx + 8]   ; tag
+    INCREF_VAL rax, rdx
+    VPUSH_VAL rax, rdx
     DISPATCH
 END_FUNC op_load_const
 

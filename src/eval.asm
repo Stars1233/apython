@@ -171,9 +171,9 @@ DEF_FUNC eval_frame
     mov r13, [r12 + PyFrame.stack_ptr]
 
 .eval_setup_consts:
-    ; r14 = &co_consts->ob_item (co_consts tuple data pointer)
-    mov rcx, [rax + PyCodeObject.co_consts]
-    lea r14, [rcx + PyTupleObject.ob_item]
+    ; r14 = co_consts fat array data pointer (past count field)
+    mov r14, [rax + PyCodeObject.co_consts]
+    add r14, 8
 
     ; r15 = &co_names->ob_item (co_names tuple data pointer)
     mov rcx, [rax + PyCodeObject.co_names]
@@ -338,8 +338,8 @@ DEF_FUNC_BARE eval_exception_unwind
 
     ; Re-derive r14/r15 from the code object
     mov rax, [r12 + PyFrame.code]
-    mov rcx, [rax + PyCodeObject.co_consts]
-    lea r14, [rcx + PyTupleObject.ob_item]
+    mov r14, [rax + PyCodeObject.co_consts]
+    add r14, 8                              ; fat array data (past count)
     mov rcx, [rax + PyCodeObject.co_names]
     lea r15, [rcx + PyTupleObject.ob_item]
 

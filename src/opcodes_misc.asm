@@ -101,17 +101,11 @@ END_FUNC op_return_value
 ;; Load constant, INCREF, and jump to eval_return.
 ;; ============================================================================
 DEF_FUNC_BARE op_return_const
-    ; ecx = arg (index into co_consts)
-    mov rax, [r14 + rcx*8]     ; rax = co_consts[arg]
-    INCREF rax
-    ; Classify: bit-63 → SmallInt, else → PTR
-    test rax, rax
-    js .rc_smallint
-    mov edx, TAG_PTR
-    jmp .rc_done
-.rc_smallint:
-    mov edx, TAG_SMALLINT
-.rc_done:
+    ; ecx = arg (index into co_consts fat array)
+    shl ecx, 4                 ; index * 16
+    mov rax, [r14 + rcx]       ; payload
+    mov rdx, [r14 + rcx + 8]   ; tag
+    INCREF_VAL rax, rdx
     mov qword [r12 + PyFrame.instr_ptr], 0  ; mark frame as "returned" (not yielded)
     jmp eval_return
 END_FUNC op_return_const
