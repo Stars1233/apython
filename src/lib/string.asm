@@ -18,10 +18,39 @@ DEF_FUNC_BARE ap_strlen
 END_FUNC ap_strlen
 
 ; ap_strcmp(const char *a, const char *b) -> int
-; Byte-by-byte compare, returns <0 / 0 / >0
+; 8-byte fast path with byte-at-a-time fallback, returns <0 / 0 / >0
+;
+; Safety: reading 8 bytes at a time is safe because all callers compare
+; PyStrObject.data which is inline after the header. Object allocation
+; always provides >=8 bytes past .data even for 1-char strings, due to
+; minimum object size and alignment.
 DEF_FUNC_BARE ap_strcmp
     ; rdi = a, rsi = b
-.loop:
+.fast8:
+    mov rax, [rdi]          ; load 8 bytes from a
+    mov rdx, [rsi]          ; load 8 bytes from b
+    cmp rax, rdx
+    jne .byte_loop          ; mismatch -> fall back
+
+    ; Check if NUL within these 8 bytes (Mycroft's trick)
+    mov rcx, rax
+    mov r8, 0x0101010101010101
+    sub rcx, r8
+    not rax
+    and rcx, rax
+    mov r8, 0x8080808080808080
+    and rcx, r8
+    jnz .equal              ; NUL found -> strings equal
+
+    add rdi, 8
+    add rsi, 8
+    jmp .fast8
+
+.equal:
+    xor eax, eax
+    ret
+
+.byte_loop:
     movzx eax, byte [rdi]
     movzx ecx, byte [rsi]
     sub eax, ecx
@@ -30,7 +59,7 @@ DEF_FUNC_BARE ap_strcmp
     jz .done                 ; both NUL
     inc rdi
     inc rsi
-    jmp .loop
+    jmp .byte_loop
 .done:
     ret
 END_FUNC ap_strcmp

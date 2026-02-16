@@ -178,8 +178,27 @@ DEF_FUNC str_hash
     lea rsi, [rdi + PyStrObject.data]
     mov rax, 0xcbf29ce484222325     ; FNV offset basis
     mov rdx, 0x100000001b3          ; FNV prime
+    ; 4x unrolled FNV-1a loop
 align 16
-.loop:
+.loop4:
+    cmp rcx, 4
+    jb .tail
+    movzx r8d, byte [rsi]
+    xor rax, r8
+    imul rax, rdx
+    movzx r8d, byte [rsi+1]
+    xor rax, r8
+    imul rax, rdx
+    movzx r8d, byte [rsi+2]
+    xor rax, r8
+    imul rax, rdx
+    movzx r8d, byte [rsi+3]
+    xor rax, r8
+    imul rax, rdx
+    add rsi, 4
+    sub rcx, 4
+    jmp .loop4
+.tail:
     test rcx, rcx
     jz .store
     movzx r8d, byte [rsi]
@@ -187,7 +206,7 @@ align 16
     imul rax, rdx
     inc rsi
     dec rcx
-    jmp .loop
+    jmp .tail
 .store:
     ; Ensure hash is never -1
     cmp rax, -1
