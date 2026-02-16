@@ -128,6 +128,7 @@ DEF_FUNC instance_getattr
     mov rdi, rax
     call obj_incref
     mov rax, r13
+    mov edx, TAG_PTR
     pop r13
     pop r12
     pop rbx
@@ -178,6 +179,7 @@ DEF_FUNC instance_getattr
     mov rsi, rbx                ; self (instance)
     call method_new
     ; rax = bound method (method_new INCREFs func and self)
+    mov edx, TAG_PTR
     pop r13
     pop r12
     pop rbx
@@ -189,6 +191,7 @@ DEF_FUNC instance_getattr
     mov rdi, r13
     call obj_incref
     mov rax, r13
+    mov edx, TAG_PTR
     pop r13
     pop r12
     pop rbx
@@ -379,11 +382,13 @@ DEF_FUNC type_call
     js .type_smallint       ; SmallInt → int type
     mov rax, [rax + PyObject.ob_type]
     inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
     leave
     ret
 .type_smallint:
     lea rax, [rel int_type]
     inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
     leave
     ret
 
@@ -514,6 +519,7 @@ DEF_FUNC type_call
 .no_init:
     ; Return the instance
     mov rax, r14
+    mov edx, TAG_PTR
 
     add rsp, 8                  ; undo alignment
     pop r15
@@ -533,6 +539,7 @@ DEF_FUNC type_call
     mov rdx, r13
     call exc_type_call
     ; rax = exception object (PyExceptionObject)
+    mov edx, TAG_PTR
     add rsp, 8                  ; undo alignment
     pop r15
     pop r14
@@ -580,6 +587,7 @@ DEF_FUNC type_call
 .int_sub_return_bare:
     mov rax, r14
 .int_sub_done:
+    mov edx, TAG_PTR
     add rsp, 8                  ; undo alignment
     pop r15
     pop r14
@@ -649,6 +657,7 @@ DEF_FUNC type_getattr
     mov rdi, rax
     call obj_incref
     mov rax, rbx
+    mov edx, TAG_PTR
 
     pop r12
     pop rbx
@@ -660,6 +669,7 @@ DEF_FUNC type_getattr
     mov rdi, [r12 + PyTypeObject.tp_name]
     call str_from_cstr
     ; rax = new string (already refcnt=1)
+    mov edx, TAG_PTR
     pop r12
     pop rbx
     leave
@@ -750,13 +760,15 @@ DEF_FUNC_LOCAL method_call
     mov rsi, r14
     lea rdx, [r13 + 1]
     call rax
-    push rax                    ; save result
+    push rax                    ; save result payload
+    push rdx                    ; save result tag
 
     ; Free temp args array
     mov rdi, r14
     call ap_free
 
-    pop rax
+    pop rdx                     ; restore result tag
+    pop rax                     ; restore result payload
     pop r14
     pop r13
     pop r12
@@ -815,6 +827,7 @@ DEF_FUNC_BARE object_type_call
     lea rcx, [rel object_type]
     mov [rax + PyObject.ob_type], rcx
     mov qword [rax + PyInstanceObject.inst_dict], 0
+    mov edx, TAG_PTR
     pop rbp
     ret
 END_FUNC object_type_call

@@ -214,6 +214,7 @@ DEF_FUNC eg_type_call, EGC_FRAME
     call obj_decref
     pop rax
 
+    mov edx, TAG_PTR
     pop r13
     pop r12
     pop rbx

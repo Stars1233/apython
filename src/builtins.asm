@@ -332,6 +332,7 @@ align 16
     pop r13
     pop r12
     pop rbx
+    mov edx, TAG_PTR
     leave
     ret
 END_FUNC builtin_print
@@ -427,6 +428,7 @@ DEF_FUNC builtin_len
     call int_from_i64
 
     pop rbx
+    mov edx, TAG_PTR
     leave
     ret
 
@@ -501,6 +503,7 @@ DEF_FUNC builtin_range
     pop r13
     pop r12
     pop rbx
+    mov edx, TAG_PTR
     leave
     ret
 END_FUNC builtin_range
@@ -523,6 +526,7 @@ DEF_FUNC builtin_type
     mov rax, [rdi + PyObject.ob_type]
     INCREF rax
 
+    mov edx, TAG_PTR
     leave
     ret
 
@@ -530,6 +534,7 @@ DEF_FUNC builtin_type
     extern int_type
     lea rax, [rel int_type]
     INCREF rax
+    mov edx, TAG_PTR
     leave
     ret
 
@@ -627,6 +632,7 @@ DEF_FUNC builtin_isinstance
     inc qword [rax + PyObject.ob_refcnt]
     pop r12
     pop rbx
+    mov edx, TAG_PTR
     leave
     ret
 
@@ -635,6 +641,7 @@ DEF_FUNC builtin_isinstance
     inc qword [rax + PyObject.ob_refcnt]
     pop r12
     pop rbx
+    mov edx, TAG_PTR
     leave
     ret
 
@@ -666,12 +673,14 @@ DEF_FUNC builtin_issubclass
 
     lea rax, [rel bool_false]
     inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
     leave
     ret
 
 .issubclass_true:
     lea rax, [rel bool_true]
     inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
     leave
     ret
 
@@ -693,6 +702,7 @@ DEF_FUNC builtin_repr
     mov rdi, [rdi]
     call obj_repr
 
+    mov edx, TAG_PTR
     leave
     ret
 
@@ -723,11 +733,13 @@ DEF_FUNC builtin_bool
     jz .bool_ret_false
     lea rax, [rel bool_true]
     inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
     leave
     ret
 .bool_ret_false:
     lea rax, [rel bool_false]
     inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
     leave
     ret
 
@@ -735,6 +747,7 @@ DEF_FUNC builtin_bool
     ; bool() -> False
     lea rax, [rel bool_false]
     inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
     leave
     ret
 
@@ -764,6 +777,7 @@ DEF_FUNC builtin_float
     extern float_from_f64
     call float_from_f64        ; rax = new float
 
+    mov edx, TAG_PTR
     leave
     ret
 
@@ -771,6 +785,7 @@ DEF_FUNC builtin_float
     ; float() -> 0.0
     xorpd xmm0, xmm0
     call float_from_f64
+    mov edx, TAG_PTR
     leave
     ret
 
@@ -1061,6 +1076,7 @@ DEF_FUNC builtin___build_class__
     pop r13
     pop r12
     pop rbx
+    mov edx, TAG_PTR
     leave
     ret
 

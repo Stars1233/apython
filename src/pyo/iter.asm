@@ -259,6 +259,7 @@ DEF_FUNC_BARE range_iter_next
     mov [rdi + PyRangeIterObject.it_current], rax
 
     mov rax, r8
+    mov edx, TAG_SMALLINT
     ret
 
 .exhausted:

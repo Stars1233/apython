@@ -126,6 +126,7 @@ DEF_FUNC_BARE bytes_getitem
     ; Get byte and return as SmallInt
     movzx eax, byte [rdi + PyBytesObject.data + rsi]
     bts rax, 63               ; encode as SmallInt
+    mov edx, TAG_SMALLINT
     ret
 
 .index_error:
@@ -565,6 +566,7 @@ DEF_FUNC_BARE bytes_iter_next
     ; Get byte and return as SmallInt
     movzx eax, byte [rax + PyBytesObject.data + rcx]
     bts rax, 63
+    mov edx, TAG_SMALLINT
 
     ; Advance index
     inc qword [rdi + PyBytesIterObject.it_index]
@@ -821,6 +823,7 @@ DEF_FUNC bytes_type_call, BTC_FRAME
     pop rax
     mov rcx, [rax + PyBytesObject.ob_size]
     mov byte [rax + PyBytesObject.data + rcx], 0
+    mov edx, TAG_PTR
     leave
     ret
 

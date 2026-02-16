@@ -427,7 +427,8 @@ DEF_FUNC func_call
     ; === Phase 7: Call eval_frame ===
     mov rdi, r12
     call eval_frame
-    mov [rsp+16], rax       ; save return value
+    mov [rsp+16], rax       ; save return value payload
+    mov [rsp+24], rdx       ; save return value tag
 
     ; Free the frame (unless generator owns it: instr_ptr != 0)
     cmp qword [r12 + PyFrame.instr_ptr], 0
@@ -436,7 +437,8 @@ DEF_FUNC func_call
     call frame_free
 .skip_frame_free:
 
-    mov rax, [rsp+16]       ; return value
+    mov rax, [rsp+16]       ; return value payload
+    mov rdx, [rsp+24]       ; return value tag
 
     add rsp, 56
     pop r15

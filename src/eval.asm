@@ -221,12 +221,13 @@ END_FUNC eval_dispatch
 ; rax contains the return value. Restores callee-saved regs and returns.
 DEF_FUNC_BARE eval_return
     ; Restore caller's eval globals (reverse of save order)
-    pop rdx
-    mov [rel eval_base_rsp], rdx
-    pop rdx
-    mov [rel eval_saved_r12], rdx
-    pop rdx
-    mov [rel eval_saved_rbx], rdx
+    ; Use rcx as scratch — rdx holds return tag (fat value protocol)
+    pop rcx
+    mov [rel eval_base_rsp], rcx
+    pop rcx
+    mov [rel eval_saved_r12], rcx
+    pop rcx
+    mov [rel eval_saved_rbx], rcx
     RESTORE_EVAL_REGS
     pop rbp
     ret

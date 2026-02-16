@@ -527,6 +527,7 @@ DEF_FUNC exc_type_call, ETC_FRAME
 
 .done:
     mov rax, [rbp - ETC_EXC]
+    mov edx, TAG_PTR
     pop r12
     pop rbx
     leave

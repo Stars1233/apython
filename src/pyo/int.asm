@@ -110,6 +110,7 @@ DEF_FUNC_BARE int_from_i64
     ; Fits: encode as SmallInt
     mov rax, rdi
     bts rax, 63            ; set tag bit
+    mov edx, TAG_SMALLINT
     ret
 END_FUNC int_from_i64
 
@@ -133,6 +134,7 @@ DEF_FUNC int_from_i64_gmp
     mov rsi, rbx
     call __gmpz_set_si wrt ..plt
     mov rax, r12
+    mov edx, TAG_PTR
     pop r12
     pop rbx
     leave
@@ -433,6 +435,7 @@ DEF_FUNC int_from_cstr_base, IB_FRAME
     ; Free nothing (no buffer allocated yet), return SmallInt 0
     xor eax, eax
     bts rax, 63            ; SmallInt(0)
+    mov edx, TAG_SMALLINT
     leave
     ret
 
@@ -787,11 +790,13 @@ DEF_FUNC int_from_cstr_base, IB_FRAME
     call ap_free
     mov rax, [rbp - IB_SIGN]
     bts rax, 63
+    mov edx, TAG_SMALLINT
     leave
     ret
 
 .return_gmp:
     mov rax, [rbp - IB_OBJ]
+    mov edx, TAG_PTR
     leave
     ret
 
@@ -1043,6 +1048,7 @@ DEF_FUNC_BARE int_add
 
     ; Result fits: encode as SmallInt
     bts rax, 63
+    mov edx, TAG_SMALLINT
     ret
 
 .gmp_path:
@@ -1099,6 +1105,7 @@ DEF_FUNC_BARE int_add
     call int_dealloc
 .no_free_b:
     pop rax
+    mov edx, TAG_PTR
     pop r13
     pop r12
     pop rbx
@@ -1131,6 +1138,7 @@ DEF_FUNC_BARE int_sub
     sub rax, rcx
     jo .gmp_path
     bts rax, 63
+    mov edx, TAG_SMALLINT
     ret
 
 .gmp_path:
@@ -1182,6 +1190,7 @@ DEF_FUNC_BARE int_sub
     call int_dealloc
 .no_free_b:
     pop rax
+    mov edx, TAG_PTR
     pop r13
     pop r12
     pop rbx
@@ -1221,6 +1230,7 @@ DEF_FUNC_BARE int_mul
     cmp rcx, 2
     jae .gmp_path
     bts rax, 63
+    mov edx, TAG_SMALLINT
     ret
 
 .gmp_path:
@@ -1272,6 +1282,7 @@ DEF_FUNC_BARE int_mul
     call int_dealloc
 .no_free_b:
     pop rax
+    mov edx, TAG_PTR
     pop r13
     pop r12
     pop rbx
@@ -1315,6 +1326,7 @@ DEF_FUNC_BARE int_floordiv
     dec rax
 .smallint_done:
     bts rax, 63
+    mov edx, TAG_SMALLINT
     ret
 
 .gmp_path:
@@ -1366,6 +1378,7 @@ DEF_FUNC_BARE int_floordiv
     call int_dealloc
 .no_free_b:
     pop rax
+    mov edx, TAG_PTR
     pop r13
     pop r12
     pop rbx
@@ -1409,6 +1422,7 @@ DEF_FUNC_BARE int_mod
     add rax, rcx            ; remainder += divisor
 .smallint_done:
     bts rax, 63
+    mov edx, TAG_SMALLINT
     ret
 
 .gmp_path:
@@ -1460,6 +1474,7 @@ DEF_FUNC_BARE int_mod
     call int_dealloc
 .no_free_b:
     pop rax
+    mov edx, TAG_PTR
     pop r13
     pop r12
     pop rbx
@@ -1496,6 +1511,7 @@ DEF_FUNC_BARE int_neg
     lea rsi, [rbx + PyIntObject.mpz]
     call __gmpz_neg wrt ..plt
     mov rax, r12
+    mov edx, TAG_PTR
     pop r12
     pop rbx
     pop rbp
@@ -1512,6 +1528,7 @@ DEF_FUNC_BARE int_neg
     cmp rcx, 2
     jae .neg_overflow
     bts rax, 63
+    mov edx, TAG_SMALLINT
     ret
 .neg_overflow:
     ; Value is 2^62, doesn't fit SmallInt. Create GMP int.
@@ -1645,6 +1662,7 @@ DEF_FUNC int_compare
 .ret_true:
     lea rax, [rel bool_true]
     inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
     pop r12
     pop rbx
     leave
@@ -1652,6 +1670,7 @@ DEF_FUNC int_compare
 .ret_false:
     lea rax, [rel bool_false]
     inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
     pop r12
     pop rbx
     leave
@@ -1702,6 +1721,7 @@ DEF_FUNC_BARE int_and
     ; Both SmallInt
     mov rax, rdi
     and rax, rsi           ; AND preserves tag bit, result is valid SmallInt
+    mov edx, TAG_SMALLINT
     ret
 
 .gmp:
@@ -1753,6 +1773,7 @@ DEF_FUNC_BARE int_and
     call int_dealloc
 .nb:
     pop rax
+    mov edx, TAG_PTR
     pop r13
     pop r12
     pop rbx
@@ -1781,6 +1802,7 @@ DEF_FUNC_BARE int_or
     ; Both SmallInt
     mov rax, rdi
     or rax, rsi            ; OR preserves tag bit
+    mov edx, TAG_SMALLINT
     ret
 
 .gmp:
@@ -1832,6 +1854,7 @@ DEF_FUNC_BARE int_or
     call int_dealloc
 .nb:
     pop rax
+    mov edx, TAG_PTR
     pop r13
     pop r12
     pop rbx
@@ -1864,6 +1887,7 @@ DEF_FUNC_BARE int_xor
     SMALLINT_DECODE rcx
     xor rax, rcx
     bts rax, 63
+    mov edx, TAG_SMALLINT
     ret
 
 .gmp:
@@ -1915,6 +1939,7 @@ DEF_FUNC_BARE int_xor
     call int_dealloc
 .nb:
     pop rax
+    mov edx, TAG_PTR
     pop r13
     pop r12
     pop rbx
@@ -1950,6 +1975,7 @@ DEF_FUNC_BARE int_invert
     lea rsi, [rbx + PyIntObject.mpz]
     call __gmpz_com wrt ..plt
     pop rax
+    mov edx, TAG_PTR
     pop rbx
     pop rbp
     ret
@@ -1959,6 +1985,7 @@ DEF_FUNC_BARE int_invert
     SMALLINT_DECODE rax
     not rax                ; ~x = -(x+1), works for all 62-bit values
     bts rax, 63
+    mov edx, TAG_SMALLINT
     ret
 END_FUNC int_invert
 
@@ -2033,6 +2060,7 @@ DEF_FUNC int_lshift
     call int_dealloc
     pop rax
 .lsh_done:
+    mov edx, TAG_PTR
     pop r13
     pop r12
     pop rbx
@@ -2093,6 +2121,7 @@ DEF_FUNC int_rshift
     jge .max_shift
     sar rax, cl
     bts rax, 63
+    mov edx, TAG_SMALLINT
     pop r13
     pop r12
     pop rbx
@@ -2102,6 +2131,7 @@ DEF_FUNC int_rshift
     ; Shift >= 63: result is 0 or -1 depending on sign
     sar rax, 63
     bts rax, 63
+    mov edx, TAG_SMALLINT
     pop r13
     pop r12
     pop rbx
@@ -2123,6 +2153,7 @@ DEF_FUNC int_rshift
     mov rdx, r13
     call __gmpz_fdiv_q_2exp wrt ..plt
     pop rax
+    mov edx, TAG_PTR
     pop r13
     pop r12
     pop rbx
@@ -2206,6 +2237,7 @@ DEF_FUNC int_power
     call int_dealloc
     pop rax
 .pow_done:
+    mov edx, TAG_PTR
     pop r13
     pop r12
     pop rbx
@@ -2245,6 +2277,7 @@ DEF_FUNC int_power
     movsd xmm0, [rel one_double]
     divsd xmm0, xmm1
     call float_from_f64
+    mov edx, TAG_PTR
     pop r13
     pop r12
     pop rbx
@@ -2300,6 +2333,7 @@ DEF_FUNC int_true_divide
     movsd xmm0, [rsp-8]   ; xmm0 = left
     divsd xmm0, xmm1
     call float_from_f64
+    mov edx, TAG_PTR
 
     pop r12
     pop rbx

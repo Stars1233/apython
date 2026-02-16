@@ -89,6 +89,7 @@ DEF_FUNC builtin_abs
 
     inc qword [rbx + PyObject.ob_refcnt]
     mov rax, rbx
+    mov edx, TAG_PTR
     add rsp, 8
     pop rbx
     leave
@@ -97,6 +98,7 @@ DEF_FUNC builtin_abs
 .abs_gmp_neg:
     mov rdi, rbx
     call int_neg
+    mov edx, TAG_PTR
     add rsp, 8
     pop rbx
     leave
@@ -111,6 +113,7 @@ DEF_FUNC builtin_abs
     neg rax
 .abs_si_pos:
     bts rax, 63
+    mov edx, TAG_SMALLINT
     add rsp, 8
     pop rbx
     leave
@@ -122,6 +125,7 @@ DEF_FUNC builtin_abs
     movq xmm1, rax
     andpd xmm0, xmm1
     call float_from_f64
+    mov edx, TAG_PTR
     add rsp, 8
     pop rbx
     leave
@@ -174,6 +178,7 @@ DEF_FUNC builtin_divmod
     call tuple_new
     mov [rax + PyTupleObject.ob_item], rbx
     mov [rax + PyTupleObject.ob_item + 8], r12
+    mov edx, TAG_PTR
 
     pop r12
     pop rbx
@@ -1072,6 +1077,13 @@ DEF_FUNC builtin_int_fn, BI_FRAME
 
 .int_ret:
     ; Common epilogue: restore rbx, leave, ret
+    ; Classify return value: SmallInt (bit63), NULL (error), or heap ptr
+    mov edx, TAG_PTR
+    test rax, rax
+    jz .int_ret_epilogue         ; NULL = error, tag doesn't matter
+    mov ecx, TAG_SMALLINT
+    cmovs edx, ecx              ; bit63 set -> TAG_SMALLINT
+.int_ret_epilogue:
     ; rbx was pushed after sub rsp, BI_FRAME, so it's at rbp - BI_FRAME - 8
     lea rsp, [rbp - BI_FRAME - 8]
     pop rbx
@@ -1093,12 +1105,14 @@ DEF_FUNC builtin_str_fn
 
     mov rdi, [rdi]
     call obj_str
+    mov edx, TAG_PTR
     leave
     ret
 
 .str_no_args:
     CSTRING rdi, ""
     call str_from_cstr
+    mov edx, TAG_PTR
     leave
     ret
 
@@ -1131,6 +1145,7 @@ DEF_FUNC builtin_ord
 
     movzx eax, byte [rdi + PyStrObject.data]
     bts rax, 63
+    mov edx, TAG_SMALLINT
     leave
     ret
 
@@ -1174,6 +1189,7 @@ DEF_FUNC builtin_chr, 16
     mov byte [rbp - 15], 0
     lea rdi, [rbp - 16]
     call str_from_cstr
+    mov edx, TAG_PTR
     leave
     ret
 
@@ -1193,6 +1209,7 @@ DEF_FUNC builtin_chr, 16
     mov byte [rbp - 14], 0
     lea rdi, [rbp - 16]
     call str_from_cstr
+    mov edx, TAG_PTR
     leave
     ret
 
@@ -1217,6 +1234,7 @@ DEF_FUNC builtin_chr, 16
     mov byte [rbp - 13], 0
     lea rdi, [rbp - 16]
     call str_from_cstr
+    mov edx, TAG_PTR
     leave
     ret
 
@@ -1243,6 +1261,7 @@ DEF_FUNC builtin_chr, 16
     mov byte [rbp - 12], 0
     lea rdi, [rbp - 16]
     call str_from_cstr
+    mov edx, TAG_PTR
     leave
     ret
 
@@ -1332,12 +1351,14 @@ DEF_FUNC builtin_hex, 80
     mov byte [rdi], 0
     lea rdi, [rbp - 80]
     call str_from_cstr
+    mov edx, TAG_PTR
     leave
     ret
 
 .hex_zero:
     CSTRING rdi, "0x0"
     call str_from_cstr
+    mov edx, TAG_PTR
     leave
     ret
 
@@ -1448,12 +1469,14 @@ DEF_FUNC builtin_callable
 
     lea rax, [rel bool_true]
     inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
     leave
     ret
 
 .callable_false:
     lea rax, [rel bool_false]
     inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
     leave
     ret
 
@@ -1482,6 +1505,7 @@ DEF_FUNC builtin_iter_fn
     jz .iter_type_error
 
     call rcx
+    mov edx, TAG_PTR
     leave
     ret
 
@@ -1518,6 +1542,10 @@ DEF_FUNC builtin_next_fn
     test rax, rax
     jz .next_stop
 
+    ; Classify: SmallInt (bit63) or heap ptr
+    mov edx, TAG_PTR
+    mov ecx, TAG_SMALLINT
+    cmovs edx, ecx
     leave
     ret
 
@@ -1595,6 +1623,7 @@ DEF_FUNC builtin_any
     call obj_decref
     lea rax, [rel bool_true]
     inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
     add rsp, 8
     pop r13
     pop r12
@@ -1607,6 +1636,7 @@ DEF_FUNC builtin_any
     call obj_decref
     lea rax, [rel bool_false]
     inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
     add rsp, 8
     pop r13
     pop r12
@@ -1683,6 +1713,7 @@ DEF_FUNC builtin_all
     call obj_decref
     lea rax, [rel bool_false]
     inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
     add rsp, 8
     pop r13
     pop r12
@@ -1695,6 +1726,7 @@ DEF_FUNC builtin_all
     call obj_decref
     lea rax, [rel bool_true]
     inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
     add rsp, 8
     pop r13
     pop r12
@@ -1793,6 +1825,10 @@ DEF_FUNC builtin_sum
     mov rdi, rbx
     call obj_decref
     mov rax, r13
+    ; Classify: SmallInt (bit63) or heap ptr
+    mov edx, TAG_PTR
+    mov ecx, TAG_SMALLINT
+    cmovs edx, ecx
     add rsp, 8
     pop r15
     pop r14
@@ -1909,6 +1945,10 @@ DEF_FUNC builtin_min
 
 .min_done:
     mov rax, r14
+    ; Classify: SmallInt (bit63) or heap ptr
+    mov edx, TAG_PTR
+    mov ecx, TAG_SMALLINT
+    cmovs edx, ecx
     add rsp, 8
     pop r15
     pop r14
@@ -2036,6 +2076,10 @@ DEF_FUNC builtin_max
 
 .max_done:
     mov rax, r14
+    ; Classify: SmallInt (bit63) or heap ptr
+    mov edx, TAG_PTR
+    mov ecx, TAG_SMALLINT
+    cmovs edx, ecx
     add rsp, 8
     pop r15
     pop r14
@@ -2108,6 +2152,7 @@ DEF_FUNC builtin_getattr
     jz .getattr_not_found
 
     inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
     pop r14
     pop r13
     pop r12
@@ -2116,6 +2161,11 @@ DEF_FUNC builtin_getattr
     ret
 
 .getattr_found:
+    ; Result from tp_getattr could be any type
+    mov edx, TAG_PTR
+    mov ecx, TAG_SMALLINT
+    test rax, rax
+    cmovs edx, ecx
     pop r14
     pop r13
     pop r12
@@ -2128,7 +2178,10 @@ DEF_FUNC builtin_getattr
     jne .getattr_raise
 
     mov rax, [rbx + 16]
+    mov edx, TAG_PTR
     test rax, rax
+    mov ecx, TAG_SMALLINT
+    cmovs edx, ecx
     js .getattr_ret_default_si
     inc qword [rax + PyObject.ob_refcnt]
 .getattr_ret_default_si:
@@ -2188,6 +2241,7 @@ DEF_FUNC builtin_hasattr
 .hasattr_found_si:
     lea rax, [rel bool_true]
     inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
     add rsp, 8
     pop r13
     pop r12
@@ -2217,6 +2271,7 @@ DEF_FUNC builtin_hasattr
 
     lea rax, [rel bool_true]
     inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
     add rsp, 8
     pop r13
     pop r12
@@ -2227,6 +2282,7 @@ DEF_FUNC builtin_hasattr
 .hasattr_not_found:
     lea rax, [rel bool_false]
     inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
     add rsp, 8
     pop r13
     pop r12
@@ -2269,6 +2325,7 @@ DEF_FUNC builtin_setattr
 
     lea rax, [rel none_singleton]
     inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
     add rsp, 8
     pop rbx
     leave
@@ -2297,6 +2354,7 @@ DEF_FUNC builtin_globals
     mov rax, [rel eval_saved_r12]
     mov rax, [rax + PyFrame.globals]
     INCREF rax
+    mov edx, TAG_PTR
     leave
     ret
 
@@ -2326,6 +2384,7 @@ DEF_FUNC builtin_locals
     ; Has locals dict - return it
     mov rax, rcx
     INCREF rax
+    mov edx, TAG_PTR
     leave
     ret
 
@@ -2333,6 +2392,7 @@ DEF_FUNC builtin_locals
     ; No locals dict - return globals (module scope)
     mov rax, [rax + PyFrame.globals]
     INCREF rax
+    mov edx, TAG_PTR
     leave
     ret
 
@@ -2443,6 +2503,7 @@ DEF_FUNC builtin_dir, DIR_FRAME
 
 .dir_done:
     mov rax, rbx            ; return result list
+    mov edx, TAG_PTR
     pop r13
     pop r12
     pop rbx
@@ -2486,6 +2547,10 @@ DEF_FUNC builtin_eval_fn
     call raise_exception
 
 .evl_done:
+    ; Classify: SmallInt (bit63) or heap ptr
+    mov edx, TAG_PTR
+    mov ecx, TAG_SMALLINT
+    cmovs edx, ecx
     leave
     ret
 

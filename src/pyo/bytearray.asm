@@ -61,6 +61,7 @@ DEF_FUNC bytearray_type_call, BA_FRAME
     call ap_memcpy
 
     pop rax                            ; return bytearray obj
+    mov edx, TAG_PTR
     leave
     ret
 

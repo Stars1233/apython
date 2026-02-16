@@ -51,6 +51,7 @@ DEF_FUNC float_from_f64, 16
     movsd xmm0, [rbp-8]
     movsd [rax + PyFloatObject.value], xmm0
 
+    mov edx, TAG_PTR
     leave
     ret
 END_FUNC float_from_f64
@@ -579,11 +580,13 @@ DEF_FUNC float_compare, 32
 .ret_true:
     lea rax, [rel bool_true]
     inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
     leave
     ret
 .ret_false:
     lea rax, [rel bool_false]
     inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
     leave
     ret
 END_FUNC float_compare

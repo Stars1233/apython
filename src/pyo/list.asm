@@ -891,6 +891,7 @@ DEF_FUNC list_type_call, LTC_FRAME
     call obj_decref
 
     mov rax, rbx            ; return the list
+    mov edx, TAG_PTR
     pop r13
     pop r12
     pop rbx
@@ -900,6 +901,7 @@ DEF_FUNC list_type_call, LTC_FRAME
 .ltc_empty:
     xor edi, edi
     call list_new
+    mov edx, TAG_PTR
     pop r13
     pop r12
     pop rbx

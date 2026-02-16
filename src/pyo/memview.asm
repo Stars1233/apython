@@ -187,6 +187,7 @@ DEF_FUNC memoryview_subscript, MS_FRAME
     mov rdx, [rdi + PyMemoryViewObject.mv_buf]
     movzx eax, byte [rdx + rsi]
     bts rax, 63                        ; SmallInt
+    mov edx, TAG_SMALLINT
     leave
     ret
 

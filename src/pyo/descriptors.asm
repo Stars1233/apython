@@ -49,6 +49,7 @@ DEF_FUNC staticmethod_construct
     call obj_incref
     pop rax
 
+    mov edx, TAG_PTR
     pop rbx
     leave
     ret
@@ -105,6 +106,7 @@ DEF_FUNC classmethod_construct
     call obj_incref
     pop rax
 
+    mov edx, TAG_PTR
     pop rbx
     leave
     ret
@@ -200,6 +202,7 @@ DEF_FUNC property_construct
 .pc_no_fdel:
 
     mov rax, rbx
+    mov edx, TAG_PTR
 
     pop r14
     pop r13
@@ -570,6 +573,7 @@ DEF_FUNC property_descr_get
     call rax
     add rsp, 8                  ; pop args
 
+    mov edx, TAG_PTR
     pop r12
     pop rbx
     leave

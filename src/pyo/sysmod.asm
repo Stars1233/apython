@@ -478,6 +478,7 @@ END_FUNC sys_exit_func
 DEF_FUNC sys_getdefaultencoding_func
     lea rdi, [rel sm_utf8]
     call str_from_cstr
+    mov edx, TAG_PTR
     leave
     ret
 END_FUNC sys_getdefaultencoding_func
@@ -520,6 +521,7 @@ DEF_FUNC sys_set_int_max_str_digits_func
     mov [rel sys_int_max_str_digits], rax
     lea rax, [rel none_singleton]
     inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
     leave
     ret
 
