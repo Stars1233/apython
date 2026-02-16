@@ -1065,39 +1065,34 @@ section .text
 ;; If localsplus[arg] is NULL, create an empty cell.
 ;; ============================================================================
 DEF_FUNC_BARE op_make_cell
-    lea rdx, [r12 + PyFrame.localsplus]
-    shl rcx, 4                    ; slot * 16 bytes
+    lea rdx, [rcx*8]              ; slot * 8 (×2 via SIB)
 
     ; Get current value
-    mov rdi, [rdx + rcx]          ; rdi = current value (or NULL)
+    mov rdi, [r12 + rdx*2 + PyFrame.localsplus]  ; rdi = current value (or NULL)
 
-    ; Save slot address
+    ; Save slot offset
     push rdx
-    push rcx
 
     ; cell_new(obj) - creates cell wrapping obj (INCREFs if non-NULL)
     call cell_new
     ; rax = new cell
 
-    pop rcx
     pop rdx
 
     ; XDECREF old value (cell_new already INCREFed it)
-    mov rdi, [rdx + rcx]
+    mov rdi, [r12 + rdx*2 + PyFrame.localsplus]
     test rdi, rdi
     jz .mc_store
     push rax
     push rdx
-    push rcx
     DECREF_REG rdi
-    pop rcx
     pop rdx
     pop rax
 
 .mc_store:
     ; Store cell in localsplus slot (payload + tag)
-    mov [rdx + rcx], rax
-    mov qword [rdx + rcx + 8], TAG_PTR
+    mov [r12 + rdx*2 + PyFrame.localsplus], rax
+    mov qword [r12 + rdx*2 + PyFrame.localsplus + 8], TAG_PTR
     DISPATCH
 END_FUNC op_make_cell
 
@@ -1311,8 +1306,7 @@ DEF_FUNC op_send, SND_FRAME
     ; Skip 1 CACHE entry = 2 bytes, then jump forward by arg * 2 bytes
     add rbx, 2
     mov rcx, [rbp - SND_ARG]
-    shl rcx, 1
-    add rbx, rcx
+    lea rbx, [rbx + rcx*2]
     leave
     DISPATCH
 
@@ -1681,9 +1675,8 @@ DEF_FUNC op_load_from_dict_or_deref, LFDOD_FRAME
 
     ; Not in dict — fall back to cell deref (like LOAD_DEREF)
     mov ecx, [rbp - LFDOD_ARG]
-    lea rax, [r12 + PyFrame.localsplus]
-    shl ecx, 4                    ; slot * 16
-    mov rax, [rax + rcx]          ; cell object
+    lea rax, [rcx*8]              ; slot * 8 (×2 via SIB)
+    mov rax, [r12 + rax*2 + PyFrame.localsplus]  ; cell object
     test rax, rax
     jz .lfdod_error
     mov rax, [rax + PyCellObject.ob_ref]

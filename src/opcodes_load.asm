@@ -78,9 +78,9 @@ END_FUNC op_load_const
 ;; ============================================================================
 DEF_FUNC_BARE op_load_fast
     ; ecx = arg (slot index in localsplus, 16 bytes/slot)
-    shl ecx, 4              ; slot * 16 (zero-extends to rcx)
-    mov rdx, [r12 + PyFrame.localsplus + rcx + 8]  ; tag
-    mov rax, [r12 + PyFrame.localsplus + rcx]       ; payload
+    lea rsi, [rcx*8]         ; slot * 8 (×2 via SIB, avoids flags clobber)
+    mov rdx, [r12 + rsi*2 + PyFrame.localsplus + 8]  ; tag
+    mov rax, [r12 + rsi*2 + PyFrame.localsplus]       ; payload
     INCREF_VAL rax, rdx     ; tag-aware INCREF
     mov [r13], rax
     mov [r13 + 8], rdx
@@ -798,9 +798,9 @@ END_FUNC op_load_attr_method
 ;; In Python 3.12, LOAD_CLOSURE is same opcode behavior as LOAD_FAST.
 ;; ============================================================================
 DEF_FUNC_BARE op_load_closure
-    shl ecx, 4              ; slot * 16 (zero-extends to rcx)
-    mov rdx, [r12 + PyFrame.localsplus + rcx + 8]  ; tag
-    mov rax, [r12 + PyFrame.localsplus + rcx]       ; payload
+    lea rsi, [rcx*8]         ; slot * 8 (×2 via SIB, avoids flags clobber)
+    mov rdx, [r12 + rsi*2 + PyFrame.localsplus + 8]  ; tag
+    mov rax, [r12 + rsi*2 + PyFrame.localsplus]       ; payload
     INCREF_VAL rax, rdx     ; tag-aware INCREF
     mov [r13], rax
     mov [r13 + 8], rdx
@@ -815,9 +815,8 @@ END_FUNC op_load_closure
 ;; Raises NameError if cell is empty (ob_ref == NULL).
 ;; ============================================================================
 DEF_FUNC_BARE op_load_deref
-    lea rax, [r12 + PyFrame.localsplus]
-    shl rcx, 4                    ; slot * 16
-    mov rax, [rax + rcx]          ; rax = cell object (payload)
+    lea rax, [rcx*8]              ; slot * 8 (×2 via SIB)
+    mov rax, [r12 + rax*2 + PyFrame.localsplus]  ; rax = cell object (payload)
     test rax, rax
     jz .deref_error
     mov rax, [rax + PyCellObject.ob_ref]   ; rax = cell contents
@@ -840,11 +839,11 @@ END_FUNC op_load_deref
 ;; Used after DELETE_FAST and in exception handlers.
 ;; ============================================================================
 DEF_FUNC_BARE op_load_fast_check
-    shl ecx, 4              ; slot * 16 (zero-extends to rcx)
-    mov rax, [r12 + PyFrame.localsplus + rcx]       ; payload
+    lea rdx, [rcx*8]        ; slot * 8 (×2 via SIB, avoids flags clobber)
+    mov rax, [r12 + rdx*2 + PyFrame.localsplus]       ; payload
     test rax, rax
     jz .lfc_error
-    mov rdx, [r12 + PyFrame.localsplus + rcx + 8]  ; tag
+    mov rdx, [r12 + rdx*2 + PyFrame.localsplus + 8]  ; tag
     INCREF_VAL rax, rdx     ; tag-aware INCREF
     mov [r13], rax
     mov [r13 + 8], rdx
@@ -864,11 +863,11 @@ END_FUNC op_load_fast_check
 ;; If slot is NULL, pushes NULL (no error).
 ;; ============================================================================
 DEF_FUNC_BARE op_load_fast_and_clear
-    shl ecx, 4                 ; slot * 16 (zero-extends to rcx)
-    mov rax, [r12 + PyFrame.localsplus + rcx]       ; payload (may be NULL)
-    mov rdx, [r12 + PyFrame.localsplus + rcx + 8]   ; tag
-    mov qword [r12 + PyFrame.localsplus + rcx], 0   ; clear payload
-    mov qword [r12 + PyFrame.localsplus + rcx + 8], 0 ; clear tag
+    lea rsi, [rcx*8]           ; slot * 8 (×2 via SIB, avoids flags clobber)
+    mov rax, [r12 + rsi*2 + PyFrame.localsplus]       ; payload (may be NULL)
+    mov rdx, [r12 + rsi*2 + PyFrame.localsplus + 8]   ; tag
+    mov qword [r12 + rsi*2 + PyFrame.localsplus], 0   ; clear payload
+    mov qword [r12 + rsi*2 + PyFrame.localsplus + 8], 0 ; clear tag
     ; Push with preserved tag - no INCREF needed (transferring ownership)
     mov [r13], rax
     mov [r13 + 8], rdx

@@ -80,20 +80,12 @@ END_FUNC op_copy
 ;; ============================================================================
 DEF_FUNC_BARE op_swap
     ; ecx = position (1-indexed from top)
-    ; Compute address of i-th item: r13 - ecx*16 (16 bytes/slot)
+    ; Swap TOS with i-th item using SSE (0 GPR temps for the swap itself)
     mov rax, rcx
     shl rax, 4                 ; rax = ecx * 16
     mov rdx, r13
-    sub rdx, rax               ; rdx = &stack[top - i] (i-th from top, payload)
-    ; Swap payloads: [r13-16] (TOS) and [rdx] (i-th item)
-    mov rax, [r13 - 16]        ; rax = TOS payload
-    mov r8, [rdx]              ; r8 = item payload at position i
-    mov [rdx], rax             ; store TOS payload into position i
-    mov [r13 - 16], r8         ; store old position i payload into TOS
-    ; Swap tags: [r13-8] (TOS tag) and [rdx+8] (i-th tag)
-    mov rax, [r13 - 8]
-    mov r8, [rdx + 8]
-    mov [rdx + 8], rax
-    mov [r13 - 8], r8
+    sub rdx, rax               ; rdx = &slot[i]
+    lea rsi, [r13 - 16]        ; rsi = &TOS
+    VSLOT_SWAP rsi, rdx
     DISPATCH
 END_FUNC op_swap

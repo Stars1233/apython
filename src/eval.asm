@@ -388,7 +388,7 @@ DEF_FUNC_BARE eval_exception_unwind
     test ecx, ecx
     jz .no_lasti
     ; Push a dummy lasti value (we don't use it for now)
-    mov rdx, 0
+    xor edx, edx
     bts rdx, 63             ; SmallInt 0
     VPUSH_INT rdx
 .no_lasti:
@@ -402,8 +402,7 @@ DEF_FUNC_BARE eval_exception_unwind
     ; target is in instruction units (halfwords), so bytes = target * 2
     mov rcx, [r12 + PyFrame.code]
     lea rbx, [rcx + PyCodeObject.co_code]
-    shl rax, 1               ; target * 2 = byte offset
-    add rbx, rax
+    lea rbx, [rbx + rax*2]   ; target * 2 = byte offset
 
     DISPATCH
 
@@ -624,7 +623,7 @@ DEF_FUNC_BARE op_raise_varargs
 .raise_type:
     ; rdi = exception type - create instance with no message
     push rdi
-    mov rsi, 0               ; no message
+    xor esi, esi              ; no message
     call exc_new
     pop rdi                  ; discard type (immortal, no DECREF needed)
     mov rdi, rax

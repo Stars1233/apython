@@ -33,7 +33,7 @@ extern str_repr
 %macro BUF_ENSURE 1
     mov rax, [rbp-16]          ; used
     add rax, %1                ; used + needed
-    add rax, 1                 ; +1 for NUL
+    inc rax                    ; +1 for NUL
     cmp rax, [rbp-24]          ; compare with capacity
     jbe %%ok
     ; Grow: new_cap = max(cap*2, used+needed+1)

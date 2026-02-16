@@ -72,12 +72,11 @@ DEF_FUNC_BARE op_store_fast
     ; ecx = arg (slot index, 16 bytes/slot)
     VPOP rax                    ; rax = new value payload
     mov r8, [r13 + 8]          ; r8 = new value tag (from just-popped slot)
-    lea rdx, [r12 + PyFrame.localsplus]
-    shl rcx, 4                 ; slot * 16
-    mov rdi, [rdx + rcx]       ; rdi = old value (payload)
-    mov r9, [rdx + rcx + 8]    ; r9 = old value tag
-    mov [rdx + rcx], rax       ; store new payload
-    mov [rdx + rcx + 8], r8    ; store new tag
+    lea rdx, [rcx*8]           ; slot * 8 (×2 via SIB)
+    mov rdi, [r12 + rdx*2 + PyFrame.localsplus]       ; rdi = old value (payload)
+    mov r9, [r12 + rdx*2 + PyFrame.localsplus + 8]    ; r9 = old value tag
+    mov [r12 + rdx*2 + PyFrame.localsplus], rax       ; store new payload
+    mov [r12 + rdx*2 + PyFrame.localsplus + 8], r8    ; store new tag
     ; XDECREF_VAL old value (tag-aware)
     XDECREF_VAL rdi, r9
     DISPATCH
@@ -282,9 +281,8 @@ END_FUNC op_store_attr
 ;; ============================================================================
 DEF_FUNC_BARE op_store_deref
     VPOP rax                        ; rax = new value
-    lea rdx, [r12 + PyFrame.localsplus]
-    shl rcx, 4                     ; slot * 16
-    mov rdx, [rdx + rcx]           ; rdx = cell object (payload)
+    lea rdx, [rcx*8]               ; slot * 8 (×2 via SIB)
+    mov rdx, [r12 + rdx*2 + PyFrame.localsplus]  ; rdx = cell object (payload)
 
     ; INCREF new value (may be SmallInt)
     push rax
@@ -314,9 +312,8 @@ END_FUNC op_store_deref
 ;; DECREFs old value if present.
 ;; ============================================================================
 DEF_FUNC_BARE op_delete_deref
-    lea rax, [r12 + PyFrame.localsplus]
-    shl rcx, 4                     ; slot * 16
-    mov rax, [rax + rcx]           ; rax = cell object (payload)
+    lea rax, [rcx*8]               ; slot * 8 (×2 via SIB)
+    mov rax, [r12 + rax*2 + PyFrame.localsplus]  ; rax = cell object (payload)
     mov rdi, [rax + PyCellObject.ob_ref]
     mov qword [rax + PyCellObject.ob_ref], 0
     ; XDECREF old value
@@ -333,12 +330,11 @@ END_FUNC op_delete_deref
 ;; DECREF old value if present.
 ;; ============================================================================
 DEF_FUNC_BARE op_delete_fast
-    lea rax, [r12 + PyFrame.localsplus]
-    shl rcx, 4                 ; slot * 16
-    mov rdi, [rax + rcx]       ; old value (payload)
-    mov rsi, [rax + rcx + 8]   ; old value tag
-    mov qword [rax + rcx], 0   ; clear payload
-    mov qword [rax + rcx + 8], 0 ; clear tag
+    lea rax, [rcx*8]           ; slot * 8 (×2 via SIB)
+    mov rdi, [r12 + rax*2 + PyFrame.localsplus]       ; old value (payload)
+    mov rsi, [r12 + rax*2 + PyFrame.localsplus + 8]   ; old value tag
+    mov qword [r12 + rax*2 + PyFrame.localsplus], 0   ; clear payload
+    mov qword [r12 + rax*2 + PyFrame.localsplus + 8], 0 ; clear tag
     XDECREF_VAL rdi, rsi
     DISPATCH
 END_FUNC op_delete_fast

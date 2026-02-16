@@ -372,6 +372,15 @@ TAG_RC_BIT   equ (1 << 8)    ; bit 8: refcounted flag
     %%skip:
 %endmacro
 
+; Swap two 16-byte value stack slots via SSE (no GPR temps needed for the swap)
+; Both addresses must be 16-byte aligned (guaranteed by malloc + 16B slot layout)
+%macro VSLOT_SWAP 2         ; %1 = addr1, %2 = addr2
+    movdqa xmm0, [%1]
+    movdqa xmm1, [%2]
+    movdqa [%1], xmm1
+    movdqa [%2], xmm0
+%endmacro
+
 ; Mark stack as non-executable and reset to .text section
 ASM_INIT
 

@@ -2475,7 +2475,7 @@ DEF_FUNC builtin_eval_fn
 
     ; Try parsing as integer literal with base 0 (auto-detect)
     lea rdi, [rdi + PyStrObject.data]
-    mov rsi, 0                  ; base 0 = auto-detect
+    xor esi, esi                ; base 0 = auto-detect
     call int_from_cstr_base
     test rax, rax
     jnz .evl_done

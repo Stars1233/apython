@@ -2,29 +2,6 @@
 
 Target: modern x86-64 (Haswell+/Zen2+). 100% Python 3.12 correctness required.
 
-## 5. SSE for Bulk Stack Operations
-
-Value stack slots are 16-byte aligned. Use `movdqa` (aligned 128-bit load/store)
-for COPY and SWAP:
-
-```nasm
-; COPY: one 16-byte load + one 16-byte store (vs two 8-byte pairs)
-op_copy:
-    ; compute source slot address
-    movdqa xmm0, [rsi]         ; load 128-bit slot (aligned)
-    movdqa [r13], xmm0          ; store to TOS
-    add r13, 16
-    DISPATCH
-
-; SWAP: two loads, two stores, zero GPR register pressure
-    movdqa xmm0, [r13 - 16]    ; load TOS
-    movdqa xmm1, [rsi]         ; load other
-    movdqa [r13 - 16], xmm1    ; store other -> TOS
-    movdqa [rsi], xmm0         ; store TOS -> other
-```
-
-SSE state is saved/restored by the kernel across context switches. No extra cost.
-
 ## 6. Superinstructions
 
 Fuse common opcode pairs into single handlers. Reserve unused opcode slots
@@ -82,32 +59,6 @@ type is loaded via `ob_type`, the first cache line (bytes 0-63) is fetched.
 Moving `tp_call` to offset +24 or +32 (after tp_name) would put it in the same
 cache line as the type pointer. Types are called far more often than repr'd.
 
-## 8. Encoding Micro-Optimizations
-
-### Use `xor eax, eax` not `xor rax, rax`
-
-2 bytes vs 3 bytes. Both zero the full 64-bit register (Intel implicitly
-zero-extends 32-bit ops to 64-bit). Audit for stragglers.
-
-### Use `test eax, eax` not `test rax, rax` (where safe)
-
-2 bytes vs 3 bytes. Safe when value is known to fit in 32 bits.
-
-### `mov rax, 0` → `xor eax, eax`
-
-`mov rax, 0` is 7 bytes and doesn't break dependency chains. `xor eax, eax` is
-2 bytes and is recognized by the CPU as a zeroing idiom (breaks false
-dependencies, doesn't consume a physical register on recent microarchitectures).
-
-### `inc`/`dec` vs `add/sub 1`
-
-On Haswell+ and Zen+, `inc`/`dec` no longer cause partial-flags stalls. Use
-freely — 1 byte shorter than `add reg, 1`.
-
-### `movzx eax, byte [mem]` not `movzx rax, byte [mem]`
-
-Same result (zero-extends to 64-bit), shorter encoding.
-
 ## 9. What NOT To Do
 
 ### Don't add AVX2 for general memcpy
@@ -144,5 +95,4 @@ net loss.
 
 | # | Optimization | Effort | Expected Gain |
 |---|-------------|--------|---------------|
-| 1 | movdqa for COPY/SWAP | Trivial | 2 instructions -> 1 |
-| 2 | COMPARE+POP_JUMP superinstruction | Medium | eliminates stack round-trip |
+| 1 | COMPARE+POP_JUMP superinstruction | Medium | eliminates stack round-trip |

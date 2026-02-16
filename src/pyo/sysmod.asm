@@ -202,7 +202,7 @@ DEF_FUNC sys_module_init, 32
     mov rdi, 12
     bts rdi, 63
     mov [rbx + PyTupleObject.ob_item + 8], rdi
-    mov rdi, 0
+    xor edi, edi
     bts rdi, 63
     mov [rbx + PyTupleObject.ob_item + 16], rdi
     push rbx
@@ -210,7 +210,7 @@ DEF_FUNC sys_module_init, 32
     call str_from_cstr
     pop rbx
     mov [rbx + PyTupleObject.ob_item + 24], rax
-    mov rdi, 0
+    xor edi, edi
     bts rdi, 63
     mov [rbx + PyTupleObject.ob_item + 32], rdi
 
@@ -312,7 +312,7 @@ DEF_FUNC sys_module_init, 32
     call obj_decref
 
     ; --- sys.stdin (fd=0) ---
-    mov rdi, 0
+    xor edi, edi
     lea rsi, [rel sm_stdin_name]
     lea rdx, [rel sm_mode_r]
     call fileobj_new
