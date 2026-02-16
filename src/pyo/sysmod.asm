@@ -461,18 +461,8 @@ DEF_FUNC sys_exit_func
     jne .exit_0
 
     ; Get exit code from args[0]
-    mov rax, [rdi]
-    ; Check if SmallInt
-    test rax, rax
-    js .exit_smallint
-    ; Not SmallInt — exit 1
-    mov edi, 1
-    call sys_exit
-
-.exit_smallint:
-    ; Decode SmallInt
-    shl rax, 1
-    sar rax, 1
+    mov rdi, [rdi]
+    call int_to_i64
     mov edi, eax
     call sys_exit
 

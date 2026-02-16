@@ -150,7 +150,7 @@ DEF_FUNC op_import_from, IF2_FRAME
     DISPATCH
 
 .if_got_attr:
-    VPUSH_BRANCHLESS rax
+    VPUSH_PTR rax
     leave
     DISPATCH
 
