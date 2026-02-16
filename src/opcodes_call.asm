@@ -45,7 +45,8 @@ CL_IS_METHOD equ 32
 CL_TOTAL     equ 40
 CL_SAVED_RSP equ 48
 CL_TPCALL    equ 56
-CL_FRAME     equ 64
+CL_RETTAG    equ 64
+CL_FRAME     equ 72
 
 ; op_make_function locals (DEF_FUNC op_make_function, MF_FRAME)
 MF_FLAGS   equ 8
@@ -64,6 +65,7 @@ CFX_RESULT  equ 56
 CFX_OPARG   equ 64
 
 ; op_before_with locals (manual frame, push rbx; push r12; sub rsp, 32)
+BW_RETTAG  equ 24
 BW_MGR     equ 32
 BW_EXIT    equ 40
 BW_ENTER   equ 48
@@ -73,6 +75,7 @@ WES_FUNC   equ 8
 WES_SELF   equ 16
 WES_VAL    equ 24
 WES_RESULT equ 32
+WES_RETTAG equ 40
 WES_FRAME  equ 48
 
 ;; ============================================================================
@@ -230,6 +233,7 @@ DEF_FUNC op_call, CL_FRAME
     call rax
     mov rsp, [rbp - CL_SAVED_RSP]
     mov [rbp - CL_RETVAL], rax
+    mov [rbp - CL_RETTAG], rdx
     jmp .cleanup
 
 .have_tp_call:
@@ -278,6 +282,7 @@ DEF_FUNC op_call, CL_FRAME
     call rax
     mov rsp, [rbp - CL_SAVED_RSP]              ; restore rsp
     mov [rbp - CL_RETVAL], rax               ; save return value
+    mov [rbp - CL_RETTAG], rdx               ; save return tag
 
 .cleanup:
     ; === Unified cleanup ===
@@ -319,7 +324,8 @@ DEF_FUNC op_call, CL_FRAME
 
 .push_result:
     ; Push return value onto value stack
-    VPUSH_BRANCHLESS rax
+    mov rdx, [rbp - CL_RETTAG]
+    VPUSH_VAL rax, rdx
 
     ; Skip 3 CACHE entries (6 bytes)
     add rbx, 6
@@ -450,7 +456,8 @@ CFX_NPOS    equ 80
 CFX_NKW     equ 88
 CFX_MERGED  equ 96       ; merged args buffer (heap ptr)
 CFX_KWNAMES equ 104      ; kw_names tuple
-CFX_FRAME2  equ 112      ; new frame size (manual push, so offset from rbp-16)
+CFX_RETTAG  equ 112      ; return tag from tp_call
+CFX_FRAME2  equ 120      ; new frame size (manual push, so offset from rbp-16)
 
 DEF_FUNC op_call_function_ex
     push rbx                        ; save (clobbered by eval convention save)
@@ -512,6 +519,7 @@ DEF_FUNC op_call_function_ex
     mov rax, [rbp - CFX_TPCALL]
     call rax
     mov [rbp - CFX_RESULT], rax
+    mov [rbp - CFX_RETTAG], rdx
     jmp .cfex_cleanup
 
 .cfex_merge_kwargs:
@@ -622,6 +630,7 @@ DEF_FUNC op_call_function_ex
     mov rax, [rbp - CFX_TPCALL]
     call rax
     mov [rbp - CFX_RESULT], rax
+    mov [rbp - CFX_RETTAG], rdx
 
     ; Clear kw_names_pending
     mov qword [rel kw_names_pending], 0
@@ -658,7 +667,8 @@ DEF_FUNC op_call_function_ex
 
     ; Push result
     mov rax, [rbp - CFX_RESULT]
-    VPUSH_BRANCHLESS rax
+    mov rdx, [rbp - CFX_RETTAG]
+    VPUSH_VAL rax, rdx
 
     add rsp, CFX_FRAME2 - 16
     pop r12
@@ -764,6 +774,7 @@ DEF_FUNC op_before_with
     call rcx
     add rsp, 8                     ; pop mgr arg
     mov [rbp - BW_ENTER], rax              ; save __enter__ result
+    mov [rbp - BW_RETTAG], rdx             ; save __enter__ result tag
 
     ; DECREF mgr
     mov rdi, [rbp - BW_MGR]
@@ -771,7 +782,8 @@ DEF_FUNC op_before_with
 
     ; Push __enter__ result
     mov rax, [rbp - BW_ENTER]
-    VPUSH_BRANCHLESS rax
+    mov rdx, [rbp - BW_RETTAG]
+    VPUSH_VAL rax, rdx
 
     add rsp, 32
     pop r12
@@ -861,10 +873,12 @@ DEF_FUNC op_with_except_start, WES_FRAME
     call rax
     add rsp, 24
     mov [rbp - WES_RESULT], rax                ; save result
+    mov [rbp - WES_RETTAG], rdx                ; save result tag
 
     ; Push result onto value stack
     mov rax, [rbp - WES_RESULT]
-    VPUSH_BRANCHLESS rax
+    mov rdx, [rbp - WES_RETTAG]
+    VPUSH_VAL rax, rdx
 
     leave
     DISPATCH
