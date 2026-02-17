@@ -384,6 +384,10 @@ DEF_FUNC op_load_attr, LA_FRAME
     mov [rbp - LA_OBJ], rdi
     mov [rbp - LA_OBJ_TAG], rax
 
+    ; Non-pointer obj can't have attrs (SmallInt, Float, None, Bool)
+    test dword [rbp - LA_OBJ_TAG], TAG_RC_BIT
+    jz .la_attr_error
+
     ; Look up attribute
     ; Check if obj's type has tp_getattr
     mov rax, [rdi + PyObject.ob_type]
@@ -436,8 +440,8 @@ DEF_FUNC op_load_attr, LA_FRAME
 .la_got_attr:
     ; === Descriptor protocol: check for staticmethod/classmethod ===
     mov rax, [rbp - LA_ATTR]   ; attr
-    cmp dword [rbp - LA_ATTR_TAG], TAG_SMALLINT
-    je .la_check_flag          ; SmallInt, skip descriptor check
+    test dword [rbp - LA_ATTR_TAG], TAG_RC_BIT
+    jz .la_check_flag          ; non-pointer (SmallInt/Float/etc), skip descriptor check
     mov rcx, [rax + PyObject.ob_type]
 
     lea rdx, [rel staticmethod_type]
@@ -506,8 +510,8 @@ DEF_FUNC op_load_attr, LA_FRAME
     cmp qword [rbp - LA_FROM_TYPE], 0
     je .la_simple_push
     mov rax, [rbp - LA_ATTR]
-    cmp dword [rbp - LA_ATTR_TAG], TAG_SMALLINT
-    je .la_simple_push          ; SmallInt
+    test dword [rbp - LA_ATTR_TAG], TAG_RC_BIT
+    jz .la_simple_push          ; non-pointer (SmallInt/Float/etc)
     mov rcx, [rax + PyObject.ob_type]
     mov rcx, [rcx + PyTypeObject.tp_call]
     test rcx, rcx

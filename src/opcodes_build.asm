@@ -135,9 +135,9 @@ DEF_FUNC_BARE op_binary_subscr
     push rdi                   ; save obj
     push rsi                   ; save key
 
-    ; Try mp_subscript first (handles int keys for all types)
-    cmp r9d, TAG_SMALLINT
-    je .no_subscript           ; SmallInt can't be subscripted
+    ; Non-pointer tags can't be subscripted (SmallInt, Float, None, Bool)
+    test r9d, TAG_RC_BIT
+    jz .subscr_error
     mov rax, [rdi + PyObject.ob_type]
     mov rax, [rax + PyTypeObject.tp_as_mapping]
     test rax, rax
@@ -306,6 +306,10 @@ DEF_FUNC_BARE op_store_subscr
     push rdi                   ; save obj
     push rsi                   ; save key
     push rdx                   ; save value
+
+    ; Non-pointer tags can't be subscript-assigned
+    test r9d, TAG_RC_BIT
+    jz .store_type_error
 
     ; Try mp_ass_subscript first
     mov rax, [rdi + PyObject.ob_type]

@@ -153,18 +153,11 @@ DEF_FUNC_BARE op_binary_op
     mov r8, [rax + rcx*8]      ; r8 = offset into PyNumberMethods
     mov r9d, ecx               ; r9d = save binary op code (survives float check)
 
-    ; Float coercion: if either operand is float, use float methods
+    ; Float coercion: if either operand is TAG_FLOAT, use float methods
     ; This handles int+float, float+int, float+float
-    cmp qword [rsp + BO_LTAG], TAG_SMALLINT
-    je .check_right_float
-    lea rcx, [rel float_type]
-    cmp [rdi + PyObject.ob_type], rcx
+    cmp qword [rsp + BO_LTAG], TAG_FLOAT
     je .use_float_methods
-.check_right_float:
-    cmp qword [rsp + BO_RTAG], TAG_SMALLINT
-    je .no_float_coerce
-    lea rcx, [rel float_type]
-    cmp [rsi + PyObject.ob_type], rcx
+    cmp qword [rsp + BO_RTAG], TAG_FLOAT
     je .use_float_methods
 
 .no_float_coerce:
@@ -444,17 +437,10 @@ section .text
     push r8                    ; save right tag
     push rsi                   ; save right
 
-    ; Float coercion: if either operand is float, use float_compare
-    cmp r9d, TAG_SMALLINT
-    je .cmp_check_right_float
-    lea rax, [rel float_type]
-    cmp [rdi + PyObject.ob_type], rax
+    ; Float coercion: if either operand is TAG_FLOAT, use float_compare
+    cmp r9d, TAG_FLOAT
     je .cmp_use_float
-.cmp_check_right_float:
-    cmp r8d, TAG_SMALLINT
-    je .cmp_no_float
-    lea rax, [rel float_type]
-    cmp [rsi + PyObject.ob_type], rax
+    cmp r8d, TAG_FLOAT
     je .cmp_use_float
 
 .cmp_no_float:
@@ -592,6 +578,10 @@ DEF_FUNC_BARE op_unary_negative
     VPOP rdi                   ; rdi = operand
     mov r8, [r13 + 8]         ; r8 = operand tag
 
+    ; TAG_FLOAT fast path: inline sign flip, no DECREF needed
+    cmp r8d, TAG_FLOAT
+    je .neg_float
+
     ; Save operand + tag for DECREF after call
     push r8
     push rdi
@@ -622,6 +612,12 @@ DEF_FUNC_BARE op_unary_negative
 
     ; Push result
     VPUSH_VAL rax, rdx
+    DISPATCH
+
+.neg_float:
+    ; Inline float negate: flip sign bit, no refcounting
+    btc rdi, 63
+    VPUSH_FLOAT rdi
     DISPATCH
 END_FUNC op_unary_negative
 
@@ -891,18 +887,14 @@ DEF_FUNC op_format_value, FV_FRAME
     test qword [rbp - FV_HASSPEC], 4
     jz .fv_no_format_spec
 
-    ; Check if value is a float
+    ; Check if value is a float (TAG_FLOAT)
     extern float_type
-    cmp dword [rbp - FV_VTAG], TAG_SMALLINT
-    je .fv_no_format_spec      ; SmallInt → not float
-    mov rax, [rdi + PyObject.ob_type]
-    lea rcx, [rel float_type]
-    cmp rax, rcx
+    cmp dword [rbp - FV_VTAG], TAG_FLOAT
     jne .fv_no_format_spec
 
-    ; Float with format spec: call float_format_spec(float, spec_data, spec_len)
+    ; Float with format spec: call float_format_spec(payload, spec_data, spec_len)
     extern float_format_spec
-    ; rdi = float obj (still set)
+    ; rdi = raw double bits (still set)
     mov rax, [rbp - FV_SPEC]  ; fmt_spec string
     lea rsi, [rax + PyStrObject.data]  ; spec data
     mov rdx, [rax + PyStrObject.ob_size]  ; spec length
@@ -1266,8 +1258,8 @@ DEF_FUNC op_send, SND_FRAME
     mov [rbp - SND_RECV], rdi  ; save receiver
 
     ; Check if receiver is a generator with iternext
-    cmp dword [r13 - 8], TAG_SMALLINT
-    je .send_error
+    test dword [r13 - 8], TAG_RC_BIT
+    jz .send_error
     mov rax, [rdi + PyObject.ob_type]
     mov rax, [rax + PyTypeObject.tp_iternext]
     test rax, rax

@@ -144,8 +144,8 @@ DEF_FUNC instance_getattr
     ; Regular callables are bound to the instance.
     mov r13, rax                ; r13 = attr (borrowed ref from dict_get)
     mov r12, rdx                ; r12 = attr tag (name no longer needed)
-    cmp r12d, TAG_SMALLINT
-    je .found_type_raw          ; SmallInt — return as-is
+    test r12d, TAG_RC_BIT
+    jz .found_type_raw          ; non-pointer — return as-is
 
     mov rcx, [rax + PyObject.ob_type]
 
@@ -422,6 +422,12 @@ DEF_FUNC type_call
     mov rax, [rsi]          ; args[0] payload
     cmp dword [rsi + 8], TAG_SMALLINT
     je .type_smallint       ; SmallInt → int type
+    cmp dword [rsi + 8], TAG_FLOAT
+    je .type_float          ; TAG_FLOAT → float type
+    cmp dword [rsi + 8], TAG_BOOL
+    je .type_bool           ; TAG_BOOL → bool type
+    cmp dword [rsi + 8], TAG_NONE
+    je .type_none           ; TAG_NONE → none type
     mov rax, [rax + PyObject.ob_type]
     inc qword [rax + PyObject.ob_refcnt]
     mov edx, TAG_PTR
@@ -429,6 +435,27 @@ DEF_FUNC type_call
     ret
 .type_smallint:
     lea rax, [rel int_type]
+    inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
+    leave
+    ret
+.type_float:
+    extern float_type
+    lea rax, [rel float_type]
+    inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
+    leave
+    ret
+.type_bool:
+    extern bool_type
+    lea rax, [rel bool_type]
+    inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
+    leave
+    ret
+.type_none:
+    extern none_type
+    lea rax, [rel none_type]
     inc qword [rax + PyObject.ob_refcnt]
     mov edx, TAG_PTR
     leave

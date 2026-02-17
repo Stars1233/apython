@@ -140,15 +140,8 @@ DEF_FUNC obj_repr
     ret
 
 .float_tag:
-    ; Create temp PyFloatObject on stack, call float_repr
-    sub rsp, 32
-    mov qword [rsp], 1            ; ob_refcnt
-    lea rax, [rel float_type]
-    mov [rsp + 8], rax             ; ob_type
-    mov [rsp + 16], rdi            ; value (double bits)
-    mov rdi, rsp
+    ; rdi = raw double bits — pass directly to float_repr
     call float_repr
-    add rsp, 32
     leave
     ret
 
@@ -226,15 +219,9 @@ DEF_FUNC obj_str
     ret
 
 .float_tag:
-    ; Create temp PyFloatObject on stack, call float_repr (float's tp_str)
-    sub rsp, 32
-    mov qword [rsp], 1            ; ob_refcnt
-    lea rax, [rel float_type]
-    mov [rsp + 8], rax             ; ob_type
-    mov [rsp + 16], rbx            ; value (double bits from payload)
-    mov rdi, rsp
+    ; rbx = raw double bits — pass directly to float_repr
+    mov rdi, rbx
     call float_repr
-    add rsp, 32
     pop r12
     pop rbx
     leave
@@ -280,6 +267,8 @@ DEF_FUNC obj_hash
 
     cmp esi, TAG_SMALLINT
     je .smallint_hash
+    cmp esi, TAG_FLOAT
+    je .float_hash
 
     ; TAG_PTR path
     test rdi, rdi
@@ -306,6 +295,16 @@ DEF_FUNC obj_hash
     leave
     ret
 
+.float_hash:
+    ; Inline float: hash = raw bits (avoid -1)
+    mov rax, rdi
+    cmp rax, -1
+    jne .float_hash_done
+    mov rax, -2
+.float_hash_done:
+    leave
+    ret
+
 .default_hash:
     ; Default: hash is the object address
     mov rax, rdi
@@ -318,6 +317,8 @@ END_FUNC obj_hash
 DEF_FUNC_BARE obj_is_true
     cmp esi, TAG_SMALLINT
     je .smallint
+    cmp esi, TAG_FLOAT
+    je .float_tag
 
     push rbp
     mov rbp, rsp
@@ -451,6 +452,17 @@ DEF_FUNC_BARE obj_is_true
     ; SmallInt is true iff raw value != 0
     test rdi, rdi
     setnz al
+    movzx eax, al
+    ret
+
+.float_tag:
+    ; Inline float: true iff not 0.0 and not -0.0
+    movq xmm0, rdi
+    xorpd xmm1, xmm1
+    ucomisd xmm0, xmm1
+    setne al
+    setp cl                    ; NaN is truthy
+    or al, cl
     movzx eax, al
     ret
 END_FUNC obj_is_true

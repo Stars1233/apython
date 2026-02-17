@@ -2372,7 +2372,6 @@ DEF_FUNC int_power
     movsd xmm0, [rel one_double]
     divsd xmm0, xmm1
     call float_from_f64
-    mov edx, TAG_PTR
     pop r14
     pop r13
     pop r12
@@ -2428,7 +2427,6 @@ DEF_FUNC int_true_divide
     movsd xmm0, [rsp-8]   ; xmm0 = left
     divsd xmm0, xmm1
     call float_from_f64
-    mov edx, TAG_PTR
 
     pop r13
     pop r12

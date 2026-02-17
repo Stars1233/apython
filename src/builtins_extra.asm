@@ -38,6 +38,7 @@ extern eval_saved_r12
 
 extern int_type
 extern float_type
+extern none_type
 extern builtin_bool
 extern builtin_float
 extern str_type
@@ -75,6 +76,9 @@ DEF_FUNC builtin_abs
 
     cmp dword [rdi + 8], TAG_SMALLINT
     je .abs_smallint
+
+    cmp dword [rdi + 8], TAG_FLOAT
+    je .abs_inline_float
 
     mov rax, [rbx + PyObject.ob_type]
     lea rcx, [rel float_type]
@@ -119,13 +123,22 @@ DEF_FUNC builtin_abs
     leave
     ret
 
+.abs_inline_float:
+    ; TAG_FLOAT: clear sign bit inline
+    btr rbx, 63
+    mov rax, rbx
+    mov edx, TAG_FLOAT
+    add rsp, 8
+    pop rbx
+    leave
+    ret
+
 .abs_float:
     movsd xmm0, [rbx + PyFloatObject.value]
     mov rax, 0x7FFFFFFFFFFFFFFF
     movq xmm1, rax
     andpd xmm0, xmm1
     call float_from_f64
-    mov edx, TAG_PTR
     add rsp, 8
     pop rbx
     leave
@@ -314,6 +327,9 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     cmp dword [rdi + 8], TAG_SMALLINT
     je .int_return_smallint
 
+    cmp dword [rdi + 8], TAG_FLOAT
+    je .int_from_inline_float
+
     mov rax, [rbx + PyObject.ob_type]
 
     lea rcx, [rel bool_type]
@@ -376,6 +392,13 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     inc qword [rbx + PyObject.ob_refcnt]
     mov rax, rbx
     mov edx, TAG_PTR
+    jmp .int_ret
+
+.int_from_inline_float:
+    ; TAG_FLOAT: rbx = raw double bits
+    movq xmm0, rbx
+    cvttsd2si rdi, xmm0
+    call int_from_i64
     jmp .int_ret
 
 .int_from_float:
@@ -555,6 +578,8 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     ; Verify result is int-like
     cmp edx, TAG_SMALLINT
     je .int_ret                  ; SmallInt — OK
+    cmp edx, TAG_FLOAT
+    je .int_dunder_returned_float
     mov rcx, [rax + PyObject.ob_type]
     lea r8, [rel int_type]
     cmp rcx, r8
@@ -625,6 +650,8 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     ; Verify result is int-like
     cmp edx, TAG_SMALLINT
     je .int_ret                  ; SmallInt — OK
+    cmp edx, TAG_FLOAT
+    je .int_dunder_returned_float
     mov rcx, [rax + PyObject.ob_type]
     lea r8, [rel int_type]
     cmp rcx, r8
@@ -663,6 +690,8 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     ; If it's already an int, return it
     cmp edx, TAG_SMALLINT
     je .int_ret                  ; SmallInt — OK
+    test edx, TAG_RC_BIT
+    jz .int_trunc_nonint_error   ; non-pointer (Float/None/Bool) — not int
     mov rcx, [rax + PyObject.ob_type]
     lea r8, [rel int_type]
     cmp rcx, r8
@@ -708,6 +737,8 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     ; Verify it's an int
     cmp edx, TAG_SMALLINT
     je .int_ret                  ; SmallInt — OK
+    test edx, TAG_RC_BIT
+    jz .int_index_nonint_error   ; non-pointer (Float/None/Bool) — not int
     mov rcx, [rax + PyObject.ob_type]
     lea r8, [rel int_type]
     cmp rcx, r8
@@ -718,9 +749,10 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     mov r8, [rcx + PyTypeObject.tp_flags]
     test r8, TYPE_FLAG_INT_SUBCLASS
     jnz .int_ret
-    ; __index__ returned non-int
+    ; __index__ returned non-int (heap object)
     mov rdi, rax
     call obj_decref
+.int_index_nonint_error:
     lea rdi, [rel exc_TypeError_type]
     CSTRING rsi, "__index__ returned non-int"
     call raise_exception
@@ -791,6 +823,18 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     mov [rel current_exception], rax
     jmp eval_exception_unwind
 
+.int_trunc_nonint_error:
+    ; __trunc__ returned non-pointer non-int (TAG_FLOAT, TAG_NONE, etc)
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "__trunc__ returned non-Integral"
+    call raise_exception
+
+.int_dunder_returned_float:
+    ; __int__/__trunc__ returned TAG_FLOAT — TypeError (non-int return)
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "__int__ returned non-int (type float)"
+    call raise_exception
+
 .int_convert_bool_result:
     ; rax = bool_true or bool_false, convert to SmallInt
     lea rcx, [rel bool_true]
@@ -826,6 +870,9 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     mov rax, [rdi + 16]            ; args[1] payload (16-byte stride)
     cmp dword [rdi + 24], TAG_SMALLINT  ; args[1] tag
     je .int_base_smallint
+    ; Reject non-pointer tags (TAG_FLOAT, TAG_NONE, TAG_BOOL)
+    test dword [rdi + 24], TAG_RC_BIT
+    jz .int_base_type_error
     ; base is a heap object — check if it's an int or has __index__
     ; args already saved in [rbp - BI_ARGS]
     mov rcx, [rax + PyObject.ob_type]
@@ -905,8 +952,8 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     mov rdi, [rbp - BI_ARGS]
     mov rbx, [rdi]                 ; args[0] payload
     mov [rbp - BI_OBJ], rbx       ; save original obj for error msg
-    cmp dword [rdi + 8], TAG_SMALLINT  ; args[0] tag
-    je .int_base_type_error_str    ; SmallInt: can't have base with int
+    test dword [rdi + 8], TAG_RC_BIT   ; args[0] tag
+    jz .int_base_type_error_str    ; non-pointer: can't have base with non-str
     mov rax, [rbx + PyObject.ob_type]
     lea rcx, [rel str_type]
     cmp rax, rcx
@@ -1148,6 +1195,8 @@ DEF_FUNC builtin_ord
 
     cmp dword [rdi + 8], TAG_SMALLINT  ; check args[0] tag before loading payload
     je .ord_type_error
+    test dword [rdi + 8], TAG_RC_BIT
+    jz .ord_type_error             ; non-pointer tag (TAG_FLOAT etc.)
 
     mov rdi, [rdi]                 ; args[0] payload
 
@@ -1427,6 +1476,9 @@ DEF_FUNC builtin_hash_fn
     cmp dword [rdi + 8], TAG_SMALLINT  ; check args[0] tag
     je .hash_smallint
 
+    cmp dword [rdi + 8], TAG_FLOAT
+    je .hash_float
+
     mov rax, [rbx + PyObject.ob_type]
     mov rcx, [rax + PyTypeObject.tp_hash]
     test rcx, rcx
@@ -1434,6 +1486,20 @@ DEF_FUNC builtin_hash_fn
 
     mov rdi, rbx
     call rcx
+    mov rdi, rax
+    call int_from_i64
+    add rsp, 8
+    pop rbx
+    leave
+    ret
+
+.hash_float:
+    ; TAG_FLOAT: hash = raw bits (avoid -1)
+    mov rax, rbx
+    cmp rax, -1
+    jne .hash_float_ok
+    mov rax, -2
+.hash_float_ok:
     mov rdi, rax
     call int_from_i64
     add rsp, 8
@@ -1470,8 +1536,10 @@ DEF_FUNC builtin_callable
     jne .callable_error
 
     cmp dword [rdi + 8], TAG_SMALLINT  ; check args[0] tag
-    mov rdi, [rdi]                     ; args[0] payload
     je .callable_false
+    test dword [rdi + 8], TAG_RC_BIT
+    jz .callable_false              ; non-pointer tag (TAG_FLOAT etc.)
+    mov rdi, [rdi]                     ; args[0] payload
 
     mov rax, [rdi + PyObject.ob_type]
     mov rcx, [rax + PyTypeObject.tp_call]
@@ -1506,8 +1574,10 @@ DEF_FUNC builtin_iter_fn
     jne .iter_error
 
     cmp dword [rdi + 8], TAG_SMALLINT  ; check args[0] tag
-    mov rdi, [rdi]                     ; args[0] payload
     je .iter_type_error
+    test dword [rdi + 8], TAG_RC_BIT
+    jz .iter_type_error             ; non-pointer tag (TAG_FLOAT etc.)
+    mov rdi, [rdi]                     ; args[0] payload
 
     mov rax, [rdi + PyObject.ob_type]
     mov rcx, [rax + PyTypeObject.tp_iter]
@@ -1540,8 +1610,10 @@ DEF_FUNC builtin_next_fn
     jne .next_error
 
     cmp dword [rdi + 8], TAG_SMALLINT  ; check args[0] tag
-    mov rdi, [rdi]                     ; args[0] payload
     je .next_type_error
+    test dword [rdi + 8], TAG_RC_BIT
+    jz .next_type_error             ; non-pointer tag (TAG_FLOAT etc.)
+    mov rdi, [rdi]                     ; args[0] payload
 
     mov rax, [rdi + PyObject.ob_type]
     mov rcx, [rax + PyTypeObject.tp_iternext]
@@ -1602,6 +1674,8 @@ DEF_FUNC builtin_any
 
     cmp dword [rdi + 8], TAG_SMALLINT
     je .any_type_error
+    test dword [rdi + 8], TAG_RC_BIT
+    jz .any_type_error              ; non-pointer tag (TAG_FLOAT etc.)
     mov rdi, [rdi]
 
     mov rax, [rdi + PyObject.ob_type]
@@ -1687,6 +1761,8 @@ DEF_FUNC builtin_all
 
     cmp dword [rdi + 8], TAG_SMALLINT
     je .all_type_error
+    test dword [rdi + 8], TAG_RC_BIT
+    jz .all_type_error              ; non-pointer tag (TAG_FLOAT etc.)
     mov rdi, [rdi]
 
     mov rax, [rdi + PyObject.ob_type]
@@ -1788,13 +1864,13 @@ DEF_FUNC builtin_sum
     mov r13, [rbx + 16]            ; args[1] payload (start value, 16-byte stride)
     mov eax, [rbx + 24]            ; args[1] tag
     mov [rsp], eax                 ; accum_tag
-    cmp eax, TAG_SMALLINT
-    je .sum_get_iter
+    test eax, TAG_RC_BIT
+    jz .sum_get_iter
     inc qword [r13 + PyObject.ob_refcnt]
 
 .sum_get_iter:
-    cmp dword [rbx + 8], TAG_SMALLINT  ; args[0] tag
-    je .sum_type_error
+    test dword [rbx + 8], TAG_RC_BIT   ; args[0] tag
+    jz .sum_type_error
     mov rdi, [rbx]                     ; args[0] payload (iterable)
     mov rax, [rdi + PyObject.ob_type]
     mov rcx, [rax + PyTypeObject.tp_iter]
@@ -1919,7 +1995,13 @@ DEF_FUNC builtin_min
     cmp ecx, TAG_SMALLINT
     je .min_no_update              ; SmallInt can't richcompare
     mov rdi, r15
+    cmp ecx, TAG_FLOAT
+    je .min_float_type
     mov rax, [rdi + PyObject.ob_type]
+    jmp .min_have_type
+.min_float_type:
+    lea rax, [rel float_type]
+.min_have_type:
     mov rcx, [rax + PyTypeObject.tp_richcompare]
     test rcx, rcx
     jz .min_no_update
@@ -2032,7 +2114,13 @@ DEF_FUNC builtin_max
     je .max_try_rhs                ; max is SmallInt, try candidate's richcompare
 
     mov rdi, r14
+    cmp dword [rsp], TAG_FLOAT
+    je .max_float_type
     mov rax, [rdi + PyObject.ob_type]
+    jmp .max_have_type
+.max_float_type:
+    lea rax, [rel float_type]
+.max_have_type:
     mov rcx, [rax + PyTypeObject.tp_richcompare]
     test rcx, rcx
     jz .max_no_update
@@ -2049,7 +2137,13 @@ DEF_FUNC builtin_max
     cmp dword [rbx + rax + 8], TAG_SMALLINT
     je .max_no_update              ; both SmallInt would have been caught above
     mov rdi, r15
+    cmp dword [rbx + rax + 8], TAG_FLOAT
+    je .max_rhs_float_type
     mov rax, [rdi + PyObject.ob_type]
+    jmp .max_rhs_have_type
+.max_rhs_float_type:
+    lea rax, [rel float_type]
+.max_rhs_have_type:
     mov rcx, [rax + PyTypeObject.tp_richcompare]
     test rcx, rcx
     jz .max_no_update
@@ -2130,8 +2224,8 @@ DEF_FUNC builtin_getattr
     mov r13, [rbx]                 ; args[0] payload (obj)
     mov r14, [rbx + 16]            ; args[1] payload (name, 16-byte stride)
 
-    cmp dword [rbx + 8], TAG_SMALLINT  ; args[0] tag
-    je .getattr_try_type_dict
+    test dword [rbx + 8], TAG_RC_BIT   ; args[0] tag
+    jz .getattr_try_type_dict
 
     mov rax, [r13 + PyObject.ob_type]
     mov rcx, [rax + PyTypeObject.tp_getattr]
@@ -2149,11 +2243,26 @@ DEF_FUNC builtin_getattr
 .getattr_try_type_dict:
     cmp dword [rbx + 8], TAG_SMALLINT
     je .getattr_smallint_type
+    cmp dword [rbx + 8], TAG_FLOAT
+    je .getattr_float_type
+    cmp dword [rbx + 8], TAG_BOOL
+    je .getattr_bool_type
+    cmp dword [rbx + 8], TAG_NONE
+    je .getattr_none_type
     mov rax, [r13 + PyObject.ob_type]
     jmp .getattr_check_dict
 
 .getattr_smallint_type:
     lea rax, [rel int_type]
+    jmp .getattr_check_dict
+.getattr_float_type:
+    lea rax, [rel float_type]
+    jmp .getattr_check_dict
+.getattr_bool_type:
+    lea rax, [rel bool_type]
+    jmp .getattr_check_dict
+.getattr_none_type:
+    lea rax, [rel none_type]
 
 .getattr_check_dict:
     mov rcx, [rax + PyTypeObject.tp_dict]
@@ -2167,8 +2276,7 @@ DEF_FUNC builtin_getattr
     test edx, edx
     jz .getattr_not_found
 
-    inc qword [rax + PyObject.ob_refcnt]
-    mov edx, TAG_PTR
+    INCREF_VAL rax, rdx
     pop r14
     pop r13
     pop r12
@@ -2192,8 +2300,8 @@ DEF_FUNC builtin_getattr
 
     mov rax, [rbx + 32]           ; args[2] payload (default, 16-byte stride)
     mov edx, [rbx + 40]           ; args[2] tag
-    cmp edx, TAG_SMALLINT
-    je .getattr_ret_default_si
+    test edx, TAG_RC_BIT
+    jz .getattr_ret_default_si
     inc qword [rax + PyObject.ob_refcnt]
 .getattr_ret_default_si:
     pop r14
@@ -2231,8 +2339,8 @@ DEF_FUNC builtin_hasattr
     mov r12, [rdi]                 ; args[0] payload (obj)
     mov r13, [rdi + 16]            ; args[1] payload (name, 16-byte stride)
 
-    cmp dword [rbx + 8], TAG_SMALLINT  ; args[0] tag
-    je .hasattr_try_type_dict
+    test dword [rbx + 8], TAG_RC_BIT   ; args[0] tag
+    jz .hasattr_try_type_dict
 
     mov rax, [r12 + PyObject.ob_type]
     mov rcx, [rax + PyTypeObject.tp_getattr]
@@ -2261,11 +2369,26 @@ DEF_FUNC builtin_hasattr
 .hasattr_try_type_dict:
     cmp dword [rbx + 8], TAG_SMALLINT
     je .hasattr_smallint_type
+    cmp dword [rbx + 8], TAG_FLOAT
+    je .hasattr_float_type
+    cmp dword [rbx + 8], TAG_BOOL
+    je .hasattr_bool_type
+    cmp dword [rbx + 8], TAG_NONE
+    je .hasattr_none_type
     mov rax, [r12 + PyObject.ob_type]
     jmp .hasattr_check_dict
 
 .hasattr_smallint_type:
     lea rax, [rel int_type]
+    jmp .hasattr_check_dict
+.hasattr_float_type:
+    lea rax, [rel float_type]
+    jmp .hasattr_check_dict
+.hasattr_bool_type:
+    lea rax, [rel bool_type]
+    jmp .hasattr_check_dict
+.hasattr_none_type:
+    lea rax, [rel none_type]
 
 .hasattr_check_dict:
     mov rcx, [rax + PyTypeObject.tp_dict]
@@ -2319,8 +2442,8 @@ DEF_FUNC builtin_setattr
 
     mov rbx, rdi
 
-    cmp dword [rbx + 8], TAG_SMALLINT  ; args[0] tag
-    je .setattr_type_error
+    test dword [rbx + 8], TAG_RC_BIT   ; args[0] tag
+    jz .setattr_type_error
     mov rdi, [rbx]                     ; args[0] payload (obj)
 
     mov rax, [rdi + PyObject.ob_type]

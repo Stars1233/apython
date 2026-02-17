@@ -2138,10 +2138,16 @@ DEF_FUNC list_method_sort, LS_FRAME
     ; Get left's type for tp_richcompare (tag at [rax + rcx - 8])
     cmp dword [rax + rcx - 8], TAG_SMALLINT
     je .sort_smallint_type
+    cmp dword [rax + rcx - 8], TAG_FLOAT
+    je .sort_float_type
     mov rax, [rdi + PyObject.ob_type]
     jmp .sort_have_type
 .sort_smallint_type:
     lea rax, [rel int_type]
+    jmp .sort_have_type
+.sort_float_type:
+    extern float_type
+    lea rax, [rel float_type]
 .sort_have_type:
     mov rax, [rax + PyTypeObject.tp_richcompare]
     test rax, rax
@@ -2323,10 +2329,15 @@ DEF_FUNC list_method_count, LC_FRAME
     ; __eq__ dispatch
     cmp r8d, TAG_SMALLINT
     je .count_eq_int
+    cmp r8d, TAG_FLOAT
+    je .count_eq_float
     mov rax, [rdi + PyObject.ob_type]
     jmp .count_eq_call
 .count_eq_int:
     lea rax, [rel int_type]
+    jmp .count_eq_call
+.count_eq_float:
+    lea rax, [rel float_type]
 .count_eq_call:
     mov rax, [rax + PyTypeObject.tp_richcompare]
     test rax, rax
@@ -3204,10 +3215,15 @@ DEF_FUNC list_method_remove
     ; __eq__ dispatch: get item type's tp_richcompare
     cmp r8d, TAG_SMALLINT
     je .lremove_eq_int
+    cmp r8d, TAG_FLOAT
+    je .lremove_eq_float
     mov rax, [rdi + PyObject.ob_type]
     jmp .lremove_eq_call
 .lremove_eq_int:
     lea rax, [rel int_type]
+    jmp .lremove_eq_call
+.lremove_eq_float:
+    lea rax, [rel float_type]
 .lremove_eq_call:
     mov rax, [rax + PyTypeObject.tp_richcompare]
     test rax, rax

@@ -10,8 +10,6 @@
 %include "object.inc"
 %include "types.inc"
 
-extern ap_malloc
-extern ap_free
 extern str_from_cstr
 extern str_from_data
 extern bool_true
@@ -33,57 +31,45 @@ extern strtod
 extern __gmpz_get_d
 
 ;; ============================================================================
-;; float_from_f64 - Create a float from a double in xmm0
+;; float_from_f64 - Create an inline float from a double in xmm0
 ;; Input:  xmm0 = double value
-;; Output: rax = new PyFloatObject*
+;; Output: rax = raw double bits (payload), edx = TAG_FLOAT
 ;; ============================================================================
-DEF_FUNC float_from_f64, 16
-
-    movsd [rbp-8], xmm0       ; save double value
-
-    mov edi, PyFloatObject_size
-    call ap_malloc
-    ; rax = new object
-
-    mov qword [rax + PyObject.ob_refcnt], 1
-    lea rcx, [rel float_type]
-    mov [rax + PyObject.ob_type], rcx
-    movsd xmm0, [rbp-8]
-    movsd [rax + PyFloatObject.value], xmm0
-
-    mov edx, TAG_PTR
-    leave
+DEF_FUNC_BARE float_from_f64
+    movq rax, xmm0
+    mov edx, TAG_FLOAT
     ret
 END_FUNC float_from_f64
 
 ;; ============================================================================
-;; float_to_f64 - Convert numeric PyObject to double
-;; Input:  rdi = PyObject* (float, SmallInt, or GMP int)
+;; float_to_f64 - Convert numeric value to double
+;; Input:  rdi = payload, esi = tag
 ;; Output: xmm0 = double value
 ;; Clobbers: rax, rcx, rdx, rdi, rsi, r8-r11
 ;; ============================================================================
 DEF_FUNC_BARE float_to_f64
     ; rdi = payload, esi = tag
-    ; Check SmallInt first
+    cmp esi, TAG_FLOAT
+    je .from_float
+
     cmp esi, TAG_SMALLINT
     je .from_smallint
 
-    ; Check type
+    ; TAG_PTR: check for GMP int
+    test rdi, rdi
+    jz .ret_zero
     mov rax, [rdi + PyObject.ob_type]
-    lea rcx, [rel float_type]
-    cmp rax, rcx
-    je .from_float
-
     lea rcx, [rel int_type]
     cmp rax, rcx
     je .from_gmp_int
 
     ; Not a number - return 0.0
+.ret_zero:
     xorpd xmm0, xmm0
     ret
 
 .from_float:
-    movsd xmm0, [rdi + PyFloatObject.value]
+    movq xmm0, rdi
     ret
 
 .from_smallint:
@@ -103,7 +89,7 @@ DEF_FUNC_BARE float_to_f64
 END_FUNC float_to_f64
 
 ;; ============================================================================
-;; float_repr(PyObject *self) -> PyStrObject*
+;; float_repr(rdi = raw double bits) -> PyStrObject*
 ;; Uses shortest representation that round-trips.
 ;; ============================================================================
 DEF_FUNC float_repr
@@ -114,7 +100,7 @@ DEF_FUNC float_repr
     ;   [rbp-16]  = precision counter (8 bytes, only low 4 used)
     ;   [rbp-64]  = buffer (48 bytes: [rbp-64] to [rbp-17])
 
-    movsd xmm0, [rdi + PyFloatObject.value]
+    movq xmm0, rdi
     movsd [rbp-8], xmm0       ; save original value
 
     ; Check for NaN
@@ -210,15 +196,14 @@ DEF_FUNC float_repr
 END_FUNC float_repr
 
 ;; ============================================================================
-;; float_format_spec(PyFloatObject *self, const char *spec, int spec_len) -> PyStrObject*
+;; float_format_spec(rdi = raw double bits, rsi = spec data ptr, edx = spec length) -> PyStrObject*
 ;; Format float using a format spec string like ".2f", ".4e", etc.
-;; rdi = float obj, rsi = spec data ptr, edx = spec length
 ;; ============================================================================
 global float_format_spec
 DEF_FUNC float_format_spec, 80
     and rsp, -16              ; ensure alignment
 
-    movsd xmm0, [rdi + PyFloatObject.value]
+    movq xmm0, rdi
     movsd [rbp-8], xmm0      ; save value
 
     ; Parse spec: look for optional '.', digits, then type char (f/e/g)
@@ -308,10 +293,10 @@ DEF_FUNC float_format_spec, 80
 END_FUNC float_format_spec
 
 ;; ============================================================================
-;; float_hash(PyObject *self) -> int64 in rax
+;; float_hash(rdi = raw double bits) -> int64 in rax
 ;; ============================================================================
 DEF_FUNC_BARE float_hash
-    mov rax, [rdi + PyFloatObject.value]  ; raw bits
+    mov rax, rdi              ; raw bits from payload
     ; Ensure hash is never -1 (Python convention)
     cmp rax, -1
     jne .ok
@@ -321,10 +306,10 @@ DEF_FUNC_BARE float_hash
 END_FUNC float_hash
 
 ;; ============================================================================
-;; float_bool(PyObject *self) -> int (0 or 1) in eax
+;; float_bool(rdi = raw double bits) -> int (0 or 1) in eax
 ;; ============================================================================
 DEF_FUNC_BARE float_bool
-    movsd xmm0, [rdi + PyFloatObject.value]
+    movq xmm0, rdi
     xorpd xmm1, xmm1         ; xmm1 = 0.0
     ucomisd xmm0, xmm1
     je .is_zero
@@ -336,13 +321,7 @@ DEF_FUNC_BARE float_bool
     ret
 END_FUNC float_bool
 
-;; ============================================================================
-;; float_dealloc(PyObject *self)
-;; ============================================================================
-DEF_FUNC_BARE float_dealloc
-    ; rdi = self
-    jmp ap_free                ; tail call
-END_FUNC float_dealloc
+;; float_dealloc removed — floats are inline (TAG_FLOAT), no heap allocation
 
 ;; ============================================================================
 ;; Binary arithmetic: float_add, float_sub, float_mul, float_truediv,
@@ -465,27 +444,22 @@ DEF_FUNC float_mod, 32
     call raise_exception
 END_FUNC float_mod
 
-DEF_FUNC float_neg, 16
-
-    ; rdi = self (only one operand for unary ops)
-    mov esi, TAG_PTR           ; float objects are heap pointers
-    call float_to_f64
-    ; Negate: XOR with sign bit
-    movsd xmm1, [rel sign_mask]
-    xorpd xmm0, xmm1
-    call float_from_f64
-
-    leave
+DEF_FUNC_BARE float_neg
+    ; rdi = raw double bits (payload), edx = tag
+    ; Negate: flip sign bit (bit 63)
+    btc rdi, 63
+    mov rax, rdi
+    mov edx, TAG_FLOAT
     ret
 END_FUNC float_neg
 
 ;; ============================================================================
-;; float_int(PyObject *self) -> PyIntObject*
+;; float_int(rdi = raw double bits) -> SmallInt or GMP int
 ;; Convert float to int by truncation.
 ;; ============================================================================
 DEF_FUNC float_int
 
-    movsd xmm0, [rdi + PyFloatObject.value]
+    movq xmm0, rdi
 
     ; Check for NaN/inf
     ucomisd xmm0, xmm0
@@ -656,7 +630,7 @@ float_type:
     dq type_type              ; ob_type
     dq float_name_str         ; tp_name
     dq PyFloatObject_size     ; tp_basicsize
-    dq float_dealloc          ; tp_dealloc
+    dq 0                      ; tp_dealloc (inline floats, no heap alloc)
     dq float_repr             ; tp_repr
     dq float_repr             ; tp_str (same as repr for float)
     dq float_hash             ; tp_hash

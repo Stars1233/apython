@@ -804,8 +804,8 @@ DEF_FUNC_BARE op_raise_varargs
 
     ; Check if it's already an exception object or a type
     ; If it's a type, create an instance with no args
-    cmp dword [r13 + 8], TAG_SMALLINT
-    je .raise_bad             ; SmallInt can't be an exception
+    test dword [r13 + 8], TAG_RC_BIT
+    jz .raise_bad             ; non-pointer can't be an exception
     test rdi, rdi
     jz .raise_bad             ; NULL can't be an exception
 
@@ -860,8 +860,11 @@ DEF_FUNC_BARE op_raise_varargs
     jmp eval_exception_unwind
 
 .raise_bad:
-    ; DECREF the bad value and raise TypeError
+    ; DECREF the bad value (only if pointer) and raise TypeError
+    test dword [r13 + 8], TAG_RC_BIT
+    jz .raise_bad_no_decref
     call obj_decref
+.raise_bad_no_decref:
     lea rdi, [rel exc_TypeError_type]
     CSTRING rsi, "exceptions must derive from BaseException"
     call raise_exception

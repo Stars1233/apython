@@ -534,6 +534,18 @@ DEF_FUNC builtin_type
     cmp dword [rsi + 8], TAG_SMALLINT
     je .type_smallint
 
+    ; Float check
+    cmp dword [rsi + 8], TAG_FLOAT
+    je .type_float
+
+    ; Bool check
+    cmp dword [rsi + 8], TAG_BOOL
+    je .type_bool
+
+    ; None check
+    cmp dword [rsi + 8], TAG_NONE
+    je .type_none
+
     mov rax, [rdi + PyObject.ob_type]
     INCREF rax
 
@@ -544,6 +556,29 @@ DEF_FUNC builtin_type
 .type_smallint:
     extern int_type
     lea rax, [rel int_type]
+    INCREF rax
+    mov edx, TAG_PTR
+    leave
+    ret
+
+.type_float:
+    lea rax, [rel float_type]
+    INCREF rax
+    mov edx, TAG_PTR
+    leave
+    ret
+
+.type_bool:
+    extern bool_type
+    lea rax, [rel bool_type]
+    INCREF rax
+    mov edx, TAG_PTR
+    leave
+    ret
+
+.type_none:
+    extern none_type
+    lea rax, [rel none_type]
     INCREF rax
     mov edx, TAG_PTR
     leave
@@ -575,27 +610,40 @@ DEF_FUNC builtin_isinstance
     mov rcx, [rdi + 16]       ; rcx = args[1] = type_to_check payload
     mov r9d, [rdi + 24]       ; r9d = args[1] tag
 
-    ; Get obj's type (SmallInt-aware, None-safe)
+    ; Get obj's type (tag-aware for all inline types)
     cmp r8d, TAG_SMALLINT
     je .isinstance_smallint
-    test rax, rax
-    jz .isinstance_none
+    cmp r8d, TAG_FLOAT
+    je .isinstance_float
+    cmp r8d, TAG_BOOL
+    je .isinstance_bool
+    cmp r8d, TAG_NONE
+    je .isinstance_none
+    test r8d, TAG_RC_BIT
+    jz .isinstance_false       ; unknown non-pointer tag → False
     mov rdx, [rax + PyObject.ob_type]
     jmp .isinstance_got_type
 
 .isinstance_none:
-    extern none_type
     lea rdx, [rel none_type]
     jmp .isinstance_got_type
 
 .isinstance_smallint:
     lea rdx, [rel int_type]
+    jmp .isinstance_got_type
+
+.isinstance_float:
+    lea rdx, [rel float_type]
+    jmp .isinstance_got_type
+
+.isinstance_bool:
+    lea rdx, [rel bool_type]
 
 .isinstance_got_type:
     ; rdx = obj's type, rcx = type_to_check (may be tuple)
-    ; Check if type_to_check is a tuple
-    cmp r9d, TAG_SMALLINT
-    je .isinstance_check       ; SmallInt → single type
+    ; Check if type_to_check is a tuple (must be TAG_PTR)
+    test r9d, TAG_RC_BIT
+    jz .isinstance_check       ; non-pointer → single type (False result)
     mov rax, [rcx + PyObject.ob_type]
     extern tuple_type
     lea r8, [rel tuple_type]
@@ -791,12 +839,22 @@ DEF_FUNC builtin_float
     ; float(x) - convert x
     mov esi, [rdi + 8]         ; esi = x tag (args[0] tag)
     mov rdi, [rdi]             ; rdi = x payload
+
+    ; TAG_FLOAT fast-path: already a float, return as-is
+    cmp esi, TAG_FLOAT
+    je .float_passthrough
+
     extern float_to_f64
     call float_to_f64          ; xmm0 = double
     extern float_from_f64
-    call float_from_f64        ; rax = new float
+    call float_from_f64        ; rax = double bits, edx = TAG_FLOAT
 
-    mov edx, TAG_PTR
+    leave
+    ret
+
+.float_passthrough:
+    mov rax, rdi
+    mov edx, TAG_FLOAT
     leave
     ret
 
@@ -804,7 +862,6 @@ DEF_FUNC builtin_float
     ; float() -> 0.0
     xorpd xmm0, xmm0
     call float_from_f64
-    mov edx, TAG_PTR
     leave
     ret
 

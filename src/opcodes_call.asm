@@ -155,6 +155,8 @@ DEF_FUNC op_call, CL_FRAME
     jz .not_callable               ; NULL check
     cmp dword [rbp - CL_CALL_TAG], TAG_SMALLINT
     je .not_callable               ; SmallInt check
+    test dword [rbp - CL_CALL_TAG], TAG_RC_BIT
+    jz .not_callable               ; non-pointer tag (TAG_FLOAT, TAG_NONE, TAG_BOOL)
     mov rax, [rdi + PyObject.ob_type]
     test rax, rax
     jz .not_callable               ; no type (shouldn't happen)
@@ -475,8 +477,8 @@ DEF_FUNC op_call_function_ex
     mov rdi, [rbp - CFX_FUNC]
     test rdi, rdi
     jz .cfex_not_callable
-    cmp dword [rbp - CFX_FUNC_TAG], TAG_SMALLINT
-    je .cfex_not_callable
+    test dword [rbp - CFX_FUNC_TAG], TAG_RC_BIT
+    jz .cfex_not_callable
     mov rax, [rdi + PyObject.ob_type]
     mov rax, [rax + PyTypeObject.tp_call]
     test rax, rax

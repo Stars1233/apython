@@ -504,7 +504,6 @@ mdo_binary_float:
     movq xmm0, rax            ; move int64 bits to xmm0 as double
     extern float_from_f64
     call float_from_f64
-    mov edx, TAG_PTR
     jmp mfinish
 
 ;--------------------------------------------------------------------------
