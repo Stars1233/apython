@@ -94,7 +94,9 @@ DEF_FUNC_BARE op_store_name
     ; Get name string before popping (fat tuple: 16-byte stride)
     shl ecx, 4
     mov r8, [r15 + rcx]        ; r8 = name (key) - caller-saved, safe temp
-    VPOP r9                    ; r9 = value to store
+    sub r13, 16
+    mov r9, [r13]              ; r9 = value payload
+    mov r10, [r13 + 8]         ; r10 = value tag
 
     ; Determine target dict: locals if present, else globals
     mov rdi, [r12 + PyFrame.locals]
@@ -102,10 +104,12 @@ DEF_FUNC_BARE op_store_name
     jnz .have_dict
     mov rdi, [r12 + PyFrame.globals]
 .have_dict:
-    ; dict_set(dict, key, value)
+    ; dict_set(dict, key, value, value_tag, key_tag)
     ; rdi = dict (already set)
     mov rsi, r8                ; rsi = name (key)
-    mov rdx, r9                ; rdx = value
+    mov rdx, r9                ; rdx = value payload
+    mov rcx, r10               ; rcx = value tag
+    mov r8d, TAG_PTR
     call dict_set
     DISPATCH
 END_FUNC op_store_name
@@ -119,12 +123,16 @@ DEF_FUNC_BARE op_store_global
     ; ecx = arg (index into co_names, fat tuple: 16-byte stride)
     shl ecx, 4
     mov r8, [r15 + rcx]        ; r8 = name (key)
-    VPOP r9                    ; r9 = value to store
+    sub r13, 16
+    mov r9, [r13]              ; r9 = value payload
+    mov r10, [r13 + 8]         ; r10 = value tag
 
     ; Always store in globals
     mov rdi, [r12 + PyFrame.globals]
     mov rsi, r8                ; rsi = name (key)
-    mov rdx, r9                ; rdx = value
+    mov rdx, r9                ; rdx = value payload
+    mov rcx, r10               ; rcx = value tag
+    mov r8d, TAG_PTR
     call dict_set
     DISPATCH
 END_FUNC op_store_global
@@ -173,6 +181,7 @@ DEF_FUNC op_store_attr, SA_FRAME
 
     push rcx                      ; save current type
     mov rsi, [rbp - SA_NAME]      ; name
+    mov edx, TAG_PTR
     call dict_get
     pop rcx
     test rax, rax
@@ -184,8 +193,8 @@ DEF_FUNC op_store_attr, SA_FRAME
 .sa_found_in_type:
 
     ; Check if it's a descriptor
-    test rax, rax
-    js .sa_no_property            ; SmallInt
+    cmp edx, TAG_SMALLINT
+    je .sa_no_property            ; SmallInt — not a descriptor
     mov rcx, [rax + PyObject.ob_type]
 
     ; Check property first (fast path)
@@ -193,10 +202,11 @@ DEF_FUNC op_store_attr, SA_FRAME
     cmp rcx, rdx
     jne .sa_check_general_set
 
-    ; Found property descriptor — call fset(obj, value)
+    ; Found property descriptor — call fset(obj, value, ecx=value_tag)
     mov rdi, rax                  ; property
     mov rsi, [rbp - SA_OBJ]      ; obj
     mov rdx, [rbp - SA_VAL]      ; value
+    mov ecx, [rbp - SA_VTAG]     ; value tag
     call property_descr_set
     jmp .sa_descr_cleanup
 
@@ -221,12 +231,12 @@ DEF_FUNC op_store_attr, SA_FRAME
     mov rsi, [rbp - SA_OBJ]     ; obj
     mov rdx, [rbp - SA_VAL]     ; value
     lea rcx, [rel dunder_set]
+    mov r8d, [rbp - SA_VTAG]    ; value tag
     call dunder_call_3
     ; DECREF result if non-NULL
-    test rax, rax
+    test edx, edx
     jz .sa_descr_cleanup
-    mov rdi, rax
-    call obj_decref
+    DECREF_VAL rax, rdx
 
 .sa_descr_cleanup:
 
@@ -251,10 +261,11 @@ DEF_FUNC op_store_attr, SA_FRAME
     test rax, rax
     jz .sa_no_setattr
 
-    ; Call tp_setattr(obj, name, value)
+    ; Call tp_setattr(obj, name, value, ecx=value_tag)
     mov rdi, [rbp - SA_OBJ]
     mov rsi, [rbp - SA_NAME]
     mov rdx, [rbp - SA_VAL]
+    mov ecx, [rbp - SA_VTAG]
     call rax
 
     ; DECREF value (tag-aware)
@@ -346,12 +357,14 @@ DEF_FUNC_BARE op_delete_name
     test rdi, rdi
     jz .dn_globals
     push rsi
+    mov edx, TAG_PTR
     call dict_del
     pop rsi
     test eax, eax
     jz .dn_ok                  ; found and deleted
 .dn_globals:
     mov rdi, [r12 + PyFrame.globals]
+    mov edx, TAG_PTR
     call dict_del
     test eax, eax
     jnz .dn_error
@@ -370,6 +383,7 @@ DEF_FUNC_BARE op_delete_global
     shl ecx, 4                ; fat tuple: 16-byte stride
     mov rsi, [r15 + rcx]      ; name
     mov rdi, [r12 + PyFrame.globals]
+    mov edx, TAG_PTR
     call dict_del
     test eax, eax
     jnz .dg_error
@@ -404,6 +418,7 @@ DEF_FUNC op_delete_attr, DA_FRAME
     mov rdi, [rbp - DA_OBJ]
     mov rsi, [rbp - DA_NAME]
     xor edx, edx               ; value = NULL means delete
+    xor ecx, ecx               ; value tag = TAG_NULL
     call rax
 
     ; DECREF obj
@@ -446,6 +461,8 @@ DEF_FUNC op_delete_subscr, DS_FRAME
     jz .ds_error
 
     xor edx, edx               ; value = NULL (delete)
+    mov ecx, dword [rbp - DS_KTAG]  ; key tag (4th arg)
+    xor r8d, r8d               ; value tag = TAG_NULL (5th arg)
     call rax
 
     ; DECREF key and obj (tag-aware)

@@ -400,7 +400,6 @@ DEF_FUNC_BARE eval_exception_unwind
     jz .no_lasti
     ; Push a dummy lasti value (we don't use it for now)
     xor edx, edx
-    bts rdx, 63             ; SmallInt 0
     VPUSH_INT rdx
 .no_lasti:
 
@@ -799,8 +798,9 @@ DEF_FUNC_BARE op_raise_varargs
 
     ; Check if it's already an exception object or a type
     ; If it's a type, create an instance with no args
+    cmp dword [r13 + 8], TAG_SMALLINT
+    je .raise_bad             ; SmallInt can't be an exception
     test rdi, rdi
-    js .raise_bad             ; SmallInt can't be an exception
     jz .raise_bad             ; NULL can't be an exception
 
     ; Check INSTANCE first (most common case: raise SomeException("msg"))
@@ -830,6 +830,7 @@ DEF_FUNC_BARE op_raise_varargs
     ; rdi = exception type - create instance with no message
     push rdi
     xor esi, esi              ; no message
+    xor edx, edx              ; no tag (NULL msg)
     call exc_new
     pop rdi                  ; discard type (immortal, no DECREF needed)
     mov rdi, rax
@@ -1018,7 +1019,9 @@ op_interpreter_exit:
     call sys_write
     pop rdi
 
-    ; Check for message
+    ; Check for message (must be a heap pointer to dereference)
+    cmp qword [rdi + PyExceptionObject.exc_value_tag], TAG_PTR
+    jne .no_message
     mov rax, [rdi + PyExceptionObject.exc_value]
     test rax, rax
     jz .no_message

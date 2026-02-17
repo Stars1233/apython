@@ -25,6 +25,7 @@ extern ap_malloc
 extern ap_free
 extern str_from_cstr
 extern obj_decref
+extern obj_dealloc
 extern obj_incref
 extern str_type
 extern type_getattr
@@ -40,18 +41,21 @@ extern eg_dealloc
 extern exc_BaseExceptionGroup_type
 extern exc_ExceptionGroup_type
 
-; exc_new(PyTypeObject *type, PyObject *msg_str) -> PyExceptionObject*
+; exc_new(PyTypeObject *type, PyObject *msg_str, int msg_tag) -> PyExceptionObject*
 ; Creates a new exception with given type and message string.
 ; msg_str is INCREFed. type is stored but not INCREFed (types are immortal).
+; rdx = msg_tag (TAG_PTR for heap objs, TAG_SMALLINT for ints, 0 for NULL).
 EN_EXC equ 8
 EN_MSG equ 16
 EN_FRAME equ 16
 DEF_FUNC exc_new, EN_FRAME
     push rbx
     push r12
+    push r13
 
     mov rbx, rdi            ; type
     mov r12, rsi            ; msg_str
+    mov r13, rdx            ; msg_tag
 
     ; Allocate exception object
     mov edi, PyExceptionObject_size
@@ -62,16 +66,14 @@ DEF_FUNC exc_new, EN_FRAME
     mov [rax + PyExceptionObject.ob_type], rbx
     mov [rax + PyExceptionObject.exc_type], rbx
     mov [rax + PyExceptionObject.exc_value], r12
+    mov [rax + PyExceptionObject.exc_value_tag], r13
     mov qword [rax + PyExceptionObject.exc_tb], 0
     mov qword [rax + PyExceptionObject.exc_context], 0
     mov qword [rax + PyExceptionObject.exc_cause], 0
     mov qword [rax + PyExceptionObject.exc_args], 0
 
-    ; INCREF the message string
-    test r12, r12
-    jz .no_msg_incref
-    INCREF r12
-.no_msg_incref:
+    ; INCREF the message (tag-aware)
+    INCREF_VAL r12, r13
 
     ; Create args tuple: (msg_str,) if msg present, else ()
     mov [rbp - EN_EXC], rax   ; save exc
@@ -79,15 +81,9 @@ DEF_FUNC exc_new, EN_FRAME
     jz .empty_args
     mov edi, 1
     call tuple_new
-    INCREF r12
+    INCREF_VAL r12, r13
     mov [rax + PyTupleObject.ob_item], r12
-    ; Classify tag (msg can be SmallInt, e.g. ValueError(1))
-    test r12, r12
-    js .msg_smallint
-    mov qword [rax + PyTupleObject.ob_item + 8], TAG_PTR
-    jmp .set_args
-.msg_smallint:
-    mov qword [rax + PyTupleObject.ob_item + 8], TAG_SMALLINT
+    mov [rax + PyTupleObject.ob_item + 8], r13    ; msg tag
     jmp .set_args
 .empty_args:
     xor edi, edi
@@ -97,6 +93,7 @@ DEF_FUNC exc_new, EN_FRAME
     mov [rcx + PyExceptionObject.exc_args], rax
     mov rax, rcx
 
+    pop r13
     pop r12
     pop rbx
     leave
@@ -115,15 +112,17 @@ DEF_FUNC exc_from_cstr
     call str_from_cstr
     ; rax = str obj (refcnt=1)
 
-    ; Now create exception: exc_new(type, str)
+    ; Now create exception: exc_new(type, str, TAG_PTR)
     mov rdi, rbx
     mov rsi, rax
+    mov edx, TAG_PTR
     call exc_new
     ; rax = exception obj
     ; exc_new INCREFs the str, so we need to DECREF our copy
     push rax
     mov rdi, [rax + PyExceptionObject.exc_value]
-    call obj_decref
+    mov rsi, [rax + PyExceptionObject.exc_value_tag]
+    DECREF_VAL rdi, rsi
     pop rax
 
     pop rbx
@@ -138,11 +137,10 @@ DEF_FUNC exc_dealloc
 
     mov rbx, rdi
 
-    ; XDECREF exc_value
+    ; XDECREF exc_value (tag-aware: may be SmallInt)
     mov rdi, [rbx + PyExceptionObject.exc_value]
-    test rdi, rdi
-    jz .no_value
-    call obj_decref
+    mov rsi, [rbx + PyExceptionObject.exc_value_tag]
+    XDECREF_VAL rdi, rsi
 .no_value:
 
     ; XDECREF exc_tb
@@ -209,7 +207,9 @@ DEF_FUNC exc_repr
     mov byte [rdi], '('
     inc rdi
 
-    ; Copy message if present
+    ; Copy message if present (must be a heap string)
+    cmp qword [rbx + PyExceptionObject.exc_value_tag], TAG_PTR
+    jne .no_msg
     mov rax, [rbx + PyExceptionObject.exc_value]
     test rax, rax
     jz .no_msg
@@ -253,7 +253,9 @@ END_FUNC exc_repr
 ; Returns the message string, or type name if no message.
 DEF_FUNC exc_str
 
-    ; Return exc_value if it's a string
+    ; Return exc_value if it's a heap string
+    cmp qword [rdi + PyExceptionObject.exc_value_tag], TAG_PTR
+    jne .use_type_name
     mov rax, [rdi + PyExceptionObject.exc_value]
     test rax, rax
     jz .use_type_name
@@ -324,8 +326,9 @@ DEF_FUNC exc_getattr
     test rdi, rdi
     jz .not_found
     mov rsi, r12
+    mov edx, TAG_PTR
     call dict_get
-    test rax, rax
+    test edx, edx
     jnz .found_in_type
 
 .not_found:
@@ -495,12 +498,14 @@ DEF_FUNC exc_type_call, ETC_FRAME
     ; Get message from args[0] if nargs >= 1
     test edx, edx
     jz .no_args
-    mov rsi, [rsi]          ; rsi = args[0] (message string)
+    mov rdx, [rsi + 8]      ; rdx = args[0] tag
+    mov rsi, [rsi]           ; rsi = args[0] (message payload)
     jmp .create
 .no_args:
-    xor esi, esi            ; msg = NULL (no message)
+    xor esi, esi             ; msg = NULL (no message)
+    xor edx, edx             ; no tag
 .create:
-    ; Create exception: exc_new(type, msg)
+    ; Create exception: exc_new(type, msg, msg_tag)
     mov rdi, rbx
     call exc_new
     mov [rbp - ETC_EXC], rax
@@ -522,23 +527,15 @@ DEF_FUNC exc_type_call, ETC_FRAME
     mov rcx, [rbp - ETC_NARGS]   ; reload loop limit (clobbered below)
     cmp rdx, rcx
     jge .replace_args
-    mov rdi, [rsi + rdx*8]
-    INCREF rdi
+    mov rcx, rdx
+    shl rcx, 4                    ; source index * 16 (args at 16B stride)
+    mov rdi, [rsi + rcx]          ; payload
+    mov r8, [rsi + rcx + 8]       ; tag
+    INCREF_VAL rdi, r8
     mov rcx, rdx
     shl rcx, 4                    ; dest index * 16
     mov [r12 + PyTupleObject.ob_item + rcx], rdi       ; payload
-    ; Classify tag
-    test rdi, rdi
-    js .copy_args_si
-    jz .copy_args_null
-    mov qword [r12 + PyTupleObject.ob_item + rcx + 8], TAG_PTR
-    jmp .copy_args_tag_done
-.copy_args_si:
-    mov qword [r12 + PyTupleObject.ob_item + rcx + 8], TAG_SMALLINT
-    jmp .copy_args_tag_done
-.copy_args_null:
-    mov qword [r12 + PyTupleObject.ob_item + rcx + 8], TAG_NULL
-.copy_args_tag_done:
+    mov [r12 + PyTupleObject.ob_item + rcx + 8], r8    ; tag
     inc rdx
     jmp .copy_args
 .replace_args:

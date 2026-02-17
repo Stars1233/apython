@@ -94,9 +94,9 @@ DEF_FUNC tuple_subscript
     push rbx
     mov rbx, rdi               ; save tuple
 
-    ; Check if key is a slice
-    test rsi, rsi
-    js .ts_int                 ; SmallInt -> int path
+    ; Check if key is a SmallInt (edx = key tag from caller)
+    cmp edx, TAG_SMALLINT
+    je .ts_int                 ; SmallInt -> int path
     mov rax, [rsi + PyObject.ob_type]
     lea rcx, [rel slice_type]
     cmp rax, rcx
@@ -321,6 +321,7 @@ DEF_FUNC tuple_getslice
     pop r13
     pop r12
     pop rbx
+    mov edx, TAG_PTR
     leave
     ret
 END_FUNC tuple_getslice
@@ -444,7 +445,8 @@ DEF_FUNC tuple_repeat
     push r14
 
     mov rbx, rdi            ; rbx = tuple
-    mov rdi, rsi            ; count
+    mov rdi, rsi            ; count (int payload)
+    mov edx, ecx            ; count tag (right operand)
     call int_to_i64
     mov r12, rax             ; r12 = repeat count
 

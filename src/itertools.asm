@@ -56,10 +56,11 @@ itertools_iter_self:
 ;; Clobbers caller-saved regs.
 ;; ============================================================================
 DEF_FUNC_LOCAL get_iterator
+    ; rdi = obj payload, esi = obj tag
 
     ; Check SmallInt (cannot iterate)
-    test rdi, rdi
-    js .no_iter
+    cmp esi, TAG_SMALLINT
+    je .no_iter
 
     mov rax, [rdi + PyObject.ob_type]
     test rax, rax
@@ -104,13 +105,15 @@ DEF_FUNC builtin_enumerate
     jne .enum_get_iter
 
     ; start = int(args[1])
-    mov rdi, [rbx + 8]
+    mov rdi, [rbx + 16]
+    mov edx, [rbx + 24]
     call int_to_i64
     mov r13, rax
 
 .enum_get_iter:
     ; Get iterator from args[0]
     mov rdi, [rbx]
+    mov esi, [rbx + 8]         ; args[0] tag
     call get_iterator
     mov rbx, rax            ; rbx = underlying iterator
 
@@ -150,7 +153,7 @@ DEF_FUNC_LOCAL enumerate_iternext
     mov rax, [rdi + PyObject.ob_type]
     mov rax, [rax + PyTypeObject.tp_iternext]
     call rax
-    test rax, rax
+    test edx, edx
     jz .enum_exhausted
     mov r12, rax             ; r12 = value payload from iternext
     push rdx                 ; save value tag from iternext
@@ -185,6 +188,7 @@ DEF_FUNC_LOCAL enumerate_iternext
 
 .enum_exhausted:
     xor eax, eax
+    xor edx, edx              ; TAG_NULL = exhausted
     pop r13
     pop r12
     pop rbx
@@ -239,7 +243,10 @@ DEF_FUNC builtin_zip
     cmp r14, r12
     jge .zip_create
 
-    mov rdi, [rbx + r14 * 8]
+    mov rax, r14
+    shl rax, 4                  ; rax = i * 16
+    mov rdi, [rbx + rax]
+    mov esi, [rbx + rax + 8]   ; arg tag
     push r13
     push r14
     call get_iterator
@@ -318,7 +325,7 @@ DEF_FUNC_LOCAL zip_iternext
     mov rax, [rdi + PyObject.ob_type]
     mov rax, [rax + PyTypeObject.tp_iternext]
     call rax
-    test rax, rax
+    test edx, edx
     jz .zip_partial_cleanup
 
     ; Store value in tuple at fat stride (rdx = tag from iternext)
@@ -376,6 +383,7 @@ DEF_FUNC_LOCAL zip_iternext
 
 .zip_exhausted:
     xor eax, eax
+    xor edx, edx              ; TAG_NULL = exhausted
     pop r15
     pop r14
     pop r13
@@ -447,7 +455,8 @@ DEF_FUNC builtin_map
     INCREF r13
 
     ; Get iterator from args[1]
-    mov rdi, [rbx + 8]
+    mov rdi, [rbx + 16]
+    mov esi, [rbx + 24]       ; args[1] tag
     call get_iterator
     mov rbx, rax             ; rbx = underlying iterator
 
@@ -489,28 +498,31 @@ DEF_FUNC_LOCAL map_iternext
     mov rax, [rdi + PyObject.ob_type]
     mov rax, [rax + PyTypeObject.tp_iternext]
     call rax
-    test rax, rax
+    test edx, edx
     jz .map_exhausted
-    mov r13, rax             ; r13 = item (we own ref)
+    mov r13, rax             ; r13 = item payload
+    mov r14, rdx             ; r14 = item tag
 
     ; Call func(item): tp_call(func, &item, 1)
-    ; Put item on stack as an args array
-    push r13                 ; args[0] = item (on stack)
+    ; Put item on stack as fat args array (16 bytes)
+    sub rsp, 16
+    mov [rsp], r13           ; args[0] payload = item
+    mov [rsp + 8], r14       ; args[0] tag
     mov rdi, [rbx + IT_FIELD1]   ; func
     mov rax, [rdi + PyObject.ob_type]
     mov rax, [rax + PyTypeObject.tp_call]
-    mov rsi, rsp             ; args pointer (points to item on stack)
+    mov rsi, rsp             ; args pointer
     mov edx, 1               ; nargs = 1
     call rax
-    add rsp, 8              ; pop args[0] placeholder
-    mov r14, rax             ; r14 = result payload
+    add rsp, 16             ; pop fat args
+    ; Save result across DECREF
     mov [rsp], rdx           ; save result tag in alignment slot
+    push rax                 ; save result payload
 
-    ; DECREF item
-    mov rdi, r13
-    call obj_decref
+    ; DECREF_VAL item
+    DECREF_VAL r13, r14
 
-    mov rax, r14             ; restore result payload
+    pop rax                  ; restore result payload
     mov rdx, [rsp]           ; restore result tag
     add rsp, 8
     pop r14
@@ -521,6 +533,7 @@ DEF_FUNC_LOCAL map_iternext
 
 .map_exhausted:
     xor eax, eax
+    xor edx, edx              ; TAG_NULL = exhausted
     add rsp, 8
     pop r14
     pop r13
@@ -583,7 +596,8 @@ DEF_FUNC builtin_filter
 
 .filter_get_iter:
     ; Get iterator from args[1]
-    mov rdi, [rbx + 8]
+    mov rdi, [rbx + 16]
+    mov esi, [rbx + 24]       ; args[1] tag
     call get_iterator
     mov rbx, rax             ; rbx = underlying iterator
 
@@ -626,7 +640,7 @@ DEF_FUNC_LOCAL filter_iternext
     mov rax, [rdi + PyObject.ob_type]
     mov rax, [rax + PyTypeObject.tp_iternext]
     call rax
-    test rax, rax
+    test edx, edx
     jz .filter_exhausted
     mov r13, rax             ; r13 = item payload (we own ref)
     push rdx                 ; save item tag from iternext
@@ -637,45 +651,53 @@ DEF_FUNC_LOCAL filter_iternext
     jz .filter_identity
 
     ; Call func(item) and test truthiness of result
-    push r13                 ; args[0] = item
+    sub rsp, 16             ; args[0] (16B slot)
+    mov [rsp], r13          ; args[0].payload = item
+    mov rax, [rsp + 16]    ; item tag (saved above push)
+    mov [rsp + 8], rax     ; args[0].tag
     mov rdi, r14             ; func
     mov rax, [rdi + PyObject.ob_type]
     mov rax, [rax + PyTypeObject.tp_call]
     mov rsi, rsp             ; &args[0]
     mov edx, 1
     call rax
-    add rsp, 8              ; pop args[0] placeholder
-    mov r14, rax             ; r14 = result of func(item)
+    add rsp, 16             ; pop args
+    mov r14, rax             ; r14 = result payload
+    mov r15, rdx             ; r15 = result tag
 
     ; Test truthiness of result
     mov rdi, r14
+    mov esi, r15d
     call obj_is_true
-    mov r15d, eax            ; save truthiness in r15
+    push rax                 ; save truthiness
 
     ; DECREF result
     mov rdi, r14
-    call obj_decref
+    mov rsi, r15
+    DECREF_VAL rdi, rsi
 
-    test r15d, r15d
+    pop rax                  ; restore truthiness
+    test eax, eax
     jnz .filter_accept
 
     ; Not truthy: DECREF item, continue
-    add rsp, 8              ; discard saved item tag
+    pop rsi                  ; item tag
     mov rdi, r13
-    call obj_decref
+    DECREF_VAL rdi, rsi
     jmp .filter_loop
 
 .filter_identity:
     ; Test truthiness of item itself
     mov rdi, r13
+    mov esi, [rsp]           ; item tag (saved on stack)
     call obj_is_true
     test eax, eax
     jnz .filter_accept
 
     ; Not truthy: DECREF item, continue
-    add rsp, 8              ; discard saved item tag
+    pop rsi                  ; item tag
     mov rdi, r13
-    call obj_decref
+    DECREF_VAL rdi, rsi
     jmp .filter_loop
 
 .filter_accept:
@@ -690,6 +712,7 @@ DEF_FUNC_LOCAL filter_iternext
 
 .filter_exhausted:
     xor eax, eax
+    xor edx, edx              ; TAG_NULL = exhausted
     pop r15
     pop r14
     pop r13
@@ -743,8 +766,8 @@ DEF_FUNC builtin_reversed
     mov r12, [rbx]          ; r12 = sequence
 
     ; SmallInt check - cannot reverse
-    test r12, r12
-    js .rev_type_error
+    cmp dword [rbx + 8], TAG_SMALLINT
+    je .rev_type_error
 
     ; Get length of sequence via sq_length or ob_size
     mov rax, [r12 + PyObject.ob_type]
@@ -831,6 +854,7 @@ DEF_FUNC_LOCAL reversed_iternext
 
 .rev_exhausted:
     xor eax, eax
+    xor edx, edx              ; TAG_NULL = exhausted
     pop rbx
     leave
     ret
@@ -872,6 +896,7 @@ DEF_FUNC builtin_sorted
 
     ; Get iterator from args[0]
     mov rdi, [rbx]
+    mov esi, [rbx + 8]         ; args[0] tag
     call get_iterator
     mov rbx, rax             ; rbx = iterator
 
@@ -886,17 +911,20 @@ DEF_FUNC builtin_sorted
     mov rax, [rdi + PyObject.ob_type]
     mov rax, [rax + PyTypeObject.tp_iternext]
     call rax
-    test rax, rax
+    test edx, edx
     jz .sorted_done_iter
 
     ; Append item to list (list_append does INCREF, and we own the ref from
     ; iternext, so we need to DECREF after append)
+    push rdx                 ; save item tag
+    push rax                 ; save item payload
     mov rdi, r12             ; list
     mov rsi, rax             ; item
-    push rax                 ; save item for DECREF
+    ; edx already has item tag from iternext
     call list_append
-    pop rdi                  ; item
-    call obj_decref          ; DECREF the ref from iternext (list_append already INCREFed)
+    pop rdi                  ; item payload
+    pop rsi                  ; item tag
+    DECREF_VAL rdi, rsi      ; DECREF the ref from iternext (list_append already INCREFed)
 
     jmp .sorted_loop
 
@@ -906,19 +934,21 @@ DEF_FUNC builtin_sorted
     call obj_decref
 
     ; Sort the list in-place using list_method_sort
-    ; list_method_sort expects (args, nargs) where args[0] = self (the list)
-    push r12                 ; args[0] = list
+    ; list_method_sort expects (args, nargs) where args[0] = self (16-byte fat slot)
+    sub rsp, 16
+    mov [rsp], r12           ; args[0].payload = list
+    mov qword [rsp+8], TAG_PTR
     mov rdi, rsp             ; args ptr
     mov rsi, 1               ; nargs = 1
     call list_method_sort
-    pop rcx                  ; clean up args[0]
+    add rsp, 16
 
     ; DECREF the None returned by sort
-    mov rdi, rax
-    call obj_decref
+    DECREF_VAL rax, rdx
 
     ; Return the list
     mov rax, r12
+    mov edx, TAG_PTR
 
     pop r12
     pop rbx

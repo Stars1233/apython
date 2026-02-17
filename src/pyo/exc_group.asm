@@ -69,6 +69,7 @@ DEF_FUNC eg_new, EGN_FRAME
     mov [rax + PyExceptionGroupObject.ob_type], rbx
     mov [rax + PyExceptionGroupObject.exc_type], rbx
     mov [rax + PyExceptionGroupObject.exc_value], r12
+    mov qword [rax + PyExceptionGroupObject.exc_value_tag], TAG_PTR
     mov qword [rax + PyExceptionGroupObject.exc_tb], 0
     mov qword [rax + PyExceptionGroupObject.exc_context], 0
     mov qword [rax + PyExceptionGroupObject.exc_cause], 0
@@ -154,7 +155,7 @@ DEF_FUNC eg_type_call, EGC_FRAME
 
     ; args[0] = msg (must be str), args[1] = excs (list or tuple)
     mov rbx, [rsi]          ; msg
-    mov r12, [rsi + 8]      ; excs
+    mov r12, [rsi + 16]     ; excs
 
     ; Check if excs is a tuple already
     mov rax, [r12 + PyObject.ob_type]
@@ -264,11 +265,10 @@ DEF_FUNC eg_dealloc
     push rbx
     mov rbx, rdi
 
-    ; XDECREF exc_value
+    ; XDECREF exc_value (tag-aware: may be SmallInt)
     mov rdi, [rbx + PyExceptionGroupObject.exc_value]
-    test rdi, rdi
-    jz .no_val
-    call obj_decref
+    mov rsi, [rbx + PyExceptionGroupObject.exc_value_tag]
+    XDECREF_VAL rdi, rsi
 .no_val:
 
     ; XDECREF exc_tb
@@ -453,6 +453,7 @@ DEF_FUNC eg_split, EGS_FRAME
     shl r8, 4
     mov rsi, [rax + PyTupleObject.ob_item + r8]
     mov rdi, [rbp - EGS_MLIST]
+    mov edx, TAG_PTR
     call list_append
     jmp .split_next
 
@@ -465,6 +466,7 @@ DEF_FUNC eg_split, EGS_FRAME
     shl r8, 4
     mov rsi, [rax + PyTupleObject.ob_item + r8]
     mov rdi, [rbp - EGS_RLIST]
+    mov edx, TAG_PTR
     call list_append
 
 .split_next:
@@ -712,6 +714,7 @@ DEF_FUNC prep_reraise_star, PRS_FRAME
     shl r9, 4
     mov rsi, [rax + PyTupleObject.ob_item + r9]
     mov rdi, [rbp - PRS_FLAT]
+    mov edx, TAG_PTR
     call list_append
     pop rax
     pop r8
@@ -733,6 +736,7 @@ DEF_FUNC prep_reraise_star, PRS_FRAME
     shl rax, 4                ; index * 16
     mov rsi, [rsi + rax]      ; list item payload (fat 16-byte stride)
     mov rdi, [rbp - PRS_FLAT]
+    mov edx, TAG_PTR
     call list_append
     pop rcx
     pop rdx

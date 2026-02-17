@@ -127,6 +127,7 @@ DEF_FUNC module_getattr
     ; dict_get(mod_dict, name_str)
     mov rdi, [rbx + PyModuleObject.mod_dict]
     mov rsi, r12
+    mov edx, TAG_PTR
     call dict_get
 
     ; INCREF if found (dict_get returns borrowed ref)
@@ -157,10 +158,12 @@ END_FUNC module_getattr
 ; Set attribute in module's dict
 ; ============================================================================
 DEF_FUNC module_setattr
-    ; dict_set(mod_dict, name, value)
+    ; dict_set(mod_dict, name, value, value_tag, key_tag)
     mov rax, rdi                ; self
     mov rdi, [rax + PyModuleObject.mod_dict]
     ; rsi = name_str, rdx = value (already in place)
+    ; ecx = value_tag (from caller, already in place)
+    mov r8d, TAG_PTR            ; key_tag (name is always heap string)
     call dict_set
     xor eax, eax               ; return 0 (success)
     leave

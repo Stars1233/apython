@@ -125,7 +125,6 @@ DEF_FUNC_BARE bytes_getitem
 
     ; Get byte and return as SmallInt
     movzx eax, byte [rdi + PyBytesObject.data + rsi]
-    bts rax, 63               ; encode as SmallInt
     mov edx, TAG_SMALLINT
     ret
 
@@ -147,9 +146,9 @@ DEF_FUNC bytes_subscript
     mov rbx, rdi               ; bytes obj
     mov r12, rsi               ; key
 
-    ; Check if key is slice
-    test r12, r12
-    js .bs_int                 ; SmallInt → int path
+    ; Check if key is a SmallInt (edx = key tag from caller)
+    cmp edx, TAG_SMALLINT
+    je .bs_int                 ; SmallInt → int path
     mov rax, [r12 + PyObject.ob_type]
     lea rcx, [rel slice_type]
     cmp rax, rcx
@@ -439,6 +438,7 @@ DEF_FUNC bytes_repr, 1024
     ; Create str from buffer
     mov rdi, r13
     call str_from_cstr
+    mov edx, TAG_PTR
 
     pop r13
     pop r12
@@ -567,7 +567,6 @@ DEF_FUNC_BARE bytes_iter_next
 
     ; Get byte and return as SmallInt
     movzx eax, byte [rax + PyBytesObject.data + rcx]
-    bts rax, 63
     mov edx, TAG_SMALLINT
 
     ; Advance index
@@ -576,6 +575,7 @@ DEF_FUNC_BARE bytes_iter_next
 
 .exhausted:
     xor eax, eax
+    xor edx, edx                  ; TAG_NULL = exhausted
     ret
 END_FUNC bytes_iter_next
 
@@ -661,12 +661,14 @@ DEF_FUNC bytes_compare
 .bytes_ret_true:
     lea rax, [rel bool_true]
     inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
     pop rbx
     leave
     ret
 .bytes_ret_false:
     lea rax, [rel bool_false]
     inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
     pop rbx
     leave
     ret
@@ -674,6 +676,7 @@ DEF_FUNC bytes_compare
     extern none_singleton
     lea rax, [rel none_singleton]
     inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
     pop rbx
     leave
     ret
@@ -755,6 +758,7 @@ DEF_FUNC bytes_mod, BM_FRAME
     DECREF_REG rdi
 
     mov rax, rbx               ; return bytes
+    mov edx, TAG_PTR
     pop r12
     pop rbx
     leave
@@ -792,9 +796,9 @@ DEF_FUNC bytes_type_call, BTC_FRAME
     mov [rbp - BTC_TYPE], rdi
     cmp rdx, 1
     jne .btc_error
-    mov rdi, [rsi]              ; arg0
-    test rdi, rdi
-    js .btc_error               ; SmallInt → error
+    mov rdi, [rsi]              ; arg0 payload
+    cmp dword [rsi + 8], TAG_SMALLINT
+    je .btc_error               ; SmallInt → error
     mov rax, [rdi + PyObject.ob_type]
     lea rcx, [rel bytes_type]
     cmp rax, rcx

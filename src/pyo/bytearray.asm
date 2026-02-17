@@ -27,10 +27,10 @@ DEF_FUNC bytearray_type_call, BA_FRAME
     mov [rbp - BA_TYPE], rdi           ; save type
     cmp rdx, 1
     jne .ba_error
-    mov rdi, [rsi]                     ; arg0
+    mov rdi, [rsi]                     ; arg0 payload
     ; Must be a bytes object
-    test rdi, rdi
-    js .ba_error                       ; SmallInt → error
+    cmp dword [rsi + 8], TAG_SMALLINT
+    je .ba_error                       ; SmallInt → error
     mov rax, [rdi + PyObject.ob_type]
     lea rcx, [rel bytes_type]
     cmp rax, rcx

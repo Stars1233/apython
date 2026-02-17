@@ -108,6 +108,7 @@ DEF_FUNC import_init
     push rax
     mov rdi, [rel sys_path_list]
     mov rsi, rax
+    mov edx, TAG_PTR
     call list_append
     pop rdi
     call obj_decref
@@ -118,6 +119,7 @@ DEF_FUNC import_init
     push rax
     mov rdi, [rel sys_path_list]
     mov rsi, rax
+    mov edx, TAG_PTR
     call list_append
     pop rdi
     call obj_decref
@@ -139,6 +141,8 @@ DEF_FUNC import_init
     mov rdi, [rel sys_modules_dict]
     pop rsi                     ; key = "builtins"
     mov rdx, rbx
+    mov ecx, TAG_PTR
+    mov r8d, TAG_PTR
     call dict_set
 
     ; DECREF key and module (dict_set INCREFs both)
@@ -158,6 +162,8 @@ DEF_FUNC import_init
     mov rdi, [rel sys_modules_dict]
     mov rsi, rax                ; key = "time"
     mov rdx, rbx                ; value = time module
+    mov ecx, TAG_PTR
+    mov r8d, TAG_PTR
     call dict_set
     pop rdi                     ; DECREF key
     call obj_decref
@@ -200,8 +206,9 @@ DEF_FUNC import_module, IF_FRAME
     ; Check sys.modules first
     mov rdi, [rel sys_modules_dict]
     mov rsi, [rbp - IF_NAME]
+    mov edx, TAG_PTR
     call dict_get
-    test rax, rax
+    test edx, edx
     jnz .found_cached
 
     ; For dotted names (a.b.c), import each component
@@ -254,8 +261,9 @@ DEF_FUNC import_module, IF_FRAME
     ; Check sys.modules for first component
     mov rdi, [rel sys_modules_dict]
     mov rsi, rax
+    mov edx, TAG_PTR
     call dict_get
-    test rax, rax
+    test edx, edx
     jnz .have_first_component
 
     ; Load first component
@@ -276,8 +284,9 @@ DEF_FUNC import_module, IF_FRAME
     ; Now try to import the full dotted name
     mov rdi, [rel sys_modules_dict]
     mov rsi, [rbp - IF_NAME]
+    mov edx, TAG_PTR
     call dict_get
-    test rax, rax
+    test edx, edx
     jnz .have_full_dotted
 
     ; Need to load intermediate + full path
@@ -310,6 +319,8 @@ DEF_FUNC import_module, IF_FRAME
     jz .no_parent_dict
     mov rsi, rax                ; key = leaf name
     mov rdx, r13                ; value = leaf module
+    mov ecx, TAG_PTR
+    mov r8d, TAG_PTR
     call dict_set
 .no_parent_dict:
     pop rdi
@@ -322,9 +333,7 @@ DEF_FUNC import_module, IF_FRAME
     lea rcx, [rel none_singleton]
     cmp rax, rcx
     je .return_top
-    ; Check if fromlist is empty tuple
-    test rax, rax
-    js .return_top              ; SmallInt = level, not fromlist
+    ; Check if fromlist is empty tuple (fromlist is always None or tuple)
     mov rcx, [rax + PyObject.ob_type]
     lea rdx, [rel none_singleton]
     mov rdx, [rdx + PyObject.ob_type]
@@ -399,8 +408,9 @@ DEF_FUNC import_find_and_load, FL_FRAME
     ; Check sys.modules first — avoid re-loading already-imported modules
     mov rdi, [rel sys_modules_dict]
     mov rsi, [rbp - FL_NAME]
+    mov edx, TAG_PTR
     call dict_get
-    test rax, rax
+    test edx, edx
     jnz .found_in_sysmod
 
     ; Ensure path buffer is allocated
@@ -459,6 +469,7 @@ DEF_FUNC import_find_and_load, FL_FRAME
     ; Look up parent in sys.modules
     mov rdi, [rel sys_modules_dict]
     mov rsi, r12
+    mov edx, TAG_PTR
     call dict_get
     mov r13, rax                ; r13 = parent module (or NULL)
 
@@ -630,13 +641,14 @@ DEF_FUNC import_search_dirs, SD_FRAME
     cmp rax, [rbp - SD_COUNT]
     jge .sd_not_found
 
-    ; Get dir string
+    ; Get dir string (fat list: 16-byte stride)
     mov rdi, [rbp - SD_DIRS]
     mov rcx, [rdi + PyListObject.ob_item]
     mov rax, [rbp - SD_IDX]
-    mov rbx, [rcx + rax * 8]   ; rbx = dir str obj
-    test rbx, rbx
-    js .sd_next                 ; skip SmallInts
+    shl rax, 4                  ; index * 16
+    mov rbx, [rcx + rax]       ; rbx = dir str obj payload
+    cmp dword [rcx + rax + 8], TAG_SMALLINT
+    je .sd_next                 ; skip SmallInts
     test rbx, rbx
     jz .sd_next
 
@@ -843,13 +855,14 @@ DEF_FUNC import_search_syspath, SS_FRAME
     cmp rax, [rbp - SS_COUNT]
     jge .ss_not_found
 
-    ; Get dir string
+    ; Get dir string (fat list: 16-byte stride)
     mov rdi, [rbp - SS_DIRS]
     mov rcx, [rdi + PyListObject.ob_item]
     mov rax, [rbp - SS_IDX]
-    mov rbx, [rcx + rax * 8]
-    test rbx, rbx
-    js .ss_next
+    shl rax, 4                  ; index * 16
+    mov rbx, [rcx + rax]       ; rbx = dir str obj payload
+    cmp dword [rcx + rax + 8], TAG_SMALLINT
+    je .ss_next                 ; skip SmallInts
     test rbx, rbx
     jz .ss_next
 
@@ -1081,6 +1094,8 @@ DEF_FUNC import_load_module, IF_FRAME
     mov rdi, r15
     mov rsi, rax
     mov rdx, rbx                ; name_str
+    mov ecx, TAG_PTR
+    mov r8d, TAG_PTR
     call dict_set
     pop rdi
     call obj_decref
@@ -1095,6 +1110,8 @@ DEF_FUNC import_load_module, IF_FRAME
     mov rdi, r15
     mov rsi, rax
     mov rdx, [rsp + 8]
+    mov ecx, TAG_PTR
+    mov r8d, TAG_PTR
     call dict_set
     pop rdi
     call obj_decref
@@ -1108,6 +1125,8 @@ DEF_FUNC import_load_module, IF_FRAME
     mov rdi, r15
     mov rsi, rax
     lea rdx, [rel none_singleton]
+    mov ecx, TAG_PTR
+    mov r8d, TAG_PTR
     call dict_set
     pop rdi
     call obj_decref
@@ -1119,6 +1138,8 @@ DEF_FUNC import_load_module, IF_FRAME
     mov rdi, r15
     mov rsi, rax
     lea rdx, [rel none_singleton]
+    mov ecx, TAG_PTR
+    mov r8d, TAG_PTR
     call dict_set
     pop rdi
     call obj_decref
@@ -1134,6 +1155,8 @@ DEF_FUNC import_load_module, IF_FRAME
     mov rdi, r15
     mov rsi, rax
     mov rdx, rbx                ; name_str
+    mov ecx, TAG_PTR
+    mov r8d, TAG_PTR
     call dict_set
     pop rdi
     call obj_decref
@@ -1179,6 +1202,7 @@ DEF_FUNC import_load_module, IF_FRAME
     push r8
     mov rdi, r8
     mov rsi, [rsp + 8]         ; pkg dir str
+    mov edx, TAG_PTR
     call list_append
     ; DECREF pkg dir str
     mov rdi, [rsp + 8]
@@ -1191,6 +1215,8 @@ DEF_FUNC import_load_module, IF_FRAME
     mov rdi, r15
     mov rsi, rax
     mov rdx, [rsp + 8]         ; list
+    mov ecx, TAG_PTR
+    mov r8d, TAG_PTR
     call dict_set
     pop rdi                     ; key
     call obj_decref
@@ -1231,6 +1257,8 @@ DEF_FUNC import_load_module, IF_FRAME
     mov rdi, r15
     mov rsi, rax
     mov rdx, [rsp + 8]
+    mov ecx, TAG_PTR
+    mov r8d, TAG_PTR
     call dict_set
     pop rdi
     call obj_decref
@@ -1248,6 +1276,8 @@ DEF_FUNC import_load_module, IF_FRAME
     mov rdi, [rel sys_modules_dict]
     mov rsi, rbx                ; name_str
     mov rdx, r13
+    mov ecx, TAG_PTR
+    mov r8d, TAG_PTR
     call dict_set
 
     ; Set __builtins__ in module dict
@@ -1257,6 +1287,8 @@ DEF_FUNC import_load_module, IF_FRAME
     mov rdi, r15
     mov rsi, rax
     mov rdx, [rel builtins_dict_global]
+    mov ecx, TAG_PTR
+    mov r8d, TAG_PTR
     call dict_set
     pop rdi
     call obj_decref
@@ -1272,13 +1304,11 @@ DEF_FUNC import_load_module, IF_FRAME
 
     mov rdi, r12
     call eval_frame
-    ; rax = return value (ignore)
-    ; XDECREF return value
-    test rax, rax
-    jz .no_retval
-    js .no_retval               ; SmallInt, skip
+    ; rax = return value (ignore), edx = tag
+    ; XDECREF return value (tag-aware)
     mov rdi, rax
-    call obj_decref
+    mov esi, edx
+    DECREF_VAL rdi, rsi
 .no_retval:
 
     ; Free frame

@@ -64,6 +64,14 @@
     mov rbp, rsp
 %endmacro
 
+; File-local function with RBP frame + local space (not exported)
+%macro DEF_FUNC_LOCAL 2
+%1:
+    push rbp
+    mov rbp, rsp
+    sub rsp, %2
+%endmacro
+
 ; End any function — emits .end label for ELF size
 %macro END_FUNC 1
 %1 %+ .end:
@@ -88,15 +96,11 @@
 
 ; Reference counting (SmallInt-aware: bit 63 set = skip)
 %macro INCREF 1
-    test %1, %1
-    js %%skip
     inc qword [%1 + PyObject.ob_refcnt]
     %%skip:
 %endmacro
 
 %macro DECREF 1
-    test %1, %1
-    js %%skip
     dec qword [%1 + PyObject.ob_refcnt]
     jnz %%skip
     push rdi
@@ -108,8 +112,6 @@
 
 ; Safe DECREF for register (doesn't push/pop if arg is rdi)
 %macro DECREF_REG 1
-    test %1, %1
-    js %%skip
     dec qword [%1 + PyObject.ob_refcnt]
     jnz %%skip
     mov rdi, %1
@@ -120,7 +122,6 @@
 %macro XDECREF 1
     test %1, %1
     jz %%skip
-    js %%skip
     dec qword [%1 + PyObject.ob_refcnt]
     jnz %%skip
     push rdi
@@ -348,6 +349,18 @@ TAG_RC_BIT   equ (1 << 8)    ; bit 8: refcounted flag
     movdqa xmm1, [%2]
     movdqa [%1], xmm1
     movdqa [%2], xmm0
+%endmacro
+
+; Used during bit-63→fat-value transition for code that still holds raw 64-bit values.
+; %1 = value reg (read-only), %2 = tag dest reg
+%macro WIDEN_TAG 2
+    test %1, %1
+    js %%smallint
+    mov %2, TAG_PTR
+    jmp %%done
+%%smallint:
+    mov %2, TAG_SMALLINT
+%%done:
 %endmacro
 
 ; Mark stack as non-executable and reset to .text section

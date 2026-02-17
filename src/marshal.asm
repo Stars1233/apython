@@ -17,6 +17,7 @@ extern tuple_new
 extern bytes_from_data
 extern ap_malloc
 extern ap_free
+extern obj_dealloc
 extern ap_realloc
 extern __gmpz_init
 extern int_type
@@ -131,8 +132,8 @@ DEF_FUNC marshal_init_refs
     cmp qword [rel marshal_ref_cap], 0
     jne .already_allocated
 
-    ; Allocate initial ref array
-    mov rdi, MARSHAL_REFS_INIT_CAP * 8
+    ; Allocate initial ref array (16 bytes per entry: payload + tag)
+    mov rdi, MARSHAL_REFS_INIT_CAP * 16
     call ap_malloc
     mov [rel marshal_refs], rax
     mov qword [rel marshal_ref_cap], MARSHAL_REFS_INIT_CAP
@@ -143,12 +144,14 @@ DEF_FUNC marshal_init_refs
 END_FUNC marshal_init_refs
 
 ;--------------------------------------------------------------------------
-; marshal_add_ref(PyObject *obj) - Add object to reference list
+; marshal_add_ref(rdi=payload, rsi=tag) - Add fat value to reference list
 ;--------------------------------------------------------------------------
 DEF_FUNC marshal_add_ref
     push rbx
+    push r12
 
-    mov rbx, rdi               ; rbx = obj
+    mov rbx, rdi               ; rbx = payload
+    mov r12, rsi               ; r12 = tag
 
     ; Check if we need to grow
     mov rax, [rel marshal_ref_count]
@@ -160,16 +163,22 @@ DEF_FUNC marshal_add_ref
     mov rax, [rel marshal_ref_cap]
     shl rax, 1                 ; new_cap = old_cap * 2
     mov [rel marshal_ref_cap], rax
-    lea rsi, [rax * 8]         ; new_cap * sizeof(ptr)
+    mov rsi, rax
+    shl rsi, 4                 ; new_cap * 16
     call ap_realloc
     mov [rel marshal_refs], rax
 
 .store:
     mov rax, [rel marshal_ref_count]
     mov rcx, [rel marshal_refs]
-    mov [rcx + rax * 8], rbx   ; refs[count] = obj
-    inc qword [rel marshal_ref_count]
+    shl rax, 4                 ; count * 16
+    mov [rcx + rax], rbx       ; refs[count].payload
+    mov [rcx + rax + 8], r12   ; refs[count].tag
+    shr rax, 4                 ; restore count
+    inc rax
+    mov [rel marshal_ref_count], rax
 
+    pop r12
     pop rbx
     leave
     ret
@@ -255,16 +264,19 @@ DEF_FUNC marshal_read_object
 
 ;--------------------------------------------------------------------------
 ; mfinish: common epilogue for marshal_read_object
-; rax = the result object, r12 = FLAG_REF flag
+; rax = the result payload, rdx = tag, r12 = FLAG_REF flag
 ;--------------------------------------------------------------------------
 mfinish:
     ; If FLAG_REF was set, add to reference list
     test r12d, r12d
     jz .no_add_ref
-    push rax
-    mov rdi, rax
+    push rdx                   ; save tag
+    push rax                   ; save payload
+    mov rdi, rax               ; payload
+    mov rsi, rdx               ; tag
     call marshal_add_ref
     pop rax
+    pop rdx                    ; restore tag
 .no_add_ref:
     pop r12
     pop rbx
@@ -276,6 +288,7 @@ mfinish:
 ;--------------------------------------------------------------------------
 mdo_none:
     lea rax, [rel none_singleton]
+    mov edx, TAG_PTR
     jmp mfinish
 
 ;--------------------------------------------------------------------------
@@ -283,6 +296,7 @@ mdo_none:
 ;--------------------------------------------------------------------------
 mdo_true:
     lea rax, [rel bool_true]
+    mov edx, TAG_PTR
     jmp mfinish
 
 ;--------------------------------------------------------------------------
@@ -290,6 +304,7 @@ mdo_true:
 ;--------------------------------------------------------------------------
 mdo_false:
     lea rax, [rel bool_false]
+    mov edx, TAG_PTR
     jmp mfinish
 
 ;--------------------------------------------------------------------------
@@ -297,6 +312,7 @@ mdo_false:
 ;--------------------------------------------------------------------------
 mdo_null:
     xor eax, eax
+    xor edx, edx              ; TAG_NULL
     jmp mfinish
 
 ;--------------------------------------------------------------------------
@@ -473,6 +489,7 @@ mdo_long:
     call __gmpz_neg wrt ..plt
 .long_gmp_not_neg:
     mov rax, r15
+    mov edx, TAG_PTR
     add rsp, 16
     pop r15
     pop r14
@@ -488,6 +505,7 @@ mdo_binary_float:
     movq xmm0, rax            ; move int64 bits to xmm0 as double
     extern float_from_f64
     call float_from_f64
+    mov edx, TAG_PTR
     jmp mfinish
 
 ;--------------------------------------------------------------------------
@@ -510,6 +528,7 @@ mdo_short_ascii:
 
     pop r13
     pop r12                    ; restore FLAG_REF
+    mov edx, TAG_PTR
     jmp mfinish
 
 ;--------------------------------------------------------------------------
@@ -531,6 +550,7 @@ mdo_ascii:
 
     pop r13
     pop r12                    ; restore FLAG_REF
+    mov edx, TAG_PTR
     jmp mfinish
 
 ;--------------------------------------------------------------------------
@@ -552,6 +572,7 @@ mdo_unicode:
 
     pop r13
     pop r12                    ; restore FLAG_REF
+    mov edx, TAG_PTR
     jmp mfinish
 
 ;--------------------------------------------------------------------------
@@ -573,6 +594,7 @@ mdo_bytes:
 
     pop r13
     pop r12                    ; restore FLAG_REF
+    mov edx, TAG_PTR
     jmp mfinish
 
 ;--------------------------------------------------------------------------
@@ -591,6 +613,7 @@ mdo_small_tuple:
     test r12d, r12d
     jz .stuple_no_reserve
     xor edi, edi               ; NULL placeholder
+    xor esi, esi               ; TAG_NULL
     call marshal_add_ref
     mov rax, [rel marshal_ref_count]
     dec rax
@@ -617,22 +640,11 @@ mdo_small_tuple:
     pop r15
     pop r14
     pop r13
-    ; Store fat element in tuple (classify 64-bit value)
+    ; Store fat element in tuple (tag in rdx from marshal_read_object)
     mov rcx, r15
     shl rcx, 4                 ; index * 16
     mov [r14 + PyTupleObject.ob_item + rcx], rax       ; payload
-    ; Classify tag
-    test rax, rax
-    jz .stuple_null
-    js .stuple_smallint
-    mov qword [r14 + PyTupleObject.ob_item + rcx + 8], TAG_PTR
-    jmp .stuple_next
-.stuple_null:
-    mov qword [r14 + PyTupleObject.ob_item + rcx + 8], TAG_NULL
-    jmp .stuple_next
-.stuple_smallint:
-    mov qword [r14 + PyTupleObject.ob_item + rcx + 8], TAG_SMALLINT
-.stuple_next:
+    mov [r14 + PyTupleObject.ob_item + rcx + 8], rdx   ; tag
     inc r15
     jmp .stuple_loop
 
@@ -643,9 +655,12 @@ mdo_small_tuple:
     jz .stuple_no_fixup
     mov rax, [rsp + 8]        ; ref index
     mov rcx, [rel marshal_refs]
-    mov [rcx + rax * 8], r14  ; fix up placeholder with tuple
+    shl rax, 4                 ; index * 16
+    mov [rcx + rax], r14      ; fix up placeholder payload
+    mov qword [rcx + rax + 8], TAG_PTR  ; fix up tag
 .stuple_no_fixup:
     mov rax, r14               ; return the tuple
+    mov edx, TAG_PTR
     add rsp, 16
     pop r15
     pop r14
@@ -669,6 +684,7 @@ mdo_tuple:
     test r12d, r12d
     jz .tuple_no_reserve
     xor edi, edi               ; NULL placeholder
+    xor esi, esi               ; TAG_NULL
     call marshal_add_ref
     mov rax, [rel marshal_ref_count]
     dec rax
@@ -695,22 +711,11 @@ mdo_tuple:
     pop r15
     pop r14
     pop r13
-    ; Store fat element in tuple (classify 64-bit value)
+    ; Store fat element in tuple (tag in rdx from marshal_read_object)
     mov rcx, r15
     shl rcx, 4                 ; index * 16
     mov [r14 + PyTupleObject.ob_item + rcx], rax       ; payload
-    ; Classify tag
-    test rax, rax
-    jz .tuple_null
-    js .tuple_smallint
-    mov qword [r14 + PyTupleObject.ob_item + rcx + 8], TAG_PTR
-    jmp .tuple_next
-.tuple_null:
-    mov qword [r14 + PyTupleObject.ob_item + rcx + 8], TAG_NULL
-    jmp .tuple_next
-.tuple_smallint:
-    mov qword [r14 + PyTupleObject.ob_item + rcx + 8], TAG_SMALLINT
-.tuple_next:
+    mov [r14 + PyTupleObject.ob_item + rcx + 8], rdx   ; tag
     inc r15
     jmp .tuple_loop
 
@@ -721,9 +726,12 @@ mdo_tuple:
     jz .tuple_no_fixup
     mov rax, [rsp + 8]        ; ref index
     mov rcx, [rel marshal_refs]
-    mov [rcx + rax * 8], r14  ; fix up placeholder with tuple
+    shl rax, 4                 ; index * 16
+    mov [rcx + rax], r14      ; fix up placeholder payload
+    mov qword [rcx + rax + 8], TAG_PTR  ; fix up tag
 .tuple_no_fixup:
     mov rax, r14
+    mov edx, TAG_PTR
     add rsp, 16
     pop r15
     pop r14
@@ -742,14 +750,16 @@ mdo_ref:
     cmp rdi, [rel marshal_ref_count]
     jge mdo_ref_oob
     mov rcx, [rel marshal_refs]
-    mov rax, [rcx + rdi * 8]
-    ; Back-references return a new reference (INCREF the shared object)
+    shl rdi, 4                 ; index * 16
+    mov rax, [rcx + rdi]      ; payload
+    mov edx, [rcx + rdi + 8]  ; tag (low 32 bits sufficient)
+    ; Back-references: INCREF only if refcounted (TAG_PTR)
+    test edx, TAG_RC_BIT
+    jz .ref_done
     test rax, rax
-    jz .ref_null
-    js .ref_smallint               ; SmallInt: no refcount
+    jz .ref_done
     inc qword [rax + PyObject.ob_refcnt]
-.ref_smallint:
-.ref_null:
+.ref_done:
     jmp mfinish
 
 mdo_ref_oob:
@@ -804,6 +814,7 @@ mdo_code:
     test r12d, r12d
     jz .code_no_placeholder
     xor edi, edi               ; NULL placeholder
+    xor esi, esi               ; TAG_NULL
     call marshal_add_ref
     mov rax, [rel marshal_ref_count]
     dec rax
@@ -953,10 +964,13 @@ mdo_code:
     jz .code_no_fixup
     mov rax, [rsp + 104]       ; ref index
     mov rcx, [rel marshal_refs]
-    mov [rcx + rax * 8], r13   ; fix up the placeholder with actual code obj
+    shl rax, 4                 ; index * 16
+    mov [rcx + rax], r13      ; fix up placeholder payload
+    mov qword [rcx + rax + 8], TAG_PTR  ; fix up tag
 .code_no_fixup:
 
     mov rax, r13               ; return code object
+    mov edx, TAG_PTR
 
     add rsp, 128
     pop r15
@@ -991,6 +1005,7 @@ mdo_frozenset:
     test r12d, r12d
     jz .fset_no_reserve
     xor edi, edi               ; NULL placeholder
+    xor esi, esi               ; TAG_NULL
     call marshal_add_ref
     mov rax, [rel marshal_ref_count]
     dec rax
@@ -1021,13 +1036,15 @@ mdo_frozenset:
     push r13
     push r14
     push r15
-    push rax                   ; save element
+    push rdx                   ; save element tag
+    push rax                   ; save element payload
     mov rdi, r14               ; set
     mov rsi, rax               ; element
+    ; rdx = element tag from marshal_read_object
     call set_add
-    pop rdi                    ; element - DECREF to compensate for set_add's INCREF
-    ; since marshal_read_object gave us an owned ref and set_add INCREF'd
-    call obj_decref
+    pop rdi                    ; element payload
+    pop rsi                    ; element tag
+    DECREF_VAL rdi, rsi        ; compensate for set_add's INCREF
     pop r15
     pop r14
     pop r13
@@ -1042,9 +1059,12 @@ mdo_frozenset:
     jz .fset_no_fixup
     mov rax, [rsp + 8]        ; ref index
     mov rcx, [rel marshal_refs]
-    mov [rcx + rax * 8], r14  ; fix up placeholder with set
+    shl rax, 4                 ; index * 16
+    mov [rcx + rax], r14      ; fix up placeholder payload
+    mov qword [rcx + rax + 8], TAG_PTR  ; fix up tag
 .fset_no_fixup:
     mov rax, r14               ; return the set
+    mov edx, TAG_PTR
     add rsp, 16
     pop r15
     pop r14

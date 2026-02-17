@@ -13,6 +13,7 @@ extern ap_malloc
 extern ap_free
 extern obj_incref
 extern obj_decref
+extern obj_dealloc
 extern type_type
 extern raise_exception
 extern exc_TypeError_type
@@ -160,14 +161,14 @@ DEF_FUNC property_construct
     xor r14d, r14d              ; fset = NULL
     cmp r12, 2
     jb .pc_alloc
-    mov r14, [rbx + 8]          ; fset = args[1]
+    mov r14, [rbx + 16]         ; fset = args[1]
 
 .pc_alloc:
     ; Save fdel
     push qword 0                ; fdel default = NULL
     cmp r12, 3
     jb .pc_do_alloc
-    mov rax, [rbx + 16]
+    mov rax, [rbx + 32]
     mov [rsp], rax              ; fdel = args[2]
 
 .pc_do_alloc:
@@ -432,26 +433,29 @@ DEF_FUNC _prop_setter_impl
 
     mov rbx, rdi                ; args
     mov r8, [rbx]               ; old property
-    mov r9, [rbx + 8]           ; new fset
+    mov r9, [rbx + 16]          ; new fset
 
     ; Build args for property_construct: (fget, fset, fdel)
-    sub rsp, 24
+    sub rsp, 48
     mov rax, [r8 + PyPropertyObject.prop_get]
     mov [rsp], rax              ; args[0] = fget
-    mov [rsp + 8], r9           ; args[1] = new fset
+    mov qword [rsp + 8], TAG_PTR ; args[0] tag
+    mov [rsp + 16], r9          ; args[1] = new fset
+    mov qword [rsp + 24], TAG_PTR ; args[1] tag
     mov rax, [r8 + PyPropertyObject.prop_del]
-    mov [rsp + 16], rax         ; args[2] = fdel
+    mov [rsp + 32], rax         ; args[2] = fdel
+    mov qword [rsp + 40], TAG_PTR ; args[2] tag
 
     xor edi, edi                ; type (ignored)
     mov rsi, rsp                ; args
     mov edx, 3                  ; nargs
     ; Check if fdel is NULL — if so, pass 2 args
-    cmp qword [rsp + 16], 0
+    cmp qword [rsp + 32], 0
     jne .psi_call
     mov edx, 2
 .psi_call:
     call property_construct
-    add rsp, 24
+    add rsp, 48
 
     pop rbx
     leave
@@ -475,27 +479,30 @@ DEF_FUNC _prop_getter_impl
 
     mov rbx, rdi
     mov r8, [rbx]               ; old property
-    mov r9, [rbx + 8]           ; new fget
+    mov r9, [rbx + 16]          ; new fget
 
-    sub rsp, 24
+    sub rsp, 48
     mov [rsp], r9               ; args[0] = new fget
+    mov qword [rsp + 8], TAG_PTR ; args[0] tag
     mov rax, [r8 + PyPropertyObject.prop_set]
-    mov [rsp + 8], rax          ; args[1] = fset
+    mov [rsp + 16], rax         ; args[1] = fset
+    mov qword [rsp + 24], TAG_PTR ; args[1] tag
     mov rax, [r8 + PyPropertyObject.prop_del]
-    mov [rsp + 16], rax         ; args[2] = fdel
+    mov [rsp + 32], rax         ; args[2] = fdel
+    mov qword [rsp + 40], TAG_PTR ; args[2] tag
 
     xor edi, edi
     mov rsi, rsp
     mov edx, 3
-    cmp qword [rsp + 16], 0
+    cmp qword [rsp + 32], 0
     jne .pgi_call
     mov edx, 2
-    cmp qword [rsp + 8], 0
+    cmp qword [rsp + 16], 0
     jne .pgi_call
     mov edx, 1
 .pgi_call:
     call property_construct
-    add rsp, 24
+    add rsp, 48
 
     pop rbx
     leave
@@ -519,20 +526,23 @@ DEF_FUNC _prop_deleter_impl
 
     mov rbx, rdi
     mov r8, [rbx]               ; old property
-    mov r9, [rbx + 8]           ; new fdel
+    mov r9, [rbx + 16]          ; new fdel
 
-    sub rsp, 24
+    sub rsp, 48
     mov rax, [r8 + PyPropertyObject.prop_get]
     mov [rsp], rax              ; args[0] = fget
+    mov qword [rsp + 8], TAG_PTR ; args[0] tag
     mov rax, [r8 + PyPropertyObject.prop_set]
-    mov [rsp + 8], rax          ; args[1] = fset
-    mov [rsp + 16], r9          ; args[2] = new fdel
+    mov [rsp + 16], rax         ; args[1] = fset
+    mov qword [rsp + 24], TAG_PTR ; args[1] tag
+    mov [rsp + 32], r9          ; args[2] = new fdel
+    mov qword [rsp + 40], TAG_PTR ; args[2] tag
 
     xor edi, edi
     mov rsi, rsp
     mov edx, 3
     call property_construct
-    add rsp, 24
+    add rsp, 48
 
     pop rbx
     leave
@@ -568,12 +578,14 @@ DEF_FUNC property_descr_get
     test rax, rax
     jz .pdg_no_getter
 
-    ; Build args on stack
-    push r12                    ; args[0] = obj
+    ; Build fat args on stack
+    sub rsp, 16
+    mov [rsp], r12              ; args[0] payload = obj
+    mov qword [rsp + 8], TAG_PTR ; args[0] tag
     mov rsi, rsp                ; args ptr
     mov edx, 1                  ; nargs = 1
     call rax
-    add rsp, 8                  ; pop args
+    add rsp, 16                 ; pop fat args
 
     pop r12
     pop rbx
@@ -596,10 +608,12 @@ DEF_FUNC property_descr_set
     push rbx
     push r12
     push r13
+    push r14
 
     mov rbx, rdi                ; property
     mov r12, rsi                ; obj
     mov r13, rdx                ; value
+    mov r14d, ecx               ; value tag
 
     mov rax, [rbx + PyPropertyObject.prop_set]
     test rax, rax
@@ -612,21 +626,22 @@ DEF_FUNC property_descr_set
     test rax, rax
     jz .pds_no_setter
 
-    ; Build args on stack: [obj, value]
-    push r13                    ; args[1] = value
-    push r12                    ; args[0] = obj
+    ; Build fat args on stack: [obj, value]
+    sub rsp, 32
+    mov [rsp], r12              ; args[0] payload = obj
+    mov qword [rsp + 8], TAG_PTR ; args[0] tag
+    mov [rsp + 16], r13         ; args[1] payload = value
+    mov [rsp + 24], r14         ; args[1] tag (from caller)
     mov rsi, rsp                ; args ptr
     mov edx, 2                  ; nargs = 2
     call rax
-    add rsp, 16                 ; pop args
+    add rsp, 32                 ; pop fat args
 
     ; DECREF result (fset returns None typically)
-    test rax, rax
-    jz .pds_done
-    mov rdi, rax
-    call obj_decref
+    DECREF_VAL rax, edx
 
 .pds_done:
+    pop r14
     pop r13
     pop r12
     pop rbx

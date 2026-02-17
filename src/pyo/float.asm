@@ -63,9 +63,10 @@ END_FUNC float_from_f64
 ;; Clobbers: rax, rcx, rdx, rdi, rsi, r8-r11
 ;; ============================================================================
 DEF_FUNC_BARE float_to_f64
-    ; Check SmallInt first (bit 63 set)
-    test rdi, rdi
-    js .from_smallint
+    ; rdi = payload, esi = tag
+    ; Check SmallInt first
+    cmp esi, TAG_SMALLINT
+    je .from_smallint
 
     ; Check type
     mov rax, [rdi + PyObject.ob_type]
@@ -87,8 +88,6 @@ DEF_FUNC_BARE float_to_f64
 
 .from_smallint:
     mov rax, rdi
-    shl rax, 1
-    sar rax, 1                 ; sign-extend SmallInt decode
     cvtsi2sd xmm0, rax
     ret
 
@@ -184,24 +183,28 @@ DEF_FUNC float_repr
 .has_dot:
     lea rdi, [rbp-64]
     call str_from_cstr
+    mov edx, TAG_PTR
     leave
     ret
 
 .is_nan:
     lea rdi, [rel str_nan]
     call str_from_cstr
+    mov edx, TAG_PTR
     leave
     ret
 
 .is_pos_inf:
     lea rdi, [rel str_inf]
     call str_from_cstr
+    mov edx, TAG_PTR
     leave
     ret
 
 .is_neg_inf:
     lea rdi, [rel str_neg_inf]
     call str_from_cstr
+    mov edx, TAG_PTR
     leave
     ret
 END_FUNC float_repr
@@ -351,10 +354,14 @@ END_FUNC float_dealloc
 ; Helper macro: convert both args to doubles
 ; Uses rbp frame with [rbp-8] = left double, [rbp-16] = right double
 %macro FLOAT_BINOP_SETUP 0
+    ; rdi=left, rsi=right, edx=left_tag, ecx=right_tag
     mov [rbp-24], rsi          ; save right operand
+    mov dword [rbp-32], ecx    ; save right_tag
+    mov esi, edx               ; esi = left_tag for float_to_f64
     call float_to_f64          ; rdi = left → xmm0
     movsd [rbp-8], xmm0
     mov rdi, [rbp-24]
+    mov esi, dword [rbp-32]    ; esi = right_tag
     call float_to_f64          ; xmm0 = right as double
     movsd [rbp-16], xmm0
 %endmacro
@@ -461,6 +468,7 @@ END_FUNC float_mod
 DEF_FUNC float_neg, 16
 
     ; rdi = self (only one operand for unary ops)
+    mov esi, TAG_PTR           ; float objects are heap pointers
     call float_to_f64
     ; Negate: XOR with sign bit
     movsd xmm1, [rel sign_mask]
@@ -507,14 +515,18 @@ END_FUNC float_int
 ;; op: PY_LT=0, PY_LE=1, PY_EQ=2, PY_NE=3, PY_GT=4, PY_GE=5
 ;; Handles mixed int/float comparisons.
 ;; ============================================================================
-DEF_FUNC float_compare, 32
-    mov [rbp-24], edx          ; save op
+DEF_FUNC float_compare, 40
+    ; rdi=left, rsi=right, edx=op, ecx=left_tag, r8d=right_tag
+    mov [rbp-24], edx          ; save op (4 bytes)
 
     ; Convert both to doubles
-    mov [rbp-32], rsi          ; save right
+    mov [rbp-40], rsi          ; save right (8 bytes)
+    mov dword [rbp-28], r8d    ; save right_tag (4 bytes, no overlap)
+    mov esi, ecx               ; left_tag for float_to_f64
     call float_to_f64          ; left → xmm0
     movsd [rbp-8], xmm0
-    mov rdi, [rbp-32]
+    mov rdi, [rbp-40]
+    mov esi, dword [rbp-28]    ; right_tag
     call float_to_f64          ; right → xmm0
     movsd [rbp-16], xmm0
 

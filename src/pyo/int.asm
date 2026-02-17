@@ -91,10 +91,6 @@ END_FUNC int_new_from_mpz
 ;; Input:  register with SmallInt
 ;; Output: same register with decoded signed value
 ;; ============================================================================
-%macro SMALLINT_DECODE 1
-    shl %1, 1
-    sar %1, 1
-%endmacro
 
 ;; ============================================================================
 ;; int_from_i64(int64_t val) -> PyObject* (SmallInt or PyIntObject*)
@@ -109,7 +105,6 @@ DEF_FUNC_BARE int_from_i64
     jae int_from_i64_gmp   ; doesn't fit, use GMP
     ; Fits: encode as SmallInt
     mov rax, rdi
-    bts rax, 63            ; set tag bit
     mov edx, TAG_SMALLINT
     ret
 END_FUNC int_from_i64
@@ -146,7 +141,6 @@ END_FUNC int_from_i64_gmp
 ;; Decode SmallInt and create GMP-backed int
 ;; ============================================================================
 DEF_FUNC_BARE smallint_to_pyint
-    SMALLINT_DECODE rdi
     jmp int_from_i64_gmp
 END_FUNC smallint_to_pyint
 
@@ -434,7 +428,6 @@ DEF_FUNC int_from_cstr_base, IB_FRAME
 .base0_return_zero:
     ; Free nothing (no buffer allocated yet), return SmallInt 0
     xor eax, eax
-    bts rax, 63            ; SmallInt(0)
     mov edx, TAG_SMALLINT
     leave
     ret
@@ -789,7 +782,6 @@ DEF_FUNC int_from_cstr_base, IB_FRAME
     mov rdi, [rbp - IB_OBJ]
     call ap_free
     mov rax, [rbp - IB_SIGN]
-    bts rax, 63
     mov edx, TAG_SMALLINT
     leave
     ret
@@ -834,8 +826,8 @@ END_FUNC int_from_cstr_base
 ;; Extract integer value as C int64. Handles SmallInt.
 ;; ============================================================================
 DEF_FUNC_BARE int_to_i64
-    test rdi, rdi
-    js .smallint
+    cmp edx, TAG_SMALLINT
+    je .smallint
     push rbp
     mov rbp, rsp
     lea rdi, [rdi + PyIntObject.mpz]
@@ -844,7 +836,6 @@ DEF_FUNC_BARE int_to_i64
     ret
 .smallint:
     mov rax, rdi
-    SMALLINT_DECODE rax
     ret
 END_FUNC int_to_i64
 
@@ -853,8 +844,8 @@ END_FUNC int_to_i64
 ;; String representation. SmallInt uses snprintf, GMP uses gmpz_get_str.
 ;; ============================================================================
 DEF_FUNC_BARE int_repr
-    test rdi, rdi
-    js .smallint
+    cmp edx, TAG_SMALLINT
+    je .smallint
     ; Check if int subclass (TYPE_FLAG_INT_SUBCLASS) — extract int_value
     mov rax, [rdi + PyObject.ob_type]
     lea rcx, [rel int_type]
@@ -865,8 +856,8 @@ DEF_FUNC_BARE int_repr
     jz .repr_gmp                 ; not int subclass → treat as GMP
     ; Extract int_value from PyIntSubclassObject
     mov rdi, [rdi + PyIntSubclassObject.int_value]
-    test rdi, rdi
-    js .smallint
+    cmp edx, TAG_SMALLINT
+    je .smallint
 .repr_gmp:
     ; GMP path
     push rbp
@@ -898,6 +889,7 @@ DEF_FUNC_BARE int_repr
     mov rdi, r12
     call ap_free               ; free C buffer
     mov rax, rbx               ; return str object
+    mov edx, TAG_PTR
     lea rsp, [rbp - 16]   ; restore RSP to before alignment (rbp-16 = after push rbx, push r12)
     pop r12
     pop rbx
@@ -910,7 +902,6 @@ DEF_FUNC_BARE int_repr
     mov rbp, rsp
     sub rsp, 32                ; 24 bytes buffer + alignment
     mov rax, rdi
-    SMALLINT_DECODE rax        ; rax = decoded signed value
 
     ; Convert int64 to decimal string in stack buffer
     ; Write digits backwards from buf[23], then reverse
@@ -946,6 +937,7 @@ DEF_FUNC_BARE int_repr
     inc rsi
     mov rdi, rsi
     call str_from_cstr
+    mov edx, TAG_PTR
     leave
     ret
 
@@ -962,8 +954,8 @@ END_FUNC int_repr
 DEF_FUNC_BARE int_hash
     ; Unwrap int subclass instances
     call int_unwrap
-    test rdi, rdi
-    js .smallint
+    cmp edx, TAG_SMALLINT
+    je .smallint
 
     push rbp
     mov rbp, rsp
@@ -981,7 +973,6 @@ DEF_FUNC_BARE int_hash
 
 .smallint:
     mov rax, rdi
-    SMALLINT_DECODE rax
     cmp rax, -1
     jne .si_done
     mov rax, -2
@@ -996,8 +987,8 @@ END_FUNC int_hash
 DEF_FUNC_BARE int_bool
     ; Unwrap int subclass instances
     call int_unwrap
-    test rdi, rdi
-    js .smallint
+    cmp edx, TAG_SMALLINT
+    je .smallint
 
     push rbp
     mov rbp, rsp
@@ -1034,20 +1025,18 @@ DEF_FUNC_BARE int_add
     mov rsi, rdi
     pop rdi
     ; Check both SmallInt
-    mov rax, rdi
-    and rax, rsi
-    jns .gmp_path           ; either is heap ptr (bit 63 clear)
+    cmp edx, TAG_SMALLINT
+    jne .gmp_path
+    cmp ecx, TAG_SMALLINT
+    jne .gmp_path
 
     ; Both SmallInt: decode and add
     mov rax, rdi
-    SMALLINT_DECODE rax
     mov rcx, rsi
-    SMALLINT_DECODE rcx
     add rax, rcx
     jo .gmp_path            ; overflow, fall back to GMP
 
     ; Result fits: encode as SmallInt
-    bts rax, 63
     mov edx, TAG_SMALLINT
     ret
 
@@ -1127,17 +1116,15 @@ DEF_FUNC_BARE int_sub
     mov rsi, rdi
     pop rdi
     ; Check both SmallInt
-    mov rax, rdi
-    and rax, rsi
-    jns .gmp_path
+    cmp edx, TAG_SMALLINT
+    jne .gmp_path
+    cmp ecx, TAG_SMALLINT
+    jne .gmp_path
 
     mov rax, rdi
-    SMALLINT_DECODE rax
     mov rcx, rsi
-    SMALLINT_DECODE rcx
     sub rax, rcx
     jo .gmp_path
-    bts rax, 63
     mov edx, TAG_SMALLINT
     ret
 
@@ -1213,14 +1200,13 @@ DEF_FUNC_BARE int_mul
     mov rsi, rdi
     pop rdi
     ; Check both SmallInt
-    mov rax, rdi
-    and rax, rsi
-    jns .gmp_path
+    cmp edx, TAG_SMALLINT
+    jne .gmp_path
+    cmp ecx, TAG_SMALLINT
+    jne .gmp_path
 
     mov rax, rdi
-    SMALLINT_DECODE rax
     mov rcx, rsi
-    SMALLINT_DECODE rcx
     imul rax, rcx
     jo .gmp_path
     ; Check result still fits SmallInt range
@@ -1229,7 +1215,6 @@ DEF_FUNC_BARE int_mul
     inc rcx
     cmp rcx, 2
     jae .gmp_path
-    bts rax, 63
     mov edx, TAG_SMALLINT
     ret
 
@@ -1304,15 +1289,14 @@ DEF_FUNC_BARE int_floordiv
     mov rsi, rdi
     pop rdi
     ; Check both SmallInt
-    mov rax, rdi
-    and rax, rsi
-    jns .gmp_path
+    cmp edx, TAG_SMALLINT
+    jne .gmp_path
+    cmp ecx, TAG_SMALLINT
+    jne .gmp_path
 
     ; SmallInt fast path
     mov rax, rdi
-    SMALLINT_DECODE rax
     mov rcx, rsi
-    SMALLINT_DECODE rcx
     test rcx, rcx
     jz .gmp_path            ; div by zero -> let GMP handle/crash
     cqo
@@ -1325,7 +1309,6 @@ DEF_FUNC_BARE int_floordiv
     jns .smallint_done
     dec rax
 .smallint_done:
-    bts rax, 63
     mov edx, TAG_SMALLINT
     ret
 
@@ -1400,14 +1383,13 @@ DEF_FUNC_BARE int_mod
     mov rsi, rdi
     pop rdi
     ; Check both SmallInt
-    mov rax, rdi
-    and rax, rsi
-    jns .gmp_path
+    cmp edx, TAG_SMALLINT
+    jne .gmp_path
+    cmp ecx, TAG_SMALLINT
+    jne .gmp_path
 
     mov rax, rdi
-    SMALLINT_DECODE rax
     mov rcx, rsi
-    SMALLINT_DECODE rcx
     test rcx, rcx
     jz .gmp_path
     cqo
@@ -1421,7 +1403,6 @@ DEF_FUNC_BARE int_mod
     jns .smallint_done
     add rax, rcx            ; remainder += divisor
 .smallint_done:
-    bts rax, 63
     mov edx, TAG_SMALLINT
     ret
 
@@ -1486,12 +1467,12 @@ END_FUNC int_mod
 ;; int_neg(PyObject *a) -> PyObject*
 ;; ============================================================================
 DEF_FUNC_BARE int_neg
-    test rdi, rdi
-    js .smallint
+    cmp edx, TAG_SMALLINT
+    je .smallint
     ; Unwrap int subclass
     call int_unwrap
-    test rdi, rdi
-    js .smallint
+    cmp edx, TAG_SMALLINT
+    je .smallint
 
     ; GMP path
     push rbp
@@ -1519,7 +1500,6 @@ DEF_FUNC_BARE int_neg
 
 .smallint:
     mov rax, rdi
-    SMALLINT_DECODE rax
     neg rax
     ; Check if result fits (only -(-2^62) = 2^62 overflows)
     mov rcx, rax
@@ -1527,7 +1507,6 @@ DEF_FUNC_BARE int_neg
     inc rcx
     cmp rcx, 2
     jae .neg_overflow
-    bts rax, 63
     mov edx, TAG_SMALLINT
     ret
 .neg_overflow:
@@ -1542,16 +1521,18 @@ END_FUNC int_neg
 ;; If rdi is a SmallInt or GMP int, leave unchanged.
 global int_unwrap
 DEF_FUNC_BARE int_unwrap
-    test rdi, rdi
-    js .iuw_done                 ; SmallInt
+    ; rdi = payload, edx = tag -> rdi = unwrapped payload, edx = unwrapped tag
+    cmp edx, TAG_SMALLINT
+    je .iuw_done
     mov rax, [rdi + PyObject.ob_type]
     lea rcx, [rel int_type]
     cmp rax, rcx
-    je .iuw_done                 ; exact int_type
+    je .iuw_done                 ; exact int_type, edx already TAG_PTR
     mov rax, [rax + PyTypeObject.tp_flags]
     test rax, TYPE_FLAG_INT_SUBCLASS
     jz .iuw_done                 ; not int subclass
-    mov rdi, [rdi + PyIntSubclassObject.int_value]
+    mov edx, [rdi + PyIntSubclassObject.int_value_tag]  ; unwrapped tag
+    mov rdi, [rdi + PyIntSubclassObject.int_value]       ; unwrapped payload
 .iuw_done:
     ret
 END_FUNC int_unwrap
@@ -1562,40 +1543,84 @@ END_FUNC int_unwrap
 DEF_FUNC int_compare
     push rbx
     push r12
+    push r13
+    push r14
 
     mov ebx, edx            ; save op
+    mov r12, rdi             ; a
+    mov r13, rsi             ; b
+    mov r14d, r8d            ; r14d = b_tag (right operand tag from caller)
 
     ; Unwrap int subclass instances
-    push rsi
-    call int_unwrap
-    pop rsi
-    push rdi
-    mov rdi, rsi
-    call int_unwrap
-    mov rsi, rdi
-    pop rdi
+    ; int_unwrap(rdi=payload, edx=tag) -> rdi=unwrapped, edx=tag
+    ; For tp_richcompare callers: rcx=right_tag, r8d or edx has left_tag
+    ; Since tp_richcompare passes edx=op, we need to determine tags ourselves
+    ; The caller (op_compare_op) passes tags in stack/regs before calling tp_richcompare
+    ; but tp_richcompare only gets (left, right, op). We detect SmallInt by checking
+    ; if value could be a heap pointer (presence of valid ob_type).
+    ; Simpler: since nb_ callers pass rdx=left_tag, rcx=right_tag, but tp_richcompare
+    ; passes edx=op, we check if edx looks like a tag or a comparison op.
+    ; Tags: 0,1,2,3,4,0x105. Ops: 0-5. Overlap at 0-4!
+    ; So we can't distinguish. Instead, just check ob_type validity for heap pointers.
 
-    ; Check if both SmallInt
-    mov rax, rdi
-    and rax, rsi
-    js .both_smallint
+    ; Strategy: try to detect SmallInt by checking if pointer dereference would be valid.
+    ; Since caller already handles both-SmallInt, at least one is a real pointer.
+    ; We use a different approach: check if the value is in a plausible heap range.
+    ; Actually, the simplest: the caller's compare_op fast path catches both-SmallInt.
+    ; For int_compare, we can just assume at least one is a heap int. We need to handle
+    ; int subclass unwrapping and SmallInt-to-GMP conversion.
+
+    ; Check a: is it a heap pointer? (ob_type at +8 would be a valid pointer)
+    ; For SmallInt raw values (arbitrary int64), accessing [rdi+8] would segfault
+    ; on most values. We need a reliable way to detect.
+    ; Use: the caller passes rdx=left_tag for nb_ calls, but edx=op for tp_richcompare.
+    ; Since we saved ebx=edx, we lost the distinction.
+    ;
+    ; NEW APPROACH: Check if ob_type points to int_type or its subclass
+    ; This only works for heap pointers. For SmallInt payloads, we'd crash.
+    ; Since the caller already eliminated both-SmallInt, at least one is heap.
+    ; We can't know WHICH one is SmallInt without tags.
+    ;
+    ; SAFE APPROACH: Make tp_richcompare callers pass tags.
+    ; For now: assume the compare_op caller already handles both-SmallInt,
+    ; so both args are heap pointers (TAG_PTR). Skip int_unwrap tag check.
+    ; int_unwrap with edx=TAG_PTR will do type checking and unwrap subclasses.
+
+    ; Unwrap a
+    mov rdi, r12
+    mov edx, ecx                 ; left_tag from caller
+    call int_unwrap
+    mov r12, rdi                 ; unwrapped a
+    mov eax, edx                 ; a_tag after unwrap
+
+    ; Unwrap b
+    push rax                     ; save a_tag
+    mov rdi, r13
+    mov edx, r14d                ; right_tag from caller
+    call int_unwrap
+    mov r13, rdi                 ; unwrapped b
+    ; edx = b_tag after unwrap
+    pop rax                      ; rax = a_tag
+
+    ; Check if both SmallInt (could happen after unwrapping int subclasses)
+    cmp eax, TAG_SMALLINT
+    jne .a_not_smallint
+    cmp edx, TAG_SMALLINT
+    je .both_smallint
+.a_not_smallint:
 
     ; At least one is GMP - need full path
-    push r13
-    mov r12, rdi
-    mov r13, rsi
-
     ; Convert SmallInt a if needed
-    test r12, r12
-    jns .a_ok
+    cmp eax, TAG_SMALLINT
+    jne .a_ok
     mov rdi, r12
     call smallint_to_pyint
     mov r12, rax
     jmp .cmp_convert_b
 .a_ok:
 .cmp_convert_b:
-    test r13, r13
-    jns .b_ok
+    cmp edx, TAG_SMALLINT
+    jne .b_ok
     mov rdi, r13
     call smallint_to_pyint
     mov r13, rax
@@ -1604,15 +1629,12 @@ DEF_FUNC int_compare
     lea rsi, [r13 + PyIntObject.mpz]
     call __gmpz_cmp wrt ..plt
     mov r12d, eax
-    pop r13
     jmp .dispatch_op
 
 .both_smallint:
-    ; Decode and compare directly
-    mov rax, rdi
-    SMALLINT_DECODE rax
-    mov rcx, rsi
-    SMALLINT_DECODE rcx
+    ; Compare SmallInt payloads directly
+    mov rax, r12
+    mov rcx, r13
     cmp rax, rcx
     ; Set r12d to cmp-style result: -1, 0, or 1
     mov r12d, 0
@@ -1663,6 +1685,8 @@ DEF_FUNC int_compare
     lea rax, [rel bool_true]
     inc qword [rax + PyObject.ob_refcnt]
     mov edx, TAG_PTR
+    pop r14
+    pop r13
     pop r12
     pop rbx
     leave
@@ -1671,6 +1695,8 @@ DEF_FUNC int_compare
     lea rax, [rel bool_false]
     inc qword [rax + PyObject.ob_refcnt]
     mov edx, TAG_PTR
+    pop r14
+    pop r13
     pop r12
     pop rbx
     leave
@@ -1683,8 +1709,8 @@ END_FUNC int_compare
 ;; ============================================================================
 DEF_FUNC_BARE int_dealloc
     ; SmallInt should never be deallocated
-    test rdi, rdi
-    js .bail
+    cmp edx, TAG_SMALLINT
+    je .bail
 
     push rbp
     mov rbp, rsp
@@ -1714,9 +1740,10 @@ DEF_FUNC_BARE int_and
     mov rsi, rdi
     pop rdi
     ; Check both SmallInt
-    mov rax, rdi
-    and rax, rsi
-    jns .gmp
+    cmp edx, TAG_SMALLINT
+    jne .gmp
+    cmp ecx, TAG_SMALLINT
+    jne .gmp
 
     ; Both SmallInt
     mov rax, rdi
@@ -1795,9 +1822,10 @@ DEF_FUNC_BARE int_or
     mov rsi, rdi
     pop rdi
     ; Check both SmallInt
-    mov rax, rdi
-    and rax, rsi
-    jns .gmp
+    cmp edx, TAG_SMALLINT
+    jne .gmp
+    cmp ecx, TAG_SMALLINT
+    jne .gmp
 
     ; Both SmallInt
     mov rax, rdi
@@ -1876,17 +1904,15 @@ DEF_FUNC_BARE int_xor
     mov rsi, rdi
     pop rdi
     ; Check both SmallInt
-    mov rax, rdi
-    and rax, rsi
-    jns .gmp
+    cmp edx, TAG_SMALLINT
+    jne .gmp
+    cmp ecx, TAG_SMALLINT
+    jne .gmp
 
     ; Both SmallInt: XOR values, must re-set tag bit
     mov rax, rdi
-    SMALLINT_DECODE rax
     mov rcx, rsi
-    SMALLINT_DECODE rcx
     xor rax, rcx
-    bts rax, 63
     mov edx, TAG_SMALLINT
     ret
 
@@ -1954,8 +1980,8 @@ END_FUNC int_xor
 DEF_FUNC_BARE int_invert
     ; Unwrap int subclass instances
     call int_unwrap
-    test rdi, rdi
-    js .smallint
+    cmp edx, TAG_SMALLINT
+    je .smallint
 
     ; GMP path
     push rbp
@@ -1982,9 +2008,7 @@ DEF_FUNC_BARE int_invert
 
 .smallint:
     mov rax, rdi
-    SMALLINT_DECODE rax
     not rax                ; ~x = -(x+1), works for all 62-bit values
-    bts rax, 63
     mov edx, TAG_SMALLINT
     ret
 END_FUNC int_invert
@@ -1996,23 +2020,33 @@ DEF_FUNC int_lshift
     push rbx
     push r12
     push r13
+    push r14
+
+    ; Save tags
+    mov r14d, edx           ; r14d = left_tag
+    ; ecx = right_tag
 
     ; Unwrap int subclass instances
     push rsi
-    call int_unwrap
+    push rcx                ; save right_tag
+    call int_unwrap          ; rdi, edx -> unwrapped rdi, edx
+    mov r14d, edx            ; update left_tag
+    pop rcx                  ; right_tag
     pop rsi
     push rdi
     mov rdi, rsi
-    call int_unwrap
-    mov rsi, rdi
-    pop rdi
+    mov edx, ecx
+    call int_unwrap          ; rdi, edx -> unwrapped rdi, edx
+    mov rsi, rdi             ; rsi = unwrapped right
+    mov ecx, edx             ; ecx = right_tag
+    pop rdi                  ; rdi = unwrapped left
 
     mov rbx, rdi           ; left operand
     mov r12, rsi           ; right operand (shift amount)
 
     ; Get shift amount as int64
-    test r12, r12
-    js .shift_smallint
+    cmp ecx, TAG_SMALLINT
+    je .shift_smallint
     ; GMP right operand: get as int64
     lea rdi, [r12 + PyIntObject.mpz]
     call __gmpz_get_si wrt ..plt
@@ -2020,8 +2054,6 @@ DEF_FUNC int_lshift
     jmp .have_shift
 .shift_smallint:
     mov r13, r12
-    shl r13, 1
-    sar r13, 1             ; decode SmallInt
 
 .have_shift:
     ; r13 = shift amount
@@ -2030,8 +2062,8 @@ DEF_FUNC int_lshift
 
     ; Convert left to GMP if needed
     xor ecx, ecx           ; flag: converted
-    test rbx, rbx
-    jns .a_gmp
+    cmp r14d, TAG_SMALLINT
+    jne .a_gmp
     mov rdi, rbx
     call smallint_to_pyint
     mov rbx, rax
@@ -2061,6 +2093,7 @@ DEF_FUNC int_lshift
     pop rax
 .lsh_done:
     mov edx, TAG_PTR
+    pop r14
     pop r13
     pop r12
     pop rbx
@@ -2080,48 +2113,55 @@ DEF_FUNC int_rshift
     push rbx
     push r12
     push r13
+    push r14
+
+    ; Save tags
+    mov r14d, edx           ; r14d = left_tag
+    ; ecx = right_tag
 
     ; Unwrap int subclass instances
     push rsi
+    push rcx                ; save right_tag
     call int_unwrap
+    mov r14d, edx            ; update left_tag
+    pop rcx
     pop rsi
     push rdi
     mov rdi, rsi
+    mov edx, ecx
     call int_unwrap
     mov rsi, rdi
+    mov ecx, edx             ; ecx = right_tag
     pop rdi
 
     mov rbx, rdi
     mov r12, rsi
 
     ; Get shift amount
-    test r12, r12
-    js .shift_smallint
+    cmp ecx, TAG_SMALLINT
+    je .shift_smallint
     lea rdi, [r12 + PyIntObject.mpz]
     call __gmpz_get_si wrt ..plt
     mov r13, rax
     jmp .have_shift
 .shift_smallint:
     mov r13, r12
-    shl r13, 1
-    sar r13, 1
 
 .have_shift:
     test r13, r13
     js .neg_shift
 
     ; SmallInt fast path
-    test rbx, rbx
-    jns .gmp_path
+    cmp r14d, TAG_SMALLINT
+    jne .gmp_path
     mov rax, rbx
-    SMALLINT_DECODE rax
     ; Arithmetic right shift
     mov rcx, r13
     cmp rcx, 63
     jge .max_shift
     sar rax, cl
-    bts rax, 63
     mov edx, TAG_SMALLINT
+    pop r14
     pop r13
     pop r12
     pop rbx
@@ -2130,8 +2170,8 @@ DEF_FUNC int_rshift
 .max_shift:
     ; Shift >= 63: result is 0 or -1 depending on sign
     sar rax, 63
-    bts rax, 63
     mov edx, TAG_SMALLINT
+    pop r14
     pop r13
     pop r12
     pop rbx
@@ -2154,6 +2194,7 @@ DEF_FUNC int_rshift
     call __gmpz_fdiv_q_2exp wrt ..plt
     pop rax
     mov edx, TAG_PTR
+    pop r14
     pop r13
     pop r12
     pop rbx
@@ -2174,31 +2215,42 @@ DEF_FUNC int_power
     push rbx
     push r12
     push r13
+    push r14
 
-    ; Unwrap int subclass instances
-    push rsi
-    call int_unwrap
-    pop rsi
-    push rdi
+    ; Calling convention: rdi=left, rsi=right, rdx=left_tag, rcx=right_tag
+    ; Unwrap int subclass instances, tracking tags
+    push rsi                ; save right
+    push rcx                ; save right_tag
+    call int_unwrap         ; rdi=unwrapped left, edx=left_tag
+    pop rcx                 ; restore right_tag
+    pop rsi                 ; restore right
+    mov r14d, edx           ; r14d = base_tag (left tag after unwrap)
+    push rdi                ; save unwrapped left
+    push r14                ; save base_tag
     mov rdi, rsi
-    call int_unwrap
-    mov rsi, rdi
-    pop rdi
+    mov edx, ecx            ; right_tag
+    call int_unwrap         ; rdi=unwrapped right, edx=right_tag
+    mov rsi, rdi            ; rsi = unwrapped right (exponent)
+    mov ecx, edx            ; ecx = exp_tag (right tag after unwrap)
+    pop r14                 ; r14d = base_tag
+    pop rdi                 ; rdi = unwrapped left (base)
 
-    mov rbx, rdi           ; base
-    mov r12, rsi           ; exponent
+    mov rbx, rdi           ; rbx = base
+    mov r12, rsi           ; r12 = exponent
 
     ; Get exponent as int64
-    test r12, r12
-    js .exp_smallint
+    cmp ecx, TAG_SMALLINT
+    je .exp_smallint
+    push rbx                ; save base across GMP call
+    push r14                ; save base_tag
     lea rdi, [r12 + PyIntObject.mpz]
     call __gmpz_get_si wrt ..plt
+    pop r14                 ; restore base_tag
+    pop rbx                 ; restore base
     mov r13, rax
     jmp .have_exp
 .exp_smallint:
     mov r13, r12
-    shl r13, 1
-    sar r13, 1
 
 .have_exp:
     ; Negative exponent: return float (int ** -n = 1/int**n)
@@ -2206,9 +2258,10 @@ DEF_FUNC int_power
     js .neg_exp
 
     ; Convert base to GMP if needed
+    ; r14d = base_tag from int_unwrap
     xor ecx, ecx
-    test rbx, rbx
-    jns .base_gmp
+    cmp r14d, TAG_SMALLINT
+    jne .base_gmp
     mov rdi, rbx
     call smallint_to_pyint
     mov rbx, rax
@@ -2238,6 +2291,7 @@ DEF_FUNC int_power
     pop rax
 .pow_done:
     mov edx, TAG_PTR
+    pop r14
     pop r13
     pop r12
     pop rbx
@@ -2249,16 +2303,14 @@ DEF_FUNC int_power
     ; For simplicity, convert both to double and use pow
     ; Actually, just raise a TypeError for now (like many impls)
     ; Python returns float for negative int power
-    ; Convert base to double
-    test rbx, rbx
-    js .neg_exp_smallint
+    ; Convert base to double (r14d = base_tag)
+    cmp r14d, TAG_SMALLINT
+    je .neg_exp_smallint
     lea rdi, [rbx + PyIntObject.mpz]
     call __gmpz_get_d wrt ..plt
     jmp .neg_exp_have_base
 .neg_exp_smallint:
     mov rax, rbx
-    shl rax, 1
-    sar rax, 1
     cvtsi2sd xmm0, rax
 .neg_exp_have_base:
     ; xmm0 = base as double
@@ -2278,6 +2330,7 @@ DEF_FUNC int_power
     divsd xmm0, xmm1
     call float_from_f64
     mov edx, TAG_PTR
+    pop r14
     pop r13
     pop r12
     pop rbx
@@ -2290,37 +2343,36 @@ END_FUNC int_power
 ;; int / int always returns float in Python
 ;; ============================================================================
 DEF_FUNC int_true_divide
+    ; rdi=left, rsi=right, rdx=left_tag, rcx=right_tag
     and rsp, -16           ; align for potential libc calls
     push rbx
     push r12
+    push r13
 
     mov rbx, rdi           ; left
     mov r12, rsi           ; right
+    mov r13d, ecx          ; r13d = right_tag
 
-    ; Convert left to double
-    test rbx, rbx
-    js .td_left_small
+    ; Convert left to double (edx = left_tag, still valid)
+    cmp edx, TAG_SMALLINT
+    je .td_left_small
     lea rdi, [rbx + PyIntObject.mpz]
     call __gmpz_get_d wrt ..plt
     jmp .td_have_left
 .td_left_small:
     mov rax, rbx
-    shl rax, 1
-    sar rax, 1
     cvtsi2sd xmm0, rax
 .td_have_left:
     movsd [rsp-8], xmm0   ; save left double
 
-    ; Convert right to double
-    test r12, r12
-    js .td_right_small
+    ; Convert right to double (r13d = right_tag)
+    cmp r13d, TAG_SMALLINT
+    je .td_right_small
     lea rdi, [r12 + PyIntObject.mpz]
     call __gmpz_get_d wrt ..plt
     jmp .td_have_right
 .td_right_small:
     mov rax, r12
-    shl rax, 1
-    sar rax, 1
     cvtsi2sd xmm0, rax
 .td_have_right:
     ; xmm0 = right double
@@ -2335,6 +2387,7 @@ DEF_FUNC int_true_divide
     call float_from_f64
     mov edx, TAG_PTR
 
+    pop r13
     pop r12
     pop rbx
     leave

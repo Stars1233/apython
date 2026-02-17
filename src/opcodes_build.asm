@@ -136,8 +136,8 @@ DEF_FUNC_BARE op_binary_subscr
     push rsi                   ; save key
 
     ; Try mp_subscript first (handles int keys for all types)
-    test rdi, rdi
-    js .no_subscript           ; SmallInt can't be subscripted
+    cmp r9d, TAG_SMALLINT
+    je .no_subscript           ; SmallInt can't be subscripted
     mov rax, [rdi + PyObject.ob_type]
     mov rax, [rax + PyTypeObject.tp_as_mapping]
     test rax, rax
@@ -146,8 +146,9 @@ DEF_FUNC_BARE op_binary_subscr
     test rax, rax
     jz .try_sequence
 
-    ; Call mp_subscript(obj, key)
+    ; Call mp_subscript(obj, key, key_tag)
     ; rdi = obj, rsi = key (already set)
+    mov edx, r8d               ; rdx = key tag
     call rax
     jmp .subscr_done
 
@@ -163,9 +164,16 @@ DEF_FUNC_BARE op_binary_subscr
     jz .no_subscript
 
     ; Convert key to int64
-    mov rdi, [rsp]             ; key
+    cmp dword [rsp + 16], TAG_SMALLINT   ; key tag
+    je .seq_key_smallint
+    mov rdi, [rsp]             ; key (heap object)
+    mov edx, [rsp + 16]       ; key tag
     call int_to_i64
     mov rsi, rax               ; rsi = int64 index
+    jmp .seq_key_ready
+.seq_key_smallint:
+    mov rsi, [rsp]             ; key payload IS the int64 index
+.seq_key_ready:
 
     mov rdi, [rsp + 8]        ; reload obj
     mov rax, [rdi + PyObject.ob_type]
@@ -177,8 +185,8 @@ DEF_FUNC_BARE op_binary_subscr
 .no_subscript:
     ; Try __class_getitem__ on type objects FIRST (for MyClass[args] syntax)
     mov rdi, [rsp+8]              ; obj
-    test rdi, rdi
-    js .try_getitem_dunder
+    cmp dword [rsp+24], TAG_SMALLINT  ; obj tag
+    je .try_getitem_dunder
     mov rax, [rdi + PyObject.ob_type]
     extern user_type_metatype
     extern type_type
@@ -192,8 +200,8 @@ DEF_FUNC_BARE op_binary_subscr
 .try_getitem_dunder:
     ; Try __getitem__ on heaptype
     mov rdi, [rsp+8]          ; obj
-    test rdi, rdi
-    js .subscr_error
+    cmp dword [rsp+24], TAG_PTR
+    jne .subscr_error
     mov rax, [rdi + PyObject.ob_type]
     mov rdx, [rax + PyTypeObject.tp_flags]
     test rdx, TYPE_FLAG_HEAPTYPE
@@ -202,6 +210,7 @@ DEF_FUNC_BARE op_binary_subscr
     extern dunder_call_2
     mov rsi, [rsp]            ; key = other
     lea rdx, [rel dunder_getitem]
+    mov ecx, [rsp + 16]      ; key tag = other_tag
     call dunder_call_2
     test rax, rax
     jnz .subscr_done
@@ -236,15 +245,19 @@ DEF_FUNC_BARE op_binary_subscr
     test rcx, rcx
     jz .subscr_error
 
-    ; Build args: [cls, key]
-    mov rax, [rsp]                ; key
-    push rax                      ; args[1] = key
-    mov rax, [rsp + 16]           ; obj (type/cls) — shifted by push
-    push rax                      ; args[0] = cls
-    mov rsi, rsp                  ; args ptr
-    mov edx, 2                    ; nargs = 2
+    ; Build fat args: [cls, key] — 2×16 = 32 bytes
+    sub rsp, 32
+    mov rax, [rsp + 32 + BSUB_OBJ]  ; obj (type/cls)
+    mov [rsp], rax                    ; args[0] payload = cls
+    mov qword [rsp + 8], TAG_PTR     ; args[0] tag (type is always heap)
+    mov rax, [rsp + 32 + BSUB_KEY]  ; key
+    mov [rsp + 16], rax              ; args[1] payload = key
+    mov rax, [rsp + 32 + BSUB_KTAG] ; key tag
+    mov [rsp + 24], rax              ; args[1] tag
+    mov rsi, rsp                     ; args ptr
+    mov edx, 2                       ; nargs = 2
     call rcx
-    add rsp, 16                   ; pop args
+    add rsp, 32                      ; pop fat args
     jmp .subscr_done
 
 .subscr_error:
@@ -303,8 +316,11 @@ DEF_FUNC_BARE op_store_subscr
     test rax, rax
     jz .store_try_seq
 
-    ; Call mp_ass_subscript(obj, key, value)
+    ; Call mp_ass_subscript(obj, key, value, key_tag, value_tag)
     ; rdi = obj, rsi = key, rdx = value (already set)
+    mov ecx, r8d               ; key tag (4th arg)
+    ; r8 = value tag (5th arg) — use r10 which holds value tag
+    mov r8, r10
     call rax
     jmp .store_done
 
@@ -321,6 +337,7 @@ DEF_FUNC_BARE op_store_subscr
 
     ; Convert key to int64
     mov rdi, [rsp + 8]        ; key
+    mov edx, [rsp + SSUB_KTAG] ; key tag
     call int_to_i64
     mov rsi, rax               ; index
 
@@ -357,15 +374,24 @@ DEF_FUNC_BARE op_store_subscr
     test rax, rax
     jz .store_type_error
 
-    ; Build args array on machine stack: [self, key, value]
-    push qword [rsp+0]       ; args[2] = value  (at original [rsp+0])
-    push qword [rsp+16]      ; args[1] = key    (at original [rsp+8], shifted by push)
-    push qword [rsp+32]      ; args[0] = self   (at original [rsp+16], shifted by 2 pushes)
+    ; Build fat args array: [self, key, value] — 3×16 = 48 bytes
+    sub rsp, 48
+    mov r8, [rsp + 48 + SSUB_OBJ]   ; self payload
+    mov [rsp], r8
+    mov qword [rsp + 8], TAG_PTR    ; self tag (heap instance)
+    mov r8, [rsp + 48 + SSUB_KEY]   ; key payload
+    mov [rsp + 16], r8
+    mov r8, [rsp + 48 + SSUB_KTAG]  ; key tag
+    mov [rsp + 24], r8
+    mov r8, [rsp + 48 + SSUB_VAL]   ; value payload
+    mov [rsp + 32], r8
+    mov r8, [rsp + 48 + SSUB_VTAG]  ; value tag
+    mov [rsp + 40], r8
     mov rdi, rcx              ; callable
     mov rsi, rsp              ; args ptr
     mov edx, 3                ; nargs
     call rax
-    add rsp, 24               ; pop args array
+    add rsp, 48               ; pop fat args array
     ; rax = result (discard — __setitem__ returns None)
     jmp .store_done
 
@@ -478,6 +504,7 @@ DEF_FUNC op_build_list, 16
     mov rax, rdx
     shl rax, 4                ; index * 16
     mov rsi, [r13 + rax]      ; item payload (ownership transfers, no extra INCREF)
+    mov edx, [r13 + rax + 8]  ; item tag
     call list_append
     pop rdx
     inc rdx
@@ -545,6 +572,8 @@ DEF_FUNC op_build_map, 16
     mov rax, rdx
     shl rax, 5                 ; pair_index * 32 (2 slots * 16 bytes)
     mov rsi, [r13 + rax]      ; key (payload at pair base)
+    mov r8, [r13 + rax + 8]   ; key tag (at pair base + 8)
+    mov rcx, [r13 + rax + 24] ; value tag (at pair base + 16 + 8)
     mov rdx, [r13 + rax + 16] ; value (payload at pair base + 16)
     call dict_set
     pop rdx
@@ -616,8 +645,10 @@ DEF_FUNC op_build_const_key_map, 32
     mov rcx, rdx
     shl rcx, 4                ; index * 16
     mov rsi, [rax + PyTupleObject.ob_item + rcx]  ; key payload
+    mov r8, [rax + PyTupleObject.ob_item + rcx + 8]  ; key tag from tuple
     mov rax, rdx
     shl rax, 4                ; index * 16
+    mov rcx, [r13 + rax + 8]  ; value tag
     mov rdx, [r13 + rax]      ; value (payload)
     call dict_set
     pop rdx
@@ -851,9 +882,9 @@ DEF_FUNC_BARE op_for_iter
 .have_iternext:
     call rax
 .check_next_result:
-    ; rax = next value, or NULL if exhausted
+    ; rax = payload, rdx = tag (TAG_NULL if exhausted)
 
-    test rax, rax
+    test edx, edx
     jz .exhausted
 
     ; Got a value - push it (iterator stays on stack)
@@ -920,6 +951,7 @@ DEF_FUNC_BARE op_list_append
 
     push r8                    ; save value tag (deeper)
     push rsi                   ; save value payload
+    mov rdx, r8                ; item tag for list_append
     call list_append
     ; list_append does INCREF, so DECREF to compensate
     pop rdi                    ; value payload
@@ -977,6 +1009,7 @@ DEF_FUNC op_list_extend, 32
     mov rcx, r8
     shl rcx, 4                ; index * 16
     mov rsi, [rax + PyTupleObject.ob_item + rcx]  ; payload
+    mov edx, [rax + PyTupleObject.ob_item + rcx + 8] ; tag
     push r8
     call list_append
     pop r8
@@ -1001,6 +1034,7 @@ DEF_FUNC op_list_extend, 32
     mov rax, r8
     shl rax, 4                ; index * 16
     mov rsi, [rdx + rax]      ; item payload
+    mov rdx, [rdx + rax + 8]  ; item tag (safe: rdx reloaded at loop start)
     push r8
     call list_append
     pop r8
@@ -1097,9 +1131,10 @@ DEF_FUNC_BARE op_contains_op
     test rax, rax
     jz .contains_error
 
-    ; Call sq_contains(container, value) -> 0/1
+    ; Call sq_contains(container, value, value_tag) -> 0/1
     mov rdi, [rsp]             ; container
     mov rsi, [rsp + 8]        ; value
+    mov edx, [rsp + CN_LTAG]  ; value tag (key_tag for dict_contains)
     call rax
     push rax                   ; save result on machine stack
 
@@ -1142,18 +1177,22 @@ DEF_FUNC_BARE op_contains_op
     mov rdi, [rsp]            ; container = self
     mov rsi, [rsp+8]          ; value = other
     lea rdx, [rel dunder_contains]
+    mov ecx, [rsp+24]         ; value tag = other_tag
     call dunder_call_2
-    test rax, rax
+    test edx, edx             ; TAG_NULL = not found
     jz .contains_type_error
 
     ; Convert result to boolean (obj_is_true)
-    push rax
+    push rdx                   ; save tag
+    push rax                   ; save payload
     mov rdi, rax
+    mov rsi, rdx
     extern obj_is_true
     call obj_is_true
     mov ecx, eax              ; save truthiness
-    pop rdi
-    DECREF_REG rdi             ; DECREF the __contains__ result
+    pop rdi                    ; payload
+    pop rsi                    ; tag
+    DECREF_VAL rdi, rsi
     mov eax, ecx
 
     ; Continue with result in eax — DECREF operands (tag-aware)
@@ -1194,12 +1233,16 @@ DEF_FUNC_BARE op_build_slice
     mov r8, [r13 + 8]     ; stop tag
     VPOP rdi               ; start
     mov r9, [r13 + 8]     ; start tag
-    ; Tags behind payloads
+    ; Save payloads+tags for later DECREF
     push r9                ; start tag (deepest)
     push r8                ; stop tag
     push rdi               ; start
     push rsi               ; stop
+    ; slice_new(rdi=start, rsi=stop, rdx=step, ecx=start_tag, r8d=stop_tag, r9d=step_tag)
     lea rdx, [rel none_singleton]  ; step = None
+    mov ecx, r9d           ; start_tag
+    ; r8 already = stop_tag
+    mov r9d, TAG_PTR       ; step_tag = TAG_PTR (none_singleton)
     call slice_new
     push rax               ; save slice (+8 shifts BSL2_ offsets)
     mov rdi, [rsp + 8 + BSL2_STOP]
@@ -1216,18 +1259,22 @@ DEF_FUNC_BARE op_build_slice
 .bs_three:
     ; arg=3: TOS=step, TOS1=stop, TOS2=start
     VPOP rdx               ; step
-    mov r8, [r13 + 8]     ; step tag
+    mov r8, [r13 + 8]     ; step tag (save in r8 temporarily)
     VPOP rsi               ; stop
     mov r9, [r13 + 8]     ; stop tag
     VPOP rdi               ; start
     mov r10, [r13 + 8]    ; start tag
-    ; Tags behind payloads
+    ; Save payloads+tags for later DECREF
     push r10               ; start tag (deepest)
     push r9                ; stop tag
     push r8                ; step tag
     push rdi               ; start
     push rsi               ; stop
     push rdx               ; step
+    ; slice_new(rdi=start, rsi=stop, rdx=step, ecx=start_tag, r8d=stop_tag, r9d=step_tag)
+    mov ecx, r10d          ; start_tag
+    ; r8=step_tag, r9=stop_tag from above. Swap for slice_new convention.
+    xchg r8, r9            ; now r8=stop_tag, r9=step_tag
     call slice_new
     push rax               ; save slice (+8 shifts BSL3_ offsets)
     mov rdi, [rsp + 8 + BSL3_STEP]
@@ -1267,16 +1314,20 @@ DEF_FUNC op_binary_slice, BSLC_FRAME
     mov [rbp - BSLC_OTAG], rcx
     mov [rbp - BSLC_OBJ], rax
 
-    ; Create slice(start, stop, None)
+    ; Create slice(start, stop, None) with tags
     mov rdi, [rbp - BSLC_START]
     mov rsi, [rbp - BSLC_STOP]
     lea rdx, [rel none_singleton]  ; step = None
+    mov ecx, [rbp - BSLC_STAG]    ; start_tag
+    mov r8d, [rbp - BSLC_PTAG]    ; stop_tag
+    mov r9d, TAG_PTR               ; step_tag (None)
     call slice_new
     mov [rbp - BSLC_SLICE], rax
 
-    ; Call mp_subscript(obj, slice)
+    ; Call mp_subscript(obj, slice, key_tag)
     mov rdi, [rbp - BSLC_OBJ]
     mov rsi, rax           ; slice as key
+    mov edx, TAG_PTR       ; key tag = slice (always TAG_PTR)
     mov rax, [rdi + PyObject.ob_type]
     mov rax, [rax + PyTypeObject.tp_as_mapping]
     mov rax, [rax + PyMappingMethods.mp_subscript]
@@ -1328,17 +1379,22 @@ DEF_FUNC op_store_slice, SSLC_FRAME
     mov [rbp - SSLC_VTAG], rcx
     mov [rbp - SSLC_VAL], rax
 
-    ; Create slice(start, stop, None)
+    ; Create slice(start, stop, None) with tags
     mov rdi, [rbp - SSLC_START]
     mov rsi, [rbp - SSLC_STOP]
     lea rdx, [rel none_singleton]  ; step = None
+    mov ecx, [rbp - SSLC_STAG]    ; start_tag
+    mov r8d, [rbp - SSLC_PTAG]    ; stop_tag
+    mov r9d, TAG_PTR               ; step_tag (None)
     call slice_new
     mov [rbp - SSLC_SLICE], rax
 
-    ; Call mp_ass_subscript(obj, slice, value)
+    ; Call mp_ass_subscript(obj, slice, value, key_tag, value_tag)
     mov rdi, [rbp - SSLC_OBJ]
     mov rsi, rax           ; slice
     mov rdx, [rbp - SSLC_VAL]
+    mov ecx, TAG_PTR               ; key tag = slice (always TAG_PTR)
+    mov r8, [rbp - SSLC_VTAG]     ; value tag
     mov rax, [rdi + PyObject.ob_type]
     mov rax, [rax + PyTypeObject.tp_as_mapping]
     mov rax, [rax + PyMappingMethods.mp_ass_subscript]
@@ -1391,6 +1447,8 @@ DEF_FUNC op_map_add
     push r8                    ; value tag
     push rsi                   ; key
     push rdx                   ; value
+    mov rcx, [rsp + MA_VTAG]  ; value tag for dict_set
+    mov r8, [rsp + MA_KTAG]   ; key tag for dict_set
     call dict_set
 
     ; DECREF key and value (tag-aware, dict_set INCREF'd them)
@@ -1459,7 +1517,9 @@ DEF_FUNC op_dict_update
     je .du_next
     mov rdx, [rax + DictEntry.value]
 
-    ; dict_set(target, key, value)
+    ; dict_set(target, key, value, value_tag, key_tag)
+    mov rcx, [rax + DictEntry.value_tag]
+    mov r8, [rax + DictEntry.key_tag]
     push rbx
     mov rdi, [rbp-32]
     call dict_set
@@ -1618,10 +1678,11 @@ DEF_FUNC op_unpack_ex
 
     mov rdi, r15
     mov rsi, rax
-    call .ue_getitem           ; rax = item (borrowed)
+    call .ue_getitem           ; rax = payload, rdx = tag (borrowed)
     mov rsi, rax
     mov rdi, [rsp + 16]        ; rest list (2 pushes deep)
     push rsi
+    ; edx = item tag from .ue_getitem (already set)
     call list_append           ; list_append does INCREF
     pop rsi                    ; discard
     pop rax
@@ -1746,6 +1807,7 @@ DEF_FUNC op_build_set, 16
     mov rax, rdx
     shl rax, 4                ; index * 16
     mov rsi, [r13 + rax]     ; item payload
+    mov edx, [r13 + rax + 8] ; item tag
     call set_add               ; set_add does INCREF
     pop rdx
     inc rdx
@@ -1797,6 +1859,7 @@ DEF_FUNC_BARE op_set_add
 
     push r8                    ; save value tag (deeper)
     push rsi                   ; save value payload
+    mov rdx, r8                ; key tag for set_add
     call set_add
     ; set_add does INCREF, so DECREF to compensate
     pop rdi                    ; value payload
@@ -1850,16 +1913,19 @@ DEF_FUNC op_set_update
     mov rax, [rdi + PyObject.ob_type]
     mov rax, [rax + PyTypeObject.tp_iternext]
     call rax
-    test rax, rax
+    test edx, edx
     jz .su_iter_done
 
-    ; rax = next item (owned ref)
-    push rax                   ; save item
+    ; rax = next item (owned ref), rdx = tag from tp_iternext
+    push rdx                   ; save item tag
+    push rax                   ; save item payload
     mov rdi, [rbp-24]          ; set
     mov rsi, rax               ; item
+    ; rdx = tag already set by tp_iternext
     call set_add               ; set_add does INCREF
-    pop rdi                    ; item - DECREF to compensate (set_add INCREF'd)
-    DECREF_REG rdi
+    pop rdi                    ; item payload
+    pop rsi                    ; item tag
+    DECREF_VAL rdi, rsi        ; DECREF to compensate (set_add INCREF'd)
     jmp .su_iter_loop
 
 .su_iter_done:
@@ -1898,7 +1964,8 @@ DEF_FUNC op_set_update
     test rsi, rsi
     jz .su_set_next
 
-    ; set_add(target_set, key)
+    ; set_add(target_set, key, key_tag)
+    mov rdx, [rax + 16]       ; SET_ENTRY_KEY_TAG offset = 16
     push rbx
     mov rdi, [rbp-24]
     call set_add
@@ -1943,16 +2010,10 @@ DEF_FUNC_BARE op_for_iter_range
 
     ; Inline range_iter_next
     mov rax, [rdi + PyRangeIterObject.it_current]
-    shl rax, 1
-    sar rax, 1                     ; current (decoded)
 
     mov r8, [rdi + PyRangeIterObject.it_stop]
-    shl r8, 1
-    sar r8, 1                      ; stop (decoded)
 
     mov r9, [rdi + PyRangeIterObject.it_step]
-    shl r9, 1
-    sar r9, 1                      ; step (decoded)
 
     ; Check exhaustion
     test r9, r9
@@ -1969,11 +2030,9 @@ DEF_FUNC_BARE op_for_iter_range
 .fir_has_value:
     ; Return current as SmallInt (no INCREF needed for SmallInt)
     mov rdx, rax
-    bts rdx, 63                    ; encode return value
 
     ; Advance: current += step
     add rax, r9
-    bts rax, 63
     mov [rdi + PyRangeIterObject.it_current], rax
 
     VPUSH_INT rdx                  ; push value

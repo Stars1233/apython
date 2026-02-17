@@ -64,15 +64,17 @@ DEF_FUNC list_new
 END_FUNC list_new
 
 ;; ============================================================================
-;; list_append(PyListObject *list, PyObject *item)
-;; Append item, grow if needed. INCREF item.
+;; list_append(PyListObject *list, PyObject *item, int item_tag)
+;; Append item, grow if needed. INCREF item. rdx = item_tag.
 ;; ============================================================================
 DEF_FUNC list_append
     push rbx
     push r12
+    push r13
 
     mov rbx, rdi               ; list
-    mov r12, rsi               ; item
+    mov r12, rsi               ; item payload
+    mov r13, rdx               ; item tag
 
     ; Check if need to grow
     mov rax, [rbx + PyListObject.ob_size]
@@ -97,26 +99,16 @@ DEF_FUNC list_append
     mov rcx, [rbx + PyListObject.ob_item]
     shl rax, 4                 ; index * 16
     mov [rcx + rax], r12       ; payload
-    ; Classify tag
-    test r12, r12
-    js .append_si
-    jz .append_null
-    mov qword [rcx + rax + 8], TAG_PTR
-    jmp .append_tag_done
-.append_si:
-    mov qword [rcx + rax + 8], TAG_SMALLINT
-    jmp .append_tag_done
-.append_null:
-    mov qword [rcx + rax + 8], TAG_NULL
-.append_tag_done:
+    ; Store item tag from caller
+    mov [rcx + rax + 8], r13
 
     ; INCREF item (tag-aware)
-    mov rsi, [rcx + rax + 8]
-    INCREF_VAL r12, rsi
+    INCREF_VAL r12, r13
 
     ; Increment size
     inc qword [rbx + PyListObject.ob_size]
 
+    pop r13
     pop r12
     pop rbx
     leave
@@ -158,15 +150,17 @@ DEF_FUNC list_getitem
 END_FUNC list_getitem
 
 ;; ============================================================================
-;; list_setitem(PyListObject *list, int64_t index, PyObject *value)
-;; sq_ass_item: set item at index, DECREF old, INCREF new
+;; list_setitem(PyListObject *list, int64_t index, PyObject *value, int value_tag)
+;; sq_ass_item: set item at index, DECREF old, INCREF new. rcx = value_tag.
 ;; ============================================================================
 DEF_FUNC list_setitem
     push rbx
     push r12
+    push r13
 
     mov rbx, rdi               ; list
-    mov r12, rdx               ; new value
+    mov r12, rdx               ; new value payload
+    mov r13, rcx               ; new value tag
 
     ; Handle negative index
     test rsi, rsi
@@ -193,21 +187,11 @@ DEF_FUNC list_setitem
 
     ; Store new value and INCREF (16-byte fat slot)
     mov [rax + rsi], r12      ; payload
-    ; Classify tag for r12
-    test r12, r12
-    js .si_setitem
-    jz .null_setitem
-    mov qword [rax + rsi + 8], TAG_PTR
-    jmp .si_setitem_done
-.si_setitem:
-    mov qword [rax + rsi + 8], TAG_SMALLINT
-    jmp .si_setitem_done
-.null_setitem:
-    mov qword [rax + rsi + 8], TAG_NULL
-.si_setitem_done:
-    mov rcx, [rax + rsi + 8]
-    INCREF_VAL r12, rcx
+    ; Store value tag from caller
+    mov [rax + rsi + 8], r13
+    INCREF_VAL r12, r13
 
+    pop r13
     pop r12
     pop rbx
     leave
@@ -228,19 +212,26 @@ DEF_FUNC list_subscript
 
     mov rbx, rdi               ; save list
 
+    ; Check if key is a SmallInt (rdx = key tag from caller)
+    cmp edx, TAG_SMALLINT
+    je .ls_smallint
     ; Check if key is a slice
-    test rsi, rsi
-    js .ls_int                 ; SmallInt -> int path
     mov rax, [rsi + PyObject.ob_type]
     lea rcx, [rel slice_type]
     cmp rax, rcx
     je .ls_slice
 
-.ls_int:
-    ; Convert key to i64
+    ; Heap int -> convert to i64
     mov rdi, rsi
     call int_to_i64
     mov rsi, rax
+    jmp .ls_do_getitem
+
+.ls_smallint:
+    ; SmallInt: payload IS the int64 index
+    mov rsi, rsi               ; nop — rsi already = payload
+
+.ls_do_getitem:
 
     ; Call list_getitem
     mov rdi, rbx
@@ -261,19 +252,24 @@ DEF_FUNC list_subscript
 END_FUNC list_subscript
 
 ;; ============================================================================
-;; list_ass_subscript(PyListObject *list, PyObject *key, PyObject *value)
+;; list_ass_subscript(PyListObject *list, PyObject *key, PyObject *value,
+;;                    int key_tag, int value_tag)
 ;; mp_ass_subscript: set with int or slice key
+;; rdi=list, rsi=key, rdx=value, ecx=key_tag, r8d=value_tag
 ;; ============================================================================
-DEF_FUNC list_ass_subscript
+LAS_VTAG  equ 8
+LAS_FRAME equ 8
+DEF_FUNC list_ass_subscript, LAS_FRAME
     push rbx
     push r12
 
     mov rbx, rdi               ; list
     mov r12, rdx               ; value
+    mov [rbp - LAS_VTAG], r8   ; save value tag
 
-    ; Check if key is a slice
-    test rsi, rsi
-    js .las_int                ; SmallInt -> int path
+    ; Check if key is a SmallInt (ecx = key tag from caller)
+    cmp ecx, TAG_SMALLINT
+    je .las_int                ; SmallInt -> int path
     mov rax, [rsi + PyObject.ob_type]
     lea rcx, [rel slice_type]
     cmp rax, rcx
@@ -282,12 +278,14 @@ DEF_FUNC list_ass_subscript
 .las_int:
     ; Convert key to i64
     mov rdi, rsi
+    mov edx, ecx              ; key tag for int_to_i64
     call int_to_i64
     mov rsi, rax
 
     ; Call list_setitem
     mov rdi, rbx
     mov rdx, r12
+    mov ecx, [rbp - LAS_VTAG]  ; value tag from caller
     call list_setitem
 
     pop r12
@@ -329,8 +327,8 @@ DEF_FUNC list_ass_subscript
     ; Get new items from value (must be a list)
     ; r12 = value (the new items list/iterable)
     ; For simplicity, require value to be a list
-    test r12, r12
-    js .las_type_error
+    test qword [rbp - LAS_VTAG], TAG_RC_BIT
+    jz .las_type_error         ; non-heap value (SmallInt etc.) → type error
     mov rax, [r12 + PyObject.ob_type]
     lea rdx, [rel list_type]
     cmp rax, rdx
@@ -749,6 +747,7 @@ DEF_FUNC list_getslice
     pop r13
     pop r12
     pop rbx
+    mov edx, TAG_PTR
     leave
     ret
 END_FUNC list_getslice
@@ -820,6 +819,7 @@ DEF_FUNC list_concat
 
 .concat_done:
     pop rax                 ; return new list
+    mov edx, TAG_PTR
     pop r14
     pop r13
     pop r12
@@ -839,7 +839,8 @@ DEF_FUNC list_repeat
     push r14
 
     mov rbx, rdi            ; rbx = list
-    mov rdi, rsi            ; count (int obj)
+    mov rdi, rsi            ; count (int payload)
+    mov edx, ecx            ; count tag (right operand)
     call int_to_i64
     mov r12, rax             ; r12 = repeat count
 
@@ -953,13 +954,14 @@ DEF_FUNC list_type_call, LTC_FRAME
     jz .ltc_done
     mov rdi, [rbp - LTC_ITER]
     call rax                ; tp_iternext(iter) -> item or NULL
-    test rax, rax
+    test edx, edx
     jz .ltc_done            ; StopIteration
 
     ; Append item to list
     push rax                ; save item
     mov rdi, rbx
     mov rsi, rax
+    mov edx, TAG_PTR
     call list_append
     ; DECREF item (list_append INCREFs internally)
     pop rdi

@@ -27,34 +27,43 @@ extern type_type
 ;; INCREFs all three args. Caller should pass none_singleton for missing values.
 ;; ============================================================================
 DEF_FUNC slice_new
+    ; rdi=start, rsi=stop, rdx=step, ecx=start_tag, r8d=stop_tag, r9d=step_tag
     push rbx
     push r12
     push r13
+    push r14
+    push r15
 
     mov rbx, rdi           ; start
     mov r12, rsi           ; stop
     mov r13, rdx           ; step
+    mov r14d, ecx          ; start_tag
+    mov r15d, r8d          ; stop_tag
+    push r9                ; save step_tag across malloc
 
     mov edi, PySliceObject_size
     call ap_malloc
 
+    pop r9                  ; step_tag
     mov qword [rax + PyObject.ob_refcnt], 1
     lea rcx, [rel slice_type]
     mov [rax + PyObject.ob_type], rcx
     mov [rax + PySliceObject.start], rbx
+    mov [rax + PySliceObject.start_tag], r14
     mov [rax + PySliceObject.stop], r12
+    mov [rax + PySliceObject.stop_tag], r15
     mov [rax + PySliceObject.step], r13
+    mov [rax + PySliceObject.step_tag], r9
 
-    ; INCREF all three
+    ; INCREF all three (tag-aware)
     push rax
-    mov rdi, rbx
-    call obj_incref
-    mov rdi, r12
-    call obj_incref
-    mov rdi, r13
-    call obj_incref
+    INCREF_VAL rbx, r14
+    INCREF_VAL r12, r15
+    INCREF_VAL r13, r9
     pop rax
 
+    pop r15
+    pop r14
     pop r13
     pop r12
     pop rbx
@@ -70,11 +79,14 @@ DEF_FUNC slice_dealloc
     mov rbx, rdi
 
     mov rdi, [rbx + PySliceObject.start]
-    call obj_decref
+    mov rsi, [rbx + PySliceObject.start_tag]
+    DECREF_VAL rdi, rsi
     mov rdi, [rbx + PySliceObject.stop]
-    call obj_decref
+    mov rsi, [rbx + PySliceObject.stop_tag]
+    DECREF_VAL rdi, rsi
     mov rdi, [rbx + PySliceObject.step]
-    call obj_decref
+    mov rsi, [rbx + PySliceObject.step_tag]
+    DECREF_VAL rdi, rsi
     mov rdi, rbx
     call ap_free
 
@@ -96,8 +108,9 @@ END_FUNC slice_repr
 ;; Converts SmallInt or GMP int to int64. For None, returns special sentinel.
 ;; ============================================================================
 pyobj_to_i64:
-    test rdi, rdi
-    js .smallint
+    ; rdi = payload, esi = tag
+    cmp esi, TAG_SMALLINT
+    je .smallint
     ; Check for None
     lea rax, [rel none_singleton]
     cmp rdi, rax
@@ -112,8 +125,6 @@ pyobj_to_i64:
     ret
 .smallint:
     mov rax, rdi
-    shl rax, 1
-    sar rax, 1
     ret
 .is_none:
     mov rax, 0x7FFFFFFFFFFFFFFF  ; sentinel for "not specified"
@@ -142,6 +153,7 @@ DEF_FUNC slice_indices
 
     ; Get step (default 1)
     mov rdi, [rbx + PySliceObject.step]
+    mov esi, [rbx + PySliceObject.step_tag]
     call pyobj_to_i64
     mov rcx, NONE_SENTINEL
     cmp rax, rcx
@@ -152,6 +164,7 @@ DEF_FUNC slice_indices
 
     ; Get start (default: 0 if step>0, length-1 if step<0)
     mov rdi, [rbx + PySliceObject.start]
+    mov esi, [rbx + PySliceObject.start_tag]
     call pyobj_to_i64
     mov rcx, NONE_SENTINEL
     cmp rax, rcx
@@ -180,6 +193,7 @@ DEF_FUNC slice_indices
 
     ; Get stop (default: length if step>0, -1 if step<0)
     mov rdi, [rbx + PySliceObject.stop]
+    mov esi, [rbx + PySliceObject.stop_tag]
     call pyobj_to_i64
     mov rcx, NONE_SENTINEL
     cmp rax, rcx

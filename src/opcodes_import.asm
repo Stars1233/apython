@@ -34,21 +34,23 @@ DEF_FUNC_BARE op_import_name
     ; Pop level (TOS1)
     VPOP rdx                    ; level (SmallInt)
 
+    ; Save tag of level (at [r13 + 8] right after VPOP)
+    mov ecx, [r13 + 8]         ; level tag
+
     ; Save name and fromlist for later
     push rax                    ; name
     push rsi                    ; fromlist
     push rdx                    ; level
 
     ; Decode level from SmallInt
-    test rdx, rdx
-    js .decode_smallint
+    cmp ecx, TAG_SMALLINT
+    je .decode_smallint
     ; Not a SmallInt — assume 0
     xor edx, edx
     jmp .do_import
 
 .decode_smallint:
-    shl rdx, 1
-    sar rdx, 1
+    ; rdx already holds the raw integer payload (no decoding needed for fat values)
 
 .do_import:
     ; import_module(name_str, fromlist, level)
@@ -126,8 +128,9 @@ DEF_FUNC op_import_from, IF2_FRAME
     test rdi, rdi
     jz .if_try_submodule
     mov rsi, [rbp - IF_ATTR]
+    mov edx, TAG_PTR
     call dict_get
-    test rax, rax
+    test edx, edx
     jnz .if_found_in_dict
     jmp .if_try_submodule
 
@@ -138,19 +141,20 @@ DEF_FUNC op_import_from, IF2_FRAME
     test rdi, rdi
     jz .if_try_submodule
     mov rsi, [rbp - IF_ATTR]
+    mov edx, TAG_PTR
     call dict_get
-    test rax, rax
+    test edx, edx
     jnz .if_found_in_dict
     jmp .if_try_submodule
 
 .if_found_in_dict:
-    inc qword [rax + PyObject.ob_refcnt]
-    VPUSH_PTR rax
+    INCREF_VAL rax, edx
+    VPUSH_VAL rax, rdx
     leave
     DISPATCH
 
 .if_got_attr:
-    VPUSH_PTR rax
+    VPUSH_VAL rax, rdx
     leave
     DISPATCH
 
@@ -169,6 +173,7 @@ DEF_FUNC op_import_from, IF2_FRAME
     mov rdi, [rbp - IF2_MOD]
     mov rdi, [rdi + PyModuleObject.mod_dict]
     mov rsi, rax
+    mov edx, TAG_PTR
     call dict_get
     mov rcx, rax                ; rcx = pkg_name str (or NULL)
     pop rdi                     ; __name__ str key

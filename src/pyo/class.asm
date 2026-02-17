@@ -95,8 +95,9 @@ DEF_FUNC instance_getattr
     test rdi, rdi
     jz .check_type_dict
     mov rsi, r12
+    mov edx, TAG_PTR
     call dict_get
-    test rax, rax
+    test edx, edx
     jnz .found_inst
 
 .check_type_dict:
@@ -110,6 +111,7 @@ DEF_FUNC instance_getattr
 
     push rcx                            ; save current type
     mov rsi, r12
+    mov edx, TAG_PTR
     call dict_get
     pop rcx                             ; restore current type
     test rax, rax
@@ -126,8 +128,7 @@ DEF_FUNC instance_getattr
     ; Found in instance dict — INCREF and return raw value
     mov r13, rax                ; save payload
     mov r12, rdx                ; save tag (name no longer needed)
-    mov rdi, rax
-    call obj_incref
+    INCREF_VAL rax, edx         ; tag-aware INCREF (skips SmallInt/SmallStr/NULL)
     mov rax, r13
     mov rdx, r12                ; restore tag from dict_get
     pop r13
@@ -143,8 +144,8 @@ DEF_FUNC instance_getattr
     ; Regular callables are bound to the instance.
     mov r13, rax                ; r13 = attr (borrowed ref from dict_get)
     mov r12, rdx                ; r12 = attr tag (name no longer needed)
-    test rax, rax
-    js .found_type_raw          ; SmallInt — return as-is
+    cmp r12d, TAG_SMALLINT
+    je .found_type_raw          ; SmallInt — return as-is
 
     mov rcx, [rax + PyObject.ob_type]
 
@@ -190,8 +191,7 @@ DEF_FUNC instance_getattr
 
 .found_type_raw:
     ; Not callable, SmallInt, or descriptor — INCREF and return
-    mov rdi, r13
-    call obj_incref
+    INCREF_VAL r13, r12d        ; tag-aware INCREF (skips SmallInt/SmallStr/NULL)
     mov rax, r13
     mov rdx, r12                ; restore tag from dict_get
     pop r13
@@ -217,6 +217,7 @@ END_FUNC instance_getattr
 ;; ============================================================================
 DEF_FUNC instance_setattr
     push rbx
+    push rcx                    ; save value_tag from caller
     mov rbx, rdi
     ; Check if inst_dict is NULL (int subclass instances start with NULL dict)
     mov rdi, [rbx + PyInstanceObject.inst_dict]
@@ -233,8 +234,10 @@ DEF_FUNC instance_setattr
     pop rsi
 
 .sa_have_dict:
-    ; dict_set(inst_dict, name, value)
+    ; dict_set(inst_dict, name, value, value_tag, key_tag)
     ; rdi = dict (already set), rsi = name, rdx = value
+    pop rcx                     ; restore value_tag
+    mov r8d, TAG_PTR            ; key_tag (name is always heap string)
     call dict_set
 
     pop rbx
@@ -259,16 +262,14 @@ DEF_FUNC instance_dealloc
     call obj_decref
 .no_dict:
 
-    ; Check if this is an int subclass — XDECREF int_value
+    ; Check if this is an int subclass — XDECREF int_value (tag-aware)
     mov rax, [rbx + PyObject.ob_type]
     mov rax, [rax + PyTypeObject.tp_flags]
     test rax, TYPE_FLAG_INT_SUBCLASS
     jz .no_int_value
     mov rdi, [rbx + PyIntSubclassObject.int_value]
-    test rdi, rdi
-    js .no_int_value             ; SmallInt — no refcount
-    jz .no_int_value             ; NULL
-    call obj_decref
+    mov rsi, [rbx + PyIntSubclassObject.int_value_tag]
+    DECREF_VAL rdi, rsi
 .no_int_value:
 
     ; DECREF ob_type (the class)
@@ -380,9 +381,9 @@ DEF_FUNC type_call
     cmp edx, 1
     jne .not_type_self
     ; type(x) → return type of x
-    mov rax, [rsi]          ; args[0]
-    test rax, rax
-    js .type_smallint       ; SmallInt → int type
+    mov rax, [rsi]          ; args[0] payload
+    cmp dword [rsi + 8], TAG_SMALLINT
+    je .type_smallint       ; SmallInt → int type
     mov rax, [rax + PyObject.ob_type]
     inc qword [rax + PyObject.ob_refcnt]
     mov edx, TAG_PTR
@@ -453,6 +454,7 @@ DEF_FUNC type_call
 
     push rcx                    ; save current type
     mov rsi, r15
+    mov edx, TAG_PTR
     call dict_get
     pop rcx                     ; restore current type
     test rax, rax
@@ -478,22 +480,29 @@ DEF_FUNC type_call
     ; === Call __init__(instance, *args) ===
     ; Build args array on machine stack: [instance, arg0, arg1, ...]
     ; Total args = nargs + 1 (for instance)
-    ; Allocate (nargs+1)*8 bytes on the stack
+    ; Allocate (nargs+1)*16 bytes on the stack (fat values)
     lea rax, [r13 + 1]
-    shl rax, 3                  ; (nargs+1) * 8
+    shl rax, 4                  ; (nargs+1) * 16
     sub rsp, rax                ; allocate on stack
     mov r15, rsp                ; r15 = new args array
 
-    ; args[0] = instance
+    ; args[0] = instance (payload + tag)
     mov [r15], r14
+    mov qword [r15 + 8], TAG_PTR
 
-    ; Copy original args: args[1..nargs]
+    ; Copy original args: args[1..nargs] (16-byte stride)
     xor ecx, ecx
 .copy_args:
     cmp rcx, r13
     jge .args_copied
-    mov rax, [r12 + rcx*8]
-    mov [r15 + rcx*8 + 8], rax
+    mov rax, rcx
+    shl rax, 4                  ; source index * 16
+    mov rdx, [r12 + rax]       ; source payload
+    mov r8, [r12 + rax + 8]    ; source tag
+    lea r9, [rcx + 1]
+    shl r9, 4                   ; dest index * 16 (offset by 1 for instance)
+    mov [r15 + r9], rdx        ; dest payload
+    mov [r15 + r9 + 8], r8    ; dest tag
     inc rcx
     jmp .copy_args
 .args_copied:
@@ -516,7 +525,7 @@ DEF_FUNC type_call
 
     ; Restore stack (undo the sub rsp from args allocation)
     lea rax, [r13 + 1]
-    shl rax, 3
+    shl rax, 4
     add rsp, rax
 
 .no_init:
@@ -559,10 +568,11 @@ DEF_FUNC type_call
     mov rdi, r12                ; args
     mov rsi, r13                ; nargs
     call builtin_int_fn
-    ; rax = int result (SmallInt or GMP pointer)
+    ; rax = int result (SmallInt or GMP pointer), edx = tag
     test rax, rax
     jz .int_sub_error           ; exception from builtin_int_fn
     mov r14, rax                ; r14 = int value
+    mov r15d, edx               ; r15d = int value tag
 
     ; If type is exactly int_type, return bare int (not a subclass)
     lea rcx, [rel int_type]
@@ -571,13 +581,16 @@ DEF_FUNC type_call
 
     ; Allocate PyIntSubclassObject
     push r14                     ; save int_value across malloc
+    push r15                     ; save int_value_tag across malloc
     mov edi, PyIntSubclassObject_size
     call ap_malloc
+    pop r15
     pop r14
     mov qword [rax + PyIntSubclassObject.ob_refcnt], 1
     mov [rax + PyIntSubclassObject.ob_type], rbx
     mov qword [rax + PyIntSubclassObject.inst_dict], 0
     mov [rax + PyIntSubclassObject.int_value], r14
+    mov [rax + PyIntSubclassObject.int_value_tag], r15
     ; INCREF the type (subclass object holds a reference)
     push rax
     mov rdi, rbx
@@ -644,8 +657,9 @@ DEF_FUNC type_getattr
     jz .tga_next_base
 
     mov rsi, rbx
+    mov edx, TAG_PTR
     call dict_get
-    test rax, rax
+    test edx, edx
     jnz .tga_found
 
 .tga_next_base:
@@ -658,8 +672,7 @@ DEF_FUNC type_getattr
     ; Found — INCREF and return
     mov rbx, rax                ; save payload (name no longer needed)
     mov r12, rdx                ; save tag (type walk done)
-    mov rdi, rax
-    call obj_incref
+    INCREF_VAL rax, edx         ; tag-aware INCREF (skips SmallInt/SmallStr/NULL)
     mov rax, rbx
     mov rdx, r12                ; restore tag from dict_get
 
@@ -737,23 +750,30 @@ DEF_FUNC_LOCAL method_call
     mov r12, rsi                ; original args
     mov r13, rdx                ; original nargs
 
-    ; Allocate new args array: (nargs+1) * 8
+    ; Allocate new args array: (nargs+1) * 16 (fat values)
     lea rdi, [rdx + 1]
-    shl rdi, 3
+    shl rdi, 4
     call ap_malloc
     mov r14, rax                ; new args array
 
-    ; new_args[0] = im_self
+    ; new_args[0] = im_self (payload + tag)
     mov rcx, [rbx + PyMethodObject.im_self]
     mov [r14], rcx
+    mov qword [r14 + 8], TAG_PTR
 
-    ; Copy original args to new_args[1..]
+    ; Copy original args to new_args[1..] (16-byte stride)
     xor ecx, ecx
 .mc_copy:
     cmp rcx, r13
     jge .mc_copy_done
-    mov rax, [r12 + rcx*8]
-    mov [r14 + rcx*8 + 8], rax
+    mov rax, rcx
+    shl rax, 4                  ; source index * 16
+    mov rdx, [r12 + rax]       ; source payload
+    mov r8, [r12 + rax + 8]    ; source tag
+    lea r9, [rcx + 1]
+    shl r9, 4                   ; dest index * 16 (offset by 1 for self)
+    mov [r14 + r9], rdx        ; dest payload
+    mov [r14 + r9 + 8], r8    ; dest tag
     inc rcx
     jmp .mc_copy
 .mc_copy_done:

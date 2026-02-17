@@ -146,6 +146,7 @@ DEF_FUNC str_repr
     lea rcx, [r12 + 2]
     mov byte [rax + PyStrObject.data + rcx], 0
 
+    mov edx, TAG_PTR
     pop r12
     pop rbx
     leave
@@ -265,6 +266,7 @@ DEF_FUNC str_concat
     pop rax
     mov byte [rax + PyStrObject.data + r13], 0
 
+    mov edx, TAG_PTR
     pop r13
     pop r12
     pop rbx
@@ -283,7 +285,8 @@ DEF_FUNC str_repeat
     push r14
 
     mov rbx, rdi            ; str
-    mov rdi, rsi            ; int
+    mov rdi, rsi            ; int (count payload)
+    mov edx, ecx            ; count tag (right operand)
     call int_to_i64
     mov r12, rax             ; r12 = repeat count
 
@@ -358,7 +361,8 @@ SM_BUF     equ 24
 SM_CAP     equ 32
 SM_ISTUPLE equ 40
 SM_NARGS   equ 48
-SM_FRAME   equ 48
+SM_ATAG    equ 56
+SM_FRAME   equ 56
 
 DEF_FUNC str_mod, SM_FRAME
     ; Stack layout:
@@ -378,12 +382,14 @@ DEF_FUNC str_mod, SM_FRAME
 
     mov [rbp-SM_FMT], rdi      ; fmt
     mov [rbp-SM_ARGS], rsi     ; args
+    mov [rbp-SM_ATAG], ecx     ; args tag
 
     ; Determine if args is a tuple
+    ; ecx = right_tag (args tag) from op_binary_op caller
     mov qword [rbp-SM_ISTUPLE], 0  ; is_tuple = false
     mov qword [rbp-SM_NARGS], 1   ; nargs = 1 (single value)
-    test rsi, rsi
-    js .sm_not_tuple            ; SmallInt → single value
+    cmp ecx, TAG_SMALLINT
+    je .sm_not_tuple            ; SmallInt → single value
     mov rax, [rsi + PyObject.ob_type]
     lea rcx, [rel tuple_type]
     cmp rax, rcx
@@ -517,8 +523,9 @@ DEF_FUNC str_mod, SM_FRAME
     ; Get next arg
     push rcx
     call .sm_get_arg
-    ; rax = arg value
+    ; rax = arg payload, edx = arg tag
     mov rdi, rax
+    mov esi, edx               ; tag for obj_str
     call obj_str
     ; rax = str result
     jmp .sm_copy_str
@@ -527,6 +534,7 @@ DEF_FUNC str_mod, SM_FRAME
     push rcx
     call .sm_get_arg
     mov rdi, rax
+    mov esi, edx               ; tag for obj_str
     call obj_str               ; int.__str__ = int_repr
     jmp .sm_copy_str
 
@@ -534,6 +542,7 @@ DEF_FUNC str_mod, SM_FRAME
     push rcx
     call .sm_get_arg
     mov rdi, rax
+    mov esi, edx               ; tag for obj_repr
     call obj_repr
     jmp .sm_copy_str
 
@@ -567,11 +576,12 @@ DEF_FUNC str_mod, SM_FRAME
 
 .sm_get_arg:
     ; Get arg at index r15, increment r15
-    ; Returns arg in rax (borrowed ref)
+    ; Returns arg payload in rax, tag in edx (borrowed ref)
     cmp qword [rbp-SM_ISTUPLE], 1
     je .sm_arg_tuple
     ; Single value
     mov rax, [rbp-SM_ARGS]
+    mov edx, [rbp-SM_ATAG]
     inc r15
     ret
 .sm_arg_tuple:
@@ -581,7 +591,8 @@ DEF_FUNC str_mod, SM_FRAME
     jge .sm_arg_none
     mov rcx, rdx
     shl rcx, 4
-    mov rax, [rax + PyTupleObject.ob_item + rcx]
+    mov edx, [rax + PyTupleObject.ob_item + rcx + 8]  ; arg tag from tuple
+    mov rax, [rax + PyTupleObject.ob_item + rcx]       ; arg payload
     inc r15
     ret
 .sm_arg_none:
@@ -630,6 +641,7 @@ DEF_FUNC str_mod, SM_FRAME
     pop r13
     pop r12
     pop rbx
+    mov edx, TAG_PTR
     leave
     ret
 END_FUNC str_mod
@@ -695,6 +707,7 @@ DEF_FUNC str_compare
 .ret_true:
     lea rax, [rel bool_true]
     inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
     pop r12
     pop rbx
     leave
@@ -702,6 +715,7 @@ DEF_FUNC str_compare
 .ret_false:
     lea rax, [rel bool_false]
     inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
     pop r12
     pop rbx
     leave
@@ -748,6 +762,7 @@ DEF_FUNC str_getitem
 
     pop r12
     pop rbx
+    mov edx, TAG_PTR
     leave
     ret
 
@@ -766,9 +781,9 @@ DEF_FUNC str_subscript
 
     mov rbx, rdi            ; save self
 
-    ; Check if key is a slice
-    test rsi, rsi
-    js .ss_int               ; SmallInt -> int path
+    ; Check if key is a SmallInt (edx = key tag from caller)
+    cmp edx, TAG_SMALLINT
+    je .ss_int               ; SmallInt -> int path
     mov rax, [rsi + PyObject.ob_type]
     lea rcx, [rel slice_type]
     cmp rax, rcx
@@ -937,6 +952,7 @@ DEF_FUNC str_getslice
     pop r13
     pop r12
     pop rbx
+    mov edx, TAG_PTR
     leave
     ret
 END_FUNC str_getslice
@@ -1006,6 +1022,7 @@ DEF_FUNC str_iter_next
 
 .si_exhausted:
     xor eax, eax
+    xor edx, edx                  ; TAG_NULL = exhausted
     pop rbx
     leave
     ret

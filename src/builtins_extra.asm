@@ -18,6 +18,7 @@ extern int_from_cstr_base
 extern float_from_f64
 extern float_int
 extern ap_malloc
+extern obj_dealloc
 extern ap_free
 extern ap_memcpy
 extern strlen
@@ -70,8 +71,8 @@ DEF_FUNC builtin_abs
 
     mov rbx, [rdi]
 
-    test rbx, rbx
-    js .abs_smallint
+    cmp dword [rdi + 8], TAG_SMALLINT
+    je .abs_smallint
 
     mov rax, [rbx + PyObject.ob_type]
     lea rcx, [rel float_type]
@@ -98,7 +99,7 @@ DEF_FUNC builtin_abs
 .abs_gmp_neg:
     mov rdi, rbx
     call int_neg
-    mov edx, TAG_PTR
+    ; rdx = tag already set by callee
     add rsp, 8
     pop rbx
     leave
@@ -106,13 +107,10 @@ DEF_FUNC builtin_abs
 
 .abs_smallint:
     mov rax, rbx
-    shl rax, 1
-    sar rax, 1
     test rax, rax
     jns .abs_si_pos
     neg rax
 .abs_si_pos:
-    bts rax, 63
     mov edx, TAG_SMALLINT
     add rsp, 8
     pop rbx
@@ -154,7 +152,7 @@ DEF_FUNC builtin_divmod
     jne .divmod_error
 
     mov rbx, [rdi]              ; a
-    mov r12, [rdi + 8]          ; b
+    mov r12, [rdi + 16]         ; b (args[1] payload, 16-byte stride)
 
     ; Compute a // b
     mov rdi, rbx
@@ -311,8 +309,8 @@ DEF_FUNC builtin_int_fn, BI_FRAME
 .int_one_arg:
     mov rbx, [rdi]
 
-    test rbx, rbx
-    js .int_return_smallint
+    cmp dword [rdi + 8], TAG_SMALLINT
+    je .int_return_smallint
 
     mov rax, [rbx + PyObject.ob_type]
 
@@ -364,16 +362,18 @@ DEF_FUNC builtin_int_fn, BI_FRAME
 
 .int_no_args:
     xor eax, eax
-    bts rax, 63
+    mov edx, TAG_SMALLINT
     jmp .int_ret
 
 .int_return_smallint:
     mov rax, rbx
+    mov edx, TAG_SMALLINT
     jmp .int_ret
 
 .int_from_int:
     inc qword [rbx + PyObject.ob_refcnt]
     mov rax, rbx
+    mov edx, TAG_PTR
     jmp .int_ret
 
 .int_from_float:
@@ -515,11 +515,9 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     cmp rbx, rax
     je .int_bool_true
     xor eax, eax
-    bts rax, 63
     jmp .int_ret
 .int_bool_true:
     mov rax, 1
-    bts rax, 63
     jmp .int_ret
 
 .int_from_int_subclass:
@@ -542,19 +540,20 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     call rcx
     add rsp, 8
     ; Check for exception (NULL return)
-    test rax, rax
+    test edx, edx
     jz .int_dunder_error
     ; Verify result is int-like
-    js .int_ret                  ; SmallInt — OK
+    cmp edx, TAG_SMALLINT
+    je .int_ret                  ; SmallInt — OK
     mov rcx, [rax + PyObject.ob_type]
-    lea rdx, [rel int_type]
-    cmp rcx, rdx
+    lea r8, [rel int_type]
+    cmp rcx, r8
     je .int_ret                  ; exact int — OK
-    lea rdx, [rel bool_type]
-    cmp rcx, rdx
+    lea r8, [rel bool_type]
+    cmp rcx, r8
     je .int_convert_bool_result  ; bool → convert to plain int
-    mov rdx, [rcx + PyTypeObject.tp_flags]
-    test rdx, TYPE_FLAG_INT_SUBCLASS
+    mov r8, [rcx + PyTypeObject.tp_flags]
+    test r8, TYPE_FLAG_INT_SUBCLASS
     jnz .int_ret                 ; int subclass — OK for now
     ; __int__ returned non-int
     mov rdi, rax
@@ -567,8 +566,9 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     ; rbx = PyIntSubclassObject with no __int__ method
     ; Extract the int_value and return it
     mov rax, [rbx + PyIntSubclassObject.int_value]
-    test rax, rax
-    js .int_ret                  ; SmallInt
+    mov edx, [rbx + PyIntSubclassObject.int_value_tag]
+    cmp edx, TAG_SMALLINT
+    je .int_ret                  ; SmallInt — no INCREF needed
     INCREF rax
     jmp .int_ret
 
@@ -610,19 +610,20 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     call rcx
     add rsp, 8
     ; Check for exception (NULL return)
-    test rax, rax
+    test edx, edx
     jz .int_dunder_error
     ; Verify result is int-like
-    js .int_ret                  ; SmallInt — OK
+    cmp edx, TAG_SMALLINT
+    je .int_ret                  ; SmallInt — OK
     mov rcx, [rax + PyObject.ob_type]
-    lea rdx, [rel int_type]
-    cmp rcx, rdx
+    lea r8, [rel int_type]
+    cmp rcx, r8
     je .int_ret                  ; exact int — OK
-    lea rdx, [rel bool_type]
-    cmp rcx, rdx
+    lea r8, [rel bool_type]
+    cmp rcx, r8
     je .int_convert_bool_result  ; bool → convert to plain int
-    mov rdx, [rcx + PyTypeObject.tp_flags]
-    test rdx, TYPE_FLAG_INT_SUBCLASS
+    mov r8, [rcx + PyTypeObject.tp_flags]
+    test r8, TYPE_FLAG_INT_SUBCLASS
     jnz .int_ret                 ; int subclass — OK
     ; Not int-like
     mov rdi, rax
@@ -647,19 +648,20 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     add rsp, 8
     ; rax = result of __trunc__()
     ; Check for exception (NULL return)
-    test rax, rax
+    test edx, edx
     jz .int_dunder_error
     ; If it's already an int, return it
-    js .int_ret                  ; SmallInt — OK
+    cmp edx, TAG_SMALLINT
+    je .int_ret                  ; SmallInt — OK
     mov rcx, [rax + PyObject.ob_type]
-    lea rdx, [rel int_type]
-    cmp rcx, rdx
+    lea r8, [rel int_type]
+    cmp rcx, r8
     je .int_ret
-    lea rdx, [rel bool_type]
-    cmp rcx, rdx
+    lea r8, [rel bool_type]
+    cmp rcx, r8
     je .int_convert_bool_result
-    mov rdx, [rcx + PyTypeObject.tp_flags]
-    test rdx, TYPE_FLAG_INT_SUBCLASS
+    mov r8, [rcx + PyTypeObject.tp_flags]
+    test r8, TYPE_FLAG_INT_SUBCLASS
     jnz .int_ret
     ; __trunc__ returned non-int — try __index__ only (CPython behavior)
     mov rbx, rax                 ; save __trunc__ result
@@ -691,19 +693,20 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     call rcx
     add rsp, 8
     ; rax = __index__ result
-    test rax, rax
+    test edx, edx
     jz .int_dunder_error
     ; Verify it's an int
-    js .int_ret                  ; SmallInt — OK
+    cmp edx, TAG_SMALLINT
+    je .int_ret                  ; SmallInt — OK
     mov rcx, [rax + PyObject.ob_type]
-    lea rdx, [rel int_type]
-    cmp rcx, rdx
+    lea r8, [rel int_type]
+    cmp rcx, r8
     je .int_ret
-    lea rdx, [rel bool_type]
-    cmp rcx, rdx
+    lea r8, [rel bool_type]
+    cmp rcx, r8
     je .int_convert_bool_result
-    mov rdx, [rcx + PyTypeObject.tp_flags]
-    test rdx, TYPE_FLAG_INT_SUBCLASS
+    mov r8, [rcx + PyTypeObject.tp_flags]
+    test r8, TYPE_FLAG_INT_SUBCLASS
     jnz .int_ret
     ; __index__ returned non-int
     mov rdi, rax
@@ -767,6 +770,7 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     ; Raise TypeError with the message
     lea rdi, [rel exc_TypeError_type]
     mov rsi, rbx
+    mov edx, TAG_PTR
     call exc_new
     push rax                               ; save exc
     mov rdi, rbx
@@ -783,11 +787,9 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     cmp rax, rcx
     je .int_bool_result_true
     xor eax, eax
-    bts rax, 63
     jmp .int_ret
 .int_bool_result_true:
     mov rax, 1
-    bts rax, 63
     jmp .int_ret
 
 .int_dunder_error:
@@ -808,10 +810,10 @@ DEF_FUNC builtin_int_fn, BI_FRAME
 ; ------- int(x, base) -------
 .int_two_args:
     mov [rbp - BI_ARGS], rdi       ; save args pointer
-    ; Get base from args[1] (contiguous 8-byte buffer from CALL)
-    mov rax, [rdi + 8]             ; args[1] = base
-    test rax, rax
-    js .int_base_smallint
+    ; Get base from args[1] (contiguous 16-byte fat value from CALL)
+    mov rax, [rdi + 16]            ; args[1] payload (16-byte stride)
+    cmp dword [rdi + 24], TAG_SMALLINT  ; args[1] tag
+    je .int_base_smallint
     ; base is a heap object — check if it's an int or has __index__
     ; args already saved in [rbp - BI_ARGS]
     mov rcx, [rax + PyObject.ob_type]
@@ -842,9 +844,10 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     call rcx
     add rsp, 8                   ; pop base obj
     ; rax = __index__ result, should be int
-    test rax, rax
+    test edx, edx
     jz .int_dunder_error         ; __index__ raised exception
-    js .int_base_si_from_index
+    cmp edx, TAG_SMALLINT
+    je .int_base_si_from_index
     ; heap int — check if it fits in i64 first
     push rax
     lea rdi, [rax + PyIntObject.mpz]
@@ -852,11 +855,10 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     test eax, eax
     pop rdi                      ; rdi = __index__ result
     jz .int_base_range_error     ; doesn't fit → definitely out of 2-36 range
+    mov edx, TAG_PTR             ; heap int
     call int_to_i64
     jmp .int_have_base
 .int_base_si_from_index:
-    shl rax, 1
-    sar rax, 1
     jmp .int_have_base
 .int_base_no_index:
     add rsp, 8                   ; pop base obj
@@ -869,11 +871,10 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     test eax, eax
     pop rdi                      ; rdi = heap int obj
     jz .int_base_range_error     ; doesn't fit → out of 2-36 range
+    mov edx, TAG_PTR             ; heap int
     call int_to_i64
     jmp .int_have_base
 .int_base_smallint:
-    shl rax, 1
-    sar rax, 1             ; decode SmallInt
 .int_have_base:
     ; rax = base value
     mov [rbp - BI_NARGS], rax      ; save base
@@ -890,10 +891,10 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     mov [rbp - BI_BASE], rax
     ; Get x from args[0] — must be string or bytes
     mov rdi, [rbp - BI_ARGS]
-    mov rbx, [rdi]                 ; args[0]
+    mov rbx, [rdi]                 ; args[0] payload
     mov [rbp - BI_OBJ], rbx       ; save original obj for error msg
-    test rbx, rbx
-    js .int_base_type_error_str    ; SmallInt: can't have base with int
+    cmp dword [rdi + 8], TAG_SMALLINT  ; args[0] tag
+    je .int_base_type_error_str    ; SmallInt: can't have base with int
     mov rax, [rbx + PyObject.ob_type]
     lea rcx, [rel str_type]
     cmp rax, rcx
@@ -1036,8 +1037,9 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     call str_from_cstr
     mov [rsp + 48], rax
 
-    ; Get repr of original object
+    ; Get repr of original object (always a heap ptr)
     mov rdi, [rbp - BI_OBJ]
+    mov esi, TAG_PTR
     call obj_repr
     test rax, rax
     jnz .ile_have_repr
@@ -1061,6 +1063,7 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     ; Create ValueError
     lea rdi, [rel exc_ValueError_type]
     mov rsi, [rsp + 64]
+    mov edx, TAG_PTR
     call exc_new
     mov rbx, rax                        ; rbx = exc (callee-saved)
 
@@ -1082,11 +1085,9 @@ DEF_FUNC builtin_int_fn, BI_FRAME
 .int_ret:
     ; Common epilogue: restore rbx, leave, ret
     ; Classify return value: SmallInt (bit63), NULL (error), or heap ptr
-    mov edx, TAG_PTR
     test rax, rax
     jz .int_ret_epilogue         ; NULL = error, tag doesn't matter
-    mov ecx, TAG_SMALLINT
-    cmovs edx, ecx              ; bit63 set -> TAG_SMALLINT
+    ; rdx = tag already set by callee
 .int_ret_epilogue:
     ; rbx was pushed after sub rsp, BI_FRAME, so it's at rbp - BI_FRAME - 8
     lea rsp, [rbp - BI_FRAME - 8]
@@ -1107,7 +1108,8 @@ DEF_FUNC builtin_str_fn
     cmp rsi, 1
     jne .str_error
 
-    mov rdi, [rdi]
+    mov esi, [rdi + 8]         ; arg[0] tag
+    mov rdi, [rdi]             ; arg[0] payload
     call obj_str
     mov edx, TAG_PTR
     leave
@@ -1134,10 +1136,10 @@ DEF_FUNC builtin_ord
     cmp rsi, 1
     jne .ord_nargs_error
 
-    mov rdi, [rdi]
+    cmp dword [rdi + 8], TAG_SMALLINT  ; check args[0] tag before loading payload
+    je .ord_type_error
 
-    test rdi, rdi
-    js .ord_type_error
+    mov rdi, [rdi]                 ; args[0] payload
 
     mov rax, [rdi + PyObject.ob_type]
     lea rcx, [rel str_type]
@@ -1148,7 +1150,6 @@ DEF_FUNC builtin_ord
     jne .ord_len_error
 
     movzx eax, byte [rdi + PyStrObject.data]
-    bts rax, 63
     mov edx, TAG_SMALLINT
     leave
     ret
@@ -1177,6 +1178,7 @@ DEF_FUNC builtin_chr, 16
     cmp rsi, 1
     jne .chr_nargs_error
 
+    mov edx, [rdi + 8]
     mov rdi, [rdi]
     call int_to_i64
 
@@ -1288,6 +1290,7 @@ DEF_FUNC builtin_hex, 80
     cmp rsi, 1
     jne .hex_nargs_error
 
+    mov edx, [rdi + 8]
     mov rdi, [rdi]
     call int_to_i64
 
@@ -1380,18 +1383,15 @@ DEF_FUNC builtin_id
     cmp rsi, 1
     jne .id_error
 
-    mov rdi, [rdi]
-
-    test rdi, rdi
-    js .id_smallint
+    cmp dword [rdi + 8], TAG_SMALLINT  ; check args[0] tag
+    mov rdi, [rdi]                     ; args[0] payload
+    je .id_smallint
 
     call int_from_i64
     leave
     ret
 
 .id_smallint:
-    shl rdi, 1
-    sar rdi, 1
     call int_from_i64
     leave
     ret
@@ -1414,8 +1414,8 @@ DEF_FUNC builtin_hash_fn
 
     mov rbx, [rdi]
 
-    test rbx, rbx
-    js .hash_smallint
+    cmp dword [rdi + 8], TAG_SMALLINT  ; check args[0] tag
+    je .hash_smallint
 
     mov rax, [rbx + PyObject.ob_type]
     mov rcx, [rax + PyTypeObject.tp_hash]
@@ -1433,8 +1433,6 @@ DEF_FUNC builtin_hash_fn
 
 .hash_smallint:
     mov rax, rbx
-    shl rax, 1
-    sar rax, 1
     mov rdi, rax
     call int_from_i64
     add rsp, 8
@@ -1461,10 +1459,9 @@ DEF_FUNC builtin_callable
     cmp rsi, 1
     jne .callable_error
 
-    mov rdi, [rdi]
-
-    test rdi, rdi
-    js .callable_false
+    cmp dword [rdi + 8], TAG_SMALLINT  ; check args[0] tag
+    mov rdi, [rdi]                     ; args[0] payload
+    je .callable_false
 
     mov rax, [rdi + PyObject.ob_type]
     mov rcx, [rax + PyTypeObject.tp_call]
@@ -1498,10 +1495,9 @@ DEF_FUNC builtin_iter_fn
     cmp rsi, 1
     jne .iter_error
 
-    mov rdi, [rdi]
-
-    test rdi, rdi
-    js .iter_type_error
+    cmp dword [rdi + 8], TAG_SMALLINT  ; check args[0] tag
+    mov rdi, [rdi]                     ; args[0] payload
+    je .iter_type_error
 
     mov rax, [rdi + PyObject.ob_type]
     mov rcx, [rax + PyTypeObject.tp_iter]
@@ -1532,10 +1528,9 @@ DEF_FUNC builtin_next_fn
     cmp rsi, 1
     jne .next_error
 
-    mov rdi, [rdi]
-
-    test rdi, rdi
-    js .next_type_error
+    cmp dword [rdi + 8], TAG_SMALLINT  ; check args[0] tag
+    mov rdi, [rdi]                     ; args[0] payload
+    je .next_type_error
 
     mov rax, [rdi + PyObject.ob_type]
     mov rcx, [rax + PyTypeObject.tp_iternext]
@@ -1543,13 +1538,11 @@ DEF_FUNC builtin_next_fn
     jz .next_type_error
 
     call rcx
-    test rax, rax
+    test edx, edx
     jz .next_stop
 
-    ; Classify: SmallInt (bit63) or heap ptr
-    mov edx, TAG_PTR
-    mov ecx, TAG_SMALLINT
-    cmovs edx, ecx
+    ; tp_iternext already returns fat (rax=payload, rdx=tag)
+    ; rdx = tag already set by callee
     leave
     ret
 
@@ -1576,15 +1569,14 @@ DEF_FUNC builtin_any
     push rbx
     push r12
     push r13
-    sub rsp, 8
+    push r14
 
     cmp rsi, 1
     jne .any_error
 
+    cmp dword [rdi + 8], TAG_SMALLINT
+    je .any_type_error
     mov rdi, [rdi]
-
-    test rdi, rdi
-    js .any_type_error
 
     mov rax, [rdi + PyObject.ob_type]
     mov rcx, [rax + PyTypeObject.tp_iter]
@@ -1599,28 +1591,24 @@ DEF_FUNC builtin_any
 .any_loop:
     mov rdi, rbx
     call r12
-    test rax, rax
+    test edx, edx             ; TAG_NULL = exhausted
     jz .any_false
 
-    mov r13, rax
+    mov r13, rax               ; item payload
+    mov r14, rdx               ; item tag
 
     mov rdi, r13
+    mov esi, r14d
     call obj_is_true
     test eax, eax
     jnz .any_found_true
 
     ; Falsy: DECREF item and continue
-    mov rdi, r13
-    test r13, r13
-    js .any_loop
-    call obj_decref
+    DECREF_VAL r13, r14
     jmp .any_loop
 
 .any_found_true:
-    mov rdi, r13
-    test r13, r13
-    js .any_true
-    call obj_decref
+    DECREF_VAL r13, r14
 
 .any_true:
     mov rdi, rbx
@@ -1628,7 +1616,7 @@ DEF_FUNC builtin_any
     lea rax, [rel bool_true]
     inc qword [rax + PyObject.ob_refcnt]
     mov edx, TAG_PTR
-    add rsp, 8
+    pop r14
     pop r13
     pop r12
     pop rbx
@@ -1641,7 +1629,7 @@ DEF_FUNC builtin_any
     lea rax, [rel bool_false]
     inc qword [rax + PyObject.ob_refcnt]
     mov edx, TAG_PTR
-    add rsp, 8
+    pop r14
     pop r13
     pop r12
     pop rbx
@@ -1666,15 +1654,14 @@ DEF_FUNC builtin_all
     push rbx
     push r12
     push r13
-    sub rsp, 8
+    push r14
 
     cmp rsi, 1
     jne .all_error
 
+    cmp dword [rdi + 8], TAG_SMALLINT
+    je .all_type_error
     mov rdi, [rdi]
-
-    test rdi, rdi
-    js .all_type_error
 
     mov rax, [rdi + PyObject.ob_type]
     mov rcx, [rax + PyTypeObject.tp_iter]
@@ -1689,28 +1676,24 @@ DEF_FUNC builtin_all
 .all_loop:
     mov rdi, rbx
     call r12
-    test rax, rax
+    test edx, edx             ; TAG_NULL = exhausted
     jz .all_true
 
-    mov r13, rax
+    mov r13, rax               ; item payload
+    mov r14, rdx               ; item tag
 
     mov rdi, r13
+    mov esi, r14d
     call obj_is_true
     test eax, eax
     jz .all_found_false
 
     ; Truthy: DECREF item and continue
-    mov rdi, r13
-    test r13, r13
-    js .all_loop
-    call obj_decref
+    DECREF_VAL r13, r14
     jmp .all_loop
 
 .all_found_false:
-    mov rdi, r13
-    test r13, r13
-    js .all_false
-    call obj_decref
+    DECREF_VAL r13, r14
 
 .all_false:
     mov rdi, rbx
@@ -1718,7 +1701,7 @@ DEF_FUNC builtin_all
     lea rax, [rel bool_false]
     inc qword [rax + PyObject.ob_refcnt]
     mov edx, TAG_PTR
-    add rsp, 8
+    pop r14
     pop r13
     pop r12
     pop rbx
@@ -1731,7 +1714,7 @@ DEF_FUNC builtin_all
     lea rax, [rel bool_true]
     inc qword [rax + PyObject.ob_refcnt]
     mov edx, TAG_PTR
-    add rsp, 8
+    pop r14
     pop r13
     pop r12
     pop rbx
@@ -1771,20 +1754,22 @@ DEF_FUNC builtin_sum
     cmp r14, 2
     je .sum_has_start
     xor eax, eax
-    bts rax, 63
     mov r13, rax
+    mov dword [rsp], TAG_SMALLINT      ; accum_tag = SmallInt (0)
     jmp .sum_get_iter
 
 .sum_has_start:
-    mov r13, [rbx + 8]
-    test r13, r13
-    js .sum_get_iter
+    mov r13, [rbx + 16]            ; args[1] payload (start value, 16-byte stride)
+    mov eax, [rbx + 24]            ; args[1] tag
+    mov [rsp], eax                 ; accum_tag
+    cmp eax, TAG_SMALLINT
+    je .sum_get_iter
     inc qword [r13 + PyObject.ob_refcnt]
 
 .sum_get_iter:
-    mov rdi, [rbx]
-    test rdi, rdi
-    js .sum_type_error
+    cmp dword [rbx + 8], TAG_SMALLINT  ; args[0] tag
+    je .sum_type_error
+    mov rdi, [rbx]                     ; args[0] payload (iterable)
     mov rax, [rdi + PyObject.ob_type]
     mov rcx, [rax + PyTypeObject.tp_iter]
     test rcx, rcx
@@ -1798,30 +1783,37 @@ DEF_FUNC builtin_sum
 .sum_loop:
     mov rdi, rbx
     call r12
-    test rax, rax
+    test edx, edx
     jz .sum_done
 
-    mov r14, rax
+    mov r14, rax                   ; item payload
+    mov r15d, edx                  ; item tag
 
-    mov rdi, r13
-    mov rsi, r14
+    mov rdi, r13                   ; accum payload
+    mov rsi, r14                   ; item payload
+    mov edx, [rsp]                 ; accum tag (left_tag)
+    mov ecx, r15d                  ; item tag (right_tag)
     call int_add
-    mov r15, rax
+    ; rax = new accum payload, edx = new accum tag
 
-    ; DECREF old accumulator
+    ; Save new accum before DECREFs
+    push rax
+    push rdx
+
+    ; DECREF old accumulator (tag at [rsp+16] = original [rsp])
     mov rdi, r13
-    test r13, r13
-    js .sum_skip_decref_accum
-    call obj_decref
-.sum_skip_decref_accum:
-    mov r13, r15
+    mov esi, [rsp + 16]
+    DECREF_VAL rdi, rsi
 
     ; DECREF item
     mov rdi, r14
-    test r14, r14
-    js .sum_skip_decref_item
-    call obj_decref
-.sum_skip_decref_item:
+    mov esi, r15d
+    DECREF_VAL rdi, rsi
+
+    ; Restore new accum
+    pop rdx                        ; new accum tag
+    pop r13                        ; new accum payload
+    mov [rsp], edx                 ; update accum_tag slot
 
     jmp .sum_loop
 
@@ -1829,10 +1821,7 @@ DEF_FUNC builtin_sum
     mov rdi, rbx
     call obj_decref
     mov rax, r13
-    ; Classify: SmallInt (bit63) or heap ptr
-    mov edx, TAG_PTR
-    mov ecx, TAG_SMALLINT
-    cmovs edx, ecx
+    mov edx, [rsp]                 ; accum_tag
     add rsp, 8
     pop r15
     pop r14
@@ -1871,39 +1860,39 @@ DEF_FUNC builtin_min
     mov r12, rsi
     mov r13, 1
 
-    mov r14, [rbx]
-    test r14, r14
-    js .min_loop
+    mov r14, [rbx]                 ; args[0] payload = current min
+    mov eax, [rbx + 8]            ; args[0] tag
+    mov [rsp], eax                 ; min_tag
+    cmp eax, TAG_SMALLINT
+    je .min_loop
     inc qword [r14 + PyObject.ob_refcnt]
 
 .min_loop:
     cmp r13, r12
     jge .min_done
 
-    mov r15, [rbx + r13 * 8]
+    mov rax, r13
+    shl rax, 4                    ; rax = index * 16 (16-byte stride)
+    mov r15, [rbx + rax]          ; candidate payload
+    mov ecx, [rbx + rax + 8]     ; candidate tag
 
-    ; SmallInt fast path: both SmallInt? (AND, not OR)
-    mov rax, r14
-    and rax, r15
-    jns .min_slow_compare
+    ; SmallInt fast path: both SmallInt?
+    cmp dword [rsp], TAG_SMALLINT
+    jne .min_slow_compare
+    cmp ecx, TAG_SMALLINT
+    jne .min_slow_compare
 
-    ; Both SmallInts: decode and compare
-    mov rax, r14
-    shl rax, 1
-    sar rax, 1
-    mov rcx, r15
-    shl rcx, 1
-    sar rcx, 1
-    cmp rcx, rax
+    ; Both SmallInts: compare directly
+    cmp r15, r14
     jge .min_no_update
-    mov r14, r15
+    mov r14, r15                   ; update min (both SmallInt, no refcount)
     jmp .min_no_update
 
 .min_slow_compare:
     ; Use tp_richcompare(args[i], current_min, PY_LT)
+    cmp ecx, TAG_SMALLINT
+    je .min_no_update              ; SmallInt can't richcompare
     mov rdi, r15
-    test rdi, rdi
-    js .min_no_update
     mov rax, [rdi + PyObject.ob_type]
     mov rcx, [rax + PyTypeObject.tp_richcompare]
     test rcx, rcx
@@ -1920,28 +1909,28 @@ DEF_FUNC builtin_min
     mov [rbp - 48], rax
     jne .min_slow_no_update
 
-    ; Update min
+    ; Update min: DECREF old min
     mov rdi, r14
-    test r14, r14
-    js .min_slow_update_skip_decref
-    call obj_decref
-.min_slow_update_skip_decref:
+    mov esi, [rsp]
+    DECREF_VAL rdi, rsi
+    ; Set new min = candidate
     mov r14, r15
-    test r14, r14
-    js .min_slow_update_done
+    mov rax, r13
+    shl rax, 4
+    mov eax, [rbx + rax + 8]     ; reload candidate tag
+    mov [rsp], eax                ; update min_tag
+    cmp eax, TAG_SMALLINT
+    je .min_slow_update_done
     inc qword [r14 + PyObject.ob_refcnt]
 .min_slow_update_done:
+    ; DECREF richcompare result
     mov rdi, [rbp - 48]
-    test rdi, rdi
-    js .min_no_update
-    call obj_decref
+    call obj_decref               ; richcompare result is always a heap ptr (bool)
     jmp .min_no_update
 
 .min_slow_no_update:
     mov rdi, [rbp - 48]
-    test rdi, rdi
-    js .min_no_update
-    call obj_decref
+    call obj_decref               ; richcompare result is always a heap ptr (bool)
 
 .min_no_update:
     inc r13
@@ -1949,10 +1938,7 @@ DEF_FUNC builtin_min
 
 .min_done:
     mov rax, r14
-    ; Classify: SmallInt (bit63) or heap ptr
-    mov edx, TAG_PTR
-    mov ecx, TAG_SMALLINT
-    cmovs edx, ecx
+    mov edx, [rsp]                 ; min_tag
     add rsp, 8
     pop r15
     pop r14
@@ -1986,40 +1972,40 @@ DEF_FUNC builtin_max
     mov r12, rsi
     mov r13, 1
 
-    mov r14, [rbx]
-    test r14, r14
-    js .max_loop
+    mov r14, [rbx]                 ; args[0] payload = current max
+    mov eax, [rbx + 8]            ; args[0] tag
+    mov [rsp], eax                 ; max_tag
+    cmp eax, TAG_SMALLINT
+    je .max_loop
     inc qword [r14 + PyObject.ob_refcnt]
 
 .max_loop:
     cmp r13, r12
     jge .max_done
 
-    mov r15, [rbx + r13 * 8]
+    mov rax, r13
+    shl rax, 4                    ; rax = index * 16 (16-byte stride)
+    mov r15, [rbx + rax]          ; candidate payload
+    mov ecx, [rbx + rax + 8]     ; candidate tag
 
-    ; SmallInt fast path: both SmallInt? (AND, not OR)
-    mov rax, r14
-    and rax, r15
-    jns .max_slow_compare
+    ; SmallInt fast path: both SmallInt?
+    cmp dword [rsp], TAG_SMALLINT
+    jne .max_slow_compare
+    cmp ecx, TAG_SMALLINT
+    jne .max_slow_compare
 
-    ; Both SmallInts: decode and compare
-    mov rax, r14
-    shl rax, 1
-    sar rax, 1
-    mov rcx, r15
-    shl rcx, 1
-    sar rcx, 1
-    cmp rcx, rax
+    ; Both SmallInts: compare directly
+    cmp r15, r14
     jle .max_no_update
-    mov r14, r15
+    mov r14, r15                   ; update max (both SmallInt, no refcount)
     jmp .max_no_update
 
 .max_slow_compare:
     ; Use tp_richcompare(current_max, args[i], PY_LT)
-    mov rdi, r14
-    test rdi, rdi
-    js .max_try_rhs
+    cmp dword [rsp], TAG_SMALLINT
+    je .max_try_rhs                ; max is SmallInt, try candidate's richcompare
 
+    mov rdi, r14
     mov rax, [rdi + PyObject.ob_type]
     mov rcx, [rax + PyTypeObject.tp_richcompare]
     test rcx, rcx
@@ -2032,9 +2018,11 @@ DEF_FUNC builtin_max
     jmp .max_check_result
 
 .max_try_rhs:
+    mov rax, r13
+    shl rax, 4
+    cmp dword [rbx + rax + 8], TAG_SMALLINT
+    je .max_no_update              ; both SmallInt would have been caught above
     mov rdi, r15
-    test rdi, rdi
-    js .max_no_update
     mov rax, [rdi + PyObject.ob_type]
     mov rcx, [rax + PyTypeObject.tp_richcompare]
     test rcx, rcx
@@ -2051,27 +2039,27 @@ DEF_FUNC builtin_max
     mov [rbp - 48], rax
     jne .max_slow_no_update
 
-    ; Update max
+    ; Update max: DECREF old max
     mov rdi, r14
-    test r14, r14
-    js .max_slow_update_skip_decref
-    call obj_decref
-.max_slow_update_skip_decref:
+    mov esi, [rsp]
+    DECREF_VAL rdi, rsi
+    ; Set new max = candidate
     mov r14, r15
-    test r14, r14
-    js .max_slow_update_done
+    mov rax, r13
+    shl rax, 4
+    mov eax, [rbx + rax + 8]     ; reload candidate tag
+    mov [rsp], eax                ; update max_tag
+    cmp eax, TAG_SMALLINT
+    je .max_slow_update_done
     inc qword [r14 + PyObject.ob_refcnt]
 .max_slow_update_done:
+    ; DECREF richcompare result (always a heap ptr)
     mov rdi, [rbp - 48]
-    test rdi, rdi
-    js .max_no_update
     call obj_decref
     jmp .max_no_update
 
 .max_slow_no_update:
     mov rdi, [rbp - 48]
-    test rdi, rdi
-    js .max_no_update
     call obj_decref
 
 .max_no_update:
@@ -2080,10 +2068,7 @@ DEF_FUNC builtin_max
 
 .max_done:
     mov rax, r14
-    ; Classify: SmallInt (bit63) or heap ptr
-    mov edx, TAG_PTR
-    mov ecx, TAG_SMALLINT
-    cmovs edx, ecx
+    mov edx, [rsp]                 ; max_tag
     add rsp, 8
     pop r15
     pop r14
@@ -2116,11 +2101,11 @@ DEF_FUNC builtin_getattr
     cmp r12, 3
     ja .getattr_error
 
-    mov r13, [rbx]
-    mov r14, [rbx + 8]
+    mov r13, [rbx]                 ; args[0] payload (obj)
+    mov r14, [rbx + 16]            ; args[1] payload (name, 16-byte stride)
 
-    test r13, r13
-    js .getattr_try_type_dict
+    cmp dword [rbx + 8], TAG_SMALLINT  ; args[0] tag
+    je .getattr_try_type_dict
 
     mov rax, [r13 + PyObject.ob_type]
     mov rcx, [rax + PyTypeObject.tp_getattr]
@@ -2136,8 +2121,8 @@ DEF_FUNC builtin_getattr
     jmp .getattr_try_type_dict
 
 .getattr_try_type_dict:
-    test r13, r13
-    js .getattr_smallint_type
+    cmp dword [rbx + 8], TAG_SMALLINT
+    je .getattr_smallint_type
     mov rax, [r13 + PyObject.ob_type]
     jmp .getattr_check_dict
 
@@ -2151,8 +2136,9 @@ DEF_FUNC builtin_getattr
 
     mov rdi, rcx
     mov rsi, r14
+    mov edx, TAG_PTR
     call dict_get
-    test rax, rax
+    test edx, edx
     jz .getattr_not_found
 
     inc qword [rax + PyObject.ob_refcnt]
@@ -2166,10 +2152,7 @@ DEF_FUNC builtin_getattr
 
 .getattr_found:
     ; Result from tp_getattr could be any type
-    mov edx, TAG_PTR
-    mov ecx, TAG_SMALLINT
-    test rax, rax
-    cmovs edx, ecx
+    ; rdx = tag already set by callee
     pop r14
     pop r13
     pop r12
@@ -2181,12 +2164,10 @@ DEF_FUNC builtin_getattr
     cmp r12, 3
     jne .getattr_raise
 
-    mov rax, [rbx + 16]
-    mov edx, TAG_PTR
-    test rax, rax
-    mov ecx, TAG_SMALLINT
-    cmovs edx, ecx
-    js .getattr_ret_default_si
+    mov rax, [rbx + 32]           ; args[2] payload (default, 16-byte stride)
+    mov edx, [rbx + 40]           ; args[2] tag
+    cmp edx, TAG_SMALLINT
+    je .getattr_ret_default_si
     inc qword [rax + PyObject.ob_refcnt]
 .getattr_ret_default_si:
     pop r14
@@ -2220,11 +2201,12 @@ DEF_FUNC builtin_hasattr
     cmp rsi, 2
     jne .hasattr_error
 
-    mov r12, [rdi]
-    mov r13, [rdi + 8]
+    mov rbx, rdi                   ; save args ptr
+    mov r12, [rdi]                 ; args[0] payload (obj)
+    mov r13, [rdi + 16]            ; args[1] payload (name, 16-byte stride)
 
-    test r12, r12
-    js .hasattr_try_type_dict
+    cmp dword [rbx + 8], TAG_SMALLINT  ; args[0] tag
+    je .hasattr_try_type_dict
 
     mov rax, [r12 + PyObject.ob_type]
     mov rcx, [rax + PyTypeObject.tp_getattr]
@@ -2239,10 +2221,7 @@ DEF_FUNC builtin_hasattr
 
     ; Found via tp_getattr - DECREF result, return True
     mov rdi, rax
-    test rax, rax
-    js .hasattr_found_si
-    call obj_decref
-.hasattr_found_si:
+    DECREF_VAL rdi, rdx            ; use tag from tp_getattr return
     lea rax, [rel bool_true]
     inc qword [rax + PyObject.ob_refcnt]
     mov edx, TAG_PTR
@@ -2254,8 +2233,8 @@ DEF_FUNC builtin_hasattr
     ret
 
 .hasattr_try_type_dict:
-    test r12, r12
-    js .hasattr_smallint_type
+    cmp dword [rbx + 8], TAG_SMALLINT
+    je .hasattr_smallint_type
     mov rax, [r12 + PyObject.ob_type]
     jmp .hasattr_check_dict
 
@@ -2269,8 +2248,9 @@ DEF_FUNC builtin_hasattr
 
     mov rdi, rcx
     mov rsi, r13
+    mov edx, TAG_PTR
     call dict_get
-    test rax, rax
+    test edx, edx
     jz .hasattr_not_found
 
     lea rax, [rel bool_true]
@@ -2313,19 +2293,22 @@ DEF_FUNC builtin_setattr
 
     mov rbx, rdi
 
-    mov rdi, [rbx]
-    test rdi, rdi
-    js .setattr_type_error
+    cmp dword [rbx + 8], TAG_SMALLINT  ; args[0] tag
+    je .setattr_type_error
+    mov rdi, [rbx]                     ; args[0] payload (obj)
 
     mov rax, [rdi + PyObject.ob_type]
-    mov rcx, [rax + PyTypeObject.tp_setattr]
-    test rcx, rcx
+    mov rax, [rax + PyTypeObject.tp_setattr]
+    test rax, rax
     jz .setattr_type_error
 
-    mov rdi, [rbx]
-    mov rsi, [rbx + 8]
-    mov rdx, [rbx + 16]
-    call rcx
+    push rax                           ; save tp_setattr
+    mov rdi, [rbx]                     ; args[0] payload (obj)
+    mov rsi, [rbx + 16]               ; args[1] payload (name, 16-byte stride)
+    mov rdx, [rbx + 32]               ; args[2] payload (value, 16-byte stride)
+    mov ecx, [rbx + 40]               ; args[2] tag (value tag, 16-byte stride)
+    pop rax                            ; restore tp_setattr
+    call rax
 
     lea rax, [rel none_singleton]
     inc qword [rax + PyObject.ob_refcnt]
@@ -2423,7 +2406,9 @@ DEF_FUNC builtin_dir, DIR_FRAME
     cmp rsi, 1
     jne .dir_error
 
-    mov rax, [rdi]          ; obj
+    mov eax, [rdi + 8]      ; args[0] tag
+    mov r12d, eax            ; save obj_tag in r12d temporarily
+    mov rax, [rdi]           ; obj payload
     mov [rbp - DIR_OBJ], rax
 
     ; Create result list
@@ -2436,8 +2421,8 @@ DEF_FUNC builtin_dir, DIR_FRAME
     ; If obj is a type (ob_type == type_type or user_type_metatype), iterate tp_dict
     ; Otherwise, iterate instance __dict__ (if any), then class dict
     mov rax, [rbp - DIR_OBJ]
-    test rax, rax
-    js .dir_done            ; SmallInt: no attributes
+    cmp r12d, TAG_SMALLINT
+    je .dir_done            ; SmallInt: no attributes
     mov rcx, [rax + PyObject.ob_type]
     lea rdx, [rel type_type]
     cmp rcx, rdx
@@ -2475,7 +2460,7 @@ DEF_FUNC builtin_dir, DIR_FRAME
     jz .dir_iter_done
     mov rdi, r13
     call rax                ; tp_iternext(iter) -> key or NULL
-    test rax, rax
+    test edx, edx
     jz .dir_iter_done
 
     ; Check if key already in result list (avoid duplicates from base classes)
@@ -2491,6 +2476,7 @@ DEF_FUNC builtin_dir, DIR_FRAME
     push rax
     mov rdi, rbx
     mov rsi, rax
+    mov edx, TAG_PTR
     call list_append
     pop rdi
     call obj_decref
@@ -2530,9 +2516,9 @@ DEF_FUNC builtin_eval_fn
     jne .evl_error
 
     ; Get the string argument
-    mov rdi, [rdi]              ; args[0]
-    test rdi, rdi
-    js .evl_type_error          ; SmallInt: not a string
+    cmp dword [rdi + 8], TAG_SMALLINT  ; args[0] tag
+    je .evl_type_error                 ; SmallInt: not a string
+    mov rdi, [rdi]                     ; args[0] payload
     mov rax, [rdi + PyObject.ob_type]
     lea rcx, [rel str_type]
     cmp rax, rcx
@@ -2552,9 +2538,7 @@ DEF_FUNC builtin_eval_fn
 
 .evl_done:
     ; Classify: SmallInt (bit63) or heap ptr
-    mov edx, TAG_PTR
-    mov ecx, TAG_SMALLINT
-    cmovs edx, ecx
+    ; rdx = tag already set by callee
     leave
     ret
 

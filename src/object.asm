@@ -39,22 +39,22 @@ DEF_FUNC obj_alloc
 END_FUNC obj_alloc
 
 ; obj_incref(PyObject *obj)
-; Increment reference count; NULL-safe, SmallInt-safe
+; Increment reference count; NULL-safe.
+; Callers must only pass heap pointers (not SmallInts).
 DEF_FUNC_BARE obj_incref
     test rdi, rdi
     jz .skip
-    js .skip                ; SmallInt - no refcount
     inc qword [rdi + PyObject.ob_refcnt]
 .skip:
     ret
 END_FUNC obj_incref
 
 ; obj_decref(PyObject *obj)
-; Decrement reference count; deallocate if zero; NULL-safe, SmallInt-safe
+; Decrement reference count; deallocate if zero; NULL-safe.
+; Callers must only pass heap pointers (not SmallInts).
 DEF_FUNC_BARE obj_decref
     test rdi, rdi
     jz .skip
-    js .skip                ; SmallInt - no refcount
     dec qword [rdi + PyObject.ob_refcnt]
     jnz .skip
     ; refcount hit zero - deallocate
@@ -66,9 +66,6 @@ END_FUNC obj_decref
 ; obj_dealloc(PyObject *obj)
 ; Calls type's tp_dealloc if present, else just frees
 DEF_FUNC_BARE obj_dealloc
-    ; Guard against SmallInt (should never happen)
-    test rdi, rdi
-    js .bail
 
     push rbp
     mov rbp, rsp
@@ -99,13 +96,16 @@ DEF_FUNC_BARE obj_dealloc
     ret
 END_FUNC obj_dealloc
 
-; obj_repr(PyObject *obj) -> PyObject* (string)
-; Calls type's tp_repr. SmallInt → int_repr.
+; obj_repr(rdi=payload, rsi=tag) -> PyObject* (string)
+; Dispatches on tag. SmallInt → int_repr. TAG_PTR → tp_repr.
 DEF_FUNC obj_repr
 
+    cmp esi, TAG_SMALLINT
+    je .smallint
+
+    ; TAG_PTR: use tp_repr
     test rdi, rdi
     jz .null_obj
-    js .smallint
 
     mov rax, [rdi + PyObject.ob_type]
     test rax, rax
@@ -114,12 +114,14 @@ DEF_FUNC obj_repr
     test rax, rax
     jz .no_repr
 
-    ; tail-call tp_repr(obj)
+    ; tail-call tp_repr(obj, tag)
+    mov edx, esi               ; pass tag for tag-aware repr (e.g., int_repr)
     leave
     jmp rax
 
 .smallint:
-    ; Delegate to int_repr which handles SmallInts
+    ; rdi = raw int value — int_repr handles SmallInt payloads
+    mov edx, TAG_SMALLINT
     call int_repr
     leave
     ret
@@ -131,15 +133,20 @@ DEF_FUNC obj_repr
     ret
 END_FUNC obj_repr
 
-; obj_str(PyObject *obj) -> PyObject* (string)
-; Calls type's tp_str, falls back to tp_repr. SmallInt → int_repr.
+; obj_str(rdi=payload, rsi=tag) -> PyObject* (string)
+; Dispatches on tag. SmallInt → int_repr. TAG_PTR → tp_str, falls back to tp_repr.
 DEF_FUNC obj_str
     push rbx
+    push r12
     mov rbx, rdi
+    mov r12, rsi               ; save tag
 
+    cmp esi, TAG_SMALLINT
+    je .smallint
+
+    ; TAG_PTR path
     test rdi, rdi
     jz .fallback
-    js .smallint
 
     mov rax, [rdi + PyObject.ob_type]
     test rax, rax
@@ -150,7 +157,9 @@ DEF_FUNC obj_str
     jz .fallback
 
     mov rdi, rbx
+    mov edx, r12d              ; tag for tp_str (e.g., int_repr checks edx)
     call rax
+    pop r12
     pop rbx
     leave
     ret
@@ -158,26 +167,33 @@ DEF_FUNC obj_str
 .smallint:
     ; SmallInt: delegate to int_repr
     mov rdi, rbx
+    mov edx, TAG_SMALLINT
     call int_repr
+    pop r12
     pop rbx
     leave
     ret
 
 .fallback:
     mov rdi, rbx
+    mov rsi, r12
     call obj_repr
+    pop r12
     pop rbx
     leave
     ret
 END_FUNC obj_str
 
-; obj_hash(PyObject *obj) -> int64
-; Calls type's tp_hash, falls back to address hash. SmallInt → decoded value.
+; obj_hash(rdi=payload, rsi=tag) -> int64
+; Dispatches on tag. SmallInt → raw value. TAG_PTR → tp_hash.
 DEF_FUNC obj_hash
 
+    cmp esi, TAG_SMALLINT
+    je .smallint_hash
+
+    ; TAG_PTR path
     test rdi, rdi
     jz .default_hash
-    js .smallint_hash
 
     mov rax, [rdi + PyObject.ob_type]
     test rax, rax
@@ -191,10 +207,8 @@ DEF_FUNC obj_hash
     jmp rax
 
 .smallint_hash:
-    ; Hash of SmallInt = decoded value (avoid -1)
+    ; Hash of SmallInt = raw value (avoid -1)
     mov rax, rdi
-    shl rax, 1
-    sar rax, 1              ; sign-extend from bit 62
     cmp rax, -1
     jne .hash_done
     mov rax, -2
@@ -209,12 +223,11 @@ DEF_FUNC obj_hash
     ret
 END_FUNC obj_hash
 
-; obj_is_true(PyObject *obj) -> int (0 or 1)
-; Tests truthiness of an object. SmallInt → decoded value != 0.
+; obj_is_true(rdi=payload, rsi=tag) -> int (0 or 1)
+; Dispatches on tag. SmallInt → value != 0. TAG_PTR → type-based truthiness.
 DEF_FUNC_BARE obj_is_true
-    ; Check SmallInt before any stack setup
-    test rdi, rdi
-    js .smallint
+    cmp esi, TAG_SMALLINT
+    je .smallint
 
     push rbp
     mov rbp, rsp
@@ -289,17 +302,20 @@ DEF_FUNC_BARE obj_is_true
     mov rdi, rbx
     lea rsi, [rel dunder_bool]
     call dunder_call_1
-    test rax, rax
+    test edx, edx              ; TAG_NULL = not found
     jz .check_dunder_len
 
     ; __bool__ returned a result — convert to int (check if it's True/False)
-    push rax
+    push rdx                   ; save tag
+    push rax                   ; save payload
     extern obj_is_true
     mov rdi, rax
+    mov rsi, rdx
     call obj_is_true
     mov ecx, eax
-    pop rdi
-    DECREF_REG rdi
+    pop rdi                    ; payload
+    pop rsi                    ; tag
+    DECREF_VAL rdi, rsi
     mov eax, ecx
     pop rbx
     pop rbp
@@ -311,16 +327,19 @@ DEF_FUNC_BARE obj_is_true
     mov rdi, rbx
     lea rsi, [rel dunder_len]
     call dunder_call_1
-    test rax, rax
+    test edx, edx              ; TAG_NULL = not found
     jz .true                ; no __len__ → truthy by default
 
     ; __len__ returned a result — truthy if > 0
-    push rax
+    push rdx                   ; save tag
+    push rax                   ; save payload
     mov rdi, rax
+    mov rsi, rdx
     call obj_is_true
     mov ecx, eax
-    pop rdi
-    DECREF_REG rdi
+    pop rdi                    ; payload
+    pop rsi                    ; tag
+    DECREF_VAL rdi, rsi
     mov eax, ecx
     pop rbx
     pop rbp
@@ -339,11 +358,8 @@ DEF_FUNC_BARE obj_is_true
     ret
 
 .smallint:
-    ; SmallInt is true iff decoded value != 0
-    ; SmallInt 0 = 0x8000000000000000 (only tag bit set)
-    mov rax, rdi
-    shl rax, 1              ; shift out tag bit
-    test rax, rax            ; zero if value was 0
+    ; SmallInt is true iff raw value != 0
+    test rdi, rdi
     setnz al
     movzx eax, al
     ret
@@ -355,7 +371,8 @@ DEF_FUNC obj_print
     push rbx
     mov rbx, rdi
 
-    ; Get string representation via obj_str (handles SmallInt)
+    ; Get string representation via obj_str(payload, tag)
+    mov esi, TAG_PTR
     call obj_str
     test rax, rax
     jz .print_null

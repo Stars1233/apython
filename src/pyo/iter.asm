@@ -66,6 +66,7 @@ DEF_FUNC_BARE list_iter_next
 
 .exhausted:
     xor eax, eax
+    xor edx, edx                  ; TAG_NULL = exhausted
     ret
 END_FUNC list_iter_next
 
@@ -156,6 +157,7 @@ DEF_FUNC_BARE tuple_iter_next
 
 .exhausted:
     xor eax, eax
+    xor edx, edx                ; TAG_NULL = exhausted
     ret
 END_FUNC tuple_iter_next
 
@@ -205,15 +207,12 @@ DEF_FUNC range_new
 
     ; Store as SmallInt-tagged values
     mov rcx, rbx
-    bts rcx, 63
     mov [rax + PyRangeIterObject.it_current], rcx
 
     pop rcx                    ; step
-    bts rcx, 63
     mov [rax + PyRangeIterObject.it_step], rcx
 
     pop rcx                    ; stop
-    bts rcx, 63
     mov [rax + PyRangeIterObject.it_stop], rcx
 
     pop rbx
@@ -228,16 +227,10 @@ END_FUNC range_new
 DEF_FUNC_BARE range_iter_next
     ; Decode current, stop, step
     mov rax, [rdi + PyRangeIterObject.it_current]
-    shl rax, 1
-    sar rax, 1                 ; current (decoded)
 
     mov rcx, [rdi + PyRangeIterObject.it_stop]
-    shl rcx, 1
-    sar rcx, 1                 ; stop (decoded)
 
     mov rdx, [rdi + PyRangeIterObject.it_step]
-    shl rdx, 1
-    sar rdx, 1                 ; step (decoded)
 
     ; Check if exhausted
     test rdx, rdx
@@ -256,11 +249,9 @@ DEF_FUNC_BARE range_iter_next
 .has_value:
     ; Return current as SmallInt
     mov r8, rax
-    bts r8, 63                 ; SmallInt encode
 
     ; Advance: current += step
     add rax, rdx
-    bts rax, 63               ; SmallInt encode new current
     mov [rdi + PyRangeIterObject.it_current], rax
 
     mov rax, r8
@@ -269,6 +260,7 @@ DEF_FUNC_BARE range_iter_next
 
 .exhausted:
     xor eax, eax
+    xor edx, edx                ; TAG_NULL = exhausted
     ret
 END_FUNC range_iter_next
 

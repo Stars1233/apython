@@ -44,6 +44,7 @@ DEF_FUNC dunder_lookup
     jz .try_base
 
     mov rsi, r13
+    mov edx, TAG_PTR
     call dict_get           ; dict_get(tp_dict, name_str) -> borrowed ref
     test rax, rax
     jnz .found
@@ -79,11 +80,11 @@ DEF_FUNC dunder_lookup
 END_FUNC dunder_lookup
 
 ; ---------------------------------------------------------------------------
-; dunder_call_1(PyObject *self, const char *name) -> PyObject*
+; dunder_call_1(PyObject *self, const char *name) -> (rax=payload, rdx=tag)
 ;
 ; Look up dunder on self's type, call with self as only arg.
-; rdi = self, rsi = dunder name C string
-; Returns: result object, or NULL if dunder not found.
+; rdi = self (heap ptr), rsi = dunder name C string
+; Returns: result fat value (rax=payload, rdx=tag), or (0, TAG_NULL) if not found.
 ; ---------------------------------------------------------------------------
 DEF_FUNC dunder_call_1
     push rbx
@@ -107,13 +108,15 @@ DEF_FUNC dunder_call_1
     test rax, rax
     jz .not_found
 
-    push rbx                ; args[0] = self
+    sub rsp, 16             ; args[0] (16B slot)
+    mov [rsp], rbx          ; args[0].payload = self
+    mov qword [rsp+8], TAG_PTR  ; args[0].tag
     mov rdi, r12            ; callable
     mov rsi, rsp            ; args ptr
     mov edx, 1              ; nargs
     call rax
-    add rsp, 8              ; pop args
-    ; rax = result
+    add rsp, 16             ; pop args
+    ; rax = result payload, rdx = result tag
 
     pop r14
     pop r13
@@ -124,6 +127,7 @@ DEF_FUNC dunder_call_1
 
 .not_found:
     xor eax, eax
+    xor edx, edx           ; TAG_NULL
     pop r14
     pop r13
     pop r12
@@ -133,20 +137,22 @@ DEF_FUNC dunder_call_1
 END_FUNC dunder_call_1
 
 ; ---------------------------------------------------------------------------
-; dunder_call_2(PyObject *self, PyObject *other, const char *name) -> PyObject*
+; dunder_call_2(PyObject *self, PyObject *other, const char *name, int other_tag)
+;   -> (rax=payload, rdx=tag)
 ;
 ; Look up dunder on self's type, call with (self, other).
-; rdi = self, rsi = other, rdx = dunder name C string
-; Returns: result object, or NULL if dunder not found.
+; rdi = self (heap ptr), rsi = other payload, rdx = dunder name, ecx = other_tag
+; Returns: result fat value (rax=payload, rdx=tag), or (0, TAG_NULL) if not found.
 ; ---------------------------------------------------------------------------
 DEF_FUNC dunder_call_2
     push rbx
     push r12
     push r13
-    push r14                ; alignment
+    push r14
 
     mov rbx, rdi            ; rbx = self
-    mov r12, rsi            ; r12 = other
+    mov r12, rsi            ; r12 = other payload
+    mov r14d, ecx           ; r14d = other tag
 
     ; Lookup dunder on self's type
     mov rdi, [rbx + PyObject.ob_type]
@@ -162,14 +168,17 @@ DEF_FUNC dunder_call_2
     test rax, rax
     jz .not_found
 
-    push r12                ; args[1] = other
-    push rbx                ; args[0] = self
+    sub rsp, 32             ; 2 args × 16B
+    mov [rsp], rbx          ; args[0].payload = self
+    mov qword [rsp+8], TAG_PTR   ; args[0].tag
+    mov [rsp+16], r12       ; args[1].payload = other
+    mov [rsp+24], r14       ; args[1].tag = other_tag
     mov rdi, r13            ; callable
     mov rsi, rsp            ; args ptr
     mov edx, 2              ; nargs
     call rax
-    add rsp, 16             ; pop args
-    ; rax = result
+    add rsp, 32             ; pop args
+    ; rax = result payload, rdx = result tag
 
     pop r14
     pop r13
@@ -180,6 +189,7 @@ DEF_FUNC dunder_call_2
 
 .not_found:
     xor eax, eax
+    xor edx, edx           ; TAG_NULL
     pop r14
     pop r13
     pop r12
@@ -189,21 +199,26 @@ DEF_FUNC dunder_call_2
 END_FUNC dunder_call_2
 
 ; ---------------------------------------------------------------------------
-; dunder_call_3(PyObject *self, PyObject *arg1, PyObject *arg2, const char *name) -> PyObject*
+; dunder_call_3(PyObject *self, PyObject *arg1, PyObject *arg2, const char *name,
+;               int arg2_tag)
+;   -> (rax=payload, rdx=tag)
 ;
 ; Look up dunder on self's type, call with (self, arg1, arg2).
-; rdi = self, rsi = arg1, rdx = arg2, rcx = dunder name C string
-; Returns: result object, or NULL if dunder not found.
+; rdi = self (heap), rsi = arg1 (heap), rdx = arg2, rcx = dunder name,
+; r8d = arg2 tag (use TAG_PTR if arg2 is always a heap ptr).
+; Returns: result fat value (rax=payload, rdx=tag), or (0, TAG_NULL) if not found.
 ; ---------------------------------------------------------------------------
 DEF_FUNC dunder_call_3
     push rbx
     push r12
     push r13
     push r14
+    push r15
 
     mov rbx, rdi            ; rbx = self
     mov r12, rsi            ; r12 = arg1
     mov r13, rdx            ; r13 = arg2
+    mov r15d, r8d           ; r15d = arg2 tag
 
     ; Lookup dunder on self's type
     mov rdi, [rbx + PyObject.ob_type]
@@ -219,16 +234,21 @@ DEF_FUNC dunder_call_3
     test rax, rax
     jz .not_found
 
-    push r13                ; args[2] = arg2
-    push r12                ; args[1] = arg1
-    push rbx                ; args[0] = self
+    sub rsp, 48             ; 3 args × 16B
+    mov [rsp], rbx          ; args[0].payload = self
+    mov qword [rsp+8], TAG_PTR
+    mov [rsp+16], r12       ; args[1].payload = arg1
+    mov qword [rsp+24], TAG_PTR
+    mov [rsp+32], r13       ; args[2].payload = arg2
+    mov [rsp+40], r15       ; args[2].tag = arg2_tag
     mov rdi, r14            ; callable
     mov rsi, rsp            ; args ptr
     mov edx, 3              ; nargs
     call rax
-    add rsp, 24             ; pop args
-    ; rax = result
+    add rsp, 48             ; pop args
+    ; rax = result payload, rdx = result tag
 
+    pop r15
     pop r14
     pop r13
     pop r12
@@ -238,6 +258,8 @@ DEF_FUNC dunder_call_3
 
 .not_found:
     xor eax, eax
+    xor edx, edx           ; TAG_NULL
+    pop r15
     pop r14
     pop r13
     pop r12

@@ -64,12 +64,15 @@ DEF_FUNC set_new
 END_FUNC set_new
 
 ;; ============================================================================
-;; set_keys_equal(PyObject *a, PyObject *b) -> int (1=equal, 0=not)
+;; set_keys_equal(PyObject *a, PyObject *b, a_tag, b_tag) -> int (1=equal, 0=not)
 ;; Internal helper: pointer equality or string comparison
+;; rdi=a, rsi=b, edx=a_tag, ecx=b_tag
 ;; ============================================================================
 DEF_FUNC_LOCAL set_keys_equal
     push rbx
     push r12
+    push r13
+    push r14
 
     ; Pointer equality check
     cmp rdi, rsi
@@ -77,26 +80,26 @@ DEF_FUNC_LOCAL set_keys_equal
 
     mov rbx, rdi                ; save a
     mov r12, rsi                ; save b
+    mov r13d, edx               ; save a_tag
+    mov r14d, ecx               ; save b_tag
 
     ; Check SmallInt: both tagged?
-    mov rax, rbx
-    and rax, r12
-    bt rax, 63
-    jnc .check_str              ; not both SmallInts
+    cmp r13d, TAG_SMALLINT
+    jne .check_b_si
+    cmp r14d, TAG_SMALLINT
+    jne .not_equal              ; a is SmallInt, b is not
 
     ; Both SmallInts - compare directly
     cmp rbx, r12
     je .equal
     jmp .not_equal
 
-.check_str:
-    ; Check if either is a SmallInt (can't be a string)
-    test rbx, rbx
-    js .not_equal
-    test r12, r12
-    js .not_equal
+.check_b_si:
+    ; a is not SmallInt; if b is SmallInt, not equal
+    cmp r14d, TAG_SMALLINT
+    je .not_equal
 
-    ; Check if both are strings: a->ob_type == &str_type
+    ; Neither is SmallInt - check if both are strings: a->ob_type == &str_type
     mov rax, [rbx + PyObject.ob_type]
     lea rcx, [rel str_type]
     cmp rax, rcx
@@ -116,6 +119,8 @@ DEF_FUNC_LOCAL set_keys_equal
 
 .not_equal:
     xor eax, eax
+    pop r14
+    pop r13
     pop r12
     pop rbx
     leave
@@ -123,6 +128,8 @@ DEF_FUNC_LOCAL set_keys_equal
 
 .equal:
     mov eax, 1
+    pop r14
+    pop r13
     pop r12
     pop rbx
     leave
@@ -130,11 +137,14 @@ DEF_FUNC_LOCAL set_keys_equal
 END_FUNC set_keys_equal
 
 ;; ============================================================================
-;; set_find_slot(set, key, hash)
+;; set_find_slot(set, key, hash, key_tag)
+;;   rdi=set, rsi=key, rdx=hash, ecx=key_tag
 ;;   -> rax = entry ptr, rdx = 1 if existing key found, 0 if empty slot
 ;; Internal helper used by set_add and set_contains
 ;; ============================================================================
+SFS_KEY_TAG equ 8
 DEF_FUNC_LOCAL set_find_slot
+    sub rsp, SFS_KEY_TAG
     push rbx
     push r12
     push r13
@@ -144,6 +154,7 @@ DEF_FUNC_LOCAL set_find_slot
     mov rbx, rdi                ; set
     mov r12, rsi                ; key
     mov r13, rdx                ; hash
+    mov [rbp - SFS_KEY_TAG], ecx ; save key_tag
 
     ; mask = capacity - 1
     mov r14, [rbx + PyDictObject.capacity]
@@ -164,20 +175,22 @@ DEF_FUNC_LOCAL set_find_slot
     imul rdx, rcx, SET_ENTRY_SIZE
     add rax, rdx                ; rax = entry ptr
 
-    ; Empty slot?
+    ; Empty slot? Check key_tag (TAG_NULL=0 means empty)
     mov rdi, [rax + SET_ENTRY_KEY]
-    test rdi, rdi
-    jz .found_empty
+    cmp qword [rax + SET_ENTRY_KEY_TAG], 0
+    je .found_empty
 
     ; Hash match?
     cmp r13, [rax + SET_ENTRY_HASH]
     jne .find_next
 
     ; Key equality check
-    ; rdi = entry.key
-    mov rsi, r12
-    push rcx
-    push rax
+    ; rdi = entry.key (already loaded above)
+    push rcx                    ; save slot
+    push rax                    ; save entry ptr
+    mov edx, [rax + SET_ENTRY_KEY_TAG]  ; a_tag (entry key)
+    mov rsi, r12                        ; b = lookup key
+    mov ecx, [rbp - SFS_KEY_TAG]        ; b_tag (lookup key tag)
     call set_keys_equal
     pop rax                     ; entry ptr
     pop rcx                     ; slot
@@ -264,10 +277,9 @@ DEF_FUNC_LOCAL set_resize
     imul rax, rcx, SET_ENTRY_SIZE
     add rax, r12                ; rax = old entry ptr
 
-    ; Skip empty slots
-    mov rdi, [rax + SET_ENTRY_KEY]
-    test rdi, rdi
-    jz .rehash_next
+    ; Skip empty slots (check key_tag for TAG_NULL=0)
+    cmp qword [rax + SET_ENTRY_KEY_TAG], 0
+    je .rehash_next
 
     ; Compute new slot: hash & (new_capacity - 1)
     push rcx                    ; save outer index
@@ -285,7 +297,7 @@ DEF_FUNC_LOCAL set_resize
 .rehash_probe:
     imul rax, rcx, SET_ENTRY_SIZE
     add rax, r15                ; new entry ptr
-    cmp qword [rax + SET_ENTRY_KEY], 0
+    cmp qword [rax + SET_ENTRY_KEY_TAG], 0
     je .rehash_insert
 
     inc rcx
@@ -321,19 +333,22 @@ DEF_FUNC_LOCAL set_resize
 END_FUNC set_resize
 
 ;; ============================================================================
-;; set_add(set, key) -> void
-;; Add a key to the set
+;; set_add(set, key, key_tag) -> void
+;; Add a key to the set. rdx = key_tag.
 ;; ============================================================================
 DEF_FUNC set_add
     push rbx
     push r12
     push r13
+    push r14
 
     mov rbx, rdi                ; set
     mov r12, rsi                ; key
+    mov r14, rdx                ; key_tag
 
     ; Hash the key
     mov rdi, r12
+    mov rsi, r14                ; key_tag (saved from rdx on entry)
     call obj_hash
     mov r13, rax                ; r13 = hash
 
@@ -341,6 +356,7 @@ DEF_FUNC set_add
     mov rdi, rbx                ; set
     mov rsi, r12                ; key
     mov rdx, r13                ; hash
+    mov ecx, r14d               ; key_tag
     call set_find_slot
     ; rax = entry ptr, edx = 1 if existing, 0 if empty
 
@@ -352,18 +368,11 @@ DEF_FUNC set_add
     mov [rax + SET_ENTRY_HASH], r13
     mov [rax + SET_ENTRY_KEY], r12
 
-    ; Classify and store key tag
-    test r12, r12
-    js .add_si
-    mov qword [rax + SET_ENTRY_KEY_TAG], TAG_PTR
-    jmp .add_tag_done
-.add_si:
-    mov qword [rax + SET_ENTRY_KEY_TAG], TAG_SMALLINT
-.add_tag_done:
+    ; Store key tag from caller
+    mov [rax + SET_ENTRY_KEY_TAG], r14
 
     ; INCREF key (tag-aware)
-    mov rcx, [rax + SET_ENTRY_KEY_TAG]
-    INCREF_VAL r12, rcx
+    INCREF_VAL r12, r14
 
     ; Increment ob_size
     inc qword [rbx + PyDictObject.ob_size]
@@ -381,6 +390,7 @@ DEF_FUNC set_add
     call set_resize
 
 .done:
+    pop r14
     pop r13
     pop r12
     pop rbx
@@ -396,12 +406,15 @@ DEF_FUNC set_contains
     push rbx
     push r12
     push r13
+    push r14
 
     mov rbx, rdi                ; set
     mov r12, rsi                ; key
+    mov r14d, edx               ; key_tag
 
     ; Hash the key
     mov rdi, r12
+    mov esi, r14d               ; key_tag
     call obj_hash
     mov r13, rax                ; r13 = hash
 
@@ -409,11 +422,13 @@ DEF_FUNC set_contains
     mov rdi, rbx                ; set
     mov rsi, r12                ; key
     mov rdx, r13                ; hash
+    mov ecx, r14d               ; key_tag
     call set_find_slot
     ; rax = entry ptr, edx = 1 if found, 0 if empty slot
 
     mov eax, edx                ; return 1 if found, 0 if not
 
+    pop r14
     pop r13
     pop r12
     pop rbx
@@ -433,7 +448,8 @@ END_FUNC set_contains_sq
 ;; set_remove(set, key) -> int (0=ok, -1=not found)
 ;; Remove a key from the set
 ;; ============================================================================
-DEF_FUNC set_remove
+SR_KEY_TAG equ 8
+DEF_FUNC set_remove, SR_KEY_TAG
     push rbx
     push r12
     push r13
@@ -442,9 +458,11 @@ DEF_FUNC set_remove
 
     mov rbx, rdi                ; set
     mov r12, rsi                ; key
+    mov [rbp - SR_KEY_TAG], edx ; save key_tag
 
     ; Hash the key
     mov rdi, r12
+    mov esi, edx                ; key_tag (passed by caller in rdx)
     call obj_hash
     mov r13, rax                ; hash
 
@@ -466,15 +484,18 @@ DEF_FUNC set_remove
     add rax, rdx
 
     mov rdi, [rax + SET_ENTRY_KEY]
-    test rdi, rdi
-    jz .sr_not_found
+    cmp qword [rax + SET_ENTRY_KEY_TAG], 0
+    je .sr_not_found
 
     cmp r13, [rax + SET_ENTRY_HASH]
     jne .sr_next
 
-    mov rsi, r12
-    push rcx
-    push rax
+    ; rdi = entry.key (already loaded)
+    push rcx                    ; save slot
+    push rax                    ; save entry ptr
+    mov edx, [rax + SET_ENTRY_KEY_TAG]  ; a_tag (entry key)
+    mov rsi, r12                        ; b = lookup key
+    mov ecx, [rbp - SR_KEY_TAG]         ; b_tag (lookup key tag)
     call set_keys_equal
     pop rdx                     ; entry ptr
     pop rcx
@@ -533,10 +554,10 @@ DEF_FUNC set_dealloc
     imul rax, r14, SET_ENTRY_SIZE
     add rax, r12
 
-    ; Skip empty slots
+    ; Skip empty slots (check key_tag for TAG_NULL=0)
     mov rdi, [rax + SET_ENTRY_KEY]
-    test rdi, rdi
-    jz .dealloc_next
+    cmp qword [rax + SET_ENTRY_KEY_TAG], 0
+    je .dealloc_next
 
     ; DECREF key (fat value)
     mov rsi, [rax + SET_ENTRY_KEY_TAG]
@@ -627,15 +648,15 @@ DEF_FUNC_BARE set_iter_next
     imul rax, rcx, SET_ENTRY_SIZE
     add rax, rsi
     mov r8, [rax + SET_ENTRY_KEY]
-    test r8, r8
-    jz .si_skip
+    cmp qword [rax + SET_ENTRY_KEY_TAG], 0
+    je .si_skip
 
-    ; Found a valid entry -- return the key
+    ; Found a valid entry -- return the key with tag
     inc rcx
     mov [rdi + PyDictIterObject.it_index], rcx
+    mov edx, [rax + SET_ENTRY_KEY_TAG]  ; key tag
     mov rax, r8
-    INCREF rax
-    mov edx, TAG_PTR               ; keys are always heap ptrs
+    INCREF_VAL rax, edx
     ret
 
 .si_skip:
@@ -645,6 +666,7 @@ DEF_FUNC_BARE set_iter_next
 .si_exhausted:
     mov [rdi + PyDictIterObject.it_index], rcx
     xor eax, eax
+    xor edx, edx                  ; TAG_NULL = exhausted
     ret
 END_FUNC set_iter_next
 

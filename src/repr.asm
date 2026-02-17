@@ -96,13 +96,14 @@ DEF_FUNC list_repr, 24                ; buf ptr, used, capacity
     BUF_BYTE ' '
 .lr_no_comma:
 
-    ; Get element (fat list: 16-byte stride, payload only for obj_repr)
+    ; Get element (fat list: 16-byte stride)
     mov rax, [rbx + PyListObject.ob_item]
     mov rcx, r12
     shl rcx, 4                 ; index * 16
+    mov esi, [rax + rcx + 8]  ; items[index] tag
     mov rdi, [rax + rcx]       ; items[index] payload
 
-    ; Call obj_repr
+    ; Call obj_repr(payload, tag)
     call obj_repr
     test rax, rax
     jz .lr_next
@@ -197,6 +198,7 @@ DEF_FUNC tuple_repr, 24
     call fat_to_obj                ; rax = PyObject* (owned ref)
     push rax                       ; save for DECREF later
     mov rdi, rax
+    mov esi, TAG_PTR               ; fat_to_obj always returns heap ptr
     call obj_repr
     test rax, rax
     jz .tr_decref_elem
@@ -298,8 +300,9 @@ DEF_FUNC dict_repr, 24
     BUF_BYTE ' '
 .dr_no_comma:
 
-    ; repr(key)
+    ; repr(key) — read key tag from entry
     ; rdi already = key
+    mov esi, [rax + rcx + DictEntry.key_tag]
     push r12                   ; save entry index across calls
     call obj_repr
     test rax, rax
@@ -329,7 +332,8 @@ DEF_FUNC dict_repr, 24
     pop r12                    ; restore entry index
     mov rax, [rbx + PyDictObject.entries]
     imul rcx, r12, DICT_ENTRY_SIZE
-    mov rdi, [rax + rcx + DictEntry.value]  ; value
+    mov esi, [rax + rcx + DictEntry.value_tag]  ; value tag
+    mov rdi, [rax + rcx + DictEntry.value]      ; value payload
     push r12
     call obj_repr
     test rax, rax
@@ -427,6 +431,7 @@ DEF_FUNC set_repr, 24
     mov rdi, [rax + rcx + 8]     ; key at SET_ENTRY_KEY offset
     test rdi, rdi
     jz .sr_next
+    mov esi, [rax + rcx + 16]   ; key_tag at SET_ENTRY_KEY_TAG offset
 
     test r14, r14
     jz .sr_no_comma

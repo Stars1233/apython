@@ -61,58 +61,74 @@ DEF_FUNC dict_new
 END_FUNC dict_new
 
 ;; ============================================================================
-;; dict_keys_equal(PyObject *a, PyObject *b) -> int (1=equal, 0=not)
-;; Internal helper: pointer equality or string comparison
+;; dict_keys_equal(rdi=a_key, rsi=b_key, edx=a_tag, ecx=b_tag) -> int (1=equal, 0=not)
+;; Internal helper: value equality for SmallInts, string comparison for heap ptrs
 ;; ============================================================================
 DEF_FUNC_LOCAL dict_keys_equal
+    ; Value/pointer equality — handles SmallInts and same-object ptrs
+    cmp rdi, rsi
+    jne .dke_diff_payload
+    ; Same payload — equal (same SmallInt value or same heap ptr)
+    mov eax, 1
+    leave
+    ret
+
+.dke_diff_payload:
+    ; Different payloads — if either is not TAG_PTR, can't be equal
+    ; (Two SmallInts with same value would have matched above)
+    cmp edx, TAG_PTR
+    jne .dke_not_equal
+    cmp ecx, TAG_PTR
+    jne .dke_not_equal
+
+    ; Both heap ptrs with different addresses — check string equality
     push rbx
     push r12
+    mov rbx, rdi
+    mov r12, rsi
 
-    ; Pointer equality check
-    cmp rdi, rsi
-    je .equal
-
-    mov rbx, rdi                ; save a
-    mov r12, rsi                ; save b
-
-    ; Check if both are strings: a->ob_type == &str_type
     mov rax, [rbx + PyObject.ob_type]
     lea rcx, [rel str_type]
     cmp rax, rcx
-    jne .not_equal
+    jne .dke_ne_pop
 
-    ; Check b->ob_type == &str_type
     mov rax, [r12 + PyObject.ob_type]
     cmp rax, rcx
-    jne .not_equal
+    jne .dke_ne_pop
 
-    ; Both are strings - compare .data with strcmp
+    ; Both strings — compare data
     lea rdi, [rbx + PyStrObject.data]
     lea rsi, [r12 + PyStrObject.data]
     call ap_strcmp
     test eax, eax
-    jz .equal
+    jnz .dke_ne_pop
 
-.not_equal:
+    ; Equal strings
+    mov eax, 1
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.dke_ne_pop:
     xor eax, eax
     pop r12
     pop rbx
     leave
     ret
 
-.equal:
-    mov eax, 1
-    pop r12
-    pop rbx
+.dke_not_equal:
+    xor eax, eax
     leave
     ret
 END_FUNC dict_keys_equal
 
 ;; ============================================================================
-;; dict_get(PyDictObject *dict, PyObject *key) -> PyObject* or NULL
+;; dict_get(rdi=dict, rsi=key, edx=key_tag) -> (rax=value, rdx=value_tag) or (0, TAG_NULL)
 ;; Linear probing lookup
 ;; ============================================================================
-DEF_FUNC dict_get
+DG_KTAG equ 8
+DEF_FUNC dict_get, 8
     push rbx
     push r12
     push r13
@@ -121,9 +137,11 @@ DEF_FUNC dict_get
 
     mov rbx, rdi                ; rbx = dict
     mov r12, rsi                ; r12 = key
+    mov [rbp - DG_KTAG], rdx    ; save key_tag
 
     ; Hash the key
     mov rdi, r12
+    mov esi, edx                ; key tag
     call obj_hash
     mov r13, rax                ; r13 = hash
 
@@ -149,10 +167,10 @@ align 16
     imul rdx, rcx, DICT_ENTRY_SIZE
     add rax, rdx                ; rax = entry ptr
 
-    ; Check if slot is empty (key == NULL)
+    ; Check if slot is empty (key_tag == TAG_NULL)
     mov rdi, [rax + DictEntry.key]
-    test rdi, rdi
-    jz .not_found
+    cmp qword [rax + DictEntry.key_tag], 0
+    je .not_found
 
     ; Check hash first (fast reject)
     cmp r13, [rax + DictEntry.hash]
@@ -161,8 +179,10 @@ align 16
     ; Hash matches - check key equality
     ; rdi already has entry.key
     mov rsi, r12                ; our key
+    mov edx, [rax + DictEntry.key_tag]  ; entry's key tag
     push rcx                    ; save slot
     push rax                    ; save entry ptr
+    mov ecx, [rbp - DG_KTAG]   ; our key tag
     call dict_keys_equal
     pop rdx                     ; restore entry ptr into rdx
     pop rcx                     ; restore slot
@@ -196,10 +216,11 @@ align 16
 END_FUNC dict_get
 
 ;; ============================================================================
-;; dict_get_index(PyDictObject *dict, PyObject *key) -> int64
+;; dict_get_index(rdi=dict, rsi=key, edx=key_tag) -> int64
 ;; Like dict_get but returns the slot index (for IC caching), -1 if not found.
 ;; ============================================================================
-DEF_FUNC dict_get_index
+GI_KTAG equ 8
+DEF_FUNC dict_get_index, 8
     push rbx
     push r12
     push r13
@@ -208,8 +229,10 @@ DEF_FUNC dict_get_index
 
     mov rbx, rdi                ; rbx = dict
     mov r12, rsi                ; r12 = key
+    mov [rbp - GI_KTAG], rdx    ; save key_tag
 
     mov rdi, r12
+    mov esi, edx                ; key tag
     call obj_hash
     mov r13, rax                ; r13 = hash
 
@@ -230,14 +253,16 @@ DEF_FUNC dict_get_index
     add rax, rdx
 
     mov rdi, [rax + DictEntry.key]
-    test rdi, rdi
-    jz .gi_not_found
+    cmp qword [rax + DictEntry.key_tag], 0
+    je .gi_not_found
 
     cmp r13, [rax + DictEntry.hash]
     jne .gi_next
 
     mov rsi, r12
+    mov edx, [rax + DictEntry.key_tag]
     push rcx
+    mov ecx, [rbp - GI_KTAG]
     call dict_keys_equal
     pop rcx
     test eax, eax
@@ -267,11 +292,12 @@ DEF_FUNC dict_get_index
 END_FUNC dict_get_index
 
 ;; ============================================================================
-;; dict_find_slot(PyDictObject *dict, PyObject *key, int64_t hash)
+;; dict_find_slot(rdi=dict, rsi=key, rdx=hash, ecx=key_tag)
 ;;   -> rax = entry ptr, rdx = 1 if existing key found, 0 if empty slot
 ;; Internal helper used by dict_set
 ;; ============================================================================
-DEF_FUNC_LOCAL dict_find_slot
+FS_KTAG equ 8
+DEF_FUNC_LOCAL dict_find_slot, 8
     push rbx
     push r12
     push r13
@@ -281,6 +307,7 @@ DEF_FUNC_LOCAL dict_find_slot
     mov rbx, rdi                ; dict
     mov r12, rsi                ; key
     mov r13, rdx                ; hash
+    mov [rbp - FS_KTAG], ecx    ; save key_tag
 
     ; mask = capacity - 1
     mov r14, [rbx + PyDictObject.capacity]
@@ -301,10 +328,10 @@ DEF_FUNC_LOCAL dict_find_slot
     imul rdx, rcx, DICT_ENTRY_SIZE
     add rax, rdx                ; rax = entry ptr
 
-    ; Empty slot?
+    ; Empty slot? (check key_tag for TAG_NULL=0)
     mov rdi, [rax + DictEntry.key]
-    test rdi, rdi
-    jz .found_empty
+    cmp qword [rax + DictEntry.key_tag], 0
+    je .found_empty
 
     ; Hash match?
     cmp r13, [rax + DictEntry.hash]
@@ -313,8 +340,10 @@ DEF_FUNC_LOCAL dict_find_slot
     ; Key equality check
     ; rdi = entry.key
     mov rsi, r12
+    mov edx, [rax + DictEntry.key_tag]  ; entry's key tag
     push rcx
     push rax
+    mov ecx, [rbp - FS_KTAG]   ; our key tag
     call dict_keys_equal
     pop rax                     ; entry ptr
     pop rcx                     ; slot
@@ -405,10 +434,9 @@ DEF_FUNC_LOCAL dict_resize
     imul rax, rcx, DICT_ENTRY_SIZE
     add rax, r12                ; rax = old entry ptr
 
-    ; Skip empty slots
-    mov rdi, [rax + DictEntry.key]
-    test rdi, rdi
-    jz .rehash_next
+    ; Skip empty slots (check key_tag for TAG_NULL=0)
+    cmp qword [rax + DictEntry.key_tag], 0
+    je .rehash_next
 
     ; Compute new slot: hash & (new_capacity - 1)
     push rcx                    ; save outer index
@@ -417,17 +445,18 @@ DEF_FUNC_LOCAL dict_resize
     dec rdx                     ; new mask
     and rcx, rdx                ; starting slot
 
-    ; Save entry data
+    ; Save entry data (including key_tag)
     push qword [rax + DictEntry.hash]
     push qword [rax + DictEntry.key]
     push qword [rax + DictEntry.value]
     push qword [rax + DictEntry.value_tag]
+    push qword [rax + DictEntry.key_tag]
 
     ; Linear probe in new table to find empty slot
 .rehash_probe:
     imul rax, rcx, DICT_ENTRY_SIZE
     add rax, r15                ; new entry ptr
-    cmp qword [rax + DictEntry.key], 0
+    cmp qword [rax + DictEntry.key_tag], 0
     je .rehash_insert
 
     inc rcx
@@ -438,6 +467,7 @@ DEF_FUNC_LOCAL dict_resize
 
 .rehash_insert:
     ; rax = target entry ptr in new table
+    pop qword [rax + DictEntry.key_tag]
     pop qword [rax + DictEntry.value_tag]
     pop qword [rax + DictEntry.value]
     pop qword [rax + DictEntry.key]
@@ -464,10 +494,12 @@ DEF_FUNC_LOCAL dict_resize
 END_FUNC dict_resize
 
 ;; ============================================================================
-;; dict_set(PyDictObject *dict, PyObject *key, PyObject *value)
-;; Insert or update a key-value pair
+;; dict_set(rdi=dict, rsi=key, rdx=value, rcx=value_tag, r8=key_tag)
+;; Insert or update a key-value pair.
 ;; ============================================================================
-DEF_FUNC dict_set
+DS_VTAG equ 8
+DS_KTAG equ 16
+DEF_FUNC dict_set, 16
     push rbx
     push r12
     push r13
@@ -476,9 +508,12 @@ DEF_FUNC dict_set
     mov rbx, rdi                ; dict
     mov r12, rsi                ; key
     mov r13, rdx                ; value
+    mov [rbp - DS_VTAG], rcx    ; save value_tag
+    mov [rbp - DS_KTAG], r8     ; save key_tag
 
     ; Hash the key
     mov rdi, r12
+    mov esi, r8d                ; key tag
     call obj_hash
     mov r14, rax                ; r14 = hash
 
@@ -486,6 +521,7 @@ DEF_FUNC dict_set
     mov rdi, rbx                ; dict
     mov rsi, r12                ; key
     mov rdx, r14                ; hash
+    mov ecx, [rbp - DS_KTAG]   ; key_tag
     call dict_find_slot
     ; rax = entry ptr, edx = 1 if existing, 0 if empty
 
@@ -493,28 +529,23 @@ DEF_FUNC dict_set
     jnz .update_existing
 
     ; --- Insert new entry ---
-    ; Store hash, key, value
+    ; Store hash, key, key_tag, value, value_tag
     mov [rax + DictEntry.hash], r14
     mov [rax + DictEntry.key], r12
+    mov rcx, [rbp - DS_KTAG]
+    mov [rax + DictEntry.key_tag], rcx
     mov [rax + DictEntry.value], r13
 
-    ; Classify value tag
-    test r13, r13
-    js .set_si
-    jz .set_null
-    mov qword [rax + DictEntry.value_tag], TAG_PTR
-    jmp .set_tag_done
-.set_si:
-    mov qword [rax + DictEntry.value_tag], TAG_SMALLINT
-    jmp .set_tag_done
-.set_null:
-    mov qword [rax + DictEntry.value_tag], TAG_NULL
-.set_tag_done:
+    ; Store value tag from caller
+    mov rcx, [rbp - DS_VTAG]
+    mov [rax + DictEntry.value_tag], rcx
 
-    ; INCREF key and value
-    INCREF r12                         ; key always heap ptr
+    ; INCREF key (tag-aware)
+    mov rsi, [rax + DictEntry.key_tag]
+    INCREF_VAL r12, rsi
+    ; INCREF value (tag-aware)
     mov rsi, [rax + DictEntry.value_tag]
-    INCREF_VAL r13, rsi                ; value may be SmallInt
+    INCREF_VAL r13, rsi
 
     ; Increment ob_size
     inc qword [rbx + PyDictObject.ob_size]
@@ -543,18 +574,9 @@ DEF_FUNC dict_set
 
     ; Store new value and INCREF it
     mov [rax + DictEntry.value], r13
-    ; Classify new value tag
-    test r13, r13
-    js .update_si
-    jz .update_null
-    mov qword [rax + DictEntry.value_tag], TAG_PTR
-    jmp .update_tag_done
-.update_si:
-    mov qword [rax + DictEntry.value_tag], TAG_SMALLINT
-    jmp .update_tag_done
-.update_null:
-    mov qword [rax + DictEntry.value_tag], TAG_NULL
-.update_tag_done:
+    ; Store new value tag from caller
+    mov rcx, [rbp - DS_VTAG]
+    mov [rax + DictEntry.value_tag], rcx
     mov rsi, [rax + DictEntry.value_tag]
     INCREF_VAL r13, rsi                ; value may be SmallInt
 
@@ -596,16 +618,17 @@ DEF_FUNC dict_dealloc
     imul rax, r14, DICT_ENTRY_SIZE
     add rax, r12
 
-    ; Skip empty slots
+    ; Skip empty slots (check key_tag for TAG_NULL=0)
     mov rdi, [rax + DictEntry.key]
-    test rdi, rdi
-    jz .dealloc_next
+    cmp qword [rax + DictEntry.key_tag], 0
+    je .dealloc_next
 
-    ; DECREF key (stays 64-bit)
+    ; DECREF key (tag-aware)
     push rax
-    call obj_decref
+    mov rsi, [rax + DictEntry.key_tag]
+    DECREF_VAL rdi, rsi
 
-    ; DECREF value (fat)
+    ; DECREF value (tag-aware)
     pop rax
     mov rdi, [rax + DictEntry.value]
     mov rsi, [rax + DictEntry.value_tag]
@@ -641,17 +664,17 @@ dict_len:
     ret
 
 ;; ============================================================================
-;; dict_subscript(PyDictObject *dict, PyObject *key) -> PyObject*
-;; mp_subscript: look up key, fatal KeyError if not found
+;; dict_subscript(rdi=dict, rsi=key, edx=key_tag) -> (rax=value, edx=value_tag)
+;; mp_subscript: look up key, raise KeyError if not found
 ;; ============================================================================
 DEF_FUNC dict_subscript
     push rbx
 
     mov rbx, rsi               ; save key for error msg
 
-    ; dict_get(dict, key)
+    ; dict_get(dict, key, key_tag) — edx already has key_tag
     call dict_get
-    test rax, rax
+    test edx, edx
     jz .key_error
 
     ; INCREF the returned value (dict_get returns borrowed fat ref)
@@ -667,26 +690,29 @@ DEF_FUNC dict_subscript
 END_FUNC dict_subscript
 
 ;; ============================================================================
-;; dict_ass_subscript(PyDictObject *dict, PyObject *key, PyObject *value)
-;; mp_ass_subscript: set key=value in dict
+;; dict_ass_subscript(rdi=dict, rsi=key, rdx=value, ecx=key_tag, r8d=value_tag)
+;; mp_ass_subscript: set key=value or delete key from dict
 ;; ============================================================================
 DEF_FUNC_BARE dict_ass_subscript
     ; If value is NULL, this is a delete operation
     test rdx, rdx
     jz .das_delete
-    ; Otherwise delegate to dict_set
+    ; dict_set wants (rdi=dict, rsi=key, rdx=value, rcx=value_tag, r8=key_tag)
+    ; Caller passes ecx=key_tag, r8d=value_tag — swap them
+    xchg ecx, r8d
     jmp dict_set
 .das_delete:
-    ; dict_del(dict, key)
-    ; rdi = dict, rsi = key (already set)
+    ; dict_del wants (rdi=dict, rsi=key, edx=key_tag)
+    mov edx, ecx               ; key_tag from caller's ecx
     jmp dict_del
 END_FUNC dict_ass_subscript
 
 ;; ============================================================================
-;; dict_del(PyDictObject *dict, PyObject *key) -> int (0=ok, -1=not found)
+;; dict_del(rdi=dict, rsi=key, edx=key_tag) -> int (0=ok, -1=not found)
 ;; Delete key from dict. DECREFs both key and value.
 ;; ============================================================================
-DEF_FUNC dict_del
+DD_KTAG equ 8
+DEF_FUNC dict_del, 8
     push rbx
     push r12
     push r13
@@ -695,9 +721,11 @@ DEF_FUNC dict_del
 
     mov rbx, rdi                ; dict
     mov r12, rsi                ; key
+    mov [rbp - DD_KTAG], rdx    ; save key_tag
 
     ; Hash the key
     mov rdi, r12
+    mov esi, edx                ; key tag
     call obj_hash
     mov r13, rax                ; hash
 
@@ -719,15 +747,17 @@ DEF_FUNC dict_del
     add rax, rdx
 
     mov rdi, [rax + DictEntry.key]
-    test rdi, rdi
-    jz .dd_not_found
+    cmp qword [rax + DictEntry.key_tag], 0
+    je .dd_not_found
 
     cmp r13, [rax + DictEntry.hash]
     jne .dd_next
 
     mov rsi, r12
+    mov edx, [rax + DictEntry.key_tag]  ; entry's key tag
     push rcx
     push rax
+    mov ecx, [rbp - DD_KTAG]   ; our key tag
     call dict_keys_equal
     pop rdx                     ; entry ptr
     pop rcx
@@ -735,16 +765,22 @@ DEF_FUNC dict_del
     jz .dd_next
 
     ; Found: null out entry, DECREF key and value, decrement size
+    push qword [rdx + DictEntry.key_tag]
     mov rdi, [rdx + DictEntry.key]
     mov qword [rdx + DictEntry.key], 0
+    mov qword [rdx + DictEntry.key_tag], 0
     push qword [rdx + DictEntry.value]
     push qword [rdx + DictEntry.value_tag]
     mov qword [rdx + DictEntry.value], 0
     mov qword [rdx + DictEntry.value_tag], 0
-    call obj_decref             ; DECREF key (64-bit)
+
+    ; DECREF key (tag-aware)
+    mov rsi, [rsp + 24]         ; key_tag (3 pushes deep)
+    DECREF_VAL rdi, rsi
     pop rsi                     ; value_tag
     pop rdi                     ; value payload
     DECREF_VAL rdi, rsi         ; DECREF value (fat)
+    add rsp, 8                  ; pop key_tag
     dec qword [rbx + PyDictObject.ob_size]
     ; Bump version counter
     inc qword [rbx + PyDictObject.dk_version]
@@ -807,8 +843,8 @@ DEF_FUNC dict_tp_iter
 END_FUNC dict_tp_iter
 
 ;; ============================================================================
-;; dict_iter_next(PyDictIterObject *self) -> PyObject* or NULL
-;; Return next key, or NULL if exhausted.
+;; dict_iter_next(PyDictIterObject *self) -> (rax=key, edx=key_tag) or (0, TAG_NULL)
+;; Return next key, or (0, TAG_NULL) if exhausted.
 ;; Scans entries for next non-empty slot.
 ;; rdi = iterator
 ;; ============================================================================
@@ -822,23 +858,23 @@ DEF_FUNC_BARE dict_iter_next
     cmp rcx, rdx
     jge .di_exhausted
 
-    ; Check if entry at index has a key
+    ; Check if entry at index has a key (key_tag != TAG_NULL)
     imul rax, rcx, DictEntry_size
     add rax, rsi
     mov r8, [rax + DictEntry.key]
-    test r8, r8
-    jz .di_skip
-    ; Also check value (deleted entries have NULL value)
-    mov r9, [rax + DictEntry.value]
-    test r9, r9
-    jz .di_skip
+    cmp qword [rax + DictEntry.key_tag], 0
+    je .di_skip
+    ; Also check value_tag (deleted entries have TAG_NULL value_tag)
+    cmp qword [rax + DictEntry.value_tag], 0
+    je .di_skip
 
-    ; Found a valid entry — return the key
+    ; Found a valid entry — return the key with its tag
     inc rcx
     mov [rdi + PyDictIterObject.it_index], rcx
+    mov edx, [rax + DictEntry.key_tag]  ; key tag from entry
     mov rax, r8
-    INCREF rax
-    mov edx, TAG_PTR               ; keys are always heap ptrs
+    ; INCREF key (tag-aware)
+    INCREF_VAL rax, rdx
     ret
 
 .di_skip:
@@ -848,6 +884,7 @@ DEF_FUNC_BARE dict_iter_next
 .di_exhausted:
     mov [rdi + PyDictIterObject.it_index], rcx
     xor eax, eax
+    xor edx, edx                  ; TAG_NULL = exhausted
     ret
 END_FUNC dict_iter_next
 
@@ -880,13 +917,13 @@ dict_iter_self:
     ret
 
 ;; ============================================================================
-;; dict_contains(PyDictObject *self, PyObject *key) -> int (0 or 1)
+;; dict_contains(rdi=dict, rsi=key, edx=key_tag) -> int (0 or 1)
 ;; For the 'in' operator: checks if key exists in dict.
 ;; ============================================================================
 DEF_FUNC_BARE dict_contains
-    ; Simply call dict_get and return 0/1 based on result
+    ; edx already has key_tag, pass through to dict_get
     call dict_get
-    test rax, rax
+    test edx, edx
     jz .dc_no
     mov eax, 1
     ret

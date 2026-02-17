@@ -31,10 +31,10 @@ DEF_FUNC memoryview_type_call, MV_FRAME
     ; rdi=type, rsi=args, rdx=nargs
     cmp rdx, 1
     jne .mv_error
-    mov rdi, [rsi]                     ; arg0
+    mov rdi, [rsi]                     ; arg0 payload
     ; Must be a bytes-like object
-    test rdi, rdi
-    js .mv_error                       ; SmallInt → error
+    cmp dword [rsi + 8], TAG_SMALLINT
+    je .mv_error                       ; SmallInt → error
     mov rax, [rdi + PyObject.ob_type]
     lea rcx, [rel bytes_type]
     cmp rax, rcx
@@ -111,9 +111,9 @@ DEF_FUNC memoryview_subscript, MS_FRAME
     mov [rbp - MS_OBJ], rdi
     mov [rbp - MS_KEY], rsi
 
-    ; Check if key is a slice
-    test rsi, rsi
-    js .ms_int_index                   ; SmallInt index
+    ; Check if key is a SmallInt (edx = key tag from caller)
+    cmp edx, TAG_SMALLINT
+    je .ms_int_index                   ; SmallInt index
     mov rax, [rsi + PyObject.ob_type]
     lea rcx, [rel slice_type]
     cmp rax, rcx
@@ -172,8 +172,6 @@ DEF_FUNC memoryview_subscript, MS_FRAME
 .ms_int_index:
     ; SmallInt index — return single byte as SmallInt
     mov rdi, [rbp - MS_OBJ]
-    shl rsi, 1
-    sar rsi, 1                         ; decode SmallInt
     ; Handle negative index
     mov rcx, [rdi + PyMemoryViewObject.mv_len]
     test rsi, rsi
@@ -186,7 +184,6 @@ DEF_FUNC memoryview_subscript, MS_FRAME
     jge .ms_index_error
     mov rdx, [rdi + PyMemoryViewObject.mv_buf]
     movzx eax, byte [rdx + rsi]
-    bts rax, 63                        ; SmallInt
     mov edx, TAG_SMALLINT
     leave
     ret

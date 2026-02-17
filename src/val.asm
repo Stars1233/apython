@@ -38,8 +38,9 @@ DEF_FUNC fat_to_obj
     ret
 
 .smallint:
-    ; While bit-63 encoding present: payload is a valid 64-bit tagged pointer
-    mov rax, rdi
+    ; Create a heap-allocated PyIntObject from raw int64 payload
+    extern int_from_i64_gmp
+    call int_from_i64_gmp      ; rdi already has the int value
     leave
     ret
 

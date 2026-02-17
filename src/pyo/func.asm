@@ -184,30 +184,20 @@ DEF_FUNC func_call
     xor ecx, ecx
     test eax, eax
     jz .positional_done
+    mov r10d, eax                  ; r10d = loop limit (preserved across loop)
 
 .bind_positional:
-    mov rdx, [r14 + rcx*8]         ; args at 8-byte stride
     mov r8, rcx
     shl r8, 4                      ; localsplus at 16-byte stride
+    mov rax, rcx
+    shl rax, 4                     ; args at 16-byte stride
+    mov rdx, [r14 + rax]           ; arg payload
+    mov r9, [r14 + rax + 8]        ; arg tag
     mov [r12 + PyFrame.localsplus + r8], rdx
-    ; Classify tag for arg value
-    test rdx, rdx
-    js .fc_pt_si
-    jz .fc_pt_null
-    mov qword [r12 + PyFrame.localsplus + r8 + 8], TAG_PTR
-    mov r9, TAG_PTR
-    jmp .fc_pt_done
-.fc_pt_si:
-    mov qword [r12 + PyFrame.localsplus + r8 + 8], TAG_SMALLINT
-    mov r9, TAG_SMALLINT
-    jmp .fc_pt_done
-.fc_pt_null:
-    mov qword [r12 + PyFrame.localsplus + r8 + 8], TAG_NULL
-    mov r9, TAG_NULL
-.fc_pt_done:
+    mov [r12 + PyFrame.localsplus + r8 + 8], r9
     INCREF_VAL rdx, r9
     inc ecx
-    cmp ecx, eax
+    cmp ecx, r10d
     jb .bind_positional
 
 .positional_done:
@@ -245,26 +235,15 @@ DEF_FUNC func_call
     jge .store_varargs
     lea edi, [r8d + esi]
     movsxd rdi, edi
-    mov r9, [r14 + rdi*8]           ; value from args (8-byte stride)
+    mov r10, rdi
+    shl r10, 4                      ; source index * 16 (args stride)
+    mov r9, [r14 + r10]             ; value payload from args
+    mov r11, [r14 + r10 + 8]        ; value tag from args
     shl rsi, 4                      ; dest index * 16
     mov [rax + PyTupleObject.ob_item + rsi], r9       ; payload
-    ; Classify tag
-    test r9, r9
-    js .fv_tag_si
-    jz .fv_tag_null
-    mov qword [rax + PyTupleObject.ob_item + rsi + 8], TAG_PTR
-    mov rdi, TAG_PTR
-    jmp .fv_tag_done
-.fv_tag_si:
-    mov qword [rax + PyTupleObject.ob_item + rsi + 8], TAG_SMALLINT
-    mov rdi, TAG_SMALLINT
-    jmp .fv_tag_done
-.fv_tag_null:
-    mov qword [rax + PyTupleObject.ob_item + rsi + 8], TAG_NULL
-    mov rdi, TAG_NULL
-.fv_tag_done:
+    mov [rax + PyTupleObject.ob_item + rsi + 8], r11  ; tag
     shr rsi, 4                      ; restore rsi = original index
-    INCREF_VAL r9, rdi
+    INCREF_VAL r9, r11
     inc esi
     jmp .fill_varargs
 
@@ -391,6 +370,7 @@ DEF_FUNC func_call
 
     ; dict_get(kwdefaults, param_name) -> borrowed ref or NULL
     mov rdi, rax            ; kwdefaults dict
+    mov edx, TAG_PTR
     call dict_get
 
     mov r8, rax             ; r8 = value payload (or NULL)
@@ -550,23 +530,11 @@ DEF_FUNC func_bind_kwargs
 
     ; Assign: localsplus[j] = args[value_index], INCREF
     mov rax, [rsp+24]
-    mov rdi, [r13 + rax*8]    ; args at 8-byte stride
+    shl rax, 4                ; args at 16-byte stride
+    mov rdi, [r13 + rax]      ; arg payload
+    mov rsi, [r13 + rax + 8]  ; arg tag
     mov [r12 + PyFrame.localsplus + rdx], rdi
-    ; Classify tag for kw arg value
-    test rdi, rdi
-    js .kwarg_tag_si
-    jz .kwarg_tag_null
-    mov qword [r12 + PyFrame.localsplus + rdx + 8], TAG_PTR
-    mov rsi, TAG_PTR
-    jmp .kwarg_tag_done
-.kwarg_tag_si:
-    mov qword [r12 + PyFrame.localsplus + rdx + 8], TAG_SMALLINT
-    mov rsi, TAG_SMALLINT
-    jmp .kwarg_tag_done
-.kwarg_tag_null:
-    mov qword [r12 + PyFrame.localsplus + rdx + 8], TAG_NULL
-    mov rsi, TAG_NULL
-.kwarg_tag_done:
+    mov [r12 + PyFrame.localsplus + rdx + 8], rsi
     INCREF_VAL rdi, rsi
     jmp .kw_next
 
@@ -576,13 +544,16 @@ DEF_FUNC func_bind_kwargs
     test rdi, rdi
     jz .kw_next             ; no **kwargs, skip (TODO: error)
 
-    ; dict_set(kwargs_dict, key, value)
-    mov rcx, [rsp+16]
-    mov rsi, rcx
+    ; dict_set(kwargs_dict, key, value, value_tag)
+    mov rax, [rsp+16]
+    mov rsi, rax
     shl rsi, 4                     ; * 16 (fat tuple stride)
     mov rsi, [r14 + PyTupleObject.ob_item + rsi]     ; key = kw_name
     mov rax, [rsp+24]
-    mov rdx, [r13 + rax*8]  ; value
+    shl rax, 4                     ; * 16 (16-byte args stride)
+    mov rcx, [r13 + rax + 8]      ; value tag
+    mov rdx, [r13 + rax]          ; value payload
+    mov r8d, TAG_PTR
     call dict_set
 
 .kw_next:
@@ -671,10 +642,12 @@ DEF_FUNC func_setattr
     push rbx
     push r12
     push r13
+    push r14
 
     mov rbx, rdi            ; rbx = func
     mov r12, rsi            ; r12 = name
     mov r13, rdx            ; r13 = value
+    mov r14d, ecx           ; r14d = value_tag (from caller)
 
     ; Check if func_dict exists
     mov rdi, [rbx + PyFuncObject.func_dict]
@@ -687,11 +660,14 @@ DEF_FUNC func_setattr
     mov rdi, rax
 
 .have_dict:
-    ; dict_set(func_dict, name, value)
+    ; dict_set(func_dict, name, value, value_tag, key_tag)
     mov rsi, r12
     mov rdx, r13
+    mov ecx, r14d           ; value_tag from caller
+    mov r8d, TAG_PTR        ; key_tag (name is always heap string)
     call dict_set
 
+    pop r14
     pop r13
     pop r12
     pop rbx
@@ -732,8 +708,9 @@ DEF_FUNC func_getattr
     jz .not_found
 
     mov rsi, r12
+    mov edx, TAG_PTR
     call dict_get
-    test rax, rax
+    test edx, edx
     jz .not_found
 
     ; Found in dict - INCREF and return (rdx = tag from dict_get)

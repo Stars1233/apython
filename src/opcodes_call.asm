@@ -46,7 +46,8 @@ CL_TOTAL     equ 40
 CL_SAVED_RSP equ 48
 CL_TPCALL    equ 56
 CL_RETTAG    equ 64
-CL_FRAME     equ 72
+CL_CALL_TAG  equ 72
+CL_FRAME     equ 80
 
 ; op_make_function locals (DEF_FUNC op_make_function, MF_FRAME)
 MF_FLAGS   equ 8
@@ -132,6 +133,8 @@ DEF_FUNC op_call, CL_FRAME
 
     ; === Method call: callable is in the deeper slot ===
     mov [rbp - CL_CALLABLE], rdi               ; callable = func_or_null
+    mov rdx, [r13 + rax + 8]                   ; callable tag
+    mov [rbp - CL_CALL_TAG], rdx
     mov qword [rbp - CL_IS_METHOD], 1          ; is_method = 1
     jmp .setup_call
 
@@ -142,13 +145,16 @@ DEF_FUNC op_call, CL_FRAME
     shl rax, 4                     ; * 16 bytes/slot
     mov rdi, [r13 + rax]
     mov [rbp - CL_CALLABLE], rdi               ; callable = callable_or_self
+    mov rdx, [r13 + rax + 8]                   ; callable tag
+    mov [rbp - CL_CALL_TAG], rdx
 
 .setup_call:
     ; Get tp_call from the callable's type
     mov rdi, [rbp - CL_CALLABLE]              ; callable
     test rdi, rdi
     jz .not_callable               ; NULL check
-    js .not_callable               ; SmallInt check (bit 63 set)
+    cmp dword [rbp - CL_CALL_TAG], TAG_SMALLINT
+    je .not_callable               ; SmallInt check
     mov rax, [rdi + PyObject.ob_type]
     test rax, rax
     jz .not_callable               ; no type (shouldn't happen)
@@ -203,35 +209,21 @@ DEF_FUNC op_call, CL_FRAME
     je .dunder_not_method
     inc rdx                    ; nargs + 2 for method calls
 .dunder_not_method:
-    ; Build contiguous 8-byte args buffer (value stack has 16-byte stride)
+    ; Zero-copy: pass value stack pointer directly (16-byte stride)
     mov [rbp - CL_TPCALL], rax          ; save tp_call
     mov [rbp - CL_TOTAL], rdx          ; save total nargs
-    mov [rbp - CL_SAVED_RSP], rsp          ; save rsp
-    lea r8, [rdx*8 + 15]
-    and r8, ~15
-    sub rsp, r8
-    ; Copy payloads from value stack to contiguous buffer
+
+    ; Calculate pointer to first arg on value stack
     mov rcx, rdx
+    shl rcx, 4                ; total_nargs * 16
     neg rcx
-    shl rcx, 4                ; -total_nargs * 16
-    lea r8, [r13 + rcx]       ; base in value stack
-    xor ecx, ecx
-.dunder_copy_args:
-    cmp rcx, rdx
-    jge .dunder_args_copied
-    mov r9, rcx
-    shl r9, 4
-    mov r9, [r8 + r9]         ; payload from 16-byte slot
-    mov [rsp + rcx*8], r9
-    inc rcx
-    jmp .dunder_copy_args
-.dunder_args_copied:
+    lea rsi, [r13 + rcx]     ; rsi = pointer to first arg (16B stride)
+
     mov rdi, [rbp - CL_CALLABLE]         ; __call__ func
-    mov rsi, rsp              ; contiguous args
+    ; rsi = args ptr (already set)
     mov rdx, [rbp - CL_TOTAL]         ; total nargs
     mov rax, [rbp - CL_TPCALL]         ; tp_call
     call rax
-    mov rsp, [rbp - CL_SAVED_RSP]
     mov [rbp - CL_RETVAL], rax
     mov [rbp - CL_RETTAG], rdx
     jmp .cleanup
@@ -249,38 +241,24 @@ DEF_FUNC op_call, CL_FRAME
     inc rdx
 
 .no_method_adj:
-    ; Build contiguous 8-byte args buffer (value stack has 16-byte stride)
+    ; Zero-copy: pass value stack pointer directly (16-byte stride)
+    ; The value stack already has args laid out as [payload, tag] pairs.
     mov [rbp - CL_TOTAL], rdx               ; save total nargs
-    mov [rbp - CL_SAVED_RSP], rsp               ; save rsp
-    lea r8, [rdx*8 + 15]
-    and r8, ~15
-    sub rsp, r8
 
-    ; Copy payloads from value stack to contiguous buffer
-    mov rcx, rdx                    ; total nargs
+    ; Calculate pointer to first arg on value stack
+    ; For function: args start at r13 - nargs*16
+    ; For method: args start at r13 - (nargs+1)*16 (includes self)
+    mov rcx, rdx
+    shl rcx, 4                     ; total_nargs * 16
     neg rcx
-    shl rcx, 4                     ; -total_nargs * 16
-    lea r8, [r13 + rcx]            ; base in value stack (16-byte stride)
-    xor ecx, ecx
-    mov r9, [rbp - CL_TOTAL]               ; loop limit
-.copy_args:
-    cmp rcx, r9
-    jge .args_copied
-    mov r10, rcx
-    shl r10, 4                     ; source offset = i * 16
-    mov r10, [r8 + r10]            ; payload
-    mov [rsp + rcx*8], r10         ; store in contiguous buffer
-    inc rcx
-    jmp .copy_args
-.args_copied:
+    lea rsi, [r13 + rcx]           ; rsi = pointer to first arg (16B stride)
 
     ; Call tp_call(callable, args, nargs)
     mov rdi, [rbp - CL_CALLABLE]              ; callable
-    mov rsi, rsp                    ; contiguous args ptr
-    mov rdx, [rbp - CL_TOTAL]              ; total nargs
+    ; rsi = args ptr (already set above)
+    ; rdx = total nargs (already set)
     mov rax, [rbp - CL_TPCALL]              ; tp_call
     call rax
-    mov rsp, [rbp - CL_SAVED_RSP]              ; restore rsp
     mov [rbp - CL_RETVAL], rax               ; save return value
     mov [rbp - CL_RETTAG], rdx               ; save return tag
 
@@ -291,14 +269,15 @@ DEF_FUNC op_call, CL_FRAME
     ; after a call so it can't contaminate the next func_call.
     mov qword [rel kw_names_pending], 0
 
-    ; Pop nargs args and DECREF each
+    ; Pop nargs args and DECREF each (tag-aware for SmallInts)
     mov rcx, [rbp - CL_NARGS]
     test rcx, rcx
     jz .args_done
 .decref_args:
     sub r13, 16
-    mov rdi, [r13]
-    call obj_decref
+    mov rdi, [r13]             ; payload
+    mov rsi, [r13 + 8]        ; tag
+    DECREF_VAL rdi, rsi
     dec qword [rbp - CL_NARGS]
     cmp qword [rbp - CL_NARGS], 0
     jnz .decref_args
@@ -307,12 +286,14 @@ DEF_FUNC op_call, CL_FRAME
     ; Pop shallower slot (self for method, callable for function) and DECREF
     sub r13, 16
     mov rdi, [r13]
-    call obj_decref
+    mov rsi, [r13 + 8]
+    DECREF_VAL rdi, rsi
 
     ; Pop deeper slot (callable for method, NULL for function) and DECREF
     sub r13, 16
     mov rdi, [r13]
-    call obj_decref
+    mov rsi, [r13 + 8]
+    XDECREF_VAL rdi, rsi
     ; Check for exception (NULL return with current_exception set)
     mov rax, [rbp - CL_RETVAL]
     test rax, rax
@@ -458,7 +439,8 @@ CFX_MERGED  equ 96       ; merged args buffer (heap ptr)
 CFX_KWNAMES equ 104      ; kw_names tuple
 CFX_RETTAG  equ 112      ; return tag from tp_call
 CFX_TEMP    equ 120      ; temp args buffer for fat tuple extraction
-CFX_FRAME2  equ 128      ; new frame size (manual push, so offset from rbp-16)
+CFX_FUNC_TAG equ 128     ; func tag for SmallInt check
+CFX_FRAME2  equ 136      ; new frame size (manual push, so offset from rbp-16)
 
 DEF_FUNC op_call_function_ex
     push rbx                        ; save (clobbered by eval convention save)
@@ -482,7 +464,9 @@ DEF_FUNC op_call_function_ex
 
     ; Pop func
     VPOP rax
+    mov rdx, [r13 + 8]           ; func tag (after VPOP)
     mov [rbp - CFX_FUNC], rax
+    mov [rbp - CFX_FUNC_TAG], rdx
 
     ; Pop NULL (unused, 16 bytes/slot)
     sub r13, 16
@@ -491,7 +475,8 @@ DEF_FUNC op_call_function_ex
     mov rdi, [rbp - CFX_FUNC]
     test rdi, rdi
     jz .cfex_not_callable
-    js .cfex_not_callable
+    cmp dword [rbp - CFX_FUNC_TAG], TAG_SMALLINT
+    je .cfex_not_callable
     mov rax, [rdi + PyObject.ob_type]
     mov rax, [rax + PyTypeObject.tp_call]
     test rax, rax
@@ -524,7 +509,9 @@ DEF_FUNC op_call_function_ex
     ; rsi = items ptr (16-byte stride), rcx = count
     push rsi                       ; save items ptr
     push rcx                       ; save count
-    lea rdi, [rcx * 8 + 8]        ; alloc size (min 8)
+    mov rdi, rcx
+    shl rdi, 4                     ; count * 16
+    add rdi, 16                    ; alloc size (16B per arg + pad)
     call ap_malloc
     mov [rbp - CFX_TEMP], rax      ; save temp buffer
     pop rcx                        ; restore count
@@ -535,9 +522,13 @@ DEF_FUNC op_call_function_ex
     jge .cfex_extract_done
     mov rax, rdx
     shl rax, 4                     ; * 16 for fat items
-    mov rax, [rsi + rax]           ; payload
+    mov r8, [rsi + rax]            ; payload
+    mov r9, [rsi + rax + 8]       ; tag
     mov rdi, [rbp - CFX_TEMP]
-    mov [rdi + rdx*8], rax         ; store in temp at *8
+    mov r10, rdx
+    shl r10, 4                     ; dest offset * 16
+    mov [rdi + r10], r8            ; store payload at 16B stride
+    mov [rdi + r10 + 8], r9       ; store tag
     inc rdx
     jmp .cfex_extract_loop
 .cfex_extract_done:
@@ -576,13 +567,13 @@ DEF_FUNC op_call_function_ex
     mov rcx, [rax + PyVarObject.ob_size]
     mov [rbp - CFX_NPOS], rcx
 
-    ; Allocate merged args buffer: (n_pos + n_kw) * 8
+    ; Allocate merged args buffer: (n_pos + n_kw) * 16
     mov rdi, [rbp - CFX_NPOS]
     add rdi, [rbp - CFX_NKW]
-    shl rdi, 3                    ; * 8 bytes per pointer
+    shl rdi, 4                    ; * 16 bytes per fat arg
     test rdi, rdi
     jnz .cfex_alloc_merged
-    mov rdi, 8                    ; minimum 8 bytes
+    mov rdi, 16                   ; minimum 16 bytes
 .cfex_alloc_merged:
     call ap_malloc
     mov [rbp - CFX_MERGED], rax
@@ -606,8 +597,12 @@ DEF_FUNC op_call_function_ex
 .cfex_copy_pos_loop:
     mov rax, rdx
     shl rax, 4                    ; *16 for fat tuple
-    mov rax, [rsi + rax]          ; payload from fat tuple
-    mov [rdi + rdx*8], rax        ; store at *8 in merged
+    mov r8, [rsi + rax]           ; payload from fat tuple
+    mov r9, [rsi + rax + 8]      ; tag from fat tuple
+    mov r10, rdx
+    shl r10, 4                    ; *16 for merged buffer
+    mov [rdi + r10], r8           ; store payload at 16B stride
+    mov [rdi + r10 + 8], r9      ; store tag
     inc rdx
     cmp rdx, rcx
     jb .cfex_copy_pos_loop
@@ -639,12 +634,21 @@ DEF_FUNC op_call_function_ex
     mov rdi, [rax + DictEntry.value]
 
     ; Store value in merged buffer at position [n_pos + kw_idx]
+    ; Also read value_tag from dict entry for fat arg
     push rcx
     push rdx
     mov rcx, [rbp - CFX_NPOS]
     add rcx, rdx                 ; merged index = n_pos + kw_idx
+    shl rcx, 4                   ; * 16 for fat args
     mov rax, [rbp - CFX_MERGED]
-    mov [rax + rcx*8], rdi       ; merged[n_pos + kw_idx] = value
+    mov [rax + rcx], rdi         ; merged[n_pos + kw_idx].payload = value
+    ; Read value_tag — rax from earlier imul still points to entry (but was clobbered)
+    ; Recalculate entry pointer
+    mov r8, [rsp + 8]           ; restore dict scan index (pushed rcx)
+    imul r8, r8, DictEntry_size
+    add r8, rbx                  ; r8 = entry ptr
+    mov r9, [r8 + DictEntry.value_tag]
+    mov [rax + rcx + 8], r9     ; merged[...].tag = value_tag
 
     ; Store key in kw_names tuple at kw_idx (fat: *16 + TAG_PTR)
     mov rax, [rbp - CFX_KWNAMES]
@@ -765,8 +769,9 @@ DEF_FUNC op_before_with
     mov rdi, [rbx + PyObject.ob_type]
     mov rdi, [rdi + PyTypeObject.tp_dict]
     mov rsi, r12
+    mov edx, TAG_PTR
     call dict_get
-    test rax, rax
+    test edx, edx
     jz .bw_no_exit_decref_name
 
     ; Got __exit__ function — create bound method(exit_func, mgr)
@@ -794,8 +799,9 @@ DEF_FUNC op_before_with
     mov rdi, [rbx + PyObject.ob_type]
     mov rdi, [rdi + PyTypeObject.tp_dict]
     mov rsi, r12
+    mov edx, TAG_PTR
     call dict_get
-    test rax, rax
+    test edx, edx
     jz .bw_no_enter_decref_name
 
     ; Got __enter__ function - call it with mgr as self
@@ -810,13 +816,16 @@ DEF_FUNC op_before_with
     test rcx, rcx
     jz .bw_no_enter
 
-    ; Set up call: push mgr as arg on stack temporarily
-    push qword [rbp - BW_MGR]            ; &mgr on machine stack
+    ; Set up call: build fat arg on stack
+    sub rsp, 16
+    mov r8, [rbp - BW_MGR]
+    mov [rsp], r8                  ; args[0] payload = mgr
+    mov qword [rsp + 8], TAG_PTR   ; args[0] tag
     mov rdi, rax                   ; callable = __enter__
-    mov rsi, rsp                   ; args ptr = &mgr
+    mov rsi, rsp                   ; args ptr
     mov rdx, 1                     ; nargs = 1
     call rcx
-    add rsp, 8                     ; pop mgr arg
+    add rsp, 16                    ; pop fat arg
     mov [rbp - BW_ENTER], rax              ; save __enter__ result
     mov [rbp - BW_RETTAG], rdx             ; save __enter__ result tag
 
@@ -895,27 +904,36 @@ DEF_FUNC op_with_except_start, WES_FRAME
     ; Build args array: [exc_type, exc_val, exc_tb]
     ; method_call will prepend self automatically
     mov rcx, [rbp - WES_VAL]               ; val
-    sub rsp, 24                      ; 3 args
+    sub rsp, 48                      ; 3 fat args (16 bytes each)
     ; Get type of exception
     test rcx, rcx
     jz .wes_none_exc
-    js .wes_none_exc
+    cmp dword [r13 - 8], TAG_SMALLINT       ; val tag from stack
+    je .wes_none_exc
+    ; Exception case
     mov rdx, [rcx + PyObject.ob_type]
-    jmp .wes_set_args
+    mov [rsp], rdx                   ; exc_type payload
+    mov qword [rsp + 8], TAG_PTR     ; exc_type tag
+    mov [rsp + 16], rcx              ; exc_val payload
+    mov qword [rsp + 24], TAG_PTR    ; exc_val tag
+    jmp .wes_set_tb
 .wes_none_exc:
     lea rdx, [rel none_singleton]
-.wes_set_args:
-    mov [rsp], rdx                   ; exc_type
-    mov [rsp+8], rcx                 ; exc_val
+    mov [rsp], rdx                   ; exc_type = None
+    mov qword [rsp + 8], TAG_PTR     ; exc_type tag
+    mov [rsp + 16], rdx              ; exc_val = None
+    mov qword [rsp + 24], TAG_PTR    ; exc_val tag
+.wes_set_tb:
     lea rdx, [rel none_singleton]
-    mov [rsp+16], rdx                ; exc_tb = None
+    mov [rsp + 32], rdx              ; exc_tb = None
+    mov qword [rsp + 40], TAG_PTR    ; exc_tb tag
 
     ; Call bound_exit(exc_type, exc_val, exc_tb)
     mov rdi, [rbp - WES_FUNC]                 ; callable = bound method
     mov rsi, rsp                     ; args ptr
     mov rdx, 3                       ; nargs = 3 (method_call adds self)
     call rax
-    add rsp, 24
+    add rsp, 48
     mov [rbp - WES_RESULT], rax                ; save result
     mov [rbp - WES_RETTAG], rdx                ; save result tag
 

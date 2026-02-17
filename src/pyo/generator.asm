@@ -54,6 +54,7 @@ DEF_FUNC gen_new
     mov qword [r12 + PyGenObject.gi_name], 0
 
     mov rax, r12               ; return gen object
+    mov edx, TAG_PTR             ; return tag
     pop r12
     pop rbx
     leave
@@ -125,6 +126,7 @@ DEF_FUNC gen_iternext
 
 .return_null:
     xor eax, eax              ; return NULL (StopIteration)
+    xor edx, edx              ; TAG_NULL = exhausted
     pop r12
     pop rbx
     leave
@@ -140,6 +142,7 @@ DEF_FUNC gen_iternext
 
 .exhausted:
     xor eax, eax              ; return NULL
+    xor edx, edx              ; TAG_NULL = exhausted
     pop r12
     pop rbx
     leave
@@ -147,6 +150,7 @@ DEF_FUNC gen_iternext
 
 .running_error:
     xor eax, eax              ; return NULL
+    xor edx, edx              ; TAG_NULL = exhausted
     pop r12
     pop rbx
     leave
@@ -207,12 +211,15 @@ END_FUNC gen_repr
 ;; ============================================================================
 global gen_send
 DEF_FUNC gen_send
+    ; rdi = generator, rsi = value, edx = value_tag
     push rbx
     push r12
     push r13
+    push r14
 
     mov rbx, rdi               ; rbx = generator
     mov r13, rsi               ; r13 = value to send
+    mov r14d, edx              ; r14d = value tag
 
     ; Check if generator is exhausted
     mov r12, [rbx + PyGenObject.gi_frame]
@@ -229,24 +236,14 @@ DEF_FUNC gen_send
     ; Push sent value onto the frame's value stack (16 bytes/slot)
     mov rax, [r12 + PyFrame.stack_ptr]
     mov [rax], r13
-    ; Auto-classify tag for sent value
-    test r13, r13
-    js .gs_tag_smallint
-    jz .gs_tag_null
-    mov qword [rax + 8], TAG_PTR
-    jmp .gs_tag_done
-.gs_tag_smallint:
-    mov qword [rax + 8], TAG_SMALLINT
-    jmp .gs_tag_done
-.gs_tag_null:
-    mov qword [rax + 8], TAG_NULL
-.gs_tag_done:
+    ; Store tag from caller
+    mov ecx, r14d
+    mov [rax + 8], rcx
     add rax, 16
     mov [r12 + PyFrame.stack_ptr], rax
 
-    ; INCREF sent value
-    mov rdi, r13
-    call obj_incref
+    ; INCREF sent value (tag-aware, may be SmallInt)
+    INCREF_VAL r13, r14
 
     ; Resume execution
     mov rdi, r12
@@ -274,6 +271,7 @@ DEF_FUNC gen_send
 .gs_stop:
     xor eax, eax
     xor edx, edx               ; TAG_NULL
+    pop r14
     pop r13
     pop r12
     pop rbx
@@ -283,6 +281,7 @@ DEF_FUNC gen_send
 .gs_yielded:
     mov rax, r12
     mov rdx, r13               ; restore result tag
+    pop r14
     pop r13
     pop r12
     pop rbx
@@ -292,6 +291,7 @@ DEF_FUNC gen_send
 .gs_exhausted:
     xor eax, eax
     xor edx, edx               ; TAG_NULL
+    pop r14
     pop r13
     pop r12
     pop rbx
@@ -301,6 +301,7 @@ DEF_FUNC gen_send
 .gs_error:
     xor eax, eax
     xor edx, edx               ; TAG_NULL
+    pop r14
     pop r13
     pop r12
     pop rbx
@@ -330,6 +331,7 @@ DEF_FUNC gen_close
     push rax
     call obj_incref
     pop rax
+    mov edx, TAG_PTR             ; None is a heap pointer
 
     pop rbx
     leave
@@ -421,8 +423,10 @@ DEF_FUNC _gen_send_impl
     cmp rsi, 2
     jne .gsi_error
 
-    mov rsi, [rdi + 8]         ; value = args[1]
-    mov rdi, [rdi]             ; gen = args[0]
+    mov rax, rdi               ; save args ptr
+    mov edx, [rax + 24]       ; value_tag = args[1].tag
+    mov rsi, [rax + 16]       ; value = args[1].payload
+    mov rdi, [rax]            ; gen = args[0].payload
     call gen_send
     test rax, rax
     jnz .gsi_ret

@@ -101,12 +101,13 @@ endstruc
 ; Dict entry
 struc DictEntry
     .hash:      resq 1     ; +0: cached hash
-    .key:       resq 1     ; +8: key PyObject* (64-bit)
+    .key:       resq 1     ; +8: key payload
     .value:     resq 1     ; +16: value payload
     .value_tag: resq 1     ; +24: value tag
+    .key_tag:   resq 1     ; +32: key tag
 endstruc
 
-DICT_ENTRY_SIZE equ DictEntry_size  ; 32
+DICT_ENTRY_SIZE equ DictEntry_size  ; 40
 
 ; Function object
 struc PyFuncObject
@@ -164,7 +165,8 @@ struc PyIntSubclassObject
     .ob_refcnt:   resq 1  ; +0
     .ob_type:     resq 1  ; +8  (type is the subclass)
     .inst_dict:   resq 1  ; +16: ptr to instance __dict__
-    .int_value:   resq 1  ; +24: SmallInt tagged value or GMP pointer
+    .int_value:   resq 1  ; +24: SmallInt payload or GMP pointer
+    .int_value_tag: resq 1  ; +32: tag for int_value
 endstruc
 
 ; Iterator objects
@@ -221,11 +223,14 @@ endstruc
 
 ; Slice object
 struc PySliceObject
-    .ob_refcnt: resq 1
-    .ob_type:   resq 1
-    .start:     resq 1    ; +16
-    .stop:      resq 1    ; +24
-    .step:      resq 1    ; +32
+    .ob_refcnt:   resq 1
+    .ob_type:     resq 1
+    .start:       resq 1    ; +16
+    .start_tag:   resq 1    ; +24
+    .stop:        resq 1    ; +32
+    .stop_tag:    resq 1    ; +40
+    .step:        resq 1    ; +48
+    .step_tag:    resq 1    ; +56
 endstruc
 
 ; Cell object (for closures)

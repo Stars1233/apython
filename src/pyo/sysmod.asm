@@ -69,6 +69,8 @@ DEF_FUNC sys_module_init, 32
     mov rdi, r15
     mov rsi, rax
     mov rdx, r14
+    mov ecx, TAG_PTR
+    mov r8d, TAG_PTR
     call dict_set
     pop rdi
     call obj_decref
@@ -86,6 +88,7 @@ DEF_FUNC sys_module_init, 32
     push rax
     mov rdi, r12
     mov rsi, rax
+    mov edx, TAG_PTR
     call list_append
     pop rdi
     call obj_decref
@@ -97,6 +100,8 @@ DEF_FUNC sys_module_init, 32
     mov rdi, r15
     mov rsi, rax
     mov rdx, r12
+    mov ecx, TAG_PTR
+    mov r8d, TAG_PTR
     call dict_set
     pop rdi
     call obj_decref
@@ -122,6 +127,7 @@ DEF_FUNC sys_module_init, 32
     push rax
     mov rdi, r13
     mov rsi, rax
+    mov edx, TAG_PTR
     call list_append
     pop rdi
     call obj_decref
@@ -139,6 +145,8 @@ DEF_FUNC sys_module_init, 32
     mov rdi, r15
     mov rsi, rax
     mov rdx, r13
+    mov ecx, TAG_PTR
+    mov r8d, TAG_PTR
     call dict_set
     pop rdi
     call obj_decref
@@ -153,6 +161,8 @@ DEF_FUNC sys_module_init, 32
     mov rdi, r15
     mov rsi, rax
     mov rdx, [rsp + 8]
+    mov ecx, TAG_PTR
+    mov r8d, TAG_PTR
     call dict_set
     pop rdi
     call obj_decref
@@ -169,6 +179,8 @@ DEF_FUNC sys_module_init, 32
     mov rdi, r15
     mov rsi, rax
     mov rdx, [rsp + 8]
+    mov ecx, TAG_PTR
+    mov r8d, TAG_PTR
     call dict_set
     pop rdi
     call obj_decref
@@ -185,6 +197,8 @@ DEF_FUNC sys_module_init, 32
     mov rdi, r15
     mov rsi, rax
     mov rdx, [rsp + 8]
+    mov ecx, TAG_PTR
+    mov r8d, TAG_PTR
     call dict_set
     pop rdi
     call obj_decref
@@ -198,17 +212,14 @@ DEF_FUNC sys_module_init, 32
     ; (3, 12, 0, 'final', 0) — fat 16-byte slots
     ; slot 0: 3 (SmallInt)
     mov rdi, 3
-    bts rdi, 63
     mov [rbx + PyTupleObject.ob_item], rdi
     mov qword [rbx + PyTupleObject.ob_item + 8], TAG_SMALLINT
     ; slot 1: 12 (SmallInt) — offset 16
     mov rdi, 12
-    bts rdi, 63
     mov [rbx + PyTupleObject.ob_item + 16], rdi
     mov qword [rbx + PyTupleObject.ob_item + 24], TAG_SMALLINT
     ; slot 2: 0 (SmallInt) — offset 32
     xor edi, edi
-    bts rdi, 63
     mov [rbx + PyTupleObject.ob_item + 32], rdi
     mov qword [rbx + PyTupleObject.ob_item + 40], TAG_SMALLINT
     ; slot 3: 'final' (string, TAG_PTR) — offset 48
@@ -220,7 +231,6 @@ DEF_FUNC sys_module_init, 32
     mov qword [rbx + PyTupleObject.ob_item + 56], TAG_PTR
     ; slot 4: 0 (SmallInt) — offset 64
     xor edi, edi
-    bts rdi, 63
     mov [rbx + PyTupleObject.ob_item + 64], rdi
     mov qword [rbx + PyTupleObject.ob_item + 72], TAG_SMALLINT
 
@@ -230,6 +240,8 @@ DEF_FUNC sys_module_init, 32
     mov rdi, r15
     mov rsi, rax
     mov rdx, rbx
+    mov ecx, TAG_PTR
+    mov r8d, TAG_PTR
     call dict_set
     pop rdi
     call obj_decref
@@ -247,6 +259,8 @@ DEF_FUNC sys_module_init, 32
     mov rdi, r15
     mov rsi, rax
     mov rdx, [rsp + 8]
+    mov ecx, TAG_PTR
+    mov r8d, TAG_PTR
     call dict_set
     pop rdi
     call obj_decref
@@ -263,6 +277,8 @@ DEF_FUNC sys_module_init, 32
     mov rdi, r15
     mov rsi, rax
     mov rdx, [rsp + 8]
+    mov ecx, TAG_PTR
+    mov r8d, TAG_PTR
     call dict_set
     pop rdi
     call obj_decref
@@ -278,6 +294,8 @@ DEF_FUNC sys_module_init, 32
     mov rdi, r15
     mov rsi, rax
     mov rdx, [rsp + 8]
+    mov ecx, TAG_PTR
+    mov r8d, TAG_PTR
     call dict_set
     pop rdi
     call obj_decref
@@ -297,6 +315,8 @@ DEF_FUNC sys_module_init, 32
     mov rdi, r15
     mov rsi, rax
     mov rdx, [rsp + 8]
+    mov ecx, TAG_PTR
+    mov r8d, TAG_PTR
     call dict_set
     pop rdi
     call obj_decref
@@ -315,6 +335,8 @@ DEF_FUNC sys_module_init, 32
     mov rdi, r15
     mov rsi, rax
     mov rdx, [rsp + 8]
+    mov ecx, TAG_PTR
+    mov r8d, TAG_PTR
     call dict_set
     pop rdi
     call obj_decref
@@ -333,6 +355,8 @@ DEF_FUNC sys_module_init, 32
     mov rdi, r15
     mov rsi, rax
     mov rdx, [rsp + 8]
+    mov ecx, TAG_PTR
+    mov r8d, TAG_PTR
     call dict_set
     pop rdi
     call obj_decref
@@ -350,6 +374,8 @@ DEF_FUNC sys_module_init, 32
     mov rdi, r15
     mov rsi, rax
     mov rdx, [rsp + 8]
+    mov ecx, TAG_PTR
+    mov r8d, TAG_PTR
     call dict_set
     pop rdi
     call obj_decref
@@ -366,6 +392,8 @@ DEF_FUNC sys_module_init, 32
     mov rdi, r15
     mov rsi, rax
     mov rdx, [rsp + 8]
+    mov ecx, TAG_PTR
+    mov r8d, TAG_PTR
     call dict_set
     pop rdi
     call obj_decref
@@ -392,6 +420,8 @@ DEF_FUNC sys_module_init, 32
     mov rdi, r15
     mov rsi, rax
     mov rdx, [rsp + 8]
+    mov ecx, TAG_PTR
+    mov r8d, TAG_PTR
     call dict_set
     pop rdi
     call obj_decref
@@ -409,6 +439,8 @@ DEF_FUNC sys_module_init, 32
     mov rdi, r15
     mov rsi, rax
     mov rdx, [rsp + 8]
+    mov ecx, TAG_PTR
+    mov r8d, TAG_PTR
     call dict_set
     pop rdi
     call obj_decref
@@ -426,6 +458,8 @@ DEF_FUNC sys_module_init, 32
     mov rdi, r15
     mov rsi, rax
     mov rdx, [rsp + 8]
+    mov ecx, TAG_PTR
+    mov r8d, TAG_PTR
     call dict_set
     pop rdi
     call obj_decref
@@ -447,6 +481,8 @@ DEF_FUNC sys_module_init, 32
     mov rdi, r14                ; sys.modules dict
     mov rsi, rax
     mov rdx, [rel sys_module_obj]
+    mov ecx, TAG_PTR
+    mov r8d, TAG_PTR
     call dict_set
     pop rdi
     call obj_decref
@@ -471,6 +507,7 @@ DEF_FUNC sys_exit_func
     jne .exit_0
 
     ; Get exit code from args[0]
+    mov edx, [rdi + 8]
     mov rdi, [rdi]
     call int_to_i64
     mov edi, eax
@@ -519,6 +556,7 @@ DEF_FUNC sys_set_int_max_str_digits_func
     cmp rsi, 1
     jne .set_imsd_error
 
+    mov edx, [rdi + 8]
     mov rdi, [rdi]
     call int_to_i64
     ; rax = new limit
@@ -595,18 +633,16 @@ DEF_FUNC sys_path_add_script_dir
     mov rdi, [rel sys_path_list]
     ; Set list item 0
     mov rcx, [rdi + PyListObject.ob_item]
-    ; DECREF old item[0]
+    ; DECREF old item[0] (fat value: payload at [rcx], tag at [rcx+8])
     push rax
     mov rdi, [rcx]
-    test rdi, rdi
-    js .skip_decref
-    jz .skip_decref
-    call obj_decref
-.skip_decref:
+    mov rsi, [rcx + 8]
+    DECREF_VAL rdi, rsi
     pop rax
     mov rdi, [rel sys_path_list]
     mov rcx, [rdi + PyListObject.ob_item]
-    mov [rcx], rax              ; store new path (already has refcount 1)
+    mov [rcx], rax              ; store new path payload (already has refcount 1)
+    mov qword [rcx + 8], TAG_PTR ; store tag (string is a heap pointer)
 
     add rsp, 8                  ; discard saved path from push at .set_path
     pop r12

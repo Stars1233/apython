@@ -77,6 +77,8 @@ DEF_FUNC_LOCAL add_method_to_dict
     mov rdi, rbx
     mov rsi, rax            ; key
     mov rdx, [rsp + 8]     ; func obj
+    mov ecx, TAG_PTR
+    mov r8d, TAG_PTR
     call dict_set
 
     ; DECREF key (dict_set did INCREF)
@@ -134,6 +136,7 @@ DEF_FUNC str_method_upper
     jmp .upper_loop
 .upper_done:
     mov rax, r13
+    mov edx, TAG_PTR
     pop r13
     pop r12
     pop rbx
@@ -174,6 +177,7 @@ DEF_FUNC str_method_lower
     jmp .lower_loop
 .lower_done:
     mov rax, r13
+    mov edx, TAG_PTR
     pop r13
     pop r12
     pop rbx
@@ -249,6 +253,7 @@ DEF_FUNC str_method_strip
     call str_new
 
 .strip_ret:
+    mov edx, TAG_PTR
     pop r14
     pop r13
     pop r12
@@ -267,7 +272,7 @@ DEF_FUNC str_method_startswith
     push r13
 
     mov rbx, [rdi]          ; self
-    mov r12, [rdi + 8]      ; prefix (args[1])
+    mov r12, [rdi + 16]     ; prefix (args[1])
 
     mov r13, [r12 + PyStrObject.ob_size]  ; prefix length
 
@@ -293,6 +298,7 @@ DEF_FUNC str_method_startswith
 .sw_true:
     lea rax, [rel bool_true]
     inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
     pop r13
     pop r12
     pop rbx
@@ -302,6 +308,7 @@ DEF_FUNC str_method_startswith
 .sw_false:
     lea rax, [rel bool_false]
     inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
     pop r13
     pop r12
     pop rbx
@@ -320,7 +327,7 @@ DEF_FUNC str_method_endswith
     push r14
 
     mov rbx, [rdi]          ; self
-    mov r12, [rdi + 8]      ; suffix
+    mov r12, [rdi + 16]     ; suffix
     mov r13, [r12 + PyStrObject.ob_size]  ; suffix length
     mov r14, [rbx + PyStrObject.ob_size]  ; self length
 
@@ -347,6 +354,7 @@ DEF_FUNC str_method_endswith
 .ew_true:
     lea rax, [rel bool_true]
     inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
     pop r14
     pop r13
     pop r12
@@ -357,6 +365,7 @@ DEF_FUNC str_method_endswith
 .ew_false:
     lea rax, [rel bool_false]
     inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
     pop r14
     pop r13
     pop r12
@@ -374,7 +383,7 @@ DEF_FUNC str_method_find
     push r12
 
     mov rbx, [rdi]          ; self
-    mov r12, [rdi + 8]      ; substr
+    mov r12, [rdi + 16]     ; substr
 
     ; Use ap_strstr to find substring
     lea rdi, [rbx + PyStrObject.data]
@@ -421,8 +430,8 @@ DEF_FUNC str_method_replace
 
     ; rbx = self, r12 = old_str, r13 = new_str, r14 = self_len, r15 = scan_pos
     mov rbx, [rdi]          ; self
-    mov r12, [rdi + 8]      ; old
-    mov r13, [rdi + 16]     ; new
+    mov r12, [rdi + 16]     ; old
+    mov r13, [rdi + 32]     ; new
     mov r14, [rbx + PyStrObject.ob_size]
     mov [rbp-72], r14
 
@@ -542,6 +551,7 @@ DEF_FUNC str_method_replace
     call ap_free
 
     pop rax
+    mov edx, TAG_PTR
     add rsp, 40
     pop r15
     pop r14
@@ -555,6 +565,7 @@ DEF_FUNC str_method_replace
     lea rdi, [rbx + PyStrObject.data]
     mov rsi, r14
     call str_new
+    mov edx, TAG_PTR
     add rsp, 40
     pop r15
     pop r14
@@ -581,7 +592,7 @@ DEF_FUNC str_method_join
     sub rsp, 32             ; 3 locals + alignment pad = 32
 
     mov rbx, [rdi]          ; self (separator)
-    mov r12, [rdi + 8]      ; list
+    mov r12, [rdi + 16]     ; list
 
     mov r13, [r12 + PyListObject.ob_size]  ; item count
     mov r14, [rbx + PyStrObject.ob_size]   ; sep length
@@ -669,6 +680,7 @@ DEF_FUNC str_method_join
     call ap_free
 
     pop rax
+    mov edx, TAG_PTR
     add rsp, 32
     pop r15
     pop r14
@@ -681,6 +693,7 @@ DEF_FUNC str_method_join
 .join_empty:
     lea rdi, [rel empty_str_cstr]
     call str_from_cstr
+    mov edx, TAG_PTR
     add rsp, 32
     pop r15
     pop r14
@@ -709,7 +722,7 @@ DEF_FUNC str_method_split
     ; Save args[1] if present
     cmp r14, 2
     jl .split_no_sep
-    mov r15, [rdi + 8]      ; separator string
+    mov r15, [rdi + 16]     ; separator string
     jmp .split_by_sep
 
 .split_no_sep:
@@ -771,6 +784,7 @@ DEF_FUNC str_method_split
     mov rdi, r13
     mov rsi, rax
     push rax
+    mov edx, TAG_PTR
     call list_append
     pop rdi
     call obj_decref         ; list_append did INCREF
@@ -785,6 +799,7 @@ DEF_FUNC str_method_split
     pop r13
     pop r12
     pop rbx
+    mov edx, TAG_PTR
     leave
     ret
 
@@ -830,6 +845,7 @@ DEF_FUNC str_method_split
     mov rdi, r13
     mov rsi, rax
     push rax
+    mov edx, TAG_PTR
     call list_append
     pop rdi
     call obj_decref
@@ -848,11 +864,13 @@ DEF_FUNC str_method_split
     mov rdi, r13
     mov rsi, rax
     push rax
+    mov edx, TAG_PTR
     call list_append
     pop rdi
     call obj_decref
 
     mov rax, r13
+    mov edx, TAG_PTR
     add rsp, 8
     pop r15
     pop r14
@@ -982,11 +1000,13 @@ DEF_FUNC str_method_format
     push rcx
     push rdx
     ; Get the arg object and convert to string
-    mov rdi, [rbx + rax*8]  ; arg object
+    shl rax, 4              ; offset = index * 16
+    mov rdi, [rbx + rax]    ; arg object payload
+    mov r8d, [rbx + rax + 8] ; arg tag
     ; Call obj_repr or tp_str
     push rdi
-    test rdi, rdi
-    js .fmt_smallint_str
+    cmp r8d, TAG_SMALLINT
+    je .fmt_smallint_str
     mov rax, [rdi + PyObject.ob_type]
     mov rax, [rax + PyTypeObject.tp_str]
     test rax, rax
@@ -1004,6 +1024,7 @@ DEF_FUNC str_method_format
     jmp .fmt_have_str
 .fmt_smallint_str:
     pop rdi
+    mov esi, TAG_SMALLINT
     call obj_repr          ; SmallInt → repr is fine
 .fmt_have_str:
     ; rax = string object; append its data to buffer
@@ -1096,6 +1117,7 @@ DEF_FUNC str_method_format
     call ap_free
 
     pop rax
+    mov edx, TAG_PTR
     add rsp, 24
     pop r15
     pop r14
@@ -1153,6 +1175,7 @@ DEF_FUNC str_method_lstrip
     call str_new
 
 .lstrip_ret:
+    mov edx, TAG_PTR
     pop r13
     pop r12
     pop rbx
@@ -1205,6 +1228,7 @@ DEF_FUNC str_method_rstrip
     call str_new
 
 .rstrip_ret:
+    mov edx, TAG_PTR
     pop r13
     pop r12
     pop rbx
@@ -1223,7 +1247,7 @@ DEF_FUNC str_method_count
     push r14
 
     mov rbx, [rdi]          ; self
-    mov r12, [rdi + 8]      ; substr
+    mov r12, [rdi + 16]     ; substr
     xor r13d, r13d          ; r13 = count
     mov r14, [r12 + PyStrObject.ob_size]  ; sub length
 
@@ -1273,7 +1297,7 @@ DEF_FUNC str_method_index
     push r12
 
     mov rbx, [rdi]          ; self
-    mov r12, [rdi + 8]      ; substr
+    mov r12, [rdi + 16]     ; substr
 
     ; Use ap_strstr to find substring
     lea rdi, [rbx + PyStrObject.data]
@@ -1313,7 +1337,7 @@ DEF_FUNC str_method_rfind
     push r14
 
     mov rbx, [rdi]          ; self
-    mov r12, [rdi + 8]      ; substr
+    mov r12, [rdi + 16]     ; substr
     mov r13, [rbx + PyStrObject.ob_size]   ; self length
     mov r14, [r12 + PyStrObject.ob_size]   ; sub length
 
@@ -1407,12 +1431,14 @@ DEF_FUNC str_method_isdigit
 .isdigit_true:
     lea rax, [rel bool_true]
     inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
     leave
     ret
 
 .isdigit_false:
     lea rax, [rel bool_false]
     inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
     leave
     ret
 END_FUNC str_method_isdigit
@@ -1450,12 +1476,14 @@ DEF_FUNC str_method_isalpha
 .isalpha_true:
     lea rax, [rel bool_true]
     inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
     leave
     ret
 
 .isalpha_false:
     lea rax, [rel bool_false]
     inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
     leave
     ret
 END_FUNC str_method_isalpha
@@ -1472,7 +1500,7 @@ DEF_FUNC str_method_removeprefix
     push r14
 
     mov rbx, [rdi]          ; self
-    mov r12, [rdi + 8]      ; prefix
+    mov r12, [rdi + 16]     ; prefix
     mov r13, [rbx + PyStrObject.ob_size]   ; self len
     mov r14, [r12 + PyStrObject.ob_size]   ; prefix len
 
@@ -1498,6 +1526,7 @@ DEF_FUNC str_method_removeprefix
     mov rsi, r13
     sub rsi, r14
     call str_new
+    mov edx, TAG_PTR
     pop r14
     pop r13
     pop r12
@@ -1508,6 +1537,7 @@ DEF_FUNC str_method_removeprefix
 .rmpfx_return_self:
     mov rax, rbx
     INCREF rax
+    mov edx, TAG_PTR
     pop r14
     pop r13
     pop r12
@@ -1528,7 +1558,7 @@ DEF_FUNC str_method_removesuffix
     push r14
 
     mov rbx, [rdi]          ; self
-    mov r12, [rdi + 8]      ; suffix
+    mov r12, [rdi + 16]     ; suffix
     mov r13, [rbx + PyStrObject.ob_size]   ; self len
     mov r14, [r12 + PyStrObject.ob_size]   ; suffix len
 
@@ -1560,6 +1590,7 @@ DEF_FUNC str_method_removesuffix
     mov rsi, r13
     sub rsi, r14
     call str_new
+    mov edx, TAG_PTR
     pop r14
     pop r13
     pop r12
@@ -1570,6 +1601,7 @@ DEF_FUNC str_method_removesuffix
 .rmsfx_return_self:
     mov rax, rbx
     INCREF rax
+    mov edx, TAG_PTR
     pop r14
     pop r13
     pop r12
@@ -1601,6 +1633,7 @@ DEF_FUNC str_method_encode
     extern ap_memcpy
     call ap_memcpy
     pop rax                    ; return bytes obj
+    mov edx, TAG_PTR
     pop r12
     pop rbx
     leave
@@ -1619,12 +1652,14 @@ END_FUNC str_method_encode
 DEF_FUNC list_method_append
 
     mov rax, [rdi]          ; self (list)
-    mov rsi, [rdi + 8]      ; item
+    mov rsi, [rdi + 16]     ; item payload
+    mov edx, [rdi + 24]     ; item tag (16-byte stride)
     mov rdi, rax
     call list_append
 
     lea rax, [rel none_singleton]
     inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
     leave
     ret
 END_FUNC list_method_append
@@ -1651,7 +1686,8 @@ DEF_FUNC list_method_pop
     jmp .pop_do
 
 .pop_idx:
-    mov rdi, [rax + 8]     ; args[1]
+    mov rdi, [rax + 16]    ; args[1]
+    mov edx, [rax + 24]    ; args[1] tag
     call int_to_i64
     mov r13, rax
 
@@ -1672,6 +1708,7 @@ DEF_FUNC list_method_pop
     mov rcx, r13
     shl rcx, 4              ; index * 16
     mov r12, [rax + rcx]    ; r12 = item payload to return
+    push qword [rax + rcx + 8]  ; save item tag on stack
     ; Don't DECREF since we're transferring ownership to caller
 
     ; Shift items down: for i = index .. size-2, items[i] = items[i+1]
@@ -1696,6 +1733,7 @@ DEF_FUNC list_method_pop
 
     ; Return item (ownership transferred, no extra INCREF needed)
     mov rax, r12
+    pop rdx                  ; item tag
     pop r13
     pop r12
     pop rbx
@@ -1718,17 +1756,19 @@ DEF_FUNC list_method_insert
     push r13
     push r14
 
-    mov rax, rdi            ; args
-    mov rbx, [rax]          ; self
+    mov rax, rdi            ; args (16-byte stride)
+    mov rbx, [rax]          ; self = args[0]
     push rax
 
     ; Get index
-    mov rdi, [rax + 8]      ; args[1]
+    mov rdi, [rax + 16]     ; args[1] payload (16B stride)
+    mov edx, [rax + 24]     ; args[1] tag
     call int_to_i64
     mov r12, rax            ; index
 
     pop rax
-    mov r13, [rax + 16]     ; item = args[2]
+    mov r13, [rax + 32]     ; item = args[2] payload (16B stride)
+    mov r14, [rax + 40]     ; item tag = args[2] tag
 
     ; Clamp index to [0, size]
     test r12, r12
@@ -1783,24 +1823,14 @@ DEF_FUNC list_method_insert
     mov rcx, r12
     shl rcx, 4              ; index * 16
     mov [rax + rcx], r13    ; payload
-    ; Classify tag
-    test r13, r13
-    js .ins_tag_si
-    jz .ins_tag_null
-    mov qword [rax + rcx + 8], TAG_PTR
-    jmp .ins_tag_done
-.ins_tag_si:
-    mov qword [rax + rcx + 8], TAG_SMALLINT
-    jmp .ins_tag_done
-.ins_tag_null:
-    mov qword [rax + rcx + 8], TAG_NULL
-.ins_tag_done:
-    mov rsi, [rax + rcx + 8]
-    INCREF_VAL r13, rsi
+    ; Store item tag from args
+    mov [rax + rcx + 8], r14
+    INCREF_VAL r13, r14
     inc qword [rbx + PyListObject.ob_size]
 
     lea rax, [rel none_singleton]
     inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
     pop r14
     pop r13
     pop r12
@@ -1847,6 +1877,7 @@ DEF_FUNC list_method_reverse
 .rev_done:
     lea rax, [rel none_singleton]
     inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
     leave
     ret
 END_FUNC list_method_reverse
@@ -1858,7 +1889,9 @@ END_FUNC list_method_reverse
 ;; ============================================================================
 LS_I     equ 8
 LS_SWAP  equ 16
-LS_FRAME equ 16
+LS_LTAG  equ 24
+LS_RTAG  equ 28
+LS_FRAME equ 32
 DEF_FUNC list_method_sort, LS_FRAME
     push rbx
     push r12
@@ -1883,11 +1916,15 @@ DEF_FUNC list_method_sort, LS_FRAME
     shl rcx, 4                       ; i * 16
     mov rdi, [rax + rcx - 16]        ; left = items[i-1] payload
     mov rsi, [rax + rcx]             ; right = items[i] payload
+    mov r8d, [rax + rcx - 8]         ; left tag
+    mov [rbp - LS_LTAG], r8d
+    mov r8d, [rax + rcx + 8]         ; right tag
+    mov [rbp - LS_RTAG], r8d
     mov [rbp - LS_I], r13            ; save i
 
-    ; Get left's type for tp_richcompare
-    test rdi, rdi
-    js .sort_smallint_type
+    ; Get left's type for tp_richcompare (tag at [rax + rcx - 8])
+    cmp dword [rax + rcx - 8], TAG_SMALLINT
+    je .sort_smallint_type
     mov rax, [rdi + PyObject.ob_type]
     jmp .sort_have_type
 .sort_smallint_type:
@@ -1897,7 +1934,9 @@ DEF_FUNC list_method_sort, LS_FRAME
     test rax, rax
     jz .sort_no_swap                 ; no richcompare → don't swap
 
-    ; Call tp_richcompare(left, right, PY_GT)
+    ; Call tp_richcompare(left, right, PY_GT, left_tag, right_tag)
+    mov ecx, [rbp - LS_LTAG]
+    mov r8d, [rbp - LS_RTAG]
     mov edx, PY_GT
     call rax
     ; rax = bool result (bool_true or bool_false)
@@ -1940,6 +1979,7 @@ DEF_FUNC list_method_sort, LS_FRAME
 .sort_done:
     lea rax, [rel none_singleton]
     inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
     pop r13
     pop r12
     pop rbx
@@ -1958,7 +1998,7 @@ DEF_FUNC list_method_index
     push r13
 
     mov rbx, [rdi]          ; self
-    mov r12, [rdi + 8]      ; value to find
+    mov r12, [rdi + 16]     ; value to find
     mov r13, [rbx + PyListObject.ob_size]
 
     xor ecx, ecx
@@ -1991,8 +2031,8 @@ DEF_FUNC list_method_index
     mov rdx, rcx
     shl rdx, 4
     mov rsi, [rax + rdx]    ; list item payload
-    test rsi, rsi
-    js .index_next          ; list item is SmallInt
+    cmp dword [rax + rdx + 8], TAG_SMALLINT
+    je .index_next          ; list item is SmallInt
     mov rax, [rdi + PyObject.ob_type]
     lea r8, [rel str_type]
     cmp rax, r8
@@ -2043,7 +2083,7 @@ DEF_FUNC list_method_count
     push r14
 
     mov rbx, [rdi]          ; self
-    mov r12, [rdi + 8]      ; value
+    mov r12, [rdi + 16]     ; value
     mov r13, [rbx + PyListObject.ob_size]
     xor r14d, r14d          ; count = 0
 
@@ -2103,6 +2143,7 @@ DEF_FUNC list_method_copy
     mov rdx, rcx
     shl rdx, 4              ; index * 16
     mov rsi, [rax + rdx]    ; payload
+    mov edx, [rax + rdx + 8] ; tag from fat slot
     mov rdi, r13
     call list_append
     pop rcx
@@ -2111,6 +2152,7 @@ DEF_FUNC list_method_copy
 
 .copy_done:
     mov rax, r13
+    mov edx, TAG_PTR
     pop r13
     pop r12
     pop rbx
@@ -2151,6 +2193,7 @@ DEF_FUNC list_method_clear
 
     lea rax, [rel none_singleton]
     inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
     pop r13
     pop r12
     pop rbx
@@ -2169,7 +2212,7 @@ DEF_FUNC list_method_extend
     push r14
 
     mov rbx, [rdi]          ; self
-    mov r12, [rdi + 8]      ; iterable (list)
+    mov r12, [rdi + 16]     ; iterable (list)
     mov r13, [r12 + PyListObject.ob_size]
 
     xor r14d, r14d
@@ -2181,6 +2224,7 @@ DEF_FUNC list_method_extend
     mov rcx, r14
     shl rcx, 4              ; index * 16
     mov rsi, [rax + rcx]    ; payload
+    mov edx, [rax + rcx + 8] ; tag from fat slot
     mov rdi, rbx
     call list_append
     pop r14
@@ -2190,6 +2234,7 @@ DEF_FUNC list_method_extend
 .extend_done:
     lea rax, [rel none_singleton]
     inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
     pop r14
     pop r13
     pop r12
@@ -2218,7 +2263,8 @@ DEF_FUNC dict_method_get
 
     ; dict_get(self, key)
     mov rdi, rbx
-    mov rsi, [rax + 8]      ; key
+    mov rsi, [rax + 16]     ; key payload
+    mov edx, [rax + 24]     ; key tag
     call dict_get
 
     test rax, rax
@@ -2229,8 +2275,9 @@ DEF_FUNC dict_method_get
     cmp r12, 3
     jl .dg_ret_none
     ; Return args[2] (default)
-    mov rax, [rcx + 16]
-    INCREF rax
+    mov rax, [rcx + 32]     ; default payload
+    mov edx, [rcx + 40]     ; default tag
+    INCREF_VAL rax, rdx
     pop r12
     pop rbx
     leave
@@ -2239,6 +2286,7 @@ DEF_FUNC dict_method_get
 .dg_ret_none:
     lea rax, [rel none_singleton]
     inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
     pop r12
     pop rbx
     leave
@@ -2248,6 +2296,7 @@ DEF_FUNC dict_method_get
     add rsp, 8              ; discard saved args
     ; INCREF the value (dict_get returns borrowed ref, rdx=tag)
     INCREF_VAL rax, rdx
+    ; rdx already has correct tag from dict_get
     pop r12
     pop rbx
     leave
@@ -2294,8 +2343,9 @@ DEF_FUNC dict_method_keys
     test rcx, rcx
     jz .dk_next
 
-    ; Append key to list
+    ; Append key to list (read key_tag from entry)
     push r14
+    mov edx, [rax + DictEntry.key_tag]
     mov rsi, rdi            ; key
     mov rdi, r12            ; list
     call list_append
@@ -2307,6 +2357,7 @@ DEF_FUNC dict_method_keys
 
 .dk_done:
     mov rax, r12
+    mov edx, TAG_PTR
     pop r14
     pop r13
     pop r12
@@ -2352,8 +2403,9 @@ DEF_FUNC dict_method_values
     test rcx, rcx
     jz .dv_next                 ; TAG_NULL = empty slot
 
-    ; Append value to list
+    ; Append value to list (read value_tag from entry)
     push r14
+    mov edx, [rax + DictEntry.value_tag]
     mov rsi, [rax + DictEntry.value]  ; value payload
     mov rdi, r12
     call list_append
@@ -2365,6 +2417,7 @@ DEF_FUNC dict_method_values
 
 .dv_done:
     mov rax, r12
+    mov edx, TAG_PTR
     pop r14
     pop r13
     pop r12
@@ -2438,6 +2491,7 @@ DEF_FUNC dict_method_items
     ; Append tuple to list
     mov rdi, r12
     mov rsi, r14
+    mov edx, TAG_PTR
     call list_append
 
     ; DECREF tuple (list_append did INCREF)
@@ -2452,6 +2506,7 @@ DEF_FUNC dict_method_items
 
 .di_done:
     mov rax, r12
+    mov edx, TAG_PTR
     pop r14
     pop r13
     pop r12
@@ -2470,17 +2525,20 @@ dict_method_pop_v2 equ dict_method_pop
     push r12
     push r13
     push r14
+    push r15
 
     mov r14, rdi            ; r14 = args
     mov rbx, [r14]          ; self
     mov r12, rsi            ; nargs
-    mov r13, [r14 + 8]      ; key
+    mov r13, [r14 + 16]     ; key payload (16-byte stride)
+    mov r15d, [r14 + 24]    ; key tag
 
     ; Try dict_get
     mov rdi, rbx
     mov rsi, r13
+    mov edx, r15d           ; key tag
     call dict_get
-    test rax, rax
+    test edx, edx
     jz .dpop2_not_found
 
     ; dict_get returns fat (rax=payload, rdx=tag)
@@ -2490,10 +2548,12 @@ dict_method_pop_v2 equ dict_method_pop
 
     mov rdi, rbx
     mov rsi, r13
+    mov edx, r15d           ; key tag
     call dict_del
 
     pop rax                 ; restore payload
     pop rdx                 ; restore tag
+    pop r15
     pop r14
     pop r13
     pop r12
@@ -2504,8 +2564,10 @@ dict_method_pop_v2 equ dict_method_pop
 .dpop2_not_found:
     cmp r12, 3
     jl .dpop2_error
-    mov rax, [r14 + 16]     ; default = args[2]
-    INCREF rax
+    mov rax, [r14 + 32]     ; default = args[2] payload (16-byte stride)
+    mov edx, [r14 + 40]     ; default tag
+    INCREF_VAL rax, rdx
+    pop r15
     pop r14
     pop r13
     pop r12
@@ -2547,10 +2609,11 @@ DEF_FUNC dict_method_clear
     test rdi, rdi
     jz .dc_next
 
-    ; DECREF key
-    call obj_decref
+    ; DECREF key (tag-aware)
+    mov rsi, [r14 + DictEntry.key_tag]
+    DECREF_VAL rdi, rsi
 
-    ; DECREF value (fat: payload + tag)
+    ; DECREF value (tag-aware)
     mov rdi, [r14 + DictEntry.value]
     mov rsi, [r14 + DictEntry.value_tag]
     DECREF_VAL rdi, rsi
@@ -2571,6 +2634,7 @@ DEF_FUNC dict_method_clear
 
     lea rax, [rel none_singleton]
     inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
     pop r14
     pop r13
     pop r12
@@ -2591,7 +2655,7 @@ DEF_FUNC dict_method_update
     push r14
 
     mov rbx, [rdi]          ; self
-    mov r12, [rdi + 8]      ; other dict
+    mov r12, [rdi + 16]     ; other dict
 
     mov r13, [r12 + PyDictObject.capacity]
     xor r14d, r14d
@@ -2611,9 +2675,11 @@ DEF_FUNC dict_method_update
     test rcx, rcx
     jz .du_next                 ; TAG_NULL = empty slot
 
-    ; dict_set(self, key, value)
+    ; dict_set(self, key, value, value_tag, key_tag)
     push r14
-    mov rdx, [rax + DictEntry.value]  ; value payload
+    mov r8d, [rax + DictEntry.key_tag]    ; key tag from entry
+    mov ecx, [rax + DictEntry.value_tag]  ; value tag from entry
+    mov rdx, [rax + DictEntry.value]      ; value payload
     mov rsi, rdi            ; key
     mov rdi, rbx            ; self
     call dict_set
@@ -2626,6 +2692,7 @@ DEF_FUNC dict_method_update
 .du_done:
     lea rax, [rel none_singleton]
     inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
     pop r14
     pop r13
     pop r12
@@ -2642,9 +2709,12 @@ DEF_FUNC dict_method_setdefault
     push rbx
     push r12
     push r13
+    push r14
+    push r15
 
     mov rbx, [rdi]          ; self (dict)
-    mov r12, [rdi + 8]      ; key
+    mov r12, [rdi + 16]     ; key payload
+    mov r14d, [rdi + 24]    ; key tag
     mov r13, rsi            ; nargs
 
     ; Save args ptr for default value access
@@ -2653,6 +2723,7 @@ DEF_FUNC dict_method_setdefault
     ; dict_get(self, key)
     mov rdi, rbx
     mov rsi, r12
+    mov edx, r14d           ; key tag
     call dict_get
 
     test rax, rax
@@ -2662,22 +2733,29 @@ DEF_FUNC dict_method_setdefault
     pop rdi                 ; restore args ptr
     cmp r13, 3
     jl .sd_use_none
-    mov r13, [rdi + 16]     ; default = args[2]
+    mov r13, [rdi + 32]     ; default = args[2] payload
+    mov r15d, [rdi + 40]    ; default = args[2] tag
     jmp .sd_set_default
 
 .sd_use_none:
     lea r13, [rel none_singleton]
+    mov r15d, TAG_PTR
 
 .sd_set_default:
     ; dict_set(self, key, default_val)
     mov rdi, rbx
     mov rsi, r12
     mov rdx, r13
+    mov ecx, r15d           ; default val tag
+    mov r8d, r14d           ; key tag
     call dict_set
 
     ; INCREF and return default_val
-    INCREF r13
+    INCREF_VAL r13, r15
     mov rax, r13
+    mov edx, r15d           ; return tag
+    pop r15
+    pop r14
     pop r13
     pop r12
     pop rbx
@@ -2688,6 +2766,8 @@ DEF_FUNC dict_method_setdefault
     add rsp, 8              ; discard saved args ptr
     ; INCREF the found value (dict_get returns borrowed ref, rdx=tag)
     INCREF_VAL rax, rdx
+    pop r15
+    pop r14
     pop r13
     pop r12
     pop rbx
@@ -2730,9 +2810,11 @@ DEF_FUNC dict_method_copy
     test rcx, rcx
     jz .dcopy_next              ; TAG_NULL = empty slot
 
-    ; dict_set(new_dict, key, value)
+    ; dict_set(new_dict, key, value, value_tag, key_tag)
     push r14
-    mov rdx, [rax + DictEntry.value]  ; value payload
+    mov r8d, [rax + DictEntry.key_tag]    ; key tag from entry
+    mov ecx, [rax + DictEntry.value_tag]  ; value tag from entry
+    mov rdx, [rax + DictEntry.value]      ; value payload
     mov rsi, rdi            ; key
     mov rdi, r12            ; new dict
     call dict_set
@@ -2744,6 +2826,7 @@ DEF_FUNC dict_method_copy
 
 .dcopy_done:
     mov rax, r12
+    mov edx, TAG_PTR         ; dict is heap ptr
     pop r14
     pop r13
     pop r12
@@ -2803,6 +2886,7 @@ DEF_FUNC dict_method_popitem
 
     ; Set tuple[0] = key, tuple[1] = value (fat 16-byte slots)
     mov [r12 + PyTupleObject.ob_item], r13
+    ; Key from dict entries — always heap ptr (strings)
     mov qword [r12 + PyTupleObject.ob_item + 8], TAG_PTR
     INCREF r13
     mov [r12 + PyTupleObject.ob_item + 16], r14
@@ -2813,9 +2897,11 @@ DEF_FUNC dict_method_popitem
     ; Delete key from dict
     mov rdi, rbx
     mov rsi, r13
+    mov edx, TAG_PTR
     call dict_del
 
     mov rax, r12
+    mov edx, TAG_PTR         ; tuple is heap ptr
     pop r14
     pop r13
     pop r12
@@ -2841,7 +2927,7 @@ DEF_FUNC list_method_remove
     push r14
 
     mov rbx, [rdi]          ; self (list)
-    mov r12, [rdi + 8]      ; value to remove
+    mov r12, [rdi + 16]     ; value to remove
     mov r13, [rbx + PyListObject.ob_size]
 
     xor r14d, r14d          ; index = 0
@@ -2909,6 +2995,7 @@ DEF_FUNC list_method_remove
     ; Return None
     lea rax, [rel none_singleton]
     inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
     pop r14
     pop r13
     pop r12
@@ -2930,9 +3017,11 @@ DEF_FUNC tuple_method_index
     push rbx
     push r12
     push r13
+    push r14
 
     mov rbx, [rdi]          ; self (tuple)
-    mov r12, [rdi + 8]      ; value to find
+    mov r12, [rdi + 16]     ; value to find (payload)
+    mov r14d, [rdi + 24]    ; value tag
     mov r13, [rbx + PyTupleObject.ob_size]
 
     xor ecx, ecx
@@ -2943,25 +3032,26 @@ DEF_FUNC tuple_method_index
     ; Tuple items are inline at [self + PyTupleObject.ob_item + i*16]
     mov rax, rcx
     shl rax, 4
+    mov rdx, rax             ; save offset for tag access
     mov rax, [rbx + PyTupleObject.ob_item + rax]
 
     ; Check pointer equality
     cmp rax, r12
     je .tindex_found
 
-    ; Check SmallInt equality
-    test rax, rax
-    jns .tindex_check_str
-    test r12, r12
-    jns .tindex_next
+    ; Check SmallInt equality (item tag at [rbx + ob_item + offset + 8])
+    cmp dword [rbx + PyTupleObject.ob_item + rdx + 8], TAG_SMALLINT
+    jne .tindex_check_str
+    cmp r14d, TAG_SMALLINT
+    jne .tindex_next
     ; Both SmallInts - already compared by pointer above
     jmp .tindex_next
 
 .tindex_check_str:
     ; Try string comparison: if both are str_type, compare data
     mov rsi, rax             ; tuple item
-    test r12, r12
-    js .tindex_next          ; value is SmallInt, item is not
+    cmp r14d, TAG_SMALLINT
+    je .tindex_next          ; value is SmallInt, item is not
     mov rax, [r12 + PyObject.ob_type]
     lea r8, [rel str_type]
     cmp rax, r8
@@ -2987,6 +3077,7 @@ DEF_FUNC tuple_method_index
 .tindex_found:
     mov rdi, rcx
     call int_from_i64
+    pop r14
     pop r13
     pop r12
     pop rbx
@@ -3010,7 +3101,7 @@ DEF_FUNC tuple_method_count
     push r14
 
     mov rbx, [rdi]          ; self (tuple)
-    mov r12, [rdi + 8]      ; value
+    mov r12, [rdi + 16]     ; value
     mov r13, [rbx + PyTupleObject.ob_size]
     xor r14d, r14d          ; count = 0
 

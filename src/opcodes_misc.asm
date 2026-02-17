@@ -155,14 +155,14 @@ DEF_FUNC_BARE op_binary_op
 
     ; Float coercion: if either operand is float, use float methods
     ; This handles int+float, float+int, float+float
-    test rdi, rdi
-    js .check_right_float      ; SmallInt left → can't be float, check right
+    cmp qword [rsp + BO_LTAG], TAG_SMALLINT
+    je .check_right_float
     lea rcx, [rel float_type]
     cmp [rdi + PyObject.ob_type], rcx
     je .use_float_methods
 .check_right_float:
-    test rsi, rsi
-    js .no_float_coerce        ; SmallInt right → no float
+    cmp qword [rsp + BO_RTAG], TAG_SMALLINT
+    je .no_float_coerce
     lea rcx, [rel float_type]
     cmp [rsi + PyObject.ob_type], rcx
     je .use_float_methods
@@ -171,8 +171,8 @@ DEF_FUNC_BARE op_binary_op
     ; For NB_ADD (0/13) and NB_MULTIPLY (5/18): if left is int/SmallInt
     ; and right has sq_concat/sq_repeat, use sequence method instead.
     ; This handles: 3 * "ab", 3 * [1,2], etc.
-    test rdi, rdi
-    jns .binop_not_smallint_left
+    cmp qword [rsp + BO_LTAG], TAG_SMALLINT
+    jne .binop_not_smallint_left
     ; Left is SmallInt — check if right has sequence methods
     cmp r9d, 5              ; NB_MULTIPLY
     je .binop_try_right_seq
@@ -182,8 +182,8 @@ DEF_FUNC_BARE op_binary_op
 
 .binop_try_right_seq:
     ; Check right operand's tp_as_sequence->sq_repeat
-    test rsi, rsi
-    js .binop_left_type     ; right is SmallInt, skip
+    cmp qword [rsp + BO_RTAG], TAG_SMALLINT
+    je .binop_left_type
     mov rax, [rsi + PyObject.ob_type]
     mov rax, [rax + PyTypeObject.tp_as_sequence]
     test rax, rax
@@ -193,6 +193,8 @@ DEF_FUNC_BARE op_binary_op
     jz .binop_left_type
     ; Call sq_repeat(right=sequence, left=count): swap args
     xchg rdi, rsi
+    mov edx, [rsp + BO_LTAG]    ; count tag (left operand)
+    mov ecx, edx                 ; also in ecx (nb_multiply convention)
     call rax
     jmp .binop_have_result
 
@@ -201,9 +203,9 @@ DEF_FUNC_BARE op_binary_op
     jmp .binop_have_type
 .binop_left_type:
     ; Get type's tp_as_number method table from left operand
-    ; SmallInt check: bit 63 set means tagged int, use int_type directly
-    test rdi, rdi
-    js .binop_smallint_type
+    ; SmallInt check: use saved left tag
+    cmp qword [rsp + BO_LTAG], TAG_SMALLINT
+    je .binop_smallint_type
     mov rax, [rdi + PyObject.ob_type]
     jmp .binop_have_type
 .binop_smallint_type:
@@ -223,7 +225,9 @@ DEF_FUNC_BARE op_binary_op
     test rax, rax
     jz .binop_try_dunder
 
-    ; Call the method: rdi=left (a), rsi=right (b) - already set
+    ; Call the method: rdi=left, rsi=right, rdx=left_tag, rcx=right_tag
+    mov rdx, [rsp + BO_LTAG]
+    mov rcx, [rsp + BO_RTAG]
     call rax
 
 .binop_have_result:
@@ -253,9 +257,9 @@ DEF_FUNC_BARE op_binary_op
     extern dunder_call_2
 
     ; Check if left is heaptype
+    cmp qword [rsp + BO_LTAG], TAG_SMALLINT
+    je .binop_try_right_dunder ; SmallInt has no dunders
     mov rdi, [rsp + BO_LEFT]
-    test rdi, rdi
-    js .binop_try_right_dunder ; SmallInt has no dunders
     mov rax, [rdi + PyObject.ob_type]
     mov rdx, [rax + PyTypeObject.tp_flags]
     test rdx, TYPE_FLAG_HEAPTYPE
@@ -272,10 +276,11 @@ DEF_FUNC_BARE op_binary_op
     test rdx, rdx
     jz .binop_try_right_dunder
 
-    ; dunder_call_2(left, right, name)
+    ; dunder_call_2(left, right, name, right_tag)
     push r9                    ; save op code (+8 shifts BO_ offsets)
     mov rdi, [rsp + 8 + BO_LEFT]
     mov rsi, [rsp + 8 + BO_RIGHT]
+    mov ecx, [rsp + 8 + BO_RTAG]   ; other_tag = right's tag
     call dunder_call_2
     pop r9
     test rax, rax
@@ -283,9 +288,9 @@ DEF_FUNC_BARE op_binary_op
 
 .binop_try_right_dunder:
     ; Try reflected dunder on right operand
+    cmp qword [rsp + BO_RTAG], TAG_SMALLINT
+    je .binop_no_method
     mov rdi, [rsp + BO_RIGHT]
-    test rdi, rdi
-    js .binop_no_method
     mov rax, [rdi + PyObject.ob_type]
     mov rdx, [rax + PyTypeObject.tp_flags]
     test rdx, TYPE_FLAG_HEAPTYPE
@@ -301,9 +306,10 @@ DEF_FUNC_BARE op_binary_op
     test rdx, rdx
     jz .binop_no_method
 
-    ; dunder_call_2(right, left, rname) — right is self for reflected
+    ; dunder_call_2(right, left, rname, left_tag) — right is self for reflected
     mov rdi, [rsp + BO_RIGHT]
     mov rsi, [rsp + BO_LEFT]
+    mov ecx, [rsp + BO_LTAG]       ; other_tag = left's tag
     call dunder_call_2
     test rax, rax
     jnz .binop_have_result
@@ -317,21 +323,17 @@ DEF_FUNC_BARE op_binary_op
 
 .binop_try_smallint_add:
     ; Check both SmallInt (bit 63 set on both)
-    mov rax, rdi
-    and rax, rsi
-    jns .binop_generic         ; at least one is NOT SmallInt
+    cmp r9d, TAG_SMALLINT
+    jne .binop_generic
+    cmp r8d, TAG_SMALLINT
+    jne .binop_generic
 
     ; Both SmallInt: decode, add, check overflow
     mov rax, rdi
-    shl rax, 1
-    sar rax, 1                 ; decode left
     mov rdx, rsi
-    shl rdx, 1
-    sar rdx, 1                 ; decode right
     add rax, rdx
     jo .binop_generic          ; overflow → fall back to generic
     ; Encode as SmallInt
-    bts rax, 63
     ; Specialize: rewrite opcode to BINARY_OP_ADD_INT (211)
     mov byte [rbx - 2], 211
     ; No DECREF needed (SmallInt are not refcounted)
@@ -341,21 +343,17 @@ DEF_FUNC_BARE op_binary_op
 
 .binop_try_smallint_sub:
     ; Check both SmallInt (bit 63 set on both)
-    mov rax, rdi
-    and rax, rsi
-    jns .binop_generic         ; at least one is NOT SmallInt
+    cmp r9d, TAG_SMALLINT
+    jne .binop_generic
+    cmp r8d, TAG_SMALLINT
+    jne .binop_generic
 
     ; Both SmallInt: decode, subtract, check overflow
     mov rax, rdi
-    shl rax, 1
-    sar rax, 1                 ; decode left
     mov rdx, rsi
-    shl rdx, 1
-    sar rdx, 1                 ; decode right
     sub rax, rdx
     jo .binop_generic          ; overflow → fall back to generic
     ; Encode as SmallInt
-    bts rax, 63
     ; Specialize: rewrite opcode to BINARY_OP_SUBTRACT_INT (212)
     mov byte [rbx - 2], 212
     ; No DECREF needed (SmallInt are not refcounted)
@@ -382,20 +380,17 @@ DEF_FUNC_BARE op_compare_op
     mov r9, [r13 + 8]         ; r9 = left tag
 
     ; Fast path: both SmallInt — inline compare, no type dispatch
-    mov rax, rdi
-    and rax, rsi
-    jns .cmp_slow_path         ; at least one is NOT SmallInt
+    cmp r9d, TAG_SMALLINT
+    jne .cmp_slow_path
+    cmp r8d, TAG_SMALLINT
+    jne .cmp_slow_path
 
     ; Both SmallInt: specialize to COMPARE_OP_INT (209)
     mov byte [rbx - 2], 209
 
     ; Both SmallInt: decode and compare
     mov rax, rdi
-    shl rax, 1
-    sar rax, 1                 ; decode left
     mov rdx, rsi
-    shl rdx, 1
-    sar rdx, 1                 ; decode right
     cmp rax, rdx               ; flags survive LEA + jmp [mem]
     lea r8, [rel .cmp_setcc_table]
     jmp [r8 + rcx*8]          ; 1 indirect branch on comparison op
@@ -450,22 +445,22 @@ section .text
     push rsi                   ; save right
 
     ; Float coercion: if either operand is float, use float_compare
-    test rdi, rdi
-    js .cmp_check_right_float  ; SmallInt can't be float
+    cmp r9d, TAG_SMALLINT
+    je .cmp_check_right_float
     lea rax, [rel float_type]
     cmp [rdi + PyObject.ob_type], rax
     je .cmp_use_float
 .cmp_check_right_float:
-    test rsi, rsi
-    js .cmp_no_float           ; SmallInt can't be float
+    cmp r8d, TAG_SMALLINT
+    je .cmp_no_float
     lea rax, [rel float_type]
     cmp [rsi + PyObject.ob_type], rax
     je .cmp_use_float
 
 .cmp_no_float:
     ; Get type's tp_richcompare (SmallInt-aware)
-    test rdi, rdi
-    js .cmp_smallint_type
+    cmp r9d, TAG_SMALLINT
+    je .cmp_smallint_type
     mov rax, [rdi + PyObject.ob_type]
     jmp .cmp_have_type
 .cmp_smallint_type:
@@ -490,9 +485,10 @@ section .text
 
     ; Save ecx (comparison op) since dunder_call_2 clobbers it
     push rcx
-    ; dunder_call_2(self=left, other=right, name)
+    ; dunder_call_2(self=left, other=right, name, right_tag)
     ; rdi = left (still set from above)
     ; rsi = right (still set)
+    mov ecx, [rsp + 16]            ; right_tag from stack
     call dunder_call_2
     pop rcx
 
@@ -502,13 +498,20 @@ section .text
 
 .cmp_use_float:
     extern float_compare
-    lea rax, [rel float_compare]
+    ; float_compare(left, right, op, left_tag, right_tag)
+    mov edx, ecx               ; edx = comparison op
+    mov ecx, [rsp + BO_LTAG]   ; ecx = left_tag
+    mov r8d, [rsp + BO_RTAG]   ; r8d = right_tag
+    call float_compare
+    jmp .cmp_do_call_result
 
 .cmp_do_call:
 
-    ; Call tp_richcompare(left, right, op)
+    ; Call tp_richcompare(left, right, op, left_tag, right_tag)
     ; rdi = left, rsi = right (already set)
     mov edx, ecx               ; edx = comparison op
+    mov ecx, [rsp + BO_LTAG]   ; ecx = left_tag (for tag-aware richcompare)
+    mov r8d, [rsp + BO_RTAG]   ; r8d = right_tag
     call rax
     ; rax = result (a bool object)
 
@@ -594,8 +597,8 @@ DEF_FUNC_BARE op_unary_negative
     push rdi
 
     ; Get nb_negative: type -> tp_as_number -> nb_negative (SmallInt-aware)
-    test rdi, rdi
-    js .neg_smallint_type
+    cmp r8d, TAG_SMALLINT
+    je .neg_smallint_type
     mov rax, [rdi + PyObject.ob_type]
     jmp .neg_have_type
 .neg_smallint_type:
@@ -632,8 +635,8 @@ DEF_FUNC_BARE op_unary_invert
     push r8
     push rdi
 
-    test rdi, rdi
-    js .inv_smallint_type
+    cmp r8d, TAG_SMALLINT
+    je .inv_smallint_type
     mov rax, [rdi + PyObject.ob_type]
     jmp .inv_have_type
 .inv_smallint_type:
@@ -668,7 +671,8 @@ DEF_FUNC_BARE op_unary_not
     push r8
     push rdi
 
-    ; Call obj_is_true(operand) -> 0 or 1
+    ; Call obj_is_true(operand, tag) -> 0 or 1
+    mov esi, r8d
     call obj_is_true
     push rax                   ; save truthiness result
 
@@ -709,7 +713,8 @@ DEF_FUNC_BARE op_pop_jump_if_false
     push r8
     push rdi
 
-    ; Call obj_is_true(value) -> 0 (false) or 1 (true)
+    ; Call obj_is_true(value, tag) -> 0 (false) or 1 (true)
+    mov esi, r8d
     call obj_is_true
     push rax                   ; save truthiness on machine stack
 
@@ -746,7 +751,8 @@ DEF_FUNC_BARE op_pop_jump_if_true
     push r8
     push rdi
 
-    ; Call obj_is_true(value)
+    ; Call obj_is_true(value, tag)
+    mov esi, r8d
     call obj_is_true
     push rax                   ; save truthiness on machine stack
 
@@ -885,8 +891,8 @@ DEF_FUNC op_format_value, FV_FRAME
 
     ; Check if value is a float
     extern float_type
-    test rdi, rdi
-    js .fv_no_format_spec      ; SmallInt → not float
+    cmp dword [rbp - FV_VTAG], TAG_SMALLINT
+    je .fv_no_format_spec      ; SmallInt → not float
     mov rax, [rdi + PyObject.ob_type]
     lea rcx, [rel float_type]
     cmp rax, rcx
@@ -903,7 +909,8 @@ DEF_FUNC op_format_value, FV_FRAME
 
 .fv_no_format_spec:
     ; Apply conversion based on arg & 3
-    mov rdi, [rbp - FV_VALUE]  ; reload value
+    mov rdi, [rbp - FV_VALUE]  ; reload value payload
+    mov esi, [rbp - FV_VTAG]   ; reload value tag
     mov eax, [rbp - FV_ARG]
     and eax, 3
     cmp eax, 2
@@ -1186,6 +1193,7 @@ DEF_FUNC_BARE op_return_generator
     mov rdi, r12
     call gen_new
     ; rax = new generator object
+    mov edx, TAG_PTR             ; return tag for fat value protocol
 
     ; Return the generator from eval_frame
     ; frame->instr_ptr is non-zero, so func_call will skip frame_free
@@ -1256,8 +1264,8 @@ DEF_FUNC op_send, SND_FRAME
     mov [rbp - SND_RECV], rdi  ; save receiver
 
     ; Check if receiver is a generator with iternext
-    test rdi, rdi
-    js .send_error
+    cmp dword [r13 - 8], TAG_SMALLINT
+    je .send_error
     mov rax, [rdi + PyObject.ob_type]
     mov rax, [rax + PyTypeObject.tp_iternext]
     test rax, rax
@@ -1269,8 +1277,10 @@ DEF_FUNC op_send, SND_FRAME
     cmp rsi, rcx
     je .send_use_iternext
 
-    ; gen_send(receiver, value)
+    ; gen_send(receiver, value, value_tag)
     mov rdi, [rbp - SND_RECV]
+    mov rsi, [rbp - SND_SENT]
+    mov edx, [rbp - SND_STAG]
     call gen_send
     jmp .send_check_result
 
@@ -1291,7 +1301,8 @@ DEF_FUNC op_send, SND_FRAME
     DECREF_VAL rdi, rsi
 
     mov rax, [rbp - SND_RESULT]
-    test rax, rax
+    mov rdx, [rbp - SND_RTAG]
+    test edx, edx
     jz .send_exhausted
 
     ; Yielded: push result on top (receiver stays below)
@@ -1343,8 +1354,8 @@ DEF_FUNC_BARE op_get_yield_from_iter
     VPEEK rdi                  ; rdi = TOS (don't pop)
 
     ; If it's already a generator, done
-    test rdi, rdi
-    js .gyfi_call_iter
+    cmp dword [r13 - 8], TAG_SMALLINT
+    je .gyfi_call_iter
     mov rax, [rdi + PyObject.ob_type]
     lea rcx, [rel gen_type]
     cmp rax, rcx
@@ -1529,7 +1540,6 @@ DEF_FUNC_BARE op_get_len
 .gl_got_len:
     pop rdi                     ; discard saved obj
     ; Convert length (in rax) to SmallInt and push
-    bts rax, 63                 ; encode as SmallInt
     VPUSH_INT rax
     DISPATCH
 
@@ -1567,10 +1577,12 @@ DEF_FUNC op_setup_annotations
     call str_from_cstr
     ; rax = key string
 
-    ; dict_set(locals, key, value)
+    ; dict_set(locals, key, value, value_tag)
     mov rdi, rbx                ; dict = locals
     mov rsi, rax                ; key = "__annotations__"
     mov rdx, r12                ; value = new annotations dict
+    mov ecx, TAG_PTR            ; value tag
+    mov r8d, TAG_PTR            ; key tag
     push rax                    ; save key for DECREF
     push rdx                    ; save value for DECREF
     call dict_set
@@ -1624,15 +1636,17 @@ DEF_FUNC_BARE op_load_from_dict_or_globals
 
     ; Try dict first
     mov rsi, [rsp + 8]         ; name
+    mov edx, TAG_PTR
     call dict_get
-    test rax, rax
+    test edx, edx
     jnz .lfdg_found
 
     ; Try globals
     mov rdi, [r12 + PyFrame.globals]
     mov rsi, [rsp + 8]         ; name
+    mov edx, TAG_PTR
     call dict_get
-    test rax, rax
+    test edx, edx
     jnz .lfdg_found
 
     ; Try builtins
@@ -1640,8 +1654,9 @@ DEF_FUNC_BARE op_load_from_dict_or_globals
     pop rdi                     ; discard saved dict (builtins from frame)
     pop rsi                     ; name
     mov rdi, [r12 + PyFrame.builtins]
+    mov edx, TAG_PTR
     call dict_get
-    test rax, rax
+    test edx, edx
     jnz .lfdg_found_no_pop
 
     ; Not found
@@ -1685,8 +1700,9 @@ DEF_FUNC op_load_from_dict_or_deref, LFDOD_FRAME
     mov [rbp - LFDOD_DICT], rdi   ; save dict
 
     ; Try dict first
+    mov edx, TAG_PTR
     call dict_get
-    test rax, rax
+    test edx, edx
     jnz .lfdod_found
 
     ; Not in dict — fall back to cell deref (like LOAD_DEREF)
@@ -1722,8 +1738,8 @@ extern dict_type
 
 DEF_FUNC_BARE op_match_mapping
     mov rdi, [r13 - 16]           ; peek TOS (16 bytes/slot)
-    test rdi, rdi
-    js .mm_false                   ; SmallInt → not a mapping
+    cmp dword [r13 - 8], TAG_SMALLINT
+    je .mm_false                   ; SmallInt → not a mapping
     mov rax, [rdi + PyObject.ob_type]
     ; Check if it's a dict or has tp_as_mapping with mp_subscript
     lea rcx, [rel dict_type]
@@ -1759,8 +1775,8 @@ extern bytes_type
 
 DEF_FUNC_BARE op_match_sequence
     mov rdi, [r13 - 16]           ; peek TOS (16 bytes/slot)
-    test rdi, rdi
-    js .ms_false                   ; SmallInt → not a sequence
+    cmp dword [r13 - 8], TAG_SMALLINT
+    je .ms_false                   ; SmallInt → not a sequence
     mov rax, [rdi + PyObject.ob_type]
     ; Exclude str, bytes, dict
     lea rcx, [rel str_type]
@@ -1838,8 +1854,9 @@ DEF_FUNC op_match_keys, MK_FRAME
 
     ; Look up in subject
     mov rdi, [rbp - MK_SUBJ]
+    mov edx, TAG_PTR
     call dict_get
-    test rax, rax
+    test edx, edx
     jz .mk_fail
 
     ; Save dict_get tag (rdx) before restoring loop index
@@ -1899,7 +1916,8 @@ MC_NPOS      equ 32
 MC_RESULT    equ 40
 MC_MATCHARGS equ 48
 MC_IDX       equ 56
-MC_FRAME     equ 64
+MC_SUBJ_TAG  equ 64
+MC_FRAME     equ 72
 
 extern none_type
 extern str_type
@@ -1912,7 +1930,9 @@ DEF_FUNC op_match_class, MC_FRAME
     VPOP rax                        ; class (TOS1)
     mov [rbp - MC_CLASS], rax
     VPOP rax                        ; subject (TOS2)
+    mov rdx, [r13 + 8]             ; subject tag
     mov [rbp - MC_SUBJ], rax
+    mov [rbp - MC_SUBJ_TAG], rdx
 
     mov [rbp - MC_NPOS], rcx        ; save npos
     mov qword [rbp - MC_RESULT], 0  ; result tuple (NULL initially)
@@ -1921,8 +1941,8 @@ DEF_FUNC op_match_class, MC_FRAME
     ;; --- isinstance check ---
     ;; Get subject's type (SmallInt/None-aware)
     mov rax, [rbp - MC_SUBJ]
-    test rax, rax
-    js .mc_smallint_type
+    cmp dword [rbp - MC_SUBJ_TAG], TAG_SMALLINT
+    je .mc_smallint_type
     jz .mc_none_type
     mov rdx, [rax + PyObject.ob_type]
     jmp .mc_got_type
@@ -1967,6 +1987,7 @@ DEF_FUNC op_match_class, MC_FRAME
     mov rsi, rax                    ; rsi = "__match_args__" str obj
     pop rdi                         ; restore dict
     push rsi                        ; save string for DECREF
+    mov edx, TAG_PTR
     call dict_get
     pop rsi                         ; rsi = string to DECREF
     push rax                        ; save dict_get result
@@ -2020,8 +2041,8 @@ DEF_FUNC op_match_class, MC_FRAME
 
     ; Call subject's tp_getattr(subject, name)
     mov rdi, [rbp - MC_SUBJ]
-    test rdi, rdi
-    js .mc_fail                     ; SmallInt has no attrs
+    cmp dword [rbp - MC_SUBJ_TAG], TAG_SMALLINT
+    je .mc_fail                     ; SmallInt has no attrs
     mov rax, [rdi + PyObject.ob_type]
     mov rax, [rax + PyTypeObject.tp_getattr]
     test rax, rax
@@ -2031,19 +2052,14 @@ DEF_FUNC op_match_class, MC_FRAME
     jz .mc_fail                     ; attr not found
 
     ; Store in result tuple[i] (already owns a ref from tp_getattr, fat: *16)
+    ; rdx = tag from tp_getattr (save before clobbering)
+    mov r9, rdx                     ; save tag
     mov rcx, [rbp - MC_IDX]
     mov rdx, [rbp - MC_RESULT]
     mov r8, rcx
     shl r8, 4
     mov [rdx + PyTupleObject.ob_item + r8], rax
-    ; Classify tag
-    test rax, rax
-    js .mc_pos_si
-    mov qword [rdx + PyTupleObject.ob_item + r8 + 8], TAG_PTR
-    jmp .mc_pos_tag_done
-.mc_pos_si:
-    mov qword [rdx + PyTupleObject.ob_item + r8 + 8], TAG_SMALLINT
-.mc_pos_tag_done:
+    mov [rdx + PyTupleObject.ob_item + r8 + 8], r9   ; tag from tp_getattr
 
     inc qword [rbp - MC_IDX]
     jmp .mc_pos_loop
@@ -2064,8 +2080,8 @@ DEF_FUNC op_match_class, MC_FRAME
 
     ; Call subject's tp_getattr(subject, name)
     mov rdi, [rbp - MC_SUBJ]
-    test rdi, rdi
-    js .mc_fail                     ; SmallInt has no attrs
+    cmp dword [rbp - MC_SUBJ_TAG], TAG_SMALLINT
+    je .mc_fail                     ; SmallInt has no attrs
     mov rax, [rdi + PyObject.ob_type]
     mov rax, [rax + PyTypeObject.tp_getattr]
     test rax, rax
@@ -2075,20 +2091,15 @@ DEF_FUNC op_match_class, MC_FRAME
     jz .mc_fail                     ; attr not found
 
     ; Store in result tuple[npos + j] (fat: *16)
+    ; rdx = tag from tp_getattr (save before clobbering)
+    mov r9, rdx                     ; save tag
     mov rcx, [rbp - MC_IDX]
     add rcx, [rbp - MC_NPOS]
     mov rdx, [rbp - MC_RESULT]
     mov r8, rcx
     shl r8, 4
     mov [rdx + PyTupleObject.ob_item + r8], rax
-    ; Classify tag
-    test rax, rax
-    js .mc_kw_si
-    mov qword [rdx + PyTupleObject.ob_item + r8 + 8], TAG_PTR
-    jmp .mc_kw_tag_done
-.mc_kw_si:
-    mov qword [rdx + PyTupleObject.ob_item + r8 + 8], TAG_SMALLINT
-.mc_kw_tag_done:
+    mov [rdx + PyTupleObject.ob_item + r8 + 8], r9   ; tag from tp_getattr
 
     inc qword [rbp - MC_IDX]
     jmp .mc_kw_loop
@@ -2105,9 +2116,10 @@ DEF_FUNC op_match_class, MC_FRAME
     call obj_decref
 
 .mc_success_decref_inputs:
-    ; DECREF subject
+    ; DECREF subject (tag-aware, may be SmallInt)
     mov rdi, [rbp - MC_SUBJ]
-    DECREF_REG rdi
+    mov rsi, [rbp - MC_SUBJ_TAG]
+    DECREF_VAL rdi, rsi
     ; DECREF class
     mov rdi, [rbp - MC_CLASS]
     DECREF_REG rdi
@@ -2136,9 +2148,10 @@ DEF_FUNC op_match_class, MC_FRAME
     call obj_decref
 
 .mc_fail_decref_inputs:
-    ; DECREF subject
+    ; DECREF subject (tag-aware, may be SmallInt)
     mov rdi, [rbp - MC_SUBJ]
-    DECREF_REG rdi
+    mov rsi, [rbp - MC_SUBJ_TAG]
+    DECREF_VAL rdi, rsi
     ; DECREF class
     mov rdi, [rbp - MC_CLASS]
     DECREF_REG rdi
@@ -2197,28 +2210,26 @@ END_FUNC op_call_intrinsic_2
 ;; ============================================================================
 ;; op_binary_op_add_int - Specialized SmallInt add (opcode 211)
 ;;
-;; Guard: both TOS and TOS1 must be SmallInt (bit 63 set).
+;; Guard: both TOS and TOS1 must be SmallInt (tag-based).
 ;; On guard failure: deopt back to BINARY_OP (122).
 ;; Followed by 1 CACHE entry (2 bytes).
 ;; ============================================================================
 DEF_FUNC_BARE op_binary_op_add_int
     VPOP rsi                   ; right
+    mov r8, [r13 + 8]         ; right tag
     VPOP rdi                   ; left
-    ; Guard: both SmallInt
+    mov r9, [r13 + 8]         ; left tag
+    ; Guard: both SmallInt (tag-based)
+    cmp r9d, TAG_SMALLINT
+    jne .add_int_deopt_repush
+    cmp r8d, TAG_SMALLINT
+    jne .add_int_deopt_repush
+    ; Add, check overflow
     mov rax, rdi
-    and rax, rsi
-    jns .add_int_deopt
-    ; Decode, add, check overflow
-    mov rax, rdi
-    shl rax, 1
-    sar rax, 1
     mov rdx, rsi
-    shl rdx, 1
-    sar rdx, 1
     add rax, rdx
     jo .add_int_deopt_repush
     ; Encode as SmallInt
-    bts rax, 63
     VPUSH_INT rax
     add rbx, 2                 ; skip CACHE
     DISPATCH
@@ -2236,33 +2247,31 @@ END_FUNC op_binary_op_add_int
 ;; ============================================================================
 ;; op_binary_op_sub_int - Specialized SmallInt subtract (opcode 212)
 ;;
-;; Guard: both TOS and TOS1 must be SmallInt (bit 63 set).
+;; Guard: both TOS and TOS1 must be SmallInt (tag-based).
 ;; On guard failure: deopt back to BINARY_OP (122).
 ;; Followed by 1 CACHE entry (2 bytes).
 ;; ============================================================================
 DEF_FUNC_BARE op_binary_op_sub_int
     VPOP rsi                   ; right
+    mov r8, [r13 + 8]         ; right tag
     VPOP rdi                   ; left
-    ; Guard: both SmallInt
+    mov r9, [r13 + 8]         ; left tag
+    ; Guard: both SmallInt (tag-based)
+    cmp r9d, TAG_SMALLINT
+    jne .sub_int_deopt_repush
+    cmp r8d, TAG_SMALLINT
+    jne .sub_int_deopt_repush
+    ; Sub, check overflow
     mov rax, rdi
-    and rax, rsi
-    jns .sub_int_deopt
-    ; Decode, sub, check overflow
-    mov rax, rdi
-    shl rax, 1
-    sar rax, 1
     mov rdx, rsi
-    shl rdx, 1
-    sar rdx, 1
     sub rax, rdx
     jo .sub_int_deopt_repush
     ; Encode as SmallInt
-    bts rax, 63
     VPUSH_INT rax
     add rbx, 2                 ; skip CACHE
     DISPATCH
 .sub_int_deopt_repush:
-    ; Overflow: re-push operands and deopt
+    ; Overflow or type mismatch: re-push operands and deopt
     VPUSH_INT rdi
     VPUSH_INT rsi
 .sub_int_deopt:
@@ -2275,7 +2284,7 @@ END_FUNC op_binary_op_sub_int
 ;; ============================================================================
 ;; op_compare_op_int - Specialized SmallInt comparison (opcode 209)
 ;;
-;; Guard: both TOS and TOS1 must be SmallInt (bit 63 set).
+;; Guard: both TOS and TOS1 must be SmallInt (tag-based).
 ;; On guard failure: deopt back to COMPARE_OP (107).
 ;; ecx = arg (comparison op = arg >> 4)
 ;; Followed by 1 CACHE entry (2 bytes).
@@ -2283,19 +2292,16 @@ END_FUNC op_binary_op_sub_int
 DEF_FUNC_BARE op_compare_op_int
     shr ecx, 4                 ; ecx = comparison op (0-5)
     VPOP rsi                   ; right
+    mov r8, [r13 + 8]         ; right tag
     VPOP rdi                   ; left
-    ; Guard: both SmallInt
-    mov rax, rdi
-    and rax, rsi
-    jns .cmp_int_deopt
-    ; Decode
-    mov rax, rdi
-    shl rax, 1
-    sar rax, 1                 ; decoded left
-    mov rdx, rsi
-    shl rdx, 1
-    sar rdx, 1                 ; decoded right
-    cmp rax, rdx               ; flags survive LEA + jmp [mem]
+    mov r9, [r13 + 8]         ; left tag
+    ; Guard: both SmallInt (tag-based)
+    cmp r9d, TAG_SMALLINT
+    jne .cmp_int_deopt_repush
+    cmp r8d, TAG_SMALLINT
+    jne .cmp_int_deopt_repush
+    ; Compare
+    cmp rdi, rsi               ; flags survive LEA + jmp [mem]
     lea r8, [rel .ci_setcc_table]
     jmp [r8 + rcx*8]          ; 1 indirect branch on comparison op
 
@@ -2339,9 +2345,10 @@ align 8
     dq .ci_set_gt              ; PY_GT = 4
     dq .ci_set_ge              ; PY_GE = 5
 section .text
-.cmp_int_deopt:
+.cmp_int_deopt_repush:
     ; Re-push operands (slots still intact — just restore stack pointer)
     VUNDROP 2
+.cmp_int_deopt:
     ; Rewrite back to COMPARE_OP (107) and re-execute
     mov byte [rbx - 2], 107
     sub rbx, 2

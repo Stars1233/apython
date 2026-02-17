@@ -247,8 +247,11 @@ align 16
     cmp r13, r12
     jge .print_flush
 
-    ; Get string representation: obj_str(args[i])
-    mov rdi, [rbx + r13 * 8]
+    ; Get string representation: obj_str(args[i]) with tag
+    mov rax, r13
+    shl rax, 4                  ; index * 16 for 16-byte stride
+    mov esi, [rbx + rax + 8]   ; tag
+    mov rdi, [rbx + rax]       ; payload
     call obj_str
     mov r14, rax                ; r14 = str obj (or NULL)
 
@@ -396,25 +399,26 @@ DEF_FUNC builtin_len
     jz .try_ob_size
 
     ; __len__ returned a result — extract integer value
+    push rdx                ; save tag for SmallInt check
     push rax                ; save result for DECREF
-    ; Check if SmallInt
-    test rax, rax
-    js .len_smallint
+    ; Check if SmallInt (tag == TAG_SMALLINT)
+    cmp dword [rsp + 8], TAG_SMALLINT
+    je .len_smallint
     ; Heap int — read value (assume fits in 64 bits)
     extern int_to_i64
     mov rdi, rax
     call int_to_i64
     pop rdi                 ; DECREF the int result
+    add rsp, 8              ; discard saved tag
     push rax                ; save extracted value
     call obj_decref
     pop rax
     jmp .make_int
 
 .len_smallint:
-    ; Decode SmallInt
-    shl rax, 1
-    sar rax, 1
-    add rsp, 8              ; discard saved (SmallInt, no DECREF needed)
+    ; SmallInt: payload IS the int64 value, no DECREF needed
+    pop rax                 ; restore payload
+    add rsp, 8              ; discard saved tag
     jmp .make_int
 
 .try_ob_size:
@@ -426,9 +430,9 @@ DEF_FUNC builtin_len
     ; rax = length; create an int object
     mov rdi, rax
     call int_from_i64
+    ; int_from_i64 returns (rax=payload, edx=tag) — preserve edx
 
     pop rbx
-    mov edx, TAG_PTR
     leave
     ret
 
@@ -464,6 +468,7 @@ DEF_FUNC builtin_range
 .range_1:
     ; range(stop): start=0, stop=args[0], step=1
     mov rdi, [rbx]
+    mov edx, [rbx + 8]
     call int_to_i64
     mov rsi, rax               ; stop
     xor edi, edi               ; start = 0
@@ -474,9 +479,11 @@ DEF_FUNC builtin_range
 .range_2:
     ; range(start, stop): step=1
     mov rdi, [rbx]
+    mov edx, [rbx + 8]
     call int_to_i64
     mov r13, rax               ; start
-    mov rdi, [rbx + 8]
+    mov rdi, [rbx + 16]
+    mov edx, [rbx + 24]
     call int_to_i64
     mov rsi, rax               ; stop
     mov rdi, r13               ; start
@@ -487,12 +494,15 @@ DEF_FUNC builtin_range
 .range_3:
     ; range(start, stop, step)
     mov rdi, [rbx]
+    mov edx, [rbx + 8]
     call int_to_i64
     push rax                   ; start
-    mov rdi, [rbx + 8]
+    mov rdi, [rbx + 16]
+    mov edx, [rbx + 24]
     call int_to_i64
     push rax                   ; stop
-    mov rdi, [rbx + 16]
+    mov rdi, [rbx + 32]
+    mov edx, [rbx + 40]
     call int_to_i64
     mov rdx, rax               ; step
     pop rsi                    ; stop
@@ -517,11 +527,12 @@ DEF_FUNC builtin_type
     cmp rsi, 1
     jne .type_error
 
-    mov rdi, [rdi]             ; obj = args[0]
+    mov rsi, rdi               ; save args ptr
+    mov rdi, [rsi]             ; obj = args[0] payload
 
-    ; SmallInt check
-    test rdi, rdi
-    js .type_smallint
+    ; SmallInt check (tag at args[0]+8)
+    cmp dword [rsi + 8], TAG_SMALLINT
+    je .type_smallint
 
     mov rax, [rdi + PyObject.ob_type]
     INCREF rax
@@ -559,12 +570,15 @@ DEF_FUNC builtin_isinstance
     extern bool_true
     extern bool_false
 
-    mov rax, [rdi]             ; rax = args[0] = obj
-    mov rcx, [rdi + 8]        ; rcx = args[1] = type_to_check
+    mov rax, [rdi]             ; rax = args[0] = obj payload
+    mov r8d, [rdi + 8]        ; r8d = args[0] tag
+    mov rcx, [rdi + 16]       ; rcx = args[1] = type_to_check payload
+    mov r9d, [rdi + 24]       ; r9d = args[1] tag
 
     ; Get obj's type (SmallInt-aware, None-safe)
+    cmp r8d, TAG_SMALLINT
+    je .isinstance_smallint
     test rax, rax
-    js .isinstance_smallint
     jz .isinstance_none
     mov rdx, [rax + PyObject.ob_type]
     jmp .isinstance_got_type
@@ -580,8 +594,8 @@ DEF_FUNC builtin_isinstance
 .isinstance_got_type:
     ; rdx = obj's type, rcx = type_to_check (may be tuple)
     ; Check if type_to_check is a tuple
-    test rcx, rcx
-    js .isinstance_check       ; SmallInt → single type
+    cmp r9d, TAG_SMALLINT
+    je .isinstance_check       ; SmallInt → single type
     mov rax, [rcx + PyObject.ob_type]
     extern tuple_type
     lea r8, [rel tuple_type]
@@ -664,7 +678,7 @@ DEF_FUNC builtin_issubclass
     jne .issubclass_error
 
     mov rdx, [rdi]             ; rdx = args[0] = cls (child type)
-    mov rcx, [rdi + 8]        ; rcx = args[1] = parent type
+    mov rcx, [rdi + 16]       ; rcx = args[1] = parent type
 
 .issubclass_check:
     cmp rdx, rcx
@@ -701,7 +715,8 @@ DEF_FUNC builtin_repr
     cmp rsi, 1
     jne .repr_error
 
-    mov rdi, [rdi]
+    mov esi, [rdi + 8]         ; arg[0] tag
+    mov rdi, [rdi]             ; arg[0] payload
     call obj_repr
 
     mov edx, TAG_PTR
@@ -728,7 +743,8 @@ DEF_FUNC builtin_bool
     jne .bool_error
 
     ; bool(x) - test truthiness
-    mov rdi, [rdi]             ; rdi = x
+    mov esi, [rdi + 8]         ; rsi = arg[0] tag
+    mov rdi, [rdi]             ; rdi = arg[0] payload
     extern obj_is_true
     call obj_is_true           ; eax = 0 or 1
     test eax, eax
@@ -773,7 +789,8 @@ DEF_FUNC builtin_float
     jne .float_error
 
     ; float(x) - convert x
-    mov rdi, [rdi]             ; rdi = x
+    mov esi, [rdi + 8]         ; esi = x tag (args[0] tag)
+    mov rdi, [rdi]             ; rdi = x payload
     extern float_to_f64
     call float_to_f64          ; xmm0 = double
     extern float_from_f64
@@ -826,12 +843,12 @@ DEF_FUNC builtin___build_class__
     xor eax, eax
     cmp rsi, 3
     jl .bc_no_base
-    mov rax, [rbx + 16]    ; base = args[2]
+    mov rax, [rbx + 32]    ; base = args[2]
 .bc_no_base:
     mov [rbp-48], rax       ; save base_class (or NULL)
 
     mov r13, [rbx]          ; r13 = body_func (args[0])
-    mov r14, [rbx + 8]      ; r14 = class_name (args[1])
+    mov r14, [rbx + 16]     ; r14 = class_name (args[1])
 
     ; Create class dict (will become tp_dict)
     call dict_new
@@ -925,6 +942,7 @@ DEF_FUNC builtin___build_class__
 
     mov rdi, r15            ; class_dict
     mov rsi, rax            ; "__init__" str
+    mov edx, TAG_PTR
     call dict_get
     mov rbx, rax            ; rbx = __init__ func or NULL
 
@@ -1036,12 +1054,14 @@ DEF_FUNC builtin___build_class__
     test rcx, rcx
     jz .bc_no_init_subclass
 
-    push r12                   ; args[0] = new class (r12)
+    sub rsp, 16
+    mov [rsp], r12             ; args[0] payload = new class
+    mov qword [rsp + 8], TAG_PTR ; args[0] tag
     mov rdi, rax               ; callable = __init_subclass__ func
     mov rsi, rsp               ; args
     mov edx, 1                 ; nargs = 1
     call rcx
-    add rsp, 8                 ; pop args
+    add rsp, 16                ; pop fat args
     ; DECREF result if non-NULL
     test rax, rax
     jz .bc_no_init_subclass
@@ -1056,6 +1076,7 @@ DEF_FUNC builtin___build_class__
     push rax                ; save key str
     mov rdi, r15            ; class_dict
     mov rsi, rax
+    mov edx, TAG_PTR
     call dict_get           ; returns cell or NULL
     pop rdi                 ; key str
     push rax                ; save cell
@@ -1123,6 +1144,8 @@ DEF_FUNC_LOCAL add_builtin
     mov rdi, rbx
     mov rsi, rax               ; key
     mov rdx, [rsp + 8]        ; func obj
+    mov ecx, TAG_PTR
+    mov r8d, TAG_PTR
     call dict_set
 
     ; DECREF key and value
@@ -1163,6 +1186,8 @@ DEF_FUNC_LOCAL add_builtin_type
     mov rsi, rcx
     pop rdx                    ; type_obj
     push rcx                   ; save key for DECREF
+    mov ecx, TAG_PTR
+    mov r8d, TAG_PTR
     call dict_set
 
     ; DECREF key
@@ -1652,6 +1677,8 @@ DEF_FUNC_LOCAL add_exc_type_builtin
     mov rdi, rbx
     mov rsi, rax               ; key
     mov rdx, r12               ; type object
+    mov ecx, TAG_PTR
+    mov r8d, TAG_PTR
     call dict_set
 
     ; DECREF key

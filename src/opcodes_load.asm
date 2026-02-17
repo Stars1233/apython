@@ -54,7 +54,8 @@ LA_ATTR      equ 32
 LA_FROM_TYPE equ 40
 LA_CLASS     equ 48   ; used by classmethod path
 LA_ATTR_TAG  equ 56
-LA_FRAME     equ 64
+LA_OBJ_TAG   equ 64
+LA_FRAME     equ 72
 
 ; op_load_super_attr frame layout (DEF_FUNC op_load_super_attr, LSA_FRAME)
 LSA_SELF     equ 8
@@ -123,6 +124,7 @@ DEF_FUNC_BARE op_load_global
     ; Try globals first: dict_get_index(globals, name) -> slot or -1
     mov rdi, [r12 + PyFrame.globals]
     mov rsi, [rsp]             ; rsi = name
+    mov edx, TAG_PTR
     call dict_get_index
     cmp rax, -1
     je .try_builtins
@@ -150,6 +152,7 @@ DEF_FUNC_BARE op_load_global
     ; Try builtins: dict_get_index(builtins, name) -> slot or -1
     mov rdi, [r12 + PyFrame.builtins]
     pop rsi                    ; rsi = name
+    mov edx, TAG_PTR
     call dict_get_index
     cmp rax, -1
     je .not_found
@@ -295,23 +298,26 @@ DEF_FUNC_BARE op_load_name
 
     ; Try locals first: dict_get(locals, name)
     mov rsi, [rsp]             ; rsi = name
+    mov edx, TAG_PTR
     call dict_get
-    test rax, rax
+    test edx, edx
     jnz .found
 
 .try_globals:
     ; Try globals: dict_get(globals, name)
     mov rdi, [r12 + PyFrame.globals]
     mov rsi, [rsp]             ; rsi = name
+    mov edx, TAG_PTR
     call dict_get
-    test rax, rax
+    test edx, edx
     jnz .found
 
     ; Try builtins: dict_get(builtins, name)
     mov rdi, [r12 + PyFrame.builtins]
     pop rsi                    ; rsi = name
+    mov edx, TAG_PTR
     call dict_get
-    test rax, rax
+    test edx, edx
     jnz .found_no_pop
 
     ; Not found in any dict - raise NameError
@@ -374,7 +380,9 @@ DEF_FUNC op_load_attr, LA_FRAME
 
     ; Pop obj
     VPOP rdi
+    mov rax, [r13 + 8]            ; obj tag (after VPOP, tag at r13+8)
     mov [rbp - LA_OBJ], rdi
+    mov [rbp - LA_OBJ_TAG], rax
 
     ; Look up attribute
     ; Check if obj's type has tp_getattr
@@ -407,8 +415,9 @@ DEF_FUNC op_load_attr, LA_FRAME
     ; dict_get(type->tp_dict, name)
     mov rdi, rax
     mov rsi, [rbp - LA_NAME]
+    mov edx, TAG_PTR
     call dict_get
-    test rax, rax
+    test edx, edx
     jz .la_attr_error
 
     ; INCREF the result (dict_get returns borrowed ref)
@@ -427,8 +436,8 @@ DEF_FUNC op_load_attr, LA_FRAME
 .la_got_attr:
     ; === Descriptor protocol: check for staticmethod/classmethod ===
     mov rax, [rbp - LA_ATTR]   ; attr
-    test rax, rax
-    js .la_check_flag          ; SmallInt, skip descriptor check
+    cmp dword [rbp - LA_ATTR_TAG], TAG_SMALLINT
+    je .la_check_flag          ; SmallInt, skip descriptor check
     mov rcx, [rax + PyObject.ob_type]
 
     lea rdx, [rel staticmethod_type]
@@ -461,6 +470,7 @@ DEF_FUNC op_load_attr, LA_FRAME
     mov rsi, [rbp - LA_OBJ]    ; obj (instance)
     mov rdx, [rsi + PyObject.ob_type] ; type(obj)
     lea rcx, [rel dunder_get]
+    mov r8d, TAG_PTR             ; type(obj) is always heap ptr
     call dunder_call_3
 
     ; rax = result from __get__, rdx = result tag
@@ -496,8 +506,8 @@ DEF_FUNC op_load_attr, LA_FRAME
     cmp qword [rbp - LA_FROM_TYPE], 0
     je .la_simple_push
     mov rax, [rbp - LA_ATTR]
-    test rax, rax
-    js .la_simple_push          ; SmallInt
+    cmp dword [rbp - LA_ATTR_TAG], TAG_SMALLINT
+    je .la_simple_push          ; SmallInt
     mov rcx, [rax + PyObject.ob_type]
     mov rcx, [rcx + PyTypeObject.tp_call]
     test rcx, rcx
@@ -531,8 +541,8 @@ DEF_FUNC op_load_attr, LA_FRAME
 .la_method_load:
     ; flag=1: method-style load
     mov rax, [rbp - LA_ATTR]
-    test rax, rax
-    js .la_not_method              ; SmallInt can't be a method
+    cmp dword [rbp - LA_ATTR_TAG], TAG_SMALLINT
+    je .la_not_method              ; SmallInt can't be a method
     mov rcx, [rax + PyObject.ob_type]
 
     ; If attr is a bound method (returned by instance_getattr with binding),
@@ -563,8 +573,8 @@ DEF_FUNC op_load_attr, LA_FRAME
 
     ; Verify type has tp_dict with valid dk_version
     mov rdi, [rbp - LA_OBJ]       ; obj
-    test rdi, rdi
-    js .la_method_push             ; SmallInt obj, skip
+    cmp dword [rbp - LA_OBJ_TAG], TAG_SMALLINT
+    je .la_method_push             ; SmallInt obj, skip
     mov rcx, [rdi + PyObject.ob_type]
     mov rdx, [rcx + PyTypeObject.tp_dict]
     test rdx, rdx
@@ -776,9 +786,9 @@ DEF_FUNC_BARE op_load_attr_method
     ; VPEEK obj (don't pop -- stays as self if guards pass, or for deopt)
     VPEEK rdi
 
-    ; SmallInt check
-    test rdi, rdi
-    js .lam_deopt
+    ; SmallInt check (tag at r13-8 for TOS)
+    cmp dword [r13 - 8], TAG_SMALLINT
+    je .lam_deopt
 
     ; Guard 1: ob_type == cached type_ptr
     mov rax, [rdi + PyObject.ob_type]
@@ -944,6 +954,7 @@ DEF_FUNC op_load_super_attr, LSA_FRAME
 
     push rax                       ; save current type
     mov rsi, [rbp - LSA_NAME]      ; name
+    mov edx, TAG_PTR
     call dict_get
     pop rcx                        ; restore current type
     test rax, rax
