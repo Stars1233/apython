@@ -421,11 +421,10 @@ DEF_FUNC set_repr, 24
     cmp r12, r13
     jge .sr_done
 
-    ; SetEntry is 16 bytes: hash(8) + key(8)
+    ; SetEntry is 24 bytes: hash(8) + key(8) + key_tag(8)
     mov rax, [rbx + PyDictObject.entries]
-    mov rcx, r12
-    shl rcx, 4                    ; index * 16
-    mov rdi, [rax + rcx + 8]     ; key
+    imul rcx, r12, 24             ; index * SET_ENTRY_SIZE (24)
+    mov rdi, [rax + rcx + 8]     ; key at SET_ENTRY_KEY offset
     test rdi, rdi
     jz .sr_next
 

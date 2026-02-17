@@ -19,9 +19,10 @@ extern str_from_cstr
 extern type_type
 
 ; Set entry layout constants
-SET_ENTRY_HASH equ 0
-SET_ENTRY_KEY  equ 8
-SET_ENTRY_SIZE equ 16
+SET_ENTRY_HASH    equ 0
+SET_ENTRY_KEY     equ 8
+SET_ENTRY_KEY_TAG equ 16
+SET_ENTRY_SIZE    equ 24
 
 ; Initial capacity (must be power of 2)
 SET_INIT_CAP equ 8
@@ -278,6 +279,7 @@ DEF_FUNC_LOCAL set_resize
     ; Save entry data
     push qword [rax + SET_ENTRY_HASH]
     push qword [rax + SET_ENTRY_KEY]
+    push qword [rax + SET_ENTRY_KEY_TAG]
 
     ; Linear probe in new table to find empty slot
 .rehash_probe:
@@ -294,6 +296,7 @@ DEF_FUNC_LOCAL set_resize
 
 .rehash_insert:
     ; rax = target entry ptr in new table
+    pop qword [rax + SET_ENTRY_KEY_TAG]
     pop qword [rax + SET_ENTRY_KEY]
     pop qword [rax + SET_ENTRY_HASH]
 
@@ -348,6 +351,15 @@ DEF_FUNC set_add
     ; Store hash and key
     mov [rax + SET_ENTRY_HASH], r13
     mov [rax + SET_ENTRY_KEY], r12
+
+    ; Classify and store key tag
+    test r12, r12
+    js .add_si
+    mov qword [rax + SET_ENTRY_KEY_TAG], TAG_PTR
+    jmp .add_tag_done
+.add_si:
+    mov qword [rax + SET_ENTRY_KEY_TAG], TAG_SMALLINT
+.add_tag_done:
 
     ; INCREF key
     INCREF r12
@@ -470,8 +482,10 @@ DEF_FUNC set_remove
 
     ; Found: null out entry, DECREF key, decrement size
     mov rdi, [rdx + SET_ENTRY_KEY]
+    mov rsi, [rdx + SET_ENTRY_KEY_TAG]
     mov qword [rdx + SET_ENTRY_KEY], 0
-    call obj_decref             ; DECREF key
+    mov qword [rdx + SET_ENTRY_KEY_TAG], 0
+    DECREF_VAL rdi, rsi
     dec qword [rbx + PyDictObject.ob_size]
     xor eax, eax               ; return 0 = success
     jmp .sr_done
@@ -523,8 +537,9 @@ DEF_FUNC set_dealloc
     test rdi, rdi
     jz .dealloc_next
 
-    ; DECREF key
-    call obj_decref
+    ; DECREF key (fat value)
+    mov rsi, [rax + SET_ENTRY_KEY_TAG]
+    DECREF_VAL rdi, rsi
 
 .dealloc_next:
     inc r14

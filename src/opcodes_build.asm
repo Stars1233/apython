@@ -1888,7 +1888,7 @@ DEF_FUNC op_set_update
 
     mov rax, [rbp-32]         ; source set
     mov rax, [rax + PyDictObject.entries]
-    imul rcx, rbx, 16         ; SET_ENTRY_SIZE = 16
+    imul rcx, rbx, 24         ; SET_ENTRY_SIZE = 24
     add rax, rcx
 
     ; Check if entry has a key
