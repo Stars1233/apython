@@ -184,6 +184,8 @@ DEF_FUNC eval_frame
     push rax
     mov rax, [rel eval_saved_r12]
     push rax
+    mov rax, [rel eval_saved_r13]
+    push rax
     mov rax, [rel eval_base_rsp]
     push rax
 
@@ -200,6 +202,7 @@ END_FUNC eval_frame
 align 16
 DEF_FUNC_BARE eval_dispatch
     mov [rel eval_saved_rbx], rbx  ; save bytecode IP for exception unwind
+    mov [rel eval_saved_r13], r13  ; save value stack ptr for exception unwind
     movzx eax, byte [rbx]      ; load opcode
     movzx ecx, byte [rbx+1]    ; load arg into ecx
     add rbx, 2                  ; advance past instruction word
@@ -224,6 +227,8 @@ DEF_FUNC_BARE eval_return
     ; Use rcx as scratch — rdx holds return tag (fat value protocol)
     pop rcx
     mov [rel eval_base_rsp], rcx
+    pop rcx
+    mov [rel eval_saved_r13], rcx
     pop rcx
     mov [rel eval_saved_r12], rcx
     pop rcx
@@ -335,6 +340,7 @@ DEF_FUNC_BARE eval_exception_unwind
     ; r14/r15: re-derive from code object
     mov rbx, [rel eval_saved_rbx]   ; restore bytecode IP (pre-advance copy)
     mov r12, [rel eval_saved_r12]   ; restore frame pointer
+    mov r13, [rel eval_saved_r13]   ; restore value stack pointer
 
     ; Re-derive r14/r15 from the code object
     mov rax, [r12 + PyFrame.code]
@@ -1358,6 +1364,8 @@ global eval_saved_rbx
 eval_saved_rbx: resq 1       ; bytecode IP saved at dispatch (for exception unwind)
 global eval_saved_r12
 eval_saved_r12: resq 1       ; frame pointer saved at frame entry (for exception unwind)
+global eval_saved_r13
+eval_saved_r13: resq 1       ; value stack ptr saved at dispatch (for exception unwind)
 
 global kw_names_pending
 kw_names_pending: resq 1     ; tuple of kw names for next CALL, or NULL

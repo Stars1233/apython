@@ -32,4 +32,12 @@ print("alpha" in d5)   # True
 print("beta" in d5)    # False
 print("gamma" in d5)   # True
 
+# KeyError on missing key
+try:
+    d6 = {"a": 1}
+    del d6["missing"]
+    print("ERROR: should have raised KeyError")
+except KeyError:
+    print("KeyError raised correctly")
+
 print("All del dict tests passed")

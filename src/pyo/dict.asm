@@ -798,7 +798,10 @@ DEF_FUNC dict_del, 8
     jmp .dd_probe
 
 .dd_not_found:
-    mov eax, -1
+    lea rdi, [rel exc_KeyError_type]
+    CSTRING rsi, "key not found"
+    call raise_exception
+    ; raise_exception does not return
 
 .dd_done:
     pop r15

@@ -300,8 +300,10 @@ DEF_FUNC dict_repr, 24
     BUF_BYTE ' '
 .dr_no_comma:
 
-    ; repr(key) — read key tag from entry
-    ; rdi already = key
+    ; Reload entry data (BUF macros clobber rax, rcx, rdi)
+    mov rax, [rbx + PyDictObject.entries]
+    imul rcx, r12, DICT_ENTRY_SIZE
+    mov rdi, [rax + rcx + DictEntry.key]
     mov esi, [rax + rcx + DictEntry.key_tag]
     push r12                   ; save entry index across calls
     call obj_repr
@@ -431,8 +433,8 @@ DEF_FUNC set_repr, 24
     mov rdi, [rax + rcx + 8]     ; key at SET_ENTRY_KEY offset
     test rdi, rdi
     jz .sr_next
-    mov esi, [rax + rcx + 16]   ; key_tag at SET_ENTRY_KEY_TAG offset
 
+    ; Print separator if not first
     test r14, r14
     jz .sr_no_comma
     BUF_ENSURE 2
@@ -440,6 +442,11 @@ DEF_FUNC set_repr, 24
     BUF_BYTE ' '
 .sr_no_comma:
 
+    ; Reload entry data (BUF macros may clobber rdi, esi)
+    mov rax, [rbx + PyDictObject.entries]
+    imul rcx, r12, 24
+    mov rdi, [rax + rcx + 8]     ; key
+    mov esi, [rax + rcx + 16]    ; key_tag
     push r12
     call obj_repr
     test rax, rax
