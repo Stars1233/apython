@@ -184,7 +184,7 @@ DEF_FUNC op_store_attr, SA_FRAME
     mov edx, TAG_PTR
     call dict_get
     pop rcx
-    test rax, rax
+    test edx, edx
     jnz .sa_found_in_type         ; found attr in type dict
 .sa_walk_next:
     mov rcx, [rcx + PyTypeObject.tp_base]

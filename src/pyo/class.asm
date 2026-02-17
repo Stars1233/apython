@@ -114,7 +114,7 @@ DEF_FUNC instance_getattr
     mov edx, TAG_PTR
     call dict_get
     pop rcx                             ; restore current type
-    test rax, rax
+    test edx, edx
     jnz .found_type                     ; found in type's dict
 
 .try_base:
@@ -323,7 +323,7 @@ DEF_FUNC instance_repr
     lea rsi, [rel dunder_repr]
     ; r12 is callee-saved and still holds eval frame from caller chain
     call dunder_call_1
-    test rax, rax
+    test edx, edx
     jnz .done
 
     ; Fall back to "<instance>"
@@ -349,7 +349,7 @@ DEF_FUNC instance_str
     extern dunder_str
     lea rsi, [rel dunder_str]
     call dunder_call_1
-    test rax, rax
+    test edx, edx
     jnz .done
 
     ; Fall back to instance_repr
@@ -457,7 +457,7 @@ DEF_FUNC type_call
     mov edx, TAG_PTR
     call dict_get
     pop rcx                     ; restore current type
-    test rax, rax
+    test edx, edx
     jnz .init_found
 
 .init_try_base:
@@ -569,7 +569,7 @@ DEF_FUNC type_call
     mov rsi, r13                ; nargs
     call builtin_int_fn
     ; rax = int result (SmallInt or GMP pointer), edx = tag
-    test rax, rax
+    test edx, edx
     jz .int_sub_error           ; exception from builtin_int_fn
     mov r14, rax                ; r14 = int value
     mov r15d, edx               ; r15d = int value tag
@@ -602,8 +602,11 @@ DEF_FUNC type_call
 
 .int_sub_return_bare:
     mov rax, r14
+    mov edx, r15d               ; restore saved tag from builtin_int_fn
+    jmp .int_sub_epilogue
 .int_sub_done:
-    mov edx, TAG_PTR
+    mov edx, TAG_PTR            ; subclass instance is always a heap ptr
+.int_sub_epilogue:
     add rsp, 8                  ; undo alignment
     pop r15
     pop r14

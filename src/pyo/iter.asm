@@ -65,8 +65,7 @@ DEF_FUNC_BARE list_iter_next
     ret
 
 .exhausted:
-    xor eax, eax
-    xor edx, edx                  ; TAG_NULL = exhausted
+    RET_NULL
     ret
 END_FUNC list_iter_next
 
@@ -156,8 +155,7 @@ DEF_FUNC_BARE tuple_iter_next
     ret
 
 .exhausted:
-    xor eax, eax
-    xor edx, edx                ; TAG_NULL = exhausted
+    RET_NULL
     ret
 END_FUNC tuple_iter_next
 
@@ -255,12 +253,11 @@ DEF_FUNC_BARE range_iter_next
     mov [rdi + PyRangeIterObject.it_current], rax
 
     mov rax, r8
-    mov edx, TAG_SMALLINT
+    RET_TAG_SMALLINT
     ret
 
 .exhausted:
-    xor eax, eax
-    xor edx, edx                ; TAG_NULL = exhausted
+    RET_NULL
     ret
 END_FUNC range_iter_next
 

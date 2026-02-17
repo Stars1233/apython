@@ -125,7 +125,7 @@ DEF_FUNC_BARE bytes_getitem
 
     ; Get byte and return as SmallInt
     movzx eax, byte [rdi + PyBytesObject.data + rsi]
-    mov edx, TAG_SMALLINT
+    RET_TAG_SMALLINT
     ret
 
 .index_error:
@@ -483,8 +483,7 @@ DEF_FUNC bytes_getattr
     jz .bga_decode
 
     ; Not found
-    xor eax, eax
-    xor edx, edx
+    RET_NULL
     pop r12
     pop rbx
     leave
@@ -567,15 +566,14 @@ DEF_FUNC_BARE bytes_iter_next
 
     ; Get byte and return as SmallInt
     movzx eax, byte [rax + PyBytesObject.data + rcx]
-    mov edx, TAG_SMALLINT
+    RET_TAG_SMALLINT
 
     ; Advance index
     inc qword [rdi + PyBytesIterObject.it_index]
     ret
 
 .exhausted:
-    xor eax, eax
-    xor edx, edx                  ; TAG_NULL = exhausted
+    RET_NULL
     ret
 END_FUNC bytes_iter_next
 

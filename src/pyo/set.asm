@@ -665,8 +665,7 @@ DEF_FUNC_BARE set_iter_next
 
 .si_exhausted:
     mov [rdi + PyDictIterObject.it_index], rcx
-    xor eax, eax
-    xor edx, edx                  ; TAG_NULL = exhausted
+    RET_NULL
     ret
 END_FUNC set_iter_next
 

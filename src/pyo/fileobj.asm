@@ -379,8 +379,7 @@ DEF_FUNC fileobj_getattr
     jz .ret_line_buffering
 
     ; Unknown attribute
-    xor eax, eax
-    xor edx, edx
+    RET_NULL
     pop r12
     pop rbx
     leave

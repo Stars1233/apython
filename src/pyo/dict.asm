@@ -886,8 +886,7 @@ DEF_FUNC_BARE dict_iter_next
 
 .di_exhausted:
     mov [rdi + PyDictIterObject.it_index], rcx
-    xor eax, eax
-    xor edx, edx                  ; TAG_NULL = exhausted
+    RET_NULL
     ret
 END_FUNC dict_iter_next
 

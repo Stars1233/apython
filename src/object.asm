@@ -121,7 +121,7 @@ DEF_FUNC obj_repr
 
 .smallint:
     ; rdi = raw int value — int_repr handles SmallInt payloads
-    mov edx, TAG_SMALLINT
+    RET_TAG_SMALLINT
     call int_repr
     leave
     ret
@@ -167,7 +167,7 @@ DEF_FUNC obj_str
 .smallint:
     ; SmallInt: delegate to int_repr
     mov rdi, rbx
-    mov edx, TAG_SMALLINT
+    RET_TAG_SMALLINT
     call int_repr
     pop r12
     pop rbx

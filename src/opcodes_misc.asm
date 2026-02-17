@@ -283,7 +283,7 @@ DEF_FUNC_BARE op_binary_op
     mov ecx, [rsp + 8 + BO_RTAG]   ; other_tag = right's tag
     call dunder_call_2
     pop r9
-    test rax, rax
+    test edx, edx
     jnz .binop_have_result
 
 .binop_try_right_dunder:
@@ -311,7 +311,7 @@ DEF_FUNC_BARE op_binary_op
     mov rsi, [rsp + BO_LEFT]
     mov ecx, [rsp + BO_LTAG]       ; other_tag = left's tag
     call dunder_call_2
-    test rax, rax
+    test edx, edx
     jnz .binop_have_result
 
 .binop_no_method:
@@ -492,7 +492,7 @@ section .text
     call dunder_call_2
     pop rcx
 
-    test rax, rax
+    test edx, edx
     jz .cmp_identity            ; dunder not found → identity fallback
     jmp .cmp_do_call_result     ; rax = result object
 
@@ -1992,13 +1992,15 @@ DEF_FUNC op_match_class, MC_FRAME
     mov edx, TAG_PTR
     call dict_get
     pop rsi                         ; rsi = string to DECREF
-    push rax                        ; save dict_get result
+    push rdx                        ; save dict_get tag
+    push rax                        ; save dict_get payload
     mov rdi, rsi
     call obj_decref
-    pop rax                         ; restore dict_get result
+    pop rax                         ; restore dict_get payload
+    pop rdx                         ; restore dict_get tag
     pop r8                          ; restore type pointer
 
-    test rax, rax
+    test edx, edx
     jnz .mc_matchargs_found
 
 .mc_matchargs_next_base:
@@ -2050,7 +2052,7 @@ DEF_FUNC op_match_class, MC_FRAME
     test rax, rax
     jz .mc_fail
     call rax
-    test rax, rax
+    test edx, edx
     jz .mc_fail                     ; attr not found
 
     ; Store in result tuple[i] (already owns a ref from tp_getattr, fat: *16)
@@ -2089,7 +2091,7 @@ DEF_FUNC op_match_class, MC_FRAME
     test rax, rax
     jz .mc_fail
     call rax
-    test rax, rax
+    test edx, edx
     jz .mc_fail                     ; attr not found
 
     ; Store in result tuple[npos + j] (fat: *16)

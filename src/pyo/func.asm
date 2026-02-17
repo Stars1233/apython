@@ -379,7 +379,7 @@ DEF_FUNC func_call
     pop rdx
     pop rax                 ; rax = kwdefaults dict
 
-    test r8, r8
+    test r10, r10
     jz .kw_defaults_next    ; not in kwdefaults, skip (would be error)
 
     ; Assign and INCREF
@@ -745,8 +745,7 @@ DEF_FUNC func_getattr
     ret
 
 .not_found:
-    xor eax, eax
-    xor edx, edx
+    RET_NULL
     pop r12
     pop rbx
     leave

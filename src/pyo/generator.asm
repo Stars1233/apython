@@ -269,8 +269,7 @@ DEF_FUNC gen_send
     jz .gs_stop
     DECREF_REG rdi
 .gs_stop:
-    xor eax, eax
-    xor edx, edx               ; TAG_NULL
+    RET_NULL
     pop r14
     pop r13
     pop r12
@@ -289,8 +288,7 @@ DEF_FUNC gen_send
     ret
 
 .gs_exhausted:
-    xor eax, eax
-    xor edx, edx               ; TAG_NULL
+    RET_NULL
     pop r14
     pop r13
     pop r12
@@ -299,8 +297,7 @@ DEF_FUNC gen_send
     ret
 
 .gs_error:
-    xor eax, eax
-    xor edx, edx               ; TAG_NULL
+    RET_NULL
     pop r14
     pop r13
     pop r12
@@ -372,8 +369,7 @@ DEF_FUNC gen_getattr
     jz .gga_throw
 
     ; Not found
-    xor eax, eax
-    xor edx, edx
+    RET_NULL
     pop r12
     pop rbx
     leave

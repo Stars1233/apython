@@ -187,8 +187,7 @@ DEF_FUNC_LOCAL enumerate_iternext
     ret
 
 .enum_exhausted:
-    xor eax, eax
-    xor edx, edx              ; TAG_NULL = exhausted
+    RET_NULL
     pop r13
     pop r12
     pop rbx
@@ -382,8 +381,7 @@ DEF_FUNC_LOCAL zip_iternext
     call obj_decref
 
 .zip_exhausted:
-    xor eax, eax
-    xor edx, edx              ; TAG_NULL = exhausted
+    RET_NULL
     pop r15
     pop r14
     pop r13
@@ -532,8 +530,7 @@ DEF_FUNC_LOCAL map_iternext
     ret
 
 .map_exhausted:
-    xor eax, eax
-    xor edx, edx              ; TAG_NULL = exhausted
+    RET_NULL
     add rsp, 8
     pop r14
     pop r13
@@ -711,8 +708,7 @@ DEF_FUNC_LOCAL filter_iternext
     ret
 
 .filter_exhausted:
-    xor eax, eax
-    xor edx, edx              ; TAG_NULL = exhausted
+    RET_NULL
     pop r15
     pop r14
     pop r13
@@ -853,8 +849,7 @@ DEF_FUNC_LOCAL reversed_iternext
     ret
 
 .rev_exhausted:
-    xor eax, eax
-    xor edx, edx              ; TAG_NULL = exhausted
+    RET_NULL
     pop rbx
     leave
     ret

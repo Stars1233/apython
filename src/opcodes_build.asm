@@ -212,7 +212,7 @@ DEF_FUNC_BARE op_binary_subscr
     lea rdx, [rel dunder_getitem]
     mov ecx, [rsp + 16]      ; key tag = other_tag
     call dunder_call_2
-    test rax, rax
+    test edx, edx
     jnz .subscr_done
     jmp .subscr_error
 
@@ -799,7 +799,7 @@ DEF_FUNC_BARE op_get_iter
     lea rsi, [rel dunder_iter]
     extern dunder_call_1
     call dunder_call_1
-    test rax, rax
+    test edx, edx
     jz .not_iterable
     ; rax = iterator from __iter__, skip the tp_iter call
     jmp .have_iter_result

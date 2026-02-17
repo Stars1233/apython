@@ -311,8 +311,7 @@ mdo_false:
 ; TYPE_NULL handler - return NULL pointer
 ;--------------------------------------------------------------------------
 mdo_null:
-    xor eax, eax
-    xor edx, edx              ; TAG_NULL
+    RET_NULL
     jmp mfinish
 
 ;--------------------------------------------------------------------------

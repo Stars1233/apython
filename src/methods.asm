@@ -2267,7 +2267,7 @@ DEF_FUNC dict_method_get
     mov edx, [rax + 24]     ; key tag
     call dict_get
 
-    test rax, rax
+    test edx, edx
     jnz .dg_found
 
     ; Not found - return default or None
@@ -2726,7 +2726,7 @@ DEF_FUNC dict_method_setdefault
     mov edx, r14d           ; key tag
     call dict_get
 
-    test rax, rax
+    test edx, edx
     jnz .sd_found
 
     ; Not found - determine default value

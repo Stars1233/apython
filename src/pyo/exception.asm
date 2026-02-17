@@ -332,8 +332,7 @@ DEF_FUNC exc_getattr
     jnz .found_in_type
 
 .not_found:
-    xor eax, eax
-    xor edx, edx
+    RET_NULL
     pop r12
     pop rbx
     leave

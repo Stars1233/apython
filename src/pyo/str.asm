@@ -1021,8 +1021,7 @@ DEF_FUNC str_iter_next
     ret
 
 .si_exhausted:
-    xor eax, eax
-    xor edx, edx                  ; TAG_NULL = exhausted
+    RET_NULL
     pop rbx
     leave
     ret

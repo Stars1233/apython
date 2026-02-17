@@ -471,14 +471,16 @@ DEF_FUNC import_find_and_load, FL_FRAME
     mov rsi, r12
     mov edx, TAG_PTR
     call dict_get
-    mov r13, rax                ; r13 = parent module (or NULL)
+    mov r13, rax                ; r13 = parent module payload (or 0)
+    push rdx                    ; save dict_get tag for found check
 
     ; DECREF parent name str
     mov rdi, r12
     call obj_decref
 
     ; If parent not found, fall through to sys.path search
-    test r13, r13
+    pop rdx                     ; restore dict_get tag
+    test edx, edx
     jz .search_sys_path
 
     ; Get parent's __path__ attribute (from module dict)

@@ -265,6 +265,27 @@ TAG_RC_BIT   equ (1 << 8)    ; bit 8: refcounted flag
     add r13, 16
 %endmacro
 
+; Set fat return to NULL error (rax=0, edx=TAG_NULL=0)
+; Use on error paths in functions returning (rax=payload, edx=tag).
+%macro RET_NULL 0
+    xor eax, eax
+    xor edx, edx
+%endmacro
+
+; Set fat return tag to SmallInt (edx=TAG_SMALLINT)
+; Caller sets rax=payload. Use when returning inline integers.
+%macro RET_TAG_SMALLINT 0
+    mov edx, TAG_SMALLINT
+%endmacro
+
+; Push fat arg onto machine stack (rsp-based, for building tp_call arg arrays)
+; Use when building a 16-byte-stride args array on the stack for tp_call.
+%macro SPUSH_PTR 1              ; %1 = payload reg containing PyObject*
+    sub rsp, 16
+    mov [rsp], %1
+    mov qword [rsp + 8], TAG_PTR
+%endmacro
+
 ; Peek tag of top-of-stack (without popping)
 %macro VPEEK_TAG 1              ; %1 = dest reg
     mov %1, [r13 - 8]

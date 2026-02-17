@@ -119,7 +119,7 @@ DEF_FUNC op_import_from, IF2_FRAME
 
     ; Call tp_getattr(module, name_str)
     call rax
-    test rax, rax
+    test edx, edx
     jnz .if_got_attr
 
     ; tp_getattr returned NULL — try dict_get directly

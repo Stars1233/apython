@@ -184,7 +184,7 @@ DEF_FUNC memoryview_subscript, MS_FRAME
     jge .ms_index_error
     mov rdx, [rdi + PyMemoryViewObject.mv_buf]
     movzx eax, byte [rdx + rsi]
-    mov edx, TAG_SMALLINT
+    RET_TAG_SMALLINT
     leave
     ret
 

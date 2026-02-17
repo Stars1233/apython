@@ -46,7 +46,7 @@ DEF_FUNC dunder_lookup
     mov rsi, r13
     mov edx, TAG_PTR
     call dict_get           ; dict_get(tp_dict, name_str) -> borrowed ref
-    test rax, rax
+    test edx, edx
     jnz .found
 
 .try_base:
@@ -126,8 +126,7 @@ DEF_FUNC dunder_call_1
     ret
 
 .not_found:
-    xor eax, eax
-    xor edx, edx           ; TAG_NULL
+    RET_NULL
     pop r14
     pop r13
     pop r12
@@ -188,8 +187,7 @@ DEF_FUNC dunder_call_2
     ret
 
 .not_found:
-    xor eax, eax
-    xor edx, edx           ; TAG_NULL
+    RET_NULL
     pop r14
     pop r13
     pop r12
@@ -257,8 +255,7 @@ DEF_FUNC dunder_call_3
     ret
 
 .not_found:
-    xor eax, eax
-    xor edx, edx           ; TAG_NULL
+    RET_NULL
     pop r15
     pop r14
     pop r13

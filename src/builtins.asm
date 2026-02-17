@@ -395,7 +395,7 @@ DEF_FUNC builtin_len
     mov rdi, rbx
     lea rsi, [rel dunder_len]
     call dunder_call_1
-    test rax, rax
+    test edx, edx
     jz .try_ob_size
 
     ; __len__ returned a result — extract integer value
@@ -1079,10 +1079,12 @@ DEF_FUNC builtin___build_class__
     mov edx, TAG_PTR
     call dict_get           ; returns cell or NULL
     pop rdi                 ; key str
-    push rax                ; save cell
+    push rdx                ; save dict_get tag
+    push rax                ; save cell payload
     call obj_decref         ; DECREF key str
-    pop rax                 ; restore cell
-    test rax, rax
+    pop rax                 ; restore cell payload
+    pop rdx                 ; restore dict_get tag
+    test edx, edx
     jz .bc_no_classcell
     ; cell.ob_ref = new type (r12), with tag
     mov [rax + PyCellObject.ob_ref], r12

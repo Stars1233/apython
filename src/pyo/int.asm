@@ -105,7 +105,7 @@ DEF_FUNC_BARE int_from_i64
     jae int_from_i64_gmp   ; doesn't fit, use GMP
     ; Fits: encode as SmallInt
     mov rax, rdi
-    mov edx, TAG_SMALLINT
+    RET_TAG_SMALLINT
     ret
 END_FUNC int_from_i64
 
@@ -181,7 +181,7 @@ DEF_FUNC int_from_cstr
     call __gmpz_clear wrt ..plt
     mov rdi, r12
     call ap_free
-    xor eax, eax
+    RET_NULL
     lea rsp, [rbp - 24]
     pop r13
     pop r12
@@ -402,7 +402,7 @@ DEF_FUNC int_from_cstr_base, IB_FRAME
     cmp cl, 11   ; \v
     je .base0_return_zero
     ; Non-zero digit or invalid char → error
-    xor eax, eax
+    RET_NULL
     leave
     ret
 .base0_zero_digit:
@@ -417,7 +417,7 @@ DEF_FUNC int_from_cstr_base, IB_FRAME
     inc rdi
     jmp .base0_zero_loop
 .base0_error:
-    xor eax, eax
+    RET_NULL
     leave
     ret
 .base0_check_trail:
@@ -428,7 +428,7 @@ DEF_FUNC int_from_cstr_base, IB_FRAME
 .base0_return_zero:
     ; Free nothing (no buffer allocated yet), return SmallInt 0
     xor eax, eax
-    mov edx, TAG_SMALLINT
+    RET_TAG_SMALLINT
     leave
     ret
 
@@ -782,7 +782,7 @@ DEF_FUNC int_from_cstr_base, IB_FRAME
     mov rdi, [rbp - IB_OBJ]
     call ap_free
     mov rax, [rbp - IB_SIGN]
-    mov edx, TAG_SMALLINT
+    RET_TAG_SMALLINT
     leave
     ret
 
@@ -815,7 +815,8 @@ DEF_FUNC int_from_cstr_base, IB_FRAME
     ; Free cleaned buffer if allocated
     mov rdi, [rbp - IB_BUF]
     call ap_free
-    xor eax, eax           ; return NULL
+    xor eax, eax           ; return NULL payload
+    xor edx, edx           ; TAG_NULL (distinguishes from SmallInt 0)
     leave
     ret
 
@@ -1043,7 +1044,7 @@ DEF_FUNC_BARE int_add
     jo .gmp_path            ; overflow, fall back to GMP
 
     ; Result fits: encode as SmallInt
-    mov edx, TAG_SMALLINT
+    RET_TAG_SMALLINT
     ret
 
 .gmp_path:
@@ -1139,7 +1140,7 @@ DEF_FUNC_BARE int_sub
     mov rcx, rsi
     sub rax, rcx
     jo .gmp_path
-    mov edx, TAG_SMALLINT
+    RET_TAG_SMALLINT
     ret
 
 .gmp_path:
@@ -1237,7 +1238,7 @@ DEF_FUNC_BARE int_mul
     inc rcx
     cmp rcx, 2
     jae .gmp_path
-    mov edx, TAG_SMALLINT
+    RET_TAG_SMALLINT
     ret
 
 .gmp_path:
@@ -1339,7 +1340,7 @@ DEF_FUNC_BARE int_floordiv
     jns .smallint_done
     dec rax
 .smallint_done:
-    mov edx, TAG_SMALLINT
+    RET_TAG_SMALLINT
     ret
 
 .gmp_path:
@@ -1441,7 +1442,7 @@ DEF_FUNC_BARE int_mod
     jns .smallint_done
     add rax, rcx            ; remainder += divisor
 .smallint_done:
-    mov edx, TAG_SMALLINT
+    RET_TAG_SMALLINT
     ret
 
 .gmp_path:
@@ -1547,7 +1548,7 @@ DEF_FUNC_BARE int_neg
     inc rcx
     cmp rcx, 2
     jae .neg_overflow
-    mov edx, TAG_SMALLINT
+    RET_TAG_SMALLINT
     ret
 .neg_overflow:
     ; Value is 2^62, doesn't fit SmallInt. Create GMP int.
@@ -1794,7 +1795,7 @@ DEF_FUNC_BARE int_and
     ; Both SmallInt
     mov rax, rdi
     and rax, rsi           ; AND preserves tag bit, result is valid SmallInt
-    mov edx, TAG_SMALLINT
+    RET_TAG_SMALLINT
     ret
 
 .gmp:
@@ -1884,7 +1885,7 @@ DEF_FUNC_BARE int_or
     ; Both SmallInt
     mov rax, rdi
     or rax, rsi            ; OR preserves tag bit
-    mov edx, TAG_SMALLINT
+    RET_TAG_SMALLINT
     ret
 
 .gmp:
@@ -1975,7 +1976,7 @@ DEF_FUNC_BARE int_xor
     mov rax, rdi
     mov rcx, rsi
     xor rax, rcx
-    mov edx, TAG_SMALLINT
+    RET_TAG_SMALLINT
     ret
 
 .gmp:
@@ -2073,7 +2074,7 @@ DEF_FUNC_BARE int_invert
 .smallint:
     mov rax, rdi
     not rax                ; ~x = -(x+1), works for all 62-bit values
-    mov edx, TAG_SMALLINT
+    RET_TAG_SMALLINT
     ret
 END_FUNC int_invert
 
@@ -2224,7 +2225,7 @@ DEF_FUNC int_rshift
     cmp rcx, 63
     jge .max_shift
     sar rax, cl
-    mov edx, TAG_SMALLINT
+    RET_TAG_SMALLINT
     pop r14
     pop r13
     pop r12
@@ -2234,7 +2235,7 @@ DEF_FUNC int_rshift
 .max_shift:
     ; Shift >= 63: result is 0 or -1 depending on sign
     sar rax, 63
-    mov edx, TAG_SMALLINT
+    RET_TAG_SMALLINT
     pop r14
     pop r13
     pop r12

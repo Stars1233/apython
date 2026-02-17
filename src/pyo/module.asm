@@ -131,7 +131,7 @@ DEF_FUNC module_getattr
     call dict_get
 
     ; INCREF if found (dict_get returns borrowed ref)
-    test rax, rax
+    test edx, edx
     jz .not_found
     mov r12, rdx                ; save tag (name no longer needed)
     mov rbx, rax                ; save payload (self no longer needed)
@@ -145,8 +145,7 @@ DEF_FUNC module_getattr
     ret
 
 .not_found:
-    xor eax, eax
-    xor edx, edx               ; TAG_NULL
+    RET_NULL
     pop r12
     pop rbx
     leave

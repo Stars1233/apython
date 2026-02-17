@@ -111,7 +111,7 @@ DEF_FUNC builtin_abs
     jns .abs_si_pos
     neg rax
 .abs_si_pos:
-    mov edx, TAG_SMALLINT
+    RET_TAG_SMALLINT
     add rsp, 8
     pop rbx
     leave
@@ -362,12 +362,12 @@ DEF_FUNC builtin_int_fn, BI_FRAME
 
 .int_no_args:
     xor eax, eax
-    mov edx, TAG_SMALLINT
+    RET_TAG_SMALLINT
     jmp .int_ret
 
 .int_return_smallint:
     mov rax, rbx
-    mov edx, TAG_SMALLINT
+    RET_TAG_SMALLINT
     jmp .int_ret
 
 .int_from_int:
@@ -392,7 +392,7 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     lea rdi, [rbx + PyStrObject.data]
     mov rsi, 10
     call int_from_cstr_base
-    test rax, rax
+    test edx, edx
     jz .int_str_parse_error
     jmp .int_ret
 
@@ -425,12 +425,14 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     mov rdi, [rsp]            ; buffer (still on stack)
     mov rsi, 10
     call int_from_cstr_base
-    mov rbx, rax              ; save result
-    pop rdi                   ; free temp buffer
-    push rbx
+    mov rbx, rax              ; save result payload
+    push rdx                  ; save result tag
+    mov rdi, [rsp + 8]       ; buffer ptr (under tag on stack)
     call ap_free
-    pop rax                   ; rax = parse result
-    test rax, rax
+    pop rdx                   ; restore result tag
+    add rsp, 8               ; pop buffer ptr
+    mov rax, rbx
+    test edx, edx            ; check tag (not payload — SmallInt 0 is valid)
     jz .int_str_parse_error
     jmp .int_ret
 
@@ -467,12 +469,14 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     mov rdi, [rsp]
     mov rsi, 10
     call int_from_cstr_base
-    mov rbx, rax
-    pop rdi
-    push rbx
+    mov rbx, rax              ; save result payload
+    push rdx                  ; save result tag
+    mov rdi, [rsp + 8]       ; buffer ptr (under tag on stack)
     call ap_free
-    pop rax
-    test rax, rax
+    pop rdx                   ; restore result tag
+    add rsp, 8               ; pop buffer ptr
+    mov rax, rbx
+    test edx, edx            ; check tag (not payload — SmallInt 0 is valid)
     jz .int_str_parse_error
     jmp .int_ret
 
@@ -501,12 +505,14 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     mov rdi, [rsp]
     mov rsi, 10
     call int_from_cstr_base
-    mov rbx, rax
-    pop rdi
-    push rbx
+    mov rbx, rax              ; save result payload
+    push rdx                  ; save result tag
+    mov rdi, [rsp + 8]       ; buffer ptr (under tag on stack)
     call ap_free
-    pop rax
-    test rax, rax
+    pop rdx                   ; restore result tag
+    add rsp, 8               ; pop buffer ptr
+    mov rax, rbx
+    test edx, edx            ; check tag (not payload — SmallInt 0 is valid)
     jz .int_str_parse_error
     jmp .int_ret
 
@@ -515,9 +521,11 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     cmp rbx, rax
     je .int_bool_true
     xor eax, eax
+    RET_TAG_SMALLINT
     jmp .int_ret
 .int_bool_true:
     mov rax, 1
+    RET_TAG_SMALLINT
     jmp .int_ret
 
 .int_from_int_subclass:
@@ -533,12 +541,12 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     mov rcx, [rcx + PyTypeObject.tp_call]
     test rcx, rcx
     jz .int_from_int
-    push rbx                     ; args[0] = self
+    SPUSH_PTR rbx                ; args[0] = self (fat arg)
     mov rdi, rax
     mov rsi, rsp
     mov edx, 1
     call rcx
-    add rsp, 8
+    add rsp, 16
     ; Check for exception (NULL return)
     test edx, edx
     jz .int_dunder_error
@@ -603,12 +611,12 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     mov rcx, [rcx + PyTypeObject.tp_call]
     test rcx, rcx
     jz .int_type_error
-    push rbx                     ; args[0] = self
+    SPUSH_PTR rbx                ; args[0] = self (fat arg)
     mov rdi, rax
     mov rsi, rsp
     mov edx, 1
     call rcx
-    add rsp, 8
+    add rsp, 16
     ; Check for exception (NULL return)
     test edx, edx
     jz .int_dunder_error
@@ -640,12 +648,12 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     mov rcx, [rcx + PyTypeObject.tp_call]
     test rcx, rcx
     jz .int_type_error
-    push rbx
+    SPUSH_PTR rbx                ; args[0] = self (fat arg)
     mov rdi, rax
     mov rsi, rsp
     mov edx, 1
     call rcx
-    add rsp, 8
+    add rsp, 16
     ; rax = result of __trunc__()
     ; Check for exception (NULL return)
     test edx, edx
@@ -686,12 +694,12 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     mov rcx, [rcx + PyTypeObject.tp_call]
     test rcx, rcx
     jz .int_trunc_no_index
-    push rbx                     ; args[0] = __trunc__ result
+    SPUSH_PTR rbx                ; args[0] = __trunc__ result (fat arg)
     mov rdi, rax
     mov rsi, rsp
     mov edx, 1
     call rcx
-    add rsp, 8
+    add rsp, 16
     ; rax = __index__ result
     test edx, edx
     jz .int_dunder_error
@@ -787,9 +795,11 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     cmp rax, rcx
     je .int_bool_result_true
     xor eax, eax
+    RET_TAG_SMALLINT
     jmp .int_ret
 .int_bool_result_true:
     mov rax, 1
+    RET_TAG_SMALLINT
     jmp .int_ret
 
 .int_dunder_error:
@@ -827,7 +837,7 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     test rdx, TYPE_FLAG_INT_SUBCLASS
     jnz .int_base_heap_int
     ; Try __index__ protocol on base
-    push rax                      ; save base obj
+    SPUSH_PTR rax                 ; save base obj as fat arg
     mov rdi, rcx                  ; type
     CSTRING rsi, "__index__"
     call dunder_lookup
@@ -839,10 +849,10 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     test rcx, rcx
     jz .int_base_no_index
     mov rdi, rax
-    lea rsi, [rsp]               ; args[0] = base_obj (at top of stack)
+    lea rsi, [rsp]               ; args[0] = base_obj (fat arg on stack)
     mov edx, 1
     call rcx
-    add rsp, 8                   ; pop base obj
+    add rsp, 16                  ; pop fat arg
     ; rax = __index__ result, should be int
     test edx, edx
     jz .int_dunder_error         ; __index__ raised exception
@@ -861,7 +871,7 @@ DEF_FUNC builtin_int_fn, BI_FRAME
 .int_base_si_from_index:
     jmp .int_have_base
 .int_base_no_index:
-    add rsp, 8                   ; pop base obj
+    add rsp, 16                  ; pop fat arg
     jmp .int_base_type_error
 .int_base_heap_int:
     ; rax = heap int object (GMP). Check if it fits in i64.
@@ -926,7 +936,7 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     lea rdi, [rbx + PyStrObject.data]
     mov rsi, [rbp - BI_NARGS]      ; base
     call int_from_cstr_base
-    test rax, rax
+    test edx, edx            ; check tag (not payload — SmallInt 0 is valid)
     jz .int_base_parse_error
     jmp .int_ret
 
@@ -953,12 +963,14 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     mov rdi, [rsp]                 ; buffer
     mov rsi, [rbp - BI_NARGS]      ; base
     call int_from_cstr_base
-    mov rbx, rax
-    pop rdi
-    push rbx
+    mov rbx, rax                   ; save result payload
+    push rdx                       ; save result tag
+    mov rdi, [rsp + 8]            ; buffer ptr (under tag on stack)
     call ap_free
-    pop rax
-    test rax, rax
+    pop rdx                        ; restore result tag
+    add rsp, 8                    ; pop buffer ptr
+    mov rax, rbx
+    test edx, edx                 ; check tag (not payload — SmallInt 0 is valid)
     jz .int_base_parse_error
     jmp .int_ret
 
@@ -1083,12 +1095,8 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     jmp eval_exception_unwind
 
 .int_ret:
-    ; Common epilogue: restore rbx, leave, ret
-    ; Classify return value: SmallInt (bit63), NULL (error), or heap ptr
-    test rax, rax
-    jz .int_ret_epilogue         ; NULL = error, tag doesn't matter
-    ; rdx = tag already set by callee
-.int_ret_epilogue:
+    ; Common epilogue: rax = payload, edx = tag (set by callee)
+    ; For errors: rax=0, edx=TAG_NULL
     ; rbx was pushed after sub rsp, BI_FRAME, so it's at rbp - BI_FRAME - 8
     lea rsp, [rbp - BI_FRAME - 8]
     pop rbx
@@ -1150,7 +1158,7 @@ DEF_FUNC builtin_ord
     jne .ord_len_error
 
     movzx eax, byte [rdi + PyStrObject.data]
-    mov edx, TAG_SMALLINT
+    RET_TAG_SMALLINT
     leave
     ret
 
@@ -2528,7 +2536,7 @@ DEF_FUNC builtin_eval_fn
     lea rdi, [rdi + PyStrObject.data]
     xor esi, esi                ; base 0 = auto-detect
     call int_from_cstr_base
-    test rax, rax
+    test edx, edx            ; check tag (not payload — SmallInt 0 is valid)
     jnz .evl_done
 
     ; Parse failed — raise SyntaxError

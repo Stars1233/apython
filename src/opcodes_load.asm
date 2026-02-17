@@ -397,7 +397,7 @@ DEF_FUNC op_load_attr, LA_FRAME
     mov rdi, [rbp - LA_OBJ]
     mov rsi, [rbp - LA_NAME]
     call rax
-    test rax, rax
+    test edx, edx
     jz .la_attr_error
     mov [rbp - LA_ATTR], rax
     mov [rbp - LA_ATTR_TAG], rdx   ; save tag from tp_getattr
@@ -958,7 +958,7 @@ DEF_FUNC op_load_super_attr, LSA_FRAME
     mov edx, TAG_PTR
     call dict_get
     pop rcx                        ; restore current type
-    test rax, rax
+    test edx, edx
     jnz .lsa_found
 
 .lsa_next_base:
