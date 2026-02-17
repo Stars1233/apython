@@ -1146,8 +1146,10 @@ DEF_FUNC_BARE op_copy_free_vars
     cmp r8d, ecx
     jge .cfv_done
 
-    ; Get cell from closure tuple item[i]
-    mov r9, [rax + PyTupleObject.ob_item + r8*8]
+    ; Get cell from closure tuple item[i] (fat: *16)
+    mov r10d, r8d
+    shl r10, 4
+    mov r9, [rax + PyTupleObject.ob_item + r10]
 
     ; Compute destination index: edx + r8d, then * 16
     mov r10d, edx
@@ -1459,9 +1461,12 @@ DEF_FUNC_BARE op_call_intrinsic_1
     push rdx
     push rsi
 
-    mov rdi, [rsi + rdx*8]    ; item
-    mov rax, [rsp + 24]       ; tuple
-    mov [rax + PyTupleObject.ob_item + rdx*8], rdi
+    mov rdi, [rsi + rdx*8]    ; item from list (8-byte stride)
+    mov rax, [rsp + 24]       ; tuple from stack
+    mov r8, rdx
+    shl r8, 4                 ; dest index * 16
+    mov [rax + PyTupleObject.ob_item + r8], rdi        ; payload
+    mov qword [rax + PyTupleObject.ob_item + r8 + 8], TAG_PTR  ; tag
     INCREF rdi
 
     pop rsi
@@ -1604,8 +1609,9 @@ END_FUNC op_load_locals
 extern dict_get
 
 DEF_FUNC_BARE op_load_from_dict_or_globals
-    ; ecx = name index
-    mov rsi, [r15 + rcx*8]     ; name string
+    ; ecx = name index (fat tuple: 16-byte stride)
+    shl ecx, 4
+    mov rsi, [r15 + rcx]       ; name string
     push rsi
 
     ; Pop dict from TOS
@@ -1665,8 +1671,9 @@ LFDOD_FRAME equ 16
 DEF_FUNC op_load_from_dict_or_deref, LFDOD_FRAME
     mov [rbp - LFDOD_ARG], ecx    ; save arg (localsplus index)
 
-    ; Get name from co_names
-    mov rsi, [r15 + rcx*8]        ; name string
+    ; Get name from co_names (fat tuple: 16-byte stride)
+    shl ecx, 4
+    mov rsi, [r15 + rcx]          ; name string
 
     ; Pop dict from TOS
     VPOP rdi
@@ -1817,10 +1824,11 @@ DEF_FUNC op_match_keys, MK_FRAME
 
     push rdx
 
-    ; Get key
+    ; Get key (fat tuple: *16)
     mov rax, [rbp - MK_KEYS]
-    lea rax, [rax + PyTupleObject.ob_item]
-    mov rsi, [rax + rdx*8]        ; key
+    mov rsi, rdx
+    shl rsi, 4
+    mov rsi, [rax + PyTupleObject.ob_item + rsi]  ; key payload
 
     ; Look up in subject
     mov rdi, [rbp - MK_SUBJ]
@@ -1833,7 +1841,17 @@ DEF_FUNC op_match_keys, MK_FRAME
     push rdx
     INCREF rax
     mov rcx, [rbp - MK_VALS]
-    mov [rcx + PyTupleObject.ob_item + rdx*8], rax
+    mov r8, rdx
+    shl r8, 4
+    mov [rcx + PyTupleObject.ob_item + r8], rax
+    ; Classify tag
+    test rax, rax
+    js .mk_val_si
+    mov qword [rcx + PyTupleObject.ob_item + r8 + 8], TAG_PTR
+    jmp .mk_val_done
+.mk_val_si:
+    mov qword [rcx + PyTupleObject.ob_item + r8 + 8], TAG_SMALLINT
+.mk_val_done:
 
     pop rdx
     inc rdx
@@ -1991,9 +2009,11 @@ DEF_FUNC op_match_class, MC_FRAME
     cmp rcx, [rbp - MC_NPOS]
     jge .mc_kw_start
 
-    ; Get attr name from __match_args__[i]
+    ; Get attr name from __match_args__[i] (fat: *16)
     mov rax, [rbp - MC_MATCHARGS]
-    mov rsi, [rax + PyTupleObject.ob_item + rcx*8]  ; name string
+    mov r8, rcx
+    shl r8, 4
+    mov rsi, [rax + PyTupleObject.ob_item + r8]  ; name string
 
     ; Call subject's tp_getattr(subject, name)
     mov rdi, [rbp - MC_SUBJ]
@@ -2007,10 +2027,20 @@ DEF_FUNC op_match_class, MC_FRAME
     test rax, rax
     jz .mc_fail                     ; attr not found
 
-    ; Store in result tuple[i] (already owns a ref from tp_getattr)
+    ; Store in result tuple[i] (already owns a ref from tp_getattr, fat: *16)
     mov rcx, [rbp - MC_IDX]
     mov rdx, [rbp - MC_RESULT]
-    mov [rdx + PyTupleObject.ob_item + rcx*8], rax
+    mov r8, rcx
+    shl r8, 4
+    mov [rdx + PyTupleObject.ob_item + r8], rax
+    ; Classify tag
+    test rax, rax
+    js .mc_pos_si
+    mov qword [rdx + PyTupleObject.ob_item + r8 + 8], TAG_PTR
+    jmp .mc_pos_tag_done
+.mc_pos_si:
+    mov qword [rdx + PyTupleObject.ob_item + r8 + 8], TAG_SMALLINT
+.mc_pos_tag_done:
 
     inc qword [rbp - MC_IDX]
     jmp .mc_pos_loop
@@ -2024,8 +2054,10 @@ DEF_FUNC op_match_class, MC_FRAME
     cmp rcx, [rax + PyTupleObject.ob_size]
     jge .mc_success
 
-    ; Get attr name from kw_attrs[j]
-    mov rsi, [rax + PyTupleObject.ob_item + rcx*8]  ; name string
+    ; Get attr name from kw_attrs[j] (fat: *16)
+    mov r8, rcx
+    shl r8, 4
+    mov rsi, [rax + PyTupleObject.ob_item + r8]  ; name string
 
     ; Call subject's tp_getattr(subject, name)
     mov rdi, [rbp - MC_SUBJ]
@@ -2039,11 +2071,21 @@ DEF_FUNC op_match_class, MC_FRAME
     test rax, rax
     jz .mc_fail                     ; attr not found
 
-    ; Store in result tuple[npos + j]
+    ; Store in result tuple[npos + j] (fat: *16)
     mov rcx, [rbp - MC_IDX]
     add rcx, [rbp - MC_NPOS]
     mov rdx, [rbp - MC_RESULT]
-    mov [rdx + PyTupleObject.ob_item + rcx*8], rax
+    mov r8, rcx
+    shl r8, 4
+    mov [rdx + PyTupleObject.ob_item + r8], rax
+    ; Classify tag
+    test rax, rax
+    js .mc_kw_si
+    mov qword [rdx + PyTupleObject.ob_item + r8 + 8], TAG_PTR
+    jmp .mc_kw_tag_done
+.mc_kw_si:
+    mov qword [rdx + PyTupleObject.ob_item + r8 + 8], TAG_SMALLINT
+.mc_kw_tag_done:
 
     inc qword [rbp - MC_IDX]
     jmp .mc_kw_loop

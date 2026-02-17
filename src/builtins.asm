@@ -611,7 +611,9 @@ DEF_FUNC builtin_isinstance
     mov rdx, r12               ; reset to obj's type
     push rcx
     push r8
-    mov rcx, [rbx + PyTupleObject.ob_item + r8*8]  ; type from tuple
+    mov rcx, r8
+    shl rcx, 4                     ; * 16 (fat tuple stride)
+    mov rcx, [rbx + PyTupleObject.ob_item + rcx]     ; type from tuple
 .isinstance_tuple_walk:
     cmp rdx, rcx
     je .isinstance_tuple_match

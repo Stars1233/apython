@@ -18,27 +18,11 @@ DEF_FUNC code_dealloc
     push r13
     mov rbx, rdi
 
-    ; Free co_consts fat array: iterate elements, DECREF_VAL each, ap_free
-    mov rax, [rbx + PyCodeObject.co_consts]
-    test rax, rax
+    ; co_consts is a fat tuple — just DECREF it (tuple_dealloc handles elements)
+    mov rdi, [rbx + PyCodeObject.co_consts]
+    test rdi, rdi
     jz .skip_consts
-    mov r12, rax                            ; r12 = fat array base (for ap_free)
-    mov r13, [rax]                          ; r13 = count
-    add rax, 8                              ; rax = data start
-.consts_decref_loop:
-    test r13, r13
-    jz .consts_decref_done
-    push rax                                ; save data pointer
-    mov rdi, [rax]                          ; payload
-    mov rsi, [rax + 8]                      ; tag
-    DECREF_VAL rdi, rsi
-    pop rax
-    add rax, 16
-    dec r13
-    jmp .consts_decref_loop
-.consts_decref_done:
-    mov rdi, r12
-    call ap_free
+    call obj_decref
 .skip_consts:
 
     ; DECREF co_names

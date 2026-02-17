@@ -2360,12 +2360,20 @@ DEF_FUNC dict_method_items
     pop rcx                 ; value
     pop rdi                 ; key
 
-    ; Store key in tuple[0]
+    ; Store key in tuple[0] (fat 16-byte slot)
     mov [r14 + PyTupleObject.ob_item], rdi
+    mov qword [r14 + PyTupleObject.ob_item + 8], TAG_PTR
     INCREF rdi
 
-    ; Store value in tuple[1]
-    mov [r14 + PyTupleObject.ob_item + 8], rcx
+    ; Store value in tuple[1] (fat 16-byte slot, classify tag)
+    mov [r14 + PyTupleObject.ob_item + 16], rcx
+    test rcx, rcx
+    js .di_val_si
+    mov qword [r14 + PyTupleObject.ob_item + 24], TAG_PTR
+    jmp .di_val_done
+.di_val_si:
+    mov qword [r14 + PyTupleObject.ob_item + 24], TAG_SMALLINT
+.di_val_done:
     INCREF rcx
 
     ; Append tuple to list
@@ -2729,10 +2737,19 @@ DEF_FUNC dict_method_popitem
     call tuple_new
     mov r12, rax             ; r12 = tuple
 
-    ; Set tuple[0] = key, tuple[1] = value
+    ; Set tuple[0] = key, tuple[1] = value (fat 16-byte slots)
     mov [r12 + PyTupleObject.ob_item], r13
+    mov qword [r12 + PyTupleObject.ob_item + 8], TAG_PTR
     INCREF r13
-    mov [r12 + PyTupleObject.ob_item + 8], r14
+    mov [r12 + PyTupleObject.ob_item + 16], r14
+    ; Classify value tag
+    test r14, r14
+    js .dpopitem_val_si
+    mov qword [r12 + PyTupleObject.ob_item + 24], TAG_PTR
+    jmp .dpopitem_val_done
+.dpopitem_val_si:
+    mov qword [r12 + PyTupleObject.ob_item + 24], TAG_SMALLINT
+.dpopitem_val_done:
     INCREF r14
 
     ; Delete key from dict
@@ -2855,8 +2872,10 @@ DEF_FUNC tuple_method_index
     cmp rcx, r13
     jge .tindex_not_found
 
-    ; Tuple items are inline at [self + PyTupleObject.ob_item + i*8]
-    mov rax, [rbx + PyTupleObject.ob_item + rcx*8]
+    ; Tuple items are inline at [self + PyTupleObject.ob_item + i*16]
+    mov rax, rcx
+    shl rax, 4
+    mov rax, [rbx + PyTupleObject.ob_item + rax]
 
     ; Check pointer equality
     cmp rax, r12
@@ -2932,7 +2951,9 @@ DEF_FUNC tuple_method_count
     cmp rcx, r13
     jge .tcount_done
 
-    mov rax, [rbx + PyTupleObject.ob_item + rcx*8]
+    mov rax, rcx
+    shl rax, 4
+    mov rax, [rbx + PyTupleObject.ob_item + rax]
 
     ; Check pointer equality
     cmp rax, r12

@@ -171,9 +171,9 @@ DEF_FUNC eval_frame
     mov r13, [r12 + PyFrame.stack_ptr]
 
 .eval_setup_consts:
-    ; r14 = co_consts fat array data pointer (past count field)
+    ; r14 = co_consts fat tuple data pointer (past tuple header)
     mov r14, [rax + PyCodeObject.co_consts]
-    add r14, 8
+    add r14, PyTupleObject.ob_item
 
     ; r15 = &co_names->ob_item (co_names tuple data pointer)
     mov rcx, [rax + PyCodeObject.co_names]
@@ -339,7 +339,7 @@ DEF_FUNC_BARE eval_exception_unwind
     ; Re-derive r14/r15 from the code object
     mov rax, [r12 + PyFrame.code]
     mov r14, [rax + PyCodeObject.co_consts]
-    add r14, 8                              ; fat array data (past count)
+    add r14, PyTupleObject.ob_item          ; fat tuple data (past header)
     mov rcx, [rax + PyCodeObject.co_names]
     lea r15, [rcx + PyTupleObject.ob_item]
 
@@ -615,6 +615,7 @@ DEF_FUNC op_check_eg_match, CEM_FRAME
     mov rcx, [rbp - CEM_EXC]
     INCREF rcx
     mov [rax + PyTupleObject.ob_item], rcx
+    mov qword [rax + PyTupleObject.ob_item + 8], TAG_PTR
 
     ; Create empty message string
     CSTRING rdi, ""

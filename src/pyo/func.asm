@@ -243,8 +243,22 @@ DEF_FUNC func_call
     jge .store_varargs
     lea edi, [r8d + esi]
     movsxd rdi, edi
-    mov r9, [r14 + rdi*8]
-    mov [rax + PyTupleObject.ob_item + rsi*8], r9
+    mov r9, [r14 + rdi*8]           ; value from args (8-byte stride)
+    shl rsi, 4                      ; dest index * 16
+    mov [rax + PyTupleObject.ob_item + rsi], r9       ; payload
+    ; Classify tag
+    test r9, r9
+    js .fv_tag_si
+    jz .fv_tag_null
+    mov qword [rax + PyTupleObject.ob_item + rsi + 8], TAG_PTR
+    jmp .fv_tag_done
+.fv_tag_si:
+    mov qword [rax + PyTupleObject.ob_item + rsi + 8], TAG_SMALLINT
+    jmp .fv_tag_done
+.fv_tag_null:
+    mov qword [rax + PyTupleObject.ob_item + rsi + 8], TAG_NULL
+.fv_tag_done:
+    shr rsi, 4                      ; restore rsi = original index
     push rax
     push rcx
     push rdx
@@ -329,7 +343,8 @@ DEF_FUNC func_call
     ; defaults[i - m]
     mov r8, rdi
     sub r8, rsi
-    mov r9, [rax + PyTupleObject.ob_item + r8*8]
+    shl r8, 4                      ; * 16 (fat tuple stride)
+    mov r9, [rax + PyTupleObject.ob_item + r8]
     movsxd r8, edi
     shl r8, 4                  ; localsplus 16 bytes/slot
     mov [r12 + PyFrame.localsplus + r8], r9
@@ -387,7 +402,8 @@ DEF_FUNC func_call
     mov rdi, [rbx + PyFuncObject.func_code]
     mov rdi, [rdi + PyCodeObject.co_localsplusnames]
     movsxd r8, esi
-    mov rsi, [rdi + PyTupleObject.ob_item + r8*8]   ; param name string
+    shl r8, 4                      ; * 16 (fat tuple stride)
+    mov rsi, [rdi + PyTupleObject.ob_item + r8]      ; param name string
 
     ; dict_get(kwdefaults, param_name) -> borrowed ref or NULL
     mov rdi, rax            ; kwdefaults dict
@@ -492,7 +508,9 @@ DEF_FUNC func_bind_kwargs
     jge .kw_outer_done
 
     ; kw_name = kw_names[kw_index]
-    mov rsi, [r14 + PyTupleObject.ob_item + rcx*8]
+    mov rsi, rcx
+    shl rsi, 4                     ; * 16 (fat tuple stride)
+    mov rsi, [r14 + PyTupleObject.ob_item + rsi]
 
     ; value_index = positional_count + kw_index
     lea eax, [r15d + ecx]
@@ -513,7 +531,9 @@ DEF_FUNC func_bind_kwargs
     jge .kw_not_found
 
     movsxd rdx, ecx
-    mov rax, [r8 + PyTupleObject.ob_item + rdx*8]
+    mov rax, rdx
+    shl rax, 4                     ; * 16 (fat tuple stride)
+    mov rax, [r8 + PyTupleObject.ob_item + rax]
 
     ; Fast path: pointer equality (interned strings)
     cmp rax, rsi
@@ -581,7 +601,9 @@ DEF_FUNC func_bind_kwargs
 
     ; dict_set(kwargs_dict, key, value)
     mov rcx, [rsp+16]
-    mov rsi, [r14 + PyTupleObject.ob_item + rcx*8]  ; key = kw_name
+    mov rsi, rcx
+    shl rsi, 4                     ; * 16 (fat tuple stride)
+    mov rsi, [r14 + PyTupleObject.ob_item + rsi]     ; key = kw_name
     mov rax, [rsp+24]
     mov rdx, [r13 + rax*8]  ; value
     call dict_set

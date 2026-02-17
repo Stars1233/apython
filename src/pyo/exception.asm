@@ -81,6 +81,13 @@ DEF_FUNC exc_new, EN_FRAME
     call tuple_new
     INCREF r12
     mov [rax + PyTupleObject.ob_item], r12
+    ; Classify tag (msg can be SmallInt, e.g. ValueError(1))
+    test r12, r12
+    js .msg_smallint
+    mov qword [rax + PyTupleObject.ob_item + 8], TAG_PTR
+    jmp .set_args
+.msg_smallint:
+    mov qword [rax + PyTupleObject.ob_item + 8], TAG_SMALLINT
     jmp .set_args
 .empty_args:
     xor edi, edi
@@ -504,11 +511,26 @@ DEF_FUNC exc_type_call, ETC_FRAME
     mov rsi, [rbp - ETC_ARGS]
     xor edx, edx
 .copy_args:
+    mov rcx, [rbp - ETC_NARGS]   ; reload loop limit (clobbered below)
     cmp rdx, rcx
     jge .replace_args
     mov rdi, [rsi + rdx*8]
     INCREF rdi
-    mov [r12 + PyTupleObject.ob_item + rdx*8], rdi
+    mov rcx, rdx
+    shl rcx, 4                    ; dest index * 16
+    mov [r12 + PyTupleObject.ob_item + rcx], rdi       ; payload
+    ; Classify tag
+    test rdi, rdi
+    js .copy_args_si
+    jz .copy_args_null
+    mov qword [r12 + PyTupleObject.ob_item + rcx + 8], TAG_PTR
+    jmp .copy_args_tag_done
+.copy_args_si:
+    mov qword [r12 + PyTupleObject.ob_item + rcx + 8], TAG_SMALLINT
+    jmp .copy_args_tag_done
+.copy_args_null:
+    mov qword [r12 + PyTupleObject.ob_item + rcx + 8], TAG_NULL
+.copy_args_tag_done:
     inc rdx
     jmp .copy_args
 .replace_args:

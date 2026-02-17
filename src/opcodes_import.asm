@@ -24,8 +24,9 @@ extern exc_ImportError_type
 ; ecx = arg = index into co_names for module name
 ; ============================================================================
 DEF_FUNC_BARE op_import_name
-    ; Get module name from co_names[ecx]
-    mov rax, [r15 + rcx * 8]   ; name_str from co_names
+    ; Get module name from co_names[ecx] (fat tuple: 16-byte stride)
+    shl ecx, 4
+    mov rax, [r15 + rcx]       ; name_str from co_names
 
     ; Pop fromlist (TOS)
     VPOP rsi                    ; fromlist
@@ -101,8 +102,9 @@ IF2_MOD  equ 16
 IF2_FRAME equ 16
 
 DEF_FUNC op_import_from, IF2_FRAME
-    ; Get attribute name from co_names[ecx]
-    mov rsi, [r15 + rcx * 8]   ; attr name_str
+    ; Get attribute name from co_names[ecx] (fat tuple: 16-byte stride)
+    shl ecx, 4
+    mov rsi, [r15 + rcx]       ; attr name_str
     mov [rbp - IF_ATTR], rsi
 
     ; Peek module (TOS, don't pop)

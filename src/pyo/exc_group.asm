@@ -97,23 +97,27 @@ DEF_FUNC eg_new, EGN_FRAME
     jz .args_no_msg
     INCREF r12
     mov [rax + PyTupleObject.ob_item], r12
+    mov qword [rax + PyTupleObject.ob_item + 8], TAG_PTR   ; slot 0 tag
     jmp .args_set_excs
 .args_no_msg:
     ; Push None for msg if NULL
     lea rdx, [rel none_singleton]
     INCREF rdx
     mov [rax + PyTupleObject.ob_item], rdx
+    mov qword [rax + PyTupleObject.ob_item + 8], TAG_PTR   ; slot 0 tag
 .args_set_excs:
-    ; args[1] = exc_tuple
+    ; args[1] = exc_tuple (fat slot 1 at offset +16)
     test r13, r13
     jz .args_no_excs
     INCREF r13
-    mov [rax + PyTupleObject.ob_item + 8], r13
+    mov [rax + PyTupleObject.ob_item + 16], r13
+    mov qword [rax + PyTupleObject.ob_item + 24], TAG_PTR  ; slot 1 tag
     jmp .args_done
 .args_no_excs:
     lea rdx, [rel none_singleton]
     INCREF rdx
-    mov [rax + PyTupleObject.ob_item + 8], rdx
+    mov [rax + PyTupleObject.ob_item + 16], rdx
+    mov qword [rax + PyTupleObject.ob_item + 24], TAG_PTR  ; slot 1 tag
 .args_done:
     mov [rcx + PyExceptionGroupObject.exc_args], rax
     mov rax, rcx
@@ -179,11 +183,15 @@ DEF_FUNC eg_type_call, EGC_FRAME
     mov rsi, [r12 + PyListObject.ob_item]
     xor edx, edx
 .copy_list:
+    mov rcx, [r12 + PyListObject.ob_size]  ; reload loop limit (clobbered below)
     cmp rdx, rcx
     jge .list_done
     mov rdi, [rsi + rdx*8]
     INCREF rdi
-    mov [r13 + PyTupleObject.ob_item + rdx*8], rdi
+    mov rcx, rdx
+    shl rcx, 4
+    mov [r13 + PyTupleObject.ob_item + rcx], rdi
+    mov qword [r13 + PyTupleObject.ob_item + rcx + 8], TAG_PTR
     inc rdx
     jmp .copy_list
 .list_done:
@@ -421,10 +429,12 @@ DEF_FUNC eg_split, EGS_FRAME
     cmp rcx, [rbp - EGS_COUNT]
     jge .split_done
 
-    ; Get exc = eg.eg_exceptions[i]
+    ; Get exc = eg.eg_exceptions[i] (fat tuple: *16 stride)
     mov rax, [rbp - EGS_EG]
     mov rax, [rax + PyExceptionGroupObject.eg_exceptions]
-    mov rdi, [rax + PyTupleObject.ob_item + rcx*8]
+    mov r8, rcx
+    shl r8, 4
+    mov rdi, [rax + PyTupleObject.ob_item + r8]
 
     ; exc_isinstance(exc, match_type)
     mov rsi, [rbp - EGS_MTYPE]
@@ -436,7 +446,9 @@ DEF_FUNC eg_split, EGS_FRAME
     mov rcx, [rbp - EGS_IDX]
     mov rax, [rbp - EGS_EG]
     mov rax, [rax + PyExceptionGroupObject.eg_exceptions]
-    mov rsi, [rax + PyTupleObject.ob_item + rcx*8]
+    mov r8, rcx
+    shl r8, 4
+    mov rsi, [rax + PyTupleObject.ob_item + r8]
     mov rdi, [rbp - EGS_MLIST]
     call list_append
     jmp .split_next
@@ -446,7 +458,9 @@ DEF_FUNC eg_split, EGS_FRAME
     mov rcx, [rbp - EGS_IDX]
     mov rax, [rbp - EGS_EG]
     mov rax, [rax + PyExceptionGroupObject.eg_exceptions]
-    mov rsi, [rax + PyTupleObject.ob_item + rcx*8]
+    mov r8, rcx
+    shl r8, 4
+    mov rsi, [rax + PyTupleObject.ob_item + r8]
     mov rdi, [rbp - EGS_RLIST]
     call list_append
 
@@ -475,7 +489,12 @@ DEF_FUNC eg_split, EGS_FRAME
     jge .match_tuple_done
     mov rdi, [rsi + rdx*8]
     INCREF rdi
-    mov [rbx + PyTupleObject.ob_item + rdx*8], rdi
+    push rcx
+    mov rcx, rdx
+    shl rcx, 4
+    mov [rbx + PyTupleObject.ob_item + rcx], rdi
+    mov qword [rbx + PyTupleObject.ob_item + rcx + 8], TAG_PTR
+    pop rcx
     inc rdx
     jmp .copy_match
 .match_tuple_done:
@@ -515,7 +534,12 @@ DEF_FUNC eg_split, EGS_FRAME
     jge .rest_tuple_done
     mov rdi, [rsi + rdx*8]
     INCREF rdi
-    mov [rbx + PyTupleObject.ob_item + rdx*8], rdi
+    push rcx
+    mov rcx, rdx
+    shl rcx, 4
+    mov [rbx + PyTupleObject.ob_item + rcx], rdi
+    mov qword [rbx + PyTupleObject.ob_item + rcx + 8], TAG_PTR
+    pop rcx
     inc rdx
     jmp .copy_rest
 .rest_tuple_done:
@@ -675,7 +699,9 @@ DEF_FUNC prep_reraise_star, PRS_FRAME
     push rcx
     push r8
     push rax
-    mov rsi, [rax + PyTupleObject.ob_item + rcx*8]
+    mov r9, rcx
+    shl r9, 4
+    mov rsi, [rax + PyTupleObject.ob_item + r9]
     mov rdi, [rbp - PRS_FLAT]
     call list_append
     pop rax
@@ -721,7 +747,12 @@ DEF_FUNC prep_reraise_star, PRS_FRAME
     jge .copy_flat_done
     mov rdi, [rsi + rdx*8]
     INCREF rdi
-    mov [rbx + PyTupleObject.ob_item + rdx*8], rdi
+    push rcx
+    mov rcx, rdx
+    shl rcx, 4
+    mov [rbx + PyTupleObject.ob_item + rcx], rdi
+    mov qword [rbx + PyTupleObject.ob_item + rcx + 8], TAG_PTR
+    pop rcx
     inc rdx
     jmp .copy_flat
 .copy_flat_done:

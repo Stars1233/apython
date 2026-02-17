@@ -617,8 +617,22 @@ mdo_small_tuple:
     pop r15
     pop r14
     pop r13
-    ; Store element in tuple
-    mov [r14 + PyTupleObject.ob_item + r15 * 8], rax
+    ; Store fat element in tuple (classify 64-bit value)
+    mov rcx, r15
+    shl rcx, 4                 ; index * 16
+    mov [r14 + PyTupleObject.ob_item + rcx], rax       ; payload
+    ; Classify tag
+    test rax, rax
+    jz .stuple_null
+    js .stuple_smallint
+    mov qword [r14 + PyTupleObject.ob_item + rcx + 8], TAG_PTR
+    jmp .stuple_next
+.stuple_null:
+    mov qword [r14 + PyTupleObject.ob_item + rcx + 8], TAG_NULL
+    jmp .stuple_next
+.stuple_smallint:
+    mov qword [r14 + PyTupleObject.ob_item + rcx + 8], TAG_SMALLINT
+.stuple_next:
     inc r15
     jmp .stuple_loop
 
@@ -681,7 +695,22 @@ mdo_tuple:
     pop r15
     pop r14
     pop r13
-    mov [r14 + PyTupleObject.ob_item + r15 * 8], rax
+    ; Store fat element in tuple (classify 64-bit value)
+    mov rcx, r15
+    shl rcx, 4                 ; index * 16
+    mov [r14 + PyTupleObject.ob_item + rcx], rax       ; payload
+    ; Classify tag
+    test rax, rax
+    jz .tuple_null
+    js .tuple_smallint
+    mov qword [r14 + PyTupleObject.ob_item + rcx + 8], TAG_PTR
+    jmp .tuple_next
+.tuple_null:
+    mov qword [r14 + PyTupleObject.ob_item + rcx + 8], TAG_NULL
+    jmp .tuple_next
+.tuple_smallint:
+    mov qword [r14 + PyTupleObject.ob_item + rcx + 8], TAG_SMALLINT
+.tuple_next:
     inc r15
     jmp .tuple_loop
 
@@ -878,9 +907,8 @@ mdo_code:
     ; r15d already has this from above
     mov [r13 + PyCodeObject.co_nlocalsplus], r15d
 
-    ; Convert co_consts tuple to 128-bit fat array
-    mov rdi, [rsp + 24]        ; co_consts tuple
-    call consts_tuple_to_fat
+    ; co_consts is already a fat tuple — store directly
+    mov rax, [rsp + 24]        ; co_consts tuple
     mov [r13 + PyCodeObject.co_consts], rax
 
     mov rax, [rsp + 32]        ; co_names
@@ -1025,75 +1053,6 @@ mdo_frozenset:
     xor r12d, r12d             ; clear FLAG_REF -- we handled it ourselves
     jmp mfinish
 
-;--------------------------------------------------------------------------
-; consts_tuple_to_fat: Convert co_consts tuple to 128-bit fat array
-;   rdi = tuple ptr
-;   Returns rax = fat array ptr [count | (payload, tag) * N]
-;   The original tuple is DECREFed (ownership transferred).
-;--------------------------------------------------------------------------
-DEF_FUNC consts_tuple_to_fat
-    push r12
-    push r13
-    push r14
-
-    mov r12, rdi                            ; r12 = tuple
-    mov r13, [rdi + PyTupleObject.ob_size]  ; r13 = count
-
-    ; Allocate fat array: 8 + count * 16
-    lea rdi, [r13*8]
-    lea rdi, [rdi + rdi + 8]                ; count * 16 + 8
-    call ap_malloc
-    mov r14, rax                            ; r14 = fat array base
-
-    ; Store count
-    mov [r14], r13
-
-    ; Copy and classify elements
-    lea r8, [r14 + 8]                       ; r8 = write position
-    xor ecx, ecx                            ; ecx = read index
-.ctf_loop:
-    cmp rcx, r13
-    jge .ctf_done
-
-    mov rax, [r12 + PyTupleObject.ob_item + rcx*8]
-
-    ; Classify: bit-63 → SmallInt, zero → NULL, else → PTR
-    test rax, rax
-    jz .ctf_null
-    js .ctf_smallint
-
-    ; Heap pointer — INCREF: fat array gets its own reference
-    mov [r8], rax
-    mov qword [r8 + 8], TAG_PTR
-    INCREF rax
-    jmp .ctf_next
-
-.ctf_null:
-    mov qword [r8], 0
-    mov qword [r8 + 8], TAG_NULL
-    jmp .ctf_next
-
-.ctf_smallint:
-    mov [r8], rax
-    mov qword [r8 + 8], TAG_SMALLINT
-
-.ctf_next:
-    add r8, 16
-    inc rcx
-    jmp .ctf_loop
-
-.ctf_done:
-    ; Do NOT free the original tuple: the marshal refs array may hold a
-    ; pointer to it (FLAG_REF). Freeing causes use-after-free when a sibling
-    ; code object's co_consts references the same tuple via TYPE_REF.
-    ; The tuple leaks (small, one-time during code loading).
-    mov rax, r14                            ; return fat array
-    pop r14
-    pop r13
-    pop r12
-    leave
-    ret
-END_FUNC consts_tuple_to_fat
 
 ;--------------------------------------------------------------------------
 ; BSS section: marshal global state

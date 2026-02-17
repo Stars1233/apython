@@ -166,13 +166,31 @@ DEF_FUNC_LOCAL enumerate_iternext
     mov rdi, 2
     call tuple_new
     ; rax = new tuple
-    ; Fill: tuple[0] = count, tuple[1] = value
-    mov [rax + PyTupleObject.ob_item], r13      ; count (owns the SmallInt ref)
-    mov [rax + PyTupleObject.ob_item + 8], r12  ; value (owns the ref from iternext)
+    ; Fill: tuple[0] = count, tuple[1] = value (fat 16-byte slots)
+    mov [rax + PyTupleObject.ob_item], r13            ; count payload (slot 0)
+    ; Classify count tag (int_from_i64 may return SmallInt)
+    test r13, r13
+    js .enum_cnt_si
+    mov qword [rax + PyTupleObject.ob_item + 8], TAG_PTR
+    jmp .enum_cnt_done
+.enum_cnt_si:
+    mov qword [rax + PyTupleObject.ob_item + 8], TAG_SMALLINT
+.enum_cnt_done:
+    ; Value at slot 1 (offset 16)
+    mov [rax + PyTupleObject.ob_item + 16], r12       ; value payload
+    ; Classify value tag
+    test r12, r12
+    js .enum_val_si
+    mov qword [rax + PyTupleObject.ob_item + 24], TAG_PTR
+    jmp .enum_val_done
+.enum_val_si:
+    mov qword [rax + PyTupleObject.ob_item + 24], TAG_SMALLINT
+.enum_val_done:
 
     pop r13
     pop r12
     pop rbx
+    mov edx, TAG_PTR               ; fat return tag
     leave
     ret
 
@@ -314,8 +332,18 @@ DEF_FUNC_LOCAL zip_iternext
     test rax, rax
     jz .zip_partial_cleanup
 
-    ; Store value in tuple
-    mov [r14 + PyTupleObject.ob_item + r15 * 8], rax
+    ; Store value in tuple at fat stride
+    mov rcx, r15
+    shl rcx, 4                     ; index * 16
+    mov [r14 + PyTupleObject.ob_item + rcx], rax       ; payload
+    ; Classify tag
+    test rax, rax
+    js .zip_store_si
+    mov qword [r14 + PyTupleObject.ob_item + rcx + 8], TAG_PTR
+    jmp .zip_store_done
+.zip_store_si:
+    mov qword [r14 + PyTupleObject.ob_item + rcx + 8], TAG_SMALLINT
+.zip_store_done:
 
     inc r15
     jmp .zip_next_loop
@@ -327,6 +355,7 @@ DEF_FUNC_LOCAL zip_iternext
     pop r13
     pop r12
     pop rbx
+    mov edx, TAG_PTR
     leave
     ret
 
@@ -338,19 +367,24 @@ DEF_FUNC_LOCAL zip_iternext
     cmp rcx, r15
     jge .zip_free_tuple
     push rcx
-    mov rdi, [r14 + PyTupleObject.ob_item + rcx * 8]
+    mov rax, rcx
+    shl rax, 4
+    mov rdi, [r14 + PyTupleObject.ob_item + rax]
     call obj_decref
     pop rcx
     inc rcx
     jmp .zip_cleanup_loop
 
 .zip_free_tuple:
-    ; Zero out remaining items to avoid double-free in tuple_dealloc
+    ; Zero out remaining items (both payload and tag) to avoid double-free in tuple_dealloc
     mov rcx, r15
 .zip_zero_loop:
     cmp rcx, r12
     jge .zip_do_free
-    mov qword [r14 + PyTupleObject.ob_item + rcx * 8], 0
+    mov rax, rcx
+    shl rax, 4
+    mov qword [r14 + PyTupleObject.ob_item + rax], 0      ; payload
+    mov qword [r14 + PyTupleObject.ob_item + rax + 8], 0   ; tag
     inc rcx
     jmp .zip_zero_loop
 .zip_do_free:

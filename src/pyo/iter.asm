@@ -133,7 +133,8 @@ DEF_FUNC tuple_iter_new
 END_FUNC tuple_iter_new
 
 ;; ============================================================================
-;; tuple_iter_next(PyTupleIterObject *self) -> PyObject* or NULL
+;; tuple_iter_next(PyTupleIterObject *self) -> (rax=payload, rdx=tag) or NULL
+;; Fat tuple: 16-byte slots
 ;; ============================================================================
 DEF_FUNC_BARE tuple_iter_next
     mov rax, [rdi + PyTupleIterObject.it_seq]
@@ -142,9 +143,11 @@ DEF_FUNC_BARE tuple_iter_next
     cmp rcx, [rax + PyTupleObject.ob_size]
     jge .exhausted
 
-    ; Get item (inline array)
-    mov rax, [rax + PyTupleObject.ob_item + rcx*8]
-    INCREF rax
+    ; Get fat item (16-byte slot)
+    shl rcx, 4                  ; index * 16
+    mov rdx, [rax + PyTupleObject.ob_item + rcx + 8]   ; tag
+    mov rax, [rax + PyTupleObject.ob_item + rcx]        ; payload
+    INCREF_VAL rax, rdx
 
     inc qword [rdi + PyTupleIterObject.it_index]
     ret

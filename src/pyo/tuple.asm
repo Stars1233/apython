@@ -1,5 +1,5 @@
 ; tuple_obj.asm - Tuple type implementation
-; Immutable sequence of PyObject* pointers with inline storage
+; Fat tuples: each element is 16 bytes (payload + tag) inline
 
 %include "macros.inc"
 %include "object.inc"
@@ -8,6 +8,7 @@
 extern ap_malloc
 extern ap_free
 extern obj_decref
+extern obj_dealloc
 extern str_from_cstr
 extern obj_hash
 extern int_to_i64
@@ -20,15 +21,17 @@ extern slice_indices
 extern type_type
 
 ; tuple_new(int64_t size) -> PyTupleObject*
-; Allocate a tuple with room for 'size' items, zero-filled
+; Allocate a tuple with room for 'size' fat items (16 bytes each), zero-filled
 DEF_FUNC tuple_new
     push rbx
     push r12
 
     mov r12, rdi                ; r12 = size (item count)
 
-    ; Allocate: header (PyTupleObject.ob_item = 32) + size*8
-    lea rdi, [r12*8 + PyTupleObject.ob_item]
+    ; Allocate: header (32) + size * 16
+    mov rdi, r12
+    shl rdi, 4                  ; size * 16
+    add rdi, PyTupleObject.ob_item
     call ap_malloc
     mov rbx, rax                ; rbx = new tuple
 
@@ -39,12 +42,13 @@ DEF_FUNC tuple_new
     mov [rbx + PyTupleObject.ob_size], r12
     mov qword [rbx + PyTupleObject.ob_hash], -1  ; not computed
 
-    ; Zero-fill the ob_item array
+    ; Zero-fill the ob_item array (16 bytes per slot)
     test r12, r12
     jz .done
     lea rdi, [rbx + PyTupleObject.ob_item]
     xor eax, eax
     mov rcx, r12
+    shl rcx, 1                  ; count * 2 (qwords per slot)
 .zero_loop:
     mov [rdi], rax
     add rdi, 8
@@ -59,8 +63,8 @@ DEF_FUNC tuple_new
     ret
 END_FUNC tuple_new
 
-; tuple_getitem(PyTupleObject *tuple, int64_t index) -> PyObject*
-; sq_item: Return tuple->ob_item[index] with bounds check and INCREF
+; tuple_getitem(PyTupleObject *tuple, int64_t index) -> (rax=payload, rdx=tag)
+; sq_item: Return fat tuple element with bounds check and INCREF_VAL
 DEF_FUNC_BARE tuple_getitem
     ; Handle negative index
     test rsi, rsi
@@ -72,8 +76,10 @@ DEF_FUNC_BARE tuple_getitem
     jge .index_error
     cmp rsi, 0
     jl .index_error
-    mov rax, [rdi + PyTupleObject.ob_item + rsi*8]
-    INCREF rax
+    shl rsi, 4                  ; index * 16
+    mov rax, [rdi + PyTupleObject.ob_item + rsi]
+    mov rdx, [rdi + PyTupleObject.ob_item + rsi + 8]
+    INCREF_VAL rax, rdx
     ret
 .index_error:
     lea rdi, [rel exc_IndexError_type]
@@ -83,6 +89,7 @@ END_FUNC tuple_getitem
 
 ; tuple_subscript(PyTupleObject *tuple, PyObject *key) -> PyObject*
 ; mp_subscript: index with int or slice key (for BINARY_SUBSCR)
+; Returns payload in rax (valid 64-bit value while bit-63 encoding present)
 DEF_FUNC tuple_subscript
     push rbx
     mov rbx, rdi               ; save tuple
@@ -100,7 +107,8 @@ DEF_FUNC tuple_subscript
     call int_to_i64
     mov rsi, rax               ; index
     mov rdi, rbx
-    call tuple_getitem
+    call tuple_getitem         ; returns (rax=payload, rdx=tag)
+    ; Return just payload — caller uses VPUSH_BRANCHLESS
     pop rbx
     leave
     ret
@@ -122,7 +130,7 @@ DEF_FUNC_BARE tuple_len
 END_FUNC tuple_len
 
 ; tuple_dealloc(PyObject *self)
-; DECREF each item, then free self
+; DECREF_VAL each fat item, then free self
 DEF_FUNC tuple_dealloc
     push rbx
     push r12
@@ -135,11 +143,11 @@ DEF_FUNC tuple_dealloc
 .decref_loop:
     cmp r13, r12
     jge .free_self
-    mov rdi, [rbx + PyTupleObject.ob_item + r13*8]
-    test rdi, rdi
-    jz .next
-    call obj_decref
-.next:
+    mov rax, r13
+    shl rax, 4                  ; index * 16
+    mov rdi, [rbx + PyTupleObject.ob_item + rax]
+    mov rsi, [rbx + PyTupleObject.ob_item + rax + 8]
+    DECREF_VAL rdi, rsi
     inc r13
     jmp .decref_loop
 
@@ -159,6 +167,7 @@ extern tuple_repr
 
 ; tuple_hash(PyObject *self) -> int64
 ; Combines item hashes using a simple multiply-xor scheme
+; TAG_SMALLINT: hash = payload. TAG_PTR: obj_hash(payload).
 DEF_FUNC tuple_hash
     push rbx
     push r12
@@ -179,10 +188,21 @@ DEF_FUNC tuple_hash
 .hash_loop:
     cmp r13, r12
     jge .finalize
-    mov rdi, [rbx + PyTupleObject.ob_item + r13*8]
-    test rdi, rdi
-    jz .skip_null
+    mov rax, r13
+    shl rax, 4                  ; index * 16
+    mov rdi, [rbx + PyTupleObject.ob_item + rax]
+    mov rsi, [rbx + PyTupleObject.ob_item + rax + 8]
+    ; Check tag
+    cmp esi, TAG_SMALLINT
+    je .hash_smallint
+    cmp esi, TAG_NULL
+    je .skip_null
+    ; TAG_PTR or other: call obj_hash on payload
     call obj_hash               ; rax = hash of item
+    jmp .hash_combine
+.hash_smallint:
+    mov rax, rdi                ; hash = payload value
+.hash_combine:
     ; Combine: hash = hash * 1000003 ^ item_hash
     imul r14, r14, 1000003
     xor r14, rax
@@ -213,7 +233,7 @@ END_FUNC tuple_hash
 
 ;; ============================================================================
 ;; tuple_getslice(PyTupleObject *tuple, PySliceObject *slice) -> PyTupleObject*
-;; Creates a new tuple from a slice of the original.
+;; Creates a new tuple from a slice of the original. Fat 16-byte slots.
 ;; ============================================================================
 DEF_FUNC tuple_getslice
     push rbx
@@ -267,24 +287,28 @@ DEF_FUNC tuple_getslice
     call tuple_new
     mov [rbp-48], rax          ; new tuple
 
-    ; Fill items
+    ; Fill items (16-byte fat slots)
     xor ecx, ecx
 .tgs_loop:
     cmp rcx, [rbp-56]
     jge .tgs_done
-    ; idx = start + i * step
+    ; src_idx = start + i * step
     mov rax, rcx
     imul rax, r15
     add rax, r13
-    ; Get item
-    mov rdx, [rbx + PyTupleObject.ob_item + rax*8]
+    ; Load fat element from source
+    shl rax, 4                 ; src_idx * 16
+    mov rdx, [rbx + PyTupleObject.ob_item + rax]       ; payload
+    mov r8, [rbx + PyTupleObject.ob_item + rax + 8]    ; tag
     ; Store in new tuple
     mov rsi, [rbp-48]
-    mov [rsi + PyTupleObject.ob_item + rcx*8], rdx
-    ; INCREF item
+    mov rax, rcx
+    shl rax, 4                 ; dest_idx * 16
+    mov [rsi + PyTupleObject.ob_item + rax], rdx
+    mov [rsi + PyTupleObject.ob_item + rax + 8], r8
+    ; INCREF_VAL
     push rcx
-    mov rdi, rdx
-    call obj_incref
+    INCREF_VAL rdx, r8
     pop rcx
     inc rcx
     jmp .tgs_loop
@@ -304,7 +328,7 @@ END_FUNC tuple_getslice
 
 ;; ============================================================================
 ;; tuple_contains(PyTupleObject *self, PyObject *value) -> int (0 or 1)
-;; Linear scan with pointer equality + value comparison fallback.
+;; Linear scan with payload equality (fat 16-byte slots).
 ;; ============================================================================
 DEF_FUNC tuple_contains
     push rbx
@@ -319,17 +343,11 @@ DEF_FUNC tuple_contains
 .tc_loop:
     cmp rcx, r13
     jge .tc_not_found
-    mov rax, [rbx + PyTupleObject.ob_item + rcx*8]
-    cmp r12, rax               ; pointer equality
+    mov rax, rcx
+    shl rax, 4                 ; index * 16
+    mov rax, [rbx + PyTupleObject.ob_item + rax]  ; payload
+    cmp r12, rax               ; pointer/value equality
     je .tc_found
-    ; Value comparison for SmallInts (common case for int 'in' tuple)
-    mov rdx, r12
-    and rdx, rax
-    jns .tc_next               ; not both SmallInt → skip
-    cmp r12, rax               ; both SmallInt, already compared above
-    ; Both SmallInt with same tag but not same pointer can't happen
-    ; (SmallInts with same value have same tagged pointer)
-.tc_next:
     inc rcx
     jmp .tc_loop
 
@@ -352,7 +370,7 @@ END_FUNC tuple_contains
 
 ;; ============================================================================
 ;; tuple_concat(PyTupleObject *a, PyObject *b) -> PyTupleObject*
-;; Concatenate two tuples: (1,2) + (3,4) -> (1,2,3,4)
+;; Concatenate two tuples with fat 16-byte slots.
 ;; ============================================================================
 DEF_FUNC tuple_concat
     push rbx
@@ -371,15 +389,19 @@ DEF_FUNC tuple_concat
     call tuple_new
     push rax                ; save new tuple
 
-    ; Copy items from a
+    ; Copy fat items from a
     xor ecx, ecx
 .copy_a:
     cmp rcx, r13
     jge .copy_b_start
-    mov rdx, [rbx + PyTupleObject.ob_item + rcx*8]
-    mov rax, [rsp]
-    mov [rax + PyTupleObject.ob_item + rcx*8], rdx
-    INCREF rdx
+    mov rax, rcx
+    shl rax, 4              ; index * 16
+    mov rdx, [rbx + PyTupleObject.ob_item + rax]       ; payload
+    mov r8, [rbx + PyTupleObject.ob_item + rax + 8]    ; tag
+    mov r9, [rsp]           ; new tuple
+    mov [r9 + PyTupleObject.ob_item + rax], rdx
+    mov [r9 + PyTupleObject.ob_item + rax + 8], r8
+    INCREF_VAL rdx, r8
     inc rcx
     jmp .copy_a
 
@@ -388,11 +410,16 @@ DEF_FUNC tuple_concat
 .copy_b:
     cmp rcx, r14
     jge .concat_done
-    mov rdx, [r12 + PyTupleObject.ob_item + rcx*8]
-    lea rax, [r13 + rcx]
-    mov r8, [rsp]
-    mov [r8 + PyTupleObject.ob_item + rax*8], rdx
-    INCREF rdx
+    mov rax, rcx
+    shl rax, 4              ; src index * 16
+    mov rdx, [r12 + PyTupleObject.ob_item + rax]       ; payload
+    mov r8, [r12 + PyTupleObject.ob_item + rax + 8]    ; tag
+    lea rax, [r13 + rcx]    ; dest index
+    shl rax, 4              ; dest index * 16
+    mov r9, [rsp]           ; new tuple
+    mov [r9 + PyTupleObject.ob_item + rax], rdx
+    mov [r9 + PyTupleObject.ob_item + rax + 8], r8
+    INCREF_VAL rdx, r8
     inc rcx
     jmp .copy_b
 
@@ -408,7 +435,7 @@ END_FUNC tuple_concat
 
 ;; ============================================================================
 ;; tuple_repeat(PyTupleObject *tuple, PyObject *count) -> PyTupleObject*
-;; Repeat a tuple: (1,2) * 3 -> (1,2,1,2,1,2)
+;; Repeat a tuple with fat 16-byte slots.
 ;; ============================================================================
 DEF_FUNC tuple_repeat
     push rbx
@@ -446,10 +473,16 @@ DEF_FUNC tuple_repeat
 .rep_inner:
     cmp rdx, r13
     jge .rep_inner_done
-    mov rax, [rbx + PyTupleObject.ob_item + rdx*8]
-    mov rcx, [rsp + 8]     ; get new tuple (past pushed rcx)
-    mov [rcx + PyTupleObject.ob_item + r8*8], rax
-    INCREF rax
+    mov rax, rdx
+    shl rax, 4              ; src index * 16
+    mov r9, [rbx + PyTupleObject.ob_item + rax]        ; payload
+    mov r10, [rbx + PyTupleObject.ob_item + rax + 8]   ; tag
+    mov rax, r8
+    shl rax, 4              ; dest index * 16
+    mov rcx, [rsp + 8]      ; get new tuple (past pushed rcx)
+    mov [rcx + PyTupleObject.ob_item + rax], r9
+    mov [rcx + PyTupleObject.ob_item + rax + 8], r10
+    INCREF_VAL r9, r10
     inc r8
     inc rdx
     jmp .rep_inner

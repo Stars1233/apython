@@ -195,24 +195,34 @@ DEF_FUNC sys_module_init, 32
     mov rdi, 5
     call tuple_new
     mov rbx, rax                ; rbx = version_info tuple
-    ; (3, 12, 0, 'final', 0)
+    ; (3, 12, 0, 'final', 0) — fat 16-byte slots
+    ; slot 0: 3 (SmallInt)
     mov rdi, 3
     bts rdi, 63
     mov [rbx + PyTupleObject.ob_item], rdi
+    mov qword [rbx + PyTupleObject.ob_item + 8], TAG_SMALLINT
+    ; slot 1: 12 (SmallInt) — offset 16
     mov rdi, 12
     bts rdi, 63
-    mov [rbx + PyTupleObject.ob_item + 8], rdi
+    mov [rbx + PyTupleObject.ob_item + 16], rdi
+    mov qword [rbx + PyTupleObject.ob_item + 24], TAG_SMALLINT
+    ; slot 2: 0 (SmallInt) — offset 32
     xor edi, edi
     bts rdi, 63
-    mov [rbx + PyTupleObject.ob_item + 16], rdi
+    mov [rbx + PyTupleObject.ob_item + 32], rdi
+    mov qword [rbx + PyTupleObject.ob_item + 40], TAG_SMALLINT
+    ; slot 3: 'final' (string, TAG_PTR) — offset 48
     push rbx
     lea rdi, [rel sm_final]
     call str_from_cstr
     pop rbx
-    mov [rbx + PyTupleObject.ob_item + 24], rax
+    mov [rbx + PyTupleObject.ob_item + 48], rax
+    mov qword [rbx + PyTupleObject.ob_item + 56], TAG_PTR
+    ; slot 4: 0 (SmallInt) — offset 64
     xor edi, edi
     bts rdi, 63
-    mov [rbx + PyTupleObject.ob_item + 32], rdi
+    mov [rbx + PyTupleObject.ob_item + 64], rdi
+    mov qword [rbx + PyTupleObject.ob_item + 72], TAG_SMALLINT
 
     lea rdi, [rel sm_version_info]
     call str_from_cstr

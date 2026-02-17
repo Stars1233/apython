@@ -20,6 +20,7 @@ extern obj_decref
 extern str_from_cstr
 extern str_type
 extern str_repr
+extern fat_to_obj
 
 ; Internal buffer struct (on stack):
 ;   [rbp-8]  = buf ptr
@@ -186,12 +187,17 @@ DEF_FUNC tuple_repr, 24
     BUF_BYTE ' '
 .tr_no_comma:
 
-    ; Get element (tuple items are inline at +32)
-    lea rax, [rbx + PyTupleObject.ob_item]
-    mov rdi, [rax + r12*8]
+    ; Get fat element at index r12
+    mov rax, r12
+    shl rax, 4                     ; index * 16
+    mov rdi, [rbx + PyTupleObject.ob_item + rax]      ; payload
+    mov rsi, [rbx + PyTupleObject.ob_item + rax + 8]  ; tag
+    call fat_to_obj                ; rax = PyObject* (owned ref)
+    push rax                       ; save for DECREF later
+    mov rdi, rax
     call obj_repr
     test rax, rax
-    jz .tr_next
+    jz .tr_decref_elem
 
     push rax
     mov rcx, [rax + PyStrObject.ob_size]
@@ -206,7 +212,11 @@ DEF_FUNC tuple_repr, 24
     rep movsb
 
     pop rdi
-    call obj_decref
+    call obj_decref                ; DECREF repr string
+
+.tr_decref_elem:
+    pop rdi                        ; fat_to_obj result
+    call obj_decref                ; DECREF fat_to_obj result
 
 .tr_next:
     inc r12

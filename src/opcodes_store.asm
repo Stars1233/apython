@@ -91,8 +91,9 @@ END_FUNC op_store_fast
 ;; ============================================================================
 DEF_FUNC_BARE op_store_name
     ; ecx = arg (index into co_names)
-    ; Get name string before popping (VPOP does not clobber ecx)
-    mov r8, [r15 + rcx*8]      ; r8 = name (key) - caller-saved, safe temp
+    ; Get name string before popping (fat tuple: 16-byte stride)
+    shl ecx, 4
+    mov r8, [r15 + rcx]        ; r8 = name (key) - caller-saved, safe temp
     VPOP r9                    ; r9 = value to store
 
     ; Determine target dict: locals if present, else globals
@@ -115,8 +116,9 @@ END_FUNC op_store_name
 ;; Same as store_name but always uses globals.
 ;; ============================================================================
 DEF_FUNC_BARE op_store_global
-    ; ecx = arg (index into co_names)
-    mov r8, [r15 + rcx*8]      ; r8 = name (key)
+    ; ecx = arg (index into co_names, fat tuple: 16-byte stride)
+    shl ecx, 4
+    mov r8, [r15 + rcx]        ; r8 = name (key)
     VPOP r9                    ; r9 = value to store
 
     ; Always store in globals
@@ -140,8 +142,9 @@ END_FUNC op_store_global
 ;; ============================================================================
 DEF_FUNC op_store_attr, SA_FRAME
 
-    ; Get name
-    mov rax, [r15 + rcx*8]
+    ; Get name (fat tuple: 16-byte stride)
+    shl ecx, 4
+    mov rax, [r15 + rcx]
     mov [rbp - SA_NAME], rax
 
     ; Pop obj (TOS)
@@ -343,7 +346,8 @@ END_FUNC op_delete_fast
 ;; op_delete_name - Delete name from locals or globals dict
 ;; ============================================================================
 DEF_FUNC_BARE op_delete_name
-    mov rsi, [r15 + rcx*8]     ; name
+    shl ecx, 4                ; fat tuple: 16-byte stride
+    mov rsi, [r15 + rcx]      ; name
     ; Try locals first
     mov rdi, [r12 + PyFrame.locals]
     test rdi, rdi
@@ -370,7 +374,8 @@ END_FUNC op_delete_name
 ;; op_delete_global - Delete name from globals dict
 ;; ============================================================================
 DEF_FUNC_BARE op_delete_global
-    mov rsi, [r15 + rcx*8]     ; name
+    shl ecx, 4                ; fat tuple: 16-byte stride
+    mov rsi, [r15 + rcx]      ; name
     mov rdi, [r12 + PyFrame.globals]
     call dict_del
     test eax, eax
@@ -390,7 +395,8 @@ END_FUNC op_delete_global
 ;; ============================================================================
 DEF_FUNC op_delete_attr, DA_FRAME
 
-    mov rax, [r15 + rcx*8]     ; name
+    shl ecx, 4                ; fat tuple: 16-byte stride
+    mov rax, [r15 + rcx]      ; name
     mov [rbp - DA_NAME], rax
 
     VPOP rdi

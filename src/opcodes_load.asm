@@ -111,8 +111,9 @@ DEF_FUNC_BARE op_load_global
 .no_push_null:
     ; Name index = arg >> 1
     shr ecx, 1
-    ; Get name string from co_names
-    mov rdi, [r15 + rcx*8]     ; rdi = name (PyStrObject*)
+    ; Get name string from co_names (fat tuple: 16-byte stride)
+    shl ecx, 4
+    mov rdi, [r15 + rcx]       ; rdi = name (PyStrObject*)
 
     ; Save name on the regular stack for retry
     push rdi
@@ -273,7 +274,8 @@ END_FUNC op_load_global_builtin
 ;; ============================================================================
 DEF_FUNC_BARE op_load_name
     ; ecx = arg (index into co_names)
-    mov rsi, [r15 + rcx*8]     ; rsi = name (PyStrObject*)
+    shl ecx, 4                ; fat tuple: 16-byte stride
+    mov rsi, [r15 + rcx]       ; rsi = name (PyStrObject*)
     push rsi                   ; save name
 
     ; Check if frame has a locals dict
@@ -355,7 +357,9 @@ DEF_FUNC op_load_attr, LA_FRAME
     mov qword [rbp - LA_FROM_TYPE], 0
 
     shr ecx, 1              ; name_index
-    mov rsi, [r15 + rcx*8]  ; name string
+    mov eax, ecx
+    shl eax, 4              ; fat tuple: 16-byte stride
+    mov rsi, [r15 + rax]    ; name string
     mov [rbp - LA_NAME], rsi
 
     ; Pop obj
@@ -898,7 +902,9 @@ DEF_FUNC op_load_super_attr, LSA_FRAME
 
     ; Get name from co_names
     shr ecx, 2
-    mov rax, [r15 + rcx*8]        ; name string
+    mov eax, ecx
+    shl eax, 4                    ; fat tuple: 16-byte stride
+    mov rax, [r15 + rax]          ; name string
     mov [rbp - LSA_NAME], rax
 
     ; Pop self, class, global_super

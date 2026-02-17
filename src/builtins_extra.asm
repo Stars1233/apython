@@ -177,7 +177,9 @@ DEF_FUNC builtin_divmod
     extern tuple_new
     call tuple_new
     mov [rax + PyTupleObject.ob_item], rbx
-    mov [rax + PyTupleObject.ob_item + 8], r12
+    mov qword [rax + PyTupleObject.ob_item + 8], TAG_PTR     ; quotient is heap int
+    mov [rax + PyTupleObject.ob_item + 16], r12
+    mov qword [rax + PyTupleObject.ob_item + 24], TAG_PTR    ; remainder is heap int
     mov edx, TAG_PTR
 
     pop r12
@@ -211,7 +213,9 @@ DEF_FUNC int_type_call, ITC_FRAME
 .itc_kw_loop:
     cmp r9, rcx
     jge .itc_kw_checked
-    mov r10, [rax + PyTupleObject.ob_item + r9*8]  ; kw name str
+    mov r10, r9
+    shl r10, 4                     ; * 16 (fat tuple stride)
+    mov r10, [rax + PyTupleObject.ob_item + r10]     ; kw name str
     ; Compare to "base"
     push rdi
     push rsi

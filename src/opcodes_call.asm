@@ -457,7 +457,8 @@ CFX_NKW     equ 88
 CFX_MERGED  equ 96       ; merged args buffer (heap ptr)
 CFX_KWNAMES equ 104      ; kw_names tuple
 CFX_RETTAG  equ 112      ; return tag from tp_call
-CFX_FRAME2  equ 120      ; new frame size (manual push, so offset from rbp-16)
+CFX_TEMP    equ 120      ; temp args buffer for fat tuple extraction
+CFX_FRAME2  equ 128      ; new frame size (manual push, so offset from rbp-16)
 
 DEF_FUNC op_call_function_ex
     push rbx                        ; save (clobbered by eval convention save)
@@ -465,6 +466,7 @@ DEF_FUNC op_call_function_ex
     sub rsp, CFX_FRAME2 - 16       ; allocate local frame
 
     mov [rbp - CFX_OPARG], ecx               ; save oparg
+    mov qword [rbp - CFX_TEMP], 0             ; no temp buffer yet
 
     ; Pop kwargs if present
     mov qword [rbp - CFX_KWARGS], 0
@@ -511,7 +513,27 @@ DEF_FUNC op_call_function_ex
     mov rsi, [rsi + PyListObject.ob_item]
     jmp .cfex_args_ready
 .cfex_tuple_args:
-    lea rsi, [rsi + PyTupleObject.ob_item]
+    ; Fat tuple: extract payloads to temp 8-byte-stride array
+    mov rcx, [rsi + PyTupleObject.ob_size]
+    push rsi                       ; save tuple ptr
+    lea rdi, [rcx * 8 + 8]        ; alloc size (min 8)
+    call ap_malloc
+    mov [rbp - CFX_TEMP], rax      ; save temp buffer
+    pop rsi                        ; restore tuple
+    mov rcx, [rsi + PyTupleObject.ob_size]
+    xor edx, edx
+.cfex_extract_loop:
+    cmp rdx, rcx
+    jge .cfex_extract_done
+    mov rax, rdx
+    shl rax, 4                     ; * 16 for fat tuple
+    mov rax, [rsi + PyTupleObject.ob_item + rax]  ; payload
+    mov rdi, [rbp - CFX_TEMP]
+    mov [rdi + rdx*8], rax         ; store in temp at *8
+    inc rdx
+    jmp .cfex_extract_loop
+.cfex_extract_done:
+    mov rsi, [rbp - CFX_TEMP]      ; use temp buffer as args
 .cfex_args_ready:
     mov rdx, [rbp - CFX_ARGS]
     mov rdx, [rdx + PyVarObject.ob_size]
@@ -520,6 +542,16 @@ DEF_FUNC op_call_function_ex
     call rax
     mov [rbp - CFX_RESULT], rax
     mov [rbp - CFX_RETTAG], rdx
+
+    ; Free temp args if allocated
+    mov rdi, [rbp - CFX_TEMP]
+    test rdi, rdi
+    jz .cfex_cleanup
+    push rax
+    push rdx
+    call ap_free
+    pop rdx
+    pop rax
     jmp .cfex_cleanup
 
 .cfex_merge_kwargs:
@@ -562,11 +594,12 @@ DEF_FUNC op_call_function_ex
     mov rcx, [rbp - CFX_NPOS]
     test rcx, rcx
     jz .cfex_pos_copied
-    ; Copy rcx qwords from rsi to rdi
     xor edx, edx
 .cfex_copy_pos_loop:
-    mov rax, [rsi + rdx*8]
-    mov [rdi + rdx*8], rax
+    mov rax, rdx
+    shl rax, 4                    ; *16 for fat tuple
+    mov rax, [rsi + rax]          ; payload from fat tuple
+    mov [rdi + rdx*8], rax        ; store at *8 in merged
     inc rdx
     cmp rdx, rcx
     jb .cfex_copy_pos_loop
@@ -605,9 +638,12 @@ DEF_FUNC op_call_function_ex
     mov rax, [rbp - CFX_MERGED]
     mov [rax + rcx*8], rdi       ; merged[n_pos + kw_idx] = value
 
-    ; Store key in kw_names tuple at kw_idx
+    ; Store key in kw_names tuple at kw_idx (fat: *16 + TAG_PTR)
     mov rax, [rbp - CFX_KWNAMES]
-    mov [rax + PyTupleObject.ob_item + rdx*8], rsi
+    mov r8, rdx
+    shl r8, 4                    ; index * 16
+    mov [rax + PyTupleObject.ob_item + r8], rsi        ; payload
+    mov qword [rax + PyTupleObject.ob_item + r8 + 8], TAG_PTR  ; tag
     INCREF rsi                   ; tuple owns a ref
     pop rdx
     pop rcx

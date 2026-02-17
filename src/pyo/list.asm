@@ -307,6 +307,7 @@ DEF_FUNC list_ass_subscript
     ; Value is a list
     mov r8, [r12 + PyListObject.ob_size]   ; r8 = new_len
     mov r9, [r12 + PyListObject.ob_item]   ; r9 = new items ptr
+    mov r15, 8                              ; r15 = source stride (list = 8)
     jmp .las_have_items
 
 .las_try_tuple:
@@ -315,9 +316,10 @@ DEF_FUNC list_ass_subscript
     cmp rax, rdx
     jne .las_type_error
 
-    ; Value is a tuple
+    ; Value is a tuple (fat: 16-byte stride)
     mov r8, [r12 + PyTupleObject.ob_size]
     lea r9, [r12 + PyTupleObject.ob_item]
+    mov r15, 16                             ; r15 = source stride (fat tuple = 16)
     jmp .las_have_items
 
 .las_have_items:
@@ -450,12 +452,15 @@ DEF_FUNC list_ass_subscript
     cmp rcx, r8            ; i < new_len?
     jge .las_insert_done
     push rcx
-    mov rax, [r9 + rcx*8] ; new item
+    ; Compute source offset: rcx * stride (r15 = 8 for list, 16 for fat tuple)
+    imul rax, rcx, 1       ; rax = i
+    imul rax, r15           ; rax = i * stride
+    mov rax, [r9 + rax]    ; new item (payload)
     INCREF rax
     mov rdx, [rbx + PyListObject.ob_item]
     mov rdi, r13
     add rdi, rcx           ; start + i
-    mov [rdx + rdi*8], rax
+    mov [rdx + rdi*8], rax  ; list items are 8-byte
     pop rcx
     inc rcx
     jmp .las_insert_loop

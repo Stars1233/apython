@@ -578,7 +578,9 @@ DEF_FUNC str_mod, SM_FRAME
     mov rdx, r15
     cmp rdx, [rax + PyTupleObject.ob_size]
     jge .sm_arg_none
-    mov rax, [rax + PyTupleObject.ob_item + rdx*8]
+    mov rcx, rdx
+    shl rcx, 4
+    mov rax, [rax + PyTupleObject.ob_item + rcx]
     inc r15
     ret
 .sm_arg_none:

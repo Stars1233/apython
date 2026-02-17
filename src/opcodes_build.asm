@@ -424,8 +424,12 @@ DEF_FUNC op_build_tuple, 16
     mov rax, rdx
     shl rax, 4                 ; index * 16
     mov rsi, [r13 + rax]      ; item payload from stack
+    mov rdi, [r13 + rax + 8]  ; item tag from stack
     mov rax, [rbp-16]
-    mov [rax + PyTupleObject.ob_item + rdx*8], rsi  ; no INCREF needed, ownership transfers
+    mov rcx, rdx
+    shl rcx, 4                ; dest index * 16
+    mov [rax + PyTupleObject.ob_item + rcx], rsi      ; payload
+    mov [rax + PyTupleObject.ob_item + rcx + 8], rdi  ; tag
     inc rdx
     cmp rdx, [rbp-8]
     jb .build_tuple_fill
@@ -609,7 +613,9 @@ DEF_FUNC op_build_const_key_map, 32
     push rdx
     mov rdi, [rbp-24]         ; dict
     mov rax, [rbp-16]         ; keys tuple
-    mov rsi, [rax + PyTupleObject.ob_item + rdx*8]  ; key
+    mov rcx, rdx
+    shl rcx, 4                ; index * 16
+    mov rsi, [rax + PyTupleObject.ob_item + rcx]  ; key payload
     mov rax, rdx
     shl rax, 4                ; index * 16
     mov rdx, [r13 + rax]      ; value (payload)
@@ -684,20 +690,31 @@ DEF_FUNC_BARE op_unpack_sequence
     call raise_exception
 
 .unpack_tuple:
-    ; Items are inline at ob_item
-    lea rsi, [rdi + PyTupleObject.ob_item]  ; rsi = items ptr
-    jmp .unpack_push
+    ; Items are inline at ob_item, fat 16-byte stride
+    mov edx, ecx              ; edx = count
+    dec edx
+.unpack_tuple_loop:
+    test edx, edx
+    js .unpack_done
+    mov eax, edx               ; zero-extend edx to rax
+    shl rax, 4                ; index * 16
+    mov rcx, [rdi + PyTupleObject.ob_item + rax + 8]  ; tag
+    mov rax, [rdi + PyTupleObject.ob_item + rax]       ; payload
+    INCREF_VAL rax, rcx
+    push rdx
+    push rdi
+    VPUSH_VAL rax, rcx
+    pop rdi
+    pop rdx
+    dec edx
+    jmp .unpack_tuple_loop
 
 .unpack_list:
-    ; Items are at ob_item pointer
-    mov rsi, [rdi + PyListObject.ob_item]   ; rsi = items ptr
-
-.unpack_push:
-    ; Push items in reverse order: items[count-1] first (becomes deepest on stack)
-    ; Actually Python pushes items[count-1] first, so items[0] is TOS
-    mov edx, ecx              ; edx = count
-    dec edx                    ; start from last item
-.unpack_loop:
+    ; Items at ob_item pointer, 8-byte stride (lists not fat yet)
+    mov rsi, [rdi + PyListObject.ob_item]
+    mov edx, ecx
+    dec edx
+.unpack_list_loop:
     test edx, edx
     js .unpack_done
     mov rax, [rsi + rdx*8]
@@ -708,7 +725,7 @@ DEF_FUNC_BARE op_unpack_sequence
     pop rsi
     pop rdx
     dec edx
-    jmp .unpack_loop
+    jmp .unpack_list_loop
 
 .unpack_done:
     ; DECREF the sequence (payload + tag)
@@ -947,21 +964,35 @@ DEF_FUNC op_list_extend, 32
 
 .extend_tuple:
     mov rcx, [rsi + PyTupleObject.ob_size]
-    lea rdx, [rsi + PyTupleObject.ob_item]
-    jmp .extend_items
+    mov [rbp-24], rcx          ; count
+    test rcx, rcx
+    jz .extend_done
+    xor r8d, r8d               ; index
+.extend_tuple_loop:
+    mov rdi, [rbp-8]          ; list
+    mov rax, [rbp-16]         ; iterable (tuple)
+    mov rcx, r8
+    shl rcx, 4                ; index * 16
+    mov rsi, [rax + PyTupleObject.ob_item + rcx]  ; payload
+    push r8
+    call list_append
+    pop r8
+    inc r8
+    cmp r8, [rbp-24]
+    jb .extend_tuple_loop
+    jmp .extend_done
 
 .extend_list:
     mov rcx, [rsi + PyListObject.ob_size]
     mov rdx, [rsi + PyListObject.ob_item]
 
-.extend_items:
     mov [rbp-24], rcx          ; count
     mov [rbp-32], rdx          ; items ptr
 
     test rcx, rcx
     jz .extend_done
     xor r8d, r8d               ; index
-.extend_loop:
+.extend_list_loop:
     mov rdi, [rbp-8]          ; list
     mov rdx, [rbp-32]         ; items ptr
     mov rsi, [rdx + r8*8]     ; item
@@ -970,7 +1001,7 @@ DEF_FUNC op_list_extend, 32
     pop r8
     inc r8
     cmp r8, [rbp-24]          ; count
-    jb .extend_loop
+    jb .extend_list_loop
 
 .extend_done:
     ; DECREF iterable
@@ -1642,8 +1673,10 @@ DEF_FUNC op_unpack_ex
     lea rcx, [rel list_type]
     cmp rax, rcx
     je .ue_gi_list
-    ; tuple
-    mov rax, [r15 + PyTupleObject.ob_item + rsi*8]
+    ; tuple: fat 16-byte stride
+    mov rax, rsi
+    shl rax, 4
+    mov rax, [r15 + PyTupleObject.ob_item + rax]
     ret
 .ue_gi_list:
     mov rax, [r15 + PyListObject.ob_item]
