@@ -152,12 +152,14 @@ DEF_FUNC_LOCAL enumerate_iternext
     call rax
     test rax, rax
     jz .enum_exhausted
-    mov r12, rax             ; r12 = value from iternext (we own this ref)
+    mov r12, rax             ; r12 = value payload from iternext
+    push rdx                 ; save value tag from iternext
 
     ; Create SmallInt for current count
     mov rdi, [rbx + IT_FIELD2]       ; it_count (raw i64)
     call int_from_i64
-    mov r13, rax             ; r13 = count as PyObject*
+    mov r13, rax             ; r13 = count payload
+    push rdx                 ; save count tag from int_from_i64
 
     ; Increment it_count
     inc qword [rbx + IT_FIELD2]
@@ -167,25 +169,12 @@ DEF_FUNC_LOCAL enumerate_iternext
     call tuple_new
     ; rax = new tuple
     ; Fill: tuple[0] = count, tuple[1] = value (fat 16-byte slots)
+    pop rcx                  ; count tag
     mov [rax + PyTupleObject.ob_item], r13            ; count payload (slot 0)
-    ; Classify count tag (int_from_i64 may return SmallInt)
-    test r13, r13
-    js .enum_cnt_si
-    mov qword [rax + PyTupleObject.ob_item + 8], TAG_PTR
-    jmp .enum_cnt_done
-.enum_cnt_si:
-    mov qword [rax + PyTupleObject.ob_item + 8], TAG_SMALLINT
-.enum_cnt_done:
-    ; Value at slot 1 (offset 16)
-    mov [rax + PyTupleObject.ob_item + 16], r12       ; value payload
-    ; Classify value tag
-    test r12, r12
-    js .enum_val_si
-    mov qword [rax + PyTupleObject.ob_item + 24], TAG_PTR
-    jmp .enum_val_done
-.enum_val_si:
-    mov qword [rax + PyTupleObject.ob_item + 24], TAG_SMALLINT
-.enum_val_done:
+    mov [rax + PyTupleObject.ob_item + 8], rcx        ; count tag
+    pop rcx                  ; value tag
+    mov [rax + PyTupleObject.ob_item + 16], r12       ; value payload (slot 1)
+    mov [rax + PyTupleObject.ob_item + 24], rcx       ; value tag
 
     pop r13
     pop r12
@@ -332,18 +321,11 @@ DEF_FUNC_LOCAL zip_iternext
     test rax, rax
     jz .zip_partial_cleanup
 
-    ; Store value in tuple at fat stride
+    ; Store value in tuple at fat stride (rdx = tag from iternext)
     mov rcx, r15
     shl rcx, 4                     ; index * 16
     mov [r14 + PyTupleObject.ob_item + rcx], rax       ; payload
-    ; Classify tag
-    test rax, rax
-    js .zip_store_si
-    mov qword [r14 + PyTupleObject.ob_item + rcx + 8], TAG_PTR
-    jmp .zip_store_done
-.zip_store_si:
-    mov qword [r14 + PyTupleObject.ob_item + rcx + 8], TAG_SMALLINT
-.zip_store_done:
+    mov [r14 + PyTupleObject.ob_item + rcx + 8], rdx   ; tag
 
     inc r15
     jmp .zip_next_loop
@@ -370,7 +352,8 @@ DEF_FUNC_LOCAL zip_iternext
     mov rax, rcx
     shl rax, 4
     mov rdi, [r14 + PyTupleObject.ob_item + rax]
-    call obj_decref
+    mov rsi, [r14 + PyTupleObject.ob_item + rax + 8]
+    DECREF_VAL rdi, rsi
     pop rcx
     inc rcx
     jmp .zip_cleanup_loop
@@ -520,13 +503,15 @@ DEF_FUNC_LOCAL map_iternext
     mov edx, 1               ; nargs = 1
     call rax
     add rsp, 8              ; pop args[0] placeholder
-    mov r14, rax             ; r14 = result
+    mov r14, rax             ; r14 = result payload
+    mov [rsp], rdx           ; save result tag in alignment slot
 
     ; DECREF item
     mov rdi, r13
     call obj_decref
 
-    mov rax, r14             ; return result
+    mov rax, r14             ; restore result payload
+    mov rdx, [rsp]           ; restore result tag
     add rsp, 8
     pop r14
     pop r13
@@ -643,7 +628,8 @@ DEF_FUNC_LOCAL filter_iternext
     call rax
     test rax, rax
     jz .filter_exhausted
-    mov r13, rax             ; r13 = item (we own ref)
+    mov r13, rax             ; r13 = item payload (we own ref)
+    push rdx                 ; save item tag from iternext
 
     ; Check if func is NULL (identity/truthiness test)
     mov r14, [rbx + IT_FIELD1]   ; it_func
@@ -674,6 +660,7 @@ DEF_FUNC_LOCAL filter_iternext
     jnz .filter_accept
 
     ; Not truthy: DECREF item, continue
+    add rsp, 8              ; discard saved item tag
     mov rdi, r13
     call obj_decref
     jmp .filter_loop
@@ -686,12 +673,14 @@ DEF_FUNC_LOCAL filter_iternext
     jnz .filter_accept
 
     ; Not truthy: DECREF item, continue
+    add rsp, 8              ; discard saved item tag
     mov rdi, r13
     call obj_decref
     jmp .filter_loop
 
 .filter_accept:
-    mov rax, r13
+    mov rax, r13             ; payload
+    pop rdx                  ; tag from iternext
     pop r15
     pop r14
     pop r13
@@ -835,6 +824,7 @@ DEF_FUNC_LOCAL reversed_iternext
     ; Decrement index
     dec qword [rbx + IT_FIELD2]
 
+    ; rdx = tag from sq_item (fat return)
     pop rbx
     leave
     ret

@@ -330,6 +330,7 @@ DEF_FUNC str_repeat
     ; Null-terminate
     pop rax
     mov byte [rax + PyStrObject.data + r14], 0
+    mov edx, TAG_PTR
 
     pop r14
     pop r13
@@ -998,6 +999,7 @@ DEF_FUNC str_iter_next
     ; Advance index
     inc qword [rbx + PyStrIterObject.it_index]
 
+    mov edx, TAG_PTR               ; str_new returns heap ptr
     pop rbx
     leave
     ret

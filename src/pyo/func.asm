@@ -15,7 +15,6 @@ extern eval_frame
 extern frame_new
 extern frame_free
 extern tuple_new
-extern obj_incref
 extern type_type
 
 ; CO_FLAGS
@@ -196,14 +195,17 @@ DEF_FUNC func_call
     js .fc_pt_si
     jz .fc_pt_null
     mov qword [r12 + PyFrame.localsplus + r8 + 8], TAG_PTR
+    mov r9, TAG_PTR
     jmp .fc_pt_done
 .fc_pt_si:
     mov qword [r12 + PyFrame.localsplus + r8 + 8], TAG_SMALLINT
+    mov r9, TAG_SMALLINT
     jmp .fc_pt_done
 .fc_pt_null:
     mov qword [r12 + PyFrame.localsplus + r8 + 8], TAG_NULL
+    mov r9, TAG_NULL
 .fc_pt_done:
-    INCREF rdx
+    INCREF_VAL rdx, r9
     inc ecx
     cmp ecx, eax
     jb .bind_positional
@@ -251,26 +253,18 @@ DEF_FUNC func_call
     js .fv_tag_si
     jz .fv_tag_null
     mov qword [rax + PyTupleObject.ob_item + rsi + 8], TAG_PTR
+    mov rdi, TAG_PTR
     jmp .fv_tag_done
 .fv_tag_si:
     mov qword [rax + PyTupleObject.ob_item + rsi + 8], TAG_SMALLINT
+    mov rdi, TAG_SMALLINT
     jmp .fv_tag_done
 .fv_tag_null:
     mov qword [rax + PyTupleObject.ob_item + rsi + 8], TAG_NULL
+    mov rdi, TAG_NULL
 .fv_tag_done:
     shr rsi, 4                      ; restore rsi = original index
-    push rax
-    push rcx
-    push rdx
-    push rsi
-    push r8
-    mov rdi, r9
-    call obj_incref
-    pop r8
-    pop rsi
-    pop rdx
-    pop rcx
-    pop rax
+    INCREF_VAL r9, rdi
     inc esi
     jmp .fill_varargs
 
@@ -344,23 +338,13 @@ DEF_FUNC func_call
     mov r8, rdi
     sub r8, rsi
     shl r8, 4                      ; * 16 (fat tuple stride)
-    mov r9, [rax + PyTupleObject.ob_item + r8]
+    mov r9, [rax + PyTupleObject.ob_item + r8]       ; payload
+    mov r10, [rax + PyTupleObject.ob_item + r8 + 8]  ; tag from fat tuple
     movsxd r8, edi
     shl r8, 4                  ; localsplus 16 bytes/slot
     mov [r12 + PyFrame.localsplus + r8], r9
-    ; Classify tag for default value
-    test r9, r9
-    js .fc_dt_si
-    jz .fc_dt_null
-    mov qword [r12 + PyFrame.localsplus + r8 + 8], TAG_PTR
-    jmp .fc_dt_done
-.fc_dt_si:
-    mov qword [r12 + PyFrame.localsplus + r8 + 8], TAG_SMALLINT
-    jmp .fc_dt_done
-.fc_dt_null:
-    mov qword [r12 + PyFrame.localsplus + r8 + 8], TAG_NULL
-.fc_dt_done:
-    INCREF r9
+    mov [r12 + PyFrame.localsplus + r8 + 8], r10
+    INCREF_VAL r9, r10
 
 .defaults_next:
     inc edi
@@ -409,9 +393,10 @@ DEF_FUNC func_call
     mov rdi, rax            ; kwdefaults dict
     call dict_get
 
+    mov r8, rax             ; r8 = value payload (or NULL)
+    mov r10, rdx            ; r10 = value tag from dict_get
     pop rsi
     pop rdx
-    mov r8, rax             ; r8 = value (or NULL)
     pop rax                 ; rax = kwdefaults dict
 
     test r8, r8
@@ -421,19 +406,8 @@ DEF_FUNC func_call
     movsxd r9, esi
     shl r9, 4                  ; localsplus 16 bytes/slot
     mov [r12 + PyFrame.localsplus + r9], r8
-    ; Classify tag for kw default value
-    test r8, r8
-    js .fc_kwdt_si
-    jz .fc_kwdt_null
-    mov qword [r12 + PyFrame.localsplus + r9 + 8], TAG_PTR
-    jmp .fc_kwdt_done
-.fc_kwdt_si:
-    mov qword [r12 + PyFrame.localsplus + r9 + 8], TAG_SMALLINT
-    jmp .fc_kwdt_done
-.fc_kwdt_null:
-    mov qword [r12 + PyFrame.localsplus + r9 + 8], TAG_NULL
-.fc_kwdt_done:
-    INCREF r8
+    mov [r12 + PyFrame.localsplus + r9 + 8], r10  ; tag from dict_get
+    INCREF_VAL r8, r10
 
 .kw_defaults_next:
     inc esi
@@ -583,14 +557,17 @@ DEF_FUNC func_bind_kwargs
     js .kwarg_tag_si
     jz .kwarg_tag_null
     mov qword [r12 + PyFrame.localsplus + rdx + 8], TAG_PTR
+    mov rsi, TAG_PTR
     jmp .kwarg_tag_done
 .kwarg_tag_si:
     mov qword [r12 + PyFrame.localsplus + rdx + 8], TAG_SMALLINT
+    mov rsi, TAG_SMALLINT
     jmp .kwarg_tag_done
 .kwarg_tag_null:
     mov qword [r12 + PyFrame.localsplus + rdx + 8], TAG_NULL
+    mov rsi, TAG_NULL
 .kwarg_tag_done:
-    INCREF rdi
+    INCREF_VAL rdi, rsi
     jmp .kw_next
 
 .kw_not_found:
@@ -759,8 +736,8 @@ DEF_FUNC func_getattr
     test rax, rax
     jz .not_found
 
-    ; Found in dict - INCREF and return
-    INCREF rax
+    ; Found in dict - INCREF and return (rdx = tag from dict_get)
+    INCREF_VAL rax, rdx
     pop r12
     pop rbx
     leave
@@ -769,6 +746,7 @@ DEF_FUNC func_getattr
 .return_name:
     mov rax, [rbx + PyFuncObject.func_name]
     INCREF rax
+    mov edx, TAG_PTR
     pop r12
     pop rbx
     leave
@@ -783,6 +761,7 @@ DEF_FUNC func_getattr
     mov [rbx + PyFuncObject.func_dict], rax
 .return_dict_obj:
     INCREF rax
+    mov edx, TAG_PTR
     pop r12
     pop rbx
     leave
@@ -790,6 +769,7 @@ DEF_FUNC func_getattr
 
 .not_found:
     xor eax, eax
+    xor edx, edx
     pop r12
     pop rbx
     leave

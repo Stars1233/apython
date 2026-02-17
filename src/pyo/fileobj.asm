@@ -380,6 +380,7 @@ DEF_FUNC fileobj_getattr
 
     ; Unknown attribute
     xor eax, eax
+    xor edx, edx
     pop r12
     pop rbx
     leave
@@ -446,6 +447,7 @@ DEF_FUNC fileobj_getattr
     call obj_decref
     pop rax
     add rsp, 8
+    mov edx, TAG_PTR
     pop r12
     pop rbx
     leave
@@ -454,6 +456,7 @@ DEF_FUNC fileobj_getattr
 .ret_encoding:
     lea rdi, [rel fa_utf8]
     call str_from_cstr
+    mov edx, TAG_PTR
     pop r12
     pop rbx
     leave
@@ -462,6 +465,7 @@ DEF_FUNC fileobj_getattr
 .ret_errors:
     lea rdi, [rel fa_surrogateescape]
     call str_from_cstr
+    mov edx, TAG_PTR
     pop r12
     pop rbx
     leave
@@ -470,6 +474,7 @@ DEF_FUNC fileobj_getattr
 .ret_name:
     mov rax, [rbx + PyFileObject.file_name]
     inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
     pop r12
     pop rbx
     leave
@@ -478,6 +483,7 @@ DEF_FUNC fileobj_getattr
 .ret_mode:
     mov rax, [rbx + PyFileObject.file_mode]
     inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
     pop r12
     pop rbx
     leave
@@ -486,6 +492,7 @@ DEF_FUNC fileobj_getattr
 .ret_closed:
     lea rax, [rel bool_false]
     inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
     pop r12
     pop rbx
     leave
@@ -494,6 +501,7 @@ DEF_FUNC fileobj_getattr
 .ret_newlines:
     lea rax, [rel none_singleton]
     inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
     pop r12
     pop rbx
     leave
@@ -502,6 +510,7 @@ DEF_FUNC fileobj_getattr
 .ret_line_buffering:
     lea rax, [rel bool_false]
     inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
     pop r12
     pop rbx
     leave

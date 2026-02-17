@@ -131,7 +131,7 @@ DEF_FUNC gen_iternext
     ret
 
 .yielded:
-    ; Return the yielded value
+    ; Return the yielded value — rdx = tag from eval_frame (preserved, no calls)
     mov rax, r12
     pop r12
     pop rbx
@@ -251,7 +251,8 @@ DEF_FUNC gen_send
     ; Resume execution
     mov rdi, r12
     call eval_frame
-    mov r12, rax               ; save return value
+    mov r12, rax               ; save return value payload
+    mov r13, rdx               ; save return value tag (sent value no longer needed)
 
     ; Mark as not running
     mov qword [rbx + PyGenObject.gi_running], 0
@@ -272,6 +273,7 @@ DEF_FUNC gen_send
     DECREF_REG rdi
 .gs_stop:
     xor eax, eax
+    xor edx, edx               ; TAG_NULL
     pop r13
     pop r12
     pop rbx
@@ -280,6 +282,7 @@ DEF_FUNC gen_send
 
 .gs_yielded:
     mov rax, r12
+    mov rdx, r13               ; restore result tag
     pop r13
     pop r12
     pop rbx
@@ -288,6 +291,7 @@ DEF_FUNC gen_send
 
 .gs_exhausted:
     xor eax, eax
+    xor edx, edx               ; TAG_NULL
     pop r13
     pop r12
     pop rbx
@@ -296,6 +300,7 @@ DEF_FUNC gen_send
 
 .gs_error:
     xor eax, eax
+    xor edx, edx               ; TAG_NULL
     pop r13
     pop r12
     pop rbx
@@ -366,6 +371,7 @@ DEF_FUNC gen_getattr
 
     ; Not found
     xor eax, eax
+    xor edx, edx
     pop r12
     pop rbx
     leave
@@ -376,6 +382,7 @@ DEF_FUNC gen_getattr
     call _get_gen_send_builtin
     mov rdi, rax
     call obj_incref
+    mov edx, TAG_PTR
     pop r12
     pop rbx
     leave
@@ -385,6 +392,7 @@ DEF_FUNC gen_getattr
     call _get_gen_close_builtin
     mov rdi, rax
     call obj_incref
+    mov edx, TAG_PTR
     pop r12
     pop rbx
     leave
@@ -395,6 +403,7 @@ DEF_FUNC gen_getattr
     call _get_gen_close_builtin
     mov rdi, rax
     call obj_incref
+    mov edx, TAG_PTR
     pop r12
     pop rbx
     leave

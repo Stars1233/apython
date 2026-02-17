@@ -306,6 +306,7 @@ DEF_FUNC property_getattr
 
     ; Not found
     xor eax, eax
+    xor edx, edx
     pop r12
     pop rbx
     leave
@@ -363,6 +364,7 @@ DEF_FUNC property_getattr
     pop rax
 
 .pga_done:
+    mov edx, TAG_PTR
     pop r12
     pop rbx
     leave
@@ -573,7 +575,6 @@ DEF_FUNC property_descr_get
     call rax
     add rsp, 8                  ; pop args
 
-    mov edx, TAG_PTR
     pop r12
     pop rbx
     leave

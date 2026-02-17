@@ -169,8 +169,9 @@ align 16
     test eax, eax
     jz .next_slot
 
-    ; Found - return entry.value
+    ; Found - return entry.value + tag
     mov rax, [rdx + DictEntry.value]
+    mov rdx, [rdx + DictEntry.value_tag]
     jmp .done
 
 .next_slot:
@@ -181,7 +182,8 @@ align 16
     jmp .probe_loop
 
 .not_found:
-    xor eax, eax               ; return NULL
+    xor eax, eax               ; return NULL payload
+    xor edx, edx               ; return TAG_NULL tag
 
 .done:
     pop r15
@@ -510,8 +512,9 @@ DEF_FUNC dict_set
 .set_tag_done:
 
     ; INCREF key and value
-    INCREF r12
-    INCREF r13
+    INCREF r12                         ; key always heap ptr
+    mov rsi, [rax + DictEntry.value_tag]
+    INCREF_VAL r13, rsi                ; value may be SmallInt
 
     ; Increment ob_size
     inc qword [rbx + PyDictObject.ob_size]
@@ -552,7 +555,8 @@ DEF_FUNC dict_set
 .update_null:
     mov qword [rax + DictEntry.value_tag], TAG_NULL
 .update_tag_done:
-    INCREF r13
+    mov rsi, [rax + DictEntry.value_tag]
+    INCREF_VAL r13, rsi                ; value may be SmallInt
 
 .done:
     ; Bump version counter (skip 0 on wrap)
@@ -650,8 +654,8 @@ DEF_FUNC dict_subscript
     test rax, rax
     jz .key_error
 
-    ; INCREF the returned value (dict_get returns borrowed ref)
-    INCREF rax
+    ; INCREF the returned value (dict_get returns borrowed fat ref)
+    INCREF_VAL rax, rdx                ; value may be SmallInt
     pop rbx
     leave
     ret
@@ -834,6 +838,7 @@ DEF_FUNC_BARE dict_iter_next
     mov [rdi + PyDictIterObject.it_index], rcx
     mov rax, r8
     INCREF rax
+    mov edx, TAG_PTR               ; keys are always heap ptrs
     ret
 
 .di_skip:

@@ -253,18 +253,18 @@ DEF_FUNC_BARE op_binary_subscr
     call raise_exception
 
 .subscr_done:
-    ; rax = result
-    push rax                   ; save result (+8 shifts BSUB_ offsets)
-    mov rdi, [rsp + 8 + BSUB_KEY]
-    mov rsi, [rsp + 8 + BSUB_KTAG]
+    ; rax = result payload, rdx = result tag
+    SAVE_FAT_RESULT            ; save (rax,rdx) — shifts rsp refs by +16
+    mov rdi, [rsp + 16 + BSUB_KEY]
+    mov rsi, [rsp + 16 + BSUB_KTAG]
     DECREF_VAL rdi, rsi
-    mov rdi, [rsp + 8 + BSUB_OBJ]
-    mov rsi, [rsp + 8 + BSUB_OTAG]
+    mov rdi, [rsp + 16 + BSUB_OBJ]
+    mov rsi, [rsp + 16 + BSUB_OTAG]
     DECREF_VAL rdi, rsi
-    pop rax                    ; restore result
+    RESTORE_FAT_RESULT
     add rsp, BSUB_SIZE
 
-    VPUSH_BRANCHLESS rax
+    VPUSH_VAL rax, rdx
 
     ; Skip 1 CACHE entry = 2 bytes
     add rbx, 2
@@ -858,7 +858,7 @@ DEF_FUNC_BARE op_for_iter
 
     ; Got a value - push it (iterator stays on stack)
     add rsp, 8                 ; discard saved jump offset
-    VPUSH_BRANCHLESS rax
+    VPUSH_VAL rax, rdx
 
     ; Skip 1 CACHE entry = 2 bytes
     add rbx, 2
@@ -1281,7 +1281,7 @@ DEF_FUNC op_binary_slice, BSLC_FRAME
     mov rax, [rax + PyTypeObject.tp_as_mapping]
     mov rax, [rax + PyMappingMethods.mp_subscript]
     call rax
-    push rax               ; save result
+    SAVE_FAT_RESULT        ; save (rax,rdx) result
 
     ; DECREF slice (heap ptr, no tag needed)
     mov rdi, [rbp - BSLC_SLICE]
@@ -1297,8 +1297,8 @@ DEF_FUNC op_binary_slice, BSLC_FRAME
     mov rsi, [rbp - BSLC_OTAG]
     DECREF_VAL rdi, rsi
 
-    pop rax
-    VPUSH_BRANCHLESS rax
+    RESTORE_FAT_RESULT
+    VPUSH_VAL rax, rdx
     leave
     DISPATCH
 END_FUNC op_binary_slice
@@ -1589,9 +1589,9 @@ DEF_FUNC op_unpack_ex
     ; Get item at index rax from iterable
     mov rdi, r15
     mov rsi, rax
-    call .ue_getitem           ; rax = item (borrowed)
-    INCREF rax
-    VPUSH_BRANCHLESS rax
+    call .ue_getitem           ; rax = payload, rdx = tag (borrowed)
+    INCREF_VAL rax, rdx
+    VPUSH_VAL rax, rdx
 
     pop rax
     pop rcx
@@ -1644,9 +1644,9 @@ DEF_FUNC op_unpack_ex
 
     mov rdi, r15
     mov rsi, rcx
-    call .ue_getitem           ; rax = item (borrowed)
-    INCREF rax
-    VPUSH_BRANCHLESS rax
+    call .ue_getitem           ; rax = payload, rdx = tag (borrowed)
+    INCREF_VAL rax, rdx
+    VPUSH_VAL rax, rdx
 
     pop rcx
     test rcx, rcx
@@ -1672,7 +1672,7 @@ DEF_FUNC op_unpack_ex
     CSTRING rsi, "not enough values to unpack"
     call raise_exception
 
-; Helper: get item at index rsi from iterable r15 (returns borrowed ref in rax)
+; Helper: get item at index rsi from iterable r15 (returns borrowed ref: rax=payload, rdx=tag)
 .ue_getitem:
     mov rax, [r15 + PyObject.ob_type]
     lea rcx, [rel list_type]
@@ -1681,12 +1681,14 @@ DEF_FUNC op_unpack_ex
     ; tuple: fat 16-byte stride
     mov rax, rsi
     shl rax, 4
-    mov rax, [r15 + PyTupleObject.ob_item + rax]
+    mov rdx, [r15 + PyTupleObject.ob_item + rax + 8]  ; tag (load before rax clobber)
+    mov rax, [r15 + PyTupleObject.ob_item + rax]       ; payload
     ret
 .ue_gi_list:
     mov rax, [r15 + PyListObject.ob_item]
     mov rcx, rsi
     shl rcx, 4                ; index * 16
+    mov rdx, [rax + rcx + 8]  ; tag
     mov rax, [rax + rcx]      ; payload
     ret
 END_FUNC op_unpack_ex

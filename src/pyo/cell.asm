@@ -1,10 +1,11 @@
 ; cell.asm - PyCellObject implementation for closures
 ;
 ; PyCellObject layout:
-;   +0  ob_refcnt (8 bytes)
-;   +8  ob_type   (8 bytes)
-;   +16 ob_ref    (8 bytes: ptr to contained object or NULL)
-;   Total: 24 bytes
+;   +0  ob_refcnt   (8 bytes)
+;   +8  ob_type     (8 bytes)
+;   +16 ob_ref      (8 bytes: contained value payload or 0 if empty)
+;   +24 ob_ref_tag  (8 bytes: contained value tag, TAG_NULL if empty)
+;   Total: 32 bytes
 
 %include "macros.inc"
 %include "object.inc"
@@ -24,7 +25,9 @@ extern type_type
 ;; ============================================================================
 DEF_FUNC cell_new
     push rbx
-    mov rbx, rdi               ; save obj
+    push r12
+    mov rbx, rdi               ; save payload
+    mov r12, rsi               ; save tag
 
     mov edi, PyCellObject_size
     call ap_malloc
@@ -34,16 +37,15 @@ DEF_FUNC cell_new
     lea rcx, [rel cell_type]
     mov [rax + PyObject.ob_type], rcx
     mov [rax + PyCellObject.ob_ref], rbx
+    mov [rax + PyCellObject.ob_ref_tag], r12
 
-    ; INCREF obj if non-NULL
-    test rbx, rbx
-    jz .done
+    ; INCREF value if refcounted (tag-aware)
     push rax
-    mov rdi, rbx
-    call obj_incref
+    INCREF_VAL rbx, r12
     pop rax
 
 .done:
+    pop r12
     pop rbx
     leave
     ret
@@ -55,6 +57,7 @@ END_FUNC cell_new
 ;; ============================================================================
 DEF_FUNC_BARE cell_get
     mov rax, [rdi + PyCellObject.ob_ref]
+    mov rdx, [rdi + PyCellObject.ob_ref_tag]
     ret
 END_FUNC cell_get
 
@@ -65,27 +68,25 @@ END_FUNC cell_get
 DEF_FUNC cell_set
     push rbx
     push r12
+    push r13
 
     mov rbx, rdi               ; cell
-    mov r12, rsi               ; new obj
+    mov r12, rsi               ; new payload
+    mov r13, rdx               ; new tag
 
-    ; INCREF new obj if non-NULL
-    test r12, r12
-    jz .skip_incref
-    mov rdi, r12
-    call obj_incref
-.skip_incref:
+    ; INCREF new value (tag-aware)
+    INCREF_VAL r12, r13
 
-    ; DECREF old obj if non-NULL
+    ; DECREF old value (tag-aware)
     mov rdi, [rbx + PyCellObject.ob_ref]
-    test rdi, rdi
-    jz .skip_decref
-    DECREF_REG rdi
-.skip_decref:
+    mov rsi, [rbx + PyCellObject.ob_ref_tag]
+    DECREF_VAL rdi, rsi
 
-    ; Store new obj
+    ; Store new value + tag
     mov [rbx + PyCellObject.ob_ref], r12
+    mov [rbx + PyCellObject.ob_ref_tag], r13
 
+    pop r13
     pop r12
     pop rbx
     leave
@@ -99,11 +100,10 @@ DEF_FUNC cell_dealloc
     push rbx
     mov rbx, rdi
 
-    ; DECREF contained object if non-NULL
+    ; DECREF contained value (tag-aware)
     mov rdi, [rbx + PyCellObject.ob_ref]
-    test rdi, rdi
-    jz .free
-    DECREF_REG rdi
+    mov rsi, [rbx + PyCellObject.ob_ref_tag]
+    DECREF_VAL rdi, rsi
 
 .free:
     mov rdi, rbx

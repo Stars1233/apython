@@ -361,8 +361,9 @@ DEF_FUNC set_add
     mov qword [rax + SET_ENTRY_KEY_TAG], TAG_SMALLINT
 .add_tag_done:
 
-    ; INCREF key
-    INCREF r12
+    ; INCREF key (tag-aware)
+    mov rcx, [rax + SET_ENTRY_KEY_TAG]
+    INCREF_VAL r12, rcx
 
     ; Increment ob_size
     inc qword [rbx + PyDictObject.ob_size]
@@ -634,6 +635,7 @@ DEF_FUNC_BARE set_iter_next
     mov [rdi + PyDictIterObject.it_index], rcx
     mov rax, r8
     INCREF rax
+    mov edx, TAG_PTR               ; keys are always heap ptrs
     ret
 
 .si_skip:

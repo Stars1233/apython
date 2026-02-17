@@ -362,6 +362,7 @@ DEF_FUNC eg_getattr
     test rax, rax
     jz .return_none
     INCREF rax
+    mov edx, TAG_PTR
     pop r12
     pop rbx
     leave
@@ -373,6 +374,7 @@ DEF_FUNC eg_getattr
     test rax, rax
     jz .return_none
     INCREF rax
+    mov edx, TAG_PTR
     pop r12
     pop rbx
     leave
@@ -381,6 +383,7 @@ DEF_FUNC eg_getattr
 .return_none:
     lea rax, [rel none_singleton]
     INCREF rax
+    mov edx, TAG_PTR
     pop r12
     pop rbx
     leave

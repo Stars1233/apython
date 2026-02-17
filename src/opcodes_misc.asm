@@ -73,7 +73,8 @@ SND_SENT   equ 16
 SND_RECV   equ 24
 SND_RESULT equ 32
 SND_STAG   equ 40    ; sent_value tag
-SND_FRAME  equ 40
+SND_RTAG   equ 48    ; result tag
+SND_FRAME  equ 48
 
 ;; Stack layout constants for op_match_keys (DEF_FUNC, 32 bytes).
 MK_KEYS    equ 8
@@ -226,20 +227,20 @@ DEF_FUNC_BARE op_binary_op
     call rax
 
 .binop_have_result:
-    ; rax = result
+    ; rax = result payload, rdx = result tag
     ; Save result, DECREF operands (tag-aware)
-    push rax                   ; save result (+8 shifts all BO_ offsets)
-    mov rdi, [rsp + 8 + BO_RIGHT]
-    mov rsi, [rsp + 8 + BO_RTAG]
+    SAVE_FAT_RESULT            ; save (rax,rdx) result — shifts rsp refs by +16
+    mov rdi, [rsp + 16 + BO_RIGHT]
+    mov rsi, [rsp + 16 + BO_RTAG]
     DECREF_VAL rdi, rsi
-    mov rdi, [rsp + 8 + BO_LEFT]
-    mov rsi, [rsp + 8 + BO_LTAG]
+    mov rdi, [rsp + 16 + BO_LEFT]
+    mov rsi, [rsp + 16 + BO_LTAG]
     DECREF_VAL rdi, rsi
-    pop rax                    ; restore result
+    RESTORE_FAT_RESULT
     add rsp, BO_SIZE           ; discard saved operands + tags
 
     ; Push result
-    VPUSH_BRANCHLESS rax
+    VPUSH_VAL rax, rdx
 
     ; Skip 1 CACHE entry = 2 bytes
     add rbx, 2
@@ -513,18 +514,18 @@ section .text
 
 .cmp_do_call_result:
     ; Save result, DECREF operands (tag-aware)
-    push rax                   ; save result (+8 shifts all BO_ offsets)
-    mov rdi, [rsp + 8 + BO_RIGHT]
-    mov rsi, [rsp + 8 + BO_RTAG]
+    SAVE_FAT_RESULT            ; save (rax,rdx) result — shifts rsp refs by +16
+    mov rdi, [rsp + 16 + BO_RIGHT]
+    mov rsi, [rsp + 16 + BO_RTAG]
     DECREF_VAL rdi, rsi
-    mov rdi, [rsp + 8 + BO_LEFT]
-    mov rsi, [rsp + 8 + BO_LTAG]
+    mov rdi, [rsp + 16 + BO_LEFT]
+    mov rsi, [rsp + 16 + BO_LTAG]
     DECREF_VAL rdi, rsi
-    pop rax                    ; restore result
+    RESTORE_FAT_RESULT
     add rsp, BO_SIZE           ; discard saved operands + tags
 
     ; Push result
-    VPUSH_BRANCHLESS rax
+    VPUSH_VAL rax, rdx
 
     ; Skip 1 CACHE entry = 2 bytes
     add rbx, 2
@@ -605,18 +606,18 @@ DEF_FUNC_BARE op_unary_negative
 
     ; Call nb_negative(operand); rdi already set
     call rax
-    ; rax = result
+    ; rax = result payload, rdx = result tag
 
     ; DECREF old operand (tag-aware)
-    push rax                   ; save result on machine stack
-    mov rdi, [rsp + 8]        ; rdi = old operand
-    mov rsi, [rsp + 16]       ; rsi = operand tag
+    SAVE_FAT_RESULT            ; save (rax,rdx) — shifts rsp refs by +16
+    mov rdi, [rsp + 16]       ; rdi = old operand (was [rsp + 8])
+    mov rsi, [rsp + 24]       ; rsi = operand tag (was [rsp + 16])
     DECREF_VAL rdi, rsi
-    pop rax                    ; restore result
+    RESTORE_FAT_RESULT
     add rsp, 16                ; discard saved operand + tag
 
     ; Push result
-    VPUSH_BRANCHLESS rax
+    VPUSH_VAL rax, rdx
     DISPATCH
 END_FUNC op_unary_negative
 
@@ -644,13 +645,13 @@ DEF_FUNC_BARE op_unary_invert
     ; Call nb_invert(operand, NULL) — binary op signature, second arg unused
     xor esi, esi
     call rax
-    push rax
-    mov rdi, [rsp + 8]
-    mov rsi, [rsp + 16]       ; tag
+    SAVE_FAT_RESULT
+    mov rdi, [rsp + 16]
+    mov rsi, [rsp + 24]       ; tag
     DECREF_VAL rdi, rsi
-    pop rax
+    RESTORE_FAT_RESULT
     add rsp, 16
-    VPUSH_BRANCHLESS rax
+    VPUSH_VAL rax, rdx
     DISPATCH
 END_FUNC op_unary_invert
 
@@ -961,7 +962,8 @@ DEF_FUNC op_build_string, BS_FRAME
 
     ; Start with first string
     mov rax, [r13]             ; first fragment (payload at slot base)
-    INCREF rax                 ; we'll DECREF all originals later
+    mov r9, [r13 + 8]         ; first fragment (tag)
+    INCREF_VAL rax, r9        ; tag-aware INCREF (safe for SmallStr)
     mov [rbp - BS_ACCUM], rax  ; accumulator
 
     ; Concatenate remaining
@@ -1071,29 +1073,28 @@ section .text
 DEF_FUNC_BARE op_make_cell
     lea rdx, [rcx*8]              ; slot * 8 (×2 via SIB)
 
-    ; Get current value
-    mov rdi, [r12 + rdx*2 + PyFrame.localsplus]  ; rdi = current value (or NULL)
+    ; Get current value + tag from localsplus
+    mov rdi, [r12 + rdx*2 + PyFrame.localsplus]      ; rdi = payload
+    mov rsi, [r12 + rdx*2 + PyFrame.localsplus + 8]  ; rsi = tag
 
     ; Save slot offset
     push rdx
 
-    ; cell_new(obj) - creates cell wrapping obj (INCREFs if non-NULL)
+    ; cell_new(payload, tag) - creates cell wrapping value (INCREFs if refcounted)
     call cell_new
     ; rax = new cell
 
     pop rdx
 
-    ; XDECREF old value (cell_new already INCREFed it)
+    ; DECREF old value (cell_new already INCREFed it; tag-aware, handles NULL)
     mov rdi, [r12 + rdx*2 + PyFrame.localsplus]
-    test rdi, rdi
-    jz .mc_store
+    mov rsi, [r12 + rdx*2 + PyFrame.localsplus + 8]
     push rax
     push rdx
-    DECREF_REG rdi
+    DECREF_VAL rdi, rsi
     pop rdx
     pop rax
 
-.mc_store:
     ; Store cell in localsplus slot (payload + tag)
     mov [r12 + rdx*2 + PyFrame.localsplus], rax
     mov qword [r12 + rdx*2 + PyFrame.localsplus + 8], TAG_PTR
@@ -1149,22 +1150,18 @@ DEF_FUNC_BARE op_copy_free_vars
     ; Get cell from closure tuple item[i] (fat: *16)
     mov r10d, r8d
     shl r10, 4
-    mov r9, [rax + PyTupleObject.ob_item + r10]
+    mov r9, [rax + PyTupleObject.ob_item + r10]        ; payload
+    mov r11, [rax + PyTupleObject.ob_item + r10 + 8]   ; tag
 
     ; Compute destination index: edx + r8d, then * 16
     mov r10d, edx
     add r10d, r8d
     shl r10, 4                     ; slot * 16 bytes
     mov [r12 + PyFrame.localsplus + r10], r9
+    mov [r12 + PyFrame.localsplus + r10 + 8], r11
 
-    ; Set tag and INCREF if non-NULL
-    test r9, r9
-    jz .cfv_null_item
-    INCREF r9
-    mov qword [r12 + PyFrame.localsplus + r10 + 8], TAG_PTR
-    jmp .cfv_next
-.cfv_null_item:
-    mov qword [r12 + PyFrame.localsplus + r10 + 8], TAG_NULL
+    ; INCREF value (tag-aware)
+    INCREF_VAL r9, r11
 .cfv_next:
     inc r8d
     jmp .cfv_loop
@@ -1202,8 +1199,9 @@ END_FUNC op_return_generator
 ;; return value from eval_frame. The generator is suspended.
 ;; ============================================================================
 DEF_FUNC_BARE op_yield_value
-    ; Pop the value to yield
+    ; Pop the value to yield (fat: payload + tag)
     VPOP rax
+    mov rdx, [r13 + 8]         ; rdx = tag (fat value protocol)
 
     ; Save frame state for resumption
     mov [r12 + PyFrame.instr_ptr], rbx
@@ -1220,13 +1218,16 @@ END_FUNC op_yield_value
 ;; ============================================================================
 DEF_FUNC_BARE op_end_send
     ; TOS = value, TOS1 = receiver
-    VPOP rax                   ; rax = value (TOS)
-    VPOP rdi                   ; rdi = receiver (TOS1)
+    VPOP rax                   ; rax = value payload (TOS)
+    mov r8, [r13 + 8]         ; r8 = value tag (slot still readable)
+    VPOP rdi                   ; rdi = receiver payload (TOS1)
     mov rsi, [r13 + 8]        ; rsi = receiver tag
-    push rax                   ; save value (DECREF_VAL clobbers caller-saved)
+    push r8                    ; save value tag
+    push rax                   ; save value payload
     DECREF_VAL rdi, rsi        ; DECREF receiver (tag-aware)
-    pop rax                    ; restore value
-    VPUSH_BRANCHLESS rax       ; push value back
+    pop rax
+    pop rdx
+    VPUSH_VAL rax, rdx         ; push value back with tag
     DISPATCH
 END_FUNC op_end_send
 
@@ -1281,7 +1282,8 @@ DEF_FUNC op_send, SND_FRAME
     call rax
 
 .send_check_result:
-    mov [rbp - SND_RESULT], rax ; save result
+    mov [rbp - SND_RESULT], rax ; save result payload
+    mov [rbp - SND_RTAG], rdx   ; save result tag
 
     ; DECREF sent value (tag-aware)
     mov rdi, [rbp - SND_SENT]
@@ -1294,7 +1296,8 @@ DEF_FUNC op_send, SND_FRAME
 
     ; Yielded: push result on top (receiver stays below)
     ; Stack becomes: ... | receiver | yielded_value |
-    VPUSH_BRANCHLESS rax
+    mov rdx, [rbp - SND_RTAG]
+    VPUSH_VAL rax, rdx
 
     ; Skip 1 CACHE entry = 2 bytes
     add rbx, 2
@@ -1650,8 +1653,9 @@ DEF_FUNC_BARE op_load_from_dict_or_globals
 .lfdg_found:
     add rsp, 16                 ; pop saved dict + name
 .lfdg_found_no_pop:
-    INCREF rax
-    VPUSH_PTR rax
+    ; dict_get returns fat (rax=payload, rdx=tag); rdx preserved through all paths
+    INCREF_VAL rax, rdx
+    VPUSH_VAL rax, rdx
     DISPATCH
 END_FUNC op_load_from_dict_or_globals
 
@@ -1691,13 +1695,14 @@ DEF_FUNC op_load_from_dict_or_deref, LFDOD_FRAME
     mov rax, [r12 + rax*2 + PyFrame.localsplus]  ; cell object
     test rax, rax
     jz .lfdod_error
+    mov rdx, [rax + PyCellObject.ob_ref_tag]
     mov rax, [rax + PyCellObject.ob_ref]
-    test rax, rax
+    test rdx, rdx                 ; check tag for empty cell
     jz .lfdod_error
 
 .lfdod_found:
-    INCREF rax
-    VPUSH_PTR rax
+    INCREF_VAL rax, rdx
+    VPUSH_VAL rax, rdx
     leave
     DISPATCH
 
@@ -1837,22 +1842,19 @@ DEF_FUNC op_match_keys, MK_FRAME
     test rax, rax
     jz .mk_fail
 
+    ; Save dict_get tag (rdx) before restoring loop index
+    mov r9, rdx                 ; r9 = value tag from dict_get
+
     ; Store value in values tuple
     pop rdx
     push rdx
-    INCREF rax
+    INCREF_VAL rax, r9          ; tag-aware INCREF
     mov rcx, [rbp - MK_VALS]
     mov r8, rdx
     shl r8, 4
     mov [rcx + PyTupleObject.ob_item + r8], rax
-    ; Classify tag
-    test rax, rax
-    js .mk_val_si
-    mov qword [rcx + PyTupleObject.ob_item + r8 + 8], TAG_PTR
-    jmp .mk_val_done
-.mk_val_si:
-    mov qword [rcx + PyTupleObject.ob_item + r8 + 8], TAG_SMALLINT
-.mk_val_done:
+    ; Use tag from dict_get directly
+    mov [rcx + PyTupleObject.ob_item + r8 + 8], r9
 
     pop rdx
     inc rdx
@@ -2338,9 +2340,8 @@ align 8
     dq .ci_set_ge              ; PY_GE = 5
 section .text
 .cmp_int_deopt:
-    ; Re-push operands
-    VPUSH_BRANCHLESS rdi
-    VPUSH_BRANCHLESS rsi
+    ; Re-push operands (slots still intact — just restore stack pointer)
+    VUNDROP 2
     ; Rewrite back to COMPARE_OP (107) and re-execute
     mov byte [rbx - 2], 107
     sub rbx, 2

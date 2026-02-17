@@ -1063,8 +1063,9 @@ DEF_FUNC builtin___build_class__
     pop rax                 ; restore cell
     test rax, rax
     jz .bc_no_classcell
-    ; cell.ob_ref = new type (r12)
+    ; cell.ob_ref = new type (r12), with tag
     mov [rax + PyCellObject.ob_ref], r12
+    mov qword [rax + PyCellObject.ob_ref_tag], TAG_PTR
     mov rdi, r12
     call obj_incref         ; cell holds a ref to the type
 .bc_no_classcell:

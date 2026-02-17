@@ -53,14 +53,16 @@ LA_NAME      equ 24
 LA_ATTR      equ 32
 LA_FROM_TYPE equ 40
 LA_CLASS     equ 48   ; used by classmethod path
-LA_FRAME     equ 48
+LA_ATTR_TAG  equ 56
+LA_FRAME     equ 64
 
 ; op_load_super_attr frame layout (DEF_FUNC op_load_super_attr, LSA_FRAME)
 LSA_SELF     equ 8
 LSA_CLASS    equ 16
 LSA_NAME     equ 24
 LSA_FLAG     equ 32
-LSA_FRAME    equ 32
+LSA_ATTR_TAG equ 40
+LSA_FRAME    equ 48
 
 ;; ============================================================================
 ;; op_load_const - Load constant from co_consts[arg]
@@ -138,7 +140,9 @@ DEF_FUNC_BARE op_load_global
     mov rdi, [rdi + PyDictObject.entries]
     movzx eax, word [rbx + 2]  ; index
     imul rax, rax, DICT_ENTRY_SIZE
-    mov rax, [rdi + rax + DictEntry.value]
+    add rdi, rax               ; rdi = entry ptr
+    mov rax, [rdi + DictEntry.value]
+    mov rdx, [rdi + DictEntry.value_tag]
     add rsp, 8                 ; discard saved name
     jmp .lg_push_result
 
@@ -166,7 +170,9 @@ DEF_FUNC_BARE op_load_global
     mov rdi, [rdi + PyDictObject.entries]
     movzx eax, word [rbx + 2]
     imul rax, rax, DICT_ENTRY_SIZE
-    mov rax, [rdi + rax + DictEntry.value]
+    add rdi, rax               ; rdi = entry ptr
+    mov rax, [rdi + DictEntry.value]
+    mov rdx, [rdi + DictEntry.value_tag]
     jmp .lg_push_result
 
 .not_found:
@@ -175,8 +181,8 @@ DEF_FUNC_BARE op_load_global
     call raise_exception
 
 .lg_push_result:
-    INCREF rax
-    VPUSH_BRANCHLESS rax
+    INCREF_VAL rax, rdx
+    VPUSH_VAL rax, rdx
     ; Skip 4 CACHE entries = 8 bytes
     add rbx, 8
     DISPATCH
@@ -200,8 +206,9 @@ DEF_FUNC_BARE op_load_global_module
     movzx eax, word [rbx + 2]  ; CACHE[1] = index
     imul rax, rax, DICT_ENTRY_SIZE
     add rdi, rax               ; rdi = entry ptr
-    cmp qword [rdi + DictEntry.value_tag], 0
-    je .lgm_deopt              ; TAG_NULL = deleted entry
+    mov rdx, [rdi + DictEntry.value_tag]
+    test rdx, rdx
+    jz .lgm_deopt              ; TAG_NULL = deleted entry
     mov rax, [rdi + DictEntry.value]
 
     ; Guards passed — now push NULL if needed
@@ -211,8 +218,8 @@ DEF_FUNC_BARE op_load_global_module
     mov qword [r13 + 8], TAG_NULL
     add r13, 16
 .lgm_no_null:
-    INCREF rax
-    VPUSH_BRANCHLESS rax
+    INCREF_VAL rax, rdx
+    VPUSH_VAL rax, rdx
     add rbx, 8
     DISPATCH
 
@@ -247,8 +254,9 @@ DEF_FUNC_BARE op_load_global_builtin
     movzx eax, word [rbx + 2]  ; CACHE[1] = index
     imul rax, rax, DICT_ENTRY_SIZE
     add rdi, rax               ; rdi = entry ptr
-    cmp qword [rdi + DictEntry.value_tag], 0
-    je .lgb_deopt              ; TAG_NULL = deleted entry
+    mov rdx, [rdi + DictEntry.value_tag]
+    test rdx, rdx
+    jz .lgb_deopt              ; TAG_NULL = deleted entry
     mov rax, [rdi + DictEntry.value]
 
     ; Guards passed — now push NULL if needed
@@ -258,8 +266,8 @@ DEF_FUNC_BARE op_load_global_builtin
     mov qword [r13 + 8], TAG_NULL
     add r13, 16
 .lgb_no_null:
-    INCREF rax
-    VPUSH_BRANCHLESS rax
+    INCREF_VAL rax, rdx
+    VPUSH_VAL rax, rdx
     add rbx, 8
     DISPATCH
 
@@ -314,8 +322,8 @@ DEF_FUNC_BARE op_load_name
 .found:
     add rsp, 8                 ; discard saved name
 .found_no_pop:
-    INCREF rax
-    VPUSH_BRANCHLESS rax
+    INCREF_VAL rax, rdx
+    VPUSH_VAL rax, rdx
     DISPATCH
 END_FUNC op_load_name
 
@@ -384,6 +392,7 @@ DEF_FUNC op_load_attr, LA_FRAME
     test rax, rax
     jz .la_attr_error
     mov [rbp - LA_ATTR], rax
+    mov [rbp - LA_ATTR_TAG], rdx   ; save tag from tp_getattr
     ; LA_FROM_TYPE stays 0 — tp_getattr already handled binding
     jmp .la_got_attr
 
@@ -404,6 +413,7 @@ DEF_FUNC op_load_attr, LA_FRAME
 
     ; INCREF the result (dict_get returns borrowed ref)
     mov [rbp - LA_ATTR], rax
+    mov [rbp - LA_ATTR_TAG], rdx   ; save tag from dict_get
     mov rdi, rax
     call obj_incref
     mov qword [rbp - LA_FROM_TYPE], 1
@@ -453,8 +463,8 @@ DEF_FUNC op_load_attr, LA_FRAME
     lea rcx, [rel dunder_get]
     call dunder_call_3
 
-    ; rax = result from __get__
-    push rax                   ; save result
+    ; rax = result from __get__, rdx = result tag
+    SAVE_FAT_RESULT            ; save (rax,rdx) across DECREF calls
 
     ; DECREF descriptor wrapper
     mov rdi, [rbp - LA_ATTR]
@@ -463,17 +473,17 @@ DEF_FUNC op_load_attr, LA_FRAME
     mov rdi, [rbp - LA_OBJ]
     call obj_decref
 
-    pop rax                    ; restore result
+    RESTORE_FAT_RESULT
     cmp qword [rbp - LA_FLAG], 0
     jne .la_descr_get_flag1
-    VPUSH_BRANCHLESS rax
+    VPUSH_VAL rax, rdx
     jmp .la_done
 
 .la_descr_get_flag1:
     ; flag=1: push NULL + result
     xor ecx, ecx
     VPUSH_NULL128
-    VPUSH_BRANCHLESS rax
+    VPUSH_VAL rax, rdx
     jmp .la_done
 
 .la_check_flag:
@@ -509,7 +519,8 @@ DEF_FUNC op_load_attr, LA_FRAME
 
 .la_simple_push:
     mov rax, [rbp - LA_ATTR]
-    VPUSH_BRANCHLESS rax
+    mov rdx, [rbp - LA_ATTR_TAG]
+    VPUSH_VAL rax, rdx
 
     ; DECREF obj
     mov rdi, [rbp - LA_OBJ]
@@ -613,7 +624,8 @@ DEF_FUNC op_load_attr, LA_FRAME
     xor eax, eax
     VPUSH_NULL128              ; push NULL
     mov rax, [rbp - LA_ATTR]
-    VPUSH_BRANCHLESS rax       ; push attr
+    mov rdx, [rbp - LA_ATTR_TAG]
+    VPUSH_VAL rax, rdx         ; push attr
     jmp .la_done
 
 .la_handle_staticmethod:
@@ -658,7 +670,7 @@ DEF_FUNC op_load_attr, LA_FRAME
     mov rdi, [rbp - LA_ATTR]   ; property descriptor
     mov rsi, [rbp - LA_OBJ]    ; obj
     call property_descr_get
-    push rax                   ; save result
+    SAVE_FAT_RESULT            ; save (rax,rdx) across DECREF calls
 
     ; DECREF property wrapper
     mov rdi, [rbp - LA_ATTR]
@@ -667,19 +679,18 @@ DEF_FUNC op_load_attr, LA_FRAME
     mov rdi, [rbp - LA_OBJ]
     call obj_decref
 
-    pop rax
+    RESTORE_FAT_RESULT
     ; Push result (property_descr_get already returns owned ref)
-    ; For flag=1, we still just push the result (property access, not method)
     cmp qword [rbp - LA_FLAG], 0
     jne .la_prop_flag1
-    VPUSH_BRANCHLESS rax
+    VPUSH_VAL rax, rdx
     jmp .la_done
 
 .la_prop_flag1:
     ; flag=1: push NULL + result (it's a value, not a method)
     xor ecx, ecx
     VPUSH_NULL128
-    VPUSH_BRANCHLESS rax
+    VPUSH_VAL rax, rdx
     jmp .la_done
 
 .la_handle_classmethod:
@@ -827,11 +838,12 @@ DEF_FUNC_BARE op_load_deref
     mov rax, [r12 + rax*2 + PyFrame.localsplus]  ; rax = cell object (payload)
     test rax, rax
     jz .deref_error
-    mov rax, [rax + PyCellObject.ob_ref]   ; rax = cell contents
-    test rax, rax
+    mov rdx, [rax + PyCellObject.ob_ref_tag]  ; rdx = value tag
+    mov rax, [rax + PyCellObject.ob_ref]       ; rax = value payload
+    test rdx, rdx                              ; check tag for NULL (empty cell)
     jz .deref_error
-    INCREF rax
-    VPUSH_BRANCHLESS rax
+    INCREF_VAL rax, rdx
+    VPUSH_VAL rax, rdx
     DISPATCH
 
 .deref_error:
@@ -953,8 +965,9 @@ DEF_FUNC op_load_super_attr, LSA_FRAME
     call raise_exception
 
 .lsa_found:
-    ; rax = attribute value (borrowed ref from dict_get)
-    INCREF rax
+    ; rax = attribute value, rdx = tag (from dict_get)
+    mov [rbp - LSA_ATTR_TAG], rdx  ; save tag before INCREF/DECREF
+    INCREF_VAL rax, rdx
     push rax                       ; save attr
 
     ; DECREF class
@@ -968,9 +981,10 @@ DEF_FUNC op_load_super_attr, LSA_FRAME
     je .lsa_attr_mode
 
     ; Method mode: CPython order: push func (deeper), then self (TOS)
-    VPUSH_PTR rax                  ; push func (deeper = callable)
-    mov rdx, [rbp - LSA_SELF]     ; self (already has ref from stack)
-    VPUSH_PTR rdx                  ; push self (TOS)
+    mov rdx, [rbp - LSA_ATTR_TAG]
+    VPUSH_VAL rax, rdx             ; push func (deeper = callable)
+    mov rax, [rbp - LSA_SELF]     ; self (already has ref from stack)
+    VPUSH_PTR rax                  ; push self (TOS)
     jmp .lsa_done
 
 .lsa_attr_mode:
@@ -981,7 +995,8 @@ DEF_FUNC op_load_super_attr, LSA_FRAME
     xor eax, eax
     VPUSH_NULL128                  ; push NULL
     pop rax
-    VPUSH_BRANCHLESS rax           ; push attr
+    mov rdx, [rbp - LSA_ATTR_TAG]
+    VPUSH_VAL rax, rdx             ; push attr
     jmp .lsa_done
 
 .lsa_done:

@@ -108,7 +108,6 @@ DEF_FUNC tuple_subscript
     mov rsi, rax               ; index
     mov rdi, rbx
     call tuple_getitem         ; returns (rax=payload, rdx=tag)
-    ; Return just payload — caller uses VPUSH_BRANCHLESS
     pop rbx
     leave
     ret
@@ -425,6 +424,7 @@ DEF_FUNC tuple_concat
 
 .concat_done:
     pop rax
+    mov edx, TAG_PTR
     pop r14
     pop r13
     pop r12
@@ -493,6 +493,7 @@ DEF_FUNC tuple_repeat
 
 .rep_done:
     pop rax
+    mov edx, TAG_PTR
     pop r14
     pop r13
     pop r12

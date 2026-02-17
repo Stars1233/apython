@@ -283,29 +283,23 @@ END_FUNC op_store_attr
 ;; INCREFs new value, DECREFs old value.
 ;; ============================================================================
 DEF_FUNC_BARE op_store_deref
-    VPOP rax                        ; rax = new value
+    VPOP_VAL rax, r8               ; rax = new payload, r8 = new tag
     lea rdx, [rcx*8]               ; slot * 8 (×2 via SIB)
     mov rdx, [r12 + rdx*2 + PyFrame.localsplus]  ; rdx = cell object (payload)
 
-    ; INCREF new value (may be SmallInt)
-    push rax
-    push rdx
-    mov rdi, rax
-    call obj_incref
-    pop rdx
-    pop rax
+    ; INCREF new value (tag-aware) — INCREF_VAL doesn't clobber regs
+    INCREF_VAL rax, r8
 
-    ; Get old value from cell
+    ; Get old value + tag from cell
     mov rdi, [rdx + PyCellObject.ob_ref]
+    mov rsi, [rdx + PyCellObject.ob_ref_tag]
 
-    ; Store new value in cell
+    ; Store new value + tag in cell
     mov [rdx + PyCellObject.ob_ref], rax
+    mov [rdx + PyCellObject.ob_ref_tag], r8
 
-    ; XDECREF old value
-    test rdi, rdi
-    jz .sd_done
-    DECREF_REG rdi
-.sd_done:
+    ; DECREF old value (tag-aware, handles NULL automatically)
+    DECREF_VAL rdi, rsi
     DISPATCH
 END_FUNC op_store_deref
 
@@ -318,12 +312,11 @@ DEF_FUNC_BARE op_delete_deref
     lea rax, [rcx*8]               ; slot * 8 (×2 via SIB)
     mov rax, [r12 + rax*2 + PyFrame.localsplus]  ; rax = cell object (payload)
     mov rdi, [rax + PyCellObject.ob_ref]
+    mov rsi, [rax + PyCellObject.ob_ref_tag]
     mov qword [rax + PyCellObject.ob_ref], 0
-    ; XDECREF old value
-    test rdi, rdi
-    jz .dd_done
-    DECREF_REG rdi
-.dd_done:
+    mov qword [rax + PyCellObject.ob_ref_tag], 0   ; TAG_NULL
+    ; DECREF old value (tag-aware)
+    DECREF_VAL rdi, rsi
     DISPATCH
 END_FUNC op_delete_deref
 

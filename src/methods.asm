@@ -1795,7 +1795,8 @@ DEF_FUNC list_method_insert
 .ins_tag_null:
     mov qword [rax + rcx + 8], TAG_NULL
 .ins_tag_done:
-    INCREF r13
+    mov rsi, [rax + rcx + 8]
+    INCREF_VAL r13, rsi
     inc qword [rbx + PyListObject.ob_size]
 
     lea rax, [rel none_singleton]
@@ -2245,8 +2246,8 @@ DEF_FUNC dict_method_get
 
 .dg_found:
     add rsp, 8              ; discard saved args
-    ; INCREF the value (dict_get returns borrowed ref)
-    INCREF rax
+    ; INCREF the value (dict_get returns borrowed ref, rdx=tag)
+    INCREF_VAL rax, rdx
     pop r12
     pop rbx
     leave
@@ -2482,14 +2483,17 @@ dict_method_pop_v2 equ dict_method_pop
     test rax, rax
     jz .dpop2_not_found
 
-    INCREF rax
-    push rax
+    ; dict_get returns fat (rax=payload, rdx=tag)
+    INCREF_VAL rax, rdx
+    push rdx                ; save tag across dict_del
+    push rax                ; save payload
 
     mov rdi, rbx
     mov rsi, r13
     call dict_del
 
-    pop rax
+    pop rax                 ; restore payload
+    pop rdx                 ; restore tag
     pop r14
     pop r13
     pop r12
@@ -2682,8 +2686,8 @@ DEF_FUNC dict_method_setdefault
 
 .sd_found:
     add rsp, 8              ; discard saved args ptr
-    ; INCREF the found value (dict_get returns borrowed ref)
-    INCREF rax
+    ; INCREF the found value (dict_get returns borrowed ref, rdx=tag)
+    INCREF_VAL rax, rdx
     pop r13
     pop r12
     pop rbx

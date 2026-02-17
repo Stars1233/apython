@@ -330,6 +330,7 @@ DEF_FUNC exc_getattr
 
 .not_found:
     xor eax, eax
+    xor edx, edx
     pop r12
     pop rbx
     leave
@@ -337,6 +338,7 @@ DEF_FUNC exc_getattr
 
 .found_in_type:
     INCREF rax
+    mov edx, TAG_PTR
     pop r12
     pop rbx
     leave
@@ -347,6 +349,7 @@ DEF_FUNC exc_getattr
     test rax, rax
     jz .return_empty_tuple
     INCREF rax
+    mov edx, TAG_PTR
     pop r12
     pop rbx
     leave
@@ -355,6 +358,7 @@ DEF_FUNC exc_getattr
 .return_empty_tuple:
     xor edi, edi
     call tuple_new
+    mov edx, TAG_PTR
     pop r12
     pop rbx
     leave
@@ -365,6 +369,7 @@ DEF_FUNC exc_getattr
     test rax, rax
     jz .return_none
     INCREF rax
+    mov edx, TAG_PTR
     pop r12
     pop rbx
     leave
@@ -375,6 +380,7 @@ DEF_FUNC exc_getattr
     test rax, rax
     jz .return_none
     INCREF rax
+    mov edx, TAG_PTR
     pop r12
     pop rbx
     leave
@@ -385,6 +391,7 @@ DEF_FUNC exc_getattr
     test rax, rax
     jz .return_none
     INCREF rax
+    mov edx, TAG_PTR
     pop r12
     pop rbx
     leave
@@ -394,6 +401,7 @@ DEF_FUNC exc_getattr
     extern none_singleton
     lea rax, [rel none_singleton]
     INCREF rax
+    mov edx, TAG_PTR
     pop r12
     pop rbx
     leave

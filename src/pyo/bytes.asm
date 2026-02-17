@@ -484,6 +484,7 @@ DEF_FUNC bytes_getattr
 
     ; Not found
     xor eax, eax
+    xor edx, edx
     pop r12
     pop rbx
     leave
@@ -493,6 +494,7 @@ DEF_FUNC bytes_getattr
     call _get_bytes_decode_builtin
     mov rdi, rax
     call obj_incref
+    mov edx, TAG_PTR
     pop r12
     pop rbx
     leave

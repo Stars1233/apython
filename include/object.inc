@@ -232,7 +232,8 @@ endstruc
 struc PyCellObject
     .ob_refcnt: resq 1
     .ob_type:   resq 1
-    .ob_ref:    resq 1    ; +16: ptr to contained object or NULL
+    .ob_ref:    resq 1    ; +16: contained value payload (or 0 if empty)
+    .ob_ref_tag: resq 1   ; +24: contained value tag (TAG_NULL if empty)
 endstruc
 
 ; Bound method

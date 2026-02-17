@@ -372,6 +372,26 @@ TAG_RC_BIT   equ (1 << 8)    ; bit 8: refcounted flag
     %%skip:
 %endmacro
 
+; ===== Fat result save/restore across DECREF calls =====
+; Save fat result (rax=payload, rdx=tag) on machine stack.
+; IMPORTANT: All rsp-relative addresses between SAVE and RESTORE need +16 offset.
+%macro SAVE_FAT_RESULT 0
+    push rdx                   ; save result tag
+    push rax                   ; save result payload
+%endmacro
+
+; Restore fat result (rax=payload, rdx=tag) from machine stack.
+%macro RESTORE_FAT_RESULT 0
+    pop rax                    ; restore result payload
+    pop rdx                    ; restore result tag
+%endmacro
+
+; Undo N VPOP operations by re-advancing the value stack pointer.
+; Useful for deopt paths where popped slots are still intact in memory.
+%macro VUNDROP 1              ; %1 = number of slots to un-pop
+    add r13, %1 * 16
+%endmacro
+
 ; Swap two 16-byte value stack slots via SSE (no GPR temps needed for the swap)
 ; Both addresses must be 16-byte aligned (guaranteed by malloc + 16B slot layout)
 %macro VSLOT_SWAP 2         ; %1 = addr1, %2 = addr2

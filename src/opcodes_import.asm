@@ -58,9 +58,7 @@ DEF_FUNC_BARE op_import_name
     call import_module
     ; rax = module (new reference)
 
-    ; DECREF level (SmallInt, no-op typically)
-    pop rdi                     ; level
-    DECREF rdi
+    add rsp, 8                  ; discard level (SmallInt, no refcount)
 
     ; DECREF fromlist
     pop rdi                     ; fromlist

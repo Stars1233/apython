@@ -124,11 +124,12 @@ DEF_FUNC instance_getattr
 
 .found_inst:
     ; Found in instance dict — INCREF and return raw value
-    mov r13, rax
+    mov r13, rax                ; save payload
+    mov r12, rdx                ; save tag (name no longer needed)
     mov rdi, rax
     call obj_incref
     mov rax, r13
-    mov edx, TAG_PTR
+    mov rdx, r12                ; restore tag from dict_get
     pop r13
     pop r12
     pop rbx
@@ -141,6 +142,7 @@ DEF_FUNC instance_getattr
     ; for LOAD_ATTR to unwrap, since LOAD_ATTR knows the push convention.
     ; Regular callables are bound to the instance.
     mov r13, rax                ; r13 = attr (borrowed ref from dict_get)
+    mov r12, rdx                ; r12 = attr tag (name no longer needed)
     test rax, rax
     js .found_type_raw          ; SmallInt — return as-is
 
@@ -191,7 +193,7 @@ DEF_FUNC instance_getattr
     mov rdi, r13
     call obj_incref
     mov rax, r13
-    mov edx, TAG_PTR
+    mov rdx, r12                ; restore tag from dict_get
     pop r13
     pop r12
     pop rbx
@@ -200,6 +202,7 @@ DEF_FUNC instance_getattr
 
 .not_found:
     xor eax, eax               ; return NULL (caller handles raise)
+    xor edx, edx               ; TAG_NULL
     pop r13
     pop r12
     pop rbx
@@ -653,11 +656,12 @@ DEF_FUNC type_getattr
 
 .tga_found:
     ; Found — INCREF and return
-    mov rbx, rax
+    mov rbx, rax                ; save payload (name no longer needed)
+    mov r12, rdx                ; save tag (type walk done)
     mov rdi, rax
     call obj_incref
     mov rax, rbx
-    mov edx, TAG_PTR
+    mov rdx, r12                ; restore tag from dict_get
 
     pop r12
     pop rbx
@@ -677,6 +681,7 @@ DEF_FUNC type_getattr
 
 .tga_not_found:
     xor eax, eax               ; return NULL
+    xor edx, edx               ; TAG_NULL
     pop r12
     pop rbx
     leave
