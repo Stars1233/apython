@@ -2289,34 +2289,74 @@ END_FUNC list_method_index
 ;; list_method_count(args, nargs) -> SmallInt
 ;; args[0]=self, args[1]=value
 ;; ============================================================================
-DEF_FUNC list_method_count
+LC_IDX    equ 8
+LC_FRAME  equ 8
+
+DEF_FUNC list_method_count, LC_FRAME
     push rbx
     push r12
     push r13
     push r14
+    push r15
 
     mov rbx, [rdi]          ; self
-    mov r12, [rdi + 16]     ; value
+    mov r12, [rdi + 16]     ; value payload
+    mov r15d, [rdi + 24]    ; value tag
     mov r13, [rbx + PyListObject.ob_size]
     xor r14d, r14d          ; count = 0
 
-    xor ecx, ecx
+    mov qword [rbp - LC_IDX], 0
 .count_loop:
+    mov rcx, [rbp - LC_IDX]
     cmp rcx, r13
     jge .count_done
     mov rax, [rbx + PyListObject.ob_item]
     mov rdx, rcx
     shl rdx, 4              ; index * 16
-    cmp r12, [rax + rdx]    ; compare payload
-    jne .count_next
+    mov rdi, [rax + rdx]    ; item payload
+    mov r8d, [rax + rdx + 8] ; item tag
+
+    ; Fast path: payload equality
+    cmp rdi, r12
+    je .count_hit
+
+    ; __eq__ dispatch
+    cmp r8d, TAG_SMALLINT
+    je .count_eq_int
+    mov rax, [rdi + PyObject.ob_type]
+    jmp .count_eq_call
+.count_eq_int:
+    lea rax, [rel int_type]
+.count_eq_call:
+    mov rax, [rax + PyTypeObject.tp_richcompare]
+    test rax, rax
+    jz .count_next           ; no richcompare → not equal
+    ; tp_richcompare(item, value, PY_EQ, item_tag, value_tag)
+    mov rsi, r12
+    mov edx, PY_EQ
+    mov ecx, r8d
+    mov r8d, r15d
+    call rax
+    lea rcx, [rel bool_true]
+    cmp rax, rcx
+    je .count_hit
+    ; DECREF result if non-NULL heap ptr
+    test rax, rax
+    jz .count_next
+    mov rdi, rax
+    call obj_decref
+    jmp .count_next
+
+.count_hit:
     inc r14
 .count_next:
-    inc rcx
+    inc qword [rbp - LC_IDX]
     jmp .count_loop
 
 .count_done:
     mov rdi, r14
     call int_from_i64
+    pop r15
     pop r14
     pop r13
     pop r12
@@ -3138,9 +3178,11 @@ DEF_FUNC list_method_remove
     push r12
     push r13
     push r14
+    push r15
 
     mov rbx, [rdi]          ; self (list)
-    mov r12, [rdi + 16]     ; value to remove
+    mov r12, [rdi + 16]     ; value payload
+    mov r15d, [rdi + 24]    ; value tag
     mov r13, [rbx + PyListObject.ob_size]
 
     xor r14d, r14d          ; index = 0
@@ -3152,20 +3194,42 @@ DEF_FUNC list_method_remove
     mov rax, [rbx + PyListObject.ob_item]
     mov rcx, r14
     shl rcx, 4              ; index * 16
-    mov rcx, [rax + rcx]    ; payload
+    mov rdi, [rax + rcx]    ; item payload
+    mov r8d, [rax + rcx + 8] ; item tag
 
-    ; Check pointer equality
-    cmp rcx, r12
+    ; Fast path: payload equality (same SmallInt or same object)
+    cmp rdi, r12
     je .lremove_found
 
-    ; Check SmallInt equality: if both have bit 63 set, compare values
-    test rcx, rcx
-    jns .lremove_next        ; list item not SmallInt
-    test r12, r12
-    jns .lremove_next        ; value not SmallInt
-    ; Both SmallInts - same tagged representation means same value
-    ; (already compared above by pointer), so no match
-    jmp .lremove_next
+    ; __eq__ dispatch: get item type's tp_richcompare
+    cmp r8d, TAG_SMALLINT
+    je .lremove_eq_int
+    mov rax, [rdi + PyObject.ob_type]
+    jmp .lremove_eq_call
+.lremove_eq_int:
+    lea rax, [rel int_type]
+.lremove_eq_call:
+    mov rax, [rax + PyTypeObject.tp_richcompare]
+    test rax, rax
+    jz .lremove_next         ; no richcompare → not equal
+    ; tp_richcompare(item, value, PY_EQ, item_tag, right_tag)
+    ; rdi = item payload (already set)
+    mov rsi, r12             ; value payload
+    mov edx, PY_EQ
+    mov ecx, r8d             ; item tag
+    push r8                  ; save item tag across call
+    mov r8d, r15d            ; value tag
+    call rax
+    pop r8
+    ; rax = result (bool_true or bool_false)
+    lea rcx, [rel bool_true]
+    cmp rax, rcx
+    je .lremove_found
+    ; DECREF result if heap ptr
+    test rax, rax
+    jz .lremove_next
+    mov rdi, rax
+    call obj_decref
 
 .lremove_next:
     inc r14
@@ -3209,6 +3273,7 @@ DEF_FUNC list_method_remove
     lea rax, [rel none_singleton]
     inc qword [rax + PyObject.ob_refcnt]
     mov edx, TAG_PTR
+    pop r15
     pop r14
     pop r13
     pop r12

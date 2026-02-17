@@ -89,7 +89,7 @@ END_FUNC tuple_getitem
 
 ; tuple_subscript(PyTupleObject *tuple, PyObject *key) -> PyObject*
 ; mp_subscript: index with int or slice key (for BINARY_SUBSCR)
-; Returns payload in rax (valid 64-bit value while bit-63 encoding present)
+; Returns (rax=payload, edx=tag) fat value
 DEF_FUNC tuple_subscript
     push rbx
     mov rbx, rdi               ; save tuple

@@ -817,10 +817,8 @@ DEF_FUNC op_before_with
     jz .bw_no_enter
 
     ; Set up call: build fat arg on stack
-    sub rsp, 16
     mov r8, [rbp - BW_MGR]
-    mov [rsp], r8                  ; args[0] payload = mgr
-    mov qword [rsp + 8], TAG_PTR   ; args[0] tag
+    SPUSH_PTR r8                   ; args[0] = mgr
     mov rdi, rax                   ; callable = __enter__
     mov rsi, rsp                   ; args ptr
     mov rdx, 1                     ; nargs = 1

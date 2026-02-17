@@ -1054,9 +1054,7 @@ DEF_FUNC builtin___build_class__
     test rcx, rcx
     jz .bc_no_init_subclass
 
-    sub rsp, 16
-    mov [rsp], r12             ; args[0] payload = new class
-    mov qword [rsp + 8], TAG_PTR ; args[0] tag
+    SPUSH_PTR r12              ; args[0] = new class
     mov rdi, rax               ; callable = __init_subclass__ func
     mov rsi, rsp               ; args
     mov edx, 1                 ; nargs = 1

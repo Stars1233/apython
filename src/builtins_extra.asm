@@ -2624,7 +2624,7 @@ DEF_FUNC builtin_round_fn, RND_FRAME
     ; It's a heap int — convert to i64 and return as SmallInt
     mov rdi, rax
     call int_to_i64
-    mov edx, TAG_SMALLINT
+    RET_TAG_SMALLINT
     pop rbx
     leave
     ret
@@ -2634,13 +2634,13 @@ DEF_FUNC builtin_round_fn, RND_FRAME
 .rnd_one_do_round:
     ; Float: banker's rounding (x86 default rounding mode = round-to-nearest-even)
     cvtsd2si rax, xmm0     ; round-to-nearest-even
-    mov edx, TAG_SMALLINT
+    RET_TAG_SMALLINT
     pop rbx
     leave
     ret
 
 .rnd_int_ret:
-    mov edx, TAG_SMALLINT
+    RET_TAG_SMALLINT
     pop rbx
     leave
     ret
@@ -2744,7 +2744,7 @@ DEF_FUNC builtin_round_fn, RND_FRAME
     divsd xmm0, xmm1
     cvtsd2si rax, xmm0      ; banker's round
     imul rax, rcx
-    mov edx, TAG_SMALLINT
+    RET_TAG_SMALLINT
     pop rbx
     leave
     ret
@@ -2810,7 +2810,7 @@ DEF_FUNC builtin_pow_fn, POW_FRAME
     shr r13, 1
     jmp .pow_sq_loop
 .pow_sq_done:
-    mov edx, TAG_SMALLINT
+    RET_TAG_SMALLINT
     pop r13
     pop r12
     pop rbx
@@ -3049,7 +3049,7 @@ DEF_FUNC builtin_pow_fn, POW_FRAME
     jmp .pow_mod_loop
 .pow_mod_done:
     mov rax, rcx
-    mov edx, TAG_SMALLINT
+    RET_TAG_SMALLINT
     pop r13
     pop r12
     pop rbx

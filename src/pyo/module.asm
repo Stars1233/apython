@@ -133,12 +133,7 @@ DEF_FUNC module_getattr
     ; INCREF if found (dict_get returns borrowed ref)
     test edx, edx
     jz .not_found
-    mov r12, rdx                ; save tag (name no longer needed)
-    mov rbx, rax                ; save payload (self no longer needed)
-    mov rdi, rax
-    call obj_incref
-    mov rax, rbx
-    mov rdx, r12                ; restore tag from dict_get
+    INCREF_VAL rax, rdx         ; tag-aware: skip for SmallInt
     pop r12
     pop rbx
     leave

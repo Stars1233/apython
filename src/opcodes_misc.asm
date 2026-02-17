@@ -322,7 +322,7 @@ DEF_FUNC_BARE op_binary_op
     call raise_exception
 
 .binop_try_smallint_add:
-    ; Check both SmallInt (bit 63 set on both)
+    ; Check both TAG_SMALLINT
     cmp r9d, TAG_SMALLINT
     jne .binop_generic
     cmp r8d, TAG_SMALLINT
@@ -342,7 +342,7 @@ DEF_FUNC_BARE op_binary_op
     DISPATCH
 
 .binop_try_smallint_sub:
-    ; Check both SmallInt (bit 63 set on both)
+    ; Check both TAG_SMALLINT
     cmp r9d, TAG_SMALLINT
     jne .binop_generic
     cmp r8d, TAG_SMALLINT

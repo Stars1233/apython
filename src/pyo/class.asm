@@ -201,8 +201,7 @@ DEF_FUNC instance_getattr
     ret
 
 .not_found:
-    xor eax, eax               ; return NULL (caller handles raise)
-    xor edx, edx               ; TAG_NULL
+    RET_NULL
     pop r13
     pop r12
     pop rbx
@@ -841,8 +840,7 @@ DEF_FUNC type_getattr
     ret
 
 .tga_not_found:
-    xor eax, eax               ; return NULL
-    xor edx, edx               ; TAG_NULL
+    RET_NULL
     pop r12
     pop rbx
     leave

@@ -131,8 +131,7 @@ DEF_FUNC gen_iternext
     mov [rbx + PyGenObject.gi_return_tag], rax
 
     ; Return NULL to signal StopIteration
-    xor eax, eax
-    xor edx, edx              ; TAG_NULL = exhausted
+    RET_NULL
     pop r12
     pop rbx
     leave
@@ -148,16 +147,14 @@ DEF_FUNC gen_iternext
     ret
 
 .exhausted:
-    xor eax, eax              ; return NULL
-    xor edx, edx              ; TAG_NULL = exhausted
+    RET_NULL
     pop r12
     pop rbx
     leave
     ret
 
 .running_error:
-    xor eax, eax              ; return NULL
-    xor edx, edx              ; TAG_NULL = exhausted
+    RET_NULL
     pop r12
     pop rbx
     leave

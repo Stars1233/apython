@@ -578,9 +578,7 @@ DEF_FUNC property_descr_get
     jz .pdg_no_getter
 
     ; Build fat args on stack
-    sub rsp, 16
-    mov [rsp], r12              ; args[0] payload = obj
-    mov qword [rsp + 8], TAG_PTR ; args[0] tag
+    SPUSH_PTR r12              ; args[0] = obj
     mov rsi, rsp                ; args ptr
     mov edx, 1                  ; nargs = 1
     call rax

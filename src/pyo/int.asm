@@ -1,9 +1,7 @@
-; int_obj.asm - Integer type (SmallInt tagged pointers + GMP arbitrary precision)
+; int_obj.asm - Integer type (fat value TAG_SMALLINT + GMP arbitrary precision)
 ;
-; SmallInt encoding: bit 63 set = SmallInt, bits 0-62 = signed value
-; Range: -2^62 to 2^62 - 1
-; Encoding: bts rax, 63 (set tag bit)
-; Decoding: shl rax, 1 / sar rax, 1 (sign-extend from bit 62)
+; Fat value TAG_SMALLINT: tag=1, payload=raw signed i64, full 64-bit range
+; No heap allocation or refcounting needed for inline integers.
 ;
 ; PyIntObject layout (GMP-backed, heap-allocated):
 ;   +0  ob_refcnt (8 bytes)
@@ -87,23 +85,12 @@ DEF_FUNC_LOCAL int_new_from_mpz
 END_FUNC int_new_from_mpz
 
 ;; ============================================================================
-;; SMALLINT_DECODE - decode SmallInt tagged pointer to int64
-;; Input:  register with SmallInt
-;; Output: same register with decoded signed value
-;; ============================================================================
 
 ;; ============================================================================
-;; int_from_i64(int64_t val) -> PyObject* (SmallInt or PyIntObject*)
-;; Creates SmallInt if value fits in 62-bit signed range, else GMP int
+;; int_from_i64(int64_t val) -> (rax=payload, edx=TAG_SMALLINT)
+;; All i64 values are SmallInt (payload = raw signed 64-bit).
 ;; ============================================================================
 DEF_FUNC_BARE int_from_i64
-    ; Check if value fits in SmallInt range: -2^62 .. 2^62-1
-    mov rax, rdi
-    sar rax, 62            ; rax = sign-extension of bits 63:62
-    inc rax                ; 0 or 1 if fits, else other
-    cmp rax, 2
-    jae int_from_i64_gmp   ; doesn't fit, use GMP
-    ; Fits: encode as SmallInt
     mov rax, rdi
     RET_TAG_SMALLINT
     ret
@@ -768,14 +755,7 @@ DEF_FUNC int_from_cstr_base, IB_FRAME
     test eax, eax
     jnz .return_gmp         ; doesn't roundtrip: keep GMP
 
-    ; Also check 62-bit SmallInt range (bts rax,63 only works for -2^62..2^62-1)
-    mov rax, [rbp - IB_SIGN]
-    sar rax, 62             ; rax = sign-extension of bits 63:62
-    inc rax                 ; 0 or 1 if fits, else other
-    cmp rax, 2
-    jae .return_gmp         ; doesn't fit SmallInt range, keep GMP
-
-    ; Fits in SmallInt: free GMP object, return tagged int
+    ; Fits in i64: free GMP object, return as SmallInt
     mov rdi, [rbp - IB_OBJ]
     lea rdi, [rdi + PyIntObject.mpz]
     call __gmpz_clear wrt ..plt
@@ -815,8 +795,7 @@ DEF_FUNC int_from_cstr_base, IB_FRAME
     ; Free cleaned buffer if allocated
     mov rdi, [rbp - IB_BUF]
     call ap_free
-    xor eax, eax           ; return NULL payload
-    xor edx, edx           ; TAG_NULL (distinguishes from SmallInt 0)
+    RET_NULL
     leave
     ret
 
@@ -1003,9 +982,7 @@ DEF_FUNC_BARE int_bool
     ret
 
 .smallint:
-    mov rax, rdi
-    shl rax, 1             ; shift out tag bit
-    test rax, rax
+    test rdi, rdi
     setnz al
     movzx eax, al
     ret
@@ -1056,7 +1033,7 @@ DEF_FUNC_BARE int_add
     mov rbx, rdi
     mov r12, rsi
 
-    ; Convert SmallInt args to GMP if needed (use tags, not bit-63)
+    ; Convert SmallInt args to GMP if needed
     push rcx                ; save right_tag across left conversion
     cmp edx, TAG_SMALLINT
     jne .a_ready
@@ -1232,12 +1209,6 @@ DEF_FUNC_BARE int_mul
     mov rcx, rsi
     imul rax, rcx
     jo .gmp_path
-    ; Check result still fits SmallInt range
-    mov rcx, rax
-    sar rcx, 62
-    inc rcx
-    cmp rcx, 2
-    jae .gmp_path
     RET_TAG_SMALLINT
     ret
 
@@ -1542,18 +1513,25 @@ DEF_FUNC_BARE int_neg
 .smallint:
     mov rax, rdi
     neg rax
-    ; Check if result fits (only -(-2^62) = 2^62 overflows)
-    mov rcx, rax
-    sar rcx, 62
-    inc rcx
-    cmp rcx, 2
-    jae .neg_overflow
+    jo .neg_overflow            ; only -(-2^63) overflows
     RET_TAG_SMALLINT
     ret
 .neg_overflow:
-    ; Value is 2^62, doesn't fit SmallInt. Create GMP int.
-    mov rdi, rax
-    jmp int_from_i64_gmp
+    ; -(-2^63) = 2^63, doesn't fit i64. Create GMP and negate.
+    push rbp
+    mov rbp, rsp
+    push rbx
+    call int_from_i64_gmp       ; rdi still has original -2^63
+    ; rax = GMP PyIntObject* with value -2^63
+    mov rbx, rax
+    lea rdi, [rax + PyIntObject.mpz]
+    mov rsi, rdi
+    call __gmpz_neg wrt ..plt   ; negate in place → +2^63
+    mov rax, rbx
+    mov edx, TAG_PTR
+    pop rbx
+    pop rbp
+    ret
 END_FUNC int_neg
 
 ;; ============================================================================
@@ -2073,7 +2051,7 @@ DEF_FUNC_BARE int_invert
 
 .smallint:
     mov rax, rdi
-    not rax                ; ~x = -(x+1), works for all 62-bit values
+    not rax                ; ~x = -(x+1), always fits i64
     RET_TAG_SMALLINT
     ret
 END_FUNC int_invert

@@ -94,7 +94,7 @@
     mov %1, [r13 - 16]
 %endmacro
 
-; Reference counting (SmallInt-aware: bit 63 set = skip)
+; Reference counting (heap pointers only — callers must not pass SmallInts)
 %macro INCREF 1
     inc qword [%1 + PyObject.ob_refcnt]
     %%skip:
@@ -370,18 +370,6 @@ TAG_RC_BIT   equ (1 << 8)    ; bit 8: refcounted flag
     movdqa xmm1, [%2]
     movdqa [%1], xmm1
     movdqa [%2], xmm0
-%endmacro
-
-; Used during bit-63→fat-value transition for code that still holds raw 64-bit values.
-; %1 = value reg (read-only), %2 = tag dest reg
-%macro WIDEN_TAG 2
-    test %1, %1
-    js %%smallint
-    mov %2, TAG_PTR
-    jmp %%done
-%%smallint:
-    mov %2, TAG_SMALLINT
-%%done:
 %endmacro
 
 ; Mark stack as non-executable and reset to .text section

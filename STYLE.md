@@ -230,6 +230,17 @@ with raw arithmetic unless implementing a new stack macro.
 Prefer typed pushes (`VPUSH_PTR`, `VPUSH_INT`) over `VPUSH` when the
 type is statically known — they avoid branching.
 
+## Fat Value Return/Push Macros
+
+Always use these macros for fat value return patterns. Never inline the
+equivalent instructions — inlining is a source of bugs.
+
+| Macro | Expansion | Use when |
+|-------|-----------|----------|
+| `RET_NULL` | `xor eax, eax` / `xor edx, edx` | Error return: (0, TAG_NULL) |
+| `RET_TAG_SMALLINT` | `mov edx, TAG_SMALLINT` | Return SmallInt (caller sets rax) |
+| `SPUSH_PTR reg` | `sub rsp, 16` / `mov [rsp], reg` / `mov qword [rsp+8], TAG_PTR` | Build 16-byte fat arg on stack for tp_call |
+
 ## Refcounting Macros
 
 | Macro | Use when |

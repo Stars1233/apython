@@ -202,8 +202,7 @@ align 16
     jmp .probe_loop
 
 .not_found:
-    xor eax, eax               ; return NULL payload
-    xor edx, edx               ; return TAG_NULL tag
+    RET_NULL
 
 .done:
     pop r15

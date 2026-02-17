@@ -154,20 +154,21 @@ DEF_FUNC sys_module_init, 32
     ; --- sys.maxsize ---
     mov rdi, 0x7FFFFFFFFFFFFFFF
     call int_from_i64
-    push rax
+    push rdx                   ; save value tag
+    push rax                   ; save value payload
     lea rdi, [rel sm_maxsize]
     call str_from_cstr
     push rax
     mov rdi, r15
-    mov rsi, rax
-    mov rdx, [rsp + 8]
-    mov ecx, TAG_PTR
-    mov r8d, TAG_PTR
+    mov rsi, rax               ; key = "maxsize" (str)
+    mov rdx, [rsp + 8]        ; value payload (SmallInt)
+    mov ecx, [rsp + 16]       ; value tag (from int_from_i64)
+    mov r8d, TAG_PTR           ; key tag (str is always TAG_PTR)
     call dict_set
     pop rdi
-    call obj_decref
-    pop rdi
-    call obj_decref
+    call obj_decref            ; DECREF key string
+    pop rdi                    ; value payload (SmallInt, no DECREF)
+    pop rcx                    ; value tag (discard)
 
     ; --- sys.platform ---
     lea rdi, [rel sm_linux]

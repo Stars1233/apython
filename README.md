@@ -9,7 +9,7 @@ apython reads `.pyc` files and executes Python 3.12 bytecode directly — no CPy
 ## Key design choices
 
 - **~10K lines of hand-written x86-64 NASM assembly** — no C runtime, no generated code
-- **SmallInt tagged pointers** — bit 63 flags inline integers, skipping heap allocation and refcounting entirely
+- **128-bit fat values** — inline integers, floats, bools in 16-byte (payload, tag) pairs, skipping heap allocation and refcounting entirely
 - **Raw Linux syscalls** — no libc dependency for I/O; buffered writes via direct `syscall`
 - **256-entry jump table dispatch** — single indirect jump per opcode
 - **GMP for arbitrary precision** — big integers via libgmp when values exceed tagged pointer range

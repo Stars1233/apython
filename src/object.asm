@@ -1,6 +1,6 @@
 ; object.asm - PyObject base operations
 ; Allocation, reference counting, type dispatch for repr/str/hash/bool
-; SmallInt-aware: all functions check bit 63 for tagged pointers
+; Fat-value aware: functions accept (payload, tag) pairs
 
 %include "macros.inc"
 %include "object.inc"

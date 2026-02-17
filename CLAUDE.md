@@ -12,7 +12,10 @@ Python 3.12 bytecode interpreter in x86-64 NASM assembly. Reads `.pyc` files and
 make              # build ./apython
 make clean        # remove build/ and apython
 make check        # full test suite: compile .py→.pyc, diff python3 vs ./apython output
+make check-cpython # CPython stdlib unit tests (harder, more thorough)
 ```
+
+**Always run BOTH `make check` AND `make check-cpython` to verify changes.**
 
 **Single test:**
 ```bash
@@ -39,9 +42,9 @@ Callee-saved registers hold global interpreter state:
 
 **Critical rule:** Never hold live values in caller-saved regs (rax, rcx, rdx, rsi, rdi, r8-r11) across `call` or `DECREF`/`DECREF_REG`. Use push/pop or callee-saved regs instead. `DECREF_REG` calls `obj_dealloc` which clobbers all caller-saved regs.
 
-## SmallInt Tagged Pointers
+## 128-bit Fat Values
 
-Bit 63 set = inline integer (range -2^62 to 2^62-1). All `INCREF`/`DECREF` macros test bit 63 and skip refcounting for SmallInts. Encode: `bts rax, 63`. Decode: `shl rax, 1` / `sar rax, 1`.
+All values are 128-bit (payload, tag) pairs in 16-byte slots. Tags: `TAG_NULL=0`, `TAG_SMALLINT=1`, `TAG_FLOAT=2`, `TAG_NONE=3`, `TAG_BOOL=4`, `TAG_PTR=0x105`. SmallInts store raw signed i64 in payload (full 64-bit range), zero heap alloc/refcount. `INCREF_VAL`/`DECREF_VAL` check `TAG_RC_BIT` (bit 8) to decide refcounting. Functions return `(rax=payload, edx=tag)`.
 
 ## Source Layout
 

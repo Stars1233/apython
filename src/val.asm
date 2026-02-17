@@ -8,8 +8,6 @@
 ;;
 ;; Convert a fat (payload, tag) pair to a 64-bit heap PyObject*.
 ;; Returns an owned reference (INCREFs heap pointers).
-;; While bit-63 encoding is present, TAG_SMALLINT payloads are valid PyObject*.
-;; After bit-63 removal (commit 10), TAG_SMALLINT will call int_from_i64.
 ;; ============================================================================
 extern none_singleton
 extern bool_true
