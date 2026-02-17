@@ -710,18 +710,21 @@ DEF_FUNC_BARE op_unpack_sequence
     jmp .unpack_tuple_loop
 
 .unpack_list:
-    ; Items at ob_item pointer, 8-byte stride (lists not fat yet)
+    ; Items at ob_item pointer, fat 16-byte stride
     mov rsi, [rdi + PyListObject.ob_item]
     mov edx, ecx
     dec edx
 .unpack_list_loop:
     test edx, edx
     js .unpack_done
-    mov rax, [rsi + rdx*8]
-    INCREF rax
+    mov eax, edx               ; zero-extend edx to rax
+    shl rax, 4                 ; index * 16
+    mov rcx, [rsi + rax + 8]   ; tag
+    mov rax, [rsi + rax]       ; payload
+    INCREF_VAL rax, rcx
     push rdx
     push rsi
-    VPUSH_BRANCHLESS rax
+    VPUSH_VAL rax, rcx
     pop rsi
     pop rdx
     dec edx
@@ -995,7 +998,9 @@ DEF_FUNC op_list_extend, 32
 .extend_list_loop:
     mov rdi, [rbp-8]          ; list
     mov rdx, [rbp-32]         ; items ptr
-    mov rsi, [rdx + r8*8]     ; item
+    mov rax, r8
+    shl rax, 4                ; index * 16
+    mov rsi, [rdx + rax]      ; item payload
     push r8
     call list_append
     pop r8
@@ -1680,7 +1685,9 @@ DEF_FUNC op_unpack_ex
     ret
 .ue_gi_list:
     mov rax, [r15 + PyListObject.ob_item]
-    mov rax, [rax + rsi*8]
+    mov rcx, rsi
+    shl rcx, 4                ; index * 16
+    mov rax, [rax + rcx]      ; payload
     ret
 END_FUNC op_unpack_ex
 
@@ -2014,16 +2021,18 @@ DEF_FUNC_BARE op_for_iter_list
     cmp rcx, [rax + PyListObject.ob_size]
     jge .fil_exhausted
 
-    ; Get item and INCREF
+    ; Get fat item and INCREF (16-byte stride)
     mov rdx, [rax + PyListObject.ob_item]
-    mov rax, [rdx + rcx*8]
-    INCREF rax
+    shl rcx, 4                    ; index * 16
+    mov rax, [rdx + rcx]          ; payload
+    mov r8, [rdx + rcx + 8]       ; tag
+    INCREF_VAL rax, r8
 
     ; Advance index
     inc qword [rdi + PyListIterObject.it_index]
 
     add rsp, 8                     ; discard saved jump offset
-    VPUSH_BRANCHLESS rax           ; push value
+    VPUSH_VAL rax, r8              ; push fat value
     add rbx, 2                     ; skip CACHE
     DISPATCH
 

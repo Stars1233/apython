@@ -1461,13 +1461,14 @@ DEF_FUNC_BARE op_call_intrinsic_1
     push rdx
     push rsi
 
-    mov rdi, [rsi + rdx*8]    ; item from list (8-byte stride)
-    mov rax, [rsp + 24]       ; tuple from stack
     mov r8, rdx
-    shl r8, 4                 ; dest index * 16
+    shl r8, 4                 ; index * 16
+    mov rdi, [rsi + r8]       ; item payload from list (fat 16-byte stride)
+    mov r9, [rsi + r8 + 8]   ; item tag from list
+    mov rax, [rsp + 24]       ; tuple from stack
     mov [rax + PyTupleObject.ob_item + r8], rdi        ; payload
-    mov qword [rax + PyTupleObject.ob_item + r8 + 8], TAG_PTR  ; tag
-    INCREF rdi
+    mov [rax + PyTupleObject.ob_item + r8 + 8], r9     ; tag
+    INCREF_VAL rdi, r9
 
     pop rsi
     pop rdx

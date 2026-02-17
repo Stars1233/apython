@@ -510,24 +510,32 @@ DEF_FUNC op_call_function_ex
     lea rdx, [rel tuple_type]
     cmp rcx, rdx
     je .cfex_tuple_args
+    ; Fat list: extract payloads to temp 8-byte-stride array
+    mov rcx, [rsi + PyListObject.ob_size]
     mov rsi, [rsi + PyListObject.ob_item]
-    jmp .cfex_args_ready
+    jmp .cfex_extract_fat
+
 .cfex_tuple_args:
     ; Fat tuple: extract payloads to temp 8-byte-stride array
     mov rcx, [rsi + PyTupleObject.ob_size]
-    push rsi                       ; save tuple ptr
+    lea rsi, [rsi + PyTupleObject.ob_item]
+
+.cfex_extract_fat:
+    ; rsi = items ptr (16-byte stride), rcx = count
+    push rsi                       ; save items ptr
+    push rcx                       ; save count
     lea rdi, [rcx * 8 + 8]        ; alloc size (min 8)
     call ap_malloc
     mov [rbp - CFX_TEMP], rax      ; save temp buffer
-    pop rsi                        ; restore tuple
-    mov rcx, [rsi + PyTupleObject.ob_size]
+    pop rcx                        ; restore count
+    pop rsi                        ; restore items ptr
     xor edx, edx
 .cfex_extract_loop:
     cmp rdx, rcx
     jge .cfex_extract_done
     mov rax, rdx
-    shl rax, 4                     ; * 16 for fat tuple
-    mov rax, [rsi + PyTupleObject.ob_item + rax]  ; payload
+    shl rax, 4                     ; * 16 for fat items
+    mov rax, [rsi + rax]           ; payload
     mov rdi, [rbp - CFX_TEMP]
     mov [rdi + rdx*8], rax         ; store in temp at *8
     inc rdx

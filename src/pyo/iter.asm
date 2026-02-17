@@ -53,10 +53,12 @@ DEF_FUNC_BARE list_iter_next
     cmp rcx, [rax + PyListObject.ob_size]
     jge .exhausted
 
-    ; Get item
+    ; Get fat item (16-byte stride)
     mov rdx, [rax + PyListObject.ob_item]
-    mov rax, [rdx + rcx*8]
-    INCREF rax
+    shl rcx, 4                    ; index * 16
+    mov rax, [rdx + rcx]          ; payload
+    mov rdx, [rdx + rcx + 8]     ; tag
+    INCREF_VAL rax, rdx
 
     ; Advance index
     inc qword [rdi + PyListIterObject.it_index]

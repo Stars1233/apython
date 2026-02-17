@@ -598,7 +598,9 @@ DEF_FUNC str_method_join
     jge .join_len_done
     push rcx
     mov rax, [r12 + PyListObject.ob_item]
-    mov rax, [rax + rcx*8]
+    mov rdx, rcx
+    shl rdx, 4              ; index * 16
+    mov rax, [rax + rdx]    ; payload
     add r15, [rax + PyStrObject.ob_size]
     pop rcx
     inc rcx
@@ -639,7 +641,9 @@ DEF_FUNC str_method_join
 .join_no_sep:
     mov rcx, [rsp]          ; reload index
     mov rax, [r12 + PyListObject.ob_item]
-    mov rax, [rax + rcx*8]  ; item
+    mov rdx, rcx
+    shl rdx, 4              ; index * 16
+    mov rax, [rax + rdx]    ; item payload
     mov rdx, [rax + PyStrObject.ob_size]
     push rdx                ; save item_len
 
@@ -1665,7 +1669,9 @@ DEF_FUNC list_method_pop
 
     ; Get the item (it already has refs from being in the list)
     mov rax, [rbx + PyListObject.ob_item]
-    mov r12, [rax + r13*8]  ; r12 = item to return
+    mov rcx, r13
+    shl rcx, 4              ; index * 16
+    mov r12, [rax + rcx]    ; r12 = item payload to return
     ; Don't DECREF since we're transferring ownership to caller
 
     ; Shift items down: for i = index .. size-2, items[i] = items[i+1]
@@ -1676,8 +1682,12 @@ DEF_FUNC list_method_pop
     cmp rcx, rdx
     jge .pop_shrink
     mov rax, [rbx + PyListObject.ob_item]
-    mov r8, [rax + rcx*8 + 8]  ; items[i+1]
-    mov [rax + rcx*8], r8
+    mov r8, rcx
+    shl r8, 4               ; i * 16
+    mov r9, [rax + r8 + 16] ; items[i+1] payload
+    mov r10, [rax + r8 + 24] ; items[i+1] tag
+    mov [rax + r8], r9       ; items[i] payload
+    mov [rax + r8 + 8], r10  ; items[i] tag
     inc rcx
     jmp .pop_shift
 
@@ -1746,7 +1756,7 @@ DEF_FUNC list_method_insert
     mov [rbx + PyListObject.allocated], rdi
     mov rdi, [rbx + PyListObject.ob_item]
     mov rsi, [rbx + PyListObject.allocated]
-    shl rsi, 3
+    shl rsi, 4              ; new_cap * 16
     call ap_realloc
     mov [rbx + PyListObject.ob_item], rax
 .ins_no_grow:
@@ -1758,15 +1768,33 @@ DEF_FUNC list_method_insert
     cmp rcx, r12
     jl .ins_place
     mov rax, [rbx + PyListObject.ob_item]
-    mov r8, [rax + rcx*8]
-    mov [rax + rcx*8 + 8], r8
+    mov r8, rcx
+    shl r8, 4               ; i * 16
+    mov r9, [rax + r8]      ; payload
+    mov r10, [rax + r8 + 8] ; tag
+    mov [rax + r8 + 16], r9  ; items[i+1] payload
+    mov [rax + r8 + 24], r10 ; items[i+1] tag
     dec rcx
     jmp .ins_shift
 
 .ins_place:
-    ; Place item at index
+    ; Place item at index (16-byte fat slot)
     mov rax, [rbx + PyListObject.ob_item]
-    mov [rax + r12*8], r13
+    mov rcx, r12
+    shl rcx, 4              ; index * 16
+    mov [rax + rcx], r13    ; payload
+    ; Classify tag
+    test r13, r13
+    js .ins_tag_si
+    jz .ins_tag_null
+    mov qword [rax + rcx + 8], TAG_PTR
+    jmp .ins_tag_done
+.ins_tag_si:
+    mov qword [rax + rcx + 8], TAG_SMALLINT
+    jmp .ins_tag_done
+.ins_tag_null:
+    mov qword [rax + rcx + 8], TAG_NULL
+.ins_tag_done:
     INCREF r13
     inc qword [rbx + PyListObject.ob_size]
 
@@ -1797,10 +1825,20 @@ DEF_FUNC list_method_reverse
 .rev_loop:
     cmp rsi, rcx
     jge .rev_done
-    mov r8, [rdi + rsi*8]
-    mov r9, [rdi + rcx*8]
-    mov [rdi + rsi*8], r9
-    mov [rdi + rcx*8], r8
+    ; Compute byte offsets for lo and hi
+    mov rax, rsi
+    shl rax, 4              ; lo * 16
+    mov rdx, rcx
+    shl rdx, 4              ; hi * 16
+    ; Swap 16-byte fat elements (payload + tag)
+    mov r8, [rdi + rax]      ; lo payload
+    mov r9, [rdi + rax + 8]  ; lo tag
+    mov r10, [rdi + rdx]     ; hi payload
+    mov r11, [rdi + rdx + 8] ; hi tag
+    mov [rdi + rax], r10
+    mov [rdi + rax + 8], r11
+    mov [rdi + rdx], r8
+    mov [rdi + rdx + 8], r9
     inc rsi
     dec rcx
     jmp .rev_loop
@@ -1840,8 +1878,10 @@ DEF_FUNC list_method_sort, LS_FRAME
     jge .sort_check
     ; Compare items[i-1] and items[i] using tp_richcompare(left, right, PY_GT)
     mov rax, [rbx + PyListObject.ob_item]
-    mov rdi, [rax + r13*8 - 8]      ; left = items[i-1]
-    mov rsi, [rax + r13*8]           ; right = items[i]
+    mov rcx, r13
+    shl rcx, 4                       ; i * 16
+    mov rdi, [rax + rcx - 16]        ; left = items[i-1] payload
+    mov rsi, [rax + rcx]             ; right = items[i] payload
     mov [rbp - LS_I], r13            ; save i
 
     ; Get left's type for tp_richcompare
@@ -1874,12 +1914,18 @@ DEF_FUNC list_method_sort, LS_FRAME
     test cl, cl
     jz .sort_no_swap
 
-    ; Swap items[i-1] and items[i]
+    ; Swap items[i-1] and items[i] (16-byte fat elements)
     mov rax, [rbx + PyListObject.ob_item]
-    mov r8, [rax + r13*8 - 8]
-    mov r9, [rax + r13*8]
-    mov [rax + r13*8 - 8], r9
-    mov [rax + r13*8], r8
+    mov rcx, r13
+    shl rcx, 4                       ; i * 16
+    mov r8, [rax + rcx - 16]         ; items[i-1] payload
+    mov r9, [rax + rcx - 8]          ; items[i-1] tag
+    mov r10, [rax + rcx]             ; items[i] payload
+    mov r11, [rax + rcx + 8]         ; items[i] tag
+    mov [rax + rcx - 16], r10
+    mov [rax + rcx - 8], r11
+    mov [rax + rcx], r8
+    mov [rax + rcx + 8], r9
     mov qword [rbp - LS_SWAP], 1    ; swapped = true
 
 .sort_no_swap:
@@ -1919,7 +1965,9 @@ DEF_FUNC list_method_index
     cmp rcx, r13
     jge .index_not_found
     mov rax, [rbx + PyListObject.ob_item]
-    cmp r12, [rax + rcx*8]
+    mov rdx, rcx
+    shl rdx, 4              ; index * 16
+    cmp r12, [rax + rdx]    ; compare payload
     je .index_found
 
     ; Also check SmallInt equality: if both are SmallInts, compare values
@@ -1927,7 +1975,9 @@ DEF_FUNC list_method_index
     test rdi, rdi
     jns .index_check_str    ; not SmallInt, try string
     mov rax, [rbx + PyListObject.ob_item]
-    mov rsi, [rax + rcx*8]
+    mov rdx, rcx
+    shl rdx, 4
+    mov rsi, [rax + rdx]    ; list item payload
     test rsi, rsi
     jns .index_next         ; list item not SmallInt
     ; Both SmallInts - already compared by pointer above (SmallInts with same
@@ -1937,7 +1987,9 @@ DEF_FUNC list_method_index
 .index_check_str:
     ; Try string comparison: if both are str_type, compare data
     mov rax, [rbx + PyListObject.ob_item]
-    mov rsi, [rax + rcx*8]
+    mov rdx, rcx
+    shl rdx, 4
+    mov rsi, [rax + rdx]    ; list item payload
     test rsi, rsi
     js .index_next          ; list item is SmallInt
     mov rax, [rdi + PyObject.ob_type]
@@ -1999,7 +2051,9 @@ DEF_FUNC list_method_count
     cmp rcx, r13
     jge .count_done
     mov rax, [rbx + PyListObject.ob_item]
-    cmp r12, [rax + rcx*8]
+    mov rdx, rcx
+    shl rdx, 4              ; index * 16
+    cmp r12, [rax + rdx]    ; compare payload
     jne .count_next
     inc r14
 .count_next:
@@ -2045,7 +2099,9 @@ DEF_FUNC list_method_copy
     jge .copy_done
     push rcx
     mov rax, [rbx + PyListObject.ob_item]
-    mov rsi, [rax + rcx*8]
+    mov rdx, rcx
+    shl rdx, 4              ; index * 16
+    mov rsi, [rax + rdx]    ; payload
     mov rdi, r13
     call list_append
     pop rcx
@@ -2073,15 +2129,18 @@ DEF_FUNC list_method_clear
     mov rbx, [rdi]          ; self
     mov r12, [rbx + PyListObject.ob_size]
 
-    ; DECREF all items
+    ; DECREF all items (fat 16-byte slots)
     xor r13d, r13d
 .clear_loop:
     cmp r13, r12
     jge .clear_done
     mov rax, [rbx + PyListObject.ob_item]
-    mov rdi, [rax + r13*8]
+    mov rcx, r13
+    shl rcx, 4              ; index * 16
+    mov rdi, [rax + rcx]    ; payload
+    mov rsi, [rax + rcx + 8] ; tag
     push r13
-    call obj_decref
+    DECREF_VAL rdi, rsi
     pop r13
     inc r13
     jmp .clear_loop
@@ -2118,7 +2177,9 @@ DEF_FUNC list_method_extend
     jge .extend_done
     push r14
     mov rax, [r12 + PyListObject.ob_item]
-    mov rsi, [rax + r14*8]
+    mov rcx, r14
+    shl rcx, 4              ; index * 16
+    mov rsi, [rax + rcx]    ; payload
     mov rdi, rbx
     call list_append
     pop r14
@@ -2793,7 +2854,9 @@ DEF_FUNC list_method_remove
     jge .lremove_not_found
 
     mov rax, [rbx + PyListObject.ob_item]
-    mov rcx, [rax + r14*8]
+    mov rcx, r14
+    shl rcx, 4              ; index * 16
+    mov rcx, [rax + rcx]    ; payload
 
     ; Check pointer equality
     cmp rcx, r12
@@ -2814,29 +2877,37 @@ DEF_FUNC list_method_remove
 
 .lremove_found:
     ; r14 = index of found item
-    ; Get the item for DECREF
+    ; Get the item for DECREF (read payload + tag)
     mov rax, [rbx + PyListObject.ob_item]
-    mov r12, [rax + r14*8]  ; item to remove (save for DECREF)
-
-    ; Shift remaining items left
     mov rcx, r14
-    mov rdx, r13
+    shl rcx, 4              ; index * 16
+    mov r12, [rax + rcx]    ; item payload (save for DECREF)
+    mov r13, [rax + rcx + 8] ; item tag (save for DECREF)
+
+    ; Shift remaining items left (16-byte fat elements)
+    mov rcx, r14
+    mov rdx, [rbx + PyListObject.ob_size]
     dec rdx                  ; size - 1
 .lremove_shift:
     cmp rcx, rdx
     jge .lremove_shrink
     mov rax, [rbx + PyListObject.ob_item]
-    mov r8, [rax + rcx*8 + 8]  ; items[i+1]
-    mov [rax + rcx*8], r8
+    mov r8, rcx
+    shl r8, 4                ; i * 16
+    mov r9, [rax + r8 + 16]  ; items[i+1] payload
+    mov r10, [rax + r8 + 24] ; items[i+1] tag
+    mov [rax + r8], r9        ; items[i] payload
+    mov [rax + r8 + 8], r10   ; items[i] tag
     inc rcx
     jmp .lremove_shift
 
 .lremove_shrink:
     dec qword [rbx + PyListObject.ob_size]
 
-    ; DECREF the removed item
+    ; DECREF the removed item (fat value)
     mov rdi, r12
-    call obj_decref
+    mov rsi, r13
+    DECREF_VAL rdi, rsi
 
     ; Return None
     lea rax, [rel none_singleton]

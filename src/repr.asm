@@ -96,9 +96,11 @@ DEF_FUNC list_repr, 24                ; buf ptr, used, capacity
     BUF_BYTE ' '
 .lr_no_comma:
 
-    ; Get element
+    ; Get element (fat list: 16-byte stride, payload only for obj_repr)
     mov rax, [rbx + PyListObject.ob_item]
-    mov rdi, [rax + r12*8]     ; items[index]
+    mov rcx, r12
+    shl rcx, 4                 ; index * 16
+    mov rdi, [rax + rcx]       ; items[index] payload
 
     ; Call obj_repr
     call obj_repr
