@@ -75,24 +75,6 @@
     section .text
 %endmacro
 
-; Value stack push (r13 = stack top pointer, 16 bytes/slot)
-; Auto-classifies payload: SmallInt (bit 63) → TAG_SMALLINT, NULL → TAG_NULL, else → TAG_PTR
-%macro VPUSH 1
-    mov [r13], %1
-    test %1, %1
-    js %%smallint
-    jz %%null
-    mov qword [r13 + 8], TAG_PTR
-    jmp %%done
-%%smallint:
-    mov qword [r13 + 8], TAG_SMALLINT
-    jmp %%done
-%%null:
-    mov qword [r13 + 8], TAG_NULL
-%%done:
-    add r13, 16
-%endmacro
-
 ; Value stack pop (16 bytes/slot)
 %macro VPOP 1
     sub r13, 16
@@ -103,17 +85,6 @@
 %macro VPEEK 1
     mov %1, [r13 - 16]
 %endmacro
-
-; Value stack peek at offset (0 = top, 1 = second, etc.; 16 bytes/slot)
-%macro VPEEK_AT 2
-    mov %1, [r13 - 16 - %2*16]
-%endmacro
-
-; SmallInt tagged pointer support
-; Bit 63 set = SmallInt, bits 0-62 = signed integer value
-; Valid range: -2^62 to 2^62 - 1
-; x86-64 canonical user-space addresses have bit 63 = 0
-SMALLINT_TAG equ 0x8000000000000000
 
 ; Reference counting (SmallInt-aware: bit 63 set = skip)
 %macro INCREF 1
@@ -211,8 +182,8 @@ SMALLINT_TAG equ 0x8000000000000000
 ; 128-BIT FAT VALUE SUPPORT
 ; ==========================================================================
 ;
-; Fat values: 64-bit payload + 64-bit tag. Used on value stack and localsplus.
-; Heap containers remain 64-bit (use val_widen/val_narrow at boundaries).
+; Fat values: 64-bit payload + 64-bit tag. Used on value stack, localsplus,
+; and heap containers (tuples, lists, dicts, sets).
 ;
 ; Tag word encoding (two modes, distinguished by bit 63):
 ;
@@ -290,28 +261,6 @@ TAG_RC_BIT   equ (1 << 8)    ; bit 8: refcounted flag
 %macro VPUSH_NULL128 0
     mov qword [r13], 0
     mov qword [r13 + 8], TAG_NULL
-    add r13, 16
-%endmacro
-
-; Push unknown/polymorphic value: branchless tag classification (clobbers r8, r9)
-; Classifies: NULL -> TAG_NULL, SmallInt (bit63) -> TAG_SMALLINT, else -> TAG_PTR
-; Safe for any payload register including rax, rdx.
-%macro VPUSH_BRANCHLESS 1      ; %1 = payload reg (clobbers r8, r9)
-    mov [r13], %1
-    xor r9d, r9d               ; TAG_NULL = 0 (before test to avoid flag clobber)
-    test %1, %1                ; set ZF/SF based on payload
-    mov r8d, TAG_PTR
-    cmovz r8d, r9d             ; null -> TAG_NULL
-    mov r9d, TAG_SMALLINT
-    cmovs r8d, r9d             ; bit63 set -> TAG_SMALLINT
-    mov [r13 + 8], r8
-    add r13, 16
-%endmacro
-
-; Push SmallStr (caller must pre-build payload + tag with SmallStr encoding)
-%macro VPUSH_STR 2              ; %1 = payload reg, %2 = tag reg (pre-built)
-    mov [r13], %1
-    mov [r13 + 8], %2
     add r13, 16
 %endmacro
 
