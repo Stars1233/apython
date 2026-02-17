@@ -628,15 +628,15 @@ DEF_FUNC op_call_function_ex
     cmp rcx, [r12 + PyDictObject.capacity]
     jge .cfex_dict_done
 
-    ; Check if entry at index has key and value
+    ; Check if entry at index has key and value_tag != TAG_NULL
     imul rax, rcx, DictEntry_size
     add rax, rbx
     mov rsi, [rax + DictEntry.key]
     test rsi, rsi
     jz .cfex_dict_skip
+    cmp qword [rax + DictEntry.value_tag], 0
+    je .cfex_dict_skip
     mov rdi, [rax + DictEntry.value]
-    test rdi, rdi
-    jz .cfex_dict_skip
 
     ; Store value in merged buffer at position [n_pos + kw_idx]
     push rcx

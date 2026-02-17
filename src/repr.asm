@@ -285,9 +285,8 @@ DEF_FUNC dict_repr, 24
 
     ; Check if entry is occupied: entries[i].key != NULL
     mov rax, [rbx + PyDictObject.entries]
-    ; Each DictEntry is 24 bytes: hash(8) + key(8) + value(8)
-    imul rcx, r12, 24
-    mov rdi, [rax + rcx + 8]   ; key
+    imul rcx, r12, DICT_ENTRY_SIZE
+    mov rdi, [rax + rcx + DictEntry.key]   ; key
     test rdi, rdi
     jz .dr_next_entry
 
@@ -329,8 +328,8 @@ DEF_FUNC dict_repr, 24
     ; repr(value)
     pop r12                    ; restore entry index
     mov rax, [rbx + PyDictObject.entries]
-    imul rcx, r12, 24
-    mov rdi, [rax + rcx + 16]  ; value
+    imul rcx, r12, DICT_ENTRY_SIZE
+    mov rdi, [rax + rcx + DictEntry.value]  ; value
     push r12
     call obj_repr
     test rax, rax

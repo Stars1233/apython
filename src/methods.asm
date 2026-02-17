@@ -2285,11 +2285,11 @@ DEF_FUNC dict_method_keys
     imul rcx, r14, DICT_ENTRY_SIZE
     add rax, rcx
 
-    ; Check if slot is occupied (key != NULL and value != NULL)
+    ; Check if slot is occupied (key != NULL and value_tag != TAG_NULL)
     mov rdi, [rax + DictEntry.key]
     test rdi, rdi
     jz .dk_next
-    mov rcx, [rax + DictEntry.value]
+    mov rcx, [rax + DictEntry.value_tag]
     test rcx, rcx
     jz .dk_next
 
@@ -2347,13 +2347,13 @@ DEF_FUNC dict_method_values
     mov rdi, [rax + DictEntry.key]
     test rdi, rdi
     jz .dv_next
-    mov rcx, [rax + DictEntry.value]
+    mov rcx, [rax + DictEntry.value_tag]
     test rcx, rcx
-    jz .dv_next
+    jz .dv_next                 ; TAG_NULL = empty slot
 
     ; Append value to list
     push r14
-    mov rsi, rcx            ; value
+    mov rsi, [rax + DictEntry.value]  ; value payload
     mov rdi, r12
     call list_append
     pop r14
@@ -2405,19 +2405,22 @@ DEF_FUNC dict_method_items
     mov rdi, [rax + DictEntry.key]
     test rdi, rdi
     jz .di_next
+    mov r8, [rax + DictEntry.value_tag]
+    test r8, r8
+    jz .di_next                 ; TAG_NULL = empty slot
     mov rcx, [rax + DictEntry.value]
-    test rcx, rcx
-    jz .di_next
 
     ; Create (key, value) tuple
     push r14
     push rdi                ; save key
     push rcx                ; save value
+    push r8                 ; save value_tag
 
     mov rdi, 2
     call tuple_new
     mov r14, rax            ; tuple
 
+    pop r8                  ; value_tag
     pop rcx                 ; value
     pop rdi                 ; key
 
@@ -2426,16 +2429,10 @@ DEF_FUNC dict_method_items
     mov qword [r14 + PyTupleObject.ob_item + 8], TAG_PTR
     INCREF rdi
 
-    ; Store value in tuple[1] (fat 16-byte slot, classify tag)
+    ; Store value in tuple[1] (fat 16-byte slot, use stored tag)
     mov [r14 + PyTupleObject.ob_item + 16], rcx
-    test rcx, rcx
-    js .di_val_si
-    mov qword [r14 + PyTupleObject.ob_item + 24], TAG_PTR
-    jmp .di_val_done
-.di_val_si:
-    mov qword [r14 + PyTupleObject.ob_item + 24], TAG_SMALLINT
-.di_val_done:
-    INCREF rcx
+    mov [r14 + PyTupleObject.ob_item + 24], r8
+    INCREF_VAL rcx, r8
 
     ; Append tuple to list
     mov rdi, r12
@@ -2549,11 +2546,10 @@ DEF_FUNC dict_method_clear
     ; DECREF key
     call obj_decref
 
-    ; DECREF value
+    ; DECREF value (fat: payload + tag)
     mov rdi, [r14 + DictEntry.value]
-    test rdi, rdi
-    jz .dc_next
-    call obj_decref
+    mov rsi, [r14 + DictEntry.value_tag]
+    DECREF_VAL rdi, rsi
 
 .dc_next:
     inc r13
@@ -2607,13 +2603,13 @@ DEF_FUNC dict_method_update
     mov rdi, [rax + DictEntry.key]
     test rdi, rdi
     jz .du_next
-    mov rsi, [rax + DictEntry.value]
-    test rsi, rsi
-    jz .du_next
+    mov rcx, [rax + DictEntry.value_tag]
+    test rcx, rcx
+    jz .du_next                 ; TAG_NULL = empty slot
 
     ; dict_set(self, key, value)
     push r14
-    mov rdx, rsi            ; value
+    mov rdx, [rax + DictEntry.value]  ; value payload
     mov rsi, rdi            ; key
     mov rdi, rbx            ; self
     call dict_set
@@ -2726,13 +2722,13 @@ DEF_FUNC dict_method_copy
     mov rdi, [rax + DictEntry.key]
     test rdi, rdi
     jz .dcopy_next
-    mov rsi, [rax + DictEntry.value]
-    test rsi, rsi
-    jz .dcopy_next
+    mov rcx, [rax + DictEntry.value_tag]
+    test rcx, rcx
+    jz .dcopy_next              ; TAG_NULL = empty slot
 
     ; dict_set(new_dict, key, value)
     push r14
-    mov rdx, rsi            ; value
+    mov rdx, [rax + DictEntry.value]  ; value payload
     mov rsi, rdi            ; key
     mov rdi, r12            ; new dict
     call dict_set
@@ -2782,9 +2778,10 @@ DEF_FUNC dict_method_popitem
     mov r13, [rax + DictEntry.key]
     test r13, r13
     jz .dpopitem_prev
+    mov rcx, [rax + DictEntry.value_tag]
+    test rcx, rcx
+    jz .dpopitem_prev           ; TAG_NULL = empty slot
     mov r14, [rax + DictEntry.value]
-    test r14, r14
-    jz .dpopitem_prev
     jmp .dpopitem_found
 
 .dpopitem_prev:
@@ -2792,10 +2789,12 @@ DEF_FUNC dict_method_popitem
     jmp .dpopitem_scan
 
 .dpopitem_found:
-    ; r13 = key, r14 = value
+    ; r13 = key, r14 = value, rcx = value_tag
+    push rcx                 ; save value_tag across tuple_new
     ; Create 2-tuple
     mov rdi, 2
     call tuple_new
+    pop rcx                  ; restore value_tag
     mov r12, rax             ; r12 = tuple
 
     ; Set tuple[0] = key, tuple[1] = value (fat 16-byte slots)
@@ -2803,15 +2802,9 @@ DEF_FUNC dict_method_popitem
     mov qword [r12 + PyTupleObject.ob_item + 8], TAG_PTR
     INCREF r13
     mov [r12 + PyTupleObject.ob_item + 16], r14
-    ; Classify value tag
-    test r14, r14
-    js .dpopitem_val_si
-    mov qword [r12 + PyTupleObject.ob_item + 24], TAG_PTR
-    jmp .dpopitem_val_done
-.dpopitem_val_si:
-    mov qword [r12 + PyTupleObject.ob_item + 24], TAG_SMALLINT
-.dpopitem_val_done:
-    INCREF r14
+    ; Use stored value_tag from dict entry
+    mov [r12 + PyTupleObject.ob_item + 24], rcx
+    INCREF_VAL r14, rcx
 
     ; Delete key from dict
     mov rdi, rbx

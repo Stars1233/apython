@@ -100,12 +100,13 @@ endstruc
 
 ; Dict entry
 struc DictEntry
-    .hash:  resq 1         ; +0: cached hash
-    .key:   resq 1         ; +8: key PyObject*
-    .value: resq 1         ; +16: value PyObject*
+    .hash:      resq 1     ; +0: cached hash
+    .key:       resq 1     ; +8: key PyObject* (64-bit)
+    .value:     resq 1     ; +16: value payload
+    .value_tag: resq 1     ; +24: value tag
 endstruc
 
-DICT_ENTRY_SIZE equ DictEntry_size  ; 24
+DICT_ENTRY_SIZE equ DictEntry_size  ; 32
 
 ; Function object
 struc PyFuncObject

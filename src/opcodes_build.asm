@@ -1447,7 +1447,7 @@ DEF_FUNC op_dict_update
     cmp rbx, [rbp-40]
     jge .du_done
 
-    ; Check if entry has a key
+    ; Check if entry has a key and value_tag != TAG_NULL
     mov rax, [rbp-48]
     imul rcx, rbx, DictEntry_size
     add rax, rcx
@@ -1455,9 +1455,9 @@ DEF_FUNC op_dict_update
     test rsi, rsi
     jz .du_next
 
+    cmp qword [rax + DictEntry.value_tag], 0
+    je .du_next
     mov rdx, [rax + DictEntry.value]
-    test rdx, rdx
-    jz .du_next
 
     ; dict_set(target, key, value)
     push rbx

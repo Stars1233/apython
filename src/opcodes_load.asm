@@ -199,9 +199,10 @@ DEF_FUNC_BARE op_load_global_module
     mov rdi, [rdi + PyDictObject.entries]
     movzx eax, word [rbx + 2]  ; CACHE[1] = index
     imul rax, rax, DICT_ENTRY_SIZE
-    mov rax, [rdi + rax + DictEntry.value]
-    test rax, rax
-    jz .lgm_deopt              ; value slot cleared (deleted entry)
+    add rdi, rax               ; rdi = entry ptr
+    cmp qword [rdi + DictEntry.value_tag], 0
+    je .lgm_deopt              ; TAG_NULL = deleted entry
+    mov rax, [rdi + DictEntry.value]
 
     ; Guards passed — now push NULL if needed
     test ecx, 1
@@ -245,9 +246,10 @@ DEF_FUNC_BARE op_load_global_builtin
     mov rdi, [rdi + PyDictObject.entries]
     movzx eax, word [rbx + 2]  ; CACHE[1] = index
     imul rax, rax, DICT_ENTRY_SIZE
-    mov rax, [rdi + rax + DictEntry.value]
-    test rax, rax
-    jz .lgb_deopt
+    add rdi, rax               ; rdi = entry ptr
+    cmp qword [rdi + DictEntry.value_tag], 0
+    je .lgb_deopt              ; TAG_NULL = deleted entry
+    mov rax, [rdi + DictEntry.value]
 
     ; Guards passed — now push NULL if needed
     test ecx, 1

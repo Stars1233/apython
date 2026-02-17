@@ -419,6 +419,7 @@ DEF_FUNC_LOCAL dict_resize
     push qword [rax + DictEntry.hash]
     push qword [rax + DictEntry.key]
     push qword [rax + DictEntry.value]
+    push qword [rax + DictEntry.value_tag]
 
     ; Linear probe in new table to find empty slot
 .rehash_probe:
@@ -435,6 +436,7 @@ DEF_FUNC_LOCAL dict_resize
 
 .rehash_insert:
     ; rax = target entry ptr in new table
+    pop qword [rax + DictEntry.value_tag]
     pop qword [rax + DictEntry.value]
     pop qword [rax + DictEntry.key]
     pop qword [rax + DictEntry.hash]
@@ -494,6 +496,19 @@ DEF_FUNC dict_set
     mov [rax + DictEntry.key], r12
     mov [rax + DictEntry.value], r13
 
+    ; Classify value tag
+    test r13, r13
+    js .set_si
+    jz .set_null
+    mov qword [rax + DictEntry.value_tag], TAG_PTR
+    jmp .set_tag_done
+.set_si:
+    mov qword [rax + DictEntry.value_tag], TAG_SMALLINT
+    jmp .set_tag_done
+.set_null:
+    mov qword [rax + DictEntry.value_tag], TAG_NULL
+.set_tag_done:
+
     ; INCREF key and value
     INCREF r12
     INCREF r13
@@ -516,14 +531,27 @@ DEF_FUNC dict_set
 
 .update_existing:
     ; rax = entry ptr with matching key
-    ; DECREF old value
+    ; DECREF old value (fat)
     push rax                    ; save entry ptr
     mov rdi, [rax + DictEntry.value]
-    call obj_decref
+    mov rsi, [rax + DictEntry.value_tag]
+    DECREF_VAL rdi, rsi
     pop rax                     ; restore entry ptr
 
     ; Store new value and INCREF it
     mov [rax + DictEntry.value], r13
+    ; Classify new value tag
+    test r13, r13
+    js .update_si
+    jz .update_null
+    mov qword [rax + DictEntry.value_tag], TAG_PTR
+    jmp .update_tag_done
+.update_si:
+    mov qword [rax + DictEntry.value_tag], TAG_SMALLINT
+    jmp .update_tag_done
+.update_null:
+    mov qword [rax + DictEntry.value_tag], TAG_NULL
+.update_tag_done:
     INCREF r13
 
 .done:
@@ -569,14 +597,15 @@ DEF_FUNC dict_dealloc
     test rdi, rdi
     jz .dealloc_next
 
-    ; DECREF key
+    ; DECREF key (stays 64-bit)
     push rax
     call obj_decref
 
-    ; DECREF value
+    ; DECREF value (fat)
     pop rax
     mov rdi, [rax + DictEntry.value]
-    call obj_decref
+    mov rsi, [rax + DictEntry.value_tag]
+    DECREF_VAL rdi, rsi
 
 .dealloc_next:
     inc r14
@@ -705,10 +734,13 @@ DEF_FUNC dict_del
     mov rdi, [rdx + DictEntry.key]
     mov qword [rdx + DictEntry.key], 0
     push qword [rdx + DictEntry.value]
+    push qword [rdx + DictEntry.value_tag]
     mov qword [rdx + DictEntry.value], 0
-    call obj_decref             ; DECREF key
-    pop rdi
-    call obj_decref             ; DECREF value
+    mov qword [rdx + DictEntry.value_tag], 0
+    call obj_decref             ; DECREF key (64-bit)
+    pop rsi                     ; value_tag
+    pop rdi                     ; value payload
+    DECREF_VAL rdi, rsi         ; DECREF value (fat)
     dec qword [rbx + PyDictObject.ob_size]
     ; Bump version counter
     inc qword [rbx + PyDictObject.dk_version]
