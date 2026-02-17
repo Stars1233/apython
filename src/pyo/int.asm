@@ -1016,14 +1016,20 @@ END_FUNC int_bool
 ;; ============================================================================
 DEF_FUNC_BARE int_add
     ; Unwrap int subclass instances
+    push rcx                ; save right_tag
     push rsi
     call int_unwrap
     pop rsi
+    pop rcx                 ; restore right_tag
+    push rdx                ; save unwrapped left_tag
     push rdi
     mov rdi, rsi
+    mov edx, ecx            ; pass right_tag to int_unwrap
     call int_unwrap
     mov rsi, rdi
+    mov ecx, edx            ; ecx = unwrapped right_tag
     pop rdi
+    pop rdx                 ; edx = unwrapped left_tag
     ; Check both SmallInt
     cmp edx, TAG_SMALLINT
     jne .gmp_path
@@ -1049,9 +1055,10 @@ DEF_FUNC_BARE int_add
     mov rbx, rdi
     mov r12, rsi
 
-    ; Convert SmallInt args to GMP if needed
-    test rbx, rbx
-    jns .a_ready
+    ; Convert SmallInt args to GMP if needed (use tags, not bit-63)
+    push rcx                ; save right_tag across left conversion
+    cmp edx, TAG_SMALLINT
+    jne .a_ready
     mov rdi, rbx
     call smallint_to_pyint
     mov rbx, rax
@@ -1060,8 +1067,9 @@ DEF_FUNC_BARE int_add
 .a_ready:
     xor r13d, r13d
 .check_b:
-    test r12, r12
-    jns .b_ready
+    pop rcx                 ; restore right_tag
+    cmp ecx, TAG_SMALLINT
+    jne .b_ready
     mov rdi, r12
     call smallint_to_pyint
     mov r12, rax
@@ -1107,14 +1115,20 @@ END_FUNC int_add
 ;; ============================================================================
 DEF_FUNC_BARE int_sub
     ; Unwrap int subclass instances
+    push rcx                ; save right_tag
     push rsi
     call int_unwrap
     pop rsi
+    pop rcx                 ; restore right_tag
+    push rdx                ; save unwrapped left_tag
     push rdi
     mov rdi, rsi
+    mov edx, ecx            ; pass right_tag to int_unwrap
     call int_unwrap
     mov rsi, rdi
+    mov ecx, edx            ; ecx = unwrapped right_tag
     pop rdi
+    pop rdx                 ; edx = unwrapped left_tag
     ; Check both SmallInt
     cmp edx, TAG_SMALLINT
     jne .gmp_path
@@ -1136,8 +1150,9 @@ DEF_FUNC_BARE int_sub
     push r13
     mov rbx, rdi
     mov r12, rsi
-    test rbx, rbx
-    jns .a_ready
+    push rcx                ; save right_tag
+    cmp edx, TAG_SMALLINT
+    jne .a_ready
     mov rdi, rbx
     call smallint_to_pyint
     mov rbx, rax
@@ -1146,8 +1161,9 @@ DEF_FUNC_BARE int_sub
 .a_ready:
     xor r13d, r13d
 .check_b:
-    test r12, r12
-    jns .b_ready
+    pop rcx                 ; restore right_tag
+    cmp ecx, TAG_SMALLINT
+    jne .b_ready
     mov rdi, r12
     call smallint_to_pyint
     mov r12, rax
@@ -1191,14 +1207,20 @@ END_FUNC int_sub
 ;; ============================================================================
 DEF_FUNC_BARE int_mul
     ; Unwrap int subclass instances
+    push rcx                ; save right_tag
     push rsi
     call int_unwrap
     pop rsi
+    pop rcx                 ; restore right_tag
+    push rdx                ; save unwrapped left_tag
     push rdi
     mov rdi, rsi
+    mov edx, ecx            ; pass right_tag to int_unwrap
     call int_unwrap
     mov rsi, rdi
+    mov ecx, edx            ; ecx = unwrapped right_tag
     pop rdi
+    pop rdx                 ; edx = unwrapped left_tag
     ; Check both SmallInt
     cmp edx, TAG_SMALLINT
     jne .gmp_path
@@ -1226,8 +1248,9 @@ DEF_FUNC_BARE int_mul
     push r13
     mov rbx, rdi
     mov r12, rsi
-    test rbx, rbx
-    jns .a_ready
+    push rcx                ; save right_tag
+    cmp edx, TAG_SMALLINT
+    jne .a_ready
     mov rdi, rbx
     call smallint_to_pyint
     mov rbx, rax
@@ -1236,8 +1259,9 @@ DEF_FUNC_BARE int_mul
 .a_ready:
     xor r13d, r13d
 .check_b:
-    test r12, r12
-    jns .b_ready
+    pop rcx                 ; restore right_tag
+    cmp ecx, TAG_SMALLINT
+    jne .b_ready
     mov rdi, r12
     call smallint_to_pyint
     mov r12, rax
@@ -1280,14 +1304,20 @@ END_FUNC int_mul
 ;; ============================================================================
 DEF_FUNC_BARE int_floordiv
     ; Unwrap int subclass instances
+    push rcx                ; save right_tag
     push rsi
     call int_unwrap
     pop rsi
+    pop rcx                 ; restore right_tag
+    push rdx                ; save unwrapped left_tag
     push rdi
     mov rdi, rsi
+    mov edx, ecx            ; pass right_tag to int_unwrap
     call int_unwrap
     mov rsi, rdi
+    mov ecx, edx            ; ecx = unwrapped right_tag
     pop rdi
+    pop rdx                 ; edx = unwrapped left_tag
     ; Check both SmallInt
     cmp edx, TAG_SMALLINT
     jne .gmp_path
@@ -1320,8 +1350,9 @@ DEF_FUNC_BARE int_floordiv
     push r13
     mov rbx, rdi
     mov r12, rsi
-    test rbx, rbx
-    jns .a_ready
+    push rcx                ; save right_tag
+    cmp edx, TAG_SMALLINT
+    jne .a_ready
     mov rdi, rbx
     call smallint_to_pyint
     mov rbx, rax
@@ -1330,8 +1361,9 @@ DEF_FUNC_BARE int_floordiv
 .a_ready:
     xor r13d, r13d
 .check_b:
-    test r12, r12
-    jns .b_ready
+    pop rcx                 ; restore right_tag
+    cmp ecx, TAG_SMALLINT
+    jne .b_ready
     mov rdi, r12
     call smallint_to_pyint
     mov r12, rax
@@ -1374,14 +1406,20 @@ END_FUNC int_floordiv
 ;; ============================================================================
 DEF_FUNC_BARE int_mod
     ; Unwrap int subclass instances
+    push rcx                ; save right_tag
     push rsi
     call int_unwrap
     pop rsi
+    pop rcx                 ; restore right_tag
+    push rdx                ; save unwrapped left_tag
     push rdi
     mov rdi, rsi
+    mov edx, ecx            ; pass right_tag to int_unwrap
     call int_unwrap
     mov rsi, rdi
+    mov ecx, edx            ; ecx = unwrapped right_tag
     pop rdi
+    pop rdx                 ; edx = unwrapped left_tag
     ; Check both SmallInt
     cmp edx, TAG_SMALLINT
     jne .gmp_path
@@ -1414,8 +1452,9 @@ DEF_FUNC_BARE int_mod
     push r13
     mov rbx, rdi
     mov r12, rsi
-    test rbx, rbx
-    jns .a_ready
+    push rcx                ; save right_tag
+    cmp edx, TAG_SMALLINT
+    jne .a_ready
     mov rdi, rbx
     call smallint_to_pyint
     mov rbx, rax
@@ -1424,8 +1463,9 @@ DEF_FUNC_BARE int_mod
 .a_ready:
     xor r13d, r13d
 .check_b:
-    test r12, r12
-    jns .b_ready
+    pop rcx                 ; restore right_tag
+    cmp ecx, TAG_SMALLINT
+    jne .b_ready
     mov rdi, r12
     call smallint_to_pyint
     mov r12, rax
@@ -1731,14 +1771,20 @@ END_FUNC int_dealloc
 ;; ============================================================================
 DEF_FUNC_BARE int_and
     ; Unwrap int subclass instances
+    push rcx                ; save right_tag
     push rsi
     call int_unwrap
     pop rsi
+    pop rcx                 ; restore right_tag
+    push rdx                ; save unwrapped left_tag
     push rdi
     mov rdi, rsi
+    mov edx, ecx            ; pass right_tag to int_unwrap
     call int_unwrap
     mov rsi, rdi
+    mov ecx, edx            ; ecx = unwrapped right_tag
     pop rdi
+    pop rdx                 ; edx = unwrapped left_tag
     ; Check both SmallInt
     cmp edx, TAG_SMALLINT
     jne .gmp
@@ -1759,8 +1805,9 @@ DEF_FUNC_BARE int_and
     push r13
     mov rbx, rdi
     mov r12, rsi
-    test rbx, rbx
-    jns .a_ok
+    push rcx                ; save right_tag
+    cmp edx, TAG_SMALLINT
+    jne .a_ok
     mov rdi, rbx
     call smallint_to_pyint
     mov rbx, rax
@@ -1769,8 +1816,9 @@ DEF_FUNC_BARE int_and
 .a_ok:
     xor r13d, r13d
 .chk_b:
-    test r12, r12
-    jns .b_ok
+    pop rcx                 ; restore right_tag
+    cmp ecx, TAG_SMALLINT
+    jne .b_ok
     mov rdi, r12
     call smallint_to_pyint
     mov r12, rax
@@ -1813,14 +1861,20 @@ END_FUNC int_and
 ;; ============================================================================
 DEF_FUNC_BARE int_or
     ; Unwrap int subclass instances
+    push rcx                ; save right_tag
     push rsi
     call int_unwrap
     pop rsi
+    pop rcx                 ; restore right_tag
+    push rdx                ; save unwrapped left_tag
     push rdi
     mov rdi, rsi
+    mov edx, ecx            ; pass right_tag to int_unwrap
     call int_unwrap
     mov rsi, rdi
+    mov ecx, edx            ; ecx = unwrapped right_tag
     pop rdi
+    pop rdx                 ; edx = unwrapped left_tag
     ; Check both SmallInt
     cmp edx, TAG_SMALLINT
     jne .gmp
@@ -1841,8 +1895,9 @@ DEF_FUNC_BARE int_or
     push r13
     mov rbx, rdi
     mov r12, rsi
-    test rbx, rbx
-    jns .a_ok
+    push rcx                ; save right_tag
+    cmp edx, TAG_SMALLINT
+    jne .a_ok
     mov rdi, rbx
     call smallint_to_pyint
     mov rbx, rax
@@ -1851,8 +1906,9 @@ DEF_FUNC_BARE int_or
 .a_ok:
     xor r13d, r13d
 .chk_b:
-    test r12, r12
-    jns .b_ok
+    pop rcx                 ; restore right_tag
+    cmp ecx, TAG_SMALLINT
+    jne .b_ok
     mov rdi, r12
     call smallint_to_pyint
     mov r12, rax
@@ -1895,14 +1951,20 @@ END_FUNC int_or
 ;; ============================================================================
 DEF_FUNC_BARE int_xor
     ; Unwrap int subclass instances
+    push rcx                ; save right_tag
     push rsi
     call int_unwrap
     pop rsi
+    pop rcx                 ; restore right_tag
+    push rdx                ; save unwrapped left_tag
     push rdi
     mov rdi, rsi
+    mov edx, ecx            ; pass right_tag to int_unwrap
     call int_unwrap
     mov rsi, rdi
+    mov ecx, edx            ; ecx = unwrapped right_tag
     pop rdi
+    pop rdx                 ; edx = unwrapped left_tag
     ; Check both SmallInt
     cmp edx, TAG_SMALLINT
     jne .gmp
@@ -1924,8 +1986,9 @@ DEF_FUNC_BARE int_xor
     push r13
     mov rbx, rdi
     mov r12, rsi
-    test rbx, rbx
-    jns .a_ok
+    push rcx                ; save right_tag
+    cmp edx, TAG_SMALLINT
+    jne .a_ok
     mov rdi, rbx
     call smallint_to_pyint
     mov rbx, rax
@@ -1934,8 +1997,9 @@ DEF_FUNC_BARE int_xor
 .a_ok:
     xor r13d, r13d
 .chk_b:
-    test r12, r12
-    jns .b_ok
+    pop rcx                 ; restore right_tag
+    cmp ecx, TAG_SMALLINT
+    jne .b_ok
     mov rdi, r12
     call smallint_to_pyint
     mov r12, rax

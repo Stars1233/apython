@@ -607,7 +607,8 @@ DEF_FUNC_BARE op_unary_negative
     mov rax, [rax + PyTypeObject.tp_as_number]
     mov rax, [rax + PyNumberMethods.nb_negative]
 
-    ; Call nb_negative(operand); rdi already set
+    ; Call nb_negative(payload, tag); rdi already set
+    mov edx, r8d               ; tag
     call rax
     ; rax = result payload, rdx = result tag
 
@@ -645,7 +646,8 @@ DEF_FUNC_BARE op_unary_invert
     mov rax, [rax + PyTypeObject.tp_as_number]
     mov rax, [rax + PyNumberMethods.nb_invert]
 
-    ; Call nb_invert(operand, NULL) — binary op signature, second arg unused
+    ; Call nb_invert(operand, tag) — binary op signature
+    mov edx, r8d               ; tag
     xor esi, esi
     call rax
     SAVE_FAT_RESULT
