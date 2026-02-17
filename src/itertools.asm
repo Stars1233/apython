@@ -930,9 +930,7 @@ DEF_FUNC builtin_sorted
 
     ; Sort the list in-place using list_method_sort
     ; list_method_sort expects (args, nargs) where args[0] = self (16-byte fat slot)
-    sub rsp, 16
-    mov [rsp], r12           ; args[0].payload = list
-    mov qword [rsp+8], TAG_PTR
+    SPUSH_PTR r12            ; args[0] = list (fat arg)
     mov rdi, rsp             ; args ptr
     mov rsi, 1               ; nargs = 1
     call list_method_sort

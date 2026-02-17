@@ -108,9 +108,7 @@ DEF_FUNC dunder_call_1
     test rax, rax
     jz .not_found
 
-    sub rsp, 16             ; args[0] (16B slot)
-    mov [rsp], rbx          ; args[0].payload = self
-    mov qword [rsp+8], TAG_PTR  ; args[0].tag
+    SPUSH_PTR rbx            ; args[0] = self (fat arg)
     mov rdi, r12            ; callable
     mov rsi, rsp            ; args ptr
     mov edx, 1              ; nargs
