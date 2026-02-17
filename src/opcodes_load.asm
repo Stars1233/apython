@@ -807,6 +807,7 @@ DEF_FUNC_BARE op_load_attr_method
     INCREF rax
     mov rcx, [r13 - 16]           ; save obj (payload of TOS)
     mov [r13 - 16], rax           ; overwrite obj position with method
+    mov qword [r13 - 8], TAG_PTR  ; ensure method tag is correct (defensive)
     VPUSH_PTR rcx                  ; push obj on top as self
 
     ; Skip 9 CACHE entries = 18 bytes

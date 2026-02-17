@@ -327,32 +327,37 @@ DEF_FUNC tuple_getslice
 END_FUNC tuple_getslice
 
 ;; ============================================================================
-;; tuple_contains(PyTupleObject *self, PyObject *value) -> int (0 or 1)
-;; Linear scan with payload equality (fat 16-byte slots).
+;; tuple_contains(PyTupleObject *self, PyObject *value, int value_tag) -> int (0 or 1)
+;; Linear scan with payload + tag equality (fat 16-byte slots).
 ;; ============================================================================
 DEF_FUNC tuple_contains
     push rbx
     push r12
     push r13
+    push r14
 
     mov rbx, rdi               ; tuple
-    mov r12, rsi               ; value to find
-    mov r13, [rbx + PyTupleObject.ob_size]
+    mov r12, rsi               ; value payload
+    mov r13d, edx              ; value tag
+    mov r14, [rbx + PyTupleObject.ob_size]
 
     xor ecx, ecx
 .tc_loop:
-    cmp rcx, r13
+    cmp rcx, r14
     jge .tc_not_found
     mov rax, rcx
     shl rax, 4                 ; index * 16
-    mov rax, [rbx + PyTupleObject.ob_item + rax]  ; payload
-    cmp r12, rax               ; pointer/value equality
+    cmp r12, [rbx + PyTupleObject.ob_item + rax]  ; payload match?
+    jne .tc_next
+    cmp r13d, [rbx + PyTupleObject.ob_item + rax + 8]  ; tag match?
     je .tc_found
+.tc_next:
     inc rcx
     jmp .tc_loop
 
 .tc_found:
     mov eax, 1
+    pop r14
     pop r13
     pop r12
     pop rbx
@@ -361,6 +366,7 @@ DEF_FUNC tuple_contains
 
 .tc_not_found:
     xor eax, eax
+    pop r14
     pop r13
     pop r12
     pop rbx

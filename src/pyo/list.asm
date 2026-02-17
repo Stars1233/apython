@@ -552,32 +552,38 @@ DEF_FUNC_BARE list_len
 END_FUNC list_len
 
 ;; ============================================================================
-;; list_contains(PyListObject *list, PyObject *value) -> int (0/1)
-;; sq_contains: linear scan with pointer equality
+;; list_contains(PyListObject *list, PyObject *value, int value_tag) -> int (0/1)
+;; sq_contains: linear scan with payload + tag equality
 ;; ============================================================================
 DEF_FUNC list_contains
     push rbx
     push r12
     push r13
+    push r14
 
     mov rbx, rdi               ; list
-    mov r12, rsi               ; value
-    mov r13, [rbx + PyListObject.ob_size]
+    mov r12, rsi               ; value payload
+    mov r13d, edx              ; value tag
+    mov r14, [rbx + PyListObject.ob_size]
 
     xor ecx, ecx
 .loop:
-    cmp rcx, r13
+    cmp rcx, r14
     jge .not_found
     mov rax, [rbx + PyListObject.ob_item]
     mov rdx, rcx
     shl rdx, 4
-    cmp r12, [rax + rdx]      ; pointer equality (16-byte stride)
+    cmp r12, [rax + rdx]      ; payload match? (16-byte stride)
+    jne .next
+    cmp r13d, [rax + rdx + 8] ; tag match?
     je .found
+.next:
     inc rcx
     jmp .loop
 
 .found:
     mov eax, 1
+    pop r14
     pop r13
     pop r12
     pop rbx
@@ -586,6 +592,7 @@ DEF_FUNC list_contains
 
 .not_found:
     xor eax, eax
+    pop r14
     pop r13
     pop r12
     pop rbx

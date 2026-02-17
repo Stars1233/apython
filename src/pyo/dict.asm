@@ -775,7 +775,7 @@ DEF_FUNC dict_del, 8
     mov qword [rdx + DictEntry.value_tag], 0
 
     ; DECREF key (tag-aware)
-    mov rsi, [rsp + 24]         ; key_tag (3 pushes deep)
+    mov rsi, [rsp + 16]         ; key_tag (3 pushes deep)
     DECREF_VAL rdi, rsi
     pop rsi                     ; value_tag
     pop rdi                     ; value payload
