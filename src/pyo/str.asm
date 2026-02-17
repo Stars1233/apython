@@ -112,41 +112,101 @@ END_FUNC str_dealloc
 DEF_FUNC str_repr
     push rbx
     push r12
+    push r13
 
     mov rbx, rdi            ; rbx = self
-    mov r12, [rbx + PyStrObject.ob_size]  ; r12 = length
+    mov r12, [rbx + PyStrObject.ob_size]  ; r12 = src length
 
-    ; Allocate new string: header + 2 quotes + length + 1 null
-    lea rdi, [r12 + PyStrObject.data + 3]
+    ; Allocate worst case: header + 2 quotes + 2*length + 1 null
+    lea rdi, [r12*2 + PyStrObject.data + 3]
     call ap_malloc
-    ; rax = new str
+    mov r13, rax             ; r13 = new str
 
     ; Fill header
-    mov qword [rax + PyObject.ob_refcnt], 1
+    mov qword [r13 + PyObject.ob_refcnt], 1
     lea rcx, [rel str_type]
-    mov [rax + PyObject.ob_type], rcx
-    lea rcx, [r12 + 2]
-    mov [rax + PyStrObject.ob_size], rcx
-    mov qword [rax + PyStrObject.ob_hash], -1
+    mov [r13 + PyObject.ob_type], rcx
+    mov qword [r13 + PyStrObject.ob_hash], -1
 
     ; Write opening quote
-    mov byte [rax + PyStrObject.data], "'"
+    mov byte [r13 + PyStrObject.data], "'"
 
-    ; Copy string data
-    push rax
-    lea rdi, [rax + PyStrObject.data + 1]
+    ; Copy with escaping: rsi=src, rdi=dst, rcx=src index
     lea rsi, [rbx + PyStrObject.data]
-    mov rdx, r12
-    call ap_memcpy
-    pop rax
+    lea rdi, [r13 + PyStrObject.data + 1]
+    xor ecx, ecx
 
+.sr_loop:
+    cmp rcx, r12
+    jge .sr_done
+    movzx eax, byte [rsi + rcx]
+
+    cmp al, 10               ; newline
+    je .sr_esc_n
+    cmp al, 13               ; carriage return
+    je .sr_esc_r
+    cmp al, 9                ; tab
+    je .sr_esc_t
+    cmp al, 0x5C             ; backslash
+    je .sr_esc_bs
+    cmp al, 0x27             ; single quote
+    je .sr_esc_sq
+
+    ; Normal character
+    mov [rdi], al
+    inc rdi
+    inc rcx
+    jmp .sr_loop
+
+.sr_esc_n:
+    mov byte [rdi], 0x5C     ; backslash
+    mov byte [rdi + 1], 'n'
+    add rdi, 2
+    inc rcx
+    jmp .sr_loop
+
+.sr_esc_r:
+    mov byte [rdi], 0x5C
+    mov byte [rdi + 1], 'r'
+    add rdi, 2
+    inc rcx
+    jmp .sr_loop
+
+.sr_esc_t:
+    mov byte [rdi], 0x5C
+    mov byte [rdi + 1], 't'
+    add rdi, 2
+    inc rcx
+    jmp .sr_loop
+
+.sr_esc_bs:
+    mov byte [rdi], 0x5C
+    mov byte [rdi + 1], 0x5C
+    add rdi, 2
+    inc rcx
+    jmp .sr_loop
+
+.sr_esc_sq:
+    mov byte [rdi], 0x5C
+    mov byte [rdi + 1], 0x27
+    add rdi, 2
+    inc rcx
+    jmp .sr_loop
+
+.sr_done:
     ; Write closing quote and null
-    lea rcx, [r12 + 1]
-    mov byte [rax + PyStrObject.data + rcx], "'"
-    lea rcx, [r12 + 2]
-    mov byte [rax + PyStrObject.data + rcx], 0
+    mov byte [rdi], "'"
+    mov byte [rdi + 1], 0
 
+    ; Calculate actual ob_size: (rdi - data_start) + 1 for closing quote
+    lea rax, [r13 + PyStrObject.data]
+    sub rdi, rax               ; rdi = chars written including open quote
+    inc rdi                    ; + closing quote
+    mov [r13 + PyStrObject.ob_size], rdi
+
+    mov rax, r13
     mov edx, TAG_PTR
+    pop r13
     pop r12
     pop rbx
     leave

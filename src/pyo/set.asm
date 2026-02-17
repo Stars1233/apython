@@ -584,6 +584,90 @@ DEF_FUNC set_dealloc
     ret
 END_FUNC set_dealloc
 
+;; ============================================================================
+;; set_type_call(self, args, nargs) -> new set
+;; Constructor: set() or set(iterable)
+;; self = set_type, args = arg array, nargs = count
+;; ============================================================================
+extern raise_exception
+extern exc_TypeError_type
+
+STC_FRAME equ 8
+DEF_FUNC set_type_call, STC_FRAME
+    push rbx
+    push r12
+
+    ; nargs can be 0 or 1
+    cmp rdx, 0
+    je .stc_empty
+    cmp rdx, 1
+    jne .stc_error
+
+    ; set(iterable): create set, iterate and add
+    mov r12, [rsi]          ; iterable payload
+    mov ecx, [rsi + 8]     ; iterable tag
+
+    call set_new
+    mov rbx, rax            ; rbx = new set
+
+    ; Get iterator: tp_iter(iterable)
+    mov rdi, r12
+    mov rax, [rdi + PyObject.ob_type]
+    mov rax, [rax + PyTypeObject.tp_iter]
+    test rax, rax
+    jz .stc_not_iterable
+    call rax
+    mov r12, rax            ; r12 = iterator
+
+.stc_iter_loop:
+    ; Get next: tp_iternext(iterator)
+    mov rdi, r12
+    mov rax, [rdi + PyObject.ob_type]
+    mov rax, [rax + PyTypeObject.tp_iternext]
+    call rax
+    test edx, edx           ; check tag (NULL = exhausted)
+    jz .stc_iter_done
+
+    ; Add to set
+    mov rdi, rbx            ; set
+    mov rsi, rax            ; key payload
+    ; edx = key tag (from tp_iternext)
+    push rdx
+    call set_add
+    pop rdx                 ; balance (set_add may clobber)
+    jmp .stc_iter_loop
+
+.stc_iter_done:
+    ; DECREF iterator
+    mov rdi, r12
+    call obj_decref
+
+    mov rax, rbx            ; return new set
+    mov edx, TAG_PTR
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.stc_empty:
+    call set_new
+    mov edx, TAG_PTR
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.stc_not_iterable:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "set() argument is not iterable"
+    call raise_exception
+
+.stc_error:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "set() takes at most 1 argument"
+    call raise_exception
+END_FUNC set_type_call
+
 ; set_repr is in src/repr.asm
 extern set_repr
 
@@ -733,7 +817,7 @@ set_type:
     dq set_repr                 ; tp_repr
     dq set_repr                 ; tp_str
     dq 0                        ; tp_hash (unhashable)
-    dq 0                        ; tp_call
+    dq set_type_call            ; tp_call
     dq 0                        ; tp_getattr
     dq 0                        ; tp_setattr
     dq 0                        ; tp_richcompare

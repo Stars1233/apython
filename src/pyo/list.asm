@@ -964,15 +964,17 @@ DEF_FUNC list_type_call, LTC_FRAME
     test edx, edx
     jz .ltc_done            ; StopIteration
 
-    ; Append item to list
-    push rax                ; save item
+    ; Append item to list (preserve actual tag from iternext)
+    push rax                ; save item payload
+    push rdx                ; save item tag
     mov rdi, rbx
     mov rsi, rax
-    mov edx, TAG_PTR
+    ; edx = tag from tp_iternext (already set)
     call list_append
-    ; DECREF item (list_append INCREFs internally)
-    pop rdi
-    call obj_decref
+    ; DECREF item (list_append INCREFs internally, tag-aware)
+    pop rsi                 ; item tag
+    pop rdi                 ; item payload
+    DECREF_VAL rdi, rsi
     jmp .ltc_loop
 
 .ltc_done:

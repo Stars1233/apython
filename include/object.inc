@@ -280,6 +280,8 @@ struc PyGenObject
     .gi_running: resq 1   ; +24: 1 if currently executing
     .gi_code:   resq 1    ; +32: code object
     .gi_name:   resq 1    ; +40: name string
+    .gi_return_value: resq 1 ; +48: return value payload (for StopIteration.value)
+    .gi_return_tag:   resq 1 ; +56: return value tag
 endstruc
 
 ; File object (for sys.stdout, sys.stderr, sys.stdin)

@@ -1318,13 +1318,24 @@ DEF_FUNC op_send, SND_FRAME
     DISPATCH
 
 .send_exhausted:
-    ; Generator exhausted. Push None as return value.
-    ; Stack: ... | receiver | → becomes ... | receiver | None |
+    ; Generator exhausted. Push gi_return_value (for yield-from protocol).
+    ; Stack: ... | receiver | → becomes ... | receiver | return_value |
     ; Then jump to END_SEND which will handle cleanup.
+    mov rdi, [rbp - SND_RECV]  ; receiver = generator
+    mov rax, [rdi + PyGenObject.gi_return_value]
+    mov rdx, [rdi + PyGenObject.gi_return_tag]
+    test edx, edx
+    jnz .send_have_retval
+    ; No return value — push None
     lea rax, [rel none_singleton]
     INCREF rax
     VPUSH_PTR rax
-
+    jmp .send_exhausted_jump
+.send_have_retval:
+    ; INCREF the return value (we're copying it onto the stack)
+    INCREF_VAL rax, rdx
+    VPUSH_VAL rax, rdx
+.send_exhausted_jump:
     ; Skip 1 CACHE entry = 2 bytes, then jump forward by arg * 2 bytes
     add rbx, 2
     mov rcx, [rbp - SND_ARG]

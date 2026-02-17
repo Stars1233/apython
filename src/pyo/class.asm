@@ -246,6 +246,41 @@ DEF_FUNC instance_setattr
 END_FUNC instance_setattr
 
 ;; ============================================================================
+;; type_setattr(PyTypeObject *type, PyObject *name, PyObject *value, ecx=value_tag)
+;; Set an attribute on a type's tp_dict.
+;; rdi = type, rsi = name, rdx = value, ecx = value_tag
+;; ============================================================================
+DEF_FUNC type_setattr
+    push rbx
+    push rcx                    ; save value_tag
+
+    ; Ensure tp_dict exists
+    mov rbx, rdi
+    mov rdi, [rbx + PyTypeObject.tp_dict]
+    test rdi, rdi
+    jnz .ts_have_dict
+
+    ; Allocate a new dict for this type
+    push rsi
+    push rdx
+    call dict_new
+    mov [rbx + PyTypeObject.tp_dict], rax
+    mov rdi, rax
+    pop rdx
+    pop rsi
+
+.ts_have_dict:
+    ; dict_set(dict, name, value, ecx=value_tag, r8=key_tag)
+    pop rcx                     ; restore value_tag
+    mov r8d, TAG_PTR            ; key_tag (name is always heap string)
+    call dict_set
+
+    pop rbx
+    leave
+    ret
+END_FUNC type_setattr
+
+;; ============================================================================
 ;; instance_dealloc(PyObject *self)
 ;; Deallocate an instance: DECREF inst_dict, DECREF ob_type, free self.
 ;; rdi = instance
@@ -372,6 +407,10 @@ END_FUNC instance_str
 ;; edx = nargs
 ;; Returns: new instance
 ;; ============================================================================
+; Local frame offsets for .normal_type_call (rbp-relative, after 5 pushes + sub rsp, 24)
+TC_NEW_FUNC equ 48              ; [rbp - 48]: saved __new__ func pointer
+TC_NEW_TAG  equ 56              ; [rbp - 56]: saved __new__ result tag
+
 DEF_FUNC type_call
     ; Special case: type(x) with 1 arg when calling type itself
     ; Returns x.__class__ (the type of x)
@@ -415,7 +454,8 @@ DEF_FUNC type_call
     push r13
     push r14
     push r15
-    sub rsp, 8                  ; align to 16 bytes (5 pushes + push rbp = 48, +8 = 56 -> 64)
+    sub rsp, 24                 ; 16 bytes local + 8 align (5 pushes + rbp = 48, +24 = 72 -> rsp 16-aligned)
+    mov dword [rbp - TC_NEW_TAG], TAG_PTR  ; default return tag
 
     mov rbx, rdi                ; rbx = type
     mov r12, rsi                ; r12 = args
@@ -434,11 +474,106 @@ DEF_FUNC type_call
     test rax, TYPE_FLAG_INT_SUBCLASS
     jnz .int_subclass_call
 
-    ; Create instance: instance_new(type)
+    ; === Look up __new__ in MRO (stop at object_type) ===
+    lea rdi, [rel new_name_cstr]
+    call str_from_cstr
+    mov r15, rax                ; r15 = "__new__" str
+
+    mov rcx, rbx                ; rcx = current type
+.new_mro_walk:
+    ; Stop at object_type (default __new__ = instance_new)
+    lea rdi, [rel object_type]
+    cmp rcx, rdi
+    je .new_not_found
+
+    mov rdi, [rcx + PyTypeObject.tp_dict]
+    test rdi, rdi
+    jz .new_try_base
+
+    push rcx
+    mov rsi, r15
+    mov edx, TAG_PTR
+    call dict_get
+    pop rcx
+    test edx, edx
+    jnz .new_found
+
+.new_try_base:
+    mov rcx, [rcx + PyTypeObject.tp_base]
+    test rcx, rcx
+    jnz .new_mro_walk
+
+.new_not_found:
+    ; DECREF name string
+    mov rdi, r15
+    call obj_decref
+    ; Default: instance_new(type)
     mov rdi, rbx
     call instance_new
     mov r14, rax                ; r14 = instance
+    jmp .lookup_init
 
+.new_found:
+    ; rax = __new__ func ptr, edx = tag
+    mov [rbp - TC_NEW_FUNC], rax
+    ; DECREF name string
+    mov rdi, r15
+    call obj_decref
+
+    ; Build args for __new__(cls, *original_args)
+    lea rax, [r13 + 1]
+    shl rax, 4                  ; (nargs+1) * 16
+    sub rsp, rax
+    mov r15, rsp                ; r15 = new args array
+
+    ; args[0] = cls (the type)
+    mov [r15], rbx
+    mov qword [r15 + 8], TAG_PTR
+
+    ; Copy original args
+    xor ecx, ecx
+.copy_new_args:
+    cmp rcx, r13
+    jge .new_args_copied
+    mov rax, rcx
+    shl rax, 4
+    mov rdx, [r12 + rax]
+    mov r8, [r12 + rax + 8]
+    lea r9, [rcx + 1]
+    shl r9, 4
+    mov [r15 + r9], rdx
+    mov [r15 + r9 + 8], r8
+    inc rcx
+    jmp .copy_new_args
+.new_args_copied:
+
+    ; Call __new__'s tp_call
+    mov rdi, [rbp - TC_NEW_FUNC]
+    mov rax, [rdi + PyObject.ob_type]
+    mov rax, [rax + PyTypeObject.tp_call]
+    test rax, rax
+    jz .new_not_callable
+
+    mov rsi, r15                ; args
+    lea rdx, [r13 + 1]          ; nargs + 1
+    call rax
+
+    mov r14, rax                ; r14 = instance from __new__
+    mov [rbp - TC_NEW_TAG], edx ; save result tag
+
+    ; Restore stack from args allocation
+    lea rax, [r13 + 1]
+    shl rax, 4
+    add rsp, rax
+
+    ; Check: only call __init__ if __new__ returned instance of cls
+    cmp dword [rbp - TC_NEW_TAG], TAG_PTR
+    jne .no_init
+    mov rax, [r14 + PyObject.ob_type]
+    cmp rax, rbx
+    jne .no_init
+
+.lookup_init:
     ; Look up __init__ walking the MRO (type + tp_base chain)
     ; Create "__init__" string for lookup
     lea rdi, [rel init_name_cstr]
@@ -529,11 +664,11 @@ DEF_FUNC type_call
     add rsp, rax
 
 .no_init:
-    ; Return the instance
+    ; Return the instance (tag from TC_NEW_TAG; default TAG_PTR, or __new__ result tag)
     mov rax, r14
-    mov edx, TAG_PTR
+    mov edx, [rbp - TC_NEW_TAG]
 
-    add rsp, 8                  ; undo alignment
+    add rsp, 24                 ; undo alignment
     pop r15
     pop r14
     pop r13
@@ -552,7 +687,7 @@ DEF_FUNC type_call
     call exc_type_call
     ; rax = exception object (PyExceptionObject)
     mov edx, TAG_PTR
-    add rsp, 8                  ; undo alignment
+    add rsp, 24                 ; undo alignment
     pop r15
     pop r14
     pop r13
@@ -607,7 +742,7 @@ DEF_FUNC type_call
 .int_sub_done:
     mov edx, TAG_PTR            ; subclass instance is always a heap ptr
 .int_sub_epilogue:
-    add rsp, 8                  ; undo alignment
+    add rsp, 24                 ; undo alignment
     pop r15
     pop r14
     pop r13
@@ -616,7 +751,7 @@ DEF_FUNC type_call
     leave
     ret
 .int_sub_error:
-    add rsp, 8
+    add rsp, 24
     pop r15
     pop r14
     pop r13
@@ -628,6 +763,16 @@ DEF_FUNC type_call
 .init_not_callable:
     lea rdi, [rel exc_TypeError_type]
     CSTRING rsi, "__init__ is not callable"
+    call raise_exception
+    ; does not return
+
+.new_not_callable:
+    ; Restore stack from args allocation, then error
+    lea rax, [r13 + 1]
+    shl rax, 4
+    add rsp, rax
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "__new__ is not callable"
     call raise_exception
     ; does not return
 END_FUNC type_call
@@ -861,12 +1006,28 @@ DEF_FUNC_BARE object_type_call
 END_FUNC object_type_call
 
 ;; ============================================================================
+;; object_new_fn(args, nargs) -> instance
+;; Implements object.__new__(cls) — creates a bare instance of cls.
+;; args[0] = cls (the type to instantiate)
+;; ============================================================================
+global object_new_fn
+DEF_FUNC object_new_fn
+    ; args[0] = cls
+    mov rdi, [rdi]              ; cls payload (PyTypeObject*)
+    call instance_new
+    mov edx, TAG_PTR
+    leave
+    ret
+END_FUNC object_new_fn
+
+;; ============================================================================
 ;; Data section
 ;; ============================================================================
 section .data
 
 instance_repr_cstr: db "<instance>", 0
 init_name_cstr:     db "__init__", 0
+new_name_cstr:      db "__new__", 0
 tga_name_str:       db "__name__", 0
 method_name_str:    db "method", 0
 object_name_str:    db "object", 0
@@ -890,7 +1051,7 @@ user_type_metatype:
     dq 0                        ; tp_hash
     dq type_call                ; tp_call — calling a class creates instances
     dq type_getattr             ; tp_getattr — accessing class vars via tp_dict
-    dq 0                        ; tp_setattr
+    dq type_setattr             ; tp_setattr — setting class vars in tp_dict
     dq 0                        ; tp_richcompare
     dq 0                        ; tp_iter
     dq 0                        ; tp_iternext

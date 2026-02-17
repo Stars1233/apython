@@ -261,6 +261,104 @@ DEF_FUNC fileobj_close_method
 END_FUNC fileobj_close_method
 
 ; ============================================================================
+; fileobj_read(PyObject **args, int64_t nargs) -> str
+; Read all content from file (or up to size bytes if arg given)
+; args[0] = self (fileobj)
+; ============================================================================
+extern sys_read
+extern ap_memcpy
+
+FR_FRAME equ 8208  ; 8192 buf + 16 overhead
+DEF_FUNC fileobj_read, FR_FRAME
+    push rbx
+    push r12
+
+    mov rbx, [rdi]              ; self (fileobj)
+    mov r12, [rbx + PyFileObject.file_fd]  ; fd
+
+    ; Read into stack buffer
+    lea rsi, [rbp - FR_FRAME]
+    mov edx, 8192
+    mov edi, r12d
+    call sys_read
+    ; rax = bytes read
+    test rax, rax
+    jle .fr_empty
+
+    ; Null-terminate and create string
+    mov rbx, rax                ; save length
+    lea rdi, [rbp - FR_FRAME]
+    mov byte [rdi + rbx], 0
+    call str_from_cstr
+
+    mov edx, TAG_PTR
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.fr_empty:
+    CSTRING rdi, ""
+    call str_from_cstr
+    mov edx, TAG_PTR
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC fileobj_read
+
+; ============================================================================
+; fileobj_readline(PyObject **args, int64_t nargs) -> str
+; Read one line from file
+; ============================================================================
+FRL_FRAME equ 8208
+DEF_FUNC fileobj_readline, FRL_FRAME
+    push rbx
+    push r12
+    push r13
+
+    mov rbx, [rdi]              ; self
+    mov r12, [rbx + PyFileObject.file_fd]  ; fd
+    xor r13d, r13d              ; bytes read so far
+
+.frl_loop:
+    cmp r13, 8190
+    jge .frl_done               ; buffer full
+
+    ; Read one byte at a time
+    lea rsi, [rbp - FRL_FRAME]
+    add rsi, r13
+    mov edx, 1
+    mov edi, r12d
+    call sys_read
+    test rax, rax
+    jle .frl_done               ; EOF or error
+
+    ; Check for newline
+    lea rdi, [rbp - FRL_FRAME]
+    cmp byte [rdi + r13], 10    ; '\n'
+    je .frl_got_newline
+
+    inc r13
+    jmp .frl_loop
+
+.frl_got_newline:
+    inc r13                     ; include the newline
+
+.frl_done:
+    ; Create string from buffer
+    lea rdi, [rbp - FRL_FRAME]
+    mov byte [rdi + r13], 0     ; null-terminate
+    call str_from_cstr
+    mov edx, TAG_PTR
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC fileobj_readline
+
+; ============================================================================
 ; fileobj_getattr(PyObject *self, PyObject *name_str) -> PyObject*
 ; Attribute access for file objects: encoding, errors, name, mode, methods
 ; ============================================================================
@@ -328,6 +426,20 @@ DEF_FUNC fileobj_getattr
     call ap_strcmp
     test eax, eax
     jz .ret_close
+
+    ; Check "read"
+    lea rdi, [r12 + PyStrObject.data]
+    CSTRING rsi, "read"
+    call ap_strcmp
+    test eax, eax
+    jz .ret_read
+
+    ; Check "readline"
+    lea rdi, [r12 + PyStrObject.data]
+    CSTRING rsi, "readline"
+    call ap_strcmp
+    test eax, eax
+    jz .ret_readline
 
     ; Check "encoding"
     lea rdi, [r12 + PyStrObject.data]
@@ -430,6 +542,18 @@ DEF_FUNC fileobj_getattr
 .ret_close:
     lea rdi, [rel fileobj_close_method]
     lea rsi, [rel fa_close]
+    call builtin_func_new
+    jmp .bind_method
+
+.ret_read:
+    lea rdi, [rel fileobj_read]
+    CSTRING rsi, "read"
+    call builtin_func_new
+    jmp .bind_method
+
+.ret_readline:
+    lea rdi, [rel fileobj_readline]
+    CSTRING rsi, "readline"
     call builtin_func_new
     jmp .bind_method
 

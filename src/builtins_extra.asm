@@ -49,6 +49,8 @@ extern exc_TypeError_type
 extern exc_ValueError_type
 extern exc_AttributeError_type
 extern exc_StopIteration_type
+extern gen_type
+extern raise_exception_obj
 extern list_new
 extern list_append
 extern list_contains
@@ -1532,6 +1534,7 @@ END_FUNC builtin_iter_fn
 ; 11. builtin_next_fn(args, nargs) - next(x)
 ; ============================================================================
 DEF_FUNC builtin_next_fn
+    push rbx
 
     cmp rsi, 1
     jne .next_error
@@ -1545,19 +1548,34 @@ DEF_FUNC builtin_next_fn
     test rcx, rcx
     jz .next_type_error
 
+    mov rbx, rdi                       ; save iterator for StopIteration.value
     call rcx
     test edx, edx
     jz .next_stop
 
     ; tp_iternext already returns fat (rax=payload, rdx=tag)
-    ; rdx = tag already set by callee
+    pop rbx
     leave
     ret
 
 .next_stop:
+    ; Check if iterator is a generator (has gi_return_value)
+    lea rax, [rel gen_type]
+    cmp [rbx + PyObject.ob_type], rax
+    jne .next_stop_no_val
+    ; Get generator's return value for StopIteration
+    mov rsi, [rbx + PyGenObject.gi_return_value]
+    mov edx, [rbx + PyGenObject.gi_return_tag]
+    test edx, edx
+    jnz .next_stop_with_val
+.next_stop_no_val:
+    lea rsi, [rel none_singleton]
+    mov edx, TAG_PTR
+.next_stop_with_val:
     lea rdi, [rel exc_StopIteration_type]
-    CSTRING rsi, ""
-    call raise_exception
+    call exc_new
+    mov rdi, rax
+    call raise_exception_obj
 
 .next_type_error:
     lea rdi, [rel exc_TypeError_type]
@@ -2560,3 +2578,741 @@ DEF_FUNC builtin_eval_fn
     CSTRING rsi, "eval() arg 1 must be a string"
     call raise_exception
 END_FUNC builtin_eval_fn
+
+; ============================================================================
+; builtin_round_fn(args, nargs) - round(number[, ndigits])
+; 1 arg: round to nearest int (banker's rounding)
+; 2 args: round to ndigits decimal places
+; ============================================================================
+extern exc_RuntimeError_type
+
+global builtin_round_fn
+RND_FRAME equ 16
+DEF_FUNC builtin_round_fn, RND_FRAME
+    push rbx
+
+    cmp rsi, 1
+    je .rnd_one_arg
+    cmp rsi, 2
+    je .rnd_two_arg
+    jmp .rnd_error
+
+.rnd_one_arg:
+    ; round(x) — return int
+    mov rax, [rdi]          ; payload
+    mov ecx, [rdi + 8]     ; tag
+
+    cmp ecx, TAG_SMALLINT
+    je .rnd_int_ret          ; int → return as-is
+
+    ; Extract double from TAG_FLOAT or TAG_PTR (PyFloatObject)
+    cmp ecx, TAG_FLOAT
+    je .rnd_one_raw_float
+    cmp ecx, TAG_PTR
+    jne .rnd_type_error
+    ; Check if it's a PyFloatObject
+    lea rcx, [rel float_type]
+    cmp [rax + PyObject.ob_type], rcx
+    jne .rnd_one_check_int_obj
+    movsd xmm0, [rax + PyFloatObject.value]
+    jmp .rnd_one_do_round
+.rnd_one_check_int_obj:
+    ; Check if it's a PyIntObject (heap int)
+    lea rcx, [rel int_type]
+    cmp [rax + PyObject.ob_type], rcx
+    jne .rnd_type_error
+    ; It's a heap int — convert to i64 and return as SmallInt
+    mov rdi, rax
+    call int_to_i64
+    mov edx, TAG_SMALLINT
+    pop rbx
+    leave
+    ret
+.rnd_one_raw_float:
+    movq xmm0, rax
+
+.rnd_one_do_round:
+    ; Float: banker's rounding (x86 default rounding mode = round-to-nearest-even)
+    cvtsd2si rax, xmm0     ; round-to-nearest-even
+    mov edx, TAG_SMALLINT
+    pop rbx
+    leave
+    ret
+
+.rnd_int_ret:
+    mov edx, TAG_SMALLINT
+    pop rbx
+    leave
+    ret
+
+.rnd_two_arg:
+    ; round(x, ndigits)
+    mov rax, [rdi]          ; x payload
+    mov ecx, [rdi + 8]     ; x tag
+    mov rbx, [rdi + 16]    ; ndigits payload
+    mov r8d, [rdi + 24]    ; ndigits tag
+
+    ; ndigits must be int
+    cmp r8d, TAG_SMALLINT
+    jne .rnd_type_error
+
+    ; Check x type — extract double
+    cmp ecx, TAG_SMALLINT
+    je .rnd_two_int
+    cmp ecx, TAG_FLOAT
+    je .rnd_two_raw_float
+    cmp ecx, TAG_PTR
+    jne .rnd_type_error
+    ; Check if PyFloatObject
+    lea rcx, [rel float_type]
+    cmp [rax + PyObject.ob_type], rcx
+    jne .rnd_type_error
+    movsd xmm0, [rax + PyFloatObject.value]
+    jmp .rnd_two_got_float
+.rnd_two_raw_float:
+    movq xmm0, rax          ; xmm0 = x (double)
+.rnd_two_got_float:
+
+    ; round(float, ndigits): multiply by 10^ndigits, round, divide
+    mov [rbp - RND_FRAME], rbx  ; save ndigits
+
+    ; Compute 10^ndigits (ndigits in rbx as int64)
+    mov rax, 1               ; multiplier = 1
+    test rbx, rbx
+    jz .rnd_two_no_scale
+    js .rnd_two_neg_scale
+    mov rcx, rbx
+.rnd_pow10_loop:
+    imul rax, 10
+    dec rcx
+    jnz .rnd_pow10_loop
+
+.rnd_two_no_scale:
+    ; xmm0 = x, rax = 10^ndigits
+    cvtsi2sd xmm1, rax      ; xmm1 = 10^ndigits
+    mulsd xmm0, xmm1        ; x * 10^n
+    cvtsd2si rax, xmm0      ; banker's round
+    cvtsi2sd xmm0, rax      ; back to double
+    divsd xmm0, xmm1        ; / 10^n
+    movq rax, xmm0
+    mov edx, TAG_FLOAT
+    pop rbx
+    leave
+    ret
+
+.rnd_two_neg_scale:
+    ; Negative ndigits for float: e.g., round(1234.5, -2) = 1200.0
+    neg rbx
+    mov rax, 1
+    mov rcx, rbx
+.rnd_pow10n_loop:
+    imul rax, 10
+    dec rcx
+    jnz .rnd_pow10n_loop
+
+    cvtsi2sd xmm1, rax      ; xmm1 = 10^|ndigits|
+    divsd xmm0, xmm1        ; x / 10^n
+    cvtsd2si rax, xmm0      ; banker's round
+    cvtsi2sd xmm0, rax
+    mulsd xmm0, xmm1        ; * 10^n
+    movq rax, xmm0
+    mov edx, TAG_FLOAT
+    pop rbx
+    leave
+    ret
+
+.rnd_two_int:
+    ; round(int, ndigits) — ndigits >= 0: return int as-is
+    ; ndigits < 0: round to nearest 10^|ndigits|
+    test rbx, rbx
+    jns .rnd_int_ret         ; ndigits >= 0, int stays the same
+
+    ; Negative ndigits: round(1234, -2) = 1200
+    neg rbx
+    ; Compute 10^|ndigits|
+    mov rcx, 1
+.rnd_int_pow10:
+    imul rcx, 10
+    dec rbx
+    jnz .rnd_int_pow10
+
+    ; rax = x, rcx = divisor
+    ; rounded = (x + divisor/2) / divisor * divisor (away from zero simple)
+    ; Python uses banker's: convert to float, round, convert back
+    cvtsi2sd xmm0, rax
+    cvtsi2sd xmm1, rcx
+    divsd xmm0, xmm1
+    cvtsd2si rax, xmm0      ; banker's round
+    imul rax, rcx
+    mov edx, TAG_SMALLINT
+    pop rbx
+    leave
+    ret
+
+.rnd_error:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "round() takes 1 or 2 arguments"
+    call raise_exception
+
+.rnd_type_error:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "type cannot be rounded"
+    call raise_exception
+END_FUNC builtin_round_fn
+
+; ============================================================================
+; builtin_pow_fn(args, nargs) - pow(base, exp[, mod])
+; 2 args: base ** exp
+; 3 args: pow(base, exp, mod) — modular exponentiation
+; ============================================================================
+global builtin_pow_fn
+POW_FRAME equ 24
+DEF_FUNC builtin_pow_fn, POW_FRAME
+    push rbx
+    push r12
+    push r13
+
+    cmp rsi, 2
+    je .pow_two
+    cmp rsi, 3
+    je .pow_three
+    jmp .pow_error
+
+.pow_two:
+    ; pow(base, exp)
+    mov rax, [rdi]          ; base payload
+    mov ecx, [rdi + 8]     ; base tag
+    mov rbx, [rdi + 16]    ; exp payload
+    mov r8d, [rdi + 24]    ; exp tag
+
+    ; Both SmallInt?
+    cmp ecx, TAG_SMALLINT
+    jne .pow_two_float
+    cmp r8d, TAG_SMALLINT
+    jne .pow_two_float
+
+    ; int ** int
+    test rbx, rbx
+    js .pow_neg_exp          ; negative exp → float result
+
+    ; Non-negative int exponent: repeated squaring
+    mov r12, rax             ; base
+    mov r13, rbx             ; exp
+    mov rax, 1               ; result = 1
+.pow_sq_loop:
+    test r13, r13
+    jz .pow_sq_done
+    test r13, 1
+    jz .pow_sq_even
+    imul rax, r12            ; result *= base
+.pow_sq_even:
+    imul r12, r12            ; base *= base
+    shr r13, 1
+    jmp .pow_sq_loop
+.pow_sq_done:
+    mov edx, TAG_SMALLINT
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.pow_neg_exp:
+    ; int ** negative_int → float
+    cvtsi2sd xmm0, rax      ; base as double
+    cvtsi2sd xmm1, rbx      ; exp as double (negative)
+    ; Use repeated multiplication for positive abs(exp), then invert
+    neg rbx
+    mov r12, 1               ; result = 1 (integer)
+    mov r13, rbx
+    cvtsi2sd xmm0, rax      ; base
+    movsd xmm2, xmm0        ; save base
+    movq xmm0, [rel const_one] ; result = 1.0
+.pow_neg_loop:
+    test r13, r13
+    jz .pow_neg_done
+    test r13, 1
+    jz .pow_neg_even
+    mulsd xmm0, xmm2        ; result *= base
+.pow_neg_even:
+    mulsd xmm2, xmm2        ; base *= base
+    shr r13, 1
+    jmp .pow_neg_loop
+.pow_neg_done:
+    ; xmm0 = base^|exp|, invert
+    movq xmm1, [rel const_one]
+    divsd xmm1, xmm0        ; 1.0 / base^|exp|
+    movq rax, xmm1
+    mov edx, TAG_FLOAT
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.pow_two_float:
+    ; At least one is float: convert both to double
+    cmp ecx, TAG_SMALLINT
+    jne .pow_f_base_float
+    cvtsi2sd xmm0, rax
+    jmp .pow_f_got_base
+.pow_f_base_float:
+    cmp ecx, TAG_FLOAT
+    je .pow_f_base_raw
+    ; TAG_PTR: extract from PyFloatObject
+    cmp ecx, TAG_PTR
+    jne .pow_type_error
+    lea rcx, [rel float_type]
+    cmp [rax + PyObject.ob_type], rcx
+    jne .pow_type_error
+    movsd xmm0, [rax + PyFloatObject.value]
+    jmp .pow_f_got_base
+.pow_f_base_raw:
+    movq xmm0, rax
+.pow_f_got_base:
+    cmp r8d, TAG_SMALLINT
+    jne .pow_f_exp_float
+    cvtsi2sd xmm1, rbx
+    jmp .pow_f_got_exp
+.pow_f_exp_float:
+    cmp r8d, TAG_FLOAT
+    je .pow_f_exp_raw
+    ; TAG_PTR: extract from PyFloatObject
+    cmp r8d, TAG_PTR
+    jne .pow_type_error
+    lea rcx, [rel float_type]
+    cmp [rbx + PyObject.ob_type], rcx
+    jne .pow_type_error
+    movsd xmm1, [rbx + PyFloatObject.value]
+    jmp .pow_f_got_exp
+.pow_f_exp_raw:
+    movq xmm1, rbx
+.pow_f_got_exp:
+    ; xmm0 = base, xmm1 = exp
+    ; Use repeated squaring for integer exponents, or fall back to exp*ln
+    ; Simple: convert to C pow() equivalent using exp/ln
+    ; x^y = exp2(y * log2(x)) — but we don't have those instructions easily
+    ; Use a simpler approach: if exp is a small integer, use repeated mult
+    cvtsd2si rcx, xmm1
+    cvtsi2sd xmm2, rcx
+    ucomisd xmm1, xmm2
+    jne .pow_f_general       ; exp is not an integer
+    jp .pow_f_general        ; NaN
+
+    ; Integer exponent: repeated squaring
+    mov r13, rcx
+    test r13, r13
+    js .pow_f_neg
+
+    movq xmm2, [rel const_one] ; result = 1.0
+.pow_f_sq:
+    test r13, r13
+    jz .pow_f_sq_done
+    test r13, 1
+    jz .pow_f_sq_even
+    mulsd xmm2, xmm0
+.pow_f_sq_even:
+    mulsd xmm0, xmm0
+    shr r13, 1
+    jmp .pow_f_sq
+.pow_f_sq_done:
+    movq rax, xmm2
+    mov edx, TAG_FLOAT
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.pow_f_neg:
+    neg r13
+    movq xmm2, [rel const_one]
+.pow_f_neg_sq:
+    test r13, r13
+    jz .pow_f_neg_done
+    test r13, 1
+    jz .pow_f_neg_even
+    mulsd xmm2, xmm0
+.pow_f_neg_even:
+    mulsd xmm0, xmm0
+    shr r13, 1
+    jmp .pow_f_neg_sq
+.pow_f_neg_done:
+    movq xmm0, [rel const_one]
+    divsd xmm0, xmm2
+    movq rax, xmm0
+    mov edx, TAG_FLOAT
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.pow_f_general:
+    ; Non-integer float exponent: x^y = 2^(y * log2(x))
+    ; xmm0 = base, xmm1 = exp
+    ; fyl2x computes st(1) * log2(st(0)), so load exp first, then base
+    sub rsp, 16
+    movsd [rsp], xmm1          ; exp on stack
+    fld qword [rsp]             ; st(0) = exp
+    movsd [rsp], xmm0          ; base on stack
+    fld qword [rsp]             ; st(0) = base, st(1) = exp
+    fyl2x                       ; st(0) = exp * log2(base)
+    ; Compute 2^st(0): split into int + frac
+    fld st0                     ; dup
+    frndint                     ; st(0) = int part
+    fsub st1, st0               ; st(1) = frac part
+    fxch st1                    ; st(0) = frac, st(1) = int
+    f2xm1                       ; st(0) = 2^frac - 1
+    fld1
+    faddp st1, st0              ; st(0) = 2^frac
+    fscale                      ; st(0) = 2^frac * 2^int = result
+    fstp st1                    ; pop int part
+    fstp qword [rsp]            ; store result
+    movsd xmm0, [rsp]
+    add rsp, 16
+    movq rax, xmm0
+    mov edx, TAG_FLOAT
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.pow_three:
+    ; pow(base, exp, mod) — modular exponentiation
+    mov rax, [rdi]          ; base
+    mov ecx, [rdi + 8]     ; base tag
+    mov rbx, [rdi + 16]    ; exp
+    mov r8d, [rdi + 24]    ; exp tag
+    mov r12, [rdi + 32]    ; mod
+    mov r9d, [rdi + 40]    ; mod tag
+
+    ; All must be SmallInt
+    cmp ecx, TAG_SMALLINT
+    jne .pow_type_error
+    cmp r8d, TAG_SMALLINT
+    jne .pow_type_error
+    cmp r9d, TAG_SMALLINT
+    jne .pow_type_error
+
+    ; exp must be >= 0
+    test rbx, rbx
+    js .pow_neg_mod_exp
+    ; mod must be != 0
+    test r12, r12
+    jz .pow_zero_mod
+
+    ; Modular exponentiation: result = base^exp mod mod
+    mov r13, rbx            ; exp
+    ; rax = base, r12 = mod
+    ; Reduce base mod first
+    cqo
+    idiv r12                ; rax=quot, rdx=rem
+    mov rax, rdx            ; base = base % mod
+    ; Handle negative remainder
+    test rax, rax
+    jns .pow_mod_pos
+    add rax, r12
+.pow_mod_pos:
+    mov rcx, 1              ; result = 1
+.pow_mod_loop:
+    test r13, r13
+    jz .pow_mod_done
+    test r13, 1
+    jz .pow_mod_even
+    imul rcx, rax           ; result *= base
+    ; result %= mod
+    push rax
+    mov rax, rcx
+    cqo
+    idiv r12
+    mov rcx, rdx
+    test rcx, rcx
+    jns .pow_mod_pos2
+    add rcx, r12
+.pow_mod_pos2:
+    pop rax
+.pow_mod_even:
+    imul rax, rax           ; base *= base
+    ; base %= mod
+    push rcx
+    cqo
+    idiv r12
+    mov rax, rdx
+    test rax, rax
+    jns .pow_mod_pos3
+    add rax, r12
+.pow_mod_pos3:
+    pop rcx
+    shr r13, 1
+    jmp .pow_mod_loop
+.pow_mod_done:
+    mov rax, rcx
+    mov edx, TAG_SMALLINT
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.pow_neg_mod_exp:
+    lea rdi, [rel exc_ValueError_type]
+    CSTRING rsi, "pow() 2nd argument cannot be negative when 3rd argument specified"
+    call raise_exception
+
+.pow_zero_mod:
+    lea rdi, [rel exc_ValueError_type]
+    CSTRING rsi, "pow() 3rd argument cannot be 0"
+    call raise_exception
+
+.pow_error:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "pow() takes 2 or 3 arguments"
+    call raise_exception
+
+.pow_type_error:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "pow() arguments must be numeric"
+    call raise_exception
+END_FUNC builtin_pow_fn
+
+section .rodata
+align 8
+const_one: dq 0x3FF0000000000000   ; 1.0 in IEEE 754
+
+section .text
+
+; ============================================================================
+; builtin_input_fn(args, nargs) - input([prompt])
+; 0 args: read line from stdin
+; 1 arg: print prompt, then read line
+; ============================================================================
+extern sys_write
+extern sys_read
+
+global builtin_input_fn
+INP_BUF_SIZE equ 4096
+INP_FRAME equ INP_BUF_SIZE + 16  ; buffer + saved values
+DEF_FUNC builtin_input_fn, INP_FRAME
+    cmp rsi, 0
+    je .inp_no_prompt
+    cmp rsi, 1
+    jne .inp_error
+
+    ; Print prompt to stdout
+    mov rax, [rdi]          ; prompt payload
+    mov ecx, [rdi + 8]     ; prompt tag
+    cmp ecx, TAG_PTR
+    jne .inp_type_error
+
+    ; Write prompt string data
+    mov rsi, rax
+    add rsi, PyStrObject.data  ; buf ptr
+    mov rdx, [rax + PyStrObject.ob_size]  ; len
+    mov edi, 1              ; stdout
+    call sys_write
+
+.inp_no_prompt:
+    ; Read line from stdin into stack buffer
+    lea rsi, [rbp - INP_FRAME]  ; buffer
+    mov edx, INP_BUF_SIZE - 1
+    xor edi, edi            ; stdin (fd=0)
+    call sys_read
+    ; rax = bytes read (or negative on error)
+    test rax, rax
+    jle .inp_empty
+
+    ; Strip trailing newline
+    lea rdi, [rbp - INP_FRAME]
+    mov rcx, rax
+    dec rcx
+    cmp byte [rdi + rcx], 10  ; '\n'
+    jne .inp_no_strip
+    dec rax                  ; exclude newline
+.inp_no_strip:
+    ; Null-terminate
+    mov byte [rdi + rax], 0
+
+    ; Create string from buffer
+    ; rdi already points to buffer
+    call str_from_cstr
+    mov edx, TAG_PTR
+    leave
+    ret
+
+.inp_empty:
+    ; EOF or error: return empty string
+    CSTRING rdi, ""
+    call str_from_cstr
+    mov edx, TAG_PTR
+    leave
+    ret
+
+.inp_error:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "input() takes at most 1 argument"
+    call raise_exception
+
+.inp_type_error:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "input() prompt must be a string"
+    call raise_exception
+END_FUNC builtin_input_fn
+
+; ============================================================================
+; builtin_open_fn(args, nargs) - open(filename[, mode])
+; 1 arg: open for reading ('r')
+; 2 args: open with specified mode
+; ============================================================================
+extern sys_open
+extern sys_close
+extern file_type
+
+global builtin_open_fn
+OPN_FRAME equ 32
+DEF_FUNC builtin_open_fn, OPN_FRAME
+    push rbx
+    push r12
+    push r13
+
+    cmp rsi, 1
+    je .opn_default_mode
+    cmp rsi, 2
+    je .opn_with_mode
+    jmp .opn_error
+
+.opn_default_mode:
+    ; filename only — default mode 'r'
+    mov rax, [rdi]          ; filename str
+    mov ecx, [rdi + 8]     ; filename tag
+    cmp ecx, TAG_PTR
+    jne .opn_type_error
+    mov rbx, rax            ; save filename str
+
+    ; Open read-only: O_RDONLY=0
+    lea rdi, [rax + PyStrObject.data]
+    xor esi, esi            ; flags = O_RDONLY
+    xor edx, edx            ; mode = 0
+    call sys_open
+    mov r12, rax            ; fd
+    test rax, rax
+    js .opn_file_error
+
+    ; Create default mode string "r"
+    CSTRING rdi, "r"
+    call str_from_cstr
+    mov r13, rax            ; mode str
+    jmp .opn_create_fileobj
+
+.opn_with_mode:
+    mov rax, [rdi]          ; filename str
+    mov ecx, [rdi + 8]
+    cmp ecx, TAG_PTR
+    jne .opn_type_error
+    mov rbx, rax            ; save filename str
+
+    mov rax, [rdi + 16]    ; mode str
+    mov ecx, [rdi + 24]
+    cmp ecx, TAG_PTR
+    jne .opn_type_error
+    mov r13, rax            ; save mode str
+
+    ; Parse mode string
+    lea rdi, [rax + PyStrObject.data]
+    movzx eax, byte [rdi]
+
+    cmp al, 'r'
+    je .opn_mode_r
+    cmp al, 'w'
+    je .opn_mode_w
+    cmp al, 'a'
+    je .opn_mode_a
+    cmp al, 'x'
+    je .opn_mode_x
+    jmp .opn_bad_mode
+
+.opn_mode_r:
+    ; Check for 'r+' or 'rb' or just 'r'
+    movzx ecx, byte [rdi + 1]
+    cmp cl, '+'
+    je .opn_rw
+    xor esi, esi            ; O_RDONLY
+    jmp .opn_do_open
+
+.opn_rw:
+    mov esi, 2              ; O_RDWR
+    jmp .opn_do_open
+
+.opn_mode_w:
+    mov esi, 0x241          ; O_WRONLY|O_CREAT|O_TRUNC (1|0x40|0x200)
+    jmp .opn_do_open
+
+.opn_mode_a:
+    mov esi, 0x441          ; O_WRONLY|O_CREAT|O_APPEND (1|0x40|0x400)
+    jmp .opn_do_open
+
+.opn_mode_x:
+    mov esi, 0xC1           ; O_WRONLY|O_CREAT|O_EXCL (1|0x40|0x80)
+    jmp .opn_do_open
+
+.opn_do_open:
+    push rsi                ; save flags
+    lea rdi, [rbx + PyStrObject.data]  ; filename cstr
+    pop rsi                 ; restore flags
+    mov edx, 0644o          ; default file permissions
+    call sys_open
+    mov r12, rax
+    test rax, rax
+    js .opn_file_error
+
+    ; INCREF mode str (we're storing a ref)
+    mov rdi, r13
+    call obj_incref
+
+.opn_create_fileobj:
+    ; Allocate PyFileObject
+    mov edi, PyFileObject_size
+    call ap_malloc
+
+    mov qword [rax + PyObject.ob_refcnt], 1
+    lea rcx, [rel file_type]
+    mov [rax + PyObject.ob_type], rcx
+    mov [rax + PyFileObject.file_fd], r12
+    mov [rax + PyFileObject.file_name], rbx
+    mov [rax + PyFileObject.file_mode], r13
+
+    ; INCREF filename (storing ref)
+    push rax
+    mov rdi, rbx
+    call obj_incref
+    pop rax
+
+    mov edx, TAG_PTR
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.opn_file_error:
+    extern exc_FileNotFoundError_type
+    lea rdi, [rel exc_FileNotFoundError_type]
+    CSTRING rsi, "No such file or directory"
+    call raise_exception
+
+.opn_bad_mode:
+    lea rdi, [rel exc_ValueError_type]
+    CSTRING rsi, "invalid mode string"
+    call raise_exception
+
+.opn_error:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "open() takes 1 or 2 arguments"
+    call raise_exception
+
+.opn_type_error:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "open() arguments must be strings"
+    call raise_exception
+END_FUNC builtin_open_fn

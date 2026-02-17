@@ -1648,6 +1648,34 @@ DEF_FUNC builtins_init
     lea rdx, [rel builtin_eval_fn]
     call add_builtin
 
+    ; round
+    mov rdi, rbx
+    lea rsi, [rel bi_name_round]
+    extern builtin_round_fn
+    lea rdx, [rel builtin_round_fn]
+    call add_builtin
+
+    ; pow
+    mov rdi, rbx
+    lea rsi, [rel bi_name_pow]
+    extern builtin_pow_fn
+    lea rdx, [rel builtin_pow_fn]
+    call add_builtin
+
+    ; input
+    mov rdi, rbx
+    lea rsi, [rel bi_name_input]
+    extern builtin_input_fn
+    lea rdx, [rel builtin_input_fn]
+    call add_builtin
+
+    ; open
+    mov rdi, rbx
+    lea rsi, [rel bi_name_open]
+    extern builtin_open_fn
+    lea rdx, [rel builtin_open_fn]
+    call add_builtin
+
     ; Return builtins dict
     mov rax, rbx
 
@@ -1784,6 +1812,10 @@ bi_name_set:               db "set", 0
 bi_name_bytes:             db "bytes", 0
 bi_name_bytearray:         db "bytearray", 0
 bi_name_memoryview:        db "memoryview", 0
+bi_name_round:             db "round", 0
+bi_name_pow:               db "pow", 0
+bi_name_input:             db "input", 0
+bi_name_open:              db "open", 0
 
 section .data
 

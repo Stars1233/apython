@@ -12,9 +12,15 @@ extern sys_write
 extern str_from_cstr
 extern none_singleton
 extern bool_false
+extern bool_true
 extern int_repr
 extern int_type
+extern float_type
+extern float_repr
+extern none_repr
+extern bool_repr
 extern type_getattr
+extern type_setattr
 extern type_call
 
 ; obj_alloc(size_t size, PyTypeObject *type) -> PyObject*
@@ -98,10 +104,17 @@ END_FUNC obj_dealloc
 
 ; obj_repr(rdi=payload, rsi=tag) -> PyObject* (string)
 ; Dispatches on tag. SmallInt → int_repr. TAG_PTR → tp_repr.
+; Also handles TAG_FLOAT, TAG_NONE, TAG_BOOL inline.
 DEF_FUNC obj_repr
 
     cmp esi, TAG_SMALLINT
     je .smallint
+    cmp esi, TAG_FLOAT
+    je .float_tag
+    cmp esi, TAG_NONE
+    je .none_tag
+    cmp esi, TAG_BOOL
+    je .bool_tag
 
     ; TAG_PTR: use tp_repr
     test rdi, rdi
@@ -126,6 +139,37 @@ DEF_FUNC obj_repr
     leave
     ret
 
+.float_tag:
+    ; Create temp PyFloatObject on stack, call float_repr
+    sub rsp, 32
+    mov qword [rsp], 1            ; ob_refcnt
+    lea rax, [rel float_type]
+    mov [rsp + 8], rax             ; ob_type
+    mov [rsp + 16], rdi            ; value (double bits)
+    mov rdi, rsp
+    call float_repr
+    add rsp, 32
+    leave
+    ret
+
+.none_tag:
+    call none_repr
+    leave
+    ret
+
+.bool_tag:
+    test rdi, rdi
+    jz .bool_false_repr
+    lea rdi, [rel bool_true]
+    call bool_repr
+    leave
+    ret
+.bool_false_repr:
+    lea rdi, [rel bool_false]
+    call bool_repr
+    leave
+    ret
+
 .null_obj:
 .no_repr:
     xor eax, eax
@@ -135,6 +179,7 @@ END_FUNC obj_repr
 
 ; obj_str(rdi=payload, rsi=tag) -> PyObject* (string)
 ; Dispatches on tag. SmallInt → int_repr. TAG_PTR → tp_str, falls back to tp_repr.
+; Also handles TAG_FLOAT, TAG_NONE, TAG_BOOL inline.
 DEF_FUNC obj_str
     push rbx
     push r12
@@ -143,6 +188,12 @@ DEF_FUNC obj_str
 
     cmp esi, TAG_SMALLINT
     je .smallint
+    cmp esi, TAG_FLOAT
+    je .float_tag
+    cmp esi, TAG_NONE
+    je .none_tag
+    cmp esi, TAG_BOOL
+    je .bool_tag
 
     ; TAG_PTR path
     test rdi, rdi
@@ -169,6 +220,45 @@ DEF_FUNC obj_str
     mov rdi, rbx
     RET_TAG_SMALLINT
     call int_repr
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.float_tag:
+    ; Create temp PyFloatObject on stack, call float_repr (float's tp_str)
+    sub rsp, 32
+    mov qword [rsp], 1            ; ob_refcnt
+    lea rax, [rel float_type]
+    mov [rsp + 8], rax             ; ob_type
+    mov [rsp + 16], rbx            ; value (double bits from payload)
+    mov rdi, rsp
+    call float_repr
+    add rsp, 32
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.none_tag:
+    call none_repr
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.bool_tag:
+    test rbx, rbx
+    jz .bool_false_str
+    lea rdi, [rel bool_true]
+    call bool_repr                 ; bool tp_str = bool_repr
+    pop r12
+    pop rbx
+    leave
+    ret
+.bool_false_str:
+    lea rdi, [rel bool_false]
+    call bool_repr
     pop r12
     pop rbx
     leave
@@ -498,7 +588,7 @@ type_type:
     dq 0                      ; tp_hash
     dq type_call              ; tp_call — calling a type creates instances
     dq type_getattr           ; tp_getattr — __name__, tp_dict lookups
-    dq 0                      ; tp_setattr
+    dq type_setattr           ; tp_setattr
     dq 0                      ; tp_richcompare
     dq 0                      ; tp_iter
     dq 0                      ; tp_iternext

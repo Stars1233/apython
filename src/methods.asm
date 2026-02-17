@@ -47,6 +47,21 @@ extern exc_ValueError_type
 extern exc_IndexError_type
 extern exc_KeyError_type
 extern int_type
+extern set_type
+extern object_type
+extern object_new_fn
+extern staticmethod_type
+
+; Set entry layout constants (must match set.asm)
+SET_ENTRY_HASH    equ 0
+SET_ENTRY_KEY     equ 8
+SET_ENTRY_KEY_TAG equ 16
+SET_ENTRY_SIZE    equ 24
+extern set_add
+extern set_contains
+extern set_remove
+extern set_new
+extern set_tp_iter
 
 ;; ============================================================================
 ;; HELPER: add_method_to_dict(dict, name_cstr, func_ptr)
@@ -1487,6 +1502,204 @@ DEF_FUNC str_method_isalpha
     leave
     ret
 END_FUNC str_method_isalpha
+
+;; ============================================================================
+;; str_method_isalnum(args, nargs) -> bool_true/bool_false
+;; args[0] = self
+;; Returns True if all chars are alphanumeric (0-9, A-Z, a-z) and len>0
+;; ============================================================================
+DEF_FUNC str_method_isalnum
+    mov rax, [rdi]          ; self
+    mov rcx, [rax + PyStrObject.ob_size]
+
+    ; Empty string -> False
+    test rcx, rcx
+    jz .isalnum_false
+
+    xor edx, edx            ; index
+.isalnum_loop:
+    cmp rdx, rcx
+    jge .isalnum_true
+    movzx esi, byte [rax + PyStrObject.data + rdx]
+    cmp sil, '0'
+    jb .isalnum_false
+    cmp sil, '9'
+    jbe .isalnum_next        ; 0-9
+    cmp sil, 'A'
+    jb .isalnum_false
+    cmp sil, 'Z'
+    jbe .isalnum_next        ; A-Z
+    cmp sil, 'a'
+    jb .isalnum_false
+    cmp sil, 'z'
+    ja .isalnum_false
+.isalnum_next:
+    inc rdx
+    jmp .isalnum_loop
+
+.isalnum_true:
+    lea rax, [rel bool_true]
+    inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
+    leave
+    ret
+
+.isalnum_false:
+    lea rax, [rel bool_false]
+    inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
+    leave
+    ret
+END_FUNC str_method_isalnum
+
+;; ============================================================================
+;; str_method_isspace(args, nargs) -> bool_true/bool_false
+;; args[0] = self
+;; Returns True if all chars are whitespace (space/tab/newline/CR/VT/FF) and len>0
+;; ============================================================================
+DEF_FUNC str_method_isspace
+    mov rax, [rdi]          ; self
+    mov rcx, [rax + PyStrObject.ob_size]
+
+    ; Empty string -> False
+    test rcx, rcx
+    jz .isspace_false
+
+    xor edx, edx            ; index
+.isspace_loop:
+    cmp rdx, rcx
+    jge .isspace_true
+    movzx esi, byte [rax + PyStrObject.data + rdx]
+    cmp sil, 0x20           ; space
+    je .isspace_next
+    cmp sil, 0x09           ; tab
+    jb .isspace_false
+    cmp sil, 0x0D           ; tab(09), newline(0A), VT(0B), FF(0C), CR(0D)
+    ja .isspace_false
+.isspace_next:
+    inc rdx
+    jmp .isspace_loop
+
+.isspace_true:
+    lea rax, [rel bool_true]
+    inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
+    leave
+    ret
+
+.isspace_false:
+    lea rax, [rel bool_false]
+    inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
+    leave
+    ret
+END_FUNC str_method_isspace
+
+;; ============================================================================
+;; str_method_isupper(args, nargs) -> bool_true/bool_false
+;; args[0] = self
+;; Returns True if all cased chars are uppercase, and there is at least one cased char
+;; ============================================================================
+DEF_FUNC str_method_isupper
+    mov rax, [rdi]          ; self
+    mov rcx, [rax + PyStrObject.ob_size]
+
+    ; Empty string -> False
+    test rcx, rcx
+    jz .isupper_false
+
+    xor edx, edx            ; index
+    xor r8d, r8d            ; has_cased flag
+.isupper_loop:
+    cmp rdx, rcx
+    jge .isupper_check_cased
+    movzx esi, byte [rax + PyStrObject.data + rdx]
+    cmp sil, 'A'
+    jb .isupper_next         ; non-alpha, skip
+    cmp sil, 'Z'
+    jbe .isupper_found_upper ; A-Z: uppercase, good
+    cmp sil, 'a'
+    jb .isupper_next         ; non-alpha, skip
+    cmp sil, 'z'
+    jbe .isupper_false       ; a-z: lowercase, fail
+.isupper_next:
+    inc rdx
+    jmp .isupper_loop
+.isupper_found_upper:
+    mov r8d, 1               ; found at least one cased char
+    inc rdx
+    jmp .isupper_loop
+.isupper_check_cased:
+    test r8d, r8d
+    jz .isupper_false        ; no cased chars found
+
+    lea rax, [rel bool_true]
+    inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
+    leave
+    ret
+
+.isupper_false:
+    lea rax, [rel bool_false]
+    inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
+    leave
+    ret
+END_FUNC str_method_isupper
+
+;; ============================================================================
+;; str_method_islower(args, nargs) -> bool_true/bool_false
+;; args[0] = self
+;; Returns True if all cased chars are lowercase, and there is at least one cased char
+;; ============================================================================
+DEF_FUNC str_method_islower
+    mov rax, [rdi]          ; self
+    mov rcx, [rax + PyStrObject.ob_size]
+
+    ; Empty string -> False
+    test rcx, rcx
+    jz .islower_false
+
+    xor edx, edx            ; index
+    xor r8d, r8d            ; has_cased flag
+.islower_loop:
+    cmp rdx, rcx
+    jge .islower_check_cased
+    movzx esi, byte [rax + PyStrObject.data + rdx]
+    cmp sil, 'a'
+    jb .islower_check_upper
+    cmp sil, 'z'
+    jbe .islower_found_lower ; a-z: lowercase, good
+    jmp .islower_next        ; > 'z', non-alpha, skip
+.islower_check_upper:
+    cmp sil, 'A'
+    jb .islower_next         ; non-alpha, skip
+    cmp sil, 'Z'
+    jbe .islower_false       ; A-Z: uppercase, fail
+.islower_next:
+    inc rdx
+    jmp .islower_loop
+.islower_found_lower:
+    mov r8d, 1               ; found at least one cased char
+    inc rdx
+    jmp .islower_loop
+.islower_check_cased:
+    test r8d, r8d
+    jz .islower_false        ; no cased chars found
+
+    lea rax, [rel bool_true]
+    inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
+    leave
+    ret
+
+.islower_false:
+    lea rax, [rel bool_false]
+    inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
+    leave
+    ret
+END_FUNC str_method_islower
 
 ;; ============================================================================
 ;; str_method_removeprefix(args, nargs) -> new string
@@ -3136,6 +3349,858 @@ END_FUNC tuple_method_count
 
 
 ;; ############################################################################
+;;                         SET METHODS
+;; ############################################################################
+
+;; ============================================================================
+;; set_method_add(args, nargs) -> None
+;; args[0]=self, args[1]=elem
+;; ============================================================================
+DEF_FUNC set_method_add
+    cmp rsi, 2
+    jne .sma_error
+
+    mov rax, rdi            ; args ptr
+    mov rdi, [rax]          ; self (set)
+    mov rsi, [rax + 16]     ; elem payload
+    mov edx, [rax + 24]     ; elem tag
+    call set_add
+
+    lea rax, [rel none_singleton]
+    inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
+    leave
+    ret
+
+.sma_error:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "add() takes exactly one argument"
+    call raise_exception
+END_FUNC set_method_add
+
+;; ============================================================================
+;; set_method_remove(args, nargs) -> None (raises KeyError if missing)
+;; args[0]=self, args[1]=elem
+;; ============================================================================
+DEF_FUNC set_method_remove
+    cmp rsi, 2
+    jne .smr_error
+
+    mov rax, rdi
+    mov rdi, [rax]          ; self
+    mov rsi, [rax + 16]     ; elem payload
+    mov edx, [rax + 24]     ; elem tag
+    call set_remove
+    test eax, eax
+    jnz .smr_keyerr
+
+    lea rax, [rel none_singleton]
+    inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
+    leave
+    ret
+
+.smr_keyerr:
+    lea rdi, [rel exc_KeyError_type]
+    CSTRING rsi, "element not in set"
+    call raise_exception
+
+.smr_error:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "remove() takes exactly one argument"
+    call raise_exception
+END_FUNC set_method_remove
+
+;; ============================================================================
+;; set_method_discard(args, nargs) -> None (no error if missing)
+;; args[0]=self, args[1]=elem
+;; ============================================================================
+DEF_FUNC set_method_discard
+    cmp rsi, 2
+    jne .smd_error
+
+    mov rax, rdi
+    mov rdi, [rax]          ; self
+    mov rsi, [rax + 16]     ; elem payload
+    mov edx, [rax + 24]     ; elem tag
+    call set_remove
+    ; Ignore return value (don't care if not found)
+
+    lea rax, [rel none_singleton]
+    inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
+    leave
+    ret
+
+.smd_error:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "discard() takes exactly one argument"
+    call raise_exception
+END_FUNC set_method_discard
+
+;; ============================================================================
+;; set_method_pop(args, nargs) -> removed element
+;; args[0]=self
+;; Scans for first occupied entry, removes and returns it.
+;; ============================================================================
+SMP_FRAME equ 16    ; save self + entry ptr
+DEF_FUNC set_method_pop, SMP_FRAME
+    push rbx
+    push r12
+    push r13
+
+    cmp rsi, 1
+    jne .smpop_error
+
+    mov rbx, [rdi]          ; self (set)
+
+    ; Check empty
+    cmp qword [rbx + PyDictObject.ob_size], 0
+    je .smpop_empty
+
+    ; Scan for first non-empty entry
+    mov r12, [rbx + PyDictObject.entries]
+    mov r13, [rbx + PyDictObject.capacity]
+    xor ecx, ecx            ; index
+
+.smpop_scan:
+    cmp rcx, r13
+    jge .smpop_empty         ; shouldn't happen
+
+    imul rax, rcx, SET_ENTRY_SIZE
+    add rax, r12             ; entry ptr
+
+    cmp qword [rax + SET_ENTRY_KEY_TAG], 0
+    jne .smpop_found
+    inc ecx
+    jmp .smpop_scan
+
+.smpop_found:
+    ; rax = entry ptr with valid key
+    ; Get key (return value) — DON'T incref, we're removing it
+    mov rcx, [rax + SET_ENTRY_KEY]        ; key payload
+    mov r12d, [rax + SET_ENTRY_KEY_TAG]   ; key tag
+
+    ; Clear the entry (mark as empty)
+    mov qword [rax + SET_ENTRY_KEY], 0
+    mov qword [rax + SET_ENTRY_KEY_TAG], 0
+    dec qword [rbx + PyDictObject.ob_size]
+
+    ; Return the key (ownership transfers, no INCREF/DECREF needed)
+    mov rax, rcx
+    mov edx, r12d
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.smpop_empty:
+    lea rdi, [rel exc_KeyError_type]
+    CSTRING rsi, "pop from an empty set"
+    call raise_exception
+
+.smpop_error:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "pop() takes no arguments"
+    call raise_exception
+END_FUNC set_method_pop
+
+;; ============================================================================
+;; set_method_clear(args, nargs) -> None
+;; args[0]=self
+;; ============================================================================
+DEF_FUNC set_method_clear
+    push rbx
+    push r12
+    push r13
+
+    cmp rsi, 1
+    jne .smc_error
+
+    mov rbx, [rdi]          ; self (set)
+    mov r12, [rbx + PyDictObject.entries]
+    mov r13, [rbx + PyDictObject.capacity]
+    xor ecx, ecx
+
+.smc_loop:
+    cmp rcx, r13
+    jge .smc_done
+
+    imul rax, rcx, SET_ENTRY_SIZE
+    add rax, r12
+    push rcx                ; save index
+
+    cmp qword [rax + SET_ENTRY_KEY_TAG], 0
+    je .smc_next
+
+    ; DECREF key
+    mov rdi, [rax + SET_ENTRY_KEY]
+    mov rsi, [rax + SET_ENTRY_KEY_TAG]
+    mov qword [rax + SET_ENTRY_KEY], 0
+    mov qword [rax + SET_ENTRY_KEY_TAG], 0
+    DECREF_VAL rdi, rsi
+
+.smc_next:
+    pop rcx
+    inc ecx
+    jmp .smc_loop
+
+.smc_done:
+    mov qword [rbx + PyDictObject.ob_size], 0
+
+    lea rax, [rel none_singleton]
+    inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.smc_error:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "clear() takes no arguments"
+    call raise_exception
+END_FUNC set_method_clear
+
+;; ============================================================================
+;; set_method_copy(args, nargs) -> new set (shallow copy)
+;; args[0]=self
+;; ============================================================================
+DEF_FUNC set_method_copy
+    push rbx
+    push r12
+    push r13
+    push r14
+
+    cmp rsi, 1
+    jne .smcp_error
+
+    mov r14, [rdi]          ; self (source set)
+
+    ; Create new empty set
+    call set_new
+    mov rbx, rax            ; rbx = new set
+
+    ; Iterate source entries
+    mov r12, [r14 + PyDictObject.entries]
+    mov r13, [r14 + PyDictObject.capacity]
+    xor ecx, ecx
+
+.smcp_loop:
+    cmp rcx, r13
+    jge .smcp_done
+
+    imul rax, rcx, SET_ENTRY_SIZE
+    add rax, r12
+    push rcx
+
+    cmp qword [rax + SET_ENTRY_KEY_TAG], 0
+    je .smcp_next
+
+    ; Add key to new set
+    mov rdi, rbx            ; new set
+    mov rsi, [rax + SET_ENTRY_KEY]
+    mov edx, [rax + SET_ENTRY_KEY_TAG]
+    call set_add
+
+.smcp_next:
+    pop rcx
+    inc ecx
+    jmp .smcp_loop
+
+.smcp_done:
+    mov rax, rbx
+    mov edx, TAG_PTR
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.smcp_error:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "copy() takes no arguments"
+    call raise_exception
+END_FUNC set_method_copy
+
+;; ============================================================================
+;; set_method_union(args, nargs) -> new set = self | other
+;; args[0]=self, args[1]=other (iterable)
+;; ============================================================================
+DEF_FUNC set_method_union
+    push rbx
+    push r12
+    push r13
+    push r14
+    push r15
+
+    cmp rsi, 2
+    jne .smu_error
+
+    mov r14, [rdi]          ; self
+    mov r15, [rdi + 16]     ; other set
+
+    ; Copy self → new set
+    mov r12, [r14 + PyDictObject.entries]
+    mov r13, [r14 + PyDictObject.capacity]
+    call set_new
+    mov rbx, rax            ; new set
+    xor ecx, ecx
+
+.smu_copy_self:
+    cmp rcx, r13
+    jge .smu_add_other
+
+    imul rax, rcx, SET_ENTRY_SIZE
+    add rax, r12
+    push rcx
+
+    cmp qword [rax + SET_ENTRY_KEY_TAG], 0
+    je .smu_cs_next
+
+    mov rdi, rbx
+    mov rsi, [rax + SET_ENTRY_KEY]
+    mov edx, [rax + SET_ENTRY_KEY_TAG]
+    call set_add
+
+.smu_cs_next:
+    pop rcx
+    inc ecx
+    jmp .smu_copy_self
+
+.smu_add_other:
+    ; Now add all elements from other
+    mov r12, [r15 + PyDictObject.entries]
+    mov r13, [r15 + PyDictObject.capacity]
+    xor ecx, ecx
+
+.smu_add_loop:
+    cmp rcx, r13
+    jge .smu_done
+
+    imul rax, rcx, SET_ENTRY_SIZE
+    add rax, r12
+    push rcx
+
+    cmp qword [rax + SET_ENTRY_KEY_TAG], 0
+    je .smu_al_next
+
+    mov rdi, rbx
+    mov rsi, [rax + SET_ENTRY_KEY]
+    mov edx, [rax + SET_ENTRY_KEY_TAG]
+    call set_add
+
+.smu_al_next:
+    pop rcx
+    inc ecx
+    jmp .smu_add_loop
+
+.smu_done:
+    mov rax, rbx
+    mov edx, TAG_PTR
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.smu_error:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "union() takes exactly one argument"
+    call raise_exception
+END_FUNC set_method_union
+
+;; ============================================================================
+;; set_method_intersection(args, nargs) -> new set = self & other
+;; args[0]=self, args[1]=other
+;; ============================================================================
+DEF_FUNC set_method_intersection
+    push rbx
+    push r12
+    push r13
+    push r14
+    push r15
+
+    cmp rsi, 2
+    jne .smi_error
+
+    mov r14, [rdi]          ; self
+    mov r15, [rdi + 16]     ; other
+
+    call set_new
+    mov rbx, rax            ; new set
+
+    ; Iterate self, add if in other
+    mov r12, [r14 + PyDictObject.entries]
+    mov r13, [r14 + PyDictObject.capacity]
+    xor ecx, ecx
+
+.smi_loop:
+    cmp rcx, r13
+    jge .smi_done
+
+    imul rax, rcx, SET_ENTRY_SIZE
+    add rax, r12
+    push rcx
+
+    cmp qword [rax + SET_ENTRY_KEY_TAG], 0
+    je .smi_next
+
+    ; Check if key is in other
+    push rax                ; save entry ptr
+    mov rdi, r15            ; other set
+    mov rsi, [rax + SET_ENTRY_KEY]
+    mov edx, [rax + SET_ENTRY_KEY_TAG]
+    call set_contains
+    pop rcx                 ; restore entry ptr (was rax)
+    test eax, eax
+    jz .smi_next
+
+    ; In both — add to result
+    mov rdi, rbx
+    mov rsi, [rcx + SET_ENTRY_KEY]
+    mov edx, [rcx + SET_ENTRY_KEY_TAG]
+    call set_add
+
+.smi_next:
+    pop rcx
+    inc ecx
+    jmp .smi_loop
+
+.smi_done:
+    mov rax, rbx
+    mov edx, TAG_PTR
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.smi_error:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "intersection() takes exactly one argument"
+    call raise_exception
+END_FUNC set_method_intersection
+
+;; ============================================================================
+;; set_method_difference(args, nargs) -> new set = self - other
+;; args[0]=self, args[1]=other
+;; ============================================================================
+DEF_FUNC set_method_difference
+    push rbx
+    push r12
+    push r13
+    push r14
+    push r15
+
+    cmp rsi, 2
+    jne .smdf_error
+
+    mov r14, [rdi]          ; self
+    mov r15, [rdi + 16]     ; other
+
+    call set_new
+    mov rbx, rax            ; new set
+
+    ; Iterate self, add if NOT in other
+    mov r12, [r14 + PyDictObject.entries]
+    mov r13, [r14 + PyDictObject.capacity]
+    xor ecx, ecx
+
+.smdf_loop:
+    cmp rcx, r13
+    jge .smdf_done
+
+    imul rax, rcx, SET_ENTRY_SIZE
+    add rax, r12
+    push rcx
+
+    cmp qword [rax + SET_ENTRY_KEY_TAG], 0
+    je .smdf_next
+
+    ; Check if key is in other
+    push rax
+    mov rdi, r15
+    mov rsi, [rax + SET_ENTRY_KEY]
+    mov edx, [rax + SET_ENTRY_KEY_TAG]
+    call set_contains
+    pop rcx                 ; entry ptr
+    test eax, eax
+    jnz .smdf_next          ; in other — skip
+
+    ; NOT in other — add to result
+    mov rdi, rbx
+    mov rsi, [rcx + SET_ENTRY_KEY]
+    mov edx, [rcx + SET_ENTRY_KEY_TAG]
+    call set_add
+
+.smdf_next:
+    pop rcx
+    inc ecx
+    jmp .smdf_loop
+
+.smdf_done:
+    mov rax, rbx
+    mov edx, TAG_PTR
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.smdf_error:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "difference() takes exactly one argument"
+    call raise_exception
+END_FUNC set_method_difference
+
+;; ============================================================================
+;; set_method_symmetric_difference(args, nargs) -> new set = self ^ other
+;; args[0]=self, args[1]=other
+;; ============================================================================
+DEF_FUNC set_method_symmetric_difference
+    push rbx
+    push r12
+    push r13
+    push r14
+    push r15
+
+    cmp rsi, 2
+    jne .smsd_error
+
+    mov r14, [rdi]          ; self
+    mov r15, [rdi + 16]     ; other
+
+    call set_new
+    mov rbx, rax            ; new set
+
+    ; Add elements in self but NOT in other
+    mov r12, [r14 + PyDictObject.entries]
+    mov r13, [r14 + PyDictObject.capacity]
+    xor ecx, ecx
+
+.smsd_self_loop:
+    cmp rcx, r13
+    jge .smsd_other
+
+    imul rax, rcx, SET_ENTRY_SIZE
+    add rax, r12
+    push rcx
+
+    cmp qword [rax + SET_ENTRY_KEY_TAG], 0
+    je .smsd_s_next
+
+    push rax
+    mov rdi, r15
+    mov rsi, [rax + SET_ENTRY_KEY]
+    mov edx, [rax + SET_ENTRY_KEY_TAG]
+    call set_contains
+    pop rcx
+    test eax, eax
+    jnz .smsd_s_next        ; in other, skip
+
+    mov rdi, rbx
+    mov rsi, [rcx + SET_ENTRY_KEY]
+    mov edx, [rcx + SET_ENTRY_KEY_TAG]
+    call set_add
+
+.smsd_s_next:
+    pop rcx
+    inc ecx
+    jmp .smsd_self_loop
+
+.smsd_other:
+    ; Add elements in other but NOT in self
+    mov r12, [r15 + PyDictObject.entries]
+    mov r13, [r15 + PyDictObject.capacity]
+    xor ecx, ecx
+
+.smsd_other_loop:
+    cmp rcx, r13
+    jge .smsd_done
+
+    imul rax, rcx, SET_ENTRY_SIZE
+    add rax, r12
+    push rcx
+
+    cmp qword [rax + SET_ENTRY_KEY_TAG], 0
+    je .smsd_o_next
+
+    push rax
+    mov rdi, r14
+    mov rsi, [rax + SET_ENTRY_KEY]
+    mov edx, [rax + SET_ENTRY_KEY_TAG]
+    call set_contains
+    pop rcx
+    test eax, eax
+    jnz .smsd_o_next        ; in self, skip
+
+    mov rdi, rbx
+    mov rsi, [rcx + SET_ENTRY_KEY]
+    mov edx, [rcx + SET_ENTRY_KEY_TAG]
+    call set_add
+
+.smsd_o_next:
+    pop rcx
+    inc ecx
+    jmp .smsd_other_loop
+
+.smsd_done:
+    mov rax, rbx
+    mov edx, TAG_PTR
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.smsd_error:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "symmetric_difference() takes exactly one argument"
+    call raise_exception
+END_FUNC set_method_symmetric_difference
+
+;; ============================================================================
+;; set_method_issubset(args, nargs) -> bool
+;; args[0]=self, args[1]=other
+;; True if every element of self is in other.
+;; ============================================================================
+DEF_FUNC set_method_issubset
+    push rbx
+    push r12
+    push r13
+    push r14
+    push r15
+
+    cmp rsi, 2
+    jne .smss_error
+
+    mov r14, [rdi]          ; self
+    mov r15, [rdi + 16]     ; other
+
+    mov r12, [r14 + PyDictObject.entries]
+    mov r13, [r14 + PyDictObject.capacity]
+    xor ecx, ecx
+
+.smss_loop:
+    cmp rcx, r13
+    jge .smss_true
+
+    imul rax, rcx, SET_ENTRY_SIZE
+    add rax, r12
+    push rcx
+
+    cmp qword [rax + SET_ENTRY_KEY_TAG], 0
+    je .smss_next
+
+    mov rdi, r15
+    mov rsi, [rax + SET_ENTRY_KEY]
+    mov edx, [rax + SET_ENTRY_KEY_TAG]
+    call set_contains
+    test eax, eax
+    jz .smss_false          ; not in other
+
+.smss_next:
+    pop rcx
+    inc ecx
+    jmp .smss_loop
+
+.smss_true:
+    lea rax, [rel bool_true]
+    inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.smss_false:
+    pop rcx                 ; balance the push in loop
+    lea rax, [rel bool_false]
+    inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.smss_error:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "issubset() takes exactly one argument"
+    call raise_exception
+END_FUNC set_method_issubset
+
+;; ============================================================================
+;; set_method_issuperset(args, nargs) -> bool
+;; args[0]=self, args[1]=other
+;; True if every element of other is in self.
+;; ============================================================================
+DEF_FUNC set_method_issuperset
+    push rbx
+    push r12
+    push r13
+    push r14
+    push r15
+
+    cmp rsi, 2
+    jne .smis_error
+
+    mov r14, [rdi + 16]     ; other (iterate this)
+    mov r15, [rdi]          ; self (check contains)
+
+    mov r12, [r14 + PyDictObject.entries]
+    mov r13, [r14 + PyDictObject.capacity]
+    xor ecx, ecx
+
+.smis_loop:
+    cmp rcx, r13
+    jge .smis_true
+
+    imul rax, rcx, SET_ENTRY_SIZE
+    add rax, r12
+    push rcx
+
+    cmp qword [rax + SET_ENTRY_KEY_TAG], 0
+    je .smis_next
+
+    mov rdi, r15            ; check in self
+    mov rsi, [rax + SET_ENTRY_KEY]
+    mov edx, [rax + SET_ENTRY_KEY_TAG]
+    call set_contains
+    test eax, eax
+    jz .smis_false
+
+.smis_next:
+    pop rcx
+    inc ecx
+    jmp .smis_loop
+
+.smis_true:
+    lea rax, [rel bool_true]
+    inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.smis_false:
+    pop rcx
+    lea rax, [rel bool_false]
+    inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.smis_error:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "issuperset() takes exactly one argument"
+    call raise_exception
+END_FUNC set_method_issuperset
+
+;; ============================================================================
+;; set_method_isdisjoint(args, nargs) -> bool
+;; args[0]=self, args[1]=other
+;; True if self and other have no common elements.
+;; ============================================================================
+DEF_FUNC set_method_isdisjoint
+    push rbx
+    push r12
+    push r13
+    push r14
+    push r15
+
+    cmp rsi, 2
+    jne .smdj_error
+
+    mov r14, [rdi]          ; self
+    mov r15, [rdi + 16]     ; other
+
+    mov r12, [r14 + PyDictObject.entries]
+    mov r13, [r14 + PyDictObject.capacity]
+    xor ecx, ecx
+
+.smdj_loop:
+    cmp rcx, r13
+    jge .smdj_true
+
+    imul rax, rcx, SET_ENTRY_SIZE
+    add rax, r12
+    push rcx
+
+    cmp qword [rax + SET_ENTRY_KEY_TAG], 0
+    je .smdj_next
+
+    mov rdi, r15
+    mov rsi, [rax + SET_ENTRY_KEY]
+    mov edx, [rax + SET_ENTRY_KEY_TAG]
+    call set_contains
+    test eax, eax
+    jnz .smdj_false         ; found in other — not disjoint
+
+.smdj_next:
+    pop rcx
+    inc ecx
+    jmp .smdj_loop
+
+.smdj_true:
+    lea rax, [rel bool_true]
+    inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.smdj_false:
+    pop rcx
+    lea rax, [rel bool_false]
+    inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.smdj_error:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "isdisjoint() takes exactly one argument"
+    call raise_exception
+END_FUNC set_method_isdisjoint
+
+
+;; ############################################################################
 ;;                       METHODS_INIT
 ;; ############################################################################
 
@@ -3249,6 +4314,26 @@ DEF_FUNC methods_init
     mov rdi, rbx
     lea rsi, [rel mn_encode]
     lea rdx, [rel str_method_encode]
+    call add_method_to_dict
+
+    mov rdi, rbx
+    lea rsi, [rel mn_isalnum]
+    lea rdx, [rel str_method_isalnum]
+    call add_method_to_dict
+
+    mov rdi, rbx
+    lea rsi, [rel mn_isspace]
+    lea rdx, [rel str_method_isspace]
+    call add_method_to_dict
+
+    mov rdi, rbx
+    lea rsi, [rel mn_isupper]
+    lea rdx, [rel str_method_isupper]
+    call add_method_to_dict
+
+    mov rdi, rbx
+    lea rsi, [rel mn_islower]
+    lea rdx, [rel str_method_islower]
     call add_method_to_dict
 
     ; Store dict in str_type.tp_dict
@@ -3395,6 +4480,124 @@ DEF_FUNC methods_init
     lea rax, [rel tuple_type]
     mov [rax + PyTypeObject.tp_dict], rbx
 
+    ;; --- set methods ---
+    call dict_new
+    mov rbx, rax
+
+    mov rdi, rbx
+    lea rsi, [rel mn_add]
+    lea rdx, [rel set_method_add]
+    call add_method_to_dict
+
+    mov rdi, rbx
+    lea rsi, [rel mn_remove]
+    lea rdx, [rel set_method_remove]
+    call add_method_to_dict
+
+    mov rdi, rbx
+    lea rsi, [rel mn_discard]
+    lea rdx, [rel set_method_discard]
+    call add_method_to_dict
+
+    mov rdi, rbx
+    lea rsi, [rel mn_pop]
+    lea rdx, [rel set_method_pop]
+    call add_method_to_dict
+
+    mov rdi, rbx
+    lea rsi, [rel mn_clear]
+    lea rdx, [rel set_method_clear]
+    call add_method_to_dict
+
+    mov rdi, rbx
+    lea rsi, [rel mn_copy]
+    lea rdx, [rel set_method_copy]
+    call add_method_to_dict
+
+    mov rdi, rbx
+    lea rsi, [rel mn_union]
+    lea rdx, [rel set_method_union]
+    call add_method_to_dict
+
+    mov rdi, rbx
+    lea rsi, [rel mn_intersection]
+    lea rdx, [rel set_method_intersection]
+    call add_method_to_dict
+
+    mov rdi, rbx
+    lea rsi, [rel mn_difference]
+    lea rdx, [rel set_method_difference]
+    call add_method_to_dict
+
+    mov rdi, rbx
+    lea rsi, [rel mn_symmetric_difference]
+    lea rdx, [rel set_method_symmetric_difference]
+    call add_method_to_dict
+
+    mov rdi, rbx
+    lea rsi, [rel mn_issubset]
+    lea rdx, [rel set_method_issubset]
+    call add_method_to_dict
+
+    mov rdi, rbx
+    lea rsi, [rel mn_issuperset]
+    lea rdx, [rel set_method_issuperset]
+    call add_method_to_dict
+
+    mov rdi, rbx
+    lea rsi, [rel mn_isdisjoint]
+    lea rdx, [rel set_method_isdisjoint]
+    call add_method_to_dict
+
+    ; Store in set_type.tp_dict
+    lea rax, [rel set_type]
+    mov [rax + PyTypeObject.tp_dict], rbx
+
+    ;; --- object_type methods (just __new__) ---
+    call dict_new
+    mov rbx, rax
+
+    ; Create builtin_func for object_new_fn
+    lea rdi, [rel object_new_fn]
+    lea rsi, [rel mn___new__]
+    call builtin_func_new
+    push rax                    ; save builtin_func
+
+    ; Wrap in PyStaticMethodObject
+    mov edi, PyStaticMethodObject_size
+    call ap_malloc
+    mov qword [rax + PyStaticMethodObject.ob_refcnt], 1
+    lea rcx, [rel staticmethod_type]
+    mov [rax + PyStaticMethodObject.ob_type], rcx
+    pop rcx                     ; builtin_func
+    mov [rax + PyStaticMethodObject.sm_callable], rcx
+    push rax                    ; save staticmethod wrapper
+
+    ; Create key string
+    lea rdi, [rel mn___new__]
+    call str_from_cstr
+    push rax                    ; save key
+
+    ; dict_set(dict, key, staticmethod_wrapper, TAG_PTR, TAG_PTR)
+    mov rdi, rbx
+    mov rsi, rax                ; key
+    mov rdx, [rsp + 8]         ; staticmethod wrapper
+    mov ecx, TAG_PTR
+    mov r8d, TAG_PTR
+    call dict_set
+
+    ; DECREF key
+    pop rdi
+    call obj_decref
+
+    ; DECREF staticmethod wrapper (dict_set did INCREF)
+    pop rdi
+    call obj_decref
+
+    ; Store in object_type.tp_dict
+    lea rax, [rel object_type]
+    mov [rax + PyTypeObject.tp_dict], rbx
+
     pop r12
     pop rbx
     leave
@@ -3445,3 +4648,17 @@ mn_encode:      db "encode", 0
 mn_setdefault:  db "setdefault", 0
 mn_popitem:     db "popitem", 0
 mn_remove:      db "remove", 0
+mn_add:         db "add", 0
+mn_discard:     db "discard", 0
+mn_union:       db "union", 0
+mn_intersection: db "intersection", 0
+mn_difference:  db "difference", 0
+mn_symmetric_difference: db "symmetric_difference", 0
+mn_issubset:    db "issubset", 0
+mn_issuperset:  db "issuperset", 0
+mn_isdisjoint:  db "isdisjoint", 0
+mn_isalnum:     db "isalnum", 0
+mn_isspace:     db "isspace", 0
+mn_isupper:     db "isupper", 0
+mn_islower:     db "islower", 0
+mn___new__:     db "__new__", 0

@@ -459,6 +459,7 @@ DEF_FUNC bytes_decode
     ; rdi = data ptr, rsi = length
     ; str_new(data, length)
     call str_new
+    mov edx, TAG_PTR
     leave
     ret
 END_FUNC bytes_decode

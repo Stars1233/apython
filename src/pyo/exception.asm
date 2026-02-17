@@ -320,6 +320,13 @@ DEF_FUNC exc_getattr
     test eax, eax
     jz .get_tb
 
+    ; Check "value" (for StopIteration.value)
+    lea rdi, [r12 + PyStrObject.data]
+    CSTRING rsi, "value"
+    call ap_strcmp
+    test eax, eax
+    jz .get_value
+
     ; Not found — try type dict (for user-defined exception subclass attrs)
     mov rdi, [rbx + PyObject.ob_type]
     mov rdi, [rdi + PyTypeObject.tp_dict]
@@ -394,6 +401,23 @@ DEF_FUNC exc_getattr
     jz .return_none
     INCREF rax
     mov edx, TAG_PTR
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.get_value:
+    ; Return exc_args[0] if args is non-empty, else None
+    mov rax, [rbx + PyExceptionObject.exc_args]
+    test rax, rax
+    jz .return_none
+    ; Check if tuple has at least 1 element
+    cmp qword [rax + PyTupleObject.ob_size], 0
+    je .return_none
+    ; Return args[0] — fat value (16-byte slot)
+    mov rdx, [rax + PyTupleObject.ob_item + 8]   ; tag
+    mov rax, [rax + PyTupleObject.ob_item]        ; payload
+    INCREF_VAL rax, rdx
     pop r12
     pop rbx
     leave

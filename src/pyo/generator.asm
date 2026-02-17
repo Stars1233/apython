@@ -18,6 +18,8 @@ extern obj_dealloc
 extern type_type
 extern ap_strcmp
 extern raise_exception
+extern raise_exception_obj
+extern exc_new
 extern exc_TypeError_type
 extern exc_StopIteration_type
 extern method_new
@@ -52,6 +54,10 @@ DEF_FUNC gen_new
 
     ; gi_name = NULL (not critical)
     mov qword [r12 + PyGenObject.gi_name], 0
+
+    ; gi_return_value = NULL (no return value yet)
+    mov qword [r12 + PyGenObject.gi_return_value], 0
+    mov qword [r12 + PyGenObject.gi_return_tag], 0
 
     mov rax, r12               ; return gen object
     mov edx, TAG_PTR             ; return tag
@@ -101,9 +107,10 @@ DEF_FUNC gen_iternext
     ; Resume execution
     mov rdi, r12
     call eval_frame
-    ; rax = yielded/returned value
+    ; rax = yielded/returned value payload, rdx = tag
 
-    mov r12, rax               ; save return value
+    mov r12, rax               ; save return value payload
+    push rdx                   ; save return value tag
 
     ; Mark as not running
     mov qword [rbx + PyGenObject.gi_running], 0
@@ -118,14 +125,13 @@ DEF_FUNC gen_iternext
     call frame_free
     mov qword [rbx + PyGenObject.gi_frame], 0
 
-    ; DECREF the return value (we don't use it, return NULL for StopIteration)
-    mov rdi, r12
-    test rdi, rdi
-    jz .return_null
-    DECREF_REG rdi
+    ; Store return value in gi_return_value (for StopIteration.value)
+    mov [rbx + PyGenObject.gi_return_value], r12
+    pop rax                    ; rax = return value tag
+    mov [rbx + PyGenObject.gi_return_tag], rax
 
-.return_null:
-    xor eax, eax              ; return NULL (StopIteration)
+    ; Return NULL to signal StopIteration
+    xor eax, eax
     xor edx, edx              ; TAG_NULL = exhausted
     pop r12
     pop rbx
@@ -133,8 +139,9 @@ DEF_FUNC gen_iternext
     ret
 
 .yielded:
-    ; Return the yielded value — rdx = tag from eval_frame (preserved, no calls)
+    ; Return the yielded value
     mov rax, r12
+    pop rdx                    ; restore result tag
     pop r12
     pop rbx
     leave
@@ -172,6 +179,11 @@ DEF_FUNC gen_dealloc
     jz .no_frame
     call frame_free
 .no_frame:
+
+    ; XDECREF gi_return_value (tag-aware)
+    mov rdi, [rbx + PyGenObject.gi_return_value]
+    mov rsi, [rbx + PyGenObject.gi_return_tag]
+    XDECREF_VAL rdi, rsi
 
     ; DECREF code object
     mov rdi, [rbx + PyGenObject.gi_code]
@@ -263,12 +275,11 @@ DEF_FUNC gen_send
     call frame_free
     mov qword [rbx + PyGenObject.gi_frame], 0
 
-    ; DECREF return value, signal StopIteration
-    mov rdi, r12
-    test rdi, rdi
-    jz .gs_stop
-    DECREF_REG rdi
-.gs_stop:
+    ; Store return value in gi_return_value (for StopIteration.value)
+    mov [rbx + PyGenObject.gi_return_value], r12
+    mov [rbx + PyGenObject.gi_return_tag], r13
+
+    ; Return NULL to signal StopIteration
     RET_NULL
     pop r14
     pop r13
@@ -416,23 +427,37 @@ END_FUNC gen_getattr
 
 ;; _gen_send_impl(args, nargs) — gen.send(value)
 DEF_FUNC _gen_send_impl
+    push rbx
+
     cmp rsi, 2
     jne .gsi_error
 
     mov rax, rdi               ; save args ptr
+    mov rbx, [rax]            ; rbx = gen (save for return value access)
     mov edx, [rax + 24]       ; value_tag = args[1].tag
     mov rsi, [rax + 16]       ; value = args[1].payload
-    mov rdi, [rax]            ; gen = args[0].payload
+    mov rdi, rbx              ; gen = args[0].payload
     call gen_send
-    test rax, rax
+    test edx, edx             ; check tag, not payload (SmallInt-0 vs NULL)
     jnz .gsi_ret
 
-    ; StopIteration
+    ; StopIteration — raise with actual return value from generator
+    ; exc_new(type, value_payload, value_tag)
     lea rdi, [rel exc_StopIteration_type]
-    CSTRING rsi, "generator exhausted"
-    call raise_exception
+    mov rsi, [rbx + PyGenObject.gi_return_value]
+    mov edx, [rbx + PyGenObject.gi_return_tag]
+    test edx, edx
+    jnz .gsi_have_val
+    ; No return value stored — use None
+    lea rsi, [rel none_singleton]
+    mov edx, TAG_PTR
+.gsi_have_val:
+    call exc_new
+    mov rdi, rax
+    call raise_exception_obj
 
 .gsi_ret:
+    pop rbx
     leave
     ret
 
