@@ -589,7 +589,12 @@ DEF_FUNC_BARE op_unary_negative
     ; Get nb_negative: type -> tp_as_number -> nb_negative (SmallInt-aware)
     cmp r8d, TAG_SMALLINT
     je .neg_smallint_type
+    cmp r8d, TAG_BOOL
+    je .neg_bool_type
     mov rax, [rdi + PyObject.ob_type]
+    jmp .neg_have_type
+.neg_bool_type:
+    lea rax, [rel bool_type]
     jmp .neg_have_type
 .neg_smallint_type:
     lea rax, [rel int_type]
@@ -634,7 +639,12 @@ DEF_FUNC_BARE op_unary_invert
 
     cmp r8d, TAG_SMALLINT
     je .inv_smallint_type
+    cmp r8d, TAG_BOOL
+    je .inv_bool_type
     mov rax, [rdi + PyObject.ob_type]
+    jmp .inv_have_type
+.inv_bool_type:
+    lea rax, [rel bool_type]
     jmp .inv_have_type
 .inv_smallint_type:
     lea rax, [rel int_type]
@@ -1446,8 +1456,35 @@ DEF_FUNC_BARE op_call_intrinsic_1
     call raise_exception
 
 .ci1_unary_positive:
-    ; +x — for ints/floats, just return x (no-op for numeric types)
-    ; TOS is already the value, just leave it
+    ; +x — for most numeric types, no-op. For bool, call nb_positive.
+    ; Check if TOS is TAG_BOOL
+    cmp dword [r13 - 8], TAG_BOOL
+    je .ci1_pos_call
+    ; Check if TOS is TAG_PTR pointing to bool_type
+    cmp dword [r13 - 8], TAG_PTR
+    jne .ci1_pos_done
+    mov rax, [r13 - 16]       ; payload
+    test rax, rax
+    jz .ci1_pos_done
+    mov rcx, [rax + PyObject.ob_type]
+    extern bool_type
+    lea r8, [rel bool_type]
+    cmp rcx, r8
+    jne .ci1_pos_done
+    ; Bool singleton: replace TOS with SmallInt 0 or 1
+    extern bool_true
+    lea rcx, [rel bool_true]
+    xor eax, eax
+    cmp qword [r13 - 16], rcx
+    sete al
+    mov [r13 - 16], rax
+    mov dword [r13 - 8], TAG_SMALLINT
+.ci1_pos_done:
+    DISPATCH
+
+.ci1_pos_call:
+    ; TAG_BOOL: payload is 0 or 1 → convert to SmallInt
+    mov dword [r13 - 8], TAG_SMALLINT
     DISPATCH
 
 .ci1_list_to_tuple:

@@ -80,6 +80,9 @@ DEF_FUNC builtin_abs
     cmp dword [rdi + 8], TAG_FLOAT
     je .abs_inline_float
 
+    cmp dword [rdi + 8], TAG_BOOL
+    je .abs_bool_tag
+
     mov rax, [rbx + PyObject.ob_type]
     lea rcx, [rel float_type]
     cmp rax, rcx
@@ -87,7 +90,27 @@ DEF_FUNC builtin_abs
 
     lea rcx, [rel int_type]
     cmp rax, rcx
+    je .abs_gmp_check
+
+    ; Check bool_type (bool singletons: payload is 0 or 1 in mpz)
+    extern bool_type
+    lea rcx, [rel bool_type]
+    cmp rax, rcx
     jne .abs_type_error
+    ; Bool singleton: check if True (mpz=1) or False (mpz=0), both non-negative
+    ; Return as SmallInt: True.abs = 1, False.abs = 0
+    extern bool_true
+    lea rcx, [rel bool_true]
+    xor eax, eax
+    cmp rbx, rcx
+    sete al                    ; rax = 1 if True, 0 if False
+    RET_TAG_SMALLINT
+    add rsp, 8
+    pop rbx
+    leave
+    ret
+
+.abs_gmp_check:
 
     ; GMP int: check _mp_size at PyIntObject.mpz + 4
     mov eax, [rbx + PyIntObject.mpz + 4]
@@ -117,6 +140,15 @@ DEF_FUNC builtin_abs
     jns .abs_si_pos
     neg rax
 .abs_si_pos:
+    RET_TAG_SMALLINT
+    add rsp, 8
+    pop rbx
+    leave
+    ret
+
+.abs_bool_tag:
+    ; TAG_BOOL: payload is 0 or 1, already non-negative → return as SmallInt
+    mov rax, rbx
     RET_TAG_SMALLINT
     add rsp, 8
     pop rbx
@@ -285,9 +317,20 @@ END_FUNC str_type_call
 
 global bool_type_call
 DEF_FUNC_BARE bool_type_call
+    ; Check for kwargs — bool() doesn't accept keyword arguments
+    mov rax, [rel kw_names_pending]
+    test rax, rax
+    jnz .bool_kwargs_error
     mov rdi, rsi
     mov rsi, rdx
     jmp builtin_bool
+.bool_kwargs_error:
+    mov qword [rel kw_names_pending], 0
+    extern exc_TypeError_type
+    extern raise_exception
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "bool() takes no keyword arguments"
+    call raise_exception
 END_FUNC bool_type_call
 
 global float_type_call

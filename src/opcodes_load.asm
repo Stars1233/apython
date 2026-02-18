@@ -384,10 +384,29 @@ DEF_FUNC op_load_attr, LA_FRAME
     mov [rbp - LA_OBJ], rdi
     mov [rbp - LA_OBJ_TAG], rax
 
-    ; Non-pointer obj can't have attrs (SmallInt, Float, None, Bool)
+    ; Non-pointer obj can't have attrs (SmallInt, Float, None)
+    ; Exception: TAG_BOOL has tp_getattr for .real/.imag
     test dword [rbp - LA_OBJ_TAG], TAG_RC_BIT
-    jz .la_attr_error
+    jnz .la_is_ptr
+    cmp dword [rbp - LA_OBJ_TAG], TAG_BOOL
+    jne .la_attr_error
 
+    ; TAG_BOOL: resolve type to bool_type, check tp_getattr
+    extern bool_type
+    lea rax, [rel bool_type]
+    mov rax, [rax + PyTypeObject.tp_getattr]
+    test rax, rax
+    jz .la_attr_error
+    ; Call tp_getattr(self_payload, name) — rdi already has payload (0 or 1)
+    mov rsi, [rbp - LA_NAME]
+    call rax
+    test edx, edx
+    jz .la_attr_error
+    mov [rbp - LA_ATTR], rax
+    mov [rbp - LA_ATTR_TAG], rdx
+    jmp .la_got_attr
+
+.la_is_ptr:
     ; Look up attribute
     ; Check if obj's type has tp_getattr
     mov rax, [rdi + PyObject.ob_type]

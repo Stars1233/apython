@@ -567,6 +567,8 @@ DEF_FUNC str_mod, SM_FRAME
     je .sm_repr
     cmp al, 'f'
     je .sm_str                 ; %f: use str() for now (float.__str__)
+    cmp al, 'x'
+    je .sm_hex
     ; Unknown: just output the char
     mov byte [r13 + r14], '%'
     inc r14
@@ -593,6 +595,35 @@ DEF_FUNC str_mod, SM_FRAME
 .sm_int:
     push rcx
     call .sm_get_arg
+    ; If TAG_BOOL, convert to TAG_SMALLINT so we get "0"/"1" not "False"/"True"
+    cmp edx, TAG_BOOL
+    je .sm_int_from_bool
+    ; If TAG_PTR pointing to bool_type, extract 0/1 as SmallInt
+    cmp edx, TAG_PTR
+    jne .sm_int_go
+    test rax, rax
+    jz .sm_int_go
+    mov rcx, [rax + PyObject.ob_type]
+    extern bool_type
+    lea r8, [rel bool_type]
+    cmp rcx, r8
+    jne .sm_int_go
+    ; bool singleton → extract 0/1 by comparing with bool_true
+    extern bool_true
+    lea rcx, [rel bool_true]
+    xor edi, edi
+    cmp rax, rcx
+    setne dil                  ; wait, True=1 so sete
+    xor edi, edi
+    cmp rax, rcx
+    sete dil                   ; rdi = 1 if True, 0 if False
+    mov rax, rdi
+    mov edx, TAG_SMALLINT
+    jmp .sm_int_go
+.sm_int_from_bool:
+    ; TAG_BOOL payload is 0 or 1
+    mov edx, TAG_SMALLINT
+.sm_int_go:
     mov rdi, rax
     mov esi, edx               ; tag for obj_str
     call obj_str               ; int.__str__ = int_repr
@@ -605,6 +636,120 @@ DEF_FUNC str_mod, SM_FRAME
     mov esi, edx               ; tag for obj_repr
     call obj_repr
     jmp .sm_copy_str
+
+.sm_hex:
+    ; %x: format integer as lowercase hex
+    push rcx
+    call .sm_get_arg
+    ; Convert TAG_BOOL to TAG_SMALLINT
+    cmp edx, TAG_BOOL
+    je .sm_hex_from_bool
+    ; Handle TAG_PTR bool singletons
+    cmp edx, TAG_PTR
+    jne .sm_hex_go
+    test rax, rax
+    jz .sm_hex_go
+    mov rcx, [rax + PyObject.ob_type]
+    lea r8, [rel bool_type]
+    cmp rcx, r8
+    jne .sm_hex_go
+    lea rcx, [rel bool_true]
+    xor edi, edi
+    cmp rax, rcx
+    sete dil
+    mov rax, rdi
+    mov edx, TAG_SMALLINT
+    jmp .sm_hex_go
+.sm_hex_from_bool:
+    mov edx, TAG_SMALLINT
+.sm_hex_go:
+    ; Only handle SmallInt for now
+    cmp edx, TAG_SMALLINT
+    jne .sm_hex_zero
+    mov rdi, rax               ; value
+    ; Format into stack buffer (max 16 hex digits + null)
+    sub rsp, 24                ; temp buffer
+    mov rsi, rsp
+    call .sm_format_hex        ; rsi = buffer, returns length in rax
+    ; Copy result to output
+    mov rcx, rax               ; length
+    mov rsi, rsp               ; buffer
+    lea rdi, [r14 + rcx + 1]
+    push rcx
+    push rsi
+    call .sm_ensure_cap
+    pop rsi
+    pop rcx
+    xor edx, edx
+.sm_hex_copy:
+    cmp rdx, rcx
+    jge .sm_hex_done
+    movzx eax, byte [rsi + rdx]
+    mov [r13 + r14], al
+    inc r14
+    inc rdx
+    jmp .sm_hex_copy
+.sm_hex_done:
+    add rsp, 24
+    pop rcx
+    jmp .sm_loop
+
+.sm_hex_zero:
+    ; Non-SmallInt: just output "0"
+    lea rdi, [r14 + 2]
+    call .sm_ensure_cap
+    mov byte [r13 + r14], '0'
+    inc r14
+    pop rcx
+    jmp .sm_loop
+
+; .sm_format_hex: format unsigned int rdi as hex into buffer rsi
+; Returns length in rax. Buffer must be >= 17 bytes.
+.sm_format_hex:
+    push rbx
+    mov rax, rdi
+    test rax, rax
+    jnz .hex_nonzero
+    mov byte [rsi], '0'
+    mov rax, 1
+    pop rbx
+    ret
+.hex_nonzero:
+    ; Write digits in reverse into temp area, then reverse
+    xor ecx, ecx              ; digit count
+    mov rbx, rsi              ; save buffer start
+    lea rdi, [rsi + 16]       ; write from end of temp area backward
+.hex_digit_loop:
+    test rax, rax
+    jz .hex_reverse
+    mov rdx, rax
+    and edx, 0xF
+    cmp dl, 10
+    jb .hex_dec_digit
+    add dl, ('a' - 10)
+    jmp .hex_store
+.hex_dec_digit:
+    add dl, '0'
+.hex_store:
+    dec rdi
+    mov [rdi], dl
+    shr rax, 4
+    inc ecx
+    jmp .hex_digit_loop
+.hex_reverse:
+    ; Copy from [rdi] to [rbx], ecx chars
+    mov rax, rcx               ; return length
+    xor edx, edx
+.hex_copy_loop:
+    cmp edx, ecx
+    jge .hex_fmt_done
+    movzx esi, byte [rdi + rdx]
+    mov [rbx + rdx], sil
+    inc edx
+    jmp .hex_copy_loop
+.hex_fmt_done:
+    pop rbx
+    ret
 
 .sm_copy_str:
     ; rax = PyStrObject* to copy into output

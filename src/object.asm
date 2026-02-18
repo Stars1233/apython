@@ -385,29 +385,72 @@ DEF_FUNC_BARE obj_is_true
     test rdx, TYPE_FLAG_HEAPTYPE
     jz .true                ; default: objects are truthy
 
+    ; Look up __bool__ in type dict to check for None
     extern dunder_bool
+    extern dunder_lookup
+    mov rdi, [rbx + PyObject.ob_type]
+    lea rsi, [rel dunder_bool]
+    call dunder_lookup
+    test rax, rax
+    jz .check_dunder_len       ; not found → try __len__
+
+    ; Check if __bool__ is None → TypeError
+    lea rcx, [rel none_singleton]
+    cmp rax, rcx
+    je .dunder_bool_none_error
+
+    ; Call __bool__ via dunder_call_1
     extern dunder_call_1
     mov rdi, rbx
     lea rsi, [rel dunder_bool]
     call dunder_call_1
-    test edx, edx              ; TAG_NULL = not found
+    test edx, edx              ; TAG_NULL = call failed
     jz .check_dunder_len
 
-    ; __bool__ returned a result — convert to int (check if it's True/False)
-    push rdx                   ; save tag
-    push rax                   ; save payload
-    extern obj_is_true
-    mov rdi, rax
-    mov rsi, rdx
-    call obj_is_true
-    mov ecx, eax
-    pop rdi                    ; payload
-    pop rsi                    ; tag
-    DECREF_VAL rdi, rsi
-    mov eax, ecx
+    ; __bool__ returned a result — must be bool
+    cmp edx, TAG_BOOL
+    je .dunder_bool_is_bool
+    ; Check TAG_PTR pointing to bool_type
+    cmp edx, TAG_PTR
+    jne .dunder_bool_type_error
+    test rax, rax
+    jz .dunder_bool_type_error
+    mov rcx, [rax + PyObject.ob_type]
+    extern bool_type
+    lea r8, [rel bool_type]
+    cmp rcx, r8
+    jne .dunder_bool_type_error
+    ; TAG_PTR bool singleton: convert to 0/1
+    lea rcx, [rel bool_true]
+    cmp rax, rcx
+    sete al
+    movzx eax, al
     pop rbx
     pop rbp
     ret
+
+.dunder_bool_is_bool:
+    ; Result is TAG_BOOL: rax payload is 0 or 1
+    pop rbx
+    pop rbp
+    ret
+
+.dunder_bool_none_error:
+    extern raise_exception
+    extern exc_TypeError_type
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "cannot interpret 'NoneType' object as an integer"
+    call raise_exception
+
+.dunder_bool_type_error:
+    ; __bool__ didn't return bool — DECREF result and raise TypeError
+    ; rax=payload, edx=tag from dunder_call_1
+    mov rdi, rax
+    mov esi, edx
+    DECREF_VAL rdi, rsi
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "__bool__ should return bool, returned non-bool"
+    call raise_exception
 
 .check_dunder_len:
     ; Try __len__ dunder
@@ -418,7 +461,22 @@ DEF_FUNC_BARE obj_is_true
     test edx, edx              ; TAG_NULL = not found
     jz .true                ; no __len__ → truthy by default
 
-    ; __len__ returned a result — truthy if > 0
+    ; __len__ returned a result — check for negative
+    cmp edx, TAG_SMALLINT
+    jne .len_check_ptr
+    ; SmallInt: check if negative
+    test rax, rax
+    js .len_negative_error
+    ; Non-negative SmallInt: truthy if != 0
+    test rax, rax
+    setnz al
+    movzx eax, al
+    pop rbx
+    pop rbp
+    ret
+
+.len_check_ptr:
+    ; Non-SmallInt result: use obj_is_true
     push rdx                   ; save tag
     push rax                   ; save payload
     mov rdi, rax
@@ -432,6 +490,12 @@ DEF_FUNC_BARE obj_is_true
     pop rbx
     pop rbp
     ret
+
+.len_negative_error:
+    extern exc_ValueError_type
+    lea rdi, [rel exc_ValueError_type]
+    CSTRING rsi, "__len__() should return >= 0"
+    call raise_exception
 
 .false:
     xor eax, eax

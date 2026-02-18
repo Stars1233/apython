@@ -55,13 +55,20 @@ DEF_FUNC_BARE float_to_f64
     cmp esi, TAG_SMALLINT
     je .from_smallint
 
-    ; TAG_PTR: check for GMP int
+    cmp esi, TAG_BOOL
+    je .from_smallint          ; TAG_BOOL payload is 0 or 1, same as SmallInt
+
+    ; TAG_PTR: check for GMP int or bool singleton
     test rdi, rdi
     jz .ret_zero
     mov rax, [rdi + PyObject.ob_type]
     lea rcx, [rel int_type]
     cmp rax, rcx
     je .from_gmp_int
+    extern bool_type
+    lea rcx, [rel bool_type]
+    cmp rax, rcx
+    je .from_gmp_int           ; bool singletons have embedded mpz
 
     ; Not a number - return 0.0
 .ret_zero:

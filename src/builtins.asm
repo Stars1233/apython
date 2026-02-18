@@ -958,6 +958,13 @@ DEF_FUNC builtin___build_class__
     cmp rsi, 3
     jl .bc_no_base
     mov rax, [rbx + 32]    ; base = args[2]
+
+    ; Prevent subclassing bool
+    extern bool_type
+    lea rcx, [rel bool_type]
+    cmp rax, rcx
+    je .build_class_bool_error
+
 .bc_no_base:
     mov [rbp-48], rax       ; save base_class (or NULL)
 
@@ -1221,6 +1228,11 @@ DEF_FUNC builtin___build_class__
 .build_class_error:
     lea rdi, [rel exc_TypeError_type]
     CSTRING rsi, "__build_class__ requires 2+ arguments"
+    call raise_exception
+
+.build_class_bool_error:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "type 'bool' is not an acceptable base type"
     call raise_exception
 END_FUNC builtin___build_class__
 

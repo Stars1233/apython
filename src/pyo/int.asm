@@ -1300,7 +1300,7 @@ DEF_FUNC_BARE int_floordiv
     mov rax, rdi
     mov rcx, rsi
     test rcx, rcx
-    jz .gmp_path            ; div by zero -> let GMP handle/crash
+    jz .zdiv_error          ; div by zero -> raise ZeroDivisionError
     cqo
     idiv rcx
     ; Python floored division: if remainder != 0 and has different sign from divisor, adjust
@@ -1313,6 +1313,13 @@ DEF_FUNC_BARE int_floordiv
 .smallint_done:
     RET_TAG_SMALLINT
     ret
+
+.zdiv_error:
+    push rbp
+    mov rbp, rsp
+    lea rdi, [rel exc_ZeroDivisionError_type]
+    CSTRING rsi, "integer division or modulo by zero"
+    call raise_exception
 
 .gmp_path:
     push rbp
@@ -1341,6 +1348,13 @@ DEF_FUNC_BARE int_floordiv
     mov r12, rax
     or r13b, 2
 .b_ready:
+    ; Check for division by zero (GMP path)
+    lea rdi, [r12 + PyIntObject.mpz]
+    xor esi, esi
+    call __gmpz_cmp_si wrt ..plt
+    test eax, eax
+    jz .gmp_zdiv_error
+
     mov edi, PyIntObject_size
     call ap_malloc
     push rax
@@ -1371,6 +1385,22 @@ DEF_FUNC_BARE int_floordiv
     pop rbx
     pop rbp
     ret
+
+.gmp_zdiv_error:
+    ; Free temp allocs if any
+    test r13b, 1
+    jz .gmp_zdiv_na
+    mov rdi, rbx
+    call int_dealloc
+.gmp_zdiv_na:
+    test r13b, 2
+    jz .gmp_zdiv_nb
+    mov rdi, r12
+    call int_dealloc
+.gmp_zdiv_nb:
+    lea rdi, [rel exc_ZeroDivisionError_type]
+    CSTRING rsi, "integer division or modulo by zero"
+    call raise_exception
 END_FUNC int_floordiv
 
 ;; ============================================================================
@@ -1401,7 +1431,7 @@ DEF_FUNC_BARE int_mod
     mov rax, rdi
     mov rcx, rsi
     test rcx, rcx
-    jz .gmp_path
+    jz .mod_zdiv_error
     cqo
     idiv rcx
     mov rax, rdx            ; remainder is in rdx
@@ -1415,6 +1445,13 @@ DEF_FUNC_BARE int_mod
 .smallint_done:
     RET_TAG_SMALLINT
     ret
+
+.mod_zdiv_error:
+    push rbp
+    mov rbp, rsp
+    lea rdi, [rel exc_ZeroDivisionError_type]
+    CSTRING rsi, "integer division or modulo by zero"
+    call raise_exception
 
 .gmp_path:
     push rbp
@@ -1443,6 +1480,13 @@ DEF_FUNC_BARE int_mod
     mov r12, rax
     or r13b, 2
 .b_ready:
+    ; Check for division by zero (GMP path)
+    lea rdi, [r12 + PyIntObject.mpz]
+    xor esi, esi
+    call __gmpz_cmp_si wrt ..plt
+    test eax, eax
+    jz .gmp_mod_zdiv_error
+
     mov edi, PyIntObject_size
     call ap_malloc
     push rax
@@ -1473,6 +1517,21 @@ DEF_FUNC_BARE int_mod
     pop rbx
     pop rbp
     ret
+
+.gmp_mod_zdiv_error:
+    test r13b, 1
+    jz .gmp_mod_zdiv_na
+    mov rdi, rbx
+    call int_dealloc
+.gmp_mod_zdiv_na:
+    test r13b, 2
+    jz .gmp_mod_zdiv_nb
+    mov rdi, r12
+    call int_dealloc
+.gmp_mod_zdiv_nb:
+    lea rdi, [rel exc_ZeroDivisionError_type]
+    CSTRING rsi, "integer division or modulo by zero"
+    call raise_exception
 END_FUNC int_mod
 
 ;; ============================================================================
@@ -1543,6 +1602,8 @@ DEF_FUNC_BARE int_unwrap
     ; rdi = payload, edx = tag -> rdi = unwrapped payload, edx = unwrapped tag
     cmp edx, TAG_SMALLINT
     je .iuw_done
+    cmp edx, TAG_BOOL
+    je .iuw_bool
     mov rax, [rdi + PyObject.ob_type]
     lea rcx, [rel int_type]
     cmp rax, rcx
@@ -1553,6 +1614,10 @@ DEF_FUNC_BARE int_unwrap
     mov edx, [rdi + PyIntSubclassObject.int_value_tag]  ; unwrapped tag
     mov rdi, [rdi + PyIntSubclassObject.int_value]       ; unwrapped payload
 .iuw_done:
+    ret
+.iuw_bool:
+    ; TAG_BOOL payload (0 or 1) -> TAG_SMALLINT (same payload)
+    mov edx, TAG_SMALLINT
     ret
 END_FUNC int_unwrap
 
