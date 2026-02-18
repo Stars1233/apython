@@ -13,6 +13,7 @@ extern obj_dealloc
 extern obj_incref
 extern str_type
 extern ap_strcmp
+extern ap_memcmp
 extern ap_memset
 extern fatal_error
 extern str_from_cstr
@@ -26,6 +27,9 @@ SET_ENTRY_SIZE    equ 24
 
 ; Initial capacity (must be power of 2)
 SET_INIT_CAP equ 8
+
+; Tombstone marker for deleted entries (must not collide with any tag)
+SET_TOMBSTONE equ 0xDEAD
 
 ;; ============================================================================
 ;; set_new() -> PySetObject* (uses PyDictObject layout)
@@ -66,81 +70,186 @@ DEF_FUNC set_new
 END_FUNC set_new
 
 ;; ============================================================================
-;; set_keys_equal(PyObject *a, PyObject *b, a_tag, b_tag) -> int (1=equal, 0=not)
-;; Internal helper: pointer equality or string comparison
-;; rdi=a, rsi=b, edx=a_tag, ecx=b_tag
+;; set_keys_equal(a, b, a_tag, b_tag) -> int (1=equal, 0=not)
+;; Internal helper: payload+tag fast path, SmallStr, TAG_PTR guard
+;; rdi=a payload, rsi=b payload, rdx=a_tag (64-bit), rcx=b_tag (64-bit)
 ;; ============================================================================
 DEF_FUNC_LOCAL set_keys_equal
+    ; Fast path: both payload AND tag identical → equal
+    ; Handles SmallStr==SmallStr, SmallInt==SmallInt, same heap ptr
+    cmp rdi, rsi
+    jne .ske_diff_payload
+    cmp rdx, rcx
+    jne .ske_diff_payload
+    mov eax, 1
+    leave
+    ret
+
+.ske_diff_payload:
+    ; Check if either is SmallStr (bit 63 of tag)
+    test rdx, rdx
+    js .ske_a_smallstr
+    test rcx, rcx
+    js .ske_b_smallstr
+
+    ; Neither is SmallStr — if either is not TAG_PTR, can't be equal
+    cmp edx, TAG_PTR
+    jne .ske_not_equal
+    cmp ecx, TAG_PTR
+    jne .ske_not_equal
+
+    ; Both heap ptrs with different addresses — check string equality
     push rbx
     push r12
-    push r13
-    push r14
+    mov rbx, rdi
+    mov r12, rsi
 
-    ; Pointer equality check
-    cmp rdi, rsi
-    je .equal
-
-    mov rbx, rdi                ; save a
-    mov r12, rsi                ; save b
-    mov r13d, edx               ; save a_tag
-    mov r14d, ecx               ; save b_tag
-
-    ; Check SmallInt: both tagged?
-    cmp r13d, TAG_SMALLINT
-    jne .check_b_si
-    cmp r14d, TAG_SMALLINT
-    jne .not_equal              ; a is SmallInt, b is not
-
-    ; Both SmallInts - compare directly
-    cmp rbx, r12
-    je .equal
-    jmp .not_equal
-
-.check_b_si:
-    ; a is not SmallInt; if b is SmallInt, not equal
-    cmp r14d, TAG_SMALLINT
-    je .not_equal
-
-    ; Neither is SmallInt - check if both are strings: a->ob_type == &str_type
     mov rax, [rbx + PyObject.ob_type]
     lea rcx, [rel str_type]
     cmp rax, rcx
-    jne .not_equal
+    jne .ske_ne_pop2
 
-    ; Check b->ob_type == &str_type
     mov rax, [r12 + PyObject.ob_type]
     cmp rax, rcx
-    jne .not_equal
+    jne .ske_ne_pop2
 
-    ; Both are strings - compare .data with strcmp
+    ; Both strings — compare data
     lea rdi, [rbx + PyStrObject.data]
     lea rsi, [r12 + PyStrObject.data]
     call ap_strcmp
     test eax, eax
-    jz .equal
+    jnz .ske_ne_pop2
 
-.not_equal:
+    ; Equal strings
+    mov eax, 1
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.ske_ne_pop2:
     xor eax, eax
-    pop r14
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.ske_a_smallstr:
+    ; a is SmallStr
+    test rcx, rcx
+    js .ske_both_smallstr      ; b is also SmallStr
+
+    ; a=SmallStr, b=heap: check if b is a string
+    cmp ecx, TAG_PTR
+    jne .ske_not_equal
+    mov rax, [rsi + PyObject.ob_type]
+    lea r8, [rel str_type]
+    cmp rax, r8
+    jne .ske_not_equal
+
+    ; Compare SmallStr a with heap str b
+    push rbx
+    push r12
+    push r13
+    mov rbx, rdi               ; a payload
+    mov r12, rdx               ; a tag
+    mov r13, rsi               ; b heap ptr
+
+    SMALLSTR_LEN rax, r12
+    cmp rax, [r13 + PyStrObject.ob_size]
+    jne .ske_ne_pop3           ; different lengths → not equal
+
+    ; Spill SmallStr to stack for contiguous bytes
+    mov rcx, r12
+    shr rcx, 8
+    mov r8, 0x0000FFFFFFFFFFFF
+    and rcx, r8               ; bytes 8-13
+    sub rsp, 16
+    mov [rsp], rbx             ; bytes 0-7
+    mov [rsp + 8], rcx         ; bytes 8-13
+
+    mov rdi, rsp
+    lea rsi, [r13 + PyStrObject.data]
+    SMALLSTR_LEN rdx, r12      ; length
+    call ap_memcmp
+    add rsp, 16
+    test eax, eax
+    jnz .ske_ne_pop3
+    mov eax, 1
     pop r13
     pop r12
     pop rbx
     leave
     ret
 
-.equal:
-    mov eax, 1
-    pop r14
+.ske_ne_pop3:
+    xor eax, eax
     pop r13
     pop r12
     pop rbx
+    leave
+    ret
+
+.ske_b_smallstr:
+    ; a=heap, b=SmallStr: symmetric case
+    cmp edx, TAG_PTR
+    jne .ske_not_equal
+    mov rax, [rdi + PyObject.ob_type]
+    lea r8, [rel str_type]
+    cmp rax, r8
+    jne .ske_not_equal
+
+    ; Compare heap str a with SmallStr b
+    push rbx
+    push r12
+    push r13
+    mov rbx, rsi               ; b payload (SmallStr)
+    mov r12, rcx               ; b tag
+    mov r13, rdi               ; a heap ptr
+
+    SMALLSTR_LEN rax, r12
+    cmp rax, [r13 + PyStrObject.ob_size]
+    jne .ske_ne_pop3
+
+    ; Spill SmallStr b to stack
+    mov rcx, r12
+    shr rcx, 8
+    mov r8, 0x0000FFFFFFFFFFFF
+    and rcx, r8
+    sub rsp, 16
+    mov [rsp], rbx
+    mov [rsp + 8], rcx
+
+    lea rdi, [r13 + PyStrObject.data]
+    mov rsi, rsp
+    SMALLSTR_LEN rdx, r12
+    call ap_memcmp
+    add rsp, 16
+    test eax, eax
+    jnz .ske_ne_pop3
+    mov eax, 1
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.ske_both_smallstr:
+    ; Both SmallStr with different payloads (already checked identical above)
+    ; Canonical encoding: same string ⟹ same bits. Different bits → not equal.
+    xor eax, eax
+    leave
+    ret
+
+.ske_not_equal:
+    xor eax, eax
     leave
     ret
 END_FUNC set_keys_equal
 
 ;; ============================================================================
 ;; set_find_slot(set, key, hash, key_tag)
-;;   rdi=set, rsi=key, rdx=hash, ecx=key_tag
+;;   rdi=set, rsi=key, rdx=hash, rcx=key_tag (64-bit for SmallStr)
 ;;   -> rax = entry ptr, rdx = 1 if existing key found, 0 if empty slot
 ;; Internal helper used by set_add and set_contains
 ;; ============================================================================
@@ -156,7 +265,7 @@ DEF_FUNC_LOCAL set_find_slot
     mov rbx, rdi                ; set
     mov r12, rsi                ; key
     mov r13, rdx                ; hash
-    mov [rbp - SFS_KEY_TAG], ecx ; save key_tag
+    mov [rbp - SFS_KEY_TAG], rcx ; save key_tag (64-bit)
 
     ; mask = capacity - 1
     mov r14, [rbx + PyDictObject.capacity]
@@ -182,6 +291,10 @@ DEF_FUNC_LOCAL set_find_slot
     cmp qword [rax + SET_ENTRY_KEY_TAG], 0
     je .found_empty
 
+    ; Tombstone? Continue probing past deleted entries
+    cmp qword [rax + SET_ENTRY_KEY_TAG], SET_TOMBSTONE
+    je .find_next
+
     ; Hash match?
     cmp r13, [rax + SET_ENTRY_HASH]
     jne .find_next
@@ -190,9 +303,9 @@ DEF_FUNC_LOCAL set_find_slot
     ; rdi = entry.key (already loaded above)
     push rcx                    ; save slot
     push rax                    ; save entry ptr
-    mov edx, [rax + SET_ENTRY_KEY_TAG]  ; a_tag (entry key)
+    mov rdx, [rax + SET_ENTRY_KEY_TAG]  ; a_tag (entry key, 64-bit)
     mov rsi, r12                        ; b = lookup key
-    mov ecx, [rbp - SFS_KEY_TAG]        ; b_tag (lookup key tag)
+    mov rcx, [rbp - SFS_KEY_TAG]        ; b_tag (lookup key tag, 64-bit)
     call set_keys_equal
     pop rax                     ; entry ptr
     pop rcx                     ; slot
@@ -280,8 +393,10 @@ DEF_FUNC_LOCAL set_resize
     imul rax, rcx, SET_ENTRY_SIZE
     add rax, r12                ; rax = old entry ptr
 
-    ; Skip empty slots (check key_tag for TAG_NULL=0)
+    ; Skip empty slots (TAG_NULL=0) and tombstones (SET_TOMBSTONE)
     cmp qword [rax + SET_ENTRY_KEY_TAG], 0
+    je .rehash_next
+    cmp qword [rax + SET_ENTRY_KEY_TAG], SET_TOMBSTONE
     je .rehash_next
 
     ; Compute new slot: hash & (new_capacity - 1)
@@ -359,7 +474,7 @@ DEF_FUNC set_add
     mov rdi, rbx                ; set
     mov rsi, r12                ; key
     mov rdx, r13                ; hash
-    mov ecx, r14d               ; key_tag
+    mov rcx, r14                ; key_tag (64-bit)
     call set_find_slot
     ; rax = entry ptr, edx = 1 if existing, 0 if empty
 
@@ -415,11 +530,11 @@ DEF_FUNC set_contains
 
     mov rbx, rdi                ; set
     mov r12, rsi                ; key
-    mov r14d, edx               ; key_tag
+    mov r14, rdx                ; key_tag (64-bit)
 
     ; Hash the key
     mov rdi, r12
-    mov esi, r14d               ; key_tag
+    mov rsi, r14                ; key_tag (64-bit)
     call obj_hash
     mov r13, rax                ; r13 = hash
 
@@ -427,7 +542,7 @@ DEF_FUNC set_contains
     mov rdi, rbx                ; set
     mov rsi, r12                ; key
     mov rdx, r13                ; hash
-    mov ecx, r14d               ; key_tag
+    mov rcx, r14                ; key_tag (64-bit)
     call set_find_slot
     ; rax = entry ptr, edx = 1 if found, 0 if empty slot
 
@@ -463,11 +578,11 @@ DEF_FUNC set_remove, SR_KEY_TAG
 
     mov rbx, rdi                ; set
     mov r12, rsi                ; key
-    mov [rbp - SR_KEY_TAG], edx ; save key_tag
+    mov [rbp - SR_KEY_TAG], rdx ; save key_tag (64-bit)
 
     ; Hash the key
     mov rdi, r12
-    mov esi, edx                ; key_tag (passed by caller in rdx)
+    mov rsi, rdx                ; key_tag (64-bit)
     call obj_hash
     mov r13, rax                ; hash
 
@@ -492,28 +607,33 @@ DEF_FUNC set_remove, SR_KEY_TAG
     cmp qword [rax + SET_ENTRY_KEY_TAG], 0
     je .sr_not_found
 
+    ; Skip tombstones — continue probing
+    cmp qword [rax + SET_ENTRY_KEY_TAG], SET_TOMBSTONE
+    je .sr_next
+
     cmp r13, [rax + SET_ENTRY_HASH]
     jne .sr_next
 
     ; rdi = entry.key (already loaded)
     push rcx                    ; save slot
     push rax                    ; save entry ptr
-    mov edx, [rax + SET_ENTRY_KEY_TAG]  ; a_tag (entry key)
+    mov rdx, [rax + SET_ENTRY_KEY_TAG]  ; a_tag (entry key, 64-bit)
     mov rsi, r12                        ; b = lookup key
-    mov ecx, [rbp - SR_KEY_TAG]         ; b_tag (lookup key tag)
+    mov rcx, [rbp - SR_KEY_TAG]         ; b_tag (lookup key tag, 64-bit)
     call set_keys_equal
     pop rdx                     ; entry ptr
     pop rcx
     test eax, eax
     jz .sr_next
 
-    ; Found: null out entry, DECREF key, decrement size
+    ; Found: tombstone entry, DECREF key, decrement size
     mov rdi, [rdx + SET_ENTRY_KEY]
     mov rsi, [rdx + SET_ENTRY_KEY_TAG]
     mov qword [rdx + SET_ENTRY_KEY], 0
-    mov qword [rdx + SET_ENTRY_KEY_TAG], 0
+    mov qword [rdx + SET_ENTRY_KEY_TAG], SET_TOMBSTONE  ; tombstone, not empty
     DECREF_VAL rdi, rsi
     dec qword [rbx + PyDictObject.ob_size]
+    inc qword [rbx + PyDictObject.dk_tombstones]
     xor eax, eax               ; return 0 = success
     jmp .sr_done
 
@@ -559,12 +679,14 @@ DEF_FUNC set_dealloc
     imul rax, r14, SET_ENTRY_SIZE
     add rax, r12
 
-    ; Skip empty slots (check key_tag for TAG_NULL=0)
-    mov rdi, [rax + SET_ENTRY_KEY]
+    ; Skip empty slots (TAG_NULL=0) and tombstones (SET_TOMBSTONE)
     cmp qword [rax + SET_ENTRY_KEY_TAG], 0
+    je .dealloc_next
+    cmp qword [rax + SET_ENTRY_KEY_TAG], SET_TOMBSTONE
     je .dealloc_next
 
     ; DECREF key (fat value)
+    mov rdi, [rax + SET_ENTRY_KEY]
     mov rsi, [rax + SET_ENTRY_KEY_TAG]
     DECREF_VAL rdi, rsi
 
@@ -612,6 +734,10 @@ DEF_FUNC set_type_call, STC_FRAME
     mov r12, [rsi]          ; iterable payload
     mov rcx, [rsi + 8]     ; iterable tag
 
+    ; Check iterable is a pointer type before dereferencing
+    cmp ecx, TAG_PTR
+    jne .stc_not_iterable
+
     call set_new
     mov rbx, rax            ; rbx = new set
 
@@ -620,7 +746,7 @@ DEF_FUNC set_type_call, STC_FRAME
     mov rax, [rdi + PyObject.ob_type]
     mov rax, [rax + PyTypeObject.tp_iter]
     test rax, rax
-    jz .stc_not_iterable
+    jz .stc_not_iterable_decref_set
     call rax
     mov r12, rax            ; r12 = iterator
 
@@ -661,6 +787,11 @@ DEF_FUNC set_type_call, STC_FRAME
     pop rbx
     leave
     ret
+
+.stc_not_iterable_decref_set:
+    ; set was already allocated but iterable has no tp_iter — free set
+    mov rdi, rbx
+    call obj_decref
 
 .stc_not_iterable:
     lea rdi, [rel exc_TypeError_type]
@@ -739,13 +870,16 @@ DEF_FUNC_BARE set_iter_next
     mov r8, [rax + SET_ENTRY_KEY]
     cmp qword [rax + SET_ENTRY_KEY_TAG], 0
     je .si_skip
+    ; Skip tombstones
+    cmp qword [rax + SET_ENTRY_KEY_TAG], SET_TOMBSTONE
+    je .si_skip
 
     ; Found a valid entry -- return the key with tag
     inc rcx
     mov [rdi + PyDictIterObject.it_index], rcx
-    mov edx, [rax + SET_ENTRY_KEY_TAG]  ; key tag
+    mov rdx, [rax + SET_ENTRY_KEY_TAG]  ; key tag (64-bit)
     mov rax, r8
-    INCREF_VAL rax, edx
+    INCREF_VAL rax, rdx
     ret
 
 .si_skip:
