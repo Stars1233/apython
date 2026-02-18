@@ -18,6 +18,7 @@ extern obj_incref
 extern obj_dealloc
 extern str_from_cstr_heap
 extern str_new_heap
+extern smallstr_to_obj
 extern str_type
 extern int_from_i64
 extern none_singleton
@@ -619,7 +620,8 @@ SD_LEAFLEN  equ 24            ; leaf length
 SD_FULLPATH equ 32            ; optional full path component (with slashes)
 SD_IDX      equ 40            ; current search index
 SD_COUNT    equ 48            ; number of dirs
-SD_FRAME    equ 56
+SD_SPILLED  equ 56            ; spilled SmallStr heap ptr (0 if none)
+SD_FRAME    equ 64
 
 DEF_FUNC import_search_dirs, SD_FRAME
     push rbx
@@ -649,10 +651,21 @@ DEF_FUNC import_search_dirs, SD_FRAME
     mov rax, [rbp - SD_IDX]
     shl rax, 4                  ; index * 16
     mov rbx, [rcx + rax]       ; rbx = dir str obj payload
-    cmp dword [rcx + rax + 8], TAG_SMALLINT
+    mov r8, [rcx + rax + 8]    ; dir tag (64-bit for SmallStr)
+    mov qword [rbp - SD_SPILLED], 0
+    cmp r8d, TAG_SMALLINT
     je .sd_next                 ; skip SmallInts
     test rbx, rbx
     jz .sd_next
+    test r8, r8
+    jns .sd_have_str            ; not SmallStr, use directly
+    ; SmallStr: spill to heap
+    mov rdi, rbx               ; payload
+    mov rsi, r8                 ; tag
+    call smallstr_to_obj
+    mov rbx, rax               ; rbx = heap PyStrObject*
+    mov [rbp - SD_SPILLED], rbx ; save for DECREF later
+.sd_have_str:
 
     ; Build path in import_path_buf_ptr
     mov r12, [rel import_path_buf_ptr]  ; r12 = dest buf
@@ -777,6 +790,12 @@ DEF_FUNC import_search_dirs, SD_FRAME
     jns .sd_found_module
 
 .sd_next:
+    ; DECREF any spilled SmallStr from this iteration
+    mov rdi, [rbp - SD_SPILLED]
+    test rdi, rdi
+    jz .sd_next_no_decref
+    call obj_decref
+.sd_next_no_decref:
     inc qword [rbp - SD_IDX]
     jmp .sd_loop
 
@@ -784,6 +803,12 @@ DEF_FUNC import_search_dirs, SD_FRAME
     ; Close the test fd
     mov rdi, rax
     call sys_close
+    ; DECREF any spilled SmallStr
+    mov rdi, [rbp - SD_SPILLED]
+    test rdi, rdi
+    jz .sd_pkg_no_decref
+    call obj_decref
+.sd_pkg_no_decref:
     mov eax, 1                  ; return 1 = package
     pop r15
     pop r14
@@ -797,6 +822,12 @@ DEF_FUNC import_search_dirs, SD_FRAME
     ; Close the test fd
     mov rdi, rax
     call sys_close
+    ; DECREF any spilled SmallStr
+    mov rdi, [rbp - SD_SPILLED]
+    test rdi, rdi
+    jz .sd_mod_no_decref
+    call obj_decref
+.sd_mod_no_decref:
     mov eax, 2                  ; return 2 = module
     pop r15
     pop r14
@@ -834,7 +865,8 @@ SS_LEAFLEN  equ 24
 SS_FULL     equ 32            ; full path component (dots->slashes)
 SS_IDX      equ 40
 SS_COUNT    equ 48
-SS_FRAME    equ 56
+SS_SPILLED  equ 56            ; spilled SmallStr heap ptr (0 if none)
+SS_FRAME    equ 64
 
 DEF_FUNC import_search_syspath, SS_FRAME
     push rbx
@@ -863,10 +895,21 @@ DEF_FUNC import_search_syspath, SS_FRAME
     mov rax, [rbp - SS_IDX]
     shl rax, 4                  ; index * 16
     mov rbx, [rcx + rax]       ; rbx = dir str obj payload
-    cmp dword [rcx + rax + 8], TAG_SMALLINT
+    mov r8, [rcx + rax + 8]    ; dir tag (64-bit for SmallStr)
+    mov qword [rbp - SS_SPILLED], 0
+    cmp r8d, TAG_SMALLINT
     je .ss_next                 ; skip SmallInts
     test rbx, rbx
     jz .ss_next
+    test r8, r8
+    jns .ss_have_str            ; not SmallStr, use directly
+    ; SmallStr: spill to heap
+    mov rdi, rbx               ; payload
+    mov rsi, r8                 ; tag
+    call smallstr_to_obj
+    mov rbx, rax               ; rbx = heap PyStrObject*
+    mov [rbp - SS_SPILLED], rbx ; save for DECREF later
+.ss_have_str:
 
     mov r12, [rel import_path_buf_ptr]  ; dest buf
 
@@ -985,12 +1028,24 @@ DEF_FUNC import_search_syspath, SS_FRAME
     jns .ss_found_module
 
 .ss_next:
+    ; DECREF any spilled SmallStr from this iteration
+    mov rdi, [rbp - SS_SPILLED]
+    test rdi, rdi
+    jz .ss_next_no_decref
+    call obj_decref
+.ss_next_no_decref:
     inc qword [rbp - SS_IDX]
     jmp .ss_loop
 
 .ss_found_package:
     mov rdi, rax
     call sys_close
+    ; DECREF any spilled SmallStr
+    mov rdi, [rbp - SS_SPILLED]
+    test rdi, rdi
+    jz .ss_pkg_no_decref
+    call obj_decref
+.ss_pkg_no_decref:
     mov eax, 1
     pop r15
     pop r14
@@ -1003,6 +1058,12 @@ DEF_FUNC import_search_syspath, SS_FRAME
 .ss_found_module:
     mov rdi, rax
     call sys_close
+    ; DECREF any spilled SmallStr
+    mov rdi, [rbp - SS_SPILLED]
+    test rdi, rdi
+    jz .ss_mod_no_decref
+    call obj_decref
+.ss_mod_no_decref:
     mov eax, 2
     pop r15
     pop r14

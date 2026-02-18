@@ -165,10 +165,10 @@ DEF_FUNC_BARE op_binary_subscr
     jz .no_subscript
 
     ; Convert key to int64
-    cmp dword [rsp + 16], TAG_SMALLINT   ; key tag
+    cmp qword [rsp + 16], TAG_SMALLINT   ; key tag
     je .seq_key_smallint
     mov rdi, [rsp]             ; key (heap object)
-    mov edx, [rsp + 16]       ; key tag
+    mov rdx, [rsp + 16]       ; key tag
     call int_to_i64
     mov rsi, rax               ; rsi = int64 index
     jmp .seq_key_ready
@@ -186,7 +186,7 @@ DEF_FUNC_BARE op_binary_subscr
 .no_subscript:
     ; Try __class_getitem__ on type objects FIRST (for MyClass[args] syntax)
     mov rdi, [rsp+8]              ; obj
-    cmp dword [rsp+24], TAG_SMALLINT  ; obj tag
+    cmp qword [rsp+24], TAG_SMALLINT  ; obj tag
     je .try_getitem_dunder
     mov rax, [rdi + PyObject.ob_type]
     extern user_type_metatype
@@ -201,7 +201,7 @@ DEF_FUNC_BARE op_binary_subscr
 .try_getitem_dunder:
     ; Try __getitem__ on heaptype
     mov rdi, [rsp+8]          ; obj
-    cmp dword [rsp+24], TAG_PTR
+    cmp qword [rsp+24], TAG_PTR
     jne .subscr_error
     mov rax, [rdi + PyObject.ob_type]
     mov rdx, [rax + PyTypeObject.tp_flags]
@@ -342,7 +342,7 @@ DEF_FUNC_BARE op_store_subscr
 
     ; Convert key to int64
     mov rdi, [rsp + 8]        ; key
-    mov edx, [rsp + SSUB_KTAG] ; key tag
+    mov rdx, [rsp + SSUB_KTAG] ; key tag
     call int_to_i64
     mov rsi, rax               ; index
 

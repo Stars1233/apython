@@ -1611,7 +1611,7 @@ DEF_FUNC_BARE int_unwrap
     mov rax, [rax + PyTypeObject.tp_flags]
     test rax, TYPE_FLAG_INT_SUBCLASS
     jz .iuw_done                 ; not int subclass
-    mov edx, [rdi + PyIntSubclassObject.int_value_tag]  ; unwrapped tag
+    mov rdx, [rdi + PyIntSubclassObject.int_value_tag]   ; unwrapped tag
     mov rdi, [rdi + PyIntSubclassObject.int_value]       ; unwrapped payload
 .iuw_done:
     ret

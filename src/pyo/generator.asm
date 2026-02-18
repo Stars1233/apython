@@ -442,7 +442,7 @@ DEF_FUNC _gen_send_impl
     ; exc_new(type, value_payload, value_tag)
     lea rdi, [rel exc_StopIteration_type]
     mov rsi, [rbx + PyGenObject.gi_return_value]
-    mov edx, [rbx + PyGenObject.gi_return_tag]
+    mov rdx, [rbx + PyGenObject.gi_return_tag]
     test edx, edx
     jnz .gsi_have_val
     ; No return value stored — use None

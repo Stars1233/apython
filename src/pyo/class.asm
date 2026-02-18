@@ -424,13 +424,13 @@ DEF_FUNC type_call
     mov rax, [rsi]          ; args[0] payload
     bt qword [rsi + 8], 63
     jc .type_smallstr       ; SmallStr → str type
-    cmp dword [rsi + 8], TAG_SMALLINT
+    cmp qword [rsi + 8], TAG_SMALLINT
     je .type_smallint       ; SmallInt → int type
-    cmp dword [rsi + 8], TAG_FLOAT
+    cmp qword [rsi + 8], TAG_FLOAT
     je .type_float          ; TAG_FLOAT → float type
-    cmp dword [rsi + 8], TAG_BOOL
+    cmp qword [rsi + 8], TAG_BOOL
     je .type_bool           ; TAG_BOOL → bool type
-    cmp dword [rsi + 8], TAG_NONE
+    cmp qword [rsi + 8], TAG_NONE
     je .type_none           ; TAG_NONE → none type
     mov rax, [rax + PyObject.ob_type]
     inc qword [rax + PyObject.ob_refcnt]
@@ -491,7 +491,7 @@ DEF_FUNC type_call
     push r14
     push r15
     sub rsp, 24                 ; 16 bytes local + 8 align (5 pushes + rbp = 48, +24 = 72 -> rsp 16-aligned)
-    mov dword [rbp - TC_NEW_TAG], TAG_PTR  ; default return tag
+    mov qword [rbp - TC_NEW_TAG], TAG_PTR  ; default return tag
 
     mov rbx, rdi                ; rbx = type
     mov r12, rsi                ; r12 = args
@@ -595,7 +595,7 @@ DEF_FUNC type_call
     call rax
 
     mov r14, rax                ; r14 = instance from __new__
-    mov [rbp - TC_NEW_TAG], edx ; save result tag
+    mov [rbp - TC_NEW_TAG], rdx ; save result tag
 
     ; Restore stack from args allocation
     lea rax, [r13 + 1]
@@ -603,7 +603,7 @@ DEF_FUNC type_call
     add rsp, rax
 
     ; Check: only call __init__ if __new__ returned instance of cls
-    cmp dword [rbp - TC_NEW_TAG], TAG_PTR
+    cmp qword [rbp - TC_NEW_TAG], TAG_PTR
     jne .no_init
     mov rax, [r14 + PyObject.ob_type]
     cmp rax, rbx
@@ -702,7 +702,7 @@ DEF_FUNC type_call
 .no_init:
     ; Return the instance (tag from TC_NEW_TAG; default TAG_PTR, or __new__ result tag)
     mov rax, r14
-    mov edx, [rbp - TC_NEW_TAG]
+    mov rdx, [rbp - TC_NEW_TAG]
 
     add rsp, 24                 ; undo alignment
     pop r15

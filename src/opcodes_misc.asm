@@ -1009,7 +1009,7 @@ DEF_FUNC op_format_value, FV_FRAME
 
     ; Check if value is a float (TAG_FLOAT)
     extern float_type
-    cmp dword [rbp - FV_VTAG], TAG_FLOAT
+    cmp qword [rbp - FV_VTAG], TAG_FLOAT
     jne .fv_no_format_spec
 
     ; Float with format spec: call float_format_spec(payload, spec_data, spec_len)
@@ -1417,7 +1417,7 @@ DEF_FUNC op_send, SND_FRAME
     mov [rbp - SND_RECV], rdi  ; save receiver
 
     ; Check if receiver is a generator with iternext
-    cmp dword [r13 - 8], TAG_PTR
+    cmp qword [r13 - 8], TAG_PTR
     jne .send_error
     mov rax, [rdi + PyObject.ob_type]
     mov rax, [rax + PyTypeObject.tp_iternext]
@@ -1613,10 +1613,10 @@ DEF_FUNC_BARE op_call_intrinsic_1
 .ci1_unary_positive:
     ; +x — for most numeric types, no-op. For bool, call nb_positive.
     ; Check if TOS is TAG_BOOL
-    cmp dword [r13 - 8], TAG_BOOL
+    cmp qword [r13 - 8], TAG_BOOL
     je .ci1_pos_call
     ; Check if TOS is TAG_PTR pointing to bool_type
-    cmp dword [r13 - 8], TAG_PTR
+    cmp qword [r13 - 8], TAG_PTR
     jne .ci1_pos_done
     mov rax, [r13 - 16]       ; payload
     test rax, rax
@@ -1633,13 +1633,13 @@ DEF_FUNC_BARE op_call_intrinsic_1
     cmp qword [r13 - 16], rcx
     sete al
     mov [r13 - 16], rax
-    mov dword [r13 - 8], TAG_SMALLINT
+    mov qword [r13 - 8], TAG_SMALLINT
 .ci1_pos_done:
     DISPATCH
 
 .ci1_pos_call:
     ; TAG_BOOL: payload is 0 or 1 → convert to SmallInt
-    mov dword [r13 - 8], TAG_SMALLINT
+    mov qword [r13 - 8], TAG_SMALLINT
     DISPATCH
 
 .ci1_list_to_tuple:
@@ -2164,7 +2164,7 @@ DEF_FUNC op_match_class, MC_FRAME
     ;; --- isinstance check ---
     ;; Get subject's type (SmallInt/None-aware)
     mov rax, [rbp - MC_SUBJ]
-    cmp dword [rbp - MC_SUBJ_TAG], TAG_SMALLINT
+    cmp qword [rbp - MC_SUBJ_TAG], TAG_SMALLINT
     je .mc_smallint_type
     jz .mc_none_type
     mov rdx, [rax + PyObject.ob_type]
@@ -2266,7 +2266,7 @@ DEF_FUNC op_match_class, MC_FRAME
 
     ; Call subject's tp_getattr(subject, name)
     mov rdi, [rbp - MC_SUBJ]
-    cmp dword [rbp - MC_SUBJ_TAG], TAG_SMALLINT
+    cmp qword [rbp - MC_SUBJ_TAG], TAG_SMALLINT
     je .mc_fail                     ; SmallInt has no attrs
     mov rax, [rdi + PyObject.ob_type]
     mov rax, [rax + PyTypeObject.tp_getattr]
@@ -2305,7 +2305,7 @@ DEF_FUNC op_match_class, MC_FRAME
 
     ; Call subject's tp_getattr(subject, name)
     mov rdi, [rbp - MC_SUBJ]
-    cmp dword [rbp - MC_SUBJ_TAG], TAG_SMALLINT
+    cmp qword [rbp - MC_SUBJ_TAG], TAG_SMALLINT
     je .mc_fail                     ; SmallInt has no attrs
     mov rax, [rdi + PyObject.ob_type]
     mov rax, [rax + PyTypeObject.tp_getattr]

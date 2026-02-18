@@ -29,7 +29,7 @@ DEF_FUNC bytearray_type_call, BA_FRAME
     jne .ba_error
     mov rdi, [rsi]                     ; arg0 payload
     ; Must be a bytes object
-    cmp dword [rsi + 8], TAG_SMALLINT
+    cmp qword [rsi + 8], TAG_SMALLINT
     je .ba_error                       ; SmallInt → error
     mov rax, [rdi + PyObject.ob_type]
     lea rcx, [rel bytes_type]

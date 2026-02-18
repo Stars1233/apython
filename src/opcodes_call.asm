@@ -153,9 +153,9 @@ DEF_FUNC op_call, CL_FRAME
     mov rdi, [rbp - CL_CALLABLE]              ; callable
     test rdi, rdi
     jz .not_callable               ; NULL check
-    cmp dword [rbp - CL_CALL_TAG], TAG_SMALLINT
+    cmp qword [rbp - CL_CALL_TAG], TAG_SMALLINT
     je .not_callable               ; SmallInt check
-    cmp dword [rbp - CL_CALL_TAG], TAG_PTR
+    cmp qword [rbp - CL_CALL_TAG], TAG_PTR
     jne .not_callable              ; non-pointer tag (TAG_FLOAT, TAG_NONE, TAG_BOOL)
     mov rax, [rdi + PyObject.ob_type]
     test rax, rax
@@ -477,7 +477,7 @@ DEF_FUNC op_call_function_ex
     mov rdi, [rbp - CFX_FUNC]
     test rdi, rdi
     jz .cfex_not_callable
-    cmp dword [rbp - CFX_FUNC_TAG], TAG_PTR
+    cmp qword [rbp - CFX_FUNC_TAG], TAG_PTR
     jne .cfex_not_callable
     mov rax, [rdi + PyObject.ob_type]
     mov rax, [rax + PyTypeObject.tp_call]
@@ -908,7 +908,7 @@ DEF_FUNC op_with_except_start, WES_FRAME
     ; Get type of exception
     test rcx, rcx
     jz .wes_none_exc
-    cmp dword [r13 - 8], TAG_SMALLINT       ; val tag from stack
+    cmp qword [r13 - 8], TAG_SMALLINT       ; val tag from stack
     je .wes_none_exc
     ; Exception case
     mov rdx, [rcx + PyObject.ob_type]

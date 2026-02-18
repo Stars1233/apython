@@ -81,11 +81,15 @@ DEF_FUNC builtin_abs
     cmp qword [rdi + 8], TAG_SMALLINT
     je .abs_smallint
 
-    cmp dword [rdi + 8], TAG_FLOAT
+    cmp qword [rdi + 8], TAG_FLOAT
     je .abs_inline_float
 
-    cmp dword [rdi + 8], TAG_BOOL
+    cmp qword [rdi + 8], TAG_BOOL
     je .abs_bool_tag
+
+    ; SmallStr check: bit 63 set means inline string, not a pointer
+    test qword [rdi + 8], (1 << 63)
+    jnz .abs_type_error
 
     mov rax, [rbx + PyObject.ob_type]
     lea rcx, [rel float_type]
@@ -387,10 +391,10 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     cmp qword [rdi + 8], TAG_SMALLINT
     je .int_return_smallint
 
-    cmp dword [rdi + 8], TAG_FLOAT
+    cmp qword [rdi + 8], TAG_FLOAT
     je .int_from_inline_float
 
-    cmp dword [rdi + 8], TAG_BOOL
+    cmp qword [rdi + 8], TAG_BOOL
     je .int_from_bool_tag
 
     ; Check SmallStr (bit 63 of full 64-bit tag)
@@ -687,7 +691,7 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     ; rbx = PyIntSubclassObject with no __int__ method
     ; Extract the int_value and return it
     mov rax, [rbx + PyIntSubclassObject.int_value]
-    mov edx, [rbx + PyIntSubclassObject.int_value_tag]
+    mov rdx, [rbx + PyIntSubclassObject.int_value_tag]
     cmp edx, TAG_SMALLINT
     je .int_ret                  ; SmallInt — no INCREF needed
     INCREF rax
@@ -1590,7 +1594,7 @@ DEF_FUNC builtin_hash_fn
     cmp qword [rdi + 8], TAG_SMALLINT  ; check args[0] tag
     je .hash_smallint
 
-    cmp dword [rdi + 8], TAG_FLOAT
+    cmp qword [rdi + 8], TAG_FLOAT
     je .hash_float
 
     ; Check non-pointer tags before dereference
@@ -1796,7 +1800,7 @@ DEF_FUNC builtin_next_fn
     jne .next_stop_no_val
     ; Get generator's return value for StopIteration
     mov rsi, [rbx + PyGenObject.gi_return_value]
-    mov edx, [rbx + PyGenObject.gi_return_tag]
+    mov rdx, [rbx + PyGenObject.gi_return_tag]
     test edx, edx
     jnz .next_stop_with_val
 .next_stop_no_val:
@@ -2036,7 +2040,7 @@ DEF_FUNC builtin_sum
     je .sum_has_start
     xor eax, eax
     mov r13, rax
-    mov dword [rsp], TAG_SMALLINT      ; accum_tag = SmallInt (0)
+    mov qword [rsp], TAG_SMALLINT      ; accum_tag = SmallInt (0)
     jmp .sum_get_iter
 
 .sum_has_start:

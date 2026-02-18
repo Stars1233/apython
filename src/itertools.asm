@@ -762,7 +762,7 @@ DEF_FUNC builtin_reversed
     mov r12, [rbx]          ; r12 = sequence
 
     ; SmallInt check - cannot reverse
-    cmp dword [rbx + 8], TAG_SMALLINT
+    cmp qword [rbx + 8], TAG_SMALLINT
     je .rev_type_error
 
     ; Get length of sequence via sq_length or ob_size

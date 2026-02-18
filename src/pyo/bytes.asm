@@ -794,7 +794,7 @@ DEF_FUNC bytes_type_call, BTC_FRAME
     cmp rdx, 1
     jne .btc_error
     mov rdi, [rsi]              ; arg0 payload
-    cmp dword [rsi + 8], TAG_SMALLINT
+    cmp qword [rsi + 8], TAG_SMALLINT
     je .btc_error               ; SmallInt → error
     mov rax, [rdi + PyObject.ob_type]
     lea rcx, [rel bytes_type]

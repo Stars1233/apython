@@ -493,7 +493,7 @@ DEF_FUNC builtin_len
     push rdx                ; save tag for SmallInt check
     push rax                ; save result for DECREF
     ; Check if SmallInt (tag == TAG_SMALLINT)
-    cmp dword [rsp + 8], TAG_SMALLINT
+    cmp qword [rsp + 8], TAG_SMALLINT
     je .len_smallint
     ; Heap int — read value (assume fits in 64 bits)
     extern int_to_i64
@@ -631,19 +631,19 @@ DEF_FUNC builtin_type
     jc .type_smallstr
 
     ; SmallInt check (tag at args[0]+8)
-    cmp dword [rsi + 8], TAG_SMALLINT
+    cmp qword [rsi + 8], TAG_SMALLINT
     je .type_smallint
 
     ; Float check
-    cmp dword [rsi + 8], TAG_FLOAT
+    cmp qword [rsi + 8], TAG_FLOAT
     je .type_float
 
     ; Bool check
-    cmp dword [rsi + 8], TAG_BOOL
+    cmp qword [rsi + 8], TAG_BOOL
     je .type_bool
 
     ; None check
-    cmp dword [rsi + 8], TAG_NONE
+    cmp qword [rsi + 8], TAG_NONE
     je .type_none
 
     mov rax, [rdi + PyObject.ob_type]

@@ -1078,11 +1078,13 @@ DEF_FUNC str_method_format
     ; Get the arg object and convert to string
     shl rax, 4              ; offset = index * 16
     mov rdi, [rbx + rax]    ; arg object payload
-    mov r8d, [rbx + rax + 8] ; arg tag
+    mov r8, [rbx + rax + 8]  ; arg tag (64-bit for SmallStr)
     ; Call obj_repr or tp_str
     push rdi
     cmp r8d, TAG_SMALLINT
     je .fmt_smallint_str
+    test r8, r8
+    js .fmt_smallstr_arg     ; SmallStr: bit 63 set
     mov rax, [rdi + PyObject.ob_type]
     mov rax, [rax + PyTypeObject.tp_str]
     test rax, rax
@@ -1098,6 +1100,11 @@ DEF_FUNC str_method_format
     jz .fmt_skip_arg
     call rax
     jmp .fmt_have_str
+.fmt_smallstr_arg:
+    pop rdi                ; rdi = payload
+    mov rsi, r8            ; rsi = tag (SmallStr)
+    call smallstr_to_obj   ; rax = heap PyStrObject*
+    jmp .fmt_heap_str
 .fmt_smallint_str:
     pop rdi
     mov esi, TAG_SMALLINT
@@ -2170,8 +2177,8 @@ END_FUNC list_method_reverse
 LS_I     equ 8
 LS_SWAP  equ 16
 LS_LTAG  equ 24
-LS_RTAG  equ 28
-LS_FRAME equ 32
+LS_RTAG  equ 32
+LS_FRAME equ 40
 DEF_FUNC list_method_sort, LS_FRAME
     push rbx
     push r12
@@ -2196,18 +2203,25 @@ DEF_FUNC list_method_sort, LS_FRAME
     shl rcx, 4                       ; i * 16
     mov rdi, [rax + rcx - 16]        ; left = items[i-1] payload
     mov rsi, [rax + rcx]             ; right = items[i] payload
-    mov r8d, [rax + rcx - 8]         ; left tag
-    mov [rbp - LS_LTAG], r8d
-    mov r8d, [rax + rcx + 8]         ; right tag
-    mov [rbp - LS_RTAG], r8d
+    mov r8, [rax + rcx - 8]          ; left tag (64-bit for SmallStr)
+    mov [rbp - LS_LTAG], r8
+    mov r8, [rax + rcx + 8]          ; right tag (64-bit for SmallStr)
+    mov [rbp - LS_RTAG], r8
     mov [rbp - LS_I], r13            ; save i
 
     ; Get left's type for tp_richcompare (tag at [rax + rcx - 8])
-    cmp dword [rax + rcx - 8], TAG_SMALLINT
+    mov r8, [rax + rcx - 8]
+    cmp r8d, TAG_SMALLINT
     je .sort_smallint_type
-    cmp dword [rax + rcx - 8], TAG_FLOAT
+    cmp r8d, TAG_FLOAT
     je .sort_float_type
+    test r8, r8
+    js .sort_smallstr_type            ; SmallStr: bit 63 set
     mov rax, [rdi + PyObject.ob_type]
+    jmp .sort_have_type
+.sort_smallstr_type:
+    extern str_type
+    lea rax, [rel str_type]
     jmp .sort_have_type
 .sort_smallint_type:
     lea rax, [rel int_type]
@@ -2221,8 +2235,8 @@ DEF_FUNC list_method_sort, LS_FRAME
     jz .sort_no_swap                 ; no richcompare → don't swap
 
     ; Call tp_richcompare(left, right, PY_GT, left_tag, right_tag)
-    mov ecx, [rbp - LS_LTAG]
-    mov r8d, [rbp - LS_RTAG]
+    mov ecx, [rbp - LS_LTAG]         ; left_tag (low 32 bits OK for tp_richcompare)
+    mov r8d, [rbp - LS_RTAG]         ; right_tag (low 32 bits OK for tp_richcompare)
     mov edx, PY_GT
     call rax
     ; rax = bool result (bool_true or bool_false)
@@ -2282,9 +2296,11 @@ DEF_FUNC list_method_index
     push rbx
     push r12
     push r13
+    push r14
 
     mov rbx, [rdi]          ; self
-    mov r12, [rdi + 16]     ; value to find
+    mov r12, [rdi + 16]     ; value to find (payload)
+    mov r14, [rdi + 24]     ; value to find (tag)
     mov r13, [rbx + PyListObject.ob_size]
 
     xor ecx, ecx
@@ -2313,12 +2329,17 @@ DEF_FUNC list_method_index
 
 .index_check_str:
     ; Try string comparison: if both are str_type, compare data
+    test r14, r14
+    js .index_next           ; search value is SmallStr — skip heap compare
     mov rax, [rbx + PyListObject.ob_item]
     mov rdx, rcx
     shl rdx, 4
     mov rsi, [rax + rdx]    ; list item payload
-    cmp dword [rax + rdx + 8], TAG_SMALLINT
-    je .index_next          ; list item is SmallInt
+    mov r8, [rax + rdx + 8] ; list item tag (64-bit for SmallStr)
+    cmp r8d, TAG_SMALLINT
+    je .index_next           ; list item is SmallInt
+    test r8, r8
+    js .index_next           ; list item is SmallStr
     mov rax, [rdi + PyObject.ob_type]
     lea r8, [rel str_type]
     cmp rax, r8
@@ -2346,6 +2367,7 @@ DEF_FUNC list_method_index
 .index_found:
     mov rdi, rcx
     call int_from_i64
+    pop r14
     pop r13
     pop r12
     pop rbx
@@ -2387,7 +2409,7 @@ DEF_FUNC list_method_count, LC_FRAME
     mov rdx, rcx
     shl rdx, 4              ; index * 16
     mov rdi, [rax + rdx]    ; item payload
-    mov r8d, [rax + rdx + 8] ; item tag
+    mov r8, [rax + rdx + 8]  ; item tag (64-bit for SmallStr)
 
     ; Fast path: payload equality
     cmp rdi, r12
@@ -2398,6 +2420,8 @@ DEF_FUNC list_method_count, LC_FRAME
     je .count_eq_int
     cmp r8d, TAG_FLOAT
     je .count_eq_float
+    test r8, r8
+    js .count_next            ; SmallStr: skip (payload already compared)
     mov rax, [rdi + PyObject.ob_type]
     jmp .count_eq_call
 .count_eq_int:
@@ -2676,7 +2700,7 @@ DEF_FUNC dict_method_keys
 
     ; Append key to list (read key_tag from entry)
     push r14
-    mov edx, [rax + DictEntry.key_tag]
+    mov rdx, [rax + DictEntry.key_tag]
     mov rsi, rdi            ; key
     mov rdi, r12            ; list
     call list_append
@@ -2736,7 +2760,7 @@ DEF_FUNC dict_method_values
 
     ; Append value to list (read value_tag from entry)
     push r14
-    mov edx, [rax + DictEntry.value_tag]
+    mov rdx, [rax + DictEntry.value_tag]
     mov rsi, [rax + DictEntry.value]  ; value payload
     mov rdi, r12
     call list_append
@@ -3273,7 +3297,7 @@ DEF_FUNC list_method_remove
     mov rcx, r14
     shl rcx, 4              ; index * 16
     mov rdi, [rax + rcx]    ; item payload
-    mov r8d, [rax + rcx + 8] ; item tag
+    mov r8, [rax + rcx + 8]  ; item tag (64-bit for SmallStr)
 
     ; Fast path: payload equality (same SmallInt or same object)
     cmp rdi, r12
@@ -3284,6 +3308,8 @@ DEF_FUNC list_method_remove
     je .lremove_eq_int
     cmp r8d, TAG_FLOAT
     je .lremove_eq_float
+    test r8, r8
+    js .lremove_next          ; SmallStr: skip (payload already compared)
     mov rax, [rdi + PyObject.ob_type]
     jmp .lremove_eq_call
 .lremove_eq_int:
@@ -3401,7 +3427,7 @@ DEF_FUNC tuple_method_index
     je .tindex_found
 
     ; Check SmallInt equality (item tag at [rbx + ob_item + offset + 8])
-    cmp dword [rbx + PyTupleObject.ob_item + rdx + 8], TAG_SMALLINT
+    cmp qword [rbx + PyTupleObject.ob_item + rdx + 8], TAG_SMALLINT
     jne .tindex_check_str
     cmp r14d, TAG_SMALLINT
     jne .tindex_next
@@ -3750,7 +3776,7 @@ DEF_FUNC set_method_copy
     ; Add key to new set
     mov rdi, rbx            ; new set
     mov rsi, [rax + SET_ENTRY_KEY]
-    mov edx, [rax + SET_ENTRY_KEY_TAG]
+    mov rdx, [rax + SET_ENTRY_KEY_TAG]
     call set_add
 
 .smcp_next:
@@ -3811,7 +3837,7 @@ DEF_FUNC set_method_union
 
     mov rdi, rbx
     mov rsi, [rax + SET_ENTRY_KEY]
-    mov edx, [rax + SET_ENTRY_KEY_TAG]
+    mov rdx, [rax + SET_ENTRY_KEY_TAG]
     call set_add
 
 .smu_cs_next:
@@ -3838,7 +3864,7 @@ DEF_FUNC set_method_union
 
     mov rdi, rbx
     mov rsi, [rax + SET_ENTRY_KEY]
-    mov edx, [rax + SET_ENTRY_KEY_TAG]
+    mov rdx, [rax + SET_ENTRY_KEY_TAG]
     call set_add
 
 .smu_al_next:
@@ -3903,7 +3929,7 @@ DEF_FUNC set_method_intersection
     push rax                ; save entry ptr
     mov rdi, r15            ; other set
     mov rsi, [rax + SET_ENTRY_KEY]
-    mov edx, [rax + SET_ENTRY_KEY_TAG]
+    mov rdx, [rax + SET_ENTRY_KEY_TAG]
     call set_contains
     pop rcx                 ; restore entry ptr (was rax)
     test eax, eax
@@ -3912,7 +3938,7 @@ DEF_FUNC set_method_intersection
     ; In both — add to result
     mov rdi, rbx
     mov rsi, [rcx + SET_ENTRY_KEY]
-    mov edx, [rcx + SET_ENTRY_KEY_TAG]
+    mov rdx, [rcx + SET_ENTRY_KEY_TAG]
     call set_add
 
 .smi_next:
@@ -3977,7 +4003,7 @@ DEF_FUNC set_method_difference
     push rax
     mov rdi, r15
     mov rsi, [rax + SET_ENTRY_KEY]
-    mov edx, [rax + SET_ENTRY_KEY_TAG]
+    mov rdx, [rax + SET_ENTRY_KEY_TAG]
     call set_contains
     pop rcx                 ; entry ptr
     test eax, eax
@@ -3986,7 +4012,7 @@ DEF_FUNC set_method_difference
     ; NOT in other — add to result
     mov rdi, rbx
     mov rsi, [rcx + SET_ENTRY_KEY]
-    mov edx, [rcx + SET_ENTRY_KEY_TAG]
+    mov rdx, [rcx + SET_ENTRY_KEY_TAG]
     call set_add
 
 .smdf_next:
@@ -4050,7 +4076,7 @@ DEF_FUNC set_method_symmetric_difference
     push rax
     mov rdi, r15
     mov rsi, [rax + SET_ENTRY_KEY]
-    mov edx, [rax + SET_ENTRY_KEY_TAG]
+    mov rdx, [rax + SET_ENTRY_KEY_TAG]
     call set_contains
     pop rcx
     test eax, eax
@@ -4058,7 +4084,7 @@ DEF_FUNC set_method_symmetric_difference
 
     mov rdi, rbx
     mov rsi, [rcx + SET_ENTRY_KEY]
-    mov edx, [rcx + SET_ENTRY_KEY_TAG]
+    mov rdx, [rcx + SET_ENTRY_KEY_TAG]
     call set_add
 
 .smsd_s_next:
@@ -4086,7 +4112,7 @@ DEF_FUNC set_method_symmetric_difference
     push rax
     mov rdi, r14
     mov rsi, [rax + SET_ENTRY_KEY]
-    mov edx, [rax + SET_ENTRY_KEY_TAG]
+    mov rdx, [rax + SET_ENTRY_KEY_TAG]
     call set_contains
     pop rcx
     test eax, eax
@@ -4094,7 +4120,7 @@ DEF_FUNC set_method_symmetric_difference
 
     mov rdi, rbx
     mov rsi, [rcx + SET_ENTRY_KEY]
-    mov edx, [rcx + SET_ENTRY_KEY_TAG]
+    mov rdx, [rcx + SET_ENTRY_KEY_TAG]
     call set_add
 
 .smsd_o_next:
@@ -4154,7 +4180,7 @@ DEF_FUNC set_method_issubset
 
     mov rdi, r15
     mov rsi, [rax + SET_ENTRY_KEY]
-    mov edx, [rax + SET_ENTRY_KEY_TAG]
+    mov rdx, [rax + SET_ENTRY_KEY_TAG]
     call set_contains
     test eax, eax
     jz .smss_false          ; not in other
@@ -4230,7 +4256,7 @@ DEF_FUNC set_method_issuperset
 
     mov rdi, r15            ; check in self
     mov rsi, [rax + SET_ENTRY_KEY]
-    mov edx, [rax + SET_ENTRY_KEY_TAG]
+    mov rdx, [rax + SET_ENTRY_KEY_TAG]
     call set_contains
     test eax, eax
     jz .smis_false
@@ -4306,7 +4332,7 @@ DEF_FUNC set_method_isdisjoint
 
     mov rdi, r15
     mov rsi, [rax + SET_ENTRY_KEY]
-    mov edx, [rax + SET_ENTRY_KEY_TAG]
+    mov rdx, [rax + SET_ENTRY_KEY_TAG]
     call set_contains
     test eax, eax
     jnz .smdj_false         ; found in other — not disjoint
