@@ -74,6 +74,9 @@ END_FUNC dict_new
 ;; ============================================================================
 extern ap_memcmp
 extern smallstr_to_obj
+extern float_to_f64
+extern int_type
+extern bool_type
 
 DEF_FUNC_LOCAL dict_keys_equal
     ; Fast path: both payload AND tag identical → equal
@@ -93,7 +96,66 @@ DEF_FUNC_LOCAL dict_keys_equal
     test rcx, rcx
     js .dke_b_smallstr
 
-    ; Neither is SmallStr — original path
+    ; Neither is SmallStr — check cross-type numeric equality
+    ; SmallInt(1) == Float(1.0) == Bool(True) in dict keys
+    ; Also handles TAG_PTR for heap int/bool objects
+    cmp edx, TAG_SMALLINT
+    je .dke_a_numeric
+    cmp edx, TAG_FLOAT
+    je .dke_a_numeric
+    cmp edx, TAG_BOOL
+    je .dke_a_numeric
+    cmp edx, TAG_PTR
+    jne .dke_not_numeric
+    ; TAG_PTR: check if int_type or bool_type
+    mov rax, [rdi + PyObject.ob_type]
+    lea r8, [rel int_type]
+    cmp rax, r8
+    je .dke_a_numeric
+    lea r8, [rel bool_type]
+    cmp rax, r8
+    je .dke_a_numeric
+    jmp .dke_not_numeric
+.dke_a_numeric:
+    cmp ecx, TAG_SMALLINT
+    je .dke_both_numeric
+    cmp ecx, TAG_FLOAT
+    je .dke_both_numeric
+    cmp ecx, TAG_BOOL
+    je .dke_both_numeric
+    cmp ecx, TAG_PTR
+    jne .dke_not_equal          ; a numeric, b not → not equal
+    ; TAG_PTR: check if int_type or bool_type
+    mov rax, [rsi + PyObject.ob_type]
+    lea r8, [rel int_type]
+    cmp rax, r8
+    je .dke_both_numeric
+    lea r8, [rel bool_type]
+    cmp rax, r8
+    je .dke_both_numeric
+    jmp .dke_not_equal          ; a numeric, b not numeric → not equal
+.dke_both_numeric:
+    ; Convert both to f64 and compare
+    ; Save b_key and b_tag (caller-saved regs clobbered by float_to_f64)
+    push rsi                    ; save b_key
+    push rcx                    ; save b_tag
+    mov esi, edx                ; a_tag
+    ; rdi = a_key (already set)
+    call float_to_f64           ; xmm0 = a as double
+    sub rsp, 8
+    movsd [rsp], xmm0           ; save a's double on stack
+    mov rdi, [rsp + 16]         ; restore b_key (+8 sub + 8 push rcx)
+    mov esi, [rsp + 8]          ; restore b_tag (ecx saved as qword)
+    call float_to_f64           ; xmm0 = b as double
+    movsd xmm1, [rsp]          ; restore a's double
+    add rsp, 24                 ; pop scratch + saved rcx + saved rsi
+    ucomisd xmm0, xmm1
+    jne .dke_not_equal
+    jp .dke_not_equal           ; NaN ≠ NaN
+    mov eax, 1
+    leave
+    ret
+.dke_not_numeric:
     ; Different payloads — if either is not TAG_PTR, can't be equal
     cmp edx, TAG_PTR
     jne .dke_not_equal

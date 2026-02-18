@@ -139,7 +139,7 @@ DEF_FUNC obj_repr
     jmp rax
 
 .smallint:
-    ; rdi = raw int value — int_repr handles SmallInt payloads
+    ; rdi = raw int value — int_repr checks edx for TAG_SMALLINT
     RET_TAG_SMALLINT
     call int_repr
     leave

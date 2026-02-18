@@ -189,6 +189,9 @@ DEF_FUNC_BARE op_binary_op
     ; SmallStr guard: SmallStr doesn't support sq_repeat as right operand
     bt qword [rsp + BO_RTAG], 63
     jc .binop_left_type
+    ; Non-pointer guard: TAG_BOOL/TAG_NONE/TAG_FLOAT can't be sequences
+    test qword [rsp + BO_RTAG], TAG_RC_BIT
+    jz .binop_left_type
     mov rax, [rsi + PyObject.ob_type]
     mov rax, [rax + PyTypeObject.tp_as_sequence]
     test rax, rax
@@ -207,6 +210,12 @@ DEF_FUNC_BARE op_binary_op
     ; SmallStr guard: don't dereference SmallStr payload
     bt qword [rsp + BO_LTAG], 63
     jc .binop_smallstr_type
+    ; TAG_BOOL: route to int (int_unwrap handles TAG_BOOL)
+    cmp qword [rsp + BO_LTAG], TAG_BOOL
+    je .binop_smallint_type
+    ; Non-pointer guard: TAG_NONE, TAG_FLOAT can't be dereferenced
+    test qword [rsp + BO_LTAG], TAG_RC_BIT
+    jz .binop_no_method
     mov rax, [rdi + PyObject.ob_type]
     jmp .binop_have_type
 .binop_left_type:
@@ -217,6 +226,12 @@ DEF_FUNC_BARE op_binary_op
     ; SmallStr check
     bt qword [rsp + BO_LTAG], 63
     jc .binop_smallstr_type
+    ; TAG_BOOL: route to int (int_unwrap handles TAG_BOOL)
+    cmp qword [rsp + BO_LTAG], TAG_BOOL
+    je .binop_smallint_type
+    ; Non-pointer guard: TAG_NONE, TAG_FLOAT can't be dereferenced
+    test qword [rsp + BO_LTAG], TAG_RC_BIT
+    jz .binop_no_method
     mov rax, [rdi + PyObject.ob_type]
     jmp .binop_have_type
 .binop_smallint_type:
@@ -283,6 +298,9 @@ DEF_FUNC_BARE op_binary_op
     ; SmallStr: no dunders (built-in str_type)
     bt qword [rsp + BO_LTAG], 63
     jc .binop_try_right_dunder
+    ; Non-pointer guard: TAG_BOOL/TAG_NONE/TAG_FLOAT can't have dunders
+    test qword [rsp + BO_LTAG], TAG_RC_BIT
+    jz .binop_try_right_dunder
     mov rdi, [rsp + BO_LEFT]
     mov rax, [rdi + PyObject.ob_type]
     mov rdx, [rax + PyTypeObject.tp_flags]
@@ -317,6 +335,9 @@ DEF_FUNC_BARE op_binary_op
     ; SmallStr: no dunders
     bt qword [rsp + BO_RTAG], 63
     jc .binop_no_method
+    ; Non-pointer guard: TAG_BOOL/TAG_NONE/TAG_FLOAT can't have dunders
+    test qword [rsp + BO_RTAG], TAG_RC_BIT
+    jz .binop_no_method
     mov rdi, [rsp + BO_RIGHT]
     mov rax, [rdi + PyObject.ob_type]
     mov rdx, [rax + PyTypeObject.tp_flags]
