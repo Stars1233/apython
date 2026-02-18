@@ -51,8 +51,12 @@ gen-cpython-tests:
 	@find lib -name '*.py' -exec $(PYTHON) -m py_compile {} \;
 	@echo "Compiling tests/cpython/test_int.py..."
 	@$(PYTHON) -m py_compile tests/cpython/test_int.py
+	@echo "Compiling tests/cpython/test_float.py..."
+	@$(PYTHON) -m py_compile tests/cpython/test_float.py
 	@echo "Done."
 
 check-cpython: $(TARGET) gen-cpython-tests
 	@echo "Running CPython test_int.py..."
 	@./apython tests/cpython/__pycache__/test_int.cpython-312.pyc
+	@echo "Running CPython test_float.py..."
+	@./apython tests/cpython/__pycache__/test_float.cpython-312.pyc

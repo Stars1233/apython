@@ -826,10 +826,11 @@ END_FUNC builtin_bool
 ;; ============================================================================
 ;; builtin_float(PyObject **args, int64_t nargs) -> PyObject*
 ;; float()    -> 0.0
-;; float(x)   -> convert x to float
+;; float(x)   -> convert x to float (int, float, or string)
 ;; ============================================================================
 global builtin_float
-DEF_FUNC builtin_float
+BF_FRAME equ 32
+DEF_FUNC builtin_float, BF_FRAME
 
     cmp rsi, 0
     je .float_no_args
@@ -844,6 +845,17 @@ DEF_FUNC builtin_float
     cmp esi, TAG_FLOAT
     je .float_passthrough
 
+    ; TAG_PTR: check for string
+    test esi, TAG_RC_BIT
+    jz .float_numeric           ; non-pointer tag → numeric conversion
+
+    ; Check if it's a string
+    mov rax, [rdi + PyObject.ob_type]
+    lea rcx, [rel str_type]
+    cmp rax, rcx
+    je .float_from_str
+
+.float_numeric:
     extern float_to_f64
     call float_to_f64          ; xmm0 = double
     extern float_from_f64
@@ -857,6 +869,51 @@ DEF_FUNC builtin_float
     mov edx, TAG_FLOAT
     leave
     ret
+
+.float_from_str:
+    ; rdi = PyStrObject*. Parse string → double via strtod.
+    lea rdi, [rdi + PyStrObject.data]   ; rdi = null-terminated string data
+    mov [rbp - 8], rdi                  ; save start ptr
+
+    ; Call strtod(str, &endptr)
+    extern strtod
+    lea rsi, [rbp - 16]                ; &endptr at [rbp-16]
+    call strtod wrt ..plt
+    ; xmm0 = parsed value, [rbp-16] = endptr
+
+    ; Check endptr > start (parsed something)
+    mov rax, [rbp - 16]                ; endptr
+    cmp rax, [rbp - 8]                 ; compare with start
+    je .float_str_error                ; nothing parsed → error
+
+    ; Skip trailing whitespace after parsed portion
+.float_skip_ws:
+    movzx ecx, byte [rax]
+    cmp cl, ' '
+    je .float_ws_next
+    cmp cl, 9                          ; tab
+    je .float_ws_next
+    cmp cl, 10                         ; newline
+    je .float_ws_next
+    cmp cl, 13                         ; carriage return
+    je .float_ws_next
+    jmp .float_ws_done
+.float_ws_next:
+    inc rax
+    jmp .float_skip_ws
+.float_ws_done:
+    cmp byte [rax], 0
+    jne .float_str_error               ; trailing garbage → ValueError
+
+    ; xmm0 still holds the strtod result
+    call float_from_f64                ; rax = double bits, edx = TAG_FLOAT
+    leave
+    ret
+
+.float_str_error:
+    lea rdi, [rel exc_ValueError_type]
+    CSTRING rsi, "could not convert string to float"
+    call raise_exception
 
 .float_no_args:
     ; float() -> 0.0

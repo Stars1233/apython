@@ -395,10 +395,9 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     jmp .int_ret
 
 .int_from_inline_float:
-    ; TAG_FLOAT: rbx = raw double bits
-    movq xmm0, rbx
-    cvttsd2si rdi, xmm0
-    call int_from_i64
+    ; TAG_FLOAT: rbx = raw double bits — delegate to float_int for NaN/inf checks
+    mov rdi, rbx
+    call float_int
     jmp .int_ret
 
 .int_from_float:
@@ -1494,12 +1493,10 @@ DEF_FUNC builtin_hash_fn
     ret
 
 .hash_float:
-    ; TAG_FLOAT: hash = raw bits (avoid -1)
-    mov rax, rbx
-    cmp rax, -1
-    jne .hash_float_ok
-    mov rax, -2
-.hash_float_ok:
+    ; TAG_FLOAT: call float_hash for PEP-correct integer-float matching
+    extern float_hash
+    mov rdi, rbx
+    call float_hash
     mov rdi, rax
     call int_from_i64
     add rsp, 8
@@ -1509,6 +1506,11 @@ DEF_FUNC builtin_hash_fn
 
 .hash_smallint:
     mov rax, rbx
+    ; Apply -1 → -2 convention (hash must never return -1)
+    cmp rax, -1
+    jne .hash_si_ok
+    mov rax, -2
+.hash_si_ok:
     mov rdi, rax
     call int_from_i64
     add rsp, 8

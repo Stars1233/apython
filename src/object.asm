@@ -296,12 +296,9 @@ DEF_FUNC obj_hash
     ret
 
 .float_hash:
-    ; Inline float: hash = raw bits (avoid -1)
-    mov rax, rdi
-    cmp rax, -1
-    jne .float_hash_done
-    mov rax, -2
-.float_hash_done:
+    ; Inline float: call float_hash for PEP-correct integer-float matching
+    extern float_hash
+    call float_hash
     leave
     ret
 

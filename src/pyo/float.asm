@@ -294,14 +294,62 @@ END_FUNC float_format_spec
 
 ;; ============================================================================
 ;; float_hash(rdi = raw double bits) -> int64 in rax
+;; For integer-valued floats, returns hash(int(x)) to match PEP requirement:
+;;   hash(float(n)) == hash(n)
+;; For non-integer floats, returns a hash derived from the raw bits.
 ;; ============================================================================
 DEF_FUNC_BARE float_hash
-    mov rax, rdi              ; raw bits from payload
-    ; Ensure hash is never -1 (Python convention)
+    movq xmm0, rdi
+
+    ; Check NaN (unordered with itself)
+    ucomisd xmm0, xmm0
+    jp .fh_nan
+
+    ; Check infinity
+    movsd xmm1, [rel pos_inf]
+    ucomisd xmm0, xmm1
+    je .fh_pos_inf
+    movsd xmm1, [rel neg_inf]
+    ucomisd xmm0, xmm1
+    je .fh_neg_inf
+
+    ; Check if integer-valued: truncate to i64, convert back, compare
+    cvttsd2si rax, xmm0
+    cvtsi2sd xmm1, rax
+    ucomisd xmm0, xmm1
+    jne .fh_fractional
+    jp .fh_fractional
+
+    ; Integer-valued: return the integer value (matches int_hash behavior)
     cmp rax, -1
-    jne .ok
+    jne .fh_done
     mov rax, -2
-.ok:
+.fh_done:
+    ret
+
+.fh_nan:
+    xor eax, eax              ; hash(nan) = 0
+    ret
+
+.fh_pos_inf:
+    mov rax, 314159            ; hash(inf) = 314159 (CPython convention)
+    ret
+
+.fh_neg_inf:
+    mov rax, -314159           ; hash(-inf) = -314159
+    ret
+
+.fh_fractional:
+    ; Non-integer float: XOR high and low 32 bits of raw double
+    mov rax, rdi
+    mov rdx, rdi
+    shr rdx, 32
+    xor rax, rdx
+    ; Ensure never -1
+    cmp rax, -1
+    jne .fh_frac_done
+    mov rax, -2
+.fh_frac_done:
     ret
 END_FUNC float_hash
 
@@ -454,6 +502,108 @@ DEF_FUNC_BARE float_neg
 END_FUNC float_neg
 
 ;; ============================================================================
+;; float_pos(rdi = left, rsi = right, edx = left_tag, ecx = right_tag)
+;; Unary positive: identity for floats.
+;; Note: called via nb_positive slot — only left operand matters.
+;; ============================================================================
+DEF_FUNC_BARE float_pos
+    mov rax, rdi
+    mov edx, TAG_FLOAT
+    ret
+END_FUNC float_pos
+
+;; ============================================================================
+;; float_pow(rdi = left, rsi = right, edx = left_tag, ecx = right_tag)
+;; Compute left ** right, returning TAG_FLOAT result.
+;; Both args are converted to double. Uses x87 fyl2x/f2xm1/fscale for
+;; non-integer exponents, repeated squaring for integer exponents.
+;; ============================================================================
+DEF_FUNC float_pow, 32
+    FLOAT_BINOP_SETUP
+    ; [rbp-8] = left double, [rbp-16] = right double
+
+    movsd xmm0, [rbp-8]        ; base
+    movsd xmm1, [rbp-16]       ; exp
+
+    ; Check if exponent is an integer
+    cvtsd2si rcx, xmm1
+    cvtsi2sd xmm2, rcx
+    ucomisd xmm1, xmm2
+    jne .fpow_general           ; non-integer exp
+    jp .fpow_general            ; NaN exp
+
+    ; Integer exponent: repeated squaring
+    test rcx, rcx
+    js .fpow_neg
+
+    ; Non-negative integer exponent
+    mov rax, rcx                ; exponent
+    movsd xmm2, [rel const_one_f] ; result = 1.0
+.fpow_sq:
+    test rax, rax
+    jz .fpow_sq_done
+    test rax, 1
+    jz .fpow_sq_even
+    mulsd xmm2, xmm0
+.fpow_sq_even:
+    mulsd xmm0, xmm0
+    shr rax, 1
+    jmp .fpow_sq
+.fpow_sq_done:
+    movapd xmm0, xmm2
+    call float_from_f64
+    leave
+    ret
+
+.fpow_neg:
+    neg rcx
+    mov rax, rcx
+    movsd xmm2, [rel const_one_f] ; result = 1.0
+.fpow_neg_sq:
+    test rax, rax
+    jz .fpow_neg_done
+    test rax, 1
+    jz .fpow_neg_even
+    mulsd xmm2, xmm0
+.fpow_neg_even:
+    mulsd xmm0, xmm0
+    shr rax, 1
+    jmp .fpow_neg_sq
+.fpow_neg_done:
+    movsd xmm0, [rel const_one_f]
+    divsd xmm0, xmm2
+    call float_from_f64
+    leave
+    ret
+
+.fpow_general:
+    ; Non-integer exponent: x^y = 2^(y * log2(x))
+    ; xmm0 = base, xmm1 = exp
+    sub rsp, 16
+    movsd [rsp], xmm1          ; exp on stack
+    fld qword [rsp]             ; st(0) = exp
+    movsd [rsp], xmm0          ; base on stack
+    fld qword [rsp]             ; st(0) = base, st(1) = exp
+    fyl2x                       ; st(0) = exp * log2(base)
+    ; Compute 2^st(0): split into int + frac
+    fld st0                     ; dup
+    frndint                     ; st(0) = int part
+    fsub st1, st0               ; st(1) = frac part
+    fxch st1                    ; st(0) = frac, st(1) = int
+    f2xm1                       ; st(0) = 2^frac - 1
+    fld1
+    faddp st1, st0              ; st(0) = 2^frac
+    fscale                      ; st(0) = 2^frac * 2^int = result
+    fstp st1                    ; pop int part
+    fstp qword [rsp]            ; store result
+    movsd xmm0, [rsp]
+    add rsp, 16
+    call float_from_f64
+    leave
+    ret
+END_FUNC float_pow
+
+;; ============================================================================
 ;; float_int(rdi = raw double bits) -> SmallInt or GMP int
 ;; Convert float to int by truncation.
 ;; ============================================================================
@@ -559,7 +709,7 @@ DEF_FUNC float_compare, 40
 
 .unordered:
     ; NaN comparisons: only NE returns True
-    cmp ecx, PY_NE
+    cmp dword [rbp-24], PY_NE
     je .ret_true
     jmp .ret_false
 
@@ -592,9 +742,10 @@ fmt_e: db "%.*e", 0
 fmt_E: db "%.*E", 0
 
 align 8
-sign_mask: dq 0x8000000000000000
-pos_inf:   dq 0x7FF0000000000000
-neg_inf:   dq 0xFFF0000000000000
+sign_mask:   dq 0x8000000000000000
+pos_inf:     dq 0x7FF0000000000000
+neg_inf:     dq 0xFFF0000000000000
+const_one_f: dq 0x3FF0000000000000   ; 1.0 in IEEE 754
 
 align 8
 global float_number_methods
@@ -604,9 +755,9 @@ float_number_methods:
     dq float_mul              ; nb_multiply     +16
     dq float_mod              ; nb_remainder    +24
     dq 0                      ; nb_divmod       +32
-    dq 0                      ; nb_power        +40
+    dq float_pow              ; nb_power        +40
     dq float_neg              ; nb_negative     +48
-    dq 0                      ; nb_positive     +56
+    dq float_pos              ; nb_positive     +56
     dq 0                      ; nb_absolute     +64
     dq float_bool             ; nb_bool         +72
     dq 0                      ; nb_invert       +80
