@@ -198,39 +198,52 @@ global builtin_divmod
 DEF_FUNC builtin_divmod
     push rbx
     push r12
+    push r13
+    push r14
+    push r15
 
     cmp rsi, 2
     jne .divmod_error
 
-    mov rbx, [rdi]              ; a
-    mov r12, [rdi + 16]         ; b (args[1] payload, 16-byte stride)
+    mov rbx, [rdi]              ; a payload
+    mov r13, [rdi + 8]          ; a tag
+    mov r12, [rdi + 16]         ; b payload (args[1], 16-byte stride)
+    mov r14, [rdi + 24]         ; b tag
 
-    ; Compute a // b
+    ; Compute a // b: int_floordiv(rdi=left, edx=left_tag, rsi=right, ecx=right_tag)
     mov rdi, rbx
+    mov edx, r13d
     mov rsi, r12
+    mov ecx, r14d
     extern int_floordiv
     call int_floordiv
-    push rax                    ; save quotient
+    mov r15, rax                ; r15 = quotient payload
+    push rdx                   ; save quotient tag (stack slot)
 
-    ; Compute a % b
+    ; Compute a % b: int_mod(rdi=left, edx=left_tag, rsi=right, ecx=right_tag)
     mov rdi, rbx
+    mov edx, r13d
     mov rsi, r12
+    mov ecx, r14d
     extern int_mod
     call int_mod
-    mov r12, rax                ; r12 = remainder
-
-    pop rbx                     ; rbx = quotient
+    mov r12, rax                ; r12 = remainder payload
+    mov r13, rdx                ; r13 = remainder tag
 
     ; Create 2-tuple (quotient, remainder)
     mov edi, 2
     extern tuple_new
     call tuple_new
-    mov [rax + PyTupleObject.ob_item], rbx
-    mov qword [rax + PyTupleObject.ob_item + 8], TAG_PTR     ; quotient is heap int
-    mov [rax + PyTupleObject.ob_item + 16], r12
-    mov qword [rax + PyTupleObject.ob_item + 24], TAG_PTR    ; remainder is heap int
+    mov [rax + PyTupleObject.ob_item], r15         ; quotient payload
+    pop rcx                                         ; quotient tag
+    mov [rax + PyTupleObject.ob_item + 8], rcx
+    mov [rax + PyTupleObject.ob_item + 16], r12    ; remainder payload
+    mov [rax + PyTupleObject.ob_item + 24], r13    ; remainder tag
     mov edx, TAG_PTR
 
+    pop r15
+    pop r14
+    pop r13
     pop r12
     pop rbx
     leave
@@ -2456,7 +2469,7 @@ DEF_FUNC builtin_getattr
     mov rdi, r13
     mov rsi, r14
     call rcx
-    test rax, rax
+    test edx, edx              ; check tag, not payload (SmallInt(0) has payload=0)
     jnz .getattr_found
 
     jmp .getattr_try_type_dict
@@ -2596,7 +2609,7 @@ DEF_FUNC builtin_hasattr
     mov rdi, r12
     mov rsi, r13
     call rcx
-    test rax, rax
+    test edx, edx              ; check tag, not payload (SmallInt(0) has payload=0)
     jz .hasattr_try_type_dict
 
     ; Found via tp_getattr - DECREF result, return True

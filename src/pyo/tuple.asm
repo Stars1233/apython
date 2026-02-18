@@ -349,7 +349,7 @@ DEF_FUNC tuple_contains
     shl rax, 4                 ; index * 16
     cmp r12, [rbx + PyTupleObject.ob_item + rax]  ; payload match?
     jne .tc_next
-    cmp r13d, [rbx + PyTupleObject.ob_item + rax + 8]  ; tag match?
+    cmp r13, [rbx + PyTupleObject.ob_item + rax + 8]   ; tag match? (64-bit for SmallStr bit 63)
     je .tc_found
 .tc_next:
     inc rcx

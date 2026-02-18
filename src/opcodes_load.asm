@@ -909,9 +909,9 @@ END_FUNC op_load_deref
 ;; ============================================================================
 DEF_FUNC_BARE op_load_fast_check
     lea rdx, [rcx*8]        ; slot * 8 (×2 via SIB, avoids flags clobber)
+    cmp qword [r12 + rdx*2 + PyFrame.localsplus + 8], 0  ; check tag for TAG_NULL
+    je .lfc_error
     mov rax, [r12 + rdx*2 + PyFrame.localsplus]       ; payload
-    test rax, rax
-    jz .lfc_error
     mov rdx, [r12 + rdx*2 + PyFrame.localsplus + 8]  ; tag
     INCREF_VAL rax, rdx     ; tag-aware INCREF
     mov [r13], rax

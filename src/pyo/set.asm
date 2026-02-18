@@ -759,13 +759,18 @@ DEF_FUNC set_type_call, STC_FRAME
     test edx, edx           ; check tag (NULL = exhausted)
     jz .stc_iter_done
 
-    ; Add to set
+    ; Add to set (set_add INCREFs, so DECREF the iternext ref after)
     mov rdi, rbx            ; set
     mov rsi, rax            ; key payload
     ; edx = key tag (from tp_iternext)
-    push rdx
+    push rax                ; save key payload
+    push rdx                ; save key tag
+    push rdx                ; alignment padding (3 pushes = odd, matches ABI)
     call set_add
-    pop rdx                 ; balance (set_add may clobber)
+    add rsp, 8              ; drop alignment padding
+    pop rsi                 ; key tag
+    pop rdi                 ; key payload
+    DECREF_VAL rdi, rsi     ; release iternext's reference
     jmp .stc_iter_loop
 
 .stc_iter_done:

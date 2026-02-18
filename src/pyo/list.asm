@@ -285,7 +285,7 @@ DEF_FUNC list_ass_subscript, LAS_FRAME
     ; Call list_setitem
     mov rdi, rbx
     mov rdx, r12
-    mov ecx, [rbp - LAS_VTAG]  ; value tag from caller
+    mov rcx, [rbp - LAS_VTAG]  ; value tag from caller (64-bit for SmallStr)
     call list_setitem
 
     pop r12
@@ -575,7 +575,7 @@ DEF_FUNC list_contains
     shl rdx, 4
     cmp r12, [rax + rdx]      ; payload match? (16-byte stride)
     jne .next
-    cmp r13d, [rax + rdx + 8] ; tag match?
+    cmp r13, [rax + rdx + 8]  ; tag match? (64-bit for SmallStr bit 63)
     je .found
 .next:
     inc rcx

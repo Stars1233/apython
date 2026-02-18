@@ -509,7 +509,7 @@ DEF_FUNC sys_exit_func
     jne .exit_0
 
     ; Get exit code from args[0]
-    mov edx, [rdi + 8]
+    mov rdx, [rdi + 8]        ; args[0] tag (64-bit for SmallStr safety)
     mov rdi, [rdi]
     call int_to_i64
     mov edi, eax

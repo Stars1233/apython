@@ -146,7 +146,7 @@ DEF_FUNC instance_getattr
     ; Regular callables are bound to the instance.
     mov r13, rax                ; r13 = attr (borrowed ref from dict_get)
     mov r12, rdx                ; r12 = attr tag (name no longer needed)
-    cmp r12d, TAG_PTR
+    cmp r12, TAG_PTR
     jne .found_type_raw         ; non-pointer — return as-is
 
     mov rcx, [rax + PyObject.ob_type]
@@ -193,7 +193,7 @@ DEF_FUNC instance_getattr
 
 .found_type_raw:
     ; Not callable, SmallInt, or descriptor — INCREF and return
-    INCREF_VAL r13, r12d        ; tag-aware INCREF (skips SmallInt/SmallStr/NULL)
+    INCREF_VAL r13, r12         ; tag-aware INCREF (64-bit tag for SmallStr safety)
     mov rax, r13
     mov rdx, r12                ; restore tag from dict_get
     pop r13

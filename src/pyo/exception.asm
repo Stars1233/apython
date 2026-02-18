@@ -78,7 +78,7 @@ DEF_FUNC exc_new, EN_FRAME
 
     ; Create args tuple: (msg_str,) if msg present, else ()
     mov [rbp - EN_EXC], rax   ; save exc
-    test r12, r12
+    test r13, r13             ; check tag for TAG_NULL, not payload (SmallInt(0) has payload=0)
     jz .empty_args
     mov edi, 1
     call tuple_new
@@ -347,8 +347,7 @@ DEF_FUNC exc_getattr
     ret
 
 .found_in_type:
-    INCREF rax
-    mov edx, TAG_PTR
+    INCREF_VAL rax, rdx     ; tag-aware INCREF (rdx = tag from dict_get)
     pop r12
     pop rbx
     leave
