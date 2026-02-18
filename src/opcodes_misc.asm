@@ -1502,9 +1502,9 @@ DEF_FUNC_BARE op_get_yield_from_iter
     ; TOS = iterable
     VPEEK rdi                  ; rdi = TOS (don't pop)
 
-    ; If it's already a generator, done
-    cmp dword [r13 - 8], TAG_SMALLINT
-    je .gyfi_call_iter
+    ; If it's already a generator, done — must be TAG_PTR to check ob_type
+    cmp qword [r13 - 8], TAG_PTR
+    jne .gyfi_call_iter
     mov rax, [rdi + PyObject.ob_type]
     lea rcx, [rel gen_type]
     cmp rax, rcx
@@ -1514,6 +1514,11 @@ DEF_FUNC_BARE op_get_yield_from_iter
     ; Not a generator — call tp_iter to get an iterator
     VPOP rdi                   ; pop iterable
     mov r8, [r13 + 8]         ; iterable tag
+
+    ; Must be TAG_PTR to dereference ob_type
+    cmp r8, TAG_PTR
+    jne .gyfi_error_nopush
+
     push r8                    ; save tag (deeper)
     push rdi                   ; save payload
 
@@ -1539,6 +1544,7 @@ DEF_FUNC_BARE op_get_yield_from_iter
 
 .gyfi_error:
     add rsp, 16                ; discard iterable payload + tag
+.gyfi_error_nopush:
     extern exc_TypeError_type
     lea rdi, [rel exc_TypeError_type]
     CSTRING rsi, "object is not iterable"

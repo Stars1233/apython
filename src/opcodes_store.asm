@@ -168,7 +168,7 @@ DEF_FUNC op_store_attr, SA_FRAME
     mov [rbp - SA_VTAG], rax
 
     ; Non-pointer obj can't have attrs set (SmallInt, Float, None, Bool)
-    cmp dword [rbp - SA_OTAG], TAG_PTR
+    cmp qword [rbp - SA_OTAG], TAG_PTR
     jne .sa_no_setattr
 
     ; Check for property/descriptor in type dict (walk MRO) before regular setattr
@@ -415,14 +415,14 @@ DEF_FUNC op_delete_attr, DA_FRAME
 
     ; Non-pointer obj can't have attrs deleted
     mov rax, [r13 + 8]            ; obj tag (after VPOP)
-    cmp eax, TAG_PTR
+    cmp rax, TAG_PTR
     jne .da_error
 
     ; Call tp_setattr(obj, name, NULL) to delete attr
     mov rax, [rdi + PyObject.ob_type]
     mov rax, [rax + PyTypeObject.tp_setattr]
     test rax, rax
-    jz .da_error
+    jz .da_error_decref
 
     mov rdi, [rbp - DA_OBJ]
     mov rsi, [rbp - DA_NAME]
@@ -437,6 +437,9 @@ DEF_FUNC op_delete_attr, DA_FRAME
     leave
     DISPATCH
 
+.da_error_decref:
+    mov rdi, [rbp - DA_OBJ]
+    call obj_decref
 .da_error:
     lea rdi, [rel exc_AttributeError_type]
     CSTRING rsi, "cannot delete attribute"
@@ -461,7 +464,7 @@ DEF_FUNC op_delete_subscr, DS_FRAME
     mov [rbp - DS_KTAG], rax    ; save key tag
 
     ; Non-pointer obj can't have items deleted
-    cmp dword [rbp - DS_OTAG], TAG_PTR
+    cmp qword [rbp - DS_OTAG], TAG_PTR
     jne .ds_error
 
     ; Call mp_ass_subscript(obj, key, NULL)

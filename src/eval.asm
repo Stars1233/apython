@@ -805,7 +805,7 @@ DEF_FUNC_BARE op_raise_varargs
 
     ; Check if it's already an exception object or a type
     ; If it's a type, create an instance with no args
-    cmp dword [r13 + 8], TAG_PTR
+    cmp qword [r13 + 8], TAG_PTR
     jne .raise_bad            ; non-pointer can't be an exception
     test rdi, rdi
     jz .raise_bad             ; NULL can't be an exception
@@ -862,7 +862,7 @@ DEF_FUNC_BARE op_raise_varargs
 
 .raise_bad:
     ; DECREF the bad value (only if pointer) and raise TypeError
-    cmp dword [r13 + 8], TAG_PTR
+    cmp qword [r13 + 8], TAG_PTR
     jne .raise_bad_no_decref
     call obj_decref
 .raise_bad_no_decref:
@@ -872,18 +872,21 @@ DEF_FUNC_BARE op_raise_varargs
 
 .raise_from:
     ; TOS = cause, TOS1 = exception
-    VPOP rsi                 ; cause (simplified: just DECREF it)
-    push rsi
+    VPOP rsi                 ; cause payload
+    mov rcx, [r13 + 8]      ; cause tag
+    push rcx                 ; save cause tag
+    push rsi                 ; save cause payload
     VPOP rdi                 ; exception
     push rdi
 
-    ; DECREF cause (we don't support __cause__ yet)
-    mov rdi, [rsp + 8]
-    call obj_decref
+    ; DECREF cause (tag-aware, we don't support __cause__ yet)
+    mov rdi, [rsp + 8]      ; cause payload
+    mov rsi, [rsp + 16]     ; cause tag
+    DECREF_VAL rdi, rsi
 
     ; Raise the exception
     pop rdi
-    add rsp, 8
+    add rsp, 16
     jmp .raise_exc_obj
 END_FUNC op_raise_varargs
 

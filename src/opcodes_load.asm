@@ -43,6 +43,8 @@ extern user_type_metatype
 extern dunder_get
 extern dunder_call_3
 extern dunder_lookup
+extern smallstr_to_obj
+extern str_type
 
 ; --- Named frame-layout constants ---
 
@@ -386,9 +388,12 @@ DEF_FUNC op_load_attr, LA_FRAME
 
     ; Non-pointer obj can't have attrs (SmallInt, Float, None)
     ; Exception: TAG_BOOL has tp_getattr for .real/.imag
-    cmp dword [rbp - LA_OBJ_TAG], TAG_PTR
+    ; Exception: SmallStr (bit 63 set) — spill to heap str
+    cmp qword [rbp - LA_OBJ_TAG], TAG_PTR
     je .la_is_ptr
-    cmp dword [rbp - LA_OBJ_TAG], TAG_BOOL
+    bt qword [rbp - LA_OBJ_TAG], 63
+    jc .la_smallstr_spill
+    cmp qword [rbp - LA_OBJ_TAG], TAG_BOOL
     jne .la_attr_error
 
     ; TAG_BOOL: resolve type to bool_type, check tp_getattr
@@ -405,6 +410,16 @@ DEF_FUNC op_load_attr, LA_FRAME
     mov [rbp - LA_ATTR], rax
     mov [rbp - LA_ATTR_TAG], rdx
     jmp .la_got_attr
+
+.la_smallstr_spill:
+    ; SmallStr: spill to heap PyStrObject* and update LA_OBJ/LA_OBJ_TAG
+    mov rdi, [rbp - LA_OBJ]       ; payload
+    mov rsi, [rbp - LA_OBJ_TAG]   ; tag
+    call smallstr_to_obj           ; rax = heap str (refcount=1)
+    mov [rbp - LA_OBJ], rax
+    mov qword [rbp - LA_OBJ_TAG], TAG_PTR
+    mov rdi, rax
+    ; fall through to .la_is_ptr
 
 .la_is_ptr:
     ; Look up attribute
@@ -459,7 +474,7 @@ DEF_FUNC op_load_attr, LA_FRAME
 .la_got_attr:
     ; === Descriptor protocol: check for staticmethod/classmethod ===
     mov rax, [rbp - LA_ATTR]   ; attr
-    cmp dword [rbp - LA_ATTR_TAG], TAG_PTR
+    cmp qword [rbp - LA_ATTR_TAG], TAG_PTR
     jne .la_check_flag         ; not a heap pointer — skip descriptor check
     mov rcx, [rax + PyObject.ob_type]
 
@@ -529,7 +544,7 @@ DEF_FUNC op_load_attr, LA_FRAME
     cmp qword [rbp - LA_FROM_TYPE], 0
     je .la_simple_push
     mov rax, [rbp - LA_ATTR]
-    cmp dword [rbp - LA_ATTR_TAG], TAG_PTR
+    cmp qword [rbp - LA_ATTR_TAG], TAG_PTR
     jne .la_simple_push         ; not a heap pointer
     mov rcx, [rax + PyObject.ob_type]
     mov rcx, [rcx + PyTypeObject.tp_call]
@@ -564,8 +579,8 @@ DEF_FUNC op_load_attr, LA_FRAME
 .la_method_load:
     ; flag=1: method-style load
     mov rax, [rbp - LA_ATTR]
-    cmp dword [rbp - LA_ATTR_TAG], TAG_SMALLINT
-    je .la_not_method              ; SmallInt can't be a method
+    cmp qword [rbp - LA_ATTR_TAG], TAG_PTR
+    jne .la_not_method             ; non-pointer can't be a method
     mov rcx, [rax + PyObject.ob_type]
 
     ; If attr is a bound method (returned by instance_getattr with binding),
@@ -596,8 +611,8 @@ DEF_FUNC op_load_attr, LA_FRAME
 
     ; Verify type has tp_dict with valid dk_version
     mov rdi, [rbp - LA_OBJ]       ; obj
-    cmp dword [rbp - LA_OBJ_TAG], TAG_SMALLINT
-    je .la_method_push             ; SmallInt obj, skip
+    cmp qword [rbp - LA_OBJ_TAG], TAG_PTR
+    jne .la_method_push            ; non-pointer obj, skip IC
     mov rcx, [rdi + PyObject.ob_type]
     mov rdx, [rcx + PyTypeObject.tp_dict]
     test rdx, rdx
@@ -809,9 +824,9 @@ DEF_FUNC_BARE op_load_attr_method
     ; VPEEK obj (don't pop -- stays as self if guards pass, or for deopt)
     VPEEK rdi
 
-    ; SmallInt check (tag at r13-8 for TOS)
-    cmp dword [r13 - 8], TAG_SMALLINT
-    je .lam_deopt
+    ; Non-pointer check (tag at r13-8 for TOS) — must be TAG_PTR to use IC
+    cmp qword [r13 - 8], TAG_PTR
+    jne .lam_deopt
 
     ; Guard 1: ob_type == cached type_ptr
     mov rax, [rdi + PyObject.ob_type]

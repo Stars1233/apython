@@ -38,6 +38,7 @@ extern dict_set
 extern slice_new
 extern slice_type
 extern slice_indices
+extern smallstr_to_obj
 extern none_singleton
 extern obj_incref
 extern dict_get
@@ -784,6 +785,19 @@ END_FUNC op_unpack_sequence
 DEF_FUNC_BARE op_get_iter
     VPOP rdi                   ; rdi = iterable obj
     mov r8, [r13 + 8]         ; r8 = iterable tag
+
+    ; SmallStr: spill to heap before dereferencing
+    bt r8, 63
+    jnc .gi_not_smallstr
+    mov rsi, r8                ; tag
+    ; rdi = payload already
+    push rbp
+    mov rbp, rsp
+    call smallstr_to_obj       ; rax = heap str (refcount=1)
+    leave
+    mov rdi, rax
+    mov r8, TAG_PTR
+.gi_not_smallstr:
 
     push r8                    ; save tag (deeper)
     push rdi                   ; save payload

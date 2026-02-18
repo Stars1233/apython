@@ -32,9 +32,9 @@ DEF_FUNC memoryview_type_call, MV_FRAME
     cmp rdx, 1
     jne .mv_error
     mov rdi, [rsi]                     ; arg0 payload
-    ; Must be a bytes-like object
-    cmp dword [rsi + 8], TAG_SMALLINT
-    je .mv_error                       ; SmallInt → error
+    ; Must be a bytes-like object (reject all non-pointer tags)
+    cmp qword [rsi + 8], TAG_PTR
+    jne .mv_error
     mov rax, [rdi + PyObject.ob_type]
     lea rcx, [rel bytes_type]
     cmp rax, rcx
