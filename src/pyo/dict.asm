@@ -563,6 +563,7 @@ DEF_FUNC_LOCAL dict_resize
     ; New capacity = old * 2
     lea r14, [r13 * 2]          ; r14 = new capacity
     mov [rbx + PyDictObject.capacity], r14
+    mov qword [rbx + PyDictObject.dk_tombstones], 0  ; rehash clears tombstones
 
     ; Allocate new entries array
     imul rdi, r14, DICT_ENTRY_SIZE
@@ -707,12 +708,14 @@ DEF_FUNC dict_set, 16
     ; Increment ob_size
     inc qword [rbx + PyDictObject.ob_size]
 
-    ; Check load factor: ob_size > capacity * 3/4
+    ; Check load factor: (ob_size + tombstones) > capacity * 3/4
     mov rax, [rbx + PyDictObject.capacity]
     mov rcx, rax
     shr rcx, 2                  ; capacity / 4
     imul rcx, rcx, 3            ; capacity * 3/4
-    cmp [rbx + PyDictObject.ob_size], rcx
+    mov rax, [rbx + PyDictObject.ob_size]
+    add rax, [rbx + PyDictObject.dk_tombstones]
+    cmp rax, rcx
     jle .done
 
     ; Resize needed

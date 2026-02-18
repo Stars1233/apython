@@ -62,6 +62,7 @@ DEF_FUNC memoryview_type_call, MV_FRAME
     mov [rax + PyMemoryViewObject.mv_len], rcx
     lea rcx, [rdi + PyBytesObject.data]
     mov [rax + PyMemoryViewObject.mv_buf], rcx
+    mov edx, TAG_PTR
     leave
     ret
 
@@ -166,6 +167,7 @@ DEF_FUNC memoryview_subscript, MS_FRAME
     INCREF rdi
     pop rax
 
+    mov edx, TAG_PTR
     leave
     ret
 

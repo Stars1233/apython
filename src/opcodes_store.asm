@@ -474,7 +474,7 @@ DEF_FUNC op_delete_subscr, DS_FRAME
     jz .ds_error
 
     xor edx, edx               ; value = NULL (delete)
-    mov ecx, dword [rbp - DS_KTAG]  ; key tag (4th arg)
+    mov rcx, [rbp - DS_KTAG]  ; key tag (4th arg, 64-bit for SmallStr)
     xor r8d, r8d               ; value tag = TAG_NULL (5th arg)
     call rax
 

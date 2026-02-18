@@ -1022,8 +1022,12 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     mov rdi, [rbp - BI_ARGS]
     mov rbx, [rdi]                 ; args[0] payload
     mov [rbp - BI_OBJ], rbx       ; save original obj for error msg
-    cmp dword [rdi + 8], TAG_PTR       ; args[0] tag
-    jne .int_base_type_error_str   ; non-pointer: can't have base with non-str
+    ; Check SmallStr first (bit 63 of full 64-bit tag)
+    mov rax, [rdi + 8]            ; args[0] full tag
+    test rax, rax
+    js .int_base_from_smallstr    ; SmallStr → spill and parse
+    cmp eax, TAG_PTR              ; args[0] tag
+    jne .int_base_type_error_str  ; non-pointer: can't have base with non-str
     mov rax, [rbx + PyObject.ob_type]
     lea rcx, [rel str_type]
     cmp rax, rcx
@@ -1044,6 +1048,16 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     test rcx, rcx
     jnz .int_base_check_bytes_chain
     jmp .int_base_type_error_str
+
+.int_base_from_smallstr:
+    ; SmallStr: spill to heap, then parse as string with base
+    ; rax = full 64-bit tag, rbx = payload
+    mov rdi, rbx
+    mov rsi, rax
+    extern smallstr_to_obj
+    call smallstr_to_obj
+    mov rbx, rax               ; rbx = heap PyStrObject (owned ref)
+    mov [rbp - BI_OBJ], rbx   ; update saved obj for error msg
 
 .int_base_from_str:
     ; Check for embedded NUL bytes
