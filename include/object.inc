@@ -208,13 +208,6 @@ struc PyRangeIterObject
     .it_step:    resq 1   ; +32: step value
 endstruc
 
-struc PyStrIterObject
-    .ob_refcnt: resq 1
-    .ob_type:   resq 1
-    .it_seq:    resq 1
-    .it_index:  resq 1
-endstruc
-
 struc PyBytesIterObject
     .ob_refcnt: resq 1
     .ob_type:   resq 1
@@ -319,7 +312,8 @@ struc SleepAwaitable
     .ob_refcnt: resq 1  ; +0
     .ob_type:   resq 1  ; +8
     .delay_ns:  resq 1  ; +16
-    .yielded:   resd 1  ; +20: 0=not yet, 1=done
+    .yielded:   resd 1  ; +24: 0=not yet, 1=done
+    .pad:       resd 1  ; +28
 endstruc
 
 ; Async stream reader

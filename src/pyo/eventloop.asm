@@ -38,6 +38,7 @@ extern exc_CancelledError_type
 extern exc_StopIteration_type
 extern coro_type
 extern builtin_func_new
+extern getenv
 
 ; Poll backend (always available)
 extern poll_backend
@@ -51,7 +52,16 @@ extern uring_init
 ;; Initialize the event loop. Try io_uring first, fall back to poll.
 ;; ============================================================================
 DEF_FUNC eventloop_init
-    ; Try io_uring first
+    ; Check APYTHON_IO_BACKEND env var
+    CSTRING rdi, "APYTHON_IO_BACKEND"
+    call getenv
+    test rax, rax
+    jz .try_uring              ; not set → default (try uring, fall back to poll)
+    cmp byte [rax], 'p'        ; "poll"
+    je .try_poll
+    ; else: try iouring (default)
+
+.try_uring:
     call uring_init
     test eax, eax
     js .try_poll
@@ -589,7 +599,7 @@ END_FUNC task_getattr
 ;; ============================================================================
 ;; task_iter_self — tp_iter for task: return self
 ;; ============================================================================
-task_iter_self:
+DEF_FUNC_BARE task_iter_self
     inc qword [rdi + PyObject.ob_refcnt]
     mov rax, rdi
     ret
@@ -599,7 +609,7 @@ END_FUNC task_iter_self
 ;; task_iternext — tp_iternext for task: yield TAG_TASK or stop
 ;; When awaited, yields itself as TAG_TASK so event loop can track dependency.
 ;; ============================================================================
-task_iternext:
+DEF_FUNC_BARE task_iternext
     ; If done, return NULL (signals StopIteration to SEND)
     cmp dword [rdi + AsyncTask.done], 1
     je .ti_done
@@ -611,10 +621,11 @@ task_iternext:
     ret
 
 .ti_done:
-    ; Return the result
+    ; Copy result to send_value/send_tag where SEND reads gi_return_value (+48/+56)
     mov rax, [rdi + AsyncTask.result]
     mov rdx, [rdi + AsyncTask.result_tag]
-    INCREF_VAL rax, rdx
+    mov [rdi + AsyncTask.send_value], rax
+    mov [rdi + AsyncTask.send_tag], rdx
     ; Return NULL to signal completion
     RET_NULL
     ret
@@ -623,7 +634,7 @@ END_FUNC task_iternext
 ;; ============================================================================
 ;; task_repr
 ;; ============================================================================
-task_repr:
+DEF_FUNC_BARE task_repr
     lea rdi, [rel task_repr_str]
     jmp str_from_cstr
 END_FUNC task_repr

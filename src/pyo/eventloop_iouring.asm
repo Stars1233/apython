@@ -346,21 +346,25 @@ END_FUNC uring_submit_timeout
 ;; ============================================================================
 DEF_FUNC uring_submit_poll
     push rbx
+    push r12
+    push r13
 
     mov rbx, rdi               ; task
-    mov r8d, esi               ; fd
-    mov r9d, edx               ; events
+    mov r12d, esi              ; fd (callee-saved across uring_get_sqe)
+    mov r13d, edx              ; events (callee-saved across uring_get_sqe)
 
     call uring_get_sqe
     test rax, rax
     jz .usp_done
 
     mov byte [rax + IoUringSqe.opcode], IORING_OP_POLL_ADD
-    mov [rax + IoUringSqe.fd], r8d
-    mov [rax + IoUringSqe.rw_flags], r9d   ; poll_events
+    mov [rax + IoUringSqe.fd], r12d
+    mov [rax + IoUringSqe.rw_flags], r13d  ; poll_events
     mov [rax + IoUringSqe.user_data], rbx
 
 .usp_done:
+    pop r13
+    pop r12
     pop rbx
     leave
     ret

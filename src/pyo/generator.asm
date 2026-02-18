@@ -344,10 +344,10 @@ DEF_FUNC ags_iternext
     ; Async gen returned (exhausted): free frame, raise StopAsyncIteration
     call frame_free
     mov qword [r12 + PyGenObject.gi_frame], 0
-    pop rax                    ; result tag
-    pop rcx                    ; result payload
-    mov [r12 + PyGenObject.gi_return_value], rcx
-    mov [r12 + PyGenObject.gi_return_tag], rax
+    pop rdx                    ; result tag
+    pop rax                    ; result payload
+    mov [r12 + PyGenObject.gi_return_value], rax
+    mov [r12 + PyGenObject.gi_return_tag], rdx
 
     ; Mark wrapper as closed
     mov dword [rbx + AsyncGenASend.ags_state], 2
@@ -436,7 +436,7 @@ END_FUNC ags_iternext
 ;; ags_iter_self(AsyncGenASend *self) -> self with INCREF
 ;; tp_iter for AsyncGenASend: return self (it IS the iterator)
 ;; ============================================================================
-ags_iter_self:
+DEF_FUNC_BARE ags_iter_self
     inc qword [rdi + PyObject.ob_refcnt]
     mov rax, rdi
     mov edx, TAG_PTR
@@ -507,7 +507,7 @@ END_FUNC gen_dealloc
 ;; gen_iter_self(PyObject *self) -> self with INCREF
 ;; tp_iter for generator: return self
 ;; ============================================================================
-gen_iter_self:
+DEF_FUNC_BARE gen_iter_self
     inc qword [rdi + PyObject.ob_refcnt]
     mov rax, rdi
     ret
@@ -516,7 +516,7 @@ END_FUNC gen_iter_self
 ;; ============================================================================
 ;; gen_repr(PyObject *self) -> PyStrObject*
 ;; ============================================================================
-gen_repr:
+DEF_FUNC_BARE gen_repr
     lea rdi, [rel gen_repr_str]
     jmp str_from_cstr
 END_FUNC gen_repr
@@ -524,7 +524,7 @@ END_FUNC gen_repr
 ;; ============================================================================
 ;; coro_repr(PyObject *self) -> PyStrObject*
 ;; ============================================================================
-coro_repr:
+DEF_FUNC_BARE coro_repr
     lea rdi, [rel coro_repr_str]
     jmp str_from_cstr
 END_FUNC coro_repr
@@ -532,7 +532,7 @@ END_FUNC coro_repr
 ;; ============================================================================
 ;; async_gen_repr(PyObject *self) -> PyStrObject*
 ;; ============================================================================
-async_gen_repr:
+DEF_FUNC_BARE async_gen_repr
     lea rdi, [rel async_gen_repr_str]
     jmp str_from_cstr
 END_FUNC async_gen_repr

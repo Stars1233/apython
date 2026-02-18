@@ -92,6 +92,7 @@ DEF_FUNC frame_pool_put
     cmp rsi, POOL_CLASS_3
     jbe .fpp_class3
     ; Too large — ap_free
+    leave
     jmp ap_free                ; tail call
 
 .fpp_class0:
@@ -121,6 +122,7 @@ DEF_FUNC frame_pool_put
 
 .fpp_full:
     ; Pool is full — ap_free
+    leave
     jmp ap_free                ; tail call (rdi already set)
 END_FUNC frame_pool_put
 

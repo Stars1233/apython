@@ -81,17 +81,7 @@ DEF_FUNC_BARE op_get_awaitable
     test rax, rax
     jz .gaw_error
 
-    ; Pop TOS, call tp_iter, push result
-    VPOP rdi
-    push rdi                   ; save original for DECREF
-    call [rdi + PyObject.ob_type]  ; Wrong! Need to re-load
-    ; Actually: we need the tp_iter function pointer
-    ; Let me redo this properly
-    pop rdi                    ; restore — redo
-    VPUSH_PTR rdi              ; push back
-    jmp .gaw_call_iter
-
-.gaw_call_iter:
+    ; Fall through to call tp_iter
     ; Pop TOS, save it, call tp_iter
     VPOP rdi
     push rdi                   ; save for DECREF later
@@ -375,6 +365,7 @@ DEF_FUNC_BARE op_end_async_for
 .eaf_reraise:
     ; Not StopAsyncIteration — re-raise
     VPOP rdi
+    mov rsi, [r13 + 8]         ; tag of popped exc value
     DECREF_VAL rdi, rsi
     lea rdi, [rel exc_TypeError_type]
     CSTRING rsi, "async for loop received unexpected exception"
@@ -428,8 +419,9 @@ DEF_FUNC_BARE op_cleanup_throw
     cmp rcx, rdx
     jne .ct_reraise
 
-    ; StopIteration: TOS already has the value
-    ; Clear current_exception
+    ; StopIteration: DECREF the exception, then clear current_exception
+    mov rdi, rax
+    call obj_decref
     mov qword [rel current_exception], 0
 
     ; Pop val (TOS)

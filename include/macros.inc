@@ -204,7 +204,7 @@
 ;   TAG_SMALLSTR in bits 0-7 ensures:
 ;     - test edx, edx → nonzero (never confused with TAG_NULL)
 ;     - cmp edx, TAG_* → never matches any other tag
-;   Only TAG_PTR has TAG_RC_BIT set, so use `cmp X, TAG_PTR` for refcount checks.
+;   Tags with TAG_RC_BIT set (TAG_PTR, TAG_TASK) are refcounted heap pointers.
 
 ; Tag constants (normal mode, bit 63 = 0)
 TAG_NULL     equ 0           ; null/empty slot
@@ -312,20 +312,25 @@ TAG_TASK     equ 0x109       ; payload = AsyncTask*, RC bit SET (9 | TAG_RC_BIT)
     mov %2, [r13 - 8 - %3*16]
 %endmacro
 
-; 128-bit INCREF — only if TAG_PTR (the only refcounted tag).
-; SmallStr, SmallInt, Float, Bool, None all skip with single comparison.
+; 128-bit INCREF — only if TAG_RC_BIT set AND not SmallStr (bit 63).
+; SmallStr tags pack string data in bits 8-55, so bit 8 may be set.
+; Must check bit 63 first to exclude SmallStr before testing TAG_RC_BIT.
 %macro INCREF_VAL 2             ; %1 = payload, %2 = tag (must be 64-bit reg)
-    cmp %2, TAG_PTR
-    jne %%skip
+    bt %2, 63
+    jc %%skip                  ; SmallStr — not refcounted
+    test %2, TAG_RC_BIT
+    jz %%skip                  ; no RC bit — not refcounted
     inc qword [%1 + PyObject.ob_refcnt]
     %%skip:
 %endmacro
 
-; 128-bit DECREF — only if TAG_PTR (the only refcounted tag).
+; 128-bit DECREF — only if TAG_RC_BIT set AND not SmallStr (bit 63).
 ; Calls obj_dealloc if refcount reaches zero. Clobbers rdi + all caller-saved.
 %macro DECREF_VAL 2             ; %1 = payload, %2 = tag (must be 64-bit reg)
-    cmp %2, TAG_PTR
-    jne %%skip
+    bt %2, 63
+    jc %%skip                  ; SmallStr — not refcounted
+    test %2, TAG_RC_BIT
+    jz %%skip                  ; no RC bit — not refcounted
     dec qword [%1 + PyObject.ob_refcnt]
     jnz %%skip
     mov rdi, %1
@@ -335,8 +340,10 @@ TAG_TASK     equ 0x109       ; payload = AsyncTask*, RC bit SET (9 | TAG_RC_BIT)
 
 ; 128-bit XDECREF — NULL-safe DECREF_VAL
 %macro XDECREF_VAL 2            ; %1 = payload, %2 = tag (must be 64-bit reg)
-    cmp %2, TAG_PTR
-    jne %%skip
+    bt %2, 63
+    jc %%skip                  ; SmallStr — not refcounted
+    test %2, TAG_RC_BIT
+    jz %%skip                  ; no RC bit — not refcounted
     test %1, %1
     jz %%skip
     dec qword [%1 + PyObject.ob_refcnt]

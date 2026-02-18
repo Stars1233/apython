@@ -289,10 +289,15 @@ DEF_FUNC asyncio_gather_func
 
     ; Add to result list
     pop rax
+    push rax                   ; save task for DECREF
     mov rdi, r13
     mov rsi, rax
     mov edx, TAG_PTR
     call list_append
+
+    ; DECREF task (list_append INCREFs, release our initial ref)
+    pop rdi
+    call obj_decref
 
     pop rcx
     inc rcx

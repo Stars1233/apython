@@ -85,7 +85,7 @@ DEF_FUNC stream_reader_new
 END_FUNC stream_reader_new
 
 ;; stream_reader_dealloc(self)
-stream_reader_dealloc:
+DEF_FUNC_BARE stream_reader_dealloc
     ; Close fd if still open
     mov edi, [rdi + AsyncStreamReader.fd]
     cmp edi, -1
@@ -360,7 +360,7 @@ END_FUNC stream_reader_readline_impl
 ;; ReadAwaitable — tp_iter / tp_iternext for async read
 ;; ============================================================================
 
-read_awaitable_iter_self:
+DEF_FUNC_BARE read_awaitable_iter_self
     inc qword [rdi + PyObject.ob_refcnt]
     mov rax, rdi
     ret
@@ -369,7 +369,7 @@ END_FUNC read_awaitable_iter_self
 ;; read_awaitable_iternext(self) -> fat value
 ;; First call: yield TAG_IO_WAIT (fd | POLLIN<<32) to wait for readability
 ;; Second call: do the actual read, return string result (StopIteration-like)
-read_awaitable_iternext:
+DEF_FUNC_BARE read_awaitable_iternext
     cmp dword [rdi + ReadAwaitable.yielded], 0
     jne .rai_read
 
@@ -416,7 +416,6 @@ read_awaitable_iternext:
     add rsp, STREAM_BUFSIZE
     pop r12
     pop rbx
-    leave
     ret
 
 .rai_eof:
@@ -428,11 +427,10 @@ read_awaitable_iternext:
     add rsp, STREAM_BUFSIZE
     pop r12
     pop rbx
-    leave
     ret
 END_FUNC read_awaitable_iternext
 
-read_awaitable_dealloc:
+DEF_FUNC_BARE read_awaitable_dealloc
     jmp ap_free
 END_FUNC read_awaitable_dealloc
 
@@ -460,7 +458,7 @@ DEF_FUNC stream_writer_new
 END_FUNC stream_writer_new
 
 ;; stream_writer_dealloc(self)
-stream_writer_dealloc:
+DEF_FUNC_BARE stream_writer_dealloc
     ; Close fd if still open
     mov edi, [rdi + AsyncStreamWriter.fd]
     cmp edi, -1
@@ -581,8 +579,8 @@ DEF_FUNC stream_writer_write_impl
 
     ; Heap string: get data ptr and length
     mov r12, rax               ; string object
-    mov r13, [rax + 32]       ; str.ob_size (length)
-    lea rdi, [rax + 40]       ; str.ob_data (inline data)
+    mov r13, [rax + 16]       ; str.ob_size (PyStrObject.ob_size = +16)
+    lea rdi, [rax + 32]       ; str.data (PyStrObject.data = +32)
     jmp .swwi_do_write
 
 .swwi_smallstr:
@@ -685,19 +683,19 @@ END_FUNC stream_writer_drain_impl
 ;; DrainAwaitable — tp_iter / tp_iternext (completes immediately)
 ;; ============================================================================
 
-drain_awaitable_iter_self:
+DEF_FUNC_BARE drain_awaitable_iter_self
     inc qword [rdi + PyObject.ob_refcnt]
     mov rax, rdi
     ret
 END_FUNC drain_awaitable_iter_self
 
-drain_awaitable_iternext:
+DEF_FUNC_BARE drain_awaitable_iternext
     ; Drain completes immediately for raw sockets — return NULL (done)
     RET_NULL
     ret
 END_FUNC drain_awaitable_iternext
 
-drain_awaitable_dealloc:
+DEF_FUNC_BARE drain_awaitable_dealloc
     jmp ap_free
 END_FUNC drain_awaitable_dealloc
 
@@ -707,14 +705,14 @@ END_FUNC drain_awaitable_dealloc
 ;; Second call: return (reader, writer) tuple
 ;; ============================================================================
 
-connect_awaitable_iter_self:
+DEF_FUNC_BARE connect_awaitable_iter_self
     inc qword [rdi + PyObject.ob_refcnt]
     mov rax, rdi
     ret
 END_FUNC connect_awaitable_iter_self
 
 ;; connect_awaitable_iternext(self) -> fat value
-connect_awaitable_iternext:
+DEF_FUNC_BARE connect_awaitable_iternext
     cmp dword [rdi + ConnectAwaitable.yielded], 0
     jne .cai_result
 
@@ -749,25 +747,24 @@ connect_awaitable_iternext:
     call tuple_new
     mov rbx, rax               ; rbx = tuple
 
-    ; Set tuple[0] = reader
-    mov [rax + 24], r12        ; ob_item[0] payload
-    mov qword [rax + 32], TAG_PTR  ; ob_item[0] tag
+    ; Set tuple[0] = reader (ob_item starts at +32)
+    mov [rax + 32], r12        ; ob_item[0] payload
+    mov qword [rax + 40], TAG_PTR  ; ob_item[0] tag
 
     ; Set tuple[1] = writer
     pop rcx                    ; writer
-    mov [rax + 40], rcx        ; ob_item[1] payload
-    mov qword [rax + 48], TAG_PTR  ; ob_item[1] tag
+    mov [rax + 48], rcx        ; ob_item[1] payload
+    mov qword [rax + 56], TAG_PTR  ; ob_item[1] tag
 
     mov rax, rbx
     mov edx, TAG_PTR
 
     pop r12
     pop rbx
-    leave
     ret
 END_FUNC connect_awaitable_iternext
 
-connect_awaitable_dealloc:
+DEF_FUNC_BARE connect_awaitable_dealloc
     jmp ap_free
 END_FUNC connect_awaitable_dealloc
 
@@ -985,11 +982,11 @@ DEF_FUNC asyncio_start_server_func, SS_FRAME
     call tuple_new
     mov rbx, rax
 
-    mov [rax + 24], r12
-    mov qword [rax + 32], TAG_PTR
+    mov [rax + 32], r12            ; ob_item[0] payload (+32)
+    mov qword [rax + 40], TAG_PTR  ; ob_item[0] tag
     pop rcx
-    mov [rax + 40], rcx
-    mov qword [rax + 48], TAG_PTR
+    mov [rax + 48], rcx            ; ob_item[1] payload
+    mov qword [rax + 56], TAG_PTR  ; ob_item[1] tag
 
     mov rax, rbx
     mov edx, TAG_PTR
@@ -1041,10 +1038,9 @@ DEF_FUNC_LOCAL ap_strcmp
     mov r12, rsi               ; Python string object
 
     ; Get string data and length from Python str object
-    ; Check if it's a heap string (has ob_refcnt/ob_type header)
-    ; Heap strings: data at +40, length at +32
-    mov rdi, [r12 + 32]       ; length
-    lea rsi, [r12 + 40]       ; data
+    ; PyStrObject: ob_size at +16, data at +32
+    mov rdi, [r12 + 16]       ; length (PyStrObject.ob_size)
+    lea rsi, [r12 + 32]       ; data (PyStrObject.data)
 
     ; Compare byte by byte
     xor ecx, ecx

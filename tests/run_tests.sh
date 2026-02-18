@@ -54,6 +54,31 @@ for test_py in "$TESTDIR"/test_*.py; do
         FAIL=$((FAIL + 1))
         ERRORS="$ERRORS\n--- $test_name ---\nExpected:\n$expected\nActual:\n$actual\n"
     fi
+
+    # Dual-backend testing for async tests
+    if [[ "$test_name" == test_async_* ]]; then
+        # Test with poll backend
+        actual_poll=$(APYTHON_IO_BACKEND=poll $APYTHON "$pyc_file" 2>&1) || true
+        if [ "$expected" != "$actual_poll" ]; then
+            echo -e "${RED}FAIL${NC} $test_name (poll backend)"
+            FAIL=$((FAIL + 1))
+            ERRORS="$ERRORS\n--- $test_name (poll) ---\nExpected:\n$expected\nActual:\n$actual_poll\n"
+        else
+            echo -e "${GREEN}PASS${NC} $test_name (poll)"
+            PASS=$((PASS + 1))
+        fi
+        # Test with iouring backend (Linux only)
+        if [ "$(uname)" = "Linux" ]; then
+            actual_uring=$(APYTHON_IO_BACKEND=iouring $APYTHON "$pyc_file" 2>&1) || true
+            if [ "$expected" != "$actual_uring" ]; then
+                echo -e "${YELLOW}SKIP${NC} $test_name (iouring — may need newer kernel)"
+                SKIP=$((SKIP + 1))
+            else
+                echo -e "${GREEN}PASS${NC} $test_name (iouring)"
+                PASS=$((PASS + 1))
+            fi
+        fi
+    fi
 done
 
 echo ""
