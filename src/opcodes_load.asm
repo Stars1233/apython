@@ -458,11 +458,10 @@ DEF_FUNC op_load_attr, LA_FRAME
     test edx, edx
     jz .la_attr_error
 
-    ; INCREF the result (dict_get returns borrowed ref)
+    ; INCREF the result (dict_get returns borrowed ref — may be SmallInt)
     mov [rbp - LA_ATTR], rax
     mov [rbp - LA_ATTR_TAG], rdx   ; save tag from dict_get
-    mov rdi, rax
-    call obj_incref
+    INCREF_VAL rax, rdx
     mov qword [rbp - LA_FROM_TYPE], 1
     jmp .la_got_attr
 

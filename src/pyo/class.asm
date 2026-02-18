@@ -690,9 +690,9 @@ DEF_FUNC type_call
     lea rdx, [r13 + 1]          ; nargs + 1
     call rax
 
-    ; DECREF __init__'s return value (should be None)
-    mov rdi, rax
-    call obj_decref
+    ; DECREF __init__'s return value (should be None — TAG_NONE, not a pointer)
+    mov rsi, rdx
+    DECREF_VAL rax, rsi
 
     ; Restore stack (undo the sub rsp from args allocation)
     lea rax, [r13 + 1]

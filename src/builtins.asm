@@ -1095,9 +1095,9 @@ DEF_FUNC builtin___build_class__
     ; eval_frame(frame)
     mov rdi, r12
     call eval_frame
-    ; DECREF return value (should be None)
-    mov rdi, rax
-    call obj_decref
+    ; DECREF return value (should be None — TAG_NONE, not a pointer)
+    mov rsi, rdx
+    DECREF_VAL rax, rsi
 
     ; Free the frame
     mov rdi, r12

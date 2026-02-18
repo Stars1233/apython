@@ -511,10 +511,20 @@ section .text
     ; SmallStr guard
     bt qword [rsp + BO_LTAG], 63
     jc .cmp_smallstr_type
+    cmp r9d, TAG_BOOL
+    je .cmp_bool_type
+    cmp r9d, TAG_NONE
+    je .cmp_none_type
     mov rax, [rdi + PyObject.ob_type]
     jmp .cmp_have_type
 .cmp_smallint_type:
     lea rax, [rel int_type]
+    jmp .cmp_have_type
+.cmp_bool_type:
+    lea rax, [rel bool_type]
+    jmp .cmp_have_type
+.cmp_none_type:
+    lea rax, [rel none_type]
     jmp .cmp_have_type
 .cmp_smallstr_type:
     ; Spill SmallStr operands to heap so str_compare can dereference them
@@ -885,11 +895,14 @@ DEF_FUNC_BARE op_pop_jump_if_none
     VPOP rax                   ; rax = value
     mov r8, [r13 + 8]         ; r8 = value tag
 
-    ; Compare with none_singleton
+    ; Check for None: TAG_NONE or (TAG_PTR with none_singleton payload)
+    cmp r8d, TAG_NONE
+    je .is_none
     lea rdx, [rel none_singleton]
     cmp rax, rdx
     jne .not_none
 
+.is_none:
     ; IS None: save jump offset, DECREF, jump
     push rcx                   ; save jump offset
     mov rsi, r8
@@ -912,7 +925,9 @@ DEF_FUNC_BARE op_pop_jump_if_not_none
     VPOP rax                   ; rax = value
     mov r8, [r13 + 8]         ; r8 = value tag
 
-    ; Compare with none_singleton
+    ; Check for None: TAG_NONE or (TAG_PTR with none_singleton payload)
+    cmp r8d, TAG_NONE
+    je .is_none
     lea rdx, [rel none_singleton]
     cmp rax, rdx
     je .is_none
@@ -1693,6 +1708,8 @@ extern obj_len
 
 DEF_FUNC_BARE op_get_len
     ; PEEK TOS (don't pop, 16 bytes/slot)
+    cmp qword [r13 - 8], TAG_PTR
+    jne .gl_error_nopop         ; non-pointer has no len()
     mov rdi, [r13 - 16]
     push rdi                    ; save obj
 
@@ -1727,6 +1744,7 @@ DEF_FUNC_BARE op_get_len
 
 .gl_error:
     pop rdi
+.gl_error_nopop:
     lea rdi, [rel exc_TypeError_type]
     CSTRING rsi, "object has no len()"
     call raise_exception
@@ -1832,10 +1850,12 @@ DEF_FUNC_BARE op_load_from_dict_or_globals
     test edx, edx
     jnz .lfdg_found
 
-    ; Try builtins
-    mov rdi, [r12 + PyFrame.builtins]
-    pop rdi                     ; discard saved dict (builtins from frame)
+    ; DECREF dict (owned ref from TOS) before builtins lookup
+    pop rdi                     ; saved dict
+    DECREF rdi
     pop rsi                     ; name
+
+    ; Try builtins
     mov rdi, [r12 + PyFrame.builtins]
     mov edx, TAG_PTR
     call dict_get
@@ -1849,9 +1869,21 @@ DEF_FUNC_BARE op_load_from_dict_or_globals
     call raise_exception
 
 .lfdg_found:
+    ; INCREF result (borrowed ref) before DECREF dict
+    INCREF_VAL rax, rdx
+    ; Save result across DECREF
+    push rax
+    push rdx
+    mov rdi, [rsp + 16]        ; saved dict (shifted by 2 pushes)
+    DECREF rdi
+    pop rdx
+    pop rax
     add rsp, 16                 ; pop saved dict + name
+    VPUSH_VAL rax, rdx
+    DISPATCH
+
 .lfdg_found_no_pop:
-    ; dict_get returns fat (rax=payload, rdx=tag); rdx preserved through all paths
+    ; dict already DECREFed in builtins path
     INCREF_VAL rax, rdx
     VPUSH_VAL rax, rdx
     DISPATCH
@@ -1900,7 +1932,15 @@ DEF_FUNC op_load_from_dict_or_deref, LFDOD_FRAME
     jz .lfdod_error
 
 .lfdod_found:
+    ; INCREF result (borrowed ref) before DECREF dict
     INCREF_VAL rax, rdx
+    ; Save result across DECREF of owned dict ref
+    push rax
+    push rdx
+    mov rdi, [rbp - LFDOD_DICT]
+    DECREF rdi
+    pop rdx
+    pop rax
     VPUSH_VAL rax, rdx
     leave
     DISPATCH
@@ -1920,9 +1960,9 @@ END_FUNC op_load_from_dict_or_deref
 extern dict_type
 
 DEF_FUNC_BARE op_match_mapping
-    mov rdi, [r13 - 16]           ; peek TOS (16 bytes/slot)
-    cmp dword [r13 - 8], TAG_SMALLINT
-    je .mm_false                   ; SmallInt → not a mapping
+    mov rdi, [r13 - 16]           ; peek TOS payload (16 bytes/slot)
+    cmp qword [r13 - 8], TAG_PTR
+    jne .mm_false                  ; non-pointer → not a mapping
     mov rax, [rdi + PyObject.ob_type]
     ; Check if it's a dict or has tp_as_mapping with mp_subscript
     lea rcx, [rel dict_type]
@@ -1957,9 +1997,9 @@ extern str_type
 extern bytes_type
 
 DEF_FUNC_BARE op_match_sequence
-    mov rdi, [r13 - 16]           ; peek TOS (16 bytes/slot)
-    cmp dword [r13 - 8], TAG_SMALLINT
-    je .ms_false                   ; SmallInt → not a sequence
+    mov rdi, [r13 - 16]           ; peek TOS payload (16 bytes/slot)
+    cmp qword [r13 - 8], TAG_PTR
+    jne .ms_false                  ; non-pointer → not a sequence
     mov rax, [rdi + PyObject.ob_type]
     ; Exclude str, bytes, dict
     lea rcx, [rel str_type]

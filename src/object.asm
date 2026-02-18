@@ -310,6 +310,10 @@ DEF_FUNC obj_hash
     je .smallint_hash
     cmp esi, TAG_FLOAT
     je .float_hash
+    cmp esi, TAG_BOOL
+    je .bool_hash
+    cmp esi, TAG_NONE
+    je .none_hash
 
     ; TAG_PTR path
     test rdi, rdi
@@ -340,6 +344,18 @@ DEF_FUNC obj_hash
     ; Inline float: call float_hash for PEP-correct integer-float matching
     extern float_hash
     call float_hash
+    leave
+    ret
+
+.bool_hash:
+    ; Hash of bool: 0 for False, 1 for True (matches Python int hash)
+    mov rax, rdi
+    leave
+    ret
+
+.none_hash:
+    ; Hash of None: constant (avoids -1 which is reserved error value)
+    mov eax, 0x48ae2ce5
     leave
     ret
 

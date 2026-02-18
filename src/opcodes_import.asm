@@ -29,7 +29,8 @@ DEF_FUNC_BARE op_import_name
     mov rax, [r15 + rcx]       ; name_str from co_names
 
     ; Pop fromlist (TOS)
-    VPOP rsi                    ; fromlist
+    VPOP rsi                    ; fromlist payload
+    mov r8, [r13 + 8]          ; fromlist tag
 
     ; Pop level (TOS1)
     VPOP rdx                    ; level (SmallInt)
@@ -37,9 +38,10 @@ DEF_FUNC_BARE op_import_name
     ; Save tag of level (at [r13 + 8] right after VPOP)
     mov rcx, [r13 + 8]         ; level tag
 
-    ; Save name and fromlist for later
+    ; Save name, fromlist (payload+tag), and level for later
     push rax                    ; name
-    push rsi                    ; fromlist
+    push r8                     ; fromlist tag
+    push rsi                    ; fromlist payload
     push rdx                    ; level
 
     ; Decode level from SmallInt
@@ -62,9 +64,12 @@ DEF_FUNC_BARE op_import_name
 
     add rsp, 8                  ; discard level (SmallInt, no refcount)
 
-    ; DECREF fromlist
-    pop rdi                     ; fromlist
-    DECREF rdi
+    ; DECREF fromlist (may be None/TAG_NONE — use fat DECREF_VAL)
+    pop rdi                     ; fromlist payload
+    pop rsi                     ; fromlist tag
+    push rax                    ; save module across DECREF
+    DECREF_VAL rdi, rsi
+    pop rax                     ; restore module
 
     add rsp, 8                  ; pop saved name (borrowed ref, no DECREF)
 
