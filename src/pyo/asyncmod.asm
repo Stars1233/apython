@@ -31,6 +31,8 @@ extern raise_exception
 extern raise_exception_obj
 extern exc_TypeError_type
 extern exc_RuntimeError_type
+extern exc_TimeoutError_type
+extern exc_CancelledError_type
 extern exc_new
 extern type_type
 extern coro_type
@@ -41,6 +43,7 @@ extern eventloop_teardown
 extern eventloop_run
 extern eventloop
 extern ready_enqueue
+extern task_add_waiter
 extern str_from_cstr
 extern list_new
 extern list_append
@@ -220,6 +223,197 @@ sleep_awaitable_dealloc:
     ; Simple object with no refs to DECREF
     jmp ap_free                ; tail call
 END_FUNC sleep_awaitable_dealloc
+
+;; ============================================================================
+;; asyncio_wait_for_func(args, nargs) — asyncio.wait_for(coro, timeout)
+;; Creates inner task, wraps in WaitForAwaitable.
+;; ============================================================================
+WF_INNER equ 8
+WF_DELAY equ 16
+WF_FRAME equ 16
+DEF_FUNC asyncio_wait_for_func, WF_FRAME
+    push rbx
+
+    cmp rsi, 2
+    jne .wf_error
+
+    ; args[0] = coro, args[1] = timeout
+    push rdi                   ; save args
+
+    ; Create inner task from coro
+    mov rdi, [rdi]             ; coro = args[0] payload
+    call task_new
+    mov [rbp - WF_INNER], rax  ; save inner task
+
+    ; Enqueue inner task on ready queue
+    mov rdi, rax
+    call ready_enqueue
+
+    ; Convert timeout (args[1]) to nanoseconds
+    pop rdi                    ; restore args
+    mov rax, [rdi + 16]       ; args[1] payload
+    mov edx, [rdi + 24]       ; args[1] tag
+
+    cmp edx, TAG_FLOAT
+    je .wf_float_timeout
+    cmp edx, TAG_SMALLINT
+    je .wf_int_timeout
+    jmp .wf_type_error
+
+.wf_float_timeout:
+    movq xmm0, rax
+    movsd xmm1, [rel async_1e9]
+    mulsd xmm0, xmm1
+    cvttsd2si rbx, xmm0       ; rbx = timeout_ns
+    jmp .wf_create
+
+.wf_int_timeout:
+    mov rbx, rax
+    imul rbx, 1000000000      ; rbx = timeout_ns
+
+.wf_create:
+    mov [rbp - WF_DELAY], rbx
+
+    ; Allocate WaitForAwaitable
+    mov edi, WaitForAwaitable_size
+    call ap_malloc
+    mov qword [rax + WaitForAwaitable.ob_refcnt], 1
+    lea rcx, [rel wait_for_awaitable_type]
+    mov [rax + WaitForAwaitable.ob_type], rcx
+    mov rcx, [rbp - WF_INNER]
+    INCREF rcx
+    mov [rax + WaitForAwaitable.inner_task], rcx
+    mov rcx, [rbp - WF_DELAY]
+    mov [rax + WaitForAwaitable.timeout_ns], rcx
+    mov dword [rax + WaitForAwaitable.state], 0
+    mov qword [rax + WaitForAwaitable.outer_task], 0
+    mov qword [rax + WaitForAwaitable.gi_return_value], 0
+    mov qword [rax + WaitForAwaitable.gi_return_tag], 0
+
+    mov edx, TAG_PTR
+    pop rbx
+    leave
+    ret
+
+.wf_error:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "asyncio.wait_for() takes exactly 2 arguments"
+    call raise_exception
+
+.wf_type_error:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "asyncio.wait_for() timeout must be a number"
+    call raise_exception
+END_FUNC asyncio_wait_for_func
+
+;; ============================================================================
+;; wait_for_awaitable_iter_self — tp_iter for WaitForAwaitable (return self)
+;; ============================================================================
+wait_for_awaitable_iter_self:
+    inc qword [rdi + PyObject.ob_refcnt]
+    mov rax, rdi
+    ret
+END_FUNC wait_for_awaitable_iter_self
+
+;; ============================================================================
+;; wait_for_awaitable_iternext — tp_iternext for WaitForAwaitable
+;; State 0: first call — yield self as TAG_WAIT_FOR for task_step to intercept.
+;; State 1: resumed — check inner task, return result or raise TimeoutError.
+;; State 2+: exhausted.
+;; ============================================================================
+wait_for_awaitable_iternext:
+    ; rdi = WaitForAwaitable*
+    mov eax, [rdi + WaitForAwaitable.state]
+
+    cmp eax, 0
+    je .wfai_first
+
+    cmp eax, 1
+    je .wfai_check
+
+    ; State 2+: exhausted
+    RET_NULL
+    ret
+
+.wfai_first:
+    ; State 0 → 1: yield (self, TAG_WAIT_FOR) for task_step
+    mov dword [rdi + WaitForAwaitable.state], 1
+    INCREF rdi
+    mov rax, rdi
+    mov edx, TAG_WAIT_FOR
+    ret
+
+.wfai_check:
+    ; State 1 → 2: check inner task
+    mov dword [rdi + WaitForAwaitable.state], 2
+    push rbx
+    mov rbx, rdi              ; rbx = WaitForAwaitable
+
+    ; Check if inner task completed
+    mov rax, [rbx + WaitForAwaitable.inner_task]
+    cmp dword [rax + AsyncTask.done], 1
+    jne .wfai_timeout
+
+    ; Inner task done — check for exception
+    mov rax, [rbx + WaitForAwaitable.inner_task]
+    cmp qword [rax + AsyncTask.exception], 0
+    jne .wfai_inner_exc
+
+    ; Copy result to gi_return_value for SEND exhaustion protocol
+    mov rax, [rbx + WaitForAwaitable.inner_task]
+    mov rcx, [rax + AsyncTask.result]
+    mov rdx, [rax + AsyncTask.result_tag]
+    mov [rbx + WaitForAwaitable.gi_return_value], rcx
+    mov [rbx + WaitForAwaitable.gi_return_tag], rdx
+    INCREF_VAL rcx, rdx
+
+    RET_NULL
+    pop rbx
+    ret
+
+.wfai_inner_exc:
+    ; Inner task had exception — re-raise it
+    mov rax, [rbx + WaitForAwaitable.inner_task]
+    mov rdi, [rax + AsyncTask.exception]
+    INCREF rdi
+    call raise_exception_obj
+    RET_NULL
+    pop rbx
+    ret
+
+.wfai_timeout:
+    ; Inner task not done — cancel it and raise TimeoutError
+    mov rax, [rbx + WaitForAwaitable.inner_task]
+    mov dword [rax + AsyncTask.cancelling], 1
+
+    lea rdi, [rel exc_TimeoutError_type]
+    CSTRING rsi, "asyncio.wait_for() timed out"
+    call raise_exception
+    RET_NULL
+    pop rbx
+    ret
+END_FUNC wait_for_awaitable_iternext
+
+;; ============================================================================
+;; wait_for_awaitable_dealloc — tp_dealloc for WaitForAwaitable
+;; ============================================================================
+wait_for_awaitable_dealloc:
+    push rdi                   ; save self
+    ; DECREF inner_task
+    mov rdi, [rdi + WaitForAwaitable.inner_task]
+    test rdi, rdi
+    jz .wfad_no_inner
+    call obj_decref
+.wfad_no_inner:
+    pop rdi
+    push rdi
+    ; XDECREF_VAL gi_return_value
+    mov rax, [rdi + WaitForAwaitable.gi_return_value]
+    mov rdx, [rdi + WaitForAwaitable.gi_return_tag]
+    XDECREF_VAL rax, rdx
+    pop rdi
+    jmp ap_free                ; tail call
+END_FUNC wait_for_awaitable_dealloc
 
 ;; ============================================================================
 ;; asyncio_create_task(args, nargs) — asyncio.create_task(coro)
@@ -446,6 +640,25 @@ DEF_FUNC asyncio_module_create
     pop rdi
     call obj_decref
 
+    ; asyncio.wait_for
+    lea rdi, [rel asyncio_wait_for_func]
+    lea rsi, [rel am_wait_for]
+    call builtin_func_new
+    push rax
+    lea rdi, [rel am_wait_for]
+    call str_from_cstr_heap
+    push rax
+    mov rdi, r12
+    mov rsi, rax
+    mov rdx, [rsp + 8]
+    mov ecx, TAG_PTR
+    mov r8d, TAG_PTR
+    call dict_set
+    pop rdi
+    call obj_decref
+    pop rdi
+    call obj_decref
+
     ; asyncio.get_running_loop
     lea rdi, [rel asyncio_get_running_loop_func]
     lea rsi, [rel am_get_running_loop]
@@ -557,10 +770,12 @@ am_gather:           db "gather", 0
 am_get_running_loop: db "get_running_loop", 0
 am_open_connection:  db "open_connection", 0
 am_start_server:     db "start_server", 0
+am_wait_for:         db "wait_for", 0
 am_stream_reader:    db "StreamReader", 0
 am_stream_writer:    db "StreamWriter", 0
 
 sleep_awaitable_name: db "SleepAwaitable", 0
+wait_for_awaitable_name: db "WaitForAwaitable", 0
 
 section .data
 
@@ -580,6 +795,33 @@ sleep_awaitable_type:
     dq 0                        ; tp_richcompare
     dq sleep_awaitable_iter_self ; tp_iter (return self — __await__ protocol)
     dq sleep_awaitable_iternext ; tp_iternext
+    dq 0                        ; tp_init
+    dq 0                        ; tp_new
+    dq 0                        ; tp_as_number
+    dq 0                        ; tp_as_sequence
+    dq 0                        ; tp_as_mapping
+    dq 0                        ; tp_base
+    dq 0                        ; tp_dict
+    dq 0                        ; tp_mro
+    dq 0                        ; tp_flags
+    dq 0                        ; tp_bases
+
+align 8
+wait_for_awaitable_type:
+    dq 1                        ; ob_refcnt (immortal)
+    dq type_type                ; ob_type
+    dq wait_for_awaitable_name  ; tp_name
+    dq WaitForAwaitable_size    ; tp_basicsize
+    dq wait_for_awaitable_dealloc ; tp_dealloc
+    dq 0                        ; tp_repr
+    dq 0                        ; tp_str
+    dq 0                        ; tp_hash
+    dq 0                        ; tp_call
+    dq 0                        ; tp_getattr
+    dq 0                        ; tp_setattr
+    dq 0                        ; tp_richcompare
+    dq wait_for_awaitable_iter_self ; tp_iter
+    dq wait_for_awaitable_iternext ; tp_iternext
     dq 0                        ; tp_init
     dq 0                        ; tp_new
     dq 0                        ; tp_as_number

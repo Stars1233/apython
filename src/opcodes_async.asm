@@ -48,6 +48,7 @@ extern str_from_cstr_heap
 extern dict_get
 extern method_new
 extern current_exception
+extern eval_exception_unwind
 
 ;; ============================================================================
 ;; op_get_awaitable - GET_AWAITABLE (131)
@@ -424,19 +425,20 @@ END_FUNC op_end_async_for
 ;; ============================================================================
 ;; op_cleanup_throw - CLEANUP_THROW (55)
 ;;
-;; Called after a throw into a subgenerator/coroutine.
+;; Called after a throw into a subgenerator/coroutine via eval_exception_unwind.
+;; eval_exception_unwind pushes the exception onto TOS and clears current_exception.
 ;; If the exception is StopIteration: extract .value and replace TOS.
-;; Otherwise: re-raise.
+;; Otherwise: re-raise by setting current_exception and re-entering unwind.
 ;;
-;; Stack: ... | sub | prev_exc | val
+;; Stack after eval_exception_unwind: ... | sub_iter(depth-preserved) | exception(TOS)
 ;; ============================================================================
 DEF_FUNC_BARE op_cleanup_throw
-    ; TOS = val (result after throw)
-    ; TOS1 = prev exception
-    ; TOS2 = sub-iterator
+    ; TOS = exception (pushed by eval_exception_unwind)
+    ; Below TOS: sub-iterator (preserved to handler depth)
+    ; current_exception = 0 (cleared by eval_exception_unwind)
 
-    ; Check if current exception is StopIteration
-    mov rax, [rel current_exception]
+    ; Read exception from TOS
+    mov rax, [r13 - 16]          ; exception payload
     test rax, rax
     jz .ct_no_exc
 
@@ -446,45 +448,53 @@ DEF_FUNC_BARE op_cleanup_throw
     cmp rcx, rdx
     jne .ct_reraise
 
-    ; StopIteration: DECREF the exception, then clear current_exception
-    mov rdi, rax
-    call obj_decref
-    mov qword [rel current_exception], 0
-
-    ; Pop val (TOS)
-    sub r13, 16
-    mov r8, [r13]
-    mov r9, [r13 + 8]
-
-    ; Pop prev_exc (TOS1) and DECREF
-    sub r13, 16
-    mov rdi, [r13]
-    mov rsi, [r13 + 8]
+    ; === StopIteration: sub-iterator returned normally ===
+    ; Extract .value (exc_args[0] or None)
+    mov rdi, [rax + PyExceptionObject.exc_args]
+    test rdi, rdi
+    jz .ct_si_none
+    cmp qword [rdi + PyTupleObject.ob_size], 0
+    je .ct_si_none
+    ; value = args[0] (fat value in 16-byte slot)
+    mov r8, [rdi + PyTupleObject.ob_item]       ; value payload
+    mov r9, [rdi + PyTupleObject.ob_item + 8]   ; value tag
+    INCREF_VAL r8, r9
+    jmp .ct_si_got_val
+.ct_si_none:
+    lea r8, [rel none_singleton]
+    INCREF r8
+    mov r9d, TAG_PTR
+.ct_si_got_val:
+    ; Save extracted value across DECREFs
     push r8
     push r9
-    DECREF_VAL rdi, rsi
-
-    ; Pop sub (TOS2) and DECREF
+    ; Pop and DECREF the StopIteration exception (TOS)
+    sub r13, 16
+    mov rdi, [r13]
+    call obj_decref
+    ; Pop and DECREF_VAL the sub-iterator
     sub r13, 16
     mov rdi, [r13]
     mov rsi, [r13 + 8]
     DECREF_VAL rdi, rsi
-
-    ; Push the value back
+    ; Restore extracted value and push
     pop r9
     pop r8
     VPUSH_VAL r8, r9
-
     DISPATCH
 
 .ct_no_exc:
-    ; No exception — just leave stack as-is
+    ; No exception — just dispatch
     DISPATCH
 
 .ct_reraise:
-    ; Not StopIteration — re-raise the current exception
-    mov rdi, rax
-    call raise_exception_obj
+    ; Not StopIteration — re-raise
+    ; INCREF for current_exception (stack still owns its ref;
+    ; eval_exception_unwind will restore r13 from saved value and
+    ; XDECREF_VAL items when adjusting to the next handler's depth)
+    INCREF rax
+    mov [rel current_exception], rax
+    jmp eval_exception_unwind
 END_FUNC op_cleanup_throw
 
 ;; ============================================================================

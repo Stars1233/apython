@@ -305,6 +305,8 @@ struc AsyncTask
     .waiters_cap:  resd 1  ; +88: waiters array capacity
     .pad2:         resd 1  ; +92
     .next:         resq 1  ; +96: ready queue linkage
+    .ts_sec:       resq 1  ; +104: timespec seconds (for uring timeout SQE)
+    .ts_nsec:      resq 1  ; +112: timespec nanoseconds
 endstruc
 
 ; Sleep awaitable object (for asyncio.sleep)
@@ -314,6 +316,19 @@ struc SleepAwaitable
     .delay_ns:  resq 1  ; +16
     .yielded:   resd 1  ; +24: 0=not yet, 1=done
     .pad:       resd 1  ; +28
+endstruc
+
+; WaitFor awaitable object (for asyncio.wait_for)
+struc WaitForAwaitable
+    .ob_refcnt:       resq 1  ; +0
+    .ob_type:         resq 1  ; +8
+    .inner_task:      resq 1  ; +16: AsyncTask* being waited on
+    .timeout_ns:      resq 1  ; +24: timeout in nanoseconds
+    .state:           resd 1  ; +32: 0=init, 1=yielded, 2=done
+    .pad:             resd 1  ; +36
+    .outer_task:      resq 1  ; +40: AsyncTask* (the waiter, set by task_step)
+    .gi_return_value: resq 1  ; +48: result payload (matches PyGenObject offset)
+    .gi_return_tag:   resq 1  ; +56: result tag (matches PyGenObject offset)
 endstruc
 
 ; Async stream reader

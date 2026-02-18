@@ -218,6 +218,7 @@ TAG_SMALLSTR equ 0x06        ; SmallStr low byte — always in tag bits 0-7
 TAG_SLEEP    equ 7           ; payload = delay_ns (uint64) — async sleep sentinel
 TAG_IO_WAIT  equ 8           ; payload = fd | (direction << 32) — async I/O sentinel
 TAG_TASK     equ 0x109       ; payload = AsyncTask*, RC bit SET (9 | TAG_RC_BIT)
+TAG_WAIT_FOR equ 0x10A       ; payload = WaitForAwaitable*, RC bit SET (10 | TAG_RC_BIT)
 
 ; 128-bit value stack push (r13 = stack top pointer, 16 bytes/slot)
 %macro VPUSH_VAL 2              ; %1 = payload reg, %2 = tag reg

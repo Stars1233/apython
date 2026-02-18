@@ -28,6 +28,7 @@ extern exc_StopAsyncIteration_type
 extern method_new
 extern builtin_func_new
 extern current_exception
+extern throw_pending
 
 ;; ============================================================================
 ;; gen_new(PyFrame *frame) -> PyGenObject*
@@ -694,7 +695,17 @@ DEF_FUNC gen_throw, GT_FRAME
     add rax, 16
     mov [r13 + PyFrame.stack_ptr], rax
 
-    ; Resume execution — eval_frame will see current_exception and unwind
+    ; Back up instr_ptr by 2 bytes so it points to YIELD_VALUE itself
+    ; (not the CACHE entry after it). The exception table covers YIELD_VALUE's
+    ; offset but NOT the CACHE entry's offset.
+    mov rax, [r13 + PyFrame.instr_ptr]
+    sub rax, 2
+    mov [r13 + PyFrame.instr_ptr], rax
+
+    ; Set throw_pending so eval_frame resume immediately unwinds
+    mov byte [rel throw_pending], 1
+
+    ; Resume execution — eval_frame will see throw_pending and unwind
     mov rdi, r13
     call eval_frame
     mov r12, rax               ; save result payload

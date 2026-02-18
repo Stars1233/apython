@@ -314,13 +314,13 @@ DEF_FUNC uring_submit_timeout
     mov rbx, rdi               ; task
     mov r12, rsi               ; delay_ns
 
-    ; Convert delay_ns to timespec
+    ; Convert delay_ns to timespec — store in task's ts_sec/ts_nsec
     mov rax, r12
     mov rcx, 1000000000
     xor edx, edx
     div rcx
-    mov [rel uring_ts_buf], rax      ; tv_sec
-    mov [rel uring_ts_buf + 8], rdx  ; tv_nsec
+    mov [rbx + AsyncTask.ts_sec], rax     ; tv_sec
+    mov [rbx + AsyncTask.ts_nsec], rdx    ; tv_nsec
 
     call uring_get_sqe
     test rax, rax
@@ -329,7 +329,7 @@ DEF_FUNC uring_submit_timeout
     ; Fill SQE for IORING_OP_TIMEOUT
     mov byte [rax + IoUringSqe.opcode], IORING_OP_TIMEOUT
     mov dword [rax + IoUringSqe.fd], -1
-    lea rcx, [rel uring_ts_buf]
+    lea rcx, [rbx + AsyncTask.ts_sec]
     mov [rax + IoUringSqe.addr], rcx
     mov dword [rax + IoUringSqe.len], 1    ; count = 1
     mov [rax + IoUringSqe.user_data], rbx  ; task as user_data

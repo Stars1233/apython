@@ -36,6 +36,8 @@ extern exc_TypeError_type
 extern exc_RuntimeError_type
 extern exc_CancelledError_type
 extern exc_StopIteration_type
+extern current_exception
+extern eval_exception_unwind
 extern coro_type
 extern builtin_func_new
 extern getenv
@@ -247,6 +249,10 @@ DEF_FUNC task_step, TS_FRAME
     mov rbx, rdi               ; rbx = task
     mov [rbp - TS_TASK], rdi
 
+    ; Done-guard: double-wakeup protection
+    cmp dword [rbx + AsyncTask.done], 1
+    je .ts_ret
+
     ; Check if cancelled
     cmp dword [rbx + AsyncTask.cancelling], 1
     je .ts_cancel
@@ -269,6 +275,8 @@ DEF_FUNC task_step, TS_FRAME
     je .ts_io_wait
     cmp edx, TAG_TASK
     je .ts_await_task
+    cmp edx, TAG_WAIT_FOR
+    je .ts_wait_for
 
     ; Unknown yield value — coroutine yielded a regular value
     ; For asyncio: this means the coroutine is waiting
@@ -314,66 +322,77 @@ DEF_FUNC task_step, TS_FRAME
     je .ts_await_done
 
     ; Add current task as waiter on the awaited task
-    ; Grow waiters array if needed
-    mov eax, [r12 + AsyncTask.n_waiters]
-    cmp eax, [r12 + AsyncTask.waiters_cap]
-    jb .ts_add_waiter
-
-    ; Grow: new_cap = old_cap ? old_cap*2 : 4
-    mov ecx, [r12 + AsyncTask.waiters_cap]
-    test ecx, ecx
-    jz .ts_init_cap
-    shl ecx, 1
-    jmp .ts_grow
-.ts_init_cap:
-    mov ecx, 4
-.ts_grow:
-    mov [r12 + AsyncTask.waiters_cap], ecx
-    ; Allocate new array
-    lea edi, [ecx * 8]
-    push rcx
-    call ap_malloc
-    pop rcx
-    ; Copy old entries
-    mov rsi, [r12 + AsyncTask.waiters]
-    test rsi, rsi
-    jz .ts_no_copy
-    mov rdi, rax
-    mov edx, [r12 + AsyncTask.n_waiters]
-    shl edx, 3
-    push rax
-    ; memcpy manually (small count)
-    xor ecx, ecx
-.ts_copy_loop:
-    cmp ecx, edx
-    jge .ts_copy_done
-    mov r8, [rsi + rcx]
-    mov [rdi + rcx], r8
-    add ecx, 8
-    jmp .ts_copy_loop
-.ts_copy_done:
-    ; Free old array
-    mov rdi, rsi
-    call ap_free
-    pop rax
-.ts_no_copy:
-    mov [r12 + AsyncTask.waiters], rax
-
-.ts_add_waiter:
-    mov eax, [r12 + AsyncTask.n_waiters]
-    mov rcx, [r12 + AsyncTask.waiters]
-    mov [rcx + rax*8], rbx     ; waiters[n_waiters] = current task
-    inc dword [r12 + AsyncTask.n_waiters]
+    mov rdi, r12               ; awaited task
+    mov rsi, rbx               ; waiter (current task)
+    call task_add_waiter
     jmp .ts_ret
 
 .ts_await_done:
-    ; Awaited task already done — set send_value to its result, re-enqueue
+    ; Awaited task already done — check for exception first
+    mov rax, [r12 + AsyncTask.exception]
+    test rax, rax
+    jnz .ts_await_done_exc
+
+    ; No exception — set send_value to its result, re-enqueue
     mov rax, [r12 + AsyncTask.result]
     mov rdx, [r12 + AsyncTask.result_tag]
     mov [rbx + AsyncTask.send_value], rax
     mov [rbx + AsyncTask.send_tag], rdx
     mov rdi, rbx
     call ready_enqueue
+    jmp .ts_ret
+
+.ts_await_done_exc:
+    ; Awaited task had exception — set send_value = None, re-enqueue.
+    ; When waiter resumes, SEND calls task_iternext which detects the
+    ; awaited task's exception and raises it via eval_exception_unwind.
+    lea rax, [rel none_singleton]
+    INCREF rax
+    mov [rbx + AsyncTask.send_value], rax
+    mov qword [rbx + AsyncTask.send_tag], TAG_PTR
+    mov rdi, rbx
+    call ready_enqueue
+    jmp .ts_ret
+
+.ts_wait_for:
+    ; rax = WaitForAwaitable*
+    mov r12, rax               ; r12 = wfa
+    ; Store outer task reference
+    mov [r12 + WaitForAwaitable.outer_task], rbx
+
+    ; Check if inner task already done
+    mov rax, [r12 + WaitForAwaitable.inner_task]
+    cmp dword [rax + AsyncTask.done], 1
+    je .ts_wf_done
+
+    ; Inner task still running — add outer as waiter + start timeout
+    mov rdi, [r12 + WaitForAwaitable.inner_task]
+    mov rsi, rbx               ; waiter = outer task
+    call task_add_waiter
+
+    ; Submit timeout for outer task
+    mov rdi, rbx               ; task
+    mov rsi, [r12 + WaitForAwaitable.timeout_ns]
+    mov rax, [rel eventloop + EventLoop.backend]
+    call [rax + IOBackend.submit_timeout]
+
+    ; DECREF wfa
+    mov rdi, r12
+    call obj_decref
+    jmp .ts_ret
+
+.ts_wf_done:
+    ; Inner task already done — fast path: set send_value, re-enqueue
+    ; Set None as send_value (wfa iternext will check inner task result)
+    lea rax, [rel none_singleton]
+    INCREF rax
+    mov [rbx + AsyncTask.send_value], rax
+    mov qword [rbx + AsyncTask.send_tag], TAG_PTR
+    mov rdi, rbx
+    call ready_enqueue
+    ; DECREF wfa
+    mov rdi, r12
+    call obj_decref
     jmp .ts_ret
 
 .ts_finished:
@@ -397,10 +416,44 @@ DEF_FUNC task_step, TS_FRAME
     mov rdi, [rbx + AsyncTask.coro]
     lea rsi, [rel exc_CancelledError_type]
     call gen_throw
-    ; Mark as done regardless
+
+    ; Store CancelledError exception on the task
+    ; gen_throw may have left it in current_exception, or coro caught it
+    test edx, edx
+    jnz .ts_cancel_caught
+    ; Exception propagated (NULL return) — grab from current_exception
+    mov rax, [rel current_exception]
+    test rax, rax
+    jz .ts_cancel_no_exc
+    INCREF rax
+    mov [rbx + AsyncTask.exception], rax
+    ; Clear current_exception
+    mov rdi, [rel current_exception]
+    mov qword [rel current_exception], 0
+    call obj_decref
+    jmp .ts_cancel_done
+.ts_cancel_caught:
+    ; Coro caught the error and returned — no exception to propagate
+    ; Store return value as result (from gi_return_value since gen exhausted)
+    mov rdi, [rbx + AsyncTask.coro]
+    mov rax, [rdi + PyGenObject.gi_return_value]
+    mov rdx, [rdi + PyGenObject.gi_return_tag]
+    mov [rbx + AsyncTask.result], rax
+    mov [rbx + AsyncTask.result_tag], rdx
+    INCREF_VAL rax, rdx
+    jmp .ts_cancel_done
+.ts_cancel_no_exc:
+    ; No exception found — create one
+    lea rdi, [rel exc_CancelledError_type]
+    xor esi, esi
+    xor edx, edx
+    call exc_new
+    mov [rbx + AsyncTask.exception], rax
+.ts_cancel_done:
+    ; Mark as done
     mov dword [rbx + AsyncTask.done], 1
     mov dword [rbx + AsyncTask.cancelling], 0
-    ; Wake waiters
+    ; Wake waiters (they'll see exception)
     mov rdi, rbx
     call task_wake_waiters
 
@@ -436,13 +489,29 @@ DEF_FUNC task_wake_waiters
     push rcx
     mov rdi, [r13 + rcx*8]    ; waiter task
 
+    ; Check if completed task has an exception
+    mov rax, [rbx + AsyncTask.exception]
+    test rax, rax
+    jnz .tw_set_cancel
+
     ; Set send_value = task's result (INCREF for each waiter)
     mov rax, [rbx + AsyncTask.result]
     mov rdx, [rbx + AsyncTask.result_tag]
     INCREF_VAL rax, rdx
     mov [rdi + AsyncTask.send_value], rax
     mov [rdi + AsyncTask.send_tag], rdx
+    jmp .tw_enqueue
 
+.tw_set_cancel:
+    ; Task had exception — set send_value = None and enqueue waiter.
+    ; When waiter is resumed, SEND calls task_iternext which will detect
+    ; the awaited task's exception and raise it via eval_exception_unwind.
+    lea rax, [rel none_singleton]
+    INCREF rax
+    mov [rdi + AsyncTask.send_value], rax
+    mov qword [rdi + AsyncTask.send_tag], TAG_PTR
+
+.tw_enqueue:
     ; Enqueue waiter
     call ready_enqueue
     pop rcx
@@ -459,6 +528,74 @@ DEF_FUNC task_wake_waiters
     leave
     ret
 END_FUNC task_wake_waiters
+
+;; ============================================================================
+;; task_add_waiter(AsyncTask *awaited, AsyncTask *waiter)
+;; Add waiter to awaited's waiters array, growing if needed.
+;; rdi = awaited task, rsi = waiter task
+;; ============================================================================
+DEF_FUNC task_add_waiter
+    push rbx
+    push r12
+
+    mov rbx, rdi               ; rbx = awaited task
+    mov r12, rsi               ; r12 = waiter task
+
+    ; Check if waiters array needs growing
+    mov eax, [rbx + AsyncTask.n_waiters]
+    cmp eax, [rbx + AsyncTask.waiters_cap]
+    jb .taw_add
+
+    ; Grow: new_cap = old_cap ? old_cap*2 : 4
+    mov ecx, [rbx + AsyncTask.waiters_cap]
+    test ecx, ecx
+    jz .taw_init_cap
+    shl ecx, 1
+    jmp .taw_grow
+.taw_init_cap:
+    mov ecx, 4
+.taw_grow:
+    mov [rbx + AsyncTask.waiters_cap], ecx
+    ; Allocate new array
+    lea edi, [ecx * 8]
+    push rcx
+    call ap_malloc
+    pop rcx
+    ; Copy old entries
+    mov rsi, [rbx + AsyncTask.waiters]
+    test rsi, rsi
+    jz .taw_no_copy
+    mov rdi, rax
+    mov edx, [rbx + AsyncTask.n_waiters]
+    shl edx, 3
+    push rax
+    xor ecx, ecx
+.taw_copy_loop:
+    cmp ecx, edx
+    jge .taw_copy_done
+    mov r8, [rsi + rcx]
+    mov [rdi + rcx], r8
+    add ecx, 8
+    jmp .taw_copy_loop
+.taw_copy_done:
+    ; Free old array
+    mov rdi, rsi
+    call ap_free
+    pop rax
+.taw_no_copy:
+    mov [rbx + AsyncTask.waiters], rax
+
+.taw_add:
+    mov eax, [rbx + AsyncTask.n_waiters]
+    mov rcx, [rbx + AsyncTask.waiters]
+    mov [rcx + rax*8], r12     ; waiters[n_waiters] = waiter
+    inc dword [rbx + AsyncTask.n_waiters]
+
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC task_add_waiter
 
 ;; ============================================================================
 ;; eventloop_run(AsyncTask *root_task) -> fat value
@@ -621,7 +758,12 @@ DEF_FUNC_BARE task_iternext
     ret
 
 .ti_done:
-    ; Copy result to send_value/send_tag where SEND reads gi_return_value (+48/+56)
+    ; Check for exception — if task was cancelled/errored, raise it
+    mov rax, [rdi + AsyncTask.exception]
+    test rax, rax
+    jnz .ti_done_exc
+
+    ; No exception — copy result for StopIteration protocol
     mov rax, [rdi + AsyncTask.result]
     mov rdx, [rdi + AsyncTask.result_tag]
     mov [rdi + AsyncTask.send_value], rax
@@ -629,6 +771,12 @@ DEF_FUNC_BARE task_iternext
     ; Return NULL to signal completion
     RET_NULL
     ret
+
+.ti_done_exc:
+    ; Task had exception — raise it (non-local jump into eval exception unwind)
+    INCREF rax
+    mov [rel current_exception], rax
+    jmp eval_exception_unwind
 END_FUNC task_iternext
 
 ;; ============================================================================

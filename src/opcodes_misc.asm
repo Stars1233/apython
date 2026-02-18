@@ -39,7 +39,10 @@ extern coro_new
 extern async_gen_new
 extern raise_exception
 extern exc_RuntimeError_type
+extern exc_StopIteration_type
 extern exc_TypeError_type
+extern current_exception
+extern eval_exception_unwind
 extern obj_incref
 extern obj_decref
 extern prep_reraise_star
@@ -1422,6 +1425,7 @@ END_FUNC op_end_send
 extern gen_send
 extern gen_type
 extern coro_type
+extern async_gen_type
 
 DEF_FUNC op_send, SND_FRAME
     ; ecx = arg (jump offset in instructions for StopIteration)
@@ -1449,6 +1453,22 @@ DEF_FUNC op_send, SND_FRAME
     cmp rsi, rcx
     je .send_use_iternext
 
+    ; Only call gen_send if receiver is gen/coro/async_gen type
+    mov rdi, [rbp - SND_RECV]
+    mov rax, [rdi + PyObject.ob_type]
+    lea rcx, [rel gen_type]
+    cmp rax, rcx
+    je .send_gen_send
+    lea rcx, [rel coro_type]
+    cmp rax, rcx
+    je .send_gen_send
+    lea rcx, [rel async_gen_type]
+    cmp rax, rcx
+    je .send_gen_send
+    ; Not a generator — use tp_iternext (value is discarded)
+    jmp .send_use_iternext
+
+.send_gen_send:
     ; gen_send(receiver, value, value_tag)
     mov rdi, [rbp - SND_RECV]
     mov rsi, [rbp - SND_SENT]
@@ -1630,7 +1650,16 @@ DEF_FUNC_BARE op_call_intrinsic_1
     DISPATCH
 
 .ci1_stopiter_error:
-    ; Convert StopIteration to RuntimeError
+    ; INTRINSIC_STOPITERATION_ERROR: convert StopIteration to RuntimeError
+    ; Only converts if exception IS StopIteration; otherwise re-raise as-is
+    mov rax, [r13 - 16]           ; TOS payload (exception)
+    test rax, rax
+    jz .ci1_si_convert
+    mov rcx, [rax + PyObject.ob_type]
+    lea rdx, [rel exc_StopIteration_type]
+    cmp rcx, rdx
+    jne .ci1_si_reraise
+.ci1_si_convert:
     ; Pop the exception, raise RuntimeError instead
     sub r13, 16
     mov rdi, [r13]
@@ -1639,6 +1668,12 @@ DEF_FUNC_BARE op_call_intrinsic_1
     lea rdi, [rel exc_RuntimeError_type]
     CSTRING rsi, "generator raised StopIteration"
     call raise_exception
+.ci1_si_reraise:
+    ; Not StopIteration — pop from TOS, set as current_exception, re-raise
+    sub r13, 16
+    mov rax, [r13]                ; exception (ref transferred from stack)
+    mov [rel current_exception], rax
+    jmp eval_exception_unwind
 
 .ci1_unary_positive:
     ; +x — for most numeric types, no-op. For bool, call nb_positive.

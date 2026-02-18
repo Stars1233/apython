@@ -202,6 +202,17 @@ DEF_FUNC eval_frame
     ; Save machine stack pointer for exception unwind cleanup
     mov [rel eval_base_rsp], rsp
 
+    ; Check for pending throw (set by gen_throw before resume)
+    mov [rel eval_saved_rbx], rbx
+    mov [rel eval_saved_r13], r13
+    cmp byte [rel throw_pending], 0
+    je .no_throw
+
+.throw_resume:
+    mov byte [rel throw_pending], 0
+    jmp eval_exception_unwind
+
+.no_throw:
     ; Fall through to eval_dispatch
 END_FUNC eval_frame
 
@@ -432,7 +443,10 @@ DEF_FUNC_BARE eval_exception_unwind
 
 .no_handler:
     ; No handler found - return NULL to propagate exception to caller
+    ; Clear instr_ptr so gen_throw/gen_send detect exhaustion
+    mov qword [r12 + PyFrame.instr_ptr], 0
     xor eax, eax
+    xor edx, edx              ; TAG_NULL for proper fat-value return
     jmp eval_return
 END_FUNC eval_exception_unwind
 
@@ -1387,6 +1401,9 @@ kw_names_pending: resq 1     ; tuple of kw names for next CALL, or NULL
 
 global trace_opcodes
 trace_opcodes: resb 1           ; nonzero = trace opcodes to stderr
+
+global throw_pending
+throw_pending: resb 1           ; nonzero = gen_throw set current_exception before resume
 
 ; ============================================================================
 ; Read-only data for traceback printing
