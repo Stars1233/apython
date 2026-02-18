@@ -879,12 +879,14 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     extern str_concat
     mov rdi, [rsp + 16]                    ; prefix str
     mov rsi, [rsp + 8]                     ; name str
+    mov ecx, TAG_PTR                       ; right_tag (heap str)
     call str_concat
     push rax                               ; save partial
 
     ; Concat: partial + suffix
     mov rdi, rax                           ; partial
     mov rsi, [rsp + 8]                     ; suffix str
+    mov ecx, TAG_PTR                       ; right_tag (heap str)
     call str_concat
     mov rbx, rax                           ; rbx = full message str
 
@@ -1225,6 +1227,7 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     ; Concat prefix_str + repr_str → full message
     mov rdi, [rsp + 48]
     mov rsi, [rsp + 56]
+    mov ecx, TAG_PTR            ; right_tag (heap str)
     call str_concat
     mov [rsp + 64], rax
 
@@ -2146,39 +2149,13 @@ DEF_FUNC builtin_min
     mov rbx, rdi
     mov r12, rsi
 
-    ; Pre-scan: spill any SmallStr args to heap in-place
-    xor ecx, ecx
-.min_spill_loop:
-    cmp rcx, r12
-    jge .min_spill_done
-    mov rax, rcx
-    shl rax, 4
-    bt qword [rbx + rax + 8], 63
-    jnc .min_spill_next
-    ; SmallStr: spill to heap
-    push rcx
-    push rbx
-    mov rdi, [rbx + rax]          ; payload
-    mov rsi, [rbx + rax + 8]     ; tag
-    call smallstr_to_obj           ; rax = heap str (refcount=1)
-    pop rbx
-    pop rcx
-    mov rdx, rcx
-    shl rdx, 4
-    mov [rbx + rdx], rax           ; replace payload
-    mov qword [rbx + rdx + 8], TAG_PTR  ; replace tag
-.min_spill_next:
-    inc rcx
-    jmp .min_spill_loop
-.min_spill_done:
-
     mov r13, 1
 
     mov r14, [rbx]                 ; args[0] payload = current min
     mov rax, [rbx + 8]            ; args[0] tag (64-bit)
     mov [rsp + MIN_TAG], rax       ; min_tag
-    test rax, TAG_RC_BIT
-    jz .min_loop                   ; SmallInt/Float/Bool/None: no INCREF
+    cmp rax, TAG_PTR
+    jne .min_loop                  ; non-refcounted (SmallInt/Float/Bool/None/SmallStr): no INCREF
     inc qword [r14 + PyObject.ob_refcnt]
 
 .min_loop:
@@ -2204,11 +2181,17 @@ DEF_FUNC builtin_min
 
 .min_slow_compare:
     ; Use tp_richcompare(args[i], current_min, PY_LT)
-    ; SmallStr already spilled at entry, so only TAG_PTR/TAG_FLOAT remain
+    ; SmallStr? (bit 63 set)
+    test rcx, rcx
+    js .min_cand_smallstr
+
     cmp rcx, TAG_PTR
     jne .min_try_float
     mov rdi, r15
     mov rax, [rdi + PyObject.ob_type]
+    jmp .min_have_type
+.min_cand_smallstr:
+    lea rax, [rel str_type]
     jmp .min_have_type
 .min_try_float:
     cmp rcx, TAG_FLOAT
@@ -2216,14 +2199,18 @@ DEF_FUNC builtin_min
     mov rdi, r15
     lea rax, [rel float_type]
 .min_have_type:
+    mov r8, rcx                    ; save candidate tag
     mov rcx, [rax + PyTypeObject.tp_richcompare]
     test rcx, rcx
     jz .min_no_update
 
-    mov rdi, r15
-    mov rsi, r14
-    xor edx, edx               ; PY_LT = 0
-    call rcx
+    mov rdi, r15                   ; left = candidate
+    mov rsi, r14                   ; right = current min
+    xor edx, edx                   ; PY_LT = 0
+    mov rax, rcx                   ; fn ptr -> rax
+    mov rcx, r8                    ; left_tag = candidate tag
+    mov r8, [rsp + MIN_TAG]        ; right_tag = min tag
+    call rax
 
     ; Compare result against bool_true BEFORE DECREF
     lea rcx, [rel bool_true]
@@ -2241,8 +2228,8 @@ DEF_FUNC builtin_min
     shl rax, 4
     mov rax, [rbx + rax + 8]     ; reload candidate tag (64-bit)
     mov [rsp + MIN_TAG], rax      ; update min_tag
-    test rax, TAG_RC_BIT
-    jz .min_slow_update_done      ; non-refcounted: no INCREF
+    cmp rax, TAG_PTR
+    jne .min_slow_update_done     ; non-refcounted (SmallStr/SmallInt/Float): no INCREF
     inc qword [r14 + PyObject.ob_refcnt]
 .min_slow_update_done:
     ; DECREF richcompare result
@@ -2295,39 +2282,13 @@ DEF_FUNC builtin_max
     mov rbx, rdi
     mov r12, rsi
 
-    ; Pre-scan: spill any SmallStr args to heap in-place
-    xor ecx, ecx
-.max_spill_loop:
-    cmp rcx, r12
-    jge .max_spill_done
-    mov rax, rcx
-    shl rax, 4
-    bt qword [rbx + rax + 8], 63
-    jnc .max_spill_next
-    ; SmallStr: spill to heap
-    push rcx
-    push rbx
-    mov rdi, [rbx + rax]          ; payload
-    mov rsi, [rbx + rax + 8]     ; tag
-    call smallstr_to_obj           ; rax = heap str (refcount=1)
-    pop rbx
-    pop rcx
-    mov rdx, rcx
-    shl rdx, 4
-    mov [rbx + rdx], rax           ; replace payload
-    mov qword [rbx + rdx + 8], TAG_PTR  ; replace tag
-.max_spill_next:
-    inc rcx
-    jmp .max_spill_loop
-.max_spill_done:
-
     mov r13, 1
 
     mov r14, [rbx]                 ; args[0] payload = current max
     mov rax, [rbx + 8]            ; args[0] tag (64-bit)
     mov [rsp + MAX_TAG], rax       ; max_tag
-    test rax, TAG_RC_BIT
-    jz .max_loop                   ; non-refcounted: no INCREF
+    cmp rax, TAG_PTR
+    jne .max_loop                  ; non-refcounted (SmallInt/Float/Bool/None/SmallStr): no INCREF
     inc qword [r14 + PyObject.ob_refcnt]
 
 .max_loop:
@@ -2356,11 +2317,19 @@ DEF_FUNC builtin_max
     cmp qword [rsp + MAX_TAG], TAG_SMALLINT
     je .max_try_rhs                ; max is SmallInt, try candidate's richcompare
 
+    ; SmallStr? (bit 63 set)
+    bt qword [rsp + MAX_TAG], 63
+    jc .max_lhs_smallstr
+
     ; Must be TAG_PTR to dereference ob_type
     cmp qword [rsp + MAX_TAG], TAG_PTR
     jne .max_try_lhs_float
     mov rdi, r14
     mov rax, [rdi + PyObject.ob_type]
+    jmp .max_have_type
+.max_lhs_smallstr:
+    extern str_type
+    lea rax, [rel str_type]
     jmp .max_have_type
 .max_try_lhs_float:
     cmp qword [rsp + MAX_TAG], TAG_FLOAT
@@ -2368,14 +2337,21 @@ DEF_FUNC builtin_max
     mov rdi, r14
     lea rax, [rel float_type]
 .max_have_type:
-    mov rcx, [rax + PyTypeObject.tp_richcompare]
-    test rcx, rcx
+    mov rax, [rax + PyTypeObject.tp_richcompare]
+    test rax, rax
     jz .max_no_update
 
+    ; Call tp_richcompare(left, right, PY_LT, left_tag, right_tag)
     mov rdi, r14
     mov rsi, r15
     xor edx, edx               ; PY_LT = 0
-    call rcx
+    mov rcx, [rsp + MAX_TAG]   ; left_tag
+    push rax                    ; save fn ptr
+    mov rax, r13
+    shl rax, 4
+    mov r8, [rbx + rax + 8]    ; right_tag
+    pop rax                     ; restore fn ptr
+    call rax
     jmp .max_check_result
 
 .max_try_rhs:
@@ -2384,25 +2360,37 @@ DEF_FUNC builtin_max
     mov rcx, [rbx + rax + 8]     ; reload candidate tag (64-bit)
     cmp rcx, TAG_SMALLINT
     je .max_no_update              ; both SmallInt would have been caught above
+
+    ; SmallStr? (bit 63 set)
+    test rcx, rcx
+    js .max_rhs_smallstr
+
     cmp rcx, TAG_PTR
     jne .max_try_rhs_float
     mov rdi, r15
     mov rax, [rdi + PyObject.ob_type]
     jmp .max_rhs_have_type
+.max_rhs_smallstr:
+    lea rax, [rel str_type]
+    jmp .max_rhs_have_type
 .max_try_rhs_float:
     cmp rcx, TAG_FLOAT
-    jne .max_no_update             ; SmallStr/Bool/None: skip
+    jne .max_no_update             ; Bool/None: skip
     mov rdi, r15
     lea rax, [rel float_type]
 .max_rhs_have_type:
+    mov r8, rcx                    ; save candidate tag
     mov rcx, [rax + PyTypeObject.tp_richcompare]
     test rcx, rcx
     jz .max_no_update
 
-    mov rdi, r15
-    mov rsi, r14
+    mov rdi, r15                   ; left = candidate
+    mov rsi, r14                   ; right = current max
     mov edx, PY_GT
-    call rcx
+    mov rax, rcx                   ; fn ptr -> rax
+    mov rcx, r8                    ; left_tag = candidate tag
+    mov r8, [rsp + MAX_TAG]        ; right_tag = max tag
+    call rax
 
 .max_check_result:
     lea rcx, [rel bool_true]
@@ -2420,8 +2408,8 @@ DEF_FUNC builtin_max
     shl rax, 4
     mov rax, [rbx + rax + 8]     ; reload candidate tag (64-bit)
     mov [rsp + MAX_TAG], rax      ; update max_tag
-    test rax, TAG_RC_BIT
-    jz .max_slow_update_done      ; non-refcounted: no INCREF
+    cmp rax, TAG_PTR
+    jne .max_slow_update_done     ; non-refcounted (SmallStr/SmallInt/Float): no INCREF
     inc qword [r14 + PyObject.ob_refcnt]
 .max_slow_update_done:
     ; DECREF richcompare result (always a heap ptr)

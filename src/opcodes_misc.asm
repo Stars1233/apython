@@ -527,34 +527,8 @@ section .text
     lea rax, [rel none_type]
     jmp .cmp_have_type
 .cmp_smallstr_type:
-    ; Spill SmallStr operands to heap so str_compare can dereference them
-    ; ecx = comparison op — must survive across calls
-    push rcx                      ; save comparison op (shifts rsp by 8)
-    ; Check left
-    mov rax, [rsp + 8 + BO_LTAG]
-    test rax, rax
-    jns .cmp_ss_left_ok
-    mov rdi, [rsp + 8 + BO_LEFT]     ; payload
-    mov rsi, rax                      ; tag
-    extern smallstr_to_obj
-    call smallstr_to_obj
-    mov qword [rsp + 8 + BO_LEFT], rax
-    mov qword [rsp + 8 + BO_LTAG], TAG_PTR
-.cmp_ss_left_ok:
-    ; Check right
-    mov rax, [rsp + 8 + BO_RTAG]
-    test rax, rax
-    jns .cmp_ss_right_ok
-    mov rdi, [rsp + 8 + BO_RIGHT]    ; payload
-    mov rsi, rax                      ; tag
-    call smallstr_to_obj
-    mov qword [rsp + 8 + BO_RIGHT], rax
-    mov qword [rsp + 8 + BO_RTAG], TAG_PTR
-.cmp_ss_right_ok:
-    pop rcx                       ; restore comparison op
-    ; Reload rdi, rsi from stack (may have been replaced)
-    mov rdi, [rsp + BO_LEFT]
-    mov rsi, [rsp + BO_RIGHT]
+    ; str_compare handles SmallStr natively — no spilling needed.
+    ; rdi/rsi = payloads, tags passed via rcx/r8 in .cmp_do_call.
     lea rax, [rel str_type]
 .cmp_have_type:
     mov r9, rax                 ; r9 = type (save for dunder check)
@@ -1137,6 +1111,7 @@ DEF_FUNC op_build_string, BS_FRAME
     push rcx
     extern str_concat
     mov rdi, [rbp - BS_ACCUM] ; accumulator
+    mov ecx, TAG_PTR           ; right_tag (heap str guaranteed)
     call str_concat
     ; DECREF old accumulator
     push rax                   ; save new result

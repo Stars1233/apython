@@ -55,6 +55,10 @@ gen-cpython-tests:
 	@$(PYTHON) -m py_compile tests/cpython/test_float.py
 	@echo "Compiling tests/cpython/test_bool.py..."
 	@$(PYTHON) -m py_compile tests/cpython/test_bool.py
+	@echo "Compiling tests/cpython/test_str_ops.py..."
+	@$(PYTHON) -m py_compile tests/cpython/test_str_ops.py
+	@echo "Compiling tests/cpython/test_str_methods.py..."
+	@$(PYTHON) -m py_compile tests/cpython/test_str_methods.py
 	@echo "Done."
 
 check-cpython: $(TARGET) gen-cpython-tests
@@ -64,3 +68,7 @@ check-cpython: $(TARGET) gen-cpython-tests
 	@./apython tests/cpython/__pycache__/test_float.cpython-312.pyc
 	@echo "Running CPython test_bool.py..."
 	@./apython tests/cpython/__pycache__/test_bool.cpython-312.pyc
+	@echo "Running CPython test_str_ops.py..."
+	@./apython tests/cpython/__pycache__/test_str_ops.cpython-312.pyc
+	@echo "Running CPython test_str_methods.py..."
+	@./apython tests/cpython/__pycache__/test_str_methods.cpython-312.pyc

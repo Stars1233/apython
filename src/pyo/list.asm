@@ -23,6 +23,13 @@ extern obj_incref
 extern slice_type
 extern slice_indices
 extern type_type
+extern int_type
+extern str_type
+extern float_type
+extern bool_type
+extern none_type
+extern float_compare
+extern obj_is_true
 
 ;; ============================================================================
 ;; list_new(int64_t capacity) -> PyListObject*
@@ -1057,6 +1064,317 @@ list_sequence_methods:
     dq 0                    ; sq_inplace_concat
     dq 0                    ; sq_inplace_repeat
 
+section .text
+
+;; ============================================================================
+;; list_richcompare(left, right, op, left_tag, right_tag) -> (rax, edx)
+;; Compare two lists. Returns bool fat value.
+;; Supports EQ, NE, LT, LE, GT, GE (lexicographic for ordering).
+;; ============================================================================
+LRC_LEFT     equ 8
+LRC_RIGHT    equ 16
+LRC_OP       equ 24
+LRC_IDX      equ 32
+LRC_MINLEN   equ 40
+LRC_FRAME    equ 40
+
+DEF_FUNC list_richcompare, LRC_FRAME
+    ; Verify right is TAG_PTR and a list
+    cmp r8d, TAG_PTR
+    jne .lrc_not_impl
+    mov rax, [rsi + PyObject.ob_type]
+    lea r9, [rel list_type]
+    cmp rax, r9
+    jne .lrc_not_impl
+
+    mov [rbp - LRC_LEFT], rdi
+    mov [rbp - LRC_RIGHT], rsi
+    mov [rbp - LRC_OP], edx
+
+    ; Get lengths
+    mov rcx, [rdi + PyListObject.ob_size]   ; left_len
+    mov r8, [rsi + PyListObject.ob_size]    ; right_len
+
+    ; min_len = min(left_len, right_len)
+    mov rax, rcx
+    cmp rax, r8
+    jle .lrc_have_min
+    mov rax, r8
+.lrc_have_min:
+    mov [rbp - LRC_MINLEN], rax
+
+    ; Compare elements 0..min_len-1
+    mov qword [rbp - LRC_IDX], 0
+
+.lrc_elem_loop:
+    mov rax, [rbp - LRC_IDX]
+    cmp rax, [rbp - LRC_MINLEN]
+    jge .lrc_elements_equal
+
+    ; Get left[i] and right[i] (fat values, 16-byte stride)
+    mov rdi, [rbp - LRC_LEFT]
+    mov rdi, [rdi + PyListObject.ob_item]
+    shl rax, 4
+    mov rcx, [rdi + rax + 8]       ; left_tag
+    mov rdi, [rdi + rax]            ; left_payload
+
+    mov rsi, [rbp - LRC_RIGHT]
+    mov rsi, [rsi + PyListObject.ob_item]
+    mov r8, [rsi + rax + 8]        ; right_tag
+    mov rsi, [rsi + rax]            ; right_payload
+
+    ; Fast path: both same tag and same payload → elements equal, skip
+    cmp rcx, r8
+    jne .lrc_elem_compare
+    cmp rdi, rsi
+    je .lrc_elem_next
+
+.lrc_elem_compare:
+    ; Compare elements for EQ using element type's tp_richcompare
+    ; Save caller state
+    push rdi                        ; left_payload
+    push rcx                        ; left_tag
+    push rsi                        ; right_payload
+    push r8                         ; right_tag
+
+    ; Float coercion: if either is TAG_FLOAT, use float_compare
+    cmp ecx, TAG_FLOAT
+    je .lrc_elem_float
+    cmp r8d, TAG_FLOAT
+    je .lrc_elem_float
+
+    ; Resolve left type
+    cmp ecx, TAG_SMALLINT
+    je .lrc_elem_int_type
+    cmp ecx, TAG_BOOL
+    je .lrc_elem_bool_type
+    cmp ecx, TAG_NONE
+    je .lrc_elem_none_type
+    test rcx, rcx
+    js .lrc_elem_str_type           ; SmallStr
+    ; TAG_PTR: get ob_type
+    mov rax, [rdi + PyObject.ob_type]
+    jmp .lrc_elem_have_type
+
+.lrc_elem_int_type:
+    lea rax, [rel int_type]
+    jmp .lrc_elem_have_type
+.lrc_elem_bool_type:
+    lea rax, [rel bool_type]
+    jmp .lrc_elem_have_type
+.lrc_elem_none_type:
+    lea rax, [rel none_type]
+    jmp .lrc_elem_have_type
+.lrc_elem_str_type:
+    lea rax, [rel str_type]
+
+.lrc_elem_have_type:
+    mov rax, [rax + PyTypeObject.tp_richcompare]
+    test rax, rax
+    jz .lrc_elem_not_equal          ; no richcompare → not equal
+
+    ; Call tp_richcompare(left, right, PY_EQ, left_tag, right_tag)
+    pop r8                          ; right_tag
+    pop rsi                         ; right_payload
+    pop rcx                         ; left_tag
+    pop rdi                         ; left_payload
+    mov edx, PY_EQ
+    call rax
+
+    ; Check result for truthiness — handle both TAG_BOOL and TAG_PTR(bool_true)
+    ; DECREF the result if TAG_PTR, then use obj_is_true
+    push rax
+    push rdx
+    mov rdi, rax
+    mov rsi, rdx
+    call obj_is_true
+    mov ecx, eax                    ; ecx = truthiness (0/1)
+    pop rdx                         ; result tag
+    pop rdi                         ; result payload
+    push rcx                        ; save truthiness
+    mov rsi, rdx
+    DECREF_VAL rdi, rsi
+    pop rcx                         ; restore truthiness
+    test ecx, ecx
+    jnz .lrc_elem_next              ; equal → continue
+
+    ; Elements not equal: for EQ/NE we know the answer
+    ; For ordering ops, need to compare with LT
+    jmp .lrc_elem_not_equal_nopop
+
+.lrc_elem_float:
+    ; float_compare(left, right, PY_EQ, left_tag, right_tag)
+    pop r8
+    pop rsi
+    pop rcx
+    pop rdi
+    mov edx, PY_EQ
+    call float_compare
+    ; Check result for truthiness
+    push rax
+    push rdx
+    mov rdi, rax
+    mov rsi, rdx
+    call obj_is_true
+    mov ecx, eax
+    pop rdx
+    pop rdi
+    push rcx
+    mov rsi, rdx
+    DECREF_VAL rdi, rsi
+    pop rcx
+    test ecx, ecx
+    jnz .lrc_elem_next
+    test rax, rax
+    jnz .lrc_elem_next
+    jmp .lrc_elem_not_equal_nopop
+
+.lrc_elem_not_equal:
+    add rsp, 32                     ; clean up 4 pushes
+.lrc_elem_not_equal_nopop:
+    ; Elements at index i differ.
+    ; For EQ: return False. For NE: return True.
+    ; For ordering: compare these elements with the requested op.
+    mov ecx, [rbp - LRC_OP]
+    cmp ecx, PY_EQ
+    je .lrc_return_false
+    cmp ecx, PY_NE
+    je .lrc_return_true
+
+    ; Ordering ops: compare the differing elements with the actual op
+    mov rax, [rbp - LRC_IDX]
+    shl rax, 4
+
+    mov rdi, [rbp - LRC_LEFT]
+    mov rdi, [rdi + PyListObject.ob_item]
+    mov rcx, [rdi + rax + 8]       ; left_tag
+    mov rdi, [rdi + rax]            ; left_payload
+
+    mov rsi, [rbp - LRC_RIGHT]
+    mov rsi, [rsi + PyListObject.ob_item]
+    mov r8, [rsi + rax + 8]        ; right_tag
+    mov rsi, [rsi + rax]            ; right_payload
+
+    ; Resolve left type (again)
+    push rcx
+    push r8
+    cmp ecx, TAG_FLOAT
+    je .lrc_order_float
+    cmp ecx, TAG_SMALLINT
+    je .lrc_order_int_type
+    cmp ecx, TAG_BOOL
+    je .lrc_order_bool_type
+    cmp ecx, TAG_NONE
+    je .lrc_order_none_type
+    test rcx, rcx
+    js .lrc_order_str_type
+    mov rax, [rdi + PyObject.ob_type]
+    jmp .lrc_order_have_type
+.lrc_order_int_type:
+    lea rax, [rel int_type]
+    jmp .lrc_order_have_type
+.lrc_order_bool_type:
+    lea rax, [rel bool_type]
+    jmp .lrc_order_have_type
+.lrc_order_none_type:
+    lea rax, [rel none_type]
+    jmp .lrc_order_have_type
+.lrc_order_str_type:
+    lea rax, [rel str_type]
+.lrc_order_have_type:
+    mov rax, [rax + PyTypeObject.tp_richcompare]
+    test rax, rax
+    jz .lrc_order_fallback
+    pop r8
+    pop rcx
+    mov edx, [rbp - LRC_OP]
+    call rax
+    ; Return the result directly
+    leave
+    ret
+.lrc_order_float:
+    pop r8
+    pop rcx
+    mov edx, [rbp - LRC_OP]
+    call float_compare
+    leave
+    ret
+.lrc_order_fallback:
+    add rsp, 16                     ; clean up 2 pushes
+    jmp .lrc_return_false
+
+.lrc_elem_next:
+    inc qword [rbp - LRC_IDX]
+    jmp .lrc_elem_loop
+
+.lrc_elements_equal:
+    ; All min_len elements are equal.
+    ; Result depends on lengths and comparison op.
+    mov rcx, [rbp - LRC_LEFT]
+    mov rcx, [rcx + PyListObject.ob_size]    ; left_len
+    mov r8, [rbp - LRC_RIGHT]
+    mov r8, [r8 + PyListObject.ob_size]      ; right_len
+    mov edx, [rbp - LRC_OP]
+
+    cmp edx, PY_EQ
+    je .lrc_len_eq
+    cmp edx, PY_NE
+    je .lrc_len_ne
+    cmp edx, PY_LT
+    je .lrc_len_lt
+    cmp edx, PY_LE
+    je .lrc_len_le
+    cmp edx, PY_GT
+    je .lrc_len_gt
+    ; PY_GE
+    cmp rcx, r8
+    jge .lrc_return_true
+    jmp .lrc_return_false
+
+.lrc_len_eq:
+    cmp rcx, r8
+    je .lrc_return_true
+    jmp .lrc_return_false
+.lrc_len_ne:
+    cmp rcx, r8
+    jne .lrc_return_true
+    jmp .lrc_return_false
+.lrc_len_lt:
+    cmp rcx, r8
+    jl .lrc_return_true
+    jmp .lrc_return_false
+.lrc_len_le:
+    cmp rcx, r8
+    jle .lrc_return_true
+    jmp .lrc_return_false
+.lrc_len_gt:
+    cmp rcx, r8
+    jg .lrc_return_true
+    jmp .lrc_return_false
+
+.lrc_return_true:
+    mov eax, 1
+    mov edx, TAG_BOOL
+    leave
+    ret
+
+.lrc_return_false:
+    xor eax, eax
+    mov edx, TAG_BOOL
+    leave
+    ret
+
+.lrc_not_impl:
+    ; Return False for non-list comparisons (simplified — CPython returns NotImplemented)
+    xor eax, eax
+    mov edx, TAG_BOOL
+    leave
+    ret
+
+END_FUNC list_richcompare
+
+section .data
+
 ; List mapping methods
 align 8
 list_mapping_methods:
@@ -1079,7 +1397,7 @@ list_type:
     dq list_type_call       ; tp_call
     dq 0                    ; tp_getattr
     dq 0                    ; tp_setattr
-    dq 0                    ; tp_richcompare
+    dq list_richcompare     ; tp_richcompare
     dq 0                    ; tp_iter (set by iter_obj.asm)
     dq 0                    ; tp_iternext
     dq 0                    ; tp_init

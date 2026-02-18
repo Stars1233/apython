@@ -384,18 +384,22 @@ DEF_FUNC_BARE obj_is_true
     je .smallint
     cmp esi, TAG_FLOAT
     je .float_tag
+    cmp esi, TAG_BOOL
+    je .bool_tag
+    cmp esi, TAG_NONE
+    je .none_tag
 
     push rbp
     mov rbp, rsp
     push rbx
     mov rbx, rdi
 
-    ; None is false
+    ; None is false (legacy — TAG_PTR none_singleton)
     lea rax, [rel none_singleton]
     cmp rbx, rax
     je .false
 
-    ; bool False is false
+    ; bool False is false (legacy — TAG_PTR bool_false)
     lea rax, [rel bool_false]
     cmp rbx, rax
     je .false
@@ -604,6 +608,17 @@ DEF_FUNC_BARE obj_is_true
     setp cl                    ; NaN is truthy
     or al, cl
     movzx eax, al
+    ret
+
+.bool_tag:
+    ; TAG_BOOL: payload = 0 (False) or 1 (True)
+    mov eax, edi
+    and eax, 1
+    ret
+
+.none_tag:
+    ; TAG_NONE: always false
+    xor eax, eax
     ret
 END_FUNC obj_is_true
 

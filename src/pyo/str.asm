@@ -17,6 +17,7 @@ extern int_to_i64
 extern fatal_error
 extern raise_exception
 extern exc_IndexError_type
+extern exc_TypeError_type
 extern slice_type
 extern slice_indices
 extern type_type
@@ -331,10 +332,20 @@ align 16
 END_FUNC str_hash
 
 ;; ============================================================================
-;; str_concat(PyObject *a, PyObject *b) -> PyObject*
-;; String concatenation via nb_add
+;; str_concat(PyObject *a, PyObject *b, ?, ecx=right_tag) -> (rax,edx) fat value
+;; String concatenation via nb_add.
+;; Binary op handler passes right_tag in ecx. Direct callers must set ecx=TAG_PTR.
 ;; ============================================================================
 DEF_FUNC str_concat
+    ; Check right tag first — non-TAG_PTR means not a heap string
+    cmp ecx, TAG_PTR
+    jne .concat_type_error
+    ; Verify right operand is a string (ob_type == str_type)
+    mov rax, [rsi + PyObject.ob_type]
+    lea rdx, [rel str_type]
+    cmp rax, rdx
+    jne .concat_type_error
+
     push rbx
     push r12
     push r13
@@ -382,6 +393,11 @@ DEF_FUNC str_concat
     pop rbx
     leave
     ret
+
+.concat_type_error:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "can only concatenate str (not other type) to str"
+    call raise_exception
 END_FUNC str_concat
 
 ;; ============================================================================
@@ -909,68 +925,121 @@ DEF_FUNC str_mod, SM_FRAME
 END_FUNC str_mod
 
 ;; ============================================================================
-;; str_compare(PyObject *a, PyObject *b, int op) -> PyObject*
-;; Rich comparison for strings
+;; str_compare(left, right, op, left_tag, right_tag) -> (rax,edx) fat bool
+;; Rich comparison for strings. Handles heap str and SmallStr natively.
+;; Caller convention: rdi=left, rsi=right, edx=op, rcx=left_tag, r8=right_tag
+;; Note: r8 may be unset by callers like max/min (rsi is always a valid heap
+;; string in that case, so the TAG_RC_BIT guard is conservative-safe).
 ;; ============================================================================
-DEF_FUNC str_compare
+;; Stack buffer layout (16 bytes each, null-terminated)
+SC_LBUF  equ 16           ; left SmallStr buffer  [rbp - SC_LBUF .. rbp - SC_LBUF + 15]
+SC_RBUF  equ 32           ; right SmallStr buffer [rbp - SC_RBUF .. rbp - SC_RBUF + 15]
+SC_FRAME equ 32
+
+DEF_FUNC str_compare, SC_FRAME
     push rbx
-    push r12
 
     mov ebx, edx            ; save op
 
-    ; Compare using strcmp on the data
-    push rdi
-    push rsi
-    lea rdi, [rdi + PyStrObject.data]
+    ; --- Resolve right operand to a data pointer (-> rsi) ---
+    ; SmallStr right? (bit 63 of tag) — check FIRST since TAG_RC_BIT is clear
+    test r8, r8
+    js .right_smallstr
+    ; Non-string guard: TAG_RC_BIT (bit 8) is set only for TAG_PTR (0x105).
+    ; Non-pointer tags (0-4) and unset r8 from max/min: if TAG_RC_BIT clear
+    ; AND bit 63 clear → not a string.
+    test r8d, TAG_RC_BIT
+    jz .not_string
+    ; Heap pointer — verify ob_type == str_type
+    mov rax, [rsi + PyObject.ob_type]
+    lea rdx, [rel str_type]
+    cmp rax, rdx
+    jne .not_string
     lea rsi, [rsi + PyStrObject.data]
-    call ap_strcmp
-    mov r12d, eax            ; r12d = strcmp result
-    pop rsi
+    jmp .right_done
+.right_smallstr:
+    ; Extract SmallStr bytes to stack buffer (zero-alloc)
+    extern smallstr_to_buf
+    push rdi
+    push rcx
+    mov rdi, rsi             ; payload
+    mov rsi, r8              ; tag
+    lea rdx, [rbp - SC_RBUF]
+    call smallstr_to_buf     ; rax = length
+    mov byte [rbp - SC_RBUF + rax], 0  ; null-terminate
+    pop rcx
     pop rdi
+    lea rsi, [rbp - SC_RBUF]
+.right_done:
 
-    ; Dispatch on comparison op
-    cmp ebx, PY_LT
-    je .do_lt
-    cmp ebx, PY_LE
-    je .do_le
-    cmp ebx, PY_EQ
-    je .do_eq
+    ; --- Resolve left operand to a data pointer (-> rdi) ---
+    ; SmallStr left? (bit 63 of tag)
+    test rcx, rcx
+    js .left_smallstr
+    ; Heap str — no type check needed (caller dispatched via str_type)
+    lea rdi, [rdi + PyStrObject.data]
+    jmp .left_done
+.left_smallstr:
+    push rsi
+    mov rsi, rcx             ; tag
+    lea rdx, [rbp - SC_LBUF]
+    call smallstr_to_buf     ; rax = length
+    mov byte [rbp - SC_LBUF + rax], 0  ; null-terminate
+    pop rsi
+    lea rdi, [rbp - SC_LBUF]
+.left_done:
+
+    ; --- Compare the two null-terminated data pointers ---
+    call ap_strcmp
+    ; eax = strcmp result
+
+    ; Dispatch on comparison op (ebx)
     cmp ebx, PY_NE
     je .do_ne
+    cmp ebx, PY_EQ
+    je .do_eq
+    cmp ebx, PY_LT
+    je .do_lt
     cmp ebx, PY_GT
     je .do_gt
-    jmp .do_ge
-
+    cmp ebx, PY_LE
+    je .do_le
+    ; fall through: PY_GE
+    test eax, eax
+    jge .ret_true
+    jmp .ret_false
 .do_lt:
-    test r12d, r12d
+    test eax, eax
     js .ret_true
     jmp .ret_false
 .do_le:
-    test r12d, r12d
+    test eax, eax
     jle .ret_true
     jmp .ret_false
 .do_eq:
-    test r12d, r12d
+    test eax, eax
     jz .ret_true
     jmp .ret_false
 .do_ne:
-    test r12d, r12d
+    test eax, eax
     jnz .ret_true
     jmp .ret_false
 .do_gt:
-    test r12d, r12d
+    test eax, eax
     jg .ret_true
     jmp .ret_false
-.do_ge:
-    test r12d, r12d
-    jge .ret_true
+
+.not_string:
+    ; Right operand is not a string.
+    ; EQ → False, NE → True, ordering → False (CPython NotImplemented fallback)
+    cmp ebx, PY_NE
+    je .ret_true
     jmp .ret_false
 
 .ret_true:
     lea rax, [rel bool_true]
     inc qword [rax + PyObject.ob_refcnt]
     mov edx, TAG_PTR
-    pop r12
     pop rbx
     leave
     ret
@@ -978,7 +1047,6 @@ DEF_FUNC str_compare
     lea rax, [rel bool_false]
     inc qword [rax + PyObject.ob_refcnt]
     mov edx, TAG_PTR
-    pop r12
     pop rbx
     leave
     ret

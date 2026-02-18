@@ -196,6 +196,7 @@ DEF_FUNC op_import_from, IF2_FRAME
     pop rdi                     ; rdi = pkg_name
     mov rsi, rax                ; rsi = "."
     push rsi                    ; save dot str for decref
+    mov ecx, TAG_PTR            ; right_tag (heap str guaranteed)
     call str_concat             ; rax = pkg_name + "."
     pop rdi                     ; dot str
     push rax                    ; save intermediate
@@ -203,6 +204,7 @@ DEF_FUNC op_import_from, IF2_FRAME
     pop rdi                     ; rdi = "pkg."
     mov rsi, [rbp - IF_ATTR]    ; rsi = attr_name
     push rdi                    ; save "pkg." for decref
+    mov ecx, TAG_PTR            ; right_tag (heap str guaranteed)
     call str_concat             ; rax = "pkg.attr"
     pop rdi                     ; "pkg."
     push rax                    ; save full name
