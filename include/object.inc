@@ -96,6 +96,7 @@ struc PyDictObject
     .capacity:  resq 1    ; +24: hash table capacity
     .entries:   resq 1    ; +32: ptr to entry array
     .dk_version: resq 1   ; +40: version counter (bumped on mutation)
+    .dk_tombstones: resq 1 ; +48: count of tombstoned entries
 endstruc
 
 ; Dict entry

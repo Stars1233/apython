@@ -23,6 +23,12 @@ extern type_type
 ; Initial capacity (must be power of 2)
 DICT_INIT_CAP equ 8
 
+; Tombstone marker for deleted dict entries.
+; When an entry is deleted, key_tag is set to this value so that
+; linear probing continues past it (instead of stopping as at empty slots).
+; Must never match a valid tag value.
+DICT_TOMBSTONE equ 0xDEAD
+
 ;; ============================================================================
 ;; dict_new() -> PyDictObject*
 ;; Allocate a new empty dict with initial capacity 8
@@ -42,6 +48,7 @@ DEF_FUNC dict_new
     mov qword [rbx + PyDictObject.ob_size], 0
     mov qword [rbx + PyDictObject.capacity], DICT_INIT_CAP
     mov qword [rbx + PyDictObject.dk_version], 1
+    mov qword [rbx + PyDictObject.dk_tombstones], 0
 
     ; Allocate entries array: capacity * DICT_ENTRY_SIZE
     mov edi, DICT_INIT_CAP * DICT_ENTRY_SIZE
@@ -288,10 +295,13 @@ align 16
     imul rdx, rcx, DICT_ENTRY_SIZE
     add rax, rdx                ; rax = entry ptr
 
-    ; Check if slot is empty (key_tag == TAG_NULL)
+    ; Check if slot is empty (key_tag == 0 means never-used → stop)
     mov rdi, [rax + DictEntry.key]
     cmp qword [rax + DictEntry.key_tag], 0
     je .not_found
+    ; Skip tombstoned (deleted) entries
+    cmp qword [rax + DictEntry.key_tag], DICT_TOMBSTONE
+    je .next_slot
 
     ; Check hash first (fast reject)
     cmp r13, [rax + DictEntry.hash]
@@ -375,6 +385,8 @@ DEF_FUNC dict_get_index, 8
     mov rdi, [rax + DictEntry.key]
     cmp qword [rax + DictEntry.key_tag], 0
     je .gi_not_found
+    cmp qword [rax + DictEntry.key_tag], DICT_TOMBSTONE
+    je .gi_next
 
     cmp r13, [rax + DictEntry.hash]
     jne .gi_next
@@ -412,12 +424,15 @@ DEF_FUNC dict_get_index, 8
 END_FUNC dict_get_index
 
 ;; ============================================================================
-;; dict_find_slot(rdi=dict, rsi=key, rdx=hash, ecx=key_tag)
-;;   -> rax = entry ptr, rdx = 1 if existing key found, 0 if empty slot
-;; Internal helper used by dict_set
+;; dict_find_slot(rdi=dict, rsi=key, rdx=hash, rcx=key_tag)
+;;   -> rax = entry ptr, rdx = 1 if existing key found, 0 if empty/tombstone slot
+;; Internal helper used by dict_set.
+;; Tombstone reuse: if no match found but a tombstone was seen, returns it
+;; instead of the empty slot, so inserts reclaim deleted entries.
 ;; ============================================================================
-FS_KTAG equ 8
-DEF_FUNC_LOCAL dict_find_slot, 8
+FS_KTAG     equ 8
+FS_TOMBPTR  equ 16
+DEF_FUNC_LOCAL dict_find_slot, 16
     push rbx
     push r12
     push r13
@@ -427,7 +442,8 @@ DEF_FUNC_LOCAL dict_find_slot, 8
     mov rbx, rdi                ; dict
     mov r12, rsi                ; key
     mov r13, rdx                ; hash
-    mov [rbp - FS_KTAG], ecx    ; save key_tag
+    mov [rbp - FS_KTAG], rcx    ; save key_tag (64-bit for SmallStr)
+    mov qword [rbp - FS_TOMBPTR], 0  ; no tombstone seen yet
 
     ; mask = capacity - 1
     mov r14, [rbx + PyDictObject.capacity]
@@ -452,6 +468,9 @@ DEF_FUNC_LOCAL dict_find_slot, 8
     mov rdi, [rax + DictEntry.key]
     cmp qword [rax + DictEntry.key_tag], 0
     je .found_empty
+    ; Tombstone? Remember first one, keep probing (key may be further)
+    cmp qword [rax + DictEntry.key_tag], DICT_TOMBSTONE
+    je .find_tombstone
 
     ; Hash match?
     cmp r13, [rax + DictEntry.hash]
@@ -476,9 +495,21 @@ DEF_FUNC_LOCAL dict_find_slot, 8
     inc r14
     jmp .find_loop
 
+.find_tombstone:
+    ; Remember first tombstone for reuse on insert
+    cmp qword [rbp - FS_TOMBPTR], 0
+    jne .find_next              ; already have one, keep looking
+    mov [rbp - FS_TOMBPTR], rax
+    jmp .find_next
+
 .found_empty:
-    ; rax = entry ptr, rdx = 0 (empty)
-    xor edx, edx
+    ; No match found — return tombstone slot if we found one, else empty slot
+    mov rdx, [rbp - FS_TOMBPTR]
+    test rdx, rdx
+    jz .return_empty
+    mov rax, rdx                ; use tombstone slot
+.return_empty:
+    xor edx, edx               ; rdx = 0 (new insert)
     pop r15
     pop r14
     pop r13
@@ -499,7 +530,11 @@ DEF_FUNC_LOCAL dict_find_slot, 8
     ret
 
 .table_full:
-    ; Should never happen if load factor is maintained
+    ; Check if we have a tombstone — use it instead of dying
+    mov rax, [rbp - FS_TOMBPTR]
+    test rax, rax
+    jnz .return_empty
+    ; No tombstone and truly full — fatal
     lea rdi, [rel .err_full]
     call fatal_error
 
@@ -554,8 +589,10 @@ DEF_FUNC_LOCAL dict_resize
     imul rax, rcx, DICT_ENTRY_SIZE
     add rax, r12                ; rax = old entry ptr
 
-    ; Skip empty slots (check key_tag for TAG_NULL=0)
+    ; Skip empty slots (key_tag == 0) and tombstones (key_tag == DICT_TOMBSTONE)
     cmp qword [rax + DictEntry.key_tag], 0
+    je .rehash_next
+    cmp qword [rax + DictEntry.key_tag], DICT_TOMBSTONE
     je .rehash_next
 
     ; Compute new slot: hash & (new_capacity - 1)
@@ -641,7 +678,7 @@ DEF_FUNC dict_set, 16
     mov rdi, rbx                ; dict
     mov rsi, r12                ; key
     mov rdx, r14                ; hash
-    mov ecx, [rbp - DS_KTAG]   ; key_tag
+    mov rcx, [rbp - DS_KTAG]   ; key_tag (64-bit for SmallStr)
     call dict_find_slot
     ; rax = entry ptr, edx = 1 if existing, 0 if empty
 
@@ -738,9 +775,11 @@ DEF_FUNC dict_dealloc
     imul rax, r14, DICT_ENTRY_SIZE
     add rax, r12
 
-    ; Skip empty slots (check key_tag for TAG_NULL=0)
+    ; Skip empty slots and tombstones
     mov rdi, [rax + DictEntry.key]
     cmp qword [rax + DictEntry.key_tag], 0
+    je .dealloc_next
+    cmp qword [rax + DictEntry.key_tag], DICT_TOMBSTONE
     je .dealloc_next
 
     ; DECREF key (tag-aware)
@@ -814,16 +853,17 @@ END_FUNC dict_subscript
 ;; mp_ass_subscript: set key=value or delete key from dict
 ;; ============================================================================
 DEF_FUNC_BARE dict_ass_subscript
-    ; If value is NULL, this is a delete operation
-    test rdx, rdx
+    ; If value tag is TAG_NULL (0), this is a delete operation
+    ; (Can't check payload: SmallInt 0 has payload=0 but tag=TAG_SMALLINT)
+    test r8, r8                 ; r8 = value_tag from caller
     jz .das_delete
     ; dict_set wants (rdi=dict, rsi=key, rdx=value, rcx=value_tag, r8=key_tag)
-    ; Caller passes ecx=key_tag, r8d=value_tag — swap them
-    xchg ecx, r8d
+    ; Caller passes rcx=key_tag, r8=value_tag — swap them
+    xchg rcx, r8
     jmp dict_set
 .das_delete:
-    ; dict_del wants (rdi=dict, rsi=key, edx=key_tag)
-    mov edx, ecx               ; key_tag from caller's ecx
+    ; dict_del wants (rdi=dict, rsi=key, rdx=key_tag)
+    mov rdx, rcx               ; key_tag from caller's rcx (64-bit for SmallStr)
     jmp dict_del
 END_FUNC dict_ass_subscript
 
@@ -869,6 +909,9 @@ DEF_FUNC dict_del, 8
     mov rdi, [rax + DictEntry.key]
     cmp qword [rax + DictEntry.key_tag], 0
     je .dd_not_found
+    ; Skip tombstoned (deleted) entries
+    cmp qword [rax + DictEntry.key_tag], DICT_TOMBSTONE
+    je .dd_next
 
     cmp r13, [rax + DictEntry.hash]
     jne .dd_next
@@ -884,11 +927,11 @@ DEF_FUNC dict_del, 8
     test eax, eax
     jz .dd_next
 
-    ; Found: null out entry, DECREF key and value, decrement size
+    ; Found: tombstone entry, DECREF key and value, decrement size
     push qword [rdx + DictEntry.key_tag]
     mov rdi, [rdx + DictEntry.key]
     mov qword [rdx + DictEntry.key], 0
-    mov qword [rdx + DictEntry.key_tag], 0
+    mov qword [rdx + DictEntry.key_tag], DICT_TOMBSTONE  ; tombstone, not empty
     push qword [rdx + DictEntry.value]
     push qword [rdx + DictEntry.value_tag]
     mov qword [rdx + DictEntry.value], 0
@@ -902,6 +945,7 @@ DEF_FUNC dict_del, 8
     DECREF_VAL rdi, rsi         ; DECREF value (fat)
     add rsp, 8                  ; pop key_tag
     dec qword [rbx + PyDictObject.ob_size]
+    inc qword [rbx + PyDictObject.dk_tombstones]
     ; Bump version counter
     inc qword [rbx + PyDictObject.dk_version]
     cmp qword [rbx + PyDictObject.dk_version], 0
@@ -987,14 +1031,13 @@ DEF_FUNC_BARE dict_iter_next
     mov r8, [rax + DictEntry.key]
     cmp qword [rax + DictEntry.key_tag], 0
     je .di_skip
-    ; Also check value_tag (deleted entries have TAG_NULL value_tag)
-    cmp qword [rax + DictEntry.value_tag], 0
+    cmp qword [rax + DictEntry.key_tag], DICT_TOMBSTONE
     je .di_skip
 
     ; Found a valid entry — return the key with its tag
     inc rcx
     mov [rdi + PyDictIterObject.it_index], rcx
-    mov edx, [rax + DictEntry.key_tag]  ; key tag from entry
+    mov rdx, [rax + DictEntry.key_tag]  ; key tag from entry (64-bit)
     mov rax, r8
     ; INCREF key (tag-aware)
     INCREF_VAL rax, rdx

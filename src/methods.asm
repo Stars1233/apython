@@ -2412,8 +2412,8 @@ DEF_FUNC list_method_count, LC_FRAME
     ; tp_richcompare(item, value, PY_EQ, item_tag, value_tag)
     mov rsi, r12
     mov edx, PY_EQ
-    mov ecx, r8d
-    mov r8d, r15d
+    mov rcx, r8               ; item tag (64-bit for SmallStr)
+    mov r8, r15               ; value tag (64-bit for SmallStr)
     call rax
     lea rcx, [rel bool_true]
     cmp rax, rcx
@@ -2879,7 +2879,7 @@ dict_method_pop_v2 equ dict_method_pop
 
     mov rdi, rbx
     mov rsi, r13
-    mov edx, r15d           ; key tag
+    mov rdx, r15            ; key tag (64-bit for SmallStr)
     call dict_del
 
     pop rax                 ; restore payload
@@ -3299,9 +3299,9 @@ DEF_FUNC list_method_remove
     ; rdi = item payload (already set)
     mov rsi, r12             ; value payload
     mov edx, PY_EQ
-    mov ecx, r8d             ; item tag
+    mov rcx, r8              ; item tag (64-bit for SmallStr)
     push r8                  ; save item tag across call
-    mov r8d, r15d            ; value tag
+    mov r8, r15              ; value tag (64-bit for SmallStr)
     call rax
     pop r8
     ; rax = result (bool_true or bool_false)

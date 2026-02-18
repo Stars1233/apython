@@ -156,10 +156,18 @@ DEF_FUNC_BARE op_binary_op
 
     ; Float coercion: if either operand is TAG_FLOAT, use float methods
     ; This handles int+float, float+int, float+float
+    ; Skip for NB_REMAINDER (6) / NB_INPLACE_REMAINDER (19) when left is not float,
+    ; because str % value should use str_mod, not float methods.
     cmp qword [rsp + BO_LTAG], TAG_FLOAT
     je .use_float_methods
     cmp qword [rsp + BO_RTAG], TAG_FLOAT
-    je .use_float_methods
+    jne .no_float_coerce
+    ; Right is float — check if this is remainder op (str % float should NOT coerce)
+    cmp r9d, 6                  ; NB_REMAINDER
+    je .no_float_coerce
+    cmp r9d, 19                 ; NB_INPLACE_REMAINDER
+    je .no_float_coerce
+    jmp .use_float_methods
 
 .no_float_coerce:
     ; For NB_ADD (0/13) and NB_MULTIPLY (5/18): if left is int/SmallInt
@@ -510,27 +518,30 @@ section .text
     jmp .cmp_have_type
 .cmp_smallstr_type:
     ; Spill SmallStr operands to heap so str_compare can dereference them
+    ; ecx = comparison op — must survive across calls
+    push rcx                      ; save comparison op (shifts rsp by 8)
     ; Check left
-    mov rax, [rsp + BO_LTAG]
+    mov rax, [rsp + 8 + BO_LTAG]
     test rax, rax
     jns .cmp_ss_left_ok
-    mov rdi, [rsp + BO_LEFT]     ; payload
-    mov rsi, rax                  ; tag
+    mov rdi, [rsp + 8 + BO_LEFT]     ; payload
+    mov rsi, rax                      ; tag
     extern smallstr_to_obj
     call smallstr_to_obj
-    mov qword [rsp + BO_LEFT], rax
-    mov qword [rsp + BO_LTAG], TAG_PTR
+    mov qword [rsp + 8 + BO_LEFT], rax
+    mov qword [rsp + 8 + BO_LTAG], TAG_PTR
 .cmp_ss_left_ok:
     ; Check right
-    mov rax, [rsp + BO_RTAG]
+    mov rax, [rsp + 8 + BO_RTAG]
     test rax, rax
     jns .cmp_ss_right_ok
-    mov rdi, [rsp + BO_RIGHT]    ; payload
-    mov rsi, rax                  ; tag
+    mov rdi, [rsp + 8 + BO_RIGHT]    ; payload
+    mov rsi, rax                      ; tag
     call smallstr_to_obj
-    mov qword [rsp + BO_RIGHT], rax
-    mov qword [rsp + BO_RTAG], TAG_PTR
+    mov qword [rsp + 8 + BO_RIGHT], rax
+    mov qword [rsp + 8 + BO_RTAG], TAG_PTR
 .cmp_ss_right_ok:
+    pop rcx                       ; restore comparison op
     ; Reload rdi, rsi from stack (may have been replaced)
     mov rdi, [rsp + BO_LEFT]
     mov rsi, [rsp + BO_RIGHT]
@@ -687,7 +698,7 @@ DEF_FUNC_BARE op_unary_negative
     mov rax, [rax + PyNumberMethods.nb_negative]
 
     ; Call nb_negative(payload, tag); rdi already set
-    mov edx, r8d               ; tag
+    mov rdx, r8                ; tag (64-bit for SmallStr)
     call rax
     ; rax = result payload, rdx = result tag
 
@@ -737,7 +748,7 @@ DEF_FUNC_BARE op_unary_invert
     mov rax, [rax + PyNumberMethods.nb_invert]
 
     ; Call nb_invert(operand, tag) — binary op signature
-    mov edx, r8d               ; tag
+    mov rdx, r8                ; tag (64-bit for SmallStr)
     xor esi, esi
     call rax
     SAVE_FAT_RESULT
@@ -764,7 +775,7 @@ DEF_FUNC_BARE op_unary_not
     push rdi
 
     ; Call obj_is_true(operand, tag) -> 0 or 1
-    mov esi, r8d
+    mov rsi, r8                ; 64-bit for SmallStr
     call obj_is_true
     push rax                   ; save truthiness result
 
@@ -806,7 +817,7 @@ DEF_FUNC_BARE op_pop_jump_if_false
     push rdi
 
     ; Call obj_is_true(value, tag) -> 0 (false) or 1 (true)
-    mov esi, r8d
+    mov rsi, r8                ; 64-bit for SmallStr
     call obj_is_true
     push rax                   ; save truthiness on machine stack
 
@@ -844,7 +855,7 @@ DEF_FUNC_BARE op_pop_jump_if_true
     push rdi
 
     ; Call obj_is_true(value, tag)
-    mov esi, r8d
+    mov rsi, r8                ; 64-bit for SmallStr
     call obj_is_true
     push rax                   ; save truthiness on machine stack
 

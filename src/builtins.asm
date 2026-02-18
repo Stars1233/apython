@@ -426,6 +426,20 @@ DEF_FUNC builtin_len
     cmp rsi, 1
     jne .len_error
 
+    ; SmallStr fast path: extract length from tag bits 56-62
+    mov rax, [rdi + 8]          ; args[0] tag
+    test rax, rax
+    jns .len_not_smallstr
+    mov rcx, rax
+    shr rcx, 56
+    and ecx, 0x7F               ; ecx = SmallStr length
+    mov rax, rcx
+    RET_TAG_SMALLINT
+    pop rbx
+    leave
+    ret
+.len_not_smallstr:
+
     mov rbx, [rdi]              ; rbx = args[0]
 
     ; Check if the object has a mapping mp_length

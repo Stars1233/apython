@@ -148,7 +148,7 @@ DEF_FUNC_BARE op_binary_subscr
 
     ; Call mp_subscript(obj, key, key_tag)
     ; rdi = obj, rsi = key (already set)
-    mov edx, r8d               ; rdx = key tag
+    mov rdx, r8                ; rdx = key tag (64-bit for SmallStr)
     call rax
     jmp .subscr_done
 
@@ -322,7 +322,7 @@ DEF_FUNC_BARE op_store_subscr
 
     ; Call mp_ass_subscript(obj, key, value, key_tag, value_tag)
     ; rdi = obj, rsi = key, rdx = value (already set)
-    mov ecx, r8d               ; key tag (4th arg)
+    mov rcx, r8                ; key tag (4th arg, 64-bit for SmallStr)
     ; r8 = value tag (5th arg) — use r10 which holds value tag
     mov r8, r10
     call rax

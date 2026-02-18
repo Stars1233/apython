@@ -492,14 +492,14 @@ DEF_FUNC str_mod, SM_FRAME
 
     mov [rbp-SM_FMT], rdi      ; fmt
     mov [rbp-SM_ARGS], rsi     ; args
-    mov [rbp-SM_ATAG], ecx     ; args tag
+    mov [rbp-SM_ATAG], rcx     ; args tag (full 64-bit for SmallStr)
 
     ; Determine if args is a tuple
-    ; ecx = right_tag (args tag) from op_binary_op caller
+    ; rcx = right_tag (args tag) from op_binary_op caller
     mov qword [rbp-SM_ISTUPLE], 0  ; is_tuple = false
     mov qword [rbp-SM_NARGS], 1   ; nargs = 1 (single value)
-    cmp ecx, TAG_SMALLINT
-    je .sm_not_tuple            ; SmallInt → single value
+    cmp ecx, TAG_PTR
+    jne .sm_not_tuple           ; non-heap → single value (SmallInt/Float/Bool/None/SmallStr)
     mov rax, [rsi + PyObject.ob_type]
     lea rcx, [rel tuple_type]
     cmp rax, rcx
@@ -635,9 +635,9 @@ DEF_FUNC str_mod, SM_FRAME
     ; Get next arg
     push rcx
     call .sm_get_arg
-    ; rax = arg payload, edx = arg tag
+    ; rax = arg payload, rdx = arg tag
     mov rdi, rax
-    mov esi, edx               ; tag for obj_str
+    mov rsi, rdx               ; tag for obj_str (64-bit for SmallStr)
     call obj_str
     ; rax = str result
     jmp .sm_copy_str
@@ -675,7 +675,7 @@ DEF_FUNC str_mod, SM_FRAME
     mov edx, TAG_SMALLINT
 .sm_int_go:
     mov rdi, rax
-    mov esi, edx               ; tag for obj_str
+    mov rsi, rdx               ; tag for obj_str (64-bit)
     call obj_str               ; int.__str__ = int_repr
     jmp .sm_copy_str
 
@@ -683,7 +683,7 @@ DEF_FUNC str_mod, SM_FRAME
     push rcx
     call .sm_get_arg
     mov rdi, rax
-    mov esi, edx               ; tag for obj_repr
+    mov rsi, rdx               ; tag for obj_repr (64-bit)
     call obj_repr
     jmp .sm_copy_str
 
@@ -838,12 +838,12 @@ DEF_FUNC str_mod, SM_FRAME
 
 .sm_get_arg:
     ; Get arg at index r15, increment r15
-    ; Returns arg payload in rax, tag in edx (borrowed ref)
+    ; Returns arg payload in rax, tag in rdx (borrowed ref)
     cmp qword [rbp-SM_ISTUPLE], 1
     je .sm_arg_tuple
     ; Single value
     mov rax, [rbp-SM_ARGS]
-    mov edx, [rbp-SM_ATAG]
+    mov rdx, [rbp-SM_ATAG]
     inc r15
     ret
 .sm_arg_tuple:
