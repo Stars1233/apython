@@ -149,7 +149,7 @@ DEF_FUNC dunder_call_2
 
     mov rbx, rdi            ; rbx = self
     mov r12, rsi            ; r12 = other payload
-    mov r14d, ecx           ; r14d = other tag
+    mov r14, rcx            ; r14 = other tag
 
     ; Lookup dunder on self's type
     mov rdi, [rbx + PyObject.ob_type]

@@ -439,6 +439,9 @@ DEF_FUNC builtin_len
     leave
     ret
 .len_not_smallstr:
+    ; rax = tag from line above; only dereference TAG_PTR payloads
+    cmp eax, TAG_PTR
+    jne .len_type_error
 
     mov rbx, [rdi]              ; rbx = args[0]
 
@@ -527,6 +530,11 @@ DEF_FUNC builtin_len
 .len_error:
     lea rdi, [rel exc_TypeError_type]
     CSTRING rsi, "len() takes exactly one argument"
+    call raise_exception
+
+.len_type_error:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "object has no len()"
     call raise_exception
 END_FUNC builtin_len
 

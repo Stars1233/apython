@@ -1593,6 +1593,16 @@ DEF_FUNC builtin_hash_fn
     cmp dword [rdi + 8], TAG_FLOAT
     je .hash_float
 
+    ; Check non-pointer tags before dereference
+    mov rax, [rdi + 8]           ; reload full 64-bit tag
+    test rax, rax
+    js .hash_smallstr             ; bit 63 set → SmallStr
+
+    cmp eax, TAG_BOOL
+    je .hash_bool
+    cmp eax, TAG_NONE
+    je .hash_none
+
     mov rax, [rbx + PyObject.ob_type]
     mov rcx, [rax + PyTypeObject.tp_hash]
     test rcx, rcx
@@ -1632,6 +1642,28 @@ DEF_FUNC builtin_hash_fn
     pop rbx
     leave
     ret
+
+.hash_bool:
+    ; hash(True) = 1, hash(False) = 0 — payload is already 0 or 1
+    mov rax, rbx
+    jmp .hash_si_ok
+
+.hash_none:
+    ; hash(None) — CPython convention
+    mov eax, 0x48ae2ce5
+    jmp .hash_si_ok
+
+.hash_smallstr:
+    ; rax = full 64-bit tag (from the test above), rbx = payload
+    extern smallstr_hash
+    mov rsi, rax                  ; rsi = tag
+    mov rdi, rbx                  ; rdi = payload
+    call smallstr_hash
+    ; rax = hash result, apply -1 → -2 convention
+    cmp rax, -1
+    jne .hash_si_ok
+    mov rax, -2
+    jmp .hash_si_ok
 
 .hash_type_error:
     lea rdi, [rel exc_TypeError_type]

@@ -304,7 +304,7 @@ DEF_FUNC_BARE op_binary_op
     push r9                    ; save op code (+8 shifts BO_ offsets)
     mov rdi, [rsp + 8 + BO_LEFT]
     mov rsi, [rsp + 8 + BO_RIGHT]
-    mov ecx, [rsp + 8 + BO_RTAG]   ; other_tag = right's tag
+    mov rcx, [rsp + 8 + BO_RTAG]   ; other_tag = right's tag
     call dunder_call_2
     pop r9
     test edx, edx
@@ -336,7 +336,7 @@ DEF_FUNC_BARE op_binary_op
     ; dunder_call_2(right, left, rname, left_tag) — right is self for reflected
     mov rdi, [rsp + BO_RIGHT]
     mov rsi, [rsp + BO_LEFT]
-    mov ecx, [rsp + BO_LTAG]       ; other_tag = left's tag
+    mov rcx, [rsp + BO_LTAG]       ; other_tag = left's tag
     call dunder_call_2
     test edx, edx
     jnz .binop_have_result

@@ -1309,7 +1309,7 @@ DEF_FUNC import_load_module, IF_FRAME
     ; rax = return value (ignore), edx = tag
     ; XDECREF return value (tag-aware)
     mov rdi, rax
-    mov esi, edx
+    mov rsi, rdx
     DECREF_VAL rdi, rsi
 .no_retval:
 
