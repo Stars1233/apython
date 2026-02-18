@@ -617,6 +617,9 @@ exc_name_UnicodeError:      db "UnicodeError", 0
 exc_name_Warning:           db "Warning", 0
 exc_name_DeprecationWarning: db "DeprecationWarning", 0
 exc_name_UserWarning:       db "UserWarning", 0
+exc_name_CancelledError:    db "CancelledError", 0
+exc_name_StopAsyncIteration: db "StopAsyncIteration", 0
+exc_name_TimeoutError:      db "TimeoutError", 0
 
 ; Exception metatype - provides tp_call so exception types can be called
 ; e.g., ValueError("msg") works via CALL opcode
@@ -710,6 +713,9 @@ DEF_EXC_TYPE exc_UnicodeError_type, exc_name_UnicodeError, exc_ValueError_type
 DEF_EXC_TYPE exc_Warning_type, exc_name_Warning, exc_Exception_type
 DEF_EXC_TYPE exc_DeprecationWarning_type, exc_name_DeprecationWarning, exc_Warning_type
 DEF_EXC_TYPE exc_UserWarning_type, exc_name_UserWarning, exc_Warning_type
+DEF_EXC_TYPE exc_CancelledError_type, exc_name_CancelledError, exc_BaseException_type
+DEF_EXC_TYPE exc_StopAsyncIteration_type, exc_name_StopAsyncIteration, exc_Exception_type
+DEF_EXC_TYPE exc_TimeoutError_type, exc_name_TimeoutError, exc_Exception_type
 
 ; Exception type lookup table indexed by EXC_* constants
 align 8
@@ -741,3 +747,6 @@ exception_type_table:
     dq exc_UnicodeError_type         ; EXC_UNICODE_ERROR = 23
     dq exc_BaseExceptionGroup_type   ; EXC_BASE_EXCEPTION_GROUP = 24
     dq exc_ExceptionGroup_type       ; EXC_EXCEPTION_GROUP = 25
+    dq exc_CancelledError_type       ; EXC_CANCELLED_ERROR = 26
+    dq exc_StopAsyncIteration_type   ; EXC_STOP_ASYNC_ITERATION = 27
+    dq exc_TimeoutError_type         ; EXC_TIMEOUT_ERROR = 28

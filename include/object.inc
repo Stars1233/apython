@@ -294,6 +294,104 @@ struc PyFileObject
     .file_mode:   resq 1  ; +32: mode string ('w', 'r')
 endstruc
 
+; Async task object (for event loop)
+struc AsyncTask
+    .ob_refcnt:    resq 1  ; +0
+    .ob_type:      resq 1  ; +8
+    .coro:         resq 1  ; +16: PyGenObject* (coroutine)
+    .result:       resq 1  ; +24: result value payload
+    .result_tag:   resq 1  ; +32: result value tag
+    .exception:    resq 1  ; +40: exception or NULL
+    .send_value:   resq 1  ; +48: value to send on next resume (payload)
+    .send_tag:     resq 1  ; +56: value to send on next resume (tag)
+    .done:         resd 1  ; +64: 0=pending, 1=done
+    .cancelling:   resd 1  ; +68: 1=cancel requested
+    .n_waiters:    resd 1  ; +72: number of waiters
+    .pad:          resd 1  ; +76
+    .waiters:      resq 1  ; +80: ptr to AsyncTask*[] array
+    .waiters_cap:  resd 1  ; +88: waiters array capacity
+    .pad2:         resd 1  ; +92
+    .next:         resq 1  ; +96: ready queue linkage
+endstruc
+
+; Sleep awaitable object (for asyncio.sleep)
+struc SleepAwaitable
+    .ob_refcnt: resq 1  ; +0
+    .ob_type:   resq 1  ; +8
+    .delay_ns:  resq 1  ; +16
+    .yielded:   resd 1  ; +20: 0=not yet, 1=done
+endstruc
+
+; Async stream reader
+struc AsyncStreamReader
+    .ob_refcnt: resq 1  ; +0
+    .ob_type:   resq 1  ; +8
+    .fd:        resd 1  ; +16: socket file descriptor
+    .eof:       resd 1  ; +20: 1 = EOF reached
+endstruc
+
+; Async stream writer
+struc AsyncStreamWriter
+    .ob_refcnt: resq 1  ; +0
+    .ob_type:   resq 1  ; +8
+    .fd:        resd 1  ; +16: socket file descriptor
+    .closed:    resd 1  ; +20: 1 = closed
+endstruc
+
+; ReadAwaitable — awaitable for stream.read(n)
+struc ReadAwaitable
+    .ob_refcnt: resq 1  ; +0
+    .ob_type:   resq 1  ; +8
+    .fd:        resd 1  ; +16: socket fd
+    .nbytes:    resd 1  ; +20: bytes to read
+    .yielded:   resd 1  ; +24: 0=not yet, 1=done
+    .pad:       resd 1  ; +28
+endstruc
+
+; WriteAwaitable — awaitable for stream.write(data)
+struc WriteAwaitable
+    .ob_refcnt: resq 1  ; +0
+    .ob_type:   resq 1  ; +8
+    .fd:        resd 1  ; +16: socket fd
+    .pad1:      resd 1  ; +20
+    .data:      resq 1  ; +24: string payload ptr (INCREF'd)
+    .data_tag:  resq 1  ; +32: string tag
+    .yielded:   resd 1  ; +40: 0=not yet, 1=done
+    .pad2:      resd 1  ; +44
+endstruc
+
+; DrainAwaitable — awaitable for stream.drain()
+struc DrainAwaitable
+    .ob_refcnt: resq 1  ; +0
+    .ob_type:   resq 1  ; +8
+    .fd:        resd 1  ; +16: socket fd
+    .yielded:   resd 1  ; +20: 0=not yet, 1=done
+endstruc
+
+; ConnectAwaitable — awaitable for open_connection
+struc ConnectAwaitable
+    .ob_refcnt: resq 1  ; +0
+    .ob_type:   resq 1  ; +8
+    .fd:        resd 1  ; +16: socket fd (already connected)
+    .yielded:   resd 1  ; +20: 0=not yet, 1=done
+endstruc
+
+; AsyncGenASend — wrapper returned by async_gen.__anext__()
+; SEND/tp_iternext on this object resumes the async gen.
+; Layout must keep gi_return_value at +48, gi_return_tag at +56
+; because op_send reads these offsets from the receiver on exhaustion.
+struc AsyncGenASend
+    .ob_refcnt:     resq 1  ; +0
+    .ob_type:       resq 1  ; +8
+    .ags_gen:       resq 1  ; +16: pointer to async generator (INCREF'd)
+    .ags_state:     resd 1  ; +24: 0=initial, 1=yielded, 2=closed
+    .pad0:          resd 1  ; +28
+    .pad1:          resq 1  ; +32
+    .pad2:          resq 1  ; +40
+    .gi_return_value: resq 1 ; +48: yielded value (for SEND exhaustion path)
+    .gi_return_tag:   resq 1 ; +56: yielded value tag
+endstruc
+
 ; Sentinel values
 NULL_OBJ equ 0
 

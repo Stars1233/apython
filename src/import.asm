@@ -61,6 +61,7 @@ extern exc_ImportError_type
 
 ; Builtin modules
 extern time_module_create
+extern asyncio_module_create
 
 ; --- import_module frame layout ---
 IF_NAME     equ 8            ; import name str
@@ -163,6 +164,23 @@ DEF_FUNC import_init
     mov rdi, [rel sys_modules_dict]
     mov rsi, rax                ; key = "time"
     mov rdx, rbx                ; value = time module
+    mov ecx, TAG_PTR
+    mov r8d, TAG_PTR
+    call dict_set
+    pop rdi                     ; DECREF key
+    call obj_decref
+    mov rdi, rbx                ; DECREF module (dict_set INCREF'd)
+    call obj_decref
+
+    ; Register asyncio module in sys.modules
+    call asyncio_module_create
+    mov rbx, rax                ; asyncio module
+    lea rdi, [rel im_asyncio_name]
+    call str_from_cstr_heap
+    push rax                    ; save key for DECREF
+    mov rdi, [rel sys_modules_dict]
+    mov rsi, rax                ; key = "asyncio"
+    mov rdx, rbx                ; value = asyncio module
     mov ecx, TAG_PTR
     mov r8d, TAG_PTR
     call dict_set
@@ -1433,6 +1451,7 @@ section .rodata
 im_lib_path:        db "lib", 0
 im_tests_cpython_path: db "tests/cpython", 0
 im_time_name:       db "time", 0
+im_asyncio_name:    db "asyncio", 0
 im_builtins:        db "builtins", 0
 im_dunder_name:     db "__name__", 0
 im_dunder_file:     db "__file__", 0

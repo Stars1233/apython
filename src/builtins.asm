@@ -122,6 +122,9 @@ extern exc_DeprecationWarning_type
 extern exc_UserWarning_type
 extern exc_BaseExceptionGroup_type
 extern exc_ExceptionGroup_type
+extern exc_CancelledError_type
+extern exc_StopAsyncIteration_type
+extern exc_TimeoutError_type
 
 ;; ============================================================================
 ;; builtin_func_new(void *func_ptr, const char *name_cstr) -> PyBuiltinObject*
@@ -1838,6 +1841,21 @@ DEF_FUNC builtins_init
     lea rdx, [rel exc_ExceptionGroup_type]
     call add_exc_type_builtin
 
+    mov rdi, rbx
+    lea rsi, [rel bi_name_CancelledError]
+    lea rdx, [rel exc_CancelledError_type]
+    call add_exc_type_builtin
+
+    mov rdi, rbx
+    lea rsi, [rel bi_name_StopAsyncIteration]
+    lea rdx, [rel exc_StopAsyncIteration_type]
+    call add_exc_type_builtin
+
+    mov rdi, rbx
+    lea rsi, [rel bi_name_TimeoutError]
+    lea rdx, [rel exc_TimeoutError_type]
+    call add_exc_type_builtin
+
     ; Register data types as builtins
     mov rdi, rbx
     lea rsi, [rel bi_name_list]
@@ -2042,6 +2060,9 @@ bi_name_DeprecationWarning: db "DeprecationWarning", 0
 bi_name_UserWarning:       db "UserWarning", 0
 bi_name_BaseExceptionGroup: db "BaseExceptionGroup", 0
 bi_name_ExceptionGroup:    db "ExceptionGroup", 0
+bi_name_CancelledError:    db "CancelledError", 0
+bi_name_StopAsyncIteration: db "StopAsyncIteration", 0
+bi_name_TimeoutError:      db "TimeoutError", 0
 bi_name_list:              db "list", 0
 bi_name_dict:              db "dict", 0
 bi_name_tuple:             db "tuple", 0

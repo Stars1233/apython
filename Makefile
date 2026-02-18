@@ -3,7 +3,7 @@
 NASM = nasm
 NASMFLAGS = -f elf64 -I include/ -g -F dwarf
 CC = cc
-LDFLAGS = -lc -lgmp
+LDFLAGS = -no-pie -lc -lgmp
 TARGET = apython
 
 # Source files

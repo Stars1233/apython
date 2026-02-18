@@ -30,7 +30,10 @@ EXC_ARITHMETIC_ERROR   equ 22
 EXC_UNICODE_ERROR          equ 23
 EXC_BASE_EXCEPTION_GROUP   equ 24
 EXC_EXCEPTION_GROUP        equ 25
-EXC_COUNT                  equ 26  ; total
+EXC_CANCELLED_ERROR        equ 26
+EXC_STOP_ASYNC_ITERATION   equ 27
+EXC_TIMEOUT_ERROR          equ 28
+EXC_COUNT                  equ 29  ; total
 
 ; Exception object
 struc PyExceptionObject

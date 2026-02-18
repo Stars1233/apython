@@ -35,6 +35,8 @@ extern float_type
 extern float_number_methods
 extern cell_new
 extern gen_new
+extern coro_new
+extern async_gen_new
 extern raise_exception
 extern exc_RuntimeError_type
 extern exc_TypeError_type
@@ -1338,13 +1340,33 @@ DEF_FUNC_BARE op_return_generator
     mov [r12 + PyFrame.instr_ptr], rbx
     mov [r12 + PyFrame.stack_ptr], r13
 
-    ; Create generator object: gen_new(frame)
+    ; Check co_flags to decide which object type to create
+    mov rax, [r12 + PyFrame.code]
+    mov eax, [rax + PyCodeObject.co_flags]
+
+    ; Create the appropriate object: gen_new/coro_new/async_gen_new(frame)
     mov rdi, r12
+    test eax, CO_COROUTINE
+    jnz .ret_gen_coro
+    test eax, CO_ASYNC_GENERATOR
+    jnz .ret_gen_async
+
+    ; Plain generator
     call gen_new
-    ; rax = new generator object
+    jmp .ret_gen_done
+
+.ret_gen_coro:
+    call coro_new
+    jmp .ret_gen_done
+
+.ret_gen_async:
+    call async_gen_new
+
+.ret_gen_done:
+    ; rax = new gen/coro/async_gen object
     mov edx, TAG_PTR             ; return tag for fat value protocol
 
-    ; Return the generator from eval_frame
+    ; Return from eval_frame
     ; frame->instr_ptr is non-zero, so func_call will skip frame_free
     jmp eval_return
 END_FUNC op_return_generator
@@ -1399,6 +1421,7 @@ END_FUNC op_end_send
 ;; ============================================================================
 extern gen_send
 extern gen_type
+extern coro_type
 
 DEF_FUNC op_send, SND_FRAME
     ; ecx = arg (jump offset in instructions for StopIteration)
@@ -1513,13 +1536,16 @@ DEF_FUNC_BARE op_get_yield_from_iter
     ; TOS = iterable
     VPEEK rdi                  ; rdi = TOS (don't pop)
 
-    ; If it's already a generator, done — must be TAG_PTR to check ob_type
+    ; If it's already a generator or coroutine, done — must be TAG_PTR to check ob_type
     cmp qword [r13 - 8], TAG_PTR
     jne .gyfi_call_iter
     mov rax, [rdi + PyObject.ob_type]
     lea rcx, [rel gen_type]
     cmp rax, rcx
     je .gyfi_done              ; already a generator, leave on stack
+    lea rcx, [rel coro_type]
+    cmp rax, rcx
+    je .gyfi_done              ; already a coroutine, leave on stack
 
 .gyfi_call_iter:
     ; Not a generator — call tp_iter to get an iterator
@@ -1586,6 +1612,8 @@ END_FUNC op_jump_backward_no_interrupt
 DEF_FUNC_BARE op_call_intrinsic_1
     cmp ecx, 3
     je .ci1_stopiter_error
+    cmp ecx, 4
+    je .ci1_async_gen_wrap
     cmp ecx, 5
     je .ci1_unary_positive
     cmp ecx, 6
@@ -1594,6 +1622,12 @@ DEF_FUNC_BARE op_call_intrinsic_1
     ; Unknown intrinsic — fatal
     CSTRING rdi, "unimplemented CALL_INTRINSIC_1"
     call fatal_error
+
+.ci1_async_gen_wrap:
+    ; INTRINSIC_ASYNC_GEN_WRAP: wrap yielded value for async generators
+    ; In our implementation, this is a no-op — value passes through unchanged.
+    ; The async generator protocol is handled by async_gen_iternext.
+    DISPATCH
 
 .ci1_stopiter_error:
     ; Convert StopIteration to RuntimeError

@@ -111,6 +111,14 @@ extern op_compare_op_int
 extern op_for_iter_list
 extern op_for_iter_range
 
+; Async opcode handlers
+extern op_get_awaitable
+extern op_get_aiter
+extern op_get_anext
+extern op_before_async_with
+extern op_end_async_for
+extern op_cleanup_throw
+
 ; External error handler
 extern error_unimplemented_opcode
 
@@ -1153,12 +1161,12 @@ opcode_table:
     dq op_unimplemented      ; 47
     dq op_unimplemented      ; 48
     dq op_with_except_start  ; 49  = WITH_EXCEPT_START
-    dq op_unimplemented      ; 50  = GET_AITER
-    dq op_unimplemented      ; 51  = GET_ANEXT
-    dq op_unimplemented      ; 52  = BEFORE_ASYNC_WITH
+    dq op_get_aiter          ; 50  = GET_AITER
+    dq op_get_anext          ; 51  = GET_ANEXT
+    dq op_before_async_with  ; 52  = BEFORE_ASYNC_WITH
     dq op_before_with        ; 53  = BEFORE_WITH
-    dq op_unimplemented      ; 54  = END_ASYNC_FOR
-    dq op_unimplemented      ; 55  = CLEANUP_THROW
+    dq op_end_async_for      ; 54  = END_ASYNC_FOR
+    dq op_cleanup_throw      ; 55  = CLEANUP_THROW
     dq op_unimplemented      ; 56
     dq op_unimplemented      ; 57
     dq op_unimplemented      ; 58
@@ -1234,7 +1242,7 @@ opcode_table:
     dq op_pop_jump_if_not_none ; 128 = POP_JUMP_IF_NOT_NONE
     dq op_pop_jump_if_none   ; 129 = POP_JUMP_IF_NONE
     dq op_raise_varargs      ; 130 = RAISE_VARARGS
-    dq op_unimplemented      ; 131 = GET_AWAITABLE
+    dq op_get_awaitable      ; 131 = GET_AWAITABLE
     dq op_make_function      ; 132 = MAKE_FUNCTION
     dq op_build_slice        ; 133 = BUILD_SLICE
     dq op_jump_backward_no_interrupt ; 134 = JUMP_BACKWARD_NO_INTERRUPT
