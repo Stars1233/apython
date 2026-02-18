@@ -622,9 +622,10 @@ DEF_FUNC op_check_eg_match, CEM_FRAME
     mov [rax + PyTupleObject.ob_item], rcx
     mov qword [rax + PyTupleObject.ob_item + 8], TAG_PTR
 
-    ; Create empty message string
+    ; Create empty message string (heap — stored in exception struct)
+    extern str_from_cstr_heap
     CSTRING rdi, ""
-    call str_from_cstr
+    call str_from_cstr_heap
     mov [rbp - CEM_TMP2], rax ; TMP2 = empty msg str
 
     ; eg_new(ExceptionGroup_type, empty_str, tuple)
@@ -804,8 +805,8 @@ DEF_FUNC_BARE op_raise_varargs
 
     ; Check if it's already an exception object or a type
     ; If it's a type, create an instance with no args
-    test dword [r13 + 8], TAG_RC_BIT
-    jz .raise_bad             ; non-pointer can't be an exception
+    cmp dword [r13 + 8], TAG_PTR
+    jne .raise_bad            ; non-pointer can't be an exception
     test rdi, rdi
     jz .raise_bad             ; NULL can't be an exception
 
@@ -861,8 +862,8 @@ DEF_FUNC_BARE op_raise_varargs
 
 .raise_bad:
     ; DECREF the bad value (only if pointer) and raise TypeError
-    test dword [r13 + 8], TAG_RC_BIT
-    jz .raise_bad_no_decref
+    cmp dword [r13 + 8], TAG_PTR
+    jne .raise_bad_no_decref
     call obj_decref
 .raise_bad_no_decref:
     lea rdi, [rel exc_TypeError_type]

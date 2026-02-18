@@ -176,28 +176,24 @@ DEF_FUNC float_repr
 .has_dot:
     lea rdi, [rbp-64]
     call str_from_cstr
-    mov edx, TAG_PTR
     leave
     ret
 
 .is_nan:
     lea rdi, [rel str_nan]
     call str_from_cstr
-    mov edx, TAG_PTR
     leave
     ret
 
 .is_pos_inf:
     lea rdi, [rel str_inf]
     call str_from_cstr
-    mov edx, TAG_PTR
     leave
     ret
 
 .is_neg_inf:
     lea rdi, [rel str_neg_inf]
     call str_from_cstr
-    mov edx, TAG_PTR
     leave
     ret
 END_FUNC float_repr

@@ -8,7 +8,7 @@
 %include "object.inc"
 %include "types.inc"
 
-extern str_from_cstr
+extern str_from_cstr_heap
 extern dict_get
 extern obj_decref
 extern obj_incref
@@ -29,9 +29,9 @@ DEF_FUNC dunder_lookup
     mov rbx, rdi            ; rbx = type (walks chain)
     mov r12, rsi            ; r12 = name C string
 
-    ; Create PyStrObject from C string for dict lookup
+    ; Create PyStrObject from C string for dict lookup (heap — dict key, DECREFed)
     mov rdi, r12
-    call str_from_cstr
+    call str_from_cstr_heap
     mov r13, rax            ; r13 = name string object
 
 .walk:

@@ -168,8 +168,8 @@ DEF_FUNC op_store_attr, SA_FRAME
     mov [rbp - SA_VTAG], rax
 
     ; Non-pointer obj can't have attrs set (SmallInt, Float, None, Bool)
-    test dword [rbp - SA_OTAG], TAG_RC_BIT
-    jz .sa_no_setattr
+    cmp dword [rbp - SA_OTAG], TAG_PTR
+    jne .sa_no_setattr
 
     ; Check for property/descriptor in type dict (walk MRO) before regular setattr
     mov rdi, [rbp - SA_OBJ]       ; obj
@@ -197,8 +197,8 @@ DEF_FUNC op_store_attr, SA_FRAME
 .sa_found_in_type:
 
     ; Check if it's a descriptor (only TAG_PTR can be a descriptor)
-    test edx, TAG_RC_BIT
-    jz .sa_no_property            ; non-pointer — not a descriptor
+    cmp edx, TAG_PTR
+    jne .sa_no_property           ; non-pointer — not a descriptor
     mov rcx, [rax + PyObject.ob_type]
 
     ; Check property first (fast path)
@@ -414,9 +414,9 @@ DEF_FUNC op_delete_attr, DA_FRAME
     mov [rbp - DA_OBJ], rdi
 
     ; Non-pointer obj can't have attrs deleted
-    mov eax, [r13 + 8]            ; obj tag (after VPOP)
-    test eax, TAG_RC_BIT
-    jz .da_error
+    mov rax, [r13 + 8]            ; obj tag (after VPOP)
+    cmp eax, TAG_PTR
+    jne .da_error
 
     ; Call tp_setattr(obj, name, NULL) to delete attr
     mov rax, [rdi + PyObject.ob_type]
@@ -461,8 +461,8 @@ DEF_FUNC op_delete_subscr, DS_FRAME
     mov [rbp - DS_KTAG], rax    ; save key tag
 
     ; Non-pointer obj can't have items deleted
-    test dword [rbp - DS_OTAG], TAG_RC_BIT
-    jz .ds_error
+    cmp dword [rbp - DS_OTAG], TAG_PTR
+    jne .ds_error
 
     ; Call mp_ass_subscript(obj, key, NULL)
     mov rax, [rdi + PyObject.ob_type]

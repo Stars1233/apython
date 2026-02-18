@@ -15,6 +15,7 @@ extern dict_new
 extern dict_get
 extern dict_set
 extern str_from_cstr
+extern str_from_cstr_heap
 extern ap_strcmp
 extern type_repr
 extern fatal_error
@@ -24,6 +25,7 @@ extern exc_TypeError_type
 extern func_type
 extern type_type
 extern int_type
+extern str_type
 extern staticmethod_type
 extern classmethod_type
 extern property_type
@@ -144,8 +146,8 @@ DEF_FUNC instance_getattr
     ; Regular callables are bound to the instance.
     mov r13, rax                ; r13 = attr (borrowed ref from dict_get)
     mov r12, rdx                ; r12 = attr tag (name no longer needed)
-    test r12d, TAG_RC_BIT
-    jz .found_type_raw          ; non-pointer — return as-is
+    cmp r12d, TAG_PTR
+    jne .found_type_raw         ; non-pointer — return as-is
 
     mov rcx, [rax + PyObject.ob_type]
 
@@ -420,6 +422,8 @@ DEF_FUNC type_call
     jne .not_type_self
     ; type(x) → return type of x
     mov rax, [rsi]          ; args[0] payload
+    bt qword [rsi + 8], 63
+    jc .type_smallstr       ; SmallStr → str type
     cmp dword [rsi + 8], TAG_SMALLINT
     je .type_smallint       ; SmallInt → int type
     cmp dword [rsi + 8], TAG_FLOAT
@@ -456,6 +460,12 @@ DEF_FUNC type_call
 .type_none:
     extern none_type
     lea rax, [rel none_type]
+    inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
+    leave
+    ret
+.type_smallstr:
+    lea rax, [rel str_type]
     inc qword [rax + PyObject.ob_refcnt]
     mov edx, TAG_PTR
     leave
@@ -502,7 +512,7 @@ DEF_FUNC type_call
 
     ; === Look up __new__ in MRO (stop at object_type) ===
     lea rdi, [rel new_name_cstr]
-    call str_from_cstr
+    call str_from_cstr_heap
     mov r15, rax                ; r15 = "__new__" str
 
     mov rcx, rbx                ; rcx = current type
@@ -601,9 +611,9 @@ DEF_FUNC type_call
 
 .lookup_init:
     ; Look up __init__ walking the MRO (type + tp_base chain)
-    ; Create "__init__" string for lookup
+    ; Create "__init__" string for lookup (heap — dict key, DECREFed)
     lea rdi, [rel init_name_cstr]
-    call str_from_cstr
+    call str_from_cstr_heap
     mov r15, rax                ; r15 = "__init__" str object
 
     ; Walk MRO: check type->tp_dict, then tp_base chain
@@ -859,8 +869,6 @@ DEF_FUNC type_getattr
     ; Return str from tp_name (C string)
     mov rdi, [r12 + PyTypeObject.tp_name]
     call str_from_cstr
-    ; rax = new string (already refcnt=1)
-    mov edx, TAG_PTR
     pop r12
     pop rbx
     leave

@@ -21,8 +21,9 @@ extern obj_incref
 extern obj_decref
 extern obj_dealloc
 extern obj_repr
-extern str_from_cstr
-extern str_new
+extern str_from_cstr_heap
+extern str_new_heap
+extern smallstr_to_obj
 extern str_type
 extern list_new
 extern list_append
@@ -85,7 +86,7 @@ DEF_FUNC_LOCAL add_method_to_dict
 
     ; Create key string from name
     mov rdi, r12
-    call str_from_cstr
+    call str_from_cstr_heap
     push rax                ; save key str
 
     ; dict_set(dict, key, func_obj)
@@ -131,7 +132,7 @@ DEF_FUNC str_method_upper
     ; Create new string: str_new(data, len)
     lea rdi, [rbx + PyStrObject.data]
     mov rsi, r12
-    call str_new
+    call str_new_heap
     mov r13, rax            ; r13 = new string
 
     ; Convert each byte to uppercase in-place
@@ -173,7 +174,7 @@ DEF_FUNC str_method_lower
 
     lea rdi, [rbx + PyStrObject.data]
     mov rsi, r12
-    call str_new
+    call str_new_heap
     mov r13, rax
 
     xor ecx, ecx
@@ -236,7 +237,7 @@ DEF_FUNC str_method_strip
 .strip_empty:
     ; All whitespace - return empty string
     lea rdi, [rel empty_str_cstr]
-    call str_from_cstr
+    call str_from_cstr_heap
     jmp .strip_ret
 
 .strip_right_start:
@@ -265,7 +266,7 @@ DEF_FUNC str_method_strip
     add rdi, r13
     mov rsi, r14
     sub rsi, r13            ; length = end - start
-    call str_new
+    call str_new_heap
 
 .strip_ret:
     mov edx, TAG_PTR
@@ -559,7 +560,7 @@ DEF_FUNC str_method_replace
 .replace_make_str:
     mov rdi, [rbp-48]
     mov rsi, [rbp-64]       ; result length
-    call str_new
+    call str_new_heap
     push rax
 
     mov rdi, [rbp-48]
@@ -579,7 +580,7 @@ DEF_FUNC str_method_replace
 .replace_copy_self:
     lea rdi, [rbx + PyStrObject.data]
     mov rsi, r14
-    call str_new
+    call str_new_heap
     mov edx, TAG_PTR
     add rsp, 40
     pop r15
@@ -606,8 +607,22 @@ DEF_FUNC str_method_join
     push r15
     sub rsp, 32             ; 3 locals + alignment pad = 32
 
-    mov rbx, [rdi]          ; self (separator)
-    mov r12, [rdi + 16]     ; list
+    ; Load separator — may be SmallStr, spill to heap if so
+    mov r15, rdi             ; save args ptr (r15 free until later)
+    mov rax, [rdi + 8]      ; self tag
+    mov rbx, [rdi]           ; self (separator) payload
+    test rax, rax
+    jns .join_sep_heap
+    ; SmallStr separator: spill to heap
+    mov rdi, rbx
+    mov rsi, rax
+    call smallstr_to_obj
+    mov rbx, rax             ; rbx = heap separator (owned)
+    jmp .join_sep_ok
+.join_sep_heap:
+    INCREF rbx               ; borrow → own
+.join_sep_ok:
+    mov r12, [r15 + 16]     ; list (args[1] payload, 16-byte stride)
 
     mov r13, [r12 + PyListObject.ob_size]  ; item count
     mov r14, [rbx + PyStrObject.ob_size]   ; sep length
@@ -626,7 +641,17 @@ DEF_FUNC str_method_join
     mov rax, [r12 + PyListObject.ob_item]
     mov rdx, rcx
     shl rdx, 4              ; index * 16
+    mov rsi, [rax + rdx + 8] ; tag
     mov rax, [rax + rdx]    ; payload
+    test rsi, rsi
+    jns .jll_heap
+    ; SmallStr element: extract length from tag
+    SMALLSTR_LEN rax, rsi
+    add r15, rax
+    pop rcx
+    inc rcx
+    jmp .join_len_loop
+.jll_heap:
     add r15, [rax + PyStrObject.ob_size]
     pop rcx
     inc rcx
@@ -669,18 +694,46 @@ DEF_FUNC str_method_join
     mov rax, [r12 + PyListObject.ob_item]
     mov rdx, rcx
     shl rdx, 4              ; index * 16
+    mov rsi, [rax + rdx + 8] ; item tag
     mov rax, [rax + rdx]    ; item payload
+    test rsi, rsi
+    js .jcl_smallstr
+
+    ; Heap string element
     mov rdx, [rax + PyStrObject.ob_size]
     push rdx                ; save item_len
-
     mov rdi, [rbp-56]
     add rdi, [rbp-64]
     lea rsi, [rax + PyStrObject.data]
     call ap_memcpy
-
     pop rdx                 ; item_len
     add [rbp-64], rdx
+    jmp .jcl_next
 
+.jcl_smallstr:
+    ; SmallStr element: spill bytes to stack buffer, copy from there
+    sub rsp, 16
+    mov [rsp], rax          ; payload = bytes 0-7
+    mov rax, rsi
+    shr rax, 8
+    mov rcx, 0x0000FFFFFFFFFFFF
+    and rax, rcx
+    mov [rsp + 8], rax      ; bytes 8-13
+    ; Extract length from tag
+    mov rcx, rsi
+    shr rcx, 56
+    and ecx, 0x7F           ; ecx = length
+    push rcx                ; save item_len
+    mov rdi, [rbp-56]
+    add rdi, [rbp-64]
+    lea rsi, [rsp + 8]      ; source = stack buffer (8 bytes pushed for len)
+    mov rdx, rcx            ; count = length
+    call ap_memcpy
+    pop rdx                 ; item_len
+    add [rbp-64], rdx
+    add rsp, 16             ; free stack buffer
+
+.jcl_next:
     pop rcx
     inc rcx
     jmp .join_copy_loop
@@ -688,11 +741,15 @@ DEF_FUNC str_method_join
 .join_make_str:
     mov rdi, [rbp-56]
     mov rsi, [rbp-48]       ; total_len
-    call str_new
+    call str_new_heap
     push rax
 
     mov rdi, [rbp-56]
     call ap_free
+
+    ; DECREF owned separator
+    mov rdi, rbx
+    call obj_decref
 
     pop rax
     mov edx, TAG_PTR
@@ -706,8 +763,12 @@ DEF_FUNC str_method_join
     ret
 
 .join_empty:
+    ; DECREF owned separator
+    mov rdi, rbx
+    call obj_decref
+
     lea rdi, [rel empty_str_cstr]
-    call str_from_cstr
+    call str_from_cstr_heap
     mov edx, TAG_PTR
     add rsp, 32
     pop r15
@@ -794,7 +855,7 @@ DEF_FUNC str_method_split
     add rdi, r15
     mov rsi, rcx
     sub rsi, r15            ; length
-    call str_new
+    call str_new_heap
     ; Append to list
     mov rdi, r13
     mov rsi, rax
@@ -856,7 +917,7 @@ DEF_FUNC str_method_split
     add rdi, rcx
     mov rsi, rax
     sub rsi, rcx            ; length = found_pos - scan_pos
-    call str_new
+    call str_new_heap
     mov rdi, r13
     mov rsi, rax
     push rax
@@ -875,7 +936,7 @@ DEF_FUNC str_method_split
     add rdi, rcx
     mov rsi, r12
     sub rsi, rcx            ; remaining length
-    call str_new
+    call str_new_heap
     mov rdi, r13
     mov rsi, rax
     push rax
@@ -1042,7 +1103,13 @@ DEF_FUNC str_method_format
     mov esi, TAG_SMALLINT
     call obj_repr          ; SmallInt → repr is fine
 .fmt_have_str:
-    ; rax = string object; append its data to buffer
+    ; rax = string result (may be SmallStr from obj_repr/obj_str)
+    test rdx, rdx
+    jns .fmt_heap_str
+    mov rdi, rax
+    mov rsi, rdx
+    call smallstr_to_obj
+.fmt_heap_str:
     push rax                ; save str obj for DECREF
     mov edx, [rax + PyStrObject.ob_size]
     lea rsi, [rax + PyStrObject.data]
@@ -1124,7 +1191,7 @@ DEF_FUNC str_method_format
     mov rdi, [rbp-48]
     mov rax, [rbp-56]
     mov byte [rdi + rax], 0
-    call str_from_cstr
+    call str_from_cstr_heap
     push rax
 
     ; Free buffer
@@ -1178,7 +1245,7 @@ DEF_FUNC str_method_lstrip
 .lstrip_empty:
     ; All whitespace - return empty string
     lea rdi, [rel empty_str_cstr]
-    call str_from_cstr
+    call str_from_cstr_heap
     jmp .lstrip_ret
 
 .lstrip_make:
@@ -1187,7 +1254,7 @@ DEF_FUNC str_method_lstrip
     add rdi, r13
     mov rsi, r12
     sub rsi, r13            ; length = len - start
-    call str_new
+    call str_new_heap
 
 .lstrip_ret:
     mov edx, TAG_PTR
@@ -1233,14 +1300,14 @@ DEF_FUNC str_method_rstrip
 .rstrip_empty:
     ; All whitespace - return empty string
     lea rdi, [rel empty_str_cstr]
-    call str_from_cstr
+    call str_from_cstr_heap
     jmp .rstrip_ret
 
 .rstrip_make:
     ; Create new string from [0, end)
     lea rdi, [rbx + PyStrObject.data]
     mov rsi, r13            ; length = end
-    call str_new
+    call str_new_heap
 
 .rstrip_ret:
     mov edx, TAG_PTR
@@ -1738,7 +1805,7 @@ DEF_FUNC str_method_removeprefix
     add rdi, r14
     mov rsi, r13
     sub rsi, r14
-    call str_new
+    call str_new_heap
     mov edx, TAG_PTR
     pop r14
     pop r13
@@ -1802,7 +1869,7 @@ DEF_FUNC str_method_removesuffix
     lea rdi, [rbx + PyStrObject.data]
     mov rsi, r13
     sub rsi, r14
-    call str_new
+    call str_new_heap
     mov edx, TAG_PTR
     pop r14
     pop r13
@@ -1866,7 +1933,7 @@ DEF_FUNC list_method_append
 
     mov rax, [rdi]          ; self (list)
     mov rsi, [rdi + 16]     ; item payload
-    mov edx, [rdi + 24]     ; item tag (16-byte stride)
+    mov rdx, [rdi + 24]     ; item tag (16-byte stride)
     mov rdi, rax
     call list_append
 
@@ -1900,7 +1967,7 @@ DEF_FUNC list_method_pop
 
 .pop_idx:
     mov rdi, [rax + 16]    ; args[1]
-    mov edx, [rax + 24]    ; args[1] tag
+    mov rdx, [rax + 24]    ; args[1] tag
     call int_to_i64
     mov r13, rax
 
@@ -1975,7 +2042,7 @@ DEF_FUNC list_method_insert
 
     ; Get index
     mov rdi, [rax + 16]     ; args[1] payload (16B stride)
-    mov edx, [rax + 24]     ; args[1] tag
+    mov rdx, [rax + 24]     ; args[1] tag
     call int_to_i64
     mov r12, rax            ; index
 
@@ -2407,7 +2474,7 @@ DEF_FUNC list_method_copy
     mov rdx, rcx
     shl rdx, 4              ; index * 16
     mov rsi, [rax + rdx]    ; payload
-    mov edx, [rax + rdx + 8] ; tag from fat slot
+    mov rdx, [rax + rdx + 8] ; tag from fat slot
     mov rdi, r13
     call list_append
     pop rcx
@@ -2488,7 +2555,7 @@ DEF_FUNC list_method_extend
     mov rcx, r14
     shl rcx, 4              ; index * 16
     mov rsi, [rax + rcx]    ; payload
-    mov edx, [rax + rcx + 8] ; tag from fat slot
+    mov rdx, [rax + rcx + 8] ; tag from fat slot
     mov rdi, rbx
     call list_append
     pop r14
@@ -2528,7 +2595,7 @@ DEF_FUNC dict_method_get
     ; dict_get(self, key)
     mov rdi, rbx
     mov rsi, [rax + 16]     ; key payload
-    mov edx, [rax + 24]     ; key tag
+    mov rdx, [rax + 24]     ; key tag
     call dict_get
 
     test edx, edx
@@ -2540,7 +2607,7 @@ DEF_FUNC dict_method_get
     jl .dg_ret_none
     ; Return args[2] (default)
     mov rax, [rcx + 32]     ; default payload
-    mov edx, [rcx + 40]     ; default tag
+    mov rdx, [rcx + 40]     ; default tag
     INCREF_VAL rax, rdx
     pop r12
     pop rbx
@@ -2829,7 +2896,7 @@ dict_method_pop_v2 equ dict_method_pop
     cmp r12, 3
     jl .dpop2_error
     mov rax, [r14 + 32]     ; default = args[2] payload (16-byte stride)
-    mov edx, [r14 + 40]     ; default tag
+    mov rdx, [r14 + 40]     ; default tag
     INCREF_VAL rax, rdx
     pop r15
     pop r14
@@ -3444,7 +3511,7 @@ DEF_FUNC set_method_add
     mov rax, rdi            ; args ptr
     mov rdi, [rax]          ; self (set)
     mov rsi, [rax + 16]     ; elem payload
-    mov edx, [rax + 24]     ; elem tag
+    mov rdx, [rax + 24]     ; elem tag
     call set_add
 
     lea rax, [rel none_singleton]
@@ -3470,7 +3537,7 @@ DEF_FUNC set_method_remove
     mov rax, rdi
     mov rdi, [rax]          ; self
     mov rsi, [rax + 16]     ; elem payload
-    mov edx, [rax + 24]     ; elem tag
+    mov rdx, [rax + 24]     ; elem tag
     call set_remove
     test eax, eax
     jnz .smr_keyerr
@@ -3503,7 +3570,7 @@ DEF_FUNC set_method_discard
     mov rax, rdi
     mov rdi, [rax]          ; self
     mov rsi, [rax + 16]     ; elem payload
-    mov edx, [rax + 24]     ; elem tag
+    mov rdx, [rax + 24]     ; elem tag
     call set_remove
     ; Ignore return value (don't care if not found)
 
@@ -4656,7 +4723,7 @@ DEF_FUNC methods_init
 
     ; Create key string
     lea rdi, [rel mn___new__]
-    call str_from_cstr
+    call str_from_cstr_heap
     push rax                    ; save key
 
     ; dict_set(dict, key, staticmethod_wrapper, TAG_PTR, TAG_PTR)

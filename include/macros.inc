@@ -194,11 +194,17 @@
 ;     bits 9-62:  reserved (0)
 ;     bit  63:    0
 ;
-;   bit 63 = 1:  SmallStr mode (inline string <= 15 bytes)
-;     bits 0-55:  string bytes 8-14 (7 bytes, zero-padded)
-;     bits 56-62: string length (0-15)
+;   bit 63 = 1:  SmallStr mode (inline string <= 14 bytes)
+;     bits 0-7:   TAG_SMALLSTR (0x06) — fixed, prevents tag collision
+;     bits 8-55:  string bytes 8-13 (6 bytes, zero-padded)
+;     bits 56-62: string length (0-14)
 ;     bit  63:    1 (SmallStr marker)
 ;     payload:    string bytes 0-7 (8 bytes, zero-padded)
+;
+;   TAG_SMALLSTR in bits 0-7 ensures:
+;     - test edx, edx → nonzero (never confused with TAG_NULL)
+;     - cmp edx, TAG_* → never matches any other tag
+;   Only TAG_PTR has TAG_RC_BIT set, so use `cmp X, TAG_PTR` for refcount checks.
 
 ; Tag constants (normal mode, bit 63 = 0)
 TAG_NULL     equ 0           ; null/empty slot
@@ -208,6 +214,7 @@ TAG_NONE     equ 3           ; payload = 0 (unused)
 TAG_BOOL     equ 4           ; payload = 0 (False) or 1 (True)
 TAG_PTR      equ 0x105       ; 5 | TAG_RC_BIT — heap PyObject*, refcounted
 TAG_RC_BIT   equ (1 << 8)    ; bit 8: refcounted flag
+TAG_SMALLSTR equ 0x06        ; SmallStr low byte — always in tag bits 0-7
 
 ; 128-bit value stack push (r13 = stack top pointer, 16 bytes/slot)
 %macro VPUSH_VAL 2              ; %1 = payload reg, %2 = tag reg
@@ -302,26 +309,20 @@ TAG_RC_BIT   equ (1 << 8)    ; bit 8: refcounted flag
     mov %2, [r13 - 8 - %3*16]
 %endmacro
 
-; 128-bit INCREF — only if refcounted (tag bit 8 set, bit 63 clear)
-; SmallStr (bit 63=1) and inline tags (bit 8=0) skip.
-; Hot path: TAG_PTR (bit 8 set, bit 63 clear) falls through to inc.
-%macro INCREF_VAL 2             ; %1 = payload, %2 = tag
-    test %2, TAG_RC_BIT
-    jz %%skip                   ; not refcounted: skip (not-taken for TAG_PTR)
-    test %2, %2
-    js %%skip                   ; SmallStr: skip (very cold)
+; 128-bit INCREF — only if TAG_PTR (the only refcounted tag).
+; SmallStr, SmallInt, Float, Bool, None all skip with single comparison.
+%macro INCREF_VAL 2             ; %1 = payload, %2 = tag (must be 64-bit reg)
+    cmp %2, TAG_PTR
+    jne %%skip
     inc qword [%1 + PyObject.ob_refcnt]
     %%skip:
 %endmacro
 
-; 128-bit DECREF — only if refcounted (tag bit 8 set, bit 63 clear)
+; 128-bit DECREF — only if TAG_PTR (the only refcounted tag).
 ; Calls obj_dealloc if refcount reaches zero. Clobbers rdi + all caller-saved.
-; Hot path: TAG_PTR (bit 8 set, bit 63 clear) falls through to dec.
-%macro DECREF_VAL 2             ; %1 = payload, %2 = tag
-    test %2, TAG_RC_BIT
-    jz %%skip                   ; not refcounted: skip
-    test %2, %2
-    js %%skip                   ; SmallStr: skip
+%macro DECREF_VAL 2             ; %1 = payload, %2 = tag (must be 64-bit reg)
+    cmp %2, TAG_PTR
+    jne %%skip
     dec qword [%1 + PyObject.ob_refcnt]
     jnz %%skip
     mov rdi, %1
@@ -329,18 +330,26 @@ TAG_RC_BIT   equ (1 << 8)    ; bit 8: refcounted flag
     %%skip:
 %endmacro
 
-; 128-bit XDECREF — NULL-safe DECREF_VAL (checks tag==TAG_NULL first)
-%macro XDECREF_VAL 2            ; %1 = payload, %2 = tag
-    test %2, %2
-    jz %%skip                   ; tag == TAG_NULL (0), skip
-    js %%skip                   ; bit 63 set = SmallStr, skip
-    test %2, TAG_RC_BIT
-    jz %%skip                   ; bit 8 clear = not refcounted, skip
+; 128-bit XDECREF — NULL-safe DECREF_VAL
+%macro XDECREF_VAL 2            ; %1 = payload, %2 = tag (must be 64-bit reg)
+    cmp %2, TAG_PTR
+    jne %%skip
+    test %1, %1
+    jz %%skip
     dec qword [%1 + PyObject.ob_refcnt]
     jnz %%skip
     mov rdi, %1
     call obj_dealloc
     %%skip:
+%endmacro
+
+; ===== SmallStr helpers =====
+; Extract SmallStr length from tag register into dest register
+; SmallStr tag: bits 56-62 = length, bit 63 = SmallStr marker
+%macro SMALLSTR_LEN 2          ; %1 = dest reg, %2 = tag reg
+    mov %1, %2
+    shr %1, 56
+    and %1, 0x7F
 %endmacro
 
 ; ===== Fat result save/restore across DECREF calls =====

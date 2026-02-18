@@ -386,8 +386,8 @@ DEF_FUNC op_load_attr, LA_FRAME
 
     ; Non-pointer obj can't have attrs (SmallInt, Float, None)
     ; Exception: TAG_BOOL has tp_getattr for .real/.imag
-    test dword [rbp - LA_OBJ_TAG], TAG_RC_BIT
-    jnz .la_is_ptr
+    cmp dword [rbp - LA_OBJ_TAG], TAG_PTR
+    je .la_is_ptr
     cmp dword [rbp - LA_OBJ_TAG], TAG_BOOL
     jne .la_attr_error
 
@@ -459,8 +459,8 @@ DEF_FUNC op_load_attr, LA_FRAME
 .la_got_attr:
     ; === Descriptor protocol: check for staticmethod/classmethod ===
     mov rax, [rbp - LA_ATTR]   ; attr
-    test dword [rbp - LA_ATTR_TAG], TAG_RC_BIT
-    jz .la_check_flag          ; non-pointer (SmallInt/Float/etc), skip descriptor check
+    cmp dword [rbp - LA_ATTR_TAG], TAG_PTR
+    jne .la_check_flag         ; not a heap pointer — skip descriptor check
     mov rcx, [rax + PyObject.ob_type]
 
     lea rdx, [rel staticmethod_type]
@@ -529,8 +529,8 @@ DEF_FUNC op_load_attr, LA_FRAME
     cmp qword [rbp - LA_FROM_TYPE], 0
     je .la_simple_push
     mov rax, [rbp - LA_ATTR]
-    test dword [rbp - LA_ATTR_TAG], TAG_RC_BIT
-    jz .la_simple_push          ; non-pointer (SmallInt/Float/etc)
+    cmp dword [rbp - LA_ATTR_TAG], TAG_PTR
+    jne .la_simple_push         ; not a heap pointer
     mov rcx, [rax + PyObject.ob_type]
     mov rcx, [rcx + PyTypeObject.tp_call]
     test rcx, rcx

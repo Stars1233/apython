@@ -23,6 +23,7 @@ extern ap_free
 extern ap_memcpy
 extern strlen
 extern str_from_cstr
+extern str_from_cstr_heap
 extern obj_str
 extern obj_repr
 extern obj_is_true
@@ -373,6 +374,18 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     cmp dword [rdi + 8], TAG_FLOAT
     je .int_from_inline_float
 
+    cmp dword [rdi + 8], TAG_BOOL
+    je .int_from_bool_tag
+
+    ; Check SmallStr (bit 63 of full 64-bit tag)
+    mov rax, [rdi + 8]
+    test rax, rax
+    js .int_from_smallstr
+
+    ; Must be TAG_PTR to dereference
+    cmp dword [rdi + 8], TAG_PTR
+    jne .int_type_error
+
     mov rax, [rbx + PyObject.ob_type]
 
     lea rcx, [rel bool_type]
@@ -436,6 +449,21 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     mov rax, rbx
     mov edx, TAG_PTR
     jmp .int_ret
+
+.int_from_bool_tag:
+    ; TAG_BOOL: payload 0 (False) or 1 (True) → SmallInt
+    mov rax, rbx
+    RET_TAG_SMALLINT
+    jmp .int_ret
+
+.int_from_smallstr:
+    ; SmallStr: spill to heap, then parse as string
+    ; rax = full 64-bit tag (from test above), rbx = payload
+    mov rdi, rbx
+    mov rsi, rax
+    call smallstr_to_obj
+    mov rbx, rax               ; rbx = heap PyStrObject (owned ref)
+    jmp .int_from_str
 
 .int_from_inline_float:
     ; TAG_FLOAT: rbx = raw double bits — delegate to float_int for NaN/inf checks
@@ -732,8 +760,8 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     ; If it's already an int, return it
     cmp edx, TAG_SMALLINT
     je .int_ret                  ; SmallInt — OK
-    test edx, TAG_RC_BIT
-    jz .int_trunc_nonint_error   ; non-pointer (Float/None/Bool) — not int
+    cmp edx, TAG_PTR
+    jne .int_trunc_nonint_error  ; non-pointer (Float/None/Bool) — not int
     mov rcx, [rax + PyObject.ob_type]
     lea r8, [rel int_type]
     cmp rcx, r8
@@ -779,8 +807,8 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     ; Verify it's an int
     cmp edx, TAG_SMALLINT
     je .int_ret                  ; SmallInt — OK
-    test edx, TAG_RC_BIT
-    jz .int_index_nonint_error   ; non-pointer (Float/None/Bool) — not int
+    cmp edx, TAG_PTR
+    jne .int_index_nonint_error  ; non-pointer (Float/None/Bool) — not int
     mov rcx, [rax + PyObject.ob_type]
     lea r8, [rel int_type]
     cmp rcx, r8
@@ -814,17 +842,17 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     ; Use str_from_cstr + str_concat approach
     push rsi                               ; save type name
     CSTRING rdi, "__trunc__ returned non-Integral (type "
-    call str_from_cstr
+    call str_from_cstr_heap
     push rax                               ; save prefix str
 
     ; Create type name str
     mov rdi, [rsp + 8]                     ; type name C string
-    call str_from_cstr
+    call str_from_cstr_heap
     push rax                               ; save name str
 
     ; Create suffix str
     CSTRING rdi, ")"
-    call str_from_cstr
+    call str_from_cstr_heap
     push rax                               ; save suffix str
 
     ; Concat: prefix + name
@@ -913,8 +941,8 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     cmp dword [rdi + 24], TAG_SMALLINT  ; args[1] tag
     je .int_base_smallint
     ; Reject non-pointer tags (TAG_FLOAT, TAG_NONE, TAG_BOOL)
-    test dword [rdi + 24], TAG_RC_BIT
-    jz .int_base_type_error
+    cmp dword [rdi + 24], TAG_PTR
+    jne .int_base_type_error
     ; base is a heap object — check if it's an int or has __index__
     ; args already saved in [rbp - BI_ARGS]
     mov rcx, [rax + PyObject.ob_type]
@@ -994,8 +1022,8 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     mov rdi, [rbp - BI_ARGS]
     mov rbx, [rdi]                 ; args[0] payload
     mov [rbp - BI_OBJ], rbx       ; save original obj for error msg
-    test dword [rdi + 8], TAG_RC_BIT   ; args[0] tag
-    jz .int_base_type_error_str    ; non-pointer: can't have base with non-str
+    cmp dword [rdi + 8], TAG_PTR       ; args[0] tag
+    jne .int_base_type_error_str   ; non-pointer: can't have base with non-str
     mov rax, [rbx + PyObject.ob_type]
     lea rcx, [rel str_type]
     cmp rax, rcx
@@ -1135,9 +1163,9 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     mov byte [rdi+1], ' '
     mov byte [rdi+2], 0
 
-    ; Create PyStr from buffer
+    ; Create PyStr from buffer (heap — passed to str_concat, DECREFed)
     mov rdi, rsp
-    call str_from_cstr
+    call str_from_cstr_heap
     mov [rsp + 48], rax
 
     ; Get repr of original object (always a heap ptr)
@@ -1147,8 +1175,17 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     test rax, rax
     jnz .ile_have_repr
     CSTRING rdi, "???"
-    call str_from_cstr
+    call str_from_cstr_heap
+    jmp .ile_repr_ready
 .ile_have_repr:
+    ; Spill SmallStr repr to heap
+    test rdx, rdx
+    jns .ile_repr_ready
+    mov rdi, rax
+    mov rsi, rdx
+    extern smallstr_to_obj
+    call smallstr_to_obj
+.ile_repr_ready:
     mov [rsp + 56], rax
 
     ; Concat prefix_str + repr_str → full message
@@ -1207,17 +1244,15 @@ DEF_FUNC builtin_str_fn
     cmp rsi, 1
     jne .str_error
 
-    mov esi, [rdi + 8]         ; arg[0] tag
+    mov rsi, [rdi + 8]         ; arg[0] tag
     mov rdi, [rdi]             ; arg[0] payload
     call obj_str
-    mov edx, TAG_PTR
     leave
     ret
 
 .str_no_args:
     CSTRING rdi, ""
     call str_from_cstr
-    mov edx, TAG_PTR
     leave
     ret
 
@@ -1237,8 +1272,8 @@ DEF_FUNC builtin_ord
 
     cmp dword [rdi + 8], TAG_SMALLINT  ; check args[0] tag before loading payload
     je .ord_type_error
-    test dword [rdi + 8], TAG_RC_BIT
-    jz .ord_type_error             ; non-pointer tag (TAG_FLOAT etc.)
+    cmp dword [rdi + 8], TAG_PTR
+    jne .ord_type_error            ; non-pointer tag (TAG_FLOAT etc.)
 
     mov rdi, [rdi]                 ; args[0] payload
 
@@ -1296,7 +1331,6 @@ DEF_FUNC builtin_chr, 16
     mov byte [rbp - 15], 0
     lea rdi, [rbp - 16]
     call str_from_cstr
-    mov edx, TAG_PTR
     leave
     ret
 
@@ -1316,7 +1350,6 @@ DEF_FUNC builtin_chr, 16
     mov byte [rbp - 14], 0
     lea rdi, [rbp - 16]
     call str_from_cstr
-    mov edx, TAG_PTR
     leave
     ret
 
@@ -1341,7 +1374,6 @@ DEF_FUNC builtin_chr, 16
     mov byte [rbp - 13], 0
     lea rdi, [rbp - 16]
     call str_from_cstr
-    mov edx, TAG_PTR
     leave
     ret
 
@@ -1368,7 +1400,6 @@ DEF_FUNC builtin_chr, 16
     mov byte [rbp - 12], 0
     lea rdi, [rbp - 16]
     call str_from_cstr
-    mov edx, TAG_PTR
     leave
     ret
 
@@ -1459,14 +1490,12 @@ DEF_FUNC builtin_hex, 80
     mov byte [rdi], 0
     lea rdi, [rbp - 80]
     call str_from_cstr
-    mov edx, TAG_PTR
     leave
     ret
 
 .hex_zero:
     CSTRING rdi, "0x0"
     call str_from_cstr
-    mov edx, TAG_PTR
     leave
     ret
 
@@ -1582,8 +1611,8 @@ DEF_FUNC builtin_callable
 
     cmp dword [rdi + 8], TAG_SMALLINT  ; check args[0] tag
     je .callable_false
-    test dword [rdi + 8], TAG_RC_BIT
-    jz .callable_false              ; non-pointer tag (TAG_FLOAT etc.)
+    cmp dword [rdi + 8], TAG_PTR
+    jne .callable_false             ; non-pointer tag (TAG_FLOAT etc.)
     mov rdi, [rdi]                     ; args[0] payload
 
     mov rax, [rdi + PyObject.ob_type]
@@ -1620,8 +1649,8 @@ DEF_FUNC builtin_iter_fn
 
     cmp dword [rdi + 8], TAG_SMALLINT  ; check args[0] tag
     je .iter_type_error
-    test dword [rdi + 8], TAG_RC_BIT
-    jz .iter_type_error             ; non-pointer tag (TAG_FLOAT etc.)
+    cmp dword [rdi + 8], TAG_PTR
+    jne .iter_type_error            ; non-pointer tag (TAG_FLOAT etc.)
     mov rdi, [rdi]                     ; args[0] payload
 
     mov rax, [rdi + PyObject.ob_type]
@@ -1656,8 +1685,8 @@ DEF_FUNC builtin_next_fn
 
     cmp dword [rdi + 8], TAG_SMALLINT  ; check args[0] tag
     je .next_type_error
-    test dword [rdi + 8], TAG_RC_BIT
-    jz .next_type_error             ; non-pointer tag (TAG_FLOAT etc.)
+    cmp dword [rdi + 8], TAG_PTR
+    jne .next_type_error            ; non-pointer tag (TAG_FLOAT etc.)
     mov rdi, [rdi]                     ; args[0] payload
 
     mov rax, [rdi + PyObject.ob_type]
@@ -1719,8 +1748,8 @@ DEF_FUNC builtin_any
 
     cmp dword [rdi + 8], TAG_SMALLINT
     je .any_type_error
-    test dword [rdi + 8], TAG_RC_BIT
-    jz .any_type_error              ; non-pointer tag (TAG_FLOAT etc.)
+    cmp dword [rdi + 8], TAG_PTR
+    jne .any_type_error             ; non-pointer tag (TAG_FLOAT etc.)
     mov rdi, [rdi]
 
     mov rax, [rdi + PyObject.ob_type]
@@ -1806,8 +1835,8 @@ DEF_FUNC builtin_all
 
     cmp dword [rdi + 8], TAG_SMALLINT
     je .all_type_error
-    test dword [rdi + 8], TAG_RC_BIT
-    jz .all_type_error              ; non-pointer tag (TAG_FLOAT etc.)
+    cmp dword [rdi + 8], TAG_PTR
+    jne .all_type_error             ; non-pointer tag (TAG_FLOAT etc.)
     mov rdi, [rdi]
 
     mov rax, [rdi + PyObject.ob_type]
@@ -1909,13 +1938,13 @@ DEF_FUNC builtin_sum
     mov r13, [rbx + 16]            ; args[1] payload (start value, 16-byte stride)
     mov eax, [rbx + 24]            ; args[1] tag
     mov [rsp], eax                 ; accum_tag
-    test eax, TAG_RC_BIT
-    jz .sum_get_iter
+    cmp eax, TAG_PTR
+    jne .sum_get_iter
     inc qword [r13 + PyObject.ob_refcnt]
 
 .sum_get_iter:
-    test dword [rbx + 8], TAG_RC_BIT   ; args[0] tag
-    jz .sum_type_error
+    cmp dword [rbx + 8], TAG_PTR       ; args[0] tag
+    jne .sum_type_error
     mov rdi, [rbx]                     ; args[0] payload (iterable)
     mov rax, [rdi + PyObject.ob_type]
     mov rcx, [rax + PyTypeObject.tp_iter]
@@ -2269,8 +2298,8 @@ DEF_FUNC builtin_getattr
     mov r13, [rbx]                 ; args[0] payload (obj)
     mov r14, [rbx + 16]            ; args[1] payload (name, 16-byte stride)
 
-    test dword [rbx + 8], TAG_RC_BIT   ; args[0] tag
-    jz .getattr_try_type_dict
+    cmp dword [rbx + 8], TAG_PTR       ; args[0] tag
+    jne .getattr_try_type_dict
 
     mov rax, [r13 + PyObject.ob_type]
     mov rcx, [rax + PyTypeObject.tp_getattr]
@@ -2344,9 +2373,9 @@ DEF_FUNC builtin_getattr
     jne .getattr_raise
 
     mov rax, [rbx + 32]           ; args[2] payload (default, 16-byte stride)
-    mov edx, [rbx + 40]           ; args[2] tag
-    test edx, TAG_RC_BIT
-    jz .getattr_ret_default_si
+    mov rdx, [rbx + 40]           ; args[2] tag
+    cmp edx, TAG_PTR
+    jne .getattr_ret_default_si
     inc qword [rax + PyObject.ob_refcnt]
 .getattr_ret_default_si:
     pop r14
@@ -2384,8 +2413,8 @@ DEF_FUNC builtin_hasattr
     mov r12, [rdi]                 ; args[0] payload (obj)
     mov r13, [rdi + 16]            ; args[1] payload (name, 16-byte stride)
 
-    test dword [rbx + 8], TAG_RC_BIT   ; args[0] tag
-    jz .hasattr_try_type_dict
+    cmp dword [rbx + 8], TAG_PTR       ; args[0] tag
+    jne .hasattr_try_type_dict
 
     mov rax, [r12 + PyObject.ob_type]
     mov rcx, [rax + PyTypeObject.tp_getattr]
@@ -2487,8 +2516,8 @@ DEF_FUNC builtin_setattr
 
     mov rbx, rdi
 
-    test dword [rbx + 8], TAG_RC_BIT   ; args[0] tag
-    jz .setattr_type_error
+    cmp dword [rbx + 8], TAG_PTR       ; args[0] tag
+    jne .setattr_type_error
     mov rdi, [rbx]                     ; args[0] payload (obj)
 
     mov rax, [rdi + PyObject.ob_type]
@@ -2500,7 +2529,7 @@ DEF_FUNC builtin_setattr
     mov rdi, [rbx]                     ; args[0] payload (obj)
     mov rsi, [rbx + 16]               ; args[1] payload (name, 16-byte stride)
     mov rdx, [rbx + 32]               ; args[2] payload (value, 16-byte stride)
-    mov ecx, [rbx + 40]               ; args[2] tag (value tag, 16-byte stride)
+    mov rcx, [rbx + 40]               ; args[2] tag (value tag, 16-byte stride)
     pop rax                            ; restore tp_setattr
     call rax
 
@@ -2600,8 +2629,8 @@ DEF_FUNC builtin_dir, DIR_FRAME
     cmp rsi, 1
     jne .dir_error
 
-    mov eax, [rdi + 8]      ; args[0] tag
-    mov r12d, eax            ; save obj_tag in r12d temporarily
+    mov rax, [rdi + 8]      ; args[0] tag
+    mov r12, rax             ; save obj_tag in r12 temporarily
     mov rax, [rdi]           ; obj payload
     mov [rbp - DIR_OBJ], rax
 
@@ -3305,7 +3334,6 @@ DEF_FUNC builtin_input_fn, INP_FRAME
     ; Create string from buffer
     ; rdi already points to buffer
     call str_from_cstr
-    mov edx, TAG_PTR
     leave
     ret
 
@@ -3313,7 +3341,6 @@ DEF_FUNC builtin_input_fn, INP_FRAME
     ; EOF or error: return empty string
     CSTRING rdi, ""
     call str_from_cstr
-    mov edx, TAG_PTR
     leave
     ret
 
@@ -3367,9 +3394,9 @@ DEF_FUNC builtin_open_fn, OPN_FRAME
     test rax, rax
     js .opn_file_error
 
-    ; Create default mode string "r"
+    ; Create default mode string "r" (heap — stored in PyFileObject struct field)
     CSTRING rdi, "r"
-    call str_from_cstr
+    call str_from_cstr_heap
     mov r13, rax            ; mode str
     jmp .opn_create_fileobj
 

@@ -431,7 +431,7 @@ DEF_FUNC _gen_send_impl
 
     mov rax, rdi               ; save args ptr
     mov rbx, [rax]            ; rbx = gen (save for return value access)
-    mov edx, [rax + 24]       ; value_tag = args[1].tag
+    mov rdx, [rax + 24]       ; value_tag = args[1].tag
     mov rsi, [rax + 16]       ; value = args[1].payload
     mov rdi, rbx              ; gen = args[0].payload
     call gen_send

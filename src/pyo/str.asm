@@ -22,9 +22,9 @@ extern slice_indices
 extern type_type
 extern obj_dealloc
 
-; str_from_cstr(const char *cstr) -> PyStrObject*
-; Creates a new string object from a C string
-DEF_FUNC str_from_cstr
+; str_from_cstr_heap(const char *cstr) -> (rax=PyStrObject*, edx=TAG_PTR)
+; Always heap-allocates. For struct fields that need a real pointer.
+DEF_FUNC str_from_cstr_heap
     push rbx
     push r12
 
@@ -54,15 +54,47 @@ DEF_FUNC str_from_cstr
     call ap_memcpy
     pop rax                  ; restore obj ptr
 
+    mov edx, TAG_PTR
     pop r12
     pop rbx
     leave
     ret
+END_FUNC str_from_cstr_heap
+
+; str_from_cstr(const char *cstr) -> (rax=payload, edx=tag)
+; Creates a string from a C string. Returns SmallStr if <= 14 bytes, else heap TAG_PTR.
+extern smallstr_from_data
+extern smallstr_to_obj
+DEF_FUNC str_from_cstr
+    push rbx
+
+    mov rbx, rdi            ; save cstr
+
+    ; Get string length
+    call ap_strlen
+
+    ; SmallStr path: if len <= 14, pack inline
+    cmp rax, 14
+    ja .sfc_heap
+
+    mov rdi, rbx            ; data ptr
+    mov rsi, rax             ; length
+    call smallstr_from_data
+    ; rax = payload, rdx = tag (SmallStr)
+    pop rbx
+    leave
+    ret
+
+.sfc_heap:
+    mov rdi, rbx
+    pop rbx
+    leave
+    jmp str_from_cstr_heap   ; tail-call heap path
 END_FUNC str_from_cstr
 
-; str_new(const char *data, int64_t len) -> PyStrObject*
-; Creates a new string object from data with given length (need not be null-terminated)
-DEF_FUNC str_new
+; str_new_heap(const char *data, int64_t len) -> (rax=PyStrObject*, edx=TAG_PTR)
+; Always heap-allocates. For struct fields and internal use.
+DEF_FUNC str_new_heap
     push rbx
     push r12
     push r13
@@ -92,11 +124,29 @@ DEF_FUNC str_new
     mov byte [r13 + PyStrObject.data + r12], 0
 
     mov rax, r13
+    mov edx, TAG_PTR
     pop r13
     pop r12
     pop rbx
     leave
     ret
+END_FUNC str_new_heap
+
+; str_new(const char *data, int64_t len) -> (rax=payload, edx=tag)
+; Creates a string from data with given length. Returns SmallStr if <= 14 bytes, else heap.
+DEF_FUNC str_new
+    ; SmallStr path: if len <= 14, pack inline
+    cmp rsi, 14
+    ja .sn_heap
+
+    call smallstr_from_data
+    ; rax = payload, rdx = tag (SmallStr)
+    leave
+    ret
+
+.sn_heap:
+    leave
+    jmp str_new_heap         ; tail-call heap path
 END_FUNC str_new
 
 ; str_dealloc(PyObject *self)
@@ -752,7 +802,14 @@ DEF_FUNC str_mod, SM_FRAME
     ret
 
 .sm_copy_str:
-    ; rax = PyStrObject* to copy into output
+    ; rax = str payload, rdx = str tag (from obj_str/obj_repr)
+    ; If SmallStr, spill to heap so we can access .ob_size/.data
+    test rdx, rdx
+    jns .sm_copy_heap
+    mov rdi, rax
+    mov rsi, rdx
+    call smallstr_to_obj       ; rax = heap PyStrObject*
+.sm_copy_heap:
     push rax                   ; save for DECREF
     mov rcx, [rax + PyStrObject.ob_size]
     lea rsi, [rax + PyStrObject.data]
@@ -796,7 +853,7 @@ DEF_FUNC str_mod, SM_FRAME
     jge .sm_arg_none
     mov rcx, rdx
     shl rcx, 4
-    mov edx, [rax + PyTupleObject.ob_item + rcx + 8]  ; arg tag from tuple
+    mov rdx, [rax + PyTupleObject.ob_item + rcx + 8]  ; arg tag from tuple
     mov rax, [rax + PyTupleObject.ob_item + rcx]       ; arg payload
     inc r15
     ret
@@ -834,7 +891,7 @@ DEF_FUNC str_mod, SM_FRAME
     push r13                   ; save buffer ptr for free
     mov rdi, r13
     mov rsi, r14
-    call str_new
+    call str_new_heap
     mov rbx, rax               ; save result
 
     pop rdi                    ; free heap buffer
@@ -967,7 +1024,6 @@ DEF_FUNC str_getitem
 
     pop r12
     pop rbx
-    mov edx, TAG_PTR
     leave
     ret
 
@@ -1104,11 +1160,11 @@ DEF_FUNC str_getslice
     cmp r15, 1
     jne .sgs_general
 
-    ; Fast path: contiguous slice
+    ; Fast path: contiguous slice (heap — merges with general heap path)
     lea rdi, [rbx + PyStrObject.data]
     add rdi, r13               ; data + start
     mov rsi, rax               ; length = slicelength
-    call str_new
+    call str_new_heap
     add rsp, 8                 ; discard slicelength
     jmp .sgs_ret
 
@@ -1219,8 +1275,6 @@ DEF_FUNC str_iter_next
 
     ; Advance index
     inc qword [rbx + PyStrIterObject.it_index]
-
-    mov edx, TAG_PTR               ; str_new returns heap ptr
     pop rbx
     leave
     ret

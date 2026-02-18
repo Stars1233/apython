@@ -104,8 +104,14 @@ END_FUNC obj_dealloc
 
 ; obj_repr(rdi=payload, rsi=tag) -> PyObject* (string)
 ; Dispatches on tag. SmallInt → int_repr. TAG_PTR → tp_repr.
-; Also handles TAG_FLOAT, TAG_NONE, TAG_BOOL inline.
+; Also handles TAG_FLOAT, TAG_NONE, TAG_BOOL, SmallStr inline.
 DEF_FUNC obj_repr
+    extern smallstr_to_obj
+    extern str_repr
+
+    ; SmallStr check: bit 63 of tag
+    test rsi, rsi
+    js .smallstr_tag
 
     cmp esi, TAG_SMALLINT
     je .smallint
@@ -163,6 +169,23 @@ DEF_FUNC obj_repr
     leave
     ret
 
+.smallstr_tag:
+    ; SmallStr: spill to heap, call str_repr, DECREF temp
+    push rbx
+    call smallstr_to_obj       ; rax = heap PyStrObject*
+    mov rbx, rax
+    mov rdi, rax
+    call str_repr              ; rax = repr result, edx = TAG_PTR
+    push rax
+    push rdx
+    mov rdi, rbx
+    call obj_decref
+    pop rdx
+    pop rax
+    pop rbx
+    leave
+    ret
+
 .null_obj:
 .no_repr:
     xor eax, eax
@@ -172,12 +195,16 @@ END_FUNC obj_repr
 
 ; obj_str(rdi=payload, rsi=tag) -> PyObject* (string)
 ; Dispatches on tag. SmallInt → int_repr. TAG_PTR → tp_str, falls back to tp_repr.
-; Also handles TAG_FLOAT, TAG_NONE, TAG_BOOL inline.
+; Also handles TAG_FLOAT, TAG_NONE, TAG_BOOL, SmallStr inline.
 DEF_FUNC obj_str
     push rbx
     push r12
     mov rbx, rdi
     mov r12, rsi               ; save tag
+
+    ; SmallStr: return self (no INCREF needed — inline value)
+    test rsi, rsi
+    js .smallstr_tag
 
     cmp esi, TAG_SMALLINT
     je .smallint
@@ -251,6 +278,15 @@ DEF_FUNC obj_str
     leave
     ret
 
+.smallstr_tag:
+    ; SmallStr: return self as-is (payload, tag). No INCREF needed.
+    mov rax, rbx               ; payload
+    mov rdx, r12               ; tag
+    pop r12
+    pop rbx
+    leave
+    ret
+
 .fallback:
     mov rdi, rbx
     mov rsi, r12
@@ -262,8 +298,13 @@ DEF_FUNC obj_str
 END_FUNC obj_str
 
 ; obj_hash(rdi=payload, rsi=tag) -> int64
-; Dispatches on tag. SmallInt → raw value. TAG_PTR → tp_hash.
+; Dispatches on tag. SmallInt → raw value. TAG_PTR → tp_hash. SmallStr → FNV-1a.
 DEF_FUNC obj_hash
+    extern smallstr_hash
+
+    ; SmallStr check: bit 63 of tag
+    test rsi, rsi
+    js .smallstr_hash_tag
 
     cmp esi, TAG_SMALLINT
     je .smallint_hash
@@ -302,6 +343,12 @@ DEF_FUNC obj_hash
     leave
     ret
 
+.smallstr_hash_tag:
+    ; SmallStr: compute FNV-1a over inline bytes
+    call smallstr_hash
+    leave
+    ret
+
 .default_hash:
     ; Default: hash is the object address
     mov rax, rdi
@@ -311,7 +358,12 @@ END_FUNC obj_hash
 
 ; obj_is_true(rdi=payload, rsi=tag) -> int (0 or 1)
 ; Dispatches on tag. SmallInt → value != 0. TAG_PTR → type-based truthiness.
+; SmallStr → true if length > 0.
 DEF_FUNC_BARE obj_is_true
+    ; SmallStr: true if length > 0
+    test rsi, rsi
+    js .smallstr_bool
+
     cmp esi, TAG_SMALLINT
     je .smallint
     cmp esi, TAG_FLOAT
@@ -509,6 +561,17 @@ DEF_FUNC_BARE obj_is_true
     pop rbp
     ret
 
+.smallstr_bool:
+    ; SmallStr: true if length > 0
+    ; Length is in tag bits 56-62
+    mov rax, rsi
+    shr rax, 56
+    and eax, 0x7F
+    test eax, eax
+    setnz al
+    movzx eax, al
+    ret
+
 .smallint:
     ; SmallInt is true iff raw value != 0
     test rdi, rdi
@@ -540,7 +603,15 @@ DEF_FUNC obj_print
     test rax, rax
     jz .print_null
 
-    mov rbx, rax            ; rbx = str obj
+    ; If SmallStr, spill to heap so we can access .data/.ob_size
+    test rdx, rdx
+    jns .print_have_heap
+    mov rdi, rax
+    mov rsi, rdx
+    extern smallstr_to_obj
+    call smallstr_to_obj
+.print_have_heap:
+    mov rbx, rax            ; rbx = str obj (always heap)
 
     ; sys_write(1, str_data, ob_size)
     mov edi, 1

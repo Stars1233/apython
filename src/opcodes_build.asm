@@ -136,8 +136,8 @@ DEF_FUNC_BARE op_binary_subscr
     push rsi                   ; save key
 
     ; Non-pointer tags can't be subscripted (SmallInt, Float, None, Bool)
-    test r9d, TAG_RC_BIT
-    jz .subscr_error
+    cmp r9d, TAG_PTR
+    jne .subscr_error
     mov rax, [rdi + PyObject.ob_type]
     mov rax, [rax + PyTypeObject.tp_as_mapping]
     test rax, rax
@@ -308,8 +308,8 @@ DEF_FUNC_BARE op_store_subscr
     push rdx                   ; save value
 
     ; Non-pointer tags can't be subscript-assigned
-    test r9d, TAG_RC_BIT
-    jz .store_type_error
+    cmp r9d, TAG_PTR
+    jne .store_type_error
 
     ; Try mp_ass_subscript first
     mov rax, [rdi + PyObject.ob_type]
@@ -508,7 +508,7 @@ DEF_FUNC op_build_list, 16
     mov rax, rdx
     shl rax, 4                ; index * 16
     mov rsi, [r13 + rax]      ; item payload (ownership transfers, no extra INCREF)
-    mov edx, [r13 + rax + 8]  ; item tag
+    mov rdx, [r13 + rax + 8]  ; item tag
     call list_append
     pop rdx
     inc rdx
@@ -1013,7 +1013,7 @@ DEF_FUNC op_list_extend, 32
     mov rcx, r8
     shl rcx, 4                ; index * 16
     mov rsi, [rax + PyTupleObject.ob_item + rcx]  ; payload
-    mov edx, [rax + PyTupleObject.ob_item + rcx + 8] ; tag
+    mov rdx, [rax + PyTupleObject.ob_item + rcx + 8] ; tag
     push r8
     call list_append
     pop r8
@@ -1069,10 +1069,14 @@ DEF_FUNC_BARE op_is_op
     VPOP rdi                   ; left
     mov r10, [r13 + 8]        ; r10 = left tag
 
-    ; Compare pointers
+    ; Compare both payload AND tag (for SmallStr/SmallInt correctness)
+    xor eax, eax
     cmp rdi, rsi
-    sete al
-    movzx eax, al              ; eax = 1 if same, 0 if different
+    jne .is_cmp_done
+    cmp r10, r9
+    jne .is_cmp_done
+    mov eax, 1
+.is_cmp_done:
 
     ; DECREF both (tag-aware) — save left before DECREF right
     push rax
@@ -1126,6 +1130,10 @@ DEF_FUNC_BARE op_contains_op
     push rdi                   ; save left
     push rsi                   ; save right
 
+    ; SmallStr container: resolve to str_type
+    test r9, r9
+    js .contains_smallstr_container
+
     ; Check sq_contains
     mov rax, [rsi + PyObject.ob_type]
     mov rax, [rax + PyTypeObject.tp_as_sequence]
@@ -1135,10 +1143,21 @@ DEF_FUNC_BARE op_contains_op
     test rax, rax
     jz .contains_error
 
+    ; Spill SmallStr value if needed before calling sq_contains
+    bt qword [rsp + CN_LTAG], 63
+    jnc .contains_val_ready
+    push rax                   ; save sq_contains fn ptr
+    mov rdi, [rsp + 8 + CN_LEFT]   ; value payload
+    mov rsi, [rsp + 8 + CN_LTAG]   ; value tag
+    call smallstr_to_obj
+    mov [rsp + 8 + CN_LEFT], rax
+    mov qword [rsp + 8 + CN_LTAG], TAG_PTR
+    pop rax                    ; restore sq_contains fn ptr
+.contains_val_ready:
     ; Call sq_contains(container, value, value_tag) -> 0/1
     mov rdi, [rsp]             ; container
     mov rsi, [rsp + 8]        ; value
-    mov edx, [rsp + CN_LTAG]  ; value tag (key_tag for dict_contains)
+    mov rdx, [rsp + CN_LTAG]  ; value tag (64-bit for SmallStr safety)
     call rax
     push rax                   ; save result on machine stack
 
@@ -1181,7 +1200,7 @@ DEF_FUNC_BARE op_contains_op
     mov rdi, [rsp]            ; container = self
     mov rsi, [rsp+8]          ; value = other
     lea rdx, [rel dunder_contains]
-    mov ecx, [rsp+24]         ; value tag = other_tag
+    mov rcx, [rsp+24]         ; value tag = other_tag
     call dunder_call_2
     test edx, edx             ; TAG_NULL = not found
     jz .contains_type_error
@@ -1208,6 +1227,57 @@ DEF_FUNC_BARE op_contains_op
     mov rsi, [rsp + 8 + CN_LTAG]
     DECREF_VAL rdi, rsi
     pop rax
+    add rsp, CN_SIZE - 8      ; discard payloads + tags
+    pop rcx                    ; invert
+    xor eax, ecx
+    test eax, eax
+    jz .contains_false
+    lea rax, [rel bool_true]
+    jmp .contains_push
+
+.contains_smallstr_container:
+    ; Container is SmallStr — spill to heap, then use str_type sq_contains
+    extern smallstr_to_obj
+    extern str_type
+    mov rdi, rsi               ; container payload
+    mov rsi, r9                ; container tag
+    call smallstr_to_obj       ; rax = heap PyStrObject*
+    ; Replace container on saved stack with heap version
+    mov [rsp], rax             ; right = heap str
+    mov qword [rsp + 16], TAG_PTR   ; right tag = TAG_PTR (owned ref, needs DECREF)
+    mov rsi, rax               ; container for sq_contains lookup
+    ; Now get sq_contains from str_type
+    lea rax, [rel str_type]
+    mov rax, [rax + PyTypeObject.tp_as_sequence]
+    mov rax, [rax + PySequenceMethods.sq_contains]
+    ; Fall through to the call — rdi/rsi need to be set
+    ; rdi = value (left), rsi = container
+    ; Spill SmallStr value if needed
+    bt qword [rsp + CN_LTAG], 63
+    jnc .contains_ss_val_ready
+    push rax                   ; save sq_contains fn ptr
+    mov rdi, [rsp + 8 + CN_LEFT]   ; value payload
+    mov rsi, [rsp + 8 + CN_LTAG]   ; value tag
+    call smallstr_to_obj
+    mov [rsp + 8 + CN_LEFT], rax
+    mov qword [rsp + 8 + CN_LTAG], TAG_PTR
+    pop rax                    ; restore sq_contains fn ptr
+.contains_ss_val_ready:
+    ; sq_contains(container, value, value_tag) -> 0/1
+    mov rdi, [rsp]             ; container (now heap)
+    mov rsi, [rsp + 8]        ; value (left)
+    mov rdx, [rsp + CN_LTAG]  ; value tag (64-bit)
+    call rax
+    push rax                   ; save result
+
+    ; DECREF both (tag-aware, +8 for push rax)
+    mov rdi, [rsp + 8 + CN_RIGHT]
+    mov rsi, [rsp + 8 + CN_RTAG]
+    DECREF_VAL rdi, rsi
+    mov rdi, [rsp + 8 + CN_LEFT]
+    mov rsi, [rsp + 8 + CN_LTAG]
+    DECREF_VAL rdi, rsi
+    pop rax                    ; result
     add rsp, CN_SIZE - 8      ; discard payloads + tags
     pop rcx                    ; invert
     xor eax, ecx
@@ -1811,7 +1881,7 @@ DEF_FUNC op_build_set, 16
     mov rax, rdx
     shl rax, 4                ; index * 16
     mov rsi, [r13 + rax]     ; item payload
-    mov edx, [r13 + rax + 8] ; item tag
+    mov rdx, [r13 + rax + 8] ; item tag
     call set_add               ; set_add does INCREF
     pop rdx
     inc rdx

@@ -43,6 +43,7 @@ extern obj_decref
 extern prep_reraise_star
 extern tuple_new
 extern list_type
+extern smallstr_to_obj
 
 ;; Stack layout constants for binary_op / compare_op generic paths.
 ;; After 4 pushes: right, right_tag, left, left_tag
@@ -177,6 +178,9 @@ DEF_FUNC_BARE op_binary_op
     ; Check right operand's tp_as_sequence->sq_repeat
     cmp qword [rsp + BO_RTAG], TAG_SMALLINT
     je .binop_left_type
+    ; SmallStr guard: SmallStr doesn't support sq_repeat as right operand
+    bt qword [rsp + BO_RTAG], 63
+    jc .binop_left_type
     mov rax, [rsi + PyObject.ob_type]
     mov rax, [rax + PyTypeObject.tp_as_sequence]
     test rax, rax
@@ -192,6 +196,9 @@ DEF_FUNC_BARE op_binary_op
     jmp .binop_have_result
 
 .binop_not_smallint_left:
+    ; SmallStr guard: don't dereference SmallStr payload
+    bt qword [rsp + BO_LTAG], 63
+    jc .binop_smallstr_type
     mov rax, [rdi + PyObject.ob_type]
     jmp .binop_have_type
 .binop_left_type:
@@ -199,10 +206,16 @@ DEF_FUNC_BARE op_binary_op
     ; SmallInt check: use saved left tag
     cmp qword [rsp + BO_LTAG], TAG_SMALLINT
     je .binop_smallint_type
+    ; SmallStr check
+    bt qword [rsp + BO_LTAG], 63
+    jc .binop_smallstr_type
     mov rax, [rdi + PyObject.ob_type]
     jmp .binop_have_type
 .binop_smallint_type:
     lea rax, [rel int_type]
+    jmp .binop_have_type
+.binop_smallstr_type:
+    lea rax, [rel str_type]
 .binop_have_type:
     mov rax, [rax + PyTypeObject.tp_as_number]
     test rax, rax
@@ -218,6 +231,13 @@ DEF_FUNC_BARE op_binary_op
     test rax, rax
     jz .binop_try_dunder
 
+    ; Spill SmallStr operands to heap before calling nb_method
+    bt qword [rsp + BO_LTAG], 63
+    jc .binop_spill_ss
+    bt qword [rsp + BO_RTAG], 63
+    jc .binop_spill_ss
+
+.binop_do_call:
     ; Call the method: rdi=left, rsi=right, rdx=left_tag, rcx=right_tag
     mov rdx, [rsp + BO_LTAG]
     mov rcx, [rsp + BO_RTAG]
@@ -252,6 +272,9 @@ DEF_FUNC_BARE op_binary_op
     ; Check if left is heaptype
     cmp qword [rsp + BO_LTAG], TAG_SMALLINT
     je .binop_try_right_dunder ; SmallInt has no dunders
+    ; SmallStr: no dunders (built-in str_type)
+    bt qword [rsp + BO_LTAG], 63
+    jc .binop_try_right_dunder
     mov rdi, [rsp + BO_LEFT]
     mov rax, [rdi + PyObject.ob_type]
     mov rdx, [rax + PyTypeObject.tp_flags]
@@ -283,6 +306,9 @@ DEF_FUNC_BARE op_binary_op
     ; Try reflected dunder on right operand
     cmp qword [rsp + BO_RTAG], TAG_SMALLINT
     je .binop_no_method
+    ; SmallStr: no dunders
+    bt qword [rsp + BO_RTAG], 63
+    jc .binop_no_method
     mov rdi, [rsp + BO_RIGHT]
     mov rax, [rdi + PyObject.ob_type]
     mov rdx, [rax + PyTypeObject.tp_flags]
@@ -313,6 +339,33 @@ DEF_FUNC_BARE op_binary_op
     lea rdi, [rel exc_TypeError_type]
     CSTRING rsi, "unsupported operand type(s)"
     call raise_exception
+
+.binop_spill_ss:
+    ; Spill SmallStr operands to heap before calling nb_method.
+    ; rax = method ptr. Save it on stack (shifts BO_ offsets by +8).
+    push rax
+    ; Spill left if SmallStr
+    bt qword [rsp + 8 + BO_LTAG], 63
+    jnc .bss_left_done
+    mov rdi, [rsp + 8 + BO_LEFT]
+    mov rsi, [rsp + 8 + BO_LTAG]
+    call smallstr_to_obj
+    mov [rsp + 8 + BO_LEFT], rax
+    mov qword [rsp + 8 + BO_LTAG], TAG_PTR
+.bss_left_done:
+    ; Spill right if SmallStr
+    bt qword [rsp + 8 + BO_RTAG], 63
+    jnc .bss_right_done
+    mov rdi, [rsp + 8 + BO_RIGHT]
+    mov rsi, [rsp + 8 + BO_RTAG]
+    call smallstr_to_obj
+    mov [rsp + 8 + BO_RIGHT], rax
+    mov qword [rsp + 8 + BO_RTAG], TAG_PTR
+.bss_right_done:
+    pop rax
+    mov rdi, [rsp + BO_LEFT]
+    mov rsi, [rsp + BO_RIGHT]
+    jmp .binop_do_call
 
 .binop_try_smallint_add:
     ; Check both TAG_SMALLINT
@@ -444,13 +497,44 @@ section .text
     je .cmp_use_float
 
 .cmp_no_float:
-    ; Get type's tp_richcompare (SmallInt-aware)
+    ; Get type's tp_richcompare (SmallInt/SmallStr-aware)
     cmp r9d, TAG_SMALLINT
     je .cmp_smallint_type
+    ; SmallStr guard
+    bt qword [rsp + BO_LTAG], 63
+    jc .cmp_smallstr_type
     mov rax, [rdi + PyObject.ob_type]
     jmp .cmp_have_type
 .cmp_smallint_type:
     lea rax, [rel int_type]
+    jmp .cmp_have_type
+.cmp_smallstr_type:
+    ; Spill SmallStr operands to heap so str_compare can dereference them
+    ; Check left
+    mov rax, [rsp + BO_LTAG]
+    test rax, rax
+    jns .cmp_ss_left_ok
+    mov rdi, [rsp + BO_LEFT]     ; payload
+    mov rsi, rax                  ; tag
+    extern smallstr_to_obj
+    call smallstr_to_obj
+    mov qword [rsp + BO_LEFT], rax
+    mov qword [rsp + BO_LTAG], TAG_PTR
+.cmp_ss_left_ok:
+    ; Check right
+    mov rax, [rsp + BO_RTAG]
+    test rax, rax
+    jns .cmp_ss_right_ok
+    mov rdi, [rsp + BO_RIGHT]    ; payload
+    mov rsi, rax                  ; tag
+    call smallstr_to_obj
+    mov qword [rsp + BO_RIGHT], rax
+    mov qword [rsp + BO_RTAG], TAG_PTR
+.cmp_ss_right_ok:
+    ; Reload rdi, rsi from stack (may have been replaced)
+    mov rdi, [rsp + BO_LEFT]
+    mov rsi, [rsp + BO_RIGHT]
+    lea rax, [rel str_type]
 .cmp_have_type:
     mov r9, rax                 ; r9 = type (save for dunder check)
     mov rax, [rax + PyTypeObject.tp_richcompare]
@@ -496,8 +580,8 @@ section .text
     ; Call tp_richcompare(left, right, op, left_tag, right_tag)
     ; rdi = left, rsi = right (already set)
     mov edx, ecx               ; edx = comparison op
-    mov ecx, [rsp + BO_LTAG]   ; ecx = left_tag (for tag-aware richcompare)
-    mov r8d, [rsp + BO_RTAG]   ; r8d = right_tag
+    mov rcx, [rsp + BO_LTAG]   ; rcx = left_tag (64-bit for SmallStr)
+    mov r8, [rsp + BO_RTAG]    ; r8 = right_tag (64-bit for SmallStr)
     call rax
     ; rax = result (a bool object)
 
@@ -904,8 +988,19 @@ DEF_FUNC op_format_value, FV_FRAME
 
     ; Float with format spec: call float_format_spec(payload, spec_data, spec_len)
     extern float_format_spec
+    ; If fmt_spec is SmallStr, spill to heap for .data access
+    mov rax, [rbp - FV_SPEC]
+    bt qword [rbp - FV_STAG], 63
+    jnc .fv_spec_heap
+    push rdi                   ; save float payload
+    mov rdi, rax
+    mov rsi, [rbp - FV_STAG]
+    call smallstr_to_obj
+    mov [rbp - FV_SPEC], rax   ; update for DECREF
+    mov qword [rbp - FV_STAG], TAG_PTR
+    pop rdi
+.fv_spec_heap:
     ; rdi = raw double bits (still set)
-    mov rax, [rbp - FV_SPEC]  ; fmt_spec string
     lea rsi, [rax + PyStrObject.data]  ; spec data
     mov rdx, [rax + PyStrObject.ob_size]  ; spec length
     call float_format_spec
@@ -914,7 +1009,7 @@ DEF_FUNC op_format_value, FV_FRAME
 .fv_no_format_spec:
     ; Apply conversion based on arg & 3
     mov rdi, [rbp - FV_VALUE]  ; reload value payload
-    mov esi, [rbp - FV_VTAG]   ; reload value tag
+    mov rsi, [rbp - FV_VTAG]   ; reload value tag
     mov eax, [rbp - FV_ARG]
     and eax, 3
     cmp eax, 2
@@ -929,7 +1024,8 @@ DEF_FUNC op_format_value, FV_FRAME
     call obj_repr
 
 .fv_have_result:
-    push rax                   ; save result
+    push rdx                   ; save result tag
+    push rax                   ; save result payload
 
     ; DECREF original value (tag-aware)
     mov rdi, [rbp - FV_VALUE]
@@ -944,8 +1040,9 @@ DEF_FUNC op_format_value, FV_FRAME
     DECREF_VAL rdi, rsi
 
 .fv_push:
-    pop rax                    ; result
-    VPUSH_PTR rax
+    pop rax                    ; result payload
+    pop rdx                    ; result tag
+    VPUSH_VAL rax, rdx
     leave
     DISPATCH
 END_FUNC op_format_value
@@ -971,23 +1068,49 @@ DEF_FUNC op_build_string, BS_FRAME
     shl rdi, 4                 ; count * 16 bytes/slot
     sub r13, rdi               ; pop all at once (r13 = base of items)
 
-    ; Start with first string
+    ; Start with first string — spill SmallStr to heap
     mov rax, [r13]             ; first fragment (payload at slot base)
     mov r9, [r13 + 8]         ; first fragment (tag)
-    INCREF_VAL rax, r9        ; tag-aware INCREF (safe for SmallStr)
-    mov [rbp - BS_ACCUM], rax  ; accumulator
+    test r9, r9
+    jns .bs_first_heap
+    ; SmallStr → spill to heap (creates new ref)
+    mov rdi, rax
+    mov rsi, r9
+    call smallstr_to_obj       ; rax = heap ptr (refcount 1)
+    jmp .bs_first_save
+.bs_first_heap:
+    INCREF rax                 ; heap str needs INCREF
+.bs_first_save:
+    mov [rbp - BS_ACCUM], rax  ; accumulator (always heap)
 
     ; Concatenate remaining
     mov rcx, 1                 ; start from index 1
 .bs_loop:
     cmp rcx, [rbp - BS_COUNT]
     jge .bs_decref
+    ; Get next fragment — spill SmallStr if needed
+    mov rax, rcx
+    shl rax, 4                ; index * 16
+    mov rsi, [r13 + rax]     ; fragment payload
+    mov rdx, [r13 + rax + 8] ; fragment tag
+    test rdx, rdx
+    jns .bs_frag_heap
+    ; SmallStr fragment → spill to heap
+    push rcx
+    mov rdi, rsi
+    mov rsi, rdx
+    call smallstr_to_obj       ; rax = heap fragment
+    mov rsi, rax               ; rsi = heap fragment (will be DECREFed after concat)
+    pop rcx
+    ; Temporarily replace fragment on stack for DECREF loop
+    mov rax, rcx
+    shl rax, 4
+    mov [r13 + rax], rsi       ; replace with heap ptr
+    mov qword [r13 + rax + 8], TAG_PTR  ; update tag
+.bs_frag_heap:
     push rcx
     extern str_concat
     mov rdi, [rbp - BS_ACCUM] ; accumulator
-    mov rax, rcx
-    shl rax, 4                ; index * 16
-    mov rsi, [r13 + rax]     ; next fragment (payload)
     call str_concat
     ; DECREF old accumulator
     push rax                   ; save new result
@@ -1026,7 +1149,7 @@ DEF_FUNC op_build_string, BS_FRAME
     extern str_from_cstr
     CSTRING rdi, ""
     call str_from_cstr
-    VPUSH_PTR rax
+    VPUSH_VAL rax, rdx
     leave
     DISPATCH
 
@@ -1268,8 +1391,8 @@ DEF_FUNC op_send, SND_FRAME
     mov [rbp - SND_RECV], rdi  ; save receiver
 
     ; Check if receiver is a generator with iternext
-    test dword [r13 - 8], TAG_RC_BIT
-    jz .send_error
+    cmp dword [r13 - 8], TAG_PTR
+    jne .send_error
     mov rax, [rdi + PyObject.ob_type]
     mov rax, [rax + PyTypeObject.tp_iternext]
     test rax, rax
@@ -1614,9 +1737,10 @@ DEF_FUNC op_setup_annotations
     call dict_new
     mov r12, rax                ; r12 = new annotations dict (saved)
 
-    ; Create key string
+    ; Create key string (heap — dict key, DECREFed)
+    extern str_from_cstr_heap
     CSTRING rdi, "__annotations__"
-    call str_from_cstr
+    call str_from_cstr_heap
     ; rax = key string
 
     ; dict_set(locals, key, value, value_tag)
@@ -2025,7 +2149,7 @@ DEF_FUNC op_match_class, MC_FRAME
     push r8
     push rdi                        ; save dict
     lea rdi, [rel .mc_matchargs_cstr]
-    call str_from_cstr
+    call str_from_cstr_heap
     mov rsi, rax                    ; rsi = "__match_args__" str obj
     pop rdi                         ; restore dict
     push rsi                        ; save string for DECREF

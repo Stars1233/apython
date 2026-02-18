@@ -35,7 +35,7 @@ DEF_FUNC_BARE op_import_name
     VPOP rdx                    ; level (SmallInt)
 
     ; Save tag of level (at [r13 + 8] right after VPOP)
-    mov ecx, [r13 + 8]         ; level tag
+    mov rcx, [r13 + 8]         ; level tag
 
     ; Save name and fromlist for later
     push rax                    ; name
@@ -93,7 +93,7 @@ END_FUNC op_import_name
 ; as a submodule (CPython submodule fallback).
 ; ============================================================================
 extern dict_get
-extern str_from_cstr
+extern str_from_cstr_heap
 extern str_concat
 extern import_find_and_load
 
@@ -166,9 +166,9 @@ DEF_FUNC op_import_from, IF2_FRAME
     test rdi, rdi
     jz .if_error
 
-    ; Look up "__name__" in module dict
+    ; Look up "__name__" in module dict (heap — dict key, DECREFed)
     lea rdi, [rel if_dunder_name]
-    call str_from_cstr
+    call str_from_cstr_heap
     push rax                    ; save __name__ str key
     mov rdi, [rbp - IF2_MOD]
     mov rdi, [rdi + PyModuleObject.mod_dict]
@@ -187,7 +187,7 @@ DEF_FUNC op_import_from, IF2_FRAME
     ; First: pkg_name + "."
     push rcx                    ; save pkg_name
     lea rdi, [rel if_dot_str]
-    call str_from_cstr
+    call str_from_cstr_heap
     pop rdi                     ; rdi = pkg_name
     mov rsi, rax                ; rsi = "."
     push rsi                    ; save dot str for decref

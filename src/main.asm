@@ -18,7 +18,7 @@ extern eval_frame
 extern pyc_read_file
 extern fatal_error
 extern obj_decref
-extern str_from_cstr
+extern str_from_cstr_heap
 extern none_singleton
 extern module_new
 extern sys_modules_dict
@@ -90,10 +90,10 @@ DEF_FUNC main
 
     ; Set __name__ = "__main__" in globals
     lea rdi, [rel __name__cstr]
-    call str_from_cstr
+    call str_from_cstr_heap
     push rax                    ; save key str
     lea rdi, [rel __main__cstr]
-    call str_from_cstr
+    call str_from_cstr_heap
     mov rdx, rax                ; value = "__main__" str
     pop rsi                     ; key = "__name__" str
     mov rdi, [rsp]              ; dict = globals (from stack)
@@ -103,7 +103,7 @@ DEF_FUNC main
 
     ; Set __package__ = None in globals (top-level module has no package)
     lea rdi, [rel __package__cstr]
-    call str_from_cstr
+    call str_from_cstr_heap
     push rax
     mov rdi, [rsp + 8]         ; globals dict
     mov rsi, rax
@@ -117,7 +117,7 @@ DEF_FUNC main
     ; Set __builtins__ in globals
     extern builtins_dict_global
     lea rdi, [rel __builtins__cstr]
-    call str_from_cstr
+    call str_from_cstr_heap
     push rax
     mov rdi, [rsp + 8]         ; globals dict
     mov rsi, rax
@@ -133,7 +133,7 @@ DEF_FUNC main
 
     ; Create __main__ module and register in sys.modules
     lea rdi, [rel __main__cstr]
-    call str_from_cstr
+    call str_from_cstr_heap
     push rax                    ; save "__main__" name str
     mov rdi, rax
     mov rsi, r14                ; dict = globals

@@ -438,7 +438,6 @@ DEF_FUNC bytes_repr, 1024
     ; Create str from buffer
     mov rdi, r13
     call str_from_cstr
-    mov edx, TAG_PTR
 
     pop r13
     pop r12
@@ -459,7 +458,6 @@ DEF_FUNC bytes_decode
     ; rdi = data ptr, rsi = length
     ; str_new(data, length)
     call str_new
-    mov edx, TAG_PTR
     leave
     ret
 END_FUNC bytes_decode
@@ -725,8 +723,8 @@ DEF_FUNC bytes_mod, BM_FRAME
     ; Convert bytes to str
     mov rsi, [rdi + PyBytesObject.ob_size]
     lea rdi, [rdi + PyBytesObject.data]
-    extern str_new
-    call str_new
+    extern str_new_heap
+    call str_new_heap
     mov rbx, rax               ; rbx = temp str
 
     ; Call str_mod(temp_str, args)

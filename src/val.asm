@@ -14,7 +14,13 @@ extern bool_true
 extern bool_false
 extern obj_incref
 
+extern smallstr_to_obj
+
 DEF_FUNC fat_to_obj
+    ; SmallStr: spill to heap object
+    test rsi, rsi
+    js .smallstr
+
     cmp esi, TAG_PTR
     je .ptr
     cmp esi, TAG_SMALLINT
@@ -58,6 +64,12 @@ DEF_FUNC fat_to_obj
 .bool_false:
     lea rax, [rel bool_false]
     inc qword [rax + PyObject.ob_refcnt]
+    leave
+    ret
+
+.smallstr:
+    ; SmallStr → heap PyStrObject* (owned ref)
+    call smallstr_to_obj       ; rax = PyStrObject*
     leave
     ret
 END_FUNC fat_to_obj

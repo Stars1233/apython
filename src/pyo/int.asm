@@ -16,6 +16,7 @@
 extern ap_malloc
 extern ap_free
 extern str_from_cstr
+extern str_from_cstr_heap
 extern bool_true
 extern bool_false
 extern none_singleton
@@ -864,7 +865,7 @@ DEF_FUNC_BARE int_repr
     lea rdx, [rbx + PyIntObject.mpz]
     call __gmpz_get_str wrt ..plt
     mov rdi, r12
-    call str_from_cstr
+    call str_from_cstr_heap
     mov rbx, rax               ; save str result (done with original obj)
     mov rdi, r12
     call ap_free               ; free C buffer
@@ -917,7 +918,6 @@ DEF_FUNC_BARE int_repr
     inc rsi
     mov rdi, rsi
     call str_from_cstr
-    mov edx, TAG_PTR
     leave
     ret
 

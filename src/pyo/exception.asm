@@ -24,6 +24,7 @@
 extern ap_malloc
 extern ap_free
 extern str_from_cstr
+extern str_from_cstr_heap
 extern obj_decref
 extern obj_dealloc
 extern obj_incref
@@ -107,9 +108,9 @@ DEF_FUNC exc_from_cstr
 
     mov rbx, rdi            ; save type
 
-    ; Convert C string to PyStrObject
+    ; Convert C string to PyStrObject (heap — stored in exception struct)
     mov rdi, rsi
-    call str_from_cstr
+    call str_from_cstr_heap
     ; rax = str obj (refcnt=1)
 
     ; Now create exception: exc_new(type, str, TAG_PTR)

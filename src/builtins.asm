@@ -11,6 +11,7 @@ extern dict_new
 extern dict_get
 extern dict_set
 extern str_from_cstr
+extern str_from_cstr_heap
 extern obj_str
 extern obj_incref
 extern obj_decref
@@ -134,9 +135,9 @@ DEF_FUNC builtin_func_new
     mov rbx, rdi                ; func_ptr
     mov r12, rsi                ; name_cstr
 
-    ; Create a string object for the name
+    ; Create a string object for the name (heap — stored in struct field)
     mov rdi, r12
-    call str_from_cstr
+    call str_from_cstr_heap
     mov r13, rax                ; r13 = name string object
 
     ; Allocate PyBuiltinObject
@@ -250,15 +251,24 @@ align 16
     ; Get string representation: obj_str(args[i]) with tag
     mov rax, r13
     shl rax, 4                  ; index * 16 for 16-byte stride
-    mov esi, [rbx + rax + 8]   ; tag
+    mov rsi, [rbx + rax + 8]   ; tag (full 64-bit for SmallStr)
     mov rdi, [rbx + rax]       ; payload
     call obj_str
-    mov r14, rax                ; r14 = str obj (or NULL)
+    ; obj_str returns (rax=payload, edx=tag) — may be SmallStr or TAG_PTR
+    mov r14, rax                ; r14 = result payload
+    mov r9, rdx                 ; r9 = result tag
 
     test r14, r14
-    jz .skip_arg
+    jnz .have_str
+    test r9d, r9d
+    jz .skip_arg                ; TAG_NULL → skip
+.have_str:
 
-    ; Get string length from ob_size
+    ; SmallStr result: extract bytes directly
+    test r9, r9
+    js .print_smallstr
+
+    ; Heap string: get length from ob_size
     mov rcx, [r14 + PyStrObject.ob_size]
 
     ; Check if it fits in buffer (need room for data + possible space)
@@ -277,9 +287,10 @@ align 16
 .copy_done:
     add r15, [r14 + PyStrObject.ob_size]
 
-    ; DECREF the string representation
+    ; DECREF the string representation (only for TAG_PTR heap strings)
     mov rdi, r14
-    call obj_decref
+    mov rsi, r9
+    DECREF_VAL rdi, rsi
 
 .skip_arg:
     ; Append space separator if not the last arg
@@ -303,15 +314,78 @@ align 16
     xor r15d, r15d              ; reset offset
 
 .write_direct:
-    ; Write this string directly
+    ; Write this string directly (only for heap strings — SmallStr always fits buffer)
     mov edi, 1                  ; fd = stdout
     lea rsi, [r14 + PyStrObject.data]
     mov rdx, [r14 + PyStrObject.ob_size]  ; len
     call sys_write
 
-    ; DECREF the string representation
+    ; DECREF the string representation (tag-aware)
     mov rdi, r14
-    call obj_decref
+    mov rsi, r9
+    DECREF_VAL rdi, rsi
+    jmp .skip_arg
+
+.print_smallstr:
+    ; SmallStr result from obj_str: extract bytes to buffer inline
+    ; r14 = payload, r9 = tag
+    ; Extract length from tag bits 56-62
+    SMALLSTR_LEN rcx, r9       ; rcx = length
+
+    ; Check buffer space
+    lea rax, [r15 + rcx + 2]
+    cmp rax, 4096
+    jae .print_smallstr_flush
+
+    ; Extract string bytes 8-13 from tag (skip TAG_SMALLSTR in bits 0-7)
+    mov rax, r9
+    shr rax, 8
+    mov rdx, 0x0000FFFFFFFFFFFF
+    and rax, rdx
+
+    ; Write 16-byte block to temp on stack, then copy to buffer
+    sub rsp, 16
+    mov [rsp], r14             ; bytes 0-7
+    mov [rsp + 8], rax         ; bytes 8-13
+
+    ; Copy rcx bytes from rsp to buffer
+    lea rdi, [rbp - 4120 + r15]
+    mov rsi, rsp
+    mov rdx, rcx
+    test rcx, rcx
+    jz .ss_copy_done
+    call ap_memcpy
+.ss_copy_done:
+    add rsp, 16
+    SMALLSTR_LEN rcx, r9
+    add r15, rcx               ; advance buffer offset
+    jmp .skip_arg               ; no DECREF needed for SmallStr
+
+.print_smallstr_flush:
+    ; Buffer full + SmallStr — flush buffer, write SmallStr directly
+    test r15, r15
+    jz .print_ss_direct
+    push rcx                   ; save length
+    mov edi, 1
+    lea rsi, [rbp - 4120]
+    mov rdx, r15
+    call sys_write
+    xor r15d, r15d
+    pop rcx
+.print_ss_direct:
+    ; Write SmallStr bytes via temp on stack (skip TAG_SMALLSTR in bits 0-7)
+    mov rax, r9
+    shr rax, 8
+    mov rdx, 0x0000FFFFFFFFFFFF
+    and rax, rdx
+    sub rsp, 16
+    mov [rsp], r14
+    mov [rsp + 8], rax
+    mov edi, 1
+    mov rsi, rsp
+    mov rdx, rcx
+    call sys_write
+    add rsp, 16
     jmp .skip_arg
 
 .print_flush:
@@ -530,6 +604,10 @@ DEF_FUNC builtin_type
     mov rsi, rdi               ; save args ptr
     mov rdi, [rsi]             ; obj = args[0] payload
 
+    ; SmallStr check (bit 63 of tag)
+    bt qword [rsi + 8], 63
+    jc .type_smallstr
+
     ; SmallInt check (tag at args[0]+8)
     cmp dword [rsi + 8], TAG_SMALLINT
     je .type_smallint
@@ -584,6 +662,13 @@ DEF_FUNC builtin_type
     leave
     ret
 
+.type_smallstr:
+    lea rax, [rel str_type]
+    INCREF rax
+    mov edx, TAG_PTR
+    leave
+    ret
+
 .type_error:
     lea rdi, [rel exc_TypeError_type]
     CSTRING rsi, "type() takes 1 argument"
@@ -606,11 +691,14 @@ DEF_FUNC builtin_isinstance
     extern bool_false
 
     mov rax, [rdi]             ; rax = args[0] = obj payload
-    mov r8d, [rdi + 8]        ; r8d = args[0] tag
+    mov r8, [rdi + 8]         ; r8 = args[0] tag (full 64-bit for SmallStr)
     mov rcx, [rdi + 16]       ; rcx = args[1] = type_to_check payload
     mov r9d, [rdi + 24]       ; r9d = args[1] tag
 
     ; Get obj's type (tag-aware for all inline types)
+    ; SmallStr check (bit 63 of tag)
+    test r8, r8
+    js .isinstance_smallstr
     cmp r8d, TAG_SMALLINT
     je .isinstance_smallint
     cmp r8d, TAG_FLOAT
@@ -619,8 +707,8 @@ DEF_FUNC builtin_isinstance
     je .isinstance_bool
     cmp r8d, TAG_NONE
     je .isinstance_none
-    test r8d, TAG_RC_BIT
-    jz .isinstance_false       ; unknown non-pointer tag → False
+    cmp r8d, TAG_PTR
+    jne .isinstance_false      ; unknown non-pointer tag → False
     mov rdx, [rax + PyObject.ob_type]
     jmp .isinstance_got_type
 
@@ -636,14 +724,18 @@ DEF_FUNC builtin_isinstance
     lea rdx, [rel float_type]
     jmp .isinstance_got_type
 
+.isinstance_smallstr:
+    lea rdx, [rel str_type]
+    jmp .isinstance_got_type
+
 .isinstance_bool:
     lea rdx, [rel bool_type]
 
 .isinstance_got_type:
     ; rdx = obj's type, rcx = type_to_check (may be tuple)
     ; Check if type_to_check is a tuple (must be TAG_PTR)
-    test r9d, TAG_RC_BIT
-    jz .isinstance_check       ; non-pointer → single type (False result)
+    cmp r9d, TAG_PTR
+    jne .isinstance_check      ; non-pointer → single type (False result)
     mov rax, [rcx + PyObject.ob_type]
     extern tuple_type
     lea r8, [rel tuple_type]
@@ -763,11 +855,10 @@ DEF_FUNC builtin_repr
     cmp rsi, 1
     jne .repr_error
 
-    mov esi, [rdi + 8]         ; arg[0] tag
+    mov rsi, [rdi + 8]         ; arg[0] tag (full 64-bit for SmallStr)
     mov rdi, [rdi]             ; arg[0] payload
     call obj_repr
-
-    mov edx, TAG_PTR
+    ; rdx = tag from obj_repr (SmallStr or TAG_PTR)
     leave
     ret
 
@@ -791,7 +882,7 @@ DEF_FUNC builtin_bool
     jne .bool_error
 
     ; bool(x) - test truthiness
-    mov esi, [rdi + 8]         ; rsi = arg[0] tag
+    mov rsi, [rdi + 8]         ; rsi = arg[0] tag
     mov rdi, [rdi]             ; rdi = arg[0] payload
     extern obj_is_true
     call obj_is_true           ; eax = 0 or 1
@@ -838,7 +929,7 @@ DEF_FUNC builtin_float, BF_FRAME
     jne .float_error
 
     ; float(x) - convert x
-    mov esi, [rdi + 8]         ; esi = x tag (args[0] tag)
+    mov rsi, [rdi + 8]         ; rsi = x tag (args[0] tag)
     mov rdi, [rdi]             ; rdi = x payload
 
     ; TAG_FLOAT fast-path: already a float, return as-is
@@ -846,8 +937,8 @@ DEF_FUNC builtin_float, BF_FRAME
     je .float_passthrough
 
     ; TAG_PTR: check for string
-    test esi, TAG_RC_BIT
-    jz .float_numeric           ; non-pointer tag → numeric conversion
+    cmp esi, TAG_PTR
+    jne .float_numeric          ; non-pointer tag → numeric conversion
 
     ; Check if it's a string
     mov rax, [rdi + PyObject.ob_type]
@@ -1058,7 +1149,7 @@ DEF_FUNC builtin___build_class__
 
     ; Look up "__init__" in class_dict for tp_init
     lea rdi, [rel bc_init_name]
-    call str_from_cstr
+    call str_from_cstr_heap
     push rax                ; save __init__ str obj
 
     mov rdi, r15            ; class_dict
@@ -1191,7 +1282,7 @@ DEF_FUNC builtin___build_class__
 
     ; Handle __classcell__: look in class_dict for the cell, set its ob_ref to the new type
     lea rdi, [rel bc_classcell_name]
-    call str_from_cstr
+    call str_from_cstr_heap
     push rax                ; save key str
     mov rdi, r15            ; class_dict
     mov rsi, rax
@@ -1261,9 +1352,9 @@ DEF_FUNC_LOCAL add_builtin
     call builtin_func_new
     push rax                   ; save func obj
 
-    ; Create key string
+    ; Create key string (heap — used as dict key, then DECREFed)
     mov rdi, r12
-    call str_from_cstr
+    call str_from_cstr_heap
     push rax                   ; save key
 
     ; dict_set
@@ -1301,10 +1392,10 @@ DEF_FUNC_LOCAL add_builtin_type
     ; Set tp_call on the type object
     mov [r12 + PyTypeObject.tp_call], rcx
 
-    ; Create key string
+    ; Create key string (heap — used as dict key, then DECREFed)
     push r12
     mov rdi, rsi
-    call str_from_cstr
+    call str_from_cstr_heap
     mov rcx, rax               ; key str
 
     ; dict_set(dict, key, type_obj)
@@ -1821,9 +1912,9 @@ DEF_FUNC_LOCAL add_exc_type_builtin
     mov rbx, rdi               ; dict
     mov r12, rdx               ; type_ptr
 
-    ; Create key string
+    ; Create key string (heap — used as dict key, then DECREFed)
     mov rdi, rsi
-    call str_from_cstr
+    call str_from_cstr_heap
     push rax                   ; save key
 
     ; dict_set(dict, key, type_ptr)

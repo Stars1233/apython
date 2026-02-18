@@ -16,8 +16,8 @@ extern ap_memcmp
 extern obj_decref
 extern obj_incref
 extern obj_dealloc
-extern str_from_cstr
-extern str_new
+extern str_from_cstr_heap
+extern str_new_heap
 extern str_type
 extern int_from_i64
 extern none_singleton
@@ -104,7 +104,7 @@ DEF_FUNC import_init
 
     ; Add "lib" to sys.path for stdlib modules
     lea rdi, [rel im_lib_path]
-    call str_from_cstr
+    call str_from_cstr_heap
     push rax
     mov rdi, [rel sys_path_list]
     mov rsi, rax
@@ -115,7 +115,7 @@ DEF_FUNC import_init
 
     ; Add "tests/cpython" to sys.path for test support
     lea rdi, [rel im_tests_cpython_path]
-    call str_from_cstr
+    call str_from_cstr_heap
     push rax
     mov rdi, [rel sys_path_list]
     mov rsi, rax
@@ -126,12 +126,12 @@ DEF_FUNC import_init
 
     ; Register builtins module in sys.modules
     lea rdi, [rel im_builtins]
-    call str_from_cstr
+    call str_from_cstr_heap
     push rax                    ; key
 
     ; Create builtins module wrapping existing builtins dict
     lea rdi, [rel im_builtins]
-    call str_from_cstr
+    call str_from_cstr_heap
     mov rdi, rax
     mov rsi, [rel builtins_dict_global]
     call module_new
@@ -157,7 +157,7 @@ DEF_FUNC import_init
     call time_module_create
     mov rbx, rax                ; time module
     lea rdi, [rel im_time_name]
-    call str_from_cstr
+    call str_from_cstr_heap
     push rax                    ; save key for DECREF
     mov rdi, [rel sys_modules_dict]
     mov rsi, rax                ; key = "time"
@@ -255,7 +255,7 @@ DEF_FUNC import_module, IF_FRAME
     ; Create substring for first component
     mov rdi, rbx
     mov rsi, rcx
-    call str_new
+    call str_new_heap
     push rax                    ; save first component name
 
     ; Check sys.modules for first component
@@ -311,7 +311,7 @@ DEF_FUNC import_module, IF_FRAME
     mov rsi, r14
     sub rsi, rcx
     dec rsi                     ; leaf name length
-    call str_new                ; rax = leaf name str
+    call str_new_heap                ; rax = leaf name str
     push rax                    ; save leaf name str
     ; Set on parent's mod_dict
     mov rdi, [r12 + PyModuleObject.mod_dict]
@@ -463,7 +463,7 @@ DEF_FUNC import_find_and_load, FL_FRAME
     ; Create parent name string and look up in sys.modules
     lea rdi, [r14]              ; parent name cstr
     mov rsi, rcx                ; parent name length
-    call str_new
+    call str_new_heap
     mov r12, rax                ; r12 = parent name str
 
     ; Look up parent in sys.modules
@@ -495,7 +495,7 @@ DEF_FUNC import_find_and_load, FL_FRAME
     push rax                    ; save tp_getattr
     push r13                    ; save parent module
     lea rdi, [rel im_dunder_path]
-    call str_from_cstr
+    call str_from_cstr_heap
     pop r13                     ; restore parent module
     pop rcx                     ; restore tp_getattr
     push rax                    ; save "__path__" str
@@ -1091,7 +1091,7 @@ DEF_FUNC import_load_module, IF_FRAME
 
     ; Set __name__
     lea rdi, [rel im_dunder_name]
-    call str_from_cstr
+    call str_from_cstr_heap
     push rax
     mov rdi, r15
     mov rsi, rax
@@ -1104,10 +1104,10 @@ DEF_FUNC import_load_module, IF_FRAME
 
     ; Set __file__
     mov rdi, r12                ; path cstr
-    call str_from_cstr
+    call str_from_cstr_heap
     push rax                    ; file str
     lea rdi, [rel im_dunder_file]
-    call str_from_cstr
+    call str_from_cstr_heap
     push rax
     mov rdi, r15
     mov rsi, rax
@@ -1122,7 +1122,7 @@ DEF_FUNC import_load_module, IF_FRAME
 
     ; Set __loader__ = None
     lea rdi, [rel im_dunder_loader]
-    call str_from_cstr
+    call str_from_cstr_heap
     push rax
     mov rdi, r15
     mov rsi, rax
@@ -1135,7 +1135,7 @@ DEF_FUNC import_load_module, IF_FRAME
 
     ; Set __spec__ = None
     lea rdi, [rel im_dunder_spec]
-    call str_from_cstr
+    call str_from_cstr_heap
     push rax
     mov rdi, r15
     mov rsi, rax
@@ -1152,7 +1152,7 @@ DEF_FUNC import_load_module, IF_FRAME
 
     ; Package: __package__ = name, __path__ = [dir]
     lea rdi, [rel im_dunder_package]
-    call str_from_cstr
+    call str_from_cstr_heap
     push rax
     mov rdi, r15
     mov rsi, rax
@@ -1187,12 +1187,12 @@ DEF_FUNC import_load_module, IF_FRAME
     ; pkg dir = path[0..rcx]
     mov rdi, r12
     mov rsi, rcx
-    call str_new
+    call str_new_heap
     jmp .set_path
 
 .use_dot_path:
     lea rdi, [rel im_dot]
-    call str_from_cstr
+    call str_from_cstr_heap
 
 .set_path:
     push rax                    ; pkg dir str
@@ -1212,7 +1212,7 @@ DEF_FUNC import_load_module, IF_FRAME
 
     ; Set __path__ in dict
     lea rdi, [rel im_dunder_path]
-    call str_from_cstr
+    call str_from_cstr_heap
     push rax
     mov rdi, r15
     mov rsi, rax
@@ -1243,18 +1243,18 @@ DEF_FUNC import_load_module, IF_FRAME
     ; Parent package = name[0..rdx]
     lea rdi, [rbx + PyStrObject.data]
     mov rsi, rdx
-    call str_new
+    call str_new_heap
     jmp .store_package
 
 .no_parent_pkg:
     ; Top-level module: __package__ = ""
     lea rdi, [rel im_empty]
-    call str_from_cstr
+    call str_from_cstr_heap
 
 .store_package:
     push rax
     lea rdi, [rel im_dunder_package]
-    call str_from_cstr
+    call str_from_cstr_heap
     push rax
     mov rdi, r15
     mov rsi, rax
@@ -1284,7 +1284,7 @@ DEF_FUNC import_load_module, IF_FRAME
 
     ; Set __builtins__ in module dict
     lea rdi, [rel im_dunder_builtins]
-    call str_from_cstr
+    call str_from_cstr_heap
     push rax
     mov rdi, r15
     mov rsi, rax

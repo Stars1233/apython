@@ -9,7 +9,7 @@
 extern ap_malloc
 extern obj_decref
 extern obj_incref
-extern str_from_cstr
+extern str_from_cstr_heap
 extern int_from_i64
 extern float_from_f64
 extern dict_new
@@ -105,7 +105,7 @@ DEF_FUNC time_module_create
     call builtin_func_new
     push rax
     lea rdi, [rel tm_process_time]
-    call str_from_cstr
+    call str_from_cstr_heap
     push rax
     mov rdi, r12
     mov rsi, rax
@@ -124,7 +124,7 @@ DEF_FUNC time_module_create
     call builtin_func_new
     push rax
     lea rdi, [rel tm_monotonic]
-    call str_from_cstr
+    call str_from_cstr_heap
     push rax
     mov rdi, r12
     mov rsi, rax
@@ -139,7 +139,7 @@ DEF_FUNC time_module_create
 
     ; Create module object
     lea rdi, [rel tm_time]
-    call str_from_cstr
+    call str_from_cstr_heap
     mov rdi, rax
     mov rsi, r12
     call module_new

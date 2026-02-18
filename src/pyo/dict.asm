@@ -62,20 +62,32 @@ END_FUNC dict_new
 
 ;; ============================================================================
 ;; dict_keys_equal(rdi=a_key, rsi=b_key, edx=a_tag, ecx=b_tag) -> int (1=equal, 0=not)
-;; Internal helper: value equality for SmallInts, string comparison for heap ptrs
+;; Internal helper: value equality for SmallInts, string comparison for heap ptrs.
+;; SmallStr-aware: compares both payload AND tag for SmallStr keys.
 ;; ============================================================================
+extern ap_memcmp
+extern smallstr_to_obj
+
 DEF_FUNC_LOCAL dict_keys_equal
-    ; Value/pointer equality — handles SmallInts and same-object ptrs
+    ; Fast path: both payload AND tag identical → equal
+    ; Handles SmallStr==SmallStr, SmallInt==SmallInt, same heap ptr
     cmp rdi, rsi
     jne .dke_diff_payload
-    ; Same payload — equal (same SmallInt value or same heap ptr)
+    cmp rdx, rcx
+    jne .dke_diff_payload
     mov eax, 1
     leave
     ret
 
 .dke_diff_payload:
+    ; Check if either is SmallStr (bit 63)
+    test rdx, rdx
+    js .dke_a_smallstr
+    test rcx, rcx
+    js .dke_b_smallstr
+
+    ; Neither is SmallStr — original path
     ; Different payloads — if either is not TAG_PTR, can't be equal
-    ; (Two SmallInts with same value would have matched above)
     cmp edx, TAG_PTR
     jne .dke_not_equal
     cmp ecx, TAG_PTR
@@ -117,6 +129,115 @@ DEF_FUNC_LOCAL dict_keys_equal
     leave
     ret
 
+.dke_a_smallstr:
+    ; a is SmallStr
+    test rcx, rcx
+    js .dke_both_smallstr      ; b is also SmallStr
+
+    ; a=SmallStr, b=heap: check if b is a string
+    cmp ecx, TAG_PTR
+    jne .dke_not_equal
+    mov rax, [rsi + PyObject.ob_type]
+    lea r8, [rel str_type]
+    cmp rax, r8
+    jne .dke_not_equal
+
+    ; Compare SmallStr a with heap str b
+    ; Extract a length
+    push rbx
+    push r12
+    push r13
+    mov rbx, rdi               ; a payload
+    mov r12, rdx               ; a tag
+    mov r13, rsi               ; b heap ptr
+
+    SMALLSTR_LEN rax, r12
+    cmp rax, [r13 + PyStrObject.ob_size]
+    jne .dke_ne_pop3           ; different lengths → not equal
+
+    ; Spill SmallStr to stack for contiguous bytes (skip TAG_SMALLSTR)
+    mov rcx, r12
+    shr rcx, 8
+    mov r8, 0x0000FFFFFFFFFFFF
+    and rcx, r8               ; bytes 8-13
+    sub rsp, 16
+    mov [rsp], rbx             ; bytes 0-7
+    mov [rsp + 8], rcx         ; bytes 8-13
+
+    mov rdi, rsp
+    lea rsi, [r13 + PyStrObject.data]
+    SMALLSTR_LEN rdx, r12      ; length
+    call ap_memcmp
+    add rsp, 16
+    test eax, eax
+    jnz .dke_ne_pop3
+    mov eax, 1
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.dke_ne_pop3:
+    xor eax, eax
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.dke_b_smallstr:
+    ; a=heap, b=SmallStr: symmetric — swap and use same logic
+    ; a is not SmallStr (already checked), b is SmallStr
+    cmp edx, TAG_PTR
+    jne .dke_not_equal
+    mov rax, [rdi + PyObject.ob_type]
+    lea r8, [rel str_type]
+    cmp rax, r8
+    jne .dke_not_equal
+
+    ; Compare heap str a with SmallStr b
+    push rbx
+    push r12
+    push r13
+    mov rbx, rsi               ; b payload (SmallStr)
+    mov r12, rcx               ; b tag
+    mov r13, rdi               ; a heap ptr
+
+    SMALLSTR_LEN rax, r12
+    cmp rax, [r13 + PyStrObject.ob_size]
+    jne .dke_ne_pop3
+
+    ; Spill SmallStr b to stack (skip TAG_SMALLSTR)
+    mov rcx, r12
+    shr rcx, 8
+    mov r8, 0x0000FFFFFFFFFFFF
+    and rcx, r8
+    sub rsp, 16
+    mov [rsp], rbx
+    mov [rsp + 8], rcx
+
+    lea rdi, [r13 + PyStrObject.data]
+    mov rsi, rsp
+    SMALLSTR_LEN rdx, r12
+    call ap_memcmp
+    add rsp, 16
+    test eax, eax
+    jnz .dke_ne_pop3
+    mov eax, 1
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.dke_both_smallstr:
+    ; Both SmallStr with different payloads (already checked identical above)
+    ; Canonical encoding: same string ⟹ same bits. Different bits → not equal.
+    xor eax, eax
+    leave
+    ret
+
 .dke_not_equal:
     xor eax, eax
     leave
@@ -141,7 +262,7 @@ DEF_FUNC dict_get, 8
 
     ; Hash the key
     mov rdi, r12
-    mov esi, edx                ; key tag
+    mov rsi, rdx                ; key tag (full 64-bit for SmallStr)
     call obj_hash
     mov r13, rax                ; r13 = hash
 
@@ -179,10 +300,10 @@ align 16
     ; Hash matches - check key equality
     ; rdi already has entry.key
     mov rsi, r12                ; our key
-    mov edx, [rax + DictEntry.key_tag]  ; entry's key tag
+    mov rdx, [rax + DictEntry.key_tag]  ; entry's key tag (full 64-bit)
     push rcx                    ; save slot
     push rax                    ; save entry ptr
-    mov ecx, [rbp - DG_KTAG]   ; our key tag
+    mov rcx, [rbp - DG_KTAG]   ; our key tag (full 64-bit)
     call dict_keys_equal
     pop rdx                     ; restore entry ptr into rdx
     pop rcx                     ; restore slot
@@ -231,7 +352,7 @@ DEF_FUNC dict_get_index, 8
     mov [rbp - GI_KTAG], rdx    ; save key_tag
 
     mov rdi, r12
-    mov esi, edx                ; key tag
+    mov rsi, rdx                ; key tag (full 64-bit for SmallStr)
     call obj_hash
     mov r13, rax                ; r13 = hash
 
@@ -259,9 +380,9 @@ DEF_FUNC dict_get_index, 8
     jne .gi_next
 
     mov rsi, r12
-    mov edx, [rax + DictEntry.key_tag]
+    mov rdx, [rax + DictEntry.key_tag]
     push rcx
-    mov ecx, [rbp - GI_KTAG]
+    mov rcx, [rbp - GI_KTAG]
     call dict_keys_equal
     pop rcx
     test eax, eax
@@ -339,10 +460,10 @@ DEF_FUNC_LOCAL dict_find_slot, 8
     ; Key equality check
     ; rdi = entry.key
     mov rsi, r12
-    mov edx, [rax + DictEntry.key_tag]  ; entry's key tag
+    mov rdx, [rax + DictEntry.key_tag]  ; entry's key tag (full 64-bit)
     push rcx
     push rax
-    mov ecx, [rbp - FS_KTAG]   ; our key tag
+    mov rcx, [rbp - FS_KTAG]   ; our key tag (full 64-bit)
     call dict_keys_equal
     pop rax                     ; entry ptr
     pop rcx                     ; slot
@@ -512,7 +633,7 @@ DEF_FUNC dict_set, 16
 
     ; Hash the key
     mov rdi, r12
-    mov esi, r8d                ; key tag
+    mov rsi, r8                 ; key tag (full 64-bit for SmallStr)
     call obj_hash
     mov r14, rax                ; r14 = hash
 
@@ -724,7 +845,7 @@ DEF_FUNC dict_del, 8
 
     ; Hash the key
     mov rdi, r12
-    mov esi, edx                ; key tag
+    mov rsi, rdx                ; key tag (full 64-bit for SmallStr)
     call obj_hash
     mov r13, rax                ; hash
 
@@ -753,10 +874,10 @@ DEF_FUNC dict_del, 8
     jne .dd_next
 
     mov rsi, r12
-    mov edx, [rax + DictEntry.key_tag]  ; entry's key tag
+    mov rdx, [rax + DictEntry.key_tag]  ; entry's key tag (full 64-bit)
     push rcx
     push rax
-    mov ecx, [rbp - DD_KTAG]   ; our key tag
+    mov rcx, [rbp - DD_KTAG]   ; our key tag (full 64-bit)
     call dict_keys_equal
     pop rdx                     ; entry ptr
     pop rcx

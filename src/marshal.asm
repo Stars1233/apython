@@ -11,7 +11,7 @@ extern none_singleton
 extern bool_true
 extern bool_false
 extern int_from_i64
-extern str_new
+extern str_new_heap
 extern str_from_cstr
 extern tuple_new
 extern bytes_from_data
@@ -522,16 +522,15 @@ mdo_short_ascii:
     call marshal_read_bytes    ; rax = pointer to string data in buffer
     mov rdi, rax               ; data ptr
     mov rsi, r13               ; length
-    call str_new
+    call str_new_heap          ; always heap — co_names readers expect TAG_PTR
 
     pop r13
     pop r12                    ; restore FLAG_REF
-    mov edx, TAG_PTR
     jmp mfinish
 
 ;--------------------------------------------------------------------------
 ; TYPE_ASCII / TYPE_ASCII_INTERNED handler
-; Read 4-byte length, then bytes -> str_new
+; Read 4-byte length, then bytes -> str_new_heap
 ;--------------------------------------------------------------------------
 mdo_ascii:
     push r12                   ; save FLAG_REF
@@ -544,16 +543,15 @@ mdo_ascii:
     call marshal_read_bytes    ; rax = pointer to string data
     mov rdi, rax               ; data ptr
     mov rsi, r13               ; length
-    call str_new
+    call str_new_heap          ; always heap — co_names readers expect TAG_PTR
 
     pop r13
     pop r12                    ; restore FLAG_REF
-    mov edx, TAG_PTR
     jmp mfinish
 
 ;--------------------------------------------------------------------------
 ; TYPE_UNICODE handler
-; Read 4-byte length, then bytes -> str_new (treat as UTF-8)
+; Read 4-byte length, then bytes -> str_new_heap (treat as UTF-8)
 ;--------------------------------------------------------------------------
 mdo_unicode:
     push r12                   ; save FLAG_REF
@@ -566,11 +564,10 @@ mdo_unicode:
     call marshal_read_bytes    ; rax = pointer to data
     mov rdi, rax               ; data ptr
     mov rsi, r13               ; length
-    call str_new
+    call str_new_heap          ; always heap — co_names readers expect TAG_PTR
 
     pop r13
     pop r12                    ; restore FLAG_REF
-    mov edx, TAG_PTR
     jmp mfinish
 
 ;--------------------------------------------------------------------------
@@ -750,10 +747,10 @@ mdo_ref:
     mov rcx, [rel marshal_refs]
     shl rdi, 4                 ; index * 16
     mov rax, [rcx + rdi]      ; payload
-    mov edx, [rcx + rdi + 8]  ; tag (low 32 bits sufficient)
+    mov rdx, [rcx + rdi + 8]  ; tag (full 64-bit for SmallStr)
     ; Back-references: INCREF only if refcounted (TAG_PTR)
-    test edx, TAG_RC_BIT
-    jz .ref_done
+    cmp edx, TAG_PTR
+    jne .ref_done
     test rax, rax
     jz .ref_done
     inc qword [rax + PyObject.ob_refcnt]
@@ -851,12 +848,32 @@ mdo_code:
     mov [rsp + 48], rax
 
     call marshal_read_object   ; co_filename (str)
+    ; Spill SmallStr to heap for struct field storage
+    test rdx, rdx
+    jns .code_fname_ok
+    mov rdi, rax
+    mov rsi, rdx
+    extern fat_to_obj
+    call fat_to_obj
+.code_fname_ok:
     mov [rsp + 56], rax
 
     call marshal_read_object   ; co_name (str)
+    test rdx, rdx
+    jns .code_name_ok
+    mov rdi, rax
+    mov rsi, rdx
+    call fat_to_obj
+.code_name_ok:
     mov [rsp + 64], rax
 
     call marshal_read_object   ; co_qualname (str)
+    test rdx, rdx
+    jns .code_qname_ok
+    mov rdi, rax
+    mov rsi, rdx
+    call fat_to_obj
+.code_qname_ok:
     mov [rsp + 72], rax
 
     call marshal_read_long     ; co_firstlineno (discard)

@@ -327,8 +327,8 @@ DEF_FUNC list_ass_subscript, LAS_FRAME
     ; Get new items from value (must be a list)
     ; r12 = value (the new items list/iterable)
     ; For simplicity, require value to be a list
-    test qword [rbp - LAS_VTAG], TAG_RC_BIT
-    jz .las_type_error         ; non-heap value (SmallInt etc.) → type error
+    cmp qword [rbp - LAS_VTAG], TAG_PTR
+    jne .las_type_error        ; non-heap value (SmallInt etc.) → type error
     mov rax, [r12 + PyObject.ob_type]
     lea rdx, [rel list_type]
     cmp rax, rdx

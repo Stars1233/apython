@@ -14,6 +14,7 @@ extern obj_decref
 extern obj_incref
 extern obj_dealloc
 extern str_from_cstr
+extern str_from_cstr_heap
 extern str_new
 extern str_type
 extern int_from_i64
@@ -64,7 +65,7 @@ DEF_FUNC sys_module_init, 32
 
     ; --- sys.modules ---
     lea rdi, [rel sm_modules]
-    call str_from_cstr
+    call str_from_cstr_heap
     push rax
     mov rdi, r15
     mov rsi, rax
@@ -84,7 +85,7 @@ DEF_FUNC sys_module_init, 32
     ; Add script directory to sys.path (computed from argv[1] later)
     ; For now, add empty string (current dir) as fallback
     lea rdi, [rel sm_empty]
-    call str_from_cstr
+    call str_from_cstr_heap
     push rax
     mov rdi, r12
     mov rsi, rax
@@ -95,7 +96,7 @@ DEF_FUNC sys_module_init, 32
 
     ; Store sys.path
     lea rdi, [rel sm_path]
-    call str_from_cstr
+    call str_from_cstr_heap
     push rax
     mov rdi, r15
     mov rsi, rax
@@ -123,7 +124,7 @@ DEF_FUNC sys_module_init, 32
     push rbx
 
     mov rdi, [rdx + rbx * 8]  ; argv[i]
-    call str_from_cstr
+    call str_from_cstr_heap
     push rax
     mov rdi, r13
     mov rsi, rax
@@ -140,7 +141,7 @@ DEF_FUNC sys_module_init, 32
 .argv_done:
 
     lea rdi, [rel sm_argv]
-    call str_from_cstr
+    call str_from_cstr_heap
     push rax
     mov rdi, r15
     mov rsi, rax
@@ -157,7 +158,7 @@ DEF_FUNC sys_module_init, 32
     push rdx                   ; save value tag
     push rax                   ; save value payload
     lea rdi, [rel sm_maxsize]
-    call str_from_cstr
+    call str_from_cstr_heap
     push rax
     mov rdi, r15
     mov rsi, rax               ; key = "maxsize" (str)
@@ -172,10 +173,10 @@ DEF_FUNC sys_module_init, 32
 
     ; --- sys.platform ---
     lea rdi, [rel sm_linux]
-    call str_from_cstr
+    call str_from_cstr_heap
     push rax
     lea rdi, [rel sm_platform]
-    call str_from_cstr
+    call str_from_cstr_heap
     push rax
     mov rdi, r15
     mov rsi, rax
@@ -190,10 +191,10 @@ DEF_FUNC sys_module_init, 32
 
     ; --- sys.version ---
     lea rdi, [rel sm_version_val]
-    call str_from_cstr
+    call str_from_cstr_heap
     push rax
     lea rdi, [rel sm_version]
-    call str_from_cstr
+    call str_from_cstr_heap
     push rax
     mov rdi, r15
     mov rsi, rax
@@ -226,7 +227,7 @@ DEF_FUNC sys_module_init, 32
     ; slot 3: 'final' (string, TAG_PTR) — offset 48
     push rbx
     lea rdi, [rel sm_final]
-    call str_from_cstr
+    call str_from_cstr_heap
     pop rbx
     mov [rbx + PyTupleObject.ob_item + 48], rax
     mov qword [rbx + PyTupleObject.ob_item + 56], TAG_PTR
@@ -236,7 +237,7 @@ DEF_FUNC sys_module_init, 32
     mov qword [rbx + PyTupleObject.ob_item + 72], TAG_SMALLINT
 
     lea rdi, [rel sm_version_info]
-    call str_from_cstr
+    call str_from_cstr_heap
     push rax
     mov rdi, r15
     mov rsi, rax
@@ -252,10 +253,10 @@ DEF_FUNC sys_module_init, 32
 
     ; --- sys.executable ---
     lea rdi, [rel sm_empty]
-    call str_from_cstr
+    call str_from_cstr_heap
     push rax
     lea rdi, [rel sm_executable]
-    call str_from_cstr
+    call str_from_cstr_heap
     push rax
     mov rdi, r15
     mov rsi, rax
@@ -270,10 +271,10 @@ DEF_FUNC sys_module_init, 32
 
     ; --- sys.prefix / sys.exec_prefix ---
     lea rdi, [rel sm_empty]
-    call str_from_cstr
+    call str_from_cstr_heap
     push rax
     lea rdi, [rel sm_prefix]
-    call str_from_cstr
+    call str_from_cstr_heap
     push rax
     mov rdi, r15
     mov rsi, rax
@@ -287,10 +288,10 @@ DEF_FUNC sys_module_init, 32
     call obj_decref
 
     lea rdi, [rel sm_empty]
-    call str_from_cstr
+    call str_from_cstr_heap
     push rax
     lea rdi, [rel sm_exec_prefix]
-    call str_from_cstr
+    call str_from_cstr_heap
     push rax
     mov rdi, r15
     mov rsi, rax
@@ -311,7 +312,7 @@ DEF_FUNC sys_module_init, 32
     mov [rel sys_stdout_obj], rax
     push rax
     lea rdi, [rel sm_stdout]
-    call str_from_cstr
+    call str_from_cstr_heap
     push rax
     mov rdi, r15
     mov rsi, rax
@@ -331,7 +332,7 @@ DEF_FUNC sys_module_init, 32
     call fileobj_new
     push rax
     lea rdi, [rel sm_stderr]
-    call str_from_cstr
+    call str_from_cstr_heap
     push rax
     mov rdi, r15
     mov rsi, rax
@@ -351,7 +352,7 @@ DEF_FUNC sys_module_init, 32
     call fileobj_new
     push rax
     lea rdi, [rel sm_stdin]
-    call str_from_cstr
+    call str_from_cstr_heap
     push rax
     mov rdi, r15
     mov rsi, rax
@@ -370,7 +371,7 @@ DEF_FUNC sys_module_init, 32
     call builtin_func_new
     push rax
     lea rdi, [rel sm_exit]
-    call str_from_cstr
+    call str_from_cstr_heap
     push rax
     mov rdi, r15
     mov rsi, rax
@@ -385,10 +386,10 @@ DEF_FUNC sys_module_init, 32
 
     ; --- sys.byteorder ---
     lea rdi, [rel sm_little]
-    call str_from_cstr
+    call str_from_cstr_heap
     push rax
     lea rdi, [rel sm_byteorder]
-    call str_from_cstr
+    call str_from_cstr_heap
     push rax
     mov rdi, r15
     mov rsi, rax
@@ -416,7 +417,7 @@ DEF_FUNC sys_module_init, 32
     call builtin_func_new
     push rax
     lea rdi, [rel sm_getdefaultencoding]
-    call str_from_cstr
+    call str_from_cstr_heap
     push rax
     mov rdi, r15
     mov rsi, rax
@@ -435,7 +436,7 @@ DEF_FUNC sys_module_init, 32
     call builtin_func_new
     push rax
     lea rdi, [rel sm_get_int_max_str_digits]
-    call str_from_cstr
+    call str_from_cstr_heap
     push rax
     mov rdi, r15
     mov rsi, rax
@@ -454,7 +455,7 @@ DEF_FUNC sys_module_init, 32
     call builtin_func_new
     push rax
     lea rdi, [rel sm_set_int_max_str_digits]
-    call str_from_cstr
+    call str_from_cstr_heap
     push rax
     mov rdi, r15
     mov rsi, rax
@@ -469,7 +470,7 @@ DEF_FUNC sys_module_init, 32
 
     ; --- Create the sys module object ---
     lea rdi, [rel sm_sys]
-    call str_from_cstr
+    call str_from_cstr_heap
     mov rdi, rax
     mov rsi, r15                ; dict
     call module_new
@@ -477,7 +478,7 @@ DEF_FUNC sys_module_init, 32
 
     ; Register sys in sys.modules
     lea rdi, [rel sm_sys]
-    call str_from_cstr
+    call str_from_cstr_heap
     push rax
     mov rdi, r14                ; sys.modules dict
     mov rsi, rax
@@ -525,8 +526,7 @@ END_FUNC sys_exit_func
 ; ============================================================================
 DEF_FUNC sys_getdefaultencoding_func
     lea rdi, [rel sm_utf8]
-    call str_from_cstr
-    mov edx, TAG_PTR
+    call str_from_cstr_heap
     leave
     ret
 END_FUNC sys_getdefaultencoding_func
@@ -621,31 +621,32 @@ DEF_FUNC sys_path_add_script_dir
 
 .use_root:
     lea rdi, [rel sm_slash]
-    call str_from_cstr
+    call str_from_cstr_heap
     jmp .set_path
 
 .use_dot:
     lea rdi, [rel sm_dot]
-    call str_from_cstr
+    call str_from_cstr_heap
 
 .set_path:
     ; Replace sys.path[0] with this directory
-    push rax
+    ; rax = payload, rdx = tag (SmallStr or TAG_PTR)
+    push rdx                    ; save new path tag
+    push rax                    ; save new path payload
     mov rdi, [rel sys_path_list]
     ; Set list item 0
     mov rcx, [rdi + PyListObject.ob_item]
     ; DECREF old item[0] (fat value: payload at [rcx], tag at [rcx+8])
-    push rax
     mov rdi, [rcx]
     mov rsi, [rcx + 8]
     DECREF_VAL rdi, rsi
-    pop rax
+    pop rax                     ; restore new path payload
+    pop rdx                     ; restore new path tag
     mov rdi, [rel sys_path_list]
     mov rcx, [rdi + PyListObject.ob_item]
-    mov [rcx], rax              ; store new path payload (already has refcount 1)
-    mov qword [rcx + 8], TAG_PTR ; store tag (string is a heap pointer)
+    mov [rcx], rax              ; store new path payload
+    mov [rcx + 8], rdx          ; store actual tag (SmallStr or TAG_PTR)
 
-    add rsp, 8                  ; discard saved path from push at .set_path
     pop r12
     pop rbx
     leave

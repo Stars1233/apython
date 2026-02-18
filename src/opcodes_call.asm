@@ -155,8 +155,8 @@ DEF_FUNC op_call, CL_FRAME
     jz .not_callable               ; NULL check
     cmp dword [rbp - CL_CALL_TAG], TAG_SMALLINT
     je .not_callable               ; SmallInt check
-    test dword [rbp - CL_CALL_TAG], TAG_RC_BIT
-    jz .not_callable               ; non-pointer tag (TAG_FLOAT, TAG_NONE, TAG_BOOL)
+    cmp dword [rbp - CL_CALL_TAG], TAG_PTR
+    jne .not_callable              ; non-pointer tag (TAG_FLOAT, TAG_NONE, TAG_BOOL)
     mov rax, [rdi + PyObject.ob_type]
     test rax, rax
     jz .not_callable               ; no type (shouldn't happen)
@@ -477,8 +477,8 @@ DEF_FUNC op_call_function_ex
     mov rdi, [rbp - CFX_FUNC]
     test rdi, rdi
     jz .cfex_not_callable
-    test dword [rbp - CFX_FUNC_TAG], TAG_RC_BIT
-    jz .cfex_not_callable
+    cmp dword [rbp - CFX_FUNC_TAG], TAG_PTR
+    jne .cfex_not_callable
     mov rax, [rdi + PyObject.ob_type]
     mov rax, [rax + PyTypeObject.tp_call]
     test rax, rax
@@ -744,7 +744,7 @@ END_FUNC op_call_function_ex
 ;; Exception table depth=1 preserves just the exit_method.
 ;; ============================================================================
 extern dict_get
-extern str_from_cstr
+extern str_from_cstr_heap
 extern exc_AttributeError_type
 extern method_new
 
@@ -764,9 +764,9 @@ DEF_FUNC op_before_with
     test rax, rax
     jz .bw_no_exit
 
-    ; Get "__exit__" from type dict
+    ; Get "__exit__" from type dict (heap — dict key, DECREFed)
     lea rdi, [rel bw_str_exit]
-    call str_from_cstr
+    call str_from_cstr_heap
     mov r12, rax                    ; r12 = exit name str
     mov rdi, [rbx + PyObject.ob_type]
     mov rdi, [rdi + PyTypeObject.tp_dict]
@@ -796,7 +796,7 @@ DEF_FUNC op_before_with
     jz .bw_no_enter
 
     lea rdi, [rel bw_str_enter]
-    call str_from_cstr
+    call str_from_cstr_heap
     mov r12, rax                    ; r12 = enter name str
     mov rdi, [rbx + PyObject.ob_type]
     mov rdi, [rdi + PyTypeObject.tp_dict]

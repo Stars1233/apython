@@ -10,6 +10,7 @@ extern ap_free
 extern obj_decref
 extern obj_dealloc
 extern str_from_cstr
+extern str_from_cstr_heap
 extern str_type
 extern int_from_i64
 extern none_singleton
@@ -46,15 +47,15 @@ DEF_FUNC fileobj_new
     mov [rdi + PyObject.ob_type], rax
     mov [rdi + PyFileObject.file_fd], rbx
 
-    ; Create name string
+    ; Create name string (heap — stored in single-qword struct field)
     mov rdi, r12
-    call str_from_cstr
+    call str_from_cstr_heap
     mov rdi, [rsp]
     mov [rdi + PyFileObject.file_name], rax
 
-    ; Create mode string
+    ; Create mode string (heap — stored in single-qword struct field)
     mov rdi, r13
-    call str_from_cstr
+    call str_from_cstr_heap
     mov rdi, [rsp]
     mov [rdi + PyFileObject.file_mode], rax
 
@@ -126,12 +127,17 @@ DEF_FUNC fileobj_write
     ; args[0] = self (file obj), args[1] = string to write
     mov rax, rdi                ; rax = args
     mov rdi, [rax]              ; rdi = self (file obj)
-    mov rsi, [rax + 16]        ; rsi = string arg (16-byte fat value stride)
+    mov rsi, [rax + 16]        ; rsi = string arg payload (16-byte stride)
+    mov r9, [rax + 24]         ; r9 = string arg tag
 
     ; Get fd
     mov rcx, [rdi + PyFileObject.file_fd]
 
-    ; Get string data + length
+    ; SmallStr check
+    test r9, r9
+    js .write_smallstr
+
+    ; Heap string: get data + length
     lea rdx, [rsi + PyStrObject.data]
     mov r8, [rsi + PyStrObject.ob_size]
 
@@ -143,6 +149,35 @@ DEF_FUNC fileobj_write
     call sys_write
     pop rdi                     ; length
 
+    ; Return char count as int
+    call int_from_i64
+    leave
+    ret
+
+.write_smallstr:
+    ; SmallStr: spill to stack for contiguous bytes
+    ; rcx = fd, rsi = payload, r9 = tag
+    push rbx
+    mov ebx, ecx               ; save fd
+
+    SMALLSTR_LEN r8, r9        ; r8 = length
+    ; Extract string bytes 8-13 from tag (skip TAG_SMALLSTR)
+    mov rax, r9
+    shr rax, 8
+    mov rdx, 0x0000FFFFFFFFFFFF
+    and rax, rdx
+    sub rsp, 16
+    mov [rsp], rsi             ; bytes 0-7
+    mov [rsp + 8], rax         ; bytes 8-13
+    ; sys_write(fd, buf, len)
+    push r8                    ; save length for return
+    mov edi, ebx               ; fd
+    lea rsi, [rsp + 8]        ; buf (past saved r8)
+    mov rdx, r8                ; len
+    call sys_write
+    pop rdi                    ; length
+    add rsp, 16                ; remove temp buffer
+    pop rbx
     ; Return char count as int
     call int_from_i64
     leave
@@ -291,7 +326,6 @@ DEF_FUNC fileobj_read, FR_FRAME
     mov byte [rdi + rbx], 0
     call str_from_cstr
 
-    mov edx, TAG_PTR
     pop r12
     pop rbx
     leave
@@ -300,7 +334,6 @@ DEF_FUNC fileobj_read, FR_FRAME
 .fr_empty:
     CSTRING rdi, ""
     call str_from_cstr
-    mov edx, TAG_PTR
     pop r12
     pop rbx
     leave
@@ -350,7 +383,6 @@ DEF_FUNC fileobj_readline, FRL_FRAME
     lea rdi, [rbp - FRL_FRAME]
     mov byte [rdi + r13], 0     ; null-terminate
     call str_from_cstr
-    mov edx, TAG_PTR
     pop r13
     pop r12
     pop rbx
@@ -579,7 +611,6 @@ DEF_FUNC fileobj_getattr
 .ret_encoding:
     lea rdi, [rel fa_utf8]
     call str_from_cstr
-    mov edx, TAG_PTR
     pop r12
     pop rbx
     leave
@@ -588,7 +619,6 @@ DEF_FUNC fileobj_getattr
 .ret_errors:
     lea rdi, [rel fa_surrogateescape]
     call str_from_cstr
-    mov edx, TAG_PTR
     pop r12
     pop rbx
     leave

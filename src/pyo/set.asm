@@ -605,7 +605,7 @@ DEF_FUNC set_type_call, STC_FRAME
 
     ; set(iterable): create set, iterate and add
     mov r12, [rsi]          ; iterable payload
-    mov ecx, [rsi + 8]     ; iterable tag
+    mov rcx, [rsi + 8]     ; iterable tag
 
     call set_new
     mov rbx, rax            ; rbx = new set

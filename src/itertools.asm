@@ -113,7 +113,7 @@ DEF_FUNC builtin_enumerate
 .enum_get_iter:
     ; Get iterator from args[0]
     mov rdi, [rbx]
-    mov esi, [rbx + 8]         ; args[0] tag
+    mov rsi, [rbx + 8]         ; args[0] tag
     call get_iterator
     mov rbx, rax            ; rbx = underlying iterator
 
@@ -245,7 +245,7 @@ DEF_FUNC builtin_zip
     mov rax, r14
     shl rax, 4                  ; rax = i * 16
     mov rdi, [rbx + rax]
-    mov esi, [rbx + rax + 8]   ; arg tag
+    mov rsi, [rbx + rax + 8]   ; arg tag
     push r13
     push r14
     call get_iterator
@@ -454,7 +454,7 @@ DEF_FUNC builtin_map
 
     ; Get iterator from args[1]
     mov rdi, [rbx + 16]
-    mov esi, [rbx + 24]       ; args[1] tag
+    mov rsi, [rbx + 24]       ; args[1] tag
     call get_iterator
     mov rbx, rax             ; rbx = underlying iterator
 
@@ -594,7 +594,7 @@ DEF_FUNC builtin_filter
 .filter_get_iter:
     ; Get iterator from args[1]
     mov rdi, [rbx + 16]
-    mov esi, [rbx + 24]       ; args[1] tag
+    mov rsi, [rbx + 24]       ; args[1] tag
     call get_iterator
     mov rbx, rax             ; rbx = underlying iterator
 
@@ -891,7 +891,7 @@ DEF_FUNC builtin_sorted
 
     ; Get iterator from args[0]
     mov rdi, [rbx]
-    mov esi, [rbx + 8]         ; args[0] tag
+    mov rsi, [rbx + 8]         ; args[0] tag
     call get_iterator
     mov rbx, rax             ; rbx = iterator
 
