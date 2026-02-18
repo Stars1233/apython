@@ -224,19 +224,21 @@ END_FUNC sleep_awaitable_dealloc
 ;; ============================================================================
 ;; asyncio_create_task(args, nargs) — asyncio.create_task(coro)
 ;; ============================================================================
-DEF_FUNC asyncio_create_task_func
+ACT_TASK equ 8
+ACT_FRAME equ 16
+DEF_FUNC asyncio_create_task_func, ACT_FRAME
     cmp rsi, 1
     jne .act_error
 
     mov rdi, [rdi]             ; coro = args[0]
     call task_new
-    push rax
+    mov [rbp - ACT_TASK], rax  ; save task (stack-aligned)
 
     ; Enqueue the new task
     mov rdi, rax
     call ready_enqueue
 
-    pop rax
+    mov rax, [rbp - ACT_TASK]
     mov edx, TAG_PTR
     leave
     ret
@@ -279,6 +281,9 @@ DEF_FUNC asyncio_gather_func
     ; Get coro from args[i] (16 bytes per arg, scale by shifting)
     mov rdi, rcx
     shl rdi, 4                 ; * 16
+    mov edx, [rbx + rdi + 8]  ; tag
+    cmp edx, TAG_PTR
+    jne .ag_type_error
     mov rdi, [rbx + rdi]      ; payload
     call task_new
     push rax
@@ -315,6 +320,15 @@ DEF_FUNC asyncio_gather_func
     pop rbx
     leave
     ret
+
+.ag_type_error:
+    pop rcx                    ; restore loop counter from stack
+    ; DECREF the partially-built list
+    mov rdi, r13
+    call obj_decref
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "asyncio.gather() arguments must be coroutines"
+    call raise_exception
 END_FUNC asyncio_gather_func
 
 ;; ============================================================================

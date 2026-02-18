@@ -70,7 +70,7 @@ BS_COUNT   equ 8
 BS_ACCUM   equ 16
 BS_FRAME   equ 16
 
-;; Stack layout constants for op_send (DEF_FUNC, 40 bytes).
+;; Stack layout constants for op_send (DEF_FUNC, 48 bytes).
 SND_ARG    equ 8
 SND_SENT   equ 16
 SND_RECV   equ 24

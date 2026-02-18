@@ -370,6 +370,14 @@ struc ConnectAwaitable
     .yielded:   resd 1  ; +20: 0=not yet, 1=done
 endstruc
 
+; AcceptAwaitable — awaitable for start_server (non-blocking accept)
+struc AcceptAwaitable
+    .ob_refcnt:  resq 1  ; +0
+    .ob_type:    resq 1  ; +8
+    .listen_fd:  resd 1  ; +16: listening socket fd
+    .yielded:    resd 1  ; +20: 0=not yet, 1=done
+endstruc
+
 ; AsyncGenASend — wrapper returned by async_gen.__anext__()
 ; SEND/tp_iternext on this object resumes the async gen.
 ; Layout must keep gi_return_value at +48, gi_return_tag at +56

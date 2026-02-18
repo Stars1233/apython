@@ -45,7 +45,6 @@ extern poll_backend
 
 ; io_uring backend (may fail at runtime)
 extern uring_backend
-extern uring_init
 
 ;; ============================================================================
 ;; eventloop_init() -> 0 ok, -1 fail
@@ -62,13 +61,14 @@ DEF_FUNC eventloop_init
     ; else: try iouring (default)
 
 .try_uring:
-    call uring_init
+    ; Set uring backend, then call init via vtable
+    lea rax, [rel uring_backend]
+    mov [rel eventloop + EventLoop.backend], rax
+    call [rax + IOBackend.init]
     test eax, eax
     js .try_poll
 
     ; io_uring available
-    lea rax, [rel uring_backend]
-    mov [rel eventloop + EventLoop.backend], rax
     jmp .init_done
 
 .try_poll:
@@ -76,9 +76,8 @@ DEF_FUNC eventloop_init
     lea rax, [rel poll_backend]
     mov [rel eventloop + EventLoop.backend], rax
 
-    ; Call poll init
-    mov rax, [rax + IOBackend.init]
-    call rax
+    ; Call poll init via vtable
+    call [rax + IOBackend.init]
 
 .init_done:
     ; Initialize ready queue
@@ -437,9 +436,10 @@ DEF_FUNC task_wake_waiters
     push rcx
     mov rdi, [r13 + rcx*8]    ; waiter task
 
-    ; Set send_value = task's result
+    ; Set send_value = task's result (INCREF for each waiter)
     mov rax, [rbx + AsyncTask.result]
     mov rdx, [rbx + AsyncTask.result_tag]
+    INCREF_VAL rax, rdx
     mov [rdi + AsyncTask.send_value], rax
     mov [rdi + AsyncTask.send_tag], rdx
 

@@ -88,18 +88,21 @@ DEF_FUNC_BARE op_get_awaitable
 
     mov rax, [rdi + PyObject.ob_type]
     mov rax, [rax + PyTypeObject.tp_iter]
-    call rax                   ; tp_iter(obj) -> iterator
+    call rax                   ; tp_iter(obj) -> rax = iterator ptr (or NULL)
     push rax                   ; save result
-    push rdx                   ; save result tag
 
     ; DECREF original
-    mov rdi, [rsp + 16]       ; saved original
+    mov rdi, [rsp + 8]        ; saved original
     call obj_decref
 
-    pop rdx                    ; restore result tag
     pop rax                    ; restore result
     add rsp, 8                ; discard saved original
-    VPUSH_VAL rax, rdx
+
+    ; Check for NULL return (tp_iter failed)
+    test rax, rax
+    jz .gaw_error
+
+    VPUSH_PTR rax
 
 .gaw_done:
     DISPATCH
@@ -124,9 +127,10 @@ END_FUNC op_get_awaitable
 DEF_FUNC_BARE op_get_aiter
     ; Pop TOS = async iterable
     VPOP rdi
+    mov rsi, [r13 + 8]        ; tag of popped value
 
-    ; Must be TAG_PTR (check the tag that was just popped)
-    cmp qword [r13 + 8], TAG_PTR
+    ; Must be TAG_PTR to dereference
+    cmp esi, TAG_PTR
     jne .gai_error
 
     ; Get __aiter__ from type — for async generators, tp_iter returns self
@@ -146,12 +150,24 @@ DEF_FUNC_BARE op_get_aiter
 
     pop rax                    ; restore result
     add rsp, 8                ; discard saved original
+
+    ; tp_iter returns a pointer — validate not NULL
+    test rax, rax
+    jz .gai_iter_error
+
     VPUSH_PTR rax              ; tp_iter returns pointer, use TAG_PTR
 
     DISPATCH
 
 .gai_error:
+    ; Non-TAG_PTR value: DECREF via tag-aware macro
+    DECREF_VAL rdi, rsi
+    jmp .gai_raise
 .gai_error_noattr:
+    ; TAG_PTR but no tp_iter: DECREF the pointer
+    call obj_decref
+.gai_raise:
+.gai_iter_error:
     lea rdi, [rel exc_TypeError_type]
     CSTRING rsi, "'async for' requires an object with __aiter__ method"
     call raise_exception
@@ -219,8 +235,10 @@ DEF_FUNC op_before_async_with, BAW_FRAME
     push rbx
     push r12
 
-    ; Pop mgr
-    VPOP rax
+    ; Pop mgr (must be TAG_PTR to dereference)
+    VPOP_VAL rax, rdx
+    cmp edx, TAG_PTR
+    jne .baw_not_ptr
     mov [rbp - BAW_MGR], rax
     mov rbx, rax               ; rbx = mgr
 
@@ -242,6 +260,8 @@ DEF_FUNC op_before_async_with, BAW_FRAME
     ; rax = value payload, edx = tag
     test edx, edx
     jz .baw_no_exit_decref_name
+    cmp edx, TAG_PTR
+    jne .baw_no_exit_decref_name
 
     ; Got __aexit__ function — create bound method
     mov [rbp - BAW_EXIT], rax
@@ -272,6 +292,8 @@ DEF_FUNC op_before_async_with, BAW_FRAME
     call dict_get
     test edx, edx
     jz .baw_no_enter_decref_name
+    cmp edx, TAG_PTR
+    jne .baw_no_enter_decref_name
 
     ; Got __aenter__ function — call it with mgr as self
     push rax                   ; save aenter func
@@ -294,6 +316,7 @@ DEF_FUNC op_before_async_with, BAW_FRAME
     call rcx
     add rsp, 16                ; pop fat arg
     mov [rbp - BAW_ENTER], rax
+    mov edx, edx               ; zero-extend 32-bit tag to 64-bit
     mov [rbp - BAW_RETTAG], rdx
 
     ; DECREF mgr
@@ -318,6 +341,11 @@ DEF_FUNC op_before_async_with, BAW_FRAME
     CSTRING rsi, "'async with' requires __aexit__ method"
     call raise_exception
 
+.baw_not_ptr:
+    DECREF_VAL rax, rdx
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "'async with' requires a context manager object"
+    call raise_exception
 .baw_no_enter_decref_name:
     mov rdi, r12
     call obj_decref
@@ -363,13 +391,12 @@ DEF_FUNC_BARE op_end_async_for
     jnz .eaf_stop
 
 .eaf_reraise:
-    ; Not StopAsyncIteration — re-raise
-    VPOP rdi
-    mov rsi, [r13 + 8]         ; tag of popped exc value
-    DECREF_VAL rdi, rsi
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "async for loop received unexpected exception"
-    call raise_exception
+    ; Not StopAsyncIteration — re-raise original exception
+    VPOP rdi                   ; exc payload
+    ; The exception is already a pointer; store as current_exception
+    ; and re-raise via eval_exception_unwind (which handles unwind).
+    ; raise_exception_obj INCREFs + XDECREFs old current_exception for us.
+    call raise_exception_obj
 
 .eaf_stop:
     ; StopAsyncIteration — pop exc and aiter, jump forward

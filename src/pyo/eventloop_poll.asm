@@ -10,6 +10,7 @@
 extern ap_malloc
 extern ap_free
 extern ready_enqueue
+extern none_singleton
 
 ; libc poll(struct pollfd *fds, nfds_t nfds, int timeout_ms)
 extern poll
@@ -545,5 +546,3 @@ poll_backend:
     dq poll_submit_poll_fd
     dq poll_cancel_io
     dq poll_wait_and_drain
-
-extern none_singleton

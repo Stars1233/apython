@@ -671,6 +671,16 @@ DEF_FUNC gen_throw, GT_FRAME
     mov qword [rbx + PyGenObject.gi_running], 1
 
     ; Create exception and set as current_exception
+    ; XDECREF any pre-existing current_exception first
+    mov rdi, [rel current_exception]
+    test rdi, rdi
+    jz .gt_no_prev_exc
+    push r12
+    push r13
+    call obj_decref
+    pop r13
+    pop r12
+.gt_no_prev_exc:
     mov rdi, r12               ; exc_type
     xor esi, esi               ; no message
     xor edx, edx               ; TAG_NULL

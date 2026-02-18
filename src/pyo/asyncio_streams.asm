@@ -219,19 +219,19 @@ DEF_FUNC stream_reader_getattr
     ; Compare name against known attributes
     CSTRING rdi, "read"
     mov rsi, r12
-    call ap_strcmp
+    call _stream_strcmp
     test eax, eax
     jz .srga_read
 
     CSTRING rdi, "close"
     mov rsi, r12
-    call ap_strcmp
+    call _stream_strcmp
     test eax, eax
     jz .srga_close
 
     CSTRING rdi, "readline"
     mov rsi, r12
-    call ap_strcmp
+    call _stream_strcmp
     test eax, eax
     jz .srga_readline
 
@@ -458,15 +458,9 @@ DEF_FUNC stream_writer_new
 END_FUNC stream_writer_new
 
 ;; stream_writer_dealloc(self)
+;; Writer does NOT own the fd — reader owns it.
+;; Explicit close via writer.close() attribute is handled by getattr.
 DEF_FUNC_BARE stream_writer_dealloc
-    ; Close fd if still open
-    mov edi, [rdi + AsyncStreamWriter.fd]
-    cmp edi, -1
-    je .swd_free
-    push rdi
-    call sys_close
-    pop rdi
-.swd_free:
     jmp ap_free
 END_FUNC stream_writer_dealloc
 
@@ -481,19 +475,19 @@ DEF_FUNC stream_writer_getattr
 
     CSTRING rdi, "write"
     mov rsi, r12
-    call ap_strcmp
+    call _stream_strcmp
     test eax, eax
     jz .swga_write
 
     CSTRING rdi, "close"
     mov rsi, r12
-    call ap_strcmp
+    call _stream_strcmp
     test eax, eax
     jz .swga_close
 
     CSTRING rdi, "drain"
     mov rsi, r12
-    call ap_strcmp
+    call _stream_strcmp
     test eax, eax
     jz .swga_drain
 
@@ -597,15 +591,9 @@ DEF_FUNC stream_writer_write_impl
     jmp .swwi_do_write_ss
 
 .swwi_do_write_ss:
-    ; sys_write(fd, buf, len)
-    mov esi, [rbx + AsyncStreamWriter.fd]
-    mov edx, r13d
-    xchg rdi, rsi              ; rdi=fd, rsi=buf
-    push rax
-    mov edi, esi               ; fd
-    pop rax
+    ; sys_write(fd, buf, len) — SmallStr bytes are at rsp
     mov edi, [rbx + AsyncStreamWriter.fd]
-    mov rsi, rsp               ; buf is on stack
+    mov rsi, rsp               ; buf = SmallStr bytes on stack
     mov edx, r13d              ; len
     call sys_write
     add rsp, 16
@@ -769,6 +757,104 @@ DEF_FUNC_BARE connect_awaitable_dealloc
 END_FUNC connect_awaitable_dealloc
 
 ;; ============================================================================
+;; AcceptAwaitable — for start_server result (non-blocking accept)
+;; First call: yield TAG_IO_WAIT (listen_fd | POLLIN<<32) to wait for connection
+;; Second call: accept4, create reader+writer, return (reader, writer) tuple
+;; ============================================================================
+
+DEF_FUNC_BARE accept_awaitable_iter_self
+    inc qword [rdi + PyObject.ob_refcnt]
+    mov rax, rdi
+    ret
+END_FUNC accept_awaitable_iter_self
+
+;; accept_awaitable_iternext(self) -> fat value
+DEF_FUNC_BARE accept_awaitable_iternext
+    cmp dword [rdi + AcceptAwaitable.yielded], 0
+    jne .aai_accept
+
+    ; First call: yield TAG_IO_WAIT for POLLIN (accept readiness)
+    mov dword [rdi + AcceptAwaitable.yielded], 1
+    mov eax, [rdi + AcceptAwaitable.listen_fd]
+    mov rdx, POLLIN
+    shl rdx, 32
+    or rax, rdx
+    mov edx, TAG_IO_WAIT
+    ret
+
+.aai_accept:
+    ; Second call: accept and create (reader, writer) tuple
+    push rbx
+    push r12
+
+    mov ebx, [rdi + AcceptAwaitable.listen_fd]
+
+    ; accept4(listen_fd, NULL, NULL, 0)
+    mov edi, ebx
+    xor esi, esi               ; addr = NULL
+    xor edx, edx               ; addrlen = NULL
+    xor ecx, ecx               ; flags = 0
+    call sys_accept4
+    mov r12d, eax              ; r12d = client fd
+
+    ; Close listen socket
+    mov edi, ebx
+    call sys_close
+
+    test r12d, r12d
+    js .aai_error
+
+    ; Set client fd to non-blocking
+    mov edi, r12d
+    mov esi, F_SETFL
+    mov edx, O_NONBLOCK
+    call sys_fcntl
+
+    ; Create reader + writer for client fd
+    mov edi, r12d
+    call stream_reader_new
+    mov rbx, rax               ; reader
+
+    mov edi, r12d
+    call stream_writer_new
+    push rax                   ; save writer
+
+    ; Create 2-tuple
+    mov edi, 2
+    call tuple_new
+    mov r12, rax               ; tuple
+
+    mov [rax + 32], rbx            ; ob_item[0] = reader
+    mov qword [rax + 40], TAG_PTR
+    pop rcx                        ; writer
+    mov [rax + 48], rcx            ; ob_item[1] = writer
+    mov qword [rax + 56], TAG_PTR
+
+    mov rax, r12
+    mov edx, TAG_PTR
+    pop r12
+    pop rbx
+    ret
+
+.aai_error:
+    lea rdi, [rel exc_OSError_type]
+    CSTRING rsi, "start_server() accept failed"
+    call raise_exception
+END_FUNC accept_awaitable_iternext
+
+DEF_FUNC_BARE accept_awaitable_dealloc
+    ; Close listen fd if still open
+    mov edi, [rdi + AcceptAwaitable.listen_fd]
+    cmp edi, -1
+    je .aad_free
+    push rdi
+    call sys_close
+    pop rdi
+.aad_free:
+    jmp ap_free
+END_FUNC accept_awaitable_dealloc
+
+;; ============================================================================
 ;; asyncio.open_connection(host, port) — create TCP connection
 ;; Returns a ConnectAwaitable
 ;; ============================================================================
@@ -925,70 +1011,21 @@ DEF_FUNC asyncio_start_server_func, SS_FRAME
 
     add rsp, 16
 
-    ; Set non-blocking
+    ; Set non-blocking for accept
     mov edi, ebx
     mov esi, F_SETFL
     mov edx, O_NONBLOCK
     call sys_fcntl
 
-    ; Create ConnectAwaitable using the listen fd
-    ; The iternext will do accept instead of connect
-    ; But we need a different type... Let's use a simpler approach:
-    ; Accept synchronously here (this is start_server after all)
-    ; For async: we'd need an AcceptAwaitable. For now, return the
-    ; listen fd wrapped in a ServerAwaitable that accepts on yield.
+    ; Create AcceptAwaitable that yields TAG_IO_WAIT(POLLIN) then accepts
+    mov edi, AcceptAwaitable_size
+    call ap_malloc
+    mov qword [rax + AcceptAwaitable.ob_refcnt], 1
+    lea rcx, [rel accept_awaitable_type]
+    mov [rax + AcceptAwaitable.ob_type], rcx
+    mov [rax + AcceptAwaitable.listen_fd], ebx
+    mov dword [rax + AcceptAwaitable.yielded], 0
 
-    ; Simplification: do a blocking accept here (since we're in the event loop,
-    ; we should yield TAG_IO_WAIT first). Let's create a ConnectAwaitable
-    ; with the listen fd — the connect_awaitable_iternext will yield POLLIN
-    ; for accept readiness, then accept and create streams.
-    ;
-    ; Actually, ConnectAwaitable assumes the fd is already the data fd.
-    ; Let's just create a simple server object.
-
-    ; For now: accept one connection synchronously (blocking)
-    ; Set back to blocking mode
-    mov edi, ebx
-    mov esi, F_SETFL
-    xor edx, edx              ; flags = 0 (blocking)
-    call sys_fcntl
-
-    ; Accept
-    mov edi, ebx
-    xor esi, esi               ; addr = NULL
-    xor edx, edx               ; addrlen = NULL
-    xor ecx, ecx               ; flags = 0
-    call sys_accept4
-    mov r13d, eax              ; r13d = client fd
-
-    ; Close listen socket
-    mov edi, ebx
-    call sys_close
-
-    test r13d, r13d
-    js .ss_accept_error
-
-    ; Create reader + writer for client fd
-    mov edi, r13d
-    call stream_reader_new
-    mov r12, rax               ; reader
-
-    mov edi, r13d
-    call stream_writer_new
-    push rax                   ; writer
-
-    ; Create 2-tuple
-    mov edi, 2
-    call tuple_new
-    mov rbx, rax
-
-    mov [rax + 32], r12            ; ob_item[0] payload (+32)
-    mov qword [rax + 40], TAG_PTR  ; ob_item[0] tag
-    pop rcx
-    mov [rax + 48], rcx            ; ob_item[1] payload
-    mov qword [rax + 56], TAG_PTR  ; ob_item[1] tag
-
-    mov rax, rbx
     mov edx, TAG_PTR
     pop r13
     pop r12
@@ -1019,10 +1056,6 @@ DEF_FUNC asyncio_start_server_func, SS_FRAME
     CSTRING rsi, "start_server() bind/listen failed"
     call raise_exception
 
-.ss_accept_error:
-    lea rdi, [rel exc_OSError_type]
-    CSTRING rsi, "start_server() accept failed"
-    call raise_exception
 END_FUNC asyncio_start_server_func
 
 ;; ============================================================================
@@ -1030,7 +1063,7 @@ END_FUNC asyncio_start_server_func
 ;; rdi = C string, rsi = PyStrObject* (or SmallStr)
 ;; Returns 0 if equal, nonzero otherwise
 ;; ============================================================================
-DEF_FUNC_LOCAL ap_strcmp
+DEF_FUNC_LOCAL _stream_strcmp
     push rbx
     push r12
 
@@ -1071,7 +1104,7 @@ DEF_FUNC_LOCAL ap_strcmp
     pop rbx
     leave
     ret
-END_FUNC ap_strcmp
+END_FUNC _stream_strcmp
 
 ;; ============================================================================
 ;; Data section
@@ -1089,6 +1122,7 @@ stream_writer_name: db "StreamWriter", 0
 read_awaitable_name: db "ReadAwaitable", 0
 drain_awaitable_name: db "DrainAwaitable", 0
 connect_awaitable_name: db "ConnectAwaitable", 0
+accept_awaitable_name: db "AcceptAwaitable", 0
 
 section .data
 align 8
@@ -1214,6 +1248,32 @@ connect_awaitable_type:
     dq 0                        ; tp_richcompare
     dq connect_awaitable_iter_self ; tp_iter
     dq connect_awaitable_iternext ; tp_iternext
+    dq 0                        ; tp_init
+    dq 0                        ; tp_new
+    dq 0                        ; tp_as_number
+    dq 0                        ; tp_as_sequence
+    dq 0                        ; tp_as_mapping
+    dq 0                        ; tp_base
+    dq 0                        ; tp_dict
+    dq 0                        ; tp_mro
+    dq 0                        ; tp_flags
+    dq 0                        ; tp_bases
+
+accept_awaitable_type:
+    dq 1                        ; ob_refcnt (immortal)
+    dq type_type                ; ob_type
+    dq accept_awaitable_name    ; tp_name
+    dq AcceptAwaitable_size     ; tp_basicsize
+    dq accept_awaitable_dealloc ; tp_dealloc
+    dq 0                        ; tp_repr
+    dq 0                        ; tp_str
+    dq 0                        ; tp_hash
+    dq 0                        ; tp_call
+    dq 0                        ; tp_getattr
+    dq 0                        ; tp_setattr
+    dq 0                        ; tp_richcompare
+    dq accept_awaitable_iter_self ; tp_iter
+    dq accept_awaitable_iternext ; tp_iternext
     dq 0                        ; tp_init
     dq 0                        ; tp_new
     dq 0                        ; tp_as_number
