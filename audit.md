@@ -3,7 +3,7 @@
 Audit date: 2026-02-17. Lists only missing and partially-implemented items
 vs CPython 3.12 reference.
 
-Current stats: 96 opcodes implemented (~94%), 51 builtins, 67 test files.
+Current stats: 96 opcodes implemented (~94%), 51 builtins, 68 test files.
 
 ---
 
@@ -61,7 +61,6 @@ Current stats: 96 opcodes implemented (~94%), 51 builtins, 67 test files.
 ### 3.2 list - Missing / Limitations
 - `sort()` with `key=` and `reverse=` kwargs
 - Extended slice assignment (`a[1:3:2] = ...`) - basic `a[1:3] = [4,5]` works
-- `__eq__` / comparison operators
 
 ### 3.3 dict - Missing
 - `fromkeys()` (classmethod)
@@ -86,7 +85,6 @@ Current stats: 96 opcodes implemented (~94%), 51 builtins, 67 test files.
 ### 3.7 float - Missing Methods
 - `is_integer()`, `as_integer_ratio()`
 - `hex()`, `fromhex()` (classmethod)
-- `__round__()` for `round()` builtin
 
 ### 3.8 Missing Dunder Support
 - `__init_subclass__`
