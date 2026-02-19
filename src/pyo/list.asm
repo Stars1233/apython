@@ -353,13 +353,69 @@ DEF_FUNC list_ass_subscript, LAS_FRAME
     extern tuple_type
     lea rdx, [rel tuple_type]
     cmp rax, rdx
-    jne .las_type_error
+    jne .las_try_generic
 
     ; Value is a tuple (fat: 16-byte stride)
     mov r8, [r12 + PyTupleObject.ob_size]
     lea r9, [r12 + PyTupleObject.ob_item]
     mov r15, 16                             ; r15 = source stride (fat tuple = 16)
     jmp .las_have_items
+
+.las_try_generic:
+    ; Generic iterable: iterate into a temp list, then use it
+    mov rax, [r12 + PyObject.ob_type]
+    mov rax, [rax + PyTypeObject.tp_iter]
+    test rax, rax
+    jz .las_type_error
+    mov rdi, r12
+    ; Save rcx (old_len) since it may be clobbered
+    push rcx
+    call rax                    ; tp_iter(iterable) → iterator
+    test rax, rax
+    jz .las_type_error_pop
+    push rax                    ; save iterator
+
+    ; Create temp list
+    xor edi, edi
+    call list_new
+    push rax                    ; save temp list [rsp]=templist, [rsp+8]=iter, [rsp+16]=old_len
+
+.las_gen_loop:
+    mov rdi, [rsp + 8]         ; iterator
+    mov rax, [rdi + PyObject.ob_type]
+    mov rax, [rax + PyTypeObject.tp_iternext]
+    test rax, rax
+    jz .las_gen_done
+    mov rdi, [rsp + 8]
+    call rax
+    test edx, edx
+    jz .las_gen_done
+    push rax
+    push rdx
+    mov rdi, [rsp + 16]       ; temp list (2 pushes deeper)
+    mov rsi, rax
+    call list_append
+    pop rsi
+    pop rdi
+    DECREF_VAL rdi, rsi
+    jmp .las_gen_loop
+
+.las_gen_done:
+    pop r12                     ; temp list (becomes new value)
+    pop rdi                     ; iterator
+    pop rcx                     ; old_len (restore)
+    push r12                    ; save temp list for DECREF later
+    call obj_decref             ; DECREF iterator
+    pop r12                     ; restore temp list
+
+    ; Use temp list as value — jump to list path
+    mov r8, [r12 + PyListObject.ob_size]
+    mov r9, [r12 + PyListObject.ob_item]
+    mov r15, 16
+    jmp .las_have_items
+
+.las_type_error_pop:
+    pop rcx                     ; discard saved old_len
 
 .las_have_items:
     ; rcx = old_len (items being removed)
@@ -668,38 +724,129 @@ END_FUNC list_len
 
 ;; ============================================================================
 ;; list_contains(PyListObject *list, PyObject *value, int value_tag) -> int (0/1)
-;; sq_contains: linear scan with payload + tag equality
+;; sq_contains: linear scan with identity check then __eq__ protocol
 ;; ============================================================================
-DEF_FUNC list_contains
+LC_LIST    equ 8
+LC_VPAY    equ 16    ; value payload
+LC_VTAG    equ 24    ; value tag
+LC_IDX     equ 32
+LC_SIZE    equ 40
+LC_FRAME   equ 40
+DEF_FUNC list_contains, LC_FRAME
     push rbx
     push r12
-    push r13
-    push r14
 
-    mov rbx, rdi               ; list
-    mov r12, rsi               ; value payload
-    mov r13d, edx              ; value tag
-    mov r14, [rbx + PyListObject.ob_size]
+    mov [rbp - LC_LIST], rdi   ; list
+    mov [rbp - LC_VPAY], rsi   ; value payload
+    mov [rbp - LC_VTAG], rdx   ; value tag (64-bit for SmallStr)
+    mov rax, [rdi + PyListObject.ob_size]
+    mov [rbp - LC_SIZE], rax
+    mov qword [rbp - LC_IDX], 0
 
-    xor ecx, ecx
 .loop:
-    cmp rcx, r14
+    mov rax, [rbp - LC_IDX]
+    cmp rax, [rbp - LC_SIZE]
     jge .not_found
-    mov rax, [rbx + PyListObject.ob_item]
-    mov rdx, rcx
-    shl rdx, 4
-    cmp r12, [rax + rdx]      ; payload match? (16-byte stride)
-    jne .next
-    cmp r13, [rax + rdx + 8]  ; tag match? (64-bit for SmallStr bit 63)
+
+    ; Load element payload+tag
+    mov rbx, [rbp - LC_LIST]
+    mov rbx, [rbx + PyListObject.ob_item]
+    mov rcx, rax
+    shl rcx, 4                  ; index * 16
+    mov rdi, [rbx + rcx]        ; elem payload
+    mov r8, [rbx + rcx + 8]     ; elem tag
+
+    ; Fast identity check: both payload and tag match → found
+    cmp rdi, [rbp - LC_VPAY]
+    jne .try_eq
+    cmp r8, [rbp - LC_VTAG]
     je .found
+
+.try_eq:
+    ; Use tp_richcompare for __eq__ protocol
+    ; Resolve element type from tag
+    mov r12, r8                 ; save elem tag
+    cmp r8d, TAG_SMALLINT
+    je .elem_int_type
+    cmp r8d, TAG_FLOAT
+    je .elem_float_type
+    test r8, r8
+    js .elem_str_type           ; SmallStr
+    cmp r8d, TAG_BOOL
+    je .elem_bool_type
+    cmp r8d, TAG_NONE
+    je .next                    ; None: identity-only
+    test r8d, TAG_RC_BIT
+    jz .next                    ; non-pointer non-known tag: skip
+    mov rax, [rdi + PyObject.ob_type]
+    jmp .elem_have_type
+.elem_int_type:
+    lea rax, [rel int_type]
+    jmp .elem_have_type
+.elem_float_type:
+    lea rax, [rel float_type]
+    jmp .elem_have_type
+.elem_str_type:
+    lea rax, [rel str_type]
+    jmp .elem_have_type
+.elem_bool_type:
+    lea rax, [rel bool_type]
+.elem_have_type:
+    mov rbx, rax                ; save type ptr
+    mov rax, [rax + PyTypeObject.tp_richcompare]
+    test rax, rax
+    jnz .elem_do_richcmp
+
+    ; No tp_richcompare — try dunder on heaptype
+    mov rdx, [rbx + PyTypeObject.tp_flags]
+    test rdx, TYPE_FLAG_HEAPTYPE
+    jz .next
+
+    ; dunder_call_2(self=elem, other=value, "__eq__", other_tag)
+    extern dunder_call_2
+    ; rdi = elem payload (already set)
+    mov rsi, [rbp - LC_VPAY]   ; other = value
+    CSTRING rdx, "__eq__"
+    mov ecx, [rbp - LC_VTAG]   ; other_tag = value tag
+    call dunder_call_2
+    ; if NULL, skip
+    test edx, edx
+    jz .next
+    jmp .elem_check_result
+
+.elem_do_richcmp:
+    ; tp_richcompare(elem, value, PY_EQ, elem_tag, value_tag)
+    ; rdi = elem payload (already set)
+    mov rsi, [rbp - LC_VPAY]
+    mov edx, PY_EQ
+    mov rcx, r12                ; elem tag
+    mov r8, [rbp - LC_VTAG]     ; value tag
+    call rax
+
+.elem_check_result:
+
+    ; Check result truthiness
+    push rax
+    push rdx
+    mov rdi, rax
+    mov rsi, rdx
+    call obj_is_true
+    mov ebx, eax               ; save truthiness
+    pop rdx
+    pop rdi                    ; result payload
+    push rbx                   ; save truthiness
+    mov rsi, rdx
+    DECREF_VAL rdi, rsi
+    pop rbx                    ; restore truthiness
+    test ebx, ebx
+    jnz .found
+
 .next:
-    inc rcx
+    inc qword [rbp - LC_IDX]
     jmp .loop
 
 .found:
     mov eax, 1
-    pop r14
-    pop r13
     pop r12
     pop rbx
     leave
@@ -707,8 +854,6 @@ DEF_FUNC list_contains
 
 .not_found:
     xor eax, eax
-    pop r14
-    pop r13
     pop r12
     pop rbx
     leave
@@ -1026,6 +1171,255 @@ DEF_FUNC list_repeat
 END_FUNC list_repeat
 
 ;; ============================================================================
+;; list_inplace_concat(left, right, left_tag, right_tag) -> (rax, edx)
+;; nb_iadd / sq_inplace_concat: extend left list in-place with right iterable
+;; Returns (left, TAG_PTR) — same object.
+;; ============================================================================
+LIC_SELF   equ 8
+LIC_ITER   equ 16
+LIC_FRAME  equ 16
+DEF_FUNC list_inplace_concat, LIC_FRAME
+    push rbx
+    push r12
+    push r13
+
+    mov rbx, rdi              ; left = self (list)
+    mov r12, rsi              ; right (iterable payload)
+    mov r13, rcx              ; right_tag
+    mov [rbp - LIC_SELF], rdi
+
+    ; Check right type for fast paths
+    test r13d, TAG_RC_BIT
+    jz .lic_type_error         ; non-pointer → error
+
+    mov rax, [r12 + PyObject.ob_type]
+    lea rcx, [rel list_type]
+    cmp rax, rcx
+    je .lic_list
+    extern tuple_type
+    lea rcx, [rel tuple_type]
+    cmp rax, rcx
+    je .lic_tuple
+    jmp .lic_generic
+
+.lic_list:
+    mov r13, [r12 + PyListObject.ob_size]
+    xor ecx, ecx
+.lic_list_loop:
+    cmp rcx, r13
+    jge .lic_done
+    push rcx
+    mov rax, [r12 + PyListObject.ob_item]
+    mov rdx, rcx
+    shl rdx, 4
+    mov rsi, [rax + rdx]
+    mov rdx, [rax + rdx + 8]
+    mov rdi, rbx
+    call list_append
+    pop rcx
+    inc rcx
+    jmp .lic_list_loop
+
+.lic_tuple:
+    mov r13, [r12 + PyTupleObject.ob_size]
+    xor ecx, ecx
+.lic_tuple_loop:
+    cmp rcx, r13
+    jge .lic_done
+    push rcx
+    mov rdx, rcx
+    shl rdx, 4
+    mov rsi, [r12 + PyTupleObject.ob_item + rdx]
+    mov rdx, [r12 + PyTupleObject.ob_item + rdx + 8]
+    mov rdi, rbx
+    call list_append
+    pop rcx
+    inc rcx
+    jmp .lic_tuple_loop
+
+.lic_generic:
+    ; Use tp_iter/tp_iternext
+    mov rax, [r12 + PyObject.ob_type]
+    mov rax, [rax + PyTypeObject.tp_iter]
+    test rax, rax
+    jz .lic_type_error
+    mov rdi, r12
+    call rax
+    test rax, rax
+    jz .lic_type_error
+    mov [rbp - LIC_ITER], rax
+
+.lic_gen_loop:
+    mov rdi, [rbp - LIC_ITER]
+    mov rax, [rdi + PyObject.ob_type]
+    mov rax, [rax + PyTypeObject.tp_iternext]
+    test rax, rax
+    jz .lic_gen_done
+    mov rdi, [rbp - LIC_ITER]
+    call rax
+    test edx, edx
+    jz .lic_gen_done
+
+    push rax
+    push rdx
+    mov rdi, rbx
+    mov rsi, rax
+    call list_append
+    pop rsi
+    pop rdi
+    DECREF_VAL rdi, rsi
+    jmp .lic_gen_loop
+
+.lic_gen_done:
+    mov rdi, [rbp - LIC_ITER]
+    call obj_decref
+
+.lic_done:
+    ; Return (self, TAG_PTR) — INCREF self
+    INCREF rbx
+    mov rax, rbx
+    mov edx, TAG_PTR
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.lic_type_error:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "can only concatenate list (not other) to list"
+    call raise_exception
+END_FUNC list_inplace_concat
+
+;; ============================================================================
+;; list_inplace_repeat(left, right, left_tag, right_tag) -> (rax, edx)
+;; nb_imul / sq_inplace_repeat: repeat left list in-place by right integer
+;; Returns (left, TAG_PTR) — same object.
+;; ============================================================================
+LIR_SELF    equ 8
+LIR_OLDSIZE equ 16
+LIR_FRAME   equ 16
+DEF_FUNC list_inplace_repeat, LIR_FRAME
+    push rbx
+    push r12
+    push r13
+
+    mov rbx, rdi              ; self (list)
+    mov r12, rsi              ; right payload
+    mov r13, rcx              ; right_tag
+
+    ; Convert right to i64 count
+    mov rdi, r12
+    mov edx, r13d             ; int_to_i64 expects tag in edx
+    call int_to_i64
+    mov r12, rax              ; r12 = count
+
+    ; Handle count <= 0: clear list
+    test r12, r12
+    jle .lir_clear
+
+    ; count == 1: no-op
+    cmp r12, 1
+    je .lir_done
+
+    ; count >= 2: replicate items
+    mov rax, [rbx + PyListObject.ob_size]
+    mov [rbp - LIR_OLDSIZE], rax
+    test rax, rax
+    jz .lir_done              ; empty list * n = empty list
+
+    ; Grow items array: new_cap = old_size * count
+    mov r13, rax              ; r13 = old_size
+    imul rax, r12             ; rax = old_size * count = new_size
+    push rax                  ; save new_size
+
+    ; Realloc
+    mov rdi, [rbx + PyListObject.ob_item]
+    mov rsi, rax
+    shl rsi, 4                ; new_size * 16
+    call ap_realloc
+    mov [rbx + PyListObject.ob_item], rax
+    pop rax                   ; new_size
+    mov [rbx + PyListObject.ob_size], rax
+    mov [rbx + PyListObject.allocated], rax
+
+    ; Copy items (count - 1) more times + INCREF each copy
+    mov rax, [rbx + PyListObject.ob_item]
+    mov rcx, 1                ; copy number (1-based)
+.lir_copy_outer:
+    cmp rcx, r12
+    jge .lir_done
+    push rcx
+
+    ; Destination offset = copy_num * old_size * 16
+    mov rdx, rcx
+    imul rdx, r13
+    shl rdx, 4                ; byte offset
+
+    ; Copy old_size elements (16 bytes each)
+    xor ecx, ecx
+.lir_copy_inner:
+    cmp rcx, r13
+    jge .lir_copy_next
+    mov r8, rcx
+    shl r8, 4                 ; src offset
+
+    ; Copy payload + tag
+    mov r9, [rax + r8]        ; src payload
+    mov r10, [rax + r8 + 8]   ; src tag
+    mov [rax + rdx], r9       ; dst payload
+    mov [rax + rdx + 8], r10  ; dst tag
+
+    ; INCREF copied item
+    push rax
+    push rcx
+    push rdx
+    INCREF_VAL r9, r10
+    pop rdx
+    pop rcx
+    pop rax
+
+    add rdx, 16
+    inc rcx
+    jmp .lir_copy_inner
+
+.lir_copy_next:
+    pop rcx
+    inc rcx
+    jmp .lir_copy_outer
+
+.lir_clear:
+    ; DECREF all items, set size=0
+    mov r13, [rbx + PyListObject.ob_size]
+    xor ecx, ecx
+.lir_clear_loop:
+    cmp rcx, r13
+    jge .lir_clear_done
+    mov rax, [rbx + PyListObject.ob_item]
+    mov rdx, rcx
+    shl rdx, 4
+    push rcx
+    mov rdi, [rax + rdx]
+    mov rsi, [rax + rdx + 8]
+    DECREF_VAL rdi, rsi
+    pop rcx
+    inc rcx
+    jmp .lir_clear_loop
+.lir_clear_done:
+    mov qword [rbx + PyListObject.ob_size], 0
+
+.lir_done:
+    INCREF rbx
+    mov rax, rbx
+    mov edx, TAG_PTR
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC list_inplace_repeat
+
+;; ============================================================================
 ;; list_type_call(PyTypeObject *type, PyObject **args, int64_t nargs) -> PyListObject*
 ;; Constructor: list() or list(iterable)
 ;; ============================================================================
@@ -1159,9 +1553,9 @@ list_number_methods:
     dq 0                    ; nb_floor_divide
     dq 0                    ; nb_true_divide
     dq 0                    ; nb_index
-    dq 0                        ; nb_iadd         +168
+    dq list_inplace_concat      ; nb_iadd         +168
     dq 0                        ; nb_isub         +176
-    dq 0                        ; nb_imul         +184
+    dq list_inplace_repeat      ; nb_imul         +184
     dq 0                        ; nb_irem         +192
     dq 0                        ; nb_ipow         +200
     dq 0                        ; nb_ilshift      +208
@@ -1181,8 +1575,8 @@ list_sequence_methods:
     dq list_getitem         ; sq_item
     dq list_setitem         ; sq_ass_item
     dq list_contains        ; sq_contains
-    dq 0                    ; sq_inplace_concat
-    dq 0                    ; sq_inplace_repeat
+    dq list_inplace_concat  ; sq_inplace_concat
+    dq list_inplace_repeat  ; sq_inplace_repeat
 
 section .text
 
@@ -1485,9 +1879,8 @@ DEF_FUNC list_richcompare, LRC_FRAME
     ret
 
 .lrc_not_impl:
-    ; Return False for non-list comparisons (simplified — CPython returns NotImplemented)
-    xor eax, eax
-    mov edx, TAG_BOOL
+    ; Return NotImplemented (NULL) so COMPARE_OP can try right operand
+    RET_NULL
     leave
     ret
 

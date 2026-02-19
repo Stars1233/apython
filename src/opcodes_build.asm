@@ -1011,9 +1011,8 @@ DEF_FUNC op_list_extend, 32
     cmp rax, rdx
     je .extend_list
 
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "list.extend() argument must be a list or tuple"
-    call raise_exception
+    ; Generic iterable: use tp_iter/tp_iternext
+    jmp .extend_generic
 
 .extend_tuple:
     mov rcx, [rsi + PyTupleObject.ob_size]
@@ -1060,6 +1059,48 @@ DEF_FUNC op_list_extend, 32
     cmp r8, [rbp-24]          ; count
     jb .extend_list_loop
 
+.extend_generic:
+    ; Generic iterable: tp_iter + tp_iternext loop
+    mov rsi, [rbp-16]         ; iterable
+    mov rax, [rsi + PyObject.ob_type]
+    mov rax, [rax + PyTypeObject.tp_iter]
+    test rax, rax
+    jz .extend_type_error
+    mov rdi, rsi
+    call rax                   ; tp_iter(iterable) → iterator
+    test rax, rax
+    jz .extend_type_error
+    mov [rbp-32], rax          ; save iterator (reusing locals slot)
+
+.extend_generic_loop:
+    mov rdi, [rbp-32]         ; iterator
+    mov rax, [rdi + PyObject.ob_type]
+    mov rax, [rax + PyTypeObject.tp_iternext]
+    test rax, rax
+    jz .extend_generic_done
+    mov rdi, [rbp-32]
+    call rax                   ; tp_iternext(iter) → (payload, tag)
+    test edx, edx
+    jz .extend_generic_done    ; StopIteration
+
+    ; Append to list
+    push rax
+    push rdx
+    mov rdi, [rbp-8]          ; list
+    mov rsi, rax
+    ; edx = tag (already set)
+    call list_append
+    ; DECREF item (list_append INCREFs)
+    pop rsi                    ; tag
+    pop rdi                    ; payload
+    DECREF_VAL rdi, rsi
+    jmp .extend_generic_loop
+
+.extend_generic_done:
+    ; DECREF iterator
+    mov rdi, [rbp-32]
+    call obj_decref
+
 .extend_done:
     ; DECREF iterable
     mov rdi, [rbp-16]
@@ -1067,6 +1108,11 @@ DEF_FUNC op_list_extend, 32
 
     leave
     DISPATCH
+
+.extend_type_error:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "list.extend() argument must be iterable"
+    call raise_exception
 END_FUNC op_list_extend
 
 ;; ============================================================================
@@ -1793,9 +1839,8 @@ DEF_FUNC op_unpack_ex
     cmp rax, rcx
     je .ue_tuple
 
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "cannot unpack non-sequence"
-    call raise_exception
+    ; Generic iterable: iterate into a temp list, then unpack from it
+    jmp .ue_generic
 
 .ue_list:
     mov rax, [r15 + PyListObject.ob_size]
@@ -1923,9 +1968,74 @@ DEF_FUNC op_unpack_ex
     leave
     DISPATCH
 
+.ue_generic:
+    ; Generic iterable: iterate into a temp list, then unpack from it
+    ; r15 = iterable, [rbp-48] = iterable tag
+    ; ebx = count_before, r14 = count_after (must preserve)
+    mov rax, [r15 + PyObject.ob_type]
+    mov rax, [rax + PyTypeObject.tp_iter]
+    test rax, rax
+    jz .ue_type_error
+    mov rdi, r15
+    call rax                   ; tp_iter(iterable) → iterator
+    test rax, rax
+    jz .ue_type_error
+    push rax                   ; [rsp] = iterator
+
+    ; Create temp list
+    xor edi, edi
+    extern list_new
+    call list_new
+    push rax                   ; [rsp] = temp_list, [rsp+8] = iterator
+
+.ue_gen_loop:
+    mov rdi, [rsp + 8]        ; iterator
+    mov rax, [rdi + PyObject.ob_type]
+    mov rax, [rax + PyTypeObject.tp_iternext]
+    test rax, rax
+    jz .ue_gen_done
+    mov rdi, [rsp + 8]
+    call rax                   ; tp_iternext(iter) → (payload, tag)
+    test edx, edx
+    jz .ue_gen_done
+
+    ; Append to temp list
+    push rax
+    push rdx
+    mov rdi, [rsp + 16]       ; temp_list (2 pushes deeper)
+    mov rsi, rax
+    call list_append
+    pop rsi                    ; tag
+    pop rdi                    ; payload
+    DECREF_VAL rdi, rsi
+    jmp .ue_gen_loop
+
+.ue_gen_done:
+    pop rax                    ; temp_list
+    pop rdi                    ; iterator
+    push rax                   ; save temp_list
+    call obj_decref            ; DECREF iterator
+
+    ; DECREF original iterable
+    mov rdi, r15
+    mov rsi, [rbp-48]
+    DECREF_VAL rdi, rsi
+
+    ; Replace r15 with temp list, update tag
+    pop r15                    ; r15 = temp_list
+    mov qword [rbp-48], TAG_PTR
+
+    ; Now fall through to .ue_list path
+    jmp .ue_list
+
 .ue_not_enough:
     lea rdi, [rel exc_ValueError_type]
     CSTRING rsi, "not enough values to unpack"
+    call raise_exception
+
+.ue_type_error:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "cannot unpack non-sequence"
     call raise_exception
 
 ; Helper: get item at index rsi from iterable r15 (returns borrowed ref: rax=payload, rdx=tag)

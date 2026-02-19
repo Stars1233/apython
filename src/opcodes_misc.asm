@@ -637,8 +637,13 @@ section .text
     mov edx, ecx               ; edx = comparison op
     mov rcx, [rsp + BO_LTAG]   ; rcx = left_tag (64-bit for SmallStr)
     mov r8, [rsp + BO_RTAG]    ; r8 = right_tag (64-bit for SmallStr)
+    push rdx                   ; save comparison op before call
     call rax
-    ; rax = result (a bool object)
+    ; rax = result payload, edx = result tag
+    ; Check for NotImplemented (NULL return = tag 0)
+    test edx, edx
+    jz .cmp_try_right
+    add rsp, 8                 ; discard saved comparison op
 
 .cmp_do_call_result:
     ; Save result, DECREF operands (tag-aware)
@@ -658,6 +663,114 @@ section .text
     ; Skip 1 CACHE entry = 2 bytes
     add rbx, 2
     DISPATCH
+
+.cmp_try_right:
+    ; Left's tp_richcompare returned NotImplemented (NULL).
+    ; Try right operand's tp_richcompare with swapped args and swapped op.
+    ; Stack: [rsp]=saved_op, [rsp+8+BO_*]=operands
+    pop rcx                    ; ecx = original comparison op
+
+    ; Resolve right operand's type
+    mov rdi, [rsp + BO_RIGHT] ; right payload (will become left arg)
+    mov r8, [rsp + BO_RTAG]   ; right tag
+    cmp r8d, TAG_SMALLINT
+    je .cmp_right_int
+    cmp r8d, TAG_FLOAT
+    je .cmp_right_float
+    test r8, r8
+    js .cmp_right_str          ; SmallStr
+    cmp r8d, TAG_BOOL
+    je .cmp_right_bool
+    cmp r8d, TAG_NONE
+    je .cmp_right_none
+    mov rax, [rdi + PyObject.ob_type]
+    jmp .cmp_right_have_type
+.cmp_right_int:
+    lea rax, [rel int_type]
+    jmp .cmp_right_have_type
+.cmp_right_float:
+    lea rax, [rel float_type]
+    jmp .cmp_right_have_type
+.cmp_right_str:
+    extern str_type
+    lea rax, [rel str_type]
+    jmp .cmp_right_have_type
+.cmp_right_bool:
+    extern bool_type
+    lea rax, [rel bool_type]
+    jmp .cmp_right_have_type
+.cmp_right_none:
+    extern none_type
+    lea rax, [rel none_type]
+.cmp_right_have_type:
+    mov r9, rax                ; r9 = right type
+    mov rax, [rax + PyTypeObject.tp_richcompare]
+    test rax, rax
+    jnz .cmp_right_do_call
+
+    ; No tp_richcompare — try dunder on heaptype (right side)
+    mov rdx, [r9 + PyTypeObject.tp_flags]
+    test rdx, TYPE_FLAG_HEAPTYPE
+    jz .cmp_identity           ; not a heaptype, no dunder → identity
+
+    ; Swap comparison op: LT↔GT, LE↔GE, EQ↔EQ, NE↔NE
+    lea rax, [rel .cmp_swap_table]
+    movsxd rdx, ecx
+    mov edx, [rax + rdx*4]    ; edx = swapped op
+
+    ; Map swapped op to dunder name
+    extern cmp_dunder_table
+    extern dunder_call_2
+    lea rax, [rel cmp_dunder_table]
+    movsxd rdx, edx
+    mov rdx, [rax + rdx*8]    ; rdx = dunder name C string
+
+    ; dunder_call_2(self=right, other=left, name, other_tag)
+    ; rdi = right (already set)
+    mov rsi, [rsp + BO_LEFT]   ; other = left payload
+    mov ecx, [rsp + BO_LTAG]   ; other_tag = left's tag
+    call dunder_call_2
+
+    ; Check if dunder returned NULL
+    test edx, edx
+    jz .cmp_identity           ; no dunder → identity fallback
+    jmp .cmp_do_call_result
+
+.cmp_right_do_call:
+    ; Swap comparison op: LT↔GT, LE↔GE, EQ↔EQ, NE↔NE
+    ; Save original op for potential identity fallback
+    push rcx                   ; [rsp] = original comparison op
+    lea r9, [rel .cmp_swap_table]
+    movsxd rcx, ecx
+    mov ecx, [r9 + rcx*4]     ; ecx = swapped op
+
+    ; Call tp_richcompare(right, left, swapped_op, right_tag, left_tag)
+    ; rdi = right (already set above)
+    mov rsi, [rsp + 8 + BO_LEFT]  ; rsi = left (becomes right arg) (+8 for push)
+    mov edx, ecx               ; swapped op
+    mov rcx, [rsp + 8 + BO_RTAG]  ; right_tag (now left_tag arg)
+    mov r8, [rsp + 8 + BO_LTAG]   ; left_tag (now right_tag arg)
+    call rax
+    ; Check for NotImplemented again
+    test edx, edx
+    jnz .cmp_try_right_ok
+    ; Both sides returned NotImplemented → identity fallback
+    pop rcx                    ; restore original comparison op (ecx) for .cmp_identity
+    jmp .cmp_identity
+.cmp_try_right_ok:
+    add rsp, 8                 ; discard saved original op
+    jmp .cmp_do_call_result    ; got a result, proceed normally
+
+section .data
+align 4
+.cmp_swap_table:
+    dd 4                       ; PY_LT(0) → PY_GT(4)
+    dd 5                       ; PY_LE(1) → PY_GE(5)
+    dd 2                       ; PY_EQ(2) → PY_EQ(2)
+    dd 3                       ; PY_NE(3) → PY_NE(3)
+    dd 0                       ; PY_GT(4) → PY_LT(0)
+    dd 1                       ; PY_GE(5) → PY_LE(1)
+section .text
 
 .cmp_identity:
     ; Fallback: identity comparison (pointer equality)
