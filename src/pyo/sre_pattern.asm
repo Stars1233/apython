@@ -223,9 +223,12 @@ DEF_FUNC sre_pattern_match_method
     je .match_error
     mov rsi, [r12]             ; string payload
 
+    ; Save user nargs for endpos check
+    mov r8, rdx                ; r8 = user nargs
+
     ; pos (default 0)
     xor ecx, ecx
-    cmp rdx, 2
+    cmp r8, 2
     jb .match_no_pos
     mov rcx, [r12 + 16]       ; pos
 .match_no_pos:
@@ -233,6 +236,10 @@ DEF_FUNC sre_pattern_match_method
 
     ; endpos (default large)
     mov rcx, 0x7FFFFFFFFFFFFFFF
+    cmp r8, 3
+    jb .match_no_endpos
+    mov rcx, [r12 + 32]       ; endpos
+.match_no_endpos:
 
     mov rdi, rbx               ; pattern
     ; rsi already = string
@@ -259,20 +266,34 @@ DEF_FUNC sre_pattern_search_method
     ; rdi = args (fat array), rsi = nargs
     push rbx
     push r12
+    push r13
     mov rbx, [rdi]             ; pattern = args[0] payload
     lea r12, [rdi + 16]        ; user args
-    lea rdx, [rsi - 1]         ; user nargs
+    lea r13, [rsi - 1]         ; user nargs
 
-    cmp rdx, 0
+    cmp r13, 0
     je .search_error
     mov rsi, [r12]             ; string payload
 
-    xor edx, edx               ; pos = 0
-    mov rcx, 0x7FFFFFFFFFFFFFFF  ; endpos = max
+    ; pos (default 0)
+    xor edx, edx
+    cmp r13, 2
+    jb .search_no_pos
+    mov rdx, [r12 + 16]       ; pos
+.search_no_pos:
+
+    ; endpos (default max)
+    mov rcx, 0x7FFFFFFFFFFFFFFF
+    cmp r13, 3
+    jb .search_no_endpos
+    mov rcx, [r12 + 32]       ; endpos
+.search_no_endpos:
+
     mov rdi, rbx
     mov r8d, 1                 ; mode = search
     call sre_pattern_do_match
 
+    pop r13
     pop r12
     pop rbx
     leave
@@ -291,20 +312,34 @@ DEF_FUNC sre_pattern_fullmatch_method
     ; rdi = args (fat array), rsi = nargs
     push rbx
     push r12
+    push r13
     mov rbx, [rdi]             ; pattern = args[0] payload
     lea r12, [rdi + 16]        ; user args
-    lea rdx, [rsi - 1]         ; user nargs
+    lea r13, [rsi - 1]         ; user nargs
 
-    cmp rdx, 0
+    cmp r13, 0
     je .fm_error
     mov rsi, [r12]             ; string payload
 
+    ; pos (default 0)
     xor edx, edx
+    cmp r13, 2
+    jb .fm_no_pos
+    mov rdx, [r12 + 16]       ; pos
+.fm_no_pos:
+
+    ; endpos (default max)
     mov rcx, 0x7FFFFFFFFFFFFFFF
+    cmp r13, 3
+    jb .fm_no_endpos
+    mov rcx, [r12 + 32]       ; endpos
+.fm_no_endpos:
+
     mov rdi, rbx
     mov r8d, 2                 ; mode = fullmatch
     call sre_pattern_do_match
 
+    pop r13
     pop r12
     pop rbx
     leave
@@ -315,6 +350,138 @@ DEF_FUNC sre_pattern_fullmatch_method
     CSTRING rsi, "fullmatch() requires a string argument"
     call raise_exception
 END_FUNC sre_pattern_fullmatch_method
+
+; ============================================================================
+; sre_substr_from_state(rdi=state, rsi=start_idx, rdx=end_idx)
+; -> (rax=payload, edx=tag)
+; Extracts substring handling both ASCII and codepoint modes.
+; Returns (0, TAG_NONE) if start or end is -1.
+; ============================================================================
+global sre_substr_from_state
+DEF_FUNC sre_substr_from_state
+    ; Check for unmatched group
+    cmp rsi, -1
+    je .ss_none
+    cmp rdx, -1
+    je .ss_none
+
+    push rbx
+    push r12
+    push r13
+
+    mov rbx, rdi               ; state
+    mov r12, rsi               ; start codepoint index
+    mov r13, rdx               ; end codepoint index
+
+    ; Check ASCII or Unicode mode
+    mov rax, [rbx + SRE_State.codepoint_buf]
+    test rax, rax
+    jnz .ss_unicode
+
+    ; ASCII mode: byte index = codepoint index
+    mov rdi, [rbx + SRE_State.str_begin]
+    add rdi, r12
+    mov rsi, r13
+    sub rsi, r12
+    call str_new_heap
+    mov edx, TAG_PTR
+
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.ss_unicode:
+    ; Unicode mode: walk UTF-8 to find byte offsets
+    mov rdi, [rbx + SRE_State.str_begin]
+    mov rcx, [rbx + SRE_State.str_end]
+    sub rcx, rdi               ; total byte length
+
+    ; Find byte offset for start_idx codepoints
+    xor r8d, r8d               ; byte offset
+    xor r9d, r9d               ; codepoint count
+
+.ss_find_start:
+    cmp r9, r12
+    jge .ss_found_start
+    cmp r8, rcx
+    jge .ss_found_start
+    movzx eax, byte [rdi + r8]
+    cmp al, 0x80
+    jb .ss_s1
+    cmp al, 0xE0
+    jb .ss_s2
+    cmp al, 0xF0
+    jb .ss_s3
+    add r8, 4
+    jmp .ss_sinc
+.ss_s1:
+    inc r8
+    jmp .ss_sinc
+.ss_s2:
+    add r8, 2
+    jmp .ss_sinc
+.ss_s3:
+    add r8, 3
+.ss_sinc:
+    inc r9
+    jmp .ss_find_start
+
+.ss_found_start:
+    push r8                    ; save start byte offset
+
+    ; Find byte offset for end_idx codepoints (continue scanning)
+.ss_find_end:
+    cmp r9, r13
+    jge .ss_found_end
+    cmp r8, rcx
+    jge .ss_found_end
+    movzx eax, byte [rdi + r8]
+    cmp al, 0x80
+    jb .ss_e1
+    cmp al, 0xE0
+    jb .ss_e2
+    cmp al, 0xF0
+    jb .ss_e3
+    add r8, 4
+    jmp .ss_einc
+.ss_e1:
+    inc r8
+    jmp .ss_einc
+.ss_e2:
+    add r8, 2
+    jmp .ss_einc
+.ss_e3:
+    add r8, 3
+.ss_einc:
+    inc r9
+    jmp .ss_find_end
+
+.ss_found_end:
+    ; r8 = end byte offset
+    pop rax                    ; start byte offset
+
+    ; Create substring from byte offsets
+    mov rdi, [rbx + SRE_State.str_begin]
+    add rdi, rax
+    mov rsi, r8
+    sub rsi, rax
+    call str_new_heap
+    mov edx, TAG_PTR
+
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.ss_none:
+    xor eax, eax
+    mov edx, TAG_NONE
+    leave
+    ret
+END_FUNC sre_substr_from_state
 
 ; ============================================================================
 ; sre_pattern_findall_method(self, args, nargs)
@@ -346,6 +513,22 @@ DEF_FUNC sre_pattern_findall_method, FA_FRAME
     mov rax, [rdi + 16]       ; string = args[1] payload
     mov [rbp - FA_STR], rax
 
+    ; pos (default 0)
+    xor ecx, ecx
+    cmp rdx, 2
+    jb .fa_no_pos
+    mov rcx, [rdi + 32]       ; args[2] = pos
+.fa_no_pos:
+    push rcx                   ; save pos
+
+    ; endpos (default max)
+    mov r8, 0x7FFFFFFFFFFFFFFF
+    cmp rdx, 3
+    jb .fa_no_endpos
+    mov r8, [rdi + 48]        ; args[3] = endpos
+.fa_no_endpos:
+    push r8                    ; save endpos
+
     ; Create result list
     xor edi, edi
     call list_new
@@ -353,11 +536,11 @@ DEF_FUNC sre_pattern_findall_method, FA_FRAME
     mov r14, rax               ; r14 = result list
 
     ; Init state
+    pop r8                     ; endpos
+    pop rcx                    ; pos
     lea rdi, [rbp - FA_STATE]
     mov rsi, [rbp - FA_PAT]
     mov rdx, [rbp - FA_STR]
-    xor ecx, ecx               ; pos = 0
-    mov r8, 0x7FFFFFFFFFFFFFFF
     call sre_state_init
 
     mov r12, [rbp - FA_PAT]   ; pattern
@@ -384,81 +567,113 @@ DEF_FUNC sre_pattern_findall_method, FA_FRAME
     je .fa_one_group
 
     ; Multiple groups: create tuple of group strings
-    ; (for now, simplified: just add whole match)
-    jmp .fa_no_groups
+    jmp .fa_multi_groups
 
 .fa_no_groups:
-    ; Append matched substring
+    ; Append matched substring (group 0)
     lea rdi, [rbp - FA_STATE]
-    mov rax, [rdi + SRE_State.str_start]  ; match start
-    mov rcx, [rdi + SRE_State.str_pos]    ; match end
-    ; Get substring from string
-    mov rsi, [rbp - FA_STR]
-    push rcx
+    mov rsi, [rdi + SRE_State.str_start]  ; match start
+    mov rdx, [rdi + SRE_State.str_pos]    ; match end
+    call sre_substr_from_state
+    ; rax = str payload, edx = tag
+    mov rdi, r14
+    mov rsi, rax
+    ; edx already set
     push rax
-    ; For ASCII: substring from str_begin[start..end]
-    mov rdi, [rbp - FA_STATE + SRE_State.str_begin]
+    push rdx
+    call list_append
+    pop rdx
     pop rax
-    pop rcx
-    ; Create substring
-    push rcx
-    lea rdi, [rdi + rax]       ; start ptr (wrong for codepoint mode, but OK for ASCII)
-    mov rsi, rcx
-    sub rsi, rax               ; length
-    call str_new_heap
-    pop rcx
-    ; Append to list
-    mov rdi, r14
-    mov rsi, rax
-    mov edx, TAG_PTR
-    push rcx
-    push rax
-    call list_append
-    pop rdi
-    call obj_decref            ; DECREF the new string (list_append INCREF'd)
-    pop rcx
-    jmp .fa_advance
-
-.fa_one_group:
-    ; Append group(1) string
-    ; Get mark 2 (start) and mark 3 (end) — group 1 marks are at index 2,3
-    lea rdi, [rbp - FA_STATE]
-    mov rax, [rdi + SRE_State.marks]
-    ; Check marks_size >= 4
-    cmp qword [rdi + SRE_State.marks_size], 4
-    jb .fa_no_groups           ; fallback to whole match
-    mov r8, [rax + 16]        ; mark[2] = group 1 start
-    mov r9, [rax + 24]        ; mark[3] = group 1 end
-    cmp r8, -1
-    je .fa_append_none
-    cmp r9, -1
-    je .fa_append_none
-
-    ; Create substring for group 1
-    mov rdi, [rbp - FA_STATE + SRE_State.str_begin]
-    lea rdi, [rdi + r8]
-    mov rsi, r9
-    sub rsi, r8
-    push qword [rbp - FA_STATE + SRE_State.str_pos]
-    call str_new_heap
-    mov rdi, r14
-    mov rsi, rax
-    mov edx, TAG_PTR
-    push rax
-    call list_append
-    pop rdi
-    call obj_decref
-    pop rcx
+    DECREF_VAL rax, rdx
     lea rdi, [rbp - FA_STATE]
     mov rcx, [rdi + SRE_State.str_pos]
     jmp .fa_advance
 
-.fa_append_none:
-    ; Group not matched — append None
+.fa_one_group:
+    ; Append group(1) string
+    ; State marks[0:1] = group 1 in CPython convention
+    lea rdi, [rbp - FA_STATE]
+    mov rax, [rdi + SRE_State.marks]
+    cmp qword [rdi + SRE_State.marks_size], 2
+    jb .fa_no_groups           ; fallback to whole match
+    mov rsi, [rax]            ; mark[0] = group 1 start
+    mov rdx, [rax + 8]       ; mark[1] = group 1 end
+    lea rdi, [rbp - FA_STATE]
+    call sre_substr_from_state
+    ; rax = payload, edx = tag (str or None)
     mov rdi, r14
-    xor esi, esi
-    mov edx, TAG_NONE
+    mov rsi, rax
+    ; edx already set
+    push rax
+    push rdx
     call list_append
+    pop rdx
+    pop rax
+    DECREF_VAL rax, rdx
+    lea rdi, [rbp - FA_STATE]
+    mov rcx, [rdi + SRE_State.str_pos]
+    jmp .fa_advance
+
+.fa_multi_groups:
+    ; Create tuple of group(1)..group(N) strings
+    mov edi, r15d              ; N groups
+    push r15
+    call tuple_new
+    pop r15
+    mov rbx, rax               ; rbx = tuple
+
+    mov ecx, 1                 ; group index (1-based)
+.fa_mg_loop:
+    cmp ecx, r15d
+    ja .fa_mg_done
+    push rcx
+
+    ; Get marks for group ecx: state marks[2*(ecx-1)] and marks[2*(ecx-1)+1]
+    ; State marks are 0-based: MARK 0/1 = group 1, MARK 2/3 = group 2, etc.
+    lea rdi, [rbp - FA_STATE]
+    mov rax, [rdi + SRE_State.marks]
+    movsx r8, ecx
+    dec r8                     ; r8 = group - 1
+    shl r8, 1                  ; r8 = 2 * (group - 1)
+    ; Check marks_size > 2*(group-1)+1
+    lea r9, [r8 + 2]
+    cmp r9, [rdi + SRE_State.marks_size]
+    ja .fa_mg_none
+
+    mov rsi, [rax + r8*8]     ; start
+    mov rdx, [rax + r8*8 + 8] ; end
+    lea rdi, [rbp - FA_STATE]
+    call sre_substr_from_state
+    jmp .fa_mg_set
+
+.fa_mg_none:
+    xor eax, eax
+    mov edx, TAG_NONE
+
+.fa_mg_set:
+    ; Set tuple[group-1] = (rax, edx)
+    pop rcx
+    push rcx
+    INCREF_VAL rax, rdx
+    lea esi, [ecx - 1]
+    movsx rsi, esi
+    shl rsi, 4                 ; * 16
+    add rsi, PyTupleObject.ob_item
+    mov [rbx + rsi], rax
+    mov [rbx + rsi + 8], rdx
+
+    pop rcx
+    inc ecx
+    jmp .fa_mg_loop
+
+.fa_mg_done:
+    ; Append tuple to list
+    mov rdi, r14
+    mov rsi, rbx
+    mov edx, TAG_PTR
+    call list_append
+    mov rdi, rbx
+    call obj_decref
     lea rdi, [rbp - FA_STATE]
     mov rcx, [rdi + SRE_State.str_pos]
     jmp .fa_advance
@@ -626,13 +841,11 @@ DEF_FUNC sre_pattern_sub_method, SUB_FRAME
     mov rax, [rbp - SUB_LASTEND]
     cmp rax, r12
     jge .sub_no_prefix
-    ; Substring from lastend to match_start
+    ; Substring from lastend to match_start (Unicode-safe)
     lea rdi, [rbp - SUB_STATE]
-    mov rdi, [rdi + SRE_State.str_begin]
-    add rdi, rax               ; start
-    mov rsi, r12
-    sub rsi, rax               ; length
-    call str_new_heap
+    mov rsi, [rbp - SUB_LASTEND]
+    mov rdx, r12
+    call sre_substr_from_state
     ; Concat with result
     mov rdi, [rbp - SUB_RESULT]
     mov rsi, rax
@@ -741,7 +954,7 @@ DEF_FUNC sre_pattern_sub_method, SUB_FRAME
     jmp .sub_loop
 
 .sub_finish:
-    ; Append remaining text after last match
+    ; Append remaining text after last match (Unicode-safe)
     lea rdi, [rbp - SUB_STATE]
     call sre_string_len
     mov rcx, rax               ; string length
@@ -750,11 +963,9 @@ DEF_FUNC sre_pattern_sub_method, SUB_FRAME
     jge .sub_done
 
     lea rdi, [rbp - SUB_STATE]
-    mov rdi, [rdi + SRE_State.str_begin]
-    add rdi, rax
-    mov rsi, rcx
-    sub rsi, rax
-    call str_new_heap
+    mov rsi, [rbp - SUB_LASTEND]
+    mov rdx, rcx
+    call sre_substr_from_state
     mov rdi, [rbp - SUB_RESULT]
     mov rsi, rax
     mov ecx, TAG_PTR
@@ -898,11 +1109,9 @@ DEF_FUNC sre_pattern_subn_method, SN_FRAME
     cmp rax, r12
     jge .subn_no_prefix
     lea rdi, [rbp - SN_STATE]
-    mov rdi, [rdi + SRE_State.str_begin]
-    add rdi, rax
-    mov rsi, r12
-    sub rsi, rax
-    call str_new_heap
+    mov rsi, [rbp - SN_LASTEND]
+    mov rdx, r12
+    call sre_substr_from_state
     mov rdi, [rbp - SN_RESULT]
     mov rsi, rax
     mov ecx, TAG_PTR
@@ -1007,11 +1216,9 @@ DEF_FUNC sre_pattern_subn_method, SN_FRAME
     jge .subn_build_tuple
 
     lea rdi, [rbp - SN_STATE]
-    mov rdi, [rdi + SRE_State.str_begin]
-    add rdi, rax
-    mov rsi, rcx
-    sub rsi, rax
-    call str_new_heap
+    mov rsi, [rbp - SN_LASTEND]
+    mov rdx, rcx
+    call sre_substr_from_state
     mov rdi, [rbp - SN_RESULT]
     mov rsi, rax
     mov ecx, TAG_PTR
@@ -1083,6 +1290,7 @@ DEF_FUNC sre_pattern_split_method, SP_FRAME
     push r12
     push r13
     push r14
+    push r15
 
     mov rax, [rdi]             ; pattern = args[0] payload
     mov [rbp - SP_PAT], rax
@@ -1107,6 +1315,10 @@ DEF_FUNC sre_pattern_split_method, SP_FRAME
     xor edi, edi
     call list_new
     mov r14, rax
+
+    ; Get group count from pattern
+    mov rax, [rbp - SP_PAT]
+    mov r15d, [rax + SRE_PatternObject.groups]
 
     ; Init state
     lea rdi, [rbp - SP_STATE]
@@ -1144,22 +1356,65 @@ DEF_FUNC sre_pattern_split_method, SP_FRAME
     je .split_advance_skip
 .split_nonzero:
 
-    ; Append text before match
-    mov rax, [rbp - SP_LASTEND]
+    ; Append text before match using sre_substr_from_state
     lea rdi, [rbp - SP_STATE]
-    mov rdi, [rdi + SRE_State.str_begin]
-    add rdi, rax
-    mov rsi, r12
-    sub rsi, rax
-    call str_new_heap
+    mov rsi, [rbp - SP_LASTEND]
+    mov rdx, r12
+    call sre_substr_from_state
     mov rdi, r14
     mov rsi, rax
-    mov edx, TAG_PTR
+    ; edx already set
     push rax
+    push rdx
     call list_append
-    pop rdi
-    call obj_decref
+    pop rdx
+    pop rax
+    DECREF_VAL rax, rdx
 
+    ; Append capturing groups 1..N
+    test r15d, r15d
+    jz .split_no_captures
+    mov ebx, 1                 ; group index
+.split_cap_loop:
+    cmp ebx, r15d
+    ja .split_no_captures
+    push rbx
+    ; Get marks for group ebx: state marks[2*(ebx-1)] and marks[2*(ebx-1)+1]
+    lea rdi, [rbp - SP_STATE]
+    mov rax, [rdi + SRE_State.marks]
+    movsx r8, ebx
+    dec r8                     ; group - 1
+    shl r8, 1                  ; 2 * (group - 1)
+    lea r9, [r8 + 2]
+    cmp r9, [rdi + SRE_State.marks_size]
+    ja .split_cap_none
+
+    mov rsi, [rax + r8*8]     ; start
+    mov rdx, [rax + r8*8 + 8] ; end
+    lea rdi, [rbp - SP_STATE]
+    call sre_substr_from_state
+    jmp .split_cap_append
+
+.split_cap_none:
+    xor eax, eax
+    mov edx, TAG_NONE
+
+.split_cap_append:
+    mov rdi, r14
+    mov rsi, rax
+    ; edx already set
+    push rax
+    push rdx
+    call list_append
+    pop rdx
+    pop rax
+    DECREF_VAL rax, rdx
+
+    pop rbx
+    inc ebx
+    jmp .split_cap_loop
+
+.split_no_captures:
     mov [rbp - SP_LASTEND], r13
     inc qword [rbp - SP_NSPLIT]
 
@@ -1182,25 +1437,23 @@ DEF_FUNC sre_pattern_split_method, SP_FRAME
     jmp .split_loop
 
 .split_finish:
-    ; Append remaining text
+    ; Append remaining text using sre_substr_from_state
     lea rdi, [rbp - SP_STATE]
     call sre_string_len
-    mov rcx, rax
-    mov rax, [rbp - SP_LASTEND]
-
+    mov rcx, rax               ; string length
+    mov rsi, [rbp - SP_LASTEND]
     lea rdi, [rbp - SP_STATE]
-    mov rdi, [rdi + SRE_State.str_begin]
-    add rdi, rax
-    mov rsi, rcx
-    sub rsi, rax
-    call str_new_heap
+    mov rdx, rcx
+    call sre_substr_from_state
     mov rdi, r14
     mov rsi, rax
-    mov edx, TAG_PTR
+    ; edx already set
     push rax
+    push rdx
     call list_append
-    pop rdi
-    call obj_decref
+    pop rdx
+    pop rax
+    DECREF_VAL rax, rdx
 
     lea rdi, [rbp - SP_STATE]
     call sre_state_fini
@@ -1208,6 +1461,7 @@ DEF_FUNC sre_pattern_split_method, SP_FRAME
     mov rax, r14
     mov edx, TAG_PTR
 
+    pop r15
     pop r14
     pop r13
     pop r12
@@ -1603,30 +1857,31 @@ DEF_FUNC sre_pattern_finditer_method
     ; rdi = args (fat array), rsi = nargs
     push rbx
     push r12
+    push r13
 
     mov rbx, [rdi]             ; self = pattern
     lea r12, [rdi + 16]        ; user args
-    lea rdx, [rsi - 1]
+    lea r13, [rsi - 1]         ; user nargs
 
-    cmp rdx, 0
+    cmp r13, 0
     je .fi_error
 
     ; string = user_args[0]
     mov rsi, [r12]             ; string payload
 
     ; pos (default 0)
-    xor ecx, ecx
-    cmp rdx, 2
+    xor edx, edx
+    cmp r13, 2
     jb .fi_no_pos
-    mov rcx, [r12 + 16]
+    mov rdx, [r12 + 16]       ; pos
 .fi_no_pos:
-    mov rdx, rcx               ; rdx = pos
 
     ; endpos (default large)
     mov rcx, 0x7FFFFFFFFFFFFFFF
-    cmp qword [rsp + 16], 3    ; check original nargs - 1 >= 3
-    ; Actually easier to just default to max
-    ; (3rd arg would be at r12+32 but we don't have orig nargs easily)
+    cmp r13, 3
+    jb .fi_no_endpos
+    mov rcx, [r12 + 32]       ; endpos
+.fi_no_endpos:
 
     ; scanner_new(pattern, string, pos, endpos)
     mov rdi, rbx               ; pattern
@@ -1637,6 +1892,7 @@ DEF_FUNC sre_pattern_finditer_method
 
     mov edx, TAG_PTR
 
+    pop r13
     pop r12
     pop rbx
     leave

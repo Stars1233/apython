@@ -101,6 +101,7 @@ SRE_FLAG_ASCII       equ 0x100
 SRE_FLAG_TEMPLATE    equ 0x01
 SRE_FLAG_LOCALE      equ 0x04
 SRE_FLAG_VERBOSE     equ 0x40
+SRE_FLAG_DEBUG       equ 0x80
 
 ; ============================================================================
 ; SRE INFO flags (embedded in SRE_OP_INFO)

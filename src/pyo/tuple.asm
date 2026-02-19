@@ -19,6 +19,12 @@ extern obj_incref
 extern slice_type
 extern slice_indices
 extern type_type
+extern obj_is_true
+extern float_compare
+extern int_type
+extern str_type
+extern bool_type
+extern none_type
 
 ; tuple_new(int64_t size) -> PyTupleObject*
 ; Allocate a tuple with room for 'size' fat items (16 bytes each), zero-filled
@@ -510,6 +516,301 @@ DEF_FUNC tuple_repeat
     ret
 END_FUNC tuple_repeat
 
+;; ============================================================================
+;; tuple_richcompare(left, right, op, left_tag, right_tag) -> (rax, edx)
+;; Compare two tuples. Returns bool fat value.
+;; Supports EQ, NE, LT, LE, GT, GE (lexicographic for ordering).
+;; ============================================================================
+TRC_LEFT     equ 8
+TRC_RIGHT    equ 16
+TRC_OP       equ 24
+TRC_IDX      equ 32
+TRC_MINLEN   equ 40
+TRC_FRAME    equ 40
+
+global tuple_richcompare
+DEF_FUNC tuple_richcompare, TRC_FRAME
+    ; Verify right is TAG_PTR and a tuple
+    cmp r8d, TAG_PTR
+    jne .trc_not_impl
+    mov rax, [rsi + PyObject.ob_type]
+    lea r9, [rel tuple_type]
+    cmp rax, r9
+    jne .trc_not_impl
+
+    mov [rbp - TRC_LEFT], rdi
+    mov [rbp - TRC_RIGHT], rsi
+    mov [rbp - TRC_OP], edx
+
+    ; Get lengths
+    mov rcx, [rdi + PyTupleObject.ob_size]   ; left_len
+    mov r8, [rsi + PyTupleObject.ob_size]    ; right_len
+
+    ; min_len = min(left_len, right_len)
+    mov rax, rcx
+    cmp rax, r8
+    jle .trc_have_min
+    mov rax, r8
+.trc_have_min:
+    mov [rbp - TRC_MINLEN], rax
+
+    ; Compare elements 0..min_len-1
+    mov qword [rbp - TRC_IDX], 0
+
+.trc_elem_loop:
+    mov rax, [rbp - TRC_IDX]
+    cmp rax, [rbp - TRC_MINLEN]
+    jge .trc_elements_equal
+
+    ; Get left[i] and right[i] (fat values inline, 16-byte stride)
+    shl rax, 4
+    mov rdi, [rbp - TRC_LEFT]
+    mov rcx, [rdi + PyTupleObject.ob_item + rax + 8]   ; left_tag
+    mov rdi, [rdi + PyTupleObject.ob_item + rax]        ; left_payload
+
+    mov rsi, [rbp - TRC_RIGHT]
+    mov r8, [rsi + PyTupleObject.ob_item + rax + 8]    ; right_tag
+    mov rsi, [rsi + PyTupleObject.ob_item + rax]        ; right_payload
+
+    ; Fast path: both same tag and same payload → elements equal, skip
+    cmp rcx, r8
+    jne .trc_elem_compare
+    cmp rdi, rsi
+    je .trc_elem_next
+
+.trc_elem_compare:
+    ; Compare elements for EQ using element type's tp_richcompare
+    push rdi                        ; left_payload
+    push rcx                        ; left_tag
+    push rsi                        ; right_payload
+    push r8                         ; right_tag
+
+    ; Float coercion: if either is TAG_FLOAT, use float_compare
+    cmp ecx, TAG_FLOAT
+    je .trc_elem_float
+    cmp r8d, TAG_FLOAT
+    je .trc_elem_float
+
+    ; Resolve left type
+    cmp ecx, TAG_SMALLINT
+    je .trc_elem_int_type
+    cmp ecx, TAG_BOOL
+    je .trc_elem_bool_type
+    cmp ecx, TAG_NONE
+    je .trc_elem_none_type
+    test rcx, rcx
+    js .trc_elem_str_type           ; SmallStr
+    ; TAG_PTR: get ob_type
+    mov rax, [rdi + PyObject.ob_type]
+    jmp .trc_elem_have_type
+
+.trc_elem_int_type:
+    lea rax, [rel int_type]
+    jmp .trc_elem_have_type
+.trc_elem_bool_type:
+    lea rax, [rel bool_type]
+    jmp .trc_elem_have_type
+.trc_elem_none_type:
+    lea rax, [rel none_type]
+    jmp .trc_elem_have_type
+.trc_elem_str_type:
+    lea rax, [rel str_type]
+
+.trc_elem_have_type:
+    mov rax, [rax + PyTypeObject.tp_richcompare]
+    test rax, rax
+    jz .trc_elem_not_equal          ; no richcompare → not equal
+
+    ; Call tp_richcompare(left, right, PY_EQ, left_tag, right_tag)
+    pop r8                          ; right_tag
+    pop rsi                         ; right_payload
+    pop rcx                         ; left_tag
+    pop rdi                         ; left_payload
+    mov edx, PY_EQ
+    call rax
+
+    ; Check result for truthiness
+    push rax
+    push rdx
+    mov rdi, rax
+    mov rsi, rdx
+    call obj_is_true
+    mov ecx, eax                    ; ecx = truthiness (0/1)
+    pop rdx                         ; result tag
+    pop rdi                         ; result payload
+    push rcx                        ; save truthiness
+    mov rsi, rdx
+    DECREF_VAL rdi, rsi
+    pop rcx                         ; restore truthiness
+    test ecx, ecx
+    jnz .trc_elem_next              ; equal → continue
+
+    ; Elements not equal
+    jmp .trc_elem_not_equal_nopop
+
+.trc_elem_float:
+    pop r8
+    pop rsi
+    pop rcx
+    pop rdi
+    mov edx, PY_EQ
+    call float_compare
+    push rax
+    push rdx
+    mov rdi, rax
+    mov rsi, rdx
+    call obj_is_true
+    mov ecx, eax
+    pop rdx
+    pop rdi
+    push rcx
+    mov rsi, rdx
+    DECREF_VAL rdi, rsi
+    pop rcx
+    test ecx, ecx
+    jnz .trc_elem_next
+    jmp .trc_elem_not_equal_nopop
+
+.trc_elem_not_equal:
+    add rsp, 32                     ; clean up 4 pushes
+.trc_elem_not_equal_nopop:
+    ; Elements at index i differ.
+    ; For EQ: return False. For NE: return True.
+    ; For ordering: compare these elements with the requested op.
+    mov ecx, [rbp - TRC_OP]
+    cmp ecx, PY_EQ
+    je .trc_return_false
+    cmp ecx, PY_NE
+    je .trc_return_true
+
+    ; Ordering ops: compare the differing elements with the actual op
+    mov rax, [rbp - TRC_IDX]
+    shl rax, 4
+
+    mov rdi, [rbp - TRC_LEFT]
+    mov rcx, [rdi + PyTupleObject.ob_item + rax + 8]   ; left_tag
+    mov rdi, [rdi + PyTupleObject.ob_item + rax]        ; left_payload
+
+    mov rsi, [rbp - TRC_RIGHT]
+    mov r8, [rsi + PyTupleObject.ob_item + rax + 8]    ; right_tag
+    mov rsi, [rsi + PyTupleObject.ob_item + rax]        ; right_payload
+
+    ; Resolve left type (again)
+    push rcx
+    push r8
+    cmp ecx, TAG_FLOAT
+    je .trc_order_float
+    cmp ecx, TAG_SMALLINT
+    je .trc_order_int_type
+    cmp ecx, TAG_BOOL
+    je .trc_order_bool_type
+    cmp ecx, TAG_NONE
+    je .trc_order_none_type
+    test rcx, rcx
+    js .trc_order_str_type
+    mov rax, [rdi + PyObject.ob_type]
+    jmp .trc_order_have_type
+.trc_order_int_type:
+    lea rax, [rel int_type]
+    jmp .trc_order_have_type
+.trc_order_bool_type:
+    lea rax, [rel bool_type]
+    jmp .trc_order_have_type
+.trc_order_none_type:
+    lea rax, [rel none_type]
+    jmp .trc_order_have_type
+.trc_order_str_type:
+    lea rax, [rel str_type]
+.trc_order_have_type:
+    mov rax, [rax + PyTypeObject.tp_richcompare]
+    test rax, rax
+    jz .trc_order_fallback
+    pop r8
+    pop rcx
+    mov edx, [rbp - TRC_OP]
+    call rax
+    leave
+    ret
+.trc_order_float:
+    pop r8
+    pop rcx
+    mov edx, [rbp - TRC_OP]
+    call float_compare
+    leave
+    ret
+.trc_order_fallback:
+    add rsp, 16                     ; clean up 2 pushes
+    jmp .trc_return_false
+
+.trc_elem_next:
+    inc qword [rbp - TRC_IDX]
+    jmp .trc_elem_loop
+
+.trc_elements_equal:
+    ; All min_len elements are equal.
+    ; Result depends on lengths and comparison op.
+    mov rcx, [rbp - TRC_LEFT]
+    mov rcx, [rcx + PyTupleObject.ob_size]    ; left_len
+    mov r8, [rbp - TRC_RIGHT]
+    mov r8, [r8 + PyTupleObject.ob_size]      ; right_len
+    mov edx, [rbp - TRC_OP]
+
+    cmp edx, PY_EQ
+    je .trc_len_eq
+    cmp edx, PY_NE
+    je .trc_len_ne
+    cmp edx, PY_LT
+    je .trc_len_lt
+    cmp edx, PY_LE
+    je .trc_len_le
+    cmp edx, PY_GT
+    je .trc_len_gt
+    ; PY_GE
+    cmp rcx, r8
+    jge .trc_return_true
+    jmp .trc_return_false
+
+.trc_len_eq:
+    cmp rcx, r8
+    je .trc_return_true
+    jmp .trc_return_false
+.trc_len_ne:
+    cmp rcx, r8
+    jne .trc_return_true
+    jmp .trc_return_false
+.trc_len_lt:
+    cmp rcx, r8
+    jl .trc_return_true
+    jmp .trc_return_false
+.trc_len_le:
+    cmp rcx, r8
+    jle .trc_return_true
+    jmp .trc_return_false
+.trc_len_gt:
+    cmp rcx, r8
+    jg .trc_return_true
+    jmp .trc_return_false
+
+.trc_return_true:
+    mov eax, 1
+    mov edx, TAG_BOOL
+    leave
+    ret
+
+.trc_return_false:
+    xor eax, eax
+    mov edx, TAG_BOOL
+    leave
+    ret
+
+.trc_not_impl:
+    ; Return NotImplemented (NULL) so COMPARE_OP can try right operand
+    RET_NULL
+    leave
+    ret
+
+END_FUNC tuple_richcompare
+
 section .data
 
 tuple_name_str: db "tuple", 0
@@ -549,7 +850,7 @@ tuple_type:
     dq 0                    ; tp_call
     dq 0                    ; tp_getattr
     dq 0                    ; tp_setattr
-    dq 0                    ; tp_richcompare
+    dq tuple_richcompare    ; tp_richcompare
     dq 0                    ; tp_iter (set by init_iter_types)
     dq 0                    ; tp_iternext
     dq 0                    ; tp_init

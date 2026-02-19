@@ -143,55 +143,29 @@ DEF_FUNC sre_match_new, MN_FRAME
     mov rax, [rdi + SRE_State.str_pos]
     mov [rcx + 8], rax
 
-    ; Copy remaining marks from state (marks[2..marks_count-1])
+    ; Copy state marks to match.marks[2..] (group 1+ data)
+    ; State marks[0] = MARK 0 from bytecode = group 1 start
+    ; State marks[1] = MARK 1 from bytecode = group 1 end
+    ; etc. These go into match.marks[2..] (after group 0 pair)
     mov r13, [rdi + SRE_State.marks_size]
     cmp r13, 0
     je .mn_no_marks
 
-    ; Copy state marks starting from index 2
+    ; Source: state marks from index 0
     mov rsi, [rdi + SRE_State.marks]
     lea rdi, [rcx + 16]       ; destination: after group 0 marks
 
-    ; Copy min(state.marks_size, r12 - 2) marks
-    mov rdx, r12
-    sub rdx, 2
-    cmp r13, rdx
-    jle .mn_copy_size_ok
-    mov r13, rdx
-.mn_copy_size_ok:
+    ; Count: min(state.marks_size, r12 - 2)
+    mov rcx, r12
+    sub rcx, 2
+    cmp r13, rcx
+    jle .mn_use_state_count
+    mov r13, rcx
+.mn_use_state_count:
     test r13, r13
     jle .mn_no_marks
-
-    ; state marks start at index 0, but they correspond to our marks[2..]
-    ; State marks: index 0 = mark 0, index 1 = mark 1, etc.
-    ; Our marks[2] = state marks[2], marks[3] = state marks[3], etc.
-    ; Actually, state marks correspond directly to MARK opcodes.
-    ; MARK 0, MARK 1 = group 0 (overall match) — but we already set those.
-    ; MARK 2, MARK 3 = group 1, etc.
-    ; So copy state marks [2..] to our marks [2..].
-    mov rsi, [rbp - MN_STATE]
-    mov rsi, [rsi + SRE_State.marks]
-    ; Check if state has marks starting at index 2
-    mov rax, [rbp - MN_STATE]
-    cmp qword [rax + SRE_State.marks_size], 2
-    jle .mn_no_marks
-    lea rsi, [rsi + 16]       ; skip marks 0 and 1 in state
+    shl r13, 3                 ; bytes
     mov rdx, r13
-    sub rdx, 0                ; total to copy
-    ; Actually: copy marks_size - 2 entries (or r12 - 2, whichever is less)
-    mov rax, [rbp - MN_STATE]
-    mov rcx, [rax + SRE_State.marks_size]
-    sub rcx, 2
-    mov rdx, r12
-    sub rdx, 2
-    cmp rcx, rdx
-    jle .mn_use_state_count
-    mov rcx, rdx
-.mn_use_state_count:
-    test rcx, rcx
-    jle .mn_no_marks
-    shl rcx, 3                 ; bytes
-    mov rdx, rcx
     call ap_memcpy
 
     ; Initialize any remaining marks to -1
@@ -212,7 +186,22 @@ DEF_FUNC sre_match_new, MN_FRAME
     jmp .mn_done
 
 .mn_init_remaining:
-    ; Check if there are unset marks at the end
+    ; Fill remaining marks (beyond what was copied) with -1
+    ; r13 = bytes copied, r12 = total marks_count
+    lea rdi, [rbx + SRE_MatchObject.marks + 16]
+    add rdi, r13               ; past copied marks
+    mov rcx, r12
+    sub rcx, 2
+    shl rcx, 3                ; total needed bytes
+    sub rcx, r13              ; remaining bytes
+    shr rcx, 3                ; remaining entries
+    test rcx, rcx
+    jle .mn_done
+.mn_fill_remaining:
+    mov qword [rdi], -1
+    add rdi, 8
+    dec rcx
+    jnz .mn_fill_remaining
 .mn_done:
     mov rax, rbx
     pop r13
@@ -281,10 +270,11 @@ END_FUNC sre_match_bool
 ; ============================================================================
 DEF_FUNC sre_match_get_group_str
     push rbx
+    push r12
+    push r13
     mov rbx, rdi               ; self
 
     ; Validate group index
-    mov eax, [rbx + SRE_MatchObject.pattern]
     mov rax, [rbx + SRE_MatchObject.pattern]
     mov ecx, [rax + SRE_PatternObject.groups]
     inc ecx                     ; groups + 1 (includes group 0)
@@ -294,22 +284,114 @@ DEF_FUNC sre_match_get_group_str
     ; Get marks for this group
     shl rsi, 1                  ; mark_start = group * 2
     lea rax, [rbx + SRE_MatchObject.marks]
-    mov r8, [rax + rsi*8]      ; start pos
-    mov r9, [rax + rsi*8 + 8]  ; end pos
+    mov r12, [rax + rsi*8]     ; start pos (codepoint index)
+    mov r13, [rax + rsi*8 + 8] ; end pos (codepoint index)
 
-    cmp r8, -1
+    cmp r12, -1
     je .group_none
-    cmp r9, -1
+    cmp r13, -1
     je .group_none
 
-    ; Create substring
+    ; Check if string has non-ASCII (scan for bytes >= 0x80)
+    mov rdi, [rbx + SRE_MatchObject.string]
+    mov rcx, [rdi + PyStrObject.ob_size]
+    lea rdi, [rdi + PyStrObject.data]
+    xor r8d, r8d
+.group_scan_ascii:
+    cmp r8, rcx
+    jge .group_ascii
+    cmp byte [rdi + r8], 0x80
+    jae .group_unicode
+    inc r8
+    jmp .group_scan_ascii
+
+.group_ascii:
+    ; ASCII mode: byte index = codepoint index
     mov rdi, [rbx + SRE_MatchObject.str_begin]
-    add rdi, r8                ; start ptr
-    mov rsi, r9
-    sub rsi, r8                ; length
+    add rdi, r12
+    mov rsi, r13
+    sub rsi, r12
     call str_new_heap
     mov edx, TAG_PTR
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
 
+.group_unicode:
+    ; Unicode mode: walk UTF-8 to find byte offsets for codepoint indices
+    mov rdi, [rbx + SRE_MatchObject.string]
+    mov rcx, [rdi + PyStrObject.ob_size]   ; total byte length
+    lea rdi, [rdi + PyStrObject.data]
+
+    ; Find byte offset for start codepoint index (r12)
+    xor r8d, r8d               ; byte offset
+    xor r9d, r9d               ; codepoint count
+.group_find_start:
+    cmp r9, r12
+    jge .group_found_start
+    cmp r8, rcx
+    jge .group_found_start
+    movzx eax, byte [rdi + r8]
+    cmp al, 0x80
+    jb .group_gs1
+    cmp al, 0xE0
+    jb .group_gs2
+    cmp al, 0xF0
+    jb .group_gs3
+    add r8, 4
+    jmp .group_gsinc
+.group_gs1:
+    inc r8
+    jmp .group_gsinc
+.group_gs2:
+    add r8, 2
+    jmp .group_gsinc
+.group_gs3:
+    add r8, 3
+.group_gsinc:
+    inc r9
+    jmp .group_find_start
+.group_found_start:
+    push r8                    ; save start byte offset
+    ; Find byte offset for end codepoint index (r13)
+.group_find_end:
+    cmp r9, r13
+    jge .group_found_end
+    cmp r8, rcx
+    jge .group_found_end
+    movzx eax, byte [rdi + r8]
+    cmp al, 0x80
+    jb .group_ge1
+    cmp al, 0xE0
+    jb .group_ge2
+    cmp al, 0xF0
+    jb .group_ge3
+    add r8, 4
+    jmp .group_geinc
+.group_ge1:
+    inc r8
+    jmp .group_geinc
+.group_ge2:
+    add r8, 2
+    jmp .group_geinc
+.group_ge3:
+    add r8, 3
+.group_geinc:
+    inc r9
+    jmp .group_find_end
+.group_found_end:
+    pop rax                    ; start byte offset
+    ; Create substring from byte offsets
+    mov rdi, [rbx + SRE_MatchObject.str_begin]
+    add rdi, rax
+    mov rsi, r8
+    sub rsi, rax
+    call str_new_heap
+    mov edx, TAG_PTR
+    pop r13
+    pop r12
     pop rbx
     leave
     ret
@@ -317,6 +399,8 @@ DEF_FUNC sre_match_get_group_str
 .group_none:
     xor eax, eax
     mov edx, TAG_NONE
+    pop r13
+    pop r12
     pop rbx
     leave
     ret
@@ -474,15 +558,32 @@ END_FUNC sre_match_group_method
 ; sre_match_groups_method(self, args, nargs)
 ; groups(default=None) — return all groups as a tuple.
 ; ============================================================================
-DEF_FUNC sre_match_groups_method
+GS_DEFAULT     equ 8
+GS_DEFAULT_TAG equ 16
+GS_FRAME       equ 16
+
+DEF_FUNC sre_match_groups_method, GS_FRAME
     ; rdi = args (fat array), rsi = nargs
     push rbx
     push r12
     push r13
+    push r14
+    push r15
 
     mov rbx, [rdi]             ; self = args[0] payload
     lea r12, [rdi + 16]        ; user args
     lea r13, [rsi - 1]         ; user nargs
+
+    ; default arg (default = None)
+    xor eax, eax
+    mov edx, TAG_NONE
+    cmp r13, 1
+    jb .groups_no_default
+    mov rax, [r12]             ; default payload
+    mov edx, [r12 + 8]        ; default tag
+.groups_no_default:
+    mov [rbp - GS_DEFAULT], rax
+    mov [rbp - GS_DEFAULT_TAG], rdx
 
     ; Get number of groups
     mov rax, [rbx + SRE_MatchObject.pattern]
@@ -498,17 +599,22 @@ DEF_FUNC sre_match_groups_method
     push rax                   ; save tuple
 
     ; Fill groups 1..groups
-    mov r13d, ecx              ; total groups
+    mov r14d, ecx              ; total groups
     mov ecx, 1                 ; start from group 1
 .groups_loop:
-    cmp ecx, r13d
+    cmp ecx, r14d
     ja .groups_done
     push rcx
     mov rdi, rbx
     mov rsi, rcx
     call sre_match_get_group_str
-    ; If None and default was given, use default
-    ; For now, just use None
+    ; If None and default was given, substitute default
+    cmp edx, TAG_NONE
+    jne .groups_use_val
+    ; Use default instead of None
+    mov rax, [rbp - GS_DEFAULT]
+    mov edx, [rbp - GS_DEFAULT_TAG]
+.groups_use_val:
     pop rcx
     push rcx
     ; Inline tuple_set: tuple.ob_item[group-1] = (rax, edx)
@@ -527,6 +633,8 @@ DEF_FUNC sre_match_groups_method
 .groups_done:
     pop rax                    ; tuple
     mov edx, TAG_PTR
+    pop r15
+    pop r14
     pop r13
     pop r12
     pop rbx
@@ -538,6 +646,8 @@ DEF_FUNC sre_match_groups_method
     xor edi, edi
     call tuple_new
     mov edx, TAG_PTR
+    pop r15
+    pop r14
     pop r13
     pop r12
     pop rbx
@@ -704,12 +814,14 @@ END_FUNC sre_match_span_method
 ; sre_match_groupdict_method(self, args, nargs)
 ; groupdict(default=None) -> dict of named groups
 ; ============================================================================
-GD_SELF     equ 8
-GD_RESULT   equ 16
-GD_ENTRIES  equ 24
-GD_IDX      equ 32
-GD_CAP      equ 40
-GD_FRAME    equ 40
+GD_SELF        equ 8
+GD_RESULT      equ 16
+GD_ENTRIES     equ 24
+GD_IDX         equ 32
+GD_CAP         equ 40
+GD_DEFAULT     equ 48
+GD_DEFAULT_TAG equ 56
+GD_FRAME       equ 56
 
 DEF_FUNC sre_match_groupdict_method, GD_FRAME
     ; rdi = args (fat array), rsi = nargs
@@ -720,6 +832,18 @@ DEF_FUNC sre_match_groupdict_method, GD_FRAME
 
     mov rax, [rdi]             ; self = args[0] payload
     mov [rbp - GD_SELF], rax
+
+    ; default arg (default = None)
+    xor ecx, ecx
+    mov r8d, TAG_NONE
+    lea rdx, [rsi - 1]        ; user nargs
+    cmp rdx, 1
+    jb .gd_no_default
+    mov rcx, [rdi + 16]       ; default payload
+    mov r8d, [rdi + 24]       ; default tag
+.gd_no_default:
+    mov [rbp - GD_DEFAULT], rcx
+    mov [rbp - GD_DEFAULT_TAG], r8
 
     ; Create result dict
     call dict_new
@@ -767,6 +891,12 @@ DEF_FUNC sre_match_groupdict_method, GD_FRAME
     mov rdi, [rbp - GD_SELF]
     call sre_match_get_group_str
     ; rax = val payload, edx = val tag
+    ; If None, substitute default
+    cmp edx, TAG_NONE
+    jne .gd_use_val
+    mov rax, [rbp - GD_DEFAULT]
+    mov edx, [rbp - GD_DEFAULT_TAG]
+.gd_use_val:
 
     ; dict_set(result, name, val, val_tag, name_tag)
     push rax

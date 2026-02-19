@@ -366,6 +366,27 @@ DEF_FUNC sre_getlower_func
 END_FUNC sre_getlower_func
 
 ; ============================================================================
+; sre_template_func(PyObject **args, int64_t nargs) -> (rax, edx)
+; _sre.template(pattern, template) -> template (passthrough stub)
+; CPython uses this for optimized sub replacement expansion.
+; We return the template list/string as-is; re module handles expansion.
+; ============================================================================
+DEF_FUNC sre_template_func
+    cmp rsi, 2
+    jb .tmpl_error
+    ; Return the template argument (args[1]) with INCREF
+    mov rax, [rdi + 16]       ; template payload
+    mov edx, [rdi + 24]       ; template tag
+    INCREF_VAL rax, rdx
+    leave
+    ret
+.tmpl_error:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "template() requires 2 arguments"
+    call raise_exception
+END_FUNC sre_template_func
+
+; ============================================================================
 ; sre_getcodesize_func(PyObject **args, int64_t nargs) -> (rax, edx)
 ; _sre.getcodesize() -> 4
 ; ============================================================================
@@ -530,6 +551,25 @@ DEF_FUNC sre_module_create, SMC_FRAME
     pop rdi
     call obj_decref
 
+    ; --- Add template ---
+    lea rdi, [rel sre_template_func]
+    lea rsi, [rel sm_template]
+    call builtin_func_new
+    push rax
+    lea rdi, [rel sm_template]
+    call str_from_cstr_heap
+    push rax
+    mov rdi, r12
+    mov rsi, rax
+    mov rdx, [rsp + 8]
+    mov ecx, TAG_PTR
+    mov r8d, TAG_PTR
+    call dict_set
+    pop rdi
+    call obj_decref
+    pop rdi
+    call obj_decref
+
     ; --- Add constants ---
     ; MAGIC
     lea rdi, [rel sm_MAGIC]
@@ -631,6 +671,7 @@ sm_unicode_tolower: db "unicode_tolower", 0
 sm_getlower:        db "getlower", 0
 sm_getcodesize:     db "getcodesize", 0
 
+sm_template:        db "template", 0
 sm_MAGIC:           db "MAGIC", 0
 sm_CODESIZE:        db "CODESIZE", 0
 sm_MAXREPEAT:       db "MAXREPEAT", 0

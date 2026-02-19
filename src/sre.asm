@@ -851,9 +851,22 @@ DEF_FUNC sre_state_init, 48
     ; Pure ASCII: str_begin/str_end are byte ptrs, charsize=1
     ; String length in chars = byte length
     mov rax, [r13 + PyStrObject.ob_size]
-    mov [rbx + SRE_State.codepoint_len], rax
 
-    ; Clamp pos and endpos
+    ; Clamp effective length with endpos
+    mov rcx, [rbp - 8]        ; endpos
+    cmp rcx, 0
+    jl .ascii_endpos_done
+    cmp rcx, rax
+    jge .ascii_endpos_done
+    mov rax, rcx               ; effective length = endpos
+.ascii_endpos_done:
+    mov [rbx + SRE_State.codepoint_len], rax
+    ; Update str_end to reflect endpos
+    mov rcx, [rbx + SRE_State.str_begin]
+    add rcx, rax
+    mov [rbx + SRE_State.str_end], rcx
+
+    ; Clamp pos
     cmp r14, 0
     jge .pos_ok
     xor r14d, r14d
@@ -872,6 +885,8 @@ DEF_FUNC sre_state_init, 48
     ; UTF-8 decode to u32 codepoint array
     mov rdi, [rbx + SRE_State.str_begin]
     mov rsi, [r13 + PyStrObject.ob_size]
+    mov rax, [rbp - 8]        ; save endpos before clobbering
+    mov [rbp - 24], rax        ; endpos in [rbp-24]
     mov [rbp - 8], rbx         ; save state ptr
     mov [rbp - 16], rsi        ; save byte length
 
@@ -952,9 +967,17 @@ DEF_FUNC sre_state_init, 48
     jmp .utf8_decode
 
 .utf8_done:
+    ; Clamp codepoint_len with endpos
+    mov rcx, [rbp - 24]       ; endpos (saved before clobber)
+    cmp rcx, 0
+    jl .uni_endpos_done
+    cmp rcx, r8
+    jge .uni_endpos_done
+    mov r8, rcx                ; effective length = endpos
+.uni_endpos_done:
     mov [rbx + SRE_State.codepoint_len], r8
 
-    ; Clamp pos and endpos for Unicode
+    ; Clamp pos for Unicode
     cmp r14, 0
     jge .upos_ok
     xor r14d, r14d
@@ -1399,27 +1422,10 @@ DEF_FUNC sre_match, SM_MFRAME
     test eax, eax
     jz .op_failure
     ; Advance pc past the set
-    mov eax, [rbx - 4]        ; skip offset (from IN+4 position)
-    ; IN format: IN skip [set data] — skip includes IN opcode word
-    ; pc was advanced past IN and skip, now need to go to IN + skip*4
-    mov rbx, [rbp - SM_PATTERN]
-    ; Actually, the skip is relative to the start of the IN opcode
-    ; Let me reconsider: pc = after IN skip, pointing at set data
-    ; skip = number of u32 words from IN opcode to past the set
-    ; So target = IN_opcode_addr + skip*4
-    ; IN_opcode_addr = rbx - 8 (backed up past opcode + skip)
-    ; Hmm, this is getting complex. Let me just advance past set using FAILURE terminator
-    ; Actually CPython's format: IN skip <set_ops> FAILURE
-    ; skip is relative offset from IN, in u32 words
-    ; target pc = &IN + skip*4
-    ; We need the original IN address. Let me recalculate.
-    ; We entered .op_in with rbx pointing past IN opcode (at skip offset)
-    ; So IN addr = rbx - 4
-    ; After reading skip: rbx = IN addr + 8 (past IN + skip)
-    ; Target = IN addr + skip*4 = (rbx - 8) + skip*4
-    lea rbx, [rbx - 8]        ; back to IN addr
-    mov eax, [rbx + 4]        ; re-read skip
-    lea rbx, [rbx + rax*4]    ; advance past set
+    ; rbx = skip_word_addr + 4 (set data start, preserved through calls)
+    ; CPython: advance skip words from skip_word position
+    mov eax, [rbx - 4]        ; re-read skip value
+    lea rbx, [rbx + rax*4 - 4] ; skip_word_addr + skip*4
     inc r13
     jmp .dispatch
 
@@ -1452,24 +1458,26 @@ DEF_FUNC sre_match, SM_MFRAME
     xor eax, r14d
     test eax, eax
     jz .op_failure
-    lea rbx, [rbx - 8]
-    mov eax, [rbx + 4]
-    lea rbx, [rbx + rax*4]
+    ; rbx = skip_word_addr + 4, same fix as .op_in
+    mov eax, [rbx - 4]        ; re-read skip
+    lea rbx, [rbx + rax*4 - 4] ; skip_word_addr + skip*4
     inc r13
     jmp .dispatch
 
 .op_info:
     ; INFO skip ... — skip past info block
-    mov eax, [rbx]             ; skip (u32 words from INFO opcode)
-    lea rbx, [rbx - 4]        ; back to INFO addr
-    lea rbx, [rbx + rax*4]    ; advance past info
+    ; rbx points to skip word (already past INFO opcode)
+    ; Need to advance skip*4 bytes from here: rbx + skip*4 = INFO + (1+skip)*4
+    mov eax, [rbx]             ; skip (u32 words after INFO opcode)
+    lea rbx, [rbx + rax*4]    ; advance past info block
     jmp .dispatch
 
 .op_jump:
     ; JUMP offset — relative jump
-    mov eax, [rbx]             ; offset from JUMP opcode
-    lea rbx, [rbx - 4]        ; back to JUMP addr
-    lea rbx, [rbx + rax*4]    ; new pc
+    ; rbx points to offset word (already past JUMP opcode)
+    ; CPython: ctx->pattern += ctx->pattern[0] (from offset word position)
+    mov eax, [rbx]             ; offset
+    lea rbx, [rbx + rax*4]    ; offset_addr + offset*4 = target
     jmp .dispatch
 
 .op_mark:
@@ -1667,10 +1675,9 @@ DEF_FUNC sre_match, SM_MFRAME
 .gre_not_matched:
     pop rcx                    ; jump offset
     pop rbx
-    ; Jump to else branch
-    lea rbx, [rbx - 8]        ; back to GROUPREF_EXISTS opcode addr + 4
-    lea rbx, [rbx - 4]        ; back to opcode addr
-    lea rbx, [rbx + rcx*4]    ; jump
+    ; rbx = group_id_addr + 8 (past both args)
+    ; CPython: pattern += skip from group_id position
+    lea rbx, [rbx + rcx*4 - 8] ; group_id_addr + skip*4
     jmp .dispatch
 
 .op_subpattern:
@@ -1750,13 +1757,10 @@ DEF_FUNC sre_match, SM_MFRAME
     pop r13                    ; restore pos (body failed)
 .ro_greedy_done:
     ; Now try tail (pattern after REPEAT_ONE body)
-    ; Tail starts at REPEAT_ONE addr + skip*4
-    ; REPEAT_ONE addr = rbx - 12 - 4 = rbx - 16
-    ; Wait: we entered with rbx pointing past opcode, then read skip/min/max and advanced +12
-    ; So body pattern = rbx (current). REPEAT_ONE addr = rbx - 16
-    ; Tail = REPEAT_ONE_addr + skip*4
-
-    lea rcx, [rbx - 16]       ; REPEAT_ONE opcode addr
+    ; Tail starts at skip_word_addr + skip*4
+    ; rbx = skip_word_addr + 12 (past skip/min/max)
+    ; CPython: ctx->pattern += ctx->pattern[0] from skip_word_addr
+    lea rcx, [rbx - 12]       ; skip_word_addr
     mov eax, r14d              ; skip
     lea r14, [rcx + rax*4]    ; tail pattern
 
@@ -1832,9 +1836,10 @@ DEF_FUNC sre_match, SM_MFRAME
 .mro_min_done:
 
     ; Calculate tail
+    ; rbx = skip_word_addr + 12
     mov eax, r14d
-    lea r14, [rbx - 16]
-    lea r14, [r14 + rax*4]
+    lea r14, [rbx - 12]          ; skip_word_addr
+    lea r14, [r14 + rax*4]       ; skip_word_addr + skip*4
 
     ; Non-greedy: try tail first, then extend
     mov r9d, [rbx - 8]        ; re-read min (ecx may be clobbered)
@@ -1907,10 +1912,11 @@ DEF_FUNC sre_match, SM_MFRAME
     mov r15, rax
     mov [r12 + SRE_State.repeat_ctx], r15
 
-    ; Pattern after REPEAT = REPEAT_addr + skip*4
-    ; REPEAT addr = rbx - 16, skip at rbx - 12
+    ; Pattern after REPEAT = skip_word_addr + skip*4
+    ; rbx = skip_word_addr + 12 (past skip/min/max)
+    ; CPython: ctx->pattern += ctx->pattern[0] from skip_word_addr
     mov eax, [rbx - 12]
-    lea rbx, [rbx - 16 + rax*4]
+    lea rbx, [rbx - 12 + rax*4]
 
     ; Continue dispatch — MAX_UNTIL or MIN_UNTIL will handle the body
     jmp .dispatch
@@ -2136,9 +2142,10 @@ DEF_FUNC sre_match, SM_MFRAME
     test eax, eax
     jz .op_failure
     ; Advance past assert body
+    ; rbx = skip_word_addr + 12 (past skip/dir/width)
+    ; CPython: ctx->pattern += ctx->pattern[0] from skip_word_addr
     mov eax, [rbx - 12]       ; skip
-    lea rbx, [rbx - 16]       ; back to ASSERT addr
-    lea rbx, [rbx + rax*4]
+    lea rbx, [rbx - 12 + rax*4]
     jmp .dispatch
 
 .assert_ahead:
@@ -2154,8 +2161,7 @@ DEF_FUNC sre_match, SM_MFRAME
     test eax, eax
     jz .op_failure
     mov eax, [rbx - 12]
-    lea rbx, [rbx - 16]
-    lea rbx, [rbx + rax*4]
+    lea rbx, [rbx - 12 + rax*4]
     jmp .dispatch
 
 .op_assert_not:
@@ -2196,9 +2202,9 @@ DEF_FUNC sre_match, SM_MFRAME
     jnz .op_failure            ; matched — negative assertion fails
 
 .assert_not_pass:
+    ; rbx = skip_word_addr + 12
     mov eax, [rbx - 12]
-    lea rbx, [rbx - 16]
-    lea rbx, [rbx + rax*4]
+    lea rbx, [rbx - 12 + rax*4]
     jmp .dispatch
 
 .op_atomic_group:
@@ -2215,9 +2221,10 @@ DEF_FUNC sre_match, SM_MFRAME
     jz .atomic_fail
     mov r13, [r12 + SRE_State.str_pos]
     ; Advance past body
-    lea rbx, [rbx - 8]        ; ATOMIC_GROUP addr
-    mov eax, [rbx + 4]        ; skip
-    lea rbx, [rbx + rax*4]
+    ; rbx = skip_word_addr + 4 (body start)
+    ; CPython: ctx->pattern += ctx->pattern[0] from skip_word_addr
+    mov eax, [rbx - 4]        ; skip
+    lea rbx, [rbx - 4 + rax*4]
     jmp .dispatch
 .atomic_fail:
     mov r13, r14               ; restore position
@@ -2285,10 +2292,11 @@ DEF_FUNC sre_match, SM_MFRAME
     pop r13
 .pr_greedy_done:
     ; Continue with tail (no backtracking into body)
+    ; rbx = skip_word_addr + 12
     add rsp, 8                 ; discard initial saved pos
-    lea rcx, [rbx - 16]
+    lea rcx, [rbx - 12]       ; skip_word_addr
     mov eax, r14d
-    lea rbx, [rcx + rax*4]
+    lea rbx, [rcx + rax*4]    ; skip_word_addr + skip*4
     jmp .dispatch
 
 .pr_fail:
@@ -2356,10 +2364,11 @@ DEF_FUNC sre_match, SM_MFRAME
 .pro_greedy_stop:
     pop r13
 .pro_greedy_done:
+    ; rbx = skip_word_addr + 12
     add rsp, 8                 ; discard initial pos
-    lea rcx, [rbx - 16]
+    lea rcx, [rbx - 12]       ; skip_word_addr
     mov eax, r14d
-    lea rbx, [rcx + rax*4]
+    lea rbx, [rcx + rax*4]    ; skip_word_addr + skip*4
     jmp .dispatch
 
 .pro_fail:
