@@ -650,7 +650,7 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     mov rdi, [rbx + PyObject.ob_type]
     CSTRING rsi, "__int__"
     call dunder_lookup
-    test rax, rax
+    test edx, edx
     jz .int_from_int_sub_extract ; no __int__, extract int_value
     ; Call __int__(self) — rax = func (borrowed ref)
     mov rcx, [rax + PyObject.ob_type]
@@ -704,21 +704,21 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     mov rdi, [rbx + PyObject.ob_type]
     CSTRING rsi, "__int__"
     call dunder_lookup
-    test rax, rax
+    test edx, edx
     jnz .int_call_dunder
 
     ; Try __index__ protocol
     mov rdi, [rbx + PyObject.ob_type]
     CSTRING rsi, "__index__"
     call dunder_lookup
-    test rax, rax
+    test edx, edx
     jnz .int_call_dunder
 
     ; Try __trunc__ protocol
     mov rdi, [rbx + PyObject.ob_type]
     CSTRING rsi, "__trunc__"
     call dunder_lookup
-    test rax, rax
+    test edx, edx
     jnz .int_call_dunder_trunc
 
     jmp .int_type_error
@@ -798,7 +798,7 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     mov rdi, [rax + PyObject.ob_type]
     CSTRING rsi, "__index__"
     call dunder_lookup
-    test rax, rax
+    test edx, edx
     jnz .int_call_trunc_index
     ; No __index__ — raise TypeError with type name
     ; Get type name from __trunc__ result
@@ -983,7 +983,7 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     mov rdi, rcx                  ; type
     CSTRING rsi, "__index__"
     call dunder_lookup
-    test rax, rax
+    test edx, edx
     jz .int_base_no_index
     ; Call __index__(base_obj)
     mov rcx, [rax + PyObject.ob_type]

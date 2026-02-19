@@ -652,6 +652,56 @@ DEF_FUNC property_descr_set
 END_FUNC property_descr_set
 
 ;; ============================================================================
+;; member_descr_new(i64 offset, PyStrObject *name) -> PyMemberDescrObject*
+;; Create a member descriptor for a __slots__ slot.
+;; rdi = byte offset in instance, rsi = slot name (INCREF'd, ownership taken)
+;; ============================================================================
+global member_descr_new
+DEF_FUNC member_descr_new
+    push rbx
+    push r12
+
+    mov rbx, rdi            ; offset
+    mov r12, rsi            ; name str
+
+    mov edi, PyMemberDescrObject_size
+    call ap_malloc
+
+    mov qword [rax + PyMemberDescrObject.ob_refcnt], 1
+    lea rcx, [rel member_descr_type]
+    mov [rax + PyMemberDescrObject.ob_type], rcx
+    mov [rax + PyMemberDescrObject.md_offset], rbx
+    mov [rax + PyMemberDescrObject.md_name], r12
+
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC member_descr_new
+
+;; member_descr_dealloc(PyMemberDescrObject *self)
+global member_descr_dealloc
+DEF_FUNC member_descr_dealloc
+    push rbx
+    mov rbx, rdi
+
+    ; DECREF name string
+    mov rdi, [rbx + PyMemberDescrObject.md_name]
+    test rdi, rdi
+    jz .md_no_name
+    call obj_decref
+.md_no_name:
+
+    ; Free self
+    mov rdi, rbx
+    call ap_free
+
+    pop rbx
+    leave
+    ret
+END_FUNC member_descr_dealloc
+
+;; ============================================================================
 ;; Data section
 ;; ============================================================================
 section .data
@@ -746,6 +796,36 @@ property_type:
     dq 0                        ; tp_mro
     dq 0                        ; tp_flags
     dq 0                        ; tp_bases
+
+; member_descr_type - type descriptor for __slots__ member descriptors
+md_name_str: db "member_descriptor", 0
+align 8
+global member_descr_type
+member_descr_type:
+    dq 1                            ; ob_refcnt (immortal)
+    dq type_type                    ; ob_type
+    dq md_name_str                  ; tp_name
+    dq PyMemberDescrObject_size     ; tp_basicsize
+    dq member_descr_dealloc         ; tp_dealloc
+    dq 0                            ; tp_repr
+    dq 0                            ; tp_str
+    dq 0                            ; tp_hash
+    dq 0                            ; tp_call
+    dq 0                            ; tp_getattr
+    dq 0                            ; tp_setattr
+    dq 0                            ; tp_richcompare
+    dq 0                            ; tp_iter
+    dq 0                            ; tp_iternext
+    dq 0                            ; tp_init
+    dq 0                            ; tp_new
+    dq 0                            ; tp_as_number
+    dq 0                            ; tp_as_sequence
+    dq 0                            ; tp_as_mapping
+    dq 0                            ; tp_base
+    dq 0                            ; tp_dict
+    dq 0                            ; tp_mro
+    dq 0                            ; tp_flags
+    dq 0                            ; tp_bases
 
 ; Cached builtin function singletons for property.setter/getter/deleter
 _prop_setter_cache: dq 0

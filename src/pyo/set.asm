@@ -1120,6 +1120,18 @@ set_number_methods:
     dq 0                        ; nb_floor_divide +144
     dq 0                        ; nb_true_divide  +152
     dq 0                        ; nb_index        +160
+    dq 0                        ; nb_iadd         +168
+    dq 0                        ; nb_isub         +176
+    dq 0                        ; nb_imul         +184
+    dq 0                        ; nb_irem         +192
+    dq 0                        ; nb_ipow         +200
+    dq 0                        ; nb_ilshift      +208
+    dq 0                        ; nb_irshift      +216
+    dq 0                        ; nb_iand         +224
+    dq 0                        ; nb_ixor         +232
+    dq 0                        ; nb_ior          +240
+    dq 0                        ; nb_ifloor_divide +248
+    dq 0                        ; nb_itrue_divide +256
 
 ; Set sequence methods (for sq_contains -> "in" operator, and sq_length -> len())
 align 8

@@ -1445,6 +1445,219 @@ DEF_FUNC str_method_format
 END_FUNC str_method_format
 
 ;; ============================================================================
+;; str_method_format_map(args, nargs) -> formatted string
+;; args[0]=self (format string), args[1]=mapping (dict)
+;; Replaces {key} with mapping[key].
+;; ============================================================================
+FM_ARGS   equ 8
+FM_MAP    equ 16
+FM_BUF    equ 24
+FM_USED   equ 32
+FM_CAP    equ 40
+FM_FRAME  equ 48
+
+DEF_FUNC str_method_format_map, FM_FRAME
+    push rbx
+    push r12
+    push r13
+    push r14
+    push r15
+
+    cmp rsi, 2
+    jne .fmap_error
+
+    mov [rbp - FM_ARGS], rdi
+    mov rax, [rdi]              ; self = format string
+    mov rcx, [rdi + 16]         ; mapping dict
+    mov [rbp - FM_MAP], rcx
+
+    lea r12, [rax + PyStrObject.data]   ; r12 = fmt data
+    mov r13d, [rax + PyStrObject.ob_size] ; r13 = fmt len
+
+    ; Allocate output buffer
+    lea rdi, [r13 + 64]
+    call ap_malloc
+    mov [rbp - FM_BUF], rax
+    mov qword [rbp - FM_USED], 0
+    lea rax, [r13 + 64]
+    mov [rbp - FM_CAP], rax
+
+    xor ecx, ecx               ; source index
+
+.fmap_loop:
+    cmp ecx, r13d
+    jge .fmap_done
+    movzx eax, byte [r12 + rcx]
+    cmp al, '{'
+    je .fmap_brace
+    cmp al, '}'
+    je .fmap_close_brace
+
+    ; Regular char — append
+    push rcx
+    mov rdi, [rbp - FM_BUF]
+    mov rax, [rbp - FM_USED]
+    movzx edx, byte [r12 + rcx]
+    mov [rdi + rax], dl
+    inc qword [rbp - FM_USED]
+    pop rcx
+    inc ecx
+    jmp .fmap_loop
+
+.fmap_brace:
+    inc ecx
+    cmp ecx, r13d
+    jge .fmap_done
+    movzx eax, byte [r12 + rcx]
+    cmp al, '{'
+    je .fmap_literal_open
+
+    ; Extract key name until '}'
+    mov r14d, ecx              ; key start
+.fmap_key_scan:
+    cmp ecx, r13d
+    jge .fmap_done
+    movzx eax, byte [r12 + rcx]
+    cmp al, '}'
+    je .fmap_have_key
+    inc ecx
+    jmp .fmap_key_scan
+
+.fmap_have_key:
+    ; Key is from r14 to ecx (exclusive)
+    push rcx
+    inc ecx                     ; skip '}'
+    push rcx                    ; save next source pos
+
+    ; Create key string
+    lea rdi, [r12 + r14]
+    mov esi, ecx
+    dec esi
+    sub esi, r14d               ; key length
+    movzx esi, si               ; zero-extend
+    call str_new_heap
+    push rax                    ; save key str
+
+    ; Look up in mapping: dict_get(dict, key, key_tag)
+    mov rdi, [rbp - FM_MAP]
+    mov rsi, rax
+    mov edx, TAG_PTR
+    call dict_get
+    ; rax = value payload, edx = value tag
+    push rax
+    push rdx
+
+    ; DECREF key
+    mov rdi, [rsp + 16]         ; key str
+    call obj_decref
+
+    ; Convert value to string
+    pop rsi                     ; value tag
+    pop rdi                     ; value payload
+    call obj_str
+    ; rax = result payload, edx = tag
+
+    ; Spill SmallStr result to heap
+    test rdx, rdx
+    jns .fmap_heap_val
+    mov rdi, rax
+    mov rsi, rdx
+    call smallstr_to_obj
+.fmap_heap_val:
+    push rax                    ; save str obj for DECREF
+
+    ; Copy string data to buffer
+    mov edx, [rax + PyStrObject.ob_size]
+    ; Ensure buffer space
+    mov rdi, [rbp - FM_USED]
+    add rdi, rdx
+    cmp rdi, [rbp - FM_CAP]
+    jbe .fmap_copy_ok
+    mov rdi, [rbp - FM_CAP]
+    shl rdi, 1
+    add rdi, rdx
+    mov [rbp - FM_CAP], rdi
+    push rdx
+    mov rsi, rdi
+    mov rdi, [rbp - FM_BUF]
+    call ap_realloc
+    mov [rbp - FM_BUF], rax
+    pop rdx
+    mov rax, [rsp]              ; re-read str obj
+.fmap_copy_ok:
+    test edx, edx
+    jz .fmap_val_done
+    push rdx
+    mov rdi, [rbp - FM_BUF]
+    add rdi, [rbp - FM_USED]
+    lea rsi, [rax + PyStrObject.data]
+    movzx edx, dx
+    call ap_memcpy
+    pop rdx
+    movzx eax, dx
+    add [rbp - FM_USED], rax
+
+.fmap_val_done:
+    ; DECREF temp str
+    pop rdi
+    call obj_decref
+    pop rax                     ; discard saved key str slot
+    pop rcx                     ; next source pos
+    pop rax                     ; discard saved old ecx
+    jmp .fmap_loop
+
+.fmap_literal_open:
+    push rcx
+    mov rdi, [rbp - FM_BUF]
+    mov rax, [rbp - FM_USED]
+    mov byte [rdi + rax], '{'
+    inc qword [rbp - FM_USED]
+    pop rcx
+    inc ecx
+    jmp .fmap_loop
+
+.fmap_close_brace:
+    inc ecx
+    cmp ecx, r13d
+    jge .fmap_done
+    movzx eax, byte [r12 + rcx]
+    cmp al, '}'
+    jne .fmap_loop
+    push rcx
+    mov rdi, [rbp - FM_BUF]
+    mov rax, [rbp - FM_USED]
+    mov byte [rdi + rax], '}'
+    inc qword [rbp - FM_USED]
+    pop rcx
+    inc ecx
+    jmp .fmap_loop
+
+.fmap_done:
+    mov rdi, [rbp - FM_BUF]
+    mov rsi, [rbp - FM_USED]
+    call str_new_heap
+    push rax
+
+    mov rdi, [rbp - FM_BUF]
+    call ap_free
+
+    pop rax
+    mov edx, TAG_PTR
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.fmap_error:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "format_map() takes exactly one argument"
+    call raise_exception
+END_FUNC str_method_format_map
+
+;; ============================================================================
 ;; str_method_lstrip(args, nargs) -> new string with left whitespace removed
 ;; args[0] = self (PyStrObject*)
 ;; ============================================================================
@@ -3517,6 +3730,120 @@ DEF_FUNC str_method_translate
     leave
     ret
 END_FUNC str_method_translate
+
+;; ============================================================================
+;; str_staticmethod_maketrans(args, nargs) -> dict
+;; 2-arg form: maketrans(x, y) where x and y are strings of equal length
+;; Returns dict mapping ord(x[i]) -> ord(y[i])
+;; Note: called as staticmethod, so no 'self' arg.
+;; ============================================================================
+SMT_FROM  equ 8
+SMT_TO    equ 16
+SMT_FRAME equ 24
+
+DEF_FUNC str_staticmethod_maketrans, SMT_FRAME
+    push rbx
+    push r12
+    push r13
+
+    cmp rsi, 2
+    jne .smt_error
+
+    ; Get from and to strings
+    mov rax, [rdi + 8]             ; args[0] tag
+    mov rcx, [rdi]                 ; args[0] payload (from str)
+    ; SmallStr: spill
+    test rax, rax
+    js .smt_spill_from
+    jmp .smt_from_ok
+.smt_spill_from:
+    push rdi
+    mov rdi, rcx
+    mov rsi, rax
+    call smallstr_to_obj
+    pop rdi
+    mov rcx, rax
+.smt_from_ok:
+    mov [rbp - SMT_FROM], rcx
+
+    mov rax, [rdi + 24]            ; args[1] tag
+    mov rcx, [rdi + 16]            ; args[1] payload (to str)
+    test rax, rax
+    js .smt_spill_to
+    jmp .smt_to_ok
+.smt_spill_to:
+    push rdi
+    mov rdi, rcx
+    mov rsi, rax
+    call smallstr_to_obj
+    pop rdi
+    mov rcx, rax
+.smt_to_ok:
+    mov [rbp - SMT_TO], rcx
+
+    ; Check equal lengths
+    mov rax, [rbp - SMT_FROM]
+    mov rcx, [rbp - SMT_TO]
+    mov r12, [rax + PyStrObject.ob_size]
+    cmp r12, [rcx + PyStrObject.ob_size]
+    jne .smt_len_error
+
+    ; Create result dict
+    call dict_new
+    mov rbx, rax                    ; result dict
+
+    ; For each character position, map ord(from[i]) -> ord(to[i])
+    xor r13d, r13d                  ; index
+.smt_loop:
+    cmp r13, r12
+    jge .smt_done
+
+    ; Get from char ordinal
+    mov rax, [rbp - SMT_FROM]
+    movzx edi, byte [rax + PyStrObject.data + r13]
+    ; Get to char ordinal
+    mov rax, [rbp - SMT_TO]
+    movzx esi, byte [rax + PyStrObject.data + r13]
+
+    ; dict_set(dict, key=ord_from, value=ord_to, value_tag=SMALLINT, key_tag=SMALLINT)
+    push r13
+    mov rdi, rbx                    ; dict
+    ; rsi already = to ordinal (value becomes SmallInt)
+    mov rdx, rsi                    ; value = to ordinal
+    movzx esi, byte [rax + PyStrObject.data + r13] ; recalc — but we need from ordinal as key
+    ; Actually: rdi=dict, rsi=key, rdx=value, rcx=value_tag, r8=key_tag
+    mov rcx, [rbp - SMT_FROM]
+    movzx esi, byte [rcx + PyStrObject.data + r13]  ; key = from ordinal
+    mov rax, [rbp - SMT_TO]
+    movzx edx, byte [rax + PyStrObject.data + r13]  ; value = to ordinal
+    mov ecx, TAG_SMALLINT           ; value_tag
+    mov r8d, TAG_SMALLINT           ; key_tag
+    call dict_set
+    pop r13
+
+    inc r13
+    jmp .smt_loop
+
+.smt_done:
+    mov rax, rbx
+    mov edx, TAG_PTR
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.smt_error:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "maketrans requires 2 string arguments"
+    call raise_exception
+
+.smt_len_error:
+    lea rdi, [rel exc_ValueError_type]
+    CSTRING rsi, "maketrans arguments must have equal length"
+    call raise_exception
+END_FUNC str_staticmethod_maketrans
+
 ;; args[0]=self, args[1]=prefix
 ;; If self starts with prefix, return self[len(prefix):], else return self.
 ;; ============================================================================
@@ -4097,6 +4424,8 @@ DEF_FUNC list_method_sort, LS_FRAME
     je .sort_float_type
     test r8, r8
     js .sort_smallstr_type            ; SmallStr: bit 63 set
+    test r8d, TAG_RC_BIT
+    jz .sort_no_swap                 ; TAG_NONE/TAG_BOOL: skip comparison
     mov rax, [rdi + PyObject.ob_type]
     jmp .sort_have_type
 .sort_smallstr_type:
@@ -4227,6 +4556,8 @@ DEF_FUNC list_method_index
     je .index_next           ; list item is SmallInt
     test r8, r8
     js .index_next           ; list item is SmallStr
+    test r8d, TAG_RC_BIT
+    jz .index_next           ; TAG_NONE/TAG_BOOL/TAG_FLOAT: skip
     mov rax, [rdi + PyObject.ob_type]
     lea r8, [rel str_type]
     cmp rax, r8
@@ -4309,6 +4640,8 @@ DEF_FUNC list_method_count, LC_FRAME
     je .count_eq_float
     test r8, r8
     js .count_next            ; SmallStr: skip (payload already compared)
+    test r8d, TAG_RC_BIT
+    jz .count_next            ; TAG_NONE/TAG_BOOL: skip dereference
     mov rax, [rdi + PyObject.ob_type]
     jmp .count_eq_call
 .count_eq_int:
@@ -4546,213 +4879,47 @@ DEF_FUNC dict_method_get
 END_FUNC dict_method_get
 
 ;; ============================================================================
-;; dict_method_keys(args, nargs) -> list of keys
+;; dict_method_keys(args, nargs) -> dict_keys view
 ;; args[0]=self
 ;; ============================================================================
+extern dict_view_new
 DEF_FUNC dict_method_keys
-    push rbx
-    push r12
-    push r13
-    push r14
-
-    mov rbx, [rdi]          ; self (dict)
-
-    ; Create result list
-    mov rdi, [rbx + PyDictObject.ob_size]
-    test rdi, rdi
-    jnz .dk_alloc
-    mov rdi, 4
-.dk_alloc:
-    call list_new
-    mov r12, rax            ; result list
-
-    ; Iterate entries
-    mov r13, [rbx + PyDictObject.capacity]
-    xor r14d, r14d          ; index
-
-.dk_loop:
-    cmp r14, r13
-    jge .dk_done
-    mov rax, [rbx + PyDictObject.entries]
-    imul rcx, r14, DICT_ENTRY_SIZE
-    add rax, rcx
-
-    ; Check if slot is occupied (key != NULL and value_tag != TAG_NULL)
-    mov rdi, [rax + DictEntry.key]
-    test rdi, rdi
-    jz .dk_next
-    mov rcx, [rax + DictEntry.value_tag]
-    test rcx, rcx
-    jz .dk_next
-
-    ; Append key to list (read key_tag from entry)
-    push r14
-    mov rdx, [rax + DictEntry.key_tag]
-    mov rsi, rdi            ; key
-    mov rdi, r12            ; list
-    call list_append
-    pop r14
-
-.dk_next:
-    inc r14
-    jmp .dk_loop
-
-.dk_done:
-    mov rax, r12
+    mov rdi, [rdi]          ; self (dict)
+    xor esi, esi            ; kind=0 (keys)
+    extern dict_keys_view_type
+    lea rdx, [rel dict_keys_view_type]
+    call dict_view_new
     mov edx, TAG_PTR
-    pop r14
-    pop r13
-    pop r12
-    pop rbx
     leave
     ret
 END_FUNC dict_method_keys
 
 ;; ============================================================================
-;; dict_method_values(args, nargs) -> list of values
+;; dict_method_values(args, nargs) -> dict_values view
 ;; args[0]=self
 ;; ============================================================================
 DEF_FUNC dict_method_values
-    push rbx
-    push r12
-    push r13
-    push r14
-
-    mov rbx, [rdi]          ; self (dict)
-
-    mov rdi, [rbx + PyDictObject.ob_size]
-    test rdi, rdi
-    jnz .dv_alloc
-    mov rdi, 4
-.dv_alloc:
-    call list_new
-    mov r12, rax
-
-    mov r13, [rbx + PyDictObject.capacity]
-    xor r14d, r14d
-
-.dv_loop:
-    cmp r14, r13
-    jge .dv_done
-    mov rax, [rbx + PyDictObject.entries]
-    imul rcx, r14, DICT_ENTRY_SIZE
-    add rax, rcx
-
-    mov rdi, [rax + DictEntry.key]
-    test rdi, rdi
-    jz .dv_next
-    mov rcx, [rax + DictEntry.value_tag]
-    test rcx, rcx
-    jz .dv_next                 ; TAG_NULL = empty slot
-
-    ; Append value to list (read value_tag from entry)
-    push r14
-    mov rdx, [rax + DictEntry.value_tag]
-    mov rsi, [rax + DictEntry.value]  ; value payload
-    mov rdi, r12
-    call list_append
-    pop r14
-
-.dv_next:
-    inc r14
-    jmp .dv_loop
-
-.dv_done:
-    mov rax, r12
+    mov rdi, [rdi]          ; self (dict)
+    mov esi, 1              ; kind=1 (values)
+    extern dict_values_view_type
+    lea rdx, [rel dict_values_view_type]
+    call dict_view_new
     mov edx, TAG_PTR
-    pop r14
-    pop r13
-    pop r12
-    pop rbx
     leave
     ret
 END_FUNC dict_method_values
 
 ;; ============================================================================
-;; dict_method_items(args, nargs) -> list of (key, value) tuples
+;; dict_method_items(args, nargs) -> dict_items view
 ;; args[0]=self
 ;; ============================================================================
 DEF_FUNC dict_method_items
-    push rbx
-    push r12
-    push r13
-    push r14
-
-    mov rbx, [rdi]          ; self (dict)
-
-    mov rdi, [rbx + PyDictObject.ob_size]
-    test rdi, rdi
-    jnz .di_alloc
-    mov rdi, 4
-.di_alloc:
-    call list_new
-    mov r12, rax             ; result list
-
-    mov r13, [rbx + PyDictObject.capacity]
-    xor r14d, r14d
-
-.di_loop:
-    cmp r14, r13
-    jge .di_done
-    mov rax, [rbx + PyDictObject.entries]
-    imul rcx, r14, DICT_ENTRY_SIZE
-    add rax, rcx
-
-    mov rdi, [rax + DictEntry.key]
-    test rdi, rdi
-    jz .di_next
-    mov r8, [rax + DictEntry.value_tag]
-    test r8, r8
-    jz .di_next                 ; TAG_NULL = empty slot
-    mov rcx, [rax + DictEntry.value]
-
-    ; Create (key, value) tuple
-    push r14
-    push rdi                ; save key
-    push rcx                ; save value
-    push r8                 ; save value_tag
-
-    mov rdi, 2
-    call tuple_new
-    mov r14, rax            ; tuple
-
-    pop r8                  ; value_tag
-    pop rcx                 ; value
-    pop rdi                 ; key
-
-    ; Store key in tuple[0] (fat 16-byte slot)
-    mov [r14 + PyTupleObject.ob_item], rdi
-    mov qword [r14 + PyTupleObject.ob_item + 8], TAG_PTR
-    INCREF rdi
-
-    ; Store value in tuple[1] (fat 16-byte slot, use stored tag)
-    mov [r14 + PyTupleObject.ob_item + 16], rcx
-    mov [r14 + PyTupleObject.ob_item + 24], r8
-    INCREF_VAL rcx, r8
-
-    ; Append tuple to list
-    mov rdi, r12
-    mov rsi, r14
+    mov rdi, [rdi]          ; self (dict)
+    mov esi, 2              ; kind=2 (items)
+    extern dict_items_view_type
+    lea rdx, [rel dict_items_view_type]
+    call dict_view_new
     mov edx, TAG_PTR
-    call list_append
-
-    ; DECREF tuple (list_append did INCREF)
-    mov rdi, r14
-    call obj_decref
-
-    pop r14
-
-.di_next:
-    inc r14
-    jmp .di_loop
-
-.di_done:
-    mov rax, r12
-    mov edx, TAG_PTR
-    pop r14
-    pop r13
-    pop r12
-    pop rbx
     leave
     ret
 END_FUNC dict_method_items
@@ -5078,6 +5245,80 @@ DEF_FUNC dict_method_copy
 END_FUNC dict_method_copy
 
 ;; ============================================================================
+;; dict_classmethod_fromkeys(args, nargs) -> new dict
+;; args[0]=cls (type), args[1]=iterable (list), optional args[2]=value (default None)
+;; Creates dict from iterable keys with given value.
+;; ============================================================================
+DFK_LIST  equ 8
+DFK_VAL   equ 16
+DFK_VTAG  equ 24
+DFK_FRAME equ 32
+
+DEF_FUNC dict_classmethod_fromkeys, DFK_FRAME
+    push rbx
+    push r12
+    push r13
+
+    ; args[1] = iterable (must be list for now)
+    mov rax, [rdi + 16]
+    mov [rbp - DFK_LIST], rax
+
+    ; Default value = None (payload=0, tag=TAG_NONE)
+    mov qword [rbp - DFK_VAL], 0
+    mov qword [rbp - DFK_VTAG], TAG_NONE
+
+    ; If nargs >= 3, use args[2] as value
+    cmp rsi, 3
+    jl .dfk_create
+    mov rax, [rdi + 32]            ; value payload
+    mov rcx, [rdi + 40]            ; value tag
+    mov [rbp - DFK_VAL], rax
+    mov [rbp - DFK_VTAG], rcx
+
+.dfk_create:
+    ; Create new dict
+    call dict_new
+    mov rbx, rax                    ; result dict
+
+    ; Iterate list keys
+    mov rax, [rbp - DFK_LIST]
+    mov r12, [rax + PyListObject.ob_size]
+    xor r13d, r13d
+
+.dfk_loop:
+    cmp r13, r12
+    jge .dfk_done
+
+    ; Get key from list
+    mov rax, [rbp - DFK_LIST]
+    mov rax, [rax + PyListObject.ob_item]
+    mov rcx, r13
+    shl rcx, 4                     ; * 16 (fat stride)
+    mov rsi, [rax + rcx]           ; key payload
+    mov r8, [rax + rcx + 8]        ; key tag
+
+    ; dict_set(dict, key, value, value_tag, key_tag)
+    push r13
+    mov rdi, rbx
+    mov rdx, [rbp - DFK_VAL]
+    mov rcx, [rbp - DFK_VTAG]
+    call dict_set
+    pop r13
+
+    inc r13
+    jmp .dfk_loop
+
+.dfk_done:
+    mov rax, rbx
+    mov edx, TAG_PTR
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC dict_classmethod_fromkeys
+
+;; ============================================================================
 ;; dict_method_popitem(args, nargs) -> (key, value) tuple
 ;; args[0]=self. Removes and returns last inserted item.
 ;; ============================================================================
@@ -5197,6 +5438,8 @@ DEF_FUNC list_method_remove
     je .lremove_eq_float
     test r8, r8
     js .lremove_next          ; SmallStr: skip (payload already compared)
+    test r8d, TAG_RC_BIT
+    jz .lremove_next          ; TAG_NONE/TAG_BOOL: skip dereference
     mov rax, [rdi + PyObject.ob_type]
     jmp .lremove_eq_call
 .lremove_eq_int:
@@ -6373,6 +6616,235 @@ DEF_FUNC int_method___abs__
 END_FUNC int_method___abs__
 
 ;; ============================================================================
+;; int_method_to_bytes(args, nargs) -> bytes
+;; args[0]=self, args[1]=length, args[2]=byteorder ("big" or "little")
+;; Optional kwarg: signed=False (via kw_names_pending)
+;; ============================================================================
+extern kw_names_pending
+
+ITB_SELF  equ 8
+ITB_LEN   equ 16
+ITB_SIGN  equ 24
+ITB_FRAME equ 32
+
+DEF_FUNC int_method_to_bytes, ITB_FRAME
+    push rbx
+    push r12
+
+    mov qword [rbp - ITB_SIGN], 0   ; signed = False
+
+    ; Extract self value
+    mov rbx, rdi
+    call int_method_self_to_i64
+    mov [rbp - ITB_SELF], rax       ; self i64
+
+    ; Extract length arg
+    mov rdx, [rbx + 24]            ; args[1] tag
+    cmp edx, TAG_SMALLINT
+    jne .itb_error
+    mov r12, [rbx + 16]            ; args[1] payload = length
+    mov [rbp - ITB_LEN], r12
+
+    ; Extract byteorder arg
+    mov rdx, [rbx + 40]            ; args[2] tag
+    mov rcx, [rbx + 32]            ; args[2] payload (str)
+
+    ; Check for "big" or "little"
+    ; SmallStr: spill to heap
+    test rdx, rdx
+    js .itb_spill_order
+    cmp edx, TAG_PTR
+    jne .itb_error
+    jmp .itb_order_ok
+.itb_spill_order:
+    push rcx
+    mov rdi, rcx
+    mov rsi, rdx
+    call smallstr_to_obj
+    mov rcx, rax
+    pop rax                         ; discard old
+.itb_order_ok:
+    ; rcx = byteorder str obj
+    push rcx                        ; save for comparison
+
+    ; Compare with "big"
+    lea rdi, [rcx + PyStrObject.data]
+    CSTRING rsi, "big"
+    call ap_strcmp
+    pop rcx
+    test eax, eax
+    jz .itb_big
+
+    push rcx
+    lea rdi, [rcx + PyStrObject.data]
+    CSTRING rsi, "little"
+    call ap_strcmp
+    pop rcx
+    test eax, eax
+    jz .itb_little
+
+    jmp .itb_order_error
+
+.itb_big:
+    ; Big-endian: MSB first
+    mov rdi, r12                    ; length
+    call bytes_new
+    mov rbx, rax
+
+    ; Fill from end to start
+    mov rax, [rbp - ITB_SELF]
+    mov rcx, r12
+.itb_big_loop:
+    test rcx, rcx
+    jz .itb_return
+    dec rcx
+    mov [rbx + PyBytesObject.data + rcx], al
+    shr rax, 8
+    jmp .itb_big_loop
+
+.itb_little:
+    ; Little-endian: LSB first
+    mov rdi, r12
+    call bytes_new
+    mov rbx, rax
+
+    mov rax, [rbp - ITB_SELF]
+    xor ecx, ecx
+.itb_little_loop:
+    cmp rcx, r12
+    jge .itb_return
+    mov [rbx + PyBytesObject.data + rcx], al
+    shr rax, 8
+    inc rcx
+    jmp .itb_little_loop
+
+.itb_return:
+    mov rax, rbx
+    mov edx, TAG_PTR
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.itb_error:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "to_bytes() requires (length, byteorder) arguments"
+    call raise_exception
+
+.itb_order_error:
+    lea rdi, [rel exc_ValueError_type]
+    CSTRING rsi, "byteorder must be 'little' or 'big'"
+    call raise_exception
+END_FUNC int_method_to_bytes
+
+;; ============================================================================
+;; int_classmethod_from_bytes(args, nargs) -> SmallInt
+;; args[0]=cls (type), args[1]=bytes, args[2]=byteorder ("big" or "little")
+;; This is a classmethod: cls is passed as first arg.
+;; ============================================================================
+extern classmethod_type
+
+IFB_BYTES equ 8
+IFB_FRAME equ 16
+
+DEF_FUNC int_classmethod_from_bytes, IFB_FRAME
+    push rbx
+    push r12
+
+    ; args[1] = bytes object
+    mov rax, [rdi + 16]            ; payload
+    mov [rbp - IFB_BYTES], rax
+
+    ; args[2] = byteorder
+    mov rdx, [rdi + 40]            ; tag
+    mov rcx, [rdi + 32]            ; payload
+
+    ; SmallStr: spill
+    test rdx, rdx
+    js .ifb_spill_order
+    cmp edx, TAG_PTR
+    jne .ifb_error
+    jmp .ifb_order_ok
+.ifb_spill_order:
+    push rdi
+    mov rdi, rcx
+    mov rsi, rdx
+    call smallstr_to_obj
+    mov rcx, rax
+    pop rdi
+.ifb_order_ok:
+    push rcx
+
+    lea rdi, [rcx + PyStrObject.data]
+    CSTRING rsi, "big"
+    call ap_strcmp
+    pop rcx
+    test eax, eax
+    jz .ifb_big
+
+    push rcx
+    lea rdi, [rcx + PyStrObject.data]
+    CSTRING rsi, "little"
+    call ap_strcmp
+    pop rcx
+    test eax, eax
+    jz .ifb_little
+
+    jmp .ifb_order_error
+
+.ifb_big:
+    ; Big-endian: MSB first
+    mov rax, [rbp - IFB_BYTES]
+    mov rcx, [rax + PyBytesObject.ob_size]
+    lea rsi, [rax + PyBytesObject.data]
+    xor r12, r12                    ; result = 0
+    xor edx, edx                   ; index
+.ifb_big_loop:
+    cmp rdx, rcx
+    jge .ifb_return
+    shl r12, 8
+    movzx eax, byte [rsi + rdx]
+    or r12, rax
+    inc rdx
+    jmp .ifb_big_loop
+
+.ifb_little:
+    ; Little-endian: LSB first
+    mov rax, [rbp - IFB_BYTES]
+    mov rcx, [rax + PyBytesObject.ob_size]
+    lea rsi, [rax + PyBytesObject.data]
+    xor r12, r12
+    mov rdx, rcx
+    dec rdx
+.ifb_little_loop:
+    test rdx, rdx
+    js .ifb_return
+    shl r12, 8
+    movzx eax, byte [rsi + rdx]
+    or r12, rax
+    dec rdx
+    jmp .ifb_little_loop
+
+.ifb_return:
+    mov rax, r12
+    RET_TAG_SMALLINT
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.ifb_error:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "from_bytes() requires (bytes, byteorder) arguments"
+    call raise_exception
+
+.ifb_order_error:
+    lea rdi, [rel exc_ValueError_type]
+    CSTRING rsi, "byteorder must be 'little' or 'big'"
+    call raise_exception
+END_FUNC int_classmethod_from_bytes
+
+;; ============================================================================
 ;; int_method___int__(args, nargs) -> SmallInt
 ;; ============================================================================
 DEF_FUNC int_method___int__
@@ -6847,6 +7319,1093 @@ DEF_FUNC bytes_method_find, BF_FRAME
     call raise_exception
 END_FUNC bytes_method_find
 
+;; ============================================================================
+;; bytes_method_replace(args, nargs) -> new bytes
+;; args[0]=self (bytes), args[1]=old (bytes), args[2]=new (bytes)
+;; Scan self for old subsequence, build new PyBytesObject with replacements.
+;; ============================================================================
+extern bytes_new
+extern bytes_from_data
+
+BR_SELF   equ 8
+BR_OLD    equ 16
+BR_NEW    equ 24
+BR_BUF    equ 32
+BR_BUFSZ  equ 40
+BR_WPOS   equ 48
+BR_FRAME  equ 56
+
+DEF_FUNC bytes_method_replace, BR_FRAME
+    push rbx
+    push r12
+    push r13
+    push r14
+    push r15
+
+    cmp rsi, 3
+    jne .br_error
+
+    mov rax, [rdi]              ; self
+    mov rcx, [rdi + 16]         ; old
+    mov rdx, [rdi + 32]         ; new
+    mov [rbp - BR_SELF], rax
+    mov [rbp - BR_OLD], rcx
+    mov [rbp - BR_NEW], rdx
+
+    ; rbx=self, r12=old, r13=new
+    mov rbx, rax
+    mov r12, rcx
+    mov r13, rdx
+
+    mov r14, [rbx + PyBytesObject.ob_size]    ; self_len
+    mov r15, [r12 + PyBytesObject.ob_size]    ; old_len
+
+    ; If old_len == 0, return copy of self
+    test r15, r15
+    jz .br_copy_self
+
+    ; Allocate initial buffer: self_len * 2 + 64
+    lea rdi, [r14 * 2 + 64]
+    mov [rbp - BR_BUFSZ], rdi
+    call ap_malloc
+    mov [rbp - BR_BUF], rax
+    mov qword [rbp - BR_WPOS], 0
+
+    xor ecx, ecx               ; scan position
+
+.br_scan:
+    ; Remaining bytes
+    mov rax, r14
+    sub rax, rcx
+    cmp rax, r15
+    jl .br_copy_tail
+
+    ; memcmp at scan position
+    push rcx
+    mov rdi, [rbp - BR_SELF]
+    lea rdi, [rdi + PyBytesObject.data]
+    add rdi, rcx
+    mov rsi, [rbp - BR_OLD]
+    lea rsi, [rsi + PyBytesObject.data]
+    mov rdx, r15
+    call ap_memcmp
+    pop rcx
+    test eax, eax
+    jnz .br_no_match
+
+    ; Match found at rcx — ensure buffer space
+    mov rax, [rbp - BR_WPOS]
+    add rax, [r13 + PyBytesObject.ob_size]
+    add rax, r14
+    cmp rax, [rbp - BR_BUFSZ]
+    jl .br_space_ok
+    shl rax, 1
+    mov [rbp - BR_BUFSZ], rax
+    push rcx
+    mov rdi, [rbp - BR_BUF]
+    mov rsi, rax
+    call ap_realloc
+    mov [rbp - BR_BUF], rax
+    pop rcx
+.br_space_ok:
+
+    ; Copy new_str into buffer
+    mov rax, [r13 + PyBytesObject.ob_size]
+    test rax, rax
+    jz .br_skip_new
+    push rcx
+    push rax
+    mov rdi, [rbp - BR_BUF]
+    add rdi, [rbp - BR_WPOS]
+    mov rsi, [rbp - BR_NEW]
+    lea rsi, [rsi + PyBytesObject.data]
+    mov rdx, rax
+    call ap_memcpy
+    pop rax
+    pop rcx
+    add [rbp - BR_WPOS], rax
+.br_skip_new:
+    add rcx, r15                ; advance past old
+    jmp .br_scan
+
+.br_no_match:
+    ; Copy one byte from self
+    mov rdi, [rbp - BR_BUF]
+    add rdi, [rbp - BR_WPOS]
+    mov rax, [rbp - BR_SELF]
+    movzx eax, byte [rax + PyBytesObject.data + rcx]
+    mov [rdi], al
+    inc qword [rbp - BR_WPOS]
+    inc rcx
+    jmp .br_scan
+
+.br_copy_tail:
+    ; Copy remaining bytes
+    mov rax, r14
+    sub rax, rcx
+    test rax, rax
+    jz .br_make_bytes
+    push rax
+    push rcx
+    mov rdi, [rbp - BR_BUF]
+    add rdi, [rbp - BR_WPOS]
+    mov rsi, [rbp - BR_SELF]
+    lea rsi, [rsi + PyBytesObject.data]
+    add rsi, rcx
+    mov rdx, rax
+    call ap_memcpy
+    pop rcx
+    pop rax
+    add [rbp - BR_WPOS], rax
+
+.br_make_bytes:
+    mov rdi, [rbp - BR_BUF]
+    mov rsi, [rbp - BR_WPOS]
+    call bytes_from_data
+    push rax
+
+    mov rdi, [rbp - BR_BUF]
+    call ap_free
+
+    pop rax
+    mov edx, TAG_PTR
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.br_copy_self:
+    ; Return copy of self
+    lea rdi, [rbx + PyBytesObject.data]
+    mov rsi, r14
+    call bytes_from_data
+    mov edx, TAG_PTR
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.br_error:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "replace() takes exactly 2 arguments"
+    call raise_exception
+END_FUNC bytes_method_replace
+
+;; ============================================================================
+;; bytes_method_split(args, nargs) -> list of bytes
+;; nargs==1: split by whitespace; nargs==2: split by separator bytes
+;; ============================================================================
+DEF_FUNC bytes_method_split
+    push rbx
+    push r12
+    push r13
+    push r14
+    push r15
+    sub rsp, 8                  ; align
+
+    mov rbx, [rdi]              ; self (bytes obj)
+    mov r14, rsi                ; nargs
+
+    cmp r14, 2
+    jl .bsp_no_sep
+
+    ; Separator mode
+    mov r15, [rdi + 16]         ; separator bytes obj
+    jmp .bsp_by_sep
+
+.bsp_no_sep:
+    ; Split by whitespace
+    mov r12, [rbx + PyBytesObject.ob_size]
+
+    mov rdi, 8
+    call list_new
+    mov r13, rax                ; result list
+
+    xor ecx, ecx
+.bsp_ws_scan:
+    cmp rcx, r12
+    jge .bsp_ws_done
+    movzx eax, byte [rbx + PyBytesObject.data + rcx]
+    cmp al, ' '
+    je .bsp_ws_skip
+    cmp al, 9
+    je .bsp_ws_skip
+    cmp al, 10
+    je .bsp_ws_skip
+    cmp al, 13
+    je .bsp_ws_skip
+    jmp .bsp_ws_word
+
+.bsp_ws_skip:
+    inc rcx
+    jmp .bsp_ws_scan
+
+.bsp_ws_word:
+    mov r15, rcx                ; word start
+.bsp_ws_wordscan:
+    inc rcx
+    cmp rcx, r12
+    jge .bsp_ws_wordend
+    movzx eax, byte [rbx + PyBytesObject.data + rcx]
+    cmp al, ' '
+    je .bsp_ws_wordend
+    cmp al, 9
+    je .bsp_ws_wordend
+    cmp al, 10
+    je .bsp_ws_wordend
+    cmp al, 13
+    je .bsp_ws_wordend
+    jmp .bsp_ws_wordscan
+
+.bsp_ws_wordend:
+    push rcx
+    lea rdi, [rbx + PyBytesObject.data]
+    add rdi, r15
+    mov rsi, rcx
+    sub rsi, r15
+    call bytes_from_data
+    mov rdi, r13
+    mov rsi, rax
+    push rax
+    mov edx, TAG_PTR
+    call list_append
+    pop rdi
+    call obj_decref
+    pop rcx
+    jmp .bsp_ws_scan
+
+.bsp_ws_done:
+    mov rax, r13
+    mov edx, TAG_PTR
+    add rsp, 8
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.bsp_by_sep:
+    mov r12, [rbx + PyBytesObject.ob_size]   ; self_len
+    mov r14, [r15 + PyBytesObject.ob_size]   ; sep_len
+
+    mov rdi, 8
+    call list_new
+    mov r13, rax                ; result list
+
+    test r14, r14
+    jz .bsp_empty_sep
+
+    ; r11 = segment start, rcx = scan position
+    xor ecx, ecx
+    xor r11d, r11d              ; segment start = 0
+
+.bsp_sep_scan:
+    ; Check if enough bytes remain for separator
+    mov rax, r12
+    sub rax, rcx
+    cmp rax, r14
+    jl .bsp_sep_tail
+
+    ; memcmp at scan position
+    push rcx
+    push r11
+    mov rdi, rbx
+    lea rdi, [rdi + PyBytesObject.data]
+    add rdi, rcx
+    lea rsi, [r15 + PyBytesObject.data]
+    mov rdx, r14
+    call ap_memcmp
+    pop r11
+    pop rcx
+    test eax, eax
+    jnz .bsp_sep_nomatch
+
+    ; Found separator at rcx — extract segment [r11..rcx)
+    push rcx
+    push r11
+    lea rdi, [rbx + PyBytesObject.data]
+    add rdi, r11
+    mov rsi, rcx
+    sub rsi, r11
+    call bytes_from_data
+    mov rdi, r13
+    mov rsi, rax
+    push rax
+    mov edx, TAG_PTR
+    call list_append
+    pop rdi
+    call obj_decref
+    pop r11
+    pop rcx
+
+    ; Advance past separator
+    add rcx, r14
+    mov r11, rcx               ; new segment start
+    jmp .bsp_sep_scan
+
+.bsp_sep_nomatch:
+    inc rcx
+    jmp .bsp_sep_scan
+
+.bsp_sep_tail:
+    ; Remaining segment from r11 to end
+    lea rdi, [rbx + PyBytesObject.data]
+    add rdi, r11
+    mov rsi, r12
+    sub rsi, r11
+    call bytes_from_data
+    mov rdi, r13
+    mov rsi, rax
+    push rax
+    mov edx, TAG_PTR
+    call list_append
+    pop rdi
+    call obj_decref
+
+    mov rax, r13
+    mov edx, TAG_PTR
+    add rsp, 8
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.bsp_empty_sep:
+    lea rdi, [rel exc_ValueError_type]
+    CSTRING rsi, "empty separator"
+    call raise_exception
+END_FUNC bytes_method_split
+
+;; ============================================================================
+;; bytes_method_join(args, nargs) -> new bytes
+;; args[0]=self (separator bytes), args[1]=list
+;; ============================================================================
+BJ_SEP    equ 8
+BJ_LIST   equ 16
+BJ_TOTAL  equ 24
+BJ_BUF    equ 32
+BJ_WPOS   equ 40
+BJ_FRAME  equ 48
+
+DEF_FUNC bytes_method_join, BJ_FRAME
+    push rbx
+    push r12
+    push r13
+    push r14
+    push r15
+
+    cmp rsi, 2
+    jne .bj_error
+
+    mov rax, [rdi]              ; self = separator bytes
+    mov rcx, [rdi + 16]         ; list
+    mov [rbp - BJ_SEP], rax
+    mov [rbp - BJ_LIST], rcx
+
+    ; Check list type
+    mov rdx, [rcx + PyObject.ob_type]
+    lea r8, [rel list_type]
+    cmp rdx, r8
+    jne .bj_error
+
+    ; Get count
+    mov r12, [rcx + PyListObject.ob_size]   ; count
+    test r12, r12
+    jz .bj_empty
+
+    ; Compute total length: sum of all item sizes + (count-1)*sep_len
+    mov rbx, [rbp - BJ_SEP]
+    mov r14, [rbx + PyBytesObject.ob_size]  ; sep_len
+
+    xor r13d, r13d              ; total = 0
+    xor ecx, ecx               ; index = 0
+.bj_len_loop:
+    cmp rcx, r12
+    jge .bj_len_done
+    mov rax, [rbp - BJ_LIST]
+    mov rax, [rax + PyListObject.ob_item]
+    mov rdx, rcx
+    shl rdx, 4                  ; * 16 (fat stride)
+    mov rax, [rax + rdx]       ; item payload
+    add r13, [rax + PyBytesObject.ob_size]
+    inc rcx
+    jmp .bj_len_loop
+.bj_len_done:
+    ; Add separator lengths: (count-1) * sep_len
+    mov rax, r12
+    dec rax
+    imul rax, r14
+    add r13, rax
+    mov [rbp - BJ_TOTAL], r13
+
+    ; Allocate buffer
+    mov rdi, r13
+    call ap_malloc
+    mov [rbp - BJ_BUF], rax
+    mov qword [rbp - BJ_WPOS], 0
+
+    ; Copy data
+    xor r15d, r15d              ; item index
+.bj_copy_loop:
+    cmp r15, r12
+    jge .bj_make_bytes
+
+    ; Insert separator before all items except first
+    test r15, r15
+    jz .bj_no_sep
+    mov rax, [rbp - BJ_SEP]
+    mov rcx, [rax + PyBytesObject.ob_size]
+    test rcx, rcx
+    jz .bj_no_sep
+    push rcx
+    mov rdi, [rbp - BJ_BUF]
+    add rdi, [rbp - BJ_WPOS]
+    lea rsi, [rax + PyBytesObject.data]
+    mov rdx, rcx
+    call ap_memcpy
+    pop rcx
+    add [rbp - BJ_WPOS], rcx
+.bj_no_sep:
+    ; Copy item bytes
+    mov rax, [rbp - BJ_LIST]
+    mov rax, [rax + PyListObject.ob_item]
+    mov rdx, r15
+    shl rdx, 4
+    mov rax, [rax + rdx]       ; item bytes obj
+    mov rcx, [rax + PyBytesObject.ob_size]
+    test rcx, rcx
+    jz .bj_next_item
+    push rcx
+    mov rdi, [rbp - BJ_BUF]
+    add rdi, [rbp - BJ_WPOS]
+    lea rsi, [rax + PyBytesObject.data]
+    mov rdx, rcx
+    call ap_memcpy
+    pop rcx
+    add [rbp - BJ_WPOS], rcx
+.bj_next_item:
+    inc r15
+    jmp .bj_copy_loop
+
+.bj_make_bytes:
+    mov rdi, [rbp - BJ_BUF]
+    mov rsi, [rbp - BJ_TOTAL]
+    call bytes_from_data
+    push rax
+
+    mov rdi, [rbp - BJ_BUF]
+    call ap_free
+
+    pop rax
+    mov edx, TAG_PTR
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.bj_empty:
+    ; Return empty bytes
+    xor edi, edi
+    call bytes_new
+    mov edx, TAG_PTR
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.bj_error:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "join() argument must be a list of bytes"
+    call raise_exception
+END_FUNC bytes_method_join
+
+;; ============================================================================
+;; float_method_as_integer_ratio(args, nargs) -> 2-tuple (numerator, denominator)
+;; Extract IEEE 754 mantissa/exponent and return (n, d) as SmallInts.
+;; ============================================================================
+extern exc_OverflowError_type
+
+FIR_FRAME equ 8
+DEF_FUNC float_method_as_integer_ratio, FIR_FRAME
+    push rbx
+
+    mov rax, [rdi]              ; self.payload = raw double bits
+
+    ; Check for inf/nan
+    mov rcx, rax
+    mov rdx, 0x7FF0000000000000
+    and rcx, rdx
+    cmp rcx, rdx
+    je .fir_error
+
+    ; Check for zero
+    mov rcx, rax
+    btr rcx, 63                 ; clear sign
+    test rcx, rcx
+    jz .fir_zero
+
+    ; Extract sign, exponent, mantissa from IEEE 754
+    ; sign = bit 63, exponent = bits 62-52 (biased), mantissa = bits 51-0
+    mov r8, rax                 ; save original bits
+    mov rcx, rax
+    shr rcx, 52
+    and ecx, 0x7FF              ; biased exponent
+    sub ecx, 1023               ; unbiased exponent
+    sub ecx, 52                 ; adjust for mantissa bits
+
+    ; mantissa with implicit 1 bit
+    mov rax, r8
+    mov rdx, 0x000FFFFFFFFFFFFF
+    and rax, rdx
+    bts rax, 52                 ; set implicit bit (bit 52)
+
+    ; Reduce: strip trailing zeros from mantissa (common factor of 2)
+    ; This makes the fraction fully reduced
+    tzcnt rdx, rax              ; count trailing zeros
+    mov cl, dl
+    shr rax, cl                 ; mantissa >>= trailing_zeros
+
+    ; Reload exponent (ecx was clobbered by cl usage)
+    mov rcx, r8
+    shr rcx, 52
+    and ecx, 0x7FF
+    sub ecx, 1023
+    sub ecx, 52
+    add ecx, edx               ; adjust exponent by trailing zeros stripped
+
+    ; Apply sign
+    bt r8, 63
+    jnc .fir_positive
+    neg rax
+.fir_positive:
+
+    ; Now: value = rax * 2^ecx
+    ; If ecx >= 0: numerator = rax << ecx, denominator = 1
+    ; If ecx < 0: numerator = rax, denominator = 1 << (-ecx)
+    test ecx, ecx
+    js .fir_neg_exp
+
+    ; Positive exponent: shift numerator left
+    cmp ecx, 62                 ; limit to prevent overflow
+    ja .fir_error
+    mov cl, cl
+    shl rax, cl
+    push rax                    ; numerator
+
+    ; Build 2-tuple (numerator=rax, denominator=1)
+    mov rdi, 2
+    call tuple_new
+    mov rbx, rax
+    pop rcx                     ; numerator
+
+    mov [rbx + PyTupleObject.ob_item], rcx
+    mov qword [rbx + PyTupleObject.ob_item + 8], TAG_SMALLINT
+    mov qword [rbx + PyTupleObject.ob_item + 16], 1
+    mov qword [rbx + PyTupleObject.ob_item + 24], TAG_SMALLINT
+
+    mov rax, rbx
+    mov edx, TAG_PTR
+    pop rbx
+    leave
+    ret
+
+.fir_neg_exp:
+    ; Negative exponent
+    neg ecx
+    cmp ecx, 62
+    ja .fir_error
+    push rax                    ; save numerator
+    mov rdx, 1
+    shl rdx, cl                 ; denominator = 1 << (-ecx)
+    push rdx                    ; save denominator
+
+    mov rdi, 2
+    call tuple_new
+    mov rbx, rax
+    pop rdx                     ; denominator
+    pop rcx                     ; numerator
+
+    mov [rbx + PyTupleObject.ob_item], rcx
+    mov qword [rbx + PyTupleObject.ob_item + 8], TAG_SMALLINT
+    mov [rbx + PyTupleObject.ob_item + 16], rdx
+    mov qword [rbx + PyTupleObject.ob_item + 24], TAG_SMALLINT
+
+    mov rax, rbx
+    mov edx, TAG_PTR
+    pop rbx
+    leave
+    ret
+
+.fir_zero:
+    ; Return (0, 1)
+    mov rdi, 2
+    call tuple_new
+    mov rbx, rax
+
+    mov qword [rbx + PyTupleObject.ob_item], 0
+    mov qword [rbx + PyTupleObject.ob_item + 8], TAG_SMALLINT
+    mov qword [rbx + PyTupleObject.ob_item + 16], 1
+    mov qword [rbx + PyTupleObject.ob_item + 24], TAG_SMALLINT
+
+    mov rax, rbx
+    mov edx, TAG_PTR
+    pop rbx
+    leave
+    ret
+
+.fir_error:
+    lea rdi, [rel exc_OverflowError_type]
+    CSTRING rsi, "cannot convert float infinity or NaN to integer ratio"
+    call raise_exception
+END_FUNC float_method_as_integer_ratio
+
+;; ============================================================================
+;; float_method_hex(args, nargs) -> str
+;; Format double as '0x1.XXXXp+YY' hex string.
+;; ============================================================================
+FH_BUF    equ 8
+FH_FRAME  equ 16
+
+DEF_FUNC float_method_hex, FH_FRAME
+    push rbx
+    push r12
+
+    mov rax, [rdi]              ; self.payload = raw double bits
+    mov rbx, rax                ; save bits
+
+    ; Allocate temp buffer (64 bytes is enough for any hex float)
+    mov edi, 64
+    call ap_malloc
+    mov [rbp - FH_BUF], rax
+    mov r12, rax                ; write pointer
+
+    ; Check sign
+    bt rbx, 63
+    jnc .fh_nosign
+    mov byte [r12], '-'
+    inc r12
+.fh_nosign:
+
+    ; Clear sign for analysis
+    mov rax, rbx
+    btr rax, 63
+
+    ; Check for zero
+    test rax, rax
+    jz .fh_zero
+
+    ; Check for inf
+    mov rcx, 0x7FF0000000000000
+    cmp rax, rcx
+    je .fh_inf
+
+    ; Check for NaN
+    mov rdx, rax
+    and rdx, rcx
+    cmp rdx, rcx
+    je .fh_nan
+
+    ; Normal float: extract exponent and mantissa
+    mov rdx, rax
+    shr rdx, 52
+    and edx, 0x7FF              ; biased exponent
+    sub edx, 1023               ; unbiased
+
+    mov rcx, rax
+    mov r8, 0x000FFFFFFFFFFFFF
+    and rcx, r8                 ; mantissa bits (52 bits)
+
+    ; Write "0x1."
+    mov byte [r12], '0'
+    mov byte [r12+1], 'x'
+    mov byte [r12+2], '1'
+    mov byte [r12+3], '.'
+    add r12, 4
+
+    ; Convert mantissa to 13 hex digits (52 bits / 4 = 13 digits)
+    ; Write hex digits from high nibble to low
+    mov rax, rcx
+    mov ecx, 13                 ; 13 hex digits
+    mov r8d, 48                 ; shift = 48 (start from high)
+.fh_hex_loop:
+    test ecx, ecx
+    jz .fh_hex_done
+    push rcx
+    mov cl, r8b
+    mov rdx, rax
+    shr rdx, cl
+    and edx, 0x0F
+    pop rcx
+    cmp edx, 10
+    jb .fh_digit
+    add edx, ('a' - 10)
+    jmp .fh_store_digit
+.fh_digit:
+    add edx, '0'
+.fh_store_digit:
+    mov [r12], dl
+    inc r12
+    sub r8d, 4
+    dec ecx
+    jmp .fh_hex_loop
+
+.fh_hex_done:
+
+    ; Write 'p' and exponent
+    mov byte [r12], 'p'
+    inc r12
+
+    ; edx = unbiased exponent (stored in [rsp area])
+    ; We need to reload it; it was in edx before hex loop
+    ; Actually we lost edx. Let's recompute.
+    mov rax, rbx
+    btr rax, 63
+    shr rax, 52
+    and eax, 0x7FF
+    sub eax, 1023
+
+    ; Write sign of exponent
+    test eax, eax
+    js .fh_exp_neg
+    mov byte [r12], '+'
+    inc r12
+    jmp .fh_exp_write
+.fh_exp_neg:
+    mov byte [r12], '-'
+    inc r12
+    neg eax
+.fh_exp_write:
+    ; Convert exponent to decimal string
+    ; eax = absolute exponent value
+    ; Use simple div loop
+    push r12                    ; save start of exponent digits
+    mov ecx, 10
+    xor r8d, r8d               ; digit count
+    test eax, eax
+    jnz .fh_exp_digits
+    ; Zero exponent
+    mov byte [r12], '0'
+    inc r12
+    jmp .fh_exp_done
+.fh_exp_digits:
+    ; Push digits in reverse
+    xor edx, edx
+    div ecx                     ; eax = quotient, edx = remainder
+    push rdx
+    inc r8d
+    test eax, eax
+    jnz .fh_exp_digits
+    ; Pop digits into buffer
+.fh_exp_pop:
+    test r8d, r8d
+    jz .fh_exp_done
+    pop rax
+    add eax, '0'
+    mov [r12], al
+    inc r12
+    dec r8d
+    jmp .fh_exp_pop
+.fh_exp_done:
+    pop rax                     ; discard saved start pos
+
+    ; Create string from buffer
+    mov rdi, [rbp - FH_BUF]
+    mov rsi, r12
+    sub rsi, rdi                ; length
+    call str_new_heap
+    push rax
+
+    mov rdi, [rbp - FH_BUF]
+    call ap_free
+
+    pop rax
+    mov edx, TAG_PTR
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.fh_zero:
+    ; Write "0x0.0p+0"
+    mov byte [r12], '0'
+    mov byte [r12+1], 'x'
+    mov byte [r12+2], '0'
+    mov byte [r12+3], '.'
+    mov byte [r12+4], '0'
+    mov byte [r12+5], 'p'
+    mov byte [r12+6], '+'
+    mov byte [r12+7], '0'
+    add r12, 8
+    jmp .fh_make_str
+
+.fh_inf:
+    mov byte [r12], 'i'
+    mov byte [r12+1], 'n'
+    mov byte [r12+2], 'f'
+    add r12, 3
+    jmp .fh_make_str
+
+.fh_nan:
+    mov byte [r12], 'n'
+    mov byte [r12+1], 'a'
+    mov byte [r12+2], 'n'
+    add r12, 3
+
+.fh_make_str:
+    mov rdi, [rbp - FH_BUF]
+    mov rsi, r12
+    sub rsi, rdi
+    call str_new_heap
+    push rax
+
+    mov rdi, [rbp - FH_BUF]
+    call ap_free
+
+    pop rax
+    mov edx, TAG_PTR
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC float_method_hex
+
+;; ============================================================================
+;; float_classmethod_fromhex(args, nargs) -> Float
+;; args[0]=cls (type), args[1]=hex string like "0x1.XXXXp+YY"
+;; Parses hex float string and returns TAG_FLOAT.
+;; ============================================================================
+FFH_STR   equ 8
+FFH_FRAME equ 16
+
+DEF_FUNC float_classmethod_fromhex, FFH_FRAME
+    push rbx
+    push r12
+    push r13
+
+    ; Get string arg
+    mov rax, [rdi + 24]            ; args[1] tag
+    mov rcx, [rdi + 16]            ; args[1] payload
+
+    ; SmallStr: spill to heap
+    test rax, rax
+    js .ffh_spill
+    jmp .ffh_str_ok
+.ffh_spill:
+    push rdi
+    mov rdi, rcx
+    mov rsi, rax
+    call smallstr_to_obj
+    pop rdi
+    mov rcx, rax
+.ffh_str_ok:
+    mov [rbp - FFH_STR], rcx
+    lea r12, [rcx + PyStrObject.data]  ; r12 = string data
+
+    ; Parse: optional '-', '0x', mantissa '1.XXXX', 'p', exponent
+    xor r13d, r13d                  ; r13 = sign (0 = positive)
+    xor ebx, ebx                   ; current position
+
+    ; Check for sign
+    movzx eax, byte [r12]
+    cmp al, '-'
+    jne .ffh_check_plus
+    mov r13d, 1
+    inc ebx
+    jmp .ffh_check_0x
+.ffh_check_plus:
+    cmp al, '+'
+    jne .ffh_check_0x
+    inc ebx
+
+.ffh_check_0x:
+    ; Expect '0x' or '0X'
+    cmp byte [r12 + rbx], '0'
+    jne .ffh_parse_error
+    inc ebx
+    movzx eax, byte [r12 + rbx]
+    or al, 0x20                     ; lowercase
+    cmp al, 'x'
+    jne .ffh_parse_error
+    inc ebx
+
+    ; Parse integer part (digits before '.')
+    xor ecx, ecx                   ; mantissa = 0 (as integer, shifted later)
+    ; Parse hex digits
+.ffh_int_digits:
+    movzx eax, byte [r12 + rbx]
+    call .ffh_hex_val               ; eax = hex value or -1
+    cmp eax, -1
+    je .ffh_int_done
+    shl rcx, 4
+    or rcx, rax
+    inc ebx
+    jmp .ffh_int_digits
+.ffh_int_done:
+
+    ; Check for '.'
+    xor r8d, r8d                    ; frac_bits = 0 (count of hex digits after .)
+    cmp byte [r12 + rbx], '.'
+    jne .ffh_check_p
+    inc ebx
+
+    ; Parse fractional hex digits
+.ffh_frac_digits:
+    movzx eax, byte [r12 + rbx]
+    push rcx
+    push r8
+    call .ffh_hex_val
+    pop r8
+    pop rcx
+    cmp eax, -1
+    je .ffh_check_p
+    shl rcx, 4
+    or rcx, rax
+    inc r8d
+    inc ebx
+    jmp .ffh_frac_digits
+
+.ffh_check_p:
+    ; rcx = combined mantissa, r8d = fractional hex digits
+    ; Expect 'p' or 'P'
+    movzx eax, byte [r12 + rbx]
+    or al, 0x20
+    cmp al, 'p'
+    jne .ffh_parse_error
+    inc ebx
+
+    ; Parse exponent (decimal, with optional sign)
+    xor r9d, r9d                    ; exp_sign = 0
+    movzx eax, byte [r12 + rbx]
+    cmp al, '-'
+    jne .ffh_exp_check_plus
+    mov r9d, 1
+    inc ebx
+    jmp .ffh_exp_digits
+.ffh_exp_check_plus:
+    cmp al, '+'
+    jne .ffh_exp_digits
+    inc ebx
+
+.ffh_exp_digits:
+    xor r10d, r10d                  ; exponent value
+.ffh_exp_loop:
+    movzx eax, byte [r12 + rbx]
+    sub al, '0'
+    cmp al, 9
+    ja .ffh_exp_done
+    imul r10d, 10
+    movzx eax, al
+    add r10d, eax
+    inc ebx
+    jmp .ffh_exp_loop
+.ffh_exp_done:
+    test r9d, r9d
+    jz .ffh_compute
+    neg r10d
+
+.ffh_compute:
+    ; rcx = mantissa bits, r8d = fractional hex digits, r10d = exponent
+    ; Actual exponent = r10d - (r8d * 4)  [each hex digit = 4 bits]
+    mov eax, r8d
+    shl eax, 2                      ; * 4
+    sub r10d, eax                   ; adjusted exponent
+
+    ; Convert to double: value = mantissa * 2^exponent
+    ; Use integer -> double conversion then ldexp
+    cvtsi2sd xmm0, rcx             ; mantissa as double
+
+    ; Apply exponent via repeated multiply/divide by 2
+    test r10d, r10d
+    jz .ffh_apply_sign
+    js .ffh_neg_exp_apply
+
+    ; Positive exponent: multiply by 2^exp
+.ffh_pos_exp:
+    ; Use a loop to multiply by 2 for each bit
+    mov ecx, r10d
+.ffh_mul_loop:
+    test ecx, ecx
+    jz .ffh_apply_sign
+    addsd xmm0, xmm0              ; xmm0 *= 2
+    dec ecx
+    jmp .ffh_mul_loop
+
+.ffh_neg_exp_apply:
+    neg r10d
+    mov ecx, r10d
+    mov rax, 0x3FF0000000000000    ; 1.0
+    movq xmm1, rax
+    mov rax, 0x4000000000000000    ; 2.0
+    movq xmm2, rax
+.ffh_div_loop:
+    test ecx, ecx
+    jz .ffh_apply_sign
+    divsd xmm0, xmm2              ; xmm0 /= 2
+    dec ecx
+    jmp .ffh_div_loop
+
+.ffh_apply_sign:
+    test r13d, r13d
+    jz .ffh_return
+    ; Negate
+    mov rax, 0x8000000000000000
+    movq xmm1, rax
+    xorpd xmm0, xmm1
+
+.ffh_return:
+    movq rax, xmm0
+    mov edx, TAG_FLOAT
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
+; Local helper: convert hex char in al to value in eax, or -1
+.ffh_hex_val:
+    movzx eax, byte [r12 + rbx]
+    cmp al, '0'
+    jb .ffh_hv_bad
+    cmp al, '9'
+    ja .ffh_hv_alpha
+    sub eax, '0'
+    ret
+.ffh_hv_alpha:
+    or al, 0x20                     ; lowercase
+    cmp al, 'a'
+    jb .ffh_hv_bad
+    cmp al, 'f'
+    ja .ffh_hv_bad
+    sub eax, 'a'
+    add eax, 10
+    ret
+.ffh_hv_bad:
+    mov eax, -1
+    ret
+
+.ffh_parse_error:
+    lea rdi, [rel exc_ValueError_type]
+    CSTRING rsi, "invalid hexadecimal floating-point string"
+    call raise_exception
+END_FUNC float_classmethod_fromhex
+
 
 ;; ############################################################################
 ;;                       METHODS_INIT
@@ -7064,6 +8623,42 @@ DEF_FUNC methods_init
     lea rdx, [rel str_method_translate]
     call add_method_to_dict
 
+    mov rdi, rbx
+    lea rsi, [rel mn_format_map]
+    lea rdx, [rel str_method_format_map]
+    call add_method_to_dict
+
+    ; Add maketrans as staticmethod
+    lea rdi, [rel str_staticmethod_maketrans]
+    lea rsi, [rel mn_maketrans]
+    call builtin_func_new
+    push rax
+
+    mov edi, PyStaticMethodObject_size
+    call ap_malloc
+    mov qword [rax + PyStaticMethodObject.ob_refcnt], 1
+    lea rcx, [rel staticmethod_type]
+    mov [rax + PyStaticMethodObject.ob_type], rcx
+    pop rcx
+    mov [rax + PyStaticMethodObject.sm_callable], rcx
+    push rax
+
+    lea rdi, [rel mn_maketrans]
+    call str_from_cstr_heap
+    push rax
+
+    mov rdi, rbx
+    mov rsi, rax
+    mov rdx, [rsp + 8]
+    mov ecx, TAG_PTR
+    mov r8d, TAG_PTR
+    call dict_set
+
+    pop rdi
+    call obj_decref
+    pop rdi
+    call obj_decref
+
     ; Store dict in str_type.tp_dict
     lea rax, [rel str_type]
     mov [rax + PyTypeObject.tp_dict], rbx
@@ -7185,6 +8780,37 @@ DEF_FUNC methods_init
     lea rsi, [rel mn_popitem]
     lea rdx, [rel dict_method_popitem]
     call add_method_to_dict
+
+    ; Add fromkeys as classmethod
+    lea rdi, [rel dict_classmethod_fromkeys]
+    lea rsi, [rel mn_fromkeys]
+    call builtin_func_new
+    push rax
+
+    mov edi, PyClassMethodObject_size
+    call ap_malloc
+    mov qword [rax + PyClassMethodObject.ob_refcnt], 1
+    lea rcx, [rel classmethod_type]
+    mov [rax + PyClassMethodObject.ob_type], rcx
+    pop rcx
+    mov [rax + PyClassMethodObject.cm_callable], rcx
+    push rax
+
+    lea rdi, [rel mn_fromkeys]
+    call str_from_cstr_heap
+    push rax
+
+    mov rdi, rbx
+    mov rsi, rax
+    mov rdx, [rsp + 8]
+    mov ecx, TAG_PTR
+    mov r8d, TAG_PTR
+    call dict_set
+
+    pop rdi
+    call obj_decref
+    pop rdi
+    call obj_decref
 
     ; Store in dict_type.tp_dict
     lea rax, [rel dict_type]
@@ -7345,6 +8971,47 @@ DEF_FUNC methods_init
     lea rdx, [rel int_method_conjugate]
     call add_method_to_dict
 
+    mov rdi, rbx
+    lea rsi, [rel mn_to_bytes]
+    lea rdx, [rel int_method_to_bytes]
+    call add_method_to_dict
+
+    ; Add from_bytes as classmethod
+    lea rdi, [rel int_classmethod_from_bytes]
+    lea rsi, [rel mn_from_bytes]
+    call builtin_func_new
+    push rax                    ; save builtin_func
+
+    ; Wrap in PyClassMethodObject
+    mov edi, PyClassMethodObject_size
+    call ap_malloc
+    mov qword [rax + PyClassMethodObject.ob_refcnt], 1
+    lea rcx, [rel classmethod_type]
+    mov [rax + PyClassMethodObject.ob_type], rcx
+    pop rcx                     ; builtin_func
+    mov [rax + PyClassMethodObject.cm_callable], rcx
+    push rax                    ; save classmethod wrapper
+
+    ; Create key string
+    lea rdi, [rel mn_from_bytes]
+    call str_from_cstr_heap
+    push rax                    ; save key
+
+    ; dict_set(dict, key, classmethod_wrapper, TAG_PTR, TAG_PTR)
+    mov rdi, rbx
+    mov rsi, rax                ; key
+    mov rdx, [rsp + 8]         ; classmethod wrapper
+    mov ecx, TAG_PTR
+    mov r8d, TAG_PTR
+    call dict_set
+
+    ; DECREF key
+    pop rdi
+    call obj_decref
+    ; DECREF classmethod wrapper (dict_set did INCREF)
+    pop rdi
+    call obj_decref
+
     ; Store in int_type.tp_dict
     lea rax, [rel int_type]
     mov [rax + PyTypeObject.tp_dict], rbx
@@ -7362,6 +9029,47 @@ DEF_FUNC methods_init
     lea rsi, [rel mn_conjugate]
     lea rdx, [rel float_method_conjugate]
     call add_method_to_dict
+
+    mov rdi, rbx
+    lea rsi, [rel mn_as_integer_ratio]
+    lea rdx, [rel float_method_as_integer_ratio]
+    call add_method_to_dict
+
+    mov rdi, rbx
+    lea rsi, [rel mn_hex]
+    lea rdx, [rel float_method_hex]
+    call add_method_to_dict
+
+    ; Add fromhex as classmethod
+    lea rdi, [rel float_classmethod_fromhex]
+    lea rsi, [rel mn_fromhex]
+    call builtin_func_new
+    push rax
+
+    mov edi, PyClassMethodObject_size
+    call ap_malloc
+    mov qword [rax + PyClassMethodObject.ob_refcnt], 1
+    lea rcx, [rel classmethod_type]
+    mov [rax + PyClassMethodObject.ob_type], rcx
+    pop rcx
+    mov [rax + PyClassMethodObject.cm_callable], rcx
+    push rax
+
+    lea rdi, [rel mn_fromhex]
+    call str_from_cstr_heap
+    push rax
+
+    mov rdi, rbx
+    mov rsi, rax
+    mov rdx, [rsp + 8]
+    mov ecx, TAG_PTR
+    mov r8d, TAG_PTR
+    call dict_set
+
+    pop rdi
+    call obj_decref
+    pop rdi
+    call obj_decref
 
     ; Store in float_type.tp_dict
     lea rax, [rel float_type]
@@ -7394,6 +9102,21 @@ DEF_FUNC methods_init
     mov rdi, rbx
     lea rsi, [rel mn_find]
     lea rdx, [rel bytes_method_find]
+    call add_method_to_dict
+
+    mov rdi, rbx
+    lea rsi, [rel mn_replace]
+    lea rdx, [rel bytes_method_replace]
+    call add_method_to_dict
+
+    mov rdi, rbx
+    lea rsi, [rel mn_split]
+    lea rdx, [rel bytes_method_split]
+    call add_method_to_dict
+
+    mov rdi, rbx
+    lea rsi, [rel mn_join]
+    lea rdx, [rel bytes_method_join]
     call add_method_to_dict
 
     ; Store in bytes_type.tp_dict
@@ -7480,7 +9203,11 @@ mn_rsplit:      db "rsplit", 0
 mn_splitlines:  db "splitlines", 0
 mn_expandtabs:  db "expandtabs", 0
 mn_translate:   db "translate", 0
+mn_format_map:  db "format_map", 0
+mn_maketrans:   db "maketrans", 0
 ; int method names
+mn_to_bytes:    db "to_bytes", 0
+mn_from_bytes:  db "from_bytes", 0
 mn_bit_length:  db "bit_length", 0
 mn_bit_count:   db "bit_count", 0
 mn___index__:   db "__index__", 0
@@ -7490,7 +9217,12 @@ mn___int__:     db "__int__", 0
 mn___float__:   db "__float__", 0
 ; float method names
 mn_is_integer:  db "is_integer", 0
+mn_as_integer_ratio: db "as_integer_ratio", 0
 mn___trunc__:   db "__trunc__", 0
+; float method names (continued)
+mn_fromhex:     db "fromhex", 0
 ; bytes method names
 mn_hex:         db "hex", 0
 mn_decode:      db "decode", 0
+; dict method names (continued)
+mn_fromkeys:    db "fromkeys", 0

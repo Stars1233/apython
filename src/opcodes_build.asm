@@ -225,7 +225,7 @@ DEF_FUNC_BARE op_binary_subscr
     mov rdi, [rsp+8]              ; obj (the type itself)
     CSTRING rsi, "__class_getitem__"
     call dunder_lookup
-    test rax, rax
+    test edx, edx
     jz .subscr_error
 
     ; rax = __class_getitem__ attr (borrowed ref)
@@ -369,7 +369,7 @@ DEF_FUNC_BARE op_store_subscr
     mov rdi, [rdi + PyObject.ob_type]
     lea rsi, [rel dunder_setitem]
     call dunder_lookup
-    test rax, rax
+    test edx, edx
     jz .store_type_error
 
     ; Call __setitem__(self, key, value) via tp_call
@@ -1082,6 +1082,21 @@ DEF_FUNC_BARE op_is_op
     mov r9, [r13 + 8]         ; r9 = right tag
     VPOP rdi                   ; left
     mov r10, [r13 + 8]        ; r10 = left tag
+
+    ; Normalize None: (none_singleton, TAG_PTR) → (0, TAG_NONE)
+    ; so that inline and pointer None representations compare equal
+    extern none_singleton
+    lea rcx, [rel none_singleton]
+    cmp rsi, rcx
+    jne .is_no_norm_right
+    xor esi, esi
+    mov r9, TAG_NONE
+.is_no_norm_right:
+    cmp rdi, rcx
+    jne .is_no_norm_left
+    xor edi, edi
+    mov r10, TAG_NONE
+.is_no_norm_left:
 
     ; Compare both payload AND tag (for SmallStr/SmallInt correctness)
     xor eax, eax

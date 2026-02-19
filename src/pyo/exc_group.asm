@@ -680,6 +680,9 @@ DEF_FUNC prep_reraise_star, PRS_FRAME
     mov rax, rdx
     shl rax, 4                ; index * 16
     mov rdi, [rsi + rax]      ; list item payload (fat 16-byte stride)
+    ; Check for None: inline TAG_NONE or pointer-to-none_singleton
+    cmp qword [rsi + rax + 8], TAG_NONE
+    je .flat_next
     lea r8, [rel none_singleton]
     cmp rdi, r8
     je .flat_next

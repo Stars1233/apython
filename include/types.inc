@@ -56,6 +56,19 @@ struc PyNumberMethods
     .nb_floor_divide:  resq 1  ; +144
     .nb_true_divide:   resq 1  ; +152
     .nb_index:         resq 1  ; +160
+    ; Inplace slots (used by NB_INPLACE_* opcodes)
+    .nb_iadd:          resq 1  ; +168
+    .nb_isub:          resq 1  ; +176
+    .nb_imul:          resq 1  ; +184
+    .nb_irem:          resq 1  ; +192
+    .nb_ipow:          resq 1  ; +200
+    .nb_ilshift:       resq 1  ; +208
+    .nb_irshift:       resq 1  ; +216
+    .nb_iand:          resq 1  ; +224
+    .nb_ixor:          resq 1  ; +232
+    .nb_ior:           resq 1  ; +240
+    .nb_ifloor_divide: resq 1  ; +248
+    .nb_itrue_divide:  resq 1  ; +256
 endstruc
 
 ; Sequence methods structure
@@ -86,6 +99,7 @@ TYPE_FLAG_STR_SUBCLASS equ 0x0200
 TYPE_FLAG_LIST_SUBCLASS equ 0x0400
 TYPE_FLAG_TUPLE_SUBCLASS equ 0x0800
 TYPE_FLAG_DICT_SUBCLASS equ 0x1000
+TYPE_FLAG_HAS_SLOTS     equ 0x2000
 
 ; Comparison opcodes (used by tp_richcompare)
 PY_LT equ 0

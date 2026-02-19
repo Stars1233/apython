@@ -154,6 +154,14 @@ struc PyModuleObject
     .mod_dict:    resq 1  ; +24: ptr to module dict
 endstruc
 
+; Member descriptor object (for __slots__)
+struc PyMemberDescrObject
+    .ob_refcnt: resq 1  ; +0
+    .ob_type:   resq 1  ; +8
+    .md_offset: resq 1  ; +16: byte offset in instance for slot payload
+    .md_name:   resq 1  ; +24: ptr to slot name (PyStrObject*, owned)
+endstruc
+
 ; Class instance object
 struc PyInstanceObject
     .ob_refcnt:   resq 1  ; +0
@@ -198,6 +206,13 @@ struc PyDictIterObject
     .it_dict:   resq 1    ; +16: ptr to dict
     .it_index:  resq 1    ; +24: current entry index
     .it_kind:   resq 1    ; +32: 0=keys, 1=values, 2=items
+endstruc
+
+struc PyDictViewObject
+    .ob_refcnt: resq 1
+    .ob_type:   resq 1
+    .dv_dict:   resq 1    ; +16: ptr to dict (INCREF'd)
+    .dv_kind:   resq 1    ; +24: 0=keys, 1=values, 2=items
 endstruc
 
 struc PyRangeIterObject

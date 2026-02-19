@@ -287,8 +287,8 @@ mfinish:
 ; TYPE_NONE handler
 ;--------------------------------------------------------------------------
 mdo_none:
-    lea rax, [rel none_singleton]
-    mov edx, TAG_PTR
+    xor eax, eax
+    mov edx, TAG_NONE
     jmp mfinish
 
 ;--------------------------------------------------------------------------

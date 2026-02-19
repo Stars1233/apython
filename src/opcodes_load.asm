@@ -542,7 +542,7 @@ DEF_FUNC op_load_attr, LA_FRAME
     mov rdi, rcx               ; attr's type
     lea rsi, [rel dunder_get]
     call dunder_lookup
-    test rax, rax
+    test edx, edx
     jz .la_check_flag          ; no __get__, treat normally
 
     ; Has __get__! Call descriptor.__get__(obj, type(obj))

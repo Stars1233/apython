@@ -361,6 +361,19 @@ DEF_FUNC_BARE eval_exception_unwind
     mov r12, [rel eval_saved_r12]   ; restore frame pointer
     mov r13, [rel eval_saved_r13]   ; restore value stack pointer
 
+    ; Attach traceback to exception if none exists yet
+    mov rax, [rel current_exception]
+    test rax, rax
+    jz .skip_tb
+    cmp qword [rax + PyExceptionObject.exc_tb], 0
+    jne .skip_tb
+    push rax                         ; save exception ptr
+    extern traceback_new
+    call traceback_new               ; rax = new traceback object
+    pop rdx                          ; rdx = exception
+    mov [rdx + PyExceptionObject.exc_tb], rax  ; attach (transfer ownership)
+.skip_tb:
+
     ; Re-derive r14/r15 from the code object
     mov rax, [r12 + PyFrame.code]
     mov r14, [rax + PyCodeObject.co_consts]

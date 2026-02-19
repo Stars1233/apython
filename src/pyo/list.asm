@@ -317,9 +317,11 @@ DEF_FUNC list_ass_subscript, LAS_FRAME
     mov r14, rdx           ; r14 = stop
     mov r15, rcx           ; r15 = step
 
-    ; Only support step=1 for now
+    ; Check step
+    test r15, r15
+    jz .las_step_zero         ; step == 0 → ValueError
     cmp r15, 1
-    jne .las_step_error
+    jne .las_extended_step    ; step != 1 → extended slice
 
     ; Clamp: if stop < start, set stop = start
     cmp r14, r13
@@ -529,14 +531,120 @@ DEF_FUNC list_ass_subscript, LAS_FRAME
     leave
     ret
 
-.las_step_error:
+.las_step_zero:
     extern exc_ValueError_type
     add rsp, 8
     pop r15
     pop r14
     pop r13
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "extended slice assignment not supported"
+    lea rdi, [rel exc_ValueError_type]
+    CSTRING rsi, "slice step cannot be zero"
+    call raise_exception
+
+;; Extended slice assignment: a[start:stop:step] = iterable (step != 0, step != 1)
+;; Registers on entry: rbx=list, r12=value, r13=start, r14=stop, r15=step
+.las_extended_step:
+    ; Compute slicelength
+    test r15, r15
+    js .ext_neg_step
+
+    ; step > 0: slicelength = (stop - start - 1) / step + 1 if stop > start, else 0
+    mov rax, r14
+    sub rax, r13
+    jle .ext_empty
+    dec rax
+    xor edx, edx
+    idiv r15
+    inc rax
+    jmp .ext_have_len
+
+.ext_neg_step:
+    ; step < 0: slicelength = (start - stop - 1) / (-step) + 1 if start > stop, else 0
+    mov rax, r13
+    sub rax, r14
+    jle .ext_empty
+    dec rax
+    mov rcx, r15
+    neg rcx
+    xor edx, edx
+    idiv rcx
+    inc rax
+    jmp .ext_have_len
+
+.ext_empty:
+    xor eax, eax
+
+.ext_have_len:
+    mov r14, rax           ; r14 = slicelength (repurpose, stop no longer needed)
+
+    ; Get replacement items from r12 (value)
+    cmp qword [rbp - LAS_VTAG], TAG_PTR
+    jne .las_type_error
+
+    mov rax, [r12 + PyObject.ob_type]
+    lea rcx, [rel list_type]
+    cmp rax, rcx
+    je .ext_from_list
+    lea rcx, [rel tuple_type]
+    cmp rax, rcx
+    je .ext_from_tuple
+    jmp .las_type_error
+
+.ext_from_list:
+    mov r8, [r12 + PyListObject.ob_size]
+    mov r12, [r12 + PyListObject.ob_item]
+    jmp .ext_check_len
+
+.ext_from_tuple:
+    mov r8, [r12 + PyTupleObject.ob_size]
+    lea r12, [r12 + PyTupleObject.ob_item]
+
+.ext_check_len:
+    cmp r8, r14
+    jne .ext_len_mismatch
+
+    ; Loop: for each position in the slice, replace value
+    ; rbx = list, r12 = source items ptr, r13 = current list index
+    ; r14 = remaining count, r15 = step
+    test r14, r14
+    jz .las_insert_done        ; jump to shared exit
+
+.ext_loop:
+    ; DECREF old value at list[r13]
+    mov rax, [rbx + PyListObject.ob_item]
+    mov rdx, r13
+    shl rdx, 4                ; idx * 16
+    mov rdi, [rax + rdx]      ; old payload
+    mov rsi, [rax + rdx + 8]  ; old tag
+    XDECREF_VAL rdi, rsi      ; may call obj_dealloc, clobbers caller-saved
+
+    ; INCREF new value from source
+    mov rdi, [r12]            ; new payload
+    mov rsi, [r12 + 8]        ; new tag
+    INCREF_VAL rdi, rsi       ; inline inc, no call
+
+    ; Store at list[r13]
+    mov rax, [rbx + PyListObject.ob_item]
+    mov rdx, r13
+    shl rdx, 4                ; idx * 16
+    mov [rax + rdx], rdi      ; payload
+    mov [rax + rdx + 8], rsi  ; tag
+
+    ; Advance
+    add r13, r15               ; next list index (start + i*step)
+    add r12, 16                ; next source item
+    dec r14                    ; remaining--
+    jnz .ext_loop
+
+    jmp .las_insert_done       ; shared exit
+
+.ext_len_mismatch:
+    add rsp, 8
+    pop r15
+    pop r14
+    pop r13
+    lea rdi, [rel exc_ValueError_type]
+    CSTRING rsi, "attempt to assign sequence of wrong size to extended slice"
     call raise_exception
 
 .las_type_error:
@@ -1051,6 +1159,18 @@ list_number_methods:
     dq 0                    ; nb_floor_divide
     dq 0                    ; nb_true_divide
     dq 0                    ; nb_index
+    dq 0                        ; nb_iadd         +168
+    dq 0                        ; nb_isub         +176
+    dq 0                        ; nb_imul         +184
+    dq 0                        ; nb_irem         +192
+    dq 0                        ; nb_ipow         +200
+    dq 0                        ; nb_ilshift      +208
+    dq 0                        ; nb_irshift      +216
+    dq 0                        ; nb_iand         +224
+    dq 0                        ; nb_ixor         +232
+    dq 0                        ; nb_ior          +240
+    dq 0                        ; nb_ifloor_divide +248
+    dq 0                        ; nb_itrue_divide +256
 
 ; List sequence methods
 align 8

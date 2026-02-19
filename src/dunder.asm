@@ -54,10 +54,12 @@ DEF_FUNC dunder_lookup
     jmp .walk
 
 .found:
-    push rax                ; save result
+    push rdx                ; save result tag
+    push rax                ; save result payload
     mov rdi, r13
     call obj_decref         ; DECREF name string
-    pop rax
+    pop rax                 ; restore payload
+    pop rdx                 ; restore tag
 
     pop r14
     pop r13
@@ -69,7 +71,7 @@ DEF_FUNC dunder_lookup
 .not_found:
     mov rdi, r13
     call obj_decref         ; DECREF name string
-    xor eax, eax            ; return NULL
+    RET_NULL                ; rax=0, edx=TAG_NULL(0)
 
     pop r14
     pop r13
@@ -98,7 +100,7 @@ DEF_FUNC dunder_call_1
     mov rdi, [rbx + PyObject.ob_type]
     ; rsi = name already set
     call dunder_lookup
-    test rax, rax
+    test edx, edx
     jz .not_found
 
     ; Call: tp_call(dunder_func, &[self], 1)
@@ -155,7 +157,7 @@ DEF_FUNC dunder_call_2
     mov rdi, [rbx + PyObject.ob_type]
     mov rsi, rdx            ; name
     call dunder_lookup
-    test rax, rax
+    test edx, edx
     jz .not_found
 
     ; Call: tp_call(dunder_func, &[self, other], 2)
@@ -220,7 +222,7 @@ DEF_FUNC dunder_call_3
     mov rdi, [rbx + PyObject.ob_type]
     mov rsi, rcx            ; name
     call dunder_lookup
-    test rax, rax
+    test edx, edx
     jz .not_found
 
     ; Call: tp_call(dunder_func, &[self, arg1, arg2], 3)
@@ -310,6 +312,7 @@ global dunder_matmul
 global dunder_get
 global dunder_set
 global dunder_delete
+global dunder_del
 
 dunder_eq:       db "__eq__", 0
 dunder_ne:       db "__ne__", 0
@@ -356,6 +359,7 @@ dunder_matmul:   db "__matmul__", 0
 dunder_get:      db "__get__", 0
 dunder_set:      db "__set__", 0
 dunder_delete:   db "__delete__", 0
+dunder_del:      db "__del__", 0
 
 ; Compare op -> dunder name lookup table
 global cmp_dunder_table

@@ -227,7 +227,7 @@ DEF_FUNC op_store_attr, SA_FRAME
     mov rdi, rcx                  ; descriptor's type
     lea rsi, [rel dunder_set]
     call dunder_lookup
-    test rax, rax
+    test edx, edx
     jz .sa_no_property
 
     ; Has __set__! Call descriptor.__set__(obj, value)

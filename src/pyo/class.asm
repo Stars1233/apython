@@ -46,10 +46,18 @@ DEF_FUNC instance_new
 
     mov rbx, rdi                ; rbx = type
 
-    ; Allocate PyInstanceObject (24 bytes)
-    mov edi, PyInstanceObject_size
+    ; Allocate using tp_basicsize (supports __slots__ with extra slot storage)
+    mov rdi, [rbx + PyTypeObject.tp_basicsize]
+    push rdi                    ; save size for zero-fill
     call ap_malloc
     mov r12, rax                ; r12 = instance
+
+    ; Zero-fill the instance (handles slot init to TAG_NULL)
+    pop rcx                     ; size in bytes
+    mov rdi, r12
+    shr rcx, 3                  ; size / 8 = number of qwords
+    xor eax, eax
+    rep stosq
 
     ; ob_refcnt = 1
     mov qword [r12 + PyObject.ob_refcnt], 1
@@ -61,10 +69,15 @@ DEF_FUNC instance_new
     mov rdi, rbx
     call obj_incref
 
-    ; inst_dict = dict_new()
+    ; Create inst_dict only if class doesn't have __slots__ (or has __dict__ in __slots__)
+    mov rax, [rbx + PyTypeObject.tp_flags]
+    test rax, TYPE_FLAG_HAS_SLOTS
+    jnz .in_no_dict              ; __slots__ suppresses inst_dict
+
     call dict_new
     mov [r12 + PyInstanceObject.inst_dict], rax
 
+.in_no_dict:
     mov rax, r12                ; return instance
     pop r12
     pop rbx
@@ -143,6 +156,7 @@ DEF_FUNC instance_getattr
     ; Found in type dict — handle method binding.
     ; Descriptors (staticmethod, classmethod, property) are returned as-is
     ; for LOAD_ATTR to unwrap, since LOAD_ATTR knows the push convention.
+    ; Member descriptors (slots) read from fixed instance offset.
     ; Regular callables are bound to the instance.
     mov r13, rax                ; r13 = attr (borrowed ref from dict_get)
     mov r12, rdx                ; r12 = attr tag (name no longer needed)
@@ -150,6 +164,12 @@ DEF_FUNC instance_getattr
     jne .found_type_raw         ; non-pointer — return as-is
 
     mov rcx, [rax + PyObject.ob_type]
+
+    ; Check for member descriptor (slot) → read from instance offset
+    extern member_descr_type
+    lea rdx, [rel member_descr_type]
+    cmp rcx, rdx
+    je .found_slot
 
     ; Check for staticmethod/classmethod/property → return raw descriptor
     ; LOAD_ATTR handles unwrapping with the correct push convention
@@ -191,6 +211,21 @@ DEF_FUNC instance_getattr
     leave
     ret
 
+.found_slot:
+    ; Member descriptor found — read value from instance at fixed offset
+    ; r13 = member descriptor, rbx = instance
+    mov rcx, [r13 + PyMemberDescrObject.md_offset]
+    mov rax, [rbx + rcx]       ; slot payload
+    mov rdx, [rbx + rcx + 8]  ; slot tag
+    test edx, edx
+    jz .slot_not_set            ; TAG_NULL = slot not set → AttributeError
+    INCREF_VAL rax, rdx
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
 .found_type_raw:
     ; Not callable, SmallInt, or descriptor — INCREF and return
     INCREF_VAL r13, r12         ; tag-aware INCREF (64-bit tag for SmallStr safety)
@@ -201,6 +236,13 @@ DEF_FUNC instance_getattr
     pop rbx
     leave
     ret
+
+.slot_not_set:
+    ; Slot exists but not initialized — raise AttributeError directly
+    ; (must not return NULL or LOAD_ATTR fallback finds descriptor in tp_dict)
+    lea rdi, [rel exc_AttributeError_type]
+    CSTRING rsi, "slot attribute not set"
+    call raise_exception
 
 .not_found:
     RET_NULL
@@ -218,32 +260,113 @@ END_FUNC instance_getattr
 ;; ============================================================================
 DEF_FUNC instance_setattr
     push rbx
-    push rcx                    ; save value_tag from caller
-    mov rbx, rdi
-    ; Check if inst_dict is NULL (int subclass instances start with NULL dict)
+    push r12
+    push r13
+    push r14
+
+    mov rbx, rdi                ; instance
+    mov r12, rsi                ; name
+    mov r13, rdx                ; value
+    mov r14, rcx                ; value_tag
+
+    ; Walk type dict chain looking for member descriptor (slot)
+    mov rax, [rbx + PyObject.ob_type]
+.sa_walk:
+    mov rdi, [rax + PyTypeObject.tp_dict]
+    test rdi, rdi
+    jz .sa_try_base
+    push rax                    ; save current type
+    mov rsi, r12                ; name
+    mov edx, TAG_PTR
+    call dict_get
+    mov r9, rax                 ; save dict_get value
+    pop rax                     ; restore current type
+    test edx, edx
+    jnz .sa_found_type
+
+.sa_try_base:
+    mov rax, [rax + PyTypeObject.tp_base]
+    test rax, rax
+    jnz .sa_walk
+    jmp .sa_no_slot
+
+.sa_found_type:
+    ; Check if it's a member descriptor (r9 = dict value, rax = type)
+    cmp edx, TAG_PTR
+    jne .sa_no_slot
+    extern member_descr_type
+    lea rcx, [rel member_descr_type]
+    cmp [r9 + PyObject.ob_type], rcx
+    jne .sa_no_slot
+
+    ; Member descriptor! Write value to slot offset
+    mov rcx, [r9 + PyMemberDescrObject.md_offset]
+
+    ; XDECREF old value at slot
+    push rcx
+    mov rdi, [rbx + rcx]       ; old payload
+    mov rsi, [rbx + rcx + 8]  ; old tag
+    XDECREF_VAL rdi, rsi
+    pop rcx
+
+    ; INCREF new value
+    INCREF_VAL r13, r14
+
+    ; Store new value at slot offset
+    mov [rbx + rcx], r13
+    mov [rbx + rcx + 8], r14
+
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.sa_no_slot:
+    ; No slot found. Fall back to inst_dict.
     mov rdi, [rbx + PyInstanceObject.inst_dict]
     test rdi, rdi
     jnz .sa_have_dict
 
-    ; Allocate a new dict for this instance
-    push rsi
-    push rdx
+    ; inst_dict is NULL — check if __slots__ class (can't set arbitrary attrs)
+    mov rax, [rbx + PyObject.ob_type]
+    mov rax, [rax + PyTypeObject.tp_flags]
+    test rax, TYPE_FLAG_HAS_SLOTS
+    jnz .sa_no_dict_error
+
+    ; Regular class without __slots__ — create dict on the fly
+    push r12
+    push r13
+    push r14
     call dict_new
     mov [rbx + PyInstanceObject.inst_dict], rax
     mov rdi, rax
-    pop rdx
-    pop rsi
+    pop r14
+    pop r13
+    pop r12
+    jmp .sa_dict_set
 
 .sa_have_dict:
+.sa_dict_set:
     ; dict_set(inst_dict, name, value, value_tag, key_tag)
-    ; rdi = dict (already set), rsi = name, rdx = value
-    pop rcx                     ; restore value_tag
+    mov rsi, r12                ; name
+    mov rdx, r13                ; value
+    mov rcx, r14                ; value_tag
     mov r8d, TAG_PTR            ; key_tag (name is always heap string)
     call dict_set
 
+    pop r14
+    pop r13
+    pop r12
     pop rbx
     leave
     ret
+
+.sa_no_dict_error:
+    lea rdi, [rel exc_AttributeError_type]
+    CSTRING rsi, "object has no attribute"
+    call raise_exception
 END_FUNC instance_setattr
 
 ;; ============================================================================
@@ -291,6 +414,31 @@ DEF_FUNC instance_dealloc
 
     mov rbx, rdi                ; rbx = self
 
+    ; Check for __del__ dunder on heaptype
+    mov rax, [rbx + PyObject.ob_type]
+    mov rax, [rax + PyTypeObject.tp_flags]
+    test rax, TYPE_FLAG_HEAPTYPE
+    jz .no_del
+
+    ; Temporarily bump refcount to prevent re-entrant dealloc during __del__
+    inc qword [rbx + PyObject.ob_refcnt]
+
+    ; Call __del__(self) — dunder_call_1 handles lookup + call
+    extern dunder_del
+    extern dunder_call_1
+    mov rdi, rbx
+    lea rsi, [rel dunder_del]
+    call dunder_call_1
+    ; Ignore return value — DECREF if non-NULL
+    test edx, edx
+    jz .del_no_result
+    DECREF_VAL rax, rdx
+.del_no_result:
+
+    ; Restore refcount (undo the bump)
+    dec qword [rbx + PyObject.ob_refcnt]
+
+.no_del:
     ; XDECREF inst_dict (may be NULL for int subclass instances)
     mov rdi, [rbx + PyInstanceObject.inst_dict]
     test rdi, rdi
@@ -307,6 +455,30 @@ DEF_FUNC instance_dealloc
     mov rsi, [rbx + PyIntSubclassObject.int_value_tag]
     DECREF_VAL rdi, rsi
 .no_int_value:
+
+    ; DECREF_VAL each __slots__ slot
+    ; nslots = (tp_basicsize - PyInstanceObject_size) / 16
+    push r12
+    mov rax, [rbx + PyObject.ob_type]
+    mov rax, [rax + PyTypeObject.tp_basicsize]
+    sub rax, PyInstanceObject_size
+    jle .no_slots                ; no slots (basicsize <= PyInstanceObject_size)
+    shr rax, 4                  ; nslots = (basicsize - 24) / 16
+    mov r12, rax                ; r12 = remaining count
+    lea rcx, [rbx + PyInstanceObject_size]  ; rcx = first slot address
+
+.slot_decref_loop:
+    push rcx
+    mov rdi, [rcx]              ; slot payload
+    mov rsi, [rcx + 8]         ; slot tag
+    XDECREF_VAL rdi, rsi
+    pop rcx
+    add rcx, 16                 ; next slot
+    dec r12
+    jnz .slot_decref_loop
+
+.no_slots:
+    pop r12
 
     ; DECREF ob_type (the class)
     mov rdi, [rbx + PyObject.ob_type]

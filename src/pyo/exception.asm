@@ -585,6 +585,110 @@ DEF_FUNC exc_type_call, ETC_FRAME
 END_FUNC exc_type_call
 
 ; ============================================================================
+; Traceback support
+; ============================================================================
+
+; traceback_new() -> PyTracebackObject*
+; Allocates a new traceback with tb_next=NULL, tb_lineno=0.
+global traceback_new
+DEF_FUNC traceback_new
+    mov edi, PyTracebackObject_size
+    call ap_malloc
+    mov qword [rax + PyTracebackObject.ob_refcnt], 1
+    lea rcx, [rel traceback_type]
+    mov [rax + PyTracebackObject.ob_type], rcx
+    mov qword [rax + PyTracebackObject.tb_next], 0
+    mov qword [rax + PyTracebackObject.tb_lineno], 0
+    leave
+    ret
+END_FUNC traceback_new
+
+; traceback_dealloc(PyTracebackObject *tb)
+; XDECREF tb_next, free self.
+global traceback_dealloc
+DEF_FUNC traceback_dealloc
+    push rbx
+    mov rbx, rdi
+    mov rdi, [rbx + PyTracebackObject.tb_next]
+    test rdi, rdi
+    jz .no_next
+    call obj_decref
+.no_next:
+    mov rdi, rbx
+    call ap_free
+    pop rbx
+    leave
+    ret
+END_FUNC traceback_dealloc
+
+; traceback_getattr(PyTracebackObject *tb, PyStrObject *name) -> (rax, edx)
+; Handles tb_lineno, tb_next, tb_frame attributes.
+global traceback_getattr
+DEF_FUNC traceback_getattr
+    push rbx
+    push r12
+
+    mov rbx, rdi            ; tb
+    mov r12, rsi            ; name str
+
+    ; Check "tb_lineno"
+    lea rdi, [r12 + PyStrObject.data]
+    CSTRING rsi, "tb_lineno"
+    call ap_strcmp
+    test eax, eax
+    jz .tb_get_lineno
+
+    ; Check "tb_next"
+    lea rdi, [r12 + PyStrObject.data]
+    CSTRING rsi, "tb_next"
+    call ap_strcmp
+    test eax, eax
+    jz .tb_get_next
+
+    ; Check "tb_frame"
+    lea rdi, [r12 + PyStrObject.data]
+    CSTRING rsi, "tb_frame"
+    call ap_strcmp
+    test eax, eax
+    jz .tb_return_none
+
+    ; Not found
+    RET_NULL
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.tb_get_lineno:
+    mov rax, [rbx + PyTracebackObject.tb_lineno]
+    mov edx, TAG_SMALLINT
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.tb_get_next:
+    mov rax, [rbx + PyTracebackObject.tb_next]
+    test rax, rax
+    jz .tb_return_none
+    INCREF rax
+    mov edx, TAG_PTR
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.tb_return_none:
+    lea rax, [rel none_singleton]
+    INCREF rax
+    mov edx, TAG_PTR
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC traceback_getattr
+
+; ============================================================================
 ; Data section - Exception type objects and name strings
 ; ============================================================================
 section .data
@@ -652,6 +756,36 @@ exc_metatype:
     dq 0                    ; tp_bases
 
 exc_meta_name: db "exception_metatype", 0
+
+; Traceback type object (immortal)
+align 8
+global traceback_type
+traceback_type:
+    dq 1                    ; ob_refcnt (immortal)
+    dq type_type            ; ob_type
+    dq tb_type_name         ; tp_name
+    dq PyTracebackObject_size ; tp_basicsize
+    dq traceback_dealloc    ; tp_dealloc
+    dq 0                    ; tp_repr
+    dq 0                    ; tp_str
+    dq 0                    ; tp_hash
+    dq 0                    ; tp_call
+    dq traceback_getattr    ; tp_getattr
+    dq 0                    ; tp_setattr
+    dq 0                    ; tp_richcompare
+    dq 0                    ; tp_iter
+    dq 0                    ; tp_iternext
+    dq 0                    ; tp_init
+    dq 0                    ; tp_new
+    dq 0                    ; tp_as_number
+    dq 0                    ; tp_as_sequence
+    dq 0                    ; tp_as_mapping
+    dq 0                    ; tp_base
+    dq 0                    ; tp_dict
+    dq 0                    ; tp_mro
+    dq 0                    ; tp_flags
+    dq 0                    ; tp_bases
+tb_type_name: db "traceback", 0
 
 ; Macro to define an exception type singleton
 ; %1 = label, %2 = name string, %3 = tp_base (or 0)

@@ -354,7 +354,14 @@ DEF_FUNC builtin_print, PR_FRAME
 
 .print_kw_file:
     ; file kwarg: get file descriptor from file object
-    ; For now, just use fd=1 (stdout) — file= support is complex
+    mov rax, [rbx + r11 + 8]       ; tag
+    cmp eax, TAG_PTR
+    jne .print_kw_next              ; non-pointer file= → ignore
+    mov rax, [rbx + r11]           ; file object payload
+    test rax, rax
+    jz .print_kw_next
+    mov rax, [rax + PyFileObject.file_fd]
+    mov [rbp - PR_FILE_FD], rax
     jmp .print_kw_next
 
 .print_kw_next:
@@ -1394,6 +1401,112 @@ DEF_FUNC builtin___build_class__
     mov rdi, r14
     call obj_incref
 
+    ; === Parse __slots__ from class_dict ===
+    ; r12=type, r15=class_dict, [rbp-48]=base_class
+    lea rdi, [rel bc_slots_name]
+    call str_from_cstr_heap
+    push rax                        ; save __slots__ str
+    mov rdi, r15                    ; class_dict
+    mov rsi, rax
+    mov edx, TAG_PTR
+    call dict_get
+    pop rdi                         ; __slots__ str
+    push rdx                        ; save dict_get tag
+    push rax                        ; save dict_get value
+    call obj_decref                 ; DECREF __slots__ str
+    pop rax                         ; value
+    pop rdx                         ; tag
+    test edx, edx
+    jz .bc_no_slots
+
+    ; Must be TAG_PTR and a tuple
+    cmp edx, TAG_PTR
+    jne .bc_no_slots
+    extern tuple_type
+    mov rcx, [rax + PyObject.ob_type]
+    lea rdx, [rel tuple_type]
+    cmp rcx, rdx
+    jne .bc_no_slots
+
+    ; rax = slots tuple
+    mov rbx, rax                    ; rbx = slots tuple
+    mov r13, [rbx + PyTupleObject.ob_size]  ; r13 = nslots
+    test r13, r13
+    jz .bc_no_slots
+
+    ; Determine base_basicsize
+    mov rax, [rbp-48]               ; base_class
+    test rax, rax
+    jz .bc_use_default_basic
+    mov rdi, [rax + PyTypeObject.tp_basicsize]
+    jmp .bc_have_basic
+.bc_use_default_basic:
+    mov rdi, PyInstanceObject_size
+.bc_have_basic:
+    ; rdi = base_basicsize
+    ; Set tp_basicsize = base_basicsize + nslots * 16
+    mov rax, r13
+    shl rax, 4                      ; nslots * 16
+    add rax, rdi                    ; + base_basicsize
+    mov [r12 + PyTypeObject.tp_basicsize], rax
+
+    ; Set TYPE_FLAG_HAS_SLOTS
+    or qword [r12 + PyTypeObject.tp_flags], TYPE_FLAG_HAS_SLOTS
+
+    ; Create member descriptors for each slot
+    ; rbx = slots tuple, r13 = nslots, rdi = base_basicsize
+    push rdi                        ; save base_basicsize
+    xor edx, edx                    ; i = 0
+
+.bc_slot_loop:
+    cmp rdx, r13                    ; i < nslots?
+    jge .bc_slots_done
+
+    push rdx                        ; save i
+
+    ; Get slot name: slots_tuple[i] (fat tuple, 16-byte stride)
+    mov rax, rdx
+    shl rax, 4
+    mov rcx, [rbx + PyTupleObject.ob_item + rax]      ; name payload
+    cmp qword [rbx + PyTupleObject.ob_item + rax + 8], TAG_PTR
+    jne .bc_slot_skip               ; skip non-string slots
+
+    ; Compute offset = base_basicsize + i * 16
+    mov rdi, [rsp + 8]             ; base_basicsize
+    mov rax, [rsp]                 ; i
+    shl rax, 4
+    add rdi, rax                   ; offset
+
+    ; Create descriptor: member_descr_new(offset, name_str)
+    mov rsi, rcx                   ; name string
+    push rcx                       ; save name for dict_set
+    INCREF rsi                     ; descriptor takes ownership
+    extern member_descr_new
+    call member_descr_new          ; rax = new descriptor
+
+    ; Add to class_dict: dict_set(dict, name, descriptor, TAG_PTR, TAG_PTR)
+    mov rdi, r15                   ; class_dict
+    pop rsi                        ; name (key)
+    mov rdx, rax                   ; descriptor (value)
+    push rax                       ; save descriptor for DECREF
+    mov ecx, TAG_PTR               ; value_tag
+    mov r8, TAG_PTR                ; key_tag
+    call dict_set
+
+    ; DECREF our ref on descriptor (dict now owns one via INCREF in dict_set)
+    pop rdi
+    call obj_decref
+
+.bc_slot_skip:
+    pop rdx                        ; restore i
+    inc rdx
+    jmp .bc_slot_loop
+
+.bc_slots_done:
+    pop rdi                        ; clean base_basicsize
+
+.bc_no_slots:
+
     ; Look up "__init__" in class_dict for tp_init
     lea rdi, [rel bc_init_name]
     call str_from_cstr_heap
@@ -1503,7 +1616,7 @@ DEF_FUNC builtin___build_class__
     mov rdi, rax               ; base class (as type)
     CSTRING rsi, "__init_subclass__"
     call dunder_lookup
-    test rax, rax
+    test edx, edx
     jz .bc_no_init_subclass
 
     ; Call __init_subclass__(new_class)
@@ -1577,6 +1690,7 @@ END_FUNC builtin___build_class__
 section .rodata
 bc_init_name: db "__init__", 0
 bc_classcell_name: db "__classcell__", 0
+bc_slots_name: db "__slots__", 0
 section .text
 
 ;; ============================================================================

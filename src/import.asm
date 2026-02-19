@@ -348,16 +348,16 @@ DEF_FUNC import_module, IF_FRAME
 .skip_set_parent:
     ; Decide what to return based on fromlist
     mov rax, [rbp - IF_FROMLIST]
-    ; Check if fromlist is None
+    ; Check if fromlist is None (inline TAG_NONE has payload=0, pointer form has none_singleton)
+    test rax, rax
+    jz .return_top
     lea rcx, [rel none_singleton]
     cmp rax, rcx
     je .return_top
-    ; Check if fromlist is empty tuple (fromlist is always None or tuple)
-    mov rcx, [rax + PyObject.ob_type]
-    lea rdx, [rel none_singleton]
-    mov rdx, [rdx + PyObject.ob_type]
-    cmp rcx, rdx
-    je .return_top
+    ; Check tuple size (fromlist is always None or tuple)
+    mov rcx, [rax + PyTupleObject.ob_size]
+    test rcx, rcx
+    jz .return_top
     ; Check tuple size
     mov rcx, [rax + PyTupleObject.ob_size]
     test rcx, rcx

@@ -62,6 +62,14 @@ struc PyExceptionGroupObject
     .eg_exceptions: resq 1  ; +72: tuple of sub-exceptions
 endstruc
 
+; Traceback object
+struc PyTracebackObject
+    .ob_refcnt: resq 1  ; +0
+    .ob_type:   resq 1  ; +8
+    .tb_next:   resq 1  ; +16: ptr to next traceback or NULL
+    .tb_lineno: resq 1  ; +24: line number (i64)
+endstruc
+
 ; Fatal error codes (non-Python, internal)
 ERR_OUT_OF_MEMORY     equ 1
 ERR_INVALID_PYC       equ 2

@@ -1081,10 +1081,11 @@ END_FUNC dict_tp_iter
 ;; rdi = iterator
 ;; ============================================================================
 DEF_FUNC_BARE dict_iter_next
-    mov rax, [rdi + PyDictIterObject.it_dict]      ; dict
-    mov rcx, [rdi + PyDictIterObject.it_index]      ; current index
-    mov rdx, [rax + PyDictObject.capacity]          ; capacity
-    mov rsi, [rax + PyDictObject.entries]            ; entries ptr
+    mov r10, [rdi + PyDictIterObject.it_kind]         ; 0=keys, 1=values, 2=items
+    mov rax, [rdi + PyDictIterObject.it_dict]         ; dict
+    mov rcx, [rdi + PyDictIterObject.it_index]        ; current index
+    mov rdx, [rax + PyDictObject.capacity]            ; capacity
+    mov rsi, [rax + PyDictObject.entries]              ; entries ptr
 
 .di_scan:
     cmp rcx, rdx
@@ -1093,19 +1094,70 @@ DEF_FUNC_BARE dict_iter_next
     ; Check if entry at index has a key (key_tag != TAG_NULL)
     imul rax, rcx, DictEntry_size
     add rax, rsi
-    mov r8, [rax + DictEntry.key]
     cmp qword [rax + DictEntry.key_tag], 0
     je .di_skip
     cmp qword [rax + DictEntry.key_tag], DICT_TOMBSTONE
     je .di_skip
 
-    ; Found a valid entry — return the key with its tag
+    ; Found a valid entry — advance index
     inc rcx
     mov [rdi + PyDictIterObject.it_index], rcx
-    mov rdx, [rax + DictEntry.key_tag]  ; key tag from entry (64-bit)
-    mov rax, r8
-    ; INCREF key (tag-aware)
+
+    ; Branch on kind
+    cmp r10, 1
+    je .di_return_value
+    ja .di_return_item
+
+    ; kind=0: return key
+    mov rdx, [rax + DictEntry.key_tag]
+    mov rax, [rax + DictEntry.key]
     INCREF_VAL rax, rdx
+    ret
+
+.di_return_value:
+    ; kind=1: return value
+    mov rdx, [rax + DictEntry.value_tag]
+    mov rax, [rax + DictEntry.value]
+    INCREF_VAL rax, rdx
+    ret
+
+.di_return_item:
+    ; kind=2: return (key, value) 2-tuple
+    ; rax = entry ptr — need to allocate tuple, so must save entry
+    push rbx
+    push r12
+    mov rbx, rax                ; save entry ptr
+
+    ; Allocate 2-tuple (2 fat items = 32 bytes item storage)
+    mov edi, PyTupleObject_size + 32
+    call ap_malloc
+    mov r12, rax                ; r12 = new tuple
+
+    mov qword [r12 + PyObject.ob_refcnt], 1
+    extern tuple_type
+    lea rcx, [rel tuple_type]
+    mov [r12 + PyObject.ob_type], rcx
+    mov qword [r12 + PyTupleObject.ob_size], 2
+
+    ; tuple[0] = key (payload + tag)
+    mov rax, [rbx + DictEntry.key]
+    mov rdx, [rbx + DictEntry.key_tag]
+    mov [r12 + PyTupleObject.ob_item], rax
+    mov [r12 + PyTupleObject.ob_item + 8], rdx
+    INCREF_VAL rax, rdx
+
+    ; tuple[1] = value (payload + tag)
+    mov rax, [rbx + DictEntry.value]
+    mov rdx, [rbx + DictEntry.value_tag]
+    mov [r12 + PyTupleObject.ob_item + 16], rax
+    mov [r12 + PyTupleObject.ob_item + 24], rdx
+    INCREF_VAL rax, rdx
+
+    mov rax, r12
+    mov edx, TAG_PTR
+
+    pop r12
+    pop rbx
     ret
 
 .di_skip:
@@ -1161,6 +1213,109 @@ DEF_FUNC_BARE dict_contains
     xor eax, eax
     ret
 END_FUNC dict_contains
+
+;; ============================================================================
+;; Dict View Objects
+;; dict.keys(), dict.values(), dict.items() return view objects.
+;; Views hold a reference to the dict and support iteration + len().
+;; ============================================================================
+
+;; ============================================================================
+;; dict_view_new(rdi=dict, rsi=kind, rdx=type_ptr) -> PyDictViewObject*
+;; Create a new dict view. kind: 0=keys, 1=values, 2=items
+;; ============================================================================
+global dict_view_new
+DEF_FUNC dict_view_new
+    push rbx
+    push r12
+    push r13
+
+    mov rbx, rdi               ; dict
+    mov r12, rsi               ; kind
+    mov r13, rdx               ; view type
+
+    mov edi, PyDictViewObject_size
+    call ap_malloc
+
+    mov qword [rax + PyObject.ob_refcnt], 1
+    mov [rax + PyObject.ob_type], r13
+    mov [rax + PyDictViewObject.dv_dict], rbx
+    mov [rax + PyDictViewObject.dv_kind], r12
+
+    ; INCREF dict
+    mov rdi, rbx
+    call obj_incref
+
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC dict_view_new
+
+;; ============================================================================
+;; dict_view_dealloc(PyObject *self)
+;; ============================================================================
+DEF_FUNC_LOCAL dict_view_dealloc
+    push rbx
+    mov rbx, rdi
+
+    ; DECREF dict
+    mov rdi, [rbx + PyDictViewObject.dv_dict]
+    call obj_decref
+
+    ; Free self
+    mov rdi, rbx
+    call ap_free
+
+    pop rbx
+    leave
+    ret
+END_FUNC dict_view_dealloc
+
+;; ============================================================================
+;; dict_view_len(rdi=view) -> i64
+;; Returns the number of items in the underlying dict.
+;; ============================================================================
+DEF_FUNC_BARE dict_view_len
+    mov rax, [rdi + PyDictViewObject.dv_dict]
+    mov rax, [rax + PyDictObject.ob_size]
+    ret
+END_FUNC dict_view_len
+
+;; ============================================================================
+;; dict_view_iter(rdi=view) -> PyDictIterObject*
+;; Create an iterator for this view, using the view's kind.
+;; ============================================================================
+global dict_view_iter
+DEF_FUNC dict_view_iter
+    push rbx
+    push r12
+
+    mov rbx, rdi               ; view
+
+    mov edi, PyDictIterObject_size
+    call ap_malloc
+
+    mov qword [rax + PyObject.ob_refcnt], 1
+    lea rcx, [rel dict_iter_type]
+    mov [rax + PyObject.ob_type], rcx
+    mov rdi, [rbx + PyDictViewObject.dv_dict]
+    mov [rax + PyDictIterObject.it_dict], rdi
+    mov qword [rax + PyDictIterObject.it_index], 0
+    mov rcx, [rbx + PyDictViewObject.dv_kind]
+    mov [rax + PyDictIterObject.it_kind], rcx
+
+    ; INCREF dict
+    push rax                    ; save iterator
+    call obj_incref
+    pop rax                     ; restore iterator
+
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC dict_view_iter
 
 
 ;; ============================================================================
@@ -1250,6 +1405,58 @@ DEF_FUNC dict_nb_or, DNO_FRAME
     leave
     ret
 END_FUNC dict_nb_or
+
+;; ============================================================================
+;; dict_nb_ior(left, right, ltag, rtag) -> left dict (inplace merge |=)
+;; Iterates right dict entries and dict_set each into left.
+;; Returns (left, TAG_PTR) with INCREF on left.
+;; ============================================================================
+DIO_LEFT  equ 8
+DIO_RIGHT equ 16
+DIO_FRAME equ 24
+
+DEF_FUNC dict_nb_ior, DIO_FRAME
+    mov [rbp - DIO_LEFT], rdi       ; left dict
+    mov [rbp - DIO_RIGHT], rsi      ; right dict
+
+    ; Iterate right dict entries, set each into left
+    mov rdi, [rbp - DIO_RIGHT]
+    mov r8, [rdi + PyDictObject.capacity]
+    xor ecx, ecx
+.dio_loop:
+    cmp rcx, r8
+    jge .dio_done
+
+    imul rax, rcx, DICT_ENTRY_SIZE
+    add rax, [rdi + PyDictObject.entries]
+    cmp qword [rax + DictEntry.value_tag], 0
+    je .dio_next
+
+    push rcx
+    push r8
+    push rdi
+    mov rdi, [rbp - DIO_LEFT]
+    mov rsi, [rax + DictEntry.key]
+    mov rdx, [rax + DictEntry.value]
+    mov rcx, [rax + DictEntry.value_tag]
+    mov r8, [rax + DictEntry.key_tag]
+    call dict_set
+    pop rdi
+    pop r8
+    pop rcx
+
+.dio_next:
+    inc rcx
+    jmp .dio_loop
+
+.dio_done:
+    ; Return left dict with INCREF (caller will DECREF both operands)
+    mov rax, [rbp - DIO_LEFT]
+    INCREF rax
+    mov edx, TAG_PTR
+    leave
+    ret
+END_FUNC dict_nb_ior
 
 
 ;; ============================================================================
@@ -1409,6 +1616,9 @@ section .data
 
 ; dict_repr_str removed - repr now in src/repr.asm
 dict_iter_name: db "dict_keyiterator", 0
+dict_keys_view_name: db "dict_keys", 0
+dict_values_view_name: db "dict_values", 0
+dict_items_view_name: db "dict_items", 0
 
 dict_name_str: db "dict", 0
 
@@ -1444,6 +1654,19 @@ dict_number_methods:
     dq 0                        ; nb_floor_divide +144
     dq 0                        ; nb_true_divide  +152
     dq 0                        ; nb_index        +160
+    ; Inplace slots
+    dq 0                        ; nb_iadd         +168
+    dq 0                        ; nb_isub         +176
+    dq 0                        ; nb_imul         +184
+    dq 0                        ; nb_irem         +192
+    dq 0                        ; nb_ipow         +200
+    dq 0                        ; nb_ilshift      +208
+    dq 0                        ; nb_irshift      +216
+    dq 0                        ; nb_iand         +224
+    dq 0                        ; nb_ixor         +232
+    dq dict_nb_ior              ; nb_ior          +240 (dict inplace merge |=)
+    dq 0                        ; nb_ifloor_divide +248
+    dq 0                        ; nb_itrue_divide +256
 
 ; Dict sequence methods (for 'in' operator)
 align 8
@@ -1508,6 +1731,105 @@ dict_iter_type:
     dq 0                        ; tp_new
     dq 0                        ; tp_as_number
     dq 0                        ; tp_as_sequence
+    dq 0                        ; tp_as_mapping
+    dq 0                        ; tp_base
+    dq 0                        ; tp_dict
+    dq 0                        ; tp_mro
+    dq 0                        ; tp_flags
+    dq 0                        ; tp_bases
+
+; Dict view sequence methods (for len())
+align 8
+dict_view_sequence_methods:
+    dq dict_view_len            ; sq_length
+    dq 0                        ; sq_concat
+    dq 0                        ; sq_repeat
+    dq 0                        ; sq_item
+    dq 0                        ; sq_ass_item
+    dq 0                        ; sq_contains
+    dq 0                        ; sq_inplace_concat
+    dq 0                        ; sq_inplace_repeat
+
+; Dict keys view type
+align 8
+global dict_keys_view_type
+dict_keys_view_type:
+    dq 1                        ; ob_refcnt (immortal)
+    dq type_type                ; ob_type
+    dq dict_keys_view_name      ; tp_name
+    dq PyDictViewObject_size    ; tp_basicsize
+    dq dict_view_dealloc        ; tp_dealloc
+    dq 0                        ; tp_repr
+    dq 0                        ; tp_str
+    dq 0                        ; tp_hash
+    dq 0                        ; tp_call
+    dq 0                        ; tp_getattr
+    dq 0                        ; tp_setattr
+    dq 0                        ; tp_richcompare
+    dq dict_view_iter           ; tp_iter
+    dq 0                        ; tp_iternext
+    dq 0                        ; tp_init
+    dq 0                        ; tp_new
+    dq 0                        ; tp_as_number
+    dq dict_view_sequence_methods ; tp_as_sequence
+    dq 0                        ; tp_as_mapping
+    dq 0                        ; tp_base
+    dq 0                        ; tp_dict
+    dq 0                        ; tp_mro
+    dq 0                        ; tp_flags
+    dq 0                        ; tp_bases
+
+; Dict values view type
+align 8
+global dict_values_view_type
+dict_values_view_type:
+    dq 1                        ; ob_refcnt (immortal)
+    dq type_type                ; ob_type
+    dq dict_values_view_name    ; tp_name
+    dq PyDictViewObject_size    ; tp_basicsize
+    dq dict_view_dealloc        ; tp_dealloc
+    dq 0                        ; tp_repr
+    dq 0                        ; tp_str
+    dq 0                        ; tp_hash
+    dq 0                        ; tp_call
+    dq 0                        ; tp_getattr
+    dq 0                        ; tp_setattr
+    dq 0                        ; tp_richcompare
+    dq dict_view_iter           ; tp_iter
+    dq 0                        ; tp_iternext
+    dq 0                        ; tp_init
+    dq 0                        ; tp_new
+    dq 0                        ; tp_as_number
+    dq dict_view_sequence_methods ; tp_as_sequence
+    dq 0                        ; tp_as_mapping
+    dq 0                        ; tp_base
+    dq 0                        ; tp_dict
+    dq 0                        ; tp_mro
+    dq 0                        ; tp_flags
+    dq 0                        ; tp_bases
+
+; Dict items view type
+align 8
+global dict_items_view_type
+dict_items_view_type:
+    dq 1                        ; ob_refcnt (immortal)
+    dq type_type                ; ob_type
+    dq dict_items_view_name     ; tp_name
+    dq PyDictViewObject_size    ; tp_basicsize
+    dq dict_view_dealloc        ; tp_dealloc
+    dq 0                        ; tp_repr
+    dq 0                        ; tp_str
+    dq 0                        ; tp_hash
+    dq 0                        ; tp_call
+    dq 0                        ; tp_getattr
+    dq 0                        ; tp_setattr
+    dq 0                        ; tp_richcompare
+    dq dict_view_iter           ; tp_iter
+    dq 0                        ; tp_iternext
+    dq 0                        ; tp_init
+    dq 0                        ; tp_new
+    dq 0                        ; tp_as_number
+    dq dict_view_sequence_methods ; tp_as_sequence
     dq 0                        ; tp_as_mapping
     dq 0                        ; tp_base
     dq 0                        ; tp_dict

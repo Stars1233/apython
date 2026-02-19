@@ -174,7 +174,7 @@ DEF_FUNC op_call, CL_FRAME
     mov rdi, rcx              ; type
     lea rsi, [rel dunder_call]
     call dunder_lookup
-    test rax, rax
+    test edx, edx
     jz .not_callable
     ; Found __call__ — use its tp_call to dispatch
     mov rcx, rax              ; __call__ func

@@ -115,7 +115,9 @@ pyobj_to_i64:
     ; rdi = payload, esi = tag
     cmp esi, TAG_SMALLINT
     je .smallint
-    ; Check for None
+    ; Check for None: inline TAG_NONE or pointer-to-none_singleton
+    cmp esi, TAG_NONE
+    je .is_none
     lea rax, [rel none_singleton]
     cmp rdi, rax
     je .is_none

@@ -463,10 +463,13 @@ DEF_FUNC_BARE obj_is_true
     mov rdi, [rbx + PyObject.ob_type]
     lea rsi, [rel dunder_bool]
     call dunder_lookup
-    test rax, rax
-    jz .check_dunder_len       ; not found → try __len__
+    test edx, edx
+    jz .check_dunder_len       ; not found (TAG_NULL) → try __len__
 
     ; Check if __bool__ is None → TypeError
+    ; Handle both inline (0, TAG_NONE) and pointer (none_singleton, TAG_PTR) forms
+    cmp edx, TAG_NONE
+    je .dunder_bool_none_error
     lea rcx, [rel none_singleton]
     cmp rax, rcx
     je .dunder_bool_none_error

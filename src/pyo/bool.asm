@@ -258,6 +258,18 @@ bool_number_methods:
     dq int_floordiv         ; nb_floor_divide
     dq int_true_divide      ; nb_true_divide
     dq 0                    ; nb_index
+    dq 0                        ; nb_iadd         +168
+    dq 0                        ; nb_isub         +176
+    dq 0                        ; nb_imul         +184
+    dq 0                        ; nb_irem         +192
+    dq 0                        ; nb_ipow         +200
+    dq 0                        ; nb_ilshift      +208
+    dq 0                        ; nb_irshift      +216
+    dq 0                        ; nb_iand         +224
+    dq 0                        ; nb_ixor         +232
+    dq 0                        ; nb_ior          +240
+    dq 0                        ; nb_ifloor_divide +248
+    dq 0                        ; nb_itrue_divide +256
 
 ; Bool type object
 align 8

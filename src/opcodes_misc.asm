@@ -257,7 +257,41 @@ DEF_FUNC_BARE op_binary_op
     ; Get the specific method function pointer
     mov rax, [rax + r8]
     test rax, rax
+    jnz .binop_have_method
+
+    ; If inplace slot was NULL, fall back to non-inplace slot
+    cmp r9d, 13
+    jl .binop_try_dunder        ; not inplace, no fallback
+    ; Reload type's tp_as_number (may have been clobbered)
+    cmp qword [rsp + BO_LTAG], TAG_SMALLINT
+    je .binop_fallback_int
+    cmp qword [rsp + BO_LTAG], TAG_BOOL
+    je .binop_fallback_int
+    bt qword [rsp + BO_LTAG], 63
+    jc .binop_fallback_str
+    test qword [rsp + BO_LTAG], TAG_RC_BIT
     jz .binop_try_dunder
+    mov rax, [rdi + PyObject.ob_type]
+    jmp .binop_fallback_have_type
+.binop_fallback_int:
+    lea rax, [rel int_type]
+    jmp .binop_fallback_have_type
+.binop_fallback_str:
+    lea rax, [rel str_type]
+.binop_fallback_have_type:
+    mov rax, [rax + PyTypeObject.tp_as_number]
+    test rax, rax
+    jz .binop_try_dunder
+    ; Map inplace op to non-inplace offset
+    mov ecx, r9d
+    sub ecx, 13                 ; inplace → base op
+    lea rdx, [rel binary_op_offsets]
+    mov rdx, [rdx + rcx*8]     ; non-inplace offset
+    mov rax, [rax + rdx]
+    test rax, rax
+    jz .binop_try_dunder
+
+.binop_have_method:
 
     ; Spill SmallStr operands to heap before calling nb_method
     bt qword [rsp + BO_LTAG], 63
@@ -1208,20 +1242,20 @@ binary_op_offsets:
     dq 8    ; NB_SUBTRACT (10)        -> nb_subtract     (+8)
     dq 152  ; NB_TRUE_DIVIDE (11)     -> nb_true_divide  (+152)
     dq 112  ; NB_XOR (12)             -> nb_xor          (+112)
-    ; Inplace variants (13-25) map to the same PyNumberMethods offsets:
-    dq 0    ; NB_INPLACE_ADD (13)              -> nb_add
-    dq 104  ; NB_INPLACE_AND (14)              -> nb_and
-    dq 144  ; NB_INPLACE_FLOOR_DIVIDE (15)     -> nb_floor_divide
-    dq 88   ; NB_INPLACE_LSHIFT (16)           -> nb_lshift
+    ; Inplace variants (13-25) map to inplace PyNumberMethods offsets:
+    dq 168  ; NB_INPLACE_ADD (13)              -> nb_iadd
+    dq 224  ; NB_INPLACE_AND (14)              -> nb_iand
+    dq 248  ; NB_INPLACE_FLOOR_DIVIDE (15)     -> nb_ifloor_divide
+    dq 208  ; NB_INPLACE_LSHIFT (16)           -> nb_ilshift
     dq 0    ; NB_INPLACE_MATRIX_MULTIPLY (17)  -> unsupported
-    dq 16   ; NB_INPLACE_MULTIPLY (18)         -> nb_multiply
-    dq 24   ; NB_INPLACE_REMAINDER (19)        -> nb_remainder
-    dq 120  ; NB_INPLACE_OR (20)               -> nb_or
-    dq 40   ; NB_INPLACE_POWER (21)            -> nb_power
-    dq 96   ; NB_INPLACE_RSHIFT (22)           -> nb_rshift
-    dq 8    ; NB_INPLACE_SUBTRACT (23)         -> nb_subtract
-    dq 152  ; NB_INPLACE_TRUE_DIVIDE (24)      -> nb_true_divide
-    dq 112  ; NB_INPLACE_XOR (25)              -> nb_xor
+    dq 184  ; NB_INPLACE_MULTIPLY (18)         -> nb_imul
+    dq 192  ; NB_INPLACE_REMAINDER (19)        -> nb_irem
+    dq 240  ; NB_INPLACE_OR (20)               -> nb_ior
+    dq 200  ; NB_INPLACE_POWER (21)            -> nb_ipow
+    dq 216  ; NB_INPLACE_RSHIFT (22)           -> nb_irshift
+    dq 176  ; NB_INPLACE_SUBTRACT (23)         -> nb_isub
+    dq 256  ; NB_INPLACE_TRUE_DIVIDE (24)      -> nb_itrue_divide
+    dq 232  ; NB_INPLACE_XOR (25)              -> nb_ixor
 
 section .text
 
@@ -1448,6 +1482,9 @@ DEF_FUNC op_send, SND_FRAME
     jz .send_error
 
     ; Check if sent value is None — use iternext, otherwise gen_send
+    ; Handle both inline TAG_NONE and pointer-to-none_singleton forms
+    cmp qword [rbp - SND_STAG], TAG_NONE
+    je .send_use_iternext
     mov rsi, [rbp - SND_SENT]
     lea rcx, [rel none_singleton]
     cmp rsi, rcx
