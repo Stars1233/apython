@@ -285,7 +285,7 @@ DEF_FUNC sre_category
     jmp .cat_true
 
 .cat_uni_word:
-    ; ASCII word chars + basic Unicode letter ranges
+    ; ASCII word chars first
     cmp esi, '_'
     je .cat_true
     cmp esi, '0'
@@ -300,9 +300,15 @@ DEF_FUNC sre_category
     jb .cat_false
     cmp esi, 'z'
     jbe .cat_true
-    ; Extended Latin, Cyrillic, etc. — simplified: consider >= 0x80 as word
-    cmp esi, 0x80
-    jae .cat_true
+    ; Check Unicode letter/digit ranges
+    push rdi
+    push rsi
+    mov edi, esi
+    call sre_uni_isword
+    pop rsi
+    pop rdi
+    test eax, eax
+    jnz .cat_true
     jmp .cat_false
 
 .cat_uni_not_word:
@@ -320,8 +326,14 @@ DEF_FUNC sre_category
     jb .cat_true
     cmp esi, 'z'
     jbe .cat_false
-    cmp esi, 0x80
-    jae .cat_false
+    push rdi
+    push rsi
+    mov edi, esi
+    call sre_uni_isword
+    pop rsi
+    pop rdi
+    test eax, eax
+    jnz .cat_false
     jmp .cat_true
 
 .cat_uni_linebreak:
@@ -769,25 +781,264 @@ END_FUNC sre_ascii_tolower
 ; ============================================================================
 DEF_FUNC_BARE sre_unicode_tolower
     mov eax, edi
+    ; ASCII A-Z -> a-z (+32)
     cmp eax, 'A'
     jb .no_lower
     cmp eax, 'Z'
-    jbe .do_lower
-    ; Latin Extended: 0xC0-0xD6, 0xD8-0xDE
+    jbe .add32
+    ; Latin-1 Supplement: 0xC0-0xD6, 0xD8-0xDE -> +32
     cmp eax, 0xC0
     jb .no_lower
     cmp eax, 0xD6
-    jbe .do_lower
+    jbe .add32
     cmp eax, 0xD8
     jb .no_lower
     cmp eax, 0xDE
-    jbe .do_lower
-    jmp .no_lower
-.do_lower:
+    jbe .add32
+    ; Latin Extended-A: even codepoints 0x100-0x12E -> +1
+    cmp eax, 0x100
+    jb .no_lower
+    cmp eax, 0x12E
+    ja .latin_ext_a2
+    test eax, 1
+    jnz .no_lower              ; already lowercase (odd)
+    inc eax
+    ret
+.latin_ext_a2:
+    ; Latin Extended-A: 0x132-0x136 even -> +1
+    cmp eax, 0x132
+    jb .no_lower
+    cmp eax, 0x136
+    ja .latin_ext_a3
+    test eax, 1
+    jnz .no_lower
+    inc eax
+    ret
+.latin_ext_a3:
+    ; 0x139-0x148: odd codepoints -> +1
+    cmp eax, 0x139
+    jb .no_lower
+    cmp eax, 0x148
+    ja .latin_ext_a4
+    test eax, 1
+    jz .no_lower               ; even = already lowercase
+    inc eax
+    ret
+.latin_ext_a4:
+    ; 0x14A-0x177: even -> +1
+    cmp eax, 0x14A
+    jb .no_lower
+    cmp eax, 0x177
+    ja .latin_ext_a5
+    test eax, 1
+    jnz .no_lower
+    inc eax
+    ret
+.latin_ext_a5:
+    ; 0x179-0x17E: odd -> +1
+    cmp eax, 0x179
+    jb .no_lower
+    cmp eax, 0x17E
+    ja .check_greek
+    test eax, 1
+    jz .no_lower
+    inc eax
+    ret
+
+.check_greek:
+    ; Greek uppercase: 0x391-0x3A1 -> +32
+    cmp eax, 0x391
+    jb .no_lower
+    cmp eax, 0x3A1
+    jbe .add32
+    ; Greek: 0x3A3-0x3A9 -> +32 (skip 0x3A2 which is final sigma)
+    cmp eax, 0x3A3
+    jb .no_lower
+    cmp eax, 0x3A9
+    jbe .add32
+
+    ; Cyrillic uppercase: 0x410-0x42F -> +32 (А-Я -> а-я)
+    cmp eax, 0x410
+    jb .no_lower
+    cmp eax, 0x42F
+    jbe .add32
+    ; Cyrillic extended: 0x400-0x40F -> +80 (Ѐ-Џ -> ѐ-џ)
+    ; (These are before 0x410 numerically but checked after due to frequency)
+    cmp eax, 0x400
+    jb .no_lower
+    cmp eax, 0x40F
+    ja .cyrillic_ext
+    add eax, 80
+    ret
+.cyrillic_ext:
+    ; Cyrillic Extended: 0x460-0x481 even -> +1
+    cmp eax, 0x460
+    jb .no_lower
+    cmp eax, 0x481
+    ja .no_lower
+    test eax, 1
+    jnz .no_lower
+    inc eax
+    ret
+
+.add32:
     add eax, 32
 .no_lower:
     ret
 END_FUNC sre_unicode_tolower
+
+; ============================================================================
+; sre_uni_isword(u32 codepoint) -> 0/1
+; Check if codepoint is a Unicode word character (letter, digit, underscore,
+; combining mark). Covers major scripts without full Unicode tables.
+; edi = codepoint (already checked not ASCII by caller)
+; ============================================================================
+DEF_FUNC_BARE sre_uni_isword
+    ; Underscore already handled by caller
+    ; Latin Extended (letters): 0x00C0-0x00FF (excluding 0xD7 and 0xF7)
+    cmp edi, 0xC0
+    jb .uw_false
+    cmp edi, 0xFF
+    ja .uw_check_latin_ext
+    cmp edi, 0xD7              ; multiplication sign
+    je .uw_false
+    cmp edi, 0xF7              ; division sign
+    je .uw_false
+    jmp .uw_true
+.uw_check_latin_ext:
+    ; Latin Extended-A: 0x0100-0x017F
+    cmp edi, 0x0100
+    jb .uw_false
+    cmp edi, 0x017F
+    jbe .uw_true
+    ; Latin Extended-B: 0x0180-0x024F
+    cmp edi, 0x024F
+    jbe .uw_true
+    ; Combining Diacritical Marks: 0x0300-0x036F
+    cmp edi, 0x0300
+    jb .uw_check_ipa
+    cmp edi, 0x036F
+    jbe .uw_true
+.uw_check_ipa:
+    ; IPA Extensions: 0x0250-0x02AF
+    cmp edi, 0x0250
+    jb .uw_false
+    cmp edi, 0x02AF
+    jbe .uw_true
+    ; Greek and Coptic: 0x0370-0x03FF
+    cmp edi, 0x0370
+    jb .uw_false
+    cmp edi, 0x03FF
+    jbe .uw_true
+    ; Cyrillic: 0x0400-0x04FF
+    cmp edi, 0x0400
+    jb .uw_false
+    cmp edi, 0x04FF
+    jbe .uw_true
+    ; Cyrillic Supplement: 0x0500-0x052F
+    cmp edi, 0x052F
+    jbe .uw_true
+    ; Armenian: 0x0530-0x058F
+    cmp edi, 0x058F
+    jbe .uw_true
+    ; Hebrew: 0x0590-0x05FF
+    cmp edi, 0x05FF
+    jbe .uw_true
+    ; Arabic: 0x0600-0x06FF
+    cmp edi, 0x06FF
+    jbe .uw_true
+    ; Devanagari: 0x0900-0x097F
+    cmp edi, 0x0900
+    jb .uw_check_thai
+    cmp edi, 0x097F
+    jbe .uw_true
+    ; Bengali, Gurmukhi, Gujarati, etc.: 0x0980-0x0DFF
+    cmp edi, 0x0DFF
+    jbe .uw_true
+.uw_check_thai:
+    ; Thai: 0x0E00-0x0E7F
+    cmp edi, 0x0E00
+    jb .uw_check_georgian
+    cmp edi, 0x0E7F
+    jbe .uw_true
+    ; Lao: 0x0E80-0x0EFF
+    cmp edi, 0x0EFF
+    jbe .uw_true
+.uw_check_georgian:
+    ; Georgian: 0x10A0-0x10FF
+    cmp edi, 0x10A0
+    jb .uw_check_hangul
+    cmp edi, 0x10FF
+    jbe .uw_true
+.uw_check_hangul:
+    ; Hangul Jamo: 0x1100-0x11FF
+    cmp edi, 0x1100
+    jb .uw_check_cjk
+    cmp edi, 0x11FF
+    jbe .uw_true
+.uw_check_cjk:
+    ; CJK Unified Ideographs: 0x4E00-0x9FFF
+    cmp edi, 0x4E00
+    jb .uw_check_digits
+    cmp edi, 0x9FFF
+    jbe .uw_true
+    ; Hangul Syllables: 0xAC00-0xD7AF
+    cmp edi, 0xAC00
+    jb .uw_check_digits
+    cmp edi, 0xD7AF
+    jbe .uw_true
+.uw_check_digits:
+    ; Unicode digit ranges beyond ASCII
+    ; Arabic-Indic: 0x0660-0x0669
+    cmp edi, 0x0660
+    jb .uw_check_digits2
+    cmp edi, 0x0669
+    jbe .uw_true
+.uw_check_digits2:
+    ; Extended Arabic-Indic: 0x06F0-0x06F9
+    cmp edi, 0x06F0
+    jb .uw_check_digits3
+    cmp edi, 0x06F9
+    jbe .uw_true
+.uw_check_digits3:
+    ; Devanagari digits: 0x0966-0x096F
+    cmp edi, 0x0966
+    jb .uw_check_digits4
+    cmp edi, 0x096F
+    jbe .uw_true
+.uw_check_digits4:
+    ; Thai digits: 0x0E50-0x0E59
+    cmp edi, 0x0E50
+    jb .uw_check_fullwidth
+    cmp edi, 0x0E59
+    jbe .uw_true
+.uw_check_fullwidth:
+    ; Fullwidth digits: 0xFF10-0xFF19, letters: 0xFF21-0xFF3A, 0xFF41-0xFF5A
+    cmp edi, 0xFF10
+    jb .uw_check_connector
+    cmp edi, 0xFF19
+    jbe .uw_true
+    cmp edi, 0xFF21
+    jb .uw_false
+    cmp edi, 0xFF3A
+    jbe .uw_true
+    cmp edi, 0xFF41
+    jb .uw_false
+    cmp edi, 0xFF5A
+    jbe .uw_true
+.uw_check_connector:
+    ; Connector punctuation (word chars in Python): 0x203F-0x2040, 0xFE33-0xFE34, 0xFE4D-0xFE4F, 0xFF3F
+    cmp edi, 0x203F
+    je .uw_true
+    cmp edi, 0x2040
+    je .uw_true
+.uw_false:
+    xor eax, eax
+    ret
+.uw_true:
+    mov eax, 1
+    ret
+END_FUNC sre_uni_isword
 
 ; ============================================================================
 ; sre_state_init(SRE_State* state, SRE_PatternObject* pattern,
@@ -837,6 +1088,7 @@ DEF_FUNC sre_state_init, SSI_FRAME
     mov [rbx + SRE_State.flags], eax
     mov dword [rbx + SRE_State.match_all], 0
     mov dword [rbx + SRE_State.is_bytes], 0
+    mov dword [rbx + SRE_State.match_depth], 0
 
     ; Determine if ASCII or needs Unicode codepoint decode
     ; Scan string bytes — if all < 0x80, ASCII fast path
@@ -1169,6 +1421,12 @@ DEF_FUNC sre_match, SM_MFRAME
     mov r13, [rdi + SRE_State.str_pos]  ; r13 = current pos
     mov r15, [rdi + SRE_State.repeat_ctx]  ; r15 = repeat ctx
 
+    ; Check recursion depth limit
+    mov eax, [r12 + SRE_State.match_depth]
+    cmp eax, SRE_MAX_RECURSION
+    jge .recursion_error
+    inc dword [r12 + SRE_State.match_depth]
+
 .dispatch:
     mov eax, [rbx]             ; opcode
     add rbx, 4                 ; advance past opcode
@@ -1220,8 +1478,8 @@ DEF_FUNC sre_match, SM_MFRAME
     dq .op_in_ignore            ; 35 IN_LOC_IGNORE
     dq .op_literal_ignore       ; 36 LITERAL_LOC_IGNORE
     dq .op_not_literal_ignore   ; 37 NOT_LITERAL_LOC_IGNORE
-    dq .op_groupref_ignore      ; 38 GROUPREF_UNI_IGNORE
-    dq .op_in_ignore            ; 39 IN_UNI_IGNORE
+    dq .op_groupref_uni_ignore  ; 38 GROUPREF_UNI_IGNORE
+    dq .op_in_uni_ignore        ; 39 IN_UNI_IGNORE
     dq .op_literal_uni_ignore   ; 40 LITERAL_UNI_IGNORE
     dq .op_not_literal_uni_ignore ; 41 NOT_LITERAL_UNI_IGNORE
     dq .op_range                ; 42 RANGE_UNI_IGNORE (handled in charset)
@@ -1471,6 +1729,40 @@ DEF_FUNC sre_match, SM_MFRAME
     test eax, eax
     jz .op_failure
     ; rbx = skip_word_addr + 4, same fix as .op_in
+    mov eax, [rbx - 4]        ; re-read skip
+    lea rbx, [rbx + rax*4 - 4] ; skip_word_addr + skip*4
+    inc r13
+    jmp .dispatch
+
+.op_in_uni_ignore:
+    ; Same as IN but case-insensitive using unicode tolower
+    mov rdi, r12
+    call sre_string_len
+    cmp r13, rax
+    jge .op_failure
+    mov r14d, [rbx]            ; skip offset
+    add rbx, 4
+    push rbx                   ; save set ptr
+    mov rdi, r12
+    mov rsi, r13
+    call sre_getchar
+    ; Lowercase the char for matching (unicode)
+    mov edi, eax
+    call sre_unicode_tolower
+    pop rdi                    ; set ptr
+    mov esi, eax
+    xor r14d, r14d
+    cmp dword [rdi], SRE_OP_NEGATE
+    jne .in_uni_ign_no_neg
+    mov r14d, 1
+    add rdi, 4
+.in_uni_ign_no_neg:
+    push r14
+    call sre_charset
+    pop r14
+    xor eax, r14d
+    test eax, eax
+    jz .op_failure
     mov eax, [rbx - 4]        ; re-read skip
     lea rbx, [rbx + rax*4 - 4] ; skip_word_addr + skip*4
     inc r13
@@ -2452,6 +2744,71 @@ DEF_FUNC sre_match, SM_MFRAME
     pop rbx
     jmp .op_failure
 
+.op_groupref_uni_ignore:
+    ; GROUPREF_UNI_IGNORE group — case-insensitive group ref (unicode)
+    mov eax, [rbx]
+    add rbx, 4
+    mov ecx, eax
+    shl ecx, 1
+    push rbx
+    mov rdi, r12
+    mov rsi, rcx
+    call sre_state_get_mark
+    mov r14, rax
+    cmp r14, -1
+    je .grui_fail
+    mov rdi, r12
+    lea rsi, [rcx + 1]
+    call sre_state_get_mark
+    mov r8, rax
+    cmp r8, -1
+    je .grui_fail
+
+    mov rcx, r8
+    sub rcx, r14
+    test rcx, rcx
+    jz .grui_done
+
+    mov rdi, r12
+    call sre_string_len
+    sub rax, r13
+    cmp rax, rcx
+    jb .grui_fail
+
+    xor r9d, r9d
+.grui_cmp:
+    cmp r9, rcx
+    jge .grui_done
+    push rcx
+    push r9
+    mov rdi, r12
+    lea rsi, [r14 + r9]
+    call sre_getchar
+    mov edi, eax
+    call sre_unicode_tolower
+    mov r10d, eax
+    pop r9
+    push r9
+    mov rdi, r12
+    lea rsi, [r13 + r9]
+    call sre_getchar
+    mov edi, eax
+    call sre_unicode_tolower
+    pop r9
+    pop rcx
+    cmp eax, r10d
+    jne .grui_fail
+    inc r9
+    jmp .grui_cmp
+
+.grui_done:
+    pop rbx
+    add r13, rcx
+    jmp .dispatch
+.grui_fail:
+    pop rbx
+    jmp .op_failure
+
 .return:
     ; On failure, free any RepeatContexts allocated during this invocation
     test eax, eax
@@ -2472,6 +2829,21 @@ DEF_FUNC sre_match, SM_MFRAME
     ; Restore state.repeat_ctx to initial value
     mov [r12 + SRE_State.repeat_ctx], r15
 .return_ok:
+    dec dword [r12 + SRE_State.match_depth]
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.recursion_error:
+    ; Raise RuntimeError for recursion overflow
+    lea rdi, [rel exc_RuntimeError_type]
+    lea rsi, [rel sre_recursion_err_msg]
+    call raise_exception
+    mov eax, SRE_MATCH_ERROR
     pop r15
     pop r14
     pop r13
@@ -2691,5 +3063,47 @@ DEF_FUNC sre_count
     ret
 END_FUNC sre_count
 
+; ============================================================================
+; sre_utf8_codepoint_to_byte(char* str, i64 byte_len, i64 target_cp_idx,
+;                             i64 start_byte, i64 start_cp_idx) -> i64 byte_offset
+; Walk UTF-8 bytes from (start_byte, start_cp_idx) until codepoint count
+; reaches target_cp_idx. Returns the byte offset.
+; rdi = string start, rsi = total byte length, rdx = target codepoint index,
+; rcx = starting byte offset, r8 = starting codepoint index
+; Returns: rax = byte offset at target codepoint
+; ============================================================================
+DEF_FUNC_BARE sre_utf8_codepoint_to_byte
+    mov rax, rcx               ; byte offset
+    mov r9, r8                 ; codepoint count
+.u8walk:
+    cmp r9, rdx
+    jge .u8done
+    cmp rax, rsi
+    jge .u8done
+    movzx r10d, byte [rdi + rax]
+    cmp r10b, 0x80
+    jb .u8_1
+    cmp r10b, 0xE0
+    jb .u8_2
+    cmp r10b, 0xF0
+    jb .u8_3
+    add rax, 4
+    jmp .u8inc
+.u8_1:
+    inc rax
+    jmp .u8inc
+.u8_2:
+    add rax, 2
+    jmp .u8inc
+.u8_3:
+    add rax, 3
+.u8inc:
+    inc r9
+    jmp .u8walk
+.u8done:
+    ret
+END_FUNC sre_utf8_codepoint_to_byte
+
 section .rodata
 ; (category tables are inline in sre_category above)
+sre_recursion_err_msg: db "maximum recursion limit exceeded in regex", 0

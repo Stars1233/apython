@@ -179,7 +179,12 @@ struc SRE_State
     .codepoint_buf: resq 1  ; +112: u32* decoded codepoints (NULL for ASCII)
     .codepoint_len: resq 1  ; +120: number of codepoints
     .original_pos:  resq 1  ; +128: original pos arg (for match.pos)
+    .match_depth:   resd 1  ; +136: current recursion depth
+    .pad_state:     resd 1  ; +140: alignment padding
 endstruc
+
+; Recursion depth limit (matches CPython's default)
+SRE_MAX_RECURSION equ 10000
 
 ; ============================================================================
 ; SRE_RepeatContext (for REPEAT/MAX_UNTIL/MIN_UNTIL backtracking)

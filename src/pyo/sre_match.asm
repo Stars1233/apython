@@ -28,6 +28,7 @@ extern exc_TypeError_type
 extern exc_IndexError_type
 extern type_type
 extern builtin_func_new
+extern sre_utf8_codepoint_to_byte
 extern method_new
 extern sre_pattern_type
 extern sre_strcmp
@@ -320,74 +321,34 @@ DEF_FUNC sre_match_get_group_str
     ret
 
 .group_unicode:
-    ; Unicode mode: walk UTF-8 to find byte offsets for codepoint indices
-    mov rdi, [rbx + SRE_MatchObject.string]
-    mov rcx, [rdi + PyStrObject.ob_size]   ; total byte length
-    lea rdi, [rdi + PyStrObject.data]
+    ; Unicode mode: use shared UTF-8 walker to find byte offsets
+    mov rax, [rbx + SRE_MatchObject.string]
+    mov rsi, [rax + PyStrObject.ob_size]   ; total byte length
+    lea rdi, [rax + PyStrObject.data]
 
     ; Find byte offset for start codepoint index (r12)
-    xor r8d, r8d               ; byte offset
-    xor r9d, r9d               ; codepoint count
-.group_find_start:
-    cmp r9, r12
-    jge .group_found_start
-    cmp r8, rcx
-    jge .group_found_start
-    movzx eax, byte [rdi + r8]
-    cmp al, 0x80
-    jb .group_gs1
-    cmp al, 0xE0
-    jb .group_gs2
-    cmp al, 0xF0
-    jb .group_gs3
-    add r8, 4
-    jmp .group_gsinc
-.group_gs1:
-    inc r8
-    jmp .group_gsinc
-.group_gs2:
-    add r8, 2
-    jmp .group_gsinc
-.group_gs3:
-    add r8, 3
-.group_gsinc:
-    inc r9
-    jmp .group_find_start
-.group_found_start:
-    push r8                    ; save start byte offset
+    mov rdx, r12               ; target = start codepoint idx
+    xor ecx, ecx               ; start_byte = 0
+    xor r8d, r8d               ; start_cp = 0
+    push rdi                   ; save str ptr
+    push rsi                   ; save byte len
+    call sre_utf8_codepoint_to_byte
+    mov r14, rax               ; r14 = start byte offset
+
     ; Find byte offset for end codepoint index (r13)
-.group_find_end:
-    cmp r9, r13
-    jge .group_found_end
-    cmp r8, rcx
-    jge .group_found_end
-    movzx eax, byte [rdi + r8]
-    cmp al, 0x80
-    jb .group_ge1
-    cmp al, 0xE0
-    jb .group_ge2
-    cmp al, 0xF0
-    jb .group_ge3
-    add r8, 4
-    jmp .group_geinc
-.group_ge1:
-    inc r8
-    jmp .group_geinc
-.group_ge2:
-    add r8, 2
-    jmp .group_geinc
-.group_ge3:
-    add r8, 3
-.group_geinc:
-    inc r9
-    jmp .group_find_end
-.group_found_end:
-    pop rax                    ; start byte offset
+    pop rsi                    ; restore byte len
+    pop rdi                    ; restore str ptr
+    mov rdx, r13               ; target = end codepoint idx
+    mov rcx, r14               ; start_byte = start offset
+    mov r8, r12                ; start_cp = start idx
+    call sre_utf8_codepoint_to_byte
+    ; rax = end byte offset, r14 = start byte offset
+
     ; Create substring from byte offsets
     mov rdi, [rbx + SRE_MatchObject.str_begin]
-    add rdi, rax
-    mov rsi, r8
-    sub rsi, rax
+    add rdi, r14
+    mov rsi, rax
+    sub rsi, r14
     call str_new_heap
     mov edx, TAG_PTR
     pop r13
@@ -1334,6 +1295,42 @@ sre_match_mapping_methods:
     dq 0                       ; mp_ass_subscript
 
 align 8
+sre_match_number_methods:
+    dq 0                       ; nb_add
+    dq 0                       ; nb_subtract
+    dq 0                       ; nb_multiply
+    dq 0                       ; nb_remainder
+    dq 0                       ; nb_divmod
+    dq 0                       ; nb_power
+    dq 0                       ; nb_negative
+    dq 0                       ; nb_positive
+    dq 0                       ; nb_absolute
+    dq sre_match_bool          ; nb_bool
+    dq 0                       ; nb_invert
+    dq 0                       ; nb_lshift
+    dq 0                       ; nb_rshift
+    dq 0                       ; nb_and
+    dq 0                       ; nb_xor
+    dq 0                       ; nb_or
+    dq 0                       ; nb_int
+    dq 0                       ; nb_float
+    dq 0                       ; nb_floor_divide
+    dq 0                       ; nb_true_divide
+    dq 0                       ; nb_index
+    dq 0                       ; nb_iadd
+    dq 0                       ; nb_isub
+    dq 0                       ; nb_imul
+    dq 0                       ; nb_irem
+    dq 0                       ; nb_ipow
+    dq 0                       ; nb_ilshift
+    dq 0                       ; nb_irshift
+    dq 0                       ; nb_iand
+    dq 0                       ; nb_ixor
+    dq 0                       ; nb_ior
+    dq 0                       ; nb_ifloor_divide
+    dq 0                       ; nb_itrue_divide
+
+align 8
 global sre_match_type
 sre_match_type:
     dq 1                       ; ob_refcnt (immortal)
@@ -1352,7 +1349,7 @@ sre_match_type:
     dq 0                       ; tp_iternext
     dq 0                       ; tp_init
     dq 0                       ; tp_new
-    dq 0                       ; tp_as_number
+    dq sre_match_number_methods ; tp_as_number
     dq 0                       ; tp_as_sequence
     dq sre_match_mapping_methods ; tp_as_mapping
     dq 0                       ; tp_base

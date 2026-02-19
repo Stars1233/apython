@@ -45,6 +45,7 @@ extern sre_search
 extern sre_state_init
 extern sre_state_fini
 extern sre_string_len
+extern sre_utf8_codepoint_to_byte
 
 ; SRE match object
 extern sre_match_new
@@ -394,80 +395,34 @@ DEF_FUNC sre_substr_from_state
     ret
 
 .ss_unicode:
-    ; Unicode mode: walk UTF-8 to find byte offsets
+    ; Unicode mode: use shared UTF-8 walker to find byte offsets
     mov rdi, [rbx + SRE_State.str_begin]
-    mov rcx, [rbx + SRE_State.str_end]
-    sub rcx, rdi               ; total byte length
+    mov rsi, [rbx + SRE_State.str_end]
+    sub rsi, rdi               ; total byte length
 
-    ; Find byte offset for start_idx codepoints
-    xor r8d, r8d               ; byte offset
-    xor r9d, r9d               ; codepoint count
+    ; Find byte offset for start codepoint index (r12)
+    mov rdx, r12               ; target = start codepoint idx
+    xor ecx, ecx               ; start_byte = 0
+    xor r8d, r8d               ; start_cp = 0
+    push rdi                   ; save str_begin
+    push rsi                   ; save byte_len
+    call sre_utf8_codepoint_to_byte
+    mov r14, rax               ; r14 = start byte offset
 
-.ss_find_start:
-    cmp r9, r12
-    jge .ss_found_start
-    cmp r8, rcx
-    jge .ss_found_start
-    movzx eax, byte [rdi + r8]
-    cmp al, 0x80
-    jb .ss_s1
-    cmp al, 0xE0
-    jb .ss_s2
-    cmp al, 0xF0
-    jb .ss_s3
-    add r8, 4
-    jmp .ss_sinc
-.ss_s1:
-    inc r8
-    jmp .ss_sinc
-.ss_s2:
-    add r8, 2
-    jmp .ss_sinc
-.ss_s3:
-    add r8, 3
-.ss_sinc:
-    inc r9
-    jmp .ss_find_start
-
-.ss_found_start:
-    push r8                    ; save start byte offset
-
-    ; Find byte offset for end_idx codepoints (continue scanning)
-.ss_find_end:
-    cmp r9, r13
-    jge .ss_found_end
-    cmp r8, rcx
-    jge .ss_found_end
-    movzx eax, byte [rdi + r8]
-    cmp al, 0x80
-    jb .ss_e1
-    cmp al, 0xE0
-    jb .ss_e2
-    cmp al, 0xF0
-    jb .ss_e3
-    add r8, 4
-    jmp .ss_einc
-.ss_e1:
-    inc r8
-    jmp .ss_einc
-.ss_e2:
-    add r8, 2
-    jmp .ss_einc
-.ss_e3:
-    add r8, 3
-.ss_einc:
-    inc r9
-    jmp .ss_find_end
-
-.ss_found_end:
-    ; r8 = end byte offset
-    pop rax                    ; start byte offset
+    ; Find byte offset for end codepoint index (r13)
+    pop rsi                    ; restore byte_len
+    pop rdi                    ; restore str_begin
+    mov rdx, r13               ; target = end codepoint idx
+    mov rcx, r14               ; start_byte = start offset
+    mov r8, r12                ; start_cp = start idx
+    call sre_utf8_codepoint_to_byte
+    ; rax = end byte offset, r14 = start byte offset
 
     ; Create substring from byte offsets
     mov rdi, [rbx + SRE_State.str_begin]
-    add rdi, rax
-    mov rsi, r8
-    sub rsi, rax
+    add rdi, r14
+    mov rsi, rax
+    sub rsi, r14
     call str_new_heap
     mov edx, TAG_PTR
 

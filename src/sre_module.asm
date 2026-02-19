@@ -123,10 +123,21 @@ DEF_FUNC sre_compile_func, SC_FRAME
     ; Fat value at r15 + index*16
     mov rax, rcx
     shl rax, 4
+    ; Validate tag is TAG_SMALLINT
+    cmp dword [r15 + rax + 8], TAG_SMALLINT
+    jne .code_type_error
     mov rax, [r15 + rax]       ; payload (SmallInt value)
     mov [r14 + rcx*4], eax    ; store as u32
     inc rcx
     jmp .code_loop
+.code_type_error:
+    ; Non-int element in code list — raise TypeError
+    mov rdi, r14               ; free code buffer
+    call ap_free
+    lea rdi, [rel exc_TypeError_type]
+    lea rsi, [rel sm_code_type_err]
+    call raise_exception
+    RET_NULL
 .code_done:
 
     ; Allocate SRE_PatternObject
@@ -265,7 +276,6 @@ DEF_FUNC sre_unicode_iscased_func
     cmp eax, 0x100
     jb .uic_false
     ; Simplified: assume cased if in Latin Extended or other letter ranges
-    mov edx, 1
     mov eax, 1
     mov edx, TAG_BOOL
     leave
@@ -398,9 +408,69 @@ DEF_FUNC sre_getcodesize_func
 END_FUNC sre_getcodesize_func
 
 ; ============================================================================
-; Helper macro for adding a function to module dict
+; Helper macros for adding entries to module dict
+; r12 = dict, preserved across calls
 ; ============================================================================
-; (inline in module_create below)
+
+; SRE_ADD_FUNC func_impl, name_cstr
+; Add a builtin function to the module dict
+%macro SRE_ADD_FUNC 2
+    lea rdi, [rel %1]
+    lea rsi, [rel %2]
+    call builtin_func_new
+    push rax
+    lea rdi, [rel %2]
+    call str_from_cstr_heap
+    push rax
+    mov rdi, r12
+    mov rsi, rax
+    mov rdx, [rsp + 8]
+    mov ecx, TAG_PTR
+    mov r8d, TAG_PTR
+    call dict_set
+    pop rdi
+    call obj_decref
+    pop rdi
+    call obj_decref
+%endmacro
+
+; SRE_ADD_INT name_cstr, value
+; Add a SmallInt constant to the module dict
+%macro SRE_ADD_INT 2
+    lea rdi, [rel %1]
+    call str_from_cstr_heap
+    push rax
+    mov rdi, r12
+    mov rsi, rax
+    mov rdx, %2
+    mov ecx, TAG_SMALLINT
+    mov r8d, TAG_PTR
+    call dict_set
+    pop rdi
+    call obj_decref
+%endmacro
+
+; SRE_ADD_STR key_cstr, val_cstr
+; Add a string constant to the module dict
+%macro SRE_ADD_STR 2
+    lea rdi, [rel %1]
+    call str_from_cstr_heap
+    push rax
+    lea rdi, [rel %2]
+    call str_from_cstr_heap
+    mov rdx, rax
+    mov rdi, r12
+    pop rsi
+    push rdx
+    push rsi
+    mov ecx, TAG_PTR
+    mov r8d, TAG_PTR
+    call dict_set
+    pop rdi
+    call obj_decref
+    pop rdi
+    call obj_decref
+%endmacro
 
 ; ============================================================================
 ; sre_module_create() -> PyObject*
@@ -418,229 +488,24 @@ DEF_FUNC sre_module_create, SMC_FRAME
     call dict_new
     mov r12, rax               ; r12 = module dict
 
-    ; --- Add compile function ---
-    lea rdi, [rel sre_compile_func]
-    lea rsi, [rel sm_compile_name]
-    call builtin_func_new
-    push rax
-    lea rdi, [rel sm_compile_name]
-    call str_from_cstr_heap
-    push rax
-    mov rdi, r12
-    mov rsi, rax
-    mov rdx, [rsp + 8]
-    mov ecx, TAG_PTR
-    mov r8d, TAG_PTR
-    call dict_set
-    pop rdi
-    call obj_decref
-    pop rdi
-    call obj_decref
+    ; Functions
+    SRE_ADD_FUNC sre_compile_func,        sm_compile_name
+    SRE_ADD_FUNC sre_ascii_iscased_func,  sm_ascii_iscased
+    SRE_ADD_FUNC sre_ascii_tolower_func,  sm_ascii_tolower
+    SRE_ADD_FUNC sre_unicode_iscased_func, sm_unicode_iscased
+    SRE_ADD_FUNC sre_unicode_tolower_func, sm_unicode_tolower
+    SRE_ADD_FUNC sre_getlower_func,       sm_getlower
+    SRE_ADD_FUNC sre_getcodesize_func,    sm_getcodesize
+    SRE_ADD_FUNC sre_template_func,       sm_template
 
-    ; --- Add ascii_iscased ---
-    lea rdi, [rel sre_ascii_iscased_func]
-    lea rsi, [rel sm_ascii_iscased]
-    call builtin_func_new
-    push rax
-    lea rdi, [rel sm_ascii_iscased]
-    call str_from_cstr_heap
-    push rax
-    mov rdi, r12
-    mov rsi, rax
-    mov rdx, [rsp + 8]
-    mov ecx, TAG_PTR
-    mov r8d, TAG_PTR
-    call dict_set
-    pop rdi
-    call obj_decref
-    pop rdi
-    call obj_decref
+    ; Integer constants
+    SRE_ADD_INT sm_MAGIC,     SRE_MAGIC
+    SRE_ADD_INT sm_CODESIZE,  SRE_CODESIZE
+    SRE_ADD_INT sm_MAXREPEAT, SRE_MAXREPEAT
+    SRE_ADD_INT sm_MAXGROUPS, SRE_MAXGROUPS
 
-    ; --- Add ascii_tolower ---
-    lea rdi, [rel sre_ascii_tolower_func]
-    lea rsi, [rel sm_ascii_tolower]
-    call builtin_func_new
-    push rax
-    lea rdi, [rel sm_ascii_tolower]
-    call str_from_cstr_heap
-    push rax
-    mov rdi, r12
-    mov rsi, rax
-    mov rdx, [rsp + 8]
-    mov ecx, TAG_PTR
-    mov r8d, TAG_PTR
-    call dict_set
-    pop rdi
-    call obj_decref
-    pop rdi
-    call obj_decref
-
-    ; --- Add unicode_iscased ---
-    lea rdi, [rel sre_unicode_iscased_func]
-    lea rsi, [rel sm_unicode_iscased]
-    call builtin_func_new
-    push rax
-    lea rdi, [rel sm_unicode_iscased]
-    call str_from_cstr_heap
-    push rax
-    mov rdi, r12
-    mov rsi, rax
-    mov rdx, [rsp + 8]
-    mov ecx, TAG_PTR
-    mov r8d, TAG_PTR
-    call dict_set
-    pop rdi
-    call obj_decref
-    pop rdi
-    call obj_decref
-
-    ; --- Add unicode_tolower ---
-    lea rdi, [rel sre_unicode_tolower_func]
-    lea rsi, [rel sm_unicode_tolower]
-    call builtin_func_new
-    push rax
-    lea rdi, [rel sm_unicode_tolower]
-    call str_from_cstr_heap
-    push rax
-    mov rdi, r12
-    mov rsi, rax
-    mov rdx, [rsp + 8]
-    mov ecx, TAG_PTR
-    mov r8d, TAG_PTR
-    call dict_set
-    pop rdi
-    call obj_decref
-    pop rdi
-    call obj_decref
-
-    ; --- Add getlower ---
-    lea rdi, [rel sre_getlower_func]
-    lea rsi, [rel sm_getlower]
-    call builtin_func_new
-    push rax
-    lea rdi, [rel sm_getlower]
-    call str_from_cstr_heap
-    push rax
-    mov rdi, r12
-    mov rsi, rax
-    mov rdx, [rsp + 8]
-    mov ecx, TAG_PTR
-    mov r8d, TAG_PTR
-    call dict_set
-    pop rdi
-    call obj_decref
-    pop rdi
-    call obj_decref
-
-    ; --- Add getcodesize ---
-    lea rdi, [rel sre_getcodesize_func]
-    lea rsi, [rel sm_getcodesize]
-    call builtin_func_new
-    push rax
-    lea rdi, [rel sm_getcodesize]
-    call str_from_cstr_heap
-    push rax
-    mov rdi, r12
-    mov rsi, rax
-    mov rdx, [rsp + 8]
-    mov ecx, TAG_PTR
-    mov r8d, TAG_PTR
-    call dict_set
-    pop rdi
-    call obj_decref
-    pop rdi
-    call obj_decref
-
-    ; --- Add template ---
-    lea rdi, [rel sre_template_func]
-    lea rsi, [rel sm_template]
-    call builtin_func_new
-    push rax
-    lea rdi, [rel sm_template]
-    call str_from_cstr_heap
-    push rax
-    mov rdi, r12
-    mov rsi, rax
-    mov rdx, [rsp + 8]
-    mov ecx, TAG_PTR
-    mov r8d, TAG_PTR
-    call dict_set
-    pop rdi
-    call obj_decref
-    pop rdi
-    call obj_decref
-
-    ; --- Add constants ---
-    ; MAGIC
-    lea rdi, [rel sm_MAGIC]
-    call str_from_cstr_heap
-    push rax
-    mov rdi, r12
-    mov rsi, rax
-    mov rdx, SRE_MAGIC
-    mov ecx, TAG_SMALLINT
-    mov r8d, TAG_PTR
-    call dict_set
-    pop rdi
-    call obj_decref
-
-    ; CODESIZE
-    lea rdi, [rel sm_CODESIZE]
-    call str_from_cstr_heap
-    push rax
-    mov rdi, r12
-    mov rsi, rax
-    mov rdx, SRE_CODESIZE
-    mov ecx, TAG_SMALLINT
-    mov r8d, TAG_PTR
-    call dict_set
-    pop rdi
-    call obj_decref
-
-    ; MAXREPEAT
-    lea rdi, [rel sm_MAXREPEAT]
-    call str_from_cstr_heap
-    push rax
-    mov rdi, r12
-    mov rsi, rax
-    mov rdx, SRE_MAXREPEAT
-    mov ecx, TAG_SMALLINT
-    mov r8d, TAG_PTR
-    call dict_set
-    pop rdi
-    call obj_decref
-
-    ; MAXGROUPS
-    lea rdi, [rel sm_MAXGROUPS]
-    call str_from_cstr_heap
-    push rax
-    mov rdi, r12
-    mov rsi, rax
-    mov rdx, SRE_MAXGROUPS
-    mov ecx, TAG_SMALLINT
-    mov r8d, TAG_PTR
-    call dict_set
-    pop rdi
-    call obj_decref
-
-    ; copyright
-    lea rdi, [rel sm_copyright]
-    call str_from_cstr_heap
-    push rax                    ; save key
-    lea rdi, [rel sm_copyright_val]
-    call str_from_cstr_heap
-    mov rdx, rax                ; value
-    mov rdi, r12                ; dict
-    pop rsi                     ; key
-    push rdx                    ; save value for DECREF
-    push rsi                    ; save key for DECREF
-    mov ecx, TAG_PTR            ; value tag
-    mov r8d, TAG_PTR            ; key tag
-    call dict_set
-    pop rdi
-    call obj_decref             ; DECREF key
-    pop rdi
-    call obj_decref             ; DECREF value
+    ; String constants
+    SRE_ADD_STR sm_copyright, sm_copyright_val
 
     ; Create module object
     lea rdi, [rel sm_sre_name]
@@ -651,6 +516,9 @@ DEF_FUNC sre_module_create, SMC_FRAME
     call module_new
     mov r13, rax                ; save module
     pop rdi                     ; name string
+    call obj_decref
+    ; DECREF the dict — module_new INCREF'd it, so our original ref is extra
+    mov rdi, r12
     call obj_decref
     mov rax, r13                ; restore module
 
@@ -682,3 +550,4 @@ sm_MAXREPEAT:       db "MAXREPEAT", 0
 sm_MAXGROUPS:       db "MAXGROUPS", 0
 sm_copyright:       db "copyright", 0
 sm_copyright_val:   db "_sre for apython", 0
+sm_code_type_err:   db "expected int in code list", 0
