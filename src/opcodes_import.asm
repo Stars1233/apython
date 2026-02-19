@@ -7,6 +7,7 @@
 
 extern eval_dispatch
 extern eval_saved_rbx
+extern eval_saved_r13
 extern trace_opcodes
 extern opcode_table
 extern import_module

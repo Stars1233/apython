@@ -21,6 +21,7 @@ section .text
 
 extern eval_dispatch
 extern eval_saved_rbx
+extern eval_saved_r13
 extern trace_opcodes
 extern opcode_table
 extern obj_dealloc
@@ -321,6 +322,7 @@ DEF_FUNC op_call, CL_FRAME
     ; Exception pending from callee — propagate to caller's handler
     extern eval_exception_unwind
     leave
+    mov [rel eval_saved_r13], r13  ; update — cleanup already popped/DECREF'd args
     jmp eval_exception_unwind
 
 .not_callable:

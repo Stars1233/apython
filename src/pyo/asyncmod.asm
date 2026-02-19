@@ -281,8 +281,7 @@ DEF_FUNC asyncio_wait_for_func, WF_FRAME
     lea rcx, [rel wait_for_awaitable_type]
     mov [rax + WaitForAwaitable.ob_type], rcx
     mov rcx, [rbp - WF_INNER]
-    INCREF rcx
-    mov [rax + WaitForAwaitable.inner_task], rcx
+    mov [rax + WaitForAwaitable.inner_task], rcx  ; transfer ownership (task_new ref)
     mov rcx, [rbp - WF_DELAY]
     mov [rax + WaitForAwaitable.timeout_ns], rcx
     mov dword [rax + WaitForAwaitable.state], 0

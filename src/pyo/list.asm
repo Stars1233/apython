@@ -265,7 +265,8 @@ END_FUNC list_subscript
 ;; rdi=list, rsi=key, rdx=value, ecx=key_tag, r8d=value_tag
 ;; ============================================================================
 LAS_VTAG  equ 8
-LAS_FRAME equ 8
+LAS_TEMP  equ 16       ; temp list from generic iterable (NULL if not used)
+LAS_FRAME equ 16
 DEF_FUNC list_ass_subscript, LAS_FRAME
     push rbx
     push r12
@@ -307,6 +308,8 @@ DEF_FUNC list_ass_subscript, LAS_FRAME
     push r14
     push r15
     sub rsp, 8             ; align
+
+    mov qword [rbp - LAS_TEMP], 0  ; no temp list yet
 
     ; Get slice indices relative to list length
     mov rdi, rsi           ; slice
@@ -411,6 +414,7 @@ DEF_FUNC list_ass_subscript, LAS_FRAME
     ; Use temp list as value — jump to list path
     mov r8, [r12 + PyListObject.ob_size]
     mov r9, [r12 + PyListObject.ob_item]
+    mov [rbp - LAS_TEMP], r12      ; save for DECREF after copy
     mov r15, 16
     jmp .las_have_items
 
@@ -578,6 +582,12 @@ DEF_FUNC list_ass_subscript, LAS_FRAME
     jmp .las_insert_loop
 
 .las_insert_done:
+    ; DECREF temp list if generic iterable path created one
+    mov rdi, [rbp - LAS_TEMP]
+    test rdi, rdi
+    jz .las_no_temp
+    call obj_decref
+.las_no_temp:
     add rsp, 8             ; undo alignment
     pop r15
     pop r14
@@ -1491,8 +1501,25 @@ DEF_FUNC list_type_call, LTC_FRAME
     mov rdi, [rbp - LTC_ITER]
     call obj_decref
 
+    ; Check for pending exception from iternext (e.g. zip strict ValueError)
+    extern current_exception
+    mov rax, [rel current_exception]
+    test rax, rax
+    jnz .ltc_exc_cleanup
+
     mov rax, rbx            ; return the list
     mov edx, TAG_PTR
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.ltc_exc_cleanup:
+    ; DECREF the partially-built list, return NULL to propagate exception
+    mov rdi, rbx
+    call obj_decref
+    RET_NULL
     pop r13
     pop r12
     pop rbx

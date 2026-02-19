@@ -325,7 +325,7 @@ DEF_FUNC task_step, TS_FRAME
     mov rdi, r12               ; awaited task
     mov rsi, rbx               ; waiter (current task)
     call task_add_waiter
-    jmp .ts_ret
+    jmp .ts_decref_awaited
 
 .ts_await_done:
     ; Awaited task already done — check for exception first
@@ -340,7 +340,7 @@ DEF_FUNC task_step, TS_FRAME
     mov [rbx + AsyncTask.send_tag], rdx
     mov rdi, rbx
     call ready_enqueue
-    jmp .ts_ret
+    jmp .ts_decref_awaited
 
 .ts_await_done_exc:
     ; Awaited task had exception — set send_value = None, re-enqueue.
@@ -352,6 +352,11 @@ DEF_FUNC task_step, TS_FRAME
     mov qword [rbx + AsyncTask.send_tag], TAG_PTR
     mov rdi, rbx
     call ready_enqueue
+
+.ts_decref_awaited:
+    ; DECREF awaited task (INCREFed by task_iternext before yielding TAG_TASK)
+    mov rdi, r12
+    call obj_decref
     jmp .ts_ret
 
 .ts_wait_for:
@@ -907,6 +912,7 @@ section .data
 task_name_str:  db "Task", 0
 task_repr_str:  db "<Task>", 0
 
+align 8
 _task_done_cache: dq 0
 _task_result_cache: dq 0
 _task_cancel_cache: dq 0

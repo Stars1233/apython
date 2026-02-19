@@ -1184,6 +1184,7 @@ async_gen_name_str: db "async_generator", 0
 async_gen_repr_str: db "<async_generator>", 0
 
 ; Cached builtin singletons for gen methods
+align 8
 _gen_send_cache: dq 0
 _gen_close_cache: dq 0
 _gen_throw_cache: dq 0

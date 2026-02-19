@@ -833,6 +833,7 @@ DEF_FUNC_BARE op_raise_varargs
 .raise_exc:
     ; TOS is the exception to raise
     VPOP rdi
+    mov [rel eval_saved_r13], r13  ; update saved stack — VPOP consumed the item
 
     ; Check if it's already an exception object or a type
     ; If it's a type, create an instance with no args
@@ -908,6 +909,7 @@ DEF_FUNC_BARE op_raise_varargs
     push rcx                 ; save cause tag
     push rsi                 ; save cause payload
     VPOP rdi                 ; exception payload
+    mov [rel eval_saved_r13], r13  ; update saved stack — VPOPs consumed both items
     push rdi                 ; save exception
 
     ; Store __cause__ on exception object (if exception is a pointer)
@@ -941,6 +943,7 @@ END_FUNC op_raise_varargs
 DEF_FUNC_BARE op_reraise
     ; Pop the exception from value stack
     VPOP rdi
+    mov [rel eval_saved_r13], r13  ; update saved stack — VPOP consumed the item
 
     ; Store it as current exception
     push rdi

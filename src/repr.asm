@@ -157,6 +157,7 @@ DEF_FUNC list_repr, 24                ; buf ptr, used, capacity
     call ap_free
 
     pop rax                    ; return str
+    mov edx, TAG_PTR           ; ap_free clobbers rdx
     pop r13
     pop r12
     pop rbx
@@ -263,6 +264,7 @@ DEF_FUNC tuple_repr, 24
     call ap_free
 
     pop rax
+    mov edx, TAG_PTR           ; ap_free clobbers rdx
     pop r13
     pop r12
     pop rbx
@@ -408,6 +410,7 @@ DEF_FUNC dict_repr, 24
     call ap_free
 
     pop rax
+    mov edx, TAG_PTR           ; ap_free clobbers rdx
     pop r14
     pop r13
     pop r12
@@ -526,6 +529,7 @@ DEF_FUNC set_repr, 24
     call ap_free
 
     pop rax
+    mov edx, TAG_PTR           ; ap_free clobbers rdx
     pop r14
     pop r13
     pop r12

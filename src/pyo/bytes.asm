@@ -264,6 +264,7 @@ DEF_FUNC bytes_subscript
     call bytes_new
 
 .bs_slice_done:
+    mov edx, TAG_PTR           ; bytes_new doesn't set tag; ap_memcpy clobbers rdx
     pop r15
     pop r14
     pop r13
@@ -689,6 +690,7 @@ bytes_iter_name_str: db "bytes_iterator", 0
 hex_digits: db "0123456789abcdef"
 
 ; Cached builtin for bytes.decode
+align 8
 _bytes_decode_cache: dq 0
 
 ; bytes sequence methods

@@ -21,6 +21,7 @@ section .text
 
 extern eval_dispatch
 extern eval_saved_rbx
+extern eval_saved_r13
 extern trace_opcodes
 extern opcode_table
 extern eval_return
@@ -1815,6 +1816,7 @@ DEF_FUNC_BARE op_call_intrinsic_1
     mov rdi, [r13]
     mov rsi, [r13 + 8]
     DECREF_VAL rdi, rsi
+    mov [rel eval_saved_r13], r13  ; update — popped and DECREF'd
     lea rdi, [rel exc_RuntimeError_type]
     CSTRING rsi, "generator raised StopIteration"
     call raise_exception
@@ -1822,6 +1824,7 @@ DEF_FUNC_BARE op_call_intrinsic_1
     ; Not StopIteration — pop from TOS, set as current_exception, re-raise
     sub r13, 16
     mov rax, [r13]                ; exception (ref transferred from stack)
+    mov [rel eval_saved_r13], r13  ; update — popped and transferred
     mov [rel current_exception], rax
     jmp eval_exception_unwind
 

@@ -20,6 +20,7 @@ extern exc_TypeError_type
 extern exc_StopIteration_type
 extern kw_names_pending
 extern none_singleton
+extern current_exception
 extern tuple_new
 extern list_new
 extern list_append
@@ -136,6 +137,7 @@ DEF_FUNC builtin_enumerate
     mov [rax + PyObject.ob_type], rcx
     mov [rax + IT_FIELD1], rbx       ; it_iter
     mov [rax + IT_FIELD2], r13       ; it_count (raw i64, not SmallInt)
+    mov edx, TAG_PTR
 
     pop r13
     pop r12
@@ -355,6 +357,7 @@ DEF_FUNC builtin_zip, ZP_FRAME
     mov [rax + IT_FIELD2], r12       ; it_count
     mov rcx, [rbp - ZP_STRICT]
     mov [rax + ZIP_STRICT], rcx      ; strict flag
+    mov edx, TAG_PTR
 
     pop r14
     pop r13
@@ -374,6 +377,7 @@ DEF_FUNC builtin_zip, ZP_FRAME
     mov qword [rax + IT_FIELD1], 0   ; NULL iters array
     mov qword [rax + IT_FIELD2], 0   ; 0 iterators
     mov qword [rax + ZIP_STRICT], 0  ; not strict
+    mov edx, TAG_PTR
 
     pop r14
     pop r13
@@ -502,9 +506,21 @@ DEF_FUNC_LOCAL zip_iternext
     mov rsi, rdx
     DECREF_VAL rdi, rsi
 .zip_strict_mismatch:
+    ; Set exception without longjmp — return NULL so callers can clean up
+    extern exc_from_cstr
     lea rdi, [rel exc_ValueError_type]
     CSTRING rsi, "zip() has arguments with different lengths"
-    call raise_exception
+    call exc_from_cstr
+    ; rax = exception object
+    push rax
+    mov rdi, [rel current_exception]
+    test rdi, rdi
+    jz .zip_strict_no_prev
+    call obj_decref
+.zip_strict_no_prev:
+    pop rax
+    mov [rel current_exception], rax
+    ; Fall through to .zip_exhausted which returns NULL
 
 .zip_exhausted:
     RET_NULL
@@ -622,6 +638,7 @@ DEF_FUNC builtin_map
     mov [rax + MAP_FUNC], r13        ; it_func
     mov [rax + MAP_ITERS], rbx       ; it_iters (array ptr)
     mov [rax + MAP_COUNT], r14       ; it_count
+    mov edx, TAG_PTR
 
     pop r14
     pop r13
@@ -843,6 +860,7 @@ DEF_FUNC builtin_filter
     mov [rax + PyObject.ob_type], rcx
     mov [rax + IT_FIELD1], r13       ; it_func (or NULL)
     mov [rax + IT_FIELD2], rbx       ; it_iter
+    mov edx, TAG_PTR
 
     pop r13
     pop r12
@@ -1059,6 +1077,7 @@ section .text
     mov [rax + PyObject.ob_type], rcx
     mov [rax + IT_FIELD1], r12       ; it_seq
     mov [rax + IT_FIELD2], r13       ; it_index
+    mov edx, TAG_PTR
 
     pop r13
     pop r12

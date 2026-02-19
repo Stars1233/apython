@@ -136,6 +136,7 @@
 ; Falls back to centralized eval_dispatch when tracing is enabled.
 %macro DISPATCH 0
     mov [rel eval_saved_rbx], rbx  ; save bytecode IP for exception unwind
+    mov [rel eval_saved_r13], r13  ; save value stack ptr for exception unwind
     cmp byte [rel trace_opcodes], 0
     jnz eval_dispatch              ; cold: centralized trace handler
     movzx eax, byte [rbx]         ; load opcode
