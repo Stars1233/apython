@@ -489,12 +489,8 @@ END_FUNC raise_exception
 
 ; raise_exception_obj(PyExceptionObject *exc)
 ; Set exception and begin unwinding.
+; Takes ownership of the exc reference (caller must pass an owned ref).
 DEF_FUNC raise_exception_obj
-
-    ; INCREF the exception (we're taking ownership)
-    push rdi
-    INCREF rdi
-    pop rdi
 
     ; XDECREF any existing exception
     push rdi

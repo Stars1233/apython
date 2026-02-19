@@ -856,7 +856,7 @@ DEF_FUNC str_method_join
     mov [rbp-48], r15       ; total_len
 
     ; Allocate buffer
-    lea rdi, [r15 + 1]
+    lea rdi, [r15 + 8]
     call ap_malloc
     mov [rbp-56], rax       ; buf_ptr
     mov qword [rbp-64], 0   ; write_pos = 0

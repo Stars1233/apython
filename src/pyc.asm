@@ -101,6 +101,10 @@ DEF_FUNC pyc_read_file
     call marshal_read_object
     mov r12, rax             ; r12 = code object
 
+    ; Release refs array ownership (DECREF all entries)
+    extern marshal_cleanup_refs
+    call marshal_cleanup_refs
+
     ; Free the file buffer
     mov rdi, rbx
     call ap_free

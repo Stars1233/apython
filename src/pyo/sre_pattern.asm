@@ -608,9 +608,10 @@ DEF_FUNC sre_pattern_findall_method, FA_FRAME
 
 .fa_mg_set:
     ; Set tuple[group-1] = (rax, edx)
+    ; Fresh strings from sre_substr_from_state have refcount=1;
+    ; tuple takes ownership without INCREF. TAG_NONE has no RC_BIT.
     pop rcx
     push rcx
-    INCREF_VAL rax, rdx
     lea esi, [ecx - 1]
     movsx rsi, esi
     shl rsi, 4                 ; * 16

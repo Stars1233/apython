@@ -420,10 +420,10 @@ align 16
 .copy_done:
     add r15, [r14 + PyStrObject.ob_size]
 
-    ; DECREF the string representation (only for TAG_PTR heap strings)
+    ; DECREF the string representation (known TAG_PTR heap string;
+    ; r9 tag may have been clobbered by ap_memcpy call above)
     mov rdi, r14
-    mov rsi, r9
-    DECREF_VAL rdi, rsi
+    call obj_decref
 
 .skip_arg:
     ; Append separator if not the last arg
@@ -492,10 +492,10 @@ align 16
     mov rdx, [r14 + PyStrObject.ob_size]  ; len
     call sys_write
 
-    ; DECREF the string representation (tag-aware)
+    ; DECREF the string representation (known TAG_PTR heap string;
+    ; r9 tag was clobbered by sys_write calls above)
     mov rdi, r14
-    mov rsi, r9
-    DECREF_VAL rdi, rsi
+    call obj_decref
     jmp .skip_arg
 
 .print_smallstr:

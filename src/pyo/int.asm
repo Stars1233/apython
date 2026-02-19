@@ -1693,22 +1693,26 @@ DEF_FUNC int_compare
     je .both_smallint
 .a_not_smallint:
 
-    ; At least one is GMP - need full path
-    ; Convert SmallInt a if needed
+    ; At least one is GMP - use __gmpz_cmp_si to avoid heap allocation
     cmp eax, TAG_SMALLINT
-    jne .a_ok
-    mov rdi, r12
-    call smallint_to_pyint
-    mov r12, rax
-    jmp .cmp_convert_b
-.a_ok:
-.cmp_convert_b:
+    jne .a_is_gmp
+    ; a is SmallInt, b is GMP: cmp_si(b->mpz, a) then negate
+    lea rdi, [r13 + PyIntObject.mpz]
+    mov rsi, r12               ; SmallInt raw value
+    call __gmpz_cmp_si wrt ..plt
+    neg eax                    ; negate: cmp_si(b,a) → want cmp(a,b)
+    mov r12d, eax
+    jmp .dispatch_op
+.a_is_gmp:
     cmp edx, TAG_SMALLINT
-    jne .b_ok
-    mov rdi, r13
-    call smallint_to_pyint
-    mov r13, rax
-.b_ok:
+    jne .both_gmp
+    ; a is GMP, b is SmallInt: cmp_si(a->mpz, b)
+    lea rdi, [r12 + PyIntObject.mpz]
+    mov rsi, r13               ; SmallInt raw value
+    call __gmpz_cmp_si wrt ..plt
+    mov r12d, eax
+    jmp .dispatch_op
+.both_gmp:
     lea rdi, [r12 + PyIntObject.mpz]
     lea rsi, [r13 + PyIntObject.mpz]
     call __gmpz_cmp wrt ..plt
@@ -1792,10 +1796,8 @@ END_FUNC int_compare
 ;; Free GMP data + object. SmallInt guard.
 ;; ============================================================================
 DEF_FUNC_BARE int_dealloc
-    ; SmallInt should never be deallocated
-    cmp edx, TAG_SMALLINT
-    je .bail
-
+    ; tp_dealloc(rdi=obj) — edx is NOT passed, so no tag check.
+    ; SmallInts never reach here (no TAG_RC_BIT, so DECREF_VAL skips them).
     push rbp
     mov rbp, rsp
     push rbx
@@ -1806,7 +1808,6 @@ DEF_FUNC_BARE int_dealloc
     call ap_free
     pop rbx
     pop rbp
-.bail:
     ret
 END_FUNC int_dealloc
 

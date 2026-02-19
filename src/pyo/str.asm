@@ -35,8 +35,8 @@ DEF_FUNC str_from_cstr_heap
     call ap_strlen
     mov r12, rax             ; r12 = length
 
-    ; Allocate: PyStrObject header + length + 1 (null terminator)
-    lea rdi, [rax + PyStrObject.data + 1]
+    ; Allocate: PyStrObject header + length + 8 (null + padding for 8-byte strcmp)
+    lea rdi, [rax + PyStrObject.data + 8]
     call ap_malloc
     ; rax = new PyStrObject*
 
@@ -54,6 +54,9 @@ DEF_FUNC str_from_cstr_heap
     lea rdx, [r12 + 1]      ; length + null
     call ap_memcpy
     pop rax                  ; restore obj ptr
+
+    ; Zero-fill 8 bytes at NUL terminator for ap_strcmp 8-byte reads
+    mov qword [rax + PyStrObject.data + r12], 0
 
     mov edx, TAG_PTR
     pop r12
@@ -103,8 +106,8 @@ DEF_FUNC str_new_heap
     mov rbx, rdi            ; save data ptr
     mov r12, rsi            ; save length
 
-    ; Allocate: header + length + 1
-    lea rdi, [r12 + PyStrObject.data + 1]
+    ; Allocate: header + length + 8 (null + padding for 8-byte strcmp)
+    lea rdi, [r12 + PyStrObject.data + 8]
     call ap_malloc
     mov r13, rax             ; r13 = new PyStrObject*
 
@@ -121,8 +124,8 @@ DEF_FUNC str_new_heap
     mov rdx, r12
     call ap_memcpy
 
-    ; Null-terminate
-    mov byte [r13 + PyStrObject.data + r12], 0
+    ; Zero-fill 8 bytes at NUL position for ap_strcmp 8-byte reads
+    mov qword [r13 + PyStrObject.data + r12], 0
 
     mov rax, r13
     mov edx, TAG_PTR
@@ -168,8 +171,8 @@ DEF_FUNC str_repr
     mov rbx, rdi            ; rbx = self
     mov r12, [rbx + PyStrObject.ob_size]  ; r12 = src length
 
-    ; Allocate worst case: header + 2 quotes + 2*length + 1 null
-    lea rdi, [r12*2 + PyStrObject.data + 3]
+    ; Allocate worst case: header + 2 quotes + 2*length + 8 (NUL padding)
+    lea rdi, [r12*2 + PyStrObject.data + 10]
     call ap_malloc
     mov r13, rax             ; r13 = new str
 
@@ -247,7 +250,7 @@ DEF_FUNC str_repr
 .sr_done:
     ; Write closing quote and null
     mov byte [rdi], "'"
-    mov byte [rdi + 1], 0
+    mov qword [rdi + 1], 0  ; 8-byte zero-fill for ap_strcmp
 
     ; Calculate actual ob_size: (rdi - data_start) + 1 for closing quote
     lea rax, [r13 + PyStrObject.data]
@@ -357,8 +360,8 @@ DEF_FUNC str_concat
     mov r13, [rbx + PyStrObject.ob_size]   ; len_a
     add r13, [r12 + PyStrObject.ob_size]   ; total length
 
-    ; Allocate new string
-    lea rdi, [r13 + PyStrObject.data + 1]
+    ; Allocate new string (+ 8 for NUL padding for 8-byte strcmp)
+    lea rdi, [r13 + PyStrObject.data + 8]
     call ap_malloc
     push rax                ; save new str
 
@@ -383,9 +386,9 @@ DEF_FUNC str_concat
     mov rdx, [r12 + PyStrObject.ob_size]
     call ap_memcpy
 
-    ; Null-terminate
+    ; Zero-fill 8 bytes at NUL position for ap_strcmp
     pop rax
-    mov byte [rax + PyStrObject.data + r13], 0
+    mov qword [rax + PyStrObject.data + r13], 0
 
     mov edx, TAG_PTR
     pop r13
@@ -426,8 +429,8 @@ DEF_FUNC str_repeat
     imul r14, r13, 1                        ; r14 = str length (copy)
     imul r14, r12                           ; r14 = total length
 
-    ; Allocate new string
-    lea rdi, [r14 + PyStrObject.data + 1]
+    ; Allocate new string (+ 8 for NUL padding for 8-byte strcmp)
+    lea rdi, [r14 + PyStrObject.data + 8]
     call ap_malloc
     push rax                ; save
 
@@ -456,9 +459,9 @@ DEF_FUNC str_repeat
     jmp .repeat_loop
 
 .repeat_done:
-    ; Null-terminate
+    ; Zero-fill 8 bytes at NUL position for ap_strcmp
     pop rax
-    mov byte [rax + PyStrObject.data + r14], 0
+    mov qword [rax + PyStrObject.data + r14], 0
     mov edx, TAG_PTR
 
     pop r14
@@ -1240,7 +1243,7 @@ DEF_FUNC str_getslice
     ; General case: build char by char on stack buffer
     ; Allocate: header + slicelength + 1
     mov rdi, rax
-    add rdi, PyStrObject.data + 1
+    add rdi, PyStrObject.data + 8  ; +8 NUL padding for ap_strcmp
     call ap_malloc
     push rax                   ; save new str obj
 
@@ -1269,7 +1272,7 @@ DEF_FUNC str_getslice
 .sgs_null_term:
     mov rax, [rsp]             ; new str
     mov rcx, [rsp + 8]        ; slicelength
-    mov byte [rax + PyStrObject.data + rcx], 0
+    mov qword [rax + PyStrObject.data + rcx], 0  ; 8-byte zero-fill for ap_strcmp
 
     pop rax                    ; new str
     add rsp, 8                 ; discard slicelength

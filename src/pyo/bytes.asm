@@ -834,7 +834,7 @@ DEF_FUNC bytes_type_call, BTC_FRAME
     mov rcx, [rdi + PyBytesObject.ob_size]
     push rdi
     push rcx
-    lea rdi, [rcx + PyBytesObject.data + 1]
+    lea rdi, [rcx + PyBytesObject.data + 8]
     call ap_malloc
     pop rcx
     pop rsi
@@ -851,10 +851,10 @@ DEF_FUNC bytes_type_call, BTC_FRAME
     lea rsi, [rsi + PyBytesObject.data]
     mov rdx, rcx
     call ap_memcpy
-    ; Null-terminate (for C string compat)
+    ; Null-terminate with 8-byte zero-fill
     pop rax
     mov rcx, [rax + PyBytesObject.ob_size]
-    mov byte [rax + PyBytesObject.data + rcx], 0
+    mov qword [rax + PyBytesObject.data + rcx], 0
     mov edx, TAG_PTR
     leave
     ret

@@ -25,6 +25,7 @@ extern fatal_error
 extern ap_memcpy
 extern code_type
 extern obj_decref
+extern obj_incref
 
 ; Initial capacity for the reference list
 MARSHAL_REFS_INIT_CAP equ 64
@@ -178,11 +179,48 @@ DEF_FUNC marshal_add_ref
     inc rax
     mov [rel marshal_ref_count], rax
 
+    ; Refs array takes ownership — INCREF the stored value
+    INCREF_VAL rbx, r12
+
     pop r12
     pop rbx
     leave
     ret
 END_FUNC marshal_add_ref
+
+;--------------------------------------------------------------------------
+; marshal_cleanup_refs() - DECREF all refs and reset count
+; Called after marshal_read_object completes to release refs array ownership.
+;--------------------------------------------------------------------------
+DEF_FUNC marshal_cleanup_refs
+    push rbx
+    push r12
+    push r13
+
+    mov r13, [rel marshal_ref_count]
+    test r13, r13
+    jz .cleanup_done
+
+    mov rbx, [rel marshal_refs]
+    xor r12d, r12d             ; index
+.cleanup_loop:
+    cmp r12, r13
+    jge .cleanup_done
+    mov rax, r12
+    shl rax, 4
+    mov rdi, [rbx + rax]      ; payload
+    mov rsi, [rbx + rax + 8]  ; tag
+    DECREF_VAL rdi, rsi
+    inc r12
+    jmp .cleanup_loop
+.cleanup_done:
+    mov qword [rel marshal_ref_count], 0
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC marshal_cleanup_refs
 
 ;--------------------------------------------------------------------------
 ; marshal_read_object() -> PyObject*
@@ -653,6 +691,8 @@ mdo_small_tuple:
     shl rax, 4                 ; index * 16
     mov [rcx + rax], r14      ; fix up placeholder payload
     mov qword [rcx + rax + 8], TAG_PTR  ; fix up tag
+    mov rdi, r14
+    call obj_incref            ; refs array takes ownership of real object
 .stuple_no_fixup:
     mov rax, r14               ; return the tuple
     mov edx, TAG_PTR
@@ -724,6 +764,8 @@ mdo_tuple:
     shl rax, 4                 ; index * 16
     mov [rcx + rax], r14      ; fix up placeholder payload
     mov qword [rcx + rax + 8], TAG_PTR  ; fix up tag
+    mov rdi, r14
+    call obj_incref            ; refs array takes ownership of real object
 .tuple_no_fixup:
     mov rax, r14
     mov edx, TAG_PTR
@@ -973,6 +1015,19 @@ mdo_code:
     call ap_memcpy
 .code_no_bytecode:
 
+    ; DECREF co_code and co_linetable bytes objects (data was copied/unused).
+    ; Safe because marshal_add_ref now INCREFs, so refs array holds its own ref.
+    mov rdi, [rsp + 16]        ; co_code bytes object
+    test rdi, rdi
+    jz .code_skip_decref_code
+    call obj_decref
+.code_skip_decref_code:
+    mov rdi, [rsp + 80]        ; co_linetable bytes object
+    test rdi, rdi
+    jz .code_skip_decref_lt
+    call obj_decref
+.code_skip_decref_lt:
+
     ; Update ref placeholder if FLAG_REF was set
     mov r12, [rsp + 96]        ; restore FLAG_REF into r12
     test r12d, r12d
@@ -982,6 +1037,8 @@ mdo_code:
     shl rax, 4                 ; index * 16
     mov [rcx + rax], r13      ; fix up placeholder payload
     mov qword [rcx + rax + 8], TAG_PTR  ; fix up tag
+    mov rdi, r13
+    call obj_incref            ; refs array takes ownership of real object
 .code_no_fixup:
 
     mov rax, r13               ; return code object
@@ -1082,6 +1139,8 @@ mdo_set_common:
     shl rax, 4                 ; index * 16
     mov [rcx + rax], r14      ; fix up placeholder payload
     mov qword [rcx + rax + 8], TAG_PTR  ; fix up tag
+    mov rdi, r14
+    call obj_incref            ; refs array takes ownership of real object
 .fset_no_fixup:
     ; Set ob_type based on frozenset flag
     extern frozenset_type

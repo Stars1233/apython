@@ -823,6 +823,7 @@ DEF_FUNC _task_result_impl
 
 .tr_exception:
     mov rdi, rcx
+    INCREF rdi                 ; borrowed from AsyncTask; raise takes ownership
     call raise_exception_obj
 END_FUNC _task_result_impl
 

@@ -111,6 +111,10 @@ DEF_FUNC_BARE op_store_name
     mov rcx, r10               ; rcx = value tag
     mov r8d, TAG_PTR
     call dict_set
+    ; DECREF value to release the stack's reference (dict_set INCREFed it)
+    mov rdi, [r13]          ; value payload (still in popped slot)
+    mov rsi, [r13 + 8]     ; value tag
+    DECREF_VAL rdi, rsi
     DISPATCH
 END_FUNC op_store_name
 
@@ -134,6 +138,10 @@ DEF_FUNC_BARE op_store_global
     mov rcx, r10               ; rcx = value tag
     mov r8d, TAG_PTR
     call dict_set
+    ; DECREF value to release the stack's reference (dict_set INCREFed it)
+    mov rdi, [r13]          ; value payload (still in popped slot)
+    mov rsi, [r13 + 8]     ; value tag
+    DECREF_VAL rdi, rsi
     DISPATCH
 END_FUNC op_store_global
 

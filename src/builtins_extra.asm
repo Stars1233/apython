@@ -517,7 +517,7 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     mov [rbp - BI_OBJ], rbx           ; save original obj for error msg
     mov qword [rbp - BI_BASE], 10     ; base 10
     mov rcx, [rbx + PyBytesObject.ob_size]
-    lea rdi, [rcx + 1]       ; size + null terminator
+    lea rdi, [rcx + 8]       ; size + 8-byte NUL padding
     push rcx
     call ap_malloc
     pop rcx
@@ -528,11 +528,11 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     mov rdx, rcx
     extern ap_memcpy
     call ap_memcpy
-    ; Null-terminate
+    ; Null-terminate with 8-byte zero-fill
     pop rdi                   ; rdi = buffer
     push rdi
     mov rcx, [rbx + PyBytesObject.ob_size]
-    mov byte [rdi + rcx], 0
+    mov qword [rdi + rcx], 0
     ; Check for embedded NUL bytes
     call strlen wrt ..plt
     cmp rax, [rbx + PyBytesObject.ob_size]
@@ -565,7 +565,7 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     mov [rbp - BI_OBJ], rbx
     mov qword [rbp - BI_BASE], 10
     mov rcx, [rbx + PyByteArrayObject.ob_size]
-    lea rdi, [rcx + 1]
+    lea rdi, [rcx + 8]
     push rcx
     call ap_malloc
     pop rcx
@@ -577,7 +577,7 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     pop rdi
     push rdi
     mov rcx, [rbx + PyByteArrayObject.ob_size]
-    mov byte [rdi + rcx], 0
+    mov qword [rdi + rcx], 0
     ; Check for embedded NUL
     call strlen wrt ..plt
     cmp rax, [rbx + PyByteArrayObject.ob_size]
@@ -601,7 +601,7 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     mov [rbp - BI_OBJ], rbx
     mov qword [rbp - BI_BASE], 10
     mov rcx, [rbx + PyMemoryViewObject.mv_len]
-    lea rdi, [rcx + 1]
+    lea rdi, [rcx + 8]
     push rcx
     call ap_malloc
     pop rcx
@@ -613,7 +613,7 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     pop rdi
     push rdi
     mov rcx, [rbx + PyMemoryViewObject.mv_len]
-    mov byte [rdi + rcx], 0
+    mov qword [rdi + rcx], 0
     ; Check for embedded NUL
     call strlen wrt ..plt
     cmp rax, [rbx + PyMemoryViewObject.mv_len]
@@ -1099,7 +1099,7 @@ DEF_FUNC builtin_int_fn, BI_FRAME
 .int_base_from_bytes:
     ; Parse bytes with given base — make null-terminated copy
     mov rcx, [rbx + PyBytesObject.ob_size]
-    lea rdi, [rcx + 1]
+    lea rdi, [rcx + 8]
     push rcx
     call ap_malloc
     pop rcx
@@ -1111,7 +1111,7 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     pop rdi
     push rdi
     mov rcx, [rbx + PyBytesObject.ob_size]
-    mov byte [rdi + rcx], 0
+    mov qword [rdi + rcx], 0
     ; Check for embedded NUL
     call strlen wrt ..plt
     cmp rax, [rbx + PyBytesObject.ob_size]
@@ -4003,7 +4003,7 @@ DEF_FUNC builtin_ascii_fn, AA_FRAME
 
     mov rbx, [rbp - AA_REPR]  ; rbx = repr str
     mov r12, [rbx + PyStrObject.ob_size]  ; r12 = original length
-    lea rdi, [r12*4 + 1]      ; worst case: every char becomes \xNN (4 chars)
+    lea rdi, [r12*4 + 8]      ; worst case: every char becomes \xNN (4 chars) + 8 NUL pad
     call ap_malloc
     mov r13, rax               ; r13 = output buffer
 
@@ -4054,7 +4054,7 @@ DEF_FUNC builtin_ascii_fn, AA_FRAME
     jmp .aa_escape_loop
 
 .aa_escape_done:
-    mov byte [rdi], 0
+    mov qword [rdi], 0         ; 8-byte zero-fill for ap_strcmp
     sub rdi, r13               ; rdi = output length
 
     ; Create string from buffer

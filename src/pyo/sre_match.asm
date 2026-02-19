@@ -572,15 +572,17 @@ DEF_FUNC sre_match_groups_method, GS_FRAME
     ; If None and default was given, substitute default
     cmp edx, TAG_NONE
     jne .groups_use_val
-    ; Use default instead of None
+    ; Use default instead of None (borrowed ref, needs INCREF for tuple)
     mov rax, [rbp - GS_DEFAULT]
     mov edx, [rbp - GS_DEFAULT_TAG]
+    INCREF_VAL rax, rdx
 .groups_use_val:
     pop rcx
     push rcx
     ; Inline tuple_set: tuple.ob_item[group-1] = (rax, edx)
+    ; Fresh strings from sre_match_get_group_str have refcount=1;
+    ; tuple takes ownership without INCREF
     mov rdi, [rsp + 8]        ; tuple
-    INCREF_VAL rax, rdx
     lea esi, [ecx - 1]        ; tuple index = group - 1
     movsx rsi, esi
     shl rsi, 4                 ; * 16
