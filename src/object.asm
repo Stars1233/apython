@@ -297,6 +297,18 @@ DEF_FUNC obj_str
     ret
 END_FUNC obj_str
 
+; hash_not_implemented() -> never returns
+; Used as tp_hash for unhashable types (dict, list, set).
+; Raises TypeError("unhashable type").
+global hash_not_implemented
+DEF_FUNC hash_not_implemented
+    extern raise_exception
+    extern exc_TypeError_type
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "unhashable type"
+    call raise_exception
+END_FUNC hash_not_implemented
+
 ; obj_hash(rdi=payload, rsi=tag) -> int64
 ; Dispatches on tag. SmallInt → raw value. TAG_PTR → tp_hash. SmallStr → FNV-1a.
 DEF_FUNC obj_hash

@@ -1652,11 +1652,103 @@ END_FUNC op_dict_update
 ;; ============================================================================
 ;; op_dict_merge - Merge dict (like dict_update but for **kwargs)
 ;;
-;; DICT_MERGE (164): same as DICT_UPDATE but raises on duplicate keys
-;; For simplicity, just delegate to dict_update logic (no dup check).
+;; DICT_MERGE (164): like DICT_UPDATE but raises TypeError on duplicate keys
+;; Used for f(**a, **b) — duplicate keys across ** spreads are errors.
 ;; ============================================================================
-DEF_FUNC_BARE op_dict_merge
-    jmp op_dict_update         ; same behavior for now
+extern dict_get
+
+DEF_FUNC op_dict_merge
+    push rbx
+    push r14
+    sub rsp, 32                ; locals + alignment
+
+    VPOP rsi                   ; rsi = mapping to merge from
+    mov [rbp-24], rsi
+
+    ; dict is at stack[-(ecx)] after pop (16 bytes/slot)
+    neg rcx
+    shl rcx, 4
+    mov rdi, [r13 + rcx]
+    mov [rbp-32], rdi          ; target dict
+
+    ; mapping must be a dict
+    mov rax, [rsi + PyObject.ob_type]
+    lea rdx, [rel dict_type]
+    cmp rax, rdx
+    jne .dm_type_error
+
+    ; Iterate over source dict entries
+    mov rax, [rsi + PyDictObject.capacity]
+    mov [rbp-40], rax          ; capacity
+    mov rax, [rsi + PyDictObject.entries]
+    mov [rbp-48], rax          ; entries ptr
+    xor ebx, ebx              ; index
+
+.dm_loop:
+    cmp rbx, [rbp-40]
+    jge .dm_done
+
+    mov rax, [rbp-48]
+    imul rcx, rbx, DictEntry_size
+    add rax, rcx
+    mov rsi, [rax + DictEntry.key]
+    test rsi, rsi
+    jz .dm_next
+
+    cmp qword [rax + DictEntry.value_tag], 0
+    je .dm_next
+
+    ; Check for duplicate: dict_get(target, key, key_tag)
+    push rbx
+    mov rdi, [rbp-32]          ; target dict
+    ; rsi = key (already set)
+    mov rax, [rbp-48]
+    imul rcx, rbx, DictEntry_size
+    add rax, rcx
+    mov rdx, [rax + DictEntry.key_tag]
+    call dict_get
+    test edx, edx
+    jnz .dm_dup_error          ; key already exists in target
+
+    ; dict_set(target, key, value, value_tag, key_tag)
+    pop rbx
+    mov rax, [rbp-48]
+    imul rcx, rbx, DictEntry_size
+    add rax, rcx
+    mov rsi, [rax + DictEntry.key]
+    mov rdx, [rax + DictEntry.value]
+    mov rcx, [rax + DictEntry.value_tag]
+    mov r8, [rax + DictEntry.key_tag]
+    push rbx
+    mov rdi, [rbp-32]
+    call dict_set
+    pop rbx
+
+.dm_next:
+    inc rbx
+    jmp .dm_loop
+
+.dm_done:
+    ; DECREF the mapping
+    mov rdi, [rbp-24]
+    call obj_decref
+
+    add rsp, 32
+    pop r14
+    pop rbx
+    leave
+    DISPATCH
+
+.dm_dup_error:
+    pop rbx                    ; balance push from before dict_get
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "got multiple values for keyword argument"
+    call raise_exception
+
+.dm_type_error:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "dict.update() argument must be a dict"
+    call raise_exception
 END_FUNC op_dict_merge
 
 ;; ============================================================================

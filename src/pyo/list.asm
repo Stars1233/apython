@@ -1513,7 +1513,8 @@ list_type:
     dq list_dealloc         ; tp_dealloc
     dq list_repr            ; tp_repr
     dq list_repr            ; tp_str
-    dq 0                    ; tp_hash (unhashable)
+    extern hash_not_implemented
+    dq hash_not_implemented ; tp_hash (raises TypeError)
     dq list_type_call       ; tp_call
     dq 0                    ; tp_getattr
     dq 0                    ; tp_setattr

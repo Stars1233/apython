@@ -300,12 +300,13 @@ DEF_FUNC dict_repr, 24
     cmp r12, r13
     jge .dr_done
 
-    ; Check if entry is occupied: entries[i].key != NULL
+    ; Check if entry is occupied (key_tag != 0 and != TOMBSTONE)
     mov rax, [rbx + PyDictObject.entries]
     imul rcx, r12, DICT_ENTRY_SIZE
-    mov rdi, [rax + rcx + DictEntry.key]   ; key
-    test rdi, rdi
-    jz .dr_next_entry
+    cmp qword [rax + rcx + DictEntry.key_tag], 0
+    je .dr_next_entry
+    cmp qword [rax + rcx + DictEntry.key_tag], 0xDEAD
+    je .dr_next_entry
 
     ; Print separator if not first
     test r14, r14

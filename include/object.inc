@@ -201,11 +201,12 @@ struc PyStrIterObject
 endstruc
 
 struc PyDictIterObject
-    .ob_refcnt: resq 1
-    .ob_type:   resq 1
-    .it_dict:   resq 1    ; +16: ptr to dict
-    .it_index:  resq 1    ; +24: current entry index
-    .it_kind:   resq 1    ; +32: 0=keys, 1=values, 2=items
+    .ob_refcnt:  resq 1
+    .ob_type:    resq 1
+    .it_dict:    resq 1    ; +16: ptr to dict
+    .it_index:   resq 1    ; +24: current entry index
+    .it_kind:    resq 1    ; +32: 0=keys, 1=values, 2=items
+    .it_version: resq 1    ; +40: dk_version snapshot for mutation detection
 endstruc
 
 struc PyDictViewObject

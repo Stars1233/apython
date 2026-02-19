@@ -984,6 +984,8 @@ END_FUNC filter_dealloc
 
 ;; builtin_reversed(args, nargs) -> ReversedIterObject*
 ;; nargs=1: reversed(sequence)
+extern dunder_call_1
+
 DEF_FUNC builtin_reversed
     push rbx
     push r12
@@ -1001,6 +1003,29 @@ DEF_FUNC builtin_reversed
     cmp qword [rbx + 8], TAG_SMALLINT
     je .rev_type_error
 
+    ; Check for __reversed__ in type's tp_dict via dunder_call_1
+    mov rdi, r12
+    lea rsi, [rel .dunder_reversed_name]
+    call dunder_call_1
+    test edx, edx
+    jnz .rev_dunder_ok      ; got a result
+
+    ; No __reversed__ found — fall through to sequence path
+    jmp .rev_no_dunder
+
+.rev_dunder_ok:
+    ; dunder_call_1 returned (rax, edx) — the iterator
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
+section .rodata
+.dunder_reversed_name: db "__reversed__", 0
+section .text
+
+.rev_no_dunder:
     ; Get length of sequence via sq_length or ob_size
     mov rax, [r12 + PyObject.ob_type]
     mov rcx, [rax + PyTypeObject.tp_as_sequence]

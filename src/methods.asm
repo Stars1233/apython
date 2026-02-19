@@ -8781,6 +8781,12 @@ DEF_FUNC methods_init
     lea rdx, [rel dict_method_popitem]
     call add_method_to_dict
 
+    extern dict_reversed
+    mov rdi, rbx
+    lea rsi, [rel mn___reversed__]
+    lea rdx, [rel dict_reversed]
+    call add_method_to_dict
+
     ; Add fromkeys as classmethod
     lea rdi, [rel dict_classmethod_fromkeys]
     lea rsi, [rel mn_fromkeys]
@@ -9226,3 +9232,4 @@ mn_hex:         db "hex", 0
 mn_decode:      db "decode", 0
 ; dict method names (continued)
 mn_fromkeys:    db "fromkeys", 0
+mn___reversed__: db "__reversed__", 0

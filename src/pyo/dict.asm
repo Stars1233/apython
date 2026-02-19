@@ -1064,6 +1064,9 @@ DEF_FUNC dict_tp_iter
     mov [rax + PyDictIterObject.it_dict], rbx
     mov qword [rax + PyDictIterObject.it_index], 0
     mov qword [rax + PyDictIterObject.it_kind], 0  ; 0 = keys
+    ; Snapshot dk_version for mutation detection
+    mov rcx, [rbx + PyDictObject.dk_version]
+    mov [rax + PyDictIterObject.it_version], rcx
 
     ; INCREF the dict
     mov rdi, rbx
@@ -1080,9 +1083,16 @@ END_FUNC dict_tp_iter
 ;; Scans entries for next non-empty slot.
 ;; rdi = iterator
 ;; ============================================================================
+extern exc_RuntimeError_type
+
 DEF_FUNC_BARE dict_iter_next
-    mov r10, [rdi + PyDictIterObject.it_kind]         ; 0=keys, 1=values, 2=items
+    ; Mutation detection: compare saved version with current
     mov rax, [rdi + PyDictIterObject.it_dict]         ; dict
+    mov rcx, [rax + PyDictObject.dk_version]
+    cmp rcx, [rdi + PyDictIterObject.it_version]
+    jne .di_mutation_error
+
+    mov r10, [rdi + PyDictIterObject.it_kind]         ; 0=keys, 1=values, 2=items
     mov rcx, [rdi + PyDictIterObject.it_index]        ; current index
     mov rdx, [rax + PyDictObject.capacity]            ; capacity
     mov rsi, [rax + PyDictObject.entries]              ; entries ptr
@@ -1168,6 +1178,11 @@ DEF_FUNC_BARE dict_iter_next
     mov [rdi + PyDictIterObject.it_index], rcx
     RET_NULL
     ret
+
+.di_mutation_error:
+    lea rdi, [rel exc_RuntimeError_type]
+    CSTRING rsi, "dictionary changed size during iteration"
+    call raise_exception
 END_FUNC dict_iter_next
 
 ;; ============================================================================
@@ -1305,6 +1320,9 @@ DEF_FUNC dict_view_iter
     mov qword [rax + PyDictIterObject.it_index], 0
     mov rcx, [rbx + PyDictViewObject.dv_kind]
     mov [rax + PyDictIterObject.it_kind], rcx
+    ; Snapshot dk_version for mutation detection
+    mov rcx, [rdi + PyDictObject.dk_version]
+    mov [rax + PyDictIterObject.it_version], rcx
 
     ; INCREF dict
     push rax                    ; save iterator
@@ -1317,6 +1335,15 @@ DEF_FUNC dict_view_iter
     ret
 END_FUNC dict_view_iter
 
+
+;; ============================================================================
+;; dict_keys_view_contains(rdi=view, rsi=key, rdx=key_tag) -> int (0 or 1)
+;; sq_contains for dict_keys view: delegates to dict_contains on underlying dict.
+;; ============================================================================
+DEF_FUNC_BARE dict_keys_view_contains
+    mov rdi, [rdi + PyDictViewObject.dv_dict]
+    jmp dict_contains           ; (rdi=dict, rsi=key, rdx=key_tag)
+END_FUNC dict_keys_view_contains
 
 ;; ============================================================================
 ;; dict_nb_or(left, right, ltag, rtag) -> new dict (merge)
@@ -1610,12 +1637,104 @@ END_FUNC dict_richcompare
 
 
 ;; ============================================================================
+;; dict_reversed(args, nargs) -> PyDictIterObject* (reverse key iterator)
+;; Called as dict.__reversed__(self).
+;; args[0] = dict (self), nargs = 1
+;; ============================================================================
+DEF_FUNC dict_reversed
+    ; args[0] = self (dict)
+    mov rax, [rdi]             ; dict payload
+    push rbx
+
+    mov rbx, rax               ; rbx = dict
+
+    mov edi, PyDictIterObject_size
+    call ap_malloc
+
+    mov qword [rax + PyObject.ob_refcnt], 1
+    lea rcx, [rel dict_rev_iter_type]
+    mov [rax + PyObject.ob_type], rcx
+    mov [rax + PyDictIterObject.it_dict], rbx
+    ; Set it_index to capacity - 1 (start from end)
+    mov rcx, [rbx + PyDictObject.capacity]
+    dec rcx
+    mov [rax + PyDictIterObject.it_index], rcx
+    mov qword [rax + PyDictIterObject.it_kind], 0  ; 0 = keys
+    ; Snapshot dk_version for mutation detection
+    mov rcx, [rbx + PyDictObject.dk_version]
+    mov [rax + PyDictIterObject.it_version], rcx
+
+    ; INCREF the dict
+    push rax
+    mov rdi, rbx
+    call obj_incref
+    pop rax
+
+    mov edx, TAG_PTR
+    pop rbx
+    leave
+    ret
+END_FUNC dict_reversed
+
+;; ============================================================================
+;; dict_rev_iter_next(PyDictIterObject *self) -> (rax=key, edx=key_tag) or NULL
+;; Like dict_iter_next but scans backwards (decrements index).
+;; ============================================================================
+DEF_FUNC_BARE dict_rev_iter_next
+    ; Mutation detection
+    mov rax, [rdi + PyDictIterObject.it_dict]
+    mov rcx, [rax + PyDictObject.dk_version]
+    cmp rcx, [rdi + PyDictIterObject.it_version]
+    jne .dri_mutation_error
+
+    mov rcx, [rdi + PyDictIterObject.it_index]        ; current index
+    mov rsi, [rax + PyDictObject.entries]              ; entries ptr
+
+.dri_scan:
+    test rcx, rcx
+    js .dri_exhausted           ; index < 0 → done
+
+    ; Check if entry at index has a valid key
+    imul rax, rcx, DictEntry_size
+    add rax, rsi
+    cmp qword [rax + DictEntry.key_tag], 0
+    je .dri_skip
+    cmp qword [rax + DictEntry.key_tag], DICT_TOMBSTONE
+    je .dri_skip
+
+    ; Found a valid entry — save decremented index
+    dec rcx
+    mov [rdi + PyDictIterObject.it_index], rcx
+
+    ; Return key
+    mov rdx, [rax + DictEntry.key_tag]
+    mov rax, [rax + DictEntry.key]
+    INCREF_VAL rax, rdx
+    ret
+
+.dri_skip:
+    dec rcx
+    jmp .dri_scan
+
+.dri_exhausted:
+    mov [rdi + PyDictIterObject.it_index], rcx
+    RET_NULL
+    ret
+
+.dri_mutation_error:
+    lea rdi, [rel exc_RuntimeError_type]
+    CSTRING rsi, "dictionary changed size during iteration"
+    call raise_exception
+END_FUNC dict_rev_iter_next
+
+;; ============================================================================
 ;; Data section
 ;; ============================================================================
 section .data
 
 ; dict_repr_str removed - repr now in src/repr.asm
 dict_iter_name: db "dict_keyiterator", 0
+dict_rev_iter_name: db "dict_reversekeyiterator", 0
 dict_keys_view_name: db "dict_keys", 0
 dict_values_view_name: db "dict_values", 0
 dict_items_view_name: db "dict_items", 0
@@ -1691,7 +1810,8 @@ dict_type:
     dq dict_dealloc             ; tp_dealloc
     dq dict_repr                ; tp_repr
     dq dict_repr                ; tp_str
-    dq 0                        ; tp_hash (unhashable)
+    extern hash_not_implemented
+    dq hash_not_implemented     ; tp_hash (raises TypeError)
     dq 0                        ; tp_call
     dq 0                        ; tp_getattr
     dq 0                        ; tp_setattr
@@ -1738,7 +1858,48 @@ dict_iter_type:
     dq 0                        ; tp_flags
     dq 0                        ; tp_bases
 
-; Dict view sequence methods (for len())
+; Dict reverse key iterator type
+align 8
+global dict_rev_iter_type
+dict_rev_iter_type:
+    dq 1                        ; ob_refcnt (immortal)
+    dq type_type                ; ob_type
+    dq dict_rev_iter_name       ; tp_name
+    dq PyDictIterObject_size    ; tp_basicsize
+    dq dict_iter_dealloc        ; tp_dealloc (reuse forward iter dealloc)
+    dq 0                        ; tp_repr
+    dq 0                        ; tp_str
+    dq 0                        ; tp_hash
+    dq 0                        ; tp_call
+    dq 0                        ; tp_getattr
+    dq 0                        ; tp_setattr
+    dq 0                        ; tp_richcompare
+    dq dict_iter_self           ; tp_iter (return self)
+    dq dict_rev_iter_next       ; tp_iternext
+    dq 0                        ; tp_init
+    dq 0                        ; tp_new
+    dq 0                        ; tp_as_number
+    dq 0                        ; tp_as_sequence
+    dq 0                        ; tp_as_mapping
+    dq 0                        ; tp_base
+    dq 0                        ; tp_dict
+    dq 0                        ; tp_mro
+    dq 0                        ; tp_flags
+    dq 0                        ; tp_bases
+
+; Dict keys view sequence methods (len + contains)
+align 8
+dict_keys_view_seq_methods:
+    dq dict_view_len            ; sq_length
+    dq 0                        ; sq_concat
+    dq 0                        ; sq_repeat
+    dq 0                        ; sq_item
+    dq 0                        ; sq_ass_item
+    dq dict_keys_view_contains  ; sq_contains
+    dq 0                        ; sq_inplace_concat
+    dq 0                        ; sq_inplace_repeat
+
+; Dict view sequence methods (for len(), values/items views)
 align 8
 dict_view_sequence_methods:
     dq dict_view_len            ; sq_length
@@ -1771,7 +1932,7 @@ dict_keys_view_type:
     dq 0                        ; tp_init
     dq 0                        ; tp_new
     dq 0                        ; tp_as_number
-    dq dict_view_sequence_methods ; tp_as_sequence
+    dq dict_keys_view_seq_methods ; tp_as_sequence (with sq_contains)
     dq 0                        ; tp_as_mapping
     dq 0                        ; tp_base
     dq 0                        ; tp_dict

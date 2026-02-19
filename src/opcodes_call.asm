@@ -296,9 +296,11 @@ DEF_FUNC op_call, CL_FRAME
     mov rdi, [r13]
     mov rsi, [r13 + 8]
     XDECREF_VAL rdi, rsi
-    ; Check for exception (NULL return with current_exception set)
+    ; Check for exception (TAG_NULL return with current_exception set)
+    ; Must check TAG (not payload) — None and SmallInt(0) have payload=0
     mov rax, [rbp - CL_RETVAL]
-    test rax, rax
+    mov rdx, [rbp - CL_RETTAG]
+    test rdx, rdx                    ; TAG_NULL = 0 means error
     jnz .push_result
     extern current_exception
     mov rcx, [rel current_exception]
@@ -306,8 +308,7 @@ DEF_FUNC op_call, CL_FRAME
     jnz .propagate_exc
 
 .push_result:
-    ; Push return value onto value stack
-    mov rdx, [rbp - CL_RETTAG]
+    ; Push return value onto value stack (rax, rdx already loaded)
     VPUSH_VAL rax, rdx
 
     ; Skip 3 CACHE entries (6 bytes)
