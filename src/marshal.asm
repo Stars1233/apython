@@ -256,7 +256,7 @@ DEF_FUNC marshal_read_object
     cmp ebx, MARSHAL_TYPE_FROZENSET
     je mdo_frozenset
     cmp ebx, MARSHAL_TYPE_SET
-    je mdo_frozenset             ; deserialize set same as frozenset
+    je mdo_set
 
     ; Unknown type
     lea rdi, [rel marshal_err_unknown]
@@ -1008,7 +1008,12 @@ END_FUNC marshal_read_object
 extern set_new
 extern set_add
 
+mdo_set:
+    push 0                     ; flag: 0 = set_type
+    jmp mdo_set_common
 mdo_frozenset:
+    push 1                     ; flag: 1 = frozenset_type
+mdo_set_common:
     push r12                   ; save FLAG_REF
     push r13
     push r14
@@ -1078,13 +1083,21 @@ mdo_frozenset:
     mov [rcx + rax], r14      ; fix up placeholder payload
     mov qword [rcx + rax + 8], TAG_PTR  ; fix up tag
 .fset_no_fixup:
-    mov rax, r14               ; return the set
+    ; Set ob_type based on frozenset flag
+    extern frozenset_type
+    cmp qword [rsp + 48], 1
+    jne .fset_is_set
+    lea rax, [rel frozenset_type]
+    mov [r14 + PyObject.ob_type], rax
+.fset_is_set:
+    mov rax, r14               ; return the set/frozenset
     mov edx, TAG_PTR
     add rsp, 16
     pop r15
     pop r14
     pop r13
     pop r12                    ; restore original r12
+    add rsp, 8                 ; pop flag
     xor r12d, r12d             ; clear FLAG_REF -- we handled it ourselves
     jmp mfinish
 

@@ -18,6 +18,7 @@ extern fatal_error
 extern raise_exception
 extern exc_TypeError_type
 extern exc_StopIteration_type
+extern kw_names_pending
 extern none_singleton
 extern tuple_new
 extern list_new
@@ -28,18 +29,26 @@ extern list_method_sort
 extern type_type
 
 ;; ============================================================================
-;; Struct definitions (inline, 32 bytes each)
+;; Struct definitions (inline)
 ;; ============================================================================
-;; EnumerateIterObject: +0 refcnt, +8 type, +16 it_iter, +24 it_count
-;; ZipIterObject:       +0 refcnt, +8 type, +16 it_iters, +24 it_count
-;; MapIterObject:       +0 refcnt, +8 type, +16 it_func, +24 it_iter
-;; FilterIterObject:    +0 refcnt, +8 type, +16 it_func, +24 it_iter
-;; ReversedIterObject:  +0 refcnt, +8 type, +16 it_seq, +24 it_index
+;; EnumerateIterObject: +0 refcnt, +8 type, +16 it_iter, +24 it_count  (32B)
+;; ZipIterObject:       +0 refcnt, +8 type, +16 it_iters, +24 it_count, +32 it_strict (40B)
+;; MapIterObject:       +0 refcnt, +8 type, +16 it_func, +24 it_iters, +32 it_count  (40B)
+;; FilterIterObject:    +0 refcnt, +8 type, +16 it_func, +24 it_iter   (32B)
+;; ReversedIterObject:  +0 refcnt, +8 type, +16 it_seq, +24 it_index   (32B)
 
-; Offsets (all 32-byte objects)
+; Offsets (all iterator objects)
 %define IT_FIELD1  16     ; first custom field
 %define IT_FIELD2  24     ; second custom field
 %define ITER_OBJ_SIZE 32
+
+; Extended sizes for zip (with strict flag) and map (with array+count)
+%define ZIP_OBJ_SIZE    40
+%define ZIP_STRICT      32     ; strict flag (0 or 1)
+%define MAP_FUNC        16     ; function pointer
+%define MAP_ITERS       24     ; iterator array pointer
+%define MAP_COUNT       32     ; number of iterators
+%define MAP_OBJ_SIZE    40
 
 ;; ============================================================================
 ;; Common: iter_self(self) -> self with INCREF
@@ -218,25 +227,103 @@ END_FUNC enumerate_dealloc
 ;; ============================================================================
 
 ;; builtin_zip(args, nargs) -> ZipIterObject*
-DEF_FUNC builtin_zip
+;; Supports strict= kwarg (PEP 618)
+extern ap_strcmp
+extern exc_ValueError_type
+extern bool_true
+ZP_ARGS    equ 8
+ZP_NARGS   equ 16
+ZP_NPOS    equ 24
+ZP_STRICT  equ 32
+ZP_FRAME   equ 32
+DEF_FUNC builtin_zip, ZP_FRAME
     push rbx
     push r12
     push r13
     push r14
 
-    mov rbx, rdi            ; args
-    mov r12, rsi            ; nargs
+    mov [rbp - ZP_ARGS], rdi     ; save args
+    mov [rbp - ZP_NARGS], rsi    ; save nargs
+    mov qword [rbp - ZP_STRICT], 0
 
-    ; Handle zero args: zip() returns empty iterator
+    ; Check for strict= kwarg
+    mov rax, [rel kw_names_pending]
+    test rax, rax
+    jz .zip_no_kw
+
+    ; Parse kwargs
+    mov rcx, [rax + PyTupleObject.ob_size]   ; n_kw
+    mov r12, rsi
+    sub r12, rcx                              ; n_pos
+    mov [rbp - ZP_NPOS], r12
+
+    ; Iterate kwarg names
+    xor r9d, r9d
+.zip_kw_loop:
+    cmp r9, rcx
+    jge .zip_kw_done
+
+    ; Get kwarg name string ptr from tuple
+    mov r10, r9
+    shl r10, 4
+    mov r10, [rax + PyTupleObject.ob_item + r10]
+
+    ; Compute value offset: (n_pos + kw_idx) * 16
+    mov r11, r12
+    add r11, r9
+    shl r11, 4
+
+    ; Compare with "strict"
+    push rax
+    push rcx
+    push r9
+    push r11
+    lea rdi, [r10 + PyStrObject.data]
+    CSTRING rsi, "strict"
+    call ap_strcmp
+    mov r10d, eax
+    pop r11
+    pop r9
+    pop rcx
+    pop rax
+    test r10d, r10d
+    jnz .zip_kw_next
+
+    ; Extract strict value: compare against bool_true
+    mov rdi, [rbp - ZP_ARGS]
+    mov r10, [rdi + r11]            ; payload
+    lea r8, [rel bool_true]
+    cmp r10, r8
+    sete r10b
+    movzx r10d, r10b
+    mov [rbp - ZP_STRICT], r10
+
+.zip_kw_next:
+    inc r9
+    jmp .zip_kw_loop
+
+.zip_kw_done:
+    mov qword [rel kw_names_pending], 0
+    jmp .zip_have_npos
+
+.zip_no_kw:
+    mov r12, [rbp - ZP_NARGS]
+    mov [rbp - ZP_NPOS], r12
+
+.zip_have_npos:
+    mov r12, [rbp - ZP_NPOS]       ; r12 = n_pos (number of iterables)
+    mov rbx, [rbp - ZP_ARGS]       ; rbx = args
+
+    ; Handle zero positional args: zip() returns empty iterator
     test r12, r12
     jz .zip_zero
 
-    ; Allocate array of iterator pointers: nargs * 8
+    ; Allocate array of iterator pointers: n_pos * 8
     lea rdi, [r12 * 8]
     call ap_malloc
     mov r13, rax             ; r13 = iterator array
 
-    ; For each arg, get its iterator
+    ; For each positional arg, get its iterator
     xor r14d, r14d          ; i = 0
 .zip_iter_loop:
     cmp r14, r12
@@ -257,15 +344,17 @@ DEF_FUNC builtin_zip
     jmp .zip_iter_loop
 
 .zip_create:
-    ; Allocate ZipIterObject
-    mov edi, ITER_OBJ_SIZE
+    ; Allocate ZipIterObject (40 bytes for strict flag)
+    mov edi, ZIP_OBJ_SIZE
     call ap_malloc
 
     mov qword [rax + PyObject.ob_refcnt], 1
     lea rcx, [rel zip_iter_type]
     mov [rax + PyObject.ob_type], rcx
     mov [rax + IT_FIELD1], r13       ; it_iters (array ptr)
-    mov [rax + IT_FIELD2], r12       ; it_count (number of iterators)
+    mov [rax + IT_FIELD2], r12       ; it_count
+    mov rcx, [rbp - ZP_STRICT]
+    mov [rax + ZIP_STRICT], rcx      ; strict flag
 
     pop r14
     pop r13
@@ -276,7 +365,7 @@ DEF_FUNC builtin_zip
 
 .zip_zero:
     ; Create a zip with 0 iterators (will immediately exhaust)
-    mov edi, ITER_OBJ_SIZE
+    mov edi, ZIP_OBJ_SIZE
     call ap_malloc
 
     mov qword [rax + PyObject.ob_refcnt], 1
@@ -284,6 +373,7 @@ DEF_FUNC builtin_zip
     mov [rax + PyObject.ob_type], rcx
     mov qword [rax + IT_FIELD1], 0   ; NULL iters array
     mov qword [rax + IT_FIELD2], 0   ; 0 iterators
+    mov qword [rax + ZIP_STRICT], 0  ; not strict
 
     pop r14
     pop r13
@@ -348,8 +438,8 @@ DEF_FUNC_LOCAL zip_iternext
     ret
 
 .zip_partial_cleanup:
-    ; One iterator exhausted. DECREF items already stored in tuple, then free tuple.
-    ; r15 = number of items already stored (items 0..r15-1)
+    ; One iterator exhausted at index r15.
+    ; DECREF items already stored in tuple, then free tuple.
     xor ecx, ecx
 .zip_cleanup_loop:
     cmp rcx, r15
@@ -365,20 +455,56 @@ DEF_FUNC_LOCAL zip_iternext
     jmp .zip_cleanup_loop
 
 .zip_free_tuple:
-    ; Zero out remaining items (both payload and tag) to avoid double-free in tuple_dealloc
+    ; Zero out remaining items to avoid double-free in tuple_dealloc
     mov rcx, r15
 .zip_zero_loop:
     cmp rcx, r12
     jge .zip_do_free
     mov rax, rcx
     shl rax, 4
-    mov qword [r14 + PyTupleObject.ob_item + rax], 0      ; payload
-    mov qword [r14 + PyTupleObject.ob_item + rax + 8], 0   ; tag
+    mov qword [r14 + PyTupleObject.ob_item + rax], 0
+    mov qword [r14 + PyTupleObject.ob_item + rax + 8], 0
     inc rcx
     jmp .zip_zero_loop
 .zip_do_free:
     mov rdi, r14
     call obj_decref
+
+    ; Check strict flag — if set, verify all iterators exhausted
+    cmp qword [rbx + ZIP_STRICT], 0
+    jz .zip_exhausted
+
+    ; r15 = index of iterator that returned NULL
+    ; If r15 > 0: iterators 0..r15-1 already returned items this round,
+    ;   so they are longer than iterator r15 → always error
+    test r15, r15
+    jnz .zip_strict_mismatch
+
+    ; r15 == 0: first iterator exhausted. Check others for remaining items.
+    mov r14, 1
+.zip_strict_check:
+    cmp r14, r12
+    jge .zip_exhausted       ; all exhausted — OK
+
+    mov rdi, [r13 + r14 * 8]
+    mov rax, [rdi + PyObject.ob_type]
+    mov rax, [rax + PyTypeObject.tp_iternext]
+    call rax
+    test edx, edx
+    jnz .zip_strict_decref_err  ; non-NULL = this one is longer
+
+    inc r14
+    jmp .zip_strict_check
+
+.zip_strict_decref_err:
+    ; DECREF the extra value we got from the longer iterator
+    mov rdi, rax
+    mov rsi, rdx
+    DECREF_VAL rdi, rsi
+.zip_strict_mismatch:
+    lea rdi, [rel exc_ValueError_type]
+    CSTRING rsi, "zip() has arguments with different lengths"
+    call raise_exception
 
 .zip_exhausted:
     RET_NULL
@@ -436,38 +562,68 @@ END_FUNC zip_dealloc
 ;; ============================================================================
 
 ;; builtin_map(args, nargs) -> MapIterObject*
-;; nargs=2: map(func, iterable)
+;; nargs>=2: map(func, iterable1, ..., iterableN)
 DEF_FUNC builtin_map
     push rbx
     push r12
     push r13
+    push r14
 
     mov rbx, rdi            ; args
     mov r12, rsi            ; nargs
 
     cmp r12, 2
-    jne .map_error
+    jl .map_error
 
-    ; INCREF func
-    mov r13, [rbx]          ; r13 = func
+    ; INCREF func (only if refcounted)
+    mov r13, [rbx]          ; r13 = func payload
+    mov eax, [rbx + 8]      ; func tag (low 32 bits)
+    test eax, TAG_RC_BIT
+    jz .map_have_func
     INCREF r13
+.map_have_func:
 
-    ; Get iterator from args[1]
-    mov rdi, [rbx + 16]
-    mov rsi, [rbx + 24]       ; args[1] tag
+    ; Number of iterables = nargs - 1
+    lea r14, [r12 - 1]      ; r14 = iter_count
+
+    ; Allocate array of iterator pointers: iter_count * 8
+    lea rdi, [r14 * 8]
+    call ap_malloc
+    push rax                 ; save iters array ptr
+
+    ; For each iterable arg[1..nargs-1], get its iterator
+    xor ecx, ecx            ; i = 0
+.map_iter_loop:
+    cmp rcx, r14
+    jge .map_create
+
+    lea rax, [rcx + 1]
+    shl rax, 4                  ; (i+1) * 16
+    mov rdi, [rbx + rax]        ; args[i+1] payload
+    mov rsi, [rbx + rax + 8]    ; args[i+1] tag
+    push rcx
     call get_iterator
-    mov rbx, rax             ; rbx = underlying iterator
+    pop rcx
+    mov rdx, [rsp]              ; iters array ptr
+    mov [rdx + rcx * 8], rax    ; store iterator
+    inc rcx
+    jmp .map_iter_loop
 
-    ; Allocate MapIterObject
-    mov edi, ITER_OBJ_SIZE
+.map_create:
+    pop rbx                  ; rbx = iters array ptr
+
+    ; Allocate MapIterObject (40 bytes)
+    mov edi, MAP_OBJ_SIZE
     call ap_malloc
 
     mov qword [rax + PyObject.ob_refcnt], 1
     lea rcx, [rel map_iter_type]
     mov [rax + PyObject.ob_type], rcx
-    mov [rax + IT_FIELD1], r13       ; it_func
-    mov [rax + IT_FIELD2], rbx       ; it_iter
+    mov [rax + MAP_FUNC], r13        ; it_func
+    mov [rax + MAP_ITERS], rbx       ; it_iters (array ptr)
+    mov [rax + MAP_COUNT], r14       ; it_count
 
+    pop r14
     pop r13
     pop r12
     pop rbx
@@ -476,62 +632,124 @@ DEF_FUNC builtin_map
 
 .map_error:
     lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "map() requires exactly 2 arguments"
+    CSTRING rsi, "map() requires at least 2 arguments"
     call raise_exception
 END_FUNC builtin_map
 
 ;; map_iternext(self) -> PyObject* or NULL
+;; Supports multiple iterables: calls func(next(it1), next(it2), ...)
 ;; IMPORTANT: Do not clobber r12 before calling tp_call, because func_call
 ;; reads r12 expecting the eval loop's current frame pointer.
-DEF_FUNC_LOCAL map_iternext
+MI_SELF    equ 8
+MI_ARGS    equ 16     ; pointer to fat args array on stack
+MI_FRAME   equ 16
+DEF_FUNC_LOCAL map_iternext, MI_FRAME
     push rbx
     push r13
     push r14
-    sub rsp, 8              ; align to 16
+    push r15
 
-    mov rbx, rdi            ; self
+    mov rbx, rdi                     ; self
+    mov r14, [rbx + MAP_COUNT]       ; iter count
+    mov r15, [rbx + MAP_ITERS]       ; iters array
 
-    ; Get next item from underlying iterator
-    mov rdi, [rbx + IT_FIELD2]       ; it_iter
+    ; Allocate fat args on stack: count * 16 bytes
+    mov rax, r14
+    shl rax, 4                       ; count * 16
+    sub rsp, rax
+    mov [rbp - MI_ARGS], rsp         ; save args base
+
+    ; For each iterator, get next value
+    xor r13d, r13d                   ; i = 0
+.map_next_loop:
+    cmp r13, r14
+    jge .map_call_func
+
+    mov rdi, [r15 + r13 * 8]        ; iterator[i]
     mov rax, [rdi + PyObject.ob_type]
     mov rax, [rax + PyTypeObject.tp_iternext]
     call rax
     test edx, edx
-    jz .map_exhausted
-    mov r13, rax             ; r13 = item payload
-    mov r14, rdx             ; r14 = item tag
+    jz .map_partial_cleanup
 
-    ; Call func(item): tp_call(func, &item, 1)
-    ; Put item on stack as fat args array (16 bytes)
-    sub rsp, 16
-    mov [rsp], r13           ; args[0] payload = item
-    mov [rsp + 8], r14       ; args[0] tag
-    mov rdi, [rbx + IT_FIELD1]   ; func
+    ; Store value in fat args array
+    mov rcx, r13
+    shl rcx, 4
+    mov r8, [rbp - MI_ARGS]
+    mov [r8 + rcx], rax              ; payload
+    mov [r8 + rcx + 8], rdx          ; tag
+
+    inc r13
+    jmp .map_next_loop
+
+.map_call_func:
+    ; Call func(item1, item2, ...): tp_call(func, args, count)
+    mov rdi, [rbx + MAP_FUNC]       ; func
     mov rax, [rdi + PyObject.ob_type]
     mov rax, [rax + PyTypeObject.tp_call]
-    mov rsi, rsp             ; args pointer
-    mov edx, 1               ; nargs = 1
+    mov rsi, [rbp - MI_ARGS]         ; args pointer
+    mov rdx, r14                     ; nargs = count
     call rax
-    add rsp, 16             ; pop fat args
-    ; Save result across DECREF
-    mov [rsp], rdx           ; save result tag in alignment slot
-    push rax                 ; save result payload
+    push rax                         ; save result payload
+    push rdx                         ; save result tag
 
-    ; DECREF_VAL item
-    DECREF_VAL r13, r14
+    ; DECREF_VAL each arg
+    xor r13d, r13d
+.map_decref_loop:
+    cmp r13, r14
+    jge .map_decref_done
+    mov rcx, r13
+    shl rcx, 4
+    mov r8, [rbp - MI_ARGS]
+    mov rdi, [r8 + rcx]
+    mov rsi, [r8 + rcx + 8]
+    push r13
+    DECREF_VAL rdi, rsi
+    pop r13
+    inc r13
+    jmp .map_decref_loop
 
-    pop rax                  ; restore result payload
-    mov rdx, [rsp]           ; restore result tag
-    add rsp, 8
+.map_decref_done:
+    pop rdx                          ; restore result tag
+    pop rax                          ; restore result payload
+
+    ; Deallocate fat args from stack
+    mov rcx, r14
+    shl rcx, 4
+    add rsp, rcx
+
+    pop r15
     pop r14
     pop r13
     pop rbx
     leave
     ret
 
-.map_exhausted:
+.map_partial_cleanup:
+    ; One iterator exhausted at index r13. DECREF items 0..r13-1
+    xor ecx, ecx
+.map_cleanup_loop:
+    cmp rcx, r13
+    jge .map_cleanup_done
+    push rcx
+    mov rax, rcx
+    shl rax, 4
+    mov r8, [rbp - MI_ARGS]
+    mov rdi, [r8 + rax]
+    mov rsi, [r8 + rax + 8]
+    DECREF_VAL rdi, rsi
+    pop rcx
+    inc rcx
+    jmp .map_cleanup_loop
+
+.map_cleanup_done:
+    ; Deallocate fat args from stack
+    mov rcx, r14
+    shl rcx, 4
+    add rsp, rcx
+
     RET_NULL
-    add rsp, 8
+    pop r15
     pop r14
     pop r13
     pop rbx
@@ -542,20 +760,38 @@ END_FUNC map_iternext
 ;; map_dealloc(self)
 DEF_FUNC_LOCAL map_dealloc
     push rbx
+    push r12
+    push r13
     mov rbx, rdi
 
     ; DECREF func
-    mov rdi, [rbx + IT_FIELD1]
+    mov rdi, [rbx + MAP_FUNC]
     call obj_decref
 
-    ; DECREF iterator
-    mov rdi, [rbx + IT_FIELD2]
+    ; DECREF each iterator in array
+    mov r12, [rbx + MAP_COUNT]
+    mov r13, [rbx + MAP_ITERS]
+    xor ecx, ecx
+.map_dealloc_loop:
+    cmp rcx, r12
+    jge .map_free_array
+    push rcx
+    mov rdi, [r13 + rcx * 8]
     call obj_decref
+    pop rcx
+    inc rcx
+    jmp .map_dealloc_loop
+
+.map_free_array:
+    mov rdi, r13
+    call ap_free
 
     ; Free self
     mov rdi, rbx
     call ap_free
 
+    pop r13
+    pop r12
     pop rbx
     leave
     ret
@@ -879,70 +1115,103 @@ END_FUNC reversed_dealloc
 
 ;; builtin_sorted(args, nargs) -> PyListObject*
 ;; nargs=1: sorted(iterable) -> new sorted list
-DEF_FUNC builtin_sorted
+; sorted() frame layout: fixed-size args buffer for list_method_sort
+; Max 3 args (list + key + reverse) = 48 bytes
+SO_ARGS       equ 8
+SO_NARGS      equ 16
+SO_SORT_BUF   equ 72     ; END of sort args buffer (grows down from here)
+SO_FRAME      equ 72     ; 24 + 48
+DEF_FUNC builtin_sorted, SO_FRAME
     push rbx
     push r12
+    push r13
 
-    mov rbx, rdi            ; args
-    mov r12, rsi            ; nargs
-
-    cmp r12, 1
-    jne .sorted_error
+    mov [rbp - SO_ARGS], rdi    ; save original args
+    mov [rbp - SO_NARGS], rsi   ; save original nargs
 
     ; Get iterator from args[0]
-    mov rdi, [rbx]
-    mov rsi, [rbx + 8]         ; args[0] tag
+    mov rax, rdi
+    mov rdi, [rax]              ; args[0] payload
+    mov esi, [rax + 8]         ; args[0] tag
     call get_iterator
-    mov rbx, rax             ; rbx = iterator
+    mov rbx, rax               ; rbx = iterator
 
     ; Create new empty list
-    xor edi, edi             ; capacity = 0 (list_new defaults to 4)
+    xor edi, edi
     call list_new
-    mov r12, rax             ; r12 = new list
+    mov r12, rax               ; r12 = new list
 
-    ; Iterate and append each item
 .sorted_loop:
-    mov rdi, rbx             ; iterator
+    mov rdi, rbx
     mov rax, [rdi + PyObject.ob_type]
     mov rax, [rax + PyTypeObject.tp_iternext]
     call rax
     test edx, edx
     jz .sorted_done_iter
 
-    ; Append item to list (list_append does INCREF, and we own the ref from
-    ; iternext, so we need to DECREF after append)
-    push rdx                 ; save item tag
-    push rax                 ; save item payload
-    mov rdi, r12             ; list
-    mov rsi, rax             ; item
-    ; edx already has item tag from iternext
+    push rdx
+    push rax
+    mov rdi, r12
+    mov rsi, rax
     call list_append
-    pop rdi                  ; item payload
-    pop rsi                  ; item tag
-    DECREF_VAL rdi, rsi      ; DECREF the ref from iternext (list_append already INCREFed)
-
+    pop rdi
+    pop rsi
+    DECREF_VAL rdi, rsi
     jmp .sorted_loop
 
 .sorted_done_iter:
-    ; DECREF the iterator
     mov rdi, rbx
     call obj_decref
 
-    ; Sort the list in-place using list_method_sort
-    ; list_method_sort expects (args, nargs) where args[0] = self (16-byte fat slot)
-    SPUSH_PTR r12            ; args[0] = list (fat arg)
-    mov rdi, rsp             ; args ptr
-    mov rsi, 1               ; nargs = 1
-    call list_method_sort
-    add rsp, 16
+    ; Build args for list_method_sort in fixed frame buffer
+    ; args[0] = list
+    mov [rbp - SO_SORT_BUF], r12
+    mov qword [rbp - SO_SORT_BUF + 8], TAG_PTR
 
-    ; DECREF the None returned by sort
+    mov rax, [rel kw_names_pending]
+    test rax, rax
+    jz .sorted_no_kw
+
+    ; Copy kwarg values into sort args buffer
+    mov rcx, [rax + PyTupleObject.ob_size]  ; n_kw
+    mov r13, rcx
+    mov rsi, [rbp - SO_NARGS]
+    sub rsi, rcx              ; n_pos
+
+    xor r9d, r9d
+.sorted_kw_copy:
+    cmp r9, r13
+    jge .sorted_kw_copy_done
+    mov rax, [rbp - SO_ARGS]
+    mov r10, rsi
+    add r10, r9
+    shl r10, 4
+    lea r8, [r9 + 1]
+    shl r8, 4
+    mov r11, [rax + r10]
+    mov [rbp - SO_SORT_BUF + r8], r11
+    mov r11, [rax + r10 + 8]
+    mov [rbp - SO_SORT_BUF + r8 + 8], r11
+    inc r9
+    jmp .sorted_kw_copy
+.sorted_kw_copy_done:
+    lea rdi, [rbp - SO_SORT_BUF]
+    lea rsi, [r13 + 1]        ; nargs = 1 + n_kw
+    call list_method_sort
+    jmp .sorted_return
+
+.sorted_no_kw:
+    lea rdi, [rbp - SO_SORT_BUF]
+    mov rsi, 1
+    call list_method_sort
+
+.sorted_return:
     DECREF_VAL rax, rdx
 
-    ; Return the list
     mov rax, r12
     mov edx, TAG_PTR
 
+    pop r13
     pop r12
     pop rbx
     leave
@@ -1001,7 +1270,7 @@ zip_iter_type:
     dq 1                        ; ob_refcnt (immortal)
     dq type_type                ; ob_type
     dq zip_iter_name            ; tp_name
-    dq ITER_OBJ_SIZE            ; tp_basicsize
+    dq ZIP_OBJ_SIZE             ; tp_basicsize
     dq zip_dealloc              ; tp_dealloc
     dq 0                        ; tp_repr
     dq 0                        ; tp_str
@@ -1030,7 +1299,7 @@ map_iter_type:
     dq 1                        ; ob_refcnt (immortal)
     dq type_type                ; ob_type
     dq map_iter_name            ; tp_name
-    dq ITER_OBJ_SIZE            ; tp_basicsize
+    dq MAP_OBJ_SIZE             ; tp_basicsize
     dq map_dealloc              ; tp_dealloc
     dq 0                        ; tp_repr
     dq 0                        ; tp_str

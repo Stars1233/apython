@@ -45,6 +45,9 @@ extern dunder_call_3
 extern dunder_lookup
 extern smallstr_to_obj
 extern str_type
+extern int_type
+extern float_type
+extern none_type
 
 ; --- Named frame-layout constants ---
 
@@ -386,29 +389,69 @@ DEF_FUNC op_load_attr, LA_FRAME
     mov [rbp - LA_OBJ], rdi
     mov [rbp - LA_OBJ_TAG], rax
 
-    ; Non-pointer obj can't have attrs (SmallInt, Float, None)
-    ; Exception: TAG_BOOL has tp_getattr for .real/.imag
-    ; Exception: SmallStr (bit 63 set) — spill to heap str
+    ; Dispatch on obj tag — resolve non-pointer tags to their type
     cmp qword [rbp - LA_OBJ_TAG], TAG_PTR
     je .la_is_ptr
     bt qword [rbp - LA_OBJ_TAG], 63
     jc .la_smallstr_spill
     cmp qword [rbp - LA_OBJ_TAG], TAG_BOOL
-    jne .la_attr_error
+    je .la_resolve_bool
+    cmp qword [rbp - LA_OBJ_TAG], TAG_SMALLINT
+    je .la_resolve_int
+    cmp qword [rbp - LA_OBJ_TAG], TAG_FLOAT
+    je .la_resolve_float
+    cmp qword [rbp - LA_OBJ_TAG], TAG_NONE
+    je .la_resolve_none
+    jmp .la_attr_error
 
-    ; TAG_BOOL: resolve type to bool_type, check tp_getattr
+    ; --- Non-pointer tag resolution: look up attr in type's tp_getattr or tp_dict ---
+.la_resolve_bool:
     extern bool_type
-    lea rax, [rel bool_type]
-    mov rax, [rax + PyTypeObject.tp_getattr]
+    lea r8, [rel bool_type]
+    jmp .la_resolve_tag_type
+
+.la_resolve_int:
+    lea r8, [rel int_type]
+    jmp .la_resolve_tag_type
+
+.la_resolve_float:
+    lea r8, [rel float_type]
+    jmp .la_resolve_tag_type
+
+.la_resolve_none:
+    lea r8, [rel none_type]
+    ; fall through
+
+.la_resolve_tag_type:
+    ; r8 = type object for the non-pointer value
+    ; First try tp_getattr
+    mov rax, [r8 + PyTypeObject.tp_getattr]
     test rax, rax
-    jz .la_attr_error
-    ; Call tp_getattr(self_payload, name) — rdi already has payload (0 or 1)
+    jz .la_resolve_tag_dict
+    ; Call tp_getattr(self_payload, name) — rdi already has payload
     mov rsi, [rbp - LA_NAME]
     call rax
     test edx, edx
     jz .la_attr_error
     mov [rbp - LA_ATTR], rax
     mov [rbp - LA_ATTR_TAG], rdx
+    jmp .la_got_attr
+
+.la_resolve_tag_dict:
+    ; No tp_getattr — try type's tp_dict
+    mov rax, [r8 + PyTypeObject.tp_dict]
+    test rax, rax
+    jz .la_attr_error
+    mov rdi, rax
+    mov rsi, [rbp - LA_NAME]
+    mov edx, TAG_PTR
+    call dict_get
+    test edx, edx
+    jz .la_attr_error
+    mov [rbp - LA_ATTR], rax
+    mov [rbp - LA_ATTR_TAG], rdx
+    INCREF_VAL rax, rdx
+    mov qword [rbp - LA_FROM_TYPE], 1
     jmp .la_got_attr
 
 .la_smallstr_spill:
@@ -436,7 +479,7 @@ DEF_FUNC op_load_attr, LA_FRAME
     mov rsi, [rbp - LA_NAME]
     call rax
     test edx, edx
-    jz .la_attr_error
+    jz .la_try_dict             ; tp_getattr returned NULL — fallback to tp_dict
     mov [rbp - LA_ATTR], rax
     mov [rbp - LA_ATTR_TAG], rdx   ; save tag from tp_getattr
     ; LA_FROM_TYPE stays 0 — tp_getattr already handled binding
@@ -542,6 +585,9 @@ DEF_FUNC op_load_attr, LA_FRAME
     ; If attr came from type dict and is callable, create bound method
     cmp qword [rbp - LA_FROM_TYPE], 0
     je .la_simple_push
+    ; Can only create bound methods for pointer self (method_new INCREFs self)
+    cmp qword [rbp - LA_OBJ_TAG], TAG_PTR
+    jne .la_nonptr_type_attr
     mov rax, [rbp - LA_ATTR]
     cmp qword [rbp - LA_ATTR_TAG], TAG_PTR
     jne .la_simple_push         ; not a heap pointer
@@ -562,6 +608,14 @@ DEF_FUNC op_load_attr, LA_FRAME
     ; DECREF obj (method_new INCREFed it)
     mov rdi, [rbp - LA_OBJ]
     call obj_decref
+    jmp .la_done
+
+.la_nonptr_type_attr:
+    ; Non-pointer self (SmallInt, Float, etc.) — push attr without binding
+    ; No obj_decref needed for non-pointer self (no TAG_RC_BIT)
+    mov rax, [rbp - LA_ATTR]
+    mov rdx, [rbp - LA_ATTR_TAG]
+    VPUSH_VAL rax, rdx
     jmp .la_done
 
 .la_simple_push:
@@ -632,7 +686,8 @@ DEF_FUNC op_load_attr, LA_FRAME
     mov rax, [rbp - LA_ATTR]
     VPUSH_PTR rax              ; push func (deeper slot = callable)
     mov rax, [rbp - LA_OBJ]
-    VPUSH_PTR rax              ; push self/obj (shallower = TOS)
+    mov rdx, [rbp - LA_OBJ_TAG]
+    VPUSH_VAL rax, rdx         ; push self with correct tag (SmallInt/Float/etc.)
     jmp .la_done
 
 .la_unwrap_bound_method:

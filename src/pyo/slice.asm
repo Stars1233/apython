@@ -21,6 +21,10 @@ extern str_from_cstr
 extern none_singleton
 extern int_type
 extern type_type
+extern raise_exception
+extern exc_TypeError_type
+extern exc_AttributeError_type
+extern ap_strcmp
 
 ;; ============================================================================
 ;; slice_new(PyObject *start, PyObject *stop, PyObject *step) -> PySliceObject*
@@ -240,6 +244,135 @@ DEF_FUNC slice_indices
 END_FUNC slice_indices
 
 ;; ============================================================================
+;; slice_getattr(PySliceObject *self, PyObject *name) -> (rax, edx) fat value
+;; Returns start, stop, step attributes.
+;; rdi = self, rsi = name (PyStrObject*)
+;; ============================================================================
+global slice_getattr
+DEF_FUNC slice_getattr
+    push rbx
+    push r12
+    mov rbx, rdi               ; rbx = self (slice object)
+    mov r12, rsi               ; r12 = name string
+
+    lea rdi, [r12 + PyStrObject.data]
+    CSTRING rsi, "start"
+    call ap_strcmp
+    test eax, eax
+    jz .sg_start
+
+    lea rdi, [r12 + PyStrObject.data]
+    CSTRING rsi, "stop"
+    call ap_strcmp
+    test eax, eax
+    jz .sg_stop
+
+    lea rdi, [r12 + PyStrObject.data]
+    CSTRING rsi, "step"
+    call ap_strcmp
+    test eax, eax
+    jz .sg_step
+
+    ; Unknown attribute
+    lea rdi, [rel exc_AttributeError_type]
+    CSTRING rsi, "slice object has no such attribute"
+    call raise_exception
+
+.sg_start:
+    mov rax, [rbx + PySliceObject.start]
+    mov rdx, [rbx + PySliceObject.start_tag]
+    INCREF_VAL rax, rdx
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.sg_stop:
+    mov rax, [rbx + PySliceObject.stop]
+    mov rdx, [rbx + PySliceObject.stop_tag]
+    INCREF_VAL rax, rdx
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.sg_step:
+    mov rax, [rbx + PySliceObject.step]
+    mov rdx, [rbx + PySliceObject.step_tag]
+    INCREF_VAL rax, rdx
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC slice_getattr
+
+;; ============================================================================
+;; slice_type_call(self, args, nargs) -> (rax, edx) fat value
+;; slice(stop), slice(start, stop), slice(start, stop, step)
+;; rdi = self (slice_type), rsi = args (16-byte fat slots), rdx = nargs
+;; ============================================================================
+global slice_type_call
+DEF_FUNC slice_type_call
+    push rbx
+
+    mov rbx, rsi               ; rbx = args ptr
+
+    cmp rdx, 1
+    je .stc_one
+    cmp rdx, 2
+    je .stc_two
+    cmp rdx, 3
+    je .stc_three
+    jmp .stc_error
+
+.stc_one:
+    ; slice(stop) → slice(None, stop, None)
+    lea rdi, [rel none_singleton]  ; start = None
+    mov ecx, TAG_PTR               ; start_tag
+    mov rsi, [rbx]                 ; stop payload
+    mov r8d, [rbx + 8]            ; stop_tag
+    lea rdx, [rel none_singleton]  ; step = None
+    mov r9d, TAG_PTR               ; step_tag
+    call slice_new
+    mov edx, TAG_PTR
+    jmp .stc_done
+
+.stc_two:
+    ; slice(start, stop) → slice(start, stop, None)
+    mov rdi, [rbx]             ; start payload
+    mov ecx, [rbx + 8]        ; start_tag
+    mov rsi, [rbx + 16]       ; stop payload
+    mov r8d, [rbx + 24]       ; stop_tag
+    lea rdx, [rel none_singleton]  ; step = None
+    mov r9d, TAG_PTR           ; step_tag
+    call slice_new
+    mov edx, TAG_PTR
+    jmp .stc_done
+
+.stc_three:
+    ; slice(start, stop, step)
+    mov rdi, [rbx]             ; start payload
+    mov ecx, [rbx + 8]        ; start_tag
+    mov rsi, [rbx + 16]       ; stop payload
+    mov r8d, [rbx + 24]       ; stop_tag
+    mov rdx, [rbx + 32]       ; step payload
+    mov r9d, [rbx + 40]       ; step_tag
+    call slice_new
+    mov edx, TAG_PTR
+    jmp .stc_done
+
+.stc_done:
+    pop rbx
+    leave
+    ret
+
+.stc_error:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "slice() takes 1 to 3 arguments"
+    call raise_exception
+END_FUNC slice_type_call
+
+;; ============================================================================
 ;; Data
 ;; ============================================================================
 section .data
@@ -258,8 +391,8 @@ slice_type:
     dq slice_repr             ; tp_repr
     dq slice_repr             ; tp_str
     dq 0                      ; tp_hash
-    dq 0                      ; tp_call
-    dq 0                      ; tp_getattr
+    dq slice_type_call        ; tp_call
+    dq slice_getattr          ; tp_getattr
     dq 0                      ; tp_setattr
     dq 0                      ; tp_richcompare
     dq 0                      ; tp_iter

@@ -2092,7 +2092,1431 @@ DEF_FUNC str_method_islower
 END_FUNC str_method_islower
 
 ;; ============================================================================
-;; str_method_removeprefix(args, nargs) -> new string
+;; str_method_title(args, nargs) -> new titlecased string
+;; Uppercase after non-alpha, lowercase after alpha
+;; ============================================================================
+DEF_FUNC str_method_title
+    push rbx
+    push r12
+    push r13
+
+    mov rbx, [rdi]          ; self
+    mov r12, [rbx + PyStrObject.ob_size]
+
+    lea rdi, [rbx + PyStrObject.data]
+    mov rsi, r12
+    call str_new_heap
+    mov r13, rax
+
+    xor ecx, ecx            ; i = 0
+    mov r8d, 1               ; prev_is_sep = true (start of string)
+.title_loop:
+    cmp rcx, r12
+    jge .title_done
+    movzx eax, byte [r13 + PyStrObject.data + rcx]
+    ; Check if alpha
+    cmp al, 'A'
+    jb .title_not_alpha
+    cmp al, 'Z'
+    jbe .title_is_upper
+    cmp al, 'a'
+    jb .title_not_alpha
+    cmp al, 'z'
+    ja .title_not_alpha
+    ; lowercase char
+    test r8d, r8d
+    jz .title_to_lower       ; prev was alpha → stay lower
+    ; prev was non-alpha → capitalize
+    sub al, 32
+    mov [r13 + PyStrObject.data + rcx], al
+    xor r8d, r8d             ; prev_is_sep = false
+    jmp .title_next
+.title_is_upper:
+    test r8d, r8d
+    jnz .title_keep_upper     ; prev was non-alpha → keep upper
+    ; prev was alpha → lowercase it
+    add al, 32
+    mov [r13 + PyStrObject.data + rcx], al
+    xor r8d, r8d
+    jmp .title_next
+.title_keep_upper:
+    xor r8d, r8d
+    jmp .title_next
+.title_to_lower:
+    ; already lowercase, prev was alpha → keep as-is
+    xor r8d, r8d
+    jmp .title_next
+.title_not_alpha:
+    mov r8d, 1               ; prev_is_sep = true
+.title_next:
+    inc rcx
+    jmp .title_loop
+.title_done:
+    mov rax, r13
+    mov edx, TAG_PTR
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC str_method_title
+
+;; ============================================================================
+;; str_method_capitalize(args, nargs) -> new string
+;; First char upper, rest lower
+;; ============================================================================
+DEF_FUNC str_method_capitalize
+    push rbx
+    push r12
+    push r13
+
+    mov rbx, [rdi]
+    mov r12, [rbx + PyStrObject.ob_size]
+
+    lea rdi, [rbx + PyStrObject.data]
+    mov rsi, r12
+    call str_new_heap
+    mov r13, rax
+
+    ; First char → upper
+    test r12, r12
+    jz .cap_done
+    movzx eax, byte [r13 + PyStrObject.data]
+    cmp al, 'a'
+    jb .cap_rest
+    cmp al, 'z'
+    ja .cap_rest
+    sub al, 32
+    mov [r13 + PyStrObject.data], al
+
+.cap_rest:
+    ; Remaining chars → lower
+    mov rcx, 1
+.cap_loop:
+    cmp rcx, r12
+    jge .cap_done
+    movzx eax, byte [r13 + PyStrObject.data + rcx]
+    cmp al, 'A'
+    jb .cap_next
+    cmp al, 'Z'
+    ja .cap_next
+    add al, 32
+    mov [r13 + PyStrObject.data + rcx], al
+.cap_next:
+    inc rcx
+    jmp .cap_loop
+.cap_done:
+    mov rax, r13
+    mov edx, TAG_PTR
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC str_method_capitalize
+
+;; ============================================================================
+;; str_method_swapcase(args, nargs) -> new string
+;; Upper→lower, lower→upper
+;; ============================================================================
+DEF_FUNC str_method_swapcase
+    push rbx
+    push r12
+    push r13
+
+    mov rbx, [rdi]
+    mov r12, [rbx + PyStrObject.ob_size]
+
+    lea rdi, [rbx + PyStrObject.data]
+    mov rsi, r12
+    call str_new_heap
+    mov r13, rax
+
+    xor ecx, ecx
+.swap_loop:
+    cmp rcx, r12
+    jge .swap_done
+    movzx eax, byte [r13 + PyStrObject.data + rcx]
+    cmp al, 'A'
+    jb .swap_next
+    cmp al, 'Z'
+    jbe .swap_to_lower
+    cmp al, 'a'
+    jb .swap_next
+    cmp al, 'z'
+    ja .swap_next
+    ; lowercase → upper
+    sub al, 32
+    mov [r13 + PyStrObject.data + rcx], al
+    jmp .swap_next
+.swap_to_lower:
+    add al, 32
+    mov [r13 + PyStrObject.data + rcx], al
+.swap_next:
+    inc rcx
+    jmp .swap_loop
+.swap_done:
+    mov rax, r13
+    mov edx, TAG_PTR
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC str_method_swapcase
+
+;; ============================================================================
+;; str_method_casefold(args, nargs) -> new string
+;; ASCII casefold = lowercase (full Unicode casefold deferred)
+;; ============================================================================
+DEF_FUNC str_method_casefold
+    push rbx
+    push r12
+    push r13
+
+    mov rbx, [rdi]
+    mov r12, [rbx + PyStrObject.ob_size]
+
+    lea rdi, [rbx + PyStrObject.data]
+    mov rsi, r12
+    call str_new_heap
+    mov r13, rax
+
+    xor ecx, ecx
+.cf_loop:
+    cmp rcx, r12
+    jge .cf_done
+    movzx eax, byte [r13 + PyStrObject.data + rcx]
+    cmp al, 'A'
+    jb .cf_next
+    cmp al, 'Z'
+    ja .cf_next
+    add al, 32
+    mov [r13 + PyStrObject.data + rcx], al
+.cf_next:
+    inc rcx
+    jmp .cf_loop
+.cf_done:
+    mov rax, r13
+    mov edx, TAG_PTR
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC str_method_casefold
+
+;; ============================================================================
+;; str_method_center(args, nargs) -> new centered string
+;; args[0]=self, args[1]=width, args[2]=fillchar (optional, default ' ')
+;; ============================================================================
+PA_SELF   equ 8
+PA_LEN    equ 16
+PA_ARGS   equ 24
+PA_NARGS  equ 32
+PA_FRAME  equ 32
+DEF_FUNC str_method_center, PA_FRAME
+    push rbx
+    push r12
+    push r13
+
+    mov [rbp - PA_ARGS], rdi
+    mov [rbp - PA_NARGS], rsi
+    mov rbx, [rdi]                      ; self
+    mov r12, [rbx + PyStrObject.ob_size]; self_len
+    mov [rbp - PA_SELF], rbx
+    mov [rbp - PA_LEN], r12
+
+    ; Get width
+    mov rdi, [rbp - PA_ARGS]
+    mov rax, rdi
+    mov rdi, [rax + 16]                 ; args[1] payload
+    mov edx, [rax + 24]                 ; args[1] tag
+    call int_to_i64
+    mov r13, rax                         ; r13 = width
+
+    ; Get fillchar (default ' ')
+    mov ecx, ' '
+    cmp qword [rbp - PA_NARGS], 3
+    jl .center_have_fill
+    mov rax, [rbp - PA_ARGS]
+    mov rdx, [rax + 32]                 ; args[2] payload (char str)
+    mov rax, [rax + 40]                 ; args[2] tag
+    test rax, rax
+    js .center_fill_smallstr
+    movzx ecx, byte [rdx + PyStrObject.data]
+    jmp .center_have_fill
+.center_fill_smallstr:
+    ; SmallStr: first char is byte 0 of payload
+    movzx ecx, dl
+.center_have_fill:
+    ; If width <= self_len, return copy of self
+    cmp r13, r12
+    jle .center_return_self
+
+    ; Allocate new string of size width
+    mov rdi, r13
+    push rcx                             ; save fillchar
+    call ap_malloc
+    pop rcx
+    mov rbx, rax                         ; rbx = new string buffer (raw)
+    ; Fill entire buffer with fillchar
+    push rcx
+    mov rdi, rbx
+    movzx esi, cl
+    mov rdx, r13
+    call ap_memset
+    pop rcx
+
+    ; Now create proper str object: str_new_heap(data, len)
+    mov rdi, rbx
+    mov rsi, r13
+    call str_new_heap
+    push rax                             ; save new str
+
+    ; Free temp buffer
+    mov rdi, rbx
+    call ap_free
+    pop r13                              ; r13 = new str
+
+    ; Copy self data into center position
+    mov rbx, [rbp - PA_SELF]
+    mov r12, [rbp - PA_LEN]
+    mov rax, [rbp - PA_LEN]
+    mov rcx, [r13 + PyStrObject.ob_size]
+    sub rcx, rax                         ; pad = width - len
+    shr rcx, 1                           ; left_pad = pad / 2
+    lea rdi, [r13 + PyStrObject.data + rcx]
+    lea rsi, [rbx + PyStrObject.data]
+    mov rdx, r12
+    call ap_memcpy
+
+    mov rax, r13
+    mov edx, TAG_PTR
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.center_return_self:
+    ; Return copy of self
+    mov rbx, [rbp - PA_SELF]
+    mov r12, [rbp - PA_LEN]
+    lea rdi, [rbx + PyStrObject.data]
+    mov rsi, r12
+    call str_new_heap
+    mov edx, TAG_PTR
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC str_method_center
+
+;; ============================================================================
+;; str_method_ljust(args, nargs) -> left-justified string
+;; args[0]=self, args[1]=width, args[2]=fillchar (optional, default ' ')
+;; ============================================================================
+DEF_FUNC str_method_ljust, PA_FRAME
+    push rbx
+    push r12
+    push r13
+
+    mov [rbp - PA_ARGS], rdi
+    mov [rbp - PA_NARGS], rsi
+    mov rbx, [rdi]
+    mov r12, [rbx + PyStrObject.ob_size]
+    mov [rbp - PA_SELF], rbx
+    mov [rbp - PA_LEN], r12
+
+    ; Get width
+    mov rax, [rbp - PA_ARGS]
+    mov rdi, [rax + 16]
+    mov edx, [rax + 24]
+    call int_to_i64
+    mov r13, rax
+
+    ; Get fillchar
+    mov ecx, ' '
+    cmp qword [rbp - PA_NARGS], 3
+    jl .ljust_have_fill
+    mov rax, [rbp - PA_ARGS]
+    mov rdx, [rax + 32]
+    mov rax, [rax + 40]
+    test rax, rax
+    js .ljust_fill_ss
+    movzx ecx, byte [rdx + PyStrObject.data]
+    jmp .ljust_have_fill
+.ljust_fill_ss:
+    movzx ecx, dl
+.ljust_have_fill:
+    cmp r13, r12
+    jle .ljust_return_self
+
+    ; Allocate, fill, copy self at start
+    mov rdi, r13
+    push rcx
+    call ap_malloc
+    pop rcx
+    mov rbx, rax
+    mov rdi, rbx
+    movzx esi, cl
+    mov rdx, r13
+    call ap_memset
+    mov rdi, rbx
+    mov rsi, r13
+    call str_new_heap
+    push rax
+    mov rdi, rbx
+    call ap_free
+    pop r13
+
+    ; Copy self at position 0
+    mov rbx, [rbp - PA_SELF]
+    mov r12, [rbp - PA_LEN]
+    lea rdi, [r13 + PyStrObject.data]
+    lea rsi, [rbx + PyStrObject.data]
+    mov rdx, r12
+    call ap_memcpy
+
+    mov rax, r13
+    mov edx, TAG_PTR
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.ljust_return_self:
+    mov rbx, [rbp - PA_SELF]
+    lea rdi, [rbx + PyStrObject.data]
+    mov rsi, [rbp - PA_LEN]
+    call str_new_heap
+    mov edx, TAG_PTR
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC str_method_ljust
+
+;; ============================================================================
+;; str_method_rjust(args, nargs) -> right-justified string
+;; ============================================================================
+DEF_FUNC str_method_rjust, PA_FRAME
+    push rbx
+    push r12
+    push r13
+
+    mov [rbp - PA_ARGS], rdi
+    mov [rbp - PA_NARGS], rsi
+    mov rbx, [rdi]
+    mov r12, [rbx + PyStrObject.ob_size]
+    mov [rbp - PA_SELF], rbx
+    mov [rbp - PA_LEN], r12
+
+    mov rax, [rbp - PA_ARGS]
+    mov rdi, [rax + 16]
+    mov edx, [rax + 24]
+    call int_to_i64
+    mov r13, rax
+
+    mov ecx, ' '
+    cmp qword [rbp - PA_NARGS], 3
+    jl .rjust_have_fill
+    mov rax, [rbp - PA_ARGS]
+    mov rdx, [rax + 32]
+    mov rax, [rax + 40]
+    test rax, rax
+    js .rjust_fill_ss
+    movzx ecx, byte [rdx + PyStrObject.data]
+    jmp .rjust_have_fill
+.rjust_fill_ss:
+    movzx ecx, dl
+.rjust_have_fill:
+    cmp r13, r12
+    jle .rjust_return_self
+
+    mov rdi, r13
+    push rcx
+    call ap_malloc
+    pop rcx
+    mov rbx, rax
+    mov rdi, rbx
+    movzx esi, cl
+    mov rdx, r13
+    call ap_memset
+    mov rdi, rbx
+    mov rsi, r13
+    call str_new_heap
+    push rax
+    mov rdi, rbx
+    call ap_free
+    pop r13
+
+    ; Copy self at end (offset = width - len)
+    mov rbx, [rbp - PA_SELF]
+    mov r12, [rbp - PA_LEN]
+    mov rcx, [r13 + PyStrObject.ob_size]
+    sub rcx, r12
+    lea rdi, [r13 + PyStrObject.data + rcx]
+    lea rsi, [rbx + PyStrObject.data]
+    mov rdx, r12
+    call ap_memcpy
+
+    mov rax, r13
+    mov edx, TAG_PTR
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.rjust_return_self:
+    mov rbx, [rbp - PA_SELF]
+    lea rdi, [rbx + PyStrObject.data]
+    mov rsi, [rbp - PA_LEN]
+    call str_new_heap
+    mov edx, TAG_PTR
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC str_method_rjust
+
+;; ============================================================================
+;; str_method_zfill(args, nargs) -> zero-filled string
+;; args[0]=self, args[1]=width
+;; ============================================================================
+DEF_FUNC str_method_zfill, PA_FRAME
+    push rbx
+    push r12
+    push r13
+
+    mov [rbp - PA_ARGS], rdi
+    mov rbx, [rdi]
+    mov r12, [rbx + PyStrObject.ob_size]
+    mov [rbp - PA_SELF], rbx
+    mov [rbp - PA_LEN], r12
+
+    mov rax, [rbp - PA_ARGS]
+    mov rdi, [rax + 16]
+    mov edx, [rax + 24]
+    call int_to_i64
+    mov r13, rax                         ; width
+
+    cmp r13, r12
+    jle .zfill_return_self
+
+    ; Allocate filled with '0'
+    mov rdi, r13
+    call ap_malloc
+    mov rbx, rax
+    mov rdi, rbx
+    mov esi, '0'
+    mov rdx, r13
+    call ap_memset
+    mov rdi, rbx
+    mov rsi, r13
+    call str_new_heap
+    push rax
+    mov rdi, rbx
+    call ap_free
+    pop r13
+
+    ; Copy self at end
+    mov rbx, [rbp - PA_SELF]
+    mov r12, [rbp - PA_LEN]
+    mov rcx, [r13 + PyStrObject.ob_size]
+    sub rcx, r12
+    ; Check for sign prefix: '+' or '-' at position 0 of self
+    test r12, r12
+    jz .zfill_no_sign
+    movzx eax, byte [rbx + PyStrObject.data]
+    cmp al, '-'
+    je .zfill_sign
+    cmp al, '+'
+    je .zfill_sign
+.zfill_no_sign:
+    lea rdi, [r13 + PyStrObject.data + rcx]
+    lea rsi, [rbx + PyStrObject.data]
+    mov rdx, r12
+    call ap_memcpy
+    jmp .zfill_done
+.zfill_sign:
+    ; Move sign to position 0, copy digits (skip sign) after zeros
+    mov [r13 + PyStrObject.data], al
+    lea rdi, [r13 + PyStrObject.data + rcx + 1]  ; after padding + sign
+    lea rsi, [rbx + PyStrObject.data + 1]          ; skip sign in source
+    mov rdx, r12
+    dec rdx                                         ; len - 1
+    call ap_memcpy
+.zfill_done:
+    mov rax, r13
+    mov edx, TAG_PTR
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.zfill_return_self:
+    lea rdi, [rbx + PyStrObject.data]
+    mov rsi, r12
+    call str_new_heap
+    mov edx, TAG_PTR
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC str_method_zfill
+
+;; ============================================================================
+;; str_method_rindex(args, nargs) -> int
+;; Like rfind but raises ValueError if not found
+;; args[0]=self, args[1]=substr
+;; ============================================================================
+DEF_FUNC str_method_rindex
+    push rbx
+    push r12
+    push r13
+
+    ; Spill SmallStr sub arg if needed
+    mov rax, [rdi + 24]
+    test rax, rax
+    js .rindex_spill
+    jmp .rindex_args_ok
+.rindex_spill:
+    push rdi
+    mov rsi, rax
+    mov rdi, [rdi + 16]
+    call smallstr_to_obj
+    pop rdi
+    mov [rdi + 16], rax
+    mov qword [rdi + 24], TAG_PTR
+.rindex_args_ok:
+    mov rbx, [rdi]           ; self
+    mov r12, [rdi + 16]      ; substr
+    mov r13, [rbx + PyStrObject.ob_size]
+    mov rcx, [r12 + PyStrObject.ob_size]
+
+    ; Search from end: try each position from (len-sublen) down to 0
+    mov rax, r13
+    sub rax, rcx
+    js .rindex_not_found      ; substr longer than self
+.rindex_loop:
+    cmp rax, 0
+    jl .rindex_not_found
+    push rax
+    push rcx
+    lea rdi, [rbx + PyStrObject.data]
+    add rdi, rax
+    lea rsi, [r12 + PyStrObject.data]
+    mov rdx, rcx
+    call ap_memcmp
+    mov r8d, eax              ; save memcmp result
+    pop rcx
+    pop rax                   ; restore position
+    test r8d, r8d
+    jz .rindex_found
+    dec rax
+    jmp .rindex_loop
+
+.rindex_found:
+    mov rdi, rax
+    call int_from_i64
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.rindex_not_found:
+    lea rdi, [rel exc_ValueError_type]
+    CSTRING rsi, "substring not found"
+    call raise_exception
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC str_method_rindex
+
+;; ============================================================================
+;; str_method_istitle(args, nargs) -> bool
+;; ============================================================================
+DEF_FUNC str_method_istitle
+    push rbx
+    push r12
+
+    mov rbx, [rdi]
+    mov r12, [rbx + PyStrObject.ob_size]
+
+    ; Empty string → False
+    test r12, r12
+    jz .istitle_false
+
+    xor ecx, ecx            ; i = 0
+    mov r8d, 1               ; prev_sep = true
+    xor r9d, r9d             ; seen_cased = false
+.istitle_loop:
+    cmp rcx, r12
+    jge .istitle_check
+    movzx eax, byte [rbx + PyStrObject.data + rcx]
+    cmp al, 'A'
+    jb .istitle_not_alpha
+    cmp al, 'Z'
+    jbe .istitle_upper
+    cmp al, 'a'
+    jb .istitle_not_alpha
+    cmp al, 'z'
+    ja .istitle_not_alpha
+    ; lowercase char
+    test r8d, r8d
+    jnz .istitle_false        ; lowercase after separator → not title
+    xor r8d, r8d
+    mov r9d, 1
+    inc rcx
+    jmp .istitle_loop
+.istitle_upper:
+    test r8d, r8d
+    jz .istitle_false         ; uppercase after alpha → not title
+    xor r8d, r8d
+    mov r9d, 1
+    inc rcx
+    jmp .istitle_loop
+.istitle_not_alpha:
+    mov r8d, 1                ; prev_sep = true
+    inc rcx
+    jmp .istitle_loop
+.istitle_check:
+    test r9d, r9d
+    jz .istitle_false         ; no cased chars → False
+    lea rax, [rel bool_true]
+    inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
+    pop r12
+    pop rbx
+    leave
+    ret
+.istitle_false:
+    lea rax, [rel bool_false]
+    inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC str_method_istitle
+
+;; ============================================================================
+;; str_method_partition(args, nargs) -> 3-tuple (before, sep, after)
+;; args[0]=self, args[1]=sep
+;; ============================================================================
+PT_SELF   equ 8
+PT_SEP    equ 16
+PT_FRAME  equ 16
+DEF_FUNC str_method_partition, PT_FRAME
+    push rbx
+    push r12
+    push r13
+
+    ; Spill SmallStr sep if needed
+    mov rax, [rdi + 24]
+    test rax, rax
+    js .part_spill
+    jmp .part_args_ok
+.part_spill:
+    push rdi
+    mov rsi, rax
+    mov rdi, [rdi + 16]
+    call smallstr_to_obj
+    pop rdi
+    mov [rdi + 16], rax
+    mov qword [rdi + 24], TAG_PTR
+.part_args_ok:
+    mov rbx, [rdi]           ; self
+    mov r12, [rdi + 16]      ; sep
+    mov [rbp - PT_SELF], rbx
+    mov [rbp - PT_SEP], r12
+
+    ; Find sep in self
+    lea rdi, [rbx + PyStrObject.data]
+    lea rsi, [r12 + PyStrObject.data]
+    call ap_strstr
+    test rax, rax
+    jz .part_not_found
+
+    ; Found: compute before, sep, after
+    mov r13, rax             ; pointer to match
+    lea rcx, [rbx + PyStrObject.data]
+    sub r13, rcx             ; r13 = match index
+
+    ; Create before string
+    lea rdi, [rbx + PyStrObject.data]
+    mov rsi, r13
+    call str_new_heap
+    push rax                 ; save before
+
+    ; INCREF sep (reuse original)
+    mov r12, [rbp - PT_SEP]
+    INCREF r12
+
+    ; Create after string
+    mov rbx, [rbp - PT_SELF]
+    mov rcx, [r12 + PyStrObject.ob_size]
+    lea rax, [r13 + rcx]     ; after_start = match_idx + sep_len
+    mov rdx, [rbx + PyStrObject.ob_size]
+    sub rdx, rax              ; after_len = self_len - after_start
+    lea rdi, [rbx + PyStrObject.data + rax]
+    mov rsi, rdx
+    call str_new_heap
+    mov r13, rax             ; r13 = after
+
+    ; Create 3-tuple
+    mov rdi, 3
+    call tuple_new
+    mov rbx, rax             ; rbx = tuple
+
+    pop rcx                  ; before
+    mov [rbx + PyTupleObject.ob_item], rcx
+    mov qword [rbx + PyTupleObject.ob_item + 8], TAG_PTR
+    mov [rbx + PyTupleObject.ob_item + 16], r12
+    mov qword [rbx + PyTupleObject.ob_item + 24], TAG_PTR
+    mov [rbx + PyTupleObject.ob_item + 32], r13
+    mov qword [rbx + PyTupleObject.ob_item + 40], TAG_PTR
+
+    mov rax, rbx
+    mov edx, TAG_PTR
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.part_not_found:
+    ; Return (self_copy, "", "")
+    mov rbx, [rbp - PT_SELF]
+    lea rdi, [rbx + PyStrObject.data]
+    mov rsi, [rbx + PyStrObject.ob_size]
+    call str_new_heap
+    push rax                 ; before = self copy
+
+    ; Create two empty strings
+    CSTRING rdi, ""
+    xor esi, esi
+    call str_new_heap
+    push rax                 ; empty1
+
+    CSTRING rdi, ""
+    xor esi, esi
+    call str_new_heap
+    mov r13, rax             ; empty2
+
+    mov rdi, 3
+    call tuple_new
+    mov rbx, rax
+
+    pop rcx                  ; empty1
+    pop rax                  ; before
+    mov [rbx + PyTupleObject.ob_item], rax
+    mov qword [rbx + PyTupleObject.ob_item + 8], TAG_PTR
+    mov [rbx + PyTupleObject.ob_item + 16], rcx
+    mov qword [rbx + PyTupleObject.ob_item + 24], TAG_PTR
+    mov [rbx + PyTupleObject.ob_item + 32], r13
+    mov qword [rbx + PyTupleObject.ob_item + 40], TAG_PTR
+
+    mov rax, rbx
+    mov edx, TAG_PTR
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC str_method_partition
+
+;; ============================================================================
+;; str_method_rpartition(args, nargs) -> 3-tuple (before, sep, after)
+;; Like partition but searches from right
+;; ============================================================================
+DEF_FUNC str_method_rpartition, PT_FRAME
+    push rbx
+    push r12
+    push r13
+
+    ; Spill SmallStr sep if needed
+    mov rax, [rdi + 24]
+    test rax, rax
+    js .rpart_spill
+    jmp .rpart_args_ok
+.rpart_spill:
+    push rdi
+    mov rsi, rax
+    mov rdi, [rdi + 16]
+    call smallstr_to_obj
+    pop rdi
+    mov [rdi + 16], rax
+    mov qword [rdi + 24], TAG_PTR
+.rpart_args_ok:
+    mov rbx, [rdi]           ; self
+    mov r12, [rdi + 16]      ; sep
+    mov [rbp - PT_SELF], rbx
+    mov [rbp - PT_SEP], r12
+
+    ; Search from right: find last occurrence
+    mov r13, [rbx + PyStrObject.ob_size]
+    mov rcx, [r12 + PyStrObject.ob_size]
+    mov rax, r13
+    sub rax, rcx              ; max start pos
+    js .rpart_not_found
+
+.rpart_loop:
+    cmp rax, 0
+    jl .rpart_not_found
+    push rax
+    push rcx
+    lea rdi, [rbx + PyStrObject.data]
+    add rdi, rax
+    lea rsi, [r12 + PyStrObject.data]
+    mov rdx, rcx
+    call ap_memcmp
+    mov r8d, eax              ; save memcmp result
+    pop rcx
+    pop rax
+    test r8d, r8d
+    jz .rpart_found
+    dec rax
+    jmp .rpart_loop
+
+.rpart_found:
+    ; rax = match index
+    mov r13, rax
+
+    ; Create before string
+    lea rdi, [rbx + PyStrObject.data]
+    mov rsi, r13
+    call str_new_heap
+    push rax
+
+    ; INCREF sep
+    mov r12, [rbp - PT_SEP]
+    INCREF r12
+
+    ; Create after string
+    mov rbx, [rbp - PT_SELF]
+    mov rcx, [r12 + PyStrObject.ob_size]
+    lea rax, [r13 + rcx]
+    mov rdx, [rbx + PyStrObject.ob_size]
+    sub rdx, rax
+    lea rdi, [rbx + PyStrObject.data + rax]
+    mov rsi, rdx
+    call str_new_heap
+    mov r13, rax
+
+    mov rdi, 3
+    call tuple_new
+    mov rbx, rax
+
+    pop rcx
+    mov [rbx + PyTupleObject.ob_item], rcx
+    mov qword [rbx + PyTupleObject.ob_item + 8], TAG_PTR
+    mov [rbx + PyTupleObject.ob_item + 16], r12
+    mov qword [rbx + PyTupleObject.ob_item + 24], TAG_PTR
+    mov [rbx + PyTupleObject.ob_item + 32], r13
+    mov qword [rbx + PyTupleObject.ob_item + 40], TAG_PTR
+
+    mov rax, rbx
+    mov edx, TAG_PTR
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.rpart_not_found:
+    ; Return ("", "", self_copy)
+    CSTRING rdi, ""
+    xor esi, esi
+    call str_new_heap
+    push rax
+
+    CSTRING rdi, ""
+    xor esi, esi
+    call str_new_heap
+    push rax
+
+    mov rbx, [rbp - PT_SELF]
+    lea rdi, [rbx + PyStrObject.data]
+    mov rsi, [rbx + PyStrObject.ob_size]
+    call str_new_heap
+    mov r13, rax
+
+    mov rdi, 3
+    call tuple_new
+    mov rbx, rax
+
+    pop rcx                  ; empty2
+    pop rax                  ; empty1
+    mov [rbx + PyTupleObject.ob_item], rax
+    mov qword [rbx + PyTupleObject.ob_item + 8], TAG_PTR
+    mov [rbx + PyTupleObject.ob_item + 16], rcx
+    mov qword [rbx + PyTupleObject.ob_item + 24], TAG_PTR
+    mov [rbx + PyTupleObject.ob_item + 32], r13
+    mov qword [rbx + PyTupleObject.ob_item + 40], TAG_PTR
+
+    mov rax, rbx
+    mov edx, TAG_PTR
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC str_method_rpartition
+
+;; ============================================================================
+;; str_method_expandtabs(args, nargs) -> new string
+;; args[0]=self, args[1]=tabsize (optional, default 8)
+;; ============================================================================
+ET_TAB    equ 8
+ET_BUF    equ 16
+ET_RES    equ 24
+ET_FRAME  equ 32
+DEF_FUNC str_method_expandtabs, ET_FRAME
+    push rbx
+    push r12
+    push r13
+    push r14
+
+    mov rbx, [rdi]           ; self
+    mov r12, [rbx + PyStrObject.ob_size]
+
+    ; Get tabsize (default 8)
+    mov r13, 8
+    cmp rsi, 2
+    jl .et_have_tab
+    mov rax, rdi
+    mov rdi, [rax + 16]
+    mov edx, [rax + 24]
+    call int_to_i64
+    mov r13, rax
+.et_have_tab:
+    mov [rbp - ET_TAB], r13
+
+    ; First pass: compute output length
+    xor ecx, ecx            ; i
+    xor r14d, r14d           ; col
+    xor r8d, r8d             ; out_len
+.et_len_loop:
+    cmp rcx, r12
+    jge .et_len_done
+    movzx eax, byte [rbx + PyStrObject.data + rcx]
+    cmp al, 9                ; '\t'
+    je .et_len_tab
+    cmp al, 10               ; '\n'
+    je .et_len_nl
+    cmp al, 13               ; '\r'
+    je .et_len_nl
+    inc r14                  ; col++
+    inc r8                   ; out_len++
+    inc rcx
+    jmp .et_len_loop
+.et_len_tab:
+    ; spaces = tabsize - (col % tabsize)
+    test r13, r13
+    jz .et_len_tab_zero
+    mov rax, r14
+    xor edx, edx
+    div r13                  ; rdx = col % tabsize
+    mov rax, r13
+    sub rax, rdx             ; spaces
+    add r8, rax
+    add r14, rax
+    inc rcx
+    jmp .et_len_loop
+.et_len_tab_zero:
+    inc rcx
+    jmp .et_len_loop
+.et_len_nl:
+    inc r8
+    xor r14d, r14d           ; reset col
+    inc rcx
+    jmp .et_len_loop
+.et_len_done:
+
+    ; Allocate output buffer
+    mov rdi, r8
+    call ap_malloc
+    mov [rbp - ET_BUF], rax
+    mov r9, rax              ; r9 = output buffer
+
+    ; Second pass: fill output
+    mov r13, [rbp - ET_TAB]
+    xor ecx, ecx            ; i (input)
+    xor r14d, r14d           ; col
+    xor r8d, r8d             ; j (output)
+.et_fill_loop:
+    cmp rcx, r12
+    jge .et_fill_done
+    movzx eax, byte [rbx + PyStrObject.data + rcx]
+    cmp al, 9
+    je .et_fill_tab
+    cmp al, 10
+    je .et_fill_nl
+    cmp al, 13
+    je .et_fill_nl
+    mov [r9 + r8], al
+    inc r14
+    inc r8
+    inc rcx
+    jmp .et_fill_loop
+.et_fill_tab:
+    test r13, r13
+    jz .et_fill_tab_skip
+    mov rax, r14
+    xor edx, edx
+    div r13
+    mov rax, r13
+    sub rax, rdx             ; spaces
+    ; Fill spaces
+    mov r10, rax
+.et_fill_spaces:
+    test r10, r10
+    jz .et_fill_tab_skip
+    mov byte [r9 + r8], ' '
+    inc r8
+    inc r14
+    dec r10
+    jmp .et_fill_spaces
+.et_fill_tab_skip:
+    inc rcx
+    jmp .et_fill_loop
+.et_fill_nl:
+    mov [r9 + r8], al
+    inc r8
+    xor r14d, r14d
+    inc rcx
+    jmp .et_fill_loop
+.et_fill_done:
+    ; Create str from buffer
+    mov rdi, [rbp - ET_BUF]
+    mov rsi, r8
+    call str_new_heap
+    mov [rbp - ET_RES], rax
+
+    ; Free temp buffer
+    mov rdi, [rbp - ET_BUF]
+    call ap_free
+
+    mov rax, [rbp - ET_RES]
+    mov edx, TAG_PTR
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC str_method_expandtabs
+
+;; ============================================================================
+;; str_method_splitlines(args, nargs) -> list of lines
+;; args[0]=self, args[1]=keepends (optional bool, default False)
+;; ============================================================================
+DEF_FUNC str_method_splitlines
+    push rbx
+    push r12
+    push r13
+    push r14
+
+    mov rbx, [rdi]           ; self
+    mov r12, [rbx + PyStrObject.ob_size]
+
+    ; Get keepends flag
+    xor r14d, r14d           ; default: don't keep
+    cmp rsi, 2
+    jl .sl_have_keep
+    ; Check args[1] - bool_true means keep
+    lea rax, [rel bool_true]
+    cmp qword [rdi + 16], rax
+    sete r14b
+.sl_have_keep:
+
+    ; Create result list
+    xor edi, edi
+    call list_new
+    mov r13, rax             ; result list
+
+    ; Scan for line breaks
+    xor ecx, ecx            ; i = start of current line
+    xor r8d, r8d             ; j = scanner
+.sl_loop:
+    cmp r8, r12
+    jge .sl_last
+
+    movzx eax, byte [rbx + PyStrObject.data + r8]
+    cmp al, 10               ; '\n'
+    je .sl_found
+    cmp al, 13               ; '\r'
+    je .sl_found_cr
+    inc r8
+    jmp .sl_loop
+
+.sl_found_cr:
+    ; Check for \r\n
+    lea rax, [r8 + 1]
+    cmp rax, r12
+    jge .sl_found            ; no more chars after \r
+    movzx eax, byte [rbx + PyStrObject.data + rax]
+    cmp al, 10
+    jne .sl_found            ; not \r\n, just \r
+    ; \r\n: end_pos = r8 + 2
+    test r14d, r14d
+    jz .sl_no_keep_crlf
+    ; keepends: include \r\n
+    lea rdx, [r8 + 2]
+    sub rdx, rcx
+    jmp .sl_emit_line
+.sl_no_keep_crlf:
+    mov rdx, r8
+    sub rdx, rcx
+    push rcx
+    push r8
+    lea rdi, [rbx + PyStrObject.data + rcx]
+    mov rsi, rdx
+    call str_new_heap
+    push rax
+    mov rdi, r13
+    mov rsi, rax
+    call list_append
+    pop rdi
+    call obj_decref
+    pop r8
+    pop rcx
+    lea rcx, [r8 + 2]        ; skip \r\n
+    lea r8, [r8 + 2]
+    jmp .sl_loop
+
+.sl_found:
+    ; Line break at r8
+    test r14d, r14d
+    jz .sl_no_keep
+    ; keepends: include the newline char
+    lea rdx, [r8 + 1]
+    sub rdx, rcx
+    jmp .sl_emit_line
+.sl_no_keep:
+    mov rdx, r8
+    sub rdx, rcx
+.sl_emit_line:
+    push rcx
+    push r8
+    lea rdi, [rbx + PyStrObject.data + rcx]
+    mov rsi, rdx
+    call str_new_heap
+    push rax
+    mov rdi, r13
+    mov rsi, rax
+    call list_append
+    pop rdi
+    call obj_decref
+    pop r8
+    pop rcx
+    lea rcx, [r8 + 1]
+    lea r8, [r8 + 1]
+    jmp .sl_loop
+
+.sl_last:
+    ; Remaining text after last newline
+    cmp rcx, r12
+    jge .sl_done
+    mov rdx, r12
+    sub rdx, rcx
+    lea rdi, [rbx + PyStrObject.data + rcx]
+    mov rsi, rdx
+    call str_new_heap
+    push rax
+    mov rdi, r13
+    mov rsi, rax
+    call list_append
+    pop rdi
+    call obj_decref
+
+.sl_done:
+    mov rax, r13
+    mov edx, TAG_PTR
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC str_method_splitlines
+
+;; ============================================================================
+;; str_method_rsplit(args, nargs) -> list
+;; Like split but from right. args[0]=self, args[1]=sep (optional)
+;; For simplicity, implements same as split (no maxsplit from right)
+;; ============================================================================
+DEF_FUNC str_method_rsplit
+    ; Delegate to split for now (rsplit without maxsplit = split)
+    jmp str_method_split
+END_FUNC str_method_rsplit
+
+;; ============================================================================
+;; str_method_translate(args, nargs) -> new string
+;; args[0]=self, args[1]=table (dict mapping ordinals to ordinals/strings/None)
+;; ============================================================================
+DEF_FUNC str_method_translate
+    push rbx
+    push r12
+    push r13
+    push r14
+
+    mov rbx, [rdi]           ; self
+    mov r12, [rbx + PyStrObject.ob_size]
+    mov r14, [rdi + 16]      ; table (dict)
+
+    ; Build result: for each char, look up ord(char) in table
+    xor edi, edi
+    call list_new
+    mov r13, rax             ; result list (of chars/strings)
+
+    xor ecx, ecx
+.tr_loop:
+    cmp rcx, r12
+    jge .tr_join
+
+    ; Get ordinal of current char
+    movzx eax, byte [rbx + PyStrObject.data + rcx]
+    push rcx
+
+    ; Look up in table: dict_get(table, ord_key)
+    ; Create SmallInt key
+    movzx edi, al
+    call int_from_i64
+    ; rax = SmallInt payload, edx = TAG_SMALLINT
+    push rax
+    push rdx
+    mov rdi, r14
+    mov rsi, rax
+    mov edx, edx
+    call dict_get
+    pop r8                   ; original key tag
+    pop r9                   ; original key payload
+    test edx, edx
+    jz .tr_not_found
+
+    ; Found: check what the value is
+    ; If None: skip char (delete)
+    lea rcx, [rel none_singleton]
+    cmp rax, rcx
+    je .tr_delete
+
+    ; If SmallInt: character ordinal
+    cmp edx, TAG_SMALLINT
+    je .tr_ord
+
+    ; Else: it's a string, append it
+    push rax
+    mov rdi, r13
+    mov rsi, rax
+    call list_append
+    pop rdi
+    call obj_decref
+    pop rcx
+    inc rcx
+    jmp .tr_loop
+
+.tr_ord:
+    ; Convert ordinal to 1-char string
+    push rax
+    sub rsp, 8
+    mov [rsp], al
+    mov byte [rsp + 1], 0
+    mov rdi, rsp
+    mov rsi, 1
+    call str_new_heap
+    add rsp, 8
+    push rax
+    mov rdi, r13
+    mov rsi, rax
+    call list_append
+    pop rdi
+    call obj_decref
+    pop rax                  ; discard saved ordinal
+    pop rcx
+    inc rcx
+    jmp .tr_loop
+
+.tr_not_found:
+    ; Not in table: keep original char
+    movzx eax, byte [rbx + PyStrObject.data + rcx]  ; rcx is on stack
+    ; Wait, rcx was pushed. Let me get it from stack.
+    mov rcx, [rsp]           ; peek at saved rcx
+    movzx eax, byte [rbx + PyStrObject.data + rcx]
+    sub rsp, 8
+    mov [rsp], al
+    mov byte [rsp + 1], 0
+    mov rdi, rsp
+    mov rsi, 1
+    call str_new_heap
+    add rsp, 8
+    push rax
+    mov rdi, r13
+    mov rsi, rax
+    call list_append
+    pop rdi
+    call obj_decref
+    pop rcx
+    inc rcx
+    jmp .tr_loop
+
+.tr_delete:
+    ; Skip this character (mapped to None)
+    pop rcx
+    inc rcx
+    jmp .tr_loop
+
+.tr_join:
+    ; Join all pieces: "".join(result_list)
+    CSTRING rdi, ""
+    xor esi, esi
+    call str_new_heap
+    push rax                 ; empty sep
+
+    ; Build args for join: [sep, list]
+    sub rsp, 32
+    mov rax, [rsp + 32]     ; sep
+    mov [rsp], rax
+    mov qword [rsp + 8], TAG_PTR
+    mov [rsp + 16], r13
+    mov qword [rsp + 24], TAG_PTR
+    mov rdi, rsp
+    mov rsi, 2
+    call str_method_join
+    add rsp, 32
+    push rax
+    push rdx
+
+    ; Cleanup: DECREF sep and list
+    mov rdi, [rsp + 16]     ; sep
+    call obj_decref
+    mov rdi, r13
+    call obj_decref
+
+    pop rdx
+    pop rax
+    add rsp, 8              ; sep ptr
+
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC str_method_translate
 ;; args[0]=self, args[1]=prefix
 ;; If self starts with prefix, return self[len(prefix):], else return self.
 ;; ============================================================================
@@ -2548,15 +3972,101 @@ LS_I     equ 8
 LS_SWAP  equ 16
 LS_LTAG  equ 24
 LS_RTAG  equ 32
-LS_FRAME equ 40
+LS_REV   equ 40     ; reverse flag (0 = normal, 1 = reverse)
+LS_FRAME equ 48
 DEF_FUNC list_method_sort, LS_FRAME
     push rbx
     push r12
     push r13
 
-    mov rbx, [rdi]          ; self
+    mov rbx, [rdi]          ; self (list)
     mov r12, [rbx + PyListObject.ob_size]
+    mov qword [rbp - LS_REV], 0    ; not reversed
 
+    ; Check for keyword arguments
+    extern kw_names_pending
+    extern ap_strcmp
+    mov rax, [rel kw_names_pending]
+    test rax, rax
+    jz .sort_no_kw
+
+    ; Parse kwargs: iterate kw names, match to key/reverse
+    push rdi                       ; save args ptr
+    push rsi                       ; save nargs
+
+    mov rcx, [rax + PyTupleObject.ob_size]  ; n_kw
+    mov r8, rsi
+    sub r8, rcx                    ; r8 = n_pos (positional count)
+    xor r9d, r9d                   ; kw index
+
+.sort_kw_loop:
+    cmp r9, rcx
+    jge .sort_kw_done
+
+    ; Get kwarg name
+    mov r10, r9
+    shl r10, 4
+    mov r10, [rax + PyTupleObject.ob_item + r10]
+
+    ; Get kwarg value offset: (n_pos + kw_idx) * 16
+    mov r11, r8
+    add r11, r9
+    shl r11, 4
+
+    ; Check "reverse"
+    push rax
+    push rcx
+    push r8
+    push r9
+    push r11
+    push rdi                       ; args ptr
+    lea rdi, [r10 + PyStrObject.data]
+    CSTRING rsi, "reverse"
+    call ap_strcmp
+    mov r10d, eax                  ; save strcmp result (pop rax clobbers eax)
+    pop rdi                        ; restore args ptr
+    pop r11
+    pop r9
+    pop r8
+    pop rcx
+    pop rax
+    test r10d, r10d
+    jnz .sort_kw_skip             ; not "reverse"
+
+    ; Extract reverse value
+    mov r10, [rdi + r11]           ; value payload
+    mov r13, [rdi + r11 + 8]      ; value tag
+    cmp r13d, TAG_BOOL
+    je .sort_rev_bool
+    cmp r13d, TAG_SMALLINT
+    je .sort_rev_int
+    ; TAG_PTR: check if bool_true (LOAD_CONST widens bools to TAG_PTR)
+    lea r13, [rel bool_true]
+    cmp r10, r13
+    sete r10b
+    movzx r10d, r10b
+    mov [rbp - LS_REV], r10
+    jmp .sort_kw_skip
+.sort_rev_bool:
+    mov [rbp - LS_REV], r10       ; 0 or 1
+    jmp .sort_kw_skip
+.sort_rev_int:
+    test r10, r10
+    setnz r10b
+    movzx r10d, r10b
+    mov [rbp - LS_REV], r10
+    jmp .sort_kw_skip
+
+.sort_kw_skip:
+    inc r9
+    jmp .sort_kw_loop
+
+.sort_kw_done:
+    pop rsi
+    pop rdi
+    mov qword [rel kw_names_pending], 0
+
+.sort_no_kw:
     ; Bubble sort
     cmp r12, 2
     jl .sort_done
@@ -2604,10 +4114,17 @@ DEF_FUNC list_method_sort, LS_FRAME
     test rax, rax
     jz .sort_no_swap                 ; no richcompare → don't swap
 
-    ; Call tp_richcompare(left, right, PY_GT, left_tag, right_tag)
+    ; Call tp_richcompare(left, right, op, left_tag, right_tag)
     mov ecx, [rbp - LS_LTAG]         ; left_tag (low 32 bits OK for tp_richcompare)
     mov r8d, [rbp - LS_RTAG]         ; right_tag (low 32 bits OK for tp_richcompare)
+    ; Use PY_LT if reverse=True, PY_GT if normal
+    cmp qword [rbp - LS_REV], 0
+    je .sort_use_gt
+    mov edx, PY_LT
+    jmp .sort_do_cmp
+.sort_use_gt:
     mov edx, PY_GT
+.sort_do_cmp:
     call rax
     ; rax = bool result (bool_true or bool_false)
     mov r13, [rbp - LS_I]           ; restore i
@@ -4745,6 +6262,593 @@ END_FUNC set_method_isdisjoint
 
 
 ;; ############################################################################
+;;                       INT METHODS
+;; ############################################################################
+
+;; ============================================================================
+;; HELPER: int_method_self_to_i64
+;; Extract raw i64 from self, handling both SmallInt and heap int (subclasses).
+;; Input: rdi = args pointer (args[0] = fat value)
+;; Output: rax = raw i64
+;; Clobbers: rcx, rdx
+;; ============================================================================
+DEF_FUNC int_method_self_to_i64
+    mov rdx, [rdi + 8]         ; self.tag
+    cmp edx, TAG_SMALLINT
+    jne .imsi_heap
+    mov rax, [rdi]              ; SmallInt payload = raw i64
+    leave
+    ret
+.imsi_heap:
+    ; TAG_PTR: heap int (subclass) — use int_to_i64
+    mov rdi, [rdi]              ; heap int ptr
+    call int_to_i64
+    leave
+    ret
+END_FUNC int_method_self_to_i64
+
+;; ============================================================================
+;; int_method_bit_length(args, nargs) -> SmallInt
+;; args[0] = self (SmallInt or heap int subclass)
+;; Returns number of bits needed to represent abs(self), excluding sign and
+;; leading zeros. bit_length(0) = 0.
+;; ============================================================================
+DEF_FUNC int_method_bit_length
+    call int_method_self_to_i64
+
+    ; abs(self)
+    mov rcx, rax
+    neg rcx
+    cmovs rcx, rax              ; rcx = abs(self)
+
+    ; bit_length = 0 for 0
+    test rcx, rcx
+    jz .ibl_zero
+
+    ; bsr finds highest set bit (0-indexed)
+    bsr rax, rcx
+    inc rax                     ; bit_length = highest_bit + 1
+    RET_TAG_SMALLINT
+    leave
+    ret
+
+.ibl_zero:
+    xor eax, eax
+    RET_TAG_SMALLINT
+    leave
+    ret
+END_FUNC int_method_bit_length
+
+;; ============================================================================
+;; int_method_bit_count(args, nargs) -> SmallInt
+;; Returns number of ones in the binary representation of abs(self).
+;; ============================================================================
+DEF_FUNC int_method_bit_count
+    call int_method_self_to_i64
+
+    ; abs(self)
+    mov rcx, rax
+    neg rcx
+    cmovs rcx, rax              ; rcx = abs(self)
+
+    ; popcnt counts 1 bits
+    popcnt rax, rcx
+    RET_TAG_SMALLINT
+    leave
+    ret
+END_FUNC int_method_bit_count
+
+;; ============================================================================
+;; int_method___index__(args, nargs) -> SmallInt
+;; ============================================================================
+DEF_FUNC int_method___index__
+    call int_method_self_to_i64
+    RET_TAG_SMALLINT
+    leave
+    ret
+END_FUNC int_method___index__
+
+;; ============================================================================
+;; int_method_conjugate(args, nargs) -> SmallInt
+;; ============================================================================
+DEF_FUNC int_method_conjugate
+    call int_method_self_to_i64
+    RET_TAG_SMALLINT
+    leave
+    ret
+END_FUNC int_method_conjugate
+
+;; ============================================================================
+;; int_method___abs__(args, nargs) -> SmallInt
+;; ============================================================================
+DEF_FUNC int_method___abs__
+    call int_method_self_to_i64
+    mov rcx, rax
+    neg rcx
+    cmovs rcx, rax              ; rcx = abs(self)
+    mov rax, rcx
+    RET_TAG_SMALLINT
+    leave
+    ret
+END_FUNC int_method___abs__
+
+;; ============================================================================
+;; int_method___int__(args, nargs) -> SmallInt
+;; ============================================================================
+DEF_FUNC int_method___int__
+    call int_method_self_to_i64
+    RET_TAG_SMALLINT
+    leave
+    ret
+END_FUNC int_method___int__
+
+;; ============================================================================
+;; int_method___float__(args, nargs) -> Float
+;; ============================================================================
+DEF_FUNC int_method___float__
+    call int_method_self_to_i64
+    cvtsi2sd xmm0, rax
+    movq rax, xmm0             ; raw double bits
+    mov edx, TAG_FLOAT
+    leave
+    ret
+END_FUNC int_method___float__
+
+
+;; ############################################################################
+;;                       FLOAT METHODS
+;; ############################################################################
+
+;; ============================================================================
+;; float_method_is_integer(args, nargs) -> Bool
+;; args[0] = self (Float: payload=raw double bits, tag=TAG_FLOAT)
+;; Returns True if float has no fractional part.
+;; ============================================================================
+extern float_type
+
+DEF_FUNC float_method_is_integer
+    mov rax, [rdi]              ; self.payload = raw double bits
+    movq xmm0, rax
+
+    ; Check for inf/nan — not integer
+    movq rax, xmm0
+    mov rcx, 0x7FF0000000000000  ; inf exponent mask
+    and rax, rcx
+    cmp rax, rcx
+    je .fii_false               ; inf or nan
+
+    ; Compare floor(x) == x
+    roundsd xmm1, xmm0, 1      ; xmm1 = floor(xmm0) (round toward -inf)
+    ucomisd xmm0, xmm1
+    jp .fii_false               ; NaN
+    jne .fii_false              ; not equal
+
+    ; True
+    mov eax, 1
+    mov edx, TAG_BOOL
+    leave
+    ret
+
+.fii_false:
+    xor eax, eax
+    mov edx, TAG_BOOL
+    leave
+    ret
+END_FUNC float_method_is_integer
+
+;; ============================================================================
+;; float_method_conjugate(args, nargs) -> Float (return self)
+;; ============================================================================
+DEF_FUNC_BARE float_method_conjugate
+    mov rax, [rdi]              ; self.payload = raw double bits
+    mov edx, TAG_FLOAT
+    ret
+END_FUNC float_method_conjugate
+
+;; ============================================================================
+;; float_method___int__(args, nargs) -> SmallInt
+;; ============================================================================
+DEF_FUNC_BARE float_method___int__
+    mov rax, [rdi]              ; self.payload = raw double bits
+    movq xmm0, rax
+    cvttsd2si rax, xmm0        ; truncate to i64
+    mov edx, TAG_SMALLINT
+    ret
+END_FUNC float_method___int__
+
+;; ============================================================================
+;; float_method___float__(args, nargs) -> Float (return self)
+;; ============================================================================
+DEF_FUNC_BARE float_method___float__
+    mov rax, [rdi]              ; self.payload = raw double bits
+    mov edx, TAG_FLOAT
+    ret
+END_FUNC float_method___float__
+
+;; ============================================================================
+;; float_method___trunc__(args, nargs) -> SmallInt
+;; ============================================================================
+DEF_FUNC_BARE float_method___trunc__
+    mov rax, [rdi]              ; self.payload = raw double bits
+    movq xmm0, rax
+    cvttsd2si rax, xmm0        ; truncate to i64
+    mov edx, TAG_SMALLINT
+    ret
+END_FUNC float_method___trunc__
+
+;; ============================================================================
+;; float_method___abs__(args, nargs) -> Float
+;; ============================================================================
+DEF_FUNC_BARE float_method___abs__
+    mov rax, [rdi]              ; self.payload = raw double bits
+    btr rax, 63                 ; clear sign bit
+    mov edx, TAG_FLOAT
+    ret
+END_FUNC float_method___abs__
+
+
+;; ############################################################################
+;;                       BYTES METHODS
+;; ############################################################################
+
+;; ============================================================================
+;; bytes_method_hex(args, nargs) -> str
+;; Converts bytes to hex string like b'\xab\xcd'.hex() -> 'abcd'
+;; ============================================================================
+extern bytes_type
+BH_SELF   equ 8
+BH_BUF    equ 16
+BH_HEXLEN equ 24
+BH_FRAME  equ 32
+
+DEF_FUNC bytes_method_hex, BH_FRAME
+    mov rax, [rdi]              ; self = bytes obj ptr
+    mov [rbp - BH_SELF], rax
+
+    ; Get length
+    mov rcx, [rax + PyBytesObject.ob_size]
+    test rcx, rcx
+    jz .bh_empty
+
+    ; Allocate temp buffer for hex chars: 2 chars per byte
+    lea rdi, [rcx * 2]
+    mov [rbp - BH_HEXLEN], rdi
+    call ap_malloc
+    mov [rbp - BH_BUF], rax
+
+    ; Fill hex chars into temp buffer
+    mov rdx, [rbp - BH_SELF]
+    mov rdi, rax                ; dest = temp buf
+    lea rsi, [rdx + PyBytesObject.data]
+    mov rcx, [rdx + PyBytesObject.ob_size]
+    xor r8d, r8d                ; byte index
+
+.bh_loop:
+    cmp r8, rcx
+    jge .bh_done
+    movzx eax, byte [rsi + r8]
+
+    ; High nibble
+    mov r9d, eax
+    shr r9d, 4
+    cmp r9d, 10
+    jb .bh_hi_digit
+    add r9d, ('a' - 10)
+    jmp .bh_hi_store
+.bh_hi_digit:
+    add r9d, '0'
+.bh_hi_store:
+    mov [rdi], r9b
+    inc rdi
+
+    ; Low nibble
+    and eax, 0x0F
+    cmp eax, 10
+    jb .bh_lo_digit
+    add eax, ('a' - 10)
+    jmp .bh_lo_store
+.bh_lo_digit:
+    add eax, '0'
+.bh_lo_store:
+    mov [rdi], al
+    inc rdi
+
+    inc r8
+    jmp .bh_loop
+
+.bh_done:
+    ; Create string from temp buffer
+    mov rdi, [rbp - BH_BUF]
+    mov rsi, [rbp - BH_HEXLEN]
+    call str_new_heap
+    push rax                    ; save result
+
+    ; Free temp buffer
+    mov rdi, [rbp - BH_BUF]
+    call ap_free
+
+    pop rax
+    mov edx, TAG_PTR
+    leave
+    ret
+
+.bh_empty:
+    ; Return empty string
+    lea rdi, [rel empty_str_cstr]
+    xor esi, esi                ; length = 0
+    call str_new_heap
+    mov edx, TAG_PTR
+    leave
+    ret
+END_FUNC bytes_method_hex
+
+;; ============================================================================
+;; bytes_method_startswith(args, nargs) -> Bool
+;; args[0]=self (bytes), args[1]=prefix (bytes)
+;; ============================================================================
+DEF_FUNC bytes_method_startswith
+    cmp rsi, 2
+    jne .bsw_error
+
+    mov rax, [rdi]              ; self
+    mov rcx, [rdi + 16]         ; prefix
+
+    ; Get lengths
+    mov r8, [rax + PyBytesObject.ob_size]   ; self len
+    mov r9, [rcx + PyBytesObject.ob_size]   ; prefix len
+
+    ; If prefix longer than self: False
+    cmp r9, r8
+    ja .bsw_false
+
+    ; Compare first r9 bytes
+    lea rdi, [rax + PyBytesObject.data]
+    lea rsi, [rcx + PyBytesObject.data]
+    mov rdx, r9
+    test rdx, rdx
+    jz .bsw_true                ; empty prefix always matches
+    call ap_memcmp
+    test eax, eax
+    jnz .bsw_false
+
+.bsw_true:
+    mov eax, 1
+    mov edx, TAG_BOOL
+    leave
+    ret
+
+.bsw_false:
+    xor eax, eax
+    mov edx, TAG_BOOL
+    leave
+    ret
+
+.bsw_error:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "startswith() takes exactly one argument"
+    call raise_exception
+END_FUNC bytes_method_startswith
+
+;; ============================================================================
+;; bytes_method_endswith(args, nargs) -> Bool
+;; args[0]=self (bytes), args[1]=suffix (bytes)
+;; ============================================================================
+DEF_FUNC bytes_method_endswith
+    cmp rsi, 2
+    jne .bew_error
+
+    mov rax, [rdi]              ; self
+    mov rcx, [rdi + 16]         ; suffix
+
+    ; Get lengths
+    mov r8, [rax + PyBytesObject.ob_size]   ; self len
+    mov r9, [rcx + PyBytesObject.ob_size]   ; suffix len
+
+    ; If suffix longer than self: False
+    cmp r9, r8
+    ja .bew_false
+
+    ; Compare last r9 bytes
+    mov rdx, r8
+    sub rdx, r9                             ; offset = self_len - suffix_len
+    lea rdi, [rax + PyBytesObject.data + rdx]
+    lea rsi, [rcx + PyBytesObject.data]
+    mov rdx, r9
+    test rdx, rdx
+    jz .bew_true                ; empty suffix always matches
+    call ap_memcmp
+    test eax, eax
+    jnz .bew_false
+
+.bew_true:
+    mov eax, 1
+    mov edx, TAG_BOOL
+    leave
+    ret
+
+.bew_false:
+    xor eax, eax
+    mov edx, TAG_BOOL
+    leave
+    ret
+
+.bew_error:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "endswith() takes exactly one argument"
+    call raise_exception
+END_FUNC bytes_method_endswith
+
+;; ============================================================================
+;; bytes_method_count(args, nargs) -> SmallInt
+;; args[0]=self (bytes), args[1]=sub (bytes)
+;; Count non-overlapping occurrences of sub in self.
+;; ============================================================================
+BC_SELF   equ 8
+BC_SUB    equ 16
+BC_FRAME  equ 24
+
+DEF_FUNC bytes_method_count, BC_FRAME
+    cmp rsi, 2
+    jne .bc_error
+
+    mov rax, [rdi]              ; self
+    mov rcx, [rdi + 16]         ; sub
+    mov [rbp - BC_SELF], rax
+    mov [rbp - BC_SUB], rcx
+
+    mov r8, [rax + PyBytesObject.ob_size]   ; self_len
+    mov r9, [rcx + PyBytesObject.ob_size]   ; sub_len
+
+    ; If sub_len == 0: count = self_len + 1
+    test r9, r9
+    jz .bc_empty_sub
+
+    ; If sub_len > self_len: count = 0
+    cmp r9, r8
+    ja .bc_zero
+
+    ; Scan
+    xor r10d, r10d              ; count = 0
+    xor r11d, r11d              ; offset = 0
+
+.bc_loop:
+    mov rax, r8
+    sub rax, r11                ; remaining = self_len - offset
+    cmp rax, r9
+    jb .bc_result               ; not enough bytes left
+
+    mov rdi, [rbp - BC_SELF]
+    lea rdi, [rdi + PyBytesObject.data + r11]
+    mov rsi, [rbp - BC_SUB]
+    lea rsi, [rsi + PyBytesObject.data]
+    mov rdx, r9
+    push r8
+    push r9
+    push r10
+    push r11
+    call ap_memcmp
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    test eax, eax
+    jnz .bc_nomatch
+
+    ; Match found
+    inc r10
+    add r11, r9                 ; skip sub_len (non-overlapping)
+    jmp .bc_loop
+
+.bc_nomatch:
+    inc r11
+    jmp .bc_loop
+
+.bc_result:
+    mov rax, r10
+    RET_TAG_SMALLINT
+    leave
+    ret
+
+.bc_empty_sub:
+    lea rax, [r8 + 1]
+    RET_TAG_SMALLINT
+    leave
+    ret
+
+.bc_zero:
+    xor eax, eax
+    RET_TAG_SMALLINT
+    leave
+    ret
+
+.bc_error:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "count() takes exactly one argument"
+    call raise_exception
+END_FUNC bytes_method_count
+
+;; ============================================================================
+;; bytes_method_find(args, nargs) -> SmallInt
+;; args[0]=self (bytes), args[1]=sub (bytes)
+;; Returns index of first occurrence, or -1 if not found.
+;; ============================================================================
+BF_SELF   equ 8
+BF_SUB    equ 16
+BF_FRAME  equ 24
+
+DEF_FUNC bytes_method_find, BF_FRAME
+    cmp rsi, 2
+    jne .bf_error
+
+    mov rax, [rdi]              ; self
+    mov rcx, [rdi + 16]         ; sub
+    mov [rbp - BF_SELF], rax
+    mov [rbp - BF_SUB], rcx
+
+    mov r8, [rax + PyBytesObject.ob_size]   ; self_len
+    mov r9, [rcx + PyBytesObject.ob_size]   ; sub_len
+
+    ; If sub_len == 0: return 0
+    test r9, r9
+    jz .bf_found_zero
+
+    ; If sub_len > self_len: return -1
+    cmp r9, r8
+    ja .bf_not_found
+
+    ; Scan
+    xor r11d, r11d              ; offset = 0
+
+.bf_loop:
+    mov rax, r8
+    sub rax, r11                ; remaining
+    cmp rax, r9
+    jb .bf_not_found
+
+    mov rdi, [rbp - BF_SELF]
+    lea rdi, [rdi + PyBytesObject.data + r11]
+    mov rsi, [rbp - BF_SUB]
+    lea rsi, [rsi + PyBytesObject.data]
+    mov rdx, r9
+    push r8
+    push r9
+    push r11
+    call ap_memcmp
+    pop r11
+    pop r9
+    pop r8
+    test eax, eax
+    jz .bf_found
+
+    inc r11
+    jmp .bf_loop
+
+.bf_found:
+    mov rax, r11
+    RET_TAG_SMALLINT
+    leave
+    ret
+
+.bf_found_zero:
+    xor eax, eax
+    RET_TAG_SMALLINT
+    leave
+    ret
+
+.bf_not_found:
+    mov rax, -1
+    RET_TAG_SMALLINT
+    leave
+    ret
+
+.bf_error:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "find() takes exactly one argument"
+    call raise_exception
+END_FUNC bytes_method_find
+
+
+;; ############################################################################
 ;;                       METHODS_INIT
 ;; ############################################################################
 
@@ -4878,6 +6982,86 @@ DEF_FUNC methods_init
     mov rdi, rbx
     lea rsi, [rel mn_islower]
     lea rdx, [rel str_method_islower]
+    call add_method_to_dict
+
+    mov rdi, rbx
+    lea rsi, [rel mn_title]
+    lea rdx, [rel str_method_title]
+    call add_method_to_dict
+
+    mov rdi, rbx
+    lea rsi, [rel mn_capitalize]
+    lea rdx, [rel str_method_capitalize]
+    call add_method_to_dict
+
+    mov rdi, rbx
+    lea rsi, [rel mn_swapcase]
+    lea rdx, [rel str_method_swapcase]
+    call add_method_to_dict
+
+    mov rdi, rbx
+    lea rsi, [rel mn_casefold]
+    lea rdx, [rel str_method_casefold]
+    call add_method_to_dict
+
+    mov rdi, rbx
+    lea rsi, [rel mn_center]
+    lea rdx, [rel str_method_center]
+    call add_method_to_dict
+
+    mov rdi, rbx
+    lea rsi, [rel mn_ljust]
+    lea rdx, [rel str_method_ljust]
+    call add_method_to_dict
+
+    mov rdi, rbx
+    lea rsi, [rel mn_rjust]
+    lea rdx, [rel str_method_rjust]
+    call add_method_to_dict
+
+    mov rdi, rbx
+    lea rsi, [rel mn_zfill]
+    lea rdx, [rel str_method_zfill]
+    call add_method_to_dict
+
+    mov rdi, rbx
+    lea rsi, [rel mn_rindex]
+    lea rdx, [rel str_method_rindex]
+    call add_method_to_dict
+
+    mov rdi, rbx
+    lea rsi, [rel mn_istitle]
+    lea rdx, [rel str_method_istitle]
+    call add_method_to_dict
+
+    mov rdi, rbx
+    lea rsi, [rel mn_partition]
+    lea rdx, [rel str_method_partition]
+    call add_method_to_dict
+
+    mov rdi, rbx
+    lea rsi, [rel mn_rpartition]
+    lea rdx, [rel str_method_rpartition]
+    call add_method_to_dict
+
+    mov rdi, rbx
+    lea rsi, [rel mn_rsplit]
+    lea rdx, [rel str_method_rsplit]
+    call add_method_to_dict
+
+    mov rdi, rbx
+    lea rsi, [rel mn_splitlines]
+    lea rdx, [rel str_method_splitlines]
+    call add_method_to_dict
+
+    mov rdi, rbx
+    lea rsi, [rel mn_expandtabs]
+    lea rdx, [rel str_method_expandtabs]
+    call add_method_to_dict
+
+    mov rdi, rbx
+    lea rsi, [rel mn_translate]
+    lea rdx, [rel str_method_translate]
     call add_method_to_dict
 
     ; Store dict in str_type.tp_dict
@@ -5142,6 +7326,80 @@ DEF_FUNC methods_init
     lea rax, [rel object_type]
     mov [rax + PyTypeObject.tp_dict], rbx
 
+    ;; --- int_type methods ---
+    call dict_new
+    mov rbx, rax
+
+    mov rdi, rbx
+    lea rsi, [rel mn_bit_length]
+    lea rdx, [rel int_method_bit_length]
+    call add_method_to_dict
+
+    mov rdi, rbx
+    lea rsi, [rel mn_bit_count]
+    lea rdx, [rel int_method_bit_count]
+    call add_method_to_dict
+
+    mov rdi, rbx
+    lea rsi, [rel mn_conjugate]
+    lea rdx, [rel int_method_conjugate]
+    call add_method_to_dict
+
+    ; Store in int_type.tp_dict
+    lea rax, [rel int_type]
+    mov [rax + PyTypeObject.tp_dict], rbx
+
+    ;; --- float_type methods ---
+    call dict_new
+    mov rbx, rax
+
+    mov rdi, rbx
+    lea rsi, [rel mn_is_integer]
+    lea rdx, [rel float_method_is_integer]
+    call add_method_to_dict
+
+    mov rdi, rbx
+    lea rsi, [rel mn_conjugate]
+    lea rdx, [rel float_method_conjugate]
+    call add_method_to_dict
+
+    ; Store in float_type.tp_dict
+    lea rax, [rel float_type]
+    mov [rax + PyTypeObject.tp_dict], rbx
+
+    ;; --- bytes_type methods (extend tp_dict, keep tp_getattr for .decode()) ---
+    call dict_new
+    mov rbx, rax
+
+    mov rdi, rbx
+    lea rsi, [rel mn_hex]
+    lea rdx, [rel bytes_method_hex]
+    call add_method_to_dict
+
+    mov rdi, rbx
+    lea rsi, [rel mn_startswith]
+    lea rdx, [rel bytes_method_startswith]
+    call add_method_to_dict
+
+    mov rdi, rbx
+    lea rsi, [rel mn_endswith]
+    lea rdx, [rel bytes_method_endswith]
+    call add_method_to_dict
+
+    mov rdi, rbx
+    lea rsi, [rel mn_count]
+    lea rdx, [rel bytes_method_count]
+    call add_method_to_dict
+
+    mov rdi, rbx
+    lea rsi, [rel mn_find]
+    lea rdx, [rel bytes_method_find]
+    call add_method_to_dict
+
+    ; Store in bytes_type.tp_dict
+    lea rax, [rel bytes_type]
+    mov [rax + PyTypeObject.tp_dict], rbx
+
     pop r12
     pop rbx
     leave
@@ -5206,3 +7464,33 @@ mn_isspace:     db "isspace", 0
 mn_isupper:     db "isupper", 0
 mn_islower:     db "islower", 0
 mn___new__:     db "__new__", 0
+mn_title:       db "title", 0
+mn_capitalize:  db "capitalize", 0
+mn_swapcase:    db "swapcase", 0
+mn_casefold:    db "casefold", 0
+mn_center:      db "center", 0
+mn_ljust:       db "ljust", 0
+mn_rjust:       db "rjust", 0
+mn_zfill:       db "zfill", 0
+mn_rindex:      db "rindex", 0
+mn_istitle:     db "istitle", 0
+mn_partition:   db "partition", 0
+mn_rpartition:  db "rpartition", 0
+mn_rsplit:      db "rsplit", 0
+mn_splitlines:  db "splitlines", 0
+mn_expandtabs:  db "expandtabs", 0
+mn_translate:   db "translate", 0
+; int method names
+mn_bit_length:  db "bit_length", 0
+mn_bit_count:   db "bit_count", 0
+mn___index__:   db "__index__", 0
+mn_conjugate:   db "conjugate", 0
+mn___abs__:     db "__abs__", 0
+mn___int__:     db "__int__", 0
+mn___float__:   db "__float__", 0
+; float method names
+mn_is_integer:  db "is_integer", 0
+mn___trunc__:   db "__trunc__", 0
+; bytes method names
+mn_hex:         db "hex", 0
+mn_decode:      db "decode", 0

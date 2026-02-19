@@ -898,14 +898,29 @@ DEF_FUNC_BARE op_raise_varargs
     mov rcx, [r13 + 8]      ; cause tag
     push rcx                 ; save cause tag
     push rsi                 ; save cause payload
-    VPOP rdi                 ; exception
-    push rdi
+    VPOP rdi                 ; exception payload
+    push rdi                 ; save exception
 
-    ; DECREF cause (tag-aware, we don't support __cause__ yet)
-    mov rdi, [rsp + 8]      ; cause payload
-    mov rsi, [rsp + 16]     ; cause tag
+    ; Store __cause__ on exception object (if exception is a pointer)
+    ; cause is at [rsp+8], cause_tag at [rsp+16]
+    mov rax, [rsp + 8]      ; cause payload
+    mov rcx, [rsp + 16]     ; cause tag
+    ; Only store cause if it's a pointer (heap exception object)
+    test ecx, TAG_RC_BIT
+    jz .raise_from_no_cause
+    ; Store cause (transfer ownership — no INCREF, we own the ref from VPOP)
+    mov [rdi + PyExceptionObject.exc_cause], rax
+    jmp .raise_from_done
+
+.raise_from_no_cause:
+    ; Non-pointer cause or None — DECREF if needed and set cause to NULL
+    mov rdi, rax
+    mov rsi, rcx
     DECREF_VAL rdi, rsi
+    mov rdi, [rsp]           ; restore exception
+    mov qword [rdi + PyExceptionObject.exc_cause], 0
 
+.raise_from_done:
     ; Raise the exception
     pop rdi
     add rsp, 16

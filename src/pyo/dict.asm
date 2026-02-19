@@ -1162,6 +1162,246 @@ DEF_FUNC_BARE dict_contains
     ret
 END_FUNC dict_contains
 
+
+;; ============================================================================
+;; dict_nb_or(left, right, ltag, rtag) -> new dict (merge)
+;; Implements dict | dict -> new dict containing all items from both.
+;; Right dict values override left on key collision.
+;; ============================================================================
+DNO_LEFT  equ 8
+DNO_RIGHT equ 16
+DNO_NEW   equ 24
+DNO_FRAME equ 32
+
+DEF_FUNC dict_nb_or, DNO_FRAME
+    mov [rbp - DNO_LEFT], rdi       ; left dict
+    mov [rbp - DNO_RIGHT], rsi      ; right dict
+
+    ; Create new dict
+    call dict_new
+    mov [rbp - DNO_NEW], rax
+
+    ; Copy all entries from left dict
+    mov rdi, [rbp - DNO_LEFT]
+    mov r8, [rdi + PyDictObject.capacity]
+    xor ecx, ecx                    ; index = 0
+.dno_copy_left:
+    cmp rcx, r8
+    jge .dno_copy_right_start
+
+    imul rax, rcx, DICT_ENTRY_SIZE
+    add rax, [rdi + PyDictObject.entries]
+    ; Check if entry is occupied (value_tag != 0)
+    cmp qword [rax + DictEntry.value_tag], 0
+    je .dno_left_next
+
+    ; dict_set(dict, key, value, value_tag, key_tag)
+    push rcx
+    push r8
+    push rdi
+    mov rdi, [rbp - DNO_NEW]
+    mov rsi, [rax + DictEntry.key]
+    mov rdx, [rax + DictEntry.value]
+    mov rcx, [rax + DictEntry.value_tag]    ; value_tag
+    mov r8, [rax + DictEntry.key_tag]       ; key_tag
+    call dict_set
+    pop rdi
+    pop r8
+    pop rcx
+
+.dno_left_next:
+    inc rcx
+    jmp .dno_copy_left
+
+.dno_copy_right_start:
+    ; Copy all entries from right dict (overrides left)
+    mov rdi, [rbp - DNO_RIGHT]
+    mov r8, [rdi + PyDictObject.capacity]
+    xor ecx, ecx
+.dno_copy_right:
+    cmp rcx, r8
+    jge .dno_done
+
+    imul rax, rcx, DICT_ENTRY_SIZE
+    add rax, [rdi + PyDictObject.entries]
+    cmp qword [rax + DictEntry.value_tag], 0
+    je .dno_right_next
+
+    push rcx
+    push r8
+    push rdi
+    mov rdi, [rbp - DNO_NEW]
+    mov rsi, [rax + DictEntry.key]
+    mov rdx, [rax + DictEntry.value]
+    mov rcx, [rax + DictEntry.value_tag]    ; value_tag
+    mov r8, [rax + DictEntry.key_tag]       ; key_tag
+    call dict_set
+    pop rdi
+    pop r8
+    pop rcx
+
+.dno_right_next:
+    inc rcx
+    jmp .dno_copy_right
+
+.dno_done:
+    mov rax, [rbp - DNO_NEW]
+    mov edx, TAG_PTR
+    leave
+    ret
+END_FUNC dict_nb_or
+
+
+;; ============================================================================
+;; dict_richcompare(left, right, op, left_tag, right_tag) -> (payload, tag)
+;; rdi=left, rsi=right, edx=op, rcx=left_tag, r8=right_tag
+;; Only supports Py_EQ (2) and Py_NE (3).
+;; Two dicts are equal if they have the same size and all key-value pairs match.
+;; ============================================================================
+
+DRC_LEFT  equ 8
+DRC_RIGHT equ 16
+DRC_OP    equ 24
+DRC_FRAME equ 32
+
+DEF_FUNC dict_richcompare, DRC_FRAME
+    ; edx = op (PY_EQ=2, PY_NE=3)
+    mov [rbp - DRC_LEFT], rdi
+    mov [rbp - DRC_RIGHT], rsi
+    mov [rbp - DRC_OP], edx
+
+    ; Only handle EQ (2) and NE (3)
+    cmp edx, 2
+    je .drc_do_eq
+    cmp edx, 3
+    je .drc_do_eq
+    ; Unsupported op — return NotImplemented (NULL)
+    RET_NULL
+    leave
+    ret
+
+.drc_do_eq:
+    ; Compare sizes
+    mov rdi, [rbp - DRC_LEFT]
+    mov rsi, [rbp - DRC_RIGHT]
+    mov rax, [rdi + PyDictObject.ob_size]
+    mov rcx, [rsi + PyDictObject.ob_size]
+    cmp rax, rcx
+    jne .drc_not_equal
+
+    ; Same size — check all key-value pairs from left exist in right with same value
+    mov r9, [rdi + PyDictObject.capacity]
+    xor r10d, r10d                  ; index = 0
+
+.drc_loop:
+    cmp r10, r9
+    jge .drc_equal
+
+    mov rdi, [rbp - DRC_LEFT]
+    imul rax, r10, DICT_ENTRY_SIZE
+    add rax, [rdi + PyDictObject.entries]
+
+    ; Skip empty entries
+    cmp qword [rax + DictEntry.value_tag], 0
+    je .drc_next
+
+    ; Save entry data for comparison
+    push r9
+    push r10
+    mov r11, [rax + DictEntry.value]        ; left value
+    mov r9d, [rax + DictEntry.value_tag]    ; left value tag (reuse r9 after push)
+
+    ; Lookup key in right dict
+    mov rdi, [rbp - DRC_RIGHT]
+    mov rsi, [rax + DictEntry.key]
+    mov edx, [rax + DictEntry.key_tag]
+    call dict_get
+    ; rax = right value, edx = tag (0 = not found)
+    test edx, edx
+    jz .drc_not_equal_pop           ; key not in right
+
+    ; Quick compare: same payload and same tag → equal
+    cmp rax, r11
+    jne .drc_values_differ
+    cmp edx, r9d
+    je .drc_values_match
+
+.drc_values_differ:
+    ; For SmallInt: both TAG_SMALLINT, compare payloads directly
+    cmp r9d, TAG_SMALLINT
+    jne .drc_ptr_compare
+    cmp edx, TAG_SMALLINT
+    jne .drc_not_equal_pop
+    ; Both SmallInt, payloads differ → not equal
+    jmp .drc_not_equal_pop
+
+.drc_ptr_compare:
+    ; Both TAG_PTR: use tp_richcompare
+    cmp r9d, TAG_PTR
+    jne .drc_not_equal_pop
+    cmp edx, TAG_PTR
+    jne .drc_not_equal_pop
+    ; Call tp_richcompare(left_val, right_val, PY_EQ, TAG_PTR, TAG_PTR)
+    push r11                        ; save left value
+    mov rdi, r11                    ; left value
+    mov rsi, rax                    ; right value
+    mov rax, [rdi + PyObject.ob_type]
+    mov rax, [rax + PyTypeObject.tp_richcompare]
+    test rax, rax
+    jz .drc_not_equal_pop2          ; no tp_richcompare
+    mov edx, 2                      ; PY_EQ
+    mov ecx, TAG_PTR
+    mov r8d, TAG_PTR
+    call rax
+    ; Result: (rax=payload, edx=tag)
+    ; Check if result is True (TAG_BOOL with payload=1)
+    pop r11
+    cmp edx, TAG_BOOL
+    jne .drc_not_equal_pop
+    test eax, eax
+    jz .drc_not_equal_pop
+    jmp .drc_values_match
+
+.drc_not_equal_pop2:
+    pop r11
+.drc_not_equal_pop:
+    pop r10
+    pop r9
+.drc_not_equal:
+    ; Return based on op: EQ→False, NE→True
+    cmp dword [rbp - DRC_OP], 3     ; NE?
+    je .drc_ret_true
+    xor eax, eax                    ; False
+    mov edx, TAG_BOOL
+    leave
+    ret
+
+.drc_values_match:
+    pop r10
+    pop r9
+
+.drc_next:
+    inc r10
+    jmp .drc_loop
+
+.drc_equal:
+    ; Return based on op: EQ→True, NE→False
+    cmp dword [rbp - DRC_OP], 3     ; NE?
+    je .drc_ret_false
+.drc_ret_true:
+    mov eax, 1                      ; True
+    mov edx, TAG_BOOL
+    leave
+    ret
+
+.drc_ret_false:
+    xor eax, eax                    ; False
+    mov edx, TAG_BOOL
+    leave
+    ret
+END_FUNC dict_richcompare
+
+
 ;; ============================================================================
 ;; Data section
 ;; ============================================================================
@@ -1179,6 +1419,31 @@ dict_mapping_methods:
     dq dict_len                 ; mp_length
     dq dict_subscript           ; mp_subscript
     dq dict_ass_subscript       ; mp_ass_subscript
+
+; Dict number methods (for | operator)
+align 8
+dict_number_methods:
+    dq 0                        ; nb_add          +0
+    dq 0                        ; nb_subtract     +8
+    dq 0                        ; nb_multiply     +16
+    dq 0                        ; nb_remainder    +24
+    dq 0                        ; nb_divmod       +32
+    dq 0                        ; nb_power        +40
+    dq 0                        ; nb_negative     +48
+    dq 0                        ; nb_positive     +56
+    dq 0                        ; nb_absolute     +64
+    dq 0                        ; nb_bool         +72
+    dq 0                        ; nb_invert       +80
+    dq 0                        ; nb_lshift       +88
+    dq 0                        ; nb_rshift       +96
+    dq 0                        ; nb_and          +104
+    dq 0                        ; nb_xor          +112
+    dq dict_nb_or               ; nb_or           +120 (dict merge |)
+    dq 0                        ; nb_int          +128
+    dq 0                        ; nb_float        +136
+    dq 0                        ; nb_floor_divide +144
+    dq 0                        ; nb_true_divide  +152
+    dq 0                        ; nb_index        +160
 
 ; Dict sequence methods (for 'in' operator)
 align 8
@@ -1207,12 +1472,12 @@ dict_type:
     dq 0                        ; tp_call
     dq 0                        ; tp_getattr
     dq 0                        ; tp_setattr
-    dq 0                        ; tp_richcompare
+    dq dict_richcompare         ; tp_richcompare
     dq dict_tp_iter             ; tp_iter
     dq 0                        ; tp_iternext
     dq 0                        ; tp_init
     dq 0                        ; tp_new
-    dq 0                        ; tp_as_number
+    dq dict_number_methods      ; tp_as_number
     dq dict_sequence_methods    ; tp_as_sequence (for 'in' operator)
     dq dict_mapping_methods     ; tp_as_mapping
     dq 0                        ; tp_base

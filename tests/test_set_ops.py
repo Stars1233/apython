@@ -31,3 +31,23 @@ print({1, 2}.issuperset({1, 2, 3}))   # False
 # isdisjoint
 print({1, 2}.isdisjoint({3, 4}))   # True
 print({1, 2}.isdisjoint({2, 3}))   # False
+
+# === Operator syntax ===
+# Union |
+print(sorted(a | b))
+
+# Intersection &
+print(sorted(a & b))
+
+# Difference -
+print(sorted(a - b))
+print(sorted(b - a))
+
+# Symmetric difference ^
+print(sorted(a ^ b))
+
+# Empty set
+e = set()
+print(sorted(a | e))
+print(sorted(a & e))
+print(sorted(a - e))

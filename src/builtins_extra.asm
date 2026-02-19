@@ -65,6 +65,7 @@ extern user_type_metatype
 extern dunder_lookup
 extern kw_names_pending
 extern ap_strcmp
+extern dict_new
 
 ; ============================================================================
 ; 1. builtin_abs(args, nargs) - abs(x)
@@ -3773,3 +3774,684 @@ DEF_FUNC builtin_open_fn, OPN_FRAME
     CSTRING rsi, "open() arguments must be strings"
     call raise_exception
 END_FUNC builtin_open_fn
+
+; ============================================================================
+; builtin_bin(args, nargs) - bin(x)
+; Returns binary string representation: '0b...' or '-0b...'
+; ============================================================================
+global builtin_bin
+DEF_FUNC builtin_bin, 80
+
+    cmp rsi, 1
+    jne .bin_nargs_error
+
+    mov edx, [rdi + 8]
+    mov rdi, [rdi]
+    call int_to_i64
+
+    test rax, rax
+    jz .bin_zero
+
+    test rax, rax
+    jns .bin_positive
+
+    ; Negative
+    neg rax
+    mov byte [rbp - 80], '-'
+    mov byte [rbp - 79], '0'
+    mov byte [rbp - 78], 'b'
+    lea rdi, [rbp - 77]
+    mov r8d, 3
+    jmp .bin_digits
+
+.bin_positive:
+    mov byte [rbp - 80], '0'
+    mov byte [rbp - 79], 'b'
+    lea rdi, [rbp - 78]
+    mov r8d, 2
+
+.bin_digits:
+    lea rsi, [rbp - 16]
+    xor ecx, ecx
+
+.bin_digit_loop:
+    test rax, rax
+    jz .bin_reverse
+
+    mov rdx, rax
+    and edx, 1
+    add edx, '0'
+    mov byte [rsi], dl
+    dec rsi
+    inc ecx
+    shr rax, 1
+    jmp .bin_digit_loop
+
+.bin_reverse:
+    inc rsi
+    mov edx, ecx
+.bin_copy_loop:
+    test ecx, ecx
+    jz .bin_done_copy
+    mov al, byte [rsi]
+    mov byte [rdi], al
+    inc rsi
+    inc rdi
+    dec ecx
+    jmp .bin_copy_loop
+
+.bin_done_copy:
+    mov byte [rdi], 0
+    lea rdi, [rbp - 80]
+    call str_from_cstr
+    leave
+    ret
+
+.bin_zero:
+    CSTRING rdi, "0b0"
+    call str_from_cstr
+    leave
+    ret
+
+.bin_nargs_error:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "bin() takes exactly one argument"
+    call raise_exception
+END_FUNC builtin_bin
+
+; ============================================================================
+; builtin_oct(args, nargs) - oct(x)
+; Returns octal string representation: '0o...' or '-0o...'
+; ============================================================================
+global builtin_oct
+DEF_FUNC builtin_oct, 80
+
+    cmp rsi, 1
+    jne .oct_nargs_error
+
+    mov edx, [rdi + 8]
+    mov rdi, [rdi]
+    call int_to_i64
+
+    test rax, rax
+    jz .oct_zero
+
+    test rax, rax
+    jns .oct_positive
+
+    ; Negative
+    neg rax
+    mov byte [rbp - 80], '-'
+    mov byte [rbp - 79], '0'
+    mov byte [rbp - 78], 'o'
+    lea rdi, [rbp - 77]
+    mov r8d, 3
+    jmp .oct_digits
+
+.oct_positive:
+    mov byte [rbp - 80], '0'
+    mov byte [rbp - 79], 'o'
+    lea rdi, [rbp - 78]
+    mov r8d, 2
+
+.oct_digits:
+    lea rsi, [rbp - 16]
+    xor ecx, ecx
+
+.oct_digit_loop:
+    test rax, rax
+    jz .oct_reverse
+
+    mov rdx, rax
+    and edx, 7
+    add edx, '0'
+    mov byte [rsi], dl
+    dec rsi
+    inc ecx
+    shr rax, 3
+    jmp .oct_digit_loop
+
+.oct_reverse:
+    inc rsi
+    mov edx, ecx
+.oct_copy_loop:
+    test ecx, ecx
+    jz .oct_done_copy
+    mov al, byte [rsi]
+    mov byte [rdi], al
+    inc rsi
+    inc rdi
+    dec ecx
+    jmp .oct_copy_loop
+
+.oct_done_copy:
+    mov byte [rdi], 0
+    lea rdi, [rbp - 80]
+    call str_from_cstr
+    leave
+    ret
+
+.oct_zero:
+    CSTRING rdi, "0o0"
+    call str_from_cstr
+    leave
+    ret
+
+.oct_nargs_error:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "oct() takes exactly one argument"
+    call raise_exception
+END_FUNC builtin_oct
+
+; ============================================================================
+; builtin_ascii_fn(args, nargs) - ascii(obj)
+; Like repr() but escapes non-ASCII characters to \xNN / \uNNNN / \UNNNNNNNN
+; ============================================================================
+extern ap_realloc
+global builtin_ascii_fn
+AA_REPR   equ 8
+AA_FRAME  equ 16
+DEF_FUNC builtin_ascii_fn, AA_FRAME
+
+    cmp rsi, 1
+    jne .aa_nargs_error
+
+    ; Get repr(obj)
+    mov esi, [rdi + 8]       ; tag
+    mov rdi, [rdi]            ; payload
+    call obj_repr
+    test edx, edx
+    jz .aa_nargs_error
+
+    ; Check if repr result is a SmallStr (bit 63 of tag)
+    test rdx, rdx
+    js .aa_smallstr_result
+
+    ; Heap string: Check if all chars are ASCII (fast path)
+    mov [rbp - AA_REPR], rax
+    lea rsi, [rax + PyStrObject.data]
+    mov rcx, [rax + PyStrObject.ob_size]
+    xor edx, edx              ; edx = index
+.aa_check_loop:
+    cmp edx, ecx
+    jge .aa_all_ascii
+    movzx eax, byte [rsi + rdx]
+    cmp eax, 128
+    jae .aa_need_escape
+    inc edx
+    jmp .aa_check_loop
+
+.aa_all_ascii:
+    ; Repr is all ASCII — just return it
+    mov rax, [rbp - AA_REPR]
+    mov edx, TAG_PTR
+    leave
+    ret
+
+.aa_smallstr_result:
+    ; SmallStr is always ASCII (max 14 bytes, all inline)
+    ; Return as-is (rax=payload, rdx=tag already set from obj_repr)
+    leave
+    ret
+
+.aa_need_escape:
+    ; We need to build a new string with non-ASCII chars escaped
+    ; For simplicity, allocate a buffer big enough (4x original + 1)
+    push rbx
+    push r12
+    push r13
+
+    mov rbx, [rbp - AA_REPR]  ; rbx = repr str
+    mov r12, [rbx + PyStrObject.ob_size]  ; r12 = original length
+    lea rdi, [r12*4 + 1]      ; worst case: every char becomes \xNN (4 chars)
+    call ap_malloc
+    mov r13, rax               ; r13 = output buffer
+
+    lea rsi, [rbx + PyStrObject.data]  ; rsi = input
+    mov rdi, r13               ; rdi = output
+    xor ecx, ecx              ; ecx = input index
+.aa_escape_loop:
+    cmp ecx, r12d
+    jge .aa_escape_done
+    movzx eax, byte [rsi + rcx]
+    cmp eax, 128
+    jae .aa_do_escape
+    mov byte [rdi], al
+    inc rdi
+    inc ecx
+    jmp .aa_escape_loop
+
+.aa_do_escape:
+    ; Emit \xHH
+    mov byte [rdi], '\'
+    mov byte [rdi + 1], 'x'
+    add rdi, 2
+    ; High nibble
+    mov edx, eax
+    shr edx, 4
+    cmp edx, 10
+    jb .aa_hi_dec
+    add edx, ('a' - 10)
+    jmp .aa_hi_store
+.aa_hi_dec:
+    add edx, '0'
+.aa_hi_store:
+    mov byte [rdi], dl
+    inc rdi
+    ; Low nibble
+    mov edx, eax
+    and edx, 0xF
+    cmp edx, 10
+    jb .aa_lo_dec
+    add edx, ('a' - 10)
+    jmp .aa_lo_store
+.aa_lo_dec:
+    add edx, '0'
+.aa_lo_store:
+    mov byte [rdi], dl
+    inc rdi
+    inc ecx
+    jmp .aa_escape_loop
+
+.aa_escape_done:
+    mov byte [rdi], 0
+    sub rdi, r13               ; rdi = output length
+
+    ; Create string from buffer
+    mov rdi, r13
+    call str_from_cstr
+    push rax
+    push rdx
+
+    ; Free buffer
+    mov rdi, r13
+    call ap_free
+
+    ; DECREF original repr
+    mov rdi, rbx
+    call obj_decref
+
+    pop rdx
+    pop rax
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.aa_nargs_error:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "ascii() takes exactly one argument"
+    call raise_exception
+END_FUNC builtin_ascii_fn
+
+; ============================================================================
+; builtin_format_fn(args, nargs) - format(value[, format_spec])
+; Calls value.__format__(format_spec) or str(value) if no __format__
+; ============================================================================
+global builtin_format_fn
+FMT_OBJ     equ 8
+FMT_OBJ_TAG equ 16
+FMT_SPEC    equ 24
+FMT_FRAME   equ 32
+DEF_FUNC builtin_format_fn, FMT_FRAME
+
+    cmp rsi, 1
+    jb .fmt_nargs_error
+    cmp rsi, 2
+    ja .fmt_nargs_error
+
+    push rbx
+    mov rbx, rsi               ; rbx = nargs
+
+    ; Save obj
+    mov rax, [rdi]
+    mov [rbp - FMT_OBJ], rax
+    mov eax, [rdi + 8]
+    mov [rbp - FMT_OBJ_TAG], rax
+
+    ; Get format spec (empty string if not provided)
+    cmp rbx, 2
+    jb .fmt_empty_spec
+    mov rax, [rdi + 16]
+    mov [rbp - FMT_SPEC], rax
+    jmp .fmt_have_spec
+
+.fmt_empty_spec:
+    CSTRING rdi, ""
+    call str_from_cstr
+    mov [rbp - FMT_SPEC], rax
+
+.fmt_have_spec:
+    ; If format spec is empty, just call str(value)
+    mov rdi, [rbp - FMT_SPEC]
+    ; Check if it's a SmallStr
+    cmp qword [rbp - FMT_OBJ_TAG], TAG_PTR
+    jne .fmt_use_str
+    ; Check if spec is empty
+    ; For heap strings, check ob_size
+    test rdi, rdi
+    jz .fmt_use_str
+
+    ; Try __format__ via dunder_lookup
+    mov rdi, [rbp - FMT_OBJ]
+    mov esi, [rbp - FMT_OBJ_TAG]
+    CSTRING rdx, "__format__"
+    call dunder_lookup
+    test edx, edx
+    jz .fmt_use_str
+
+    ; Call __format__(format_spec)
+    ; Build arg array on stack: [spec_payload, spec_tag]
+    push rbx                   ; align
+    sub rsp, 16
+    mov rax, [rbp - FMT_SPEC]
+    mov [rsp], rax
+    mov qword [rsp + 8], TAG_PTR
+    mov rdi, rsp
+    mov rsi, 1
+    ; rax = __format__ callable — need to call tp_call
+    ; Actually dunder_lookup returned (rax, edx) fat value
+    ; We need to call it. Save it and use tp_call
+    add rsp, 16
+    pop rbx
+    jmp .fmt_use_str           ; TODO: full __format__ call, fallback to str for now
+
+.fmt_use_str:
+    ; Just call str(value) — simple fallback
+    mov rdi, [rbp - FMT_OBJ]
+    mov esi, [rbp - FMT_OBJ_TAG]
+    call obj_str
+    ; If we allocated an empty spec, DECREF it
+    cmp rbx, 2
+    jge .fmt_done
+    push rax
+    push rdx
+    mov rdi, [rbp - FMT_SPEC]
+    call obj_decref
+    pop rdx
+    pop rax
+.fmt_done:
+    pop rbx
+    leave
+    ret
+
+.fmt_nargs_error:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "format() takes 1 or 2 arguments"
+    call raise_exception
+END_FUNC builtin_format_fn
+
+; ============================================================================
+; builtin_vars_fn(args, nargs) - vars([obj])
+; 0 args: returns frame locals dict (same as locals())
+; 1 arg: returns obj.__dict__
+; ============================================================================
+extern eval_saved_r12
+global builtin_vars_fn
+VR_FRAME equ 8
+DEF_FUNC builtin_vars_fn, VR_FRAME
+
+    test rsi, rsi
+    jz .vars_no_arg
+    cmp rsi, 1
+    jne .vars_nargs_error
+
+    ; vars(obj): return obj.__dict__
+    mov rax, [rdi + 8]        ; tag
+    cmp eax, TAG_PTR
+    jne .vars_no_dict
+
+    mov rdi, [rdi]            ; obj pointer
+    ; Try inst_dict (user-defined class instances)
+    mov rax, [rdi + PyObject.ob_type]
+    mov rcx, [rax + PyTypeObject.tp_flags]
+    test ecx, TYPE_FLAG_HEAPTYPE
+    jz .vars_no_dict
+
+    ; User instance: get inst_dict
+    mov rax, [rdi + PyInstanceObject.inst_dict]
+    test rax, rax
+    jz .vars_empty_dict
+    INCREF rax
+    mov edx, TAG_PTR
+    leave
+    ret
+
+.vars_empty_dict:
+    ; Instance has no dict yet — create empty dict
+    call dict_new
+    mov edx, TAG_PTR
+    leave
+    ret
+
+.vars_no_arg:
+    ; Same as locals()
+    extern builtin_locals
+    xor edi, edi
+    xor esi, esi
+    call builtin_locals
+    leave
+    ret
+
+.vars_no_dict:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "vars() argument must have __dict__ attribute"
+    call raise_exception
+
+.vars_nargs_error:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "vars() takes at most 1 argument"
+    call raise_exception
+END_FUNC builtin_vars_fn
+
+; ============================================================================
+; builtin_delattr_fn(args, nargs) - delattr(obj, name)
+; Calls tp_setattr(obj, name, NULL) to delete
+; ============================================================================
+extern dict_del
+global builtin_delattr_fn
+DA2_OBJ   equ 8
+DA2_NAME  equ 16
+DA2_FRAME equ 24
+DEF_FUNC builtin_delattr_fn, DA2_FRAME
+
+    cmp rsi, 2
+    jne .da2_nargs_error
+
+    ; Get obj and name
+    mov rax, [rdi]             ; obj payload
+    mov [rbp - DA2_OBJ], rax
+    mov rax, [rdi + 16]       ; name payload
+    mov [rbp - DA2_NAME], rax
+
+    ; obj must be a heap pointer
+    cmp dword [rdi + 8], TAG_PTR
+    jne .da2_type_error
+
+    ; Get type and tp_setattr
+    mov rdi, [rbp - DA2_OBJ]
+    mov rax, [rdi + PyObject.ob_type]
+    mov rax, [rax + PyTypeObject.tp_setattr]
+    test rax, rax
+    jz .da2_attr_error
+
+    ; Call tp_setattr(obj, name, NULL=delete)
+    mov rdi, [rbp - DA2_OBJ]
+    mov rsi, [rbp - DA2_NAME]
+    xor edx, edx              ; value = NULL means delete
+    xor ecx, ecx              ; value tag = TAG_NULL
+    call rax
+
+    ; Return None
+    lea rax, [rel none_singleton]
+    INCREF rax
+    mov edx, TAG_PTR
+    leave
+    ret
+
+.da2_type_error:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "delattr: first argument must be an object"
+    call raise_exception
+
+.da2_attr_error:
+    lea rdi, [rel exc_AttributeError_type]
+    CSTRING rsi, "object does not support attribute deletion"
+    call raise_exception
+
+.da2_nargs_error:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "delattr() takes exactly 2 arguments"
+    call raise_exception
+END_FUNC builtin_delattr_fn
+
+; ============================================================================
+; builtin_aiter_fn(args, nargs) - aiter(async_iterable)
+; Calls tp_iter on the async iterable
+; ============================================================================
+global builtin_aiter_fn
+DEF_FUNC builtin_aiter_fn
+
+    cmp rsi, 1
+    jne .aiter_nargs_error
+
+    ; Get the object
+    mov esi, [rdi + 8]        ; tag
+    mov rdi, [rdi]            ; payload
+
+    ; Must be a heap pointer
+    cmp esi, TAG_PTR
+    jne .aiter_type_error
+
+    ; Call tp_iter
+    mov rax, [rdi + PyObject.ob_type]
+    mov rax, [rax + PyTypeObject.tp_iter]
+    test rax, rax
+    jz .aiter_type_error
+
+    call rax                   ; tp_iter returns rax=ptr only
+    mov edx, TAG_PTR
+    leave
+    ret
+
+.aiter_type_error:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "object is not an async iterable"
+    call raise_exception
+
+.aiter_nargs_error:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "aiter() takes exactly 1 argument"
+    call raise_exception
+END_FUNC builtin_aiter_fn
+
+; ============================================================================
+; builtin_anext_fn(args, nargs) - anext(async_iterator[, default])
+; Calls tp_iternext; on StopAsyncIteration returns default
+; ============================================================================
+extern exc_StopAsyncIteration_type
+extern current_exception
+global builtin_anext_fn
+AN_ITER    equ 8
+AN_DEFAULT equ 16
+AN_DEFTAG  equ 24
+AN_NARGS   equ 32
+AN_FRAME   equ 40
+DEF_FUNC builtin_anext_fn, AN_FRAME
+
+    cmp rsi, 1
+    jb .an_nargs_error
+    cmp rsi, 2
+    ja .an_nargs_error
+
+    mov [rbp - AN_NARGS], rsi
+
+    ; Save iterator
+    mov rax, [rdi]
+    mov [rbp - AN_ITER], rax
+
+    ; Save default if present
+    cmp rsi, 2
+    jb .an_no_default
+    mov rax, [rdi + 16]
+    mov [rbp - AN_DEFAULT], rax
+    mov eax, [rdi + 24]
+    mov [rbp - AN_DEFTAG], rax
+    jmp .an_call
+
+.an_no_default:
+    mov qword [rbp - AN_DEFAULT], 0
+    mov qword [rbp - AN_DEFTAG], 0
+
+.an_call:
+    ; Call tp_iternext
+    mov rdi, [rbp - AN_ITER]
+    mov rax, [rdi + PyObject.ob_type]
+    mov rax, [rax + PyTypeObject.tp_iternext]
+    test rax, rax
+    jz .an_type_error
+
+    mov rdi, [rbp - AN_ITER]
+    call rax                   ; returns (rax, edx)
+    test edx, edx
+    jnz .an_got_value
+
+    ; Got NULL — check if we have a default
+    cmp qword [rbp - AN_NARGS], 2
+    jb .an_reraise
+
+    ; Clear the exception and return default
+    mov qword [rel current_exception], 0
+    mov rax, [rbp - AN_DEFAULT]
+    mov edx, [rbp - AN_DEFTAG]
+    INCREF_VAL rax, rdx
+    leave
+    ret
+
+.an_got_value:
+    leave
+    ret
+
+.an_reraise:
+    ; No default — let the exception propagate
+    leave
+    ret
+
+.an_type_error:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "object is not an async iterator"
+    call raise_exception
+
+.an_nargs_error:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "anext() takes 1 or 2 arguments"
+    call raise_exception
+END_FUNC builtin_anext_fn
+
+; ============================================================================
+; builtin_import_fn(args, nargs) - __import__(name, ...)
+; Wraps import_module(name_str, fromlist=NULL, level=0)
+; Only uses first arg (name), ignores globals/locals/fromlist/level for now
+; ============================================================================
+extern import_module
+global builtin_import_fn
+DEF_FUNC builtin_import_fn
+
+    cmp rsi, 1
+    jb .imp_nargs_error
+
+    ; Get name string
+    mov rdi, [rdi]             ; name payload (must be str)
+    xor esi, esi               ; fromlist = NULL
+    xor edx, edx              ; level = 0
+    call import_module
+    ; Returns (rax=module, edx=TAG_PTR)
+    leave
+    ret
+
+.imp_nargs_error:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "__import__() requires at least 1 argument"
+    call raise_exception
+END_FUNC builtin_import_fn

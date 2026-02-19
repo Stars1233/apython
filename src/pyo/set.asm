@@ -927,6 +927,165 @@ set_iter_self:
 END_FUNC set_iter_self
 
 ;; ============================================================================
+;; frozenset_type_call(self, args, nargs) -> frozenset
+;; Same as set_type_call but creates frozenset (reuses set_new, sets ob_type)
+;; rdi = self (frozenset_type), rsi = args (16-byte fat slots), rdx = nargs
+;; ============================================================================
+global frozenset_type_call
+FTC_FRAME equ 8
+DEF_FUNC frozenset_type_call, FTC_FRAME
+    push rbx
+    push r12
+
+    ; nargs can be 0 or 1
+    cmp rdx, 0
+    je .ftc_empty
+    cmp rdx, 1
+    jne .ftc_error
+
+    ; frozenset(iterable): create set, iterate and add, then set type
+    mov r12, [rsi]          ; iterable payload
+    mov rcx, [rsi + 8]     ; iterable tag
+    cmp ecx, TAG_PTR
+    jne .ftc_not_iterable
+
+    call set_new
+    mov rbx, rax
+
+    ; Get iterator
+    mov rdi, r12
+    mov rax, [rdi + PyObject.ob_type]
+    mov rax, [rax + PyTypeObject.tp_iter]
+    test rax, rax
+    jz .ftc_not_iterable_decref
+    call rax
+    mov r12, rax
+
+.ftc_iter_loop:
+    mov rdi, r12
+    mov rax, [rdi + PyObject.ob_type]
+    mov rax, [rax + PyTypeObject.tp_iternext]
+    call rax
+    test edx, edx
+    jz .ftc_iter_done
+
+    mov rdi, rbx
+    mov rsi, rax
+    push rax
+    push rdx
+    push rdx
+    call set_add
+    add rsp, 8
+    pop rsi
+    pop rdi
+    DECREF_VAL rdi, rsi
+    jmp .ftc_iter_loop
+
+.ftc_iter_done:
+    mov rdi, r12
+    call obj_decref
+
+    ; Set type to frozenset_type
+    lea rax, [rel frozenset_type]
+    mov [rbx + PyObject.ob_type], rax
+    mov rax, rbx
+    mov edx, TAG_PTR
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.ftc_empty:
+    call set_new
+    lea rcx, [rel frozenset_type]
+    mov [rax + PyObject.ob_type], rcx
+    mov edx, TAG_PTR
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.ftc_not_iterable_decref:
+    mov rdi, rbx
+    call obj_decref
+.ftc_not_iterable:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "frozenset() argument is not iterable"
+    call raise_exception
+.ftc_error:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "frozenset() takes at most 1 argument"
+    call raise_exception
+END_FUNC frozenset_type_call
+
+
+;; ============================================================================
+;; Set number method wrappers (nb_* convention -> set_method_* convention)
+;; nb_* calling convention: rdi=left, rsi=right, rdx=ltag, rcx=rtag
+;; set_method calling convention: rdi=args_array, rsi=nargs
+;; ============================================================================
+
+extern set_method_union
+extern set_method_intersection
+extern set_method_difference
+extern set_method_symmetric_difference
+
+SNB_FRAME equ 32
+
+;; set_nb_or(left, right, ltag, rtag) -> new set (union)
+DEF_FUNC set_nb_or, SNB_FRAME
+    mov [rbp - 32], rdi         ; args[0].payload = left
+    mov [rbp - 24], rdx         ; args[0].tag = ltag
+    mov [rbp - 16], rsi         ; args[1].payload = right
+    mov [rbp - 8], rcx          ; args[1].tag = rtag
+    lea rdi, [rbp - 32]
+    mov esi, 2
+    call set_method_union
+    leave
+    ret
+END_FUNC set_nb_or
+
+;; set_nb_and(left, right, ltag, rtag) -> new set (intersection)
+DEF_FUNC set_nb_and, SNB_FRAME
+    mov [rbp - 32], rdi
+    mov [rbp - 24], rdx
+    mov [rbp - 16], rsi
+    mov [rbp - 8], rcx
+    lea rdi, [rbp - 32]
+    mov esi, 2
+    call set_method_intersection
+    leave
+    ret
+END_FUNC set_nb_and
+
+;; set_nb_sub(left, right, ltag, rtag) -> new set (difference)
+DEF_FUNC set_nb_sub, SNB_FRAME
+    mov [rbp - 32], rdi
+    mov [rbp - 24], rdx
+    mov [rbp - 16], rsi
+    mov [rbp - 8], rcx
+    lea rdi, [rbp - 32]
+    mov esi, 2
+    call set_method_difference
+    leave
+    ret
+END_FUNC set_nb_sub
+
+;; set_nb_xor(left, right, ltag, rtag) -> new set (symmetric_difference)
+DEF_FUNC set_nb_xor, SNB_FRAME
+    mov [rbp - 32], rdi
+    mov [rbp - 24], rdx
+    mov [rbp - 16], rsi
+    mov [rbp - 8], rcx
+    lea rdi, [rbp - 32]
+    mov esi, 2
+    call set_method_symmetric_difference
+    leave
+    ret
+END_FUNC set_nb_xor
+
+
+;; ============================================================================
 ;; Data section
 ;; ============================================================================
 section .data
@@ -935,6 +1094,32 @@ section .data
 set_iter_name: db "set_iterator", 0
 
 set_name_str: db "set", 0
+frozenset_name_str: db "frozenset", 0
+
+; Set number methods (for |, &, -, ^ operators)
+align 8
+set_number_methods:
+    dq 0                        ; nb_add          +0
+    dq set_nb_sub               ; nb_subtract     +8  (set difference -)
+    dq 0                        ; nb_multiply     +16
+    dq 0                        ; nb_remainder    +24
+    dq 0                        ; nb_divmod       +32
+    dq 0                        ; nb_power        +40
+    dq 0                        ; nb_negative     +48
+    dq 0                        ; nb_positive     +56
+    dq 0                        ; nb_absolute     +64
+    dq 0                        ; nb_bool         +72
+    dq 0                        ; nb_invert       +80
+    dq 0                        ; nb_lshift       +88
+    dq 0                        ; nb_rshift       +96
+    dq set_nb_and               ; nb_and          +104 (set intersection &)
+    dq set_nb_xor               ; nb_xor          +112 (set symmetric_difference ^)
+    dq set_nb_or                ; nb_or           +120 (set union |)
+    dq 0                        ; nb_int          +128
+    dq 0                        ; nb_float        +136
+    dq 0                        ; nb_floor_divide +144
+    dq 0                        ; nb_true_divide  +152
+    dq 0                        ; nb_index        +160
 
 ; Set sequence methods (for sq_contains -> "in" operator, and sq_length -> len())
 align 8
@@ -969,8 +1154,37 @@ set_type:
     dq 0                        ; tp_iternext
     dq 0                        ; tp_init
     dq 0                        ; tp_new
-    dq 0                        ; tp_as_number
+    dq set_number_methods       ; tp_as_number
     dq set_seq_methods          ; tp_as_sequence
+    dq 0                        ; tp_as_mapping
+    dq 0                        ; tp_base
+    dq 0                        ; tp_dict
+    dq 0                        ; tp_mro
+    dq 0                        ; tp_flags
+    dq 0                        ; tp_bases
+
+; Frozenset type object
+align 8
+global frozenset_type
+frozenset_type:
+    dq 1                        ; ob_refcnt (immortal)
+    dq type_type                ; ob_type
+    dq frozenset_name_str       ; tp_name
+    dq PyDictObject_size        ; tp_basicsize (reuse dict layout)
+    dq set_dealloc              ; tp_dealloc (same as set)
+    dq set_repr                 ; tp_repr (TODO: frozenset({...}) format)
+    dq set_repr                 ; tp_str
+    dq 0                        ; tp_hash (TODO: implement)
+    dq frozenset_type_call      ; tp_call
+    dq 0                        ; tp_getattr
+    dq 0                        ; tp_setattr
+    dq 0                        ; tp_richcompare
+    dq set_tp_iter              ; tp_iter (reuse set iter)
+    dq 0                        ; tp_iternext
+    dq 0                        ; tp_init
+    dq 0                        ; tp_new
+    dq set_number_methods       ; tp_as_number
+    dq set_seq_methods          ; tp_as_sequence (reuse set methods)
     dq 0                        ; tp_as_mapping
     dq 0                        ; tp_base
     dq 0                        ; tp_dict

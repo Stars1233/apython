@@ -233,18 +233,141 @@ section .text
 ;; Print each arg separated by spaces, followed by newline
 ;; Buffered: builds output in stack buffer, single fwrite() at end
 ;; ============================================================================
-DEF_FUNC builtin_print
+; Print frame layout
+PR_SEP       equ 8     ; sep string ptr (0 = default " ")
+PR_SEP_TAG   equ 16    ; sep tag
+PR_END       equ 24    ; end string ptr (0 = default "\n")
+PR_END_TAG   equ 32    ; end tag
+PR_FILE_FD   equ 40    ; file descriptor (1 = stdout)
+PR_BUF       equ 48    ; start of 4096 byte buffer
+PR_FRAME     equ 4144  ; total frame size (48 + 4096)
+
+extern kw_names_pending
+extern ap_strcmp
+extern smallstr_to_obj
+
+DEF_FUNC builtin_print, PR_FRAME
     push rbx
     push r12
     push r13
     push r14
     push r15
-    sub rsp, 4104               ; 4096 byte buffer + 8 alignment
 
     mov rbx, rdi                ; args array
     mov r12, rsi                ; nargs
     xor r13d, r13d              ; r13 = current arg index
     xor r15d, r15d              ; r15 = buffer write offset
+
+    ; Initialize defaults
+    mov qword [rbp - PR_SEP], 0       ; NULL = default " "
+    mov qword [rbp - PR_END], 0       ; NULL = default "\n"
+    mov qword [rbp - PR_FILE_FD], 1   ; stdout
+
+    ; Check for keyword arguments
+    mov rax, [rel kw_names_pending]
+    test rax, rax
+    jz .print_no_kw
+
+    ; Parse kwargs
+    mov rcx, [rax + PyTupleObject.ob_size]  ; n_kw
+    sub r12, rcx                             ; r12 = n_pos (positional count)
+    ; Process each kwarg
+    xor r9d, r9d                             ; kw index
+.print_kw_loop:
+    cmp r9, rcx
+    jge .print_kw_done
+    push rcx
+    push rax
+    push r9
+
+    ; Get kwarg name
+    mov r10, r9
+    shl r10, 4                     ; * 16 (fat tuple stride)
+    mov r10, [rax + PyTupleObject.ob_item + r10]  ; kw name str
+
+    ; Get kwarg value position: n_pos + kw_index
+    mov r11, r12                   ; n_pos
+    add r11, r9                    ; n_pos + kw_index
+    shl r11, 4                     ; * 16 for fat stride
+    ; value at [rbx + r11], tag at [rbx + r11 + 8]
+
+    ; Check "sep"
+    push r10
+    push r11
+    lea rdi, [r10 + PyStrObject.data]
+    CSTRING rsi, "sep"
+    call ap_strcmp
+    test eax, eax
+    pop r11
+    pop r10
+    jz .print_kw_sep
+
+    ; Check "end"
+    push r10
+    push r11
+    lea rdi, [r10 + PyStrObject.data]
+    CSTRING rsi, "end"
+    call ap_strcmp
+    test eax, eax
+    pop r11
+    pop r10
+    jz .print_kw_end
+
+    ; Check "file"
+    push r10
+    push r11
+    lea rdi, [r10 + PyStrObject.data]
+    CSTRING rsi, "file"
+    call ap_strcmp
+    test eax, eax
+    pop r11
+    pop r10
+    jz .print_kw_file
+
+    ; Check "flush" — accept but ignore
+    push r10
+    push r11
+    lea rdi, [r10 + PyStrObject.data]
+    CSTRING rsi, "flush"
+    call ap_strcmp
+    test eax, eax
+    pop r11
+    pop r10
+    jz .print_kw_next
+
+    ; Unknown keyword — skip (be lenient)
+    jmp .print_kw_next
+
+.print_kw_sep:
+    mov rax, [rbx + r11]
+    mov [rbp - PR_SEP], rax
+    mov rax, [rbx + r11 + 8]
+    mov [rbp - PR_SEP_TAG], rax
+    jmp .print_kw_next
+
+.print_kw_end:
+    mov rax, [rbx + r11]
+    mov [rbp - PR_END], rax
+    mov rax, [rbx + r11 + 8]
+    mov [rbp - PR_END_TAG], rax
+    jmp .print_kw_next
+
+.print_kw_file:
+    ; file kwarg: get file descriptor from file object
+    ; For now, just use fd=1 (stdout) — file= support is complex
+    jmp .print_kw_next
+
+.print_kw_next:
+    pop r9
+    pop rax
+    pop rcx
+    inc r9
+    jmp .print_kw_loop
+
+.print_kw_done:
+    mov qword [rel kw_names_pending], 0
+
+.print_no_kw:
 
 align 16
 .print_loop:
@@ -280,7 +403,7 @@ align 16
     jae .flush_and_write_direct
 
     ; Copy string data into buffer
-    lea rdi, [rbp - 4120 + r15] ; dest = buf + offset
+    lea rdi, [rbp - PR_FRAME + r15] ; dest = buf + offset
     lea rsi, [r14 + PyStrObject.data]  ; src = str data
     mov rdx, rcx                ; len
     ; Inline small copy (most strings are short)
@@ -296,12 +419,51 @@ align 16
     DECREF_VAL rdi, rsi
 
 .skip_arg:
-    ; Append space separator if not the last arg
+    ; Append separator if not the last arg
     inc r13
     cmp r13, r12
     jge .print_flush
 
-    mov byte [rbp - 4120 + r15], ' '
+    ; Check if custom sep was provided
+    cmp qword [rbp - PR_SEP], 0
+    jne .print_custom_sep
+
+    ; Default: single space
+    mov byte [rbp - PR_FRAME + r15], ' '
+    inc r15
+    jmp .print_loop
+
+.print_custom_sep:
+    ; Custom sep — check if None (means default " ")
+    mov rax, [rbp - PR_SEP_TAG]
+    cmp eax, TAG_NONE
+    je .print_default_sep_fallback
+    cmp eax, TAG_PTR
+    jne .print_default_sep_fallback
+
+    ; Heap string sep
+    mov rax, [rbp - PR_SEP]
+    ; Check if None singleton
+    lea rcx, [rel none_singleton]
+    cmp rax, rcx
+    je .print_default_sep_fallback
+
+    mov rcx, [rax + PyStrObject.ob_size]
+    ; Copy sep bytes into buffer
+    lea rdi, [rbp - PR_FRAME + r15]
+    lea rsi, [rax + PyStrObject.data]
+    mov rdx, rcx
+    test rcx, rcx
+    jz .print_sep_done
+    push rcx
+    call ap_memcpy
+    pop rcx
+.print_sep_done:
+    add r15, rcx
+    jmp .print_loop
+
+.print_default_sep_fallback:
+    mov byte [rbp - PR_FRAME + r15], ' '
     inc r15
     jmp .print_loop
 
@@ -311,7 +473,7 @@ align 16
     test r15, r15
     jz .write_direct
     mov edi, 1                  ; fd = stdout
-    lea rsi, [rbp - 4120]      ; buf
+    lea rsi, [rbp - PR_FRAME]      ; buf
     mov rdx, r15                ; len
     call sys_write
     xor r15d, r15d              ; reset offset
@@ -352,7 +514,7 @@ align 16
     mov [rsp + 8], rax         ; bytes 8-13
 
     ; Copy rcx bytes from rsp to buffer
-    lea rdi, [rbp - 4120 + r15]
+    lea rdi, [rbp - PR_FRAME + r15]
     mov rsi, rsp
     mov rdx, rcx
     test rcx, rcx
@@ -370,7 +532,7 @@ align 16
     jz .print_ss_direct
     push rcx                   ; save length
     mov edi, 1
-    lea rsi, [rbp - 4120]
+    lea rsi, [rbp - PR_FRAME]
     mov rdx, r15
     call sys_write
     xor r15d, r15d
@@ -392,13 +554,74 @@ align 16
     jmp .skip_arg
 
 .print_flush:
-    ; Append newline
-    mov byte [rbp - 4120 + r15], 10
+    ; Append end string (default: "\n")
+    cmp qword [rbp - PR_END], 0
+    jne .print_custom_end
+
+    ; Default: newline
+    mov byte [rbp - PR_FRAME + r15], 10
+    inc r15
+    jmp .print_do_flush
+
+.print_custom_end:
+    ; Check if None (means default "\n")
+    mov rax, [rbp - PR_END_TAG]
+    cmp eax, TAG_NONE
+    je .print_default_end
+    cmp eax, TAG_PTR
+    jne .print_default_end
+    mov rax, [rbp - PR_END]
+    lea rcx, [rel none_singleton]
+    cmp rax, rcx
+    je .print_default_end
+
+    ; Custom end string
+    ; Check if SmallStr
+    test qword [rbp - PR_END_TAG], (1 << 63)
+    jnz .print_end_smallstr
+
+    mov rcx, [rax + PyStrObject.ob_size]
+    lea rdi, [rbp - PR_FRAME + r15]
+    lea rsi, [rax + PyStrObject.data]
+    mov rdx, rcx
+    test rcx, rcx
+    jz .print_end_copy_done
+    push rcx
+    call ap_memcpy
+    pop rcx
+.print_end_copy_done:
+    add r15, rcx
+    jmp .print_do_flush
+
+.print_end_smallstr:
+    ; SmallStr end: spill to heap, copy, DECREF
+    mov rdi, [rbp - PR_END]
+    mov rsi, [rbp - PR_END_TAG]
+    call smallstr_to_obj
+    mov rcx, [rax + PyStrObject.ob_size]
+    push rax
+    push rcx
+    lea rdi, [rbp - PR_FRAME + r15]
+    lea rsi, [rax + PyStrObject.data]
+    mov rdx, rcx
+    test rcx, rcx
+    jz .print_end_ss_done
+    call ap_memcpy
+.print_end_ss_done:
+    pop rcx
+    add r15, rcx
+    pop rdi
+    call obj_decref
+    jmp .print_do_flush
+
+.print_default_end:
+    mov byte [rbp - PR_FRAME + r15], 10
     inc r15
 
+.print_do_flush:
     ; Single sys_write for entire output
-    mov edi, 1                  ; fd = stdout
-    lea rsi, [rbp - 4120]      ; buf
+    mov rdi, [rbp - PR_FILE_FD]  ; fd (1 = stdout)
+    lea rsi, [rbp - PR_FRAME]      ; buf
     mov rdx, r15                ; len
     call sys_write
 
@@ -406,7 +629,6 @@ align 16
     lea rax, [rel none_singleton]
     inc qword [rax + PyObject.ob_refcnt]
 
-    add rsp, 4104
     pop r15
     pop r14
     pop r13
@@ -1931,6 +2153,87 @@ DEF_FUNC builtins_init
     lea rdx, [rel builtin_open_fn]
     call add_builtin
 
+    ; bin
+    mov rdi, rbx
+    lea rsi, [rel bi_name_bin]
+    extern builtin_bin
+    lea rdx, [rel builtin_bin]
+    call add_builtin
+
+    ; oct
+    mov rdi, rbx
+    lea rsi, [rel bi_name_oct]
+    extern builtin_oct
+    lea rdx, [rel builtin_oct]
+    call add_builtin
+
+    ; ascii
+    mov rdi, rbx
+    lea rsi, [rel bi_name_ascii]
+    extern builtin_ascii_fn
+    lea rdx, [rel builtin_ascii_fn]
+    call add_builtin
+
+    ; format
+    mov rdi, rbx
+    lea rsi, [rel bi_name_format]
+    extern builtin_format_fn
+    lea rdx, [rel builtin_format_fn]
+    call add_builtin
+
+    ; vars
+    mov rdi, rbx
+    lea rsi, [rel bi_name_vars]
+    extern builtin_vars_fn
+    lea rdx, [rel builtin_vars_fn]
+    call add_builtin
+
+    ; delattr
+    mov rdi, rbx
+    lea rsi, [rel bi_name_delattr]
+    extern builtin_delattr_fn
+    lea rdx, [rel builtin_delattr_fn]
+    call add_builtin
+
+    ; aiter
+    mov rdi, rbx
+    lea rsi, [rel bi_name_aiter]
+    extern builtin_aiter_fn
+    lea rdx, [rel builtin_aiter_fn]
+    call add_builtin
+
+    ; anext
+    mov rdi, rbx
+    lea rsi, [rel bi_name_anext]
+    extern builtin_anext_fn
+    lea rdx, [rel builtin_anext_fn]
+    call add_builtin
+
+    ; __import__
+    mov rdi, rbx
+    lea rsi, [rel bi_name___import__]
+    extern builtin_import_fn
+    lea rdx, [rel builtin_import_fn]
+    call add_builtin
+
+    ; slice
+    mov rdi, rbx
+    lea rsi, [rel bi_name_slice]
+    extern slice_type
+    extern slice_type_call
+    lea rdx, [rel slice_type]
+    lea rcx, [rel slice_type_call]
+    call add_builtin_type
+
+    ; frozenset
+    mov rdi, rbx
+    lea rsi, [rel bi_name_frozenset]
+    extern frozenset_type
+    extern frozenset_type_call
+    lea rdx, [rel frozenset_type]
+    lea rcx, [rel frozenset_type_call]
+    call add_builtin_type
+
     ; Return builtins dict
     mov rax, rbx
 
@@ -2074,6 +2377,17 @@ bi_name_round:             db "round", 0
 bi_name_pow:               db "pow", 0
 bi_name_input:             db "input", 0
 bi_name_open:              db "open", 0
+bi_name_bin:               db "bin", 0
+bi_name_oct:               db "oct", 0
+bi_name_ascii:             db "ascii", 0
+bi_name_format:            db "format", 0
+bi_name_vars:              db "vars", 0
+bi_name_delattr:           db "delattr", 0
+bi_name_aiter:             db "aiter", 0
+bi_name_anext:             db "anext", 0
+bi_name___import__:        db "__import__", 0
+bi_name_slice:             db "slice", 0
+bi_name_frozenset:         db "frozenset", 0
 
 section .data
 
