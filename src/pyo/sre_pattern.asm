@@ -1,0 +1,1793 @@
+; sre_pattern.asm - SRE_Pattern type implementation
+; Provides match/search/fullmatch/findall/finditer/sub/subn/split methods.
+
+%include "macros.inc"
+%include "object.inc"
+%include "types.inc"
+%include "builtins.inc"
+%include "sre.inc"
+
+extern ap_malloc
+extern ap_free
+extern ap_realloc
+extern ap_memcpy
+extern obj_decref
+extern obj_incref
+extern obj_dealloc
+extern str_from_cstr_heap
+extern str_new_heap
+extern str_concat
+extern int_from_i64
+extern dict_new
+extern dict_set
+extern dict_get
+extern list_new
+extern list_append
+extern tuple_new
+extern none_singleton
+extern raise_exception
+extern exc_TypeError_type
+extern exc_ValueError_type
+extern type_type
+extern str_type
+extern builtin_func_new
+extern method_new
+
+; SRE engine functions
+extern sre_match
+extern sre_search
+extern sre_state_init
+extern sre_state_fini
+extern sre_string_len
+
+; SRE match object
+extern sre_match_new
+extern sre_match_type
+
+; ============================================================================
+; Forward declarations
+; ============================================================================
+
+; ============================================================================
+; sre_pattern_dealloc(PyObject* self)
+; ============================================================================
+DEF_FUNC sre_pattern_dealloc
+    push rbx
+    mov rbx, rdi
+
+    ; DECREF pattern string
+    mov rdi, [rbx + SRE_PatternObject.pattern]
+    test rdi, rdi
+    jz .no_pattern
+    call obj_decref
+.no_pattern:
+
+    ; DECREF groupindex
+    mov rdi, [rbx + SRE_PatternObject.groupindex]
+    test rdi, rdi
+    jz .no_gi
+    call obj_decref
+.no_gi:
+
+    ; DECREF indexgroup
+    mov rdi, [rbx + SRE_PatternObject.indexgroup]
+    test rdi, rdi
+    jz .no_ig
+    call obj_decref
+.no_ig:
+
+    ; Free code array
+    mov rdi, [rbx + SRE_PatternObject.code]
+    test rdi, rdi
+    jz .no_code
+    call ap_free
+.no_code:
+
+    ; Free object
+    mov rdi, rbx
+    call ap_free
+
+    pop rbx
+    leave
+    ret
+END_FUNC sre_pattern_dealloc
+
+; ============================================================================
+; sre_pattern_repr(PyObject* self) -> PyObject*
+; ============================================================================
+DEF_FUNC sre_pattern_repr
+    CSTRING rdi, "re.compile(...)"
+    call str_from_cstr_heap
+    leave
+    ret
+END_FUNC sre_pattern_repr
+
+; ============================================================================
+; Helper: run match/search/fullmatch and return MatchObject or None
+; rdi = pattern obj, rsi = string, rdx = pos, rcx = endpos,
+; r8 = mode (0=match, 1=search, 2=fullmatch)
+; ============================================================================
+PM_PAT      equ 8
+PM_STR      equ 16
+PM_POS      equ 24
+PM_ENDPOS   equ 32
+PM_MODE     equ 40
+PM_STATE    equ 40 + SRE_State_size  ; state base at BOTTOM of frame
+PM_FRAME    equ 40 + SRE_State_size
+
+DEF_FUNC sre_pattern_do_match, PM_FRAME
+    push rbx
+    push r12
+    push r13
+    push r14
+
+    mov [rbp - PM_PAT], rdi
+    mov [rbp - PM_STR], rsi
+    mov [rbp - PM_POS], rdx
+    mov [rbp - PM_ENDPOS], rcx
+    mov [rbp - PM_MODE], r8
+
+    ; Initialize state
+    lea rdi, [rbp - PM_STATE]
+    mov rsi, [rbp - PM_PAT]
+    mov rdx, [rbp - PM_STR]
+    mov rcx, [rbp - PM_POS]
+    mov r8, [rbp - PM_ENDPOS]
+    call sre_state_init
+
+    ; Set fullmatch mode if applicable
+    mov rax, [rbp - PM_MODE]
+    cmp rax, 2
+    jne .no_fullmatch
+    lea rdi, [rbp - PM_STATE]
+    mov dword [rdi + SRE_State.match_all], 1
+.no_fullmatch:
+
+    ; Run match or search
+    mov rax, [rbp - PM_MODE]
+    cmp rax, 1
+    je .do_search
+
+    ; match/fullmatch: try at pos only
+    lea rdi, [rbp - PM_STATE]
+    mov rsi, [rbp - PM_PAT]
+    mov rsi, [rsi + SRE_PatternObject.code]
+    call sre_match
+    jmp .check_result
+
+.do_search:
+    lea rdi, [rbp - PM_STATE]
+    call sre_search
+
+.check_result:
+    test eax, eax
+    jz .no_match
+
+    ; Create SRE_MatchObject
+    lea rdi, [rbp - PM_STATE]
+    mov rsi, [rbp - PM_PAT]
+    mov rdx, [rbp - PM_STR]
+    call sre_match_new
+    mov r12, rax               ; match object
+
+    ; Clean up state
+    lea rdi, [rbp - PM_STATE]
+    call sre_state_fini
+
+    mov rax, r12
+    mov edx, TAG_PTR
+
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.no_match:
+    lea rdi, [rbp - PM_STATE]
+    call sre_state_fini
+
+    ; Return None
+    xor eax, eax
+    mov edx, TAG_NONE
+
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC sre_pattern_do_match
+
+; ============================================================================
+; sre_pattern_match_method(self, args, nargs)
+; Pattern.match(string, pos=0, endpos=sys.maxsize)
+; ============================================================================
+DEF_FUNC sre_pattern_match_method
+    ; rdi = args (fat array), rsi = nargs
+    ; args[0] = self (pattern), args[1..] = user args
+    push rbx
+    push r12
+    mov rbx, [rdi]             ; pattern = args[0] payload
+    lea r12, [rdi + 16]        ; user args start at args[1]
+    lea rdx, [rsi - 1]         ; user nargs
+
+    ; Get string arg
+    cmp rdx, 0
+    je .match_error
+    mov rsi, [r12]             ; string payload
+
+    ; pos (default 0)
+    xor ecx, ecx
+    cmp rdx, 2
+    jb .match_no_pos
+    mov rcx, [r12 + 16]       ; pos
+.match_no_pos:
+    mov rdx, rcx               ; rdx = pos
+
+    ; endpos (default large)
+    mov rcx, 0x7FFFFFFFFFFFFFFF
+
+    mov rdi, rbx               ; pattern
+    ; rsi already = string
+    ; rdx = pos
+    ; rcx = endpos
+    xor r8d, r8d               ; mode = 0 (match)
+    call sre_pattern_do_match
+
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.match_error:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "match() requires a string argument"
+    call raise_exception
+END_FUNC sre_pattern_match_method
+
+; ============================================================================
+; sre_pattern_search_method(self, args, nargs)
+; ============================================================================
+DEF_FUNC sre_pattern_search_method
+    ; rdi = args (fat array), rsi = nargs
+    push rbx
+    push r12
+    mov rbx, [rdi]             ; pattern = args[0] payload
+    lea r12, [rdi + 16]        ; user args
+    lea rdx, [rsi - 1]         ; user nargs
+
+    cmp rdx, 0
+    je .search_error
+    mov rsi, [r12]             ; string payload
+
+    xor edx, edx               ; pos = 0
+    mov rcx, 0x7FFFFFFFFFFFFFFF  ; endpos = max
+    mov rdi, rbx
+    mov r8d, 1                 ; mode = search
+    call sre_pattern_do_match
+
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.search_error:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "search() requires a string argument"
+    call raise_exception
+END_FUNC sre_pattern_search_method
+
+; ============================================================================
+; sre_pattern_fullmatch_method(self, args, nargs)
+; ============================================================================
+DEF_FUNC sre_pattern_fullmatch_method
+    ; rdi = args (fat array), rsi = nargs
+    push rbx
+    push r12
+    mov rbx, [rdi]             ; pattern = args[0] payload
+    lea r12, [rdi + 16]        ; user args
+    lea rdx, [rsi - 1]         ; user nargs
+
+    cmp rdx, 0
+    je .fm_error
+    mov rsi, [r12]             ; string payload
+
+    xor edx, edx
+    mov rcx, 0x7FFFFFFFFFFFFFFF
+    mov rdi, rbx
+    mov r8d, 2                 ; mode = fullmatch
+    call sre_pattern_do_match
+
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.fm_error:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "fullmatch() requires a string argument"
+    call raise_exception
+END_FUNC sre_pattern_fullmatch_method
+
+; ============================================================================
+; sre_pattern_findall_method(self, args, nargs)
+; Returns list of all non-overlapping matches.
+; If pattern has no groups: list of matched strings.
+; If 1 group: list of group(1) strings.
+; If >1 groups: list of tuples.
+; ============================================================================
+FA_PAT      equ 8
+FA_STR      equ 16
+FA_LIST     equ 24
+FA_STATE    equ 24 + SRE_State_size   ; state base at BOTTOM of frame
+FA_FRAME    equ 24 + SRE_State_size
+
+DEF_FUNC sre_pattern_findall_method, FA_FRAME
+    ; rdi = args (fat array), rsi = nargs
+    push rbx
+    push r12
+    push r13
+    push r14
+    push r15
+
+    mov rax, [rdi]             ; pattern = args[0] payload
+    mov [rbp - FA_PAT], rax
+    lea rdx, [rsi - 1]         ; user nargs
+    cmp rdx, 0
+    je .fa_error
+
+    mov rax, [rdi + 16]       ; string = args[1] payload
+    mov [rbp - FA_STR], rax
+
+    ; Create result list
+    xor edi, edi
+    call list_new
+    mov [rbp - FA_LIST], rax
+    mov r14, rax               ; r14 = result list
+
+    ; Init state
+    lea rdi, [rbp - FA_STATE]
+    mov rsi, [rbp - FA_PAT]
+    mov rdx, [rbp - FA_STR]
+    xor ecx, ecx               ; pos = 0
+    mov r8, 0x7FFFFFFFFFFFFFFF
+    call sre_state_init
+
+    mov r12, [rbp - FA_PAT]   ; pattern
+    mov r15d, [r12 + SRE_PatternObject.groups]  ; number of groups
+
+.fa_loop:
+    ; Reset marks
+    lea rdi, [rbp - FA_STATE]
+    mov qword [rdi + SRE_State.marks_size], 0
+    mov qword [rdi + SRE_State.lastmark], -1
+    mov qword [rdi + SRE_State.lastindex], -1
+    mov qword [rdi + SRE_State.repeat_ctx], 0
+
+    ; Search
+    lea rdi, [rbp - FA_STATE]
+    call sre_search
+    test eax, eax
+    jz .fa_done
+
+    ; Found a match. What to append depends on groups.
+    cmp r15d, 0
+    je .fa_no_groups
+    cmp r15d, 1
+    je .fa_one_group
+
+    ; Multiple groups: create tuple of group strings
+    ; (for now, simplified: just add whole match)
+    jmp .fa_no_groups
+
+.fa_no_groups:
+    ; Append matched substring
+    lea rdi, [rbp - FA_STATE]
+    mov rax, [rdi + SRE_State.str_start]  ; match start
+    mov rcx, [rdi + SRE_State.str_pos]    ; match end
+    ; Get substring from string
+    mov rsi, [rbp - FA_STR]
+    push rcx
+    push rax
+    ; For ASCII: substring from str_begin[start..end]
+    mov rdi, [rbp - FA_STATE + SRE_State.str_begin]
+    pop rax
+    pop rcx
+    ; Create substring
+    push rcx
+    lea rdi, [rdi + rax]       ; start ptr (wrong for codepoint mode, but OK for ASCII)
+    mov rsi, rcx
+    sub rsi, rax               ; length
+    call str_new_heap
+    pop rcx
+    ; Append to list
+    mov rdi, r14
+    mov rsi, rax
+    mov edx, TAG_PTR
+    push rcx
+    push rax
+    call list_append
+    pop rdi
+    call obj_decref            ; DECREF the new string (list_append INCREF'd)
+    pop rcx
+    jmp .fa_advance
+
+.fa_one_group:
+    ; Append group(1) string
+    ; Get mark 2 (start) and mark 3 (end) — group 1 marks are at index 2,3
+    lea rdi, [rbp - FA_STATE]
+    mov rax, [rdi + SRE_State.marks]
+    ; Check marks_size >= 4
+    cmp qword [rdi + SRE_State.marks_size], 4
+    jb .fa_no_groups           ; fallback to whole match
+    mov r8, [rax + 16]        ; mark[2] = group 1 start
+    mov r9, [rax + 24]        ; mark[3] = group 1 end
+    cmp r8, -1
+    je .fa_append_none
+    cmp r9, -1
+    je .fa_append_none
+
+    ; Create substring for group 1
+    mov rdi, [rbp - FA_STATE + SRE_State.str_begin]
+    lea rdi, [rdi + r8]
+    mov rsi, r9
+    sub rsi, r8
+    push qword [rbp - FA_STATE + SRE_State.str_pos]
+    call str_new_heap
+    mov rdi, r14
+    mov rsi, rax
+    mov edx, TAG_PTR
+    push rax
+    call list_append
+    pop rdi
+    call obj_decref
+    pop rcx
+    lea rdi, [rbp - FA_STATE]
+    mov rcx, [rdi + SRE_State.str_pos]
+    jmp .fa_advance
+
+.fa_append_none:
+    ; Group not matched — append None
+    mov rdi, r14
+    xor esi, esi
+    mov edx, TAG_NONE
+    call list_append
+    lea rdi, [rbp - FA_STATE]
+    mov rcx, [rdi + SRE_State.str_pos]
+    jmp .fa_advance
+
+.fa_advance:
+    ; Advance position past the match
+    lea rdi, [rbp - FA_STATE]
+    mov rax, [rdi + SRE_State.str_start]
+    cmp rcx, rax
+    jne .fa_advance_ok
+    ; Zero-width match: advance by 1 to avoid infinite loop
+    inc rcx
+.fa_advance_ok:
+    lea rdi, [rbp - FA_STATE]
+    mov [rdi + SRE_State.str_pos], rcx
+    mov [rdi + SRE_State.str_start], rcx
+
+    ; Check if past end
+    push rcx
+    lea rdi, [rbp - FA_STATE]
+    call sre_string_len
+    pop rcx
+    cmp rcx, rax
+    ja .fa_done
+
+    jmp .fa_loop
+
+.fa_done:
+    lea rdi, [rbp - FA_STATE]
+    call sre_state_fini
+
+    mov rax, r14
+    mov edx, TAG_PTR
+
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.fa_error:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "findall() requires a string argument"
+    call raise_exception
+END_FUNC sre_pattern_findall_method
+
+; ============================================================================
+; sre_pattern_sub_method(self, args, nargs)
+; Pattern.sub(repl, string, count=0)
+; ============================================================================
+SUB_PAT     equ 8
+SUB_REPL    equ 16
+SUB_STR     equ 24
+SUB_COUNT   equ 32
+SUB_RESULT  equ 40
+SUB_NSUBS   equ 48
+SUB_LASTEND equ 56
+SUB_STATE   equ 56 + SRE_State_size  ; state base at BOTTOM of frame
+SUB_FRAME   equ 56 + SRE_State_size
+
+DEF_FUNC sre_pattern_sub_method, SUB_FRAME
+    ; rdi = args (fat array), rsi = nargs
+    push rbx
+    push r12
+    push r13
+    push r14
+    push r15
+
+    mov rax, [rdi]             ; pattern = args[0] payload
+    mov [rbp - SUB_PAT], rax
+    lea rdx, [rsi - 1]         ; user nargs
+    cmp rdx, 2
+    jb .sub_error
+
+    ; repl = user_args[0], string = user_args[1]
+    mov rax, [rdi + 16]       ; args[1] = repl
+    mov [rbp - SUB_REPL], rax
+    mov rax, [rdi + 32]       ; args[2] = string
+    mov [rbp - SUB_STR], rax
+
+    ; count = user_args[2] if user_nargs >= 3, else 0
+    xor eax, eax
+    cmp rdx, 3
+    jb .sub_no_count
+    mov rax, [rdi + 48]       ; args[3] = count
+.sub_no_count:
+    mov [rbp - SUB_COUNT], rax
+    mov qword [rbp - SUB_NSUBS], 0
+    mov qword [rbp - SUB_LASTEND], 0
+
+    ; Create empty result string
+    CSTRING rdi, ""
+    call str_from_cstr_heap
+    mov [rbp - SUB_RESULT], rax
+
+    ; Init state
+    lea rdi, [rbp - SUB_STATE]
+    mov rsi, [rbp - SUB_PAT]
+    mov rdx, [rbp - SUB_STR]
+    xor ecx, ecx
+    mov r8, 0x7FFFFFFFFFFFFFFF
+    call sre_state_init
+
+.sub_loop:
+    ; Check count limit
+    mov rax, [rbp - SUB_COUNT]
+    test rax, rax
+    jz .sub_search              ; 0 means unlimited
+    cmp [rbp - SUB_NSUBS], rax
+    jge .sub_finish
+
+.sub_search:
+    lea rdi, [rbp - SUB_STATE]
+    mov qword [rdi + SRE_State.marks_size], 0
+    mov qword [rdi + SRE_State.lastmark], -1
+    mov qword [rdi + SRE_State.lastindex], -1
+    mov qword [rdi + SRE_State.repeat_ctx], 0
+    call sre_search
+    test eax, eax
+    jz .sub_finish
+
+    ; Get match start and end
+    lea rdi, [rbp - SUB_STATE]
+    mov r12, [rdi + SRE_State.str_start]  ; match start (char index)
+    mov r13, [rdi + SRE_State.str_pos]    ; match end (char index)
+
+    ; Append unmatched text before this match
+    mov rax, [rbp - SUB_LASTEND]
+    cmp rax, r12
+    jge .sub_no_prefix
+    ; Substring from lastend to match_start
+    lea rdi, [rbp - SUB_STATE]
+    mov rdi, [rdi + SRE_State.str_begin]
+    add rdi, rax               ; start
+    mov rsi, r12
+    sub rsi, rax               ; length
+    call str_new_heap
+    ; Concat with result
+    mov rdi, [rbp - SUB_RESULT]
+    mov rsi, rax
+    mov ecx, TAG_PTR
+    push rax                   ; save for DECREF
+    call str_concat
+    push rax                   ; save new result
+    mov rdi, [rbp - SUB_RESULT]
+    call obj_decref
+    pop rax
+    mov [rbp - SUB_RESULT], rax
+    pop rdi
+    call obj_decref
+.sub_no_prefix:
+
+    ; Append replacement string
+    mov rdi, [rbp - SUB_RESULT]
+    mov rsi, [rbp - SUB_REPL]
+    mov ecx, TAG_PTR
+    call str_concat
+    push rax
+    mov rdi, [rbp - SUB_RESULT]
+    call obj_decref
+    pop rax
+    mov [rbp - SUB_RESULT], rax
+
+    ; Update state
+    mov [rbp - SUB_LASTEND], r13
+    inc qword [rbp - SUB_NSUBS]
+
+    ; Advance past match
+    cmp r13, r12
+    jne .sub_advance_ok
+    inc r13                    ; zero-width match
+.sub_advance_ok:
+    lea rdi, [rbp - SUB_STATE]
+    mov [rdi + SRE_State.str_pos], r13
+    mov [rdi + SRE_State.str_start], r13
+
+    ; Check if past end
+    push r13
+    lea rdi, [rbp - SUB_STATE]
+    call sre_string_len
+    pop r13
+    cmp r13, rax
+    ja .sub_finish
+
+    jmp .sub_loop
+
+.sub_finish:
+    ; Append remaining text after last match
+    lea rdi, [rbp - SUB_STATE]
+    call sre_string_len
+    mov rcx, rax               ; string length
+    mov rax, [rbp - SUB_LASTEND]
+    cmp rax, rcx
+    jge .sub_done
+
+    lea rdi, [rbp - SUB_STATE]
+    mov rdi, [rdi + SRE_State.str_begin]
+    add rdi, rax
+    mov rsi, rcx
+    sub rsi, rax
+    call str_new_heap
+    mov rdi, [rbp - SUB_RESULT]
+    mov rsi, rax
+    mov ecx, TAG_PTR
+    push rax
+    call str_concat
+    push rax
+    mov rdi, [rbp - SUB_RESULT]
+    call obj_decref
+    pop rax
+    mov [rbp - SUB_RESULT], rax
+    pop rdi
+    call obj_decref
+
+.sub_done:
+    lea rdi, [rbp - SUB_STATE]
+    call sre_state_fini
+
+    mov rax, [rbp - SUB_RESULT]
+    mov edx, TAG_PTR
+
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.sub_error:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "sub() requires repl and string arguments"
+    call raise_exception
+END_FUNC sre_pattern_sub_method
+
+; ============================================================================
+; sre_pattern_subn_method(self, args, nargs)
+; Like sub but returns (result, count) tuple.
+; Duplicated sub loop with count tracking.
+; ============================================================================
+SN_PAT     equ 8
+SN_REPL    equ 16
+SN_STR     equ 24
+SN_COUNT   equ 32
+SN_RESULT  equ 40
+SN_NSUBS   equ 48
+SN_LASTEND equ 56
+SN_STATE   equ 56 + SRE_State_size
+SN_FRAME   equ 56 + SRE_State_size
+
+DEF_FUNC sre_pattern_subn_method, SN_FRAME
+    push rbx
+    push r12
+    push r13
+    push r14
+    push r15
+
+    mov rax, [rdi]
+    mov [rbp - SN_PAT], rax
+    lea rdx, [rsi - 1]
+    cmp rdx, 2
+    jb .subn_error
+
+    mov rax, [rdi + 16]
+    mov [rbp - SN_REPL], rax
+    mov rax, [rdi + 32]
+    mov [rbp - SN_STR], rax
+
+    xor eax, eax
+    cmp rdx, 3
+    jb .subn_no_count
+    mov rax, [rdi + 48]
+.subn_no_count:
+    mov [rbp - SN_COUNT], rax
+    mov qword [rbp - SN_NSUBS], 0
+    mov qword [rbp - SN_LASTEND], 0
+
+    CSTRING rdi, ""
+    call str_from_cstr_heap
+    mov [rbp - SN_RESULT], rax
+
+    lea rdi, [rbp - SN_STATE]
+    mov rsi, [rbp - SN_PAT]
+    mov rdx, [rbp - SN_STR]
+    xor ecx, ecx
+    mov r8, 0x7FFFFFFFFFFFFFFF
+    call sre_state_init
+
+.subn_loop:
+    mov rax, [rbp - SN_COUNT]
+    test rax, rax
+    jz .subn_search
+    cmp [rbp - SN_NSUBS], rax
+    jge .subn_finish
+
+.subn_search:
+    lea rdi, [rbp - SN_STATE]
+    mov qword [rdi + SRE_State.marks_size], 0
+    mov qword [rdi + SRE_State.lastmark], -1
+    mov qword [rdi + SRE_State.lastindex], -1
+    mov qword [rdi + SRE_State.repeat_ctx], 0
+    call sre_search
+    test eax, eax
+    jz .subn_finish
+
+    lea rdi, [rbp - SN_STATE]
+    mov r12, [rdi + SRE_State.str_start]
+    mov r13, [rdi + SRE_State.str_pos]
+
+    mov rax, [rbp - SN_LASTEND]
+    cmp rax, r12
+    jge .subn_no_prefix
+    lea rdi, [rbp - SN_STATE]
+    mov rdi, [rdi + SRE_State.str_begin]
+    add rdi, rax
+    mov rsi, r12
+    sub rsi, rax
+    call str_new_heap
+    mov rdi, [rbp - SN_RESULT]
+    mov rsi, rax
+    mov ecx, TAG_PTR
+    push rax
+    call str_concat
+    push rax
+    mov rdi, [rbp - SN_RESULT]
+    call obj_decref
+    pop rax
+    mov [rbp - SN_RESULT], rax
+    pop rdi
+    call obj_decref
+.subn_no_prefix:
+
+    mov rdi, [rbp - SN_RESULT]
+    mov rsi, [rbp - SN_REPL]
+    mov ecx, TAG_PTR
+    call str_concat
+    push rax
+    mov rdi, [rbp - SN_RESULT]
+    call obj_decref
+    pop rax
+    mov [rbp - SN_RESULT], rax
+
+    mov [rbp - SN_LASTEND], r13
+    inc qword [rbp - SN_NSUBS]
+
+    cmp r13, r12
+    jne .subn_advance_ok
+    inc r13
+.subn_advance_ok:
+    lea rdi, [rbp - SN_STATE]
+    mov [rdi + SRE_State.str_pos], r13
+    mov [rdi + SRE_State.str_start], r13
+
+    push r13
+    lea rdi, [rbp - SN_STATE]
+    call sre_string_len
+    pop r13
+    cmp r13, rax
+    ja .subn_finish
+
+    jmp .subn_loop
+
+.subn_finish:
+    lea rdi, [rbp - SN_STATE]
+    call sre_string_len
+    mov rcx, rax
+    mov rax, [rbp - SN_LASTEND]
+    cmp rax, rcx
+    jge .subn_build_tuple
+
+    lea rdi, [rbp - SN_STATE]
+    mov rdi, [rdi + SRE_State.str_begin]
+    add rdi, rax
+    mov rsi, rcx
+    sub rsi, rax
+    call str_new_heap
+    mov rdi, [rbp - SN_RESULT]
+    mov rsi, rax
+    mov ecx, TAG_PTR
+    push rax
+    call str_concat
+    push rax
+    mov rdi, [rbp - SN_RESULT]
+    call obj_decref
+    pop rax
+    mov [rbp - SN_RESULT], rax
+    pop rdi
+    call obj_decref
+
+.subn_build_tuple:
+    lea rdi, [rbp - SN_STATE]
+    call sre_state_fini
+
+    ; Create (result, nsubs) tuple
+    mov edi, 2
+    call tuple_new
+    mov rbx, rax
+
+    mov r12, [rbp - SN_RESULT]
+    inc qword [r12 + PyObject.ob_refcnt]
+    mov [rbx + PyTupleObject.ob_item], r12
+    mov qword [rbx + PyTupleObject.ob_item + 8], TAG_PTR
+
+    mov rax, [rbp - SN_NSUBS]
+    mov [rbx + PyTupleObject.ob_item + 16], rax
+    mov qword [rbx + PyTupleObject.ob_item + 24], TAG_SMALLINT
+
+    ; DECREF result string (tuple holds a ref)
+    mov rdi, r12
+    call obj_decref
+
+    mov rax, rbx
+    mov edx, TAG_PTR
+
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.subn_error:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "subn() requires repl and string arguments"
+    call raise_exception
+END_FUNC sre_pattern_subn_method
+
+; ============================================================================
+; sre_pattern_split_method(self, args, nargs)
+; Pattern.split(string, maxsplit=0)
+; ============================================================================
+SP_PAT      equ 8
+SP_STR      equ 16
+SP_MAX      equ 24
+SP_LIST     equ 32
+SP_NSPLIT   equ 40
+SP_LASTEND  equ 48
+SP_STATE    equ 48 + SRE_State_size  ; state base at BOTTOM of frame
+SP_FRAME    equ 48 + SRE_State_size
+
+DEF_FUNC sre_pattern_split_method, SP_FRAME
+    ; rdi = args (fat array), rsi = nargs
+    push rbx
+    push r12
+    push r13
+    push r14
+
+    mov rax, [rdi]             ; pattern = args[0] payload
+    mov [rbp - SP_PAT], rax
+    lea rdx, [rsi - 1]         ; user nargs
+    cmp rdx, 0
+    je .split_error
+
+    mov rax, [rdi + 16]       ; string = args[1] payload
+    mov [rbp - SP_STR], rax
+
+    ; maxsplit
+    xor eax, eax
+    cmp rdx, 2
+    jb .split_no_max
+    mov rax, [rdi + 32]       ; args[2] = maxsplit
+.split_no_max:
+    mov [rbp - SP_MAX], rax
+    mov qword [rbp - SP_NSPLIT], 0
+    mov qword [rbp - SP_LASTEND], 0
+
+    ; Create result list
+    xor edi, edi
+    call list_new
+    mov r14, rax
+
+    ; Init state
+    lea rdi, [rbp - SP_STATE]
+    mov rsi, [rbp - SP_PAT]
+    mov rdx, [rbp - SP_STR]
+    xor ecx, ecx
+    mov r8, 0x7FFFFFFFFFFFFFFF
+    call sre_state_init
+
+.split_loop:
+    mov rax, [rbp - SP_MAX]
+    test rax, rax
+    jz .split_search
+    cmp [rbp - SP_NSPLIT], rax
+    jge .split_finish
+
+.split_search:
+    lea rdi, [rbp - SP_STATE]
+    mov qword [rdi + SRE_State.marks_size], 0
+    mov qword [rdi + SRE_State.lastmark], -1
+    mov qword [rdi + SRE_State.lastindex], -1
+    mov qword [rdi + SRE_State.repeat_ctx], 0
+    call sre_search
+    test eax, eax
+    jz .split_finish
+
+    lea rdi, [rbp - SP_STATE]
+    mov r12, [rdi + SRE_State.str_start]
+    mov r13, [rdi + SRE_State.str_pos]
+
+    ; Skip zero-width matches at start
+    cmp r13, r12
+    jne .split_nonzero
+    cmp r12, [rbp - SP_LASTEND]
+    je .split_advance_skip
+.split_nonzero:
+
+    ; Append text before match
+    mov rax, [rbp - SP_LASTEND]
+    lea rdi, [rbp - SP_STATE]
+    mov rdi, [rdi + SRE_State.str_begin]
+    add rdi, rax
+    mov rsi, r12
+    sub rsi, rax
+    call str_new_heap
+    mov rdi, r14
+    mov rsi, rax
+    mov edx, TAG_PTR
+    push rax
+    call list_append
+    pop rdi
+    call obj_decref
+
+    mov [rbp - SP_LASTEND], r13
+    inc qword [rbp - SP_NSPLIT]
+
+.split_advance_skip:
+    ; Advance
+    cmp r13, r12
+    jne .split_adv_ok
+    inc r13
+.split_adv_ok:
+    lea rdi, [rbp - SP_STATE]
+    mov [rdi + SRE_State.str_pos], r13
+    mov [rdi + SRE_State.str_start], r13
+
+    push r13
+    lea rdi, [rbp - SP_STATE]
+    call sre_string_len
+    pop r13
+    cmp r13, rax
+    ja .split_finish
+    jmp .split_loop
+
+.split_finish:
+    ; Append remaining text
+    lea rdi, [rbp - SP_STATE]
+    call sre_string_len
+    mov rcx, rax
+    mov rax, [rbp - SP_LASTEND]
+
+    lea rdi, [rbp - SP_STATE]
+    mov rdi, [rdi + SRE_State.str_begin]
+    add rdi, rax
+    mov rsi, rcx
+    sub rsi, rax
+    call str_new_heap
+    mov rdi, r14
+    mov rsi, rax
+    mov edx, TAG_PTR
+    push rax
+    call list_append
+    pop rdi
+    call obj_decref
+
+    lea rdi, [rbp - SP_STATE]
+    call sre_state_fini
+
+    mov rax, r14
+    mov edx, TAG_PTR
+
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.split_error:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "split() requires a string argument"
+    call raise_exception
+END_FUNC sre_pattern_split_method
+
+; ============================================================================
+; sre_pattern_getattr(PyObject* self, PyObject* name) -> PyObject*
+; ============================================================================
+DEF_FUNC sre_pattern_getattr
+    push rbx
+    push r12
+
+    mov rbx, rdi               ; self (pattern)
+    mov r12, rsi               ; name string
+
+    ; Get name as C string
+    lea rdi, [r12 + PyStrObject.data]
+
+    ; Check known attributes
+    lea rsi, [rel sp_match_str]
+    call sre_strcmp
+    test eax, eax
+    jz .ga_match
+
+    lea rdi, [r12 + PyStrObject.data]
+    lea rsi, [rel sp_search_str]
+    call sre_strcmp
+    test eax, eax
+    jz .ga_search
+
+    lea rdi, [r12 + PyStrObject.data]
+    lea rsi, [rel sp_fullmatch_str]
+    call sre_strcmp
+    test eax, eax
+    jz .ga_fullmatch
+
+    lea rdi, [r12 + PyStrObject.data]
+    lea rsi, [rel sp_findall_str]
+    call sre_strcmp
+    test eax, eax
+    jz .ga_findall
+
+    lea rdi, [r12 + PyStrObject.data]
+    lea rsi, [rel sp_sub_str]
+    call sre_strcmp
+    test eax, eax
+    jz .ga_sub
+
+    lea rdi, [r12 + PyStrObject.data]
+    lea rsi, [rel sp_subn_str]
+    call sre_strcmp
+    test eax, eax
+    jz .ga_subn
+
+    lea rdi, [r12 + PyStrObject.data]
+    lea rsi, [rel sp_split_str]
+    call sre_strcmp
+    test eax, eax
+    jz .ga_split
+
+    lea rdi, [r12 + PyStrObject.data]
+    lea rsi, [rel sp_pattern_str]
+    call sre_strcmp
+    test eax, eax
+    jz .ga_pattern_attr
+
+    lea rdi, [r12 + PyStrObject.data]
+    lea rsi, [rel sp_flags_str]
+    call sre_strcmp
+    test eax, eax
+    jz .ga_flags
+
+    lea rdi, [r12 + PyStrObject.data]
+    lea rsi, [rel sp_groups_str]
+    call sre_strcmp
+    test eax, eax
+    jz .ga_groups
+
+    lea rdi, [r12 + PyStrObject.data]
+    lea rsi, [rel sp_groupindex_str]
+    call sre_strcmp
+    test eax, eax
+    jz .ga_groupindex
+
+    lea rdi, [r12 + PyStrObject.data]
+    lea rsi, [rel sp_finditer_str]
+    call sre_strcmp
+    test eax, eax
+    jz .ga_finditer
+
+    lea rdi, [r12 + PyStrObject.data]
+    lea rsi, [rel sp_scanner_str]
+    call sre_strcmp
+    test eax, eax
+    jz .ga_finditer
+
+    lea rdi, [r12 + PyStrObject.data]
+    lea rsi, [rel sp_copy_str]
+    call sre_strcmp
+    test eax, eax
+    jz .ga_copy
+
+    lea rdi, [r12 + PyStrObject.data]
+    lea rsi, [rel sp_deepcopy_str]
+    call sre_strcmp
+    test eax, eax
+    jz .ga_copy
+
+    ; Not found
+    xor eax, eax
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.ga_match:
+    lea rdi, [rel sre_pattern_match_method]
+    lea rsi, [rel sp_match_str]
+    call builtin_func_new
+    jmp .ga_bind
+.ga_search:
+    lea rdi, [rel sre_pattern_search_method]
+    lea rsi, [rel sp_search_str]
+    call builtin_func_new
+    jmp .ga_bind
+.ga_fullmatch:
+    lea rdi, [rel sre_pattern_fullmatch_method]
+    lea rsi, [rel sp_fullmatch_str]
+    call builtin_func_new
+    jmp .ga_bind
+.ga_findall:
+    lea rdi, [rel sre_pattern_findall_method]
+    lea rsi, [rel sp_findall_str]
+    call builtin_func_new
+    jmp .ga_bind
+.ga_sub:
+    lea rdi, [rel sre_pattern_sub_method]
+    lea rsi, [rel sp_sub_str]
+    call builtin_func_new
+    jmp .ga_bind
+.ga_subn:
+    lea rdi, [rel sre_pattern_subn_method]
+    lea rsi, [rel sp_subn_str]
+    call builtin_func_new
+    jmp .ga_bind
+.ga_split:
+    lea rdi, [rel sre_pattern_split_method]
+    lea rsi, [rel sp_split_str]
+    call builtin_func_new
+    jmp .ga_bind
+.ga_finditer:
+    lea rdi, [rel sre_pattern_finditer_method]
+    lea rsi, [rel sp_finditer_str]
+    call builtin_func_new
+    jmp .ga_bind
+.ga_copy:
+    lea rdi, [rel sre_pattern_copy_method]
+    lea rsi, [rel sp_copy_str]
+    call builtin_func_new
+    jmp .ga_bind
+
+.ga_bind:
+    ; rax = builtin func from builtin_func_new
+    push rax                    ; save func
+    mov rdi, rax                ; func
+    mov rsi, rbx                ; self (pattern)
+    call method_new
+    push rax
+    mov rdi, [rsp + 8]         ; DECREF unbound func
+    call obj_decref
+    pop rax
+    add rsp, 8
+    mov edx, TAG_PTR
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.ga_pattern_attr:
+    ; Return pattern.pattern (the regex string)
+    mov rax, [rbx + SRE_PatternObject.pattern]
+    inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.ga_flags:
+    mov rax, [rbx + SRE_PatternObject.flags]
+    movsx rax, eax
+    RET_TAG_SMALLINT
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.ga_groups:
+    mov eax, [rbx + SRE_PatternObject.groups]
+    movsx rax, eax
+    RET_TAG_SMALLINT
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.ga_groupindex:
+    mov rax, [rbx + SRE_PatternObject.groupindex]
+    test rax, rax
+    jz .ga_empty_dict
+    inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
+    pop r12
+    pop rbx
+    leave
+    ret
+.ga_empty_dict:
+    call dict_new
+    mov edx, TAG_PTR
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC sre_pattern_getattr
+
+; ============================================================================
+; Helper: strcmp for attribute lookup
+; ============================================================================
+DEF_FUNC_LOCAL sre_strcmp
+    ; rdi = str1, rsi = str2
+.cmp_loop:
+    movzx eax, byte [rdi]
+    movzx ecx, byte [rsi]
+    cmp al, cl
+    jne .cmp_ne
+    test al, al
+    jz .cmp_eq
+    inc rdi
+    inc rsi
+    jmp .cmp_loop
+.cmp_eq:
+    xor eax, eax
+    leave
+    ret
+.cmp_ne:
+    mov eax, 1
+    leave
+    ret
+END_FUNC sre_strcmp
+
+; ============================================================================
+; sre_pattern_copy_method(self, args, nargs)
+; __copy__ / __deepcopy__ — patterns are effectively immutable.
+; Returns self (INCREF'd).
+; ============================================================================
+DEF_FUNC sre_pattern_copy_method
+    mov rax, [rdi]             ; self payload
+    inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
+    leave
+    ret
+END_FUNC sre_pattern_copy_method
+
+; ============================================================================
+; sre_pattern_finditer_method(self, args, nargs)
+; Pattern.finditer(string, pos=0, endpos=sys.maxsize)
+; Returns an SRE_Scanner iterator.
+; ============================================================================
+DEF_FUNC sre_pattern_finditer_method
+    ; rdi = args (fat array), rsi = nargs
+    push rbx
+    push r12
+
+    mov rbx, [rdi]             ; self = pattern
+    lea r12, [rdi + 16]        ; user args
+    lea rdx, [rsi - 1]
+
+    cmp rdx, 0
+    je .fi_error
+
+    ; string = user_args[0]
+    mov rsi, [r12]             ; string payload
+
+    ; pos (default 0)
+    xor ecx, ecx
+    cmp rdx, 2
+    jb .fi_no_pos
+    mov rcx, [r12 + 16]
+.fi_no_pos:
+    mov rdx, rcx               ; rdx = pos
+
+    ; endpos (default large)
+    mov rcx, 0x7FFFFFFFFFFFFFFF
+    cmp qword [rsp + 16], 3    ; check original nargs - 1 >= 3
+    ; Actually easier to just default to max
+    ; (3rd arg would be at r12+32 but we don't have orig nargs easily)
+
+    ; scanner_new(pattern, string, pos, endpos)
+    mov rdi, rbx               ; pattern
+    ; rsi = string (already set)
+    ; rdx = pos
+    ; rcx = endpos
+    call sre_scanner_new
+
+    mov edx, TAG_PTR
+
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.fi_error:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "finditer() requires a string argument"
+    call raise_exception
+END_FUNC sre_pattern_finditer_method
+
+; ============================================================================
+; SRE_Scanner implementation
+; ============================================================================
+
+; ============================================================================
+; sre_scanner_new(rdi=pattern, rsi=string, rdx=pos, rcx=endpos) -> rax
+; Allocates and initializes an SRE_ScannerObject.
+; ============================================================================
+DEF_FUNC sre_scanner_new
+    push rbx
+    push r12
+    push r13
+    push r14
+    push r15
+
+    mov r12, rdi               ; pattern
+    mov r13, rsi               ; string
+    mov r14, rdx               ; pos
+    mov r15, rcx               ; endpos
+
+    mov edi, SRE_ScannerObject_size
+    call ap_malloc
+    mov rbx, rax
+
+    mov qword [rbx + PyObject.ob_refcnt], 1
+    lea rax, [rel sre_scanner_type]
+    mov [rbx + PyObject.ob_type], rax
+
+    mov [rbx + SRE_ScannerObject.pattern], r12
+    inc qword [r12 + PyObject.ob_refcnt]
+
+    mov [rbx + SRE_ScannerObject.string], r13
+    inc qword [r13 + PyObject.ob_refcnt]
+
+    mov [rbx + SRE_ScannerObject.pos], r14
+    mov [rbx + SRE_ScannerObject.endpos], r15
+
+    mov rax, rbx
+
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC sre_scanner_new
+
+; ============================================================================
+; sre_scanner_dealloc(rdi=self)
+; ============================================================================
+DEF_FUNC sre_scanner_dealloc
+    push rbx
+    mov rbx, rdi
+
+    mov rdi, [rbx + SRE_ScannerObject.pattern]
+    call obj_decref
+
+    mov rdi, [rbx + SRE_ScannerObject.string]
+    call obj_decref
+
+    mov rdi, rbx
+    call ap_free
+
+    pop rbx
+    leave
+    ret
+END_FUNC sre_scanner_dealloc
+
+; ============================================================================
+; sre_scanner_iter_self(rdi=self) -> rax (no edx, tp_iter convention)
+; ============================================================================
+DEF_FUNC_BARE sre_scanner_iter_self
+    inc qword [rdi + PyObject.ob_refcnt]
+    mov rax, rdi
+    ret
+END_FUNC sre_scanner_iter_self
+
+; ============================================================================
+; sre_scanner_iternext(rdi=self) -> (rax, edx) fat value
+; Returns next match via sre_search, or NULL on exhaustion.
+; ============================================================================
+SI_SELF    equ 8
+SI_STATE   equ 8 + SRE_State_size
+SI_FRAME   equ 8 + SRE_State_size
+
+DEF_FUNC sre_scanner_iternext, SI_FRAME
+    push rbx
+    push r12
+    push r13
+
+    mov [rbp - SI_SELF], rdi
+    mov rbx, rdi
+
+    ; Check if past end
+    mov rax, [rbx + SRE_ScannerObject.pos]
+    cmp rax, [rbx + SRE_ScannerObject.endpos]
+    ja .si_exhausted
+
+    ; Init state
+    lea rdi, [rbp - SI_STATE]
+    mov rsi, [rbx + SRE_ScannerObject.pattern]
+    mov rdx, [rbx + SRE_ScannerObject.string]
+    mov rcx, [rbx + SRE_ScannerObject.pos]
+    mov r8, [rbx + SRE_ScannerObject.endpos]
+    call sre_state_init
+
+    ; Reset state marks
+    lea rdi, [rbp - SI_STATE]
+    mov qword [rdi + SRE_State.marks_size], 0
+    mov qword [rdi + SRE_State.lastmark], -1
+    mov qword [rdi + SRE_State.lastindex], -1
+    mov qword [rdi + SRE_State.repeat_ctx], 0
+
+    ; Search
+    lea rdi, [rbp - SI_STATE]
+    call sre_search
+    test eax, eax
+    jz .si_no_match
+
+    ; Get match boundaries
+    lea rdi, [rbp - SI_STATE]
+    mov r12, [rdi + SRE_State.str_start]   ; match_start
+    mov r13, [rdi + SRE_State.str_pos]     ; match_end
+
+    ; Create match object
+    lea rdi, [rbp - SI_STATE]
+    mov rbx, [rbp - SI_SELF]
+    mov rsi, [rbx + SRE_ScannerObject.pattern]
+    mov rdx, [rbx + SRE_ScannerObject.string]
+    call sre_match_new
+    push rax                   ; save match object
+
+    ; Clean up state
+    lea rdi, [rbp - SI_STATE]
+    call sre_state_fini
+
+    ; Advance scanner position: max(match_end, match_start + 1)
+    mov rbx, [rbp - SI_SELF]
+    mov rax, r13               ; match_end
+    cmp rax, r12
+    jne .si_advance_ok
+    lea rax, [r12 + 1]        ; zero-width guard
+.si_advance_ok:
+    mov [rbx + SRE_ScannerObject.pos], rax
+
+    pop rax                    ; match object
+    mov edx, TAG_PTR
+
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.si_no_match:
+    lea rdi, [rbp - SI_STATE]
+    call sre_state_fini
+
+.si_exhausted:
+    RET_NULL
+
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC sre_scanner_iternext
+
+; ============================================================================
+; sre_scanner_search_method(self, args, nargs)
+; scanner.search() — same as iternext but returns None instead of NULL
+; ============================================================================
+DEF_FUNC sre_scanner_search_method
+    mov rdi, [rdi]             ; self = args[0] payload
+    call sre_scanner_iternext
+    ; If NULL (tag=0), return None
+    test edx, edx
+    jnz .ssm_done
+    xor eax, eax
+    mov edx, TAG_NONE
+.ssm_done:
+    leave
+    ret
+END_FUNC sre_scanner_search_method
+
+; ============================================================================
+; sre_scanner_match_method(self, args, nargs)
+; scanner.match() — anchored match at current pos, returns match or None
+; ============================================================================
+SM2_SELF   equ 8
+SM2_STATE  equ 8 + SRE_State_size
+SM2_FRAME  equ 8 + SRE_State_size
+
+DEF_FUNC sre_scanner_match_method, SM2_FRAME
+    push rbx
+    push r12
+    push r13
+
+    mov rbx, [rdi]             ; self = args[0] payload
+    mov [rbp - SM2_SELF], rbx
+
+    ; Check if past end
+    mov rax, [rbx + SRE_ScannerObject.pos]
+    cmp rax, [rbx + SRE_ScannerObject.endpos]
+    ja .sm2_none
+
+    ; Init state
+    lea rdi, [rbp - SM2_STATE]
+    mov rsi, [rbx + SRE_ScannerObject.pattern]
+    mov rdx, [rbx + SRE_ScannerObject.string]
+    mov rcx, [rbx + SRE_ScannerObject.pos]
+    mov r8, [rbx + SRE_ScannerObject.endpos]
+    call sre_state_init
+
+    ; Reset marks
+    lea rdi, [rbp - SM2_STATE]
+    mov qword [rdi + SRE_State.marks_size], 0
+    mov qword [rdi + SRE_State.lastmark], -1
+    mov qword [rdi + SRE_State.lastindex], -1
+    mov qword [rdi + SRE_State.repeat_ctx], 0
+
+    ; Anchored match (not search)
+    lea rdi, [rbp - SM2_STATE]
+    mov rbx, [rbp - SM2_SELF]
+    mov rsi, [rbx + SRE_ScannerObject.pattern]
+    mov rsi, [rsi + SRE_PatternObject.code]
+    call sre_match
+    test eax, eax
+    jz .sm2_no_match
+
+    ; Get match boundaries
+    lea rdi, [rbp - SM2_STATE]
+    mov r12, [rdi + SRE_State.str_start]
+    mov r13, [rdi + SRE_State.str_pos]
+
+    ; Create match object
+    lea rdi, [rbp - SM2_STATE]
+    mov rbx, [rbp - SM2_SELF]
+    mov rsi, [rbx + SRE_ScannerObject.pattern]
+    mov rdx, [rbx + SRE_ScannerObject.string]
+    call sre_match_new
+    push rax
+
+    lea rdi, [rbp - SM2_STATE]
+    call sre_state_fini
+
+    ; Advance scanner pos
+    mov rbx, [rbp - SM2_SELF]
+    mov rax, r13
+    cmp rax, r12
+    jne .sm2_adv_ok
+    lea rax, [r12 + 1]
+.sm2_adv_ok:
+    mov [rbx + SRE_ScannerObject.pos], rax
+
+    pop rax
+    mov edx, TAG_PTR
+
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.sm2_no_match:
+    lea rdi, [rbp - SM2_STATE]
+    call sre_state_fini
+
+.sm2_none:
+    xor eax, eax
+    mov edx, TAG_NONE
+
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC sre_scanner_match_method
+
+; ============================================================================
+; sre_scanner_getattr(rdi=self, rsi=name) -> (rax, edx)
+; ============================================================================
+DEF_FUNC sre_scanner_getattr
+    push rbx
+    push r12
+
+    mov rbx, rdi               ; self
+    mov r12, rsi               ; name
+
+    lea rdi, [r12 + PyStrObject.data]
+    lea rsi, [rel sc_match_str]
+    call sre_strcmp
+    test eax, eax
+    jz .sga_match
+
+    lea rdi, [r12 + PyStrObject.data]
+    lea rsi, [rel sc_search_str]
+    call sre_strcmp
+    test eax, eax
+    jz .sga_search
+
+    lea rdi, [r12 + PyStrObject.data]
+    lea rsi, [rel sp_pattern_str]
+    call sre_strcmp
+    test eax, eax
+    jz .sga_pattern
+
+    ; Not found
+    xor eax, eax
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.sga_match:
+    lea rdi, [rel sre_scanner_match_method]
+    lea rsi, [rel sc_match_str]
+    call builtin_func_new
+    jmp .sga_bind
+.sga_search:
+    lea rdi, [rel sre_scanner_search_method]
+    lea rsi, [rel sc_search_str]
+    call builtin_func_new
+    jmp .sga_bind
+
+.sga_bind:
+    push rax
+    mov rdi, rax
+    mov rsi, rbx
+    call method_new
+    push rax
+    mov rdi, [rsp + 8]
+    call obj_decref
+    pop rax
+    add rsp, 8
+    mov edx, TAG_PTR
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.sga_pattern:
+    mov rax, [rbx + SRE_ScannerObject.pattern]
+    inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC sre_scanner_getattr
+
+; ============================================================================
+; Type definitions
+; ============================================================================
+section .data
+align 8
+
+; SRE_Scanner type
+global sre_scanner_type
+sre_scanner_type:
+    dq 1                       ; ob_refcnt (immortal)
+    dq type_type               ; ob_type
+    dq sc_type_name            ; tp_name
+    dq SRE_ScannerObject_size  ; tp_basicsize
+    dq sre_scanner_dealloc     ; tp_dealloc
+    dq 0                       ; tp_repr
+    dq 0                       ; tp_str
+    dq 0                       ; tp_hash
+    dq 0                       ; tp_call
+    dq sre_scanner_getattr     ; tp_getattr
+    dq 0                       ; tp_setattr
+    dq 0                       ; tp_richcompare
+    dq sre_scanner_iter_self   ; tp_iter
+    dq sre_scanner_iternext    ; tp_iternext
+    dq 0                       ; tp_init
+    dq 0                       ; tp_new
+    dq 0                       ; tp_as_number
+    dq 0                       ; tp_as_sequence
+    dq 0                       ; tp_as_mapping
+    dq 0                       ; tp_base
+    dq 0                       ; tp_dict
+    dq 0                       ; tp_mro
+    dq 0                       ; tp_flags
+    dq 0                       ; tp_bases
+
+align 8
+
+; SRE_Pattern type
+global sre_pattern_type
+sre_pattern_type:
+    dq 1                       ; ob_refcnt (immortal)
+    dq type_type               ; ob_type
+    dq sp_type_name            ; tp_name
+    dq SRE_PatternObject_size  ; tp_basicsize
+    dq sre_pattern_dealloc     ; tp_dealloc
+    dq sre_pattern_repr        ; tp_repr
+    dq sre_pattern_repr        ; tp_str
+    dq 0                       ; tp_hash
+    dq 0                       ; tp_call (patterns aren't directly callable)
+    dq sre_pattern_getattr     ; tp_getattr
+    dq 0                       ; tp_setattr
+    dq 0                       ; tp_richcompare
+    dq 0                       ; tp_iter
+    dq 0                       ; tp_iternext
+    dq 0                       ; tp_init
+    dq 0                       ; tp_new
+    dq 0                       ; tp_as_number
+    dq 0                       ; tp_as_sequence
+    dq 0                       ; tp_as_mapping
+    dq 0                       ; tp_base
+    dq 0                       ; tp_dict
+    dq 0                       ; tp_mro
+    dq 0                       ; tp_flags
+    dq 0                       ; tp_bases
+
+section .rodata
+sp_type_name:     db "re.Pattern", 0
+sp_match_str:     db "match", 0
+sp_search_str:    db "search", 0
+sp_fullmatch_str: db "fullmatch", 0
+sp_findall_str:   db "findall", 0
+sp_finditer_str:  db "finditer", 0
+sp_sub_str:       db "sub", 0
+sp_subn_str:      db "subn", 0
+sp_split_str:     db "split", 0
+sp_pattern_str:   db "pattern", 0
+sp_flags_str:     db "flags", 0
+sp_groups_str:    db "groups", 0
+sp_groupindex_str: db "groupindex", 0
+sp_scanner_str:    db "scanner", 0
+sp_copy_str:       db "__copy__", 0
+sp_deepcopy_str:   db "__deepcopy__", 0
+
+; Scanner type rodata
+sc_type_name:      db "re.Scanner", 0
+sc_match_str:      db "match", 0
+sc_search_str:     db "search", 0
