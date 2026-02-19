@@ -37,6 +37,7 @@ extern method_type
 extern builtin_func_type
 extern bool_true
 extern bool_false
+extern smallstr_to_obj
 
 ; SRE engine functions
 extern sre_match
@@ -734,8 +735,9 @@ SUB_RESULT   equ 40
 SUB_NSUBS    equ 48
 SUB_LASTEND  equ 56
 SUB_CALLABLE equ 64
-SUB_STATE    equ 64 + SRE_State_size
-SUB_FRAME    equ 64 + SRE_State_size
+SUB_REPL_TAG equ 72
+SUB_STATE    equ 72 + SRE_State_size
+SUB_FRAME    equ 72 + SRE_State_size
 
 DEF_FUNC sre_pattern_sub_method, SUB_FRAME
     ; rdi = args (fat array), rsi = nargs
@@ -757,12 +759,15 @@ DEF_FUNC sre_pattern_sub_method, SUB_FRAME
     mov rax, [rdi + 32]       ; args[2] = string
     mov [rbp - SUB_STR], rax
 
+    ; Save repl tag for str_concat usage
+    mov rcx, [rdi + 24]       ; repl tag = args[1] tag
+    mov [rbp - SUB_REPL_TAG], rcx
+
     ; Check if repl is callable by type whitelist
     ; (tp_call check alone fails because add_builtin_type patches tp_call
     ;  on str_type/int_type/etc. for constructor use, making all instances
     ;  appear callable)
     mov qword [rbp - SUB_CALLABLE], 0
-    mov rcx, [rdi + 24]       ; repl tag = args[1] tag
     test rcx, rcx
     js .sub_repl_not_callable  ; SmallStr (bit 63 set)
     cmp ecx, TAG_PTR
@@ -866,10 +871,33 @@ DEF_FUNC sre_pattern_sub_method, SUB_FRAME
     jnz .sub_callable_repl
 
     ; String replacement: concat repl directly
+    ; Check if repl is SmallStr — must widen to heap for str_concat
+    mov rcx, [rbp - SUB_REPL_TAG]
+    test rcx, rcx
+    js .sub_widen_repl          ; SmallStr (bit 63 set)
     mov rdi, [rbp - SUB_RESULT]
     mov rsi, [rbp - SUB_REPL]
     mov ecx, TAG_PTR
     call str_concat
+    jmp .sub_repl_concated
+
+.sub_widen_repl:
+    mov rdi, [rbp - SUB_REPL]
+    mov rsi, [rbp - SUB_REPL_TAG]
+    call smallstr_to_obj
+    ; rax = heap string
+    push rax                   ; save for DECREF
+    mov rdi, [rbp - SUB_RESULT]
+    mov rsi, rax
+    mov ecx, TAG_PTR
+    call str_concat
+    push rax                   ; save new result
+    mov rdi, [rsp + 8]        ; DECREF widened string
+    call obj_decref
+    pop rax                    ; restore new result
+    add rsp, 8                 ; pop saved widened string
+
+.sub_repl_concated:
     push rax
     mov rdi, [rbp - SUB_RESULT]
     call obj_decref
@@ -913,6 +941,8 @@ DEF_FUNC sre_pattern_sub_method, SUB_FRAME
     ; Concat replacement with result
     pop rcx                    ; replacement tag → ecx for str_concat
     pop rsi                    ; replacement string payload
+    push rsi                   ; save repl payload for DECREF
+    push rcx                   ; save repl tag for DECREF
     mov rdi, [rbp - SUB_RESULT]
     call str_concat
     push rax
@@ -921,10 +951,10 @@ DEF_FUNC sre_pattern_sub_method, SUB_FRAME
     pop rax
     mov [rbp - SUB_RESULT], rax
 
-    ; DECREF replacement string (str_concat INCREFs internally)
-    ; Actually str_concat creates a new string; the replacement was from tp_call
-    ; We need to DECREF it if it's a ptr
-    ; For safety, just move on — the replacement was consumed by concat
+    ; DECREF replacement string from tp_call
+    pop rdx                    ; repl tag
+    pop rax                    ; repl payload
+    DECREF_VAL rax, rdx
 
     pop r13
     pop r12
@@ -1013,8 +1043,9 @@ SN_RESULT   equ 40
 SN_NSUBS    equ 48
 SN_LASTEND  equ 56
 SN_CALLABLE equ 64
-SN_STATE    equ 64 + SRE_State_size
-SN_FRAME    equ 64 + SRE_State_size
+SN_REPL_TAG equ 72
+SN_STATE    equ 72 + SRE_State_size
+SN_FRAME    equ 72 + SRE_State_size
 
 DEF_FUNC sre_pattern_subn_method, SN_FRAME
     push rbx
@@ -1034,9 +1065,12 @@ DEF_FUNC sre_pattern_subn_method, SN_FRAME
     mov rax, [rdi + 32]
     mov [rbp - SN_STR], rax
 
+    ; Save repl tag for str_concat usage
+    mov rcx, [rdi + 24]        ; repl tag = args[1] tag
+    mov [rbp - SN_REPL_TAG], rcx
+
     ; Check if repl is callable by type whitelist
     mov qword [rbp - SN_CALLABLE], 0
-    mov rcx, [rdi + 24]        ; repl tag = args[1] tag
     test rcx, rcx
     js .subn_repl_not_callable  ; SmallStr (bit 63 set)
     cmp ecx, TAG_PTR
@@ -1130,11 +1164,32 @@ DEF_FUNC sre_pattern_subn_method, SN_FRAME
     cmp qword [rbp - SN_CALLABLE], 0
     jnz .subn_callable_repl
 
-    ; String replacement
+    ; String replacement: check SmallStr and widen if needed
+    mov rcx, [rbp - SN_REPL_TAG]
+    test rcx, rcx
+    js .subn_widen_repl         ; SmallStr (bit 63 set)
     mov rdi, [rbp - SN_RESULT]
     mov rsi, [rbp - SN_REPL]
     mov ecx, TAG_PTR
     call str_concat
+    jmp .subn_repl_concated
+
+.subn_widen_repl:
+    mov rdi, [rbp - SN_REPL]
+    mov rsi, [rbp - SN_REPL_TAG]
+    call smallstr_to_obj
+    push rax                   ; save for DECREF
+    mov rdi, [rbp - SN_RESULT]
+    mov rsi, rax
+    mov ecx, TAG_PTR
+    call str_concat
+    push rax                   ; save new result
+    mov rdi, [rsp + 8]        ; DECREF widened string
+    call obj_decref
+    pop rax                    ; restore new result
+    add rsp, 8                 ; pop saved widened string
+
+.subn_repl_concated:
     push rax
     mov rdi, [rbp - SN_RESULT]
     call obj_decref
@@ -1173,8 +1228,10 @@ DEF_FUNC sre_pattern_subn_method, SN_FRAME
     call obj_decref
 
     ; Concat replacement
-    pop rcx
-    pop rsi
+    pop rcx                    ; replacement tag
+    pop rsi                    ; replacement payload
+    push rsi                   ; save repl payload for DECREF
+    push rcx                   ; save repl tag for DECREF
     mov rdi, [rbp - SN_RESULT]
     call str_concat
     push rax
@@ -1182,6 +1239,11 @@ DEF_FUNC sre_pattern_subn_method, SN_FRAME
     call obj_decref
     pop rax
     mov [rbp - SN_RESULT], rax
+
+    ; DECREF replacement string from tp_call
+    pop rdx                    ; repl tag
+    pop rax                    ; repl payload
+    DECREF_VAL rax, rdx
 
     pop r13
     pop r12
@@ -1564,7 +1626,7 @@ DEF_FUNC sre_pattern_getattr
     lea rsi, [rel sp_scanner_str]
     call sre_strcmp
     test eax, eax
-    jz .ga_finditer
+    jz .ga_scanner
 
     lea rdi, [r12 + PyStrObject.data]
     lea rsi, [rel sp_copy_str]
@@ -1623,6 +1685,11 @@ DEF_FUNC sre_pattern_getattr
 .ga_finditer:
     lea rdi, [rel sre_pattern_finditer_method]
     lea rsi, [rel sp_finditer_str]
+    call builtin_func_new
+    jmp .ga_bind
+.ga_scanner:
+    lea rdi, [rel sre_pattern_finditer_method]
+    lea rsi, [rel sp_scanner_str]
     call builtin_func_new
     jmp .ga_bind
 .ga_copy:
@@ -1698,7 +1765,8 @@ END_FUNC sre_pattern_getattr
 ; ============================================================================
 ; Helper: strcmp for attribute lookup
 ; ============================================================================
-DEF_FUNC_LOCAL sre_strcmp
+global sre_strcmp
+DEF_FUNC sre_strcmp
     ; rdi = str1, rsi = str2
 .cmp_loop:
     movzx eax, byte [rdi]

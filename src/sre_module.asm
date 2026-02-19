@@ -51,7 +51,7 @@ SC_GINDEX   equ 56
 SC_IGROUP   equ 64
 SC_CODEBUF  equ 72
 SC_CODELEN  equ 80
-SC_FRAME    equ 80
+SC_FRAME    equ 88
 
 DEF_FUNC sre_compile_func, SC_FRAME
     push rbx
@@ -645,10 +645,14 @@ DEF_FUNC sre_module_create, SMC_FRAME
     ; Create module object
     lea rdi, [rel sm_sre_name]
     call str_from_cstr_heap
+    push rax                    ; save name for DECREF
     mov rdi, rax
     mov rsi, r12
     call module_new
-    ; rax = _sre module
+    mov r13, rax                ; save module
+    pop rdi                     ; name string
+    call obj_decref
+    mov rax, r13                ; restore module
 
     pop r13
     pop r12

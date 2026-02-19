@@ -178,6 +178,7 @@ struc SRE_State
     .charsize:      resd 1  ; +108: 1=ASCII byte, 4=u32 codepoint
     .codepoint_buf: resq 1  ; +112: u32* decoded codepoints (NULL for ASCII)
     .codepoint_len: resq 1  ; +120: number of codepoints
+    .original_pos:  resq 1  ; +128: original pos arg (for match.pos)
 endstruc
 
 ; ============================================================================

@@ -30,6 +30,7 @@ extern type_type
 extern builtin_func_new
 extern method_new
 extern sre_pattern_type
+extern sre_strcmp
 
 ; ============================================================================
 ; sre_match_new(SRE_State* state, SRE_PatternObject* pattern,
@@ -80,12 +81,11 @@ DEF_FUNC sre_match_new, MN_FRAME
     mov rax, [rdi + SRE_State.str_begin]
     mov [rbx + SRE_MatchObject.str_begin], rax
 
-    ; pos = str_start (original search start)
-    mov rax, [rdi + SRE_State.str_start]
+    ; pos = original_pos (the pos argument passed to match/search)
+    mov rax, [rdi + SRE_State.original_pos]
     mov [rbx + SRE_MatchObject.pos], rax
 
     ; endpos
-    call_get_endpos:
     mov rdi, [rbp - MN_STATE]
     mov rax, [rdi + SRE_State.codepoint_buf]
     test rax, rax
@@ -1029,98 +1029,98 @@ DEF_FUNC sre_match_getattr
 
     ; Check methods
     lea rsi, [rel sm_group_str]
-    call sre_match_strcmp
+    call sre_strcmp
     test eax, eax
     jz .mga_group
 
     lea rdi, [r12 + PyStrObject.data]
     lea rsi, [rel sm_groups_str]
-    call sre_match_strcmp
+    call sre_strcmp
     test eax, eax
     jz .mga_groups
 
     lea rdi, [r12 + PyStrObject.data]
     lea rsi, [rel sm_groupdict_str]
-    call sre_match_strcmp
+    call sre_strcmp
     test eax, eax
     jz .mga_groupdict
 
     lea rdi, [r12 + PyStrObject.data]
     lea rsi, [rel sm_start_str]
-    call sre_match_strcmp
+    call sre_strcmp
     test eax, eax
     jz .mga_start
 
     lea rdi, [r12 + PyStrObject.data]
     lea rsi, [rel sm_end_str]
-    call sre_match_strcmp
+    call sre_strcmp
     test eax, eax
     jz .mga_end
 
     lea rdi, [r12 + PyStrObject.data]
     lea rsi, [rel sm_span_str]
-    call sre_match_strcmp
+    call sre_strcmp
     test eax, eax
     jz .mga_span
 
     ; Check attributes
     lea rdi, [r12 + PyStrObject.data]
     lea rsi, [rel sm_re_str]
-    call sre_match_strcmp
+    call sre_strcmp
     test eax, eax
     jz .mga_re
 
     lea rdi, [r12 + PyStrObject.data]
     lea rsi, [rel sm_string_str]
-    call sre_match_strcmp
+    call sre_strcmp
     test eax, eax
     jz .mga_string
 
     lea rdi, [r12 + PyStrObject.data]
     lea rsi, [rel sm_pos_str]
-    call sre_match_strcmp
+    call sre_strcmp
     test eax, eax
     jz .mga_pos
 
     lea rdi, [r12 + PyStrObject.data]
     lea rsi, [rel sm_endpos_str]
-    call sre_match_strcmp
+    call sre_strcmp
     test eax, eax
     jz .mga_endpos
 
     lea rdi, [r12 + PyStrObject.data]
     lea rsi, [rel sm_lastindex_str]
-    call sre_match_strcmp
+    call sre_strcmp
     test eax, eax
     jz .mga_lastindex
 
     lea rdi, [r12 + PyStrObject.data]
     lea rsi, [rel sm_lastgroup_str]
-    call sre_match_strcmp
+    call sre_strcmp
     test eax, eax
     jz .mga_lastgroup
 
     lea rdi, [r12 + PyStrObject.data]
     lea rsi, [rel sm_regs_str]
-    call sre_match_strcmp
+    call sre_strcmp
     test eax, eax
     jz .mga_regs
 
     lea rdi, [r12 + PyStrObject.data]
     lea rsi, [rel sm_expand_str]
-    call sre_match_strcmp
+    call sre_strcmp
     test eax, eax
     jz .mga_expand
 
     lea rdi, [r12 + PyStrObject.data]
     lea rsi, [rel sm_copy_str]
-    call sre_match_strcmp
+    call sre_strcmp
     test eax, eax
     jz .mga_copy
 
     lea rdi, [r12 + PyStrObject.data]
     lea rsi, [rel sm_deepcopy_str]
-    call sre_match_strcmp
+    call sre_strcmp
     test eax, eax
     jz .mga_copy
 
@@ -1320,29 +1320,7 @@ DEF_FUNC sre_match_getattr
     jmp .mga_bind
 END_FUNC sre_match_getattr
 
-; ============================================================================
-; Helper: strcmp
-; ============================================================================
-DEF_FUNC_LOCAL sre_match_strcmp
-.cmp_loop:
-    movzx eax, byte [rdi]
-    movzx ecx, byte [rsi]
-    cmp al, cl
-    jne .cmp_ne
-    test al, al
-    jz .cmp_eq
-    inc rdi
-    inc rsi
-    jmp .cmp_loop
-.cmp_eq:
-    xor eax, eax
-    leave
-    ret
-.cmp_ne:
-    mov eax, 1
-    leave
-    ret
-END_FUNC sre_match_strcmp
+; sre_strcmp is now shared from sre_pattern.asm (extern sre_strcmp)
 
 ; ============================================================================
 ; Type definition

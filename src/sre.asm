@@ -567,8 +567,13 @@ DEF_FUNC sre_at
     ret
 
 .at_beginning:
+    ; AT_BEGINNING: pos == 0 (same as AT_BEGINNING_STRING per CPython)
+    test r9, r9
+    jz .at_true
+    jmp .at_false
+
 .at_beginning_string:
-    ; pos == 0
+    ; AT_BEGINNING_STRING: pos == 0
     test r9, r9
     jz .at_true
     jmp .at_false
@@ -789,7 +794,12 @@ END_FUNC sre_unicode_tolower
 ;                PyStrObject* string, i64 pos, i64 endpos)
 ; Initialize match state for a string.
 ; ============================================================================
-DEF_FUNC sre_state_init, 48
+SSI_ENDPOS   equ 8       ; endpos (ASCII path); reused as state ptr (Unicode path)
+SSI_BYTELEN  equ 16      ; byte length (Unicode path only)
+SSI_UENDPOS  equ 24      ; endpos saved before clobber (Unicode path only)
+SSI_FRAME    equ 48
+
+DEF_FUNC sre_state_init, SSI_FRAME
     push rbx
     push r12
     push r13
@@ -799,7 +809,7 @@ DEF_FUNC sre_state_init, 48
     mov r12, rsi               ; pattern
     mov r13, rdx               ; string
     mov r14, rcx               ; pos
-    mov [rbp - 8], r8          ; save endpos
+    mov [rbp - SSI_ENDPOS], r8 ; save endpos
 
     ; Zero out the state
     mov rdi, rbx
@@ -853,7 +863,7 @@ DEF_FUNC sre_state_init, 48
     mov rax, [r13 + PyStrObject.ob_size]
 
     ; Clamp effective length with endpos
-    mov rcx, [rbp - 8]        ; endpos
+    mov rcx, [rbp - SSI_ENDPOS] ; endpos
     cmp rcx, 0
     jl .ascii_endpos_done
     cmp rcx, rax
@@ -877,6 +887,7 @@ DEF_FUNC sre_state_init, 48
 .pos_ok2:
     mov [rbx + SRE_State.str_pos], r14
     mov [rbx + SRE_State.str_start], r14
+    mov [rbx + SRE_State.original_pos], r14
 
     jmp .init_marks
 
@@ -885,20 +896,20 @@ DEF_FUNC sre_state_init, 48
     ; UTF-8 decode to u32 codepoint array
     mov rdi, [rbx + SRE_State.str_begin]
     mov rsi, [r13 + PyStrObject.ob_size]
-    mov rax, [rbp - 8]        ; save endpos before clobbering
-    mov [rbp - 24], rax        ; endpos in [rbp-24]
-    mov [rbp - 8], rbx         ; save state ptr
-    mov [rbp - 16], rsi        ; save byte length
+    mov rax, [rbp - SSI_ENDPOS] ; save endpos before clobbering
+    mov [rbp - SSI_UENDPOS], rax ; endpos in Unicode-path slot
+    mov [rbp - SSI_ENDPOS], rbx  ; save state ptr (reuses slot)
+    mov [rbp - SSI_BYTELEN], rsi ; save byte length
 
     ; Allocate codepoint buffer (worst case: byte_len codepoints)
     lea rdi, [rsi*4]           ; u32 per codepoint
     call ap_malloc
-    mov rbx, [rbp - 8]        ; restore state
+    mov rbx, [rbp - SSI_ENDPOS] ; restore state (slot reused)
     mov [rbx + SRE_State.codepoint_buf], rax
 
     ; Decode UTF-8
     mov rdi, [rbx + SRE_State.str_begin]
-    mov rsi, [rbp - 16]       ; byte length
+    mov rsi, [rbp - SSI_BYTELEN] ; byte length
     mov rdx, rax               ; output buffer
     xor ecx, ecx               ; byte index
     xor r8d, r8d               ; codepoint index
@@ -968,7 +979,7 @@ DEF_FUNC sre_state_init, 48
 
 .utf8_done:
     ; Clamp codepoint_len with endpos
-    mov rcx, [rbp - 24]       ; endpos (saved before clobber)
+    mov rcx, [rbp - SSI_UENDPOS] ; endpos (saved before clobber)
     cmp rcx, 0
     jl .uni_endpos_done
     cmp rcx, r8
@@ -988,6 +999,7 @@ DEF_FUNC sre_state_init, 48
 .upos_ok2:
     mov [rbx + SRE_State.str_pos], r14
     mov [rbx + SRE_State.str_start], r14
+    mov [rbx + SRE_State.original_pos], r14
 
 .init_marks:
     ; Allocate marks array
@@ -2441,6 +2453,25 @@ DEF_FUNC sre_match, SM_MFRAME
     jmp .op_failure
 
 .return:
+    ; On failure, free any RepeatContexts allocated during this invocation
+    test eax, eax
+    jnz .return_ok
+    ; Walk r15 chain and free until we reach the initial r15 (saved on stack)
+.free_repeat_loop:
+    cmp r15, [rsp]             ; compare with saved initial r15
+    je .return_cleanup_done
+    test r15, r15
+    jz .return_cleanup_done    ; safety: NULL chain end
+    mov rdi, r15
+    mov r15, [r15 + SRE_RepeatContext.prev]
+    push rax
+    call ap_free
+    pop rax
+    jmp .free_repeat_loop
+.return_cleanup_done:
+    ; Restore state.repeat_ctx to initial value
+    mov [r12 + SRE_State.repeat_ctx], r15
+.return_ok:
     pop r15
     pop r14
     pop r13
@@ -2504,29 +2535,45 @@ END_FUNC sre_save_marks
 ; ============================================================================
 DEF_FUNC sre_restore_marks
     push rbx
+    push r12
     mov rbx, rsi               ; state
-    mov r8, rdi                ; saved data
+    mov r12, rdi               ; saved data
 
     ; Restore header
-    mov rcx, [r8]              ; marks_size
+    mov rcx, [r12]             ; marks_size
     mov [rbx + SRE_State.marks_size], rcx
-    mov rcx, [r8 + 8]         ; lastmark
+    mov rcx, [r12 + 8]        ; lastmark
     mov [rbx + SRE_State.lastmark], rcx
-    mov rcx, [r8 + 16]        ; lastindex
+    mov rcx, [r12 + 16]       ; lastindex
     mov [rbx + SRE_State.lastindex], rcx
 
     ; Restore marks data
-    mov rcx, [r8]
+    mov rcx, [r12]
     test rcx, rcx
     jz .restore_done
 
+    ; Bounds check: grow marks array if saved size > capacity
+    cmp rcx, [rbx + SRE_State.marks_count]
+    jbe .restore_fits
+    ; Grow: realloc to saved marks_size
+    push rcx
+    mov [rbx + SRE_State.marks_count], rcx
+    shl rcx, 3                ; bytes
+    mov rsi, rcx               ; new size
     mov rdi, [rbx + SRE_State.marks]
-    lea rsi, [r8 + 24]
+    call ap_realloc
+    mov [rbx + SRE_State.marks], rax
+    pop rcx
+
+.restore_fits:
+    mov rdi, [rbx + SRE_State.marks]
+    lea rsi, [r12 + 24]
     mov rdx, rcx
     shl rdx, 3
     call ap_memcpy
 
 .restore_done:
+    pop r12
     pop rbx
     leave
     ret
