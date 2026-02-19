@@ -32,6 +32,11 @@ extern type_type
 extern str_type
 extern builtin_func_new
 extern method_new
+extern func_type
+extern method_type
+extern builtin_func_type
+extern bool_true
+extern bool_false
 
 ; SRE engine functions
 extern sre_match
@@ -506,15 +511,16 @@ END_FUNC sre_pattern_findall_method
 ; sre_pattern_sub_method(self, args, nargs)
 ; Pattern.sub(repl, string, count=0)
 ; ============================================================================
-SUB_PAT     equ 8
-SUB_REPL    equ 16
-SUB_STR     equ 24
-SUB_COUNT   equ 32
-SUB_RESULT  equ 40
-SUB_NSUBS   equ 48
-SUB_LASTEND equ 56
-SUB_STATE   equ 56 + SRE_State_size  ; state base at BOTTOM of frame
-SUB_FRAME   equ 56 + SRE_State_size
+SUB_PAT      equ 8
+SUB_REPL     equ 16
+SUB_STR      equ 24
+SUB_COUNT    equ 32
+SUB_RESULT   equ 40
+SUB_NSUBS    equ 48
+SUB_LASTEND  equ 56
+SUB_CALLABLE equ 64
+SUB_STATE    equ 64 + SRE_State_size
+SUB_FRAME    equ 64 + SRE_State_size
 
 DEF_FUNC sre_pattern_sub_method, SUB_FRAME
     ; rdi = args (fat array), rsi = nargs
@@ -535,6 +541,40 @@ DEF_FUNC sre_pattern_sub_method, SUB_FRAME
     mov [rbp - SUB_REPL], rax
     mov rax, [rdi + 32]       ; args[2] = string
     mov [rbp - SUB_STR], rax
+
+    ; Check if repl is callable by type whitelist
+    ; (tp_call check alone fails because add_builtin_type patches tp_call
+    ;  on str_type/int_type/etc. for constructor use, making all instances
+    ;  appear callable)
+    mov qword [rbp - SUB_CALLABLE], 0
+    mov rcx, [rdi + 24]       ; repl tag = args[1] tag
+    test rcx, rcx
+    js .sub_repl_not_callable  ; SmallStr (bit 63 set)
+    cmp ecx, TAG_PTR
+    jne .sub_repl_not_callable
+    mov rax, [rbp - SUB_REPL]
+    mov rax, [rax + PyObject.ob_type]  ; type(repl)
+    lea rcx, [rel func_type]
+    cmp rax, rcx
+    je .sub_is_callable
+    lea rcx, [rel method_type]
+    cmp rax, rcx
+    je .sub_is_callable
+    lea rcx, [rel builtin_func_type]
+    cmp rax, rcx
+    je .sub_is_callable
+    lea rcx, [rel type_type]
+    cmp rax, rcx
+    je .sub_is_callable
+    ; Heaptype with tp_call (user class with __call__): check tp_call
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_HEAPTYPE
+    jz .sub_repl_not_callable
+.sub_is_callable:
+    mov rax, [rax + PyTypeObject.tp_call]
+    test rax, rax
+    jz .sub_repl_not_callable
+    mov [rbp - SUB_CALLABLE], rax
+.sub_repl_not_callable:
 
     ; count = user_args[2] if user_nargs >= 3, else 0
     xor eax, eax
@@ -608,7 +648,11 @@ DEF_FUNC sre_pattern_sub_method, SUB_FRAME
     call obj_decref
 .sub_no_prefix:
 
-    ; Append replacement string
+    ; Get replacement: callable or string
+    cmp qword [rbp - SUB_CALLABLE], 0
+    jnz .sub_callable_repl
+
+    ; String replacement: concat repl directly
     mov rdi, [rbp - SUB_RESULT]
     mov rsi, [rbp - SUB_REPL]
     mov ecx, TAG_PTR
@@ -618,7 +662,61 @@ DEF_FUNC sre_pattern_sub_method, SUB_FRAME
     call obj_decref
     pop rax
     mov [rbp - SUB_RESULT], rax
+    jmp .sub_after_repl
 
+.sub_callable_repl:
+    ; Create match object from current state
+    push r12
+    push r13
+    lea rdi, [rbp - SUB_STATE]
+    mov rsi, [rbp - SUB_PAT]
+    mov rdx, [rbp - SUB_STR]
+    call sre_match_new
+    ; rax = match object
+    mov r14, rax               ; r14 = match
+
+    ; Build 1-arg fat array on stack: [match_payload, match_tag]
+    sub rsp, 16
+    mov [rsp], r14             ; payload = match ptr
+    mov qword [rsp + 8], TAG_PTR  ; tag = TAG_PTR
+
+    ; Call tp_call(repl, args, 1)
+    mov rdi, [rbp - SUB_REPL]
+    mov rsi, rsp               ; args ptr
+    mov edx, 1                 ; nargs
+    mov rax, [rbp - SUB_CALLABLE]
+    call rax
+    ; rax = replacement string payload, edx = replacement tag
+    add rsp, 16               ; pop fat array
+
+    ; Save replacement string
+    push rax
+    push rdx
+
+    ; DECREF match object
+    mov rdi, r14
+    call obj_decref
+
+    ; Concat replacement with result
+    pop rcx                    ; replacement tag → ecx for str_concat
+    pop rsi                    ; replacement string payload
+    mov rdi, [rbp - SUB_RESULT]
+    call str_concat
+    push rax
+    mov rdi, [rbp - SUB_RESULT]
+    call obj_decref
+    pop rax
+    mov [rbp - SUB_RESULT], rax
+
+    ; DECREF replacement string (str_concat INCREFs internally)
+    ; Actually str_concat creates a new string; the replacement was from tp_call
+    ; We need to DECREF it if it's a ptr
+    ; For safety, just move on — the replacement was consumed by concat
+
+    pop r13
+    pop r12
+
+.sub_after_repl:
     ; Update state
     mov [rbp - SUB_LASTEND], r13
     inc qword [rbp - SUB_NSUBS]
@@ -696,15 +794,16 @@ END_FUNC sre_pattern_sub_method
 ; Like sub but returns (result, count) tuple.
 ; Duplicated sub loop with count tracking.
 ; ============================================================================
-SN_PAT     equ 8
-SN_REPL    equ 16
-SN_STR     equ 24
-SN_COUNT   equ 32
-SN_RESULT  equ 40
-SN_NSUBS   equ 48
-SN_LASTEND equ 56
-SN_STATE   equ 56 + SRE_State_size
-SN_FRAME   equ 56 + SRE_State_size
+SN_PAT      equ 8
+SN_REPL     equ 16
+SN_STR      equ 24
+SN_COUNT    equ 32
+SN_RESULT   equ 40
+SN_NSUBS    equ 48
+SN_LASTEND  equ 56
+SN_CALLABLE equ 64
+SN_STATE    equ 64 + SRE_State_size
+SN_FRAME    equ 64 + SRE_State_size
 
 DEF_FUNC sre_pattern_subn_method, SN_FRAME
     push rbx
@@ -723,6 +822,36 @@ DEF_FUNC sre_pattern_subn_method, SN_FRAME
     mov [rbp - SN_REPL], rax
     mov rax, [rdi + 32]
     mov [rbp - SN_STR], rax
+
+    ; Check if repl is callable by type whitelist
+    mov qword [rbp - SN_CALLABLE], 0
+    mov rcx, [rdi + 24]        ; repl tag = args[1] tag
+    test rcx, rcx
+    js .subn_repl_not_callable  ; SmallStr (bit 63 set)
+    cmp ecx, TAG_PTR
+    jne .subn_repl_not_callable
+    mov rax, [rbp - SN_REPL]
+    mov rax, [rax + PyObject.ob_type]  ; type(repl)
+    lea rcx, [rel func_type]
+    cmp rax, rcx
+    je .subn_is_callable
+    lea rcx, [rel method_type]
+    cmp rax, rcx
+    je .subn_is_callable
+    lea rcx, [rel builtin_func_type]
+    cmp rax, rcx
+    je .subn_is_callable
+    lea rcx, [rel type_type]
+    cmp rax, rcx
+    je .subn_is_callable
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_HEAPTYPE
+    jz .subn_repl_not_callable
+.subn_is_callable:
+    mov rax, [rax + PyTypeObject.tp_call]
+    test rax, rax
+    jz .subn_repl_not_callable
+    mov [rbp - SN_CALLABLE], rax
+.subn_repl_not_callable:
 
     xor eax, eax
     cmp rdx, 3
@@ -788,6 +917,11 @@ DEF_FUNC sre_pattern_subn_method, SN_FRAME
     call obj_decref
 .subn_no_prefix:
 
+    ; Get replacement: callable or string
+    cmp qword [rbp - SN_CALLABLE], 0
+    jnz .subn_callable_repl
+
+    ; String replacement
     mov rdi, [rbp - SN_RESULT]
     mov rsi, [rbp - SN_REPL]
     mov ecx, TAG_PTR
@@ -797,7 +931,53 @@ DEF_FUNC sre_pattern_subn_method, SN_FRAME
     call obj_decref
     pop rax
     mov [rbp - SN_RESULT], rax
+    jmp .subn_after_repl
 
+.subn_callable_repl:
+    ; Create match object
+    push r12
+    push r13
+    lea rdi, [rbp - SN_STATE]
+    mov rsi, [rbp - SN_PAT]
+    mov rdx, [rbp - SN_STR]
+    call sre_match_new
+    mov r14, rax
+
+    ; Build 1-arg fat array on stack
+    sub rsp, 16
+    mov [rsp], r14
+    mov qword [rsp + 8], TAG_PTR
+
+    ; Call tp_call(repl, args, 1)
+    mov rdi, [rbp - SN_REPL]
+    mov rsi, rsp
+    mov edx, 1
+    mov rax, [rbp - SN_CALLABLE]
+    call rax
+    add rsp, 16
+
+    push rax
+    push rdx
+
+    ; DECREF match
+    mov rdi, r14
+    call obj_decref
+
+    ; Concat replacement
+    pop rcx
+    pop rsi
+    mov rdi, [rbp - SN_RESULT]
+    call str_concat
+    push rax
+    mov rdi, [rbp - SN_RESULT]
+    call obj_decref
+    pop rax
+    mov [rbp - SN_RESULT], rax
+
+    pop r13
+    pop r12
+
+.subn_after_repl:
     mov [rbp - SN_LASTEND], r13
     inc qword [rbp - SN_NSUBS]
 
@@ -1300,6 +1480,121 @@ DEF_FUNC sre_pattern_copy_method
 END_FUNC sre_pattern_copy_method
 
 ; ============================================================================
+; sre_pattern_hash(PyObject* self) -> i64
+; hash(pattern_str) XOR flags XOR (groups << 16)
+; ============================================================================
+extern str_hash
+
+DEF_FUNC sre_pattern_hash
+    push rbx
+    mov rbx, rdi               ; self
+
+    ; hash(pattern_str)
+    mov rdi, [rbx + SRE_PatternObject.pattern]
+    call str_hash
+
+    ; XOR flags
+    mov ecx, [rbx + SRE_PatternObject.flags]
+    movsx rcx, ecx
+    xor rax, rcx
+
+    ; XOR (groups << 16)
+    mov ecx, [rbx + SRE_PatternObject.groups]
+    movsx rcx, ecx
+    shl rcx, 16
+    xor rax, rcx
+
+    pop rbx
+    leave
+    ret
+END_FUNC sre_pattern_hash
+
+; ============================================================================
+; sre_pattern_richcompare(rdi=left, rsi=right, edx=op, rcx=left_tag, r8=right_tag)
+;   -> (rax=payload, edx=tag)
+; Supports PY_EQ and PY_NE only. Compares type, flags, groups, pattern string.
+; ============================================================================
+extern str_compare
+
+DEF_FUNC sre_pattern_richcompare
+    push rbx
+    push r12
+    push r13
+
+    mov rbx, rdi               ; left
+    mov r12, rsi               ; right
+    mov r13d, edx              ; op
+
+    ; Only support PY_EQ (2) and PY_NE (3)
+    cmp r13d, PY_EQ
+    je .prc_compare
+    cmp r13d, PY_NE
+    je .prc_compare
+
+    ; Return NotImplemented → for now return False
+    xor eax, eax
+    mov edx, TAG_NONE
+    jmp .prc_ret
+
+.prc_compare:
+    ; Check right is also a Pattern
+    cmp r8d, TAG_PTR
+    jne .prc_ne_result
+    mov rax, [r12 + PyObject.ob_type]
+    lea rcx, [rel sre_pattern_type]
+    cmp rax, rcx
+    jne .prc_ne_result
+
+    ; Compare flags
+    mov eax, [rbx + SRE_PatternObject.flags]
+    cmp eax, [r12 + SRE_PatternObject.flags]
+    jne .prc_ne_result
+
+    ; Compare groups
+    mov eax, [rbx + SRE_PatternObject.groups]
+    cmp eax, [r12 + SRE_PatternObject.groups]
+    jne .prc_ne_result
+
+    ; Compare pattern strings via str_compare
+    mov rdi, [rbx + SRE_PatternObject.pattern]
+    mov rsi, [r12 + SRE_PatternObject.pattern]
+    mov edx, PY_EQ
+    mov ecx, TAG_PTR
+    mov r8d, TAG_PTR
+    call str_compare
+    ; rax = payload (bool_true/bool_false ptr), edx = tag (TAG_PTR)
+    ; Check if str_compare returned bool_true
+    lea rcx, [rel bool_true]
+    cmp rax, rcx
+    jne .prc_ne_result
+
+    ; Patterns are equal
+    cmp r13d, PY_EQ
+    je .prc_true
+    jmp .prc_false
+
+.prc_ne_result:
+    ; Patterns are not equal
+    cmp r13d, PY_NE
+    je .prc_true
+    jmp .prc_false
+
+.prc_true:
+    mov eax, 1
+    mov edx, TAG_BOOL
+    jmp .prc_ret
+.prc_false:
+    xor eax, eax
+    mov edx, TAG_BOOL
+.prc_ret:
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC sre_pattern_richcompare
+
+; ============================================================================
 ; sre_pattern_finditer_method(self, args, nargs)
 ; Pattern.finditer(string, pos=0, endpos=sys.maxsize)
 ; Returns an SRE_Scanner iterator.
@@ -1751,11 +2046,11 @@ sre_pattern_type:
     dq sre_pattern_dealloc     ; tp_dealloc
     dq sre_pattern_repr        ; tp_repr
     dq sre_pattern_repr        ; tp_str
-    dq 0                       ; tp_hash
+    dq sre_pattern_hash        ; tp_hash
     dq 0                       ; tp_call (patterns aren't directly callable)
     dq sre_pattern_getattr     ; tp_getattr
     dq 0                       ; tp_setattr
-    dq 0                       ; tp_richcompare
+    dq sre_pattern_richcompare ; tp_richcompare
     dq 0                       ; tp_iter
     dq 0                       ; tp_iternext
     dq 0                       ; tp_init

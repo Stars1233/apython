@@ -208,4 +208,66 @@ assert pattern.groups == 0, f"pattern.groups wrong: {pattern.groups}"
 assert pattern.flags == 0, f"pattern.flags wrong: {pattern.flags}"
 print("pattern attributes OK")
 
+# =================================================================
+# Gap 4: lastgroup attribute
+# =================================================================
+# Named group with lastgroup
+nm2 = named_pat.match("xyz")
+assert nm2.lastgroup == "word", f"lastgroup wrong: {nm2.lastgroup}"
+print("lastgroup (named) OK")
+
+# No group match → lastgroup is None
+assert m.lastgroup is None, f"lastgroup should be None: {m.lastgroup}"
+print("lastgroup (none) OK")
+
+# =================================================================
+# Gap 1: String group names in group/start/end/span
+# =================================================================
+assert nm2.group("word") == "x", f"group('word') failed: {nm2.group('word')}"
+assert nm2.start("word") == 0, f"start('word') failed: {nm2.start('word')}"
+assert nm2.end("word") == 1, f"end('word') failed: {nm2.end('word')}"
+sp2 = nm2.span("word")
+assert sp2[0] == 0 and sp2[1] == 1, f"span('word') failed: {sp2}"
+print("string group names OK")
+
+# =================================================================
+# Gap 7: Pattern __hash__ / __eq__
+# =================================================================
+# Same pattern → equal
+p1 = _sre.compile("hello", 0, code, 0, {}, ())
+p2 = _sre.compile("hello", 0, code, 0, {}, ())
+assert p1 == p2, "identical patterns should be equal"
+assert not (p1 != p2), "identical patterns should not be unequal"
+
+# Different pattern string → not equal
+p3 = _sre.compile("world", 0, code, 0, {}, ())
+assert p1 != p3, "different patterns should not be equal"
+
+# Hash: same patterns have same hash
+assert hash(p1) == hash(p2), "identical patterns should have same hash"
+print("pattern hash/eq OK")
+
+# =================================================================
+# Gap 2: Callable repl in sub/subn
+# =================================================================
+# Use a callable that uppercases the match
+def upper_repl(m):
+    return m.group(0).upper()
+
+sub_result = pattern.sub(upper_repl, "hello world hello")
+assert sub_result == "HELLO world HELLO", f"callable sub failed: {sub_result}"
+print("callable sub OK")
+
+# subn with callable
+subn_result = pattern.subn(upper_repl, "hello world hello")
+assert subn_result[0] == "HELLO world HELLO", f"callable subn result wrong: {subn_result[0]}"
+assert subn_result[1] == 2, f"callable subn count wrong: {subn_result[1]}"
+print("callable subn OK")
+
+# subn with callable and count limit
+subn_result2 = pattern.subn(upper_repl, "hello world hello", 1)
+assert subn_result2[0] == "HELLO world hello", f"callable subn count=1 wrong: {subn_result2[0]}"
+assert subn_result2[1] == 1, f"callable subn count=1 count wrong: {subn_result2[1]}"
+print("callable subn count limit OK")
+
 print("All _sre tests passed!")

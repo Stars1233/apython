@@ -103,8 +103,30 @@ DEF_FUNC sre_match_new, MN_FRAME
     mov rax, [rdi + SRE_State.lastindex]
     mov [rbx + SRE_MatchObject.lastindex], rax
 
-    ; lastgroup = NULL for now (TODO: look up in indexgroup)
+    ; lastgroup: look up indexgroup[lastindex] if available
     mov qword [rbx + SRE_MatchObject.lastgroup], 0
+    mov rax, [rbp - MN_STATE]
+    mov rcx, [rax + SRE_State.lastindex]
+    cmp rcx, 0
+    jle .mn_no_lastgroup
+    ; Check if pattern has indexgroup tuple
+    mov rax, [rbp - MN_PAT]
+    mov rax, [rax + SRE_PatternObject.indexgroup]
+    test rax, rax
+    jz .mn_no_lastgroup
+    ; Bounds check: lastindex < tuple.ob_size
+    cmp rcx, [rax + PyVarObject.ob_size]
+    jge .mn_no_lastgroup
+    ; indexgroup is a fat tuple: 16-byte stride at ob_item
+    shl rcx, 4
+    add rcx, PyTupleObject.ob_item
+    mov rdx, [rax + rcx + 8]   ; tag
+    cmp edx, TAG_PTR
+    jne .mn_no_lastgroup        ; None or non-string → NULL
+    mov rax, [rax + rcx]       ; payload (string ptr)
+    inc qword [rax + PyObject.ob_refcnt]
+    mov [rbx + SRE_MatchObject.lastgroup], rax
+.mn_no_lastgroup:
 
     ; marks_count
     mov [rbx + SRE_MatchObject.marks_count], r12
@@ -306,6 +328,53 @@ DEF_FUNC sre_match_get_group_str
 END_FUNC sre_match_get_group_str
 
 ; ============================================================================
+; sre_match_resolve_group_idx(rdi=self, rsi=payload, edx=tag) -> rsi=int_idx
+; Resolve a group argument: SmallInt passes through, string does dict lookup.
+; On error (no such group), raises IndexError.
+; ============================================================================
+DEF_FUNC sre_match_resolve_group_idx
+    ; SmallInt → return as-is
+    cmp edx, TAG_SMALLINT
+    je .rgi_done
+
+    ; TAG_PTR (string) → look up in pattern->groupindex
+    test edx, TAG_RC_BIT
+    jz .rgi_type_error
+
+    push rdi                    ; save self
+    mov rdi, [rdi + SRE_MatchObject.pattern]
+    mov rdi, [rdi + SRE_PatternObject.groupindex]
+    test rdi, rdi
+    jz .rgi_no_group_pop
+
+    ; dict_get(groupindex, key, key_tag)
+    ; rsi = key (already set), edx = TAG_PTR
+    mov edx, TAG_PTR
+    call dict_get
+    ; rax = val payload, edx = val tag
+    test edx, edx
+    jz .rgi_no_group_pop2
+    ; group_idx = val payload (SmallInt)
+    mov rsi, rax
+    pop rdi                     ; restore self (discard)
+.rgi_done:
+    leave
+    ret
+
+.rgi_no_group_pop:
+    pop rdi
+.rgi_no_group_pop2:
+    lea rdi, [rel exc_IndexError_type]
+    CSTRING rsi, "no such group"
+    call raise_exception
+
+.rgi_type_error:
+    lea rdi, [rel exc_IndexError_type]
+    CSTRING rsi, "no such group"
+    call raise_exception
+END_FUNC sre_match_resolve_group_idx
+
+; ============================================================================
 ; sre_match_group_method(self, args, nargs)
 ; group(*args) — return one or more subgroups of the match.
 ; group() or group(0) returns entire match.
@@ -341,10 +410,14 @@ DEF_FUNC sre_match_group_method
     jge .group_multi_done
     push rcx
     push r13
-    ; Get group index from args
+    ; Get group index from args (may be string or int)
     mov rax, rcx
     shl rax, 4                 ; 16-byte stride
-    mov rsi, [r12 + rax]       ; group index (SmallInt payload)
+    mov rsi, [r12 + rax]       ; group arg payload
+    mov edx, [r12 + rax + 8]  ; group arg tag
+    mov rdi, rbx
+    call sre_match_resolve_group_idx
+    ; rsi = resolved int index
     mov rdi, rbx
     call sre_match_get_group_str
     ; rax = payload, edx = tag
@@ -383,7 +456,11 @@ DEF_FUNC sre_match_group_method
     ret
 
 .group_single:
-    mov rsi, [r12]             ; group index
+    mov rsi, [r12]             ; group arg payload
+    mov edx, [r12 + 8]        ; group arg tag
+    mov rdi, rbx
+    call sre_match_resolve_group_idx
+    ; rsi = resolved int index
     mov rdi, rbx
     call sre_match_get_group_str
     pop r13
@@ -483,8 +560,14 @@ DEF_FUNC sre_match_start_method
     xor esi, esi               ; default group = 0
     test rdx, rdx
     jz .start_default
-    mov rsi, [rcx]             ; group = user_args[0] payload
+    mov rsi, [rcx]             ; group arg payload
+    mov edx, [rcx + 8]        ; group arg tag
+    mov rdi, rbx
+    call sre_match_resolve_group_idx
+    ; rsi = resolved int index
+    jmp .start_resolved
 .start_default:
+.start_resolved:
 
     ; Get mark for group start
     shl rsi, 1                 ; mark_index = group * 2
@@ -522,8 +605,14 @@ DEF_FUNC sre_match_end_method
     xor esi, esi               ; default group = 0
     test rdx, rdx
     jz .end_default
-    mov rsi, [rcx]             ; group = user_args[0] payload
+    mov rsi, [rcx]             ; group arg payload
+    mov edx, [rcx + 8]        ; group arg tag
+    mov rdi, rbx
+    call sre_match_resolve_group_idx
+    ; rsi = resolved int index
+    jmp .end_resolved
 .end_default:
+.end_resolved:
 
     shl rsi, 1
     inc rsi                     ; mark_index = group * 2 + 1
@@ -560,7 +649,11 @@ DEF_FUNC sre_match_span_method
     xor r12d, r12d             ; group = 0
     test rdx, rdx
     jz .span_default
-    mov r12, [rcx]             ; group = user_args[0] payload
+    mov rsi, [rcx]             ; group arg payload
+    mov edx, [rcx + 8]        ; group arg tag
+    mov rdi, rbx
+    call sre_match_resolve_group_idx
+    mov r12, rsi               ; resolved int index
 .span_default:
 
     ; Get start and end

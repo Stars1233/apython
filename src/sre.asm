@@ -165,12 +165,62 @@ DEF_FUNC sre_category
     jb .cat_false
     cmp esi, '9'
     jbe .cat_true
-    jmp .cat_false              ; TODO: full Unicode digit ranges
+    ; Arabic-Indic digits
+    cmp esi, 0x0660
+    jb .cat_false
+    cmp esi, 0x0669
+    jbe .cat_true
+    ; Extended Arabic-Indic digits
+    cmp esi, 0x06F0
+    jb .cat_false
+    cmp esi, 0x06F9
+    jbe .cat_true
+    ; Devanagari digits
+    cmp esi, 0x0966
+    jb .cat_false
+    cmp esi, 0x096F
+    jbe .cat_true
+    ; Bengali digits
+    cmp esi, 0x09E6
+    jb .cat_false
+    cmp esi, 0x09EF
+    jbe .cat_true
+    ; Fullwidth digits
+    cmp esi, 0xFF10
+    jb .cat_false
+    cmp esi, 0xFF19
+    jbe .cat_true
+    jmp .cat_false
 
 .cat_uni_not_digit:
     cmp esi, '0'
     jb .cat_true
     cmp esi, '9'
+    jbe .cat_false
+    ; Arabic-Indic digits
+    cmp esi, 0x0660
+    jb .cat_true
+    cmp esi, 0x0669
+    jbe .cat_false
+    ; Extended Arabic-Indic digits
+    cmp esi, 0x06F0
+    jb .cat_true
+    cmp esi, 0x06F9
+    jbe .cat_false
+    ; Devanagari digits
+    cmp esi, 0x0966
+    jb .cat_true
+    cmp esi, 0x096F
+    jbe .cat_false
+    ; Bengali digits
+    cmp esi, 0x09E6
+    jb .cat_true
+    cmp esi, 0x09EF
+    jbe .cat_false
+    ; Fullwidth digits
+    cmp esi, 0xFF10
+    jb .cat_true
+    cmp esi, 0xFF19
     jbe .cat_false
     jmp .cat_true
 
