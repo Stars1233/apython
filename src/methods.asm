@@ -4303,9 +4303,10 @@ LS_DST     equ 32     ; current dest array (temp or items)
 LS_TEMP    equ 40     ; temp array (for freeing)
 LS_REV     equ 48     ; reverse flag (0=normal, 1=reverse)
 LS_KEY     equ 56     ; key function payload (0=none)
-LS_KSRC    equ 64     ; keys source array
-LS_KDST    equ 72     ; keys dest array
-LS_KTEMP   equ 80     ; keys temp array (for freeing)
+LS_KSRC    equ 64     ; keys source array (swapped during sort)
+LS_KDST    equ 72     ; keys dest array (swapped during sort)
+LS_KTEMP   equ 80     ; keys temp array (2nd alloc, for freeing)
+LS_KORIG   equ 168    ; original keys array (1st alloc, for freeing)
 LS_WIDTH   equ 88     ; current merge width
 LS_OUTI    equ 96     ; outer loop index
 LS_MI      equ 104    ; merge: left index
@@ -4315,7 +4316,7 @@ LS_MREND   equ 128    ; merge: right end boundary
 LS_MK      equ 136    ; merge: dest index (k)
 LS_SAVED_ITEMS equ 144  ; saved ob_item before sort
 LS_SAVED_SIZE  equ 152  ; saved ob_size before sort
-LS_FRAME   equ 160
+LS_FRAME   equ 176     ; increased for LS_KORIG at 168
 DEF_FUNC list_method_sort, LS_FRAME
     push rbx
     push r12
@@ -4332,6 +4333,7 @@ DEF_FUNC list_method_sort, LS_FRAME
     mov qword [rbp - LS_KSRC], 0
     mov qword [rbp - LS_KDST], 0
     mov qword [rbp - LS_KTEMP], 0
+    mov qword [rbp - LS_KORIG], 0
 
     ; --- Parse keyword arguments ---
     extern kw_names_pending
@@ -4478,6 +4480,7 @@ DEF_FUNC list_method_sort, LS_FRAME
     extern ap_malloc
     call ap_malloc
     mov [rbp - LS_KSRC], rax
+    mov [rbp - LS_KORIG], rax      ; save original allocation for freeing
     mov r14, rax                   ; r14 = keys array
 
     ; Compute key(items[i]) for each i
@@ -4633,23 +4636,26 @@ DEF_FUNC list_method_sort, LS_FRAME
     jge .merge_copy_left
 
     ; Load elements for comparison (use keys if available, else items)
+    ; Python's sort uses right < left (PY_LT on right), not left > right.
+    ; This ensures __lt__ works (more commonly defined than __gt__).
     mov rax, [rbp - LS_KSRC]
     test rax, rax
     jnz .merge_have_cmp_arr
     mov rax, [rbp - LS_SRC]
 .merge_have_cmp_arr:
-    ; left element
-    mov rcx, [rbp - LS_MI]
-    shl rcx, 4
-    mov rdi, [rax + rcx]          ; left payload
-    mov r8, [rax + rcx + 8]       ; left tag (full 64-bit)
-    ; right element
+    ; For comparison: we do right < left (ascending) or right > left (descending)
+    ; Load right element first (will be "self" in dunder call)
     mov rcx, [rbp - LS_MJ]
     shl rcx, 4
-    mov rsi, [rax + rcx]          ; right payload
-    mov r9, [rax + rcx + 8]       ; right tag (full 64-bit)
+    mov rdi, [rax + rcx]          ; right payload (self for comparison)
+    mov r8, [rax + rcx + 8]       ; right tag (full 64-bit)
+    ; Load left element (will be "other" in dunder call)
+    mov rcx, [rbp - LS_MI]
+    shl rcx, 4
+    mov rsi, [rax + rcx]          ; left payload (other for comparison)
+    mov r9, [rax + rcx + 8]       ; left tag (full 64-bit)
 
-    ; Type dispatch on left element for tp_richcompare
+    ; Type dispatch on right element for tp_richcompare
     ; Float coercion: if either operand is TAG_FLOAT, use float_compare
     cmp r8d, TAG_FLOAT
     je .merge_use_float
@@ -4676,63 +4682,69 @@ DEF_FUNC list_method_sort, LS_FRAME
     test rax, rax
     jz .merge_try_dunder
 
-    ; tp_richcompare(rdi=left, rsi=right, edx=op, rcx=left_tag, r8=right_tag)
-    mov rcx, r8                    ; left_tag (full 64-bit for SmallStr)
-    mov r8, r9                     ; right_tag (full 64-bit for SmallStr)
+    ; tp_richcompare(rdi=right, rsi=left, edx=op, rcx=right_tag, r8=left_tag)
+    ; Comparing: right < left (ascending) or right > left (descending)
+    mov rcx, r8                    ; right_tag (full 64-bit for SmallStr)
+    mov r8, r9                     ; left_tag (full 64-bit for SmallStr)
     cmp qword [rbp - LS_REV], 0
-    je .merge_use_gt
-    mov edx, PY_LT
+    je .merge_use_lt
+    mov edx, PY_GT                 ; reversed: right > left
     jmp .merge_do_cmp
-.merge_use_gt:
-    mov edx, PY_GT
+.merge_use_lt:
+    mov edx, PY_LT                 ; normal: right < left
 .merge_do_cmp:
     call rax
     jmp .merge_check_result
 
 .merge_use_float:
-    ; float_compare(left, right, op, left_tag, right_tag)
+    ; float_compare(right, left, op, right_tag, left_tag)
     extern float_compare
-    mov rcx, r8                    ; left_tag (full 64-bit)
-    mov r8, r9                     ; right_tag (full 64-bit)
+    mov rcx, r8                    ; right_tag (full 64-bit)
+    mov r8, r9                     ; left_tag (full 64-bit)
     cmp qword [rbp - LS_REV], 0
-    je .merge_float_gt
-    mov edx, PY_LT
+    je .merge_float_lt
+    mov edx, PY_GT                 ; reversed: right > left
     jmp .merge_float_cmp
-.merge_float_gt:
-    mov edx, PY_GT
+.merge_float_lt:
+    mov edx, PY_LT                 ; normal: right < left
 .merge_float_cmp:
     call float_compare
     jmp .merge_check_result
 
 .merge_try_dunder:
-    ; No tp_richcompare — try dunder on heaptype (left side)
+    ; No tp_richcompare — try dunder on heaptype (right side, the "self")
     mov rdx, [r10 + PyTypeObject.tp_flags]
     test rdx, TYPE_FLAG_HEAPTYPE
     jz .merge_take_left            ; not heaptype, give up
 
-    ; Reload left/right from comparison array
+    ; Reload right/left from comparison array
+    ; right = self, left = other (for right < left comparison)
     mov rax, [rbp - LS_KSRC]
     test rax, rax
     jnz .merge_dunder_have_arr
     mov rax, [rbp - LS_SRC]
 .merge_dunder_have_arr:
+    ; right element = self (index MJ)
     mov rcx, [rbp - LS_MJ]
     shl rcx, 4
-    mov rsi, [rax + rcx]          ; right payload
-    mov ecx, [rax + rcx + 8]      ; right_tag (32-bit for dunder_call_2)
-    mov r8, [rbp - LS_MI]
-    shl r8, 4
-    mov rdi, [rax + r8]           ; left payload (self)
+    mov rdi, [rax + rcx]          ; right payload (self)
+    mov r11d, [rax + rcx + 8]     ; right_tag (save temporarily)
+    ; left element = other (index MI)
+    mov rcx, [rbp - LS_MI]
+    shl rcx, 4
+    mov rsi, [rax + rcx]          ; left payload (other)
+    mov ecx, [rax + rcx + 8]      ; left_tag (32-bit for dunder_call_2)
 
     ; dunder_call_2(rdi=self, rsi=other, rdx=name, ecx=other_tag)
+    ; self=right, other=left: comparing right < left (ascending)
     cmp qword [rbp - LS_REV], 0
-    je .merge_dunder_gt
-    extern dunder_lt
-    lea rdx, [rel dunder_lt]
-    jmp .merge_dunder_call
-.merge_dunder_gt:
+    je .merge_dunder_lt
     extern dunder_gt
-    lea rdx, [rel dunder_gt]
+    lea rdx, [rel dunder_gt]       ; reversed: right > left
+    jmp .merge_dunder_call
+.merge_dunder_lt:
+    extern dunder_lt
+    lea rdx, [rel dunder_lt]       ; normal: right < left
 .merge_dunder_call:
     extern dunder_call_2
     call dunder_call_2
@@ -4770,6 +4782,15 @@ DEF_FUNC list_method_sort, LS_FRAME
     jnz .sort_free_temp            ; real exception → cleanup and propagate
     ; No exception → unorderable types, raise TypeError
 .merge_cmp_type_error:
+    ; Before raising TypeError, check if list was mutated during comparison
+    mov rbx, [rbp - LS_LIST]
+    mov rax, [rbx + PyListObject.ob_item]
+    test rax, rax
+    jnz .sort_free_temp            ; ob_item != NULL → mutated, go to cleanup (will check there)
+    mov rax, [rbx + PyListObject.ob_size]
+    test rax, rax
+    jnz .sort_free_temp            ; ob_size != 0 → mutated
+    ; No mutation: raise TypeError for unorderable types
     extern exc_TypeError_type
     lea rdi, [rel exc_TypeError_type]
     CSTRING rsi, "'<' not supported between instances"
@@ -4975,8 +4996,8 @@ DEF_FUNC list_method_sort, LS_FRAME
     jmp .sort_decref_keys
 
 .sort_free_keys:
-    ; Free both keys arrays
-    mov rdi, [rbp - LS_KSRC]
+    ; Free both keys arrays (use LS_KORIG not LS_KSRC - they may swap)
+    mov rdi, [rbp - LS_KORIG]
     call ap_free
     mov rdi, [rbp - LS_KTEMP]
     call ap_free

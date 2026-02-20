@@ -3,6 +3,8 @@
 
 %include "macros.inc"
 %include "object.inc"
+%include "types.inc"
+%include "errcodes.inc"
 %include "frame.inc"
 
 extern bool_init
@@ -170,6 +172,81 @@ DEF_FUNC main
     mov rdi, rbx
     call frame_free
 
+    ; Check for unhandled exception
+    extern current_exception
+    mov rdi, [rel current_exception]
+    test rdi, rdi
+    jz .exit_ok
+
+    ; Print exception to stderr: "ExceptionType: message\n"
+    ; Get type name
+    mov rax, [rdi + PyObject.ob_type]
+    mov rsi, [rax + PyTypeObject.tp_name]
+    ; strlen of type name
+    push rdi
+    mov rdi, rsi
+    xor ecx, ecx
+.strlen_type:
+    cmp byte [rdi + rcx], 0
+    je .strlen_type_done
+    inc ecx
+    jmp .strlen_type
+.strlen_type_done:
+    mov edx, ecx
+    push rsi
+    push rdx
+    mov edi, 2                  ; stderr
+    extern sys_write
+    call sys_write
+    pop rdx
+    pop rsi
+    pop rdi
+
+    ; Check for message (must be TAG_PTR)
+    extern PyExceptionObject
+    cmp qword [rdi + PyExceptionObject.exc_value_tag], TAG_PTR
+    jne .print_newline
+    mov rax, [rdi + PyExceptionObject.exc_value]
+    test rax, rax
+    jz .print_newline
+
+    ; Print ": "
+    push rax
+    mov edi, 2
+    lea rsi, [rel colon_space]
+    mov edx, 2
+    call sys_write
+    pop rax
+
+    ; Print message (must be a string)
+    mov rcx, [rax + PyObject.ob_type]
+    extern str_type
+    lea rdx, [rel str_type]
+    cmp rcx, rdx
+    jne .print_newline
+
+    lea rsi, [rax + PyStrObject.data]
+    mov rdx, [rax + PyStrObject.ob_size]
+    mov edi, 2
+    call sys_write
+
+.print_newline:
+    mov edi, 2
+    lea rsi, [rel newline_char]
+    mov edx, 1
+    call sys_write
+
+    ; Exit 1
+    mov eax, 1
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.exit_ok:
     ; Exit 0
     xor eax, eax
     pop r15
@@ -194,3 +271,5 @@ __name__cstr: db "__name__", 0
 __main__cstr: db "__main__", 0
 __package__cstr: db "__package__", 0
 __builtins__cstr: db "__builtins__", 0
+colon_space: db ": "
+newline_char: db 10
