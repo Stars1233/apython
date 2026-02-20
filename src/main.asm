@@ -236,6 +236,11 @@ DEF_FUNC main
     mov edx, 1
     call sys_write
 
+    ; DECREF the exception object before exiting
+    mov rdi, [rel current_exception]
+    call obj_decref
+    mov qword [rel current_exception], 0
+
     ; Exit 1
     mov eax, 1
     pop r15
