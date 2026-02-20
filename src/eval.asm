@@ -489,7 +489,20 @@ DEF_FUNC_BARE eval_exception_unwind
     DISPATCH
 
 .no_handler:
-    ; No handler found - return NULL to propagate exception to caller
+    ; No handler found - must clean up value stack before returning
+    ; DECREF all items on value stack (from stack_base to r13)
+    mov rdi, [r12 + PyFrame.stack_base]
+.no_handler_cleanup:
+    cmp r13, rdi
+    jbe .no_handler_done
+    sub r13, 16
+    push rdi                 ; save stack_base
+    mov rdi, [r13]           ; payload
+    mov rsi, [r13 + 8]       ; tag
+    XDECREF_VAL rdi, rsi     ; tag-aware NULL-safe DECREF
+    pop rdi                  ; restore stack_base
+    jmp .no_handler_cleanup
+.no_handler_done:
     ; Clear instr_ptr so gen_throw/gen_send detect exhaustion
     mov qword [r12 + PyFrame.instr_ptr], 0
     xor eax, eax
