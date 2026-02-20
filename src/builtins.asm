@@ -1390,12 +1390,8 @@ DEF_FUNC builtin___build_class__
     ; tp_flags = HEAPTYPE (enables dunder dispatch fallbacks)
     mov qword [r12 + PyTypeObject.tp_flags], TYPE_FLAG_HEAPTYPE
 
-    ; tp_dict = class_dict
+    ; tp_dict = class_dict (ownership transferred from r15, no INCREF needed)
     mov [r12 + PyTypeObject.tp_dict], r15
-
-    ; INCREF class_dict (type holds a reference)
-    mov rdi, r15
-    call obj_incref
 
     ; INCREF class_name (type object refers to it via tp_name)
     mov rdi, r14

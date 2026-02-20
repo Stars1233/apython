@@ -1226,6 +1226,61 @@ DEF_FUNC object_new_fn
 END_FUNC object_new_fn
 
 ;; ============================================================================
+;; user_type_dealloc(PyTypeObject *type)
+;; Deallocator for user-defined heap types (created by __build_class__).
+;; Frees tp_dict, tp_name string, and the type object itself.
+;; ============================================================================
+global user_type_dealloc
+DEF_FUNC user_type_dealloc
+    push rbx
+    mov rbx, rdi                ; rbx = type object
+
+    ; DECREF tp_dict if present
+    mov rdi, [rbx + PyTypeObject.tp_dict]
+    test rdi, rdi
+    jz .utd_no_dict
+    call obj_decref
+.utd_no_dict:
+
+    ; DECREF tp_name string (recover from data pointer - PyStrObject.data = 32)
+    mov rdi, [rbx + PyTypeObject.tp_name]
+    test rdi, rdi
+    jz .utd_no_name
+    sub rdi, PyStrObject.data   ; point back to PyStrObject base
+    call obj_decref
+.utd_no_name:
+
+    ; DECREF tp_base if present
+    mov rdi, [rbx + PyTypeObject.tp_base]
+    test rdi, rdi
+    jz .utd_no_base
+    call obj_decref
+.utd_no_base:
+
+    ; DECREF tp_bases tuple if present
+    mov rdi, [rbx + PyTypeObject.tp_bases]
+    test rdi, rdi
+    jz .utd_no_bases
+    call obj_decref
+.utd_no_bases:
+
+    ; DECREF tp_mro tuple if present
+    mov rdi, [rbx + PyTypeObject.tp_mro]
+    test rdi, rdi
+    jz .utd_no_mro
+    call obj_decref
+.utd_no_mro:
+
+    ; Free the type object itself
+    mov rdi, rbx
+    call ap_free
+
+    pop rbx
+    leave
+    ret
+END_FUNC user_type_dealloc
+
+;; ============================================================================
 ;; Data section
 ;; ============================================================================
 section .data
@@ -1250,7 +1305,7 @@ user_type_metatype:
     dq user_type_metatype       ; ob_type (self-referential)
     dq user_type_name_str       ; tp_name
     dq TYPE_OBJECT_SIZE         ; tp_basicsize
-    dq 0                        ; tp_dealloc
+    dq user_type_dealloc        ; tp_dealloc — free heap types
     dq type_repr                ; tp_repr — <class 'Name'>
     dq type_repr                ; tp_str — same as repr
     dq 0                        ; tp_hash
