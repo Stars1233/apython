@@ -59,6 +59,10 @@ gen-cpython-tests:
 	@$(PYTHON) -m py_compile tests/cpython/test_str_ops.py
 	@echo "Compiling tests/cpython/test_str_methods.py..."
 	@$(PYTHON) -m py_compile tests/cpython/test_str_methods.py
+	@echo "Compiling tests/cpython/test_sort.py..."
+	@$(PYTHON) -m py_compile tests/cpython/test_sort.py
+	@echo "Compiling tests/cpython/test_enumerate.py..."
+	@$(PYTHON) -m py_compile tests/cpython/test_enumerate.py
 	@echo "Done."
 
 check-cpython: $(TARGET) gen-cpython-tests
@@ -72,3 +76,7 @@ check-cpython: $(TARGET) gen-cpython-tests
 	@./apython tests/cpython/__pycache__/test_str_ops.cpython-312.pyc
 	@echo "Running CPython test_str_methods.py..."
 	@./apython tests/cpython/__pycache__/test_str_methods.cpython-312.pyc
+	@echo "Running CPython test_sort.py..."
+	@./apython tests/cpython/__pycache__/test_sort.cpython-312.pyc
+	@echo "Running CPython test_enumerate.py..."
+	@./apython tests/cpython/__pycache__/test_enumerate.cpython-312.pyc

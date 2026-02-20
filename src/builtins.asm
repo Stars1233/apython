@@ -1969,10 +1969,13 @@ DEF_FUNC builtins_init
     call add_builtin
 
     ; Register iterator builtins (from itertools.asm)
+    extern enumerate_iter_type
+    extern enumerate_type_call
     mov rdi, rbx
     lea rsi, [rel bi_name_enumerate]
-    lea rdx, [rel builtin_enumerate]
-    call add_builtin
+    lea rdx, [rel enumerate_iter_type]
+    lea rcx, [rel enumerate_type_call]
+    call add_builtin_type
 
     mov rdi, rbx
     lea rsi, [rel bi_name_zip]
@@ -2034,6 +2037,13 @@ DEF_FUNC builtins_init
     mov rdi, rbx
     lea rsi, [rel bi_name_property]
     lea rdx, [rel property_type]
+    call add_exc_type_builtin
+
+    ; Register NotImplemented singleton as builtin constant
+    extern notimpl_singleton
+    mov rdi, rbx
+    lea rsi, [rel bi_name_NotImplemented]
+    lea rdx, [rel notimpl_singleton]
     call add_exc_type_builtin
 
     ; Register exception types as builtins
@@ -2447,6 +2457,7 @@ bi_name_super:        db "super", 0
 bi_name_staticmethod: db "staticmethod", 0
 bi_name_classmethod:  db "classmethod", 0
 bi_name_property:     db "property", 0
+bi_name_NotImplemented: db "NotImplemented", 0
 
 ; Exception type names
 bi_name_BaseException:     db "BaseException", 0

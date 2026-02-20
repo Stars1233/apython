@@ -16,6 +16,8 @@ extern frame_new
 extern frame_free
 extern tuple_new
 extern type_type
+extern exc_TypeError_type
+extern raise_exception
 
 ; CO_FLAGS
 CO_VARARGS equ 0x04
@@ -136,6 +138,21 @@ DEF_FUNC func_call
 .no_kw_adjust:
     mov [rsp+8], ecx        ; save positional_count
     mov qword [rsp+24], 0   ; kwargs_dict = NULL
+
+    ; Check too many positional args (unless CO_VARARGS)
+    mov rdi, [rbx + PyFuncObject.func_code]
+    mov eax, [rdi + PyCodeObject.co_argcount]
+    cmp ecx, eax
+    jbe .args_count_ok
+    mov edx, [rdi + PyCodeObject.co_flags]
+    test edx, CO_VARARGS
+    jnz .args_count_ok
+    ; Too many positional args — raise TypeError
+    extern exc_TypeError_type
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "function takes too many positional arguments"
+    call raise_exception
+.args_count_ok:
 
     ; Get builtins from global (avoids r12 caller-frame assumption)
     extern builtins_dict_global
@@ -394,6 +411,34 @@ DEF_FUNC func_call
     jmp .kw_defaults_loop
 
 .kw_defaults_done:
+    ; === Phase 6.5: Validate all required args are filled ===
+    mov rdi, [rbx + PyFuncObject.func_code]
+    mov ecx, [rdi + PyCodeObject.co_argcount]
+    add ecx, [rdi + PyCodeObject.co_kwonlyargcount]
+    test ecx, ecx
+    jz .args_valid
+    xor esi, esi
+.check_args_loop:
+    cmp esi, ecx
+    jge .args_valid
+    movsxd r8, esi
+    shl r8, 4
+    ; Check if slot is NULL (payload=0 AND tag=0)
+    mov r9, [r12 + PyFrame.localsplus + r8]
+    or r9, [r12 + PyFrame.localsplus + r8 + 8]
+    jz .args_missing
+    inc esi
+    jmp .check_args_loop
+.args_missing:
+    ; Free the frame before raising
+    push rsi
+    mov rdi, r12
+    call frame_free
+    pop rsi
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "function missing required argument"
+    call raise_exception
+.args_valid:
     ; === Phase 7: Call eval_frame ===
     mov rdi, r12
     call eval_frame

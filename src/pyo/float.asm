@@ -644,6 +644,43 @@ END_FUNC float_int
 ;; ============================================================================
 DEF_FUNC float_compare, 40
     ; rdi=left, rsi=right, edx=op, ecx=left_tag, r8d=right_tag
+    ; Validate both operands are numeric (float, int, or bool)
+    ; Left tag
+    cmp ecx, TAG_FLOAT
+    je .fc_left_ok
+    cmp ecx, TAG_SMALLINT
+    je .fc_left_ok
+    cmp ecx, TAG_BOOL
+    je .fc_left_ok
+    cmp ecx, TAG_PTR
+    jne .fc_not_impl
+    mov rax, [rdi + PyObject.ob_type]
+    lea r9, [rel int_type]
+    cmp rax, r9
+    je .fc_left_ok
+    lea r9, [rel float_type]
+    cmp rax, r9
+    je .fc_left_ok
+    jmp .fc_not_impl
+.fc_left_ok:
+    ; Right tag
+    cmp r8d, TAG_FLOAT
+    je .fc_right_ok
+    cmp r8d, TAG_SMALLINT
+    je .fc_right_ok
+    cmp r8d, TAG_BOOL
+    je .fc_right_ok
+    cmp r8d, TAG_PTR
+    jne .fc_not_impl
+    mov rax, [rsi + PyObject.ob_type]
+    lea r9, [rel int_type]
+    cmp rax, r9
+    je .fc_right_ok
+    lea r9, [rel float_type]
+    cmp rax, r9
+    je .fc_right_ok
+    jmp .fc_not_impl
+.fc_right_ok:
     mov [rbp-24], edx          ; save op (4 bytes)
 
     ; Convert both to doubles
@@ -715,6 +752,12 @@ DEF_FUNC float_compare, 40
     cmp dword [rbp-24], PY_NE
     je .ret_true
     jmp .ret_false
+
+.fc_not_impl:
+    ; Operand is not numeric — return NULL (NotImplemented)
+    RET_NULL
+    leave
+    ret
 
 .ret_true:
     lea rax, [rel bool_true]

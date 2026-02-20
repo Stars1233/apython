@@ -628,7 +628,12 @@ section .text
     mov edx, ecx               ; edx = comparison op
     mov ecx, [rsp + BO_LTAG]   ; ecx = left_tag
     mov r8d, [rsp + BO_RTAG]   ; r8d = right_tag
+    push rdx                   ; save comparison op (like .cmp_do_call does)
     call float_compare
+    ; Check for NotImplemented (NULL return = tag 0)
+    test edx, edx
+    jz .cmp_try_right          ; try right operand's tp_richcompare
+    add rsp, 8                 ; discard saved comparison op
     jmp .cmp_do_call_result
 
 .cmp_do_call:
@@ -775,11 +780,32 @@ section .text
 
 .cmp_identity:
     ; Fallback: identity comparison (pointer equality)
+    ; For ordering ops (LT, LE, GT, GE) with non-identical objects, raise TypeError
+    ; For EQ/NE, use identity comparison
+    cmp ecx, PY_EQ
+    je .cmp_id_eq_ne
+    cmp ecx, PY_NE
+    je .cmp_id_eq_ne
+
+    ; Ordering comparison with unsupported types → raise TypeError
+    ; DECREF both operands first
+    mov rdi, [rsp + BO_LEFT]
+    mov rsi, [rsp + BO_LTAG]
+    DECREF_VAL rdi, rsi
+    mov rdi, [rsp + BO_RIGHT]
+    mov rsi, [rsp + BO_RTAG]
+    DECREF_VAL rdi, rsi
+    add rsp, BO_SIZE
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "'<' not supported between instances"
+    extern raise_exception
+    call raise_exception
+    DISPATCH
+
+.cmp_id_eq_ne:
     mov rsi, [rsp + BO_RIGHT]
     mov rdi, [rsp + BO_LEFT]
     cmp rdi, rsi
-    ; For EQ: equal pointers → True. For NE: unequal → True.
-    ; All other comparisons fall back to False for unsupported types.
     je .cmp_id_equal
     ; Not equal
     cmp ecx, PY_NE
@@ -787,10 +813,6 @@ section .text
     jmp .cmp_id_false
 .cmp_id_equal:
     cmp ecx, PY_EQ
-    je .cmp_id_true
-    cmp ecx, PY_LE
-    je .cmp_id_true
-    cmp ecx, PY_GE
     je .cmp_id_true
 .cmp_id_false:
     ; DECREF both operands (tag-aware), push False

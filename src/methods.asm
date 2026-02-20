@@ -4313,7 +4313,9 @@ LS_MJ      equ 112    ; merge: right index (j)
 LS_MMID    equ 120    ; merge: mid boundary
 LS_MREND   equ 128    ; merge: right end boundary
 LS_MK      equ 136    ; merge: dest index (k)
-LS_FRAME   equ 144
+LS_SAVED_ITEMS equ 144  ; saved ob_item before sort
+LS_SAVED_SIZE  equ 152  ; saved ob_size before sort
+LS_FRAME   equ 160
 DEF_FUNC list_method_sort, LS_FRAME
     push rbx
     push r12
@@ -4451,9 +4453,20 @@ DEF_FUNC list_method_sort, LS_FRAME
     mov qword [rel kw_names_pending], 0
 
 .sort_no_kw:
+    ; Initialize saved state (needed for sort_done even on early exit)
+    mov qword [rbp - LS_SAVED_ITEMS], 0
+    mov qword [rbp - LS_SAVED_SIZE], 0
+
     ; If n < 2, nothing to sort
     cmp r12, 2
-    jl .sort_done
+    jl .sort_trivial_done
+
+    ; Save list state and empty it during sort (mutation detection)
+    mov rax, [rbx + PyListObject.ob_item]
+    mov [rbp - LS_SAVED_ITEMS], rax
+    mov [rbp - LS_SAVED_SIZE], r12
+    mov qword [rbx + PyListObject.ob_item], 0
+    mov qword [rbx + PyListObject.ob_size], 0
 
     ; --- Pre-compute keys if key= provided ---
     cmp qword [rbp - LS_KEY], 0
@@ -4473,9 +4486,8 @@ DEF_FUNC list_method_sort, LS_FRAME
     cmp r15, [rbp - LS_N]
     jge .sort_keys_done
 
-    ; Get items[i] and push as single arg on stack
-    mov rax, [rbp - LS_LIST]
-    mov rax, [rax + PyListObject.ob_item]
+    ; Get items[i] and push as single arg on stack (use saved items, list is empty during sort)
+    mov rax, [rbp - LS_SAVED_ITEMS]
     mov rcx, r15
     shl rcx, 4
     mov rdi, [rax + rcx]          ; item payload
@@ -4497,7 +4509,24 @@ DEF_FUNC list_method_sort, LS_FRAME
     jmp .sort_key_store
 
 .sort_key_try_meta:
-    ; Try metatype's tp_call (e.g., for type objects used as key)
+    ; tp_call NULL — check if heaptype instance with __call__
+    mov rdi, [rbp - LS_KEY]
+    mov rax, [rdi + PyObject.ob_type]
+    mov rdx, [rax + PyTypeObject.tp_flags]
+    test rdx, TYPE_FLAG_HEAPTYPE
+    jz .sort_key_meta_builtin
+
+    ; Heaptype instance: use __call__(key, item) via dunder_call_2
+    mov rsi, [rsp]                 ; other = item payload
+    mov rcx, [rsp + 8]            ; other_tag = item tag
+    extern dunder_call
+    lea rdx, [rel dunder_call]
+    extern dunder_call_2
+    call dunder_call_2
+    jmp .sort_key_store
+
+.sort_key_meta_builtin:
+    ; Built-in type: try metatype's tp_call (e.g., for type objects used as key)
     mov rdi, [rbp - LS_KEY]
     mov rax, [rdi + PyObject.ob_type]
     mov rax, [rax + PyObject.ob_type]  ; metatype
@@ -4512,7 +4541,7 @@ DEF_FUNC list_method_sort, LS_FRAME
     add rsp, 16                    ; pop item from stack
     ; rax = key result payload, edx = key result tag
     test edx, edx
-    jz .sort_key_error             ; NULL return → error
+    jz .sort_cleanup_keys          ; NULL return → error (item already popped)
     ; Store key in keys[i]
     mov rcx, r15
     shl rcx, 4
@@ -4542,9 +4571,8 @@ DEF_FUNC list_method_sort, LS_FRAME
     mov [rbp - LS_TEMP], rax
     mov [rbp - LS_DST], rax
 
-    ; Source = list's items array
-    mov rax, [rbp - LS_LIST]
-    mov rax, [rax + PyListObject.ob_item]
+    ; Source = saved list items array (list is empty during sort)
+    mov rax, [rbp - LS_SAVED_ITEMS]
     mov [rbp - LS_SRC], rax
 
     ; =========================================================================
@@ -4622,10 +4650,14 @@ DEF_FUNC list_method_sort, LS_FRAME
     mov r9, [rax + rcx + 8]       ; right tag (full 64-bit)
 
     ; Type dispatch on left element for tp_richcompare
+    ; Float coercion: if either operand is TAG_FLOAT, use float_compare
+    cmp r8d, TAG_FLOAT
+    je .merge_use_float
+    cmp r9d, TAG_FLOAT
+    je .merge_use_float
+
     cmp r8d, TAG_SMALLINT
     je .merge_si_type
-    cmp r8d, TAG_FLOAT
-    je .merge_fl_type
     test r8, r8
     js .merge_ss_type              ; SmallStr: bit 63 set
     test r8d, TAG_RC_BIT
@@ -4634,10 +4666,6 @@ DEF_FUNC list_method_sort, LS_FRAME
     jmp .merge_have_type
 .merge_si_type:
     lea rax, [rel int_type]
-    jmp .merge_have_type
-.merge_fl_type:
-    extern float_type
-    lea rax, [rel float_type]
     jmp .merge_have_type
 .merge_ss_type:
     extern str_type
@@ -4648,9 +4676,9 @@ DEF_FUNC list_method_sort, LS_FRAME
     test rax, rax
     jz .merge_try_dunder
 
-    ; tp_richcompare(rdi=left, rsi=right, edx=op, ecx=left_tag, r8=right_tag)
-    mov ecx, r8d                   ; left_tag
-    mov r8d, r9d                   ; right_tag
+    ; tp_richcompare(rdi=left, rsi=right, edx=op, rcx=left_tag, r8=right_tag)
+    mov rcx, r8                    ; left_tag (full 64-bit for SmallStr)
+    mov r8, r9                     ; right_tag (full 64-bit for SmallStr)
     cmp qword [rbp - LS_REV], 0
     je .merge_use_gt
     mov edx, PY_LT
@@ -4659,6 +4687,21 @@ DEF_FUNC list_method_sort, LS_FRAME
     mov edx, PY_GT
 .merge_do_cmp:
     call rax
+    jmp .merge_check_result
+
+.merge_use_float:
+    ; float_compare(left, right, op, left_tag, right_tag)
+    extern float_compare
+    mov rcx, r8                    ; left_tag (full 64-bit)
+    mov r8, r9                     ; right_tag (full 64-bit)
+    cmp qword [rbp - LS_REV], 0
+    je .merge_float_gt
+    mov edx, PY_LT
+    jmp .merge_float_cmp
+.merge_float_gt:
+    mov edx, PY_GT
+.merge_float_cmp:
+    call float_compare
     jmp .merge_check_result
 
 .merge_try_dunder:
@@ -4698,10 +4741,14 @@ DEF_FUNC list_method_sort, LS_FRAME
 .merge_check_result:
     ; (rax=payload, edx=tag) — check if comparison is true
     test edx, edx
-    jz .merge_take_left            ; NULL/NotImplemented → take left (stable)
+    jz .merge_cmp_null             ; NULL → check for error or unorderable types
     cmp edx, TAG_BOOL
     je .merge_bool_result
-    ; TAG_PTR: check if bool_true, then DECREF
+    ; TAG_PTR: check for NotImplemented, then check bool_true
+    extern notimpl_singleton
+    lea rcx, [rel notimpl_singleton]
+    cmp rax, rcx
+    je .merge_cmp_type_error       ; NotImplemented → raise TypeError
     push rax                       ; save for DECREF
     lea rcx, [rel bool_true]
     cmp rax, rcx
@@ -4715,6 +4762,20 @@ DEF_FUNC list_method_sort, LS_FRAME
     test ecx, ecx
     jnz .merge_take_right
     jmp .merge_take_left
+
+.merge_cmp_null:
+    ; NULL return — check current_exception
+    mov rax, [rel current_exception]
+    test rax, rax
+    jnz .sort_free_temp            ; real exception → cleanup and propagate
+    ; No exception → unorderable types, raise TypeError
+.merge_cmp_type_error:
+    extern exc_TypeError_type
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "'<' not supported between instances"
+    extern raise_exception
+    call raise_exception
+    jmp .sort_free_temp
 .merge_bool_result:
     ; eax = 0 (false) or 1 (true)
     test eax, eax
@@ -4875,13 +4936,12 @@ DEF_FUNC list_method_sort, LS_FRAME
 
 .sort_width_done:
     ; After loop, result is in LS_SRC. If not list's items, copy back.
-    mov rax, [rbp - LS_LIST]
-    mov rax, [rax + PyListObject.ob_item]
+    mov rax, [rbp - LS_SAVED_ITEMS]
     cmp rax, [rbp - LS_SRC]
     je .sort_free_temp             ; result already in items
 
     ; memcpy items ← src, n*16 bytes
-    mov rdi, rax                   ; dest = items
+    mov rdi, rax                   ; dest = saved items
     mov rsi, [rbp - LS_SRC]       ; src = temp (where result is)
     mov rdx, [rbp - LS_N]
     shl rdx, 4                     ; byte count
@@ -4948,11 +5008,120 @@ DEF_FUNC list_method_sort, LS_FRAME
 .sort_cleanup_keys_free:
     mov rdi, r14
     call ap_free
+    ; Error path: propagate exception (return TAG_NULL)
+    extern current_exception
+    mov rax, [rel current_exception]
+    test rax, rax
+    jnz .sort_error_return
 
-.sort_done:
+.sort_trivial_done:
+    ; n < 2, no sort needed, return None
     lea rax, [rel none_singleton]
     inc qword [rax + PyObject.ob_refcnt]
     mov edx, TAG_PTR
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.sort_done:
+    ; Restore list state: put sorted items back
+    mov rbx, [rbp - LS_LIST]
+    ; Check if list was mutated during sort (ob_item or ob_size changed)
+    mov rax, [rbx + PyListObject.ob_item]
+    test rax, rax
+    jnz .sort_mutated              ; ob_item != NULL → someone put items back
+    mov rax, [rbx + PyListObject.ob_size]
+    test rax, rax
+    jnz .sort_mutated              ; ob_size != 0 → someone changed it
+
+    ; No mutation: restore saved items
+    mov rax, [rbp - LS_SAVED_ITEMS]
+    mov [rbx + PyListObject.ob_item], rax
+    mov rax, [rbp - LS_SAVED_SIZE]
+    mov [rbx + PyListObject.ob_size], rax
+
+    ; Check if an exception was raised during sort
+    mov rax, [rel current_exception]
+    test rax, rax
+    jnz .sort_error_return
+    lea rax, [rel none_singleton]
+    inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.sort_mutated:
+    ; List was mutated during sort — this is an error
+    ; Free the mutated list's items (they're someone else's problem)
+    ; But first restore our saved sorted items
+    ; Actually: the mutated items are the new state. We need to DECREF our
+    ; saved items (since they won't be in the list anymore) and raise ValueError.
+    ; CPython: puts sorted items back, then raises ValueError.
+    ; We'll do the same: restore sorted items, free mutated items
+    ; Save mutated items for cleanup
+    mov rcx, [rbx + PyListObject.ob_item]
+    mov r8, [rbx + PyListObject.ob_size]
+    ; Restore our sorted items
+    mov rax, [rbp - LS_SAVED_ITEMS]
+    mov [rbx + PyListObject.ob_item], rax
+    mov rax, [rbp - LS_SAVED_SIZE]
+    mov [rbx + PyListObject.ob_size], rax
+    ; DECREF all mutated items and free the array
+    push rcx
+    push r8
+    test rcx, rcx
+    jz .sort_mut_no_decref
+    xor r9d, r9d
+.sort_mut_decref_loop:
+    cmp r9, r8
+    jge .sort_mut_decref_done
+    mov rax, r9
+    shl rax, 4
+    mov rdi, [rcx + rax]          ; payload
+    mov rsi, [rcx + rax + 8]      ; tag
+    push rcx
+    push r8
+    push r9
+    DECREF_VAL rdi, rsi
+    pop r9
+    pop r8
+    pop rcx
+    inc r9
+    jmp .sort_mut_decref_loop
+.sort_mut_decref_done:
+    mov rdi, rcx
+    call ap_free
+.sort_mut_no_decref:
+    pop r8
+    pop rcx
+    ; Raise ValueError
+    lea rdi, [rel exc_ValueError_type]
+    CSTRING rsi, "list modified during sort"
+    call raise_exception
+    jmp .sort_error_return
+
+.sort_error_return:
+    ; Restore list items if still saved (error during sort before merge)
+    mov rbx, [rbp - LS_LIST]
+    mov rax, [rbx + PyListObject.ob_item]
+    test rax, rax
+    jnz .sort_error_already_restored
+    ; List is still empty — restore saved items
+    mov rax, [rbp - LS_SAVED_ITEMS]
+    mov [rbx + PyListObject.ob_item], rax
+    mov rax, [rbp - LS_SAVED_SIZE]
+    mov [rbx + PyListObject.ob_size], rax
+.sort_error_already_restored:
+    RET_NULL
     pop r15
     pop r14
     pop r13
@@ -5058,6 +5227,9 @@ DEF_FUNC list_method_index, LI_FRAME
     mov rcx, r12
     mov r8, [rbp - LI_VTAG]
     call rax
+    ; Check for NotImplemented (NULL return = tag 0)
+    test edx, edx
+    jz .index_next
 
 .index_check_result:
     ; Check truthiness
@@ -5177,6 +5349,9 @@ DEF_FUNC list_method_count, LC_FRAME
     mov rcx, r8               ; item tag (64-bit for SmallStr)
     mov r8, r15               ; value tag (64-bit for SmallStr)
     call rax
+    ; Check for NotImplemented (NULL return = tag 0)
+    test edx, edx
+    jz .count_next
 
 .count_check_result:
     ; Check result truthiness (handles both TAG_BOOL and TAG_PTR bool)
@@ -5857,22 +6032,19 @@ END_FUNC dict_method_copy
 
 ;; ============================================================================
 ;; dict_classmethod_fromkeys(args, nargs) -> new dict
-;; args[0]=cls (type), args[1]=iterable (list), optional args[2]=value (default None)
+;; args[0]=cls (type), args[1]=iterable, optional args[2]=value (default None)
 ;; Creates dict from iterable keys with given value.
 ;; ============================================================================
-DFK_LIST  equ 8
-DFK_VAL   equ 16
-DFK_VTAG  equ 24
-DFK_FRAME equ 32
+DFK_ITER  equ 8
+DFK_DICT  equ 16
+DFK_VAL   equ 24
+DFK_VTAG  equ 32
+DFK_FRAME equ 40
 
 DEF_FUNC dict_classmethod_fromkeys, DFK_FRAME
     push rbx
     push r12
     push r13
-
-    ; args[1] = iterable (must be list for now)
-    mov rax, [rdi + 16]
-    mov [rbp - DFK_LIST], rax
 
     ; Default value = None (payload=0, tag=TAG_NONE)
     mov qword [rbp - DFK_VAL], 0
@@ -5880,47 +6052,53 @@ DEF_FUNC dict_classmethod_fromkeys, DFK_FRAME
 
     ; If nargs >= 3, use args[2] as value
     cmp rsi, 3
-    jl .dfk_create
+    jl .dfk_get_iter
     mov rax, [rdi + 32]            ; value payload
     mov rcx, [rdi + 40]            ; value tag
     mov [rbp - DFK_VAL], rax
     mov [rbp - DFK_VTAG], rcx
 
-.dfk_create:
+.dfk_get_iter:
+    ; Get iterator from args[1] (iterable)
+    ; args array: [0]=cls, [8]=cls_tag, [16]=iterable, [24]=iterable_tag, ...
+    mov rax, rdi                   ; save args ptr
+    mov rdi, [rax + 16]            ; iterable payload
+    mov esi, [rax + 24]            ; iterable tag
+    extern get_iterator
+    call get_iterator
+    mov [rbp - DFK_ITER], rax
+
     ; Create new dict
     call dict_new
-    mov rbx, rax                    ; result dict
-
-    ; Iterate list keys
-    mov rax, [rbp - DFK_LIST]
-    mov r12, [rax + PyListObject.ob_size]
-    xor r13d, r13d
+    mov [rbp - DFK_DICT], rax
 
 .dfk_loop:
-    cmp r13, r12
-    jge .dfk_done
+    ; Get next key from iterator
+    mov rdi, [rbp - DFK_ITER]
+    extern call_iternext
+    call call_iternext
+    test edx, edx
+    jz .dfk_done                   ; iterator exhausted
 
-    ; Get key from list
-    mov rax, [rbp - DFK_LIST]
-    mov rax, [rax + PyListObject.ob_item]
-    mov rcx, r13
-    shl rcx, 4                     ; * 16 (fat stride)
-    mov rsi, [rax + rcx]           ; key payload
-    mov r8, [rax + rcx + 8]        ; key tag
+    ; rax=key payload, rdx=key tag (full 64-bit for SmallStr)
+    ; Save key before loading value (which overwrites rdx)
+    mov rsi, rax                   ; key payload
+    mov r8, rdx                    ; key tag (full 64-bit for SmallStr support)
 
     ; dict_set(dict, key, value, value_tag, key_tag)
-    push r13
-    mov rdi, rbx
-    mov rdx, [rbp - DFK_VAL]
-    mov rcx, [rbp - DFK_VTAG]
+    mov rdi, [rbp - DFK_DICT]
+    mov rdx, [rbp - DFK_VAL]       ; value payload (overwrites old rdx)
+    mov rcx, [rbp - DFK_VTAG]      ; value tag
     call dict_set
-    pop r13
 
-    inc r13
     jmp .dfk_loop
 
 .dfk_done:
-    mov rax, rbx
+    ; DECREF iterator
+    mov rdi, [rbp - DFK_ITER]
+    call obj_decref
+
+    mov rax, [rbp - DFK_DICT]
     mov edx, TAG_PTR
     pop r13
     pop r12
@@ -6090,6 +6268,9 @@ DEF_FUNC list_method_remove
     mov rcx, r8              ; item tag (64-bit for SmallStr)
     mov r8, r15              ; value tag (64-bit for SmallStr)
     call rax
+    ; Check for NotImplemented (NULL return = tag 0)
+    test edx, edx
+    jz .lremove_next
 
 .lremove_check_result:
     ; Check result truthiness (handles TAG_BOOL and TAG_PTR bool)

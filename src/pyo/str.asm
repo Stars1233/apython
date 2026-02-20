@@ -1034,10 +1034,16 @@ DEF_FUNC str_compare, SC_FRAME
 
 .not_string:
     ; Right operand is not a string.
-    ; EQ → False, NE → True, ordering → False (CPython NotImplemented fallback)
+    ; EQ → False, NE → True, ordering → NotImplemented (NULL)
+    cmp ebx, PY_EQ
+    je .ret_false
     cmp ebx, PY_NE
     je .ret_true
-    jmp .ret_false
+    ; Ordering comparison with non-string → return NotImplemented (NULL)
+    RET_NULL
+    pop rbx
+    leave
+    ret
 
 .ret_true:
     lea rax, [rel bool_true]
@@ -1344,7 +1350,7 @@ DEF_FUNC str_iter_next
     mov rsi, 1
     call str_new
 
-    ; Advance index
+    ; Advance index - str_new already set rax/rdx correctly (SmallStr or heap)
     inc qword [rbx + PyStrIterObject.it_index]
     pop rbx
     leave

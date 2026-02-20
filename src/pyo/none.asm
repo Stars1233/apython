@@ -106,3 +106,54 @@ global none_singleton
 none_singleton:
     dq 0x7FFFFFFFFFFFFFFF   ; ob_refcnt (max value, never reaches zero)
     dq none_type            ; ob_type
+
+; ============================================================================
+; NotImplementedType and NotImplemented singleton
+; ============================================================================
+
+section .text
+; notimpl_repr(PyObject *self) -> PyObject*
+DEF_FUNC_BARE notimpl_repr
+    lea rdi, [rel notimpl_repr_str]
+    jmp str_from_cstr
+END_FUNC notimpl_repr
+
+section .data
+notimpl_name_str: db "NotImplementedType", 0
+notimpl_repr_str: db "NotImplemented", 0
+
+; NotImplementedType type object
+align 8
+global notimpl_type
+notimpl_type:
+    dq 1                    ; ob_refcnt (immortal)
+    dq type_type            ; ob_type
+    dq notimpl_name_str     ; tp_name
+    dq PyObject_size        ; tp_basicsize
+    dq 0                    ; tp_dealloc (never deallocated)
+    dq notimpl_repr         ; tp_repr
+    dq notimpl_repr         ; tp_str
+    dq 0                    ; tp_hash
+    dq 0                    ; tp_call
+    dq 0                    ; tp_getattr
+    dq 0                    ; tp_setattr
+    dq 0                    ; tp_richcompare
+    dq 0                    ; tp_iter
+    dq 0                    ; tp_iternext
+    dq 0                    ; tp_init
+    dq 0                    ; tp_new
+    dq 0                    ; tp_as_number
+    dq 0                    ; tp_as_sequence
+    dq 0                    ; tp_as_mapping
+    dq 0                    ; tp_base
+    dq 0                    ; tp_dict
+    dq 0                    ; tp_mro
+    dq 0                    ; tp_flags
+    dq 0                    ; tp_bases
+
+; NotImplemented singleton - immortal object, never freed
+align 8
+global notimpl_singleton
+notimpl_singleton:
+    dq 0x7FFFFFFFFFFFFFFF   ; ob_refcnt (max value, never reaches zero)
+    dq notimpl_type         ; ob_type

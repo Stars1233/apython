@@ -29,7 +29,7 @@ DEF_FUNC fat_to_obj
     je .none
     cmp esi, TAG_BOOL
     je .bool
-    ; TAG_NULL or unknown: return NULL
+    ; TAG_FLOAT, TAG_NULL or unknown: return NULL
     xor eax, eax
     leave
     ret

@@ -1734,17 +1734,13 @@ DEF_FUNC builtin_iter_fn
     bt qword [rdi + 8], 63
     jc .iter_smallstr_spill
 
-    cmp qword [rdi + 8], TAG_PTR
-    jne .iter_type_error            ; non-pointer tag
+    mov esi, [rdi + 8]                 ; args[0] tag
     mov rdi, [rdi]                     ; args[0] payload
 
 .iter_have_obj:
-    mov rax, [rdi + PyObject.ob_type]
-    mov rcx, [rax + PyTypeObject.tp_iter]
-    test rcx, rcx
-    jz .iter_type_error
-
-    call rcx
+    ; Use get_iterator which handles tp_iter, __iter__, __getitem__, validation
+    extern get_iterator
+    call get_iterator
     mov edx, TAG_PTR
     leave
     ret
@@ -1755,11 +1751,6 @@ DEF_FUNC builtin_iter_fn
     call smallstr_to_obj
     mov rdi, rax
     jmp .iter_have_obj
-
-.iter_type_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "object is not iterable"
-    call raise_exception
 
 .iter_error:
     lea rdi, [rel exc_TypeError_type]
@@ -1783,16 +1774,49 @@ DEF_FUNC builtin_next_fn
     mov rdi, [rdi]                     ; args[0] payload
 
     mov rax, [rdi + PyObject.ob_type]
-    mov rcx, [rax + PyTypeObject.tp_iternext]
-    test rcx, rcx
-    jz .next_type_error
+    mov rcx, rax                       ; save type
+    mov rax, [rax + PyTypeObject.tp_iternext]
+    test rax, rax
+    jnz .next_have_iternext
 
+    ; tp_iternext NULL — try __next__ on heaptype
+    mov rdx, [rcx + PyTypeObject.tp_flags]
+    test rdx, TYPE_FLAG_HEAPTYPE
+    jz .next_type_error
+    mov rbx, rdi                       ; save iterator
+    extern dunder_next
+    lea rsi, [rel dunder_next]
+    extern dunder_call_1
+    call dunder_call_1
+    test edx, edx
+    jnz .next_got_val                  ; got a value
+    ; NULL from __next__ — check for StopIteration in current_exception
+    extern current_exception
+    mov rax, [rel current_exception]
+    test rax, rax
+    jz .next_stop                      ; no exception, clean exhaustion
+    mov rcx, [rax + PyObject.ob_type]
+    extern exc_StopIteration_type
+    lea rdx, [rel exc_StopIteration_type]
+    cmp rcx, rdx
+    jne .next_got_val_null             ; other exception: leave it, propagate
+    ; It's StopIteration — leave it as current_exception for raise
+    jmp .next_stop
+.next_got_val_null:
+    ; Non-StopIteration exception set — return NULL to propagate
+    RET_NULL
+    pop rbx
+    leave
+    ret
+
+.next_have_iternext:
     mov rbx, rdi                       ; save iterator for StopIteration.value
-    call rcx
+    call rax
     test edx, edx
     jz .next_stop
 
-    ; tp_iternext already returns fat (rax=payload, rdx=tag)
+.next_got_val:
+    ; tp_iternext / __next__ returns fat (rax=payload, rdx=tag)
     pop rbx
     leave
     ret

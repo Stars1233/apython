@@ -819,9 +819,10 @@ DEF_FUNC_BARE op_get_iter
     extern dunder_call_1
     call dunder_call_1
     test edx, edx
-    jz .not_iterable
-    ; rax = iterator from __iter__, skip the tp_iter call
-    jmp .have_iter_result
+    jnz .have_iter_result
+    ; __iter__ not found — try __getitem__ sequence protocol
+    mov rdi, [rsp]             ; restore obj
+    jmp .try_getitem
 
 .have_iter:
     ; Call tp_iter(obj) -> iterator
@@ -838,6 +839,19 @@ DEF_FUNC_BARE op_get_iter
 
     VPUSH_PTR rax
     DISPATCH
+
+.try_getitem:
+    ; rdi = original obj. Check if heaptype has __getitem__
+    mov rcx, [rdi + PyObject.ob_type]
+    mov rdx, [rcx + PyTypeObject.tp_flags]
+    test rdx, TYPE_FLAG_HEAPTYPE
+    jz .not_iterable
+    push rbp
+    mov rbp, rsp
+    extern seq_iter_new
+    call seq_iter_new          ; creates seq_iter wrapping obj
+    leave
+    jmp .have_iter_result
 
 .not_iterable:
     lea rdi, [rel exc_TypeError_type]
@@ -895,8 +909,26 @@ DEF_FUNC_BARE op_for_iter
     lea rsi, [rel dunder_next]
     extern dunder_call_1
     call dunder_call_1
-    ; rax = value or NULL (if __next__ not found)
-    jmp .check_next_result
+    test edx, edx
+    jnz .check_next_result     ; got a value
+
+    ; NULL from __next__ — check for StopIteration
+    extern current_exception
+    mov rax, [rel current_exception]
+    test rax, rax
+    jz .exhausted              ; no exception, clean exhaustion
+
+    extern exc_StopIteration_type
+    mov rcx, [rax + PyObject.ob_type]
+    lea rdx, [rel exc_StopIteration_type]
+    cmp rcx, rdx
+    jne .exhausted             ; other exception: leave it, propagate later
+
+    ; Clear StopIteration
+    mov rdi, rax
+    call obj_decref
+    mov qword [rel current_exception], 0
+    jmp .exhausted
 
 .have_iternext:
     call rax

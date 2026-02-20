@@ -628,6 +628,9 @@ DEF_FUNC tuple_richcompare, TRC_FRAME
     pop rdi                         ; left_payload
     mov edx, PY_EQ
     call rax
+    ; Check for NotImplemented (NULL return = tag 0)
+    test edx, edx
+    jz .trc_elem_not_equal_nopop
 
     ; Check result for truthiness
     push rax
@@ -655,6 +658,9 @@ DEF_FUNC tuple_richcompare, TRC_FRAME
     pop rdi
     mov edx, PY_EQ
     call float_compare
+    ; Check for NotImplemented (NULL return = tag 0)
+    test edx, edx
+    jz .trc_elem_not_equal_nopop
     push rax
     push rdx
     mov rdi, rax
@@ -698,7 +704,10 @@ DEF_FUNC tuple_richcompare, TRC_FRAME
     ; Resolve left type (again)
     push rcx
     push r8
+    ; Float coercion: if either operand is TAG_FLOAT, use float_compare
     cmp ecx, TAG_FLOAT
+    je .trc_order_float
+    cmp r8d, TAG_FLOAT
     je .trc_order_float
     cmp ecx, TAG_SMALLINT
     je .trc_order_int_type
@@ -722,6 +731,7 @@ DEF_FUNC tuple_richcompare, TRC_FRAME
 .trc_order_str_type:
     lea rax, [rel str_type]
 .trc_order_have_type:
+    mov r10, rax                    ; save type ptr
     mov rax, [rax + PyTypeObject.tp_richcompare]
     test rax, rax
     jz .trc_order_fallback
@@ -739,8 +749,52 @@ DEF_FUNC tuple_richcompare, TRC_FRAME
     leave
     ret
 .trc_order_fallback:
+    ; tp_richcompare is NULL — check if heaptype with dunders
+    mov rax, [r10 + PyTypeObject.tp_flags]
+    test rax, TYPE_FLAG_HEAPTYPE
+    jz .trc_order_notimpl           ; not heaptype → return NotImplemented
+    ; Heaptype: try dunder for ordering op
+    pop r8                          ; right_tag
+    pop rcx                         ; left_tag (unused, dunder_call_2 uses ecx=right_tag)
+    mov ecx, r8d                    ; ecx = right_tag for dunder_call_2
+    ; rdi = left_payload (still set from line 698)
+    ; rsi = right_payload (still set from line 702)
+    mov eax, [rbp - TRC_OP]
+    cmp eax, PY_LT
+    je .trc_order_dunder_lt
+    cmp eax, PY_LE
+    je .trc_order_dunder_le
+    cmp eax, PY_GT
+    je .trc_order_dunder_gt
+    cmp eax, PY_GE
+    je .trc_order_dunder_ge
+    jmp .trc_order_notimpl_nopop    ; shouldn't reach here
+.trc_order_dunder_lt:
+    extern dunder_lt
+    lea rdx, [rel dunder_lt]
+    jmp .trc_order_dunder_call
+.trc_order_dunder_le:
+    extern dunder_le
+    lea rdx, [rel dunder_le]
+    jmp .trc_order_dunder_call
+.trc_order_dunder_gt:
+    extern dunder_gt
+    lea rdx, [rel dunder_gt]
+    jmp .trc_order_dunder_call
+.trc_order_dunder_ge:
+    extern dunder_ge
+    lea rdx, [rel dunder_ge]
+.trc_order_dunder_call:
+    extern dunder_call_2
+    call dunder_call_2
+    leave
+    ret
+.trc_order_notimpl:
     add rsp, 16                     ; clean up 2 pushes
-    jmp .trc_return_false
+.trc_order_notimpl_nopop:
+    RET_NULL
+    leave
+    ret
 
 .trc_elem_next:
     inc qword [rbp - TRC_IDX]
@@ -811,6 +865,158 @@ DEF_FUNC tuple_richcompare, TRC_FRAME
 
 END_FUNC tuple_richcompare
 
+;; ============================================================================
+;; tuple_type_call(PyTypeObject *type, PyObject **args, int64_t nargs)
+;; Constructor: tuple() or tuple(iterable)
+;; ============================================================================
+TTC_LIST    equ 8       ; temp list
+TTC_ITER    equ 16      ; iterator
+TTC_FRAME   equ 24
+
+global tuple_type_call
+DEF_FUNC tuple_type_call, TTC_FRAME
+    push rbx
+    push r12
+    push r13
+
+    mov r12, rsi            ; args
+    mov r13, rdx            ; nargs
+
+    ; tuple() — no args: return empty tuple
+    test r13, r13
+    jz .ttc_empty
+
+    ; tuple(iterable) — exactly 1 arg
+    cmp r13, 1
+    jne .ttc_error
+
+    ; If arg is already a tuple, return a copy (or just INCREF)
+    ; For now: always iterate
+
+    ; Create empty list, iterate into it, convert to tuple
+    xor edi, edi
+    extern list_new
+    call list_new
+    mov [rbp - TTC_LIST], rax
+    mov rbx, rax            ; rbx = temp list
+
+    ; Get iterator from arg
+    mov rdi, [r12]          ; iterable payload
+    mov esi, [r12 + 8]      ; iterable tag
+    extern get_iterator
+    call get_iterator
+    mov [rbp - TTC_ITER], rax
+
+    ; Iterate and append to list
+.ttc_loop:
+    mov rdi, [rbp - TTC_ITER]
+    extern call_iternext
+    call call_iternext
+    test edx, edx
+    jz .ttc_done
+
+    push rax                ; save item payload
+    push rdx                ; save item tag
+    mov rdi, rbx
+    mov rsi, rax
+    ; edx = tag
+    extern list_append
+    call list_append
+    pop rsi                 ; item tag
+    pop rdi                 ; item payload
+    DECREF_VAL rdi, rsi
+    jmp .ttc_loop
+
+.ttc_done:
+    ; DECREF iterator
+    mov rdi, [rbp - TTC_ITER]
+    call obj_decref
+
+    ; Check for pending exception
+    extern current_exception
+    mov rax, [rel current_exception]
+    test rax, rax
+    jnz .ttc_exc_cleanup
+
+    ; Convert list to tuple
+    mov rcx, [rbx + PyListObject.ob_size]
+    mov rsi, [rbx + PyListObject.ob_item]
+    push rbx                ; save list for DECREF
+
+    mov rdi, rcx
+    push rcx
+    push rsi
+    extern tuple_new
+    call tuple_new
+    pop rsi                 ; items ptr
+    pop rcx                 ; count
+    mov r12, rax             ; r12 = new tuple
+
+    ; Copy items from list to tuple, INCREF each
+    xor edx, edx
+.ttc_copy_loop:
+    cmp rdx, rcx
+    jge .ttc_copy_done
+    push rcx
+    push rdx
+    push rsi
+
+    mov r8, rdx
+    shl r8, 4               ; index * 16
+    mov rdi, [rsi + r8]     ; payload from list
+    mov r9, [rsi + r8 + 8]  ; tag from list
+    mov [r12 + PyTupleObject.ob_item + r8], rdi
+    mov [r12 + PyTupleObject.ob_item + r8 + 8], r9
+    INCREF_VAL rdi, r9
+
+    pop rsi
+    pop rdx
+    pop rcx
+    inc rdx
+    jmp .ttc_copy_loop
+
+.ttc_copy_done:
+    ; DECREF the temp list
+    pop rdi                 ; temp list
+    call obj_decref
+
+    mov rax, r12
+    mov edx, TAG_PTR
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.ttc_exc_cleanup:
+    ; DECREF the temp list, return NULL
+    mov rdi, rbx
+    call obj_decref
+    RET_NULL
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.ttc_empty:
+    xor edi, edi
+    extern tuple_new
+    call tuple_new
+    mov edx, TAG_PTR
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.ttc_error:
+    extern exc_TypeError_type
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "tuple expected at most 1 argument"
+    call raise_exception
+END_FUNC tuple_type_call
+
 section .data
 
 tuple_name_str: db "tuple", 0
@@ -847,7 +1053,7 @@ tuple_type:
     dq tuple_repr           ; tp_repr
     dq tuple_repr           ; tp_str
     dq tuple_hash           ; tp_hash
-    dq 0                    ; tp_call
+    dq tuple_type_call      ; tp_call
     dq 0                    ; tp_getattr
     dq 0                    ; tp_setattr
     dq tuple_richcompare    ; tp_richcompare

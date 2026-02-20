@@ -204,6 +204,9 @@ DEF_FUNC tuple_repr, 24
     shl rax, 4                     ; index * 16
     mov rdi, [rbx + PyTupleObject.ob_item + rax]      ; payload
     mov rsi, [rbx + PyTupleObject.ob_item + rax + 8]  ; tag
+    ; TAG_FLOAT shortcut: call float_repr directly (no heap float object)
+    cmp esi, TAG_FLOAT
+    je .tr_float_elem
     call fat_to_obj                ; rax = PyObject* (owned ref)
     push rax                       ; save for DECREF later
     mov rdi, rax
@@ -233,6 +236,35 @@ DEF_FUNC tuple_repr, 24
 
     pop rdi
     call obj_decref                ; DECREF repr string
+    jmp .tr_decref_elem
+
+.tr_float_elem:
+    ; rdi = raw double bits; call float_repr directly
+    extern float_repr
+    call float_repr                ; rax = payload, edx = tag (may be SmallStr)
+    test edx, edx
+    jz .tr_next                    ; skip on error
+    ; Spill SmallStr to heap if needed
+    test rdx, rdx
+    jns .tr_float_heap
+    mov rdi, rax
+    mov rsi, rdx
+    call smallstr_to_obj
+.tr_float_heap:
+    push rax
+    mov rcx, [rax + PyStrObject.ob_size]
+    BUF_ENSURE rcx
+    mov rsi, [rsp]
+    lea rsi, [rsi + PyStrObject.data]
+    mov rdi, [rbp-8]
+    add rdi, [rbp-16]
+    mov rcx, [rsp]
+    mov rcx, [rcx + PyStrObject.ob_size]
+    add [rbp-16], rcx
+    rep movsb
+    pop rdi
+    call obj_decref                ; DECREF repr string
+    jmp .tr_next
 
 .tr_decref_elem:
     pop rdi                        ; fat_to_obj result

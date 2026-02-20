@@ -336,6 +336,10 @@ DEF_FUNC list_ass_subscript, LAS_FRAME
     mov rcx, r14
     sub rcx, r13           ; rcx = old_len
 
+    ; Check if this is a deletion (value_tag == TAG_NULL means del)
+    cmp qword [rbp - LAS_VTAG], TAG_NULL
+    je .las_delete_slice
+
     ; Get new items from value (must be a list)
     ; r12 = value (the new items list/iterable)
     ; For simplicity, require value to be a list
@@ -407,15 +411,24 @@ DEF_FUNC list_ass_subscript, LAS_FRAME
     pop r12                     ; temp list (becomes new value)
     pop rdi                     ; iterator
     pop rcx                     ; old_len (restore)
+    push rcx                    ; save old_len (obj_decref clobbers rcx)
     push r12                    ; save temp list for DECREF later
     call obj_decref             ; DECREF iterator
     pop r12                     ; restore temp list
+    pop rcx                     ; restore old_len
 
     ; Use temp list as value — jump to list path
     mov r8, [r12 + PyListObject.ob_size]
     mov r9, [r12 + PyListObject.ob_item]
     mov [rbp - LAS_TEMP], r12      ; save for DECREF after copy
     mov r15, 16
+    jmp .las_have_items
+
+.las_delete_slice:
+    ; Deletion: new_len = 0, no new items to copy
+    xor r8d, r8d               ; r8 = 0 (new_len)
+    xor r9d, r9d               ; r9 = 0 (new items ptr, unused)
+    mov r15, 16                 ; stride (unused but consistent)
     jmp .las_have_items
 
 .las_type_error_pop:
@@ -643,6 +656,10 @@ DEF_FUNC list_ass_subscript, LAS_FRAME
 .ext_have_len:
     mov r14, rax           ; r14 = slicelength (repurpose, stop no longer needed)
 
+    ; Check for deletion (del a[::step])
+    cmp qword [rbp - LAS_VTAG], TAG_NULL
+    je .ext_delete
+
     ; Get replacement items from r12 (value)
     cmp qword [rbp - LAS_VTAG], TAG_PTR
     jne .las_type_error
@@ -703,6 +720,85 @@ DEF_FUNC list_ass_subscript, LAS_FRAME
     jnz .ext_loop
 
     jmp .las_insert_done       ; shared exit
+
+;; Extended slice deletion: del a[start:stop:step]
+;; r13 = start, r14 = slicelength, r15 = step, rbx = list
+.ext_delete:
+    test r14, r14
+    jz .las_insert_done        ; empty slice → no-op
+
+    ; Phase 1: DECREF items at each slice position
+    mov rcx, r13               ; cur = start
+    mov r8, r14                ; remaining = slicelength
+.ext_del_decref:
+    push rcx
+    push r8
+    mov rax, [rbx + PyListObject.ob_item]
+    mov rdx, rcx
+    shl rdx, 4
+    mov rdi, [rax + rdx]      ; payload
+    mov rsi, [rax + rdx + 8]  ; tag
+    XDECREF_VAL rdi, rsi
+    pop r8
+    pop rcx
+    add rcx, r15              ; cur += step
+    dec r8
+    jnz .ext_del_decref
+
+    ; Phase 2: Compact by shifting remaining items into gaps
+    ; For step>0: deleted indices are start, start+step, start+2*step, ...
+    ; For step<0: normalize to ascending order
+    mov rcx, r13               ; first_del = start
+    mov r8, r15                ; abs_step = step
+    test r15, r15
+    jns .ext_del_pos
+    ; Negative step: lowest index = start + (slicelength-1)*step
+    mov rax, r14
+    dec rax
+    imul rax, r15
+    add rcx, rax              ; first_del = start + (slicelength-1)*step
+    neg r8                    ; abs_step = -step
+.ext_del_pos:
+    ; Two-pointer compact: src walks 0..ob_size, dst skips deleted positions
+    ; rcx = next_del, r8 = abs_step
+    mov r10, [rbx + PyListObject.ob_size]
+    mov r11, [rbx + PyListObject.ob_item]
+    xor r9d, r9d              ; dst = 0
+    mov rdi, r14               ; del_remaining = slicelength
+    xor esi, esi               ; src = 0
+.ext_compact_loop:
+    cmp rsi, r10
+    jge .ext_compact_done
+    ; Check if src is a deleted position
+    cmp rsi, rcx
+    jne .ext_compact_copy
+    test rdi, rdi
+    jz .ext_compact_copy
+    ; Skip this position
+    add rcx, r8               ; next_del += abs_step
+    dec rdi                    ; del_remaining--
+    inc rsi                    ; src++
+    jmp .ext_compact_loop
+.ext_compact_copy:
+    cmp rsi, r9
+    je .ext_compact_nocopy     ; src == dst, no copy needed
+    mov rax, rsi
+    shl rax, 4
+    mov rdx, r9
+    shl rdx, 4
+    push rcx
+    mov rcx, [r11 + rax]
+    mov [r11 + rdx], rcx
+    mov rcx, [r11 + rax + 8]
+    mov [r11 + rdx + 8], rcx
+    pop rcx
+.ext_compact_nocopy:
+    inc rsi
+    inc r9
+    jmp .ext_compact_loop
+.ext_compact_done:
+    mov [rbx + PyListObject.ob_size], r9
+    jmp .las_insert_done
 
 .ext_len_mismatch:
     add rsp, 8
@@ -832,6 +928,9 @@ DEF_FUNC list_contains, LC_FRAME
     mov rcx, r12                ; elem tag
     mov r8, [rbp - LC_VTAG]     ; value tag
     call rax
+    ; Check for NotImplemented (NULL return = tag 0)
+    test edx, edx
+    jz .next
 
 .elem_check_result:
 
@@ -1460,26 +1559,18 @@ DEF_FUNC list_type_call, LTC_FRAME
     mov [rbp - LTC_LIST], rax
     mov rbx, rax            ; rbx = new list
 
-    ; Get iterator from arg
-    mov rdi, [r12]          ; iterable
-    mov rax, [rdi + PyObject.ob_type]
-    mov rax, [rax + PyTypeObject.tp_iter]
-    test rax, rax
-    jz .ltc_not_iterable
-    call rax                ; tp_iter(iterable) -> iterator
-    test rax, rax
-    jz .ltc_not_iterable
+    ; Get iterator from arg (supports heaptypes with __iter__)
+    mov rdi, [r12]          ; iterable payload
+    mov esi, [r12 + 8]      ; iterable tag
+    extern get_iterator
+    call get_iterator
     mov [rbp - LTC_ITER], rax
 
-    ; Iterate and append
+    ; Iterate and append (call_iternext handles heaptype __next__)
 .ltc_loop:
     mov rdi, [rbp - LTC_ITER]
-    mov rax, [rdi + PyObject.ob_type]
-    mov rax, [rax + PyTypeObject.tp_iternext]
-    test rax, rax
-    jz .ltc_done
-    mov rdi, [rbp - LTC_ITER]
-    call rax                ; tp_iternext(iter) -> item or NULL
+    extern call_iternext
+    call call_iternext
     test edx, edx
     jz .ltc_done            ; StopIteration
 
@@ -1721,6 +1812,9 @@ DEF_FUNC list_richcompare, LRC_FRAME
     pop rdi                         ; left_payload
     mov edx, PY_EQ
     call rax
+    ; Check for NotImplemented (NULL return = tag 0)
+    test edx, edx
+    jz .lrc_elem_not_equal_nopop
 
     ; Check result for truthiness — handle both TAG_BOOL and TAG_PTR(bool_true)
     ; DECREF the result if TAG_PTR, then use obj_is_true
@@ -1751,6 +1845,9 @@ DEF_FUNC list_richcompare, LRC_FRAME
     pop rdi
     mov edx, PY_EQ
     call float_compare
+    ; Check for NotImplemented (NULL return = tag 0)
+    test edx, edx
+    jz .lrc_elem_not_equal_nopop
     ; Check result for truthiness
     push rax
     push rdx
@@ -1799,7 +1896,10 @@ DEF_FUNC list_richcompare, LRC_FRAME
     ; Resolve left type (again)
     push rcx
     push r8
+    ; Float coercion: if either operand is TAG_FLOAT, use float_compare
     cmp ecx, TAG_FLOAT
+    je .lrc_order_float
+    cmp r8d, TAG_FLOAT
     je .lrc_order_float
     cmp ecx, TAG_SMALLINT
     je .lrc_order_int_type

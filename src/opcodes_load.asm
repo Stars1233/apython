@@ -661,7 +661,19 @@ DEF_FUNC op_load_attr, LA_FRAME
     ; === IC: try to specialize as LOAD_ATTR_METHOD (203) ===
     ; Only when attr came from type dict (no tp_getattr path)
     cmp qword [rbp - LA_FROM_TYPE], 0
-    je .la_method_push             ; not from type dict, skip IC
+    jne .la_ic_check               ; from type dict → IC + method_push
+    ; from_type=0: came from tp_getattr
+    ; For heaptype instances, instance dict attrs are NOT methods — push [NULL, func]
+    ; For built-in types, tp_getattr returns methods that need self binding
+    cmp qword [rbp - LA_OBJ_TAG], TAG_PTR
+    jne .la_method_push            ; non-ptr obj can't be heaptype
+    mov rdi, [rbp - LA_OBJ]
+    mov rax, [rdi + PyObject.ob_type]
+    test dword [rax + PyTypeObject.tp_flags], TYPE_FLAG_HEAPTYPE
+    jnz .la_not_method             ; heaptype instance attr → [NULL, func]
+    jmp .la_method_push            ; built-in tp_getattr → [func, self]
+
+.la_ic_check:
 
     ; Verify type has tp_dict with valid dk_version
     mov rdi, [rbp - LA_OBJ]       ; obj

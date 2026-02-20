@@ -216,6 +216,14 @@ struc PyDictViewObject
     .dv_kind:   resq 1    ; +24: 0=keys, 1=values, 2=items
 endstruc
 
+struc PyRangeObject
+    .ob_refcnt: resq 1
+    .ob_type:   resq 1
+    .start:     resq 1    ; +16: start value (raw i64)
+    .stop:      resq 1    ; +24: stop value (raw i64)
+    .step:      resq 1    ; +32: step value (raw i64)
+endstruc
+
 struc PyRangeIterObject
     .ob_refcnt: resq 1
     .ob_type:   resq 1

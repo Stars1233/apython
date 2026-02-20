@@ -718,9 +718,17 @@ DEF_FUNC op_call_function_ex
     mov rdi, [rbp - CFX_FUNC]
     call obj_decref
 
-    ; Push result
+    ; Check for exception (TAG_NULL return with current_exception set)
     mov rax, [rbp - CFX_RESULT]
     mov rdx, [rbp - CFX_RETTAG]
+    test rdx, rdx                    ; TAG_NULL = 0 means error
+    jnz .cfex_push_result
+    extern current_exception
+    mov rcx, [rel current_exception]
+    test rcx, rcx
+    jnz .cfex_propagate_exc
+
+.cfex_push_result:
     VPUSH_VAL rax, rdx
 
     add rsp, CFX_FRAME2 - 16
@@ -728,6 +736,16 @@ DEF_FUNC op_call_function_ex
     pop rbx
     pop rbp
     DISPATCH
+
+.cfex_propagate_exc:
+    ; Exception pending from callee — propagate to caller's handler
+    extern eval_exception_unwind
+    add rsp, CFX_FRAME2 - 16
+    pop r12
+    pop rbx
+    pop rbp
+    mov [rel eval_saved_r13], r13
+    jmp eval_exception_unwind
 
 .cfex_not_callable:
     lea rdi, [rel exc_TypeError_type]

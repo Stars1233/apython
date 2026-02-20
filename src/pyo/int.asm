@@ -1604,6 +1604,12 @@ DEF_FUNC_BARE int_unwrap
     je .iuw_done
     cmp edx, TAG_BOOL
     je .iuw_bool
+    ; Only dereference if TAG_PTR (heap pointer); other tags return unchanged
+    test edx, TAG_RC_BIT
+    jz .iuw_done                 ; TAG_FLOAT, TAG_NONE, TAG_NULL → not an int
+    ; Also skip SmallStr (bit 63 set in tag)
+    bt rdx, 63
+    jc .iuw_done
     mov rax, [rdi + PyObject.ob_type]
     lea rcx, [rel int_type]
     cmp rax, rcx
@@ -1685,6 +1691,34 @@ DEF_FUNC int_compare
     mov r13, rdi                 ; unwrapped b
     ; edx = b_tag after unwrap
     pop rax                      ; rax = a_tag
+
+    ; Validate both operands are actually ints (TAG_SMALLINT or TAG_PTR with int_type/bool_type)
+    ; If either is not an int, return NULL (NotImplemented)
+    extern bool_type
+    cmp eax, TAG_SMALLINT
+    je .a_valid
+    cmp eax, TAG_PTR
+    jne .ret_notimpl             ; a is not int (e.g., str, float obj, etc.)
+    mov rcx, [r12 + PyObject.ob_type]
+    lea r8, [rel int_type]
+    cmp rcx, r8
+    je .a_valid
+    lea r8, [rel bool_type]
+    cmp rcx, r8
+    jne .ret_notimpl             ; a is TAG_PTR but not int_type or bool_type
+.a_valid:
+    cmp edx, TAG_SMALLINT
+    je .b_valid
+    cmp edx, TAG_PTR
+    jne .ret_notimpl             ; b is not int
+    mov rcx, [r13 + PyObject.ob_type]
+    lea r8, [rel int_type]
+    cmp rcx, r8
+    je .b_valid
+    lea r8, [rel bool_type]
+    cmp rcx, r8
+    jne .ret_notimpl             ; b is TAG_PTR but not int_type or bool_type
+.b_valid:
 
     ; Check if both SmallInt (could happen after unwrapping int subclasses)
     cmp eax, TAG_SMALLINT
@@ -1768,6 +1802,16 @@ DEF_FUNC int_compare
     test r12d, r12d
     jge .ret_true
     jmp .ret_false
+
+.ret_notimpl:
+    ; Operand is not an int — return NULL (NotImplemented)
+    RET_NULL
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
 
 .ret_true:
     lea rax, [rel bool_true]
