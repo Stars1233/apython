@@ -370,10 +370,12 @@ BI_ARGS   equ 8
 BI_NARGS  equ 16
 BI_OBJ    equ 24       ; original string/bytes obj for error messages
 BI_BASE   equ 32       ; base value for error messages
-BI_FRAME  equ 32
+BI_OWNS   equ 40       ; flag: 1 if we own BI_OBJ (from smallstr_to_obj), 0 if borrowed
+BI_FRAME  equ 40
 
 DEF_FUNC builtin_int_fn, BI_FRAME
     push rbx
+    mov qword [rbp - BI_OWNS], 0     ; initialize: don't own obj
 
     test rsi, rsi
     jz .int_no_args
@@ -484,6 +486,7 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     mov rsi, rax
     call smallstr_to_obj
     mov rbx, rax               ; rbx = heap PyStrObject (owned ref)
+    mov qword [rbp - BI_OWNS], 1  ; we own this obj
     jmp .int_from_str
 
 .int_from_inline_float:
@@ -822,7 +825,15 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     mov edx, 1
     call rcx
     add rsp, 16
-    ; rax = __index__ result
+    ; rax = __index__ result, rbx = __trunc__ result (still needs DECREF)
+    ; Save __index__ result and DECREF __trunc__ result first
+    push rax
+    push rdx
+    mov rdi, rbx
+    call obj_decref              ; DECREF __trunc__ result
+    pop rdx
+    pop rax
+    ; Now check __index__ result
     test edx, edx
     jz .int_dunder_error
     ; Verify it's an int
@@ -1081,6 +1092,7 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     call smallstr_to_obj
     mov rbx, rax               ; rbx = heap PyStrObject (owned ref)
     mov [rbp - BI_OBJ], rbx   ; update saved obj for error msg
+    mov qword [rbp - BI_OWNS], 1  ; we own this obj
 
 .int_base_from_str:
     ; Check for embedded NUL bytes
@@ -1257,12 +1269,28 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     call obj_decref
 .int_ile_no_prev:
     mov [rel current_exception], rbx
+    ; DECREF owned obj (from smallstr_to_obj) if applicable
+    cmp qword [rbp - BI_OWNS], 0
+    je .int_ile_no_obj
+    mov rdi, [rbp - BI_OBJ]
+    call obj_decref
+.int_ile_no_obj:
     add rsp, 72
     jmp eval_exception_unwind
 
 .int_ret:
     ; Common epilogue: rax = payload, edx = tag (set by callee)
     ; For errors: rax=0, edx=TAG_NULL
+    ; DECREF owned obj (from smallstr_to_obj) if applicable
+    cmp qword [rbp - BI_OWNS], 0
+    je .int_ret_no_decref
+    push rax
+    push rdx
+    mov rdi, [rbp - BI_OBJ]
+    call obj_decref
+    pop rdx
+    pop rax
+.int_ret_no_decref:
     ; rbx was pushed after sub rsp, BI_FRAME, so it's at rbp - BI_FRAME - 8
     lea rsp, [rbp - BI_FRAME - 8]
     pop rbx
