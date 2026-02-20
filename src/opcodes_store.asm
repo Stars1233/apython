@@ -304,15 +304,15 @@ END_FUNC op_store_attr
 ;; op_store_deref - Store TOS into cell at localsplus[arg]
 ;;
 ;; Gets cell from localsplus[arg], sets cell.ob_ref = TOS.
-;; INCREFs new value, DECREFs old value.
+;; Ownership transfers from stack to cell (no INCREF needed).
+;; DECREFs old cell value.
 ;; ============================================================================
 DEF_FUNC_BARE op_store_deref
     VPOP_VAL rax, r8               ; rax = new payload, r8 = new tag
     lea rdx, [rcx*8]               ; slot * 8 (×2 via SIB)
     mov rdx, [r12 + rdx*2 + PyFrame.localsplus]  ; rdx = cell object (payload)
 
-    ; INCREF new value (tag-aware) — INCREF_VAL doesn't clobber regs
-    INCREF_VAL rax, r8
+    ; Ownership transfers from stack to cell - no INCREF needed
 
     ; Get old value + tag from cell
     mov rdi, [rdx + PyCellObject.ob_ref]
