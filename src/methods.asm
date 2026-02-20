@@ -4795,21 +4795,60 @@ DEF_FUNC list_method_sort, LS_FRAME
     jnz .sort_free_temp            ; real exception → cleanup and propagate
     ; No exception → unorderable types, raise TypeError
 .merge_cmp_type_error:
-    ; Before raising TypeError, check if list was mutated during comparison
+    ; IMPORTANT: raise_exception does not return (non-local jump to eval_exception_unwind)
+    ; Must free temp buffer and restore list state BEFORE raising.
+    
+    ; Free temp buffer
+    mov rdi, [rbp - LS_TEMP]
+    call ap_free
+    
+    ; If keys were used, DECREF keys and free arrays
+    cmp qword [rbp - LS_KEY], 0
+    jz .mcte_no_keys
+    mov r14, [rbp - LS_KSRC]
+    test r14, r14
+    jz .mcte_free_ktemp
+    xor r15d, r15d
+.mcte_decref_keys:
+    cmp r15, [rbp - LS_N]
+    jge .mcte_free_keys
+    mov rcx, r15
+    shl rcx, 4
+    mov rdi, [r14 + rcx]
+    mov esi, [r14 + rcx + 8]
+    DECREF_VAL rdi, rsi
+    inc r15
+    jmp .mcte_decref_keys
+.mcte_free_keys:
+    mov rdi, [rbp - LS_KORIG]
+    call ap_free
+    mov rdi, [rbp - LS_KTEMP]
+    call ap_free
+    jmp .mcte_restore_list
+.mcte_free_ktemp:
+    mov rdi, [rbp - LS_KTEMP]
+    test rdi, rdi
+    jz .mcte_restore_list
+    call ap_free
+.mcte_no_keys:
+.mcte_restore_list:
+    ; Restore list items (list is empty during sort)
     mov rbx, [rbp - LS_LIST]
     mov rax, [rbx + PyListObject.ob_item]
     test rax, rax
-    jnz .sort_free_temp            ; ob_item != NULL → mutated, go to cleanup (will check there)
-    mov rax, [rbx + PyListObject.ob_size]
-    test rax, rax
-    jnz .sort_free_temp            ; ob_size != 0 → mutated
-    ; No mutation: raise TypeError for unorderable types
+    jnz .mcte_already_restored     ; someone else restored
+    mov rax, [rbp - LS_SAVED_ITEMS]
+    mov [rbx + PyListObject.ob_item], rax
+    mov rax, [rbp - LS_SAVED_SIZE]
+    mov [rbx + PyListObject.ob_size], rax
+.mcte_already_restored:
+    ; Now raise TypeError
     extern exc_TypeError_type
     lea rdi, [rel exc_TypeError_type]
     CSTRING rsi, "'<' not supported between instances"
     extern raise_exception
     call raise_exception
-    jmp .sort_free_temp
+    ; raise_exception does not return
 .merge_bool_result:
     ; eax = 0 (false) or 1 (true)
     test eax, eax
@@ -5095,12 +5134,43 @@ DEF_FUNC list_method_sort, LS_FRAME
 
 .sort_mutated:
     ; List was mutated during sort — this is an error
-    ; Free the mutated list's items (they're someone else's problem)
-    ; But first restore our saved sorted items
-    ; Actually: the mutated items are the new state. We need to DECREF our
-    ; saved items (since they won't be in the list anymore) and raise ValueError.
-    ; CPython: puts sorted items back, then raises ValueError.
-    ; We'll do the same: restore sorted items, free mutated items
+    ; IMPORTANT: raise_exception does not return (non-local jump)
+    ; Must cleanup BEFORE raising.
+    
+    ; First free temp buffer (allocated during sort)
+    mov rdi, [rbp - LS_TEMP]
+    call ap_free
+    
+    ; If keys were used, DECREF keys and free arrays
+    cmp qword [rbp - LS_KEY], 0
+    jz .sm_no_keys
+    mov r14, [rbp - LS_KSRC]
+    test r14, r14
+    jz .sm_free_ktemp
+    xor r15d, r15d
+.sm_decref_keys:
+    cmp r15, [rbp - LS_N]
+    jge .sm_free_keys
+    mov rcx, r15
+    shl rcx, 4
+    mov rdi, [r14 + rcx]
+    mov esi, [r14 + rcx + 8]
+    DECREF_VAL rdi, rsi
+    inc r15
+    jmp .sm_decref_keys
+.sm_free_keys:
+    mov rdi, [rbp - LS_KORIG]
+    call ap_free
+    mov rdi, [rbp - LS_KTEMP]
+    call ap_free
+    jmp .sm_handle_mutation
+.sm_free_ktemp:
+    mov rdi, [rbp - LS_KTEMP]
+    test rdi, rdi
+    jz .sm_handle_mutation
+    call ap_free
+.sm_no_keys:
+.sm_handle_mutation:
     ; Save mutated items for cleanup
     mov rcx, [rbx + PyListObject.ob_item]
     mov r8, [rbx + PyListObject.ob_size]
@@ -5141,7 +5211,7 @@ DEF_FUNC list_method_sort, LS_FRAME
     lea rdi, [rel exc_ValueError_type]
     CSTRING rsi, "list modified during sort"
     call raise_exception
-    jmp .sort_error_return
+    ; raise_exception does not return
 
 .sort_error_return:
     ; Restore list items if still saved (error during sort before merge)
