@@ -350,6 +350,40 @@ DEF_FUNC_BARE eval_exception_unwind
     ; bypasses CALL opcode cleanup, leaving kw_names_pending set.
     mov qword [rel kw_names_pending], 0
 
+    ; Free stale cfex_temp_pending buffer if set
+    mov rdi, [rel cfex_temp_pending]
+    test rdi, rdi
+    jz .no_cfex_temp
+    mov qword [rel cfex_temp_pending], 0
+    extern ap_free
+    call ap_free
+.no_cfex_temp:
+
+    ; Free stale cfex_merged_pending buffer if set
+    mov rdi, [rel cfex_merged_pending]
+    test rdi, rdi
+    jz .no_cfex_merged
+    mov qword [rel cfex_merged_pending], 0
+    call ap_free
+.no_cfex_merged:
+
+    ; DECREF stale cfex_kwnames_pending tuple if set
+    mov rdi, [rel cfex_kwnames_pending]
+    test rdi, rdi
+    jz .no_cfex_kwnames
+    mov qword [rel cfex_kwnames_pending], 0
+    extern obj_decref
+    call obj_decref
+.no_cfex_kwnames:
+
+    ; DECREF stale build_class_pending type object if set
+    mov rdi, [rel build_class_pending]
+    test rdi, rdi
+    jz .no_build_class
+    mov qword [rel build_class_pending], 0
+    call obj_decref
+.no_build_class:
+
     ; Restore eval loop registers that may have been corrupted.
     ; When raise_exception is called from inside a function that saved/modified
     ; callee-saved regs (e.g. list_subscript saves rbx for temp use), the
@@ -1425,6 +1459,18 @@ eval_saved_r13: resq 1       ; value stack ptr saved at dispatch (for exception 
 
 global kw_names_pending
 kw_names_pending: resq 1     ; tuple of kw names for next CALL, or NULL
+
+global cfex_temp_pending
+cfex_temp_pending: resq 1    ; temp buffer from op_call_function_ex, or NULL
+
+global cfex_merged_pending
+cfex_merged_pending: resq 1  ; merged buffer from op_call_function_ex kwargs, or NULL
+
+global cfex_kwnames_pending
+cfex_kwnames_pending: resq 1 ; kw_names tuple from op_call_function_ex kwargs, or NULL
+
+global build_class_pending
+build_class_pending: resq 1  ; type object from builtin___build_class__ during construction, or NULL
 
 global trace_opcodes
 trace_opcodes: resb 1           ; nonzero = trace opcodes to stderr

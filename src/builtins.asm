@@ -25,6 +25,7 @@ extern ap_malloc
 extern ap_free
 extern fatal_error
 extern raise_exception
+extern build_class_pending
 extern sys_write
 extern range_new
 extern int_to_i64
@@ -1347,6 +1348,7 @@ DEF_FUNC builtin___build_class__
     mov edi, TYPE_OBJECT_SIZE
     call ap_malloc
     mov r12, rax            ; r12 = new type object
+    mov [rel build_class_pending], rax  ; register for exception cleanup
 
     ; Zero-fill the type object
     mov rdi, r12
@@ -1659,7 +1661,8 @@ DEF_FUNC builtin___build_class__
     call obj_incref         ; cell holds a ref to the type
 .bc_no_classcell:
 
-    ; Return the new type object
+    ; Return the new type object - clear pending flag first
+    mov qword [rel build_class_pending], 0
     mov rax, r12
 
     add rsp, 24

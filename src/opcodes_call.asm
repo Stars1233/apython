@@ -32,6 +32,9 @@ extern raise_exception
 extern func_new
 extern exc_TypeError_type
 extern kw_names_pending
+extern cfex_temp_pending
+extern cfex_merged_pending
+extern cfex_kwnames_pending
 extern ap_malloc
 extern ap_free
 extern tuple_new
@@ -519,6 +522,7 @@ DEF_FUNC op_call_function_ex
     add rdi, 16                    ; alloc size (16B per arg + pad)
     call ap_malloc
     mov [rbp - CFX_TEMP], rax      ; save temp buffer
+    mov [rel cfex_temp_pending], rax  ; register for exception cleanup
     pop rcx                        ; restore count
     pop rsi                        ; restore items ptr
     xor edx, edx
@@ -551,6 +555,7 @@ DEF_FUNC op_call_function_ex
     mov rdi, [rbp - CFX_TEMP]
     test rdi, rdi
     jz .cfex_cleanup
+    mov qword [rel cfex_temp_pending], 0  ; clear before freeing
     push rax
     push rdx
     call ap_free
@@ -582,6 +587,7 @@ DEF_FUNC op_call_function_ex
 .cfex_alloc_merged:
     call ap_malloc
     mov [rbp - CFX_MERGED], rax
+    mov [rel cfex_merged_pending], rax  ; register for exception cleanup
 
     ; Copy positional args from tuple to merged buffer
     mov rsi, [rbp - CFX_ARGS]
@@ -617,6 +623,7 @@ DEF_FUNC op_call_function_ex
     mov rdi, [rbp - CFX_NKW]
     call tuple_new
     mov [rbp - CFX_KWNAMES], rax
+    mov [rel cfex_kwnames_pending], rax  ; register for exception cleanup
 
     ; Iterate kwargs dict entries, copy values to merged buffer and keys to kw_names
     mov r12, [rbp - CFX_KWARGS]
@@ -688,11 +695,13 @@ DEF_FUNC op_call_function_ex
     ; Clear kw_names_pending
     mov qword [rel kw_names_pending], 0
 
-    ; Free merged buffer
+    ; Free merged buffer and clear pending
+    mov qword [rel cfex_merged_pending], 0
     mov rdi, [rbp - CFX_MERGED]
     call ap_free
 
-    ; DECREF kw_names tuple
+    ; DECREF kw_names tuple and clear pending
+    mov qword [rel cfex_kwnames_pending], 0
     mov rdi, [rbp - CFX_KWNAMES]
     call obj_decref
 
