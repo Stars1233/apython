@@ -1781,6 +1781,8 @@ END_FUNC op_jump_backward_no_interrupt
 ;;   6 = INTRINSIC_LIST_TO_TUPLE
 ;; ============================================================================
 DEF_FUNC_BARE op_call_intrinsic_1
+    cmp ecx, 2
+    je .ci1_import_star
     cmp ecx, 3
     je .ci1_stopiter_error
     cmp ecx, 4
@@ -1793,6 +1795,187 @@ DEF_FUNC_BARE op_call_intrinsic_1
     ; Unknown intrinsic — fatal
     CSTRING rdi, "unimplemented CALL_INTRINSIC_1"
     call fatal_error
+
+;; INTRINSIC_IMPORT_STAR (arg=2): import * from module
+;; TOS = module object. Copy module's exported names into frame.locals.
+;; If module has __all__, use that list. Otherwise copy all non-underscore names.
+IS_MOD      equ 16      ; [rbp-16] module ptr
+IS_MODDICT  equ 24      ; [rbp-24] module's __dict__
+IS_LOCALS   equ 32      ; [rbp-32] frame's locals dict
+IS_IDX      equ 40      ; [rbp-40] loop index
+IS_LIMIT    equ 48      ; [rbp-48] capacity or count
+IS_ITEMS    equ 56      ; [rbp-56] items array ptr (__all__ path)
+IS_FRAME    equ 56      ; sub rsp, 56 (after push rbp + push rbx = 72 total)
+extern dict_get
+extern dict_set
+extern str_from_cstr_heap
+extern obj_decref
+
+.ci1_import_star:
+    ; Pop module from TOS (r13 = eval value stack)
+    sub r13, 16
+    mov rdi, [r13]                    ; module payload (ptr)
+
+    ; Set up stack frame
+    push rbp
+    mov rbp, rsp
+    push rbx                          ; [rbp-8] = saved eval-loop bytecode IP
+    sub rsp, IS_FRAME
+    mov [rbp - IS_MOD], rdi           ; save module ptr
+
+    ; Get mod_dict (+24)
+    mov rax, [rdi + PyModuleObject.mod_dict]
+    test rax, rax
+    jz .is_done
+    mov [rbp - IS_MODDICT], rax
+
+    ; Get frame locals
+    mov rax, [r12 + PyFrame.locals]
+    test rax, rax
+    jz .is_done
+    mov [rbp - IS_LOCALS], rax
+
+    ; Look up "__all__" in mod_dict
+    CSTRING rdi, "__all__"
+    call str_from_cstr_heap           ; rax = heap str (owned, refcnt=1)
+    mov rbx, rax                      ; save key in callee-saved rbx
+    mov rdi, [rbp - IS_MODDICT]
+    mov rsi, rax                      ; key = "__all__"
+    mov edx, TAG_PTR
+    call dict_get                     ; → (rax=value, rdx=tag) or (0, 0)
+    ; Save result before DECREF of key
+    push rax
+    push rdx
+    mov rdi, rbx                      ; DECREF "__all__" key string
+    call obj_decref
+    pop rdx                           ; value tag
+    pop rax                           ; value payload
+
+    test edx, edx                     ; TAG_NULL = not found?
+    jz .is_no_all
+
+    ;; --- __all__ found: rax = list/tuple ptr ---
+    ; Determine items array and count
+    mov rbx, rax                      ; rbx = __all__ object
+    mov rcx, [rbx + PyVarObject.ob_size]  ; count (same offset for list/tuple)
+    mov [rbp - IS_LIMIT], rcx
+
+    ; Check if list (ob_item is pointer) or tuple (ob_item is inline)
+    extern list_type
+    mov rax, [rbx + PyObject.ob_type]
+    lea rdx, [rel list_type]
+    cmp rax, rdx
+    jne .is_all_tuple
+    ; List: items = [obj + PyListObject.ob_item] (pointer to array)
+    mov rax, [rbx + PyListObject.ob_item]
+    jmp .is_all_have_items
+.is_all_tuple:
+    ; Tuple (or other sequence): items = obj + PyTupleObject.ob_item (inline)
+    lea rax, [rbx + PyTupleObject.ob_item]
+.is_all_have_items:
+    mov [rbp - IS_ITEMS], rax         ; save items ptr
+    mov qword [rbp - IS_IDX], 0
+
+.is_all_loop:
+    mov rcx, [rbp - IS_IDX]
+    cmp rcx, [rbp - IS_LIMIT]
+    jge .is_done
+
+    ; Get name from items[idx] — 16-byte fat slots
+    mov rax, [rbp - IS_ITEMS]
+    shl rcx, 4                        ; idx * 16
+    mov rsi, [rax + rcx]              ; name payload
+    mov rdx, [rax + rcx + 8]          ; name tag (full 64-bit for SmallStr)
+
+    ; Look up name in mod_dict
+    mov rdi, [rbp - IS_MODDICT]
+    ; rsi = key payload, rdx = key_tag (already set)
+    call dict_get                     ; → (rax=value, rdx=value_tag) or (0, 0)
+    test edx, edx
+    jz .is_all_next                   ; name not in module dict → skip
+
+    ; dict_set(locals, key=name, value, value_tag, key_tag)
+    ; Reload name from items array (caller-saved regs clobbered by dict_get)
+    mov r9, rax                       ; save value payload
+    mov r10, rdx                      ; save value tag
+    mov rcx, [rbp - IS_IDX]
+    mov rax, [rbp - IS_ITEMS]
+    shl rcx, 4
+    mov rsi, [rax + rcx]              ; name payload
+    mov r8, [rax + rcx + 8]           ; name tag (key_tag)
+    mov rdi, [rbp - IS_LOCALS]
+    mov rdx, r9                       ; value payload
+    mov rcx, r10                      ; value tag
+    call dict_set
+
+.is_all_next:
+    inc qword [rbp - IS_IDX]
+    jmp .is_all_loop
+
+    ;; --- No __all__: walk dict entries, skip _-prefixed names ---
+.is_no_all:
+    mov rax, [rbp - IS_MODDICT]
+    mov rcx, [rax + PyDictObject.capacity]
+    mov [rbp - IS_LIMIT], rcx
+    mov qword [rbp - IS_IDX], 0
+
+.is_dict_loop:
+    mov rcx, [rbp - IS_IDX]
+    cmp rcx, [rbp - IS_LIMIT]
+    jge .is_done
+
+    ; Entry address: entries + idx * DICT_ENTRY_SIZE (40)
+    mov rax, [rbp - IS_MODDICT]
+    mov rsi, [rax + PyDictObject.entries]
+    imul rcx, DICT_ENTRY_SIZE
+    lea rbx, [rsi + rcx]              ; rbx = entry ptr (callee-saved)
+
+    ; Skip empty: key_tag == 0
+    mov r8, [rbx + DictEntry.key_tag]
+    test r8, r8
+    jz .is_dict_next
+
+    ; Get key payload
+    mov rsi, [rbx + DictEntry.key]
+
+    ; Skip names starting with '_'
+    bt r8, 63
+    jc .is_smallstr_uscore            ; SmallStr → check inline
+    cmp r8d, TAG_PTR
+    jne .is_dict_copy                 ; non-string → copy
+    ; Heap string: check first data byte
+    cmp byte [rsi + PyStrObject.data], '_'
+    je .is_dict_next
+    jmp .is_dict_copy
+
+.is_smallstr_uscore:
+    ; SmallStr: first char is low byte of payload
+    cmp sil, '_'
+    je .is_dict_next
+
+.is_dict_copy:
+    ; dict_set(locals, key, value, value_tag, key_tag)
+    mov rdi, [rbp - IS_LOCALS]
+    ; rsi = key payload (already set)
+    mov rdx, [rbx + DictEntry.value]
+    mov rcx, [rbx + DictEntry.value_tag]
+    ; r8 = key_tag (already set)
+    call dict_set
+
+.is_dict_next:
+    inc qword [rbp - IS_IDX]
+    jmp .is_dict_loop
+
+.is_done:
+    ; DECREF module
+    mov rdi, [rbp - IS_MOD]
+    call obj_decref
+
+    ; Restore and return
+    mov rbx, [rbp - 8]                ; restore eval-loop bytecode IP
+    leave                             ; mov rsp, rbp; pop rbp
+    VPUSH_NONE
+    DISPATCH
 
 .ci1_async_gen_wrap:
     ; INTRINSIC_ASYNC_GEN_WRAP: wrap yielded value for async generators
