@@ -54,6 +54,7 @@ extern object_type
 extern object_new_fn
 extern staticmethod_type
 extern obj_is_true
+extern list_sorting_error
 
 ; Set entry layout constants (must match set.asm)
 SET_ENTRY_HASH    equ 0
@@ -4061,6 +4062,9 @@ END_FUNC str_method_encode
 DEF_FUNC list_method_append
 
     mov rax, [rdi]          ; self (list)
+    ; Check if list is being sorted (ob_item == NULL)
+    cmp qword [rax + PyListObject.ob_item], 0
+    je list_sorting_error
     mov rsi, [rdi + 16]     ; item payload
     mov rdx, [rdi + 24]     ; item tag (16-byte stride)
     mov rdi, rax
@@ -4084,6 +4088,9 @@ DEF_FUNC list_method_pop
 
     mov rax, rdi            ; rax = args ptr
     mov rbx, [rax]          ; self (list)
+    ; Check if list is being sorted (ob_item == NULL)
+    cmp qword [rbx + PyListObject.ob_item], 0
+    je list_sorting_error
     mov r12, rsi            ; nargs
 
     ; Get index
@@ -4167,6 +4174,9 @@ DEF_FUNC list_method_insert
 
     mov rax, rdi            ; args (16-byte stride)
     mov rbx, [rax]          ; self = args[0]
+    ; Check if list is being sorted (ob_item == NULL)
+    cmp qword [rbx + PyListObject.ob_item], 0
+    je list_sorting_error
     push rax
 
     ; Get index
@@ -4255,6 +4265,9 @@ END_FUNC list_method_insert
 DEF_FUNC list_method_reverse
 
     mov rax, [rdi]          ; self
+    ; Check if list is being sorted (ob_item == NULL)
+    cmp qword [rax + PyListObject.ob_item], 0
+    je list_sorting_error
     mov rcx, [rax + PyListObject.ob_size]
     test rcx, rcx
     jz .rev_done
@@ -5468,6 +5481,9 @@ DEF_FUNC list_method_clear
     push r13
 
     mov rbx, [rdi]          ; self
+    ; Check if list is being sorted (ob_item == NULL)
+    cmp qword [rbx + PyListObject.ob_item], 0
+    je list_sorting_error
     mov r12, [rbx + PyListObject.ob_size]
 
     ; DECREF all items (fat 16-byte slots)
@@ -5512,6 +5528,9 @@ DEF_FUNC list_method_extend, LE_FRAME
     push r13
 
     mov rbx, [rdi]           ; self
+    ; Check if list is being sorted (ob_item == NULL)
+    cmp qword [rbx + PyListObject.ob_item], 0
+    je list_sorting_error
     mov r12, [rdi + 16]      ; iterable payload
     mov r13, [rdi + 24]      ; iterable tag
     mov [rbp - LE_SELF], rbx
@@ -6221,6 +6240,9 @@ DEF_FUNC list_method_remove
     push r15
 
     mov rbx, [rdi]          ; self (list)
+    ; Check if list is being sorted (ob_item == NULL)
+    cmp qword [rbx + PyListObject.ob_item], 0
+    je list_sorting_error
     mov r12, [rdi + 16]     ; value payload
     mov r15d, [rdi + 24]    ; value tag
     mov r13, [rbx + PyListObject.ob_size]

@@ -100,8 +100,20 @@ DEF_FUNC error_unimplemented_opcode, 32             ; space for decimal digits
     call sys_exit
 END_FUNC error_unimplemented_opcode
 
+; list_sorting_error - raise ValueError when list is mutated during sort
+; Called when ob_item == NULL (list is being sorted)
+; Does not return - jumps to exception unwinder
+DEF_FUNC_BARE list_sorting_error
+    extern exc_ValueError_type
+    lea rdi, [rel exc_ValueError_type]
+    lea rsi, [rel list_modified_msg]
+    extern raise_exception
+    jmp raise_exception        ; tail call, doesn't return
+END_FUNC list_sorting_error
+
 section .rodata
 err_prefix: db "Error: "
 err_newline: db 10
 err_op_prefix: db "Error: unimplemented opcode "
 err_op_prefix_len equ $ - err_op_prefix
+list_modified_msg: db "list modified during sort", 0

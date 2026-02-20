@@ -136,15 +136,35 @@ def test_sort_bad_key_raises():
         print("PASS: test_sort_bad_key_raises")
 
 # Mutation detection tests
-# SKIP: Mutating list during sort causes crash (ob_item is NULL during sort)
-# CPython detects mutation and raises ValueError, but apython crashes
 def test_sort_mutation_append():
-    # SKIP: causes segfault - list mutation during sort not handled yet
-    print("SKIP: test_sort_mutation_append (mutation during sort causes crash)")
+    class Mutator:
+        def __init__(self, val):
+            self.val = val
+        def __lt__(self, other):
+            L.append(Mutator(999))
+            return self.val < other.val
+    
+    L = [Mutator(i) for i in range(5)]
+    try:
+        L.sort()
+        print("FAIL: test_sort_mutation_append - should have raised ValueError")
+    except ValueError:
+        print("PASS: test_sort_mutation_append")
 
 def test_sort_mutation_clear():
-    # SKIP: causes segfault - list mutation during sort not handled yet
-    print("SKIP: test_sort_mutation_clear (mutation during sort causes crash)")
+    class Mutator:
+        def __init__(self, val):
+            self.val = val
+        def __lt__(self, other):
+            L.clear()
+            return self.val < other.val
+    
+    L = [Mutator(i) for i in range(10)]
+    try:
+        L.sort()
+        print("FAIL: test_sort_mutation_clear - should have raised ValueError")
+    except ValueError:
+        print("PASS: test_sort_mutation_clear")
 
 # Negative/zero tests
 def test_sort_negative():

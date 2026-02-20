@@ -30,6 +30,7 @@ extern bool_type
 extern none_type
 extern float_compare
 extern obj_is_true
+extern list_sorting_error
 
 ;; ============================================================================
 ;; list_new(int64_t capacity) -> PyListObject*
@@ -80,6 +81,9 @@ DEF_FUNC list_append
     push r13
 
     mov rbx, rdi               ; list
+    ; Check if list is being sorted (ob_item == NULL)
+    cmp qword [rbx + PyListObject.ob_item], 0
+    je list_sorting_error
     mov r12, rsi               ; item payload
     mov r13, rdx               ; item tag
 
@@ -128,6 +132,10 @@ END_FUNC list_append
 ;; ============================================================================
 DEF_FUNC list_getitem
 
+    ; Check if list is being sorted (ob_item == NULL)
+    cmp qword [rdi + PyListObject.ob_item], 0
+    je list_sorting_error
+
     ; Handle negative index
     test rsi, rsi
     jns .positive
@@ -166,6 +174,9 @@ DEF_FUNC list_setitem
     push r13
 
     mov rbx, rdi               ; list
+    ; Check if list is being sorted (ob_item == NULL)
+    cmp qword [rbx + PyListObject.ob_item], 0
+    je list_sorting_error
     mov r12, rdx               ; new value payload
     mov r13, rcx               ; new value tag
 
@@ -218,6 +229,9 @@ DEF_FUNC list_subscript
     push rbx
 
     mov rbx, rdi               ; save list
+    ; Check if list is being sorted (ob_item == NULL)
+    cmp qword [rbx + PyListObject.ob_item], 0
+    je list_sorting_error
 
     ; Check if key is a SmallInt (rdx = key tag from caller)
     cmp edx, TAG_SMALLINT
@@ -272,6 +286,9 @@ DEF_FUNC list_ass_subscript, LAS_FRAME
     push r12
 
     mov rbx, rdi               ; list
+    ; Check if list is being sorted (ob_item == NULL)
+    cmp qword [rbx + PyListObject.ob_item], 0
+    je list_sorting_error
     mov r12, rdx               ; value
     mov [rbp - LAS_VTAG], r8   ; save value tag
 
@@ -1293,6 +1310,9 @@ DEF_FUNC list_inplace_concat, LIC_FRAME
     push r13
 
     mov rbx, rdi              ; left = self (list)
+    ; Check if list is being sorted (ob_item == NULL)
+    cmp qword [rbx + PyListObject.ob_item], 0
+    je list_sorting_error
     mov r12, rsi              ; right (iterable payload)
     mov r13, rcx              ; right_tag
     mov [rbp - LIC_SELF], rdi
@@ -1414,6 +1434,9 @@ DEF_FUNC list_inplace_repeat, LIR_FRAME
     push r13
 
     mov rbx, rdi              ; self (list)
+    ; Check if list is being sorted (ob_item == NULL)
+    cmp qword [rbx + PyListObject.ob_item], 0
+    je list_sorting_error
     mov r12, rsi              ; right payload
     mov r13, rcx              ; right_tag
 
