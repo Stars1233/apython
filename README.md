@@ -13,7 +13,7 @@ apython reads `.pyc` files and executes Python 3.12 bytecode directly — no CPy
 - **SmallStr optimization** — strings up to 15 bytes stored inline in the 128-bit value slot, zero allocation
 - **Raw Linux syscalls** — no libc dependency for I/O; buffered writes via direct `syscall`
 - **256-entry jump table dispatch** — x86-BTB-friendly single indirect jump per opcode
-- **GMP for arbitrary precision** — big integers via libgmp when values exceed SmallInt range
+- **GMP for arbitrary precision** — big integers via libgmp when values exceed int64_t range
 - **Reference counting + cycle-collecting GC** — deterministic memory management with a 3-generation collector for cycles
 - **Full async/await with io_uring** — high-speed async I/O via Linux io_uring (with epoll fallback), zero-copy TCP streams
 - **DWARF debug symbols** — full GDB support with frame-pointer unwinding, function boundaries, and source-level stepping
