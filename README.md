@@ -4,7 +4,7 @@ A Python 3.12 bytecode interpreter in x86-64 NASM assembly (v0.6.0), exploring t
 
 ## What is this?
 
-apython reads `.pyc` files and executes Python 3.12 bytecode directly — no CPython, no JIT, no interpreter overhead layers. The entire interpreter is **~74,000 lines of hand-written x86-64 assembly**, from the eval loop to the type system to the garbage collector to async I/O. It implements 27+ types, 106 opcodes, generators, async/await, pattern matching, a regex engine, cycle-collecting GC, and a pure-assembly asyncio event loop.
+apython reads `.pyc` files and executes Python 3.12 bytecode directly — no CPython, no JIT, no interpreter overhead layers. The entire interpreter is **~74,000 lines of x86-64 assembly**, from the eval loop to the type system to the garbage collector to async I/O. It implements 27+ types, 106 opcodes, generators, async/await, pattern matching, a regex engine, cycle-collecting GC, and a pure-assembly asyncio event loop.
 
 ## Key design choices
 
