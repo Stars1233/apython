@@ -1,0 +1,25 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y nasm libgmp-dev
+
+      - name: Build
+        run: make
+
+      - name: Test
+        run: make check
+
+      - name: CPython compatibility tests
+        run: make check-cpython

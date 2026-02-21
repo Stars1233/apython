@@ -15,7 +15,7 @@ apython reads `.pyc` files and executes Python 3.12 bytecode directly — no CPy
 - **256-entry jump table dispatch** — single indirect jump per opcode
 - **GMP for arbitrary precision** — big integers via libgmp when values exceed SmallInt range
 - **Reference counting + cycle-collecting GC** — deterministic memory management with a 3-generation collector for cycles
-- **Full async/await** — epoll and io_uring event loop backends, TCP streams
+- **Full async/await with io_uring** — high-speed async I/O via Linux io_uring (with epoll fallback), zero-copy TCP streams
 - **DWARF debug symbols** — full GDB support with frame-pointer unwinding, function boundaries, and source-level stepping
 
 ## Quick start
@@ -110,7 +110,7 @@ BaseExceptionGroup, ExceptionGroup, CancelledError
 | Module | Description |
 |--------|-------------|
 | sys | argv, exit, version, path, modules, stdin/stdout/stderr, exc_info, maxsize |
-| asyncio | Event loop, coroutine runner, TCP streams (open_connection, start_server), sleep, gather |
+| asyncio | Event loop with io_uring backend, coroutine runner, TCP streams (open_connection, start_server), sleep, gather |
 | re | SRE regex engine — compile, match, search, findall, finditer, sub, split |
 | time | time, sleep, monotonic |
 | itertools | chain, islice, count, repeat, zip_longest, product, permutations, combinations, starmap, takewhile, dropwhile, filterfalse, accumulate, groupby, tee, pairwise |
