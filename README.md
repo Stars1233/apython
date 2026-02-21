@@ -1,6 +1,6 @@
 # apython
 
-A Python 3.12 bytecode interpreter in x86-64 NASM assembly (v0.6.0), exploring the fastest single-core Python execution on x86-64.
+A Python 3.12 bytecode interpreter in x86-64 NASM assembly, exploring the fastest x86 single-core Python execution, with a focus on floating pointer and integer performance.
 
 ## What is this?
 
