@@ -9,7 +9,7 @@ apython reads `.pyc` files and executes Python 3.12 bytecode directly — no CPy
 ## Key design choices
 
 - **~74K lines of focused x86-64 NASM assembly** — no C runtime
-- **128-bit fat values** — inline integers, floats, bools in 16-byte (payload, tag) pairs, skipping heap allocation and refcounting entirely
+- **128-bit fat values** — inline integers, floats, bools and small strings in 16-byte (payload, tag) pairs, skipping heap allocation and refcounting entirely
 - **SmallStr optimization** — strings up to 15 bytes stored inline in the 128-bit value slot, zero allocation
 - **Raw Linux syscalls** — no libc dependency for I/O; buffered writes via direct `syscall`
 - **256-entry jump table dispatch** — single indirect jump per opcode
