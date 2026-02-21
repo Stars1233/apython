@@ -9,6 +9,8 @@
 
 ; External functions
 extern ap_malloc
+extern gc_alloc
+extern gc_track
 extern ap_free
 extern ap_realloc
 extern ap_memcpy
@@ -9596,12 +9598,14 @@ DEF_FUNC methods_init
     push rax
 
     mov edi, PyStaticMethodObject_size
-    call ap_malloc
-    mov qword [rax + PyStaticMethodObject.ob_refcnt], 1
-    lea rcx, [rel staticmethod_type]
-    mov [rax + PyStaticMethodObject.ob_type], rcx
+    lea rsi, [rel staticmethod_type]
+    call gc_alloc
     pop rcx
     mov [rax + PyStaticMethodObject.sm_callable], rcx
+    push rax
+    mov rdi, rax
+    call gc_track
+    pop rax
     push rax
 
     lea rdi, [rel mn_maketrans]
@@ -9760,12 +9764,14 @@ DEF_FUNC methods_init
     push rax
 
     mov edi, PyClassMethodObject_size
-    call ap_malloc
-    mov qword [rax + PyClassMethodObject.ob_refcnt], 1
-    lea rcx, [rel classmethod_type]
-    mov [rax + PyClassMethodObject.ob_type], rcx
+    lea rsi, [rel classmethod_type]
+    call gc_alloc
     pop rcx
     mov [rax + PyClassMethodObject.cm_callable], rcx
+    push rax
+    mov rdi, rax
+    call gc_track
+    pop rax
     push rax
 
     lea rdi, [rel mn_fromkeys]
@@ -9889,15 +9895,17 @@ DEF_FUNC methods_init
     call builtin_func_new
     push rax                    ; save builtin_func
 
-    ; Wrap in PyStaticMethodObject
+    ; Wrap in PyStaticMethodObject (GC-tracked)
     mov edi, PyStaticMethodObject_size
-    call ap_malloc
-    mov qword [rax + PyStaticMethodObject.ob_refcnt], 1
-    lea rcx, [rel staticmethod_type]
-    mov [rax + PyStaticMethodObject.ob_type], rcx
+    lea rsi, [rel staticmethod_type]
+    call gc_alloc
     pop rcx                     ; builtin_func
     mov [rax + PyStaticMethodObject.sm_callable], rcx
     push rax                    ; save staticmethod wrapper
+    mov rdi, rax
+    call gc_track
+    pop rax
+    push rax                    ; re-save
 
     ; Create key string
     lea rdi, [rel mn___new__]
@@ -9954,15 +9962,17 @@ DEF_FUNC methods_init
     call builtin_func_new
     push rax                    ; save builtin_func
 
-    ; Wrap in PyClassMethodObject
+    ; Wrap in PyClassMethodObject (GC-tracked)
     mov edi, PyClassMethodObject_size
-    call ap_malloc
-    mov qword [rax + PyClassMethodObject.ob_refcnt], 1
-    lea rcx, [rel classmethod_type]
-    mov [rax + PyClassMethodObject.ob_type], rcx
+    lea rsi, [rel classmethod_type]
+    call gc_alloc
     pop rcx                     ; builtin_func
     mov [rax + PyClassMethodObject.cm_callable], rcx
     push rax                    ; save classmethod wrapper
+    mov rdi, rax
+    call gc_track
+    pop rax
+    push rax                    ; re-save
 
     ; Create key string
     lea rdi, [rel mn_from_bytes]
@@ -10019,12 +10029,14 @@ DEF_FUNC methods_init
     push rax
 
     mov edi, PyClassMethodObject_size
-    call ap_malloc
-    mov qword [rax + PyClassMethodObject.ob_refcnt], 1
-    lea rcx, [rel classmethod_type]
-    mov [rax + PyClassMethodObject.ob_type], rcx
+    lea rsi, [rel classmethod_type]
+    call gc_alloc
     pop rcx
     mov [rax + PyClassMethodObject.cm_callable], rcx
+    push rax
+    mov rdi, rax
+    call gc_track
+    pop rax
     push rax
 
     lea rdi, [rel mn_fromhex]

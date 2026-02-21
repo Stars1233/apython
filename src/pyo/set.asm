@@ -6,6 +6,9 @@
 %include "types.inc"
 
 extern ap_malloc
+extern gc_alloc
+extern gc_track
+extern gc_dealloc
 extern ap_free
 extern obj_hash
 extern obj_decref
@@ -18,6 +21,8 @@ extern ap_memset
 extern fatal_error
 extern str_from_cstr
 extern type_type
+extern set_traverse
+extern set_clear_gc
 
 ; Set entry layout constants
 SET_ENTRY_HASH    equ 0
@@ -38,15 +43,12 @@ SET_TOMBSTONE equ 0xDEAD
 DEF_FUNC set_new
     push rbx
 
-    ; Allocate set header (reuses PyDictObject layout)
+    ; Allocate set header (GC-tracked, reuses PyDictObject layout)
     mov edi, PyDictObject_size
-    call ap_malloc
-    mov rbx, rax                ; rbx = set
+    lea rsi, [rel set_type]
+    call gc_alloc
+    mov rbx, rax                ; rbx = set (ob_refcnt=1, ob_type set)
 
-    ; Fill header
-    mov qword [rbx + PyObject.ob_refcnt], 1
-    lea rax, [rel set_type]
-    mov [rbx + PyObject.ob_type], rax
     mov qword [rbx + PyDictObject.ob_size], 0
     mov qword [rbx + PyDictObject.capacity], SET_INIT_CAP
     mov qword [rbx + PyDictObject.dk_version], 0
@@ -62,6 +64,9 @@ DEF_FUNC set_new
     xor esi, esi
     mov edx, SET_INIT_CAP * SET_ENTRY_SIZE
     call ap_memset
+
+    mov rdi, rbx
+    call gc_track
 
     mov rax, rbx
     pop rbx
@@ -699,9 +704,9 @@ DEF_FUNC set_dealloc
     mov rdi, r12
     call ap_free
 
-    ; Free set object itself
+    ; Free set object itself (GC-aware)
     mov rdi, rbx
-    call ap_free
+    call gc_dealloc
 
     pop r14
     pop r13
@@ -1173,8 +1178,10 @@ set_type:
     dq 0                        ; tp_base
     dq 0                        ; tp_dict
     dq 0                        ; tp_mro
-    dq 0                        ; tp_flags
+    dq TYPE_FLAG_HAVE_GC                        ; tp_flags
     dq 0                        ; tp_bases
+    dq set_traverse                        ; tp_traverse
+    dq set_clear_gc                        ; tp_clear
 
 ; Frozenset type object
 align 8
@@ -1202,8 +1209,10 @@ frozenset_type:
     dq 0                        ; tp_base
     dq 0                        ; tp_dict
     dq 0                        ; tp_mro
-    dq 0                        ; tp_flags
+    dq TYPE_FLAG_HAVE_GC                        ; tp_flags
     dq 0                        ; tp_bases
+    dq set_traverse                        ; tp_traverse
+    dq set_clear_gc                        ; tp_clear
 
 ; Set iterator type
 align 8
@@ -1233,3 +1242,5 @@ set_iter_type:
     dq 0                        ; tp_mro
     dq 0                        ; tp_flags
     dq 0                        ; tp_bases
+    dq 0                        ; tp_traverse
+    dq 0                        ; tp_clear

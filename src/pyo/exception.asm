@@ -22,6 +22,9 @@
 %include "errcodes.inc"
 
 extern ap_malloc
+extern gc_alloc
+extern gc_track
+extern gc_dealloc
 extern ap_free
 extern str_from_cstr
 extern str_from_cstr_heap
@@ -32,6 +35,8 @@ extern str_type
 extern type_getattr
 extern type_repr
 extern type_type
+extern exc_traverse
+extern exc_clear_gc
 extern tuple_new
 extern tuple_type
 extern ap_strcmp
@@ -58,13 +63,11 @@ DEF_FUNC exc_new, EN_FRAME
     mov r12, rsi            ; msg_str
     mov r13, rdx            ; msg_tag
 
-    ; Allocate exception object
+    ; Allocate exception object (GC-tracked)
     mov edi, PyExceptionObject_size
-    call ap_malloc
-
-    ; Initialize fields
-    mov qword [rax + PyExceptionObject.ob_refcnt], 1
-    mov [rax + PyExceptionObject.ob_type], rbx
+    mov rsi, rbx               ; type
+    call gc_alloc
+    ; ob_refcnt=1, ob_type set by gc_alloc
     mov [rax + PyExceptionObject.exc_type], rbx
     mov [rax + PyExceptionObject.exc_value], r12
     mov [rax + PyExceptionObject.exc_value_tag], r13
@@ -92,7 +95,12 @@ DEF_FUNC exc_new, EN_FRAME
 .set_args:
     mov rcx, [rbp - EN_EXC]
     mov [rcx + PyExceptionObject.exc_args], rax
-    mov rax, rcx
+
+    ; Track in GC
+    mov rdi, rcx
+    call gc_track
+
+    mov rax, [rbp - EN_EXC]
 
     pop r13
     pop r12
@@ -172,9 +180,9 @@ DEF_FUNC exc_dealloc
     call obj_decref
 .no_args:
 
-    ; Free the object
+    ; Free the object (GC-aware)
     mov rdi, rbx
-    call ap_free
+    call gc_dealloc
 
     pop rbx
     leave
@@ -733,7 +741,7 @@ exc_metatype:
     dq 1                    ; ob_refcnt (immortal)
     dq type_type            ; ob_type
     dq exc_meta_name        ; tp_name
-    dq 192                  ; tp_basicsize (PyTypeObject size)
+    dq TYPE_OBJECT_SIZE     ; tp_basicsize (PyTypeObject size)
     dq 0                    ; tp_dealloc (types are immortal)
     dq type_repr            ; tp_repr — <class 'ExcName'>
     dq type_repr            ; tp_str — same as repr
@@ -752,8 +760,10 @@ exc_metatype:
     dq 0                    ; tp_base
     dq 0                    ; tp_dict
     dq 0                    ; tp_mro
-    dq 0                    ; tp_flags
+    dq 0                    ; tp_flags (no HAVE_GC — exc types are static, not gc_alloc'd)
     dq 0                    ; tp_bases
+    dq 0                    ; tp_traverse
+    dq 0                    ; tp_clear
 
 exc_meta_name: db "exception_metatype", 0
 
@@ -785,6 +795,8 @@ traceback_type:
     dq 0                    ; tp_mro
     dq 0                    ; tp_flags
     dq 0                    ; tp_bases
+    dq 0                        ; tp_traverse
+    dq 0                        ; tp_clear
 tb_type_name: db "traceback", 0
 
 ; Macro to define an exception type singleton
@@ -815,8 +827,10 @@ global %1
     dq %3                   ; tp_base
     dq 0                    ; tp_dict
     dq 0                    ; tp_mro
-    dq 0                    ; tp_flags
+    dq TYPE_FLAG_HAVE_GC    ; tp_flags
     dq 0                    ; tp_bases
+    dq exc_traverse         ; tp_traverse
+    dq exc_clear_gc         ; tp_clear
 %endmacro
 
 ; Define all exception types

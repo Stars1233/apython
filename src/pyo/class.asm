@@ -7,6 +7,9 @@
 %include "frame.inc"
 
 extern ap_malloc
+extern gc_alloc
+extern gc_track
+extern gc_dealloc
 extern ap_free
 extern obj_decref
 extern obj_incref
@@ -24,6 +27,10 @@ extern exc_AttributeError_type
 extern exc_TypeError_type
 extern func_type
 extern type_type
+extern method_traverse
+extern method_clear
+extern instance_traverse
+extern instance_clear
 extern int_type
 extern str_type
 extern staticmethod_type
@@ -46,24 +53,22 @@ DEF_FUNC instance_new
 
     mov rbx, rdi                ; rbx = type
 
-    ; Allocate using tp_basicsize (supports __slots__ with extra slot storage)
+    ; Allocate using tp_basicsize (GC-tracked, supports __slots__)
     mov rdi, [rbx + PyTypeObject.tp_basicsize]
     push rdi                    ; save size for zero-fill
-    call ap_malloc
-    mov r12, rax                ; r12 = instance
+    mov rsi, rbx                ; type
+    call gc_alloc
+    mov r12, rax                ; r12 = instance (ob_refcnt=1, ob_type set)
 
-    ; Zero-fill the instance (handles slot init to TAG_NULL)
+    ; Zero-fill body past header (handles slot init to TAG_NULL)
     pop rcx                     ; size in bytes
-    mov rdi, r12
-    shr rcx, 3                  ; size / 8 = number of qwords
+    sub rcx, OBJ_HEADER_SIZE
+    jle .skip_zero
+    lea rdi, [r12 + OBJ_HEADER_SIZE]
+    shr rcx, 3
     xor eax, eax
     rep stosq
-
-    ; ob_refcnt = 1
-    mov qword [r12 + PyObject.ob_refcnt], 1
-
-    ; ob_type = type
-    mov [r12 + PyObject.ob_type], rbx
+.skip_zero:
 
     ; INCREF type (stored in ob_type)
     mov rdi, rbx
@@ -78,6 +83,9 @@ DEF_FUNC instance_new
     mov [r12 + PyInstanceObject.inst_dict], rax
 
 .in_no_dict:
+    mov rdi, r12
+    call gc_track
+
     mov rax, r12                ; return instance
     pop r12
     pop rbx
@@ -480,13 +488,16 @@ DEF_FUNC instance_dealloc
 .no_slots:
     pop r12
 
-    ; DECREF ob_type (the class)
-    mov rdi, [rbx + PyObject.ob_type]
-    call obj_decref
+    ; Save ob_type before freeing (gc_dealloc reads ob_type, then frees)
+    push qword [rbx + PyObject.ob_type]
 
-    ; Free the instance
+    ; Free the instance (GC-aware) — must happen before type DECREF
     mov rdi, rbx
-    call ap_free
+    call gc_dealloc
+
+    ; DECREF ob_type (the class) AFTER freeing the instance
+    pop rdi
+    call obj_decref
 
     pop rbx
     leave
@@ -503,13 +514,16 @@ DEF_FUNC builtin_sub_dealloc
     push rbx
     mov rbx, rdi
 
-    ; DECREF ob_type (the heap type class)
-    mov rdi, [rbx + PyObject.ob_type]
-    call obj_decref
+    ; Save ob_type before freeing (gc_dealloc reads ob_type)
+    push qword [rbx + PyObject.ob_type]
 
-    ; Free the object
+    ; Free the object (may be GC-tracked) — must happen before type DECREF
     mov rdi, rbx
-    call ap_free
+    call gc_dealloc
+
+    ; DECREF ob_type (the class) AFTER freeing the object
+    pop rdi
+    call obj_decref
 
     pop rbx
     leave
@@ -922,15 +936,14 @@ DEF_FUNC type_call
     cmp rbx, rcx
     je .int_sub_return_bare
 
-    ; Allocate PyIntSubclassObject
+    ; Allocate PyIntSubclassObject (gc_alloc since heaptypes have HAVE_GC)
     push r14                     ; save int_value across malloc
     push r15                     ; save int_value_tag across malloc
     mov edi, PyIntSubclassObject_size
-    call ap_malloc
+    mov rsi, rbx                 ; type = heaptype
+    call gc_alloc
     pop r15
     pop r14
-    mov qword [rax + PyIntSubclassObject.ob_refcnt], 1
-    mov [rax + PyIntSubclassObject.ob_type], rbx
     mov qword [rax + PyIntSubclassObject.inst_dict], 0
     mov [rax + PyIntSubclassObject.int_value], r14
     mov [rax + PyIntSubclassObject.int_value_tag], r15
@@ -941,6 +954,11 @@ DEF_FUNC type_call
     pop rax
     ; int_value ownership: builtin_int_fn returns a new reference,
     ; we transfer it directly into the subclass object (no INCREF needed).
+    ; Track in GC
+    push rax
+    mov rdi, rax
+    call gc_track
+    pop rax
     jmp .int_sub_done
 
 .int_sub_return_bare:
@@ -1067,10 +1085,9 @@ DEF_FUNC method_new
     mov r12, rsi                ; self
 
     mov edi, PyMethodObject_size
-    call ap_malloc
-    mov qword [rax + PyMethodObject.ob_refcnt], 1
-    lea rcx, [rel method_type]
-    mov [rax + PyMethodObject.ob_type], rcx
+    lea rsi, [rel method_type]
+    call gc_alloc
+    ; ob_refcnt=1, ob_type set by gc_alloc
     mov [rax + PyMethodObject.im_func], rbx
     mov [rax + PyMethodObject.im_self], r12
 
@@ -1080,6 +1097,10 @@ DEF_FUNC method_new
     call obj_incref
     mov rdi, r12
     call obj_incref
+
+    ; Track in GC
+    mov rdi, [rsp]
+    call gc_track
     pop rax
 
     pop r12
@@ -1169,7 +1190,7 @@ DEF_FUNC_LOCAL method_dealloc
     mov rdi, [rbx + PyMethodObject.im_self]
     call obj_decref
     mov rdi, rbx
-    call ap_free
+    call gc_dealloc
 
     pop rbx
     leave
@@ -1196,15 +1217,18 @@ END_FUNC method_getattr
 ;; ============================================================================
 global object_type_call
 DEF_FUNC_BARE object_type_call
-    ; Create a bare instance with object_type
+    ; Create a bare instance with object_type (gc_alloc since HAVE_GC)
     push rbp
     mov rbp, rsp
     mov edi, PyInstanceObject_size
-    call ap_malloc
-    mov qword [rax + PyObject.ob_refcnt], 1
-    lea rcx, [rel object_type]
-    mov [rax + PyObject.ob_type], rcx
+    lea rsi, [rel object_type]
+    call gc_alloc
     mov qword [rax + PyInstanceObject.inst_dict], 0
+    ; Track in GC
+    push rax
+    mov rdi, rax
+    call gc_track
+    pop rax
     mov edx, TAG_PTR
     pop rbp
     ret
@@ -1271,9 +1295,9 @@ DEF_FUNC user_type_dealloc
     call obj_decref
 .utd_no_mro:
 
-    ; Free the type object itself
+    ; Free the type object itself (gc_alloc'd)
     mov rdi, rbx
-    call ap_free
+    call gc_dealloc
 
     pop rbx
     leave
@@ -1323,8 +1347,10 @@ user_type_metatype:
     dq type_type                ; tp_base — metatype inherits from type
     dq 0                        ; tp_dict
     dq 0                        ; tp_mro
-    dq 0                        ; tp_flags
+    dq TYPE_FLAG_HAVE_GC         ; tp_flags (heaptypes are gc_alloc'd)
     dq 0                        ; tp_bases
+    dq 0                        ; tp_traverse
+    dq 0                        ; tp_clear
 
 ; object_type - base type for all Python objects
 ; Used as explicit base class: class Foo(object): pass
@@ -1354,8 +1380,10 @@ object_type:
     dq 0                        ; tp_base
     dq 0                        ; tp_dict
     dq 0                        ; tp_mro
-    dq 0                        ; tp_flags
+    dq TYPE_FLAG_HAVE_GC                        ; tp_flags
     dq 0                        ; tp_bases
+    dq instance_traverse                        ; tp_traverse
+    dq instance_clear                        ; tp_clear
 
 ; super_type - placeholder for the 'super' builtin
 ; LOAD_SUPER_ATTR pops and discards this; it just needs to be loadable.
@@ -1394,5 +1422,7 @@ method_type:
     dq 0                        ; tp_base
     dq 0                        ; tp_dict
     dq 0                        ; tp_mro
-    dq 0                        ; tp_flags
+    dq TYPE_FLAG_HAVE_GC                        ; tp_flags
     dq 0                        ; tp_bases
+    dq method_traverse                        ; tp_traverse
+    dq method_clear                        ; tp_clear

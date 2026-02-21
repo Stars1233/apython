@@ -6,6 +6,9 @@
 %include "types.inc"
 
 extern ap_malloc
+extern gc_alloc
+extern gc_track
+extern gc_dealloc
 extern ap_free
 extern obj_decref
 extern str_from_cstr
@@ -519,6 +522,8 @@ list_iter_type:
     dq 0                    ; tp_mro
     dq 0                    ; tp_flags
     dq 0                    ; tp_bases
+    dq 0                        ; tp_traverse
+    dq 0                        ; tp_clear
 
 ; Tuple iterator type
 align 8
@@ -548,6 +553,8 @@ tuple_iter_type:
     dq 0                    ; tp_mro
     dq 0                    ; tp_flags
     dq 0                    ; tp_bases
+    dq 0                        ; tp_traverse
+    dq 0                        ; tp_clear
 
 ; Range iterator type
 align 8
@@ -577,6 +584,8 @@ range_iter_type:
     dq 0                    ; tp_mro
     dq 0                    ; tp_flags
     dq 0                    ; tp_bases
+    dq 0                        ; tp_traverse
+    dq 0                        ; tp_clear
 
 ; Range object type (reusable sequence, creates fresh iterators)
 align 8
@@ -606,6 +615,8 @@ range_obj_type:
     dq 0                        ; tp_mro
     dq 0                        ; tp_flags
     dq 0                        ; tp_bases
+    dq 0                        ; tp_traverse
+    dq 0                        ; tp_clear
 
 ; Range object sequence methods
 align 8

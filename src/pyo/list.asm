@@ -6,6 +6,9 @@
 %include "types.inc"
 
 extern ap_malloc
+extern gc_alloc
+extern gc_track
+extern gc_dealloc
 extern ap_free
 extern ap_realloc
 extern obj_decref
@@ -23,6 +26,8 @@ extern obj_incref
 extern slice_type
 extern slice_indices
 extern type_type
+extern list_traverse
+extern list_clear
 extern int_type
 extern str_type
 extern float_type
@@ -46,15 +51,12 @@ DEF_FUNC list_new
     mov r12, 4                 ; minimum capacity
 .has_cap:
 
-    ; Allocate PyListObject header
+    ; Allocate PyListObject header (GC-tracked)
     mov edi, PyListObject_size
-    call ap_malloc
-    mov rbx, rax               ; rbx = list
+    lea rsi, [rel list_type]
+    call gc_alloc
+    mov rbx, rax               ; rbx = list (ob_refcnt=1, ob_type set)
 
-    ; Fill header
-    mov qword [rbx + PyObject.ob_refcnt], 1
-    lea rax, [rel list_type]
-    mov [rbx + PyObject.ob_type], rax
     mov qword [rbx + PyListObject.ob_size], 0
     mov [rbx + PyListObject.allocated], r12
 
@@ -63,6 +65,9 @@ DEF_FUNC list_new
     shl rdi, 4
     call ap_malloc
     mov [rbx + PyListObject.ob_item], rax
+
+    mov rdi, rbx
+    call gc_track
 
     mov rax, rbx
     pop r12
@@ -1016,7 +1021,7 @@ DEF_FUNC list_dealloc
     call ap_free
 
     mov rdi, rbx
-    call ap_free
+    call gc_dealloc
 
     pop r13
     pop r12
@@ -2072,5 +2077,7 @@ list_type:
     dq 0                    ; tp_base
     dq 0                    ; tp_dict
     dq 0                    ; tp_mro
-    dq TYPE_FLAG_LIST_SUBCLASS ; tp_flags
+    dq TYPE_FLAG_HAVE_GC | TYPE_FLAG_LIST_SUBCLASS ; tp_flags
     dq 0                    ; tp_bases
+    dq list_traverse                        ; tp_traverse
+    dq list_clear                        ; tp_clear

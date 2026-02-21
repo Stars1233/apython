@@ -6,6 +6,9 @@
 %include "types.inc"
 
 extern ap_malloc
+extern gc_alloc
+extern gc_track
+extern gc_dealloc
 extern ap_free
 extern obj_hash
 extern obj_decref
@@ -19,6 +22,8 @@ extern exc_KeyError_type
 extern obj_incref
 extern str_from_cstr
 extern type_type
+extern dict_traverse
+extern dict_clear_gc
 
 ; Initial capacity (must be power of 2)
 DICT_INIT_CAP equ 8
@@ -36,15 +41,12 @@ DICT_TOMBSTONE equ 0xDEAD
 DEF_FUNC dict_new
     push rbx
 
-    ; Allocate PyDictObject header
+    ; Allocate PyDictObject header (GC-tracked)
     mov edi, PyDictObject_size
-    call ap_malloc
-    mov rbx, rax                ; rbx = dict
+    lea rsi, [rel dict_type]
+    call gc_alloc
+    mov rbx, rax                ; rbx = dict (ob_refcnt=1, ob_type set)
 
-    ; Fill header
-    mov qword [rbx + PyObject.ob_refcnt], 1
-    lea rax, [rel dict_type]
-    mov [rbx + PyObject.ob_type], rax
     mov qword [rbx + PyDictObject.ob_size], 0
     mov qword [rbx + PyDictObject.capacity], DICT_INIT_CAP
     mov qword [rbx + PyDictObject.dk_version], 1
@@ -60,6 +62,9 @@ DEF_FUNC dict_new
     xor esi, esi
     mov edx, DICT_INIT_CAP * DICT_ENTRY_SIZE
     call ap_memset
+
+    mov rdi, rbx
+    call gc_track
 
     mov rax, rbx
     pop rbx
@@ -867,9 +872,9 @@ DEF_FUNC dict_dealloc
     mov rdi, r12
     call ap_free
 
-    ; Free dict object itself
+    ; Free dict object itself (GC-aware)
     mov rdi, rbx
-    call ap_free
+    call gc_dealloc
 
     pop r14
     pop r13
@@ -1138,15 +1143,12 @@ DEF_FUNC_BARE dict_iter_next
     push r12
     mov rbx, rax                ; save entry ptr
 
-    ; Allocate 2-tuple (2 fat items = 32 bytes item storage)
+    ; Allocate 2-tuple (2 fat items = 32 bytes item storage, GC-tracked)
     mov edi, PyTupleObject_size + 32
-    call ap_malloc
-    mov r12, rax                ; r12 = new tuple
-
-    mov qword [r12 + PyObject.ob_refcnt], 1
     extern tuple_type
-    lea rcx, [rel tuple_type]
-    mov [r12 + PyObject.ob_type], rcx
+    lea rsi, [rel tuple_type]
+    call gc_alloc
+    mov r12, rax                ; r12 = new tuple (ob_refcnt=1, ob_type set)
     mov qword [r12 + PyTupleObject.ob_size], 2
 
     ; tuple[0] = key (payload + tag)
@@ -1162,6 +1164,10 @@ DEF_FUNC_BARE dict_iter_next
     mov [r12 + PyTupleObject.ob_item + 16], rax
     mov [r12 + PyTupleObject.ob_item + 24], rdx
     INCREF_VAL rax, rdx
+
+    ; Track in GC
+    mov rdi, r12
+    call gc_track
 
     mov rax, r12
     mov edx, TAG_PTR
@@ -1826,8 +1832,10 @@ dict_type:
     dq 0                        ; tp_base
     dq 0                        ; tp_dict
     dq 0                        ; tp_mro
-    dq TYPE_FLAG_DICT_SUBCLASS  ; tp_flags
+    dq TYPE_FLAG_HAVE_GC | TYPE_FLAG_DICT_SUBCLASS  ; tp_flags
     dq 0                        ; tp_bases
+    dq dict_traverse                        ; tp_traverse
+    dq dict_clear_gc                        ; tp_clear
 
 ; Dict key iterator type
 align 8
@@ -1857,6 +1865,8 @@ dict_iter_type:
     dq 0                        ; tp_mro
     dq 0                        ; tp_flags
     dq 0                        ; tp_bases
+    dq 0                        ; tp_traverse
+    dq 0                        ; tp_clear
 
 ; Dict reverse key iterator type
 align 8
@@ -1886,6 +1896,8 @@ dict_rev_iter_type:
     dq 0                        ; tp_mro
     dq 0                        ; tp_flags
     dq 0                        ; tp_bases
+    dq 0                        ; tp_traverse
+    dq 0                        ; tp_clear
 
 ; Dict keys view sequence methods (len + contains)
 align 8
@@ -1939,6 +1951,8 @@ dict_keys_view_type:
     dq 0                        ; tp_mro
     dq 0                        ; tp_flags
     dq 0                        ; tp_bases
+    dq 0                        ; tp_traverse
+    dq 0                        ; tp_clear
 
 ; Dict values view type
 align 8
@@ -1968,6 +1982,8 @@ dict_values_view_type:
     dq 0                        ; tp_mro
     dq 0                        ; tp_flags
     dq 0                        ; tp_bases
+    dq 0                        ; tp_traverse
+    dq 0                        ; tp_clear
 
 ; Dict items view type
 align 8
@@ -1997,3 +2013,5 @@ dict_items_view_type:
     dq 0                        ; tp_mro
     dq 0                        ; tp_flags
     dq 0                        ; tp_bases
+    dq 0                        ; tp_traverse
+    dq 0                        ; tp_clear

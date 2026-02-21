@@ -7,6 +7,8 @@
 
 extern ap_malloc
 extern ap_free
+extern gc_alloc
+extern gc_track
 extern str_from_cstr
 extern str_new
 extern ap_memcpy
@@ -836,16 +838,26 @@ DEF_FUNC bytes_type_call, BTC_FRAME
     mov rcx, [rdi + PyBytesObject.ob_size]
     push rdi
     push rcx
+    ; Check if type needs GC allocation (heap type subclass)
+    mov rdx, [rbp - BTC_TYPE]
+    test qword [rdx + PyTypeObject.tp_flags], TYPE_FLAG_HAVE_GC
     lea rdi, [rcx + PyBytesObject.data + 8]
+    jz .btc_plain_alloc
+    ; GC alloc for subclass
+    mov rsi, rdx
+    call gc_alloc
+    jmp .btc_alloc_done
+.btc_plain_alloc:
     call ap_malloc
-    pop rcx
-    pop rsi
-
     mov qword [rax + PyBytesObject.ob_refcnt], 1
     mov rdx, [rbp - BTC_TYPE]
     mov [rax + PyBytesObject.ob_type], rdx
+.btc_alloc_done:
+    pop rcx
+    pop rsi
     mov [rax + PyBytesObject.ob_size], rcx
     ; INCREF the type (needed for heap type subclasses)
+    mov rdx, [rbp - BTC_TYPE]
     inc qword [rdx + PyObject.ob_refcnt]
 
     push rax
@@ -857,6 +869,15 @@ DEF_FUNC bytes_type_call, BTC_FRAME
     pop rax
     mov rcx, [rax + PyBytesObject.ob_size]
     mov qword [rax + PyBytesObject.data + rcx], 0
+    ; gc_track if heap type subclass
+    mov rdx, [rbp - BTC_TYPE]
+    test qword [rdx + PyTypeObject.tp_flags], TYPE_FLAG_HAVE_GC
+    jz .btc_no_track
+    push rax
+    mov rdi, rax
+    call gc_track
+    pop rax
+.btc_no_track:
     mov edx, TAG_PTR
     leave
     ret
@@ -897,6 +918,8 @@ bytes_type:
     dq 0                    ; tp_mro
     dq TYPE_FLAG_BASETYPE   ; tp_flags
     dq 0                    ; tp_bases
+    dq 0                        ; tp_traverse
+    dq 0                        ; tp_clear
 
 ; bytes_iter type object
 align 8
@@ -925,3 +948,5 @@ bytes_iter_type:
     dq 0                        ; tp_mro
     dq 0                        ; tp_flags
     dq 0                        ; tp_bases
+    dq 0                        ; tp_traverse
+    dq 0                        ; tp_clear

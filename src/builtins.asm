@@ -22,6 +22,9 @@ extern str_type
 extern bool_type
 extern float_type
 extern ap_malloc
+extern gc_alloc
+extern gc_track
+extern gc_dealloc
 extern ap_free
 extern fatal_error
 extern raise_exception
@@ -1344,24 +1347,18 @@ DEF_FUNC builtin___build_class__
     mov rdi, r12
     call frame_free
 
-    ; Allocate the type object
+    ; Allocate the type object (GC-tracked)
     mov edi, TYPE_OBJECT_SIZE
-    call ap_malloc
-    mov r12, rax            ; r12 = new type object
+    lea rsi, [rel user_type_metatype]
+    call gc_alloc
+    mov r12, rax            ; r12 = new type object (ob_refcnt=1, ob_type set)
     mov [rel build_class_pending], rax  ; register for exception cleanup
 
-    ; Zero-fill the type object
-    mov rdi, r12
+    ; Zero-fill the type object (skip ob_refcnt and ob_type, already set by gc_alloc)
+    lea rdi, [r12 + 16]
     xor eax, eax
-    mov ecx, TYPE_OBJECT_SIZE / 8
+    mov ecx, (TYPE_OBJECT_SIZE - 16) / 8
     rep stosq
-
-    ; Fill type fields
-    mov qword [r12 + PyTypeObject.ob_refcnt], 1
-
-    ; ob_type = user_type_metatype (metatype handles class variable access + instantiation)
-    lea rax, [rel user_type_metatype]
-    mov [r12 + PyTypeObject.ob_type], rax
 
     ; tp_name: point to class_name string's data area
     lea rax, [r14 + PyStrObject.data]
@@ -1389,8 +1386,16 @@ DEF_FUNC builtin___build_class__
     lea rax, [rel instance_setattr]
     mov [r12 + PyTypeObject.tp_setattr], rax
 
-    ; tp_flags = HEAPTYPE (enables dunder dispatch fallbacks)
-    mov qword [r12 + PyTypeObject.tp_flags], TYPE_FLAG_HEAPTYPE
+    ; tp_flags = HEAPTYPE | HAVE_GC (enables dunder dispatch fallbacks + GC tracking)
+    mov qword [r12 + PyTypeObject.tp_flags], TYPE_FLAG_HEAPTYPE | TYPE_FLAG_HAVE_GC
+
+    ; Set tp_traverse and tp_clear for GC cycle detection
+    extern instance_traverse
+    extern instance_clear
+    lea rax, [rel instance_traverse]
+    mov [r12 + PyTypeObject.tp_traverse], rax
+    lea rax, [rel instance_clear]
+    mov [r12 + PyTypeObject.tp_clear], rax
 
     ; tp_dict = class_dict (ownership transferred from r15, no INCREF needed)
     mov [r12 + PyTypeObject.tp_dict], r15
@@ -1557,6 +1562,13 @@ DEF_FUNC builtin___build_class__
     ; No getattr/setattr for exceptions (they're not instances)
     mov qword [r12 + PyTypeObject.tp_getattr], 0
     mov qword [r12 + PyTypeObject.tp_setattr], 0
+    ; Wire exc traverse/clear for exception subclasses
+    extern exc_traverse
+    extern exc_clear_gc
+    lea rax, [rel exc_traverse]
+    mov [r12 + PyTypeObject.tp_traverse], rax
+    lea rax, [rel exc_clear_gc]
+    mov [r12 + PyTypeObject.tp_clear], rax
     jmp .bc_no_set_base
 
 .bc_check_int_sub:
@@ -1660,6 +1672,11 @@ DEF_FUNC builtin___build_class__
     mov rdi, r12
     call obj_incref         ; cell holds a ref to the type
 .bc_no_classcell:
+
+    ; Track the type object in GC
+    extern gc_track
+    mov rdi, r12
+    call gc_track
 
     ; Return the new type object - clear pending flag first
     mov qword [rel build_class_pending], 0
@@ -2551,3 +2568,5 @@ builtin_func_type:
     dq 0                        ; tp_mro
     dq 0                        ; tp_flags
     dq 0                        ; tp_bases
+    dq 0                        ; tp_traverse
+    dq 0                        ; tp_clear

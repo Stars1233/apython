@@ -10,11 +10,20 @@
 %include "builtins.inc"
 
 extern ap_malloc
+extern gc_alloc
+extern gc_track
+extern gc_dealloc
 extern ap_free
 extern obj_incref
 extern obj_decref
 extern obj_dealloc
 extern type_type
+extern staticmethod_traverse
+extern staticmethod_clear
+extern property_traverse
+extern property_clear
+extern classmethod_traverse
+extern classmethod_clear
 extern raise_exception
 extern exc_TypeError_type
 extern exc_AttributeError_type
@@ -35,19 +44,19 @@ DEF_FUNC staticmethod_construct
 
     mov rbx, [rsi]              ; rbx = func (args[0])
 
-    ; Allocate wrapper
+    ; Allocate wrapper (GC-tracked)
     mov edi, PyStaticMethodObject_size
-    call ap_malloc
-
-    mov qword [rax + PyObject.ob_refcnt], 1
-    lea rcx, [rel staticmethod_type]
-    mov [rax + PyObject.ob_type], rcx
+    lea rsi, [rel staticmethod_type]
+    call gc_alloc
+    ; ob_refcnt=1, ob_type set
     mov [rax + PyStaticMethodObject.sm_callable], rbx
 
     ; INCREF func
     push rax
     mov rdi, rbx
     call obj_incref
+    mov rdi, [rsp]
+    call gc_track
     pop rax
 
     mov edx, TAG_PTR
@@ -72,7 +81,7 @@ DEF_FUNC_LOCAL staticmethod_dealloc
     call obj_decref
 
     mov rdi, rbx
-    call ap_free
+    call gc_dealloc
 
     pop rbx
     leave
@@ -92,19 +101,19 @@ DEF_FUNC classmethod_construct
 
     mov rbx, [rsi]              ; rbx = func (args[0])
 
-    ; Allocate wrapper
+    ; Allocate wrapper (GC-tracked)
     mov edi, PyClassMethodObject_size
-    call ap_malloc
-
-    mov qword [rax + PyObject.ob_refcnt], 1
-    lea rcx, [rel classmethod_type]
-    mov [rax + PyObject.ob_type], rcx
+    lea rsi, [rel classmethod_type]
+    call gc_alloc
+    ; ob_refcnt=1, ob_type set
     mov [rax + PyClassMethodObject.cm_callable], rbx
 
     ; INCREF func
     push rax
     mov rdi, rbx
     call obj_incref
+    mov rdi, [rsp]
+    call gc_track
     pop rax
 
     mov edx, TAG_PTR
@@ -129,7 +138,7 @@ DEF_FUNC_LOCAL classmethod_dealloc
     call obj_decref
 
     mov rdi, rbx
-    call ap_free
+    call gc_dealloc
 
     pop rbx
     leave
@@ -173,12 +182,9 @@ DEF_FUNC property_construct
 
 .pc_do_alloc:
     mov edi, PyPropertyObject_size
-    call ap_malloc
-    mov rbx, rax                ; rbx = new property
-
-    mov qword [rbx + PyObject.ob_refcnt], 1
-    lea rcx, [rel property_type]
-    mov [rbx + PyObject.ob_type], rcx
+    lea rsi, [rel property_type]
+    call gc_alloc
+    mov rbx, rax                ; rbx = new property (ob_refcnt=1, ob_type set)
     mov [rbx + PyPropertyObject.prop_get], r13
     mov [rbx + PyPropertyObject.prop_set], r14
     pop rax                     ; fdel
@@ -201,6 +207,9 @@ DEF_FUNC property_construct
     jz .pc_no_fdel
     call obj_incref
 .pc_no_fdel:
+
+    mov rdi, rbx
+    call gc_track
 
     mov rax, rbx
     mov edx, TAG_PTR
@@ -242,7 +251,7 @@ DEF_FUNC_LOCAL property_dealloc
 .pd_no_del:
 
     mov rdi, rbx
-    call ap_free
+    call gc_dealloc
 
     pop rbx
     leave
@@ -736,8 +745,10 @@ staticmethod_type:
     dq 0                        ; tp_base
     dq 0                        ; tp_dict
     dq 0                        ; tp_mro
-    dq 0                        ; tp_flags
+    dq TYPE_FLAG_HAVE_GC                        ; tp_flags
     dq 0                        ; tp_bases
+    dq staticmethod_traverse                        ; tp_traverse
+    dq staticmethod_clear                        ; tp_clear
 
 ; classmethod_type - type descriptor for classmethod wrapper
 align 8
@@ -765,8 +776,10 @@ classmethod_type:
     dq 0                        ; tp_base
     dq 0                        ; tp_dict
     dq 0                        ; tp_mro
-    dq 0                        ; tp_flags
+    dq TYPE_FLAG_HAVE_GC                        ; tp_flags
     dq 0                        ; tp_bases
+    dq classmethod_traverse                        ; tp_traverse
+    dq classmethod_clear                        ; tp_clear
 
 ; property_type - type descriptor for property descriptor
 align 8
@@ -794,8 +807,10 @@ property_type:
     dq 0                        ; tp_base
     dq 0                        ; tp_dict
     dq 0                        ; tp_mro
-    dq 0                        ; tp_flags
+    dq TYPE_FLAG_HAVE_GC                        ; tp_flags
     dq 0                        ; tp_bases
+    dq property_traverse                        ; tp_traverse
+    dq property_clear                        ; tp_clear
 
 ; member_descr_type - type descriptor for __slots__ member descriptors
 md_name_str: db "member_descriptor", 0
@@ -826,6 +841,8 @@ member_descr_type:
     dq 0                            ; tp_mro
     dq 0                            ; tp_flags
     dq 0                            ; tp_bases
+    dq 0                        ; tp_traverse
+    dq 0                        ; tp_clear
 
 ; Cached builtin function singletons for property.setter/getter/deleter
 _prop_setter_cache: dq 0

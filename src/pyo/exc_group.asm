@@ -18,6 +18,9 @@
 
 extern ap_free
 extern ap_malloc
+extern gc_alloc
+extern gc_track
+extern gc_dealloc
 extern ap_strcmp
 extern exc_BaseException_type
 extern exc_Exception_type
@@ -861,6 +864,8 @@ exc_BaseExceptionGroup_type:
     dq 0                        ; tp_mro
     dq 0                        ; tp_flags
     dq 0                        ; tp_bases
+    dq 0                        ; tp_traverse
+    dq 0                        ; tp_clear
 
 ; ExceptionGroup type — base = BaseExceptionGroup (also inherits from Exception)
 align 8
@@ -890,3 +895,5 @@ exc_ExceptionGroup_type:
     dq 0                        ; tp_mro
     dq 0                        ; tp_flags
     dq 0                        ; tp_bases
+    dq 0                        ; tp_traverse
+    dq 0                        ; tp_clear

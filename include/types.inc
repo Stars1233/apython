@@ -29,6 +29,8 @@ struc PyTypeObject
     .tp_mro:         resq 1  ; +168 ptr to MRO tuple
     .tp_flags:       resq 1  ; +176
     .tp_bases:       resq 1  ; +184 ptr to bases tuple
+    .tp_traverse:    resq 1  ; +192 GC traverse function ptr
+    .tp_clear:       resq 1  ; +200 GC clear function ptr
 endstruc
 
 TYPE_OBJECT_SIZE equ PyTypeObject_size

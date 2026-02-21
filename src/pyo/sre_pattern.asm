@@ -2313,6 +2313,8 @@ sre_scanner_type:
     dq 0                       ; tp_mro
     dq 0                       ; tp_flags
     dq 0                       ; tp_bases
+    dq 0                        ; tp_traverse
+    dq 0                        ; tp_clear
 
 align 8
 
@@ -2343,6 +2345,8 @@ sre_pattern_type:
     dq 0                       ; tp_mro
     dq 0                       ; tp_flags
     dq 0                       ; tp_bases
+    dq 0                        ; tp_traverse
+    dq 0                        ; tp_clear
 
 section .rodata
 sp_type_name:     db "re.Pattern", 0

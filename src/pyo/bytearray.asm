@@ -8,6 +8,8 @@
 extern ap_malloc
 extern ap_free
 extern ap_memcpy
+extern gc_alloc
+extern gc_track
 extern type_type
 extern raise_exception
 extern exc_TypeError_type
@@ -40,17 +42,28 @@ DEF_FUNC bytearray_type_call, BA_FRAME
     mov rcx, [rdi + PyBytesObject.ob_size]
     push rdi                           ; save src bytes
     push rcx                           ; save size
+    ; Check if type needs GC allocation (heap type subclass)
+    mov rdx, [rbp - BA_TYPE]
+    test qword [rdx + PyTypeObject.tp_flags], TYPE_FLAG_HAVE_GC
     lea rdi, [rcx + PyByteArrayObject.data]
+    jz .ba_plain_alloc
+    ; GC alloc for subclass
+    mov rsi, rdx
+    call gc_alloc
+    jmp .ba_alloc_done
+.ba_plain_alloc:
     call ap_malloc
+    mov qword [rax + PyByteArrayObject.ob_refcnt], 1
+    mov rdx, [rbp - BA_TYPE]
+    mov [rax + PyByteArrayObject.ob_type], rdx
+.ba_alloc_done:
     pop rcx                            ; size
     pop rsi                            ; src bytes
 
     ; Init header
-    mov qword [rax + PyByteArrayObject.ob_refcnt], 1
-    mov rdx, [rbp - BA_TYPE]           ; use passed-in type (for subclasses)
-    mov [rax + PyByteArrayObject.ob_type], rdx
     mov [rax + PyByteArrayObject.ob_size], rcx
     ; INCREF the type (needed for heap type subclasses)
+    mov rdx, [rbp - BA_TYPE]
     inc qword [rdx + PyObject.ob_refcnt]
 
     ; Copy data
@@ -61,6 +74,15 @@ DEF_FUNC bytearray_type_call, BA_FRAME
     call ap_memcpy
 
     pop rax                            ; return bytearray obj
+    ; gc_track if heap type subclass
+    mov rdx, [rbp - BA_TYPE]
+    test qword [rdx + PyTypeObject.tp_flags], TYPE_FLAG_HAVE_GC
+    jz .ba_no_track
+    push rax
+    mov rdi, rax
+    call gc_track
+    pop rax
+.ba_no_track:
     mov edx, TAG_PTR
     leave
     ret
@@ -132,3 +154,5 @@ bytearray_type:
     dq 0                            ; tp_mro
     dq TYPE_FLAG_BASETYPE           ; tp_flags (allow subclassing)
     dq 0                            ; tp_bases
+    dq 0                        ; tp_traverse
+    dq 0                        ; tp_clear

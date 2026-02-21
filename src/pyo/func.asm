@@ -7,6 +7,9 @@
 %include "frame.inc"
 
 extern ap_malloc
+extern gc_alloc
+extern gc_track
+extern gc_dealloc
 extern ap_free
 extern obj_decref
 extern obj_incref
@@ -17,6 +20,8 @@ extern frame_new
 extern frame_free
 extern tuple_new
 extern type_type
+extern func_traverse
+extern func_clear
 extern exc_TypeError_type
 extern raise_exception
 
@@ -38,17 +43,11 @@ DEF_FUNC func_new
     mov rbx, rdi            ; rbx = code
     mov r12, rsi            ; r12 = globals
 
-    ; Allocate PyFuncObject
+    ; Allocate PyFuncObject (GC-tracked)
     mov edi, PyFuncObject_size
-    call ap_malloc
-    mov r13, rax            ; r13 = new func object
-
-    ; ob_refcnt = 1
-    mov qword [r13 + PyObject.ob_refcnt], 1
-
-    ; ob_type = &func_type
-    lea rax, [rel func_type]
-    mov [r13 + PyObject.ob_type], rax
+    lea rsi, [rel func_type]
+    call gc_alloc
+    mov r13, rax            ; r13 = new func object (ob_refcnt=1, ob_type set)
 
     ; func_code = code; INCREF code
     mov [r13 + PyFuncObject.func_code], rbx
@@ -74,6 +73,9 @@ DEF_FUNC func_new
 
     ; func_dict = NULL
     mov qword [r13 + PyFuncObject.func_dict], 0
+
+    mov rdi, r13
+    call gc_track
 
     mov rax, r13            ; return func object
     pop r14
@@ -675,9 +677,9 @@ DEF_FUNC func_dealloc
     call obj_decref
 .no_func_dict:
 
-    ; Free the function object itself
+    ; Free the function object itself (GC-aware)
     mov rdi, rbx
-    call ap_free
+    call gc_dealloc
 
     pop r12
     pop rbx
@@ -926,5 +928,7 @@ func_type:
     dq 0                    ; tp_base
     dq 0                    ; tp_dict
     dq 0                    ; tp_mro
-    dq 0                    ; tp_flags
+    dq TYPE_FLAG_HAVE_GC                    ; tp_flags
     dq 0                    ; tp_bases
+    dq func_traverse                        ; tp_traverse
+    dq func_clear                        ; tp_clear

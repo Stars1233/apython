@@ -6,6 +6,9 @@
 %include "types.inc"
 
 extern ap_malloc
+extern gc_alloc
+extern gc_track
+extern gc_dealloc
 extern ap_free
 extern obj_decref
 extern obj_dealloc
@@ -19,6 +22,8 @@ extern obj_incref
 extern slice_type
 extern slice_indices
 extern type_type
+extern tuple_traverse
+extern tuple_clear
 extern obj_is_true
 extern float_compare
 extern int_type
@@ -34,17 +39,13 @@ DEF_FUNC tuple_new
 
     mov r12, rdi                ; r12 = size (item count)
 
-    ; Allocate: header (32) + size * 16
+    ; Allocate: header (32) + size * 16 (GC-tracked)
     mov rdi, r12
     shl rdi, 4                  ; size * 16
     add rdi, PyTupleObject.ob_item
-    call ap_malloc
-    mov rbx, rax                ; rbx = new tuple
-
-    ; Fill header
-    mov qword [rbx + PyObject.ob_refcnt], 1
-    lea rax, [rel tuple_type]
-    mov [rbx + PyObject.ob_type], rax
+    lea rsi, [rel tuple_type]
+    call gc_alloc
+    mov rbx, rax                ; rbx = new tuple (ob_refcnt=1, ob_type set)
     mov [rbx + PyTupleObject.ob_size], r12
     mov qword [rbx + PyTupleObject.ob_hash], -1  ; not computed
 
@@ -62,6 +63,9 @@ DEF_FUNC tuple_new
     jnz .zero_loop
 
 .done:
+    mov rdi, rbx
+    call gc_track
+
     mov rax, rbx
     pop r12
     pop rbx
@@ -158,7 +162,7 @@ DEF_FUNC tuple_dealloc
 
 .free_self:
     mov rdi, rbx
-    call ap_free
+    call gc_dealloc
 
     pop r13
     pop r12
@@ -1067,5 +1071,7 @@ tuple_type:
     dq 0                    ; tp_base
     dq 0                    ; tp_dict
     dq 0                    ; tp_mro
-    dq TYPE_FLAG_TUPLE_SUBCLASS ; tp_flags
+    dq TYPE_FLAG_HAVE_GC | TYPE_FLAG_TUPLE_SUBCLASS ; tp_flags
     dq 0                    ; tp_bases
+    dq tuple_traverse                        ; tp_traverse
+    dq tuple_clear                        ; tp_clear

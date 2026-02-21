@@ -1474,6 +1474,8 @@ str_type:
     dq 0                ; tp_mro
     dq TYPE_FLAG_STR_SUBCLASS ; tp_flags
     dq 0                ; tp_bases
+    dq 0                        ; tp_traverse
+    dq 0                        ; tp_clear
 
 ; str_iter type data
 align 8
@@ -1505,3 +1507,5 @@ str_iter_type:
     dq 0                        ; tp_mro
     dq 0                        ; tp_flags
     dq 0                        ; tp_bases
+    dq 0                        ; tp_traverse
+    dq 0                        ; tp_clear

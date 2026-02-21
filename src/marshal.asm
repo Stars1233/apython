@@ -16,6 +16,9 @@ extern str_from_cstr
 extern tuple_new
 extern bytes_from_data
 extern ap_malloc
+extern gc_alloc
+extern gc_track
+extern gc_dealloc
 extern ap_free
 extern obj_dealloc
 extern ap_realloc

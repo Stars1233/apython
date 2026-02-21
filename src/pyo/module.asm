@@ -6,6 +6,9 @@
 %include "types.inc"
 
 extern ap_malloc
+extern gc_alloc
+extern gc_track
+extern gc_dealloc
 extern ap_free
 extern obj_decref
 extern obj_dealloc
@@ -16,6 +19,8 @@ extern dict_new
 extern dict_get
 extern dict_set
 extern type_type
+extern module_traverse
+extern module_clear_gc
 extern none_singleton
 extern ap_strcmp
 
@@ -43,14 +48,11 @@ DEF_FUNC module_new
     call obj_incref
 
 .alloc:
-    ; Allocate PyModuleObject
+    ; Allocate PyModuleObject (GC-tracked)
     mov edi, PyModuleObject_size
-    call ap_malloc
-
-    ; Fill header
-    mov qword [rax + PyObject.ob_refcnt], 1
-    lea rcx, [rel module_type]
-    mov [rax + PyObject.ob_type], rcx
+    lea rsi, [rel module_type]
+    call gc_alloc
+    ; ob_refcnt=1, ob_type set by gc_alloc
 
     ; INCREF name
     push rax
@@ -61,6 +63,11 @@ DEF_FUNC module_new
     ; Fill module fields
     mov [rax + PyModuleObject.mod_name], rbx
     mov [rax + PyModuleObject.mod_dict], r12
+
+    push rax
+    mov rdi, rax
+    call gc_track
+    pop rax
 
     pop r12
     pop rbx
@@ -88,7 +95,7 @@ DEF_FUNC_LOCAL module_dealloc
     call obj_decref
 .no_dict:
     mov rdi, rbx
-    call ap_free
+    call gc_dealloc
 
     pop rbx
     leave
@@ -217,5 +224,7 @@ module_type:
     dq 0                        ; tp_base
     dq 0                        ; tp_dict
     dq 0                        ; tp_mro
-    dq 0                        ; tp_flags
+    dq TYPE_FLAG_HAVE_GC                        ; tp_flags
     dq 0                        ; tp_bases
+    dq module_traverse                        ; tp_traverse
+    dq module_clear_gc                        ; tp_clear

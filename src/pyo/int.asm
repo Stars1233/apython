@@ -2626,3 +2626,5 @@ int_type:
     dq 0                    ; tp_mro
     dq TYPE_FLAG_INT_SUBCLASS ; tp_flags
     dq 0                    ; tp_bases
+    dq 0                        ; tp_traverse
+    dq 0                        ; tp_clear

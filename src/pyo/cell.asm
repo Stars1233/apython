@@ -12,11 +12,16 @@
 %include "types.inc"
 
 extern ap_malloc
+extern gc_alloc
+extern gc_track
+extern gc_dealloc
 extern ap_free
 extern obj_incref
 extern obj_dealloc
 extern str_from_cstr
 extern type_type
+extern cell_traverse
+extern cell_clear
 
 ;; ============================================================================
 ;; cell_new(PyObject *obj) -> PyCellObject*
@@ -30,18 +35,21 @@ DEF_FUNC cell_new
     mov r12, rsi               ; save tag
 
     mov edi, PyCellObject_size
-    call ap_malloc
-    ; rax = new cell
-
-    mov qword [rax + PyObject.ob_refcnt], 1
-    lea rcx, [rel cell_type]
-    mov [rax + PyObject.ob_type], rcx
+    lea rsi, [rel cell_type]
+    call gc_alloc
+    ; rax = new cell (ob_refcnt=1, ob_type set)
     mov [rax + PyCellObject.ob_ref], rbx
     mov [rax + PyCellObject.ob_ref_tag], r12
 
     ; INCREF value if refcounted (tag-aware)
     push rax
     INCREF_VAL rbx, r12
+    pop rax
+
+    ; Track in GC
+    push rax
+    mov rdi, rax
+    call gc_track
     pop rax
 
 .done:
@@ -107,7 +115,7 @@ DEF_FUNC cell_dealloc
 
 .free:
     mov rdi, rbx
-    call ap_free
+    call gc_dealloc
 
     pop rbx
     leave
@@ -155,5 +163,7 @@ cell_type:
     dq 0                      ; tp_base
     dq 0                      ; tp_dict
     dq 0                      ; tp_mro
-    dq 0                      ; tp_flags
+    dq TYPE_FLAG_HAVE_GC                      ; tp_flags
     dq 0                      ; tp_bases
+    dq cell_traverse                        ; tp_traverse
+    dq cell_clear                        ; tp_clear

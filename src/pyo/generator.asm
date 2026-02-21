@@ -9,6 +9,9 @@
 %include "errcodes.inc"
 
 extern ap_malloc
+extern gc_alloc
+extern gc_track
+extern gc_dealloc
 extern ap_free
 extern obj_decref
 extern obj_incref
@@ -18,6 +21,8 @@ extern none_singleton
 extern str_from_cstr
 extern obj_dealloc
 extern type_type
+extern gen_traverse
+extern gen_clear
 extern ap_strcmp
 extern raise_exception
 extern raise_exception_obj
@@ -42,12 +47,10 @@ DEF_FUNC gen_new
     mov rbx, rdi               ; rbx = frame
 
     mov edi, PyGenObject_size
-    call ap_malloc
-    mov r12, rax               ; r12 = gen object
+    lea rsi, [rel gen_type]
+    call gc_alloc
+    mov r12, rax               ; r12 = gen object (ob_refcnt=1, ob_type set)
 
-    mov qword [r12 + PyObject.ob_refcnt], 1
-    lea rcx, [rel gen_type]
-    mov [r12 + PyObject.ob_type], rcx
     mov [r12 + PyGenObject.gi_frame], rbx
     mov qword [r12 + PyGenObject.gi_running], 0
 
@@ -63,6 +66,9 @@ DEF_FUNC gen_new
     ; gi_return_value = NULL (no return value yet)
     mov qword [r12 + PyGenObject.gi_return_value], 0
     mov qword [r12 + PyGenObject.gi_return_tag], 0
+
+    mov rdi, r12
+    call gc_track
 
     mov rax, r12               ; return gen object
     mov edx, TAG_PTR             ; return tag
@@ -84,12 +90,10 @@ DEF_FUNC coro_new
     mov rbx, rdi               ; rbx = frame
 
     mov edi, PyGenObject_size
-    call ap_malloc
-    mov r12, rax               ; r12 = coro object
+    lea rsi, [rel coro_type]
+    call gc_alloc
+    mov r12, rax               ; r12 = coro object (ob_refcnt=1, ob_type set)
 
-    mov qword [r12 + PyObject.ob_refcnt], 1
-    lea rcx, [rel coro_type]
-    mov [r12 + PyObject.ob_type], rcx
     mov [r12 + PyGenObject.gi_frame], rbx
     mov qword [r12 + PyGenObject.gi_running], 0
 
@@ -102,6 +106,9 @@ DEF_FUNC coro_new
     mov qword [r12 + PyGenObject.gi_name], 0
     mov qword [r12 + PyGenObject.gi_return_value], 0
     mov qword [r12 + PyGenObject.gi_return_tag], 0
+
+    mov rdi, r12
+    call gc_track
 
     mov rax, r12               ; return coro object
     mov edx, TAG_PTR
@@ -123,12 +130,10 @@ DEF_FUNC async_gen_new
     mov rbx, rdi               ; rbx = frame
 
     mov edi, PyGenObject_size
-    call ap_malloc
-    mov r12, rax
+    lea rsi, [rel async_gen_type]
+    call gc_alloc
+    mov r12, rax               ; ob_refcnt=1, ob_type set
 
-    mov qword [r12 + PyObject.ob_refcnt], 1
-    lea rcx, [rel async_gen_type]
-    mov [r12 + PyObject.ob_type], rcx
     mov [r12 + PyGenObject.gi_frame], rbx
     mov qword [r12 + PyGenObject.gi_running], 0
 
@@ -140,6 +145,9 @@ DEF_FUNC async_gen_new
     mov qword [r12 + PyGenObject.gi_name], 0
     mov qword [r12 + PyGenObject.gi_return_value], 0
     mov qword [r12 + PyGenObject.gi_return_tag], 0
+
+    mov rdi, r12
+    call gc_track
 
     mov rax, r12
     mov edx, TAG_PTR
@@ -495,9 +503,9 @@ DEF_FUNC gen_dealloc
     mov rdi, [rbx + PyGenObject.gi_code]
     call obj_decref
 
-    ; Free self
+    ; Free self (GC-aware)
     mov rdi, rbx
-    call ap_free
+    call gc_dealloc
 
     pop rbx
     leave
@@ -1214,8 +1222,10 @@ gen_type:
     dq 0                        ; tp_base
     dq 0                        ; tp_dict
     dq 0                        ; tp_mro
-    dq 0                        ; tp_flags
+    dq TYPE_FLAG_HAVE_GC                        ; tp_flags
     dq 0                        ; tp_bases
+    dq gen_traverse                        ; tp_traverse
+    dq gen_clear                        ; tp_clear
 
 align 8
 global coro_type
@@ -1242,8 +1252,10 @@ coro_type:
     dq 0                        ; tp_base
     dq 0                        ; tp_dict
     dq 0                        ; tp_mro
-    dq 0                        ; tp_flags
+    dq TYPE_FLAG_HAVE_GC                        ; tp_flags
     dq 0                        ; tp_bases
+    dq gen_traverse                        ; tp_traverse
+    dq gen_clear                        ; tp_clear
 
 align 8
 global async_gen_type
@@ -1270,8 +1282,10 @@ async_gen_type:
     dq 0                        ; tp_base
     dq 0                        ; tp_dict
     dq 0                        ; tp_mro
-    dq 0                        ; tp_flags
+    dq TYPE_FLAG_HAVE_GC                        ; tp_flags
     dq 0                        ; tp_bases
+    dq gen_traverse                        ; tp_traverse
+    dq gen_clear                        ; tp_clear
 
 ags_name_str: db "async_generator_asend", 0
 
@@ -1301,3 +1315,5 @@ async_gen_asend_type:
     dq 0                        ; tp_mro
     dq 0                        ; tp_flags
     dq 0                        ; tp_bases
+    dq 0                        ; tp_traverse
+    dq 0                        ; tp_clear

@@ -19,6 +19,9 @@
 %include "eventloop.inc"
 
 extern ap_malloc
+extern gc_alloc
+extern gc_track
+extern gc_dealloc
 extern ap_free
 extern obj_incref
 extern obj_decref
@@ -945,6 +948,8 @@ task_type:
     dq 0                        ; tp_mro
     dq 0                        ; tp_flags
     dq 0                        ; tp_bases
+    dq 0                        ; tp_traverse
+    dq 0                        ; tp_clear
 
 section .bss
 align 8

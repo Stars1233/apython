@@ -11,6 +11,7 @@ extern obj_dealloc
 extern obj_incref
 extern str_from_cstr
 extern type_type
+; code objects are not GC-tracked (allocated by marshal via ap_malloc)
 
 ; code_dealloc(PyObject *self)
 ; Free code object and decref contained objects
@@ -202,3 +203,5 @@ code_type:
     dq 0                ; tp_mro
     dq 0                ; tp_flags
     dq 0                ; tp_bases
+    dq 0                ; tp_traverse
+    dq 0                ; tp_clear

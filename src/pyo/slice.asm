@@ -13,6 +13,9 @@
 %include "types.inc"
 
 extern ap_malloc
+extern gc_alloc
+extern gc_track
+extern gc_dealloc
 extern ap_free
 extern obj_incref
 extern obj_dealloc
@@ -21,6 +24,8 @@ extern str_from_cstr
 extern none_singleton
 extern int_type
 extern type_type
+extern slice_traverse
+extern slice_clear_gc
 extern raise_exception
 extern exc_TypeError_type
 extern exc_AttributeError_type
@@ -46,12 +51,11 @@ DEF_FUNC slice_new
     push r9                ; save step_tag across malloc
 
     mov edi, PySliceObject_size
-    call ap_malloc
+    lea rsi, [rel slice_type]
+    call gc_alloc
 
     pop r9                  ; step_tag
-    mov qword [rax + PyObject.ob_refcnt], 1
-    lea rcx, [rel slice_type]
-    mov [rax + PyObject.ob_type], rcx
+    ; ob_refcnt=1, ob_type set by gc_alloc
     mov [rax + PySliceObject.start], rbx
     mov [rax + PySliceObject.start_tag], r14
     mov [rax + PySliceObject.stop], r12
@@ -64,6 +68,10 @@ DEF_FUNC slice_new
     INCREF_VAL rbx, r14
     INCREF_VAL r12, r15
     INCREF_VAL r13, r9
+
+    ; Track in GC
+    mov rdi, [rsp]          ; obj ptr saved on stack
+    call gc_track
     pop rax
 
     pop r15
@@ -92,7 +100,7 @@ DEF_FUNC slice_dealloc
     mov rsi, [rbx + PySliceObject.step_tag]
     DECREF_VAL rdi, rsi
     mov rdi, rbx
-    call ap_free
+    call gc_dealloc
 
     pop rbx
     leave
@@ -407,5 +415,7 @@ slice_type:
     dq 0                      ; tp_base
     dq 0                      ; tp_dict
     dq 0                      ; tp_mro
-    dq 0                      ; tp_flags
+    dq TYPE_FLAG_HAVE_GC                      ; tp_flags
     dq 0                      ; tp_bases
+    dq slice_traverse                        ; tp_traverse
+    dq slice_clear_gc                        ; tp_clear
