@@ -1,7 +1,14 @@
 # Makefile for apython - Python bytecode interpreter in x86-64 assembly
 
+VERSION_MAJOR = 0
+VERSION_MINOR = 6
+VERSION_PATCH = 0
+VERSION = $(VERSION_MAJOR).$(VERSION_MINOR).$(VERSION_PATCH)
+
 NASM = nasm
-NASMFLAGS = -f elf64 -I include/ -g -F dwarf
+NASMFLAGS = -f elf64 -I include/ -g -F dwarf \
+    -DVERSION_MAJOR=$(VERSION_MAJOR) -DVERSION_MINOR=$(VERSION_MINOR) \
+    -DVERSION_PATCH=$(VERSION_PATCH) -DVERSION_STR=\"$(VERSION)\"
 CC = cc
 LDFLAGS = -no-pie -lc -lgmp
 TARGET = apython

@@ -26,6 +26,7 @@ extern none_singleton
 extern module_new
 extern sys_modules_dict
 extern sys_module_obj
+extern sys_write
 
 ; main(int argc, char **argv) -> int
 DEF_FUNC main
@@ -42,6 +43,30 @@ DEF_FUNC main
     ; Save argc/argv early
     mov r14d, edi               ; r14 = argc
     mov r15, rsi                ; r15 = argv
+
+    ; Check for --version flag
+    mov rax, [r15 + 8]          ; rax = argv[1]
+    cmp word [rax], 0x2D2D      ; "--" little-endian
+    jne .not_version
+    mov rcx, [rax + 2]          ; load 8 bytes: "version\0"
+    mov rdx, 0x006E6F6973726576 ; "version\0" little-endian
+    cmp rcx, rdx
+    jne .not_version
+
+    ; Print version and exit 0
+    mov edi, 1                  ; stdout
+    lea rsi, [rel version_msg]
+    mov edx, version_msg_len
+    call sys_write
+    xor eax, eax
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+.not_version:
 
     ; Check for -t flag (opcode tracing)
     mov rax, [r15 + 8]         ; rax = argv[1]
@@ -301,7 +326,7 @@ DEF_FUNC main
     ret
 
 .usage:
-    CSTRING rdi, "Usage: apython [-t] <file.pyc>"
+    CSTRING rdi, "Usage: apython [--version] [-t] <file.pyc>"
     call fatal_error
 
 .load_failed:
@@ -310,6 +335,8 @@ DEF_FUNC main
 END_FUNC main
 
 section .rodata
+version_msg: db "apython ", VERSION_STR, 10
+version_msg_len equ $ - version_msg
 __name__cstr: db "__name__", 0
 __main__cstr: db "__main__", 0
 __package__cstr: db "__package__", 0

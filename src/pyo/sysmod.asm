@@ -670,7 +670,7 @@ sm_maxsize:      db "maxsize", 0
 sm_platform:     db "platform", 0
 sm_linux:        db "linux", 0
 sm_version:      db "version", 0
-sm_version_val:  db "3.12.0 (apython)", 0
+sm_version_val:  db "3.12.0 (apython ", VERSION_STR, ")", 0
 sm_version_info: db "version_info", 0
 sm_final:        db "final", 0
 sm_executable:   db "executable", 0
