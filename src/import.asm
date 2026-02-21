@@ -135,25 +135,25 @@ DEF_FUNC import_init
     ; Create builtins module wrapping existing builtins dict
     lea rdi, [rel im_builtins]
     call str_from_cstr_heap
+    push rax                    ; save name for DECREF
     mov rdi, rax
     mov rsi, [rel builtins_dict_global]
     call module_new
     mov rbx, rax                ; builtins module
+    pop rdi                     ; DECREF name (module_new INCREF'd)
+    call obj_decref
 
     ; dict_set(sys_modules, "builtins", builtins_module)
     mov rdi, [rel sys_modules_dict]
     pop rsi                     ; key = "builtins"
+    push rsi                    ; re-save key for DECREF
     mov rdx, rbx
     mov ecx, TAG_PTR
     mov r8d, TAG_PTR
     call dict_set
-
-    ; DECREF key and module (dict_set INCREFs both)
-    ; key was already consumed, but dict_set INCREF'd it; we need to decref our copy
-    ; Actually str_from_cstr returned with refcount 1, dict_set INCREF'd, so decref ours
-    ; The key was popped and passed to dict_set as rsi. dict_set INCREFs key and value.
-    ; We need to DECREF our references.
-    mov rdi, rbx                ; builtins module
+    pop rdi                     ; DECREF key (dict_set INCREF'd)
+    call obj_decref
+    mov rdi, rbx                ; DECREF module (dict_set INCREF'd)
     call obj_decref
 
     ; Register time module in sys.modules

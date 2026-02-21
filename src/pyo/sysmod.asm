@@ -106,6 +106,8 @@ DEF_FUNC sys_module_init, 32
     call dict_set
     pop rdi
     call obj_decref
+    mov rdi, r12            ; DECREF sys.path (dict_set INCREF'd)
+    call obj_decref
 
     ; --- sys.argv ---
     xor edi, edi
@@ -150,6 +152,8 @@ DEF_FUNC sys_module_init, 32
     mov r8d, TAG_PTR
     call dict_set
     pop rdi
+    call obj_decref
+    mov rdi, r13            ; DECREF sys.argv (dict_set INCREF'd)
     call obj_decref
 
     ; --- sys.maxsize ---

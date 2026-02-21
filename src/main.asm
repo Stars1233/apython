@@ -16,6 +16,7 @@ extern dict_new
 extern dict_set
 extern frame_new
 extern frame_free
+extern frame_pool_drain
 extern eval_frame
 extern pyc_read_file
 extern fatal_error
@@ -24,6 +25,7 @@ extern str_from_cstr_heap
 extern none_singleton
 extern module_new
 extern sys_modules_dict
+extern sys_module_obj
 
 ; main(int argc, char **argv) -> int
 DEF_FUNC main
@@ -96,12 +98,17 @@ DEF_FUNC main
     push rax                    ; save key str
     lea rdi, [rel __main__cstr]
     call str_from_cstr_heap
+    push rax                    ; save value str
     mov rdx, rax                ; value = "__main__" str
-    pop rsi                     ; key = "__name__" str
-    mov rdi, [rsp]              ; dict = globals (from stack)
+    mov rsi, [rsp + 8]          ; key = "__name__" str
+    mov rdi, [rsp + 16]         ; dict = globals (from stack)
     mov ecx, TAG_PTR
     mov r8d, TAG_PTR
     call dict_set
+    pop rdi                     ; value str
+    call obj_decref
+    pop rdi                     ; key str
+    call obj_decref
 
     ; Set __package__ = None in globals (top-level module has no package)
     lea rdi, [rel __package__cstr]
@@ -242,18 +249,49 @@ DEF_FUNC main
     mov qword [rel current_exception], 0
 
     ; Exit 1
-    mov eax, 1
-    pop r15
-    pop r14
-    pop r13
-    pop r12
-    pop rbx
-    leave
-    ret
+    mov ebx, 1
+    jmp .exit_cleanup
 
 .exit_ok:
-    ; Exit 0
-    xor eax, eax
+    xor ebx, ebx
+
+.exit_cleanup:
+    ; Break sys.modules cycle: sys_modules_dict -> sys module -> sys_dict
+    ;   -> "modules" entry -> sys_modules_dict
+    ; NULL out sys_module.mod_dict and DECREF the old dict twice:
+    ;   once for creation ref, once for module_new INCREF
+    ;   (module_dealloc won't DECREF since we NULLed mod_dict)
+    mov rax, [rel sys_module_obj]
+    test rax, rax
+    jz .no_sys_module
+    mov rdi, [rax + PyModuleObject.mod_dict]
+    mov qword [rax + PyModuleObject.mod_dict], 0
+    test rdi, rdi
+    jz .no_sys_module
+    push rdi
+    call obj_decref
+    pop rdi
+    call obj_decref
+.no_sys_module:
+
+    ; DECREF owned objects
+    mov rdi, r14            ; globals dict
+    call obj_decref
+    mov rdi, r12            ; code object
+    call obj_decref
+
+    ; DECREF sys.modules (cascades to free all modules and their dicts)
+    mov rdi, [rel sys_modules_dict]
+    call obj_decref
+
+    ; DECREF builtins dict (after sys.modules cascade reduced its refcount)
+    mov rdi, [rel builtins_dict_global]
+    call obj_decref
+
+    ; Drain frame pools
+    call frame_pool_drain
+
+    mov eax, ebx
     pop r15
     pop r14
     pop r13

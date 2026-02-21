@@ -245,6 +245,73 @@ DEF_FUNC frame_free
 END_FUNC frame_free
 
 ;; ============================================================================
+;; frame_pool_drain()
+;; Free all entries in all pool freelists. Called at exit.
+;; ============================================================================
+global frame_pool_drain
+DEF_FUNC frame_pool_drain
+    push rbx
+    push r12        ; alignment
+
+    ; Drain pool class 0
+    lea rbx, [rel pool_free_0]
+.drain_0:
+    mov rdi, [rbx]
+    test rdi, rdi
+    jz .done_0
+    mov rax, [rdi]          ; next = head->next
+    mov [rbx], rax          ; head = next
+    call ap_free
+    jmp .drain_0
+.done_0:
+    mov dword [rbx + 8], 0
+
+    ; Drain pool class 1
+    lea rbx, [rel pool_free_1]
+.drain_1:
+    mov rdi, [rbx]
+    test rdi, rdi
+    jz .done_1
+    mov rax, [rdi]
+    mov [rbx], rax
+    call ap_free
+    jmp .drain_1
+.done_1:
+    mov dword [rbx + 8], 0
+
+    ; Drain pool class 2
+    lea rbx, [rel pool_free_2]
+.drain_2:
+    mov rdi, [rbx]
+    test rdi, rdi
+    jz .done_2
+    mov rax, [rdi]
+    mov [rbx], rax
+    call ap_free
+    jmp .drain_2
+.done_2:
+    mov dword [rbx + 8], 0
+
+    ; Drain pool class 3
+    lea rbx, [rel pool_free_3]
+.drain_3:
+    mov rdi, [rbx]
+    test rdi, rdi
+    jz .done_3
+    mov rax, [rdi]
+    mov [rbx], rax
+    call ap_free
+    jmp .drain_3
+.done_3:
+    mov dword [rbx + 8], 0
+
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC frame_pool_drain
+
+;; ============================================================================
 ;; Pool data
 ;; ============================================================================
 section .data

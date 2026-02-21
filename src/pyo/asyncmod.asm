@@ -744,9 +744,16 @@ DEF_FUNC asyncio_module_create
     ; Create module object
     lea rdi, [rel am_asyncio]
     call str_from_cstr_heap
+    push rax                ; save name for DECREF
     mov rdi, rax
     mov rsi, r12
     call module_new
+    mov rbx, rax            ; save module
+    pop rdi                 ; DECREF name (module_new INCREF'd)
+    call obj_decref
+    mov rdi, r12            ; DECREF dict (module_new INCREF'd)
+    call obj_decref
+    mov rax, rbx            ; return module
 
     pop r12
     pop rbx

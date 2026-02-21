@@ -140,10 +140,16 @@ DEF_FUNC time_module_create
     ; Create module object
     lea rdi, [rel tm_time]
     call str_from_cstr_heap
+    push rax                ; save name for DECREF
     mov rdi, rax
     mov rsi, r12
     call module_new
-    ; rax = time module
+    mov rbx, rax            ; save module
+    pop rdi                 ; DECREF name (module_new INCREF'd)
+    call obj_decref
+    mov rdi, r12            ; DECREF dict (module_new INCREF'd)
+    call obj_decref
+    mov rax, rbx            ; return module
 
     pop r12
     pop rbx
