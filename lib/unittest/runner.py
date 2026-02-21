@@ -35,7 +35,7 @@ def main(module=None):
         # Find test methods
         methods = []
         for name in sorted(dir(cls)):
-            if name.startswith('test_'):
+            if name.startswith('test'):
                 methods.append(name)
 
         for method_name in methods:

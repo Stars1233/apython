@@ -102,6 +102,9 @@ DEF_FUNC dunder_call_1
     call dunder_lookup
     test edx, edx
     jz .not_found
+    ; Guard: non-pointer dunder (e.g. set to None) → not callable
+    test edx, TAG_RC_BIT
+    jz .not_found
 
     ; Call: tp_call(dunder_func, &[self], 1)
     mov r12, rax            ; r12 = dunder func
@@ -158,6 +161,9 @@ DEF_FUNC dunder_call_2
     mov rsi, rdx            ; name
     call dunder_lookup
     test edx, edx
+    jz .not_found
+    ; Guard: non-pointer dunder (e.g. set to None) → not callable
+    test edx, TAG_RC_BIT
     jz .not_found
 
     ; Call: tp_call(dunder_func, &[self, other], 2)
@@ -223,6 +229,9 @@ DEF_FUNC dunder_call_3
     mov rsi, rcx            ; name
     call dunder_lookup
     test edx, edx
+    jz .not_found
+    ; Guard: non-pointer dunder (e.g. set to None) → not callable
+    test edx, TAG_RC_BIT
     jz .not_found
 
     ; Call: tp_call(dunder_func, &[self, arg1, arg2], 3)
@@ -306,6 +315,22 @@ global dunder_hash
 global dunder_iadd
 global dunder_isub
 global dunder_imul
+global dunder_iand
+global dunder_ifloordiv
+global dunder_ilshift
+global dunder_imatmul
+global dunder_imod
+global dunder_ior
+global dunder_ipow
+global dunder_irshift
+global dunder_itruediv
+global dunder_ixor
+global dunder_rmatmul
+global dunder_rand
+global dunder_ror
+global dunder_rxor
+global dunder_rlshift
+global dunder_rrshift
 global dunder_repr
 global dunder_str
 global dunder_matmul
@@ -353,6 +378,22 @@ dunder_hash:     db "__hash__", 0
 dunder_iadd:     db "__iadd__", 0
 dunder_isub:     db "__isub__", 0
 dunder_imul:     db "__imul__", 0
+dunder_iand:     db "__iand__", 0
+dunder_ifloordiv: db "__ifloordiv__", 0
+dunder_ilshift:  db "__ilshift__", 0
+dunder_imatmul:  db "__imatmul__", 0
+dunder_imod:     db "__imod__", 0
+dunder_ior:      db "__ior__", 0
+dunder_ipow:     db "__ipow__", 0
+dunder_irshift:  db "__irshift__", 0
+dunder_itruediv: db "__itruediv__", 0
+dunder_ixor:     db "__ixor__", 0
+dunder_rmatmul:  db "__rmatmul__", 0
+dunder_rand:     db "__rand__", 0
+dunder_ror:      db "__ror__", 0
+dunder_rxor:     db "__rxor__", 0
+dunder_rlshift:  db "__rlshift__", 0
+dunder_rrshift:  db "__rrshift__", 0
 dunder_repr:     db "__repr__", 0
 dunder_str:      db "__str__", 0
 dunder_matmul:   db "__matmul__", 0
@@ -396,15 +437,34 @@ global binop_rdunder_table
 align 8
 binop_rdunder_table:
     dq dunder_radd          ; 0  = NB_ADD -> __radd__
-    dq 0                    ; 1  = NB_AND (no __rand__)
+    dq dunder_rand          ; 1  = NB_AND -> __rand__
     dq dunder_rfloordiv     ; 2  = NB_FLOOR_DIVIDE -> __rfloordiv__
-    dq 0                    ; 3  = NB_LSHIFT (no __rlshift__)
-    dq 0                    ; 4  = NB_MATRIX_MULTIPLY (no __rmatmul__)
+    dq dunder_rlshift       ; 3  = NB_LSHIFT -> __rlshift__
+    dq dunder_rmatmul       ; 4  = NB_MATRIX_MULTIPLY -> __rmatmul__
     dq dunder_rmul          ; 5  = NB_MULTIPLY -> __rmul__
     dq dunder_rmod          ; 6  = NB_REMAINDER -> __rmod__
-    dq 0                    ; 7  = NB_OR (no __ror__)
+    dq dunder_ror           ; 7  = NB_OR -> __ror__
     dq dunder_rpow          ; 8  = NB_POWER -> __rpow__
-    dq 0                    ; 9  = NB_RSHIFT (no __rrshift__)
+    dq dunder_rrshift       ; 9  = NB_RSHIFT -> __rrshift__
     dq dunder_rsub          ; 10 = NB_SUBTRACT -> __rsub__
     dq dunder_rtruediv      ; 11 = NB_TRUE_DIVIDE -> __rtruediv__
-    dq 0                    ; 12 = NB_XOR (no __rxor__)
+    dq dunder_rxor          ; 12 = NB_XOR -> __rxor__
+
+; Inplace binary op -> dunder name lookup table
+; Indexed by (NB_INPLACE_* - 13), same 0-12 order as binop_dunder_table
+global binop_inplace_dunder_table
+align 8
+binop_inplace_dunder_table:
+    dq dunder_iadd           ; 0  = NB_ADD -> __iadd__
+    dq dunder_iand           ; 1  = NB_AND -> __iand__
+    dq dunder_ifloordiv      ; 2  = NB_FLOOR_DIVIDE -> __ifloordiv__
+    dq dunder_ilshift        ; 3  = NB_LSHIFT -> __ilshift__
+    dq dunder_imatmul        ; 4  = NB_MATRIX_MULTIPLY -> __imatmul__
+    dq dunder_imul           ; 5  = NB_MULTIPLY -> __imul__
+    dq dunder_imod           ; 6  = NB_REMAINDER -> __imod__
+    dq dunder_ior            ; 7  = NB_OR -> __ior__
+    dq dunder_ipow           ; 8  = NB_POWER -> __ipow__
+    dq dunder_irshift        ; 9  = NB_RSHIFT -> __irshift__
+    dq dunder_isub           ; 10 = NB_SUBTRACT -> __isub__
+    dq dunder_itruediv       ; 11 = NB_TRUE_DIVIDE -> __itruediv__
+    dq dunder_ixor           ; 12 = NB_XOR -> __ixor__

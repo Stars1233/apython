@@ -5,8 +5,10 @@
 %include "types.inc"
 
 extern ap_free
+extern ap_strcmp
 extern obj_decref
 extern obj_dealloc
+extern obj_incref
 extern str_from_cstr
 extern type_type
 
@@ -91,8 +93,84 @@ DEF_FUNC_BARE code_repr
     jmp str_from_cstr
 END_FUNC code_repr
 
+; code_getattr(PyCodeObject *self, PyObject *name) -> (rax, edx) or NULL
+; rdi = code object, rsi = name string
+DEF_FUNC code_getattr
+    push rbx
+    push r12
+
+    mov rbx, rdi            ; rbx = code
+    mov r12, rsi            ; r12 = name
+
+    ; Check for co_kwonlyargcount
+    lea rdi, [rel co_attr_kwonlyargcount]
+    lea rsi, [r12 + PyStrObject.data]
+    call ap_strcmp
+    test eax, eax
+    jz .return_kwonlyargcount
+
+    ; Check for co_argcount
+    lea rdi, [rel co_attr_argcount]
+    lea rsi, [r12 + PyStrObject.data]
+    call ap_strcmp
+    test eax, eax
+    jz .return_argcount
+
+    ; Check for co_varnames (return co_localsplusnames)
+    lea rdi, [rel co_attr_varnames]
+    lea rsi, [r12 + PyStrObject.data]
+    call ap_strcmp
+    test eax, eax
+    jz .return_varnames
+
+    ; Not found
+    RET_NULL
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.return_kwonlyargcount:
+    movsxd rax, dword [rbx + PyCodeObject.co_kwonlyargcount]
+    mov edx, TAG_SMALLINT
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.return_argcount:
+    movsxd rax, dword [rbx + PyCodeObject.co_argcount]
+    mov edx, TAG_SMALLINT
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.return_varnames:
+    mov rax, [rbx + PyCodeObject.co_localsplusnames]
+    test rax, rax
+    jz .return_none
+    INCREF rax
+    mov edx, TAG_PTR
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.return_none:
+    xor eax, eax
+    mov edx, TAG_NONE
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC code_getattr
+
 section .data
 
+co_attr_kwonlyargcount: db "co_kwonlyargcount", 0
+co_attr_argcount:       db "co_argcount", 0
+co_attr_varnames:       db "co_varnames", 0
 code_repr_str: db "<code object>", 0
 code_type_name: db "code", 0
 
@@ -109,7 +187,7 @@ code_type:
     dq code_repr        ; tp_str
     dq 0                ; tp_hash
     dq 0                ; tp_call
-    dq 0                ; tp_getattr
+    dq code_getattr     ; tp_getattr
     dq 0                ; tp_setattr
     dq 0                ; tp_richcompare
     dq 0                ; tp_iter

@@ -30,6 +30,7 @@ extern fatal_error
 extern raise_exception
 extern obj_incref
 extern obj_decref
+extern type_type
 extern func_type
 extern cell_type
 extern exc_NameError_type
@@ -669,6 +670,14 @@ DEF_FUNC op_load_attr, LA_FRAME
     jne .la_method_push            ; non-ptr obj can't be heaptype
     mov rdi, [rbp - LA_OBJ]
     mov rax, [rdi + PyObject.ob_type]
+    ; If obj IS a type (ob_type == type_type or user_type_metatype),
+    ; attribute is unbound → [NULL, func]
+    lea rcx, [rel type_type]
+    cmp rax, rcx
+    je .la_not_method              ; class attribute → [NULL, func]
+    lea rcx, [rel user_type_metatype]
+    cmp rax, rcx
+    je .la_not_method              ; heaptype class attribute → [NULL, func]
     test dword [rax + PyTypeObject.tp_flags], TYPE_FLAG_HEAPTYPE
     jnz .la_not_method             ; heaptype instance attr → [NULL, func]
     jmp .la_method_push            ; built-in tp_getattr → [func, self]

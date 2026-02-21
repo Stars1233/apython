@@ -294,6 +294,35 @@ DEF_FUNC_BARE op_binary_op
 
 .binop_have_method:
 
+    ; Guard: if left is SmallInt/Bool and right is a heaptype (not int subclass),
+    ; the int nb_* methods can't handle it. Skip to dunder dispatch.
+    cmp qword [rsp + BO_LTAG], TAG_SMALLINT
+    je .binop_guard_int_left
+    cmp qword [rsp + BO_LTAG], TAG_BOOL
+    je .binop_guard_int_left
+    jmp .binop_compat_ok
+
+.binop_guard_int_left:
+    ; Left is int/bool. Check if right is an incompatible heaptype.
+    test qword [rsp + BO_RTAG], TAG_RC_BIT
+    jz .binop_compat_ok          ; right not a heap pointer → compatible
+    bt qword [rsp + BO_RTAG], 63
+    jc .binop_compat_ok          ; SmallStr → compatible
+    ; Right is a heap pointer (TAG_PTR)
+    push rax                     ; save method ptr
+    mov r10, [rsp + 8 + BO_RIGHT]
+    mov r10, [r10 + PyObject.ob_type]
+    test qword [r10 + PyTypeObject.tp_flags], TYPE_FLAG_HEAPTYPE
+    jz .binop_guard_ok           ; not heaptype → could be GMP int, proceed
+    test qword [r10 + PyTypeObject.tp_flags], TYPE_FLAG_INT_SUBCLASS
+    jnz .binop_guard_ok          ; int subclass → int methods handle it
+    ; Heaptype non-int-subclass → skip to dunders
+    pop rax
+    jmp .binop_try_dunder
+.binop_guard_ok:
+    pop rax
+
+.binop_compat_ok:
     ; Spill SmallStr operands to heap before calling nb_method
     bt qword [rsp + BO_LTAG], 63
     jc .binop_spill_ss
@@ -330,7 +359,9 @@ DEF_FUNC_BARE op_binary_op
     ; Try dunder method on heaptype objects
     extern binop_dunder_table
     extern binop_rdunder_table
+    extern binop_inplace_dunder_table
     extern dunder_call_2
+    extern dunder_lookup
 
     ; Check if left is heaptype
     cmp qword [rsp + BO_LTAG], TAG_SMALLINT
@@ -347,7 +378,43 @@ DEF_FUNC_BARE op_binary_op
     test rdx, TYPE_FLAG_HEAPTYPE
     jz .binop_try_right_dunder
 
-    ; Map op code to dunder name
+    ; For inplace ops, try inplace dunder first
+    cmp r9d, 13
+    jl .binop_left_dunder
+
+    ; --- Inplace dunder probe ---
+    ; Look up inplace dunder on left's type via dunder_lookup
+    push r9                    ; save op code (+8 shifts BO_ offsets)
+    mov rdi, [rsp + 8 + BO_LEFT]
+    mov rdi, [rdi + PyObject.ob_type]
+    mov eax, r9d
+    sub eax, 13
+    lea rsi, [rel binop_inplace_dunder_table]
+    mov rsi, [rsi + rax*8]    ; inplace dunder name
+    call dunder_lookup
+    pop r9
+    test edx, edx
+    jz .binop_left_dunder      ; not found → fall back to regular dunder
+    test edx, TAG_RC_BIT
+    jz .binop_no_method        ; found None → blocks fallback (TypeError)
+
+    ; Inplace dunder exists and is callable — call via dunder_call_2
+    push r9
+    mov eax, r9d
+    sub eax, 13
+    lea rdx, [rel binop_inplace_dunder_table]
+    mov rdx, [rdx + rax*8]    ; inplace dunder name
+    mov rdi, [rsp + 8 + BO_LEFT]
+    mov rsi, [rsp + 8 + BO_RIGHT]
+    mov rcx, [rsp + 8 + BO_RTAG]
+    call dunder_call_2
+    pop r9
+    test edx, edx
+    jnz .binop_have_result
+    ; Inplace dunder call returned NULL unexpectedly — fall through to regular
+
+.binop_left_dunder:
+    ; Map op code to regular dunder name
     mov eax, r9d
     cmp eax, 13
     jl .binop_dunder_idx

@@ -9,6 +9,7 @@
 extern ap_malloc
 extern ap_free
 extern obj_decref
+extern obj_incref
 extern obj_dealloc
 extern str_from_cstr
 extern eval_frame
@@ -587,7 +588,7 @@ DEF_FUNC func_bind_kwargs
     ; Add to **kwargs if available
     mov rdi, [rsp+0]
     test rdi, rdi
-    jz .kw_next             ; no **kwargs, skip (TODO: error)
+    jz .kw_unexpected       ; no **kwargs, raise TypeError
 
     ; dict_set(kwargs_dict, key, value, value_tag)
     mov rax, [rsp+16]
@@ -600,6 +601,13 @@ DEF_FUNC func_bind_kwargs
     mov rdx, [r13 + rax]          ; value payload
     mov r8d, TAG_PTR
     call dict_set
+    jmp .kw_next
+
+.kw_unexpected:
+    ; Raise TypeError for unexpected keyword argument
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "got an unexpected keyword argument"
+    call raise_exception
 
 .kw_next:
     inc qword [rsp+16]
@@ -694,6 +702,13 @@ DEF_FUNC func_setattr
     mov r13, rdx            ; r13 = value
     mov r14d, ecx           ; r14d = value_tag (from caller)
 
+    ; Check for __kwdefaults__
+    lea rdi, [rel fn_attr_kwdefaults]
+    lea rsi, [r12 + PyStrObject.data]
+    call ap_strcmp
+    test eax, eax
+    jz .set_kwdefaults
+
     ; Check if func_dict exists
     mov rdi, [rbx + PyFuncObject.func_dict]
     test rdi, rdi
@@ -712,6 +727,30 @@ DEF_FUNC func_setattr
     mov r8d, TAG_PTR        ; key_tag (name is always heap string)
     call dict_set
 
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.set_kwdefaults:
+    ; XDECREF old kwdefaults
+    mov rdi, [rbx + PyFuncObject.func_kwdefaults]
+    test rdi, rdi
+    jz .no_old_kwd
+    call obj_decref
+.no_old_kwd:
+    ; Store new kwdefaults — INCREF if pointer, store NULL if non-pointer
+    test r14d, TAG_RC_BIT
+    jz .store_kwd_null
+    mov rdi, r13
+    call obj_incref
+    mov [rbx + PyFuncObject.func_kwdefaults], r13
+    jmp .setattr_done
+.store_kwd_null:
+    mov qword [rbx + PyFuncObject.func_kwdefaults], 0
+.setattr_done:
     pop r14
     pop r13
     pop r12
@@ -739,6 +778,20 @@ DEF_FUNC func_getattr
     call ap_strcmp
     test eax, eax
     jz .return_name
+
+    ; Check for __kwdefaults__
+    lea rdi, [rel fn_attr_kwdefaults]
+    lea rsi, [r12 + PyStrObject.data]
+    call ap_strcmp
+    test eax, eax
+    jz .return_kwdefaults
+
+    ; Check for __code__
+    lea rdi, [rel fn_attr_code]
+    lea rsi, [r12 + PyStrObject.data]
+    call ap_strcmp
+    test eax, eax
+    jz .return_code
 
     ; Check for __dict__
     lea rdi, [rel fn_attr_dict]
@@ -789,6 +842,34 @@ DEF_FUNC func_getattr
     leave
     ret
 
+.return_code:
+    mov rax, [rbx + PyFuncObject.func_code]
+    INCREF rax
+    mov edx, TAG_PTR
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.return_kwdefaults:
+    mov rax, [rbx + PyFuncObject.func_kwdefaults]
+    test rax, rax
+    jnz .return_kwdefaults_obj
+    ; Return None if no kwdefaults
+    xor eax, eax
+    mov edx, TAG_NONE
+    pop r12
+    pop rbx
+    leave
+    ret
+.return_kwdefaults_obj:
+    INCREF rax
+    mov edx, TAG_PTR
+    pop r12
+    pop rbx
+    leave
+    ret
+
 .not_found:
     RET_NULL
     pop r12
@@ -816,6 +897,8 @@ func_name_str:  db "function", 0
 func_repr_str:  db "<function>", 0
 fn_attr_name:   db "__name__", 0
 fn_attr_dict:   db "__dict__", 0
+fn_attr_code:   db "__code__", 0
+fn_attr_kwdefaults: db "__kwdefaults__", 0
 
 ; func_type - Type object for function objects
 align 8
