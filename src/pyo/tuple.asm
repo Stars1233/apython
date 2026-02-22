@@ -22,6 +22,7 @@ extern obj_incref
 extern slice_type
 extern slice_indices
 extern type_type
+extern gc_untrack
 extern tuple_traverse
 extern tuple_clear
 extern obj_is_true
@@ -39,6 +40,36 @@ DEF_FUNC tuple_new
 
     mov r12, rdi                ; r12 = size (item count)
 
+    ; Try pool for small tuples (size 1-3)
+    cmp r12, 1
+    je .try_pool_1
+    cmp r12, 2
+    je .try_pool_2
+    cmp r12, 3
+    je .try_pool_3
+    jmp .alloc_fresh
+.try_pool_1:
+    lea rcx, [rel tuple_pool_1_head]
+    jmp .try_pool
+.try_pool_2:
+    lea rcx, [rel tuple_pool_2_head]
+    jmp .try_pool
+.try_pool_3:
+    lea rcx, [rel tuple_pool_3_head]
+.try_pool:
+    mov rax, [rcx]              ; head
+    test rax, rax
+    jz .alloc_fresh
+    mov rdx, [rax + PyObject.ob_refcnt]  ; next link
+    mov [rcx], rdx
+    dec dword [rcx + 8]         ; count--
+    mov qword [rax + PyObject.ob_refcnt], 1
+    mov rbx, rax
+    mov [rbx + PyTupleObject.ob_size], r12
+    mov qword [rbx + PyTupleObject.ob_hash], -1
+    jmp .zero_fill              ; zero items, skip gc_alloc+gc_track
+
+.alloc_fresh:
     ; Allocate: header (32) + size * 16 (GC-tracked)
     mov rdi, r12
     shl rdi, 4                  ; size * 16
@@ -49,9 +80,10 @@ DEF_FUNC tuple_new
     mov [rbx + PyTupleObject.ob_size], r12
     mov qword [rbx + PyTupleObject.ob_hash], -1  ; not computed
 
+.zero_fill:
     ; Zero-fill the ob_item array (16 bytes per slot)
     test r12, r12
-    jz .done
+    jz .done_pool
     lea rdi, [rbx + PyTupleObject.ob_item]
     xor eax, eax
     mov rcx, r12
@@ -62,7 +94,11 @@ DEF_FUNC tuple_new
     dec rcx
     jnz .zero_loop
 
-.done:
+.done_pool:
+    ; Only gc_track if freshly allocated (pooled tuples are already tracked)
+    ; Check: if tuple came from pool, ob_type is already set from previous use
+    ; For fresh alloc, gc_alloc sets ob_type. We can skip gc_track for pooled.
+    ; Pooled tuples were gc_untracked in dealloc, so we must gc_track them again.
     mov rdi, rbx
     call gc_track
 
@@ -139,7 +175,9 @@ DEF_FUNC_BARE tuple_len
 END_FUNC tuple_len
 
 ; tuple_dealloc(PyObject *self)
-; DECREF_VAL each fat item, then free self
+; DECREF_VAL each fat item, then free self or return to pool
+TUPLE_POOL_MAX equ 16
+
 DEF_FUNC tuple_dealloc
     push rbx
     push r12
@@ -151,7 +189,7 @@ DEF_FUNC tuple_dealloc
 
 .decref_loop:
     cmp r13, r12
-    jge .free_self
+    jge .try_pool
     mov rax, r13
     shl rax, 4                  ; index * 16
     mov rdi, [rbx + PyTupleObject.ob_item + rax]
@@ -159,6 +197,42 @@ DEF_FUNC tuple_dealloc
     DECREF_VAL rdi, rsi
     inc r13
     jmp .decref_loop
+
+.try_pool:
+    ; Try to pool small tuples (size 1-3)
+    cmp r12, 1
+    je .pool_1
+    cmp r12, 2
+    je .pool_2
+    cmp r12, 3
+    je .pool_3
+    jmp .free_self
+.pool_1:
+    lea rcx, [rel tuple_pool_1_head]
+    jmp .try_push
+.pool_2:
+    lea rcx, [rel tuple_pool_2_head]
+    jmp .try_push
+.pool_3:
+    lea rcx, [rel tuple_pool_3_head]
+.try_push:
+    cmp dword [rcx + 8], TUPLE_POOL_MAX
+    jge .free_self
+    ; Untrack from GC before pooling
+    push rcx              ; save pool head ptr (caller-saved, clobbered by gc_untrack)
+    mov rdi, rbx
+    call gc_untrack
+    pop rcx               ; restore pool head ptr
+    ; Push to pool: reuse ob_refcnt as next-pointer
+    mov rdx, [rcx]
+    mov [rbx + PyObject.ob_refcnt], rdx
+    mov [rcx], rbx
+    inc dword [rcx + 8]         ; count++
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
 
 .free_self:
     mov rdi, rbx
@@ -1022,6 +1096,18 @@ DEF_FUNC tuple_type_call, TTC_FRAME
 END_FUNC tuple_type_call
 
 section .data
+
+; Tuple object pools (freelist per size class, singly-linked via ob_refcnt)
+align 8
+tuple_pool_1_head:  dq 0       ; 1-tuple freelist head
+tuple_pool_1_count: dd 0       ; current count
+                    dd 0       ; padding
+tuple_pool_2_head:  dq 0       ; 2-tuple freelist head
+tuple_pool_2_count: dd 0
+                    dd 0
+tuple_pool_3_head:  dq 0       ; 3-tuple freelist head
+tuple_pool_3_count: dd 0
+                    dd 0
 
 tuple_name_str: db "tuple", 0
 ; tuple_repr_str removed - repr now in src/repr.asm

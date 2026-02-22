@@ -472,14 +472,10 @@ DEF_FUNC_LOCAL enumerate_iternext
     mov r12, rax             ; r12 = value payload from iternext
     push rdx                 ; save value tag from iternext
 
-    ; Create SmallInt for current count
-    mov rdi, [rbx + IT_FIELD2]       ; it_count (raw i64)
-    call int_from_i64
-    mov r13, rax             ; r13 = count payload
-    push rdx                 ; save count tag from int_from_i64
-
-    ; Increment it_count
-    inc qword [rbx + IT_FIELD2]
+    ; Inline SmallInt for current count (int_from_i64 always returns SmallInt)
+    mov r13, [rbx + IT_FIELD2]       ; r13 = count (raw i64 = SmallInt payload)
+    inc qword [rbx + IT_FIELD2]      ; increment for next time
+    push qword TAG_SMALLINT          ; count tag (always SmallInt)
 
     ; Create 2-tuple
     mov rdi, 2

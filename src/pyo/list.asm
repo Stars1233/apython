@@ -43,6 +43,8 @@ extern list_sorting_error
 ;; list_new(int64_t capacity) -> PyListObject*
 ;; Allocate a new empty list with given initial capacity
 ;; ============================================================================
+LIST_POOL_MAX equ 16
+
 DEF_FUNC list_new
     push rbx
     push r12
@@ -53,12 +55,26 @@ DEF_FUNC list_new
     mov r12, 4                 ; minimum capacity
 .has_cap:
 
+    ; Try list header pool first
+    mov rax, [rel list_pool_head]
+    test rax, rax
+    jz .alloc_fresh
+    ; Pop from pool: reuse ob_refcnt slot as next-link
+    mov rcx, [rax + PyObject.ob_refcnt]
+    mov [rel list_pool_head], rcx
+    dec dword [rel list_pool_count]
+    mov qword [rax + PyObject.ob_refcnt], 1  ; reinit refcount
+    mov rbx, rax
+    jmp .init_fields
+
+.alloc_fresh:
     ; Allocate PyListObject header (GC-tracked)
     mov edi, PyListObject_size
     lea rsi, [rel list_type]
     call gc_alloc
     mov rbx, rax               ; rbx = list (ob_refcnt=1, ob_type set)
 
+.init_fields:
     mov qword [rbx + PyListObject.ob_size], 0
     mov [rbx + PyListObject.allocated], r12
 
@@ -968,7 +984,7 @@ END_FUNC list_contains
 
 ;; ============================================================================
 ;; list_dealloc(PyObject *self)
-;; DECREF all items, free items array, free list
+;; DECREF all items, free items array, free or pool list header
 ;; ============================================================================
 DEF_FUNC list_dealloc
     push rbx
@@ -995,6 +1011,25 @@ DEF_FUNC list_dealloc
     mov rdi, [rbx + PyListObject.ob_item]
     call ap_free
 
+    ; Try to pool list header
+    cmp dword [rel list_pool_count], LIST_POOL_MAX
+    jge .free_header
+    ; Untrack from GC before pooling
+    mov rdi, rbx
+    extern gc_untrack
+    call gc_untrack
+    ; Push to pool: reuse ob_refcnt as next-pointer
+    mov rcx, [rel list_pool_head]
+    mov [rbx + PyObject.ob_refcnt], rcx
+    mov [rel list_pool_head], rbx
+    inc dword [rel list_pool_count]
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.free_header:
     mov rdi, rbx
     call gc_dealloc
 
@@ -1680,6 +1715,12 @@ END_FUNC list_type_call
 ;; Data section
 ;; ============================================================================
 section .data
+
+; List header pool (freelist, singly-linked via ob_refcnt)
+align 8
+list_pool_head:  dq 0       ; freelist head
+list_pool_count: dd 0       ; current count
+                 dd 0       ; padding
 
 list_name_str: db "list", 0
 ; list_repr_str removed - repr now in src/repr.asm
