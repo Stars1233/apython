@@ -368,6 +368,7 @@ DEF_FUNC sre_substr_from_state
     push rbx
     push r12
     push r13
+    push r14
 
     mov rbx, rdi               ; state
     mov r12, rsi               ; start codepoint index
@@ -386,6 +387,7 @@ DEF_FUNC sre_substr_from_state
     call str_new_heap
     mov edx, TAG_PTR
 
+    pop r14
     pop r13
     pop r12
     pop rbx
@@ -424,6 +426,7 @@ DEF_FUNC sre_substr_from_state
     call str_new_heap
     mov edx, TAG_PTR
 
+    pop r14
     pop r13
     pop r12
     pop rbx

@@ -273,6 +273,7 @@ DEF_FUNC sre_match_get_group_str
     push rbx
     push r12
     push r13
+    push r14
     mov rbx, rdi               ; self
 
     ; Validate group index
@@ -314,6 +315,7 @@ DEF_FUNC sre_match_get_group_str
     sub rsi, r12
     call str_new_heap
     mov edx, TAG_PTR
+    pop r14
     pop r13
     pop r12
     pop rbx
@@ -351,6 +353,7 @@ DEF_FUNC sre_match_get_group_str
     sub rsi, r14
     call str_new_heap
     mov edx, TAG_PTR
+    pop r14
     pop r13
     pop r12
     pop rbx
@@ -360,6 +363,7 @@ DEF_FUNC sre_match_get_group_str
 .group_none:
     xor eax, eax
     mov edx, TAG_NONE
+    pop r14
     pop r13
     pop r12
     pop rbx

@@ -804,7 +804,6 @@ DEF_FUNC str_method_join
 .join_no_sep:
     mov rcx, [rsp]          ; reload index
     mov rax, [r12 + PyListObject.ob_item]
-    mov rdx, [r12 + PyListObject.ob_item_tags]
     mov rax, [rax + rcx * 8]    ; item payload
 
     ; Heap string element

@@ -993,6 +993,7 @@ DEF_FUNC tuple_type_call, TTC_FRAME
     push rbx
     push r12
     push r13
+    push r14
 
     mov r12, rsi            ; args
     mov r13, rdx            ; nargs
@@ -1080,6 +1081,8 @@ DEF_FUNC tuple_type_call, TTC_FRAME
     push rcx
     push rdx
     push rsi
+    push r10
+    push r11
 
     mov rdi, [rsi + rdx * 8]      ; payload from list
     movzx r9d, byte [r10 + rdx]   ; tag from list
@@ -1087,6 +1090,8 @@ DEF_FUNC tuple_type_call, TTC_FRAME
     mov byte [r14 + rdx], r9b
     INCREF_VAL rdi, r9
 
+    pop r11
+    pop r10
     pop rsi
     pop rdx
     pop rcx
@@ -1100,6 +1105,7 @@ DEF_FUNC tuple_type_call, TTC_FRAME
 
     mov rax, r12
     mov edx, TAG_PTR
+    pop r14
     pop r13
     pop r12
     pop rbx
@@ -1111,6 +1117,7 @@ DEF_FUNC tuple_type_call, TTC_FRAME
     mov rdi, rbx
     call obj_decref
     RET_NULL
+    pop r14
     pop r13
     pop r12
     pop rbx
@@ -1122,6 +1129,7 @@ DEF_FUNC tuple_type_call, TTC_FRAME
     extern tuple_new
     call tuple_new
     mov edx, TAG_PTR
+    pop r14
     pop r13
     pop r12
     pop rbx
