@@ -115,6 +115,7 @@ extern op_binary_op_sub_float
 extern op_binary_op_mul_float
 extern op_binary_op_truediv_float
 extern op_binary_op_mul_int
+extern op_binary_op_floordiv_int
 extern op_for_iter_list
 extern op_for_iter_range
 
@@ -1428,7 +1429,7 @@ opcode_table:
     dq op_binary_op_mul_float    ; 219 = BINARY_OP_MUL_FLOAT (specialized)
     dq op_binary_op_truediv_float ; 220 = BINARY_OP_TRUEDIV_FLOAT (specialized)
     dq op_binary_op_mul_int      ; 221 = BINARY_OP_MULTIPLY_INT (specialized)
-    dq op_unimplemented      ; 222
+    dq op_binary_op_floordiv_int ; 222 = BINARY_OP_FLOORDIV_INT (specialized)
     dq op_unimplemented      ; 223
     dq op_unimplemented      ; 224
     dq op_unimplemented      ; 225

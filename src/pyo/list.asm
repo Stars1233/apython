@@ -11,6 +11,8 @@ extern gc_track
 extern gc_dealloc
 extern ap_free
 extern ap_realloc
+extern ap_memmove
+extern ap_memcpy
 extern obj_decref
 extern obj_dealloc
 extern str_from_cstr
@@ -549,38 +551,11 @@ DEF_FUNC list_ass_subscript, LAS_FRAME
     mov rax, r14
     shl rax, 4
     add rsi, rax
-    ; count in 16-byte slots
-    ; Use forward or backward copy depending on direction
+    ; rcx = tail_count (16-byte elements), rdi = dst, rsi = src
     push rcx
-    cmp rdi, rsi
-    jb .las_copy_fwd
-    ; Backward copy (dst > src, overlap)
-    dec rcx
-.las_copy_bwd_loop:
-    cmp rcx, 0
-    jl .las_copy_done
-    mov rax, rcx
-    shl rax, 4                ; offset = i * 16
-    mov r10, [rsi + rax]      ; payload
-    mov r11, [rsi + rax + 8]  ; tag
-    mov [rdi + rax], r10
-    mov [rdi + rax + 8], r11
-    dec rcx
-    jmp .las_copy_bwd_loop
-.las_copy_fwd:
-    xor edx, edx
-.las_copy_fwd_loop:
-    cmp rdx, rcx
-    jge .las_copy_done
-    mov rax, rdx
-    shl rax, 4                ; offset = i * 16
-    mov r10, [rsi + rax]
-    mov r11, [rsi + rax + 8]
-    mov [rdi + rax], r10
-    mov [rdi + rax + 8], r11
-    inc rdx
-    jmp .las_copy_fwd_loop
-.las_copy_done:
+    shl rcx, 4                ; bytes = tail_count * 16
+    mov rdx, rcx              ; rdx = byte count for ap_memmove
+    call ap_memmove
     pop rcx
 
 .las_shift_done:
@@ -1111,6 +1086,40 @@ DEF_FUNC list_getslice
     mov rdi, [rsp]             ; new list
     mov [rdi + PyListObject.ob_size], rcx
 
+    ; Fast path: step == 1 → contiguous memcpy + bulk INCREF
+    cmp r15, 1
+    jne .lgs_loop_start
+    ; src = source->ob_item + start * 16
+    mov rsi, [rbx + PyListObject.ob_item]
+    mov rax, r13
+    shl rax, 4
+    add rsi, rax
+    ; dst = new_list->ob_item
+    mov rdi, [rsp]             ; new list
+    mov rdi, [rdi + PyListObject.ob_item]
+    ; count = slicelength * 16
+    mov rdx, [rsp + 8]        ; slicelength
+    shl rdx, 4
+    call ap_memcpy
+    ; Bulk INCREF all copied elements
+    mov rcx, [rsp + 8]        ; slicelength
+    test rcx, rcx
+    jz .lgs_done
+    mov rdi, [rsp]             ; new list
+    mov rdi, [rdi + PyListObject.ob_item]
+    xor edx, edx
+.lgs_incref_loop:
+    cmp rdx, rcx
+    jge .lgs_done
+    mov rax, rdx
+    shl rax, 4
+    mov r8, [rdi + rax]       ; payload
+    mov r9, [rdi + rax + 8]   ; tag
+    INCREF_VAL r8, r9
+    inc rdx
+    jmp .lgs_incref_loop
+
+.lgs_loop_start:
     xor ecx, ecx              ; i = 0
 .lgs_loop:
     cmp rcx, [rsp + 8]        ; slicelength

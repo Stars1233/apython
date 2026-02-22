@@ -158,6 +158,12 @@ DEF_FUNC_BARE op_binary_op
     cmp ecx, 24                ; NB_INPLACE_TRUE_DIVIDE
     je .binop_try_float_truediv
 
+    ; Fast path: SmallInt floor divide (NB_FLOOR_DIVIDE=2, NB_INPLACE_FLOOR_DIVIDE=15)
+    cmp ecx, 2                 ; NB_FLOOR_DIVIDE
+    je .binop_try_smallint_fdiv
+    cmp ecx, 15                ; NB_INPLACE_FLOOR_DIVIDE
+    je .binop_try_smallint_fdiv
+
 .binop_generic:
     ; Save operands + tags for DECREF after call (push on machine stack)
     ; Stack layout: [rsp+BO_RIGHT], [rsp+BO_RTAG], [rsp+BO_LEFT], [rsp+BO_LTAG]
@@ -640,6 +646,30 @@ DEF_FUNC_BARE op_binary_op
     divsd xmm0, xmm1
     movq rax, xmm0
     VPUSH_FLOAT rax
+    add rbx, 2
+    DISPATCH
+
+.binop_try_smallint_fdiv:
+    ; Check both TAG_SMALLINT
+    cmp r9d, TAG_SMALLINT
+    jne .binop_generic
+    cmp r8d, TAG_SMALLINT
+    jne .binop_generic
+    test rsi, rsi
+    jz .binop_generic          ; zero divisor → generic raises error
+    mov rax, rdi
+    cqo
+    idiv rsi                    ; rax=quotient, rdx=remainder
+    ; Floor: if remainder != 0 and signs differ, subtract 1
+    test rdx, rdx
+    jz .fdiv_exact
+    mov rcx, rdi
+    xor rcx, rsi
+    jns .fdiv_exact             ; same sign → truncation == floor
+    dec rax
+.fdiv_exact:
+    mov byte [rbx - 2], 222    ; specialize to BINARY_OP_FLOORDIV_INT
+    VPUSH_INT rax
     add rbx, 2
     DISPATCH
 END_FUNC op_binary_op
@@ -3254,6 +3284,49 @@ DEF_FUNC_BARE op_binary_op_mul_int
     sub rbx, 2
     DISPATCH
 END_FUNC op_binary_op_mul_int
+
+;; ============================================================================
+;; op_binary_op_floordiv_int - Specialized SmallInt floor divide (opcode 222)
+;;
+;; Guard: both TOS and TOS1 must be SmallInt, right != 0.
+;; On guard failure: deopt back to BINARY_OP (122).
+;; Followed by 1 CACHE entry (2 bytes).
+;; ============================================================================
+DEF_FUNC_BARE op_binary_op_floordiv_int
+    VPOP rsi                   ; right
+    mov r8, [r13 + 8]         ; right tag
+    VPOP rdi                   ; left
+    mov r9, [r13 + 8]         ; left tag
+    ; Guard: both SmallInt
+    cmp r9d, TAG_SMALLINT
+    jne .fdiv_int_deopt_repush
+    cmp r8d, TAG_SMALLINT
+    jne .fdiv_int_deopt_repush
+    ; Guard: right != 0
+    test rsi, rsi
+    jz .fdiv_int_deopt_repush
+    ; Floor divide
+    mov rax, rdi
+    cqo
+    idiv rsi                    ; rax=quotient, rdx=remainder
+    ; Floor: if remainder != 0 and signs differ, subtract 1
+    test rdx, rdx
+    jz .fdiv_int_exact
+    mov rcx, rdi
+    xor rcx, rsi
+    jns .fdiv_int_exact         ; same sign → truncation == floor
+    dec rax
+.fdiv_int_exact:
+    VPUSH_INT rax
+    add rbx, 2                 ; skip CACHE
+    DISPATCH
+.fdiv_int_deopt_repush:
+    VUNDROP 2
+.fdiv_int_deopt:
+    mov byte [rbx - 2], 122
+    sub rbx, 2
+    DISPATCH
+END_FUNC op_binary_op_floordiv_int
 
 ;; ============================================================================
 ;; op_compare_op_int - Specialized SmallInt comparison (opcode 209)

@@ -11,10 +11,12 @@
 %include "macros.inc"
 %include "object.inc"
 %include "types.inc"
+%include "gc.inc"
 
 extern ap_malloc
 extern gc_alloc
 extern gc_track
+extern gc_untrack
 extern gc_dealloc
 extern ap_free
 extern obj_incref
@@ -50,12 +52,25 @@ DEF_FUNC slice_new
     mov r15d, r8d          ; stop_tag
     push r9                ; save step_tag across malloc
 
+    ; Check slice pool first
+    mov rax, [rel slice_pool_head]
+    test rax, rax
+    jz .alloc_fresh
+    ; Pop from pool: reuse ob_refcnt slot as next-link
+    mov rcx, [rax + PyObject.ob_refcnt]
+    mov [rel slice_pool_head], rcx
+    dec dword [rel slice_pool_count]
+    mov qword [rax + PyObject.ob_refcnt], 1  ; reinit refcount
+    jmp .fill_fields
+
+.alloc_fresh:
     mov edi, PySliceObject_size
     lea rsi, [rel slice_type]
     call gc_alloc
 
+.fill_fields:
     pop r9                  ; step_tag
-    ; ob_refcnt=1, ob_type set by gc_alloc
+    ; ob_refcnt=1, ob_type set by gc_alloc (or still set from pool)
     mov [rax + PySliceObject.start], rbx
     mov [rax + PySliceObject.start_tag], r14
     mov [rax + PySliceObject.stop], r12
@@ -86,6 +101,8 @@ END_FUNC slice_new
 ;; ============================================================================
 ;; slice_dealloc(PySliceObject *self)
 ;; ============================================================================
+SLICE_POOL_MAX equ 16
+
 DEF_FUNC slice_dealloc
     push rbx
     mov rbx, rdi
@@ -99,9 +116,26 @@ DEF_FUNC slice_dealloc
     mov rdi, [rbx + PySliceObject.step]
     mov rsi, [rbx + PySliceObject.step_tag]
     DECREF_VAL rdi, rsi
-    mov rdi, rbx
-    call gc_dealloc
 
+    ; Untrack from GC
+    mov rdi, rbx
+    call gc_untrack
+
+    ; Try to push to pool
+    cmp dword [rel slice_pool_count], SLICE_POOL_MAX
+    jge .free_it
+    ; Push to pool: reuse ob_refcnt as next-pointer
+    mov rcx, [rel slice_pool_head]
+    mov [rbx + PyObject.ob_refcnt], rcx
+    mov [rel slice_pool_head], rbx
+    inc dword [rel slice_pool_count]
+    pop rbx
+    leave
+    ret
+
+.free_it:
+    lea rdi, [rbx - GC_HEAD_SIZE]
+    call ap_free
     pop rbx
     leave
     ret
@@ -389,6 +423,12 @@ section .data
 
 slice_name_str: db "slice", 0
 slice_repr_str: db "slice(...)", 0
+
+; Slice object pool (freelist)
+align 8
+slice_pool_head:  dq 0       ; freelist head (singly-linked via ob_refcnt slot)
+slice_pool_count: dd 0       ; current count
+                  dd 0       ; padding
 
 align 8
 global slice_type

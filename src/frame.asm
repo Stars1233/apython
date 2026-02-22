@@ -178,12 +178,32 @@ DEF_FUNC frame_new
     test ecx, ecx
     jz .done
     push rax                ; save frame pointer
-    mov rdi, rax            ; rdi = frame (for localsplus base calc)
-    lea rdi, [rdi + PyFrame.localsplus]
+    lea rdi, [rax + PyFrame.localsplus]
+    cmp ecx, 4
+    ja .zero_large
+    ; Small: unrolled stores for 1-4 slots (16 bytes each)
     xor eax, eax
-    mov ecx, ecx            ; zero-extend ecx (already done but be explicit)
+    mov [rdi], rax
+    mov [rdi + 8], rax
+    cmp ecx, 1
+    je .zero_done
+    mov [rdi + 16], rax
+    mov [rdi + 24], rax
+    cmp ecx, 2
+    je .zero_done
+    mov [rdi + 32], rax
+    mov [rdi + 40], rax
+    cmp ecx, 3
+    je .zero_done
+    mov [rdi + 48], rax
+    mov [rdi + 56], rax
+    jmp .zero_done
+.zero_large:
+    xor eax, eax
+    mov ecx, ecx            ; zero-extend ecx
     shl ecx, 1              ; 2 qwords per 16-byte slot
     rep stosq               ; store ecx qwords of 0 at [rdi]
+.zero_done:
     pop rax                 ; restore frame pointer
 
 .done:
