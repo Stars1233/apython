@@ -182,17 +182,7 @@ DEF_FUNC gen_iternext
     mov qword [rbx + PyGenObject.gi_running], 1
 
     ; Push None as the "sent" value onto the frame's value stack
-    ; The value stack top is at frame->stack_ptr (16 bytes/slot)
-    mov rax, [r12 + PyFrame.stack_ptr]
-    lea rcx, [rel none_singleton]
-    mov [rax], rcx
-    mov qword [rax + 8], TAG_PTR    ; None singleton is a heap pointer
-    add rax, 16
-    mov [r12 + PyFrame.stack_ptr], rax
-
-    ; INCREF None (it's now on the value stack)
-    mov rdi, rcx
-    call obj_incref
+    FRAME_PUSH_NONE r12, rax
 
     ; Resume execution
     mov rdi, r12
@@ -326,14 +316,7 @@ DEF_FUNC ags_iternext
 
     ; Push None as sent value onto the generator's frame stack
     mov rdi, [r12 + PyGenObject.gi_frame]
-    mov rax, [rdi + PyFrame.stack_ptr]
-    lea rcx, [rel none_singleton]
-    mov [rax], rcx
-    mov qword [rax + 8], TAG_PTR
-    add rax, 16
-    mov [rdi + PyFrame.stack_ptr], rax
-    mov rdi, rcx
-    call obj_incref
+    FRAME_PUSH_NONE rdi, rax
 
     ; Resume execution of the async generator
     mov rdi, [r12 + PyGenObject.gi_frame]
@@ -575,14 +558,8 @@ DEF_FUNC gen_send
     ; Mark as running
     mov qword [rbx + PyGenObject.gi_running], 1
 
-    ; Push sent value onto the frame's value stack (16 bytes/slot)
-    mov rax, [r12 + PyFrame.stack_ptr]
-    mov [rax], r13
-    ; Store tag from caller
-    mov ecx, r14d
-    mov [rax + 8], rcx
-    add rax, 16
-    mov [r12 + PyFrame.stack_ptr], rax
+    ; Push sent value onto the frame's value stack
+    FRAME_PUSH_VAL r12, r13, r14b, rax
 
     ; INCREF sent value (tag-aware, may be SmallInt)
     INCREF_VAL r13, r14
@@ -697,11 +674,7 @@ DEF_FUNC gen_throw, GT_FRAME
     mov [rel current_exception], rax
 
     ; Push dummy value onto frame stack (eval_frame expects TOS after YIELD_VALUE)
-    mov rax, [r13 + PyFrame.stack_ptr]
-    mov qword [rax], 0
-    mov qword [rax + 8], TAG_NONE
-    add rax, 16
-    mov [r13 + PyFrame.stack_ptr], rax
+    FRAME_PUSH_NONE r13, rax
 
     ; Back up instr_ptr by 2 bytes so it points to YIELD_VALUE itself
     ; (not the CACHE entry after it). The exception table covers YIELD_VALUE's

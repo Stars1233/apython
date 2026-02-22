@@ -12,6 +12,13 @@
 %include "types.inc"
 
 
+; Set entry layout (must match set.asm)
+SET_ENTRY_HASH    equ 0
+SET_ENTRY_KEY     equ 8
+SET_ENTRY_KEY_TAG equ 16
+SET_ENTRY_SIZE    equ 24
+SET_TOMBSTONE     equ 0xDEAD
+
 extern ap_malloc
 extern ap_free
 extern ap_realloc
@@ -21,7 +28,6 @@ extern str_from_cstr_heap
 extern str_type
 extern str_repr
 extern fat_to_obj
-extern smallstr_to_obj
 
 ; Internal buffer struct (on stack):
 ;   [rbp-8]  = buf ptr
@@ -97,24 +103,16 @@ DEF_FUNC list_repr, 24                ; buf ptr, used, capacity
     BUF_BYTE ' '
 .lr_no_comma:
 
-    ; Get element (fat list: 16-byte stride)
+    ; Get element (payload + tag arrays)
     mov rax, [rbx + PyListObject.ob_item]
-    mov rcx, r12
-    shl rcx, 4                 ; index * 16
-    mov rsi, [rax + rcx + 8]  ; items[index] tag (full 64-bit for SmallStr)
-    mov rdi, [rax + rcx]       ; items[index] payload
+    mov rcx, [rbx + PyListObject.ob_item_tags]
+    mov rdi, [rax + r12 * 8]      ; payload
+    movzx esi, byte [rcx + r12]   ; tag
 
     ; Call obj_repr(payload, tag)
     call obj_repr
     test rax, rax
     jz .lr_next
-    ; Spill SmallStr to heap
-    test rdx, rdx
-    jns .lr_repr_heap
-    mov rdi, rax
-    mov rsi, rdx
-    call smallstr_to_obj
-.lr_repr_heap:
 
     ; Append repr string to buffer
     push rax                   ; save repr str for DECREF
@@ -199,11 +197,11 @@ DEF_FUNC tuple_repr, 24
     BUF_BYTE ' '
 .tr_no_comma:
 
-    ; Get fat element at index r12
-    mov rax, r12
-    shl rax, 4                     ; index * 16
-    mov rdi, [rbx + PyTupleObject.ob_item + rax]      ; payload
-    mov rsi, [rbx + PyTupleObject.ob_item + rax + 8]  ; tag
+    ; Get element at index r12
+    mov rax, [rbx + PyTupleObject.ob_item]
+    mov rcx, [rbx + PyTupleObject.ob_item_tags]
+    mov rdi, [rax + r12 * 8]       ; payload
+    movzx esi, byte [rcx + r12]    ; tag
     ; TAG_FLOAT shortcut: call float_repr directly (no heap float object)
     cmp esi, TAG_FLOAT
     je .tr_float_elem
@@ -214,13 +212,6 @@ DEF_FUNC tuple_repr, 24
     call obj_repr
     test rax, rax
     jz .tr_decref_elem
-    ; Spill SmallStr to heap
-    test rdx, rdx
-    jns .tr_repr_heap
-    mov rdi, rax
-    mov rsi, rdx
-    call smallstr_to_obj
-.tr_repr_heap:
 
     push rax
     mov rcx, [rax + PyStrObject.ob_size]
@@ -241,16 +232,9 @@ DEF_FUNC tuple_repr, 24
 .tr_float_elem:
     ; rdi = raw double bits; call float_repr directly
     extern float_repr
-    call float_repr                ; rax = payload, edx = tag (may be SmallStr)
+    call float_repr                ; rax = payload, edx = tag
     test edx, edx
     jz .tr_next                    ; skip on error
-    ; Spill SmallStr to heap if needed
-    test rdx, rdx
-    jns .tr_float_heap
-    mov rdi, rax
-    mov rsi, rdx
-    call smallstr_to_obj
-.tr_float_heap:
     push rax
     mov rcx, [rax + PyStrObject.ob_size]
     BUF_ENSURE rcx
@@ -337,9 +321,9 @@ DEF_FUNC dict_repr, 24
     ; Check if entry is occupied (key_tag != 0 and != TOMBSTONE)
     mov rax, [rbx + PyDictObject.entries]
     imul rcx, r12, DICT_ENTRY_SIZE
-    cmp qword [rax + rcx + DictEntry.key_tag], 0
+    cmp byte [rax + rcx + DictEntry.key_tag], 0
     je .dr_next_entry
-    cmp qword [rax + rcx + DictEntry.key_tag], 0xDEAD
+    cmp byte [rax + rcx + DictEntry.key_tag], DICT_TOMBSTONE
     je .dr_next_entry
 
     ; Print separator if not first
@@ -354,18 +338,11 @@ DEF_FUNC dict_repr, 24
     mov rax, [rbx + PyDictObject.entries]
     imul rcx, r12, DICT_ENTRY_SIZE
     mov rdi, [rax + rcx + DictEntry.key]
-    mov rsi, [rax + rcx + DictEntry.key_tag]
+    movzx esi, byte [rax + rcx + DictEntry.key_tag]
     push r12                   ; save entry index across calls
     call obj_repr
     test rax, rax
     jz .dr_after_key
-    ; Spill SmallStr to heap
-    test rdx, rdx
-    jns .dr_key_repr_heap
-    mov rdi, rax
-    mov rsi, rdx
-    call smallstr_to_obj
-.dr_key_repr_heap:
 
     push rax
     mov rcx, [rax + PyStrObject.ob_size]
@@ -391,19 +368,12 @@ DEF_FUNC dict_repr, 24
     pop r12                    ; restore entry index
     mov rax, [rbx + PyDictObject.entries]
     imul rcx, r12, DICT_ENTRY_SIZE
-    mov rsi, [rax + rcx + DictEntry.value_tag]  ; value tag (full 64-bit)
+    movzx esi, byte [rax + rcx + DictEntry.value_tag]  ; value tag
     mov rdi, [rax + rcx + DictEntry.value]      ; value payload
     push r12
     call obj_repr
     test rax, rax
     jz .dr_after_val
-    ; Spill SmallStr to heap
-    test rdx, rdx
-    jns .dr_val_repr_heap
-    mov rdi, rax
-    mov rsi, rdx
-    call smallstr_to_obj
-.dr_val_repr_heap:
 
     push rax
     mov rcx, [rax + PyStrObject.ob_size]
@@ -492,12 +462,14 @@ DEF_FUNC set_repr, 24
     cmp r12, r13
     jge .sr_done
 
-    ; SetEntry is 24 bytes: hash(8) + key(8) + key_tag(8)
+    ; SetEntry is SET_ENTRY_SIZE bytes: hash(8) + key(8) + key_tag(8)
     mov rax, [rbx + PyDictObject.entries]
-    imul rcx, r12, 24             ; index * SET_ENTRY_SIZE (24)
-    mov rdi, [rax + rcx + 8]     ; key at SET_ENTRY_KEY offset
-    test rdi, rdi
-    jz .sr_next
+    imul rcx, r12, SET_ENTRY_SIZE
+    cmp qword [rax + rcx + SET_ENTRY_KEY_TAG], 0              ; empty
+    je .sr_next
+    cmp qword [rax + rcx + SET_ENTRY_KEY_TAG], SET_TOMBSTONE  ; deleted
+    je .sr_next
+    mov rdi, [rax + rcx + SET_ENTRY_KEY]                      ; key payload
 
     ; Print separator if not first
     test r14, r14
@@ -516,13 +488,6 @@ DEF_FUNC set_repr, 24
     call obj_repr
     test rax, rax
     jz .sr_after_elem
-    ; Spill SmallStr to heap
-    test rdx, rdx
-    jns .sr_repr_heap
-    mov rdi, rax
-    mov rsi, rdx
-    call smallstr_to_obj
-.sr_repr_heap:
 
     push rax
     mov rcx, [rax + PyStrObject.ob_size]

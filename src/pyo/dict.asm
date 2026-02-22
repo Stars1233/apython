@@ -32,7 +32,6 @@ DICT_INIT_CAP equ 8
 ; When an entry is deleted, key_tag is set to this value so that
 ; linear probing continues past it (instead of stopping as at empty slots).
 ; Must never match a valid tag value.
-DICT_TOMBSTONE equ 0xDEAD
 
 ;; ============================================================================
 ;; dict_new() -> PyDictObject*
@@ -75,17 +74,14 @@ END_FUNC dict_new
 ;; ============================================================================
 ;; dict_keys_equal(rdi=a_key, rsi=b_key, edx=a_tag, ecx=b_tag) -> int (1=equal, 0=not)
 ;; Internal helper: value equality for SmallInts, string comparison for heap ptrs.
-;; SmallStr-aware: compares both payload AND tag for SmallStr keys.
 ;; ============================================================================
-extern ap_memcmp
-extern smallstr_to_obj
 extern float_to_f64
 extern int_type
 extern bool_type
 
 DEF_FUNC_LOCAL dict_keys_equal
     ; Fast path: both payload AND tag identical → equal
-    ; Handles SmallStr==SmallStr, SmallInt==SmallInt, same heap ptr
+    ; Handles SmallInt==SmallInt, same heap ptr
     cmp rdi, rsi
     jne .dke_diff_payload
     cmp rdx, rcx
@@ -95,13 +91,7 @@ DEF_FUNC_LOCAL dict_keys_equal
     ret
 
 .dke_diff_payload:
-    ; Check if either is SmallStr (bit 63)
-    test rdx, rdx
-    js .dke_a_smallstr
-    test rcx, rcx
-    js .dke_b_smallstr
-
-    ; Neither is SmallStr — check cross-type numeric equality
+    ; Check cross-type numeric equality
     ; SmallInt(1) == Float(1.0) == Bool(True) in dict keys
     ; Also handles TAG_PTR for heap int/bool objects
     cmp edx, TAG_SMALLINT
@@ -203,115 +193,6 @@ DEF_FUNC_LOCAL dict_keys_equal
     leave
     ret
 
-.dke_a_smallstr:
-    ; a is SmallStr
-    test rcx, rcx
-    js .dke_both_smallstr      ; b is also SmallStr
-
-    ; a=SmallStr, b=heap: check if b is a string
-    cmp ecx, TAG_PTR
-    jne .dke_not_equal
-    mov rax, [rsi + PyObject.ob_type]
-    lea r8, [rel str_type]
-    cmp rax, r8
-    jne .dke_not_equal
-
-    ; Compare SmallStr a with heap str b
-    ; Extract a length
-    push rbx
-    push r12
-    push r13
-    mov rbx, rdi               ; a payload
-    mov r12, rdx               ; a tag
-    mov r13, rsi               ; b heap ptr
-
-    SMALLSTR_LEN rax, r12
-    cmp rax, [r13 + PyStrObject.ob_size]
-    jne .dke_ne_pop3           ; different lengths → not equal
-
-    ; Spill SmallStr to stack for contiguous bytes (skip TAG_SMALLSTR)
-    mov rcx, r12
-    shr rcx, 8
-    mov r8, 0x0000FFFFFFFFFFFF
-    and rcx, r8               ; bytes 8-13
-    sub rsp, 16
-    mov [rsp], rbx             ; bytes 0-7
-    mov [rsp + 8], rcx         ; bytes 8-13
-
-    mov rdi, rsp
-    lea rsi, [r13 + PyStrObject.data]
-    SMALLSTR_LEN rdx, r12      ; length
-    call ap_memcmp
-    add rsp, 16
-    test eax, eax
-    jnz .dke_ne_pop3
-    mov eax, 1
-    pop r13
-    pop r12
-    pop rbx
-    leave
-    ret
-
-.dke_ne_pop3:
-    xor eax, eax
-    pop r13
-    pop r12
-    pop rbx
-    leave
-    ret
-
-.dke_b_smallstr:
-    ; a=heap, b=SmallStr: symmetric — swap and use same logic
-    ; a is not SmallStr (already checked), b is SmallStr
-    cmp edx, TAG_PTR
-    jne .dke_not_equal
-    mov rax, [rdi + PyObject.ob_type]
-    lea r8, [rel str_type]
-    cmp rax, r8
-    jne .dke_not_equal
-
-    ; Compare heap str a with SmallStr b
-    push rbx
-    push r12
-    push r13
-    mov rbx, rsi               ; b payload (SmallStr)
-    mov r12, rcx               ; b tag
-    mov r13, rdi               ; a heap ptr
-
-    SMALLSTR_LEN rax, r12
-    cmp rax, [r13 + PyStrObject.ob_size]
-    jne .dke_ne_pop3
-
-    ; Spill SmallStr b to stack (skip TAG_SMALLSTR)
-    mov rcx, r12
-    shr rcx, 8
-    mov r8, 0x0000FFFFFFFFFFFF
-    and rcx, r8
-    sub rsp, 16
-    mov [rsp], rbx
-    mov [rsp + 8], rcx
-
-    lea rdi, [r13 + PyStrObject.data]
-    mov rsi, rsp
-    SMALLSTR_LEN rdx, r12
-    call ap_memcmp
-    add rsp, 16
-    test eax, eax
-    jnz .dke_ne_pop3
-    mov eax, 1
-    pop r13
-    pop r12
-    pop rbx
-    leave
-    ret
-
-.dke_both_smallstr:
-    ; Both SmallStr with different payloads (already checked identical above)
-    ; Canonical encoding: same string ⟹ same bits. Different bits → not equal.
-    xor eax, eax
-    leave
-    ret
-
 .dke_not_equal:
     xor eax, eax
     leave
@@ -336,7 +217,7 @@ DEF_FUNC dict_get, 8
 
     ; Hash the key
     mov rdi, r12
-    mov rsi, rdx                ; key tag (full 64-bit for SmallStr)
+    mov rsi, rdx                ; key tag
     call obj_hash
     mov r13, rax                ; r13 = hash
 
@@ -364,10 +245,10 @@ align 16
 
     ; Check if slot is empty (key_tag == 0 means never-used → stop)
     mov rdi, [rax + DictEntry.key]
-    cmp qword [rax + DictEntry.key_tag], 0
+    cmp byte [rax + DictEntry.key_tag], 0
     je .not_found
     ; Skip tombstoned (deleted) entries
-    cmp qword [rax + DictEntry.key_tag], DICT_TOMBSTONE
+    cmp byte [rax + DictEntry.key_tag], DICT_TOMBSTONE
     je .next_slot
 
     ; Check hash first (fast reject)
@@ -377,10 +258,10 @@ align 16
     ; Hash matches - check key equality
     ; rdi already has entry.key
     mov rsi, r12                ; our key
-    mov rdx, [rax + DictEntry.key_tag]  ; entry's key tag (full 64-bit)
+    movzx edx, byte [rax + DictEntry.key_tag]  ; entry's key tag
     push rcx                    ; save slot
     push rax                    ; save entry ptr
-    mov rcx, [rbp - DG_KTAG]   ; our key tag (full 64-bit)
+    mov rcx, [rbp - DG_KTAG]   ; our key tag
     call dict_keys_equal
     pop rdx                     ; restore entry ptr into rdx
     pop rcx                     ; restore slot
@@ -389,7 +270,7 @@ align 16
 
     ; Found - return entry.value + tag
     mov rax, [rdx + DictEntry.value]
-    mov rdx, [rdx + DictEntry.value_tag]
+    movzx edx, byte [rdx + DictEntry.value_tag]
     jmp .done
 
 .next_slot:
@@ -429,7 +310,7 @@ DEF_FUNC dict_get_index, 8
     mov [rbp - GI_KTAG], rdx    ; save key_tag
 
     mov rdi, r12
-    mov rsi, rdx                ; key tag (full 64-bit for SmallStr)
+    mov rsi, rdx                ; key tag
     call obj_hash
     mov r13, rax                ; r13 = hash
 
@@ -450,16 +331,16 @@ DEF_FUNC dict_get_index, 8
     add rax, rdx
 
     mov rdi, [rax + DictEntry.key]
-    cmp qword [rax + DictEntry.key_tag], 0
+    cmp byte [rax + DictEntry.key_tag], 0
     je .gi_not_found
-    cmp qword [rax + DictEntry.key_tag], DICT_TOMBSTONE
+    cmp byte [rax + DictEntry.key_tag], DICT_TOMBSTONE
     je .gi_next
 
     cmp r13, [rax + DictEntry.hash]
     jne .gi_next
 
     mov rsi, r12
-    mov rdx, [rax + DictEntry.key_tag]
+    movzx edx, byte [rax + DictEntry.key_tag]
     push rcx
     mov rcx, [rbp - GI_KTAG]
     call dict_keys_equal
@@ -509,7 +390,7 @@ DEF_FUNC_LOCAL dict_find_slot, 16
     mov rbx, rdi                ; dict
     mov r12, rsi                ; key
     mov r13, rdx                ; hash
-    mov [rbp - FS_KTAG], rcx    ; save key_tag (64-bit for SmallStr)
+    mov [rbp - FS_KTAG], rcx    ; save key_tag
     mov qword [rbp - FS_TOMBPTR], 0  ; no tombstone seen yet
 
     ; mask = capacity - 1
@@ -533,10 +414,10 @@ DEF_FUNC_LOCAL dict_find_slot, 16
 
     ; Empty slot? (check key_tag for TAG_NULL=0)
     mov rdi, [rax + DictEntry.key]
-    cmp qword [rax + DictEntry.key_tag], 0
+    cmp byte [rax + DictEntry.key_tag], 0
     je .found_empty
     ; Tombstone? Remember first one, keep probing (key may be further)
-    cmp qword [rax + DictEntry.key_tag], DICT_TOMBSTONE
+    cmp byte [rax + DictEntry.key_tag], DICT_TOMBSTONE
     je .find_tombstone
 
     ; Hash match?
@@ -546,10 +427,10 @@ DEF_FUNC_LOCAL dict_find_slot, 16
     ; Key equality check
     ; rdi = entry.key
     mov rsi, r12
-    mov rdx, [rax + DictEntry.key_tag]  ; entry's key tag (full 64-bit)
+    movzx edx, byte [rax + DictEntry.key_tag]  ; entry's key tag
     push rcx
     push rax
-    mov rcx, [rbp - FS_KTAG]   ; our key tag (full 64-bit)
+    mov rcx, [rbp - FS_KTAG]   ; our key tag
     call dict_keys_equal
     pop rax                     ; entry ptr
     pop rcx                     ; slot
@@ -658,9 +539,9 @@ DEF_FUNC_LOCAL dict_resize
     add rax, r12                ; rax = old entry ptr
 
     ; Skip empty slots (key_tag == 0) and tombstones (key_tag == DICT_TOMBSTONE)
-    cmp qword [rax + DictEntry.key_tag], 0
+    cmp byte [rax + DictEntry.key_tag], 0
     je .rehash_next
-    cmp qword [rax + DictEntry.key_tag], DICT_TOMBSTONE
+    cmp byte [rax + DictEntry.key_tag], DICT_TOMBSTONE
     je .rehash_next
 
     ; Compute new slot: hash & (new_capacity - 1)
@@ -674,14 +555,16 @@ DEF_FUNC_LOCAL dict_resize
     push qword [rax + DictEntry.hash]
     push qword [rax + DictEntry.key]
     push qword [rax + DictEntry.value]
-    push qword [rax + DictEntry.value_tag]
-    push qword [rax + DictEntry.key_tag]
+    movzx edx, byte [rax + DictEntry.value_tag]
+    push rdx
+    movzx edx, byte [rax + DictEntry.key_tag]
+    push rdx
 
     ; Linear probe in new table to find empty slot
 .rehash_probe:
     imul rax, rcx, DICT_ENTRY_SIZE
     add rax, r15                ; new entry ptr
-    cmp qword [rax + DictEntry.key_tag], 0
+    cmp byte [rax + DictEntry.key_tag], 0
     je .rehash_insert
 
     inc rcx
@@ -692,8 +575,10 @@ DEF_FUNC_LOCAL dict_resize
 
 .rehash_insert:
     ; rax = target entry ptr in new table
-    pop qword [rax + DictEntry.key_tag]
-    pop qword [rax + DictEntry.value_tag]
+    pop rdx
+    mov byte [rax + DictEntry.key_tag], dl
+    pop rdx
+    mov byte [rax + DictEntry.value_tag], dl
     pop qword [rax + DictEntry.value]
     pop qword [rax + DictEntry.key]
     pop qword [rax + DictEntry.hash]
@@ -738,7 +623,7 @@ DEF_FUNC dict_set, 16
 
     ; Hash the key
     mov rdi, r12
-    mov rsi, r8                 ; key tag (full 64-bit for SmallStr)
+    mov rsi, r8                 ; key tag
     call obj_hash
     mov r14, rax                ; r14 = hash
 
@@ -746,7 +631,7 @@ DEF_FUNC dict_set, 16
     mov rdi, rbx                ; dict
     mov rsi, r12                ; key
     mov rdx, r14                ; hash
-    mov rcx, [rbp - DS_KTAG]   ; key_tag (64-bit for SmallStr)
+    mov rcx, [rbp - DS_KTAG]   ; key_tag
     call dict_find_slot
     ; rax = entry ptr, edx = 1 if existing, 0 if empty
 
@@ -758,18 +643,18 @@ DEF_FUNC dict_set, 16
     mov [rax + DictEntry.hash], r14
     mov [rax + DictEntry.key], r12
     mov rcx, [rbp - DS_KTAG]
-    mov [rax + DictEntry.key_tag], rcx
+    mov byte [rax + DictEntry.key_tag], cl
     mov [rax + DictEntry.value], r13
 
     ; Store value tag from caller
     mov rcx, [rbp - DS_VTAG]
-    mov [rax + DictEntry.value_tag], rcx
+    mov byte [rax + DictEntry.value_tag], cl
 
     ; INCREF key (tag-aware)
-    mov rsi, [rax + DictEntry.key_tag]
+    movzx esi, byte [rax + DictEntry.key_tag]
     INCREF_VAL r12, rsi
     ; INCREF value (tag-aware)
-    mov rsi, [rax + DictEntry.value_tag]
+    movzx esi, byte [rax + DictEntry.value_tag]
     INCREF_VAL r13, rsi
 
     ; Increment ob_size
@@ -795,7 +680,7 @@ DEF_FUNC dict_set, 16
     ; DECREF old value (fat)
     push rax                    ; save entry ptr
     mov rdi, [rax + DictEntry.value]
-    mov rsi, [rax + DictEntry.value_tag]
+    movzx esi, byte [rax + DictEntry.value_tag]
     DECREF_VAL rdi, rsi
     pop rax                     ; restore entry ptr
 
@@ -803,8 +688,8 @@ DEF_FUNC dict_set, 16
     mov [rax + DictEntry.value], r13
     ; Store new value tag from caller
     mov rcx, [rbp - DS_VTAG]
-    mov [rax + DictEntry.value_tag], rcx
-    mov rsi, [rax + DictEntry.value_tag]
+    mov byte [rax + DictEntry.value_tag], cl
+    movzx esi, byte [rax + DictEntry.value_tag]
     INCREF_VAL r13, rsi                ; value may be SmallInt
 
 .done:
@@ -847,20 +732,20 @@ DEF_FUNC dict_dealloc
 
     ; Skip empty slots and tombstones
     mov rdi, [rax + DictEntry.key]
-    cmp qword [rax + DictEntry.key_tag], 0
+    cmp byte [rax + DictEntry.key_tag], 0
     je .dealloc_next
-    cmp qword [rax + DictEntry.key_tag], DICT_TOMBSTONE
+    cmp byte [rax + DictEntry.key_tag], DICT_TOMBSTONE
     je .dealloc_next
 
     ; DECREF key (tag-aware)
     push rax
-    mov rsi, [rax + DictEntry.key_tag]
+    movzx esi, byte [rax + DictEntry.key_tag]
     DECREF_VAL rdi, rsi
 
     ; DECREF value (tag-aware)
     pop rax
     mov rdi, [rax + DictEntry.value]
-    mov rsi, [rax + DictEntry.value_tag]
+    movzx esi, byte [rax + DictEntry.value_tag]
     DECREF_VAL rdi, rsi
 
 .dealloc_next:
@@ -933,7 +818,7 @@ DEF_FUNC_BARE dict_ass_subscript
     jmp dict_set
 .das_delete:
     ; dict_del wants (rdi=dict, rsi=key, rdx=key_tag)
-    mov rdx, rcx               ; key_tag from caller's rcx (64-bit for SmallStr)
+    mov rdx, rcx               ; key_tag from caller's rcx
     jmp dict_del
 END_FUNC dict_ass_subscript
 
@@ -955,7 +840,7 @@ DEF_FUNC dict_del, 8
 
     ; Hash the key
     mov rdi, r12
-    mov rsi, rdx                ; key tag (full 64-bit for SmallStr)
+    mov rsi, rdx                ; key tag
     call obj_hash
     mov r13, rax                ; hash
 
@@ -977,20 +862,20 @@ DEF_FUNC dict_del, 8
     add rax, rdx
 
     mov rdi, [rax + DictEntry.key]
-    cmp qword [rax + DictEntry.key_tag], 0
+    cmp byte [rax + DictEntry.key_tag], 0
     je .dd_not_found
     ; Skip tombstoned (deleted) entries
-    cmp qword [rax + DictEntry.key_tag], DICT_TOMBSTONE
+    cmp byte [rax + DictEntry.key_tag], DICT_TOMBSTONE
     je .dd_next
 
     cmp r13, [rax + DictEntry.hash]
     jne .dd_next
 
     mov rsi, r12
-    mov rdx, [rax + DictEntry.key_tag]  ; entry's key tag (full 64-bit)
+    movzx edx, byte [rax + DictEntry.key_tag]  ; entry's key tag
     push rcx
     push rax
-    mov rcx, [rbp - DD_KTAG]   ; our key tag (full 64-bit)
+    mov rcx, [rbp - DD_KTAG]   ; our key tag
     call dict_keys_equal
     pop rdx                     ; entry ptr
     pop rcx
@@ -998,14 +883,16 @@ DEF_FUNC dict_del, 8
     jz .dd_next
 
     ; Found: tombstone entry, DECREF key and value, decrement size
-    push qword [rdx + DictEntry.key_tag]
+    movzx esi, byte [rdx + DictEntry.key_tag]
+    push rsi
     mov rdi, [rdx + DictEntry.key]
     mov qword [rdx + DictEntry.key], 0
-    mov qword [rdx + DictEntry.key_tag], DICT_TOMBSTONE  ; tombstone, not empty
+    mov byte [rdx + DictEntry.key_tag], DICT_TOMBSTONE  ; tombstone, not empty
     push qword [rdx + DictEntry.value]
-    push qword [rdx + DictEntry.value_tag]
+    movzx esi, byte [rdx + DictEntry.value_tag]
+    push rsi
     mov qword [rdx + DictEntry.value], 0
-    mov qword [rdx + DictEntry.value_tag], 0
+    mov byte [rdx + DictEntry.value_tag], 0
 
     ; DECREF key (tag-aware)
     mov rsi, [rsp + 16]         ; key_tag (3 pushes deep)
@@ -1109,9 +996,9 @@ DEF_FUNC_BARE dict_iter_next
     ; Check if entry at index has a key (key_tag != TAG_NULL)
     imul rax, rcx, DictEntry_size
     add rax, rsi
-    cmp qword [rax + DictEntry.key_tag], 0
+    cmp byte [rax + DictEntry.key_tag], 0
     je .di_skip
-    cmp qword [rax + DictEntry.key_tag], DICT_TOMBSTONE
+    cmp byte [rax + DictEntry.key_tag], DICT_TOMBSTONE
     je .di_skip
 
     ; Found a valid entry — advance index
@@ -1124,14 +1011,14 @@ DEF_FUNC_BARE dict_iter_next
     ja .di_return_item
 
     ; kind=0: return key
-    mov rdx, [rax + DictEntry.key_tag]
+    movzx edx, byte [rax + DictEntry.key_tag]
     mov rax, [rax + DictEntry.key]
     INCREF_VAL rax, rdx
     ret
 
 .di_return_value:
     ; kind=1: return value
-    mov rdx, [rax + DictEntry.value_tag]
+    movzx edx, byte [rax + DictEntry.value_tag]
     mov rax, [rax + DictEntry.value]
     INCREF_VAL rax, rdx
     ret
@@ -1143,31 +1030,28 @@ DEF_FUNC_BARE dict_iter_next
     push r12
     mov rbx, rax                ; save entry ptr
 
-    ; Allocate 2-tuple (2 fat items = 32 bytes item storage, GC-tracked)
-    mov edi, PyTupleObject_size + 32
-    extern tuple_type
-    lea rsi, [rel tuple_type]
-    call gc_alloc
-    mov r12, rax                ; r12 = new tuple (ob_refcnt=1, ob_type set)
-    mov qword [r12 + PyTupleObject.ob_size], 2
+    ; Allocate 2-tuple
+    mov edi, 2
+    extern tuple_new
+    call tuple_new
+    mov r12, rax                ; r12 = new tuple
 
-    ; tuple[0] = key (payload + tag)
+    mov r9, [r12 + PyTupleObject.ob_item]
+    mov r10, [r12 + PyTupleObject.ob_item_tags]
+
+    ; tuple[0] = key
     mov rax, [rbx + DictEntry.key]
-    mov rdx, [rbx + DictEntry.key_tag]
-    mov [r12 + PyTupleObject.ob_item], rax
-    mov [r12 + PyTupleObject.ob_item + 8], rdx
+    movzx edx, byte [rbx + DictEntry.key_tag]
+    mov [r9], rax
+    mov byte [r10], dl
     INCREF_VAL rax, rdx
 
-    ; tuple[1] = value (payload + tag)
+    ; tuple[1] = value
     mov rax, [rbx + DictEntry.value]
-    mov rdx, [rbx + DictEntry.value_tag]
-    mov [r12 + PyTupleObject.ob_item + 16], rax
-    mov [r12 + PyTupleObject.ob_item + 24], rdx
+    movzx edx, byte [rbx + DictEntry.value_tag]
+    mov [r9 + 8], rax
+    mov byte [r10 + 1], dl
     INCREF_VAL rax, rdx
-
-    ; Track in GC
-    mov rdi, r12
-    call gc_track
 
     mov rax, r12
     mov edx, TAG_PTR
@@ -1380,7 +1264,7 @@ DEF_FUNC dict_nb_or, DNO_FRAME
     imul rax, rcx, DICT_ENTRY_SIZE
     add rax, [rdi + PyDictObject.entries]
     ; Check if entry is occupied (value_tag != 0)
-    cmp qword [rax + DictEntry.value_tag], 0
+    cmp byte [rax + DictEntry.value_tag], 0
     je .dno_left_next
 
     ; dict_set(dict, key, value, value_tag, key_tag)
@@ -1390,8 +1274,8 @@ DEF_FUNC dict_nb_or, DNO_FRAME
     mov rdi, [rbp - DNO_NEW]
     mov rsi, [rax + DictEntry.key]
     mov rdx, [rax + DictEntry.value]
-    mov rcx, [rax + DictEntry.value_tag]    ; value_tag
-    mov r8, [rax + DictEntry.key_tag]       ; key_tag
+    movzx ecx, byte [rax + DictEntry.value_tag]    ; value_tag
+    movzx r8d, byte [rax + DictEntry.key_tag]      ; key_tag
     call dict_set
     pop rdi
     pop r8
@@ -1412,7 +1296,7 @@ DEF_FUNC dict_nb_or, DNO_FRAME
 
     imul rax, rcx, DICT_ENTRY_SIZE
     add rax, [rdi + PyDictObject.entries]
-    cmp qword [rax + DictEntry.value_tag], 0
+    cmp byte [rax + DictEntry.value_tag], 0
     je .dno_right_next
 
     push rcx
@@ -1421,8 +1305,8 @@ DEF_FUNC dict_nb_or, DNO_FRAME
     mov rdi, [rbp - DNO_NEW]
     mov rsi, [rax + DictEntry.key]
     mov rdx, [rax + DictEntry.value]
-    mov rcx, [rax + DictEntry.value_tag]    ; value_tag
-    mov r8, [rax + DictEntry.key_tag]       ; key_tag
+    movzx ecx, byte [rax + DictEntry.value_tag]    ; value_tag
+    movzx r8d, byte [rax + DictEntry.key_tag]      ; key_tag
     call dict_set
     pop rdi
     pop r8
@@ -1462,7 +1346,7 @@ DEF_FUNC dict_nb_ior, DIO_FRAME
 
     imul rax, rcx, DICT_ENTRY_SIZE
     add rax, [rdi + PyDictObject.entries]
-    cmp qword [rax + DictEntry.value_tag], 0
+    cmp byte [rax + DictEntry.value_tag], 0
     je .dio_next
 
     push rcx
@@ -1471,8 +1355,8 @@ DEF_FUNC dict_nb_ior, DIO_FRAME
     mov rdi, [rbp - DIO_LEFT]
     mov rsi, [rax + DictEntry.key]
     mov rdx, [rax + DictEntry.value]
-    mov rcx, [rax + DictEntry.value_tag]
-    mov r8, [rax + DictEntry.key_tag]
+    movzx ecx, byte [rax + DictEntry.value_tag]
+    movzx r8d, byte [rax + DictEntry.key_tag]
     call dict_set
     pop rdi
     pop r8
@@ -1542,19 +1426,19 @@ DEF_FUNC dict_richcompare, DRC_FRAME
     add rax, [rdi + PyDictObject.entries]
 
     ; Skip empty entries
-    cmp qword [rax + DictEntry.value_tag], 0
+    cmp byte [rax + DictEntry.value_tag], 0
     je .drc_next
 
     ; Save entry data for comparison
     push r9
     push r10
     mov r11, [rax + DictEntry.value]        ; left value
-    mov r9d, [rax + DictEntry.value_tag]    ; left value tag (reuse r9 after push)
+    movzx r9d, byte [rax + DictEntry.value_tag]    ; left value tag
 
     ; Lookup key in right dict
     mov rdi, [rbp - DRC_RIGHT]
     mov rsi, [rax + DictEntry.key]
-    mov edx, [rax + DictEntry.key_tag]
+    movzx edx, byte [rax + DictEntry.key_tag]
     call dict_get
     ; rax = right value, edx = tag (0 = not found)
     test edx, edx
@@ -1703,9 +1587,9 @@ DEF_FUNC_BARE dict_rev_iter_next
     ; Check if entry at index has a valid key
     imul rax, rcx, DictEntry_size
     add rax, rsi
-    cmp qword [rax + DictEntry.key_tag], 0
+    cmp byte [rax + DictEntry.key_tag], 0
     je .dri_skip
-    cmp qword [rax + DictEntry.key_tag], DICT_TOMBSTONE
+    cmp byte [rax + DictEntry.key_tag], DICT_TOMBSTONE
     je .dri_skip
 
     ; Found a valid entry — save decremented index
@@ -1713,7 +1597,7 @@ DEF_FUNC_BARE dict_rev_iter_next
     mov [rdi + PyDictIterObject.it_index], rcx
 
     ; Return key
-    mov rdx, [rax + DictEntry.key_tag]
+    movzx edx, byte [rax + DictEntry.key_tag]
     mov rax, [rax + DictEntry.key]
     INCREF_VAL rax, rdx
     ret

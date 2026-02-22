@@ -8,7 +8,8 @@
 extern eval_dispatch
 extern eval_saved_rbx
 extern eval_saved_r13
-extern trace_opcodes
+extern eval_saved_r15
+extern eval_co_names
 extern opcode_table
 extern import_module
 extern obj_decref
@@ -25,19 +26,16 @@ extern exc_ImportError_type
 ; ecx = arg = index into co_names for module name
 ; ============================================================================
 DEF_FUNC_BARE op_import_name
-    ; Get module name from co_names[ecx] (fat tuple: 16-byte stride)
-    shl ecx, 4
-    mov rax, [r15 + rcx]       ; name_str from co_names
+    ; Get module name from co_names[ecx] (payload array: 8-byte stride)
+    shl ecx, 3
+    LOAD_CO_NAMES rax
+    mov rax, [rax + rcx]       ; name_str from co_names
 
     ; Pop fromlist (TOS)
-    VPOP rsi                    ; fromlist payload
-    mov r8, [r13 + 8]          ; fromlist tag
+    VPOP_VAL rsi, r8            ; fromlist payload+tag
 
     ; Pop level (TOS1)
-    VPOP rdx                    ; level (SmallInt)
-
-    ; Save tag of level (at [r13 + 8] right after VPOP)
-    mov rcx, [r13 + 8]         ; level tag
+    VPOP_VAL rdx, rcx           ; level payload+tag
 
     ; Save name, fromlist (payload+tag), and level for later
     push rax                    ; name
@@ -108,9 +106,10 @@ IF2_MOD  equ 16
 IF2_FRAME equ 16
 
 DEF_FUNC op_import_from, IF2_FRAME
-    ; Get attribute name from co_names[ecx] (fat tuple: 16-byte stride)
-    shl ecx, 4
-    mov rsi, [r15 + rcx]       ; attr name_str
+    ; Get attribute name from co_names[ecx] (payload array: 8-byte stride)
+    shl ecx, 3
+    LOAD_CO_NAMES rsi
+    mov rsi, [rsi + rcx]       ; attr name_str
     mov [rbp - IF_ATTR], rsi
 
     ; Peek module (TOS, don't pop)

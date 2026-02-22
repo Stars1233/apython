@@ -133,10 +133,6 @@ DEF_FUNC fileobj_write
     ; Get fd
     mov rcx, [rdi + PyFileObject.file_fd]
 
-    ; SmallStr check
-    test r9, r9
-    js .write_smallstr
-
     ; Heap string: get data + length
     lea rdx, [rsi + PyStrObject.data]
     mov r8, [rsi + PyStrObject.ob_size]
@@ -149,35 +145,6 @@ DEF_FUNC fileobj_write
     call sys_write
     pop rdi                     ; length
 
-    ; Return char count as int
-    call int_from_i64
-    leave
-    ret
-
-.write_smallstr:
-    ; SmallStr: spill to stack for contiguous bytes
-    ; rcx = fd, rsi = payload, r9 = tag
-    push rbx
-    mov ebx, ecx               ; save fd
-
-    SMALLSTR_LEN r8, r9        ; r8 = length
-    ; Extract string bytes 8-13 from tag (skip TAG_SMALLSTR)
-    mov rax, r9
-    shr rax, 8
-    mov rdx, 0x0000FFFFFFFFFFFF
-    and rax, rdx
-    sub rsp, 16
-    mov [rsp], rsi             ; bytes 0-7
-    mov [rsp + 8], rax         ; bytes 8-13
-    ; sys_write(fd, buf, len)
-    push r8                    ; save length for return
-    mov edi, ebx               ; fd
-    lea rsi, [rsp + 8]        ; buf (past saved r8)
-    mov rdx, r8                ; len
-    call sys_write
-    pop rdi                    ; length
-    add rsp, 16                ; remove temp buffer
-    pop rbx
     ; Return char count as int
     call int_from_i64
     leave

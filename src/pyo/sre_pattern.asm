@@ -37,8 +37,6 @@ extern method_type
 extern builtin_func_type
 extern bool_true
 extern bool_false
-extern smallstr_to_obj
-
 ; SRE engine functions
 extern sre_match
 extern sre_search
@@ -370,6 +368,7 @@ DEF_FUNC sre_substr_from_state
     push rbx
     push r12
     push r13
+    push r14
 
     mov rbx, rdi               ; state
     mov r12, rsi               ; start codepoint index
@@ -388,6 +387,7 @@ DEF_FUNC sre_substr_from_state
     call str_new_heap
     mov edx, TAG_PTR
 
+    pop r14
     pop r13
     pop r12
     pop rbx
@@ -426,6 +426,7 @@ DEF_FUNC sre_substr_from_state
     call str_new_heap
     mov edx, TAG_PTR
 
+    pop r14
     pop r13
     pop r12
     pop rbx
@@ -614,10 +615,10 @@ DEF_FUNC sre_pattern_findall_method, FA_FRAME
     push rcx
     lea esi, [ecx - 1]
     movsx rsi, esi
-    shl rsi, 4                 ; * 16
-    add rsi, PyTupleObject.ob_item
-    mov [rbx + rsi], rax
-    mov [rbx + rsi + 8], rdx
+    mov r8, [rbx + PyTupleObject.ob_item]       ; payloads
+    mov r9, [rbx + PyTupleObject.ob_item_tags]  ; tags
+    mov [r8 + rsi*8], rax
+    mov byte [r9 + rsi], dl
 
     pop rcx
     inc ecx
@@ -724,8 +725,6 @@ DEF_FUNC sre_pattern_sub_method, SUB_FRAME
     ;  on str_type/int_type/etc. for constructor use, making all instances
     ;  appear callable)
     mov qword [rbp - SUB_CALLABLE], 0
-    test rcx, rcx
-    js .sub_repl_not_callable  ; SmallStr (bit 63 set)
     cmp ecx, TAG_PTR
     jne .sub_repl_not_callable
     mov rax, [rbp - SUB_REPL]
@@ -827,31 +826,10 @@ DEF_FUNC sre_pattern_sub_method, SUB_FRAME
     jnz .sub_callable_repl
 
     ; String replacement: concat repl directly
-    ; Check if repl is SmallStr — must widen to heap for str_concat
-    mov rcx, [rbp - SUB_REPL_TAG]
-    test rcx, rcx
-    js .sub_widen_repl          ; SmallStr (bit 63 set)
     mov rdi, [rbp - SUB_RESULT]
     mov rsi, [rbp - SUB_REPL]
     mov ecx, TAG_PTR
     call str_concat
-    jmp .sub_repl_concated
-
-.sub_widen_repl:
-    mov rdi, [rbp - SUB_REPL]
-    mov rsi, [rbp - SUB_REPL_TAG]
-    call smallstr_to_obj
-    ; rax = heap string
-    push rax                   ; save for DECREF
-    mov rdi, [rbp - SUB_RESULT]
-    mov rsi, rax
-    mov ecx, TAG_PTR
-    call str_concat
-    push rax                   ; save new result
-    mov rdi, [rsp + 8]        ; DECREF widened string
-    call obj_decref
-    pop rax                    ; restore new result
-    add rsp, 8                 ; pop saved widened string
 
 .sub_repl_concated:
     push rax
@@ -1027,8 +1005,6 @@ DEF_FUNC sre_pattern_subn_method, SN_FRAME
 
     ; Check if repl is callable by type whitelist
     mov qword [rbp - SN_CALLABLE], 0
-    test rcx, rcx
-    js .subn_repl_not_callable  ; SmallStr (bit 63 set)
     cmp ecx, TAG_PTR
     jne .subn_repl_not_callable
     mov rax, [rbp - SN_REPL]
@@ -1120,30 +1096,11 @@ DEF_FUNC sre_pattern_subn_method, SN_FRAME
     cmp qword [rbp - SN_CALLABLE], 0
     jnz .subn_callable_repl
 
-    ; String replacement: check SmallStr and widen if needed
-    mov rcx, [rbp - SN_REPL_TAG]
-    test rcx, rcx
-    js .subn_widen_repl         ; SmallStr (bit 63 set)
+    ; String replacement: concat repl directly
     mov rdi, [rbp - SN_RESULT]
     mov rsi, [rbp - SN_REPL]
     mov ecx, TAG_PTR
     call str_concat
-    jmp .subn_repl_concated
-
-.subn_widen_repl:
-    mov rdi, [rbp - SN_REPL]
-    mov rsi, [rbp - SN_REPL_TAG]
-    call smallstr_to_obj
-    push rax                   ; save for DECREF
-    mov rdi, [rbp - SN_RESULT]
-    mov rsi, rax
-    mov ecx, TAG_PTR
-    call str_concat
-    push rax                   ; save new result
-    mov rdi, [rsp + 8]        ; DECREF widened string
-    call obj_decref
-    pop rax                    ; restore new result
-    add rsp, 8                 ; pop saved widened string
 
 .subn_repl_concated:
     push rax
@@ -1259,14 +1216,17 @@ DEF_FUNC sre_pattern_subn_method, SN_FRAME
     call tuple_new
     mov rbx, rax
 
+    mov r8, [rbx + PyTupleObject.ob_item]       ; payloads
+    mov r9, [rbx + PyTupleObject.ob_item_tags]  ; tags
+
     mov r12, [rbp - SN_RESULT]
     inc qword [r12 + PyObject.ob_refcnt]
-    mov [rbx + PyTupleObject.ob_item], r12
-    mov qword [rbx + PyTupleObject.ob_item + 8], TAG_PTR
+    mov [r8], r12
+    mov byte [r9], TAG_PTR
 
     mov rax, [rbp - SN_NSUBS]
-    mov [rbx + PyTupleObject.ob_item + 16], rax
-    mov qword [rbx + PyTupleObject.ob_item + 24], TAG_SMALLINT
+    mov [r8 + 8], rax
+    mov byte [r9 + 1], TAG_SMALLINT
 
     ; DECREF result string (tuple holds a ref)
     mov rdi, r12

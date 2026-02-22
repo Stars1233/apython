@@ -86,8 +86,10 @@ DEF_FUNC exc_new, EN_FRAME
     mov edi, 1
     call tuple_new
     INCREF_VAL r12, r13
-    mov [rax + PyTupleObject.ob_item], r12
-    mov [rax + PyTupleObject.ob_item + 8], r13    ; msg tag
+    mov r8, [rax + PyTupleObject.ob_item]       ; payloads
+    mov r9, [rax + PyTupleObject.ob_item_tags]  ; tags
+    mov [r8], r12
+    mov byte [r9], r13b                         ; msg tag
     jmp .set_args
 .empty_args:
     xor edi, edi
@@ -422,9 +424,11 @@ DEF_FUNC exc_getattr
     ; Check if tuple has at least 1 element
     cmp qword [rax + PyTupleObject.ob_size], 0
     je .return_none
-    ; Return args[0] — fat value (16-byte slot)
-    mov rdx, [rax + PyTupleObject.ob_item + 8]   ; tag
-    mov rax, [rax + PyTupleObject.ob_item]        ; payload
+    ; Return args[0]
+    mov rcx, [rax + PyTupleObject.ob_item]       ; payloads
+    mov r8, [rax + PyTupleObject.ob_item_tags]   ; tags
+    mov rax, [rcx]                               ; payload
+    movzx edx, byte [r8]                         ; tag
     INCREF_VAL rax, rdx
     pop r12
     pop rbx
@@ -563,10 +567,10 @@ DEF_FUNC exc_type_call, ETC_FRAME
     mov rdi, [rsi + rcx]          ; payload
     mov r8, [rsi + rcx + 8]       ; tag
     INCREF_VAL rdi, r8
-    mov rcx, rdx
-    shl rcx, 4                    ; dest index * 16
-    mov [r12 + PyTupleObject.ob_item + rcx], rdi       ; payload
-    mov [r12 + PyTupleObject.ob_item + rcx + 8], r8    ; tag
+    mov r9, [r12 + PyTupleObject.ob_item]       ; payloads
+    mov r10, [r12 + PyTupleObject.ob_item_tags] ; tags
+    mov [r9 + rdx*8], rdi
+    mov byte [r10 + rdx], r8b
     inc rdx
     jmp .copy_args
 .replace_args:

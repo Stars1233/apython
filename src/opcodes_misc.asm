@@ -4,9 +4,9 @@
 ; Register convention (callee-saved, preserved across handlers):
 ;   rbx = bytecode instruction pointer (current position in co_code[])
 ;   r12 = current frame pointer (PyFrame*)
-;   r13 = value stack top pointer
-;   r14 = co_consts tuple data pointer (&tuple.ob_item[0])
-;   r15 = co_names tuple data pointer (&tuple.ob_item[0])
+;   r13 = value stack payload top pointer
+;   r14 = locals_tag_base pointer (frame's tag sidecar for localsplus[])
+;   r15 = value stack tag top pointer
 ;
 ; ecx = opcode argument on entry (set by eval_dispatch)
 ; rbx has already been advanced past the 2-byte instruction word.
@@ -22,7 +22,10 @@ section .text
 extern eval_dispatch
 extern eval_saved_rbx
 extern eval_saved_r13
-extern trace_opcodes
+extern eval_saved_r15
+extern eval_co_names
+extern eval_co_consts
+extern eval_co_consts_tags
 extern opcode_table
 extern eval_return
 extern obj_dealloc
@@ -50,7 +53,6 @@ extern obj_decref
 extern prep_reraise_star
 extern tuple_new
 extern list_type
-extern smallstr_to_obj
 
 ;; Stack layout constants for binary_op / compare_op generic paths.
 ;; After 4 pushes: right, right_tag, left, left_tag
@@ -98,8 +100,7 @@ MK_FRAME   equ 32
 ;; Pop return value and jump to eval_return.
 ;; ============================================================================
 DEF_FUNC_BARE op_return_value
-    VPOP rax                    ; rax = return value (payload)
-    mov rdx, [r13 + 8]         ; rdx = tag (fat value protocol)
+    VPOP_VAL rax, rdx            ; rax = return value (payload), rdx = tag
     mov qword [r12 + PyFrame.instr_ptr], 0  ; mark frame as "returned" (not yielded)
     jmp eval_return
 END_FUNC op_return_value
@@ -110,10 +111,11 @@ END_FUNC op_return_value
 ;; Load constant, INCREF, and jump to eval_return.
 ;; ============================================================================
 DEF_FUNC_BARE op_return_const
-    ; ecx = arg (index into co_consts fat array)
-    shl ecx, 4                 ; index * 16
-    mov rax, [r14 + rcx]       ; payload
-    mov rdx, [r14 + rcx + 8]   ; tag
+    ; ecx = arg (index into co_consts)
+    mov rax, [rel eval_co_consts]
+    mov rax, [rax + rcx * 8]   ; payload
+    mov rdx, [rel eval_co_consts_tags]
+    movzx edx, byte [rdx + rcx] ; tag
     INCREF_VAL rax, rdx
     mov qword [r12 + PyFrame.instr_ptr], 0  ; mark frame as "returned" (not yielded)
     jmp eval_return
@@ -129,10 +131,18 @@ END_FUNC op_return_const
 DEF_FUNC_BARE op_binary_op
     ; ecx = NB_* op code
     ; Save the op index before pops (VPOP doesn't clobber ecx)
-    VPOP rsi                   ; rsi = right operand (b)
-    mov r8, [r13 + 8]         ; r8 = right tag
-    VPOP rdi                   ; rdi = left operand (a)
-    mov r9, [r13 + 8]         ; r9 = left tag
+    VPOP_VAL rsi, r8            ; rsi = right operand (b), r8 = right tag
+    VPOP_VAL rdi, r9            ; rdi = left operand (a), r9 = left tag
+
+    ; Treat TAG_BOOL as smallint for numeric ops (bool is int subclass)
+    cmp r9d, TAG_BOOL
+    jne .binop_left_ok
+    mov r9d, TAG_SMALLINT
+.binop_left_ok:
+    cmp r8d, TAG_BOOL
+    jne .binop_right_ok
+    mov r8d, TAG_SMALLINT
+.binop_right_ok:
 
     ; Fast path: SmallInt add (NB_ADD=0, NB_INPLACE_ADD=13)
     cmp ecx, 0                 ; NB_ADD
@@ -211,9 +221,6 @@ DEF_FUNC_BARE op_binary_op
     ; Check right operand's tp_as_sequence->sq_repeat
     cmp qword [rsp + BO_RTAG], TAG_SMALLINT
     je .binop_left_type
-    ; SmallStr guard: SmallStr doesn't support sq_repeat as right operand
-    bt qword [rsp + BO_RTAG], 63
-    jc .binop_left_type
     ; Non-pointer guard: TAG_BOOL/TAG_NONE/TAG_FLOAT can't be sequences
     test qword [rsp + BO_RTAG], TAG_RC_BIT
     jz .binop_left_type
@@ -232,9 +239,6 @@ DEF_FUNC_BARE op_binary_op
     jmp .binop_have_result
 
 .binop_not_smallint_left:
-    ; SmallStr guard: don't dereference SmallStr payload
-    bt qword [rsp + BO_LTAG], 63
-    jc .binop_smallstr_type
     ; TAG_BOOL: route to int (int_unwrap handles TAG_BOOL)
     cmp qword [rsp + BO_LTAG], TAG_BOOL
     je .binop_smallint_type
@@ -248,9 +252,6 @@ DEF_FUNC_BARE op_binary_op
     ; SmallInt check: use saved left tag
     cmp qword [rsp + BO_LTAG], TAG_SMALLINT
     je .binop_smallint_type
-    ; SmallStr check
-    bt qword [rsp + BO_LTAG], 63
-    jc .binop_smallstr_type
     ; TAG_BOOL: route to int (int_unwrap handles TAG_BOOL)
     cmp qword [rsp + BO_LTAG], TAG_BOOL
     je .binop_smallint_type
@@ -262,8 +263,6 @@ DEF_FUNC_BARE op_binary_op
 .binop_smallint_type:
     lea rax, [rel int_type]
     jmp .binop_have_type
-.binop_smallstr_type:
-    lea rax, [rel str_type]
 .binop_have_type:
     mov rax, [rax + PyTypeObject.tp_as_number]
     test rax, rax
@@ -298,8 +297,6 @@ DEF_FUNC_BARE op_binary_op
     je .binop_fallback_int
     cmp qword [rsp + BO_LTAG], TAG_BOOL
     je .binop_fallback_int
-    bt qword [rsp + BO_LTAG], 63
-    jc .binop_fallback_str
     test qword [rsp + BO_LTAG], TAG_RC_BIT
     jz .binop_try_dunder
     mov rax, [rdi + PyObject.ob_type]
@@ -310,8 +307,6 @@ DEF_FUNC_BARE op_binary_op
 .binop_fallback_int:
     lea rax, [rel int_type]
     jmp .binop_fallback_have_type
-.binop_fallback_str:
-    lea rax, [rel str_type]
 .binop_fallback_have_type:
     mov rax, [rax + PyTypeObject.tp_as_number]
 .binop_fallback_have_methods:
@@ -335,8 +330,6 @@ DEF_FUNC_BARE op_binary_op
     ; Left is int/bool. Check if right is an incompatible heaptype.
     test qword [rsp + BO_RTAG], TAG_RC_BIT
     jz .binop_compat_ok          ; right not a heap pointer → compatible
-    bt qword [rsp + BO_RTAG], 63
-    jc .binop_compat_ok          ; SmallStr → compatible
     ; Right is a heap pointer (TAG_PTR)
     push rax                     ; save method ptr
     mov r10, [rsp + 8 + BO_RIGHT]
@@ -352,11 +345,6 @@ DEF_FUNC_BARE op_binary_op
     pop rax
 
 .binop_compat_ok:
-    ; Spill SmallStr operands to heap before calling nb_method
-    bt qword [rsp + BO_LTAG], 63
-    jc .binop_spill_ss
-    bt qword [rsp + BO_RTAG], 63
-    jc .binop_spill_ss
 
 .binop_do_call:
     ; Call the method: rdi=left, rsi=right, rdx=left_tag, rcx=right_tag
@@ -395,9 +383,6 @@ DEF_FUNC_BARE op_binary_op
     ; Check if left is heaptype
     cmp qword [rsp + BO_LTAG], TAG_SMALLINT
     je .binop_try_right_dunder ; SmallInt has no dunders
-    ; SmallStr: no dunders (built-in str_type)
-    bt qword [rsp + BO_LTAG], 63
-    jc .binop_try_right_dunder
     ; Non-pointer guard: TAG_BOOL/TAG_NONE/TAG_FLOAT can't have dunders
     test qword [rsp + BO_LTAG], TAG_RC_BIT
     jz .binop_try_right_dunder
@@ -468,9 +453,6 @@ DEF_FUNC_BARE op_binary_op
     ; Try reflected dunder on right operand
     cmp qword [rsp + BO_RTAG], TAG_SMALLINT
     je .binop_no_method
-    ; SmallStr: no dunders
-    bt qword [rsp + BO_RTAG], 63
-    jc .binop_no_method
     ; Non-pointer guard: TAG_BOOL/TAG_NONE/TAG_FLOAT can't have dunders
     test qword [rsp + BO_RTAG], TAG_RC_BIT
     jz .binop_no_method
@@ -504,33 +486,6 @@ DEF_FUNC_BARE op_binary_op
     lea rdi, [rel exc_TypeError_type]
     CSTRING rsi, "unsupported operand type(s)"
     call raise_exception
-
-.binop_spill_ss:
-    ; Spill SmallStr operands to heap before calling nb_method.
-    ; rax = method ptr. Save it on stack (shifts BO_ offsets by +8).
-    push rax
-    ; Spill left if SmallStr
-    bt qword [rsp + 8 + BO_LTAG], 63
-    jnc .bss_left_done
-    mov rdi, [rsp + 8 + BO_LEFT]
-    mov rsi, [rsp + 8 + BO_LTAG]
-    call smallstr_to_obj
-    mov [rsp + 8 + BO_LEFT], rax
-    mov qword [rsp + 8 + BO_LTAG], TAG_PTR
-.bss_left_done:
-    ; Spill right if SmallStr
-    bt qword [rsp + 8 + BO_RTAG], 63
-    jnc .bss_right_done
-    mov rdi, [rsp + 8 + BO_RIGHT]
-    mov rsi, [rsp + 8 + BO_RTAG]
-    call smallstr_to_obj
-    mov [rsp + 8 + BO_RIGHT], rax
-    mov qword [rsp + 8 + BO_RTAG], TAG_PTR
-.bss_right_done:
-    pop rax
-    mov rdi, [rsp + BO_LEFT]
-    mov rsi, [rsp + BO_RIGHT]
-    jmp .binop_do_call
 
 .binop_try_smallint_add:
     ; Check both TAG_SMALLINT
@@ -686,10 +641,8 @@ DEF_FUNC_BARE op_compare_op
     ; ecx = arg; comparison op = arg >> 4
     shr ecx, 4                 ; ecx = PY_LT/LE/EQ/NE/GT/GE (0-5)
 
-    VPOP rsi                   ; rsi = right operand
-    mov r8, [r13 + 8]         ; r8 = right tag
-    VPOP rdi                   ; rdi = left operand
-    mov r9, [r13 + 8]         ; r9 = left tag
+    VPOP_VAL rsi, r8            ; rsi = right operand, r8 = right tag
+    VPOP_VAL rdi, r9            ; rdi = left operand, r9 = left tag
 
     ; Fast path: both SmallInt — inline compare, no type dispatch
     cmp r9d, TAG_SMALLINT
@@ -771,12 +724,9 @@ section .text
     je .cmp_use_float
 
 .cmp_no_float:
-    ; Get type's tp_richcompare (SmallInt/SmallStr-aware)
+    ; Get type's tp_richcompare
     cmp r9d, TAG_SMALLINT
     je .cmp_smallint_type
-    ; SmallStr guard
-    bt qword [rsp + BO_LTAG], 63
-    jc .cmp_smallstr_type
     cmp r9d, TAG_BOOL
     je .cmp_bool_type
     cmp r9d, TAG_NONE
@@ -792,10 +742,6 @@ section .text
 .cmp_none_type:
     lea rax, [rel none_type]
     jmp .cmp_have_type
-.cmp_smallstr_type:
-    ; str_compare handles SmallStr natively — no spilling needed.
-    ; rdi/rsi = payloads, tags passed via rcx/r8 in .cmp_do_call.
-    lea rax, [rel str_type]
 .cmp_have_type:
     mov r9, rax                 ; r9 = type (save for dunder check)
     mov rax, [rax + PyTypeObject.tp_richcompare]
@@ -846,8 +792,8 @@ section .text
     ; Call tp_richcompare(left, right, op, left_tag, right_tag)
     ; rdi = left, rsi = right (already set)
     mov edx, ecx               ; edx = comparison op
-    mov rcx, [rsp + BO_LTAG]   ; rcx = left_tag (64-bit for SmallStr)
-    mov r8, [rsp + BO_RTAG]    ; r8 = right_tag (64-bit for SmallStr)
+    mov rcx, [rsp + BO_LTAG]   ; rcx = left_tag
+    mov r8, [rsp + BO_RTAG]    ; r8 = right_tag
     push rdx                   ; save comparison op before call
     call rax
     ; rax = result payload, edx = result tag
@@ -888,8 +834,6 @@ section .text
     je .cmp_right_int
     cmp r8d, TAG_FLOAT
     je .cmp_right_float
-    test r8, r8
-    js .cmp_right_str          ; SmallStr
     cmp r8d, TAG_BOOL
     je .cmp_right_bool
     cmp r8d, TAG_NONE
@@ -901,10 +845,6 @@ section .text
     jmp .cmp_right_have_type
 .cmp_right_float:
     lea rax, [rel float_type]
-    jmp .cmp_right_have_type
-.cmp_right_str:
-    extern str_type
-    lea rax, [rel str_type]
     jmp .cmp_right_have_type
 .cmp_right_bool:
     extern bool_type
@@ -1055,8 +995,7 @@ END_FUNC op_compare_op
 ;; Calls type's nb_negative from tp_as_number.
 ;; ============================================================================
 DEF_FUNC_BARE op_unary_negative
-    VPOP rdi                   ; rdi = operand
-    mov r8, [r13 + 8]         ; r8 = operand tag
+    VPOP_VAL rdi, r8            ; rdi = operand, r8 = operand tag
 
     ; TAG_FLOAT fast path: inline sign flip, no DECREF needed
     cmp r8d, TAG_FLOAT
@@ -1083,7 +1022,7 @@ DEF_FUNC_BARE op_unary_negative
     mov rax, [rax + PyNumberMethods.nb_negative]
 
     ; Call nb_negative(payload, tag); rdi already set
-    mov rdx, r8                ; tag (64-bit for SmallStr)
+    mov rdx, r8                ; tag
     call rax
     ; rax = result payload, rdx = result tag
 
@@ -1112,8 +1051,7 @@ END_FUNC op_unary_negative
 ;; Calls type's nb_invert from tp_as_number.
 ;; ============================================================================
 DEF_FUNC_BARE op_unary_invert
-    VPOP rdi                   ; rdi = operand
-    mov r8, [r13 + 8]         ; r8 = operand tag
+    VPOP_VAL rdi, r8            ; rdi = operand, r8 = operand tag
     push r8
     push rdi
 
@@ -1133,7 +1071,7 @@ DEF_FUNC_BARE op_unary_invert
     mov rax, [rax + PyNumberMethods.nb_invert]
 
     ; Call nb_invert(operand, tag) — binary op signature
-    mov rdx, r8                ; tag (64-bit for SmallStr)
+    mov rdx, r8                ; tag
     xor esi, esi
     call rax
     SAVE_FAT_RESULT
@@ -1152,15 +1090,14 @@ END_FUNC op_unary_invert
 ;; Calls obj_is_true, then pushes the inverted boolean.
 ;; ============================================================================
 DEF_FUNC_BARE op_unary_not
-    VPOP rdi                   ; rdi = operand
-    mov r8, [r13 + 8]         ; r8 = operand tag
+    VPOP_VAL rdi, r8            ; rdi = operand, r8 = operand tag
 
     ; Save operand + tag for DECREF
     push r8
     push rdi
 
     ; Call obj_is_true(operand, tag) -> 0 or 1
-    mov rsi, r8                ; 64-bit for SmallStr
+    mov rsi, r8                ; tag
     call obj_is_true
     push rax                   ; save truthiness result
 
@@ -1191,8 +1128,7 @@ END_FUNC op_unary_not
 ;; (2-byte units from start of co_code).
 ;; ============================================================================
 DEF_FUNC_BARE op_pop_jump_if_false
-    VPOP rdi                   ; rdi = value to test
-    mov r8, [r13 + 8]         ; r8 = value tag
+    VPOP_VAL rdi, r8            ; rdi = value to test, r8 = value tag
 
     ; Fast path: TAG_BOOL — payload is 0/1, no DECREF needed
     cmp r8d, TAG_BOOL
@@ -1202,7 +1138,7 @@ DEF_FUNC_BARE op_pop_jump_if_false
     push rcx                   ; save target offset
     push r8                    ; save tag for DECREF
     push rdi                   ; save value for DECREF
-    mov rsi, r8                ; 64-bit for SmallStr
+    mov rsi, r8                ; tag
     call obj_is_true
     push rax                   ; save truthiness
     mov rdi, [rsp + 8]        ; reload value
@@ -1229,8 +1165,7 @@ END_FUNC op_pop_jump_if_false
 ;; op_pop_jump_if_true - Pop TOS, jump if truthy
 ;; ============================================================================
 DEF_FUNC_BARE op_pop_jump_if_true
-    VPOP rdi
-    mov r8, [r13 + 8]         ; r8 = value tag
+    VPOP_VAL rdi, r8            ; rdi = value to test, r8 = value tag
 
     ; Fast path: TAG_BOOL — payload is 0/1, no DECREF needed
     cmp r8d, TAG_BOOL
@@ -1240,7 +1175,7 @@ DEF_FUNC_BARE op_pop_jump_if_true
     push rcx                   ; save target offset
     push r8                    ; save tag for DECREF
     push rdi                   ; save value for DECREF
-    mov rsi, r8                ; 64-bit for SmallStr
+    mov rsi, r8                ; tag
     call obj_is_true
     push rax                   ; save truthiness
     mov rdi, [rsp + 8]        ; reload value
@@ -1267,8 +1202,7 @@ END_FUNC op_pop_jump_if_true
 ;; op_pop_jump_if_none - Pop TOS, jump if None
 ;; ============================================================================
 DEF_FUNC_BARE op_pop_jump_if_none
-    VPOP rax                   ; rax = value
-    mov r8, [r13 + 8]         ; r8 = value tag
+    VPOP_VAL rax, r8            ; rax = value, r8 = value tag
 
     ; Check for None: TAG_NONE or (TAG_PTR with none_singleton payload)
     cmp r8d, TAG_NONE
@@ -1297,8 +1231,7 @@ END_FUNC op_pop_jump_if_none
 ;; op_pop_jump_if_not_none - Pop TOS, jump if NOT None
 ;; ============================================================================
 DEF_FUNC_BARE op_pop_jump_if_not_none
-    VPOP rax                   ; rax = value
-    mov r8, [r13 + 8]         ; r8 = value tag
+    VPOP_VAL rax, r8            ; rax = value, r8 = value tag
 
     ; Check for None: TAG_NONE or (TAG_PTR with none_singleton payload)
     cmp r8d, TAG_NONE
@@ -1367,14 +1300,12 @@ DEF_FUNC op_format_value, FV_FRAME
     ; Stack order: TOS = fmt_spec, TOS1 = value
     test qword [rbp - FV_HASSPEC], 4
     jz .fv_no_spec
-    VPOP rax                   ; fmt_spec string
-    mov rcx, [r13 + 8]        ; fmt_spec tag
+    VPOP_VAL rax, rcx           ; fmt_spec string + tag
     mov [rbp - FV_SPEC], rax   ; save fmt_spec
     mov [rbp - FV_STAG], rcx   ; save fmt_spec tag
 .fv_no_spec:
 
-    VPOP rdi                   ; value
-    mov rax, [r13 + 8]        ; value tag
+    VPOP_VAL rdi, rax           ; value + tag
     mov [rbp - FV_VALUE], rdi  ; save value
     mov [rbp - FV_VTAG], rax   ; save value tag
 
@@ -1389,23 +1320,19 @@ DEF_FUNC op_format_value, FV_FRAME
 
     ; Float with format spec: call float_format_spec(payload, spec_data, spec_len)
     extern float_format_spec
-    ; If fmt_spec is SmallStr, spill to heap for .data access
     mov rax, [rbp - FV_SPEC]
-    bt qword [rbp - FV_STAG], 63
-    jnc .fv_spec_heap
-    push rdi                   ; save float payload
-    mov rdi, rax
-    mov rsi, [rbp - FV_STAG]
-    call smallstr_to_obj
-    mov [rbp - FV_SPEC], rax   ; update for DECREF
-    mov qword [rbp - FV_STAG], TAG_PTR
-    pop rdi
-.fv_spec_heap:
+    cmp qword [rbp - FV_STAG], TAG_PTR
+    jne .fv_type_error
     ; rdi = raw double bits (still set)
     lea rsi, [rax + PyStrObject.data]  ; spec data
     mov rdx, [rax + PyStrObject.ob_size]  ; spec length
     call float_format_spec
     jmp .fv_have_result
+
+.fv_type_error:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "format spec must be str"
+    call raise_exception
 
 .fv_no_format_spec:
     ; Apply conversion based on arg & 3
@@ -1464,51 +1391,31 @@ DEF_FUNC op_build_string, BS_FRAME
     je .bs_one
 
     ; General case: iterate and concatenate
-    ; Pop all items, keeping base pointer
+    ; Pop all items, keeping base pointers
     mov rdi, rcx
-    shl rdi, 4                 ; count * 16 bytes/slot
-    sub r13, rdi               ; pop all at once (r13 = base of items)
+    shl rdi, 3                 ; count * 8 bytes/slot
+    sub r13, rdi               ; pop all payloads at once (r13 = base)
+    sub r15, rcx               ; pop all tags at once (r15 = base)
 
-    ; Start with first string — spill SmallStr to heap
-    mov rax, [r13]             ; first fragment (payload at slot base)
-    mov r9, [r13 + 8]         ; first fragment (tag)
-    test r9, r9
-    jns .bs_first_heap
-    ; SmallStr → spill to heap (creates new ref)
-    mov rdi, rax
-    mov rsi, r9
-    call smallstr_to_obj       ; rax = heap ptr (refcount 1)
-    jmp .bs_first_save
-.bs_first_heap:
+    ; Start with first string
+    mov rax, [r13]             ; first fragment payload
+    movzx r9d, byte [r15]      ; first fragment tag
+    cmp r9d, TAG_PTR
+    jne .bs_type_error
     INCREF rax                 ; heap str needs INCREF
-.bs_first_save:
-    mov [rbp - BS_ACCUM], rax  ; accumulator (always heap)
+    mov [rbp - BS_ACCUM], rax  ; accumulator (heap)
 
     ; Concatenate remaining
     mov rcx, 1                 ; start from index 1
 .bs_loop:
     cmp rcx, [rbp - BS_COUNT]
     jge .bs_decref
-    ; Get next fragment — spill SmallStr if needed
+    ; Get next fragment — must be heap str
     mov rax, rcx
-    shl rax, 4                ; index * 16
-    mov rsi, [r13 + rax]     ; fragment payload
-    mov rdx, [r13 + rax + 8] ; fragment tag
-    test rdx, rdx
-    jns .bs_frag_heap
-    ; SmallStr fragment → spill to heap
-    push rcx
-    mov rdi, rsi
-    mov rsi, rdx
-    call smallstr_to_obj       ; rax = heap fragment
-    mov rsi, rax               ; rsi = heap fragment (will be DECREFed after concat)
-    pop rcx
-    ; Temporarily replace fragment on stack for DECREF loop
-    mov rax, rcx
-    shl rax, 4
-    mov [r13 + rax], rsi       ; replace with heap ptr
-    mov qword [r13 + rax + 8], TAG_PTR  ; update tag
-.bs_frag_heap:
+    mov rsi, [r13 + rax*8]     ; fragment payload
+    movzx edx, byte [r15 + rax] ; fragment tag
+    cmp edx, TAG_PTR
+    jne .bs_type_error
     push rcx
     extern str_concat
     mov rdi, [rbp - BS_ACCUM] ; accumulator
@@ -1531,9 +1438,8 @@ DEF_FUNC op_build_string, BS_FRAME
     cmp rcx, [rbp - BS_COUNT]
     jge .bs_push
     mov rax, rcx
-    shl rax, 4                ; index * 16
-    mov rdi, [r13 + rax]
-    mov rsi, [r13 + rax + 8]  ; tag
+    mov rdi, [r13 + rax*8]
+    movzx rsi, byte [r15 + rax]  ; tag
     push rcx
     DECREF_VAL rdi, rsi
     pop rcx
@@ -1545,6 +1451,11 @@ DEF_FUNC op_build_string, BS_FRAME
     VPUSH_PTR rax
     leave
     DISPATCH
+
+.bs_type_error:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "build_string expects str"
+    call raise_exception
 
 .bs_zero:
     ; Empty f-string: push empty string
@@ -1607,11 +1518,11 @@ section .text
 ;; If localsplus[arg] is NULL, create an empty cell.
 ;; ============================================================================
 DEF_FUNC_BARE op_make_cell
-    lea rdx, [rcx*8]              ; slot * 8 (×2 via SIB)
+    lea rdx, [rcx*8]              ; slot * 8
 
     ; Get current value + tag from localsplus
-    mov rdi, [r12 + rdx*2 + PyFrame.localsplus]      ; rdi = payload
-    mov rsi, [r12 + rdx*2 + PyFrame.localsplus + 8]  ; rsi = tag
+    mov rdi, [r12 + PyFrame.localsplus + rdx]        ; rdi = payload
+    movzx rsi, byte [r14 + rcx]                      ; rsi = tag (r14 = locals_tag_base)
 
     ; Save slot offset
     push rdx
@@ -1621,10 +1532,12 @@ DEF_FUNC_BARE op_make_cell
     ; rax = new cell
 
     pop rdx
+    mov rcx, rdx
+    shr rcx, 3              ; recover slot index from slot*8
 
     ; DECREF old value (cell_new already INCREFed it; tag-aware, handles NULL)
-    mov rdi, [r12 + rdx*2 + PyFrame.localsplus]
-    mov rsi, [r12 + rdx*2 + PyFrame.localsplus + 8]
+    mov rdi, [r12 + PyFrame.localsplus + rdx]
+    movzx rsi, byte [r14 + rcx]
     push rax
     push rdx
     DECREF_VAL rdi, rsi
@@ -1632,8 +1545,8 @@ DEF_FUNC_BARE op_make_cell
     pop rax
 
     ; Store cell in localsplus slot (payload + tag)
-    mov [r12 + rdx*2 + PyFrame.localsplus], rax
-    mov qword [r12 + rdx*2 + PyFrame.localsplus + 8], TAG_PTR
+    mov [r12 + PyFrame.localsplus + rdx], rax
+    mov byte [r14 + rcx], TAG_PTR
     DISPATCH
 END_FUNC op_make_cell
 
@@ -1678,23 +1591,22 @@ DEF_FUNC_BARE op_copy_free_vars
     sub edx, ecx                   ; edx = first freevar index
 
     ; Copy cells from closure tuple to freevar slots
+    mov rdi, [rax + PyTupleObject.ob_item]       ; payloads
+    mov rsi, [rax + PyTupleObject.ob_item_tags]  ; tags
     xor r8d, r8d                   ; loop counter
 .cfv_loop:
     cmp r8d, ecx
     jge .cfv_done
 
-    ; Get cell from closure tuple item[i] (fat: *16)
-    mov r10d, r8d
-    shl r10, 4
-    mov r9, [rax + PyTupleObject.ob_item + r10]        ; payload
-    mov r11, [rax + PyTupleObject.ob_item + r10 + 8]   ; tag
+    ; Get cell from closure tuple item[i]
+    mov r9, [rdi + r8*8]                               ; payload
+    movzx r11d, byte [rsi + r8]                        ; tag
 
-    ; Compute destination index: edx + r8d, then * 16
+    ; Compute destination index: edx + r8d
     mov r10d, edx
     add r10d, r8d
-    shl r10, 4                     ; slot * 16 bytes
-    mov [r12 + PyFrame.localsplus + r10], r9
-    mov [r12 + PyFrame.localsplus + r10 + 8], r11
+    mov [r12 + PyFrame.localsplus + r10*8], r9
+    mov byte [r14 + r10], r11b                       ; r14 = locals_tag_base
 
     ; INCREF value (tag-aware)
     INCREF_VAL r9, r11
@@ -1717,6 +1629,7 @@ DEF_FUNC_BARE op_return_generator
     ; Save current execution state in frame for later resumption
     mov [r12 + PyFrame.instr_ptr], rbx
     mov [r12 + PyFrame.stack_ptr], r13
+    mov [r12 + PyFrame.stack_tag_ptr], r15
 
     ; Check co_flags to decide which object type to create
     mov rax, [r12 + PyFrame.code]
@@ -1757,12 +1670,12 @@ END_FUNC op_return_generator
 ;; ============================================================================
 DEF_FUNC_BARE op_yield_value
     ; Pop the value to yield (fat: payload + tag)
-    VPOP rax
-    mov rdx, [r13 + 8]         ; rdx = tag (fat value protocol)
+    VPOP_VAL rax, rdx
 
     ; Save frame state for resumption
     mov [r12 + PyFrame.instr_ptr], rbx
     mov [r12 + PyFrame.stack_ptr], r13
+    mov [r12 + PyFrame.stack_tag_ptr], r15
 
     ; Return yielded value from eval_frame
     jmp eval_return
@@ -1775,10 +1688,8 @@ END_FUNC op_yield_value
 ;; ============================================================================
 DEF_FUNC_BARE op_end_send
     ; TOS = value, TOS1 = receiver
-    VPOP rax                   ; rax = value payload (TOS)
-    mov r8, [r13 + 8]         ; r8 = value tag (slot still readable)
-    VPOP rdi                   ; rdi = receiver payload (TOS1)
-    mov rsi, [r13 + 8]        ; rsi = receiver tag
+    VPOP_VAL rax, r8            ; value payload + tag
+    VPOP_VAL rdi, rsi           ; receiver payload + tag
     push r8                    ; save value tag
     push rax                   ; save value payload
     DECREF_VAL rdi, rsi        ; DECREF receiver (tag-aware)
@@ -1807,15 +1718,14 @@ DEF_FUNC op_send, SND_FRAME
     ; Stack: ... | receiver | sent_value |
     mov [rbp - SND_ARG], rcx   ; save arg
 
-    VPOP rsi                   ; rsi = sent_value (TOS)
-    mov rax, [r13 + 8]        ; sent_value tag
+    VPOP_VAL rsi, rax           ; sent_value payload + tag
     mov [rbp - SND_SENT], rsi  ; save sent_value
     mov [rbp - SND_STAG], rax  ; save sent_value tag
     VPEEK rdi                  ; rdi = receiver (TOS1, stay on stack)
     mov [rbp - SND_RECV], rdi  ; save receiver
 
     ; Check if receiver is a generator with iternext
-    cmp qword [r13 - 8], TAG_PTR
+    cmp byte [r15 - 1], TAG_PTR
     jne .send_error
     mov rax, [rdi + PyObject.ob_type]
     mov rax, [rax + PyTypeObject.tp_iternext]
@@ -1850,7 +1760,7 @@ DEF_FUNC op_send, SND_FRAME
     ; gen_send(receiver, value, value_tag)
     mov rdi, [rbp - SND_RECV]
     mov rsi, [rbp - SND_SENT]
-    mov edx, [rbp - SND_STAG]
+    movzx edx, byte [rbp - SND_STAG]
     call gen_send
     jmp .send_check_result
 
@@ -1867,17 +1777,17 @@ DEF_FUNC op_send, SND_FRAME
 
     ; DECREF sent value (tag-aware)
     mov rdi, [rbp - SND_SENT]
-    mov rsi, [rbp - SND_STAG]
+    movzx esi, byte [rbp - SND_STAG]
     DECREF_VAL rdi, rsi
 
     mov rax, [rbp - SND_RESULT]
-    mov rdx, [rbp - SND_RTAG]
+    movzx edx, byte [rbp - SND_RTAG]
     test edx, edx
     jz .send_exhausted
 
     ; Yielded: push result on top (receiver stays below)
     ; Stack becomes: ... | receiver | yielded_value |
-    mov rdx, [rbp - SND_RTAG]
+    movzx edx, byte [rbp - SND_RTAG]
     VPUSH_VAL rax, rdx
 
     ; Skip 1 CACHE entry = 2 bytes
@@ -1935,7 +1845,7 @@ DEF_FUNC_BARE op_get_yield_from_iter
     VPEEK rdi                  ; rdi = TOS (don't pop)
 
     ; If it's already a generator or coroutine, done — must be TAG_PTR to check ob_type
-    cmp qword [r13 - 8], TAG_PTR
+    cmp byte [r15 - 1], TAG_PTR
     jne .gyfi_call_iter
     mov rax, [rdi + PyObject.ob_type]
     lea rcx, [rel gen_type]
@@ -1947,8 +1857,7 @@ DEF_FUNC_BARE op_get_yield_from_iter
 
 .gyfi_call_iter:
     ; Not a generator — call tp_iter to get an iterator
-    VPOP rdi                   ; pop iterable
-    mov r8, [r13 + 8]         ; iterable tag
+    VPOP_VAL rdi, r8            ; pop iterable + tag
 
     ; Must be TAG_PTR to dereference ob_type
     cmp r8, TAG_PTR
@@ -2031,8 +1940,9 @@ IS_MODDICT  equ 24      ; [rbp-24] module's __dict__
 IS_LOCALS   equ 32      ; [rbp-32] frame's locals dict
 IS_IDX      equ 40      ; [rbp-40] loop index
 IS_LIMIT    equ 48      ; [rbp-48] capacity or count
-IS_ITEMS    equ 56      ; [rbp-56] items array ptr (__all__ path)
-IS_FRAME    equ 56      ; sub rsp, 56 (after push rbp + push rbx = 72 total)
+IS_ITEMS    equ 56      ; [rbp-56] items payload ptr (__all__ path)
+IS_ITEM_TAGS equ 64     ; [rbp-64] items tag ptr (__all__ path)
+IS_FRAME    equ 64      ; sub rsp, 64 (after push rbp + push rbx = 72 total)
 extern dict_get
 extern dict_set
 extern str_from_cstr_heap
@@ -2040,8 +1950,9 @@ extern obj_decref
 
 .ci1_import_star:
     ; Pop module from TOS (r13 = eval value stack)
-    sub r13, 16
-    mov rdi, [r13]                    ; module payload (ptr)
+    VPOP_VAL rdi, rsi
+    cmp rsi, TAG_PTR
+    jne .is_done
 
     ; Set up stack frame
     push rbp
@@ -2087,20 +1998,23 @@ extern obj_decref
     mov rcx, [rbx + PyVarObject.ob_size]  ; count (same offset for list/tuple)
     mov [rbp - IS_LIMIT], rcx
 
-    ; Check if list (ob_item is pointer) or tuple (ob_item is inline)
+    ; Check if list or tuple
     extern list_type
     mov rax, [rbx + PyObject.ob_type]
     lea rdx, [rel list_type]
     cmp rax, rdx
     jne .is_all_tuple
-    ; List: items = [obj + PyListObject.ob_item] (pointer to array)
+    ; List: items = payload/tag arrays
     mov rax, [rbx + PyListObject.ob_item]
+    mov rdx, [rbx + PyListObject.ob_item_tags]
     jmp .is_all_have_items
 .is_all_tuple:
-    ; Tuple (or other sequence): items = obj + PyTupleObject.ob_item (inline)
-    lea rax, [rbx + PyTupleObject.ob_item]
+    ; Tuple: items = payload/tag arrays
+    mov rax, [rbx + PyTupleObject.ob_item]
+    mov rdx, [rbx + PyTupleObject.ob_item_tags]
 .is_all_have_items:
-    mov [rbp - IS_ITEMS], rax         ; save items ptr
+    mov [rbp - IS_ITEMS], rax         ; save payloads ptr
+    mov [rbp - IS_ITEM_TAGS], rdx     ; save tags ptr
     mov qword [rbp - IS_IDX], 0
 
 .is_all_loop:
@@ -2108,11 +2022,11 @@ extern obj_decref
     cmp rcx, [rbp - IS_LIMIT]
     jge .is_done
 
-    ; Get name from items[idx] — 16-byte fat slots
+    ; Get name from items[idx]
     mov rax, [rbp - IS_ITEMS]
-    shl rcx, 4                        ; idx * 16
-    mov rsi, [rax + rcx]              ; name payload
-    mov rdx, [rax + rcx + 8]          ; name tag (full 64-bit for SmallStr)
+    mov rdx, [rbp - IS_ITEM_TAGS]
+    mov rsi, [rax + rcx * 8]          ; name payload
+    movzx edx, byte [rdx + rcx]       ; name tag
 
     ; Look up name in mod_dict
     mov rdi, [rbp - IS_MODDICT]
@@ -2127,9 +2041,9 @@ extern obj_decref
     mov r10, rdx                      ; save value tag
     mov rcx, [rbp - IS_IDX]
     mov rax, [rbp - IS_ITEMS]
-    shl rcx, 4
-    mov rsi, [rax + rcx]              ; name payload
-    mov r8, [rax + rcx + 8]           ; name tag (key_tag)
+    mov rdx, [rbp - IS_ITEM_TAGS]
+    mov rsi, [rax + rcx * 8]          ; name payload
+    movzx r8d, byte [rdx + rcx]       ; name tag (key_tag)
     mov rdi, [rbp - IS_LOCALS]
     mov rdx, r9                       ; value payload
     mov rcx, r10                      ; value tag
@@ -2158,26 +2072,18 @@ extern obj_decref
     lea rbx, [rsi + rcx]              ; rbx = entry ptr (callee-saved)
 
     ; Skip empty: key_tag == 0
-    mov r8, [rbx + DictEntry.key_tag]
-    test r8, r8
+    movzx r8d, byte [rbx + DictEntry.key_tag]
+    test r8d, r8d
     jz .is_dict_next
 
     ; Get key payload
     mov rsi, [rbx + DictEntry.key]
 
     ; Skip names starting with '_'
-    bt r8, 63
-    jc .is_smallstr_uscore            ; SmallStr → check inline
     cmp r8d, TAG_PTR
     jne .is_dict_copy                 ; non-string → copy
     ; Heap string: check first data byte
     cmp byte [rsi + PyStrObject.data], '_'
-    je .is_dict_next
-    jmp .is_dict_copy
-
-.is_smallstr_uscore:
-    ; SmallStr: first char is low byte of payload
-    cmp sil, '_'
     je .is_dict_next
 
 .is_dict_copy:
@@ -2185,7 +2091,7 @@ extern obj_decref
     mov rdi, [rbp - IS_LOCALS]
     ; rsi = key payload (already set)
     mov rdx, [rbx + DictEntry.value]
-    mov rcx, [rbx + DictEntry.value_tag]
+    movzx ecx, byte [rbx + DictEntry.value_tag]
     ; r8 = key_tag (already set)
     call dict_set
 
@@ -2213,7 +2119,7 @@ extern obj_decref
 .ci1_stopiter_error:
     ; INTRINSIC_STOPITERATION_ERROR: convert StopIteration to RuntimeError
     ; Only converts if exception IS StopIteration; otherwise re-raise as-is
-    mov rax, [r13 - 16]           ; TOS payload (exception)
+    mov rax, [r13 - 8]            ; TOS payload (exception)
     test rax, rax
     jz .ci1_si_convert
     mov rcx, [rax + PyObject.ob_type]
@@ -2222,31 +2128,30 @@ extern obj_decref
     jne .ci1_si_reraise
 .ci1_si_convert:
     ; Pop the exception, raise RuntimeError instead
-    sub r13, 16
-    mov rdi, [r13]
-    mov rsi, [r13 + 8]
+    VPOP_VAL rdi, rsi
     DECREF_VAL rdi, rsi
     mov [rel eval_saved_r13], r13  ; update — popped and DECREF'd
+    mov [rel eval_saved_r15], r15
     lea rdi, [rel exc_RuntimeError_type]
     CSTRING rsi, "generator raised StopIteration"
     call raise_exception
 .ci1_si_reraise:
     ; Not StopIteration — pop from TOS, set as current_exception, re-raise
-    sub r13, 16
-    mov rax, [r13]                ; exception (ref transferred from stack)
+    VPOP_VAL rax, rsi              ; exception (ref transferred from stack)
     mov [rel eval_saved_r13], r13  ; update — popped and transferred
+    mov [rel eval_saved_r15], r15
     mov [rel current_exception], rax
     jmp eval_exception_unwind
 
 .ci1_unary_positive:
     ; +x — for most numeric types, no-op. For bool, call nb_positive.
     ; Check if TOS is TAG_BOOL
-    cmp qword [r13 - 8], TAG_BOOL
+    cmp byte [r15 - 1], TAG_BOOL
     je .ci1_pos_call
     ; Check if TOS is TAG_PTR pointing to bool_type
-    cmp qword [r13 - 8], TAG_PTR
+    cmp byte [r15 - 1], TAG_PTR
     jne .ci1_pos_done
-    mov rax, [r13 - 16]       ; payload
+    mov rax, [r13 - 8]        ; payload
     test rax, rax
     jz .ci1_pos_done
     mov rcx, [rax + PyObject.ob_type]
@@ -2258,28 +2163,32 @@ extern obj_decref
     extern bool_true
     lea rcx, [rel bool_true]
     xor eax, eax
-    cmp qword [r13 - 16], rcx
+    cmp qword [r13 - 8], rcx
     sete al
-    mov [r13 - 16], rax
-    mov qword [r13 - 8], TAG_SMALLINT
+    mov [r13 - 8], rax
+    mov byte [r15 - 1], TAG_SMALLINT
 .ci1_pos_done:
     DISPATCH
 
 .ci1_pos_call:
     ; TAG_BOOL: payload is 0 or 1 → convert to SmallInt
-    mov qword [r13 - 8], TAG_SMALLINT
+    mov byte [r15 - 1], TAG_SMALLINT
     DISPATCH
 
 .ci1_list_to_tuple:
     ; Convert list to tuple
-    VPOP rdi                   ; rdi = list
+    VPOP_VAL rdi, rsi           ; rdi = list, rsi = tag
+    cmp rsi, TAG_PTR
+    jne .ci1_l2t_error
     push rdi                   ; save for DECREF
 
     ; Get list size and items
     mov rcx, [rdi + PyListObject.ob_size]
     mov rsi, [rdi + PyListObject.ob_item]
+    mov rdx, [rdi + PyListObject.ob_item_tags]
     push rcx
     push rsi
+    push rdx
 
     ; Create tuple of same size
     mov rdi, rcx
@@ -2287,7 +2196,8 @@ extern obj_decref
     mov rbx, rax               ; CAREFUL: clobbers rbx! Save and restore
     ; Actually rbx is the bytecode IP, don't clobber it
     ; Use stack instead
-    pop rsi                    ; items ptr
+    pop r11                    ; tags ptr
+    pop rsi                    ; payloads ptr
     pop rcx                    ; count
     push rax                   ; save tuple
 
@@ -2300,13 +2210,13 @@ extern obj_decref
     push rdx
     push rsi
 
-    mov r8, rdx
-    shl r8, 4                 ; index * 16
-    mov rdi, [rsi + r8]       ; item payload from list (fat 16-byte stride)
-    mov r9, [rsi + r8 + 8]   ; item tag from list
-    mov rax, [rsp + 24]       ; tuple from stack
-    mov [rax + PyTupleObject.ob_item + r8], rdi        ; payload
-    mov [rax + PyTupleObject.ob_item + r8 + 8], r9     ; tag
+    mov rdi, [rsi + rdx * 8]        ; item payload
+    movzx r9d, byte [r11 + rdx]     ; item tag
+    mov rax, [rsp + 24]             ; tuple from stack
+    mov r8, [rax + PyTupleObject.ob_item]
+    mov r10, [rax + PyTupleObject.ob_item_tags]
+    mov [r8 + rdx * 8], rdi         ; payload
+    mov byte [r10 + rdx], r9b       ; tag
     INCREF_VAL rdi, r9
 
     pop rsi
@@ -2324,6 +2234,11 @@ extern obj_decref
     DECREF_REG rdi
 
     DISPATCH
+
+.ci1_l2t_error:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "list expected"
+    call raise_exception
 END_FUNC op_call_intrinsic_1
 
 ;; ============================================================================
@@ -2336,9 +2251,9 @@ extern obj_len
 
 DEF_FUNC_BARE op_get_len
     ; PEEK TOS (don't pop, 16 bytes/slot)
-    cmp qword [r13 - 8], TAG_PTR
+    cmp byte [r15 - 1], TAG_PTR
     jne .gl_error_nopop         ; non-pointer has no len()
-    mov rdi, [r13 - 16]
+    mov rdi, [r13 - 8]
     push rdi                    ; save obj
 
     ; Get length
@@ -2454,14 +2369,17 @@ END_FUNC op_load_locals
 extern dict_get
 
 DEF_FUNC_BARE op_load_from_dict_or_globals
-    ; ecx = name index (fat tuple: 16-byte stride)
-    shl ecx, 4
-    mov rsi, [r15 + rcx]       ; name string
+    ; ecx = name index (payload array: 8-byte stride)
+    shl ecx, 3
+    LOAD_CO_NAMES rsi
+    mov rsi, [rsi + rcx]       ; name string
     push rsi
 
     ; Pop dict from TOS
-    VPOP rdi
+    VPOP_VAL rdi, r8
     push rdi                    ; save dict
+    cmp r8, TAG_PTR
+    jne .lfdg_not_dict
 
     ; Try dict first
     mov rsi, [rsp + 8]         ; name
@@ -2510,6 +2428,14 @@ DEF_FUNC_BARE op_load_from_dict_or_globals
     VPUSH_VAL rax, rdx
     DISPATCH
 
+.lfdg_not_dict:
+    ; Not a dict on TOS
+    pop rdi
+    pop rsi
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "dict expected"
+    call raise_exception
+
 .lfdg_found_no_pop:
     ; dict already DECREFed in builtins path
     INCREF_VAL rax, rdx
@@ -2534,13 +2460,16 @@ LFDOD_FRAME equ 16
 DEF_FUNC op_load_from_dict_or_deref, LFDOD_FRAME
     mov [rbp - LFDOD_ARG], ecx    ; save arg (localsplus index)
 
-    ; Get name from co_names (fat tuple: 16-byte stride)
-    shl ecx, 4
-    mov rsi, [r15 + rcx]          ; name string
+    ; Get name from co_names (payload array: 8-byte stride)
+    shl ecx, 3
+    LOAD_CO_NAMES rsi
+    mov rsi, [rsi + rcx]          ; name string
 
     ; Pop dict from TOS
-    VPOP rdi
+    VPOP_VAL rdi, r8
     mov [rbp - LFDOD_DICT], rdi   ; save dict
+    cmp r8, TAG_PTR
+    jne .lfdod_error
 
     ; Try dict first
     mov edx, TAG_PTR
@@ -2550,8 +2479,7 @@ DEF_FUNC op_load_from_dict_or_deref, LFDOD_FRAME
 
     ; Not in dict — fall back to cell deref (like LOAD_DEREF)
     mov ecx, [rbp - LFDOD_ARG]
-    lea rax, [rcx*8]              ; slot * 8 (×2 via SIB)
-    mov rax, [r12 + rax*2 + PyFrame.localsplus]  ; cell object
+    mov rax, [r12 + PyFrame.localsplus + rcx*8]  ; cell object
     test rax, rax
     jz .lfdod_error
     mov rdx, [rax + PyCellObject.ob_ref_tag]
@@ -2588,8 +2516,8 @@ END_FUNC op_load_from_dict_or_deref
 extern dict_type
 
 DEF_FUNC_BARE op_match_mapping
-    mov rdi, [r13 - 16]           ; peek TOS payload (16 bytes/slot)
-    cmp qword [r13 - 8], TAG_PTR
+    mov rdi, [r13 - 8]            ; peek TOS payload
+    cmp byte [r15 - 1], TAG_PTR
     jne .mm_false                  ; non-pointer → not a mapping
     mov rax, [rdi + PyObject.ob_type]
     ; Check if it's a dict or has tp_as_mapping with mp_subscript
@@ -2625,8 +2553,8 @@ extern str_type
 extern bytes_type
 
 DEF_FUNC_BARE op_match_sequence
-    mov rdi, [r13 - 16]           ; peek TOS payload (16 bytes/slot)
-    cmp qword [r13 - 8], TAG_PTR
+    mov rdi, [r13 - 8]            ; peek TOS payload
+    cmp byte [r15 - 1], TAG_PTR
     jne .ms_false                  ; non-pointer → not a sequence
     mov rax, [rdi + PyObject.ob_type]
     ; Exclude str, bytes, dict
@@ -2677,9 +2605,9 @@ DEF_FUNC op_match_keys, MK_FRAME
 
     ; TOS = keys tuple, TOS1 = subject (16 bytes/slot)
     ; Peek at both — don't pop either! Push result on top.
-    mov rax, [r13 - 16]           ; keys tuple (TOS)
+    mov rax, [r13 - 8]            ; keys tuple (TOS)
     mov [rbp - MK_KEYS], rax
-    mov rax, [r13 - 32]           ; subject (TOS1)
+    mov rax, [r13 - 16]           ; subject (TOS1)
     mov [rbp - MK_SUBJ], rax
 
     ; Allocate values tuple
@@ -2697,11 +2625,10 @@ DEF_FUNC op_match_keys, MK_FRAME
 
     push rdx
 
-    ; Get key (fat tuple: *16)
+    ; Get key
     mov rax, [rbp - MK_KEYS]
-    mov rsi, rdx
-    shl rsi, 4
-    mov rsi, [rax + PyTupleObject.ob_item + rsi]  ; key payload
+    mov rsi, [rax + PyTupleObject.ob_item]        ; payloads
+    mov rsi, [rsi + rdx*8]                         ; key payload
 
     ; Look up in subject
     mov rdi, [rbp - MK_SUBJ]
@@ -2718,11 +2645,10 @@ DEF_FUNC op_match_keys, MK_FRAME
     push rdx
     INCREF_VAL rax, r9          ; tag-aware INCREF
     mov rcx, [rbp - MK_VALS]
-    mov r8, rdx
-    shl r8, 4
-    mov [rcx + PyTupleObject.ob_item + r8], rax
-    ; Use tag from dict_get directly
-    mov [rcx + PyTupleObject.ob_item + r8 + 8], r9
+    mov r8, [rcx + PyTupleObject.ob_item]         ; payloads
+    mov r10, [rcx + PyTupleObject.ob_item_tags]   ; tags
+    mov [r8 + rdx*8], rax
+    mov byte [r10 + rdx], r9b                     ; tag from dict_get
 
     pop rdx
     inc rdx
@@ -2780,8 +2706,7 @@ DEF_FUNC op_match_class, MC_FRAME
     mov [rbp - MC_KWATTRS], rax
     VPOP rax                        ; class (TOS1)
     mov [rbp - MC_CLASS], rax
-    VPOP rax                        ; subject (TOS2)
-    mov rdx, [r13 + 8]             ; subject tag
+    VPOP_VAL rax, rdx               ; subject (TOS2) + tag
     mov [rbp - MC_SUBJ], rax
     mov [rbp - MC_SUBJ_TAG], rdx
 
@@ -2886,11 +2811,10 @@ DEF_FUNC op_match_class, MC_FRAME
     cmp rcx, [rbp - MC_NPOS]
     jge .mc_kw_start
 
-    ; Get attr name from __match_args__[i] (fat: *16)
+    ; Get attr name from __match_args__[i]
     mov rax, [rbp - MC_MATCHARGS]
-    mov r8, rcx
-    shl r8, 4
-    mov rsi, [rax + PyTupleObject.ob_item + r8]  ; name string
+    mov rsi, [rax + PyTupleObject.ob_item]       ; payloads
+    mov rsi, [rsi + rcx*8]                       ; name string
 
     ; Call subject's tp_getattr(subject, name)
     mov rdi, [rbp - MC_SUBJ]
@@ -2909,10 +2833,10 @@ DEF_FUNC op_match_class, MC_FRAME
     mov r9, rdx                     ; save tag
     mov rcx, [rbp - MC_IDX]
     mov rdx, [rbp - MC_RESULT]
-    mov r8, rcx
-    shl r8, 4
-    mov [rdx + PyTupleObject.ob_item + r8], rax
-    mov [rdx + PyTupleObject.ob_item + r8 + 8], r9   ; tag from tp_getattr
+    mov r8, [rdx + PyTupleObject.ob_item]        ; payloads
+    mov r10, [rdx + PyTupleObject.ob_item_tags]  ; tags
+    mov [r8 + rcx*8], rax
+    mov byte [r10 + rcx], r9b                    ; tag from tp_getattr
 
     inc qword [rbp - MC_IDX]
     jmp .mc_pos_loop
@@ -2926,10 +2850,9 @@ DEF_FUNC op_match_class, MC_FRAME
     cmp rcx, [rax + PyTupleObject.ob_size]
     jge .mc_success
 
-    ; Get attr name from kw_attrs[j] (fat: *16)
-    mov r8, rcx
-    shl r8, 4
-    mov rsi, [rax + PyTupleObject.ob_item + r8]  ; name string
+    ; Get attr name from kw_attrs[j]
+    mov r8, [rax + PyTupleObject.ob_item]        ; payloads
+    mov rsi, [r8 + rcx*8]                        ; name string
 
     ; Call subject's tp_getattr(subject, name)
     mov rdi, [rbp - MC_SUBJ]
@@ -2949,10 +2872,10 @@ DEF_FUNC op_match_class, MC_FRAME
     mov rcx, [rbp - MC_IDX]
     add rcx, [rbp - MC_NPOS]
     mov rdx, [rbp - MC_RESULT]
-    mov r8, rcx
-    shl r8, 4
-    mov [rdx + PyTupleObject.ob_item + r8], rax
-    mov [rdx + PyTupleObject.ob_item + r8 + 8], r9   ; tag from tp_getattr
+    mov r8, [rdx + PyTupleObject.ob_item]        ; payloads
+    mov r10, [rdx + PyTupleObject.ob_item_tags]  ; tags
+    mov [r8 + rcx*8], rax
+    mov byte [r10 + rcx], r9b                    ; tag from tp_getattr
 
     inc qword [rbp - MC_IDX]
     jmp .mc_kw_loop
@@ -3043,9 +2966,7 @@ DEF_FUNC_BARE op_call_intrinsic_2
 
     ; For type parameter intrinsics, just keep TOS1 and discard TOS
     ; (a simplification — full type parameter support would need more)
-    sub r13, 16
-    mov rdi, [r13]
-    mov rsi, [r13 + 8]
+    VPOP_VAL rdi, rsi
     DECREF_VAL rdi, rsi
     ; TOS1 stays
     DISPATCH
@@ -3053,8 +2974,8 @@ DEF_FUNC_BARE op_call_intrinsic_2
 .ci2_prep_reraise:
     ; INTRINSIC_PREP_RERAISE_STAR: TOS = exc_list, TOS1 = orig_exc
     ; Delegate to prep_reraise_star(orig, excs_list)
-    VPOP rsi                       ; rsi = exc_list
-    VPOP rdi                       ; rdi = orig_exc
+    VPOP_VAL rsi, rdx              ; rsi = exc_list
+    VPOP_VAL rdi, rcx              ; rdi = orig_exc
     call prep_reraise_star
     VPUSH_PTR rax
     DISPATCH
@@ -3068,10 +2989,8 @@ END_FUNC op_call_intrinsic_2
 ;; Followed by 1 CACHE entry (2 bytes).
 ;; ============================================================================
 DEF_FUNC_BARE op_binary_op_add_int
-    VPOP rsi                   ; right
-    mov r8, [r13 + 8]         ; right tag
-    VPOP rdi                   ; left
-    mov r9, [r13 + 8]         ; left tag
+    VPOP_VAL rsi, r8            ; right + tag
+    VPOP_VAL rdi, r9            ; left + tag
     ; Guard: both SmallInt (tag-based)
     cmp r9d, TAG_SMALLINT
     jne .add_int_deopt_repush
@@ -3088,8 +3007,8 @@ DEF_FUNC_BARE op_binary_op_add_int
     DISPATCH
 .add_int_deopt_repush:
     ; Overflow: re-push operands and deopt
-    VPUSH_INT rdi
-    VPUSH_INT rsi
+    VPUSH_VAL rdi, r9
+    VPUSH_VAL rsi, r8
 .add_int_deopt:
     ; Rewrite opcode back to BINARY_OP (122)
     mov byte [rbx - 2], 122
@@ -3105,10 +3024,8 @@ END_FUNC op_binary_op_add_int
 ;; Followed by 1 CACHE entry (2 bytes).
 ;; ============================================================================
 DEF_FUNC_BARE op_binary_op_sub_int
-    VPOP rsi                   ; right
-    mov r8, [r13 + 8]         ; right tag
-    VPOP rdi                   ; left
-    mov r9, [r13 + 8]         ; left tag
+    VPOP_VAL rsi, r8            ; right + tag
+    VPOP_VAL rdi, r9            ; left + tag
     ; Guard: both SmallInt (tag-based)
     cmp r9d, TAG_SMALLINT
     jne .sub_int_deopt_repush
@@ -3125,8 +3042,8 @@ DEF_FUNC_BARE op_binary_op_sub_int
     DISPATCH
 .sub_int_deopt_repush:
     ; Overflow or type mismatch: re-push operands and deopt
-    VPUSH_INT rdi
-    VPUSH_INT rsi
+    VPUSH_VAL rdi, r9
+    VPUSH_VAL rsi, r8
 .sub_int_deopt:
     ; Rewrite opcode back to BINARY_OP (122)
     mov byte [rbx - 2], 122
@@ -3142,10 +3059,8 @@ END_FUNC op_binary_op_sub_int
 ;; Followed by 1 CACHE entry (2 bytes).
 ;; ============================================================================
 DEF_FUNC_BARE op_binary_op_add_float
-    VPOP rsi                   ; right
-    mov r8, [r13 + 8]         ; right tag
-    VPOP rdi                   ; left
-    mov r9, [r13 + 8]         ; left tag
+    VPOP_VAL rsi, r8            ; right + tag
+    VPOP_VAL rdi, r9            ; left + tag
     cmp r9d, TAG_FLOAT
     jne .add_float_deopt_repush
     cmp r8d, TAG_FLOAT
@@ -3169,10 +3084,8 @@ END_FUNC op_binary_op_add_float
 ;; op_binary_op_sub_float - Specialized float subtract (opcode 218)
 ;; ============================================================================
 DEF_FUNC_BARE op_binary_op_sub_float
-    VPOP rsi                   ; right
-    mov r8, [r13 + 8]         ; right tag
-    VPOP rdi                   ; left
-    mov r9, [r13 + 8]         ; left tag
+    VPOP_VAL rsi, r8            ; right + tag
+    VPOP_VAL rdi, r9            ; left + tag
     cmp r9d, TAG_FLOAT
     jne .sub_float_deopt_repush
     cmp r8d, TAG_FLOAT
@@ -3196,10 +3109,8 @@ END_FUNC op_binary_op_sub_float
 ;; op_binary_op_mul_float - Specialized float multiply (opcode 219)
 ;; ============================================================================
 DEF_FUNC_BARE op_binary_op_mul_float
-    VPOP rsi                   ; right
-    mov r8, [r13 + 8]         ; right tag
-    VPOP rdi                   ; left
-    mov r9, [r13 + 8]         ; left tag
+    VPOP_VAL rsi, r8            ; right + tag
+    VPOP_VAL rdi, r9            ; left + tag
     cmp r9d, TAG_FLOAT
     jne .mul_float_deopt_repush
     cmp r8d, TAG_FLOAT
@@ -3223,10 +3134,8 @@ END_FUNC op_binary_op_mul_float
 ;; op_binary_op_truediv_float - Specialized float truediv (opcode 220)
 ;; ============================================================================
 DEF_FUNC_BARE op_binary_op_truediv_float
-    VPOP rsi                   ; right
-    mov r8, [r13 + 8]         ; right tag
-    VPOP rdi                   ; left
-    mov r9, [r13 + 8]         ; left tag
+    VPOP_VAL rsi, r8            ; right + tag
+    VPOP_VAL rdi, r9            ; left + tag
     cmp r9d, TAG_FLOAT
     jne .truediv_float_deopt_repush
     cmp r8d, TAG_FLOAT
@@ -3258,10 +3167,8 @@ END_FUNC op_binary_op_truediv_float
 ;; Followed by 1 CACHE entry (2 bytes).
 ;; ============================================================================
 DEF_FUNC_BARE op_binary_op_mul_int
-    VPOP rsi                   ; right
-    mov r8, [r13 + 8]         ; right tag
-    VPOP rdi                   ; left
-    mov r9, [r13 + 8]         ; left tag
+    VPOP_VAL rsi, r8            ; right + tag
+    VPOP_VAL rdi, r9            ; left + tag
     cmp r9d, TAG_SMALLINT
     jne .mul_int_deopt_repush
     cmp r8d, TAG_SMALLINT
@@ -3274,8 +3181,8 @@ DEF_FUNC_BARE op_binary_op_mul_int
     DISPATCH
 .mul_int_deopt_repush_vals:
     ; imul clobbered rax/rdx, use saved values
-    VPUSH_INT rdi
-    VPUSH_INT rsi
+    VPUSH_VAL rdi, r9
+    VPUSH_VAL rsi, r8
     jmp .mul_int_deopt
 .mul_int_deopt_repush:
     VUNDROP 2
@@ -3293,10 +3200,8 @@ END_FUNC op_binary_op_mul_int
 ;; Followed by 1 CACHE entry (2 bytes).
 ;; ============================================================================
 DEF_FUNC_BARE op_binary_op_floordiv_int
-    VPOP rsi                   ; right
-    mov r8, [r13 + 8]         ; right tag
-    VPOP rdi                   ; left
-    mov r9, [r13 + 8]         ; left tag
+    VPOP_VAL rsi, r8            ; right + tag
+    VPOP_VAL rdi, r9            ; left + tag
     ; Guard: both SmallInt
     cmp r9d, TAG_SMALLINT
     jne .fdiv_int_deopt_repush
@@ -3338,10 +3243,8 @@ END_FUNC op_binary_op_floordiv_int
 ;; ============================================================================
 DEF_FUNC_BARE op_compare_op_int
     shr ecx, 4                 ; ecx = comparison op (0-5)
-    VPOP rsi                   ; right
-    mov r8, [r13 + 8]         ; right tag
-    VPOP rdi                   ; left
-    mov r9, [r13 + 8]         ; left tag
+    VPOP_VAL rsi, r8            ; right + tag
+    VPOP_VAL rdi, r9            ; left + tag
     ; Guard: both SmallInt (tag-based)
     cmp r9d, TAG_SMALLINT
     jne .cmp_int_deopt_repush
@@ -3407,10 +3310,8 @@ END_FUNC op_compare_op_int
 ;; ============================================================================
 DEF_FUNC_BARE op_compare_op_int_jump_false
     shr ecx, 4                 ; ecx = comparison op (0-5)
-    VPOP rsi                   ; right
-    mov r8, [r13 + 8]         ; right tag
-    VPOP rdi                   ; left
-    mov r9, [r13 + 8]         ; left tag
+    VPOP_VAL rsi, r8            ; right + tag
+    VPOP_VAL rdi, r9            ; left + tag
     ; Guard: both SmallInt
     cmp r9d, TAG_SMALLINT
     jne .cijf_deopt_repush
@@ -3475,10 +3376,8 @@ END_FUNC op_compare_op_int_jump_false
 ;; ============================================================================
 DEF_FUNC_BARE op_compare_op_int_jump_true
     shr ecx, 4                 ; ecx = comparison op (0-5)
-    VPOP rsi                   ; right
-    mov r8, [r13 + 8]         ; right tag
-    VPOP rdi                   ; left
-    mov r9, [r13 + 8]         ; left tag
+    VPOP_VAL rsi, r8            ; right + tag
+    VPOP_VAL rdi, r9            ; left + tag
     ; Guard: both SmallInt
     cmp r9d, TAG_SMALLINT
     jne .cijt_deopt_repush

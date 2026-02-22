@@ -301,9 +301,8 @@ DEF_FUNC builtin_enumerate, EN_FRAME
     jge .enum_kw_done
 
     ; Get kwarg name string ptr from tuple
-    mov r10, r9
-    shl r10, 4
-    mov r10, [rax + PyTupleObject.ob_item + r10]
+    mov r10, [rax + PyTupleObject.ob_item]        ; kw names payloads
+    mov r10, [r10 + r9*8]
 
     ; Compute value offset in args: (original_n_pos + kw_idx) * 16
     ; Use r8 (original n_pos), NOT [rbp - EN_NPOS] which may have been updated
@@ -356,9 +355,8 @@ DEF_FUNC builtin_enumerate, EN_FRAME
     push r9
     push r11
     ; Reload r10 = kwarg name string ptr from tuple
-    mov r10, r9
-    shl r10, 4
-    mov r10, [rax + PyTupleObject.ob_item + r10]
+    mov r10, [rax + PyTupleObject.ob_item]        ; kw names payloads
+    mov r10, [r10 + r9*8]
     lea rdi, [r10 + PyStrObject.data]
     CSTRING rsi, "iterable"
     call ap_strcmp
@@ -481,13 +479,15 @@ DEF_FUNC_LOCAL enumerate_iternext
     mov rdi, 2
     call tuple_new
     ; rax = new tuple
-    ; Fill: tuple[0] = count, tuple[1] = value (fat 16-byte slots)
+    ; Fill: tuple[0] = count, tuple[1] = value
+    mov r8, [rax + PyTupleObject.ob_item]       ; payloads
+    mov r9, [rax + PyTupleObject.ob_item_tags]  ; tags
     pop rcx                  ; count tag
-    mov [rax + PyTupleObject.ob_item], r13            ; count payload (slot 0)
-    mov [rax + PyTupleObject.ob_item + 8], rcx        ; count tag
+    mov [r8], r13            ; count payload (slot 0)
+    mov byte [r9], cl        ; count tag
     pop rcx                  ; value tag
-    mov [rax + PyTupleObject.ob_item + 16], r12       ; value payload (slot 1)
-    mov [rax + PyTupleObject.ob_item + 24], rcx       ; value tag
+    mov [r8 + 8], r12        ; value payload (slot 1)
+    mov byte [r9 + 1], cl    ; value tag
 
     pop r13
     pop r12
@@ -565,9 +565,8 @@ DEF_FUNC builtin_zip, ZP_FRAME
     jge .zip_kw_done
 
     ; Get kwarg name string ptr from tuple
-    mov r10, r9
-    shl r10, 4
-    mov r10, [rax + PyTupleObject.ob_item + r10]
+    mov r10, [rax + PyTupleObject.ob_item]        ; kw names payloads
+    mov r10, [r10 + r9*8]
 
     ; Compute value offset: (n_pos + kw_idx) * 16
     mov r11, r12
@@ -720,11 +719,11 @@ DEF_FUNC_LOCAL zip_iternext
     test edx, edx
     jz .zip_partial_cleanup
 
-    ; Store value in tuple at fat stride (rdx = tag from iternext)
-    mov rcx, r15
-    shl rcx, 4                     ; index * 16
-    mov [r14 + PyTupleObject.ob_item + rcx], rax       ; payload
-    mov [r14 + PyTupleObject.ob_item + rcx + 8], rdx   ; tag
+    ; Store value in tuple (rdx = tag from iternext)
+    mov r8, [r14 + PyTupleObject.ob_item]        ; payloads
+    mov r9, [r14 + PyTupleObject.ob_item_tags]   ; tags
+    mov [r8 + r15*8], rax                        ; payload
+    mov byte [r9 + r15], dl                      ; tag
 
     inc r15
     jmp .zip_next_loop
@@ -748,10 +747,10 @@ DEF_FUNC_LOCAL zip_iternext
     cmp rcx, r15
     jge .zip_free_tuple
     push rcx
-    mov rax, rcx
-    shl rax, 4
-    mov rdi, [r14 + PyTupleObject.ob_item + rax]
-    mov rsi, [r14 + PyTupleObject.ob_item + rax + 8]
+    mov r8, [r14 + PyTupleObject.ob_item]        ; payloads
+    mov r9, [r14 + PyTupleObject.ob_item_tags]   ; tags
+    mov rdi, [r8 + rcx*8]
+    movzx esi, byte [r9 + rcx]
     DECREF_VAL rdi, rsi
     pop rcx
     inc rcx
@@ -763,10 +762,10 @@ DEF_FUNC_LOCAL zip_iternext
 .zip_zero_loop:
     cmp rcx, r12
     jge .zip_do_free
-    mov rax, rcx
-    shl rax, 4
-    mov qword [r14 + PyTupleObject.ob_item + rax], 0
-    mov qword [r14 + PyTupleObject.ob_item + rax + 8], 0
+    mov r8, [r14 + PyTupleObject.ob_item]        ; payloads
+    mov r9, [r14 + PyTupleObject.ob_item_tags]   ; tags
+    mov qword [r8 + rcx*8], 0
+    mov byte [r9 + rcx], 0
     inc rcx
     jmp .zip_zero_loop
 .zip_do_free:

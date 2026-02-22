@@ -6,9 +6,9 @@
 ; Register convention (callee-saved, preserved across handlers):
 ;   rbx = bytecode instruction pointer (IP into co_code[])
 ;   r12 = current frame pointer (PyFrame*)
-;   r13 = value stack top pointer
-;   r14 = co_consts tuple data pointer (&tuple.ob_item[0])
-;   r15 = co_names tuple data pointer (&tuple.ob_item[0])
+;   r13 = value stack payload top pointer
+;   r14 = locals_tag_base pointer (frame's tag sidecar for localsplus[])
+;   r15 = value stack tag top pointer
 ;
 ; ecx = opcode argument on handler entry (set by eval_dispatch)
 ; rbx has already been advanced past the 2-byte instruction word.
@@ -29,7 +29,7 @@ section .text
 extern eval_dispatch
 extern eval_saved_rbx
 extern eval_saved_r13
-extern trace_opcodes
+extern eval_saved_r15
 extern opcode_table
 extern obj_dealloc
 extern obj_incref
@@ -63,7 +63,7 @@ DEF_FUNC_BARE op_get_awaitable
     VPEEK rdi                  ; rdi = TOS payload (don't pop yet)
 
     ; Must be TAG_PTR to check ob_type
-    cmp qword [r13 - 8], TAG_PTR
+    cmp byte [r15 - 1], TAG_PTR
     jne .gaw_error
 
     ; Check if it's a coroutine — already awaitable
@@ -128,8 +128,7 @@ END_FUNC op_get_awaitable
 ;; ============================================================================
 DEF_FUNC_BARE op_get_aiter
     ; Pop TOS = async iterable
-    VPOP rdi
-    mov rsi, [r13 + 8]        ; tag of popped value
+    VPOP_VAL rdi, rsi
 
     ; Must be TAG_PTR to dereference
     cmp esi, TAG_PTR
@@ -186,7 +185,7 @@ DEF_FUNC_BARE op_get_anext
     VPEEK rdi
 
     ; Must be TAG_PTR
-    cmp qword [r13 - 8], TAG_PTR
+    cmp byte [r15 - 1], TAG_PTR
     jne .gan_error
 
     ; Call tp_iternext on the async iterator
@@ -372,7 +371,7 @@ DEF_FUNC_BARE op_end_async_for
 
     ; TOS = exc_val (the exception that was raised)
     VPEEK rdi                  ; peek at exc payload
-    mov rsi, [r13 - 8]        ; exc tag
+    movzx rsi, byte [r15 - 1]  ; exc tag
 
     ; Check if it's StopAsyncIteration
     cmp rsi, TAG_PTR
@@ -394,7 +393,7 @@ DEF_FUNC_BARE op_end_async_for
 
 .eaf_reraise:
     ; Not StopAsyncIteration — re-raise original exception
-    VPOP rdi                   ; exc payload
+    VPOP_VAL rdi, rsi          ; exc payload+tag
     ; The exception is already a pointer; store as current_exception
     ; and re-raise via eval_exception_unwind (which handles unwind).
     ; raise_exception_obj INCREFs + XDECREFs old current_exception for us.
@@ -403,16 +402,12 @@ DEF_FUNC_BARE op_end_async_for
 .eaf_stop:
     ; StopAsyncIteration — pop exc and aiter, jump forward
     ; Pop exc
-    sub r13, 16
-    mov rdi, [r13]
-    mov rsi, [r13 + 8]
+    VPOP_VAL rdi, rsi
     push rcx                   ; save arg
     DECREF_VAL rdi, rsi
 
     ; Pop aiter
-    sub r13, 16
-    mov rdi, [r13]
-    mov rsi, [r13 + 8]
+    VPOP_VAL rdi, rsi
     DECREF_VAL rdi, rsi
     pop rcx                    ; restore arg
 
@@ -439,7 +434,7 @@ DEF_FUNC_BARE op_cleanup_throw
     ; current_exception = 0 (cleared by eval_exception_unwind)
 
     ; Read exception from TOS
-    mov rax, [r13 - 16]          ; exception payload
+    mov rax, [r13 - 8]          ; exception payload
     test rax, rax
     jz .ct_no_exc
 
@@ -457,8 +452,10 @@ DEF_FUNC_BARE op_cleanup_throw
     cmp qword [rdi + PyTupleObject.ob_size], 0
     je .ct_si_none
     ; value = args[0] (fat value in 16-byte slot)
-    mov r8, [rdi + PyTupleObject.ob_item]       ; value payload
-    mov r9, [rdi + PyTupleObject.ob_item + 8]   ; value tag
+    mov r8, [rdi + PyTupleObject.ob_item]       ; payloads
+    mov r9, [rdi + PyTupleObject.ob_item_tags]  ; tags
+    mov r8, [r8]                                ; value payload
+    movzx r9d, byte [r9]                        ; value tag
     INCREF_VAL r8, r9
     jmp .ct_si_got_val
 .ct_si_none:
@@ -470,13 +467,10 @@ DEF_FUNC_BARE op_cleanup_throw
     push r8
     push r9
     ; Pop and DECREF the StopIteration exception (TOS)
-    sub r13, 16
-    mov rdi, [r13]
+    VPOP rdi
     call obj_decref
     ; Pop and DECREF_VAL the sub-iterator
-    sub r13, 16
-    mov rdi, [r13]
-    mov rsi, [r13 + 8]
+    VPOP_VAL rdi, rsi
     DECREF_VAL rdi, rsi
     ; Restore extracted value and push
     pop r9

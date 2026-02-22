@@ -56,11 +56,11 @@ DEF_FUNC_BARE list_iter_next
     cmp rcx, [rax + PyListObject.ob_size]
     jge .exhausted
 
-    ; Get fat item (16-byte stride)
+    ; Get item (payload + tag arrays)
     mov rdx, [rax + PyListObject.ob_item]
-    shl rcx, 4                    ; index * 16
-    mov rax, [rdx + rcx]          ; payload
-    mov rdx, [rdx + rcx + 8]     ; tag
+    mov r8, [rax + PyListObject.ob_item_tags]
+    mov rax, [rdx + rcx * 8]     ; payload
+    movzx edx, byte [r8 + rcx]   ; tag
     INCREF_VAL rax, rdx
 
     ; Advance index
@@ -148,10 +148,11 @@ DEF_FUNC_BARE tuple_iter_next
     cmp rcx, [rax + PyTupleObject.ob_size]
     jge .exhausted
 
-    ; Get fat item (16-byte slot)
-    shl rcx, 4                  ; index * 16
-    mov rdx, [rax + PyTupleObject.ob_item + rcx + 8]   ; tag
-    mov rax, [rax + PyTupleObject.ob_item + rcx]        ; payload
+    ; Get item (payload + tag arrays)
+    mov rdx, [rax + PyTupleObject.ob_item_tags]
+    mov rax, [rax + PyTupleObject.ob_item]
+    mov rax, [rax + rcx * 8]       ; payload
+    movzx edx, byte [rdx + rcx]    ; tag
     INCREF_VAL rax, rdx
 
     inc qword [rdi + PyTupleIterObject.it_index]

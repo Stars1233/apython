@@ -180,20 +180,24 @@ DEF_FUNC eval_frame
     ; Normal entry: start from co_code beginning
     lea rbx, [rax + PyCodeObject.co_code]
     mov r13, [r12 + PyFrame.stack_base]
+    mov r15, [r12 + PyFrame.stack_tag_base]
     jmp .eval_setup_consts
 
 .eval_resume:
     ; Generator resume: use saved IP and stack pointer
     mov r13, [r12 + PyFrame.stack_ptr]
+    mov r15, [r12 + PyFrame.stack_tag_ptr]
 
 .eval_setup_consts:
-    ; r14 = co_consts fat tuple data pointer (past tuple header)
+    ; Derive co_consts payload + tags pointers
     mov r14, [rax + PyCodeObject.co_consts]
-    add r14, PyTupleObject.ob_item
+    mov rdx, [r14 + PyTupleObject.ob_item_tags]
+    mov r14, [r14 + PyTupleObject.ob_item]       ; co_consts payload ptr (→ global)
 
-    ; r15 = &co_names->ob_item (co_names tuple data pointer)
+    ; rcx = co_names payload pointer, r8 = co_names tags pointer
     mov rcx, [rax + PyCodeObject.co_names]
-    lea r15, [rcx + PyTupleObject.ob_item]
+    mov r8, [rcx + PyTupleObject.ob_item_tags]
+    mov rcx, [rcx + PyTupleObject.ob_item]
 
     ; Save caller's eval globals (for nested eval_frame calls)
     mov rax, [rel eval_saved_rbx]
@@ -202,8 +206,27 @@ DEF_FUNC eval_frame
     push rax
     mov rax, [rel eval_saved_r13]
     push rax
+    mov rax, [rel eval_saved_r15]
+    push rax
+    mov rax, [rel eval_co_names]
+    push rax
+    mov rax, [rel eval_co_names_tags]
+    push rax
+    mov rax, [rel eval_co_consts_tags]
+    push rax
+    mov rax, [rel eval_co_consts]
+    push rax
     mov rax, [rel eval_base_rsp]
     push rax
+
+    ; Set globals for this frame
+    mov [rel eval_co_consts], r14               ; co_consts payload → global
+    mov [rel eval_co_consts_tags], rdx
+    mov [rel eval_co_names_tags], r8
+    mov [rel eval_co_names], rcx
+
+    ; r14 = locals_tag_base (hot: used by LOAD_FAST/STORE_FAST)
+    mov r14, [r12 + PyFrame.locals_tag_base]
 
     ; Set up for this frame
     mov [rel eval_saved_r12], r12
@@ -213,6 +236,7 @@ DEF_FUNC eval_frame
     ; Check for pending throw (set by gen_throw before resume)
     mov [rel eval_saved_rbx], rbx
     mov [rel eval_saved_r13], r13
+    mov [rel eval_saved_r15], r15
     cmp byte [rel throw_pending], 0
     je .no_throw
 
@@ -229,7 +253,8 @@ END_FUNC eval_frame
 align 16
 DEF_FUNC_BARE eval_dispatch
     mov [rel eval_saved_rbx], rbx  ; save bytecode IP for exception unwind
-    mov [rel eval_saved_r13], r13  ; save value stack ptr for exception unwind
+    mov [rel eval_saved_r13], r13  ; save payload stack ptr for exception unwind
+    mov [rel eval_saved_r15], r15  ; save tag stack ptr for exception unwind
     movzx eax, byte [rbx]      ; load opcode
     movzx ecx, byte [rbx+1]    ; load arg into ecx
     add rbx, 2                  ; advance past instruction word
@@ -254,6 +279,16 @@ DEF_FUNC_BARE eval_return
     ; Use rcx as scratch — rdx holds return tag (fat value protocol)
     pop rcx
     mov [rel eval_base_rsp], rcx
+    pop rcx
+    mov [rel eval_co_consts], rcx
+    pop rcx
+    mov [rel eval_co_consts_tags], rcx
+    pop rcx
+    mov [rel eval_co_names_tags], rcx
+    pop rcx
+    mov [rel eval_co_names], rcx
+    pop rcx
+    mov [rel eval_saved_r15], rcx
     pop rcx
     mov [rel eval_saved_r13], rcx
     pop rcx
@@ -398,10 +433,11 @@ DEF_FUNC_BARE eval_exception_unwind
     ; non-local jump to here bypasses the restore, leaving regs corrupted.
     ; rbx: use saved copy from eval_dispatch (pre-advance, points to instruction)
     ; r12: reload from frame pointer (saved in eval_frame_r12)
-    ; r14/r15: re-derive from code object
+    ; r14: re-derive locals_tag_base from frame
     mov rbx, [rel eval_saved_rbx]   ; restore bytecode IP (pre-advance copy)
     mov r12, [rel eval_saved_r12]   ; restore frame pointer
-    mov r13, [rel eval_saved_r13]   ; restore value stack pointer
+    mov r13, [rel eval_saved_r13]   ; restore payload stack pointer
+    mov r15, [rel eval_saved_r15]   ; restore tag stack pointer
 
     ; Attach traceback to exception if none exists yet
     mov rax, [rel current_exception]
@@ -416,12 +452,20 @@ DEF_FUNC_BARE eval_exception_unwind
     mov [rdx + PyExceptionObject.exc_tb], rax  ; attach (transfer ownership)
 .skip_tb:
 
-    ; Re-derive r14/r15 from the code object
+    ; Re-derive globals + r14 from the code object
     mov rax, [r12 + PyFrame.code]
-    mov r14, [rax + PyCodeObject.co_consts]
-    add r14, PyTupleObject.ob_item          ; fat tuple data (past header)
+    mov rcx, [rax + PyCodeObject.co_consts]
+    mov rdx, [rcx + PyTupleObject.ob_item_tags]
+    mov rcx, [rcx + PyTupleObject.ob_item]          ; consts payload array
+    mov [rel eval_co_consts], rcx
+    mov [rel eval_co_consts_tags], rdx
     mov rcx, [rax + PyCodeObject.co_names]
-    lea r15, [rcx + PyTupleObject.ob_item]
+    mov r8, [rcx + PyTupleObject.ob_item_tags]
+    mov rcx, [rcx + PyTupleObject.ob_item]
+    mov [rel eval_co_names], rcx
+    mov [rel eval_co_names_tags], r8
+    ; r14 = locals_tag_base (hot register)
+    mov r14, [r12 + PyFrame.locals_tag_base]
 
     ; Compute bytecode offset in instruction units (halfwords)
     ; eval_saved_rbx points to the instruction word (before add rbx, 2)
@@ -449,27 +493,33 @@ DEF_FUNC_BARE eval_exception_unwind
     push rcx                 ; save push_lasti flag
 
     ; Adjust value stack to target depth
-    ; target r13 = stack_base + depth * 16 (128-bit slots)
+    ; target r13/r15 = stack_base + depth
     mov rdi, [r12 + PyFrame.stack_base]
+    mov rsi, [r12 + PyFrame.stack_tag_base]
     mov eax, edx
-    shl rax, 4               ; depth * 16
-    add rdi, rax
+    lea r8, [rsi + rax]      ; target tag ptr
+    shl rax, 3               ; depth * 8 (payload)
+    add rdi, rax             ; target payload ptr
     ; DECREF any items being popped from stack
     cmp r13, rdi
     jbe .stack_adjusted
 .pop_stack:
-    sub r13, 16
+    sub r13, 8
+    sub r15, 1
     cmp r13, rdi
     jb .stack_adjusted
-    push rdi                 ; save target stack ptr
+    push r8                  ; save target tag ptr (caller-saved, clobbered by XDECREF_VAL)
+    push rdi                 ; save target payload ptr
     mov rdi, [r13]           ; payload
-    mov rsi, [r13 + 8]      ; tag
+    movzx rsi, byte [r15]    ; tag
     XDECREF_VAL rdi, rsi    ; tag-aware NULL-safe DECREF
     pop rdi
+    pop r8
     cmp r13, rdi
     ja .pop_stack
 .stack_adjusted:
-    mov r13, rdi             ; set stack to target depth
+    mov r13, rdi             ; set payload stack to target depth
+    mov r15, r8              ; set tag stack to target depth
 
     ; Check push_lasti flag
     pop rcx                  ; restore push_lasti
@@ -500,13 +550,15 @@ DEF_FUNC_BARE eval_exception_unwind
     ; No handler found - must clean up value stack before returning
     ; DECREF all items on value stack (from stack_base to r13)
     mov rdi, [r12 + PyFrame.stack_base]
+    mov rsi, [r12 + PyFrame.stack_tag_base]
 .no_handler_cleanup:
     cmp r13, rdi
     jbe .no_handler_done
-    sub r13, 16
+    sub r13, 8
+    sub r15, 1
     push rdi                 ; save stack_base
     mov rdi, [r13]           ; payload
-    mov rsi, [r13 + 8]       ; tag
+    movzx rsi, byte [r15]    ; tag
     XDECREF_VAL rdi, rsi     ; tag-aware NULL-safe DECREF
     pop rdi                  ; restore stack_base
     jmp .no_handler_cleanup
@@ -514,7 +566,7 @@ DEF_FUNC_BARE eval_exception_unwind
     ; Clear instr_ptr so gen_throw/gen_send detect exhaustion
     mov qword [r12 + PyFrame.instr_ptr], 0
     xor eax, eax
-    xor edx, edx              ; TAG_NULL for proper fat-value return
+    xor edx, edx              ; TAG_NULL for proper value return
     jmp eval_return
 END_FUNC eval_exception_unwind
 
@@ -705,8 +757,10 @@ DEF_FUNC op_check_eg_match, CEM_FRAME
     mov [rbp - CEM_TMP1], rax ; TMP1 = tuple
     mov rcx, [rbp - CEM_EXC]
     INCREF rcx
-    mov [rax + PyTupleObject.ob_item], rcx
-    mov qword [rax + PyTupleObject.ob_item + 8], TAG_PTR
+    mov rdx, [rax + PyTupleObject.ob_item]
+    mov r8, [rax + PyTupleObject.ob_item_tags]
+    mov [rdx], rcx
+    mov byte [r8], TAG_PTR
 
     ; Create empty message string (heap — stored in exception struct)
     extern str_from_cstr_heap
@@ -887,15 +941,16 @@ DEF_FUNC_BARE op_raise_varargs
 
 .raise_exc:
     ; TOS is the exception to raise
-    VPOP rdi
+    VPOP_VAL rdi, r8
     mov [rel eval_saved_r13], r13  ; update saved stack — VPOP consumed the item
+    mov [rel eval_saved_r15], r15
 
     ; Check if it's already an exception object or a type
     ; If it's a type, create an instance with no args
-    cmp qword [r13 + 8], TAG_PTR
-    jne .raise_bad            ; non-pointer can't be an exception
+    cmp r8d, TAG_PTR
+    jne .raise_bad_no_decref  ; non-pointer can't be an exception
     test rdi, rdi
-    jz .raise_bad             ; NULL can't be an exception
+    jz .raise_bad_no_decref   ; NULL can't be an exception
 
     ; Check INSTANCE first (most common case: raise SomeException("msg"))
     ; An instance's ob_type chain might be an exception type
@@ -948,9 +1003,7 @@ DEF_FUNC_BARE op_raise_varargs
     jmp eval_exception_unwind
 
 .raise_bad:
-    ; DECREF the bad value (only if pointer) and raise TypeError
-    cmp qword [r13 + 8], TAG_PTR
-    jne .raise_bad_no_decref
+    ; DECREF the bad value (pointer guaranteed here) and raise TypeError
     call obj_decref
 .raise_bad_no_decref:
     lea rdi, [rel exc_TypeError_type]
@@ -959,12 +1012,12 @@ DEF_FUNC_BARE op_raise_varargs
 
 .raise_from:
     ; TOS = cause, TOS1 = exception
-    VPOP rsi                 ; cause payload
-    mov rcx, [r13 + 8]      ; cause tag
+    VPOP_VAL rsi, rcx         ; cause payload + tag
     push rcx                 ; save cause tag
     push rsi                 ; save cause payload
-    VPOP rdi                 ; exception payload
+    VPOP_VAL rdi, r8          ; exception payload
     mov [rel eval_saved_r13], r13  ; update saved stack — VPOPs consumed both items
+    mov [rel eval_saved_r15], r15
     push rdi                 ; save exception
 
     ; Store __cause__ on exception object (if exception is a pointer)
@@ -997,8 +1050,9 @@ END_FUNC op_raise_varargs
 ; TOS = exception to re-raise
 DEF_FUNC_BARE op_reraise
     ; Pop the exception from value stack
-    VPOP rdi
+    VPOP_VAL rdi, r8
     mov [rel eval_saved_r13], r13  ; update saved stack — VPOP consumed the item
+    mov [rel eval_saved_r15], r15
 
     ; Store it as current exception
     push rdi
@@ -1044,7 +1098,7 @@ op_interpreter_exit:
     mov rax, [rel current_exception]
     test rax, rax
     jnz .unhandled_exception
-    VPOP rax
+    VPOP_VAL rax, rdx
     jmp eval_return
 
 .unhandled_exception:
@@ -1477,6 +1531,16 @@ global eval_saved_r12
 eval_saved_r12: resq 1       ; frame pointer saved at frame entry (for exception unwind)
 global eval_saved_r13
 eval_saved_r13: resq 1       ; value stack ptr saved at dispatch (for exception unwind)
+global eval_saved_r15
+eval_saved_r15: resq 1       ; tag stack ptr saved at dispatch (for exception unwind)
+global eval_co_names
+eval_co_names: resq 1        ; co_names payload pointer (&tuple.ob_item[0])
+global eval_co_names_tags
+eval_co_names_tags: resq 1   ; co_names tag pointer (&tuple.ob_item_tags[0])
+global eval_co_consts
+eval_co_consts: resq 1       ; co_consts payload pointer (&tuple.ob_item[0])
+global eval_co_consts_tags
+eval_co_consts_tags: resq 1  ; co_consts tag pointer (&tuple.ob_item_tags[0])
 
 global kw_names_pending
 kw_names_pending: resq 1     ; tuple of kw names for next CALL, or NULL

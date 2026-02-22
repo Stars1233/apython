@@ -3,9 +3,9 @@
 ; Register convention (callee-saved, preserved across handlers):
 ;   rbx = bytecode instruction pointer (current position in co_code[])
 ;   r12 = current frame pointer (PyFrame*)
-;   r13 = value stack top pointer
-;   r14 = co_consts tuple data pointer (&tuple.ob_item[0])
-;   r15 = co_names tuple data pointer (&tuple.ob_item[0])
+;   r13 = value stack payload top pointer
+;   r14 = locals_tag_base pointer (frame's tag sidecar for localsplus[])
+;   r15 = value stack tag top pointer
 ;
 ; ecx = opcode argument on entry (set by eval_dispatch)
 ; rbx has already been advanced past the 2-byte instruction word.
@@ -21,7 +21,10 @@ section .text
 extern eval_dispatch
 extern eval_saved_rbx
 extern eval_saved_r13
-extern trace_opcodes
+extern eval_saved_r15
+extern eval_co_names
+extern eval_co_consts
+extern eval_co_consts_tags
 extern opcode_table
 extern obj_dealloc
 extern dict_get
@@ -45,7 +48,6 @@ extern user_type_metatype
 extern dunder_get
 extern dunder_call_3
 extern dunder_lookup
-extern smallstr_to_obj
 extern str_type
 extern int_type
 extern float_type
@@ -76,10 +78,11 @@ LSA_FRAME    equ 48
 ;; op_load_const - Load constant from co_consts[arg]
 ;; ============================================================================
 DEF_FUNC_BARE op_load_const
-    ; ecx = arg (index into co_consts fat array)
-    shl ecx, 4                 ; index * 16
-    mov rax, [r14 + rcx]       ; payload
-    mov rdx, [r14 + rcx + 8]   ; tag
+    ; ecx = arg (index into co_consts)
+    mov rax, [rel eval_co_consts]
+    mov rax, [rax + rcx * 8]   ; payload
+    mov rdx, [rel eval_co_consts_tags]
+    movzx edx, byte [rdx + rcx] ; tag
     INCREF_VAL rax, rdx
     VPUSH_VAL rax, rdx
     DISPATCH
@@ -89,14 +92,11 @@ END_FUNC op_load_const
 ;; op_load_fast - Load local variable from frame localsplus[arg]
 ;; ============================================================================
 DEF_FUNC_BARE op_load_fast
-    ; ecx = arg (slot index in localsplus, 16 bytes/slot)
-    lea rsi, [rcx*8]         ; slot * 8 (×2 via SIB, avoids flags clobber)
-    mov rdx, [r12 + rsi*2 + PyFrame.localsplus + 8]  ; tag
-    mov rax, [r12 + rsi*2 + PyFrame.localsplus]       ; payload
+    ; ecx = arg (slot index in localsplus)
+    mov rax, [r12 + PyFrame.localsplus + rcx*8]       ; payload
+    movzx rdx, byte [r14 + rcx]                       ; tag (r14 = locals_tag_base)
     INCREF_VAL rax, rdx     ; tag-aware INCREF
-    mov [r13], rax
-    mov [r13 + 8], rdx
-    add r13, 16
+    VPUSH_VAL rax, rdx
     DISPATCH
 END_FUNC op_load_fast
 
@@ -115,15 +115,14 @@ DEF_FUNC_BARE op_load_global
     ; Check bit 0: if set, push NULL first
     test ecx, 1
     jz .no_push_null
-    mov qword [r13], 0
-    mov qword [r13 + 8], TAG_NULL
-    add r13, 16
+    VPUSH_NULL128
 .no_push_null:
     ; Name index = arg >> 1
     shr ecx, 1
-    ; Get name string from co_names (fat tuple: 16-byte stride)
-    shl ecx, 4
-    mov rdi, [r15 + rcx]       ; rdi = name (PyStrObject*)
+    ; Get name string from co_names (payload array)
+    shl ecx, 3
+    LOAD_CO_NAMES rdi
+    mov rdi, [rdi + rcx]       ; rdi = name (PyStrObject*)
 
     ; Save name on the regular stack for retry
     push rdi
@@ -151,7 +150,7 @@ DEF_FUNC_BARE op_load_global
     imul rax, rax, DICT_ENTRY_SIZE
     add rdi, rax               ; rdi = entry ptr
     mov rax, [rdi + DictEntry.value]
-    mov rdx, [rdi + DictEntry.value_tag]
+    movzx edx, byte [rdi + DictEntry.value_tag]
     add rsp, 8                 ; discard saved name
     jmp .lg_push_result
 
@@ -182,7 +181,7 @@ DEF_FUNC_BARE op_load_global
     imul rax, rax, DICT_ENTRY_SIZE
     add rdi, rax               ; rdi = entry ptr
     mov rax, [rdi + DictEntry.value]
-    mov rdx, [rdi + DictEntry.value_tag]
+    movzx edx, byte [rdi + DictEntry.value_tag]
     jmp .lg_push_result
 
 .not_found:
@@ -216,17 +215,15 @@ DEF_FUNC_BARE op_load_global_module
     movzx eax, word [rbx + 2]  ; CACHE[1] = index
     imul rax, rax, DICT_ENTRY_SIZE
     add rdi, rax               ; rdi = entry ptr
-    mov rdx, [rdi + DictEntry.value_tag]
-    test rdx, rdx
+    movzx edx, byte [rdi + DictEntry.value_tag]
+    test edx, edx
     jz .lgm_deopt              ; TAG_NULL = deleted entry
     mov rax, [rdi + DictEntry.value]
 
     ; Guards passed — now push NULL if needed
     test ecx, 1
     jz .lgm_no_null
-    mov qword [r13], 0
-    mov qword [r13 + 8], TAG_NULL
-    add r13, 16
+    VPUSH_NULL128
 .lgm_no_null:
     INCREF_VAL rax, rdx
     VPUSH_VAL rax, rdx
@@ -264,17 +261,15 @@ DEF_FUNC_BARE op_load_global_builtin
     movzx eax, word [rbx + 2]  ; CACHE[1] = index
     imul rax, rax, DICT_ENTRY_SIZE
     add rdi, rax               ; rdi = entry ptr
-    mov rdx, [rdi + DictEntry.value_tag]
-    test rdx, rdx
+    movzx edx, byte [rdi + DictEntry.value_tag]
+    test edx, edx
     jz .lgb_deopt              ; TAG_NULL = deleted entry
     mov rax, [rdi + DictEntry.value]
 
     ; Guards passed — now push NULL if needed
     test ecx, 1
     jz .lgb_no_null
-    mov qword [r13], 0
-    mov qword [r13 + 8], TAG_NULL
-    add r13, 16
+    VPUSH_NULL128
 .lgb_no_null:
     INCREF_VAL rax, rdx
     VPUSH_VAL rax, rdx
@@ -294,8 +289,9 @@ END_FUNC op_load_global_builtin
 ;; ============================================================================
 DEF_FUNC_BARE op_load_name
     ; ecx = arg (index into co_names)
-    shl ecx, 4                ; fat tuple: 16-byte stride
-    mov rsi, [r15 + rcx]       ; rsi = name (PyStrObject*)
+    shl ecx, 3                ; payload array: 8-byte stride
+    LOAD_CO_NAMES rsi
+    mov rsi, [rsi + rcx]       ; rsi = name (PyStrObject*)
     push rsi                   ; save name
 
     ; Check if frame has a locals dict
@@ -381,21 +377,19 @@ DEF_FUNC op_load_attr, LA_FRAME
 
     shr ecx, 1              ; name_index
     mov eax, ecx
-    shl eax, 4              ; fat tuple: 16-byte stride
-    mov rsi, [r15 + rax]    ; name string
+    shl eax, 3              ; payload array: 8-byte stride
+    LOAD_CO_NAMES rsi
+    mov rsi, [rsi + rax]    ; name string
     mov [rbp - LA_NAME], rsi
 
     ; Pop obj
-    VPOP rdi
-    mov rax, [r13 + 8]            ; obj tag (after VPOP, tag at r13+8)
+    VPOP_VAL rdi, rax
     mov [rbp - LA_OBJ], rdi
     mov [rbp - LA_OBJ_TAG], rax
 
     ; Dispatch on obj tag — resolve non-pointer tags to their type
     cmp qword [rbp - LA_OBJ_TAG], TAG_PTR
     je .la_is_ptr
-    bt qword [rbp - LA_OBJ_TAG], 63
-    jc .la_smallstr_spill
     cmp qword [rbp - LA_OBJ_TAG], TAG_BOOL
     je .la_resolve_bool
     cmp qword [rbp - LA_OBJ_TAG], TAG_SMALLINT
@@ -455,16 +449,6 @@ DEF_FUNC op_load_attr, LA_FRAME
     INCREF_VAL rax, rdx
     mov qword [rbp - LA_FROM_TYPE], 1
     jmp .la_got_attr
-
-.la_smallstr_spill:
-    ; SmallStr: spill to heap PyStrObject* and update LA_OBJ/LA_OBJ_TAG
-    mov rdi, [rbp - LA_OBJ]       ; payload
-    mov rsi, [rbp - LA_OBJ_TAG]   ; tag
-    call smallstr_to_obj           ; rax = heap str (refcount=1)
-    mov [rbp - LA_OBJ], rax
-    mov qword [rbp - LA_OBJ_TAG], TAG_PTR
-    mov rdi, rax
-    ; fall through to .la_is_ptr
 
 .la_is_ptr:
     ; Look up attribute
@@ -900,8 +884,8 @@ DEF_FUNC_BARE op_load_attr_method
     ; VPEEK obj (don't pop -- stays as self if guards pass, or for deopt)
     VPEEK rdi
 
-    ; Non-pointer check (tag at r13-8 for TOS) — must be TAG_PTR to use IC
-    cmp qword [r13 - 8], TAG_PTR
+    ; Non-pointer check (tag at r15-1 for TOS) — must be TAG_PTR to use IC
+    cmp byte [r15 - 1], TAG_PTR
     jne .lam_deopt
 
     ; Guard 1: ob_type == cached type_ptr
@@ -916,12 +900,12 @@ DEF_FUNC_BARE op_load_attr_method
     jne .lam_deopt
 
     ; Guards passed! CPython order: method (deeper), obj/self (TOS)
-    ; obj is currently at [r13-16]; overwrite it with method, push obj on top
+    ; obj is currently at [r13-8]; overwrite it with method, push obj on top
     mov rax, [rbx + 10]           ; cached descriptor (method ptr)
     INCREF rax
-    mov rcx, [r13 - 16]           ; save obj (payload of TOS)
-    mov [r13 - 16], rax           ; overwrite obj position with method
-    mov qword [r13 - 8], TAG_PTR  ; ensure method tag is correct (defensive)
+    mov rcx, [r13 - 8]            ; save obj (payload of TOS)
+    mov [r13 - 8], rax            ; overwrite obj position with method
+    mov byte [r15 - 1], TAG_PTR   ; ensure method tag is correct (defensive)
     VPUSH_PTR rcx                  ; push obj on top as self
 
     ; Skip 9 CACHE entries = 18 bytes
@@ -942,13 +926,10 @@ END_FUNC op_load_attr_method
 ;; In Python 3.12, LOAD_CLOSURE is same opcode behavior as LOAD_FAST.
 ;; ============================================================================
 DEF_FUNC_BARE op_load_closure
-    lea rsi, [rcx*8]         ; slot * 8 (×2 via SIB, avoids flags clobber)
-    mov rdx, [r12 + rsi*2 + PyFrame.localsplus + 8]  ; tag
-    mov rax, [r12 + rsi*2 + PyFrame.localsplus]       ; payload
+    mov rax, [r12 + PyFrame.localsplus + rcx*8]       ; payload
+    movzx rdx, byte [r14 + rcx]                       ; tag (r14 = locals_tag_base)
     INCREF_VAL rax, rdx     ; tag-aware INCREF
-    mov [r13], rax
-    mov [r13 + 8], rdx
-    add r13, 16
+    VPUSH_VAL rax, rdx
     DISPATCH
 END_FUNC op_load_closure
 
@@ -959,8 +940,7 @@ END_FUNC op_load_closure
 ;; Raises NameError if cell is empty (ob_ref == NULL).
 ;; ============================================================================
 DEF_FUNC_BARE op_load_deref
-    lea rax, [rcx*8]              ; slot * 8 (×2 via SIB)
-    mov rax, [r12 + rax*2 + PyFrame.localsplus]  ; rax = cell object (payload)
+    mov rax, [r12 + PyFrame.localsplus + rcx*8]  ; rax = cell object (payload)
     test rax, rax
     jz .deref_error
     mov rdx, [rax + PyCellObject.ob_ref_tag]  ; rdx = value tag
@@ -984,15 +964,12 @@ END_FUNC op_load_deref
 ;; Used after DELETE_FAST and in exception handlers.
 ;; ============================================================================
 DEF_FUNC_BARE op_load_fast_check
-    lea rdx, [rcx*8]        ; slot * 8 (×2 via SIB, avoids flags clobber)
-    cmp qword [r12 + rdx*2 + PyFrame.localsplus + 8], 0  ; check tag for TAG_NULL
+    cmp byte [r14 + rcx], 0  ; check tag for TAG_NULL (r14 = locals_tag_base)
     je .lfc_error
-    mov rax, [r12 + rdx*2 + PyFrame.localsplus]       ; payload
-    mov rdx, [r12 + rdx*2 + PyFrame.localsplus + 8]  ; tag
+    mov rax, [r12 + PyFrame.localsplus + rcx*8]       ; payload
+    movzx rdx, byte [r14 + rcx]                       ; tag
     INCREF_VAL rax, rdx     ; tag-aware INCREF
-    mov [r13], rax
-    mov [r13 + 8], rdx
-    add r13, 16
+    VPUSH_VAL rax, rdx
     DISPATCH
 
 .lfc_error:
@@ -1008,15 +985,12 @@ END_FUNC op_load_fast_check
 ;; If slot is NULL, pushes NULL (no error).
 ;; ============================================================================
 DEF_FUNC_BARE op_load_fast_and_clear
-    lea rsi, [rcx*8]           ; slot * 8 (×2 via SIB, avoids flags clobber)
-    mov rax, [r12 + rsi*2 + PyFrame.localsplus]       ; payload (may be NULL)
-    mov rdx, [r12 + rsi*2 + PyFrame.localsplus + 8]   ; tag
-    mov qword [r12 + rsi*2 + PyFrame.localsplus], 0   ; clear payload
-    mov qword [r12 + rsi*2 + PyFrame.localsplus + 8], 0 ; clear tag
+    mov rax, [r12 + PyFrame.localsplus + rcx*8]       ; payload (may be NULL)
+    movzx rdx, byte [r14 + rcx]                       ; tag (r14 = locals_tag_base)
+    mov qword [r12 + PyFrame.localsplus + rcx*8], 0   ; clear payload
+    mov byte [r14 + rcx], 0                           ; clear tag
     ; Push with preserved tag - no INCREF needed (transferring ownership)
-    mov [r13], rax
-    mov [r13 + 8], rdx
-    add r13, 16
+    VPUSH_VAL rax, rdx
     DISPATCH
 END_FUNC op_load_fast_and_clear
 
@@ -1042,17 +1016,17 @@ DEF_FUNC op_load_super_attr, LSA_FRAME
     ; Get name from co_names
     shr ecx, 2
     mov eax, ecx
-    shl eax, 4                    ; fat tuple: 16-byte stride
-    mov rax, [r15 + rax]          ; name string
+    shl eax, 3                    ; payload array: 8-byte stride
+    LOAD_CO_NAMES rsi
+    mov rax, [rsi + rax]          ; name string
     mov [rbp - LSA_NAME], rax
 
     ; Pop self, class, global_super
-    VPOP rax                       ; self
+    VPOP_VAL rax, rdx              ; self
     mov [rbp - LSA_SELF], rax
-    VPOP rax                       ; class
+    VPOP_VAL rax, rdx              ; class
     mov [rbp - LSA_CLASS], rax
-    VPOP rdi                       ; global_super -- DECREF and discard
-    mov rsi, [r13 + 8]            ; global_super tag
+    VPOP_VAL rdi, rsi              ; global_super -- DECREF and discard
     DECREF_VAL rdi, rsi
 
     ; Walk from class->tp_base up the chain looking for name

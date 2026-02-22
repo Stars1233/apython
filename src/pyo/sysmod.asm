@@ -215,30 +215,32 @@ DEF_FUNC sys_module_init, 32
     mov rdi, 5
     call tuple_new
     mov rbx, rax                ; rbx = version_info tuple
-    ; (3, 12, 0, 'final', 0) — fat 16-byte slots
+    mov r8, [rbx + PyTupleObject.ob_item]       ; payloads
+    mov r9, [rbx + PyTupleObject.ob_item_tags]  ; tags
+    ; (3, 12, 0, 'final', 0)
     ; slot 0: 3 (SmallInt)
     mov rdi, 3
-    mov [rbx + PyTupleObject.ob_item], rdi
-    mov qword [rbx + PyTupleObject.ob_item + 8], TAG_SMALLINT
-    ; slot 1: 12 (SmallInt) — offset 16
+    mov [r8], rdi
+    mov byte [r9], TAG_SMALLINT
+    ; slot 1: 12 (SmallInt)
     mov rdi, 12
-    mov [rbx + PyTupleObject.ob_item + 16], rdi
-    mov qword [rbx + PyTupleObject.ob_item + 24], TAG_SMALLINT
-    ; slot 2: 0 (SmallInt) — offset 32
+    mov [r8 + 8], rdi
+    mov byte [r9 + 1], TAG_SMALLINT
+    ; slot 2: 0 (SmallInt)
     xor edi, edi
-    mov [rbx + PyTupleObject.ob_item + 32], rdi
-    mov qword [rbx + PyTupleObject.ob_item + 40], TAG_SMALLINT
-    ; slot 3: 'final' (string, TAG_PTR) — offset 48
-    push rbx
+    mov [r8 + 16], rdi
+    mov byte [r9 + 2], TAG_SMALLINT
+    ; slot 3: 'final' (string, TAG_PTR)
     lea rdi, [rel sm_final]
     call str_from_cstr_heap
-    pop rbx
-    mov [rbx + PyTupleObject.ob_item + 48], rax
-    mov qword [rbx + PyTupleObject.ob_item + 56], TAG_PTR
-    ; slot 4: 0 (SmallInt) — offset 64
+    mov r8, [rbx + PyTupleObject.ob_item]       ; reload payloads (clobbered)
+    mov r9, [rbx + PyTupleObject.ob_item_tags]  ; reload tags
+    mov [r8 + 24], rax
+    mov byte [r9 + 3], TAG_PTR
+    ; slot 4: 0 (SmallInt)
     xor edi, edi
-    mov [rbx + PyTupleObject.ob_item + 64], rdi
-    mov qword [rbx + PyTupleObject.ob_item + 72], TAG_SMALLINT
+    mov [r8 + 32], rdi
+    mov byte [r9 + 4], TAG_SMALLINT
 
     lea rdi, [rel sm_version_info]
     call str_from_cstr_heap
@@ -513,7 +515,7 @@ DEF_FUNC sys_exit_func
     jne .exit_0
 
     ; Get exit code from args[0]
-    mov rdx, [rdi + 8]        ; args[0] tag (64-bit for SmallStr safety)
+    mov rdx, [rdi + 8]        ; args[0] tag
     mov rdi, [rdi]
     call int_to_i64
     mov edi, eax
@@ -634,22 +636,24 @@ DEF_FUNC sys_path_add_script_dir
 
 .set_path:
     ; Replace sys.path[0] with this directory
-    ; rax = payload, rdx = tag (SmallStr or TAG_PTR)
+    ; rax = payload, rdx = tag (TAG_PTR)
     push rdx                    ; save new path tag
     push rax                    ; save new path payload
     mov rdi, [rel sys_path_list]
     ; Set list item 0
-    mov rcx, [rdi + PyListObject.ob_item]
-    ; DECREF old item[0] (fat value: payload at [rcx], tag at [rcx+8])
+    mov rcx, [rdi + PyListObject.ob_item]       ; payloads
+    mov r8, [rdi + PyListObject.ob_item_tags]   ; tags
+    ; DECREF old item[0]
     mov rdi, [rcx]
-    mov rsi, [rcx + 8]
+    movzx esi, byte [r8]
     DECREF_VAL rdi, rsi
     pop rax                     ; restore new path payload
     pop rdx                     ; restore new path tag
     mov rdi, [rel sys_path_list]
     mov rcx, [rdi + PyListObject.ob_item]
+    mov r8, [rdi + PyListObject.ob_item_tags]
     mov [rcx], rax              ; store new path payload
-    mov [rcx + 8], rdx          ; store actual tag (SmallStr or TAG_PTR)
+    mov byte [r8], dl           ; store actual tag
 
     pop r12
     pop rbx

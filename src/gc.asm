@@ -694,23 +694,26 @@ DEF_FUNC list_traverse
     push rbx
     push r12
     push r13
+    push r15
 
     mov rbx, rdi                       ; obj
-    mov r12, [rbx + PyListObject.ob_item]
+    mov r12, [rbx + PyListObject.ob_item]       ; payloads
+    mov r15, [rbx + PyListObject.ob_item_tags]  ; tags
     mov r13, [rbx + PyListObject.ob_size]
     test r13, r13
     jz .done
 
 .loop:
     dec r13
-    ; 16-byte fat value slots
     mov rdi, [r12]                     ; payload
-    mov rsi, [r12 + 8]                 ; tag
+    movzx esi, byte [r15]             ; tag
     VISIT_FAT rdi, rsi
-    add r12, 16
+    add r12, 8
+    inc r15
     test r13, r13
     jnz .loop
 .done:
+    pop r15
     pop r13
     pop r12
     pop rbx
@@ -722,9 +725,11 @@ DEF_FUNC list_clear
     push rbx
     push r12
     push r13
+    push r15
 
     mov rbx, rdi
-    mov r12, [rbx + PyListObject.ob_item]
+    mov r12, [rbx + PyListObject.ob_item]       ; payloads
+    mov r15, [rbx + PyListObject.ob_item_tags]  ; tags
     mov r13, [rbx + PyListObject.ob_size]
     mov qword [rbx + PyListObject.ob_size], 0
 
@@ -733,12 +738,18 @@ DEF_FUNC list_clear
 .loop:
     dec r13
     mov rdi, [r12]
-    mov rsi, [r12 + 8]
+    movzx esi, byte [r15]
+    push r12
+    push r15
     DECREF_VAL rdi, rsi
-    add r12, 16
+    pop r15
+    pop r12
+    add r12, 8
+    inc r15
     test r13, r13
     jnz .loop
 .done:
+    pop r15
     pop r13
     pop r12
     pop rbx
@@ -751,21 +762,25 @@ DEF_FUNC tuple_traverse
     push rbx
     push r12
     push r13
+    push r15
 
     mov rbx, rdi
     mov r13, [rbx + PyTupleObject.ob_size]
-    lea r12, [rbx + PyTupleObject.ob_item]  ; inline items
+    mov r12, [rbx + PyTupleObject.ob_item]       ; payloads
+    mov r15, [rbx + PyTupleObject.ob_item_tags]  ; tags (callee-saved, survives VISIT_FAT)
     test r13, r13
     jz .done
 .loop:
     dec r13
     mov rdi, [r12]
-    mov rsi, [r12 + 8]
+    movzx esi, byte [r15]
     VISIT_FAT rdi, rsi
-    add r12, 16
+    add r12, 8
+    inc r15
     test r13, r13
     jnz .loop
 .done:
+    pop r15
     pop r13
     pop r12
     pop rbx
@@ -777,10 +792,12 @@ DEF_FUNC tuple_clear
     push rbx
     push r12
     push r13
+    push r15
 
     mov rbx, rdi
     mov r13, [rbx + PyTupleObject.ob_size]
-    lea r12, [rbx + PyTupleObject.ob_item]
+    mov r12, [rbx + PyTupleObject.ob_item]       ; payloads
+    mov r15, [rbx + PyTupleObject.ob_item_tags]  ; tags
     mov qword [rbx + PyTupleObject.ob_size], 0
 
     test r13, r13
@@ -788,12 +805,18 @@ DEF_FUNC tuple_clear
 .loop:
     dec r13
     mov rdi, [r12]
-    mov rsi, [r12 + 8]
+    movzx esi, byte [r15]
+    push r12
+    push r15
     DECREF_VAL rdi, rsi
-    add r12, 16
+    pop r15
+    pop r12
+    add r12, 8
+    inc r15
     test r13, r13
     jnz .loop
 .done:
+    pop r15
     pop r13
     pop r12
     pop rbx
@@ -804,7 +827,7 @@ END_FUNC tuple_clear
 ; ---- dict_traverse / dict_clear ----
 extern ap_memset
 
-DICT_TOMBSTONE_GC equ 0xDEAD
+DICT_TOMBSTONE_GC equ 0xFF
 
 DEF_FUNC dict_traverse
     push rbx
@@ -819,18 +842,18 @@ DEF_FUNC dict_traverse
 .loop:
     dec r13
     ; Check for empty/tombstone
-    cmp qword [r12 + DictEntry.key_tag], 0
+    cmp byte [r12 + DictEntry.key_tag], 0
     je .next
-    cmp qword [r12 + DictEntry.key_tag], DICT_TOMBSTONE_GC
+    cmp byte [r12 + DictEntry.key_tag], DICT_TOMBSTONE_GC
     je .next
 
     ; Visit key
     mov rdi, [r12 + DictEntry.key]
-    mov rsi, [r12 + DictEntry.key_tag]
+    movzx esi, byte [r12 + DictEntry.key_tag]
     VISIT_FAT rdi, rsi
     ; Visit value
     mov rdi, [r12 + DictEntry.value]
-    mov rsi, [r12 + DictEntry.value_tag]
+    movzx esi, byte [r12 + DictEntry.value_tag]
     VISIT_FAT rdi, rsi
 
 .next:
@@ -858,16 +881,16 @@ DEF_FUNC dict_clear_gc
     jz .done
 .loop:
     dec r13
-    cmp qword [r12 + DictEntry.key_tag], 0
+    cmp byte [r12 + DictEntry.key_tag], 0
     je .next
-    cmp qword [r12 + DictEntry.key_tag], DICT_TOMBSTONE_GC
+    cmp byte [r12 + DictEntry.key_tag], DICT_TOMBSTONE_GC
     je .next
 
     ; DECREF key
     push r12
     push r13
     mov rdi, [r12 + DictEntry.key]
-    mov rsi, [r12 + DictEntry.key_tag]
+    movzx esi, byte [r12 + DictEntry.key_tag]
     DECREF_VAL rdi, rsi
     pop r13
     pop r12
@@ -876,15 +899,15 @@ DEF_FUNC dict_clear_gc
     push r12
     push r13
     mov rdi, [r12 + DictEntry.value]
-    mov rsi, [r12 + DictEntry.value_tag]
+    movzx esi, byte [r12 + DictEntry.value_tag]
     DECREF_VAL rdi, rsi
     pop r13
     pop r12
 
     ; Clear entry
-    mov qword [r12 + DictEntry.key_tag], 0
+    mov byte [r12 + DictEntry.key_tag], 0
     mov qword [r12 + DictEntry.key], 0
-    mov qword [r12 + DictEntry.value_tag], 0
+    mov byte [r12 + DictEntry.value_tag], 0
     mov qword [r12 + DictEntry.value], 0
 
 .next:
@@ -902,15 +925,90 @@ DEF_FUNC dict_clear_gc
 END_FUNC dict_clear_gc
 
 ; ---- set_traverse / set_clear ----
-; Set uses dict internally — traverse the dict's entries
+; Set entries are 24 bytes (hash+key+key_tag_qword), distinct from DictEntry (32 bytes).
+SET_ENTRY_SIZE_GC    equ 24
+SET_ENTRY_KEY_GC     equ 8
+SET_ENTRY_KEY_TAG_GC equ 16
+SET_TOMBSTONE_GC     equ 0xDEAD
+
 DEF_FUNC set_traverse
-    ; rdi = set obj; set uses a dict at [rdi + 16] (SetObject -> dict ptr)
-    ; Actually set objects ARE dicts — same layout as PyDictObject
-    jmp dict_traverse
+    push rbx
+    push r12
+    push r13
+
+    mov rbx, rdi
+    mov r12, [rbx + PyDictObject.entries]   ; set reuses PyDictObject layout for header
+    mov r13, [rbx + PyDictObject.capacity]
+    test r13, r13
+    jz .st_done
+.st_loop:
+    dec r13
+    ; Check for empty (key_tag == 0) or tombstone (key_tag == 0xDEAD)
+    cmp qword [r12 + SET_ENTRY_KEY_TAG_GC], 0
+    je .st_next
+    cmp qword [r12 + SET_ENTRY_KEY_TAG_GC], SET_TOMBSTONE_GC
+    je .st_next
+
+    ; Visit key
+    mov rdi, [r12 + SET_ENTRY_KEY_GC]
+    movzx esi, byte [r12 + SET_ENTRY_KEY_TAG_GC]
+    VISIT_FAT rdi, rsi
+
+.st_next:
+    add r12, SET_ENTRY_SIZE_GC
+    test r13, r13
+    jnz .st_loop
+.st_done:
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
 END_FUNC set_traverse
 
 DEF_FUNC set_clear_gc
-    jmp dict_clear_gc
+    push rbx
+    push r12
+    push r13
+
+    mov rbx, rdi
+    mov r12, [rbx + PyDictObject.entries]
+    mov r13, [rbx + PyDictObject.capacity]
+
+    test r13, r13
+    jz .sc_done
+.sc_loop:
+    dec r13
+    cmp qword [r12 + SET_ENTRY_KEY_TAG_GC], 0
+    je .sc_next
+    cmp qword [r12 + SET_ENTRY_KEY_TAG_GC], SET_TOMBSTONE_GC
+    je .sc_next
+
+    ; DECREF key
+    push r12
+    push r13
+    mov rdi, [r12 + SET_ENTRY_KEY_GC]
+    movzx esi, byte [r12 + SET_ENTRY_KEY_TAG_GC]
+    DECREF_VAL rdi, rsi
+    pop r13
+    pop r12
+
+    ; Clear entry
+    mov qword [r12 + SET_ENTRY_KEY_TAG_GC], 0
+    mov qword [r12 + SET_ENTRY_KEY_GC], 0
+
+.sc_next:
+    add r12, SET_ENTRY_SIZE_GC
+    test r13, r13
+    jnz .sc_loop
+.sc_done:
+    mov qword [rbx + PyDictObject.ob_size], 0
+
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
 END_FUNC set_clear_gc
 
 ; ---- func_traverse / func_clear ----
@@ -1071,13 +1169,13 @@ DEF_FUNC gen_traverse
     test r13d, r13d
     jz .done
 
-    lea r12, [r12 + PyFrame.localsplus]  ; start of fat value array
+    mov r11, [r12 + PyFrame.locals_tag_base]
+    lea r12, [r12 + PyFrame.localsplus]  ; start of payload array
 .frame_loop:
     dec r13d
-    mov rdi, [r12]
-    mov rsi, [r12 + 8]
+    mov rdi, [r12 + r13*8]
+    movzx rsi, byte [r11 + r13]
     VISIT_FAT rdi, rsi
-    add r12, 16
     test r13d, r13d
     jnz .frame_loop
 

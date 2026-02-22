@@ -35,16 +35,20 @@ Callee-saved registers hold global interpreter state:
 |----------|------|
 | `rbx` | Bytecode IP (into co_code[]) |
 | `r12` | Current frame (PyFrame*) |
-| `r13` | Value stack top |
+| `r13` | Value stack top (payload array, u64[]) |
 | `r14` | co_consts data ptr (&tuple.ob_item[0]) |
-| `r15` | co_names data ptr (&tuple.ob_item[0]) |
+| `r15` | Tag stack top (sidecar tag array, u8[]) |
 | `ecx` | Opcode arg on handler entry |
+
+co_names is accessed via `LOAD_CO_NAMES reg` / `LOAD_CO_NAMES_TAGS reg` macros (reads from `eval_co_names` / `eval_co_names_tags` globals), not a dedicated register.
 
 **Critical rule:** Never hold live values in caller-saved regs (rax, rcx, rdx, rsi, rdi, r8-r11) across `call` or `DECREF`/`DECREF_REG`. Use push/pop or callee-saved regs instead. `DECREF_REG` calls `obj_dealloc` which clobbers all caller-saved regs.
 
-## 128-bit Fat Values
+## Value64 Representation
 
-All values are 128-bit (payload, tag) pairs in 16-byte slots. Tags: `TAG_NULL=0`, `TAG_SMALLINT=1`, `TAG_FLOAT=2`, `TAG_NONE=3`, `TAG_BOOL=4`, `TAG_PTR=0x105`. SmallInts store raw signed i64 in payload (full 64-bit range), zero heap alloc/refcount. `INCREF_VAL`/`DECREF_VAL` check `TAG_RC_BIT` (bit 8) to decide refcounting. Functions return `(rax=payload, edx=tag)`.
+Values are split into 64-bit payloads stored in `u64[]` arrays and 8-bit tags stored in separate `u8[]` sidecar arrays. The value stack uses `r13` (payload top) and `r15` (tag top). Containers (list, tuple, dict) store `ob_item` (u64[]) and `ob_item_tags` (u8[]) separately. Frame locals use `localsplus` (u64[]) and `locals_tag_base` (u8[]).
+
+Tags (u8): `TAG_NULL=0`, `TAG_SMALLINT=1`, `TAG_FLOAT=2`, `TAG_NONE=3`, `TAG_BOOL=4`, `TAG_PTR=0x85`. Bit 7 (`TAG_RC_BIT=0x80`) means payload is a refcounted heap pointer. SmallInts store raw signed i64 in payload (full 64-bit range), zero heap alloc/refcount. `INCREF_VAL`/`DECREF_VAL` check `TAG_RC_BIT` to decide refcounting. Functions return `(rax=payload, edx=tag)`.
 
 ## Source Layout
 
@@ -64,7 +68,7 @@ All values are 128-bit (payload, tag) pairs in 16-byte slots. Tags: `TAG_NULL=0`
 Defined in `include/*.inc`. All objects start with `PyObject` (ob_refcnt +0, ob_type +8).
 
 - **PyTypeObject** (types.inc, 192 bytes): tp_call +64, tp_getattr +72, tp_setattr +80, tp_as_number +128, tp_as_sequence +136, tp_as_mapping +144
-- **PyFrame** (frame.inc): code +8, globals +16, locals +32, localsplus +72 (variable-size)
+- **PyFrame** (frame.inc): code +8, globals +16, locals +32, stack_tag_ptr +64, locals_tag_base +96, localsplus +104 (variable-size u64[])
 - **PyCodeObject** (object.inc): co_consts, co_names, co_code starts at +112
 
 ## Opcode Handler Pattern
@@ -77,7 +81,7 @@ op_example:
     DISPATCH          ; jmp eval_dispatch
 ```
 
-Stack macros: `VPUSH reg`, `VPOP reg`, `VPEEK reg`, `VPEEK_AT reg, offset`
+Stack macros: `VPUSH_PTR reg`, `VPUSH_INT reg`, `VPUSH_FLOAT reg`, `VPUSH_NONE`, `VPUSH_BOOL reg`, `VPUSH_VAL pay, tag`, `VPOP reg` (payload only), `VPOP_VAL pay, tag`, `VPEEK reg`
 
 ## Named Frame-Layout Constants
 

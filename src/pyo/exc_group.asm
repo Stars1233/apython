@@ -96,32 +96,35 @@ DEF_FUNC eg_new, EGN_FRAME
     call tuple_new
     mov rcx, [rbp - EGN_EG]
 
+    mov r8, [rax + PyTupleObject.ob_item]       ; payloads
+    mov r9, [rax + PyTupleObject.ob_item_tags]  ; tags
+
     ; args[0] = msg_str
     test r12, r12
     jz .args_no_msg
     INCREF r12
-    mov [rax + PyTupleObject.ob_item], r12
-    mov qword [rax + PyTupleObject.ob_item + 8], TAG_PTR   ; slot 0 tag
+    mov [r8], r12
+    mov byte [r9], TAG_PTR                       ; slot 0 tag
     jmp .args_set_excs
 .args_no_msg:
     ; Push None for msg if NULL
     lea rdx, [rel none_singleton]
     INCREF rdx
-    mov [rax + PyTupleObject.ob_item], rdx
-    mov qword [rax + PyTupleObject.ob_item + 8], TAG_PTR   ; slot 0 tag
+    mov [r8], rdx
+    mov byte [r9], TAG_PTR                       ; slot 0 tag
 .args_set_excs:
     ; args[1] = exc_tuple (fat slot 1 at offset +16)
     test r13, r13
     jz .args_no_excs
     INCREF r13
-    mov [rax + PyTupleObject.ob_item + 16], r13
-    mov qword [rax + PyTupleObject.ob_item + 24], TAG_PTR  ; slot 1 tag
+    mov [r8 + 8], r13
+    mov byte [r9 + 1], TAG_PTR                   ; slot 1 tag
     jmp .args_done
 .args_no_excs:
     lea rdx, [rel none_singleton]
     INCREF rdx
-    mov [rax + PyTupleObject.ob_item + 16], rdx
-    mov qword [rax + PyTupleObject.ob_item + 24], TAG_PTR  ; slot 1 tag
+    mov [r8 + 8], rdx
+    mov byte [r9 + 1], TAG_PTR                   ; slot 1 tag
 .args_done:
     mov [rcx + PyExceptionGroupObject.exc_args], rax
     mov rax, rcx
@@ -184,18 +187,20 @@ DEF_FUNC eg_type_call, EGC_FRAME
 
     ; Copy list items to tuple
     mov rcx, [r12 + PyListObject.ob_size]
-    mov rsi, [r12 + PyListObject.ob_item]
+    mov r8, [r12 + PyListObject.ob_item]       ; list payloads
+    mov r9, [r12 + PyListObject.ob_item_tags]  ; list tags
     xor edx, edx
 .copy_list:
     mov rcx, [r12 + PyListObject.ob_size]  ; reload loop limit (clobbered below)
     cmp rdx, rcx
     jge .list_done
-    mov rcx, rdx
-    shl rcx, 4                ; index * 16
-    mov rdi, [rsi + rcx]      ; list item payload (fat 16-byte stride)
-    INCREF rdi
-    mov [r13 + PyTupleObject.ob_item + rcx], rdi
-    mov qword [r13 + PyTupleObject.ob_item + rcx + 8], TAG_PTR
+    mov rdi, [r8 + rdx*8]      ; list item payload
+    movzx r11d, byte [r9 + rdx] ; list item tag
+    INCREF_VAL rdi, r11
+    mov r10, [r13 + PyTupleObject.ob_item]       ; tuple payloads
+    mov rsi, [r13 + PyTupleObject.ob_item_tags]  ; tuple tags
+    mov [r10 + rdx*8], rdi
+    mov byte [rsi + rdx], r11b
     inc rdx
     jmp .copy_list
 .list_done:
@@ -435,12 +440,11 @@ DEF_FUNC eg_split, EGS_FRAME
     cmp rcx, [rbp - EGS_COUNT]
     jge .split_done
 
-    ; Get exc = eg.eg_exceptions[i] (fat tuple: *16 stride)
+    ; Get exc = eg.eg_exceptions[i]
     mov rax, [rbp - EGS_EG]
     mov rax, [rax + PyExceptionGroupObject.eg_exceptions]
-    mov r8, rcx
-    shl r8, 4
-    mov rdi, [rax + PyTupleObject.ob_item + r8]
+    mov r8, [rax + PyTupleObject.ob_item]
+    mov rdi, [r8 + rcx*8]
 
     ; exc_isinstance(exc, match_type)
     mov rsi, [rbp - EGS_MTYPE]
@@ -452,9 +456,8 @@ DEF_FUNC eg_split, EGS_FRAME
     mov rcx, [rbp - EGS_IDX]
     mov rax, [rbp - EGS_EG]
     mov rax, [rax + PyExceptionGroupObject.eg_exceptions]
-    mov r8, rcx
-    shl r8, 4
-    mov rsi, [rax + PyTupleObject.ob_item + r8]
+    mov r8, [rax + PyTupleObject.ob_item]
+    mov rsi, [r8 + rcx*8]
     mov rdi, [rbp - EGS_MLIST]
     mov edx, TAG_PTR
     call list_append
@@ -465,9 +468,8 @@ DEF_FUNC eg_split, EGS_FRAME
     mov rcx, [rbp - EGS_IDX]
     mov rax, [rbp - EGS_EG]
     mov rax, [rax + PyExceptionGroupObject.eg_exceptions]
-    mov r8, rcx
-    shl r8, 4
-    mov rsi, [rax + PyTupleObject.ob_item + r8]
+    mov r8, [rax + PyTupleObject.ob_item]
+    mov rsi, [r8 + rcx*8]
     mov rdi, [rbp - EGS_RLIST]
     mov edx, TAG_PTR
     call list_append
@@ -490,18 +492,20 @@ DEF_FUNC eg_split, EGS_FRAME
     mov rbx, rax             ; rbx = match_tuple
     pop rcx
     mov rax, [rbp - EGS_MLIST]
-    mov rsi, [rax + PyListObject.ob_item]
+    mov r8, [rax + PyListObject.ob_item]       ; list payloads
+    mov r9, [rax + PyListObject.ob_item_tags]  ; list tags
     xor edx, edx
 .copy_match:
     cmp rdx, rcx
     jge .match_tuple_done
     push rcx
-    mov rcx, rdx
-    shl rcx, 4                ; index * 16
-    mov rdi, [rsi + rcx]      ; list item payload (fat 16-byte stride)
-    INCREF rdi
-    mov [rbx + PyTupleObject.ob_item + rcx], rdi
-    mov qword [rbx + PyTupleObject.ob_item + rcx + 8], TAG_PTR
+    mov rdi, [r8 + rdx*8]      ; list item payload
+    movzx r11d, byte [r9 + rdx] ; list item tag
+    INCREF_VAL rdi, r11
+    mov r10, [rbx + PyTupleObject.ob_item]       ; tuple payloads
+    mov rsi, [rbx + PyTupleObject.ob_item_tags]  ; tuple tags
+    mov [r10 + rdx*8], rdi
+    mov byte [rsi + rdx], r11b
     pop rcx
     inc rdx
     jmp .copy_match
@@ -535,18 +539,20 @@ DEF_FUNC eg_split, EGS_FRAME
     mov rbx, rax             ; rbx = rest_tuple
     pop rcx
     mov rax, [rbp - EGS_RLIST]
-    mov rsi, [rax + PyListObject.ob_item]
+    mov r8, [rax + PyListObject.ob_item]       ; list payloads
+    mov r9, [rax + PyListObject.ob_item_tags]  ; list tags
     xor edx, edx
 .copy_rest:
     cmp rdx, rcx
     jge .rest_tuple_done
     push rcx
-    mov rcx, rdx
-    shl rcx, 4                ; index * 16
-    mov rdi, [rsi + rcx]      ; list item payload (fat 16-byte stride)
-    INCREF rdi
-    mov [rbx + PyTupleObject.ob_item + rcx], rdi
-    mov qword [rbx + PyTupleObject.ob_item + rcx + 8], TAG_PTR
+    mov rdi, [r8 + rdx*8]      ; list item payload
+    movzx r11d, byte [r9 + rdx] ; list item tag
+    INCREF_VAL rdi, r11
+    mov r10, [rbx + PyTupleObject.ob_item]       ; tuple payloads
+    mov rsi, [rbx + PyTupleObject.ob_item_tags]  ; tuple tags
+    mov [r10 + rdx*8], rdi
+    mov byte [rsi + rdx], r11b
     pop rcx
     inc rdx
     jmp .copy_rest
@@ -632,6 +638,7 @@ DEF_FUNC prep_reraise_star, PRS_FRAME
 
     ; Phase 1: Count non-None entries, find first non-None
     mov rcx, [rsi + PyListObject.ob_size]
+    mov r9, [rsi + PyListObject.ob_item_tags]   ; tag array
     mov rsi, [rsi + PyListObject.ob_item]
     xor ebx, ebx                ; non-None count
     xor r12d, r12d              ; first non-None ptr
@@ -640,10 +647,11 @@ DEF_FUNC prep_reraise_star, PRS_FRAME
 .scan:
     cmp rdx, rcx
     jge .scan_done
-    mov rax, rdx
-    shl rax, 4                ; index * 16
-    mov rdi, [rsi + rax]      ; list item payload (fat 16-byte stride)
-    cmp rdi, r8
+    movzx eax, byte [r9 + rdx] ; tag
+    cmp al, TAG_NONE
+    je .scan_next
+    mov rdi, [rsi + rdx*8]     ; list item payload (8-byte stride)
+    cmp rdi, r8                 ; also check none_singleton (mixed repr)
     je .scan_next
     inc ebx
     test r12, r12
@@ -679,13 +687,13 @@ DEF_FUNC prep_reraise_star, PRS_FRAME
     cmp rdx, rcx
     jge .flat_done
     mov rax, [rbp - PRS_LIST]
-    mov rsi, [rax + PyListObject.ob_item]
-    mov rax, rdx
-    shl rax, 4                ; index * 16
-    mov rdi, [rsi + rax]      ; list item payload (fat 16-byte stride)
-    ; Check for None: inline TAG_NONE or pointer-to-none_singleton
-    cmp qword [rsi + rax + 8], TAG_NONE
+    mov r9, [rax + PyListObject.ob_item_tags]  ; tag array
+    mov rsi, [rax + PyListObject.ob_item]      ; payload array
+    ; Check for None via tag
+    movzx eax, byte [r9 + rdx]
+    cmp al, TAG_NONE
     je .flat_next
+    mov rdi, [rsi + rdx*8]                    ; list item payload (8-byte stride)
     lea r8, [rel none_singleton]
     cmp rdi, r8
     je .flat_next
@@ -701,10 +709,8 @@ DEF_FUNC prep_reraise_star, PRS_FRAME
 
     ; It's an EG: append each sub-exception from eg_exceptions tuple
     mov rax, [rbp - PRS_LIST]
-    mov rsi, [rax + PyListObject.ob_item]
-    mov rax, rdx
-    shl rax, 4                ; index * 16
-    mov rdi, [rsi + rax]      ; the EG payload (fat 16-byte stride)
+    mov rsi, [rax + PyListObject.ob_item]       ; payloads
+    mov rdi, [rsi + rdx*8]                      ; the EG payload
     mov rax, [rdi + PyExceptionGroupObject.eg_exceptions]
     mov r8, [rax + PyTupleObject.ob_size]
     push rdx
@@ -716,9 +722,8 @@ DEF_FUNC prep_reraise_star, PRS_FRAME
     push rcx
     push r8
     push rax
-    mov r9, rcx
-    shl r9, 4
-    mov rsi, [rax + PyTupleObject.ob_item + r9]
+    mov r9, [rax + PyTupleObject.ob_item]       ; payloads
+    mov rsi, [r9 + rcx*8]
     mov rdi, [rbp - PRS_FLAT]
     mov edx, TAG_PTR
     call list_append
@@ -737,10 +742,8 @@ DEF_FUNC prep_reraise_star, PRS_FRAME
     push rdx
     push rcx
     mov rax, [rbp - PRS_LIST]
-    mov rsi, [rax + PyListObject.ob_item]
-    mov rax, rdx
-    shl rax, 4                ; index * 16
-    mov rsi, [rsi + rax]      ; list item payload (fat 16-byte stride)
+    mov rsi, [rax + PyListObject.ob_item]       ; payloads
+    mov rsi, [rsi + rdx*8]                       ; list item payload
     mov rdi, [rbp - PRS_FLAT]
     mov edx, TAG_PTR
     call list_append
@@ -761,18 +764,20 @@ DEF_FUNC prep_reraise_star, PRS_FRAME
     mov rbx, rax                   ; rbx = new tuple
     pop rcx
     mov rax, [rbp - PRS_FLAT]
-    mov rsi, [rax + PyListObject.ob_item]
+    mov r8, [rax + PyListObject.ob_item]       ; list payloads
+    mov r9, [rax + PyListObject.ob_item_tags]  ; list tags
     xor edx, edx
 .copy_flat:
     cmp rdx, rcx
     jge .copy_flat_done
     push rcx
-    mov rcx, rdx
-    shl rcx, 4                ; index * 16
-    mov rdi, [rsi + rcx]      ; list item payload (fat 16-byte stride)
-    INCREF rdi
-    mov [rbx + PyTupleObject.ob_item + rcx], rdi
-    mov qword [rbx + PyTupleObject.ob_item + rcx + 8], TAG_PTR
+    mov rdi, [r8 + rdx*8]      ; list item payload
+    movzx r11d, byte [r9 + rdx] ; list item tag
+    INCREF_VAL rdi, r11
+    mov r10, [rbx + PyTupleObject.ob_item]       ; tuple payloads
+    mov rsi, [rbx + PyTupleObject.ob_item_tags]  ; tuple tags
+    mov [r10 + rdx*8], rdi
+    mov byte [rsi + rdx], r11b
     pop rcx
     inc rdx
     jmp .copy_flat

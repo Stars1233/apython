@@ -3,9 +3,9 @@
 ; Register convention (callee-saved, preserved across handlers):
 ;   rbx = bytecode instruction pointer (current position in co_code[])
 ;   r12 = current frame pointer (PyFrame*)
-;   r13 = value stack top pointer
-;   r14 = co_consts tuple data pointer (&tuple.ob_item[0])
-;   r15 = co_names tuple data pointer (&tuple.ob_item[0])
+;   r13 = value stack payload top pointer
+;   r14 = locals_tag_base pointer (frame's tag sidecar for localsplus[])
+;   r15 = value stack tag top pointer
 ;
 ; ecx = opcode argument on entry (set by eval_dispatch)
 ; rbx has already been advanced past the 2-byte instruction word.
@@ -21,7 +21,8 @@ section .text
 extern eval_dispatch
 extern eval_saved_rbx
 extern eval_saved_r13
-extern trace_opcodes
+extern eval_saved_r15
+extern eval_co_names
 extern opcode_table
 extern obj_dealloc
 extern obj_decref
@@ -70,14 +71,12 @@ DS_FRAME  equ 32
 ;; VPOP does not clobber ecx (it only does sub r13,8 / mov reg,[r13]).
 ;; ============================================================================
 DEF_FUNC_BARE op_store_fast
-    ; ecx = arg (slot index, 16 bytes/slot)
-    VPOP rax                    ; rax = new value payload
-    mov r8, [r13 + 8]          ; r8 = new value tag (from just-popped slot)
-    lea rdx, [rcx*8]           ; slot * 8 (×2 via SIB)
-    mov rdi, [r12 + rdx*2 + PyFrame.localsplus]       ; rdi = old value (payload)
-    mov r9, [r12 + rdx*2 + PyFrame.localsplus + 8]    ; r9 = old value tag
-    mov [r12 + rdx*2 + PyFrame.localsplus], rax       ; store new payload
-    mov [r12 + rdx*2 + PyFrame.localsplus + 8], r8    ; store new tag
+    ; ecx = arg (slot index)
+    VPOP_VAL rax, r8             ; rax = new value payload, r8 = new value tag
+    mov rdi, [r12 + PyFrame.localsplus + rcx*8]       ; rdi = old value (payload)
+    movzx r9, byte [r14 + rcx]                        ; r9 = old value tag (r14 = locals_tag_base)
+    mov [r12 + PyFrame.localsplus + rcx*8], rax       ; store new payload
+    mov byte [r14 + rcx], r8b                         ; store new tag
     ; XDECREF_VAL old value (tag-aware)
     XDECREF_VAL rdi, r9
     DISPATCH
@@ -92,12 +91,11 @@ END_FUNC op_store_fast
 ;; ============================================================================
 DEF_FUNC_BARE op_store_name
     ; ecx = arg (index into co_names)
-    ; Get name string before popping (fat tuple: 16-byte stride)
-    shl ecx, 4
-    mov r8, [r15 + rcx]        ; r8 = name (key) - caller-saved, safe temp
-    sub r13, 16
-    mov r9, [r13]              ; r9 = value payload
-    mov r10, [r13 + 8]         ; r10 = value tag
+    ; Get name string before popping (payload array: 8-byte stride)
+    shl ecx, 3
+    LOAD_CO_NAMES r8
+    mov r8, [r8 + rcx]        ; r8 = name (key) - caller-saved, safe temp
+    VPOP_VAL r9, r10           ; r9 = value payload, r10 = value tag
 
     ; Determine target dict: locals if present, else globals
     mov rdi, [r12 + PyFrame.locals]
@@ -111,11 +109,13 @@ DEF_FUNC_BARE op_store_name
     mov rdx, r9                ; rdx = value payload
     mov rcx, r10               ; rcx = value tag
     mov r8d, TAG_PTR
+    push r9
+    push r10
     call dict_set
+    pop r10
+    pop r9
     ; DECREF value to release the stack's reference (dict_set INCREFed it)
-    mov rdi, [r13]          ; value payload (still in popped slot)
-    mov rsi, [r13 + 8]     ; value tag
-    DECREF_VAL rdi, rsi
+    DECREF_VAL r9, r10
     DISPATCH
 END_FUNC op_store_name
 
@@ -125,12 +125,11 @@ END_FUNC op_store_name
 ;; Same as store_name but always uses globals.
 ;; ============================================================================
 DEF_FUNC_BARE op_store_global
-    ; ecx = arg (index into co_names, fat tuple: 16-byte stride)
-    shl ecx, 4
-    mov r8, [r15 + rcx]        ; r8 = name (key)
-    sub r13, 16
-    mov r9, [r13]              ; r9 = value payload
-    mov r10, [r13 + 8]         ; r10 = value tag
+    ; ecx = arg (index into co_names, payload array: 8-byte stride)
+    shl ecx, 3
+    LOAD_CO_NAMES r8
+    mov r8, [r8 + rcx]        ; r8 = name (key)
+    VPOP_VAL r9, r10           ; r9 = value payload, r10 = value tag
 
     ; Always store in globals
     mov rdi, [r12 + PyFrame.globals]
@@ -138,11 +137,13 @@ DEF_FUNC_BARE op_store_global
     mov rdx, r9                ; rdx = value payload
     mov rcx, r10               ; rcx = value tag
     mov r8d, TAG_PTR
+    push r9
+    push r10
     call dict_set
+    pop r10
+    pop r9
     ; DECREF value to release the stack's reference (dict_set INCREFed it)
-    mov rdi, [r13]          ; value payload (still in popped slot)
-    mov rsi, [r13 + 8]     ; value tag
-    DECREF_VAL rdi, rsi
+    DECREF_VAL r9, r10
     DISPATCH
 END_FUNC op_store_global
 
@@ -159,20 +160,19 @@ END_FUNC op_store_global
 ;; ============================================================================
 DEF_FUNC op_store_attr, SA_FRAME
 
-    ; Get name (fat tuple: 16-byte stride)
-    shl ecx, 4
-    mov rax, [r15 + rcx]
+    ; Get name (payload array: 8-byte stride)
+    shl ecx, 3
+    LOAD_CO_NAMES rax
+    mov rax, [rax + rcx]
     mov [rbp - SA_NAME], rax
 
     ; Pop obj (TOS)
-    VPOP rdi
-    mov rax, [r13 + 8]        ; obj tag
+    VPOP_VAL rdi, rax
     mov [rbp - SA_OBJ], rdi
     mov [rbp - SA_OTAG], rax
 
     ; Pop value
-    VPOP rdi
-    mov rax, [r13 + 8]        ; value tag
+    VPOP_VAL rdi, rax
     mov [rbp - SA_VAL], rdi
     mov [rbp - SA_VTAG], rax
 
@@ -309,8 +309,7 @@ END_FUNC op_store_attr
 ;; ============================================================================
 DEF_FUNC_BARE op_store_deref
     VPOP_VAL rax, r8               ; rax = new payload, r8 = new tag
-    lea rdx, [rcx*8]               ; slot * 8 (×2 via SIB)
-    mov rdx, [r12 + rdx*2 + PyFrame.localsplus]  ; rdx = cell object (payload)
+    mov rdx, [r12 + PyFrame.localsplus + rcx*8]  ; rdx = cell object (payload)
 
     ; Ownership transfers from stack to cell - no INCREF needed
 
@@ -333,8 +332,7 @@ END_FUNC op_store_deref
 ;; DECREFs old value if present.
 ;; ============================================================================
 DEF_FUNC_BARE op_delete_deref
-    lea rax, [rcx*8]               ; slot * 8 (×2 via SIB)
-    mov rax, [r12 + rax*2 + PyFrame.localsplus]  ; rax = cell object (payload)
+    mov rax, [r12 + PyFrame.localsplus + rcx*8]  ; rax = cell object (payload)
     mov rdi, [rax + PyCellObject.ob_ref]
     mov rsi, [rax + PyCellObject.ob_ref_tag]
     mov qword [rax + PyCellObject.ob_ref], 0
@@ -350,11 +348,10 @@ END_FUNC op_delete_deref
 ;; DECREF old value if present.
 ;; ============================================================================
 DEF_FUNC_BARE op_delete_fast
-    lea rax, [rcx*8]           ; slot * 8 (×2 via SIB)
-    mov rdi, [r12 + rax*2 + PyFrame.localsplus]       ; old value (payload)
-    mov rsi, [r12 + rax*2 + PyFrame.localsplus + 8]   ; old value tag
-    mov qword [r12 + rax*2 + PyFrame.localsplus], 0   ; clear payload
-    mov qword [r12 + rax*2 + PyFrame.localsplus + 8], 0 ; clear tag
+    mov rdi, [r12 + PyFrame.localsplus + rcx*8]       ; old value (payload)
+    movzx rsi, byte [r14 + rcx]                       ; old value tag (r14 = locals_tag_base)
+    mov qword [r12 + PyFrame.localsplus + rcx*8], 0   ; clear payload
+    mov byte [r14 + rcx], 0                           ; clear tag
     XDECREF_VAL rdi, rsi
     DISPATCH
 END_FUNC op_delete_fast
@@ -363,8 +360,9 @@ END_FUNC op_delete_fast
 ;; op_delete_name - Delete name from locals or globals dict
 ;; ============================================================================
 DEF_FUNC_BARE op_delete_name
-    shl ecx, 4                ; fat tuple: 16-byte stride
-    mov rsi, [r15 + rcx]      ; name
+    shl ecx, 3                ; payload array: 8-byte stride
+    LOAD_CO_NAMES rsi
+    mov rsi, [rsi + rcx]      ; name
     ; Try locals first
     mov rdi, [r12 + PyFrame.locals]
     test rdi, rdi
@@ -393,8 +391,9 @@ END_FUNC op_delete_name
 ;; op_delete_global - Delete name from globals dict
 ;; ============================================================================
 DEF_FUNC_BARE op_delete_global
-    shl ecx, 4                ; fat tuple: 16-byte stride
-    mov rsi, [r15 + rcx]      ; name
+    shl ecx, 3                ; payload array: 8-byte stride
+    LOAD_CO_NAMES rsi
+    mov rsi, [rsi + rcx]      ; name
     mov rdi, [r12 + PyFrame.globals]
     mov edx, TAG_PTR
     call dict_del
@@ -415,15 +414,15 @@ END_FUNC op_delete_global
 ;; ============================================================================
 DEF_FUNC op_delete_attr, DA_FRAME
 
-    shl ecx, 4                ; fat tuple: 16-byte stride
-    mov rax, [r15 + rcx]      ; name
+    shl ecx, 3                ; payload array: 8-byte stride
+    LOAD_CO_NAMES rax
+    mov rax, [rax + rcx]      ; name
     mov [rbp - DA_NAME], rax
 
-    VPOP rdi
+    VPOP_VAL rdi, rax
     mov [rbp - DA_OBJ], rdi
 
     ; Non-pointer obj can't have attrs deleted
-    mov rax, [r13 + 8]            ; obj tag (after VPOP)
     cmp rax, TAG_PTR
     jne .da_error
 
@@ -463,10 +462,8 @@ END_FUNC op_delete_attr
 ;; ============================================================================
 DEF_FUNC op_delete_subscr, DS_FRAME
 
-    VPOP rsi                    ; key
-    mov rax, [r13 + 8]        ; key tag
-    VPOP rdi                    ; obj
-    mov rcx, [r13 + 8]        ; obj tag
+    VPOP_VAL rsi, rax            ; key + tag
+    VPOP_VAL rdi, rcx            ; obj + tag
     mov [rbp - DS_OBJ], rdi     ; save obj
     mov [rbp - DS_KEY], rsi     ; save key
     mov [rbp - DS_OTAG], rcx    ; save obj tag
@@ -486,7 +483,7 @@ DEF_FUNC op_delete_subscr, DS_FRAME
     jz .ds_error
 
     xor edx, edx               ; value = NULL (delete)
-    mov rcx, [rbp - DS_KTAG]  ; key tag (4th arg, 64-bit for SmallStr)
+    mov rcx, [rbp - DS_KTAG]  ; key tag (4th arg)
     xor r8d, r8d               ; value tag = TAG_NULL (5th arg)
     call rax
 

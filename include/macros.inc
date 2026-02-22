@@ -8,10 +8,13 @@
 ; 1. EVAL LOOP REGISTERS (callee-saved, global interpreter state)
 ;    rbx  = bytecode instruction pointer (IP into co_code[])
 ;    r12  = current frame pointer (PyFrame*)
-;    r13  = value stack top pointer
+;    r13  = value stack top pointer (payload array, u64[])
 ;    r14  = co_consts tuple data pointer (&tuple.ob_item[0])
-;    r15  = co_names tuple data pointer (&tuple.ob_item[0])
+;    r15  = tag stack top pointer (sidecar tag array, u8[])
 ;    ecx  = opcode arg on handler entry (set by eval_dispatch)
+;
+;    co_names accessed via LOAD_CO_NAMES / LOAD_CO_NAMES_TAGS macros
+;    (reads eval_co_names / eval_co_names_tags globals).
 ;
 ; 2. OPCODE HANDLER RULE
 ;    Never hold live values in caller-saved registers (rax, rcx, rdx,
@@ -83,15 +86,16 @@
     section .text
 %endmacro
 
-; Value stack pop (16 bytes/slot)
+; Value stack pop (payload only)
 %macro VPOP 1
-    sub r13, 16
+    sub r13, 8
+    sub r15, 1
     mov %1, [r13]
 %endmacro
 
-; Value stack peek (top of stack without popping, 16 bytes/slot)
+; Value stack peek (top of stack without popping)
 %macro VPEEK 1
-    mov %1, [r13 - 16]
+    mov %1, [r13 - 8]
 %endmacro
 
 ; Reference counting (heap pointers only — callers must not pass SmallInts)
@@ -137,8 +141,7 @@
 %macro DISPATCH 0
     mov [rel eval_saved_rbx], rbx  ; save bytecode IP for exception unwind
     mov [rel eval_saved_r13], r13  ; save value stack ptr for exception unwind
-    cmp byte [rel trace_opcodes], 0
-    jnz eval_dispatch              ; cold: centralized trace handler
+    mov [rel eval_saved_r15], r15  ; save tag stack ptr for exception unwind
     movzx eax, byte [rbx]         ; load opcode
     movzx ecx, byte [rbx+1]      ; load arg into ecx
     add rbx, 2                     ; advance past instruction word
@@ -180,101 +183,165 @@
     lea %1, [rel %%str]
 %endmacro
 
-; ==========================================================================
-; 128-BIT FAT VALUE SUPPORT
-; ==========================================================================
-;
-; Fat values: 64-bit payload + 64-bit tag. Used on value stack, localsplus,
-; and heap containers (tuples, lists, dicts, sets).
-;
-; Tag word encoding (two modes, distinguished by bit 63):
-;
-;   bit 63 = 0:  Normal tag mode
-;     bits 0-7:   type tag (TAG_SMALLINT..TAG_PTR)
-;     bit  8:     refcounted flag (1 = payload is heap pointer needing INCREF/DECREF)
-;     bits 9-62:  reserved (0)
-;     bit  63:    0
-;
-;   bit 63 = 1:  SmallStr mode (inline string <= 14 bytes)
-;     bits 0-7:   TAG_SMALLSTR (0x06) — fixed, prevents tag collision
-;     bits 8-55:  string bytes 8-13 (6 bytes, zero-padded)
-;     bits 56-62: string length (0-14)
-;     bit  63:    1 (SmallStr marker)
-;     payload:    string bytes 0-7 (8 bytes, zero-padded)
-;
-;   TAG_SMALLSTR in bits 0-7 ensures:
-;     - test edx, edx → nonzero (never confused with TAG_NULL)
-;     - cmp edx, TAG_* → never matches any other tag
-;   Tags with TAG_RC_BIT set (TAG_PTR, TAG_TASK) are refcounted heap pointers.
-
-; Tag constants (normal mode, bit 63 = 0)
-TAG_NULL     equ 0           ; null/empty slot
-TAG_SMALLINT equ 1           ; payload = int64_t (full 64-bit range)
-TAG_FLOAT    equ 2           ; payload = double bits (IEEE 754)
-TAG_NONE     equ 3           ; payload = 0 (unused)
-TAG_BOOL     equ 4           ; payload = 0 (False) or 1 (True)
-TAG_PTR      equ 0x105       ; 5 | TAG_RC_BIT — heap PyObject*, refcounted
-TAG_RC_BIT   equ (1 << 8)    ; bit 8: refcounted flag
-TAG_SMALLSTR equ 0x06        ; SmallStr low byte — always in tag bits 0-7
-TAG_SLEEP    equ 7           ; payload = delay_ns (uint64) — async sleep sentinel
-TAG_IO_WAIT  equ 8           ; payload = fd | (direction << 32) — async I/O sentinel
-TAG_TASK     equ 0x109       ; payload = AsyncTask*, RC bit SET (9 | TAG_RC_BIT)
-TAG_WAIT_FOR equ 0x10A       ; payload = WaitForAwaitable*, RC bit SET (10 | TAG_RC_BIT)
-
-; 128-bit value stack push (r13 = stack top pointer, 16 bytes/slot)
-%macro VPUSH_VAL 2              ; %1 = payload reg, %2 = tag reg
-    mov [r13], %1
-    mov [r13 + 8], %2
-    add r13, 16
+; Load co_names payload pointer (&tuple.ob_item[0]) into a register
+%macro LOAD_CO_NAMES 1          ; %1 = dest reg
+    mov %1, [rel eval_co_names]
 %endmacro
 
-; 128-bit value stack pop
+; Load co_names tag pointer (&tuple.ob_item_tags[0]) into a register
+%macro LOAD_CO_NAMES_TAGS 1     ; %1 = dest reg
+    mov %1, [rel eval_co_names_tags]
+%endmacro
+
+; ==========================================================================
+; VALUE64 + TAG (u8) SUPPORT
+; ==========================================================================
+;
+; Value64: 64-bit payload + 8-bit tag stored in parallel sidecar arrays.
+; Value stack: r13 → u64[] payloads, r15 → u8[] tags.
+; Containers (list/tuple/dict): ob_item → u64[], ob_item_tags → u8[].
+; Frame locals: localsplus → u64[], locals_tag_base → u8[].
+; Functions return (rax=payload, edx=tag).
+;
+; Tag encoding (u8):
+;   bits 0-6: type tag (TAG_SMALLINT..TAG_PTR)
+;   bit 7:    TAG_RC_BIT — payload is a refcounted heap pointer
+
+; Tag constants (u8)
+TAG_NULL     equ 0           ; null/empty slot
+TAG_SMALLINT equ 1           ; payload = int64_t (full 64-bit range)
+TAG_I64      equ TAG_SMALLINT
+TAG_FLOAT    equ 2           ; payload = double bits (IEEE 754)
+TAG_F64      equ TAG_FLOAT
+TAG_NONE     equ 3           ; payload = 0 (unused)
+TAG_BOOL     equ 4           ; payload = 0 (False) or 1 (True)
+TAG_RC_BIT   equ 0x80        ; bit 7: refcounted flag
+TAG_PTR      equ (5 | TAG_RC_BIT)    ; heap PyObject*, refcounted
+TAG_SLEEP    equ 7           ; payload = delay_ns (uint64) — async sleep sentinel
+TAG_IO_WAIT  equ 8           ; payload = fd | (direction << 32) — async I/O sentinel
+TAG_TASK     equ (9 | TAG_RC_BIT)    ; payload = AsyncTask*, RC bit SET
+TAG_WAIT_FOR equ (10 | TAG_RC_BIT)   ; payload = WaitForAwaitable*, RC bit SET
+
+; Value stack push (r13 = payload top, r15 = tag top)
+%macro VPUSH_VAL 2              ; %1 = payload reg, %2 = tag reg
+    mov [r13], %1
+%ifidni %2, rax
+    mov byte [r15], al
+%elifidni %2, eax
+    mov byte [r15], al
+%elifidni %2, rbx
+    mov byte [r15], bl
+%elifidni %2, ebx
+    mov byte [r15], bl
+%elifidni %2, rcx
+    mov byte [r15], cl
+%elifidni %2, ecx
+    mov byte [r15], cl
+%elifidni %2, rdx
+    mov byte [r15], dl
+%elifidni %2, edx
+    mov byte [r15], dl
+%elifidni %2, rsi
+    mov byte [r15], sil
+%elifidni %2, esi
+    mov byte [r15], sil
+%elifidni %2, rdi
+    mov byte [r15], dil
+%elifidni %2, edi
+    mov byte [r15], dil
+%elifidni %2, r8
+    mov byte [r15], r8b
+%elifidni %2, r8d
+    mov byte [r15], r8b
+%elifidni %2, r9
+    mov byte [r15], r9b
+%elifidni %2, r9d
+    mov byte [r15], r9b
+%elifidni %2, r10
+    mov byte [r15], r10b
+%elifidni %2, r10d
+    mov byte [r15], r10b
+%elifidni %2, r11
+    mov byte [r15], r11b
+%elifidni %2, r11d
+    mov byte [r15], r11b
+%elifidni %2, r12
+    mov byte [r15], r12b
+%elifidni %2, r12d
+    mov byte [r15], r12b
+%elifidni %2, r13
+    mov byte [r15], r13b
+%elifidni %2, r13d
+    mov byte [r15], r13b
+%elifidni %2, r14
+    mov byte [r15], r14b
+%elifidni %2, r14d
+    mov byte [r15], r14b
+%elifidni %2, r15
+    mov byte [r15], r15b
+%elifidni %2, r15d
+    mov byte [r15], r15b
+%else
+    mov byte [r15], %2
+%endif
+    add r13, 8
+    add r15, 1
+%endmacro
+
+; Value stack pop
 %macro VPOP_VAL 2               ; %1 = payload dest reg, %2 = tag dest reg
-    sub r13, 16
+    sub r13, 8
+    sub r15, 1
     mov %1, [r13]
-    mov %2, [r13 + 8]
+    movzx %2, byte [r15]
 %endmacro
 
 ; Push SmallInt (payload = raw int64, no encode needed)
 %macro VPUSH_INT 1              ; %1 = payload reg containing int64
     mov [r13], %1
-    mov qword [r13 + 8], TAG_SMALLINT
-    add r13, 16
+    mov byte [r15], TAG_SMALLINT
+    add r13, 8
+    add r15, 1
 %endmacro
 
 ; Push float (payload = IEEE 754 double bits)
 %macro VPUSH_FLOAT 1            ; %1 = payload reg containing double bits
     mov [r13], %1
-    mov qword [r13 + 8], TAG_FLOAT
-    add r13, 16
+    mov byte [r15], TAG_FLOAT
+    add r13, 8
+    add r15, 1
 %endmacro
 
 ; Push None (payload = 0, tag = TAG_NONE)
 %macro VPUSH_NONE 0
     mov qword [r13], 0
-    mov qword [r13 + 8], TAG_NONE
-    add r13, 16
+    mov byte [r15], TAG_NONE
+    add r13, 8
+    add r15, 1
 %endmacro
 
 ; Push bool (payload = 0 or 1)
 %macro VPUSH_BOOL 1             ; %1 = payload reg (0=False, 1=True)
     mov [r13], %1
-    mov qword [r13 + 8], TAG_BOOL
-    add r13, 16
+    mov byte [r15], TAG_BOOL
+    add r13, 8
+    add r15, 1
 %endmacro
 
 ; Push heap pointer (refcounted)
 %macro VPUSH_PTR 1              ; %1 = payload reg containing PyObject*
     mov [r13], %1
-    mov qword [r13 + 8], TAG_PTR
-    add r13, 16
+    mov byte [r15], TAG_PTR
+    add r13, 8
+    add r15, 1
 %endmacro
 
 ; Push null/empty slot (16 bytes of zero, tag = TAG_NULL = 0)
 %macro VPUSH_NULL128 0
     mov qword [r13], 0
-    mov qword [r13 + 8], TAG_NULL
-    add r13, 16
+    mov byte [r15], TAG_NULL
+    add r13, 8
+    add r15, 1
 %endmacro
 
 ; Set fat return to NULL error (rax=0, edx=TAG_NULL=0)
@@ -300,37 +367,31 @@ TAG_WAIT_FOR equ 0x10A       ; payload = WaitForAwaitable*, RC bit SET (10 | TAG
 
 ; Peek tag of top-of-stack (without popping)
 %macro VPEEK_TAG 1              ; %1 = dest reg
-    mov %1, [r13 - 8]
+    movzx %1, byte [r15 - 1]
 %endmacro
 
 ; Peek payload of top-of-stack (without popping)
 %macro VPEEK_PAYLOAD 1          ; %1 = dest reg
-    mov %1, [r13 - 16]
+    mov %1, [r13 - 8]
 %endmacro
 
 ; Peek 128-bit value at offset from TOS (0 = TOS, 1 = second, etc.)
 %macro VPEEK_AT_VAL 3           ; %1 = payload dest, %2 = tag dest, %3 = offset (0=TOS)
-    mov %1, [r13 - 16 - %3*16]
-    mov %2, [r13 - 8 - %3*16]
+    mov %1, [r13 - 8 - %3*8]
+    movzx %2, byte [r15 - 1 - %3]
 %endmacro
 
-; 128-bit INCREF — only if TAG_RC_BIT set AND not SmallStr (bit 63).
-; SmallStr tags pack string data in bits 8-55, so bit 8 may be set.
-; Must check bit 63 first to exclude SmallStr before testing TAG_RC_BIT.
-%macro INCREF_VAL 2             ; %1 = payload, %2 = tag (must be 64-bit reg)
-    bt %2, 63
-    jc %%skip                  ; SmallStr — not refcounted
+; Value64 INCREF — only if TAG_RC_BIT (bit 7) is set in the u8 tag.
+%macro INCREF_VAL 2             ; %1 = payload, %2 = tag (reg with u8 tag value)
     test %2, TAG_RC_BIT
     jz %%skip                  ; no RC bit — not refcounted
     inc qword [%1 + PyObject.ob_refcnt]
     %%skip:
 %endmacro
 
-; 128-bit DECREF — only if TAG_RC_BIT set AND not SmallStr (bit 63).
+; Value64 DECREF — only if TAG_RC_BIT (bit 7) is set in the u8 tag.
 ; Calls obj_dealloc if refcount reaches zero. Clobbers rdi + all caller-saved.
-%macro DECREF_VAL 2             ; %1 = payload, %2 = tag (must be 64-bit reg)
-    bt %2, 63
-    jc %%skip                  ; SmallStr — not refcounted
+%macro DECREF_VAL 2             ; %1 = payload, %2 = tag (reg with u8 tag value)
     test %2, TAG_RC_BIT
     jz %%skip                  ; no RC bit — not refcounted
     dec qword [%1 + PyObject.ob_refcnt]
@@ -340,10 +401,8 @@ TAG_WAIT_FOR equ 0x10A       ; payload = WaitForAwaitable*, RC bit SET (10 | TAG
     %%skip:
 %endmacro
 
-; 128-bit XDECREF — NULL-safe DECREF_VAL
-%macro XDECREF_VAL 2            ; %1 = payload, %2 = tag (must be 64-bit reg)
-    bt %2, 63
-    jc %%skip                  ; SmallStr — not refcounted
+; Value64 XDECREF — NULL-safe DECREF_VAL
+%macro XDECREF_VAL 2            ; %1 = payload, %2 = tag (reg with u8 tag value)
     test %2, TAG_RC_BIT
     jz %%skip                  ; no RC bit — not refcounted
     test %1, %1
@@ -353,15 +412,6 @@ TAG_WAIT_FOR equ 0x10A       ; payload = WaitForAwaitable*, RC bit SET (10 | TAG
     mov rdi, %1
     call obj_dealloc
     %%skip:
-%endmacro
-
-; ===== SmallStr helpers =====
-; Extract SmallStr length from tag register into dest register
-; SmallStr tag: bits 56-62 = length, bit 63 = SmallStr marker
-%macro SMALLSTR_LEN 2          ; %1 = dest reg, %2 = tag reg
-    mov %1, %2
-    shr %1, 56
-    and %1, 0x7F
 %endmacro
 
 ; ===== Fat result save/restore across DECREF calls =====
@@ -381,7 +431,8 @@ TAG_WAIT_FOR equ 0x10A       ; payload = WaitForAwaitable*, RC bit SET (10 | TAG
 ; Undo N VPOP operations by re-advancing the value stack pointer.
 ; Useful for deopt paths where popped slots are still intact in memory.
 %macro VUNDROP 1              ; %1 = number of slots to un-pop
-    add r13, %1 * 16
+    add r13, %1 * 8
+    add r15, %1
 %endmacro
 
 ; Swap two 16-byte value stack slots via SSE (no GPR temps needed for the swap)
@@ -391,6 +442,37 @@ TAG_WAIT_FOR equ 0x10A       ; payload = WaitForAwaitable*, RC bit SET (10 | TAG
     movdqa xmm1, [%2]
     movdqa [%1], xmm1
     movdqa [%2], xmm0
+%endmacro
+
+; ==========================================================================
+; FRAME STACK PUSH — push onto a saved frame's value stack (stack_ptr/stack_tag_ptr)
+; Used by generator resume to push sent/None values before calling eval_frame.
+; ==========================================================================
+
+; Push None onto a frame's saved value stack.
+; %1 = frame register, %2 = scratch register (clobbered)
+%macro FRAME_PUSH_NONE 2
+    mov %2, [%1 + PyFrame.stack_ptr]
+    mov qword [%2], 0
+    add %2, 8
+    mov [%1 + PyFrame.stack_ptr], %2
+    mov %2, [%1 + PyFrame.stack_tag_ptr]
+    mov byte [%2], TAG_NONE
+    inc %2
+    mov [%1 + PyFrame.stack_tag_ptr], %2
+%endmacro
+
+; Push a value onto a frame's saved value stack.
+; %1 = frame register, %2 = payload register (64-bit), %3 = tag byte, %4 = scratch register
+%macro FRAME_PUSH_VAL 4
+    mov %4, [%1 + PyFrame.stack_ptr]
+    mov [%4], %2
+    add %4, 8
+    mov [%1 + PyFrame.stack_ptr], %4
+    mov %4, [%1 + PyFrame.stack_tag_ptr]
+    mov byte [%4], %3
+    inc %4
+    mov [%1 + PyFrame.stack_tag_ptr], %4
 %endmacro
 
 ; Mark stack as non-executable and reset to .text section

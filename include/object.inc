@@ -76,7 +76,8 @@ struc PyListObject
     .ob_type:   resq 1    ; +8
     .ob_size:   resq 1    ; +16: item count
     .allocated: resq 1    ; +24: capacity
-    .ob_item:   resq 1    ; +32: ptr to PyObject*[] array
+    .ob_item:   resq 1    ; +32: ptr to payload (u64[]) array
+    .ob_item_tags: resq 1 ; +40: ptr to tag (u8[]) array
 endstruc
 
 ; Tuple object
@@ -85,7 +86,8 @@ struc PyTupleObject
     .ob_type:   resq 1    ; +8
     .ob_size:   resq 1    ; +16: item count
     .ob_hash:   resq 1    ; +24: cached hash (-1 = not computed)
-    .ob_item:              ; +32: inline PyObject* array (variable)
+    .ob_item:   resq 1     ; +32: ptr to payload (u64[]) array
+    .ob_item_tags: resq 1  ; +40: ptr to tag (u8[]) array
 endstruc
 
 ; Dict object
@@ -104,11 +106,13 @@ struc DictEntry
     .hash:      resq 1     ; +0: cached hash
     .key:       resq 1     ; +8: key payload
     .value:     resq 1     ; +16: value payload
-    .value_tag: resq 1     ; +24: value tag
-    .key_tag:   resq 1     ; +32: key tag
+    .key_tag:   resb 1     ; +24: key tag (u8)
+    .value_tag: resb 1     ; +25: value tag (u8)
+    .pad:       resb 6     ; +26: padding
 endstruc
 
-DICT_ENTRY_SIZE equ DictEntry_size  ; 40
+DICT_ENTRY_SIZE equ DictEntry_size  ; 32
+DICT_TOMBSTONE  equ 0xFF
 
 ; Function object
 struc PyFuncObject
