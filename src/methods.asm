@@ -15,6 +15,7 @@ extern ap_free
 extern ap_realloc
 extern ap_memcpy
 extern ap_memset
+extern ap_memmove
 extern ap_strcmp
 extern ap_strlen
 extern ap_strstr
@@ -4129,22 +4130,18 @@ DEF_FUNC list_method_pop
     push qword [rax + rcx + 8]  ; save item tag on stack
     ; Don't DECREF since we're transferring ownership to caller
 
-    ; Shift items down: for i = index .. size-2, items[i] = items[i+1]
-    mov rcx, r13            ; i = index
-    mov rdx, [rbx + PyListObject.ob_size]
-    dec rdx                 ; size - 1
-.pop_shift:
-    cmp rcx, rdx
-    jge .pop_shrink
+    ; Shift items down: memmove(&items[idx], &items[idx+1], (size-1-idx)*16)
     mov rax, [rbx + PyListObject.ob_item]
-    mov r8, rcx
-    shl r8, 4               ; i * 16
-    mov r9, [rax + r8 + 16] ; items[i+1] payload
-    mov r10, [rax + r8 + 24] ; items[i+1] tag
-    mov [rax + r8], r9       ; items[i] payload
-    mov [rax + r8 + 8], r10  ; items[i] tag
-    inc rcx
-    jmp .pop_shift
+    mov rcx, r13
+    shl rcx, 4              ; idx * 16
+    lea rdi, [rax + rcx]    ; dst = &items[idx]
+    lea rsi, [rdi + 16]     ; src = &items[idx+1]
+    mov rdx, [rbx + PyListObject.ob_size]
+    sub rdx, r13
+    dec rdx                 ; count = size - idx - 1
+    shl rdx, 4              ; bytes = count * 16
+    jz .pop_shrink          ; nothing to shift if popping last
+    call ap_memmove
 
 .pop_shrink:
     dec qword [rbx + PyListObject.ob_size]
@@ -4222,21 +4219,17 @@ DEF_FUNC list_method_insert
     mov [rbx + PyListObject.ob_item], rax
 .ins_no_grow:
 
-    ; Shift items up: for i = size-1 down to index, items[i+1] = items[i]
-    mov rcx, [rbx + PyListObject.ob_size]
-    dec rcx                 ; i = size - 1
-.ins_shift:
-    cmp rcx, r12
-    jl .ins_place
+    ; Shift items up: memmove(&items[idx+1], &items[idx], (size-idx)*16)
     mov rax, [rbx + PyListObject.ob_item]
-    mov r8, rcx
-    shl r8, 4               ; i * 16
-    mov r9, [rax + r8]      ; payload
-    mov r10, [rax + r8 + 8] ; tag
-    mov [rax + r8 + 16], r9  ; items[i+1] payload
-    mov [rax + r8 + 24], r10 ; items[i+1] tag
-    dec rcx
-    jmp .ins_shift
+    mov rcx, r12
+    shl rcx, 4              ; idx * 16
+    lea rsi, [rax + rcx]    ; src = &items[idx]
+    lea rdi, [rsi + 16]     ; dst = &items[idx+1]
+    mov rdx, [rbx + PyListObject.ob_size]
+    sub rdx, r12            ; count = size - idx
+    shl rdx, 4              ; bytes = count * 16
+    jz .ins_place           ; nothing to shift if inserting at end
+    call ap_memmove
 
 .ins_place:
     ; Place item at index (16-byte fat slot)
@@ -6417,22 +6410,18 @@ DEF_FUNC list_method_remove
     mov r12, [rax + rcx]    ; item payload (save for DECREF)
     mov r13, [rax + rcx + 8] ; item tag (save for DECREF)
 
-    ; Shift remaining items left (16-byte fat elements)
-    mov rcx, r14
-    mov rdx, [rbx + PyListObject.ob_size]
-    dec rdx                  ; size - 1
-.lremove_shift:
-    cmp rcx, rdx
-    jge .lremove_shrink
+    ; Shift remaining items left: memmove(&items[idx], &items[idx+1], (size-1-idx)*16)
     mov rax, [rbx + PyListObject.ob_item]
-    mov r8, rcx
-    shl r8, 4                ; i * 16
-    mov r9, [rax + r8 + 16]  ; items[i+1] payload
-    mov r10, [rax + r8 + 24] ; items[i+1] tag
-    mov [rax + r8], r9        ; items[i] payload
-    mov [rax + r8 + 8], r10   ; items[i] tag
-    inc rcx
-    jmp .lremove_shift
+    mov rcx, r14
+    shl rcx, 4              ; idx * 16
+    lea rdi, [rax + rcx]    ; dst = &items[idx]
+    lea rsi, [rdi + 16]     ; src = &items[idx+1]
+    mov rdx, [rbx + PyListObject.ob_size]
+    sub rdx, r14
+    dec rdx                 ; count = size - idx - 1
+    shl rdx, 4              ; bytes = count * 16
+    jz .lremove_shrink      ; nothing to shift if removing last
+    call ap_memmove
 
 .lremove_shrink:
     dec qword [rbx + PyListObject.ob_size]

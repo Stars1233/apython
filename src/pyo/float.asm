@@ -528,6 +528,31 @@ DEF_FUNC float_pow, 32
     movsd xmm0, [rbp-8]        ; base
     movsd xmm1, [rbp-16]       ; exp
 
+    ; Fast path: exp == 0.5 → sqrtsd (~12 cycles vs ~100+ for general)
+    movsd xmm2, [rel const_half_f]
+    ucomisd xmm1, xmm2
+    jne .not_sqrt
+    jp .not_sqrt
+    ; base >= 0 check (negative base → general path for complex/error)
+    xorpd xmm3, xmm3
+    ucomisd xmm0, xmm3
+    jb .fpow_general
+    sqrtsd xmm0, xmm0
+    call float_from_f64
+    leave
+    ret
+.not_sqrt:
+    ; Fast path: exp == 2.0 → mulsd
+    movsd xmm2, [rel const_two_f]
+    ucomisd xmm1, xmm2
+    jne .check_int_exp
+    jp .check_int_exp
+    mulsd xmm0, xmm0
+    call float_from_f64
+    leave
+    ret
+
+.check_int_exp:
     ; Check if exponent is an integer
     cvtsd2si rcx, xmm1
     cvtsi2sd xmm2, rcx
@@ -791,7 +816,9 @@ align 8
 sign_mask:   dq 0x8000000000000000
 pos_inf:     dq 0x7FF0000000000000
 neg_inf:     dq 0xFFF0000000000000
-const_one_f: dq 0x3FF0000000000000   ; 1.0 in IEEE 754
+const_one_f:  dq 0x3FF0000000000000   ; 1.0 in IEEE 754
+const_half_f: dq 0x3FE0000000000000   ; 0.5
+const_two_f:  dq 0x4000000000000000   ; 2.0
 
 align 8
 global float_number_methods

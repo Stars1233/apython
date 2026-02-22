@@ -11,6 +11,8 @@ extern gc_track
 extern gc_dealloc
 extern ap_free
 extern ap_realloc
+extern ap_memmove
+extern ap_memcpy
 extern obj_decref
 extern obj_dealloc
 extern str_from_cstr
@@ -41,6 +43,8 @@ extern list_sorting_error
 ;; list_new(int64_t capacity) -> PyListObject*
 ;; Allocate a new empty list with given initial capacity
 ;; ============================================================================
+LIST_POOL_MAX equ 16
+
 DEF_FUNC list_new
     push rbx
     push r12
@@ -51,12 +55,26 @@ DEF_FUNC list_new
     mov r12, 4                 ; minimum capacity
 .has_cap:
 
+    ; Try list header pool first
+    mov rax, [rel list_pool_head]
+    test rax, rax
+    jz .alloc_fresh
+    ; Pop from pool: reuse ob_refcnt slot as next-link
+    mov rcx, [rax + PyObject.ob_refcnt]
+    mov [rel list_pool_head], rcx
+    dec dword [rel list_pool_count]
+    mov qword [rax + PyObject.ob_refcnt], 1  ; reinit refcount
+    mov rbx, rax
+    jmp .init_fields
+
+.alloc_fresh:
     ; Allocate PyListObject header (GC-tracked)
     mov edi, PyListObject_size
     lea rsi, [rel list_type]
     call gc_alloc
     mov rbx, rax               ; rbx = list (ob_refcnt=1, ob_type set)
 
+.init_fields:
     mov qword [rbx + PyListObject.ob_size], 0
     mov [rbx + PyListObject.allocated], r12
 
@@ -549,38 +567,11 @@ DEF_FUNC list_ass_subscript, LAS_FRAME
     mov rax, r14
     shl rax, 4
     add rsi, rax
-    ; count in 16-byte slots
-    ; Use forward or backward copy depending on direction
+    ; rcx = tail_count (16-byte elements), rdi = dst, rsi = src
     push rcx
-    cmp rdi, rsi
-    jb .las_copy_fwd
-    ; Backward copy (dst > src, overlap)
-    dec rcx
-.las_copy_bwd_loop:
-    cmp rcx, 0
-    jl .las_copy_done
-    mov rax, rcx
-    shl rax, 4                ; offset = i * 16
-    mov r10, [rsi + rax]      ; payload
-    mov r11, [rsi + rax + 8]  ; tag
-    mov [rdi + rax], r10
-    mov [rdi + rax + 8], r11
-    dec rcx
-    jmp .las_copy_bwd_loop
-.las_copy_fwd:
-    xor edx, edx
-.las_copy_fwd_loop:
-    cmp rdx, rcx
-    jge .las_copy_done
-    mov rax, rdx
-    shl rax, 4                ; offset = i * 16
-    mov r10, [rsi + rax]
-    mov r11, [rsi + rax + 8]
-    mov [rdi + rax], r10
-    mov [rdi + rax + 8], r11
-    inc rdx
-    jmp .las_copy_fwd_loop
-.las_copy_done:
+    shl rcx, 4                ; bytes = tail_count * 16
+    mov rdx, rcx              ; rdx = byte count for ap_memmove
+    call ap_memmove
     pop rcx
 
 .las_shift_done:
@@ -993,7 +984,7 @@ END_FUNC list_contains
 
 ;; ============================================================================
 ;; list_dealloc(PyObject *self)
-;; DECREF all items, free items array, free list
+;; DECREF all items, free items array, free or pool list header
 ;; ============================================================================
 DEF_FUNC list_dealloc
     push rbx
@@ -1020,6 +1011,25 @@ DEF_FUNC list_dealloc
     mov rdi, [rbx + PyListObject.ob_item]
     call ap_free
 
+    ; Try to pool list header
+    cmp dword [rel list_pool_count], LIST_POOL_MAX
+    jge .free_header
+    ; Untrack from GC before pooling
+    mov rdi, rbx
+    extern gc_untrack
+    call gc_untrack
+    ; Push to pool: reuse ob_refcnt as next-pointer
+    mov rcx, [rel list_pool_head]
+    mov [rbx + PyObject.ob_refcnt], rcx
+    mov [rel list_pool_head], rbx
+    inc dword [rel list_pool_count]
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.free_header:
     mov rdi, rbx
     call gc_dealloc
 
@@ -1111,6 +1121,40 @@ DEF_FUNC list_getslice
     mov rdi, [rsp]             ; new list
     mov [rdi + PyListObject.ob_size], rcx
 
+    ; Fast path: step == 1 → contiguous memcpy + bulk INCREF
+    cmp r15, 1
+    jne .lgs_loop_start
+    ; src = source->ob_item + start * 16
+    mov rsi, [rbx + PyListObject.ob_item]
+    mov rax, r13
+    shl rax, 4
+    add rsi, rax
+    ; dst = new_list->ob_item
+    mov rdi, [rsp]             ; new list
+    mov rdi, [rdi + PyListObject.ob_item]
+    ; count = slicelength * 16
+    mov rdx, [rsp + 8]        ; slicelength
+    shl rdx, 4
+    call ap_memcpy
+    ; Bulk INCREF all copied elements
+    mov rcx, [rsp + 8]        ; slicelength
+    test rcx, rcx
+    jz .lgs_done
+    mov rdi, [rsp]             ; new list
+    mov rdi, [rdi + PyListObject.ob_item]
+    xor edx, edx
+.lgs_incref_loop:
+    cmp rdx, rcx
+    jge .lgs_done
+    mov rax, rdx
+    shl rax, 4
+    mov r8, [rdi + rax]       ; payload
+    mov r9, [rdi + rax + 8]   ; tag
+    INCREF_VAL r8, r9
+    inc rdx
+    jmp .lgs_incref_loop
+
+.lgs_loop_start:
     xor ecx, ecx              ; i = 0
 .lgs_loop:
     cmp rcx, [rsp + 8]        ; slicelength
@@ -1671,6 +1715,12 @@ END_FUNC list_type_call
 ;; Data section
 ;; ============================================================================
 section .data
+
+; List header pool (freelist, singly-linked via ob_refcnt)
+align 8
+list_pool_head:  dq 0       ; freelist head
+list_pool_count: dd 0       ; current count
+                 dd 0       ; padding
 
 list_name_str: db "list", 0
 ; list_repr_str removed - repr now in src/repr.asm

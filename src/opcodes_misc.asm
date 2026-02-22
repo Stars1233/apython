@@ -42,6 +42,7 @@ extern raise_exception
 extern exc_RuntimeError_type
 extern exc_StopIteration_type
 extern exc_TypeError_type
+extern exc_ZeroDivisionError_type
 extern current_exception
 extern eval_exception_unwind
 extern obj_incref
@@ -144,6 +145,24 @@ DEF_FUNC_BARE op_binary_op
     je .binop_try_smallint_sub
     cmp ecx, 23                ; NB_INPLACE_SUBTRACT
     je .binop_try_smallint_sub
+
+    ; Fast path: SmallInt multiply (NB_MULTIPLY=5, NB_INPLACE_MULTIPLY=18)
+    cmp ecx, 5                 ; NB_MULTIPLY
+    je .binop_try_smallint_mul
+    cmp ecx, 18                ; NB_INPLACE_MULTIPLY
+    je .binop_try_smallint_mul
+
+    ; Fast path: float truediv (NB_TRUE_DIVIDE=11, NB_INPLACE_TRUE_DIVIDE=24)
+    cmp ecx, 11                ; NB_TRUE_DIVIDE
+    je .binop_try_float_truediv
+    cmp ecx, 24                ; NB_INPLACE_TRUE_DIVIDE
+    je .binop_try_float_truediv
+
+    ; Fast path: SmallInt floor divide (NB_FLOOR_DIVIDE=2, NB_INPLACE_FLOOR_DIVIDE=15)
+    cmp ecx, 2                 ; NB_FLOOR_DIVIDE
+    je .binop_try_smallint_fdiv
+    cmp ecx, 15                ; NB_INPLACE_FLOOR_DIVIDE
+    je .binop_try_smallint_fdiv
 
 .binop_generic:
     ; Save operands + tags for DECREF after call (push on machine stack)
@@ -263,7 +282,18 @@ DEF_FUNC_BARE op_binary_op
     ; If inplace slot was NULL, fall back to non-inplace slot
     cmp r9d, 13
     jl .binop_try_dunder        ; not inplace, no fallback
-    ; Reload type's tp_as_number (may have been clobbered)
+    ; Map inplace op to non-inplace offset
+    mov ecx, r9d
+    sub ecx, 13                 ; inplace → base op
+    lea rdx, [rel binary_op_offsets]
+    mov rdx, [rdx + rcx*8]     ; non-inplace offset
+    ; Float coercion: if either operand is float, use float_number_methods
+    ; (mirrors the initial float coercion at .use_float_methods)
+    cmp qword [rsp + BO_LTAG], TAG_FLOAT
+    je .binop_fallback_float
+    cmp qword [rsp + BO_RTAG], TAG_FLOAT
+    je .binop_fallback_float
+    ; Reload type's tp_as_number
     cmp qword [rsp + BO_LTAG], TAG_SMALLINT
     je .binop_fallback_int
     cmp qword [rsp + BO_LTAG], TAG_BOOL
@@ -274,6 +304,9 @@ DEF_FUNC_BARE op_binary_op
     jz .binop_try_dunder
     mov rax, [rdi + PyObject.ob_type]
     jmp .binop_fallback_have_type
+.binop_fallback_float:
+    lea rax, [rel float_number_methods]
+    jmp .binop_fallback_have_methods
 .binop_fallback_int:
     lea rax, [rel int_type]
     jmp .binop_fallback_have_type
@@ -281,13 +314,9 @@ DEF_FUNC_BARE op_binary_op
     lea rax, [rel str_type]
 .binop_fallback_have_type:
     mov rax, [rax + PyTypeObject.tp_as_number]
+.binop_fallback_have_methods:
     test rax, rax
     jz .binop_try_dunder
-    ; Map inplace op to non-inplace offset
-    mov ecx, r9d
-    sub ecx, 13                 ; inplace → base op
-    lea rdx, [rel binary_op_offsets]
-    mov rdx, [rdx + rcx*8]     ; non-inplace offset
     mov rax, [rax + rdx]
     test rax, rax
     jz .binop_try_dunder
@@ -506,7 +535,7 @@ DEF_FUNC_BARE op_binary_op
 .binop_try_smallint_add:
     ; Check both TAG_SMALLINT
     cmp r9d, TAG_SMALLINT
-    jne .binop_generic
+    jne .binop_try_float_add
     cmp r8d, TAG_SMALLINT
     jne .binop_generic
 
@@ -515,18 +544,31 @@ DEF_FUNC_BARE op_binary_op
     mov rdx, rsi
     add rax, rdx
     jo .binop_generic          ; overflow → fall back to generic
-    ; Encode as SmallInt
     ; Specialize: rewrite opcode to BINARY_OP_ADD_INT (211)
     mov byte [rbx - 2], 211
-    ; No DECREF needed (SmallInt are not refcounted)
     VPUSH_INT rax
+    add rbx, 2
+    DISPATCH
+
+.binop_try_float_add:
+    cmp r9d, TAG_FLOAT
+    jne .binop_generic
+    cmp r8d, TAG_FLOAT
+    jne .binop_generic
+    ; Both float: inline add
+    mov byte [rbx - 2], 217   ; BINARY_OP_ADD_FLOAT
+    movq xmm0, rdi
+    movq xmm1, rsi
+    addsd xmm0, xmm1
+    movq rax, xmm0
+    VPUSH_FLOAT rax
     add rbx, 2
     DISPATCH
 
 .binop_try_smallint_sub:
     ; Check both TAG_SMALLINT
     cmp r9d, TAG_SMALLINT
-    jne .binop_generic
+    jne .binop_try_float_sub
     cmp r8d, TAG_SMALLINT
     jne .binop_generic
 
@@ -535,10 +577,98 @@ DEF_FUNC_BARE op_binary_op
     mov rdx, rsi
     sub rax, rdx
     jo .binop_generic          ; overflow → fall back to generic
-    ; Encode as SmallInt
     ; Specialize: rewrite opcode to BINARY_OP_SUBTRACT_INT (212)
     mov byte [rbx - 2], 212
-    ; No DECREF needed (SmallInt are not refcounted)
+    VPUSH_INT rax
+    add rbx, 2
+    DISPATCH
+
+.binop_try_float_sub:
+    cmp r9d, TAG_FLOAT
+    jne .binop_generic
+    cmp r8d, TAG_FLOAT
+    jne .binop_generic
+    ; Both float: inline sub
+    mov byte [rbx - 2], 218   ; BINARY_OP_SUB_FLOAT
+    movq xmm0, rdi
+    movq xmm1, rsi
+    subsd xmm0, xmm1
+    movq rax, xmm0
+    VPUSH_FLOAT rax
+    add rbx, 2
+    DISPATCH
+
+.binop_try_smallint_mul:
+    ; Check both TAG_SMALLINT
+    cmp r9d, TAG_SMALLINT
+    jne .binop_try_float_mul
+    cmp r8d, TAG_SMALLINT
+    jne .binop_generic
+
+    ; Both SmallInt: multiply, check overflow
+    mov rax, rdi
+    imul rsi
+    jo .binop_generic          ; overflow → fall back to generic
+    ; Specialize: rewrite opcode to BINARY_OP_MULTIPLY_INT (221)
+    mov byte [rbx - 2], 221
+    VPUSH_INT rax
+    add rbx, 2
+    DISPATCH
+
+.binop_try_float_mul:
+    cmp r9d, TAG_FLOAT
+    jne .binop_generic
+    cmp r8d, TAG_FLOAT
+    jne .binop_generic
+    ; Both float: inline mul
+    mov byte [rbx - 2], 219   ; BINARY_OP_MUL_FLOAT
+    movq xmm0, rdi
+    movq xmm1, rsi
+    mulsd xmm0, xmm1
+    movq rax, xmm0
+    VPUSH_FLOAT rax
+    add rbx, 2
+    DISPATCH
+
+.binop_try_float_truediv:
+    cmp r9d, TAG_FLOAT
+    jne .binop_generic
+    cmp r8d, TAG_FLOAT
+    jne .binop_generic
+    ; Both float: check for division by zero
+    movq xmm1, rsi
+    xorpd xmm2, xmm2
+    ucomisd xmm1, xmm2
+    je .binop_generic          ; zero divisor → generic path raises ZeroDivisionError
+    ; Inline truediv
+    mov byte [rbx - 2], 220   ; BINARY_OP_TRUEDIV_FLOAT
+    movq xmm0, rdi
+    divsd xmm0, xmm1
+    movq rax, xmm0
+    VPUSH_FLOAT rax
+    add rbx, 2
+    DISPATCH
+
+.binop_try_smallint_fdiv:
+    ; Check both TAG_SMALLINT
+    cmp r9d, TAG_SMALLINT
+    jne .binop_generic
+    cmp r8d, TAG_SMALLINT
+    jne .binop_generic
+    test rsi, rsi
+    jz .binop_generic          ; zero divisor → generic raises error
+    mov rax, rdi
+    cqo
+    idiv rsi                    ; rax=quotient, rdx=remainder
+    ; Floor: if remainder != 0 and signs differ, subtract 1
+    test rdx, rdx
+    jz .fdiv_exact
+    mov rcx, rdi
+    xor rcx, rsi
+    jns .fdiv_exact             ; same sign → truncation == floor
+    dec rax
+.fdiv_exact:
+    mov byte [rbx - 2], 222    ; specialize to BINARY_OP_FLOORDIV_INT
     VPUSH_INT rax
     add rbx, 2
     DISPATCH
@@ -567,9 +697,22 @@ DEF_FUNC_BARE op_compare_op
     cmp r8d, TAG_SMALLINT
     jne .cmp_slow_path
 
-    ; Both SmallInt: specialize to COMPARE_OP_INT (209)
-    mov byte [rbx - 2], 209
+    ; Both SmallInt: specialize — check if next opcode is POP_JUMP_IF_FALSE/TRUE
+    ; rbx points past 2-byte instruction; CACHE at [rbx], next opcode at [rbx+2]
+    cmp byte [rbx + 2], 114    ; POP_JUMP_IF_FALSE
+    je .cmp_specialize_jump_false
+    cmp byte [rbx + 2], 115    ; POP_JUMP_IF_TRUE
+    je .cmp_specialize_jump_true
+    mov byte [rbx - 2], 209   ; plain COMPARE_OP_INT
+    jmp .cmp_do_compare
+.cmp_specialize_jump_false:
+    mov byte [rbx - 2], 215   ; COMPARE_OP_INT_JUMP_FALSE
+    jmp .cmp_do_compare
+.cmp_specialize_jump_true:
+    mov byte [rbx - 2], 216   ; COMPARE_OP_INT_JUMP_TRUE
+    ; fall through
 
+.cmp_do_compare:
     ; Both SmallInt: decode and compare
     mov rax, rdi
     mov rdx, rsi
@@ -598,12 +741,7 @@ DEF_FUNC_BARE op_compare_op
 
 .cmp_push_bool:
     movzx eax, al             ; eax = 0 or 1
-    lea rdx, [rel bool_false]
-    lea r8, [rel bool_true]
-    test eax, eax
-    cmovnz rdx, r8            ; rdx = bool_true if true, else bool_false
-    inc qword [rdx + PyObject.ob_refcnt]
-    VPUSH_PTR rdx
+    VPUSH_BOOL rax             ; (0/1, TAG_BOOL) — no INCREF needed
     add rbx, 2
     DISPATCH
 
@@ -1053,37 +1191,37 @@ END_FUNC op_unary_not
 ;; (2-byte units from start of co_code).
 ;; ============================================================================
 DEF_FUNC_BARE op_pop_jump_if_false
-    ; Save arg (target offset) before call
-    push rcx                   ; save target offset on machine stack
-
     VPOP rdi                   ; rdi = value to test
     mov r8, [r13 + 8]         ; r8 = value tag
 
-    ; Save value + tag for DECREF
-    push r8
-    push rdi
+    ; Fast path: TAG_BOOL — payload is 0/1, no DECREF needed
+    cmp r8d, TAG_BOOL
+    je .pjif_bool_fast
 
-    ; Call obj_is_true(value, tag) -> 0 (false) or 1 (true)
+    ; Slow path: call obj_is_true + DECREF
+    push rcx                   ; save target offset
+    push r8                    ; save tag for DECREF
+    push rdi                   ; save value for DECREF
     mov rsi, r8                ; 64-bit for SmallStr
     call obj_is_true
-    push rax                   ; save truthiness on machine stack
-
-    ; DECREF the popped value (tag-aware)
+    push rax                   ; save truthiness
     mov rdi, [rsp + 8]        ; reload value
     mov rsi, [rsp + 16]       ; tag
     DECREF_VAL rdi, rsi
     pop rax                    ; restore truthiness
     add rsp, 16                ; discard saved value + tag
     pop rcx                    ; restore target offset
-
-    ; If false (result == 0), jump to target
     test eax, eax
     jnz .no_jump
-
-    ; Jump: relative from current rbx (delta in instruction words)
     lea rbx, [rbx + rcx*2]
-
 .no_jump:
+    DISPATCH
+
+.pjif_bool_fast:
+    test edi, edi
+    jnz .pjif_no_jump          ; truthy → don't jump
+    lea rbx, [rbx + rcx*2]    ; jump
+.pjif_no_jump:
     DISPATCH
 END_FUNC op_pop_jump_if_false
 
@@ -1091,37 +1229,37 @@ END_FUNC op_pop_jump_if_false
 ;; op_pop_jump_if_true - Pop TOS, jump if truthy
 ;; ============================================================================
 DEF_FUNC_BARE op_pop_jump_if_true
-    ; Save arg (delta in instruction words)
-    push rcx                   ; save target offset on machine stack
-
     VPOP rdi
     mov r8, [r13 + 8]         ; r8 = value tag
 
-    ; Save value + tag for DECREF
-    push r8
-    push rdi
+    ; Fast path: TAG_BOOL — payload is 0/1, no DECREF needed
+    cmp r8d, TAG_BOOL
+    je .pjit_bool_fast
 
-    ; Call obj_is_true(value, tag)
+    ; Slow path: call obj_is_true + DECREF
+    push rcx                   ; save target offset
+    push r8                    ; save tag for DECREF
+    push rdi                   ; save value for DECREF
     mov rsi, r8                ; 64-bit for SmallStr
     call obj_is_true
-    push rax                   ; save truthiness on machine stack
-
-    ; DECREF the popped value (tag-aware)
+    push rax                   ; save truthiness
     mov rdi, [rsp + 8]        ; reload value
     mov rsi, [rsp + 16]       ; tag
     DECREF_VAL rdi, rsi
     pop rax                    ; restore truthiness
     add rsp, 16                ; discard saved value + tag
     pop rcx                    ; restore target offset
-
-    ; If true (result != 0), jump to target
     test eax, eax
     jz .no_jump
-
-    ; Jump: relative from current rbx
     lea rbx, [rbx + rcx*2]
-
 .no_jump:
+    DISPATCH
+
+.pjit_bool_fast:
+    test edi, edi
+    jz .pjit_no_jump           ; falsy → don't jump
+    lea rbx, [rbx + rcx*2]    ; jump
+.pjit_no_jump:
     DISPATCH
 END_FUNC op_pop_jump_if_true
 
@@ -2997,6 +3135,200 @@ DEF_FUNC_BARE op_binary_op_sub_int
 END_FUNC op_binary_op_sub_int
 
 ;; ============================================================================
+;; op_binary_op_add_float - Specialized float add (opcode 217)
+;;
+;; Guard: both TOS and TOS1 must be TAG_FLOAT.
+;; On guard failure: deopt back to BINARY_OP (122).
+;; Followed by 1 CACHE entry (2 bytes).
+;; ============================================================================
+DEF_FUNC_BARE op_binary_op_add_float
+    VPOP rsi                   ; right
+    mov r8, [r13 + 8]         ; right tag
+    VPOP rdi                   ; left
+    mov r9, [r13 + 8]         ; left tag
+    cmp r9d, TAG_FLOAT
+    jne .add_float_deopt_repush
+    cmp r8d, TAG_FLOAT
+    jne .add_float_deopt_repush
+    movq xmm0, rdi
+    movq xmm1, rsi
+    addsd xmm0, xmm1
+    movq rax, xmm0
+    VPUSH_FLOAT rax
+    add rbx, 2                 ; skip CACHE
+    DISPATCH
+.add_float_deopt_repush:
+    VUNDROP 2
+.add_float_deopt:
+    mov byte [rbx - 2], 122
+    sub rbx, 2
+    DISPATCH
+END_FUNC op_binary_op_add_float
+
+;; ============================================================================
+;; op_binary_op_sub_float - Specialized float subtract (opcode 218)
+;; ============================================================================
+DEF_FUNC_BARE op_binary_op_sub_float
+    VPOP rsi                   ; right
+    mov r8, [r13 + 8]         ; right tag
+    VPOP rdi                   ; left
+    mov r9, [r13 + 8]         ; left tag
+    cmp r9d, TAG_FLOAT
+    jne .sub_float_deopt_repush
+    cmp r8d, TAG_FLOAT
+    jne .sub_float_deopt_repush
+    movq xmm0, rdi
+    movq xmm1, rsi
+    subsd xmm0, xmm1
+    movq rax, xmm0
+    VPUSH_FLOAT rax
+    add rbx, 2                 ; skip CACHE
+    DISPATCH
+.sub_float_deopt_repush:
+    VUNDROP 2
+.sub_float_deopt:
+    mov byte [rbx - 2], 122
+    sub rbx, 2
+    DISPATCH
+END_FUNC op_binary_op_sub_float
+
+;; ============================================================================
+;; op_binary_op_mul_float - Specialized float multiply (opcode 219)
+;; ============================================================================
+DEF_FUNC_BARE op_binary_op_mul_float
+    VPOP rsi                   ; right
+    mov r8, [r13 + 8]         ; right tag
+    VPOP rdi                   ; left
+    mov r9, [r13 + 8]         ; left tag
+    cmp r9d, TAG_FLOAT
+    jne .mul_float_deopt_repush
+    cmp r8d, TAG_FLOAT
+    jne .mul_float_deopt_repush
+    movq xmm0, rdi
+    movq xmm1, rsi
+    mulsd xmm0, xmm1
+    movq rax, xmm0
+    VPUSH_FLOAT rax
+    add rbx, 2                 ; skip CACHE
+    DISPATCH
+.mul_float_deopt_repush:
+    VUNDROP 2
+.mul_float_deopt:
+    mov byte [rbx - 2], 122
+    sub rbx, 2
+    DISPATCH
+END_FUNC op_binary_op_mul_float
+
+;; ============================================================================
+;; op_binary_op_truediv_float - Specialized float truediv (opcode 220)
+;; ============================================================================
+DEF_FUNC_BARE op_binary_op_truediv_float
+    VPOP rsi                   ; right
+    mov r8, [r13 + 8]         ; right tag
+    VPOP rdi                   ; left
+    mov r9, [r13 + 8]         ; left tag
+    cmp r9d, TAG_FLOAT
+    jne .truediv_float_deopt_repush
+    cmp r8d, TAG_FLOAT
+    jne .truediv_float_deopt_repush
+    ; Check for division by zero
+    movq xmm1, rsi
+    xorpd xmm2, xmm2
+    ucomisd xmm1, xmm2
+    je .truediv_float_deopt_repush  ; zero divisor → deopt to generic (raises ZeroDivisionError)
+    movq xmm0, rdi
+    divsd xmm0, xmm1
+    movq rax, xmm0
+    VPUSH_FLOAT rax
+    add rbx, 2                 ; skip CACHE
+    DISPATCH
+.truediv_float_deopt_repush:
+    VUNDROP 2
+.truediv_float_deopt:
+    mov byte [rbx - 2], 122
+    sub rbx, 2
+    DISPATCH
+END_FUNC op_binary_op_truediv_float
+
+;; ============================================================================
+;; op_binary_op_mul_int - Specialized SmallInt multiply (opcode 221)
+;;
+;; Guard: both TOS and TOS1 must be SmallInt.
+;; On guard failure: deopt back to BINARY_OP (122).
+;; Followed by 1 CACHE entry (2 bytes).
+;; ============================================================================
+DEF_FUNC_BARE op_binary_op_mul_int
+    VPOP rsi                   ; right
+    mov r8, [r13 + 8]         ; right tag
+    VPOP rdi                   ; left
+    mov r9, [r13 + 8]         ; left tag
+    cmp r9d, TAG_SMALLINT
+    jne .mul_int_deopt_repush
+    cmp r8d, TAG_SMALLINT
+    jne .mul_int_deopt_repush
+    mov rax, rdi
+    imul rsi
+    jo .mul_int_deopt_repush_vals
+    VPUSH_INT rax
+    add rbx, 2                 ; skip CACHE
+    DISPATCH
+.mul_int_deopt_repush_vals:
+    ; imul clobbered rax/rdx, use saved values
+    VPUSH_INT rdi
+    VPUSH_INT rsi
+    jmp .mul_int_deopt
+.mul_int_deopt_repush:
+    VUNDROP 2
+.mul_int_deopt:
+    mov byte [rbx - 2], 122
+    sub rbx, 2
+    DISPATCH
+END_FUNC op_binary_op_mul_int
+
+;; ============================================================================
+;; op_binary_op_floordiv_int - Specialized SmallInt floor divide (opcode 222)
+;;
+;; Guard: both TOS and TOS1 must be SmallInt, right != 0.
+;; On guard failure: deopt back to BINARY_OP (122).
+;; Followed by 1 CACHE entry (2 bytes).
+;; ============================================================================
+DEF_FUNC_BARE op_binary_op_floordiv_int
+    VPOP rsi                   ; right
+    mov r8, [r13 + 8]         ; right tag
+    VPOP rdi                   ; left
+    mov r9, [r13 + 8]         ; left tag
+    ; Guard: both SmallInt
+    cmp r9d, TAG_SMALLINT
+    jne .fdiv_int_deopt_repush
+    cmp r8d, TAG_SMALLINT
+    jne .fdiv_int_deopt_repush
+    ; Guard: right != 0
+    test rsi, rsi
+    jz .fdiv_int_deopt_repush
+    ; Floor divide
+    mov rax, rdi
+    cqo
+    idiv rsi                    ; rax=quotient, rdx=remainder
+    ; Floor: if remainder != 0 and signs differ, subtract 1
+    test rdx, rdx
+    jz .fdiv_int_exact
+    mov rcx, rdi
+    xor rcx, rsi
+    jns .fdiv_int_exact         ; same sign → truncation == floor
+    dec rax
+.fdiv_int_exact:
+    VPUSH_INT rax
+    add rbx, 2                 ; skip CACHE
+    DISPATCH
+.fdiv_int_deopt_repush:
+    VUNDROP 2
+.fdiv_int_deopt:
+    mov byte [rbx - 2], 122
+    sub rbx, 2
+    DISPATCH
+END_FUNC op_binary_op_floordiv_int
+
+;; ============================================================================
 ;; op_compare_op_int - Specialized SmallInt comparison (opcode 209)
 ;;
 ;; Guard: both TOS and TOS1 must be SmallInt (tag-based).
@@ -3041,12 +3373,7 @@ DEF_FUNC_BARE op_compare_op_int
 
 .ci_push_bool:
     movzx eax, al             ; eax = 0 or 1
-    lea rdx, [rel bool_false]
-    lea r8, [rel bool_true]
-    test eax, eax
-    cmovnz rdx, r8            ; rdx = bool_true if true, else bool_false
-    inc qword [rdx + PyObject.ob_refcnt]
-    VPUSH_PTR rdx
+    VPUSH_BOOL rax             ; (0/1, TAG_BOOL) — no INCREF needed
     add rbx, 2                ; skip CACHE
     DISPATCH
 
@@ -3069,3 +3396,142 @@ section .text
     sub rbx, 2
     DISPATCH
 END_FUNC op_compare_op_int
+
+;; ============================================================================
+;; op_compare_op_int_jump_false - Fused COMPARE_OP_INT + POP_JUMP_IF_FALSE (215)
+;;
+;; Guard: both TOS and TOS1 must be SmallInt.
+;; On guard failure: deopt back to COMPARE_OP (107).
+;; ecx = arg (comparison op = arg >> 4).
+;; Followed by 1 CACHE entry (2 bytes), then POP_JUMP_IF_FALSE (2 bytes).
+;; ============================================================================
+DEF_FUNC_BARE op_compare_op_int_jump_false
+    shr ecx, 4                 ; ecx = comparison op (0-5)
+    VPOP rsi                   ; right
+    mov r8, [r13 + 8]         ; right tag
+    VPOP rdi                   ; left
+    mov r9, [r13 + 8]         ; left tag
+    ; Guard: both SmallInt
+    cmp r9d, TAG_SMALLINT
+    jne .cijf_deopt_repush
+    cmp r8d, TAG_SMALLINT
+    jne .cijf_deopt_repush
+    ; Read jump target from POP_JUMP_IF_FALSE arg (at rbx+3)
+    movzx r8d, byte [rbx + 3]
+    ; Compare
+    cmp rdi, rsi
+    lea r9, [rel .cijf_setcc_table]
+    jmp [r9 + rcx*8]
+
+.cijf_lt:
+    setl al
+    jmp .cijf_branch
+.cijf_le:
+    setle al
+    jmp .cijf_branch
+.cijf_eq:
+    sete al
+    jmp .cijf_branch
+.cijf_ne:
+    setne al
+    jmp .cijf_branch
+.cijf_gt:
+    setg al
+    jmp .cijf_branch
+.cijf_ge:
+    setge al
+    ; fall through
+.cijf_branch:
+    ; Skip CACHE (2) + POP_JUMP_IF_FALSE (2) = 4 bytes
+    add rbx, 4
+    test al, al
+    jnz .cijf_no_jump          ; truthy → don't jump (POP_JUMP_IF_FALSE)
+    lea rbx, [rbx + r8*2]     ; jump (r8 = target offset)
+.cijf_no_jump:
+    DISPATCH
+
+section .data
+align 8
+.cijf_setcc_table:
+    dq .cijf_lt                ; PY_LT = 0
+    dq .cijf_le                ; PY_LE = 1
+    dq .cijf_eq                ; PY_EQ = 2
+    dq .cijf_ne                ; PY_NE = 3
+    dq .cijf_gt                ; PY_GT = 4
+    dq .cijf_ge                ; PY_GE = 5
+section .text
+
+.cijf_deopt_repush:
+    VUNDROP 2
+    mov byte [rbx - 2], 107   ; deopt to COMPARE_OP
+    sub rbx, 2
+    DISPATCH
+END_FUNC op_compare_op_int_jump_false
+
+;; ============================================================================
+;; op_compare_op_int_jump_true - Fused COMPARE_OP_INT + POP_JUMP_IF_TRUE (216)
+;;
+;; Same as above but jumps when comparison is TRUE.
+;; ============================================================================
+DEF_FUNC_BARE op_compare_op_int_jump_true
+    shr ecx, 4                 ; ecx = comparison op (0-5)
+    VPOP rsi                   ; right
+    mov r8, [r13 + 8]         ; right tag
+    VPOP rdi                   ; left
+    mov r9, [r13 + 8]         ; left tag
+    ; Guard: both SmallInt
+    cmp r9d, TAG_SMALLINT
+    jne .cijt_deopt_repush
+    cmp r8d, TAG_SMALLINT
+    jne .cijt_deopt_repush
+    ; Read jump target from POP_JUMP_IF_TRUE arg (at rbx+3)
+    movzx r8d, byte [rbx + 3]
+    ; Compare
+    cmp rdi, rsi
+    lea r9, [rel .cijt_setcc_table]
+    jmp [r9 + rcx*8]
+
+.cijt_lt:
+    setl al
+    jmp .cijt_branch
+.cijt_le:
+    setle al
+    jmp .cijt_branch
+.cijt_eq:
+    sete al
+    jmp .cijt_branch
+.cijt_ne:
+    setne al
+    jmp .cijt_branch
+.cijt_gt:
+    setg al
+    jmp .cijt_branch
+.cijt_ge:
+    setge al
+    ; fall through
+.cijt_branch:
+    ; Skip CACHE (2) + POP_JUMP_IF_TRUE (2) = 4 bytes
+    add rbx, 4
+    test al, al
+    jz .cijt_no_jump           ; falsy → don't jump (POP_JUMP_IF_TRUE)
+    lea rbx, [rbx + r8*2]     ; jump (r8 = target offset)
+.cijt_no_jump:
+    DISPATCH
+
+section .data
+align 8
+.cijt_setcc_table:
+    dq .cijt_lt                ; PY_LT = 0
+    dq .cijt_le                ; PY_LE = 1
+    dq .cijt_eq                ; PY_EQ = 2
+    dq .cijt_ne                ; PY_NE = 3
+    dq .cijt_gt                ; PY_GT = 4
+    dq .cijt_ge                ; PY_GE = 5
+section .text
+
+.cijt_deopt_repush:
+    VUNDROP 2
+    mov byte [rbx - 2], 107   ; deopt to COMPARE_OP
+    sub rbx, 2
+    DISPATCH
+END_FUNC op_compare_op_int_jump_true

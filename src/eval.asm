@@ -108,6 +108,14 @@ extern op_import_from
 extern op_binary_op_add_int
 extern op_binary_op_sub_int
 extern op_compare_op_int
+extern op_compare_op_int_jump_false
+extern op_compare_op_int_jump_true
+extern op_binary_op_add_float
+extern op_binary_op_sub_float
+extern op_binary_op_mul_float
+extern op_binary_op_truediv_float
+extern op_binary_op_mul_int
+extern op_binary_op_floordiv_int
 extern op_for_iter_list
 extern op_for_iter_range
 
@@ -1414,14 +1422,14 @@ opcode_table:
     dq op_binary_op_sub_int  ; 212 = BINARY_OP_SUBTRACT_INT (specialized)
     dq op_for_iter_list      ; 213 = FOR_ITER_LIST (specialized)
     dq op_for_iter_range     ; 214 = FOR_ITER_RANGE (specialized)
-    dq op_unimplemented      ; 215
-    dq op_unimplemented      ; 216
-    dq op_unimplemented      ; 217
-    dq op_unimplemented      ; 218
-    dq op_unimplemented      ; 219
-    dq op_unimplemented      ; 220
-    dq op_unimplemented      ; 221
-    dq op_unimplemented      ; 222
+    dq op_compare_op_int_jump_false ; 215 = COMPARE_OP_INT_JUMP_FALSE (superinstruction)
+    dq op_compare_op_int_jump_true  ; 216 = COMPARE_OP_INT_JUMP_TRUE (superinstruction)
+    dq op_binary_op_add_float    ; 217 = BINARY_OP_ADD_FLOAT (specialized)
+    dq op_binary_op_sub_float    ; 218 = BINARY_OP_SUB_FLOAT (specialized)
+    dq op_binary_op_mul_float    ; 219 = BINARY_OP_MUL_FLOAT (specialized)
+    dq op_binary_op_truediv_float ; 220 = BINARY_OP_TRUEDIV_FLOAT (specialized)
+    dq op_binary_op_mul_int      ; 221 = BINARY_OP_MULTIPLY_INT (specialized)
+    dq op_binary_op_floordiv_int ; 222 = BINARY_OP_FLOORDIV_INT (specialized)
     dq op_unimplemented      ; 223
     dq op_unimplemented      ; 224
     dq op_unimplemented      ; 225
