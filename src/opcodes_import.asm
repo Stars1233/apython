@@ -10,7 +10,6 @@ extern eval_saved_rbx
 extern eval_saved_r13
 extern eval_saved_r15
 extern eval_co_names
-extern trace_opcodes
 extern opcode_table
 extern import_module
 extern obj_decref

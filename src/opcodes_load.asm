@@ -25,7 +25,6 @@ extern eval_saved_r15
 extern eval_co_names
 extern eval_co_consts
 extern eval_co_consts_tags
-extern trace_opcodes
 extern opcode_table
 extern obj_dealloc
 extern dict_get

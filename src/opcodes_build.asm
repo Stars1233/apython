@@ -23,7 +23,6 @@ extern eval_saved_rbx
 extern eval_saved_r13
 extern eval_saved_r15
 extern eval_co_consts
-extern trace_opcodes
 extern opcode_table
 extern obj_dealloc
 extern obj_decref

@@ -22,7 +22,6 @@ extern eval_dispatch
 extern eval_saved_rbx
 extern eval_saved_r13
 extern eval_saved_r15
-extern trace_opcodes
 extern opcode_table
 extern obj_dealloc
 
