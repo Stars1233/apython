@@ -45,10 +45,11 @@ Repeat the register convention comment block at the top of every
 ; Register convention (callee-saved, preserved across handlers):
 ;   rbx = bytecode instruction pointer (current position in co_code[])
 ;   r12 = current frame pointer (PyFrame*)
-;   r13 = value stack top pointer
+;   r13 = value stack top pointer (payload array, u64[])
 ;   r14 = co_consts tuple data pointer (&tuple.ob_item[0])
-;   r15 = co_names tuple data pointer (&tuple.ob_item[0])
+;   r15 = tag stack top pointer (sidecar tag array, u8[])
 ;
+; co_names accessed via LOAD_CO_NAMES / LOAD_CO_NAMES_TAGS macros (globals).
 ; ecx = opcode argument on entry (set by eval_dispatch)
 ; rbx has already been advanced past the 2-byte instruction word.
 ```
@@ -230,16 +231,16 @@ with raw arithmetic unless implementing a new stack macro.
 Prefer typed pushes (`VPUSH_PTR`, `VPUSH_INT`) over `VPUSH` when the
 type is statically known — they avoid branching.
 
-## Fat Value Return/Push Macros
+## Value Return/Push Macros
 
-Always use these macros for fat value return patterns. Never inline the
+Always use these macros for value return patterns. Never inline the
 equivalent instructions — inlining is a source of bugs.
 
 | Macro | Expansion | Use when |
 |-------|-----------|----------|
 | `RET_NULL` | `xor eax, eax` / `xor edx, edx` | Error return: (0, TAG_NULL) |
 | `RET_TAG_SMALLINT` | `mov edx, TAG_SMALLINT` | Return SmallInt (caller sets rax) |
-| `SPUSH_PTR reg` | `sub rsp, 16` / `mov [rsp], reg` / `mov qword [rsp+8], TAG_PTR` | Build 16-byte fat arg on stack for tp_call |
+| `SPUSH_PTR reg` | `sub rsp, 16` / `mov [rsp], reg` / `mov qword [rsp+8], TAG_PTR` | Build fat arg on stack for tp_call |
 
 ## Refcounting Macros
 
@@ -249,21 +250,21 @@ equivalent instructions — inlining is a source of bugs.
 | `DECREF reg` | Known heap pointer (saves/restores rdi) |
 | `DECREF_REG reg` | Known heap pointer (does NOT save rdi) |
 | `XDECREF reg` | Possibly NULL heap pointer |
-| `INCREF_VAL pay, tag` | 128-bit fat value |
-| `DECREF_VAL pay, tag` | 128-bit fat value (clobbers rdi + caller-saved) |
-| `XDECREF_VAL pay, tag` | 128-bit fat value, NULL-safe |
+| `INCREF_VAL pay, tag` | Value64 (payload + u8 tag) |
+| `DECREF_VAL pay, tag` | Value64 (clobbers rdi + caller-saved) |
+| `XDECREF_VAL pay, tag` | Value64, NULL-safe |
 
 `DECREF_REG` and `DECREF_VAL` contain `call obj_dealloc` which **clobbers
 all caller-saved registers** when the refcount reaches zero.
 
 ## Addressing Idioms
 
-**Localsplus indexing** (16 bytes/slot = ×8 × ×2 via LEA):
+**Localsplus indexing** (8 bytes/payload slot + separate u8 tag array):
 
 ```nasm
-lea rdx, [rcx*8]                                  ; slot * 8
-mov rdi, [r12 + rdx*2 + PyFrame.localsplus]        ; payload
-mov r9,  [r12 + rdx*2 + PyFrame.localsplus + 8]    ; tag
+mov rdi, [r12 + rcx*8 + PyFrame.localsplus]        ; payload from u64[]
+mov rdx, [r12 + PyFrame.locals_tag_base]           ; tag array base (u8[])
+movzx esi, byte [rdx + rcx]                        ; tag from u8[]
 ```
 
 **Forward bytecode jumps** (instruction words → bytes = ×2):

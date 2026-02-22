@@ -8,10 +8,13 @@
 ; 1. EVAL LOOP REGISTERS (callee-saved, global interpreter state)
 ;    rbx  = bytecode instruction pointer (IP into co_code[])
 ;    r12  = current frame pointer (PyFrame*)
-;    r13  = value stack top pointer
+;    r13  = value stack top pointer (payload array, u64[])
 ;    r14  = co_consts tuple data pointer (&tuple.ob_item[0])
-;    r15  = co_names tuple data pointer (&tuple.ob_item[0])
+;    r15  = tag stack top pointer (sidecar tag array, u8[])
 ;    ecx  = opcode arg on handler entry (set by eval_dispatch)
+;
+;    co_names accessed via LOAD_CO_NAMES / LOAD_CO_NAMES_TAGS macros
+;    (reads eval_co_names / eval_co_names_tags globals).
 ;
 ; 2. OPCODE HANDLER RULE
 ;    Never hold live values in caller-saved registers (rax, rcx, rdx,
@@ -196,12 +199,15 @@
 ; VALUE64 + TAG (u8) SUPPORT
 ; ==========================================================================
 ;
-; Value64: 64-bit payload + 8-bit tag stored in sidecar arrays.
-; Stack/locals arrays store payloads (u64[]) and tags (u8[]) separately.
+; Value64: 64-bit payload + 8-bit tag stored in parallel sidecar arrays.
+; Value stack: r13 → u64[] payloads, r15 → u8[] tags.
+; Containers (list/tuple/dict): ob_item → u64[], ob_item_tags → u8[].
+; Frame locals: localsplus → u64[], locals_tag_base → u8[].
+; Functions return (rax=payload, edx=tag).
 ;
-; Tag encoding:
+; Tag encoding (u8):
 ;   bits 0-6: type tag (TAG_SMALLINT..TAG_PTR)
-;   bit 7:    TAG_RC_BIT (refcounted heap pointer)
+;   bit 7:    TAG_RC_BIT — payload is a refcounted heap pointer
 
 ; Tag constants (u8)
 TAG_NULL     equ 0           ; null/empty slot
@@ -385,19 +391,17 @@ TAG_WAIT_FOR equ (10 | TAG_RC_BIT)   ; payload = WaitForAwaitable*, RC bit SET
     movzx %2, byte [r15 - 1 - %3]
 %endmacro
 
-; 128-bit INCREF — only if TAG_RC_BIT set AND not SmallStr (bit 63).
-; SmallStr tags pack string data in bits 8-55, so bit 8 may be set.
-; Must check bit 63 first to exclude SmallStr before testing TAG_RC_BIT.
-%macro INCREF_VAL 2             ; %1 = payload, %2 = tag (must be 64-bit reg)
+; Value64 INCREF — only if TAG_RC_BIT (bit 7) is set in the u8 tag.
+%macro INCREF_VAL 2             ; %1 = payload, %2 = tag (reg with u8 tag value)
     test %2, TAG_RC_BIT
     jz %%skip                  ; no RC bit — not refcounted
     inc qword [%1 + PyObject.ob_refcnt]
     %%skip:
 %endmacro
 
-; 128-bit DECREF — only if TAG_RC_BIT set AND not SmallStr (bit 63).
+; Value64 DECREF — only if TAG_RC_BIT (bit 7) is set in the u8 tag.
 ; Calls obj_dealloc if refcount reaches zero. Clobbers rdi + all caller-saved.
-%macro DECREF_VAL 2             ; %1 = payload, %2 = tag (must be 64-bit reg)
+%macro DECREF_VAL 2             ; %1 = payload, %2 = tag (reg with u8 tag value)
     test %2, TAG_RC_BIT
     jz %%skip                  ; no RC bit — not refcounted
     dec qword [%1 + PyObject.ob_refcnt]
@@ -407,8 +411,8 @@ TAG_WAIT_FOR equ (10 | TAG_RC_BIT)   ; payload = WaitForAwaitable*, RC bit SET
     %%skip:
 %endmacro
 
-; 128-bit XDECREF — NULL-safe DECREF_VAL
-%macro XDECREF_VAL 2            ; %1 = payload, %2 = tag (must be 64-bit reg)
+; Value64 XDECREF — NULL-safe DECREF_VAL
+%macro XDECREF_VAL 2            ; %1 = payload, %2 = tag (reg with u8 tag value)
     test %2, TAG_RC_BIT
     jz %%skip                  ; no RC bit — not refcounted
     test %1, %1
