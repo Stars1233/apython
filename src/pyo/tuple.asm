@@ -716,8 +716,6 @@ DEF_FUNC tuple_richcompare, TRC_FRAME
     je .trc_elem_bool_type
     cmp ecx, TAG_NONE
     je .trc_elem_none_type
-    test rcx, rcx
-    js .trc_elem_str_type           ; SmallStr
     ; TAG_PTR: get ob_type
     mov rax, [rdi + PyObject.ob_type]
     jmp .trc_elem_have_type
@@ -731,9 +729,6 @@ DEF_FUNC tuple_richcompare, TRC_FRAME
 .trc_elem_none_type:
     lea rax, [rel none_type]
     jmp .trc_elem_have_type
-.trc_elem_str_type:
-    lea rax, [rel str_type]
-
 .trc_elem_have_type:
     mov rax, [rax + PyTypeObject.tp_richcompare]
     test rax, rax

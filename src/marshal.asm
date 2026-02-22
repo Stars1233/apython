@@ -796,7 +796,7 @@ mdo_ref:
     mov rcx, [rel marshal_refs]
     shl rdi, 4                 ; index * 16
     mov rax, [rcx + rdi]      ; payload
-    mov rdx, [rcx + rdi + 8]  ; tag (full 64-bit for SmallStr)
+    mov rdx, [rcx + rdi + 8]  ; tag
     ; Back-references: INCREF only if refcounted (TAG_PTR)
     cmp edx, TAG_PTR
     jne .ref_done
@@ -897,32 +897,12 @@ mdo_code:
     mov [rsp + 48], rax
 
     call marshal_read_object   ; co_filename (str)
-    ; Spill SmallStr to heap for struct field storage
-    test rdx, rdx
-    jns .code_fname_ok
-    mov rdi, rax
-    mov rsi, rdx
-    extern fat_to_obj
-    call fat_to_obj
-.code_fname_ok:
     mov [rsp + 56], rax
 
     call marshal_read_object   ; co_name (str)
-    test rdx, rdx
-    jns .code_name_ok
-    mov rdi, rax
-    mov rsi, rdx
-    call fat_to_obj
-.code_name_ok:
     mov [rsp + 64], rax
 
     call marshal_read_object   ; co_qualname (str)
-    test rdx, rdx
-    jns .code_qname_ok
-    mov rdi, rax
-    mov rsi, rdx
-    call fat_to_obj
-.code_qname_ok:
     mov [rsp + 72], rax
 
     call marshal_read_long     ; co_firstlineno (discard)

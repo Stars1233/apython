@@ -515,7 +515,7 @@ DEF_FUNC sys_exit_func
     jne .exit_0
 
     ; Get exit code from args[0]
-    mov rdx, [rdi + 8]        ; args[0] tag (64-bit for SmallStr safety)
+    mov rdx, [rdi + 8]        ; args[0] tag
     mov rdi, [rdi]
     call int_to_i64
     mov edi, eax
@@ -636,7 +636,7 @@ DEF_FUNC sys_path_add_script_dir
 
 .set_path:
     ; Replace sys.path[0] with this directory
-    ; rax = payload, rdx = tag (SmallStr or TAG_PTR)
+    ; rax = payload, rdx = tag (TAG_PTR)
     push rdx                    ; save new path tag
     push rax                    ; save new path payload
     mov rdi, [rel sys_path_list]

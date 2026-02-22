@@ -151,7 +151,7 @@ DEF_FUNC instance_getattr
     ; Found in instance dict — INCREF and return raw value
     mov r13, rax                ; save payload
     mov r12, rdx                ; save tag (name no longer needed)
-    INCREF_VAL rax, edx         ; tag-aware INCREF (skips SmallInt/SmallStr/NULL)
+    INCREF_VAL rax, edx         ; tag-aware INCREF (skips SmallInt/NULL)
     mov rax, r13
     mov rdx, r12                ; restore tag from dict_get
     pop r13
@@ -236,7 +236,7 @@ DEF_FUNC instance_getattr
 
 .found_type_raw:
     ; Not callable, SmallInt, or descriptor — INCREF and return
-    INCREF_VAL r13, r12         ; tag-aware INCREF (64-bit tag for SmallStr safety)
+    INCREF_VAL r13, r12         ; tag-aware INCREF
     mov rax, r13
     mov rdx, r12                ; restore tag from dict_get
     pop r13
@@ -608,8 +608,6 @@ DEF_FUNC type_call
     jne .not_type_self
     ; type(x) → return type of x
     mov rax, [rsi]          ; args[0] payload
-    bt qword [rsi + 8], 63
-    jc .type_smallstr       ; SmallStr → str type
     cmp qword [rsi + 8], TAG_SMALLINT
     je .type_smallint       ; SmallInt → int type
     cmp qword [rsi + 8], TAG_FLOAT
@@ -646,12 +644,6 @@ DEF_FUNC type_call
 .type_none:
     extern none_type
     lea rax, [rel none_type]
-    inc qword [rax + PyObject.ob_refcnt]
-    mov edx, TAG_PTR
-    leave
-    ret
-.type_smallstr:
-    lea rax, [rel str_type]
     inc qword [rax + PyObject.ob_refcnt]
     mov edx, TAG_PTR
     leave
@@ -1046,7 +1038,7 @@ DEF_FUNC type_getattr
     ; Found — INCREF and return
     mov rbx, rax                ; save payload (name no longer needed)
     mov r12, rdx                ; save tag (type walk done)
-    INCREF_VAL rax, edx         ; tag-aware INCREF (skips SmallInt/SmallStr/NULL)
+    INCREF_VAL rax, edx         ; tag-aware INCREF (skips SmallInt/NULL)
     mov rax, rbx
     mov rdx, r12                ; restore tag from dict_get
 

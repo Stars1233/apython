@@ -21,7 +21,6 @@ extern str_from_cstr_heap
 extern str_type
 extern str_repr
 extern fat_to_obj
-extern smallstr_to_obj
 
 ; Internal buffer struct (on stack):
 ;   [rbp-8]  = buf ptr
@@ -107,13 +106,6 @@ DEF_FUNC list_repr, 24                ; buf ptr, used, capacity
     call obj_repr
     test rax, rax
     jz .lr_next
-    ; Spill SmallStr to heap
-    test rdx, rdx
-    jns .lr_repr_heap
-    mov rdi, rax
-    mov rsi, rdx
-    call smallstr_to_obj
-.lr_repr_heap:
 
     ; Append repr string to buffer
     push rax                   ; save repr str for DECREF
@@ -213,13 +205,6 @@ DEF_FUNC tuple_repr, 24
     call obj_repr
     test rax, rax
     jz .tr_decref_elem
-    ; Spill SmallStr to heap
-    test rdx, rdx
-    jns .tr_repr_heap
-    mov rdi, rax
-    mov rsi, rdx
-    call smallstr_to_obj
-.tr_repr_heap:
 
     push rax
     mov rcx, [rax + PyStrObject.ob_size]
@@ -240,16 +225,9 @@ DEF_FUNC tuple_repr, 24
 .tr_float_elem:
     ; rdi = raw double bits; call float_repr directly
     extern float_repr
-    call float_repr                ; rax = payload, edx = tag (may be SmallStr)
+    call float_repr                ; rax = payload, edx = tag
     test edx, edx
     jz .tr_next                    ; skip on error
-    ; Spill SmallStr to heap if needed
-    test rdx, rdx
-    jns .tr_float_heap
-    mov rdi, rax
-    mov rsi, rdx
-    call smallstr_to_obj
-.tr_float_heap:
     push rax
     mov rcx, [rax + PyStrObject.ob_size]
     BUF_ENSURE rcx
@@ -358,13 +336,6 @@ DEF_FUNC dict_repr, 24
     call obj_repr
     test rax, rax
     jz .dr_after_key
-    ; Spill SmallStr to heap
-    test rdx, rdx
-    jns .dr_key_repr_heap
-    mov rdi, rax
-    mov rsi, rdx
-    call smallstr_to_obj
-.dr_key_repr_heap:
 
     push rax
     mov rcx, [rax + PyStrObject.ob_size]
@@ -396,13 +367,6 @@ DEF_FUNC dict_repr, 24
     call obj_repr
     test rax, rax
     jz .dr_after_val
-    ; Spill SmallStr to heap
-    test rdx, rdx
-    jns .dr_val_repr_heap
-    mov rdi, rax
-    mov rsi, rdx
-    call smallstr_to_obj
-.dr_val_repr_heap:
 
     push rax
     mov rcx, [rax + PyStrObject.ob_size]
@@ -494,9 +458,11 @@ DEF_FUNC set_repr, 24
     ; SetEntry is 24 bytes: hash(8) + key(8) + key_tag(8)
     mov rax, [rbx + PyDictObject.entries]
     imul rcx, r12, 24             ; index * SET_ENTRY_SIZE (24)
-    mov rdi, [rax + rcx + 8]     ; key at SET_ENTRY_KEY offset
-    test rdi, rdi
-    jz .sr_next
+    cmp qword [rax + rcx + 16], 0       ; key_tag == TAG_NULL → empty
+    je .sr_next
+    cmp qword [rax + rcx + 16], 0xDEAD  ; key_tag == TOMBSTONE → deleted
+    je .sr_next
+    mov rdi, [rax + rcx + 8]            ; key payload (only if occupied)
 
     ; Print separator if not first
     test r14, r14
@@ -515,13 +481,6 @@ DEF_FUNC set_repr, 24
     call obj_repr
     test rax, rax
     jz .sr_after_elem
-    ; Spill SmallStr to heap
-    test rdx, rdx
-    jns .sr_repr_heap
-    mov rdi, rax
-    mov rsi, rdx
-    call smallstr_to_obj
-.sr_repr_heap:
 
     push rax
     mov rcx, [rax + PyStrObject.ob_size]

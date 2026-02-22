@@ -1607,9 +1607,6 @@ DEF_FUNC_BARE int_unwrap
     ; Only dereference if TAG_PTR (heap pointer); other tags return unchanged
     test edx, TAG_RC_BIT
     jz .iuw_done                 ; TAG_FLOAT, TAG_NONE, TAG_NULL → not an int
-    ; Also skip SmallStr (bit 63 set in tag)
-    bt rdx, 63
-    jc .iuw_done
     mov rax, [rdi + PyObject.ob_type]
     lea rcx, [rel int_type]
     cmp rax, rcx

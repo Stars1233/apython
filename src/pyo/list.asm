@@ -349,7 +349,7 @@ DEF_FUNC list_ass_subscript, LAS_FRAME
     ; Call list_setitem
     mov rdi, rbx
     mov rdx, r12
-    mov rcx, [rbp - LAS_VTAG]  ; value tag from caller (64-bit for SmallStr)
+    mov rcx, [rbp - LAS_VTAG]  ; value tag from caller
     call list_setitem
 
     pop r12
@@ -896,7 +896,7 @@ DEF_FUNC list_contains, LC_FRAME
 
     mov [rbp - LC_LIST], rdi   ; list
     mov [rbp - LC_VPAY], rsi   ; value payload
-    mov [rbp - LC_VTAG], rdx   ; value tag (64-bit for SmallStr)
+    mov [rbp - LC_VTAG], rdx   ; value tag
     mov rax, [rdi + PyListObject.ob_size]
     mov [rbp - LC_SIZE], rax
     mov qword [rbp - LC_IDX], 0
@@ -929,8 +929,6 @@ DEF_FUNC list_contains, LC_FRAME
     je .elem_int_type
     cmp r8d, TAG_FLOAT
     je .elem_float_type
-    test r8, r8
-    js .elem_str_type           ; SmallStr
     cmp r8d, TAG_BOOL
     je .elem_bool_type
     cmp r8d, TAG_NONE
@@ -944,9 +942,6 @@ DEF_FUNC list_contains, LC_FRAME
     jmp .elem_have_type
 .elem_float_type:
     lea rax, [rel float_type]
-    jmp .elem_have_type
-.elem_str_type:
-    lea rax, [rel str_type]
     jmp .elem_have_type
 .elem_bool_type:
     lea rax, [rel bool_type]
@@ -1908,8 +1903,6 @@ DEF_FUNC list_richcompare, LRC_FRAME
     je .lrc_elem_bool_type
     cmp ecx, TAG_NONE
     je .lrc_elem_none_type
-    test rcx, rcx
-    js .lrc_elem_str_type           ; SmallStr
     ; TAG_PTR: get ob_type
     mov rax, [rdi + PyObject.ob_type]
     jmp .lrc_elem_have_type
@@ -1923,9 +1916,6 @@ DEF_FUNC list_richcompare, LRC_FRAME
 .lrc_elem_none_type:
     lea rax, [rel none_type]
     jmp .lrc_elem_have_type
-.lrc_elem_str_type:
-    lea rax, [rel str_type]
-
 .lrc_elem_have_type:
     mov rax, [rax + PyTypeObject.tp_richcompare]
     test rax, rax

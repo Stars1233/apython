@@ -67,7 +67,6 @@ END_FUNC str_from_cstr_heap
 
 ; str_from_cstr(const char *cstr) -> (rax=payload, edx=tag)
 ; Creates a string from a C string. Always returns heap TAG_PTR.
-extern smallstr_to_obj
 DEF_FUNC_BARE str_from_cstr
     jmp str_from_cstr_heap
 END_FUNC str_from_cstr
@@ -476,14 +475,14 @@ DEF_FUNC str_mod, SM_FRAME
 
     mov [rbp-SM_FMT], rdi      ; fmt
     mov [rbp-SM_ARGS], rsi     ; args
-    mov [rbp-SM_ATAG], rcx     ; args tag (full 64-bit for SmallStr)
+    mov [rbp-SM_ATAG], rcx     ; args tag
 
     ; Determine if args is a tuple
     ; rcx = right_tag (args tag) from op_binary_op caller
     mov qword [rbp-SM_ISTUPLE], 0  ; is_tuple = false
     mov qword [rbp-SM_NARGS], 1   ; nargs = 1 (single value)
     cmp ecx, TAG_PTR
-    jne .sm_not_tuple           ; non-heap → single value (SmallInt/Float/Bool/None/SmallStr)
+    jne .sm_not_tuple           ; non-heap → single value (SmallInt/Float/Bool/None)
     mov rax, [rsi + PyObject.ob_type]
     lea rcx, [rel tuple_type]
     cmp rax, rcx
@@ -621,7 +620,7 @@ DEF_FUNC str_mod, SM_FRAME
     call .sm_get_arg
     ; rax = arg payload, rdx = arg tag
     mov rdi, rax
-    mov rsi, rdx               ; tag for obj_str (64-bit for SmallStr)
+    mov rsi, rdx               ; tag for obj_str
     call obj_str
     ; rax = str result
     jmp .sm_copy_str
@@ -786,14 +785,7 @@ DEF_FUNC str_mod, SM_FRAME
     ret
 
 .sm_copy_str:
-    ; rax = str payload, rdx = str tag (from obj_str/obj_repr)
-    ; If SmallStr, spill to heap so we can access .ob_size/.data
-    test rdx, rdx
-    jns .sm_copy_heap
-    mov rdi, rax
-    mov rsi, rdx
-    call smallstr_to_obj       ; rax = heap PyStrObject*
-.sm_copy_heap:
+    ; rax = str payload (heap PyStrObject*)
     push rax                   ; save for DECREF
     mov rcx, [rax + PyStrObject.ob_size]
     lea rsi, [rax + PyStrObject.data]
@@ -842,8 +834,8 @@ DEF_FUNC str_mod, SM_FRAME
     inc r15
     ret
 .sm_arg_none:
-    extern none_singleton
-    lea rax, [rel none_singleton]
+    xor eax, eax              ; payload = 0
+    mov edx, TAG_NONE         ; tag = TAG_NONE
     inc r15
     ret
 
@@ -894,28 +886,21 @@ END_FUNC str_mod
 
 ;; ============================================================================
 ;; str_compare(left, right, op, left_tag, right_tag) -> (rax,edx) fat bool
-;; Rich comparison for strings. Handles heap str and SmallStr natively.
+;; Rich comparison for strings. Both operands are heap PyStrObject*.
 ;; Caller convention: rdi=left, rsi=right, edx=op, rcx=left_tag, r8=right_tag
 ;; Note: r8 may be unset by callers like max/min (rsi is always a valid heap
 ;; string in that case, so the TAG_RC_BIT guard is conservative-safe).
 ;; ============================================================================
-;; Stack buffer layout (16 bytes each, null-terminated)
-SC_LBUF  equ 16           ; left SmallStr buffer  [rbp - SC_LBUF .. rbp - SC_LBUF + 15]
-SC_RBUF  equ 32           ; right SmallStr buffer [rbp - SC_RBUF .. rbp - SC_RBUF + 15]
-SC_FRAME equ 32
 
-DEF_FUNC str_compare, SC_FRAME
+DEF_FUNC str_compare
     push rbx
 
     mov ebx, edx            ; save op
 
     ; --- Resolve right operand to a data pointer (-> rsi) ---
-    ; SmallStr right? (bit 63 of tag) — check FIRST since TAG_RC_BIT is clear
-    test r8, r8
-    js .right_smallstr
     ; Non-string guard: TAG_RC_BIT (bit 8) is set only for TAG_PTR (0x105).
     ; Non-pointer tags (0-4) and unset r8 from max/min: if TAG_RC_BIT clear
-    ; AND bit 63 clear → not a string.
+    ; → not a string.
     test r8d, TAG_RC_BIT
     jz .not_string
     ; Heap pointer — verify ob_type == str_type
@@ -924,38 +909,10 @@ DEF_FUNC str_compare, SC_FRAME
     cmp rax, rdx
     jne .not_string
     lea rsi, [rsi + PyStrObject.data]
-    jmp .right_done
-.right_smallstr:
-    ; Extract SmallStr bytes to stack buffer (zero-alloc)
-    extern smallstr_to_buf
-    push rdi
-    push rcx
-    mov rdi, rsi             ; payload
-    mov rsi, r8              ; tag
-    lea rdx, [rbp - SC_RBUF]
-    call smallstr_to_buf     ; rax = length
-    mov byte [rbp - SC_RBUF + rax], 0  ; null-terminate
-    pop rcx
-    pop rdi
-    lea rsi, [rbp - SC_RBUF]
-.right_done:
 
     ; --- Resolve left operand to a data pointer (-> rdi) ---
-    ; SmallStr left? (bit 63 of tag)
-    test rcx, rcx
-    js .left_smallstr
     ; Heap str — no type check needed (caller dispatched via str_type)
     lea rdi, [rdi + PyStrObject.data]
-    jmp .left_done
-.left_smallstr:
-    push rsi
-    mov rsi, rcx             ; tag
-    lea rdx, [rbp - SC_LBUF]
-    call smallstr_to_buf     ; rax = length
-    mov byte [rbp - SC_LBUF + rax], 0  ; null-terminate
-    pop rsi
-    lea rdi, [rbp - SC_LBUF]
-.left_done:
 
     ; --- Compare the two null-terminated data pointers ---
     call ap_strcmp
@@ -1315,7 +1272,7 @@ DEF_FUNC str_iter_next
     mov rsi, 1
     call str_new
 
-    ; Advance index - str_new already set rax/rdx correctly (SmallStr or heap)
+    ; Advance index - str_new already set rax/rdx correctly
     inc qword [rbx + PyStrIterObject.it_index]
     pop rbx
     leave

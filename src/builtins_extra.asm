@@ -47,9 +47,6 @@ extern bool_type
 extern bool_true
 extern bool_false
 
-extern smallstr_to_obj
-extern smallstr_len
-
 extern exc_TypeError_type
 extern exc_ValueError_type
 extern exc_AttributeError_type
@@ -88,9 +85,8 @@ DEF_FUNC builtin_abs
     cmp qword [rdi + 8], TAG_BOOL
     je .abs_bool_tag
 
-    ; SmallStr check: bit 63 set means inline string, not a pointer
-    test qword [rdi + 8], (1 << 63)
-    jnz .abs_type_error
+    cmp qword [rdi + 8], TAG_PTR
+    jne .abs_type_error
 
     mov rax, [rbx + PyObject.ob_type]
     lea rcx, [rel float_type]
@@ -371,12 +367,10 @@ BI_ARGS   equ 8
 BI_NARGS  equ 16
 BI_OBJ    equ 24       ; original string/bytes obj for error messages
 BI_BASE   equ 32       ; base value for error messages
-BI_OWNS   equ 40       ; flag: 1 if we own BI_OBJ (from smallstr_to_obj), 0 if borrowed
-BI_FRAME  equ 40
+BI_FRAME  equ 32
 
 DEF_FUNC builtin_int_fn, BI_FRAME
     push rbx
-    mov qword [rbp - BI_OWNS], 0     ; initialize: don't own obj
 
     test rsi, rsi
     jz .int_no_args
@@ -400,11 +394,6 @@ DEF_FUNC builtin_int_fn, BI_FRAME
 
     cmp qword [rdi + 8], TAG_BOOL
     je .int_from_bool_tag
-
-    ; Check SmallStr (bit 63 of full 64-bit tag)
-    mov rax, [rdi + 8]
-    test rax, rax
-    js .int_from_smallstr
 
     ; Must be TAG_PTR to dereference
     cmp qword [rdi + 8], TAG_PTR
@@ -479,16 +468,6 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     mov rax, rbx
     RET_TAG_SMALLINT
     jmp .int_ret
-
-.int_from_smallstr:
-    ; SmallStr: spill to heap, then parse as string
-    ; rax = full 64-bit tag (from test above), rbx = payload
-    mov rdi, rbx
-    mov rsi, rax
-    call smallstr_to_obj
-    mov rbx, rax               ; rbx = heap PyStrObject (owned ref)
-    mov qword [rbp - BI_OWNS], 1  ; we own this obj
-    jmp .int_from_str
 
 .int_from_inline_float:
     ; TAG_FLOAT: rbx = raw double bits — delegate to float_int for NaN/inf checks
@@ -1057,11 +1036,7 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     mov rdi, [rbp - BI_ARGS]
     mov rbx, [rdi]                 ; args[0] payload
     mov [rbp - BI_OBJ], rbx       ; save original obj for error msg
-    ; Check SmallStr first (bit 63 of full 64-bit tag)
-    mov rax, [rdi + 8]            ; args[0] full tag
-    test rax, rax
-    js .int_base_from_smallstr    ; SmallStr → spill and parse
-    cmp eax, TAG_PTR              ; args[0] tag
+    cmp qword [rdi + 8], TAG_PTR  ; args[0] tag
     jne .int_base_type_error_str  ; non-pointer: can't have base with non-str
     mov rax, [rbx + PyObject.ob_type]
     lea rcx, [rel str_type]
@@ -1083,17 +1058,6 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     test rcx, rcx
     jnz .int_base_check_bytes_chain
     jmp .int_base_type_error_str
-
-.int_base_from_smallstr:
-    ; SmallStr: spill to heap, then parse as string with base
-    ; rax = full 64-bit tag, rbx = payload
-    mov rdi, rbx
-    mov rsi, rax
-    extern smallstr_to_obj
-    call smallstr_to_obj
-    mov rbx, rax               ; rbx = heap PyStrObject (owned ref)
-    mov [rbp - BI_OBJ], rbx   ; update saved obj for error msg
-    mov qword [rbp - BI_OWNS], 1  ; we own this obj
 
 .int_base_from_str:
     ; Check for embedded NUL bytes
@@ -1228,13 +1192,7 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     call str_from_cstr_heap
     jmp .ile_repr_ready
 .ile_have_repr:
-    ; Spill SmallStr repr to heap
-    test rdx, rdx
-    jns .ile_repr_ready
-    mov rdi, rax
-    mov rsi, rdx
-    extern smallstr_to_obj
-    call smallstr_to_obj
+    ; rax = repr string (heap ptr)
 .ile_repr_ready:
     mov [rsp + 56], rax
 
@@ -1270,28 +1228,11 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     call obj_decref
 .int_ile_no_prev:
     mov [rel current_exception], rbx
-    ; DECREF owned obj (from smallstr_to_obj) if applicable
-    cmp qword [rbp - BI_OWNS], 0
-    je .int_ile_no_obj
-    mov rdi, [rbp - BI_OBJ]
-    call obj_decref
-.int_ile_no_obj:
     add rsp, 72
     jmp eval_exception_unwind
 
 .int_ret:
     ; Common epilogue: rax = payload, edx = tag (set by callee)
-    ; For errors: rax=0, edx=TAG_NULL
-    ; DECREF owned obj (from smallstr_to_obj) if applicable
-    cmp qword [rbp - BI_OWNS], 0
-    je .int_ret_no_decref
-    push rax
-    push rdx
-    mov rdi, [rbp - BI_OBJ]
-    call obj_decref
-    pop rdx
-    pop rax
-.int_ret_no_decref:
     ; rbx was pushed after sub rsp, BI_FRAME, so it's at rbp - BI_FRAME - 8
     lea rsp, [rbp - BI_FRAME - 8]
     pop rbx
@@ -1337,10 +1278,6 @@ DEF_FUNC builtin_ord
     cmp rsi, 1
     jne .ord_nargs_error
 
-    ; Check for SmallStr fast path
-    bt qword [rdi + 8], 63
-    jc .ord_smallstr
-
     cmp qword [rdi + 8], TAG_PTR
     jne .ord_type_error            ; non-string tag
 
@@ -1355,17 +1292,6 @@ DEF_FUNC builtin_ord
     jne .ord_len_error
 
     movzx eax, byte [rdi + PyStrObject.data]
-    RET_TAG_SMALLINT
-    leave
-    ret
-
-.ord_smallstr:
-    ; SmallStr: extract length, check == 1, get first byte from payload
-    mov rax, [rdi + 8]            ; tag
-    SMALLSTR_LEN rcx, rax
-    cmp rcx, 1
-    jne .ord_len_error
-    movzx eax, byte [rdi]         ; first byte of payload
     RET_TAG_SMALLINT
     leave
     ret
@@ -1631,13 +1557,9 @@ DEF_FUNC builtin_hash_fn
     je .hash_float
 
     ; Check non-pointer tags before dereference
-    mov rax, [rdi + 8]           ; reload full 64-bit tag
-    test rax, rax
-    js .hash_smallstr             ; bit 63 set → SmallStr
-
-    cmp eax, TAG_BOOL
+    cmp qword [rdi + 8], TAG_BOOL
     je .hash_bool
-    cmp eax, TAG_NONE
+    cmp qword [rdi + 8], TAG_NONE
     je .hash_none
 
     mov rax, [rbx + PyObject.ob_type]
@@ -1688,18 +1610,6 @@ DEF_FUNC builtin_hash_fn
 .hash_none:
     ; hash(None) — CPython convention
     mov eax, 0x48ae2ce5
-    jmp .hash_si_ok
-
-.hash_smallstr:
-    ; rax = full 64-bit tag (from the test above), rbx = payload
-    extern smallstr_hash
-    mov rsi, rax                  ; rsi = tag
-    mov rdi, rbx                  ; rdi = payload
-    call smallstr_hash
-    ; rax = hash result, apply -1 → -2 convention
-    cmp rax, -1
-    jne .hash_si_ok
-    mov rax, -2
     jmp .hash_si_ok
 
 .hash_type_error:
@@ -1759,27 +1669,15 @@ DEF_FUNC builtin_iter_fn
     cmp rsi, 1
     jne .iter_error
 
-    ; SmallStr: spill to heap before calling tp_iter
-    bt qword [rdi + 8], 63
-    jc .iter_smallstr_spill
-
     mov esi, [rdi + 8]                 ; args[0] tag
     mov rdi, [rdi]                     ; args[0] payload
 
-.iter_have_obj:
     ; Use get_iterator which handles tp_iter, __iter__, __getitem__, validation
     extern get_iterator
     call get_iterator
     mov edx, TAG_PTR
     leave
     ret
-
-.iter_smallstr_spill:
-    mov rsi, [rdi + 8]            ; tag
-    mov rdi, [rdi]                ; payload
-    call smallstr_to_obj
-    mov rdi, rax
-    jmp .iter_have_obj
 
 .iter_error:
     lea rdi, [rel exc_TypeError_type]
@@ -1892,15 +1790,9 @@ DEF_FUNC builtin_any
     cmp rsi, 1
     jne .any_error
 
-    ; SmallStr: spill to heap
-    bt qword [rdi + 8], 63
-    jc .any_smallstr_spill
-
     cmp qword [rdi + 8], TAG_PTR
     jne .any_type_error
     mov rdi, [rdi]
-
-.any_have_obj:
     mov rax, [rdi + PyObject.ob_type]
     mov rcx, [rax + PyTypeObject.tp_iter]
     test rcx, rcx
@@ -1921,7 +1813,7 @@ DEF_FUNC builtin_any
     mov r14, rdx               ; item tag
 
     mov rdi, r13
-    mov rsi, r14               ; 64-bit tag for SmallStr support
+    mov rsi, r14
     call obj_is_true
     test eax, eax
     jnz .any_found_true
@@ -1959,13 +1851,6 @@ DEF_FUNC builtin_any
     leave
     ret
 
-.any_smallstr_spill:
-    mov rsi, [rdi + 8]
-    mov rdi, [rdi]
-    call smallstr_to_obj
-    mov rdi, rax
-    jmp .any_have_obj
-
 .any_type_error:
     lea rdi, [rel exc_TypeError_type]
     CSTRING rsi, "argument is not iterable"
@@ -1989,15 +1874,9 @@ DEF_FUNC builtin_all
     cmp rsi, 1
     jne .all_error
 
-    ; SmallStr: spill to heap
-    bt qword [rdi + 8], 63
-    jc .all_smallstr_spill
-
     cmp qword [rdi + 8], TAG_PTR
     jne .all_type_error
     mov rdi, [rdi]
-
-.all_have_obj:
     mov rax, [rdi + PyObject.ob_type]
     mov rcx, [rax + PyTypeObject.tp_iter]
     test rcx, rcx
@@ -2018,7 +1897,7 @@ DEF_FUNC builtin_all
     mov r14, rdx               ; item tag
 
     mov rdi, r13
-    mov rsi, r14               ; 64-bit tag for SmallStr support
+    mov rsi, r14
     call obj_is_true
     test eax, eax
     jz .all_found_false
@@ -2055,13 +1934,6 @@ DEF_FUNC builtin_all
     pop rbx
     leave
     ret
-
-.all_smallstr_spill:
-    mov rsi, [rdi + 8]
-    mov rdi, [rdi]
-    call smallstr_to_obj
-    mov rdi, rax
-    jmp .all_have_obj
 
 .all_type_error:
     lea rdi, [rel exc_TypeError_type]
@@ -2507,25 +2379,6 @@ DEF_FUNC builtin_getattr
     cmp r12, 3
     ja .getattr_error
 
-    ; Spill SmallStr args[0] to heap if needed
-    bt qword [rbx + 8], 63
-    jnc .getattr_no_spill0
-    mov rdi, [rbx]
-    mov rsi, [rbx + 8]
-    call smallstr_to_obj
-    mov [rbx], rax
-    mov qword [rbx + 8], TAG_PTR
-.getattr_no_spill0:
-    ; Spill SmallStr args[1] to heap if needed
-    bt qword [rbx + 24], 63
-    jnc .getattr_no_spill1
-    mov rdi, [rbx + 16]
-    mov rsi, [rbx + 24]
-    call smallstr_to_obj
-    mov [rbx + 16], rax
-    mov qword [rbx + 24], TAG_PTR
-.getattr_no_spill1:
-
     mov r13, [rbx]                 ; args[0] payload (obj)
     mov r14, [rbx + 16]            ; args[1] payload (name, 16-byte stride)
 
@@ -2546,8 +2399,6 @@ DEF_FUNC builtin_getattr
     jmp .getattr_try_type_dict
 
 .getattr_try_type_dict:
-    bt qword [rbx + 8], 63
-    jc .getattr_str_type
     cmp qword [rbx + 8], TAG_SMALLINT
     je .getattr_smallint_type
     cmp qword [rbx + 8], TAG_FLOAT
@@ -2572,9 +2423,6 @@ DEF_FUNC builtin_getattr
     jmp .getattr_check_dict
 .getattr_none_type:
     lea rax, [rel none_type]
-    jmp .getattr_check_dict
-.getattr_str_type:
-    lea rax, [rel str_type]
 
 .getattr_check_dict:
     mov rcx, [rax + PyTypeObject.tp_dict]
@@ -2647,25 +2495,6 @@ DEF_FUNC builtin_hasattr
 
     mov rbx, rdi                   ; save args ptr
 
-    ; Spill SmallStr args[0] to heap if needed
-    bt qword [rbx + 8], 63
-    jnc .hasattr_no_spill0
-    mov rdi, [rbx]
-    mov rsi, [rbx + 8]
-    call smallstr_to_obj
-    mov [rbx], rax
-    mov qword [rbx + 8], TAG_PTR
-.hasattr_no_spill0:
-    ; Spill SmallStr args[1] to heap if needed
-    bt qword [rbx + 24], 63
-    jnc .hasattr_no_spill1
-    mov rdi, [rbx + 16]
-    mov rsi, [rbx + 24]
-    call smallstr_to_obj
-    mov [rbx + 16], rax
-    mov qword [rbx + 24], TAG_PTR
-.hasattr_no_spill1:
-
     mov r12, [rbx]                 ; args[0] payload (obj)
     mov r13, [rbx + 16]            ; args[1] payload (name, 16-byte stride)
 
@@ -2697,8 +2526,6 @@ DEF_FUNC builtin_hasattr
     ret
 
 .hasattr_try_type_dict:
-    bt qword [rbx + 8], 63
-    jc .hasattr_str_type
     cmp qword [rbx + 8], TAG_SMALLINT
     je .hasattr_smallint_type
     cmp qword [rbx + 8], TAG_FLOAT
@@ -2723,9 +2550,6 @@ DEF_FUNC builtin_hasattr
     jmp .hasattr_check_dict
 .hasattr_none_type:
     lea rax, [rel none_type]
-    jmp .hasattr_check_dict
-.hasattr_str_type:
-    lea rax, [rel str_type]
 
 .hasattr_check_dict:
     mov rcx, [rax + PyTypeObject.tp_dict]
@@ -3564,14 +3388,8 @@ DEF_FUNC builtin_input_fn, INP_FRAME
     mov rax, [rdi]          ; prompt payload
     mov rcx, [rdi + 8]     ; prompt tag (64-bit)
 
-    ; SmallStr prompt: spill to heap
-    bt rcx, 63
-    jc .inp_smallstr_spill
-
     cmp rcx, TAG_PTR
     jne .inp_type_error
-
-.inp_have_prompt:
     ; Write prompt string data
     mov rsi, rax
     add rsi, PyStrObject.data  ; buf ptr
@@ -3618,12 +3436,6 @@ DEF_FUNC builtin_input_fn, INP_FRAME
     CSTRING rsi, "input() takes at most 1 argument"
     call raise_exception
 
-.inp_smallstr_spill:
-    mov rdi, rax               ; payload
-    mov rsi, rcx               ; tag
-    call smallstr_to_obj
-    jmp .inp_have_prompt
-
 .inp_type_error:
     lea rdi, [rel exc_TypeError_type]
     CSTRING rsi, "input() prompt must be a string"
@@ -3656,12 +3468,8 @@ DEF_FUNC builtin_open_fn, OPN_FRAME
     ; filename only — default mode 'r'
     mov rax, [rdi]          ; filename str
     mov rcx, [rdi + 8]     ; filename tag (64-bit)
-    ; SmallStr filename: spill to heap
-    bt rcx, 63
-    jc .opn_fn_smallstr_spill
     cmp rcx, TAG_PTR
     jne .opn_type_error
-.opn_have_fn_default:
     mov rbx, rax            ; save filename str
 
     ; Open read-only: O_RDONLY=0
@@ -3683,23 +3491,15 @@ DEF_FUNC builtin_open_fn, OPN_FRAME
     mov rax, [rdi]          ; filename str
     mov rcx, [rdi + 8]     ; filename tag (64-bit)
     push rdi                ; save args ptr
-    ; SmallStr filename: spill to heap
-    bt rcx, 63
-    jc .opn_fn2_smallstr_spill
     cmp rcx, TAG_PTR
     jne .opn_type_error_pop
-.opn_have_fn2:
     mov rbx, rax            ; save filename str
     pop rdi                 ; restore args ptr
 
     mov rax, [rdi + 16]    ; mode str
     mov rcx, [rdi + 24]    ; mode tag (64-bit)
-    ; SmallStr mode: spill to heap
-    bt rcx, 63
-    jc .opn_mode_smallstr_spill
     cmp rcx, TAG_PTR
     jne .opn_type_error
-.opn_have_mode:
     mov r13, rax            ; save mode str
 
     ; Parse mode string
@@ -3794,24 +3594,6 @@ DEF_FUNC builtin_open_fn, OPN_FRAME
     lea rdi, [rel exc_TypeError_type]
     CSTRING rsi, "open() takes 1 or 2 arguments"
     call raise_exception
-
-.opn_fn_smallstr_spill:
-    mov rdi, rax               ; payload
-    mov rsi, rcx               ; tag
-    call smallstr_to_obj
-    jmp .opn_have_fn_default
-
-.opn_fn2_smallstr_spill:
-    mov rdi, rax               ; payload
-    mov rsi, rcx               ; tag
-    call smallstr_to_obj
-    jmp .opn_have_fn2
-
-.opn_mode_smallstr_spill:
-    mov rdi, rax               ; payload
-    mov rsi, rcx               ; tag
-    call smallstr_to_obj
-    jmp .opn_have_mode
 
 .opn_type_error_pop:
     add rsp, 8                 ; discard saved args ptr
@@ -4009,11 +3791,7 @@ DEF_FUNC builtin_ascii_fn, AA_FRAME
     test edx, edx
     jz .aa_nargs_error
 
-    ; Check if repr result is a SmallStr (bit 63 of tag)
-    test rdx, rdx
-    js .aa_smallstr_result
-
-    ; Heap string: Check if all chars are ASCII (fast path)
+    ; Check if all chars are ASCII (fast path)
     mov [rbp - AA_REPR], rax
     lea rsi, [rax + PyStrObject.data]
     mov rcx, [rax + PyStrObject.ob_size]
@@ -4031,12 +3809,6 @@ DEF_FUNC builtin_ascii_fn, AA_FRAME
     ; Repr is all ASCII — just return it
     mov rax, [rbp - AA_REPR]
     mov edx, TAG_PTR
-    leave
-    ret
-
-.aa_smallstr_result:
-    ; SmallStr is always ASCII (max 14 bytes, all inline)
-    ; Return as-is (rax=payload, rdx=tag already set from obj_repr)
     leave
     ret
 

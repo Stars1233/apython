@@ -148,7 +148,7 @@ DEF_FUNC_BARE op_binary_subscr
 
     ; Call mp_subscript(obj, key, key_tag)
     ; rdi = obj, rsi = key (already set)
-    mov rdx, r8                ; rdx = key tag (64-bit for SmallStr)
+    mov rdx, r8                ; rdx = key tag
     call rax
     jmp .subscr_done
 
@@ -319,7 +319,7 @@ DEF_FUNC_BARE op_store_subscr
 
     ; Call mp_ass_subscript(obj, key, value, key_tag, value_tag)
     ; rdi = obj, rsi = key, rdx = value (already set)
-    mov rcx, r8                ; key tag (4th arg, 64-bit for SmallStr)
+    mov rcx, r8                ; key tag (4th arg)
     ; r8 = value tag (5th arg) — use r10 which holds value tag
     mov r8, r10
     call rax
@@ -1162,7 +1162,7 @@ DEF_FUNC_BARE op_is_op
     mov r10, TAG_NONE
 .is_no_norm_left:
 
-    ; Compare both payload AND tag (for SmallStr/SmallInt correctness)
+    ; Compare both payload AND tag (for SmallInt correctness)
     xor eax, eax
     cmp rdi, rsi
     jne .is_cmp_done
@@ -1235,7 +1235,7 @@ DEF_FUNC_BARE op_contains_op
     ; Call sq_contains(container, value, value_tag) -> 0/1
     mov rdi, [rsp]             ; container
     mov rsi, [rsp + 8]        ; value
-    mov rdx, [rsp + CN_LTAG]  ; value tag (64-bit for SmallStr safety)
+    mov rdx, [rsp + CN_LTAG]  ; value tag
     call rax
     push rax                   ; save result on machine stack
 

@@ -27,7 +27,6 @@ extern obj_repr
 extern obj_str
 extern str_from_cstr_heap
 extern str_new_heap
-extern smallstr_to_obj
 extern str_type
 extern list_new
 extern list_append
@@ -301,10 +300,8 @@ DEF_FUNC str_method_startswith
     push r12
     push r13
 
-    ; Validate args[1] is a string; spill SmallStr to heap in-place
+    ; Validate args[1] is a string
     mov rax, [rdi + 24]        ; args[1] tag
-    test rax, rax
-    js .sw_spill_sub           ; SmallStr (bit 63)
     cmp eax, TAG_PTR
     jne .sw_type_error
     mov rax, [rdi + 16]
@@ -312,16 +309,6 @@ DEF_FUNC str_method_startswith
     lea rdx, [rel str_type]
     cmp rcx, rdx
     jne .sw_type_error
-    jmp .sw_args_ok
-.sw_spill_sub:
-    push rdi
-    mov rsi, rax               ; tag
-    mov rdi, [rdi + 16]        ; payload
-    call smallstr_to_obj
-    pop rdi
-    mov [rdi + 16], rax        ; replace payload in-place
-    mov qword [rdi + 24], TAG_PTR
-.sw_args_ok:
 
     mov rbx, [rdi]          ; self
     mov r12, [rdi + 16]     ; prefix (args[1])
@@ -383,10 +370,8 @@ DEF_FUNC str_method_endswith
     push r13
     push r14
 
-    ; Validate args[1] is a string; spill SmallStr to heap in-place
+    ; Validate args[1] is a string
     mov rax, [rdi + 24]        ; args[1] tag
-    test rax, rax
-    js .ew_spill_sub           ; SmallStr (bit 63)
     cmp eax, TAG_PTR
     jne .ew_type_error
     mov rax, [rdi + 16]
@@ -394,16 +379,6 @@ DEF_FUNC str_method_endswith
     lea rdx, [rel str_type]
     cmp rcx, rdx
     jne .ew_type_error
-    jmp .ew_args_ok
-.ew_spill_sub:
-    push rdi
-    mov rsi, rax               ; tag
-    mov rdi, [rdi + 16]        ; payload
-    call smallstr_to_obj
-    pop rdi
-    mov [rdi + 16], rax        ; replace payload in-place
-    mov qword [rdi + 24], TAG_PTR
-.ew_args_ok:
 
     mov rbx, [rdi]          ; self
     mov r12, [rdi + 16]     ; suffix
@@ -466,10 +441,8 @@ DEF_FUNC str_method_find
     push rbx
     push r12
 
-    ; Validate args[1] is a string; spill SmallStr to heap in-place
+    ; Validate args[1] is a string
     mov rax, [rdi + 24]        ; args[1] tag
-    test rax, rax
-    js .find_spill_sub         ; SmallStr (bit 63)
     cmp eax, TAG_PTR
     jne .find_type_error
     mov rax, [rdi + 16]
@@ -477,16 +450,6 @@ DEF_FUNC str_method_find
     lea rdx, [rel str_type]
     cmp rcx, rdx
     jne .find_type_error
-    jmp .find_args_ok
-.find_spill_sub:
-    push rdi
-    mov rsi, rax               ; tag
-    mov rdi, [rdi + 16]        ; payload
-    call smallstr_to_obj
-    pop rdi
-    mov [rdi + 16], rax        ; replace payload in-place
-    mov qword [rdi + 24], TAG_PTR
-.find_args_ok:
 
     mov rbx, [rdi]          ; self
     mov r12, [rdi + 16]     ; substr (now guaranteed heap str)
@@ -539,10 +502,8 @@ DEF_FUNC str_method_replace
     push r15
     sub rsp, 40             ; [rbp-48]=buf_ptr, [rbp-56]=buf_alloc, [rbp-64]=write_pos, [rbp-72]=self_len, [rbp-80]=pad
 
-    ; Validate args[1] is a string; spill SmallStr to heap in-place
+    ; Validate args[1] is a string
     mov rax, [rdi + 24]        ; args[1] tag
-    test rax, rax
-    js .repl_spill_arg1        ; SmallStr (bit 63)
     cmp eax, TAG_PTR
     jne .repl_type_error
     mov rax, [rdi + 16]
@@ -550,21 +511,9 @@ DEF_FUNC str_method_replace
     lea rdx, [rel str_type]
     cmp rcx, rdx
     jne .repl_type_error
-    jmp .repl_arg1_ok
-.repl_spill_arg1:
-    push rdi
-    mov rsi, rax               ; tag
-    mov rdi, [rdi + 16]        ; payload
-    call smallstr_to_obj
-    pop rdi
-    mov [rdi + 16], rax        ; replace payload in-place
-    mov qword [rdi + 24], TAG_PTR
-.repl_arg1_ok:
 
-    ; Validate args[2] is a string; spill SmallStr to heap in-place
+    ; Validate args[2] is a string
     mov rax, [rdi + 40]        ; args[2] tag
-    test rax, rax
-    js .repl_spill_arg2        ; SmallStr (bit 63)
     cmp eax, TAG_PTR
     jne .repl_type_error
     mov rax, [rdi + 32]
@@ -572,16 +521,6 @@ DEF_FUNC str_method_replace
     lea rdx, [rel str_type]
     cmp rcx, rdx
     jne .repl_type_error
-    jmp .repl_arg2_ok
-.repl_spill_arg2:
-    push rdi
-    mov rsi, rax               ; tag
-    mov rdi, [rdi + 32]        ; payload
-    call smallstr_to_obj
-    pop rdi
-    mov [rdi + 32], rax        ; replace payload in-place
-    mov qword [rdi + 40], TAG_PTR
-.repl_arg2_ok:
 
     ; rbx = self, r12 = old_str, r13 = new_str, r14 = self_len, r15 = scan_pos
     mov rbx, [rdi]          ; self
@@ -794,21 +733,10 @@ DEF_FUNC str_method_join
     push r15
     sub rsp, 32             ; 3 locals + alignment pad = 32
 
-    ; Load separator — may be SmallStr, spill to heap if so
+    ; Load separator
     mov r15, rdi             ; save args ptr (r15 free until later)
-    mov rax, [rdi + 8]      ; self tag
     mov rbx, [rdi]           ; self (separator) payload
-    test rax, rax
-    jns .join_sep_heap
-    ; SmallStr separator: spill to heap
-    mov rdi, rbx
-    mov rsi, rax
-    call smallstr_to_obj
-    mov rbx, rax             ; rbx = heap separator (owned)
-    jmp .join_sep_ok
-.join_sep_heap:
     INCREF rbx               ; borrow → own
-.join_sep_ok:
     mov r12, [r15 + 16]     ; list (args[1] payload, 16-byte stride)
 
     mov r13, [r12 + PyListObject.ob_size]  ; item count
@@ -829,15 +757,6 @@ DEF_FUNC str_method_join
     mov rdx, [r12 + PyListObject.ob_item_tags]
     mov rax, [rax + rcx * 8]    ; payload
     movzx esi, byte [rdx + rcx] ; tag
-    test rsi, rsi
-    jns .jll_heap
-    ; SmallStr element: extract length from tag
-    SMALLSTR_LEN rax, rsi
-    add r15, rax
-    pop rcx
-    inc rcx
-    jmp .join_len_loop
-.jll_heap:
     ; Verify element is TAG_PTR and a str
     cmp esi, TAG_PTR
     jne .join_type_error
@@ -887,9 +806,6 @@ DEF_FUNC str_method_join
     mov rax, [r12 + PyListObject.ob_item]
     mov rdx, [r12 + PyListObject.ob_item_tags]
     mov rax, [rax + rcx * 8]    ; item payload
-    movzx esi, byte [rdx + rcx] ; item tag
-    test rsi, rsi
-    js .jcl_smallstr
 
     ; Heap string element
     mov rdx, [rax + PyStrObject.ob_size]
@@ -900,32 +816,6 @@ DEF_FUNC str_method_join
     call ap_memcpy
     pop rdx                 ; item_len
     add [rbp-64], rdx
-    jmp .jcl_next
-
-.jcl_smallstr:
-    ; SmallStr element: spill bytes to stack buffer, copy from there
-    sub rsp, 16
-    mov [rsp], rax          ; payload = bytes 0-7
-    mov rax, rsi
-    shr rax, 8
-    mov rcx, 0x0000FFFFFFFFFFFF
-    and rax, rcx
-    mov [rsp + 8], rax      ; bytes 8-13
-    ; Extract length from tag
-    mov rcx, rsi
-    shr rcx, 56
-    and ecx, 0x7F           ; ecx = length
-    push rcx                ; save item_len
-    mov rdi, [rbp-56]
-    add rdi, [rbp-64]
-    lea rsi, [rsp + 8]      ; source = stack buffer (8 bytes pushed for len)
-    mov rdx, rcx            ; count = length
-    call ap_memcpy
-    pop rdx                 ; item_len
-    add [rbp-64], rdx
-    add rsp, 16             ; free stack buffer
-
-.jcl_next:
     pop rcx
     inc rcx
     jmp .join_copy_loop
@@ -999,10 +889,8 @@ DEF_FUNC str_method_split
     cmp r14, 2
     jl .split_no_sep
 
-    ; Validate args[1] is a string; spill SmallStr to heap in-place
+    ; Validate args[1] is a string
     mov rax, [rdi + 24]        ; args[1] tag
-    test rax, rax
-    js .spl_spill_sub          ; SmallStr (bit 63)
     cmp eax, TAG_PTR
     jne .spl_type_error
     mov rax, [rdi + 16]
@@ -1010,16 +898,6 @@ DEF_FUNC str_method_split
     lea rdx, [rel str_type]
     cmp rcx, rdx
     jne .spl_type_error
-    jmp .spl_args_ok
-.spl_spill_sub:
-    push rdi
-    mov rsi, rax               ; tag
-    mov rdi, [rdi + 16]        ; payload
-    call smallstr_to_obj
-    pop rdi
-    mov [rdi + 16], rax        ; replace payload in-place
-    mov qword [rdi + 24], TAG_PTR
-.spl_args_ok:
 
     mov r15, [rdi + 16]     ; separator string
     jmp .split_by_sep
@@ -1306,12 +1184,10 @@ DEF_FUNC str_method_format
     ; Get the arg object and convert to string
     shl rax, 4              ; offset = index * 16
     mov rdi, [rbx + rax]    ; arg object payload
-    mov r8, [rbx + rax + 8]  ; arg tag (64-bit for SmallStr)
+    mov r8, [rbx + rax + 8]  ; arg tag
     ; Convert arg to string via obj_str(payload, tag)
-    ; obj_str handles all tags: SmallInt, Float, Bool, None, SmallStr, TAG_PTR
+    ; obj_str handles all tags: SmallInt, Float, Bool, None, TAG_PTR
     push rdi
-    test r8, r8
-    js .fmt_smallstr_arg     ; SmallStr: bit 63 set — spill to heap for concat
     cmp r8d, TAG_PTR
     jne .fmt_inline_str      ; SmallInt, Float, Bool, None → obj_str
     ; TAG_PTR path: call tp_str directly (avoids extra push/pop in obj_str)
@@ -1321,7 +1197,7 @@ DEF_FUNC str_method_format
     jz .fmt_use_repr
     pop rdi
     call rax
-    jmp .fmt_have_str
+    jmp .fmt_heap_str
 .fmt_use_repr:
     pop rdi
     mov rax, [rdi + PyObject.ob_type]
@@ -1329,23 +1205,11 @@ DEF_FUNC str_method_format
     test rax, rax
     jz .fmt_skip_arg
     call rax
-    jmp .fmt_have_str
-.fmt_smallstr_arg:
-    pop rdi                ; rdi = payload
-    mov rsi, r8            ; rsi = tag (SmallStr)
-    call smallstr_to_obj   ; rax = heap PyStrObject*
     jmp .fmt_heap_str
 .fmt_inline_str:
     pop rdi
     mov esi, r8d           ; tag
     call obj_str           ; handles SmallInt, Float, Bool, None
-.fmt_have_str:
-    ; rax = string result (may be SmallStr from obj_repr/obj_str)
-    test rdx, rdx
-    jns .fmt_heap_str
-    mov rdi, rax
-    mov rsi, rdx
-    call smallstr_to_obj
 .fmt_heap_str:
     push rax                ; save str obj for DECREF
     mov edx, [rax + PyStrObject.ob_size]
@@ -1559,14 +1423,6 @@ DEF_FUNC str_method_format_map, FM_FRAME
     pop rdi                     ; value payload
     call obj_str
     ; rax = result payload, edx = tag
-
-    ; Spill SmallStr result to heap
-    test rdx, rdx
-    jns .fmap_heap_val
-    mov rdi, rax
-    mov rsi, rdx
-    call smallstr_to_obj
-.fmap_heap_val:
     push rax                    ; save str obj for DECREF
 
     ; Copy string data to buffer
@@ -1786,10 +1642,8 @@ DEF_FUNC str_method_count
     push r13
     push r14
 
-    ; Validate args[1] is a string; spill SmallStr to heap in-place
+    ; Validate args[1] is a string
     mov rax, [rdi + 24]        ; args[1] tag
-    test rax, rax
-    js .count_spill_sub        ; SmallStr (bit 63)
     cmp eax, TAG_PTR
     jne .count_type_error
     mov rax, [rdi + 16]
@@ -1797,16 +1651,6 @@ DEF_FUNC str_method_count
     lea rdx, [rel str_type]
     cmp rcx, rdx
     jne .count_type_error
-    jmp .count_args_ok
-.count_spill_sub:
-    push rdi
-    mov rsi, rax               ; tag
-    mov rdi, [rdi + 16]        ; payload
-    call smallstr_to_obj
-    pop rdi
-    mov [rdi + 16], rax        ; replace payload in-place
-    mov qword [rdi + 24], TAG_PTR
-.count_args_ok:
 
     mov rbx, [rdi]          ; self
     mov r12, [rdi + 16]     ; substr (now guaranteed heap str)
@@ -1863,10 +1707,8 @@ DEF_FUNC str_method_index
     push rbx
     push r12
 
-    ; Validate args[1] is a string; spill SmallStr to heap in-place
+    ; Validate args[1] is a string
     mov rax, [rdi + 24]        ; args[1] tag
-    test rax, rax
-    js .idx_spill_sub          ; SmallStr (bit 63)
     cmp eax, TAG_PTR
     jne .idx_type_error
     mov rax, [rdi + 16]
@@ -1874,16 +1716,6 @@ DEF_FUNC str_method_index
     lea rdx, [rel str_type]
     cmp rcx, rdx
     jne .idx_type_error
-    jmp .idx_args_ok
-.idx_spill_sub:
-    push rdi
-    mov rsi, rax               ; tag
-    mov rdi, [rdi + 16]        ; payload
-    call smallstr_to_obj
-    pop rdi
-    mov [rdi + 16], rax        ; replace payload in-place
-    mov qword [rdi + 24], TAG_PTR
-.idx_args_ok:
 
     mov rbx, [rdi]          ; self
     mov r12, [rdi + 16]     ; substr
@@ -1930,10 +1762,8 @@ DEF_FUNC str_method_rfind
     push r13
     push r14
 
-    ; Validate args[1] is a string; spill SmallStr to heap in-place
+    ; Validate args[1] is a string
     mov rax, [rdi + 24]        ; args[1] tag
-    test rax, rax
-    js .rfind_spill_sub        ; SmallStr (bit 63)
     cmp eax, TAG_PTR
     jne .rfind_type_error
     mov rax, [rdi + 16]
@@ -1941,16 +1771,6 @@ DEF_FUNC str_method_rfind
     lea rdx, [rel str_type]
     cmp rcx, rdx
     jne .rfind_type_error
-    jmp .rfind_args_ok
-.rfind_spill_sub:
-    push rdi
-    mov rsi, rax               ; tag
-    mov rdi, [rdi + 16]        ; payload
-    call smallstr_to_obj
-    pop rdi
-    mov [rdi + 16], rax
-    mov qword [rdi + 24], TAG_PTR
-.rfind_args_ok:
 
     mov rbx, [rdi]          ; self
     mov r12, [rdi + 16]     ; substr (now guaranteed heap str)
@@ -2557,14 +2377,7 @@ DEF_FUNC str_method_center, PA_FRAME
     jl .center_have_fill
     mov rax, [rbp - PA_ARGS]
     mov rdx, [rax + 32]                 ; args[2] payload (char str)
-    mov rax, [rax + 40]                 ; args[2] tag
-    test rax, rax
-    js .center_fill_smallstr
     movzx ecx, byte [rdx + PyStrObject.data]
-    jmp .center_have_fill
-.center_fill_smallstr:
-    ; SmallStr: first char is byte 0 of payload
-    movzx ecx, dl
 .center_have_fill:
     ; If width <= self_len, return copy of self
     cmp r13, r12
@@ -2900,20 +2713,6 @@ DEF_FUNC str_method_rindex
     push r12
     push r13
 
-    ; Spill SmallStr sub arg if needed
-    mov rax, [rdi + 24]
-    test rax, rax
-    js .rindex_spill
-    jmp .rindex_args_ok
-.rindex_spill:
-    push rdi
-    mov rsi, rax
-    mov rdi, [rdi + 16]
-    call smallstr_to_obj
-    pop rdi
-    mov [rdi + 16], rax
-    mov qword [rdi + 24], TAG_PTR
-.rindex_args_ok:
     mov rbx, [rdi]           ; self
     mov r12, [rdi + 16]      ; substr
     mov r13, [rbx + PyStrObject.ob_size]
@@ -3040,20 +2839,6 @@ DEF_FUNC str_method_partition, PT_FRAME
     push r12
     push r13
 
-    ; Spill SmallStr sep if needed
-    mov rax, [rdi + 24]
-    test rax, rax
-    js .part_spill
-    jmp .part_args_ok
-.part_spill:
-    push rdi
-    mov rsi, rax
-    mov rdi, [rdi + 16]
-    call smallstr_to_obj
-    pop rdi
-    mov [rdi + 16], rax
-    mov qword [rdi + 24], TAG_PTR
-.part_args_ok:
     mov rbx, [rdi]           ; self
     mov r12, [rdi + 16]      ; sep
     mov [rbp - PT_SELF], rbx
@@ -3167,20 +2952,6 @@ DEF_FUNC str_method_rpartition, PT_FRAME
     push r12
     push r13
 
-    ; Spill SmallStr sep if needed
-    mov rax, [rdi + 24]
-    test rax, rax
-    js .rpart_spill
-    jmp .rpart_args_ok
-.rpart_spill:
-    push rdi
-    mov rsi, rax
-    mov rdi, [rdi + 16]
-    call smallstr_to_obj
-    pop rdi
-    mov [rdi + 16], rax
-    mov qword [rdi + 24], TAG_PTR
-.rpart_args_ok:
     mov rbx, [rdi]           ; self
     mov r12, [rdi + 16]      ; sep
     mov [rbp - PT_SELF], rbx
@@ -3761,35 +3532,10 @@ DEF_FUNC str_staticmethod_maketrans, SMT_FRAME
     jne .smt_error
 
     ; Get from and to strings
-    mov rax, [rdi + 8]             ; args[0] tag
     mov rcx, [rdi]                 ; args[0] payload (from str)
-    ; SmallStr: spill
-    test rax, rax
-    js .smt_spill_from
-    jmp .smt_from_ok
-.smt_spill_from:
-    push rdi
-    mov rdi, rcx
-    mov rsi, rax
-    call smallstr_to_obj
-    pop rdi
-    mov rcx, rax
-.smt_from_ok:
     mov [rbp - SMT_FROM], rcx
 
-    mov rax, [rdi + 24]            ; args[1] tag
     mov rcx, [rdi + 16]            ; args[1] payload (to str)
-    test rax, rax
-    js .smt_spill_to
-    jmp .smt_to_ok
-.smt_spill_to:
-    push rdi
-    mov rdi, rcx
-    mov rsi, rax
-    call smallstr_to_obj
-    pop rdi
-    mov rcx, rax
-.smt_to_ok:
     mov [rbp - SMT_TO], rcx
 
     ; Check equal lengths
@@ -3864,10 +3610,8 @@ DEF_FUNC str_method_removeprefix
     push r13
     push r14
 
-    ; Validate args[1] is a string; spill SmallStr to heap in-place
+    ; Validate args[1] is a string
     mov rax, [rdi + 24]        ; args[1] tag
-    test rax, rax
-    js .rp_spill_sub           ; SmallStr (bit 63)
     cmp eax, TAG_PTR
     jne .rp_type_error
     mov rax, [rdi + 16]
@@ -3875,16 +3619,6 @@ DEF_FUNC str_method_removeprefix
     lea rdx, [rel str_type]
     cmp rcx, rdx
     jne .rp_type_error
-    jmp .rp_args_ok
-.rp_spill_sub:
-    push rdi
-    mov rsi, rax               ; tag
-    mov rdi, [rdi + 16]        ; payload
-    call smallstr_to_obj
-    pop rdi
-    mov [rdi + 16], rax        ; replace payload in-place
-    mov qword [rdi + 24], TAG_PTR
-.rp_args_ok:
 
     mov rbx, [rdi]          ; self
     mov r12, [rdi + 16]     ; prefix
@@ -3949,10 +3683,8 @@ DEF_FUNC str_method_removesuffix
     push r13
     push r14
 
-    ; Validate args[1] is a string; spill SmallStr to heap in-place
+    ; Validate args[1] is a string
     mov rax, [rdi + 24]        ; args[1] tag
-    test rax, rax
-    js .rs_spill_sub           ; SmallStr (bit 63)
     cmp eax, TAG_PTR
     jne .rs_type_error
     mov rax, [rdi + 16]
@@ -3960,16 +3692,6 @@ DEF_FUNC str_method_removesuffix
     lea rdx, [rel str_type]
     cmp rcx, rdx
     jne .rs_type_error
-    jmp .rs_args_ok
-.rs_spill_sub:
-    push rdi
-    mov rsi, rax               ; tag
-    mov rdi, [rdi + 16]        ; payload
-    call smallstr_to_obj
-    pop rdi
-    mov [rdi + 16], rax        ; replace payload in-place
-    mov qword [rdi + 24], TAG_PTR
-.rs_args_ok:
 
     mov rbx, [rdi]          ; self
     mov r12, [rdi + 16]     ; suffix
@@ -4729,18 +4451,12 @@ DEF_FUNC list_method_sort, LS_FRAME
 
     cmp r8d, TAG_SMALLINT
     je .merge_si_type
-    test r8, r8
-    js .merge_ss_type              ; SmallStr: bit 63 set
     test r8d, TAG_RC_BIT
     jz .merge_take_left            ; TAG_NONE/TAG_BOOL: take left (stable)
     mov rax, [rdi + PyObject.ob_type]
     jmp .merge_have_type
 .merge_si_type:
     lea rax, [rel int_type]
-    jmp .merge_have_type
-.merge_ss_type:
-    extern str_type
-    lea rax, [rel str_type]
 .merge_have_type:
     mov r10, rax                   ; save type ptr for dunder fallback
     mov rax, [rax + PyTypeObject.tp_richcompare]
@@ -4749,8 +4465,8 @@ DEF_FUNC list_method_sort, LS_FRAME
 
     ; tp_richcompare(rdi=right, rsi=left, edx=op, rcx=right_tag, r8=left_tag)
     ; Comparing: right < left (ascending) or right > left (descending)
-    mov rcx, r8                    ; right_tag (full 64-bit for SmallStr)
-    mov r8, r9                     ; left_tag (full 64-bit for SmallStr)
+    mov rcx, r8                    ; right_tag
+    mov r8, r9                     ; left_tag
     cmp qword [rbp - LS_REV], 0
     je .merge_use_lt
     mov edx, PY_GT                 ; reversed: right > left
@@ -5536,8 +5252,6 @@ DEF_FUNC list_method_count, LC_FRAME
     je .count_eq_int
     cmp r8d, TAG_FLOAT
     je .count_eq_float
-    test r8, r8
-    js .count_next            ; SmallStr: skip (payload already compared)
     cmp r8d, TAG_BOOL
     je .count_next            ; TAG_BOOL: identity only
     test r8d, TAG_RC_BIT
@@ -5573,8 +5287,8 @@ DEF_FUNC list_method_count, LC_FRAME
     ; tp_richcompare(item, value, PY_EQ, item_tag, value_tag)
     mov rsi, r12
     mov edx, PY_EQ
-    mov rcx, r8               ; item tag (64-bit for SmallStr)
-    mov r8, r15               ; value tag (64-bit for SmallStr)
+    mov rcx, r8               ; item tag
+    mov r8, r15               ; value tag
     call rax
     ; Check for NotImplemented (NULL return = tag 0)
     test edx, edx
@@ -5973,7 +5687,7 @@ dict_method_pop_v2 equ dict_method_pop
 
     mov rdi, rbx
     mov rsi, r13
-    mov rdx, r15            ; key tag (64-bit for SmallStr)
+    mov rdx, r15            ; key tag
     call dict_del
 
     pop rax                 ; restore payload
@@ -6310,10 +6024,10 @@ DEF_FUNC dict_classmethod_fromkeys, DFK_FRAME
     test edx, edx
     jz .dfk_done                   ; iterator exhausted
 
-    ; rax=key payload, rdx=key tag (full 64-bit for SmallStr)
+    ; rax=key payload, rdx=key tag
     ; Save key before loading value (which overwrites rdx)
     mov rsi, rax                   ; key payload
-    mov r8, rdx                    ; key tag (full 64-bit for SmallStr support)
+    mov r8, rdx                    ; key tag
 
     ; dict_set(dict, key, value, value_tag, key_tag)
     mov rdi, [rbp - DFK_DICT]
@@ -6462,8 +6176,6 @@ DEF_FUNC list_method_remove
     je .lremove_eq_int
     cmp r8d, TAG_FLOAT
     je .lremove_eq_float
-    test r8, r8
-    js .lremove_next          ; SmallStr: skip (payload already compared)
     cmp r8d, TAG_BOOL
     je .lremove_next          ; TAG_BOOL: identity only
     test r8d, TAG_RC_BIT
@@ -6499,8 +6211,8 @@ DEF_FUNC list_method_remove
     ; rdi = item payload (already set)
     mov rsi, r12             ; value payload
     mov edx, PY_EQ
-    mov rcx, r8              ; item tag (64-bit for SmallStr)
-    mov r8, r15              ; value tag (64-bit for SmallStr)
+    mov rcx, r8              ; item tag
+    mov r8, r15              ; value tag
     call rax
     ; Check for NotImplemented (NULL return = tag 0)
     test edx, edx
@@ -7738,22 +7450,10 @@ DEF_FUNC int_method_to_bytes, ITB_FRAME
     ; Extract byteorder arg
     mov rdx, [rbx + 40]            ; args[2] tag
     mov rcx, [rbx + 32]            ; args[2] payload (str)
-
-    ; Check for "big" or "little"
-    ; SmallStr: spill to heap
-    test rdx, rdx
-    js .itb_spill_order
     cmp edx, TAG_PTR
     jne .itb_error
-    jmp .itb_order_ok
-.itb_spill_order:
-    push rcx
-    mov rdi, rcx
-    mov rsi, rdx
-    call smallstr_to_obj
-    mov rcx, rax
-    pop rax                         ; discard old
-.itb_order_ok:
+
+    ; Check for "big" or "little"
     ; rcx = byteorder str obj
     push rcx                        ; save for comparison
 
@@ -7846,23 +7546,10 @@ DEF_FUNC int_classmethod_from_bytes, IFB_FRAME
     mov [rbp - IFB_BYTES], rax
 
     ; args[2] = byteorder
-    mov rdx, [rdi + 40]            ; tag
+    mov edx, [rdi + 40]            ; tag
     mov rcx, [rdi + 32]            ; payload
-
-    ; SmallStr: spill
-    test rdx, rdx
-    js .ifb_spill_order
     cmp edx, TAG_PTR
     jne .ifb_error
-    jmp .ifb_order_ok
-.ifb_spill_order:
-    push rdi
-    mov rdi, rcx
-    mov rsi, rdx
-    call smallstr_to_obj
-    mov rcx, rax
-    pop rdi
-.ifb_order_ok:
     push rcx
 
     lea rdi, [rcx + PyStrObject.data]
@@ -9292,21 +8979,7 @@ DEF_FUNC float_classmethod_fromhex, FFH_FRAME
     push r13
 
     ; Get string arg
-    mov rax, [rdi + 24]            ; args[1] tag
     mov rcx, [rdi + 16]            ; args[1] payload
-
-    ; SmallStr: spill to heap
-    test rax, rax
-    js .ffh_spill
-    jmp .ffh_str_ok
-.ffh_spill:
-    push rdi
-    mov rdi, rcx
-    mov rsi, rax
-    call smallstr_to_obj
-    pop rdi
-    mov rcx, rax
-.ffh_str_ok:
     mov [rbp - FFH_STR], rcx
     lea r12, [rcx + PyStrObject.data]  ; r12 = string data
 

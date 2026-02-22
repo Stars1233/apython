@@ -382,9 +382,6 @@ DEF_FUNC_BARE op_binary_op
     ; Check if left is heaptype
     cmp qword [rsp + BO_LTAG], TAG_SMALLINT
     je .binop_try_right_dunder ; SmallInt has no dunders
-    ; SmallStr: no dunders (built-in str_type)
-    bt qword [rsp + BO_LTAG], 63
-    jc .binop_try_right_dunder
     ; Non-pointer guard: TAG_BOOL/TAG_NONE/TAG_FLOAT can't have dunders
     test qword [rsp + BO_LTAG], TAG_RC_BIT
     jz .binop_try_right_dunder
@@ -794,8 +791,8 @@ section .text
     ; Call tp_richcompare(left, right, op, left_tag, right_tag)
     ; rdi = left, rsi = right (already set)
     mov edx, ecx               ; edx = comparison op
-    mov rcx, [rsp + BO_LTAG]   ; rcx = left_tag (64-bit for SmallStr)
-    mov r8, [rsp + BO_RTAG]    ; r8 = right_tag (64-bit for SmallStr)
+    mov rcx, [rsp + BO_LTAG]   ; rcx = left_tag
+    mov r8, [rsp + BO_RTAG]    ; r8 = right_tag
     push rdx                   ; save comparison op before call
     call rax
     ; rax = result payload, edx = result tag
@@ -836,8 +833,6 @@ section .text
     je .cmp_right_int
     cmp r8d, TAG_FLOAT
     je .cmp_right_float
-    test r8, r8
-    js .cmp_right_str          ; SmallStr
     cmp r8d, TAG_BOOL
     je .cmp_right_bool
     cmp r8d, TAG_NONE
@@ -849,10 +844,6 @@ section .text
     jmp .cmp_right_have_type
 .cmp_right_float:
     lea rax, [rel float_type]
-    jmp .cmp_right_have_type
-.cmp_right_str:
-    extern str_type
-    lea rax, [rel str_type]
     jmp .cmp_right_have_type
 .cmp_right_bool:
     extern bool_type
@@ -1030,7 +1021,7 @@ DEF_FUNC_BARE op_unary_negative
     mov rax, [rax + PyNumberMethods.nb_negative]
 
     ; Call nb_negative(payload, tag); rdi already set
-    mov rdx, r8                ; tag (64-bit for SmallStr)
+    mov rdx, r8                ; tag
     call rax
     ; rax = result payload, rdx = result tag
 
@@ -1079,7 +1070,7 @@ DEF_FUNC_BARE op_unary_invert
     mov rax, [rax + PyNumberMethods.nb_invert]
 
     ; Call nb_invert(operand, tag) — binary op signature
-    mov rdx, r8                ; tag (64-bit for SmallStr)
+    mov rdx, r8                ; tag
     xor esi, esi
     call rax
     SAVE_FAT_RESULT
@@ -1105,7 +1096,7 @@ DEF_FUNC_BARE op_unary_not
     push rdi
 
     ; Call obj_is_true(operand, tag) -> 0 or 1
-    mov rsi, r8                ; 64-bit for SmallStr
+    mov rsi, r8                ; tag
     call obj_is_true
     push rax                   ; save truthiness result
 
@@ -1146,7 +1137,7 @@ DEF_FUNC_BARE op_pop_jump_if_false
     push rcx                   ; save target offset
     push r8                    ; save tag for DECREF
     push rdi                   ; save value for DECREF
-    mov rsi, r8                ; 64-bit for SmallStr
+    mov rsi, r8                ; tag
     call obj_is_true
     push rax                   ; save truthiness
     mov rdi, [rsp + 8]        ; reload value
@@ -1183,7 +1174,7 @@ DEF_FUNC_BARE op_pop_jump_if_true
     push rcx                   ; save target offset
     push r8                    ; save tag for DECREF
     push rdi                   ; save value for DECREF
-    mov rsi, r8                ; 64-bit for SmallStr
+    mov rsi, r8                ; tag
     call obj_is_true
     push rax                   ; save truthiness
     mov rdi, [rsp + 8]        ; reload value

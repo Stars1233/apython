@@ -425,7 +425,7 @@ DEF_FUNC_BARE read_awaitable_iternext
     ; EOF or error: return empty string
     CSTRING rdi, ""
     call str_from_cstr
-    ; rax = empty string, edx = tag (might be SmallStr)
+    ; rax = empty string, edx = tag
 
     add rsp, STREAM_BUFSIZE
     pop r12
@@ -565,11 +565,7 @@ DEF_FUNC stream_writer_write_impl
 
     ; args[1] = data (string)
     mov rax, [rdi + 16]       ; data payload
-    mov rdx, [rdi + 24]       ; data tag (full 64-bit for SmallStr check)
-
-    ; Check if SmallStr (bit 63 set in tag)
-    bt rdx, 63
-    jc .swwi_smallstr
+    mov rdx, [rdi + 24]       ; data tag
 
     cmp edx, TAG_PTR
     jne .swwi_type_error
@@ -578,31 +574,8 @@ DEF_FUNC stream_writer_write_impl
     mov r12, rax               ; string object
     mov r13, [rax + 16]       ; str.ob_size (PyStrObject.ob_size = +16)
     lea rdi, [rax + 32]       ; str.data (PyStrObject.data = +32)
-    jmp .swwi_do_write
 
-.swwi_smallstr:
-    ; SmallStr: extract length from tag bits 56-62
-    mov r12, rax               ; payload = bytes 0-7
-    mov r13, rdx               ; tag
-    shr r13, 56
-    and r13, 0x7F              ; length (0-15)
-    ; Data is in payload + tag bytes — need to put on stack
-    sub rsp, 16
-    mov [rsp], rax             ; payload bytes
-    mov [rsp + 8], rdx         ; tag bytes (first byte = rest of string)
-    mov rdi, rsp
-    jmp .swwi_do_write_ss
-
-.swwi_do_write_ss:
-    ; sys_write(fd, buf, len) — SmallStr bytes are at rsp
-    mov edi, [rbx + AsyncStreamWriter.fd]
-    mov rsi, rsp               ; buf = SmallStr bytes on stack
-    mov edx, r13d              ; len
-    call sys_write
-    add rsp, 16
-    jmp .swwi_return_count
-
-.swwi_do_write:
+    ; .swwi_do_write:
     ; rdi = data ptr, r13 = length
     mov rsi, rdi               ; buf
     mov edi, [rbx + AsyncStreamWriter.fd]
@@ -1063,7 +1036,7 @@ END_FUNC asyncio_start_server_func
 
 ;; ============================================================================
 ;; ap_strcmp — compare C string with Python string object
-;; rdi = C string, rsi = PyStrObject* (or SmallStr)
+;; rdi = C string, rsi = PyStrObject*
 ;; Returns 0 if equal, nonzero otherwise
 ;; ============================================================================
 DEF_FUNC_LOCAL _stream_strcmp

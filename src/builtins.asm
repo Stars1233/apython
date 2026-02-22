@@ -248,7 +248,6 @@ PR_FRAME     equ 4144  ; total frame size (48 + 4096)
 
 extern kw_names_pending
 extern ap_strcmp
-extern smallstr_to_obj
 
 DEF_FUNC builtin_print, PR_FRAME
     push rbx
@@ -387,22 +386,15 @@ align 16
     ; Get string representation: obj_str(args[i]) with tag
     mov rax, r13
     shl rax, 4                  ; index * 16 for 16-byte stride
-    mov rsi, [rbx + rax + 8]   ; tag (full 64-bit for SmallStr)
+    mov rsi, [rbx + rax + 8]   ; tag
     mov rdi, [rbx + rax]       ; payload
     call obj_str
-    ; obj_str returns (rax=payload, edx=tag) — may be SmallStr or TAG_PTR
+    ; obj_str returns (rax=payload, edx=tag)
     mov r14, rax                ; r14 = result payload
     mov r9, rdx                 ; r9 = result tag
 
-    test r14, r14
-    jnz .have_str
     test r9d, r9d
     jz .skip_arg                ; TAG_NULL → skip
-.have_str:
-
-    ; SmallStr result: extract bytes directly
-    test r9, r9
-    js .print_smallstr
 
     ; Heap string: get length from ob_size
     mov rcx, [r14 + PyStrObject.ob_size]
@@ -489,7 +481,7 @@ align 16
     xor r15d, r15d              ; reset offset
 
 .write_direct:
-    ; Write this string directly (only for heap strings — SmallStr always fits buffer)
+    ; Write this string directly
     mov edi, 1                  ; fd = stdout
     lea rsi, [r14 + PyStrObject.data]
     mov rdx, [r14 + PyStrObject.ob_size]  ; len
@@ -499,68 +491,6 @@ align 16
     ; r9 tag was clobbered by sys_write calls above)
     mov rdi, r14
     call obj_decref
-    jmp .skip_arg
-
-.print_smallstr:
-    ; SmallStr result from obj_str: extract bytes to buffer inline
-    ; r14 = payload, r9 = tag
-    ; Extract length from tag bits 56-62
-    SMALLSTR_LEN rcx, r9       ; rcx = length
-
-    ; Check buffer space
-    lea rax, [r15 + rcx + 2]
-    cmp rax, 4096
-    jae .print_smallstr_flush
-
-    ; Extract string bytes 8-13 from tag (skip TAG_SMALLSTR in bits 0-7)
-    mov rax, r9
-    shr rax, 8
-    mov rdx, 0x0000FFFFFFFFFFFF
-    and rax, rdx
-
-    ; Write 16-byte block to temp on stack, then copy to buffer
-    sub rsp, 16
-    mov [rsp], r14             ; bytes 0-7
-    mov [rsp + 8], rax         ; bytes 8-13
-
-    ; Copy rcx bytes from rsp to buffer
-    lea rdi, [rbp - PR_FRAME + r15]
-    mov rsi, rsp
-    mov rdx, rcx
-    test rcx, rcx
-    jz .ss_copy_done
-    call ap_memcpy
-.ss_copy_done:
-    add rsp, 16
-    SMALLSTR_LEN rcx, r9
-    add r15, rcx               ; advance buffer offset
-    jmp .skip_arg               ; no DECREF needed for SmallStr
-
-.print_smallstr_flush:
-    ; Buffer full + SmallStr — flush buffer, write SmallStr directly
-    test r15, r15
-    jz .print_ss_direct
-    push rcx                   ; save length
-    mov edi, 1
-    lea rsi, [rbp - PR_FRAME]
-    mov rdx, r15
-    call sys_write
-    xor r15d, r15d
-    pop rcx
-.print_ss_direct:
-    ; Write SmallStr bytes via temp on stack (skip TAG_SMALLSTR in bits 0-7)
-    mov rax, r9
-    shr rax, 8
-    mov rdx, 0x0000FFFFFFFFFFFF
-    and rax, rdx
-    sub rsp, 16
-    mov [rsp], r14
-    mov [rsp + 8], rax
-    mov edi, 1
-    mov rsi, rsp
-    mov rdx, rcx
-    call sys_write
-    add rsp, 16
     jmp .skip_arg
 
 .print_flush:
@@ -586,10 +516,6 @@ align 16
     je .print_default_end
 
     ; Custom end string
-    ; Check if SmallStr
-    test qword [rbp - PR_END_TAG], (1 << 63)
-    jnz .print_end_smallstr
-
     mov rcx, [rax + PyStrObject.ob_size]
     lea rdi, [rbp - PR_FRAME + r15]
     lea rsi, [rax + PyStrObject.data]
@@ -601,27 +527,6 @@ align 16
     pop rcx
 .print_end_copy_done:
     add r15, rcx
-    jmp .print_do_flush
-
-.print_end_smallstr:
-    ; SmallStr end: spill to heap, copy, DECREF
-    mov rdi, [rbp - PR_END]
-    mov rsi, [rbp - PR_END_TAG]
-    call smallstr_to_obj
-    mov rcx, [rax + PyStrObject.ob_size]
-    push rax
-    push rcx
-    lea rdi, [rbp - PR_FRAME + r15]
-    lea rsi, [rax + PyStrObject.data]
-    mov rdx, rcx
-    test rcx, rcx
-    jz .print_end_ss_done
-    call ap_memcpy
-.print_end_ss_done:
-    pop rcx
-    add r15, rcx
-    pop rdi
-    call obj_decref
     jmp .print_do_flush
 
 .print_default_end:
@@ -661,20 +566,7 @@ DEF_FUNC builtin_len
     cmp rsi, 1
     jne .len_error
 
-    ; SmallStr fast path: extract length from tag bits 56-62
-    mov rax, [rdi + 8]          ; args[0] tag
-    test rax, rax
-    jns .len_not_smallstr
-    mov rcx, rax
-    shr rcx, 56
-    and ecx, 0x7F               ; ecx = SmallStr length
-    mov rax, rcx
-    RET_TAG_SMALLINT
-    pop rbx
-    leave
-    ret
-.len_not_smallstr:
-    ; rax = tag from line above; only dereference TAG_PTR payloads
+    mov eax, [rdi + 8]          ; args[0] tag
     cmp eax, TAG_PTR
     jne .len_type_error
 
@@ -861,10 +753,6 @@ DEF_FUNC builtin_type
     mov rsi, rdi               ; save args ptr
     mov rdi, [rsi]             ; obj = args[0] payload
 
-    ; SmallStr check (bit 63 of tag)
-    bt qword [rsi + 8], 63
-    jc .type_smallstr
-
     ; SmallInt check (tag at args[0]+8)
     cmp qword [rsi + 8], TAG_SMALLINT
     je .type_smallint
@@ -919,13 +807,6 @@ DEF_FUNC builtin_type
     leave
     ret
 
-.type_smallstr:
-    lea rax, [rel str_type]
-    INCREF rax
-    mov edx, TAG_PTR
-    leave
-    ret
-
 .type_error:
     lea rdi, [rel exc_TypeError_type]
     CSTRING rsi, "type() takes 1 argument"
@@ -948,14 +829,11 @@ DEF_FUNC builtin_isinstance
     extern bool_false
 
     mov rax, [rdi]             ; rax = args[0] = obj payload
-    mov r8, [rdi + 8]         ; r8 = args[0] tag (full 64-bit for SmallStr)
+    mov r8d, [rdi + 8]        ; r8d = args[0] tag
     mov rcx, [rdi + 16]       ; rcx = args[1] = type_to_check payload
     mov r9d, [rdi + 24]       ; r9d = args[1] tag
 
     ; Get obj's type (tag-aware for all inline types)
-    ; SmallStr check (bit 63 of tag)
-    test r8, r8
-    js .isinstance_smallstr
     cmp r8d, TAG_SMALLINT
     je .isinstance_smallint
     cmp r8d, TAG_FLOAT
@@ -979,10 +857,6 @@ DEF_FUNC builtin_isinstance
 
 .isinstance_float:
     lea rdx, [rel float_type]
-    jmp .isinstance_got_type
-
-.isinstance_smallstr:
-    lea rdx, [rel str_type]
     jmp .isinstance_got_type
 
 .isinstance_bool:
@@ -1111,10 +985,10 @@ DEF_FUNC builtin_repr
     cmp rsi, 1
     jne .repr_error
 
-    mov rsi, [rdi + 8]         ; arg[0] tag (full 64-bit for SmallStr)
+    mov rsi, [rdi + 8]         ; arg[0] tag
     mov rdi, [rdi]             ; arg[0] payload
     call obj_repr
-    ; rdx = tag from obj_repr (SmallStr or TAG_PTR)
+    ; rdx = tag from obj_repr
     leave
     ret
 
