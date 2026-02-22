@@ -2134,7 +2134,17 @@ DEF_FUNC builtin_sum
     mov rsi, r14                   ; item payload
     mov edx, [rsp]                 ; accum tag (left_tag)
     mov ecx, r15d                  ; item tag (right_tag)
+    ; Use float_add if either operand is float, else int_add
+    cmp edx, TAG_FLOAT
+    je .sum_float_add
+    cmp ecx, TAG_FLOAT
+    je .sum_float_add
     call int_add
+    jmp .sum_have_result
+.sum_float_add:
+    extern float_add
+    call float_add
+.sum_have_result:
     ; rax = new accum payload, edx = new accum tag
 
     ; Save new accum before DECREFs
@@ -2184,304 +2194,151 @@ DEF_FUNC builtin_sum
 END_FUNC builtin_sum
 
 ; ============================================================================
-; 15. builtin_min(args, nargs) - min(a, b, ...)
+; 15-16. builtin_min / builtin_max
 ; ============================================================================
-MIN_TAG     equ 0      ; [rsp + MIN_TAG] = current min tag
-MIN_CMP_RES equ 8      ; [rsp + MIN_CMP_RES] = richcompare result ptr
-DEF_FUNC builtin_min
-    push rbx
-    push r12
-    push r13
-    push r14
-    push r15
-    sub rsp, 16
+; Shared implementation: minmax_impl(args, nargs, cmp_op)
+;   rdi = args, rsi = nargs, edx = cmp_op (PY_LT=0 for min, PY_GT=4 for max)
+; Returns (rax=payload, rdx=tag)
+;
+; Stack layout:
+;   [rsp + MM_TAG]     = current best tag (64-bit)
+;   [rsp + MM_CMP_RES] = richcompare result ptr
+;   [rsp + MM_ITER]    = iterator ptr (iter path only)
+;   [rsp + MM_ITERNX]  = tp_iternext fn ptr (iter path only)
+;   [rsp + MM_CMP_OP]  = comparison op (PY_LT or PY_GT)
+MM_TAG     equ 8
+MM_CMP_RES equ 16
+MM_ITER    equ 24
+MM_ITERNX  equ 32
+MM_CMP_OP  equ 40
+MM_FRAME   equ 48
 
-    cmp rsi, 1
-    jb .min_error
-
-    mov rbx, rdi
-    mov r12, rsi
-
-    mov r13, 1
-
-    mov r14, [rbx]                 ; args[0] payload = current min
-    mov rax, [rbx + 8]            ; args[0] tag (64-bit)
-    mov [rsp + MIN_TAG], rax       ; min_tag
-    cmp rax, TAG_PTR
-    jne .min_loop                  ; non-refcounted (SmallInt/Float/Bool/None/SmallStr): no INCREF
-    inc qword [r14 + PyObject.ob_refcnt]
-
-.min_loop:
-    cmp r13, r12
-    jge .min_done
-
-    mov rax, r13
-    shl rax, 4                    ; rax = index * 16 (16-byte stride)
-    mov r15, [rbx + rax]          ; candidate payload
-    mov rcx, [rbx + rax + 8]     ; candidate tag (64-bit)
-
-    ; SmallInt fast path: both SmallInt?
-    cmp qword [rsp + MIN_TAG], TAG_SMALLINT
-    jne .min_slow_compare
-    cmp rcx, TAG_SMALLINT
-    jne .min_slow_compare
-
-    ; Both SmallInts: compare directly
-    cmp r15, r14
-    jge .min_no_update
-    mov r14, r15                   ; update min (both SmallInt, no refcount)
-    jmp .min_no_update
-
-.min_slow_compare:
-    ; Use tp_richcompare(args[i], current_min, PY_LT)
-    ; SmallStr? (bit 63 set)
-    test rcx, rcx
-    js .min_cand_smallstr
-
-    cmp rcx, TAG_PTR
-    jne .min_try_float
-    mov rdi, r15
-    mov rax, [rdi + PyObject.ob_type]
-    jmp .min_have_type
-.min_cand_smallstr:
-    lea rax, [rel str_type]
-    jmp .min_have_type
-.min_try_float:
-    cmp rcx, TAG_FLOAT
-    jne .min_no_update             ; Bool/None: skip
-    mov rdi, r15
-    lea rax, [rel float_type]
-.min_have_type:
-    mov r8, rcx                    ; save candidate tag
-    mov rcx, [rax + PyTypeObject.tp_richcompare]
-    test rcx, rcx
-    jz .min_no_update
-
-    mov rdi, r15                   ; left = candidate
-    mov rsi, r14                   ; right = current min
+DEF_FUNC_BARE builtin_min
     xor edx, edx                   ; PY_LT = 0
-    mov rax, rcx                   ; fn ptr -> rax
-    mov rcx, r8                    ; left_tag = candidate tag
-    mov r8, [rsp + MIN_TAG]        ; right_tag = min tag
-    call rax
-
-    ; Compare result against bool_true BEFORE DECREF
-    lea rcx, [rel bool_true]
-    cmp rax, rcx
-    mov [rsp + MIN_CMP_RES], rax
-    jne .min_slow_no_update
-
-    ; Update min: DECREF old min
-    mov rdi, r14
-    mov rsi, [rsp + MIN_TAG]
-    DECREF_VAL rdi, rsi
-    ; Set new min = candidate
-    mov r14, r15
-    mov rax, r13
-    shl rax, 4
-    mov rax, [rbx + rax + 8]     ; reload candidate tag (64-bit)
-    mov [rsp + MIN_TAG], rax      ; update min_tag
-    cmp rax, TAG_PTR
-    jne .min_slow_update_done     ; non-refcounted (SmallStr/SmallInt/Float): no INCREF
-    inc qword [r14 + PyObject.ob_refcnt]
-.min_slow_update_done:
-    ; DECREF richcompare result
-    mov rdi, [rsp + MIN_CMP_RES]
-    call obj_decref               ; richcompare result is always a heap ptr (bool)
-    jmp .min_no_update
-
-.min_slow_no_update:
-    mov rdi, [rsp + MIN_CMP_RES]
-    call obj_decref               ; richcompare result is always a heap ptr (bool)
-
-.min_no_update:
-    inc r13
-    jmp .min_loop
-
-.min_done:
-    mov rax, r14
-    mov rdx, [rsp + MIN_TAG]       ; min_tag (64-bit)
-    add rsp, 16
-    pop r15
-    pop r14
-    pop r13
-    pop r12
-    pop rbx
-    leave
-    ret
-
-.min_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "min expected at least 1 argument"
-    call raise_exception
+    jmp minmax_impl
 END_FUNC builtin_min
 
-; ============================================================================
-; 16. builtin_max(args, nargs) - max(a, b, ...)
-; ============================================================================
-MAX_TAG     equ 0      ; [rsp + MAX_TAG] = current max tag
-MAX_CMP_RES equ 8      ; [rsp + MAX_CMP_RES] = richcompare result ptr
-DEF_FUNC builtin_max
+DEF_FUNC_BARE builtin_max
+    mov edx, PY_GT                 ; PY_GT = 4
+    jmp minmax_impl
+END_FUNC builtin_max
+
+DEF_FUNC_LOCAL minmax_impl, MM_FRAME
     push rbx
     push r12
     push r13
     push r14
     push r15
-    sub rsp, 16
+
+    mov [rbp - MM_CMP_OP], edx    ; save comparison op
 
     cmp rsi, 1
-    jb .max_error
+    jb .mm_error
 
-    mov rbx, rdi
-    mov r12, rsi
+    ; nargs == 1 → iterate the single argument
+    cmp rsi, 1
+    je .mm_iter_path
 
-    mov r13, 1
+    ; --- Multi-arg path: min/max(a, b, ...) ---
+    mov rbx, rdi                   ; args array
+    mov r12, rsi                   ; nargs
+    mov r13, 1                     ; index = 1
 
-    mov r14, [rbx]                 ; args[0] payload = current max
+    mov r14, [rbx]                 ; args[0] payload = current best
     mov rax, [rbx + 8]            ; args[0] tag (64-bit)
-    mov [rsp + MAX_TAG], rax       ; max_tag
-    cmp rax, TAG_PTR
-    jne .max_loop                  ; non-refcounted (SmallInt/Float/Bool/None/SmallStr): no INCREF
-    inc qword [r14 + PyObject.ob_refcnt]
+    mov [rbp - MM_TAG], rax
+    INCREF_VAL r14, rax
 
-.max_loop:
+.mm_loop:
     cmp r13, r12
-    jge .max_done
+    jge .mm_done
 
     mov rax, r13
-    shl rax, 4                    ; rax = index * 16 (16-byte stride)
+    shl rax, 4
     mov r15, [rbx + rax]          ; candidate payload
-    mov rcx, [rbx + rax + 8]     ; candidate tag (64-bit)
+    mov rcx, [rbx + rax + 8]     ; candidate tag
 
     ; SmallInt fast path: both SmallInt?
-    cmp qword [rsp + MAX_TAG], TAG_SMALLINT
-    jne .max_slow_compare
+    cmp qword [rbp - MM_TAG], TAG_SMALLINT
+    jne .mm_slow
     cmp rcx, TAG_SMALLINT
-    jne .max_slow_compare
-
-    ; Both SmallInts: compare directly
+    jne .mm_slow
+    ; For min (PY_LT=0): update if candidate < best
+    ; For max (PY_GT=4): update if candidate > best
+    cmp dword [rbp - MM_CMP_OP], 0
+    jne .mm_si_max
     cmp r15, r14
-    jle .max_no_update
-    mov r14, r15                   ; update max (both SmallInt, no refcount)
-    jmp .max_no_update
+    jge .mm_no_update
+    mov r14, r15
+    jmp .mm_no_update
+.mm_si_max:
+    cmp r15, r14
+    jle .mm_no_update
+    mov r14, r15
+    jmp .mm_no_update
 
-.max_slow_compare:
-    ; Use tp_richcompare(current_max, args[i], PY_LT)
-    cmp qword [rsp + MAX_TAG], TAG_SMALLINT
-    je .max_try_rhs                ; max is SmallInt, try candidate's richcompare
-
-    ; SmallStr? (bit 63 set)
-    bt qword [rsp + MAX_TAG], 63
-    jc .max_lhs_smallstr
-
-    ; Must be TAG_PTR to dereference ob_type
-    cmp qword [rsp + MAX_TAG], TAG_PTR
-    jne .max_try_lhs_float
-    mov rdi, r14
-    mov rax, [rdi + PyObject.ob_type]
-    jmp .max_have_type
-.max_lhs_smallstr:
-    extern str_type
-    lea rax, [rel str_type]
-    jmp .max_have_type
-.max_try_lhs_float:
-    cmp qword [rsp + MAX_TAG], TAG_FLOAT
-    jne .max_try_rhs               ; Bool/None: try RHS
-    mov rdi, r14
-    lea rax, [rel float_type]
-.max_have_type:
-    mov rax, [rax + PyTypeObject.tp_richcompare]
-    test rax, rax
-    jz .max_no_update
-
-    ; Call tp_richcompare(left, right, PY_LT, left_tag, right_tag)
-    mov rdi, r14
-    mov rsi, r15
-    xor edx, edx               ; PY_LT = 0
-    mov rcx, [rsp + MAX_TAG]   ; left_tag
-    push rax                    ; save fn ptr
-    mov rax, r13
-    shl rax, 4
-    mov r8, [rbx + rax + 8]    ; right_tag
-    pop rax                     ; restore fn ptr
-    call rax
-    jmp .max_check_result
-
-.max_try_rhs:
-    mov rax, r13
-    shl rax, 4
-    mov rcx, [rbx + rax + 8]     ; reload candidate tag (64-bit)
-    cmp rcx, TAG_SMALLINT
-    je .max_no_update              ; both SmallInt would have been caught above
-
-    ; SmallStr? (bit 63 set)
-    test rcx, rcx
-    js .max_rhs_smallstr
-
-    cmp rcx, TAG_PTR
-    jne .max_try_rhs_float
-    mov rdi, r15
-    mov rax, [rdi + PyObject.ob_type]
-    jmp .max_rhs_have_type
-.max_rhs_smallstr:
-    lea rax, [rel str_type]
-    jmp .max_rhs_have_type
-.max_try_rhs_float:
-    cmp rcx, TAG_FLOAT
-    jne .max_no_update             ; Bool/None: skip
-    mov rdi, r15
-    lea rax, [rel float_type]
-.max_rhs_have_type:
+.mm_slow:
+    ; Resolve candidate type for richcompare
     mov r8, rcx                    ; save candidate tag
+    test rcx, rcx
+    js .mm_cand_ss
+    cmp rcx, TAG_PTR
+    jne .mm_try_float
+    mov rdi, r15
+    mov rax, [rdi + PyObject.ob_type]
+    jmp .mm_have_type
+.mm_cand_ss:
+    lea rax, [rel str_type]
+    jmp .mm_have_type
+.mm_try_float:
+    cmp rcx, TAG_FLOAT
+    jne .mm_no_update
+    lea rax, [rel float_type]
+.mm_have_type:
     mov rcx, [rax + PyTypeObject.tp_richcompare]
     test rcx, rcx
-    jz .max_no_update
+    jz .mm_no_update
 
-    mov rdi, r15                   ; left = candidate
-    mov rsi, r14                   ; right = current max
-    mov edx, PY_GT
-    mov rax, rcx                   ; fn ptr -> rax
+    ; tp_richcompare(candidate, best, cmp_op, cand_tag, best_tag)
+    mov rdi, r15
+    mov rsi, r14
+    mov edx, [rbp - MM_CMP_OP]
+    mov rax, rcx                   ; fn ptr
     mov rcx, r8                    ; left_tag = candidate tag
-    mov r8, [rsp + MAX_TAG]        ; right_tag = max tag
+    mov r8, [rbp - MM_TAG]         ; right_tag = best tag
     call rax
 
-.max_check_result:
     lea rcx, [rel bool_true]
     cmp rax, rcx
-    mov [rsp + MAX_CMP_RES], rax
-    jne .max_slow_no_update
+    mov [rbp - MM_CMP_RES], rax
+    jne .mm_slow_no_upd
 
-    ; Update max: DECREF old max
+    ; Update best: DECREF old, set new = candidate
     mov rdi, r14
-    mov rsi, [rsp + MAX_TAG]
+    mov rsi, [rbp - MM_TAG]
     DECREF_VAL rdi, rsi
-    ; Set new max = candidate
     mov r14, r15
     mov rax, r13
     shl rax, 4
-    mov rax, [rbx + rax + 8]     ; reload candidate tag (64-bit)
-    mov [rsp + MAX_TAG], rax      ; update max_tag
-    cmp rax, TAG_PTR
-    jne .max_slow_update_done     ; non-refcounted (SmallStr/SmallInt/Float): no INCREF
-    inc qword [r14 + PyObject.ob_refcnt]
-.max_slow_update_done:
-    ; DECREF richcompare result (always a heap ptr)
-    mov rdi, [rsp + MAX_CMP_RES]
-    call obj_decref
-    jmp .max_no_update
+    mov rax, [rbx + rax + 8]
+    mov [rbp - MM_TAG], rax
+    INCREF_VAL r14, rax
 
-.max_slow_no_update:
-    mov rdi, [rsp + MAX_CMP_RES]
+    mov rdi, [rbp - MM_CMP_RES]
+    call obj_decref
+    jmp .mm_no_update
+
+.mm_slow_no_upd:
+    mov rdi, [rbp - MM_CMP_RES]
     call obj_decref
 
-.max_no_update:
+.mm_no_update:
     inc r13
-    jmp .max_loop
+    jmp .mm_loop
 
-.max_done:
+.mm_done:
     mov rax, r14
-    mov rdx, [rsp + MAX_TAG]       ; max_tag (64-bit)
-    add rsp, 16
+    mov rdx, [rbp - MM_TAG]
     pop r15
     pop r14
     pop r13
@@ -2490,11 +2347,147 @@ DEF_FUNC builtin_max
     leave
     ret
 
-.max_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "max expected at least 1 argument"
+    ; --- Iterator path: min/max(iterable) ---
+.mm_iter_path:
+    ; Get iterator from args[0]
+    cmp qword [rdi + 8], TAG_PTR
+    jne .mm_iter_type_error
+    mov rdi, [rdi]                     ; iterable
+    mov rax, [rdi + PyObject.ob_type]
+    mov rcx, [rax + PyTypeObject.tp_iter]
+    test rcx, rcx
+    jz .mm_iter_type_error
+    call rcx
+    test rax, rax
+    jz .mm_iter_type_error
+    mov [rbp - MM_ITER], rax
+    mov rbx, [rax + PyObject.ob_type]
+    mov rbx, [rbx + PyTypeObject.tp_iternext]
+    mov [rbp - MM_ITERNX], rbx
+
+    ; Get first element → initial best
+    mov rdi, [rbp - MM_ITER]
+    call rbx
+    test edx, edx
+    jz .mm_iter_empty
+
+    mov r14, rax                       ; best payload
+    mov [rbp - MM_TAG], rdx            ; best tag
+    INCREF_VAL r14, rdx
+    DECREF_VAL rax, rdx                ; DECREF iternext result
+
+.mm_iter_loop:
+    mov rdi, [rbp - MM_ITER]
+    call qword [rbp - MM_ITERNX]
+    test edx, edx
+    jz .mm_iter_done
+
+    mov r15, rax                       ; candidate payload
+    mov r12, rdx                       ; candidate tag
+
+    ; SmallInt fast path
+    cmp qword [rbp - MM_TAG], TAG_SMALLINT
+    jne .mm_iter_slow
+    cmp r12, TAG_SMALLINT
+    jne .mm_iter_slow
+    cmp dword [rbp - MM_CMP_OP], 0
+    jne .mm_iter_si_max
+    cmp r15, r14
+    jge .mm_iter_no_update
+    mov r14, r15
+    jmp .mm_iter_no_update
+.mm_iter_si_max:
+    cmp r15, r14
+    jle .mm_iter_no_update
+    mov r14, r15
+    jmp .mm_iter_no_update
+
+.mm_iter_slow:
+    ; Resolve candidate type for richcompare
+    mov rcx, r12
+    test rcx, rcx
+    js .mm_iter_cand_ss
+    cmp rcx, TAG_PTR
+    jne .mm_iter_try_float
+    mov rdi, r15
+    mov rax, [rdi + PyObject.ob_type]
+    jmp .mm_iter_have_type
+.mm_iter_cand_ss:
+    lea rax, [rel str_type]
+    jmp .mm_iter_have_type
+.mm_iter_try_float:
+    cmp rcx, TAG_FLOAT
+    jne .mm_iter_no_update
+    lea rax, [rel float_type]
+.mm_iter_have_type:
+    mov rax, [rax + PyTypeObject.tp_richcompare]
+    test rax, rax
+    jz .mm_iter_no_update
+
+    ; tp_richcompare(candidate, best, cmp_op, cand_tag, best_tag)
+    mov rdi, r15
+    mov rsi, r14
+    mov edx, [rbp - MM_CMP_OP]
+    mov rcx, r12
+    mov r8, [rbp - MM_TAG]
+    call rax
+
+    lea rcx, [rel bool_true]
+    cmp rax, rcx
+    mov [rbp - MM_CMP_RES], rax
+    jne .mm_iter_slow_no_upd
+
+    ; Update best
+    mov rdi, r14
+    mov rsi, [rbp - MM_TAG]
+    DECREF_VAL rdi, rsi
+    mov r14, r15
+    mov [rbp - MM_TAG], r12
+    INCREF_VAL r14, r12
+
+    mov rdi, [rbp - MM_CMP_RES]
+    call obj_decref
+    jmp .mm_iter_no_update
+
+.mm_iter_slow_no_upd:
+    mov rdi, [rbp - MM_CMP_RES]
+    call obj_decref
+
+.mm_iter_no_update:
+    ; DECREF candidate
+    DECREF_VAL r15, r12
+    jmp .mm_iter_loop
+
+.mm_iter_done:
+    mov rdi, [rbp - MM_ITER]
+    call obj_decref
+    mov rax, r14
+    mov rdx, [rbp - MM_TAG]
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.mm_iter_empty:
+    mov rdi, [rbp - MM_ITER]
+    call obj_decref
+    lea rdi, [rel exc_ValueError_type]
+    CSTRING rsi, "min()/max() arg is an empty sequence"
     call raise_exception
-END_FUNC builtin_max
+
+.mm_iter_type_error:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "argument is not iterable"
+    call raise_exception
+
+.mm_error:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "min()/max() expected at least 1 argument"
+    call raise_exception
+END_FUNC minmax_impl
 
 ; ============================================================================
 ; 17. builtin_getattr(args, nargs) - getattr(obj, name[, default])

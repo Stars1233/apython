@@ -263,7 +263,18 @@ DEF_FUNC_BARE op_binary_op
     ; If inplace slot was NULL, fall back to non-inplace slot
     cmp r9d, 13
     jl .binop_try_dunder        ; not inplace, no fallback
-    ; Reload type's tp_as_number (may have been clobbered)
+    ; Map inplace op to non-inplace offset
+    mov ecx, r9d
+    sub ecx, 13                 ; inplace → base op
+    lea rdx, [rel binary_op_offsets]
+    mov rdx, [rdx + rcx*8]     ; non-inplace offset
+    ; Float coercion: if either operand is float, use float_number_methods
+    ; (mirrors the initial float coercion at .use_float_methods)
+    cmp qword [rsp + BO_LTAG], TAG_FLOAT
+    je .binop_fallback_float
+    cmp qword [rsp + BO_RTAG], TAG_FLOAT
+    je .binop_fallback_float
+    ; Reload type's tp_as_number
     cmp qword [rsp + BO_LTAG], TAG_SMALLINT
     je .binop_fallback_int
     cmp qword [rsp + BO_LTAG], TAG_BOOL
@@ -274,6 +285,9 @@ DEF_FUNC_BARE op_binary_op
     jz .binop_try_dunder
     mov rax, [rdi + PyObject.ob_type]
     jmp .binop_fallback_have_type
+.binop_fallback_float:
+    lea rax, [rel float_number_methods]
+    jmp .binop_fallback_have_methods
 .binop_fallback_int:
     lea rax, [rel int_type]
     jmp .binop_fallback_have_type
@@ -281,13 +295,9 @@ DEF_FUNC_BARE op_binary_op
     lea rax, [rel str_type]
 .binop_fallback_have_type:
     mov rax, [rax + PyTypeObject.tp_as_number]
+.binop_fallback_have_methods:
     test rax, rax
     jz .binop_try_dunder
-    ; Map inplace op to non-inplace offset
-    mov ecx, r9d
-    sub ecx, 13                 ; inplace → base op
-    lea rdx, [rel binary_op_offsets]
-    mov rdx, [rdx + rcx*8]     ; non-inplace offset
     mov rax, [rax + rdx]
     test rax, rax
     jz .binop_try_dunder

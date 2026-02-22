@@ -312,9 +312,10 @@ DEF_FUNC_LOCAL set_find_slot
     mov rsi, r12                        ; b = lookup key
     mov rcx, [rbp - SFS_KEY_TAG]        ; b_tag (lookup key tag, 64-bit)
     call set_keys_equal
+    mov edi, eax                ; save equality result (survives pops)
     pop rax                     ; entry ptr
     pop rcx                     ; slot
-    test eax, eax
+    test edi, edi
     jnz .found_existing
 
 .find_next:
