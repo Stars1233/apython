@@ -21,6 +21,7 @@ extern exc_IndexError_type
 extern obj_incref
 extern slice_type
 extern slice_indices
+extern ap_memcpy
 extern type_type
 extern gc_untrack
 extern tuple_traverse
@@ -401,6 +402,48 @@ DEF_FUNC tuple_getslice
     mov [rbp-48], rax          ; new tuple
 
     ; Fill items (payload + tag arrays)
+    ; Fast path: step == 1 → contiguous memcpy + bulk INCREF
+    cmp r15, 1
+    jne .tgs_loop_start
+
+    ; Copy payloads (contiguous)
+    mov rsi, [rbx + PyTupleObject.ob_item]
+    mov rax, r13
+    shl rax, 3
+    add rsi, rax              ; src payloads + start*8
+    mov rdi, [rbp-48]
+    mov rdi, [rdi + PyTupleObject.ob_item]  ; dst payloads
+    mov rdx, [rbp-56]         ; slicelength
+    shl rdx, 3
+    call ap_memcpy
+
+    ; Copy tags
+    mov rsi, [rbx + PyTupleObject.ob_item_tags]
+    add rsi, r13              ; src tags + start
+    mov rdi, [rbp-48]
+    mov rdi, [rdi + PyTupleObject.ob_item_tags] ; dst tags
+    mov rdx, [rbp-56]         ; slicelength (bytes)
+    call ap_memcpy
+
+    ; Bulk INCREF all copied elements
+    mov rcx, [rbp-56]         ; slicelength
+    test rcx, rcx
+    jz .tgs_done
+    mov rdi, [rbp-48]
+    mov rdi, [rdi + PyTupleObject.ob_item]       ; payloads
+    mov rsi, [rbp-48]
+    mov rsi, [rsi + PyTupleObject.ob_item_tags]  ; tags
+    xor edx, edx
+.tgs_incref_loop:
+    cmp rdx, rcx
+    jge .tgs_done
+    mov r8, [rdi + rdx * 8]       ; payload
+    movzx r9d, byte [rsi + rdx]   ; tag
+    INCREF_VAL r8, r9
+    inc rdx
+    jmp .tgs_incref_loop
+
+.tgs_loop_start:
     xor ecx, ecx
 .tgs_loop:
     cmp rcx, [rbp-56]

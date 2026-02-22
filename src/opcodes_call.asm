@@ -4,7 +4,7 @@
 ;   rbx = bytecode instruction pointer (current position in co_code[])
 ;   r12 = current frame pointer (PyFrame*)
 ;   r13 = value stack payload top pointer
-;   r14 = co_consts payload pointer (&tuple.ob_item[0])
+;   r14 = locals_tag_base pointer (frame's tag sidecar for localsplus[])
 ;   r15 = value stack tag top pointer
 ;
 ; ecx = opcode argument on entry (set by eval_dispatch)
@@ -256,24 +256,21 @@ DEF_FUNC op_call, CL_FRAME
     shl rax, 4                             ; total_nargs * 16
     sub rsp, rax
     mov [rbp - CL_SAVED_RSP], rsp
-    mov r8, rsp                            ; args_ptr
-    mov r9, rcx                            ; depth = total_nargs
-    xor r10d, r10d                         ; index = 0
+    mov r8, rsp                            ; dst ptr (fat args)
+    ; Pre-compute source base pointers (deepest arg = total_nargs below TOS)
+    mov rax, rcx
+    neg rax
+    lea r9, [r13 + rax*8]                  ; src payload start (deepest arg)
+    lea r10, [r15 + rax]                   ; src tag start (deepest arg)
 .copy_loop:
-    mov r11, r9
-    shl r11, 3                             ; depth * 8
-    mov rax, r13
-    sub rax, r11
-    mov rax, [rax]                         ; payload slot at depth
-    mov r11, r15
-    sub r11, r9                            ; tag slot at depth
-    movzx edx, byte [r11]
-    mov r11, r10
-    shl r11, 4
-    mov [r8 + r11], rax
-    mov [r8 + r11 + 8], rdx
+    mov rax, [r9]
+    movzx edx, byte [r10]
+    mov [r8], rax
+    mov [r8 + 8], rdx
+    add r9, 8
     inc r10
-    dec r9
+    add r8, 16
+    dec ecx
     jnz .copy_loop
 .args_ready:
     mov rdi, [rbp - CL_CALLABLE]           ; callable

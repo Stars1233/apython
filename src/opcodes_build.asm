@@ -4,7 +4,7 @@
 ;   rbx = bytecode instruction pointer (current position in co_code[])
 ;   r12 = current frame pointer (PyFrame*)
 ;   r13 = value stack payload top pointer
-;   r14 = co_consts payload pointer (&tuple.ob_item[0])
+;   r14 = locals_tag_base pointer (frame's tag sidecar for localsplus[])
 ;   r15 = value stack tag top pointer
 ;
 ; ecx = opcode argument on entry (set by eval_dispatch)
@@ -22,6 +22,7 @@ extern eval_dispatch
 extern eval_saved_rbx
 extern eval_saved_r13
 extern eval_saved_r15
+extern eval_co_consts
 extern trace_opcodes
 extern opcode_table
 extern obj_dealloc
@@ -733,43 +734,36 @@ DEF_FUNC_BARE op_unpack_sequence
     ; Items are in payload/tag arrays
     mov rsi, [rdi + PyTupleObject.ob_item]
     mov r8, [rdi + PyTupleObject.ob_item_tags]
-    mov edx, ecx              ; edx = count
-    dec edx
-.unpack_tuple_loop:
-    test edx, edx
-    js .unpack_done
-    mov eax, edx               ; zero-extend edx to rax
-    mov rax, [rsi + rax * 8]   ; payload
-    movzx ecx, byte [r8 + rdx] ; tag
-    INCREF_VAL rax, rcx
-    push rdx
-    push rdi
-    VPUSH_VAL rax, rcx
-    pop rdi
-    pop rdx
-    dec edx
-    jmp .unpack_tuple_loop
+    jmp .unpack_fill
 
 .unpack_list:
     ; Items in payload/tag arrays
     mov rsi, [rdi + PyListObject.ob_item]
     mov r8, [rdi + PyListObject.ob_item_tags]
+
+.unpack_fill:
+    ; Pre-advance stack by count (ecx)
     mov edx, ecx
-    dec edx
-.unpack_list_loop:
+    shl edx, 3
+    add r13, rdx              ; payload stack += count * 8
+    add r15, rcx              ; tag stack += count
+    ; r10 = negative offset from pre-advanced pointers, starts at -count
+    mov r10, rcx
+    neg r10
+    mov edx, ecx
+    dec edx                    ; edx = source index (count-1 down to 0)
+.unpack_fill_loop:
     test edx, edx
     js .unpack_done
-    mov eax, edx               ; zero-extend edx to rax
-    mov rax, [rsi + rax * 8]   ; payload
-    movzx ecx, byte [r8 + rdx] ; tag
-    INCREF_VAL rax, rcx
-    push rdx
-    push rsi
-    VPUSH_VAL rax, rcx
-    pop rsi
-    pop rdx
+    mov eax, edx
+    mov rax, [rsi + rax * 8]  ; payload = items[edx]
+    movzx r9d, byte [r8 + rdx] ; tag = tags[edx]
+    INCREF_VAL rax, r9
+    mov [r13 + r10*8], rax
+    mov byte [r15 + r10], r9b
+    inc r10
     dec edx
-    jmp .unpack_list_loop
+    jmp .unpack_fill_loop
 
 .unpack_done:
     ; DECREF the sequence (payload + tag)
@@ -2014,7 +2008,8 @@ extern kw_names_pending
 
 DEF_FUNC_BARE op_kw_names
     ; ecx = arg (index into co_consts)
-    mov rax, [r14 + rcx * 8]   ; payload (tuple ptr for kw_names)
+    mov rax, [rel eval_co_consts]
+    mov rax, [rax + rcx * 8]   ; payload (tuple ptr for kw_names)
     mov [rel kw_names_pending], rax
     DISPATCH
 END_FUNC op_kw_names

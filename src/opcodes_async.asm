@@ -7,7 +7,7 @@
 ;   rbx = bytecode instruction pointer (IP into co_code[])
 ;   r12 = current frame pointer (PyFrame*)
 ;   r13 = value stack payload top pointer
-;   r14 = co_consts payload pointer (&tuple.ob_item[0])
+;   r14 = locals_tag_base pointer (frame's tag sidecar for localsplus[])
 ;   r15 = value stack tag top pointer
 ;
 ; ecx = opcode argument on handler entry (set by eval_dispatch)

@@ -626,24 +626,43 @@ DEF_FUNC list_ass_subscript, LAS_FRAME
 
 .las_copy_new:
     ; 3. Copy new items into [start..start+new_len), INCREF each
-    xor ecx, ecx          ; i = 0
-.las_insert_loop:
-    cmp rcx, r8            ; i < new_len?
+    test r8, r8
+    jz .las_insert_done
+
+    ; Bulk memcpy payloads: dst = list.ob_item + start*8, src = r9, len = new_len*8
+    push r8                   ; save new_len [rsp+16]
+    push r9                   ; save new_payload_ptr [rsp+8]
+    push r10                  ; save new_tag_ptr [rsp+0]
+    mov rdi, [rbx + PyListObject.ob_item]
+    mov rax, r13
+    shl rax, 3
+    add rdi, rax              ; dst = ob_item + start*8
+    mov rsi, r9               ; src = new payloads ptr
+    mov rdx, r8
+    shl rdx, 3
+    call ap_memcpy
+    ; Bulk memcpy tags: dst = list.ob_item_tags + start, src = r10, len = new_len
+    mov r10, [rsp]            ; restore new_tag_ptr (don't pop yet)
+    mov r8, [rsp + 16]       ; restore new_len
+    mov rdi, [rbx + PyListObject.ob_item_tags]
+    add rdi, r13              ; dst = ob_item_tags + start
+    mov rsi, r10              ; src = new tags ptr
+    mov rdx, r8               ; len = new_len
+    call ap_memcpy
+    ; Restore all saved values for INCREF loop
+    pop r10                   ; new_tag_ptr
+    pop r9                    ; new_payload_ptr
+    pop r8                    ; new_len
+    ; Bulk INCREF all new items
+    xor ecx, ecx
+.las_incref_loop:
+    cmp rcx, r8
     jge .las_insert_done
-    push rcx
-    ; Load payload/tag from source arrays
-    mov r11, [r9 + rcx * 8]        ; payload
-    movzx eax, byte [r10 + rcx]    ; tag
-    INCREF_VAL r11, rax
-    mov rdx, [rbx + PyListObject.ob_item]
-    mov rsi, [rbx + PyListObject.ob_item_tags]
-    mov rdi, r13
-    add rdi, rcx                   ; start + i
-    mov [rdx + rdi * 8], r11       ; payload
-    mov byte [rsi + rdi], al       ; tag
-    pop rcx
+    mov rdi, [r9 + rcx * 8]
+    movzx eax, byte [r10 + rcx]
+    INCREF_VAL rdi, rax
     inc rcx
-    jmp .las_insert_loop
+    jmp .las_incref_loop
 
 .las_insert_done:
     ; DECREF temp list if generic iterable path created one
@@ -1159,7 +1178,87 @@ DEF_FUNC list_getslice
 
     ; Fast path: step == 1 → contiguous memcpy + bulk INCREF
     cmp r15, 1
-    jne .lgs_loop_start
+    je .lgs_memcpy_fwd
+    ; Fast path: step == -1 → contiguous memcpy + reverse + bulk INCREF
+    cmp r15, -1
+    je .lgs_reversed
+    jmp .lgs_loop_start
+
+.lgs_reversed:
+    ; For step=-1: source is contiguous [stop+1 .. start] (slicelength elements)
+    ; Copy forward, then reverse in place
+    mov rax, r14               ; stop
+    inc rax                    ; stop+1 = source start index
+    ; Copy payloads
+    mov rsi, [rbx + PyListObject.ob_item]
+    mov rcx, rax
+    shl rcx, 3
+    add rsi, rcx              ; src payloads + (stop+1)*8
+    mov rdi, [rsp]            ; new list
+    mov rdi, [rdi + PyListObject.ob_item]  ; dst payloads
+    push rax                   ; save source start index
+    mov rdx, [rsp + 16]       ; slicelength (rsp+8=saved_idx, rsp+16=slicelength)
+    shl rdx, 3
+    call ap_memcpy
+
+    ; Copy tags
+    pop rax                    ; restore source start index
+    mov rsi, [rbx + PyListObject.ob_item_tags]
+    add rsi, rax              ; src tags + (stop+1)
+    mov rdi, [rsp]            ; new list
+    mov rdi, [rdi + PyListObject.ob_item_tags] ; dst tags
+    mov rdx, [rsp + 8]        ; slicelength (bytes)
+    call ap_memcpy
+
+    ; Reverse payloads in place (lo/hi swap loop)
+    mov rcx, [rsp + 8]        ; slicelength
+    cmp rcx, 2
+    jl .lgs_rev_tags           ; 0 or 1 elements, no swap needed
+    mov rdi, [rsp]             ; new list
+    mov rdi, [rdi + PyListObject.ob_item]  ; payload array
+    mov rsi, rcx
+    dec rsi
+    shl rsi, 3
+    add rsi, rdi               ; rsi = &payloads[slicelength-1]
+    ; rdi = lo, rsi = hi
+.lgs_rev_payload_loop:
+    cmp rdi, rsi
+    jge .lgs_rev_tags
+    mov rax, [rdi]
+    mov rdx, [rsi]
+    mov [rdi], rdx
+    mov [rsi], rax
+    add rdi, 8
+    sub rsi, 8
+    jmp .lgs_rev_payload_loop
+
+.lgs_rev_tags:
+    ; Reverse tags in place
+    mov rcx, [rsp + 8]        ; slicelength
+    cmp rcx, 2
+    jl .lgs_rev_done
+    mov rdi, [rsp]             ; new list
+    mov rdi, [rdi + PyListObject.ob_item_tags] ; tag array
+    mov rsi, rcx
+    dec rsi
+    add rsi, rdi               ; rsi = &tags[slicelength-1]
+    ; rdi = lo, rsi = hi
+.lgs_rev_tag_loop:
+    cmp rdi, rsi
+    jge .lgs_rev_done
+    mov al, [rdi]
+    mov dl, [rsi]
+    mov [rdi], dl
+    mov [rsi], al
+    inc rdi
+    dec rsi
+    jmp .lgs_rev_tag_loop
+
+.lgs_rev_done:
+    ; Bulk INCREF (reuse common path)
+    jmp .lgs_incref_start
+
+.lgs_memcpy_fwd:
     ; Copy payloads (contiguous)
     mov rsi, [rbx + PyListObject.ob_item]
     mov rax, r13
@@ -1180,6 +1279,7 @@ DEF_FUNC list_getslice
     mov rdx, [rsp + 8]        ; slicelength (bytes)
     call ap_memcpy
     ; Bulk INCREF all copied elements
+.lgs_incref_start:
     mov rcx, [rsp + 8]        ; slicelength
     test rcx, rcx
     jz .lgs_done

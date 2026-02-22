@@ -142,8 +142,6 @@
     mov [rel eval_saved_rbx], rbx  ; save bytecode IP for exception unwind
     mov [rel eval_saved_r13], r13  ; save value stack ptr for exception unwind
     mov [rel eval_saved_r15], r15  ; save tag stack ptr for exception unwind
-    cmp byte [rel trace_opcodes], 0
-    jnz eval_dispatch              ; cold: centralized trace handler
     movzx eax, byte [rbx]         ; load opcode
     movzx ecx, byte [rbx+1]      ; load arg into ecx
     add rbx, 2                     ; advance past instruction word

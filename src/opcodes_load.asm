@@ -4,7 +4,7 @@
 ;   rbx = bytecode instruction pointer (current position in co_code[])
 ;   r12 = current frame pointer (PyFrame*)
 ;   r13 = value stack payload top pointer
-;   r14 = co_consts payload pointer (&tuple.ob_item[0])
+;   r14 = locals_tag_base pointer (frame's tag sidecar for localsplus[])
 ;   r15 = value stack tag top pointer
 ;
 ; ecx = opcode argument on entry (set by eval_dispatch)
@@ -23,6 +23,7 @@ extern eval_saved_rbx
 extern eval_saved_r13
 extern eval_saved_r15
 extern eval_co_names
+extern eval_co_consts
 extern eval_co_consts_tags
 extern trace_opcodes
 extern opcode_table
@@ -79,7 +80,8 @@ LSA_FRAME    equ 48
 ;; ============================================================================
 DEF_FUNC_BARE op_load_const
     ; ecx = arg (index into co_consts)
-    mov rax, [r14 + rcx * 8]   ; payload
+    mov rax, [rel eval_co_consts]
+    mov rax, [rax + rcx * 8]   ; payload
     mov rdx, [rel eval_co_consts_tags]
     movzx edx, byte [rdx + rcx] ; tag
     INCREF_VAL rax, rdx
@@ -93,8 +95,7 @@ END_FUNC op_load_const
 DEF_FUNC_BARE op_load_fast
     ; ecx = arg (slot index in localsplus)
     mov rax, [r12 + PyFrame.localsplus + rcx*8]       ; payload
-    mov rsi, [r12 + PyFrame.locals_tag_base]
-    movzx rdx, byte [rsi + rcx]                       ; tag
+    movzx rdx, byte [r14 + rcx]                       ; tag (r14 = locals_tag_base)
     INCREF_VAL rax, rdx     ; tag-aware INCREF
     VPUSH_VAL rax, rdx
     DISPATCH
@@ -927,8 +928,7 @@ END_FUNC op_load_attr_method
 ;; ============================================================================
 DEF_FUNC_BARE op_load_closure
     mov rax, [r12 + PyFrame.localsplus + rcx*8]       ; payload
-    mov rsi, [r12 + PyFrame.locals_tag_base]
-    movzx rdx, byte [rsi + rcx]                       ; tag
+    movzx rdx, byte [r14 + rcx]                       ; tag (r14 = locals_tag_base)
     INCREF_VAL rax, rdx     ; tag-aware INCREF
     VPUSH_VAL rax, rdx
     DISPATCH
@@ -965,11 +965,10 @@ END_FUNC op_load_deref
 ;; Used after DELETE_FAST and in exception handlers.
 ;; ============================================================================
 DEF_FUNC_BARE op_load_fast_check
-    mov rsi, [r12 + PyFrame.locals_tag_base]
-    cmp byte [rsi + rcx], 0  ; check tag for TAG_NULL
+    cmp byte [r14 + rcx], 0  ; check tag for TAG_NULL (r14 = locals_tag_base)
     je .lfc_error
     mov rax, [r12 + PyFrame.localsplus + rcx*8]       ; payload
-    movzx rdx, byte [rsi + rcx]                       ; tag
+    movzx rdx, byte [r14 + rcx]                       ; tag
     INCREF_VAL rax, rdx     ; tag-aware INCREF
     VPUSH_VAL rax, rdx
     DISPATCH
@@ -988,10 +987,9 @@ END_FUNC op_load_fast_check
 ;; ============================================================================
 DEF_FUNC_BARE op_load_fast_and_clear
     mov rax, [r12 + PyFrame.localsplus + rcx*8]       ; payload (may be NULL)
-    mov rsi, [r12 + PyFrame.locals_tag_base]
-    movzx rdx, byte [rsi + rcx]                       ; tag
+    movzx rdx, byte [r14 + rcx]                       ; tag (r14 = locals_tag_base)
     mov qword [r12 + PyFrame.localsplus + rcx*8], 0   ; clear payload
-    mov byte [rsi + rcx], 0                           ; clear tag
+    mov byte [r14 + rcx], 0                           ; clear tag
     ; Push with preserved tag - no INCREF needed (transferring ownership)
     VPUSH_VAL rax, rdx
     DISPATCH

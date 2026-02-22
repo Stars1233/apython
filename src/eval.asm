@@ -189,10 +189,10 @@ DEF_FUNC eval_frame
     mov r15, [r12 + PyFrame.stack_tag_ptr]
 
 .eval_setup_consts:
-    ; r14 = co_consts payload array pointer, rdx = co_consts tags pointer
+    ; Derive co_consts payload + tags pointers
     mov r14, [rax + PyCodeObject.co_consts]
     mov rdx, [r14 + PyTupleObject.ob_item_tags]
-    mov r14, [r14 + PyTupleObject.ob_item]
+    mov r14, [r14 + PyTupleObject.ob_item]       ; co_consts payload ptr (→ global)
 
     ; rcx = co_names payload pointer, r8 = co_names tags pointer
     mov rcx, [rax + PyCodeObject.co_names]
@@ -214,13 +214,19 @@ DEF_FUNC eval_frame
     push rax
     mov rax, [rel eval_co_consts_tags]
     push rax
+    mov rax, [rel eval_co_consts]
+    push rax
     mov rax, [rel eval_base_rsp]
     push rax
 
     ; Set globals for this frame
+    mov [rel eval_co_consts], r14               ; co_consts payload → global
     mov [rel eval_co_consts_tags], rdx
     mov [rel eval_co_names_tags], r8
     mov [rel eval_co_names], rcx
+
+    ; r14 = locals_tag_base (hot: used by LOAD_FAST/STORE_FAST)
+    mov r14, [r12 + PyFrame.locals_tag_base]
 
     ; Set up for this frame
     mov [rel eval_saved_r12], r12
@@ -273,6 +279,8 @@ DEF_FUNC_BARE eval_return
     ; Use rcx as scratch — rdx holds return tag (fat value protocol)
     pop rcx
     mov [rel eval_base_rsp], rcx
+    pop rcx
+    mov [rel eval_co_consts], rcx
     pop rcx
     mov [rel eval_co_consts_tags], rcx
     pop rcx
@@ -425,7 +433,7 @@ DEF_FUNC_BARE eval_exception_unwind
     ; non-local jump to here bypasses the restore, leaving regs corrupted.
     ; rbx: use saved copy from eval_dispatch (pre-advance, points to instruction)
     ; r12: reload from frame pointer (saved in eval_frame_r12)
-    ; r14: re-derive from code object (co_consts)
+    ; r14: re-derive locals_tag_base from frame
     mov rbx, [rel eval_saved_rbx]   ; restore bytecode IP (pre-advance copy)
     mov r12, [rel eval_saved_r12]   ; restore frame pointer
     mov r13, [rel eval_saved_r13]   ; restore payload stack pointer
@@ -444,17 +452,20 @@ DEF_FUNC_BARE eval_exception_unwind
     mov [rdx + PyExceptionObject.exc_tb], rax  ; attach (transfer ownership)
 .skip_tb:
 
-    ; Re-derive r14/r15 from the code object
+    ; Re-derive globals + r14 from the code object
     mov rax, [r12 + PyFrame.code]
-    mov r14, [rax + PyCodeObject.co_consts]
-    mov rdx, [r14 + PyTupleObject.ob_item_tags]
-    mov r14, [r14 + PyTupleObject.ob_item]          ; consts payload array
+    mov rcx, [rax + PyCodeObject.co_consts]
+    mov rdx, [rcx + PyTupleObject.ob_item_tags]
+    mov rcx, [rcx + PyTupleObject.ob_item]          ; consts payload array
+    mov [rel eval_co_consts], rcx
     mov [rel eval_co_consts_tags], rdx
     mov rcx, [rax + PyCodeObject.co_names]
     mov r8, [rcx + PyTupleObject.ob_item_tags]
     mov rcx, [rcx + PyTupleObject.ob_item]
     mov [rel eval_co_names], rcx
     mov [rel eval_co_names_tags], r8
+    ; r14 = locals_tag_base (hot register)
+    mov r14, [r12 + PyFrame.locals_tag_base]
 
     ; Compute bytecode offset in instruction units (halfwords)
     ; eval_saved_rbx points to the instruction word (before add rbx, 2)
@@ -1526,6 +1537,8 @@ global eval_co_names
 eval_co_names: resq 1        ; co_names payload pointer (&tuple.ob_item[0])
 global eval_co_names_tags
 eval_co_names_tags: resq 1   ; co_names tag pointer (&tuple.ob_item_tags[0])
+global eval_co_consts
+eval_co_consts: resq 1       ; co_consts payload pointer (&tuple.ob_item[0])
 global eval_co_consts_tags
 eval_co_consts_tags: resq 1  ; co_consts tag pointer (&tuple.ob_item_tags[0])
 

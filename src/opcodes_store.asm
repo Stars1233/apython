@@ -4,7 +4,7 @@
 ;   rbx = bytecode instruction pointer (current position in co_code[])
 ;   r12 = current frame pointer (PyFrame*)
 ;   r13 = value stack payload top pointer
-;   r14 = co_consts payload pointer (&tuple.ob_item[0])
+;   r14 = locals_tag_base pointer (frame's tag sidecar for localsplus[])
 ;   r15 = value stack tag top pointer
 ;
 ; ecx = opcode argument on entry (set by eval_dispatch)
@@ -74,11 +74,10 @@ DS_FRAME  equ 32
 DEF_FUNC_BARE op_store_fast
     ; ecx = arg (slot index)
     VPOP_VAL rax, r8             ; rax = new value payload, r8 = new value tag
-    mov rsi, [r12 + PyFrame.locals_tag_base]
     mov rdi, [r12 + PyFrame.localsplus + rcx*8]       ; rdi = old value (payload)
-    movzx r9, byte [rsi + rcx]                        ; r9 = old value tag
+    movzx r9, byte [r14 + rcx]                        ; r9 = old value tag (r14 = locals_tag_base)
     mov [r12 + PyFrame.localsplus + rcx*8], rax       ; store new payload
-    mov byte [rsi + rcx], r8b                         ; store new tag
+    mov byte [r14 + rcx], r8b                         ; store new tag
     ; XDECREF_VAL old value (tag-aware)
     XDECREF_VAL rdi, r9
     DISPATCH
@@ -351,11 +350,9 @@ END_FUNC op_delete_deref
 ;; ============================================================================
 DEF_FUNC_BARE op_delete_fast
     mov rdi, [r12 + PyFrame.localsplus + rcx*8]       ; old value (payload)
-    mov rsi, [r12 + PyFrame.locals_tag_base]
-    movzx rsi, byte [rsi + rcx]                       ; old value tag
+    movzx rsi, byte [r14 + rcx]                       ; old value tag (r14 = locals_tag_base)
     mov qword [r12 + PyFrame.localsplus + rcx*8], 0   ; clear payload
-    mov rdx, [r12 + PyFrame.locals_tag_base]
-    mov byte [rdx + rcx], 0                           ; clear tag
+    mov byte [r14 + rcx], 0                           ; clear tag
     XDECREF_VAL rdi, rsi
     DISPATCH
 END_FUNC op_delete_fast
