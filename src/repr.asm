@@ -12,6 +12,13 @@
 %include "types.inc"
 
 
+; Set entry layout (must match set.asm)
+SET_ENTRY_HASH    equ 0
+SET_ENTRY_KEY     equ 8
+SET_ENTRY_KEY_TAG equ 16
+SET_ENTRY_SIZE    equ 24
+SET_TOMBSTONE     equ 0xDEAD
+
 extern ap_malloc
 extern ap_free
 extern ap_realloc
@@ -455,14 +462,14 @@ DEF_FUNC set_repr, 24
     cmp r12, r13
     jge .sr_done
 
-    ; SetEntry is 24 bytes: hash(8) + key(8) + key_tag(8)
+    ; SetEntry is SET_ENTRY_SIZE bytes: hash(8) + key(8) + key_tag(8)
     mov rax, [rbx + PyDictObject.entries]
-    imul rcx, r12, 24             ; index * SET_ENTRY_SIZE (24)
-    cmp qword [rax + rcx + 16], 0       ; key_tag == TAG_NULL → empty
+    imul rcx, r12, SET_ENTRY_SIZE
+    cmp qword [rax + rcx + SET_ENTRY_KEY_TAG], 0              ; empty
     je .sr_next
-    cmp qword [rax + rcx + 16], 0xDEAD  ; key_tag == TOMBSTONE → deleted
+    cmp qword [rax + rcx + SET_ENTRY_KEY_TAG], SET_TOMBSTONE  ; deleted
     je .sr_next
-    mov rdi, [rax + rcx + 8]            ; key payload (only if occupied)
+    mov rdi, [rax + rcx + SET_ENTRY_KEY]                      ; key payload
 
     ; Print separator if not first
     test r14, r14
