@@ -23,6 +23,35 @@ DEF_FUNC_BARE ap_memset
     ret
 END_FUNC ap_memset
 
+; ap_memmove(void *dst, const void *src, size_t n) -> void *dst
+; Handles overlapping regions. n must be a multiple of 8.
+; Forward: rep movsq (fast). Backward: manual qword loop (avoids std penalty).
+DEF_FUNC_BARE ap_memmove
+    mov rax, rdi            ; save dst for return
+    mov rcx, rdx
+    shr rcx, 3              ; qword count = n / 8
+    jz .memmove_done
+    cmp rdi, rsi
+    je .memmove_done        ; dst == src, nop
+    jb .memmove_fwd         ; dst < src: forward safe
+.memmove_bk:
+    ; dst > src: copy backward to avoid overlap corruption
+    lea rsi, [rsi + rdx - 8]
+    lea rdi, [rdi + rdx - 8]
+.memmove_bk_loop:
+    mov r8, [rsi]
+    mov [rdi], r8
+    sub rsi, 8
+    sub rdi, 8
+    dec rcx
+    jnz .memmove_bk_loop
+    ret
+.memmove_fwd:
+    rep movsq
+.memmove_done:
+    ret
+END_FUNC ap_memmove
+
 ; ap_memcmp(const void *s1, const void *s2, size_t n) -> int
 ; Returns 0 if equal, <0 if s1<s2, >0 if s1>s2
 DEF_FUNC_BARE ap_memcmp
