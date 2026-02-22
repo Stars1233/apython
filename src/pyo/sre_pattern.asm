@@ -614,10 +614,10 @@ DEF_FUNC sre_pattern_findall_method, FA_FRAME
     push rcx
     lea esi, [ecx - 1]
     movsx rsi, esi
-    shl rsi, 4                 ; * 16
-    add rsi, PyTupleObject.ob_item
-    mov [rbx + rsi], rax
-    mov [rbx + rsi + 8], rdx
+    mov r8, [rbx + PyTupleObject.ob_item]       ; payloads
+    mov r9, [rbx + PyTupleObject.ob_item_tags]  ; tags
+    mov [r8 + rsi*8], rax
+    mov byte [r9 + rsi], dl
 
     pop rcx
     inc ecx
@@ -1259,14 +1259,17 @@ DEF_FUNC sre_pattern_subn_method, SN_FRAME
     call tuple_new
     mov rbx, rax
 
+    mov r8, [rbx + PyTupleObject.ob_item]       ; payloads
+    mov r9, [rbx + PyTupleObject.ob_item_tags]  ; tags
+
     mov r12, [rbp - SN_RESULT]
     inc qword [r12 + PyObject.ob_refcnt]
-    mov [rbx + PyTupleObject.ob_item], r12
-    mov qword [rbx + PyTupleObject.ob_item + 8], TAG_PTR
+    mov [r8], r12
+    mov byte [r9], TAG_PTR
 
     mov rax, [rbp - SN_NSUBS]
-    mov [rbx + PyTupleObject.ob_item + 16], rax
-    mov qword [rbx + PyTupleObject.ob_item + 24], TAG_SMALLINT
+    mov [r8 + 8], rax
+    mov byte [r9 + 1], TAG_SMALLINT
 
     ; DECREF result string (tuple holds a ref)
     mov rdi, r12

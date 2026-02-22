@@ -31,12 +31,10 @@ GC_PREV_MASK            equ ~3    ; mask to extract prev pointer (clear low 2 bi
     lea %1, [%2 + GC_HEAD_SIZE]
 %endmacro
 
-; VISIT_FAT — call visit callback on a fat value slot if it's a heap pointer
+; VISIT_FAT — call visit callback on a value if it's a heap pointer
 ; r14 must be loaded with the visit callback function pointer before use
 ; rdi is set to the payload (object pointer) for the callback
 %macro VISIT_FAT 2                ; %1 = payload_reg, %2 = tag_reg (64-bit)
-    bt %2, 63
-    jc %%skip                     ; SmallStr — skip
     test %2, TAG_RC_BIT
     jz %%skip                     ; no RC bit — not a heap pointer
     test %1, %1

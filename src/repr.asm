@@ -97,12 +97,11 @@ DEF_FUNC list_repr, 24                ; buf ptr, used, capacity
     BUF_BYTE ' '
 .lr_no_comma:
 
-    ; Get element (fat list: 16-byte stride)
+    ; Get element (payload + tag arrays)
     mov rax, [rbx + PyListObject.ob_item]
-    mov rcx, r12
-    shl rcx, 4                 ; index * 16
-    mov rsi, [rax + rcx + 8]  ; items[index] tag (full 64-bit for SmallStr)
-    mov rdi, [rax + rcx]       ; items[index] payload
+    mov rcx, [rbx + PyListObject.ob_item_tags]
+    mov rdi, [rax + r12 * 8]      ; payload
+    movzx esi, byte [rcx + r12]   ; tag
 
     ; Call obj_repr(payload, tag)
     call obj_repr
@@ -199,11 +198,11 @@ DEF_FUNC tuple_repr, 24
     BUF_BYTE ' '
 .tr_no_comma:
 
-    ; Get fat element at index r12
-    mov rax, r12
-    shl rax, 4                     ; index * 16
-    mov rdi, [rbx + PyTupleObject.ob_item + rax]      ; payload
-    mov rsi, [rbx + PyTupleObject.ob_item + rax + 8]  ; tag
+    ; Get element at index r12
+    mov rax, [rbx + PyTupleObject.ob_item]
+    mov rcx, [rbx + PyTupleObject.ob_item_tags]
+    mov rdi, [rax + r12 * 8]       ; payload
+    movzx esi, byte [rcx + r12]    ; tag
     ; TAG_FLOAT shortcut: call float_repr directly (no heap float object)
     cmp esi, TAG_FLOAT
     je .tr_float_elem
@@ -337,9 +336,9 @@ DEF_FUNC dict_repr, 24
     ; Check if entry is occupied (key_tag != 0 and != TOMBSTONE)
     mov rax, [rbx + PyDictObject.entries]
     imul rcx, r12, DICT_ENTRY_SIZE
-    cmp qword [rax + rcx + DictEntry.key_tag], 0
+    cmp byte [rax + rcx + DictEntry.key_tag], 0
     je .dr_next_entry
-    cmp qword [rax + rcx + DictEntry.key_tag], 0xDEAD
+    cmp byte [rax + rcx + DictEntry.key_tag], DICT_TOMBSTONE
     je .dr_next_entry
 
     ; Print separator if not first
@@ -354,7 +353,7 @@ DEF_FUNC dict_repr, 24
     mov rax, [rbx + PyDictObject.entries]
     imul rcx, r12, DICT_ENTRY_SIZE
     mov rdi, [rax + rcx + DictEntry.key]
-    mov rsi, [rax + rcx + DictEntry.key_tag]
+    movzx esi, byte [rax + rcx + DictEntry.key_tag]
     push r12                   ; save entry index across calls
     call obj_repr
     test rax, rax
@@ -391,7 +390,7 @@ DEF_FUNC dict_repr, 24
     pop r12                    ; restore entry index
     mov rax, [rbx + PyDictObject.entries]
     imul rcx, r12, DICT_ENTRY_SIZE
-    mov rsi, [rax + rcx + DictEntry.value_tag]  ; value tag (full 64-bit)
+    movzx esi, byte [rax + rcx + DictEntry.value_tag]  ; value tag
     mov rdi, [rax + rcx + DictEntry.value]      ; value payload
     push r12
     call obj_repr

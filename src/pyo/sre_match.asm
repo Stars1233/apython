@@ -118,13 +118,13 @@ DEF_FUNC sre_match_new, MN_FRAME
     ; Bounds check: lastindex < tuple.ob_size
     cmp rcx, [rax + PyVarObject.ob_size]
     jge .mn_no_lastgroup
-    ; indexgroup is a fat tuple: 16-byte stride at ob_item
-    shl rcx, 4
-    add rcx, PyTupleObject.ob_item
-    mov rdx, [rax + rcx + 8]   ; tag
+    ; indexgroup tuple: payloads/tags arrays
+    mov r8, [rax + PyTupleObject.ob_item]       ; payloads
+    mov rdx, [rax + PyTupleObject.ob_item_tags] ; tags
+    movzx edx, byte [rdx + rcx]                 ; tag
     cmp edx, TAG_PTR
     jne .mn_no_lastgroup        ; None or non-string → NULL
-    mov rax, [rax + rcx]       ; payload (string ptr)
+    mov rax, [r8 + rcx*8]       ; payload (string ptr)
     inc qword [rax + PyObject.ob_refcnt]
     mov [rbx + SRE_MatchObject.lastgroup], rax
 .mn_no_lastgroup:
@@ -473,11 +473,10 @@ DEF_FUNC sre_match_group_method
     ; INCREF if needed
     INCREF_VAL rax, rdx
     ; Write payload and tag
-    mov rsi, rcx
-    shl rsi, 4                 ; index * 16
-    add rsi, PyTupleObject.ob_item
-    mov [rdi + rsi], rax       ; payload
-    mov [rdi + rsi + 8], rdx   ; tag
+    mov rsi, [rdi + PyTupleObject.ob_item]       ; payloads
+    mov r8, [rdi + PyTupleObject.ob_item_tags]   ; tags
+    mov [rsi + rcx*8], rax       ; payload
+    mov byte [r8 + rcx], dl      ; tag
     inc rcx
     jmp .group_multi_loop
 
@@ -585,10 +584,10 @@ DEF_FUNC sre_match_groups_method, GS_FRAME
     mov rdi, [rsp + 8]        ; tuple
     lea esi, [ecx - 1]        ; tuple index = group - 1
     movsx rsi, esi
-    shl rsi, 4                 ; * 16
-    add rsi, PyTupleObject.ob_item
-    mov [rdi + rsi], rax       ; payload
-    mov [rdi + rsi + 8], rdx   ; tag
+    mov r8, [rdi + PyTupleObject.ob_item]       ; payloads
+    mov r9, [rdi + PyTupleObject.ob_item_tags]  ; tags
+    mov [r8 + rsi*8], rax       ; payload
+    mov byte [r9 + rsi], dl     ; tag
     pop rcx
     inc ecx
     jmp .groups_loop
@@ -753,13 +752,15 @@ DEF_FUNC sre_match_span_method
     pop r9
     pop r8
 
-    ; Set start: tuple.ob_item[0] = (r8, TAG_SMALLINT)
-    mov [rax + PyTupleObject.ob_item], r8
-    mov qword [rax + PyTupleObject.ob_item + 8], TAG_SMALLINT
+    mov r10, [rax + PyTupleObject.ob_item]       ; payloads
+    mov r11, [rax + PyTupleObject.ob_item_tags]  ; tags
+    ; Set start: tuple[0] = (r8, TAG_SMALLINT)
+    mov [r10], r8
+    mov byte [r11], TAG_SMALLINT
 
-    ; Set end: tuple.ob_item[1] = (r9, TAG_SMALLINT)
-    mov [rax + PyTupleObject.ob_item + 16], r9
-    mov qword [rax + PyTupleObject.ob_item + 24], TAG_SMALLINT
+    ; Set end: tuple[1] = (r9, TAG_SMALLINT)
+    mov [r10 + 8], r9
+    mov byte [r11 + 1], TAG_SMALLINT
     mov edx, TAG_PTR
 
     pop r12
@@ -837,15 +838,15 @@ DEF_FUNC sre_match_groupdict_method, GD_FRAME
     lea r12, [rcx + rax]       ; r12 = entry ptr
 
     ; Skip empty/tombstone entries
-    mov rax, [r12 + DictEntry.key_tag]
-    test rax, rax
+    movzx eax, byte [r12 + DictEntry.key_tag]
+    test eax, eax
     jz .gd_next                ; empty slot (key_tag == 0)
     cmp qword [r12 + DictEntry.hash], -1
     je .gd_next                ; tombstone
 
     ; name = entry->key, name_tag = entry->key_tag
     mov r13, [r12 + DictEntry.key]       ; name payload
-    mov r14, [r12 + DictEntry.key_tag]   ; name tag
+    movzx r14d, byte [r12 + DictEntry.key_tag]   ; name tag
 
     ; group_idx = entry->value (SmallInt payload)
     mov rsi, [r12 + DictEntry.value]     ; group index
@@ -1244,19 +1245,21 @@ DEF_FUNC sre_match_getattr
     pop rcx                    ; end
     pop rdx                    ; start
 
+    mov r8, [rax + PyTupleObject.ob_item]       ; payloads
+    mov r9, [rax + PyTupleObject.ob_item_tags]  ; tags
     ; Set inner[0] = start (SmallInt)
-    mov [rax + PyTupleObject.ob_item], rdx
-    mov qword [rax + PyTupleObject.ob_item + 8], TAG_SMALLINT
+    mov [r8], rdx
+    mov byte [r9], TAG_SMALLINT
 
     ; Set inner[1] = end (SmallInt)
-    mov [rax + PyTupleObject.ob_item + 16], rcx
-    mov qword [rax + PyTupleObject.ob_item + 24], TAG_SMALLINT
+    mov [r8 + 8], rcx
+    mov byte [r9 + 1], TAG_SMALLINT
 
     ; Set outer[i] = inner (TAG_PTR)
-    mov rcx, r13
-    shl rcx, 4                 ; i * 16
-    mov [r15 + PyTupleObject.ob_item + rcx], rax
-    mov qword [r15 + PyTupleObject.ob_item + rcx + 8], TAG_PTR
+    mov r10, [r15 + PyTupleObject.ob_item]       ; payloads
+    mov r11, [r15 + PyTupleObject.ob_item_tags]  ; tags
+    mov [r10 + r13*8], rax
+    mov byte [r11 + r13], TAG_PTR
 
     inc r13
     jmp .mga_regs_loop

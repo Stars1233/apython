@@ -695,10 +695,10 @@ DEF_FUNC import_search_dirs, SD_FRAME
     ; Get dir string (fat list: 16-byte stride)
     mov rdi, [rbp - SD_DIRS]
     mov rcx, [rdi + PyListObject.ob_item]
+    mov rdx, [rdi + PyListObject.ob_item_tags]
     mov rax, [rbp - SD_IDX]
-    shl rax, 4                  ; index * 16
-    mov rbx, [rcx + rax]       ; rbx = dir str obj payload
-    mov r8, [rcx + rax + 8]    ; dir tag (64-bit for SmallStr)
+    mov rbx, [rcx + rax * 8]      ; rbx = dir str obj payload
+    movzx r8d, byte [rdx + rax]   ; dir tag
     mov qword [rbp - SD_SPILLED], 0
     cmp r8d, TAG_SMALLINT
     je .sd_next                 ; skip SmallInts
@@ -939,10 +939,10 @@ DEF_FUNC import_search_syspath, SS_FRAME
     ; Get dir string (fat list: 16-byte stride)
     mov rdi, [rbp - SS_DIRS]
     mov rcx, [rdi + PyListObject.ob_item]
+    mov rdx, [rdi + PyListObject.ob_item_tags]
     mov rax, [rbp - SS_IDX]
-    shl rax, 4                  ; index * 16
-    mov rbx, [rcx + rax]       ; rbx = dir str obj payload
-    mov r8, [rcx + rax + 8]    ; dir tag (64-bit for SmallStr)
+    mov rbx, [rcx + rax * 8]      ; rbx = dir str obj payload
+    movzx r8d, byte [rdx + rax]   ; dir tag
     mov qword [rbp - SS_SPILLED], 0
     cmp r8d, TAG_SMALLINT
     je .ss_next                 ; skip SmallInts

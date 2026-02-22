@@ -3,9 +3,9 @@
 ; Register convention (callee-saved, preserved across handlers):
 ;   rbx = bytecode instruction pointer (current position in co_code[])
 ;   r12 = current frame pointer (PyFrame*)
-;   r13 = value stack top pointer
-;   r14 = co_consts tuple data pointer (&tuple.ob_item[0])
-;   r15 = co_names tuple data pointer (&tuple.ob_item[0])
+;   r13 = value stack payload top pointer
+;   r14 = co_consts payload pointer (&tuple.ob_item[0])
+;   r15 = value stack tag top pointer
 ;
 ; ecx = opcode argument on entry (set by eval_dispatch)
 ; rbx has already been advanced past the 2-byte instruction word.
@@ -21,6 +21,7 @@ section .text
 extern eval_dispatch
 extern eval_saved_rbx
 extern eval_saved_r13
+extern eval_saved_r15
 extern trace_opcodes
 extern opcode_table
 extern obj_dealloc
@@ -29,9 +30,7 @@ extern obj_dealloc
 ;; op_pop_top - Pop and discard top of stack, DECREF it
 ;; ============================================================================
 DEF_FUNC_BARE op_pop_top
-    sub r13, 16
-    mov rax, [r13]              ; payload
-    mov rdx, [r13 + 8]         ; tag
+    VPOP_VAL rax, rdx
     DECREF_VAL rax, rdx
     DISPATCH
 END_FUNC op_pop_top
@@ -42,9 +41,7 @@ END_FUNC op_pop_top
 ;; Used before LOAD_GLOBAL/LOAD_ATTR to mark callable slots.
 ;; ============================================================================
 DEF_FUNC_BARE op_push_null
-    mov qword [r13], 0
-    mov qword [r13 + 8], TAG_NULL
-    add r13, 16
+    VPUSH_NULL128
     DISPATCH
 END_FUNC op_push_null
 
@@ -52,22 +49,25 @@ END_FUNC op_push_null
 ;; op_copy - Copy the i-th item (1-based from top) to top of stack
 ;;
 ;; ecx = arg = position (1 = top of stack)
-;; Stack layout: ... [r13 - N*8] ... [r13 - 16] [r13 - 8]
+;; Stack layout: ... [r13 - N*8] ... [r13 - 8] [r13]
 ;;                                                ^ TOS (position 1)
 ;; ============================================================================
 DEF_FUNC_BARE op_copy
     ; ecx = position (1-indexed from top)
-    ; Compute address: r13 - ecx*16 (16 bytes/slot)
+    ; Compute address: r13 - ecx*8 (8 bytes/slot)
     mov rax, rcx
-    shl rax, 4                 ; rax = ecx * 16
     mov rdx, r13
-    sub rdx, rax               ; rdx = r13 - ecx*16
+    shl rax, 3
+    sub rdx, rax               ; payload slot
+    mov r8, r15
+    sub r8, rcx                ; tag slot
     mov rax, [rdx]             ; peek payload at position i
-    mov rsi, [rdx + 8]        ; peek tag at position i
+    movzx esi, byte [r8]       ; peek tag at position i
     INCREF_VAL rax, rsi
     mov [r13], rax
-    mov [r13 + 8], rsi
-    add r13, 16
+    mov byte [r15], sil
+    add r13, 8
+    add r15, 1
     DISPATCH
 END_FUNC op_copy
 
@@ -81,12 +81,22 @@ END_FUNC op_copy
 ;; ============================================================================
 DEF_FUNC_BARE op_swap
     ; ecx = position (1-indexed from top)
-    ; Swap TOS with i-th item using SSE (0 GPR temps for the swap itself)
+    ; Swap TOS with i-th item (payload + tag)
     mov rax, rcx
-    shl rax, 4                 ; rax = ecx * 16
     mov rdx, r13
-    sub rdx, rax               ; rdx = &slot[i]
-    lea rsi, [r13 - 16]        ; rsi = &TOS
-    VSLOT_SWAP rsi, rdx
+    shl rax, 3
+    sub rdx, rax               ; payload slot[i]
+    mov r8, r15
+    sub r8, rcx                ; tag slot[i]
+    ; swap payloads
+    mov r9, [rdx]
+    mov r10, [r13 - 8]
+    mov [rdx], r10
+    mov [r13 - 8], r9
+    ; swap tags
+    mov r9b, byte [r8]
+    mov r10b, byte [r15 - 1]
+    mov byte [r8], r10b
+    mov byte [r15 - 1], r9b
     DISPATCH
 END_FUNC op_swap

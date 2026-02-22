@@ -66,34 +66,10 @@ DEF_FUNC str_from_cstr_heap
 END_FUNC str_from_cstr_heap
 
 ; str_from_cstr(const char *cstr) -> (rax=payload, edx=tag)
-; Creates a string from a C string. Returns SmallStr if <= 14 bytes, else heap TAG_PTR.
-extern smallstr_from_data
+; Creates a string from a C string. Always returns heap TAG_PTR.
 extern smallstr_to_obj
-DEF_FUNC str_from_cstr
-    push rbx
-
-    mov rbx, rdi            ; save cstr
-
-    ; Get string length
-    call ap_strlen
-
-    ; SmallStr path: if len <= 14, pack inline
-    cmp rax, 14
-    ja .sfc_heap
-
-    mov rdi, rbx            ; data ptr
-    mov rsi, rax             ; length
-    call smallstr_from_data
-    ; rax = payload, rdx = tag (SmallStr)
-    pop rbx
-    leave
-    ret
-
-.sfc_heap:
-    mov rdi, rbx
-    pop rbx
-    leave
-    jmp str_from_cstr_heap   ; tail-call heap path
+DEF_FUNC_BARE str_from_cstr
+    jmp str_from_cstr_heap
 END_FUNC str_from_cstr
 
 ; str_new_heap(const char *data, int64_t len) -> (rax=PyStrObject*, edx=TAG_PTR)
@@ -137,19 +113,8 @@ DEF_FUNC str_new_heap
 END_FUNC str_new_heap
 
 ; str_new(const char *data, int64_t len) -> (rax=payload, edx=tag)
-; Creates a string from data with given length. Returns SmallStr if <= 14 bytes, else heap.
-DEF_FUNC str_new
-    ; SmallStr path: if len <= 14, pack inline
-    cmp rsi, 14
-    ja .sn_heap
-
-    call smallstr_from_data
-    ; rax = payload, rdx = tag (SmallStr)
-    leave
-    ret
-
-.sn_heap:
-    leave
+; Creates a string from data with given length. Always returns heap TAG_PTR.
+DEF_FUNC_BARE str_new
     jmp str_new_heap         ; tail-call heap path
 END_FUNC str_new
 
@@ -870,10 +835,10 @@ DEF_FUNC str_mod, SM_FRAME
     mov rdx, r15
     cmp rdx, [rax + PyTupleObject.ob_size]
     jge .sm_arg_none
-    mov rcx, rdx
-    shl rcx, 4
-    mov rdx, [rax + PyTupleObject.ob_item + rcx + 8]  ; arg tag from tuple
-    mov rax, [rax + PyTupleObject.ob_item + rcx]       ; arg payload
+    mov rcx, [rax + PyTupleObject.ob_item]       ; payloads
+    mov r8, [rax + PyTupleObject.ob_item_tags]   ; tags
+    mov rax, [rcx + rdx*8]                       ; arg payload
+    movzx edx, byte [r8 + rdx]                   ; arg tag from tuple
     inc r15
     ret
 .sm_arg_none:

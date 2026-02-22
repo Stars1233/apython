@@ -203,6 +203,9 @@ DEF_FUNC stream_reader_read, SR_FRAME
 
     ; Let's abort this approach and implement it via getattr returning awaitables.
     RET_NULL
+    pop r12
+    pop rbx
+    leave
     ret
 END_FUNC stream_reader_read
 

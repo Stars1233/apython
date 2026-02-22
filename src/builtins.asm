@@ -285,9 +285,8 @@ DEF_FUNC builtin_print, PR_FRAME
     push r9
 
     ; Get kwarg name
-    mov r10, r9
-    shl r10, 4                     ; * 16 (fat tuple stride)
-    mov r10, [rax + PyTupleObject.ob_item + r10]  ; kw name str
+    mov r10, [rax + PyTupleObject.ob_item]        ; kw names payloads
+    mov r10, [r10 + r9*8]                          ; kw name str
 
     ; Get kwarg value position: n_pos + kw_index
     mov r11, r12                   ; n_pos
@@ -1015,6 +1014,7 @@ DEF_FUNC builtin_isinstance
     ; rcx = tuple of types. Check obj against each.
     mov rbx, rcx               ; rbx = tuple
     mov r12, rdx               ; r12 = obj's type (saved)
+    mov rsi, [rbx + PyTupleObject.ob_item]  ; payloads
     mov rcx, [rbx + PyTupleObject.ob_size]
     xor r8d, r8d               ; index
 .isinstance_tuple_loop:
@@ -1023,9 +1023,7 @@ DEF_FUNC builtin_isinstance
     mov rdx, r12               ; reset to obj's type
     push rcx
     push r8
-    mov rcx, r8
-    shl rcx, 4                     ; * 16 (fat tuple stride)
-    mov rcx, [rbx + PyTupleObject.ob_item + rcx]     ; type from tuple
+    mov rcx, [rsi + r8*8]           ; type from tuple
 .isinstance_tuple_walk:
     cmp rdx, rcx
     je .isinstance_tuple_match
@@ -1467,11 +1465,12 @@ DEF_FUNC builtin___build_class__
 
     push rdx                        ; save i
 
-    ; Get slot name: slots_tuple[i] (fat tuple, 16-byte stride)
-    mov rax, rdx
-    shl rax, 4
-    mov rcx, [rbx + PyTupleObject.ob_item + rax]      ; name payload
-    cmp qword [rbx + PyTupleObject.ob_item + rax + 8], TAG_PTR
+    ; Get slot name: slots_tuple[i]
+    mov rax, [rbx + PyTupleObject.ob_item]       ; payloads
+    mov r11, [rbx + PyTupleObject.ob_item_tags]  ; tags
+    mov rcx, [rax + rdx*8]                        ; name payload
+    movzx r8d, byte [r11 + rdx]                   ; name tag
+    cmp r8d, TAG_PTR
     jne .bc_slot_skip               ; skip non-string slots
 
     ; Compute offset = base_basicsize + i * 16

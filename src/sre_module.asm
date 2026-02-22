@@ -115,18 +115,17 @@ DEF_FUNC sre_compile_func, SC_FRAME
     mov [rbp - SC_CODEBUF], r14
 
     ; Iterate code list, extract each SmallInt as u32
-    mov r15, [r12 + PyListObject.ob_item]  ; fat value array
+    mov r15, [r12 + PyListObject.ob_item]       ; payloads
+    mov rbx, [r12 + PyListObject.ob_item_tags]  ; tags
     xor ecx, ecx               ; index
 .code_loop:
     cmp rcx, r13
     jge .code_done
-    ; Fat value at r15 + index*16
-    mov rax, rcx
-    shl rax, 4
     ; Validate tag is TAG_SMALLINT
-    cmp dword [r15 + rax + 8], TAG_SMALLINT
+    movzx edx, byte [rbx + rcx]
+    cmp edx, TAG_SMALLINT
     jne .code_type_error
-    mov rax, [r15 + rax]       ; payload (SmallInt value)
+    mov rax, [r15 + rcx*8]     ; payload (SmallInt value)
     mov [r14 + rcx*4], eax    ; store as u32
     inc rcx
     jmp .code_loop

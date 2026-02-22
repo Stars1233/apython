@@ -28,26 +28,29 @@ END_FUNC ap_memset
 ; Forward: rep movsq (fast). Backward: manual qword loop (avoids std penalty).
 DEF_FUNC_BARE ap_memmove
     mov rax, rdi            ; save dst for return
-    mov rcx, rdx
-    shr rcx, 3              ; qword count = n / 8
+    mov rcx, rdx            ; rcx = byte count
+    test rcx, rcx
     jz .memmove_done
     cmp rdi, rsi
     je .memmove_done        ; dst == src, nop
     jb .memmove_fwd         ; dst < src: forward safe
 .memmove_bk:
     ; dst > src: copy backward to avoid overlap corruption
-    lea rsi, [rsi + rdx - 8]
-    lea rdi, [rdi + rdx - 8]
-.memmove_bk_loop:
-    mov r8, [rsi]
-    mov [rdi], r8
-    sub rsi, 8
-    sub rdi, 8
-    dec rcx
-    jnz .memmove_bk_loop
+    ; Point rsi/rdi to last byte, set direction flag, copy bytes
+    lea rsi, [rsi + rcx - 1]
+    lea rdi, [rdi + rcx - 1]
+    std
+    rep movsb
+    cld
     ret
 .memmove_fwd:
+    ; dst < src: forward copy — qwords then byte remainder
+    push rdx                ; save original count
+    shr rcx, 3
     rep movsq
+    pop rcx
+    and rcx, 7
+    rep movsb
 .memmove_done:
     ret
 END_FUNC ap_memmove

@@ -239,11 +239,13 @@ DEF_FUNC builtin_divmod
     mov edi, 2
     extern tuple_new
     call tuple_new
-    mov [rax + PyTupleObject.ob_item], r15         ; quotient payload
-    pop rcx                                         ; quotient tag
-    mov [rax + PyTupleObject.ob_item + 8], rcx
-    mov [rax + PyTupleObject.ob_item + 16], r12    ; remainder payload
-    mov [rax + PyTupleObject.ob_item + 24], r13    ; remainder tag
+    mov rbx, [rax + PyTupleObject.ob_item]       ; payloads
+    mov rsi, [rax + PyTupleObject.ob_item_tags]  ; tags
+    mov [rbx], r15                               ; quotient payload
+    pop rcx                                      ; quotient tag
+    mov byte [rsi], cl
+    mov [rbx + 8], r12                           ; remainder payload
+    mov byte [rsi + 1], r13b                     ; remainder tag
     mov edx, TAG_PTR
 
     pop r15
@@ -280,9 +282,8 @@ DEF_FUNC int_type_call, ITC_FRAME
 .itc_kw_loop:
     cmp r9, rcx
     jge .itc_kw_checked
-    mov r10, r9
-    shl r10, 4                     ; * 16 (fat tuple stride)
-    mov r10, [rax + PyTupleObject.ob_item + r10]     ; kw name str
+    mov r10, [rax + PyTupleObject.ob_item]        ; kw names payloads
+    mov r10, [r10 + r9*8]                          ; kw name str
     ; Compare to "base"
     push rdi
     push rsi
@@ -4152,7 +4153,7 @@ DEF_FUNC builtin_format_fn, FMT_FRAME
     ; Save obj
     mov rax, [rdi]
     mov [rbp - FMT_OBJ], rax
-    mov eax, [rdi + 8]
+    mov rax, [rdi + 8]
     mov [rbp - FMT_OBJ_TAG], rax
 
     ; Get format spec (empty string if not provided)
@@ -4168,44 +4169,14 @@ DEF_FUNC builtin_format_fn, FMT_FRAME
     mov [rbp - FMT_SPEC], rax
 
 .fmt_have_spec:
-    ; If format spec is empty, just call str(value)
-    mov rdi, [rbp - FMT_SPEC]
-    ; Check if it's a SmallStr
-    cmp qword [rbp - FMT_OBJ_TAG], TAG_PTR
-    jne .fmt_use_str
-    ; Check if spec is empty
-    ; For heap strings, check ob_size
-    test rdi, rdi
-    jz .fmt_use_str
-
-    ; Try __format__ via dunder_lookup
-    mov rdi, [rbp - FMT_OBJ]
-    mov esi, [rbp - FMT_OBJ_TAG]
-    CSTRING rdx, "__format__"
-    call dunder_lookup
-    test edx, edx
-    jz .fmt_use_str
-
-    ; Call __format__(format_spec)
-    ; Build arg array on stack: [spec_payload, spec_tag]
-    push rbx                   ; align
-    sub rsp, 16
-    mov rax, [rbp - FMT_SPEC]
-    mov [rsp], rax
-    mov qword [rsp + 8], TAG_PTR
-    mov rdi, rsp
-    mov rsi, 1
-    ; rax = __format__ callable — need to call tp_call
-    ; Actually dunder_lookup returned (rax, edx) fat value
-    ; We need to call it. Save it and use tp_call
-    add rsp, 16
-    pop rbx
-    jmp .fmt_use_str           ; TODO: full __format__ call, fallback to str for now
+    ; For now, always use str(value) as fallback.
+    ; TODO: implement __format__ protocol for non-empty format specs.
+    jmp .fmt_use_str
 
 .fmt_use_str:
     ; Just call str(value) — simple fallback
     mov rdi, [rbp - FMT_OBJ]
-    mov esi, [rbp - FMT_OBJ_TAG]
+    mov rsi, [rbp - FMT_OBJ_TAG]
     call obj_str
     ; If we allocated an empty spec, DECREF it
     cmp rbx, 2
