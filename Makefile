@@ -82,6 +82,10 @@ gen-cpython-tests:
 	@$(PYTHON) -m py_compile tests/cpython/test_dict.py
 	@echo "Compiling tests/cpython/test_set.py..."
 	@$(PYTHON) -m py_compile tests/cpython/test_set.py
+	@echo "Compiling tests/cpython/test_isinstance.py..."
+	@$(PYTHON) -m py_compile tests/cpython/test_isinstance.py
+	@echo "Compiling tests/cpython/test_decorators.py..."
+	@$(PYTHON) -m py_compile tests/cpython/test_decorators.py
 	@echo "Done."
 
 check-cpython: $(TARGET) gen-cpython-tests
@@ -111,3 +115,7 @@ check-cpython: $(TARGET) gen-cpython-tests
 	@./apython tests/cpython/__pycache__/test_dict.cpython-312.pyc
 	@echo "Running CPython test_set.py..."
 	@./apython tests/cpython/__pycache__/test_set.cpython-312.pyc
+	@echo "Running CPython test_isinstance.py..."
+	@./apython tests/cpython/__pycache__/test_isinstance.cpython-312.pyc
+	@echo "Running CPython test_decorators.py..."
+	@./apython tests/cpython/__pycache__/test_decorators.cpython-312.pyc

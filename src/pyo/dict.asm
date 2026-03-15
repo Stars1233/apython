@@ -249,11 +249,11 @@ DEF_FUNC_LOCAL dict_keys_equal
     mov rax, [rbx + PyObject.ob_type]
     lea rcx, [rel str_type]
     cmp rax, rcx
-    jne .dke_ne_pop
+    jne .dke_try_richcompare
 
     mov rax, [r12 + PyObject.ob_type]
     cmp rax, rcx
-    jne .dke_ne_pop
+    jne .dke_try_richcompare
 
     ; Both strings — compare data
     lea rdi, [rbx + PyStrObject.data]
@@ -264,6 +264,41 @@ DEF_FUNC_LOCAL dict_keys_equal
 
     ; Equal strings
     mov eax, 1
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.dke_try_richcompare:
+    ; Both heap ptrs, not strings — try tp_richcompare
+    extern obj_is_true
+    mov rax, [rbx + PyObject.ob_type]
+    mov rax, [rax + PyTypeObject.tp_richcompare]
+    test rax, rax
+    jz .dke_ne_pop
+    ; Call tp_richcompare(a, b, PY_EQ, a_tag=TAG_PTR, b_tag=TAG_PTR)
+    mov rdi, rbx
+    mov rsi, r12
+    mov edx, PY_EQ
+    mov ecx, TAG_PTR
+    mov r8d, TAG_PTR
+    call rax
+    ; Check result: if NULL/TAG_NULL → not equal
+    test edx, edx
+    jz .dke_ne_pop
+    ; Check if result is truthy
+    mov rdi, rax
+    mov rsi, rdx
+    push rax
+    push rdx
+    call obj_is_true
+    mov ebx, eax           ; save truthiness
+    pop rdx
+    pop rdi
+    push rbx
+    mov rsi, rdx
+    DECREF_VAL rdi, rsi
+    pop rax                 ; truthiness result
     pop r12
     pop rbx
     leave

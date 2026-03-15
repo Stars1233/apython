@@ -96,6 +96,11 @@
 **Root cause**: Method not implemented, not registered in set tp_dict
 **Fix**: Implement set_method_update, register in init_builtin_methods
 
+### 20. dict_keys_equal only handles strings/numerics (dict.asm)
+**Symptom**: `d[(2,)]` fails to find key even though `(2,)` is in dict (memoize pattern broken)
+**Root cause**: `dict_keys_equal` returned "not equal" for any non-string, non-numeric heap pointers. Tuple keys, frozenset keys, etc. all failed equality checks.
+**Fix**: Add `.dke_try_richcompare` fallback that calls `tp_richcompare(PY_EQ)` + `obj_is_true` for non-string heap pointer keys.
+
 ### Known Bugs Not Yet Fixed
 - `dict.update(x=1, y=2)` with kwargs segfaults (methods.asm)
 - `repr(d.keys())` returns wrong value (dict view repr not implemented)
@@ -103,6 +108,10 @@
 - `tuple(t) is t` identity optimization not implemented
 - `list.append()` no-args segfaults (method arg count validation missing)
 - `assertRaises(fn)` double-free crash (exception handling memory issue)
+- `issubclass(C, (C,))` always returns False (tuple arg not supported)
+- `isinstance(1, 1)` doesn't raise TypeError (input validation missing)
+- `issubclass(1, int)` segfaults (input validation missing)
+- `func.__name__ = "x"` silently ignored (attribute set on functions not supported)
 
 ## New Infrastructure Added
 - `list_copy()` - standalone shallow copy function
