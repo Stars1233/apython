@@ -71,6 +71,25 @@
 **Symptom**: Same as #6 but for tuples
 **Fix**: Same pattern as list.index - check nargs, extract start/stop.
 
+### 15. set_richcompare completely unimplemented (set.asm)
+**Symptom**: `{1,2} == {1,2}` returns False, `set() == set()` returns False
+**Root cause**: `tp_richcompare = 0` for set_type and frozenset_type. The `==` operator fell through to identity comparison.
+**Fix**: Implement `set_richcompare` for PY_EQ and PY_NE. PY_EQ checks len equality then verifies every element of self is in other. PY_NE negates PY_EQ result.
+
+### 16. dict() constructor creates broken dict (dict.asm)
+**Symptom**: `dict() == {}` returns False, adding items to `dict()` crashes with "hash table full"
+**Root cause**: `dict_type.tp_call = 0`, so `type_call` used generic `instance_new` which allocated a PyDictObject-sized block but didn't initialize the hash table entries array.
+**Fix**: Implement `dict_type_call` that calls `dict_new` for no-args case and copies entries for dict(other_dict) case.
+
+### Known Bugs Not Yet Fixed
+- `dict.update()` with no args segfaults (methods.asm)
+- `dict.update(x=1, y=2)` with kwargs segfaults (methods.asm)
+- `dict.popitem()` segfaults (methods.asm)
+- `set.update()` method not implemented (use |= instead)
+- `repr(d.keys())` returns wrong value (dict view repr not implemented)
+- `(1,1) in d.items()` fails (dict_items __contains__ not implemented)
+- `tuple(t) is t` identity optimization not implemented
+
 ## New Infrastructure Added
 - `list_copy()` - standalone shallow copy function
 - `ALWAYS_EQ`, `NEVER_EQ`, `C_RECURSION_LIMIT` in `lib/test/support/__init__.py`

@@ -80,6 +80,8 @@ gen-cpython-tests:
 	@$(PYTHON) -m py_compile tests/cpython/test_tuple.py
 	@echo "Compiling tests/cpython/test_dict.py..."
 	@$(PYTHON) -m py_compile tests/cpython/test_dict.py
+	@echo "Compiling tests/cpython/test_set.py..."
+	@$(PYTHON) -m py_compile tests/cpython/test_set.py
 	@echo "Done."
 
 check-cpython: $(TARGET) gen-cpython-tests
@@ -107,3 +109,5 @@ check-cpython: $(TARGET) gen-cpython-tests
 	@./apython tests/cpython/__pycache__/test_tuple.cpython-312.pyc
 	@echo "Running CPython test_dict.py..."
 	@./apython tests/cpython/__pycache__/test_dict.cpython-312.pyc
+	@echo "Running CPython test_set.py..."
+	@./apython tests/cpython/__pycache__/test_set.cpython-312.pyc

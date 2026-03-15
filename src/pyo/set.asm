@@ -449,6 +449,127 @@ DEF_FUNC set_contains
 END_FUNC set_contains
 
 ;; ============================================================================
+;; set_richcompare(self, other, op, self_tag, other_tag) -> (rax, edx) fat value
+;; Compares two sets. Only PY_EQ and PY_NE implemented.
+;; ============================================================================
+SRC_SELF  equ 8
+SRC_OTHER equ 16
+SRC_OP    equ 24
+SRC_FRAME equ 24
+DEF_FUNC set_richcompare, SRC_FRAME
+    push rbx
+    push r12
+    push r13
+
+    mov [rbp - SRC_SELF], rdi
+    mov [rbp - SRC_OTHER], rsi
+    mov [rbp - SRC_OP], rdx
+
+    ; Check other is a set or frozenset
+    test r8d, TAG_RC_BIT
+    jz .src_not_impl
+    mov rax, [rsi + PyObject.ob_type]
+    lea rcx, [rel set_type]
+    cmp rax, rcx
+    je .src_is_set
+    lea rcx, [rel frozenset_type]
+    cmp rax, rcx
+    je .src_is_set
+    jmp .src_not_impl
+
+.src_is_set:
+    ; Only support PY_EQ (2) and PY_NE (3)
+    cmp edx, PY_EQ
+    je .src_eq
+    cmp edx, PY_NE
+    je .src_ne
+    jmp .src_not_impl
+
+.src_eq:
+    ; Check lengths
+    mov rax, [rdi + PyDictObject.ob_size]
+    cmp rax, [rsi + PyDictObject.ob_size]
+    jne .src_false
+
+    ; Every element of self must be in other
+    mov rbx, rdi               ; self (set)
+    mov r12, rsi               ; other (set)
+    mov r13, [rbx + PyDictObject.capacity]
+    xor ecx, ecx               ; index
+.src_eq_loop:
+    cmp rcx, r13
+    jge .src_true
+
+    ; Get entry at index
+    imul rax, rcx, SET_ENTRY_SIZE
+    add rax, [rbx + PyDictObject.entries]
+    ; Check if occupied (key_tag != 0 and != tombstone)
+    movzx edx, word [rax + SET_ENTRY_KEY_TAG]
+    test edx, edx
+    jz .src_eq_next
+    cmp edx, SET_TOMBSTONE
+    je .src_eq_next
+
+    ; Entry is occupied — check if key is in other set
+    push rcx
+    mov rdi, r12               ; other set
+    mov rsi, [rax + SET_ENTRY_KEY]   ; key
+    movzx edx, word [rax + SET_ENTRY_KEY_TAG]
+    call set_contains
+    pop rcx
+    test eax, eax
+    jz .src_false              ; not found → not equal
+
+.src_eq_next:
+    inc rcx
+    jmp .src_eq_loop
+
+.src_ne:
+    ; PY_NE = not PY_EQ
+    push rdi
+    push rsi
+    mov edx, PY_EQ
+    call set_richcompare
+    pop rsi
+    pop rdi
+    ; Negate: if bool_true → return bool_false, vice versa
+    test edx, edx
+    jz .src_not_impl           ; NULL result → propagate
+    lea rcx, [rel bool_true]
+    cmp rax, rcx
+    je .src_false              ; EQ was True → NE is False
+    jmp .src_true              ; EQ was False → NE is True
+
+.src_true:
+    extern bool_true
+    lea rax, [rel bool_true]
+    mov edx, TAG_PTR
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.src_false:
+    extern bool_false
+    lea rax, [rel bool_false]
+    mov edx, TAG_PTR
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.src_not_impl:
+    RET_NULL
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC set_richcompare
+
+;; ============================================================================
 ;; set_contains_sq(self, key) -> int (0/1)
 ;; sq_contains wrapper for the sequence methods (for "in" operator)
 ;; ============================================================================
@@ -1054,7 +1175,7 @@ set_type:
     dq set_type_call            ; tp_call
     dq 0                        ; tp_getattr
     dq 0                        ; tp_setattr
-    dq 0                        ; tp_richcompare
+    dq set_richcompare          ; tp_richcompare
     dq set_tp_iter              ; tp_iter
     dq 0                        ; tp_iternext
     dq 0                        ; tp_init
@@ -1085,7 +1206,7 @@ frozenset_type:
     dq frozenset_type_call      ; tp_call
     dq 0                        ; tp_getattr
     dq 0                        ; tp_setattr
-    dq 0                        ; tp_richcompare
+    dq set_richcompare          ; tp_richcompare
     dq set_tp_iter              ; tp_iter (reuse set iter)
     dq 0                        ; tp_iternext
     dq 0                        ; tp_init
