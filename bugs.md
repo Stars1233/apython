@@ -111,17 +111,42 @@
 **Root cause**: list_contains only tried element's __eq__, not value's reflected __eq__
 **Fix**: Added `.try_reflected` path in list_contains
 
+### 23. range repr/str not implemented (iter.asm)
+**Symptom**: `str(range(1000))` returns SmallInt 0, crashing BINARY_SLICE
+**Root cause**: range_obj_type had `tp_repr = 0` and `tp_str = 0`
+**Fix**: Implement range_obj_repr producing "range(start, stop[, step])" format
+
+### 24. Recursive list repr crashes (repr.asm)
+**Symptom**: `a=[]; a.append(a); repr(a)` → infinite recursion → crash
+**Root cause**: No recursion detection in list_repr
+**Fix**: Add global repr_stack, check/push/pop around repr, return "[...]" on cycle
+
+### 25. except tuple matching broken (exception.asm)
+**Symptom**: `except (MemoryError, OverflowError)` never matches
+**Root cause**: exc_isinstance only handled single type arg, not tuples
+**Fix**: Check if type arg is tuple, iterate elements recursively
+
+### 26. list * maxsize OOM crash (list.asm)
+**Symptom**: `[0] * sys.maxsize` → fatal OOM instead of OverflowError
+**Root cause**: No overflow check before huge allocation in list_repeat
+**Fix**: Add `jo` (signed overflow) check + 256M item limit, raise OverflowError
+
+### 27. list() accepts keyword args (list.asm)
+**Symptom**: `list(sequence=[])` returns `[]` instead of TypeError
+**Root cause**: list_type_call didn't check kw_names_pending
+**Fix**: Check kw_names_pending, raise TypeError if set
+
 ### Known Bugs Not Yet Fixed
+- GMP crash during test_constructors in full test suite (memory corruption in int_mul)
 - `dict.update(x=1, y=2)` with kwargs segfaults (methods.asm)
 - `repr(d.keys())` returns wrong value (dict view repr not implemented)
 - `(1,1) in d.items()` fails (dict_items __contains__ not implemented)
 - `tuple(t) is t` identity optimization not implemented
-- `list.append()` no-args segfaults (method arg count validation missing)
-- `assertRaises(fn)` double-free crash (exception handling memory issue)
 - `issubclass(C, (C,))` always returns False (tuple arg not supported)
 - `isinstance(1, 1)` doesn't raise TypeError (input validation missing)
 - `issubclass(1, int)` segfaults (input validation missing)
 - `func.__name__ = "x"` silently ignored (attribute set on functions not supported)
+- User-defined `__iter__` dunder not connected to tp_iter slot on heaptypes
 
 ## New Infrastructure Added
 - `list_copy()` - standalone shallow copy function
