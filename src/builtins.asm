@@ -1343,18 +1343,24 @@ DEF_FUNC builtin___build_class__
     test edx, edx
     jz .bc_no_slots
 
-    ; Must be TAG_PTR and a tuple
+    ; Must be TAG_PTR and a tuple or list
     cmp edx, TAG_PTR
     jne .bc_no_slots
     extern tuple_type
+    extern list_type
     mov rcx, [rax + PyObject.ob_type]
     lea rdx, [rel tuple_type]
     cmp rcx, rdx
+    je .bc_slots_tuple
+    lea rdx, [rel list_type]
+    cmp rcx, rdx
     jne .bc_no_slots
 
-    ; rax = slots tuple
-    mov rbx, rax                    ; rbx = slots tuple
-    mov r13, [rbx + PyTupleObject.ob_size]  ; r13 = nslots
+    ; rax = slots list — get size and item pointers (same layout as tuple for ob_size/ob_item)
+.bc_slots_tuple:
+    ; rax = slots sequence (tuple or list, both have ob_size at same offset)
+    mov rbx, rax                    ; rbx = slots sequence
+    mov r13, [rbx + PyTupleObject.ob_size]  ; r13 = nslots (works for both)
     test r13, r13
     jz .bc_no_slots
 
