@@ -448,8 +448,17 @@ END_FUNC exc_getattr
 
 ; exc_isinstance(PyExceptionObject *exc, PyTypeObject *type) -> int (0/1)
 ; Check if exception is an instance of type, walking tp_base chain.
+; If type is a tuple, checks each element.
+extern tuple_type
 DEF_FUNC_BARE exc_isinstance
-    ; rdi = exc, rsi = target type
+    ; rdi = exc, rsi = target type (or tuple of types)
+    ; Check if rsi is a tuple
+    mov rax, [rsi + PyObject.ob_type]
+    lea rcx, [rel tuple_type]
+    cmp rax, rcx
+    je .tuple_match
+
+    ; Single type: walk tp_base chain
     mov rax, [rdi + PyExceptionObject.ob_type]
 .walk:
     test rax, rax
@@ -463,6 +472,41 @@ DEF_FUNC_BARE exc_isinstance
     ret
 .not_match:
     xor eax, eax
+    ret
+
+.tuple_match:
+    ; rsi = tuple of types. Check each element.
+    push rbx
+    push r12
+    push r13
+    mov rbx, rdi               ; save exc
+    mov r12, [rsi + PyTupleObject.ob_item]       ; type payloads
+    mov r13, [rsi + PyTupleObject.ob_size]        ; count
+    xor ecx, ecx
+.tuple_loop:
+    cmp rcx, r13
+    jge .tuple_no_match
+    push rcx
+    mov rdi, rbx               ; exc
+    mov rsi, [r12 + rcx*8]    ; type element
+    ; Recursive call for nested tuples
+    call exc_isinstance
+    pop rcx
+    test eax, eax
+    jnz .tuple_found
+    inc rcx
+    jmp .tuple_loop
+.tuple_found:
+    mov eax, 1
+    pop r13
+    pop r12
+    pop rbx
+    ret
+.tuple_no_match:
+    xor eax, eax
+    pop r13
+    pop r12
+    pop rbx
     ret
 END_FUNC exc_isinstance
 

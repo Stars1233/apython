@@ -1660,8 +1660,12 @@ DEF_FUNC list_repeat
 .rep_positive:
 
     mov r13, [rbx + PyListObject.ob_size]   ; r13 = len(list)
-    imul r14, r13, 1                         ; r14 = original length
+    mov r14, r13
     imul r14, r12                            ; r14 = total items
+    jo .rep_overflow                         ; signed overflow → MemoryError
+    ; Sanity check: total_items * 8 must fit in address space
+    cmp r14, 0x10000000                      ; 256M items limit (~2GB)
+    ja .rep_overflow
 
     ; Allocate new list
     mov rdi, r14
@@ -1711,6 +1715,12 @@ DEF_FUNC list_repeat
     pop rbx
     leave
     ret
+
+.rep_overflow:
+    extern exc_OverflowError_type
+    lea rdi, [rel exc_OverflowError_type]
+    CSTRING rsi, "too many items for list repetition"
+    call raise_exception
 END_FUNC list_repeat
 
 ;; ============================================================================
@@ -1879,6 +1889,9 @@ DEF_FUNC list_inplace_repeat, LIR_FRAME
     ; Grow items array: new_cap = old_size * count
     mov r13, rax              ; r13 = old_size
     imul rax, r12             ; rax = old_size * count = new_size
+    jo .lir_overflow           ; signed overflow → OverflowError
+    cmp rax, 0x10000000        ; 256M items limit
+    ja .lir_overflow
     push rax                  ; save new_size
 
     ; Realloc payloads
@@ -1966,6 +1979,11 @@ DEF_FUNC list_inplace_repeat, LIR_FRAME
     pop rbx
     leave
     ret
+.lir_overflow:
+    extern exc_OverflowError_type
+    lea rdi, [rel exc_OverflowError_type]
+    CSTRING rsi, "too many items for list repetition"
+    call raise_exception
 END_FUNC list_inplace_repeat
 
 ;; ============================================================================
@@ -1984,6 +2002,12 @@ DEF_FUNC list_type_call, LTC_FRAME
 
     mov r12, rsi            ; args
     mov r13, rdx            ; nargs
+
+    ; Reject keyword arguments
+    extern kw_names_pending
+    mov rax, [rel kw_names_pending]
+    test rax, rax
+    jnz .ltc_kwarg_error
 
     ; list() — no args: return empty list
     test r13, r13
@@ -2076,6 +2100,13 @@ DEF_FUNC list_type_call, LTC_FRAME
 .ltc_error:
     lea rdi, [rel exc_TypeError_type]
     CSTRING rsi, "list expected at most 1 argument"
+    call raise_exception
+
+.ltc_kwarg_error:
+    ; Clear kw_names_pending to avoid stale state
+    mov qword [rel kw_names_pending], 0
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "list() takes no keyword arguments"
     call raise_exception
 END_FUNC list_type_call
 
