@@ -117,6 +117,58 @@ DEF_FUNC_LOCAL add_method_to_dict
     ret
 END_FUNC add_method_to_dict
 
+;; ============================================================================
+;; HELPER: add_method_to_dict_checked(dict, name_cstr, func_ptr, min_args, max_args)
+;; rdi=dict, rsi=name_cstr, rdx=func_ptr, rcx=min_args, r8=max_args
+;; Like add_method_to_dict but sets arg count bounds.
+;; ============================================================================
+extern builtin_func_new_checked
+DEF_FUNC_LOCAL add_method_to_dict_checked
+    push rbx
+    push r12
+    push r13
+
+    mov rbx, rdi            ; dict
+    mov r12, rsi            ; name_cstr
+
+    ; Create builtin func wrapper with bounds
+    mov rdi, rdx            ; func_ptr
+    mov rsi, r12            ; name_cstr
+    ; rdx = min_args (already in rcx from caller)
+    mov rdx, rcx
+    ; rcx = max_args (from r8)
+    mov rcx, r8
+    call builtin_func_new_checked
+    push rax                ; save func obj
+
+    ; Create key string from name
+    mov rdi, r12
+    call str_from_cstr_heap
+    push rax                ; save key str
+
+    ; dict_set(dict, key, func_obj)
+    mov rdi, rbx
+    mov rsi, rax            ; key
+    mov rdx, [rsp + 8]     ; func obj
+    mov ecx, TAG_PTR
+    mov r8d, TAG_PTR
+    call dict_set
+
+    ; DECREF key (dict_set did INCREF)
+    pop rdi
+    call obj_decref
+
+    ; DECREF func obj (dict_set did INCREF)
+    pop rdi
+    call obj_decref
+
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC add_method_to_dict_checked
+
 ;; ############################################################################
 ;;                         STRING METHODS
 ;; ############################################################################
@@ -9590,29 +9642,37 @@ DEF_FUNC methods_init
     mov [rax + PyTypeObject.tp_dict], rbx
     ; INCREF the dict (type holds ref; dict_new gave us refcnt=1, which we keep)
 
-    ;; --- list methods ---
+    ;; --- list methods (with arg count validation) ---
     call dict_new
     mov rbx, rax
 
     mov rdi, rbx
     lea rsi, [rel mn_append]
     lea rdx, [rel list_method_append]
-    call add_method_to_dict
+    mov rcx, 2              ; min: self + item
+    mov r8, 2               ; max: self + item
+    call add_method_to_dict_checked
 
     mov rdi, rbx
     lea rsi, [rel mn_pop]
     lea rdx, [rel list_method_pop]
-    call add_method_to_dict
+    mov rcx, 1              ; min: self (index optional)
+    mov r8, 2               ; max: self + index
+    call add_method_to_dict_checked
 
     mov rdi, rbx
     lea rsi, [rel mn_insert]
     lea rdx, [rel list_method_insert]
-    call add_method_to_dict
+    mov rcx, 3              ; min: self + index + item
+    mov r8, 3               ; max
+    call add_method_to_dict_checked
 
     mov rdi, rbx
     lea rsi, [rel mn_reverse]
     lea rdx, [rel list_method_reverse]
-    call add_method_to_dict
+    mov rcx, 1              ; min: self
+    mov r8, 1               ; max: self
+    call add_method_to_dict_checked
 
     mov rdi, rbx
     lea rsi, [rel mn_sort]
@@ -9622,32 +9682,44 @@ DEF_FUNC methods_init
     mov rdi, rbx
     lea rsi, [rel mn_index]
     lea rdx, [rel list_method_index]
-    call add_method_to_dict
+    mov rcx, 2              ; min: self + value
+    mov r8, -1              ; max: unlimited (start, stop optional)
+    call add_method_to_dict_checked
 
     mov rdi, rbx
     lea rsi, [rel mn_count]
     lea rdx, [rel list_method_count]
-    call add_method_to_dict
+    mov rcx, 2              ; min: self + value
+    mov r8, 2               ; max: self + value
+    call add_method_to_dict_checked
 
     mov rdi, rbx
     lea rsi, [rel mn_copy]
     lea rdx, [rel list_method_copy]
-    call add_method_to_dict
+    mov rcx, 1              ; min: self
+    mov r8, 1               ; max: self
+    call add_method_to_dict_checked
 
     mov rdi, rbx
     lea rsi, [rel mn_clear]
     lea rdx, [rel list_method_clear]
-    call add_method_to_dict
+    mov rcx, 1              ; min: self
+    mov r8, 1               ; max: self
+    call add_method_to_dict_checked
 
     mov rdi, rbx
     lea rsi, [rel mn_extend]
     lea rdx, [rel list_method_extend]
-    call add_method_to_dict
+    mov rcx, 2              ; min: self + iterable
+    mov r8, 2               ; max
+    call add_method_to_dict_checked
 
     mov rdi, rbx
     lea rsi, [rel mn_remove]
     lea rdx, [rel list_method_remove]
-    call add_method_to_dict
+    mov rcx, 2              ; min: self + value
+    mov r8, 2               ; max
+    call add_method_to_dict_checked
 
     mov rdi, rbx
     lea rsi, [rel mn___reversed__]

@@ -60,6 +60,8 @@ struc PyBuiltinObject
     .func_id:     resq 1  ; +16: builtin function ID
     .func_name:   resq 1  ; +24: ptr to name string
     .func_ptr:    resq 1  ; +32: ptr to C implementation
+    .min_args:    resq 1  ; +40: minimum nargs (including self), 0 = no check
+    .max_args:    resq 1  ; +48: maximum nargs, -1 = no max check
 endstruc
 
 %endif ; BUILTINS_INC

@@ -161,6 +161,8 @@ DEF_FUNC builtin_func_new
     mov qword [rax + PyBuiltinObject.func_id], 0   ; not used for func_ptr dispatch
     mov [rax + PyBuiltinObject.func_name], r13
     mov [rax + PyBuiltinObject.func_ptr], rbx
+    mov qword [rax + PyBuiltinObject.min_args], 0  ; 0 = no check
+    mov qword [rax + PyBuiltinObject.max_args], -1 ; -1 = no max check
 
     pop r13
     pop r12
@@ -170,17 +172,64 @@ DEF_FUNC builtin_func_new
 END_FUNC builtin_func_new
 
 ;; ============================================================================
+;; builtin_func_new_checked(void *func_ptr, const char *name_cstr,
+;;                          int64_t min_args, int64_t max_args)
+;; Like builtin_func_new but sets arg count bounds for validation.
+;; rdx = min_args (including self), rcx = max_args (-1 = no max)
+;; ============================================================================
+global builtin_func_new_checked
+DEF_FUNC builtin_func_new_checked
+    push r14
+    push r15
+    mov r14, rdx                ; min_args
+    mov r15, rcx                ; max_args
+    call builtin_func_new
+    mov [rax + PyBuiltinObject.min_args], r14
+    mov [rax + PyBuiltinObject.max_args], r15
+    pop r15
+    pop r14
+    leave
+    ret
+END_FUNC builtin_func_new_checked
+
+;; ============================================================================
 ;; builtin_func_call(PyObject *self, PyObject **args, int64_t nargs) -> PyObject*
 ;; Dispatch to the underlying C function: func_ptr(args, nargs)
+;; Validates nargs against min_args/max_args if set.
 ;; ============================================================================
 DEF_FUNC_BARE builtin_func_call
     ; self = rdi, args = rsi, nargs = rdx
+    ; Check min_args (0 = no check)
+    mov rcx, [rdi + PyBuiltinObject.min_args]
+    test rcx, rcx
+    jz .bfc_no_min_check
+    cmp rdx, rcx
+    jl .bfc_too_few
+.bfc_no_min_check:
+    ; Check max_args (-1 = no check)
+    mov rcx, [rdi + PyBuiltinObject.max_args]
+    cmp rcx, -1
+    je .bfc_no_max_check
+    cmp rdx, rcx
+    jg .bfc_too_many
+.bfc_no_max_check:
     ; Extract func_ptr from self
     mov rax, [rdi + PyBuiltinObject.func_ptr]
     ; Call func_ptr(args, nargs)
     mov rdi, rsi                ; args
     mov rsi, rdx                ; nargs
     jmp rax                     ; tail call
+
+.bfc_too_few:
+    extern exc_TypeError_type
+    extern raise_exception
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "function takes at least 1 argument"
+    call raise_exception
+.bfc_too_many:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "function takes at most N arguments"
+    call raise_exception
 END_FUNC builtin_func_call
 
 ;; ============================================================================
