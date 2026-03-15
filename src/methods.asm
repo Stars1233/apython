@@ -6378,20 +6378,66 @@ END_FUNC list_method_reversed
 
 ;; ============================================================================
 ;; tuple_method_index(args, nargs) -> SmallInt index
-;; args[0]=self (tuple), args[1]=value
+;; args[0]=self (tuple), args[1]=value, optional args[2]=start, args[3]=stop
 ;; ============================================================================
-DEF_FUNC tuple_method_index
+DEF_FUNC tuple_method_index, 16
     push rbx
     push r12
     push r13
     push r14
 
+    mov [rbp - 8], rdi      ; save args
+    mov [rbp - 16], rsi     ; save nargs
     mov rbx, [rdi]          ; self (tuple)
     mov r12, [rdi + 16]     ; value to find (payload)
     mov r14d, [rdi + 24]    ; value tag
-    mov r13, [rbx + PyTupleObject.ob_size]
+    mov r13, [rbx + PyTupleObject.ob_size]  ; default stop = size
 
+    xor ecx, ecx            ; default start = 0
+
+    ; Check for optional start arg (nargs >= 3)
+    cmp qword [rbp - 16], 3
+    jl .ti_have_bounds
+    mov rax, [rbp - 8]
+    push rcx
+    mov rdi, [rax + 32]      ; args[2] payload
+    mov edx, [rax + 40]      ; args[2] tag
+    call int_to_i64
+    pop rcx
+    mov rcx, rax
+    ; Handle negative start
+    test rcx, rcx
+    jns .ti_start_pos
+    add rcx, r13
+    test rcx, rcx
+    jns .ti_start_pos
     xor ecx, ecx
+.ti_start_pos:
+
+    ; Check for optional stop arg (nargs >= 4)
+    cmp qword [rbp - 16], 4
+    jl .ti_have_bounds
+    mov rax, [rbp - 8]
+    push rcx
+    mov rdi, [rax + 48]      ; args[3] payload
+    mov edx, [rax + 56]      ; args[3] tag
+    call int_to_i64
+    pop rcx
+    ; Handle negative stop
+    test rax, rax
+    jns .ti_stop_pos
+    add rax, r13
+    test rax, rax
+    jns .ti_stop_pos
+    xor eax, eax
+.ti_stop_pos:
+    cmp rax, r13
+    jle .ti_stop_ok
+    mov rax, r13
+.ti_stop_ok:
+    mov r13, rax            ; r13 = stop
+
+.ti_have_bounds:
 .tindex_loop:
     cmp rcx, r13
     jge .tindex_not_found

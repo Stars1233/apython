@@ -286,9 +286,14 @@ DEF_FUNC_BARE op_binary_op
     lea rax, [rel int_type]
     jmp .binop_have_type
 .binop_have_type:
+    push rax                   ; save type ptr for sq fallback
     mov rax, [rax + PyTypeObject.tp_as_number]
     test rax, rax
-    jz .binop_try_dunder
+    jnz .binop_have_number
+    pop rax                    ; restore type ptr
+    jmp .binop_try_seq_fallback
+.binop_have_number:
+    add rsp, 8                 ; discard saved type ptr
     jmp .binop_call_method
 
 .use_float_methods:
@@ -393,6 +398,41 @@ DEF_FUNC_BARE op_binary_op
     ; Skip 1 CACHE entry = 2 bytes
     add rbx, 2
     DISPATCH
+
+.binop_try_seq_fallback:
+    ; rax = type ptr. Check if type has tp_as_sequence for ADD/MUL ops.
+    mov rax, [rax + PyTypeObject.tp_as_sequence]
+    test rax, rax
+    jz .binop_try_dunder
+    ; NB_ADD (0) or NB_INPLACE_ADD (13) → sq_concat / sq_inplace_concat
+    cmp r9d, 0              ; NB_ADD
+    je .binop_seq_concat
+    cmp r9d, 13             ; NB_INPLACE_ADD
+    je .binop_seq_concat
+    ; NB_MULTIPLY (5) or NB_INPLACE_MULTIPLY (18) → sq_repeat
+    cmp r9d, 5
+    je .binop_seq_repeat_left
+    cmp r9d, 18             ; NB_INPLACE_MULTIPLY
+    je .binop_seq_repeat_left
+    jmp .binop_try_dunder
+
+.binop_seq_concat:
+    mov rax, [rax + PySequenceMethods.sq_concat]
+    test rax, rax
+    jz .binop_try_dunder
+    ; sq_concat(left, right): rdi=left, rsi=right already set
+    call rax
+    jmp .binop_have_result
+
+.binop_seq_repeat_left:
+    mov rax, [rax + PySequenceMethods.sq_repeat]
+    test rax, rax
+    jz .binop_try_dunder
+    ; sq_repeat(left=sequence, right=count)
+    mov edx, [rsp + BO_RTAG]
+    mov ecx, edx
+    call rax
+    jmp .binop_have_result
 
 .binop_try_dunder:
     ; Try dunder method on heaptype objects

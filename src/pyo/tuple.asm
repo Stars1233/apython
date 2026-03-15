@@ -168,6 +168,10 @@ DEF_FUNC tuple_subscript
     lea rcx, [rel slice_type]
     cmp rax, rcx
     je .ts_slice
+    ; Check if key is actually an int type
+    lea rcx, [rel int_type]
+    cmp rax, rcx
+    jne .ts_type_error
 
 .ts_int:
     mov rdi, rsi               ; key
@@ -186,6 +190,11 @@ DEF_FUNC tuple_subscript
     pop rbx
     leave
     ret
+
+.ts_type_error:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "tuple indices must be integers or slices"
+    call raise_exception
 END_FUNC tuple_subscript
 
 ; tuple_len(PyTupleObject *tuple) -> int64_t
