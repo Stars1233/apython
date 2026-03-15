@@ -480,6 +480,144 @@ DEF_FUNC range_obj_reversed
 END_FUNC range_obj_reversed
 
 ;; ============================================================================
+;; range_obj_repr(PyRangeObject *self) -> PyStrObject*
+;; Returns "range(start, stop)" or "range(start, stop, step)" if step != 1
+;; ============================================================================
+extern str_from_cstr_heap
+extern obj_repr
+ROR_BUF equ 8
+ROR_POS equ 16
+ROR_FRAME equ 16
+DEF_FUNC range_obj_repr, ROR_FRAME
+    push rbx
+    push r12
+    push r13
+    push r14
+
+    mov rbx, rdi               ; self (range object)
+    mov r12, [rbx + PyRangeObject.start]
+    mov r13, [rbx + PyRangeObject.stop]
+    mov r14, [rbx + PyRangeObject.step]
+
+    ; Allocate buffer (128 bytes is plenty for "range(i64, i64, i64)")
+    mov edi, 128
+    call ap_malloc
+    mov [rbp - ROR_BUF], rax
+    mov qword [rbp - ROR_POS], 0
+
+    ; Write "range("
+    mov rdi, rax
+    mov byte [rdi], 'r'
+    mov byte [rdi+1], 'a'
+    mov byte [rdi+2], 'n'
+    mov byte [rdi+3], 'g'
+    mov byte [rdi+4], 'e'
+    mov byte [rdi+5], '('
+    mov qword [rbp - ROR_POS], 6
+
+    ; Format start
+    mov rdi, r12               ; start value (i64)
+    call .ror_format_i64
+
+    ; Write ", "
+    mov rdi, [rbp - ROR_BUF]
+    mov rcx, [rbp - ROR_POS]
+    mov byte [rdi + rcx], ','
+    mov byte [rdi + rcx + 1], ' '
+    add qword [rbp - ROR_POS], 2
+
+    ; Format stop
+    mov rdi, r13               ; stop value (i64)
+    call .ror_format_i64
+
+    ; If step != 1, add ", step"
+    cmp r14, 1
+    je .ror_close
+    mov rdi, [rbp - ROR_BUF]
+    mov rcx, [rbp - ROR_POS]
+    mov byte [rdi + rcx], ','
+    mov byte [rdi + rcx + 1], ' '
+    add qword [rbp - ROR_POS], 2
+    mov rdi, r14               ; step value (i64)
+    call .ror_format_i64
+
+.ror_close:
+    ; Write ")"
+    mov rdi, [rbp - ROR_BUF]
+    mov rcx, [rbp - ROR_POS]
+    mov byte [rdi + rcx], ')'
+    mov byte [rdi + rcx + 1], 0  ; NUL terminate
+    inc qword [rbp - ROR_POS]
+
+    ; Create string from buffer
+    mov rdi, [rbp - ROR_BUF]
+    call str_from_cstr_heap
+    push rax                   ; save string
+
+    ; Free buffer
+    mov rdi, [rbp - ROR_BUF]
+    call ap_free
+
+    pop rax                    ; return string
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
+; Helper: format i64 in rdi to buffer, appending at current position
+.ror_format_i64:
+    push rbx
+    push r12
+    mov rbx, rdi               ; value
+    mov r12, [rbp - ROR_BUF]
+    mov rcx, [rbp - ROR_POS]
+
+    ; Handle negative
+    test rbx, rbx
+    jns .ror_fi_pos
+    mov byte [r12 + rcx], '-'
+    inc rcx
+    mov [rbp - ROR_POS], rcx
+    neg rbx
+
+.ror_fi_pos:
+    ; Convert to decimal digits (reversed)
+    sub rsp, 24                ; temp digit buffer on stack
+    mov rdi, rsp
+    xor r8d, r8d               ; digit count
+    mov rax, rbx
+.ror_fi_loop:
+    xor edx, edx
+    mov rcx, 10
+    div rcx                    ; rax = quotient, rdx = remainder
+    add dl, '0'
+    mov [rdi + r8], dl
+    inc r8
+    test rax, rax
+    jnz .ror_fi_loop
+
+    ; Copy reversed digits to buffer
+    mov rcx, [rbp - ROR_POS]
+    mov rdi, [rbp - ROR_BUF]
+.ror_fi_copy:
+    dec r8
+    movzx eax, byte [rsp + r8]
+    mov [rdi + rcx], al
+    inc rcx
+    test r8, r8
+    jnz .ror_fi_copy
+
+    add rsp, 24
+    mov [rbp - ROR_POS], rcx
+    pop r12
+    pop rbx
+    ret
+
+END_FUNC range_obj_repr
+
+;; ============================================================================
 ;; init_iter_types
 ;; Patches list_type.tp_iter and tuple_type.tp_iter at startup
 ;; Called from main.asm or builtins_init
@@ -610,8 +748,8 @@ range_obj_type:
     dq range_obj_name           ; tp_name
     dq PyRangeObject_size       ; tp_basicsize
     dq range_obj_dealloc        ; tp_dealloc
-    dq 0                        ; tp_repr
-    dq 0                        ; tp_str
+    dq range_obj_repr           ; tp_repr
+    dq range_obj_repr           ; tp_str
     dq 0                        ; tp_hash
     dq 0                        ; tp_call
     dq 0                        ; tp_getattr
