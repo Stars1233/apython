@@ -72,6 +72,89 @@ DEF_FUNC dict_new
 END_FUNC dict_new
 
 ;; ============================================================================
+;; dict_type_call(PyTypeObject *type, PyObject **args, int64_t nargs) -> PyDictObject*
+;; Constructor: dict() or dict(mapping)
+;; ============================================================================
+global dict_type_call
+DEF_FUNC dict_type_call
+    push rbx
+    push r12
+    mov rbx, rsi               ; args
+    mov r12, rdx               ; nargs
+
+    ; dict() - no args
+    test r12, r12
+    jz .dtc_empty
+
+    ; dict(arg) - one positional arg
+    cmp r12, 1
+    jne .dtc_error
+
+    ; Check if arg is a dict
+    mov rdi, [rbx]             ; args[0] payload
+    mov eax, [rbx + 8]        ; args[0] tag
+    cmp eax, TAG_PTR
+    jne .dtc_error
+    mov rax, [rdi + PyObject.ob_type]
+    lea rcx, [rel dict_type]
+    cmp rax, rcx
+    jne .dtc_error
+
+    ; dict(other_dict) → create new dict and copy entries
+    push rdi                   ; save source dict
+    call dict_new
+    mov rbx, rax               ; rbx = new dict
+    pop rdi                    ; rdi = source dict
+
+    ; Copy all entries from source
+    mov r8, [rdi + PyDictObject.capacity]
+    xor ecx, ecx
+.dtc_copy_loop:
+    cmp rcx, r8
+    jge .dtc_copy_done
+    imul rax, rcx, DICT_ENTRY_SIZE
+    add rax, [rdi + PyDictObject.entries]
+    cmp byte [rax + DictEntry.value_tag], 0
+    je .dtc_copy_next
+    push rcx
+    push r8
+    push rdi
+    mov rdi, rbx               ; new dict
+    mov rsi, [rax + DictEntry.key]
+    mov rdx, [rax + DictEntry.value]
+    movzx ecx, byte [rax + DictEntry.value_tag]
+    movzx r8d, byte [rax + DictEntry.key_tag]
+    call dict_set
+    pop rdi
+    pop r8
+    pop rcx
+.dtc_copy_next:
+    inc rcx
+    jmp .dtc_copy_loop
+.dtc_copy_done:
+    mov rax, rbx
+    mov edx, TAG_PTR
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.dtc_empty:
+    call dict_new
+    mov edx, TAG_PTR
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.dtc_error:
+    extern exc_TypeError_type
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "dict() argument must be a dict"
+    call raise_exception
+END_FUNC dict_type_call
+
+;; ============================================================================
 ;; dict_keys_equal(rdi=a_key, rsi=b_key, edx=a_tag, ecx=b_tag) -> int (1=equal, 0=not)
 ;; Internal helper: value equality for SmallInts, string comparison for heap ptrs.
 ;; ============================================================================
@@ -1702,7 +1785,7 @@ dict_type:
     dq dict_repr                ; tp_str
     extern hash_not_implemented
     dq hash_not_implemented     ; tp_hash (raises TypeError)
-    dq 0                        ; tp_call
+    dq dict_type_call           ; tp_call
     dq 0                        ; tp_getattr
     dq 0                        ; tp_setattr
     dq dict_richcompare         ; tp_richcompare
