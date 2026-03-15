@@ -163,12 +163,35 @@ pyobj_to_i64:
     lea rax, [rel none_singleton]
     cmp rdi, rax
     je .is_none
-    ; GMP int: use mpz_get_si
+    ; GMP int: check if it fits in i64, clamp if not
     push rbp
     mov rbp, rsp
+    push rdi                     ; save obj ptr
+    lea rdi, [rdi + PyIntObject.mpz]
+    extern __gmpz_fits_slong_p
+    call __gmpz_fits_slong_p wrt ..plt
+    test eax, eax
+    jz .gmp_clamp               ; doesn't fit → clamp
+    pop rdi                      ; restore obj ptr
     lea rdi, [rdi + PyIntObject.mpz]
     extern __gmpz_get_si
     call __gmpz_get_si wrt ..plt
+    leave
+    ret
+.gmp_clamp:
+    ; Value too large for i64 — clamp based on sign
+    pop rdi                      ; restore obj ptr
+    lea rdi, [rdi + PyIntObject.mpz]
+    extern __gmpz_cmp_si
+    xor esi, esi               ; compare with 0
+    call __gmpz_cmp_si wrt ..plt
+    test eax, eax
+    js .gmp_clamp_neg
+    mov rax, 0x7FFFFFFFFFFFFFFE  ; positive: clamp to near-maxsize (not sentinel)
+    leave
+    ret
+.gmp_clamp_neg:
+    mov rax, 0x8000000000000001  ; negative: clamp to near-minsize
     leave
     ret
 .smallint:
