@@ -22,3 +22,51 @@ def requires_resource(name):
 
 def run_in_subinterp(code):
     raise unittest.SkipTest("no subinterp support")
+
+# Sentinel objects for testing comparison behavior
+class _ALWAYS_EQ:
+    """Object that is equal to everything."""
+    def __eq__(self, other):
+        return True
+    def __ne__(self, other):
+        return False
+    def __lt__(self, other):
+        return False
+    def __le__(self, other):
+        return True
+    def __gt__(self, other):
+        return False
+    def __ge__(self, other):
+        return True
+    def __hash__(self):
+        return 0
+
+ALWAYS_EQ = _ALWAYS_EQ()
+
+class _NEVER_EQ:
+    """Object that is not equal to anything."""
+    def __eq__(self, other):
+        return False
+    def __ne__(self, other):
+        return True
+    def __lt__(self, other):
+        return False
+    def __le__(self, other):
+        return False
+    def __gt__(self, other):
+        return False
+    def __ge__(self, other):
+        return False
+    def __hash__(self):
+        return 0
+
+NEVER_EQ = _NEVER_EQ()
+
+C_RECURSION_LIMIT = 50
+
+def check_free_after_iterating(test, func, cls):
+    """Check that an iterator doesn't hold references after exhaustion."""
+    obj = cls([0, 1, 2, 3, 4])
+    it = func(obj)
+    for _ in it:
+        pass

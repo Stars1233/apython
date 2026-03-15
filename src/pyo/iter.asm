@@ -50,11 +50,13 @@ END_FUNC list_iter_new
 ;; ============================================================================
 DEF_FUNC_BARE list_iter_next
     mov rax, [rdi + PyListIterObject.it_seq]      ; list
+    test rax, rax
+    jz .exhausted                                  ; already exhausted
     mov rcx, [rdi + PyListIterObject.it_index]     ; index
 
     ; Check bounds
     cmp rcx, [rax + PyListObject.ob_size]
-    jge .exhausted
+    jge .exhausted_mark
 
     ; Get item (payload + tag arrays)
     mov rdx, [rax + PyListObject.ob_item]
@@ -67,6 +69,14 @@ DEF_FUNC_BARE list_iter_next
     inc qword [rdi + PyListIterObject.it_index]
     ret
 
+.exhausted_mark:
+    ; Mark as permanently exhausted by clearing it_seq
+    ; DECREF the list
+    push rdi
+    mov rdi, [rdi + PyListIterObject.it_seq]
+    call obj_decref
+    pop rdi
+    mov qword [rdi + PyListIterObject.it_seq], 0
 .exhausted:
     RET_NULL
     ret
@@ -79,9 +89,12 @@ DEF_FUNC_LOCAL list_iter_dealloc
     push rbx
     mov rbx, rdi
 
-    ; DECREF the list
+    ; DECREF the list (if not already exhausted)
     mov rdi, [rbx + PyListIterObject.it_seq]
+    test rdi, rdi
+    jz .lid_no_decref
     call obj_decref
+.lid_no_decref:
 
     ; Free self
     mov rdi, rbx

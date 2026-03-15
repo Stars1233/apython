@@ -105,6 +105,66 @@ DEF_FUNC list_new
 END_FUNC list_new
 
 ;; ============================================================================
+;; list_copy(PyListObject *src) -> PyListObject* (shallow copy)
+;; Creates a new list with same items, INCREFs each.
+;; ============================================================================
+global list_copy
+DEF_FUNC list_copy
+    push rbx
+    push r12
+    push r13
+
+    mov rbx, rdi               ; src list
+    mov r12, [rbx + PyListObject.ob_size]
+
+    ; Allocate new list
+    mov rdi, r12
+    test rdi, rdi
+    jnz .lc_alloc
+    mov rdi, 4
+.lc_alloc:
+    call list_new
+    mov r13, rax               ; new list
+    mov [r13 + PyListObject.ob_size], r12
+
+    ; Bulk copy payloads
+    mov rdi, [r13 + PyListObject.ob_item]
+    mov rsi, [rbx + PyListObject.ob_item]
+    mov rdx, r12
+    shl rdx, 3
+    call ap_memcpy
+
+    ; Bulk copy tags
+    mov rdi, [r13 + PyListObject.ob_item_tags]
+    mov rsi, [rbx + PyListObject.ob_item_tags]
+    mov rdx, r12
+    call ap_memcpy
+
+    ; INCREF each item
+    xor ecx, ecx
+.lc_incref:
+    cmp rcx, r12
+    jge .lc_done
+    mov rax, [r13 + PyListObject.ob_item]
+    mov rdx, [r13 + PyListObject.ob_item_tags]
+    mov rdi, [rax + rcx * 8]
+    movzx esi, byte [rdx + rcx]
+    push rcx
+    INCREF_VAL rdi, rsi
+    pop rcx
+    inc rcx
+    jmp .lc_incref
+
+.lc_done:
+    mov rax, r13
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC list_copy
+
+;; ============================================================================
 ;; list_append(PyListObject *list, PyObject *item, int item_tag)
 ;; Append item, grow if needed. INCREF item. rdx = item_tag.
 ;; ============================================================================
@@ -281,6 +341,11 @@ DEF_FUNC list_subscript
     cmp rax, rcx
     je .ls_slice
 
+    ; Check if it's actually an int type before converting
+    mov rax, [rsi + PyObject.ob_type]
+    lea rcx, [rel int_type]
+    cmp rax, rcx
+    jne .ls_type_error
     ; Heap int -> convert to i64
     mov rdi, rsi
     call int_to_i64
@@ -309,6 +374,11 @@ DEF_FUNC list_subscript
     pop rbx
     leave
     ret
+
+.ls_type_error:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "list indices must be integers or slices"
+    call raise_exception
 END_FUNC list_subscript
 
 ;; ============================================================================
@@ -346,6 +416,10 @@ DEF_FUNC list_ass_subscript, LAS_FRAME
     call int_to_i64
     mov rsi, rax
 
+    ; Check if this is a delete (value_tag == TAG_NULL)
+    cmp qword [rbp - LAS_VTAG], TAG_NULL
+    je .las_int_delete
+
     ; Call list_setitem
     mov rdi, rbx
     mov rdx, r12
@@ -356,6 +430,77 @@ DEF_FUNC list_ass_subscript, LAS_FRAME
     pop rbx
     leave
     ret
+
+.las_int_delete:
+    ; Delete item at index rsi from list rbx
+    ; Handle negative index
+    test rsi, rsi
+    jns .lid_positive
+    add rsi, [rbx + PyListObject.ob_size]
+.lid_positive:
+    ; Bounds check
+    cmp rsi, [rbx + PyListObject.ob_size]
+    jge .lid_index_error
+    cmp rsi, 0
+    jl .lid_index_error
+
+    push rsi                   ; save index
+
+    ; DECREF old value at index
+    mov rax, [rbx + PyListObject.ob_item]
+    mov rdx, [rbx + PyListObject.ob_item_tags]
+    mov rdi, [rax + rsi * 8]      ; old value payload
+    movzx ecx, byte [rdx + rsi]   ; old value tag
+    DECREF_VAL rdi, rcx
+
+    pop rsi                    ; restore index
+
+    ; Shift elements down: memmove items[i] = items[i+1] for i..size-2
+    mov rcx, [rbx + PyListObject.ob_size]
+    dec rcx                    ; new_size = size - 1
+    mov r8, rcx
+    sub r8, rsi                ; count = new_size - index
+
+    ; Shift payload array
+    mov rax, [rbx + PyListObject.ob_item]
+    lea rdi, [rax + rsi * 8]      ; dst
+    lea r9, [rdi + 8]             ; src = dst + 8
+    push rcx
+    push rsi
+    push r8
+    mov rsi, r9               ; src
+    ; rdi already = dst
+    shl r8, 3                 ; count * 8 bytes
+    mov rcx, r8
+    cld
+    rep movsb
+    pop r8
+    pop rsi
+    pop rcx
+
+    ; Shift tag array
+    mov rax, [rbx + PyListObject.ob_item_tags]
+    lea rdi, [rax + rsi]          ; dst
+    lea r9, [rdi + 1]             ; src = dst + 1
+    push rcx
+    mov rsi, r9               ; src
+    mov rcx, r8               ; count bytes (1 byte per tag)
+    cld
+    rep movsb
+    pop rcx
+
+    ; Decrement ob_size
+    mov [rbx + PyListObject.ob_size], rcx
+
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.lid_index_error:
+    lea rdi, [rel exc_IndexError_type]
+    CSTRING rsi, "list assignment index out of range"
+    call raise_exception
 
 .las_slice:
     ; Slice assignment: a[start:stop] = value
@@ -406,7 +551,17 @@ DEF_FUNC list_ass_subscript, LAS_FRAME
     cmp rax, rdx
     jne .las_try_tuple
 
-    ; Value is a list
+    ; Value is a list — check for self-assignment
+    cmp r12, rbx
+    jne .las_list_direct
+    ; Self-assignment: make a shallow copy first
+    push rcx                   ; save old_len (clobbered by list_copy)
+    mov rdi, r12
+    call list_copy
+    pop rcx                    ; restore old_len
+    mov r12, rax
+    mov [rbp - LAS_TEMP], rax  ; store for cleanup at exit
+.las_list_direct:
     mov r8, [r12 + PyListObject.ob_size]       ; r8 = new_len
     mov r9, [r12 + PyListObject.ob_item]       ; r9 = new payload ptr
     mov r10, [r12 + PyListObject.ob_item_tags] ; r10 = new tag ptr
@@ -744,6 +899,16 @@ DEF_FUNC list_ass_subscript, LAS_FRAME
     jmp .las_type_error
 
 .ext_from_list:
+    ; Self-assignment check: if source == target, make a shallow copy
+    cmp r12, rbx
+    jne .ext_list_direct
+    ; Create temp copy of the list for self-assignment
+    mov rdi, r12
+    extern list_copy
+    call list_copy
+    mov r12, rax               ; r12 = temp copy list
+    mov [rbp - LAS_TEMP], rax  ; store for cleanup at exit
+.ext_list_direct:
     mov r8, [r12 + PyListObject.ob_size]
     mov r11, [r12 + PyListObject.ob_item_tags]
     mov r12, [r12 + PyListObject.ob_item]
@@ -1135,9 +1300,10 @@ DEF_FUNC list_getslice
     ; Compute slicelength
     test r15, r15
     jg .lgs_pos_step
-    ; Negative step
+    ; Negative step: if start <= stop, empty
     mov rax, r13
     sub rax, r14               ; start - stop
+    jle .lgs_empty
     dec rax                    ; start - stop - 1
     mov rcx, r15
     neg rcx                    ; abs(step)
@@ -1664,7 +1830,7 @@ DEF_FUNC list_inplace_repeat, LIR_FRAME
     mov [rbx + PyListObject.ob_item], rax
     ; Realloc tags
     mov rdi, [rbx + PyListObject.ob_item_tags]
-    mov rsi, rax              ; new_size (bytes)
+    mov rsi, [rsp]            ; new_size from stack (not rax which is realloc result)
     call ap_realloc
     mov [rbx + PyListObject.ob_item_tags], rax
     pop rax                   ; new_size

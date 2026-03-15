@@ -371,9 +371,10 @@ DEF_FUNC tuple_getslice
     ; Compute slicelength
     test r15, r15
     jg .tgs_pos_step
-    ; Negative step
+    ; Negative step: if start <= stop, empty
     mov rax, r13
     sub rax, r14
+    jle .tgs_empty
     dec rax
     mov rcx, r15
     neg rcx

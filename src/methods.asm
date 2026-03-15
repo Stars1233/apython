@@ -5076,7 +5076,7 @@ END_FUNC list_method_sort
 
 ;; ============================================================================
 ;; list_method_index(args, nargs) -> SmallInt index
-;; args[0]=self, args[1]=value
+;; args[0]=self, args[1]=value, optional args[2]=start, args[3]=stop
 ;; Linear scan with identity check then __eq__ protocol
 ;; ============================================================================
 LI_LIST   equ 8
@@ -5084,21 +5084,74 @@ LI_VPAY   equ 16   ; value payload
 LI_VTAG   equ 24   ; value tag
 LI_IDX    equ 32
 LI_SIZE   equ 40
-LI_FRAME  equ 40
+LI_ARGS   equ 48   ; save args pointer
+LI_NARGS  equ 56   ; save nargs
+LI_FRAME  equ 56
 DEF_FUNC list_method_index, LI_FRAME
     push rbx
     push r12
 
+    mov [rbp - LI_ARGS], rdi  ; save args
+    mov [rbp - LI_NARGS], rsi ; save nargs
     mov rax, [rdi]           ; self
     mov [rbp - LI_LIST], rax
     mov rax, [rdi + 16]      ; value payload
     mov [rbp - LI_VPAY], rax
     mov rax, [rdi + 24]      ; value tag
     mov [rbp - LI_VTAG], rax
-    mov rax, [rbp - LI_LIST]
-    mov rax, [rax + PyListObject.ob_size]
-    mov [rbp - LI_SIZE], rax
+    mov rcx, [rbp - LI_LIST]
+    mov rcx, [rcx + PyListObject.ob_size]
+
+    ; Default stop = list size
+    mov [rbp - LI_SIZE], rcx
+
+    ; Default start = 0
     mov qword [rbp - LI_IDX], 0
+
+    ; Check for optional start arg (nargs >= 3)
+    cmp qword [rbp - LI_NARGS], 3
+    jl .li_have_bounds
+    ; Get start from args[2]
+    mov rax, [rbp - LI_ARGS]
+    mov rdi, [rax + 32]      ; args[2] payload
+    mov edx, [rax + 40]      ; args[2] tag
+    call int_to_i64
+    ; Handle negative start
+    test rax, rax
+    jns .li_start_pos
+    add rax, [rbp - LI_SIZE]  ; start += len
+    test rax, rax
+    jns .li_start_pos
+    xor eax, eax              ; clamp to 0
+.li_start_pos:
+    mov [rbp - LI_IDX], rax
+
+    ; Check for optional stop arg (nargs >= 4)
+    cmp qword [rbp - LI_NARGS], 4
+    jl .li_have_bounds
+    ; Get stop from args[3]
+    mov rax, [rbp - LI_ARGS]
+    mov rdi, [rax + 48]      ; args[3] payload
+    mov edx, [rax + 56]      ; args[3] tag
+    call int_to_i64
+    ; Handle negative stop
+    test rax, rax
+    jns .li_stop_pos
+    add rax, [rbp - LI_SIZE]  ; stop += len
+    test rax, rax
+    jns .li_stop_pos
+    xor eax, eax              ; clamp to 0
+.li_stop_pos:
+    ; Clamp stop to list size
+    mov rcx, [rbp - LI_LIST]
+    mov rcx, [rcx + PyListObject.ob_size]
+    cmp rax, rcx
+    jle .li_stop_ok
+    mov rax, rcx
+.li_stop_ok:
+    mov [rbp - LI_SIZE], rax
+
+.li_have_bounds:
 
 .index_loop:
     mov rax, [rbp - LI_IDX]

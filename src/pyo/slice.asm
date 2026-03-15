@@ -195,28 +195,42 @@ DEF_FUNC slice_indices
     mov rbx, rdi           ; slice
     mov r14, rsi           ; length
 
-    ; Sentinel constant for "None" from pyobj_to_i64
-    ; (can't use cmp rax, imm64 — x86-64 doesn't support it)
-%define NONE_SENTINEL 0x7FFFFFFFFFFFFFFF
+    ; Check for None using both TAG_NONE and (none_singleton, TAG_PTR) forms.
+    ; This avoids collision between NONE_SENTINEL and sys.maxsize.
+    extern none_singleton
 
     ; Get step (default 1)
+    cmp qword [rbx + PySliceObject.step_tag], TAG_NONE
+    je .step_is_none
+    cmp qword [rbx + PySliceObject.step_tag], TAG_PTR
+    jne .step_not_none
+    lea rcx, [rel none_singleton]
+    cmp [rbx + PySliceObject.step], rcx
+    je .step_is_none
+.step_not_none:
     mov rdi, [rbx + PySliceObject.step]
     mov esi, [rbx + PySliceObject.step_tag]
     call pyobj_to_i64
-    mov rcx, NONE_SENTINEL
-    cmp rax, rcx
-    jne .have_step
+    jmp .have_step
+.step_is_none:
     mov rax, 1
 .have_step:
     mov r15, rax           ; r15 = step
 
     ; Get start (default: 0 if step>0, length-1 if step<0)
+    cmp qword [rbx + PySliceObject.start_tag], TAG_NONE
+    je .start_is_none
+    cmp qword [rbx + PySliceObject.start_tag], TAG_PTR
+    jne .start_not_none
+    lea rcx, [rel none_singleton]
+    cmp [rbx + PySliceObject.start], rcx
+    je .start_is_none
+.start_not_none:
     mov rdi, [rbx + PySliceObject.start]
     mov esi, [rbx + PySliceObject.start_tag]
     call pyobj_to_i64
-    mov rcx, NONE_SENTINEL
-    cmp rax, rcx
-    jne .have_start
+    jmp .have_start
+.start_is_none:
     test r15, r15
     js .start_neg_step
     xor eax, eax           ; start = 0
@@ -235,17 +249,28 @@ DEF_FUNC slice_indices
 .start_pos:
     cmp rax, r14
     jl .start_ok
-    mov rax, r14           ; clamp to length
+    ; start >= length: clamp to length-1 if step<0, length if step>0
+    mov rax, r14
+    test r15, r15
+    jns .start_ok
+    dec rax                ; start = length - 1 for negative step
 .start_ok:
     mov r12, rax           ; r12 = start
 
     ; Get stop (default: length if step>0, -1 if step<0)
+    cmp qword [rbx + PySliceObject.stop_tag], TAG_NONE
+    je .stop_is_none
+    cmp qword [rbx + PySliceObject.stop_tag], TAG_PTR
+    jne .stop_not_none
+    lea rcx, [rel none_singleton]
+    cmp [rbx + PySliceObject.stop], rcx
+    je .stop_is_none
+.stop_not_none:
     mov rdi, [rbx + PySliceObject.stop]
     mov esi, [rbx + PySliceObject.stop_tag]
     call pyobj_to_i64
-    mov rcx, NONE_SENTINEL
-    cmp rax, rcx
-    jne .have_stop
+    jmp .have_stop
+.stop_is_none:
     test r15, r15
     js .stop_neg_step
     mov rax, r14           ; stop = length
@@ -260,10 +285,13 @@ DEF_FUNC slice_indices
     add rax, r14           ; stop += length
     test rax, rax
     jns .stop_pos
-    ; For negative step, stop=-1 is valid (means "go to beginning")
+    ; For negative step, clamp to -1 (means "go to beginning")
     test r15, r15
-    js .stop_ok
+    js .stop_neg_clamp
     xor eax, eax           ; clamp to 0 for positive step
+    jmp .stop_ok
+.stop_neg_clamp:
+    mov rax, -1            ; clamp to -1 for negative step
     jmp .stop_ok
 .stop_pos:
     cmp rax, r14

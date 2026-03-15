@@ -74,6 +74,8 @@ gen-cpython-tests:
 	@$(PYTHON) -m py_compile tests/cpython/test_keywordonlyarg.py
 	@echo "Compiling tests/cpython/test_augassign.py..."
 	@$(PYTHON) -m py_compile tests/cpython/test_augassign.py
+	@echo "Compiling tests/cpython/test_list.py..."
+	@$(PYTHON) -m py_compile tests/cpython/test_list.py
 	@echo "Done."
 
 check-cpython: $(TARGET) gen-cpython-tests
@@ -95,3 +97,5 @@ check-cpython: $(TARGET) gen-cpython-tests
 	@./apython tests/cpython/__pycache__/test_keywordonlyarg.cpython-312.pyc
 	@echo "Running CPython test_augassign.py..."
 	@./apython tests/cpython/__pycache__/test_augassign.cpython-312.pyc
+	@echo "Running CPython test_list.py..."
+	@./apython tests/cpython/__pycache__/test_list.cpython-312.pyc

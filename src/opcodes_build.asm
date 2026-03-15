@@ -2340,6 +2340,16 @@ DEF_FUNC_BARE op_for_iter_list
     DISPATCH
 
 .fil_exhausted:
+    ; Mark iterator as exhausted: DECREF list, clear it_seq
+    push rdi                       ; save iterator ptr
+    mov rdi, [rdi + PyListIterObject.it_seq]
+    test rdi, rdi
+    jz .fil_already_exhausted
+    call obj_decref
+.fil_already_exhausted:
+    pop rdi
+    mov qword [rdi + PyListIterObject.it_seq], 0
+
     ; Restore the original arg (jump offset)
     pop rcx                        ; restore jump offset
     lea rcx, [rcx + 1]            ; arg + 1

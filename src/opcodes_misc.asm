@@ -245,6 +245,28 @@ DEF_FUNC_BARE op_binary_op
     ; Non-pointer guard: TAG_NONE, TAG_FLOAT can't be dereferenced
     test qword [rsp + BO_LTAG], TAG_RC_BIT
     jz .binop_no_method
+    ; Check if left has sq_repeat and right is int (e.g. tuple*3, list*3)
+    ; Only for NB_MULTIPLY, not INPLACE (imul uses nb_imul/sq_inplace_repeat)
+    cmp r9d, 5              ; NB_MULTIPLY
+    je .binop_try_left_seq
+    jmp .binop_left_seq_done
+.binop_try_left_seq:
+    cmp qword [rsp + BO_RTAG], TAG_SMALLINT
+    jne .binop_left_seq_done
+    mov rax, [rdi + PyObject.ob_type]
+    mov rax, [rax + PyTypeObject.tp_as_sequence]
+    test rax, rax
+    jz .binop_left_seq_done
+    mov rax, [rax + PySequenceMethods.sq_repeat]
+    test rax, rax
+    jz .binop_left_seq_done
+    ; Call sq_repeat(left=sequence, right=count)
+    ; rdi already = left (sequence), rsi already = right (count)
+    mov edx, [rsp + BO_RTAG]    ; count tag (right operand)
+    mov ecx, edx
+    call rax
+    jmp .binop_have_result
+.binop_left_seq_done:
     mov rax, [rdi + PyObject.ob_type]
     jmp .binop_have_type
 .binop_left_type:
