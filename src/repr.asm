@@ -29,6 +29,51 @@ extern str_type
 extern str_repr
 extern fat_to_obj
 
+; Recursion detection for container repr
+; Simple fixed-size stack of object pointers currently being repr'd.
+section .data
+align 8
+repr_depth: dq 0                  ; current depth (number of entries)
+repr_stack: times 64 dq 0         ; up to 64 nested containers
+
+section .text
+
+; Check if ptr is in repr_stack. Returns 1 in eax if found, 0 if not.
+; Does NOT clobber rdi.
+repr_check_active:
+    mov rcx, [rel repr_depth]
+    test rcx, rcx
+    jz .rca_not_found
+    lea rax, [rel repr_stack]
+.rca_loop:
+    dec rcx
+    cmp [rax + rcx*8], rdi
+    je .rca_found
+    test rcx, rcx
+    jnz .rca_loop
+.rca_not_found:
+    xor eax, eax
+    ret
+.rca_found:
+    mov eax, 1
+    ret
+
+; Push ptr onto repr_stack
+repr_push:
+    mov rax, [rel repr_depth]
+    cmp rax, 64
+    jge .rp_full
+    lea rcx, [rel repr_stack]
+    mov [rcx + rax*8], rdi
+    inc qword [rel repr_depth]
+.rp_full:
+    ret
+
+; Pop from repr_stack
+repr_pop:
+    dec qword [rel repr_depth]
+    ret
+
 ; Internal buffer struct (on stack):
 ;   [rbp-8]  = buf ptr
 ;   [rbp-16] = buf used (length of content)
@@ -75,6 +120,16 @@ DEF_FUNC list_repr, 24                ; buf ptr, used, capacity
     push r13                   ; count
 
     mov rbx, rdi               ; rbx = list
+
+    ; Recursion check: if already repr'ing this list, return "[...]"
+    mov rdi, rbx
+    call repr_check_active
+    test eax, eax
+    jnz .lr_recursive
+
+    ; Push onto repr stack
+    mov rdi, rbx
+    call repr_push
 
     ; Get count
     mov r13, [rbx + PyListObject.ob_size]
@@ -156,6 +211,21 @@ DEF_FUNC list_repr, 24                ; buf ptr, used, capacity
 
     pop rax                    ; return str
     mov edx, TAG_PTR           ; ap_free clobbers rdx
+
+    ; Pop from repr stack
+    call repr_pop
+
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.lr_recursive:
+    ; Return "[...]" for recursive reference
+    CSTRING rdi, "[...]"
+    call str_from_cstr_heap
+    mov edx, TAG_PTR
     pop r13
     pop r12
     pop rbx
