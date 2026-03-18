@@ -699,9 +699,11 @@ END_FUNC op_build_const_key_map
 ;; op_unpack_sequence - Unpack iterable into N items on stack
 ;;
 ;; ecx = count
-;; Pop TOS (tuple/list), push items[count-1], ..., items[0] (reverse order)
+;; Pop TOS (tuple/list/str), push items[count-1], ..., items[0] (reverse order)
 ;; Followed by 1 CACHE entry (2 bytes).
 ;; ============================================================================
+extern str_new
+extern str_type
 DEF_FUNC_BARE op_unpack_sequence
     VPOP_VAL rdi, r8           ; rdi = sequence (tuple or list), r8 = tag
     cmp r8d, TAG_PTR
@@ -723,6 +725,10 @@ DEF_FUNC_BARE op_unpack_sequence
     cmp rax, rdx
     je .unpack_list
 
+    lea rdx, [rel str_type]
+    cmp rax, rdx
+    je .unpack_str
+
 .unpack_type_error:
     ; Unknown type
     lea rdi, [rel exc_TypeError_type]
@@ -730,12 +736,18 @@ DEF_FUNC_BARE op_unpack_sequence
     call raise_exception
 
 .unpack_tuple:
+    ; Validate count matches size
+    cmp rcx, [rdi + PyTupleObject.ob_size]
+    jne .unpack_count_error
     ; Items are in payload/tag arrays
     mov rsi, [rdi + PyTupleObject.ob_item]
     mov r8, [rdi + PyTupleObject.ob_item_tags]
     jmp .unpack_fill
 
 .unpack_list:
+    ; Validate count matches size
+    cmp rcx, [rdi + PyListObject.ob_size]
+    jne .unpack_count_error
     ; Items in payload/tag arrays
     mov rsi, [rdi + PyListObject.ob_item]
     mov r8, [rdi + PyListObject.ob_item_tags]
@@ -768,6 +780,77 @@ DEF_FUNC_BARE op_unpack_sequence
     ; DECREF the sequence (payload + tag)
     pop rdi                    ; sequence payload
     pop rsi                    ; sequence tag
+    DECREF_VAL rdi, rsi
+
+    ; Skip 1 CACHE entry = 2 bytes
+    add rbx, 2
+    DISPATCH
+
+.unpack_count_error:
+    ; Count mismatch: expected ecx items, got different size
+    pop rdi                    ; sequence payload
+    pop rsi                    ; sequence tag
+    DECREF_VAL rdi, rsi
+    lea rdi, [rel exc_ValueError_type]
+    CSTRING rsi, "not enough values to unpack"
+    call raise_exception
+
+.unpack_str:
+    ; String unpacking: a, b, c = "xyz"
+    ; Validate length matches count
+    cmp rcx, [rdi + PyStrObject.ob_size]
+    jne .unpack_count_error
+
+    ; Use rbp-frame for the string unpacking loop
+    ; Save callee-saved regs
+    push rbx                   ; save bytecode IP
+    push r12                   ; save frame
+    push r14                   ; spare
+
+    mov r12, rcx               ; r12 = count
+    mov r14, rdi               ; r14 = string object
+
+    ; Pre-advance stack by count
+    mov edx, ecx
+    shl edx, 3
+    add r13, rdx              ; payload stack += count * 8
+    add r15, rcx              ; tag stack += count
+
+    ; Create single-char strings in reverse order (count-1 down to 0)
+    mov ebx, ecx
+    dec ebx                    ; ebx = source index (count-1)
+    mov rcx, r12
+    neg rcx                    ; rcx = -count (negative offset)
+
+.unpack_str_loop:
+    test ebx, ebx
+    js .unpack_str_done
+
+    ; Create single-char string: str_new(&data[ebx], 1)
+    lea rdi, [r14 + PyStrObject.data]
+    movsxd rax, ebx
+    add rdi, rax               ; rdi = &str.data[ebx]
+    mov rsi, 1                 ; length = 1
+    push rcx                   ; save negative offset
+    push rbx                   ; save source index
+    call str_new
+    pop rbx
+    pop rcx
+    ; rax = new string (TAG_PTR, refcount=1, ownership transferred to stack)
+    mov [r13 + rcx*8], rax
+    mov byte [r15 + rcx], TAG_PTR
+    inc rcx
+    dec ebx
+    jmp .unpack_str_loop
+
+.unpack_str_done:
+    pop r14
+    pop r12
+    pop rbx                    ; restore bytecode IP
+
+    ; DECREF the string
+    pop rdi                    ; string payload
+    pop rsi                    ; string tag
     DECREF_VAL rdi, rsi
 
     ; Skip 1 CACHE entry = 2 bytes

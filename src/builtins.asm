@@ -97,6 +97,7 @@ extern builtin_chain
 extern builtin_globals
 extern builtin_locals
 extern builtin_dir
+extern builtin_breakpoint
 
 ; Exception types
 extern exc_BaseException_type
@@ -2081,6 +2082,11 @@ DEF_FUNC builtins_init
     lea rdx, [rel builtin_dir]
     call add_builtin
 
+    mov rdi, rbx
+    lea rsi, [rel bi_name_breakpoint]
+    lea rdx, [rel builtin_breakpoint]
+    call add_builtin
+
     ; Register super type as builtin (LOAD_SUPER_ATTR needs it loadable)
     mov rdi, rbx
     lea rsi, [rel bi_name_super]
@@ -2108,6 +2114,13 @@ DEF_FUNC builtins_init
     mov rdi, rbx
     lea rsi, [rel bi_name_NotImplemented]
     lea rdx, [rel notimpl_singleton]
+    call add_exc_type_builtin
+
+    ; Register Ellipsis singleton as builtin constant
+    extern ellipsis_singleton
+    mov rdi, rbx
+    lea rsi, [rel bi_name_Ellipsis]
+    lea rdx, [rel ellipsis_singleton]
     call add_exc_type_builtin
 
     ; Register exception types as builtins
@@ -2269,6 +2282,192 @@ DEF_FUNC builtins_init
     mov rdi, rbx
     lea rsi, [rel bi_name_TimeoutError]
     lea rdx, [rel exc_TimeoutError_type]
+    call add_exc_type_builtin
+
+    extern exc_GeneratorExit_type
+    mov rdi, rbx
+    lea rsi, [rel bi_name_GeneratorExit]
+    lea rdx, [rel exc_GeneratorExit_type]
+    call add_exc_type_builtin
+
+    extern exc_ModuleNotFoundError_type
+    mov rdi, rbx
+    lea rsi, [rel bi_name_ModuleNotFoundError]
+    lea rdx, [rel exc_ModuleNotFoundError_type]
+    call add_exc_type_builtin
+
+    extern exc_SyntaxError_type
+    mov rdi, rbx
+    lea rsi, [rel bi_name_SyntaxError]
+    lea rdx, [rel exc_SyntaxError_type]
+    call add_exc_type_builtin
+
+    extern exc_EOFError_type
+    mov rdi, rbx
+    lea rsi, [rel bi_name_EOFError]
+    lea rdx, [rel exc_EOFError_type]
+    call add_exc_type_builtin
+
+    extern exc_UnicodeDecodeError_type
+    mov rdi, rbx
+    lea rsi, [rel bi_name_UnicodeDecodeError]
+    lea rdx, [rel exc_UnicodeDecodeError_type]
+    call add_exc_type_builtin
+
+    extern exc_UnicodeEncodeError_type
+    mov rdi, rbx
+    lea rsi, [rel bi_name_UnicodeEncodeError]
+    lea rdx, [rel exc_UnicodeEncodeError_type]
+    call add_exc_type_builtin
+
+    extern exc_ConnectionError_type
+    mov rdi, rbx
+    lea rsi, [rel bi_name_ConnectionError]
+    lea rdx, [rel exc_ConnectionError_type]
+    call add_exc_type_builtin
+
+    extern exc_ConnectionResetError_type
+    mov rdi, rbx
+    lea rsi, [rel bi_name_ConnectionResetError]
+    lea rdx, [rel exc_ConnectionResetError_type]
+    call add_exc_type_builtin
+
+    extern exc_ConnectionRefusedError_type
+    mov rdi, rbx
+    lea rsi, [rel bi_name_ConnectionRefusedError]
+    lea rdx, [rel exc_ConnectionRefusedError_type]
+    call add_exc_type_builtin
+
+    extern exc_ConnectionAbortedError_type
+    mov rdi, rbx
+    lea rsi, [rel bi_name_ConnectionAbortedError]
+    lea rdx, [rel exc_ConnectionAbortedError_type]
+    call add_exc_type_builtin
+
+    extern exc_BrokenPipeError_type
+    mov rdi, rbx
+    lea rsi, [rel bi_name_BrokenPipeError]
+    lea rdx, [rel exc_BrokenPipeError_type]
+    call add_exc_type_builtin
+
+    extern exc_PermissionError_type
+    mov rdi, rbx
+    lea rsi, [rel bi_name_PermissionError]
+    lea rdx, [rel exc_PermissionError_type]
+    call add_exc_type_builtin
+
+    extern exc_IsADirectoryError_type
+    mov rdi, rbx
+    lea rsi, [rel bi_name_IsADirectoryError]
+    lea rdx, [rel exc_IsADirectoryError_type]
+    call add_exc_type_builtin
+
+    extern exc_NotADirectoryError_type
+    mov rdi, rbx
+    lea rsi, [rel bi_name_NotADirectoryError]
+    lea rdx, [rel exc_NotADirectoryError_type]
+    call add_exc_type_builtin
+
+    extern exc_ProcessLookupError_type
+    mov rdi, rbx
+    lea rsi, [rel bi_name_ProcessLookupError]
+    lea rdx, [rel exc_ProcessLookupError_type]
+    call add_exc_type_builtin
+
+    extern exc_ChildProcessError_type
+    mov rdi, rbx
+    lea rsi, [rel bi_name_ChildProcessError]
+    lea rdx, [rel exc_ChildProcessError_type]
+    call add_exc_type_builtin
+
+    extern exc_BlockingIOError_type
+    mov rdi, rbx
+    lea rsi, [rel bi_name_BlockingIOError]
+    lea rdx, [rel exc_BlockingIOError_type]
+    call add_exc_type_builtin
+
+    extern exc_InterruptedError_type
+    mov rdi, rbx
+    lea rsi, [rel bi_name_InterruptedError]
+    lea rdx, [rel exc_InterruptedError_type]
+    call add_exc_type_builtin
+
+    extern exc_FloatingPointError_type
+    mov rdi, rbx
+    lea rsi, [rel bi_name_FloatingPointError]
+    lea rdx, [rel exc_FloatingPointError_type]
+    call add_exc_type_builtin
+
+    extern exc_BufferError_type
+    mov rdi, rbx
+    lea rsi, [rel bi_name_BufferError]
+    lea rdx, [rel exc_BufferError_type]
+    call add_exc_type_builtin
+
+    extern exc_ReferenceError_type
+    mov rdi, rbx
+    lea rsi, [rel bi_name_ReferenceError]
+    lea rdx, [rel exc_ReferenceError_type]
+    call add_exc_type_builtin
+
+    extern exc_SystemError_type
+    mov rdi, rbx
+    lea rsi, [rel bi_name_SystemError]
+    lea rdx, [rel exc_SystemError_type]
+    call add_exc_type_builtin
+
+    extern exc_RuntimeWarning_type
+    mov rdi, rbx
+    lea rsi, [rel bi_name_RuntimeWarning]
+    lea rdx, [rel exc_RuntimeWarning_type]
+    call add_exc_type_builtin
+
+    extern exc_FutureWarning_type
+    mov rdi, rbx
+    lea rsi, [rel bi_name_FutureWarning]
+    lea rdx, [rel exc_FutureWarning_type]
+    call add_exc_type_builtin
+
+    extern exc_ImportWarning_type
+    mov rdi, rbx
+    lea rsi, [rel bi_name_ImportWarning]
+    lea rdx, [rel exc_ImportWarning_type]
+    call add_exc_type_builtin
+
+    extern exc_UnicodeWarning_type
+    mov rdi, rbx
+    lea rsi, [rel bi_name_UnicodeWarning]
+    lea rdx, [rel exc_UnicodeWarning_type]
+    call add_exc_type_builtin
+
+    extern exc_ResourceWarning_type
+    mov rdi, rbx
+    lea rsi, [rel bi_name_ResourceWarning]
+    lea rdx, [rel exc_ResourceWarning_type]
+    call add_exc_type_builtin
+
+    extern exc_BytesWarning_type
+    mov rdi, rbx
+    lea rsi, [rel bi_name_BytesWarning]
+    lea rdx, [rel exc_BytesWarning_type]
+    call add_exc_type_builtin
+
+    extern exc_PendingDeprecationWarning_type
+    mov rdi, rbx
+    lea rsi, [rel bi_name_PendingDeprecationWarning]
+    lea rdx, [rel exc_PendingDeprecationWarning_type]
+    call add_exc_type_builtin
+
+    extern exc_SyntaxWarning_type
+    mov rdi, rbx
+    lea rsi, [rel bi_name_SyntaxWarning]
+    lea rdx, [rel exc_SyntaxWarning_type]
+    call add_exc_type_builtin
+
+    extern exc_EncodingWarning_type
+    mov rdi, rbx
+    lea rsi, [rel bi_name_EncodingWarning]
+    lea rdx, [rel exc_EncodingWarning_type]
     call add_exc_type_builtin
 
     ; Register data types as builtins
@@ -2477,6 +2676,7 @@ END_FUNC add_exc_type_builtin
 ;; ============================================================================
 section .rodata
 
+bi_name_breakpoint:   db "breakpoint", 0
 bi_name_print:        db "print", 0
 bi_name_len:          db "len", 0
 bi_name_range:        db "range", 0
@@ -2528,6 +2728,7 @@ bi_name_staticmethod: db "staticmethod", 0
 bi_name_classmethod:  db "classmethod", 0
 bi_name_property:     db "property", 0
 bi_name_NotImplemented: db "NotImplemented", 0
+bi_name_Ellipsis:      db "Ellipsis", 0
 
 ; Exception type names
 bi_name_BaseException:     db "BaseException", 0
@@ -2562,6 +2763,37 @@ bi_name_ExceptionGroup:    db "ExceptionGroup", 0
 bi_name_CancelledError:    db "CancelledError", 0
 bi_name_StopAsyncIteration: db "StopAsyncIteration", 0
 bi_name_TimeoutError:      db "TimeoutError", 0
+bi_name_GeneratorExit:     db "GeneratorExit", 0
+bi_name_ModuleNotFoundError: db "ModuleNotFoundError", 0
+bi_name_SyntaxError:       db "SyntaxError", 0
+bi_name_EOFError:          db "EOFError", 0
+bi_name_UnicodeDecodeError: db "UnicodeDecodeError", 0
+bi_name_UnicodeEncodeError: db "UnicodeEncodeError", 0
+bi_name_ConnectionError:   db "ConnectionError", 0
+bi_name_ConnectionResetError: db "ConnectionResetError", 0
+bi_name_ConnectionRefusedError: db "ConnectionRefusedError", 0
+bi_name_ConnectionAbortedError: db "ConnectionAbortedError", 0
+bi_name_BrokenPipeError:   db "BrokenPipeError", 0
+bi_name_PermissionError:   db "PermissionError", 0
+bi_name_IsADirectoryError: db "IsADirectoryError", 0
+bi_name_NotADirectoryError: db "NotADirectoryError", 0
+bi_name_ProcessLookupError: db "ProcessLookupError", 0
+bi_name_ChildProcessError: db "ChildProcessError", 0
+bi_name_BlockingIOError:   db "BlockingIOError", 0
+bi_name_InterruptedError:  db "InterruptedError", 0
+bi_name_FloatingPointError: db "FloatingPointError", 0
+bi_name_BufferError:       db "BufferError", 0
+bi_name_ReferenceError:    db "ReferenceError", 0
+bi_name_SystemError:       db "SystemError", 0
+bi_name_RuntimeWarning:    db "RuntimeWarning", 0
+bi_name_FutureWarning:     db "FutureWarning", 0
+bi_name_ImportWarning:     db "ImportWarning", 0
+bi_name_UnicodeWarning:    db "UnicodeWarning", 0
+bi_name_ResourceWarning:   db "ResourceWarning", 0
+bi_name_BytesWarning:      db "BytesWarning", 0
+bi_name_PendingDeprecationWarning: db "PendingDeprecationWarning", 0
+bi_name_SyntaxWarning:     db "SyntaxWarning", 0
+bi_name_EncodingWarning:   db "EncodingWarning", 0
 bi_name_list:              db "list", 0
 bi_name_dict:              db "dict", 0
 bi_name_tuple:             db "tuple", 0

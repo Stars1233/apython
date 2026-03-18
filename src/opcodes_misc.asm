@@ -832,8 +832,48 @@ section .text
     pop rcx
 
     test edx, edx
-    jz .cmp_identity            ; dunder not found → identity fallback
-    jmp .cmp_do_call_result     ; rax = result object
+    jnz .cmp_do_call_result     ; got result, proceed
+
+    ; Dunder not found. If NE, try __eq__ + negate (auto-derivation)
+    cmp ecx, PY_NE
+    jne .cmp_identity           ; not NE → identity fallback
+
+    ; Try __eq__ on left's heaptype
+    mov rdi, [rsp + BO_LEFT]
+    mov rsi, [rsp + BO_RIGHT]
+    lea rax, [rel cmp_dunder_table]
+    mov rdx, [rax + PY_EQ*8]   ; rdx = "__eq__" name
+    push rcx
+    mov ecx, [rsp + 8 + BO_RTAG]  ; right_tag (+8 for push rcx)
+    call dunder_call_2
+    pop rcx
+    test edx, edx
+    jz .cmp_identity            ; __eq__ also not found → identity
+
+    ; Negate __eq__ result: if True → False, if False → True
+    cmp edx, TAG_BOOL
+    je .ne_negate_tag_bool
+    ; Check for TAG_PTR bool (bool_true/bool_false singletons)
+    cmp edx, TAG_PTR
+    jne .cmp_do_call_result     ; non-bool result, just use as-is
+    extern bool_true
+    extern bool_false
+    lea rcx, [rel bool_true]
+    cmp rax, rcx
+    je .ne_return_false
+    lea rcx, [rel bool_false]
+    cmp rax, rcx
+    je .ne_return_true
+    jmp .cmp_do_call_result     ; not a bool ptr → use as-is
+.ne_negate_tag_bool:
+    xor eax, 1                  ; flip 0↔1 for TAG_BOOL
+    jmp .cmp_do_call_result
+.ne_return_false:
+    lea rax, [rel bool_false]
+    jmp .cmp_do_call_result
+.ne_return_true:
+    lea rax, [rel bool_true]
+    jmp .cmp_do_call_result
 
 .cmp_use_float:
     extern float_compare

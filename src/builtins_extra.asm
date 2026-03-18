@@ -1637,11 +1637,53 @@ DEF_FUNC builtin_callable
     jne .callable_false             ; non-pointer tag (TAG_FLOAT etc.)
     mov rdi, [rdi]                     ; args[0] payload
 
+    ; Get type of arg
     mov rax, [rdi + PyObject.ob_type]
+
+    ; Check if arg is a type (all types are callable via type_call)
+    extern type_type
+    lea rcx, [rel type_type]
+    cmp rax, rcx
+    je .callable_true
+    extern exc_metatype
+    lea rcx, [rel exc_metatype]
+    cmp rax, rcx
+    je .callable_true
+    lea rcx, [rel user_type_metatype]
+    cmp rax, rcx
+    je .callable_true
+
+    ; For heaptypes (user-defined classes): tp_call is set only when __call__ defined
+    mov rdx, [rax + PyTypeObject.tp_flags]
+    test rdx, TYPE_FLAG_HEAPTYPE
+    jnz .callable_check_heaptype
+
+    ; For built-in types: only known callable types return True
+    ; (func, builtin_func, method have genuinely callable instances)
+    extern func_type
+    lea rcx, [rel func_type]
+    cmp rax, rcx
+    je .callable_true
+    extern builtin_func_type
+    lea rcx, [rel builtin_func_type]
+    cmp rax, rcx
+    je .callable_true
+    extern method_type
+    lea rcx, [rel method_type]
+    cmp rax, rcx
+    je .callable_true
+
+    ; Not a known callable built-in type (dict, list, set, etc. instances → not callable)
+    jmp .callable_false
+
+.callable_check_heaptype:
+    ; Heaptype instance: check if type has tp_call set (set when __call__ defined)
     mov rcx, [rax + PyTypeObject.tp_call]
     test rcx, rcx
-    jz .callable_false
+    jnz .callable_true
+    jmp .callable_false
 
+.callable_true:
     lea rax, [rel bool_true]
     inc qword [rax + PyObject.ob_refcnt]
     mov edx, TAG_PTR
@@ -4265,3 +4307,14 @@ DEF_FUNC builtin_import_fn
     CSTRING rsi, "__import__() requires at least 1 argument"
     call raise_exception
 END_FUNC builtin_import_fn
+
+; ============================================================================
+; builtin_breakpoint(args, nargs) - breakpoint() stub (no-op)
+; ============================================================================
+global builtin_breakpoint
+DEF_FUNC_BARE builtin_breakpoint
+    ; No-op: return None
+    xor eax, eax
+    mov edx, TAG_NONE
+    ret
+END_FUNC builtin_breakpoint

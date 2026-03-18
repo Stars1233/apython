@@ -843,6 +843,37 @@ exc_name_UserWarning:       db "UserWarning", 0
 exc_name_CancelledError:    db "CancelledError", 0
 exc_name_StopAsyncIteration: db "StopAsyncIteration", 0
 exc_name_TimeoutError:      db "TimeoutError", 0
+exc_name_GeneratorExit:     db "GeneratorExit", 0
+exc_name_ModuleNotFoundError: db "ModuleNotFoundError", 0
+exc_name_SyntaxError:       db "SyntaxError", 0
+exc_name_EOFError:          db "EOFError", 0
+exc_name_UnicodeDecodeError: db "UnicodeDecodeError", 0
+exc_name_UnicodeEncodeError: db "UnicodeEncodeError", 0
+exc_name_ConnectionError:   db "ConnectionError", 0
+exc_name_ConnectionResetError: db "ConnectionResetError", 0
+exc_name_ConnectionRefusedError: db "ConnectionRefusedError", 0
+exc_name_ConnectionAbortedError: db "ConnectionAbortedError", 0
+exc_name_BrokenPipeError:   db "BrokenPipeError", 0
+exc_name_PermissionError:   db "PermissionError", 0
+exc_name_IsADirectoryError: db "IsADirectoryError", 0
+exc_name_NotADirectoryError: db "NotADirectoryError", 0
+exc_name_ProcessLookupError: db "ProcessLookupError", 0
+exc_name_ChildProcessError: db "ChildProcessError", 0
+exc_name_BlockingIOError:   db "BlockingIOError", 0
+exc_name_InterruptedError:  db "InterruptedError", 0
+exc_name_FloatingPointError: db "FloatingPointError", 0
+exc_name_BufferError:       db "BufferError", 0
+exc_name_ReferenceError:    db "ReferenceError", 0
+exc_name_SystemError:       db "SystemError", 0
+exc_name_RuntimeWarning:    db "RuntimeWarning", 0
+exc_name_FutureWarning:     db "FutureWarning", 0
+exc_name_ImportWarning:     db "ImportWarning", 0
+exc_name_UnicodeWarning:    db "UnicodeWarning", 0
+exc_name_ResourceWarning:   db "ResourceWarning", 0
+exc_name_BytesWarning:      db "BytesWarning", 0
+exc_name_PendingDeprecationWarning: db "PendingDeprecationWarning", 0
+exc_name_SyntaxWarning:     db "SyntaxWarning", 0
+exc_name_EncodingWarning:   db "EncodingWarning", 0
 
 ; Exception metatype - provides tp_call so exception types can be called
 ; e.g., ValueError("msg") works via CALL opcode
@@ -977,6 +1008,37 @@ DEF_EXC_TYPE exc_UserWarning_type, exc_name_UserWarning, exc_Warning_type
 DEF_EXC_TYPE exc_CancelledError_type, exc_name_CancelledError, exc_BaseException_type
 DEF_EXC_TYPE exc_StopAsyncIteration_type, exc_name_StopAsyncIteration, exc_Exception_type
 DEF_EXC_TYPE exc_TimeoutError_type, exc_name_TimeoutError, exc_Exception_type
+DEF_EXC_TYPE exc_GeneratorExit_type, exc_name_GeneratorExit, exc_BaseException_type
+DEF_EXC_TYPE exc_ModuleNotFoundError_type, exc_name_ModuleNotFoundError, exc_ImportError_type
+DEF_EXC_TYPE exc_SyntaxError_type, exc_name_SyntaxError, exc_Exception_type
+DEF_EXC_TYPE exc_EOFError_type, exc_name_EOFError, exc_Exception_type
+DEF_EXC_TYPE exc_UnicodeDecodeError_type, exc_name_UnicodeDecodeError, exc_UnicodeError_type
+DEF_EXC_TYPE exc_UnicodeEncodeError_type, exc_name_UnicodeEncodeError, exc_UnicodeError_type
+DEF_EXC_TYPE exc_ConnectionError_type, exc_name_ConnectionError, exc_OSError_type
+DEF_EXC_TYPE exc_ConnectionResetError_type, exc_name_ConnectionResetError, exc_ConnectionError_type
+DEF_EXC_TYPE exc_ConnectionRefusedError_type, exc_name_ConnectionRefusedError, exc_ConnectionError_type
+DEF_EXC_TYPE exc_ConnectionAbortedError_type, exc_name_ConnectionAbortedError, exc_ConnectionError_type
+DEF_EXC_TYPE exc_BrokenPipeError_type, exc_name_BrokenPipeError, exc_ConnectionError_type
+DEF_EXC_TYPE exc_PermissionError_type, exc_name_PermissionError, exc_OSError_type
+DEF_EXC_TYPE exc_IsADirectoryError_type, exc_name_IsADirectoryError, exc_OSError_type
+DEF_EXC_TYPE exc_NotADirectoryError_type, exc_name_NotADirectoryError, exc_OSError_type
+DEF_EXC_TYPE exc_ProcessLookupError_type, exc_name_ProcessLookupError, exc_OSError_type
+DEF_EXC_TYPE exc_ChildProcessError_type, exc_name_ChildProcessError, exc_OSError_type
+DEF_EXC_TYPE exc_BlockingIOError_type, exc_name_BlockingIOError, exc_OSError_type
+DEF_EXC_TYPE exc_InterruptedError_type, exc_name_InterruptedError, exc_OSError_type
+DEF_EXC_TYPE exc_FloatingPointError_type, exc_name_FloatingPointError, exc_ArithmeticError_type
+DEF_EXC_TYPE exc_BufferError_type, exc_name_BufferError, exc_Exception_type
+DEF_EXC_TYPE exc_ReferenceError_type, exc_name_ReferenceError, exc_Exception_type
+DEF_EXC_TYPE exc_SystemError_type, exc_name_SystemError, exc_Exception_type
+DEF_EXC_TYPE exc_RuntimeWarning_type, exc_name_RuntimeWarning, exc_Warning_type
+DEF_EXC_TYPE exc_FutureWarning_type, exc_name_FutureWarning, exc_Warning_type
+DEF_EXC_TYPE exc_ImportWarning_type, exc_name_ImportWarning, exc_Warning_type
+DEF_EXC_TYPE exc_UnicodeWarning_type, exc_name_UnicodeWarning, exc_Warning_type
+DEF_EXC_TYPE exc_ResourceWarning_type, exc_name_ResourceWarning, exc_Warning_type
+DEF_EXC_TYPE exc_BytesWarning_type, exc_name_BytesWarning, exc_Warning_type
+DEF_EXC_TYPE exc_PendingDeprecationWarning_type, exc_name_PendingDeprecationWarning, exc_Warning_type
+DEF_EXC_TYPE exc_SyntaxWarning_type, exc_name_SyntaxWarning, exc_Warning_type
+DEF_EXC_TYPE exc_EncodingWarning_type, exc_name_EncodingWarning, exc_Warning_type
 
 ; Exception type lookup table indexed by EXC_* constants
 align 8
