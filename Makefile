@@ -155,6 +155,10 @@ gen-cpython-tests:
 	@$(PYTHON) -m py_compile tests/cpython/test_assignment.py
 	@$(PYTHON) -m py_compile tests/cpython/test_exceptions_extra.py
 	@$(PYTHON) -m py_compile tests/cpython/test_generators_extra.py
+	@$(PYTHON) -m py_compile tests/cpython/test_format.py
+	@$(PYTHON) -m py_compile tests/cpython/test_slice_ops.py
+	@$(PYTHON) -m py_compile tests/cpython/test_numeric.py
+	@$(PYTHON) -m py_compile tests/cpython/test_comprehensions.py
 	@echo "Done."
 
 check-cpython: $(TARGET) gen-cpython-tests
@@ -262,3 +266,11 @@ check-cpython: $(TARGET) gen-cpython-tests
 	@./apython tests/cpython/__pycache__/test_exceptions_extra.cpython-312.pyc
 	@echo "Running CPython test_generators_extra.py..."
 	@./apython tests/cpython/__pycache__/test_generators_extra.cpython-312.pyc
+	@echo "Running CPython test_format.py..."
+	@./apython tests/cpython/__pycache__/test_format.cpython-312.pyc
+	@echo "Running CPython test_slice_ops.py..."
+	@./apython tests/cpython/__pycache__/test_slice_ops.cpython-312.pyc
+	@echo "Running CPython test_numeric.py..."
+	@./apython tests/cpython/__pycache__/test_numeric.cpython-312.pyc
+	@echo "Running CPython test_comprehensions.py..."
+	@./apython tests/cpython/__pycache__/test_comprehensions.cpython-312.pyc
