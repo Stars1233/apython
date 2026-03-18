@@ -163,6 +163,10 @@ gen-cpython-tests:
 	@$(PYTHON) -m py_compile tests/cpython/test_walrus.py
 	@$(PYTHON) -m py_compile tests/cpython/test_match.py
 	@$(PYTHON) -m py_compile tests/cpython/test_datastructures.py
+	@$(PYTHON) -m py_compile tests/cpython/test_exceptions_builtin.py
+	@$(PYTHON) -m py_compile tests/cpython/test_functions.py
+	@$(PYTHON) -m py_compile tests/cpython/test_range_extra.py
+	@$(PYTHON) -m py_compile tests/cpython/test_conditional.py
 	@echo "Done."
 
 check-cpython: $(TARGET) gen-cpython-tests
@@ -286,3 +290,11 @@ check-cpython: $(TARGET) gen-cpython-tests
 	@./apython tests/cpython/__pycache__/test_match.cpython-312.pyc
 	@echo "Running CPython test_datastructures.py..."
 	@./apython tests/cpython/__pycache__/test_datastructures.cpython-312.pyc
+	@echo "Running CPython test_exceptions_builtin.py..."
+	@./apython tests/cpython/__pycache__/test_exceptions_builtin.cpython-312.pyc
+	@echo "Running CPython test_functions.py..."
+	@./apython tests/cpython/__pycache__/test_functions.cpython-312.pyc
+	@echo "Running CPython test_range_extra.py..."
+	@./apython tests/cpython/__pycache__/test_range_extra.cpython-312.pyc
+	@echo "Running CPython test_conditional.py..."
+	@./apython tests/cpython/__pycache__/test_conditional.cpython-312.pyc
