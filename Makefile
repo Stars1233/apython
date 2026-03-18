@@ -159,6 +159,10 @@ gen-cpython-tests:
 	@$(PYTHON) -m py_compile tests/cpython/test_slice_ops.py
 	@$(PYTHON) -m py_compile tests/cpython/test_numeric.py
 	@$(PYTHON) -m py_compile tests/cpython/test_comprehensions.py
+	@$(PYTHON) -m py_compile tests/cpython/test_decorators_extra.py
+	@$(PYTHON) -m py_compile tests/cpython/test_walrus.py
+	@$(PYTHON) -m py_compile tests/cpython/test_match.py
+	@$(PYTHON) -m py_compile tests/cpython/test_datastructures.py
 	@echo "Done."
 
 check-cpython: $(TARGET) gen-cpython-tests
@@ -274,3 +278,11 @@ check-cpython: $(TARGET) gen-cpython-tests
 	@./apython tests/cpython/__pycache__/test_numeric.cpython-312.pyc
 	@echo "Running CPython test_comprehensions.py..."
 	@./apython tests/cpython/__pycache__/test_comprehensions.cpython-312.pyc
+	@echo "Running CPython test_decorators_extra.py..."
+	@./apython tests/cpython/__pycache__/test_decorators_extra.cpython-312.pyc
+	@echo "Running CPython test_walrus.py..."
+	@./apython tests/cpython/__pycache__/test_walrus.cpython-312.pyc
+	@echo "Running CPython test_match.py..."
+	@./apython tests/cpython/__pycache__/test_match.cpython-312.pyc
+	@echo "Running CPython test_datastructures.py..."
+	@./apython tests/cpython/__pycache__/test_datastructures.cpython-312.pyc
