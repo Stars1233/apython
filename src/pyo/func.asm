@@ -1134,3 +1134,4 @@ func_type:
     dq 0                    ; tp_bases
     dq func_traverse                        ; tp_traverse
     dq func_clear                        ; tp_clear
+    dq 0       ; tp_dictoffset

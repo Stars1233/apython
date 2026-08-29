@@ -845,6 +845,7 @@ exc_BaseExceptionGroup_type:
     dq 0                        ; tp_bases
     dq 0                        ; tp_traverse
     dq 0                        ; tp_clear
+    dq 0 ; tp_dictoffset
 
 ; ExceptionGroup type — base = BaseExceptionGroup (also inherits from Exception)
 align 8
@@ -876,3 +877,4 @@ exc_ExceptionGroup_type:
     dq 0                        ; tp_bases
     dq 0                        ; tp_traverse
     dq 0                        ; tp_clear
+    dq 0 ; tp_dictoffset

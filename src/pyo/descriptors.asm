@@ -744,6 +744,7 @@ staticmethod_type:
     dq 0                        ; tp_bases
     dq staticmethod_traverse                        ; tp_traverse
     dq staticmethod_clear                        ; tp_clear
+    dq 0               ; tp_dictoffset
 
 ; classmethod_type - type descriptor for classmethod wrapper
 align 8
@@ -775,6 +776,7 @@ classmethod_type:
     dq 0                        ; tp_bases
     dq classmethod_traverse                        ; tp_traverse
     dq classmethod_clear                        ; tp_clear
+    dq 0              ; tp_dictoffset
 
 ; property_type - type descriptor for property descriptor
 align 8
@@ -806,6 +808,7 @@ property_type:
     dq 0                        ; tp_bases
     dq property_traverse                        ; tp_traverse
     dq property_clear                        ; tp_clear
+    dq 0           ; tp_dictoffset
 
 ; member_descr_type - type descriptor for __slots__ member descriptors
 md_name_str: db "member_descriptor", 0
@@ -838,6 +841,7 @@ member_descr_type:
     dq 0                            ; tp_bases
     dq 0                        ; tp_traverse
     dq 0                        ; tp_clear
+    dq 0 ; tp_dictoffset
 
 ; Cached builtin function singletons for property.setter/getter/deleter
 _prop_setter_cache: dq 0

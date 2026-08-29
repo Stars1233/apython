@@ -812,6 +812,7 @@ sleep_awaitable_type:
     dq 0                        ; tp_bases
     dq 0                        ; tp_traverse
     dq 0                        ; tp_clear
+    dq 0 ; tp_dictoffset
 
 align 8
 global wait_for_awaitable_type
@@ -842,3 +843,4 @@ wait_for_awaitable_type:
     dq 0                        ; tp_bases
     dq 0                        ; tp_traverse
     dq 0                        ; tp_clear
+    dq 0 ; tp_dictoffset

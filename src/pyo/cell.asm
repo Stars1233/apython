@@ -155,3 +155,4 @@ cell_type:
     dq 0                      ; tp_bases
     dq cell_traverse                        ; tp_traverse
     dq cell_clear                        ; tp_clear
+    dq 0       ; tp_dictoffset

@@ -101,6 +101,7 @@ none_type:
     dq 0                    ; tp_bases
     dq 0                        ; tp_traverse
     dq 0                        ; tp_clear
+    dq 0 ; tp_dictoffset
 
 ; None singleton - immortal object, never freed
 align 8
@@ -154,6 +155,7 @@ notimpl_type:
     dq 0                    ; tp_bases
     dq 0                        ; tp_traverse
     dq 0                        ; tp_clear
+    dq 0 ; tp_dictoffset
 
 ; NotImplemented singleton - immortal object, never freed
 align 8
@@ -207,6 +209,7 @@ ellipsis_type:
     dq 0                    ; tp_bases
     dq 0                    ; tp_traverse
     dq 0                    ; tp_clear
+    dq 0 ; tp_dictoffset
 
 ; Ellipsis singleton - immortal object, never freed
 align 8

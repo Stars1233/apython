@@ -86,8 +86,10 @@ DEF_FUNC instance_new
     test rax, TYPE_FLAG_HAS_SLOTS
     jnz .in_no_dict              ; __slots__ suppresses inst_dict
 
+    cmp qword [rbx + PyTypeObject.tp_dictoffset], 0
+    je .in_no_dict              ; this family's instances carry no dict
     call dict_new
-    mov [r12 + PyInstanceObject.inst_dict], rax
+    STORE_INST_DICT r12, rax, rcx, .in_no_dict
 
 .in_no_dict:
     mov rdi, r12
@@ -123,8 +125,8 @@ DEF_FUNC instance_getattr, IG_FRAME
     mov r12, rsi                ; r12 = name
     mov [rbp - IG_NAME], rsi    ; r12 is reused as scratch further down
 
-    ; Check self->inst_dict first (may be NULL for int subclass instances)
-    mov rdi, [rbx + PyInstanceObject.inst_dict]
+    ; Check self's instance dict first; a type may have none at all.
+    LOAD_INST_DICT rdi, rbx, .check_type_dict
     test rdi, rdi
     jz .check_type_dict
     mov rsi, r12
@@ -378,8 +380,8 @@ DEF_FUNC instance_setattr
     ret
 
 .sa_no_slot:
-    ; No slot found. Fall back to inst_dict.
-    mov rdi, [rbx + PyInstanceObject.inst_dict]
+    ; No slot found. Fall back to the instance dict.
+    LOAD_INST_DICT rdi, rbx, .sa_no_dict_slot
     test rdi, rdi
     jnz .sa_have_dict
 
@@ -394,7 +396,7 @@ DEF_FUNC instance_setattr
     push r13
     push r14
     call dict_new
-    mov [rbx + PyInstanceObject.inst_dict], rax
+    STORE_INST_DICT rbx, rax, rcx, .sa_no_dict_slot
     mov rdi, rax
     pop r14
     pop r13
@@ -416,6 +418,13 @@ DEF_FUNC instance_setattr
     ret
 
 .sa_no_dict_error:
+    lea rdi, [rel exc_AttributeError_type]
+    CSTRING rsi, "object has no attribute"
+    call raise_exception
+
+.sa_no_dict_slot:
+    ; This type's instances have no dict slot -- a str subclass, or a class
+    ; with __slots__ -- so there is nowhere to put the attribute.
     lea rdi, [rel exc_AttributeError_type]
     CSTRING rsi, "object has no attribute"
     call raise_exception
@@ -517,8 +526,8 @@ DEF_FUNC instance_dealloc, ID_FRAME
     jmp .del_cleared
 
 .no_del:
-    ; XDECREF inst_dict (may be NULL for int subclass instances)
-    mov rdi, [rbx + PyInstanceObject.inst_dict]
+    ; XDECREF the instance dict; a type may have no dict slot at all.
+    LOAD_INST_DICT rdi, rbx, .no_dict
     test rdi, rdi
     jz .no_dict
     call obj_decref
@@ -1573,6 +1582,7 @@ user_type_metatype:
     dq 0                        ; tp_bases
     dq 0                        ; tp_traverse
     dq 0                        ; tp_clear
+    dq 0 ; tp_dictoffset
 
 ; object_type - base type for all Python objects
 ; Used as explicit base class: class Foo(object): pass
@@ -1606,6 +1616,7 @@ object_type:
     dq 0                        ; tp_bases
     dq instance_traverse                        ; tp_traverse
     dq instance_clear                        ; tp_clear
+    dq 0           ; tp_dictoffset
 
 ; super_type - placeholder for the 'super' builtin
 ; LOAD_SUPER_ATTR pops and discards this; it just needs to be loadable.
@@ -1648,3 +1659,4 @@ method_type:
     dq 0                        ; tp_bases
     dq method_traverse                        ; tp_traverse
     dq method_clear                        ; tp_clear
+    dq 0         ; tp_dictoffset

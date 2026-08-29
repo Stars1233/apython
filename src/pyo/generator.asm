@@ -1220,6 +1220,7 @@ gen_type:
     dq 0                        ; tp_bases
     dq gen_traverse                        ; tp_traverse
     dq gen_clear                        ; tp_clear
+    dq 0      ; tp_dictoffset
 
 align 8
 global coro_type
@@ -1250,6 +1251,7 @@ coro_type:
     dq 0                        ; tp_bases
     dq gen_traverse                        ; tp_traverse
     dq gen_clear                        ; tp_clear
+    dq 0      ; tp_dictoffset
 
 align 8
 global async_gen_type
@@ -1280,6 +1282,7 @@ async_gen_type:
     dq 0                        ; tp_bases
     dq gen_traverse                        ; tp_traverse
     dq gen_clear                        ; tp_clear
+    dq 0      ; tp_dictoffset
 
 ags_name_str: db "async_generator_asend", 0
 
@@ -1312,3 +1315,4 @@ async_gen_asend_type:
     dq 0                        ; tp_bases
     dq 0                        ; tp_traverse
     dq 0                        ; tp_clear
+    dq 0 ; tp_dictoffset

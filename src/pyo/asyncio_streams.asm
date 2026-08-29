@@ -1140,6 +1140,7 @@ stream_reader_type:
     dq 0                        ; tp_bases
     dq 0                        ; tp_traverse
     dq 0                        ; tp_clear
+    dq 0 ; tp_dictoffset
 
 global stream_writer_type
 stream_writer_type:
@@ -1169,6 +1170,7 @@ stream_writer_type:
     dq 0                        ; tp_bases
     dq 0                        ; tp_traverse
     dq 0                        ; tp_clear
+    dq 0 ; tp_dictoffset
 
 read_awaitable_type:
     dq 1                        ; ob_refcnt (immortal)
@@ -1197,6 +1199,7 @@ read_awaitable_type:
     dq 0                        ; tp_bases
     dq 0                        ; tp_traverse
     dq 0                        ; tp_clear
+    dq 0 ; tp_dictoffset
 
 drain_awaitable_type:
     dq 1                        ; ob_refcnt (immortal)
@@ -1225,6 +1228,7 @@ drain_awaitable_type:
     dq 0                        ; tp_bases
     dq 0                        ; tp_traverse
     dq 0                        ; tp_clear
+    dq 0 ; tp_dictoffset
 
 connect_awaitable_type:
     dq 1                        ; ob_refcnt (immortal)
@@ -1253,6 +1257,7 @@ connect_awaitable_type:
     dq 0                        ; tp_bases
     dq 0                        ; tp_traverse
     dq 0                        ; tp_clear
+    dq 0 ; tp_dictoffset
 
 accept_awaitable_type:
     dq 1                        ; ob_refcnt (immortal)
@@ -1281,3 +1286,4 @@ accept_awaitable_type:
     dq 0                        ; tp_bases
     dq 0                        ; tp_traverse
     dq 0                        ; tp_clear
+    dq 0 ; tp_dictoffset

@@ -936,6 +936,7 @@ exc_metatype:
     dq 0                    ; tp_bases
     dq 0                    ; tp_traverse
     dq 0                    ; tp_clear
+    dq 0 ; tp_dictoffset
 
 exc_meta_name: db "exception_metatype", 0
 
@@ -969,6 +970,7 @@ traceback_type:
     dq 0                    ; tp_bases
     dq 0                        ; tp_traverse
     dq 0                        ; tp_clear
+    dq 0 ; tp_dictoffset
 tb_type_name: db "traceback", 0
 
 ; Macro to define an exception type singleton
@@ -1003,6 +1005,7 @@ global %1
     dq 0                    ; tp_bases
     dq exc_traverse         ; tp_traverse
     dq exc_clear_gc         ; tp_clear
+    dq 0         ; tp_dictoffset
 %endmacro
 
 ; Define all exception types

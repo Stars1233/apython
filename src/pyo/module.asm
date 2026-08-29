@@ -229,3 +229,4 @@ module_type:
     dq 0                        ; tp_bases
     dq module_traverse                        ; tp_traverse
     dq module_clear_gc                        ; tp_clear
+    dq 0            ; tp_dictoffset

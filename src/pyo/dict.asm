@@ -1833,6 +1833,7 @@ dict_type:
     dq 0                        ; tp_bases
     dq dict_traverse                        ; tp_traverse
     dq dict_clear_gc                        ; tp_clear
+    dq 0          ; tp_dictoffset
 
 ; Dict key iterator type
 align 8
@@ -1864,6 +1865,7 @@ dict_iter_type:
     dq 0                        ; tp_bases
     dq 0                        ; tp_traverse
     dq 0                        ; tp_clear
+    dq 0 ; tp_dictoffset
 
 ; Dict reverse key iterator type
 align 8
@@ -1895,6 +1897,7 @@ dict_rev_iter_type:
     dq 0                        ; tp_bases
     dq 0                        ; tp_traverse
     dq 0                        ; tp_clear
+    dq 0 ; tp_dictoffset
 
 ; Dict keys view sequence methods (len + contains)
 align 8
@@ -1950,6 +1953,7 @@ dict_keys_view_type:
     dq 0                        ; tp_bases
     dq 0                        ; tp_traverse
     dq 0                        ; tp_clear
+    dq 0 ; tp_dictoffset
 
 ; Dict values view type
 align 8
@@ -1981,6 +1985,7 @@ dict_values_view_type:
     dq 0                        ; tp_bases
     dq 0                        ; tp_traverse
     dq 0                        ; tp_clear
+    dq 0 ; tp_dictoffset
 
 ; Dict items view type
 align 8
@@ -2012,3 +2017,4 @@ dict_items_view_type:
     dq 0                        ; tp_bases
     dq 0                        ; tp_traverse
     dq 0                        ; tp_clear
+    dq 0 ; tp_dictoffset

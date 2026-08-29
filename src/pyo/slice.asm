@@ -521,3 +521,4 @@ slice_type:
     dq 0                      ; tp_bases
     dq slice_traverse                        ; tp_traverse
     dq slice_clear_gc                        ; tp_clear
+    dq 0           ; tp_dictoffset

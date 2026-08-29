@@ -2007,6 +2007,7 @@ enumerate_iter_type:
     dq 0                        ; tp_bases
     dq 0                        ; tp_traverse
     dq 0                        ; tp_clear
+    dq 0 ; tp_dictoffset
 
 ; Zip iterator type
 align 8
@@ -2038,6 +2039,7 @@ zip_iter_type:
     dq 0                        ; tp_bases
     dq 0                        ; tp_traverse
     dq 0                        ; tp_clear
+    dq 0 ; tp_dictoffset
 
 ; Map iterator type
 align 8
@@ -2069,6 +2071,7 @@ map_iter_type:
     dq 0                        ; tp_bases
     dq 0                        ; tp_traverse
     dq 0                        ; tp_clear
+    dq 0 ; tp_dictoffset
 
 ; Filter iterator type
 align 8
@@ -2100,6 +2103,7 @@ filter_iter_type:
     dq 0                        ; tp_bases
     dq 0                        ; tp_traverse
     dq 0                        ; tp_clear
+    dq 0 ; tp_dictoffset
 
 ; Sequence iterator type (__getitem__ protocol)
 align 8
@@ -2131,6 +2135,7 @@ seq_iter_type:
     dq 0                        ; tp_bases
     dq 0                        ; tp_traverse
     dq 0                        ; tp_clear
+    dq 0 ; tp_dictoffset
 
 ; Reversed iterator type
 align 8
@@ -2162,6 +2167,7 @@ reversed_iter_type:
     dq 0                        ; tp_bases
     dq 0                        ; tp_traverse
     dq 0                        ; tp_clear
+    dq 0 ; tp_dictoffset
 
 ; Chain iterator type
 align 8
@@ -2193,3 +2199,4 @@ chain_iter_type:
     dq 0                        ; tp_bases
     dq 0                        ; tp_traverse
     dq 0                        ; tp_clear
+    dq 0 ; tp_dictoffset

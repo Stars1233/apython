@@ -1185,18 +1185,29 @@ DEF_FUNC instance_traverse
 
     mov rbx, rdi
 
-    ; Visit inst_dict
-    mov rdi, [rbx + PyInstanceObject.inst_dict]
+    ; Visit the instance dict, wherever this family keeps it
+    LOAD_INST_DICT rdi, rbx, .no_inst_dict
     VISIT_PTR rdi
+.no_inst_dict:
 
-    ; Visit __slots__ values (one Value each, after the instance header)
+    ; Visit __slots__ values (one Value each, after the instance header).
+    ; The header ends at tp_dictoffset plus the dict word, or at
+    ; PyInstanceObject_size when the family keeps no dict.
     mov rax, [rbx + PyObject.ob_type]
+    mov rcx, [rax + PyTypeObject.tp_dictoffset]
+    test rcx, rcx
+    jz .it_no_dict_hdr
+    add rcx, 8
+    jmp .it_have_hdr
+.it_no_dict_hdr:
+    mov rcx, PyInstanceObject_size
+.it_have_hdr:
     mov rax, [rax + PyTypeObject.tp_basicsize]
-    sub rax, PyInstanceObject_size
+    sub rax, rcx
     jle .done
     shr rax, 3                  ; nslots
     mov r13, rax
-    lea r12, [rbx + PyInstanceObject_size]
+    lea r12, [rbx + rcx]
 
 .slot_loop:
     mov rdi, [r12]
@@ -1217,9 +1228,13 @@ DEF_FUNC instance_clear
     push rbx
     mov rbx, rdi
 
-    ; XDECREF + NULL inst_dict
-    mov rdi, [rbx + PyInstanceObject.inst_dict]
-    mov qword [rbx + PyInstanceObject.inst_dict], 0
+    ; XDECREF + NULL the instance dict, wherever this family keeps it
+    mov rax, [rbx + PyObject.ob_type]
+    mov rax, [rax + PyTypeObject.tp_dictoffset]
+    test rax, rax
+    jz .done
+    mov rdi, [rbx + rax]
+    mov qword [rbx + rax], 0
     test rdi, rdi
     jz .done
     call obj_decref

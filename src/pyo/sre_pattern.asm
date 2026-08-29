@@ -2370,6 +2370,7 @@ sre_scanner_type:
     dq 0                       ; tp_bases
     dq 0                        ; tp_traverse
     dq 0                        ; tp_clear
+    dq 0 ; tp_dictoffset
 
 align 8
 
@@ -2402,6 +2403,7 @@ sre_pattern_type:
     dq 0                       ; tp_bases
     dq 0                        ; tp_traverse
     dq 0                        ; tp_clear
+    dq 0 ; tp_dictoffset
 
 section .rodata
 sp_type_name:     db "re.Pattern", 0

@@ -31,6 +31,11 @@ struc PyTypeObject
     .tp_bases:       resq 1  ; +184 ptr to bases tuple
     .tp_traverse:    resq 1  ; +192 GC traverse function ptr
     .tp_clear:       resq 1  ; +200 GC clear function ptr
+    ; Byte offset of the instance __dict__ within an instance, or 0 for a
+    ; type whose instances have none.  Only ever read for a heaptype, which
+    ; is gc_alloc'd and zero-filled, so a static table that predates this
+    ; field cannot be misread.
+    .tp_dictoffset:  resq 1  ; +208
 endstruc
 
 TYPE_OBJECT_SIZE equ PyTypeObject_size

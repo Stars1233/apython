@@ -444,6 +444,30 @@ TAG_IO_WAIT  equ 8           ; payload = fd | (direction << 32) — async I/O se
     dec qword [rel c_recursion_depth]
 %endmacro
 
+; Instance __dict__ access, via the type's tp_dictoffset rather than a fixed
+; +16.  A subclass of list, tuple, dict or set embeds the base layout first
+; and carries its dict after it, so the offset varies by family; a str
+; subclass has none at all.  Only a heaptype ever has a non-zero offset.
+;
+; LOAD_INST_DICT dest, inst, none_label -- dest gets the dict pointer, or the
+; label is taken when this type's instances have no dict slot.
+%macro LOAD_INST_DICT 3
+    mov %1, [%2 + PyObject.ob_type]
+    mov %1, [%1 + PyTypeObject.tp_dictoffset]
+    test %1, %1
+    jz %3
+    mov %1, [%2 + %1]
+%endmacro
+
+; STORE_INST_DICT inst, value, scratch, none_label
+%macro STORE_INST_DICT 4
+    mov %3, [%1 + PyObject.ob_type]
+    mov %3, [%3 + PyTypeObject.tp_dictoffset]
+    test %3, %3
+    jz %4
+    mov [%1 + %3], %2
+%endmacro
+
 ; A dunder call returns NULL for two different reasons: the type does not
 ; define the dunder, or it ran and raised.  Only the first is a fallback --
 ; treating the second as one swallows the exception, which then surfaces

@@ -1393,7 +1393,54 @@ DEF_FUNC type_from_parts
     lea rax, [r14 + PyStrObject.data]
     mov [r12 + PyTypeObject.tp_name], rax
 
+    ; Instance layout.  A heaptype embeds its base's layout and puts its own
+    ; __dict__ immediately after it, so both numbers come from the base:
+    ; tp_dictoffset is the base's basicsize, and tp_basicsize is that plus
+    ; the dict word.  With no base that yields 16 and 24 -- exactly
+    ; PyInstanceObject, which is where those constants came from.
+    ;
+    ; A variable-size base such as str keeps its data inline, so there is no
+    ; fixed offset past the header for a dict; those get none, as bytes and
+    ; __slots__ classes already do.
     mov qword [r12 + PyTypeObject.tp_basicsize], PyInstanceObject_size
+    mov qword [r12 + PyTypeObject.tp_dictoffset], PyInstanceObject.inst_dict
+    mov rax, [rbp-48]               ; base class
+    test rax, rax
+    jz .bc_layout_done
+    ; If the base already has a dict slot -- another heaptype, or an int
+    ; subclass -- share it rather than adding a second one, which would
+    ; collide with whatever the base put there.
+    mov rcx, [rax + PyTypeObject.tp_dictoffset]
+    test rcx, rcx
+    jnz .bc_layout_inherit
+
+    mov rcx, [rax + PyTypeObject.tp_flags]
+    test rcx, TYPE_FLAG_STR_SUBCLASS
+    jnz .bc_layout_no_dict
+    test rcx, TYPE_FLAG_INT_SUBCLASS
+    jnz .bc_layout_done             ; int subclasses wrap rather than embed
+
+    ; A builtin base with a fixed-size header: the dict goes just past it.
+    mov rcx, [rax + PyTypeObject.tp_basicsize]
+    test rcx, rcx
+    jz .bc_layout_done
+    mov [r12 + PyTypeObject.tp_dictoffset], rcx
+    add rcx, 8
+    mov [r12 + PyTypeObject.tp_basicsize], rcx
+    jmp .bc_layout_done
+
+.bc_layout_inherit:
+    mov [r12 + PyTypeObject.tp_dictoffset], rcx
+    mov rcx, [rax + PyTypeObject.tp_basicsize]
+    mov [r12 + PyTypeObject.tp_basicsize], rcx
+    jmp .bc_layout_done
+
+.bc_layout_no_dict:
+    mov qword [r12 + PyTypeObject.tp_dictoffset], 0
+    mov rcx, [rax + PyTypeObject.tp_basicsize]
+    mov [r12 + PyTypeObject.tp_basicsize], rcx
+
+.bc_layout_done:
 
     ; Wire instance methods
     lea rax, [rel instance_dealloc]
@@ -1473,13 +1520,11 @@ DEF_FUNC type_from_parts
     jz .bc_no_slots
 
     ; Determine base_basicsize
-    mov rax, [rbp-48]               ; base_class
-    test rax, rax
-    jz .bc_use_default_basic
-    mov rdi, [rax + PyTypeObject.tp_basicsize]
-    jmp .bc_have_basic
-.bc_use_default_basic:
-    mov rdi, PyInstanceObject_size
+    ; Slots are laid out after the whole instance header, which is what
+    ; tp_basicsize was just set to -- the base's layout plus the dict word.
+    ; Using the *base's* basicsize instead puts the first slot on top of the
+    ; dict pointer.
+    mov rdi, [r12 + PyTypeObject.tp_basicsize]
 .bc_have_basic:
     ; rdi = base_basicsize
     ; Set tp_basicsize = base_basicsize + nslots * 8 (one Value per slot)
@@ -2948,3 +2993,4 @@ builtin_func_type:
     dq 0                        ; tp_bases
     dq 0                        ; tp_traverse
     dq 0                        ; tp_clear
+    dq 0 ; tp_dictoffset

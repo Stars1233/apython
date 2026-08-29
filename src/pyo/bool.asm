@@ -292,6 +292,7 @@ bool_type:
     dq 0                    ; tp_bases
     dq 0                        ; tp_traverse
     dq 0                        ; tp_clear
+    dq 0 ; tp_dictoffset
 
 ; True singleton - has embedded mpz_t value of 1
 align 8
