@@ -270,25 +270,56 @@ END_FUNC obj_str
 ; Takes the same (payload, tag) pair as int_to_i64 so a call site changes by
 ; one word.  This is where the __index__ protocol belongs once heaptypes
 ; carry real slots.
-DEF_FUNC_BARE obj_as_index
+DEF_FUNC obj_as_index
     cmp edx, TAG_SMALLINT
     je .oai_immediate
     cmp edx, TAG_PTR
     jne .oai_error
-    push rdi
-    push rdx
     mov rax, [rdi + PyObject.ob_type]
-    REQUIRE_INT_TYPE rax, rcx, .oai_error_pop
-    pop rdx
-    pop rdi
-    jmp int_to_i64
+    REQUIRE_INT_TYPE rax, rcx, .oai_try_dunder
+    call int_to_i64
+    leave
+    ret
 
 .oai_immediate:
     mov rax, rdi
+    leave
     ret
 
-.oai_error_pop:
-    add rsp, 16
+.oai_try_dunder:
+    ; Not an int, but __index__ makes an object usable wherever one is
+    ; wanted -- as a subscript, a repetition count, a slice bound, or an
+    ; argument to hex().  This is the single place all of those converge.
+    mov rax, [rdi + PyObject.ob_type]
+    mov rax, [rax + PyTypeObject.tp_as_number]
+    test rax, rax
+    jz .oai_error
+    mov rax, [rax + PyNumberMethods.nb_index]
+    test rax, rax
+    jz .oai_error
+    call rax                    ; nb_index returns a Value
+    V_UNPACK rax, rdx
+    ; __index__ must itself return an int; one level only, so a class whose
+    ; __index__ returns another such class is an error rather than a loop.
+    cmp edx, TAG_SMALLINT
+    je .oai_dunder_done
+    cmp edx, TAG_PTR
+    jne .oai_bad_index
+    mov rcx, [rax + PyObject.ob_type]
+    REQUIRE_INT_TYPE rcx, rsi, .oai_bad_index
+    mov rdi, rax
+    call int_to_i64
+    leave
+    ret
+.oai_dunder_done:
+    leave
+    ret
+
+.oai_bad_index:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "__index__ returned non-int"
+    call raise_exception
+
 .oai_error:
     lea rdi, [rel exc_TypeError_type]
     CSTRING rsi, "object cannot be interpreted as an integer"

@@ -115,17 +115,27 @@ END_FUNC bool_xor
 ;; know we're called from bool's number methods, so tag is TAG_BOOL)
 ;; ============================================================================
 
-; bool_positive: +False -> 0, +True -> 1 (as SmallInt)
+; bool_positive: +False -> 0, +True -> 1
+; True and False are ordinary heap singletons, so rdi is a pointer -- not the
+; 0/1 payload this used to be handed before the value representation changed.
+; Nothing called it until __pos__ started reaching real slots, which is why
+; the stale convention went unnoticed.
 DEF_FUNC_BARE bool_positive
-    mov rax, rdi           ; payload (0 or 1)
-    RET_TAG_SMALLINT
+    lea rcx, [rel bool_true]
+    xor eax, eax
+    cmp rdi, rcx
+    sete al
+    V_PACK_I64 rax, rcx
     ret
 END_FUNC bool_positive
 
-; bool_absolute: abs(False) -> 0, abs(True) -> 1 (as SmallInt)
+; bool_absolute: abs(False) -> 0, abs(True) -> 1
 DEF_FUNC_BARE bool_absolute
-    mov rax, rdi           ; payload (0 or 1), already non-negative
-    RET_TAG_SMALLINT
+    lea rcx, [rel bool_true]
+    xor eax, eax
+    cmp rdi, rcx
+    sete al
+    V_PACK_I64 rax, rcx
     ret
 END_FUNC bool_absolute
 

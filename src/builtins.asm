@@ -1259,6 +1259,24 @@ DEF_FUNC builtin_float, BF_FRAME
     cmp rax, rcx
     je .float_from_str
 
+    ; A class defining __float__ now carries nb_float; float_to_f64 below
+    ; knows nothing about it and returned 0.0 for such an object.
+    mov rcx, [rax + PyTypeObject.tp_as_number]
+    test rcx, rcx
+    jz .float_numeric
+    mov rcx, [rcx + PyNumberMethods.nb_float]
+    test rcx, rcx
+    jz .float_numeric
+    call rcx                    ; nb_float returns a Value
+    mov rdi, rax
+    V_UNPACK rdi, rdx
+    cmp edx, TAG_FLOAT
+    jne .float_numeric          ; not a float: let the generic path complain
+    mov rax, rdi
+    mov edx, TAG_FLOAT
+    leave
+    ret
+
 .float_numeric:
     extern float_to_f64
     call float_to_f64          ; xmm0 = double

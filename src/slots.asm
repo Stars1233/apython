@@ -24,10 +24,19 @@
 %include "object.inc"
 %include "types.inc"
 
+; Where a slot lives: directly in PyTypeObject, or in one of the three
+; method tables it points at.  A table is allocated for a type only when it
+; defines at least one dunder that belongs in it.
+SLOT_DIRECT   equ 0
+SLOT_NUMBER   equ 1
+SLOT_SEQUENCE equ 2
+SLOT_MAPPING  equ 3
+
 ; One row of the dunder-to-slot table.
 struc SlotEntry
     .name:    resq 1        ; dunder name, a C string
-    .offset:  resq 1        ; byte offset of the slot within PyTypeObject
+    .kind:    resq 1        ; SLOT_DIRECT or which method table
+    .offset:  resq 1        ; byte offset within PyTypeObject or that table
     .wrapper: resq 1        ; function to install there
 endstruc
 
@@ -39,8 +48,206 @@ extern current_exception
 extern eval_exception_unwind
 extern exc_StopIteration_type
 extern obj_decref
+extern obj_as_index
+extern ap_malloc
+extern raise_exception
+extern exc_TypeError_type
 
 section .text
+
+;; ============================================================================
+;; slot_ensure_table(rdi = type, esi = kind) -> rax = the method table
+;;
+;; Allocate the method table on first use and hang it off the type.  A
+;; heaptype starts with all three pointers NULL, which is exactly what
+;; "implements no numeric/sequence/mapping protocol" means, so they must stay
+;; NULL unless the class actually defines something.
+;; ============================================================================
+DEF_FUNC_LOCAL slot_ensure_table
+    push rbx
+    push r12
+    mov rbx, rdi
+    mov r12d, esi
+
+    cmp r12d, SLOT_NUMBER
+    je .number
+    cmp r12d, SLOT_SEQUENCE
+    je .sequence
+    ; mapping
+    mov rax, [rbx + PyTypeObject.tp_as_mapping]
+    test rax, rax
+    jnz .have
+    mov edi, PyMappingMethods_size
+    call .alloc_zeroed
+    mov [rbx + PyTypeObject.tp_as_mapping], rax
+    jmp .have
+
+.number:
+    mov rax, [rbx + PyTypeObject.tp_as_number]
+    test rax, rax
+    jnz .have
+    mov edi, PyNumberMethods_size
+    call .alloc_zeroed
+    mov [rbx + PyTypeObject.tp_as_number], rax
+    jmp .have
+
+.sequence:
+    mov rax, [rbx + PyTypeObject.tp_as_sequence]
+    test rax, rax
+    jnz .have
+    mov edi, PySequenceMethods_size
+    call .alloc_zeroed
+    mov [rbx + PyTypeObject.tp_as_sequence], rax
+
+.have:
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.alloc_zeroed:
+    push rdi
+    call ap_malloc
+    pop rcx
+    push rax
+    mov rdi, rax
+    shr rcx, 3
+    xor eax, eax
+    rep stosq
+    pop rax
+    ret
+END_FUNC slot_ensure_table
+
+;; ============================================================================
+;; slot_tp_hash(rdi = self, edx = tag) -> rax = i64 hash
+;; ============================================================================
+DEF_FUNC slot_tp_hash
+    lea rsi, [rel sl_hash_name]
+    call dunder_call_1
+    V_UNPACK rax, rdx
+    test edx, edx
+    jz .failed
+    ; __hash__ must return an int; obj_as_index raises otherwise.
+    push rax
+    push rdx
+    mov rdi, rax
+    call obj_as_index
+    add rsp, 16
+    leave
+    ret
+.failed:
+    call slot_reraise
+END_FUNC slot_tp_hash
+
+;; ============================================================================
+;; Unary numeric slots.  Each is called as nb_xxx(rdi = operand Value) and
+;; returns a Value.  Before this, -obj and ~obj on a user class dereferenced
+;; a NULL tp_as_number, and +obj and abs(obj) were simply ignored.
+;; ============================================================================
+%macro DEF_UNARY_SLOT 2         ; %1 = function name, %2 = dunder name symbol
+DEF_FUNC %1
+    lea rsi, [rel %2]
+    call dunder_call_1
+    V_UNPACK rax, rdx
+    test edx, edx
+    jz %%failed
+    V_PACK rax, rdx
+    leave
+    ret
+%%failed:
+    call slot_reraise
+END_FUNC %1
+%endmacro
+
+;; ============================================================================
+;; slot_nb_bool(rdi = self) -> eax = 0 or 1
+;;
+;; obj_is_true consults nb_bool, then sq_length, then mp_length, and only then
+;; the __bool__ dunder -- so once __len__ reached a length slot it shadowed
+;; __bool__, which is the wrong priority.  Installing nb_bool puts it back.
+;; ============================================================================
+DEF_FUNC slot_nb_bool
+    lea rsi, [rel sl_bool_name]
+    call dunder_call_1
+    V_UNPACK rax, rdx
+    test edx, edx
+    jz .failed
+
+    extern bool_true
+    extern bool_false
+    push rax
+    push rdx
+    cmp edx, TAG_PTR
+    jne .not_bool
+    lea rcx, [rel bool_true]
+    cmp rax, rcx
+    je .is_true
+    lea rcx, [rel bool_false]
+    cmp rax, rcx
+    jne .not_bool
+    pop rdx
+    pop rdi
+    call obj_decref
+    xor eax, eax
+    leave
+    ret
+.is_true:
+    pop rdx
+    pop rdi
+    call obj_decref
+    mov eax, 1
+    leave
+    ret
+.not_bool:
+    add rsp, 16
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "__bool__ should return bool"
+    call raise_exception
+.failed:
+    call slot_reraise
+END_FUNC slot_nb_bool
+
+;; ============================================================================
+;; slot_nb_index / slot_nb_int / slot_nb_float -- conversion protocols.
+;; ============================================================================
+DEF_UNARY_SLOT slot_nb_index, sl_index_name
+DEF_UNARY_SLOT slot_nb_int,   sl_int_name
+DEF_UNARY_SLOT slot_nb_float, sl_float_name
+
+DEF_UNARY_SLOT slot_nb_negative, sl_neg_name
+DEF_UNARY_SLOT slot_nb_positive, sl_pos_name
+DEF_UNARY_SLOT slot_nb_invert,   sl_invert_name
+DEF_UNARY_SLOT slot_nb_absolute, sl_abs_name
+
+;; ============================================================================
+;; slot_length(rdi = self) -> rax = i64
+;;
+;; Serves both mp_length and sq_length; builtin_len tries mapping first, and
+;; GET_LEN in a match statement tries sequence first.
+;; ============================================================================
+DEF_FUNC slot_length
+    lea rsi, [rel sl_len_name]
+    call dunder_call_1
+    V_UNPACK rax, rdx
+    test edx, edx
+    jz .failed
+    push rax
+    push rdx
+    mov rdi, rax
+    call obj_as_index
+    add rsp, 16
+    test rax, rax
+    js .negative
+    leave
+    ret
+.negative:
+    extern exc_ValueError_type
+    lea rdi, [rel exc_ValueError_type]
+    CSTRING rsi, "__len__() should return >= 0"
+    call raise_exception
+.failed:
+    call slot_reraise
+END_FUNC slot_length
 
 ;; ============================================================================
 ;; slot_reraise - resume unwinding with the exception the dunder left pending.
@@ -156,9 +363,21 @@ DEF_FUNC type_install_slots, TIS_FRAME
     je .skip
 
     mov rcx, [rbp - TIS_TYPE]
+    mov rsi, [rbx + SlotEntry.kind]
+    test rsi, rsi
+    jnz .indirect
     mov rax, [rbx + SlotEntry.offset]
     mov rdx, [rbx + SlotEntry.wrapper]
     mov [rcx + rax], rdx
+    jmp .skip
+
+.indirect:
+    mov rdi, rcx
+    call slot_ensure_table      ; rax = the method table
+    mov rbx, [rbp - TIS_ENTRY]
+    mov rcx, [rbx + SlotEntry.offset]
+    mov rdx, [rbx + SlotEntry.wrapper]
+    mov [rax + rcx], rdx
 
 .skip:
     add rbx, SlotEntry_size
@@ -173,11 +392,32 @@ END_FUNC type_install_slots
 
 section .rodata
 
-sl_iter_name: db "__iter__", 0
-sl_next_name: db "__next__", 0
+sl_iter_name:   db "__iter__", 0
+sl_next_name:   db "__next__", 0
+sl_hash_name:   db "__hash__", 0
+sl_neg_name:    db "__neg__", 0
+sl_pos_name:    db "__pos__", 0
+sl_invert_name: db "__invert__", 0
+sl_abs_name:    db "__abs__", 0
+sl_len_name:    db "__len__", 0
+sl_bool_name:   db "__bool__", 0
+sl_index_name:  db "__index__", 0
+sl_int_name:    db "__int__", 0
+sl_float_name:  db "__float__", 0
 
 align 8
 slot_table:
-    dq sl_iter_name, PyTypeObject.tp_iter,     slot_tp_iter
-    dq sl_next_name, PyTypeObject.tp_iternext, slot_tp_iternext
-    dq 0, 0, 0
+    dq sl_iter_name,   SLOT_DIRECT,   PyTypeObject.tp_iter,     slot_tp_iter
+    dq sl_next_name,   SLOT_DIRECT,   PyTypeObject.tp_iternext, slot_tp_iternext
+    dq sl_hash_name,   SLOT_DIRECT,   PyTypeObject.tp_hash,     slot_tp_hash
+    dq sl_neg_name,    SLOT_NUMBER,   PyNumberMethods.nb_negative, slot_nb_negative
+    dq sl_pos_name,    SLOT_NUMBER,   PyNumberMethods.nb_positive, slot_nb_positive
+    dq sl_invert_name, SLOT_NUMBER,   PyNumberMethods.nb_invert,   slot_nb_invert
+    dq sl_abs_name,    SLOT_NUMBER,   PyNumberMethods.nb_absolute, slot_nb_absolute
+    dq sl_bool_name,   SLOT_NUMBER,   PyNumberMethods.nb_bool,     slot_nb_bool
+    dq sl_index_name,  SLOT_NUMBER,   PyNumberMethods.nb_index,    slot_nb_index
+    dq sl_int_name,    SLOT_NUMBER,   PyNumberMethods.nb_int,      slot_nb_int
+    dq sl_float_name,  SLOT_NUMBER,   PyNumberMethods.nb_float,    slot_nb_float
+    dq sl_len_name,    SLOT_MAPPING,  PyMappingMethods.mp_length,  slot_length
+    dq sl_len_name,    SLOT_SEQUENCE, PySequenceMethods.sq_length, slot_length
+    dq 0, 0, 0, 0

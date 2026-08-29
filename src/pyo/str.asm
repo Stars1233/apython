@@ -20,6 +20,7 @@ extern raise_exception
 extern exc_IndexError_type
 extern exc_TypeError_type
 extern int_type
+extern obj_as_index
 extern int_fits_i64
 extern exc_OverflowError_type
 extern slice_type
@@ -1083,14 +1084,13 @@ DEF_FUNC str_subscript
     lea rcx, [rel slice_type]
     cmp rax, rcx
     je .ss_slice
-    ; only an int may reach int_to_i64, which reads PyIntObject.compact
-    ; unconditionally
-    REQUIRE_INT_TYPE rax, rcx, .ss_type_error
 
 .ss_int:
-    ; Convert key to i64
+    ; obj_as_index covers int, bool, an int subclass and __index__, and
+    ; raises for anything else -- int_to_i64 would read PyIntObject.compact
+    ; off whatever it was given.
     mov rdi, rsi
-    call int_to_i64
+    call obj_as_index
     mov rsi, rax
 
     ; Call str_getitem — already returns a Value

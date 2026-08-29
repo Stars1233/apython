@@ -27,6 +27,9 @@ extern exc_AttributeError_type
 extern exc_TypeError_type
 extern func_type
 extern type_type
+extern eval_exception_unwind
+extern none_singleton
+extern dunder_lookup
 extern sys_write
 extern current_exception
 extern dict_type
@@ -109,13 +112,16 @@ END_FUNC instance_new
 ;; rdi = instance, rsi = name (PyStrObject*)
 ;; Returns: owned reference to attribute value, or NULL
 ;; ============================================================================
-DEF_FUNC instance_getattr
+IG_NAME  equ 8
+IG_FRAME equ 16
+DEF_FUNC instance_getattr, IG_FRAME
     push rbx
     push r12
     push r13
 
     mov rbx, rdi                ; rbx = self (instance)
     mov r12, rsi                ; r12 = name
+    mov [rbp - IG_NAME], rsi    ; r12 is reused as scratch further down
 
     ; Check self->inst_dict first (may be NULL for int subclass instances)
     mov rdi, [rbx + PyInstanceObject.inst_dict]
@@ -261,6 +267,42 @@ DEF_FUNC instance_getattr
     call raise_exception
 
 .not_found:
+    ; Ordinary lookup missed.  __getattr__ is Python's hook for exactly that
+    ; -- it runs only when normal resolution fails -- and it was never
+    ; consulted, so a class defining it got a bare AttributeError.
+    mov rdi, [rbx + PyObject.ob_type]
+    lea rsi, [rel ig_getattr_name]
+    call dunder_lookup
+    V_UNPACK rax, rdx
+    test edx, edx
+    jz .really_not_found
+    IS_NONE rax, rcx
+    je .really_not_found
+
+    ; dunder_call_2(self, name, "__getattr__", TAG_PTR)
+    mov rdi, rbx
+    mov rsi, [rbp - IG_NAME]    ; the attribute name str
+    lea rdx, [rel ig_getattr_name]
+    mov ecx, TAG_PTR
+    extern dunder_call_2
+    call dunder_call_2
+    V_UNPACK rax, rdx
+    test edx, edx
+    jz .getattr_raised          ; the slot is present, so NULL means it raised
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    V_PACK rax, rdx
+    ret
+
+.getattr_raised:
+    ; Returning NULL here would have LOAD_ATTR report a plain AttributeError,
+    ; discarding whatever __getattr__ actually raised.
+    leave
+    jmp eval_exception_unwind
+
+.really_not_found:
     RET_NULL
     pop r13
     pop r12
@@ -1484,6 +1526,7 @@ END_FUNC user_type_dealloc
 ;; Data section
 ;; ============================================================================
 section .rodata
+ig_getattr_name: db "__getattr__", 0
 id_del_ignored_msg: db "Exception ignored in __del__", 10
 id_del_ignored_len equ $ - id_del_ignored_msg
 section .data

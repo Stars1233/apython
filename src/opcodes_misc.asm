@@ -1439,6 +1439,28 @@ DEF_FUNC op_format_value, FV_FRAME
     test qword [rbp - FV_HASSPEC], 4
     jz .fv_no_format_spec
 
+    ; A class defining __format__ formats itself.  Only float had a spec path
+    ; here, so f"{obj:>5}" ignored both the spec and the method.
+    cmp qword [rbp - FV_VTAG], TAG_PTR
+    jne .fv_spec_not_ptr
+    mov rdi, [rbp - FV_VALUE]
+    mov rax, [rdi + PyObject.ob_type]
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_HEAPTYPE
+    jz .fv_spec_not_ptr
+    mov rax, [rbp - FV_SPEC]
+    cmp qword [rbp - FV_STAG], TAG_PTR
+    jne .fv_type_error
+    mov rsi, rax
+    lea rdx, [rel fv_format_name]
+    mov ecx, TAG_PTR
+    extern dunder_call_2
+    call dunder_call_2
+    V_UNPACK rax, rdx
+    test edx, edx
+    jnz .fv_have_result         ; __format__ produced the string
+    mov rdi, [rbp - FV_VALUE]   ; no __format__: fall through as before
+
+.fv_spec_not_ptr:
     ; Check if value is a float (TAG_FLOAT)
     extern float_type
     cmp qword [rbp - FV_VTAG], TAG_FLOAT
@@ -1468,6 +1490,40 @@ DEF_FUNC op_format_value, FV_FRAME
     and eax, 3
     cmp eax, 2
     je .fv_repr
+    test eax, eax
+    jnz .fv_use_str            ; !s asks for str() explicitly
+
+    ; No conversion and no spec: f"{obj}" still goes through __format__ with
+    ; an empty spec in CPython, not through str().
+    cmp qword [rbp - FV_VTAG], TAG_PTR
+    jne .fv_use_str
+    mov rax, [rdi + PyObject.ob_type]
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_HEAPTYPE
+    jz .fv_use_str
+    extern str_from_cstr_heap
+    push rdi
+    CSTRING rdi, ""
+    call str_from_cstr_heap
+    mov rsi, rax               ; the empty spec
+    pop rdi
+    push rsi
+    lea rdx, [rel fv_format_name]
+    mov ecx, TAG_PTR
+    call dunder_call_2
+    V_UNPACK rax, rdx
+    pop rdi                    ; the empty spec, ours to release
+    push rax
+    push rdx
+    call obj_decref
+    pop rdx
+    pop rax
+    test edx, edx
+    jnz .fv_have_result
+    ; No __format__: fall through to str() as before.
+    mov rdi, [rbp - FV_VALUE]
+    mov rsi, [rbp - FV_VTAG]
+
+.fv_use_str:
     ; Default: str() — conversion 0 (none) and 1 (!s) both use str()
     extern obj_str
     V_PACK rdi, rsi
@@ -2262,35 +2318,29 @@ extern obj_decref
     jmp eval_exception_unwind
 
 .ci1_unary_positive:
-    ; +x is a no-op for a numeric type and a TypeError for everything else.
-    ; This used to pass every object through unchanged, so +None was None
-    ; and +[1] was [1].
+    ; +x calls the type's nb_positive.  This used to only *test* the slot and
+    ; leave the value alone, which was indistinguishable from identity for
+    ; int and float -- but a user class defining __pos__ now has a real slot,
+    ; and ignoring it returned the operand unchanged.
     mov rax, [r13 - 8]
     V_TEST_PTR rax, rcx
     ja .ci1_pos_done            ; an int or float immediate: +x is x
     mov rcx, [rax + PyObject.ob_type]
-    extern bool_type
-    lea r8, [rel bool_type]
-    cmp rcx, r8
-    je .ci1_pos_bool
     mov rcx, [rcx + PyTypeObject.tp_as_number]
     test rcx, rcx
     jz .ci1_pos_error
-    cmp qword [rcx + PyNumberMethods.nb_positive], 0
-    je .ci1_pos_error
-    jmp .ci1_pos_done
+    mov rcx, [rcx + PyNumberMethods.nb_positive]
+    test rcx, rcx
+    jz .ci1_pos_error
+    push rax
+    push rax                    ; twice: keep rsp 16-byte aligned
+    mov rdi, rax                ; a pointer is its own Value
+    call rcx                    ; nb_positive returns a Value
+    mov [r13 - 8], rax          ; the result replaces TOS
+    pop rdi
+    pop rdi                     ; rdi = the operand, still owned
+    DECREF_V rdi, rcx
 
-.ci1_pos_bool:
-    ; Bool singleton: replace TOS with SmallInt 0 or 1
-    ; +True is 1 and +False is 0, as plain ints.  Both are well inside the
-    ; immediate range, so the encode needs no overflow check.
-    extern bool_true
-    lea rcx, [rel bool_true]
-    xor eax, eax
-    cmp qword [r13 - 8], rcx
-    sete al
-    add rax, [rel v_int_bias]
-    mov [r13 - 8], rax
 .ci1_pos_done:
     DISPATCH
 
@@ -3554,3 +3604,6 @@ section .text
     sub rbx, 2
     DISPATCH
 END_FUNC op_compare_op_int_jump_true
+
+section .rodata
+fv_format_name: db "__format__", 0

@@ -31,6 +31,7 @@ extern tuple_clear
 extern obj_is_true
 extern float_compare
 extern int_type
+extern obj_as_index
 extern recursion_limit
 extern c_recursion_depth
 extern exc_RecursionError_type
@@ -165,12 +166,10 @@ DEF_FUNC tuple_subscript
     lea rcx, [rel slice_type]
     cmp rax, rcx
     je .ts_slice
-    ; Check if key is actually an int type
-    REQUIRE_INT_TYPE rax, rcx, .ts_type_error
 
 .ts_int:
     mov rdi, rsi               ; key
-    call int_to_i64
+    call obj_as_index          ; int, bool, int subclass or __index__
     mov rsi, rax               ; index
     mov rdi, rbx
     call tuple_getitem         ; already returns a Value

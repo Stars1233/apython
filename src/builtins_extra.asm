@@ -11,6 +11,7 @@
 extern int_promote_mpz
 extern int_from_i64
 extern int_to_i64
+extern obj_as_index
 extern __gmpz_fits_slong_p
 extern int_neg
 extern int_add
@@ -100,7 +101,26 @@ DEF_FUNC builtin_abs
     extern bool_type
     lea rcx, [rel bool_type]
     cmp rax, rcx
-    jne .abs_type_error
+    je .abs_bool
+
+    ; Anything else goes through the numeric protocol, which now carries
+    ; __abs__ for a user class.  abs(obj) used to be a flat TypeError.
+    mov rcx, [rax + PyTypeObject.tp_as_number]
+    test rcx, rcx
+    jz .abs_type_error
+    mov rcx, [rcx + PyNumberMethods.nb_absolute]
+    test rcx, rcx
+    jz .abs_type_error
+    mov rdi, rbx                ; a pointer is its own Value
+    call rcx
+    V_UNPACK rax, rdx
+    add rsp, 8
+    pop rbx
+    leave
+    V_PACK rax, rdx
+    ret
+
+.abs_bool:
     ; Bool singleton: check if True (mpz=1) or False (mpz=0), both non-negative
     ; Return as SmallInt: True.abs = 1, False.abs = 0
     extern bool_true
@@ -1488,7 +1508,10 @@ DEF_FUNC builtin_hex, 80
     mov rdi, [rdi]            ; args[0]
 
     V_UNPACK rdi, rdx
-    call int_to_i64
+    ; obj_as_index rather than int_to_i64: it rejects a non-integer instead
+    ; of decoding its payload as one, and it honours __index__, which is what
+    ; makes hex() work on a class that defines it.
+    call obj_as_index
 
     test rax, rax
     jz .hex_zero
@@ -3610,6 +3633,7 @@ DEF_FUNC builtin_pow_fn, POW_FRAME
 END_FUNC builtin_pow_fn
 
 section .rodata
+fmt_dunder_name: db "__format__", 0
 align 8
 const_one: dq 0x3FF0000000000000   ; 1.0 in IEEE 754
 
@@ -3863,7 +3887,10 @@ DEF_FUNC builtin_bin, 80
     mov rdi, [rdi]            ; args[0]
 
     V_UNPACK rdi, rdx
-    call int_to_i64
+    ; obj_as_index rather than int_to_i64: it rejects a non-integer instead
+    ; of decoding its payload as one, and it honours __index__, which is what
+    ; makes hex() work on a class that defines it.
+    call obj_as_index
 
     test rax, rax
     jz .bin_zero
@@ -3950,7 +3977,10 @@ DEF_FUNC builtin_oct, 80
     mov rdi, [rdi]            ; args[0]
 
     V_UNPACK rdi, rdx
-    call int_to_i64
+    ; obj_as_index rather than int_to_i64: it rejects a non-integer instead
+    ; of decoding its payload as one, and it honours __index__, which is what
+    ; makes hex() work on a class that defines it.
+    call obj_as_index
 
     test rax, rax
     jz .oct_zero
@@ -4176,11 +4206,11 @@ DEF_FUNC builtin_format_fn, FMT_FRAME
     push rbx
     mov rbx, rsi               ; rbx = nargs
 
-    ; Save obj
+    ; Save obj.  args[0] is a Value; the slot below used to be filled from
+    ; args[1] as though it were a separate tag, which is what the fat-value
+    ; representation looked like -- so it held the format spec instead.
     mov rax, [rdi]
     mov [rbp - FMT_OBJ], rax
-    mov rax, [rdi + 8]
-    mov [rbp - FMT_OBJ_TAG], rax
 
     ; Get format spec (empty string if not provided)
     cmp rbx, 2
@@ -4195,15 +4225,40 @@ DEF_FUNC builtin_format_fn, FMT_FRAME
     mov [rbp - FMT_SPEC], rax
 
 .fmt_have_spec:
-    ; For now, always use str(value) as fallback.
-    ; TODO: implement __format__ protocol for non-empty format specs.
-    jmp .fmt_use_str
+    ; A class defining __format__ formats itself.  This used to fall straight
+    ; through to str(), so f"{obj:>5}" ignored both the spec and the method.
+    V_TEST_PTR_M [rbp - FMT_OBJ], rcx
+    ja .fmt_use_str
+    mov rdi, [rbp - FMT_OBJ]
+    mov rax, [rdi + PyObject.ob_type]
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_HEAPTYPE
+    jz .fmt_use_str
+    mov rsi, [rbp - FMT_SPEC]
+    extern dunder_call_2
+    lea rdx, [rel fmt_dunder_name]
+    mov ecx, TAG_PTR
+    call dunder_call_2
+    V_UNPACK rax, rdx
+    test edx, edx
+    jz .fmt_use_str             ; no __format__ on this class
+    ; If an empty spec was allocated here, release it.
+    cmp rbx, 2
+    jge .fmt_done
+    push rax
+    push rdx
+    mov rdi, [rbp - FMT_SPEC]
+    call obj_decref
+    pop rdx
+    pop rax
+    jmp .fmt_done
+
+    ; The builtin format-spec mini-language -- width, fill, alignment, and
+    ; the b/o/x/_ type codes -- is still unimplemented for int, float and
+    ; str; format(255, "08b") returns "255".
 
 .fmt_use_str:
     ; Just call str(value) — simple fallback
-    mov rdi, [rbp - FMT_OBJ]
-    mov rsi, [rbp - FMT_OBJ_TAG]
-    V_PACK rdi, rsi
+    mov rdi, [rbp - FMT_OBJ]    ; already a Value
     call obj_str
     ; If we allocated an empty spec, DECREF it
     cmp rbx, 2

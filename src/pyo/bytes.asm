@@ -21,6 +21,7 @@ extern exc_IndexError_type
 extern exc_TypeError_type
 extern exc_ValueError_type
 extern int_type
+extern obj_as_index
 extern bool_type
 extern int_to_i64
 extern slice_type
@@ -163,14 +164,12 @@ DEF_FUNC bytes_subscript
     lea rcx, [rel slice_type]
     cmp rax, rcx
     je .bs_slice
-    ; only an int may reach int_to_i64, which reads PyIntObject.compact
-    ; unconditionally
-    REQUIRE_INT_TYPE rax, rcx, .bs_type_error
 
 .bs_int:
-    ; Convert key to i64
+    ; obj_as_index covers int, bool, an int subclass and __index__, and
+    ; raises for anything else.
     mov rdi, r12
-    call int_to_i64
+    call obj_as_index
     ; Call bytes_getitem
     mov rdi, rbx
     mov rsi, rax

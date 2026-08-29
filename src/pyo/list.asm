@@ -31,6 +31,7 @@ extern type_type
 extern list_traverse
 extern list_clear
 extern int_type
+extern obj_as_index
 extern recursion_limit
 extern c_recursion_depth
 extern exc_RecursionError_type
@@ -321,12 +322,11 @@ DEF_FUNC list_subscript
     cmp rax, rcx
     je .ls_slice
 
-    ; Check if it's actually an int type before converting
-    mov rax, [rsi + PyObject.ob_type]
-    REQUIRE_INT_TYPE rax, rcx, .ls_type_error
-    ; Heap int -> convert to i64
+    ; obj_as_index covers int, bool, an int subclass and __index__, and
+    ; raises for anything else.
     mov rdi, rsi
-    call int_to_i64
+    mov edx, TAG_PTR
+    call obj_as_index
     mov rsi, rax
     jmp .ls_do_getitem
 
