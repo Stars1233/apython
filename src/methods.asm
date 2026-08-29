@@ -4871,7 +4871,7 @@ DEF_FUNC list_method_sort, LS_FRAME
     test rax, rax
     jnz .sort_mutated              ; ob_item != NULL → someone put items back
     test rax, rax
-    jnz .sort_mutated              ; ob_item_tags != NULL → someone put items back
+    jnz .sort_mutated              ; ob_item != NULL → someone put items back
     mov rax, [rbx + PyListObject.ob_size]
     test rax, rax
     jnz .sort_mutated              ; ob_size != 0 → someone changed it

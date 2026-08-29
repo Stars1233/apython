@@ -1471,9 +1471,9 @@ DEF_FUNC builtin___build_class__
     mov rdi, PyInstanceObject_size
 .bc_have_basic:
     ; rdi = base_basicsize
-    ; Set tp_basicsize = base_basicsize + nslots * 16
+    ; Set tp_basicsize = base_basicsize + nslots * 8 (one Value per slot)
     mov rax, r13
-    shl rax, 4                      ; nslots * 16
+    shl rax, 3                      ; nslots * 8
     add rax, rdi                    ; + base_basicsize
     mov [r12 + PyTypeObject.tp_basicsize], rax
 
@@ -1498,10 +1498,10 @@ DEF_FUNC builtin___build_class__
     cmp r8d, TAG_PTR
     jne .bc_slot_skip               ; skip non-string slots
 
-    ; Compute offset = base_basicsize + i * 16
+    ; Compute offset = base_basicsize + i * 8
     mov rdi, [rsp + 8]             ; base_basicsize
     mov rax, [rsp]                 ; i
-    shl rax, 4
+    shl rax, 3
     add rdi, rax                   ; offset
 
     ; Create descriptor: member_descr_new(offset, name_str)

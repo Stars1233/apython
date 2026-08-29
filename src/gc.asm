@@ -1186,20 +1186,19 @@ DEF_FUNC instance_traverse
     mov rdi, [rbx + PyInstanceObject.inst_dict]
     VISIT_PTR rdi
 
-    ; Visit __slots__ values (fat value slots after PyInstanceObject header)
+    ; Visit __slots__ values (one Value each, after the instance header)
     mov rax, [rbx + PyObject.ob_type]
     mov rax, [rax + PyTypeObject.tp_basicsize]
     sub rax, PyInstanceObject_size
     jle .done
-    shr rax, 4                  ; nslots
+    shr rax, 3                  ; nslots
     mov r13, rax
     lea r12, [rbx + PyInstanceObject_size]
 
 .slot_loop:
     mov rdi, [r12]
-    mov rsi, [r12 + 8]
-    VISIT_FAT rdi, rsi
-    add r12, 16
+    VISIT_V rdi, rsi
+    add r12, 8
     dec r13
     jnz .slot_loop
 

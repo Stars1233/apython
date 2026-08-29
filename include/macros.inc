@@ -182,11 +182,11 @@
 ; LEGACY (payload, tag) SUPPORT — being retired
 ; ==========================================================================
 ;
-; The value stack and frame locals now hold one NaN-boxed Value per slot
-; (see include/value.inc).  Containers and most runtime functions still use
-; the old split form: containers keep ob_item plus an ob_item_tags sidecar,
-; and functions return (rax=payload, edx=tag).  The V_PACK / V_UNPACK macros
-; bridge the two until P4 and P5 finish the conversion.
+; Every value store -- the stack, frame locals, containers and object fields
+; -- now holds one NaN-boxed Value (see include/value.inc).  What is left of
+; the split form is the runtime function ABI: functions still return
+; (rax=payload, edx=tag) and take tags as extra arguments.  The V_PACK /
+; V_UNPACK macros bridge the two until P5 finishes the conversion.
 ;
 ; Tag encoding (u8):
 ;   bits 0-6: type tag (TAG_SMALLINT..TAG_PTR)

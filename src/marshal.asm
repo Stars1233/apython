@@ -137,8 +137,8 @@ DEF_FUNC marshal_init_refs
     cmp qword [rel marshal_ref_cap], 0
     jne .already_allocated
 
-    ; Allocate initial ref array (16 bytes per entry: payload + tag)
-    mov rdi, MARSHAL_REFS_INIT_CAP * 16
+    ; Allocate the initial ref array (one Value per entry)
+    mov rdi, MARSHAL_REFS_INIT_CAP * 8
     call ap_malloc
     mov [rel marshal_refs], rax
     mov qword [rel marshal_ref_cap], MARSHAL_REFS_INIT_CAP
@@ -169,22 +169,19 @@ DEF_FUNC marshal_add_ref
     shl rax, 1                 ; new_cap = old_cap * 2
     mov [rel marshal_ref_cap], rax
     mov rsi, rax
-    shl rsi, 4                 ; new_cap * 16
+    shl rsi, 3                 ; new_cap * 8
     call ap_realloc
     mov [rel marshal_refs], rax
 
 .store:
+    ; The refs array takes ownership — INCREF, then pack and store
+    INCREF_VAL rbx, r12
+    V_PACK rbx, r12
     mov rax, [rel marshal_ref_count]
     mov rcx, [rel marshal_refs]
-    shl rax, 4                 ; count * 16
-    mov [rcx + rax], rbx       ; refs[count].payload
-    mov [rcx + rax + 8], r12   ; refs[count].tag
-    shr rax, 4                 ; restore count
+    mov [rcx + rax*8], rbx
     inc rax
     mov [rel marshal_ref_count], rax
-
-    ; Refs array takes ownership — INCREF the stored value
-    INCREF_VAL rbx, r12
 
     pop r12
     pop rbx
@@ -210,11 +207,8 @@ DEF_FUNC marshal_cleanup_refs
 .cleanup_loop:
     cmp r12, r13
     jge .cleanup_done
-    mov rax, r12
-    shl rax, 4
-    mov rdi, [rbx + rax]      ; payload
-    mov rsi, [rbx + rax + 8]  ; tag
-    DECREF_VAL rdi, rsi
+    mov rdi, [rbx + r12*8]
+    DECREF_V rdi, rsi
     inc r12
     jmp .cleanup_loop
 .cleanup_done:
@@ -709,9 +703,7 @@ mdo_small_tuple:
     jz .stuple_no_fixup
     mov rax, [rsp + 8]        ; ref index
     mov rcx, [rel marshal_refs]
-    shl rax, 4                 ; index * 16
-    mov [rcx + rax], r14      ; fix up placeholder payload
-    mov qword [rcx + rax + 8], TAG_PTR  ; fix up tag
+    mov [rcx + rax*8], r14     ; a pointer is its own Value
     mov rdi, r14
     call obj_incref            ; refs array takes ownership of real object
 .stuple_no_fixup:
@@ -783,9 +775,7 @@ mdo_tuple:
     jz .tuple_no_fixup
     mov rax, [rsp + 8]        ; ref index
     mov rcx, [rel marshal_refs]
-    shl rax, 4                 ; index * 16
-    mov [rcx + rax], r14      ; fix up placeholder payload
-    mov qword [rcx + rax + 8], TAG_PTR  ; fix up tag
+    mov [rcx + rax*8], r14     ; a pointer is its own Value
     mov rdi, r14
     call obj_incref            ; refs array takes ownership of real object
 .tuple_no_fixup:
@@ -809,15 +799,9 @@ mdo_ref:
     cmp rdi, [rel marshal_ref_count]
     jge mdo_ref_oob
     mov rcx, [rel marshal_refs]
-    shl rdi, 4                 ; index * 16
-    mov rax, [rcx + rdi]      ; payload
-    mov rdx, [rcx + rdi + 8]  ; tag
-    ; Back-references: INCREF only if refcounted (TAG_PTR)
-    cmp edx, TAG_PTR
-    jne .ref_done
-    test rax, rax
-    jz .ref_done
-    inc qword [rax + PyObject.ob_refcnt]
+    mov rax, [rcx + rdi*8]
+    INCREF_V rax, rdx
+    V_UNPACK rax, rdx
 .ref_done:
     jmp mfinish
 
@@ -1036,9 +1020,7 @@ mdo_code:
     jz .code_no_fixup
     mov rax, [rsp + 104]       ; ref index
     mov rcx, [rel marshal_refs]
-    shl rax, 4                 ; index * 16
-    mov [rcx + rax], r13      ; fix up placeholder payload
-    mov qword [rcx + rax + 8], TAG_PTR  ; fix up tag
+    mov [rcx + rax*8], r13     ; a pointer is its own Value
     mov rdi, r13
     call obj_incref            ; refs array takes ownership of real object
 .code_no_fixup:
@@ -1138,9 +1120,7 @@ mdo_set_common:
     jz .fset_no_fixup
     mov rax, [rsp + 8]        ; ref index
     mov rcx, [rel marshal_refs]
-    shl rax, 4                 ; index * 16
-    mov [rcx + rax], r14      ; fix up placeholder payload
-    mov qword [rcx + rax + 8], TAG_PTR  ; fix up tag
+    mov [rcx + rax*8], r14     ; a pointer is its own Value
     mov rdi, r14
     call obj_incref            ; refs array takes ownership of real object
 .fset_no_fixup:

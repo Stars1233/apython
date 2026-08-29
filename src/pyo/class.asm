@@ -223,11 +223,11 @@ DEF_FUNC instance_getattr
     ; Member descriptor found — read value from instance at fixed offset
     ; r13 = member descriptor, rbx = instance
     mov rcx, [r13 + PyMemberDescrObject.md_offset]
-    mov rax, [rbx + rcx]       ; slot payload
-    mov rdx, [rbx + rcx + 8]  ; slot tag
-    test edx, edx
-    jz .slot_not_set            ; TAG_NULL = slot not set → AttributeError
-    INCREF_VAL rax, rdx
+    mov rax, [rbx + rcx]       ; slot Value
+    test rax, rax
+    jz .slot_not_set            ; 0 = slot not set → AttributeError
+    INCREF_V rax, rdx
+    V_UNPACK rax, rdx
     pop r13
     pop r12
     pop rbx
@@ -312,17 +312,14 @@ DEF_FUNC instance_setattr
 
     ; XDECREF old value at slot
     push rcx
-    mov rdi, [rbx + rcx]       ; old payload
-    mov rsi, [rbx + rcx + 8]  ; old tag
-    XDECREF_VAL rdi, rsi
+    mov rdi, [rbx + rcx]       ; old Value
+    XDECREF_V rdi, rsi
     pop rcx
 
-    ; INCREF new value
+    ; INCREF the new value, then pack and store it
     INCREF_VAL r13, r14
-
-    ; Store new value at slot offset
+    V_PACK r13, r14
     mov [rbx + rcx], r13
-    mov [rbx + rcx + 8], r14
 
     pop r14
     pop r13
@@ -465,23 +462,22 @@ DEF_FUNC instance_dealloc
 .no_int_value:
 
     ; DECREF_VAL each __slots__ slot
-    ; nslots = (tp_basicsize - PyInstanceObject_size) / 16
+    ; nslots = (tp_basicsize - PyInstanceObject_size) / 8
     push r12
     mov rax, [rbx + PyObject.ob_type]
     mov rax, [rax + PyTypeObject.tp_basicsize]
     sub rax, PyInstanceObject_size
-    jle .no_slots                ; no slots (basicsize <= PyInstanceObject_size)
-    shr rax, 4                  ; nslots = (basicsize - 24) / 16
+    jle .no_slots                ; no slots
+    shr rax, 3                  ; nslots
     mov r12, rax                ; r12 = remaining count
     lea rcx, [rbx + PyInstanceObject_size]  ; rcx = first slot address
 
 .slot_decref_loop:
     push rcx
-    mov rdi, [rcx]              ; slot payload
-    mov rsi, [rcx + 8]         ; slot tag
-    XDECREF_VAL rdi, rsi
+    mov rdi, [rcx]              ; slot Value
+    XDECREF_V rdi, rsi
     pop rcx
-    add rcx, 16                 ; next slot
+    add rcx, 8                  ; next slot
     dec r12
     jnz .slot_decref_loop
 
