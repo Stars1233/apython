@@ -817,6 +817,7 @@ DEF_FUNC set_type_call, STC_FRAME
     mov rax, [rdi + PyObject.ob_type]
     mov rax, [rax + PyTypeObject.tp_iternext]
     call rax
+    V_UNPACK rax, rdx           ; tp_iternext returns a Value
     test edx, edx           ; check tag (NULL = exhausted)
     jz .stc_iter_done
 
@@ -937,12 +938,11 @@ DEF_FUNC_BARE set_iter_next
     mov r8, [rax + SET_ENTRY_KEY]
     SET_ENTRY_CLASSIFY rax, .si_skip, .si_skip
 
-    ; Found a valid entry -- return the key as (payload, tag)
+    ; Found a valid entry -- return the key Value
     inc rcx
     mov [rdi + PyDictIterObject.it_index], rcx
     mov rax, r8
     INCREF_V rax, rdx
-    V_UNPACK rax, rdx
     ret
 
 .si_skip:
@@ -1024,6 +1024,7 @@ DEF_FUNC frozenset_type_call, FTC_FRAME
     mov rax, [rdi + PyObject.ob_type]
     mov rax, [rax + PyTypeObject.tp_iternext]
     call rax
+    V_UNPACK rax, rdx           ; tp_iternext returns a Value
     test edx, edx
     jz .ftc_iter_done
 

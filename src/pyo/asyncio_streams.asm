@@ -383,7 +383,7 @@ DEF_FUNC_BARE read_awaitable_iternext
     mov rdx, POLLIN
     shl rdx, 32
     or rax, rdx
-    mov edx, TAG_IO_WAIT
+    or rax, [rel v_iowait_lo]   ; IO_WAIT sentinel Value
     ret
 
 .rai_read:
@@ -686,7 +686,7 @@ DEF_FUNC_BARE connect_awaitable_iternext
     mov rdx, POLLOUT
     shl rdx, 32
     or rax, rdx
-    mov edx, TAG_IO_WAIT
+    or rax, [rel v_iowait_lo]   ; IO_WAIT sentinel Value
     ret
 
 .cai_result:
@@ -711,17 +711,13 @@ DEF_FUNC_BARE connect_awaitable_iternext
     call tuple_new
     mov rbx, rax               ; rbx = tuple
 
-    ; Set tuple[0] = reader (ob_item starts at +32)
-    mov [rax + 32], r12        ; ob_item[0] payload
-    mov qword [rax + 40], TAG_PTR  ; ob_item[0] tag
-
-    ; Set tuple[1] = writer
+    ; Set tuple[0] = reader, tuple[1] = writer
+    mov r9, [rax + PyTupleObject.ob_item]
+    mov [r9], r12
     pop rcx                    ; writer
-    mov [rax + 48], rcx        ; ob_item[1] payload
-    mov qword [rax + 56], TAG_PTR  ; ob_item[1] tag
+    mov [r9 + 8], rcx
 
     mov rax, rbx
-    mov edx, TAG_PTR
 
     pop r12
     pop rbx
@@ -755,7 +751,7 @@ DEF_FUNC_BARE accept_awaitable_iternext
     mov rdx, POLLIN
     shl rdx, 32
     or rax, rdx
-    mov edx, TAG_IO_WAIT
+    or rax, [rel v_iowait_lo]   ; IO_WAIT sentinel Value
     ret
 
 .aai_accept:
@@ -800,14 +796,12 @@ DEF_FUNC_BARE accept_awaitable_iternext
     call tuple_new
     mov r12, rax               ; tuple
 
-    mov [rax + 32], rbx            ; ob_item[0] = reader
-    mov qword [rax + 40], TAG_PTR
+    mov r9, [rax + PyTupleObject.ob_item]
+    mov [r9], rbx                  ; ob_item[0] = reader
     pop rcx                        ; writer
-    mov [rax + 48], rcx            ; ob_item[1] = writer
-    mov qword [rax + 56], TAG_PTR
+    mov [r9 + 8], rcx              ; ob_item[1] = writer
 
     mov rax, r12
-    mov edx, TAG_PTR
     pop r12
     pop rbx
     ret

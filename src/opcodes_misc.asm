@@ -1829,6 +1829,7 @@ DEF_FUNC op_send, SND_FRAME
     mov rax, [rdi + PyObject.ob_type]
     mov rax, [rax + PyTypeObject.tp_iternext]
     call rax
+    V_UNPACK rax, rdx           ; tp_iternext returns a Value
 
 .send_check_result:
     mov [rbp - SND_RESULT], rax ; save result payload

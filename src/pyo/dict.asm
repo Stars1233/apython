@@ -183,6 +183,7 @@ DEF_FUNC dict_type_call
     mov rax, [rdi + PyObject.ob_type]
     mov rax, [rax + PyTypeObject.tp_iternext]
     call rax
+    V_UNPACK rax, rdx           ; tp_iternext returns a Value
     test edx, edx
     jz .dtc_iter_done          ; exhausted
 
@@ -1243,15 +1244,13 @@ DEF_FUNC_BARE dict_iter_next
 
     ; kind=0: return key
     mov rax, [rax + DictEntry.key]
-    V_UNPACK rax, rdx
-    INCREF_VAL rax, rdx
+    INCREF_V rax, rdx
     ret
 
 .di_return_value:
     ; kind=1: return value
     mov rax, [rax + DictEntry.value]
-    V_UNPACK rax, rdx
-    INCREF_VAL rax, rdx
+    INCREF_V rax, rdx
     ret
 
 .di_return_item:
@@ -1271,20 +1270,15 @@ DEF_FUNC_BARE dict_iter_next
 
     ; tuple[0] = key
     mov rax, [rbx + DictEntry.key]
-    V_UNPACK rax, rdx
-    INCREF_VAL rax, rdx
-    V_PACK rax, rdx
+    INCREF_V rax, rdx
     mov [r9], rax
 
     ; tuple[1] = value
     mov rax, [rbx + DictEntry.value]
-    V_UNPACK rax, rdx
-    INCREF_VAL rax, rdx
-    V_PACK rax, rdx
+    INCREF_V rax, rdx
     mov [r9 + 8], rax
 
     mov rax, r12
-    mov edx, TAG_PTR
 
     pop r12
     pop rbx
@@ -1837,8 +1831,7 @@ DEF_FUNC_BARE dict_rev_iter_next
 
     ; Return key
     mov rax, [rax + DictEntry.key]
-    V_UNPACK rax, rdx
-    INCREF_VAL rax, rdx
+    INCREF_V rax, rdx
     ret
 
 .dri_skip:

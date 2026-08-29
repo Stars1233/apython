@@ -215,10 +215,10 @@ sleep_awaitable_iternext:
     cmp dword [rdi + SleepAwaitable.yielded], 0
     jne .sai_done
 
-    ; First call: yield TAG_SLEEP with delay_ns
+    ; First call: yield the SLEEP sentinel Value carrying delay_ns
     mov dword [rdi + SleepAwaitable.yielded], 1
     mov rax, [rdi + SleepAwaitable.delay_ns]
-    mov edx, TAG_SLEEP
+    or rax, [rel v_sleep_lo]
     ret
 
 .sai_done:
@@ -358,7 +358,6 @@ wait_for_awaitable_iternext:
     mov dword [rdi + WaitForAwaitable.state], 1
     INCREF rdi
     mov rax, rdi
-    mov edx, TAG_PTR
     ret
 
 .wfai_check:

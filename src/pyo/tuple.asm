@@ -1023,6 +1023,7 @@ DEF_FUNC tuple_type_call, TTC_FRAME
     mov rdi, [rbp - TTC_ITER]
     extern call_iternext
     call call_iternext
+    V_UNPACK rax, rdx           ; call_iternext returns a Value
     test edx, edx
     jz .ttc_done
 

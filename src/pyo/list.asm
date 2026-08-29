@@ -574,6 +574,7 @@ DEF_FUNC list_ass_subscript, LAS_FRAME
     jz .las_gen_done
     mov rdi, [rsp + 8]
     call rax
+    V_UNPACK rax, rdx           ; tp_iternext returns a Value
     test edx, edx
     jz .las_gen_done
     push rax
@@ -1676,6 +1677,7 @@ DEF_FUNC list_inplace_concat, LIC_FRAME
     jz .lic_gen_done
     mov rdi, [rbp - LIC_ITER]
     call rax
+    V_UNPACK rax, rdx           ; tp_iternext returns a Value
     test edx, edx
     jz .lic_gen_done
 
@@ -1890,6 +1892,7 @@ DEF_FUNC list_type_call, LTC_FRAME
     mov rdi, [rbp - LTC_ITER]
     extern call_iternext
     call call_iternext
+    V_UNPACK rax, rdx           ; call_iternext returns a Value
     test edx, edx
     jz .ltc_done            ; StopIteration
 

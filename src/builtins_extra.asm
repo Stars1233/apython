@@ -1747,6 +1747,7 @@ DEF_FUNC builtin_next_fn
     test rax, rax
     jz .next_two_type_error
     call rax
+    V_UNPACK rax, rdx           ; tp_iternext returns a Value
     test edx, edx
     jz .next_two_default           ; exhausted → return default
     ; Got value — discard saved default
@@ -1823,6 +1824,7 @@ DEF_FUNC builtin_next_fn
 .next_have_iternext:
     mov rbx, rdi                       ; save iterator for StopIteration.value
     call rax
+    V_UNPACK rax, rdx                  ; tp_iternext returns a Value
     test edx, edx
     jz .next_stop
 
@@ -1890,6 +1892,7 @@ DEF_FUNC builtin_any
 .any_loop:
     mov rdi, rbx
     call r12
+    V_UNPACK rax, rdx           ; tp_iternext returns a Value
     test edx, edx             ; TAG_NULL = exhausted
     jz .any_false
 
@@ -1975,6 +1978,7 @@ DEF_FUNC builtin_all
 .all_loop:
     mov rdi, rbx
     call r12
+    V_UNPACK rax, rdx           ; tp_iternext returns a Value
     test edx, edx             ; TAG_NULL = exhausted
     jz .all_true
 
@@ -2083,6 +2087,7 @@ DEF_FUNC builtin_sum
 .sum_loop:
     mov rdi, rbx
     call r12
+    V_UNPACK rax, rdx           ; tp_iternext returns a Value
     test edx, edx
     jz .sum_done
 
@@ -2327,6 +2332,7 @@ DEF_FUNC_LOCAL minmax_impl, MM_FRAME
     ; Get first element → initial best
     mov rdi, [rbp - MM_ITER]
     call rbx
+    V_UNPACK rax, rdx           ; tp_iternext returns a Value
     test edx, edx
     jz .mm_iter_empty
 
@@ -2338,6 +2344,7 @@ DEF_FUNC_LOCAL minmax_impl, MM_FRAME
 .mm_iter_loop:
     mov rdi, [rbp - MM_ITER]
     call qword [rbp - MM_ITERNX]
+    V_UNPACK rax, rdx           ; tp_iternext returns a Value
     test edx, edx
     jz .mm_iter_done
 
@@ -2848,6 +2855,7 @@ DEF_FUNC builtin_dir, DIR_FRAME
     jz .dir_iter_done
     mov rdi, r13
     call rax                ; tp_iternext(iter) -> key or NULL
+    V_UNPACK rax, rdx           ; tp_iternext returns a Value
     test edx, edx
     jz .dir_iter_done
 
@@ -4303,6 +4311,7 @@ DEF_FUNC builtin_anext_fn, AN_FRAME
 
     mov rdi, [rbp - AN_ITER]
     call rax                   ; returns (rax, edx)
+    V_UNPACK rax, rdx           ; tp_iternext returns a Value
     test edx, edx
     jnz .an_got_value
 

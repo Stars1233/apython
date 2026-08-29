@@ -193,6 +193,7 @@ DEF_FUNC_BARE op_get_anext
 
     call rax                   ; tp_iternext(aiter) -> awaitable or NULL
     ; rax = result payload, edx = tag
+    V_UNPACK rax, rdx           ; tp_iternext returns a Value
     test edx, edx
     jz .gan_stop               ; NULL = exhausted
 

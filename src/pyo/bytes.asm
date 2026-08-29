@@ -567,9 +567,9 @@ DEF_FUNC_BARE bytes_iter_next
     cmp rcx, [rax + PyBytesObject.ob_size]
     jge .exhausted
 
-    ; Get byte and return as SmallInt
+    ; Get byte and return as an int immediate (0..255 always fits)
     movzx eax, byte [rax + PyBytesObject.data + rcx]
-    RET_TAG_SMALLINT
+    add rax, [rel v_int_bias]
 
     ; Advance index
     inc qword [rdi + PyBytesIterObject.it_index]

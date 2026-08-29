@@ -975,6 +975,7 @@ DEF_FUNC_BARE op_for_iter
 
 .have_iternext:
     call rax
+    V_UNPACK rax, rdx          ; tp_iternext returns a Value
 .check_next_result:
     ; rax = payload, rdx = tag (TAG_NULL if exhausted)
 
@@ -1148,6 +1149,7 @@ DEF_FUNC op_list_extend, 32
     jz .extend_generic_done
     mov rdi, [rbp-32]
     call rax                   ; tp_iternext(iter) → (payload, tag)
+    V_UNPACK rax, rdx           ; tp_iternext returns a Value
     test edx, edx
     jz .extend_generic_done    ; StopIteration
 
@@ -1372,6 +1374,7 @@ DEF_FUNC_BARE op_contains_op
     mov rax, [rdi + PyObject.ob_type]
     mov rax, [rax + PyTypeObject.tp_iternext]
     call rax
+    V_UNPACK rax, rdx           ; tp_iternext returns a Value
     test edx, edx
     jz .contains_iter_not_found  ; TAG_NULL = exhausted
 
@@ -2250,6 +2253,7 @@ DEF_FUNC op_unpack_ex
     jz .ue_gen_done
     mov rdi, [rsp + 8]
     call rax                   ; tp_iternext(iter) → (payload, tag)
+    V_UNPACK rax, rdx           ; tp_iternext returns a Value
     test edx, edx
     jz .ue_gen_done
 
@@ -2471,6 +2475,7 @@ DEF_FUNC op_set_update
     mov rax, [rdi + PyObject.ob_type]
     mov rax, [rax + PyTypeObject.tp_iternext]
     call rax
+    V_UNPACK rax, rdx           ; tp_iternext returns a Value
     test edx, edx
     jz .su_iter_done
 

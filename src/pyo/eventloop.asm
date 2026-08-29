@@ -765,7 +765,6 @@ DEF_FUNC_BARE task_iternext
     ; Not done — yield self; task_step identifies it by ob_type
     inc qword [rdi + PyObject.ob_refcnt]
     mov rax, rdi
-    mov edx, TAG_PTR
     ret
 
 .ti_done:

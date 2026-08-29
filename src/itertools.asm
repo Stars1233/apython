@@ -84,7 +84,8 @@ DEF_FUNC call_iternext
     jz .ci_null
     lea rsi, [rel dunder_next]
     call dunder_call_1
-    test edx, edx
+    V_PACK rax, rdx           ; dunder_call_1 still returns a fat pair
+    test rax, rax
     jnz .ci_ret               ; got a value, return it
 
     ; NULL from __next__ — check for StopIteration
@@ -480,33 +481,25 @@ DEF_FUNC_LOCAL enumerate_iternext
     ; Call underlying iterator's iternext
     mov rdi, [rbx + IT_FIELD1]       ; it_iter
     call call_iternext
-    test edx, edx
+    test rax, rax
     jz .enum_exhausted
-    mov r12, rax             ; r12 = value payload from iternext
-    push rdx                 ; save value tag from iternext
+    mov r12, rax             ; r12 = value Value from iternext
 
-    ; Inline SmallInt for current count (int_from_i64 always returns SmallInt)
-    mov r13, [rbx + IT_FIELD2]       ; r13 = count (raw i64 = SmallInt payload)
+    mov r13, [rbx + IT_FIELD2]       ; r13 = count
     inc qword [rbx + IT_FIELD2]      ; increment for next time
-    push qword TAG_SMALLINT          ; count tag (always SmallInt)
+    V_PACK_I64 r13, rcx              ; the count as a Value
 
     ; Create 2-tuple
     mov rdi, 2
     call tuple_new
-    ; rax = new tuple
     ; Fill: tuple[0] = count, tuple[1] = value
     mov r8, [rax + PyTupleObject.ob_item]
-    pop rcx                  ; count tag
-    V_PACK r13, rcx
     mov [r8], r13            ; slot 0
-    pop rcx                  ; value tag
-    V_PACK r12, rcx
     mov [r8 + 8], r12        ; slot 1
 
     pop r13
     pop r12
     pop rbx
-    mov edx, TAG_PTR               ; fat return tag
     leave
     ret
 
@@ -730,12 +723,11 @@ DEF_FUNC_LOCAL zip_iternext
     mov rax, [rdi + PyObject.ob_type]
     mov rax, [rax + PyTypeObject.tp_iternext]
     call rax
-    test edx, edx
+    test rax, rax
     jz .zip_partial_cleanup
 
-    ; Store value in tuple (rdx = tag from iternext)
-    mov r8, [r14 + PyTupleObject.ob_item]        ; payloads
-    V_PACK rax, rdx
+    ; Store the item Value in the tuple
+    mov r8, [r14 + PyTupleObject.ob_item]
     mov [r8 + r15 * 8], rax
 
     inc r15
@@ -748,7 +740,6 @@ DEF_FUNC_LOCAL zip_iternext
     pop r13
     pop r12
     pop rbx
-    mov edx, TAG_PTR
     leave
     ret
 
@@ -760,10 +751,9 @@ DEF_FUNC_LOCAL zip_iternext
     cmp rcx, r15
     jge .zip_free_tuple
     push rcx
-    mov r8, [r14 + PyTupleObject.ob_item]        ; payloads
+    mov r8, [r14 + PyTupleObject.ob_item]
     mov rdi, [r8 + rcx*8]
-    V_UNPACK rdi, rsi
-    DECREF_VAL rdi, rsi
+    DECREF_V rdi, rsi
     pop rcx
     inc rcx
     jmp .zip_cleanup_loop
@@ -802,7 +792,7 @@ DEF_FUNC_LOCAL zip_iternext
     mov rax, [rdi + PyObject.ob_type]
     mov rax, [rax + PyTypeObject.tp_iternext]
     call rax
-    test edx, edx
+    test rax, rax
     jnz .zip_strict_decref_err  ; non-NULL = this one is longer
 
     inc r14
@@ -811,8 +801,7 @@ DEF_FUNC_LOCAL zip_iternext
 .zip_strict_decref_err:
     ; DECREF the extra value we got from the longer iterator
     mov rdi, rax
-    mov rsi, rdx
-    DECREF_VAL rdi, rsi
+    DECREF_V rdi, rsi
 .zip_strict_mismatch:
     ; Set exception without longjmp — return NULL so callers can clean up
     extern exc_from_cstr
@@ -994,10 +983,11 @@ DEF_FUNC_LOCAL map_iternext, MI_FRAME
     mov rax, [rdi + PyObject.ob_type]
     mov rax, [rax + PyTypeObject.tp_iternext]
     call rax
-    test edx, edx
+    test rax, rax
     jz .map_partial_cleanup
 
-    ; Store value in fat args array
+    ; Store value in fat args array (tp_call still takes a 16-byte stride)
+    V_UNPACK rax, rdx
     mov rcx, r13
     shl rcx, 4
     mov r8, [rbp - MI_ARGS]
@@ -1042,6 +1032,7 @@ DEF_FUNC_LOCAL map_iternext, MI_FRAME
     mov rcx, r14
     shl rcx, 4
     add rsp, rcx
+    V_PACK rax, rdx
 
     pop r15
     pop r14
@@ -1199,8 +1190,9 @@ DEF_FUNC_LOCAL filter_iternext
     mov rax, [rdi + PyObject.ob_type]
     mov rax, [rax + PyTypeObject.tp_iternext]
     call rax
-    test edx, edx
+    test rax, rax
     jz .filter_exhausted
+    V_UNPACK rax, rdx
     mov r13, rax             ; r13 = item payload (we own ref)
     push rdx                 ; save item tag from iternext
 
@@ -1264,6 +1256,7 @@ DEF_FUNC_LOCAL filter_iternext
 .filter_accept:
     mov rax, r13             ; payload
     pop rdx                  ; tag from iternext
+    V_PACK rax, rdx
     pop r15
     pop r14
     pop r13
@@ -1518,7 +1511,8 @@ DEF_FUNC_LOCAL reversed_iternext
     ; Decrement index
     dec qword [rbx + IT_FIELD2]
 
-    ; rax = payload, rdx = tag from sq_item/dunder_call_2
+    ; sq_item and dunder_call_2 both still return a fat pair
+    V_PACK rax, rdx
     pop rbx
     leave
     ret
@@ -1585,6 +1579,7 @@ DEF_FUNC builtin_sorted, SO_FRAME
     mov rax, [rdi + PyObject.ob_type]
     mov rax, [rax + PyTypeObject.tp_iternext]
     call rax
+    V_UNPACK rax, rdx           ; tp_iternext returns a Value
     test edx, edx
     jz .sorted_done_iter
 
@@ -1718,6 +1713,7 @@ DEF_FUNC_LOCAL seq_iter_iternext
 
     ; Got a value — increment index
     inc qword [rbx + IT_FIELD2]
+    V_PACK rax, rdx
     pop rbx
     leave
     ret
@@ -1878,7 +1874,7 @@ DEF_FUNC_LOCAL chain_iternext
 
     ; Call iternext via helper (handles __next__, clears StopIteration)
     call call_iternext
-    test edx, edx
+    test rax, rax
     jnz .chain_got_value
 
     ; call_iternext clears StopIteration automatically.

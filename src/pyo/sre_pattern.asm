@@ -2103,7 +2103,6 @@ DEF_FUNC sre_scanner_iternext, SI_FRAME
     mov [rbx + SRE_ScannerObject.pos], rax
 
     pop rax                    ; match object
-    mov edx, TAG_PTR
 
     pop r13
     pop r12

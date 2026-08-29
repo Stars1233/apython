@@ -5687,6 +5687,7 @@ DEF_FUNC list_method_extend, LE_FRAME
     jz .extend_iter_done
     mov rdi, [rbp - LE_ITER]
     call rax                    ; tp_iternext(iter) → (payload, tag)
+    V_UNPACK rax, rdx           ; tp_iternext returns a Value
     test edx, edx
     jz .extend_iter_done        ; StopIteration
 
@@ -6203,6 +6204,7 @@ DEF_FUNC dict_classmethod_fromkeys, DFK_FRAME
     mov rdi, [rbp - DFK_ITER]
     extern call_iternext
     call call_iternext
+    V_UNPACK rax, rdx           ; call_iternext returns a Value
     test edx, edx
     jz .dfk_done                   ; iterator exhausted
 

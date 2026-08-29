@@ -220,6 +220,7 @@ DEF_FUNC gen_iternext
     ; Return the yielded value
     mov rax, r12
     pop rdx                    ; restore result tag
+    V_PACK rax, rdx            ; eval_frame still returns a fat pair
     pop r12
     pop rbx
     leave
@@ -266,7 +267,6 @@ DEF_FUNC async_gen_iternext
     ; INCREF the async generator (wrapper holds a ref)
     inc qword [rbx + PyObject.ob_refcnt]
 
-    mov edx, TAG_PTR
     pop rbx
     leave
     ret
@@ -365,7 +365,7 @@ DEF_FUNC ags_iternext
     mov [rbx + AsyncGenASend.gi_return_value], rax
 
     ; INCREF the value (we're storing + returning it)
-    INCREF_VAL rax, rdx
+    INCREF_V rax, rdx
 
     ; Transition to state 1 (yielded)
     mov dword [rbx + AsyncGenASend.ags_state], 1
