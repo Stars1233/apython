@@ -137,12 +137,10 @@ DEF_FUNC task_new
     pop rax
 
     mov qword [rax + AsyncTask.result], 0
-    mov qword [rax + AsyncTask.result_tag], 0
     mov qword [rax + AsyncTask.exception], 0
     ; send_value starts as None
     lea rcx, [rel none_singleton]
     mov [rax + AsyncTask.send_value], rcx
-    mov qword [rax + AsyncTask.send_tag], TAG_PTR
     mov dword [rax + AsyncTask.done], 0
     mov dword [rax + AsyncTask.cancelling], 0
     mov dword [rax + AsyncTask.n_waiters], 0
@@ -171,7 +169,7 @@ DEF_FUNC task_dealloc
 
     ; XDECREF result
     mov rdi, [rbx + AsyncTask.result]
-    mov rsi, [rbx + AsyncTask.result_tag]
+    V_UNPACK rdi, rsi
     XDECREF_VAL rdi, rsi
 
     ; XDECREF exception
@@ -265,7 +263,7 @@ DEF_FUNC task_step, TS_FRAME
     ; gen_send(coro, send_value, send_tag)
     mov rdi, [rbx + AsyncTask.coro]
     mov rsi, [rbx + AsyncTask.send_value]
-    mov edx, [rbx + AsyncTask.send_tag]
+    V_UNPACK rsi, rdx
     call gen_send
     ; rax = result payload, edx = tag
 
@@ -351,9 +349,9 @@ DEF_FUNC task_step, TS_FRAME
 
     ; No exception — set send_value to its result, re-enqueue
     mov rax, [r12 + AsyncTask.result]
-    mov rdx, [r12 + AsyncTask.result_tag]
+    V_UNPACK rax, rdx
+    V_PACK rax, rdx
     mov [rbx + AsyncTask.send_value], rax
-    mov [rbx + AsyncTask.send_tag], rdx
     mov rdi, rbx
     call ready_enqueue
     jmp .ts_decref_awaited
@@ -365,7 +363,6 @@ DEF_FUNC task_step, TS_FRAME
     lea rax, [rel none_singleton]
     INCREF rax
     mov [rbx + AsyncTask.send_value], rax
-    mov qword [rbx + AsyncTask.send_tag], TAG_PTR
     mov rdi, rbx
     call ready_enqueue
 
@@ -408,7 +405,6 @@ DEF_FUNC task_step, TS_FRAME
     lea rax, [rel none_singleton]
     INCREF rax
     mov [rbx + AsyncTask.send_value], rax
-    mov qword [rbx + AsyncTask.send_tag], TAG_PTR
     mov rdi, rbx
     call ready_enqueue
     ; DECREF wfa
@@ -421,9 +417,9 @@ DEF_FUNC task_step, TS_FRAME
     ; The return value is in gen.gi_return_value
     mov rdi, [rbx + AsyncTask.coro]
     mov rax, [rdi + PyGenObject.gi_return_value]
-    mov rdx, [rdi + PyGenObject.gi_return_tag]
+    V_UNPACK rax, rdx
+    V_PACK rax, rdx
     mov [rbx + AsyncTask.result], rax
-    mov [rbx + AsyncTask.result_tag], rdx
     INCREF_VAL rax, rdx
     mov dword [rbx + AsyncTask.done], 1
 
@@ -458,9 +454,9 @@ DEF_FUNC task_step, TS_FRAME
     ; Store return value as result (from gi_return_value since gen exhausted)
     mov rdi, [rbx + AsyncTask.coro]
     mov rax, [rdi + PyGenObject.gi_return_value]
-    mov rdx, [rdi + PyGenObject.gi_return_tag]
+    V_UNPACK rax, rdx
+    V_PACK rax, rdx
     mov [rbx + AsyncTask.result], rax
-    mov [rbx + AsyncTask.result_tag], rdx
     INCREF_VAL rax, rdx
     jmp .ts_cancel_done
 .ts_cancel_no_exc:
@@ -517,10 +513,10 @@ DEF_FUNC task_wake_waiters
 
     ; Set send_value = task's result (INCREF for each waiter)
     mov rax, [rbx + AsyncTask.result]
-    mov rdx, [rbx + AsyncTask.result_tag]
+    V_UNPACK rax, rdx
     INCREF_VAL rax, rdx
+    V_PACK rax, rdx
     mov [rdi + AsyncTask.send_value], rax
-    mov [rdi + AsyncTask.send_tag], rdx
     jmp .tw_enqueue
 
 .tw_set_cancel:
@@ -530,7 +526,6 @@ DEF_FUNC task_wake_waiters
     lea rax, [rel none_singleton]
     INCREF rax
     mov [rdi + AsyncTask.send_value], rax
-    mov qword [rdi + AsyncTask.send_tag], TAG_PTR
 
 .tw_enqueue:
     ; Enqueue waiter
@@ -663,7 +658,7 @@ DEF_FUNC eventloop_run, ER_FRAME
 .er_done:
     ; Return root task's result
     mov rax, [rbx + AsyncTask.result]
-    mov rdx, [rbx + AsyncTask.result_tag]
+    V_UNPACK rax, rdx
     INCREF_VAL rax, rdx
 
     pop r12
@@ -787,9 +782,9 @@ DEF_FUNC_BARE task_iternext
 
     ; No exception — copy result for StopIteration protocol
     mov rax, [rdi + AsyncTask.result]
-    mov rdx, [rdi + AsyncTask.result_tag]
+    V_UNPACK rax, rdx
+    V_PACK rax, rdx
     mov [rdi + AsyncTask.send_value], rax
-    mov [rdi + AsyncTask.send_tag], rdx
     ; Return NULL to signal completion
     RET_NULL
     ret
@@ -832,9 +827,9 @@ DEF_FUNC _task_result_impl
     test rcx, rcx
     jnz .tr_exception
     ; Return result
-    mov rdx, [rax + AsyncTask.result_tag]
     mov rax, [rax + AsyncTask.result]
-    INCREF_VAL rax, rdx
+    INCREF_V rax, rdx
+    V_UNPACK rax, rdx
     leave
     ret
 

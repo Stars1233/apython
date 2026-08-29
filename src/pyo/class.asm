@@ -460,7 +460,7 @@ DEF_FUNC instance_dealloc
     test rax, TYPE_FLAG_INT_SUBCLASS
     jz .no_int_value
     mov rdi, [rbx + PyIntSubclassObject.int_value]
-    mov rsi, [rbx + PyIntSubclassObject.int_value_tag]
+    V_UNPACK rdi, rsi
     DECREF_VAL rdi, rsi
 .no_int_value:
 
@@ -979,15 +979,15 @@ DEF_FUNC type_call
 
     ; Allocate PyIntSubclassObject (gc_alloc since heaptypes have HAVE_GC)
     push r14                     ; save int_value across malloc
-    push r15                     ; save int_value_tag across malloc
+    push r15                     ; save the wrapped value's tag across malloc
     mov edi, PyIntSubclassObject_size
     mov rsi, rbx                 ; type = heaptype
     call gc_alloc
     pop r15
     pop r14
     mov qword [rax + PyIntSubclassObject.inst_dict], 0
+    V_PACK r14, r15
     mov [rax + PyIntSubclassObject.int_value], r14
-    mov [rax + PyIntSubclassObject.int_value_tag], r15
     ; INCREF the type (subclass object holds a reference)
     push rax
     mov rdi, rbx

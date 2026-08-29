@@ -1861,10 +1861,12 @@ DEF_FUNC op_send, SND_FRAME
     V_TEST_PTR rdi, rax
     ja .send_no_retval
     mov rax, [rdi + PyObject.ob_type]
+    ; gi_return_value lives at +48, so the object must be at least 56 bytes.
+    ; (Was `jle 56` when the struct still carried a separate tag word.)
     cmp qword [rax + PyTypeObject.tp_basicsize], 56
-    jle .send_no_retval
+    jl .send_no_retval
     mov rax, [rdi + PyGenObject.gi_return_value]
-    mov rdx, [rdi + PyGenObject.gi_return_tag]
+    V_UNPACK rax, rdx
     test edx, edx
     jnz .send_have_retval
 .send_no_retval:
@@ -2534,10 +2536,10 @@ DEF_FUNC op_load_from_dict_or_deref, LFDOD_FRAME
     mov rax, [r12 + PyFrame.localsplus + rcx*8]  ; cell object
     test rax, rax
     jz .lfdod_error
-    mov rdx, [rax + PyCellObject.ob_ref_tag]
     mov rax, [rax + PyCellObject.ob_ref]
-    test rdx, rdx                 ; check tag for empty cell
+    test rax, rax                 ; 0 means an empty cell
     jz .lfdod_error
+    V_UNPACK rax, rdx
 
 .lfdod_found:
     ; INCREF result (borrowed ref) before DECREF dict

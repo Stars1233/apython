@@ -1077,8 +1077,7 @@ DEF_FUNC cell_traverse
     mov rbx, rdi
 
     mov rdi, [rbx + PyCellObject.ob_ref]
-    mov rsi, [rbx + PyCellObject.ob_ref_tag]
-    VISIT_FAT rdi, rsi
+    VISIT_V rdi, rsi
 
     pop rbx
     leave
@@ -1090,10 +1089,8 @@ DEF_FUNC cell_clear
     mov rbx, rdi
 
     mov rdi, [rbx + PyCellObject.ob_ref]
-    mov rsi, [rbx + PyCellObject.ob_ref_tag]
     mov qword [rbx + PyCellObject.ob_ref], 0
-    mov qword [rbx + PyCellObject.ob_ref_tag], TAG_NULL
-    DECREF_VAL rdi, rsi
+    DECREF_V rdi, rsi
 
     pop rbx
     leave
@@ -1155,7 +1152,7 @@ DEF_FUNC gen_traverse
 
     ; Visit return value (fat)
     mov rdi, [rbx + PyGenObject.gi_return_value]
-    mov rsi, [rbx + PyGenObject.gi_return_tag]
+    V_UNPACK rdi, rsi
     VISIT_FAT rdi, rsi
 
     ; Traverse frame localsplus if frame exists
@@ -1191,9 +1188,8 @@ DEF_FUNC gen_clear
 
     ; Clear return value
     mov rdi, [rbx + PyGenObject.gi_return_value]
-    mov rsi, [rbx + PyGenObject.gi_return_tag]
+    V_UNPACK rdi, rsi
     mov qword [rbx + PyGenObject.gi_return_value], 0
-    mov qword [rbx + PyGenObject.gi_return_tag], TAG_NULL
     XDECREF_VAL rdi, rsi
 
     ; Free frame if held (frame_free DECREFs localsplus)
@@ -1270,8 +1266,7 @@ DEF_FUNC exc_traverse
 
     ; Visit exc_value (fat)
     mov rdi, [rbx + PyExceptionObject.exc_value]
-    mov rsi, [rbx + PyExceptionObject.exc_value_tag]
-    VISIT_FAT rdi, rsi
+    VISIT_V rdi, rsi
 
     ; Visit heap ptrs
     mov rdi, [rbx + PyExceptionObject.exc_tb]
@@ -1294,10 +1289,8 @@ DEF_FUNC exc_clear_gc
 
     ; DECREF_VAL exc_value
     mov rdi, [rbx + PyExceptionObject.exc_value]
-    mov rsi, [rbx + PyExceptionObject.exc_value_tag]
     mov qword [rbx + PyExceptionObject.exc_value], 0
-    mov qword [rbx + PyExceptionObject.exc_value_tag], TAG_NULL
-    DECREF_VAL rdi, rsi
+    DECREF_V rdi, rsi
 
     ; XDECREF + NULL heap ptrs
     mov rdi, [rbx + PyExceptionObject.exc_tb]
@@ -1477,14 +1470,11 @@ DEF_FUNC slice_traverse
     mov rbx, rdi
 
     mov rdi, [rbx + PySliceObject.start]
-    mov rsi, [rbx + PySliceObject.start_tag]
-    VISIT_FAT rdi, rsi
+    VISIT_V rdi, rsi
     mov rdi, [rbx + PySliceObject.stop]
-    mov rsi, [rbx + PySliceObject.stop_tag]
-    VISIT_FAT rdi, rsi
+    VISIT_V rdi, rsi
     mov rdi, [rbx + PySliceObject.step]
-    mov rsi, [rbx + PySliceObject.step_tag]
-    VISIT_FAT rdi, rsi
+    VISIT_V rdi, rsi
 
     pop rbx
     leave
@@ -1496,22 +1486,16 @@ DEF_FUNC slice_clear_gc
     mov rbx, rdi
 
     mov rdi, [rbx + PySliceObject.start]
-    mov rsi, [rbx + PySliceObject.start_tag]
     mov qword [rbx + PySliceObject.start], 0
-    mov qword [rbx + PySliceObject.start_tag], TAG_NULL
-    DECREF_VAL rdi, rsi
+    DECREF_V rdi, rsi
 
     mov rdi, [rbx + PySliceObject.stop]
-    mov rsi, [rbx + PySliceObject.stop_tag]
     mov qword [rbx + PySliceObject.stop], 0
-    mov qword [rbx + PySliceObject.stop_tag], TAG_NULL
-    DECREF_VAL rdi, rsi
+    DECREF_V rdi, rsi
 
     mov rdi, [rbx + PySliceObject.step]
-    mov rsi, [rbx + PySliceObject.step_tag]
     mov qword [rbx + PySliceObject.step], 0
-    mov qword [rbx + PySliceObject.step_tag], TAG_NULL
-    DECREF_VAL rdi, rsi
+    DECREF_V rdi, rsi
 
     pop rbx
     leave
@@ -1617,12 +1601,12 @@ DEF_FUNC task_traverse
 
     ; Visit result (fat)
     mov rdi, [rbx + AsyncTask.result]
-    mov rsi, [rbx + AsyncTask.result_tag]
+    V_UNPACK rdi, rsi
     VISIT_FAT rdi, rsi
 
     ; Visit send_value (fat)
     mov rdi, [rbx + AsyncTask.send_value]
-    mov rsi, [rbx + AsyncTask.send_tag]
+    V_UNPACK rdi, rsi
     VISIT_FAT rdi, rsi
 
     ; Visit exception
@@ -1666,16 +1650,14 @@ DEF_FUNC task_clear
 
     ; DECREF_VAL result
     mov rdi, [rbx + AsyncTask.result]
-    mov rsi, [rbx + AsyncTask.result_tag]
+    V_UNPACK rdi, rsi
     mov qword [rbx + AsyncTask.result], 0
-    mov qword [rbx + AsyncTask.result_tag], TAG_NULL
     DECREF_VAL rdi, rsi
 
     ; DECREF_VAL send_value
     mov rdi, [rbx + AsyncTask.send_value]
-    mov rsi, [rbx + AsyncTask.send_tag]
+    V_UNPACK rdi, rsi
     mov qword [rbx + AsyncTask.send_value], 0
-    mov qword [rbx + AsyncTask.send_tag], TAG_NULL
     DECREF_VAL rdi, rsi
 
     pop rbx
@@ -1693,7 +1675,7 @@ DEF_FUNC wait_for_traverse
     mov rdi, [rbx + WaitForAwaitable.outer_task]
     VISIT_PTR rdi
     mov rdi, [rbx + WaitForAwaitable.gi_return_value]
-    mov rsi, [rbx + WaitForAwaitable.gi_return_tag]
+    V_UNPACK rdi, rsi
     VISIT_FAT rdi, rsi
 
     pop rbx
@@ -1719,9 +1701,8 @@ DEF_FUNC wait_for_clear
 .no_outer:
 
     mov rdi, [rbx + WaitForAwaitable.gi_return_value]
-    mov rsi, [rbx + WaitForAwaitable.gi_return_tag]
+    V_UNPACK rdi, rsi
     mov qword [rbx + WaitForAwaitable.gi_return_value], 0
-    mov qword [rbx + WaitForAwaitable.gi_return_tag], TAG_NULL
     DECREF_VAL rdi, rsi
 
     pop rbx

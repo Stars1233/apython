@@ -72,7 +72,6 @@ DEF_FUNC eg_new, EGN_FRAME
     mov [rax + PyExceptionGroupObject.ob_type], rbx
     mov [rax + PyExceptionGroupObject.exc_type], rbx
     mov [rax + PyExceptionGroupObject.exc_value], r12
-    mov qword [rax + PyExceptionGroupObject.exc_value_tag], TAG_PTR
     mov qword [rax + PyExceptionGroupObject.exc_tb], 0
     mov qword [rax + PyExceptionGroupObject.exc_context], 0
     mov qword [rax + PyExceptionGroupObject.exc_cause], 0
@@ -273,10 +272,8 @@ DEF_FUNC eg_dealloc
     push rbx
     mov rbx, rdi
 
-    ; XDECREF exc_value (tag-aware: may be SmallInt)
     mov rdi, [rbx + PyExceptionGroupObject.exc_value]
-    mov rsi, [rbx + PyExceptionGroupObject.exc_value_tag]
-    XDECREF_VAL rdi, rsi
+    XDECREF_V rdi, rsi
 .no_val:
 
     ; XDECREF exc_tb

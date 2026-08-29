@@ -674,7 +674,7 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     ; rbx = PyIntSubclassObject with no __int__ method
     ; Extract the int_value and return it
     mov rax, [rbx + PyIntSubclassObject.int_value]
-    mov rdx, [rbx + PyIntSubclassObject.int_value_tag]
+    V_UNPACK rax, rdx
     cmp edx, TAG_SMALLINT
     je .int_ret                  ; SmallInt — no INCREF needed
     INCREF rax
@@ -1840,7 +1840,7 @@ DEF_FUNC builtin_next_fn
     jne .next_stop_no_val
     ; Get generator's return value for StopIteration
     mov rsi, [rbx + PyGenObject.gi_return_value]
-    mov rdx, [rbx + PyGenObject.gi_return_tag]
+    V_UNPACK rsi, rdx
     test edx, edx
     jnz .next_stop_with_val
 .next_stop_no_val:

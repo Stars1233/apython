@@ -936,12 +936,11 @@ DEF_FUNC_BARE op_load_deref
     mov rax, [r12 + PyFrame.localsplus + rcx*8]  ; rax = cell object (payload)
     test rax, rax
     jz .deref_error
-    mov rdx, [rax + PyCellObject.ob_ref_tag]  ; rdx = value tag
-    mov rax, [rax + PyCellObject.ob_ref]       ; rax = value payload
-    test rdx, rdx                              ; check tag for NULL (empty cell)
+    mov rax, [rax + PyCellObject.ob_ref]       ; rax = contained Value
+    test rax, rax                              ; 0 means an empty cell
     jz .deref_error
-    INCREF_VAL rax, rdx
-    VPUSH_VAL rax, rdx
+    INCREF_V rax, rdx
+    VPUSH rax
     DISPATCH
 
 .deref_error:

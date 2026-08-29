@@ -69,8 +69,11 @@ DEF_FUNC exc_new, EN_FRAME
     call gc_alloc
     ; ob_refcnt=1, ob_type set by gc_alloc
     mov [rax + PyExceptionObject.exc_type], rbx
-    mov [rax + PyExceptionObject.exc_value], r12
-    mov [rax + PyExceptionObject.exc_value_tag], r13
+    ; Pack into a scratch pair: r12/r13 are still needed below to build exc_args
+    mov rcx, r12
+    mov rdx, r13
+    V_PACK rcx, rdx
+    mov [rax + PyExceptionObject.exc_value], rcx
     mov qword [rax + PyExceptionObject.exc_tb], 0
     mov qword [rax + PyExceptionObject.exc_context], 0
     mov qword [rax + PyExceptionObject.exc_cause], 0
@@ -133,8 +136,7 @@ DEF_FUNC exc_from_cstr
     ; exc_new INCREFs the str, so we need to DECREF our copy
     push rax
     mov rdi, [rax + PyExceptionObject.exc_value]
-    mov rsi, [rax + PyExceptionObject.exc_value_tag]
-    DECREF_VAL rdi, rsi
+    DECREF_V rdi, rsi
     pop rax
 
     pop rbx
@@ -151,8 +153,7 @@ DEF_FUNC exc_dealloc
 
     ; XDECREF exc_value (tag-aware: may be SmallInt)
     mov rdi, [rbx + PyExceptionObject.exc_value]
-    mov rsi, [rbx + PyExceptionObject.exc_value_tag]
-    XDECREF_VAL rdi, rsi
+    XDECREF_V rdi, rsi
 .no_value:
 
     ; XDECREF exc_tb
@@ -227,11 +228,9 @@ DEF_FUNC exc_repr
     inc rdi
 
     ; Copy message if present (must be a heap string)
-    cmp qword [rbx + PyExceptionObject.exc_value_tag], TAG_PTR
-    jne .no_msg
     mov rax, [rbx + PyExceptionObject.exc_value]
-    test rax, rax
-    jz .no_msg
+    V_TEST_PTR rax, rcx
+    ja .no_msg
 
     ; Check if message is a string
     mov rcx, [rax + PyObject.ob_type]
@@ -273,11 +272,9 @@ END_FUNC exc_repr
 DEF_FUNC exc_str
 
     ; Return exc_value if it's a heap string
-    cmp qword [rdi + PyExceptionObject.exc_value_tag], TAG_PTR
-    jne .use_type_name
     mov rax, [rdi + PyExceptionObject.exc_value]
-    test rax, rax
-    jz .use_type_name
+    V_TEST_PTR rax, rcx
+    ja .use_type_name
 
     ; Check if it's a string.  rdx carries the fat return tag, so the
     ; str_type address goes in r8 -- clobbering rdx here silently returned

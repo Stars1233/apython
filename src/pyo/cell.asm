@@ -3,9 +3,8 @@
 ; PyCellObject layout:
 ;   +0  ob_refcnt   (8 bytes)
 ;   +8  ob_type     (8 bytes)
-;   +16 ob_ref      (8 bytes: contained value payload or 0 if empty)
-;   +24 ob_ref_tag  (8 bytes: contained value tag, TAG_NULL if empty)
-;   Total: 32 bytes
+;   +16 ob_ref      (8 bytes: contained Value, 0 if empty)
+;   Total: 24 bytes
 
 %include "macros.inc"
 %include "object.inc"
@@ -38,13 +37,12 @@ DEF_FUNC cell_new
     lea rsi, [rel cell_type]
     call gc_alloc
     ; rax = new cell (ob_refcnt=1, ob_type set)
-    mov [rax + PyCellObject.ob_ref], rbx
-    mov [rax + PyCellObject.ob_ref_tag], r12
-
-    ; INCREF value if refcounted (tag-aware)
+    ; INCREF while the tag is still around, then store one Value
     push rax
     INCREF_VAL rbx, r12
+    V_PACK rbx, r12
     pop rax
+    mov [rax + PyCellObject.ob_ref], rbx
 
     ; Track in GC
     push rax
@@ -65,7 +63,7 @@ END_FUNC cell_new
 ;; ============================================================================
 DEF_FUNC_BARE cell_get
     mov rax, [rdi + PyCellObject.ob_ref]
-    mov rdx, [rdi + PyCellObject.ob_ref_tag]
+    V_UNPACK rax, rdx
     ret
 END_FUNC cell_get
 
@@ -82,17 +80,15 @@ DEF_FUNC cell_set
     mov r12, rsi               ; new payload
     mov r13, rdx               ; new tag
 
-    ; INCREF new value (tag-aware)
+    ; INCREF the new value while its tag is still around, then pack it
     INCREF_VAL r12, r13
+    V_PACK r12, r13
 
-    ; DECREF old value (tag-aware)
+    ; Release the old one
     mov rdi, [rbx + PyCellObject.ob_ref]
-    mov rsi, [rbx + PyCellObject.ob_ref_tag]
-    DECREF_VAL rdi, rsi
+    DECREF_V rdi, rsi
 
-    ; Store new value + tag
     mov [rbx + PyCellObject.ob_ref], r12
-    mov [rbx + PyCellObject.ob_ref_tag], r13
 
     pop r13
     pop r12
@@ -108,10 +104,8 @@ DEF_FUNC cell_dealloc
     push rbx
     mov rbx, rdi
 
-    ; DECREF contained value (tag-aware)
     mov rdi, [rbx + PyCellObject.ob_ref]
-    mov rsi, [rbx + PyCellObject.ob_ref_tag]
-    DECREF_VAL rdi, rsi
+    DECREF_V rdi, rsi
 
 .free:
     mov rdi, rbx

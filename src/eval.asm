@@ -1179,11 +1179,9 @@ op_interpreter_exit:
     pop rdi
 
     ; Check for message (must be a heap pointer to dereference)
-    cmp qword [rdi + PyExceptionObject.exc_value_tag], TAG_PTR
-    jne .no_message
     mov rax, [rdi + PyExceptionObject.exc_value]
-    test rax, rax
-    jz .no_message
+    V_TEST_PTR rax, rcx
+    ja .no_message
 
     ; Print ": "
     push rax

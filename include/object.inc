@@ -207,8 +207,7 @@ struc PyIntSubclassObject
     .ob_refcnt:   resq 1  ; +0
     .ob_type:     resq 1  ; +8  (type is the subclass)
     .inst_dict:   resq 1  ; +16: ptr to instance __dict__
-    .int_value:   resq 1  ; +24: SmallInt payload or GMP pointer
-    .int_value_tag: resq 1  ; +32: tag for int_value
+    .int_value:   resq 1  ; +24: the wrapped integer, as a Value
 endstruc
 
 ; Iterator objects
@@ -276,20 +275,16 @@ endstruc
 struc PySliceObject
     .ob_refcnt:   resq 1
     .ob_type:     resq 1
-    .start:       resq 1    ; +16
-    .start_tag:   resq 1    ; +24
-    .stop:        resq 1    ; +32
-    .stop_tag:    resq 1    ; +40
-    .step:        resq 1    ; +48
-    .step_tag:    resq 1    ; +56
+    .start:       resq 1    ; +16: Value
+    .stop:        resq 1    ; +24: Value
+    .step:        resq 1    ; +32: Value
 endstruc
 
 ; Cell object (for closures)
 struc PyCellObject
     .ob_refcnt: resq 1
     .ob_type:   resq 1
-    .ob_ref:    resq 1    ; +16: contained value payload (or 0 if empty)
-    .ob_ref_tag: resq 1   ; +24: contained value tag (TAG_NULL if empty)
+    .ob_ref:    resq 1    ; +16: contained Value (0 if empty)
 endstruc
 
 ; Bound method
@@ -331,8 +326,7 @@ struc PyGenObject
     .gi_running: resq 1   ; +24: 1 if currently executing
     .gi_code:   resq 1    ; +32: code object
     .gi_name:   resq 1    ; +40: name string
-    .gi_return_value: resq 1 ; +48: return value payload (for StopIteration.value)
-    .gi_return_tag:   resq 1 ; +56: return value tag
+    .gi_return_value: resq 1 ; +48: return Value (for StopIteration.value)
 endstruc
 
 ; File object (for sys.stdout, sys.stderr, sys.stdin)
@@ -349,11 +343,13 @@ struc AsyncTask
     .ob_refcnt:    resq 1  ; +0
     .ob_type:      resq 1  ; +8
     .coro:         resq 1  ; +16: PyGenObject* (coroutine)
-    .result:       resq 1  ; +24: result value payload
-    .result_tag:   resq 1  ; +32: result value tag
+    .result:       resq 1  ; +24: result Value
+    .pad_result:   resq 1  ; +32: (was result_tag)
     .exception:    resq 1  ; +40: exception or NULL
-    .send_value:   resq 1  ; +48: value to send on next resume (payload)
-    .send_tag:     resq 1  ; +56: value to send on next resume (tag)
+    ; +48 must line up with PyGenObject.gi_return_value: op_send reads that
+    ; offset on whatever object a coroutine yielded, a task included.
+    .send_value:   resq 1  ; +48: Value to send on next resume
+    .pad_send:     resq 1  ; +56: (was send_tag)
     .done:         resd 1  ; +64: 0=pending, 1=done
     .cancelling:   resd 1  ; +68: 1=cancel requested
     .n_waiters:    resd 1  ; +72: number of waiters
@@ -384,8 +380,7 @@ struc WaitForAwaitable
     .state:           resd 1  ; +32: 0=init, 1=yielded, 2=done
     .pad:             resd 1  ; +36
     .outer_task:      resq 1  ; +40: AsyncTask* (the waiter, set by task_step)
-    .gi_return_value: resq 1  ; +48: result payload (matches PyGenObject offset)
-    .gi_return_tag:   resq 1  ; +56: result tag (matches PyGenObject offset)
+    .gi_return_value: resq 1  ; +48: result Value (matches PyGenObject offset)
 endstruc
 
 ; Async stream reader
@@ -420,10 +415,9 @@ struc WriteAwaitable
     .ob_type:   resq 1  ; +8
     .fd:        resd 1  ; +16: socket fd
     .pad1:      resd 1  ; +20
-    .data:      resq 1  ; +24: string payload ptr (INCREF'd)
-    .data_tag:  resq 1  ; +32: string tag
-    .yielded:   resd 1  ; +40: 0=not yet, 1=done
-    .pad2:      resd 1  ; +44
+    .data:      resq 1  ; +24: string Value (INCREF'd)
+    .yielded:   resd 1  ; +32: 0=not yet, 1=done
+    .pad2:      resd 1  ; +36
 endstruc
 
 ; DrainAwaitable — awaitable for stream.drain()
@@ -462,8 +456,7 @@ struc AsyncGenASend
     .pad0:          resd 1  ; +28
     .pad1:          resq 1  ; +32
     .pad2:          resq 1  ; +40
-    .gi_return_value: resq 1 ; +48: yielded value (for SEND exhaustion path)
-    .gi_return_tag:   resq 1 ; +56: yielded value tag
+    .gi_return_value: resq 1 ; +48: yielded Value (for SEND exhaustion path)
 endstruc
 
 ; Sentinel values

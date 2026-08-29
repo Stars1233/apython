@@ -40,13 +40,12 @@ struc PyExceptionObject
     .ob_refcnt:     resq 1  ; +0
     .ob_type:       resq 1  ; +8
     .exc_type:      resq 1  ; +16: ptr to exception type object
-    .exc_value:     resq 1  ; +24: value (payload)
-    .exc_value_tag: resq 1  ; +32: value tag (TAG_PTR, TAG_SMALLINT, etc.)
-    .exc_tb:        resq 1  ; +40: ptr to traceback or NULL
-    .exc_context:   resq 1  ; +48: ptr to __context__ or NULL
-    .exc_cause:     resq 1  ; +56: ptr to __cause__ or NULL
-    .exc_args:      resq 1  ; +64: ptr to args tuple or NULL
-    .exc_dict:      resq 1  ; +72: ptr to instance dict or NULL (for custom attrs)
+    .exc_value:     resq 1  ; +24: value, as a Value
+    .exc_tb:        resq 1  ; +32: ptr to traceback or NULL
+    .exc_context:   resq 1  ; +40: ptr to __context__ or NULL
+    .exc_cause:     resq 1  ; +48: ptr to __cause__ or NULL
+    .exc_args:      resq 1  ; +56: ptr to args tuple or NULL
+    .exc_dict:      resq 1  ; +64: ptr to instance dict or NULL (for custom attrs)
 endstruc
 
 ; Exception group object (extends PyExceptionObject with eg_exceptions)
@@ -54,14 +53,13 @@ struc PyExceptionGroupObject
     .ob_refcnt:     resq 1  ; +0
     .ob_type:       resq 1  ; +8
     .exc_type:      resq 1  ; +16
-    .exc_value:     resq 1  ; +24 (message payload)
-    .exc_value_tag: resq 1  ; +32 (message tag)
-    .exc_tb:        resq 1  ; +40
-    .exc_context:   resq 1  ; +48
-    .exc_cause:     resq 1  ; +56
-    .exc_args:      resq 1  ; +64
-    .exc_dict:      resq 1  ; +72: ptr to instance dict or NULL
-    .eg_exceptions: resq 1  ; +80: tuple of sub-exceptions
+    .exc_value:     resq 1  ; +24 (message, as a Value)
+    .exc_tb:        resq 1  ; +32
+    .exc_context:   resq 1  ; +40
+    .exc_cause:     resq 1  ; +48
+    .exc_args:      resq 1  ; +56
+    .exc_dict:      resq 1  ; +64: ptr to instance dict or NULL
+    .eg_exceptions: resq 1  ; +72: tuple of sub-exceptions
 endstruc
 
 ; Traceback object

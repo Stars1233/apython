@@ -67,7 +67,6 @@ DEF_FUNC gen_new
 
     ; gi_return_value = NULL (no return value yet)
     mov qword [r12 + PyGenObject.gi_return_value], 0
-    mov qword [r12 + PyGenObject.gi_return_tag], 0
 
     mov rdi, r12
     call gc_track
@@ -107,7 +106,6 @@ DEF_FUNC coro_new
 
     mov qword [r12 + PyGenObject.gi_name], 0
     mov qword [r12 + PyGenObject.gi_return_value], 0
-    mov qword [r12 + PyGenObject.gi_return_tag], 0
 
     mov rdi, r12
     call gc_track
@@ -146,7 +144,6 @@ DEF_FUNC async_gen_new
 
     mov qword [r12 + PyGenObject.gi_name], 0
     mov qword [r12 + PyGenObject.gi_return_value], 0
-    mov qword [r12 + PyGenObject.gi_return_tag], 0
 
     mov rdi, r12
     call gc_track
@@ -208,9 +205,9 @@ DEF_FUNC gen_iternext
     mov qword [rbx + PyGenObject.gi_frame], 0
 
     ; Store return value in gi_return_value (for StopIteration.value)
-    mov [rbx + PyGenObject.gi_return_value], r12
     pop rax                    ; rax = return value tag
-    mov [rbx + PyGenObject.gi_return_tag], rax
+    V_PACK r12, rax
+    mov [rbx + PyGenObject.gi_return_value], r12
 
     ; Return NULL to signal StopIteration
     RET_NULL
@@ -265,7 +262,6 @@ DEF_FUNC async_gen_iternext
     mov [rax + AsyncGenASend.ags_gen], rbx
     mov dword [rax + AsyncGenASend.ags_state], 0   ; initial
     mov qword [rax + AsyncGenASend.gi_return_value], 0
-    mov qword [rax + AsyncGenASend.gi_return_tag], 0
 
     ; INCREF the async generator (wrapper holds a ref)
     inc qword [rbx + PyObject.ob_refcnt]
@@ -340,8 +336,8 @@ DEF_FUNC ags_iternext
     mov qword [r12 + PyGenObject.gi_frame], 0
     pop rdx                    ; result tag
     pop rax                    ; result payload
+    V_PACK rax, rdx
     mov [r12 + PyGenObject.gi_return_value], rax
-    mov [r12 + PyGenObject.gi_return_tag], rdx
 
     ; Mark wrapper as closed
     mov dword [rbx + AsyncGenASend.ags_state], 2
@@ -365,8 +361,8 @@ DEF_FUNC ags_iternext
     pop rax                    ; result payload
 
     ; Store yielded value in wrapper's gi_return_value for SEND exhaustion path
+    V_PACK rax, rdx
     mov [rbx + AsyncGenASend.gi_return_value], rax
-    mov [rbx + AsyncGenASend.gi_return_tag], rdx
 
     ; INCREF the value (we're storing + returning it)
     INCREF_VAL rax, rdx
@@ -447,7 +443,7 @@ DEF_FUNC ags_dealloc
 
     ; DECREF stored return value if present
     mov rdi, [rbx + AsyncGenASend.gi_return_value]
-    mov rsi, [rbx + AsyncGenASend.gi_return_tag]
+    V_UNPACK rdi, rsi
     DECREF_VAL rdi, rsi
 
     ; DECREF the async generator
@@ -481,7 +477,7 @@ DEF_FUNC gen_dealloc
 
     ; XDECREF gi_return_value (tag-aware)
     mov rdi, [rbx + PyGenObject.gi_return_value]
-    mov rsi, [rbx + PyGenObject.gi_return_tag]
+    V_UNPACK rdi, rsi
     XDECREF_VAL rdi, rsi
 
     ; DECREF code object
@@ -586,8 +582,8 @@ DEF_FUNC gen_send
     mov qword [rbx + PyGenObject.gi_frame], 0
 
     ; Store return value in gi_return_value (for StopIteration.value)
+    V_PACK r12, r13
     mov [rbx + PyGenObject.gi_return_value], r12
-    mov [rbx + PyGenObject.gi_return_tag], r13
 
     ; Return NULL to signal StopIteration
     RET_NULL
@@ -706,8 +702,8 @@ DEF_FUNC gen_throw, GT_FRAME
     ; Exhausted: free frame
     call frame_free
     mov qword [rbx + PyGenObject.gi_frame], 0
+    V_PACK r12, r13
     mov [rbx + PyGenObject.gi_return_value], r12
-    mov [rbx + PyGenObject.gi_return_tag], r13
 
     ; Return NULL to signal StopIteration
     RET_NULL
@@ -1046,7 +1042,7 @@ DEF_FUNC _gen_send_impl
     ; exc_new(type, value_payload, value_tag)
     lea rdi, [rel exc_StopIteration_type]
     mov rsi, [rbx + PyGenObject.gi_return_value]
-    mov rdx, [rbx + PyGenObject.gi_return_tag]
+    V_UNPACK rsi, rdx
     test edx, edx
     jnz .gsi_have_val
     ; No return value stored — use None
@@ -1094,7 +1090,7 @@ DEF_FUNC _gen_throw_impl
     ; Exhausted — raise StopIteration with return value
     lea rdi, [rel exc_StopIteration_type]
     mov rsi, [rbx + PyGenObject.gi_return_value]
-    mov rdx, [rbx + PyGenObject.gi_return_tag]
+    V_UNPACK rsi, rdx
     test edx, edx
     jnz .gti_have_val
     lea rsi, [rel none_singleton]

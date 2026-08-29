@@ -1824,8 +1824,8 @@ DEF_FUNC_BARE int_unwrap
     mov rax, [rax + PyTypeObject.tp_flags]
     test rax, TYPE_FLAG_INT_SUBCLASS
     jz .iuw_done                 ; not int subclass
-    mov rdx, [rdi + PyIntSubclassObject.int_value_tag]   ; unwrapped tag
-    mov rdi, [rdi + PyIntSubclassObject.int_value]       ; unwrapped payload
+    mov rdi, [rdi + PyIntSubclassObject.int_value]       ; wrapped Value
+    V_UNPACK rdi, rdx
     jmp .iuw_retry               ; the wrapped value may itself be a compact int
 .iuw_exact:
     cmp qword [rdi + PyIntObject.compact], 0

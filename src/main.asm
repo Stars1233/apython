@@ -253,13 +253,10 @@ DEF_FUNC main
     pop rsi
     pop rdi
 
-    ; Check for message (must be TAG_PTR)
-    extern PyExceptionObject
-    cmp qword [rdi + PyExceptionObject.exc_value_tag], TAG_PTR
-    jne .print_newline
+    ; Check for message (must be a real object)
     mov rax, [rdi + PyExceptionObject.exc_value]
-    test rax, rax
-    jz .print_newline
+    V_TEST_PTR rax, rcx
+    ja .print_newline
 
     ; Print ": "
     push rax

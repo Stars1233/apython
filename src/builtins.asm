@@ -1699,8 +1699,7 @@ DEF_FUNC builtin___build_class__
     test edx, edx
     jz .bc_no_classcell
     ; cell.ob_ref = new type (r12), with tag
-    mov [rax + PyCellObject.ob_ref], r12
-    mov qword [rax + PyCellObject.ob_ref_tag], TAG_PTR
+    mov [rax + PyCellObject.ob_ref], r12        ; a type pointer is its own Value
     mov rdi, r12
     call obj_incref         ; cell holds a ref to the type
 .bc_no_classcell:

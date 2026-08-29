@@ -302,21 +302,13 @@ END_FUNC op_store_attr
 ;; DECREFs old cell value.
 ;; ============================================================================
 DEF_FUNC_BARE op_store_deref
-    VPOP_VAL rax, r8               ; rax = new payload, r8 = new tag
-    mov rdx, [r12 + PyFrame.localsplus + rcx*8]  ; rdx = cell object (payload)
+    VPOP rax                       ; new Value
+    mov rdx, [r12 + PyFrame.localsplus + rcx*8]  ; cell object
 
     ; Ownership transfers from stack to cell - no INCREF needed
-
-    ; Get old value + tag from cell
-    mov rdi, [rdx + PyCellObject.ob_ref]
-    mov rsi, [rdx + PyCellObject.ob_ref_tag]
-
-    ; Store new value + tag in cell
+    mov rdi, [rdx + PyCellObject.ob_ref]        ; old Value
     mov [rdx + PyCellObject.ob_ref], rax
-    mov [rdx + PyCellObject.ob_ref_tag], r8
-
-    ; DECREF old value (tag-aware, handles NULL automatically)
-    DECREF_VAL rdi, rsi
+    DECREF_V rdi, rsi
     DISPATCH
 END_FUNC op_store_deref
 
@@ -328,11 +320,8 @@ END_FUNC op_store_deref
 DEF_FUNC_BARE op_delete_deref
     mov rax, [r12 + PyFrame.localsplus + rcx*8]  ; rax = cell object (payload)
     mov rdi, [rax + PyCellObject.ob_ref]
-    mov rsi, [rax + PyCellObject.ob_ref_tag]
     mov qword [rax + PyCellObject.ob_ref], 0
-    mov qword [rax + PyCellObject.ob_ref_tag], 0   ; TAG_NULL
-    ; DECREF old value (tag-aware)
-    DECREF_VAL rdi, rsi
+    DECREF_V rdi, rsi
     DISPATCH
 END_FUNC op_delete_deref
 

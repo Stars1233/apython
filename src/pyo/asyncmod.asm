@@ -307,7 +307,6 @@ DEF_FUNC asyncio_wait_for_func, WF_FRAME
     mov dword [rax + WaitForAwaitable.state], 0
     mov qword [rax + WaitForAwaitable.outer_task], 0
     mov qword [rax + WaitForAwaitable.gi_return_value], 0
-    mov qword [rax + WaitForAwaitable.gi_return_tag], 0
 
     mov edx, TAG_PTR
     pop rbx
@@ -381,9 +380,9 @@ wait_for_awaitable_iternext:
     ; Copy result to gi_return_value for SEND exhaustion protocol
     mov rax, [rbx + WaitForAwaitable.inner_task]
     mov rcx, [rax + AsyncTask.result]
-    mov rdx, [rax + AsyncTask.result_tag]
+    V_UNPACK rcx, rdx
+    V_PACK rcx, rdx
     mov [rbx + WaitForAwaitable.gi_return_value], rcx
-    mov [rbx + WaitForAwaitable.gi_return_tag], rdx
     INCREF_VAL rcx, rdx
 
     RET_NULL
@@ -428,7 +427,7 @@ wait_for_awaitable_dealloc:
     push rdi
     ; XDECREF_VAL gi_return_value
     mov rax, [rdi + WaitForAwaitable.gi_return_value]
-    mov rdx, [rdi + WaitForAwaitable.gi_return_tag]
+    V_UNPACK rax, rdx
     XDECREF_VAL rax, rdx
     pop rdi
     jmp ap_free                ; tail call

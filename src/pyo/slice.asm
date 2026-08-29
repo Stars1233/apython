@@ -72,18 +72,19 @@ DEF_FUNC slice_new
 .fill_fields:
     pop r9                  ; step_tag
     ; ob_refcnt=1, ob_type set by gc_alloc (or still set from pool)
-    mov [rax + PySliceObject.start], rbx
-    mov [rax + PySliceObject.start_tag], r14
-    mov [rax + PySliceObject.stop], r12
-    mov [rax + PySliceObject.stop_tag], r15
-    mov [rax + PySliceObject.step], r13
-    mov [rax + PySliceObject.step_tag], r9
-
-    ; INCREF all three (tag-aware)
     push rax
+
+    ; INCREF each while its tag is still around, then pack into a Value
     INCREF_VAL rbx, r14
     INCREF_VAL r12, r15
     INCREF_VAL r13, r9
+    V_PACK rbx, r14
+    V_PACK r12, r15
+    V_PACK r13, r9
+    mov rax, [rsp]
+    mov [rax + PySliceObject.start], rbx
+    mov [rax + PySliceObject.stop], r12
+    mov [rax + PySliceObject.step], r13
 
     ; Track in GC
     mov rdi, [rsp]          ; obj ptr saved on stack
@@ -109,14 +110,11 @@ DEF_FUNC slice_dealloc
     mov rbx, rdi
 
     mov rdi, [rbx + PySliceObject.start]
-    mov rsi, [rbx + PySliceObject.start_tag]
-    DECREF_VAL rdi, rsi
+    DECREF_V rdi, rsi
     mov rdi, [rbx + PySliceObject.stop]
-    mov rsi, [rbx + PySliceObject.stop_tag]
-    DECREF_VAL rdi, rsi
+    DECREF_V rdi, rsi
     mov rdi, [rbx + PySliceObject.step]
-    mov rsi, [rbx + PySliceObject.step_tag]
-    DECREF_VAL rdi, rsi
+    DECREF_V rdi, rsi
 
     ; Untrack from GC
     mov rdi, rbx
@@ -220,19 +218,13 @@ DEF_FUNC slice_indices
     mov rbx, rdi           ; slice
     mov r14, rsi           ; length
 
-    ; Check for None using both TAG_NONE and (none_singleton, TAG_PTR) forms.
-    ; This avoids collision between NONE_SENTINEL and sys.maxsize.
     extern none_singleton
 
     ; Get step (default 1)
-    cmp qword [rbx + PySliceObject.step_tag], TAG_PTR
-    jne .step_not_none
-    lea rcx, [rel none_singleton]
-    cmp [rbx + PySliceObject.step], rcx
-    je .step_is_none
-.step_not_none:
     mov rdi, [rbx + PySliceObject.step]
-    mov esi, [rbx + PySliceObject.step_tag]
+    IS_NONE rdi, rcx
+    je .step_is_none
+    V_UNPACK rdi, rsi
     call pyobj_to_i64
     jmp .have_step
 .step_is_none:
@@ -241,14 +233,10 @@ DEF_FUNC slice_indices
     mov r15, rax           ; r15 = step
 
     ; Get start (default: 0 if step>0, length-1 if step<0)
-    cmp qword [rbx + PySliceObject.start_tag], TAG_PTR
-    jne .start_not_none
-    lea rcx, [rel none_singleton]
-    cmp [rbx + PySliceObject.start], rcx
-    je .start_is_none
-.start_not_none:
     mov rdi, [rbx + PySliceObject.start]
-    mov esi, [rbx + PySliceObject.start_tag]
+    IS_NONE rdi, rcx
+    je .start_is_none
+    V_UNPACK rdi, rsi
     call pyobj_to_i64
     jmp .have_start
 .start_is_none:
@@ -279,14 +267,10 @@ DEF_FUNC slice_indices
     mov r12, rax           ; r12 = start
 
     ; Get stop (default: length if step>0, -1 if step<0)
-    cmp qword [rbx + PySliceObject.stop_tag], TAG_PTR
-    jne .stop_not_none
-    lea rcx, [rel none_singleton]
-    cmp [rbx + PySliceObject.stop], rcx
-    je .stop_is_none
-.stop_not_none:
     mov rdi, [rbx + PySliceObject.stop]
-    mov esi, [rbx + PySliceObject.stop_tag]
+    IS_NONE rdi, rcx
+    je .stop_is_none
+    V_UNPACK rdi, rsi
     call pyobj_to_i64
     jmp .have_stop
 .stop_is_none:
@@ -371,8 +355,8 @@ DEF_FUNC slice_getattr
 
 .sg_start:
     mov rax, [rbx + PySliceObject.start]
-    mov rdx, [rbx + PySliceObject.start_tag]
-    INCREF_VAL rax, rdx
+    INCREF_V rax, rdx
+    V_UNPACK rax, rdx
     pop r12
     pop rbx
     leave
@@ -380,8 +364,8 @@ DEF_FUNC slice_getattr
 
 .sg_stop:
     mov rax, [rbx + PySliceObject.stop]
-    mov rdx, [rbx + PySliceObject.stop_tag]
-    INCREF_VAL rax, rdx
+    INCREF_V rax, rdx
+    V_UNPACK rax, rdx
     pop r12
     pop rbx
     leave
@@ -389,8 +373,8 @@ DEF_FUNC slice_getattr
 
 .sg_step:
     mov rax, [rbx + PySliceObject.step]
-    mov rdx, [rbx + PySliceObject.step_tag]
-    INCREF_VAL rax, rdx
+    INCREF_V rax, rdx
+    V_UNPACK rax, rdx
     pop r12
     pop rbx
     leave

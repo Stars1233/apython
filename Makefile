@@ -31,6 +31,11 @@ PYO_SRCS = $(wildcard src/pyo/*.asm)
 LIB_SRCS = $(wildcard src/lib/*.asm)
 OBJS = $(SRCS:src/%.asm=build/%.o) $(PYO_SRCS:src/pyo/%.asm=build/%.o) $(LIB_SRCS:src/lib/%.asm=build/%.o)
 
+# Every object depends on every header: nasm has no depfile support here, and
+# a stale build after editing a struct layout in include/*.inc is a silent,
+# very confusing failure.
+HEADERS = $(wildcard include/*.inc)
+
 # Python compiler for tests
 PYTHON = python3
 
@@ -41,13 +46,13 @@ all: $(TARGET)
 $(TARGET): $(OBJS)
 	$(CC) -o $@ $^ $(LDFLAGS)
 
-build/%.o: src/%.asm | build
+build/%.o: src/%.asm $(HEADERS) | build
 	$(NASM) $(NASMFLAGS) -o $@ $<
 
-build/%.o: src/pyo/%.asm | build
+build/%.o: src/pyo/%.asm $(HEADERS) | build
 	$(NASM) $(NASMFLAGS) -o $@ $<
 
-build/%.o: src/lib/%.asm | build
+build/%.o: src/lib/%.asm $(HEADERS) | build
 	$(NASM) $(NASMFLAGS) -o $@ $<
 
 build:
