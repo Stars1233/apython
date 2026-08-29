@@ -5436,6 +5436,7 @@ DEF_FUNC_BARE list_dunder_getitem
     mov rax, [rdi]          ; self
     mov rsi, [rdi + 16]     ; key payload
     mov edx, [rdi + 24]     ; key tag
+    V_PACK rsi, rdx         ; list_subscript takes a key Value
     mov rdi, rax
     jmp list_subscript
 END_FUNC list_dunder_getitem

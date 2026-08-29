@@ -136,6 +136,7 @@ DEF_FUNC_BARE tuple_getitem
     mov rax, [rax + rsi * 8]
     INCREF_V rax, rdx
     V_UNPACK rax, rdx
+    V_PACK rax, rdx             ; return one Value
     ret
 .index_error:
     lea rdi, [rel exc_IndexError_type]
@@ -147,6 +148,7 @@ END_FUNC tuple_getitem
 ; mp_subscript: index with int or slice key (for BINARY_SUBSCR)
 ; Returns (rax=payload, edx=tag) fat value
 DEF_FUNC tuple_subscript
+    V_UNPACK rsi, rdx           ; key Value -> (payload, tag)
     push rbx
     mov rbx, rdi               ; save tuple
 
@@ -167,7 +169,7 @@ DEF_FUNC tuple_subscript
     call int_to_i64
     mov rsi, rax               ; index
     mov rdi, rbx
-    call tuple_getitem         ; returns (rax=payload, rdx=tag)
+    call tuple_getitem         ; already returns a Value
     pop rbx
     leave
     ret
@@ -178,6 +180,7 @@ DEF_FUNC tuple_subscript
     call tuple_getslice
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .ts_type_error:

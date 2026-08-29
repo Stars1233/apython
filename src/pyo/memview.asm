@@ -109,6 +109,7 @@ MS_OBJ   equ 8
 MS_KEY   equ 16
 MS_FRAME equ 16
 DEF_FUNC memoryview_subscript, MS_FRAME
+    V_UNPACK rsi, rdx           ; key Value -> (payload, tag)
     mov [rbp - MS_OBJ], rdi
     mov [rbp - MS_KEY], rsi
 
@@ -169,6 +170,7 @@ DEF_FUNC memoryview_subscript, MS_FRAME
 
     mov edx, TAG_PTR
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .ms_int_index:
@@ -188,6 +190,7 @@ DEF_FUNC memoryview_subscript, MS_FRAME
     movzx eax, byte [rdx + rsi]
     RET_TAG_SMALLINT
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .ms_int_index_heap:

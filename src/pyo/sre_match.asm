@@ -920,6 +920,7 @@ END_FUNC sre_match_copy_method
 ; __getitem__ for match[group] indexing.
 ; ============================================================================
 DEF_FUNC sre_match_subscript
+    V_UNPACK rsi, rdx           ; key Value -> (payload, tag)
     ; rdi = self, rsi = key payload, rdx = key tag
     push rbx
     push r12
@@ -960,6 +961,7 @@ DEF_FUNC sre_match_subscript
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .ms_no_such_group:

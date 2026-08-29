@@ -1033,6 +1033,7 @@ DEF_FUNC str_getitem
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .index_error:
@@ -1046,6 +1047,7 @@ END_FUNC str_getitem
 ;; mp_subscript: index with int or slice key (for BINARY_SUBSCR)
 ;; ============================================================================
 DEF_FUNC str_subscript
+    V_UNPACK rsi, rdx           ; key Value -> (payload, tag)
     push rbx
 
     mov rbx, rdi            ; save self
@@ -1064,7 +1066,7 @@ DEF_FUNC str_subscript
     call int_to_i64
     mov rsi, rax
 
-    ; Call str_getitem
+    ; Call str_getitem — already returns a Value
     mov rdi, rbx
     call str_getitem
 
@@ -1078,6 +1080,7 @@ DEF_FUNC str_subscript
     call str_getslice
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 END_FUNC str_subscript
 

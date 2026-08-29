@@ -399,6 +399,7 @@ DEF_FUNC range_obj_sq_item
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .index_error:

@@ -229,6 +229,7 @@ DEF_FUNC list_getitem
     INCREF_VAL rax, rdx
 
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .index_error:
@@ -250,8 +251,7 @@ DEF_FUNC list_setitem
     ; Check if list is being sorted (ob_item == NULL)
     cmp qword [rbx + PyListObject.ob_item], 0
     je list_sorting_error
-    mov r12, rdx               ; new value payload
-    mov r13, rcx               ; new value tag
+    mov r12, rdx               ; new value Value
 
     ; Handle negative index
     test rsi, rsi
@@ -267,19 +267,17 @@ DEF_FUNC list_setitem
 
     ; DECREF old value
     mov rax, [rbx + PyListObject.ob_item]
-    mov rdi, [rax + rsi * 8]      ; old value payload
-    V_UNPACK rdi, rcx
+    mov rdi, [rax + rsi * 8]      ; old Value
     push rax
     push rdx
     push rsi
-    DECREF_VAL rdi, rcx
+    DECREF_V rdi, rcx
     pop rsi
     pop rdx
     pop rax
 
     ; Store new value and INCREF
-    INCREF_VAL r12, r13
-    V_PACK r12, r13
+    INCREF_V r12, r13
     mov [rax + rsi * 8], r12
 
     pop r13
@@ -299,6 +297,7 @@ END_FUNC list_setitem
 ;; mp_subscript: index with int or slice key (for BINARY_SUBSCR)
 ;; ============================================================================
 DEF_FUNC list_subscript
+    V_UNPACK rsi, rdx           ; key Value -> (payload, tag)
     push rbx
 
     mov rbx, rdi               ; save list
@@ -332,7 +331,7 @@ DEF_FUNC list_subscript
 
 .ls_do_getitem:
 
-    ; Call list_getitem
+    ; Call list_getitem — already returns a Value
     mov rdi, rbx
     call list_getitem
 
@@ -347,6 +346,7 @@ DEF_FUNC list_subscript
     call list_getslice
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .ls_type_error:
@@ -402,10 +402,11 @@ DEF_FUNC list_ass_subscript, LAS_FRAME
     cmp qword [rbp - LAS_VTAG], TAG_NULL
     je .las_int_delete
 
-    ; Call list_setitem
+    ; Call list_setitem — it takes the value as a Value
     mov rdi, rbx
     mov rdx, r12
     mov rcx, [rbp - LAS_VTAG]  ; value tag from caller
+    V_PACK rdx, rcx
     call list_setitem
 
     pop r12

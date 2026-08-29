@@ -1492,7 +1492,7 @@ DEF_FUNC_LOCAL reversed_iternext
     test rcx, rcx
     jz .revi_try_getitem
     call rcx
-    ; rax = item (with INCREF from sq_item), rdx = tag
+    V_UNPACK rax, rdx          ; sq_item returns a Value
     jmp .revi_got_item
 
 .revi_try_getitem:

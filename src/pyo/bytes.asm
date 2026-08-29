@@ -128,6 +128,7 @@ DEF_FUNC_BARE bytes_getitem
     ; Get byte and return as SmallInt
     movzx eax, byte [rdi + PyBytesObject.data + rsi]
     RET_TAG_SMALLINT
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .index_error:
@@ -142,6 +143,7 @@ END_FUNC bytes_getitem
 ;; mp_subscript: handles both int and slice keys
 ;; ============================================================================
 DEF_FUNC bytes_subscript
+    V_UNPACK rsi, rdx           ; key Value -> (payload, tag)
     push rbx
     push r12
 
@@ -163,7 +165,7 @@ DEF_FUNC bytes_subscript
     ; Call bytes_getitem
     mov rdi, rbx
     mov rsi, rax
-    call bytes_getitem
+    call bytes_getitem          ; already returns a Value
 
     pop r12
     pop rbx
@@ -273,6 +275,7 @@ DEF_FUNC bytes_subscript
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 END_FUNC bytes_subscript
 

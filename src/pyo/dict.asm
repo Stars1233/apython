@@ -1035,9 +1035,8 @@ dict_len:
 DEF_FUNC dict_subscript
     push rbx
 
-    V_PACK rsi, rdx            ; dict_get takes a key Value
-    mov rbx, rsi               ; save key for error msg
-    call dict_get
+    mov rbx, rsi               ; save the key Value for the error message
+    call dict_get              ; both take a key Value
     V_UNPACK rax, rdx           ; dict_get returns a Value
     test edx, edx
     jz .key_error
@@ -1046,6 +1045,7 @@ DEF_FUNC dict_subscript
     INCREF_VAL rax, rdx                ; value may be SmallInt
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .key_error:

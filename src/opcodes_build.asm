@@ -143,10 +143,11 @@ DEF_FUNC_BARE op_binary_subscr
     test rax, rax
     jz .try_sequence
 
-    ; Call mp_subscript(obj, key, key_tag)
-    ; rdi = obj, rsi = key (already set)
+    ; Call mp_subscript(rdi = obj, rsi = key Value)
     mov rdx, r8                ; rdx = key tag
+    V_PACK rsi, rdx
     call rax
+    V_UNPACK rax, rdx          ; mp_subscript returns a Value
     jmp .subscr_done
 
 .try_sequence:
@@ -177,6 +178,7 @@ DEF_FUNC_BARE op_binary_subscr
     mov rax, [rax + PyTypeObject.tp_as_sequence]
     mov rax, [rax + PySequenceMethods.sq_item]
     call rax
+    V_UNPACK rax, rdx          ; sq_item returns a Value
     jmp .subscr_done
 
 .no_subscript:
@@ -341,6 +343,8 @@ DEF_FUNC_BARE op_store_subscr
 
     mov rdi, [rsp + 16]       ; obj
     mov rdx, [rsp]             ; value
+    mov rcx, [rsp + SSUB_VTAG] ; value tag
+    V_PACK rdx, rcx            ; sq_ass_item takes a value Value
     mov rax, [rdi + PyObject.ob_type]
     mov rax, [rax + PyTypeObject.tp_as_sequence]
     mov rax, [rax + PySequenceMethods.sq_ass_item]
@@ -1753,7 +1757,8 @@ DEF_FUNC op_binary_slice, BSLC_FRAME
     mov rax, [rdi + PyObject.ob_type]
     mov rax, [rax + PyTypeObject.tp_as_mapping]
     mov rax, [rax + PyMappingMethods.mp_subscript]
-    call rax
+    call rax               ; rsi is a slice pointer, already a Value
+    V_UNPACK rax, rdx      ; mp_subscript returns a Value
     SAVE_FAT_RESULT        ; save (rax,rdx) result
 
     ; DECREF slice (heap ptr, no tag needed)
@@ -1811,8 +1816,8 @@ DEF_FUNC op_store_slice, SSLC_FRAME
     mov rdi, [rbp - SSLC_OBJ]
     mov rsi, rax           ; slice
     mov rdx, [rbp - SSLC_VAL]
-    mov ecx, TAG_PTR               ; key tag = slice (always TAG_PTR)
     mov r8, [rbp - SSLC_VTAG]     ; value tag
+    V_PACK rdx, r8                 ; mp_ass_subscript takes a value Value
     mov rax, [rdi + PyObject.ob_type]
     mov rax, [rax + PyTypeObject.tp_as_mapping]
     mov rax, [rax + PyMappingMethods.mp_ass_subscript]
