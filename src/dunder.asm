@@ -67,6 +67,7 @@ DEF_FUNC dunder_lookup
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .not_found:
@@ -79,6 +80,7 @@ DEF_FUNC dunder_lookup
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 END_FUNC dunder_lookup
 
@@ -101,6 +103,7 @@ DEF_FUNC dunder_call_1
     mov rdi, [rbx + PyObject.ob_type]
     ; rsi = name already set
     call dunder_lookup
+    V_UNPACK rax, rdx           ; returns a Value
     test edx, edx
     jz .not_found
     ; Guard: a dunder explicitly set to None, or any non-pointer, is not callable
@@ -131,6 +134,7 @@ DEF_FUNC dunder_call_1
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .not_found:
@@ -140,6 +144,7 @@ DEF_FUNC dunder_call_1
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 END_FUNC dunder_call_1
 
@@ -165,6 +170,7 @@ DEF_FUNC dunder_call_2
     mov rdi, [rbx + PyObject.ob_type]
     mov rsi, rdx            ; name
     call dunder_lookup
+    V_UNPACK rax, rdx           ; returns a Value
     test edx, edx
     jz .not_found
     ; Guard: a dunder explicitly set to None, or any non-pointer, is not callable
@@ -197,6 +203,7 @@ DEF_FUNC dunder_call_2
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .not_found:
@@ -206,6 +213,7 @@ DEF_FUNC dunder_call_2
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 END_FUNC dunder_call_2
 
@@ -235,6 +243,7 @@ DEF_FUNC dunder_call_3
     mov rdi, [rbx + PyObject.ob_type]
     mov rsi, rcx            ; name
     call dunder_lookup
+    V_UNPACK rax, rdx           ; returns a Value
     test edx, edx
     jz .not_found
     ; Guard: a dunder explicitly set to None, or any non-pointer, is not callable
@@ -269,6 +278,7 @@ DEF_FUNC dunder_call_3
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .not_found:
@@ -279,6 +289,7 @@ DEF_FUNC dunder_call_3
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 END_FUNC dunder_call_3
 

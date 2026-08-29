@@ -522,6 +522,7 @@ DEF_FUNC op_load_attr, LA_FRAME
     mov rdi, rcx               ; attr's type
     lea rsi, [rel dunder_get]
     call dunder_lookup
+    V_UNPACK rax, rdx           ; returns a Value
     test edx, edx
     jz .la_check_flag          ; no __get__, treat normally
 
@@ -532,6 +533,7 @@ DEF_FUNC op_load_attr, LA_FRAME
     lea rcx, [rel dunder_get]
     mov r8d, TAG_PTR             ; type(obj) is always heap ptr
     call dunder_call_3
+    V_UNPACK rax, rdx           ; returns a Value
 
     ; rax = result from __get__, rdx = result tag
     SAVE_FAT_RESULT            ; save (rax,rdx) across DECREF calls

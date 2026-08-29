@@ -211,6 +211,7 @@ DEF_FUNC_BARE op_binary_subscr
     lea rdx, [rel dunder_getitem]
     mov ecx, [rsp + 16]      ; key tag = other_tag
     call dunder_call_2
+    V_UNPACK rax, rdx           ; returns a Value
     test edx, edx
     jnz .subscr_done
     jmp .subscr_error
@@ -223,6 +224,7 @@ DEF_FUNC_BARE op_binary_subscr
     mov rdi, [rsp+8]              ; obj (the type itself)
     CSTRING rsi, "__class_getitem__"
     call dunder_lookup
+    V_UNPACK rax, rdx           ; returns a Value
     test edx, edx
     jz .subscr_error
 
@@ -366,6 +368,7 @@ DEF_FUNC_BARE op_store_subscr
     mov rdi, [rdi + PyObject.ob_type]
     lea rsi, [rel dunder_setitem]
     call dunder_lookup
+    V_UNPACK rax, rdx           ; returns a Value
     test edx, edx
     jz .store_type_error
 
@@ -865,6 +868,7 @@ DEF_FUNC_BARE op_get_iter
     lea rsi, [rel dunder_iter]
     extern dunder_call_1
     call dunder_call_1
+    V_UNPACK rax, rdx           ; returns a Value
     test edx, edx
     jnz .have_iter_result
     ; __iter__ not found — try __getitem__ sequence protocol
@@ -956,6 +960,7 @@ DEF_FUNC_BARE op_for_iter
     lea rsi, [rel dunder_next]
     extern dunder_call_1
     call dunder_call_1
+    V_UNPACK rax, rdx           ; returns a Value
     test edx, edx
     jnz .check_next_result     ; got a value
 
@@ -1324,6 +1329,7 @@ DEF_FUNC_BARE op_contains_op
     lea rdx, [rel dunder_contains]
     mov rcx, [rsp+24]         ; value tag = other_tag
     call dunder_call_2
+    V_UNPACK rax, rdx           ; returns a Value
     test edx, edx             ; TAG_NULL = not found
     jz .contains_iter_fallback
 
@@ -1512,6 +1518,7 @@ DEF_FUNC_BARE op_contains_op
     lea rdx, [rel dunder_getitem]
     mov ecx, TAG_SMALLINT           ; index is SmallInt
     call dunder_call_2
+    V_UNPACK rax, rdx           ; returns a Value
     test edx, edx
     jz .contains_gi_null_result
     ; Check for exception (IndexError = stop)

@@ -657,6 +657,7 @@ DEF_FUNC builtin_len
     mov rdi, rbx
     lea rsi, [rel dunder_len]
     call dunder_call_1
+    V_UNPACK rax, rdx           ; returns a Value
     test edx, edx
     jz .try_ob_size
 
@@ -1656,6 +1657,7 @@ DEF_FUNC builtin___build_class__
     mov rdi, rax               ; base class (as type)
     CSTRING rsi, "__init_subclass__"
     call dunder_lookup
+    V_UNPACK rax, rdx           ; returns a Value
     test edx, edx
     jz .bc_no_init_subclass
 

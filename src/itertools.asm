@@ -84,7 +84,6 @@ DEF_FUNC call_iternext
     jz .ci_null
     lea rsi, [rel dunder_next]
     call dunder_call_1
-    V_PACK rax, rdx           ; dunder_call_1 still returns a fat pair
     test rax, rax
     jnz .ci_ret               ; got a value, return it
 
@@ -151,6 +150,7 @@ DEF_FUNC get_iterator
     lea rsi, [rel dunder_iter]
     extern dunder_call_1
     call dunder_call_1
+    V_UNPACK rax, rdx           ; returns a Value
     test edx, edx
     jnz .validate_iter
 
@@ -188,6 +188,7 @@ DEF_FUNC get_iterator
     lea rsi, [rel dunder_next]
     extern dunder_lookup
     call dunder_lookup
+    V_UNPACK rax, rdx           ; returns a Value
     test edx, edx
     jz .iter_bad                   ; no __next__ found
     ; Has __next__, good
@@ -217,6 +218,7 @@ DEF_FUNC get_iterator
     extern dunder_getitem
     lea rsi, [rel dunder_getitem]
     call dunder_lookup
+    V_UNPACK rax, rdx           ; returns a Value
     test edx, edx
     jz .no_iter                    ; no __getitem__
     ; Has __getitem__ — create seq_iter
@@ -1337,6 +1339,7 @@ DEF_FUNC builtin_reversed
     lea rsi, [rel .dunder_reversed_name]
     extern dunder_lookup
     call dunder_lookup
+    V_UNPACK rax, rdx           ; returns a Value
     test edx, edx
     jz .rev_no_dunder      ; not found at all
 
@@ -1351,6 +1354,7 @@ DEF_FUNC builtin_reversed
     mov rdi, r12
     lea rsi, [rel .dunder_reversed_name]
     call dunder_call_1
+    V_UNPACK rax, rdx           ; returns a Value
     test edx, edx
     jnz .rev_dunder_ok      ; got a result
     jmp .rev_type_error     ; __reversed__ raised
@@ -1412,6 +1416,7 @@ section .text
     extern dunder_len
     lea rsi, [rel dunder_len]
     call dunder_lookup
+    V_UNPACK rax, rdx           ; returns a Value
     test edx, edx
     pop rcx                 ; restore type
     jz .rev_type_error      ; no __len__
@@ -1421,6 +1426,7 @@ section .text
     extern dunder_getitem
     lea rsi, [rel dunder_getitem]
     call dunder_lookup
+    V_UNPACK rax, rdx           ; returns a Value
     test edx, edx
     jz .rev_type_error      ; no __getitem__
 
@@ -1429,6 +1435,7 @@ section .text
     extern dunder_len
     lea rsi, [rel dunder_len]
     call dunder_call_1
+    V_UNPACK rax, rdx           ; returns a Value
     ; rax = length (SmallInt payload), edx = TAG_SMALLINT
     jmp .rev_have_len
 
@@ -1507,6 +1514,7 @@ DEF_FUNC_LOCAL reversed_iternext
     mov ecx, TAG_SMALLINT
     extern dunder_call_2
     call dunder_call_2
+    V_UNPACK rax, rdx           ; returns a Value
     test edx, edx
     jz .revi_exhausted           ; __getitem__ failed
 
@@ -1709,6 +1717,7 @@ DEF_FUNC_LOCAL seq_iter_iternext
     mov ecx, TAG_SMALLINT          ; other_tag for index
     extern dunder_call_2
     call dunder_call_2
+    V_UNPACK rax, rdx           ; returns a Value
     test edx, edx
     jz .si_check_exc               ; NULL — check for IndexError
 

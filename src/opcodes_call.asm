@@ -181,6 +181,7 @@ DEF_FUNC op_call, CL_FRAME
     mov rdi, rcx              ; type
     lea rsi, [rel dunder_call]
     call dunder_lookup
+    V_UNPACK rax, rdx           ; returns a Value
     test edx, edx
     jz .not_callable
     ; Found __call__ — use its tp_call to dispatch

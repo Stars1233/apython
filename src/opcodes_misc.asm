@@ -465,6 +465,7 @@ DEF_FUNC_BARE op_binary_op
     lea rsi, [rel binop_inplace_dunder_table]
     mov rsi, [rsi + rax*8]    ; inplace dunder name
     call dunder_lookup
+    V_UNPACK rax, rdx           ; returns a Value
     pop r9
     test edx, edx
     jz .binop_left_dunder      ; not found → fall back to regular dunder
@@ -483,6 +484,7 @@ DEF_FUNC_BARE op_binary_op
     mov rsi, [rsp + 8 + BO_RIGHT]
     mov rcx, [rsp + 8 + BO_RTAG]
     call dunder_call_2
+    V_UNPACK rax, rdx           ; returns a Value
     pop r9
     test edx, edx
     jnz .binop_have_result
@@ -506,6 +508,7 @@ DEF_FUNC_BARE op_binary_op
     mov rsi, [rsp + 8 + BO_RIGHT]
     mov rcx, [rsp + 8 + BO_RTAG]   ; other_tag = right's tag
     call dunder_call_2
+    V_UNPACK rax, rdx           ; returns a Value
     pop r9
     test edx, edx
     jnz .binop_have_result
@@ -538,6 +541,7 @@ DEF_FUNC_BARE op_binary_op
     mov rsi, [rsp + BO_LEFT]
     mov rcx, [rsp + BO_LTAG]       ; other_tag = left's tag
     call dunder_call_2
+    V_UNPACK rax, rdx           ; returns a Value
     test edx, edx
     jnz .binop_have_result
 
@@ -824,6 +828,7 @@ section .text
     ; rsi = right (still set)
     mov ecx, [rsp + 16]            ; right_tag from stack
     call dunder_call_2
+    V_UNPACK rax, rdx           ; returns a Value
     pop rcx
 
     test edx, edx
@@ -841,6 +846,7 @@ section .text
     push rcx
     mov ecx, [rsp + 8 + BO_RTAG]  ; right_tag (+8 for push rcx)
     call dunder_call_2
+    V_UNPACK rax, rdx           ; returns a Value
     pop rcx
     test edx, edx
     jz .cmp_identity            ; __eq__ also not found → identity
@@ -978,6 +984,7 @@ section .text
     mov rsi, [rsp + BO_LEFT]   ; other = left payload
     mov ecx, [rsp + BO_LTAG]   ; other_tag = left's tag
     call dunder_call_2
+    V_UNPACK rax, rdx           ; returns a Value
 
     ; Check if dunder returned NULL
     test edx, edx

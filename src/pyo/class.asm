@@ -434,6 +434,7 @@ DEF_FUNC instance_dealloc
     mov rdi, rbx
     lea rsi, [rel dunder_del]
     call dunder_call_1
+    V_UNPACK rax, rdx           ; returns a Value
     ; Ignore return value — DECREF if non-NULL
     test edx, edx
     jz .del_no_result
@@ -541,6 +542,7 @@ DEF_FUNC instance_repr
     lea rsi, [rel dunder_repr]
     ; r12 is callee-saved and still holds eval frame from caller chain
     call dunder_call_1
+    V_UNPACK rax, rdx           ; returns a Value
     test edx, edx
     jnz .done
 
@@ -567,6 +569,7 @@ DEF_FUNC instance_str
     extern dunder_str
     lea rsi, [rel dunder_str]
     call dunder_call_1
+    V_UNPACK rax, rdx           ; returns a Value
     test edx, edx
     jnz .done
 

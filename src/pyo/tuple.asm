@@ -135,8 +135,6 @@ DEF_FUNC_BARE tuple_getitem
     mov rax, [rdi + PyTupleObject.ob_item]
     mov rax, [rax + rsi * 8]
     INCREF_V rax, rdx
-    V_UNPACK rax, rdx
-    V_PACK rax, rdx             ; return one Value
     ret
 .index_error:
     lea rdi, [rel exc_IndexError_type]
@@ -918,6 +916,7 @@ DEF_FUNC tuple_richcompare, TRC_FRAME
 .trc_order_dunder_call:
     extern dunder_call_2
     call dunder_call_2
+    V_UNPACK rax, rdx           ; returns a Value
     leave
     ret
 .trc_order_notimpl:

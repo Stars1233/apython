@@ -648,6 +648,7 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     mov rdi, [rbx + PyObject.ob_type]
     CSTRING rsi, "__int__"
     call dunder_lookup
+    V_UNPACK rax, rdx           ; returns a Value
     test edx, edx
     jz .int_from_int_sub_extract ; no __int__, extract int_value
     ; Call __int__(self) — rax = func (borrowed ref)
@@ -703,6 +704,7 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     mov rdi, [rbx + PyObject.ob_type]
     CSTRING rsi, "__int__"
     call dunder_lookup
+    V_UNPACK rax, rdx           ; returns a Value
     test edx, edx
     jnz .int_call_dunder
 
@@ -710,6 +712,7 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     mov rdi, [rbx + PyObject.ob_type]
     CSTRING rsi, "__index__"
     call dunder_lookup
+    V_UNPACK rax, rdx           ; returns a Value
     test edx, edx
     jnz .int_call_dunder
 
@@ -717,6 +720,7 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     mov rdi, [rbx + PyObject.ob_type]
     CSTRING rsi, "__trunc__"
     call dunder_lookup
+    V_UNPACK rax, rdx           ; returns a Value
     test edx, edx
     jnz .int_call_dunder_trunc
 
@@ -799,6 +803,7 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     mov rdi, [rax + PyObject.ob_type]
     CSTRING rsi, "__index__"
     call dunder_lookup
+    V_UNPACK rax, rdx           ; returns a Value
     test edx, edx
     jnz .int_call_trunc_index
     ; No __index__ — raise TypeError with type name
@@ -994,6 +999,7 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     mov rdi, rcx                  ; type
     CSTRING rsi, "__index__"
     call dunder_lookup
+    V_UNPACK rax, rdx           ; returns a Value
     test edx, edx
     jz .int_base_no_index
     ; Call __index__(base_obj)
@@ -1844,6 +1850,7 @@ DEF_FUNC builtin_next_fn
     lea rsi, [rel dunder_next]
     extern dunder_call_1
     call dunder_call_1
+    V_UNPACK rax, rdx           ; returns a Value
     test edx, edx
     jnz .next_got_val                  ; got a value
     ; NULL from __next__ — check for StopIteration in current_exception

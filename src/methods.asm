@@ -4371,6 +4371,7 @@ DEF_FUNC list_method_sort, LS_FRAME
     lea rdx, [rel dunder_call]
     extern dunder_call_2
     call dunder_call_2
+    V_UNPACK rax, rdx           ; returns a Value
     jmp .sort_key_store
 
 .sort_key_meta_builtin:
@@ -4594,6 +4595,7 @@ DEF_FUNC list_method_sort, LS_FRAME
 .merge_dunder_call:
     extern dunder_call_2
     call dunder_call_2
+    V_UNPACK rax, rdx           ; returns a Value
     ; fall through to check_result
 
 .merge_check_result:
@@ -5270,6 +5272,7 @@ DEF_FUNC list_method_index, LI_FRAME
     CSTRING rdx, "__eq__"
     mov ecx, [rbp - LI_VTAG]
     call dunder_call_2
+    V_UNPACK rax, rdx           ; returns a Value
     test edx, edx
     jz .index_next
     jmp .index_check_result
@@ -5391,6 +5394,7 @@ DEF_FUNC list_method_count, LC_FRAME
     CSTRING rdx, "__eq__"
     mov ecx, r15d              ; other_tag = value tag
     call dunder_call_2
+    V_UNPACK rax, rdx           ; returns a Value
     test edx, edx
     jz .count_next
     jmp .count_check_result
@@ -6494,6 +6498,7 @@ DEF_FUNC list_method_remove
     CSTRING rdx, "__eq__"
     mov ecx, r15d            ; other_tag = value tag
     call dunder_call_2
+    V_UNPACK rax, rdx           ; returns a Value
     test edx, edx
     jz .lremove_next
     jmp .lremove_check_result

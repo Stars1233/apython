@@ -414,6 +414,7 @@ DEF_FUNC_BARE obj_is_true
     mov rdi, [rbx + PyObject.ob_type]
     lea rsi, [rel dunder_bool]
     call dunder_lookup
+    V_UNPACK rax, rdx           ; returns a Value
     test edx, edx
     jz .check_dunder_len       ; not found (TAG_NULL) → try __len__
 
@@ -428,6 +429,7 @@ DEF_FUNC_BARE obj_is_true
     mov rdi, rbx
     lea rsi, [rel dunder_bool]
     call dunder_call_1
+    V_UNPACK rax, rdx           ; returns a Value
     test edx, edx              ; TAG_NULL = call failed
     jz .check_dunder_len
 
@@ -480,6 +482,7 @@ DEF_FUNC_BARE obj_is_true
     mov rdi, rbx
     lea rsi, [rel dunder_len]
     call dunder_call_1
+    V_UNPACK rax, rdx           ; returns a Value
     test edx, edx              ; TAG_NULL = not found
     jz .true                ; no __len__ → truthy by default
 

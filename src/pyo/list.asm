@@ -1079,6 +1079,7 @@ DEF_FUNC list_contains, LC_FRAME
     CSTRING rdx, "__eq__"
     mov ecx, [rbp - LC_VTAG]   ; other_tag = value tag
     call dunder_call_2
+    V_UNPACK rax, rdx           ; returns a Value
     ; if NULL, skip
     test edx, edx
     jz .next
@@ -1134,6 +1135,7 @@ DEF_FUNC list_contains, LC_FRAME
     ; rdi = value (already set)
     CSTRING rdx, "__eq__"
     call dunder_call_2
+    V_UNPACK rax, rdx           ; returns a Value
     test edx, edx
     jz .next
     jmp .elem_check_result
