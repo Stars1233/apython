@@ -1158,6 +1158,7 @@ DEF_FUNC list_contains, LC_FRAME
     push rdx
     mov rdi, rax
     mov rsi, rdx
+    V_PACK rdi, rsi
     call obj_is_true
     mov ebx, eax               ; save truthiness
     pop rdx
@@ -2143,6 +2144,7 @@ DEF_FUNC list_richcompare, LRC_FRAME
     push rdx
     mov rdi, rax
     mov rsi, rdx
+    V_PACK rdi, rsi
     call obj_is_true
     mov ecx, eax                    ; ecx = truthiness (0/1)
     pop rdx                         ; result tag
@@ -2174,6 +2176,7 @@ DEF_FUNC list_richcompare, LRC_FRAME
     push rdx
     mov rdi, rax
     mov rsi, rdx
+    V_PACK rdi, rsi
     call obj_is_true
     mov ecx, eax
     pop rdx

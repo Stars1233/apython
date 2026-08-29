@@ -1253,6 +1253,7 @@ DEF_FUNC str_method_format
 .fmt_inline_str:
     pop rdi
     mov esi, r8d           ; tag
+    V_PACK rdi, rsi
     call obj_str           ; handles SmallInt, Float, Bool, None
 .fmt_heap_str:
     push rax                ; save str obj for DECREF
@@ -1465,6 +1466,7 @@ DEF_FUNC str_method_format_map, FM_FRAME
     ; Convert value to string
     pop rsi                     ; value tag
     pop rdi                     ; value payload
+    V_PACK rdi, rsi
     call obj_str
     ; rax = result payload, edx = tag
     push rax                    ; save str obj for DECREF
@@ -5221,6 +5223,7 @@ DEF_FUNC list_method_index, LI_FRAME
     push rdx
     mov rdi, rax
     mov rsi, rdx
+    V_PACK rdi, rsi
     call obj_is_true
     mov ebx, eax
     pop rdx
@@ -5337,6 +5340,7 @@ DEF_FUNC list_method_count, LC_FRAME
     push rdx
     mov rdi, rax
     mov rsi, rdx
+    V_PACK rdi, rsi
     call obj_is_true
     mov ecx, eax               ; save truthiness
     pop rdx
@@ -6411,6 +6415,7 @@ DEF_FUNC list_method_remove
     push rdx
     mov rdi, rax
     mov rsi, rdx
+    V_PACK rdi, rsi
     call obj_is_true
     mov ecx, eax
     pop rdx

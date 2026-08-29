@@ -1184,7 +1184,6 @@ DEF_FUNC builtin_int_fn, BI_FRAME
 
     ; Get repr of original object (always a heap ptr)
     mov rdi, [rbp - BI_OBJ]
-    mov esi, TAG_PTR
     call obj_repr
     test rax, rax
     jnz .ile_have_repr
@@ -1254,6 +1253,7 @@ DEF_FUNC builtin_str_fn
 
     mov rsi, [rdi + 8]         ; arg[0] tag
     mov rdi, [rdi]             ; arg[0] payload
+    V_PACK rdi, rsi
     call obj_str
     leave
     ret
@@ -1898,6 +1898,7 @@ DEF_FUNC builtin_any
 
     mov rdi, r13
     mov rsi, r14
+    V_PACK rdi, rsi
     call obj_is_true
     test eax, eax
     jnz .any_found_true
@@ -1982,6 +1983,7 @@ DEF_FUNC builtin_all
 
     mov rdi, r13
     mov rsi, r14
+    V_PACK rdi, rsi
     call obj_is_true
     test eax, eax
     jz .all_found_false
@@ -3904,6 +3906,7 @@ DEF_FUNC builtin_ascii_fn, AA_FRAME
     ; Get repr(obj)
     mov esi, [rdi + 8]       ; tag
     mov rdi, [rdi]            ; payload
+    V_PACK rdi, rsi
     call obj_repr
     test edx, edx
     jz .aa_nargs_error
@@ -4066,6 +4069,7 @@ DEF_FUNC builtin_format_fn, FMT_FRAME
     ; Just call str(value) — simple fallback
     mov rdi, [rbp - FMT_OBJ]
     mov rsi, [rbp - FMT_OBJ_TAG]
+    V_PACK rdi, rsi
     call obj_str
     ; If we allocated an empty spec, DECREF it
     cmp rbx, 2

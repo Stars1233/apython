@@ -1327,6 +1327,7 @@ DEF_FUNC_BARE op_contains_op
     mov rdi, rax
     mov rsi, rdx
     extern obj_is_true
+    V_PACK rdi, rsi
     call obj_is_true
     mov ecx, eax              ; save truthiness
     pop rdi                    ; payload
@@ -1420,6 +1421,7 @@ DEF_FUNC_BARE op_contains_op
     mov rdi, rax
     mov rsi, rdx
     extern obj_is_true
+    V_PACK rdi, rsi
     call obj_is_true
     mov r8d, eax
     pop rsi                         ; result tag
@@ -1565,6 +1567,7 @@ DEF_FUNC_BARE op_contains_op
     push rdx
     mov rdi, rax
     mov rsi, rdx
+    V_PACK rdi, rsi
     call obj_is_true
     mov r8d, eax
     pop rsi

@@ -348,6 +348,7 @@ DEF_FUNC set_add
     ; Hash the key
     mov rdi, r12
     mov rsi, r14                ; key_tag (saved from rdx on entry)
+    V_PACK rdi, rsi
     call obj_hash
     mov r13, rax                ; r13 = hash
 
@@ -413,6 +414,7 @@ DEF_FUNC set_contains
     ; Hash the key
     mov rdi, r12
     mov rsi, r14                ; key_tag
+    V_PACK rdi, rsi
     call obj_hash
     mov r13, rax                ; r13 = hash
 
@@ -648,6 +650,7 @@ DEF_FUNC set_remove, SR_KEY_TAG
     ; Hash the key
     mov rdi, r12
     mov rsi, rdx                ; key_tag
+    V_PACK rdi, rsi
     call obj_hash
     mov r13, rax                ; hash
 

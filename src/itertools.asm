@@ -1227,6 +1227,7 @@ DEF_FUNC_LOCAL filter_iternext
     ; Test truthiness of result
     mov rdi, r14
     mov esi, r15d
+    V_PACK rdi, rsi
     call obj_is_true
     push rax                 ; save truthiness
 
@@ -1249,6 +1250,7 @@ DEF_FUNC_LOCAL filter_iternext
     ; Test truthiness of item itself
     mov rdi, r13
     mov esi, [rsp]           ; item tag (saved on stack)
+    V_PACK rdi, rsi
     call obj_is_true
     test eax, eax
     jnz .filter_accept

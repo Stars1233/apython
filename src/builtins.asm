@@ -440,6 +440,7 @@ align 16
     shl rax, 4                  ; index * 16 for 16-byte stride
     mov rsi, [rbx + rax + 8]   ; tag
     mov rdi, [rbx + rax]       ; payload
+    V_PACK rdi, rsi
     call obj_str
     ; obj_str returns (rax=payload, edx=tag)
     mov r14, rax                ; r14 = result payload
@@ -1133,6 +1134,7 @@ DEF_FUNC builtin_repr
 
     mov rsi, [rdi + 8]         ; arg[0] tag
     mov rdi, [rdi]             ; arg[0] payload
+    V_PACK rdi, rsi
     call obj_repr
     ; rdx = tag from obj_repr
     leave
@@ -1161,6 +1163,7 @@ DEF_FUNC builtin_bool
     mov rsi, [rdi + 8]         ; rsi = arg[0] tag
     mov rdi, [rdi]             ; rdi = arg[0] payload
     extern obj_is_true
+    V_PACK rdi, rsi
     call obj_is_true           ; eax = 0 or 1
     test eax, eax
     jz .bool_ret_false

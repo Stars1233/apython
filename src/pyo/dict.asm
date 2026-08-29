@@ -448,6 +448,7 @@ DEF_FUNC_LOCAL dict_keys_equal
     mov rsi, rdx
     push rax
     push rdx
+    V_PACK rdi, rsi
     call obj_is_true
     mov ebx, eax           ; save truthiness
     pop rdx
@@ -494,6 +495,7 @@ DEF_FUNC dict_get, 8
     ; Hash the key
     mov rdi, r12
     mov rsi, rdx                ; key tag
+    V_PACK rdi, rsi
     call obj_hash
     mov r13, rax                ; r13 = hash
 
@@ -580,6 +582,7 @@ DEF_FUNC dict_get_index, 8
 
     mov rdi, r12
     mov rsi, rdx                ; key tag
+    V_PACK rdi, rsi
     call obj_hash
     mov r13, rax                ; r13 = hash
 
@@ -878,6 +881,7 @@ DEF_FUNC dict_set, 16
     ; Hash the key
     mov rdi, r12
     mov rsi, r8                 ; key tag
+    V_PACK rdi, rsi
     call obj_hash
     mov r14, rax                ; r14 = hash
 
@@ -1081,6 +1085,7 @@ DEF_FUNC dict_del, 8
     ; Hash the key
     mov rdi, r12
     mov rsi, rdx                ; key tag
+    V_PACK rdi, rsi
     call obj_hash
     mov r13, rax                ; hash
 
@@ -1713,6 +1718,7 @@ DEF_FUNC dict_richcompare, DRC_FRAME
     mov rsi, rdx
     push rax
     push rdx
+    V_PACK rdi, rsi
     call obj_is_true
     pop rdx
     pop rdi

@@ -622,6 +622,7 @@ DEF_FUNC str_mod, SM_FRAME
     ; rax = arg payload, rdx = arg tag
     mov rdi, rax
     mov rsi, rdx               ; tag for obj_str
+    V_PACK rdi, rsi
     call obj_str
     ; rax = str result
     jmp .sm_copy_str
@@ -658,6 +659,7 @@ DEF_FUNC str_mod, SM_FRAME
 .sm_int_go:
     mov rdi, rax
     mov rsi, rdx               ; tag for obj_str (64-bit)
+    V_PACK rdi, rsi
     call obj_str               ; int.__str__ = int_repr
     jmp .sm_copy_str
 
@@ -666,6 +668,7 @@ DEF_FUNC str_mod, SM_FRAME
     call .sm_get_arg
     mov rdi, rax
     mov rsi, rdx               ; tag for obj_repr (64-bit)
+    V_PACK rdi, rsi
     call obj_repr
     jmp .sm_copy_str
 

@@ -302,6 +302,7 @@ DEF_FUNC tuple_hash
     cmp esi, TAG_NULL
     je .skip_null
     ; TAG_PTR or other: call obj_hash on payload
+    V_PACK rdi, rsi
     call obj_hash               ; rax = hash of item
     jmp .hash_combine
 .hash_smallint:
@@ -748,6 +749,7 @@ DEF_FUNC tuple_richcompare, TRC_FRAME
     push rdx
     mov rdi, rax
     mov rsi, rdx
+    V_PACK rdi, rsi
     call obj_is_true
     mov ecx, eax                    ; ecx = truthiness (0/1)
     pop rdx                         ; result tag
@@ -776,6 +778,7 @@ DEF_FUNC tuple_richcompare, TRC_FRAME
     push rdx
     mov rdi, rax
     mov rsi, rdx
+    V_PACK rdi, rsi
     call obj_is_true
     mov ecx, eax
     pop rdx

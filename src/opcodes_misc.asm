@@ -1173,6 +1173,7 @@ DEF_FUNC_BARE op_unary_not
 
     ; Call obj_is_true(operand, tag) -> 0 or 1
     mov rsi, r8                ; tag
+    V_PACK rdi, rsi
     call obj_is_true
     push rax                   ; save truthiness result
 
@@ -1212,6 +1213,7 @@ DEF_FUNC_BARE op_pop_jump_if_false
     push r8                    ; save tag for DECREF
     push rdi                   ; save value for DECREF
     mov rsi, r8                ; tag
+    V_PACK rdi, rsi
     call obj_is_true
     push rax                   ; save truthiness
     mov rdi, [rsp + 8]        ; reload value
@@ -1247,6 +1249,7 @@ DEF_FUNC_BARE op_pop_jump_if_true
     push r8                    ; save tag for DECREF
     push rdi                   ; save value for DECREF
     mov rsi, r8                ; tag
+    V_PACK rdi, rsi
     call obj_is_true
     push rax                   ; save truthiness
     mov rdi, [rsp + 8]        ; reload value
@@ -1411,11 +1414,13 @@ DEF_FUNC op_format_value, FV_FRAME
     je .fv_repr
     ; Default: str() — conversion 0 (none) and 1 (!s) both use str()
     extern obj_str
+    V_PACK rdi, rsi
     call obj_str
     jmp .fv_have_result
 
 .fv_repr:
     extern obj_repr
+    V_PACK rdi, rsi
     call obj_repr
 
 .fv_have_result:

@@ -102,11 +102,11 @@ DEF_FUNC_BARE obj_dealloc
     ret
 END_FUNC obj_dealloc
 
-; obj_repr(rdi=payload, rsi=tag) -> PyObject* (string)
-; Dispatches on tag. SmallInt → int_repr. TAG_PTR → tp_repr.
-; Also handles TAG_FLOAT, TAG_NONE, TAG_BOOL.
+; obj_repr(rdi=value) -> PyObject* (string)
+; Decodes the Value, then dispatches: int immediate → int_repr, pointer → tp_repr.
 DEF_FUNC obj_repr
     extern str_repr
+    V_UNPACK rdi, rsi
 
     cmp esi, TAG_SMALLINT
     je .smallint
@@ -167,10 +167,11 @@ DEF_FUNC obj_repr
     ret
 END_FUNC obj_repr
 
-; obj_str(rdi=payload, rsi=tag) -> PyObject* (string)
-; Dispatches on tag. SmallInt → int_repr. TAG_PTR → tp_str, falls back to tp_repr.
-; Also handles TAG_FLOAT, TAG_NONE, TAG_BOOL.
+; obj_str(rdi=value) -> PyObject* (string)
+; Decodes the Value, then dispatches: int immediate → int_repr, pointer → tp_str
+; falling back to tp_repr.
 DEF_FUNC obj_str
+    V_UNPACK rdi, rsi
     push rbx
     push r12
     mov rbx, rdi
@@ -247,6 +248,7 @@ DEF_FUNC obj_str
 .fallback:
     mov rdi, rbx
     mov rsi, r12
+    V_PACK rdi, rsi
     call obj_repr
     pop r12
     pop rbx
@@ -266,9 +268,10 @@ DEF_FUNC hash_not_implemented
     call raise_exception
 END_FUNC hash_not_implemented
 
-; obj_hash(rdi=payload, rsi=tag) -> int64
-; Dispatches on tag. SmallInt → raw value. TAG_PTR → tp_hash.
+; obj_hash(rdi=value) -> int64
+; Decodes the Value, then dispatches: int immediate → int_hash_i64, pointer → tp_hash.
 DEF_FUNC obj_hash
+    V_UNPACK rdi, rsi
 
     cmp esi, TAG_SMALLINT
     je .smallint_hash
@@ -327,9 +330,10 @@ DEF_FUNC obj_hash
     ret
 END_FUNC obj_hash
 
-; obj_is_true(rdi=payload, rsi=tag) -> int (0 or 1)
-; Dispatches on tag. SmallInt → value != 0. TAG_PTR → type-based truthiness.
+; obj_is_true(rdi=value) -> int (0 or 1)
+; Decodes the Value, then dispatches: int immediate → value != 0, pointer → type-based.
 DEF_FUNC_BARE obj_is_true
+    V_UNPACK rdi, rsi
 
     cmp esi, TAG_SMALLINT
     je .smallint
@@ -499,6 +503,7 @@ DEF_FUNC_BARE obj_is_true
     push rax                   ; save payload
     mov rdi, rax
     mov rsi, rdx
+    V_PACK rdi, rsi
     call obj_is_true
     mov ecx, eax
     pop rdi                    ; payload
@@ -564,7 +569,6 @@ DEF_FUNC obj_print
     mov rbx, rdi
 
     ; Get string representation via obj_str(payload, tag)
-    mov esi, TAG_PTR
     call obj_str
     test rax, rax
     jz .print_null
