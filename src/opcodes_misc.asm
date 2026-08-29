@@ -1124,21 +1124,23 @@ DEF_FUNC_BARE op_unary_negative
     mov rax, [rax + PyTypeObject.tp_as_number]
     mov rax, [rax + PyNumberMethods.nb_negative]
 
-    ; Call nb_negative(payload, tag); rdi already set
+    ; Call nb_negative(rdi = operand Value)
     mov rdx, r8                ; tag
-    call rax
-    ; rax = result payload, rdx = result tag
+    V_PACK rdi, rdx
+    call rax                   ; rax = result Value
 
     ; DECREF old operand (tag-aware)
-    SAVE_FAT_RESULT            ; save (rax,rdx) — shifts rsp refs by +16
-    mov rdi, [rsp + 16]       ; rdi = old operand (was [rsp + 8])
-    mov rsi, [rsp + 24]       ; rsi = operand tag (was [rsp + 16])
+    push rax                   ; save result Value
+    push rax                   ; keep the stack 16-byte aligned
+    mov rdi, [rsp + 16]       ; rdi = old operand
+    mov rsi, [rsp + 24]       ; rsi = operand tag
     DECREF_VAL rdi, rsi
-    RESTORE_FAT_RESULT
+    add rsp, 8
+    pop rax
     add rsp, 16                ; discard saved operand + tag
 
     ; Push result
-    VPUSH_VAL rax, rdx
+    VPUSH rax
     DISPATCH
 
 .neg_float:
@@ -1171,17 +1173,20 @@ DEF_FUNC_BARE op_unary_invert
     mov rax, [rax + PyTypeObject.tp_as_number]
     mov rax, [rax + PyNumberMethods.nb_invert]
 
-    ; Call nb_invert(operand, tag) — binary op signature
+    ; Call nb_invert(rdi = operand Value)
     mov rdx, r8                ; tag
+    V_PACK rdi, rdx
     xor esi, esi
-    call rax
-    SAVE_FAT_RESULT
+    call rax                   ; rax = result Value
+    push rax
+    push rax                   ; alignment
     mov rdi, [rsp + 16]
     mov rsi, [rsp + 24]       ; tag
     DECREF_VAL rdi, rsi
-    RESTORE_FAT_RESULT
+    add rsp, 8
+    pop rax
     add rsp, 16
-    VPUSH_VAL rax, rdx
+    VPUSH rax
     DISPATCH
 END_FUNC op_unary_invert
 

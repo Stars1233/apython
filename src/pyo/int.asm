@@ -1726,6 +1726,7 @@ END_FUNC int_mod
 ;; int_neg(PyObject *a) -> PyObject*
 ;; ============================================================================
 DEF_FUNC_BARE int_neg
+    V_UNPACK rdi, rdx           ; operand Value -> (payload, tag)
     cmp edx, TAG_SMALLINT
     je .smallint
     ; Unwrap int subclass
@@ -1759,6 +1760,7 @@ DEF_FUNC_BARE int_neg
     pop r12
     pop rbx
     pop rbp
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .smallint:
@@ -1766,6 +1768,7 @@ DEF_FUNC_BARE int_neg
     neg rax
     jo .neg_overflow            ; only -(-2^63) overflows
     RET_TAG_SMALLINT
+    V_PACK rax, rdx             ; return one Value
     ret
 .neg_overflow:
     ; -(-2^63) = 2^63, doesn't fit i64. Create GMP and negate.
@@ -1783,6 +1786,7 @@ DEF_FUNC_BARE int_neg
     mov edx, TAG_PTR
     pop rbx
     pop rbp
+    V_PACK rax, rdx             ; return one Value
     ret
 END_FUNC int_neg
 
@@ -2400,6 +2404,7 @@ END_FUNC int_xor
 ;; ~x = -(x+1)
 ;; ============================================================================
 DEF_FUNC_BARE int_invert
+    V_UNPACK rdi, rdx           ; operand Value -> (payload, tag)
     ; Unwrap int subclass instances
     call int_unwrap
     cmp edx, TAG_SMALLINT
@@ -2430,12 +2435,14 @@ DEF_FUNC_BARE int_invert
     mov edx, TAG_PTR
     pop rbx
     pop rbp
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .smallint:
     mov rax, rdi
     not rax                ; ~x = -(x+1), always fits i64
     RET_TAG_SMALLINT
+    V_PACK rax, rdx             ; return one Value
     ret
 END_FUNC int_invert
 

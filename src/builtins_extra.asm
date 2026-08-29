@@ -131,10 +131,9 @@ DEF_FUNC builtin_abs
     ret
 
 .abs_gmp_neg:
-    mov rdi, rbx
-    mov edx, TAG_PTR            ; int_neg forwards edx to int_unwrap
+    mov rdi, rbx               ; a heap int pointer is its own Value
     call int_neg
-    ; rdx = tag already set by callee
+    V_UNPACK rax, rdx           ; int_neg returns a Value
     add rsp, 8
     pop rbx
     leave
