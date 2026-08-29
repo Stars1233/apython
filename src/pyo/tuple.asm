@@ -527,6 +527,15 @@ DEF_FUNC tuple_concat
     mov rbx, rdi            ; rbx = tuple a
     mov r12, rsi            ; r12 = tuple b
 
+    ; b is read as a tuple below.  An immediate's payload is not an address,
+    ; and this worked on a list only by layout accident -- PyListObject
+    ; happens to carry ob_size and ob_item at the same offsets.
+    cmp ecx, TAG_PTR
+    jne .tc_type_error
+    lea rax, [rel tuple_type]
+    cmp [r12 + PyObject.ob_type], rax
+    jne .tc_type_error
+
     mov r13, [rbx + PyTupleObject.ob_size]   ; r13 = len(a)
     mov r14, [r12 + PyTupleObject.ob_size]   ; r14 = len(b)
 
@@ -574,6 +583,10 @@ DEF_FUNC tuple_concat
     leave
     V_PACK rax, rdx             ; return one Value
     ret
+.tc_type_error:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "can only concatenate tuple (not other) to tuple"
+    call raise_exception
 END_FUNC tuple_concat
 
 ;; ============================================================================

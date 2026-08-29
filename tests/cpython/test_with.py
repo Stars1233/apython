@@ -71,7 +71,9 @@ class WithBasicTest(unittest.TestCase):
         def f():
             with NoEnter():
                 pass
-        self.assertRaises(AttributeError, f)
+        # CPython 3.12 reports an incomplete context manager as a protocol
+        # TypeError, not as an AttributeError on the missing dunder.
+        self.assertRaises(TypeError, f)
 
     def test_nested_with(self):
         order = []

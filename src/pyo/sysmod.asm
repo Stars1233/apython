@@ -17,6 +17,9 @@ extern str_from_cstr
 extern str_from_cstr_heap
 extern str_new
 extern str_type
+extern sys_write
+extern int_type
+extern bool_type
 extern int_from_i64
 extern int_to_i64
 extern none_singleton
@@ -473,11 +476,45 @@ DEF_FUNC sys_exit_func
     cmp rsi, 1
     jne .exit_0
 
-    ; Get exit code from args[0]
-    mov rdi, [rdi]            ; args[0]
+    ; Get exit code from args[0].  int_to_i64 reads PyIntObject.compact
+    ; unconditionally, so it may only be handed something that really is an
+    ; int -- sys.exit("usage") used to read a string's payload as one and
+    ; then dereference the mpz limb pointer it found there.
+    mov rdi, [rdi]            ; args[0] Value
     V_UNPACK rdi, rdx
+    cmp edx, TAG_SMALLINT
+    je .exit_int
+    cmp edx, TAG_PTR
+    jne .exit_nonzero         ; a float exit status is not a status
+    mov rax, [rdi + PyObject.ob_type]
+    lea rcx, [rel none_singleton]
+    cmp rdi, rcx
+    je .exit_0                ; sys.exit(None) is a success exit
+    lea rcx, [rel str_type]
+    cmp rax, rcx
+    je .exit_message
+    REQUIRE_INT_TYPE rax, rcx, .exit_nonzero
+
+.exit_int:
+    V_PACK rdi, rdx
     call int_to_i64
     mov edi, eax
+    call sys_exit
+
+.exit_message:
+    ; A non-integer argument is a message: CPython prints it on stderr and
+    ; exits 1.  Compute both operands before clobbering rdi.
+    mov rdx, [rdi + PyStrObject.ob_size]    ; length
+    lea rsi, [rdi + PyStrObject.data]       ; data
+    mov edi, 2                              ; stderr
+    call sys_write
+    mov edi, 2
+    lea rsi, [rel sys_exit_nl]
+    mov edx, 1
+    call sys_write
+
+.exit_nonzero:
+    mov edi, 1
     call sys_exit
 
 .exit_0:
@@ -625,6 +662,7 @@ END_FUNC sys_path_add_script_dir
 ; Data
 ; ============================================================================
 section .rodata
+sys_exit_nl: db 10
 
 sm_sys:          db "sys", 0
 sm_modules:      db "modules", 0

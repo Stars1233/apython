@@ -642,43 +642,68 @@ DEF_FUNC bytes_compare
     mov ebx, edx              ; save op in ebx
 
     ; Check if b is also bytes
+    cmp r8d, TAG_PTR          ; b may be an int or float immediate, whose
+    jne .bytes_cmp_not_impl   ; payload is not an address
     lea rax, [rel bytes_type]
     cmp [rsi + PyObject.ob_type], rax
     jne .bytes_cmp_not_impl
 
-    ; Compare lengths
-    mov rcx, [rdi + PyBytesObject.ob_size]
-    cmp rcx, [rsi + PyBytesObject.ob_size]
-    jne .bytes_cmp_neq
-
-    ; Same length — compare data
+    ; Lexicographic three-way compare, as CPython does: walk the common
+    ; prefix, and if that matches, the shorter operand sorts first.  Only
+    ; == and != were implemented before, so every ordering comparison
+    ; between two bytes fell through to NotImplemented.
+    mov rcx, [rdi + PyBytesObject.ob_size]   ; rcx = len(a)
+    mov rdx, [rsi + PyBytesObject.ob_size]   ; rdx = len(b)
+    mov r11, rcx
+    cmp r11, rdx
+    jle .bytes_have_min
+    mov r11, rdx
+.bytes_have_min:                             ; r11 = min(len(a), len(b))
     lea r8, [rdi + PyBytesObject.data]
     lea r9, [rsi + PyBytesObject.data]
     xor eax, eax
 .bytes_cmp_loop:
-    cmp rax, rcx
-    jge .bytes_cmp_eq
-    movzx edx, byte [r8 + rax]
-    cmp dl, [r9 + rax]
-    jne .bytes_cmp_neq
+    cmp rax, r11
+    jge .bytes_prefix_equal
+    movzx r10d, byte [r8 + rax]
+    cmp r10b, [r9 + rax]                     ; bytes compare unsigned
+    jb .bytes_cmp_lt
+    ja .bytes_cmp_gt
     inc rax
     jmp .bytes_cmp_loop
 
-.bytes_cmp_eq:
-    ; Equal: return True for ==, False for !=
-    cmp ebx, 2                ; PyCmp_EQ = 2
-    je .bytes_ret_true
-    cmp ebx, 3                ; PyCmp_NE = 3
-    je .bytes_ret_false
-    jmp .bytes_cmp_not_impl
+.bytes_prefix_equal:
+    cmp rcx, rdx
+    jb .bytes_cmp_lt
+    ja .bytes_cmp_gt
+    ; fall through: the two are equal
 
-.bytes_cmp_neq:
-    ; Not equal: return False for ==, True for !=
-    cmp ebx, 2
-    je .bytes_ret_false
-    cmp ebx, 3
+.bytes_cmp_eq:
+    cmp ebx, PY_EQ
     je .bytes_ret_true
-    jmp .bytes_cmp_not_impl
+    cmp ebx, PY_LE
+    je .bytes_ret_true
+    cmp ebx, PY_GE
+    je .bytes_ret_true
+    jmp .bytes_ret_false
+
+.bytes_cmp_lt:
+    cmp ebx, PY_LT
+    je .bytes_ret_true
+    cmp ebx, PY_LE
+    je .bytes_ret_true
+    cmp ebx, PY_NE
+    je .bytes_ret_true
+    jmp .bytes_ret_false
+
+.bytes_cmp_gt:
+    cmp ebx, PY_GT
+    je .bytes_ret_true
+    cmp ebx, PY_GE
+    je .bytes_ret_true
+    cmp ebx, PY_NE
+    je .bytes_ret_true
+    jmp .bytes_ret_false
 
 .bytes_ret_true:
     lea rax, [rel bool_true]
@@ -695,10 +720,10 @@ DEF_FUNC bytes_compare
     leave
     ret
 .bytes_cmp_not_impl:
-    extern none_singleton
-    lea rax, [rel none_singleton]
-    inc qword [rax + PyObject.ob_refcnt]
-    mov edx, TAG_PTR
+    ; NotImplemented is a NULL return, so op_compare_op can try the reflected
+    ; operand and then fall back to identity.  Returning None instead made
+    ; b"a" == 5 and every ordering comparison evaluate to None.
+    RET_NULL
     pop rbx
     leave
     ret
@@ -852,8 +877,8 @@ DEF_FUNC bytes_type_call, BTC_FRAME
     cmp rdx, 1
     jne .btc_error
     mov rdi, [rsi]              ; arg0 payload
-    V_TEST_INT_M [rsi], r11      ; args[0] an int immediate?
-    jae .btc_error
+    V_TEST_PTR_M [rsi], r11     ; a float is not an int immediate either, and
+    ja .btc_error               ; its payload is raw f64 bits, not an address
     mov rax, [rdi + PyObject.ob_type]
     lea rcx, [rel bytes_type]
     cmp rax, rcx

@@ -2801,7 +2801,12 @@ DEF_FUNC op_match_class, MC_FRAME
     mov rax, [rbp - MC_SUBJ]
     cmp qword [rbp - MC_SUBJ_TAG], TAG_SMALLINT
     je .mc_smallint_type
-    jz .mc_none_type
+    cmp qword [rbp - MC_SUBJ_TAG], TAG_FLOAT
+    je .mc_float_type
+    ; Everything else is a real pointer -- None included, since it is an
+    ; ordinary heap singleton.  (The arm here used to be `jz .mc_none_type`,
+    ; which tests the same flag as the `je` above it: the None arm was dead
+    ; and a float subject fell into the dereference below.)
     mov rdx, [rax + PyObject.ob_type]
     jmp .mc_got_type
 
@@ -2809,8 +2814,8 @@ DEF_FUNC op_match_class, MC_FRAME
     lea rdx, [rel int_type]
     jmp .mc_got_type
 
-.mc_none_type:
-    lea rdx, [rel none_type]
+.mc_float_type:
+    lea rdx, [rel float_type]
 
 .mc_got_type:
     ; rdx = subject's type, walk tp_base chain vs class

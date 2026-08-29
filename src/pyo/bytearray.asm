@@ -31,8 +31,8 @@ DEF_FUNC bytearray_type_call, BA_FRAME
     jne .ba_error
     mov rdi, [rsi]                     ; arg0 payload
     ; Must be a bytes object
-    V_TEST_INT_M [rsi], r11      ; args[0] an int immediate?
-    jae .ba_error
+    V_TEST_PTR_M [rsi], r11     ; a float is not an int immediate either, and
+    ja .ba_error                ; its payload is raw f64 bits, not an address
     mov rax, [rdi + PyObject.ob_type]
     lea rcx, [rel bytes_type]
     cmp rax, rcx

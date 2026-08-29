@@ -1617,11 +1617,22 @@ DEF_FUNC dict_richcompare, DRC_FRAME
     mov [rbp - DRC_RIGHT], rsi
     mov [rbp - DRC_OP], edx
 
+    ; The right operand is dereferenced as a dict below, so it has to be
+    ; one: an immediate's payload is not an address, and any other object's
+    ; fields are not ob_size/capacity/entries.
+    cmp r8d, TAG_PTR
+    jne .drc_not_impl
+    lea rax, [rel dict_type]
+    cmp [rsi + PyObject.ob_type], rax
+    jne .drc_not_impl
+
     ; Only handle EQ (2) and NE (3)
     cmp edx, 2
     je .drc_do_eq
     cmp edx, 3
     je .drc_do_eq
+
+.drc_not_impl:
     ; Unsupported op — return NotImplemented (NULL)
     RET_NULL
     leave

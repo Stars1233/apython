@@ -1470,6 +1470,15 @@ DEF_FUNC list_concat
     mov rbx, rdi            ; rbx = list a
     mov r12, rsi            ; r12 = list b
 
+    ; b is read as a list below.  An immediate's payload is not an address,
+    ; and this worked on a tuple only by layout accident -- PyTupleObject
+    ; happens to carry ob_size and ob_item at the same offsets.
+    cmp ecx, TAG_PTR
+    jne .lc_type_error
+    lea rax, [rel list_type]
+    cmp [r12 + PyObject.ob_type], rax
+    jne .lc_type_error
+
     ; Get sizes
     mov r13, [rbx + PyListObject.ob_size]   ; r13 = len(a)
     mov r14, [r12 + PyListObject.ob_size]   ; r14 = len(b)
@@ -1522,6 +1531,10 @@ DEF_FUNC list_concat
     leave
     V_PACK rax, rdx             ; return one Value
     ret
+.lc_type_error:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "can only concatenate list (not other) to list"
+    call raise_exception
 END_FUNC list_concat
 
 ;; ============================================================================

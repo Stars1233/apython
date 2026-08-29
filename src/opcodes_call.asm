@@ -726,6 +726,11 @@ DEF_FUNC op_before_with
     mov [rbp - BW_MGR], rax
     mov rbx, rax                    ; rbx = mgr
 
+    ; An int or float manager has no type pointer to walk: its payload is a
+    ; value, not an address.  `with 5:` dereferenced it.
+    cmp edx, TAG_PTR
+    jne .bw_not_a_manager
+
     ; Look up __exit__ on mgr's type
     mov rax, [rbx + PyObject.ob_type]
     mov rax, [rax + PyTypeObject.tp_dict]
@@ -817,16 +822,23 @@ DEF_FUNC op_before_with
     mov rdi, r12
     call obj_decref
 .bw_no_exit:
-    lea rdi, [rel exc_AttributeError_type]
-    CSTRING rsi, "__exit__"
+    ; CPython reports a missing __enter__/__exit__ as a protocol TypeError,
+    ; not as a bare AttributeError on the dunder name.
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "object does not support the context manager protocol"
     call raise_exception
 
 .bw_no_enter_decref_name:
     mov rdi, r12
     call obj_decref
 .bw_no_enter:
-    lea rdi, [rel exc_AttributeError_type]
-    CSTRING rsi, "__enter__"
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "object does not support the context manager protocol"
+    call raise_exception
+
+.bw_not_a_manager:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "object does not support the context manager protocol"
     call raise_exception
 END_FUNC op_before_with
 
