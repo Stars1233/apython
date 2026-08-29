@@ -30,6 +30,7 @@ extern str_new_heap
 extern str_type
 extern list_new
 extern list_append
+extern obj_as_index
 extern list_type
 extern tuple_new
 extern tuple_type
@@ -258,81 +259,120 @@ DEF_FUNC str_method_lower
 END_FUNC str_method_lower
 
 ;; ============================================================================
-;; str_method_strip(args, nargs) -> new stripped string
-;; Strip whitespace (space, tab, newline, cr, form feed, vertical tab) from both ends
 ;; ============================================================================
-DEF_FUNC str_method_strip
+;; strip_char_matches(dil = byte, rsi = chars data or 0, rdx = chars len)
+;;   -> eax = 1 when the byte should be stripped
+;;
+;; With no chars argument the set is whitespace, as before.  The argument was
+;; accepted and then ignored outright, so "xxaxx".strip("x") returned the
+;; string unchanged.
+;; ============================================================================
+DEF_FUNC_BARE strip_char_matches
+    test rsi, rsi
+    jz .scm_whitespace
+    xor ecx, ecx
+.scm_loop:
+    cmp rcx, rdx
+    jge .scm_no
+    cmp dil, [rsi + rcx]
+    je .scm_yes
+    inc rcx
+    jmp .scm_loop
+
+.scm_whitespace:
+    cmp dil, ' '
+    je .scm_yes
+    cmp dil, 9                  ; tab
+    je .scm_yes
+    cmp dil, 10                 ; newline
+    je .scm_yes
+    cmp dil, 13                 ; carriage return
+    je .scm_yes
+    cmp dil, 11                 ; vertical tab
+    je .scm_yes
+    cmp dil, 12                 ; form feed
+    je .scm_yes
+.scm_no:
+    xor eax, eax
+    ret
+.scm_yes:
+    mov eax, 1
+    ret
+END_FUNC strip_char_matches
+
+;; ============================================================================
+;; str_strip_impl(rdi = args, rsi = nargs, edx = mode) -> Value
+;; mode: bit 0 = strip the left, bit 1 = strip the right.
+;; ============================================================================
+SSI_CHARS equ 8
+SSI_CLEN  equ 16
+SSI_MODE  equ 24
+SSI_FRAME equ 32
+
+DEF_FUNC_LOCAL str_strip_impl, SSI_FRAME
     push rbx
     push r12
     push r13
     push r14
 
-    mov rax, [rdi]          ; self
-    mov rbx, rax
-    mov r12, [rbx + PyStrObject.ob_size]  ; length
+    mov [rbp - SSI_MODE], rdx
+    mov qword [rbp - SSI_CHARS], 0
+    mov qword [rbp - SSI_CLEN], 0
 
-    ; Find start (skip leading whitespace)
-    xor r13d, r13d          ; r13 = start index
-.strip_left:
-    cmp r13, r12
-    jge .strip_empty
-    movzx eax, byte [rbx + PyStrObject.data + r13]
-    cmp al, ' '
-    je .strip_left_next
-    cmp al, 9              ; tab
-    je .strip_left_next
-    cmp al, 10             ; newline
-    je .strip_left_next
-    cmp al, 13             ; carriage return
-    je .strip_left_next
-    cmp al, 11             ; vertical tab
-    je .strip_left_next
-    cmp al, 12             ; form feed
-    je .strip_left_next
-    jmp .strip_right_start
-.strip_left_next:
+    mov rbx, [rdi]              ; self
+    mov r12, [rbx + PyStrObject.ob_size]
+
+    cmp rsi, 2
+    jl .ssi_have_chars
+    mov rax, [rdi + 8]          ; the chars argument
+    V_TEST_PTR rax, rcx
+    ja .ssi_type_error
+    mov rcx, [rax + PyObject.ob_type]
+    REQUIRE_STR_TYPE rcx, rdx, .ssi_type_error
+    lea rcx, [rax + PyStrObject.data]
+    mov [rbp - SSI_CHARS], rcx
+    mov rcx, [rax + PyStrObject.ob_size]
+    mov [rbp - SSI_CLEN], rcx
+
+.ssi_have_chars:
+    xor r13d, r13d              ; start
+    mov r14, r12                ; end, exclusive
+
+    test qword [rbp - SSI_MODE], 1
+    jz .ssi_right
+.ssi_left_loop:
+    cmp r13, r14
+    jge .ssi_make
+    movzx edi, byte [rbx + PyStrObject.data + r13]
+    mov rsi, [rbp - SSI_CHARS]
+    mov rdx, [rbp - SSI_CLEN]
+    call strip_char_matches
+    test eax, eax
+    jz .ssi_right
     inc r13
-    jmp .strip_left
+    jmp .ssi_left_loop
 
-.strip_empty:
-    ; All whitespace - return empty string
-    lea rdi, [rel empty_str_cstr]
-    call str_from_cstr_heap
-    jmp .strip_ret
-
-.strip_right_start:
-    ; Find end (skip trailing whitespace)
-    mov r14, r12            ; r14 = end (exclusive)
-.strip_right:
+.ssi_right:
+    test qword [rbp - SSI_MODE], 2
+    jz .ssi_make
+.ssi_right_loop:
     cmp r14, r13
-    jle .strip_empty
-    movzx eax, byte [rbx + PyStrObject.data + r14 - 1]
-    cmp al, ' '
-    je .strip_right_next
-    cmp al, 9
-    je .strip_right_next
-    cmp al, 10
-    je .strip_right_next
-    cmp al, 13
-    je .strip_right_next
-    cmp al, 11             ; vertical tab
-    je .strip_right_next
-    cmp al, 12             ; form feed
-    je .strip_right_next
-    jmp .strip_make
-.strip_right_next:
+    jle .ssi_make
+    movzx edi, byte [rbx + PyStrObject.data + r14 - 1]
+    mov rsi, [rbp - SSI_CHARS]
+    mov rdx, [rbp - SSI_CLEN]
+    call strip_char_matches
+    test eax, eax
+    jz .ssi_make
     dec r14
-    jmp .strip_right
+    jmp .ssi_right_loop
 
-.strip_make:
-    ; Create new string from [start, end)
+.ssi_make:
     lea rdi, [rbx + PyStrObject.data]
     add rdi, r13
     mov rsi, r14
-    sub rsi, r13            ; length = end - start
+    sub rsi, r13
     call str_new_heap
-
-.strip_ret:
     mov edx, TAG_PTR
     pop r14
     pop r13
@@ -341,16 +381,129 @@ DEF_FUNC str_method_strip
     leave
     V_PACK rax, rdx             ; builtins return one Value
     ret
+
+.ssi_type_error:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "strip arg must be None or str"
+    call raise_exception
+END_FUNC str_strip_impl
+
+;; ============================================================================
+;; str_method_strip(args, nargs) -> new string with both ends stripped
+;; args[0]=self, args[1]=chars (optional)
+;; ============================================================================
+DEF_FUNC_BARE str_method_strip
+    mov edx, 3
+    jmp str_strip_impl
 END_FUNC str_method_strip
 
 ;; ============================================================================
 ;; str_method_startswith(args, nargs) -> bool_true/bool_false
 ;; args[0]=self, args[1]=prefix
 ;; ============================================================================
-DEF_FUNC str_method_startswith
+;; ============================================================================
+;; str_affix_dispatch(rdi = args, rsi = nargs, rdx = single-affix function)
+;;   -> True when any element of a tuple argument matches
+;;
+;; startswith and endswith accept a tuple of candidates in Python.  Only a
+;; single str was accepted here, so "He".startswith(("X", "He")) raised
+;; TypeError.
+;; ============================================================================
+SAD_ARGS  equ 8
+SAD_NARGS equ 16
+SAD_FN    equ 24
+SAD_TUP   equ 32
+SAD_IDX   equ 40
+SAD_FRAME equ 48
+
+DEF_FUNC_LOCAL str_affix_dispatch, SAD_FRAME
+    mov [rbp - SAD_ARGS], rdi
+    mov [rbp - SAD_NARGS], rsi
+    mov [rbp - SAD_FN], rdx
+
+    cmp rsi, 2
+    jl .sad_single
+    mov rax, [rdi + 8]
+    V_TEST_PTR rax, rcx
+    ja .sad_single
+    mov rcx, [rax + PyObject.ob_type]
+    lea rdx, [rel tuple_type]
+    cmp rcx, rdx
+    jne .sad_single
+
+    mov [rbp - SAD_TUP], rax
+    mov qword [rbp - SAD_IDX], 0
+
+.sad_loop:
+    mov rax, [rbp - SAD_TUP]
+    mov rcx, [rbp - SAD_IDX]
+    cmp rcx, [rax + PyTupleObject.ob_size]
+    jge .sad_false
+
+    ; Build (self, candidate) plus any start/stop the caller passed.
+    sub rsp, 64
+    mov rdx, [rbp - SAD_ARGS]
+    mov r8, [rdx]
+    mov [rsp], r8                       ; self
+    mov r9, [rax + PyTupleObject.ob_item]
+    mov r9, [r9 + rcx * 8]
+    mov [rsp + 8], r9                   ; the candidate
+    mov r10, [rbp - SAD_NARGS]
+    cmp r10, 3
+    jl .sad_no_extra
+    mov r8, [rdx + 16]
+    mov [rsp + 16], r8
+    cmp r10, 4
+    jl .sad_no_extra
+    mov r8, [rdx + 24]
+    mov [rsp + 24], r8
+.sad_no_extra:
+    mov rdi, rsp
+    mov rsi, [rbp - SAD_NARGS]
+    call [rbp - SAD_FN]
+    add rsp, 64
+
+    V_UNPACK rax, rdx
+    lea rcx, [rel bool_true]
+    cmp rax, rcx
+    je .sad_true
+
+    inc qword [rbp - SAD_IDX]
+    jmp .sad_loop
+
+.sad_single:
+    mov rdi, [rbp - SAD_ARGS]
+    mov rsi, [rbp - SAD_NARGS]
+    call [rbp - SAD_FN]
+    leave
+    ret
+
+.sad_true:
+    lea rax, [rel bool_true]
+    inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
+    leave
+    V_PACK rax, rdx
+    ret
+
+.sad_false:
+    lea rax, [rel bool_false]
+    inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
+    leave
+    V_PACK rax, rdx
+    ret
+END_FUNC str_affix_dispatch
+
+AFF_ARGS  equ 8
+AFF_NARGS equ 16
+AFF_FRAME equ 16
+DEF_FUNC_LOCAL str_startswith_one, AFF_FRAME
     push rbx
     push r12
     push r13
+    mov [rbp - AFF_ARGS], rdi
+    mov [rbp - AFF_NARGS], rsi
 
     ; Validate args[1] is a string
     mov rax, [rdi + 8]         ; args[1]
@@ -364,24 +517,74 @@ DEF_FUNC str_method_startswith
 
     mov r13, [r12 + PyStrObject.ob_size]  ; prefix length
 
-    ; If prefix is longer than self, return False
-    cmp r13, [rbx + PyStrObject.ob_size]
-    jg .sw_false
+    ; start/end narrow the region examined, and were ignored: only args[0]
+    ; and args[1] were ever read, so "abc".startswith("b", 1) was False.
+    ; r14 = start, r15 = end (exclusive), both clamped like a slice.
+    push r14
+    push r15
+    xor r14d, r14d
+    mov r15, [rbx + PyStrObject.ob_size]
+    cmp qword [rbp - AFF_NARGS], 3
+    jl .sw_have_bounds
+    mov rdi, [rbp - AFF_ARGS]
+    mov rdi, [rdi + 16]
+    V_UNPACK rdi, rdx
+    call obj_as_index
+    mov r14, rax
+    test r14, r14
+    jns .sw_start_ok
+    add r14, [rbx + PyStrObject.ob_size]
+    jns .sw_start_ok
+    xor r14d, r14d
+.sw_start_ok:
+    cmp qword [rbp - AFF_NARGS], 4
+    jl .sw_have_bounds
+    mov rdi, [rbp - AFF_ARGS]
+    mov rdi, [rdi + 24]
+    V_UNPACK rdi, rdx
+    call obj_as_index
+    test rax, rax
+    jns .sw_end_ok
+    add rax, [rbx + PyStrObject.ob_size]
+    jns .sw_end_ok
+    xor eax, eax
+.sw_end_ok:
+    cmp rax, [rbx + PyStrObject.ob_size]
+    jle .sw_end_clamped
+    mov rax, [rbx + PyStrObject.ob_size]
+.sw_end_clamped:
+    mov r15, rax
+.sw_have_bounds:
+    cmp r14, r15
+    jg .sw_false_pop
 
-    ; Compare first prefix_len bytes
+    ; The prefix must fit inside [start, end)
+    mov rax, r15
+    sub rax, r14
+    cmp r13, rax
+    jg .sw_false_pop
+
     lea rdi, [rbx + PyStrObject.data]
+    add rdi, r14
     lea rsi, [r12 + PyStrObject.data]
-    mov rdx, r13
-    ; Manual byte comparison since ap_strcmp needs null-terminated
     xor ecx, ecx
 .sw_cmp:
     cmp rcx, r13
-    jge .sw_true
+    jge .sw_true_pop
     movzx eax, byte [rdi + rcx]
     cmp al, [rsi + rcx]
-    jne .sw_false
+    jne .sw_false_pop
     inc rcx
     jmp .sw_cmp
+
+.sw_true_pop:
+    pop r15
+    pop r14
+    jmp .sw_true
+.sw_false_pop:
+    pop r15
+    pop r14
+    jmp .sw_false
 
 .sw_true:
     lea rax, [rel bool_true]
@@ -409,17 +612,24 @@ DEF_FUNC str_method_startswith
     lea rdi, [rel exc_TypeError_type]
     CSTRING rsi, "must be str, not other type"
     call raise_exception
+END_FUNC str_startswith_one
+
+DEF_FUNC_BARE str_method_startswith
+    lea rdx, [rel str_startswith_one]
+    jmp str_affix_dispatch
 END_FUNC str_method_startswith
 
 ;; ============================================================================
 ;; str_method_endswith(args, nargs) -> bool_true/bool_false
 ;; args[0]=self, args[1]=suffix
 ;; ============================================================================
-DEF_FUNC str_method_endswith
+DEF_FUNC_LOCAL str_endswith_one, AFF_FRAME
     push rbx
     push r12
     push r13
     push r14
+    mov [rbp - AFF_ARGS], rdi
+    mov [rbp - AFF_NARGS], rsi
 
     ; Validate args[1] is a string
     mov rax, [rdi + 8]         ; args[1]
@@ -434,24 +644,71 @@ DEF_FUNC str_method_endswith
     mov r14, [rbx + PyStrObject.ob_size]  ; self length
 
     ; If suffix longer than self, False
-    cmp r13, r14
-    jg .ew_false
+    ; start/end narrow the region examined, and were ignored here too.
+    push r15
+    xor r14d, r14d                  ; start
+    mov r15, [rbx + PyStrObject.ob_size]
+    cmp qword [rbp - AFF_NARGS], 3
+    jl .ew_have_bounds
+    mov rdi, [rbp - AFF_ARGS]
+    mov rdi, [rdi + 16]
+    V_UNPACK rdi, rdx
+    call obj_as_index
+    mov r14, rax
+    test r14, r14
+    jns .ew_start_ok
+    add r14, [rbx + PyStrObject.ob_size]
+    jns .ew_start_ok
+    xor r14d, r14d
+.ew_start_ok:
+    cmp qword [rbp - AFF_NARGS], 4
+    jl .ew_have_bounds
+    mov rdi, [rbp - AFF_ARGS]
+    mov rdi, [rdi + 24]
+    V_UNPACK rdi, rdx
+    call obj_as_index
+    test rax, rax
+    jns .ew_end_ok
+    add rax, [rbx + PyStrObject.ob_size]
+    jns .ew_end_ok
+    xor eax, eax
+.ew_end_ok:
+    cmp rax, [rbx + PyStrObject.ob_size]
+    jle .ew_end_clamped
+    mov rax, [rbx + PyStrObject.ob_size]
+.ew_end_clamped:
+    mov r15, rax
+.ew_have_bounds:
+    cmp r14, r15
+    jg .ew_false_pop
 
-    ; Compare last suffix_len bytes of self with suffix
-    mov rcx, r14
-    sub rcx, r13            ; offset = self_len - suffix_len
+    ; The suffix must fit inside [start, end)
+    mov rax, r15
+    sub rax, r14
+    cmp r13, rax
+    jg .ew_false_pop
+
+    mov rcx, r15
+    sub rcx, r13                    ; offset = end - suffix_len
     lea rdi, [rbx + PyStrObject.data]
     add rdi, rcx
     lea rsi, [r12 + PyStrObject.data]
     xor ecx, ecx
 .ew_cmp:
     cmp rcx, r13
-    jge .ew_true
+    jge .ew_true_pop
     movzx eax, byte [rdi + rcx]
     cmp al, [rsi + rcx]
-    jne .ew_false
+    jne .ew_false_pop
     inc rcx
     jmp .ew_cmp
+
+.ew_true_pop:
+    pop r15
+    jmp .ew_true
+.ew_false_pop:
+    pop r15
+    jmp .ew_false
 
 .ew_true:
     lea rax, [rel bool_true]
@@ -481,6 +738,11 @@ DEF_FUNC str_method_endswith
     lea rdi, [rel exc_TypeError_type]
     CSTRING rsi, "must be str, not other type"
     call raise_exception
+END_FUNC str_endswith_one
+
+DEF_FUNC_BARE str_method_endswith
+    lea rdx, [rel str_endswith_one]
+    jmp str_affix_dispatch
 END_FUNC str_method_endswith
 
 ;; ============================================================================
@@ -960,176 +1222,302 @@ END_FUNC str_method_join
 ;; If nargs==1: split by whitespace
 ;; If nargs==2: split by args[1]
 ;; ============================================================================
-DEF_FUNC str_method_split
+;; ============================================================================
+;; str_split_impl(rdi = args, rsi = nargs, edx = from_right) -> list
+;;
+;; One implementation for split and rsplit.  maxsplit was accepted and
+;; ignored by both, and rsplit was a plain jump to split -- so
+;; "a-b-c".rsplit("-", 1) returned three pieces instead of ['a-b', 'c'].
+;;
+;; With no separator the split is on runs of whitespace and leading and
+;; trailing whitespace produce no empty pieces; with one, every occurrence
+;; separates, so "a,,b".split(",") is three pieces.
+;; ============================================================================
+SPI_SELF   equ 8
+SPI_SEP    equ 16        ; separator data, or 0 for whitespace
+SPI_SEPLEN equ 24
+SPI_MAX    equ 32        ; remaining splits allowed, -1 for no limit
+SPI_LIST   equ 40
+SPI_RIGHT  equ 48
+SPI_LEN    equ 56
+SPI_FRAME  equ 64
+
+DEF_FUNC_LOCAL str_split_impl, SPI_FRAME
     push rbx
     push r12
     push r13
     push r14
-    push r15
-    sub rsp, 8              ; align
 
-    mov rbx, [rdi]          ; self
-    mov r14, rsi            ; nargs
-    ; Save args[1] if present
-    cmp r14, 2
-    jl .split_no_sep
+    mov [rbp - SPI_RIGHT], rdx
+    mov rbx, [rdi]                  ; self
+    mov [rbp - SPI_SELF], rbx
+    mov rax, [rbx + PyStrObject.ob_size]
+    mov [rbp - SPI_LEN], rax
+    mov qword [rbp - SPI_SEP], 0
+    mov qword [rbp - SPI_SEPLEN], 0
+    mov qword [rbp - SPI_MAX], -1
 
-    ; Validate args[1] is a string
-    mov rax, [rdi + 8]         ; args[1]
+    cmp rsi, 2
+    jl .spi_ready
+    mov rax, [rdi + 8]              ; separator, or None
+    lea rcx, [rel none_singleton]
+    cmp rax, rcx
+    je .spi_check_max
     V_TEST_PTR rax, rcx
-    ja .spl_type_error
+    ja .spi_type_error
     mov rcx, [rax + PyObject.ob_type]
-    REQUIRE_STR_TYPE rcx, rdx, .spl_type_error
+    REQUIRE_STR_TYPE rcx, rdx, .spi_type_error
+    mov rcx, [rax + PyStrObject.ob_size]
+    test rcx, rcx
+    jz .spi_empty_sep
+    mov [rbp - SPI_SEPLEN], rcx
+    lea rcx, [rax + PyStrObject.data]
+    mov [rbp - SPI_SEP], rcx
 
-    mov r15, [rdi + 8]     ; separator string
-    jmp .split_by_sep
-
-.split_no_sep:
-    ; Split by whitespace
-    mov r12, [rbx + PyStrObject.ob_size]  ; self length
-
-    ; Create result list
-    mov rdi, 8
-    call list_new
-    mov r13, rax            ; r13 = result list
-
-    ; Scan through self
-    xor ecx, ecx            ; ecx = position
-.ws_scan:
-    ; Skip leading whitespace
-    cmp rcx, r12
-    jge .ws_done
-    movzx eax, byte [rbx + PyStrObject.data + rcx]
-    cmp al, ' '
-    je .ws_skip
-    cmp al, 9
-    je .ws_skip
-    cmp al, 10
-    je .ws_skip
-    cmp al, 13
-    je .ws_skip
-    jmp .ws_word_start
-.ws_skip:
-    inc rcx
-    jmp .ws_scan
-
-.ws_word_start:
-    ; Found start of word at rcx
-    mov r15, rcx            ; word start
-.ws_word_scan:
-    inc rcx
-    cmp rcx, r12
-    jge .ws_word_end
-    movzx eax, byte [rbx + PyStrObject.data + rcx]
-    cmp al, ' '
-    je .ws_word_end
-    cmp al, 9
-    je .ws_word_end
-    cmp al, 10
-    je .ws_word_end
-    cmp al, 13
-    je .ws_word_end
-    jmp .ws_word_scan
-
-.ws_word_end:
-    ; Word from r15 to rcx (exclusive)
-    push rcx
-    lea rdi, [rbx + PyStrObject.data]
-    add rdi, r15
-    mov rsi, rcx
-    sub rsi, r15            ; length
-    call str_new_heap
-    ; Append to list
-    mov rdi, r13
-    mov rsi, rax
-    push rax
-    call list_append
+.spi_check_max:
+    cmp rsi, 3
+    jl .spi_ready
+    push rdi
+    mov rdi, [rdi + 16]
+    V_UNPACK rdi, rdx
+    call obj_as_index
     pop rdi
-    call obj_decref         ; list_append did INCREF
-    pop rcx
-    jmp .ws_scan
-
-.ws_done:
-    mov rax, r13
-    add rsp, 8
-    pop r15
-    pop r14
-    pop r13
-    pop r12
-    pop rbx
-    mov edx, TAG_PTR
-    leave
-    V_PACK rax, rdx             ; builtins return one Value
-    ret
-
-.split_by_sep:
-    ; Split by separator string r15
-    mov r12, [rbx + PyStrObject.ob_size]  ; self length
-    mov r14, [r15 + PyStrObject.ob_size]  ; sep length
-
-    ; Create result list
-    mov rdi, 8
-    call list_new
-    mov r13, rax            ; r13 = result list
-
-    ; If sep is empty, raise ValueError
-    test r14, r14
-    jz .split_empty_sep
-
-    xor ecx, ecx            ; scan position
-.sep_scan:
-    push rcx                ; save scan pos
-
-    ; Search for separator starting at current position
-    lea rdi, [rbx + PyStrObject.data]
-    add rdi, rcx
-    lea rsi, [r15 + PyStrObject.data]
-    call ap_strstr
-    pop rcx
-
     test rax, rax
-    jz .sep_tail
+    js .spi_ready                   ; a negative maxsplit means no limit
+    mov [rbp - SPI_MAX], rax
 
-    ; Found separator at rax
-    lea rdx, [rbx + PyStrObject.data]
-    sub rax, rdx            ; found_pos in self
-    push rax                ; save found_pos
+.spi_ready:
+    xor edi, edi
+    call list_new
+    mov [rbp - SPI_LIST], rax
 
-    ; Create substring from rcx to found_pos
+    cmp qword [rbp - SPI_SEP], 0
+    je .spi_whitespace
+
+    ; ---- explicit separator ------------------------------------------------
+    cmp qword [rbp - SPI_RIGHT], 0
+    jne .spi_sep_right
+
+    xor r12d, r12d                  ; start of the current piece
+.spi_sep_loop:
+    cmp qword [rbp - SPI_MAX], 0
+    je .spi_sep_tail
+    mov r13, r12                    ; scan position
+.spi_sep_scan:
+    mov rax, [rbp - SPI_LEN]
+    sub rax, [rbp - SPI_SEPLEN]
+    cmp r13, rax
+    jg .spi_sep_tail
+    mov rdi, rbx
+    lea rdi, [rdi + PyStrObject.data]
+    add rdi, r13
+    mov rsi, [rbp - SPI_SEP]
+    mov rdx, [rbp - SPI_SEPLEN]
+    call ap_memcmp
+    test eax, eax
+    jz .spi_sep_hit
+    inc r13
+    jmp .spi_sep_scan
+
+.spi_sep_hit:
+    mov r14, r13
+    sub r14, r12                    ; piece length
     lea rdi, [rbx + PyStrObject.data]
-    add rdi, rcx
-    mov rsi, rax
-    sub rsi, rcx            ; length = found_pos - scan_pos
-    call str_new_heap
-    mov rdi, r13
-    mov rsi, rax
-    push rax
-    call list_append
-    pop rdi
-    call obj_decref
+    add rdi, r12
+    mov rsi, r14
+    call .spi_emit
+    mov r12, r13
+    add r12, [rbp - SPI_SEPLEN]
+    cmp qword [rbp - SPI_MAX], 0
+    jl .spi_sep_loop
+    dec qword [rbp - SPI_MAX]
+    jmp .spi_sep_loop
 
-    pop rcx                 ; found_pos
-    add rcx, r14            ; advance past separator
-    jmp .sep_scan
-
-.sep_tail:
-    ; Copy remaining string from rcx to end
+.spi_sep_tail:
+    mov r14, [rbp - SPI_LEN]
+    sub r14, r12
     lea rdi, [rbx + PyStrObject.data]
-    add rdi, rcx
+    add rdi, r12
+    mov rsi, r14
+    call .spi_emit
+    jmp .spi_done
+
+    ; ---- explicit separator, scanning from the right ----------------------
+.spi_sep_right:
+    mov r12, [rbp - SPI_LEN]        ; end of the current piece, exclusive
+.spi_sepr_loop:
+    cmp qword [rbp - SPI_MAX], 0
+    je .spi_sepr_tail
+    mov r13, r12
+    sub r13, [rbp - SPI_SEPLEN]
+.spi_sepr_scan:
+    test r13, r13
+    js .spi_sepr_tail
+    lea rdi, [rbx + PyStrObject.data]
+    add rdi, r13
+    mov rsi, [rbp - SPI_SEP]
+    mov rdx, [rbp - SPI_SEPLEN]
+    call ap_memcmp
+    test eax, eax
+    jz .spi_sepr_hit
+    dec r13
+    jmp .spi_sepr_scan
+
+.spi_sepr_hit:
+    mov r14, r13
+    add r14, [rbp - SPI_SEPLEN]
     mov rsi, r12
-    sub rsi, rcx            ; remaining length
-    call str_new_heap
-    mov rdi, r13
-    mov rsi, rax
-    push rax
-    call list_append
-    pop rdi
-    call obj_decref
+    sub rsi, r14                    ; piece length
+    lea rdi, [rbx + PyStrObject.data]
+    add rdi, r14
+    call .spi_emit_front
+    mov r12, r13
+    cmp qword [rbp - SPI_MAX], 0
+    jl .spi_sepr_loop
+    dec qword [rbp - SPI_MAX]
+    jmp .spi_sepr_loop
 
-    mov rax, r13
+.spi_sepr_tail:
+    lea rdi, [rbx + PyStrObject.data]
+    mov rsi, r12
+    call .spi_emit_front
+    jmp .spi_done
+
+    ; ---- whitespace --------------------------------------------------------
+.spi_whitespace:
+    cmp qword [rbp - SPI_RIGHT], 0
+    jne .spi_ws_right
+    xor r12d, r12d
+.spi_ws_loop:
+    ; skip leading whitespace
+    cmp r12, [rbp - SPI_LEN]
+    jge .spi_done
+    movzx edi, byte [rbx + PyStrObject.data + r12]
+    xor esi, esi
+    xor edx, edx
+    call strip_char_matches
+    test eax, eax
+    jz .spi_ws_piece
+    inc r12
+    jmp .spi_ws_loop
+
+.spi_ws_piece:
+    cmp qword [rbp - SPI_MAX], 0
+    jne .spi_ws_scan
+    ; out of splits: the rest is one piece, minus trailing whitespace
+    mov r13, [rbp - SPI_LEN]
+.spi_ws_rtrim:
+    cmp r13, r12
+    jle .spi_ws_emit_last
+    movzx edi, byte [rbx + PyStrObject.data + r13 - 1]
+    xor esi, esi
+    xor edx, edx
+    call strip_char_matches
+    test eax, eax
+    jz .spi_ws_emit_last
+    dec r13
+    jmp .spi_ws_rtrim
+.spi_ws_emit_last:
+    mov rsi, r13
+    sub rsi, r12
+    lea rdi, [rbx + PyStrObject.data]
+    add rdi, r12
+    call .spi_emit
+    jmp .spi_done
+
+.spi_ws_scan:
+    mov r13, r12
+.spi_ws_find_end:
+    cmp r13, [rbp - SPI_LEN]
+    jge .spi_ws_emit
+    movzx edi, byte [rbx + PyStrObject.data + r13]
+    xor esi, esi
+    xor edx, edx
+    call strip_char_matches
+    test eax, eax
+    jnz .spi_ws_emit
+    inc r13
+    jmp .spi_ws_find_end
+.spi_ws_emit:
+    mov rsi, r13
+    sub rsi, r12
+    lea rdi, [rbx + PyStrObject.data]
+    add rdi, r12
+    call .spi_emit
+    mov r12, r13
+    cmp qword [rbp - SPI_MAX], 0
+    jl .spi_ws_loop
+    dec qword [rbp - SPI_MAX]
+    jmp .spi_ws_loop
+
+.spi_ws_right:
+    ; rsplit() with no separator: same pieces, but maxsplit counts from the
+    ; right, so collect from the right and prepend.
+    mov r12, [rbp - SPI_LEN]
+.spi_wsr_loop:
+    ; skip trailing whitespace
+    test r12, r12
+    jle .spi_done
+    movzx edi, byte [rbx + PyStrObject.data + r12 - 1]
+    xor esi, esi
+    xor edx, edx
+    call strip_char_matches
+    test eax, eax
+    jz .spi_wsr_piece
+    dec r12
+    jmp .spi_wsr_loop
+
+.spi_wsr_piece:
+    cmp qword [rbp - SPI_MAX], 0
+    jne .spi_wsr_scan
+    mov r13, 0
+.spi_wsr_ltrim:
+    cmp r13, r12
+    jge .spi_wsr_emit_last
+    movzx edi, byte [rbx + PyStrObject.data + r13]
+    xor esi, esi
+    xor edx, edx
+    call strip_char_matches
+    test eax, eax
+    jz .spi_wsr_emit_last
+    inc r13
+    jmp .spi_wsr_ltrim
+.spi_wsr_emit_last:
+    mov rsi, r12
+    sub rsi, r13
+    lea rdi, [rbx + PyStrObject.data]
+    add rdi, r13
+    call .spi_emit_front
+    jmp .spi_done
+
+.spi_wsr_scan:
+    mov r13, r12
+.spi_wsr_find:
+    test r13, r13
+    jle .spi_wsr_emit
+    movzx edi, byte [rbx + PyStrObject.data + r13 - 1]
+    xor esi, esi
+    xor edx, edx
+    call strip_char_matches
+    test eax, eax
+    jnz .spi_wsr_emit
+    dec r13
+    jmp .spi_wsr_find
+.spi_wsr_emit:
+    mov rsi, r12
+    sub rsi, r13
+    lea rdi, [rbx + PyStrObject.data]
+    add rdi, r13
+    call .spi_emit_front
+    mov r12, r13
+    cmp qword [rbp - SPI_MAX], 0
+    jl .spi_wsr_loop
+    dec qword [rbp - SPI_MAX]
+    jmp .spi_wsr_loop
+
+.spi_done:
+    mov rax, [rbp - SPI_LIST]
     mov edx, TAG_PTR
-    add rsp, 8
-    pop r15
     pop r14
     pop r13
     pop r12
@@ -1138,15 +1526,59 @@ DEF_FUNC str_method_split
     V_PACK rax, rdx             ; builtins return one Value
     ret
 
-.split_empty_sep:
+.spi_empty_sep:
     lea rdi, [rel exc_ValueError_type]
     CSTRING rsi, "empty separator"
     call raise_exception
 
-.spl_type_error:
+.spi_type_error:
     lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "must be str, not other type"
+    CSTRING rsi, "must be str or None, not other type"
     call raise_exception
+
+;; Append a piece (rdi = data, rsi = length) to the result list.
+.spi_emit:
+    push r12
+    push r13
+    call str_new_heap
+    push rax
+    mov rdi, [rbp - SPI_LIST]
+    mov rsi, rax
+    call list_append
+    pop rdi
+    call obj_decref
+    pop r13
+    pop r12
+    ret
+
+;; The same, but inserted at the front: the right-hand scans produce pieces
+;; in reverse.
+.spi_emit_front:
+    push r12
+    push r13
+    call str_new_heap
+    ; list.insert(0, piece), through the method's own args-array interface
+    sub rsp, 32
+    mov rcx, [rbp - SPI_LIST]
+    mov [rsp], rcx
+    mov rcx, [rel v_int_bias]       ; the Value for 0
+    mov [rsp + 8], rcx
+    mov [rsp + 16], rax
+    push rax
+    lea rdi, [rsp + 8]
+    mov rsi, 3
+    call list_method_insert
+    pop rdi
+    add rsp, 32
+    call obj_decref
+    pop r13
+    pop r12
+    ret
+END_FUNC str_split_impl
+
+DEF_FUNC_BARE str_method_split
+    xor edx, edx                ; scan from the left
+    jmp str_split_impl
 END_FUNC str_method_split
 
 
@@ -1604,121 +2036,21 @@ DEF_FUNC str_method_format_map, FM_FRAME
 END_FUNC str_method_format_map
 
 ;; ============================================================================
-;; str_method_lstrip(args, nargs) -> new string with left whitespace removed
-;; args[0] = self (PyStrObject*)
+;; str_method_lstrip(args, nargs) -> new string with the left end stripped
+;; args[0]=self, args[1]=chars (optional)
 ;; ============================================================================
-DEF_FUNC str_method_lstrip
-    push rbx
-    push r12
-    push r13
-
-    mov rax, [rdi]          ; self = args[0]
-    mov rbx, rax            ; rbx = self
-    mov r12, [rbx + PyStrObject.ob_size]  ; r12 = length
-
-    ; Find start (skip leading whitespace)
-    xor r13d, r13d          ; r13 = start index
-.lstrip_left:
-    cmp r13, r12
-    jge .lstrip_empty
-    movzx eax, byte [rbx + PyStrObject.data + r13]
-    cmp al, ' '
-    je .lstrip_left_next
-    cmp al, 9              ; tab
-    je .lstrip_left_next
-    cmp al, 10             ; newline
-    je .lstrip_left_next
-    cmp al, 13             ; carriage return
-    je .lstrip_left_next
-    cmp al, 11             ; vertical tab
-    je .lstrip_left_next
-    cmp al, 12             ; form feed
-    je .lstrip_left_next
-    jmp .lstrip_make
-.lstrip_left_next:
-    inc r13
-    jmp .lstrip_left
-
-.lstrip_empty:
-    ; All whitespace - return empty string
-    lea rdi, [rel empty_str_cstr]
-    call str_from_cstr_heap
-    jmp .lstrip_ret
-
-.lstrip_make:
-    ; Create new string from [start, end)
-    lea rdi, [rbx + PyStrObject.data]
-    add rdi, r13
-    mov rsi, r12
-    sub rsi, r13            ; length = len - start
-    call str_new_heap
-
-.lstrip_ret:
-    mov edx, TAG_PTR
-    pop r13
-    pop r12
-    pop rbx
-    leave
-    V_PACK rax, rdx             ; builtins return one Value
-    ret
+DEF_FUNC_BARE str_method_lstrip
+    mov edx, 1
+    jmp str_strip_impl
 END_FUNC str_method_lstrip
 
 ;; ============================================================================
-;; str_method_rstrip(args, nargs) -> new string with right whitespace removed
-;; args[0] = self (PyStrObject*)
+;; str_method_rstrip(args, nargs) -> new string with the right end stripped
+;; args[0]=self, args[1]=chars (optional)
 ;; ============================================================================
-DEF_FUNC str_method_rstrip
-    push rbx
-    push r12
-    push r13
-
-    mov rax, [rdi]          ; self = args[0]
-    mov rbx, rax            ; rbx = self
-    mov r12, [rbx + PyStrObject.ob_size]  ; r12 = length
-
-    ; Find end (skip trailing whitespace)
-    mov r13, r12            ; r13 = end (exclusive)
-.rstrip_right:
-    cmp r13, 0
-    jle .rstrip_empty
-    movzx eax, byte [rbx + PyStrObject.data + r13 - 1]
-    cmp al, ' '
-    je .rstrip_right_next
-    cmp al, 9              ; tab
-    je .rstrip_right_next
-    cmp al, 10             ; newline
-    je .rstrip_right_next
-    cmp al, 13             ; carriage return
-    je .rstrip_right_next
-    cmp al, 11             ; vertical tab
-    je .rstrip_right_next
-    cmp al, 12             ; form feed
-    je .rstrip_right_next
-    jmp .rstrip_make
-.rstrip_right_next:
-    dec r13
-    jmp .rstrip_right
-
-.rstrip_empty:
-    ; All whitespace - return empty string
-    lea rdi, [rel empty_str_cstr]
-    call str_from_cstr_heap
-    jmp .rstrip_ret
-
-.rstrip_make:
-    ; Create new string from [0, end)
-    lea rdi, [rbx + PyStrObject.data]
-    mov rsi, r13            ; length = end
-    call str_new_heap
-
-.rstrip_ret:
-    mov edx, TAG_PTR
-    pop r13
-    pop r12
-    pop rbx
-    leave
-    V_PACK rax, rdx             ; builtins return one Value
-    ret
+DEF_FUNC_BARE str_method_rstrip
+    mov edx, 2
+    jmp str_strip_impl
 END_FUNC str_method_rstrip
 
 ;; ============================================================================
@@ -3461,8 +3793,8 @@ END_FUNC str_method_splitlines
 ;; For simplicity, implements same as split (no maxsplit from right)
 ;; ============================================================================
 DEF_FUNC_BARE str_method_rsplit
-    ; Delegate to split for now (rsplit without maxsplit = split)
-    jmp str_method_split
+    mov edx, 1                  ; scan from the right
+    jmp str_split_impl
 END_FUNC str_method_rsplit
 
 ;; ============================================================================
@@ -7885,6 +8217,43 @@ END_FUNC int_method_self_to_i64
 ;; leading zeros. bit_length(0) = 0.
 ;; ============================================================================
 DEF_FUNC int_method_bit_length
+    ; A value too large for int64 has to be measured on its mpz: going
+    ; through int_to_i64 truncated it, so (2**63).bit_length() was 0.
+    mov rax, [rdi]
+    V_UNPACK rax, rdx
+    cmp edx, TAG_SMALLINT
+    je .ibl_small
+    cmp edx, TAG_PTR
+    jne .ibl_small
+    cmp qword [rax + PyIntObject.compact], 0
+    jne .ibl_small
+
+    push rbx
+    mov rbx, rax
+    lea rdi, [rbx + PyIntObject.mpz]
+    xor esi, esi
+    extern __gmpz_cmp_si
+    call __gmpz_cmp_si wrt ..plt
+    test eax, eax
+    jz .ibl_mpz_zero
+    lea rdi, [rbx + PyIntObject.mpz]
+    mov esi, 2
+    extern __gmpz_sizeinbase
+    call __gmpz_sizeinbase wrt ..plt
+    pop rbx
+    RET_TAG_SMALLINT
+    leave
+    V_PACK rax, rdx             ; builtins return one Value
+    ret
+.ibl_mpz_zero:
+    pop rbx
+    xor eax, eax
+    RET_TAG_SMALLINT
+    leave
+    V_PACK rax, rdx
+    ret
+
+.ibl_small:
     call int_method_self_to_i64
 
     ; abs(self)

@@ -151,8 +151,34 @@ DEF_FUNC str_repr
     mov [r13 + PyObject.ob_type], rcx
     mov qword [r13 + PyStrObject.ob_hash], -1
 
+    ; Pick the delimiter as CPython does: a single quote normally, a double
+    ; quote when the text contains ' and no ", so the quote inside needs no
+    ; backslash.  This always used ' and escaped, so repr("a'b") came out as
+    ; 'a\'b' where CPython gives "a'b".
+    push r14
+    mov r14d, 0x27
+    xor eax, eax                ; saw a single quote?
+    xor ecx, ecx
+.sr_scan:
+    cmp rcx, r12
+    jge .sr_scan_done
+    movzx edx, byte [rbx + PyStrObject.data + rcx]
+    cmp dl, 0x22                ; a double quote rules the switch out
+    je .sr_scan_keep
+    cmp dl, 0x27
+    jne .sr_scan_next
+    mov eax, 1
+.sr_scan_next:
+    inc rcx
+    jmp .sr_scan
+.sr_scan_done:
+    test eax, eax
+    jz .sr_scan_keep
+    mov r14d, 0x22
+.sr_scan_keep:
+
     ; Write opening quote
-    mov byte [r13 + PyStrObject.data], "'"
+    mov [r13 + PyStrObject.data], r14b
 
     ; Copy with escaping: rsi=src, rdi=dst, rcx=src index
     lea rsi, [rbx + PyStrObject.data]
@@ -172,7 +198,7 @@ DEF_FUNC str_repr
     je .sr_esc_t
     cmp al, 0x5C             ; backslash
     je .sr_esc_bs
-    cmp al, 0x27             ; single quote
+    cmp eax, r14d            ; the delimiter in use
     je .sr_esc_sq
 
     ; Normal character
@@ -211,14 +237,14 @@ DEF_FUNC str_repr
 
 .sr_esc_sq:
     mov byte [rdi], 0x5C
-    mov byte [rdi + 1], 0x27
+    mov [rdi + 1], r14b      ; the delimiter in use
     add rdi, 2
     inc rcx
     jmp .sr_loop
 
 .sr_done:
     ; Write closing quote and null
-    mov byte [rdi], "'"
+    mov [rdi], r14b
     mov qword [rdi + 1], 0  ; 8-byte zero-fill for ap_strcmp
 
     ; Calculate actual ob_size: (rdi - data_start) + 1 for closing quote
@@ -229,6 +255,7 @@ DEF_FUNC str_repr
 
     mov rax, r13
     mov edx, TAG_PTR
+    pop r14
     pop r13
     pop r12
     pop rbx
