@@ -833,19 +833,15 @@ DEF_FUNC sre_match_groupdict_method, GD_FRAME
     imul rax, DICT_ENTRY_SIZE
     lea r12, [rcx + rax]       ; r12 = entry ptr
 
-    ; Skip empty/tombstone entries
-    movzx eax, byte [r12 + DictEntry.key_tag]
-    test eax, eax
-    jz .gd_next                ; empty slot (key_tag == 0)
-    cmp qword [r12 + DictEntry.hash], -1
-    je .gd_next                ; tombstone
+    ; Skip empty and tombstoned entries
+    ENTRY_CLASSIFY r12, .gd_next, .gd_next
 
-    ; name = entry->key, name_tag = entry->key_tag
-    mov r13, [r12 + DictEntry.key]       ; name payload
-    movzx r14d, byte [r12 + DictEntry.key_tag]   ; name tag
+    mov r13, [r12 + DictEntry.key]       ; name Value
+    V_UNPACK r13, r14                    ; -> (payload, tag)
 
-    ; group_idx = entry->value (SmallInt payload)
-    mov rsi, [r12 + DictEntry.value]     ; group index
+    ; group_idx = entry->value, an integer Value
+    mov rsi, [r12 + DictEntry.value]
+    V_UNPACK rsi, rax
 
     ; sre_match_get_group_str(self, group_idx)
     mov rdi, [rbp - GD_SELF]

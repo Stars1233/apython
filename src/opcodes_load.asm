@@ -143,7 +143,7 @@ DEF_FUNC_BARE op_load_global
     imul rax, rax, DICT_ENTRY_SIZE
     add rdi, rax               ; rdi = entry ptr
     mov rax, [rdi + DictEntry.value]
-    movzx edx, byte [rdi + DictEntry.value_tag]
+    V_UNPACK rax, rdx
     add rsp, 8                 ; discard saved name
     jmp .lg_push_result
 
@@ -176,7 +176,7 @@ DEF_FUNC_BARE op_load_global
     imul rax, rax, DICT_ENTRY_SIZE
     add rdi, rax               ; rdi = entry ptr
     mov rax, [rdi + DictEntry.value]
-    movzx edx, byte [rdi + DictEntry.value_tag]
+    V_UNPACK rax, rdx
     jmp .lg_push_result
 
 .not_found:
@@ -210,10 +210,10 @@ DEF_FUNC_BARE op_load_global_module
     movzx eax, word [rbx + 2]  ; CACHE[1] = index
     imul rax, rax, DICT_ENTRY_SIZE
     add rdi, rax               ; rdi = entry ptr
-    movzx edx, byte [rdi + DictEntry.value_tag]
     test edx, edx
     jz .lgm_deopt              ; TAG_NULL = deleted entry
     mov rax, [rdi + DictEntry.value]
+    V_UNPACK rax, rdx
 
     ; Guards passed — now push NULL if needed
     test ecx, 1
@@ -256,10 +256,10 @@ DEF_FUNC_BARE op_load_global_builtin
     movzx eax, word [rbx + 2]  ; CACHE[1] = index
     imul rax, rax, DICT_ENTRY_SIZE
     add rdi, rax               ; rdi = entry ptr
-    movzx edx, byte [rdi + DictEntry.value_tag]
     test edx, edx
     jz .lgb_deopt              ; TAG_NULL = deleted entry
     mov rax, [rdi + DictEntry.value]
+    V_UNPACK rax, rdx
 
     ; Guards passed — now push NULL if needed
     test ecx, 1

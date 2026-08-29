@@ -61,8 +61,7 @@ extern list_sorting_error
 ; Set entry layout constants (must match set.asm)
 SET_ENTRY_HASH    equ 0
 SET_ENTRY_KEY     equ 8
-SET_ENTRY_KEY_TAG equ 16
-SET_ENTRY_SIZE    equ 24
+SET_ENTRY_SIZE    equ 16
 extern set_add
 extern set_contains
 extern set_remove
@@ -5916,16 +5915,16 @@ DEF_FUNC dict_method_clear
     lea r14, [rax + rcx]    ; r14 = entry ptr
 
     mov rdi, [r14 + DictEntry.key]
+    V_UNPACK rdi, rsi
     test rdi, rdi
     jz .dc_next
 
     ; DECREF key (tag-aware)
-    movzx esi, byte [r14 + DictEntry.key_tag]
     DECREF_VAL rdi, rsi
 
     ; DECREF value (tag-aware)
     mov rdi, [r14 + DictEntry.value]
-    movzx esi, byte [r14 + DictEntry.value_tag]
+    V_UNPACK rdi, rsi
     DECREF_VAL rdi, rsi
 
 .dc_next:
@@ -5986,15 +5985,12 @@ DEF_FUNC dict_method_update
     mov rdi, [rax + DictEntry.key]
     test rdi, rdi
     jz .du_next
-    movzx ecx, byte [rax + DictEntry.value_tag]
-    test ecx, ecx
-    jz .du_next                 ; TAG_NULL = empty slot
 
     ; dict_set(self, key, value, value_tag, key_tag)
     push r14
-    movzx r8d, byte [rax + DictEntry.key_tag]    ; key tag from entry
-    movzx ecx, byte [rax + DictEntry.value_tag]  ; value tag from entry
-    mov rdx, [rax + DictEntry.value]      ; value payload
+    V_UNPACK rdi, r8        ; dict_set still takes (payload, tag)
+    mov rdx, [rax + DictEntry.value]
+    V_UNPACK rdx, rcx
     mov rsi, rdi            ; key
     mov rdi, rbx            ; self
     call dict_set
@@ -6121,15 +6117,12 @@ DEF_FUNC dict_method_copy
     mov rdi, [rax + DictEntry.key]
     test rdi, rdi
     jz .dcopy_next
-    movzx ecx, byte [rax + DictEntry.value_tag]
-    test ecx, ecx
-    jz .dcopy_next              ; TAG_NULL = empty slot
 
     ; dict_set(new_dict, key, value, value_tag, key_tag)
     push r14
-    movzx r8d, byte [rax + DictEntry.key_tag]    ; key tag from entry
-    movzx ecx, byte [rax + DictEntry.value_tag]  ; value tag from entry
-    mov rdx, [rax + DictEntry.value]      ; value payload
+    V_UNPACK rdi, r8        ; dict_set still takes (payload, tag)
+    mov rdx, [rax + DictEntry.value]
+    V_UNPACK rdx, rcx
     mov rsi, rdi            ; key
     mov rdi, r12            ; new dict
     call dict_set
@@ -6259,10 +6252,10 @@ DEF_FUNC dict_method_popitem
     mov r13, [rax + DictEntry.key]
     test r13, r13
     jz .dpopitem_prev
-    movzx ecx, byte [rax + DictEntry.value_tag]
     test rcx, rcx
     jz .dpopitem_prev           ; TAG_NULL = empty slot
     mov r14, [rax + DictEntry.value]
+    V_UNPACK r14, rcx
     jmp .dpopitem_found
 
 .dpopitem_prev:
@@ -6275,7 +6268,8 @@ DEF_FUNC dict_method_popitem
     mov rax, [rbx + PyDictObject.entries]
     imul rdx, r12, DICT_ENTRY_SIZE
     add rax, rdx
-    movzx r8d, byte [rax + DictEntry.key_tag]
+    V_TAG_OF r8, qword [rax + DictEntry.key]
+    V_UNPACK r13, r8         ; r13 held the key as a Value
     push r8                  ; save key_tag
     push rcx                 ; save value_tag across tuple_new
     ; Create 2-tuple
@@ -6794,7 +6788,7 @@ DEF_FUNC set_method_pop, SMP_FRAME
     imul rax, rcx, SET_ENTRY_SIZE
     add rax, r12             ; entry ptr
 
-    cmp qword [rax + SET_ENTRY_KEY_TAG], 0
+    cmp qword [rax + SET_ENTRY_KEY], 0   ; occupied?
     jne .smpop_found
     inc ecx
     jmp .smpop_scan
@@ -6803,11 +6797,10 @@ DEF_FUNC set_method_pop, SMP_FRAME
     ; rax = entry ptr with valid key
     ; Get key (return value) — DON'T incref, we're removing it
     mov rcx, [rax + SET_ENTRY_KEY]        ; key payload
-    mov r12d, [rax + SET_ENTRY_KEY_TAG]   ; key tag
+    V_UNPACK rcx, r12
 
     ; Clear the entry (mark as empty)
     mov qword [rax + SET_ENTRY_KEY], 0
-    mov qword [rax + SET_ENTRY_KEY_TAG], 0
     dec qword [rbx + PyDictObject.ob_size]
 
     ; Return the key (ownership transfers, no INCREF/DECREF needed)
@@ -6855,14 +6848,13 @@ DEF_FUNC set_method_clear
     add rax, r12
     push rcx                ; save index
 
-    cmp qword [rax + SET_ENTRY_KEY_TAG], 0
+    cmp qword [rax + SET_ENTRY_KEY], 0   ; occupied?
     je .smc_next
 
     ; DECREF key
     mov rdi, [rax + SET_ENTRY_KEY]
-    mov rsi, [rax + SET_ENTRY_KEY_TAG]
+    V_UNPACK rdi, rsi
     mov qword [rax + SET_ENTRY_KEY], 0
-    mov qword [rax + SET_ENTRY_KEY_TAG], 0
     DECREF_VAL rdi, rsi
 
 .smc_next:
@@ -6920,13 +6912,13 @@ DEF_FUNC set_method_copy
     add rax, r12
     push rcx
 
-    cmp qword [rax + SET_ENTRY_KEY_TAG], 0
+    cmp qword [rax + SET_ENTRY_KEY], 0   ; occupied?
     je .smcp_next
 
     ; Add key to new set
     mov rdi, rbx            ; new set
     mov rsi, [rax + SET_ENTRY_KEY]
-    mov rdx, [rax + SET_ENTRY_KEY_TAG]
+    V_UNPACK rsi, rdx
     call set_add
 
 .smcp_next:
@@ -6982,12 +6974,12 @@ DEF_FUNC set_method_union
     add rax, r12
     push rcx
 
-    cmp qword [rax + SET_ENTRY_KEY_TAG], 0
+    cmp qword [rax + SET_ENTRY_KEY], 0   ; occupied?
     je .smu_cs_next
 
     mov rdi, rbx
     mov rsi, [rax + SET_ENTRY_KEY]
-    mov rdx, [rax + SET_ENTRY_KEY_TAG]
+    V_UNPACK rsi, rdx
     call set_add
 
 .smu_cs_next:
@@ -7009,12 +7001,12 @@ DEF_FUNC set_method_union
     add rax, r12
     push rcx
 
-    cmp qword [rax + SET_ENTRY_KEY_TAG], 0
+    cmp qword [rax + SET_ENTRY_KEY], 0   ; occupied?
     je .smu_al_next
 
     mov rdi, rbx
     mov rsi, [rax + SET_ENTRY_KEY]
-    mov rdx, [rax + SET_ENTRY_KEY_TAG]
+    V_UNPACK rsi, rdx
     call set_add
 
 .smu_al_next:
@@ -7065,12 +7057,12 @@ DEF_FUNC set_method_update
     add rax, [r12 + PyDictObject.entries]
     push rcx
 
-    cmp qword [rax + SET_ENTRY_KEY_TAG], 0
+    cmp qword [rax + SET_ENTRY_KEY], 0   ; occupied?
     je .supd_next
 
     mov rdi, rbx
     mov rsi, [rax + SET_ENTRY_KEY]
-    mov rdx, [rax + SET_ENTRY_KEY_TAG]
+    V_UNPACK rsi, rdx
     call set_add
 
 .supd_next:
@@ -7123,14 +7115,14 @@ DEF_FUNC set_method_intersection
     add rax, r12
     push rcx
 
-    cmp qword [rax + SET_ENTRY_KEY_TAG], 0
+    cmp qword [rax + SET_ENTRY_KEY], 0   ; occupied?
     je .smi_next
 
     ; Check if key is in other
     push rax                ; save entry ptr
     mov rdi, r15            ; other set
     mov rsi, [rax + SET_ENTRY_KEY]
-    mov rdx, [rax + SET_ENTRY_KEY_TAG]
+    V_UNPACK rsi, rdx
     call set_contains
     pop rcx                 ; restore entry ptr (was rax)
     test eax, eax
@@ -7139,7 +7131,7 @@ DEF_FUNC set_method_intersection
     ; In both — add to result
     mov rdi, rbx
     mov rsi, [rcx + SET_ENTRY_KEY]
-    mov rdx, [rcx + SET_ENTRY_KEY_TAG]
+    V_UNPACK rsi, rdx
     call set_add
 
 .smi_next:
@@ -7197,14 +7189,14 @@ DEF_FUNC set_method_difference
     add rax, r12
     push rcx
 
-    cmp qword [rax + SET_ENTRY_KEY_TAG], 0
+    cmp qword [rax + SET_ENTRY_KEY], 0   ; occupied?
     je .smdf_next
 
     ; Check if key is in other
     push rax
     mov rdi, r15
     mov rsi, [rax + SET_ENTRY_KEY]
-    mov rdx, [rax + SET_ENTRY_KEY_TAG]
+    V_UNPACK rsi, rdx
     call set_contains
     pop rcx                 ; entry ptr
     test eax, eax
@@ -7213,7 +7205,7 @@ DEF_FUNC set_method_difference
     ; NOT in other — add to result
     mov rdi, rbx
     mov rsi, [rcx + SET_ENTRY_KEY]
-    mov rdx, [rcx + SET_ENTRY_KEY_TAG]
+    V_UNPACK rsi, rdx
     call set_add
 
 .smdf_next:
@@ -7271,13 +7263,13 @@ DEF_FUNC set_method_symmetric_difference
     add rax, r12
     push rcx
 
-    cmp qword [rax + SET_ENTRY_KEY_TAG], 0
+    cmp qword [rax + SET_ENTRY_KEY], 0   ; occupied?
     je .smsd_s_next
 
     push rax
     mov rdi, r15
     mov rsi, [rax + SET_ENTRY_KEY]
-    mov rdx, [rax + SET_ENTRY_KEY_TAG]
+    V_UNPACK rsi, rdx
     call set_contains
     pop rcx
     test eax, eax
@@ -7285,7 +7277,7 @@ DEF_FUNC set_method_symmetric_difference
 
     mov rdi, rbx
     mov rsi, [rcx + SET_ENTRY_KEY]
-    mov rdx, [rcx + SET_ENTRY_KEY_TAG]
+    V_UNPACK rsi, rdx
     call set_add
 
 .smsd_s_next:
@@ -7307,13 +7299,13 @@ DEF_FUNC set_method_symmetric_difference
     add rax, r12
     push rcx
 
-    cmp qword [rax + SET_ENTRY_KEY_TAG], 0
+    cmp qword [rax + SET_ENTRY_KEY], 0   ; occupied?
     je .smsd_o_next
 
     push rax
     mov rdi, r14
     mov rsi, [rax + SET_ENTRY_KEY]
-    mov rdx, [rax + SET_ENTRY_KEY_TAG]
+    V_UNPACK rsi, rdx
     call set_contains
     pop rcx
     test eax, eax
@@ -7321,7 +7313,7 @@ DEF_FUNC set_method_symmetric_difference
 
     mov rdi, rbx
     mov rsi, [rcx + SET_ENTRY_KEY]
-    mov rdx, [rcx + SET_ENTRY_KEY_TAG]
+    V_UNPACK rsi, rdx
     call set_add
 
 .smsd_o_next:
@@ -7376,12 +7368,12 @@ DEF_FUNC set_method_issubset
     add rax, r12
     push rcx
 
-    cmp qword [rax + SET_ENTRY_KEY_TAG], 0
+    cmp qword [rax + SET_ENTRY_KEY], 0   ; occupied?
     je .smss_next
 
     mov rdi, r15
     mov rsi, [rax + SET_ENTRY_KEY]
-    mov rdx, [rax + SET_ENTRY_KEY_TAG]
+    V_UNPACK rsi, rdx
     call set_contains
     test eax, eax
     jz .smss_false          ; not in other
@@ -7452,12 +7444,12 @@ DEF_FUNC set_method_issuperset
     add rax, r12
     push rcx
 
-    cmp qword [rax + SET_ENTRY_KEY_TAG], 0
+    cmp qword [rax + SET_ENTRY_KEY], 0   ; occupied?
     je .smis_next
 
     mov rdi, r15            ; check in self
     mov rsi, [rax + SET_ENTRY_KEY]
-    mov rdx, [rax + SET_ENTRY_KEY_TAG]
+    V_UNPACK rsi, rdx
     call set_contains
     test eax, eax
     jz .smis_false
@@ -7528,12 +7520,12 @@ DEF_FUNC set_method_isdisjoint
     add rax, r12
     push rcx
 
-    cmp qword [rax + SET_ENTRY_KEY_TAG], 0
+    cmp qword [rax + SET_ENTRY_KEY], 0   ; occupied?
     je .smdj_next
 
     mov rdi, r15
     mov rsi, [rax + SET_ENTRY_KEY]
-    mov rdx, [rax + SET_ENTRY_KEY_TAG]
+    V_UNPACK rsi, rdx
     call set_contains
     test eax, eax
     jnz .smdj_false         ; found in other — not disjoint

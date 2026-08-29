@@ -1922,14 +1922,11 @@ DEF_FUNC op_dict_update
     mov rsi, [rax + DictEntry.key]
     test rsi, rsi
     jz .du_next
-
-    cmp byte [rax + DictEntry.value_tag], 0
-    je .du_next
     mov rdx, [rax + DictEntry.value]
+    V_UNPACK rdx, rcx
+    V_UNPACK rsi, r8          ; dict_set still takes (payload, tag)
 
     ; dict_set(target, key, value, value_tag, key_tag)
-    movzx ecx, byte [rax + DictEntry.value_tag]
-    movzx r8d, byte [rax + DictEntry.key_tag]
     push rbx
     mov rdi, [rbp-32]
     call dict_set
@@ -2003,18 +2000,12 @@ DEF_FUNC op_dict_merge
     mov rsi, [rax + DictEntry.key]
     test rsi, rsi
     jz .dm_next
+    V_UNPACK rsi, rdx         ; dict_get still takes (payload, tag)
 
-    cmp byte [rax + DictEntry.value_tag], 0
-    je .dm_next
-
-    ; Check for duplicate: dict_get(target, key, key_tag)
+    ; Check for duplicate: dict_get(target, key, key_tag).  dict_get returns
+    ; its tag in edx, so the key tag must not be restored over it.
     push rbx
     mov rdi, [rbp-32]          ; target dict
-    ; rsi = key (already set)
-    mov rax, [rbp-48]
-    imul rcx, rbx, DictEntry_size
-    add rax, rcx
-    movzx edx, byte [rax + DictEntry.key_tag]
     call dict_get
     test edx, edx
     jnz .dm_dup_error          ; key already exists in target
@@ -2025,9 +2016,9 @@ DEF_FUNC op_dict_merge
     imul rcx, rbx, DictEntry_size
     add rax, rcx
     mov rsi, [rax + DictEntry.key]
+    V_UNPACK rsi, r8
     mov rdx, [rax + DictEntry.value]
-    movzx ecx, byte [rax + DictEntry.value_tag]
-    movzx r8d, byte [rax + DictEntry.key_tag]
+    V_UNPACK rdx, rcx
     push rbx
     mov rdi, [rbp-32]
     call dict_set
@@ -2524,7 +2515,7 @@ DEF_FUNC op_set_update
 
     mov rax, [rbp-32]         ; source set
     mov rax, [rax + PyDictObject.entries]
-    imul rcx, rbx, 24         ; SET_ENTRY_SIZE = 24
+    imul rcx, rbx, 16         ; SET_ENTRY_SIZE = 16
     add rax, rcx
 
     ; Check if entry has a key
@@ -2533,7 +2524,7 @@ DEF_FUNC op_set_update
     jz .su_set_next
 
     ; set_add(target_set, key, key_tag)
-    mov rdx, [rax + 16]       ; SET_ENTRY_KEY_TAG offset = 16
+    V_UNPACK rsi, rdx
     push rbx
     mov rdi, [rbp-24]
     call set_add

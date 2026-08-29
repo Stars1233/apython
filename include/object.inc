@@ -129,17 +129,46 @@ struc PyDictObject
 endstruc
 
 ; Dict entry
+; An entry's state lives in .key and .hash rather than in a tag byte:
+;   occupied  -> .key != 0
+;   empty     -> .key == 0 and .hash == 0
+;   tombstone -> .key == 0 and .hash == -1
+; A key Value is never 0, and CPython's hash never returns -1 (it maps -1 to
+; -2), so the three states are distinct and each test is an imm32 compare.
 struc DictEntry
-    .hash:      resq 1     ; +0: cached hash
-    .key:       resq 1     ; +8: key payload
-    .value:     resq 1     ; +16: value payload
-    .key_tag:   resb 1     ; +24: key tag (u8)
-    .value_tag: resb 1     ; +25: value tag (u8)
-    .pad:       resb 6     ; +26: padding
+    .hash:      resq 1     ; +0:  cached hash of key (-1 marks a tombstone)
+    .key:       resq 1     ; +8:  key Value (0 when not occupied)
+    .value:     resq 1     ; +16: value Value
 endstruc
 
-DICT_ENTRY_SIZE equ DictEntry_size  ; 32
-DICT_TOMBSTONE  equ 0xFF
+DICT_ENTRY_SIZE equ DictEntry_size  ; 24
+ENTRY_TOMBSTONE_HASH equ -1
+
+; A set entry mirrors DictEntry minus the value: hash at +0, key Value at +8.
+SET_ENTRY_HASH equ 0
+SET_ENTRY_KEY  equ 8
+
+; Set-entry counterpart of ENTRY_CLASSIFY.
+%macro SET_ENTRY_CLASSIFY 3     ; %1 = entry ptr, %2 = empty label, %3 = tombstone label
+    cmp qword [%1 + SET_ENTRY_KEY], 0
+    jne %%occupied
+    cmp qword [%1 + SET_ENTRY_HASH], ENTRY_TOMBSTONE_HASH
+    je %3
+    jmp %2
+%%occupied:
+%endmacro
+
+; Classify a dict or set entry during a probe.  Jumps to %2 when the slot was
+; never used (probing can stop) and to %3 when it holds a tombstone (probing
+; must continue); falls through when the slot is occupied.
+%macro ENTRY_CLASSIFY 3         ; %1 = entry ptr, %2 = empty label, %3 = tombstone label
+    cmp qword [%1 + DictEntry.key], 0
+    jne %%occupied
+    cmp qword [%1 + DictEntry.hash], ENTRY_TOMBSTONE_HASH
+    je %3
+    jmp %2
+%%occupied:
+%endmacro
 
 ; Function object
 struc PyFuncObject

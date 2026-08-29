@@ -113,11 +113,14 @@ extern val_from_i64_p
     cmp %2, [rel v_ptr_max_m1]
 %endmacro
 
-; Derive the legacy tag of a Value without disturbing it.
+; Derive the legacy tag of a Value.  %2 may be a register or a memory
+; operand and is left untouched; only %1 is written.
 %macro V_TAG_OF 2               ; %1 = tag out, %2 = Value (preserved)
     mov %1, %2
+    test %1, %1
+    jz %%null                   ; 0 is the empty slot
     shr %1, 48
-    jz %%maybe_ptr
+    jz %%ptr
     cmp %1, VH_INT_LO
     jae %%int
     cmp %1, VH_F64_MAX
@@ -126,15 +129,11 @@ extern val_from_i64_p
     je %%slp
     cmp %1, VH_IOWAIT
     je %%iow
-    xor %1, %1
-    jmp %%done
-%%maybe_ptr:
-    test %2, %2
-    jz %%null
-    mov %1, TAG_PTR
-    jmp %%done
 %%null:
     xor %1, %1
+    jmp %%done
+%%ptr:
+    mov %1, TAG_PTR
     jmp %%done
 %%int:
     mov %1, TAG_SMALLINT

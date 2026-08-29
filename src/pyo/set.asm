@@ -26,14 +26,12 @@ extern set_clear_gc
 ; Set entry layout constants
 SET_ENTRY_HASH    equ 0
 SET_ENTRY_KEY     equ 8
-SET_ENTRY_KEY_TAG equ 16
-SET_ENTRY_SIZE    equ 24
+SET_ENTRY_SIZE    equ 16
 
 ; Initial capacity (must be power of 2)
 SET_INIT_CAP equ 8
 
 ; Tombstone marker for deleted entries (must not collide with any tag)
-SET_TOMBSTONE equ 0xDEAD
 
 ;; ============================================================================
 ;; set_new() -> PySetObject* (uses PyDictObject layout)
@@ -177,14 +175,8 @@ DEF_FUNC_LOCAL set_find_slot
     imul rdx, rcx, SET_ENTRY_SIZE
     add rax, rdx                ; rax = entry ptr
 
-    ; Empty slot? Check key_tag (TAG_NULL=0 means empty)
+    SET_ENTRY_CLASSIFY rax, .found_empty, .find_next
     mov rdi, [rax + SET_ENTRY_KEY]
-    cmp qword [rax + SET_ENTRY_KEY_TAG], 0
-    je .found_empty
-
-    ; Tombstone? Continue probing past deleted entries
-    cmp qword [rax + SET_ENTRY_KEY_TAG], SET_TOMBSTONE
-    je .find_next
 
     ; Hash match?
     cmp r13, [rax + SET_ENTRY_HASH]
@@ -194,7 +186,8 @@ DEF_FUNC_LOCAL set_find_slot
     ; rdi = entry.key (already loaded above)
     push rcx                    ; save slot
     push rax                    ; save entry ptr
-    mov rdx, [rax + SET_ENTRY_KEY_TAG]  ; a_tag (entry key)
+
+    V_UNPACK rdi, rdx           ; set_keys_equal takes (payload, tag)
     mov rsi, r12                        ; b = lookup key
     mov rcx, [rbp - SFS_KEY_TAG]        ; b_tag (lookup key tag)
     call set_keys_equal
@@ -285,11 +278,8 @@ DEF_FUNC_LOCAL set_resize
     imul rax, rcx, SET_ENTRY_SIZE
     add rax, r12                ; rax = old entry ptr
 
-    ; Skip empty slots (TAG_NULL=0) and tombstones (SET_TOMBSTONE)
-    cmp qword [rax + SET_ENTRY_KEY_TAG], 0
-    je .rehash_next
-    cmp qword [rax + SET_ENTRY_KEY_TAG], SET_TOMBSTONE
-    je .rehash_next
+    ; Skip slots that are not occupied
+    SET_ENTRY_CLASSIFY rax, .rehash_next, .rehash_next
 
     ; Compute new slot: hash & (new_capacity - 1)
     push rcx                    ; save outer index
@@ -301,13 +291,12 @@ DEF_FUNC_LOCAL set_resize
     ; Save entry data
     push qword [rax + SET_ENTRY_HASH]
     push qword [rax + SET_ENTRY_KEY]
-    push qword [rax + SET_ENTRY_KEY_TAG]
 
     ; Linear probe in new table to find empty slot
 .rehash_probe:
     imul rax, rcx, SET_ENTRY_SIZE
     add rax, r15                ; new entry ptr
-    cmp qword [rax + SET_ENTRY_KEY_TAG], 0
+    cmp qword [rax + SET_ENTRY_KEY], 0   ; occupied?
     je .rehash_insert
 
     inc rcx
@@ -318,7 +307,6 @@ DEF_FUNC_LOCAL set_resize
 
 .rehash_insert:
     ; rax = target entry ptr in new table
-    pop qword [rax + SET_ENTRY_KEY_TAG]
     pop qword [rax + SET_ENTRY_KEY]
     pop qword [rax + SET_ENTRY_HASH]
 
@@ -374,15 +362,11 @@ DEF_FUNC set_add
     jnz .done                   ; key already exists, do nothing
 
     ; --- Insert new entry ---
-    ; Store hash and key
+    ; Store hash and key; INCREF while the tag is in hand, then pack
     mov [rax + SET_ENTRY_HASH], r13
-    mov [rax + SET_ENTRY_KEY], r12
-
-    ; Store key tag from caller
-    mov [rax + SET_ENTRY_KEY_TAG], r14
-
-    ; INCREF key (tag-aware)
     INCREF_VAL r12, r14
+    V_PACK r12, r14
+    mov [rax + SET_ENTRY_KEY], r12
 
     ; Increment ob_size
     inc qword [rbx + PyDictObject.ob_size]
@@ -510,18 +494,15 @@ DEF_FUNC set_richcompare, SRC_FRAME
     ; Get entry at index
     imul rax, rcx, SET_ENTRY_SIZE
     add rax, [rbx + PyDictObject.entries]
-    ; Check if occupied (key_tag != 0 and != tombstone)
-    movzx edx, word [rax + SET_ENTRY_KEY_TAG]
-    test edx, edx
-    jz .src_eq_next
-    cmp edx, SET_TOMBSTONE
+    ; Occupied entries have a non-zero key Value
+    cmp qword [rax + SET_ENTRY_KEY], 0
     je .src_eq_next
 
     ; Entry is occupied — check if key is in other set
     push rcx
     mov rdi, r12               ; other set
     mov rsi, [rax + SET_ENTRY_KEY]   ; key
-    movzx edx, word [rax + SET_ENTRY_KEY_TAG]
+    V_UNPACK rsi, rdx
     call set_contains
     pop rcx
     test eax, eax
@@ -542,15 +523,12 @@ DEF_FUNC set_richcompare, SRC_FRAME
     jge .src_true
     imul rax, rcx, SET_ENTRY_SIZE
     add rax, [rbx + PyDictObject.entries]
-    movzx edx, word [rax + SET_ENTRY_KEY_TAG]
-    test edx, edx
-    jz .src_le_next
-    cmp edx, SET_TOMBSTONE
+    cmp qword [rax + SET_ENTRY_KEY], 0   ; occupied?
     je .src_le_next
     push rcx
     mov rdi, r12
     mov rsi, [rax + SET_ENTRY_KEY]
-    movzx edx, word [rax + SET_ENTRY_KEY_TAG]
+    V_UNPACK rsi, rdx
     call set_contains
     pop rcx
     test eax, eax
@@ -570,15 +548,12 @@ DEF_FUNC set_richcompare, SRC_FRAME
     jge .src_true
     imul rax, rcx, SET_ENTRY_SIZE
     add rax, [rbx + PyDictObject.entries]
-    movzx edx, word [rax + SET_ENTRY_KEY_TAG]
-    test edx, edx
-    jz .src_ge_next
-    cmp edx, SET_TOMBSTONE
+    cmp qword [rax + SET_ENTRY_KEY], 0   ; occupied?
     je .src_ge_next
     push rcx
     mov rdi, r12
     mov rsi, [rax + SET_ENTRY_KEY]
-    movzx edx, word [rax + SET_ENTRY_KEY_TAG]
+    V_UNPACK rsi, rdx
     call set_contains
     pop rcx
     test eax, eax
@@ -694,12 +669,7 @@ DEF_FUNC set_remove, SR_KEY_TAG
     add rax, rdx
 
     mov rdi, [rax + SET_ENTRY_KEY]
-    cmp qword [rax + SET_ENTRY_KEY_TAG], 0
-    je .sr_not_found
-
-    ; Skip tombstones — continue probing
-    cmp qword [rax + SET_ENTRY_KEY_TAG], SET_TOMBSTONE
-    je .sr_next
+    SET_ENTRY_CLASSIFY rax, .sr_not_found, .sr_next
 
     cmp r13, [rax + SET_ENTRY_HASH]
     jne .sr_next
@@ -707,7 +677,8 @@ DEF_FUNC set_remove, SR_KEY_TAG
     ; rdi = entry.key (already loaded)
     push rcx                    ; save slot
     push rax                    ; save entry ptr
-    mov rdx, [rax + SET_ENTRY_KEY_TAG]  ; a_tag (entry key)
+
+    V_UNPACK rdi, rdx           ; set_keys_equal takes (payload, tag)
     mov rsi, r12                        ; b = lookup key
     mov rcx, [rbp - SR_KEY_TAG]         ; b_tag (lookup key tag)
     call set_keys_equal
@@ -718,9 +689,9 @@ DEF_FUNC set_remove, SR_KEY_TAG
 
     ; Found: tombstone entry, DECREF key, decrement size
     mov rdi, [rdx + SET_ENTRY_KEY]
-    mov rsi, [rdx + SET_ENTRY_KEY_TAG]
+    V_UNPACK rdi, rsi
     mov qword [rdx + SET_ENTRY_KEY], 0
-    mov qword [rdx + SET_ENTRY_KEY_TAG], SET_TOMBSTONE  ; tombstone, not empty
+    mov qword [rdx + SET_ENTRY_HASH], ENTRY_TOMBSTONE_HASH   ; tombstone
     DECREF_VAL rdi, rsi
     dec qword [rbx + PyDictObject.ob_size]
     inc qword [rbx + PyDictObject.dk_tombstones]
@@ -769,15 +740,12 @@ DEF_FUNC set_dealloc
     imul rax, r14, SET_ENTRY_SIZE
     add rax, r12
 
-    ; Skip empty slots (TAG_NULL=0) and tombstones (SET_TOMBSTONE)
-    cmp qword [rax + SET_ENTRY_KEY_TAG], 0
-    je .dealloc_next
-    cmp qword [rax + SET_ENTRY_KEY_TAG], SET_TOMBSTONE
-    je .dealloc_next
+    ; Skip slots that are not occupied
+    SET_ENTRY_CLASSIFY rax, .dealloc_next, .dealloc_next
 
     ; DECREF key (fat value)
     mov rdi, [rax + SET_ENTRY_KEY]
-    mov rsi, [rax + SET_ENTRY_KEY_TAG]
+    V_UNPACK rdi, rsi
     DECREF_VAL rdi, rsi
 
 .dealloc_next:
@@ -963,18 +931,14 @@ DEF_FUNC_BARE set_iter_next
     imul rax, rcx, SET_ENTRY_SIZE
     add rax, rsi
     mov r8, [rax + SET_ENTRY_KEY]
-    cmp qword [rax + SET_ENTRY_KEY_TAG], 0
-    je .si_skip
-    ; Skip tombstones
-    cmp qword [rax + SET_ENTRY_KEY_TAG], SET_TOMBSTONE
-    je .si_skip
+    SET_ENTRY_CLASSIFY rax, .si_skip, .si_skip
 
-    ; Found a valid entry -- return the key with tag
+    ; Found a valid entry -- return the key as (payload, tag)
     inc rcx
     mov [rdi + PyDictIterObject.it_index], rcx
-    mov rdx, [rax + SET_ENTRY_KEY_TAG]  ; key tag
     mov rax, r8
-    INCREF_VAL rax, rdx
+    INCREF_V rax, rdx
+    V_UNPACK rax, rdx
     ret
 
 .si_skip:

@@ -644,8 +644,6 @@ DEF_FUNC op_call_function_ex
     mov rsi, [rax + DictEntry.key]
     test rsi, rsi
     jz .cfex_dict_skip
-    cmp byte [rax + DictEntry.value_tag], 0
-    je .cfex_dict_skip
     mov rdi, [rax + DictEntry.value]
 
     ; Store value in merged buffer at position [n_pos + kw_idx]
@@ -662,8 +660,10 @@ DEF_FUNC op_call_function_ex
     mov r8, [rsp + 8]           ; restore dict scan index (pushed rcx)
     imul r8, r8, DictEntry_size
     add r8, rbx                  ; r8 = entry ptr
-    movzx r9d, byte [r8 + DictEntry.value_tag]
-    mov [rax + rcx + 8], r9     ; merged[...].tag = value_tag
+    mov r9, [r8 + DictEntry.value]
+    V_UNPACK r9, r10
+    mov [rax + rcx], r9         ; merged[...].payload
+    mov [rax + rcx + 8], r10    ; merged[...].tag
 
     ; Store key in kw_names tuple at kw_idx (fat: *16 + TAG_PTR)
     mov rax, [rbp - CFX_KWNAMES]

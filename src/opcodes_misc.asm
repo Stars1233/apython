@@ -2133,12 +2133,12 @@ extern obj_decref
     lea rbx, [rsi + rcx]              ; rbx = entry ptr (callee-saved)
 
     ; Skip empty: key_tag == 0
-    movzx r8d, byte [rbx + DictEntry.key_tag]
     test r8d, r8d
     jz .is_dict_next
 
     ; Get key payload
     mov rsi, [rbx + DictEntry.key]
+    V_UNPACK rsi, r8
 
     ; Skip names starting with '_'
     cmp r8d, TAG_PTR
@@ -2152,7 +2152,7 @@ extern obj_decref
     mov rdi, [rbp - IS_LOCALS]
     ; rsi = key payload (already set)
     mov rdx, [rbx + DictEntry.value]
-    movzx ecx, byte [rbx + DictEntry.value_tag]
+    V_UNPACK rdx, rcx
     ; r8 = key_tag (already set)
     call dict_set
 

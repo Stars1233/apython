@@ -15,9 +15,7 @@
 ; Set entry layout (must match set.asm)
 SET_ENTRY_HASH    equ 0
 SET_ENTRY_KEY     equ 8
-SET_ENTRY_KEY_TAG equ 16
-SET_ENTRY_SIZE    equ 24
-SET_TOMBSTONE     equ 0xDEAD
+SET_ENTRY_SIZE    equ 16
 
 extern ap_malloc
 extern ap_free
@@ -391,12 +389,10 @@ DEF_FUNC dict_repr, 24
     cmp r12, r13
     jge .dr_done
 
-    ; Check if entry is occupied (key_tag != 0 and != TOMBSTONE)
+    ; Occupied entries have a non-zero key Value
     mov rax, [rbx + PyDictObject.entries]
     imul rcx, r12, DICT_ENTRY_SIZE
-    cmp byte [rax + rcx + DictEntry.key_tag], 0
-    je .dr_next_entry
-    cmp byte [rax + rcx + DictEntry.key_tag], DICT_TOMBSTONE
+    cmp qword [rax + rcx + DictEntry.key], 0
     je .dr_next_entry
 
     ; Print separator if not first
@@ -411,7 +407,7 @@ DEF_FUNC dict_repr, 24
     mov rax, [rbx + PyDictObject.entries]
     imul rcx, r12, DICT_ENTRY_SIZE
     mov rdi, [rax + rcx + DictEntry.key]
-    movzx esi, byte [rax + rcx + DictEntry.key_tag]
+    V_UNPACK rdi, rsi
     push r12                   ; save entry index across calls
     call obj_repr
     test rax, rax
@@ -441,8 +437,8 @@ DEF_FUNC dict_repr, 24
     pop r12                    ; restore entry index
     mov rax, [rbx + PyDictObject.entries]
     imul rcx, r12, DICT_ENTRY_SIZE
-    movzx esi, byte [rax + rcx + DictEntry.value_tag]  ; value tag
-    mov rdi, [rax + rcx + DictEntry.value]      ; value payload
+    mov rdi, [rax + rcx + DictEntry.value]
+    V_UNPACK rdi, rsi
     push r12
     call obj_repr
     test rax, rax
@@ -535,13 +531,10 @@ DEF_FUNC set_repr, 24
     cmp r12, r13
     jge .sr_done
 
-    ; SetEntry is SET_ENTRY_SIZE bytes: hash(8) + key(8) + key_tag(8)
+    ; SetEntry is SET_ENTRY_SIZE bytes: hash(8) + key Value(8)
     mov rax, [rbx + PyDictObject.entries]
     imul rcx, r12, SET_ENTRY_SIZE
-    cmp qword [rax + rcx + SET_ENTRY_KEY_TAG], 0              ; empty
-    je .sr_next
-    cmp qword [rax + rcx + SET_ENTRY_KEY_TAG], SET_TOMBSTONE  ; deleted
-    je .sr_next
+    SET_ENTRY_CLASSIFY rax + rcx, .sr_next, .sr_next
     mov rdi, [rax + rcx + SET_ENTRY_KEY]                      ; key payload
 
     ; Print separator if not first
@@ -554,9 +547,9 @@ DEF_FUNC set_repr, 24
 
     ; Reload entry data (BUF macros may clobber rdi, esi)
     mov rax, [rbx + PyDictObject.entries]
-    imul rcx, r12, 24
-    mov rdi, [rax + rcx + 8]     ; key
-    mov rsi, [rax + rcx + 16]    ; key_tag (full 64-bit)
+    imul rcx, r12, SET_ENTRY_SIZE
+    mov rdi, [rax + rcx + SET_ENTRY_KEY]
+    V_UNPACK rdi, rsi
     push r12
     call obj_repr
     test rax, rax
