@@ -1634,12 +1634,12 @@ DEF_FUNC builtin___build_class__
     jmp .bc_no_set_base
 
 .bc_check_builtin_sub:
-    ; Check if base has a tp_call that should be inherited
-    ; (for bytearray, memoryview, bytes subclasses)
+    ; Inherit the base's constructor (tp_new) for bytearray, memoryview and
+    ; bytes subclasses.
     mov rax, [rbp-48]              ; base class
     test rax, rax
     jz .bc_no_set_base
-    mov rdi, [rax + PyTypeObject.tp_call]
+    mov rdi, [rax + PyTypeObject.tp_new]
     test rdi, rdi
     jz .bc_no_set_base
     ; Don't inherit object_type_call or type_call
@@ -1650,8 +1650,8 @@ DEF_FUNC builtin___build_class__
     lea rcx, [rel type_call]
     cmp rdi, rcx
     je .bc_no_set_base
-    ; Inherit tp_call from base (for bytearray, etc.)
-    mov [r12 + PyTypeObject.tp_call], rdi
+    ; Inherit the constructor from the base (for bytearray, etc.)
+    mov [r12 + PyTypeObject.tp_new], rdi
     ; Use builtin_sub_dealloc instead of instance_dealloc
     ; (builtin subclasses don't have inst_dict at +16)
     extern builtin_sub_dealloc
@@ -1810,8 +1810,9 @@ DEF_FUNC_LOCAL add_builtin_type
     mov rbx, rdi               ; dict
     mov r12, rdx               ; type_obj
 
-    ; Set tp_call on the type object
-    mov [r12 + PyTypeObject.tp_call], rcx
+    ; Install the constructor in tp_new.  It must NOT go in tp_call: tp_call
+    ; on a type governs whether that type's INSTANCES are callable.
+    mov [r12 + PyTypeObject.tp_new], rcx
 
     ; Create key string (heap — used as dict key, then DECREFed)
     push r12

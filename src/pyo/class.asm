@@ -650,15 +650,18 @@ DEF_FUNC type_call
     ret
 
 .not_type_self:
-    ; Check if type has its own tp_call (built-in constructor, e.g. staticmethod)
-    mov rax, [rdi + PyTypeObject.tp_call]
+    ; Check for a built-in constructor (int(), str(), staticmethod(), ...).
+    ; It lives in tp_new, NOT tp_call: tp_call on a type is what makes that
+    ; type's INSTANCES callable, so parking a constructor there made every
+    ; string, list and heap int callable ("abc"() returned '').
+    mov rax, [rdi + PyTypeObject.tp_new]
     test rax, rax
     jz .normal_type_call
-    ; Avoid infinite recursion: don't tail-call if tp_call is type_call itself
+    ; Avoid infinite recursion if a constructor is ever type_call itself
     lea rcx, [rel type_call]
     cmp rax, rcx
     je .normal_type_call
-    ; Tail-call the constructor: tp_call(type, args, nargs)
+    ; Tail-call the constructor: ctor(type, args, nargs)
     leave
     jmp rax
 
@@ -1408,7 +1411,7 @@ object_type:
     dq instance_repr            ; tp_repr
     dq 0                        ; tp_str
     dq 0                        ; tp_hash
-    dq 0                        ; tp_call  (set by add_builtin_type)
+    dq 0                        ; tp_call  (instances are not callable)
     dq 0                        ; tp_getattr
     dq 0                        ; tp_setattr
     dq 0                        ; tp_richcompare

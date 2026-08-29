@@ -731,14 +731,14 @@ staticmethod_type:
     dq 0                        ; tp_repr
     dq 0                        ; tp_str
     dq 0                        ; tp_hash
-    dq staticmethod_construct   ; tp_call (constructor)
+    dq 0                ; tp_call  (instances are not callable)
     dq 0                        ; tp_getattr
     dq 0                        ; tp_setattr
     dq 0                        ; tp_richcompare
     dq 0                        ; tp_iter
     dq 0                        ; tp_iternext
     dq 0                        ; tp_init
-    dq 0                        ; tp_new
+    dq staticmethod_construct ; tp_new  (constructor)
     dq 0                        ; tp_as_number
     dq 0                        ; tp_as_sequence
     dq 0                        ; tp_as_mapping
@@ -762,14 +762,14 @@ classmethod_type:
     dq 0                        ; tp_repr
     dq 0                        ; tp_str
     dq 0                        ; tp_hash
-    dq classmethod_construct    ; tp_call (constructor)
+    dq 0                ; tp_call  (instances are not callable)
     dq 0                        ; tp_getattr
     dq 0                        ; tp_setattr
     dq 0                        ; tp_richcompare
     dq 0                        ; tp_iter
     dq 0                        ; tp_iternext
     dq 0                        ; tp_init
-    dq 0                        ; tp_new
+    dq classmethod_construct ; tp_new  (constructor)
     dq 0                        ; tp_as_number
     dq 0                        ; tp_as_sequence
     dq 0                        ; tp_as_mapping
@@ -793,14 +793,14 @@ property_type:
     dq 0                        ; tp_repr
     dq 0                        ; tp_str
     dq 0                        ; tp_hash
-    dq property_construct       ; tp_call (constructor)
+    dq 0                ; tp_call  (instances are not callable)
     dq property_getattr         ; tp_getattr (.setter/.getter/.deleter)
     dq 0                        ; tp_setattr
     dq 0                        ; tp_richcompare
     dq 0                        ; tp_iter
     dq 0                        ; tp_iternext
     dq 0                        ; tp_init
-    dq 0                        ; tp_new
+    dq property_construct   ; tp_new  (constructor)
     dq 0                        ; tp_as_number
     dq 0                        ; tp_as_sequence
     dq 0                        ; tp_as_mapping

@@ -1992,14 +1992,14 @@ dict_type:
     dq dict_repr                ; tp_str
     extern hash_not_implemented
     dq hash_not_implemented     ; tp_hash (raises TypeError)
-    dq dict_type_call           ; tp_call
+    dq 0                ; tp_call  (instances are not callable)
     dq 0                        ; tp_getattr
     dq 0                        ; tp_setattr
     dq dict_richcompare         ; tp_richcompare
     dq dict_tp_iter             ; tp_iter
     dq 0                        ; tp_iternext
     dq 0                        ; tp_init
-    dq 0                        ; tp_new
+    dq dict_type_call       ; tp_new  (constructor)
     dq dict_number_methods      ; tp_as_number
     dq dict_sequence_methods    ; tp_as_sequence (for 'in' operator)
     dq dict_mapping_methods     ; tp_as_mapping

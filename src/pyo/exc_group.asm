@@ -853,14 +853,14 @@ exc_BaseExceptionGroup_type:
     dq exc_repr                 ; tp_repr
     dq eg_str                   ; tp_str
     dq 0                        ; tp_hash
-    dq eg_type_call             ; tp_call — enables constructor
+    dq 0                ; tp_call  (instances are not callable)
     dq eg_getattr               ; tp_getattr
     dq 0                        ; tp_setattr
     dq 0                        ; tp_richcompare
     dq 0                        ; tp_iter
     dq 0                        ; tp_iternext
     dq 0                        ; tp_init
-    dq 0                        ; tp_new
+    dq eg_type_call         ; tp_new  (constructor)
     dq 0                        ; tp_as_number
     dq 0                        ; tp_as_sequence
     dq 0                        ; tp_as_mapping
@@ -884,14 +884,14 @@ exc_ExceptionGroup_type:
     dq exc_repr                 ; tp_repr
     dq eg_str                   ; tp_str
     dq 0                        ; tp_hash
-    dq eg_type_call             ; tp_call — enables constructor
+    dq 0                ; tp_call  (instances are not callable)
     dq eg_getattr               ; tp_getattr
     dq 0                        ; tp_setattr
     dq 0                        ; tp_richcompare
     dq 0                        ; tp_iter
     dq 0                        ; tp_iternext
     dq 0                        ; tp_init
-    dq 0                        ; tp_new
+    dq eg_type_call         ; tp_new  (constructor)
     dq 0                        ; tp_as_number
     dq 0                        ; tp_as_sequence
     dq 0                        ; tp_as_mapping

@@ -625,8 +625,9 @@ DEF_FUNC exc_type_call, ETC_FRAME
     mov [rbp - ETC_ARGS], rsi
     mov [rbp - ETC_NARGS], rdx
 
-    ; Check if the type has its own tp_call (e.g., ExceptionGroup)
-    mov rax, [rbx + PyTypeObject.tp_call]
+    ; Check if the type has its own constructor (e.g., ExceptionGroup).
+    ; It lives in tp_new; tp_call would make instances callable.
+    mov rax, [rbx + PyTypeObject.tp_new]
     test rax, rax
     jz .default_exc_create
     ; Delegate to type's own tp_call

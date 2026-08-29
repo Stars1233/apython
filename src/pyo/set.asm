@@ -1249,14 +1249,14 @@ set_type:
     dq set_repr                 ; tp_str
     extern hash_not_implemented
     dq hash_not_implemented     ; tp_hash (raises TypeError)
-    dq set_type_call            ; tp_call
+    dq 0                ; tp_call  (instances are not callable)
     dq 0                        ; tp_getattr
     dq 0                        ; tp_setattr
     dq set_richcompare          ; tp_richcompare
     dq set_tp_iter              ; tp_iter
     dq 0                        ; tp_iternext
     dq 0                        ; tp_init
-    dq 0                        ; tp_new
+    dq set_type_call        ; tp_new  (constructor)
     dq set_number_methods       ; tp_as_number
     dq set_seq_methods          ; tp_as_sequence
     dq 0                        ; tp_as_mapping
@@ -1280,14 +1280,14 @@ frozenset_type:
     dq set_repr                 ; tp_repr (TODO: frozenset({...}) format)
     dq set_repr                 ; tp_str
     dq 0                        ; tp_hash (TODO: implement)
-    dq frozenset_type_call      ; tp_call
+    dq 0                ; tp_call  (instances are not callable)
     dq 0                        ; tp_getattr
     dq 0                        ; tp_setattr
     dq set_richcompare          ; tp_richcompare
     dq set_tp_iter              ; tp_iter (reuse set iter)
     dq 0                        ; tp_iternext
     dq 0                        ; tp_init
-    dq 0                        ; tp_new
+    dq frozenset_type_call  ; tp_new  (constructor)
     dq set_number_methods       ; tp_as_number
     dq set_seq_methods          ; tp_as_sequence (reuse set methods)
     dq 0                        ; tp_as_mapping

@@ -1244,14 +1244,14 @@ tuple_type:
     dq tuple_repr           ; tp_repr
     dq tuple_repr           ; tp_str
     dq tuple_hash           ; tp_hash
-    dq tuple_type_call      ; tp_call
+    dq 0                ; tp_call  (instances are not callable)
     dq 0                    ; tp_getattr
     dq 0                    ; tp_setattr
     dq tuple_richcompare    ; tp_richcompare
     dq 0                    ; tp_iter (set by init_iter_types)
     dq 0                    ; tp_iternext
     dq 0                    ; tp_init
-    dq 0                    ; tp_new
+    dq tuple_type_call      ; tp_new  (constructor)
     dq 0                    ; tp_as_number
     dq tuple_sequence_methods ; tp_as_sequence
     dq tuple_mapping_methods ; tp_as_mapping
