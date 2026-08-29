@@ -1638,6 +1638,14 @@ DEF_FUNC type_from_parts
 
 .bc_no_set_base:
 
+    ; Fill the type's slots from the dunders it defines.  Until now a
+    ; heaptype's tp_iter, tp_iternext, tp_hash, tp_call, tp_richcompare and
+    ; tp_as_* were all left at zero, and every operation that wanted one had
+    ; to grow its own dunder fallback -- or, more often, not.
+    extern type_install_slots
+    mov rdi, r12
+    call type_install_slots
+
     ; Call parent's __init_subclass__ if present
     mov rax, [rbp-48]          ; base class
     test rax, rax

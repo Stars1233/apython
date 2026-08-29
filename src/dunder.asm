@@ -8,6 +8,22 @@
 %include "object.inc"
 %include "types.inc"
 
+extern kw_names_pending
+
+; A dunder is invoked on behalf of an operation, not as the call the user
+; wrote, so it must not inherit that call's keyword names.  Without this,
+; sorted(MyIterable(), reverse=True) reached __iter__ with reverse=True still
+; pending and raised "unexpected keyword argument".  The leak only became
+; reachable once heaptypes had real slots to dispatch through.
+%macro DUNDER_KW_SAVE 1
+    mov %1, [rel kw_names_pending]
+    mov qword [rel kw_names_pending], 0
+%endmacro
+
+%macro DUNDER_KW_RESTORE 1
+    mov [rel kw_names_pending], %1
+%endmacro
+
 extern none_singleton
 extern str_from_cstr_heap
 extern dict_get
@@ -124,8 +140,14 @@ DEF_FUNC dunder_call_1
     mov rdi, r12            ; callable
     mov rsi, rsp            ; args ptr
     mov edx, 1              ; nargs
-    call rax
+    push r15
+    push r15                ; pushed twice: rsp must stay 16-byte aligned
+    DUNDER_KW_SAVE r15      ; at the call, and the args pointer was taken
+    call rax                ; before these, so it is unaffected
     V_UNPACK rax, rdx           ; tp_call returns a Value
+    DUNDER_KW_RESTORE r15
+    pop r15
+    pop r15
     add rsp, 16             ; pop args
     ; rax = result payload, rdx = result tag
 
@@ -193,8 +215,14 @@ DEF_FUNC dunder_call_2
     mov rdi, r13            ; callable
     mov rsi, rsp            ; args ptr
     mov edx, 2              ; nargs
-    call rax
+    push r15
+    push r15                ; pushed twice: rsp must stay 16-byte aligned
+    DUNDER_KW_SAVE r15      ; at the call, and the args pointer was taken
+    call rax                ; before these, so it is unaffected
     V_UNPACK rax, rdx           ; tp_call returns a Value
+    DUNDER_KW_RESTORE r15
+    pop r15
+    pop r15
     add rsp, 16             ; pop args
     ; rax = result payload, rdx = result tag
 
@@ -267,8 +295,14 @@ DEF_FUNC dunder_call_3
     mov rdi, r14            ; callable
     mov rsi, rsp            ; args ptr
     mov edx, 3              ; nargs
-    call rax
+    push r15
+    push r15                ; pushed twice: rsp must stay 16-byte aligned
+    DUNDER_KW_SAVE r15      ; at the call, and the args pointer was taken
+    call rax                ; before these, so it is unaffected
     V_UNPACK rax, rdx           ; tp_call returns a Value
+    DUNDER_KW_RESTORE r15
+    pop r15
+    pop r15
     add rsp, 32             ; pop args
     ; rax = result payload, rdx = result tag
 

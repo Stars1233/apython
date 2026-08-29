@@ -1609,6 +1609,14 @@ DEF_FUNC builtin_sorted, SO_FRAME
     mov rdi, rbx
     call obj_decref
 
+    ; call_iternext answers NULL both for a clean exhaustion and for a
+    ; __next__ that raised something other than StopIteration -- it clears
+    ; StopIteration itself and leaves anything else pending.  list() checks;
+    ; sorted() did not, so sorted(x) quietly returned a partial result while
+    ; the exception waited to surface somewhere unrelated.
+    cmp qword [rel current_exception], 0
+    jne .sorted_propagate
+
     ; Build args for list_method_sort in the fixed frame buffer
     ; args[0] = list (a pointer is its own Value)
     mov [rbp - SO_SORT_BUF], r12
@@ -1665,6 +1673,12 @@ DEF_FUNC builtin_sorted, SO_FRAME
     lea rdi, [rel exc_TypeError_type]
     CSTRING rsi, "sorted() requires exactly 1 argument"
     call raise_exception
+.sorted_propagate:
+    mov rdi, r12
+    call obj_decref             ; the partially built list
+    leave
+    mov [rel eval_saved_r13], r13
+    jmp eval_exception_unwind
 END_FUNC builtin_sorted
 
 ;; ============================================================================

@@ -718,6 +718,30 @@ DEF_FUNC_BARE op_unpack_sequence
     cmp rax, rdx
     je .unpack_str
 
+    ; Anything iterable unpacks in Python -- a set, a range, a generator, a
+    ; dict, a str subclass.  Only exact tuple, list and str were accepted, so
+    ; `a, b = {1, 2}` and `a, b = range(2)` raised.
+    ; Stack here: [rsp] = payload, [rsp+8] = tag.
+    push rcx                        ; expected count
+    push rdi                        ; the original, released below
+    sub rsp, 16                     ; scratch Value slot, keeps rsp aligned
+    mov [rsp], rdi
+    lea rsi, [rsp]
+    extern tuple_type_call
+    lea rdi, [rel tuple_type]
+    mov edx, 1
+    call tuple_type_call            ; raises for a non-iterable
+    add rsp, 16
+    pop rdi                         ; the original
+    push rax                        ; the materialised tuple
+    call obj_decref                 ; release the original
+    pop rdi                         ; rdi = the tuple
+    pop rcx                         ; expected count
+    mov [rsp], rdi                  ; the saved payload is now the tuple, so
+    mov qword [rsp + 8], TAG_PTR    ; the existing cleanup frees it
+    mov rax, [rdi + PyObject.ob_type]
+    jmp .unpack_tuple
+
 .unpack_type_error:
     ; Unknown type
     lea rdi, [rel exc_TypeError_type]
@@ -1331,7 +1355,7 @@ DEF_FUNC_BARE op_contains_op
     call dunder_call_2
     V_UNPACK rax, rdx           ; returns a Value
     test edx, edx             ; TAG_NULL = not found
-    jz .contains_iter_fallback
+    jz .contains_check_blocked
 
     ; Convert result to boolean (obj_is_true)
     push rdx                   ; save tag
@@ -1363,6 +1387,23 @@ DEF_FUNC_BARE op_contains_op
     jz .contains_false
     lea rax, [rel bool_true]
     jmp .contains_push
+
+.contains_check_blocked:
+    ; dunder_call_2 answers NULL both for "no __contains__" and for
+    ; "__contains__ is None".  In Python the second explicitly disables the
+    ; protocol, so it is a TypeError rather than licence to iterate.  The
+    ; distinction only became observable once __iter__ reached tp_iter and
+    ; the iteration fallback actually worked.
+    mov rdi, [rsp]
+    mov rdi, [rdi + PyObject.ob_type]
+    lea rsi, [rel dunder_contains]
+    extern dunder_lookup
+    call dunder_lookup
+    V_UNPACK rax, rdx
+    test edx, edx
+    jz .contains_iter_fallback  ; genuinely not defined
+    IS_NONE rax, rcx
+    je .contains_type_error
 
 .contains_iter_fallback:
     ; Fallback: iterate container via tp_iter, compare each element
