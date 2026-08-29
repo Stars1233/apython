@@ -14,6 +14,7 @@ extern type_type
 extern raise_exception
 extern exc_TypeError_type
 extern bytes_type
+extern bytearray_repr
 
 section .text
 
@@ -135,8 +136,8 @@ bytearray_type:
     dq ba_name_str                  ; tp_name
     dq PyByteArrayObject.data       ; tp_basicsize
     dq bytearray_dealloc            ; tp_dealloc
-    dq 0                            ; tp_repr
-    dq 0                            ; tp_str
+    dq bytearray_repr               ; tp_repr
+    dq bytearray_repr               ; tp_str
     dq 0                            ; tp_hash
     dq 0                            ; tp_call (set by add_builtin_type)
     dq 0                            ; tp_getattr

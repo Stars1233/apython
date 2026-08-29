@@ -162,7 +162,9 @@ DEF_FUNC obj_repr
 
 .null_obj:
 .no_repr:
-    xor eax, eax
+    ; Return a NULL *Value*, not just a zero payload: callers test the tag,
+    ; and leaving edx stale made print() dereference the NULL.
+    RET_NULL
     leave
     ret
 END_FUNC obj_repr

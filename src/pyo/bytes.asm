@@ -337,21 +337,79 @@ END_FUNC bytes_contains
 ;; bytes_repr(PyObject *self) -> PyStrObject*
 ;; Returns b'...' representation with hex escapes for non-printable bytes
 ;; ============================================================================
-DEF_FUNC bytes_repr, 1024
+;; bytes and bytearray have identical layouts -- ob_size at +16, data at +24 --
+;; so one implementation serves both; only the wrapper text differs.
+global bytearray_repr
+DEF_FUNC bytes_repr
+    xor esi, esi               ; 0 = b'...'
+    call bytes_repr_impl
+    leave
+    ret
+END_FUNC bytes_repr
+
+DEF_FUNC bytearray_repr
+    mov esi, 1                 ; 1 = bytearray(b'...')
+    call bytes_repr_impl
+    leave
+    ret
+END_FUNC bytearray_repr
+
+DEF_FUNC_LOCAL bytes_repr_impl, 1024
     push rbx
     push r12
     push r13
+    push r14
+    push r15
 
     mov rbx, rdi               ; bytes obj
     mov r12, [rbx + PyBytesObject.ob_size]  ; length
+    mov r14d, esi              ; wrap flag, preserved across the loop
+
+    ; Pick the delimiter the way CPython does: a single quote normally, but a
+    ; double quote when the data contains ' and no ", so the quote inside
+    ; needs no backslash.
+    mov r15d, 0x27
+    xor eax, eax               ; saw a single quote?
+    xor edx, edx
+.br_scan:
+    cmp rdx, r12
+    jge .br_scan_done
+    movzx ecx, byte [rbx + PyBytesObject.data + rdx]
+    cmp ecx, 0x22              ; a double quote rules the switch out
+    je .br_scan_done_squote
+    cmp ecx, 0x27
+    jne .br_scan_next
+    mov eax, 1
+.br_scan_next:
+    inc rdx
+    jmp .br_scan
+.br_scan_done:
+    test eax, eax
+    jz .br_scan_done_squote
+    mov r15d, 0x22
+.br_scan_done_squote:
 
     ; Build repr in local buffer
     lea r13, [rbp - 1024]      ; buffer on stack
 
-    ; Write "b'"
-    mov byte [r13], 'b'
-    mov byte [r13 + 1], 0x27   ; single quote
-    mov ecx, 2                 ; output pos
+    xor ecx, ecx               ; output pos
+    test r14d, r14d
+    jz .br_prefix_b
+    mov byte [r13 + 0], 'b'
+    mov byte [r13 + 1], 'y'
+    mov byte [r13 + 2], 't'
+    mov byte [r13 + 3], 'e'
+    mov byte [r13 + 4], 'a'
+    mov byte [r13 + 5], 'r'
+    mov byte [r13 + 6], 'r'
+    mov byte [r13 + 7], 'a'
+    mov byte [r13 + 8], 'y'
+    mov byte [r13 + 9], '('
+    mov ecx, 10
+.br_prefix_b:
+    mov byte [r13 + rcx], 'b'
+    mov [r13 + rcx + 1], r15b        ; opening delimiter
+    add ecx, 2
 
     ; Iterate bytes
     xor edx, edx               ; input pos
@@ -368,8 +426,13 @@ DEF_FUNC bytes_repr, 1024
     jl .br_hex
     cmp eax, 127
     jge .br_hex
-    cmp eax, 0x27              ; single quote
+    cmp eax, r15d              ; the delimiter in use
     je .br_escape_quote
+    test r14d, r14d            ; CPython's bytearray_repr escapes a single
+    jz .br_not_squote          ; quote even under a double-quote delimiter,
+    cmp eax, 0x27              ; where its bytes_repr does not
+    je .br_escape_squote
+.br_not_squote:
     cmp eax, 0x5C              ; backslash
     je .br_escape_bs
 
@@ -379,9 +442,16 @@ DEF_FUNC bytes_repr, 1024
     inc edx
     jmp .br_loop
 
+.br_escape_squote:
+    mov byte [r13 + rcx], 0x5C     ; backslash
+    mov byte [r13 + rcx + 1], 0x27
+    add ecx, 2
+    inc edx
+    jmp .br_loop
+
 .br_escape_quote:
     mov byte [r13 + rcx], 0x5C     ; backslash
-    mov byte [r13 + rcx + 1], 0x27 ; quote
+    mov [r13 + rcx + 1], r15b      ; the delimiter in use
     add ecx, 2
     inc edx
     jmp .br_loop
@@ -452,19 +522,27 @@ DEF_FUNC bytes_repr, 1024
     jmp .br_loop
 
 .br_close:
-    mov byte [r13 + rcx], 0x27     ; closing quote
-    mov byte [r13 + rcx + 1], 0    ; null terminator
+    mov [r13 + rcx], r15b          ; closing delimiter
+    inc ecx
+    test r14d, r14d
+    jz .br_terminate
+    mov byte [r13 + rcx], ')'
+    inc ecx
+.br_terminate:
+    mov byte [r13 + rcx], 0        ; null terminator
 
     ; Create str from buffer
     mov rdi, r13
     call str_from_cstr
 
+    pop r15
+    pop r14
     pop r13
     pop r12
     pop rbx
     leave
     ret
-END_FUNC bytes_repr
+END_FUNC bytes_repr_impl
 
 ;; ============================================================================
 ;; bytes_decode(PyBytesObject *self) -> PyStrObject*
