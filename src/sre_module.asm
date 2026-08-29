@@ -195,6 +195,7 @@ DEF_FUNC sre_compile_func, SC_FRAME
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .compile_error_args:
@@ -223,11 +224,13 @@ DEF_FUNC sre_ascii_iscased_func
     xor eax, eax
     RET_BOOL_RAX
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 .aic_true:
     mov eax, 1
     RET_BOOL_RAX
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 .aic_error:
     lea rdi, [rel exc_TypeError_type]
@@ -250,6 +253,7 @@ DEF_FUNC sre_ascii_tolower_func
 .atl_done:
     RET_TAG_SMALLINT
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 .atl_error:
     lea rdi, [rel exc_TypeError_type]
@@ -286,16 +290,19 @@ DEF_FUNC sre_unicode_iscased_func
     mov eax, 1
     RET_BOOL_RAX
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 .uic_false:
     xor eax, eax
     RET_BOOL_RAX
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 .uic_true:
     mov eax, 1
     RET_BOOL_RAX
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 .uic_error:
     lea rdi, [rel exc_TypeError_type]
@@ -328,6 +335,7 @@ DEF_FUNC sre_unicode_tolower_func
 .utl_done:
     RET_TAG_SMALLINT
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 .utl_error:
     lea rdi, [rel exc_TypeError_type]
@@ -382,6 +390,7 @@ DEF_FUNC sre_getlower_func
 .gl_done:
     RET_TAG_SMALLINT
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 .gl_error:
     lea rdi, [rel exc_TypeError_type]
@@ -403,6 +412,7 @@ DEF_FUNC sre_template_func
     V_UNPACK rax, rdx       ; args[1]
     INCREF_VAL rax, rdx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 .tmpl_error:
     lea rdi, [rel exc_TypeError_type]
@@ -418,6 +428,7 @@ DEF_FUNC sre_getcodesize_func
     mov eax, SRE_CODESIZE
     RET_TAG_SMALLINT
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 END_FUNC sre_getcodesize_func
 

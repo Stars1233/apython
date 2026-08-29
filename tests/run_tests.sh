@@ -52,8 +52,17 @@ for test_py in "$TESTDIR"/test_*.py; do
         continue
     fi
 
-    # Run with Python
-    expected=$($PYTHON "$test_py" 2>&1) || true
+    # Oracle: normally CPython itself.  A handful of tests exercise private
+    # APIs that CPython does not validate and that crash it outright — those
+    # record their expected output in tests/expected/ instead.  Such a test
+    # must be self-checking (assert on every step) so the recording is a
+    # transcript of a verified run, not the definition of correct.
+    expected_file="$TESTDIR/expected/${test_name}.txt"
+    if [ -f "$expected_file" ]; then
+        expected=$(cat "$expected_file")
+    else
+        expected=$($PYTHON "$test_py" 2>&1) || true
+    fi
 
     # Run with apython
     actual=$($APYTHON "$pyc_file" 2>&1) || true
