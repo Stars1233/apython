@@ -1568,6 +1568,7 @@ DEF_FUNC builtin_hash_fn
     jz .hash_type_error
 
     mov rdi, rbx
+    mov edx, TAG_PTR            ; tp_hash forwards edx to int_unwrap
     call rcx
     mov rdi, rax
     call int_from_i64
@@ -1589,11 +1590,9 @@ DEF_FUNC builtin_hash_fn
     ret
 
 .hash_smallint:
-    mov rax, rbx
-    ; Apply -1 → -2 convention (hash must never return -1)
-    cmp rax, -1
-    jne .hash_si_ok
-    mov rax, -2
+    extern int_hash_i64
+    mov rdi, rbx
+    call int_hash_i64
 .hash_si_ok:
     mov rdi, rax
     call int_from_i64

@@ -298,19 +298,20 @@ DEF_FUNC obj_hash
     test rax, rax
     jz .default_hash
 
-    ; tail-call tp_hash(obj)
+    ; tail-call tp_hash(rdi=obj, edx=tag)
+    ; tp_hash implementations (int_hash) forward edx to int_unwrap, so the
+    ; tag MUST be supplied here -- leaving edx undefined makes int_unwrap
+    ; take a random branch and int_hash return the object address.
+    mov edx, esi
     leave
     jmp rax
 
 .smallint_hash:
-    ; Hash of SmallInt = raw value (avoid -1)
-    mov rax, rdi
-    cmp rax, -1
-    jne .hash_done
-    mov rax, -2
-.hash_done:
+    ; Shared with int_hash / builtin_hash: sign(v) * (|v| mod 2^61-1).
+    ; All three must agree or dict and set lookups silently break.
+    extern int_hash_i64
     leave
-    ret
+    jmp int_hash_i64
 
 .float_hash:
     ; Inline float: call float_hash for PEP-correct integer-float matching

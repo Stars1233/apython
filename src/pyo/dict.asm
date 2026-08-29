@@ -716,9 +716,10 @@ DEF_FUNC_LOCAL dict_find_slot, 16
     push rax
     mov rcx, [rbp - FS_KTAG]   ; our key tag
     call dict_keys_equal
+    mov edi, eax                ; save equality result (survives the pops)
     pop rax                     ; entry ptr
     pop rcx                     ; slot
-    test eax, eax
+    test edi, edi
     jnz .found_existing
 
 .find_next:

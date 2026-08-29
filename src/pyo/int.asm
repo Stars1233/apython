@@ -29,6 +29,7 @@ extern __gmpz_clear
 extern __gmpz_set_si
 extern __gmpz_set
 extern __gmpz_get_si
+extern __gmpz_tdiv_ui
 extern __gmpz_get_str
 extern __gmpz_add
 extern __gmpz_sub
@@ -928,8 +929,47 @@ DEF_FUNC_BARE int_repr
 END_FUNC int_repr
 
 ;; ============================================================================
-;; int_hash(PyObject *self) -> int64
-;; SmallInt: decoded value. GMP: low bits via get_si. Never returns -1.
+;; int_hash_i64(rdi: int64) -> rax: int64
+;;
+;; CPython's integer hash: sign(v) * (|v| mod PyHASH_MODULUS), with -1 mapped
+;; to -2.  PyHASH_MODULUS is 2^61-1, so any |v| < 2^61-1 hashes to itself --
+;; that fast path covers every immediate and almost every heap int.
+;;
+;; Shared by int_hash, obj_hash and builtin_hash so that all three agree; a
+;; disagreement silently corrupts dict and set lookups.
+;; ============================================================================
+global int_hash_i64
+DEF_FUNC_BARE int_hash_i64
+    mov rcx, rdi
+    sar rcx, 63                 ; rcx = sign mask (0 or -1)
+    mov rax, rdi
+    xor rax, rcx
+    sub rax, rcx                ; rax = |v| (INT64_MIN -> 2^63, unsigned)
+    mov r8, PYHASH_MODULUS
+    cmp rax, r8
+    jb .ihi_small               ; |v| < modulus: the value is its own hash
+
+    xor edx, edx
+    div r8                      ; rdx = |v| mod modulus
+    mov rax, rdx
+    xor rax, rcx
+    sub rax, rcx                ; reapply the sign
+    jmp .ihi_fix
+
+.ihi_small:
+    mov rax, rdi
+.ihi_fix:
+    cmp rax, -1
+    jne .ihi_done
+    mov rax, -2
+.ihi_done:
+    ret
+END_FUNC int_hash_i64
+
+;; ============================================================================
+;; int_hash(rdi: PyObject *self, edx: tag) -> int64
+;;
+;; NOTE: edx MUST hold the value's tag -- it is forwarded to int_unwrap.
 ;; ============================================================================
 DEF_FUNC_BARE int_hash
     ; Unwrap int subclass instances
@@ -942,22 +982,23 @@ DEF_FUNC_BARE int_hash
     push rbx
     mov rbx, rdi
     lea rdi, [rbx + PyIntObject.mpz]
-    call __gmpz_get_si wrt ..plt
-    cmp rax, -1
-    jne .done
-    mov rax, -2
+    mov rsi, PYHASH_MODULUS
+    call __gmpz_tdiv_ui wrt ..plt   ; rax = |n| mod modulus
+    mov ecx, [rbx + PyIntObject.mpz + 4]   ; _mp_size carries the sign
+    test ecx, ecx
+    jns .done
+    neg rax
 .done:
+    cmp rax, -1
+    jne .done2
+    mov rax, -2
+.done2:
     pop rbx
     pop rbp
     ret
 
 .smallint:
-    mov rax, rdi
-    cmp rax, -1
-    jne .si_done
-    mov rax, -2
-.si_done:
-    ret
+    jmp int_hash_i64
 END_FUNC int_hash
 
 ;; ============================================================================

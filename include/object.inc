@@ -21,6 +21,10 @@ endstruc
 VAR_HEADER_SIZE equ PyVarObject_size  ; 24
 
 ; Integer object (GMP-backed)
+; CPython's integer hash modulus (PyHASH_MODULUS = 2^61 - 1 on 64-bit).
+; sign(v) * (|v| mod PYHASH_MODULUS); see int_hash_i64 in src/pyo/int.asm.
+PYHASH_MODULUS equ 0x1FFFFFFFFFFFFFFF
+
 ; mpz_t is a struct: { int _mp_alloc, int _mp_size, mp_limb_t *_mp_d }
 ; On x86-64 GMP: sizeof(mpz_t) = 16 bytes (4+4+8)
 struc PyIntObject
