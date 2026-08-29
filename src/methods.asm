@@ -6689,6 +6689,7 @@ DEF_FUNC set_method_add
     mov rdi, [rax]          ; self (set)
     mov rsi, [rax + 16]     ; elem payload
     mov rdx, [rax + 24]     ; elem tag
+    V_PACK rsi, rdx         ; set_add takes a key Value
     call set_add
 
     lea rax, [rel none_singleton]
@@ -6715,6 +6716,7 @@ DEF_FUNC set_method_remove
     mov rdi, [rax]          ; self
     mov rsi, [rax + 16]     ; elem payload
     mov rdx, [rax + 24]     ; elem tag
+    V_PACK rsi, rdx         ; set_remove takes a key Value
     call set_remove
     test eax, eax
     jnz .smr_keyerr
@@ -6748,6 +6750,7 @@ DEF_FUNC set_method_discard
     mov rdi, [rax]          ; self
     mov rsi, [rax + 16]     ; elem payload
     mov rdx, [rax + 24]     ; elem tag
+    V_PACK rsi, rdx         ; set_remove takes a key Value
     call set_remove
     ; Ignore return value (don't care if not found)
 
@@ -6925,7 +6928,6 @@ DEF_FUNC set_method_copy
     ; Add key to new set
     mov rdi, rbx            ; new set
     mov rsi, [rax + SET_ENTRY_KEY]
-    V_UNPACK rsi, rdx
     call set_add
 
 .smcp_next:
@@ -6986,7 +6988,6 @@ DEF_FUNC set_method_union
 
     mov rdi, rbx
     mov rsi, [rax + SET_ENTRY_KEY]
-    V_UNPACK rsi, rdx
     call set_add
 
 .smu_cs_next:
@@ -7013,7 +7014,6 @@ DEF_FUNC set_method_union
 
     mov rdi, rbx
     mov rsi, [rax + SET_ENTRY_KEY]
-    V_UNPACK rsi, rdx
     call set_add
 
 .smu_al_next:
@@ -7069,7 +7069,6 @@ DEF_FUNC set_method_update
 
     mov rdi, rbx
     mov rsi, [rax + SET_ENTRY_KEY]
-    V_UNPACK rsi, rdx
     call set_add
 
 .supd_next:
@@ -7129,7 +7128,6 @@ DEF_FUNC set_method_intersection
     push rax                ; save entry ptr
     mov rdi, r15            ; other set
     mov rsi, [rax + SET_ENTRY_KEY]
-    V_UNPACK rsi, rdx
     call set_contains
     pop rcx                 ; restore entry ptr (was rax)
     test eax, eax
@@ -7138,7 +7136,6 @@ DEF_FUNC set_method_intersection
     ; In both — add to result
     mov rdi, rbx
     mov rsi, [rcx + SET_ENTRY_KEY]
-    V_UNPACK rsi, rdx
     call set_add
 
 .smi_next:
@@ -7203,7 +7200,6 @@ DEF_FUNC set_method_difference
     push rax
     mov rdi, r15
     mov rsi, [rax + SET_ENTRY_KEY]
-    V_UNPACK rsi, rdx
     call set_contains
     pop rcx                 ; entry ptr
     test eax, eax
@@ -7212,7 +7208,6 @@ DEF_FUNC set_method_difference
     ; NOT in other — add to result
     mov rdi, rbx
     mov rsi, [rcx + SET_ENTRY_KEY]
-    V_UNPACK rsi, rdx
     call set_add
 
 .smdf_next:
@@ -7276,7 +7271,6 @@ DEF_FUNC set_method_symmetric_difference
     push rax
     mov rdi, r15
     mov rsi, [rax + SET_ENTRY_KEY]
-    V_UNPACK rsi, rdx
     call set_contains
     pop rcx
     test eax, eax
@@ -7284,7 +7278,6 @@ DEF_FUNC set_method_symmetric_difference
 
     mov rdi, rbx
     mov rsi, [rcx + SET_ENTRY_KEY]
-    V_UNPACK rsi, rdx
     call set_add
 
 .smsd_s_next:
@@ -7312,7 +7305,6 @@ DEF_FUNC set_method_symmetric_difference
     push rax
     mov rdi, r14
     mov rsi, [rax + SET_ENTRY_KEY]
-    V_UNPACK rsi, rdx
     call set_contains
     pop rcx
     test eax, eax
@@ -7320,7 +7312,6 @@ DEF_FUNC set_method_symmetric_difference
 
     mov rdi, rbx
     mov rsi, [rcx + SET_ENTRY_KEY]
-    V_UNPACK rsi, rdx
     call set_add
 
 .smsd_o_next:
@@ -7380,7 +7371,6 @@ DEF_FUNC set_method_issubset
 
     mov rdi, r15
     mov rsi, [rax + SET_ENTRY_KEY]
-    V_UNPACK rsi, rdx
     call set_contains
     test eax, eax
     jz .smss_false          ; not in other
@@ -7456,7 +7446,6 @@ DEF_FUNC set_method_issuperset
 
     mov rdi, r15            ; check in self
     mov rsi, [rax + SET_ENTRY_KEY]
-    V_UNPACK rsi, rdx
     call set_contains
     test eax, eax
     jz .smis_false
@@ -7532,7 +7521,6 @@ DEF_FUNC set_method_isdisjoint
 
     mov rdi, r15
     mov rsi, [rax + SET_ENTRY_KEY]
-    V_UNPACK rsi, rdx
     call set_contains
     test eax, eax
     jnz .smdj_false         ; found in other — not disjoint

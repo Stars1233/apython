@@ -332,7 +332,7 @@ END_FUNC set_resize
 
 ;; ============================================================================
 ;; set_add(set, key, key_tag) -> void
-;; Add a key to the set. rdx = key_tag.
+;; set_add(rdi=set, rsi=key Value) -> int
 ;; ============================================================================
 DEF_FUNC set_add
     push rbx
@@ -340,6 +340,7 @@ DEF_FUNC set_add
     push r13
     push r14
 
+    V_UNPACK rsi, rdx           ; decode the key Value
     mov rbx, rdi                ; set
     mov r12, rsi                ; key
     mov r14, rdx                ; key_tag
@@ -404,6 +405,7 @@ DEF_FUNC set_contains
     push r13
     push r14
 
+    V_UNPACK rsi, rdx           ; decode the key Value
     mov rbx, rdi                ; set
     mov r12, rsi                ; key
     mov r14, rdx                ; key_tag
@@ -502,7 +504,6 @@ DEF_FUNC set_richcompare, SRC_FRAME
     push rcx
     mov rdi, r12               ; other set
     mov rsi, [rax + SET_ENTRY_KEY]   ; key
-    V_UNPACK rsi, rdx
     call set_contains
     pop rcx
     test eax, eax
@@ -528,7 +529,6 @@ DEF_FUNC set_richcompare, SRC_FRAME
     push rcx
     mov rdi, r12
     mov rsi, [rax + SET_ENTRY_KEY]
-    V_UNPACK rsi, rdx
     call set_contains
     pop rcx
     test eax, eax
@@ -553,7 +553,6 @@ DEF_FUNC set_richcompare, SRC_FRAME
     push rcx
     mov rdi, r12
     mov rsi, [rax + SET_ENTRY_KEY]
-    V_UNPACK rsi, rdx
     call set_contains
     pop rcx
     test eax, eax
@@ -626,6 +625,7 @@ END_FUNC set_richcompare
 ;; sq_contains wrapper for the sequence methods (for "in" operator)
 ;; ============================================================================
 DEF_FUNC_BARE set_contains_sq
+    V_PACK rsi, rdx             ; the sq_contains slot still passes a fat pair
     jmp set_contains
 END_FUNC set_contains_sq
 
@@ -641,6 +641,7 @@ DEF_FUNC set_remove, SR_KEY_TAG
     push r14
     push r15
 
+    V_UNPACK rsi, rdx           ; decode the key Value
     mov rbx, rdi                ; set
     mov r12, rsi                ; key
     mov [rbp - SR_KEY_TAG], rdx ; save key_tag
@@ -824,6 +825,7 @@ DEF_FUNC set_type_call, STC_FRAME
     push rax                ; save key payload
     push rdx                ; save key tag
     push rdx                ; alignment padding (3 pushes = odd, matches ABI)
+    V_PACK rsi, rdx         ; set_add takes a key Value
     call set_add
     add rsp, 8              ; drop alignment padding
     pop rsi                 ; key tag
@@ -1028,6 +1030,7 @@ DEF_FUNC frozenset_type_call, FTC_FRAME
     push rax
     push rdx
     push rdx
+    V_PACK rsi, rdx         ; set_add takes a key Value
     call set_add
     add rsp, 8
     pop rsi

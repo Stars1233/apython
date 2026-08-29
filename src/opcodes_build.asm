@@ -2361,7 +2361,6 @@ DEF_FUNC op_build_set, 16
     mov rax, rdx
     shl rax, 3                ; index * 8
     mov rsi, [r13 + rax]     ; item
-    V_UNPACK rsi, rdx        ; set_add still takes (payload, tag)
     call set_add               ; set_add does INCREF
     pop rdx
     inc rdx
@@ -2411,7 +2410,8 @@ DEF_FUNC_BARE op_set_add
 
     push r8                    ; save value tag (deeper)
     push rsi                   ; save value payload
-    mov rdx, r8                ; key tag for set_add
+    mov rdx, r8
+    V_PACK rsi, rdx            ; set_add takes a key Value
     call set_add
     ; set_add does INCREF, so DECREF to compensate
     pop rdi                    ; value payload
@@ -2474,7 +2474,7 @@ DEF_FUNC op_set_update
     push rax                   ; save item payload
     mov rdi, [rbp-24]          ; set
     mov rsi, rax               ; item
-    ; rdx = tag already set by tp_iternext
+    V_PACK rsi, rdx            ; set_add takes a key Value
     call set_add               ; set_add does INCREF
     pop rdi                    ; item payload
     pop rsi                    ; item tag
@@ -2517,8 +2517,7 @@ DEF_FUNC op_set_update
     test rsi, rsi
     jz .su_set_next
 
-    ; set_add(target_set, key, key_tag)
-    V_UNPACK rsi, rdx
+    ; set_add(target_set, key Value)
     push rbx
     mov rdi, [rbp-24]
     call set_add

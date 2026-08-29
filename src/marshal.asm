@@ -1101,7 +1101,7 @@ mdo_set_common:
     push rax                   ; save element payload
     mov rdi, r14               ; set
     mov rsi, rax               ; element
-    ; rdx = element tag from marshal_read_object
+    V_PACK rsi, rdx            ; set_add takes a key Value
     call set_add
     pop rdi                    ; element payload
     pop rsi                    ; element tag
