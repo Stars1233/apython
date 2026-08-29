@@ -121,11 +121,17 @@ DEF_FUNC sre_compile_func, SC_FRAME
 .code_loop:
     cmp rcx, r13
     jge .code_done
-    ; Validate tag is TAG_SMALLINT
+    ; Normalize first: int_unwrap flattens bool, compact heap ints and int
+    ; subclasses to (value, TAG_SMALLINT), so the check accepts any integer.
+    extern int_unwrap
     movzx edx, byte [rbx + rcx]
+    mov rdi, [r15 + rcx*8]
+    push rcx
+    call int_unwrap
+    pop rcx
     cmp edx, TAG_SMALLINT
     jne .code_type_error
-    mov rax, [r15 + rcx*8]     ; payload (SmallInt value)
+    mov eax, edi               ; unwrapped value
     mov [r14 + rcx*4], eax    ; store as u32
     inc rcx
     jmp .code_loop

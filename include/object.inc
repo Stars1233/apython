@@ -27,11 +27,36 @@ PYHASH_MODULUS equ 0x1FFFFFFFFFFFFFFF
 
 ; mpz_t is a struct: { int _mp_alloc, int _mp_size, mp_limb_t *_mp_d }
 ; On x86-64 GMP: sizeof(mpz_t) = 16 bytes (4+4+8)
+; An integer is "compact" when its value fits in int64: .ival holds it and
+; .mpz is UNINITIALIZED, so creating one costs no GMP init and no limb
+; allocation.  Anything wider is GMP-backed (.compact == 0, .mpz valid).
+; Reading .mpz on a possibly-compact object requires INT_NEED_MPZ first,
+; which promotes in place.  .mpz stays at +16 so existing GMP code is
+; unaffected.
 struc PyIntObject
     .ob_refcnt: resq 1    ; +0
     .ob_type:   resq 1    ; +8
     .mpz:       resb 16   ; +16: inline mpz_t (alloc:4, size:4, *d:8)
+    .ival:      resq 1    ; +32: int64 value      (valid iff .compact != 0)
+    .compact:   resq 1    ; +40: 1 = compact, 0 = GMP-backed
 endstruc
+
+; Promote a possibly-compact PyIntObject to GMP form in place.  Two
+; instructions when it is already GMP-backed; int_promote_mpz preserves every
+; register, so this is safe to drop in front of any .mpz access.
+%macro INT_NEED_MPZ 1           ; %1 = register holding PyIntObject*
+    cmp qword [%1 + PyIntObject.compact], 0
+    je %%done
+%ifidni %1, rdi
+    call int_promote_mpz
+%else
+    push rdi
+    mov rdi, %1
+    call int_promote_mpz
+    pop rdi
+%endif
+%%done:
+%endmacro
 
 ; Float object
 struc PyFloatObject

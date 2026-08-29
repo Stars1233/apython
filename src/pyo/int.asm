@@ -24,7 +24,9 @@ extern bool_from_int
 extern type_type
 
 ; GMP functions
+extern bool_type
 extern __gmpz_init
+extern __gmpz_init_set_si
 extern __gmpz_clear
 extern __gmpz_set_si
 extern __gmpz_set
@@ -74,8 +76,11 @@ DEF_FUNC_LOCAL int_new_from_mpz
     mov qword [r12 + PyObject.ob_refcnt], 1
     lea rax, [rel int_type]
     mov [r12 + PyObject.ob_type], rax
+    mov qword [r12 + PyIntObject.compact], 0  ; GMP-backed
+    INT_NEED_MPZ r12
     lea rdi, [r12 + PyIntObject.mpz]
     call __gmpz_init wrt ..plt
+    INT_NEED_MPZ r12
     lea rdi, [r12 + PyIntObject.mpz]
     mov rsi, rbx
     call __gmpz_set wrt ..plt
@@ -93,34 +98,102 @@ END_FUNC int_new_from_mpz
 ;; All i64 values are SmallInt (payload = raw signed 64-bit).
 ;; ============================================================================
 DEF_FUNC_BARE int_from_i64
+%ifdef INT_STRESS_BOX
+    ; Stress build (make INT_STRESS=1): box anything with |v| >= INT_STRESS_BOX
+    ; as a compact heap int, so the ordinary test suite exercises the heap-int
+    ; paths that the shrinking immediate range will make common.  Small-int
+    ; identity (`x is y`) differs from CPython in this mode by construction.
+    mov rax, rdi
+    mov rcx, rdi
+    sar rcx, 63
+    xor rax, rcx
+    sub rax, rcx
+    cmp rax, INT_STRESS_BOX
+    jb .inline
+    push rbp
+    mov rbp, rsp
+    call int_new_compact
+    mov edx, TAG_PTR
+    leave
+    ret
+.inline:
+%endif
     mov rax, rdi
     RET_TAG_SMALLINT
     ret
 END_FUNC int_from_i64
 
 ;; ============================================================================
-;; int_from_i64_gmp(int64_t val) -> PyIntObject*
-;; Always creates a GMP-backed integer (no SmallInt)
+;; int_promote_mpz(rdi: PyIntObject*) -> void
+;;
+;; Give a compact integer a real mpz_t, in place.  Idempotent in practice
+;; because callers reach it through INT_NEED_MPZ, which checks .compact first.
+;;
+;; PRESERVES EVERY REGISTER, so INT_NEED_MPZ can be dropped in front of any
+;; .mpz access without auditing what is live around it.
 ;; ============================================================================
-DEF_FUNC int_from_i64_gmp
+global int_promote_mpz
+DEF_FUNC int_promote_mpz
+    push rax
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    push r8
+    push r9
+    push r10
+    push r11
+    push rdi                    ; 10th push keeps rsp 16-byte aligned for GMP
+    mov rsi, [rdi + PyIntObject.ival]
+    lea rdi, [rdi + PyIntObject.mpz]
+    call __gmpz_init_set_si wrt ..plt
+    pop rdi                     ; the object again
+    mov qword [rdi + PyIntObject.compact], 0
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rax
+    leave
+    ret
+END_FUNC int_promote_mpz
+
+;; ============================================================================
+;; int_new_compact(int64_t val) -> rax: PyIntObject*
+;; Heap integer with no GMP init and no limb allocation.
+;; ============================================================================
+global int_new_compact
+DEF_FUNC int_new_compact
     push rbx
     push r12
     mov rbx, rdi
     mov edi, PyIntObject_size
     call ap_malloc
-    mov r12, rax
-    mov qword [r12 + PyObject.ob_refcnt], 1
-    lea rax, [rel int_type]
-    mov [r12 + PyObject.ob_type], rax
-    lea rdi, [r12 + PyIntObject.mpz]
-    call __gmpz_init wrt ..plt
-    lea rdi, [r12 + PyIntObject.mpz]
-    mov rsi, rbx
-    call __gmpz_set_si wrt ..plt
-    mov rax, r12
-    mov edx, TAG_PTR
+    mov qword [rax + PyObject.ob_refcnt], 1
+    lea rcx, [rel int_type]
+    mov [rax + PyObject.ob_type], rcx
+    mov [rax + PyIntObject.ival], rbx
+    mov qword [rax + PyIntObject.compact], 1
     pop r12
     pop rbx
+    leave
+    ret
+END_FUNC int_new_compact
+
+;; ============================================================================
+;; int_from_i64_gmp(int64_t val) -> (rax=PyIntObject*, edx=TAG_PTR)
+;; Heap integer from an int64.  Compact: the mpz is created lazily, only if
+;; something actually needs it.  (Name kept for its many call sites.)
+;; ============================================================================
+DEF_FUNC_BARE int_from_i64_gmp
+    push rbp
+    mov rbp, rsp
+    call int_new_compact
+    mov edx, TAG_PTR
     leave
     ret
 END_FUNC int_from_i64_gmp
@@ -150,8 +223,11 @@ DEF_FUNC int_from_cstr
     mov qword [r12 + PyObject.ob_refcnt], 1
     lea rax, [rel int_type]
     mov [r12 + PyObject.ob_type], rax
+    mov qword [r12 + PyIntObject.compact], 0  ; GMP-backed
+    INT_NEED_MPZ r12
     lea rdi, [r12 + PyIntObject.mpz]
     call __gmpz_init wrt ..plt
+    INT_NEED_MPZ r12
     lea rdi, [r12 + PyIntObject.mpz]
     mov rsi, rbx
     mov edx, r13d
@@ -166,6 +242,7 @@ DEF_FUNC int_from_cstr
     leave
     ret
 .parse_fail:
+    INT_NEED_MPZ r12
     lea rdi, [r12 + PyIntObject.mpz]
     call __gmpz_clear wrt ..plt
     mov rdi, r12
@@ -716,11 +793,14 @@ DEF_FUNC int_from_cstr_base, IB_FRAME
     mov qword [rax + PyObject.ob_refcnt], 1
     lea rcx, [rel int_type]
     mov [rax + PyObject.ob_type], rcx
+    mov qword [rax + PyIntObject.compact], 0  ; GMP-backed
+    INT_NEED_MPZ rax
     lea rdi, [rax + PyIntObject.mpz]
     call __gmpz_init wrt ..plt
 
     ; Parse with GMP
     mov rax, [rbp - IB_OBJ]
+    INT_NEED_MPZ rax
     lea rdi, [rax + PyIntObject.mpz]
     mov rsi, [rbp - IB_BUF]
     mov rdx, [rbp - IB_BASE]
@@ -732,7 +812,9 @@ DEF_FUNC int_from_cstr_base, IB_FRAME
     cmp qword [rbp - IB_SIGN], 0
     je .no_negate
     mov rax, [rbp - IB_OBJ]
+    INT_NEED_MPZ rax
     lea rdi, [rax + PyIntObject.mpz]
+    INT_NEED_MPZ rax
     lea rsi, [rax + PyIntObject.mpz]
     call __gmpz_neg wrt ..plt
 .no_negate:
@@ -743,6 +825,7 @@ DEF_FUNC int_from_cstr_base, IB_FRAME
 
     ; Try to normalize to SmallInt if small enough
     mov rax, [rbp - IB_OBJ]
+    INT_NEED_MPZ rax
     lea rdi, [rax + PyIntObject.mpz]
     call __gmpz_get_si wrt ..plt
     mov rcx, rax
@@ -751,6 +834,7 @@ DEF_FUNC int_from_cstr_base, IB_FRAME
     ; Save small int value now — rcx will be clobbered by call
     mov [rbp - IB_SIGN], rcx
     mov rdi, [rbp - IB_OBJ]
+    INT_NEED_MPZ rdi
     lea rdi, [rdi + PyIntObject.mpz]
     mov rsi, rcx
     call __gmpz_cmp_si wrt ..plt
@@ -759,6 +843,7 @@ DEF_FUNC int_from_cstr_base, IB_FRAME
 
     ; Fits in i64: free GMP object, return as SmallInt
     mov rdi, [rbp - IB_OBJ]
+    INT_NEED_MPZ rdi
     lea rdi, [rdi + PyIntObject.mpz]
     call __gmpz_clear wrt ..plt
     mov rdi, [rbp - IB_OBJ]
@@ -777,6 +862,7 @@ DEF_FUNC int_from_cstr_base, IB_FRAME
 .gmp_parse_fail:
     ; Clean up allocated object and return parse error (NULL)
     mov rdi, [rbp - IB_OBJ]
+    INT_NEED_MPZ rdi
     lea rdi, [rdi + PyIntObject.mpz]
     call __gmpz_clear wrt ..plt
     mov rdi, [rbp - IB_OBJ]
@@ -810,11 +896,16 @@ END_FUNC int_from_cstr_base
 DEF_FUNC_BARE int_to_i64
     cmp edx, TAG_SMALLINT
     je .smallint
+    cmp qword [rdi + PyIntObject.compact], 0
+    jne .compact                ; heap int whose value already fits int64
     push rbp
     mov rbp, rsp
     lea rdi, [rdi + PyIntObject.mpz]
     call __gmpz_get_si wrt ..plt
     pop rbp
+    ret
+.compact:
+    mov rax, [rdi + PyIntObject.ival]
     ret
 .smallint:
     mov rax, rdi
@@ -848,6 +939,7 @@ DEF_FUNC_BARE int_repr
     push r12
     and rsp, -16           ; dynamically align RSP to 16 bytes
     mov rbx, rdi
+    INT_NEED_MPZ rbx
     lea rdi, [rbx + PyIntObject.mpz]
     mov esi, 10
     call __gmpz_sizeinbase wrt ..plt
@@ -863,6 +955,7 @@ DEF_FUNC_BARE int_repr
     mov r12, rax               ; r12 = C string buffer
     mov rdi, r12
     mov esi, 10
+    INT_NEED_MPZ rbx
     lea rdx, [rbx + PyIntObject.mpz]
     call __gmpz_get_str wrt ..plt
     mov rdi, r12
@@ -981,9 +1074,11 @@ DEF_FUNC_BARE int_hash
     mov rbp, rsp
     push rbx
     mov rbx, rdi
+    INT_NEED_MPZ rbx
     lea rdi, [rbx + PyIntObject.mpz]
     mov rsi, PYHASH_MODULUS
     call __gmpz_tdiv_ui wrt ..plt   ; rax = |n| mod modulus
+    INT_NEED_MPZ rbx
     mov ecx, [rbx + PyIntObject.mpz + 4]   ; _mp_size carries the sign
     test ecx, ecx
     jns .done
@@ -1013,6 +1108,7 @@ DEF_FUNC_BARE int_bool
 
     push rbp
     mov rbp, rsp
+    INT_NEED_MPZ rdi
     lea rdi, [rdi + PyIntObject.mpz]
     xor esi, esi
     call __gmpz_cmp_si wrt ..plt
@@ -1101,11 +1197,16 @@ DEF_FUNC_BARE int_add
     mov qword [rax + PyObject.ob_refcnt], 1
     lea rcx, [rel int_type]
     mov [rax + PyObject.ob_type], rcx
+    mov qword [rax + PyIntObject.compact], 0  ; GMP-backed
+    INT_NEED_MPZ rax
     lea rdi, [rax + PyIntObject.mpz]
     call __gmpz_init wrt ..plt
     mov rax, [rsp]          ; reload result ptr
+    INT_NEED_MPZ rax
     lea rdi, [rax + PyIntObject.mpz]
+    INT_NEED_MPZ rbx
     lea rsi, [rbx + PyIntObject.mpz]
+    INT_NEED_MPZ r12
     lea rdx, [r12 + PyIntObject.mpz]
     call __gmpz_add wrt ..plt
 
@@ -1194,11 +1295,16 @@ DEF_FUNC_BARE int_sub
     mov qword [rax + PyObject.ob_refcnt], 1
     lea rcx, [rel int_type]
     mov [rax + PyObject.ob_type], rcx
+    mov qword [rax + PyIntObject.compact], 0  ; GMP-backed
+    INT_NEED_MPZ rax
     lea rdi, [rax + PyIntObject.mpz]
     call __gmpz_init wrt ..plt
     mov rax, [rsp]
+    INT_NEED_MPZ rax
     lea rdi, [rax + PyIntObject.mpz]
+    INT_NEED_MPZ rbx
     lea rsi, [rbx + PyIntObject.mpz]
+    INT_NEED_MPZ r12
     lea rdx, [r12 + PyIntObject.mpz]
     call __gmpz_sub wrt ..plt
     test r13b, 1
@@ -1290,11 +1396,16 @@ DEF_FUNC_BARE int_mul
     mov qword [rax + PyObject.ob_refcnt], 1
     lea rcx, [rel int_type]
     mov [rax + PyObject.ob_type], rcx
+    mov qword [rax + PyIntObject.compact], 0  ; GMP-backed
+    INT_NEED_MPZ rax
     lea rdi, [rax + PyIntObject.mpz]
     call __gmpz_init wrt ..plt
     mov rax, [rsp]
+    INT_NEED_MPZ rax
     lea rdi, [rax + PyIntObject.mpz]
+    INT_NEED_MPZ rbx
     lea rsi, [rbx + PyIntObject.mpz]
+    INT_NEED_MPZ r12
     lea rdx, [r12 + PyIntObject.mpz]
     call __gmpz_mul wrt ..plt
     test r13b, 1
@@ -1394,6 +1505,7 @@ DEF_FUNC_BARE int_floordiv
     or r13b, 2
 .b_ready:
     ; Check for division by zero (GMP path)
+    INT_NEED_MPZ r12
     lea rdi, [r12 + PyIntObject.mpz]
     xor esi, esi
     call __gmpz_cmp_si wrt ..plt
@@ -1406,11 +1518,16 @@ DEF_FUNC_BARE int_floordiv
     mov qword [rax + PyObject.ob_refcnt], 1
     lea rcx, [rel int_type]
     mov [rax + PyObject.ob_type], rcx
+    mov qword [rax + PyIntObject.compact], 0  ; GMP-backed
+    INT_NEED_MPZ rax
     lea rdi, [rax + PyIntObject.mpz]
     call __gmpz_init wrt ..plt
     mov rax, [rsp]
+    INT_NEED_MPZ rax
     lea rdi, [rax + PyIntObject.mpz]
+    INT_NEED_MPZ rbx
     lea rsi, [rbx + PyIntObject.mpz]
+    INT_NEED_MPZ r12
     lea rdx, [r12 + PyIntObject.mpz]
     call __gmpz_fdiv_q wrt ..plt
     test r13b, 1
@@ -1526,6 +1643,7 @@ DEF_FUNC_BARE int_mod
     or r13b, 2
 .b_ready:
     ; Check for division by zero (GMP path)
+    INT_NEED_MPZ r12
     lea rdi, [r12 + PyIntObject.mpz]
     xor esi, esi
     call __gmpz_cmp_si wrt ..plt
@@ -1538,11 +1656,16 @@ DEF_FUNC_BARE int_mod
     mov qword [rax + PyObject.ob_refcnt], 1
     lea rcx, [rel int_type]
     mov [rax + PyObject.ob_type], rcx
+    mov qword [rax + PyIntObject.compact], 0  ; GMP-backed
+    INT_NEED_MPZ rax
     lea rdi, [rax + PyIntObject.mpz]
     call __gmpz_init wrt ..plt
     mov rax, [rsp]
+    INT_NEED_MPZ rax
     lea rdi, [rax + PyIntObject.mpz]
+    INT_NEED_MPZ rbx
     lea rsi, [rbx + PyIntObject.mpz]
+    INT_NEED_MPZ r12
     lea rdx, [r12 + PyIntObject.mpz]
     call __gmpz_fdiv_r wrt ..plt
     test r13b, 1
@@ -1602,9 +1725,13 @@ DEF_FUNC_BARE int_neg
     mov qword [r12 + PyObject.ob_refcnt], 1
     lea rax, [rel int_type]
     mov [r12 + PyObject.ob_type], rax
+    mov qword [r12 + PyIntObject.compact], 0  ; GMP-backed
+    INT_NEED_MPZ r12
     lea rdi, [r12 + PyIntObject.mpz]
     call __gmpz_init wrt ..plt
+    INT_NEED_MPZ r12
     lea rdi, [r12 + PyIntObject.mpz]
+    INT_NEED_MPZ rbx
     lea rsi, [rbx + PyIntObject.mpz]
     call __gmpz_neg wrt ..plt
     mov rax, r12
@@ -1628,6 +1755,7 @@ DEF_FUNC_BARE int_neg
     call int_from_i64_gmp       ; rdi still has original -2^63
     ; rax = GMP PyIntObject* with value -2^63
     mov rbx, rax
+    INT_NEED_MPZ rax
     lea rdi, [rax + PyIntObject.mpz]
     mov rsi, rdi
     call __gmpz_neg wrt ..plt   ; negate in place → +2^63
@@ -1642,9 +1770,50 @@ END_FUNC int_neg
 ;; int_unwrap(rdi) -> rdi
 ;; If rdi is a PyIntSubclassObject, extract the int_value.
 ;; If rdi is a SmallInt or GMP int, leave unchanged.
+;; ============================================================================
+;; int_is_integer(rdi: payload, edx: tag) -> eax: 1 if this value is an int
+;;
+;; True for SmallInt, bool, heap PyIntObject (compact or GMP) and int
+;; subclasses.  Builtins that used to test `tag == TAG_SMALLINT` need this
+;; instead, or they reject every integer that lives on the heap.
+;; ============================================================================
+global int_is_integer
+DEF_FUNC_BARE int_is_integer
+    cmp edx, TAG_SMALLINT
+    je .iii_yes
+    cmp edx, TAG_BOOL
+    je .iii_yes
+    test edx, TAG_RC_BIT
+    jz .iii_no
+    test rdi, rdi
+    jz .iii_no
+    mov rax, [rdi + PyObject.ob_type]
+    lea rcx, [rel int_type]
+    cmp rax, rcx
+    je .iii_yes
+    lea rcx, [rel bool_type]
+    cmp rax, rcx
+    je .iii_yes
+    mov rax, [rax + PyTypeObject.tp_flags]
+    test rax, TYPE_FLAG_INT_SUBCLASS
+    jnz .iii_yes
+.iii_no:
+    xor eax, eax
+    ret
+.iii_yes:
+    mov eax, 1
+    ret
+END_FUNC int_is_integer
+
 global int_unwrap
 DEF_FUNC_BARE int_unwrap
     ; rdi = payload, edx = tag -> rdi = unwrapped payload, edx = unwrapped tag
+    ;
+    ; Also flattens a COMPACT heap int to (ival, TAG_SMALLINT).  Nearly every
+    ; int operation starts by calling this, so that one line is what lets them
+    ; all take their existing int64 fast path for compact operands instead of
+    ; forcing a GMP promotion.
+.iuw_retry:
     cmp edx, TAG_SMALLINT
     je .iuw_done
     cmp edx, TAG_BOOL
@@ -1655,12 +1824,18 @@ DEF_FUNC_BARE int_unwrap
     mov rax, [rdi + PyObject.ob_type]
     lea rcx, [rel int_type]
     cmp rax, rcx
-    je .iuw_done                 ; exact int_type, edx already TAG_PTR
+    je .iuw_exact                ; exact int_type: compact or GMP?
     mov rax, [rax + PyTypeObject.tp_flags]
     test rax, TYPE_FLAG_INT_SUBCLASS
     jz .iuw_done                 ; not int subclass
     mov rdx, [rdi + PyIntSubclassObject.int_value_tag]   ; unwrapped tag
     mov rdi, [rdi + PyIntSubclassObject.int_value]       ; unwrapped payload
+    jmp .iuw_retry               ; the wrapped value may itself be a compact int
+.iuw_exact:
+    cmp qword [rdi + PyIntObject.compact], 0
+    je .iuw_done                 ; GMP-backed, edx already TAG_PTR
+    mov rdi, [rdi + PyIntObject.ival]
+    mov edx, TAG_SMALLINT
 .iuw_done:
     ret
 .iuw_bool:
@@ -1773,6 +1948,7 @@ DEF_FUNC int_compare
     cmp eax, TAG_SMALLINT
     jne .a_is_gmp
     ; a is SmallInt, b is GMP: cmp_si(b->mpz, a) then negate
+    INT_NEED_MPZ r13
     lea rdi, [r13 + PyIntObject.mpz]
     mov rsi, r12               ; SmallInt raw value
     call __gmpz_cmp_si wrt ..plt
@@ -1783,13 +1959,16 @@ DEF_FUNC int_compare
     cmp edx, TAG_SMALLINT
     jne .both_gmp
     ; a is GMP, b is SmallInt: cmp_si(a->mpz, b)
+    INT_NEED_MPZ r12
     lea rdi, [r12 + PyIntObject.mpz]
     mov rsi, r13               ; SmallInt raw value
     call __gmpz_cmp_si wrt ..plt
     mov r12d, eax
     jmp .dispatch_op
 .both_gmp:
+    INT_NEED_MPZ r12
     lea rdi, [r12 + PyIntObject.mpz]
+    INT_NEED_MPZ r13
     lea rsi, [r13 + PyIntObject.mpz]
     call __gmpz_cmp wrt ..plt
     mov r12d, eax
@@ -1888,8 +2067,11 @@ DEF_FUNC_BARE int_dealloc
     mov rbp, rsp
     push rbx
     mov rbx, rdi
+    cmp qword [rbx + PyIntObject.compact], 0
+    jne .compact                ; no mpz was ever initialized
     lea rdi, [rbx + PyIntObject.mpz]
     call __gmpz_clear wrt ..plt
+.compact:
     mov rdi, rbx
     call ap_free
     pop rbx
@@ -1961,11 +2143,16 @@ DEF_FUNC_BARE int_and
     mov qword [rax + PyObject.ob_refcnt], 1
     lea rcx, [rel int_type]
     mov [rax + PyObject.ob_type], rcx
+    mov qword [rax + PyIntObject.compact], 0  ; GMP-backed
+    INT_NEED_MPZ rax
     lea rdi, [rax + PyIntObject.mpz]
     call __gmpz_init wrt ..plt
     mov rax, [rsp]
+    INT_NEED_MPZ rax
     lea rdi, [rax + PyIntObject.mpz]
+    INT_NEED_MPZ rbx
     lea rsi, [rbx + PyIntObject.mpz]
+    INT_NEED_MPZ r12
     lea rdx, [r12 + PyIntObject.mpz]
     call __gmpz_and wrt ..plt
     test r13b, 1
@@ -2051,11 +2238,16 @@ DEF_FUNC_BARE int_or
     mov qword [rax + PyObject.ob_refcnt], 1
     lea rcx, [rel int_type]
     mov [rax + PyObject.ob_type], rcx
+    mov qword [rax + PyIntObject.compact], 0  ; GMP-backed
+    INT_NEED_MPZ rax
     lea rdi, [rax + PyIntObject.mpz]
     call __gmpz_init wrt ..plt
     mov rax, [rsp]
+    INT_NEED_MPZ rax
     lea rdi, [rax + PyIntObject.mpz]
+    INT_NEED_MPZ rbx
     lea rsi, [rbx + PyIntObject.mpz]
+    INT_NEED_MPZ r12
     lea rdx, [r12 + PyIntObject.mpz]
     call __gmpz_ior wrt ..plt
     test r13b, 1
@@ -2142,11 +2334,16 @@ DEF_FUNC_BARE int_xor
     mov qword [rax + PyObject.ob_refcnt], 1
     lea rcx, [rel int_type]
     mov [rax + PyObject.ob_type], rcx
+    mov qword [rax + PyIntObject.compact], 0  ; GMP-backed
+    INT_NEED_MPZ rax
     lea rdi, [rax + PyIntObject.mpz]
     call __gmpz_init wrt ..plt
     mov rax, [rsp]
+    INT_NEED_MPZ rax
     lea rdi, [rax + PyIntObject.mpz]
+    INT_NEED_MPZ rbx
     lea rsi, [rbx + PyIntObject.mpz]
+    INT_NEED_MPZ r12
     lea rdx, [r12 + PyIntObject.mpz]
     call __gmpz_xor wrt ..plt
     test r13b, 1
@@ -2189,10 +2386,14 @@ DEF_FUNC_BARE int_invert
     mov qword [rax + PyObject.ob_refcnt], 1
     lea rcx, [rel int_type]
     mov [rax + PyObject.ob_type], rcx
+    mov qword [rax + PyIntObject.compact], 0  ; GMP-backed
+    INT_NEED_MPZ rax
     lea rdi, [rax + PyIntObject.mpz]
     call __gmpz_init wrt ..plt
     mov rax, [rsp]
+    INT_NEED_MPZ rax
     lea rdi, [rax + PyIntObject.mpz]
+    INT_NEED_MPZ rbx
     lea rsi, [rbx + PyIntObject.mpz]
     call __gmpz_com wrt ..plt
     pop rax
@@ -2243,6 +2444,7 @@ DEF_FUNC int_lshift
     cmp ecx, TAG_SMALLINT
     je .shift_smallint
     ; GMP right operand: get as int64
+    INT_NEED_MPZ r12
     lea rdi, [r12 + PyIntObject.mpz]
     call __gmpz_get_si wrt ..plt
     mov r13, rax
@@ -2271,10 +2473,14 @@ DEF_FUNC int_lshift
     mov qword [rax + PyObject.ob_refcnt], 1
     lea rcx, [rel int_type]
     mov [rax + PyObject.ob_type], rcx
+    mov qword [rax + PyIntObject.compact], 0  ; GMP-backed
+    INT_NEED_MPZ rax
     lea rdi, [rax + PyIntObject.mpz]
     call __gmpz_init wrt ..plt
     mov rax, [rsp]
+    INT_NEED_MPZ rax
     lea rdi, [rax + PyIntObject.mpz]
+    INT_NEED_MPZ rbx
     lea rsi, [rbx + PyIntObject.mpz]
     mov rdx, r13           ; shift count
     call __gmpz_mul_2exp wrt ..plt
@@ -2335,6 +2541,7 @@ DEF_FUNC int_rshift
     ; Get shift amount
     cmp ecx, TAG_SMALLINT
     je .shift_smallint
+    INT_NEED_MPZ r12
     lea rdi, [r12 + PyIntObject.mpz]
     call __gmpz_get_si wrt ..plt
     mov r13, rax
@@ -2380,10 +2587,14 @@ DEF_FUNC int_rshift
     mov qword [rax + PyObject.ob_refcnt], 1
     lea rcx, [rel int_type]
     mov [rax + PyObject.ob_type], rcx
+    mov qword [rax + PyIntObject.compact], 0  ; GMP-backed
+    INT_NEED_MPZ rax
     lea rdi, [rax + PyIntObject.mpz]
     call __gmpz_init wrt ..plt
     mov rax, [rsp]
+    INT_NEED_MPZ rax
     lea rdi, [rax + PyIntObject.mpz]
+    INT_NEED_MPZ rbx
     lea rsi, [rbx + PyIntObject.mpz]
     mov rdx, r13
     call __gmpz_fdiv_q_2exp wrt ..plt
@@ -2438,6 +2649,7 @@ DEF_FUNC int_power
     je .exp_smallint
     push rbx                ; save base across GMP call
     push r14                ; save base_tag
+    INT_NEED_MPZ r12
     lea rdi, [r12 + PyIntObject.mpz]
     call __gmpz_get_si wrt ..plt
     pop r14                 ; restore base_tag
@@ -2469,10 +2681,14 @@ DEF_FUNC int_power
     mov qword [rax + PyObject.ob_refcnt], 1
     lea rcx, [rel int_type]
     mov [rax + PyObject.ob_type], rcx
+    mov qword [rax + PyIntObject.compact], 0  ; GMP-backed
+    INT_NEED_MPZ rax
     lea rdi, [rax + PyIntObject.mpz]
     call __gmpz_init wrt ..plt
     mov rax, [rsp]
+    INT_NEED_MPZ rax
     lea rdi, [rax + PyIntObject.mpz]
+    INT_NEED_MPZ rbx
     lea rsi, [rbx + PyIntObject.mpz]
     mov rdx, r13           ; exponent (unsigned)
     call __gmpz_pow_ui wrt ..plt
@@ -2501,6 +2717,7 @@ DEF_FUNC int_power
     ; Convert base to double (r14d = base_tag)
     cmp r14d, TAG_SMALLINT
     je .neg_exp_smallint
+    INT_NEED_MPZ rbx
     lea rdi, [rbx + PyIntObject.mpz]
     call __gmpz_get_d wrt ..plt
     jmp .neg_exp_have_base
@@ -2550,6 +2767,7 @@ DEF_FUNC int_true_divide
     ; Convert left to double (edx = left_tag, still valid)
     cmp edx, TAG_SMALLINT
     je .td_left_small
+    INT_NEED_MPZ rbx
     lea rdi, [rbx + PyIntObject.mpz]
     call __gmpz_get_d wrt ..plt
     jmp .td_have_left
@@ -2562,6 +2780,7 @@ DEF_FUNC int_true_divide
     ; Convert right to double (r13d = right_tag)
     cmp r13d, TAG_SMALLINT
     je .td_right_small
+    INT_NEED_MPZ r12
     lea rdi, [r12 + PyIntObject.mpz]
     call __gmpz_get_d wrt ..plt
     jmp .td_have_right

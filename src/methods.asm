@@ -1247,6 +1247,7 @@ DEF_FUNC str_method_format
     test rax, rax
     jz .fmt_use_repr
     pop rdi
+    mov edx, TAG_PTR            ; tp_str/int_repr dispatches on edx
     call rax
     jmp .fmt_heap_str
 .fmt_use_repr:
@@ -1255,6 +1256,7 @@ DEF_FUNC str_method_format
     mov rax, [rax + PyTypeObject.tp_repr]
     test rax, rax
     jz .fmt_skip_arg
+    mov edx, TAG_PTR            ; tp_repr/int_repr dispatches on edx
     call rax
     jmp .fmt_heap_str
 .fmt_inline_str:

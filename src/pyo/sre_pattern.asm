@@ -209,6 +209,49 @@ END_FUNC sre_pattern_do_match
 ; sre_pattern_match_method(self, args, nargs)
 ; Pattern.match(string, pos=0, endpos=sys.maxsize)
 ; ============================================================================
+;; ============================================================================
+;; sp_arg_i64(rdi: pointer to a fat arg slot) -> rax: int64
+;;
+;; pos/endpos arguments used to be read straight out of the payload word,
+;; which is only correct while every integer is a SmallInt.  Normalize here
+;; so bool, compact heap ints, GMP ints and int subclasses all work.
+;; Clobbers rax, rcx, rdx, rdi, rsi, r8-r11 like any call.
+;; ============================================================================
+extern int_unwrap
+extern int_to_i64
+DEF_FUNC_LOCAL sp_arg_i64
+    ; Preserves every register except rax; the callers keep the pattern,
+    ; the string and the argument count live across these calls.
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    push r8
+    push r9
+    push r10
+    push r11
+    mov rdx, [rdi + 8]         ; tag
+    mov rdi, [rdi]             ; payload
+    call int_unwrap
+    cmp edx, TAG_SMALLINT
+    je .sai_small
+    call int_to_i64
+    jmp .sai_out
+.sai_small:
+    mov rax, rdi
+.sai_out:
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    leave
+    ret
+END_FUNC sp_arg_i64
+
 DEF_FUNC sre_pattern_match_method
     ; rdi = args (fat array), rsi = nargs
     ; args[0] = self (pattern), args[1..] = user args
@@ -230,7 +273,9 @@ DEF_FUNC sre_pattern_match_method
     xor ecx, ecx
     cmp r8, 2
     jb .match_no_pos
-    mov rcx, [r12 + 16]       ; pos
+    lea rdi, [r12 + 16]
+    call sp_arg_i64
+    mov rcx, rax               ; pos
 .match_no_pos:
     mov rdx, rcx               ; rdx = pos
 
@@ -238,7 +283,9 @@ DEF_FUNC sre_pattern_match_method
     mov rcx, 0x7FFFFFFFFFFFFFFF
     cmp r8, 3
     jb .match_no_endpos
-    mov rcx, [r12 + 32]       ; endpos
+    lea rdi, [r12 + 32]
+    call sp_arg_i64
+    mov rcx, rax               ; endpos
 .match_no_endpos:
 
     mov rdi, rbx               ; pattern
@@ -279,14 +326,18 @@ DEF_FUNC sre_pattern_search_method
     xor edx, edx
     cmp r13, 2
     jb .search_no_pos
-    mov rdx, [r12 + 16]       ; pos
+    lea rdi, [r12 + 16]
+    call sp_arg_i64
+    mov rdx, rax               ; pos
 .search_no_pos:
 
     ; endpos (default max)
     mov rcx, 0x7FFFFFFFFFFFFFFF
     cmp r13, 3
     jb .search_no_endpos
-    mov rcx, [r12 + 32]       ; endpos
+    lea rdi, [r12 + 32]
+    call sp_arg_i64
+    mov rcx, rax               ; endpos
 .search_no_endpos:
 
     mov rdi, rbx
@@ -325,14 +376,18 @@ DEF_FUNC sre_pattern_fullmatch_method
     xor edx, edx
     cmp r13, 2
     jb .fm_no_pos
-    mov rdx, [r12 + 16]       ; pos
+    lea rdi, [r12 + 16]
+    call sp_arg_i64
+    mov rdx, rax               ; pos
 .fm_no_pos:
 
     ; endpos (default max)
     mov rcx, 0x7FFFFFFFFFFFFFFF
     cmp r13, 3
     jb .fm_no_endpos
-    mov rcx, [r12 + 32]       ; endpos
+    lea rdi, [r12 + 32]
+    call sp_arg_i64
+    mov rcx, rax               ; endpos
 .fm_no_endpos:
 
     mov rdi, rbx
@@ -474,7 +529,11 @@ DEF_FUNC sre_pattern_findall_method, FA_FRAME
     xor ecx, ecx
     cmp rdx, 2
     jb .fa_no_pos
-    mov rcx, [rdi + 32]       ; args[2] = pos
+    push rdi
+    lea rdi, [rdi + 32]
+    call sp_arg_i64
+    pop rdi
+    mov rcx, rax               ; args[2] = pos
 .fa_no_pos:
     push rcx                   ; save pos
 
@@ -482,7 +541,11 @@ DEF_FUNC sre_pattern_findall_method, FA_FRAME
     mov r8, 0x7FFFFFFFFFFFFFFF
     cmp rdx, 3
     jb .fa_no_endpos
-    mov r8, [rdi + 48]        ; args[3] = endpos
+    push rdi
+    lea rdi, [rdi + 48]
+    call sp_arg_i64
+    pop rdi
+    mov r8, rax                ; args[3] = endpos
 .fa_no_endpos:
     push r8                    ; save endpos
 
@@ -1857,14 +1920,18 @@ DEF_FUNC sre_pattern_finditer_method
     xor edx, edx
     cmp r13, 2
     jb .fi_no_pos
-    mov rdx, [r12 + 16]       ; pos
+    lea rdi, [r12 + 16]
+    call sp_arg_i64
+    mov rdx, rax               ; pos
 .fi_no_pos:
 
     ; endpos (default large)
     mov rcx, 0x7FFFFFFFFFFFFFFF
     cmp r13, 3
     jb .fi_no_endpos
-    mov rcx, [r12 + 32]       ; endpos
+    lea rdi, [r12 + 32]
+    call sp_arg_i64
+    mov rcx, rax               ; endpos
 .fi_no_endpos:
 
     ; scanner_new(pattern, string, pos, endpos)

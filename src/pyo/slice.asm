@@ -13,6 +13,7 @@
 %include "types.inc"
 %include "gc.inc"
 
+extern int_promote_mpz
 extern ap_malloc
 extern gc_alloc
 extern gc_track
@@ -167,12 +168,14 @@ pyobj_to_i64:
     push rbp
     mov rbp, rsp
     push rdi                     ; save obj ptr
+    INT_NEED_MPZ rdi
     lea rdi, [rdi + PyIntObject.mpz]
     extern __gmpz_fits_slong_p
     call __gmpz_fits_slong_p wrt ..plt
     test eax, eax
     jz .gmp_clamp               ; doesn't fit → clamp
     pop rdi                      ; restore obj ptr
+    INT_NEED_MPZ rdi
     lea rdi, [rdi + PyIntObject.mpz]
     extern __gmpz_get_si
     call __gmpz_get_si wrt ..plt
@@ -181,6 +184,7 @@ pyobj_to_i64:
 .gmp_clamp:
     ; Value too large for i64 — clamp based on sign
     pop rdi                      ; restore obj ptr
+    INT_NEED_MPZ rdi
     lea rdi, [rdi + PyIntObject.mpz]
     extern __gmpz_cmp_si
     xor esi, esi               ; compare with 0

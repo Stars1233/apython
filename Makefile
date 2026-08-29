@@ -9,6 +9,18 @@ NASM = nasm
 NASMFLAGS = -f elf64 -I include/ -g -F dwarf \
     -DVERSION_MAJOR=$(VERSION_MAJOR) -DVERSION_MINOR=$(VERSION_MINOR) \
     -DVERSION_PATCH=$(VERSION_PATCH) -DVERSION_STR=\"$(VERSION)\"
+# INT_STRESS=N boxes every |int| >= N as a heap PyIntObject, so the normal
+# test suite exercises the heap-int paths.  Use it to shake out code that only
+# handles SmallInt operands.  INT_STRESS=1 defaults the threshold to 8.
+ifdef INT_STRESS
+ifeq ($(INT_STRESS),1)
+INT_STRESS_THRESHOLD = 8
+else
+INT_STRESS_THRESHOLD = $(INT_STRESS)
+endif
+NASMFLAGS += -DINT_STRESS_BOX=$(INT_STRESS_THRESHOLD)
+endif
+
 CC = cc
 LDFLAGS = -no-pie -lc -lgmp
 TARGET = apython

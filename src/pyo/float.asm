@@ -10,6 +10,7 @@
 %include "object.inc"
 %include "types.inc"
 
+extern int_promote_mpz
 extern str_from_cstr
 extern str_from_data
 extern bool_true
@@ -88,6 +89,7 @@ DEF_FUNC_BARE float_to_f64
     push rbp
     mov rbp, rsp
     and rsp, -16              ; ensure 16-byte alignment for GMP call
+    INT_NEED_MPZ rdi
     lea rdi, [rdi + PyIntObject.mpz]
     call __gmpz_get_d wrt ..plt
     ; result in xmm0

@@ -7,6 +7,7 @@
 %include "marshal.inc"
 
 
+extern int_promote_mpz
 extern none_singleton
 extern bool_true
 extern bool_false
@@ -463,6 +464,8 @@ mdo_long:
     mov qword [r15 + PyObject.ob_refcnt], 1
     lea rax, [rel int_type]
     mov [r15 + PyObject.ob_type], rax
+    mov qword [r15 + PyIntObject.compact], 0  ; GMP-backed
+    INT_NEED_MPZ r15
     lea rdi, [r15 + PyIntObject.mpz]
     call __gmpz_init wrt ..plt
 
@@ -516,7 +519,9 @@ mdo_long:
     mov rdx, [rsp + 16 + 8]   ; shift amount (from outer stack frame)
     call __gmpz_mul_2exp wrt ..plt
     ; Add: gmpz_add(result, result, temp)
+    INT_NEED_MPZ r15
     lea rdi, [r15 + PyIntObject.mpz]
+    INT_NEED_MPZ r15
     lea rsi, [r15 + PyIntObject.mpz]
     mov rdx, rsp
     call __gmpz_add wrt ..plt
@@ -534,7 +539,9 @@ mdo_long:
     ; Apply sign
     test r13, r13
     jns .long_gmp_not_neg
+    INT_NEED_MPZ r15
     lea rdi, [r15 + PyIntObject.mpz]
+    INT_NEED_MPZ r15
     lea rsi, [r15 + PyIntObject.mpz]
     call __gmpz_neg wrt ..plt
 .long_gmp_not_neg:

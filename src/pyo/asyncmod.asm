@@ -143,6 +143,14 @@ DEF_FUNC asyncio_sleep_func
     mov rax, [rdi]             ; payload
     mov edx, [rdi + 8]        ; tag
 
+    ; Normalize: int_unwrap flattens bool, compact heap ints and int
+    ; subclasses to (value, TAG_SMALLINT); floats pass through untouched.
+    push rdi
+    mov rdi, rax
+    call int_unwrap
+    mov rax, rdi
+    pop rdi
+
     ; Convert to nanoseconds
     ; Supports: float (seconds), int (seconds)
     cmp edx, TAG_FLOAT
@@ -256,6 +264,15 @@ DEF_FUNC asyncio_wait_for_func, WF_FRAME
     pop rdi                    ; restore args
     mov rax, [rdi + 16]       ; args[1] payload
     mov edx, [rdi + 24]       ; args[1] tag
+
+    ; Normalize: int_unwrap flattens bool, compact heap ints and int
+    ; subclasses to (value, TAG_SMALLINT); floats pass through untouched.
+    extern int_unwrap
+    push rdi
+    mov rdi, rax
+    call int_unwrap
+    mov rax, rdi
+    pop rdi
 
     cmp edx, TAG_FLOAT
     je .wf_float_timeout

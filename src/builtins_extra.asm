@@ -8,6 +8,7 @@
 %include "frame.inc"
 
 ; External symbols used
+extern int_promote_mpz
 extern int_from_i64
 extern int_to_i64
 extern __gmpz_fits_slong_p
@@ -118,6 +119,7 @@ DEF_FUNC builtin_abs
 .abs_gmp_check:
 
     ; GMP int: check _mp_size at PyIntObject.mpz + 4
+    INT_NEED_MPZ rbx
     mov eax, [rbx + PyIntObject.mpz + 4]
     test eax, eax
     jl .abs_gmp_neg
@@ -132,6 +134,7 @@ DEF_FUNC builtin_abs
 
 .abs_gmp_neg:
     mov rdi, rbx
+    mov edx, TAG_PTR            ; int_neg forwards edx to int_unwrap
     call int_neg
     ; rdx = tag already set by callee
     add rsp, 8
@@ -993,6 +996,7 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     je .int_base_si_from_index
     ; heap int — check if it fits in i64 first
     push rax
+    INT_NEED_MPZ rax
     lea rdi, [rax + PyIntObject.mpz]
     call __gmpz_fits_slong_p wrt ..plt
     test eax, eax
@@ -1009,6 +1013,7 @@ DEF_FUNC builtin_int_fn, BI_FRAME
 .int_base_heap_int:
     ; rax = heap int object (GMP). Check if it fits in i64.
     push rax
+    INT_NEED_MPZ rax
     lea rdi, [rax + PyIntObject.mpz]
     call __gmpz_fits_slong_p wrt ..plt
     test eax, eax
@@ -2959,7 +2964,10 @@ END_FUNC builtin_eval_fn
 extern exc_RuntimeError_type
 
 global builtin_round_fn
-RND_FRAME equ 16
+RND_NDIGITS equ 16      ; historical: referenced as [rbp - RND_NDIGITS]
+RND_XPAY    equ 24
+RND_XTAG    equ 32
+RND_FRAME   equ 48
 DEF_FUNC builtin_round_fn, RND_FRAME
     push rbx
 
@@ -2970,9 +2978,14 @@ DEF_FUNC builtin_round_fn, RND_FRAME
     jmp .rnd_error
 
 .rnd_one_arg:
-    ; round(x) — return int
-    mov rax, [rdi]          ; payload
-    mov ecx, [rdi + 8]     ; tag
+    ; round(x) — return int.  Normalize first: int_unwrap flattens bool,
+    ; compact heap ints and int subclasses to (value, TAG_SMALLINT).
+    extern int_unwrap
+    mov rdx, [rdi + 8]
+    mov rdi, [rdi]
+    call int_unwrap
+    mov rax, rdi            ; payload
+    mov ecx, edx            ; tag
 
     cmp ecx, TAG_SMALLINT
     je .rnd_int_ret          ; int → return as-is
@@ -2993,8 +3006,10 @@ DEF_FUNC builtin_round_fn, RND_FRAME
     lea rcx, [rel int_type]
     cmp [rax + PyObject.ob_type], rcx
     jne .rnd_type_error
-    ; It's a heap int — convert to i64 and return as SmallInt
+    ; It's a heap int — convert to i64 and return as SmallInt.
+    ; int_to_i64 dispatches on edx, so the tag must be supplied.
     mov rdi, rax
+    mov edx, TAG_PTR
     call int_to_i64
     RET_TAG_SMALLINT
     pop rbx
@@ -3018,11 +3033,21 @@ DEF_FUNC builtin_round_fn, RND_FRAME
     ret
 
 .rnd_two_arg:
-    ; round(x, ndigits)
-    mov rax, [rdi]          ; x payload
-    mov ecx, [rdi + 8]     ; x tag
-    mov rbx, [rdi + 16]    ; ndigits payload
-    mov r8d, [rdi + 24]    ; ndigits tag
+    ; round(x, ndigits) — normalize both operands (see .rnd_one_arg)
+    extern int_unwrap
+    mov r9, rdi                 ; args array
+    mov rdx, [r9 + 8]
+    mov rdi, [r9]
+    call int_unwrap
+    mov [rbp - RND_XPAY], rdi
+    mov [rbp - RND_XTAG], rdx
+    mov rdx, [r9 + 24]
+    mov rdi, [r9 + 16]
+    call int_unwrap
+    mov rbx, rdi                ; ndigits payload
+    mov r8d, edx                ; ndigits tag
+    mov rax, [rbp - RND_XPAY]   ; x payload
+    mov ecx, [rbp - RND_XTAG]   ; x tag
 
     ; ndigits must be int
     cmp r8d, TAG_SMALLINT
@@ -3046,7 +3071,7 @@ DEF_FUNC builtin_round_fn, RND_FRAME
 .rnd_two_got_float:
 
     ; round(float, ndigits): multiply by 10^ndigits, round, divide
-    mov [rbp - RND_FRAME], rbx  ; save ndigits
+    mov [rbp - RND_NDIGITS], rbx  ; save ndigits
 
     ; Compute 10^ndigits (ndigits in rbx as int64)
     mov rax, 1               ; multiplier = 1
@@ -3138,7 +3163,11 @@ END_FUNC builtin_round_fn
 ; 3 args: pow(base, exp, mod) — modular exponentiation
 ; ============================================================================
 global builtin_pow_fn
-POW_FRAME equ 24
+POW_BASE equ 8
+POW_BTAG equ 16
+POW_EXP  equ 24
+POW_ETAG equ 32
+POW_FRAME equ 48
 DEF_FUNC builtin_pow_fn, POW_FRAME
     push rbx
     push r12
@@ -3157,11 +3186,35 @@ DEF_FUNC builtin_pow_fn, POW_FRAME
     mov rbx, [rdi + 16]    ; exp payload
     mov r8d, [rdi + 24]    ; exp tag
 
-    ; Both SmallInt? Delegate to int_power (handles GMP overflow)
-    cmp ecx, TAG_SMALLINT
-    jne .pow_two_float
-    cmp r8d, TAG_SMALLINT
-    jne .pow_two_float
+    ; Both integers?  Delegate to int_power, which handles SmallInt, heap
+    ; ints and int subclasses (and GMP overflow) itself.
+    extern int_is_integer
+    mov [rbp - POW_BTAG], rcx
+    mov [rbp - POW_ETAG], r8
+    mov r12, rax                ; base payload
+    mov r13, rbx                ; exp payload
+    mov rdi, rax
+    mov edx, ecx
+    call int_is_integer
+    test eax, eax
+    jz .pow_reload_float
+    mov rdi, r13
+    mov edx, [rbp - POW_ETAG]
+    call int_is_integer
+    test eax, eax
+    jz .pow_reload_float
+    mov rax, r12
+    mov rbx, r13
+    mov ecx, [rbp - POW_BTAG]
+    mov r8d, [rbp - POW_ETAG]
+    jmp .pow_two_int
+.pow_reload_float:
+    mov rax, r12
+    mov rbx, r13
+    mov ecx, [rbp - POW_BTAG]
+    mov r8d, [rbp - POW_ETAG]
+    jmp .pow_two_float
+.pow_two_int:
 
     ; int ** int — call int_power(base, exp, base_tag, exp_tag)
     extern int_power
@@ -3307,15 +3360,33 @@ DEF_FUNC builtin_pow_fn, POW_FRAME
     ret
 
 .pow_three:
-    ; pow(base, exp, mod) — modular exponentiation
-    mov rax, [rdi]          ; base
-    mov ecx, [rdi + 8]     ; base tag
-    mov rbx, [rdi + 16]    ; exp
-    mov r8d, [rdi + 24]    ; exp tag
-    mov r12, [rdi + 32]    ; mod
-    mov r9d, [rdi + 40]    ; mod tag
+    ; pow(base, exp, mod) — modular exponentiation.
+    ; Normalize the operands first: int_unwrap flattens bool, compact heap
+    ; ints and int subclasses to (value, TAG_SMALLINT).  Genuinely huge
+    ; GMP-backed ints stay TAG_PTR and are rejected below, as before.
+    extern int_unwrap
+    mov r13, rdi                ; args array
+    mov rdi, [r13]
+    mov edx, [r13 + 8]
+    call int_unwrap
+    mov [rbp - POW_BASE], rdi
+    mov [rbp - POW_BTAG], rdx
+    mov rdi, [r13 + 16]
+    mov edx, [r13 + 24]
+    call int_unwrap
+    mov [rbp - POW_EXP], rdi
+    mov [rbp - POW_ETAG], rdx
+    mov rdi, [r13 + 32]
+    mov edx, [r13 + 40]
+    call int_unwrap
+    mov r12, rdi                ; mod
+    mov r9d, edx                ; mod tag
+    mov rax, [rbp - POW_BASE]   ; base
+    mov ecx, [rbp - POW_BTAG]   ; base tag
+    mov rbx, [rbp - POW_EXP]    ; exp
+    mov r8d, [rbp - POW_ETAG]   ; exp tag
 
-    ; All must be SmallInt
+    ; All must now be plain int64
     cmp ecx, TAG_SMALLINT
     jne .pow_type_error
     cmp r8d, TAG_SMALLINT

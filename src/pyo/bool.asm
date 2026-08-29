@@ -312,6 +312,8 @@ bool_true:
     dd 0                    ; _mp_alloc (set by gmpz_init)
     dd 0                    ; _mp_size  (set by gmpz_set_si)
     dq 0                    ; _mp_d     (set by gmpz_init)
+    dq 0                    ; ival      (unused: singletons are GMP-backed)
+    dq 0                    ; compact   (0 = GMP-backed)
 
 ; False singleton - has embedded mpz_t value of 0
 align 8
@@ -322,6 +324,8 @@ bool_false:
     dd 0                    ; _mp_alloc
     dd 0                    ; _mp_size
     dq 0                    ; _mp_d
+    dq 0                    ; ival      (unused: singletons are GMP-backed)
+    dq 0                    ; compact   (0 = GMP-backed)
 
 ; bool_init() - Initialize True/False singletons' mpz values and set tp_base
 ; Must be called once at startup
