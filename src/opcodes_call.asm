@@ -455,6 +455,35 @@ DEF_FUNC op_call_function_ex
     VPOP rax
     mov [rbp - CFX_ARGS], rax
 
+    ; Normalize the argument sequence.  CPython emits CALL_FUNCTION_EX with
+    ; whatever iterable the * was applied to -- f(*aset), f(*"ab"), f(*gen),
+    ; f(*range(3)) all arrive here as-is.  Only tuple and list carry an
+    ; ob_item array that can be handed straight to tp_call; the old code
+    ; assumed "not a tuple" meant "a list" and read [obj+16] as the argument
+    ; count and [obj+32] as the Value array, which is memory corruption on
+    ; every other type and a plain dereference of the payload for f(*5).
+    V_TEST_PTR_M [rbp - CFX_ARGS], rcx
+    ja .cfex_args_not_iterable
+    mov rcx, [rax + PyObject.ob_type]
+    lea rdx, [rel tuple_type]
+    cmp rcx, rdx
+    je .cfex_args_ok
+    extern list_type
+    lea rdx, [rel list_type]
+    cmp rcx, rdx
+    je .cfex_args_ok
+    ; Anything else: materialise it through the iterator protocol.  This
+    ; raises for a non-iterable, which is what CPython does too.
+    extern tuple_type_call
+    lea rdi, [rel tuple_type]
+    lea rsi, [rbp - CFX_ARGS]
+    mov edx, 1
+    call tuple_type_call
+    mov rdi, [rbp - CFX_ARGS]       ; the original iterable, still owned
+    mov [rbp - CFX_ARGS], rax
+    call obj_decref
+.cfex_args_ok:
+
     ; Pop func
     VPOP_VAL rax, rdx
     mov [rbp - CFX_FUNC], rax
@@ -644,6 +673,11 @@ DEF_FUNC op_call_function_ex
     call obj_decref
 
     jmp .cfex_cleanup_shared
+
+.cfex_args_not_iterable:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "argument after * must be an iterable"
+    call raise_exception
 
 .cfex_cleanup:
     ; Clear kw_names_pending (safety)

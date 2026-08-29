@@ -1757,15 +1757,26 @@ DEF_FUNC op_binary_slice, BSLC_FRAME
     call slice_new
     mov [rbp - BSLC_SLICE], rax
 
-    ; Call mp_subscript(obj, slice, key_tag)
+    ; Call mp_subscript(obj, slice, key_tag).  All three of these loads ran
+    ; unguarded: the object may be an immediate, whose payload is not an
+    ; address, and a real object may have no mapping methods at all.  5[0:1]
+    ; and obj[1:2] on any user class were both SIGSEGV.
     mov rdi, [rbp - BSLC_OBJ]
+    cmp qword [rbp - BSLC_OTAG], TAG_PTR
+    jne .bslc_not_subscriptable
     mov rsi, rax           ; slice as key
     mov edx, TAG_PTR       ; key tag = slice (always TAG_PTR)
     mov rax, [rdi + PyObject.ob_type]
     mov rax, [rax + PyTypeObject.tp_as_mapping]
+    test rax, rax
+    jz .bslc_try_dunder
     mov rax, [rax + PyMappingMethods.mp_subscript]
+    test rax, rax
+    jz .bslc_try_dunder
     call rax               ; rsi is a slice pointer, already a Value
     V_UNPACK rax, rdx      ; mp_subscript returns a Value
+
+.bslc_have_result:
     SAVE_FAT_RESULT        ; save (rax,rdx) result
 
     ; DECREF slice (heap ptr, no tag needed)
@@ -1786,6 +1797,26 @@ DEF_FUNC op_binary_slice, BSLC_FRAME
     VPUSH_VAL rax, rdx
     leave
     DISPATCH
+
+.bslc_try_dunder:
+    ; A user class defines __getitem__ instead of filling mp_subscript.
+    mov rdi, [rbp - BSLC_OBJ]
+    mov rax, [rdi + PyObject.ob_type]
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_HEAPTYPE
+    jz .bslc_not_subscriptable
+    mov rsi, [rbp - BSLC_SLICE]
+    lea rdx, [rel dunder_getitem]
+    mov ecx, TAG_PTR
+    call dunder_call_2
+    V_UNPACK rax, rdx
+    test edx, edx
+    jz .bslc_not_subscriptable
+    jmp .bslc_have_result
+
+.bslc_not_subscriptable:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "object is not subscriptable"
+    call raise_exception
 END_FUNC op_binary_slice
 
 ;; ============================================================================
@@ -1819,16 +1850,25 @@ DEF_FUNC op_store_slice, SSLC_FRAME
     call slice_new
     mov [rbp - SSLC_SLICE], rax
 
-    ; Call mp_ass_subscript(obj, slice, value, key_tag, value_tag)
+    ; Call mp_ass_subscript(obj, slice, value, key_tag, value_tag).  As in
+    ; op_binary_slice, none of these three loads was guarded.
     mov rdi, [rbp - SSLC_OBJ]
+    cmp qword [rbp - SSLC_OTAG], TAG_PTR
+    jne .sslc_no_ass
     mov rsi, rax           ; slice
     mov rdx, [rbp - SSLC_VAL]
     mov r8, [rbp - SSLC_VTAG]     ; value tag
     V_PACK rdx, r8                 ; mp_ass_subscript takes a value Value
     mov rax, [rdi + PyObject.ob_type]
     mov rax, [rax + PyTypeObject.tp_as_mapping]
+    test rax, rax
+    jz .sslc_try_dunder
     mov rax, [rax + PyMappingMethods.mp_ass_subscript]
+    test rax, rax
+    jz .sslc_try_dunder
     call rax
+
+.sslc_stored:
 
     ; DECREF slice (heap ptr, no tag needed)
     mov rdi, [rbp - SSLC_SLICE]
@@ -1849,6 +1889,26 @@ DEF_FUNC op_store_slice, SSLC_FRAME
 
     leave
     DISPATCH
+
+.sslc_try_dunder:
+    ; A user class defines __setitem__ instead of filling mp_ass_subscript.
+    mov rdi, [rbp - SSLC_OBJ]
+    mov rax, [rdi + PyObject.ob_type]
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_HEAPTYPE
+    jz .sslc_no_ass
+    mov rsi, [rbp - SSLC_SLICE]
+    mov rdx, [rbp - SSLC_VAL]   ; dunder_call_3 takes the value's payload and
+    mov r8, [rbp - SSLC_VTAG]   ; tag separately, not a packed Value
+    extern dunder_setitem
+    extern dunder_call_3
+    lea rcx, [rel dunder_setitem]
+    call dunder_call_3
+    jmp .sslc_stored
+
+.sslc_no_ass:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "object does not support slice assignment"
+    call raise_exception
 END_FUNC op_store_slice
 
 ;; ============================================================================
