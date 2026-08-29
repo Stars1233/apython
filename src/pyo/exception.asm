@@ -279,14 +279,17 @@ DEF_FUNC exc_str
     test rax, rax
     jz .use_type_name
 
-    ; Check if it's a string
+    ; Check if it's a string.  rdx carries the fat return tag, so the
+    ; str_type address goes in r8 -- clobbering rdx here silently returned
+    ; a string with a garbage tag.
     mov rcx, [rax + PyObject.ob_type]
-    lea rdx, [rel str_type]
-    cmp rcx, rdx
+    lea r8, [rel str_type]
+    cmp rcx, r8
     jne .use_type_name
 
     ; INCREF and return the message
     INCREF rax
+    mov edx, TAG_PTR
     leave
     ret
 
