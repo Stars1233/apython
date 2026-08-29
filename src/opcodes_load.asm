@@ -68,7 +68,9 @@ LSA_CLASS    equ 16
 LSA_NAME     equ 24
 LSA_FLAG     equ 32
 LSA_ATTR_TAG equ 40
-LSA_FRAME    equ 48
+LSA_ATTR     equ 48
+LSA_BIND     equ 56
+LSA_FRAME    equ 64
 
 ;; ============================================================================
 ;; op_load_const - Load constant from co_consts[arg]
@@ -1070,6 +1072,24 @@ DEF_FUNC op_load_super_attr, LSA_FRAME
 
     pop rax                        ; restore attr
 
+    ; A staticmethod reached through super() must be unwrapped and pushed
+    ; unbound.  super().__new__(cls) supplies cls itself, so binding self here
+    ; would call __new__(cls, cls, ...) — and a staticmethod wrapper has no
+    ; tp_call, so it would raise "object is not callable" first.  LOAD_ATTR
+    ; does the same thing at .la_handle_staticmethod.
+    ; rax is the decoded payload here, not a Value, so the tag is what says
+    ; whether it is safe to dereference.
+    cmp qword [rbp - LSA_ATTR_TAG], TAG_PTR
+    jne .lsa_check_flag
+    mov rcx, [rax + PyObject.ob_type]
+    lea rdx, [rel staticmethod_type]
+    cmp rcx, rdx
+    je .lsa_staticmethod
+    lea rdx, [rel classmethod_type]
+    cmp rcx, rdx
+    je .lsa_classmethod
+
+.lsa_check_flag:
     ; Check method flag
     cmp qword [rbp - LSA_FLAG], 0
     je .lsa_attr_mode
@@ -1091,6 +1111,76 @@ DEF_FUNC op_load_super_attr, LSA_FRAME
     pop rax
     mov rdx, [rbp - LSA_ATTR_TAG]
     VPUSH_VAL rax, rdx             ; push attr
+    jmp .lsa_done
+
+.lsa_staticmethod:
+    ; Unwrap sm_callable, release the wrapper and self, push (NULL, callable)
+    ; in both flag modes — a staticmethod never binds self.
+    mov rcx, [rax + PyStaticMethodObject.sm_callable]
+    mov [rbp - LSA_ATTR], rcx
+    push rax                       ; save the wrapper
+    mov rdi, rcx
+    call obj_incref                ; we now own the callable
+    pop rdi                        ; the wrapper
+    call obj_decref
+    mov rdi, [rbp - LSA_SELF]
+    call obj_decref                ; not binding self
+    VPUSH_NULL
+    mov rax, [rbp - LSA_ATTR]
+    VPUSH_PTR rax
+    jmp .lsa_done
+
+.lsa_classmethod:
+    ; Unwrap cm_callable and bind it to the derived class, not to self:
+    ; super().cm() must pass type(self), matching .la_handle_classmethod.
+    mov rcx, [rax + PyClassMethodObject.cm_callable]
+    mov [rbp - LSA_ATTR], rcx
+    push rax                       ; save the wrapper
+    mov rdi, rcx
+    call obj_incref                ; we now own the callable
+    pop rdi                        ; the wrapper
+    call obj_decref
+
+    ; class = self when self is already a type, else type(self)
+    mov rdi, [rbp - LSA_SELF]
+    mov rax, [rdi + PyObject.ob_type]
+    lea rcx, [rel user_type_metatype]
+    cmp rax, rcx
+    je .lsa_cm_self_is_type
+    mov [rbp - LSA_BIND], rax
+    mov rdi, rax
+    call obj_incref
+    jmp .lsa_cm_have_class
+.lsa_cm_self_is_type:
+    mov [rbp - LSA_BIND], rdi
+    call obj_incref
+.lsa_cm_have_class:
+    mov rdi, [rbp - LSA_SELF]
+    call obj_decref                ; the class stands in for self
+
+    cmp qword [rbp - LSA_FLAG], 0
+    jne .lsa_cm_flag1
+
+    ; Attr mode: push NULL + a method bound to the class
+    mov rdi, [rbp - LSA_ATTR]
+    mov rsi, [rbp - LSA_BIND]
+    call method_new                ; INCREFs both
+    push rax                       ; save the bound method
+    mov rdi, [rbp - LSA_ATTR]
+    call obj_decref
+    mov rdi, [rbp - LSA_BIND]
+    call obj_decref
+    pop rax
+    VPUSH_NULL
+    VPUSH_PTR rax
+    jmp .lsa_done
+
+.lsa_cm_flag1:
+    ; Method mode: func deeper, the class as self on top
+    mov rax, [rbp - LSA_ATTR]
+    VPUSH_PTR rax
+    mov rax, [rbp - LSA_BIND]
+    VPUSH_PTR rax
     jmp .lsa_done
 
 .lsa_done:
