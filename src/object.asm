@@ -15,6 +15,7 @@ extern bool_false
 extern bool_true
 extern int_repr
 extern int_type
+extern int_to_i64
 extern float_type
 extern float_repr
 extern none_repr
@@ -257,6 +258,71 @@ DEF_FUNC obj_str
     leave
     ret
 END_FUNC obj_str
+
+; obj_as_index(rdi = payload, edx = tag) -> rax = int64
+;
+; Convert a Value to a C index, or raise TypeError.  Callers used to hand
+; whatever they were given straight to int_to_i64, which reads
+; PyIntObject.compact unconditionally: a float's payload is raw IEEE bits, so
+; range(1.5) dereferenced 0x3FF8000000000000, and None's fields decoded as a
+; garbage length, so range(None) hung.
+;
+; Takes the same (payload, tag) pair as int_to_i64 so a call site changes by
+; one word.  This is where the __index__ protocol belongs once heaptypes
+; carry real slots.
+DEF_FUNC_BARE obj_as_index
+    cmp edx, TAG_SMALLINT
+    je .oai_immediate
+    cmp edx, TAG_PTR
+    jne .oai_error
+    push rdi
+    push rdx
+    mov rax, [rdi + PyObject.ob_type]
+    REQUIRE_INT_TYPE rax, rcx, .oai_error_pop
+    pop rdx
+    pop rdi
+    jmp int_to_i64
+
+.oai_immediate:
+    mov rax, rdi
+    ret
+
+.oai_error_pop:
+    add rsp, 16
+.oai_error:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "object cannot be interpreted as an integer"
+    call raise_exception
+END_FUNC obj_as_index
+
+; value_number_methods(rdi = payload, edx = tag) -> rax = PyNumberMethods*, or 0
+;
+; Resolve a Value's numeric protocol table, immediates included.  Callers that
+; want an arithmetic slot need this rather than assuming int: builtin_divmod
+; called int_floordiv unconditionally, so divmod(1.5, 1.5) crashed even though
+; 1.5 // 1.5 has always worked.
+DEF_FUNC_BARE value_number_methods
+    cmp edx, TAG_SMALLINT
+    je .vnm_int
+    cmp edx, TAG_FLOAT
+    je .vnm_float
+    cmp edx, TAG_PTR
+    jne .vnm_none
+    mov rax, [rdi + PyObject.ob_type]
+    mov rax, [rax + PyTypeObject.tp_as_number]
+    ret
+.vnm_int:
+    lea rax, [rel int_type]
+    mov rax, [rax + PyTypeObject.tp_as_number]
+    ret
+.vnm_float:
+    lea rax, [rel float_type]
+    mov rax, [rax + PyTypeObject.tp_as_number]
+    ret
+.vnm_none:
+    xor eax, eax
+    ret
+END_FUNC value_number_methods
 
 ; hash_not_implemented() -> never returns
 ; Used as tp_hash for unhashable types (dict, list, set).

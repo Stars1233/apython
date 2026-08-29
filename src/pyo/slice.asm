@@ -25,6 +25,8 @@ extern obj_dealloc
 extern obj_decref
 extern str_from_cstr
 extern none_singleton
+extern bool_type
+extern exc_ValueError_type
 extern int_type
 extern type_type
 extern slice_traverse
@@ -160,6 +162,13 @@ pyobj_to_i64:
     lea rax, [rel none_singleton]
     cmp rdi, rax
     je .is_none
+    ; Everything below treats the payload as a PyIntObject, so it has to be
+    ; one: a float's payload is raw IEEE bits, and "abc"[::1.5] handed those
+    ; to INT_NEED_MPZ.
+    cmp esi, TAG_PTR
+    jne .not_an_index
+    mov rax, [rdi + PyObject.ob_type]
+    REQUIRE_INT_TYPE rax, rcx, .not_an_index
     ; GMP int: check if it fits in i64, clamp if not
     push rbp
     mov rbp, rsp
@@ -200,6 +209,10 @@ pyobj_to_i64:
 .is_none:
     mov rax, 0x7FFFFFFFFFFFFFFF  ; sentinel for "not specified"
     ret
+.not_an_index:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "slice indices must be integers or None"
+    call raise_exception
 END_FUNC pyobj_to_i64
 
 ;; ============================================================================
@@ -230,6 +243,11 @@ DEF_FUNC slice_indices
 .step_is_none:
     mov rax, 1
 .have_step:
+    ; A zero step reaches `neg rcx` and then `div rcx` in every caller's
+    ; slice loop: "abc"[::0] and [10,11][10:0:0] were SIGFPE.  One check
+    ; here covers all six callers.
+    test rax, rax
+    jz .step_is_zero
     mov r15, rax           ; r15 = step
 
     ; Get start (default: 0 if step>0, length-1 if step<0)
@@ -316,6 +334,10 @@ DEF_FUNC slice_indices
     pop rbx
     leave
     ret
+.step_is_zero:
+    lea rdi, [rel exc_ValueError_type]
+    CSTRING rsi, "slice step cannot be zero"
+    call raise_exception
 END_FUNC slice_indices
 
 ;; ============================================================================
@@ -348,10 +370,16 @@ DEF_FUNC slice_getattr
     test eax, eax
     jz .sg_step
 
-    ; Unknown attribute
-    lea rdi, [rel exc_AttributeError_type]
-    CSTRING rsi, "slice object has no such attribute"
-    call raise_exception
+    ; Unknown attribute.  Every other tp_getattr signals "not found" with a
+    ; NULL return and lets the caller decide; raising here meant
+    ; hasattr(slice(1,2), "indices") propagated the AttributeError instead of
+    ; answering False, and getattr(s, "x", default) could not reach its
+    ; default -- raise_exception never comes back.
+    RET_NULL
+    pop r12
+    pop rbx
+    leave
+    ret
 
 .sg_start:
     mov rax, [rbx + PySliceObject.start]

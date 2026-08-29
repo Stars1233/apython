@@ -1723,6 +1723,21 @@ DEF_FUNC_BARE int_mod
 END_FUNC int_mod
 
 ;; ============================================================================
+;; int_pos(rdi = operand Value) -> the operand, unchanged
+;; Unary positive: identity for ints.  The slot existed as a zero, which is
+;; indistinguishable from "this type has no unary +" -- so +x could not be
+;; type-checked without rejecting a heap int too.
+;; ============================================================================
+DEF_FUNC_BARE int_pos
+    mov rax, rdi
+    V_TEST_PTR rax, rcx
+    ja .ip_immediate
+    inc qword [rax + PyObject.ob_refcnt]
+.ip_immediate:
+    ret
+END_FUNC int_pos
+
+;; ============================================================================
 ;; int_neg(PyObject *a) -> PyObject*
 ;; ============================================================================
 DEF_FUNC_BARE int_neg
@@ -2885,7 +2900,7 @@ int_number_methods:
     dq 0                    ; nb_divmod       +32
     dq int_power            ; nb_power        +40
     dq int_neg              ; nb_negative     +48
-    dq 0                    ; nb_positive     +56
+    dq int_pos              ; nb_positive     +56
     dq 0                    ; nb_absolute     +64
     dq int_bool             ; nb_bool         +72
     dq int_invert           ; nb_invert       +80

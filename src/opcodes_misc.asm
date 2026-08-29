@@ -1119,16 +1119,22 @@ DEF_FUNC_BARE op_unary_negative
     ; Get nb_negative: type -> tp_as_number -> nb_negative (SmallInt-aware)
     cmp r8d, TAG_SMALLINT
     je .neg_smallint_type
+    cmp r8d, TAG_PTR            ; a float took the fast path above; anything
+    jne .neg_type_error         ; else that is not a pointer has no type
     mov rax, [rdi + PyObject.ob_type]
-    jmp .neg_have_type
-.neg_bool_type:
-    lea rax, [rel bool_type]
     jmp .neg_have_type
 .neg_smallint_type:
     lea rax, [rel int_type]
 .neg_have_type:
+    ; Neither of these loads was guarded.  A type with no numeric protocol
+    ; -- None, str, and every user class, whose tp_as_number is zero -- read
+    ; nb_negative from address 0 and called it.
     mov rax, [rax + PyTypeObject.tp_as_number]
+    test rax, rax
+    jz .neg_type_error
     mov rax, [rax + PyNumberMethods.nb_negative]
+    test rax, rax
+    jz .neg_type_error
 
     ; Call nb_negative(rdi = operand Value)
     mov rdx, r8                ; tag
@@ -1154,6 +1160,11 @@ DEF_FUNC_BARE op_unary_negative
     btc rdi, 63
     VPUSH_FLOAT rdi, r15
     DISPATCH
+
+.neg_type_error:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "bad operand type for unary -"
+    call raise_exception
 END_FUNC op_unary_negative
 
 ;; ============================================================================
@@ -1168,16 +1179,19 @@ DEF_FUNC_BARE op_unary_invert
 
     cmp r8d, TAG_SMALLINT
     je .inv_smallint_type
+    cmp r8d, TAG_PTR            ; ~ has no float case at all, so a float's
+    jne .inv_type_error         ; raw bits were used as an address
     mov rax, [rdi + PyObject.ob_type]
-    jmp .inv_have_type
-.inv_bool_type:
-    lea rax, [rel bool_type]
     jmp .inv_have_type
 .inv_smallint_type:
     lea rax, [rel int_type]
 .inv_have_type:
     mov rax, [rax + PyTypeObject.tp_as_number]
+    test rax, rax
+    jz .inv_type_error
     mov rax, [rax + PyNumberMethods.nb_invert]
+    test rax, rax
+    jz .inv_type_error
 
     ; Call nb_invert(rdi = operand Value)
     mov rdx, r8                ; tag
@@ -1194,6 +1208,11 @@ DEF_FUNC_BARE op_unary_invert
     add rsp, 16
     VPUSH rax
     DISPATCH
+
+.inv_type_error:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "bad operand type for unary ~"
+    call raise_exception
 END_FUNC op_unary_invert
 
 ;; ============================================================================
@@ -2243,16 +2262,25 @@ extern obj_decref
     jmp eval_exception_unwind
 
 .ci1_unary_positive:
-    ; +x — for most numeric types, no-op. For bool, call nb_positive.
-    ; Check whether TOS is a bool singleton
+    ; +x is a no-op for a numeric type and a TypeError for everything else.
+    ; This used to pass every object through unchanged, so +None was None
+    ; and +[1] was [1].
     mov rax, [r13 - 8]
     V_TEST_PTR rax, rcx
-    ja .ci1_pos_done
+    ja .ci1_pos_done            ; an int or float immediate: +x is x
     mov rcx, [rax + PyObject.ob_type]
     extern bool_type
     lea r8, [rel bool_type]
     cmp rcx, r8
-    jne .ci1_pos_done
+    je .ci1_pos_bool
+    mov rcx, [rcx + PyTypeObject.tp_as_number]
+    test rcx, rcx
+    jz .ci1_pos_error
+    cmp qword [rcx + PyNumberMethods.nb_positive], 0
+    je .ci1_pos_error
+    jmp .ci1_pos_done
+
+.ci1_pos_bool:
     ; Bool singleton: replace TOS with SmallInt 0 or 1
     ; +True is 1 and +False is 0, as plain ints.  Both are well inside the
     ; immediate range, so the encode needs no overflow check.
@@ -2265,6 +2293,11 @@ extern obj_decref
     mov [r13 - 8], rax
 .ci1_pos_done:
     DISPATCH
+
+.ci1_pos_error:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "bad operand type for unary +"
+    call raise_exception
 
 .ci1_list_to_tuple:
     ; Convert list to tuple

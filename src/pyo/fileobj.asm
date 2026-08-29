@@ -127,8 +127,18 @@ DEF_FUNC fileobj_write
     ; args[0] = self (file obj), args[1] = string to write
     mov rax, rdi                ; rax = args
     mov rdi, [rax]              ; rdi = self (file obj)
-    mov rsi, [rax + 8]        ; rsi = string arg payload (16-byte stride)
+    mov rsi, [rax + 8]        ; rsi = the string argument Value
     V_UNPACK rsi, r9       ; args[1]
+
+    ; The data pointer is taken below, so the argument has to be a str: an
+    ; immediate's payload is not an address, and nothing else carries its
+    ; text at PyStrObject.data.  write(5) read and emitted wild memory.
+    cmp r9d, TAG_PTR
+    jne .write_type_error
+    mov rcx, [rsi + PyObject.ob_type]
+    lea rdx, [rel str_type]
+    cmp rcx, rdx
+    jne .write_type_error
 
     ; Get fd
     mov rcx, [rdi + PyFileObject.file_fd]
@@ -156,6 +166,11 @@ DEF_FUNC fileobj_write
     extern exc_TypeError_type
     lea rdi, [rel exc_TypeError_type]
     CSTRING rsi, "write() takes exactly 1 argument"
+    call raise_exception
+
+.write_type_error:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "write() argument must be str"
     call raise_exception
 END_FUNC fileobj_write
 

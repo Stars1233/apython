@@ -35,6 +35,7 @@ extern str_type
 extern type_getattr
 extern type_repr
 extern type_type
+extern raise_exception
 extern exc_traverse
 extern exc_clear_gc
 extern tuple_new
@@ -513,12 +514,32 @@ END_FUNC exc_setattr
 extern tuple_type
 DEF_FUNC_BARE exc_isinstance
     ; rdi = exc, rsi = target type (or tuple of types)
-    ; Check if rsi is a tuple
+    ; The target is an arbitrary expression -- `except 5:` is legal syntax --
+    ; so classify it before dereferencing.  An immediate's payload is not an
+    ; address; this walked ob_type off it.  Putting the check here covers all
+    ; five callers and the recursion through nested tuples below.
+    V_TEST_PTR rsi, rax
+    ja .not_a_class
     mov rax, [rsi + PyObject.ob_type]
     lea rcx, [rel tuple_type]
     cmp rax, rcx
     je .tuple_match
 
+    ; A class is anything whose type is one of the three metatypes: the
+    ; builtin exception types carry exc_metatype, a `class E(Exception)`
+    ; heaptype carries user_type_metatype, and everything else type_type.
+    lea rcx, [rel exc_metatype]
+    cmp rax, rcx
+    je .is_class
+    lea rcx, [rel type_type]
+    cmp rax, rcx
+    je .is_class
+    extern user_type_metatype
+    lea rcx, [rel user_type_metatype]
+    cmp rax, rcx
+    jne .not_a_class
+
+.is_class:
     ; Single type: walk tp_base chain
     mov rax, [rdi + PyExceptionObject.ob_type]
 .walk:
@@ -531,6 +552,10 @@ DEF_FUNC_BARE exc_isinstance
 .match:
     mov eax, 1
     ret
+.not_a_class:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "catching classes that do not inherit from BaseException is not allowed"
+    call raise_exception
 .not_match:
     xor eax, eax
     ret

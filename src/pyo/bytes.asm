@@ -19,6 +19,7 @@ extern obj_dealloc
 extern raise_exception
 extern exc_IndexError_type
 extern exc_TypeError_type
+extern exc_ValueError_type
 extern int_type
 extern bool_type
 extern int_to_i64
@@ -299,15 +300,35 @@ END_FUNC bytes_subscript
 DEF_FUNC bytes_contains
     V_UNPACK rsi, rdx           ; decode the operand Value
     push rbx
+    push r12
+    push r13
+    push r14
 
     mov rbx, rdi               ; bytes obj
 
-    ; Value must be an int (0-255)
-    mov rdi, rsi
-    call int_to_i64
-    ; rax = byte value
+    ; An int (or bool) searches for a single byte; a bytes searches for a
+    ; subsequence.  The operand used to go straight to int_to_i64, which
+    ; reads PyIntObject.compact unconditionally -- so 1.5 in b"ab" read raw
+    ; f64 bits as an address -- and the subsequence form was missing
+    ; entirely, so b"a" in b"xaby" was False.
+    cmp edx, TAG_SMALLINT
+    je .bc_byte
+    cmp edx, TAG_PTR
+    jne .bc_type_error
+    mov rax, [rsi + PyObject.ob_type]
+    lea rcx, [rel bytes_type]
+    cmp rax, rcx
+    je .bc_sub
+    REQUIRE_INT_TYPE rax, rcx, .bc_type_error
 
-    ; Search
+.bc_byte:
+    mov rdi, rsi                ; int_to_i64 takes the payload plus the tag
+    call int_to_i64             ; in edx, not a packed Value
+    ; A byte value outside 0..255 can never be present, and CPython raises
+    ; for it rather than answering False.
+    cmp rax, 255
+    ja .bc_range_error
+
     mov rcx, [rbx + PyBytesObject.ob_size]
     lea rdx, [rbx + PyBytesObject.data]
     xor r8d, r8d               ; index
@@ -320,17 +341,62 @@ DEF_FUNC bytes_contains
     inc r8
     jmp .bc_loop
 
+.bc_sub:
+    ; Naive subsequence search: needle is short in practice.
+    mov r12, [rsi + PyBytesObject.ob_size]      ; needle length
+    mov r13, [rbx + PyBytesObject.ob_size]      ; haystack length
+    lea r14, [rsi + PyBytesObject.data]         ; needle data
+    test r12, r12
+    jz .bc_found                                ; b"" is in everything
+    mov rax, r13
+    sub rax, r12
+    js .bc_not_found                            ; needle longer than haystack
+    xor r8d, r8d                                ; start offset
+.bc_sub_outer:
+    cmp r8, rax
+    jg .bc_not_found
+    xor r9d, r9d                                ; offset within the needle
+.bc_sub_inner:
+    cmp r9, r12
+    jge .bc_found
+    mov rcx, r8
+    add rcx, r9
+    movzx edi, byte [rbx + PyBytesObject.data + rcx]
+    cmp dil, [r14 + r9]
+    jne .bc_sub_next
+    inc r9
+    jmp .bc_sub_inner
+.bc_sub_next:
+    inc r8
+    jmp .bc_sub_outer
+
 .bc_found:
     mov eax, 1
+    pop r14
+    pop r13
+    pop r12
     pop rbx
     leave
     ret
 
 .bc_not_found:
     xor eax, eax
+    pop r14
+    pop r13
+    pop r12
     pop rbx
     leave
     ret
+
+.bc_type_error:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "a bytes-like object is required"
+    call raise_exception
+
+.bc_range_error:
+    lea rdi, [rel exc_ValueError_type]
+    CSTRING rsi, "byte must be in range(0, 256)"
+    call raise_exception
 END_FUNC bytes_contains
 
 ;; ============================================================================

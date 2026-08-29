@@ -496,7 +496,7 @@ DEF_FUNC sys_exit_func
     REQUIRE_INT_TYPE rax, rcx, .exit_nonzero
 
 .exit_int:
-    V_PACK rdi, rdx
+    ; int_to_i64 takes the payload plus the tag in edx, not a packed Value.
     call int_to_i64
     mov edi, eax
     call sys_exit

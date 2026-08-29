@@ -32,6 +32,7 @@ extern build_class_pending
 extern sys_write
 extern range_new
 extern int_to_i64
+extern obj_as_index
 extern init_iter_types
 extern obj_repr
 extern eval_frame
@@ -738,7 +739,8 @@ DEF_FUNC builtin_range
     ; range(stop): start=0, stop=args[0], step=1
     mov rdi, [rbx]             ; args[0]
     V_UNPACK rdi, rdx
-    call int_to_i64
+    call obj_as_index      ; raises for a non-integer, rather than
+                           ; decoding its payload as one
     mov rsi, rax               ; stop
     xor edi, edi               ; start = 0
     mov edx, 1                 ; step = 1
@@ -749,11 +751,13 @@ DEF_FUNC builtin_range
     ; range(start, stop): step=1
     mov rdi, [rbx]             ; args[0]
     V_UNPACK rdi, rdx
-    call int_to_i64
+    call obj_as_index      ; raises for a non-integer, rather than
+                           ; decoding its payload as one
     mov r13, rax               ; start
     mov rdi, [rbx + 8]
     V_UNPACK rdi, rdx       ; args[1]
-    call int_to_i64
+    call obj_as_index      ; raises for a non-integer, rather than
+                           ; decoding its payload as one
     mov rsi, rax               ; stop
     mov rdi, r13               ; start
     mov edx, 1                 ; step = 1
@@ -764,19 +768,33 @@ DEF_FUNC builtin_range
     ; range(start, stop, step)
     mov rdi, [rbx]             ; args[0]
     V_UNPACK rdi, rdx
-    call int_to_i64
+    call obj_as_index      ; raises for a non-integer, rather than
+                           ; decoding its payload as one
     push rax                   ; start
     mov rdi, [rbx + 8]
     V_UNPACK rdi, rdx       ; args[1]
-    call int_to_i64
+    call obj_as_index      ; raises for a non-integer, rather than
+                           ; decoding its payload as one
     push rax                   ; stop
     mov rdi, [rbx + 16]
     V_UNPACK rdi, rdx       ; args[2]
-    call int_to_i64
+    call obj_as_index      ; raises for a non-integer, rather than
+                           ; decoding its payload as one
     mov rdx, rax               ; step
+    ; A zero step makes range_obj_sq_length divide by zero and makes
+    ; range_iter_next advance by nothing, so len(range(0,5,0)) was SIGFPE
+    ; and `for i in range(0,5,0)` hung.
+    test rdx, rdx
+    jz .range_zero_step
     pop rsi                    ; stop
     pop rdi                    ; start
     call range_new
+    jmp .range_done
+
+.range_zero_step:
+    lea rdi, [rel exc_ValueError_type]
+    CSTRING rsi, "range() arg 3 must not be zero"
+    call raise_exception
 
 .range_done:
     pop r13

@@ -220,28 +220,47 @@ DEF_FUNC builtin_divmod
     mov r12, [rdi + 8]          ; args[1] = b
     V_UNPACK r12, r14
 
-    ; Compute a // b: int_floordiv(rdi=left, edx=left_tag, rsi=right, ecx=right_tag)
+    ; Dispatch through the left operand's numeric protocol, the way the //
+    ; and % operators do.  This used to call int_floordiv unconditionally,
+    ; so divmod(1.5, 1.5) handed raw f64 bits to integer code.
+    mov rdi, rbx
+    mov edx, r13d
+    extern value_number_methods
+    call value_number_methods
+    test rax, rax
+    jz .divmod_type_error
+    mov rax, [rax + PyNumberMethods.nb_floor_divide]
+    test rax, rax
+    jz .divmod_type_error
+
     mov rdi, rbx
     mov edx, r13d
     mov rsi, r12
     mov ecx, r14d
     V_PACK rdi, rdx
     V_PACK rsi, rcx
-    extern int_floordiv
-    call int_floordiv
+    call rax
     V_UNPACK rax, rdx           ; int_floordiv returns a Value
     mov r15, rax                ; r15 = quotient payload
     push rdx                   ; save quotient tag (stack slot)
 
-    ; Compute a % b: int_mod(rdi=left, edx=left_tag, rsi=right, ecx=right_tag)
+    ; Same for the remainder.
+    mov rdi, rbx
+    mov edx, r13d
+    call value_number_methods
+    test rax, rax
+    jz .divmod_type_error
+    mov rax, [rax + PyNumberMethods.nb_remainder]
+    test rax, rax
+    jz .divmod_type_error
+
     mov rdi, rbx
     mov edx, r13d
     mov rsi, r12
     mov ecx, r14d
     V_PACK rdi, rdx
     V_PACK rsi, rcx
-    extern int_mod
-    call int_mod
+    call rax
     V_UNPACK rax, rdx           ; int_mod returns a Value
     mov r12, rax                ; r12 = remainder payload
     mov r13, rdx                ; r13 = remainder tag
@@ -270,6 +289,11 @@ DEF_FUNC builtin_divmod
 .divmod_error:
     lea rdi, [rel exc_TypeError_type]
     CSTRING rsi, "divmod expected 2 arguments"
+    call raise_exception
+
+.divmod_type_error:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "unsupported operand type(s) for divmod()"
     call raise_exception
 END_FUNC builtin_divmod
 
