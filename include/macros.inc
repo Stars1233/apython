@@ -491,6 +491,50 @@ TAG_IO_WAIT  equ 8           ; payload = fd | (direction << 32) — async I/O se
     jne %2
 %endmacro
 
+; The same, for the container families.  Each exact-type test these replace
+; rejected a subclass: [1] == MyList([1]) was silently False, and
+; {**MyDict(...)} was a TypeError.
+%macro REQUIRE_LIST_TYPE 3
+    lea %2, [rel list_type]
+    cmp %1, %2
+    je %%list_like
+    test qword [%1 + PyTypeObject.tp_flags], TYPE_FLAG_LIST_SUBCLASS
+    jz %3
+%%list_like:
+%endmacro
+
+%macro REQUIRE_TUPLE_TYPE 3
+    lea %2, [rel tuple_type]
+    cmp %1, %2
+    je %%tuple_like
+    test qword [%1 + PyTypeObject.tp_flags], TYPE_FLAG_TUPLE_SUBCLASS
+    jz %3
+%%tuple_like:
+%endmacro
+
+%macro REQUIRE_DICT_TYPE 3
+    lea %2, [rel dict_type]
+    cmp %1, %2
+    je %%dict_like
+    test qword [%1 + PyTypeObject.tp_flags], TYPE_FLAG_DICT_SUBCLASS
+    jz %3
+%%dict_like:
+%endmacro
+
+; Require that a type object is str or a str subclass; jump away if not.
+; The exact-type test these replace rejected a str subclass everywhere it
+; appeared -- "a" + MyStr("b") was a TypeError, and "a" == MyStr("a") was
+; silently False.
+; %1 = register holding the PyTypeObject*, %2 = scratch, %3 = fail label.
+%macro REQUIRE_STR_TYPE 3
+    lea %2, [rel str_type]
+    cmp %1, %2
+    je %%str_like
+    test qword [%1 + PyTypeObject.tp_flags], TYPE_FLAG_STR_SUBCLASS
+    jz %3
+%%str_like:
+%endmacro
+
 ; Require that a type object is int, bool, or an int subclass; jump away if
 ; not.  Python's bool derives from int, so an object indexed with True is
 ; indexed with 1 -- and bool_type carries tp_base = int_type but no

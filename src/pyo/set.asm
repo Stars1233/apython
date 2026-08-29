@@ -1188,7 +1188,7 @@ set_type:
     dq 0                        ; tp_base
     dq 0                        ; tp_dict
     dq 0                        ; tp_mro
-    dq TYPE_FLAG_HAVE_GC                        ; tp_flags
+    dq TYPE_FLAG_HAVE_GC | TYPE_FLAG_SET_SUBCLASS ; tp_flags
     dq 0                        ; tp_bases
     dq set_traverse                        ; tp_traverse
     dq set_clear_gc                        ; tp_clear
@@ -1220,7 +1220,7 @@ frozenset_type:
     dq 0                        ; tp_base
     dq 0                        ; tp_dict
     dq 0                        ; tp_mro
-    dq TYPE_FLAG_HAVE_GC                        ; tp_flags
+    dq TYPE_FLAG_HAVE_GC | TYPE_FLAG_SET_SUBCLASS ; tp_flags
     dq 0                        ; tp_bases
     dq set_traverse                        ; tp_traverse
     dq set_clear_gc                        ; tp_clear

@@ -27,6 +27,8 @@ extern exc_AttributeError_type
 extern exc_TypeError_type
 extern func_type
 extern type_type
+extern tuple_type_call
+extern ap_memcpy
 extern eval_exception_unwind
 extern none_singleton
 extern dunder_lookup
@@ -54,6 +56,211 @@ extern frame_free
 ;; rdi = type (the class)
 ;; Returns: new instance with refcnt=1, ob_type=type, inst_dict=new dict
 ;; ============================================================================
+;; ============================================================================
+;; builtin_sub_init_base(rdi = instance)
+;;
+;; Give the embedded base portion of a builtin-container subclass a valid
+;; empty state.  instance_new zeroes the body, which is already a correct
+;; empty tuple, but list and dict want a real backing array -- a NULL
+;; ob_item is how list marks "currently being sorted", so the first
+;; l.append() on a fresh subclass instance reported "list modified during
+;; sort".
+;; ============================================================================
+;; ============================================================================
+;; str_sub_new(rdi = subclass type, rsi = args, rdx = nargs) -> instance
+;;
+;; A str keeps its characters inline, so its instances are variable-size and
+;; instance_new -- which allocates exactly tp_basicsize -- cannot make one.
+;; A str subclass therefore has to be built here, from the argument, the way
+;; str's own constructor would.  Without this the instance was an empty
+;; string of the right type, so CustomStr("100") was "".
+;;
+;; These instances carry no __dict__: tp_dictoffset is 0 for the family,
+;; because there is no fixed offset past inline data to put one at.
+;; ============================================================================
+SSN_TYPE  equ 8
+SSN_SRC   equ 16
+SSN_FRAME equ 32
+
+global str_sub_new
+DEF_FUNC str_sub_new, SSN_FRAME
+    push rbx
+    push r12
+
+    mov [rbp - SSN_TYPE], rdi
+    mov qword [rbp - SSN_SRC], 0
+    test rdx, rdx
+    jz .ssn_empty
+
+    ; str(x) of the argument gives a plain str to copy from.
+    mov rdi, [rsi]
+    extern obj_str
+    call obj_str
+    V_UNPACK rax, rdx
+    test edx, edx
+    jz .ssn_failed
+    mov [rbp - SSN_SRC], rax
+    mov rbx, rax
+    mov r12, [rbx + PyStrObject.ob_size]
+    jmp .ssn_have_src
+
+.ssn_empty:
+    xor ebx, ebx
+    xor r12d, r12d
+
+.ssn_have_src:
+    ; header + length + 8, matching str_new_heap's padding for the 8-byte
+    ; comparisons ap_strcmp does
+    lea rdi, [r12 + PyStrObject.data + 8]
+    mov rsi, [rbp - SSN_TYPE]
+    extern gc_alloc
+    call gc_alloc                   ; sets ob_refcnt and ob_type
+    mov [rax + PyStrObject.ob_size], r12
+    mov qword [rax + PyStrObject.ob_hash], -1
+    mov qword [rax + PyStrObject.data + r12], 0
+
+    test rbx, rbx
+    jz .ssn_no_copy
+    push rax
+    lea rdi, [rax + PyStrObject.data]
+    lea rsi, [rbx + PyStrObject.data]
+    mov rdx, r12
+    call ap_memcpy
+    mov rdi, [rbp - SSN_SRC]
+    call obj_decref
+    pop rax
+
+.ssn_no_copy:
+    ; gc_alloc does not INCREF the type it stamps into ob_type.
+    push rax
+    mov rdi, [rbp - SSN_TYPE]
+    call obj_incref
+    pop rax
+    mov rdi, rax
+    push rax
+    extern gc_track
+    call gc_track
+    pop rax
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.ssn_failed:
+    xor eax, eax
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC str_sub_new
+
+;; ============================================================================
+;; tuple_sub_fill(rdi = instance, rsi = args, rdx = nargs)
+;;
+;; A tuple is immutable and has no __init__, so a subclass cannot be filled
+;; after the fact the way list, dict and set are -- the contents have to be
+;; put in at construction, which is what tuple.__new__ does.  Without this a
+;; tuple subclass was always empty.
+;; ============================================================================
+TSF_INST  equ 8
+TSF_TMP   equ 16
+TSF_FRAME equ 32
+
+global tuple_sub_fill
+DEF_FUNC tuple_sub_fill, TSF_FRAME
+    push rbx
+    push r12
+    push r13
+
+    mov [rbp - TSF_INST], rdi
+    mov qword [rbp - TSF_TMP], 0
+    mov qword [rdi + PyTupleObject.ob_hash], -1
+    test rdx, rdx
+    jz .tsf_done                ; Sub() is the empty tuple
+
+    ; Materialise the argument, so any iterable works.
+    push rsi
+    lea rdi, [rel tuple_type]
+    mov edx, 1
+    pop rsi
+    call tuple_type_call
+    mov [rbp - TSF_TMP], rax
+    mov rbx, rax
+    mov r12, [rbx + PyTupleObject.ob_size]
+    test r12, r12
+    jz .tsf_release
+
+    ; Own copy of the item array: the temporary is about to be released.
+    mov rdi, r12
+    shl rdi, 3
+    call ap_malloc
+    mov r13, rax
+    mov rcx, [rbp - TSF_INST]
+    mov [rcx + PyTupleObject.ob_item], r13
+    mov [rcx + PyTupleObject.ob_size], r12
+
+    xor ecx, ecx
+.tsf_copy:
+    cmp rcx, r12
+    jge .tsf_release
+    mov rax, [rbx + PyTupleObject.ob_item]
+    mov rdi, [rax + rcx * 8]
+    mov [r13 + rcx * 8], rdi
+    push rcx
+    INCREF_V rdi, rax
+    pop rcx
+    inc rcx
+    jmp .tsf_copy
+
+.tsf_release:
+    mov rdi, [rbp - TSF_TMP]
+    mov qword [rbp - TSF_TMP], 0
+    call obj_decref
+
+.tsf_done:
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC tuple_sub_fill
+
+global builtin_sub_init_base
+DEF_FUNC builtin_sub_init_base
+    push rbx
+    mov rbx, rdi
+    mov rax, [rbx + PyObject.ob_type]
+    mov rax, [rax + PyTypeObject.tp_flags]
+
+    test rax, TYPE_FLAG_LIST_SUBCLASS
+    jnz .bsib_list
+    test rax, TYPE_FLAG_DICT_SUBCLASS | TYPE_FLAG_SET_SUBCLASS
+    jnz .bsib_dict
+    jmp .bsib_done              ; tuple: zeroed is already an empty tuple
+
+.bsib_list:
+    mov edi, 4 * 8
+    call ap_malloc
+    mov [rbx + PyListObject.ob_item], rax
+    mov qword [rbx + PyListObject.allocated], 4
+    jmp .bsib_done
+
+.bsib_dict:
+    mov edi, DICT_INIT_CAP * DICT_ENTRY_SIZE
+    call ap_malloc
+    mov [rbx + PyDictObject.entries], rax
+    mov rdi, rax
+    mov ecx, DICT_INIT_CAP * DICT_ENTRY_SIZE / 8
+    xor eax, eax
+    rep stosq
+    mov qword [rbx + PyDictObject.capacity], DICT_INIT_CAP
+
+.bsib_done:
+    pop rbx
+    leave
+    ret
+END_FUNC builtin_sub_init_base
+
 DEF_FUNC instance_new
     push rbx
     push r12
@@ -543,16 +750,27 @@ DEF_FUNC instance_dealloc, ID_FRAME
     DECREF_VAL rdi, rsi
 .no_int_value:
 
-    ; DECREF_VAL each __slots__ slot
-    ; nslots = (tp_basicsize - PyInstanceObject_size) / 8
+    ; DECREF_VAL each __slots__ slot.  Slots start after the whole instance
+    ; header, which for a container subclass is the embedded base plus the
+    ; dict word -- not PyInstanceObject_size.  Assuming the latter made a
+    ; list subclass treat its own `allocated` and `ob_item` fields as slot
+    ; values and DECREF them.
     push r12
     mov rax, [rbx + PyObject.ob_type]
+    mov rcx, [rax + PyTypeObject.tp_dictoffset]
+    test rcx, rcx
+    jz .id_no_dict_hdr
+    add rcx, 8
+    jmp .id_have_hdr
+.id_no_dict_hdr:
+    mov rcx, PyInstanceObject_size
+.id_have_hdr:
     mov rax, [rax + PyTypeObject.tp_basicsize]
-    sub rax, PyInstanceObject_size
+    sub rax, rcx
     jle .no_slots                ; no slots
     shr rax, 3                  ; nslots
     mov r12, rax                ; r12 = remaining count
-    lea rcx, [rbx + PyInstanceObject_size]  ; rcx = first slot address
+    add rcx, rbx                ; rcx = first slot address
 
 .slot_decref_loop:
     push rcx
@@ -613,6 +831,31 @@ END_FUNC builtin_sub_dealloc
 ;; Try __repr__ dunder, fall back to "<instance>".
 ;; rdi = instance
 ;; ============================================================================
+;; ============================================================================
+;; base_slot(rdi = type, rsi = slot byte offset) -> rax = the slot, or 0
+;;
+;; Walk past the heaptypes in the tp_base chain to the concrete builtin
+;; underneath and read one of its slots.  A subclass of list embeds a list,
+;; so printing it should print the list -- "<instance>" is only right for a
+;; class that derives from object.
+;; ============================================================================
+DEF_FUNC_LOCAL base_slot
+.bs_walk:
+    mov rdi, [rdi + PyTypeObject.tp_base]
+    test rdi, rdi
+    jz .bs_none
+    mov rax, [rdi + PyTypeObject.tp_flags]
+    test rax, TYPE_FLAG_HEAPTYPE
+    jnz .bs_walk
+    mov rax, [rdi + rsi]
+    leave
+    ret
+.bs_none:
+    xor eax, eax
+    leave
+    ret
+END_FUNC base_slot
+
 IR_EXC   equ 8
 IR_FRAME equ 16
 DEF_FUNC instance_repr, IR_FRAME
@@ -631,7 +874,28 @@ DEF_FUNC instance_repr, IR_FRAME
     jnz .done
     DUNDER_RAISED [rbp - IR_EXC], .failed   ; __repr__ ran and raised
 
-    ; Fall back to "<instance>"
+    ; No __repr__.  If a builtin lies under this class, use its repr: a
+    ; list subclass should print as a list.
+    mov rdi, [rbx + PyObject.ob_type]
+    mov rsi, PyTypeObject.tp_repr
+    call base_slot
+    test rax, rax
+    jz .ir_generic
+    ; object_type.tp_repr is instance_repr itself, so a plain class would
+    ; call straight back into here.
+    lea rcx, [rel instance_repr]
+    cmp rax, rcx
+    je .ir_generic
+    mov rdi, rbx
+    call rax
+    ; The base slot returns a str pointer.  Some of them (str_str) set only
+    ; rax, and callers still read rdx as the tag -- builtin_print treats a
+    ; zero tag as "skip this argument", which is why printing a str subclass
+    ; produced nothing.
+    mov edx, TAG_PTR
+    jmp .done
+
+.ir_generic:
     lea rdi, [rel instance_repr_cstr]
     call str_from_cstr
 
@@ -668,7 +932,25 @@ DEF_FUNC instance_str, IS_FRAME
     jnz .done
     DUNDER_RAISED [rbp - IS_EXC], .failed   ; __str__ ran and raised
 
-    ; Fall back to instance_repr
+    ; No __str__.  Prefer the underlying builtin's tp_str, then __repr__.
+    mov rdi, [rbx + PyObject.ob_type]
+    mov rsi, PyTypeObject.tp_str
+    call base_slot
+    test rax, rax
+    jz .is_generic
+    lea rcx, [rel instance_str]
+    cmp rax, rcx
+    je .is_generic
+    mov rdi, rbx
+    call rax
+    ; The base slot returns a str pointer.  Some of them (str_str) set only
+    ; rax, and callers still read rdx as the tag -- builtin_print treats a
+    ; zero tag as "skip this argument", which is why printing a str subclass
+    ; produced nothing.
+    mov edx, TAG_PTR
+    jmp .done
+
+.is_generic:
     mov rdi, rbx
     call instance_repr
 
@@ -905,14 +1187,57 @@ DEF_FUNC type_call
     ; DECREF name string
     mov rdi, r15
     call obj_decref
+    ; A str subclass is variable-size, so it cannot come from instance_new.
+    mov rax, [rbx + PyTypeObject.tp_flags]
+    test rax, TYPE_FLAG_STR_SUBCLASS
+    jz .tc_plain_new
+    mov rdi, rbx
+    mov rsi, r12
+    mov rdx, r13
+    call str_sub_new
+    mov r14, rax
+    jmp .lookup_init
+
+.tc_plain_new:
     ; Default: instance_new(type)
     mov rdi, rbx
     call instance_new
     mov r14, rax                ; r14 = instance
+
+    ; A subclass of a builtin container embeds that container's layout, so
+    ; the embedded part needs the empty state its own constructor would have
+    ; given it before __init__ fills it.
+    mov rax, [rbx + PyTypeObject.tp_flags]
+    test rax, TYPE_FLAG_LIST_SUBCLASS | TYPE_FLAG_TUPLE_SUBCLASS | \
+              TYPE_FLAG_DICT_SUBCLASS | TYPE_FLAG_SET_SUBCLASS
+    jz .lookup_init
+    mov rdi, r14
+    call builtin_sub_init_base
+
+    ; tuple has no __init__ to fill it later, so do it now.
+    mov rax, [rbx + PyTypeObject.tp_flags]
+    test rax, TYPE_FLAG_TUPLE_SUBCLASS
+    jz .lookup_init
+    mov rdi, r14
+    mov rsi, r12
+    mov rdx, r13
+    call tuple_sub_fill
     jmp .lookup_init
 
 .new_found:
     ; rax = __new__ func ptr, edx = tag
+    ; __new__ is conventionally a staticmethod -- it is registered that way
+    ; for the container types, and a user class writing @staticmethod gets
+    ; the same wrapper -- so unwrap before calling.  The wrapper itself has
+    ; no tp_call.
+    cmp edx, TAG_PTR
+    jne .tc_new_unwrapped
+    mov rcx, [rax + PyObject.ob_type]
+    lea rdx, [rel staticmethod_type]
+    cmp rcx, rdx
+    jne .tc_new_unwrapped
+    mov rax, [rax + PyStaticMethodObject.sm_callable]
+.tc_new_unwrapped:
     mov [rbp - TC_NEW_FUNC], rax
     ; DECREF name string
     mov rdi, r15

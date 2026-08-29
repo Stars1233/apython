@@ -1102,7 +1102,44 @@ DEF_FUNC op_load_super_attr, LSA_FRAME
     jmp .lsa_done
 
 .lsa_attr_mode:
-    ; Attr mode: DECREF self, push NULL + attr
+    ; Attr mode: super().meth is a *bound* method, exactly as it is in
+    ; CPython -- the lookup goes through the descriptor protocol.  Pushing
+    ; the raw function meant super().__init__(*args) called it with no self,
+    ; so the first argument stood in for self and the real instance was
+    ; never touched: a list subclass whose __init__ did super().__init__(*a)
+    ; came out empty.  The non-star form works because the compiler emits
+    ; method mode for it, which is why this went unnoticed.
+    cmp qword [rbp - LSA_ATTR_TAG], TAG_PTR
+    jne .lsa_attr_plain
+    mov rcx, [rax + PyObject.ob_type]
+    extern func_type
+    lea rdx, [rel func_type]
+    cmp rcx, rdx
+    je .lsa_attr_bind
+    ; A builtin method is equally a descriptor: super().__init__ on a list
+    ; subclass resolves to list.__init__, which is one of these.
+    extern builtin_func_type
+    lea rdx, [rel builtin_func_type]
+    cmp rcx, rdx
+    jne .lsa_attr_plain
+
+.lsa_attr_bind:
+    mov [rbp - LSA_ATTR], rax
+    mov rdi, rax
+    mov rsi, [rbp - LSA_SELF]
+    call method_new                ; INCREFs both
+    push rax                       ; the bound method, ours
+    mov rdi, [rbp - LSA_ATTR]
+    call obj_decref                ; release our ref on the function
+    mov rdi, [rbp - LSA_SELF]
+    call obj_decref                ; and on self
+    pop rax
+    VPUSH_NULL
+    VPUSH_PTR rax
+    jmp .lsa_done
+
+.lsa_attr_plain:
+    ; Not a function: a plain class attribute, returned as-is.
     push rax                      ; save attr
     mov rdi, [rbp - LSA_SELF]
     call obj_decref

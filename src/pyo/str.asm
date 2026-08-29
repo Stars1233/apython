@@ -316,9 +316,7 @@ DEF_FUNC str_concat
     jne .concat_type_error
     ; Verify right operand is a string (ob_type == str_type)
     mov rax, [rsi + PyObject.ob_type]
-    lea rdx, [rel str_type]
-    cmp rax, rdx
-    jne .concat_type_error
+    REQUIRE_STR_TYPE rax, rdx, .concat_type_error
 
     push rbx
     push r12
@@ -936,9 +934,7 @@ DEF_FUNC str_compare
     jz .not_string
     ; Heap pointer — verify ob_type == str_type
     mov rax, [rsi + PyObject.ob_type]
-    lea rdx, [rel str_type]
-    cmp rax, rdx
-    jne .not_string
+    REQUIRE_STR_TYPE rax, rdx, .not_string
     lea rsi, [rsi + PyStrObject.data]
 
     ; --- Resolve left operand to a data pointer (-> rdi) ---
@@ -1127,9 +1123,7 @@ DEF_FUNC str_contains
     cmp edx, TAG_PTR
     jne .str_contains_type_error
     mov rax, [rsi + PyObject.ob_type]
-    lea rcx, [rel str_type]
-    cmp rax, rcx
-    jne .str_contains_type_error
+    REQUIRE_STR_TYPE rax, rcx, .str_contains_type_error
 
     extern ap_strstr
     lea rdi, [rdi + PyStrObject.data]

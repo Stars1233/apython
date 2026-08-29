@@ -1620,7 +1620,12 @@ DEF_FUNC type_from_parts
     ; Inherit type flag subclass bits from base type
     mov rax, [rbp-48]
     mov rax, [rax + PyTypeObject.tp_flags]
-    and rax, TYPE_FLAG_INT_SUBCLASS | TYPE_FLAG_STR_SUBCLASS
+    ; The container bits were defined and set on the base types but never
+    ; inherited, so nothing downstream could tell a list subclass from any
+    ; other user class.
+    and rax, TYPE_FLAG_INT_SUBCLASS | TYPE_FLAG_STR_SUBCLASS | \
+             TYPE_FLAG_LIST_SUBCLASS | TYPE_FLAG_TUPLE_SUBCLASS | \
+             TYPE_FLAG_DICT_SUBCLASS | TYPE_FLAG_SET_SUBCLASS
     or [r12 + PyTypeObject.tp_flags], rax
 
     ; If base is an exception type, inherit exception-compatible methods
@@ -1680,6 +1685,17 @@ DEF_FUNC type_from_parts
     mov rax, [rbp-48]              ; base class
     test rax, rax
     jz .bc_no_set_base
+
+    ; Not for the container families.  Inheriting tp_new sends type_call
+    ; straight to the base constructor, which returns a plain list (or
+    ; tuple, dict, set) and never reaches __init__ -- so the subclass name
+    ; was lost and its __init__ never ran.  Leaving tp_new NULL routes them
+    ; through .normal_type_call, the same path an ordinary class takes.
+    mov rcx, [r12 + PyTypeObject.tp_flags]
+    test rcx, TYPE_FLAG_LIST_SUBCLASS | TYPE_FLAG_TUPLE_SUBCLASS | \
+              TYPE_FLAG_DICT_SUBCLASS | TYPE_FLAG_SET_SUBCLASS | \
+              TYPE_FLAG_STR_SUBCLASS
+    jnz .bc_container_sub
     mov rdi, [rax + PyTypeObject.tp_new]
     test rdi, rdi
     jz .bc_no_set_base
@@ -1698,6 +1714,28 @@ DEF_FUNC type_from_parts
     extern builtin_sub_dealloc
     lea rax, [rel builtin_sub_dealloc]
     mov [r12 + PyTypeObject.tp_dealloc], rax
+
+.bc_container_sub:
+    ; Inherit the base's protocol slots.  These have no Python-level dunder
+    ; that instance_getattr could route to, so a subclass with none of them
+    ; is not a container at all: d["k"] = 1 raised, because a heaptype's
+    ; tp_as_mapping is NULL.  type_install_slots runs after this and
+    ; overrides whichever ones the class defines for itself.
+    mov rax, [rbp-48]              ; base class
+    mov rcx, [rax + PyTypeObject.tp_as_number]
+    mov [r12 + PyTypeObject.tp_as_number], rcx
+    mov rcx, [rax + PyTypeObject.tp_as_sequence]
+    mov [r12 + PyTypeObject.tp_as_sequence], rcx
+    mov rcx, [rax + PyTypeObject.tp_as_mapping]
+    mov [r12 + PyTypeObject.tp_as_mapping], rcx
+    mov rcx, [rax + PyTypeObject.tp_hash]
+    mov [r12 + PyTypeObject.tp_hash], rcx
+    mov rcx, [rax + PyTypeObject.tp_richcompare]
+    mov [r12 + PyTypeObject.tp_richcompare], rcx
+    mov rcx, [rax + PyTypeObject.tp_iter]
+    mov [r12 + PyTypeObject.tp_iter], rcx
+    mov rcx, [rax + PyTypeObject.tp_iternext]
+    mov [r12 + PyTypeObject.tp_iternext], rcx
 
 .bc_no_set_base:
 

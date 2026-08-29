@@ -2022,9 +2022,7 @@ DEF_FUNC op_dict_update
 
     ; mapping must be a dict (for now)
     mov rax, [rsi + PyObject.ob_type]
-    lea rdx, [rel dict_type]
-    cmp rax, rdx
-    jne .du_type_error
+    REQUIRE_DICT_TYPE rax, rdx, .du_type_error
 
     ; Iterate over source dict entries and copy to target
     ; Source dict: entries at [rsi + PyDictObject.entries], capacity at +24
@@ -2100,9 +2098,7 @@ DEF_FUNC op_dict_merge
 
     ; mapping must be a dict
     mov rax, [rsi + PyObject.ob_type]
-    lea rdx, [rel dict_type]
-    cmp rax, rdx
-    jne .dm_type_error
+    REQUIRE_DICT_TYPE rax, rdx, .dm_type_error
 
     ; Iterate over source dict entries
     mov rax, [rsi + PyDictObject.capacity]

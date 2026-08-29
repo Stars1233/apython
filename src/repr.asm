@@ -560,10 +560,41 @@ DEF_FUNC set_repr, 24
 
     mov rbx, rdi
 
-    ; Check empty set
+    ; Check empty set.  An empty frozenset or subclass is Name(), not set().
     cmp qword [rbx + PyDictObject.ob_size], 0
     jne .sr_notempty
+    extern set_type
+    mov rax, [rbx + PyObject.ob_type]
+    lea rcx, [rel set_type]
+    cmp rax, rcx
+    jne .sr_empty_named
     lea rdi, [rel set_repr_empty_str]
+    call str_from_cstr_heap
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.sr_empty_named:
+    ; "Name()" -- built with str_from_cstr into a small stack buffer.
+    mov rsi, [rax + PyTypeObject.tp_name]
+    lea rdi, [rbp-24]           ; the three locals are unused on this path
+    xor ecx, ecx
+.sr_empty_copy:
+    cmp ecx, 20
+    jge .sr_empty_close
+    movzx edx, byte [rsi + rcx]
+    test dl, dl
+    jz .sr_empty_close
+    mov [rdi + rcx], dl
+    inc ecx
+    jmp .sr_empty_copy
+.sr_empty_close:
+    mov byte [rdi + rcx], '('
+    mov byte [rdi + rcx + 1], ')'
+    mov byte [rdi + rcx + 2], 0
     call str_from_cstr_heap
     pop r14
     pop r13
@@ -586,6 +617,30 @@ DEF_FUNC set_repr, 24
     mov [rbp-8], rax
     mov qword [rbp-16], 0
     mov qword [rbp-24], 256
+
+    ; Anything that is not exactly `set` prints as Name({...}): that is how
+    ; CPython renders frozenset, and a subclass of either.  Neither was
+    ; handled, so repr(frozenset([1])) came out as {1}.
+    extern set_type
+    mov rax, [rbx + PyObject.ob_type]
+    lea rcx, [rel set_type]
+    cmp rax, rcx
+    je .sr_no_prefix
+    mov r14, [rax + PyTypeObject.tp_name]
+.sr_name_loop:
+    movzx r13d, byte [r14]      ; not rax: BUF_ENSURE clobbers it
+    test r13b, r13b
+    jz .sr_name_done
+    BUF_ENSURE 1
+    mov rcx, [rbp-8]
+    mov rdx, [rbp-16]
+    mov [rcx + rdx], r13b
+    inc qword [rbp-16]
+    inc r14
+    jmp .sr_name_loop
+.sr_name_done:
+    BUF_BYTE '('
+.sr_no_prefix:
 
     BUF_BYTE '{'
 
@@ -643,8 +698,14 @@ DEF_FUNC set_repr, 24
     jmp .sr_loop
 
 .sr_done:
-    BUF_ENSURE 2
+    BUF_ENSURE 3
     BUF_BYTE '}'
+    mov rax, [rbx + PyObject.ob_type]
+    lea rcx, [rel set_type]
+    cmp rax, rcx
+    je .sr_no_suffix
+    BUF_BYTE ')'
+.sr_no_suffix:
     mov rax, [rbp-8]
     mov rcx, [rbp-16]
     mov byte [rax + rcx], 0

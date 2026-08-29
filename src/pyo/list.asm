@@ -1337,9 +1337,8 @@ DEF_FUNC list_concat
     ; happens to carry ob_size and ob_item at the same offsets.
     cmp ecx, TAG_PTR
     jne .lc_type_error
-    lea rax, [rel list_type]
-    cmp [r12 + PyObject.ob_type], rax
-    jne .lc_type_error
+    mov rax, [r12 + PyObject.ob_type]
+    REQUIRE_LIST_TYPE rax, rcx, .lc_type_error
 
     ; Get sizes
     mov r13, [rbx + PyListObject.ob_size]   ; r13 = len(a)
@@ -1980,9 +1979,7 @@ DEF_FUNC_LOCAL list_richcompare_inner, LRC_FRAME
     V_TEST_PTR rsi, rax
     ja .lrc_not_impl
     mov rax, [rsi + PyObject.ob_type]
-    lea r9, [rel list_type]
-    cmp rax, r9
-    jne .lrc_not_impl
+    REQUIRE_LIST_TYPE rax, r9, .lrc_not_impl
 
     mov [rbp - LRC_LEFT], rdi
     mov [rbp - LRC_RIGHT], rsi

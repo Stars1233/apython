@@ -357,9 +357,7 @@ DEF_FUNC str_method_startswith
     V_TEST_PTR rax, rcx
     ja .sw_type_error
     mov rcx, [rax + PyObject.ob_type]
-    lea rdx, [rel str_type]
-    cmp rcx, rdx
-    jne .sw_type_error
+    REQUIRE_STR_TYPE rcx, rdx, .sw_type_error
 
     mov rbx, [rdi]          ; self
     mov r12, [rdi + 8]     ; prefix (args[1])
@@ -428,9 +426,7 @@ DEF_FUNC str_method_endswith
     V_TEST_PTR rax, rcx
     ja .ew_type_error
     mov rcx, [rax + PyObject.ob_type]
-    lea rdx, [rel str_type]
-    cmp rcx, rdx
-    jne .ew_type_error
+    REQUIRE_STR_TYPE rcx, rdx, .ew_type_error
 
     mov rbx, [rdi]          ; self
     mov r12, [rdi + 8]     ; suffix
@@ -500,9 +496,7 @@ DEF_FUNC str_method_find
     V_TEST_PTR rax, rcx
     ja .find_type_error
     mov rcx, [rax + PyObject.ob_type]
-    lea rdx, [rel str_type]
-    cmp rcx, rdx
-    jne .find_type_error
+    REQUIRE_STR_TYPE rcx, rdx, .find_type_error
 
     mov rbx, [rdi]          ; self
     mov r12, [rdi + 8]     ; substr (now guaranteed heap str)
@@ -562,18 +556,14 @@ DEF_FUNC str_method_replace
     V_TEST_PTR rax, rcx
     ja .repl_type_error
     mov rcx, [rax + PyObject.ob_type]
-    lea rdx, [rel str_type]
-    cmp rcx, rdx
-    jne .repl_type_error
+    REQUIRE_STR_TYPE rcx, rdx, .repl_type_error
 
     ; Validate args[2] is a string
     mov rax, [rdi + 16]         ; args[2]
     V_TEST_PTR rax, rcx
     ja .repl_type_error
     mov rcx, [rax + PyObject.ob_type]
-    lea rdx, [rel str_type]
-    cmp rcx, rdx
-    jne .repl_type_error
+    REQUIRE_STR_TYPE rcx, rdx, .repl_type_error
 
     ; rbx = self, r12 = old_str, r13 = new_str, r14 = self_len, r15 = scan_pos
     mov rbx, [rdi]          ; self
@@ -854,9 +844,7 @@ DEF_FUNC str_method_join
     cmp esi, TAG_PTR
     jne .join_type_error
     mov rdi, [rax + PyObject.ob_type]
-    lea r8, [rel str_type]
-    cmp rdi, r8
-    jne .join_type_error
+    REQUIRE_STR_TYPE rdi, r8, .join_type_error
     add r15, [rax + PyStrObject.ob_size]
     pop rcx
     inc rcx
@@ -991,9 +979,7 @@ DEF_FUNC str_method_split
     V_TEST_PTR rax, rcx
     ja .spl_type_error
     mov rcx, [rax + PyObject.ob_type]
-    lea rdx, [rel str_type]
-    cmp rcx, rdx
-    jne .spl_type_error
+    REQUIRE_STR_TYPE rcx, rdx, .spl_type_error
 
     mov r15, [rdi + 8]     ; separator string
     jmp .split_by_sep
@@ -1750,9 +1736,7 @@ DEF_FUNC str_method_count
     V_TEST_PTR rax, rcx
     ja .count_type_error
     mov rcx, [rax + PyObject.ob_type]
-    lea rdx, [rel str_type]
-    cmp rcx, rdx
-    jne .count_type_error
+    REQUIRE_STR_TYPE rcx, rdx, .count_type_error
 
     mov rbx, [rdi]          ; self
     mov r12, [rdi + 8]     ; substr (now guaranteed heap str)
@@ -1815,9 +1799,7 @@ DEF_FUNC str_method_index
     V_TEST_PTR rax, rcx
     ja .idx_type_error
     mov rcx, [rax + PyObject.ob_type]
-    lea rdx, [rel str_type]
-    cmp rcx, rdx
-    jne .idx_type_error
+    REQUIRE_STR_TYPE rcx, rdx, .idx_type_error
 
     mov rbx, [rdi]          ; self
     mov r12, [rdi + 8]     ; substr
@@ -1870,9 +1852,7 @@ DEF_FUNC str_method_rfind
     V_TEST_PTR rax, rcx
     ja .rfind_type_error
     mov rcx, [rax + PyObject.ob_type]
-    lea rdx, [rel str_type]
-    cmp rcx, rdx
-    jne .rfind_type_error
+    REQUIRE_STR_TYPE rcx, rdx, .rfind_type_error
 
     mov rbx, [rdi]          ; self
     mov r12, [rdi + 8]     ; substr (now guaranteed heap str)
@@ -3747,9 +3727,7 @@ DEF_FUNC str_method_removeprefix
     V_TEST_PTR rax, rcx
     ja .rp_type_error
     mov rcx, [rax + PyObject.ob_type]
-    lea rdx, [rel str_type]
-    cmp rcx, rdx
-    jne .rp_type_error
+    REQUIRE_STR_TYPE rcx, rdx, .rp_type_error
 
     mov rbx, [rdi]          ; self
     mov r12, [rdi + 8]     ; prefix
@@ -3821,9 +3799,7 @@ DEF_FUNC str_method_removesuffix
     V_TEST_PTR rax, rcx
     ja .rs_type_error
     mov rcx, [rax + PyObject.ob_type]
-    lea rdx, [rel str_type]
-    cmp rcx, rdx
-    jne .rs_type_error
+    REQUIRE_STR_TYPE rcx, rdx, .rs_type_error
 
     mov rbx, [rdi]          ; self
     mov r12, [rdi + 8]     ; suffix
@@ -5591,9 +5567,123 @@ END_FUNC list_dunder_iadd
 ;; list.__init__(self, [iterable]) → re-initialize list
 ;; Uses list_extend to populate from iterable after clearing.
 ;; ============================================================================
+;; ============================================================================
+;; container_dunder_new(args, nargs) -> a new empty instance of args[0]
+;;
+;; list, tuple, dict and set had no __new__ in their type dicts, so
+;; super().__new__(cls, seq) inside a subclass's own __new__ found nothing.
+;; It is registered as a staticmethod, as CPython does: __new__ takes the
+;; class explicitly and must not be bound to anything.
+;; ============================================================================
+extern instance_new
+extern builtin_sub_init_base
+extern tuple_sub_fill
+DEF_FUNC container_dunder_new
+    push rbx
+    push r12
+    push r13
+
+    test rsi, rsi
+    jz .cdn_error
+    mov rbx, [rdi]              ; cls
+    mov r12, rdi                ; args
+    mov r13, rsi                ; nargs
+
+    V_TEST_PTR rbx, rax
+    ja .cdn_error
+
+    mov rdi, rbx
+    call instance_new
+    push rax
+    mov rdi, rax
+    call builtin_sub_init_base
+    pop rax
+
+    ; tuple is immutable, so its contents arrive here rather than through
+    ; __init__.
+    mov rcx, [rbx + PyTypeObject.tp_flags]
+    test rcx, TYPE_FLAG_TUPLE_SUBCLASS
+    jz .cdn_done
+    push rax
+    mov rdi, rax
+    lea rsi, [r12 + 8]          ; the arguments after cls
+    lea rdx, [r13 - 1]
+    call tuple_sub_fill
+    pop rax
+
+.cdn_done:
+    mov edx, TAG_PTR
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    V_PACK rax, rdx             ; builtins return one Value
+    ret
+
+.cdn_error:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "__new__() takes a class argument"
+    call raise_exception
+END_FUNC container_dunder_new
+
+;; add_new_staticmethod(rdi = type dict) -- register container_dunder_new as
+;; the type's __new__, wrapped so it is not bound to the instance.
+extern staticmethod_construct
+extern staticmethod_type
+DEF_FUNC_LOCAL add_new_staticmethod
+    push rbx
+    push r12
+    mov rbx, rdi
+
+    ; Build the plain builtin-function object first.
+    sub rsp, 16
+    lea rdi, [rel mn___new__]
+    call str_from_cstr_heap
+    mov r12, rax                ; the name, ours
+
+    lea rdi, [rel container_dunder_new]     ; func ptr
+    lea rsi, [rel mn___new__]               ; name
+    mov edx, 1                              ; min args (cls)
+    mov rcx, -1                             ; no maximum
+    call builtin_func_new_checked
+    mov [rsp], rax              ; args[0] for staticmethod()
+
+    lea rdi, [rel staticmethod_type]
+    mov rsi, rsp
+    mov edx, 1
+    call staticmethod_construct
+    push rax
+
+    mov rdi, [rsp + 8]          ; the raw function
+    call obj_decref
+    pop rdx                     ; the staticmethod wrapper
+    push rdx
+    mov rdi, rbx                ; the type dict
+    mov rsi, r12                ; name
+    call dict_set
+    pop rdi
+    call obj_decref
+    mov rdi, r12
+    call obj_decref
+    add rsp, 16
+
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC add_new_staticmethod
+
 DEF_FUNC list_dunder_init
     push rbx
     push r12
+
+    ; list() takes no keyword arguments.  A subclass that overrides __init__
+    ; or __new__ absorbs them itself -- func_call clears kw_names_pending on
+    ; the way in, so by the time super().__init__(seq) reaches here it is
+    ; unset.  Seeing it still set means the keywords were aimed at list's own
+    ; init, which CPython rejects: subclass(sequence=()) is a TypeError.
+    cmp qword [rel kw_names_pending], 0
+    jne .ldi_no_keywords
 
     mov rbx, rdi            ; save args ptr
     mov r12, rsi            ; save nargs
@@ -5630,6 +5720,10 @@ DEF_FUNC list_dunder_init
     leave
     V_PACK rax, rdx             ; builtins return one Value
     ret
+.ldi_no_keywords:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "list() takes no keyword arguments"
+    call raise_exception
 END_FUNC list_dunder_init
 
 ;; ============================================================================
@@ -6104,9 +6198,7 @@ DEF_FUNC dict_method_update, DU_FRAME
     ja .du_from_pairs               ; an immediate is not a mapping; let the
                                     ; iterator protocol produce the TypeError
     mov rax, [r12 + PyObject.ob_type]
-    lea rcx, [rel dict_type]
-    cmp rax, rcx
-    jne .du_from_pairs
+    REQUIRE_DICT_TYPE rax, rcx, .du_from_pairs
 
     ; ---- other is a dict: walk its entry table ----------------------------
     mov r13, [r12 + PyDictObject.capacity]
@@ -7179,19 +7271,68 @@ END_FUNC set_method_union
 
 ;; ============================================================================
 ;; set_method_update(args, nargs) -> None
-;; args[0]=self, args[1]=other (set). Adds all elements of other to self.
+;; args[0]=self, args[1]=any iterable.  Also serves as set.__init__.
+;;
+;; This read args[1] as a PyDictObject unconditionally, so s.update([2,3])
+;; walked a list's fields as a hash table -- and a set subclass, which fills
+;; itself through __init__, crashed on construction from any list.
 ;; ============================================================================
-DEF_FUNC set_method_update
+SU_SELF   equ 8
+SU_TMP    equ 16        ; materialised sequence, owned, or 0
+SU_FRAME  equ 32
+
+DEF_FUNC set_method_update, SU_FRAME
     push rbx
     push r12
     push r13
 
     mov rbx, [rdi]          ; self
-    ; If no other arg, no-op
+    mov [rbp - SU_SELF], rbx
+    mov qword [rbp - SU_TMP], 0
     cmp rsi, 2
     jl .supd_done
 
-    mov r12, [rdi + 8]     ; other set
+    mov r12, [rdi + 8]      ; the source Value
+    V_TEST_PTR r12, rax
+    ja .supd_materialise
+    mov rax, [r12 + PyObject.ob_type]
+    lea rcx, [rel set_type]
+    cmp rax, rcx
+    je .supd_from_set
+    extern frozenset_type
+    lea rcx, [rel frozenset_type]
+    cmp rax, rcx
+    je .supd_from_set
+
+.supd_materialise:
+    ; Any other iterable: materialise it and add the elements one by one.
+    lea rsi, [rdi + 8]
+    lea rdi, [rel tuple_type]
+    mov edx, 1
+    call tuple_type_call        ; raises for a non-iterable
+    mov [rbp - SU_TMP], rax
+    mov r12, rax
+    mov r13, [r12 + PyTupleObject.ob_size]
+    xor ecx, ecx
+.supd_seq_loop:
+    cmp rcx, r13
+    jge .supd_release
+    push rcx
+    mov rax, [r12 + PyTupleObject.ob_item]
+    mov rsi, [rax + rcx * 8]
+    mov rdi, [rbp - SU_SELF]
+    call set_add
+    pop rcx
+    inc rcx
+    jmp .supd_seq_loop
+
+.supd_release:
+    mov rdi, [rbp - SU_TMP]
+    mov qword [rbp - SU_TMP], 0
+    call obj_decref
+    jmp .supd_done
+
+.supd_from_set:
     mov r13, [r12 + PyDictObject.capacity]
     xor ecx, ecx
 
@@ -7206,7 +7347,7 @@ DEF_FUNC set_method_update
     cmp qword [rax + SET_ENTRY_KEY], 0   ; occupied?
     je .supd_next
 
-    mov rdi, rbx
+    mov rdi, [rbp - SU_SELF]
     mov rsi, [rax + SET_ENTRY_KEY]
     call set_add
 
@@ -10051,6 +10192,9 @@ DEF_FUNC methods_init
     mov r8, -1
     call add_method_to_dict_checked
 
+    mov rdi, rbx
+    call add_new_staticmethod
+
     ; Store in list_type.tp_dict
     lea rax, [rel list_type]
     mov [rax + PyTypeObject.tp_dict], rbx
@@ -10093,6 +10237,14 @@ DEF_FUNC methods_init
     lea rsi, [rel mn_update]
     lea rdx, [rel dict_method_update]
     call add_method_to_dict
+
+    ; dict() has no __init__ either; update() is the same operation.
+    mov rdi, rbx
+    lea rsi, [rel mn___init__]
+    lea rdx, [rel dict_method_update]
+    mov rcx, 1
+    mov r8, -1
+    call add_method_to_dict_checked
 
     mov rdi, rbx
     lea rsi, [rel mn_setdefault]
@@ -10145,6 +10297,9 @@ DEF_FUNC methods_init
     call obj_decref
     pop rdi
     call obj_decref
+
+    mov rdi, rbx
+    call add_new_staticmethod
 
     ; Store in dict_type.tp_dict
     lea rax, [rel dict_type]
@@ -10211,6 +10366,9 @@ DEF_FUNC methods_init
     mov rcx, 2
     mov r8, 2
     call add_method_to_dict_checked
+
+    mov rdi, rbx
+    call add_new_staticmethod
 
     ; Store in tuple_type.tp_dict
     lea rax, [rel tuple_type]
@@ -10289,6 +10447,18 @@ DEF_FUNC methods_init
     lea rsi, [rel mn_update]
     lea rdx, [rel set_method_update]
     call add_method_to_dict
+
+    ; set() has no __init__, so a subclass had nothing to fill it from.
+    ; update() already takes (self, iterable) and returns None.
+    mov rdi, rbx
+    lea rsi, [rel mn___init__]
+    lea rdx, [rel set_method_update]
+    mov rcx, 1
+    mov r8, -1
+    call add_method_to_dict_checked
+
+    mov rdi, rbx
+    call add_new_staticmethod
 
     ; Store in set_type.tp_dict
     lea rax, [rel set_type]

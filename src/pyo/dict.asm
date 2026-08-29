@@ -31,7 +31,7 @@ extern dict_traverse
 extern dict_clear_gc
 
 ; Initial capacity (must be power of 2)
-DICT_INIT_CAP equ 8
+; DICT_INIT_CAP now lives in object.inc, shared with the subclass path
 
 ; Tombstone marker for deleted dict entries.
 ; When an entry is deleted, key_tag is set to this value so that
@@ -119,9 +119,7 @@ DEF_FUNC dict_type_call
     V_TEST_PTR rdi, rax
     ja .dtc_try_iterable
     mov rax, [rdi + PyObject.ob_type]
-    lea rcx, [rel dict_type]
-    cmp rax, rcx
-    jne .dtc_try_iterable
+    REQUIRE_DICT_TYPE rax, rcx, .dtc_try_iterable
 
     ; dict(other_dict) → create new dict and copy entries
     push rdi                   ; save source dict

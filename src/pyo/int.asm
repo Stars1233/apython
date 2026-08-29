@@ -955,8 +955,13 @@ DEF_FUNC_BARE int_repr
     mov rax, [rax + PyTypeObject.tp_flags]
     test rax, TYPE_FLAG_INT_SUBCLASS
     jz .repr_gmp                 ; not int subclass → treat as GMP
-    ; Extract int_value from PyIntSubclassObject
+    ; Extract int_value from PyIntSubclassObject.  It is a Value, so its own
+    ; tag has to come out of it -- edx still describes the wrapper, which is
+    ; a pointer, so a wrapped small int fell into the GMP path and had its
+    ; encoded form dereferenced.  MyInt() with no argument wraps 0 and
+    ; printing it crashed.
     mov rdi, [rdi + PyIntSubclassObject.int_value]
+    V_UNPACK rdi, rdx
     cmp edx, TAG_SMALLINT
     je .smallint
 .repr_gmp:

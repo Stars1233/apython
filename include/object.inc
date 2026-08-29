@@ -142,6 +142,7 @@ struc DictEntry
 endstruc
 
 DICT_ENTRY_SIZE equ DictEntry_size  ; 24
+DICT_INIT_CAP   equ 8               ; initial hash-table slots for dict and set
 ENTRY_TOMBSTONE_HASH equ -1
 
 ; A set entry mirrors DictEntry minus the value: hash at +0, key Value at +8.
