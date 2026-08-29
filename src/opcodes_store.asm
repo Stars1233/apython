@@ -26,6 +26,8 @@ extern obj_decref
 extern dict_set
 extern fatal_error
 extern raise_exception
+extern eval_exception_unwind
+extern current_exception
 extern obj_incref
 extern exc_AttributeError_type
 extern exc_TypeError_type
@@ -47,7 +49,8 @@ SA_NAME   equ 24
 SA_DESC   equ 32    ; general descriptor (MRO walk)
 SA_OTAG   equ 40
 SA_VTAG   equ 48
-SA_FRAME  equ 48
+SA_EXC    equ 56
+SA_FRAME  equ 64
 
 ; op_delete_attr: rbp-frame (16 bytes)
 DA_NAME   equ 8
@@ -153,6 +156,7 @@ END_FUNC op_store_global
 ;; Followed by 4 CACHE entries (8 bytes) that must be skipped.
 ;; ============================================================================
 DEF_FUNC op_store_attr, SA_FRAME
+    DUNDER_EXC_SAVE [rbp - SA_EXC]
 
     ; Get name (payload array: 8-byte stride)
     shl ecx, 3
@@ -259,6 +263,11 @@ DEF_FUNC op_store_attr, SA_FRAME
     mov rsi, [rbp - SA_OTAG]
     DECREF_VAL rdi, rsi
 
+    ; A descriptor __set__ that raised returns normally, leaving the
+    ; exception pending; without this it surfaced later at an unrelated
+    ; instruction.  Compared against entry, because current_exception is
+    ; already set whenever this runs inside an except block.
+    DUNDER_RAISED [rbp - SA_EXC], .sa_propagate
     add rbx, 8
     leave
     DISPATCH
@@ -288,9 +297,17 @@ DEF_FUNC op_store_attr, SA_FRAME
     mov rsi, [rbp - SA_OTAG]
     DECREF_VAL rdi, rsi
 
+    DUNDER_RAISED [rbp - SA_EXC], .sa_propagate
     add rbx, 8                ; skip 4 CACHE entries
     leave
     DISPATCH
+
+.sa_propagate:
+    ; Same shape as op_call's .propagate_exc: the unwinder reads the current
+    ; IP from eval_saved_rbx, which DISPATCH set, so rbx is not advanced.
+    leave
+    mov [rel eval_saved_r13], r13
+    jmp eval_exception_unwind
 
 .sa_no_setattr:
     lea rdi, [rel exc_AttributeError_type]

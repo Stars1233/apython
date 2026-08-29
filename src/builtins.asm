@@ -32,6 +32,7 @@ extern build_class_pending
 extern sys_write
 extern range_new
 extern int_to_i64
+extern current_exception
 extern obj_as_index
 extern init_iter_types
 extern obj_repr
@@ -606,7 +607,9 @@ END_FUNC builtin_print
 ;; Returns len() of the first argument
 ;; Phase 4 stub: checks ob_size for variable-size objects
 ;; ============================================================================
-DEF_FUNC builtin_len
+LEN_EXC   equ 8
+LEN_FRAME equ 16
+DEF_FUNC builtin_len, LEN_FRAME
     push rbx
 
     ; Check nargs == 1
@@ -651,16 +654,17 @@ DEF_FUNC builtin_len
     mov rax, [rbx + PyObject.ob_type]
     mov rdx, [rax + PyTypeObject.tp_flags]
     test rdx, TYPE_FLAG_HEAPTYPE
-    jz .try_ob_size
+    jz .len_type_error
 
     extern dunder_len
     extern dunder_call_1
     mov rdi, rbx
+    DUNDER_EXC_SAVE [rbp - LEN_EXC]
     lea rsi, [rel dunder_len]
     call dunder_call_1
     V_UNPACK rax, rdx           ; returns a Value
     test edx, edx
-    jz .try_ob_size
+    jz .no_dunder_len
 
     ; __len__ returned a result — extract integer value
     push rdx                ; save tag for SmallInt check
@@ -685,10 +689,17 @@ DEF_FUNC builtin_len
     add rsp, 8              ; discard saved tag
     jmp .make_int
 
-.try_ob_size:
-    ; Fallback: read ob_size at PyVarObject offset +16
-    ; This works for strings, tuples, lists, dicts, bytes
-    mov rax, [rbx + PyVarObject.ob_size]
+.no_dunder_len:
+    ; A NULL from dunder_call_1 means either "no __len__ on this type" or
+    ; "__len__ raised"; only the first is a fallback.
+    DUNDER_RAISED [rbp - LEN_EXC], .len_failed
+
+    ; There is no last-resort ob_size read here any more.  Every real
+    ; container reaches len() through sq_length, mp_length or __len__; the
+    ; fallback only caught things that have no length at all, and read +16 --
+    ; which for an iterator is it_seq, so len(reversed([1,2,3])) returned a
+    ; heap address.
+    jmp .len_type_error
 
 .make_int:
     ; rax = length; create an int object
@@ -699,6 +710,12 @@ DEF_FUNC builtin_len
     pop rbx
     leave
     V_PACK rax, rdx             ; builtins return one Value
+    ret
+
+.len_failed:
+    RET_NULL
+    pop rbx
+    leave
     ret
 
 .len_error:

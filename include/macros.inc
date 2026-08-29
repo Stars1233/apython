@@ -429,6 +429,29 @@ TAG_IO_WAIT  equ 8           ; payload = fd | (direction << 32) — async I/O se
     mov [%1 + PyFrame.stack_ptr], %3
 %endmacro
 
+; A dunder call returns NULL for two different reasons: the type does not
+; define the dunder, or it ran and raised.  Only the first is a fallback --
+; treating the second as one swallows the exception, which then surfaces
+; later at an unrelated instruction.
+;
+; current_exception alone cannot tell them apart: it stays set for the whole
+; of an `except` block, so an ordinary dunder miss inside a handler would
+; look like a failure.  Save it before the call and compare after.
+%macro DUNDER_EXC_SAVE 1        ; %1 = destination slot (register or memory)
+    push rax
+    mov rax, [rel current_exception]
+    mov %1, rax
+    pop rax
+%endmacro
+
+%macro DUNDER_RAISED 2          ; %1 = the saved slot, %2 = label to take
+    push rax
+    mov rax, [rel current_exception]
+    cmp rax, %1
+    pop rax                     ; pop does not disturb the flags
+    jne %2
+%endmacro
+
 ; Require that a type object is int, bool, or an int subclass; jump away if
 ; not.  Python's bool derives from int, so an object indexed with True is
 ; indexed with 1 -- and bool_type carries tp_base = int_type but no

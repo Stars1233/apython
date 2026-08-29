@@ -431,6 +431,7 @@ DEF_FUNC instance_dealloc
     ; Call __del__(self) — dunder_call_1 handles lookup + call
     extern dunder_del
     extern dunder_call_1
+extern current_exception
     mov rdi, rbx
     lea rsi, [rel dunder_del]
     call dunder_call_1
@@ -532,9 +533,12 @@ END_FUNC builtin_sub_dealloc
 ;; Try __repr__ dunder, fall back to "<instance>".
 ;; rdi = instance
 ;; ============================================================================
-DEF_FUNC instance_repr
+IR_EXC   equ 8
+IR_FRAME equ 16
+DEF_FUNC instance_repr, IR_FRAME
     push rbx
     mov rbx, rdi
+    DUNDER_EXC_SAVE [rbp - IR_EXC]
 
     ; Try __repr__ dunder
     extern dunder_repr
@@ -545,12 +549,19 @@ DEF_FUNC instance_repr
     V_UNPACK rax, rdx           ; returns a Value
     test edx, edx
     jnz .done
+    DUNDER_RAISED [rbp - IR_EXC], .failed   ; __repr__ ran and raised
 
     ; Fall back to "<instance>"
     lea rdi, [rel instance_repr_cstr]
     call str_from_cstr
 
 .done:
+    pop rbx
+    leave
+    ret
+
+.failed:
+    RET_NULL
     pop rbx
     leave
     ret
@@ -561,9 +572,12 @@ END_FUNC instance_repr
 ;; Try __str__ dunder, fall back to instance_repr.
 ;; rdi = instance
 ;; ============================================================================
-DEF_FUNC instance_str
+IS_EXC   equ 8
+IS_FRAME equ 16
+DEF_FUNC instance_str, IS_FRAME
     push rbx
     mov rbx, rdi
+    DUNDER_EXC_SAVE [rbp - IS_EXC]
 
     ; Try __str__ dunder
     extern dunder_str
@@ -572,12 +586,19 @@ DEF_FUNC instance_str
     V_UNPACK rax, rdx           ; returns a Value
     test edx, edx
     jnz .done
+    DUNDER_RAISED [rbp - IS_EXC], .failed   ; __str__ ran and raised
 
     ; Fall back to instance_repr
     mov rdi, rbx
     call instance_repr
 
 .done:
+    pop rbx
+    leave
+    ret
+
+.failed:
+    RET_NULL
     pop rbx
     leave
     ret

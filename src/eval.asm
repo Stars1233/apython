@@ -163,6 +163,16 @@ extern tuple_new
 ; Main entry point: sets up registers from the frame and enters the dispatch loop.
 ; Returns NULL if an unhandled exception propagated out.
 ; rdi = frame
+section .data
+global recursion_depth
+global recursion_limit
+recursion_depth: dq 0
+; CPython's default.  apython's frames are cheaper -- about 320 machine-stack
+; bytes each against an 8 MB rlimit -- but matching CPython is what programs
+; and tests expect, and sys.setrecursionlimit() can raise it.
+recursion_limit: dq 1000
+section .text
+
 DEF_FUNC eval_frame
     SAVE_EVAL_REGS
 
@@ -217,6 +227,18 @@ DEF_FUNC eval_frame
     ; Save machine stack pointer for exception unwind cleanup
     mov [rel eval_base_rsp], rsp
 
+    ; Recursion guard.  A Python-level call costs about 320 bytes of machine
+    ; stack across op_call, func_call and eval_frame, so the 8 MB default ran
+    ; out at roughly 25 000 frames -- as a bare SIGSEGV, with no
+    ; RecursionError and no message.  The counter is incremented here, once
+    ; the frame's globals and eval_base_rsp are in place so the raise unwinds
+    ; through this frame, and decremented in eval_return, which is the only
+    ; exit (.no_handler jumps there too).
+    inc qword [rel recursion_depth]
+    mov rax, [rel recursion_depth]
+    cmp rax, [rel recursion_limit]
+    jg .eval_recursion_error
+
     ; Check for pending throw (set by gen_throw before resume)
     mov [rel eval_saved_rbx], rbx
     mov [rel eval_saved_r13], r13
@@ -226,6 +248,15 @@ DEF_FUNC eval_frame
 .throw_resume:
     mov byte [rel throw_pending], 0
     jmp eval_exception_unwind
+
+.eval_recursion_error:
+    ; Out of line: this must not sit between the throw_pending test and
+    ; .throw_resume, or every generator throw falls into it.
+    mov [rel eval_saved_rbx], rbx
+    mov [rel eval_saved_r13], r13
+    lea rdi, [rel exc_RecursionError_type]
+    CSTRING rsi, "maximum recursion depth exceeded"
+    call raise_exception
 
 .no_throw:
     ; Fall through to eval_dispatch
@@ -257,6 +288,7 @@ END_FUNC eval_dispatch
 ; eval_return - Return from eval_frame
 ; rax contains the return value. Restores callee-saved regs and returns.
 DEF_FUNC_BARE eval_return
+    dec qword [rel recursion_depth]
     ; Restore caller's eval globals (reverse of save order)
     ; Use rcx as scratch — rdx holds return tag (fat value protocol)
     pop rcx
@@ -369,12 +401,21 @@ DEF_FUNC_BARE eval_exception_unwind
     ; bypasses CALL opcode cleanup, leaving kw_names_pending set.
     mov qword [rel kw_names_pending], 0
 
+    ; repr_depth is bracketed by repr_push/repr_pop around a container repr,
+    ; and the pop is skipped by any raise from inside a nested __repr__.  It
+    ; saturates at 64 and then every container repr in the process raises,
+    ; and repr_stack keeps 64 dangling pointers that repr_check_active
+    ; compares by address.
+    mov qword [rel repr_depth], 0
+
     ; Free stale cfex_temp_pending buffer if set
     mov rdi, [rel cfex_temp_pending]
     test rdi, rdi
     jz .no_cfex_temp
     mov qword [rel cfex_temp_pending], 0
     extern ap_free
+extern repr_depth
+extern exc_RecursionError_type
     call ap_free
 .no_cfex_temp:
 

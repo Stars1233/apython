@@ -30,10 +30,24 @@ extern str_repr
 ; Simple fixed-size stack of object pointers currently being repr'd.
 section .data
 align 8
+global repr_depth           ; eval_exception_unwind resets this: a raise from
+                            ; inside a nested __repr__ skips repr_pop
 repr_depth: dq 0                  ; current depth (number of entries)
 repr_stack: times 64 dq 0         ; up to 64 nested containers
 
 section .text
+
+; obj_repr returns NULL both for "this type has no repr" and for "the repr
+; raised".  A container propagating that NULL must have an exception pending,
+; or the caller sees a bare NULL Value and pushes it.
+%macro REPR_ENSURE_EXC 0
+    cmp qword [rel current_exception], 0
+    jne %%have_exc
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "object has no repr"
+    call raise_exception
+%%have_exc:
+%endmacro
 
 ; Check if ptr is in repr_stack. Returns 1 in eax if found, 0 if not.
 ; Does NOT clobber rdi.
@@ -67,6 +81,8 @@ repr_push:
 .rp_overflow:
     extern exc_RecursionError_type
     extern raise_exception
+extern exc_TypeError_type
+extern current_exception
     lea rdi, [rel exc_RecursionError_type]
     CSTRING rsi, "maximum recursion depth exceeded while getting the repr of an object"
     call raise_exception
@@ -167,7 +183,7 @@ DEF_FUNC list_repr, 24                ; buf ptr, used, capacity
     ; Call obj_repr(payload, tag)
     call obj_repr
     test rax, rax
-    jz .lr_next
+    jz .lr_elem_failed
 
     ; Append repr string to buffer
     push rax                   ; save repr str for DECREF
@@ -221,6 +237,21 @@ DEF_FUNC list_repr, 24                ; buf ptr, used, capacity
     leave
     ret
 
+.lr_elem_failed:
+    ; An element's repr failed.  Skipping it left the exception pending with
+    ; a perfectly good-looking string as the result, so it surfaced later at
+    ; an unrelated instruction instead of at the repr() call.
+    mov rdi, [rbp-8]
+    call ap_free
+    call repr_pop
+    REPR_ENSURE_EXC
+    RET_NULL
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
 .lr_recursive:
     ; Return "[...]" for recursive reference
     CSTRING rdi, "[...]"
@@ -243,6 +274,15 @@ DEF_FUNC tuple_repr, 24
     push r13
 
     mov rbx, rdi               ; rbx = tuple
+
+    ; Cycle guard, as list_repr has.  Without it a tuple that reaches itself
+    ; -- l = []; t = (l,); l.append(t) -- recursed to a stack overflow.
+    mov rdi, rbx
+    call repr_check_active
+    test eax, eax
+    jnz .tr_recursive
+    mov rdi, rbx
+    call repr_push
 
     mov r13, [rbx + PyTupleObject.ob_size]
 
@@ -272,7 +312,7 @@ DEF_FUNC tuple_repr, 24
     mov rdi, [rax + r12 * 8]       ; the element Value
     call obj_repr                  ; obj_repr decodes it itself
     test rax, rax
-    jz .tr_next
+    jz .tr_elem_failed
 
     push rax
     mov rcx, [rax + PyStrObject.ob_size]
@@ -316,6 +356,29 @@ DEF_FUNC tuple_repr, 24
 
     pop rax
     mov edx, TAG_PTR           ; ap_free clobbers rdx
+    call repr_pop
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.tr_elem_failed:
+    mov rdi, [rbp-8]
+    call ap_free
+    call repr_pop
+    REPR_ENSURE_EXC
+    RET_NULL
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.tr_recursive:
+    CSTRING rdi, "(...)"
+    call str_from_cstr_heap
+    mov edx, TAG_PTR
     pop r13
     pop r12
     pop rbx
@@ -335,6 +398,14 @@ DEF_FUNC dict_repr, 24
     push r14                   ; items printed count
 
     mov rbx, rdi
+
+    ; Cycle guard: d = {}; d['k'] = d; repr(d) recursed to a segfault.
+    mov rdi, rbx
+    call repr_check_active
+    test eax, eax
+    jnz .dr_recursive
+    mov rdi, rbx
+    call repr_push
 
     ; Allocate buffer
     mov edi, 256
@@ -374,7 +445,7 @@ DEF_FUNC dict_repr, 24
     push r12                   ; save entry index across calls
     call obj_repr
     test rax, rax
-    jz .dr_after_key
+    jz .dr_elem_failed
 
     push rax
     mov rcx, [rax + PyStrObject.ob_size]
@@ -404,7 +475,7 @@ DEF_FUNC dict_repr, 24
     push r12
     call obj_repr
     test rax, rax
-    jz .dr_after_val
+    jz .dr_elem_failed
 
     push rax
     mov rcx, [rax + PyStrObject.ob_size]
@@ -444,6 +515,31 @@ DEF_FUNC dict_repr, 24
 
     pop rax
     mov edx, TAG_PTR           ; ap_free clobbers rdx
+    call repr_pop
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.dr_elem_failed:
+    mov rdi, [rbp-8]
+    call ap_free
+    call repr_pop
+    REPR_ENSURE_EXC
+    RET_NULL
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.dr_recursive:
+    CSTRING rdi, "{...}"
+    call str_from_cstr_heap
+    mov edx, TAG_PTR
     pop r14
     pop r13
     pop r12
@@ -477,6 +573,14 @@ DEF_FUNC set_repr, 24
     ret
 
 .sr_notempty:
+    ; Cycle guard.  The empty-set exit above must stay ahead of the push.
+    mov rdi, rbx
+    call repr_check_active
+    test eax, eax
+    jnz .sr_recursive
+    mov rdi, rbx
+    call repr_push
+
     mov edi, 256
     call ap_malloc
     mov [rbp-8], rax
@@ -514,7 +618,7 @@ DEF_FUNC set_repr, 24
     push r12
     call obj_repr
     test rax, rax
-    jz .sr_after_elem
+    jz .sr_elem_failed
 
     push rax
     mov rcx, [rax + PyStrObject.ob_size]
@@ -554,6 +658,31 @@ DEF_FUNC set_repr, 24
 
     pop rax
     mov edx, TAG_PTR           ; ap_free clobbers rdx
+    call repr_pop
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.sr_elem_failed:
+    mov rdi, [rbp-8]
+    call ap_free
+    call repr_pop
+    REPR_ENSURE_EXC
+    RET_NULL
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.sr_recursive:
+    CSTRING rdi, "{...}"
+    call str_from_cstr_heap
+    mov edx, TAG_PTR
     pop r14
     pop r13
     pop r12
