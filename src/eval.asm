@@ -164,6 +164,7 @@ extern tuple_new
 ; Returns NULL if an unhandled exception propagated out.
 ; rdi = frame
 section .data
+eval_no_frame_msg: db "exception raised outside the interpreter loop", 0
 global recursion_depth
 global recursion_limit
 recursion_depth: dq 0
@@ -400,6 +401,13 @@ END_FUNC trace_print_opcode
 ; it adjusts the value stack and jumps to the handler. If not found,
 ; it returns NULL from eval_frame to propagate to the caller.
 DEF_FUNC_BARE eval_exception_unwind
+    ; eval_base_rsp lives in .bss, so it is 0 before the first eval_frame and
+    ; again after the last one -- during startup, and during the shutdown
+    ; DECREF cascade, which runs __del__.  Unwinding to it would be
+    ; `mov rsp, 0`; there is genuinely nowhere to unwind to, so say so.
+    cmp qword [rel eval_base_rsp], 0
+    je .no_interpreter_frame
+
     ; Restore machine stack to eval frame level (discard intermediate frames)
     mov rsp, [rel eval_base_rsp]
 
@@ -415,12 +423,19 @@ DEF_FUNC_BARE eval_exception_unwind
     mov qword [rel repr_depth], 0
     mov qword [rel c_recursion_depth], 0
 
+    ; gc_collecting is set for the duration of a collection and cleared at
+    ; the end.  A __del__ that raises during phase 5 longjmps out of that,
+    ; leaving it set forever -- after which the reentrancy guard makes the
+    ; collector a permanent no-op and cyclic garbage accumulates silently.
+    mov qword [rel gc_collecting], 0
+
     ; Free stale cfex_temp_pending buffer if set
     mov rdi, [rel cfex_temp_pending]
     test rdi, rdi
     jz .no_cfex_temp
     mov qword [rel cfex_temp_pending], 0
-    extern ap_free
+    extern gc_collecting
+extern ap_free
 extern repr_depth
 extern exc_RecursionError_type
     call ap_free
@@ -553,6 +568,10 @@ extern exc_RecursionError_type
     lea rbx, [rbx + rax*2]   ; target * 2 = byte offset
 
     DISPATCH
+
+.no_interpreter_frame:
+    lea rdi, [rel eval_no_frame_msg]
+    call fatal_error            ; does not return
 
 .no_handler:
     ; No handler found - must clean up value stack before returning

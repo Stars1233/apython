@@ -54,6 +54,9 @@ gc_gen2_collections: dq 0
 ; GC state
 global gc_enabled
 gc_enabled:     dq 1
+global gc_collecting        ; eval_exception_unwind resets this: a raising
+                            ; __del__ during a collection longjmps out and
+                            ; would otherwise latch it on for good
 gc_collecting:  dq 0    ; reentrancy guard
 
 ; Generation table (for indexed access)

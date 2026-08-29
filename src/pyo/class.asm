@@ -27,6 +27,8 @@ extern exc_AttributeError_type
 extern exc_TypeError_type
 extern func_type
 extern type_type
+extern sys_write
+extern current_exception
 extern dict_type
 extern tuple_type
 extern method_traverse
@@ -416,7 +418,9 @@ END_FUNC type_setattr
 ;; Deallocate an instance: DECREF inst_dict, DECREF ob_type, free self.
 ;; rdi = instance
 ;; ============================================================================
-DEF_FUNC instance_dealloc
+ID_EXC   equ 8
+ID_FRAME equ 16
+DEF_FUNC instance_dealloc, ID_FRAME
     push rbx
 
     mov rbx, rdi                ; rbx = self
@@ -433,7 +437,7 @@ DEF_FUNC instance_dealloc
     ; Call __del__(self) — dunder_call_1 handles lookup + call
     extern dunder_del
     extern dunder_call_1
-extern current_exception
+    DUNDER_EXC_SAVE [rbp - ID_EXC]
     mov rdi, rbx
     lea rsi, [rel dunder_del]
     call dunder_call_1
@@ -444,8 +448,31 @@ extern current_exception
     DECREF_VAL rax, rdx
 .del_no_result:
 
+    ; A __del__ that raises must not leave the exception pending: the object
+    ; is being freed, there is no caller to hand it to, and leaving it set
+    ; means the *next* raise silently discards it -- or, if this dealloc came
+    ; from the unwinder dropping the value stack, that the handler receives
+    ; the wrong exception object.  CPython reports it and clears it.
+    DUNDER_RAISED [rbp - ID_EXC], .del_raised
+.del_cleared:
+
     ; Restore refcount (undo the bump)
     dec qword [rbx + PyObject.ob_refcnt]
+
+    jmp .no_del
+
+.del_raised:
+    ; Report on stderr and clear, so nothing downstream inherits it.
+    mov edi, 2
+    lea rsi, [rel id_del_ignored_msg]
+    mov edx, id_del_ignored_len
+    call sys_write
+    mov rdi, [rel current_exception]
+    mov qword [rel current_exception], 0
+    test rdi, rdi
+    jz .del_cleared
+    call obj_decref
+    jmp .del_cleared
 
 .no_del:
     ; XDECREF inst_dict (may be NULL for int subclass instances)
@@ -1456,6 +1483,9 @@ END_FUNC user_type_dealloc
 ;; ============================================================================
 ;; Data section
 ;; ============================================================================
+section .rodata
+id_del_ignored_msg: db "Exception ignored in __del__", 10
+id_del_ignored_len equ $ - id_del_ignored_msg
 section .data
 
 instance_repr_cstr: db "<instance>", 0
