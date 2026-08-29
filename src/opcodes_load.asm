@@ -1018,8 +1018,8 @@ DEF_FUNC op_load_super_attr, LSA_FRAME
     mov [rbp - LSA_SELF], rax
     VPOP_VAL rax, rdx              ; class
     mov [rbp - LSA_CLASS], rax
-    VPOP_VAL rdi, rsi              ; global_super -- DECREF and discard
-    DECREF_VAL rdi, rsi
+    VPOP rdi              ; global_super -- DECREF and discard
+    DECREF_V rdi, rsi
 
     ; Walk from class->tp_base up the chain looking for name
     mov rax, [rbp - LSA_CLASS]     ; class

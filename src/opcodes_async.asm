@@ -405,8 +405,8 @@ DEF_FUNC_BARE op_end_async_for
     DECREF_VAL rdi, rsi
 
     ; Pop aiter
-    VPOP_VAL rdi, rsi
-    DECREF_VAL rdi, rsi
+    VPOP rdi
+    DECREF_V rdi, rsi
     pop rcx                    ; restore arg
 
     ; Jump forward by arg instructions (each = 2 bytes)
@@ -467,8 +467,8 @@ DEF_FUNC_BARE op_cleanup_throw
     VPOP rdi
     call obj_decref
     ; Pop and DECREF_VAL the sub-iterator
-    VPOP_VAL rdi, rsi
-    DECREF_VAL rdi, rsi
+    VPOP rdi
+    DECREF_V rdi, rsi
     ; Restore extracted value and push
     pop r9
     pop r8

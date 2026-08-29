@@ -5504,8 +5504,6 @@ extern list_subscript
 DEF_FUNC_BARE list_dunder_getitem
     mov rax, [rdi]          ; self
     mov rsi, [rdi + 8]     ; key payload
-    V_UNPACK rsi, rdx       ; args[1]
-    V_PACK rsi, rdx         ; list_subscript takes a key Value
     mov rdi, rax
     jmp list_subscript
 END_FUNC list_dunder_getitem
@@ -5532,8 +5530,6 @@ END_FUNC list_dunder_setitem
 DEF_FUNC list_dunder_delitem
     mov rax, [rdi]          ; self
     mov rsi, [rdi + 8]     ; key payload
-    V_UNPACK rsi, rcx       ; args[1]
-    V_PACK rsi, rcx         ; list_ass_subscript takes Values
     xor edx, edx            ; a NULL value Value means "delete"
     mov rdi, rax
     call list_ass_subscript
@@ -5553,8 +5549,6 @@ extern list_contains
 DEF_FUNC list_dunder_contains
     mov rax, [rdi]          ; self
     mov rsi, [rdi + 8]     ; item payload
-    V_UNPACK rsi, rdx       ; args[1]
-    V_PACK rsi, rdx         ; list_contains takes a Value
     mov rdi, rax
     call list_contains
     ; eax = 0 or 1 → return bool
@@ -6759,8 +6753,6 @@ DEF_FUNC tuple_method_count
 
     mov rbx, [rdi]          ; self (tuple)
     mov r12, [rdi + 8]     ; value payload
-    V_UNPACK r12, r14       ; args[1]
-    V_PACK r12, r14         ; compare Values, as the tuple now stores them
     mov r13, [rbx + PyTupleObject.ob_size]
     xor r14d, r14d          ; count = 0
 
@@ -6809,8 +6801,6 @@ DEF_FUNC set_method_add
     mov rax, rdi            ; args ptr
     mov rdi, [rax]          ; self (set)
     mov rsi, [rax + 8]     ; elem payload
-    V_UNPACK rsi, rdx       ; args[1]
-    V_PACK rsi, rdx         ; set_add takes a key Value
     call set_add
 
     lea rax, [rel none_singleton]
@@ -6837,8 +6827,6 @@ DEF_FUNC set_method_remove
     mov rax, rdi
     mov rdi, [rax]          ; self
     mov rsi, [rax + 8]     ; elem payload
-    V_UNPACK rsi, rdx       ; args[1]
-    V_PACK rsi, rdx         ; set_remove takes a key Value
     call set_remove
     test eax, eax
     jnz .smr_keyerr
@@ -6872,8 +6860,6 @@ DEF_FUNC set_method_discard
     mov rax, rdi
     mov rdi, [rax]          ; self
     mov rsi, [rax + 8]     ; elem payload
-    V_UNPACK rsi, rdx       ; args[1]
-    V_PACK rsi, rdx         ; set_remove takes a key Value
     call set_remove
     ; Ignore return value (don't care if not found)
 

@@ -2229,8 +2229,8 @@ extern obj_decref
     jne .ci1_si_reraise
 .ci1_si_convert:
     ; Pop the exception, raise RuntimeError instead
-    VPOP_VAL rdi, rsi
-    DECREF_VAL rdi, rsi
+    VPOP rdi
+    DECREF_V rdi, rsi
     mov [rel eval_saved_r13], r13  ; update — popped and DECREF'd
     lea rdi, [rel exc_RuntimeError_type]
     CSTRING rsi, "generator raised StopIteration"
@@ -3048,8 +3048,8 @@ DEF_FUNC_BARE op_call_intrinsic_2
 
     ; For type parameter intrinsics, just keep TOS1 and discard TOS
     ; (a simplification — full type parameter support would need more)
-    VPOP_VAL rdi, rsi
-    DECREF_VAL rdi, rsi
+    VPOP rdi
+    DECREF_V rdi, rsi
     ; TOS1 stays
     DISPATCH
 

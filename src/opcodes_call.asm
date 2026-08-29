@@ -282,12 +282,12 @@ DEF_FUNC op_call, CL_FRAME
 .args_done:
 
     ; Pop shallower slot (self for method, callable for function) and DECREF
-    VPOP_VAL rdi, rsi
-    DECREF_VAL rdi, rsi
+    VPOP rdi
+    DECREF_V rdi, rsi
 
     ; Pop deeper slot (callable for method, NULL for function) and DECREF
-    VPOP_VAL rdi, rsi
-    XDECREF_VAL rdi, rsi
+    VPOP rdi
+    XDECREF_V rdi, rsi
     ; Check for exception (TAG_NULL return with current_exception set)
     ; Must check TAG (not payload) — None and SmallInt(0) have payload=0
     mov rax, [rbp - CL_RETVAL]
@@ -360,8 +360,8 @@ DEF_FUNC op_make_function, MF_FRAME
     ; annotations (0x04) - pop and discard
     test ecx, MAKE_FUNC_ANNOTATIONS
     jz .mf_no_annotations
-    VPOP_VAL rdi, rsi
-    DECREF_VAL rdi, rsi
+    VPOP rdi
+    DECREF_V rdi, rsi
     mov ecx, [rbp - MF_FLAGS]              ; reload flags (DECREF clobbers ecx)
 .mf_no_annotations:
 

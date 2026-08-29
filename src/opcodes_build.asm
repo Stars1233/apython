@@ -1008,8 +1008,8 @@ DEF_FUNC_BARE op_for_iter
     lea rbx, [rbx + rcx*2]    ; then jump forward
 
     ; Now pop and DECREF the iterator (safe: rbx/r13 are callee-saved)
-    VPOP_VAL rdi, rsi
-    DECREF_VAL rdi, rsi
+    VPOP rdi
+    DECREF_V rdi, rsi
 
     DISPATCH
 END_FUNC op_for_iter
@@ -1022,11 +1022,11 @@ END_FUNC op_for_iter
 ;; ============================================================================
 DEF_FUNC_BARE op_end_for
     ; Pop TOS (end-of-iteration sentinel / last value)
-    VPOP_VAL rdi, rsi
-    DECREF_VAL rdi, rsi
+    VPOP rdi
+    DECREF_V rdi, rsi
     ; Pop the iterator
-    VPOP_VAL rdi, rsi
-    DECREF_VAL rdi, rsi
+    VPOP rdi
+    DECREF_V rdi, rsi
     DISPATCH
 END_FUNC op_end_for
 
@@ -2625,8 +2625,8 @@ DEF_FUNC_BARE op_for_iter_range
     lea rcx, [rcx + 1]            ; arg + 1
     add rbx, 2                     ; skip CACHE
     lea rbx, [rbx + rcx*2]        ; jump forward
-    VPOP_VAL rdi, rsi
-    DECREF_VAL rdi, rsi
+    VPOP rdi
+    DECREF_V rdi, rsi
     DISPATCH
 
 .fir_deopt:
@@ -2690,8 +2690,8 @@ DEF_FUNC_BARE op_for_iter_list
     lea rcx, [rcx + 1]            ; arg + 1
     add rbx, 2                     ; skip CACHE
     lea rbx, [rbx + rcx*2]        ; jump forward
-    VPOP_VAL rdi, rsi
-    DECREF_VAL rdi, rsi
+    VPOP rdi
+    DECREF_V rdi, rsi
     DISPATCH
 
 .fil_deopt:

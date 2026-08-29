@@ -26,8 +26,8 @@ extern obj_dealloc
 ;; op_pop_top - Pop and discard top of stack, DECREF it
 ;; ============================================================================
 DEF_FUNC_BARE op_pop_top
-    VPOP_VAL rax, rdx
-    DECREF_VAL rax, rdx
+    VPOP rax
+    DECREF_V rax, rdx
     DISPATCH
 END_FUNC op_pop_top
 

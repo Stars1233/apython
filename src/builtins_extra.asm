@@ -2780,8 +2780,6 @@ DEF_FUNC builtin_setattr
     mov rdi, [rbx]                     ; args[0] payload (obj)
     mov rsi, [rbx + 8]               ; args[1] payload (name, 16-byte stride)
     mov rdx, [rbx + 16]               ; args[2] payload (value, 16-byte stride)
-    V_UNPACK rdx, rcx       ; args[2]
-    V_PACK rdx, rcx                    ; tp_setattr takes a value Value
     pop rax                            ; restore tp_setattr
     call rax
 
