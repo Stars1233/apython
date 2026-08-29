@@ -1461,20 +1461,19 @@ DEF_FUNC op_format_value, FV_FRAME
     mov rdi, [rbp - FV_VALUE]   ; no __format__: fall through as before
 
 .fv_spec_not_ptr:
-    ; Check if value is a float (TAG_FLOAT)
-    extern float_type
-    cmp qword [rbp - FV_VTAG], TAG_FLOAT
-    jne .fv_no_format_spec
-
-    ; Float with format spec: call float_format_spec(payload, spec_data, spec_len)
-    extern float_format_spec
+    ; Everything else goes through the full spec grammar.  Only float had a
+    ; path here, and it understood just a precision and a type letter, so
+    ; f"{255:08b}" was "255" and f"{5:>5}" was "5".
     mov rax, [rbp - FV_SPEC]
     cmp qword [rbp - FV_STAG], TAG_PTR
     jne .fv_type_error
-    ; rdi = raw double bits (still set)
-    lea rsi, [rax + PyStrObject.data]  ; spec data
-    mov rdx, [rax + PyStrObject.ob_size]  ; spec length
-    call float_format_spec
+    mov rdi, [rbp - FV_VALUE]
+    mov rsi, [rbp - FV_VTAG]
+    V_PACK rdi, rsi
+    mov rsi, rax
+    extern format_apply_spec
+    call format_apply_spec
+    V_UNPACK rax, rdx
     jmp .fv_have_result
 
 .fv_type_error:

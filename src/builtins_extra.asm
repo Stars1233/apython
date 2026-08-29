@@ -4228,11 +4228,11 @@ DEF_FUNC builtin_format_fn, FMT_FRAME
     ; A class defining __format__ formats itself.  This used to fall straight
     ; through to str(), so f"{obj:>5}" ignored both the spec and the method.
     V_TEST_PTR_M [rbp - FMT_OBJ], rcx
-    ja .fmt_use_str
+    ja .fmt_apply_spec
     mov rdi, [rbp - FMT_OBJ]
     mov rax, [rdi + PyObject.ob_type]
     test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_HEAPTYPE
-    jz .fmt_use_str
+    jz .fmt_apply_spec
     mov rsi, [rbp - FMT_SPEC]
     extern dunder_call_2
     lea rdx, [rel fmt_dunder_name]
@@ -4240,7 +4240,7 @@ DEF_FUNC builtin_format_fn, FMT_FRAME
     call dunder_call_2
     V_UNPACK rax, rdx
     test edx, edx
-    jz .fmt_use_str             ; no __format__ on this class
+    jz .fmt_apply_spec             ; no __format__ on this class
     ; If an empty spec was allocated here, release it.
     cmp rbx, 2
     jge .fmt_done
@@ -4252,9 +4252,22 @@ DEF_FUNC builtin_format_fn, FMT_FRAME
     pop rax
     jmp .fmt_done
 
-    ; The builtin format-spec mini-language -- width, fill, alignment, and
-    ; the b/o/x/_ type codes -- is still unimplemented for int, float and
-    ; str; format(255, "08b") returns "255".
+.fmt_apply_spec:
+    ; Not a class with its own __format__: apply the spec directly.
+    extern format_apply_spec
+    mov rdi, [rbp - FMT_OBJ]
+    mov rsi, [rbp - FMT_SPEC]
+    call format_apply_spec
+    V_UNPACK rax, rdx
+    cmp rbx, 2
+    jge .fmt_done
+    push rax
+    push rdx
+    mov rdi, [rbp - FMT_SPEC]
+    call obj_decref
+    pop rdx
+    pop rax
+    jmp .fmt_done
 
 .fmt_use_str:
     ; Just call str(value) — simple fallback
