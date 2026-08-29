@@ -99,9 +99,16 @@ END_FUNC float_to_f64
 ;; float_repr(rdi = raw double bits) -> PyStrObject*
 ;; Uses shortest representation that round-trips.
 ;; ============================================================================
+; Named slots for the second buffer the notation choice needs.
+FR_VAL   equ 8
+FR_PREC  equ 16
+FR_BUF   equ 64          ; 48 bytes, [rbp-64, rbp-16)
+FR_EBUF  equ 128         ; 48 bytes, [rbp-128, rbp-80)
+FR_EXP   equ 136
+
 DEF_FUNC float_repr
     and rsp, -16              ; ensure 16-byte alignment for libc calls
-    sub rsp, 80
+    sub rsp, 160
     ; Stack layout:
     ;   [rbp-8]   = original double value (8 bytes)
     ;   [rbp-16]  = precision counter (8 bytes, only low 4 used)
@@ -127,16 +134,16 @@ DEF_FUNC float_repr
     mov qword [rbp-16], 1     ; prec = 1
 
 .repr_loop:
-    lea rdi, [rbp-64]         ; buf
+    lea rdi, [rbp - FR_BUF]   ; buf
     mov esi, 48                ; bufsz
     lea rdx, [rel fmt_g]      ; "%.*g"
-    mov ecx, [rbp-16]         ; prec
-    movsd xmm0, [rbp-8]      ; value
+    mov ecx, [rbp - FR_PREC]  ; prec
+    movsd xmm0, [rbp - FR_VAL] ; value
     mov eax, 1                ; 1 xmm register used
     call snprintf wrt ..plt
 
     ; Round-trip check: strtod(buf, NULL) == val?
-    lea rdi, [rbp-64]         ; buf
+    lea rdi, [rbp - FR_BUF]   ; buf
     xor esi, esi              ; endptr = NULL
     call strtod wrt ..plt
     ; xmm0 = reparsed value
@@ -149,6 +156,100 @@ DEF_FUNC float_repr
     jle .repr_loop
 
 .repr_found:
+    ; The loop above found the shortest digit count that round-trips, but it
+    ; let %g pick the notation -- and %g goes exponential as soon as the
+    ; exponent reaches the precision, so repr(100.0) came out as "1e+02".
+    ; CPython chooses the digits first and the notation second: fixed when
+    ; the decimal exponent is in [-4, 16), exponential otherwise.
+    lea rdi, [rbp - FR_EBUF]
+    mov esi, 48
+    lea rdx, [rel fmt_e]
+    mov ecx, [rbp - FR_PREC]
+    dec ecx                   ; %e takes digits after the point
+    movsd xmm0, [rbp - FR_VAL]
+    mov eax, 1
+    call snprintf wrt ..plt
+
+    ; Read the exponent out of "d.dddde<sign>dd".
+    lea rsi, [rbp - FR_EBUF]
+    xor ecx, ecx
+.fr_find_e:
+    movzx eax, byte [rsi + rcx]
+    test al, al
+    jz .fr_use_e              ; no exponent: nothing to decide
+    cmp al, 'e'
+    je .fr_got_e
+    inc rcx
+    jmp .fr_find_e
+.fr_got_e:
+    inc rcx
+    xor r8d, r8d              ; negative?
+    movzx eax, byte [rsi + rcx]
+    cmp al, '-'
+    jne .fr_exp_sign_done
+    mov r8d, 1
+    inc rcx
+    jmp .fr_exp_digits
+.fr_exp_sign_done:
+    cmp al, '+'
+    jne .fr_exp_digits
+    inc rcx
+.fr_exp_digits:
+    xor r9d, r9d
+.fr_exp_loop:
+    movzx eax, byte [rsi + rcx]
+    cmp al, '0'
+    jb .fr_exp_done
+    cmp al, '9'
+    ja .fr_exp_done
+    imul r9, r9, 10
+    sub rax, '0'
+    add r9, rax
+    inc rcx
+    jmp .fr_exp_loop
+.fr_exp_done:
+    test r8d, r8d
+    jz .fr_exp_positive
+    neg r9
+.fr_exp_positive:
+    mov [rbp - FR_EXP], r9
+
+    cmp r9, -4
+    jl .fr_use_e
+    cmp r9, 16
+    jge .fr_use_e
+
+    ; Fixed notation: digits after the point = (significant - 1) - exponent
+    mov rcx, [rbp - FR_PREC]
+    dec rcx
+    sub rcx, r9
+    jns .fr_fixed_prec_ok
+    xor ecx, ecx
+.fr_fixed_prec_ok:
+    lea rdi, [rbp - FR_BUF]
+    mov esi, 48
+    lea rdx, [rel fmt_f]
+    movsd xmm0, [rbp - FR_VAL]
+    mov eax, 1
+    call snprintf wrt ..plt
+    jmp .fr_notation_done
+
+.fr_use_e:
+    ; Exponential: the %e rendering is already what CPython would print.
+    lea rdi, [rbp - FR_BUF]
+    lea rsi, [rbp - FR_EBUF]
+    xor ecx, ecx
+.fr_copy_e:
+    movzx eax, byte [rsi + rcx]
+    mov [rdi + rcx], al
+    test al, al
+    jz .fr_notation_done
+    inc rcx
+    cmp rcx, 47
+    jl .fr_copy_e
+    mov byte [rdi + rcx], 0
+
+.fr_notation_done:
     ; Check if buf needs ".0" appended (no '.', no 'e', no 'E')
     lea rdi, [rbp-64]
     xor ecx, ecx
