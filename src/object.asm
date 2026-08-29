@@ -112,10 +112,6 @@ DEF_FUNC obj_repr
     je .smallint
     cmp esi, TAG_FLOAT
     je .float_tag
-    cmp esi, TAG_NONE
-    je .none_tag
-    cmp esi, TAG_BOOL
-    je .bool_tag
 
     ; TAG_PTR: use tp_repr
     test rdi, rdi
@@ -184,10 +180,6 @@ DEF_FUNC obj_str
     je .smallint
     cmp esi, TAG_FLOAT
     je .float_tag
-    cmp esi, TAG_NONE
-    je .none_tag
-    cmp esi, TAG_BOOL
-    je .bool_tag
 
     ; TAG_PTR path
     test rdi, rdi
@@ -282,10 +274,6 @@ DEF_FUNC obj_hash
     je .smallint_hash
     cmp esi, TAG_FLOAT
     je .float_hash
-    cmp esi, TAG_BOOL
-    je .bool_hash
-    cmp esi, TAG_NONE
-    je .none_hash
 
     ; TAG_PTR path
     test rdi, rdi
@@ -347,10 +335,6 @@ DEF_FUNC_BARE obj_is_true
     je .smallint
     cmp esi, TAG_FLOAT
     je .float_tag
-    cmp esi, TAG_BOOL
-    je .bool_tag
-    cmp esi, TAG_NONE
-    je .none_tag
 
     push rbp
     mov rbp, rsp
@@ -431,8 +415,6 @@ DEF_FUNC_BARE obj_is_true
 
     ; Check if __bool__ is None → TypeError
     ; Handle both inline (0, TAG_NONE) and pointer (none_singleton, TAG_PTR) forms
-    cmp edx, TAG_NONE
-    je .dunder_bool_none_error
     lea rcx, [rel none_singleton]
     cmp rax, rcx
     je .dunder_bool_none_error
@@ -446,8 +428,6 @@ DEF_FUNC_BARE obj_is_true
     jz .check_dunder_len
 
     ; __bool__ returned a result — must be bool
-    cmp edx, TAG_BOOL
-    je .dunder_bool_is_bool
     ; Check TAG_PTR pointing to bool_type
     cmp edx, TAG_PTR
     jne .dunder_bool_type_error

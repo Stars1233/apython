@@ -7,6 +7,8 @@
 %include "builtins.inc"
 %include "sre.inc"
 
+extern bool_true
+extern bool_false
 extern ap_malloc
 extern ap_free
 extern obj_decref
@@ -86,8 +88,7 @@ DEF_FUNC sre_compile_func, SC_FRAME
 
     ; args[4] = groupindex (dict or None)
     mov rax, [rdi + 64]        ; payload
-    mov rcx, [rdi + 72]        ; tag
-    cmp ecx, TAG_NONE
+    IS_NONE rax, rcx
     jne .have_groupindex
     xor eax, eax               ; NULL for None
 .have_groupindex:
@@ -95,8 +96,7 @@ DEF_FUNC sre_compile_func, SC_FRAME
 
     ; args[5] = indexgroup (tuple or None)
     mov rax, [rdi + 80]        ; payload
-    mov rcx, [rdi + 88]        ; tag
-    cmp ecx, TAG_NONE
+    IS_NONE rax, rcx
     jne .have_indexgroup
     xor eax, eax
 .have_indexgroup:
@@ -219,12 +219,12 @@ DEF_FUNC sre_ascii_iscased_func
     jbe .aic_true
 .aic_false:
     xor eax, eax
-    mov edx, TAG_BOOL
+    RET_BOOL_RAX
     leave
     ret
 .aic_true:
     mov eax, 1
-    mov edx, TAG_BOOL
+    RET_BOOL_RAX
     leave
     ret
 .aic_error:
@@ -282,17 +282,17 @@ DEF_FUNC sre_unicode_iscased_func
     jb .uic_false
     ; Simplified: assume cased if in Latin Extended or other letter ranges
     mov eax, 1
-    mov edx, TAG_BOOL
+    RET_BOOL_RAX
     leave
     ret
 .uic_false:
     xor eax, eax
-    mov edx, TAG_BOOL
+    RET_BOOL_RAX
     leave
     ret
 .uic_true:
     mov eax, 1
-    mov edx, TAG_BOOL
+    RET_BOOL_RAX
     leave
     ret
 .uic_error:

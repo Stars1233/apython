@@ -1223,20 +1223,8 @@ DEF_FUNC_BARE op_is_op
     VPOP_VAL rsi, r9           ; right
     VPOP_VAL rdi, r10          ; left
 
-    ; Normalize None: (none_singleton, TAG_PTR) → (0, TAG_NONE)
-    ; so that inline and pointer None representations compare equal
-    extern none_singleton
-    lea rcx, [rel none_singleton]
-    cmp rsi, rcx
-    jne .is_no_norm_right
-    xor esi, esi
-    mov r9, TAG_NONE
-.is_no_norm_right:
-    cmp rdi, rcx
-    jne .is_no_norm_left
-    xor edi, edi
-    mov r10, TAG_NONE
-.is_no_norm_left:
+    ; None has a single representation (the heap singleton), so payload+tag
+    ; comparison is all `is` needs -- no normalization step.
 
     ; Compare both payload AND tag (for SmallInt correctness)
     xor eax, eax

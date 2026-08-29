@@ -5,6 +5,7 @@
 %include "object.inc"
 %include "types.inc"
 
+extern none_singleton
 extern ap_malloc
 extern ap_free
 extern ap_strlen
@@ -629,8 +630,6 @@ DEF_FUNC str_mod, SM_FRAME
     push rcx
     call .sm_get_arg
     ; If TAG_BOOL, convert to TAG_SMALLINT so we get "0"/"1" not "False"/"True"
-    cmp edx, TAG_BOOL
-    je .sm_int_from_bool
     ; If TAG_PTR pointing to bool_type, extract 0/1 as SmallInt
     cmp edx, TAG_PTR
     jne .sm_int_go
@@ -675,8 +674,6 @@ DEF_FUNC str_mod, SM_FRAME
     push rcx
     call .sm_get_arg
     ; Convert TAG_BOOL to TAG_SMALLINT
-    cmp edx, TAG_BOOL
-    je .sm_hex_from_bool
     ; Handle TAG_PTR bool singletons
     cmp edx, TAG_PTR
     jne .sm_hex_go
@@ -835,7 +832,7 @@ DEF_FUNC str_mod, SM_FRAME
     ret
 .sm_arg_none:
     xor eax, eax              ; payload = 0
-    mov edx, TAG_NONE         ; tag = TAG_NONE
+    RET_NONE         ; tag = TAG_NONE
     inc r15
     ret
 

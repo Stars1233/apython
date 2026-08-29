@@ -6,6 +6,7 @@
 %include "types.inc"
 %include "frame.inc"
 
+extern none_singleton
 extern ap_malloc
 extern gc_alloc
 extern gc_track
@@ -887,7 +888,7 @@ DEF_FUNC func_getattr
     jnz .return_kwdefaults_obj
     ; Return None if no kwdefaults
     xor eax, eax
-    mov edx, TAG_NONE
+    RET_NONE
     pop r12
     pop rbx
     leave

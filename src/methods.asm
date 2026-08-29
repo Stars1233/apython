@@ -4197,8 +4197,6 @@ DEF_FUNC list_method_sort, LS_FRAME
     ; Extract reverse value
     mov r10, [rdi + r11]           ; value payload
     mov r13, [rdi + r11 + 8]      ; value tag
-    cmp r13d, TAG_BOOL
-    je .sort_rev_bool
     cmp r13d, TAG_SMALLINT
     je .sort_rev_int
     ; TAG_PTR: check if bool_true
@@ -4247,8 +4245,6 @@ DEF_FUNC list_method_sort, LS_FRAME
     mov r10, [rdi + r11]           ; key payload
     mov r13, [rdi + r11 + 8]      ; key tag
     ; key=None means no key function
-    cmp r13d, TAG_NONE
-    je .sort_kw_next
     lea r14, [rel none_singleton]
     cmp r10, r14
     je .sort_kw_next
@@ -4588,8 +4584,6 @@ DEF_FUNC list_method_sort, LS_FRAME
     ; (rax=payload, edx=tag) — check if comparison is true
     test edx, edx
     jz .merge_cmp_null             ; NULL → check for error or unorderable types
-    cmp edx, TAG_BOOL
-    je .merge_bool_result
     ; TAG_PTR: check for NotImplemented, then check bool_true
     extern notimpl_singleton
     lea rcx, [rel notimpl_singleton]
@@ -5235,8 +5229,6 @@ DEF_FUNC list_method_index, LI_FRAME
     je .index_float_type
     test r8, r8
     js .index_str_type
-    cmp r8d, TAG_BOOL
-    je .index_next
     test r8d, TAG_RC_BIT
     jz .index_next
     mov rax, [rdi + PyObject.ob_type]
@@ -5358,8 +5350,6 @@ DEF_FUNC list_method_count, LC_FRAME
     je .count_eq_int
     cmp r8d, TAG_FLOAT
     je .count_eq_float
-    cmp r8d, TAG_BOOL
-    je .count_next            ; TAG_BOOL: identity only
     test r8d, TAG_RC_BIT
     jz .count_next            ; TAG_NONE etc: skip
     mov rax, [rdi + PyObject.ob_type]
@@ -6240,9 +6230,11 @@ DEF_FUNC dict_classmethod_fromkeys, DFK_FRAME
     push r12
     push r13
 
-    ; Default value = None (payload=0, tag=TAG_NONE)
-    mov qword [rbp - DFK_VAL], 0
-    mov qword [rbp - DFK_VTAG], TAG_NONE
+    ; Default value = None
+    extern none_singleton
+    lea rax, [rel none_singleton]
+    mov [rbp - DFK_VAL], rax
+    mov qword [rbp - DFK_VTAG], TAG_PTR
 
     ; If nargs >= 3, use args[2] as value
     cmp rsi, 3
@@ -6431,8 +6423,6 @@ DEF_FUNC list_method_remove
     je .lremove_eq_int
     cmp r8d, TAG_FLOAT
     je .lremove_eq_float
-    cmp r8d, TAG_BOOL
-    je .lremove_next          ; TAG_BOOL: identity only
     test r8d, TAG_RC_BIT
     jz .lremove_next          ; TAG_NONE etc: skip
     mov rax, [rdi + PyObject.ob_type]
@@ -8026,13 +8016,13 @@ DEF_FUNC float_method_is_integer
 
     ; True
     mov eax, 1
-    mov edx, TAG_BOOL
+    RET_BOOL_RAX
     leave
     ret
 
 .fii_false:
     xor eax, eax
-    mov edx, TAG_BOOL
+    RET_BOOL_RAX
     leave
     ret
 END_FUNC float_method_is_integer
@@ -8214,13 +8204,13 @@ DEF_FUNC bytes_method_startswith
 
 .bsw_true:
     mov eax, 1
-    mov edx, TAG_BOOL
+    RET_BOOL_RAX
     leave
     ret
 
 .bsw_false:
     xor eax, eax
-    mov edx, TAG_BOOL
+    RET_BOOL_RAX
     leave
     ret
 
@@ -8263,13 +8253,13 @@ DEF_FUNC bytes_method_endswith
 
 .bew_true:
     mov eax, 1
-    mov edx, TAG_BOOL
+    RET_BOOL_RAX
     leave
     ret
 
 .bew_false:
     xor eax, eax
-    mov edx, TAG_BOOL
+    RET_BOOL_RAX
     leave
     ret
 

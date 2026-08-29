@@ -4,6 +4,7 @@
 %include "object.inc"
 %include "types.inc"
 
+extern none_singleton
 extern ap_free
 extern ap_strcmp
 extern obj_decref
@@ -160,7 +161,7 @@ DEF_FUNC code_getattr
 
 .return_none:
     xor eax, eax
-    mov edx, TAG_NONE
+    RET_NONE
     pop r12
     pop rbx
     leave

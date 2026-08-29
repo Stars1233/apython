@@ -5,6 +5,8 @@
 %include "object.inc"
 %include "types.inc"
 
+extern bool_true
+extern bool_false
 extern ap_malloc
 extern gc_alloc
 extern gc_track
@@ -765,10 +767,6 @@ DEF_FUNC tuple_richcompare, TRC_FRAME
     ; Resolve left type
     cmp ecx, TAG_SMALLINT
     je .trc_elem_int_type
-    cmp ecx, TAG_BOOL
-    je .trc_elem_bool_type
-    cmp ecx, TAG_NONE
-    je .trc_elem_none_type
     ; TAG_PTR: get ob_type
     mov rax, [rdi + PyObject.ob_type]
     jmp .trc_elem_have_type
@@ -879,10 +877,6 @@ DEF_FUNC tuple_richcompare, TRC_FRAME
     je .trc_order_float
     cmp ecx, TAG_SMALLINT
     je .trc_order_int_type
-    cmp ecx, TAG_BOOL
-    je .trc_order_bool_type
-    cmp ecx, TAG_NONE
-    je .trc_order_none_type
     test rcx, rcx
     js .trc_order_str_type
     mov rax, [rdi + PyObject.ob_type]
@@ -1015,13 +1009,13 @@ DEF_FUNC tuple_richcompare, TRC_FRAME
 
 .trc_return_true:
     mov eax, 1
-    mov edx, TAG_BOOL
+    RET_BOOL_RAX
     leave
     ret
 
 .trc_return_false:
     xor eax, eax
-    mov edx, TAG_BOOL
+    RET_BOOL_RAX
     leave
     ret
 

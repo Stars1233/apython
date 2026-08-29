@@ -89,46 +89,22 @@ END_FUNC bool_from_int
 
 ; bool_and(rdi=left, rsi=right, edx=left_tag, ecx=right_tag)
 DEF_FUNC_BARE bool_and
-    cmp edx, TAG_BOOL
-    jne .delegate
-    cmp ecx, TAG_BOOL
-    jne .delegate
-    ; Both TAG_BOOL: payload is 0 or 1
-    and rdi, rsi
-    mov rax, rdi
-    mov edx, TAG_BOOL
-    ret
-.delegate:
+    ; True and False are PyIntObject-shaped singletons, so int_and handles them
+    ; directly and already returns a bool when both operands are bools.
     jmp int_and
 END_FUNC bool_and
 
 ; bool_or(rdi=left, rsi=right, edx=left_tag, ecx=right_tag)
 DEF_FUNC_BARE bool_or
-    cmp edx, TAG_BOOL
-    jne .delegate
-    cmp ecx, TAG_BOOL
-    jne .delegate
-    ; Both TAG_BOOL
-    or rdi, rsi
-    mov rax, rdi
-    mov edx, TAG_BOOL
-    ret
-.delegate:
+    ; True and False are PyIntObject-shaped singletons, so int_or handles them
+    ; directly and already returns a bool when both operands are bools.
     jmp int_or
 END_FUNC bool_or
 
 ; bool_xor(rdi=left, rsi=right, edx=left_tag, ecx=right_tag)
 DEF_FUNC_BARE bool_xor
-    cmp edx, TAG_BOOL
-    jne .delegate
-    cmp ecx, TAG_BOOL
-    jne .delegate
-    ; Both TAG_BOOL
-    xor rdi, rsi
-    mov rax, rdi
-    mov edx, TAG_BOOL
-    ret
-.delegate:
+    ; True and False are PyIntObject-shaped singletons, so int_xor handles them
+    ; directly and already returns a bool when both operands are bools.
     jmp int_xor
 END_FUNC bool_xor
 

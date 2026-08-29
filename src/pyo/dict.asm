@@ -5,6 +5,8 @@
 %include "object.inc"
 %include "types.inc"
 
+extern bool_true
+extern bool_false
 extern ap_malloc
 extern gc_alloc
 extern gc_track
@@ -347,8 +349,6 @@ DEF_FUNC_LOCAL dict_keys_equal
     je .dke_a_numeric
     cmp edx, TAG_FLOAT
     je .dke_a_numeric
-    cmp edx, TAG_BOOL
-    je .dke_a_numeric
     cmp edx, TAG_PTR
     jne .dke_not_numeric
     ; TAG_PTR: check if int_type or bool_type
@@ -364,8 +364,6 @@ DEF_FUNC_LOCAL dict_keys_equal
     cmp ecx, TAG_SMALLINT
     je .dke_both_numeric
     cmp ecx, TAG_FLOAT
-    je .dke_both_numeric
-    cmp ecx, TAG_BOOL
     je .dke_both_numeric
     cmp ecx, TAG_PTR
     jne .dke_not_equal          ; a numeric, b not → not equal
@@ -1770,11 +1768,23 @@ DEF_FUNC dict_richcompare, DRC_FRAME
     mov ecx, TAG_PTR
     mov r8d, TAG_PTR
     call rax
-    ; Result: (rax=payload, edx=tag)
-    ; Check if result is True (TAG_BOOL with payload=1)
-    cmp edx, TAG_BOOL
-    jne .drc_not_equal_pop
-    test eax, eax
+    ; Result: (rax=payload, edx=tag).  True and False are heap singletons
+    ; now, so test truthiness instead of looking for an inline bool payload.
+    extern obj_is_true
+    test edx, edx
+    jz .drc_not_equal_pop           ; NULL result: treat as not equal
+    mov rdi, rax
+    mov rsi, rdx
+    push rax
+    push rdx
+    call obj_is_true
+    pop rdx
+    pop rdi
+    mov r11d, eax                   ; truthiness
+    push r11
+    DECREF_VAL rdi, rdx
+    pop r11
+    test r11d, r11d
     jz .drc_not_equal_pop
     jmp .drc_values_match
 
@@ -1786,7 +1796,7 @@ DEF_FUNC dict_richcompare, DRC_FRAME
     cmp dword [rbp - DRC_OP], 3     ; NE?
     je .drc_ret_true
     xor eax, eax                    ; False
-    mov edx, TAG_BOOL
+    RET_BOOL_RAX
     leave
     ret
 
@@ -1804,13 +1814,13 @@ DEF_FUNC dict_richcompare, DRC_FRAME
     je .drc_ret_false
 .drc_ret_true:
     mov eax, 1                      ; True
-    mov edx, TAG_BOOL
+    RET_BOOL_RAX
     leave
     ret
 
 .drc_ret_false:
     xor eax, eax                    ; False
-    mov edx, TAG_BOOL
+    RET_BOOL_RAX
     leave
     ret
 END_FUNC dict_richcompare

@@ -134,15 +134,8 @@ DEF_FUNC_BARE op_binary_op
     VPOP_VAL rsi, r8            ; rsi = right operand (b), r8 = right tag
     VPOP_VAL rdi, r9            ; rdi = left operand (a), r9 = left tag
 
-    ; Treat TAG_BOOL as smallint for numeric ops (bool is int subclass)
-    cmp r9d, TAG_BOOL
-    jne .binop_left_ok
-    mov r9d, TAG_SMALLINT
-.binop_left_ok:
-    cmp r8d, TAG_BOOL
-    jne .binop_right_ok
-    mov r8d, TAG_SMALLINT
-.binop_right_ok:
+    ; Bools are heap singletons shaped like PyIntObject, so they arrive as
+    ; TAG_PTR and the ordinary int path handles them -- no tag rewriting.
 
     ; Fast path: SmallInt add (NB_ADD=0, NB_INPLACE_ADD=13)
     cmp ecx, 0                 ; NB_ADD
@@ -240,8 +233,6 @@ DEF_FUNC_BARE op_binary_op
 
 .binop_not_smallint_left:
     ; TAG_BOOL: route to int (int_unwrap handles TAG_BOOL)
-    cmp qword [rsp + BO_LTAG], TAG_BOOL
-    je .binop_smallint_type
     ; Non-pointer guard: TAG_NONE, TAG_FLOAT can't be dereferenced
     test qword [rsp + BO_LTAG], TAG_RC_BIT
     jz .binop_no_method
@@ -275,8 +266,6 @@ DEF_FUNC_BARE op_binary_op
     cmp qword [rsp + BO_LTAG], TAG_SMALLINT
     je .binop_smallint_type
     ; TAG_BOOL: route to int (int_unwrap handles TAG_BOOL)
-    cmp qword [rsp + BO_LTAG], TAG_BOOL
-    je .binop_smallint_type
     ; Non-pointer guard: TAG_NONE, TAG_FLOAT can't be dereferenced
     test qword [rsp + BO_LTAG], TAG_RC_BIT
     jz .binop_no_method
@@ -322,8 +311,6 @@ DEF_FUNC_BARE op_binary_op
     ; Reload type's tp_as_number
     cmp qword [rsp + BO_LTAG], TAG_SMALLINT
     je .binop_fallback_int
-    cmp qword [rsp + BO_LTAG], TAG_BOOL
-    je .binop_fallback_int
     test qword [rsp + BO_LTAG], TAG_RC_BIT
     jz .binop_try_dunder
     mov rax, [rdi + PyObject.ob_type]
@@ -348,8 +335,6 @@ DEF_FUNC_BARE op_binary_op
     ; Guard: if left is SmallInt/Bool and right is a heaptype (not int subclass),
     ; the int nb_* methods can't handle it. Skip to dunder dispatch.
     cmp qword [rsp + BO_LTAG], TAG_SMALLINT
-    je .binop_guard_int_left
-    cmp qword [rsp + BO_LTAG], TAG_BOOL
     je .binop_guard_int_left
     jmp .binop_compat_ok
 
@@ -472,7 +457,9 @@ DEF_FUNC_BARE op_binary_op
     test edx, edx
     jz .binop_left_dunder      ; not found → fall back to regular dunder
     test edx, TAG_RC_BIT
-    jz .binop_no_method        ; found None → blocks fallback (TypeError)
+    jz .binop_no_method        ; non-pointer: cannot be called
+    IS_NONE rax, rcx
+    je .binop_no_method        ; __i<op>__ = None blocks the fallback (TypeError)
 
     ; Inplace dunder exists and is callable — call via dunder_call_2
     push r9
@@ -789,10 +776,6 @@ section .text
     ; Get type's tp_richcompare
     cmp r9d, TAG_SMALLINT
     je .cmp_smallint_type
-    cmp r9d, TAG_BOOL
-    je .cmp_bool_type
-    cmp r9d, TAG_NONE
-    je .cmp_none_type
     mov rax, [rdi + PyObject.ob_type]
     jmp .cmp_have_type
 .cmp_smallint_type:
@@ -851,8 +834,6 @@ section .text
     jz .cmp_identity            ; __eq__ also not found → identity
 
     ; Negate __eq__ result: if True → False, if False → True
-    cmp edx, TAG_BOOL
-    je .ne_negate_tag_bool
     ; Check for TAG_PTR bool (bool_true/bool_false singletons)
     cmp edx, TAG_PTR
     jne .cmp_do_call_result     ; non-bool result, just use as-is
@@ -936,10 +917,6 @@ section .text
     je .cmp_right_int
     cmp r8d, TAG_FLOAT
     je .cmp_right_float
-    cmp r8d, TAG_BOOL
-    je .cmp_right_bool
-    cmp r8d, TAG_NONE
-    je .cmp_right_none
     mov rax, [rdi + PyObject.ob_type]
     jmp .cmp_right_have_type
 .cmp_right_int:
@@ -1115,8 +1092,6 @@ DEF_FUNC_BARE op_unary_negative
     ; Get nb_negative: type -> tp_as_number -> nb_negative (SmallInt-aware)
     cmp r8d, TAG_SMALLINT
     je .neg_smallint_type
-    cmp r8d, TAG_BOOL
-    je .neg_bool_type
     mov rax, [rdi + PyObject.ob_type]
     jmp .neg_have_type
 .neg_bool_type:
@@ -1164,8 +1139,6 @@ DEF_FUNC_BARE op_unary_invert
 
     cmp r8d, TAG_SMALLINT
     je .inv_smallint_type
-    cmp r8d, TAG_BOOL
-    je .inv_bool_type
     mov rax, [rdi + PyObject.ob_type]
     jmp .inv_have_type
 .inv_bool_type:
@@ -1238,8 +1211,6 @@ DEF_FUNC_BARE op_pop_jump_if_false
     VPOP_VAL rdi, r8            ; rdi = value to test, r8 = value tag
 
     ; Fast path: TAG_BOOL — payload is 0/1, no DECREF needed
-    cmp r8d, TAG_BOOL
-    je .pjif_bool_fast
 
     ; Slow path: call obj_is_true + DECREF
     push rcx                   ; save target offset
@@ -1275,8 +1246,6 @@ DEF_FUNC_BARE op_pop_jump_if_true
     VPOP_VAL rdi, r8            ; rdi = value to test, r8 = value tag
 
     ; Fast path: TAG_BOOL — payload is 0/1, no DECREF needed
-    cmp r8d, TAG_BOOL
-    je .pjit_bool_fast
 
     ; Slow path: call obj_is_true + DECREF
     push rcx                   ; save target offset
@@ -1312,8 +1281,6 @@ DEF_FUNC_BARE op_pop_jump_if_none
     VPOP_VAL rax, r8            ; rax = value, r8 = value tag
 
     ; Check for None: TAG_NONE or (TAG_PTR with none_singleton payload)
-    cmp r8d, TAG_NONE
-    je .is_none
     lea rdx, [rel none_singleton]
     cmp rax, rdx
     jne .not_none
@@ -1341,8 +1308,6 @@ DEF_FUNC_BARE op_pop_jump_if_not_none
     VPOP_VAL rax, r8            ; rax = value, r8 = value tag
 
     ; Check for None: TAG_NONE or (TAG_PTR with none_singleton payload)
-    cmp r8d, TAG_NONE
-    je .is_none
     lea rdx, [rel none_singleton]
     cmp rax, rdx
     je .is_none
@@ -1841,8 +1806,6 @@ DEF_FUNC op_send, SND_FRAME
 
     ; Check if sent value is None — use iternext, otherwise gen_send
     ; Handle both inline TAG_NONE and pointer-to-none_singleton forms
-    cmp qword [rbp - SND_STAG], TAG_NONE
-    je .send_use_iternext
     mov rsi, [rbp - SND_SENT]
     lea rcx, [rel none_singleton]
     cmp rsi, rcx
@@ -2262,8 +2225,6 @@ extern obj_decref
 .ci1_unary_positive:
     ; +x — for most numeric types, no-op. For bool, call nb_positive.
     ; Check if TOS is TAG_BOOL
-    cmp byte [r15 - 1], TAG_BOOL
-    je .ci1_pos_call
     ; Check if TOS is TAG_PTR pointing to bool_type
     cmp byte [r15 - 1], TAG_PTR
     jne .ci1_pos_done

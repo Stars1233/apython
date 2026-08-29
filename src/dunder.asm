@@ -8,6 +8,7 @@
 %include "object.inc"
 %include "types.inc"
 
+extern none_singleton
 extern str_from_cstr_heap
 extern dict_get
 extern obj_decref
@@ -102,9 +103,11 @@ DEF_FUNC dunder_call_1
     call dunder_lookup
     test edx, edx
     jz .not_found
-    ; Guard: non-pointer dunder (e.g. set to None) → not callable
+    ; Guard: a dunder explicitly set to None, or any non-pointer, is not callable
     test edx, TAG_RC_BIT
     jz .not_found
+    IS_NONE rax, r9
+    je .not_found
 
     ; Call: tp_call(dunder_func, &[self], 1)
     mov r12, rax            ; r12 = dunder func
@@ -162,9 +165,11 @@ DEF_FUNC dunder_call_2
     call dunder_lookup
     test edx, edx
     jz .not_found
-    ; Guard: non-pointer dunder (e.g. set to None) → not callable
+    ; Guard: a dunder explicitly set to None, or any non-pointer, is not callable
     test edx, TAG_RC_BIT
     jz .not_found
+    IS_NONE rax, r9
+    je .not_found
 
     ; Call: tp_call(dunder_func, &[self, other], 2)
     mov r13, rax            ; r13 = dunder func
@@ -230,9 +235,11 @@ DEF_FUNC dunder_call_3
     call dunder_lookup
     test edx, edx
     jz .not_found
-    ; Guard: non-pointer dunder (e.g. set to None) → not callable
+    ; Guard: a dunder explicitly set to None, or any non-pointer, is not callable
     test edx, TAG_RC_BIT
     jz .not_found
+    IS_NONE rax, r9
+    je .not_found
 
     ; Call: tp_call(dunder_func, &[self, arg1, arg2], 3)
     mov r14, rax            ; r14 = dunder func

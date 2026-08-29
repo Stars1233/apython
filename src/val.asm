@@ -92,9 +92,9 @@ END_FUNC val_to_i64
 ;; MIGRATION SHIM.  Converts an old (payload, tag) pair into a Value.
 ;; Ownership transfers 1:1: an owned (payload, tag) yields an owned Value.
 ;;
-;; TAG_NONE / TAG_BOOL become the immortal singleton pointers (with an INCREF,
-;; so that the returned Value is genuinely owned).  Those two arms disappear
-;; in P2, and this whole function disappears in P6.
+;; None, True and False have no tag of their own: they are ordinary heap
+;; singletons, so they travel the TAG_PTR path.  This whole function
+;; disappears in P6.
 ;; ============================================================================
 DEF_FUNC val_pack
     cmp esi, TAG_PTR
@@ -105,10 +105,6 @@ DEF_FUNC val_pack
     je .float
     cmp esi, TAG_NULL
     je .null
-    cmp esi, TAG_NONE
-    je .none
-    cmp esi, TAG_BOOL
-    je .bool
     cmp esi, TAG_TASK
     je .passthru
     cmp esi, TAG_WAIT_FOR
@@ -143,21 +139,6 @@ DEF_FUNC val_pack
     leave
     ret
 
-.none:
-    lea rax, [rel none_singleton]
-    inc qword [rax + PyObject.ob_refcnt]
-    leave
-    ret
-
-.bool:
-    lea rax, [rel bool_false]
-    lea rcx, [rel bool_true]
-    test rdi, rdi
-    cmovnz rax, rcx
-    inc qword [rax + PyObject.ob_refcnt]
-    leave
-    ret
-
 .sleep:
     mov rax, rdi
     and rax, [rel v_mask48]
@@ -180,9 +161,8 @@ END_FUNC val_pack
 ;;
 ;; MIGRATION SHIM, the inverse of val_pack.  Ownership transfers 1:1.
 ;;
-;; NOTE: never returns TAG_NONE or TAG_BOOL — None/True/False are ordinary
-;; heap singletons in the new representation and come back as TAG_PTR.  P2
-;; removes every consumer of those two tags before this shim goes into use.
+;; None, True and False come back as TAG_PTR: they are ordinary heap
+;; singletons with no tag of their own.
 ;; ============================================================================
 DEF_FUNC val_unpack
     mov rax, rdi
@@ -252,10 +232,6 @@ DEF_FUNC fat_to_obj
     je .ptr
     cmp esi, TAG_SMALLINT
     je .smallint
-    cmp esi, TAG_NONE
-    je .none
-    cmp esi, TAG_BOOL
-    je .bool
     ; TAG_FLOAT, TAG_NULL or unknown: return NULL
     xor eax, eax
     leave
@@ -271,25 +247,6 @@ DEF_FUNC fat_to_obj
 .smallint:
     ; Create a heap-allocated PyIntObject from raw int64 payload
     call int_from_i64_gmp      ; rdi already has the int value
-    leave
-    ret
-
-.none:
-    lea rax, [rel none_singleton]
-    inc qword [rax + PyObject.ob_refcnt]
-    leave
-    ret
-
-.bool:
-    test rdi, rdi
-    jz .bool_false
-    lea rax, [rel bool_true]
-    inc qword [rax + PyObject.ob_refcnt]
-    leave
-    ret
-.bool_false:
-    lea rax, [rel bool_false]
-    inc qword [rax + PyObject.ob_refcnt]
     leave
     ret
 

@@ -209,14 +209,13 @@
 ;   bits 0-6: type tag (TAG_SMALLINT..TAG_PTR)
 ;   bit 7:    TAG_RC_BIT — payload is a refcounted heap pointer
 
-; Tag constants (u8)
+; Tag constants (u8).  There is no TAG_NONE or TAG_BOOL: None, True and
+; False are the immortal heap singletons and travel as TAG_PTR.
 TAG_NULL     equ 0           ; null/empty slot
 TAG_SMALLINT equ 1           ; payload = int64_t (full 64-bit range)
 TAG_I64      equ TAG_SMALLINT
 TAG_FLOAT    equ 2           ; payload = double bits (IEEE 754)
 TAG_F64      equ TAG_FLOAT
-TAG_NONE     equ 3           ; payload = 0 (unused)
-TAG_BOOL     equ 4           ; payload = 0 (False) or 1 (True)
 TAG_RC_BIT   equ 0x80        ; bit 7: refcounted flag
 TAG_PTR      equ (5 | TAG_RC_BIT)    ; heap PyObject*, refcounted
 TAG_SLEEP    equ 7           ; payload = delay_ns (uint64) — async sleep sentinel
@@ -314,18 +313,29 @@ TAG_WAIT_FOR equ (10 | TAG_RC_BIT)   ; payload = WaitForAwaitable*, RC bit SET
     add r15, 1
 %endmacro
 
-; Push None (payload = 0, tag = TAG_NONE)
+; Push the None singleton (owned reference).  No scratch register needed:
+; the binary is linked -no-pie, so the address fits an imm32.
 %macro VPUSH_NONE 0
-    mov qword [r13], 0
-    mov byte [r15], TAG_NONE
+    mov qword [r13], none_singleton
+    inc qword [rel none_singleton]      ; ob_refcnt is at offset 0
+    mov byte [r15], TAG_PTR
     add r13, 8
     add r15, 1
 %endmacro
 
-; Push bool (payload = 0 or 1)
+; Push True/False from a 0/1 value.  Bools are the immortal singletons, so
+; this pushes an owned pointer, not an inline payload.  Clobbers %1.
 %macro VPUSH_BOOL 1             ; %1 = payload reg (0=False, 1=True)
+    test %1, %1
+    jz %%false
+    lea %1, [rel bool_true]
+    jmp %%store
+%%false:
+    lea %1, [rel bool_false]
+%%store:
+    inc qword [%1 + PyObject.ob_refcnt]
     mov [r13], %1
-    mov byte [r15], TAG_BOOL
+    mov byte [r15], TAG_PTR
     add r13, 8
     add r15, 1
 %endmacro
@@ -344,6 +354,50 @@ TAG_WAIT_FOR equ (10 | TAG_RC_BIT)   ; payload = WaitForAwaitable*, RC bit SET
     mov byte [r15], TAG_NULL
     add r13, 8
     add r15, 1
+%endmacro
+
+; ==========================================================================
+; None / True / False as owned singleton pointers
+;
+; These have no immediate form: they are the immortal heap singletons.  A
+; single representation removes the whole class of bugs where one code path
+; produced (0, TAG_NONE) and another (none_singleton, TAG_PTR), and it is
+; what the NaN-boxed representation requires.
+;
+; The including file must declare the externs itself (none.asm / bool.asm
+; define these symbols and must not also extern them).
+; ==========================================================================
+
+; Fat return of None: (rax = none_singleton, edx = TAG_PTR).  Clobbers rax.
+%macro RET_NONE 0
+    lea rax, [rel none_singleton]
+    inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
+%endmacro
+
+; Fat return of a bool from a 0/1 value already in rax.  Clobbers rax, rdx.
+%macro RET_BOOL_RAX 0
+    lea rdx, [rel bool_false]
+    test rax, rax
+    jz %%false
+    lea rdx, [rel bool_true]
+%%false:
+    mov rax, rdx
+    inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
+%endmacro
+
+; Compare a value against the None singleton; ZF is set when it is None.
+; Replaces the old `cmp tag, TAG_NONE` test.
+%macro IS_NONE 2                ; %1 = payload reg/mem, %2 = scratch reg
+    lea %2, [rel none_singleton]
+    cmp %1, %2
+%endmacro
+
+; Load the None singleton (owned) into a register.  Clobbers only %1.
+%macro LOAD_NONE 1
+    lea %1, [rel none_singleton]
+    inc qword [%1 + PyObject.ob_refcnt]
 %endmacro
 
 ; Set fat return to NULL error (rax=0, edx=TAG_NULL=0)
@@ -455,11 +509,12 @@ TAG_WAIT_FOR equ (10 | TAG_RC_BIT)   ; payload = WaitForAwaitable*, RC bit SET
 ; %1 = frame register, %2 = scratch register (clobbered)
 %macro FRAME_PUSH_NONE 2
     mov %2, [%1 + PyFrame.stack_ptr]
-    mov qword [%2], 0
+    mov qword [%2], none_singleton
+    inc qword [rel none_singleton]      ; ob_refcnt is at offset 0
     add %2, 8
     mov [%1 + PyFrame.stack_ptr], %2
     mov %2, [%1 + PyFrame.stack_tag_ptr]
-    mov byte [%2], TAG_NONE
+    mov byte [%2], TAG_PTR
     inc %2
     mov [%1 + PyFrame.stack_tag_ptr], %2
 %endmacro

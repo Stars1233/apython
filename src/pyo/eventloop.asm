@@ -18,6 +18,8 @@
 %include "errcodes.inc"
 %include "eventloop.inc"
 
+extern bool_true
+extern bool_false
 extern ap_malloc
 extern gc_alloc
 extern gc_track
@@ -803,7 +805,7 @@ END_FUNC task_repr
 DEF_FUNC _task_done_impl
     mov rax, [rdi]             ; self = args[0]
     mov eax, [rax + AsyncTask.done]
-    mov edx, TAG_BOOL
+    RET_BOOL_RAX
     leave
     ret
 END_FUNC _task_done_impl
@@ -840,7 +842,7 @@ DEF_FUNC _task_cancel_impl
     mov rax, [rdi]
     mov dword [rax + AsyncTask.cancelling], 1
     mov eax, 1
-    mov edx, TAG_BOOL
+    RET_BOOL_RAX
     leave
     ret
 END_FUNC _task_cancel_impl
@@ -849,7 +851,7 @@ END_FUNC _task_cancel_impl
 DEF_FUNC _task_cancelled_impl
     mov rax, [rdi]
     mov eax, [rax + AsyncTask.cancelling]
-    mov edx, TAG_BOOL
+    RET_BOOL_RAX
     leave
     ret
 END_FUNC _task_cancelled_impl

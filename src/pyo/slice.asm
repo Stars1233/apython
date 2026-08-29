@@ -159,8 +159,6 @@ pyobj_to_i64:
     cmp esi, TAG_SMALLINT
     je .smallint
     ; Check for None: inline TAG_NONE or pointer-to-none_singleton
-    cmp esi, TAG_NONE
-    je .is_none
     lea rax, [rel none_singleton]
     cmp rdi, rax
     je .is_none
@@ -227,8 +225,6 @@ DEF_FUNC slice_indices
     extern none_singleton
 
     ; Get step (default 1)
-    cmp qword [rbx + PySliceObject.step_tag], TAG_NONE
-    je .step_is_none
     cmp qword [rbx + PySliceObject.step_tag], TAG_PTR
     jne .step_not_none
     lea rcx, [rel none_singleton]
@@ -245,8 +241,6 @@ DEF_FUNC slice_indices
     mov r15, rax           ; r15 = step
 
     ; Get start (default: 0 if step>0, length-1 if step<0)
-    cmp qword [rbx + PySliceObject.start_tag], TAG_NONE
-    je .start_is_none
     cmp qword [rbx + PySliceObject.start_tag], TAG_PTR
     jne .start_not_none
     lea rcx, [rel none_singleton]
@@ -285,8 +279,6 @@ DEF_FUNC slice_indices
     mov r12, rax           ; r12 = start
 
     ; Get stop (default: length if step>0, -1 if step<0)
-    cmp qword [rbx + PySliceObject.stop_tag], TAG_NONE
-    je .stop_is_none
     cmp qword [rbx + PySliceObject.stop_tag], TAG_PTR
     jne .stop_not_none
     lea rcx, [rel none_singleton]

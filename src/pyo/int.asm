@@ -1781,8 +1781,6 @@ global int_is_integer
 DEF_FUNC_BARE int_is_integer
     cmp edx, TAG_SMALLINT
     je .iii_yes
-    cmp edx, TAG_BOOL
-    je .iii_yes
     test edx, TAG_RC_BIT
     jz .iii_no
     test rdi, rdi
@@ -1816,8 +1814,6 @@ DEF_FUNC_BARE int_unwrap
 .iuw_retry:
     cmp edx, TAG_SMALLINT
     je .iuw_done
-    cmp edx, TAG_BOOL
-    je .iuw_bool
     ; Only dereference if TAG_PTR (heap pointer); other tags return unchanged
     test edx, TAG_RC_BIT
     jz .iuw_done                 ; TAG_FLOAT, TAG_NONE, TAG_NULL → not an int

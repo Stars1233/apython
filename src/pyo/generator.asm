@@ -8,6 +8,8 @@
 %include "frame.inc"
 %include "errcodes.inc"
 
+extern bool_true
+extern bool_false
 extern ap_malloc
 extern gc_alloc
 extern gc_track
@@ -925,7 +927,7 @@ DEF_FUNC coro_getattr
 .cga_cr_running:
     ; Return bool for cr_running
     mov rax, [rbx + PyGenObject.gi_running]
-    mov edx, TAG_BOOL
+    RET_BOOL_RAX
     pop r12
     pop rbx
     leave

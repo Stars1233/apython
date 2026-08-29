@@ -362,7 +362,7 @@ DEF_FUNC sre_match_get_group_str
 
 .group_none:
     xor eax, eax
-    mov edx, TAG_NONE
+    RET_NONE
     pop r14
     pop r13
     pop r12
@@ -540,7 +540,7 @@ DEF_FUNC sre_match_groups_method, GS_FRAME
 
     ; default arg (default = None)
     xor eax, eax
-    mov edx, TAG_NONE
+    RET_NONE
     cmp r13, 1
     jb .groups_no_default
     mov rax, [r12]             ; default payload
@@ -573,7 +573,7 @@ DEF_FUNC sre_match_groups_method, GS_FRAME
     mov rsi, rcx
     call sre_match_get_group_str
     ; If None and default was given, substitute default
-    cmp edx, TAG_NONE
+    IS_NONE rax, rcx
     jne .groups_use_val
     ; Use default instead of None (borrowed ref, needs INCREF for tuple)
     mov rax, [rbp - GS_DEFAULT]
@@ -802,8 +802,8 @@ DEF_FUNC sre_match_groupdict_method, GD_FRAME
     mov [rbp - GD_SELF], rax
 
     ; default arg (default = None)
-    xor ecx, ecx
-    mov r8d, TAG_NONE
+    LOAD_NONE rcx
+    mov r8d, TAG_PTR
     lea rdx, [rsi - 1]        ; user nargs
     cmp rdx, 1
     jb .gd_no_default
@@ -860,7 +860,7 @@ DEF_FUNC sre_match_groupdict_method, GD_FRAME
     call sre_match_get_group_str
     ; rax = val payload, edx = val tag
     ; If None, substitute default
-    cmp edx, TAG_NONE
+    IS_NONE rax, r8
     jne .gd_use_val
     mov rax, [rbp - GD_DEFAULT]
     mov edx, [rbp - GD_DEFAULT_TAG]
@@ -1189,7 +1189,7 @@ DEF_FUNC sre_match_getattr
     ret
 .mga_lastindex_none:
     xor eax, eax
-    mov edx, TAG_NONE
+    RET_NONE
     pop r12
     pop rbx
     leave
@@ -1207,7 +1207,7 @@ DEF_FUNC sre_match_getattr
     ret
 .mga_lastgroup_none:
     xor eax, eax
-    mov edx, TAG_NONE
+    RET_NONE
     pop r12
     pop rbx
     leave

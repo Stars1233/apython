@@ -612,10 +612,6 @@ DEF_FUNC type_call
     je .type_smallint       ; SmallInt → int type
     cmp qword [rsi + 8], TAG_FLOAT
     je .type_float          ; TAG_FLOAT → float type
-    cmp qword [rsi + 8], TAG_BOOL
-    je .type_bool           ; TAG_BOOL → bool type
-    cmp qword [rsi + 8], TAG_NONE
-    je .type_none           ; TAG_NONE → none type
     mov rax, [rax + PyObject.ob_type]
     inc qword [rax + PyObject.ob_refcnt]
     mov edx, TAG_PTR

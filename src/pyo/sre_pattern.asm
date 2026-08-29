@@ -195,7 +195,7 @@ DEF_FUNC sre_pattern_do_match, PM_FRAME
 
     ; Return None
     xor eax, eax
-    mov edx, TAG_NONE
+    RET_NONE
 
     pop r14
     pop r13
@@ -490,7 +490,7 @@ DEF_FUNC sre_substr_from_state
 
 .ss_none:
     xor eax, eax
-    mov edx, TAG_NONE
+    RET_NONE
     leave
     ret
 END_FUNC sre_substr_from_state
@@ -668,7 +668,7 @@ DEF_FUNC sre_pattern_findall_method, FA_FRAME
 
 .fa_mg_none:
     xor eax, eax
-    mov edx, TAG_NONE
+    RET_NONE
 
 .fa_mg_set:
     ; Set tuple[group-1] = (rax, edx)
@@ -1438,7 +1438,7 @@ DEF_FUNC sre_pattern_split_method, SP_FRAME
 
 .split_cap_none:
     xor eax, eax
-    mov edx, TAG_NONE
+    RET_NONE
 
 .split_cap_append:
     mov rdi, r14
@@ -1834,7 +1834,7 @@ DEF_FUNC sre_pattern_richcompare
 
     ; Return NotImplemented → for now return False
     xor eax, eax
-    mov edx, TAG_NONE
+    RET_NONE
     jmp .prc_ret
 
 .prc_compare:
@@ -1882,11 +1882,11 @@ DEF_FUNC sre_pattern_richcompare
 
 .prc_true:
     mov eax, 1
-    mov edx, TAG_BOOL
+    RET_BOOL_RAX
     jmp .prc_ret
 .prc_false:
     xor eax, eax
-    mov edx, TAG_BOOL
+    RET_BOOL_RAX
 .prc_ret:
     pop r13
     pop r12
@@ -2135,7 +2135,7 @@ DEF_FUNC sre_scanner_search_method
     test edx, edx
     jnz .ssm_done
     xor eax, eax
-    mov edx, TAG_NONE
+    RET_NONE
 .ssm_done:
     leave
     ret
@@ -2226,7 +2226,7 @@ DEF_FUNC sre_scanner_match_method, SM2_FRAME
 
 .sm2_none:
     xor eax, eax
-    mov edx, TAG_NONE
+    RET_NONE
 
     pop r13
     pop r12

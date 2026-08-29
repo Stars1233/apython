@@ -1123,10 +1123,6 @@ DEF_FUNC list_contains, LC_FRAME
     je .elem_int_type
     cmp r8d, TAG_FLOAT
     je .elem_float_type
-    cmp r8d, TAG_BOOL
-    je .elem_bool_type
-    cmp r8d, TAG_NONE
-    je .next                    ; None: identity-only
     test r8d, TAG_RC_BIT
     jz .next                    ; non-pointer non-known tag: skip
     mov rax, [rdi + PyObject.ob_type]
@@ -2265,10 +2261,6 @@ DEF_FUNC list_richcompare, LRC_FRAME
     ; Resolve left type
     cmp ecx, TAG_SMALLINT
     je .lrc_elem_int_type
-    cmp ecx, TAG_BOOL
-    je .lrc_elem_bool_type
-    cmp ecx, TAG_NONE
-    je .lrc_elem_none_type
     ; TAG_PTR: get ob_type
     mov rax, [rdi + PyObject.ob_type]
     jmp .lrc_elem_have_type
@@ -2385,10 +2377,6 @@ DEF_FUNC list_richcompare, LRC_FRAME
     je .lrc_order_float
     cmp ecx, TAG_SMALLINT
     je .lrc_order_int_type
-    cmp ecx, TAG_BOOL
-    je .lrc_order_bool_type
-    cmp ecx, TAG_NONE
-    je .lrc_order_none_type
     test rcx, rcx
     js .lrc_order_str_type
     mov rax, [rdi + PyObject.ob_type]
@@ -2477,13 +2465,13 @@ DEF_FUNC list_richcompare, LRC_FRAME
 
 .lrc_return_true:
     mov eax, 1
-    mov edx, TAG_BOOL
+    RET_BOOL_RAX
     leave
     ret
 
 .lrc_return_false:
     xor eax, eax
-    mov edx, TAG_BOOL
+    RET_BOOL_RAX
     leave
     ret
 

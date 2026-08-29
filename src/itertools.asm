@@ -1352,13 +1352,11 @@ DEF_FUNC builtin_reversed
     test edx, edx
     jz .rev_no_dunder      ; not found at all
 
-    ; Found __reversed__. Check if it's None (blocked).
-    cmp eax, 0
-    jne .rev_call_dunder
-    cmp edx, TAG_NONE
-    je .rev_type_error      ; __reversed__ = None means blocked
-    ; Check for bool_false (payload=0, TAG_PTR pointing to bool_false)
-    ; If payload is 0 with TAG_PTR, it might be a None-like block...actually skip for now.
+    ; Found __reversed__.  Setting it to None blocks reversal.
+    IS_NONE rax, rcx
+    je .rev_type_error
+    test rax, rax
+    jz .rev_type_error
 
 .rev_call_dunder:
     ; Call __reversed__ via dunder_call_1

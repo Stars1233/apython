@@ -648,8 +648,6 @@ DEF_FUNC prep_reraise_star, PRS_FRAME
     cmp rdx, rcx
     jge .scan_done
     movzx eax, byte [r9 + rdx] ; tag
-    cmp al, TAG_NONE
-    je .scan_next
     mov rdi, [rsi + rdx*8]     ; list item payload (8-byte stride)
     cmp rdi, r8                 ; also check none_singleton (mixed repr)
     je .scan_next
@@ -691,8 +689,6 @@ DEF_FUNC prep_reraise_star, PRS_FRAME
     mov rsi, [rax + PyListObject.ob_item]      ; payload array
     ; Check for None via tag
     movzx eax, byte [r9 + rdx]
-    cmp al, TAG_NONE
-    je .flat_next
     mov rdi, [rsi + rdx*8]                    ; list item payload (8-byte stride)
     lea r8, [rel none_singleton]
     cmp rdi, r8

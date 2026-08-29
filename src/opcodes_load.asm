@@ -393,14 +393,10 @@ DEF_FUNC op_load_attr, LA_FRAME
     ; Dispatch on obj tag — resolve non-pointer tags to their type
     cmp qword [rbp - LA_OBJ_TAG], TAG_PTR
     je .la_is_ptr
-    cmp qword [rbp - LA_OBJ_TAG], TAG_BOOL
-    je .la_resolve_bool
     cmp qword [rbp - LA_OBJ_TAG], TAG_SMALLINT
     je .la_resolve_int
     cmp qword [rbp - LA_OBJ_TAG], TAG_FLOAT
     je .la_resolve_float
-    cmp qword [rbp - LA_OBJ_TAG], TAG_NONE
-    je .la_resolve_none
     jmp .la_attr_error
 
     ; --- Non-pointer tag resolution: look up attr in type's tp_getattr or tp_dict ---

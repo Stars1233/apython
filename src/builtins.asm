@@ -490,8 +490,6 @@ align 16
 .print_custom_sep:
     ; Custom sep — check if None (means default " ")
     mov rax, [rbp - PR_SEP_TAG]
-    cmp eax, TAG_NONE
-    je .print_default_sep_fallback
     cmp eax, TAG_PTR
     jne .print_default_sep_fallback
 
@@ -558,8 +556,6 @@ align 16
 .print_custom_end:
     ; Check if None (means default "\n")
     mov rax, [rbp - PR_END_TAG]
-    cmp eax, TAG_NONE
-    je .print_default_end
     cmp eax, TAG_PTR
     jne .print_default_end
     mov rax, [rbp - PR_END]
@@ -814,12 +810,8 @@ DEF_FUNC builtin_type
     je .type_float
 
     ; Bool check
-    cmp qword [rsi + 8], TAG_BOOL
-    je .type_bool
 
     ; None check
-    cmp qword [rsi + 8], TAG_NONE
-    je .type_none
 
     mov rax, [rdi + PyObject.ob_type]
     INCREF rax
@@ -890,10 +882,6 @@ DEF_FUNC builtin_isinstance
     je .isinstance_smallint
     cmp r8d, TAG_FLOAT
     je .isinstance_float
-    cmp r8d, TAG_BOOL
-    je .isinstance_bool
-    cmp r8d, TAG_NONE
-    je .isinstance_none
     cmp r8d, TAG_PTR
     jne .isinstance_false      ; unknown non-pointer tag → False
     mov rdx, [rax + PyObject.ob_type]

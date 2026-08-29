@@ -56,8 +56,6 @@ DEF_FUNC_BARE float_to_f64
     cmp esi, TAG_SMALLINT
     je .from_smallint
 
-    cmp esi, TAG_BOOL
-    je .from_smallint          ; TAG_BOOL payload is 0 or 1, same as SmallInt
 
     ; TAG_PTR: check for GMP int or bool singleton
     test rdi, rdi
@@ -677,8 +675,6 @@ DEF_FUNC float_compare, 40
     je .fc_left_ok
     cmp ecx, TAG_SMALLINT
     je .fc_left_ok
-    cmp ecx, TAG_BOOL
-    je .fc_left_ok
     cmp ecx, TAG_PTR
     jne .fc_not_impl
     mov rax, [rdi + PyObject.ob_type]
@@ -694,8 +690,6 @@ DEF_FUNC float_compare, 40
     cmp r8d, TAG_FLOAT
     je .fc_right_ok
     cmp r8d, TAG_SMALLINT
-    je .fc_right_ok
-    cmp r8d, TAG_BOOL
     je .fc_right_ok
     cmp r8d, TAG_PTR
     jne .fc_not_impl

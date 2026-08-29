@@ -83,8 +83,6 @@ DEF_FUNC builtin_abs
     cmp qword [rdi + 8], TAG_FLOAT
     je .abs_inline_float
 
-    cmp qword [rdi + 8], TAG_BOOL
-    je .abs_bool_tag
 
     cmp qword [rdi + 8], TAG_PTR
     jne .abs_type_error
@@ -395,8 +393,6 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     cmp qword [rdi + 8], TAG_FLOAT
     je .int_from_inline_float
 
-    cmp qword [rdi + 8], TAG_BOOL
-    je .int_from_bool_tag
 
     ; Must be TAG_PTR to dereference
     cmp qword [rdi + 8], TAG_PTR
@@ -1562,10 +1558,6 @@ DEF_FUNC builtin_hash_fn
     je .hash_float
 
     ; Check non-pointer tags before dereference
-    cmp qword [rdi + 8], TAG_BOOL
-    je .hash_bool
-    cmp qword [rdi + 8], TAG_NONE
-    je .hash_none
 
     mov rax, [rbx + PyObject.ob_type]
     mov rcx, [rax + PyTypeObject.tp_hash]
@@ -2496,10 +2488,6 @@ DEF_FUNC builtin_getattr
     je .getattr_smallint_type
     cmp qword [rbx + 8], TAG_FLOAT
     je .getattr_float_type
-    cmp qword [rbx + 8], TAG_BOOL
-    je .getattr_bool_type
-    cmp qword [rbx + 8], TAG_NONE
-    je .getattr_none_type
     cmp qword [rbx + 8], TAG_PTR
     jne .getattr_not_found         ; unknown tag
     mov rax, [r13 + PyObject.ob_type]
@@ -2623,10 +2611,6 @@ DEF_FUNC builtin_hasattr
     je .hasattr_smallint_type
     cmp qword [rbx + 8], TAG_FLOAT
     je .hasattr_float_type
-    cmp qword [rbx + 8], TAG_BOOL
-    je .hasattr_bool_type
-    cmp qword [rbx + 8], TAG_NONE
-    je .hasattr_none_type
     cmp qword [rbx + 8], TAG_PTR
     jne .hasattr_not_found         ; unknown tag
     mov rax, [r12 + PyObject.ob_type]
@@ -4385,6 +4369,6 @@ global builtin_breakpoint
 DEF_FUNC_BARE builtin_breakpoint
     ; No-op: return None
     xor eax, eax
-    mov edx, TAG_NONE
+    RET_NONE
     ret
 END_FUNC builtin_breakpoint
