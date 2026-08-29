@@ -96,7 +96,7 @@ MK_FRAME   equ 32
 ;; Pop return value and jump to eval_return.
 ;; ============================================================================
 DEF_FUNC_BARE op_return_value
-    VPOP_VAL rax, rdx            ; rax = return value (payload), rdx = tag
+    VPOP rax                     ; rax = the return Value
     mov qword [r12 + PyFrame.instr_ptr], 0  ; mark frame as "returned" (not yielded)
     jmp eval_return
 END_FUNC op_return_value
@@ -111,7 +111,6 @@ DEF_FUNC_BARE op_return_const
     mov rax, [rel eval_co_consts]
     mov rax, [rax + rcx * 8]
     INCREF_V rax, rdx
-    V_UNPACK rax, rdx
     mov qword [r12 + PyFrame.instr_ptr], 0  ; mark frame as "returned" (not yielded)
     jmp eval_return
 END_FUNC op_return_const
@@ -1752,8 +1751,7 @@ DEF_FUNC_BARE op_return_generator
     call async_gen_new
 
 .ret_gen_done:
-    ; rax = new gen/coro/async_gen object
-    mov edx, TAG_PTR             ; return tag for fat value protocol
+    ; rax = new gen/coro/async_gen object — a pointer is its own Value
 
     ; Return from eval_frame
     ; frame->instr_ptr is non-zero, so func_call will skip frame_free
@@ -1767,8 +1765,8 @@ END_FUNC op_return_generator
 ;; return value from eval_frame. The generator is suspended.
 ;; ============================================================================
 DEF_FUNC_BARE op_yield_value
-    ; Pop the value to yield (fat: payload + tag)
-    VPOP_VAL rax, rdx
+    ; Pop the Value to yield
+    VPOP rax
 
     ; Save frame state for resumption
     mov [r12 + PyFrame.instr_ptr], rbx

@@ -209,6 +209,7 @@ DEF_FUNC main
     ; Execute the bytecode
     mov rdi, rbx
     call eval_frame
+    V_UNPACK rax, rdx           ; eval_frame returns a Value
     ; rax = return value (ignore for module-level code)
 
     ; Clean up

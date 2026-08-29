@@ -1067,7 +1067,7 @@ op_interpreter_exit:
     mov rax, [rel current_exception]
     test rax, rax
     jnz .unhandled_exception
-    VPOP_VAL rax, rdx
+    VPOP rax                  ; the return Value
     jmp eval_return
 
 .unhandled_exception:

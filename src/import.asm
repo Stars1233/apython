@@ -1321,6 +1321,7 @@ DEF_FUNC import_load_module, IF_FRAME
 
     mov rdi, r12
     call eval_frame
+    V_UNPACK rax, rdx           ; eval_frame returns a Value
     ; rax = return value (ignore), edx = tag
     ; XDECREF return value (tag-aware)
     mov rdi, rax

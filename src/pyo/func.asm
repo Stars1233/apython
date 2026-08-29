@@ -438,6 +438,7 @@ DEF_FUNC func_call
     ; === Phase 7: Call eval_frame ===
     mov rdi, r12
     call eval_frame
+    V_UNPACK rax, rdx           ; eval_frame returns a Value
     mov [rsp+16], rax       ; save return value payload
     mov [rsp+24], rdx       ; save return value tag
 

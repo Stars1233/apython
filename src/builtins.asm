@@ -1359,6 +1359,7 @@ DEF_FUNC builtin___build_class__
     ; eval_frame(frame)
     mov rdi, r12
     call eval_frame
+    V_UNPACK rax, rdx           ; eval_frame returns a Value
     ; DECREF return value (should be None — TAG_NONE, not a pointer)
     mov rsi, rdx
     DECREF_VAL rax, rsi

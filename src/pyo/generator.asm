@@ -186,6 +186,7 @@ DEF_FUNC gen_iternext
     ; Resume execution
     mov rdi, r12
     call eval_frame
+    V_UNPACK rax, rdx           ; eval_frame returns a Value
     ; rax = yielded/returned value payload, rdx = tag
 
     mov r12, rax               ; save return value payload
@@ -319,6 +320,7 @@ DEF_FUNC ags_iternext
     ; Resume execution of the async generator
     mov rdi, [r12 + PyGenObject.gi_frame]
     call eval_frame
+    V_UNPACK rax, rdx           ; eval_frame returns a Value
     ; rax = result payload, rdx = result tag
     push rax
     push rdx
@@ -567,6 +569,7 @@ DEF_FUNC gen_send
     ; Resume execution
     mov rdi, r12
     call eval_frame
+    V_UNPACK rax, rdx           ; eval_frame returns a Value
     mov r12, rax               ; save return value payload
     mov r13, rdx               ; save return value tag (sent value no longer needed)
 
@@ -693,6 +696,7 @@ DEF_FUNC gen_throw, GT_FRAME
     ; Resume execution — eval_frame will see throw_pending and unwind
     mov rdi, r13
     call eval_frame
+    V_UNPACK rax, rdx           ; eval_frame returns a Value
     mov r12, rax               ; save result payload
     mov r13, rdx               ; save result tag
 
