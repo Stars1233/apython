@@ -224,6 +224,20 @@ DEF_FUNC eval_frame
     push rax
     mov rax, [rel eval_base_rsp]
     push rax
+    ; The CALL_FUNCTION_EX cleanup registrations belong to whichever frame is
+    ; running.  There is one global for each, and a raise inside a *nested*
+    ; frame unwinds only to that frame -- leaving the outer opcode's C frame
+    ; alive, so the unwinder freed a buffer the outer opcode then freed
+    ; again.  Scope them the way the other eval globals are scoped.
+    mov rax, [rel cfex_temp_pending]
+    push rax
+    mov rax, [rel cfex_merged_pending]
+    push rax
+    mov rax, [rel cfex_kwnames_pending]
+    push rax
+    mov qword [rel cfex_temp_pending], 0
+    mov qword [rel cfex_merged_pending], 0
+    mov qword [rel cfex_kwnames_pending], 0
 
     ; Set globals for this frame
     mov [rel eval_co_consts], r14
@@ -298,6 +312,12 @@ DEF_FUNC_BARE eval_return
     dec qword [rel recursion_depth]
     ; Restore caller's eval globals (reverse of save order)
     ; Use rcx as scratch — rdx holds return tag (fat value protocol)
+    pop rcx
+    mov [rel cfex_kwnames_pending], rcx
+    pop rcx
+    mov [rel cfex_merged_pending], rcx
+    pop rcx
+    mov [rel cfex_temp_pending], rcx
     pop rcx
     mov [rel eval_base_rsp], rcx
     pop rcx

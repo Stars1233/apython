@@ -635,7 +635,24 @@ DEF_FUNC tuple_repeat
     jg .rep_positive
     xor r12d, r12d
 .rep_positive:
+    ; t * 1 is t itself.  CPython returns the same object, and seq_tests
+    ; asserts id(s) == id(s*1); only an exact tuple qualifies, since a
+    ; subclass instance is not interchangeable with a plain tuple.
+    cmp r12, 1
+    jne .rep_not_one
+    lea rax, [rel tuple_type]
+    cmp [rbx + PyObject.ob_type], rax
+    jne .rep_not_one
+    mov rax, rbx
+    inc qword [rax + PyObject.ob_refcnt]
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
 
+.rep_not_one:
     mov r13, [rbx + PyTupleObject.ob_size]   ; r13 = len(tuple)
     mov r14, r13
     imul r14, r12            ; r14 = total items

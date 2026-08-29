@@ -4188,6 +4188,20 @@ DEF_FUNC list_method_sort, LS_FRAME
     push r14
     push r15
 
+    ; sort() takes no positional argument beyond self; only the keywords key
+    ; and reverse.  nargs was never compared against anything, so
+    ; l.sort(42, 42) was accepted.  The check has to be here rather than in
+    ; add_method_to_dict_checked, which counts keyword values in nargs and
+    ; would therefore reject l.sort(key=f).
+    mov rax, rsi                ; nargs, self included
+    mov rcx, [rel kw_names_pending]
+    test rcx, rcx
+    jz .ls_have_npos
+    sub rax, [rcx + PyTupleObject.ob_size]
+.ls_have_npos:
+    cmp rax, 1
+    jg .ls_too_many
+
     mov rbx, [rdi]              ; self (list)
     mov r12, [rbx + PyListObject.ob_size]
     mov [rbp - LS_LIST], rbx
@@ -5179,6 +5193,10 @@ DEF_FUNC list_method_sort, LS_FRAME
     leave
     V_PACK rax, rdx             ; builtins return one Value
     ret
+.ls_too_many:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "sort() takes no positional arguments"
+    call raise_exception
 END_FUNC list_method_sort
 
 ;; ============================================================================
@@ -5410,6 +5428,73 @@ END_FUNC list_method_copy
 ;; list.__getitem__(self, key) → calls list_subscript
 ;; ============================================================================
 extern list_subscript
+;; ============================================================================
+;; tuple dunders.  tuple_type.tp_dict held only index and count, so
+;; hasattr((1,), '__getitem__') was False and the operators worked solely
+;; through the type slots -- which is what CPython's seq_tests probes.
+;; ============================================================================
+extern tuple_subscript
+DEF_FUNC_BARE tuple_dunder_getitem
+    mov rax, [rdi]          ; self
+    mov rsi, [rdi + 8]      ; the key Value
+    mov rdi, rax
+    jmp tuple_subscript
+END_FUNC tuple_dunder_getitem
+
+extern tuple_contains
+DEF_FUNC tuple_dunder_contains
+    mov rax, [rdi]          ; self
+    mov rsi, [rdi + 8]      ; the item Value
+    mov rdi, rax
+    call tuple_contains
+    test eax, eax
+    jz .tdc_false
+    lea rax, [rel bool_true]
+    jmp .tdc_done
+.tdc_false:
+    lea rax, [rel bool_false]
+.tdc_done:
+    mov edx, TAG_PTR
+    INCREF rax
+    leave
+    V_PACK rax, rdx             ; builtins return one Value
+    ret
+END_FUNC tuple_dunder_contains
+
+DEF_FUNC tuple_dunder_len
+    mov rax, [rdi]          ; self
+    mov rdi, [rax + PyTupleObject.ob_size]
+    call int_from_i64
+    leave
+    V_PACK rax, rdx             ; builtins return one Value
+    ret
+END_FUNC tuple_dunder_len
+
+extern tuple_concat
+DEF_FUNC_BARE tuple_dunder_add
+    mov rax, [rdi]
+    mov rsi, [rdi + 8]
+    mov rdi, rax
+    jmp tuple_concat
+END_FUNC tuple_dunder_add
+
+extern tuple_repeat
+DEF_FUNC_BARE tuple_dunder_mul
+    mov rax, [rdi]
+    mov rsi, [rdi + 8]
+    mov rdi, rax
+    jmp tuple_repeat
+END_FUNC tuple_dunder_mul
+
+;; __rmul__ has the operands the other way round, and tuple_repeat wants the
+;; sequence first.
+DEF_FUNC_BARE tuple_dunder_rmul
+    mov rax, [rdi]
+    mov rsi, [rdi + 8]
+    mov rdi, rax
+    jmp tuple_repeat
+END_FUNC tuple_dunder_rmul
+
 DEF_FUNC_BARE list_dunder_getitem
     mov rax, [rdi]          ; self
     mov rsi, [rdi + 8]     ; key payload
@@ -10069,15 +10154,63 @@ DEF_FUNC methods_init
     call dict_new
     mov rbx, rax
 
+    ; Registered with arity checks: a.count() and u.index() with no argument
+    ; must raise TypeError, which seq_tests asserts.
     mov rdi, rbx
     lea rsi, [rel mn_index]
     lea rdx, [rel tuple_method_index]
-    call add_method_to_dict
+    mov rcx, 2
+    mov r8, 4                   ; self, value, optional start and stop
+    call add_method_to_dict_checked
 
     mov rdi, rbx
     lea rsi, [rel mn_count]
     lea rdx, [rel tuple_method_count]
-    call add_method_to_dict
+    mov rcx, 2
+    mov r8, 2
+    call add_method_to_dict_checked
+
+    mov rdi, rbx
+    lea rsi, [rel mn___getitem__]
+    lea rdx, [rel tuple_dunder_getitem]
+    mov rcx, 2
+    mov r8, 2
+    call add_method_to_dict_checked
+
+    mov rdi, rbx
+    lea rsi, [rel mn___contains__]
+    lea rdx, [rel tuple_dunder_contains]
+    mov rcx, 2
+    mov r8, 2
+    call add_method_to_dict_checked
+
+    mov rdi, rbx
+    lea rsi, [rel mn___len__]
+    lea rdx, [rel tuple_dunder_len]
+    mov rcx, 1
+    mov r8, 1
+    call add_method_to_dict_checked
+
+    mov rdi, rbx
+    lea rsi, [rel mn___add__]
+    lea rdx, [rel tuple_dunder_add]
+    mov rcx, 2
+    mov r8, 2
+    call add_method_to_dict_checked
+
+    mov rdi, rbx
+    lea rsi, [rel mn___mul__]
+    lea rdx, [rel tuple_dunder_mul]
+    mov rcx, 2
+    mov r8, 2
+    call add_method_to_dict_checked
+
+    mov rdi, rbx
+    lea rsi, [rel mn___rmul__]
+    lea rdx, [rel tuple_dunder_rmul]
+    mov rcx, 2
+    mov r8, 2
+    call add_method_to_dict_checked
 
     ; Store in tuple_type.tp_dict
     lea rax, [rel tuple_type]
@@ -10486,5 +10619,8 @@ mn___setitem__: db "__setitem__", 0
 mn___delitem__: db "__delitem__", 0
 mn___contains__: db "__contains__", 0
 mn___len__:     db "__len__", 0
+mn___add__:     db "__add__", 0
+mn___mul__:     db "__mul__", 0
+mn___rmul__:    db "__rmul__", 0
 mn___iadd__:    db "__iadd__", 0
 mn___init__:    db "__init__", 0

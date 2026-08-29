@@ -100,3 +100,57 @@ print(t(lambda: lst.index(lst)))
 
 lst = [Clearing()]
 print(lst.count(lst), lst)
+
+
+# tuple grew the dunders it was missing: tuple_type.tp_dict held only index
+# and count, so hasattr((1,), '__getitem__') was False and the operators
+# worked solely through the type slots.
+tt = (1, 2, 3)
+print(hasattr(tt, "__getitem__"), hasattr(tt, "__len__"), hasattr(tt, "__contains__"))
+print(tt.__getitem__(1), tt.__len__(), tt.__contains__(2))
+print(tt.__add__((4,)), tt.__mul__(2), tt.__rmul__(2))
+
+# t * 1 is t itself, as CPython does for an exact tuple
+print(tt * 1 is tt, id(tt) == id(tt * 1), (() * 1) == ())
+print([1, 2] * 1 is [1, 2])
+
+# count/index/sort reject the wrong number of arguments
+print(t(lambda: tt.count()), t(lambda: tt.index()), t(lambda: [1].sort(42, 42)))
+lst2 = [3, 1, 2]
+lst2.sort()
+print(lst2)
+lst2.sort(reverse=True)
+print(lst2)
+lst2.sort(key=lambda x: -x)
+print(lst2)
+
+
+# bpo-38588: an element's __eq__ can clear either operand, and the size
+# comparison that decides the result must use the sizes as they are *after*
+# the comparison ran, not as they were before.
+class ClearsOther:
+    def __eq__(self, other):
+        list2.clear()
+        return NotImplemented
+
+
+class ClearsSelf:
+    def __eq__(self, other):
+        list1.clear()
+        return NotImplemented
+
+
+list1 = [ClearsOther()]
+list2 = [ClearsSelf()]
+print(list1 == list2)
+
+
+class ClearsThird:
+    def __eq__(self, other):
+        list3.clear()
+        return NotImplemented
+
+
+list3 = [ClearsThird()]
+list4 = [1]
+print(list3 == list4)
