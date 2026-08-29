@@ -8,9 +8,9 @@
 ; 1. EVAL LOOP REGISTERS (callee-saved, global interpreter state)
 ;    rbx  = bytecode instruction pointer (IP into co_code[])
 ;    r12  = current frame pointer (PyFrame*)
-;    r13  = value stack top pointer (u64[] of Values)
-;    r14  = unused (freed by the single-word representation)
-;    r15  = unused (freed by the single-word representation)
+;    r13  = value stack top pointer (Value[], one 64-bit word per slot)
+;    r14  = co_consts tuple data pointer (&tuple.ob_item[0])
+;    r15  = free (the single-word representation retired the tag stack)
 ;    ecx  = opcode arg on handler entry (set by eval_dispatch)
 ;
 ;    co_names / co_consts are read from the eval_co_names / eval_co_consts
@@ -340,6 +340,7 @@ TAG_IO_WAIT  equ 8           ; payload = fd | (direction << 32) — async I/O se
 
 ; --- legacy (payload, tag) refcounting and returns ------------------------
 
+; --- (payload, tag) refcount shims, for code not yet converted ------------
 ; INCREF a fat value — only when the tag says the payload is refcounted.
 %macro INCREF_VAL 2             ; %1 = payload, %2 = tag reg
     test %2, TAG_RC_BIT
@@ -391,14 +392,14 @@ TAG_IO_WAIT  equ 8           ; payload = fd | (direction << 32) — async I/O se
 %endmacro
 
 ; ===== Fat result save/restore across DECREF calls =====
-; Save fat result (rax=payload, rdx=tag) on machine stack.
+; Save a fat (rax=payload, rdx=tag) result on the machine stack.
 ; IMPORTANT: All rsp-relative addresses between SAVE and RESTORE need +16 offset.
 %macro SAVE_FAT_RESULT 0
     push rdx                   ; save result tag
     push rax                   ; save result payload
 %endmacro
 
-; Restore fat result (rax=payload, rdx=tag) from machine stack.
+; Restore a fat (rax=payload, rdx=tag) result from the machine stack.
 %macro RESTORE_FAT_RESULT 0
     pop rax                    ; restore result payload
     pop rdx                    ; restore result tag

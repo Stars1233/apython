@@ -45,11 +45,11 @@ Repeat the register convention comment block at the top of every
 ; Register convention (callee-saved, preserved across handlers):
 ;   rbx = bytecode instruction pointer (current position in co_code[])
 ;   r12 = current frame pointer (PyFrame*)
-;   r13 = value stack top pointer (payload array, u64[])
+;   r13 = value stack top pointer (Value[], one 64-bit word per slot)
 ;   r14 = co_consts tuple data pointer (&tuple.ob_item[0])
-;   r15 = tag stack top pointer (sidecar tag array, u8[])
+;   r15 = free
 ;
-; co_names accessed via LOAD_CO_NAMES / LOAD_CO_NAMES_TAGS macros (globals).
+; co_names is accessed via the LOAD_CO_NAMES macro (reads a global).
 ; ecx = opcode argument on entry (set by eval_dispatch)
 ; rbx has already been advanced past the 2-byte instruction word.
 ```
@@ -207,9 +207,9 @@ Two safe patterns for preserving values across calls:
     mov rdi, [rbp - SA_OBJ]
 ```
 
-**Eval loop registers** (`rbx`, `r12`-`r15`) are callee-saved and hold
-interpreter state. They survive calls automatically but must never be
-repurposed within opcode handlers.
+**Eval loop registers** (`rbx`, `r12`, `r13`, `r14`) are callee-saved and
+hold interpreter state. They survive calls automatically but must never be
+repurposed within opcode handlers.  `r15` is free for handler use.
 
 ## Stack Macros
 
@@ -218,18 +218,19 @@ with raw arithmetic unless implementing a new stack macro.
 
 | Macro | Purpose |
 |-------|---------|
-| `VPUSH reg` | Push with auto-classification (SmallInt/NULL/PTR) |
-| `VPUSH_PTR reg` | Push known heap pointer (TAG_PTR) |
-| `VPUSH_INT reg` | Push known SmallInt (TAG_SMALLINT) |
+| `VPUSH reg` | Push a Value already in encoded form |
+| `VPUSH_PTR reg` | Push a heap pointer (a pointer is its own Value) |
+| `VPUSH_INT reg, scratch` | Push an int64, boxing it if it exceeds ±2^50 |
+| `VPUSH_FLOAT reg, scratch` | Push raw double bits |
 | `VPUSH_NONE` | Push None |
-| `VPUSH_BOOL reg` | Push bool (0 or 1) |
-| `VPUSH_VAL pay, tag` | Push pre-classified 128-bit value |
-| `VPOP reg` | Pop payload into reg |
-| `VPOP_VAL pay, tag` | Pop payload + tag |
-| `VPEEK reg` | Read TOS payload without popping |
+| `VPUSH_BOOL reg` | Push a bool (0 or 1) |
+| `VPUSH_NULL` | Push the NULL Value (CALL's empty callable slot) |
+| `VPOP reg` | Pop one Value |
+| `VPEEK reg` | Read TOS without popping |
 
-Prefer typed pushes (`VPUSH_PTR`, `VPUSH_INT`) over `VPUSH` when the
-type is statically known — they avoid branching.
+`VPUSH_VAL pay, tag` and `VPOP_VAL pay, tag` are migration shims that
+encode and decode around the old (payload, tag) pair.  New code should
+not use them.
 
 ## Value Return/Push Macros
 
@@ -238,9 +239,9 @@ equivalent instructions — inlining is a source of bugs.
 
 | Macro | Expansion | Use when |
 |-------|-----------|----------|
-| `RET_NULL` | `xor eax, eax` / `xor edx, edx` | Error return: (0, TAG_NULL) |
-| `RET_TAG_SMALLINT` | `mov edx, TAG_SMALLINT` | Return SmallInt (caller sets rax) |
-| `SPUSH_PTR reg` | `sub rsp, 16` / `mov [rsp], reg` / `mov qword [rsp+8], TAG_PTR` | Build fat arg on stack for tp_call |
+| `RET_NULL` | `xor eax, eax` / `xor edx, edx` | Error return: a NULL Value is 0 |
+| `RET_NONE` | load `none_singleton`, INCREF | Return None |
+| `SPUSH_PTR reg` | `sub rsp, 16` / `mov [rsp], reg` | One-argument array on the machine stack for tp_call (16 keeps rsp aligned) |
 
 ## Refcounting Macros
 
@@ -250,21 +251,22 @@ equivalent instructions — inlining is a source of bugs.
 | `DECREF reg` | Known heap pointer (saves/restores rdi) |
 | `DECREF_REG reg` | Known heap pointer (does NOT save rdi) |
 | `XDECREF reg` | Possibly NULL heap pointer |
-| `INCREF_VAL pay, tag` | Value64 (payload + u8 tag) |
-| `DECREF_VAL pay, tag` | Value64 (clobbers rdi + caller-saved) |
-| `XDECREF_VAL pay, tag` | Value64, NULL-safe |
+| `INCREF_V value, scratch` | A Value: no-op unless it holds a pointer |
+| `DECREF_V value, scratch` | A Value; NULL-safe (clobbers rdi + caller-saved) |
+| `XDECREF_V value, scratch` | Same as `DECREF_V`, spelled for clarity at NULL-able sites |
 
-`DECREF_REG` and `DECREF_VAL` contain `call obj_dealloc` which **clobbers
+`INCREF_VAL` / `DECREF_VAL` / `XDECREF_VAL` are the (payload, tag)
+migration shims; new code should use the `_V` forms.
+
+`DECREF_REG` and `DECREF_V` contain `call obj_dealloc` which **clobbers
 all caller-saved registers** when the refcount reaches zero.
 
 ## Addressing Idioms
 
-**Localsplus indexing** (8 bytes/payload slot + separate u8 tag array):
+**Localsplus indexing** (one Value per slot):
 
 ```nasm
-mov rdi, [r12 + rcx*8 + PyFrame.localsplus]        ; payload from u64[]
-mov rdx, [r12 + PyFrame.locals_tag_base]           ; tag array base (u8[])
-movzx esi, byte [rdx + rcx]                        ; tag from u8[]
+mov rdi, [r12 + rcx*8 + PyFrame.localsplus]        ; the local's Value
 ```
 
 **Forward bytecode jumps** (instruction words → bytes = ×2):
@@ -277,7 +279,8 @@ lea rbx, [rbx + rcx*2]     ; advance IP by arg words
 
 ```nasm
 mov rax, [r14 + rcx*8]     ; co_consts[arg]
-mov rsi, [r15 + rcx*8]     ; co_names[arg]
+LOAD_CO_NAMES rsi
+mov rsi, [rsi + rcx*8]     ; co_names[arg]
 ```
 
 ## Error Handling
