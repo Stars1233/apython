@@ -448,11 +448,10 @@ DEF_FUNC_BARE op_cleanup_throw
     cmp qword [rdi + PyTupleObject.ob_size], 0
     je .ct_si_none
     ; value = args[0] (fat value in 16-byte slot)
-    mov r8, [rdi + PyTupleObject.ob_item]       ; payloads
-    mov r9, [rdi + PyTupleObject.ob_item_tags]  ; tags
-    mov r8, [r8]                                ; value payload
-    movzx r9d, byte [r9]                        ; value tag
-    INCREF_VAL r8, r9
+    mov r8, [rdi + PyTupleObject.ob_item]
+    mov r8, [r8]                                ; value Value
+    INCREF_V r8, r9
+    V_UNPACK r8, r9
     jmp .ct_si_got_val
 .ct_si_none:
     lea r8, [rel none_singleton]

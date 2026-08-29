@@ -451,9 +451,8 @@ DEF_FUNC op_build_tuple, 16
     V_UNPACK rsi, rdi         ; tuples still store (payload, tag)
     mov rax, [rbp-16]
     mov r8, [rax + PyTupleObject.ob_item]       ; payloads
-    mov r9, [rax + PyTupleObject.ob_item_tags]  ; tags
-    mov [r8 + rdx*8], rsi                        ; payload
-    mov byte [r9 + rdx], dil                     ; tag
+    V_PACK rsi, rdi
+    mov [r8 + rdx * 8], rsi
     inc rdx
     cmp rdx, [rbp-8]
     jb .build_tuple_fill
@@ -639,9 +638,8 @@ DEF_FUNC op_build_const_key_map, 32
     mov rdi, [rbp-24]         ; dict
     mov rax, [rbp-16]         ; keys tuple
     mov r10, [rax + PyTupleObject.ob_item]       ; payloads
-    mov r11, [rax + PyTupleObject.ob_item_tags]  ; tags
     mov rsi, [r10 + rdx*8]                        ; key payload
-    movzx r8d, byte [r11 + rdx]                   ; key tag from tuple
+    V_UNPACK rsi, r8
     mov r9, rdx
     mov rax, rdx
     shl rax, 3                ; index * 8
@@ -730,7 +728,6 @@ DEF_FUNC_BARE op_unpack_sequence
     jne .unpack_count_error
     ; Items are in payload/tag arrays
     mov rsi, [rdi + PyTupleObject.ob_item]
-    mov r8, [rdi + PyTupleObject.ob_item_tags]
     jmp .unpack_fill
 
 .unpack_list:
@@ -739,7 +736,6 @@ DEF_FUNC_BARE op_unpack_sequence
     jne .unpack_count_error
     ; Items in payload/tag arrays
     mov rsi, [rdi + PyListObject.ob_item]
-    mov r8, [rdi + PyListObject.ob_item_tags]
 
 .unpack_fill:
     ; Pre-advance stack by count (ecx)
@@ -755,10 +751,8 @@ DEF_FUNC_BARE op_unpack_sequence
     test edx, edx
     js .unpack_done
     mov eax, edx
-    mov rax, [rsi + rax * 8]  ; payload = items[edx]
-    movzx r9d, byte [r8 + rdx] ; tag = tags[edx]  (lists still store both)
-    INCREF_VAL rax, r9
-    V_PACK rax, r9
+    mov rax, [rsi + rax * 8]  ; items[edx] is already a Value
+    INCREF_V rax, r9
     mov [r13 + r10*8], rax
     inc r10
     dec edx
@@ -1106,9 +1100,8 @@ DEF_FUNC op_list_extend, 32
     mov rdi, [rbp-8]          ; list
     mov rax, [rbp-16]         ; iterable (tuple)
     mov r9, [rax + PyTupleObject.ob_item]
-    mov r10, [rax + PyTupleObject.ob_item_tags]
     mov rsi, [r9 + r8 * 8]    ; payload
-    movzx edx, byte [r10 + r8] ; tag
+    V_UNPACK rsi, rdx
     push r8
     call list_append
     pop r8
@@ -1131,9 +1124,8 @@ DEF_FUNC op_list_extend, 32
     mov rdi, [rbp-8]          ; list
     mov rdx, [rbp-32]         ; payloads ptr
     mov rax, [rbp-16]         ; iterable list
-    mov r11, [rax + PyListObject.ob_item_tags]
     mov rsi, [rdx + r8 * 8]   ; item payload
-    movzx edx, byte [r11 + r8] ; item tag
+    V_UNPACK rsi, rdx
     push r8
     call list_append
     pop r8
@@ -2321,15 +2313,13 @@ DEF_FUNC op_unpack_ex
     je .ue_gi_list
     ; tuple: payload + tag arrays
     mov rax, [rdi + PyTupleObject.ob_item]
-    mov rdx, [rdi + PyTupleObject.ob_item_tags]
     mov rax, [rax + rsi * 8]       ; payload
-    movzx edx, byte [rdx + rsi]    ; tag
+    V_UNPACK rax, rdx
     ret
 .ue_gi_list:
     mov rax, [rdi + PyListObject.ob_item]
-    mov rcx, [rdi + PyListObject.ob_item_tags]
     mov rax, [rax + rsi * 8]      ; payload
-    movzx edx, byte [rcx + rsi]   ; tag
+    V_UNPACK rax, rdx
     ret
 END_FUNC op_unpack_ex
 
@@ -2660,9 +2650,8 @@ DEF_FUNC_BARE op_for_iter_list
 
     ; Get item and INCREF (payload + tag arrays)
     mov rdx, [rax + PyListObject.ob_item]
-    mov r9, [rax + PyListObject.ob_item_tags]
     mov rax, [rdx + rcx * 8]      ; payload
-    movzx r8d, byte [r9 + rcx]    ; tag
+    V_UNPACK rax, r8
     INCREF_VAL rax, r8
 
     ; Advance index

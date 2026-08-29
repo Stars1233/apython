@@ -78,21 +78,16 @@ DEF_FUNC list_new
     mov qword [rbx + PyListObject.ob_size], 0
     mov [rbx + PyListObject.allocated], r12
 
-    ; Allocate payload array: capacity * 8 (Value64 payloads)
+    ; Allocate the item array: capacity * 8, zeroed (an empty slot is 0, and
+    ; slice operations can read ahead of ob_size)
     mov rdi, r12
     shl rdi, 3
     call ap_malloc
     mov [rbx + PyListObject.ob_item], rax
-
-    ; Allocate tag array: capacity * 1 (u8 tags), zeroed
-    mov rdi, r12
-    call ap_malloc
-    mov [rbx + PyListObject.ob_item_tags], rax
-    ; Zero tag array (prevents stale tags during slice ops)
     mov rdi, rax
     xor eax, eax
     mov ecx, r12d
-    rep stosb
+    rep stosq
 
     mov rdi, rbx
     call gc_track
@@ -134,23 +129,15 @@ DEF_FUNC list_copy
     shl rdx, 3
     call ap_memcpy
 
-    ; Bulk copy tags
-    mov rdi, [r13 + PyListObject.ob_item_tags]
-    mov rsi, [rbx + PyListObject.ob_item_tags]
-    mov rdx, r12
-    call ap_memcpy
-
     ; INCREF each item
     xor ecx, ecx
 .lc_incref:
     cmp rcx, r12
     jge .lc_done
     mov rax, [r13 + PyListObject.ob_item]
-    mov rdx, [r13 + PyListObject.ob_item_tags]
     mov rdi, [rax + rcx * 8]
-    movzx esi, byte [rdx + rcx]
     push rcx
-    INCREF_VAL rdi, rsi
+    INCREF_V rdi, rsi
     pop rcx
     inc rcx
     jmp .lc_incref
@@ -197,22 +184,13 @@ DEF_FUNC list_append
     call ap_realloc
     mov [rbx + PyListObject.ob_item], rax
 
-    ; Realloc tag array
-    mov rdi, [rbx + PyListObject.ob_item_tags]
-    mov rsi, [rbx + PyListObject.allocated]
-    call ap_realloc
-    mov [rbx + PyListObject.ob_item_tags], rax
-
 .no_grow:
-    ; Append item (payload + tag)
+    ; Append the item
     mov rax, [rbx + PyListObject.ob_size]
     mov rcx, [rbx + PyListObject.ob_item]
-    mov rdx, [rbx + PyListObject.ob_item_tags]
-    mov [rcx + rax * 8], r12       ; payload
-    mov byte [rdx + rax], r13b     ; tag
-
-    ; INCREF item (tag-aware)
     INCREF_VAL r12, r13
+    V_PACK r12, r13
+    mov [rcx + rax * 8], r12
 
     ; Increment size
     inc qword [rbx + PyListObject.ob_size]
@@ -248,9 +226,8 @@ DEF_FUNC list_getitem
 
     ; Return item with INCREF (payload + tag)
     mov rax, [rdi + PyListObject.ob_item]
-    mov rcx, [rdi + PyListObject.ob_item_tags]
     mov rax, [rax + rsi * 8]      ; payload
-    movzx edx, byte [rcx + rsi]   ; tag
+    V_UNPACK rax, rdx
     INCREF_VAL rax, rdx
 
     leave
@@ -292,9 +269,8 @@ DEF_FUNC list_setitem
 
     ; DECREF old value
     mov rax, [rbx + PyListObject.ob_item]
-    mov rdx, [rbx + PyListObject.ob_item_tags]
     mov rdi, [rax + rsi * 8]      ; old value payload
-    movzx ecx, byte [rdx + rsi]   ; old value tag
+    V_UNPACK rdi, rcx
     push rax
     push rdx
     push rsi
@@ -304,9 +280,9 @@ DEF_FUNC list_setitem
     pop rax
 
     ; Store new value and INCREF
-    mov [rax + rsi * 8], r12      ; payload
-    mov byte [rdx + rsi], r13b    ; tag
     INCREF_VAL r12, r13
+    V_PACK r12, r13
+    mov [rax + rsi * 8], r12
 
     pop r13
     pop r12
@@ -453,9 +429,8 @@ DEF_FUNC list_ass_subscript, LAS_FRAME
 
     ; DECREF old value at index
     mov rax, [rbx + PyListObject.ob_item]
-    mov rdx, [rbx + PyListObject.ob_item_tags]
     mov rdi, [rax + rsi * 8]      ; old value payload
-    movzx ecx, byte [rdx + rsi]   ; old value tag
+    V_UNPACK rdi, rcx
     DECREF_VAL rdi, rcx
 
     pop rsi                    ; restore index
@@ -481,17 +456,6 @@ DEF_FUNC list_ass_subscript, LAS_FRAME
     rep movsb
     pop r8
     pop rsi
-    pop rcx
-
-    ; Shift tag array
-    mov rax, [rbx + PyListObject.ob_item_tags]
-    lea rdi, [rax + rsi]          ; dst
-    lea r9, [rdi + 1]             ; src = dst + 1
-    push rcx
-    mov rsi, r9               ; src
-    mov rcx, r8               ; count bytes (1 byte per tag)
-    cld
-    rep movsb
     pop rcx
 
     ; Decrement ob_size
@@ -569,7 +533,6 @@ DEF_FUNC list_ass_subscript, LAS_FRAME
 .las_list_direct:
     mov r8, [r12 + PyListObject.ob_size]       ; r8 = new_len
     mov r9, [r12 + PyListObject.ob_item]       ; r9 = new payload ptr
-    mov r10, [r12 + PyListObject.ob_item_tags] ; r10 = new tag ptr
     jmp .las_have_items
 
 .las_try_tuple:
@@ -581,7 +544,6 @@ DEF_FUNC list_ass_subscript, LAS_FRAME
     ; Value is a tuple
     mov r8, [r12 + PyTupleObject.ob_size]
     mov r9, [r12 + PyTupleObject.ob_item]       ; payload ptr
-    mov r10, [r12 + PyTupleObject.ob_item_tags] ; tag ptr
     jmp .las_have_items
 
 .las_try_generic:
@@ -636,7 +598,6 @@ DEF_FUNC list_ass_subscript, LAS_FRAME
     ; Use temp list as value — jump to list path
     mov r8, [r12 + PyListObject.ob_size]
     mov r9, [r12 + PyListObject.ob_item]       ; payload ptr
-    mov r10, [r12 + PyListObject.ob_item_tags] ; tag ptr
     mov [rbp - LAS_TEMP], r12      ; save for DECREF after copy
     jmp .las_have_items
 
@@ -670,9 +631,8 @@ DEF_FUNC list_ass_subscript, LAS_FRAME
     jge .las_decref_done
     push rcx
     mov rax, [rbx + PyListObject.ob_item]
-    mov rdx, [rbx + PyListObject.ob_item_tags]
     mov rdi, [rax + rcx * 8]      ; payload
-    movzx esi, byte [rdx + rcx]   ; tag
+    V_UNPACK rdi, rsi
     XDECREF_VAL rdi, rsi
     pop rcx
     inc rcx
@@ -716,10 +676,6 @@ DEF_FUNC list_ass_subscript, LAS_FRAME
     shl rsi, 3             ; bytes (capacity * 8)
     call ap_realloc
     mov [rbx + PyListObject.ob_item], rax
-    mov rdi, [rbx + PyListObject.ob_item_tags]
-    mov rsi, [rbx + PyListObject.allocated]
-    call ap_realloc
-    mov [rbx + PyListObject.ob_item_tags], rax
 
 .las_no_realloc:
     add rsp, 8             ; alignment
@@ -760,19 +716,6 @@ DEF_FUNC list_ass_subscript, LAS_FRAME
     call ap_memmove
     pop rcx
 
-    ; Shift tags
-    mov rdi, [rbx + PyListObject.ob_item_tags]
-    ; dst = tags + (start + new_len)
-    mov rax, r13
-    add rax, r8
-    add rdi, rax
-    ; src = tags + stop
-    mov rsi, [rbx + PyListObject.ob_item_tags]
-    mov rax, r14
-    add rsi, rax
-    mov rdx, rcx              ; bytes = tail_count
-    call ap_memmove
-
 .las_shift_done:
     pop rdi                ; new_size
     mov [rbx + PyListObject.ob_size], rdi
@@ -801,14 +744,7 @@ DEF_FUNC list_ass_subscript, LAS_FRAME
     mov rdx, r8
     shl rdx, 3
     call ap_memcpy
-    ; Bulk memcpy tags: dst = list.ob_item_tags + start, src = r10, len = new_len
-    mov r10, [rsp]            ; restore new_tag_ptr (don't pop yet)
     mov r8, [rsp + 16]       ; restore new_len
-    mov rdi, [rbx + PyListObject.ob_item_tags]
-    add rdi, r13              ; dst = ob_item_tags + start
-    mov rsi, r10              ; src = new tags ptr
-    mov rdx, r8               ; len = new_len
-    call ap_memcpy
     ; Restore all saved values for INCREF loop
     pop r10                   ; new_tag_ptr
     pop r9                    ; new_payload_ptr
@@ -819,7 +755,7 @@ DEF_FUNC list_ass_subscript, LAS_FRAME
     cmp rcx, r8
     jge .las_insert_done
     mov rdi, [r9 + rcx * 8]
-    movzx eax, byte [r10 + rcx]
+    V_UNPACK rdi, rax
     INCREF_VAL rdi, rax
     inc rcx
     jmp .las_incref_loop
@@ -915,13 +851,11 @@ DEF_FUNC list_ass_subscript, LAS_FRAME
     mov [rbp - LAS_TEMP], rax  ; store for cleanup at exit
 .ext_list_direct:
     mov r8, [r12 + PyListObject.ob_size]
-    mov r11, [r12 + PyListObject.ob_item_tags]
     mov r12, [r12 + PyListObject.ob_item]
     jmp .ext_check_len
 
 .ext_from_tuple:
     mov r8, [r12 + PyTupleObject.ob_size]
-    mov r11, [r12 + PyTupleObject.ob_item_tags]
     mov r12, [r12 + PyTupleObject.ob_item]
 
 .ext_check_len:
@@ -937,30 +871,22 @@ DEF_FUNC list_ass_subscript, LAS_FRAME
 .ext_loop:
     ; DECREF old value at list[r13]
     mov rax, [rbx + PyListObject.ob_item]
-    mov rdx, [rbx + PyListObject.ob_item_tags]
-    mov rdi, [rax + r13 * 8]      ; old payload
-    movzx esi, byte [rdx + r13]   ; old tag
-    push r11                       ; save source tag ptr (caller-saved)
+    mov rdi, [rax + r13 * 8]      ; old Value
     sub rsp, 8                     ; alignment
-    XDECREF_VAL rdi, rsi      ; may call obj_dealloc, clobbers caller-saved
+    XDECREF_V rdi, rsi        ; may call obj_dealloc, clobbers caller-saved
     add rsp, 8
-    pop r11
 
-    ; INCREF new value from source
-    mov rdi, [r12]            ; new payload
-    movzx esi, byte [r11]     ; new tag
-    INCREF_VAL rdi, rsi       ; inline inc, no call
+    ; INCREF the new value from the source
+    mov rdi, [r12]
+    INCREF_V rdi, rsi
 
     ; Store at list[r13]
     mov rax, [rbx + PyListObject.ob_item]
-    mov rdx, [rbx + PyListObject.ob_item_tags]
-    mov [rax + r13 * 8], rdi      ; payload
-    mov byte [rdx + r13], sil     ; tag
+    mov [rax + r13 * 8], rdi
 
     ; Advance
     add r13, r15               ; next list index (start + i*step)
-    add r12, 8                 ; next source payload
-    inc r11                    ; next source tag
+    add r12, 8                 ; next source item
     dec r14                    ; remaining--
     jnz .ext_loop
 
@@ -979,9 +905,8 @@ DEF_FUNC list_ass_subscript, LAS_FRAME
     push rcx
     push r8
     mov rax, [rbx + PyListObject.ob_item]
-    mov rdx, [rbx + PyListObject.ob_item_tags]
     mov rdi, [rax + rcx * 8]      ; payload
-    movzx esi, byte [rdx + rcx]   ; tag
+    V_UNPACK rdi, rsi
     XDECREF_VAL rdi, rsi
     pop r8
     pop rcx
@@ -1007,7 +932,6 @@ DEF_FUNC list_ass_subscript, LAS_FRAME
     ; rcx = next_del, r8 = abs_step
     mov r10, [rbx + PyListObject.ob_size]
     mov r11, [rbx + PyListObject.ob_item]       ; payloads
-    mov r12, [rbx + PyListObject.ob_item_tags]  ; tags
     xor r9d, r9d              ; dst = 0
     mov rdi, r14               ; del_remaining = slicelength
     xor esi, esi               ; src = 0
@@ -1030,8 +954,6 @@ DEF_FUNC list_ass_subscript, LAS_FRAME
     push rcx
     mov rax, [r11 + rsi * 8]
     mov [r11 + r9 * 8], rax
-    movzx ecx, byte [r12 + rsi]
-    mov byte [r12 + r9], cl
     pop rcx
 .ext_compact_nocopy:
     inc rsi
@@ -1104,10 +1026,9 @@ DEF_FUNC list_contains, LC_FRAME
     mov rbx, [rbp - LC_LIST]
     mov rbx, [rbx + PyListObject.ob_item]
     mov rdx, [rbp - LC_LIST]
-    mov rdx, [rdx + PyListObject.ob_item_tags]
     mov rcx, rax
     mov rdi, [rbx + rcx * 8]        ; elem payload
-    movzx r8d, byte [rdx + rcx]     ; elem tag
+    V_UNPACK rdi, r8
 
     ; Fast identity check: both payload and tag match → found
     cmp rdi, [rbp - LC_VPAY]
@@ -1199,9 +1120,8 @@ DEF_FUNC list_contains, LC_FRAME
     mov rbx, [rbp - LC_LIST]
     mov rbx, [rbx + PyListObject.ob_item]
     mov rdx, [rbp - LC_LIST]
-    mov rdx, [rdx + PyListObject.ob_item_tags]
     mov rsi, [rbx + rax * 8]        ; elem payload
-    movzx ecx, byte [rdx + rax]     ; elem tag
+    V_UNPACK rsi, rcx
     ; dunder_call_2(self=value, other=elem, "__eq__", other_tag=elem_tag)
     ; rdi = value (already set)
     CSTRING rdx, "__eq__"
@@ -1216,9 +1136,8 @@ DEF_FUNC list_contains, LC_FRAME
     mov rbx, [rbp - LC_LIST]
     mov rbx, [rbx + PyListObject.ob_item]
     mov rdx, [rbp - LC_LIST]
-    mov rdx, [rdx + PyListObject.ob_item_tags]
     mov rsi, [rbx + rcx * 8]        ; elem payload
-    movzx r12d, byte [rdx + rcx]    ; elem tag
+    V_UNPACK rsi, r12
     pop rax
     ; tp_richcompare(value, elem, PY_EQ, value_tag, elem_tag)
     ; rdi = value (already set)
@@ -1283,17 +1202,14 @@ DEF_FUNC list_dealloc
     cmp r13, r12
     jge .free_items
     mov rax, [rbx + PyListObject.ob_item]
-    mov rcx, [rbx + PyListObject.ob_item_tags]
     mov rdi, [rax + r13 * 8]      ; payload
-    movzx esi, byte [rcx + r13]   ; tag
+    V_UNPACK rdi, rsi
     XDECREF_VAL rdi, rsi
     inc r13
     jmp .dealloc_loop
 
 .free_items:
     mov rdi, [rbx + PyListObject.ob_item]
-    call ap_free
-    mov rdi, [rbx + PyListObject.ob_item_tags]
     call ap_free
 
     ; Try to pool list header
@@ -1432,19 +1348,12 @@ DEF_FUNC list_getslice
     shl rdx, 3
     call ap_memcpy
 
-    ; Copy tags
     pop rax                    ; restore source start index
-    mov rsi, [rbx + PyListObject.ob_item_tags]
-    add rsi, rax              ; src tags + (stop+1)
-    mov rdi, [rsp]            ; new list
-    mov rdi, [rdi + PyListObject.ob_item_tags] ; dst tags
-    mov rdx, [rsp + 8]        ; slicelength (bytes)
-    call ap_memcpy
 
     ; Reverse payloads in place (lo/hi swap loop)
     mov rcx, [rsp + 8]        ; slicelength
     cmp rcx, 2
-    jl .lgs_rev_tags           ; 0 or 1 elements, no swap needed
+    jl .lgs_rev_done           ; 0 or 1 elements, no swap needed
     mov rdi, [rsp]             ; new list
     mov rdi, [rdi + PyListObject.ob_item]  ; payload array
     mov rsi, rcx
@@ -1454,7 +1363,7 @@ DEF_FUNC list_getslice
     ; rdi = lo, rsi = hi
 .lgs_rev_payload_loop:
     cmp rdi, rsi
-    jge .lgs_rev_tags
+    jge .lgs_rev_done
     mov rax, [rdi]
     mov rdx, [rsi]
     mov [rdi], rdx
@@ -1462,28 +1371,6 @@ DEF_FUNC list_getslice
     add rdi, 8
     sub rsi, 8
     jmp .lgs_rev_payload_loop
-
-.lgs_rev_tags:
-    ; Reverse tags in place
-    mov rcx, [rsp + 8]        ; slicelength
-    cmp rcx, 2
-    jl .lgs_rev_done
-    mov rdi, [rsp]             ; new list
-    mov rdi, [rdi + PyListObject.ob_item_tags] ; tag array
-    mov rsi, rcx
-    dec rsi
-    add rsi, rdi               ; rsi = &tags[slicelength-1]
-    ; rdi = lo, rsi = hi
-.lgs_rev_tag_loop:
-    cmp rdi, rsi
-    jge .lgs_rev_done
-    mov al, [rdi]
-    mov dl, [rsi]
-    mov [rdi], dl
-    mov [rsi], al
-    inc rdi
-    dec rsi
-    jmp .lgs_rev_tag_loop
 
 .lgs_rev_done:
     ; Bulk INCREF (reuse common path)
@@ -1501,29 +1388,19 @@ DEF_FUNC list_getslice
     shl rdx, 3
     call ap_memcpy
 
-    ; Copy tags
-    mov rsi, [rbx + PyListObject.ob_item_tags]
-    mov rax, r13
-    add rsi, rax              ; src tags
-    mov rdi, [rsp]            ; new list
-    mov rdi, [rdi + PyListObject.ob_item_tags] ; dst tags
-    mov rdx, [rsp + 8]        ; slicelength (bytes)
-    call ap_memcpy
     ; Bulk INCREF all copied elements
 .lgs_incref_start:
     mov rcx, [rsp + 8]        ; slicelength
     test rcx, rcx
     jz .lgs_done
     mov rdi, [rsp]             ; new list
-    mov rdi, [rdi + PyListObject.ob_item]       ; payloads
-    mov rsi, [rsp]             ; new list
-    mov rsi, [rsi + PyListObject.ob_item_tags]  ; tags
+    mov rdi, [rdi + PyListObject.ob_item]
     xor edx, edx
 .lgs_incref_loop:
     cmp rdx, rcx
     jge .lgs_done
     mov r8, [rdi + rdx * 8]       ; payload
-    movzx r9d, byte [rsi + rdx]   ; tag
+    V_UNPACK r8, r9
     INCREF_VAL r8, r9
     inc rdx
     jmp .lgs_incref_loop
@@ -1539,17 +1416,12 @@ DEF_FUNC list_getslice
     add rax, r13               ; start + i * step
     ; Get item from source list
     mov rdx, [rbx + PyListObject.ob_item]
-    mov r11, [rbx + PyListObject.ob_item_tags]
-    mov r8, [rdx + rax * 8]       ; item payload
-    movzx r9d, byte [r11 + rax]   ; item tag
-    INCREF_VAL r8, r9
+    mov r8, [rdx + rax * 8]       ; item Value
+    INCREF_V r8, r9
     ; Store item into new list
     mov rdi, [rsp]             ; new list
     mov rdi, [rdi + PyListObject.ob_item]
-    mov rsi, [rsp]             ; new list
-    mov rsi, [rsi + PyListObject.ob_item_tags]
-    mov [rdi + rcx * 8], r8    ; payload
-    mov byte [rsi + rcx], r9b  ; tag
+    mov [rdi + rcx * 8], r8
     inc rcx
     jmp .lgs_loop
 
@@ -1596,39 +1468,30 @@ DEF_FUNC list_concat
 
     ; Copy items from a
     mov rdi, [rax + PyListObject.ob_item]       ; dest payloads
-    mov rdx, [rax + PyListObject.ob_item_tags]  ; dest tags
     mov rsi, [rbx + PyListObject.ob_item]       ; src payloads
-    mov r8, [rbx + PyListObject.ob_item_tags]   ; src tags
     xor ecx, ecx
 .copy_a:
     cmp rcx, r13
     jge .copy_b_start
-    mov r9, [rsi + rcx * 8]       ; payload from source
-    movzx r10d, byte [r8 + rcx]   ; tag from source
-    mov [rdi + rcx * 8], r9       ; payload to dest
-    mov byte [rdx + rcx], r10b    ; tag to dest
-    INCREF_VAL r9, r10
+    mov r9, [rsi + rcx * 8]       ; item from source
+    mov [rdi + rcx * 8], r9
+    INCREF_V r9, r10
     inc rcx
     jmp .copy_a
 
 .copy_b_start:
     ; Copy items from b
     mov rsi, [r12 + PyListObject.ob_item]       ; src payloads
-    mov r8, [r12 + PyListObject.ob_item_tags]   ; src tags
     xor ecx, ecx
 .copy_b:
     cmp rcx, r14
     jge .concat_done
-    mov r9, [rsi + rcx * 8]       ; payload from source b
-    movzx r10d, byte [r8 + rcx]   ; tag from source b
+    mov r9, [rsi + rcx * 8]       ; item from source b
     lea r11, [r13 + rcx]          ; dest index
     mov rax, [rsp]                ; new list
     mov rax, [rax + PyListObject.ob_item]
-    mov rdi, [rsp]
-    mov rdi, [rdi + PyListObject.ob_item_tags]
-    mov [rax + r11 * 8], r9       ; payload
-    mov byte [rdi + r11], r10b    ; tag
-    INCREF_VAL r9, r10
+    mov [rax + r11 * 8], r9
+    INCREF_V r9, r10
     inc rcx
     jmp .copy_b
 
@@ -1685,7 +1548,6 @@ DEF_FUNC list_repeat
 
     ; Copy list r12 times
     mov rdi, [rax + PyListObject.ob_item]       ; dest payloads
-    mov r10, [rax + PyListObject.ob_item_tags]  ; dest tags
     xor ecx, ecx            ; ecx = repeat counter
 .rep_outer:
     cmp rcx, r12
@@ -1693,18 +1555,14 @@ DEF_FUNC list_repeat
     push rcx
     ; Copy all items from source list
     mov rsi, [rbx + PyListObject.ob_item]       ; src payloads
-    mov r11, [rbx + PyListObject.ob_item_tags]  ; src tags
     xor edx, edx
 .rep_inner:
     cmp rdx, r13
     jge .rep_inner_done
-    mov r8, [rsi + rdx * 8]       ; payload
-    movzx r9d, byte [r11 + rdx]   ; tag
-    mov [rdi], r8                 ; payload to dest
-    mov byte [r10], r9b           ; tag to dest
-    INCREF_VAL r8, r9
-    add rdi, 8                    ; advance dest payload
-    inc r10                       ; advance dest tag
+    mov r8, [rsi + rdx * 8]       ; item
+    mov [rdi], r8
+    INCREF_V r8, r9
+    add rdi, 8                    ; advance dest
     inc rdx
     jmp .rep_inner
 .rep_inner_done:
@@ -1772,9 +1630,8 @@ DEF_FUNC list_inplace_concat, LIC_FRAME
     jge .lic_done
     push rcx
     mov rax, [r12 + PyListObject.ob_item]
-    mov rdx, [r12 + PyListObject.ob_item_tags]
     mov rsi, [rax + rcx * 8]
-    movzx edx, byte [rdx + rcx]
+    V_UNPACK rsi, rdx
     mov rdi, rbx
     call list_append
     pop rcx
@@ -1789,9 +1646,8 @@ DEF_FUNC list_inplace_concat, LIC_FRAME
     jge .lic_done
     push rcx
     mov rax, [r12 + PyTupleObject.ob_item]
-    mov rdx, [r12 + PyTupleObject.ob_item_tags]
     mov rsi, [rax + rcx * 8]
-    movzx edx, byte [rdx + rcx]
+    V_UNPACK rsi, rdx
     mov rdi, rbx
     call list_append
     pop rcx
@@ -1906,18 +1762,12 @@ DEF_FUNC list_inplace_repeat, LIR_FRAME
     shl rsi, 3                ; new_size * 8
     call ap_realloc
     mov [rbx + PyListObject.ob_item], rax
-    ; Realloc tags
-    mov rdi, [rbx + PyListObject.ob_item_tags]
-    mov rsi, [rsp]            ; new_size from stack (not rax which is realloc result)
-    call ap_realloc
-    mov [rbx + PyListObject.ob_item_tags], rax
     pop rax                   ; new_size
     mov [rbx + PyListObject.ob_size], rax
     mov [rbx + PyListObject.allocated], rax
 
     ; Copy items (count - 1) more times + INCREF each copy
     mov rax, [rbx + PyListObject.ob_item]       ; payloads
-    mov r11, [rbx + PyListObject.ob_item_tags]  ; tags
     mov rcx, 1                ; copy number (1-based)
 .lir_copy_outer:
     cmp rcx, r12
@@ -1933,17 +1783,14 @@ DEF_FUNC list_inplace_repeat, LIR_FRAME
 .lir_copy_inner:
     cmp rcx, r13
     jge .lir_copy_next
-    ; Copy payload + tag
-    mov r9, [rax + rcx * 8]       ; src payload
-    movzx r10d, byte [r11 + rcx]  ; src tag
-    mov [rax + rdx * 8], r9       ; dst payload
-    mov byte [r11 + rdx], r10b    ; dst tag
+    mov r9, [rax + rcx * 8]       ; src item
+    mov [rax + rdx * 8], r9
 
     ; INCREF copied item
     push rax
     push rcx
     push rdx
-    INCREF_VAL r9, r10
+    INCREF_V r9, r10
     pop rdx
     pop rcx
     pop rax
@@ -1965,10 +1812,9 @@ DEF_FUNC list_inplace_repeat, LIR_FRAME
     cmp rcx, r13
     jge .lir_clear_done
     mov rax, [rbx + PyListObject.ob_item]
-    mov rdx, [rbx + PyListObject.ob_item_tags]
     push rcx
     mov rdi, [rax + rcx * 8]
-    movzx esi, byte [rdx + rcx]
+    V_UNPACK rdi, rsi
     DECREF_VAL rdi, rsi
     pop rcx
     inc rcx
@@ -2229,14 +2075,12 @@ DEF_FUNC list_richcompare, LRC_FRAME
     ; Get left[i] and right[i] (payload + tag arrays)
     mov rdi, [rbp - LRC_LEFT]
     mov r10, [rdi + PyListObject.ob_item]       ; left payloads
-    mov rdx, [rdi + PyListObject.ob_item_tags]  ; left tags
     mov rdi, [rbp - LRC_RIGHT]
     mov rsi, [rdi + PyListObject.ob_item]       ; right payloads
-    mov r9, [rdi + PyListObject.ob_item_tags]   ; right tags
     mov rdi, [r10 + rax * 8]        ; left_payload
-    movzx ecx, byte [rdx + rax]     ; left_tag
+    V_UNPACK rdi, rcx
     mov rsi, [rsi + rax * 8]        ; right_payload
-    movzx r8d, byte [r9 + rax]      ; right_tag
+    V_UNPACK rsi, r8
 
     ; Fast path: both same tag and same payload → elements equal, skip
     cmp rcx, r8
@@ -2358,14 +2202,12 @@ DEF_FUNC list_richcompare, LRC_FRAME
 
     mov rdi, [rbp - LRC_LEFT]
     mov r10, [rdi + PyListObject.ob_item]
-    mov rdx, [rdi + PyListObject.ob_item_tags]
     mov rdi, [rbp - LRC_RIGHT]
     mov rsi, [rdi + PyListObject.ob_item]
-    mov r9, [rdi + PyListObject.ob_item_tags]
     mov rdi, [r10 + rax * 8]        ; left_payload
-    movzx ecx, byte [rdx + rax]     ; left_tag
+    V_UNPACK rdi, rcx
     mov rsi, [rsi + rax * 8]        ; right_payload
-    movzx r8d, byte [r9 + rax]      ; right_tag
+    V_UNPACK rsi, r8
 
     ; Resolve left type (again)
     push rcx

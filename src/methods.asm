@@ -806,9 +806,8 @@ DEF_FUNC str_method_join
     jge .join_len_done
     push rcx
     mov rax, [r12 + PyListObject.ob_item]
-    mov rdx, [r12 + PyListObject.ob_item_tags]
     mov rax, [rax + rcx * 8]    ; payload
-    movzx esi, byte [rdx + rcx] ; tag
+    V_UNPACK rax, rsi
     ; Verify element is TAG_PTR and a str
     cmp esi, TAG_PTR
     jne .join_type_error
@@ -2936,14 +2935,10 @@ DEF_FUNC str_method_partition, PT_FRAME
     mov rbx, rax             ; rbx = tuple
 
     mov r9, [rbx + PyTupleObject.ob_item]
-    mov r10, [rbx + PyTupleObject.ob_item_tags]
     pop rcx                  ; before
     mov [r9], rcx
-    mov byte [r10], TAG_PTR
     mov [r9 + 8], r12
-    mov byte [r10 + 1], TAG_PTR
     mov [r9 + 16], r13
-    mov byte [r10 + 2], TAG_PTR
 
     mov rax, rbx
     mov edx, TAG_PTR
@@ -2977,15 +2972,11 @@ DEF_FUNC str_method_partition, PT_FRAME
     mov rbx, rax
 
     mov r9, [rbx + PyTupleObject.ob_item]
-    mov r10, [rbx + PyTupleObject.ob_item_tags]
     pop rcx                  ; empty1
     pop rax                  ; before
     mov [r9], rax
-    mov byte [r10], TAG_PTR
     mov [r9 + 8], rcx
-    mov byte [r10 + 1], TAG_PTR
     mov [r9 + 16], r13
-    mov byte [r10 + 2], TAG_PTR
 
     mov rax, rbx
     mov edx, TAG_PTR
@@ -3065,14 +3056,10 @@ DEF_FUNC str_method_rpartition, PT_FRAME
     mov rbx, rax
 
     mov r9, [rbx + PyTupleObject.ob_item]
-    mov r10, [rbx + PyTupleObject.ob_item_tags]
     pop rcx
     mov [r9], rcx
-    mov byte [r10], TAG_PTR
     mov [r9 + 8], r12
-    mov byte [r10 + 1], TAG_PTR
     mov [r9 + 16], r13
-    mov byte [r10 + 2], TAG_PTR
 
     mov rax, rbx
     mov edx, TAG_PTR
@@ -3105,15 +3092,11 @@ DEF_FUNC str_method_rpartition, PT_FRAME
     mov rbx, rax
 
     mov r9, [rbx + PyTupleObject.ob_item]
-    mov r10, [rbx + PyTupleObject.ob_item_tags]
     pop rcx                  ; empty2
     pop rax                  ; empty1
     mov [r9], rax
-    mov byte [r10], TAG_PTR
     mov [r9 + 8], rcx
-    mov byte [r10 + 1], TAG_PTR
     mov [r9 + 16], r13
-    mov byte [r10 + 2], TAG_PTR
 
     mov rax, rbx
     mov edx, TAG_PTR
@@ -3905,9 +3888,8 @@ DEF_FUNC list_method_pop
 
     ; Get the item (it already has refs from being in the list)
     mov rax, [rbx + PyListObject.ob_item]
-    mov rcx, [rbx + PyListObject.ob_item_tags]
     mov r12, [rax + r13 * 8]        ; payload to return
-    movzx edx, byte [rcx + r13]     ; tag to return
+    V_UNPACK r12, rdx
     push rdx                        ; save tag on stack
     ; Don't DECREF since we're transferring ownership to caller
 
@@ -3919,18 +3901,7 @@ DEF_FUNC list_method_pop
     sub rdx, r13
     dec rdx                         ; count = size - idx - 1
     shl rdx, 3                      ; bytes = count * 8
-    jz .pop_shift_tags              ; nothing to shift if popping last
-    call ap_memmove
-
-.pop_shift_tags:
-    ; Shift tags down: memmove(&tags[idx], &tags[idx+1], count)
-    mov rax, [rbx + PyListObject.ob_item_tags]
-    lea rdi, [rax + r13]
-    lea rsi, [rdi + 1]
-    mov rdx, [rbx + PyListObject.ob_size]
-    sub rdx, r13
-    dec rdx
-    jz .pop_shrink
+    jz .pop_shrink                  ; nothing to shift if popping last
     call ap_memmove
 
 .pop_shrink:
@@ -4007,41 +3978,26 @@ DEF_FUNC list_method_insert
     shl rsi, 3              ; new_cap * 8
     call ap_realloc
     mov [rbx + PyListObject.ob_item], rax
-    mov rdi, [rbx + PyListObject.ob_item_tags]
-    mov rsi, [rbx + PyListObject.allocated]
-    call ap_realloc
-    mov [rbx + PyListObject.ob_item_tags], rax
 .ins_no_grow:
 
-    ; Shift payloads up: memmove(&payloads[idx+1], &payloads[idx], (size-idx)*8)
+    ; Shift items up: memmove(&items[idx+1], &items[idx], (size-idx)*8)
     mov rax, [rbx + PyListObject.ob_item]
     mov rcx, r12
     shl rcx, 3              ; idx * 8
-    lea rsi, [rax + rcx]    ; src = &payloads[idx]
-    lea rdi, [rsi + 8]      ; dst = &payloads[idx+1]
+    lea rsi, [rax + rcx]    ; src = &items[idx]
+    lea rdi, [rsi + 8]      ; dst = &items[idx+1]
     mov rdx, [rbx + PyListObject.ob_size]
     sub rdx, r12            ; count = size - idx
     shl rdx, 3              ; bytes = count * 8
-    jz .ins_shift_tags      ; nothing to shift if inserting at end
-    call ap_memmove
-
-.ins_shift_tags:
-    ; Shift tags up: memmove(&tags[idx+1], &tags[idx], count)
-    mov rax, [rbx + PyListObject.ob_item_tags]
-    lea rsi, [rax + r12]
-    lea rdi, [rsi + 1]
-    mov rdx, [rbx + PyListObject.ob_size]
-    sub rdx, r12            ; count = size - idx
-    jz .ins_place
+    jz .ins_place           ; nothing to shift if inserting at end
     call ap_memmove
 
 .ins_place:
     ; Place item at index
     mov rax, [rbx + PyListObject.ob_item]
-    mov [rax + r12 * 8], r13    ; payload
-    mov rax, [rbx + PyListObject.ob_item_tags]
-    mov byte [rax + r12], r14b  ; tag
     INCREF_VAL r13, r14
+    V_PACK r13, r14
+    mov [rax + r12 * 8], r13
     inc qword [rbx + PyListObject.ob_size]
 
     lea rax, [rel none_singleton]
@@ -4070,7 +4026,6 @@ DEF_FUNC list_method_reverse
     jz .rev_done
 
     mov rdi, [rax + PyListObject.ob_item]       ; payloads
-    mov rbx, [rax + PyListObject.ob_item_tags]  ; tags
     xor esi, esi            ; lo = 0
     dec rcx                 ; hi = size - 1
 .rev_loop:
@@ -4081,11 +4036,6 @@ DEF_FUNC list_method_reverse
     mov r10, [rdi + rcx * 8]     ; hi payload
     mov [rdi + rsi * 8], r10
     mov [rdi + rcx * 8], r8
-    ; Swap tags
-    movzx r9d, byte [rbx + rsi]
-    movzx r11d, byte [rbx + rcx]
-    mov byte [rbx + rsi], r11b
-    mov byte [rbx + rcx], r9b
     inc rsi
     dec rcx
     jmp .rev_loop
@@ -4275,7 +4225,6 @@ DEF_FUNC list_method_sort, LS_FRAME
     ; Save list state and empty it during sort (mutation detection)
     mov rax, [rbx + PyListObject.ob_item]
     mov [rbp - LS_SAVED_PAYLOADS], rax
-    mov rax, [rbx + PyListObject.ob_item_tags]
     mov [rbp - LS_SAVED_TAGS], rax
     mov [rbp - LS_SAVED_SIZE], r12
 
@@ -4293,7 +4242,7 @@ DEF_FUNC list_method_sort, LS_FRAME
     cmp rcx, r12
     jge .sort_copy_items_done
     mov r8, [rsi + rcx * 8]               ; payload
-    movzx r9d, byte [rdx + rcx]           ; tag
+    V_UNPACK r8, r9
     mov r10, rcx
     shl r10, 4
     mov [rdi + r10], r8
@@ -4303,7 +4252,6 @@ DEF_FUNC list_method_sort, LS_FRAME
 .sort_copy_items_done:
 
     mov qword [rbx + PyListObject.ob_item], 0
-    mov qword [rbx + PyListObject.ob_item_tags], 0
     mov qword [rbx + PyListObject.ob_size], 0
 
     ; --- Pre-compute keys if key= provided ---
@@ -4655,7 +4603,6 @@ DEF_FUNC list_method_sort, LS_FRAME
     mov rax, [rbp - LS_SAVED_PAYLOADS]
     mov [rbx + PyListObject.ob_item], rax
     mov rax, [rbp - LS_SAVED_TAGS]
-    mov [rbx + PyListObject.ob_item_tags], rax
     mov rax, [rbp - LS_SAVED_SIZE]
     mov [rbx + PyListObject.ob_size], rax
 .mcte_already_restored:
@@ -4924,7 +4871,6 @@ DEF_FUNC list_method_sort, LS_FRAME
     mov rax, [rbx + PyListObject.ob_item]
     test rax, rax
     jnz .sort_mutated              ; ob_item != NULL → someone put items back
-    mov rax, [rbx + PyListObject.ob_item_tags]
     test rax, rax
     jnz .sort_mutated              ; ob_item_tags != NULL → someone put items back
     mov rax, [rbx + PyListObject.ob_size]
@@ -4944,8 +4890,8 @@ DEF_FUNC list_method_sort, LS_FRAME
     shl r9, 4
     mov r10, [rdi + r9]           ; payload
     mov r11, [rdi + r9 + 8]       ; tag (low byte)
+    V_PACK r10, r11
     mov [rsi + r8 * 8], r10
-    mov byte [rdx + r8], r11b
     inc r8
     jmp .sort_copy_back
 .sort_copy_back_done:
@@ -4960,7 +4906,6 @@ DEF_FUNC list_method_sort, LS_FRAME
     mov rax, [rbp - LS_SAVED_PAYLOADS]
     mov [rbx + PyListObject.ob_item], rax
     mov rax, [rbp - LS_SAVED_TAGS]
-    mov [rbx + PyListObject.ob_item_tags], rax
     mov rax, [rbp - LS_SAVED_SIZE]
     mov [rbx + PyListObject.ob_size], rax
 
@@ -5020,7 +4965,6 @@ DEF_FUNC list_method_sort, LS_FRAME
 .sm_handle_mutation:
     ; Save mutated items for cleanup
     mov rcx, [rbx + PyListObject.ob_item]       ; mutated payloads
-    mov r9, [rbx + PyListObject.ob_item_tags]   ; mutated tags
     mov r8, [rbx + PyListObject.ob_size]
 
     ; Restore our sorted items from fat buffer
@@ -5036,8 +4980,8 @@ DEF_FUNC list_method_sort, LS_FRAME
     shl rax, 4
     mov r12, [rdi + rax]          ; payload
     mov r13, [rdi + rax + 8]      ; tag
+    V_PACK r12, r13
     mov [rsi + r11 * 8], r12
-    mov byte [rdx + r11], r13b
     inc r11
     jmp .sort_mut_copy_back
 .sort_mut_copy_back_done:
@@ -5050,7 +4994,6 @@ DEF_FUNC list_method_sort, LS_FRAME
     mov rax, [rbp - LS_SAVED_PAYLOADS]
     mov [rbx + PyListObject.ob_item], rax
     mov rax, [rbp - LS_SAVED_TAGS]
-    mov [rbx + PyListObject.ob_item_tags], rax
     mov rax, [rbp - LS_SAVED_SIZE]
     mov [rbx + PyListObject.ob_size], rax
 
@@ -5065,7 +5008,7 @@ DEF_FUNC list_method_sort, LS_FRAME
     cmp r11, r8
     jge .sort_mut_decref_done
     mov rdi, [rcx + r11 * 8]          ; payload
-    movzx esi, byte [r9 + r11]        ; tag
+    V_UNPACK rdi, rsi
     push rcx
     push r9
     push r8
@@ -5102,7 +5045,6 @@ DEF_FUNC list_method_sort, LS_FRAME
     mov rax, [rbp - LS_SAVED_PAYLOADS]
     mov [rbx + PyListObject.ob_item], rax
     mov rax, [rbp - LS_SAVED_TAGS]
-    mov [rbx + PyListObject.ob_item_tags], rax
     mov rax, [rbp - LS_SAVED_SIZE]
     mov [rbx + PyListObject.ob_size], rax
 .sort_error_already_restored:
@@ -5210,9 +5152,8 @@ DEF_FUNC list_method_index, LI_FRAME
     mov rbx, [rbp - LI_LIST]
     mov rbx, [rbx + PyListObject.ob_item]
     mov rdx, [rbp - LI_LIST]
-    mov rdx, [rdx + PyListObject.ob_item_tags]
     mov rdi, [rbx + rax * 8]      ; elem payload
-    movzx r8d, byte [rdx + rax]   ; elem tag
+    V_UNPACK rdi, r8
 
     ; Fast identity: both payload AND tag match → found
     cmp rdi, [rbp - LI_VPAY]
@@ -5334,9 +5275,8 @@ DEF_FUNC list_method_count, LC_FRAME
     cmp rcx, r13
     jge .count_done
     mov rax, [rbx + PyListObject.ob_item]
-    mov rdx, [rbx + PyListObject.ob_item_tags]
     mov rdi, [rax + rcx * 8]    ; item payload
-    movzx r8d, byte [rdx + rcx] ; item tag
+    V_UNPACK rdi, r8
 
     ; Fast path: identity (both payload AND tag match)
     cmp rdi, r12
@@ -5454,9 +5394,8 @@ DEF_FUNC list_method_copy
     jge .copy_done
     push rcx
     mov rax, [rbx + PyListObject.ob_item]
-    mov rdx, [rbx + PyListObject.ob_item_tags]
     mov rsi, [rax + rcx * 8]    ; payload
-    movzx edx, byte [rdx + rcx] ; tag
+    V_UNPACK rsi, rdx
     mov rdi, r13
     call list_append
     pop rcx
@@ -5633,9 +5572,8 @@ DEF_FUNC list_method_clear
     cmp r13, r12
     jge .clear_done
     mov rax, [rbx + PyListObject.ob_item]
-    mov rcx, [rbx + PyListObject.ob_item_tags]
     mov rdi, [rax + r13 * 8]    ; payload
-    movzx esi, byte [rcx + r13] ; tag
+    V_UNPACK rdi, rsi
     push r13
     DECREF_VAL rdi, rsi
     pop r13
@@ -5698,9 +5636,8 @@ DEF_FUNC list_method_extend, LE_FRAME
     jge .extend_done
     push rcx
     mov rax, [r12 + PyListObject.ob_item]
-    mov rdx, [r12 + PyListObject.ob_item_tags]
     mov rsi, [rax + rcx * 8]       ; payload
-    movzx edx, byte [rdx + rcx]    ; tag
+    V_UNPACK rsi, rdx
     mov rdi, [rbp - LE_SELF]
     call list_append
     pop rcx
@@ -5715,9 +5652,8 @@ DEF_FUNC list_method_extend, LE_FRAME
     jge .extend_done
     push rcx
     mov rax, [r12 + PyTupleObject.ob_item]
-    mov rdx, [r12 + PyTupleObject.ob_item_tags]
     mov rsi, [rax + rcx * 8]      ; payload
-    movzx edx, byte [rdx + rcx]   ; tag
+    V_UNPACK rsi, rdx
     mov rdi, [rbp - LE_SELF]
     call list_append
     pop rcx
@@ -6351,18 +6287,21 @@ DEF_FUNC dict_method_popitem
 
     ; Set tuple[0] = key with correct tag, tuple[1] = value
     mov r9, [r12 + PyTupleObject.ob_item]
-    mov r10, [r12 + PyTupleObject.ob_item_tags]
-    mov [r9], r13
-    mov byte [r10], r8b     ; key tag from entry
     INCREF_VAL r13, r8
-    mov [r9 + 8], r14
-    mov byte [r10 + 1], cl  ; value tag from entry
     INCREF_VAL r14, rcx
+    mov r10, r13
+    mov r11, r8
+    V_PACK r10, r11
+    mov [r9], r10
+    mov r10, r14
+    mov r11, rcx
+    V_PACK r10, r11
+    mov [r9 + 8], r10
 
     ; Delete key from dict
     mov rdi, rbx
     mov rsi, r13
-    movzx edx, byte [r10]   ; key tag
+    mov edx, r8d            ; key tag from the entry
     call dict_del
 
     mov rax, r12
@@ -6407,9 +6346,8 @@ DEF_FUNC list_method_remove
     jge .lremove_not_found
 
     mov rax, [rbx + PyListObject.ob_item]
-    mov rdx, [rbx + PyListObject.ob_item_tags]
     mov rdi, [rax + r14 * 8]    ; item payload
-    movzx r8d, byte [rdx + r14] ; item tag
+    V_UNPACK rdi, r8
 
     ; Fast path: identity (both payload AND tag match)
     cmp rdi, r12
@@ -6488,9 +6426,8 @@ DEF_FUNC list_method_remove
     ; r14 = index of found item
     ; Get the item for DECREF (read payload + tag)
     mov rax, [rbx + PyListObject.ob_item]
-    mov rcx, [rbx + PyListObject.ob_item_tags]
     mov r12, [rax + r14 * 8]        ; item payload
-    movzx r13d, byte [rcx + r14]    ; item tag
+    V_UNPACK r12, r13
 
     ; Shift payloads left: memmove(&payloads[idx], &payloads[idx+1], (size-1-idx)*8)
     mov rax, [rbx + PyListObject.ob_item]
@@ -6500,17 +6437,6 @@ DEF_FUNC list_method_remove
     sub rdx, r14
     dec rdx                 ; count = size - idx - 1
     shl rdx, 3              ; bytes = count * 8
-    jz .lremove_shift_tags
-    call ap_memmove
-
-.lremove_shift_tags:
-    ; Shift tags left: memmove(&tags[idx], &tags[idx+1], count)
-    mov rax, [rbx + PyListObject.ob_item_tags]
-    lea rdi, [rax + r14]
-    lea rsi, [rdi + 1]
-    mov rdx, [rbx + PyListObject.ob_size]
-    sub rdx, r14
-    dec rdx
     jz .lremove_shrink      ; nothing to shift if removing last
     call ap_memmove
 
@@ -6636,9 +6562,8 @@ DEF_FUNC tuple_method_index, 16
     jge .tindex_not_found
 
     mov rsi, [rbx + PyTupleObject.ob_item]       ; payloads
-    mov rdx, [rbx + PyTupleObject.ob_item_tags]  ; tags
     mov rax, [rsi + rcx * 8]
-    movzx r8d, byte [rdx + rcx]
+    V_UNPACK rax, r8
 
     ; Check exact match (payload + tag)
     cmp rax, r12
@@ -6712,7 +6637,9 @@ DEF_FUNC tuple_method_count
     push r14
 
     mov rbx, [rdi]          ; self (tuple)
-    mov r12, [rdi + 16]     ; value
+    mov r12, [rdi + 16]     ; value payload
+    mov r14, [rdi + 24]     ; value tag
+    V_PACK r12, r14         ; compare Values, as the tuple now stores them
     mov r13, [rbx + PyTupleObject.ob_size]
     xor r14d, r14d          ; count = 0
 
@@ -9031,11 +8958,11 @@ DEF_FUNC float_method_as_integer_ratio, FIR_FRAME
     pop rcx                     ; numerator
 
     mov r9, [rbx + PyTupleObject.ob_item]
-    mov r10, [rbx + PyTupleObject.ob_item_tags]
+    V_PACK_I64 rcx, r10
     mov [r9], rcx
-    mov byte [r10], TAG_SMALLINT
-    mov qword [r9 + 8], 1
-    mov byte [r10 + 1], TAG_SMALLINT
+    mov rcx, 1
+    V_PACK_I64 rcx, r10
+    mov [r9 + 8], rcx
 
     mov rax, rbx
     mov edx, TAG_PTR
@@ -9060,11 +8987,10 @@ DEF_FUNC float_method_as_integer_ratio, FIR_FRAME
     pop rcx                     ; numerator
 
     mov r9, [rbx + PyTupleObject.ob_item]
-    mov r10, [rbx + PyTupleObject.ob_item_tags]
+    V_PACK_I64 rcx, r10
     mov [r9], rcx
-    mov byte [r10], TAG_SMALLINT
+    V_PACK_I64 rdx, r10
     mov [r9 + 8], rdx
-    mov byte [r10 + 1], TAG_SMALLINT
 
     mov rax, rbx
     mov edx, TAG_PTR
@@ -9079,11 +9005,12 @@ DEF_FUNC float_method_as_integer_ratio, FIR_FRAME
     mov rbx, rax
 
     mov r9, [rbx + PyTupleObject.ob_item]
-    mov r10, [rbx + PyTupleObject.ob_item_tags]
-    mov qword [r9], 0
-    mov byte [r10], TAG_SMALLINT
-    mov qword [r9 + 8], 1
-    mov byte [r10 + 1], TAG_SMALLINT
+    xor ecx, ecx
+    V_PACK_I64 rcx, r10
+    mov [r9], rcx
+    mov rcx, 1
+    V_PACK_I64 rcx, r10
+    mov [r9 + 8], rcx
 
     mov rax, rbx
     mov edx, TAG_PTR

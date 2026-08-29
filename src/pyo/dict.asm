@@ -201,14 +201,11 @@ DEF_FUNC dict_type_call
     ; Extract key and value from tuple
     push rax                   ; save tuple for DECREF
     mov rcx, [rax + PyTupleObject.ob_item]
-    mov r8, [rax + PyTupleObject.ob_item_tags]
     mov rdi, r15               ; dict
-    mov rsi, [rcx]             ; key payload
-    mov rdx, [rcx + 8]        ; value payload
-    movzx eax, byte [r8 + 1]  ; value tag (index 1)
-    push rax                   ; save value tag
-    movzx r8d, byte [r8]      ; key tag (index 0)
-    pop rcx                    ; rcx = value tag
+    mov rsi, [rcx]             ; key Value
+    mov rdx, [rcx + 8]        ; value Value
+    V_UNPACK rsi, r8          ; dict_set still takes (payload, tag) pairs
+    V_UNPACK rdx, rcx
     call dict_set
     pop rdi                    ; tuple
     call obj_decref
@@ -250,7 +247,6 @@ DEF_FUNC dict_type_call
 
     ; kw_names.ob_item has the key strings, args[n_pos + i] has values
     mov rax, [r14 + PyTupleObject.ob_item]      ; keys payload array
-    mov rdx, [r14 + PyTupleObject.ob_item_tags]  ; keys tag array
     xor r8d, r8d              ; kw index
 .dtc_kw_loop:
     cmp r8, r13
@@ -264,7 +260,7 @@ DEF_FUNC dict_type_call
 
     ; Get key from kw_names
     mov rsi, [rax + r8*8]         ; key payload (string)
-    movzx r8d, byte [rdx + r8]   ; key tag
+    V_UNPACK rsi, r8
 
     ; Get value from args
     lea r9, [rcx + r8]            ; wait, need original r8 (kw index)
@@ -281,9 +277,8 @@ DEF_FUNC dict_type_call
 
     ; key from kw_names tuple items
     mov r9, [r14 + PyTupleObject.ob_item]
-    mov rsi, [r9 + r8*8]         ; key payload
-    mov r9, [r14 + PyTupleObject.ob_item_tags]
-    movzx r10d, byte [r9 + r8]  ; key tag → r10d (save for later)
+    mov rsi, [r9 + r8*8]         ; key Value
+    V_UNPACK rsi, r10           ; dict_set still takes (payload, tag)
 
     ; value from args: index = n_pos + kw_index
     add rcx, r8                   ; rcx = n_pos + kw_index
@@ -1320,21 +1315,20 @@ DEF_FUNC_BARE dict_iter_next
     mov r12, rax                ; r12 = new tuple
 
     mov r9, [r12 + PyTupleObject.ob_item]
-    mov r10, [r12 + PyTupleObject.ob_item_tags]
 
     ; tuple[0] = key
     mov rax, [rbx + DictEntry.key]
     movzx edx, byte [rbx + DictEntry.key_tag]
-    mov [r9], rax
-    mov byte [r10], dl
     INCREF_VAL rax, rdx
+    V_PACK rax, rdx
+    mov [r9], rax
 
     ; tuple[1] = value
     mov rax, [rbx + DictEntry.value]
     movzx edx, byte [rbx + DictEntry.value_tag]
-    mov [r9 + 8], rax
-    mov byte [r10 + 1], dl
     INCREF_VAL rax, rdx
+    V_PACK rax, rdx
+    mov [r9 + 8], rax
 
     mov rax, r12
     mov edx, TAG_PTR

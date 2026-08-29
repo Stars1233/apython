@@ -349,8 +349,6 @@ DEF_FUNC task_step, TS_FRAME
 
     ; No exception — set send_value to its result, re-enqueue
     mov rax, [r12 + AsyncTask.result]
-    V_UNPACK rax, rdx
-    V_PACK rax, rdx
     mov [rbx + AsyncTask.send_value], rax
     mov rdi, rbx
     call ready_enqueue
@@ -417,10 +415,8 @@ DEF_FUNC task_step, TS_FRAME
     ; The return value is in gen.gi_return_value
     mov rdi, [rbx + AsyncTask.coro]
     mov rax, [rdi + PyGenObject.gi_return_value]
-    V_UNPACK rax, rdx
-    V_PACK rax, rdx
     mov [rbx + AsyncTask.result], rax
-    INCREF_VAL rax, rdx
+    INCREF_V rax, rdx
     mov dword [rbx + AsyncTask.done], 1
 
     ; Wake waiters
@@ -454,10 +450,8 @@ DEF_FUNC task_step, TS_FRAME
     ; Store return value as result (from gi_return_value since gen exhausted)
     mov rdi, [rbx + AsyncTask.coro]
     mov rax, [rdi + PyGenObject.gi_return_value]
-    V_UNPACK rax, rdx
-    V_PACK rax, rdx
     mov [rbx + AsyncTask.result], rax
-    INCREF_VAL rax, rdx
+    INCREF_V rax, rdx
     jmp .ts_cancel_done
 .ts_cancel_no_exc:
     ; No exception found — create one
@@ -782,8 +776,6 @@ DEF_FUNC_BARE task_iternext
 
     ; No exception — copy result for StopIteration protocol
     mov rax, [rdi + AsyncTask.result]
-    V_UNPACK rax, rdx
-    V_PACK rax, rdx
     mov [rdi + AsyncTask.send_value], rax
     ; Return NULL to signal completion
     RET_NULL

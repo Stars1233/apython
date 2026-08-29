@@ -1493,9 +1493,8 @@ DEF_FUNC builtin___build_class__
 
     ; Get slot name: slots_tuple[i]
     mov rax, [rbx + PyTupleObject.ob_item]       ; payloads
-    mov r11, [rbx + PyTupleObject.ob_item_tags]  ; tags
     mov rcx, [rax + rdx*8]                        ; name payload
-    movzx r8d, byte [r11 + rdx]                   ; name tag
+    V_UNPACK rcx, r8
     cmp r8d, TAG_PTR
     jne .bc_slot_skip               ; skip non-string slots
 

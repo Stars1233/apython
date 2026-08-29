@@ -21,7 +21,6 @@ extern eval_saved_rbx
 extern eval_saved_r13
 extern eval_co_names
 extern eval_co_consts
-extern eval_co_consts_tags
 extern opcode_table
 extern obj_dealloc
 extern dict_get
@@ -77,11 +76,9 @@ LSA_FRAME    equ 48
 DEF_FUNC_BARE op_load_const
     ; ecx = arg (index into co_consts)
     mov rax, [rel eval_co_consts]
-    mov rax, [rax + rcx * 8]   ; payload
-    mov rdx, [rel eval_co_consts_tags]
-    movzx edx, byte [rdx + rcx] ; tag
-    INCREF_VAL rax, rdx
-    VPUSH_VAL rax, rdx
+    mov rax, [rax + rcx * 8]
+    INCREF_V rax, rdx
+    VPUSH rax
     DISPATCH
 END_FUNC op_load_const
 

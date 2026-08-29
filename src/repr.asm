@@ -165,9 +165,8 @@ DEF_FUNC list_repr, 24                ; buf ptr, used, capacity
 
     ; Get element (payload + tag arrays)
     mov rax, [rbx + PyListObject.ob_item]
-    mov rcx, [rbx + PyListObject.ob_item_tags]
     mov rdi, [rax + r12 * 8]      ; payload
-    movzx esi, byte [rcx + r12]   ; tag
+    V_UNPACK rdi, rsi
 
     ; Call obj_repr(payload, tag)
     call obj_repr
@@ -274,9 +273,8 @@ DEF_FUNC tuple_repr, 24
 
     ; Get element at index r12
     mov rax, [rbx + PyTupleObject.ob_item]
-    mov rcx, [rbx + PyTupleObject.ob_item_tags]
     mov rdi, [rax + r12 * 8]       ; payload
-    movzx esi, byte [rcx + r12]    ; tag
+    V_UNPACK rdi, rsi
     ; TAG_FLOAT shortcut: call float_repr directly (no heap float object)
     cmp esi, TAG_FLOAT
     je .tr_float_elem

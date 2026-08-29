@@ -825,9 +825,8 @@ DEF_FUNC str_mod, SM_FRAME
     cmp rdx, [rax + PyTupleObject.ob_size]
     jge .sm_arg_none
     mov rcx, [rax + PyTupleObject.ob_item]       ; payloads
-    mov r8, [rax + PyTupleObject.ob_item_tags]   ; tags
     mov rax, [rcx + rdx*8]                       ; arg payload
-    movzx edx, byte [r8 + rdx]                   ; arg tag from tuple
+    V_UNPACK rax, rdx
     inc r15
     ret
 .sm_arg_none:

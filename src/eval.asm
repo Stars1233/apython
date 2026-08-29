@@ -187,14 +187,11 @@ DEF_FUNC eval_frame
     mov r13, [r12 + PyFrame.stack_ptr]
 
 .eval_setup_consts:
-    ; Derive co_consts payload + tags pointers
+    ; Derive the co_consts / co_names item pointers
     mov r14, [rax + PyCodeObject.co_consts]
-    mov rdx, [r14 + PyTupleObject.ob_item_tags]
-    mov r14, [r14 + PyTupleObject.ob_item]       ; co_consts payload ptr (→ global)
+    mov r14, [r14 + PyTupleObject.ob_item]
 
-    ; rcx = co_names payload pointer, r8 = co_names tags pointer
     mov rcx, [rax + PyCodeObject.co_names]
-    mov r8, [rcx + PyTupleObject.ob_item_tags]
     mov rcx, [rcx + PyTupleObject.ob_item]
 
     ; Save caller's eval globals (for nested eval_frame calls)
@@ -206,19 +203,13 @@ DEF_FUNC eval_frame
     push rax
     mov rax, [rel eval_co_names]
     push rax
-    mov rax, [rel eval_co_names_tags]
-    push rax
-    mov rax, [rel eval_co_consts_tags]
-    push rax
     mov rax, [rel eval_co_consts]
     push rax
     mov rax, [rel eval_base_rsp]
     push rax
 
     ; Set globals for this frame
-    mov [rel eval_co_consts], r14               ; co_consts payload → global
-    mov [rel eval_co_consts_tags], rdx
-    mov [rel eval_co_names_tags], r8
+    mov [rel eval_co_consts], r14
     mov [rel eval_co_names], rcx
 
     ; Set up for this frame
@@ -272,10 +263,6 @@ DEF_FUNC_BARE eval_return
     mov [rel eval_base_rsp], rcx
     pop rcx
     mov [rel eval_co_consts], rcx
-    pop rcx
-    mov [rel eval_co_consts_tags], rcx
-    pop rcx
-    mov [rel eval_co_names_tags], rcx
     pop rcx
     mov [rel eval_co_names], rcx
     pop rcx
@@ -442,15 +429,11 @@ DEF_FUNC_BARE eval_exception_unwind
     ; Re-derive the co_consts / co_names globals from the code object
     mov rax, [r12 + PyFrame.code]
     mov rcx, [rax + PyCodeObject.co_consts]
-    mov rdx, [rcx + PyTupleObject.ob_item_tags]
     mov rcx, [rcx + PyTupleObject.ob_item]          ; consts payload array
     mov [rel eval_co_consts], rcx
-    mov [rel eval_co_consts_tags], rdx
     mov rcx, [rax + PyCodeObject.co_names]
-    mov r8, [rcx + PyTupleObject.ob_item_tags]
     mov rcx, [rcx + PyTupleObject.ob_item]
     mov [rel eval_co_names], rcx
-    mov [rel eval_co_names_tags], r8
 
     ; Compute bytecode offset in instruction units (halfwords)
     ; eval_saved_rbx points to the instruction word (before add rbx, 2)
@@ -732,9 +715,7 @@ DEF_FUNC op_check_eg_match, CEM_FRAME
     mov rcx, [rbp - CEM_EXC]
     INCREF rcx
     mov rdx, [rax + PyTupleObject.ob_item]
-    mov r8, [rax + PyTupleObject.ob_item_tags]
     mov [rdx], rcx
-    mov byte [r8], TAG_PTR
 
     ; Create empty message string (heap — stored in exception struct)
     extern str_from_cstr_heap
@@ -1519,12 +1500,8 @@ global eval_saved_r13
 eval_saved_r13: resq 1       ; value stack ptr saved at dispatch (for exception unwind)
 global eval_co_names
 eval_co_names: resq 1        ; co_names payload pointer (&tuple.ob_item[0])
-global eval_co_names_tags
-eval_co_names_tags: resq 1   ; co_names tag pointer (&tuple.ob_item_tags[0])
 global eval_co_consts
 eval_co_consts: resq 1       ; co_consts payload pointer (&tuple.ob_item[0])
-global eval_co_consts_tags
-eval_co_consts_tags: resq 1  ; co_consts tag pointer (&tuple.ob_item_tags[0])
 
 global kw_names_pending
 kw_names_pending: resq 1     ; tuple of kw names for next CALL, or NULL

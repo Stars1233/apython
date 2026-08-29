@@ -693,10 +693,9 @@ DEF_FUNC import_search_dirs, SD_FRAME
     ; Get dir string (fat list: 16-byte stride)
     mov rdi, [rbp - SD_DIRS]
     mov rcx, [rdi + PyListObject.ob_item]
-    mov rdx, [rdi + PyListObject.ob_item_tags]
     mov rax, [rbp - SD_IDX]
     mov rbx, [rcx + rax * 8]      ; rbx = dir str obj payload
-    movzx r8d, byte [rdx + rax]   ; dir tag
+    V_UNPACK rbx, r8
     cmp r8d, TAG_SMALLINT
     je .sd_next                 ; skip SmallInts
     test rbx, rbx
@@ -908,10 +907,9 @@ DEF_FUNC import_search_syspath, SS_FRAME
     ; Get dir string (fat list: 16-byte stride)
     mov rdi, [rbp - SS_DIRS]
     mov rcx, [rdi + PyListObject.ob_item]
-    mov rdx, [rdi + PyListObject.ob_item_tags]
     mov rax, [rbp - SS_IDX]
     mov rbx, [rcx + rax * 8]      ; rbx = dir str obj payload
-    movzx r8d, byte [rdx + rax]   ; dir tag
+    V_UNPACK rbx, r8
     cmp r8d, TAG_SMALLINT
     je .ss_next                 ; skip SmallInts
     test rbx, rbx

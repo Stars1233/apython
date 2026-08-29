@@ -698,18 +698,15 @@ DEF_FUNC list_traverse
 
     mov rbx, rdi                       ; obj
     mov r12, [rbx + PyListObject.ob_item]       ; payloads
-    mov r15, [rbx + PyListObject.ob_item_tags]  ; tags
     mov r13, [rbx + PyListObject.ob_size]
     test r13, r13
     jz .done
 
 .loop:
     dec r13
-    mov rdi, [r12]                     ; payload
-    movzx esi, byte [r15]             ; tag
-    VISIT_FAT rdi, rsi
+    mov rdi, [r12]
+    VISIT_V rdi, rsi
     add r12, 8
-    inc r15
     test r13, r13
     jnz .loop
 .done:
@@ -729,7 +726,6 @@ DEF_FUNC list_clear
 
     mov rbx, rdi
     mov r12, [rbx + PyListObject.ob_item]       ; payloads
-    mov r15, [rbx + PyListObject.ob_item_tags]  ; tags
     mov r13, [rbx + PyListObject.ob_size]
     mov qword [rbx + PyListObject.ob_size], 0
 
@@ -738,14 +734,12 @@ DEF_FUNC list_clear
 .loop:
     dec r13
     mov rdi, [r12]
-    movzx esi, byte [r15]
     push r12
-    push r15
-    DECREF_VAL rdi, rsi
-    pop r15
+    push r12
+    DECREF_V rdi, rsi
+    pop r12
     pop r12
     add r12, 8
-    inc r15
     test r13, r13
     jnz .loop
 .done:
@@ -767,16 +761,13 @@ DEF_FUNC tuple_traverse
     mov rbx, rdi
     mov r13, [rbx + PyTupleObject.ob_size]
     mov r12, [rbx + PyTupleObject.ob_item]       ; payloads
-    mov r15, [rbx + PyTupleObject.ob_item_tags]  ; tags (callee-saved, survives VISIT_FAT)
     test r13, r13
     jz .done
 .loop:
     dec r13
     mov rdi, [r12]
-    movzx esi, byte [r15]
-    VISIT_FAT rdi, rsi
+    VISIT_V rdi, rsi
     add r12, 8
-    inc r15
     test r13, r13
     jnz .loop
 .done:
@@ -797,7 +788,6 @@ DEF_FUNC tuple_clear
     mov rbx, rdi
     mov r13, [rbx + PyTupleObject.ob_size]
     mov r12, [rbx + PyTupleObject.ob_item]       ; payloads
-    mov r15, [rbx + PyTupleObject.ob_item_tags]  ; tags
     mov qword [rbx + PyTupleObject.ob_size], 0
 
     test r13, r13
@@ -805,14 +795,12 @@ DEF_FUNC tuple_clear
 .loop:
     dec r13
     mov rdi, [r12]
-    movzx esi, byte [r15]
     push r12
-    push r15
-    DECREF_VAL rdi, rsi
-    pop r15
+    push r12
+    DECREF_V rdi, rsi
+    pop r12
     pop r12
     add r12, 8
-    inc r15
     test r13, r13
     jnz .loop
 .done:

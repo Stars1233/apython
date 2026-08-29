@@ -106,7 +106,6 @@ struc PyListObject
     .ob_size:   resq 1    ; +16: item count
     .allocated: resq 1    ; +24: capacity
     .ob_item:   resq 1    ; +32: ptr to payload (u64[]) array
-    .ob_item_tags: resq 1 ; +40: ptr to tag (u8[]) array
 endstruc
 
 ; Tuple object
@@ -116,7 +115,6 @@ struc PyTupleObject
     .ob_size:   resq 1    ; +16: item count
     .ob_hash:   resq 1    ; +24: cached hash (-1 = not computed)
     .ob_item:   resq 1     ; +32: ptr to payload (u64[]) array
-    .ob_item_tags: resq 1  ; +40: ptr to tag (u8[]) array
 endstruc
 
 ; Dict object

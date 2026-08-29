@@ -116,7 +116,6 @@ DEF_FUNC sre_compile_func, SC_FRAME
 
     ; Iterate code list, extract each SmallInt as u32
     mov r15, [r12 + PyListObject.ob_item]       ; payloads
-    mov rbx, [r12 + PyListObject.ob_item_tags]  ; tags
     xor ecx, ecx               ; index
 .code_loop:
     cmp rcx, r13
@@ -124,8 +123,8 @@ DEF_FUNC sre_compile_func, SC_FRAME
     ; Normalize first: int_unwrap flattens bool, compact heap ints and int
     ; subclasses to (value, TAG_SMALLINT), so the check accepts any integer.
     extern int_unwrap
-    movzx edx, byte [rbx + rcx]
     mov rdi, [r15 + rcx*8]
+    V_UNPACK rdi, rdx
     push rcx
     call int_unwrap
     pop rcx

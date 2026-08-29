@@ -510,14 +510,12 @@ DEF_FUNC op_call_function_ex
     je .cfex_tuple_args
     ; List: extract payload+tag to temp fat array
     mov rcx, [rsi + PyListObject.ob_size]
-    mov rbx, [rsi + PyListObject.ob_item_tags]
     mov rsi, [rsi + PyListObject.ob_item]
     jmp .cfex_extract_fat
 
 .cfex_tuple_args:
     ; Tuple: extract payload+tag to temp fat array
     mov rcx, [rsi + PyTupleObject.ob_size]
-    mov rbx, [rsi + PyTupleObject.ob_item_tags]
     mov rsi, [rsi + PyTupleObject.ob_item]
 
 .cfex_extract_fat:
@@ -537,7 +535,7 @@ DEF_FUNC op_call_function_ex
     cmp rdx, rcx
     jge .cfex_extract_done
     mov r8, [rsi + rdx * 8]        ; payload
-    movzx r9d, byte [rbx + rdx]    ; tag
+    V_UNPACK r8, r9
     mov rdi, [rbp - CFX_TEMP]
     mov r10, rdx
     shl r10, 4                     ; dest offset * 16
@@ -602,11 +600,9 @@ DEF_FUNC op_call_function_ex
     lea rdx, [rel tuple_type]
     cmp rcx, rdx
     je .cfex_merge_tuple_src
-    mov rbx, [rsi + PyListObject.ob_item_tags]
     mov rsi, [rsi + PyListObject.ob_item]
     jmp .cfex_merge_copy_pos
 .cfex_merge_tuple_src:
-    mov rbx, [rsi + PyTupleObject.ob_item_tags]
     mov rsi, [rsi + PyTupleObject.ob_item]
 .cfex_merge_copy_pos:
     mov rdi, [rbp - CFX_MERGED]
@@ -616,7 +612,7 @@ DEF_FUNC op_call_function_ex
     xor edx, edx
 .cfex_copy_pos_loop:
     mov r8, [rsi + rdx * 8]       ; payload
-    movzx r9d, byte [rbx + rdx]   ; tag
+    V_UNPACK r8, r9
     mov r10, rdx
     shl r10, 4                    ; *16 for merged buffer
     mov [rdi + r10], r8           ; store payload at 16B stride
@@ -672,9 +668,7 @@ DEF_FUNC op_call_function_ex
     ; Store key in kw_names tuple at kw_idx (fat: *16 + TAG_PTR)
     mov rax, [rbp - CFX_KWNAMES]
     mov r8, [rax + PyTupleObject.ob_item]       ; payloads
-    mov r9, [rax + PyTupleObject.ob_item_tags]  ; tags
-    mov [r8 + rdx * 8], rsi                     ; payload
-    mov byte [r9 + rdx], TAG_PTR                ; tag
+    mov [r8 + rdx * 8], rsi
     INCREF rsi                   ; tuple owns a ref
     pop rdx
     pop rcx

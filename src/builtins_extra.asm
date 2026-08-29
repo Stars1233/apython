@@ -236,13 +236,12 @@ DEF_FUNC builtin_divmod
     mov edi, 2
     extern tuple_new
     call tuple_new
-    mov rbx, [rax + PyTupleObject.ob_item]       ; payloads
-    mov rsi, [rax + PyTupleObject.ob_item_tags]  ; tags
-    mov [rbx], r15                               ; quotient payload
+    mov rbx, [rax + PyTupleObject.ob_item]
     pop rcx                                      ; quotient tag
-    mov byte [rsi], cl
-    mov [rbx + 8], r12                           ; remainder payload
-    mov byte [rsi + 1], r13b                     ; remainder tag
+    V_PACK r15, rcx
+    mov [rbx], r15
+    V_PACK r12, r13
+    mov [rbx + 8], r12
     mov edx, TAG_PTR
 
     pop r15

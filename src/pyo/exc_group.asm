@@ -96,34 +96,29 @@ DEF_FUNC eg_new, EGN_FRAME
     mov rcx, [rbp - EGN_EG]
 
     mov r8, [rax + PyTupleObject.ob_item]       ; payloads
-    mov r9, [rax + PyTupleObject.ob_item_tags]  ; tags
 
     ; args[0] = msg_str
     test r12, r12
     jz .args_no_msg
     INCREF r12
     mov [r8], r12
-    mov byte [r9], TAG_PTR                       ; slot 0 tag
     jmp .args_set_excs
 .args_no_msg:
     ; Push None for msg if NULL
     lea rdx, [rel none_singleton]
     INCREF rdx
     mov [r8], rdx
-    mov byte [r9], TAG_PTR                       ; slot 0 tag
 .args_set_excs:
     ; args[1] = exc_tuple (fat slot 1 at offset +16)
     test r13, r13
     jz .args_no_excs
     INCREF r13
     mov [r8 + 8], r13
-    mov byte [r9 + 1], TAG_PTR                   ; slot 1 tag
     jmp .args_done
 .args_no_excs:
     lea rdx, [rel none_singleton]
     INCREF rdx
     mov [r8 + 8], rdx
-    mov byte [r9 + 1], TAG_PTR                   ; slot 1 tag
 .args_done:
     mov [rcx + PyExceptionGroupObject.exc_args], rax
     mov rax, rcx
@@ -187,19 +182,17 @@ DEF_FUNC eg_type_call, EGC_FRAME
     ; Copy list items to tuple
     mov rcx, [r12 + PyListObject.ob_size]
     mov r8, [r12 + PyListObject.ob_item]       ; list payloads
-    mov r9, [r12 + PyListObject.ob_item_tags]  ; list tags
     xor edx, edx
 .copy_list:
     mov rcx, [r12 + PyListObject.ob_size]  ; reload loop limit (clobbered below)
     cmp rdx, rcx
     jge .list_done
     mov rdi, [r8 + rdx*8]      ; list item payload
-    movzx r11d, byte [r9 + rdx] ; list item tag
+    V_UNPACK rdi, r11
     INCREF_VAL rdi, r11
     mov r10, [r13 + PyTupleObject.ob_item]       ; tuple payloads
-    mov rsi, [r13 + PyTupleObject.ob_item_tags]  ; tuple tags
-    mov [r10 + rdx*8], rdi
-    mov byte [rsi + rdx], r11b
+    V_PACK rdi, r11
+    mov [r10 + rdx * 8], rdi
     inc rdx
     jmp .copy_list
 .list_done:
@@ -490,19 +483,17 @@ DEF_FUNC eg_split, EGS_FRAME
     pop rcx
     mov rax, [rbp - EGS_MLIST]
     mov r8, [rax + PyListObject.ob_item]       ; list payloads
-    mov r9, [rax + PyListObject.ob_item_tags]  ; list tags
     xor edx, edx
 .copy_match:
     cmp rdx, rcx
     jge .match_tuple_done
     push rcx
     mov rdi, [r8 + rdx*8]      ; list item payload
-    movzx r11d, byte [r9 + rdx] ; list item tag
+    V_UNPACK rdi, r11
     INCREF_VAL rdi, r11
     mov r10, [rbx + PyTupleObject.ob_item]       ; tuple payloads
-    mov rsi, [rbx + PyTupleObject.ob_item_tags]  ; tuple tags
-    mov [r10 + rdx*8], rdi
-    mov byte [rsi + rdx], r11b
+    V_PACK rdi, r11
+    mov [r10 + rdx * 8], rdi
     pop rcx
     inc rdx
     jmp .copy_match
@@ -537,19 +528,17 @@ DEF_FUNC eg_split, EGS_FRAME
     pop rcx
     mov rax, [rbp - EGS_RLIST]
     mov r8, [rax + PyListObject.ob_item]       ; list payloads
-    mov r9, [rax + PyListObject.ob_item_tags]  ; list tags
     xor edx, edx
 .copy_rest:
     cmp rdx, rcx
     jge .rest_tuple_done
     push rcx
     mov rdi, [r8 + rdx*8]      ; list item payload
-    movzx r11d, byte [r9 + rdx] ; list item tag
+    V_UNPACK rdi, r11
     INCREF_VAL rdi, r11
     mov r10, [rbx + PyTupleObject.ob_item]       ; tuple payloads
-    mov rsi, [rbx + PyTupleObject.ob_item_tags]  ; tuple tags
-    mov [r10 + rdx*8], rdi
-    mov byte [rsi + rdx], r11b
+    V_PACK rdi, r11
+    mov [r10 + rdx * 8], rdi
     pop rcx
     inc rdx
     jmp .copy_rest
@@ -635,7 +624,6 @@ DEF_FUNC prep_reraise_star, PRS_FRAME
 
     ; Phase 1: Count non-None entries, find first non-None
     mov rcx, [rsi + PyListObject.ob_size]
-    mov r9, [rsi + PyListObject.ob_item_tags]   ; tag array
     mov rsi, [rsi + PyListObject.ob_item]
     xor ebx, ebx                ; non-None count
     xor r12d, r12d              ; first non-None ptr
@@ -644,9 +632,8 @@ DEF_FUNC prep_reraise_star, PRS_FRAME
 .scan:
     cmp rdx, rcx
     jge .scan_done
-    movzx eax, byte [r9 + rdx] ; tag
-    mov rdi, [rsi + rdx*8]     ; list item payload (8-byte stride)
-    cmp rdi, r8                 ; also check none_singleton (mixed repr)
+    mov rdi, [rsi + rdx*8]     ; list item
+    cmp rdi, r8                 ; skip None
     je .scan_next
     inc ebx
     test r12, r12
@@ -682,11 +669,8 @@ DEF_FUNC prep_reraise_star, PRS_FRAME
     cmp rdx, rcx
     jge .flat_done
     mov rax, [rbp - PRS_LIST]
-    mov r9, [rax + PyListObject.ob_item_tags]  ; tag array
     mov rsi, [rax + PyListObject.ob_item]      ; payload array
-    ; Check for None via tag
-    movzx eax, byte [r9 + rdx]
-    mov rdi, [rsi + rdx*8]                    ; list item payload (8-byte stride)
+    mov rdi, [rsi + rdx*8]                    ; list item
     lea r8, [rel none_singleton]
     cmp rdi, r8
     je .flat_next
@@ -758,19 +742,17 @@ DEF_FUNC prep_reraise_star, PRS_FRAME
     pop rcx
     mov rax, [rbp - PRS_FLAT]
     mov r8, [rax + PyListObject.ob_item]       ; list payloads
-    mov r9, [rax + PyListObject.ob_item_tags]  ; list tags
     xor edx, edx
 .copy_flat:
     cmp rdx, rcx
     jge .copy_flat_done
     push rcx
     mov rdi, [r8 + rdx*8]      ; list item payload
-    movzx r11d, byte [r9 + rdx] ; list item tag
+    V_UNPACK rdi, r11
     INCREF_VAL rdi, r11
     mov r10, [rbx + PyTupleObject.ob_item]       ; tuple payloads
-    mov rsi, [rbx + PyTupleObject.ob_item_tags]  ; tuple tags
-    mov [r10 + rdx*8], rdi
-    mov byte [rsi + rdx], r11b
+    V_PACK rdi, r11
+    mov [r10 + rdx * 8], rdi
     pop rcx
     inc rdx
     jmp .copy_flat

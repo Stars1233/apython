@@ -695,11 +695,10 @@ mdo_small_tuple:
     pop r13
     ; Store element in tuple (tag in rdx from marshal_read_object)
     mov r8, [r14 + PyTupleObject.ob_item]       ; payloads
-    mov r9, [r14 + PyTupleObject.ob_item_tags]  ; tags
     mov rcx, r15
     shl rcx, 3                 ; index * 8
-    mov [r8 + rcx], rax         ; payload
-    mov byte [r9 + r15], dl     ; tag
+    V_PACK rax, rdx
+    mov [r8 + rcx], rax
     inc r15
     jmp .stuple_loop
 
@@ -770,11 +769,10 @@ mdo_tuple:
     pop r13
     ; Store element in tuple (tag in rdx from marshal_read_object)
     mov r8, [r14 + PyTupleObject.ob_item]       ; payloads
-    mov r9, [r14 + PyTupleObject.ob_item_tags]  ; tags
     mov rcx, r15
     shl rcx, 3                 ; index * 8
-    mov [r8 + rcx], rax         ; payload
-    mov byte [r9 + r15], dl     ; tag
+    V_PACK rax, rdx
+    mov [r8 + rcx], rax
     inc r15
     jmp .tuple_loop
 

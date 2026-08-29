@@ -380,10 +380,8 @@ wait_for_awaitable_iternext:
     ; Copy result to gi_return_value for SEND exhaustion protocol
     mov rax, [rbx + WaitForAwaitable.inner_task]
     mov rcx, [rax + AsyncTask.result]
-    V_UNPACK rcx, rdx
-    V_PACK rcx, rdx
     mov [rbx + WaitForAwaitable.gi_return_value], rcx
-    INCREF_VAL rcx, rdx
+    INCREF_V rcx, rdx
 
     RET_NULL
     pop rbx

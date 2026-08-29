@@ -22,7 +22,6 @@ extern eval_saved_rbx
 extern eval_saved_r13
 extern eval_co_names
 extern eval_co_consts
-extern eval_co_consts_tags
 extern opcode_table
 extern eval_return
 extern obj_dealloc
@@ -110,10 +109,9 @@ END_FUNC op_return_value
 DEF_FUNC_BARE op_return_const
     ; ecx = arg (index into co_consts)
     mov rax, [rel eval_co_consts]
-    mov rax, [rax + rcx * 8]   ; payload
-    mov rdx, [rel eval_co_consts_tags]
-    movzx edx, byte [rdx + rcx] ; tag
-    INCREF_VAL rax, rdx
+    mov rax, [rax + rcx * 8]
+    INCREF_V rax, rdx
+    V_UNPACK rax, rdx
     mov qword [r12 + PyFrame.instr_ptr], 0  ; mark frame as "returned" (not yielded)
     jmp eval_return
 END_FUNC op_return_const
@@ -1653,7 +1651,6 @@ DEF_FUNC_BARE op_copy_free_vars
 
     ; Copy cells from closure tuple to freevar slots
     mov rdi, [rax + PyTupleObject.ob_item]       ; payloads
-    mov rsi, [rax + PyTupleObject.ob_item_tags]  ; tags
     xor r8d, r8d                   ; loop counter
 .cfv_loop:
     cmp r8d, ecx
@@ -1661,7 +1658,7 @@ DEF_FUNC_BARE op_copy_free_vars
 
     ; Get cell from closure tuple item[i] (tuples still carry a tag sidecar)
     mov r9, [rdi + r8*8]                               ; payload
-    movzx r11d, byte [rsi + r8]                        ; tag
+    V_UNPACK r9, r11
 
     ; INCREF while the tag is still around, then pack into a Value
     INCREF_VAL r9, r11
@@ -2072,12 +2069,10 @@ extern obj_decref
     jne .is_all_tuple
     ; List: items = payload/tag arrays
     mov rax, [rbx + PyListObject.ob_item]
-    mov rdx, [rbx + PyListObject.ob_item_tags]
     jmp .is_all_have_items
 .is_all_tuple:
     ; Tuple: items = payload/tag arrays
     mov rax, [rbx + PyTupleObject.ob_item]
-    mov rdx, [rbx + PyTupleObject.ob_item_tags]
 .is_all_have_items:
     mov [rbp - IS_ITEMS], rax         ; save payloads ptr
     mov [rbp - IS_ITEM_TAGS], rdx     ; save tags ptr
@@ -2092,7 +2087,7 @@ extern obj_decref
     mov rax, [rbp - IS_ITEMS]
     mov rdx, [rbp - IS_ITEM_TAGS]
     mov rsi, [rax + rcx * 8]          ; name payload
-    movzx edx, byte [rdx + rcx]       ; name tag
+    V_UNPACK rsi, rdx
 
     ; Look up name in mod_dict
     mov rdi, [rbp - IS_MODDICT]
@@ -2109,7 +2104,7 @@ extern obj_decref
     mov rax, [rbp - IS_ITEMS]
     mov rdx, [rbp - IS_ITEM_TAGS]
     mov rsi, [rax + rcx * 8]          ; name payload
-    movzx r8d, byte [rdx + rcx]       ; name tag (key_tag)
+    V_UNPACK rsi, r8
     mov rdi, [rbp - IS_LOCALS]
     mov rdx, r9                       ; value payload
     mov rcx, r10                      ; value tag
@@ -2241,7 +2236,6 @@ extern obj_decref
     ; Get list size and items
     mov rcx, [rdi + PyListObject.ob_size]
     mov rsi, [rdi + PyListObject.ob_item]
-    mov rdx, [rdi + PyListObject.ob_item_tags]
     push rcx
     push rsi
     push rdx
@@ -2264,14 +2258,11 @@ extern obj_decref
     push rdx
     push rsi
 
-    mov rdi, [rsi + rdx * 8]        ; item payload
-    movzx r9d, byte [r11 + rdx]     ; item tag
+    mov rdi, [rsi + rdx * 8]        ; item Value
     mov rax, [rsp + 24]             ; tuple from stack
     mov r8, [rax + PyTupleObject.ob_item]
-    mov r10, [rax + PyTupleObject.ob_item_tags]
-    mov [r8 + rdx * 8], rdi         ; payload
-    mov byte [r10 + rdx], r9b       ; tag
-    INCREF_VAL rdi, r9
+    mov [r8 + rdx * 8], rdi
+    INCREF_V rdi, r9
 
     pop rsi
     pop rdx
@@ -2700,9 +2691,8 @@ DEF_FUNC op_match_keys, MK_FRAME
     INCREF_VAL rax, r9          ; tag-aware INCREF
     mov rcx, [rbp - MK_VALS]
     mov r8, [rcx + PyTupleObject.ob_item]         ; payloads
-    mov r10, [rcx + PyTupleObject.ob_item_tags]   ; tags
-    mov [r8 + rdx*8], rax
-    mov byte [r10 + rdx], r9b                     ; tag from dict_get
+    V_PACK rax, r9
+    mov [r8 + rdx * 8], rax
 
     pop rdx
     inc rdx
@@ -2888,9 +2878,8 @@ DEF_FUNC op_match_class, MC_FRAME
     mov rcx, [rbp - MC_IDX]
     mov rdx, [rbp - MC_RESULT]
     mov r8, [rdx + PyTupleObject.ob_item]        ; payloads
-    mov r10, [rdx + PyTupleObject.ob_item_tags]  ; tags
-    mov [r8 + rcx*8], rax
-    mov byte [r10 + rcx], r9b                    ; tag from tp_getattr
+    V_PACK rax, r9
+    mov [r8 + rcx * 8], rax
 
     inc qword [rbp - MC_IDX]
     jmp .mc_pos_loop
@@ -2927,9 +2916,8 @@ DEF_FUNC op_match_class, MC_FRAME
     add rcx, [rbp - MC_NPOS]
     mov rdx, [rbp - MC_RESULT]
     mov r8, [rdx + PyTupleObject.ob_item]        ; payloads
-    mov r10, [rdx + PyTupleObject.ob_item_tags]  ; tags
-    mov [r8 + rcx*8], rax
-    mov byte [r10 + rcx], r9b                    ; tag from tp_getattr
+    V_PACK rax, r9
+    mov [r8 + rcx * 8], rax
 
     inc qword [rbp - MC_IDX]
     jmp .mc_kw_loop

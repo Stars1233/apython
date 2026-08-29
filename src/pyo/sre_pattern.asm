@@ -679,9 +679,8 @@ DEF_FUNC sre_pattern_findall_method, FA_FRAME
     lea esi, [ecx - 1]
     movsx rsi, esi
     mov r8, [rbx + PyTupleObject.ob_item]       ; payloads
-    mov r9, [rbx + PyTupleObject.ob_item_tags]  ; tags
-    mov [r8 + rsi*8], rax
-    mov byte [r9 + rsi], dl
+    V_PACK rax, rdx
+    mov [r8 + rsi * 8], rax
 
     pop rcx
     inc ecx
@@ -1280,16 +1279,14 @@ DEF_FUNC sre_pattern_subn_method, SN_FRAME
     mov rbx, rax
 
     mov r8, [rbx + PyTupleObject.ob_item]       ; payloads
-    mov r9, [rbx + PyTupleObject.ob_item_tags]  ; tags
 
     mov r12, [rbp - SN_RESULT]
     inc qword [r12 + PyObject.ob_refcnt]
     mov [r8], r12
-    mov byte [r9], TAG_PTR
 
     mov rax, [rbp - SN_NSUBS]
+    V_PACK_I64 rax, r9
     mov [r8 + 8], rax
-    mov byte [r9 + 1], TAG_SMALLINT
 
     ; DECREF result string (tuple holds a ref)
     mov rdi, r12

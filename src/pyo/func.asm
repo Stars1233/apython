@@ -262,11 +262,10 @@ DEF_FUNC func_call
     shl r10, 4                      ; source index * 16 (args stride)
     mov r9, [r14 + r10]             ; value payload from args
     mov r11, [r14 + r10 + 8]        ; value tag from args
-    mov r10, [rax + PyTupleObject.ob_item]       ; payloads
-    mov rdi, [rax + PyTupleObject.ob_item_tags]  ; tags
-    mov [r10 + rsi*8], r9           ; payload
-    mov byte [rdi + rsi], r11b      ; tag
+    mov r10, [rax + PyTupleObject.ob_item]
     INCREF_VAL r9, r11
+    V_PACK r9, r11
+    mov [r10 + rsi * 8], r9
     inc esi
     jmp .fill_varargs
 
@@ -339,9 +338,8 @@ DEF_FUNC func_call
     mov r8, rdi
     sub r8, rsi
     mov r9, [rax + PyTupleObject.ob_item]       ; payloads
-    mov r10, [rax + PyTupleObject.ob_item_tags] ; tags
     mov r9, [r9 + r8*8]                          ; payload
-    movzx r10d, byte [r10 + r8]                  ; tag
+    V_UNPACK r9, r10
     movsxd r8, edi
     mov r11, r8
     shl r8, 3                  ; localsplus 8 bytes/slot

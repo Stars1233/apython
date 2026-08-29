@@ -216,31 +216,28 @@ DEF_FUNC sys_module_init, 32
     call tuple_new
     mov rbx, rax                ; rbx = version_info tuple
     mov r8, [rbx + PyTupleObject.ob_item]       ; payloads
-    mov r9, [rbx + PyTupleObject.ob_item_tags]  ; tags
     ; (3, 12, 0, 'final', 0)
-    ; slot 0: 3 (SmallInt)
+    ; slot 0: 3
     mov rdi, 3
+    V_PACK_I64 rdi, rcx
     mov [r8], rdi
-    mov byte [r9], TAG_SMALLINT
-    ; slot 1: 12 (SmallInt)
+    ; slot 1: 12
     mov rdi, 12
+    V_PACK_I64 rdi, rcx
     mov [r8 + 8], rdi
-    mov byte [r9 + 1], TAG_SMALLINT
-    ; slot 2: 0 (SmallInt)
+    ; slot 2: 0
     xor edi, edi
+    V_PACK_I64 rdi, rcx
     mov [r8 + 16], rdi
-    mov byte [r9 + 2], TAG_SMALLINT
     ; slot 3: 'final' (string, TAG_PTR)
     lea rdi, [rel sm_final]
     call str_from_cstr_heap
     mov r8, [rbx + PyTupleObject.ob_item]       ; reload payloads (clobbered)
-    mov r9, [rbx + PyTupleObject.ob_item_tags]  ; reload tags
     mov [r8 + 24], rax
-    mov byte [r9 + 3], TAG_PTR
-    ; slot 4: 0 (SmallInt)
+    ; slot 4: 0
     xor edi, edi
+    V_PACK_I64 rdi, rcx
     mov [r8 + 32], rdi
-    mov byte [r9 + 4], TAG_SMALLINT
 
     lea rdi, [rel sm_version_info]
     call str_from_cstr_heap
@@ -642,18 +639,15 @@ DEF_FUNC sys_path_add_script_dir
     mov rdi, [rel sys_path_list]
     ; Set list item 0
     mov rcx, [rdi + PyListObject.ob_item]       ; payloads
-    mov r8, [rdi + PyListObject.ob_item_tags]   ; tags
     ; DECREF old item[0]
     mov rdi, [rcx]
-    movzx esi, byte [r8]
-    DECREF_VAL rdi, rsi
+    DECREF_V rdi, rsi
     pop rax                     ; restore new path payload
     pop rdx                     ; restore new path tag
+    V_PACK rax, rdx
     mov rdi, [rel sys_path_list]
     mov rcx, [rdi + PyListObject.ob_item]
-    mov r8, [rdi + PyListObject.ob_item_tags]
-    mov [rcx], rax              ; store new path payload
-    mov byte [r8], dl           ; store actual tag
+    mov [rcx], rax
 
     pop r12
     pop rbx

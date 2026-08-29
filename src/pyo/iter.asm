@@ -60,9 +60,8 @@ DEF_FUNC_BARE list_iter_next
 
     ; Get item (payload + tag arrays)
     mov rdx, [rax + PyListObject.ob_item]
-    mov r8, [rax + PyListObject.ob_item_tags]
     mov rax, [rdx + rcx * 8]     ; payload
-    movzx edx, byte [r8 + rcx]   ; tag
+    V_UNPACK rax, rdx
     INCREF_VAL rax, rdx
 
     ; Advance index
@@ -162,10 +161,9 @@ DEF_FUNC_BARE tuple_iter_next
     jge .exhausted
 
     ; Get item (payload + tag arrays)
-    mov rdx, [rax + PyTupleObject.ob_item_tags]
     mov rax, [rax + PyTupleObject.ob_item]
     mov rax, [rax + rcx * 8]       ; payload
-    movzx edx, byte [rdx + rcx]    ; tag
+    V_UNPACK rax, rdx
     INCREF_VAL rax, rdx
 
     inc qword [rdi + PyTupleIterObject.it_index]

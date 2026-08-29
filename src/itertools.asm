@@ -495,14 +495,13 @@ DEF_FUNC_LOCAL enumerate_iternext
     call tuple_new
     ; rax = new tuple
     ; Fill: tuple[0] = count, tuple[1] = value
-    mov r8, [rax + PyTupleObject.ob_item]       ; payloads
-    mov r9, [rax + PyTupleObject.ob_item_tags]  ; tags
+    mov r8, [rax + PyTupleObject.ob_item]
     pop rcx                  ; count tag
-    mov [r8], r13            ; count payload (slot 0)
-    mov byte [r9], cl        ; count tag
+    V_PACK r13, rcx
+    mov [r8], r13            ; slot 0
     pop rcx                  ; value tag
-    mov [r8 + 8], r12        ; value payload (slot 1)
-    mov byte [r9 + 1], cl    ; value tag
+    V_PACK r12, rcx
+    mov [r8 + 8], r12        ; slot 1
 
     pop r13
     pop r12
@@ -736,9 +735,8 @@ DEF_FUNC_LOCAL zip_iternext
 
     ; Store value in tuple (rdx = tag from iternext)
     mov r8, [r14 + PyTupleObject.ob_item]        ; payloads
-    mov r9, [r14 + PyTupleObject.ob_item_tags]   ; tags
-    mov [r8 + r15*8], rax                        ; payload
-    mov byte [r9 + r15], dl                      ; tag
+    V_PACK rax, rdx
+    mov [r8 + r15 * 8], rax
 
     inc r15
     jmp .zip_next_loop
@@ -763,9 +761,8 @@ DEF_FUNC_LOCAL zip_iternext
     jge .zip_free_tuple
     push rcx
     mov r8, [r14 + PyTupleObject.ob_item]        ; payloads
-    mov r9, [r14 + PyTupleObject.ob_item_tags]   ; tags
     mov rdi, [r8 + rcx*8]
-    movzx esi, byte [r9 + rcx]
+    V_UNPACK rdi, rsi
     DECREF_VAL rdi, rsi
     pop rcx
     inc rcx
@@ -777,10 +774,8 @@ DEF_FUNC_LOCAL zip_iternext
 .zip_zero_loop:
     cmp rcx, r12
     jge .zip_do_free
-    mov r8, [r14 + PyTupleObject.ob_item]        ; payloads
-    mov r9, [r14 + PyTupleObject.ob_item_tags]   ; tags
+    mov r8, [r14 + PyTupleObject.ob_item]
     mov qword [r8 + rcx*8], 0
-    mov byte [r9 + rcx], 0
     inc rcx
     jmp .zip_zero_loop
 .zip_do_free:

@@ -90,10 +90,11 @@ DEF_FUNC exc_new, EN_FRAME
     mov edi, 1
     call tuple_new
     INCREF_VAL r12, r13
-    mov r8, [rax + PyTupleObject.ob_item]       ; payloads
-    mov r9, [rax + PyTupleObject.ob_item_tags]  ; tags
-    mov [r8], r12
-    mov byte [r9], r13b                         ; msg tag
+    mov r8, [rax + PyTupleObject.ob_item]
+    mov r9, r12
+    mov r10, r13
+    V_PACK r9, r10
+    mov [r8], r9
     jmp .set_args
 .empty_args:
     xor edi, edi
@@ -451,11 +452,10 @@ DEF_FUNC exc_getattr
     cmp qword [rax + PyTupleObject.ob_size], 0
     je .return_none
     ; Return args[0]
-    mov rcx, [rax + PyTupleObject.ob_item]       ; payloads
-    mov r8, [rax + PyTupleObject.ob_item_tags]   ; tags
-    mov rax, [rcx]                               ; payload
-    movzx edx, byte [r8]                         ; tag
-    INCREF_VAL rax, rdx
+    mov rcx, [rax + PyTupleObject.ob_item]
+    mov rax, [rcx]
+    INCREF_V rax, rdx
+    V_UNPACK rax, rdx
     pop r12
     pop rbx
     leave
@@ -675,9 +675,8 @@ DEF_FUNC exc_type_call, ETC_FRAME
     mov r8, [rsi + rcx + 8]       ; tag
     INCREF_VAL rdi, r8
     mov r9, [r12 + PyTupleObject.ob_item]       ; payloads
-    mov r10, [r12 + PyTupleObject.ob_item_tags] ; tags
-    mov [r9 + rdx*8], rdi
-    mov byte [r10 + rdx], r8b
+    V_PACK rdi, r8
+    mov [r9 + rdx * 8], rdi
     inc rdx
     jmp .copy_args
 .replace_args:
