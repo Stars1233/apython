@@ -197,6 +197,24 @@ value from before the call.
 same reason.  A raising `__del__` is reported and cleared.  A raise with no
 interpreter frame to unwind to reports instead of executing `mov rsp, 0`.
 
+### Fixed: builtin subclassing (B3)
+
+`class Sub(list)` produced a plain `list`.  A subclass now embeds the base's
+layout and keeps its `__dict__` after it (`tp_dictoffset`), inherits the
+base's protocol slots, and is filled by `__init__` (list, dict, set) or at
+construction (tuple, str).  `__new__` is registered as a staticmethod on the
+four container types.  ~20 exact-type checks that rejected a subclass are
+now family-flag checks.
+
+Pre-existing bugs found while doing it: `set.update` read its argument as a
+set; `super().meth` in attribute mode pushed an unbound function, so
+`super().__init__(*args)` lost `self`; `int_repr`'s subclass arm left the
+tag describing the wrapper; `str_str` returns a bare pointer whose tag
+`builtin_print` then reads.
+
+`test_list` and `test_tuple` pass in full, so the `-` prefix is gone from
+the Makefile and `check-cpython` enforces all 64 files.
+
 ### Known, not fixed
 
 - **Multiple inheritance does not exist.**  `__build_class__` reads only
@@ -214,6 +232,10 @@ interpreter frame to unwind to reports instead of executing `mov rsp, 0`.
   MemoryError.  `ap_malloc` exits fatally rather than returning NULL, so the
   two cases cannot be told apart.
 - The container repr cycle stack is 64 deep; CPython's limit is far higher.
+- A `str` subclass has no instance `__dict__`.  A str keeps its characters
+  inline, so there is no fixed offset past the header to put one at; CPython
+  uses a negative `tp_dictoffset` scaled by `tp_itemsize`.  These behave like
+  `bytes` and like a `__slots__` class.
 
 
 ## New Infrastructure Added
