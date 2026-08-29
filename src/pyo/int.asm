@@ -31,6 +31,7 @@ extern __gmpz_clear
 extern __gmpz_set_si
 extern __gmpz_set
 extern __gmpz_get_si
+extern __gmpz_fits_slong_p
 extern __gmpz_tdiv_ui
 extern __gmpz_get_str
 extern __gmpz_add
@@ -888,6 +889,33 @@ DEF_FUNC int_from_cstr_base, IB_FRAME
     ret
 
 END_FUNC int_from_cstr_base
+
+;; ============================================================================
+;; int_fits_i64(rdi = payload, edx = tag) -> eax = 1 when the value fits
+;;
+;; int_to_i64 truncates through __gmpz_get_si, so a count of 2**64 came back
+;; as 0 and [0] * (2**64) quietly returned [] instead of raising.
+DEF_FUNC int_fits_i64
+    cmp edx, TAG_SMALLINT
+    je .ifi_yes
+    cmp edx, TAG_PTR
+    jne .ifi_yes                ; not an int at all; the caller's type check
+                                ; deals with that
+    cmp qword [rdi + PyIntObject.compact], 0
+    jne .ifi_yes                ; the compact ival is live, so it fits
+    lea rdi, [rdi + PyIntObject.mpz]
+    call __gmpz_fits_slong_p wrt ..plt
+    test eax, eax
+    jz .ifi_no
+.ifi_yes:
+    mov eax, 1
+    leave
+    ret
+.ifi_no:
+    xor eax, eax
+    leave
+    ret
+END_FUNC int_fits_i64
 
 ;; ============================================================================
 ;; int_to_i64(PyObject *obj) -> int64_t

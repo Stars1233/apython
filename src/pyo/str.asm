@@ -20,6 +20,8 @@ extern raise_exception
 extern exc_IndexError_type
 extern exc_TypeError_type
 extern int_type
+extern int_fits_i64
+extern exc_OverflowError_type
 extern slice_type
 extern slice_indices
 extern type_type
@@ -387,6 +389,15 @@ DEF_FUNC str_repeat
     mov rbx, rdi            ; str
     mov rdi, rsi            ; int (count payload)
     mov edx, ecx            ; count tag (right operand)
+    ; A count too large for int64 truncates through __gmpz_get_si, so
+    ; "a" * (2**64) quietly returned "".
+    push rdi
+    push rdx
+    call int_fits_i64
+    pop rdx
+    pop rdi
+    test eax, eax
+    jz .srep_overflow
     call int_to_i64
     mov r12, rax             ; r12 = repeat count
 
@@ -397,8 +408,13 @@ DEF_FUNC str_repeat
 .positive:
 
     mov r13, [rbx + PyStrObject.ob_size]   ; r13 = str length
-    imul r14, r13, 1                        ; r14 = str length (copy)
+    mov r14, r13
     imul r14, r12                           ; r14 = total length
+    ; ("a"*16) * (2**60) wrapped to 0, allocated 40 bytes, and then ran the
+    ; copy loop 2**60 times into it.
+    jo .srep_overflow
+    cmp r14, 0x10000000                     ; 256M bytes
+    ja .srep_overflow
 
     ; Allocate new string (+ 8 for NUL padding for 8-byte strcmp)
     lea rdi, [r14 + PyStrObject.data + 8]
@@ -442,6 +458,10 @@ DEF_FUNC str_repeat
     leave
     V_PACK rax, rdx             ; return one Value
     ret
+.srep_overflow:
+    lea rdi, [rel exc_OverflowError_type]
+    CSTRING rsi, "repeated string is too long"
+    call raise_exception
 END_FUNC str_repeat
 
 ;; ============================================================================

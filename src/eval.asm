@@ -167,6 +167,12 @@ section .data
 global recursion_depth
 global recursion_limit
 recursion_depth: dq 0
+; Depth of C-level container recursion -- comparing or hashing a structure
+; that reaches itself.  Separate from recursion_depth because a non-local
+; exit discards those C frames without unwinding them, so it is reset by
+; eval_exception_unwind rather than balanced, exactly as repr_depth is.
+global c_recursion_depth
+c_recursion_depth: dq 0
 ; CPython's default.  apython's frames are cheaper -- about 320 machine-stack
 ; bytes each against an 8 MB rlimit -- but matching CPython is what programs
 ; and tests expect, and sys.setrecursionlimit() can raise it.
@@ -407,6 +413,7 @@ DEF_FUNC_BARE eval_exception_unwind
     ; and repr_stack keeps 64 dangling pointers that repr_check_active
     ; compares by address.
     mov qword [rel repr_depth], 0
+    mov qword [rel c_recursion_depth], 0
 
     ; Free stale cfex_temp_pending buffer if set
     mov rdi, [rel cfex_temp_pending]

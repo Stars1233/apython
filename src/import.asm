@@ -88,6 +88,9 @@ FL_STKSZ    equ 4096         ; stack buffer for path component
 
 ; Path buffer size
 PATHBUF_SIZE equ 8192
+; Room for the longest suffix this file appends after the directory and the
+; module component: "/__pycache__/__init__.cpython-312.pyc" is 37 bytes.
+IM_PATH_MARGIN equ 64
 
 ; ============================================================================
 ; import_init(int argc, char **argv)
@@ -691,9 +694,20 @@ DEF_FUNC import_search_dirs, SD_FRAME
     ; Build path in import_path_buf_ptr
     mov r12, [rel import_path_buf_ptr]  ; r12 = dest buf
 
-    ; Copy dir to buffer
+    ; Bound the assembled path before writing any of it.  Nothing checked
+    ; it: a sys.path entry longer than the buffer memcpy'd straight past the
+    ; end of the 8192-byte heap block, so sys.path.insert(0, "A"*9000)
+    ; followed by any import corrupted the heap.  Too long simply means the
+    ; module is not findable here.
     lea rsi, [rbx + PyStrObject.data]
     mov r13, [rbx + PyStrObject.ob_size] ; r13 = offset (dir length)
+    mov rax, r13
+    add rax, [rbp - SD_LEAFLEN]
+    add rax, IM_PATH_MARGIN
+    cmp rax, PATHBUF_SIZE
+    jae .sd_next
+
+    ; Copy dir to buffer
     test r13, r13
     jz .sd_no_dir
     mov rdi, r12
@@ -904,9 +918,16 @@ DEF_FUNC import_search_syspath, SS_FRAME
 
     mov r12, [rel import_path_buf_ptr]  ; dest buf
 
-    ; Copy dir to buffer
+    ; Same bound as the search loop above.
     lea rsi, [rbx + PyStrObject.data]
     mov r13, [rbx + PyStrObject.ob_size]
+    mov rax, r13
+    add rax, [rbp - SS_LEAFLEN]
+    add rax, IM_PATH_MARGIN
+    cmp rax, PATHBUF_SIZE
+    jae .ss_next
+
+    ; Copy dir to buffer
     test r13, r13
     jz .ss_no_dir
     mov rdi, r12
@@ -929,6 +950,12 @@ DEF_FUNC import_search_syspath, SS_FRAME
     call ap_strlen
     mov r15, rax                ; r15 = full component length
     pop r13
+    ; The dotted component can be longer than the leaf checked above.
+    mov rax, r13
+    add rax, r15
+    add rax, IM_PATH_MARGIN
+    cmp rax, PATHBUF_SIZE
+    jae .ss_next
 
     mov rdi, r12
     add rdi, r13

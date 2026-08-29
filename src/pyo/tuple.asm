@@ -31,6 +31,11 @@ extern tuple_clear
 extern obj_is_true
 extern float_compare
 extern int_type
+extern recursion_limit
+extern c_recursion_depth
+extern exc_RecursionError_type
+extern int_fits_i64
+extern exc_OverflowError_type
 extern str_type
 extern bool_type
 extern none_type
@@ -604,6 +609,15 @@ DEF_FUNC tuple_repeat
     mov rbx, rdi            ; rbx = tuple
     mov rdi, rsi            ; count (int payload)
     mov edx, ecx            ; count tag (right operand)
+    ; A count too large for int64 used to truncate through __gmpz_get_si,
+    ; so (1,) * (2**64) quietly returned an empty result.
+    push rdi
+    push rdx
+    call int_fits_i64
+    pop rdx
+    pop rdi
+    test eax, eax
+    jz .trep_overflow
     call int_to_i64
     mov r12, rax             ; r12 = repeat count
 
@@ -613,8 +627,11 @@ DEF_FUNC tuple_repeat
 .rep_positive:
 
     mov r13, [rbx + PyTupleObject.ob_size]   ; r13 = len(tuple)
-    imul r14, r13, 1
+    mov r14, r13
     imul r14, r12            ; r14 = total items
+    jo .trep_overflow        ; the product wrapped; (1,) * (2**61) wrapped
+    cmp r14, 0x10000000      ; 256M items, as list_repeat caps at
+    ja .trep_overflow
 
     ; Allocate new tuple
     mov rdi, r14
@@ -656,6 +673,10 @@ DEF_FUNC tuple_repeat
     leave
     V_PACK rax, rdx             ; return one Value
     ret
+.trep_overflow:
+    lea rdi, [rel exc_OverflowError_type]
+    CSTRING rsi, "too many items for tuple repetition"
+    call raise_exception
 END_FUNC tuple_repeat
 
 ;; ============================================================================
@@ -670,8 +691,25 @@ TRC_IDX      equ 32
 TRC_MINLEN   equ 40
 TRC_FRAME    equ 40
 
+; Comparing two structures that reach each other -- a=[]; a.append(a);
+; b=[]; b.append(b); a==b -- recursed until the machine stack ran out; the
+; identity fast path inside only catches a==a.  The body is wrapped so its
+; several exits need not each be touched.
 global tuple_richcompare
-DEF_FUNC tuple_richcompare, TRC_FRAME
+DEF_FUNC tuple_richcompare
+    C_RECURSION_ENTER .trc_too_deep
+    call tuple_richcompare_inner
+    C_RECURSION_LEAVE
+    leave
+    ret
+.trc_too_deep:
+    C_RECURSION_LEAVE
+    lea rdi, [rel exc_RecursionError_type]
+    CSTRING rsi, "maximum recursion depth exceeded in comparison"
+    call raise_exception
+END_FUNC tuple_richcompare
+
+DEF_FUNC_LOCAL tuple_richcompare_inner, TRC_FRAME
     V_UNPACK rdi, rcx           ; left  Value -> (payload, tag)
     V_UNPACK rsi, r8            ; right Value -> (payload, tag)
     ; Verify right is TAG_PTR and a tuple
@@ -1007,7 +1045,7 @@ DEF_FUNC tuple_richcompare, TRC_FRAME
     leave
     ret
 
-END_FUNC tuple_richcompare
+END_FUNC tuple_richcompare_inner
 
 ;; ============================================================================
 ;; tuple_type_call(PyTypeObject *type, PyObject **args, int64_t nargs)

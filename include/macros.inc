@@ -429,6 +429,21 @@ TAG_IO_WAIT  equ 8           ; payload = fd | (direction << 32) — async I/O se
     mov [%1 + PyFrame.stack_ptr], %3
 %endmacro
 
+; Bound C-level recursion through a container: comparing or hashing a
+; structure that reaches itself recursed until the machine stack ran out.
+; %1 is taken when the limit is hit; the counter is reset wholesale by
+; eval_exception_unwind, since a raise discards these frames.
+%macro C_RECURSION_ENTER 1
+    inc qword [rel c_recursion_depth]
+    mov rax, [rel c_recursion_depth]
+    cmp rax, [rel recursion_limit]
+    jg %1
+%endmacro
+
+%macro C_RECURSION_LEAVE 0
+    dec qword [rel c_recursion_depth]
+%endmacro
+
 ; A dunder call returns NULL for two different reasons: the type does not
 ; define the dunder, or it ran and raised.  Only the first is a fallback --
 ; treating the second as one swallows the exception, which then surfaces
