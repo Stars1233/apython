@@ -4,8 +4,6 @@
 ;   rbx = bytecode instruction pointer (current position in co_code[])
 ;   r12 = current frame pointer (PyFrame*)
 ;   r13 = value stack payload top pointer
-;   r14 = locals_tag_base pointer (frame's tag sidecar for localsplus[])
-;   r15 = value stack tag top pointer
 ;
 ; ecx = opcode argument on entry (set by eval_dispatch)
 ; rbx has already been advanced past the 2-byte instruction word.
@@ -22,7 +20,6 @@ section .text
 extern eval_dispatch
 extern eval_saved_rbx
 extern eval_saved_r13
-extern eval_saved_r15
 extern opcode_table
 extern obj_dealloc
 extern obj_decref
@@ -52,7 +49,6 @@ CL_TPCALL    equ 56
 CL_RETTAG    equ 64
 CL_CALL_TAG  equ 72
 CL_SAVED_R13 equ 80
-CL_SAVED_R15 equ 88
 CL_FRAME     equ 96
 
 ; op_make_function locals (DEF_FUNC op_make_function, MF_FRAME)
@@ -119,7 +115,6 @@ DEF_FUNC op_call, CL_FRAME
 
     ; Save value stack pointers in case callee clobbers callee-saved regs
     mov [rbp - CL_SAVED_R13], r13
-    mov [rbp - CL_SAVED_R15], r15
 
     mov [rbp - CL_NARGS], rcx                ; save nargs
     mov qword [rbp - CL_IS_METHOD], 0          ; is_method = 0
@@ -144,8 +139,7 @@ DEF_FUNC op_call, CL_FRAME
 
     ; === Method call: callable is in the deeper slot ===
     mov [rbp - CL_CALLABLE], rdi               ; callable = func_or_null
-    lea rdx, [r15 + rax]
-    movzx edx, byte [rdx]                      ; callable tag
+    V_TAG_OF rdx, rdi                          ; callable tag
     mov [rbp - CL_CALL_TAG], rdx
     mov qword [rbp - CL_IS_METHOD], 1          ; is_method = 1
     jmp .setup_call
@@ -158,8 +152,7 @@ DEF_FUNC op_call, CL_FRAME
     lea rdi, [r13 + rax*8]
     mov rdi, [rdi]
     mov [rbp - CL_CALLABLE], rdi               ; callable = callable_or_self
-    lea rdx, [r15 + rax]
-    movzx edx, byte [rdx]                      ; callable tag
+    V_TAG_OF rdx, rdi                          ; callable tag
     mov [rbp - CL_CALL_TAG], rdx
 
 .setup_call:
@@ -256,18 +249,18 @@ DEF_FUNC op_call, CL_FRAME
     sub rsp, rax
     mov [rbp - CL_SAVED_RSP], rsp
     mov r8, rsp                            ; dst ptr (fat args)
-    ; Pre-compute source base pointers (deepest arg = total_nargs below TOS)
+    ; Pre-compute the source base pointer (deepest arg = total_nargs below TOS)
     mov rax, rcx
     neg rax
-    lea r9, [r13 + rax*8]                  ; src payload start (deepest arg)
-    lea r10, [r15 + rax]                   ; src tag start (deepest arg)
+    lea r9, [r13 + rax*8]                  ; deepest arg
 .copy_loop:
+    ; tp_call still takes a 16-byte-stride (payload, tag) array, so unpack
+    ; each Value on the way in.  P5b removes this copy entirely.
     mov rax, [r9]
-    movzx edx, byte [r10]
+    V_UNPACK rax, rdx
     mov [r8], rax
     mov [r8 + 8], rdx
     add r9, 8
-    inc r10
     add r8, 16
     dec ecx
     jnz .copy_loop
@@ -289,7 +282,6 @@ DEF_FUNC op_call, CL_FRAME
 .cleanup:
     ; Restore value stack pointers (defensive against callee clobber)
     mov r13, [rbp - CL_SAVED_R13]
-    mov r15, [rbp - CL_SAVED_R15]
 
     ; === Unified cleanup ===
     ; Clear kw_names_pending: func_call clears it for Python functions,
@@ -343,7 +335,6 @@ DEF_FUNC op_call, CL_FRAME
     extern eval_exception_unwind
     leave
     mov [rel eval_saved_r13], r13  ; update — cleanup already popped/DECREF'd args
-    mov [rel eval_saved_r15], r15
     jmp eval_exception_unwind
 
 .not_callable:
@@ -770,7 +761,6 @@ DEF_FUNC op_call_function_ex
     pop rbx
     pop rbp
     mov [rel eval_saved_r13], r13
-    mov [rel eval_saved_r15], r15
     jmp eval_exception_unwind
 
 .cfex_not_callable:
@@ -955,8 +945,8 @@ DEF_FUNC op_with_except_start, WES_FRAME
     ; Get type of exception
     test rcx, rcx
     jz .wes_none_exc
-    cmp byte [r15 - 1], TAG_SMALLINT       ; val tag from stack
-    je .wes_none_exc
+    V_TEST_PTR rcx, rdx                    ; only a real object can be an exception
+    ja .wes_none_exc
     ; Exception case
     mov rdx, [rcx + PyObject.ob_type]
     mov [rsp], rdx                   ; exc_type payload

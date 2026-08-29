@@ -4,8 +4,6 @@
 ;   rbx = bytecode instruction pointer (current position in co_code[])
 ;   r12 = current frame pointer (PyFrame*)
 ;   r13 = value stack payload top pointer
-;   r14 = locals_tag_base pointer (frame's tag sidecar for localsplus[])
-;   r15 = value stack tag top pointer
 ;
 ; ecx = opcode argument on entry (set by eval_dispatch)
 ; rbx has already been advanced past the 2-byte instruction word.
@@ -21,7 +19,6 @@ section .text
 extern eval_dispatch
 extern eval_saved_rbx
 extern eval_saved_r13
-extern eval_saved_r15
 extern eval_co_names
 extern eval_co_consts
 extern eval_co_consts_tags
@@ -93,10 +90,9 @@ END_FUNC op_load_const
 ;; ============================================================================
 DEF_FUNC_BARE op_load_fast
     ; ecx = arg (slot index in localsplus)
-    mov rax, [r12 + PyFrame.localsplus + rcx*8]       ; payload
-    movzx rdx, byte [r14 + rcx]                       ; tag (r14 = locals_tag_base)
-    INCREF_VAL rax, rdx     ; tag-aware INCREF
-    VPUSH_VAL rax, rdx
+    mov rax, [r12 + PyFrame.localsplus + rcx*8]
+    INCREF_V rax, rdx
+    VPUSH rax
     DISPATCH
 END_FUNC op_load_fast
 
@@ -883,9 +879,9 @@ DEF_FUNC_BARE op_load_attr_method
     ; VPEEK obj (don't pop -- stays as self if guards pass, or for deopt)
     VPEEK rdi
 
-    ; Non-pointer check (tag at r15-1 for TOS) — must be TAG_PTR to use IC
-    cmp byte [r15 - 1], TAG_PTR
-    jne .lam_deopt
+    ; The inline cache only applies to real objects
+    V_TEST_PTR rdi, rax
+    ja .lam_deopt
 
     ; Guard 1: ob_type == cached type_ptr
     mov rax, [rdi + PyObject.ob_type]
@@ -904,7 +900,6 @@ DEF_FUNC_BARE op_load_attr_method
     INCREF rax
     mov rcx, [r13 - 8]            ; save obj (payload of TOS)
     mov [r13 - 8], rax            ; overwrite obj position with method
-    mov byte [r15 - 1], TAG_PTR   ; ensure method tag is correct (defensive)
     VPUSH_PTR rcx                  ; push obj on top as self
 
     ; Skip 9 CACHE entries = 18 bytes
@@ -925,10 +920,9 @@ END_FUNC op_load_attr_method
 ;; In Python 3.12, LOAD_CLOSURE is same opcode behavior as LOAD_FAST.
 ;; ============================================================================
 DEF_FUNC_BARE op_load_closure
-    mov rax, [r12 + PyFrame.localsplus + rcx*8]       ; payload
-    movzx rdx, byte [r14 + rcx]                       ; tag (r14 = locals_tag_base)
-    INCREF_VAL rax, rdx     ; tag-aware INCREF
-    VPUSH_VAL rax, rdx
+    mov rax, [r12 + PyFrame.localsplus + rcx*8]
+    INCREF_V rax, rdx
+    VPUSH rax
     DISPATCH
 END_FUNC op_load_closure
 
@@ -964,12 +958,11 @@ END_FUNC op_load_deref
 ;; Used after DELETE_FAST and in exception handlers.
 ;; ============================================================================
 DEF_FUNC_BARE op_load_fast_check
-    cmp byte [r14 + rcx], 0  ; check tag for TAG_NULL (r14 = locals_tag_base)
-    je .lfc_error
-    mov rax, [r12 + PyFrame.localsplus + rcx*8]       ; payload
-    movzx rdx, byte [r14 + rcx]                       ; tag
-    INCREF_VAL rax, rdx     ; tag-aware INCREF
-    VPUSH_VAL rax, rdx
+    mov rax, [r12 + PyFrame.localsplus + rcx*8]
+    test rax, rax           ; an empty slot is 0
+    jz .lfc_error
+    INCREF_V rax, rdx
+    VPUSH rax
     DISPATCH
 
 .lfc_error:
@@ -986,12 +979,10 @@ END_FUNC op_load_fast_check
 ;; If slot is NULL, pushes NULL (no error).
 ;; ============================================================================
 DEF_FUNC_BARE op_load_fast_and_clear
-    mov rax, [r12 + PyFrame.localsplus + rcx*8]       ; payload (may be NULL)
-    movzx rdx, byte [r14 + rcx]                       ; tag (r14 = locals_tag_base)
-    mov qword [r12 + PyFrame.localsplus + rcx*8], 0   ; clear payload
-    mov byte [r14 + rcx], 0                           ; clear tag
-    ; Push with preserved tag - no INCREF needed (transferring ownership)
-    VPUSH_VAL rax, rdx
+    mov rax, [r12 + PyFrame.localsplus + rcx*8]       ; may be empty (0)
+    mov qword [r12 + PyFrame.localsplus + rcx*8], 0
+    ; Ownership transfers to the stack, so no INCREF
+    VPUSH rax
     DISPATCH
 END_FUNC op_load_fast_and_clear
 

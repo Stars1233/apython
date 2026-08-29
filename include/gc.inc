@@ -44,6 +44,17 @@ GC_PREV_MASK            equ ~3    ; mask to extract prev pointer (clear low 2 bi
 %%skip:
 %endmacro
 
+; VISIT_V — call visit callback on a NaN-boxed Value if it holds a pointer
+; r14 must be loaded with the visit callback function pointer before use
+%macro VISIT_V 2                  ; %1 = Value reg, %2 = scratch (clobbered)
+    lea %2, [%1 - 1]
+    cmp %2, [rel v_ptr_max_m1]
+    ja %%skip                     ; immediate or NULL — not a reference
+    mov rdi, %1
+    call r14                      ; visit callback(obj)
+%%skip:
+%endmacro
+
 ; VISIT_PTR — call visit callback on a plain heap pointer (NULL-safe)
 %macro VISIT_PTR 1                ; %1 = ptr_reg
     test %1, %1

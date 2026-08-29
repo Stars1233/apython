@@ -560,11 +560,12 @@ DEF_FUNC gen_send
     ; Mark as running
     mov qword [rbx + PyGenObject.gi_running], 1
 
-    ; Push sent value onto the frame's value stack
-    FRAME_PUSH_VAL r12, r13, r14b, rax
-
-    ; INCREF sent value (tag-aware, may be SmallInt)
+    ; INCREF the sent value while its tag is still around, then pack it
     INCREF_VAL r13, r14
+    V_PACK r13, r14
+
+    ; Push the sent Value onto the frame's value stack
+    FRAME_PUSH_VALUE r12, r13, rax
 
     ; Resume execution
     mov rdi, r12

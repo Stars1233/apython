@@ -72,6 +72,9 @@ extern v_canon_nan
 extern v_int_lo
 extern v_int_bias
 extern v_mask48
+extern v_sleep_lo
+extern v_iowait_lo
+extern val_from_i64_p
 %endif
 
 ; ==========================================================================
@@ -101,6 +104,50 @@ extern v_mask48
     shr %2, 48
     dec %2
     cmp %2, VH_F64_MAX
+%endmacro
+
+; Test whether a Value is a real (non-NULL) pointer.  Use `ja` to branch away
+; when it is NULL or an immediate, `jbe` when it is a pointer.
+%macro V_TEST_PTR 2             ; %1 = value, %2 = scratch (clobbered)
+    lea %2, [%1 - 1]
+    cmp %2, [rel v_ptr_max_m1]
+%endmacro
+
+; Derive the legacy tag of a Value without disturbing it.
+%macro V_TAG_OF 2               ; %1 = tag out, %2 = Value (preserved)
+    mov %1, %2
+    shr %1, 48
+    jz %%maybe_ptr
+    cmp %1, VH_INT_LO
+    jae %%int
+    cmp %1, VH_F64_MAX
+    jbe %%f64
+    cmp %1, VH_SLEEP
+    je %%slp
+    cmp %1, VH_IOWAIT
+    je %%iow
+    xor %1, %1
+    jmp %%done
+%%maybe_ptr:
+    test %2, %2
+    jz %%null
+    mov %1, TAG_PTR
+    jmp %%done
+%%null:
+    xor %1, %1
+    jmp %%done
+%%int:
+    mov %1, TAG_SMALLINT
+    jmp %%done
+%%f64:
+    mov %1, TAG_FLOAT
+    jmp %%done
+%%slp:
+    mov %1, TAG_SLEEP
+    jmp %%done
+%%iow:
+    mov %1, TAG_IO_WAIT
+%%done:
 %endmacro
 
 ; Load high16 of a value into a scratch register (for a multi-way switch).
@@ -140,6 +187,105 @@ extern v_mask48
 ; Value (known int immediate) -> int64.
 %macro V_TO_I64 1               ; %1 = value in / int64 out
     sub %1, [rel v_int_bias]
+%endmacro
+
+; ==========================================================================
+; MIGRATION SHIMS
+;
+; Bridge between converted code, which passes a single Value, and code that
+; still passes an old (payload, tag) pair.  Both are inline: the classify is
+; a couple of compares, and only an out-of-range integer needs a call.
+; These disappear along with the tags in P6.
+; ==========================================================================
+
+; int64 -> Value, boxing on overflow.  %2 must not be rax.
+%macro V_PACK_I64 2             ; %1 = i64 in / Value out, %2 = scratch
+    mov %2, %1
+    sar %2, V_INT_SHIFT
+    inc %2
+    cmp %2, 2
+    jb %%fits
+    ; Outside the immediate range: box it.  val_from_i64_p preserves every
+    ; register except rax, so this cold path cannot disturb the caller.
+    push rax
+    push rdi
+    mov rdi, %1
+    call val_from_i64_p
+    mov %2, rax
+    pop rdi
+    pop rax
+    mov %1, %2
+    jmp %%done
+%%fits:
+    add %1, [rel v_int_bias]
+%%done:
+%endmacro
+
+; (payload, tag) -> Value.  %2 must not be rax.
+%macro V_PACK 2                 ; %1 = payload in / Value out, %2 = tag (clobbered)
+    cmp %2, TAG_SMALLINT
+    je %%si
+    cmp %2, TAG_FLOAT
+    je %%f64
+    cmp %2, TAG_SLEEP
+    je %%slp
+    cmp %2, TAG_IO_WAIT
+    je %%iow
+    jmp %%done                  ; TAG_PTR and TAG_NULL: the payload is the Value
+%%si:
+    V_PACK_I64 %1, %2
+    jmp %%done
+%%f64:
+    V_FROM_F64 %1, %2
+    jmp %%done
+%%slp:
+    or %1, [rel v_sleep_lo]
+    jmp %%done
+%%iow:
+    or %1, [rel v_iowait_lo]
+%%done:
+%endmacro
+
+; Value -> (payload, tag).
+%macro V_UNPACK 2               ; %1 = Value in / payload out, %2 = tag out
+    mov %2, %1
+    shr %2, 48
+    jz %%ptr
+    cmp %2, VH_INT_LO
+    jae %%int
+    cmp %2, VH_F64_MAX
+    jbe %%f64
+    cmp %2, VH_SLEEP
+    je %%slp
+    cmp %2, VH_IOWAIT
+    je %%iow
+    xor %1, %1                  ; reserved encoding: treat as empty
+    xor %2, %2
+    jmp %%done
+%%ptr:
+    test %1, %1
+    jz %%null
+    mov %2, TAG_PTR
+    jmp %%done
+%%null:
+    xor %2, %2
+    jmp %%done
+%%int:
+    sub %1, [rel v_int_bias]
+    mov %2, TAG_SMALLINT
+    jmp %%done
+%%f64:
+    sub %1, [rel v_f64_off]
+    mov %2, TAG_FLOAT
+    jmp %%done
+%%slp:
+    and %1, [rel v_mask48]
+    mov %2, TAG_SLEEP
+    jmp %%done
+%%iow:
+    and %1, [rel v_mask48]
+    mov %2, TAG_IO_WAIT
+%%done:
 %endmacro
 
 ; Immortal singletons.  The including file must declare the extern itself

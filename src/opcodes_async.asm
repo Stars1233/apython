@@ -7,8 +7,6 @@
 ;   rbx = bytecode instruction pointer (IP into co_code[])
 ;   r12 = current frame pointer (PyFrame*)
 ;   r13 = value stack payload top pointer
-;   r14 = locals_tag_base pointer (frame's tag sidecar for localsplus[])
-;   r15 = value stack tag top pointer
 ;
 ; ecx = opcode argument on handler entry (set by eval_dispatch)
 ; rbx has already been advanced past the 2-byte instruction word.
@@ -29,7 +27,6 @@ section .text
 extern eval_dispatch
 extern eval_saved_rbx
 extern eval_saved_r13
-extern eval_saved_r15
 extern opcode_table
 extern obj_dealloc
 extern obj_incref
@@ -62,9 +59,9 @@ DEF_FUNC_BARE op_get_awaitable
     ; TOS = object to await
     VPEEK rdi                  ; rdi = TOS payload (don't pop yet)
 
-    ; Must be TAG_PTR to check ob_type
-    cmp byte [r15 - 1], TAG_PTR
-    jne .gaw_error
+    ; Must be a real object to check ob_type
+    V_TEST_PTR rdi, rax
+    ja .gaw_error
 
     ; Check if it's a coroutine — already awaitable
     mov rax, [rdi + PyObject.ob_type]
@@ -184,9 +181,9 @@ DEF_FUNC_BARE op_get_anext
     ; Peek TOS = async iterator (don't pop — async for loop needs it)
     VPEEK rdi
 
-    ; Must be TAG_PTR
-    cmp byte [r15 - 1], TAG_PTR
-    jne .gan_error
+    ; Must be a real object
+    V_TEST_PTR rdi, rax
+    ja .gan_error
 
     ; Call tp_iternext on the async iterator
     mov rax, [rdi + PyObject.ob_type]
@@ -370,12 +367,11 @@ DEF_FUNC_BARE op_end_async_for
     ; ecx = arg (jump offset in instructions)
 
     ; TOS = exc_val (the exception that was raised)
-    VPEEK rdi                  ; peek at exc payload
-    movzx rsi, byte [r15 - 1]  ; exc tag
+    VPEEK rdi                  ; peek at the exception Value
 
     ; Check if it's StopAsyncIteration
-    cmp rsi, TAG_PTR
-    jne .eaf_reraise
+    V_TEST_PTR rdi, rsi
+    ja .eaf_reraise
 
     ; Get exception type
     mov rax, [rdi + PyObject.ob_type]

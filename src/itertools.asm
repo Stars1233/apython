@@ -234,9 +234,7 @@ DEF_FUNC get_iterator
     ; Exception was raised by __iter__. Propagate it via eval_exception_unwind.
     extern eval_exception_unwind
     extern eval_saved_r13
-    extern eval_saved_r15
     mov [rel eval_saved_r13], r13
-    mov [rel eval_saved_r15], r15
     pop rbx
     leave
     jmp eval_exception_unwind

@@ -4,8 +4,6 @@
 ;   rbx = bytecode instruction pointer (current position in co_code[])
 ;   r12 = current frame pointer (PyFrame*)
 ;   r13 = value stack payload top pointer
-;   r14 = locals_tag_base pointer (frame's tag sidecar for localsplus[])
-;   r15 = value stack tag top pointer
 ;
 ; ecx = opcode argument on entry (set by eval_dispatch)
 ; rbx has already been advanced past the 2-byte instruction word.
@@ -21,7 +19,6 @@ section .text
 extern eval_dispatch
 extern eval_saved_rbx
 extern eval_saved_r13
-extern eval_saved_r15
 extern opcode_table
 extern obj_dealloc
 
@@ -57,16 +54,11 @@ DEF_FUNC_BARE op_copy
     mov rax, rcx
     mov rdx, r13
     shl rax, 3
-    sub rdx, rax               ; payload slot
-    mov r8, r15
-    sub r8, rcx                ; tag slot
-    mov rax, [rdx]             ; peek payload at position i
-    movzx esi, byte [r8]       ; peek tag at position i
-    INCREF_VAL rax, rsi
+    sub rdx, rax               ; slot i
+    mov rax, [rdx]             ; peek the Value at position i
+    INCREF_V rax, rsi
     mov [r13], rax
-    mov byte [r15], sil
     add r13, 8
-    add r15, 1
     DISPATCH
 END_FUNC op_copy
 
@@ -80,22 +72,14 @@ END_FUNC op_copy
 ;; ============================================================================
 DEF_FUNC_BARE op_swap
     ; ecx = position (1-indexed from top)
-    ; Swap TOS with i-th item (payload + tag)
+    ; Swap TOS with the i-th item -- one word each now
     mov rax, rcx
     mov rdx, r13
     shl rax, 3
-    sub rdx, rax               ; payload slot[i]
-    mov r8, r15
-    sub r8, rcx                ; tag slot[i]
-    ; swap payloads
+    sub rdx, rax               ; slot i
     mov r9, [rdx]
     mov r10, [r13 - 8]
     mov [rdx], r10
     mov [r13 - 8], r9
-    ; swap tags
-    mov r9b, byte [r8]
-    mov r10b, byte [r15 - 1]
-    mov byte [r8], r10b
-    mov byte [r15 - 1], r9b
     DISPATCH
 END_FUNC op_swap

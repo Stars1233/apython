@@ -4,8 +4,6 @@
 ;   rbx = bytecode instruction pointer (current position in co_code[])
 ;   r12 = current frame pointer (PyFrame*)
 ;   r13 = value stack payload top pointer
-;   r14 = locals_tag_base pointer (frame's tag sidecar for localsplus[])
-;   r15 = value stack tag top pointer
 ;
 ; ecx = opcode argument on entry (set by eval_dispatch)
 ; rbx has already been advanced past the 2-byte instruction word.
@@ -21,7 +19,6 @@ section .text
 extern eval_dispatch
 extern eval_saved_rbx
 extern eval_saved_r13
-extern eval_saved_r15
 extern eval_co_names
 extern opcode_table
 extern obj_dealloc
@@ -72,13 +69,10 @@ DS_FRAME  equ 32
 ;; ============================================================================
 DEF_FUNC_BARE op_store_fast
     ; ecx = arg (slot index)
-    VPOP_VAL rax, r8             ; rax = new value payload, r8 = new value tag
-    mov rdi, [r12 + PyFrame.localsplus + rcx*8]       ; rdi = old value (payload)
-    movzx r9, byte [r14 + rcx]                        ; r9 = old value tag (r14 = locals_tag_base)
-    mov [r12 + PyFrame.localsplus + rcx*8], rax       ; store new payload
-    mov byte [r14 + rcx], r8b                         ; store new tag
-    ; XDECREF_VAL old value (tag-aware)
-    XDECREF_VAL rdi, r9
+    VPOP rax                                          ; new value
+    mov rdi, [r12 + PyFrame.localsplus + rcx*8]       ; old value
+    mov [r12 + PyFrame.localsplus + rcx*8], rax
+    XDECREF_V rdi, r9
     DISPATCH
 END_FUNC op_store_fast
 
@@ -348,11 +342,9 @@ END_FUNC op_delete_deref
 ;; DECREF old value if present.
 ;; ============================================================================
 DEF_FUNC_BARE op_delete_fast
-    mov rdi, [r12 + PyFrame.localsplus + rcx*8]       ; old value (payload)
-    movzx rsi, byte [r14 + rcx]                       ; old value tag (r14 = locals_tag_base)
-    mov qword [r12 + PyFrame.localsplus + rcx*8], 0   ; clear payload
-    mov byte [r14 + rcx], 0                           ; clear tag
-    XDECREF_VAL rdi, rsi
+    mov rdi, [r12 + PyFrame.localsplus + rcx*8]       ; old value
+    mov qword [r12 + PyFrame.localsplus + rcx*8], 0
+    XDECREF_V rdi, rsi
     DISPATCH
 END_FUNC op_delete_fast
 

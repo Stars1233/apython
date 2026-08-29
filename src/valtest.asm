@@ -16,6 +16,7 @@ extern int_from_i64_gmp
 extern int_to_i64
 extern obj_dealloc
 extern val_from_i64
+extern val_from_i64_p
 extern val_unpack
 
 section .rodata
@@ -59,6 +60,28 @@ float_cases:
     dq 0xFFFFFFFFFFFFFFFF, 0x7FF8000000000000   ; all-ones NaN
 float_cases_end:
 FLOAT_CASE_COUNT equ (float_cases_end - float_cases) / 16
+
+; --- Group 4: V_PACK / V_UNPACK round trips.
+; (payload, tag, expected payload, expected tag).  An expected tag of -1 means
+; "expect a heap-boxed integer whose value is the input payload".
+align 16
+pack_cases:
+    dq 0,                    TAG_NULL,     0,                    TAG_NULL
+    dq 5,                    TAG_SMALLINT, 5,                    TAG_SMALLINT
+    dq -5,                   TAG_SMALLINT, -5,                   TAG_SMALLINT
+    dq 0x0003FFFFFFFFFFFF,   TAG_SMALLINT, 0x0003FFFFFFFFFFFF,   TAG_SMALLINT
+    dq 0xFFFC000000000000,   TAG_SMALLINT, 0xFFFC000000000000,   TAG_SMALLINT
+    dq 0x0004000000000000,   TAG_SMALLINT, 0x0004000000000000,   -1
+    dq 0x8000000000000000,   TAG_SMALLINT, 0x8000000000000000,   -1
+    dq 0x3FF0000000000000,   TAG_FLOAT,    0x3FF0000000000000,   TAG_FLOAT
+    dq 0x8000000000000000,   TAG_FLOAT,    0x8000000000000000,   TAG_FLOAT
+    dq 0xFFF0000000000000,   TAG_FLOAT,    0xFFF0000000000000,   TAG_FLOAT
+    dq 0xFFF8000000000000,   TAG_FLOAT,    0x7FF8000000000000,   TAG_FLOAT
+    dq 0x0000000000000001,   TAG_FLOAT,    0x0000000000000001,   TAG_FLOAT
+    dq 12345678901,          TAG_SLEEP,    12345678901,          TAG_SLEEP
+    dq 0x0000000300000007,   TAG_IO_WAIT,  0x0000000300000007,   TAG_IO_WAIT
+pack_cases_end:
+PACK_CASE_COUNT equ (pack_cases_end - pack_cases) / 32
 
 msg_ok:     db "value selftest: OK", 10
 msg_ok_len  equ $ - msg_ok
@@ -220,6 +243,59 @@ DEF_FUNC value_selftest
     jne .ptr_fail
     inc r12
 
+    ; ---------------------------------------------------------------- group 4
+    ; V_PACK / V_UNPACK must round trip every (payload, tag) pair the VM can
+    ; hold.  These two macros carry the whole migration: a mistake here
+    ; corrupts values silently rather than crashing.
+    xor r12, r12
+.pk_loop:
+    cmp r12, PACK_CASE_COUNT
+    jae .pk_done
+
+    mov rdx, r12
+    shl rdx, 5                      ; 32 bytes per case
+    lea rax, [rel pack_cases]
+    add rax, rdx
+    mov r13, [rax]                  ; payload
+    mov r14, [rax + 8]              ; tag
+    mov r15, [rax + 16]             ; expected payload
+    mov rbx, [rax + 24]             ; expected tag (-1 = expect boxed int)
+
+    push rbx
+    push r15
+    mov rdi, r13
+    mov rsi, r14
+    V_PACK rdi, rsi                 ; rdi = Value
+    V_UNPACK rdi, rsi               ; rdi = payload, rsi = tag
+    pop r15
+    pop rbx
+
+    cmp rbx, -1
+    je .pk_boxed
+
+    cmp rsi, rbx
+    jne .pk_fail
+    cmp rdi, r15
+    jne .pk_fail
+    jmp .pk_next
+
+.pk_boxed:
+    ; Expect a heap PyIntObject holding the original value.
+    cmp rsi, TAG_PTR
+    jne .pk_fail
+    mov edx, TAG_PTR
+    push rdi
+    call int_to_i64
+    cmp rax, r15
+    pop rdi
+    jne .pk_fail
+    call obj_dealloc
+
+.pk_next:
+    inc r12
+    jmp .pk_loop
+.pk_done:
+
     ; ---------------------------------------------------------------- success
     xor eax, eax
     jmp .done
@@ -235,6 +311,10 @@ DEF_FUNC value_selftest
 .ptr_fail:
     lea rax, [r12 + 1]
     add rax, 3000
+    jmp .done
+.pk_fail:
+    lea rax, [r12 + 1]
+    add rax, 4000
 
 .done:
     pop r15

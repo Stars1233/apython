@@ -5,8 +5,6 @@
 ;   rbx = bytecode instruction pointer (current position in co_code[])
 ;   r12 = current frame pointer (PyFrame*)
 ;   r13 = value stack payload top pointer
-;   r14 = locals_tag_base pointer (frame's tag sidecar for localsplus[])
-;   r15 = value stack tag top pointer
 ;
 ; ecx = opcode argument on entry (set by eval_dispatch)
 ; rbx has already been advanced past the 2-byte instruction word.
@@ -22,7 +20,6 @@ section .text
 extern eval_dispatch
 extern eval_saved_rbx
 extern eval_saved_r13
-extern eval_saved_r15
 extern eval_co_names
 extern eval_co_consts
 extern eval_co_consts_tags
@@ -550,7 +547,7 @@ DEF_FUNC_BARE op_binary_op
     jo .binop_generic          ; overflow → fall back to generic
     ; Specialize: rewrite opcode to BINARY_OP_ADD_INT (211)
     mov byte [rbx - 2], 211
-    VPUSH_INT rax
+    VPUSH_INT rax, r15
     add rbx, 2
     DISPATCH
 
@@ -565,7 +562,7 @@ DEF_FUNC_BARE op_binary_op
     movq xmm1, rsi
     addsd xmm0, xmm1
     movq rax, xmm0
-    VPUSH_FLOAT rax
+    VPUSH_FLOAT rax, r15
     add rbx, 2
     DISPATCH
 
@@ -583,7 +580,7 @@ DEF_FUNC_BARE op_binary_op
     jo .binop_generic          ; overflow → fall back to generic
     ; Specialize: rewrite opcode to BINARY_OP_SUBTRACT_INT (212)
     mov byte [rbx - 2], 212
-    VPUSH_INT rax
+    VPUSH_INT rax, r15
     add rbx, 2
     DISPATCH
 
@@ -598,7 +595,7 @@ DEF_FUNC_BARE op_binary_op
     movq xmm1, rsi
     subsd xmm0, xmm1
     movq rax, xmm0
-    VPUSH_FLOAT rax
+    VPUSH_FLOAT rax, r15
     add rbx, 2
     DISPATCH
 
@@ -615,7 +612,7 @@ DEF_FUNC_BARE op_binary_op
     jo .binop_generic          ; overflow → fall back to generic
     ; Specialize: rewrite opcode to BINARY_OP_MULTIPLY_INT (221)
     mov byte [rbx - 2], 221
-    VPUSH_INT rax
+    VPUSH_INT rax, r15
     add rbx, 2
     DISPATCH
 
@@ -630,7 +627,7 @@ DEF_FUNC_BARE op_binary_op
     movq xmm1, rsi
     mulsd xmm0, xmm1
     movq rax, xmm0
-    VPUSH_FLOAT rax
+    VPUSH_FLOAT rax, r15
     add rbx, 2
     DISPATCH
 
@@ -649,7 +646,7 @@ DEF_FUNC_BARE op_binary_op
     movq xmm0, rdi
     divsd xmm0, xmm1
     movq rax, xmm0
-    VPUSH_FLOAT rax
+    VPUSH_FLOAT rax, r15
     add rbx, 2
     DISPATCH
 
@@ -673,7 +670,7 @@ DEF_FUNC_BARE op_binary_op
     dec rax
 .fdiv_exact:
     mov byte [rbx - 2], 222    ; specialize to BINARY_OP_FLOORDIV_INT
-    VPUSH_INT rax
+    VPUSH_INT rax, r15
     add rbx, 2
     DISPATCH
 END_FUNC op_binary_op
@@ -1123,7 +1120,7 @@ DEF_FUNC_BARE op_unary_negative
 .neg_float:
     ; Inline float negate: flip sign bit, no refcounting
     btc rdi, 63
-    VPUSH_FLOAT rdi
+    VPUSH_FLOAT rdi, r15
     DISPATCH
 END_FUNC op_unary_negative
 
@@ -1466,14 +1463,12 @@ DEF_FUNC op_build_string, BS_FRAME
     ; Pop all items, keeping base pointers
     mov rdi, rcx
     shl rdi, 3                 ; count * 8 bytes/slot
-    sub r13, rdi               ; pop all payloads at once (r13 = base)
-    sub r15, rcx               ; pop all tags at once (r15 = base)
+    sub r13, rdi               ; pop all items at once (r13 = base)
 
     ; Start with first string
-    mov rax, [r13]             ; first fragment payload
-    movzx r9d, byte [r15]      ; first fragment tag
-    cmp r9d, TAG_PTR
-    jne .bs_type_error
+    mov rax, [r13]             ; first fragment
+    V_TEST_PTR rax, r9
+    ja .bs_type_error
     INCREF rax                 ; heap str needs INCREF
     mov [rbp - BS_ACCUM], rax  ; accumulator (heap)
 
@@ -1484,10 +1479,9 @@ DEF_FUNC op_build_string, BS_FRAME
     jge .bs_decref
     ; Get next fragment — must be heap str
     mov rax, rcx
-    mov rsi, [r13 + rax*8]     ; fragment payload
-    movzx edx, byte [r15 + rax] ; fragment tag
-    cmp edx, TAG_PTR
-    jne .bs_type_error
+    mov rsi, [r13 + rax*8]     ; fragment
+    V_TEST_PTR rsi, rdx
+    ja .bs_type_error
     push rcx
     extern str_concat
     mov rdi, [rbp - BS_ACCUM] ; accumulator
@@ -1511,9 +1505,8 @@ DEF_FUNC op_build_string, BS_FRAME
     jge .bs_push
     mov rax, rcx
     mov rdi, [r13 + rax*8]
-    movzx rsi, byte [r15 + rax]  ; tag
     push rcx
-    DECREF_VAL rdi, rsi
+    DECREF_V rdi, rsi
     pop rcx
     inc rcx
     jmp .bs_decref_loop
@@ -1592,33 +1585,29 @@ section .text
 DEF_FUNC_BARE op_make_cell
     lea rdx, [rcx*8]              ; slot * 8
 
-    ; Get current value + tag from localsplus
-    mov rdi, [r12 + PyFrame.localsplus + rdx]        ; rdi = payload
-    movzx rsi, byte [r14 + rcx]                      ; rsi = tag (r14 = locals_tag_base)
+    ; Current Value in the slot
+    mov rdi, [r12 + PyFrame.localsplus + rdx]
 
-    ; Save slot offset
-    push rdx
+    push rdx                ; slot offset
+    push rdi                ; old Value, for the DECREF below
 
-    ; cell_new(payload, tag) - creates cell wrapping value (INCREFs if refcounted)
+    ; cell_new still takes an old (payload, tag) pair
+    V_UNPACK rdi, rsi
     call cell_new
     ; rax = new cell
 
-    pop rdx
-    mov rcx, rdx
-    shr rcx, 3              ; recover slot index from slot*8
+    pop rdi                 ; old Value
+    pop rdx                 ; slot offset
 
-    ; DECREF old value (cell_new already INCREFed it; tag-aware, handles NULL)
-    mov rdi, [r12 + PyFrame.localsplus + rdx]
-    movzx rsi, byte [r14 + rcx]
+    ; Release the slot's reference; cell_new took its own
     push rax
     push rdx
-    DECREF_VAL rdi, rsi
+    DECREF_V rdi, rsi
     pop rdx
     pop rax
 
-    ; Store cell in localsplus slot (payload + tag)
+    ; A cell pointer is its own Value
     mov [r12 + PyFrame.localsplus + rdx], rax
-    mov byte [r14 + rcx], TAG_PTR
     DISPATCH
 END_FUNC op_make_cell
 
@@ -1670,18 +1659,18 @@ DEF_FUNC_BARE op_copy_free_vars
     cmp r8d, ecx
     jge .cfv_done
 
-    ; Get cell from closure tuple item[i]
+    ; Get cell from closure tuple item[i] (tuples still carry a tag sidecar)
     mov r9, [rdi + r8*8]                               ; payload
     movzx r11d, byte [rsi + r8]                        ; tag
+
+    ; INCREF while the tag is still around, then pack into a Value
+    INCREF_VAL r9, r11
+    V_PACK r9, r11
 
     ; Compute destination index: edx + r8d
     mov r10d, edx
     add r10d, r8d
     mov [r12 + PyFrame.localsplus + r10*8], r9
-    mov byte [r14 + r10], r11b                       ; r14 = locals_tag_base
-
-    ; INCREF value (tag-aware)
-    INCREF_VAL r9, r11
 .cfv_next:
     inc r8d
     jmp .cfv_loop
@@ -1701,7 +1690,6 @@ DEF_FUNC_BARE op_return_generator
     ; Save current execution state in frame for later resumption
     mov [r12 + PyFrame.instr_ptr], rbx
     mov [r12 + PyFrame.stack_ptr], r13
-    mov [r12 + PyFrame.stack_tag_ptr], r15
 
     ; Check co_flags to decide which object type to create
     mov rax, [r12 + PyFrame.code]
@@ -1747,7 +1735,6 @@ DEF_FUNC_BARE op_yield_value
     ; Save frame state for resumption
     mov [r12 + PyFrame.instr_ptr], rbx
     mov [r12 + PyFrame.stack_ptr], r13
-    mov [r12 + PyFrame.stack_tag_ptr], r15
 
     ; Return yielded value from eval_frame
     jmp eval_return
@@ -1797,8 +1784,8 @@ DEF_FUNC op_send, SND_FRAME
     mov [rbp - SND_RECV], rdi  ; save receiver
 
     ; Check if receiver is a generator with iternext
-    cmp byte [r15 - 1], TAG_PTR
-    jne .send_error
+    V_TEST_PTR rdi, rax
+    ja .send_error
     mov rax, [rdi + PyObject.ob_type]
     mov rax, [rax + PyTypeObject.tp_iternext]
     test rax, rax
@@ -1871,10 +1858,8 @@ DEF_FUNC op_send, SND_FRAME
     ; Guard: only read if receiver's type has tp_basicsize > 56 (enough for +48 field).
     ; Plain iterators (str_iter, list_iter) have smaller objects → push None.
     mov rdi, [rbp - SND_RECV]
-    cmp byte [r15 - 1], TAG_PTR
-    jne .send_no_retval
-    test rdi, rdi
-    jz .send_no_retval
+    V_TEST_PTR rdi, rax
+    ja .send_no_retval
     mov rax, [rdi + PyObject.ob_type]
     cmp qword [rax + PyTypeObject.tp_basicsize], 56
     jle .send_no_retval
@@ -1923,9 +1908,9 @@ DEF_FUNC_BARE op_get_yield_from_iter
     ; TOS = iterable
     VPEEK rdi                  ; rdi = TOS (don't pop)
 
-    ; If it's already a generator or coroutine, done — must be TAG_PTR to check ob_type
-    cmp byte [r15 - 1], TAG_PTR
-    jne .gyfi_call_iter
+    ; If it's already a generator or coroutine, done — must be a real object
+    V_TEST_PTR rdi, rax
+    ja .gyfi_call_iter
     mov rax, [rdi + PyObject.ob_type]
     lea rcx, [rel gen_type]
     cmp rax, rcx
@@ -2210,7 +2195,6 @@ extern obj_decref
     VPOP_VAL rdi, rsi
     DECREF_VAL rdi, rsi
     mov [rel eval_saved_r13], r13  ; update — popped and DECREF'd
-    mov [rel eval_saved_r15], r15
     lea rdi, [rel exc_RuntimeError_type]
     CSTRING rsi, "generator raised StopIteration"
     call raise_exception
@@ -2218,38 +2202,31 @@ extern obj_decref
     ; Not StopIteration — pop from TOS, set as current_exception, re-raise
     VPOP_VAL rax, rsi              ; exception (ref transferred from stack)
     mov [rel eval_saved_r13], r13  ; update — popped and transferred
-    mov [rel eval_saved_r15], r15
     mov [rel current_exception], rax
     jmp eval_exception_unwind
 
 .ci1_unary_positive:
     ; +x — for most numeric types, no-op. For bool, call nb_positive.
-    ; Check if TOS is TAG_BOOL
-    ; Check if TOS is TAG_PTR pointing to bool_type
-    cmp byte [r15 - 1], TAG_PTR
-    jne .ci1_pos_done
-    mov rax, [r13 - 8]        ; payload
-    test rax, rax
-    jz .ci1_pos_done
+    ; Check whether TOS is a bool singleton
+    mov rax, [r13 - 8]
+    V_TEST_PTR rax, rcx
+    ja .ci1_pos_done
     mov rcx, [rax + PyObject.ob_type]
     extern bool_type
     lea r8, [rel bool_type]
     cmp rcx, r8
     jne .ci1_pos_done
     ; Bool singleton: replace TOS with SmallInt 0 or 1
+    ; +True is 1 and +False is 0, as plain ints.  Both are well inside the
+    ; immediate range, so the encode needs no overflow check.
     extern bool_true
     lea rcx, [rel bool_true]
     xor eax, eax
     cmp qword [r13 - 8], rcx
     sete al
+    add rax, [rel v_int_bias]
     mov [r13 - 8], rax
-    mov byte [r15 - 1], TAG_SMALLINT
 .ci1_pos_done:
-    DISPATCH
-
-.ci1_pos_call:
-    ; TAG_BOOL: payload is 0 or 1 → convert to SmallInt
-    mov byte [r15 - 1], TAG_SMALLINT
     DISPATCH
 
 .ci1_list_to_tuple:
@@ -2325,10 +2302,10 @@ END_FUNC op_call_intrinsic_1
 extern obj_len
 
 DEF_FUNC_BARE op_get_len
-    ; PEEK TOS (don't pop, 16 bytes/slot)
-    cmp byte [r15 - 1], TAG_PTR
-    jne .gl_error_nopop         ; non-pointer has no len()
+    ; PEEK TOS (don't pop)
     mov rdi, [r13 - 8]
+    V_TEST_PTR rdi, rax
+    ja .gl_error_nopop          ; an immediate has no len()
     push rdi                    ; save obj
 
     ; Get length
@@ -2357,7 +2334,7 @@ DEF_FUNC_BARE op_get_len
 .gl_got_len:
     pop rdi                     ; discard saved obj
     ; Convert length (in rax) to SmallInt and push
-    VPUSH_INT rax
+    VPUSH_INT rax, r15
     DISPATCH
 
 .gl_error:
@@ -2591,9 +2568,9 @@ END_FUNC op_load_from_dict_or_deref
 extern dict_type
 
 DEF_FUNC_BARE op_match_mapping
-    mov rdi, [r13 - 8]            ; peek TOS payload
-    cmp byte [r15 - 1], TAG_PTR
-    jne .mm_false                  ; non-pointer → not a mapping
+    mov rdi, [r13 - 8]            ; peek TOS
+    V_TEST_PTR rdi, rax
+    ja .mm_false                   ; an immediate is not a mapping
     mov rax, [rdi + PyObject.ob_type]
     ; Check if it's a dict or has tp_as_mapping with mp_subscript
     lea rcx, [rel dict_type]
@@ -2628,9 +2605,9 @@ extern str_type
 extern bytes_type
 
 DEF_FUNC_BARE op_match_sequence
-    mov rdi, [r13 - 8]            ; peek TOS payload
-    cmp byte [r15 - 1], TAG_PTR
-    jne .ms_false                  ; non-pointer → not a sequence
+    mov rdi, [r13 - 8]            ; peek TOS
+    V_TEST_PTR rdi, rax
+    ja .ms_false                   ; an immediate is not a sequence
     mov rax, [rdi + PyObject.ob_type]
     ; Exclude str, bytes, dict
     lea rcx, [rel str_type]
@@ -3077,7 +3054,7 @@ DEF_FUNC_BARE op_binary_op_add_int
     add rax, rdx
     jo .add_int_deopt_repush
     ; Encode as SmallInt
-    VPUSH_INT rax
+    VPUSH_INT rax, r15
     add rbx, 2                 ; skip CACHE
     DISPATCH
 .add_int_deopt_repush:
@@ -3112,7 +3089,7 @@ DEF_FUNC_BARE op_binary_op_sub_int
     sub rax, rdx
     jo .sub_int_deopt_repush
     ; Encode as SmallInt
-    VPUSH_INT rax
+    VPUSH_INT rax, r15
     add rbx, 2                 ; skip CACHE
     DISPATCH
 .sub_int_deopt_repush:
@@ -3144,7 +3121,7 @@ DEF_FUNC_BARE op_binary_op_add_float
     movq xmm1, rsi
     addsd xmm0, xmm1
     movq rax, xmm0
-    VPUSH_FLOAT rax
+    VPUSH_FLOAT rax, r15
     add rbx, 2                 ; skip CACHE
     DISPATCH
 .add_float_deopt_repush:
@@ -3169,7 +3146,7 @@ DEF_FUNC_BARE op_binary_op_sub_float
     movq xmm1, rsi
     subsd xmm0, xmm1
     movq rax, xmm0
-    VPUSH_FLOAT rax
+    VPUSH_FLOAT rax, r15
     add rbx, 2                 ; skip CACHE
     DISPATCH
 .sub_float_deopt_repush:
@@ -3194,7 +3171,7 @@ DEF_FUNC_BARE op_binary_op_mul_float
     movq xmm1, rsi
     mulsd xmm0, xmm1
     movq rax, xmm0
-    VPUSH_FLOAT rax
+    VPUSH_FLOAT rax, r15
     add rbx, 2                 ; skip CACHE
     DISPATCH
 .mul_float_deopt_repush:
@@ -3223,7 +3200,7 @@ DEF_FUNC_BARE op_binary_op_truediv_float
     movq xmm0, rdi
     divsd xmm0, xmm1
     movq rax, xmm0
-    VPUSH_FLOAT rax
+    VPUSH_FLOAT rax, r15
     add rbx, 2                 ; skip CACHE
     DISPATCH
 .truediv_float_deopt_repush:
@@ -3251,7 +3228,7 @@ DEF_FUNC_BARE op_binary_op_mul_int
     mov rax, rdi
     imul rsi
     jo .mul_int_deopt_repush_vals
-    VPUSH_INT rax
+    VPUSH_INT rax, r15
     add rbx, 2                 ; skip CACHE
     DISPATCH
 .mul_int_deopt_repush_vals:
@@ -3297,7 +3274,7 @@ DEF_FUNC_BARE op_binary_op_floordiv_int
     jns .fdiv_int_exact         ; same sign → truncation == floor
     dec rax
 .fdiv_int_exact:
-    VPUSH_INT rax
+    VPUSH_INT rax, r15
     add rbx, 2                 ; skip CACHE
     DISPATCH
 .fdiv_int_deopt_repush:

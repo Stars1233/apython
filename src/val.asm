@@ -31,6 +31,8 @@ global v_canon_nan
 global v_int_lo
 global v_int_bias
 global v_mask48
+global v_sleep_lo
+global v_iowait_lo
 
 v_f64_off:      dq V_F64_OFF
 v_ptr_max_m1:   dq V_PTR_MAX_M1
@@ -39,6 +41,8 @@ v_canon_nan:    dq V_CANON_NAN
 v_int_lo:       dq V_INT_LO
 v_int_bias:     dq V_INT_BIAS
 v_mask48:       dq V_MASK48
+v_sleep_lo:     dq V_SLEEP_LO
+v_iowait_lo:    dq V_IOWAIT_LO
 
 section .text
 
@@ -62,6 +66,36 @@ DEF_FUNC val_from_i64
     leave
     ret
 END_FUNC val_from_i64
+
+;; ============================================================================
+;; val_from_i64_p(rdi: int64) -> rax: Value
+;;
+;; As val_from_i64, but preserves every register except rax so the V_PACK_I64
+;; macro can call it from anywhere without knowing what is live.
+;; ============================================================================
+DEF_FUNC val_from_i64_p
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    push r8
+    push r9
+    push r10
+    push r11
+    and rsp, -16                ; the callee may reach ap_malloc
+    call val_from_i64           ; rdi already holds the value
+    lea rsp, [rbp - 64]         ; undo the alignment; 8 pushes below rbp
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    leave
+    ret
+END_FUNC val_from_i64_p
 
 ;; ============================================================================
 ;; val_to_i64(rdi: Value) -> rax: int64, edx: 0 on success / 1 on failure

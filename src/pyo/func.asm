@@ -194,9 +194,7 @@ DEF_FUNC func_call
     movsxd rcx, ecx
     mov rdx, rcx
     shl rcx, 3                 ; localsplus 8 bytes/slot
-    mov [r12 + PyFrame.localsplus + rcx], rax
-    mov rsi, [r12 + PyFrame.locals_tag_base]
-    mov byte [rsi + rdx], TAG_PTR  ; dict is always heap ptr
+    mov [r12 + PyFrame.localsplus + rcx], rax   ; a dict pointer is its own Value
 
 .no_kwargs_dict:
     ; === Phase 2: Copy positional args ===
@@ -218,10 +216,9 @@ DEF_FUNC func_call
     shl rax, 4                     ; args at 16-byte stride
     mov rdx, [r14 + rax]           ; arg payload
     mov r9, [r14 + rax + 8]        ; arg tag
-    mov [r12 + PyFrame.localsplus + r8], rdx
-    mov rsi, [r12 + PyFrame.locals_tag_base]
-    mov byte [rsi + r11], r9b
     INCREF_VAL rdx, r9
+    V_PACK rdx, r9
+    mov [r12 + PyFrame.localsplus + r8], rdx
     inc ecx
     cmp ecx, r10d
     jb .bind_positional
@@ -274,11 +271,9 @@ DEF_FUNC func_call
     jmp .fill_varargs
 
 .store_varargs:
-    mov rsi, [r12 + PyFrame.locals_tag_base]
     mov r11, rdx
     shl rdx, 3                 ; localsplus 8 bytes/slot
-    mov [r12 + PyFrame.localsplus + rdx], rax
-    mov byte [rsi + r11], TAG_PTR
+    mov [r12 + PyFrame.localsplus + rdx], rax   ; a tuple pointer is its own Value
     jmp .varargs_done
 
 .empty_varargs:
@@ -286,11 +281,9 @@ DEF_FUNC func_call
     xor edi, edi
     call tuple_new
     pop rdx                     ; rdx = slot index
-    mov rsi, [r12 + PyFrame.locals_tag_base]
     mov r11, rdx
     shl rdx, 3                 ; localsplus 8 bytes/slot
-    mov [r12 + PyFrame.localsplus + rdx], rax
-    mov byte [rsi + r11], TAG_PTR
+    mov [r12 + PyFrame.localsplus + rdx], rax   ; a tuple pointer is its own Value
 
 .varargs_done:
     ; === Phase 4: Match keyword args ===
@@ -334,8 +327,7 @@ DEF_FUNC func_call
     jge .pos_defaults_done
 
     mov r10, rdi
-    mov r11, [r12 + PyFrame.locals_tag_base]
-    cmp byte [r11 + r10], 0
+    cmp qword [r12 + PyFrame.localsplus + r10*8], 0
     jne .defaults_next
 
     ; Must have a default (i >= m)
@@ -353,10 +345,9 @@ DEF_FUNC func_call
     movsxd r8, edi
     mov r11, r8
     shl r8, 3                  ; localsplus 8 bytes/slot
-    mov [r12 + PyFrame.localsplus + r8], r9
-    mov r8, [r12 + PyFrame.locals_tag_base]
-    mov byte [r8 + r11], r10b
     INCREF_VAL r9, r10
+    V_PACK r9, r10
+    mov [r12 + PyFrame.localsplus + r8], r9
 
 .defaults_next:
     inc edi
@@ -384,8 +375,7 @@ DEF_FUNC func_call
     jge .kw_defaults_done
 
     movsxd r8, esi
-    mov r11, [r12 + PyFrame.locals_tag_base]
-    cmp byte [r11 + r8], 0
+    cmp qword [r12 + PyFrame.localsplus + r8*8], 0
     jne .kw_defaults_next
 
     ; Slot is NULL - look up param name in kwdefaults dict
@@ -419,10 +409,9 @@ DEF_FUNC func_call
     movsxd r9, esi
     mov r11, r9
     shl r9, 3                  ; localsplus 8 bytes/slot
-    mov [r12 + PyFrame.localsplus + r9], r8
-    mov rsi, [r12 + PyFrame.locals_tag_base]
-    mov byte [rsi + r11], r10b  ; tag from dict_get
     INCREF_VAL r8, r10
+    V_PACK r8, r10
+    mov [r12 + PyFrame.localsplus + r9], r8
 
 .kw_defaults_next:
     inc esi
@@ -440,8 +429,7 @@ DEF_FUNC func_call
     cmp esi, ecx
     jge .args_valid
     movsxd r8, esi
-    mov r9, [r12 + PyFrame.locals_tag_base]
-    cmp byte [r9 + r8], 0
+    cmp qword [r12 + PyFrame.localsplus + r8*8], 0
     je .args_missing
     inc esi
     jmp .check_args_loop
@@ -581,9 +569,8 @@ DEF_FUNC func_bind_kwargs
 .kw_found:
     ; ecx = j (param index in localsplus)
     movsxd rdx, ecx
-    mov r11, [r12 + PyFrame.locals_tag_base]
     ; Check if slot already filled (would be "multiple values" error)
-    cmp byte [r11 + rdx], 0
+    cmp qword [r12 + PyFrame.localsplus + rdx*8], 0
     jne .kw_next            ; skip silently (TODO: error)
 
     ; Assign: localsplus[j] = args[value_index], INCREF
@@ -591,9 +578,9 @@ DEF_FUNC func_bind_kwargs
     shl rax, 4                ; args at 16-byte stride
     mov rdi, [r13 + rax]      ; arg payload
     mov rsi, [r13 + rax + 8]  ; arg tag
-    mov [r12 + PyFrame.localsplus + rdx*8], rdi
-    mov byte [r11 + rdx], sil
     INCREF_VAL rdi, rsi
+    V_PACK rdi, rsi
+    mov [r12 + PyFrame.localsplus + rdx*8], rdi
     jmp .kw_next
 
 .kw_not_found:

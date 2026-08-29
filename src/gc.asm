@@ -1169,13 +1169,11 @@ DEF_FUNC gen_traverse
     test r13d, r13d
     jz .done
 
-    mov r11, [r12 + PyFrame.locals_tag_base]
-    lea r12, [r12 + PyFrame.localsplus]  ; start of payload array
+    lea r12, [r12 + PyFrame.localsplus]  ; start of the Value array
 .frame_loop:
     dec r13d
     mov rdi, [r12 + r13*8]
-    movzx rsi, byte [r11 + r13]
-    VISIT_FAT rdi, rsi
+    VISIT_V rdi, rsi
     test r13d, r13d
     jnz .frame_loop
 

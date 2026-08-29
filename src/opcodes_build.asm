@@ -4,8 +4,6 @@
 ;   rbx = bytecode instruction pointer (current position in co_code[])
 ;   r12 = current frame pointer (PyFrame*)
 ;   r13 = value stack payload top pointer
-;   r14 = locals_tag_base pointer (frame's tag sidecar for localsplus[])
-;   r15 = value stack tag top pointer
 ;
 ; ecx = opcode argument on entry (set by eval_dispatch)
 ; rbx has already been advanced past the 2-byte instruction word.
@@ -21,7 +19,6 @@ section .text
 extern eval_dispatch
 extern eval_saved_rbx
 extern eval_saved_r13
-extern eval_saved_r15
 extern eval_co_consts
 extern opcode_table
 extern obj_dealloc
@@ -442,17 +439,16 @@ DEF_FUNC op_build_tuple, 16
     test rcx, rcx
     jz .build_tuple_done
 
-    ; Calculate base of items on value stack (payload + tag arrays)
+    ; Calculate base of items on the value stack
     mov rdi, rcx
-    shl rdi, 3                 ; count * 8 (payloads)
-    sub r13, rdi               ; pop all payloads at once
-    sub r15, rcx               ; pop all tags at once
+    shl rdi, 3                 ; count * 8
+    sub r13, rdi               ; pop all items at once
 
 .build_tuple_fill:
     mov rax, rdx
     shl rax, 3                 ; index * 8
-    mov rsi, [r13 + rax]      ; item payload from stack
-    movzx edi, byte [r15 + rdx] ; item tag from stack
+    mov rsi, [r13 + rax]      ; item from stack
+    V_UNPACK rsi, rdi         ; tuples still store (payload, tag)
     mov rax, [rbp-16]
     mov r8, [rax + PyTupleObject.ob_item]       ; payloads
     mov r9, [rax + PyTupleObject.ob_item_tags]  ; tags
@@ -492,11 +488,10 @@ DEF_FUNC op_build_list, 16
     test rcx, rcx
     jz .build_list_done
 
-    ; Calculate base (payload + tag arrays)
+    ; Calculate base of items on the value stack
     mov rdi, rcx
     shl rdi, 3
-    sub r13, rdi               ; pop all payloads
-    sub r15, rcx               ; pop all tags
+    sub r13, rdi               ; pop all items
 
     xor edx, edx
 .build_list_fill:
@@ -506,8 +501,8 @@ DEF_FUNC op_build_list, 16
     mov rdi, [rbp-16]         ; list
     mov rax, rdx
     shl rax, 3                ; index * 8
-    mov rsi, [r13 + rax]      ; item payload (ownership transfers, no extra INCREF)
-    movzx edx, byte [r15 + rdx] ; item tag
+    mov rsi, [r13 + rax]      ; item (ownership transfers, no extra INCREF)
+    V_UNPACK rsi, rdx         ; list_append still takes (payload, tag)
     call list_append
     pop rdx
     inc rdx
@@ -529,9 +524,8 @@ DEF_FUNC op_build_list, 16
     mov rax, rdx
     shl rax, 3                ; index * 8
     mov rdi, [r13 + rax]
-    movzx esi, byte [r15 + rdx]  ; tag
     push rdx
-    DECREF_VAL rdi, rsi
+    DECREF_V rdi, rsi
     pop rdx
     inc rdx
     jmp .build_list_fixref
@@ -564,8 +558,7 @@ DEF_FUNC op_build_map, 16
 
     mov rdi, rcx
     shl rdi, 3                 ; total_items * 8 bytes/slot
-    sub r13, rdi               ; pop all payloads
-    sub r15, rcx               ; pop all tags
+    sub r13, rdi               ; pop all items
 
     xor edx, edx              ; pair index
 .build_map_fill:
@@ -575,11 +568,10 @@ DEF_FUNC op_build_map, 16
     mov rdi, [rbp-16]         ; dict
     mov rax, rdx
     shl rax, 4                 ; pair_index * 16 (2 payload slots)
-    mov rsi, [r13 + rax]      ; key payload
-    lea r9, [rdx + rdx]       ; tag base index = pair_index * 2
-    movzx r8d, byte [r15 + r9]     ; key tag
-    mov rdx, [r13 + rax + 8]       ; value payload
-    movzx ecx, byte [r15 + r9 + 1] ; value tag
+    mov rsi, [r13 + rax]      ; key
+    V_UNPACK rsi, r8          ; dict_set still takes (payload, tag)
+    mov rdx, [r13 + rax + 8]  ; value
+    V_UNPACK rdx, rcx
     call dict_set
     pop rdx
     inc rdx
@@ -598,10 +590,9 @@ DEF_FUNC op_build_map, 16
     mov rax, rdx
     shl rax, 3                ; index * 8
     mov rdi, [r13 + rax]
-    movzx esi, byte [r15 + rdx]  ; tag
     push rdx
     push rcx
-    DECREF_VAL rdi, rsi
+    DECREF_V rdi, rsi
     pop rcx
     pop rdx
     inc rdx
@@ -638,8 +629,7 @@ DEF_FUNC op_build_const_key_map, 32
 
     mov rdi, rcx
     shl rdi, 3                 ; count * 8 bytes/slot
-    sub r13, rdi               ; pop all payloads
-    sub r15, rcx               ; pop all tags
+    sub r13, rdi               ; pop all items
 
     xor edx, edx
 .bckm_fill:
@@ -655,8 +645,8 @@ DEF_FUNC op_build_const_key_map, 32
     mov r9, rdx
     mov rax, rdx
     shl rax, 3                ; index * 8
-    mov rdx, [r13 + rax]      ; value payload
-    movzx ecx, byte [r15 + r9]  ; value tag
+    mov rdx, [r13 + rax]      ; value
+    V_UNPACK rdx, rcx         ; dict_set still takes (payload, tag)
     call dict_set
     pop rdx
     inc rdx
@@ -674,10 +664,9 @@ DEF_FUNC op_build_const_key_map, 32
     mov rax, rdx
     shl rax, 3                ; index * 8
     mov rdi, [r13 + rax]
-    movzx esi, byte [r15 + rdx]  ; tag
     push rdx
     push rcx
-    DECREF_VAL rdi, rsi
+    DECREF_V rdi, rsi
     pop rcx
     pop rdx
     inc rdx
@@ -756,9 +745,8 @@ DEF_FUNC_BARE op_unpack_sequence
     ; Pre-advance stack by count (ecx)
     mov edx, ecx
     shl edx, 3
-    add r13, rdx              ; payload stack += count * 8
-    add r15, rcx              ; tag stack += count
-    ; r10 = negative offset from pre-advanced pointers, starts at -count
+    add r13, rdx              ; stack += count * 8
+    ; r10 = negative offset from the pre-advanced pointer, starts at -count
     mov r10, rcx
     neg r10
     mov edx, ecx
@@ -768,10 +756,10 @@ DEF_FUNC_BARE op_unpack_sequence
     js .unpack_done
     mov eax, edx
     mov rax, [rsi + rax * 8]  ; payload = items[edx]
-    movzx r9d, byte [r8 + rdx] ; tag = tags[edx]
+    movzx r9d, byte [r8 + rdx] ; tag = tags[edx]  (lists still store both)
     INCREF_VAL rax, r9
+    V_PACK rax, r9
     mov [r13 + r10*8], rax
-    mov byte [r15 + r10], r9b
     inc r10
     dec edx
     jmp .unpack_fill_loop
@@ -813,8 +801,7 @@ DEF_FUNC_BARE op_unpack_sequence
     ; Pre-advance stack by count
     mov edx, ecx
     shl edx, 3
-    add r13, rdx              ; payload stack += count * 8
-    add r15, rcx              ; tag stack += count
+    add r13, rdx              ; stack += count * 8
 
     ; Create single-char strings in reverse order (count-1 down to 0)
     mov ebx, ecx
@@ -837,8 +824,7 @@ DEF_FUNC_BARE op_unpack_sequence
     pop rbx
     pop rcx
     ; rax = new string (TAG_PTR, refcount=1, ownership transferred to stack)
-    mov [r13 + rcx*8], rax
-    mov byte [r15 + rcx], TAG_PTR
+    mov [r13 + rcx*8], rax    ; a string pointer is its own Value
     inc rcx
     dec ebx
     jmp .unpack_str_loop
@@ -2096,7 +2082,7 @@ extern tuple_getitem
 DEF_FUNC op_unpack_ex
     push rbx
     push r14
-    ; NOTE: do NOT push/pop r15 — VPUSH_VAL/VPUSH_PTR macros advance r15
+    ; NOTE: do NOT push/pop r13 — the VPUSH macros advance it
     ; (tag stack top) and restoring it would desync from r13 (payload stack top)
     sub rsp, 40                ; locals: [rbp-32]=total_len, [rbp-40]=rest_count,
                                ;         [rbp-48]=iter_tag, [rbp-56]=iterable payload
@@ -2386,11 +2372,10 @@ DEF_FUNC op_build_set, 16
     test rcx, rcx
     jz .build_set_done
 
-    ; Calculate base (payload + tag arrays)
+    ; Calculate base of items on the value stack
     mov rdi, rcx
     shl rdi, 3
-    sub r13, rdi               ; pop all payloads
-    sub r15, rcx               ; pop all tags
+    sub r13, rdi               ; pop all items
 
     xor edx, edx
 .build_set_fill:
@@ -2400,8 +2385,8 @@ DEF_FUNC op_build_set, 16
     mov rdi, [rbp-16]         ; set
     mov rax, rdx
     shl rax, 3                ; index * 8
-    mov rsi, [r13 + rax]     ; item payload
-    movzx edx, byte [r15 + rdx] ; item tag
+    mov rsi, [r13 + rax]     ; item
+    V_UNPACK rsi, rdx        ; set_add still takes (payload, tag)
     call set_add               ; set_add does INCREF
     pop rdx
     inc rdx
@@ -2419,9 +2404,8 @@ DEF_FUNC op_build_set, 16
     mov rax, rdx
     shl rax, 3                ; index * 8
     mov rdi, [r13 + rax]
-    movzx esi, byte [r15 + rdx]  ; tag
     push rdx
-    DECREF_VAL rdi, rsi
+    DECREF_V rdi, rsi
     pop rdx
     inc rdx
     jmp .build_set_fixref
@@ -2629,7 +2613,7 @@ DEF_FUNC_BARE op_for_iter_range
     add rax, r9
     mov [rdi + PyRangeIterObject.it_current], rax
 
-    VPUSH_INT rdx                  ; push value
+    VPUSH_INT rdx, r15                  ; push value
     add rbx, 2                     ; skip CACHE
     DISPATCH
 

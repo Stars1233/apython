@@ -8,13 +8,13 @@
 ; 1. EVAL LOOP REGISTERS (callee-saved, global interpreter state)
 ;    rbx  = bytecode instruction pointer (IP into co_code[])
 ;    r12  = current frame pointer (PyFrame*)
-;    r13  = value stack top pointer (payload array, u64[])
-;    r14  = co_consts tuple data pointer (&tuple.ob_item[0])
-;    r15  = tag stack top pointer (sidecar tag array, u8[])
+;    r13  = value stack top pointer (u64[] of Values)
+;    r14  = unused (freed by the single-word representation)
+;    r15  = unused (freed by the single-word representation)
 ;    ecx  = opcode arg on handler entry (set by eval_dispatch)
 ;
-;    co_names accessed via LOAD_CO_NAMES / LOAD_CO_NAMES_TAGS macros
-;    (reads eval_co_names / eval_co_names_tags globals).
+;    co_names / co_consts are read from the eval_co_names / eval_co_consts
+;    globals via the LOAD_CO_NAMES macro.
 ;
 ; 2. OPCODE HANDLER RULE
 ;    Never hold live values in caller-saved registers (rax, rcx, rdx,
@@ -88,18 +88,6 @@
     section .text
 %endmacro
 
-; Value stack pop (payload only)
-%macro VPOP 1
-    sub r13, 8
-    sub r15, 1
-    mov %1, [r13]
-%endmacro
-
-; Value stack peek (top of stack without popping)
-%macro VPEEK 1
-    mov %1, [r13 - 8]
-%endmacro
-
 ; Reference counting (heap pointers only — callers must not pass SmallInts)
 %macro INCREF 1
     inc qword [%1 + PyObject.ob_refcnt]
@@ -143,7 +131,6 @@
 %macro DISPATCH 0
     mov [rel eval_saved_rbx], rbx  ; save bytecode IP for exception unwind
     mov [rel eval_saved_r13], r13  ; save value stack ptr for exception unwind
-    mov [rel eval_saved_r15], r15  ; save tag stack ptr for exception unwind
     movzx eax, byte [rbx]         ; load opcode
     movzx ecx, byte [rbx+1]      ; load arg into ecx
     add rbx, 2                     ; advance past instruction word
@@ -190,20 +177,16 @@
     mov %1, [rel eval_co_names]
 %endmacro
 
-; Load co_names tag pointer (&tuple.ob_item_tags[0]) into a register
-%macro LOAD_CO_NAMES_TAGS 1     ; %1 = dest reg
-    mov %1, [rel eval_co_names_tags]
-%endmacro
 
 ; ==========================================================================
-; VALUE64 + TAG (u8) SUPPORT
+; LEGACY (payload, tag) SUPPORT — being retired
 ; ==========================================================================
 ;
-; Value64: 64-bit payload + 8-bit tag stored in parallel sidecar arrays.
-; Value stack: r13 → u64[] payloads, r15 → u8[] tags.
-; Containers (list/tuple/dict): ob_item → u64[], ob_item_tags → u8[].
-; Frame locals: localsplus → u64[], locals_tag_base → u8[].
-; Functions return (rax=payload, edx=tag).
+; The value stack and frame locals now hold one NaN-boxed Value per slot
+; (see include/value.inc).  Containers and most runtime functions still use
+; the old split form: containers keep ob_item plus an ob_item_tags sidecar,
+; and functions return (rax=payload, edx=tag).  The V_PACK / V_UNPACK macros
+; bridge the two until P4 and P5 finish the conversion.
 ;
 ; Tag encoding (u8):
 ;   bits 0-6: type tag (TAG_SMALLINT..TAG_PTR)
@@ -221,109 +204,71 @@ TAG_PTR      equ (5 | TAG_RC_BIT)    ; heap PyObject*, refcounted
 TAG_SLEEP    equ 7           ; payload = delay_ns (uint64) — async sleep sentinel
 TAG_IO_WAIT  equ 8           ; payload = fd | (direction << 32) — async I/O sentinel
 
-; Value stack push (r13 = payload top, r15 = tag top)
-%macro VPUSH_VAL 2              ; %1 = payload reg, %2 = tag reg
+; ==========================================================================
+; VALUE STACK
+;
+; One u64 per slot, holding a NaN-boxed Value.  r13 is the top; there is no
+; tag sidecar and r15 is free.
+; ==========================================================================
+
+; Push a Value.
+%macro VPUSH 1                  ; %1 = Value
     mov [r13], %1
-%ifidni %2, rax
-    mov byte [r15], al
-%elifidni %2, eax
-    mov byte [r15], al
-%elifidni %2, rbx
-    mov byte [r15], bl
-%elifidni %2, ebx
-    mov byte [r15], bl
-%elifidni %2, rcx
-    mov byte [r15], cl
-%elifidni %2, ecx
-    mov byte [r15], cl
-%elifidni %2, rdx
-    mov byte [r15], dl
-%elifidni %2, edx
-    mov byte [r15], dl
-%elifidni %2, rsi
-    mov byte [r15], sil
-%elifidni %2, esi
-    mov byte [r15], sil
-%elifidni %2, rdi
-    mov byte [r15], dil
-%elifidni %2, edi
-    mov byte [r15], dil
-%elifidni %2, r8
-    mov byte [r15], r8b
-%elifidni %2, r8d
-    mov byte [r15], r8b
-%elifidni %2, r9
-    mov byte [r15], r9b
-%elifidni %2, r9d
-    mov byte [r15], r9b
-%elifidni %2, r10
-    mov byte [r15], r10b
-%elifidni %2, r10d
-    mov byte [r15], r10b
-%elifidni %2, r11
-    mov byte [r15], r11b
-%elifidni %2, r11d
-    mov byte [r15], r11b
-%elifidni %2, r12
-    mov byte [r15], r12b
-%elifidni %2, r12d
-    mov byte [r15], r12b
-%elifidni %2, r13
-    mov byte [r15], r13b
-%elifidni %2, r13d
-    mov byte [r15], r13b
-%elifidni %2, r14
-    mov byte [r15], r14b
-%elifidni %2, r14d
-    mov byte [r15], r14b
-%elifidni %2, r15
-    mov byte [r15], r15b
-%elifidni %2, r15d
-    mov byte [r15], r15b
-%else
-    mov byte [r15], %2
-%endif
     add r13, 8
-    add r15, 1
 %endmacro
 
-; Value stack pop
-%macro VPOP_VAL 2               ; %1 = payload dest reg, %2 = tag dest reg
+; Pop a Value.
+%macro VPOP 1                   ; %1 = dest
     sub r13, 8
-    sub r15, 1
     mov %1, [r13]
-    movzx %2, byte [r15]
 %endmacro
 
-; Push SmallInt (payload = raw int64, no encode needed)
-%macro VPUSH_INT 1              ; %1 = payload reg containing int64
+; Peek at the top Value without popping.
+%macro VPEEK 1                  ; %1 = dest
+    mov %1, [r13 - 8]
+%endmacro
+
+; --- (payload, tag) shims, for call sites not yet converted ---------------
+
+; Push from an old fat pair.  %2 must not be rax.
+%macro VPUSH_VAL 2              ; %1 = payload (clobbered), %2 = tag (clobbered)
+    V_PACK %1, %2
     mov [r13], %1
-    mov byte [r15], TAG_SMALLINT
     add r13, 8
-    add r15, 1
 %endmacro
 
-; Push float (payload = IEEE 754 double bits)
-%macro VPUSH_FLOAT 1            ; %1 = payload reg containing double bits
+; Pop into an old fat pair.
+%macro VPOP_VAL 2               ; %1 = payload dest, %2 = tag dest
+    sub r13, 8
+    mov %1, [r13]
+    V_UNPACK %1, %2
+%endmacro
+
+; Push a raw int64, boxing it when it falls outside the immediate range.
+; %2 must not be rax.
+%macro VPUSH_INT 2              ; %1 = int64 (clobbered), %2 = scratch
+    V_PACK_I64 %1, %2
     mov [r13], %1
-    mov byte [r15], TAG_FLOAT
     add r13, 8
-    add r15, 1
 %endmacro
 
-; Push the None singleton (owned reference).  No scratch register needed:
-; the binary is linked -no-pie, so the address fits an imm32.
+; Push raw IEEE-754 double bits.
+%macro VPUSH_FLOAT 2            ; %1 = bits (clobbered), %2 = scratch
+    V_FROM_F64 %1, %2
+    mov [r13], %1
+    add r13, 8
+%endmacro
+
+; Push the None singleton (owned).  No scratch needed: the binary is linked
+; -no-pie, so the address fits an imm32.
 %macro VPUSH_NONE 0
     mov qword [r13], none_singleton
     inc qword [rel none_singleton]      ; ob_refcnt is at offset 0
-    mov byte [r15], TAG_PTR
     add r13, 8
-    add r15, 1
 %endmacro
 
-; Push True/False from a 0/1 value.  Bools are the immortal singletons, so
-; this pushes an owned pointer, not an inline payload.  Clobbers %1.
-%macro VPUSH_BOOL 1             ; %1 = payload reg (0=False, 1=True)
+; Push True/False (owned) from a 0/1 value.  Clobbers %1.
+%macro VPUSH_BOOL 1             ; %1 = 0 (False) or 1 (True)
     test %1, %1
     jz %%false
     lea %1, [rel bool_true]
@@ -333,37 +278,33 @@ TAG_IO_WAIT  equ 8           ; payload = fd | (direction << 32) — async I/O se
 %%store:
     inc qword [%1 + PyObject.ob_refcnt]
     mov [r13], %1
-    mov byte [r15], TAG_PTR
     add r13, 8
-    add r15, 1
 %endmacro
 
-; Push heap pointer (refcounted)
-%macro VPUSH_PTR 1              ; %1 = payload reg containing PyObject*
+; Push a heap pointer.  A pointer is its own Value.
+%macro VPUSH_PTR 1
     mov [r13], %1
-    mov byte [r15], TAG_PTR
     add r13, 8
-    add r15, 1
 %endmacro
 
-; Push null/empty slot (16 bytes of zero, tag = TAG_NULL = 0)
+; Push an empty slot.
 %macro VPUSH_NULL128 0
     mov qword [r13], 0
-    mov byte [r15], TAG_NULL
     add r13, 8
-    add r15, 1
+%endmacro
+
+; Undo N pops by re-advancing the stack pointer (deopt paths, where the
+; popped slots are still intact in memory).
+%macro VUNDROP 1                ; %1 = number of slots
+    add r13, %1 * 8
 %endmacro
 
 ; ==========================================================================
 ; None / True / False as owned singleton pointers
 ;
-; These have no immediate form: they are the immortal heap singletons.  A
-; single representation removes the whole class of bugs where one code path
-; produced (0, TAG_NONE) and another (none_singleton, TAG_PTR), and it is
-; what the NaN-boxed representation requires.
-;
-; The including file must declare the externs itself (none.asm / bool.asm
-; define these symbols and must not also extern them).
+; These have no immediate form: they are the immortal heap singletons.  The
+; including file must declare the externs itself (none.asm / bool.asm define
+; these symbols and must not also extern them).
 ; ==========================================================================
 
 ; Fat return of None: (rax = none_singleton, edx = TAG_PTR).  Clobbers rax.
@@ -386,68 +327,32 @@ TAG_IO_WAIT  equ 8           ; payload = fd | (direction << 32) — async I/O se
 %endmacro
 
 ; Compare a value against the None singleton; ZF is set when it is None.
-; Replaces the old `cmp tag, TAG_NONE` test.
 %macro IS_NONE 2                ; %1 = payload reg/mem, %2 = scratch reg
     lea %2, [rel none_singleton]
     cmp %1, %2
 %endmacro
 
 ; Load the None singleton (owned) into a register.  Clobbers only %1.
-%macro LOAD_NONE 1
+%macro LOAD_NONE 1              ; %1 = dest
     lea %1, [rel none_singleton]
     inc qword [%1 + PyObject.ob_refcnt]
 %endmacro
 
-; Set fat return to NULL error (rax=0, edx=TAG_NULL=0)
-; Use on error paths in functions returning (rax=payload, edx=tag).
-%macro RET_NULL 0
-    xor eax, eax
-    xor edx, edx
-%endmacro
+; --- legacy (payload, tag) refcounting and returns ------------------------
 
-; Set fat return tag to SmallInt (edx=TAG_SMALLINT)
-; Caller sets rax=payload. Use when returning inline integers.
-%macro RET_TAG_SMALLINT 0
-    mov edx, TAG_SMALLINT
-%endmacro
-
-; Push fat arg onto machine stack (rsp-based, for building tp_call arg arrays)
-; Use when building a 16-byte-stride args array on the stack for tp_call.
-%macro SPUSH_PTR 1              ; %1 = payload reg containing PyObject*
-    sub rsp, 16
-    mov [rsp], %1
-    mov qword [rsp + 8], TAG_PTR
-%endmacro
-
-; Peek tag of top-of-stack (without popping)
-%macro VPEEK_TAG 1              ; %1 = dest reg
-    movzx %1, byte [r15 - 1]
-%endmacro
-
-; Peek payload of top-of-stack (without popping)
-%macro VPEEK_PAYLOAD 1          ; %1 = dest reg
-    mov %1, [r13 - 8]
-%endmacro
-
-; Peek 128-bit value at offset from TOS (0 = TOS, 1 = second, etc.)
-%macro VPEEK_AT_VAL 3           ; %1 = payload dest, %2 = tag dest, %3 = offset (0=TOS)
-    mov %1, [r13 - 8 - %3*8]
-    movzx %2, byte [r15 - 1 - %3]
-%endmacro
-
-; Value64 INCREF — only if TAG_RC_BIT (bit 7) is set in the u8 tag.
-%macro INCREF_VAL 2             ; %1 = payload, %2 = tag (reg with u8 tag value)
+; INCREF a fat value — only when the tag says the payload is refcounted.
+%macro INCREF_VAL 2             ; %1 = payload, %2 = tag reg
     test %2, TAG_RC_BIT
-    jz %%skip                  ; no RC bit — not refcounted
+    jz %%skip
     inc qword [%1 + PyObject.ob_refcnt]
     %%skip:
 %endmacro
 
-; Value64 DECREF — only if TAG_RC_BIT (bit 7) is set in the u8 tag.
-; Calls obj_dealloc if refcount reaches zero. Clobbers rdi + all caller-saved.
-%macro DECREF_VAL 2             ; %1 = payload, %2 = tag (reg with u8 tag value)
+; DECREF a fat value.  Clobbers rdi and all caller-saved regs when the
+; object is freed.
+%macro DECREF_VAL 2             ; %1 = payload, %2 = tag reg
     test %2, TAG_RC_BIT
-    jz %%skip                  ; no RC bit — not refcounted
+    jz %%skip
     dec qword [%1 + PyObject.ob_refcnt]
     jnz %%skip
     mov rdi, %1
@@ -455,10 +360,10 @@ TAG_IO_WAIT  equ 8           ; payload = fd | (direction << 32) — async I/O se
     %%skip:
 %endmacro
 
-; Value64 XDECREF — NULL-safe DECREF_VAL
-%macro XDECREF_VAL 2            ; %1 = payload, %2 = tag (reg with u8 tag value)
+; NULL-safe DECREF_VAL.
+%macro XDECREF_VAL 2            ; %1 = payload, %2 = tag reg
     test %2, TAG_RC_BIT
-    jz %%skip                  ; no RC bit — not refcounted
+    jz %%skip
     test %1, %1
     jz %%skip
     dec qword [%1 + PyObject.ob_refcnt]
@@ -466,6 +371,25 @@ TAG_IO_WAIT  equ 8           ; payload = fd | (direction << 32) — async I/O se
     mov rdi, %1
     call obj_dealloc
     %%skip:
+%endmacro
+
+; Fat return of NULL/error: (rax = 0, edx = TAG_NULL = 0).
+%macro RET_NULL 0
+    xor eax, eax
+    xor edx, edx
+%endmacro
+
+; Fat return tag for an inline integer; the caller sets rax.
+%macro RET_TAG_SMALLINT 0
+    mov edx, TAG_SMALLINT
+%endmacro
+
+; Push a fat PTR arg onto the machine stack, for building the 16-byte-stride
+; argument arrays that tp_call still expects.
+%macro SPUSH_PTR 1              ; %1 = PyObject*
+    sub rsp, 16
+    mov [rsp], %1
+    mov qword [rsp + 8], TAG_PTR
 %endmacro
 
 ; ===== Fat result save/restore across DECREF calls =====
@@ -482,24 +406,8 @@ TAG_IO_WAIT  equ 8           ; payload = fd | (direction << 32) — async I/O se
     pop rdx                    ; restore result tag
 %endmacro
 
-; Undo N VPOP operations by re-advancing the value stack pointer.
-; Useful for deopt paths where popped slots are still intact in memory.
-%macro VUNDROP 1              ; %1 = number of slots to un-pop
-    add r13, %1 * 8
-    add r15, %1
-%endmacro
-
-; Swap two 16-byte value stack slots via SSE (no GPR temps needed for the swap)
-; Both addresses must be 16-byte aligned (guaranteed by malloc + 16B slot layout)
-%macro VSLOT_SWAP 2         ; %1 = addr1, %2 = addr2
-    movdqa xmm0, [%1]
-    movdqa xmm1, [%2]
-    movdqa [%1], xmm1
-    movdqa [%2], xmm0
-%endmacro
-
 ; ==========================================================================
-; FRAME STACK PUSH — push onto a saved frame's value stack (stack_ptr/stack_tag_ptr)
+; FRAME STACK PUSH — push onto a saved frame's value stack (stack_ptr)
 ; Used by generator resume to push sent/None values before calling eval_frame.
 ; ==========================================================================
 
@@ -511,23 +419,15 @@ TAG_IO_WAIT  equ 8           ; payload = fd | (direction << 32) — async I/O se
     inc qword [rel none_singleton]      ; ob_refcnt is at offset 0
     add %2, 8
     mov [%1 + PyFrame.stack_ptr], %2
-    mov %2, [%1 + PyFrame.stack_tag_ptr]
-    mov byte [%2], TAG_PTR
-    inc %2
-    mov [%1 + PyFrame.stack_tag_ptr], %2
 %endmacro
 
-; Push a value onto a frame's saved value stack.
-; %1 = frame register, %2 = payload register (64-bit), %3 = tag byte, %4 = scratch register
-%macro FRAME_PUSH_VAL 4
-    mov %4, [%1 + PyFrame.stack_ptr]
-    mov [%4], %2
-    add %4, 8
-    mov [%1 + PyFrame.stack_ptr], %4
-    mov %4, [%1 + PyFrame.stack_tag_ptr]
-    mov byte [%4], %3
-    inc %4
-    mov [%1 + PyFrame.stack_tag_ptr], %4
+; Push a Value onto a frame's saved value stack.
+; %1 = frame register, %2 = Value register, %3 = scratch register
+%macro FRAME_PUSH_VALUE 3
+    mov %3, [%1 + PyFrame.stack_ptr]
+    mov [%3], %2
+    add %3, 8
+    mov [%1 + PyFrame.stack_ptr], %3
 %endmacro
 
 ; Mark stack as non-executable and reset to .text section
