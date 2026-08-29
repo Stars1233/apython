@@ -584,6 +584,7 @@ DEF_FUNC property_descr_get
     mov rsi, rsp                ; args ptr
     mov edx, 1                  ; nargs = 1
     call rax
+    V_UNPACK rax, rdx           ; tp_call returns a Value
     add rsp, 16                 ; pop fat args
 
     pop r12
@@ -631,6 +632,7 @@ DEF_FUNC property_descr_set
     mov rsi, rsp                ; args ptr
     mov edx, 2                  ; nargs = 2
     call rax
+    V_UNPACK rax, rdx           ; tp_call returns a Value
     add rsp, 16                 ; pop args
 
     ; DECREF result (fset returns None typically)

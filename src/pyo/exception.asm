@@ -626,14 +626,18 @@ DEF_FUNC exc_type_call, ETC_FRAME
     mov rax, [rbx + PyTypeObject.tp_new]
     test rax, rax
     jz .default_exc_create
-    ; Delegate to type's own tp_call
+    ; Delegate to the type's own constructor, which still returns a fat pair
     mov rdi, rbx
     mov rsi, [rbp - ETC_ARGS]
     mov rdx, [rbp - ETC_NARGS]
     pop r12
     pop rbx
     leave
-    jmp rax
+    sub rsp, 8                  ; keep the callee's rsp 16-byte aligned
+    call rax
+    add rsp, 8
+    V_PACK rax, rdx
+    ret
 
 .default_exc_create:
     ; Get message from args[0] if nargs >= 1
@@ -695,6 +699,7 @@ DEF_FUNC exc_type_call, ETC_FRAME
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; tp_call returns one Value
     ret
 END_FUNC exc_type_call
 

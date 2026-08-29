@@ -923,6 +923,7 @@ DEF_FUNC sre_pattern_sub_method, SUB_FRAME
     mov edx, 1                 ; nargs
     mov rax, [rbp - SUB_CALLABLE]
     call rax
+    V_UNPACK rax, rdx           ; tp_call returns a Value
     ; rax = replacement string payload, edx = replacement tag
     add rsp, 16               ; pop fat array
 
@@ -1193,6 +1194,7 @@ DEF_FUNC sre_pattern_subn_method, SN_FRAME
     mov edx, 1
     mov rax, [rbp - SN_CALLABLE]
     call rax
+    V_UNPACK rax, rdx           ; tp_call returns a Value
     add rsp, 16
 
     push rax

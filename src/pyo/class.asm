@@ -612,12 +612,14 @@ DEF_FUNC type_call
     inc qword [rax + PyObject.ob_refcnt]
     mov edx, TAG_PTR
     leave
+    V_PACK rax, rdx             ; tp_call returns one Value
     ret
 .type_smallint:
     lea rax, [rel int_type]
     inc qword [rax + PyObject.ob_refcnt]
     mov edx, TAG_PTR
     leave
+    V_PACK rax, rdx             ; tp_call returns one Value
     ret
 .type_float:
     extern float_type
@@ -625,6 +627,7 @@ DEF_FUNC type_call
     inc qword [rax + PyObject.ob_refcnt]
     mov edx, TAG_PTR
     leave
+    V_PACK rax, rdx             ; tp_call returns one Value
     ret
 .type_bool:
     extern bool_type
@@ -632,6 +635,7 @@ DEF_FUNC type_call
     inc qword [rax + PyObject.ob_refcnt]
     mov edx, TAG_PTR
     leave
+    V_PACK rax, rdx             ; tp_call returns one Value
     ret
 .type_none:
     extern none_type
@@ -639,6 +643,7 @@ DEF_FUNC type_call
     inc qword [rax + PyObject.ob_refcnt]
     mov edx, TAG_PTR
     leave
+    V_PACK rax, rdx             ; tp_call returns one Value
     ret
 
 .not_type_self:
@@ -653,9 +658,14 @@ DEF_FUNC type_call
     lea rcx, [rel type_call]
     cmp rax, rcx
     je .normal_type_call
-    ; Tail-call the constructor: ctor(type, args, nargs)
+    ; Call the constructor: ctor(type, args, nargs).  It still returns a fat
+    ; pair, so tp_call has to pack it rather than tail-jump.
     leave
-    jmp rax
+    sub rsp, 8                  ; keep the callee's rsp 16-byte aligned
+    call rax
+    add rsp, 8
+    V_PACK rax, rdx
+    ret
 
 .normal_type_call:
     push rbx
@@ -763,6 +773,7 @@ DEF_FUNC type_call
     mov rsi, r15                ; args
     lea rdx, [r13 + 1]          ; nargs + 1
     call rax
+    V_UNPACK rax, rdx           ; tp_call returns a Value
 
     mov r14, rax                ; r14 = instance from __new__
     mov [rbp - TC_NEW_TAG], rdx ; save result tag
@@ -856,6 +867,7 @@ DEF_FUNC type_call
     mov rsi, r15                ; args ptr
     lea rdx, [r13 + 1]          ; nargs + 1
     call rax
+    V_UNPACK rax, rdx           ; tp_call returns a Value
 
     ; DECREF __init__'s return value (should be None — TAG_NONE, not a pointer)
     mov rsi, rdx
@@ -878,6 +890,7 @@ DEF_FUNC type_call
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; tp_call returns one Value
     ret
 
 .exc_subclass_call:
@@ -926,6 +939,7 @@ DEF_FUNC type_call
     mov rsi, r15
     lea rdx, [r13 + 1]
     call rax
+    V_UNPACK rax, rdx           ; tp_call returns a Value
     ; DECREF return value (should be None)
     mov rsi, rdx
     DECREF_VAL rax, rsi
@@ -944,6 +958,7 @@ DEF_FUNC type_call
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; tp_call returns one Value
     ret
 
 .int_subclass_call:
@@ -1003,6 +1018,7 @@ DEF_FUNC type_call
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; tp_call returns one Value
     ret
 .int_sub_error:
     add rsp, 24
@@ -1012,6 +1028,7 @@ DEF_FUNC type_call
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; tp_call returns one Value
     ret
 
 .init_not_callable:
@@ -1187,6 +1204,7 @@ DEF_FUNC_LOCAL method_call
     mov rsi, r14
     lea rdx, [r13 + 1]
     call rax
+    V_UNPACK rax, rdx           ; tp_call returns a Value
     push rax                    ; save result payload
     push rdx                    ; save result tag
 
@@ -1201,6 +1219,7 @@ DEF_FUNC_LOCAL method_call
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; tp_call returns one Value
     ret
 END_FUNC method_call
 

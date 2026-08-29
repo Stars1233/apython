@@ -458,6 +458,7 @@ DEF_FUNC func_call
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; tp_call returns one Value
     ret
 END_FUNC func_call
 

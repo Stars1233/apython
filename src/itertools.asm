@@ -1004,6 +1004,7 @@ DEF_FUNC_LOCAL map_iternext, MI_FRAME
     mov rsi, [rbp - MI_ARGS]         ; args pointer
     mov rdx, r14                     ; nargs = count
     call rax
+    V_UNPACK rax, rdx           ; tp_call returns a Value
     push rax                         ; save result payload
     push rdx                         ; save result tag
 
@@ -1206,6 +1207,7 @@ DEF_FUNC_LOCAL filter_iternext
     mov rsi, rsp             ; &args[0]
     mov edx, 1
     call rax
+    V_UNPACK rax, rdx           ; tp_call returns a Value
     add rsp, 16             ; pop args
     mov r14, rax             ; r14 = result payload
     mov r15, rdx             ; r15 = result tag

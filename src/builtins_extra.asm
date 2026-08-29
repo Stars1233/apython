@@ -652,6 +652,7 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     mov rsi, rsp
     mov edx, 1
     call rcx
+    V_UNPACK rax, rdx           ; tp_call returns a Value
     add rsp, 16
     ; Check for exception (NULL return)
     test edx, edx
@@ -724,6 +725,7 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     mov rsi, rsp
     mov edx, 1
     call rcx
+    V_UNPACK rax, rdx           ; tp_call returns a Value
     add rsp, 16
     ; Check for exception (NULL return)
     test edx, edx
@@ -763,6 +765,7 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     mov rsi, rsp
     mov edx, 1
     call rcx
+    V_UNPACK rax, rdx           ; tp_call returns a Value
     add rsp, 16
     ; rax = result of __trunc__()
     ; Check for exception (NULL return)
@@ -811,6 +814,7 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     mov rsi, rsp
     mov edx, 1
     call rcx
+    V_UNPACK rax, rdx           ; tp_call returns a Value
     add rsp, 16
     ; rax = __index__ result, rbx = __trunc__ result (still needs DECREF)
     ; Save __index__ result and DECREF __trunc__ result first
@@ -993,6 +997,7 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     lea rsi, [rsp]               ; args[0] = base_obj (fat arg on stack)
     mov edx, 1
     call rcx
+    V_UNPACK rax, rdx           ; tp_call returns a Value
     add rsp, 16                  ; pop fat arg
     ; rax = __index__ result, should be int
     test edx, edx
@@ -1896,6 +1901,7 @@ DEF_FUNC builtin_any
     test rcx, rcx
     jz .any_type_error
     call rcx
+    V_UNPACK rax, rdx           ; tp_call returns a Value
     mov rbx, rax
 
     mov rax, [rbx + PyObject.ob_type]

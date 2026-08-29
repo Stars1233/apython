@@ -122,6 +122,7 @@ DEF_FUNC dunder_call_1
     mov rsi, rsp            ; args ptr
     mov edx, 1              ; nargs
     call rax
+    V_UNPACK rax, rdx           ; tp_call returns a Value
     add rsp, 16             ; pop args
     ; rax = result payload, rdx = result tag
 
@@ -187,6 +188,7 @@ DEF_FUNC dunder_call_2
     mov rsi, rsp            ; args ptr
     mov edx, 2              ; nargs
     call rax
+    V_UNPACK rax, rdx           ; tp_call returns a Value
     add rsp, 16             ; pop args
     ; rax = result payload, rdx = result tag
 
@@ -257,6 +259,7 @@ DEF_FUNC dunder_call_3
     mov rsi, rsp            ; args ptr
     mov edx, 3              ; nargs
     call rax
+    V_UNPACK rax, rdx           ; tp_call returns a Value
     add rsp, 32             ; pop args
     ; rax = result payload, rdx = result tag
 

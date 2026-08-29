@@ -255,6 +255,7 @@ DEF_FUNC_BARE op_binary_subscr
     mov rsi, rsp                     ; args ptr
     mov edx, 2                       ; nargs = 2
     call rcx
+    V_UNPACK rax, rdx           ; tp_call returns a Value
     add rsp, 16                      ; pop args
     jmp .subscr_done
 
@@ -391,6 +392,7 @@ DEF_FUNC_BARE op_store_subscr
     mov rsi, rsp              ; args ptr
     mov edx, 3                ; nargs
     call rax
+    V_UNPACK rax, rdx           ; tp_call returns a Value
     add rsp, 32               ; pop the args array
     ; rax = result (discard — __setitem__ returns None)
     jmp .store_done

@@ -252,6 +252,7 @@ DEF_FUNC op_call, CL_FRAME
     mov rdx, [rbp - CL_TOTAL]              ; total nargs
     mov rax, [rbp - CL_TPCALL]             ; tp_call
     call rax
+    V_UNPACK rax, rdx           ; tp_call returns a Value
     mov [rbp - CL_RETVAL], rax             ; save return value
     mov [rbp - CL_RETTAG], rdx             ; save return tag
     jmp .cleanup
@@ -502,6 +503,7 @@ DEF_FUNC op_call_function_ex
     mov rdi, [rbp - CFX_FUNC]
     mov rax, [rbp - CFX_TPCALL]
     call rax
+    V_UNPACK rax, rdx           ; tp_call returns a Value
     mov [rbp - CFX_RESULT], rax
     mov [rbp - CFX_RETTAG], rdx
 
@@ -623,6 +625,7 @@ DEF_FUNC op_call_function_ex
     add rdx, [rbp - CFX_NKW]
     mov rax, [rbp - CFX_TPCALL]
     call rax
+    V_UNPACK rax, rdx           ; tp_call returns a Value
     mov [rbp - CFX_RESULT], rax
     mov [rbp - CFX_RETTAG], rdx
 
@@ -789,6 +792,7 @@ DEF_FUNC op_before_with
     mov rsi, rsp                   ; args ptr
     mov rdx, 1                     ; nargs = 1
     call rcx
+    V_UNPACK rax, rdx           ; tp_call returns a Value
     add rsp, 16                    ; pop fat arg
     mov [rbp - BW_ENTER], rax              ; save __enter__ result
     mov [rbp - BW_RETTAG], rdx             ; save __enter__ result tag
@@ -892,6 +896,7 @@ DEF_FUNC op_with_except_start, WES_FRAME
     mov rsi, rsp                     ; args ptr
     mov rdx, 3                       ; nargs = 3 (method_call adds self)
     call rax
+    V_UNPACK rax, rdx           ; tp_call returns a Value
     add rsp, 32
     mov [rbp - WES_RESULT], rax                ; save result
     mov [rbp - WES_RETTAG], rdx                ; save result tag

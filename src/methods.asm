@@ -4283,6 +4283,7 @@ DEF_FUNC list_method_sort, LS_FRAME
     mov rsi, rsp                   ; args ptr → &[item]
     mov edx, 1                     ; nargs = 1
     call rax
+    V_UNPACK rax, rdx           ; tp_call returns a Value
     jmp .sort_key_store
 
 .sort_key_try_meta:
@@ -4313,6 +4314,7 @@ DEF_FUNC list_method_sort, LS_FRAME
     mov rsi, rsp
     mov edx, 1
     call rax
+    V_UNPACK rax, rdx           ; tp_call returns a Value
 
 .sort_key_store:
     add rsp, 16                    ; pop item from stack

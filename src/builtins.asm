@@ -218,10 +218,15 @@ DEF_FUNC_BARE builtin_func_call
 .bfc_no_max_check:
     ; Extract func_ptr from self
     mov rax, [rdi + PyBuiltinObject.func_ptr]
-    ; Call func_ptr(args, nargs)
+    ; Call func_ptr(args, nargs).  The builtin still returns a fat pair, so
+    ; this can no longer be a tail call: tp_call hands back one Value.
     mov rdi, rsi                ; args
     mov rsi, rdx                ; nargs
-    jmp rax                     ; tail call
+    sub rsp, 8                  ; keep the callee's rsp 16-byte aligned
+    call rax
+    add rsp, 8
+    V_PACK rax, rdx
+    ret
 
 .bfc_too_few:
     extern exc_TypeError_type
@@ -1662,6 +1667,7 @@ DEF_FUNC builtin___build_class__
     mov rsi, rsp               ; args
     mov edx, 1                 ; nargs = 1
     call rcx
+    V_UNPACK rax, rdx           ; tp_call returns a Value
     add rsp, 16                ; pop fat args
     ; DECREF result if non-NULL
     test rax, rax
