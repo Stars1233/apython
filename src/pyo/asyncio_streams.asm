@@ -244,6 +244,7 @@ DEF_FUNC stream_reader_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .srga_read:
@@ -258,6 +259,7 @@ DEF_FUNC stream_reader_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .srga_close:
@@ -276,6 +278,7 @@ DEF_FUNC stream_reader_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .srga_readline:
@@ -290,6 +293,7 @@ DEF_FUNC stream_reader_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 END_FUNC stream_reader_getattr
 
@@ -499,6 +503,7 @@ DEF_FUNC stream_writer_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .swga_write:
@@ -512,6 +517,7 @@ DEF_FUNC stream_writer_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .swga_close:
@@ -531,6 +537,7 @@ DEF_FUNC stream_writer_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .swga_drain:
@@ -545,6 +552,7 @@ DEF_FUNC stream_writer_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 END_FUNC stream_writer_getattr
 

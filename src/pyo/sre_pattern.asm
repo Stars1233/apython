@@ -1625,6 +1625,7 @@ DEF_FUNC sre_pattern_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .ga_match:
@@ -1693,6 +1694,7 @@ DEF_FUNC sre_pattern_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .ga_pattern_attr:
@@ -1703,6 +1705,7 @@ DEF_FUNC sre_pattern_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .ga_flags:
@@ -1712,6 +1715,7 @@ DEF_FUNC sre_pattern_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .ga_groups:
@@ -1721,6 +1725,7 @@ DEF_FUNC sre_pattern_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .ga_groupindex:
@@ -1732,6 +1737,7 @@ DEF_FUNC sre_pattern_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 .ga_empty_dict:
     call dict_new
@@ -1739,6 +1745,7 @@ DEF_FUNC sre_pattern_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 END_FUNC sre_pattern_getattr
 
@@ -2270,6 +2277,7 @@ DEF_FUNC sre_scanner_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .sga_match:
@@ -2297,6 +2305,7 @@ DEF_FUNC sre_scanner_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .sga_pattern:
@@ -2306,6 +2315,7 @@ DEF_FUNC sre_scanner_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 END_FUNC sre_scanner_getattr
 

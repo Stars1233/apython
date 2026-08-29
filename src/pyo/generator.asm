@@ -813,6 +813,7 @@ DEF_FUNC gen_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .gga_send:
@@ -824,6 +825,7 @@ DEF_FUNC gen_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .gga_close:
@@ -834,6 +836,7 @@ DEF_FUNC gen_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .gga_throw:
@@ -844,6 +847,7 @@ DEF_FUNC gen_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 END_FUNC gen_getattr
 
@@ -889,6 +893,7 @@ DEF_FUNC coro_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .cga_send:
@@ -899,6 +904,7 @@ DEF_FUNC coro_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .cga_close:
@@ -909,6 +915,7 @@ DEF_FUNC coro_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .cga_throw:
@@ -919,6 +926,7 @@ DEF_FUNC coro_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .cga_cr_running:
@@ -928,6 +936,7 @@ DEF_FUNC coro_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 END_FUNC coro_getattr
 
@@ -983,6 +992,7 @@ DEF_FUNC async_gen_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .aga_send:
@@ -993,6 +1003,7 @@ DEF_FUNC async_gen_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .aga_close:
@@ -1003,6 +1014,7 @@ DEF_FUNC async_gen_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .aga_throw:
@@ -1013,6 +1025,7 @@ DEF_FUNC async_gen_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 END_FUNC async_gen_getattr
 

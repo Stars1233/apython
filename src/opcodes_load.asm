@@ -419,6 +419,7 @@ DEF_FUNC op_load_attr, LA_FRAME
     ; Call tp_getattr(self_payload, name) — rdi already has payload
     mov rsi, [rbp - LA_NAME]
     call rax
+    V_UNPACK rax, rdx           ; tp_getattr returns a Value
     test edx, edx
     jz .la_attr_error
     mov [rbp - LA_ATTR], rax
@@ -456,6 +457,7 @@ DEF_FUNC op_load_attr, LA_FRAME
     mov rdi, [rbp - LA_OBJ]
     mov rsi, [rbp - LA_NAME]
     call rax
+    V_UNPACK rax, rdx           ; tp_getattr returns a Value
     test edx, edx
     jz .la_try_dict             ; tp_getattr returned NULL — fallback to tp_dict
     mov [rbp - LA_ATTR], rax

@@ -374,6 +374,7 @@ DEF_FUNC exc_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .found_in_dict:
@@ -381,6 +382,7 @@ DEF_FUNC exc_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .found_in_type:
@@ -388,6 +390,7 @@ DEF_FUNC exc_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .get_args:
@@ -399,6 +402,7 @@ DEF_FUNC exc_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .return_empty_tuple:
@@ -408,6 +412,7 @@ DEF_FUNC exc_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .get_context:
@@ -419,6 +424,7 @@ DEF_FUNC exc_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .get_cause:
@@ -430,6 +436,7 @@ DEF_FUNC exc_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .get_tb:
@@ -441,6 +448,7 @@ DEF_FUNC exc_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .get_value:
@@ -459,6 +467,7 @@ DEF_FUNC exc_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .return_none:
@@ -469,6 +478,7 @@ DEF_FUNC exc_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 END_FUNC exc_getattr
 
@@ -494,8 +504,7 @@ DEF_FUNC exc_setattr
     pop rsi
 .esa_have_dict:
     mov rdi, [rbx + PyExceptionObject.exc_dict]
-    ; rsi = name (a pointer, so already a Value); rdx/ecx = value pair
-    V_PACK rdx, rcx             ; dict_set takes Values
+    ; rsi = name and rdx = value are both already Values
     call dict_set
 
     xor eax, eax            ; return 0 (success)
@@ -773,6 +782,7 @@ DEF_FUNC traceback_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .tb_get_lineno:
@@ -781,6 +791,7 @@ DEF_FUNC traceback_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .tb_get_next:
@@ -792,6 +803,7 @@ DEF_FUNC traceback_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .tb_return_none:
@@ -801,6 +813,7 @@ DEF_FUNC traceback_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 END_FUNC traceback_getattr
 

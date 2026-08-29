@@ -2502,6 +2502,7 @@ DEF_FUNC builtin_getattr
     mov rdi, r13
     mov rsi, r14
     call rcx
+    V_UNPACK rax, rdx           ; tp_getattr returns a Value
     test edx, edx              ; check tag, not payload (SmallInt(0) has payload=0)
     jnz .getattr_found
 
@@ -2614,6 +2615,7 @@ DEF_FUNC builtin_hasattr
     mov rdi, r12
     mov rsi, r13
     call rcx
+    V_UNPACK rax, rdx           ; tp_getattr returns a Value
     test edx, edx              ; check tag, not payload (SmallInt(0) has payload=0)
     jz .hasattr_try_type_dict
 
@@ -2718,6 +2720,7 @@ DEF_FUNC builtin_setattr
     mov rsi, [rbx + 16]               ; args[1] payload (name, 16-byte stride)
     mov rdx, [rbx + 32]               ; args[2] payload (value, 16-byte stride)
     mov rcx, [rbx + 40]               ; args[2] tag (value tag, 16-byte stride)
+    V_PACK rdx, rcx                    ; tp_setattr takes a value Value
     pop rax                            ; restore tp_setattr
     call rax
 

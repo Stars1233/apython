@@ -161,6 +161,7 @@ DEF_FUNC bool_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .real:
@@ -178,6 +179,7 @@ DEF_FUNC bool_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 .real_one:
     mov eax, 1
@@ -185,6 +187,7 @@ DEF_FUNC bool_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 .real_tag_bool:
     mov rax, rbx               ; 0 or 1
@@ -192,6 +195,7 @@ DEF_FUNC bool_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .imag:
@@ -201,6 +205,7 @@ DEF_FUNC bool_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 END_FUNC bool_getattr
 

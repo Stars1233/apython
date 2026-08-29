@@ -700,6 +700,7 @@ DEF_FUNC task_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .ta_done_method:
@@ -710,6 +711,7 @@ DEF_FUNC task_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .ta_result_method:
@@ -720,6 +722,7 @@ DEF_FUNC task_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .ta_cancel_method:
@@ -730,6 +733,7 @@ DEF_FUNC task_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .ta_cancelled_method:
@@ -740,6 +744,7 @@ DEF_FUNC task_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 END_FUNC task_getattr
 

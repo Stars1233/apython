@@ -494,6 +494,7 @@ DEF_FUNC fileobj_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .ret_write:
@@ -573,6 +574,7 @@ DEF_FUNC fileobj_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .ret_encoding:
@@ -581,6 +583,7 @@ DEF_FUNC fileobj_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .ret_errors:
@@ -589,6 +592,7 @@ DEF_FUNC fileobj_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .ret_name:
@@ -598,6 +602,7 @@ DEF_FUNC fileobj_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .ret_mode:
@@ -607,6 +612,7 @@ DEF_FUNC fileobj_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .ret_closed:
@@ -616,6 +622,7 @@ DEF_FUNC fileobj_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .ret_newlines:
@@ -625,6 +632,7 @@ DEF_FUNC fileobj_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .ret_line_buffering:
@@ -634,6 +642,7 @@ DEF_FUNC fileobj_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 END_FUNC fileobj_getattr

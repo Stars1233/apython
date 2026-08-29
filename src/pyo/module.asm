@@ -128,6 +128,7 @@ DEF_FUNC module_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .normal_lookup:
@@ -144,6 +145,7 @@ DEF_FUNC module_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .not_found:
@@ -151,6 +153,7 @@ DEF_FUNC module_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 END_FUNC module_getattr
 
@@ -162,8 +165,7 @@ DEF_FUNC module_setattr
     ; dict_set(mod_dict, name, value, value_tag, key_tag)
     mov rax, rdi                ; self
     mov rdi, [rax + PyModuleObject.mod_dict]
-    ; rsi = name_str (a pointer, so already a Value); rdx/ecx = value pair
-    V_PACK rdx, rcx             ; dict_set takes Values
+    ; rsi = name_str and rdx = value are both already Values
     call dict_set
     xor eax, eax               ; return 0 (success)
     leave

@@ -695,8 +695,7 @@ DEF_FUNC func_setattr
 
     mov rbx, rdi            ; rbx = func
     mov r12, rsi            ; r12 = name
-    mov r13, rdx            ; r13 = value
-    mov r14d, ecx           ; r14d = value_tag (from caller)
+    mov r13, rdx            ; r13 = value Value
 
     ; Check for __kwdefaults__
     lea rdi, [rel fn_attr_kwdefaults]
@@ -716,11 +715,9 @@ DEF_FUNC func_setattr
     mov rdi, rax
 
 .have_dict:
-    ; dict_set(func_dict, name, value, value_tag, key_tag)
+    ; dict_set(func_dict, name Value, value Value)
     mov rsi, r12
     mov rdx, r13
-    mov ecx, r14d           ; value_tag from caller
-    V_PACK rdx, rcx
     call dict_set
 
     pop r14
@@ -737,9 +734,9 @@ DEF_FUNC func_setattr
     jz .no_old_kwd
     call obj_decref
 .no_old_kwd:
-    ; Store new kwdefaults — INCREF if pointer, store NULL if non-pointer
-    test r14d, TAG_RC_BIT
-    jz .store_kwd_null
+    ; Store new kwdefaults — only a heap pointer can be a dict
+    V_TEST_PTR r13, r14
+    ja .store_kwd_null
     mov rdi, r13
     call obj_incref
     mov [rbx + PyFuncObject.func_kwdefaults], r13
@@ -819,6 +816,7 @@ DEF_FUNC func_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .return_name:
@@ -828,6 +826,7 @@ DEF_FUNC func_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .return_qualname:
@@ -841,6 +840,7 @@ DEF_FUNC func_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .return_dict:
@@ -856,6 +856,7 @@ DEF_FUNC func_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .return_code:
@@ -865,6 +866,7 @@ DEF_FUNC func_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .return_kwdefaults:
@@ -877,6 +879,7 @@ DEF_FUNC func_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 .return_kwdefaults_obj:
     INCREF rax
@@ -884,6 +887,7 @@ DEF_FUNC func_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .not_found:
@@ -891,6 +895,7 @@ DEF_FUNC func_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 END_FUNC func_getattr
 

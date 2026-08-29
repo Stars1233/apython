@@ -130,6 +130,7 @@ DEF_FUNC code_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .return_kwonlyargcount:
@@ -138,6 +139,7 @@ DEF_FUNC code_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .return_argcount:
@@ -146,6 +148,7 @@ DEF_FUNC code_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .return_varnames:
@@ -157,6 +160,7 @@ DEF_FUNC code_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .return_none:
@@ -165,6 +169,7 @@ DEF_FUNC code_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 END_FUNC code_getattr
 

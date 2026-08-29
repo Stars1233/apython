@@ -360,6 +360,7 @@ DEF_FUNC slice_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .sg_stop:
@@ -369,6 +370,7 @@ DEF_FUNC slice_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .sg_step:
@@ -378,6 +380,7 @@ DEF_FUNC slice_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 END_FUNC slice_getattr
 

@@ -273,6 +273,7 @@ DEF_FUNC op_store_attr, SA_FRAME
     mov rsi, [rbp - SA_NAME]
     mov rdx, [rbp - SA_VAL]
     mov ecx, [rbp - SA_VTAG]
+    V_PACK rdx, rcx             ; tp_setattr takes a value Value
     call rax
 
     ; DECREF value (tag-aware)

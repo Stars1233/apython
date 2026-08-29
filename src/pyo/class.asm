@@ -158,6 +158,7 @@ DEF_FUNC instance_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .found_type:
@@ -217,6 +218,7 @@ DEF_FUNC instance_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .found_slot:
@@ -232,6 +234,7 @@ DEF_FUNC instance_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .found_type_raw:
@@ -243,6 +246,7 @@ DEF_FUNC instance_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .slot_not_set:
@@ -258,6 +262,7 @@ DEF_FUNC instance_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 END_FUNC instance_getattr
 
@@ -274,8 +279,7 @@ DEF_FUNC instance_setattr
 
     mov rbx, rdi                ; instance
     mov r12, rsi                ; name
-    mov r13, rdx                ; value
-    mov r14, rcx                ; value_tag
+    mov r13, rdx                ; value Value
 
     ; Walk type dict chain looking for member descriptor (slot)
     mov rax, [rbx + PyObject.ob_type]
@@ -316,9 +320,8 @@ DEF_FUNC instance_setattr
     XDECREF_V rdi, rsi
     pop rcx
 
-    ; INCREF the new value, then pack and store it
-    INCREF_VAL r13, r14
-    V_PACK r13, r14
+    ; INCREF the new value and store it
+    INCREF_V r13, r14
     mov [rbx + rcx], r13
 
     pop r14
@@ -354,11 +357,9 @@ DEF_FUNC instance_setattr
 
 .sa_have_dict:
 .sa_dict_set:
-    ; dict_set(inst_dict, name, value, value_tag, key_tag)
+    ; dict_set(inst_dict, name Value, value Value)
     mov rsi, r12                ; name
     mov rdx, r13                ; value
-    mov rcx, r14                ; value_tag
-    V_PACK rdx, rcx
     call dict_set
 
     pop r14
@@ -381,7 +382,7 @@ END_FUNC instance_setattr
 ;; ============================================================================
 DEF_FUNC type_setattr
     push rbx
-    push rcx                    ; save value_tag
+    push rcx                    ; keep the stack aligned
 
     ; Ensure tp_dict exists
     mov rbx, rdi
@@ -400,8 +401,7 @@ DEF_FUNC type_setattr
 
 .ts_have_dict:
     ; dict_set(dict, name Value, value Value)
-    pop rcx                     ; restore value_tag
-    V_PACK rdx, rcx
+    pop rcx
     call dict_set
 
     pop rbx
@@ -1090,6 +1090,7 @@ DEF_FUNC type_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .tga_return_name:
@@ -1099,6 +1100,7 @@ DEF_FUNC type_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .tga_not_found:
@@ -1106,6 +1108,7 @@ DEF_FUNC type_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 END_FUNC type_getattr
 
@@ -1243,7 +1246,7 @@ DEF_FUNC method_getattr
     ; Delegate to the underlying function's getattr
     mov rdi, [rdi + PyMethodObject.im_func]
     extern func_getattr
-    call func_getattr
+    call func_getattr           ; already returns a Value
     leave
     ret
 END_FUNC method_getattr

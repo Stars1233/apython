@@ -319,6 +319,7 @@ DEF_FUNC property_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .pga_setter:
@@ -377,6 +378,7 @@ DEF_FUNC property_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 END_FUNC property_getattr
 

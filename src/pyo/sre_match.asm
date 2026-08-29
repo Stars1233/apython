@@ -1087,6 +1087,7 @@ DEF_FUNC sre_match_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
     ; --- Methods (create bound methods) ---
@@ -1131,6 +1132,7 @@ DEF_FUNC sre_match_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
     ; --- Attributes ---
@@ -1141,6 +1143,7 @@ DEF_FUNC sre_match_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .mga_string:
@@ -1150,6 +1153,7 @@ DEF_FUNC sre_match_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .mga_pos:
@@ -1158,6 +1162,7 @@ DEF_FUNC sre_match_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .mga_endpos:
@@ -1166,6 +1171,7 @@ DEF_FUNC sre_match_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .mga_lastindex:
@@ -1176,6 +1182,7 @@ DEF_FUNC sre_match_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 .mga_lastindex_none:
     xor eax, eax
@@ -1183,6 +1190,7 @@ DEF_FUNC sre_match_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .mga_lastgroup:
@@ -1194,6 +1202,7 @@ DEF_FUNC sre_match_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 .mga_lastgroup_none:
     xor eax, eax
@@ -1201,6 +1210,7 @@ DEF_FUNC sre_match_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .mga_regs:
@@ -1262,6 +1272,7 @@ DEF_FUNC sre_match_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .mga_expand:

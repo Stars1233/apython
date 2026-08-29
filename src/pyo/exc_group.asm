@@ -364,6 +364,7 @@ DEF_FUNC eg_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .get_exceptions:
@@ -376,6 +377,7 @@ DEF_FUNC eg_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .return_none:
@@ -385,6 +387,7 @@ DEF_FUNC eg_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 END_FUNC eg_getattr
 

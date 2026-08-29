@@ -2902,6 +2902,7 @@ DEF_FUNC op_match_class, MC_FRAME
     test rax, rax
     jz .mc_fail
     call rax
+    V_UNPACK rax, rdx           ; tp_getattr returns a Value
     test edx, edx
     jz .mc_fail                     ; attr not found
 
@@ -2939,6 +2940,7 @@ DEF_FUNC op_match_class, MC_FRAME
     test rax, rax
     jz .mc_fail
     call rax
+    V_UNPACK rax, rdx           ; tp_getattr returns a Value
     test edx, edx
     jz .mc_fail                     ; attr not found
 

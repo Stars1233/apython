@@ -490,6 +490,7 @@ DEF_FUNC bytes_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .bga_decode:
@@ -500,6 +501,7 @@ DEF_FUNC bytes_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 END_FUNC bytes_getattr
 
