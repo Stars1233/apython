@@ -18,6 +18,19 @@ GREEN='\033[0;32m'
 YELLOW='\033[0;33m'
 NC='\033[0m'
 
+# Value encoding self-test: verifies the NaN-box boundaries directly, before
+# any Python-level test can be misled by a mis-encoded value.
+printf "%-40s " "value encoding selftest"
+if $APYTHON --selftest-value > /tmp/apython_selftest.out 2>&1; then
+    printf "${GREEN}PASS${NC}\n"
+    PASS=$((PASS + 1))
+else
+    printf "${RED}FAIL${NC}\n"
+    cat /tmp/apython_selftest.out
+    FAIL=$((FAIL + 1))
+    ERRORS="$ERRORS value-selftest"
+fi
+
 # Pre-compile all non-test .py files (helper modules)
 for helper_py in "$TESTDIR"/*.py; do
     case "$(basename "$helper_py")" in

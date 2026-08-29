@@ -37,6 +37,8 @@
 %ifndef MACROS_INC
 %define MACROS_INC
 
+%include "value.inc"
+
 ; Standard global function with RBP frame
 %macro DEF_FUNC 1
     global %1:function (%1 %+ .end - %1)
