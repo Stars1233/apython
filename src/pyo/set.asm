@@ -1096,6 +1096,8 @@ SNB_FRAME equ 32
 
 ;; set_nb_or(left, right, ltag, rtag) -> new set (union)
 DEF_FUNC set_nb_or, SNB_FRAME
+    V_UNPACK rdi, rdx           ; left  Value -> (payload, tag)
+    V_UNPACK rsi, rcx           ; right Value -> (payload, tag)
     mov [rbp - 32], rdi         ; args[0].payload = left
     mov [rbp - 24], rdx         ; args[0].tag = ltag
     mov [rbp - 16], rsi         ; args[1].payload = right
@@ -1104,11 +1106,14 @@ DEF_FUNC set_nb_or, SNB_FRAME
     mov esi, 2
     call set_method_union
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 END_FUNC set_nb_or
 
 ;; set_nb_and(left, right, ltag, rtag) -> new set (intersection)
 DEF_FUNC set_nb_and, SNB_FRAME
+    V_UNPACK rdi, rdx           ; left  Value -> (payload, tag)
+    V_UNPACK rsi, rcx           ; right Value -> (payload, tag)
     mov [rbp - 32], rdi
     mov [rbp - 24], rdx
     mov [rbp - 16], rsi
@@ -1117,11 +1122,14 @@ DEF_FUNC set_nb_and, SNB_FRAME
     mov esi, 2
     call set_method_intersection
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 END_FUNC set_nb_and
 
 ;; set_nb_sub(left, right, ltag, rtag) -> new set (difference)
 DEF_FUNC set_nb_sub, SNB_FRAME
+    V_UNPACK rdi, rdx           ; left  Value -> (payload, tag)
+    V_UNPACK rsi, rcx           ; right Value -> (payload, tag)
     mov [rbp - 32], rdi
     mov [rbp - 24], rdx
     mov [rbp - 16], rsi
@@ -1130,11 +1138,14 @@ DEF_FUNC set_nb_sub, SNB_FRAME
     mov esi, 2
     call set_method_difference
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 END_FUNC set_nb_sub
 
 ;; set_nb_xor(left, right, ltag, rtag) -> new set (symmetric_difference)
 DEF_FUNC set_nb_xor, SNB_FRAME
+    V_UNPACK rdi, rdx           ; left  Value -> (payload, tag)
+    V_UNPACK rsi, rcx           ; right Value -> (payload, tag)
     mov [rbp - 32], rdi
     mov [rbp - 24], rdx
     mov [rbp - 16], rsi
@@ -1143,6 +1154,7 @@ DEF_FUNC set_nb_xor, SNB_FRAME
     mov esi, 2
     call set_method_symmetric_difference
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 END_FUNC set_nb_xor
 

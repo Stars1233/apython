@@ -397,33 +397,44 @@ END_FUNC float_bool
 %endmacro
 
 DEF_FUNC float_add, 32
+    V_UNPACK rdi, rdx           ; left  Value -> (payload, tag)
+    V_UNPACK rsi, rcx           ; right Value -> (payload, tag)
     FLOAT_BINOP_SETUP
     movsd xmm0, [rbp-8]
     addsd xmm0, [rbp-16]
     call float_from_f64
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 END_FUNC float_add
 
 DEF_FUNC float_sub, 32
+    V_UNPACK rdi, rdx           ; left  Value -> (payload, tag)
+    V_UNPACK rsi, rcx           ; right Value -> (payload, tag)
     FLOAT_BINOP_SETUP
     movsd xmm0, [rbp-8]
     subsd xmm0, [rbp-16]
     call float_from_f64
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 END_FUNC float_sub
 
 DEF_FUNC float_mul, 32
+    V_UNPACK rdi, rdx           ; left  Value -> (payload, tag)
+    V_UNPACK rsi, rcx           ; right Value -> (payload, tag)
     FLOAT_BINOP_SETUP
     movsd xmm0, [rbp-8]
     mulsd xmm0, [rbp-16]
     call float_from_f64
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 END_FUNC float_mul
 
 DEF_FUNC float_truediv, 32
+    V_UNPACK rdi, rdx           ; left  Value -> (payload, tag)
+    V_UNPACK rsi, rcx           ; right Value -> (payload, tag)
     FLOAT_BINOP_SETUP
 
     ; Check for division by zero
@@ -436,6 +447,7 @@ DEF_FUNC float_truediv, 32
     divsd xmm0, xmm1
     call float_from_f64
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .div_zero:
@@ -445,6 +457,8 @@ DEF_FUNC float_truediv, 32
 END_FUNC float_truediv
 
 DEF_FUNC float_floordiv, 32
+    V_UNPACK rdi, rdx           ; left  Value -> (payload, tag)
+    V_UNPACK rsi, rcx           ; right Value -> (payload, tag)
     FLOAT_BINOP_SETUP
 
     ; Check for division by zero
@@ -459,6 +473,7 @@ DEF_FUNC float_floordiv, 32
     roundsd xmm0, xmm0, 1     ; 1 = floor
     call float_from_f64
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .floordiv_zero:
@@ -468,6 +483,8 @@ DEF_FUNC float_floordiv, 32
 END_FUNC float_floordiv
 
 DEF_FUNC float_mod, 32
+    V_UNPACK rdi, rdx           ; left  Value -> (payload, tag)
+    V_UNPACK rsi, rcx           ; right Value -> (payload, tag)
     FLOAT_BINOP_SETUP
 
     ; Check for division by zero
@@ -487,6 +504,7 @@ DEF_FUNC float_mod, 32
     movapd xmm0, xmm2
     call float_from_f64
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .mod_zero:
@@ -522,6 +540,8 @@ END_FUNC float_pos
 ;; non-integer exponents, repeated squaring for integer exponents.
 ;; ============================================================================
 DEF_FUNC float_pow, 32
+    V_UNPACK rdi, rdx           ; left  Value -> (payload, tag)
+    V_UNPACK rsi, rcx           ; right Value -> (payload, tag)
     FLOAT_BINOP_SETUP
     ; [rbp-8] = left double, [rbp-16] = right double
 
@@ -540,6 +560,7 @@ DEF_FUNC float_pow, 32
     sqrtsd xmm0, xmm0
     call float_from_f64
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 .not_sqrt:
     ; Fast path: exp == 2.0 → mulsd
@@ -550,6 +571,7 @@ DEF_FUNC float_pow, 32
     mulsd xmm0, xmm0
     call float_from_f64
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .check_int_exp:
@@ -581,6 +603,7 @@ DEF_FUNC float_pow, 32
     movapd xmm0, xmm2
     call float_from_f64
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .fpow_neg:
@@ -602,6 +625,7 @@ DEF_FUNC float_pow, 32
     divsd xmm0, xmm2
     call float_from_f64
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .fpow_general:
@@ -628,6 +652,7 @@ DEF_FUNC float_pow, 32
     add rsp, 16
     call float_from_f64
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 END_FUNC float_pow
 

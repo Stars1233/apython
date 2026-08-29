@@ -1130,6 +1130,8 @@ END_FUNC int_bool
 ;; SmallInt x SmallInt fast path with overflow check.
 ;; ============================================================================
 DEF_FUNC_BARE int_add
+    V_UNPACK rdi, rdx           ; left  Value -> (payload, tag)
+    V_UNPACK rsi, rcx           ; right Value -> (payload, tag)
     ; Unwrap int subclass instances
     push rcx                ; save right_tag
     push rsi
@@ -1159,6 +1161,7 @@ DEF_FUNC_BARE int_add
 
     ; Result fits: encode as SmallInt
     RET_TAG_SMALLINT
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .gmp_path:
@@ -1227,6 +1230,7 @@ DEF_FUNC_BARE int_add
     pop r12
     pop rbx
     pop rbp
+    V_PACK rax, rdx             ; return one Value
     ret
 END_FUNC int_add
 
@@ -1234,6 +1238,8 @@ END_FUNC int_add
 ;; int_sub(PyObject *a, PyObject *b) -> PyObject*
 ;; ============================================================================
 DEF_FUNC_BARE int_sub
+    V_UNPACK rdi, rdx           ; left  Value -> (payload, tag)
+    V_UNPACK rsi, rcx           ; right Value -> (payload, tag)
     ; Unwrap int subclass instances
     push rcx                ; save right_tag
     push rsi
@@ -1260,6 +1266,7 @@ DEF_FUNC_BARE int_sub
     sub rax, rcx
     jo .gmp_path
     RET_TAG_SMALLINT
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .gmp_path:
@@ -1323,6 +1330,7 @@ DEF_FUNC_BARE int_sub
     pop r12
     pop rbx
     pop rbp
+    V_PACK rax, rdx             ; return one Value
     ret
 END_FUNC int_sub
 
@@ -1331,6 +1339,8 @@ END_FUNC int_sub
 ;; SmallInt x SmallInt: use imul with overflow detection
 ;; ============================================================================
 DEF_FUNC_BARE int_mul
+    V_UNPACK rdi, rdx           ; left  Value -> (payload, tag)
+    V_UNPACK rsi, rcx           ; right Value -> (payload, tag)
     ; Unwrap int subclass instances
     push rcx                ; save right_tag
     push rsi
@@ -1359,6 +1369,7 @@ DEF_FUNC_BARE int_mul
     jo .gmp_path_pop
     add rsp, 8             ; discard saved right_tag
     RET_TAG_SMALLINT
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .gmp_path_pop:
@@ -1424,6 +1435,7 @@ DEF_FUNC_BARE int_mul
     pop r12
     pop rbx
     pop rbp
+    V_PACK rax, rdx             ; return one Value
     ret
 END_FUNC int_mul
 
@@ -1431,6 +1443,8 @@ END_FUNC int_mul
 ;; int_floordiv(PyObject *a, PyObject *b) -> PyObject*
 ;; ============================================================================
 DEF_FUNC_BARE int_floordiv
+    V_UNPACK rdi, rdx           ; left  Value -> (payload, tag)
+    V_UNPACK rsi, rcx           ; right Value -> (payload, tag)
     ; Unwrap int subclass instances
     push rcx                ; save right_tag
     push rsi
@@ -1468,6 +1482,7 @@ DEF_FUNC_BARE int_floordiv
     dec rax
 .smallint_done:
     RET_TAG_SMALLINT
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .zdiv_error:
@@ -1546,6 +1561,7 @@ DEF_FUNC_BARE int_floordiv
     pop r12
     pop rbx
     pop rbp
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .gmp_zdiv_error:
@@ -1569,6 +1585,8 @@ END_FUNC int_floordiv
 ;; int_mod(PyObject *a, PyObject *b) -> PyObject*
 ;; ============================================================================
 DEF_FUNC_BARE int_mod
+    V_UNPACK rdi, rdx           ; left  Value -> (payload, tag)
+    V_UNPACK rsi, rcx           ; right Value -> (payload, tag)
     ; Unwrap int subclass instances
     push rcx                ; save right_tag
     push rsi
@@ -1606,6 +1624,7 @@ DEF_FUNC_BARE int_mod
     add rax, rcx            ; remainder += divisor
 .smallint_done:
     RET_TAG_SMALLINT
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .mod_zdiv_error:
@@ -1684,6 +1703,7 @@ DEF_FUNC_BARE int_mod
     pop r12
     pop rbx
     pop rbp
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .gmp_mod_zdiv_error:
@@ -2081,6 +2101,8 @@ END_FUNC int_dealloc
 ;; Bitwise AND: int_and(PyObject *a, PyObject *b) -> PyObject*
 ;; ============================================================================
 DEF_FUNC_BARE int_and
+    V_UNPACK rdi, rdx           ; left  Value -> (payload, tag)
+    V_UNPACK rsi, rcx           ; right Value -> (payload, tag)
     ; Unwrap int subclass instances
     push rcx                ; save right_tag
     push rsi
@@ -2106,6 +2128,7 @@ DEF_FUNC_BARE int_and
     mov rax, rdi
     and rax, rsi           ; AND preserves tag bit, result is valid SmallInt
     RET_TAG_SMALLINT
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .gmp:
@@ -2169,6 +2192,7 @@ DEF_FUNC_BARE int_and
     pop r12
     pop rbx
     pop rbp
+    V_PACK rax, rdx             ; return one Value
     ret
 END_FUNC int_and
 
@@ -2176,6 +2200,8 @@ END_FUNC int_and
 ;; Bitwise OR: int_or(PyObject *a, PyObject *b) -> PyObject*
 ;; ============================================================================
 DEF_FUNC_BARE int_or
+    V_UNPACK rdi, rdx           ; left  Value -> (payload, tag)
+    V_UNPACK rsi, rcx           ; right Value -> (payload, tag)
     ; Unwrap int subclass instances
     push rcx                ; save right_tag
     push rsi
@@ -2201,6 +2227,7 @@ DEF_FUNC_BARE int_or
     mov rax, rdi
     or rax, rsi            ; OR preserves tag bit
     RET_TAG_SMALLINT
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .gmp:
@@ -2264,6 +2291,7 @@ DEF_FUNC_BARE int_or
     pop r12
     pop rbx
     pop rbp
+    V_PACK rax, rdx             ; return one Value
     ret
 END_FUNC int_or
 
@@ -2271,6 +2299,8 @@ END_FUNC int_or
 ;; Bitwise XOR: int_xor(PyObject *a, PyObject *b) -> PyObject*
 ;; ============================================================================
 DEF_FUNC_BARE int_xor
+    V_UNPACK rdi, rdx           ; left  Value -> (payload, tag)
+    V_UNPACK rsi, rcx           ; right Value -> (payload, tag)
     ; Unwrap int subclass instances
     push rcx                ; save right_tag
     push rsi
@@ -2297,6 +2327,7 @@ DEF_FUNC_BARE int_xor
     mov rcx, rsi
     xor rax, rcx
     RET_TAG_SMALLINT
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .gmp:
@@ -2360,6 +2391,7 @@ DEF_FUNC_BARE int_xor
     pop r12
     pop rbx
     pop rbp
+    V_PACK rax, rdx             ; return one Value
     ret
 END_FUNC int_xor
 
@@ -2411,6 +2443,8 @@ END_FUNC int_invert
 ;; Left shift: int_lshift(PyObject *a, PyObject *b) -> PyObject*
 ;; ============================================================================
 DEF_FUNC int_lshift
+    V_UNPACK rdi, rdx           ; left  Value -> (payload, tag)
+    V_UNPACK rsi, rcx           ; right Value -> (payload, tag)
     push rbx
     push r12
     push r13
@@ -2497,6 +2531,7 @@ DEF_FUNC int_lshift
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .neg_shift:
@@ -2509,6 +2544,8 @@ END_FUNC int_lshift
 ;; Right shift: int_rshift(PyObject *a, PyObject *b) -> PyObject*
 ;; ============================================================================
 DEF_FUNC int_rshift
+    V_UNPACK rdi, rdx           ; left  Value -> (payload, tag)
+    V_UNPACK rsi, rcx           ; right Value -> (payload, tag)
     push rbx
     push r12
     push r13
@@ -2566,6 +2603,7 @@ DEF_FUNC int_rshift
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 .max_shift:
     ; Shift >= 63: result is 0 or -1 depending on sign
@@ -2576,6 +2614,7 @@ DEF_FUNC int_rshift
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .gmp_path:
@@ -2603,6 +2642,7 @@ DEF_FUNC int_rshift
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .neg_shift:
@@ -2616,6 +2656,8 @@ END_FUNC int_rshift
 ;; For small positive exponents, use GMP mpz_pow_ui
 ;; ============================================================================
 DEF_FUNC int_power
+    V_UNPACK rdi, rdx           ; left  Value -> (payload, tag)
+    V_UNPACK rsi, rcx           ; right Value -> (payload, tag)
     push rbx
     push r12
     push r13
@@ -2705,6 +2747,7 @@ DEF_FUNC int_power
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .neg_exp:
@@ -2744,6 +2787,7 @@ DEF_FUNC int_power
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 END_FUNC int_power
 
@@ -2752,6 +2796,8 @@ END_FUNC int_power
 ;; int / int always returns float in Python
 ;; ============================================================================
 DEF_FUNC int_true_divide
+    V_UNPACK rdi, rdx           ; left  Value -> (payload, tag)
+    V_UNPACK rsi, rcx           ; right Value -> (payload, tag)
     ; rdi=left, rsi=right, rdx=left_tag, rcx=right_tag
     and rsp, -16           ; align for potential libc calls
     push rbx
@@ -2801,6 +2847,7 @@ DEF_FUNC int_true_divide
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .td_divzero:

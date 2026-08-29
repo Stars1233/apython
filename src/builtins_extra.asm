@@ -217,8 +217,11 @@ DEF_FUNC builtin_divmod
     mov edx, r13d
     mov rsi, r12
     mov ecx, r14d
+    V_PACK rdi, rdx
+    V_PACK rsi, rcx
     extern int_floordiv
     call int_floordiv
+    V_UNPACK rax, rdx           ; int_floordiv returns a Value
     mov r15, rax                ; r15 = quotient payload
     push rdx                   ; save quotient tag (stack slot)
 
@@ -227,8 +230,11 @@ DEF_FUNC builtin_divmod
     mov edx, r13d
     mov rsi, r12
     mov ecx, r14d
+    V_PACK rdi, rdx
+    V_PACK rsi, rcx
     extern int_mod
     call int_mod
+    V_UNPACK rax, rdx           ; int_mod returns a Value
     mov r12, rax                ; r12 = remainder payload
     mov r13, rdx                ; r13 = remainder tag
 
@@ -2103,11 +2109,17 @@ DEF_FUNC builtin_sum
     je .sum_float_add
     cmp ecx, TAG_FLOAT
     je .sum_float_add
+    V_PACK rdi, rdx
+    V_PACK rsi, rcx
     call int_add
+    V_UNPACK rax, rdx           ; int_add returns a Value
     jmp .sum_have_result
 .sum_float_add:
     extern float_add
+    V_PACK rdi, rdx
+    V_PACK rsi, rcx
     call float_add
+    V_UNPACK rax, rdx           ; float_add returns a Value
 .sum_have_result:
     ; rax = new accum payload, edx = new accum tag
 
@@ -3220,7 +3232,10 @@ DEF_FUNC builtin_pow_fn, POW_FRAME
     mov rsi, rbx            ; exp payload
     mov edx, ecx            ; base tag (TAG_SMALLINT)
     mov ecx, r8d            ; exp tag (TAG_SMALLINT)
+    V_PACK rdi, rdx
+    V_PACK rsi, rcx
     call int_power
+    V_UNPACK rax, rdx       ; int_power returns a Value
     ; rax = result payload, edx = result tag
     pop r13
     pop r12

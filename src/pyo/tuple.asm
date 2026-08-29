@@ -515,6 +515,8 @@ END_FUNC tuple_contains
 ;; Concatenate two tuples with fat 16-byte slots.
 ;; ============================================================================
 DEF_FUNC tuple_concat
+    V_UNPACK rdi, rdx           ; left  Value -> (payload, tag)
+    V_UNPACK rsi, rcx           ; right Value -> (payload, tag)
     push rbx
     push r12
     push r13
@@ -568,6 +570,7 @@ DEF_FUNC tuple_concat
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 END_FUNC tuple_concat
 
@@ -576,6 +579,8 @@ END_FUNC tuple_concat
 ;; Repeat a tuple with fat 16-byte slots.
 ;; ============================================================================
 DEF_FUNC tuple_repeat
+    V_UNPACK rdi, rdx           ; left  Value -> (payload, tag)
+    V_UNPACK rsi, rcx           ; right Value -> (payload, tag)
     push rbx
     push r12
     push r13
@@ -634,6 +639,7 @@ DEF_FUNC tuple_repeat
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 END_FUNC tuple_repeat
 

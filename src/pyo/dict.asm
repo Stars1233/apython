@@ -1473,6 +1473,8 @@ DNO_NEW   equ 24
 DNO_FRAME equ 32
 
 DEF_FUNC dict_nb_or, DNO_FRAME
+    V_UNPACK rdi, rdx           ; left  Value -> (payload, tag)
+    V_UNPACK rsi, rcx           ; right Value -> (payload, tag)
     mov [rbp - DNO_LEFT], rdi       ; left dict
     mov [rbp - DNO_RIGHT], rsi      ; right dict
 
@@ -1543,6 +1545,7 @@ DEF_FUNC dict_nb_or, DNO_FRAME
     mov rax, [rbp - DNO_NEW]
     mov edx, TAG_PTR
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 END_FUNC dict_nb_or
 
@@ -1556,6 +1559,8 @@ DIO_RIGHT equ 16
 DIO_FRAME equ 24
 
 DEF_FUNC dict_nb_ior, DIO_FRAME
+    V_UNPACK rdi, rdx           ; left  Value -> (payload, tag)
+    V_UNPACK rsi, rcx           ; right Value -> (payload, tag)
     mov [rbp - DIO_LEFT], rdi       ; left dict
     mov [rbp - DIO_RIGHT], rsi      ; right dict
 
@@ -1593,6 +1598,7 @@ DEF_FUNC dict_nb_ior, DIO_FRAME
     INCREF rax
     mov edx, TAG_PTR
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 END_FUNC dict_nb_ior
 

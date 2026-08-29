@@ -722,6 +722,8 @@ BM_ARGS  equ 16
 BM_FRAME equ 16
 
 DEF_FUNC bytes_mod, BM_FRAME
+    V_UNPACK rdi, rdx           ; left  Value -> (payload, tag)
+    V_UNPACK rsi, rcx           ; right Value -> (payload, tag)
     push rbx
     push r12
 
@@ -766,6 +768,7 @@ DEF_FUNC bytes_mod, BM_FRAME
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 END_FUNC bytes_mod
 

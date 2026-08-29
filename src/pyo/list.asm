@@ -1456,6 +1456,8 @@ END_FUNC list_getslice
 ;; Concatenate two lists: [1,2] + [3,4] -> [1,2,3,4]
 ;; ============================================================================
 DEF_FUNC list_concat
+    V_UNPACK rdi, rdx           ; left  Value -> (payload, tag)
+    V_UNPACK rsi, rcx           ; right Value -> (payload, tag)
     push rbx
     push r12
     push r13
@@ -1514,6 +1516,7 @@ DEF_FUNC list_concat
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 END_FUNC list_concat
 
@@ -1522,6 +1525,8 @@ END_FUNC list_concat
 ;; Repeat a list: [1,2] * 3 -> [1,2,1,2,1,2]
 ;; ============================================================================
 DEF_FUNC list_repeat
+    V_UNPACK rdi, rdx           ; left  Value -> (payload, tag)
+    V_UNPACK rsi, rcx           ; right Value -> (payload, tag)
     push rbx
     push r12
     push r13
@@ -1589,6 +1594,7 @@ DEF_FUNC list_repeat
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .rep_overflow:
@@ -1607,6 +1613,8 @@ LIC_SELF   equ 8
 LIC_ITER   equ 16
 LIC_FRAME  equ 16
 DEF_FUNC list_inplace_concat, LIC_FRAME
+    V_UNPACK rdi, rdx           ; left  Value -> (payload, tag)
+    V_UNPACK rsi, rcx           ; right Value -> (payload, tag)
     push rbx
     push r12
     push r13
@@ -1711,6 +1719,7 @@ DEF_FUNC list_inplace_concat, LIC_FRAME
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .lic_type_error:
@@ -1728,6 +1737,8 @@ LIR_SELF    equ 8
 LIR_OLDSIZE equ 16
 LIR_FRAME   equ 16
 DEF_FUNC list_inplace_repeat, LIR_FRAME
+    V_UNPACK rdi, rdx           ; left  Value -> (payload, tag)
+    V_UNPACK rsi, rcx           ; right Value -> (payload, tag)
     push rbx
     push r12
     push r13
@@ -1841,6 +1852,7 @@ DEF_FUNC list_inplace_repeat, LIR_FRAME
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 .lir_overflow:
     extern exc_OverflowError_type

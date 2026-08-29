@@ -305,6 +305,8 @@ END_FUNC str_hash
 ;; Binary op handler passes right_tag in ecx. Direct callers must set ecx=TAG_PTR.
 ;; ============================================================================
 DEF_FUNC str_concat
+    V_UNPACK rdi, rdx           ; left  Value -> (payload, tag)
+    V_UNPACK rsi, rcx           ; right Value -> (payload, tag)
     ; Check right tag first — non-TAG_PTR means not a heap string
     cmp ecx, TAG_PTR
     jne .concat_type_error
@@ -360,6 +362,7 @@ DEF_FUNC str_concat
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .concat_type_error:
@@ -373,6 +376,8 @@ END_FUNC str_concat
 ;; String repetition via nb_multiply
 ;; ============================================================================
 DEF_FUNC str_repeat
+    V_UNPACK rdi, rdx           ; left  Value -> (payload, tag)
+    V_UNPACK rsi, rcx           ; right Value -> (payload, tag)
     push rbx
     push r12
     push r13
@@ -434,6 +439,7 @@ DEF_FUNC str_repeat
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 END_FUNC str_repeat
 
@@ -459,6 +465,8 @@ SM_ATAG    equ 56
 SM_FRAME   equ 56
 
 DEF_FUNC str_mod, SM_FRAME
+    V_UNPACK rdi, rdx           ; left  Value -> (payload, tag)
+    V_UNPACK rsi, rcx           ; right Value -> (payload, tag)
     ; Stack layout:
     ; [rbp-SM_FMT]     = fmt string
     ; [rbp-SM_ARGS]    = args (single value or tuple)

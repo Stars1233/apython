@@ -221,9 +221,12 @@ DEF_FUNC_BARE op_binary_op
     jz .binop_left_type
     ; Call sq_repeat(right=sequence, left=count): swap args
     xchg rdi, rsi
-    mov edx, [rsp + BO_LTAG]    ; count tag (left operand)
-    mov ecx, edx                 ; also in ecx (nb_multiply convention)
+    mov rdx, [rsp + BO_RTAG]    ; sequence tag (now the left argument)
+    mov rcx, [rsp + BO_LTAG]    ; count tag
+    V_PACK rdi, rdx
+    V_PACK rsi, rcx
     call rax
+    V_UNPACK rax, rdx           ; sq_repeat returns a Value
     jmp .binop_have_result
 
 .binop_not_smallint_left:
@@ -248,9 +251,12 @@ DEF_FUNC_BARE op_binary_op
     jz .binop_left_seq_done
     ; Call sq_repeat(left=sequence, right=count)
     ; rdi already = left (sequence), rsi already = right (count)
-    mov edx, [rsp + BO_RTAG]    ; count tag (right operand)
-    mov ecx, edx
+    mov rdx, [rsp + BO_LTAG]
+    mov rcx, [rsp + BO_RTAG]    ; count tag (right operand)
+    V_PACK rdi, rdx
+    V_PACK rsi, rcx
     call rax
+    V_UNPACK rax, rdx           ; sq_repeat returns a Value
     jmp .binop_have_result
 .binop_left_seq_done:
     mov rax, [rdi + PyObject.ob_type]
@@ -354,10 +360,13 @@ DEF_FUNC_BARE op_binary_op
 .binop_compat_ok:
 
 .binop_do_call:
-    ; Call the method: rdi=left, rsi=right, rdx=left_tag, rcx=right_tag
+    ; Call the method: rdi = left Value, rsi = right Value
     mov rdx, [rsp + BO_LTAG]
     mov rcx, [rsp + BO_RTAG]
+    V_PACK rdi, rdx
+    V_PACK rsi, rcx
     call rax
+    V_UNPACK rax, rdx           ; the nb_ slot returns a Value
 
 .binop_have_result:
     ; rax = result payload, rdx = result tag
@@ -401,7 +410,12 @@ DEF_FUNC_BARE op_binary_op
     test rax, rax
     jz .binop_try_dunder
     ; sq_concat(left, right): rdi=left, rsi=right already set
+    mov rdx, [rsp + BO_LTAG]
+    mov rcx, [rsp + BO_RTAG]
+    V_PACK rdi, rdx
+    V_PACK rsi, rcx
     call rax
+    V_UNPACK rax, rdx           ; sq_concat returns a Value
     jmp .binop_have_result
 
 .binop_seq_repeat_left:
@@ -409,9 +423,12 @@ DEF_FUNC_BARE op_binary_op
     test rax, rax
     jz .binop_try_dunder
     ; sq_repeat(left=sequence, right=count)
-    mov edx, [rsp + BO_RTAG]
-    mov ecx, edx
+    mov rdx, [rsp + BO_LTAG]
+    mov rcx, [rsp + BO_RTAG]
+    V_PACK rdi, rdx
+    V_PACK rsi, rcx
     call rax
+    V_UNPACK rax, rdx           ; sq_repeat returns a Value
     jmp .binop_have_result
 
 .binop_try_dunder:
