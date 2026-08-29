@@ -778,19 +778,58 @@ END_FUNC str_method_replace
 ;; Regs: rbx=self(sep), r12=list, r13=count, r14=sep_len
 ;; Stack: [rbp-48]=total_len, [rbp-56]=buf_ptr, [rbp-64]=write_pos
 ;; ============================================================================
+extern tuple_type_call
+
+; Release the sequence join() materialised for itself, if it made one.
+%macro JOIN_RELEASE_TMP 0
+    mov rdi, [rbp - SJ_TMP]
+    test rdi, rdi
+    jz %%no_tmp
+    mov qword [rbp - SJ_TMP], 0
+    call obj_decref
+%%no_tmp:
+%endmacro
+
+SJ_TOTAL equ 48
+SJ_BUF   equ 56
+SJ_POS   equ 64
+SJ_TMP   equ 72         ; materialised sequence, owned, or 0
 DEF_FUNC str_method_join
     push rbx
     push r12
     push r13
     push r14
     push r15
-    sub rsp, 32             ; 3 locals + alignment pad = 32
+    sub rsp, 48             ; 4 locals + alignment pad
 
     ; Load separator
     mov r15, rdi             ; save args ptr (r15 free until later)
     mov rbx, [rdi]           ; self (separator)
     INCREF rbx               ; borrow → own
-    mov r12, [r15 + 8]       ; args[1] = list
+    mov r12, [r15 + 8]       ; args[1] = the sequence Value
+
+    ; The loop below indexes ob_item directly, which only a list or a tuple
+    ; has.  join() takes any iterable, so materialise anything else -- that
+    ; includes a generator, a set, a str and a dict, all of which used to
+    ; read [obj+16] as a count and [obj+32] as an item array.
+    mov qword [rbp - SJ_TMP], 0
+    V_TEST_PTR_M [r15 + 8], rax
+    ja .join_materialise
+    mov rax, [r12 + PyObject.ob_type]
+    lea rcx, [rel list_type]
+    cmp rax, rcx
+    je .join_seq_ready
+    lea rcx, [rel tuple_type]
+    cmp rax, rcx
+    je .join_seq_ready
+.join_materialise:
+    lea rdi, [rel tuple_type]
+    lea rsi, [r15 + 8]
+    mov edx, 1
+    call tuple_type_call        ; raises for a non-iterable, as CPython does
+    mov [rbp - SJ_TMP], rax
+    mov r12, rax
+.join_seq_ready:
 
     mov r13, [r12 + PyListObject.ob_size]  ; item count
     mov r14, [rbx + PyStrObject.ob_size]   ; sep length
@@ -827,13 +866,13 @@ DEF_FUNC str_method_join
     dec rax
     imul rax, r14
     add r15, rax
-    mov [rbp-48], r15       ; total_len
+    mov [rbp - SJ_TOTAL], r15   ; total_len
 
     ; Allocate buffer
     lea rdi, [r15 + 8]
     call ap_malloc
-    mov [rbp-56], rax       ; buf_ptr
-    mov qword [rbp-64], 0   ; write_pos = 0
+    mov [rbp - SJ_BUF], rax     ; buf_ptr
+    mov qword [rbp - SJ_POS], 0 ; write_pos = 0
 
     ; Second pass: copy data
     xor ecx, ecx
@@ -846,12 +885,12 @@ DEF_FUNC str_method_join
     test rcx, rcx
     jz .join_no_sep
 
-    mov rdi, [rbp-56]
-    add rdi, [rbp-64]
+    mov rdi, [rbp - SJ_BUF]
+    add rdi, [rbp - SJ_POS]
     lea rsi, [rbx + PyStrObject.data]
     mov rdx, r14
     call ap_memcpy
-    add [rbp-64], r14
+    add [rbp - SJ_POS], r14
 
 .join_no_sep:
     mov rcx, [rsp]          ; reload index
@@ -861,32 +900,33 @@ DEF_FUNC str_method_join
     ; Heap string element
     mov rdx, [rax + PyStrObject.ob_size]
     push rdx                ; save item_len
-    mov rdi, [rbp-56]
-    add rdi, [rbp-64]
+    mov rdi, [rbp - SJ_BUF]
+    add rdi, [rbp - SJ_POS]
     lea rsi, [rax + PyStrObject.data]
     call ap_memcpy
     pop rdx                 ; item_len
-    add [rbp-64], rdx
+    add [rbp - SJ_POS], rdx
     pop rcx
     inc rcx
     jmp .join_copy_loop
 
 .join_make_str:
-    mov rdi, [rbp-56]
-    mov rsi, [rbp-48]       ; total_len
+    mov rdi, [rbp - SJ_BUF]
+    mov rsi, [rbp - SJ_TOTAL]   ; total_len
     call str_new_heap
     push rax
 
-    mov rdi, [rbp-56]
+    mov rdi, [rbp - SJ_BUF]
     call ap_free
 
     ; DECREF owned separator
     mov rdi, rbx
     call obj_decref
+    JOIN_RELEASE_TMP
 
     pop rax
     mov edx, TAG_PTR
-    add rsp, 32
+    add rsp, 48
     pop r15
     pop r14
     pop r13
@@ -900,11 +940,12 @@ DEF_FUNC str_method_join
     ; DECREF owned separator
     mov rdi, rbx
     call obj_decref
+    JOIN_RELEASE_TMP
 
     lea rdi, [rel empty_str_cstr]
     call str_from_cstr_heap
     mov edx, TAG_PTR
-    add rsp, 32
+    add rsp, 48
     pop r15
     pop r14
     pop r13
@@ -918,6 +959,7 @@ DEF_FUNC str_method_join
     pop rcx                 ; clean up pushed index from len_loop
     mov rdi, rbx
     call obj_decref         ; DECREF owned separator
+    JOIN_RELEASE_TMP
     lea rdi, [rel exc_TypeError_type]
     CSTRING rsi, "sequence item: expected str instance"
     call raise_exception
@@ -6056,29 +6098,70 @@ END_FUNC dict_method_clear
 
 ;; ============================================================================
 ;; dict_method_update(args, nargs) -> None
-;; args[0]=self, args[1]=other_dict
-;; Merge other_dict into self
+;; args[0]=self; then either a mapping, or an iterable of key/value pairs,
+;; and/or keyword arguments.  All three forms are ordinary Python; the old
+;; code read args[1] as a PyDictObject unconditionally, so d.update(5)
+;; dereferenced the payload, d.update([("a",1)]) read a list's fields as a
+;; dict's, and d.update(a=1) treated the keyword's value as the mapping.
 ;; ============================================================================
-DEF_FUNC dict_method_update
+DU_ARGS   equ 8
+DU_SELF   equ 16
+DU_NKW    equ 24
+DU_NPOS   equ 32
+DU_TMP    equ 40        ; materialised sequence, owned, or 0
+DU_PAIRV  equ 48        ; scratch Value, so &it can be passed as an args array
+DU_PAIR   equ 56        ; materialised pair, owned, or 0
+DU_KWNAMES equ 64       ; the consumed kw_names_pending tuple, borrowed
+DU_FRAME  equ 80
+
+DEF_FUNC dict_method_update, DU_FRAME
     push rbx
     push r12
     push r13
     push r14
 
-    mov rbx, [rdi]          ; self
+    mov rbx, [rdi]                  ; self
+    mov [rbp - DU_ARGS], rdi
+    mov [rbp - DU_SELF], rbx
+    mov qword [rbp - DU_TMP], 0
+    mov qword [rbp - DU_PAIR], 0
 
-    ; If nargs == 1 (just self, no args), return None immediately
-    cmp rsi, 1
-    jle .du_done
+    ; Keyword arguments occupy the last n_kw slots and are named by
+    ; kw_names_pending.  Consume it here so nothing downstream sees it.
+    xor eax, eax
+    mov [rbp - DU_KWNAMES], rax
+    mov rcx, [rel kw_names_pending]
+    test rcx, rcx
+    jz .du_have_nkw
+    mov [rbp - DU_KWNAMES], rcx
+    mov rax, [rcx + PyTupleObject.ob_size]
+    mov qword [rel kw_names_pending], 0
+.du_have_nkw:
+    mov [rbp - DU_NKW], rax
+    sub rsi, rax
+    mov [rbp - DU_NPOS], rsi        ; positional count, self included
 
-    mov r12, [rdi + 8]     ; other dict
+    cmp rsi, 2
+    jg .du_too_many
+    jl .du_kwargs                   ; self only: nothing positional to merge
 
+    ; ---- positional argument: a mapping, or an iterable of pairs ----------
+    mov rdi, [rbp - DU_ARGS]
+    mov r12, [rdi + 8]
+    V_TEST_PTR r12, rax
+    ja .du_from_pairs               ; an immediate is not a mapping; let the
+                                    ; iterator protocol produce the TypeError
+    mov rax, [r12 + PyObject.ob_type]
+    lea rcx, [rel dict_type]
+    cmp rax, rcx
+    jne .du_from_pairs
+
+    ; ---- other is a dict: walk its entry table ----------------------------
     mov r13, [r12 + PyDictObject.capacity]
     xor r14d, r14d
-
 .du_loop:
     cmp r14, r13
-    jge .du_done
+    jge .du_kwargs
 
     mov rax, [r12 + PyDictObject.entries]
     imul rcx, r14, DICT_ENTRY_SIZE
@@ -6088,17 +6171,76 @@ DEF_FUNC dict_method_update
     test rdi, rdi
     jz .du_next
 
-    ; dict_set(self, key, value, value_tag, key_tag)
-    push r14
     mov rdx, [rax + DictEntry.value]
-    mov rsi, rdi            ; key
-    mov rdi, rbx            ; self
+    mov rsi, rdi                    ; key Value
+    mov rdi, rbx                    ; self
     call dict_set
-    pop r14
 
 .du_next:
     inc r14
     jmp .du_loop
+
+    ; ---- other is an iterable of (key, value) pairs -----------------------
+.du_from_pairs:
+    mov rdi, [rbp - DU_ARGS]
+    lea rsi, [rdi + 8]
+    lea rdi, [rel tuple_type]
+    mov edx, 1
+    call tuple_type_call            ; raises for a non-iterable
+    mov [rbp - DU_TMP], rax
+    mov r12, rax
+    mov r13, [r12 + PyTupleObject.ob_size]
+    xor r14d, r14d
+.du_pair_loop:
+    cmp r14, r13
+    jge .du_pairs_done
+    mov rax, [r12 + PyTupleObject.ob_item]
+    mov rax, [rax + r14 * 8]
+    mov [rbp - DU_PAIRV], rax
+    ; Materialise the pair too, so any two-element iterable is accepted.
+    lea rsi, [rbp - DU_PAIRV]
+    lea rdi, [rel tuple_type]
+    mov edx, 1
+    call tuple_type_call
+    mov [rbp - DU_PAIR], rax
+    cmp qword [rax + PyTupleObject.ob_size], 2
+    jne .du_bad_pair
+    mov rcx, [rax + PyTupleObject.ob_item]
+    mov rsi, [rcx]                  ; key Value
+    mov rdx, [rcx + 8]              ; value Value
+    mov rdi, [rbp - DU_SELF]
+    call dict_set
+    mov rdi, [rbp - DU_PAIR]
+    mov qword [rbp - DU_PAIR], 0
+    call obj_decref
+    inc r14
+    jmp .du_pair_loop
+.du_pairs_done:
+    mov rdi, [rbp - DU_TMP]
+    mov qword [rbp - DU_TMP], 0
+    call obj_decref
+    mov rbx, [rbp - DU_SELF]
+
+    ; ---- keyword arguments -------------------------------------------------
+.du_kwargs:
+    mov r13, [rbp - DU_NKW]
+    test r13, r13
+    jz .du_done
+    mov r12, [rbp - DU_KWNAMES]
+    xor r14d, r14d
+.du_kw_loop:
+    cmp r14, r13
+    jge .du_done
+    mov rax, [r12 + PyTupleObject.ob_item]
+    mov rsi, [rax + r14 * 8]        ; keyword name str, already a Value
+    mov rax, [rbp - DU_NPOS]
+    add rax, r14                    ; value slot = n_pos + kw index
+    mov rcx, [rbp - DU_ARGS]
+    mov rdx, [rcx + rax * 8]        ; value Value
+    mov rdi, [rbp - DU_SELF]
+    call dict_set
+    inc r14
+    jmp .du_kw_loop
 
 .du_done:
     lea rax, [rel none_singleton]
@@ -6111,6 +6253,16 @@ DEF_FUNC dict_method_update
     leave
     V_PACK rax, rdx             ; builtins return one Value
     ret
+
+.du_bad_pair:
+    lea rdi, [rel exc_ValueError_type]
+    CSTRING rsi, "dictionary update sequence element has length != 2"
+    call raise_exception
+
+.du_too_many:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "update expected at most 1 argument"
+    call raise_exception
 END_FUNC dict_method_update
 
 ;; ============================================================================
@@ -8880,7 +9032,18 @@ BJ_LIST   equ 16
 BJ_TOTAL  equ 24
 BJ_BUF    equ 32
 BJ_WPOS   equ 40
-BJ_FRAME  equ 48
+BJ_TMP    equ 48        ; materialised sequence, owned, or 0
+BJ_FRAME  equ 64
+
+; Release the sequence bytes.join() materialised for itself, if it made one.
+%macro BJ_RELEASE_TMP 0
+    mov rdi, [rbp - BJ_TMP]
+    test rdi, rdi
+    jz %%no_tmp
+    mov qword [rbp - BJ_TMP], 0
+    call obj_decref
+%%no_tmp:
+%endmacro
 
 DEF_FUNC bytes_method_join, BJ_FRAME
     push rbx
@@ -8893,15 +9056,33 @@ DEF_FUNC bytes_method_join, BJ_FRAME
     jne .bj_error
 
     mov rax, [rdi]              ; self = separator bytes
-    mov rcx, [rdi + 8]         ; list
+    mov rcx, [rdi + 8]         ; the sequence Value
     mov [rbp - BJ_SEP], rax
     mov [rbp - BJ_LIST], rcx
+    mov qword [rbp - BJ_TMP], 0
 
-    ; Check list type
+    ; The loop below indexes ob_item directly, so the argument has to be a
+    ; list or a tuple.  join() takes any iterable, and the type check here
+    ; used to dereference the operand before making it -- b",".join(5) read
+    ; ob_type off the payload.
+    V_TEST_PTR_M [rdi + 8], rdx
+    ja .bj_materialise
     mov rdx, [rcx + PyObject.ob_type]
     lea r8, [rel list_type]
     cmp rdx, r8
-    jne .bj_error
+    je .bj_seq_ready
+    lea r8, [rel tuple_type]
+    cmp rdx, r8
+    je .bj_seq_ready
+.bj_materialise:
+    lea rsi, [rdi + 8]          ; &args[1]; rdi is still the args pointer
+    lea rdi, [rel tuple_type]
+    mov edx, 1
+    call tuple_type_call        ; raises for a non-iterable, as CPython does
+    mov [rbp - BJ_TMP], rax
+    mov [rbp - BJ_LIST], rax
+    mov rcx, rax
+.bj_seq_ready:
 
     ; Get count
     mov r12, [rcx + PyListObject.ob_size]   ; count
@@ -8919,7 +9100,15 @@ DEF_FUNC bytes_method_join, BJ_FRAME
     jge .bj_len_done
     mov rax, [rbp - BJ_LIST]
     mov rax, [rax + PyListObject.ob_item]
-    mov rax, [rax + rcx * 8]  ; item payload (8-byte stride)
+    mov rax, [rax + rcx * 8]  ; item Value (8-byte stride)
+    ; Each item must really be bytes: its ob_size is read as a length and
+    ; its data copied, so a str item produced garbage rather than TypeError.
+    V_TEST_PTR rax, rdx
+    ja .bj_item_error
+    mov rdx, [rax + PyObject.ob_type]
+    lea r8, [rel bytes_type]
+    cmp rdx, r8
+    jne .bj_item_error
     add r13, [rax + PyBytesObject.ob_size]
     inc rcx
     jmp .bj_len_loop
@@ -8986,6 +9175,7 @@ DEF_FUNC bytes_method_join, BJ_FRAME
 
     mov rdi, [rbp - BJ_BUF]
     call ap_free
+    BJ_RELEASE_TMP
 
     pop rax
     mov edx, TAG_PTR
@@ -9000,6 +9190,7 @@ DEF_FUNC bytes_method_join, BJ_FRAME
 
 .bj_empty:
     ; Return empty bytes
+    BJ_RELEASE_TMP
     xor edi, edi
     call bytes_new
     mov edx, TAG_PTR
@@ -9015,6 +9206,12 @@ DEF_FUNC bytes_method_join, BJ_FRAME
 .bj_error:
     lea rdi, [rel exc_TypeError_type]
     CSTRING rsi, "join() argument must be a list of bytes"
+    call raise_exception
+
+.bj_item_error:
+    BJ_RELEASE_TMP
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "sequence item: expected a bytes-like object"
     call raise_exception
 END_FUNC bytes_method_join
 
