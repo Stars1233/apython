@@ -27,6 +27,8 @@ extern exc_AttributeError_type
 extern exc_TypeError_type
 extern func_type
 extern type_type
+extern dict_type
+extern tuple_type
 extern method_traverse
 extern method_clear
 extern instance_traverse
@@ -624,6 +626,8 @@ DEF_FUNC type_call
     lea rax, [rel type_type]
     cmp rdi, rax
     jne .not_type_self
+    cmp edx, 3
+    je .type_three_arg
     cmp edx, 1
     jne .not_type_self
     ; type(x) → return type of x
@@ -653,6 +657,79 @@ DEF_FUNC type_call
     leave
     V_PACK rax, rdx             ; tp_call returns one Value
     ret
+.type_three_arg:
+    ; type(name, bases, namespace) builds a class, exactly as a class
+    ; statement does.  Falling through to .normal_type_call instead treated
+    ; type_type as an ordinary class: it allocated a PyInstanceObject-sized
+    ; block and wrote type fields into it, so the result printed as
+    ; <class ''> and the process aborted with a double free.
+    push rbx
+    mov rbx, rsi                        ; args
+
+    mov rdi, [rbx]                      ; name
+    V_TEST_PTR rdi, rax
+    ja .type_three_bad_name
+    mov rax, [rdi + PyObject.ob_type]
+    lea rcx, [rel str_type]
+    cmp rax, rcx
+    jne .type_three_bad_name
+
+    ; bases: an empty tuple means object, one entry means that base.  More
+    ; than one would be multiple inheritance, which __build_class__ does not
+    ; do either.
+    mov rsi, [rbx + 8]
+    V_TEST_PTR rsi, rax
+    ja .type_three_bad_bases
+    mov rax, [rsi + PyObject.ob_type]
+    lea rcx, [rel tuple_type]
+    cmp rax, rcx
+    jne .type_three_bad_bases
+    mov rcx, [rsi + PyTupleObject.ob_size]
+    test rcx, rcx
+    jz .type_three_no_base
+    cmp rcx, 1
+    jne .type_three_bad_bases
+    mov rax, [rsi + PyTupleObject.ob_item]
+    mov rsi, [rax]                      ; the single base
+    jmp .type_three_have_base
+.type_three_no_base:
+    xor esi, esi
+.type_three_have_base:
+
+    mov rdx, [rbx + 16]                 ; namespace dict
+    V_TEST_PTR rdx, rax
+    ja .type_three_bad_ns
+    mov rax, [rdx + PyObject.ob_type]
+    lea rcx, [rel dict_type]
+    cmp rax, rcx
+    jne .type_three_bad_ns
+
+    ; type_from_parts takes ownership of a reference to the namespace, which
+    ; becomes tp_dict, and keeps the name alive through tp_name.
+    inc qword [rdx + PyObject.ob_refcnt]
+    mov rdi, [rbx]
+    inc qword [rdi + PyObject.ob_refcnt]
+    extern type_from_parts
+    call type_from_parts
+    mov edx, TAG_PTR
+    pop rbx
+    leave
+    V_PACK rax, rdx
+    ret
+
+.type_three_bad_name:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "type() argument 1 must be str"
+    call raise_exception
+.type_three_bad_bases:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "type() argument 2 must be a tuple of at most one base"
+    call raise_exception
+.type_three_bad_ns:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "type() argument 3 must be dict"
+    call raise_exception
+
 .type_bool:
     extern bool_type
     lea rax, [rel bool_type]

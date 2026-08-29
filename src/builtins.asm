@@ -1333,75 +1333,30 @@ DEF_FUNC builtin_float, BF_FRAME
 END_FUNC builtin_float
 
 ;; ============================================================================
-;; builtin___build_class__(PyObject **args, int64_t nargs) -> PyObject*
-;; __build_class__(body_func, class_name, *bases)
+;; type_from_parts(rdi = name str, rsi = base type or NULL, rdx = namespace dict)
+;;   -> rax = the new type object, one strong reference
 ;;
-;; 1. body_func = args[0], class_name = args[1]
-;; 2. Create a class dict
-;; 3. Execute body_func with class_dict as locals
-;; 4. Create a new type object with class_dict as tp_dict
-;; 5. Return the new type
+;; The heaptype construction shared by __build_class__ and the three-argument
+;; type().  Extracted rather than duplicated: type() used to fall through to
+;; type_call's .normal_type_call, which treats type_type as an ordinary class
+;; -- it allocated an instance-sized block and let type fields be written into
+;; it, printing <class ''> and then aborting with a double free.
+;;
+;; The frame is built by hand, not by DEF_FUNC's size argument, so that the
+;; body's [rbp-48] slot keeps meaning what it meant inside __build_class__.
 ;; ============================================================================
-DEF_FUNC builtin___build_class__
+global type_from_parts
+DEF_FUNC type_from_parts
     push rbx
     push r12
     push r13
     push r14
     push r15
-    sub rsp, 24             ; 3 slots: [rbp-48]=base_class, [rbp-56]=unused, [rbp-64]=align
+    sub rsp, 24
 
-    ; Check nargs >= 2
-    cmp rsi, 2
-    jl .build_class_error
-
-    mov rbx, rdi            ; rbx = args
-    ; r12 will be used later for the type object
-
-    ; Save base class if present (args[2])
-    xor eax, eax
-    cmp rsi, 3
-    jl .bc_no_base
-    mov rax, [rbx + 16]    ; base = args[2]
-
-    ; Prevent subclassing bool
-    extern bool_type
-    lea rcx, [rel bool_type]
-    cmp rax, rcx
-    je .build_class_bool_error
-
-.bc_no_base:
-    mov [rbp-48], rax       ; save base_class (or NULL)
-
-    mov r13, [rbx]          ; r13 = body_func (args[0])
-    mov r14, [rbx + 8]     ; r14 = class_name (args[1])
-
-    ; Create class dict (will become tp_dict)
-    call dict_new
-    mov r15, rax            ; r15 = class_dict
-
-    ; Execute body function with class_dict as locals
-    ; frame_new(code, globals, builtins, locals)
-    mov rdi, [r13 + PyFuncObject.func_code]     ; code from body func
-    mov rsi, [r13 + PyFuncObject.func_globals]  ; globals from body func
-    mov rdx, [rel builtins_dict_global]         ; builtins dict
-    mov rcx, r15                                ; class_dict as locals
-    call frame_new
-    mov r12, rax            ; r12 = new frame
-
-    ; Store body function in frame for COPY_FREE_VARS (closure support)
-    mov [r12 + PyFrame.func_obj], r13
-
-    ; eval_frame(frame)
-    mov rdi, r12
-    call eval_frame
-    V_UNPACK rax, rdx           ; eval_frame returns a Value
-    ; DECREF return value (should be None — TAG_NONE, not a pointer)
-    mov rsi, rdx
-    DECREF_VAL rax, rsi
-
-    ; Free the frame
-    mov rdi, r12
-    call frame_free
+    mov r14, rdi                ; class name str
+    mov r15, rdx                ; namespace dict, becomes tp_dict
+    mov [rbp-48], rsi           ; base type, or NULL
 
     ; Allocate the type object (GC-tracked)
     mov edi, TYPE_OBJECT_SIZE
@@ -1756,11 +1711,99 @@ DEF_FUNC builtin___build_class__
     pop r13
     pop r12
     pop rbx
+    leave
+    ret
+END_FUNC type_from_parts
+
+;; ============================================================================
+;; builtin___build_class__(PyObject **args, int64_t nargs) -> PyObject*
+;; __build_class__(body_func, class_name, *bases)
+;;
+;; 1. body_func = args[0], class_name = args[1]
+;; 2. Create a class dict
+;; 3. Execute body_func with class_dict as locals
+;; 4. Create a new type object with class_dict as tp_dict
+;; 5. Return the new type
+;; ============================================================================
+DEF_FUNC builtin___build_class__
+    push rbx
+    push r12
+    push r13
+    push r14
+    push r15
+    sub rsp, 24             ; 3 slots: [rbp-48]=base_class, [rbp-56]=unused, [rbp-64]=align
+
+    ; Check nargs >= 2
+    cmp rsi, 2
+    jl .build_class_error
+
+    mov rbx, rdi            ; rbx = args
+    ; r12 will be used later for the type object
+
+    ; Save base class if present (args[2])
+    xor eax, eax
+    cmp rsi, 3
+    jl .bc_no_base
+    mov rax, [rbx + 16]    ; base = args[2]
+
+    ; Prevent subclassing bool
+    extern bool_type
+    lea rcx, [rel bool_type]
+    cmp rax, rcx
+    je .build_class_bool_error
+
+.bc_no_base:
+    mov [rbp-48], rax       ; save base_class (or NULL)
+
+    mov r13, [rbx]          ; r13 = body_func (args[0])
+    mov r14, [rbx + 8]     ; r14 = class_name (args[1])
+
+    ; Create class dict (will become tp_dict)
+    call dict_new
+    mov r15, rax            ; r15 = class_dict
+
+    ; Execute body function with class_dict as locals
+    ; frame_new(code, globals, builtins, locals)
+    mov rdi, [r13 + PyFuncObject.func_code]     ; code from body func
+    mov rsi, [r13 + PyFuncObject.func_globals]  ; globals from body func
+    mov rdx, [rel builtins_dict_global]         ; builtins dict
+    mov rcx, r15                                ; class_dict as locals
+    call frame_new
+    mov r12, rax            ; r12 = new frame
+
+    ; Store body function in frame for COPY_FREE_VARS (closure support)
+    mov [r12 + PyFrame.func_obj], r13
+
+    ; eval_frame(frame)
+    mov rdi, r12
+    call eval_frame
+    V_UNPACK rax, rdx           ; eval_frame returns a Value
+    ; DECREF return value (should be None — TAG_NONE, not a pointer)
+    mov rsi, rdx
+    DECREF_VAL rax, rsi
+
+    ; Free the frame
+    mov rdi, r12
+    call frame_free
+
+    ; Build the heaptype from (name, base, namespace); the three-argument
+    ; type() reaches the same code.
+    mov rdi, r14
+    mov rsi, [rbp-48]
+    mov rdx, r15
+    call type_from_parts
+
+    add rsp, 24
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
     mov edx, TAG_PTR
     leave
     V_PACK rax, rdx             ; builtins return one Value
-    V_PACK rax, rdx             ; builtins return one Value
     ret
+
 
 .build_class_error:
     lea rdi, [rel exc_TypeError_type]
