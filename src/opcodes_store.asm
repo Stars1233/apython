@@ -102,7 +102,7 @@ DEF_FUNC_BARE op_store_name
     mov rsi, r8                ; rsi = name (key)
     mov rdx, r9                ; rdx = value payload
     mov rcx, r10               ; rcx = value tag
-    mov r8d, TAG_PTR
+    V_PACK rdx, rcx
     push r9
     push r10
     call dict_set
@@ -130,7 +130,7 @@ DEF_FUNC_BARE op_store_global
     mov rsi, r8                ; rsi = name (key)
     mov rdx, r9                ; rdx = value payload
     mov rcx, r10               ; rcx = value tag
-    mov r8d, TAG_PTR
+    V_PACK rdx, rcx
     push r9
     push r10
     call dict_set
@@ -188,10 +188,10 @@ DEF_FUNC op_store_attr, SA_FRAME
 
     push rcx                      ; save current type
     mov rsi, [rbp - SA_NAME]      ; name
-    mov edx, TAG_PTR
     call dict_get
+    V_UNPACK rax, rdx           ; dict_get returns a Value
     pop rcx
-    test edx, edx
+    test rax, rax
     jnz .sa_found_in_type         ; found attr in type dict
 .sa_walk_next:
     mov rcx, [rcx + PyTypeObject.tp_base]
@@ -349,14 +349,12 @@ DEF_FUNC_BARE op_delete_name
     test rdi, rdi
     jz .dn_globals
     push rsi
-    mov edx, TAG_PTR
     call dict_del
     pop rsi
     test eax, eax
     jz .dn_ok                  ; found and deleted
 .dn_globals:
     mov rdi, [r12 + PyFrame.globals]
-    mov edx, TAG_PTR
     call dict_del
     test eax, eax
     jnz .dn_error
@@ -376,7 +374,6 @@ DEF_FUNC_BARE op_delete_global
     LOAD_CO_NAMES rsi
     mov rsi, [rsi + rcx]      ; name
     mov rdi, [r12 + PyFrame.globals]
-    mov edx, TAG_PTR
     call dict_del
     test eax, eax
     jnz .dg_error
@@ -454,7 +451,7 @@ DEF_FUNC op_delete_subscr, DS_FRAME
     cmp qword [rbp - DS_OTAG], TAG_PTR
     jne .ds_error
 
-    ; Call mp_ass_subscript(obj, key, NULL)
+    ; Call mp_ass_subscript(obj, key Value, NULL) -- a NULL value means delete
     mov rax, [rdi + PyObject.ob_type]
     mov rax, [rax + PyTypeObject.tp_as_mapping]
     test rax, rax
@@ -463,9 +460,9 @@ DEF_FUNC op_delete_subscr, DS_FRAME
     test rax, rax
     jz .ds_error
 
-    xor edx, edx               ; value = NULL (delete)
-    mov rcx, [rbp - DS_KTAG]  ; key tag (4th arg)
-    xor r8d, r8d               ; value tag = TAG_NULL (5th arg)
+    mov rcx, [rbp - DS_KTAG]
+    V_PACK rsi, rcx            ; key Value
+    xor edx, edx               ; value = 0 (delete)
     call rax
 
     ; DECREF key and obj (tag-aware)

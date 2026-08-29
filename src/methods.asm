@@ -97,8 +97,6 @@ DEF_FUNC_LOCAL add_method_to_dict
     mov rdi, rbx
     mov rsi, rax            ; key
     mov rdx, [rsp + 8]     ; func obj
-    mov ecx, TAG_PTR
-    mov r8d, TAG_PTR
     call dict_set
 
     ; DECREF key (dict_set did INCREF)
@@ -149,8 +147,6 @@ DEF_FUNC_LOCAL add_method_to_dict_checked
     mov rdi, rbx
     mov rsi, rax            ; key
     mov rdx, [rsp + 8]     ; func obj
-    mov ecx, TAG_PTR
-    mov r8d, TAG_PTR
     call dict_set
 
     ; DECREF key (dict_set did INCREF)
@@ -1459,8 +1455,8 @@ DEF_FUNC str_method_format_map, FM_FRAME
     ; Look up in mapping: dict_get(dict, key, key_tag)
     mov rdi, [rbp - FM_MAP]
     mov rsi, rax
-    mov edx, TAG_PTR
     call dict_get
+    V_UNPACK rax, rdx           ; dict_get returns a Value
     ; rax = value payload, edx = value tag
     push rax
     push rdx
@@ -3432,7 +3428,9 @@ DEF_FUNC str_method_translate
     mov rdi, r14
     mov rsi, rax
     mov edx, edx
+    V_PACK rsi, rdx           ; dict_get/del take a key Value
     call dict_get
+    V_UNPACK rax, rdx           ; dict_get returns a Value
     pop r8                   ; original key tag
     pop r9                   ; original key payload
     test edx, edx
@@ -3608,8 +3606,8 @@ DEF_FUNC str_staticmethod_maketrans, SMT_FRAME
     movzx esi, byte [rcx + PyStrObject.data + r13]  ; key = from ordinal
     mov rax, [rbp - SMT_TO]
     movzx edx, byte [rax + PyStrObject.data + r13]  ; value = to ordinal
-    mov ecx, TAG_SMALLINT           ; value_tag
-    mov r8d, TAG_SMALLINT           ; key_tag
+    V_PACK_I64 rdx, rcx      ; dict_set takes Values
+    V_PACK_I64 rsi, r8       ; dict_set takes Values
     call dict_set
     pop r13
 
@@ -5433,6 +5431,8 @@ DEF_FUNC_BARE list_dunder_setitem
     mov ecx, [rdi + 24]     ; key tag
     mov rdx, [rdi + 32]     ; value payload
     mov r8d, [rdi + 40]     ; value tag
+    V_PACK rsi, rcx         ; list_ass_subscript takes Values
+    V_PACK rdx, r8
     mov rdi, rax
     jmp list_ass_subscript
 END_FUNC list_dunder_setitem
@@ -5444,8 +5444,8 @@ DEF_FUNC list_dunder_delitem
     mov rax, [rdi]          ; self
     mov rsi, [rdi + 16]     ; key payload
     mov ecx, [rdi + 24]     ; key tag
-    xor edx, edx            ; value = NULL
-    xor r8d, r8d            ; value tag = TAG_NULL
+    V_PACK rsi, rcx         ; list_ass_subscript takes Values
+    xor edx, edx            ; a NULL value Value means "delete"
     mov rdi, rax
     call list_ass_subscript
     extern none_singleton
@@ -5741,8 +5741,9 @@ DEF_FUNC dict_method_get
     mov rsi, [rax + 16]     ; key payload
     mov rdx, [rax + 24]     ; key tag
     call dict_get
+    V_UNPACK rax, rdx           ; dict_get returns a Value
 
-    test edx, edx
+    test rax, rax
     jnz .dg_found
 
     ; Not found - return default or None
@@ -5846,7 +5847,9 @@ dict_method_pop_v2 equ dict_method_pop
     mov rdi, rbx
     mov rsi, r13
     mov edx, r15d           ; key tag
+    V_PACK rsi, rdx           ; dict_get/del take a key Value
     call dict_get
+    V_UNPACK rax, rdx           ; dict_get returns a Value
     test edx, edx
     jz .dpop2_not_found
 
@@ -5858,6 +5861,7 @@ dict_method_pop_v2 equ dict_method_pop
     mov rdi, rbx
     mov rsi, r13
     mov rdx, r15            ; key tag
+    V_PACK rsi, rdx           ; dict_get/del take a key Value
     call dict_del
 
     pop rax                 ; restore payload
@@ -5988,9 +5992,7 @@ DEF_FUNC dict_method_update
 
     ; dict_set(self, key, value, value_tag, key_tag)
     push r14
-    V_UNPACK rdi, r8        ; dict_set still takes (payload, tag)
     mov rdx, [rax + DictEntry.value]
-    V_UNPACK rdx, rcx
     mov rsi, rdi            ; key
     mov rdi, rbx            ; self
     call dict_set
@@ -6035,9 +6037,11 @@ DEF_FUNC dict_method_setdefault
     mov rdi, rbx
     mov rsi, r12
     mov edx, r14d           ; key tag
+    V_PACK rsi, rdx           ; dict_get/del take a key Value
     call dict_get
+    V_UNPACK rax, rdx           ; dict_get returns a Value
 
-    test edx, edx
+    test rax, rax
     jnz .sd_found
 
     ; Not found - determine default value
@@ -6058,7 +6062,9 @@ DEF_FUNC dict_method_setdefault
     mov rsi, r12
     mov rdx, r13
     mov ecx, r15d           ; default val tag
+    V_PACK rdx, rcx
     mov r8d, r14d           ; key tag
+    V_PACK rsi, r8
     call dict_set
 
     ; INCREF and return default_val
@@ -6120,9 +6126,7 @@ DEF_FUNC dict_method_copy
 
     ; dict_set(new_dict, key, value, value_tag, key_tag)
     push r14
-    V_UNPACK rdi, r8        ; dict_set still takes (payload, tag)
     mov rdx, [rax + DictEntry.value]
-    V_UNPACK rdx, rcx
     mov rsi, rdi            ; key
     mov rdi, r12            ; new dict
     call dict_set
@@ -6199,11 +6203,13 @@ DEF_FUNC dict_classmethod_fromkeys, DFK_FRAME
     ; Save key before loading value (which overwrites rdx)
     mov rsi, rax                   ; key payload
     mov r8, rdx                    ; key tag
+    V_PACK rsi, r8
 
-    ; dict_set(dict, key, value, value_tag, key_tag)
+    ; dict_set(dict, key Value, value Value)
     mov rdi, [rbp - DFK_DICT]
-    mov rdx, [rbp - DFK_VAL]       ; value payload (overwrites old rdx)
+    mov rdx, [rbp - DFK_VAL]       ; value payload
     mov rcx, [rbp - DFK_VTAG]      ; value tag
+    V_PACK rdx, rcx
     call dict_set
 
     jmp .dfk_loop
@@ -6296,6 +6302,7 @@ DEF_FUNC dict_method_popitem
     mov rdi, rbx
     mov rsi, r13
     mov edx, r8d            ; key tag from the entry
+    V_PACK rsi, rdx           ; dict_get/del take a key Value
     call dict_del
 
     mov rax, r12
@@ -9678,8 +9685,6 @@ DEF_FUNC methods_init
     mov rdi, rbx
     mov rsi, rax
     mov rdx, [rsp + 8]
-    mov ecx, TAG_PTR
-    mov r8d, TAG_PTR
     call dict_set
 
     pop rdi
@@ -9914,8 +9919,6 @@ DEF_FUNC methods_init
     mov rdi, rbx
     mov rsi, rax
     mov rdx, [rsp + 8]
-    mov ecx, TAG_PTR
-    mov r8d, TAG_PTR
     call dict_set
 
     pop rdi
@@ -10054,8 +10057,6 @@ DEF_FUNC methods_init
     mov rdi, rbx
     mov rsi, rax                ; key
     mov rdx, [rsp + 8]         ; staticmethod wrapper
-    mov ecx, TAG_PTR
-    mov r8d, TAG_PTR
     call dict_set
 
     ; DECREF key
@@ -10121,8 +10122,6 @@ DEF_FUNC methods_init
     mov rdi, rbx
     mov rsi, rax                ; key
     mov rdx, [rsp + 8]         ; classmethod wrapper
-    mov ecx, TAG_PTR
-    mov r8d, TAG_PTR
     call dict_set
 
     ; DECREF key
@@ -10184,8 +10183,6 @@ DEF_FUNC methods_init
     mov rdi, rbx
     mov rsi, rax
     mov rdx, [rsp + 8]
-    mov ecx, TAG_PTR
-    mov r8d, TAG_PTR
     call dict_set
 
     pop rdi

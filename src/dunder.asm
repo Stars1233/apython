@@ -45,8 +45,8 @@ DEF_FUNC dunder_lookup
     jz .try_base
 
     mov rsi, r13
-    mov edx, TAG_PTR
     call dict_get           ; dict_get(tp_dict, name_str) -> borrowed ref
+    V_UNPACK rax, rdx           ; dict_get returns a Value
     test edx, edx
     jnz .found
 

@@ -2042,8 +2042,8 @@ extern obj_decref
     mov rbx, rax                      ; save key in callee-saved rbx
     mov rdi, [rbp - IS_MODDICT]
     mov rsi, rax                      ; key = "__all__"
-    mov edx, TAG_PTR
     call dict_get                     ; → (rax=value, rdx=tag) or (0, 0)
+    V_UNPACK rax, rdx           ; dict_get returns a Value
     ; Save result before DECREF of key
     push rax
     push rdx
@@ -2087,12 +2087,12 @@ extern obj_decref
     mov rax, [rbp - IS_ITEMS]
     mov rdx, [rbp - IS_ITEM_TAGS]
     mov rsi, [rax + rcx * 8]          ; name payload
-    V_UNPACK rsi, rdx
 
     ; Look up name in mod_dict
     mov rdi, [rbp - IS_MODDICT]
     ; rsi = key payload, rdx = key_tag (already set)
     call dict_get                     ; → (rax=value, rdx=value_tag) or (0, 0)
+    V_UNPACK rax, rdx           ; dict_get returns a Value
     test edx, edx
     jz .is_all_next                   ; name not in module dict → skip
 
@@ -2104,10 +2104,10 @@ extern obj_decref
     mov rax, [rbp - IS_ITEMS]
     mov rdx, [rbp - IS_ITEM_TAGS]
     mov rsi, [rax + rcx * 8]          ; name payload
-    V_UNPACK rsi, r8
     mov rdi, [rbp - IS_LOCALS]
     mov rdx, r9                       ; value payload
     mov rcx, r10                      ; value tag
+    V_PACK rdx, rcx
     call dict_set
 
 .is_all_next:
@@ -2148,12 +2148,10 @@ extern obj_decref
     je .is_dict_next
 
 .is_dict_copy:
-    ; dict_set(locals, key, value, value_tag, key_tag)
+    ; dict_set(locals, key Value, value Value)
     mov rdi, [rbp - IS_LOCALS]
-    ; rsi = key payload (already set)
+    ; rsi = key Value (already set), value comes straight from the entry
     mov rdx, [rbx + DictEntry.value]
-    V_UNPACK rdx, rcx
-    ; r8 = key_tag (already set)
     call dict_set
 
 .is_dict_next:
@@ -2370,8 +2368,6 @@ DEF_FUNC op_setup_annotations
     mov rdi, rbx                ; dict = locals
     mov rsi, rax                ; key = "__annotations__"
     mov rdx, r12                ; value = new annotations dict
-    mov ecx, TAG_PTR            ; value tag
-    mov r8d, TAG_PTR            ; key tag
     push rax                    ; save key for DECREF
     push rdx                    ; save value for DECREF
     call dict_set
@@ -2428,16 +2424,16 @@ DEF_FUNC_BARE op_load_from_dict_or_globals
 
     ; Try dict first
     mov rsi, [rsp + 8]         ; name
-    mov edx, TAG_PTR
     call dict_get
+    V_UNPACK rax, rdx           ; dict_get returns a Value
     test edx, edx
     jnz .lfdg_found
 
     ; Try globals
     mov rdi, [r12 + PyFrame.globals]
     mov rsi, [rsp + 8]         ; name
-    mov edx, TAG_PTR
     call dict_get
+    V_UNPACK rax, rdx           ; dict_get returns a Value
     test edx, edx
     jnz .lfdg_found
 
@@ -2448,8 +2444,8 @@ DEF_FUNC_BARE op_load_from_dict_or_globals
 
     ; Try builtins
     mov rdi, [r12 + PyFrame.builtins]
-    mov edx, TAG_PTR
     call dict_get
+    V_UNPACK rax, rdx           ; dict_get returns a Value
     test edx, edx
     jnz .lfdg_found_no_pop
 
@@ -2516,9 +2512,9 @@ DEF_FUNC op_load_from_dict_or_deref, LFDOD_FRAME
     cmp r8, TAG_PTR
     jne .lfdod_error
 
-    ; Try dict first
-    mov edx, TAG_PTR
+    ; Try dict first (the name is a string, so it is already a Value)
     call dict_get
+    V_UNPACK rax, rdx           ; dict_get returns a Value
     test edx, edx
     jnz .lfdod_found
 
@@ -2677,8 +2673,8 @@ DEF_FUNC op_match_keys, MK_FRAME
 
     ; Look up in subject
     mov rdi, [rbp - MK_SUBJ]
-    mov edx, TAG_PTR
     call dict_get
+    V_UNPACK rax, rdx           ; dict_get returns a Value
     test edx, edx
     jz .mk_fail
 
@@ -2807,8 +2803,8 @@ DEF_FUNC op_match_class, MC_FRAME
     mov rsi, rax                    ; rsi = "__match_args__" str obj
     pop rdi                         ; restore dict
     push rsi                        ; save string for DECREF
-    mov edx, TAG_PTR
     call dict_get
+    V_UNPACK rax, rdx           ; dict_get returns a Value
     pop rsi                         ; rsi = string to DECREF
     push rdx                        ; save dict_get tag
     push rax                        ; save dict_get payload

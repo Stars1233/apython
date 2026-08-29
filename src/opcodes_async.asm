@@ -253,10 +253,10 @@ DEF_FUNC op_before_async_with, BAW_FRAME
     mov rdi, [rbx + PyObject.ob_type]
     mov rdi, [rdi + PyTypeObject.tp_dict]
     mov rsi, r12
-    mov edx, TAG_PTR
     call dict_get
+    V_UNPACK rax, rdx           ; dict_get returns a Value
     ; rax = value payload, edx = tag
-    test edx, edx
+    test rax, rax
     jz .baw_no_exit_decref_name
     cmp edx, TAG_PTR
     jne .baw_no_exit_decref_name
@@ -286,8 +286,8 @@ DEF_FUNC op_before_async_with, BAW_FRAME
     mov rdi, [rbx + PyObject.ob_type]
     mov rdi, [rdi + PyTypeObject.tp_dict]
     mov rsi, r12
-    mov edx, TAG_PTR
     call dict_get
+    V_UNPACK rax, rdx           ; dict_get returns a Value
     test edx, edx
     jz .baw_no_enter_decref_name
     cmp edx, TAG_PTR

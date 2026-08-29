@@ -353,8 +353,8 @@ DEF_FUNC exc_getattr
     test rdi, rdi
     jz .check_exc_dict
     mov rsi, r12
-    mov edx, TAG_PTR
     call dict_get
+    V_UNPACK rax, rdx           ; dict_get returns a Value
     test edx, edx
     jnz .found_in_type
 
@@ -364,8 +364,8 @@ DEF_FUNC exc_getattr
     test rdi, rdi
     jz .not_found
     mov rsi, r12
-    mov edx, TAG_PTR
     call dict_get
+    V_UNPACK rax, rdx           ; dict_get returns a Value
     test edx, edx
     jnz .found_in_dict
 
@@ -493,11 +493,9 @@ DEF_FUNC exc_setattr
     pop rdx
     pop rsi
 .esa_have_dict:
-    ; dict_set(dict, key, value, value_tag, key_tag)
     mov rdi, [rbx + PyExceptionObject.exc_dict]
-    ; rsi = name (key), rdx = value already set
-    ; ecx = value_tag, r8d = key_tag (TAG_PTR for string name)
-    mov r8d, TAG_PTR
+    ; rsi = name (a pointer, so already a Value); rdx/ecx = value pair
+    V_PACK rdx, rcx             ; dict_set takes Values
     call dict_set
 
     xor eax, eax            ; return 0 (success)

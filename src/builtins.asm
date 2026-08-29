@@ -1429,8 +1429,8 @@ DEF_FUNC builtin___build_class__
     push rax                        ; save __slots__ str
     mov rdi, r15                    ; class_dict
     mov rsi, rax
-    mov edx, TAG_PTR
     call dict_get
+    V_UNPACK rax, rdx           ; dict_get returns a Value
     pop rdi                         ; __slots__ str
     push rdx                        ; save dict_get tag
     push rax                        ; save dict_get value
@@ -1516,8 +1516,6 @@ DEF_FUNC builtin___build_class__
     pop rsi                        ; name (key)
     mov rdx, rax                   ; descriptor (value)
     push rax                       ; save descriptor for DECREF
-    mov ecx, TAG_PTR               ; value_tag
-    mov r8, TAG_PTR                ; key_tag
     call dict_set
 
     ; DECREF our ref on descriptor (dict now owns one via INCREF in dict_set)
@@ -1541,8 +1539,8 @@ DEF_FUNC builtin___build_class__
 
     mov rdi, r15            ; class_dict
     mov rsi, rax            ; "__init__" str
-    mov edx, TAG_PTR
     call dict_get
+    V_UNPACK rax, rdx           ; dict_get returns a Value
     mov rbx, rax            ; rbx = __init__ func or NULL
 
     ; DECREF the "__init__" string
@@ -1687,8 +1685,8 @@ DEF_FUNC builtin___build_class__
     push rax                ; save key str
     mov rdi, r15            ; class_dict
     mov rsi, rax
-    mov edx, TAG_PTR
     call dict_get           ; returns cell or NULL
+    V_UNPACK rax, rdx           ; dict_get returns a Value
     pop rdi                 ; key str
     push rdx                ; save dict_get tag
     push rax                ; save cell payload
@@ -1768,8 +1766,6 @@ DEF_FUNC_LOCAL add_builtin
     mov rdi, rbx
     mov rsi, rax               ; key
     mov rdx, [rsp + 8]        ; func obj
-    mov ecx, TAG_PTR
-    mov r8d, TAG_PTR
     call dict_set
 
     ; DECREF key and value
@@ -1805,14 +1801,13 @@ DEF_FUNC_LOCAL add_builtin_type
     mov rdi, rsi
     call str_from_cstr_heap
     mov rcx, rax               ; key str
+    V_PACK rdx, rcx
 
     ; dict_set(dict, key, type_obj)
     mov rdi, rbx
     mov rsi, rcx
     pop rdx                    ; type_obj
     push rcx                   ; save key for DECREF
-    mov ecx, TAG_PTR
-    mov r8d, TAG_PTR
     call dict_set
 
     ; DECREF key
@@ -2644,8 +2639,6 @@ DEF_FUNC_LOCAL add_exc_type_builtin
     mov rdi, rbx
     mov rsi, rax               ; key
     mov rdx, r12               ; type object
-    mov ecx, TAG_PTR
-    mov r8d, TAG_PTR
     call dict_set
 
     ; DECREF key

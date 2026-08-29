@@ -429,8 +429,6 @@ END_FUNC sre_getcodesize_func
     mov rdi, r12
     mov rsi, rax
     mov rdx, [rsp + 8]
-    mov ecx, TAG_PTR
-    mov r8d, TAG_PTR
     call dict_set
     pop rdi
     call obj_decref
@@ -447,8 +445,7 @@ END_FUNC sre_getcodesize_func
     mov rdi, r12
     mov rsi, rax
     mov rdx, %2
-    mov ecx, TAG_SMALLINT
-    mov r8d, TAG_PTR
+    V_PACK_I64 rdx, rcx      ; dict_set takes Values
     call dict_set
     pop rdi
     call obj_decref
@@ -467,8 +464,6 @@ END_FUNC sre_getcodesize_func
     pop rsi
     push rdx
     push rsi
-    mov ecx, TAG_PTR
-    mov r8d, TAG_PTR
     call dict_set
     pop rdi
     call obj_decref

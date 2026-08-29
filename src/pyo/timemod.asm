@@ -110,8 +110,6 @@ DEF_FUNC time_module_create
     mov rdi, r12
     mov rsi, rax
     mov rdx, [rsp + 8]
-    mov ecx, TAG_PTR
-    mov r8d, TAG_PTR
     call dict_set
     pop rdi
     call obj_decref
@@ -129,8 +127,6 @@ DEF_FUNC time_module_create
     mov rdi, r12
     mov rsi, rax
     mov rdx, [rsp + 8]
-    mov ecx, TAG_PTR
-    mov r8d, TAG_PTR
     call dict_set
     pop rdi
     call obj_decref

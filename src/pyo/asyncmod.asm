@@ -591,8 +591,6 @@ DEF_FUNC asyncio_module_create
     mov rdi, r12
     mov rsi, rax
     mov rdx, [rsp + 8]
-    mov ecx, TAG_PTR
-    mov r8d, TAG_PTR
     call dict_set
     pop rdi
     call obj_decref
@@ -610,8 +608,6 @@ DEF_FUNC asyncio_module_create
     mov rdi, r12
     mov rsi, rax
     mov rdx, [rsp + 8]
-    mov ecx, TAG_PTR
-    mov r8d, TAG_PTR
     call dict_set
     pop rdi
     call obj_decref
@@ -629,8 +625,6 @@ DEF_FUNC asyncio_module_create
     mov rdi, r12
     mov rsi, rax
     mov rdx, [rsp + 8]
-    mov ecx, TAG_PTR
-    mov r8d, TAG_PTR
     call dict_set
     pop rdi
     call obj_decref
@@ -648,8 +642,6 @@ DEF_FUNC asyncio_module_create
     mov rdi, r12
     mov rsi, rax
     mov rdx, [rsp + 8]
-    mov ecx, TAG_PTR
-    mov r8d, TAG_PTR
     call dict_set
     pop rdi
     call obj_decref
@@ -667,8 +659,6 @@ DEF_FUNC asyncio_module_create
     mov rdi, r12
     mov rsi, rax
     mov rdx, [rsp + 8]
-    mov ecx, TAG_PTR
-    mov r8d, TAG_PTR
     call dict_set
     pop rdi
     call obj_decref
@@ -686,8 +676,6 @@ DEF_FUNC asyncio_module_create
     mov rdi, r12
     mov rsi, rax
     mov rdx, [rsp + 8]
-    mov ecx, TAG_PTR
-    mov r8d, TAG_PTR
     call dict_set
     pop rdi
     call obj_decref
@@ -705,8 +693,6 @@ DEF_FUNC asyncio_module_create
     mov rdi, r12
     mov rsi, rax
     mov rdx, [rsp + 8]
-    mov ecx, TAG_PTR
-    mov r8d, TAG_PTR
     call dict_set
     pop rdi
     call obj_decref
@@ -724,8 +710,6 @@ DEF_FUNC asyncio_module_create
     mov rdi, r12
     mov rsi, rax
     mov rdx, [rsp + 8]
-    mov ecx, TAG_PTR
-    mov r8d, TAG_PTR
     call dict_set
     pop rdi
     call obj_decref
@@ -739,8 +723,6 @@ DEF_FUNC asyncio_module_create
     mov rdi, r12
     mov rsi, rax
     lea rdx, [rel stream_reader_type]
-    mov ecx, TAG_PTR
-    mov r8d, TAG_PTR
     call dict_set
     pop rdi
     call obj_decref
@@ -752,8 +734,6 @@ DEF_FUNC asyncio_module_create
     mov rdi, r12
     mov rsi, rax
     lea rdx, [rel stream_writer_type]
-    mov ecx, TAG_PTR
-    mov r8d, TAG_PTR
     call dict_set
     pop rdi
     call obj_decref

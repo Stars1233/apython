@@ -314,11 +314,11 @@ DEF_FUNC_BARE op_store_subscr
     test rax, rax
     jz .store_try_seq
 
-    ; Call mp_ass_subscript(obj, key, value, key_tag, value_tag)
-    ; rdi = obj, rsi = key, rdx = value (already set)
-    mov rcx, r8                ; key tag (4th arg)
-    ; r8 = value tag (5th arg) — use r10 which holds value tag
-    mov r8, r10
+    ; Call mp_ass_subscript(obj, key Value, value Value)
+    mov rcx, r8                ; key tag
+    V_PACK rsi, rcx
+    mov rcx, r10               ; value tag
+    V_PACK rdx, rcx
     call rax
     jmp .store_done
 
@@ -568,9 +568,7 @@ DEF_FUNC op_build_map, 16
     mov rax, rdx
     shl rax, 4                 ; pair_index * 16 (2 payload slots)
     mov rsi, [r13 + rax]      ; key
-    V_UNPACK rsi, r8          ; dict_set still takes (payload, tag)
     mov rdx, [r13 + rax + 8]  ; value
-    V_UNPACK rdx, rcx
     call dict_set
     pop rdx
     inc rdx
@@ -639,12 +637,10 @@ DEF_FUNC op_build_const_key_map, 32
     mov rax, [rbp-16]         ; keys tuple
     mov r10, [rax + PyTupleObject.ob_item]       ; payloads
     mov rsi, [r10 + rdx*8]                        ; key payload
-    V_UNPACK rsi, r8
     mov r9, rdx
     mov rax, rdx
     shl rax, 3                ; index * 8
     mov rdx, [r13 + rax]      ; value
-    V_UNPACK rdx, rcx         ; dict_set still takes (payload, tag)
     call dict_set
     pop rdx
     inc rdx
@@ -1855,8 +1851,10 @@ DEF_FUNC op_map_add
     push r8                    ; value tag
     push rsi                   ; key
     push rdx                   ; value
-    mov rcx, [rsp + MA_VTAG]  ; value tag for dict_set
-    mov r8, [rsp + MA_KTAG]   ; key tag for dict_set
+    mov rcx, [rsp + MA_VTAG]  ; value tag
+    mov r8, [rsp + MA_KTAG]   ; key tag
+    V_PACK rsi, r8            ; dict_set takes Values
+    V_PACK rdx, rcx
     call dict_set
 
     ; DECREF key and value (tag-aware, dict_set INCREF'd them)
@@ -1923,8 +1921,6 @@ DEF_FUNC op_dict_update
     test rsi, rsi
     jz .du_next
     mov rdx, [rax + DictEntry.value]
-    V_UNPACK rdx, rcx
-    V_UNPACK rsi, r8          ; dict_set still takes (payload, tag)
 
     ; dict_set(target, key, value, value_tag, key_tag)
     push rbx
@@ -2000,13 +1996,13 @@ DEF_FUNC op_dict_merge
     mov rsi, [rax + DictEntry.key]
     test rsi, rsi
     jz .dm_next
-    V_UNPACK rsi, rdx         ; dict_get still takes (payload, tag)
 
     ; Check for duplicate: dict_get(target, key, key_tag).  dict_get returns
     ; its tag in edx, so the key tag must not be restored over it.
     push rbx
     mov rdi, [rbp-32]          ; target dict
     call dict_get
+    V_UNPACK rax, rdx           ; dict_get returns a Value
     test edx, edx
     jnz .dm_dup_error          ; key already exists in target
 
@@ -2016,9 +2012,7 @@ DEF_FUNC op_dict_merge
     imul rcx, rbx, DictEntry_size
     add rax, rcx
     mov rsi, [rax + DictEntry.key]
-    V_UNPACK rsi, r8
     mov rdx, [rax + DictEntry.value]
-    V_UNPACK rdx, rcx
     push rbx
     mov rdi, [rbp-32]
     call dict_set

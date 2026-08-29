@@ -147,8 +147,6 @@ DEF_FUNC import_init
     pop rsi                     ; key = "builtins"
     push rsi                    ; re-save key for DECREF
     mov rdx, rbx
-    mov ecx, TAG_PTR
-    mov r8d, TAG_PTR
     call dict_set
     pop rdi                     ; DECREF key (dict_set INCREF'd)
     call obj_decref
@@ -164,8 +162,6 @@ DEF_FUNC import_init
     mov rdi, [rel sys_modules_dict]
     mov rsi, rax                ; key = "time"
     mov rdx, rbx                ; value = time module
-    mov ecx, TAG_PTR
-    mov r8d, TAG_PTR
     call dict_set
     pop rdi                     ; DECREF key
     call obj_decref
@@ -181,8 +177,6 @@ DEF_FUNC import_init
     mov rdi, [rel sys_modules_dict]
     mov rsi, rax                ; key = "asyncio"
     mov rdx, rbx                ; value = asyncio module
-    mov ecx, TAG_PTR
-    mov r8d, TAG_PTR
     call dict_set
     pop rdi                     ; DECREF key
     call obj_decref
@@ -198,8 +192,6 @@ DEF_FUNC import_init
     mov rdi, [rel sys_modules_dict]
     mov rsi, rax                ; key = "_sre"
     mov rdx, rbx                ; value = _sre module
-    mov ecx, TAG_PTR
-    mov r8d, TAG_PTR
     call dict_set
     pop rdi                     ; DECREF key
     call obj_decref
@@ -253,8 +245,8 @@ DEF_FUNC import_module, IF_FRAME
     ; Check sys.modules first
     mov rdi, [rel sys_modules_dict]
     mov rsi, [rbp - IF_NAME]
-    mov edx, TAG_PTR
     call dict_get
+    V_UNPACK rax, rdx           ; dict_get returns a Value
     test edx, edx
     jnz .found_cached
 
@@ -308,8 +300,8 @@ DEF_FUNC import_module, IF_FRAME
     ; Check sys.modules for first component
     mov rdi, [rel sys_modules_dict]
     mov rsi, rax
-    mov edx, TAG_PTR
     call dict_get
+    V_UNPACK rax, rdx           ; dict_get returns a Value
     test edx, edx
     jnz .have_first_component
 
@@ -331,8 +323,8 @@ DEF_FUNC import_module, IF_FRAME
     ; Now try to import the full dotted name
     mov rdi, [rel sys_modules_dict]
     mov rsi, [rbp - IF_NAME]
-    mov edx, TAG_PTR
     call dict_get
+    V_UNPACK rax, rdx           ; dict_get returns a Value
     test edx, edx
     jnz .have_full_dotted
 
@@ -366,8 +358,6 @@ DEF_FUNC import_module, IF_FRAME
     jz .no_parent_dict
     mov rsi, rax                ; key = leaf name
     mov rdx, r13                ; value = leaf module
-    mov ecx, TAG_PTR
-    mov r8d, TAG_PTR
     call dict_set
 .no_parent_dict:
     pop rdi
@@ -455,8 +445,8 @@ DEF_FUNC import_find_and_load, FL_FRAME
     ; Check sys.modules first — avoid re-loading already-imported modules
     mov rdi, [rel sys_modules_dict]
     mov rsi, [rbp - FL_NAME]
-    mov edx, TAG_PTR
     call dict_get
+    V_UNPACK rax, rdx           ; dict_get returns a Value
     test edx, edx
     jnz .found_in_sysmod
 
@@ -516,8 +506,8 @@ DEF_FUNC import_find_and_load, FL_FRAME
     ; Look up parent in sys.modules
     mov rdi, [rel sys_modules_dict]
     mov rsi, r12
-    mov edx, TAG_PTR
     call dict_get
+    V_UNPACK rax, rdx           ; dict_get returns a Value
     mov r13, rax                ; r13 = parent module payload (or 0)
     push rdx                    ; save dict_get tag for found check
 
@@ -1143,8 +1133,6 @@ DEF_FUNC import_load_module, IF_FRAME
     mov rdi, r15
     mov rsi, rax
     mov rdx, rbx                ; name_str
-    mov ecx, TAG_PTR
-    mov r8d, TAG_PTR
     call dict_set
     pop rdi
     call obj_decref
@@ -1159,8 +1147,6 @@ DEF_FUNC import_load_module, IF_FRAME
     mov rdi, r15
     mov rsi, rax
     mov rdx, [rsp + 8]
-    mov ecx, TAG_PTR
-    mov r8d, TAG_PTR
     call dict_set
     pop rdi
     call obj_decref
@@ -1174,8 +1160,6 @@ DEF_FUNC import_load_module, IF_FRAME
     mov rdi, r15
     mov rsi, rax
     lea rdx, [rel none_singleton]
-    mov ecx, TAG_PTR
-    mov r8d, TAG_PTR
     call dict_set
     pop rdi
     call obj_decref
@@ -1187,8 +1171,6 @@ DEF_FUNC import_load_module, IF_FRAME
     mov rdi, r15
     mov rsi, rax
     lea rdx, [rel none_singleton]
-    mov ecx, TAG_PTR
-    mov r8d, TAG_PTR
     call dict_set
     pop rdi
     call obj_decref
@@ -1204,8 +1186,6 @@ DEF_FUNC import_load_module, IF_FRAME
     mov rdi, r15
     mov rsi, rax
     mov rdx, rbx                ; name_str
-    mov ecx, TAG_PTR
-    mov r8d, TAG_PTR
     call dict_set
     pop rdi
     call obj_decref
@@ -1264,8 +1244,6 @@ DEF_FUNC import_load_module, IF_FRAME
     mov rdi, r15
     mov rsi, rax
     mov rdx, [rsp + 8]         ; list
-    mov ecx, TAG_PTR
-    mov r8d, TAG_PTR
     call dict_set
     pop rdi                     ; key
     call obj_decref
@@ -1306,8 +1284,6 @@ DEF_FUNC import_load_module, IF_FRAME
     mov rdi, r15
     mov rsi, rax
     mov rdx, [rsp + 8]
-    mov ecx, TAG_PTR
-    mov r8d, TAG_PTR
     call dict_set
     pop rdi
     call obj_decref
@@ -1325,8 +1301,6 @@ DEF_FUNC import_load_module, IF_FRAME
     mov rdi, [rel sys_modules_dict]
     mov rsi, rbx                ; name_str
     mov rdx, r13
-    mov ecx, TAG_PTR
-    mov r8d, TAG_PTR
     call dict_set
 
     ; Set __builtins__ in module dict
@@ -1336,8 +1310,6 @@ DEF_FUNC import_load_module, IF_FRAME
     mov rdi, r15
     mov rsi, rax
     mov rdx, [rel builtins_dict_global]
-    mov ecx, TAG_PTR
-    mov r8d, TAG_PTR
     call dict_set
     pop rdi
     call obj_decref

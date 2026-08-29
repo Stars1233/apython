@@ -118,8 +118,8 @@ DEF_FUNC instance_getattr
     test rdi, rdi
     jz .check_type_dict
     mov rsi, r12
-    mov edx, TAG_PTR
     call dict_get
+    V_UNPACK rax, rdx           ; dict_get returns a Value
     test edx, edx
     jnz .found_inst
 
@@ -134,10 +134,10 @@ DEF_FUNC instance_getattr
 
     push rcx                            ; save current type
     mov rsi, r12
-    mov edx, TAG_PTR
     call dict_get
+    V_UNPACK rax, rdx           ; dict_get returns a Value
     pop rcx                             ; restore current type
-    test edx, edx
+    test rax, rax
     jnz .found_type                     ; found in type's dict
 
 .try_base:
@@ -285,8 +285,8 @@ DEF_FUNC instance_setattr
     jz .sa_try_base
     push rax                    ; save current type
     mov rsi, r12                ; name
-    mov edx, TAG_PTR
     call dict_get
+    V_UNPACK rax, rdx           ; dict_get returns a Value
     mov r9, rax                 ; save dict_get value
     pop rax                     ; restore current type
     test edx, edx
@@ -358,7 +358,7 @@ DEF_FUNC instance_setattr
     mov rsi, r12                ; name
     mov rdx, r13                ; value
     mov rcx, r14                ; value_tag
-    mov r8d, TAG_PTR            ; key_tag (name is always heap string)
+    V_PACK rdx, rcx
     call dict_set
 
     pop r14
@@ -399,9 +399,9 @@ DEF_FUNC type_setattr
     pop rsi
 
 .ts_have_dict:
-    ; dict_set(dict, name, value, ecx=value_tag, r8=key_tag)
+    ; dict_set(dict, name Value, value Value)
     pop rcx                     ; restore value_tag
-    mov r8d, TAG_PTR            ; key_tag (name is always heap string)
+    V_PACK rdx, rcx
     call dict_set
 
     pop rbx
@@ -701,10 +701,10 @@ DEF_FUNC type_call
 
     push rcx
     mov rsi, r15
-    mov edx, TAG_PTR
     call dict_get
+    V_UNPACK rax, rdx           ; dict_get returns a Value
     pop rcx
-    test edx, edx
+    test rax, rax
     jnz .new_found
 
 .new_try_base:
@@ -798,10 +798,10 @@ DEF_FUNC type_call
 
     push rcx                    ; save current type
     mov rsi, r15
-    mov edx, TAG_PTR
     call dict_get
+    V_UNPACK rax, rdx           ; dict_get returns a Value
     pop rcx                     ; restore current type
-    test edx, edx
+    test rax, rax
     jnz .init_found
 
 .init_try_base:
@@ -1068,8 +1068,8 @@ DEF_FUNC type_getattr
     jz .tga_next_base
 
     mov rsi, rbx
-    mov edx, TAG_PTR
     call dict_get
+    V_UNPACK rax, rdx           ; dict_get returns a Value
     test edx, edx
     jnz .tga_found
 

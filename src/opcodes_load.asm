@@ -296,8 +296,8 @@ DEF_FUNC_BARE op_load_name
 
     ; Try locals first: dict_get(locals, name)
     mov rsi, [rsp]             ; rsi = name
-    mov edx, TAG_PTR
     call dict_get
+    V_UNPACK rax, rdx           ; dict_get returns a Value
     test edx, edx
     jnz .found
 
@@ -305,8 +305,8 @@ DEF_FUNC_BARE op_load_name
     ; Try globals: dict_get(globals, name)
     mov rdi, [r12 + PyFrame.globals]
     mov rsi, [rsp]             ; rsi = name
-    mov edx, TAG_PTR
     call dict_get
+    V_UNPACK rax, rdx           ; dict_get returns a Value
     test edx, edx
     jnz .found
 
@@ -314,8 +314,8 @@ DEF_FUNC_BARE op_load_name
     mov rdi, [r12 + PyFrame.builtins]
     pop rsi                    ; rsi = name
     push rsi                   ; save for error message
-    mov edx, TAG_PTR
     call dict_get
+    V_UNPACK rax, rdx           ; dict_get returns a Value
     test edx, edx
     jnz .found
 
@@ -432,8 +432,8 @@ DEF_FUNC op_load_attr, LA_FRAME
     jz .la_attr_error
     mov rdi, rax
     mov rsi, [rbp - LA_NAME]
-    mov edx, TAG_PTR
     call dict_get
+    V_UNPACK rax, rdx           ; dict_get returns a Value
     test edx, edx
     jz .la_attr_error
     mov [rbp - LA_ATTR], rax
@@ -474,8 +474,8 @@ DEF_FUNC op_load_attr, LA_FRAME
     ; dict_get(type->tp_dict, name)
     mov rdi, rax
     mov rsi, [rbp - LA_NAME]
-    mov edx, TAG_PTR
     call dict_get
+    V_UNPACK rax, rdx           ; dict_get returns a Value
     test edx, edx
     jz .la_attr_error
 
@@ -1024,17 +1024,19 @@ DEF_FUNC op_load_super_attr, LSA_FRAME
     jz .lsa_not_found
 
 .lsa_walk:
-    ; Check this type's tp_dict
+    ; rcx tracks the current type for the .lsa_next_base step, including the
+    ; no-tp_dict path that used to fall through with rcx undefined.
+    mov rcx, rax
     mov rdi, [rax + PyTypeObject.tp_dict]
     test rdi, rdi
     jz .lsa_next_base
 
     push rax                       ; save current type
     mov rsi, [rbp - LSA_NAME]      ; name
-    mov edx, TAG_PTR
     call dict_get
+    V_UNPACK rax, rdx           ; dict_get returns a Value
     pop rcx                        ; restore current type
-    test edx, edx
+    test rax, rax
     jnz .lsa_found
 
 .lsa_next_base:

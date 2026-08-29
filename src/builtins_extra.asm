@@ -2511,8 +2511,8 @@ DEF_FUNC builtin_getattr
 
     mov rdi, rcx
     mov rsi, r14
-    mov edx, TAG_PTR
     call dict_get
+    V_UNPACK rax, rdx           ; dict_get returns a Value
     test edx, edx
     jz .getattr_not_found
 
@@ -2634,8 +2634,8 @@ DEF_FUNC builtin_hasattr
 
     mov rdi, rcx
     mov rsi, r13
-    mov edx, TAG_PTR
     call dict_get
+    V_UNPACK rax, rdx           ; dict_get returns a Value
     test edx, edx
     jz .hasattr_not_found
 

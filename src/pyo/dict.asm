@@ -143,9 +143,7 @@ DEF_FUNC dict_type_call
     push rdi
     mov rdi, r15               ; new dict
     mov rsi, [rax + DictEntry.key]
-    V_UNPACK rsi, r8
     mov rdx, [rax + DictEntry.value]
-    V_UNPACK rdx, rcx
     call dict_set
     pop rdi
     pop r8
@@ -204,8 +202,6 @@ DEF_FUNC dict_type_call
     mov rdi, r15               ; dict
     mov rsi, [rcx]             ; key Value
     mov rdx, [rcx + 8]        ; value Value
-    V_UNPACK rsi, r8          ; dict_set still takes (payload, tag) pairs
-    V_UNPACK rdx, rcx
     call dict_set
     pop rdi                    ; tuple
     call obj_decref
@@ -289,7 +285,9 @@ DEF_FUNC dict_type_call
     ; dict_set(dict, key, value, value_tag, key_tag)
     mov rdi, r15
     mov ecx, eax                  ; value tag
+    V_PACK rdx, rcx
     mov r8d, r10d                 ; key tag
+    V_PACK rsi, r8
     call dict_set
 
     pop rdx
@@ -477,7 +475,7 @@ DEF_FUNC_LOCAL dict_keys_equal
 END_FUNC dict_keys_equal
 
 ;; ============================================================================
-;; dict_get(rdi=dict, rsi=key, edx=key_tag) -> (rax=value, rdx=value_tag) or (0, TAG_NULL)
+;; dict_get(rdi=dict, rsi=key Value) -> rax = value Value, or 0 when absent
 ;; Linear probing lookup
 ;; ============================================================================
 DG_KTAG equ 8
@@ -488,6 +486,7 @@ DEF_FUNC dict_get, 8
     push r14
     push r15
 
+    V_UNPACK rsi, rdx           ; decode the key Value
     mov rbx, rdi                ; rbx = dict
     mov r12, rsi                ; r12 = key
     mov [rbp - DG_KTAG], rdx    ; save key_tag
@@ -539,9 +538,8 @@ align 16
     test eax, eax
     jz .next_slot
 
-    ; Found - return entry.value + tag
+    ; Found - return the entry's value Value
     mov rax, [rdx + DictEntry.value]
-    V_UNPACK rax, rdx
     jmp .done
 
 .next_slot:
@@ -856,7 +854,7 @@ DEF_FUNC_LOCAL dict_resize
 END_FUNC dict_resize
 
 ;; ============================================================================
-;; dict_set(rdi=dict, rsi=key, rdx=value, rcx=value_tag, r8=key_tag)
+;; dict_set(rdi=dict, rsi=key Value, rdx=value Value)
 ;; Insert or update a key-value pair.
 ;; ============================================================================
 DS_VTAG equ 8
@@ -866,6 +864,10 @@ DEF_FUNC dict_set, 16
     push r12
     push r13
     push r14
+
+    ; Decode the two Values into the (payload, tag) pairs the body uses.
+    V_UNPACK rsi, r8            ; key
+    V_UNPACK rdx, rcx           ; value
 
     mov rbx, rdi                ; dict
     mov r12, rsi                ; key
@@ -1025,10 +1027,10 @@ dict_len:
 DEF_FUNC dict_subscript
     push rbx
 
+    V_PACK rsi, rdx            ; dict_get takes a key Value
     mov rbx, rsi               ; save key for error msg
-
-    ; dict_get(dict, key, key_tag) — edx already has key_tag
     call dict_get
+    V_UNPACK rax, rdx           ; dict_get returns a Value
     test edx, edx
     jz .key_error
 
@@ -1045,26 +1047,21 @@ DEF_FUNC dict_subscript
 END_FUNC dict_subscript
 
 ;; ============================================================================
-;; dict_ass_subscript(rdi=dict, rsi=key, rdx=value, ecx=key_tag, r8d=value_tag)
+;; dict_ass_subscript(rdi=dict, rsi=key Value, rdx=value Value)
+;; A value Value of 0 (NULL) means "delete this key".
 ;; mp_ass_subscript: set key=value or delete key from dict
 ;; ============================================================================
 DEF_FUNC_BARE dict_ass_subscript
-    ; If value tag is TAG_NULL (0), this is a delete operation
-    ; (Can't check payload: SmallInt 0 has payload=0 but tag=TAG_SMALLINT)
-    test r8, r8                 ; r8 = value_tag from caller
+    ; A NULL Value is 0 and no real Value is, so this test needs no tag
+    test rdx, rdx
     jz .das_delete
-    ; dict_set wants (rdi=dict, rsi=key, rdx=value, rcx=value_tag, r8=key_tag)
-    ; Caller passes rcx=key_tag, r8=value_tag — swap them
-    xchg rcx, r8
     jmp dict_set
 .das_delete:
-    ; dict_del wants (rdi=dict, rsi=key, rdx=key_tag)
-    mov rdx, rcx               ; key_tag from caller's rcx
     jmp dict_del
 END_FUNC dict_ass_subscript
 
 ;; ============================================================================
-;; dict_del(rdi=dict, rsi=key, edx=key_tag) -> int (0=ok, -1=not found)
+;; dict_del(rdi=dict, rsi=key Value) -> int (0=ok, -1=not found)
 ;; Delete key from dict. DECREFs both key and value.
 ;; ============================================================================
 DD_KTAG equ 8
@@ -1073,6 +1070,8 @@ DEF_FUNC dict_del, 8
     push r12
     push r13
     push r14
+
+    V_UNPACK rsi, rdx           ; decode the key Value
     push r15
 
     mov rbx, rdi                ; dict
@@ -1334,8 +1333,9 @@ dict_iter_self:
 ;; For the 'in' operator: checks if key exists in dict.
 ;; ============================================================================
 DEF_FUNC_BARE dict_contains
-    ; edx already has key_tag, pass through to dict_get
+    V_PACK rsi, rdx            ; dict_get takes a key Value
     call dict_get
+    V_UNPACK rax, rdx           ; dict_get returns a Value
     test edx, edx
     jz .dc_no
     mov eax, 1
@@ -1499,9 +1499,7 @@ DEF_FUNC dict_nb_or, DNO_FRAME
     push rdi
     mov rdi, [rbp - DNO_NEW]
     mov rsi, [rax + DictEntry.key]
-    V_UNPACK rsi, r8
     mov rdx, [rax + DictEntry.value]
-    V_UNPACK rdx, rcx
     call dict_set
     pop rdi
     pop r8
@@ -1530,9 +1528,7 @@ DEF_FUNC dict_nb_or, DNO_FRAME
     push rdi
     mov rdi, [rbp - DNO_NEW]
     mov rsi, [rax + DictEntry.key]
-    V_UNPACK rsi, r8
     mov rdx, [rax + DictEntry.value]
-    V_UNPACK rdx, rcx
     call dict_set
     pop rdi
     pop r8
@@ -1580,9 +1576,7 @@ DEF_FUNC dict_nb_ior, DIO_FRAME
     push rdi
     mov rdi, [rbp - DIO_LEFT]
     mov rsi, [rax + DictEntry.key]
-    V_UNPACK rsi, r8
     mov rdx, [rax + DictEntry.value]
-    V_UNPACK rdx, rcx
     call dict_set
     pop rdi
     pop r8
@@ -1668,8 +1662,8 @@ DEF_FUNC dict_richcompare, DRC_FRAME
     ; Lookup key in right dict
     mov rdi, [rbp - DRC_RIGHT]
     mov rsi, [rax + DictEntry.key]
-    V_UNPACK rsi, rdx
     call dict_get
+    V_UNPACK rax, rdx           ; dict_get returns a Value
     ; rax = right value, edx = tag (0 = not found)
     ; NOTE: r11 and r9 are caller-saved and may be clobbered by dict_get
     test edx, edx

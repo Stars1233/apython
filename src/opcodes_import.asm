@@ -132,8 +132,8 @@ DEF_FUNC op_import_from, IF2_FRAME
     test rdi, rdi
     jz .if_try_submodule
     mov rsi, [rbp - IF_ATTR]
-    mov edx, TAG_PTR
     call dict_get
+    V_UNPACK rax, rdx           ; dict_get returns a Value
     test edx, edx
     jnz .if_found_in_dict
     jmp .if_try_submodule
@@ -145,8 +145,8 @@ DEF_FUNC op_import_from, IF2_FRAME
     test rdi, rdi
     jz .if_try_submodule
     mov rsi, [rbp - IF_ATTR]
-    mov edx, TAG_PTR
     call dict_get
+    V_UNPACK rax, rdx           ; dict_get returns a Value
     test edx, edx
     jnz .if_found_in_dict
     jmp .if_try_submodule
@@ -177,8 +177,8 @@ DEF_FUNC op_import_from, IF2_FRAME
     mov rdi, [rbp - IF2_MOD]
     mov rdi, [rdi + PyModuleObject.mod_dict]
     mov rsi, rax
-    mov edx, TAG_PTR
     call dict_get
+    V_UNPACK rax, rdx           ; dict_get returns a Value
     mov rcx, rax                ; rcx = pkg_name str (or NULL)
     pop rdi                     ; __name__ str key
     push rcx                    ; save pkg_name

@@ -396,10 +396,10 @@ DEF_FUNC sre_match_resolve_group_idx
 
     ; dict_get(groupindex, key, key_tag)
     ; rsi = key (already set), edx = TAG_PTR
-    mov edx, TAG_PTR
     call dict_get
+    V_UNPACK rax, rdx           ; dict_get returns a Value
     ; rax = val payload, edx = val tag
-    test edx, edx
+    test rax, rax
     jz .rgi_no_group_pop2
     ; group_idx = val payload (SmallInt)
     mov rsi, rax
@@ -862,7 +862,9 @@ DEF_FUNC sre_match_groupdict_method, GD_FRAME
     ; rdx = val (still in rax from call), edx = val_tag
     mov rdx, [rsp + 8]        ; val payload
     mov ecx, [rsp]            ; val tag
+    V_PACK rdx, rcx
     mov r8, r14                ; key tag
+    V_PACK rsi, r8
     call dict_set
     pop rdx
     pop rax
@@ -941,10 +943,10 @@ DEF_FUNC sre_match_subscript
 
     ; dict_get(groupindex, key, key_tag)
     mov rsi, r12               ; key
-    mov edx, TAG_PTR           ; key_tag (string is TAG_PTR)
     call dict_get
+    V_UNPACK rax, rdx           ; dict_get returns a Value
     ; rax = val payload, edx = val tag
-    test edx, edx
+    test rax, rax
     jz .ms_no_such_group
 
     ; group_idx = val payload (SmallInt)

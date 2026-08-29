@@ -70,8 +70,6 @@ DEF_FUNC sys_module_init, 32
     mov rdi, r15
     mov rsi, rax
     mov rdx, r14
-    mov ecx, TAG_PTR
-    mov r8d, TAG_PTR
     call dict_set
     pop rdi
     call obj_decref
@@ -101,8 +99,6 @@ DEF_FUNC sys_module_init, 32
     mov rdi, r15
     mov rsi, rax
     mov rdx, r12
-    mov ecx, TAG_PTR
-    mov r8d, TAG_PTR
     call dict_set
     pop rdi
     call obj_decref
@@ -148,8 +144,6 @@ DEF_FUNC sys_module_init, 32
     mov rdi, r15
     mov rsi, rax
     mov rdx, r13
-    mov ecx, TAG_PTR
-    mov r8d, TAG_PTR
     call dict_set
     pop rdi
     call obj_decref
@@ -166,9 +160,9 @@ DEF_FUNC sys_module_init, 32
     push rax
     mov rdi, r15
     mov rsi, rax               ; key = "maxsize" (str)
-    mov rdx, [rsp + 8]        ; value payload (SmallInt)
+    mov rdx, [rsp + 8]        ; value payload
     mov ecx, [rsp + 16]       ; value tag (from int_from_i64)
-    mov r8d, TAG_PTR           ; key tag (str is always TAG_PTR)
+    V_PACK rdx, rcx           ; dict_set takes Values
     call dict_set
     pop rdi
     call obj_decref            ; DECREF key string
@@ -185,8 +179,6 @@ DEF_FUNC sys_module_init, 32
     mov rdi, r15
     mov rsi, rax
     mov rdx, [rsp + 8]
-    mov ecx, TAG_PTR
-    mov r8d, TAG_PTR
     call dict_set
     pop rdi
     call obj_decref
@@ -203,8 +195,6 @@ DEF_FUNC sys_module_init, 32
     mov rdi, r15
     mov rsi, rax
     mov rdx, [rsp + 8]
-    mov ecx, TAG_PTR
-    mov r8d, TAG_PTR
     call dict_set
     pop rdi
     call obj_decref
@@ -245,8 +235,6 @@ DEF_FUNC sys_module_init, 32
     mov rdi, r15
     mov rsi, rax
     mov rdx, rbx
-    mov ecx, TAG_PTR
-    mov r8d, TAG_PTR
     call dict_set
     pop rdi
     call obj_decref
@@ -264,8 +252,6 @@ DEF_FUNC sys_module_init, 32
     mov rdi, r15
     mov rsi, rax
     mov rdx, [rsp + 8]
-    mov ecx, TAG_PTR
-    mov r8d, TAG_PTR
     call dict_set
     pop rdi
     call obj_decref
@@ -282,8 +268,6 @@ DEF_FUNC sys_module_init, 32
     mov rdi, r15
     mov rsi, rax
     mov rdx, [rsp + 8]
-    mov ecx, TAG_PTR
-    mov r8d, TAG_PTR
     call dict_set
     pop rdi
     call obj_decref
@@ -299,8 +283,6 @@ DEF_FUNC sys_module_init, 32
     mov rdi, r15
     mov rsi, rax
     mov rdx, [rsp + 8]
-    mov ecx, TAG_PTR
-    mov r8d, TAG_PTR
     call dict_set
     pop rdi
     call obj_decref
@@ -320,8 +302,6 @@ DEF_FUNC sys_module_init, 32
     mov rdi, r15
     mov rsi, rax
     mov rdx, [rsp + 8]
-    mov ecx, TAG_PTR
-    mov r8d, TAG_PTR
     call dict_set
     pop rdi
     call obj_decref
@@ -340,8 +320,6 @@ DEF_FUNC sys_module_init, 32
     mov rdi, r15
     mov rsi, rax
     mov rdx, [rsp + 8]
-    mov ecx, TAG_PTR
-    mov r8d, TAG_PTR
     call dict_set
     pop rdi
     call obj_decref
@@ -360,8 +338,6 @@ DEF_FUNC sys_module_init, 32
     mov rdi, r15
     mov rsi, rax
     mov rdx, [rsp + 8]
-    mov ecx, TAG_PTR
-    mov r8d, TAG_PTR
     call dict_set
     pop rdi
     call obj_decref
@@ -379,8 +355,6 @@ DEF_FUNC sys_module_init, 32
     mov rdi, r15
     mov rsi, rax
     mov rdx, [rsp + 8]
-    mov ecx, TAG_PTR
-    mov r8d, TAG_PTR
     call dict_set
     pop rdi
     call obj_decref
@@ -397,8 +371,6 @@ DEF_FUNC sys_module_init, 32
     mov rdi, r15
     mov rsi, rax
     mov rdx, [rsp + 8]
-    mov ecx, TAG_PTR
-    mov r8d, TAG_PTR
     call dict_set
     pop rdi
     call obj_decref
@@ -425,8 +397,6 @@ DEF_FUNC sys_module_init, 32
     mov rdi, r15
     mov rsi, rax
     mov rdx, [rsp + 8]
-    mov ecx, TAG_PTR
-    mov r8d, TAG_PTR
     call dict_set
     pop rdi
     call obj_decref
@@ -444,8 +414,6 @@ DEF_FUNC sys_module_init, 32
     mov rdi, r15
     mov rsi, rax
     mov rdx, [rsp + 8]
-    mov ecx, TAG_PTR
-    mov r8d, TAG_PTR
     call dict_set
     pop rdi
     call obj_decref
@@ -463,8 +431,6 @@ DEF_FUNC sys_module_init, 32
     mov rdi, r15
     mov rsi, rax
     mov rdx, [rsp + 8]
-    mov ecx, TAG_PTR
-    mov r8d, TAG_PTR
     call dict_set
     pop rdi
     call obj_decref
@@ -486,8 +452,6 @@ DEF_FUNC sys_module_init, 32
     mov rdi, r14                ; sys.modules dict
     mov rsi, rax
     mov rdx, [rel sys_module_obj]
-    mov ecx, TAG_PTR
-    mov r8d, TAG_PTR
     call dict_set
     pop rdi
     call obj_decref

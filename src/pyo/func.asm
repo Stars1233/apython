@@ -391,8 +391,8 @@ DEF_FUNC func_call
 
     ; dict_get(kwdefaults, param_name) -> borrowed ref or NULL
     mov rdi, rax            ; kwdefaults dict
-    mov edx, TAG_PTR
     call dict_get
+    V_UNPACK rax, rdx           ; dict_get returns a Value
 
     mov r8, rax             ; r8 = value payload (or NULL)
     mov r10, rdx            ; r10 = value tag from dict_get
@@ -587,15 +587,15 @@ DEF_FUNC func_bind_kwargs
     test rdi, rdi
     jz .kw_unexpected       ; no **kwargs, raise TypeError
 
-    ; dict_set(kwargs_dict, key, value, value_tag)
+    ; dict_set(kwargs_dict, key Value, value Value)
     mov rax, [rsp+16]
-    mov rsi, [r14 + PyTupleObject.ob_item]           ; payloads
-    mov rsi, [rsi + rax*8]                           ; key = kw_name
+    mov rsi, [r14 + PyTupleObject.ob_item]
+    mov rsi, [rsi + rax*8]         ; key = kw_name (already a Value)
     mov rax, [rsp+24]
     shl rax, 4                     ; * 16 (16-byte args stride)
     mov rcx, [r13 + rax + 8]      ; value tag
     mov rdx, [r13 + rax]          ; value payload
-    mov r8d, TAG_PTR
+    V_PACK rdx, rcx
     call dict_set
     jmp .kw_next
 
@@ -720,7 +720,7 @@ DEF_FUNC func_setattr
     mov rsi, r12
     mov rdx, r13
     mov ecx, r14d           ; value_tag from caller
-    mov r8d, TAG_PTR        ; key_tag (name is always heap string)
+    V_PACK rdx, rcx
     call dict_set
 
     pop r14
@@ -809,8 +809,8 @@ DEF_FUNC func_getattr
     jz .not_found
 
     mov rsi, r12
-    mov edx, TAG_PTR
     call dict_get
+    V_UNPACK rax, rdx           ; dict_get returns a Value
     test edx, edx
     jz .not_found
 

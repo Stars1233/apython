@@ -146,8 +146,6 @@ DEF_FUNC main
     mov rdx, rax                ; value = "__main__" str
     mov rsi, [rsp + 8]          ; key = "__name__" str
     mov rdi, [rsp + 16]         ; dict = globals (from stack)
-    mov ecx, TAG_PTR
-    mov r8d, TAG_PTR
     call dict_set
     pop rdi                     ; value str
     call obj_decref
@@ -161,8 +159,6 @@ DEF_FUNC main
     mov rdi, [rsp + 8]         ; globals dict
     mov rsi, rax
     lea rdx, [rel none_singleton]
-    mov ecx, TAG_PTR
-    mov r8d, TAG_PTR
     call dict_set
     pop rdi
     call obj_decref
@@ -175,8 +171,6 @@ DEF_FUNC main
     mov rdi, [rsp + 8]         ; globals dict
     mov rsi, rax
     mov rdx, [rel builtins_dict_global]
-    mov ecx, TAG_PTR
-    mov r8d, TAG_PTR
     call dict_set
     pop rdi
     call obj_decref
@@ -196,8 +190,6 @@ DEF_FUNC main
     mov rdi, [rel sys_modules_dict]
     mov rsi, [rsp + 8]         ; key = "__main__" str
     mov rdx, rax               ; value = module object
-    mov ecx, TAG_PTR
-    mov r8d, TAG_PTR
     call dict_set
     pop rdi                     ; module object (owned by sys.modules now)
     call obj_decref

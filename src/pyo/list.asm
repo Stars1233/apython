@@ -358,10 +358,9 @@ DEF_FUNC list_subscript
 END_FUNC list_subscript
 
 ;; ============================================================================
-;; list_ass_subscript(PyListObject *list, PyObject *key, PyObject *value,
-;;                    int key_tag, int value_tag)
-;; mp_ass_subscript: set with int or slice key
-;; rdi=list, rsi=key, rdx=value, ecx=key_tag, r8d=value_tag
+;; list_ass_subscript(rdi=list, rsi=key Value, rdx=value Value)
+;; mp_ass_subscript: set with an int or slice key.
+;; A value Value of 0 (NULL) means "delete".
 ;; ============================================================================
 LAS_VTAG  equ 8
 LAS_TEMP  equ 16       ; temp list from generic iterable (NULL if not used)
@@ -369,6 +368,10 @@ LAS_FRAME equ 16
 DEF_FUNC list_ass_subscript, LAS_FRAME
     push rbx
     push r12
+
+    ; Decode into the (payload, tag) pairs the body uses
+    V_UNPACK rsi, rcx          ; key
+    V_UNPACK rdx, r8           ; value (a NULL Value unpacks to tag 0)
 
     mov rbx, rdi               ; list
     ; Check if list is being sorted (ob_item == NULL)
