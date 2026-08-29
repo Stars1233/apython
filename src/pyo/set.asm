@@ -625,7 +625,6 @@ END_FUNC set_richcompare
 ;; sq_contains wrapper for the sequence methods (for "in" operator)
 ;; ============================================================================
 DEF_FUNC_BARE set_contains_sq
-    V_PACK rsi, rdx             ; the sq_contains slot still passes a fat pair
     jmp set_contains
 END_FUNC set_contains_sq
 

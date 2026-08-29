@@ -2853,6 +2853,7 @@ DEF_FUNC builtin_dir, DIR_FRAME
     push rax                ; save key
     mov rdi, rbx            ; list
     mov rsi, rax            ; key
+    V_PACK rsi, rdx         ; list_contains takes a Value
     call list_contains
     test eax, eax
     pop rax                 ; restore key

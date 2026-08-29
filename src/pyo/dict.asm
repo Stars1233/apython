@@ -1333,7 +1333,6 @@ dict_iter_self:
 ;; For the 'in' operator: checks if key exists in dict.
 ;; ============================================================================
 DEF_FUNC_BARE dict_contains
-    V_PACK rsi, rdx            ; dict_get takes a key Value
     call dict_get
     V_UNPACK rax, rdx           ; dict_get returns a Value
     test edx, edx
@@ -1458,7 +1457,7 @@ END_FUNC dict_view_iter
 ;; ============================================================================
 DEF_FUNC_BARE dict_keys_view_contains
     mov rdi, [rdi + PyDictViewObject.dv_dict]
-    jmp dict_contains           ; (rdi=dict, rsi=key, rdx=key_tag)
+    jmp dict_contains           ; (rdi=dict, rsi=key Value)
 END_FUNC dict_keys_view_contains
 
 ;; ============================================================================

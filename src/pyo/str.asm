@@ -1069,10 +1069,11 @@ DEF_FUNC str_subscript
 END_FUNC str_subscript
 
 ;; ============================================================================
-;; str_contains(PyObject *self, PyObject *substr, int substr_tag) -> int (0/1)
+;; str_contains(rdi=self, rsi=substr Value) -> int (0/1)
 ;; sq_contains: check if substr is in self using strstr
 ;; ============================================================================
 DEF_FUNC str_contains
+    V_UNPACK rsi, rdx           ; decode the operand Value
 
     ; Validate substr is a string (TAG_PTR with ob_type == str_type)
     cmp edx, TAG_PTR

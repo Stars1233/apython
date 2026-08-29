@@ -1010,6 +1010,7 @@ LC_IDX     equ 32
 LC_SIZE    equ 40
 LC_FRAME   equ 40
 DEF_FUNC list_contains, LC_FRAME
+    V_UNPACK rsi, rdx           ; decode the operand Value
     push rbx
     push r12
 

@@ -460,10 +460,11 @@ DEF_FUNC tuple_getslice
 END_FUNC tuple_getslice
 
 ;; ============================================================================
-;; tuple_contains(PyTupleObject *self, PyObject *value, int value_tag) -> int (0 or 1)
-;; Linear scan with payload + tag equality (fat 16-byte slots).
+;; tuple_contains(rdi=self, rsi=value Value) -> int (0 or 1)
+;; Linear scan with identity then __eq__.
 ;; ============================================================================
 DEF_FUNC tuple_contains
+    V_UNPACK rsi, rdx           ; decode the operand Value
     push rbx
     push r12
     push r13

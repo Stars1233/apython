@@ -5464,6 +5464,7 @@ DEF_FUNC list_dunder_contains
     mov rax, [rdi]          ; self
     mov rsi, [rdi + 16]     ; item payload
     mov edx, [rdi + 24]     ; item tag
+    V_PACK rsi, rdx         ; list_contains takes a Value
     mov rdi, rax
     call list_contains
     ; eax = 0 or 1 → return bool

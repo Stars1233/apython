@@ -1270,10 +1270,11 @@ DEF_FUNC_BARE op_contains_op
     test rax, rax
     jz .contains_error
 
-    ; Call sq_contains(container, value, value_tag) -> 0/1
+    ; Call sq_contains(container, value Value) -> 0/1
     mov rdi, [rsp]             ; container
     mov rsi, [rsp + 8]        ; value
     mov rdx, [rsp + CN_LTAG]  ; value tag
+    V_PACK rsi, rdx
     call rax
     push rax                   ; save result on machine stack
 

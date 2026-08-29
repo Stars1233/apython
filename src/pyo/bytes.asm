@@ -281,6 +281,7 @@ END_FUNC bytes_subscript
 ;; sq_contains: check if byte value is in bytes
 ;; ============================================================================
 DEF_FUNC bytes_contains
+    V_UNPACK rsi, rdx           ; decode the operand Value
     push rbx
 
     mov rbx, rdi               ; bytes obj
