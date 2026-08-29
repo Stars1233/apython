@@ -1844,14 +1844,12 @@ DEF_FUNC builtin_next_fn
     lea rax, [rel gen_type]
     cmp [rbx + PyObject.ob_type], rax
     jne .next_stop_no_val
-    ; Get generator's return value for StopIteration
+    ; Get generator's return value for StopIteration (already a Value)
     mov rsi, [rbx + PyGenObject.gi_return_value]
-    V_UNPACK rsi, rdx
-    test edx, edx
+    test rsi, rsi
     jnz .next_stop_with_val
 .next_stop_no_val:
     lea rsi, [rel none_singleton]
-    mov edx, TAG_PTR
 .next_stop_with_val:
     lea rdi, [rel exc_StopIteration_type]
     call exc_new

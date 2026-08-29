@@ -534,6 +534,7 @@ END_FUNC async_gen_repr
 ;; ============================================================================
 global gen_send
 DEF_FUNC gen_send
+    V_UNPACK rsi, rdx           ; sent Value -> (payload, tag)
     ; rdi = generator, rsi = value, edx = value_tag
     push rbx
     push r12
@@ -592,6 +593,7 @@ DEF_FUNC gen_send
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .gs_yielded:
@@ -602,6 +604,7 @@ DEF_FUNC gen_send
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .gs_exhausted:
@@ -611,6 +614,7 @@ DEF_FUNC gen_send
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .gs_error:
@@ -620,6 +624,7 @@ DEF_FUNC gen_send
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 END_FUNC gen_send
 
@@ -1047,20 +1052,19 @@ DEF_FUNC _gen_send_impl
     mov rdx, [rax + 24]       ; value_tag = args[1].tag
     mov rsi, [rax + 16]       ; value = args[1].payload
     mov rdi, rbx              ; gen = args[0].payload
+    V_PACK rsi, rdx           ; gen_send takes a Value
     call gen_send
+    V_UNPACK rax, rdx         ; gen_send returns a Value
     test edx, edx             ; check tag, not payload (SmallInt-0 vs NULL)
     jnz .gsi_ret
 
     ; StopIteration — raise with actual return value from generator
-    ; exc_new(type, value_payload, value_tag)
     lea rdi, [rel exc_StopIteration_type]
-    mov rsi, [rbx + PyGenObject.gi_return_value]
-    V_UNPACK rsi, rdx
-    test edx, edx
+    mov rsi, [rbx + PyGenObject.gi_return_value]   ; already a Value
+    test rsi, rsi
     jnz .gsi_have_val
     ; No return value stored — use None
     lea rsi, [rel none_singleton]
-    mov edx, TAG_PTR
 .gsi_have_val:
     call exc_new
     mov rdi, rax
@@ -1102,12 +1106,10 @@ DEF_FUNC _gen_throw_impl
 
     ; Exhausted — raise StopIteration with return value
     lea rdi, [rel exc_StopIteration_type]
-    mov rsi, [rbx + PyGenObject.gi_return_value]
-    V_UNPACK rsi, rdx
-    test edx, edx
+    mov rsi, [rbx + PyGenObject.gi_return_value]   ; already a Value
+    test rsi, rsi
     jnz .gti_have_val
     lea rsi, [rel none_singleton]
-    mov edx, TAG_PTR
 .gti_have_val:
     call exc_new
     mov rdi, rax

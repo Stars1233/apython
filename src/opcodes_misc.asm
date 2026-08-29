@@ -1625,9 +1625,7 @@ DEF_FUNC_BARE op_make_cell
     push rdx                ; slot offset
     push rdi                ; old Value, for the DECREF below
 
-    ; cell_new still takes an old (payload, tag) pair
-    V_UNPACK rdi, rsi
-    call cell_new
+    call cell_new              ; takes the contents Value in rdi
     ; rax = new cell
 
     pop rdi                 ; old Value
@@ -1851,7 +1849,9 @@ DEF_FUNC op_send, SND_FRAME
     mov rdi, [rbp - SND_RECV]
     mov rsi, [rbp - SND_SENT]
     movzx edx, byte [rbp - SND_STAG]
+    V_PACK rsi, rdx
     call gen_send
+    V_UNPACK rax, rdx         ; gen_send returns a Value
     jmp .send_check_result
 
 .send_use_iternext:

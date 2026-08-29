@@ -262,10 +262,9 @@ DEF_FUNC task_step, TS_FRAME
 
     ; gen_send(coro, send_value, send_tag)
     mov rdi, [rbx + AsyncTask.coro]
-    mov rsi, [rbx + AsyncTask.send_value]
-    V_UNPACK rsi, rdx
+    mov rsi, [rbx + AsyncTask.send_value]   ; already a Value
     call gen_send
-    ; rax = result payload, edx = tag
+    V_UNPACK rax, rdx          ; gen_send returns a Value
 
     ; Check for exhaustion (NULL tag = coroutine returned)
     test edx, edx

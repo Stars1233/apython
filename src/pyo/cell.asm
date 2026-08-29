@@ -23,25 +23,19 @@ extern cell_traverse
 extern cell_clear
 
 ;; ============================================================================
-;; cell_new(PyObject *obj) -> PyCellObject*
-;; Create a new cell containing obj (may be NULL for empty cell).
-;; If obj is non-NULL, INCREFs it.
+;; cell_new(rdi = contents Value) -> PyCellObject*
+;; Create a new cell holding the Value (0 for an empty cell), INCREFing it.
 ;; ============================================================================
 DEF_FUNC cell_new
     push rbx
     push r12
-    mov rbx, rdi               ; save payload
-    mov r12, rsi               ; save tag
+    mov rbx, rdi               ; contents Value
 
     mov edi, PyCellObject_size
     lea rsi, [rel cell_type]
     call gc_alloc
     ; rax = new cell (ob_refcnt=1, ob_type set)
-    ; INCREF while the tag is still around, then store one Value
-    push rax
-    INCREF_VAL rbx, r12
-    V_PACK rbx, r12
-    pop rax
+    INCREF_V rbx, r12
     mov [rax + PyCellObject.ob_ref], rbx
 
     ; Track in GC

@@ -60,8 +60,7 @@ DEF_FUNC exc_new, EN_FRAME
     push r13
 
     mov rbx, rdi            ; type
-    mov r12, rsi            ; msg_str
-    mov r13, rdx            ; msg_tag
+    mov r12, rsi            ; msg Value (0 = no message)
 
     ; Allocate exception object (GC-tracked)
     mov edi, PyExceptionObject_size
@@ -69,32 +68,25 @@ DEF_FUNC exc_new, EN_FRAME
     call gc_alloc
     ; ob_refcnt=1, ob_type set by gc_alloc
     mov [rax + PyExceptionObject.exc_type], rbx
-    ; Pack into a scratch pair: r12/r13 are still needed below to build exc_args
-    mov rcx, r12
-    mov rdx, r13
-    V_PACK rcx, rdx
-    mov [rax + PyExceptionObject.exc_value], rcx
+    mov [rax + PyExceptionObject.exc_value], r12
     mov qword [rax + PyExceptionObject.exc_tb], 0
     mov qword [rax + PyExceptionObject.exc_context], 0
     mov qword [rax + PyExceptionObject.exc_cause], 0
     mov qword [rax + PyExceptionObject.exc_args], 0
     mov qword [rax + PyExceptionObject.exc_dict], 0
 
-    ; INCREF the message (tag-aware)
-    INCREF_VAL r12, r13
+    ; INCREF the message
+    INCREF_V r12, r13
 
-    ; Create args tuple: (msg_str,) if msg present, else ()
+    ; Create args tuple: (msg,) if msg present, else ()
     mov [rbp - EN_EXC], rax   ; save exc
-    test r13, r13             ; check tag for TAG_NULL, not payload (SmallInt(0) has payload=0)
+    test r12, r12             ; a NULL Value is 0 and no real Value is
     jz .empty_args
     mov edi, 1
     call tuple_new
-    INCREF_VAL r12, r13
+    INCREF_V r12, r13
     mov r8, [rax + PyTupleObject.ob_item]
-    mov r9, r12
-    mov r10, r13
-    V_PACK r9, r10
-    mov [r8], r9
+    mov [r8], r12
     jmp .set_args
 .empty_args:
     xor edi, edi
@@ -649,6 +641,7 @@ DEF_FUNC exc_type_call, ETC_FRAME
     jz .no_args
     mov rdx, [rsi + 8]      ; rdx = args[0] tag
     mov rsi, [rsi]           ; rsi = args[0] (message payload)
+    V_PACK rsi, rdx          ; exc_new takes a message Value
     jmp .create
 .no_args:
     xor esi, esi             ; msg = NULL (no message)
