@@ -257,7 +257,7 @@ DEF_FUNC op_before_async_with, BAW_FRAME
     call dict_get
     V_UNPACK rax, rdx           ; dict_get returns a Value
     ; rax = value payload, edx = tag
-    test rax, rax
+    test edx, edx               ; the tag, not the payload: a hit may be int 0
     jz .baw_no_exit_decref_name
     cmp edx, TAG_PTR
     jne .baw_no_exit_decref_name

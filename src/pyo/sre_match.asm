@@ -399,7 +399,7 @@ DEF_FUNC sre_match_resolve_group_idx
     call dict_get
     V_UNPACK rax, rdx           ; dict_get returns a Value
     ; rax = val payload, edx = val tag
-    test rax, rax
+    test edx, edx               ; the tag, not the payload: a hit may be int 0
     jz .rgi_no_group_pop2
     ; group_idx = val payload (SmallInt)
     mov rsi, rax
@@ -958,7 +958,7 @@ DEF_FUNC sre_match_subscript
     call dict_get
     V_UNPACK rax, rdx           ; dict_get returns a Value
     ; rax = val payload, edx = val tag
-    test rax, rax
+    test edx, edx               ; the tag, not the payload: a hit may be int 0
     jz .ms_no_such_group
 
     ; group_idx = val payload (SmallInt)

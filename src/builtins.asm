@@ -1677,7 +1677,7 @@ DEF_FUNC builtin___build_class__
     V_UNPACK rax, rdx           ; tp_call returns a Value
     add rsp, 16                ; pop fat args
     ; DECREF result if non-NULL
-    test rax, rax
+    test edx, edx               ; the tag, not the payload: a hit may be int 0
     jz .bc_no_init_subclass
     mov rdi, rax
     call obj_decref

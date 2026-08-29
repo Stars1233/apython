@@ -191,7 +191,7 @@ DEF_FUNC op_store_attr, SA_FRAME
     call dict_get
     V_UNPACK rax, rdx           ; dict_get returns a Value
     pop rcx
-    test rax, rax
+    test edx, edx               ; the tag, not the payload: a hit may be int 0
     jnz .sa_found_in_type         ; found attr in type dict
 .sa_walk_next:
     mov rcx, [rcx + PyTypeObject.tp_base]

@@ -1040,7 +1040,7 @@ DEF_FUNC op_load_super_attr, LSA_FRAME
     call dict_get
     V_UNPACK rax, rdx           ; dict_get returns a Value
     pop rcx                        ; restore current type
-    test rax, rax
+    test edx, edx               ; the tag, not the payload: a hit may be int 0
     jnz .lsa_found
 
 .lsa_next_base:

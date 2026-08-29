@@ -137,7 +137,7 @@ DEF_FUNC instance_getattr
     call dict_get
     V_UNPACK rax, rdx           ; dict_get returns a Value
     pop rcx                             ; restore current type
-    test rax, rax
+    test edx, edx               ; the tag, not the payload: a hit may be int 0
     jnz .found_type                     ; found in type's dict
 
 .try_base:
@@ -717,7 +717,7 @@ DEF_FUNC type_call
     call dict_get
     V_UNPACK rax, rdx           ; dict_get returns a Value
     pop rcx
-    test rax, rax
+    test edx, edx               ; the tag, not the payload: a hit may be int 0
     jnz .new_found
 
 .new_try_base:
@@ -812,7 +812,7 @@ DEF_FUNC type_call
     call dict_get
     V_UNPACK rax, rdx           ; dict_get returns a Value
     pop rcx                     ; restore current type
-    test rax, rax
+    test edx, edx               ; the tag, not the payload: a hit may be int 0
     jnz .init_found
 
 .init_try_base:

@@ -5833,7 +5833,7 @@ DEF_FUNC dict_method_get
     call dict_get
     V_UNPACK rax, rdx           ; dict_get returns a Value
 
-    test rax, rax
+    test edx, edx               ; the tag, not the payload: a hit may be int 0
     jnz .dg_found
 
     ; Not found - return default or None
@@ -6141,7 +6141,7 @@ DEF_FUNC dict_method_setdefault
     call dict_get
     V_UNPACK rax, rdx           ; dict_get returns a Value
 
-    test rax, rax
+    test edx, edx               ; the tag, not the payload: a hit may be int 0
     jnz .sd_found
 
     ; Not found - determine default value
