@@ -336,7 +336,7 @@ END_FUNC wait_for_awaitable_iter_self
 
 ;; ============================================================================
 ;; wait_for_awaitable_iternext — tp_iternext for WaitForAwaitable
-;; State 0: first call — yield self as TAG_WAIT_FOR for task_step to intercept.
+;; State 0: first call — yield self; task_step intercepts it by ob_type.
 ;; State 1: resumed — check inner task, return result or raise TimeoutError.
 ;; State 2+: exhausted.
 ;; ============================================================================
@@ -355,11 +355,11 @@ wait_for_awaitable_iternext:
     ret
 
 .wfai_first:
-    ; State 0 → 1: yield (self, TAG_WAIT_FOR) for task_step
+    ; State 0 → 1: yield self for task_step (identified by ob_type)
     mov dword [rdi + WaitForAwaitable.state], 1
     INCREF rdi
     mov rax, rdi
-    mov edx, TAG_WAIT_FOR
+    mov edx, TAG_PTR
     ret
 
 .wfai_check:
@@ -835,6 +835,7 @@ sleep_awaitable_type:
     dq 0                        ; tp_clear
 
 align 8
+global wait_for_awaitable_type
 wait_for_awaitable_type:
     dq 1                        ; ob_refcnt (immortal)
     dq type_type                ; ob_type

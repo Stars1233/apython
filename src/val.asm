@@ -105,10 +105,6 @@ DEF_FUNC val_pack
     je .float
     cmp esi, TAG_NULL
     je .null
-    cmp esi, TAG_TASK
-    je .passthru
-    cmp esi, TAG_WAIT_FOR
-    je .passthru
     cmp esi, TAG_SLEEP
     je .sleep
     cmp esi, TAG_IO_WAIT

@@ -220,8 +220,6 @@ TAG_RC_BIT   equ 0x80        ; bit 7: refcounted flag
 TAG_PTR      equ (5 | TAG_RC_BIT)    ; heap PyObject*, refcounted
 TAG_SLEEP    equ 7           ; payload = delay_ns (uint64) — async sleep sentinel
 TAG_IO_WAIT  equ 8           ; payload = fd | (direction << 32) — async I/O sentinel
-TAG_TASK     equ (9 | TAG_RC_BIT)    ; payload = AsyncTask*, RC bit SET
-TAG_WAIT_FOR equ (10 | TAG_RC_BIT)   ; payload = WaitForAwaitable*, RC bit SET
 
 ; Value stack push (r13 = payload top, r15 = tag top)
 %macro VPUSH_VAL 2              ; %1 = payload reg, %2 = tag reg

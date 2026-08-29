@@ -273,15 +273,26 @@ DEF_FUNC task_step, TS_FRAME
     test edx, edx
     jz .ts_finished
 
-    ; Dispatch on result tag
+    ; Dispatch on the yielded value.  Sleep and io-wait carry raw data and
+    ; need their own tags; a yielded task or wait_for is an ordinary object,
+    ; so it is identified by its type rather than by a tag of its own.
     cmp edx, TAG_SLEEP
     je .ts_sleep
     cmp edx, TAG_IO_WAIT
     je .ts_io_wait
-    cmp edx, TAG_TASK
+    cmp edx, TAG_PTR
+    jne .ts_plain_value
+    ; rcx/rsi are scratch here; r13 must not be touched -- it is the VM value
+    ; stack pointer and task_step does not save it.
+    mov rcx, [rax + PyObject.ob_type]
+    lea rsi, [rel task_type]
+    cmp rcx, rsi
     je .ts_await_task
-    cmp edx, TAG_WAIT_FOR
+    extern wait_for_awaitable_type
+    lea rsi, [rel wait_for_awaitable_type]
+    cmp rcx, rsi
     je .ts_wait_for
+.ts_plain_value:
 
     ; Unknown yield value — coroutine yielded a regular value
     ; For asyncio: this means the coroutine is waiting
@@ -359,7 +370,7 @@ DEF_FUNC task_step, TS_FRAME
     call ready_enqueue
 
 .ts_decref_awaited:
-    ; DECREF awaited task (INCREFed by task_iternext before yielding TAG_TASK)
+    ; DECREF awaited task (INCREFed by task_iternext before yielding itself)
     mov rdi, r12
     call obj_decref
     jmp .ts_ret
@@ -753,18 +764,19 @@ DEF_FUNC_BARE task_iter_self
 END_FUNC task_iter_self
 
 ;; ============================================================================
-;; task_iternext — tp_iternext for task: yield TAG_TASK or stop
-;; When awaited, yields itself as TAG_TASK so event loop can track dependency.
+;; task_iternext — tp_iternext for task: yield self or stop.
+;; When awaited, yields itself so the event loop can track the dependency;
+;; task_step recognizes it by its type.
 ;; ============================================================================
 DEF_FUNC_BARE task_iternext
     ; If done, return NULL (signals StopIteration to SEND)
     cmp dword [rdi + AsyncTask.done], 1
     je .ti_done
 
-    ; Not done — yield self as TAG_TASK
+    ; Not done — yield self; task_step identifies it by ob_type
     inc qword [rdi + PyObject.ob_refcnt]
     mov rax, rdi
-    mov edx, TAG_TASK
+    mov edx, TAG_PTR
     ret
 
 .ti_done:
