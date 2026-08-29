@@ -148,6 +148,74 @@
 - `func.__name__ = "x"` silently ignored (attribute set on functions not supported)
 - User-defined `__iter__` dunder not connected to tp_iter slot on heaptypes
 
+## Pre-existing breakage campaign
+
+Found by differential probing (every immediate kind through 76 operations,
+plus a structural corpus for recursion, cycles and size overflow) together
+with three static audits.  All were pre-existing; the crash sweep is now
+clean.  See git log for the commits.
+
+### Fixed: crash root causes
+
+1. **Non-pointer Value dereferenced.**  `V_UNPACK` yields a payload, not a
+   Value.  Code tested it against *one* non-pointer tag and dereferenced on
+   the fall-through, so the other tag walked into `[payload + ob_type]`.
+   Sites: the five subscript entry points, `dict.get` (which additionally
+   pre-decoded a Value that `dict_get` decodes itself), `bytes_compare`,
+   `dict_richcompare`, `tuple_concat`/`list_concat`, `op_before_with`,
+   `op_match_class` (whose `jz` repeated the `je` above it, so the None arm
+   was dead code), `bytes()`/`bytearray()`/`eval()`, `hash()`, `sys.exit()`,
+   `file.write`, `exc_isinstance`, `bytes_contains`, `slice` components and
+   `range()` arguments.
+2. **Iterable arguments read as concrete lists.**  `str.join`, `bytes.join`
+   and `dict.update` indexed `ob_item` directly.
+3. **`CALL_FUNCTION_EX` assumed non-tuple meant list**, so `f(*aset)`,
+   `f(*"ab")`, `f(*gen)` and `f(*range(3))` read `[obj+16]` as an argument
+   count and `[obj+32]` as a Value array.
+4. **`BINARY_SLICE`/`STORE_SLICE`** made three unguarded loads in a row.
+5. **No recursion bound anywhere**, at Python level or through
+   `list`/`tuple_richcompare`, `tuple_hash` or the container reprs.
+6. **Unchecked size arithmetic** in `tuple_repeat`, `str_repeat` and
+   `tuple_new`, and truncation of an oversized count through
+   `__gmpz_get_si`.
+7. **The 8192-byte import path buffer** was never measured against.
+8. **Three-argument `type()`** allocated an instance-sized block and wrote
+   type fields into it.
+
+### Fixed: exceptions that went missing
+
+A dunder call returns NULL both for "the type does not define it" and for
+"it ran and raised".  `instance_repr`, `instance_str`, `builtin_len`, the
+four container reprs and `op_store_attr` all treated the second as the
+first, so the exception stayed pending and surfaced later at an unrelated
+instruction.  `current_exception` cannot discriminate on its own -- it stays
+set for the whole of an `except` block -- so it is compared against its
+value from before the call.
+
+`repr_depth`, `gc_collecting` and `c_recursion_depth` are now reset by
+`eval_exception_unwind`, which already repaired five other globals for the
+same reason.  A raising `__del__` is reported and cleared.  A raise with no
+interpreter frame to unwind to reports instead of executing `mov rsp, 0`.
+
+### Known, not fixed
+
+- **Multiple inheritance does not exist.**  `__build_class__` reads only
+  `args[2]`, so `class C(A, B)` produces a class that has never heard of B
+  and `c.b()` is an AttributeError -- silently, which is the worst shape.
+  Needs a C3 MRO.
+- **Recursive deallocation overflows the stack**: `a=[]`, then 300k times
+  `a=[a]`, then `del a`.  Needs a trashcan mechanism.
+- **Crafted `.pyc` and `_sre` bytecode are trusted.**  Marshal validates
+  offsets but not types, so a `co_consts` slot holding an int is
+  dereferenced by `eval_frame`; `frame_new` adds two `.pyc` fields in 32
+  bits; `sre_match` bounds the opcode but not its operands.  This is an
+  attacker model rather than breakage, and is a separate track.
+- Repetition too large to allocate reports OverflowError where CPython says
+  MemoryError.  `ap_malloc` exits fatally rather than returning NULL, so the
+  two cases cannot be told apart.
+- The container repr cycle stack is 64 deep; CPython's limit is far higher.
+
+
 ## New Infrastructure Added
 - `list_copy()` - standalone shallow copy function
 - `ALWAYS_EQ`, `NEVER_EQ`, `C_RECURSION_LIMIT` in `lib/test/support/__init__.py`
