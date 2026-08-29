@@ -4474,7 +4474,10 @@ DEF_FUNC list_method_sort, LS_FRAME
 .merge_use_lt:
     mov edx, PY_LT                 ; normal: right < left
 .merge_do_cmp:
+    V_PACK rdi, rcx             ; left  -> Value
+    V_PACK rsi, r8              ; right -> Value
     call rax
+    V_UNPACK rax, rdx           ; tp_richcompare returns a Value
     jmp .merge_check_result
 
 .merge_use_float:
@@ -4489,7 +4492,10 @@ DEF_FUNC list_method_sort, LS_FRAME
 .merge_float_lt:
     mov edx, PY_LT                 ; normal: right < left
 .merge_float_cmp:
+    V_PACK rdi, rcx             ; left  -> Value
+    V_PACK rsi, r8              ; right -> Value
     call float_compare
+    V_UNPACK rax, rdx           ; float_compare returns a Value
     jmp .merge_check_result
 
 .merge_try_dunder:
@@ -5212,7 +5218,10 @@ DEF_FUNC list_method_index, LI_FRAME
     mov edx, PY_EQ
     mov rcx, r12
     mov r8, [rbp - LI_VTAG]
+    V_PACK rdi, rcx             ; left  -> Value
+    V_PACK rsi, r8              ; right -> Value
     call rax
+    V_UNPACK rax, rdx           ; tp_richcompare returns a Value
     ; Check for NotImplemented (NULL return = tag 0)
     test edx, edx
     jz .index_next
@@ -5329,7 +5338,10 @@ DEF_FUNC list_method_count, LC_FRAME
     mov edx, PY_EQ
     mov rcx, r8               ; item tag
     mov r8, r15               ; value tag
+    V_PACK rdi, rcx             ; left  -> Value
+    V_PACK rsi, r8              ; right -> Value
     call rax
+    V_UNPACK rax, rdx           ; tp_richcompare returns a Value
     ; Check for NotImplemented (NULL return = tag 0)
     test edx, edx
     jz .count_next
@@ -6406,7 +6418,10 @@ DEF_FUNC list_method_remove
     mov edx, PY_EQ
     mov rcx, r8              ; item tag
     mov r8, r15              ; value tag
+    V_PACK rdi, rcx             ; left  -> Value
+    V_PACK rsi, r8              ; right -> Value
     call rax
+    V_UNPACK rax, rdx           ; tp_richcompare returns a Value
     ; Check for NotImplemented (NULL return = tag 0)
     test edx, edx
     jz .lremove_next

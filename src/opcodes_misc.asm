@@ -858,7 +858,10 @@ section .text
     mov ecx, [rsp + BO_LTAG]   ; ecx = left_tag
     mov r8d, [rsp + BO_RTAG]   ; r8d = right_tag
     push rdx                   ; save comparison op (like .cmp_do_call does)
+    V_PACK rdi, rcx             ; left  -> Value
+    V_PACK rsi, r8              ; right -> Value
     call float_compare
+    V_UNPACK rax, rdx           ; float_compare returns a Value
     ; Check for NotImplemented (NULL return = tag 0)
     test edx, edx
     jz .cmp_try_right          ; try right operand's tp_richcompare
@@ -873,7 +876,10 @@ section .text
     mov rcx, [rsp + BO_LTAG]   ; rcx = left_tag
     mov r8, [rsp + BO_RTAG]    ; r8 = right_tag
     push rdx                   ; save comparison op before call
+    V_PACK rdi, rcx             ; left  -> Value
+    V_PACK rsi, r8              ; right -> Value
     call rax
+    V_UNPACK rax, rdx           ; tp_richcompare returns a Value
     ; rax = result payload, edx = result tag
     ; Check for NotImplemented (NULL return = tag 0)
     test edx, edx
@@ -975,7 +981,10 @@ section .text
     mov edx, ecx               ; swapped op
     mov rcx, [rsp + 8 + BO_RTAG]  ; right_tag (now left_tag arg)
     mov r8, [rsp + 8 + BO_LTAG]   ; left_tag (now right_tag arg)
+    V_PACK rdi, rcx             ; left  -> Value
+    V_PACK rsi, r8              ; right -> Value
     call rax
+    V_UNPACK rax, rdx           ; tp_richcompare returns a Value
     ; Check for NotImplemented again
     test edx, edx
     jnz .cmp_try_right_ok

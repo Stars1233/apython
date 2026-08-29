@@ -1417,7 +1417,10 @@ DEF_FUNC_BARE op_contains_op
     mov rax, [rax + PyTypeObject.tp_richcompare]
     test rax, rax
     jz .contains_iter_skip_eq
+    V_PACK rdi, rcx             ; left  -> Value
+    V_PACK rsi, r8              ; right -> Value
     call rax                        ; tp_richcompare(left, right, PY_EQ, left_tag, right_tag)
+    V_UNPACK rax, rdx           ; tp_richcompare returns a Value
     ; Result: (rax=payload, edx=tag). Check if True
     push rax
     push rdx
@@ -1565,7 +1568,10 @@ DEF_FUNC_BARE op_contains_op
     mov rax, [rax + PyTypeObject.tp_richcompare]
     test rax, rax
     jz .contains_gi_no_match
+    V_PACK rdi, rcx             ; left  -> Value
+    V_PACK rsi, r8              ; right -> Value
     call rax
+    V_UNPACK rax, rdx           ; tp_richcompare returns a Value
     push rax
     push rdx
     mov rdi, rax

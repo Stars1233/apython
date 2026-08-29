@@ -440,7 +440,10 @@ DEF_FUNC_LOCAL dict_keys_equal
     mov edx, PY_EQ
     mov ecx, TAG_PTR
     mov r8d, TAG_PTR
+    V_PACK rdi, rcx             ; left  -> Value
+    V_PACK rsi, r8              ; right -> Value
     call rax
+    V_UNPACK rax, rdx           ; tp_richcompare returns a Value
     ; Check result: if NULL/TAG_NULL → not equal
     test edx, edx
     jz .dke_ne_pop
@@ -1609,6 +1612,8 @@ DRC_LTAG  equ 40
 DRC_FRAME equ 48
 
 DEF_FUNC dict_richcompare, DRC_FRAME
+    V_UNPACK rdi, rcx           ; left  Value -> (payload, tag)
+    V_UNPACK rsi, r8            ; right Value -> (payload, tag)
     ; edx = op (PY_EQ=2, PY_NE=3)
     mov [rbp - DRC_LEFT], rdi
     mov [rbp - DRC_RIGHT], rsi
@@ -1702,7 +1707,10 @@ DEF_FUNC dict_richcompare, DRC_FRAME
     mov edx, 2                      ; PY_EQ
     mov ecx, TAG_PTR
     mov r8d, TAG_PTR
+    V_PACK rdi, rcx             ; left  -> Value
+    V_PACK rsi, r8              ; right -> Value
     call rax
+    V_UNPACK rax, rdx           ; tp_richcompare returns a Value
     ; Result: (rax=payload, edx=tag).  True and False are heap singletons
     ; now, so test truthiness instead of looking for an inline bool payload.
     extern obj_is_true

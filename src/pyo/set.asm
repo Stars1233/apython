@@ -445,6 +445,8 @@ SRC_OTHER equ 16
 SRC_OP    equ 24
 SRC_FRAME equ 24
 DEF_FUNC set_richcompare, SRC_FRAME
+    V_UNPACK rdi, rcx           ; left  Value -> (payload, tag)
+    V_UNPACK rsi, r8            ; right Value -> (payload, tag)
     push rbx
     push r12
     push r13

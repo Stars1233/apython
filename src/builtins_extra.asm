@@ -2270,6 +2270,8 @@ DEF_FUNC_LOCAL minmax_impl, MM_FRAME
     mov rax, rcx                   ; fn ptr
     mov rcx, r8                    ; left_tag = candidate tag
     mov r8, [rbp - MM_TAG]         ; right_tag = best tag
+    V_PACK rdi, rcx             ; left  -> Value
+    V_PACK rsi, r8              ; right -> Value
     call rax
 
     lea rcx, [rel bool_true]
@@ -2396,7 +2398,10 @@ DEF_FUNC_LOCAL minmax_impl, MM_FRAME
     mov edx, [rbp - MM_CMP_OP]
     mov rcx, r12
     mov r8, [rbp - MM_TAG]
+    V_PACK rdi, rcx             ; left  -> Value
+    V_PACK rsi, r8              ; right -> Value
     call rax
+    V_UNPACK rax, rdx           ; tp_richcompare returns a Value
 
     lea rcx, [rel bool_true]
     cmp rax, rcx

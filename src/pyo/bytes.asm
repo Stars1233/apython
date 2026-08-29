@@ -616,6 +616,8 @@ END_FUNC bytes_iter_self
 extern bool_true
 extern bool_false
 DEF_FUNC bytes_compare
+    V_UNPACK rdi, rcx           ; left  Value -> (payload, tag)
+    V_UNPACK rsi, r8            ; right Value -> (payload, tag)
     ; rdi=a, rsi=b, edx=op
     push rbx
     mov ebx, edx              ; save op in ebx

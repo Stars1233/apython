@@ -892,6 +892,8 @@ END_FUNC str_mod
 ;; ============================================================================
 
 DEF_FUNC str_compare
+    V_UNPACK rdi, rcx           ; left  Value -> (payload, tag)
+    V_UNPACK rsi, r8            ; right Value -> (payload, tag)
     push rbx
 
     mov ebx, edx            ; save op

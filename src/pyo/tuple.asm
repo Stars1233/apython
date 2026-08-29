@@ -651,6 +651,8 @@ TRC_FRAME    equ 40
 
 global tuple_richcompare
 DEF_FUNC tuple_richcompare, TRC_FRAME
+    V_UNPACK rdi, rcx           ; left  Value -> (payload, tag)
+    V_UNPACK rsi, r8            ; right Value -> (payload, tag)
     ; Verify right is TAG_PTR and a tuple
     cmp r8d, TAG_PTR
     jne .trc_not_impl
@@ -739,7 +741,10 @@ DEF_FUNC tuple_richcompare, TRC_FRAME
     pop rcx                         ; left_tag
     pop rdi                         ; left_payload
     mov edx, PY_EQ
+    V_PACK rdi, rcx             ; left  -> Value
+    V_PACK rsi, r8              ; right -> Value
     call rax
+    V_UNPACK rax, rdx           ; tp_richcompare returns a Value
     ; Check for NotImplemented (NULL return = tag 0)
     test edx, edx
     jz .trc_elem_not_equal_nopop
@@ -770,7 +775,10 @@ DEF_FUNC tuple_richcompare, TRC_FRAME
     pop rcx
     pop rdi
     mov edx, PY_EQ
+    V_PACK rdi, rcx
+    V_PACK rsi, r8
     call float_compare
+    V_UNPACK rax, rdx           ; float_compare returns a Value
     ; Check for NotImplemented (NULL return = tag 0)
     test edx, edx
     jz .trc_elem_not_equal_nopop
@@ -848,6 +856,8 @@ DEF_FUNC tuple_richcompare, TRC_FRAME
     pop r8
     pop rcx
     mov edx, [rbp - TRC_OP]
+    V_PACK rdi, rcx             ; left  -> Value
+    V_PACK rsi, r8              ; right -> Value
     call rax
     leave
     ret
@@ -855,6 +865,8 @@ DEF_FUNC tuple_richcompare, TRC_FRAME
     pop r8
     pop rcx
     mov edx, [rbp - TRC_OP]
+    V_PACK rdi, rcx
+    V_PACK rsi, r8
     call float_compare
     leave
     ret

@@ -1844,6 +1844,8 @@ END_FUNC int_unwrap
 ;; op: PY_LT=0 PY_LE=1 PY_EQ=2 PY_NE=3 PY_GT=4 PY_GE=5
 ;; ============================================================================
 DEF_FUNC int_compare
+    V_UNPACK rdi, rcx           ; left  Value -> (payload, tag)
+    V_UNPACK rsi, r8            ; right Value -> (payload, tag)
     push rbx
     push r12
     push r13

@@ -1090,7 +1090,10 @@ DEF_FUNC list_contains, LC_FRAME
     mov edx, PY_EQ
     mov rcx, r12                ; elem tag
     mov r8, [rbp - LC_VTAG]     ; value tag
+    V_PACK rdi, rcx             ; left  -> Value
+    V_PACK rsi, r8              ; right -> Value
     call rax
+    V_UNPACK rax, rdx           ; tp_richcompare returns a Value
     ; Check for NotImplemented (NULL return = tag 0)
     test edx, edx
     jnz .elem_check_result
@@ -1148,7 +1151,10 @@ DEF_FUNC list_contains, LC_FRAME
     mov edx, PY_EQ
     mov rcx, [rbp - LC_VTAG]        ; self_tag = value_tag
     mov r8, r12                      ; other_tag = elem_tag
+    V_PACK rdi, rcx             ; left  -> Value
+    V_PACK rsi, r8              ; right -> Value
     call rax
+    V_UNPACK rax, rdx           ; tp_richcompare returns a Value
     test edx, edx
     jz .next
 
@@ -2047,6 +2053,8 @@ LRC_MINLEN   equ 40
 LRC_FRAME    equ 40
 
 DEF_FUNC list_richcompare, LRC_FRAME
+    V_UNPACK rdi, rcx           ; left  Value -> (payload, tag)
+    V_UNPACK rsi, r8            ; right Value -> (payload, tag)
     ; Verify right is TAG_PTR and a list
     cmp r8d, TAG_PTR
     jne .lrc_not_impl
@@ -2136,7 +2144,10 @@ DEF_FUNC list_richcompare, LRC_FRAME
     pop rcx                         ; left_tag
     pop rdi                         ; left_payload
     mov edx, PY_EQ
+    V_PACK rdi, rcx             ; left  -> Value
+    V_PACK rsi, r8              ; right -> Value
     call rax
+    V_UNPACK rax, rdx           ; tp_richcompare returns a Value
     ; Check for NotImplemented (NULL return = tag 0)
     test edx, edx
     jz .lrc_elem_not_equal_nopop
@@ -2170,7 +2181,10 @@ DEF_FUNC list_richcompare, LRC_FRAME
     pop rcx
     pop rdi
     mov edx, PY_EQ
+    V_PACK rdi, rcx
+    V_PACK rsi, r8
     call float_compare
+    V_UNPACK rax, rdx           ; float_compare returns a Value
     ; Check for NotImplemented (NULL return = tag 0)
     test edx, edx
     jz .lrc_elem_not_equal_nopop
@@ -2250,14 +2264,18 @@ DEF_FUNC list_richcompare, LRC_FRAME
     pop r8
     pop rcx
     mov edx, [rbp - LRC_OP]
+    V_PACK rdi, rcx             ; left  -> Value
+    V_PACK rsi, r8              ; right -> Value
     call rax
-    ; Return the result directly
+    ; Return the Value directly
     leave
     ret
 .lrc_order_float:
     pop r8
     pop rcx
     mov edx, [rbp - LRC_OP]
+    V_PACK rdi, rcx
+    V_PACK rsi, r8
     call float_compare
     leave
     ret

@@ -668,6 +668,8 @@ END_FUNC float_int
 ;; Handles mixed int/float comparisons.
 ;; ============================================================================
 DEF_FUNC float_compare, 40
+    V_UNPACK rdi, rcx           ; left  Value -> (payload, tag)
+    V_UNPACK rsi, r8            ; right Value -> (payload, tag)
     ; rdi=left, rsi=right, edx=op, ecx=left_tag, r8d=right_tag
     ; Validate both operands are numeric (float, int, or bool)
     ; Left tag

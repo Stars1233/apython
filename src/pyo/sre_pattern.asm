@@ -1819,6 +1819,8 @@ END_FUNC sre_pattern_hash
 extern str_compare
 
 DEF_FUNC sre_pattern_richcompare
+    V_UNPACK rdi, rcx           ; left  Value -> (payload, tag)
+    V_UNPACK rsi, r8            ; right Value -> (payload, tag)
     push rbx
     push r12
     push r13
