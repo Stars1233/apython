@@ -31,6 +31,8 @@ extern type_type
 extern list_traverse
 extern list_clear
 extern int_type
+extern eval_exception_unwind
+extern obj_richcompare_bool
 extern obj_as_index
 extern recursion_limit
 extern c_recursion_depth
@@ -1010,198 +1012,54 @@ END_FUNC list_len
 ;; sq_contains: linear scan with identity check then __eq__ protocol
 ;; ============================================================================
 LC_LIST    equ 8
-LC_VPAY    equ 16    ; value payload
-LC_VTAG    equ 24    ; value tag
+LC_VALUE   equ 16    ; the value being searched for, as a Value
 LC_IDX     equ 32
 LC_SIZE    equ 40
-LC_FRAME   equ 40
+LC_FRAME   equ 48
 DEF_FUNC list_contains, LC_FRAME
-    V_UNPACK rsi, rdx           ; decode the operand Value
-    push rbx
-    push r12
-
     mov [rbp - LC_LIST], rdi   ; list
-    mov [rbp - LC_VPAY], rsi   ; value payload
-    mov [rbp - LC_VTAG], rdx   ; value tag
+    mov [rbp - LC_VALUE], rsi  ; the value Value
     mov rax, [rdi + PyListObject.ob_size]
     mov [rbp - LC_SIZE], rax
     mov qword [rbp - LC_IDX], 0
 
 .loop:
     mov rax, [rbp - LC_IDX]
-    cmp rax, [rbp - LC_SIZE]
+    ; Re-read the size each pass: an __eq__ running below can mutate the
+    ; list, and CPython's own test_equal_operator_modifying_operand relies on
+    ; the search noticing.
+    mov rcx, [rbp - LC_LIST]
+    mov rdx, [rcx + PyListObject.ob_size]
+    cmp rax, rdx
     jge .not_found
 
-    ; Load element payload+tag
-    mov rbx, [rbp - LC_LIST]
-    mov rbx, [rbx + PyListObject.ob_item]
-    mov rdx, [rbp - LC_LIST]
-    mov rcx, rax
-    mov rdi, [rbx + rcx * 8]        ; elem payload
-    V_UNPACK rdi, r8
-
-    ; Fast identity check: both payload and tag match → found
-    cmp rdi, [rbp - LC_VPAY]
-    jne .try_eq
-    cmp r8, [rbp - LC_VTAG]
-    je .found
-
-.try_eq:
-    ; Use tp_richcompare for __eq__ protocol
-    ; Resolve element type from tag
-    mov r12, r8                 ; save elem tag
-    cmp r8d, TAG_SMALLINT
-    je .elem_int_type
-    cmp r8d, TAG_FLOAT
-    je .elem_float_type
-    test r8d, TAG_RC_BIT
-    jz .next                    ; non-pointer non-known tag: skip
-    mov rax, [rdi + PyObject.ob_type]
-    jmp .elem_have_type
-.elem_int_type:
-    lea rax, [rel int_type]
-    jmp .elem_have_type
-.elem_float_type:
-    lea rax, [rel float_type]
-    jmp .elem_have_type
-.elem_bool_type:
-    lea rax, [rel bool_type]
-.elem_have_type:
-    mov rbx, rax                ; save type ptr
-    mov rax, [rax + PyTypeObject.tp_richcompare]
-    test rax, rax
-    jnz .elem_do_richcmp
-
-    ; No tp_richcompare — try dunder on heaptype
-    mov rdx, [rbx + PyTypeObject.tp_flags]
-    test rdx, TYPE_FLAG_HEAPTYPE
-    jz .next
-
-    ; dunder_call_2(self=elem, other=value, "__eq__", other_tag)
-    extern dunder_call_2
-    ; rdi = elem payload (already set)
-    mov rsi, [rbp - LC_VPAY]   ; other = value
-    CSTRING rdx, "__eq__"
-    mov ecx, [rbp - LC_VTAG]   ; other_tag = value tag
-    call dunder_call_2
-    V_UNPACK rax, rdx           ; returns a Value
-    ; if NULL, skip
-    test edx, edx
-    jz .next
-    jmp .elem_check_result
-
-.elem_do_richcmp:
-    ; tp_richcompare(elem, value, PY_EQ, elem_tag, value_tag)
-    ; rdi = elem payload (already set)
-    mov rsi, [rbp - LC_VPAY]
+    mov rcx, [rcx + PyListObject.ob_item]
+    mov rdi, [rcx + rax * 8]        ; the element Value
+    mov rsi, [rbp - LC_VALUE]
     mov edx, PY_EQ
-    mov rcx, r12                ; elem tag
-    mov r8, [rbp - LC_VTAG]     ; value tag
-    V_PACK rdi, rcx             ; left  -> Value
-    V_PACK rsi, r8              ; right -> Value
-    call rax
-    V_UNPACK rax, rdx           ; tp_richcompare returns a Value
-    ; Check for NotImplemented (NULL return = tag 0)
-    test edx, edx
-    jnz .elem_check_result
-    ; Element's __eq__ returned NotImplemented — try reflected (value.__eq__(elem))
-    jmp .try_reflected
-
-.try_reflected:
-    ; Try the VALUE's __eq__ (reflected comparison: value.__eq__(elem))
-    mov rdi, [rbp - LC_VPAY]      ; value payload
-    mov r8d, [rbp - LC_VTAG]      ; value tag
-    ; Resolve value type
-    cmp r8d, TAG_PTR
-    jne .try_reflected_nonptr
-    mov rax, [rdi + PyObject.ob_type]
-    jmp .try_reflected_have_type
-.try_reflected_nonptr:
-    cmp r8d, TAG_SMALLINT
-    jne .next
-    lea rax, [rel int_type]
-.try_reflected_have_type:
-    mov rax, [rax + PyTypeObject.tp_richcompare]
-    test rax, rax
-    jnz .try_reflected_richcmp
-    ; No tp_richcompare — try dunder on heaptype
-    mov rax, [rdi + PyObject.ob_type]
-    mov rdx, [rax + PyTypeObject.tp_flags]
-    test rdx, TYPE_FLAG_HEAPTYPE
-    jz .next
-    ; Reload elem payload + tag for the reflected call
-    mov rax, [rbp - LC_IDX]
-    mov rbx, [rbp - LC_LIST]
-    mov rbx, [rbx + PyListObject.ob_item]
-    mov rdx, [rbp - LC_LIST]
-    mov rsi, [rbx + rax * 8]        ; elem payload
-    V_UNPACK rsi, rcx
-    ; dunder_call_2(self=value, other=elem, "__eq__", other_tag=elem_tag)
-    ; rdi = value (already set)
-    CSTRING rdx, "__eq__"
-    call dunder_call_2
-    V_UNPACK rax, rdx           ; returns a Value
-    test edx, edx
-    jz .next
-    jmp .elem_check_result
-.try_reflected_richcmp:
-    ; Reload elem for reflected call
-    push rax                         ; save richcompare func
-    mov rcx, [rbp - LC_IDX]
-    mov rbx, [rbp - LC_LIST]
-    mov rbx, [rbx + PyListObject.ob_item]
-    mov rdx, [rbp - LC_LIST]
-    mov rsi, [rbx + rcx * 8]        ; elem payload
-    V_UNPACK rsi, r12
-    pop rax
-    ; tp_richcompare(value, elem, PY_EQ, value_tag, elem_tag)
-    ; rdi = value (already set)
-    mov edx, PY_EQ
-    mov rcx, [rbp - LC_VTAG]        ; self_tag = value_tag
-    mov r8, r12                      ; other_tag = elem_tag
-    V_PACK rdi, rcx             ; left  -> Value
-    V_PACK rsi, r8              ; right -> Value
-    call rax
-    V_UNPACK rax, rdx           ; tp_richcompare returns a Value
-    test edx, edx
-    jz .next
-
-.elem_check_result:
-
-    ; Check result truthiness
-    push rax
-    push rdx
-    mov rdi, rax
-    mov rsi, rdx
-    V_PACK rdi, rsi
-    call obj_is_true
-    mov ebx, eax               ; save truthiness
-    pop rdx
-    pop rdi                    ; result payload
-    push rbx                   ; save truthiness
-    mov rsi, rdx
-    DECREF_VAL rdi, rsi
-    pop rbx                    ; restore truthiness
-    test ebx, ebx
+    call obj_richcompare_bool
+    cmp eax, -1
+    je .contains_error
+    test eax, eax
     jnz .found
 
-.next:
     inc qword [rbp - LC_IDX]
     jmp .loop
 
 .found:
     mov eax, 1
-    pop r12
-    pop rbx
     leave
     ret
 
 .not_found:
     xor eax, eax
-    pop r12
-    pop rbx
     leave
     ret
+
+.contains_error:
+    ; sq_contains has no error channel; the exception is already pending.
+    leave
+    jmp eval_exception_unwind
 END_FUNC list_contains
 
 ;; ============================================================================

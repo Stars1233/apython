@@ -5,6 +5,8 @@
 %include "object.inc"
 %include "types.inc"
 
+extern obj_richcompare_bool
+extern eval_exception_unwind
 extern bool_true
 extern bool_false
 extern ap_malloc
@@ -310,165 +312,26 @@ END_FUNC dict_type_call
 
 ;; ============================================================================
 ;; dict_keys_equal(rdi=a_key, rsi=b_key, edx=a_tag, ecx=b_tag) -> int (1=equal, 0=not)
-;; Internal helper: value equality for SmallInts, string comparison for heap ptrs.
+;;
+;; Was identity, then a hand-rolled cross-type numeric compare, then a
+;; strcmp, then tp_richcompare -- most of PyObject_RichCompareBool, with the
+;; reflected call missing.  So a key whose __eq__ lives on the *lookup* side
+;; rather than the stored side was never found.
 ;; ============================================================================
-extern float_to_f64
-extern int_type
-extern bool_type
-
 DEF_FUNC_LOCAL dict_keys_equal
-    ; Fast path: both payload AND tag identical → equal
-    ; Handles SmallInt==SmallInt, same heap ptr
-    cmp rdi, rsi
-    jne .dke_diff_payload
-    cmp rdx, rcx
-    jne .dke_diff_payload
-    mov eax, 1
-    leave
-    ret
-
-.dke_diff_payload:
-    ; Check cross-type numeric equality
-    ; SmallInt(1) == Float(1.0) == Bool(True) in dict keys
-    ; Also handles TAG_PTR for heap int/bool objects
-    cmp edx, TAG_SMALLINT
-    je .dke_a_numeric
-    cmp edx, TAG_FLOAT
-    je .dke_a_numeric
-    cmp edx, TAG_PTR
-    jne .dke_not_numeric
-    ; TAG_PTR: check if int_type or bool_type
-    mov rax, [rdi + PyObject.ob_type]
-    lea r8, [rel int_type]
-    cmp rax, r8
-    je .dke_a_numeric
-    lea r8, [rel bool_type]
-    cmp rax, r8
-    je .dke_a_numeric
-    jmp .dke_not_numeric
-.dke_a_numeric:
-    cmp ecx, TAG_SMALLINT
-    je .dke_both_numeric
-    cmp ecx, TAG_FLOAT
-    je .dke_both_numeric
-    cmp ecx, TAG_PTR
-    jne .dke_not_equal          ; a numeric, b not → not equal
-    ; TAG_PTR: check if int_type or bool_type
-    mov rax, [rsi + PyObject.ob_type]
-    lea r8, [rel int_type]
-    cmp rax, r8
-    je .dke_both_numeric
-    lea r8, [rel bool_type]
-    cmp rax, r8
-    je .dke_both_numeric
-    jmp .dke_not_equal          ; a numeric, b not numeric → not equal
-.dke_both_numeric:
-    ; Convert both to f64 and compare
-    ; Save b_key and b_tag (caller-saved regs clobbered by float_to_f64)
-    push rsi                    ; save b_key
-    push rcx                    ; save b_tag
-    mov esi, edx                ; a_tag
-    ; rdi = a_key (already set)
-    call float_to_f64           ; xmm0 = a as double
-    sub rsp, 8
-    movsd [rsp], xmm0           ; save a's double on stack
-    mov rdi, [rsp + 16]         ; restore b_key (+8 sub + 8 push rcx)
-    mov esi, [rsp + 8]          ; restore b_tag (ecx saved as qword)
-    call float_to_f64           ; xmm0 = b as double
-    movsd xmm1, [rsp]          ; restore a's double
-    add rsp, 24                 ; pop scratch + saved rcx + saved rsi
-    ucomisd xmm0, xmm1
-    jne .dke_not_equal
-    jp .dke_not_equal           ; NaN ≠ NaN
-    mov eax, 1
-    leave
-    ret
-.dke_not_numeric:
-    ; Different payloads — if either is not TAG_PTR, can't be equal
-    cmp edx, TAG_PTR
-    jne .dke_not_equal
-    cmp ecx, TAG_PTR
-    jne .dke_not_equal
-
-    ; Both heap ptrs with different addresses — check string equality
-    push rbx
-    push r12
-    mov rbx, rdi
-    mov r12, rsi
-
-    mov rax, [rbx + PyObject.ob_type]
-    lea rcx, [rel str_type]
-    cmp rax, rcx
-    jne .dke_try_richcompare
-
-    mov rax, [r12 + PyObject.ob_type]
-    cmp rax, rcx
-    jne .dke_try_richcompare
-
-    ; Both strings — compare data
-    lea rdi, [rbx + PyStrObject.data]
-    lea rsi, [r12 + PyStrObject.data]
-    call ap_strcmp
-    test eax, eax
-    jnz .dke_ne_pop
-
-    ; Equal strings
-    mov eax, 1
-    pop r12
-    pop rbx
-    leave
-    ret
-
-.dke_try_richcompare:
-    ; Both heap ptrs, not strings — try tp_richcompare
-    extern obj_is_true
-    mov rax, [rbx + PyObject.ob_type]
-    mov rax, [rax + PyTypeObject.tp_richcompare]
-    test rax, rax
-    jz .dke_ne_pop
-    ; Call tp_richcompare(a, b, PY_EQ, a_tag=TAG_PTR, b_tag=TAG_PTR)
-    mov rdi, rbx
-    mov rsi, r12
+    V_PACK rdi, rdx             ; both are immediates or pointers, so the
+    V_PACK rsi, rcx             ; round-trip cannot box anything
     mov edx, PY_EQ
-    mov ecx, TAG_PTR
-    mov r8d, TAG_PTR
-    V_PACK rdi, rcx             ; left  -> Value
-    V_PACK rsi, r8              ; right -> Value
-    call rax
-    V_UNPACK rax, rdx           ; tp_richcompare returns a Value
-    ; Check result: if NULL/TAG_NULL → not equal
-    test edx, edx
-    jz .dke_ne_pop
-    ; Check if result is truthy
-    mov rdi, rax
-    mov rsi, rdx
-    push rax
-    push rdx
-    V_PACK rdi, rsi
-    call obj_is_true
-    mov ebx, eax           ; save truthiness
-    pop rdx
-    pop rdi
-    push rbx
-    mov rsi, rdx
-    DECREF_VAL rdi, rsi
-    pop rax                 ; truthiness result
-    pop r12
-    pop rbx
+    call obj_richcompare_bool
+    cmp eax, -1
+    je .dke_error
     leave
     ret
 
-.dke_ne_pop:
-    xor eax, eax
-    pop r12
-    pop rbx
+.dke_error:
+    ; The probe loop has no error channel; the exception is already pending.
     leave
-    ret
-
-.dke_not_equal:
-    xor eax, eax
-    leave
-    ret
+    jmp eval_exception_unwind
 END_FUNC dict_keys_equal
 
 ;; ============================================================================

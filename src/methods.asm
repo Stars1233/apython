@@ -42,6 +42,8 @@ extern none_singleton
 extern bool_true
 extern bool_false
 extern int_from_i64
+extern eval_exception_unwind
+extern obj_richcompare_bool
 extern int_to_i64
 extern builtin_func_new
 extern raise_exception
@@ -5200,10 +5202,8 @@ DEF_FUNC list_method_index, LI_FRAME
     mov [rbp - LI_NARGS], rsi ; save nargs
     mov rax, [rdi]           ; self
     mov [rbp - LI_LIST], rax
-    mov rax, [rdi + 8]      ; args[1]
-    V_UNPACK rax, rdx
-    mov [rbp - LI_VPAY], rax
-    mov [rbp - LI_VTAG], rdx
+    mov rax, [rdi + 8]      ; args[1], the value to find
+    mov [rbp - LI_VPAY], rax    ; kept whole: obj_richcompare_bool takes a Value
     mov rcx, [rbp - LI_LIST]
     mov rcx, [rcx + PyListObject.ob_size]
 
@@ -5262,96 +5262,25 @@ DEF_FUNC list_method_index, LI_FRAME
     mov rax, [rbp - LI_IDX]
     cmp rax, [rbp - LI_SIZE]
     jge .index_not_found
-
-    ; Load element payload+tag
+    ; Re-read the size: an element's __eq__ can shorten the list.
     mov rbx, [rbp - LI_LIST]
+    cmp rax, [rbx + PyListObject.ob_size]
+    jge .index_not_found
+
     mov rbx, [rbx + PyListObject.ob_item]
-    mov rdx, [rbp - LI_LIST]
-    mov rdi, [rbx + rax * 8]      ; elem payload
-    V_UNPACK rdi, r8
+    mov rdi, [rbx + rax * 8]    ; the element Value
 
-    ; Fast identity: both payload AND tag match → found
-    cmp rdi, [rbp - LI_VPAY]
-    jne .index_try_eq
-    cmp r8, [rbp - LI_VTAG]
-    je .index_found
-
-.index_try_eq:
-    ; Resolve element type
-    mov r12, r8
-    cmp r8d, TAG_SMALLINT
-    je .index_int_type
-    cmp r8d, TAG_FLOAT
-    je .index_float_type
-    test r8, r8
-    js .index_str_type
-    test r8d, TAG_RC_BIT
-    jz .index_next
-    mov rax, [rdi + PyObject.ob_type]
-    jmp .index_have_type
-.index_int_type:
-    lea rax, [rel int_type]
-    jmp .index_have_type
-.index_float_type:
-    extern float_type
-    lea rax, [rel float_type]
-    jmp .index_have_type
-.index_str_type:
-    extern str_type
-    lea rax, [rel str_type]
-.index_have_type:
-    mov rbx, rax               ; save type ptr
-    mov rax, [rax + PyTypeObject.tp_richcompare]
-    test rax, rax
-    jnz .index_do_richcmp
-
-    ; No tp_richcompare — try dunder on heaptype
-    mov rdx, [rbx + PyTypeObject.tp_flags]
-    test rdx, TYPE_FLAG_HEAPTYPE
-    jz .index_next
-    ; rdi = elem (already set)
-    mov rsi, [rbp - LI_VPAY]
-    CSTRING rdx, "__eq__"
-    mov ecx, [rbp - LI_VTAG]
-    call dunder_call_2
-    V_UNPACK rax, rdx           ; returns a Value
-    test edx, edx
-    jz .index_next
-    jmp .index_check_result
-
-.index_do_richcmp:
-    ; tp_richcompare(elem, value, PY_EQ, elem_tag, value_tag)
+    ; Was a hand-rolled type switch feeding tp_richcompare, with a NULL
+    ; result meaning "no match" -- so NotImplemented never tried the
+    ; reflected operand and a raising __eq__ was reported as absence.
     mov rsi, [rbp - LI_VPAY]
     mov edx, PY_EQ
-    mov rcx, r12
-    mov r8, [rbp - LI_VTAG]
-    V_PACK rdi, rcx             ; left  -> Value
-    V_PACK rsi, r8              ; right -> Value
-    call rax
-    V_UNPACK rax, rdx           ; tp_richcompare returns a Value
-    ; Check for NotImplemented (NULL return = tag 0)
-    test edx, edx
-    jz .index_next
-
-.index_check_result:
-    ; Check truthiness
-    push rax
-    push rdx
-    mov rdi, rax
-    mov rsi, rdx
-    V_PACK rdi, rsi
-    call obj_is_true
-    mov ebx, eax
-    pop rdx
-    pop rdi
-    push rbx
-    mov rsi, rdx
-    DECREF_VAL rdi, rsi
-    pop rbx
-    test ebx, ebx
+    call obj_richcompare_bool
+    cmp eax, -1
+    je .index_error
+    test eax, eax
     jnz .index_found
 
-.index_next:
     inc qword [rbp - LI_IDX]
     jmp .index_loop
 
@@ -5363,6 +5292,10 @@ DEF_FUNC list_method_index, LI_FRAME
     leave
     V_PACK rax, rdx             ; builtins return one Value
     ret
+
+.index_error:
+    leave
+    jmp eval_exception_unwind
 
 .index_not_found:
     lea rdi, [rel exc_ValueError_type]
@@ -5382,100 +5315,31 @@ DEF_FUNC list_method_count, LC_FRAME
     push r12
     push r13
     push r14
-    push r15
 
     mov rbx, [rdi]          ; self
-    mov r12, [rdi + 8]     ; value payload
-    V_UNPACK r12, r15       ; args[1]
-    mov r13, [rbx + PyListObject.ob_size]
+    mov r12, [rdi + 8]      ; the value Value
     xor r14d, r14d          ; count = 0
-
     mov qword [rbp - LC_IDX], 0
+
 .count_loop:
     mov rcx, [rbp - LC_IDX]
+    ; The size is re-read every pass: an element's __eq__ can shorten the
+    ; list under us.
+    mov r13, [rbx + PyListObject.ob_size]
     cmp rcx, r13
     jge .count_done
+
     mov rax, [rbx + PyListObject.ob_item]
-    mov rdi, [rax + rcx * 8]    ; item payload
-    V_UNPACK rdi, r8
-
-    ; Fast path: identity (both payload AND tag match)
-    cmp rdi, r12
-    jne .count_eq_dispatch
-    cmp r8, r15
-    je .count_hit
-
-.count_eq_dispatch:
-    ; __eq__ dispatch via tp_richcompare
-    cmp r8d, TAG_SMALLINT
-    je .count_eq_int
-    cmp r8d, TAG_FLOAT
-    je .count_eq_float
-    test r8d, TAG_RC_BIT
-    jz .count_next            ; TAG_NONE etc: skip
-    mov rax, [rdi + PyObject.ob_type]
-    jmp .count_eq_call
-.count_eq_int:
-    lea rax, [rel int_type]
-    jmp .count_eq_call
-.count_eq_float:
-    lea rax, [rel float_type]
-.count_eq_call:
-    mov rcx, rax               ; save type ptr
-    mov rax, [rax + PyTypeObject.tp_richcompare]
-    test rax, rax
-    jnz .count_do_richcmp
-
-    ; No tp_richcompare — try dunder on heaptype
-    mov rdx, [rcx + PyTypeObject.tp_flags]
-    test rdx, TYPE_FLAG_HEAPTYPE
-    jz .count_next
-    extern dunder_call_2
-    ; rdi = item (already set)
-    mov rsi, r12               ; other = value
-    CSTRING rdx, "__eq__"
-    mov ecx, r15d              ; other_tag = value tag
-    call dunder_call_2
-    V_UNPACK rax, rdx           ; returns a Value
-    test edx, edx
-    jz .count_next
-    jmp .count_check_result
-
-.count_do_richcmp:
-    ; tp_richcompare(item, value, PY_EQ, item_tag, value_tag)
+    mov rdi, [rax + rcx * 8]    ; the element Value
     mov rsi, r12
     mov edx, PY_EQ
-    mov rcx, r8               ; item tag
-    mov r8, r15               ; value tag
-    V_PACK rdi, rcx             ; left  -> Value
-    V_PACK rsi, r8              ; right -> Value
-    call rax
-    V_UNPACK rax, rdx           ; tp_richcompare returns a Value
-    ; Check for NotImplemented (NULL return = tag 0)
-    test edx, edx
+    call obj_richcompare_bool
+    cmp eax, -1
+    je .count_error
+    test eax, eax
     jz .count_next
-
-.count_check_result:
-    ; Check result truthiness (handles both TAG_BOOL and TAG_PTR bool)
-    push rax
-    push rdx
-    mov rdi, rax
-    mov rsi, rdx
-    V_PACK rdi, rsi
-    call obj_is_true
-    mov ecx, eax               ; save truthiness
-    pop rdx
-    pop rdi
-    push rcx
-    mov rsi, rdx
-    DECREF_VAL rdi, rsi
-    pop rcx
-    test ecx, ecx
-    jnz .count_hit
-    jmp .count_next
-
-.count_hit:
     inc r14
+
 .count_next:
     inc qword [rbp - LC_IDX]
     jmp .count_loop
@@ -5483,7 +5347,6 @@ DEF_FUNC list_method_count, LC_FRAME
 .count_done:
     mov rdi, r14
     call int_from_i64
-    pop r15
     pop r14
     pop r13
     pop r12
@@ -5491,6 +5354,10 @@ DEF_FUNC list_method_count, LC_FRAME
     leave
     V_PACK rax, rdx             ; builtins return one Value
     ret
+
+.count_error:
+    leave
+    jmp eval_exception_unwind
 END_FUNC list_method_count
 
 ;; ============================================================================
@@ -6593,104 +6460,41 @@ DEF_FUNC list_method_remove
     ; Check if list is being sorted (ob_item == NULL)
     cmp qword [rbx + PyListObject.ob_item], 0
     je list_sorting_error
-    mov r12, [rdi + 8]     ; value payload
-    V_UNPACK r12, r15       ; args[1]
-    mov r13, [rbx + PyListObject.ob_size]
-
+    mov r12, [rdi + 8]      ; the value Value
     xor r14d, r14d          ; index = 0
 
 .lremove_loop:
+    ; Re-read the size each pass: an element's __eq__ can shorten the list.
+    mov r13, [rbx + PyListObject.ob_size]
     cmp r14, r13
     jge .lremove_not_found
 
     mov rax, [rbx + PyListObject.ob_item]
-    mov rdi, [rax + r14 * 8]    ; item payload
-    V_UNPACK rdi, r8
+    mov rdi, [rax + r14 * 8]    ; the element Value
 
-    ; Fast path: identity (both payload AND tag match)
-    cmp rdi, r12
-    jne .lremove_eq_dispatch
-    cmp r8, r15
-    je .lremove_found
-
-.lremove_eq_dispatch:
-    ; __eq__ dispatch: get item type's tp_richcompare
-    cmp r8d, TAG_SMALLINT
-    je .lremove_eq_int
-    cmp r8d, TAG_FLOAT
-    je .lremove_eq_float
-    test r8d, TAG_RC_BIT
-    jz .lremove_next          ; TAG_NONE etc: skip
-    mov rax, [rdi + PyObject.ob_type]
-    jmp .lremove_eq_call
-.lremove_eq_int:
-    lea rax, [rel int_type]
-    jmp .lremove_eq_call
-.lremove_eq_float:
-    lea rax, [rel float_type]
-.lremove_eq_call:
-    mov rcx, rax              ; save type ptr
-    mov rax, [rax + PyTypeObject.tp_richcompare]
-    test rax, rax
-    jnz .lremove_do_richcmp
-
-    ; No tp_richcompare — try dunder on heaptype
-    mov rdx, [rcx + PyTypeObject.tp_flags]
-    test rdx, TYPE_FLAG_HEAPTYPE
-    jz .lremove_next
-    ; rdi = item (already set)
-    mov rsi, r12             ; other = value
-    CSTRING rdx, "__eq__"
-    mov ecx, r15d            ; other_tag = value tag
-    call dunder_call_2
-    V_UNPACK rax, rdx           ; returns a Value
-    test edx, edx
-    jz .lremove_next
-    jmp .lremove_check_result
-
-.lremove_do_richcmp:
-    ; tp_richcompare(item, value, PY_EQ, item_tag, right_tag)
-    ; rdi = item payload (already set)
-    mov rsi, r12             ; value payload
+    ; Was a hand-rolled type switch feeding tp_richcompare, treating a NULL
+    ; result as "no match" -- so NotImplemented never reached the reflected
+    ; operand and a raising __eq__ became a ValueError about absence.
+    mov rsi, r12
     mov edx, PY_EQ
-    mov rcx, r8              ; item tag
-    mov r8, r15              ; value tag
-    V_PACK rdi, rcx             ; left  -> Value
-    V_PACK rsi, r8              ; right -> Value
-    call rax
-    V_UNPACK rax, rdx           ; tp_richcompare returns a Value
-    ; Check for NotImplemented (NULL return = tag 0)
-    test edx, edx
-    jz .lremove_next
-
-.lremove_check_result:
-    ; Check result truthiness (handles TAG_BOOL and TAG_PTR bool)
-    push rax
-    push rdx
-    mov rdi, rax
-    mov rsi, rdx
-    V_PACK rdi, rsi
-    call obj_is_true
-    mov ecx, eax
-    pop rdx
-    pop rdi
-    push rcx
-    mov rsi, rdx
-    DECREF_VAL rdi, rsi
-    pop rcx
-    test ecx, ecx
+    call obj_richcompare_bool
+    cmp eax, -1
+    je .lremove_error
+    test eax, eax
     jnz .lremove_found
 
-.lremove_next:
     inc r14
     jmp .lremove_loop
 
+.lremove_error:
+    leave
+    jmp eval_exception_unwind
+
 .lremove_found:
     ; r14 = index of found item
-    ; Get the item for DECREF (read payload + tag)
+    ; Get the item for DECREF
     mov rax, [rbx + PyListObject.ob_item]
-    mov r12, [rax + r14 * 8]        ; item payload
-    V_UNPACK r12, r13
+    mov r12, [rax + r14 * 8]        ; the item Value
 
     ; Shift payloads left: memmove(&payloads[idx], &payloads[idx+1], (size-1-idx)*8)
     mov rax, [rbx + PyListObject.ob_item]
@@ -6706,10 +6510,9 @@ DEF_FUNC list_method_remove
 .lremove_shrink:
     dec qword [rbx + PyListObject.ob_size]
 
-    ; DECREF the removed item (fat value)
+    ; DECREF the removed item
     mov rdi, r12
-    mov rsi, r13
-    DECREF_VAL rdi, rsi
+    DECREF_V rdi, rsi
 
     ; Return None
     lea rax, [rel none_singleton]
@@ -6773,8 +6576,7 @@ DEF_FUNC tuple_method_index, 16
     mov [rbp - 8], rdi      ; save args
     mov [rbp - 16], rsi     ; save nargs
     mov rbx, [rdi]          ; self (tuple)
-    mov r12, [rdi + 8]     ; value to find (payload)
-    V_UNPACK r12, r14       ; args[1]
+    mov r12, [rdi + 8]      ; the value to find, as a Value
     mov r13, [rbx + PyTupleObject.ob_size]  ; default stop = size
 
     xor ecx, ecx            ; default start = 0
@@ -6822,61 +6624,32 @@ DEF_FUNC tuple_method_index, 16
     mov r13, rax            ; r13 = stop
 
 .ti_have_bounds:
+    mov r14, rcx                ; r14 = the search index, live across the call
+
 .tindex_loop:
-    cmp rcx, r13
+    cmp r14, r13
     jge .tindex_not_found
 
-    mov rsi, [rbx + PyTupleObject.ob_item]       ; payloads
-    mov rax, [rsi + rcx * 8]
-    V_UNPACK rax, r8
+    mov rsi, [rbx + PyTupleObject.ob_item]
+    mov rdi, [rsi + r14 * 8]    ; the element Value
 
-    ; Check exact match (payload + tag)
-    cmp rax, r12
-    jne .tindex_check_smallint
-    cmp r8d, r14d
-    je .tindex_found
-
-.tindex_check_smallint:
-    ; Check SmallInt equality
-    cmp r8d, TAG_SMALLINT
-    jne .tindex_check_str
-    cmp r14d, TAG_SMALLINT
-    jne .tindex_next
-    cmp rax, r12
-    je .tindex_found
-    jmp .tindex_next
-
-.tindex_check_str:
-    ; Try string comparison: if both are str_type, compare data
-    mov rsi, rax             ; tuple item
-    cmp r14d, TAG_PTR
-    jne .tindex_next
-    cmp r8d, TAG_PTR
-    jne .tindex_next
-    mov rax, [r12 + PyObject.ob_type]
-    lea r8, [rel str_type]
-    cmp rax, r8
-    jne .tindex_next
-    mov rax, [rsi + PyObject.ob_type]
-    cmp rax, r8
-    jne .tindex_next
-    ; Both strings - compare
-    push rcx
-    push rsi
-    lea rdi, [r12 + PyStrObject.data]
-    lea rsi, [rsi + PyStrObject.data]
-    call ap_strcmp
-    pop rsi
-    pop rcx
+    ; This was a hand-rolled chain -- identity, then SmallInt, then strcmp --
+    ; which is most of PyObject_RichCompareBool with the interesting parts
+    ; missing: no element __eq__, no reflected call, and a raise reported as
+    ; "no match".
+    mov rsi, r12
+    mov edx, PY_EQ
+    call obj_richcompare_bool
+    cmp eax, -1
+    je .tindex_error
     test eax, eax
-    jz .tindex_found
+    jnz .tindex_found
 
-.tindex_next:
-    inc rcx
+    inc r14
     jmp .tindex_loop
 
 .tindex_found:
-    mov rdi, rcx
+    mov rdi, r14
     call int_from_i64
     pop r14
     pop r13
@@ -6885,6 +6658,10 @@ DEF_FUNC tuple_method_index, 16
     leave
     V_PACK rax, rdx             ; builtins return one Value
     ret
+
+.tindex_error:
+    leave
+    jmp eval_exception_unwind
 
 .tindex_not_found:
     lea rdi, [rel exc_ValueError_type]
@@ -6896,44 +6673,56 @@ END_FUNC tuple_method_index
 ;; tuple_method_count(args, nargs) -> SmallInt
 ;; args[0]=self (tuple), args[1]=value
 ;; ============================================================================
-DEF_FUNC tuple_method_count
+TCT_IDX   equ 8
+TCT_COUNT equ 16
+TCT_FRAME equ 16
+DEF_FUNC tuple_method_count, TCT_FRAME
     push rbx
     push r12
     push r13
-    push r14
 
     mov rbx, [rdi]          ; self (tuple)
-    mov r12, [rdi + 8]     ; value payload
+    mov r12, [rdi + 8]      ; the value Value
     mov r13, [rbx + PyTupleObject.ob_size]
-    xor r14d, r14d          ; count = 0
+    mov qword [rbp - TCT_IDX], 0
+    mov qword [rbp - TCT_COUNT], 0
 
-    xor ecx, ecx
 .tcount_loop:
+    mov rcx, [rbp - TCT_IDX]
     cmp rcx, r13
     jge .tcount_done
 
     mov rax, [rbx + PyTupleObject.ob_item]
-    mov rax, [rax + rcx * 8]
+    mov rdi, [rax + rcx * 8]
 
-    ; Check pointer equality
-    cmp rax, r12
-    jne .tcount_next
-    inc r14
+    ; A word compare only ever matched an identical object, so an element
+    ; with its own __eq__ was never counted.
+    mov rsi, r12
+    mov edx, PY_EQ
+    call obj_richcompare_bool
+    cmp eax, -1
+    je .tcount_error
+    test eax, eax
+    jz .tcount_next
+    inc qword [rbp - TCT_COUNT]
 
 .tcount_next:
-    inc rcx
+    inc qword [rbp - TCT_IDX]
     jmp .tcount_loop
 
 .tcount_done:
-    mov rdi, r14
+    mov rdi, [rbp - TCT_COUNT]
     call int_from_i64
-    pop r14
     pop r13
     pop r12
     pop rbx
     leave
     V_PACK rax, rdx             ; builtins return one Value
     ret
+
+.tcount_error:
+    leave
+    jmp eval_exception_unwind
 END_FUNC tuple_method_count
 
 

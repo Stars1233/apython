@@ -214,6 +214,60 @@ DEF_UNARY_SLOT slot_nb_index, sl_index_name
 DEF_UNARY_SLOT slot_nb_int,   sl_int_name
 DEF_UNARY_SLOT slot_nb_float, sl_float_name
 
+;; ============================================================================
+;; slot_tp_richcompare(rdi = left Value, rsi = right Value, edx = op) -> Value
+;;
+;; NULL means NotImplemented, which is what every caller of tp_richcompare
+;; already expects.  Installed when the class defines any of the six
+;; comparison dunders, so dict and set key lookup -- which consult
+;; tp_richcompare -- start seeing a user class's __eq__.
+;; ============================================================================
+DEF_FUNC slot_tp_richcompare
+    push rbx
+    push r12
+    mov rbx, rdi
+    mov r12, rsi
+
+    ; op -> dunder name
+    extern cmp_dunder_table
+    lea rax, [rel cmp_dunder_table]
+    movsxd rcx, edx
+    mov rdx, [rax + rcx*8]      ; the dunder name
+
+    ; dunder_call_2 takes `other` as a payload plus its tag, not a Value.
+    mov rdi, rbx
+    mov rsi, r12
+    V_UNPACK rsi, rcx
+    extern dunder_call_2
+    call dunder_call_2
+    V_UNPACK rax, rdx
+    test edx, edx
+    jz .rc_notimplemented
+
+    ; A dunder answering NotImplemented is reported the same way a missing
+    ; one is: NULL, so the caller tries the reflected operand.
+    extern notimpl_singleton
+    lea rcx, [rel notimpl_singleton]
+    cmp rax, rcx
+    je .rc_drop_notimpl
+
+    V_PACK rax, rdx
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.rc_drop_notimpl:
+    mov rdi, rax
+    call obj_decref
+.rc_notimplemented:
+    RET_NULL
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC slot_tp_richcompare
+
 DEF_UNARY_SLOT slot_nb_negative, sl_neg_name
 DEF_UNARY_SLOT slot_nb_positive, sl_pos_name
 DEF_UNARY_SLOT slot_nb_invert,   sl_invert_name
@@ -404,6 +458,12 @@ sl_bool_name:   db "__bool__", 0
 sl_index_name:  db "__index__", 0
 sl_int_name:    db "__int__", 0
 sl_float_name:  db "__float__", 0
+sl_eq_name:     db "__eq__", 0
+sl_ne_name:     db "__ne__", 0
+sl_lt_name:     db "__lt__", 0
+sl_le_name:     db "__le__", 0
+sl_gt_name:     db "__gt__", 0
+sl_ge_name:     db "__ge__", 0
 
 align 8
 slot_table:
@@ -420,4 +480,12 @@ slot_table:
     dq sl_float_name,  SLOT_NUMBER,   PyNumberMethods.nb_float,    slot_nb_float
     dq sl_len_name,    SLOT_MAPPING,  PyMappingMethods.mp_length,  slot_length
     dq sl_len_name,    SLOT_SEQUENCE, PySequenceMethods.sq_length, slot_length
+    ; Any one of the six installs the single richcompare wrapper, which
+    ; dispatches on the op it is handed.
+    dq sl_eq_name,     SLOT_DIRECT,   PyTypeObject.tp_richcompare, slot_tp_richcompare
+    dq sl_ne_name,     SLOT_DIRECT,   PyTypeObject.tp_richcompare, slot_tp_richcompare
+    dq sl_lt_name,     SLOT_DIRECT,   PyTypeObject.tp_richcompare, slot_tp_richcompare
+    dq sl_le_name,     SLOT_DIRECT,   PyTypeObject.tp_richcompare, slot_tp_richcompare
+    dq sl_gt_name,     SLOT_DIRECT,   PyTypeObject.tp_richcompare, slot_tp_richcompare
+    dq sl_ge_name,     SLOT_DIRECT,   PyTypeObject.tp_richcompare, slot_tp_richcompare
     dq 0, 0, 0, 0

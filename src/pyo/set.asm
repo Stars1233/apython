@@ -15,6 +15,8 @@ extern obj_decref
 extern obj_dealloc
 extern obj_incref
 extern str_type
+extern eval_exception_unwind
+extern obj_richcompare_bool
 extern ap_strcmp
 extern ap_memset
 extern fatal_error
@@ -73,67 +75,28 @@ END_FUNC set_new
 
 ;; ============================================================================
 ;; set_keys_equal(a, b, a_tag, b_tag) -> int (1=equal, 0=not)
-;; Internal helper: payload+tag fast path, TAG_PTR guard
+;;
+;; Was an identity check plus a string compare, and nothing else: no
+;; cross-type numeric equality, so 1.0 in {1} was False where the same
+;; lookup in a dict succeeded, and no __eq__, so a user class could never
+;; find its own key.  Set membership is PyObject_RichCompareBool, the same
+;; as everywhere else.
 ;; rdi=a payload, rsi=b payload, rdx=a_tag, rcx=b_tag
 ;; ============================================================================
 DEF_FUNC_LOCAL set_keys_equal
-    ; Fast path: both payload AND tag identical → equal
-    ; Handles SmallInt==SmallInt, same heap ptr
-    cmp rdi, rsi
-    jne .ske_diff_payload
-    cmp rdx, rcx
-    jne .ske_diff_payload
-    mov eax, 1
+    V_PACK rdi, rdx             ; both are immediates or pointers, so the
+    V_PACK rsi, rcx             ; round-trip cannot box anything
+    mov edx, PY_EQ
+    call obj_richcompare_bool
+    cmp eax, -1
+    je .ske_error
     leave
     ret
 
-.ske_diff_payload:
-    ; If either is not TAG_PTR, can't be equal
-    cmp edx, TAG_PTR
-    jne .ske_not_equal
-    cmp ecx, TAG_PTR
-    jne .ske_not_equal
-
-    ; Both heap ptrs with different addresses — check string equality
-    push rbx
-    push r12
-    mov rbx, rdi
-    mov r12, rsi
-
-    mov rax, [rbx + PyObject.ob_type]
-    lea rcx, [rel str_type]
-    cmp rax, rcx
-    jne .ske_ne_pop2
-
-    mov rax, [r12 + PyObject.ob_type]
-    cmp rax, rcx
-    jne .ske_ne_pop2
-
-    ; Both strings — compare data
-    lea rdi, [rbx + PyStrObject.data]
-    lea rsi, [r12 + PyStrObject.data]
-    call ap_strcmp
-    test eax, eax
-    jnz .ske_ne_pop2
-
-    ; Equal strings
-    mov eax, 1
-    pop r12
-    pop rbx
+.ske_error:
+    ; The caller has no error channel; the exception is already pending.
     leave
-    ret
-
-.ske_ne_pop2:
-    xor eax, eax
-    pop r12
-    pop rbx
-    leave
-    ret
-
-.ske_not_equal:
-    xor eax, eax
-    leave
-    ret
+    jmp eval_exception_unwind
 END_FUNC set_keys_equal
 
 ;; ============================================================================

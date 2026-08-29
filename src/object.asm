@@ -15,6 +15,7 @@ extern bool_false
 extern bool_true
 extern int_repr
 extern int_type
+extern current_exception
 extern int_to_i64
 extern float_type
 extern float_repr
@@ -354,6 +355,171 @@ DEF_FUNC_BARE value_number_methods
     xor eax, eax
     ret
 END_FUNC value_number_methods
+
+; value_type(rdi = Value) -> rax = PyTypeObject*, or 0 for a NULL Value
+;
+; Resolve a Value's type, immediates included.  Several places open-code this
+; three-way test; having it once keeps them from disagreeing.
+DEF_FUNC_BARE value_type
+    V_IS_INT rdi, rax
+    jae .vt_int
+    V_IS_FLOAT rdi, rax
+    jb .vt_float
+    test rdi, rdi
+    jz .vt_null
+    mov rax, [rdi + PyObject.ob_type]
+    ret
+.vt_int:
+    lea rax, [rel int_type]
+    ret
+.vt_float:
+    lea rax, [rel float_type]
+    ret
+.vt_null:
+    xor eax, eax
+    ret
+END_FUNC value_type
+
+; obj_richcompare_bool(rdi = left Value, rsi = right Value, edx = op)
+;   -> eax = 1 (true), 0 (false), or -1 (an exception is pending)
+;
+; CPython's PyObject_RichCompareBool, which is what every container search
+; uses and what none of them used here.  Nine sites open-coded a comparison
+; and treated a NULL result as "not equal" -- but NULL means either
+; NotImplemented, in which case the reflected operand and then identity must
+; be tried, or that the comparison raised, in which case it must propagate.
+; None of them read current_exception, so a raising __eq__ inside `x in list`
+; silently answered False.
+;
+; The identity shortcut comes first, as in CPython: a container holding an
+; object finds it even if its __eq__ is broken or raises.
+ORB_LEFT  equ 8
+ORB_RIGHT equ 16
+ORB_OP    equ 24
+ORB_EXC   equ 32
+ORB_RES   equ 40
+ORB_FRAME equ 48
+
+DEF_FUNC obj_richcompare_bool, ORB_FRAME
+    mov [rbp - ORB_LEFT], rdi
+    mov [rbp - ORB_RIGHT], rsi
+    mov [rbp - ORB_OP], rdx
+
+    ; Hold a strong reference to both operands for the duration.  A
+    ; comparison can run arbitrary Python: CPython's own
+    ; test_count_index_remove_crashes has an __eq__ that clears the very list
+    ; being searched, which frees the element the caller handed us as a
+    ; borrowed slot reference (bpo-38610).  Doing it here rather than in each
+    ; of the six search loops means no loop can forget.
+    INCREF_V rdi, rax
+    INCREF_V rsi, rax
+
+    ; Identity: for == this is true and for != false, without consulting the
+    ; type at all.  One compare, since a Value is one word.
+    mov rdi, [rbp - ORB_LEFT]
+    cmp rdi, [rbp - ORB_RIGHT]
+    jne .orb_compare
+    mov edx, [rbp - ORB_OP]
+    cmp edx, PY_EQ
+    je .orb_true
+    cmp edx, PY_NE
+    je .orb_false
+
+.orb_compare:
+    DUNDER_EXC_SAVE [rbp - ORB_EXC]
+
+    ; Left operand's tp_richcompare.
+    mov rdi, [rbp - ORB_LEFT]
+    call value_type
+    test rax, rax
+    jz .orb_identity
+    mov rax, [rax + PyTypeObject.tp_richcompare]
+    test rax, rax
+    jz .orb_reflected
+    mov rdi, [rbp - ORB_LEFT]
+    mov rsi, [rbp - ORB_RIGHT]
+    mov edx, [rbp - ORB_OP]
+    call rax
+    test rax, rax
+    jnz .orb_have_result
+    DUNDER_RAISED [rbp - ORB_EXC], .orb_error
+
+.orb_reflected:
+    ; NotImplemented from the left: try the right operand with the op
+    ; reversed, which is how a subclass or a mixed-type comparison gets its
+    ; say.
+    mov rdi, [rbp - ORB_RIGHT]
+    call value_type
+    test rax, rax
+    jz .orb_identity
+    mov rax, [rax + PyTypeObject.tp_richcompare]
+    test rax, rax
+    jz .orb_identity
+    mov rdi, [rbp - ORB_RIGHT]
+    mov rsi, [rbp - ORB_LEFT]
+    mov edx, [rbp - ORB_OP]
+    lea rcx, [rel orb_swap_table]
+    movsxd rdx, edx
+    mov edx, [rcx + rdx*4]      ; the reversed op
+    call rax
+    test rax, rax
+    jnz .orb_have_result
+    DUNDER_RAISED [rbp - ORB_EXC], .orb_error
+
+.orb_identity:
+    ; Neither side had an opinion.  Equality falls back to identity, which
+    ; the fast path above already ruled out, so the answer is fixed.
+    mov edx, [rbp - ORB_OP]
+    cmp edx, PY_EQ
+    je .orb_false
+    cmp edx, PY_NE
+    je .orb_true
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "unorderable types"
+    call raise_exception
+
+.orb_have_result:
+    mov [rbp - ORB_RES], rax    ; the result Value, owned
+    mov rdi, rax
+    call obj_is_true
+    mov [rbp - ORB_OP], rax     ; the op is finished with; reuse the slot
+    mov rdi, [rbp - ORB_RES]
+    DECREF_V rdi, rdx
+    mov rax, [rbp - ORB_OP]
+    jmp .orb_done
+
+.orb_true:
+    mov eax, 1
+    jmp .orb_done
+
+.orb_false:
+    xor eax, eax
+    jmp .orb_done
+
+.orb_error:
+    mov eax, -1
+
+.orb_done:
+    mov [rbp - ORB_RES], rax
+    mov rdi, [rbp - ORB_LEFT]
+    DECREF_V rdi, rdx
+    mov rdi, [rbp - ORB_RIGHT]
+    DECREF_V rdi, rdx
+    mov rax, [rbp - ORB_RES]
+    leave
+    ret
+END_FUNC obj_richcompare_bool
+
+section .rodata
+align 4
+orb_swap_table:
+    dd PY_GT                    ; PY_LT reversed
+    dd PY_GE                    ; PY_LE
+    dd PY_EQ                    ; PY_EQ
+    dd PY_NE                    ; PY_NE
+    dd PY_LT                    ; PY_GT
+    dd PY_LE                    ; PY_GE
+section .text
 
 ; hash_not_implemented() -> never returns
 ; Used as tp_hash for unhashable types (dict, list, set).

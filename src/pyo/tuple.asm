@@ -31,6 +31,8 @@ extern tuple_clear
 extern obj_is_true
 extern float_compare
 extern int_type
+extern eval_exception_unwind
+extern obj_richcompare_bool
 extern obj_as_index
 extern recursion_limit
 extern c_recursion_depth
@@ -470,36 +472,41 @@ END_FUNC tuple_getslice
 ;; tuple_contains(rdi=self, rsi=value Value) -> int (0 or 1)
 ;; Linear scan with identity then __eq__.
 ;; ============================================================================
-DEF_FUNC tuple_contains
-    V_UNPACK rsi, rdx           ; decode the operand Value
+TCN_IDX   equ 8
+TCN_FRAME equ 16
+DEF_FUNC tuple_contains, TCN_FRAME
     push rbx
     push r12
     push r13
-    push r14
 
     mov rbx, rdi               ; tuple
-    mov r12, rsi               ; value payload
-    mov r13d, edx              ; value tag
-    mov r14, [rbx + PyTupleObject.ob_size]
+    mov r12, rsi               ; the value Value
+    mov r13, [rbx + PyTupleObject.ob_size]
+    mov qword [rbp - TCN_IDX], 0
 
-    xor ecx, ecx
 .tc_loop:
-    cmp rcx, r14
+    mov rcx, [rbp - TCN_IDX]
+    cmp rcx, r13
     jge .tc_not_found
     mov rax, [rbx + PyTupleObject.ob_item]
-    mov rax, [rax + rcx * 8]
-    V_UNPACK rax, rdx
-    cmp r12, rax              ; payload match?
-    jne .tc_next
-    cmp r13d, edx             ; tag match?
-    je .tc_found
-.tc_next:
-    inc rcx
+    mov rdi, [rax + rcx * 8]   ; the element Value
+
+    ; Membership is PyObject_RichCompareBool, not a word compare: it tries
+    ; identity, then the element's __eq__, then the value's reflected one.
+    ; Comparing the two Value words only ever found an identical object.
+    mov rsi, r12
+    mov edx, PY_EQ
+    call obj_richcompare_bool
+    cmp eax, -1
+    je .tc_error
+    test eax, eax
+    jnz .tc_found
+
+    inc qword [rbp - TCN_IDX]
     jmp .tc_loop
 
 .tc_found:
     mov eax, 1
-    pop r14
     pop r13
     pop r12
     pop rbx
@@ -508,12 +515,16 @@ DEF_FUNC tuple_contains
 
 .tc_not_found:
     xor eax, eax
-    pop r14
     pop r13
     pop r12
     pop rbx
     leave
     ret
+
+.tc_error:
+    ; sq_contains has no error channel, and the exception is already pending.
+    leave
+    jmp eval_exception_unwind
 END_FUNC tuple_contains
 
 ;; ============================================================================
