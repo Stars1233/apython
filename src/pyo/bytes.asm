@@ -19,6 +19,8 @@ extern obj_dealloc
 extern raise_exception
 extern exc_IndexError_type
 extern exc_TypeError_type
+extern int_type
+extern bool_type
 extern int_to_i64
 extern slice_type
 extern slice_indices
@@ -153,10 +155,16 @@ DEF_FUNC bytes_subscript
     ; Check if key is a SmallInt (edx = key tag from caller)
     cmp edx, TAG_SMALLINT
     je .bs_int                 ; SmallInt → int path
+    cmp edx, TAG_PTR            ; a float key is neither: classify
+    jne .bs_type_error          ; fully before dereferencing, or raw
+                                ; f64 bits get used as an address
     mov rax, [r12 + PyObject.ob_type]
     lea rcx, [rel slice_type]
     cmp rax, rcx
     je .bs_slice
+    ; only an int may reach int_to_i64, which reads PyIntObject.compact
+    ; unconditionally
+    REQUIRE_INT_TYPE rax, rcx, .bs_type_error
 
 .bs_int:
     ; Convert key to i64
@@ -277,6 +285,11 @@ DEF_FUNC bytes_subscript
     leave
     V_PACK rax, rdx             ; return one Value
     ret
+
+.bs_type_error:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "byte indices must be integers or slices"
+    call raise_exception
 END_FUNC bytes_subscript
 
 ;; ============================================================================

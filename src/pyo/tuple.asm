@@ -153,14 +153,15 @@ DEF_FUNC tuple_subscript
     ; Check if key is a SmallInt (edx = key tag from caller)
     cmp edx, TAG_SMALLINT
     je .ts_int                 ; SmallInt -> int path
+    cmp edx, TAG_PTR            ; a float key is neither: classify
+    jne .ts_type_error          ; fully before dereferencing, or raw
+                                ; f64 bits get used as an address
     mov rax, [rsi + PyObject.ob_type]
     lea rcx, [rel slice_type]
     cmp rax, rcx
     je .ts_slice
     ; Check if key is actually an int type
-    lea rcx, [rel int_type]
-    cmp rax, rcx
-    jne .ts_type_error
+    REQUIRE_INT_TYPE rax, rcx, .ts_type_error
 
 .ts_int:
     mov rdi, rsi               ; key

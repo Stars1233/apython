@@ -429,6 +429,24 @@ TAG_IO_WAIT  equ 8           ; payload = fd | (direction << 32) — async I/O se
     mov [%1 + PyFrame.stack_ptr], %3
 %endmacro
 
+; Require that a type object is int, bool, or an int subclass; jump away if
+; not.  Python's bool derives from int, so an object indexed with True is
+; indexed with 1 -- and bool_type carries tp_base = int_type but no
+; TYPE_FLAG_INT_SUBCLASS, so testing the flag alone misses it.
+; %1 = register holding the PyTypeObject*, %2 = scratch, %3 = label to take
+; when the type is not int-like.  Both registers are preserved.
+%macro REQUIRE_INT_TYPE 3
+    lea %2, [rel int_type]
+    cmp %1, %2
+    je %%int_like
+    lea %2, [rel bool_type]
+    cmp %1, %2
+    je %%int_like
+    test qword [%1 + PyTypeObject.tp_flags], TYPE_FLAG_INT_SUBCLASS
+    jz %3
+%%int_like:
+%endmacro
+
 ; Mark stack as non-executable and reset to .text section
 ASM_INIT
 

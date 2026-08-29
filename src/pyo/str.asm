@@ -19,6 +19,7 @@ extern fatal_error
 extern raise_exception
 extern exc_IndexError_type
 extern exc_TypeError_type
+extern int_type
 extern slice_type
 extern slice_indices
 extern type_type
@@ -1055,10 +1056,16 @@ DEF_FUNC str_subscript
     ; Check if key is a SmallInt (edx = key tag from caller)
     cmp edx, TAG_SMALLINT
     je .ss_int               ; SmallInt -> int path
+    cmp edx, TAG_PTR            ; a float key is neither: classify
+    jne .ss_type_error          ; fully before dereferencing, or raw
+                                ; f64 bits get used as an address
     mov rax, [rsi + PyObject.ob_type]
     lea rcx, [rel slice_type]
     cmp rax, rcx
     je .ss_slice
+    ; only an int may reach int_to_i64, which reads PyIntObject.compact
+    ; unconditionally
+    REQUIRE_INT_TYPE rax, rcx, .ss_type_error
 
 .ss_int:
     ; Convert key to i64
@@ -1082,6 +1089,11 @@ DEF_FUNC str_subscript
     leave
     V_PACK rax, rdx             ; return one Value
     ret
+
+.ss_type_error:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "string indices must be integers"
+    call raise_exception
 END_FUNC str_subscript
 
 ;; ============================================================================

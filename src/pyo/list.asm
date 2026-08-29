@@ -308,6 +308,9 @@ DEF_FUNC list_subscript
     ; Check if key is a SmallInt (rdx = key tag from caller)
     cmp edx, TAG_SMALLINT
     je .ls_smallint
+    cmp edx, TAG_PTR            ; a float key is neither: classify
+    jne .ls_type_error          ; fully before dereferencing, or raw
+                                ; f64 bits get used as an address
     ; Check if key is a slice
     mov rax, [rsi + PyObject.ob_type]
     lea rcx, [rel slice_type]
@@ -316,9 +319,7 @@ DEF_FUNC list_subscript
 
     ; Check if it's actually an int type before converting
     mov rax, [rsi + PyObject.ob_type]
-    lea rcx, [rel int_type]
-    cmp rax, rcx
-    jne .ls_type_error
+    REQUIRE_INT_TYPE rax, rcx, .ls_type_error
     ; Heap int -> convert to i64
     mov rdi, rsi
     call int_to_i64

@@ -5828,9 +5828,8 @@ DEF_FUNC dict_method_get
 
     ; dict_get(self, key)
     mov rdi, rbx
-    mov rsi, [rax + 8]     ; key payload
-    V_UNPACK rsi, rdx       ; args[1]
-    call dict_get
+    mov rsi, [rax + 8]      ; key Value -- dict_get unpacks it itself, so
+    call dict_get           ; decoding here would hand it a bare payload
     V_UNPACK rax, rdx           ; dict_get returns a Value
 
     test edx, edx               ; the tag, not the payload: a hit may be int 0

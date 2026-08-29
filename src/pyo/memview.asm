@@ -13,6 +13,8 @@ extern obj_incref
 extern obj_decref
 extern raise_exception
 extern exc_TypeError_type
+extern int_type
+extern bool_type
 extern exc_IndexError_type
 extern bytes_type
 extern int_to_i64
@@ -116,6 +118,9 @@ DEF_FUNC memoryview_subscript, MS_FRAME
     ; Check if key is a SmallInt (edx = key tag from caller)
     cmp edx, TAG_SMALLINT
     je .ms_int_index                   ; SmallInt index
+    cmp edx, TAG_PTR            ; a float key is neither: classify
+    jne .ms_type_error          ; fully before dereferencing, or raw
+                                ; f64 bits get used as an address
     mov rax, [rsi + PyObject.ob_type]
     lea rcx, [rel slice_type]
     cmp rax, rcx
@@ -195,6 +200,8 @@ DEF_FUNC memoryview_subscript, MS_FRAME
 
 .ms_int_index_heap:
     ; Heap int index — convert to i64
+    mov rax, [rsi + PyObject.ob_type]   ; int_to_i64 reads PyIntObject.compact
+    REQUIRE_INT_TYPE rax, rcx, .ms_type_error   ; unconditionally
     push rdi
     mov rdi, rsi
     call int_to_i64
@@ -210,6 +217,11 @@ DEF_FUNC memoryview_subscript, MS_FRAME
 .ms_step_error:
     lea rdi, [rel exc_TypeError_type]
     CSTRING rsi, "memoryview: unsupported step"
+    call raise_exception
+
+.ms_type_error:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "memoryview: invalid slice key"
     call raise_exception
 END_FUNC memoryview_subscript
 
