@@ -669,6 +669,7 @@ DEF_FUNC builtin_zip, ZP_FRAME
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .zip_zero:
@@ -689,6 +690,7 @@ DEF_FUNC builtin_zip, ZP_FRAME
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 END_FUNC builtin_zip
 
@@ -941,6 +943,7 @@ DEF_FUNC builtin_map
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .map_error:
@@ -1159,6 +1162,7 @@ DEF_FUNC builtin_filter
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .filter_error:
@@ -1356,6 +1360,7 @@ DEF_FUNC builtin_reversed
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 section .rodata
@@ -1372,6 +1377,7 @@ section .text
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .rev_no_dunder:
@@ -1453,6 +1459,7 @@ section .text
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .rev_error:
@@ -1634,7 +1641,7 @@ DEF_FUNC builtin_sorted, SO_FRAME
     call list_method_sort
 
 .sorted_return:
-    DECREF_VAL rax, rdx
+    DECREF_V rax, rdx
 
     mov rax, r12
     mov edx, TAG_PTR
@@ -1643,6 +1650,7 @@ DEF_FUNC builtin_sorted, SO_FRAME
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .sorted_error:
@@ -1825,6 +1833,7 @@ DEF_FUNC builtin_chain
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .chain_zero:
@@ -1845,6 +1854,7 @@ DEF_FUNC builtin_chain
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 END_FUNC builtin_chain
 

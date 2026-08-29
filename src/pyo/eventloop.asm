@@ -809,6 +809,7 @@ DEF_FUNC _task_done_impl
     mov eax, [rax + AsyncTask.done]
     RET_BOOL_RAX
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 END_FUNC _task_done_impl
 
@@ -826,6 +827,7 @@ DEF_FUNC _task_result_impl
     INCREF_V rax, rdx
     V_UNPACK rax, rdx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .tr_not_done:
@@ -846,6 +848,7 @@ DEF_FUNC _task_cancel_impl
     mov eax, 1
     RET_BOOL_RAX
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 END_FUNC _task_cancel_impl
 
@@ -855,6 +858,7 @@ DEF_FUNC _task_cancelled_impl
     mov eax, [rax + AsyncTask.cancelling]
     RET_BOOL_RAX
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 END_FUNC _task_cancelled_impl
 

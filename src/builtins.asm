@@ -218,15 +218,11 @@ DEF_FUNC_BARE builtin_func_call
 .bfc_no_max_check:
     ; Extract func_ptr from self
     mov rax, [rdi + PyBuiltinObject.func_ptr]
-    ; Call func_ptr(args, nargs).  The builtin still returns a fat pair, so
-    ; this can no longer be a tail call: tp_call hands back one Value.
+    ; Call func_ptr(args, nargs) — builtins return a Value, so this stays a
+    ; tail call.
     mov rdi, rsi                ; args
     mov rsi, rdx                ; nargs
-    sub rsp, 8                  ; keep the callee's rsp 16-byte aligned
-    call rax
-    add rsp, 8
-    V_PACK rax, rdx
-    ret
+    jmp rax
 
 .bfc_too_few:
     extern exc_TypeError_type
@@ -600,6 +596,7 @@ align 16
     pop rbx
     mov edx, TAG_PTR
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 END_FUNC builtin_print
 
@@ -699,6 +696,7 @@ DEF_FUNC builtin_len
 
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .len_error:
@@ -785,6 +783,7 @@ DEF_FUNC builtin_range
     pop rbx
     mov edx, TAG_PTR
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 END_FUNC builtin_range
 
@@ -971,6 +970,7 @@ DEF_FUNC builtin_isinstance
     pop rbx
     mov edx, TAG_PTR
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .isinstance_true:
@@ -980,6 +980,7 @@ DEF_FUNC builtin_isinstance
     pop rbx
     mov edx, TAG_PTR
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .isinstance_type_error:
@@ -1093,6 +1094,7 @@ DEF_FUNC builtin_issubclass
     pop rbx
     mov edx, TAG_PTR
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .issubclass_true:
@@ -1103,6 +1105,7 @@ DEF_FUNC builtin_issubclass
     pop rbx
     mov edx, TAG_PTR
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .issubclass_arg1_error:
@@ -1134,6 +1137,7 @@ DEF_FUNC builtin_repr
     call obj_repr
     ; rdx = tag from obj_repr
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .repr_error:
@@ -1716,6 +1720,8 @@ DEF_FUNC builtin___build_class__
     pop rbx
     mov edx, TAG_PTR
     leave
+    V_PACK rax, rdx             ; builtins return one Value
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .build_class_error:

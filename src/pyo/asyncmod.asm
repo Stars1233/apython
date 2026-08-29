@@ -110,6 +110,7 @@ DEF_FUNC asyncio_run_func, AR_FRAME
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .ar_error:
@@ -185,6 +186,7 @@ DEF_FUNC asyncio_sleep_func
     mov edx, TAG_PTR
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .as_error:
@@ -310,6 +312,7 @@ DEF_FUNC asyncio_wait_for_func, WF_FRAME
     mov edx, TAG_PTR
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .wf_error:
@@ -449,6 +452,7 @@ DEF_FUNC asyncio_create_task_func, ACT_FRAME
     mov rax, [rbp - ACT_TASK]
     mov edx, TAG_PTR
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .act_error:
@@ -525,6 +529,7 @@ DEF_FUNC asyncio_gather_func
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .ag_type_error:
@@ -552,6 +557,7 @@ DEF_FUNC asyncio_get_running_loop_func
     pop rax
     mov edx, TAG_PTR
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .grl_error:

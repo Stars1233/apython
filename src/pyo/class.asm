@@ -1293,6 +1293,7 @@ DEF_FUNC object_new_fn
     call instance_new
     mov edx, TAG_PTR
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 END_FUNC object_new_fn
 

@@ -209,6 +209,7 @@ DEF_FUNC str_method_upper
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 END_FUNC str_method_upper
 
@@ -250,6 +251,7 @@ DEF_FUNC str_method_lower
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 END_FUNC str_method_lower
 
@@ -335,6 +337,7 @@ DEF_FUNC str_method_strip
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 END_FUNC str_method_strip
 
@@ -388,6 +391,7 @@ DEF_FUNC str_method_startswith
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .sw_false:
@@ -398,6 +402,7 @@ DEF_FUNC str_method_startswith
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .sw_type_error:
@@ -459,6 +464,7 @@ DEF_FUNC str_method_endswith
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .ew_false:
@@ -470,6 +476,7 @@ DEF_FUNC str_method_endswith
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .ew_type_error:
@@ -516,6 +523,7 @@ DEF_FUNC str_method_find
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .find_not_found:
@@ -525,6 +533,7 @@ DEF_FUNC str_method_find
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .find_type_error:
@@ -695,6 +704,7 @@ DEF_FUNC str_method_replace
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .replace_interleave:
@@ -752,6 +762,7 @@ DEF_FUNC str_method_replace
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .repl_type_error:
@@ -882,6 +893,7 @@ DEF_FUNC str_method_join
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .join_empty:
@@ -899,6 +911,7 @@ DEF_FUNC str_method_join
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .join_type_error:
@@ -1016,6 +1029,7 @@ DEF_FUNC str_method_split
     pop rbx
     mov edx, TAG_PTR
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .split_by_sep:
@@ -1091,6 +1105,7 @@ DEF_FUNC str_method_split
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .split_empty_sep:
@@ -1347,6 +1362,7 @@ DEF_FUNC str_method_format
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 END_FUNC str_method_format
 
@@ -1548,6 +1564,7 @@ DEF_FUNC str_method_format_map, FM_FRAME
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .fmap_error:
@@ -1612,6 +1629,7 @@ DEF_FUNC str_method_lstrip
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 END_FUNC str_method_lstrip
 
@@ -1669,6 +1687,7 @@ DEF_FUNC str_method_rstrip
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 END_FUNC str_method_rstrip
 
@@ -1730,6 +1749,7 @@ DEF_FUNC str_method_count
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .count_type_error:
@@ -1776,6 +1796,7 @@ DEF_FUNC str_method_index
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .str_index_not_found:
@@ -1853,6 +1874,7 @@ DEF_FUNC str_method_rfind
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .rfind_empty_sub:
@@ -1863,6 +1885,7 @@ DEF_FUNC str_method_rfind
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .rfind_not_found:
@@ -1873,6 +1896,7 @@ DEF_FUNC str_method_rfind
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .rfind_type_error:
@@ -1911,6 +1935,7 @@ DEF_FUNC str_method_isdigit
     inc qword [rax + PyObject.ob_refcnt]
     mov edx, TAG_PTR
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .isdigit_false:
@@ -1918,6 +1943,7 @@ DEF_FUNC str_method_isdigit
     inc qword [rax + PyObject.ob_refcnt]
     mov edx, TAG_PTR
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 END_FUNC str_method_isdigit
 
@@ -1956,6 +1982,7 @@ DEF_FUNC str_method_isalpha
     inc qword [rax + PyObject.ob_refcnt]
     mov edx, TAG_PTR
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .isalpha_false:
@@ -1963,6 +1990,7 @@ DEF_FUNC str_method_isalpha
     inc qword [rax + PyObject.ob_refcnt]
     mov edx, TAG_PTR
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 END_FUNC str_method_isalpha
 
@@ -2005,6 +2033,7 @@ DEF_FUNC str_method_isalnum
     inc qword [rax + PyObject.ob_refcnt]
     mov edx, TAG_PTR
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .isalnum_false:
@@ -2012,6 +2041,7 @@ DEF_FUNC str_method_isalnum
     inc qword [rax + PyObject.ob_refcnt]
     mov edx, TAG_PTR
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 END_FUNC str_method_isalnum
 
@@ -2048,6 +2078,7 @@ DEF_FUNC str_method_isspace
     inc qword [rax + PyObject.ob_refcnt]
     mov edx, TAG_PTR
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .isspace_false:
@@ -2055,6 +2086,7 @@ DEF_FUNC str_method_isspace
     inc qword [rax + PyObject.ob_refcnt]
     mov edx, TAG_PTR
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 END_FUNC str_method_isspace
 
@@ -2100,6 +2132,7 @@ DEF_FUNC str_method_isupper
     inc qword [rax + PyObject.ob_refcnt]
     mov edx, TAG_PTR
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .isupper_false:
@@ -2107,6 +2140,7 @@ DEF_FUNC str_method_isupper
     inc qword [rax + PyObject.ob_refcnt]
     mov edx, TAG_PTR
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 END_FUNC str_method_isupper
 
@@ -2154,6 +2188,7 @@ DEF_FUNC str_method_islower
     inc qword [rax + PyObject.ob_refcnt]
     mov edx, TAG_PTR
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .islower_false:
@@ -2161,6 +2196,7 @@ DEF_FUNC str_method_islower
     inc qword [rax + PyObject.ob_refcnt]
     mov edx, TAG_PTR
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 END_FUNC str_method_islower
 
@@ -2231,6 +2267,7 @@ DEF_FUNC str_method_title
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 END_FUNC str_method_title
 
@@ -2285,6 +2322,7 @@ DEF_FUNC str_method_capitalize
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 END_FUNC str_method_capitalize
 
@@ -2335,6 +2373,7 @@ DEF_FUNC str_method_swapcase
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 END_FUNC str_method_swapcase
 
@@ -2376,6 +2415,7 @@ DEF_FUNC str_method_casefold
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 END_FUNC str_method_casefold
 
@@ -2463,6 +2503,7 @@ DEF_FUNC str_method_center, PA_FRAME
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .center_return_self:
@@ -2477,6 +2518,7 @@ DEF_FUNC str_method_center, PA_FRAME
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 END_FUNC str_method_center
 
@@ -2552,6 +2594,7 @@ DEF_FUNC str_method_ljust, PA_FRAME
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .ljust_return_self:
@@ -2564,6 +2607,7 @@ DEF_FUNC str_method_ljust, PA_FRAME
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 END_FUNC str_method_ljust
 
@@ -2637,6 +2681,7 @@ DEF_FUNC str_method_rjust, PA_FRAME
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .rjust_return_self:
@@ -2649,6 +2694,7 @@ DEF_FUNC str_method_rjust, PA_FRAME
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 END_FUNC str_method_rjust
 
@@ -2726,6 +2772,7 @@ DEF_FUNC str_method_zfill, PA_FRAME
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .zfill_return_self:
@@ -2737,6 +2784,7 @@ DEF_FUNC str_method_zfill, PA_FRAME
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 END_FUNC str_method_zfill
 
@@ -2784,6 +2832,7 @@ DEF_FUNC str_method_rindex
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .rindex_not_found:
@@ -2794,6 +2843,7 @@ DEF_FUNC str_method_rindex
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 END_FUNC str_method_rindex
 
@@ -2853,6 +2903,7 @@ DEF_FUNC str_method_istitle
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 .istitle_false:
     lea rax, [rel bool_false]
@@ -2861,6 +2912,7 @@ DEF_FUNC str_method_istitle
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 END_FUNC str_method_istitle
 
@@ -2931,6 +2983,7 @@ DEF_FUNC str_method_partition, PT_FRAME
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .part_not_found:
@@ -2969,6 +3022,7 @@ DEF_FUNC str_method_partition, PT_FRAME
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 END_FUNC str_method_partition
 
@@ -3052,6 +3106,7 @@ DEF_FUNC str_method_rpartition, PT_FRAME
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .rpart_not_found:
@@ -3089,6 +3144,7 @@ DEF_FUNC str_method_rpartition, PT_FRAME
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 END_FUNC str_method_rpartition
 
@@ -3233,6 +3289,7 @@ DEF_FUNC str_method_expandtabs, ET_FRAME
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 END_FUNC str_method_expandtabs
 
@@ -3370,6 +3427,7 @@ DEF_FUNC str_method_splitlines
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 END_FUNC str_method_splitlines
 
@@ -3518,6 +3576,7 @@ DEF_FUNC str_method_translate
     mov rdi, rsp
     mov rsi, 2
     call str_method_join
+    V_UNPACK rax, rdx           ; str_method_join returns a Value
     add rsp, 16
     push rax
     push rdx
@@ -3537,6 +3596,7 @@ DEF_FUNC str_method_translate
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 END_FUNC str_method_translate
 
@@ -3615,6 +3675,7 @@ DEF_FUNC str_staticmethod_maketrans, SMT_FRAME
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .smt_error:
@@ -3679,6 +3740,7 @@ DEF_FUNC str_method_removeprefix
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .rmpfx_return_self:
@@ -3690,6 +3752,7 @@ DEF_FUNC str_method_removeprefix
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .rp_type_error:
@@ -3757,6 +3820,7 @@ DEF_FUNC str_method_removesuffix
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .rmsfx_return_self:
@@ -3768,6 +3832,7 @@ DEF_FUNC str_method_removesuffix
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .rs_type_error:
@@ -3803,6 +3868,7 @@ DEF_FUNC str_method_encode
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 END_FUNC str_method_encode
 
@@ -3831,6 +3897,7 @@ DEF_FUNC list_method_append
     inc qword [rax + PyObject.ob_refcnt]
     mov edx, TAG_PTR
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 END_FUNC list_method_append
 
@@ -3904,6 +3971,7 @@ DEF_FUNC list_method_pop
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .pop_error:
@@ -3998,6 +4066,7 @@ DEF_FUNC list_method_insert
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 END_FUNC list_method_insert
 
@@ -4036,6 +4105,7 @@ DEF_FUNC list_method_reverse
     mov edx, TAG_PTR
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 END_FUNC list_method_reverse
 
@@ -4860,6 +4930,7 @@ DEF_FUNC list_method_sort, LS_FRAME
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .sort_done:
@@ -4920,6 +4991,7 @@ DEF_FUNC list_method_sort, LS_FRAME
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .sort_mutated:
@@ -5059,6 +5131,7 @@ DEF_FUNC list_method_sort, LS_FRAME
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 END_FUNC list_method_sort
 
@@ -5243,6 +5316,7 @@ DEF_FUNC list_method_index, LI_FRAME
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .index_not_found:
@@ -5369,6 +5443,7 @@ DEF_FUNC list_method_count, LC_FRAME
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 END_FUNC list_method_count
 
@@ -5414,6 +5489,7 @@ DEF_FUNC list_method_copy
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 END_FUNC list_method_copy
 
@@ -5434,16 +5510,16 @@ END_FUNC list_dunder_getitem
 ;; list.__setitem__(self, key, value) → calls list_ass_subscript
 ;; ============================================================================
 extern list_ass_subscript
-DEF_FUNC_BARE list_dunder_setitem
+DEF_FUNC list_dunder_setitem
     mov rax, [rdi]          ; self
-    mov rsi, [rdi + 8]     ; key payload
-    V_UNPACK rsi, rcx       ; args[1]
-    mov rdx, [rdi + 16]     ; value payload
-    V_UNPACK rdx, r8       ; args[2]
-    V_PACK rsi, rcx         ; list_ass_subscript takes Values
-    V_PACK rdx, r8
+    mov rsi, [rdi + 8]      ; args[1] = key   (already a Value)
+    mov rdx, [rdi + 16]     ; args[2] = value (already a Value)
     mov rdi, rax
-    jmp list_ass_subscript
+    call list_ass_subscript
+    lea rax, [rel none_singleton]
+    inc qword [rax + PyObject.ob_refcnt]
+    leave
+    ret
 END_FUNC list_dunder_setitem
 
 ;; ============================================================================
@@ -5462,6 +5538,7 @@ DEF_FUNC list_dunder_delitem
     inc qword [rax + PyObject.ob_refcnt]
     mov edx, TAG_PTR
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 END_FUNC list_dunder_delitem
 
@@ -5489,6 +5566,7 @@ DEF_FUNC list_dunder_contains
     mov edx, TAG_PTR
     INCREF rax
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 END_FUNC list_dunder_contains
 
@@ -5501,6 +5579,7 @@ DEF_FUNC list_dunder_len
     mov rdi, rax
     call int_from_i64
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 END_FUNC list_dunder_len
 
@@ -5557,6 +5636,7 @@ DEF_FUNC list_dunder_init
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 END_FUNC list_dunder_init
 
@@ -5599,6 +5679,7 @@ DEF_FUNC list_method_clear
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 END_FUNC list_method_clear
 
@@ -5720,6 +5801,7 @@ DEF_FUNC list_method_extend, LE_FRAME
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .extend_type_error:
@@ -5767,6 +5849,7 @@ DEF_FUNC dict_method_get
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .dg_ret_none:
@@ -5776,6 +5859,7 @@ DEF_FUNC dict_method_get
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .dg_found:
@@ -5786,6 +5870,7 @@ DEF_FUNC dict_method_get
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 END_FUNC dict_method_get
 
@@ -5802,6 +5887,7 @@ DEF_FUNC dict_method_keys
     call dict_view_new
     mov edx, TAG_PTR
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 END_FUNC dict_method_keys
 
@@ -5817,6 +5903,7 @@ DEF_FUNC dict_method_values
     call dict_view_new
     mov edx, TAG_PTR
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 END_FUNC dict_method_values
 
@@ -5832,6 +5919,7 @@ DEF_FUNC dict_method_items
     call dict_view_new
     mov edx, TAG_PTR
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 END_FUNC dict_method_items
 
@@ -5882,6 +5970,7 @@ dict_method_pop_v2 equ dict_method_pop
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .dpop2_not_found:
@@ -5896,6 +5985,7 @@ dict_method_pop_v2 equ dict_method_pop
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .dpop2_error:
@@ -5963,6 +6053,7 @@ DEF_FUNC dict_method_clear
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 END_FUNC dict_method_clear
 
@@ -6021,6 +6112,7 @@ DEF_FUNC dict_method_update
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 END_FUNC dict_method_update
 
@@ -6087,6 +6179,7 @@ DEF_FUNC dict_method_setdefault
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .sd_found:
@@ -6099,6 +6192,7 @@ DEF_FUNC dict_method_setdefault
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 END_FUNC dict_method_setdefault
 
@@ -6154,6 +6248,7 @@ DEF_FUNC dict_method_copy
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 END_FUNC dict_method_copy
 
@@ -6236,6 +6331,7 @@ DEF_FUNC dict_classmethod_fromkeys, DFK_FRAME
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 END_FUNC dict_classmethod_fromkeys
 
@@ -6323,6 +6419,7 @@ DEF_FUNC dict_method_popitem
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .dpopitem_empty:
@@ -6474,6 +6571,7 @@ DEF_FUNC list_method_remove
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .lremove_not_found:
@@ -6508,6 +6606,7 @@ DEF_FUNC list_method_reversed
     mov edx, TAG_PTR
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 END_FUNC list_method_reversed
 
@@ -6634,6 +6733,7 @@ DEF_FUNC tuple_method_index, 16
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .tindex_not_found:
@@ -6684,6 +6784,7 @@ DEF_FUNC tuple_method_count
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 END_FUNC tuple_method_count
 
@@ -6711,6 +6812,7 @@ DEF_FUNC set_method_add
     inc qword [rax + PyObject.ob_refcnt]
     mov edx, TAG_PTR
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .sma_error:
@@ -6740,6 +6842,7 @@ DEF_FUNC set_method_remove
     inc qword [rax + PyObject.ob_refcnt]
     mov edx, TAG_PTR
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .smr_keyerr:
@@ -6773,6 +6876,7 @@ DEF_FUNC set_method_discard
     inc qword [rax + PyObject.ob_refcnt]
     mov edx, TAG_PTR
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .smd_error:
@@ -6835,6 +6939,7 @@ DEF_FUNC set_method_pop, SMP_FRAME
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .smpop_empty:
@@ -6897,6 +7002,7 @@ DEF_FUNC set_method_clear
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .smc_error:
@@ -6958,6 +7064,7 @@ DEF_FUNC set_method_copy
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .smcp_error:
@@ -7045,6 +7152,7 @@ DEF_FUNC set_method_union
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .smu_error:
@@ -7100,6 +7208,7 @@ DEF_FUNC set_method_update
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 END_FUNC set_method_update
 
@@ -7167,6 +7276,7 @@ DEF_FUNC set_method_intersection
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .smi_error:
@@ -7239,6 +7349,7 @@ DEF_FUNC set_method_difference
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .smdf_error:
@@ -7343,6 +7454,7 @@ DEF_FUNC set_method_symmetric_difference
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .smsd_error:
@@ -7405,6 +7517,7 @@ DEF_FUNC set_method_issubset
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .smss_false:
@@ -7418,6 +7531,7 @@ DEF_FUNC set_method_issubset
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .smss_error:
@@ -7480,6 +7594,7 @@ DEF_FUNC set_method_issuperset
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .smis_false:
@@ -7493,6 +7608,7 @@ DEF_FUNC set_method_issuperset
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .smis_error:
@@ -7555,6 +7671,7 @@ DEF_FUNC set_method_isdisjoint
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .smdj_false:
@@ -7568,6 +7685,7 @@ DEF_FUNC set_method_isdisjoint
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .smdj_error:
@@ -7626,12 +7744,14 @@ DEF_FUNC int_method_bit_length
     inc rax                     ; bit_length = highest_bit + 1
     RET_TAG_SMALLINT
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .ibl_zero:
     xor eax, eax
     RET_TAG_SMALLINT
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 END_FUNC int_method_bit_length
 
@@ -7651,6 +7771,7 @@ DEF_FUNC int_method_bit_count
     popcnt rax, rcx
     RET_TAG_SMALLINT
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 END_FUNC int_method_bit_count
 
@@ -7671,6 +7792,7 @@ DEF_FUNC int_method_conjugate
     call int_method_self_to_i64
     RET_TAG_SMALLINT
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 END_FUNC int_method_conjugate
 
@@ -7785,6 +7907,7 @@ DEF_FUNC int_method_to_bytes, ITB_FRAME
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .itb_error:
@@ -7879,6 +8002,7 @@ DEF_FUNC int_classmethod_from_bytes, IFB_FRAME
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .ifb_error:
@@ -7948,12 +8072,14 @@ DEF_FUNC float_method_is_integer
     mov eax, 1
     RET_BOOL_RAX
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .fii_false:
     xor eax, eax
     RET_BOOL_RAX
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 END_FUNC float_method_is_integer
 
@@ -7964,6 +8090,7 @@ DEF_FUNC_BARE float_method_conjugate
     mov rax, [rdi]              ; args[0] = self
     V_TO_F64 rax                ; raw double bits
     mov edx, TAG_FLOAT
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 END_FUNC float_method_conjugate
 
@@ -8096,6 +8223,7 @@ DEF_FUNC bytes_method_hex, BH_FRAME
     pop rax
     mov edx, TAG_PTR
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .bh_empty:
@@ -8105,6 +8233,7 @@ DEF_FUNC bytes_method_hex, BH_FRAME
     call str_new_heap
     mov edx, TAG_PTR
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 END_FUNC bytes_method_hex
 
@@ -8141,12 +8270,14 @@ DEF_FUNC bytes_method_startswith
     mov eax, 1
     RET_BOOL_RAX
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .bsw_false:
     xor eax, eax
     RET_BOOL_RAX
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .bsw_error:
@@ -8190,12 +8321,14 @@ DEF_FUNC bytes_method_endswith
     mov eax, 1
     RET_BOOL_RAX
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .bew_false:
     xor eax, eax
     RET_BOOL_RAX
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .bew_error:
@@ -8273,18 +8406,21 @@ DEF_FUNC bytes_method_count, BC_FRAME
     mov rax, r10
     RET_TAG_SMALLINT
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .bc_empty_sub:
     lea rax, [r8 + 1]
     RET_TAG_SMALLINT
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .bc_zero:
     xor eax, eax
     RET_TAG_SMALLINT
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .bc_error:
@@ -8353,18 +8489,21 @@ DEF_FUNC bytes_method_find, BF_FRAME
     mov rax, r11
     RET_TAG_SMALLINT
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .bf_found_zero:
     xor eax, eax
     RET_TAG_SMALLINT
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .bf_not_found:
     mov rax, -1
     RET_TAG_SMALLINT
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .bf_error:
@@ -8529,6 +8668,7 @@ DEF_FUNC bytes_method_replace, BR_FRAME
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .br_copy_self:
@@ -8543,6 +8683,7 @@ DEF_FUNC bytes_method_replace, BR_FRAME
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .br_error:
@@ -8643,6 +8784,7 @@ DEF_FUNC bytes_method_split
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .bsp_by_sep:
@@ -8730,6 +8872,7 @@ DEF_FUNC bytes_method_split
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .bsp_empty_sep:
@@ -8862,6 +9005,7 @@ DEF_FUNC bytes_method_join, BJ_FRAME
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .bj_empty:
@@ -8875,6 +9019,7 @@ DEF_FUNC bytes_method_join, BJ_FRAME
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .bj_error:
@@ -8974,6 +9119,7 @@ DEF_FUNC float_method_as_integer_ratio, FIR_FRAME
     mov edx, TAG_PTR
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .fir_neg_exp:
@@ -9002,6 +9148,7 @@ DEF_FUNC float_method_as_integer_ratio, FIR_FRAME
     mov edx, TAG_PTR
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .fir_zero:
@@ -9022,6 +9169,7 @@ DEF_FUNC float_method_as_integer_ratio, FIR_FRAME
     mov edx, TAG_PTR
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .fir_error:
@@ -9195,6 +9343,7 @@ DEF_FUNC float_method_hex, FH_FRAME
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .fh_zero:
@@ -9238,6 +9387,7 @@ DEF_FUNC float_method_hex, FH_FRAME
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 END_FUNC float_method_hex
 
@@ -9417,6 +9567,7 @@ DEF_FUNC float_classmethod_fromhex, FFH_FRAME
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 ; Local helper: convert hex char in al to value in eax, or -1

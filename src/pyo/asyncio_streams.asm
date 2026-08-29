@@ -334,6 +334,7 @@ DEF_FUNC stream_reader_read_impl
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 END_FUNC stream_reader_read_impl
 
@@ -360,6 +361,7 @@ DEF_FUNC stream_reader_readline_impl
     mov edx, TAG_PTR
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 END_FUNC stream_reader_readline_impl
 
@@ -603,6 +605,7 @@ DEF_FUNC stream_writer_write_impl
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .swwi_error:
@@ -624,6 +627,7 @@ DEF_FUNC stream_writer_write_impl
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 END_FUNC stream_writer_write_impl
 
@@ -648,6 +652,7 @@ DEF_FUNC stream_writer_drain_impl
     mov edx, TAG_PTR
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 END_FUNC stream_writer_drain_impl
 
@@ -902,6 +907,7 @@ DEF_FUNC asyncio_open_connection_func, OC_FRAME
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .oc_error:
@@ -1009,6 +1015,7 @@ DEF_FUNC asyncio_start_server_func, SS_FRAME
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .ss_error:

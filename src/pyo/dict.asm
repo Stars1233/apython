@@ -1805,6 +1805,7 @@ DEF_FUNC dict_reversed
     mov edx, TAG_PTR
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 END_FUNC dict_reversed
 

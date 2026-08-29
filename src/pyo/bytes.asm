@@ -516,6 +516,7 @@ DEF_FUNC _bytes_decode_impl
     mov rdi, [rdi]             ; self = args[0]
     call bytes_decode
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 END_FUNC _bytes_decode_impl
 

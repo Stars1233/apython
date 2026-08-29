@@ -112,6 +112,7 @@ DEF_FUNC builtin_abs
     add rsp, 8
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .abs_gmp_check:
@@ -128,6 +129,7 @@ DEF_FUNC builtin_abs
     add rsp, 8
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .abs_gmp_neg:
@@ -137,6 +139,7 @@ DEF_FUNC builtin_abs
     add rsp, 8
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .abs_smallint:
@@ -150,6 +153,7 @@ DEF_FUNC builtin_abs
     add rsp, 8
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .abs_bool_tag:
@@ -159,6 +163,7 @@ DEF_FUNC builtin_abs
     add rsp, 8
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .abs_inline_float:
@@ -170,6 +175,7 @@ DEF_FUNC builtin_abs
     add rsp, 8
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .abs_float:
@@ -181,6 +187,7 @@ DEF_FUNC builtin_abs
     add rsp, 8
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .abs_type_error:
@@ -257,6 +264,7 @@ DEF_FUNC builtin_divmod
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .divmod_error:
@@ -1307,6 +1315,7 @@ DEF_FUNC builtin_ord
     movzx eax, byte [rdi + PyStrObject.data]
     RET_TAG_SMALLINT
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .ord_type_error:
@@ -1352,6 +1361,7 @@ DEF_FUNC builtin_chr, 16
     lea rdi, [rbp - 16]
     call str_from_cstr
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .chr_utf8_encode:
@@ -1371,6 +1381,7 @@ DEF_FUNC builtin_chr, 16
     lea rdi, [rbp - 16]
     call str_from_cstr
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .chr_3byte:
@@ -1395,6 +1406,7 @@ DEF_FUNC builtin_chr, 16
     lea rdi, [rbp - 16]
     call str_from_cstr
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .chr_4byte:
@@ -1421,6 +1433,7 @@ DEF_FUNC builtin_chr, 16
     lea rdi, [rbp - 16]
     call str_from_cstr
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .chr_range_error:
@@ -1512,12 +1525,14 @@ DEF_FUNC builtin_hex, 80
     lea rdi, [rbp - 80]
     call str_from_cstr
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .hex_zero:
     CSTRING rdi, "0x0"
     call str_from_cstr
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .hex_nargs_error:
@@ -1540,12 +1555,14 @@ DEF_FUNC builtin_id
 
     call int_from_i64
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .id_smallint:
     V_TO_I64 rdi
     call int_from_i64
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .id_error:
@@ -1587,6 +1604,7 @@ DEF_FUNC builtin_hash_fn
     add rsp, 8
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .hash_float:
@@ -1600,6 +1618,7 @@ DEF_FUNC builtin_hash_fn
     add rsp, 8
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .hash_smallint:
@@ -1613,6 +1632,7 @@ DEF_FUNC builtin_hash_fn
     add rsp, 8
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .hash_bool:
@@ -1701,6 +1721,7 @@ DEF_FUNC builtin_callable
     inc qword [rax + PyObject.ob_refcnt]
     mov edx, TAG_PTR
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .callable_false:
@@ -1708,6 +1729,7 @@ DEF_FUNC builtin_callable
     inc qword [rax + PyObject.ob_refcnt]
     mov edx, TAG_PTR
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .callable_error:
@@ -1732,6 +1754,7 @@ DEF_FUNC builtin_iter_fn
     call get_iterator
     mov edx, TAG_PTR
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .iter_error:
@@ -1772,6 +1795,7 @@ DEF_FUNC builtin_next_fn
     add rsp, 16
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 .next_two_default:
     ; Clear any StopIteration exception
@@ -1791,6 +1815,7 @@ DEF_FUNC builtin_next_fn
     V_UNPACK rax, rdx              ; next() still returns a fat pair
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 .next_two_type_error:
     add rsp, 16                    ; discard saved default
@@ -1838,6 +1863,7 @@ DEF_FUNC builtin_next_fn
     RET_NULL
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .next_have_iternext:
@@ -1851,6 +1877,7 @@ DEF_FUNC builtin_next_fn
     ; tp_iternext / __next__ returns fat (rax=payload, rdx=tag)
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .next_stop:
@@ -1942,6 +1969,7 @@ DEF_FUNC builtin_any
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .any_false:
@@ -1955,6 +1983,7 @@ DEF_FUNC builtin_any
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .any_type_error:
@@ -2028,6 +2057,7 @@ DEF_FUNC builtin_all
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .all_true:
@@ -2041,6 +2071,7 @@ DEF_FUNC builtin_all
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .all_type_error:
@@ -2168,6 +2199,7 @@ DEF_FUNC builtin_sum
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .sum_type_error:
@@ -2336,6 +2368,7 @@ DEF_FUNC_LOCAL minmax_impl, MM_FRAME
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
     ; --- Iterator path: min/max(iterable) ---
@@ -2465,6 +2498,7 @@ DEF_FUNC_LOCAL minmax_impl, MM_FRAME
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .mm_iter_empty:
@@ -2562,6 +2596,7 @@ DEF_FUNC builtin_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .getattr_found:
@@ -2572,6 +2607,7 @@ DEF_FUNC builtin_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .getattr_not_found:
@@ -2587,6 +2623,7 @@ DEF_FUNC builtin_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .getattr_raise:
@@ -2644,6 +2681,7 @@ DEF_FUNC builtin_hasattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .hasattr_try_type_dict:
@@ -2688,6 +2726,7 @@ DEF_FUNC builtin_hasattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .hasattr_not_found:
@@ -2699,6 +2738,7 @@ DEF_FUNC builtin_hasattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .hasattr_error:
@@ -2744,6 +2784,7 @@ DEF_FUNC builtin_setattr
     add rsp, 8
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .setattr_type_error:
@@ -2771,6 +2812,7 @@ DEF_FUNC builtin_globals
     INCREF rax
     mov edx, TAG_PTR
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .globals_error:
@@ -2801,6 +2843,7 @@ DEF_FUNC builtin_locals
     INCREF rax
     mov edx, TAG_PTR
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .locals_use_globals:
@@ -2809,6 +2852,7 @@ DEF_FUNC builtin_locals
     INCREF rax
     mov edx, TAG_PTR
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .locals_error:
@@ -2926,6 +2970,7 @@ DEF_FUNC builtin_dir, DIR_FRAME
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .dir_error:
@@ -2968,6 +3013,7 @@ DEF_FUNC builtin_eval_fn
     ; Classify: SmallInt (bit63) or heap ptr
     ; rdx = tag already set by callee
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .evl_error:
@@ -3039,6 +3085,7 @@ DEF_FUNC builtin_round_fn, RND_FRAME
     RET_TAG_SMALLINT
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 .rnd_one_raw_float:
     movq xmm0, rax
@@ -3049,12 +3096,14 @@ DEF_FUNC builtin_round_fn, RND_FRAME
     RET_TAG_SMALLINT
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .rnd_int_ret:
     RET_TAG_SMALLINT
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .rnd_two_arg:
@@ -3120,6 +3169,7 @@ DEF_FUNC builtin_round_fn, RND_FRAME
     mov edx, TAG_FLOAT
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .rnd_two_neg_scale:
@@ -3141,6 +3191,7 @@ DEF_FUNC builtin_round_fn, RND_FRAME
     mov edx, TAG_FLOAT
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .rnd_two_int:
@@ -3169,6 +3220,7 @@ DEF_FUNC builtin_round_fn, RND_FRAME
     RET_TAG_SMALLINT
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .rnd_error:
@@ -3256,6 +3308,7 @@ DEF_FUNC builtin_pow_fn, POW_FRAME
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .pow_two_float:
@@ -3330,6 +3383,7 @@ DEF_FUNC builtin_pow_fn, POW_FRAME
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .pow_f_neg:
@@ -3354,6 +3408,7 @@ DEF_FUNC builtin_pow_fn, POW_FRAME
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .pow_f_general:
@@ -3385,6 +3440,7 @@ DEF_FUNC builtin_pow_fn, POW_FRAME
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .pow_three:
@@ -3500,6 +3556,7 @@ DEF_FUNC builtin_pow_fn, POW_FRAME
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .pow_neg_mod_exp:
@@ -3582,6 +3639,7 @@ DEF_FUNC builtin_input_fn, INP_FRAME
     ; rdi already points to buffer
     call str_from_cstr
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .inp_empty:
@@ -3589,6 +3647,7 @@ DEF_FUNC builtin_input_fn, INP_FRAME
     CSTRING rdi, ""
     call str_from_cstr
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .inp_error:
@@ -3735,6 +3794,7 @@ DEF_FUNC builtin_open_fn, OPN_FRAME
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .opn_file_error:
@@ -3832,12 +3892,14 @@ DEF_FUNC builtin_bin, 80
     lea rdi, [rbp - 80]
     call str_from_cstr
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .bin_zero:
     CSTRING rdi, "0b0"
     call str_from_cstr
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .bin_nargs_error:
@@ -3917,12 +3979,14 @@ DEF_FUNC builtin_oct, 80
     lea rdi, [rbp - 80]
     call str_from_cstr
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .oct_zero:
     CSTRING rdi, "0o0"
     call str_from_cstr
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .oct_nargs_error:
@@ -3969,6 +4033,7 @@ DEF_FUNC builtin_ascii_fn, AA_FRAME
     mov rax, [rbp - AA_REPR]
     mov edx, TAG_PTR
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .aa_need_escape:
@@ -4054,6 +4119,7 @@ DEF_FUNC builtin_ascii_fn, AA_FRAME
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .aa_nargs_error:
@@ -4122,6 +4188,7 @@ DEF_FUNC builtin_format_fn, FMT_FRAME
 .fmt_done:
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .fmt_nargs_error:
@@ -4163,6 +4230,7 @@ DEF_FUNC builtin_vars_fn, VR_FRAME
     INCREF rax
     mov edx, TAG_PTR
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .vars_empty_dict:
@@ -4170,6 +4238,7 @@ DEF_FUNC builtin_vars_fn, VR_FRAME
     call dict_new
     mov edx, TAG_PTR
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .vars_no_arg:
@@ -4177,7 +4246,7 @@ DEF_FUNC builtin_vars_fn, VR_FRAME
     extern builtin_locals
     xor edi, edi
     xor esi, esi
-    call builtin_locals
+    call builtin_locals         ; already returns a Value
     leave
     ret
 
@@ -4235,6 +4304,7 @@ DEF_FUNC builtin_delattr_fn, DA2_FRAME
     INCREF rax
     mov edx, TAG_PTR
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .da2_type_error:
@@ -4279,6 +4349,7 @@ DEF_FUNC builtin_aiter_fn
     call rax                   ; tp_iter returns rax=ptr only
     mov edx, TAG_PTR
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .aiter_type_error:
@@ -4354,15 +4425,18 @@ DEF_FUNC builtin_anext_fn, AN_FRAME
     mov edx, [rbp - AN_DEFTAG]
     INCREF_VAL rax, rdx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .an_got_value:
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .an_reraise:
     ; No default — let the exception propagate
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .an_type_error:
@@ -4395,6 +4469,7 @@ DEF_FUNC builtin_import_fn
     call import_module
     ; Returns (rax=module, edx=TAG_PTR)
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .imp_nargs_error:
@@ -4411,5 +4486,6 @@ DEF_FUNC_BARE builtin_breakpoint
     ; No-op: return None
     xor eax, eax
     RET_NONE
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 END_FUNC builtin_breakpoint

@@ -493,6 +493,7 @@ DEF_FUNC sys_getdefaultencoding_func
     lea rdi, [rel sm_utf8]
     call str_from_cstr_heap
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 END_FUNC sys_getdefaultencoding_func
 
@@ -506,6 +507,7 @@ DEF_FUNC sys_get_int_max_str_digits_func
     mov rdi, [rel sys_int_max_str_digits]
     call int_from_i64
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 .get_imsd_error:
     extern exc_TypeError_type
@@ -538,6 +540,7 @@ DEF_FUNC sys_set_int_max_str_digits_func
     inc qword [rax + PyObject.ob_refcnt]
     mov edx, TAG_PTR
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .set_imsd_value_error:

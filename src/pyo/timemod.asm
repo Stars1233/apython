@@ -49,6 +49,7 @@ DEF_FUNC time_process_time_func, 16
 
     call float_from_f64
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .pt_error:
@@ -78,6 +79,7 @@ DEF_FUNC time_monotonic_func, 16
 
     call float_from_f64
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .mono_error:

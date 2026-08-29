@@ -1100,7 +1100,6 @@ DEF_FUNC set_nb_or, SNB_FRAME
     mov esi, 2
     call set_method_union
     leave
-    V_PACK rax, rdx             ; return one Value
     ret
 END_FUNC set_nb_or
 
@@ -1112,7 +1111,6 @@ DEF_FUNC set_nb_and, SNB_FRAME
     mov esi, 2
     call set_method_intersection
     leave
-    V_PACK rax, rdx             ; return one Value
     ret
 END_FUNC set_nb_and
 
@@ -1124,7 +1122,6 @@ DEF_FUNC set_nb_sub, SNB_FRAME
     mov esi, 2
     call set_method_difference
     leave
-    V_PACK rax, rdx             ; return one Value
     ret
 END_FUNC set_nb_sub
 
@@ -1136,7 +1133,6 @@ DEF_FUNC set_nb_xor, SNB_FRAME
     mov esi, 2
     call set_method_symmetric_difference
     leave
-    V_PACK rax, rdx             ; return one Value
     ret
 END_FUNC set_nb_xor
 

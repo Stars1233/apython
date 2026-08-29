@@ -466,6 +466,7 @@ DEF_FUNC _prop_setter_impl
 
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .psi_error:
@@ -510,6 +511,7 @@ DEF_FUNC _prop_getter_impl
 
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .pgi_error:
@@ -547,6 +549,7 @@ DEF_FUNC _prop_deleter_impl
 
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .pdi_error:

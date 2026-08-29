@@ -148,6 +148,7 @@ DEF_FUNC fileobj_write
     ; Return char count as int
     call int_from_i64
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .write_error:
@@ -166,6 +167,7 @@ DEF_FUNC fileobj_flush
     lea rax, [rel none_singleton]
     inc qword [rax + PyObject.ob_refcnt]
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 END_FUNC fileobj_flush
 
@@ -177,6 +179,7 @@ DEF_FUNC fileobj_fileno
     mov rdi, [rax + PyFileObject.file_fd]
     call int_from_i64
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 END_FUNC fileobj_fileno
 
@@ -192,11 +195,13 @@ DEF_FUNC fileobj_isatty
     lea rax, [rel bool_false]
     inc qword [rax + PyObject.ob_refcnt]
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 .is_tty:
     lea rax, [rel bool_true]
     inc qword [rax + PyObject.ob_refcnt]
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 END_FUNC fileobj_isatty
 
@@ -212,11 +217,13 @@ DEF_FUNC fileobj_writable
     lea rax, [rel bool_false]
     inc qword [rax + PyObject.ob_refcnt]
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 .yes:
     lea rax, [rel bool_true]
     inc qword [rax + PyObject.ob_refcnt]
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 END_FUNC fileobj_writable
 
@@ -231,11 +238,13 @@ DEF_FUNC fileobj_readable
     lea rax, [rel bool_false]
     inc qword [rax + PyObject.ob_refcnt]
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 .yes:
     lea rax, [rel bool_true]
     inc qword [rax + PyObject.ob_refcnt]
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 END_FUNC fileobj_readable
 
@@ -246,6 +255,7 @@ DEF_FUNC fileobj_seekable
     lea rax, [rel bool_false]
     inc qword [rax + PyObject.ob_refcnt]
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 END_FUNC fileobj_seekable
 
@@ -259,6 +269,7 @@ DEF_FUNC fileobj_close_method
     lea rax, [rel none_singleton]
     inc qword [rax + PyObject.ob_refcnt]
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 END_FUNC fileobj_close_method
 
@@ -296,6 +307,7 @@ DEF_FUNC fileobj_read, FR_FRAME
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .fr_empty:
@@ -304,6 +316,7 @@ DEF_FUNC fileobj_read, FR_FRAME
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 END_FUNC fileobj_read
 
@@ -354,6 +367,7 @@ DEF_FUNC fileobj_readline, FRL_FRAME
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 END_FUNC fileobj_readline
 

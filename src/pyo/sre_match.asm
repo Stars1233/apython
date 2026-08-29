@@ -488,6 +488,7 @@ DEF_FUNC sre_match_group_method
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .group_zero:
@@ -498,6 +499,7 @@ DEF_FUNC sre_match_group_method
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .group_single:
@@ -512,6 +514,7 @@ DEF_FUNC sre_match_group_method
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 END_FUNC sre_match_group_method
 
@@ -601,6 +604,7 @@ DEF_FUNC sre_match_groups_method, GS_FRAME
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .groups_empty:
@@ -614,6 +618,7 @@ DEF_FUNC sre_match_groups_method, GS_FRAME
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 END_FUNC sre_match_groups_method
 
@@ -654,6 +659,7 @@ DEF_FUNC sre_match_start_method
 
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .start_error:
@@ -698,6 +704,7 @@ DEF_FUNC sre_match_end_method
 
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .end_error:
@@ -762,6 +769,7 @@ DEF_FUNC sre_match_span_method
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .span_error:
@@ -883,6 +891,7 @@ DEF_FUNC sre_match_groupdict_method, GD_FRAME
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 END_FUNC sre_match_groupdict_method
 
@@ -898,6 +907,7 @@ DEF_FUNC sre_match_expand_method
     V_UNPACK rax, rdx       ; args[1]
     INCREF_VAL rax, rdx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 END_FUNC sre_match_expand_method
 
@@ -912,6 +922,7 @@ DEF_FUNC sre_match_copy_method
     inc qword [rax + PyObject.ob_refcnt]
     mov edx, TAG_PTR
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 END_FUNC sre_match_copy_method
 

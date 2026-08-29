@@ -1073,6 +1073,7 @@ DEF_FUNC _gen_send_impl
 .gsi_ret:
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .gsi_error:
@@ -1086,6 +1087,7 @@ DEF_FUNC _gen_close_impl
     mov rdi, [rdi]             ; gen = args[0]
     call gen_close
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 END_FUNC _gen_close_impl
 
@@ -1118,6 +1120,7 @@ DEF_FUNC _gen_throw_impl
 .gti_ret:
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .gti_error:

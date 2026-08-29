@@ -297,6 +297,7 @@ DEF_FUNC sre_pattern_match_method
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .match_error:
@@ -347,6 +348,7 @@ DEF_FUNC sre_pattern_search_method
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .search_error:
@@ -397,6 +399,7 @@ DEF_FUNC sre_pattern_fullmatch_method
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .fm_error:
@@ -734,6 +737,7 @@ DEF_FUNC sre_pattern_findall_method, FA_FRAME
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .fa_error:
@@ -1019,6 +1023,7 @@ DEF_FUNC sre_pattern_sub_method, SUB_FRAME
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .sub_error:
@@ -1303,6 +1308,7 @@ DEF_FUNC sre_pattern_subn_method, SN_FRAME
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .subn_error:
@@ -1513,6 +1519,7 @@ DEF_FUNC sre_pattern_split_method, SP_FRAME
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .split_error:
@@ -1789,6 +1796,7 @@ DEF_FUNC sre_pattern_copy_method
     inc qword [rax + PyObject.ob_refcnt]
     mov edx, TAG_PTR
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 END_FUNC sre_pattern_copy_method
 
@@ -1961,6 +1969,7 @@ DEF_FUNC sre_pattern_finditer_method
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .fi_error:
@@ -2151,6 +2160,7 @@ DEF_FUNC sre_scanner_search_method
     RET_NONE
 .ssm_done:
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 END_FUNC sre_scanner_search_method
 
@@ -2231,6 +2241,7 @@ DEF_FUNC sre_scanner_match_method, SM2_FRAME
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .sm2_no_match:
@@ -2245,6 +2256,7 @@ DEF_FUNC sre_scanner_match_method, SM2_FRAME
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 END_FUNC sre_scanner_match_method
 
