@@ -384,12 +384,10 @@ TAG_IO_WAIT  equ 8           ; payload = fd | (direction << 32) — async I/O se
     mov edx, TAG_SMALLINT
 %endmacro
 
-; Push a fat PTR arg onto the machine stack, for building the 16-byte-stride
-; argument arrays that tp_call still expects.
+; Push one pointer Value as a single-argument array on the machine stack.
 %macro SPUSH_PTR 1              ; %1 = PyObject*
-    sub rsp, 16
+    sub rsp, 16                 ; one Value; 16 keeps rsp 16-byte aligned
     mov [rsp], %1
-    mov qword [rsp + 8], TAG_PTR
 %endmacro
 
 ; ===== Fat result save/restore across DECREF calls =====

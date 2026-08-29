@@ -639,9 +639,7 @@ DEF_FUNC exc_type_call, ETC_FRAME
     ; Get message from args[0] if nargs >= 1
     test edx, edx
     jz .no_args
-    mov rdx, [rsi + 8]      ; rdx = args[0] tag
-    mov rsi, [rsi]           ; rsi = args[0] (message payload)
-    V_PACK rsi, rdx          ; exc_new takes a message Value
+    mov rsi, [rsi]           ; args[0] is already the message Value
     jmp .create
 .no_args:
     xor esi, esi             ; msg = NULL (no message)
@@ -670,12 +668,10 @@ DEF_FUNC exc_type_call, ETC_FRAME
     cmp rdx, rcx
     jge .replace_args
     mov rcx, rdx
-    shl rcx, 4                    ; source index * 16 (args at 16B stride)
-    mov rdi, [rsi + rcx]          ; payload
-    mov r8, [rsi + rcx + 8]       ; tag
-    INCREF_VAL rdi, r8
-    mov r9, [r12 + PyTupleObject.ob_item]       ; payloads
-    V_PACK rdi, r8
+    shl rcx, 3                    ; one Value per arg slot
+    mov rdi, [rsi + rcx]          ; the argument Value
+    INCREF_V rdi, r8
+    mov r9, [r12 + PyTupleObject.ob_item]
     mov [r9 + rdx * 8], rdi
     inc rdx
     jmp .copy_args

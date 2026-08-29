@@ -2,6 +2,7 @@
 ; Provides _sre.compile() and SRE constants needed by the re module.
 
 %include "macros.inc"
+extern val_to_i64
 %include "object.inc"
 %include "types.inc"
 %include "builtins.inc"
@@ -69,25 +70,27 @@ DEF_FUNC sre_compile_func, SC_FRAME
     cmp rsi, 6
     jb .compile_error_args
 
-    ; Extract args (fat values: 16-byte stride)
+    ; Extract args (one Value per slot)
     ; args[0] = pattern string
-    mov rax, [rdi]              ; payload
+    mov rax, [rdi]
     mov [rbp - SC_PATTERN], rax
 
-    ; args[1] = flags (SmallInt)
-    mov rax, [rdi + 16]        ; payload
-    mov [rbp - SC_FLAGS], rax
-
     ; args[2] = code (list of ints)
-    mov rax, [rdi + 32]        ; payload
+    mov rax, [rdi + 16]
     mov [rbp - SC_CODE], rax
 
-    ; args[3] = groups (SmallInt)
-    mov rax, [rdi + 48]        ; payload
+    ; args[1] = flags, args[3] = groups — both ints, immediate or boxed
+    mov rdi, [rdi + 8]
+    call val_to_i64
+    mov [rbp - SC_FLAGS], rax
+    mov rdi, [rbp - SC_ARGS]
+    mov rdi, [rdi + 24]
+    call val_to_i64
     mov [rbp - SC_GROUPS], rax
+    mov rdi, [rbp - SC_ARGS]
 
     ; args[4] = groupindex (dict or None)
-    mov rax, [rdi + 64]        ; payload
+    mov rax, [rdi + 32]
     IS_NONE rax, rcx
     jne .have_groupindex
     xor eax, eax               ; NULL for None
@@ -95,7 +98,7 @@ DEF_FUNC sre_compile_func, SC_FRAME
     mov [rbp - SC_GINDEX], rax
 
     ; args[5] = indexgroup (tuple or None)
-    mov rax, [rdi + 80]        ; payload
+    mov rax, [rdi + 40]
     IS_NONE rax, rcx
     jne .have_indexgroup
     xor eax, eax
@@ -339,8 +342,15 @@ END_FUNC sre_unicode_tolower_func
 DEF_FUNC sre_getlower_func
     cmp rsi, 2
     jne .gl_error
-    mov eax, [rdi]             ; char
-    mov ecx, [rdi + 16]       ; flags
+    push rdi
+    mov rdi, [rdi]             ; args[0] = char
+    call val_to_i64
+    pop rdi
+    push rax
+    mov rdi, [rdi + 8]         ; args[1] = flags
+    call val_to_i64
+    mov ecx, eax
+    pop rax                    ; char
     ; If ASCII flag, use ASCII tolower
     test ecx, SRE_FLAG_ASCII
     jnz .gl_ascii
@@ -389,8 +399,8 @@ DEF_FUNC sre_template_func
     cmp rsi, 2
     jb .tmpl_error
     ; Return the template argument (args[1]) with INCREF
-    mov rax, [rdi + 16]       ; template payload
-    mov edx, [rdi + 24]       ; template tag
+    mov rax, [rdi + 8]       ; template payload
+    V_UNPACK rax, rdx       ; args[1]
     INCREF_VAL rax, rdx
     leave
     ret

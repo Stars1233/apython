@@ -214,6 +214,7 @@ DEF_FUNC op_store_attr, SA_FRAME
     mov rsi, [rbp - SA_OBJ]      ; obj
     mov rdx, [rbp - SA_VAL]      ; value
     mov ecx, [rbp - SA_VTAG]     ; value tag
+    V_PACK rdx, rcx              ; property_descr_set takes a value Value
     call property_descr_set
     jmp .sa_descr_cleanup
 

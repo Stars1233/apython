@@ -838,8 +838,8 @@ DEF_FUNC bytes_type_call, BTC_FRAME
     cmp rdx, 1
     jne .btc_error
     mov rdi, [rsi]              ; arg0 payload
-    cmp qword [rsi + 8], TAG_SMALLINT
-    je .btc_error               ; SmallInt → error
+    V_TEST_INT_M [rsi], r11      ; args[0] an int immediate?
+    jae .btc_error
     mov rax, [rdi + PyObject.ob_type]
     lea rcx, [rel bytes_type]
     cmp rax, rcx

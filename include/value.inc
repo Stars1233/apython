@@ -220,6 +220,32 @@ extern val_from_i64_p
 %%done:
 %endmacro
 
+; ---------------------------------------------------------------------------
+; Classify a Value that lives in memory, without first loading it into the
+; register the caller is going to use.  Each writes only the scratch %2.
+; ---------------------------------------------------------------------------
+
+; Pointer test: follow with `ja` to branch away when NULL or an immediate.
+%macro V_TEST_PTR_M 2           ; %1 = m64 holding a Value, %2 = scratch
+    mov %2, %1
+    dec %2
+    cmp %2, [rel v_ptr_max_m1]
+%endmacro
+
+; Int-immediate test: follow with `jae` when it is one, `jb` when it is not.
+%macro V_TEST_INT_M 2           ; %1 = m64 holding a Value, %2 = scratch
+    mov %2, %1
+    cmp %2, [rel v_int_lo]
+%endmacro
+
+; Float test: follow with `jbe` when it is one, `ja` when it is not.
+%macro V_TEST_F64_M 2           ; %1 = m64 holding a Value, %2 = scratch
+    mov %2, %1
+    shr %2, 48
+    dec %2
+    cmp %2, VH_F64_MAX - 1
+%endmacro
+
 ; (payload, tag) -> Value.  %2 must not be rax.
 %macro V_PACK 2                 ; %1 = payload in / Value out, %2 = tag (clobbered)
     cmp %2, TAG_SMALLINT

@@ -474,8 +474,8 @@ DEF_FUNC sys_exit_func
     jne .exit_0
 
     ; Get exit code from args[0]
-    mov rdx, [rdi + 8]        ; args[0] tag
-    mov rdi, [rdi]
+    mov rdi, [rdi]            ; args[0]
+    V_UNPACK rdi, rdx
     call int_to_i64
     mov edi, eax
     call sys_exit
@@ -522,8 +522,9 @@ DEF_FUNC sys_set_int_max_str_digits_func
     cmp rsi, 1
     jne .set_imsd_error
 
-    mov edx, [rdi + 8]
-    mov rdi, [rdi]
+    mov rdi, [rdi]            ; args[0]
+
+    V_UNPACK rdi, rdx
     call int_to_i64
     ; rax = new limit
     test rax, rax

@@ -604,10 +604,10 @@ DEF_FUNC type_call
     jne .not_type_self
     ; type(x) → return type of x
     mov rax, [rsi]          ; args[0] payload
-    cmp qword [rsi + 8], TAG_SMALLINT
-    je .type_smallint       ; SmallInt → int type
-    cmp qword [rsi + 8], TAG_FLOAT
-    je .type_float          ; TAG_FLOAT → float type
+    V_TEST_INT_M [rsi], r11      ; args[0] an int immediate?
+    jae .type_smallint
+    V_TEST_F64_M [rsi], r11      ; args[0] a float?
+    jbe .type_float
     mov rax, [rax + PyObject.ob_type]
     inc qword [rax + PyObject.ob_refcnt]
     mov edx, TAG_PTR
@@ -735,9 +735,8 @@ DEF_FUNC type_call
     sub rsp, rax
     mov r15, rsp                ; r15 = new args array
 
-    ; args[0] = cls (the type)
+    ; args[0] = cls (a type pointer is its own Value)
     mov [r15], rbx
-    mov qword [r15 + 8], TAG_PTR
 
     ; Copy original args
     xor ecx, ecx
@@ -745,13 +744,11 @@ DEF_FUNC type_call
     cmp rcx, r13
     jge .new_args_copied
     mov rax, rcx
-    shl rax, 4
+    shl rax, 3                  ; one Value per slot
     mov rdx, [r12 + rax]
-    mov r8, [r12 + rax + 8]
     lea r9, [rcx + 1]
-    shl r9, 4
+    shl r9, 3                   ; dest slot (offset by one for self)
     mov [r15 + r9], rdx
-    mov [r15 + r9 + 8], r8
     inc rcx
     jmp .copy_new_args
 .new_args_copied:
@@ -830,9 +827,8 @@ DEF_FUNC type_call
     sub rsp, rax                ; allocate on stack
     mov r15, rsp                ; r15 = new args array
 
-    ; args[0] = instance (payload + tag)
+    ; args[0] = instance (a pointer is its own Value)
     mov [r15], r14
-    mov qword [r15 + 8], TAG_PTR
 
     ; Copy original args: args[1..nargs] (16-byte stride)
     xor ecx, ecx
@@ -840,13 +836,11 @@ DEF_FUNC type_call
     cmp rcx, r13
     jge .args_copied
     mov rax, rcx
-    shl rax, 4                  ; source index * 16
-    mov rdx, [r12 + rax]       ; source payload
-    mov r8, [r12 + rax + 8]    ; source tag
+    shl rax, 3                  ; one Value per slot
+    mov rdx, [r12 + rax]
     lea r9, [rcx + 1]
-    shl r9, 4                   ; dest index * 16 (offset by 1 for instance)
-    mov [r15 + r9], rdx        ; dest payload
-    mov [r15 + r9 + 8], r8    ; dest tag
+    shl r9, 3                   ; dest slot (offset by one for self)
+    mov [r15 + r9], rdx
     inc rcx
     jmp .copy_args
 .args_copied:
@@ -908,20 +902,17 @@ DEF_FUNC type_call
     sub rsp, rax
     mov r15, rsp                ; r15 = new args array
     mov [r15], r14
-    mov qword [r15 + 8], TAG_PTR
     ; Copy original args
     xor ecx, ecx
 .exc_sub_copy_args:
     cmp rcx, r13
     jge .exc_sub_args_copied
     mov rax, rcx
-    shl rax, 4
+    shl rax, 3                  ; one Value per slot
     mov rdx, [r12 + rax]
-    mov r8, [r12 + rax + 8]
     lea r9, [rcx + 1]
-    shl r9, 4
+    shl r9, 3                   ; dest slot (offset by one for self)
     mov [r15 + r9], rdx
-    mov [r15 + r9 + 8], r8
     inc rcx
     jmp .exc_sub_copy_args
 .exc_sub_args_copied:
@@ -1170,10 +1161,9 @@ DEF_FUNC_LOCAL method_call
     call ap_malloc
     mov r14, rax                ; new args array
 
-    ; new_args[0] = im_self (payload + tag)
+    ; new_args[0] = im_self (a pointer is its own Value)
     mov rcx, [rbx + PyMethodObject.im_self]
     mov [r14], rcx
-    mov qword [r14 + 8], TAG_PTR
 
     ; Copy original args to new_args[1..] (16-byte stride)
     xor ecx, ecx
@@ -1181,13 +1171,11 @@ DEF_FUNC_LOCAL method_call
     cmp rcx, r13
     jge .mc_copy_done
     mov rax, rcx
-    shl rax, 4                  ; source index * 16
-    mov rdx, [r12 + rax]       ; source payload
-    mov r8, [r12 + rax + 8]    ; source tag
+    shl rax, 3                  ; one Value per slot
+    mov rdx, [r12 + rax]
     lea r9, [rcx + 1]
-    shl r9, 4                   ; dest index * 16 (offset by 1 for self)
-    mov [r14 + r9], rdx        ; dest payload
-    mov [r14 + r9 + 8], r8    ; dest tag
+    shl r9, 3                   ; dest slot (offset by one for self)
+    mov [r14 + r9], rdx
     inc rcx
     jmp .mc_copy
 .mc_copy_done:

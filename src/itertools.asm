@@ -280,17 +280,17 @@ DEF_FUNC builtin_enumerate, EN_FRAME
 
     ; Save iterable to local (args[0])
     mov rbx, [rbp - EN_ARGS]
-    mov rax, [rbx]
+    mov rax, [rbx]              ; args[0] = the iterable
+    V_UNPACK rax, rdx
     mov [rbp - EN_ITER], rax
-    mov rax, [rbx + 8]
-    mov [rbp - EN_ITERTAG], rax
+    mov [rbp - EN_ITERTAG], rdx
 
     cmp r12, 2
     jne .enum_get_iter
 
     ; start = int(args[1])  (positional)
-    mov rdi, [rbx + 16]
-    mov edx, [rbx + 24]
+    mov rdi, [rbx + 8]
+    V_UNPACK rdi, rdx       ; args[1]
     cmp edx, TAG_SMALLINT
     jne .enum_type_error
     call int_to_i64
@@ -320,11 +320,11 @@ DEF_FUNC builtin_enumerate, EN_FRAME
     mov r10, [rax + PyTupleObject.ob_item]        ; kw names payloads
     mov r10, [r10 + r9*8]
 
-    ; Compute value offset in args: (original_n_pos + kw_idx) * 16
+    ; Compute value offset in args: (original_n_pos + kw_idx) * 8
     ; Use r8 (original n_pos), NOT [rbp - EN_NPOS] which may have been updated
     mov r11, r8
     add r11, r9
-    shl r11, 4
+    shl r11, 3
 
     ; Compare with "start"
     push rax
@@ -350,8 +350,8 @@ DEF_FUNC builtin_enumerate, EN_FRAME
     push r8
     push r9
     mov rbx, [rbp - EN_ARGS]
-    mov rdi, [rbx + r11]           ; value payload
-    mov edx, [rbx + r11 + 8]      ; value tag
+    mov rdi, [rbx + r11]           ; the value Value
+    V_UNPACK rdi, rdx
     cmp edx, TAG_SMALLINT
     jne .enum_type_error
     call int_to_i64
@@ -393,8 +393,8 @@ DEF_FUNC builtin_enumerate, EN_FRAME
     mov rbx, [rbp - EN_ARGS]
     push rdi
     push rsi
-    mov rdi, [rbx + r11]
-    mov rsi, [rbx + r11 + 8]
+    mov rdi, [rbx + r11]           ; the iterable Value
+    V_UNPACK rdi, rsi
     mov [rbp - EN_ITER], rdi
     mov [rbp - EN_ITERTAG], rsi
     pop rsi
@@ -426,10 +426,10 @@ DEF_FUNC builtin_enumerate, EN_FRAME
     jne .enum_get_iter
     ; No iterable= kwarg — iterable is positional args[0]
     mov rbx, [rbp - EN_ARGS]
-    mov rax, [rbx]
+    mov rax, [rbx]              ; args[0] = the iterable
+    V_UNPACK rax, rdx
     mov [rbp - EN_ITER], rax
-    mov rax, [rbx + 8]
-    mov [rbp - EN_ITERTAG], rax
+    mov [rbp - EN_ITERTAG], rdx
 
 .enum_get_iter:
     ; Get iterator from saved iterable (locals, not args - args on value stack)
@@ -575,10 +575,10 @@ DEF_FUNC builtin_zip, ZP_FRAME
     mov r10, [rax + PyTupleObject.ob_item]        ; kw names payloads
     mov r10, [r10 + r9*8]
 
-    ; Compute value offset: (n_pos + kw_idx) * 16
+    ; Compute value offset: (n_pos + kw_idx) * 8
     mov r11, r12
     add r11, r9
-    shl r11, 4
+    shl r11, 3
 
     ; Compare with "strict"
     push rax
@@ -637,9 +637,9 @@ DEF_FUNC builtin_zip, ZP_FRAME
     jge .zip_create
 
     mov rax, r14
-    shl rax, 4                  ; rax = i * 16
+    shl rax, 3                  ; one Value per slot
     mov rdi, [rbx + rax]
-    mov rsi, [rbx + rax + 8]   ; arg tag
+    V_UNPACK rdi, rsi
     push r13
     push r14
     call get_iterator
@@ -889,10 +889,9 @@ DEF_FUNC builtin_map
     jl .map_error
 
     ; INCREF func (only if refcounted)
-    mov r13, [rbx]          ; r13 = func payload
-    mov eax, [rbx + 8]      ; func tag (low 32 bits)
-    test eax, TAG_RC_BIT
-    jz .map_have_func
+    mov r13, [rbx]          ; r13 = func Value
+    V_TEST_PTR r13, rax
+    ja .map_have_func
     INCREF r13
 .map_have_func:
 
@@ -911,9 +910,9 @@ DEF_FUNC builtin_map
     jge .map_create
 
     lea rax, [rcx + 1]
-    shl rax, 4                  ; (i+1) * 16
-    mov rdi, [rbx + rax]        ; args[i+1] payload
-    mov rsi, [rbx + rax + 8]    ; args[i+1] tag
+    shl rax, 3                  ; one Value per slot
+    mov rdi, [rbx + rax]        ; args[i+1]
+    V_UNPACK rdi, rsi
     push rcx
     call get_iterator
     pop rcx
@@ -955,8 +954,9 @@ END_FUNC builtin_map
 ;; IMPORTANT: Do not clobber r12 before calling tp_call, because func_call
 ;; reads r12 expecting the eval loop's current frame pointer.
 MI_SELF    equ 8
-MI_ARGS    equ 16     ; pointer to fat args array on stack
-MI_FRAME   equ 16
+MI_ARGS    equ 16     ; pointer to the Value args array on the stack
+MI_ASIZE   equ 24     ; bytes reserved for it
+MI_FRAME   equ 32
 DEF_FUNC_LOCAL map_iternext, MI_FRAME
     push rbx
     push r13
@@ -967,11 +967,12 @@ DEF_FUNC_LOCAL map_iternext, MI_FRAME
     mov r14, [rbx + MAP_COUNT]       ; iter count
     mov r15, [rbx + MAP_ITERS]       ; iters array
 
-    ; Allocate fat args on stack: count * 16 bytes
-    mov rax, r14
-    shl rax, 4                       ; count * 16
+    ; Allocate the args array on the stack: count Values, 16-byte aligned
+    lea rax, [r14*8 + 15]
+    and rax, -16
     sub rsp, rax
     mov [rbp - MI_ARGS], rsp         ; save args base
+    mov [rbp - MI_ASIZE], rax
 
     ; For each iterator, get next value
     xor r13d, r13d                   ; i = 0
@@ -986,13 +987,11 @@ DEF_FUNC_LOCAL map_iternext, MI_FRAME
     test rax, rax
     jz .map_partial_cleanup
 
-    ; Store value in fat args array (tp_call still takes a 16-byte stride)
-    V_UNPACK rax, rdx
+    ; Store the item Value in the args array
     mov rcx, r13
-    shl rcx, 4
+    shl rcx, 3
     mov r8, [rbp - MI_ARGS]
-    mov [r8 + rcx], rax              ; payload
-    mov [r8 + rcx + 8], rdx          ; tag
+    mov [r8 + rcx], rax
 
     inc r13
     jmp .map_next_loop
@@ -1014,12 +1013,11 @@ DEF_FUNC_LOCAL map_iternext, MI_FRAME
     cmp r13, r14
     jge .map_decref_done
     mov rcx, r13
-    shl rcx, 4
+    shl rcx, 3
     mov r8, [rbp - MI_ARGS]
     mov rdi, [r8 + rcx]
-    mov rsi, [r8 + rcx + 8]
     push r13
-    DECREF_VAL rdi, rsi
+    DECREF_V rdi, rsi
     pop r13
     inc r13
     jmp .map_decref_loop
@@ -1028,10 +1026,8 @@ DEF_FUNC_LOCAL map_iternext, MI_FRAME
     pop rdx                          ; restore result tag
     pop rax                          ; restore result payload
 
-    ; Deallocate fat args from stack
-    mov rcx, r14
-    shl rcx, 4
-    add rsp, rcx
+    ; Deallocate the args array from the stack
+    add rsp, [rbp - MI_ASIZE]
     V_PACK rax, rdx
 
     pop r15
@@ -1049,20 +1045,17 @@ DEF_FUNC_LOCAL map_iternext, MI_FRAME
     jge .map_cleanup_done
     push rcx
     mov rax, rcx
-    shl rax, 4
+    shl rax, 3
     mov r8, [rbp - MI_ARGS]
     mov rdi, [r8 + rax]
-    mov rsi, [r8 + rax + 8]
-    DECREF_VAL rdi, rsi
+    DECREF_V rdi, rsi
     pop rcx
     inc rcx
     jmp .map_cleanup_loop
 
 .map_cleanup_done:
-    ; Deallocate fat args from stack
-    mov rcx, r14
-    shl rcx, 4
-    add rsp, rcx
+    ; Deallocate the args array from the stack
+    add rsp, [rbp - MI_ASIZE]
 
     RET_NULL
     pop r15
@@ -1145,8 +1138,8 @@ DEF_FUNC builtin_filter
 
 .filter_get_iter:
     ; Get iterator from args[1]
-    mov rdi, [rbx + 16]
-    mov rsi, [rbx + 24]       ; args[1] tag
+    mov rdi, [rbx + 8]
+    V_UNPACK rdi, rsi       ; args[1]
     call get_iterator
     mov rbx, rax             ; rbx = underlying iterator
 
@@ -1202,10 +1195,11 @@ DEF_FUNC_LOCAL filter_iternext
     jz .filter_identity
 
     ; Call func(item) and test truthiness of result
-    sub rsp, 16             ; args[0] (16B slot)
-    mov [rsp], r13          ; args[0].payload = item
-    mov rax, [rsp + 16]    ; item tag (saved above push)
-    mov [rsp + 8], rax     ; args[0].tag
+    sub rsp, 16             ; one Value; 16 keeps rsp aligned
+    mov rax, [rsp + 16]     ; item tag (pushed above)
+    mov rcx, r13
+    V_PACK rcx, rax         ; args[0] = item
+    mov [rsp], rcx
     mov rdi, r14             ; func
     mov rax, [rdi + PyObject.ob_type]
     mov rax, [rax + PyTypeObject.tp_call]
@@ -1320,9 +1314,9 @@ DEF_FUNC builtin_reversed
 
     mov r12, [rbx]          ; r12 = sequence
 
-    ; Non-pointer tag — cannot reverse
-    test dword [rbx + 8], TAG_RC_BIT
-    jz .rev_type_error
+    ; Only a heap pointer can be reversed
+    V_TEST_PTR r12, rax
+    ja .rev_type_error
 
     ; Check for range_obj_type — use specialized __reversed__
     mov rax, [r12 + PyObject.ob_type]
@@ -1564,8 +1558,8 @@ DEF_FUNC builtin_sorted, SO_FRAME
 
     ; Get iterator from args[0]
     mov rax, rdi
-    mov rdi, [rax]              ; args[0] payload
-    mov esi, [rax + 8]         ; args[0] tag
+    mov rdi, [rax]              ; args[0]
+    V_UNPACK rdi, rsi
     call get_iterator
     mov rbx, rax               ; rbx = iterator
 
@@ -1598,10 +1592,9 @@ DEF_FUNC builtin_sorted, SO_FRAME
     mov rdi, rbx
     call obj_decref
 
-    ; Build args for list_method_sort in fixed frame buffer
-    ; args[0] = list
+    ; Build args for list_method_sort in the fixed frame buffer
+    ; args[0] = list (a pointer is its own Value)
     mov [rbp - SO_SORT_BUF], r12
-    mov qword [rbp - SO_SORT_BUF + 8], TAG_PTR
 
     mov rax, [rel kw_names_pending]
     test rax, rax
@@ -1620,13 +1613,11 @@ DEF_FUNC builtin_sorted, SO_FRAME
     mov rax, [rbp - SO_ARGS]
     mov r10, rsi
     add r10, r9
-    shl r10, 4
+    shl r10, 3
     lea r8, [r9 + 1]
-    shl r8, 4
+    shl r8, 3
     mov r11, [rax + r10]
     mov [rbp - SO_SORT_BUF + r8], r11
-    mov r11, [rax + r10 + 8]
-    mov [rbp - SO_SORT_BUF + r8 + 8], r11
     inc r9
     jmp .sorted_kw_copy
 .sorted_kw_copy_done:
@@ -1801,9 +1792,9 @@ DEF_FUNC builtin_chain
     jge .chain_create
 
     mov rax, r14
-    shl rax, 4                  ; rax = i * 16
-    mov rdi, [rbx + rax]        ; args[i] payload
-    mov rsi, [rbx + rax + 8]    ; args[i] tag
+    shl rax, 3                  ; one Value per slot
+    mov rdi, [rbx + rax]        ; args[i]
+    V_UNPACK rdi, rsi
     push r13
     push r14
     call get_iterator

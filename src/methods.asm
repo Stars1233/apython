@@ -348,17 +348,16 @@ DEF_FUNC str_method_startswith
     push r13
 
     ; Validate args[1] is a string
-    mov rax, [rdi + 24]        ; args[1] tag
-    cmp eax, TAG_PTR
-    jne .sw_type_error
-    mov rax, [rdi + 16]
+    mov rax, [rdi + 8]         ; args[1]
+    V_TEST_PTR rax, rcx
+    ja .sw_type_error
     mov rcx, [rax + PyObject.ob_type]
     lea rdx, [rel str_type]
     cmp rcx, rdx
     jne .sw_type_error
 
     mov rbx, [rdi]          ; self
-    mov r12, [rdi + 16]     ; prefix (args[1])
+    mov r12, [rdi + 8]     ; prefix (args[1])
 
     mov r13, [r12 + PyStrObject.ob_size]  ; prefix length
 
@@ -418,17 +417,16 @@ DEF_FUNC str_method_endswith
     push r14
 
     ; Validate args[1] is a string
-    mov rax, [rdi + 24]        ; args[1] tag
-    cmp eax, TAG_PTR
-    jne .ew_type_error
-    mov rax, [rdi + 16]
+    mov rax, [rdi + 8]         ; args[1]
+    V_TEST_PTR rax, rcx
+    ja .ew_type_error
     mov rcx, [rax + PyObject.ob_type]
     lea rdx, [rel str_type]
     cmp rcx, rdx
     jne .ew_type_error
 
     mov rbx, [rdi]          ; self
-    mov r12, [rdi + 16]     ; suffix
+    mov r12, [rdi + 8]     ; suffix
     mov r13, [r12 + PyStrObject.ob_size]  ; suffix length
     mov r14, [rbx + PyStrObject.ob_size]  ; self length
 
@@ -489,17 +487,16 @@ DEF_FUNC str_method_find
     push r12
 
     ; Validate args[1] is a string
-    mov rax, [rdi + 24]        ; args[1] tag
-    cmp eax, TAG_PTR
-    jne .find_type_error
-    mov rax, [rdi + 16]
+    mov rax, [rdi + 8]         ; args[1]
+    V_TEST_PTR rax, rcx
+    ja .find_type_error
     mov rcx, [rax + PyObject.ob_type]
     lea rdx, [rel str_type]
     cmp rcx, rdx
     jne .find_type_error
 
     mov rbx, [rdi]          ; self
-    mov r12, [rdi + 16]     ; substr (now guaranteed heap str)
+    mov r12, [rdi + 8]     ; substr (now guaranteed heap str)
 
     ; Use ap_strstr to find substring
     lea rdi, [rbx + PyStrObject.data]
@@ -550,20 +547,18 @@ DEF_FUNC str_method_replace
     sub rsp, 40             ; [rbp-48]=buf_ptr, [rbp-56]=buf_alloc, [rbp-64]=write_pos, [rbp-72]=self_len, [rbp-80]=pad
 
     ; Validate args[1] is a string
-    mov rax, [rdi + 24]        ; args[1] tag
-    cmp eax, TAG_PTR
-    jne .repl_type_error
-    mov rax, [rdi + 16]
+    mov rax, [rdi + 8]         ; args[1]
+    V_TEST_PTR rax, rcx
+    ja .repl_type_error
     mov rcx, [rax + PyObject.ob_type]
     lea rdx, [rel str_type]
     cmp rcx, rdx
     jne .repl_type_error
 
     ; Validate args[2] is a string
-    mov rax, [rdi + 40]        ; args[2] tag
-    cmp eax, TAG_PTR
-    jne .repl_type_error
-    mov rax, [rdi + 32]
+    mov rax, [rdi + 16]         ; args[2]
+    V_TEST_PTR rax, rcx
+    ja .repl_type_error
     mov rcx, [rax + PyObject.ob_type]
     lea rdx, [rel str_type]
     cmp rcx, rdx
@@ -571,8 +566,8 @@ DEF_FUNC str_method_replace
 
     ; rbx = self, r12 = old_str, r13 = new_str, r14 = self_len, r15 = scan_pos
     mov rbx, [rdi]          ; self
-    mov r12, [rdi + 16]     ; old
-    mov r13, [rdi + 32]     ; new
+    mov r12, [rdi + 8]     ; old
+    mov r13, [rdi + 16]     ; new
     mov r14, [rbx + PyStrObject.ob_size]
     mov [rbp-72], r14
 
@@ -782,9 +777,9 @@ DEF_FUNC str_method_join
 
     ; Load separator
     mov r15, rdi             ; save args ptr (r15 free until later)
-    mov rbx, [rdi]           ; self (separator) payload
+    mov rbx, [rdi]           ; self (separator)
     INCREF rbx               ; borrow → own
-    mov r12, [r15 + 16]     ; list (args[1] payload, 16-byte stride)
+    mov r12, [r15 + 8]       ; args[1] = list
 
     mov r13, [r12 + PyListObject.ob_size]  ; item count
     mov r14, [rbx + PyStrObject.ob_size]   ; sep length
@@ -935,16 +930,15 @@ DEF_FUNC str_method_split
     jl .split_no_sep
 
     ; Validate args[1] is a string
-    mov rax, [rdi + 24]        ; args[1] tag
-    cmp eax, TAG_PTR
-    jne .spl_type_error
-    mov rax, [rdi + 16]
+    mov rax, [rdi + 8]         ; args[1]
+    V_TEST_PTR rax, rcx
+    ja .spl_type_error
     mov rcx, [rax + PyObject.ob_type]
     lea rdx, [rel str_type]
     cmp rcx, rdx
     jne .spl_type_error
 
-    mov r15, [rdi + 16]     ; separator string
+    mov r15, [rdi + 8]     ; separator string
     jmp .split_by_sep
 
 .split_no_sep:
@@ -1224,9 +1218,9 @@ DEF_FUNC str_method_format
     push rcx
     push rdx
     ; Get the arg object and convert to string
-    shl rax, 4              ; offset = index * 16
-    mov rdi, [rbx + rax]    ; arg object payload
-    mov r8, [rbx + rax + 8]  ; arg tag
+    shl rax, 3              ; one Value per slot
+    mov rdi, [rbx + rax]    ; arg Value
+    V_UNPACK rdi, r8
     ; Convert arg to string via obj_str(payload, tag)
     ; obj_str handles all tags: SmallInt, Float, Bool, None, TAG_PTR
     push rdi
@@ -1380,7 +1374,7 @@ DEF_FUNC str_method_format_map, FM_FRAME
 
     mov [rbp - FM_ARGS], rdi
     mov rax, [rdi]              ; self = format string
-    mov rcx, [rdi + 16]         ; mapping dict
+    mov rcx, [rdi + 8]         ; mapping dict
     mov [rbp - FM_MAP], rcx
 
     lea r12, [rax + PyStrObject.data]   ; r12 = fmt data
@@ -1689,17 +1683,16 @@ DEF_FUNC str_method_count
     push r14
 
     ; Validate args[1] is a string
-    mov rax, [rdi + 24]        ; args[1] tag
-    cmp eax, TAG_PTR
-    jne .count_type_error
-    mov rax, [rdi + 16]
+    mov rax, [rdi + 8]         ; args[1]
+    V_TEST_PTR rax, rcx
+    ja .count_type_error
     mov rcx, [rax + PyObject.ob_type]
     lea rdx, [rel str_type]
     cmp rcx, rdx
     jne .count_type_error
 
     mov rbx, [rdi]          ; self
-    mov r12, [rdi + 16]     ; substr (now guaranteed heap str)
+    mov r12, [rdi + 8]     ; substr (now guaranteed heap str)
     xor r13d, r13d          ; r13 = count
     mov r14, [r12 + PyStrObject.ob_size]  ; sub length
 
@@ -1754,17 +1747,16 @@ DEF_FUNC str_method_index
     push r12
 
     ; Validate args[1] is a string
-    mov rax, [rdi + 24]        ; args[1] tag
-    cmp eax, TAG_PTR
-    jne .idx_type_error
-    mov rax, [rdi + 16]
+    mov rax, [rdi + 8]         ; args[1]
+    V_TEST_PTR rax, rcx
+    ja .idx_type_error
     mov rcx, [rax + PyObject.ob_type]
     lea rdx, [rel str_type]
     cmp rcx, rdx
     jne .idx_type_error
 
     mov rbx, [rdi]          ; self
-    mov r12, [rdi + 16]     ; substr
+    mov r12, [rdi + 8]     ; substr
 
     ; Use ap_strstr to find substring
     lea rdi, [rbx + PyStrObject.data]
@@ -1809,17 +1801,16 @@ DEF_FUNC str_method_rfind
     push r14
 
     ; Validate args[1] is a string
-    mov rax, [rdi + 24]        ; args[1] tag
-    cmp eax, TAG_PTR
-    jne .rfind_type_error
-    mov rax, [rdi + 16]
+    mov rax, [rdi + 8]         ; args[1]
+    V_TEST_PTR rax, rcx
+    ja .rfind_type_error
     mov rcx, [rax + PyObject.ob_type]
     lea rdx, [rel str_type]
     cmp rcx, rdx
     jne .rfind_type_error
 
     mov rbx, [rdi]          ; self
-    mov r12, [rdi + 16]     ; substr (now guaranteed heap str)
+    mov r12, [rdi + 8]     ; substr (now guaranteed heap str)
     mov r13, [rbx + PyStrObject.ob_size]   ; self length
     mov r14, [r12 + PyStrObject.ob_size]   ; sub length
 
@@ -2412,8 +2403,8 @@ DEF_FUNC str_method_center, PA_FRAME
     ; Get width
     mov rdi, [rbp - PA_ARGS]
     mov rax, rdi
-    mov rdi, [rax + 16]                 ; args[1] payload
-    mov edx, [rax + 24]                 ; args[1] tag
+    mov rdi, [rax + 8]                 ; args[1] payload
+    V_UNPACK rdi, rdx       ; args[1]
     call int_to_i64
     mov r13, rax                         ; r13 = width
 
@@ -2422,7 +2413,7 @@ DEF_FUNC str_method_center, PA_FRAME
     cmp qword [rbp - PA_NARGS], 3
     jl .center_have_fill
     mov rax, [rbp - PA_ARGS]
-    mov rdx, [rax + 32]                 ; args[2] payload (char str)
+    mov rdx, [rax + 16]                 ; args[2] payload (char str)
     movzx ecx, byte [rdx + PyStrObject.data]
 .center_have_fill:
     ; If width <= self_len, return copy of self
@@ -2507,8 +2498,8 @@ DEF_FUNC str_method_ljust, PA_FRAME
 
     ; Get width
     mov rax, [rbp - PA_ARGS]
-    mov rdi, [rax + 16]
-    mov edx, [rax + 24]
+    mov rdi, [rax + 8]
+    V_UNPACK rdi, rdx       ; args[1]
     call int_to_i64
     mov r13, rax
 
@@ -2517,8 +2508,8 @@ DEF_FUNC str_method_ljust, PA_FRAME
     cmp qword [rbp - PA_NARGS], 3
     jl .ljust_have_fill
     mov rax, [rbp - PA_ARGS]
-    mov rdx, [rax + 32]
-    mov rax, [rax + 40]
+    mov rdx, [rax + 16]
+    V_UNPACK rdx, rax       ; args[2]
     test rax, rax
     js .ljust_fill_ss
     movzx ecx, byte [rdx + PyStrObject.data]
@@ -2592,8 +2583,8 @@ DEF_FUNC str_method_rjust, PA_FRAME
     mov [rbp - PA_LEN], r12
 
     mov rax, [rbp - PA_ARGS]
-    mov rdi, [rax + 16]
-    mov edx, [rax + 24]
+    mov rdi, [rax + 8]
+    V_UNPACK rdi, rdx       ; args[1]
     call int_to_i64
     mov r13, rax
 
@@ -2601,8 +2592,8 @@ DEF_FUNC str_method_rjust, PA_FRAME
     cmp qword [rbp - PA_NARGS], 3
     jl .rjust_have_fill
     mov rax, [rbp - PA_ARGS]
-    mov rdx, [rax + 32]
-    mov rax, [rax + 40]
+    mov rdx, [rax + 16]
+    V_UNPACK rdx, rax       ; args[2]
     test rax, rax
     js .rjust_fill_ss
     movzx ecx, byte [rdx + PyStrObject.data]
@@ -2677,8 +2668,8 @@ DEF_FUNC str_method_zfill, PA_FRAME
     mov [rbp - PA_LEN], r12
 
     mov rax, [rbp - PA_ARGS]
-    mov rdi, [rax + 16]
-    mov edx, [rax + 24]
+    mov rdi, [rax + 8]
+    V_UNPACK rdi, rdx       ; args[1]
     call int_to_i64
     mov r13, rax                         ; width
 
@@ -2760,7 +2751,7 @@ DEF_FUNC str_method_rindex
     push r13
 
     mov rbx, [rdi]           ; self
-    mov r12, [rdi + 16]      ; substr
+    mov r12, [rdi + 8]      ; substr
     mov r13, [rbx + PyStrObject.ob_size]
     mov rcx, [r12 + PyStrObject.ob_size]
 
@@ -2886,7 +2877,7 @@ DEF_FUNC str_method_partition, PT_FRAME
     push r13
 
     mov rbx, [rdi]           ; self
-    mov r12, [rdi + 16]      ; sep
+    mov r12, [rdi + 8]      ; sep
     mov [rbp - PT_SELF], rbx
     mov [rbp - PT_SEP], r12
 
@@ -2991,7 +2982,7 @@ DEF_FUNC str_method_rpartition, PT_FRAME
     push r13
 
     mov rbx, [rdi]           ; self
-    mov r12, [rdi + 16]      ; sep
+    mov r12, [rdi + 8]      ; sep
     mov [rbp - PT_SELF], rbx
     mov [rbp - PT_SEP], r12
 
@@ -3123,8 +3114,8 @@ DEF_FUNC str_method_expandtabs, ET_FRAME
     cmp rsi, 2
     jl .et_have_tab
     mov rax, rdi
-    mov rdi, [rax + 16]
-    mov edx, [rax + 24]
+    mov rdi, [rax + 8]
+    V_UNPACK rdi, rdx       ; args[1]
     call int_to_i64
     mov r13, rax
 .et_have_tab:
@@ -3264,7 +3255,7 @@ DEF_FUNC str_method_splitlines
     jl .sl_have_keep
     ; Check args[1] - bool_true means keep
     lea rax, [rel bool_true]
-    cmp qword [rdi + 16], rax
+    cmp qword [rdi + 8], rax
     sete r14b
 .sl_have_keep:
 
@@ -3404,7 +3395,7 @@ DEF_FUNC str_method_translate
 
     mov rbx, [rdi]           ; self
     mov r12, [rbx + PyStrObject.ob_size]
-    mov r14, [rdi + 16]      ; table (dict)
+    mov r14, [rdi + 8]      ; table (dict)
 
     ; Build result: for each char, look up ord(char) in table
     xor edi, edi
@@ -3520,16 +3511,14 @@ DEF_FUNC str_method_translate
     push rax                 ; empty sep
 
     ; Build args for join: [sep, list]
-    sub rsp, 32
-    mov rax, [rsp + 32]     ; sep
+    sub rsp, 16
+    mov rax, [rsp + 16]     ; sep
     mov [rsp], rax
-    mov qword [rsp + 8], TAG_PTR
-    mov [rsp + 16], r13
-    mov qword [rsp + 24], TAG_PTR
+    mov [rsp + 8], r13
     mov rdi, rsp
     mov rsi, 2
     call str_method_join
-    add rsp, 32
+    add rsp, 16
     push rax
     push rdx
 
@@ -3573,7 +3562,7 @@ DEF_FUNC str_staticmethod_maketrans, SMT_FRAME
     mov rcx, [rdi]                 ; args[0] payload (from str)
     mov [rbp - SMT_FROM], rcx
 
-    mov rcx, [rdi + 16]            ; args[1] payload (to str)
+    mov rcx, [rdi + 8]            ; args[1] payload (to str)
     mov [rbp - SMT_TO], rcx
 
     ; Check equal lengths
@@ -3649,17 +3638,16 @@ DEF_FUNC str_method_removeprefix
     push r14
 
     ; Validate args[1] is a string
-    mov rax, [rdi + 24]        ; args[1] tag
-    cmp eax, TAG_PTR
-    jne .rp_type_error
-    mov rax, [rdi + 16]
+    mov rax, [rdi + 8]         ; args[1]
+    V_TEST_PTR rax, rcx
+    ja .rp_type_error
     mov rcx, [rax + PyObject.ob_type]
     lea rdx, [rel str_type]
     cmp rcx, rdx
     jne .rp_type_error
 
     mov rbx, [rdi]          ; self
-    mov r12, [rdi + 16]     ; prefix
+    mov r12, [rdi + 8]     ; prefix
     mov r13, [rbx + PyStrObject.ob_size]   ; self len
     mov r14, [r12 + PyStrObject.ob_size]   ; prefix len
 
@@ -3722,17 +3710,16 @@ DEF_FUNC str_method_removesuffix
     push r14
 
     ; Validate args[1] is a string
-    mov rax, [rdi + 24]        ; args[1] tag
-    cmp eax, TAG_PTR
-    jne .rs_type_error
-    mov rax, [rdi + 16]
+    mov rax, [rdi + 8]         ; args[1]
+    V_TEST_PTR rax, rcx
+    ja .rs_type_error
     mov rcx, [rax + PyObject.ob_type]
     lea rdx, [rel str_type]
     cmp rcx, rdx
     jne .rs_type_error
 
     mov rbx, [rdi]          ; self
-    mov r12, [rdi + 16]     ; suffix
+    mov r12, [rdi + 8]     ; suffix
     mov r13, [rbx + PyStrObject.ob_size]   ; self len
     mov r14, [r12 + PyStrObject.ob_size]   ; suffix len
 
@@ -3834,8 +3821,8 @@ DEF_FUNC list_method_append
     ; Check if list is being sorted (ob_item == NULL)
     cmp qword [rax + PyListObject.ob_item], 0
     je list_sorting_error
-    mov rsi, [rdi + 16]     ; item payload
-    mov rdx, [rdi + 24]     ; item tag (16-byte stride)
+    mov rsi, [rdi + 8]     ; item payload
+    V_UNPACK rsi, rdx       ; args[1]
     mov rdi, rax
     V_PACK rsi, rdx         ; list_append takes a Value
     call list_append
@@ -3872,8 +3859,8 @@ DEF_FUNC list_method_pop
     jmp .pop_do
 
 .pop_idx:
-    mov rdi, [rax + 16]    ; args[1]
-    mov rdx, [rax + 24]    ; args[1] tag
+    mov rdi, [rax + 8]    ; args[1]
+    V_UNPACK rdi, rdx       ; args[1]
     call int_to_i64
     mov r13, rax
 
@@ -3943,14 +3930,14 @@ DEF_FUNC list_method_insert
     push rax
 
     ; Get index
-    mov rdi, [rax + 16]     ; args[1] payload (16B stride)
-    mov rdx, [rax + 24]     ; args[1] tag
+    mov rdi, [rax + 8]     ; args[1] payload (16B stride)
+    V_UNPACK rdi, rdx       ; args[1]
     call int_to_i64
     mov r12, rax            ; index
 
     pop rax
-    mov r13, [rax + 32]     ; item = args[2] payload (16B stride)
-    mov r14, [rax + 40]     ; item tag = args[2] tag
+    mov r13, [rax + 16]     ; item = args[2] payload (16B stride)
+    V_UNPACK r13, r14       ; args[2]
 
     ; Clamp index to [0, size]
     test r12, r12
@@ -4122,10 +4109,10 @@ DEF_FUNC list_method_sort, LS_FRAME
     mov rbx, [rax + PyTupleObject.ob_item]
     mov r10, [rbx + r10 * 8]
 
-    ; Kwarg value offset: (n_pos + kw_idx) * 16
+    ; Kwarg value offset: (n_pos + kw_idx) * 8
     mov r11, r8
     add r11, r9
-    shl r11, 4
+    shl r11, 3
 
     ; --- Check "reverse" ---
     push rax
@@ -4148,8 +4135,8 @@ DEF_FUNC list_method_sort, LS_FRAME
     jnz .sort_kw_not_reverse
 
     ; Extract reverse value
-    mov r10, [rdi + r11]           ; value payload
-    mov r13, [rdi + r11 + 8]      ; value tag
+    mov r10, [rdi + r11]           ; the value Value
+    V_UNPACK r10, r13
     cmp r13d, TAG_SMALLINT
     je .sort_rev_int
     ; TAG_PTR: check if bool_true
@@ -4195,8 +4182,7 @@ DEF_FUNC list_method_sort, LS_FRAME
     jnz .sort_kw_next              ; not "key" either, skip
 
     ; Extract key function value
-    mov r10, [rdi + r11]           ; key payload
-    mov r13, [rdi + r11 + 8]      ; key tag
+    mov r10, [rdi + r11]           ; the key Value (a callable, so a pointer)
     ; key=None means no key function
     lea r14, [rel none_singleton]
     cmp r10, r14
@@ -4282,8 +4268,9 @@ DEF_FUNC list_method_sort, LS_FRAME
     shl rcx, 4
     mov rdi, [rax + rcx]          ; item payload
     mov rsi, [rax + rcx + 8]      ; item tag
-    push rsi                       ; arg[0] tag
-    push rdi                       ; arg[0] payload
+    V_PACK rdi, rsi
+    sub rsp, 16                    ; one Value; 16 keeps rsp aligned
+    mov [rsp], rdi                 ; args[0] = item
 
     ; Get key function's tp_call
     mov rdi, [rbp - LS_KEY]
@@ -4307,8 +4294,8 @@ DEF_FUNC list_method_sort, LS_FRAME
     jz .sort_key_meta_builtin
 
     ; Heaptype instance: use __call__(key, item) via dunder_call_2
-    mov rsi, [rsp]                 ; other = item payload
-    mov rcx, [rsp + 8]            ; other_tag = item tag
+    mov rsi, [rsp]                 ; the item Value
+    V_UNPACK rsi, rcx
     extern dunder_call
     lea rdx, [rel dunder_call]
     extern dunder_call_2
@@ -5094,10 +5081,10 @@ DEF_FUNC list_method_index, LI_FRAME
     mov [rbp - LI_NARGS], rsi ; save nargs
     mov rax, [rdi]           ; self
     mov [rbp - LI_LIST], rax
-    mov rax, [rdi + 16]      ; value payload
+    mov rax, [rdi + 8]      ; args[1]
+    V_UNPACK rax, rdx
     mov [rbp - LI_VPAY], rax
-    mov rax, [rdi + 24]      ; value tag
-    mov [rbp - LI_VTAG], rax
+    mov [rbp - LI_VTAG], rdx
     mov rcx, [rbp - LI_LIST]
     mov rcx, [rcx + PyListObject.ob_size]
 
@@ -5112,8 +5099,8 @@ DEF_FUNC list_method_index, LI_FRAME
     jl .li_have_bounds
     ; Get start from args[2]
     mov rax, [rbp - LI_ARGS]
-    mov rdi, [rax + 32]      ; args[2] payload
-    mov edx, [rax + 40]      ; args[2] tag
+    mov rdi, [rax + 16]      ; args[2] payload
+    V_UNPACK rdi, rdx       ; args[2]
     call int_to_i64
     ; Handle negative start
     test rax, rax
@@ -5130,8 +5117,8 @@ DEF_FUNC list_method_index, LI_FRAME
     jl .li_have_bounds
     ; Get stop from args[3]
     mov rax, [rbp - LI_ARGS]
-    mov rdi, [rax + 48]      ; args[3] payload
-    mov edx, [rax + 56]      ; args[3] tag
+    mov rdi, [rax + 24]      ; args[3] payload
+    V_UNPACK rdi, rdx       ; args[3]
     call int_to_i64
     ; Handle negative stop
     test rax, rax
@@ -5277,8 +5264,8 @@ DEF_FUNC list_method_count, LC_FRAME
     push r15
 
     mov rbx, [rdi]          ; self
-    mov r12, [rdi + 16]     ; value payload
-    mov r15d, [rdi + 24]    ; value tag
+    mov r12, [rdi + 8]     ; value payload
+    V_UNPACK r12, r15       ; args[1]
     mov r13, [rbx + PyListObject.ob_size]
     xor r14d, r14d          ; count = 0
 
@@ -5434,8 +5421,8 @@ END_FUNC list_method_copy
 extern list_subscript
 DEF_FUNC_BARE list_dunder_getitem
     mov rax, [rdi]          ; self
-    mov rsi, [rdi + 16]     ; key payload
-    mov edx, [rdi + 24]     ; key tag
+    mov rsi, [rdi + 8]     ; key payload
+    V_UNPACK rsi, rdx       ; args[1]
     V_PACK rsi, rdx         ; list_subscript takes a key Value
     mov rdi, rax
     jmp list_subscript
@@ -5447,10 +5434,10 @@ END_FUNC list_dunder_getitem
 extern list_ass_subscript
 DEF_FUNC_BARE list_dunder_setitem
     mov rax, [rdi]          ; self
-    mov rsi, [rdi + 16]     ; key payload
-    mov ecx, [rdi + 24]     ; key tag
-    mov rdx, [rdi + 32]     ; value payload
-    mov r8d, [rdi + 40]     ; value tag
+    mov rsi, [rdi + 8]     ; key payload
+    V_UNPACK rsi, rcx       ; args[1]
+    mov rdx, [rdi + 16]     ; value payload
+    V_UNPACK rdx, r8       ; args[2]
     V_PACK rsi, rcx         ; list_ass_subscript takes Values
     V_PACK rdx, r8
     mov rdi, rax
@@ -5462,8 +5449,8 @@ END_FUNC list_dunder_setitem
 ;; ============================================================================
 DEF_FUNC list_dunder_delitem
     mov rax, [rdi]          ; self
-    mov rsi, [rdi + 16]     ; key payload
-    mov ecx, [rdi + 24]     ; key tag
+    mov rsi, [rdi + 8]     ; key payload
+    V_UNPACK rsi, rcx       ; args[1]
     V_PACK rsi, rcx         ; list_ass_subscript takes Values
     xor edx, edx            ; a NULL value Value means "delete"
     mov rdi, rax
@@ -5482,8 +5469,8 @@ END_FUNC list_dunder_delitem
 extern list_contains
 DEF_FUNC list_dunder_contains
     mov rax, [rdi]          ; self
-    mov rsi, [rdi + 16]     ; item payload
-    mov edx, [rdi + 24]     ; item tag
+    mov rsi, [rdi + 8]     ; item payload
+    V_UNPACK rsi, rdx       ; args[1]
     V_PACK rsi, rdx         ; list_contains takes a Value
     mov rdi, rax
     call list_contains
@@ -5521,8 +5508,8 @@ END_FUNC list_dunder_len
 extern list_inplace_concat
 DEF_FUNC_BARE list_dunder_iadd
     mov rax, [rdi]          ; self
-    mov rsi, [rdi + 16]     ; other payload
-    mov rcx, [rdi + 24]     ; other tag
+    mov rsi, [rdi + 8]     ; other payload
+    V_UNPACK rsi, rcx       ; args[1]
     mov rdi, rax
     jmp list_inplace_concat
 END_FUNC list_dunder_iadd
@@ -5629,8 +5616,8 @@ DEF_FUNC list_method_extend, LE_FRAME
     ; Check if list is being sorted (ob_item == NULL)
     cmp qword [rbx + PyListObject.ob_item], 0
     je list_sorting_error
-    mov r12, [rdi + 16]      ; iterable payload
-    mov r13, [rdi + 24]      ; iterable tag
+    mov r12, [rdi + 8]      ; iterable payload
+    V_UNPACK r12, r13       ; args[1]
     mov [rbp - LE_SELF], rbx
 
     ; Check iterable type for fast paths
@@ -5759,8 +5746,8 @@ DEF_FUNC dict_method_get
 
     ; dict_get(self, key)
     mov rdi, rbx
-    mov rsi, [rax + 16]     ; key payload
-    mov rdx, [rax + 24]     ; key tag
+    mov rsi, [rax + 8]     ; key payload
+    V_UNPACK rsi, rdx       ; args[1]
     call dict_get
     V_UNPACK rax, rdx           ; dict_get returns a Value
 
@@ -5772,8 +5759,8 @@ DEF_FUNC dict_method_get
     cmp r12, 3
     jl .dg_ret_none
     ; Return args[2] (default)
-    mov rax, [rcx + 32]     ; default payload
-    mov rdx, [rcx + 40]     ; default tag
+    mov rax, [rcx + 16]     ; default payload
+    V_UNPACK rax, rdx       ; args[2]
     INCREF_VAL rax, rdx
     pop r12
     pop rbx
@@ -5861,8 +5848,8 @@ dict_method_pop_v2 equ dict_method_pop
     mov r14, rdi            ; r14 = args
     mov rbx, [r14]          ; self
     mov r12, rsi            ; nargs
-    mov r13, [r14 + 16]     ; key payload (16-byte stride)
-    mov r15d, [r14 + 24]    ; key tag
+    mov r13, [r14 + 8]     ; key payload (16-byte stride)
+    V_UNPACK r13, r15       ; args[1]
 
     ; Try dict_get
     mov rdi, rbx
@@ -5898,8 +5885,8 @@ dict_method_pop_v2 equ dict_method_pop
 .dpop2_not_found:
     cmp r12, 3
     jl .dpop2_error
-    mov rax, [r14 + 32]     ; default = args[2] payload (16-byte stride)
-    mov rdx, [r14 + 40]     ; default tag
+    mov rax, [r14 + 16]     ; default = args[2] payload (16-byte stride)
+    V_UNPACK rax, rdx       ; args[2]
     INCREF_VAL rax, rdx
     pop r15
     pop r14
@@ -5994,7 +5981,7 @@ DEF_FUNC dict_method_update
     cmp rsi, 1
     jle .du_done
 
-    mov r12, [rdi + 16]     ; other dict
+    mov r12, [rdi + 8]     ; other dict
 
     mov r13, [r12 + PyDictObject.capacity]
     xor r14d, r14d
@@ -6047,8 +6034,8 @@ DEF_FUNC dict_method_setdefault
     push r15
 
     mov rbx, [rdi]          ; self (dict)
-    mov r12, [rdi + 16]     ; key payload
-    mov r14d, [rdi + 24]    ; key tag
+    mov r12, [rdi + 8]     ; key payload
+    V_UNPACK r12, r14       ; args[1]
     mov r13, rsi            ; nargs
 
     ; Save args ptr for default value access
@@ -6069,8 +6056,8 @@ DEF_FUNC dict_method_setdefault
     pop rdi                 ; restore args ptr
     cmp r13, 3
     jl .sd_use_none
-    mov r13, [rdi + 32]     ; default = args[2] payload
-    mov r15d, [rdi + 40]    ; default = args[2] tag
+    mov r13, [rdi + 16]     ; default = args[2] payload
+    V_UNPACK r13, r15       ; args[2]
     jmp .sd_set_default
 
 .sd_use_none:
@@ -6193,8 +6180,8 @@ DEF_FUNC dict_classmethod_fromkeys, DFK_FRAME
     ; If nargs >= 3, use args[2] as value
     cmp rsi, 3
     jl .dfk_get_iter
-    mov rax, [rdi + 32]            ; value payload
-    mov rcx, [rdi + 40]            ; value tag
+    mov rax, [rdi + 16]            ; value payload
+    V_UNPACK rax, rcx       ; args[2]
     mov [rbp - DFK_VAL], rax
     mov [rbp - DFK_VTAG], rcx
 
@@ -6202,8 +6189,8 @@ DEF_FUNC dict_classmethod_fromkeys, DFK_FRAME
     ; Get iterator from args[1] (iterable)
     ; args array: [0]=cls, [8]=cls_tag, [16]=iterable, [24]=iterable_tag, ...
     mov rax, rdi                   ; save args ptr
-    mov rdi, [rax + 16]            ; iterable payload
-    mov esi, [rax + 24]            ; iterable tag
+    mov rdi, [rax + 8]            ; iterable payload
+    V_UNPACK rdi, rsi       ; args[1]
     extern get_iterator
     call get_iterator
     mov [rbp - DFK_ITER], rax
@@ -6358,8 +6345,8 @@ DEF_FUNC list_method_remove
     ; Check if list is being sorted (ob_item == NULL)
     cmp qword [rbx + PyListObject.ob_item], 0
     je list_sorting_error
-    mov r12, [rdi + 16]     ; value payload
-    mov r15d, [rdi + 24]    ; value tag
+    mov r12, [rdi + 8]     ; value payload
+    V_UNPACK r12, r15       ; args[1]
     mov r13, [rbx + PyListObject.ob_size]
 
     xor r14d, r14d          ; index = 0
@@ -6535,8 +6522,8 @@ DEF_FUNC tuple_method_index, 16
     mov [rbp - 8], rdi      ; save args
     mov [rbp - 16], rsi     ; save nargs
     mov rbx, [rdi]          ; self (tuple)
-    mov r12, [rdi + 16]     ; value to find (payload)
-    mov r14d, [rdi + 24]    ; value tag
+    mov r12, [rdi + 8]     ; value to find (payload)
+    V_UNPACK r12, r14       ; args[1]
     mov r13, [rbx + PyTupleObject.ob_size]  ; default stop = size
 
     xor ecx, ecx            ; default start = 0
@@ -6546,8 +6533,8 @@ DEF_FUNC tuple_method_index, 16
     jl .ti_have_bounds
     mov rax, [rbp - 8]
     push rcx
-    mov rdi, [rax + 32]      ; args[2] payload
-    mov edx, [rax + 40]      ; args[2] tag
+    mov rdi, [rax + 16]      ; args[2] payload
+    V_UNPACK rdi, rdx       ; args[2]
     call int_to_i64
     pop rcx
     mov rcx, rax
@@ -6565,8 +6552,8 @@ DEF_FUNC tuple_method_index, 16
     jl .ti_have_bounds
     mov rax, [rbp - 8]
     push rcx
-    mov rdi, [rax + 48]      ; args[3] payload
-    mov edx, [rax + 56]      ; args[3] tag
+    mov rdi, [rax + 24]      ; args[3] payload
+    V_UNPACK rdi, rdx       ; args[3]
     call int_to_i64
     pop rcx
     ; Handle negative stop
@@ -6664,8 +6651,8 @@ DEF_FUNC tuple_method_count
     push r14
 
     mov rbx, [rdi]          ; self (tuple)
-    mov r12, [rdi + 16]     ; value payload
-    mov r14, [rdi + 24]     ; value tag
+    mov r12, [rdi + 8]     ; value payload
+    V_UNPACK r12, r14       ; args[1]
     V_PACK r12, r14         ; compare Values, as the tuple now stores them
     mov r13, [rbx + PyTupleObject.ob_size]
     xor r14d, r14d          ; count = 0
@@ -6713,8 +6700,8 @@ DEF_FUNC set_method_add
 
     mov rax, rdi            ; args ptr
     mov rdi, [rax]          ; self (set)
-    mov rsi, [rax + 16]     ; elem payload
-    mov rdx, [rax + 24]     ; elem tag
+    mov rsi, [rax + 8]     ; elem payload
+    V_UNPACK rsi, rdx       ; args[1]
     V_PACK rsi, rdx         ; set_add takes a key Value
     call set_add
 
@@ -6740,8 +6727,8 @@ DEF_FUNC set_method_remove
 
     mov rax, rdi
     mov rdi, [rax]          ; self
-    mov rsi, [rax + 16]     ; elem payload
-    mov rdx, [rax + 24]     ; elem tag
+    mov rsi, [rax + 8]     ; elem payload
+    V_UNPACK rsi, rdx       ; args[1]
     V_PACK rsi, rdx         ; set_remove takes a key Value
     call set_remove
     test eax, eax
@@ -6774,8 +6761,8 @@ DEF_FUNC set_method_discard
 
     mov rax, rdi
     mov rdi, [rax]          ; self
-    mov rsi, [rax + 16]     ; elem payload
-    mov rdx, [rax + 24]     ; elem tag
+    mov rsi, [rax + 8]     ; elem payload
+    V_UNPACK rsi, rdx       ; args[1]
     V_PACK rsi, rdx         ; set_remove takes a key Value
     call set_remove
     ; Ignore return value (don't care if not found)
@@ -6992,7 +6979,7 @@ DEF_FUNC set_method_union
     jne .smu_error
 
     mov r14, [rdi]          ; self
-    mov r15, [rdi + 16]     ; other set
+    mov r15, [rdi + 8]     ; other set
 
     ; Copy self → new set
     mov r12, [r14 + PyDictObject.entries]
@@ -7078,7 +7065,7 @@ DEF_FUNC set_method_update
     cmp rsi, 2
     jl .supd_done
 
-    mov r12, [rdi + 16]     ; other set
+    mov r12, [rdi + 8]     ; other set
     mov r13, [r12 + PyDictObject.capacity]
     xor ecx, ecx
 
@@ -7129,7 +7116,7 @@ DEF_FUNC set_method_intersection
     jne .smi_error
 
     mov r14, [rdi]          ; self
-    mov r15, [rdi + 16]     ; other
+    mov r15, [rdi + 8]     ; other
 
     call set_new
     mov rbx, rax            ; new set
@@ -7201,7 +7188,7 @@ DEF_FUNC set_method_difference
     jne .smdf_error
 
     mov r14, [rdi]          ; self
-    mov r15, [rdi + 16]     ; other
+    mov r15, [rdi + 8]     ; other
 
     call set_new
     mov rbx, rax            ; new set
@@ -7273,7 +7260,7 @@ DEF_FUNC set_method_symmetric_difference
     jne .smsd_error
 
     mov r14, [rdi]          ; self
-    mov r15, [rdi + 16]     ; other
+    mov r15, [rdi + 8]     ; other
 
     call set_new
     mov rbx, rax            ; new set
@@ -7378,7 +7365,7 @@ DEF_FUNC set_method_issubset
     jne .smss_error
 
     mov r14, [rdi]          ; self
-    mov r15, [rdi + 16]     ; other
+    mov r15, [rdi + 8]     ; other
 
     mov r12, [r14 + PyDictObject.entries]
     mov r13, [r14 + PyDictObject.capacity]
@@ -7452,7 +7439,7 @@ DEF_FUNC set_method_issuperset
     cmp rsi, 2
     jne .smis_error
 
-    mov r14, [rdi + 16]     ; other (iterate this)
+    mov r14, [rdi + 8]     ; other (iterate this)
     mov r15, [rdi]          ; self (check contains)
 
     mov r12, [r14 + PyDictObject.entries]
@@ -7528,7 +7515,7 @@ DEF_FUNC set_method_isdisjoint
     jne .smdj_error
 
     mov r14, [rdi]          ; self
-    mov r15, [rdi + 16]     ; other
+    mov r15, [rdi + 8]     ; other
 
     mov r12, [r14 + PyDictObject.entries]
     mov r13, [r14 + PyDictObject.capacity]
@@ -7595,15 +7582,15 @@ END_FUNC set_method_isdisjoint
 ;; ============================================================================
 ;; HELPER: int_method_self_to_i64
 ;; Extract raw i64 from self, handling both SmallInt and heap int (subclasses).
-;; Input: rdi = args pointer (args[0] = fat value)
+;; Input: rdi = args pointer (args[0] = self)
 ;; Output: rax = raw i64
 ;; Clobbers: rcx, rdx
 ;; ============================================================================
 DEF_FUNC int_method_self_to_i64
-    mov rdx, [rdi + 8]         ; self.tag
+    mov rax, [rdi]              ; args[0] = self
+    V_UNPACK rax, rdx
     cmp edx, TAG_SMALLINT
     jne .imsi_heap
-    mov rax, [rdi]              ; SmallInt payload = raw i64
     leave
     ret
 .imsi_heap:
@@ -7723,15 +7710,15 @@ DEF_FUNC int_method_to_bytes, ITB_FRAME
     mov [rbp - ITB_SELF], rax       ; self i64
 
     ; Extract length arg
-    mov rdx, [rbx + 24]            ; args[1] tag
+    mov r12, [rbx + 8]             ; args[1]
+    V_UNPACK r12, rdx
     cmp edx, TAG_SMALLINT
     jne .itb_error
-    mov r12, [rbx + 16]            ; args[1] payload = length
     mov [rbp - ITB_LEN], r12
 
     ; Extract byteorder arg
-    mov rdx, [rbx + 40]            ; args[2] tag
-    mov rcx, [rbx + 32]            ; args[2] payload (str)
+    mov rcx, [rbx + 16]            ; args[2] payload (str)
+    V_UNPACK rcx, rdx       ; args[2]
     cmp edx, TAG_PTR
     jne .itb_error
 
@@ -7824,12 +7811,12 @@ DEF_FUNC int_classmethod_from_bytes, IFB_FRAME
     push r12
 
     ; args[1] = bytes object
-    mov rax, [rdi + 16]            ; payload
+    mov rax, [rdi + 8]            ; payload
     mov [rbp - IFB_BYTES], rax
 
     ; args[2] = byteorder
-    mov edx, [rdi + 40]            ; tag
-    mov rcx, [rdi + 32]            ; payload
+    mov rcx, [rdi + 16]            ; payload
+    V_UNPACK rcx, rdx       ; args[2]
     cmp edx, TAG_PTR
     jne .ifb_error
     push rcx
@@ -7938,7 +7925,8 @@ END_FUNC int_method___float__
 extern float_type
 
 DEF_FUNC float_method_is_integer
-    mov rax, [rdi]              ; self.payload = raw double bits
+    mov rax, [rdi]              ; args[0] = self
+    V_TO_F64 rax                ; raw double bits
     movq xmm0, rax
 
     ; Check for inf/nan — not integer
@@ -7971,7 +7959,8 @@ END_FUNC float_method_is_integer
 ;; float_method_conjugate(args, nargs) -> Float (return self)
 ;; ============================================================================
 DEF_FUNC_BARE float_method_conjugate
-    mov rax, [rdi]              ; self.payload = raw double bits
+    mov rax, [rdi]              ; args[0] = self
+    V_TO_F64 rax                ; raw double bits
     mov edx, TAG_FLOAT
     ret
 END_FUNC float_method_conjugate
@@ -7980,7 +7969,8 @@ END_FUNC float_method_conjugate
 ;; float_method___int__(args, nargs) -> SmallInt
 ;; ============================================================================
 DEF_FUNC_BARE float_method___int__
-    mov rax, [rdi]              ; self.payload = raw double bits
+    mov rax, [rdi]              ; args[0] = self
+    V_TO_F64 rax                ; raw double bits
     movq xmm0, rax
     cvttsd2si rax, xmm0        ; truncate to i64
     mov edx, TAG_SMALLINT
@@ -7991,7 +7981,8 @@ END_FUNC float_method___int__
 ;; float_method___float__(args, nargs) -> Float (return self)
 ;; ============================================================================
 DEF_FUNC_BARE float_method___float__
-    mov rax, [rdi]              ; self.payload = raw double bits
+    mov rax, [rdi]              ; args[0] = self
+    V_TO_F64 rax                ; raw double bits
     mov edx, TAG_FLOAT
     ret
 END_FUNC float_method___float__
@@ -8000,7 +7991,8 @@ END_FUNC float_method___float__
 ;; float_method___trunc__(args, nargs) -> SmallInt
 ;; ============================================================================
 DEF_FUNC_BARE float_method___trunc__
-    mov rax, [rdi]              ; self.payload = raw double bits
+    mov rax, [rdi]              ; args[0] = self
+    V_TO_F64 rax                ; raw double bits
     movq xmm0, rax
     cvttsd2si rax, xmm0        ; truncate to i64
     mov edx, TAG_SMALLINT
@@ -8011,7 +8003,8 @@ END_FUNC float_method___trunc__
 ;; float_method___abs__(args, nargs) -> Float
 ;; ============================================================================
 DEF_FUNC_BARE float_method___abs__
-    mov rax, [rdi]              ; self.payload = raw double bits
+    mov rax, [rdi]              ; args[0] = self
+    V_TO_F64 rax                ; raw double bits
     btr rax, 63                 ; clear sign bit
     mov edx, TAG_FLOAT
     ret
@@ -8122,7 +8115,7 @@ DEF_FUNC bytes_method_startswith
     jne .bsw_error
 
     mov rax, [rdi]              ; self
-    mov rcx, [rdi + 16]         ; prefix
+    mov rcx, [rdi + 8]         ; prefix
 
     ; Get lengths
     mov r8, [rax + PyBytesObject.ob_size]   ; self len
@@ -8169,7 +8162,7 @@ DEF_FUNC bytes_method_endswith
     jne .bew_error
 
     mov rax, [rdi]              ; self
-    mov rcx, [rdi + 16]         ; suffix
+    mov rcx, [rdi + 8]         ; suffix
 
     ; Get lengths
     mov r8, [rax + PyBytesObject.ob_size]   ; self len
@@ -8223,7 +8216,7 @@ DEF_FUNC bytes_method_count, BC_FRAME
     jne .bc_error
 
     mov rax, [rdi]              ; self
-    mov rcx, [rdi + 16]         ; sub
+    mov rcx, [rdi + 8]         ; sub
     mov [rbp - BC_SELF], rax
     mov [rbp - BC_SUB], rcx
 
@@ -8312,7 +8305,7 @@ DEF_FUNC bytes_method_find, BF_FRAME
     jne .bf_error
 
     mov rax, [rdi]              ; self
-    mov rcx, [rdi + 16]         ; sub
+    mov rcx, [rdi + 8]         ; sub
     mov [rbp - BF_SELF], rax
     mov [rbp - BF_SUB], rcx
 
@@ -8405,8 +8398,8 @@ DEF_FUNC bytes_method_replace, BR_FRAME
     jne .br_error
 
     mov rax, [rdi]              ; self
-    mov rcx, [rdi + 16]         ; old
-    mov rdx, [rdi + 32]         ; new
+    mov rcx, [rdi + 8]         ; old
+    mov rdx, [rdi + 16]         ; new
     mov [rbp - BR_SELF], rax
     mov [rbp - BR_OLD], rcx
     mov [rbp - BR_NEW], rdx
@@ -8575,7 +8568,7 @@ DEF_FUNC bytes_method_split
     jl .bsp_no_sep
 
     ; Separator mode
-    mov r15, [rdi + 16]         ; separator bytes obj
+    mov r15, [rdi + 8]         ; separator bytes obj
     jmp .bsp_by_sep
 
 .bsp_no_sep:
@@ -8765,7 +8758,7 @@ DEF_FUNC bytes_method_join, BJ_FRAME
     jne .bj_error
 
     mov rax, [rdi]              ; self = separator bytes
-    mov rcx, [rdi + 16]         ; list
+    mov rcx, [rdi + 8]         ; list
     mov [rbp - BJ_SEP], rax
     mov [rbp - BJ_LIST], rcx
 
@@ -8898,7 +8891,8 @@ FIR_FRAME equ 8
 DEF_FUNC float_method_as_integer_ratio, FIR_FRAME
     push rbx
 
-    mov rax, [rdi]              ; self.payload = raw double bits
+    mov rax, [rdi]              ; args[0] = self
+    V_TO_F64 rax                ; raw double bits
 
     ; Check for inf/nan
     mov rcx, rax
@@ -9045,7 +9039,8 @@ DEF_FUNC float_method_hex, FH_FRAME
     push rbx
     push r12
 
-    mov rax, [rdi]              ; self.payload = raw double bits
+    mov rax, [rdi]              ; args[0] = self
+    V_TO_F64 rax                ; raw double bits
     mov rbx, rax                ; save bits
 
     ; Allocate temp buffer (64 bytes is enough for any hex float)
@@ -9258,7 +9253,7 @@ DEF_FUNC float_classmethod_fromhex, FFH_FRAME
     push r13
 
     ; Get string arg
-    mov rcx, [rdi + 16]            ; args[1] payload
+    mov rcx, [rdi + 8]            ; args[1] payload
     mov [rbp - FFH_STR], rcx
     lea r12, [rcx + PyStrObject.data]  ; r12 = string data
 

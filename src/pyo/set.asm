@@ -794,12 +794,11 @@ DEF_FUNC set_type_call, STC_FRAME
     jne .stc_error
 
     ; set(iterable): create set, iterate and add
-    mov r12, [rsi]          ; iterable payload
-    mov rcx, [rsi + 8]     ; iterable tag
+    mov r12, [rsi]          ; args[0]
 
-    ; Check iterable is a pointer type before dereferencing
-    cmp ecx, TAG_PTR
-    jne .stc_not_iterable
+    ; Only a heap pointer can be iterable
+    V_TEST_PTR r12, rcx
+    ja .stc_not_iterable
 
     call set_new
     mov rbx, rax            ; rbx = new set
@@ -1004,10 +1003,9 @@ DEF_FUNC frozenset_type_call, FTC_FRAME
     jne .ftc_error
 
     ; frozenset(iterable): create set, iterate and add, then set type
-    mov r12, [rsi]          ; iterable payload
-    mov rcx, [rsi + 8]     ; iterable tag
-    cmp ecx, TAG_PTR
-    jne .ftc_not_iterable
+    mov r12, [rsi]          ; args[0]
+    V_TEST_PTR r12, rcx
+    ja .ftc_not_iterable
 
     call set_new
     mov rbx, rax
@@ -1096,12 +1094,8 @@ SNB_FRAME equ 32
 
 ;; set_nb_or(left, right, ltag, rtag) -> new set (union)
 DEF_FUNC set_nb_or, SNB_FRAME
-    V_UNPACK rdi, rdx           ; left  Value -> (payload, tag)
-    V_UNPACK rsi, rcx           ; right Value -> (payload, tag)
-    mov [rbp - 32], rdi         ; args[0].payload = left
-    mov [rbp - 24], rdx         ; args[0].tag = ltag
-    mov [rbp - 16], rsi         ; args[1].payload = right
-    mov [rbp - 8], rcx          ; args[1].tag = rtag
+    mov [rbp - 32], rdi         ; args[0] = left
+    mov [rbp - 24], rsi         ; args[1] = right
     lea rdi, [rbp - 32]
     mov esi, 2
     call set_method_union
@@ -1112,12 +1106,8 @@ END_FUNC set_nb_or
 
 ;; set_nb_and(left, right, ltag, rtag) -> new set (intersection)
 DEF_FUNC set_nb_and, SNB_FRAME
-    V_UNPACK rdi, rdx           ; left  Value -> (payload, tag)
-    V_UNPACK rsi, rcx           ; right Value -> (payload, tag)
-    mov [rbp - 32], rdi
-    mov [rbp - 24], rdx
-    mov [rbp - 16], rsi
-    mov [rbp - 8], rcx
+    mov [rbp - 32], rdi         ; args[0] = left
+    mov [rbp - 24], rsi         ; args[1] = right
     lea rdi, [rbp - 32]
     mov esi, 2
     call set_method_intersection
@@ -1128,12 +1118,8 @@ END_FUNC set_nb_and
 
 ;; set_nb_sub(left, right, ltag, rtag) -> new set (difference)
 DEF_FUNC set_nb_sub, SNB_FRAME
-    V_UNPACK rdi, rdx           ; left  Value -> (payload, tag)
-    V_UNPACK rsi, rcx           ; right Value -> (payload, tag)
-    mov [rbp - 32], rdi
-    mov [rbp - 24], rdx
-    mov [rbp - 16], rsi
-    mov [rbp - 8], rcx
+    mov [rbp - 32], rdi         ; args[0] = left
+    mov [rbp - 24], rsi         ; args[1] = right
     lea rdi, [rbp - 32]
     mov esi, 2
     call set_method_difference
@@ -1144,12 +1130,8 @@ END_FUNC set_nb_sub
 
 ;; set_nb_xor(left, right, ltag, rtag) -> new set (symmetric_difference)
 DEF_FUNC set_nb_xor, SNB_FRAME
-    V_UNPACK rdi, rdx           ; left  Value -> (payload, tag)
-    V_UNPACK rsi, rcx           ; right Value -> (payload, tag)
-    mov [rbp - 32], rdi
-    mov [rbp - 24], rdx
-    mov [rbp - 16], rsi
-    mov [rbp - 8], rcx
+    mov [rbp - 32], rdi         ; args[0] = left
+    mov [rbp - 24], rsi         ; args[1] = right
     lea rdi, [rbp - 32]
     mov esi, 2
     call set_method_symmetric_difference

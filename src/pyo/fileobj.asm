@@ -127,8 +127,8 @@ DEF_FUNC fileobj_write
     ; args[0] = self (file obj), args[1] = string to write
     mov rax, rdi                ; rax = args
     mov rdi, [rax]              ; rdi = self (file obj)
-    mov rsi, [rax + 16]        ; rsi = string arg payload (16-byte stride)
-    mov r9, [rax + 24]         ; r9 = string arg tag
+    mov rsi, [rax + 8]        ; rsi = string arg payload (16-byte stride)
+    V_UNPACK rsi, r9       ; args[1]
 
     ; Get fd
     mov rcx, [rdi + PyFileObject.file_fd]

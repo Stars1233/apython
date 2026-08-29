@@ -116,7 +116,8 @@ DEF_FUNC dunder_call_1
     test rax, rax
     jz .not_found
 
-    SPUSH_PTR rbx            ; args[0] = self (fat arg)
+    sub rsp, 16             ; one Value; 16 keeps rsp aligned
+    mov [rsp], rbx          ; args[0] = self
     mov rdi, r12            ; callable
     mov rsi, rsp            ; args ptr
     mov edx, 1              ; nargs
@@ -178,16 +179,15 @@ DEF_FUNC dunder_call_2
     test rax, rax
     jz .not_found
 
-    sub rsp, 32             ; 2 args × 16B
-    mov [rsp], rbx          ; args[0].payload = self
-    mov qword [rsp+8], TAG_PTR   ; args[0].tag
-    mov [rsp+16], r12       ; args[1].payload = other
-    mov [rsp+24], r14       ; args[1].tag = other_tag
+    sub rsp, 16             ; 2 Values
+    mov [rsp], rbx          ; args[0] = self
+    V_PACK r12, r14         ; args[1] = other
+    mov [rsp+8], r12
     mov rdi, r13            ; callable
     mov rsi, rsp            ; args ptr
     mov edx, 2              ; nargs
     call rax
-    add rsp, 32             ; pop args
+    add rsp, 16             ; pop args
     ; rax = result payload, rdx = result tag
 
     pop r14
@@ -248,18 +248,16 @@ DEF_FUNC dunder_call_3
     test rax, rax
     jz .not_found
 
-    sub rsp, 48             ; 3 args × 16B
-    mov [rsp], rbx          ; args[0].payload = self
-    mov qword [rsp+8], TAG_PTR
-    mov [rsp+16], r12       ; args[1].payload = arg1
-    mov qword [rsp+24], TAG_PTR
-    mov [rsp+32], r13       ; args[2].payload = arg2
-    mov [rsp+40], r15       ; args[2].tag = arg2_tag
+    sub rsp, 32             ; 3 Values, rounded up to keep rsp aligned
+    mov [rsp], rbx          ; args[0] = self
+    mov [rsp+8], r12        ; args[1] = arg1
+    V_PACK r13, r15         ; args[2] = arg2
+    mov [rsp+16], r13
     mov rdi, r14            ; callable
     mov rsi, rsp            ; args ptr
     mov edx, 3              ; nargs
     call rax
-    add rsp, 48             ; pop args
+    add rsp, 32             ; pop args
     ; rax = result payload, rdx = result tag
 
     pop r15

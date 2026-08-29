@@ -113,10 +113,9 @@ DEF_FUNC dict_type_call
     jne .dtc_error
 
     ; Check if arg is a dict
-    mov rdi, [rbx]             ; args[0] payload
-    mov eax, [rbx + 8]        ; args[0] tag
-    cmp eax, TAG_PTR
-    jne .dtc_try_iterable
+    mov rdi, [rbx]             ; args[0]
+    V_TEST_PTR rdi, rax
+    ja .dtc_try_iterable
     mov rax, [rdi + PyObject.ob_type]
     lea rcx, [rel dict_type]
     cmp rax, rcx
@@ -157,10 +156,9 @@ DEF_FUNC dict_type_call
 
 .dtc_try_iterable:
     ; Not a dict — try iterating as sequence of (key, value) pairs
-    mov rdi, [rbx]             ; args[0] payload
-    movzx esi, byte [rbx + 8] ; args[0] tag
-    cmp esi, TAG_PTR
-    jne .dtc_error
+    mov rdi, [rbx]             ; args[0]
+    V_TEST_PTR rdi, rsi
+    ja .dtc_error
     ; Get iterator
     push rdi
     mov rax, [rdi + PyObject.ob_type]
@@ -275,20 +273,14 @@ DEF_FUNC dict_type_call
     ; key from kw_names tuple items
     mov r9, [r14 + PyTupleObject.ob_item]
     mov rsi, [r9 + r8*8]         ; key Value
-    V_UNPACK rsi, r10           ; dict_set still takes (payload, tag)
 
     ; value from args: index = n_pos + kw_index
     add rcx, r8                   ; rcx = n_pos + kw_index
-    shl rcx, 4                    ; rcx * 16 (each arg is 16 bytes)
-    mov rdx, [rbx + rcx]         ; value payload
-    movzx eax, byte [rbx + rcx + 8]  ; value tag
+    shl rcx, 3                    ; one Value per arg slot
+    mov rdx, [rbx + rcx]         ; value Value
 
-    ; dict_set(dict, key, value, value_tag, key_tag)
+    ; dict_set(dict, key Value, value Value)
     mov rdi, r15
-    mov ecx, eax                  ; value tag
-    V_PACK rdx, rcx
-    mov r8d, r10d                 ; key tag
-    V_PACK rsi, r8
     call dict_set
 
     pop rdx

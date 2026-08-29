@@ -1900,8 +1900,8 @@ DEF_FUNC list_type_call, LTC_FRAME
     mov rbx, rax            ; rbx = new list
 
     ; Get iterator from arg (supports heaptypes with __iter__)
-    mov rdi, [r12]          ; iterable payload
-    mov esi, [r12 + 8]      ; iterable tag
+    mov rdi, [r12]          ; args[0]
+    V_UNPACK rdi, rsi
     extern get_iterator
     call get_iterator
     mov [rbp - LTC_ITER], rax

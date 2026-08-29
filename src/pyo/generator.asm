@@ -1049,8 +1049,8 @@ DEF_FUNC _gen_send_impl
 
     mov rax, rdi               ; save args ptr
     mov rbx, [rax]            ; rbx = gen (save for return value access)
-    mov rdx, [rax + 24]       ; value_tag = args[1].tag
-    mov rsi, [rax + 16]       ; value = args[1].payload
+    mov rsi, [rax + 8]       ; value = args[1].payload
+    V_UNPACK rsi, rdx       ; args[1]
     mov rdi, rbx              ; gen = args[0].payload
     V_PACK rsi, rdx           ; gen_send takes a Value
     call gen_send
@@ -1098,7 +1098,7 @@ DEF_FUNC _gen_throw_impl
 
     mov rax, rdi               ; save args ptr
     mov rbx, [rax]            ; rbx = gen
-    mov rsi, [rax + 16]       ; exc_type = args[1].payload
+    mov rsi, [rax + 8]       ; exc_type = args[1].payload
     mov rdi, rbx              ; gen = args[0].payload
     call gen_throw
     test edx, edx

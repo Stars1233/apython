@@ -435,7 +435,7 @@ DEF_FUNC sre_match_group_method
     push r13
 
     mov rbx, [rdi]             ; self = args[0] payload
-    lea r12, [rdi + 16]        ; user args start at args[1]
+    lea r12, [rdi + 8]         ; user args start at args[1]
     lea r13, [rsi - 1]         ; user nargs
 
     ; No args: return group(0)
@@ -459,9 +459,9 @@ DEF_FUNC sre_match_group_method
     push r13
     ; Get group index from args (may be string or int)
     mov rax, rcx
-    shl rax, 4                 ; 16-byte stride
-    mov rsi, [r12 + rax]       ; group arg payload
-    mov edx, [r12 + rax + 8]  ; group arg tag
+    shl rax, 3                 ; one Value per slot
+    mov rsi, [r12 + rax]       ; group arg Value
+    V_UNPACK rsi, rdx
     mov rdi, rbx
     call sre_match_resolve_group_idx
     ; rsi = resolved int index
@@ -501,8 +501,8 @@ DEF_FUNC sre_match_group_method
     ret
 
 .group_single:
-    mov rsi, [r12]             ; group arg payload
-    mov edx, [r12 + 8]        ; group arg tag
+    mov rsi, [r12]             ; group arg Value
+    V_UNPACK rsi, rdx
     mov rdi, rbx
     call sre_match_resolve_group_idx
     ; rsi = resolved int index
@@ -532,7 +532,7 @@ DEF_FUNC sre_match_groups_method, GS_FRAME
     push r15
 
     mov rbx, [rdi]             ; self = args[0] payload
-    lea r12, [rdi + 16]        ; user args
+    lea r12, [rdi + 8]         ; user args
     lea r13, [rsi - 1]         ; user nargs
 
     ; default arg (default = None)
@@ -540,8 +540,8 @@ DEF_FUNC sre_match_groups_method, GS_FRAME
     RET_NONE
     cmp r13, 1
     jb .groups_no_default
-    mov rax, [r12]             ; default payload
-    mov edx, [r12 + 8]        ; default tag
+    mov rax, [r12]             ; default Value
+    V_UNPACK rax, rdx
 .groups_no_default:
     mov [rbp - GS_DEFAULT], rax
     mov [rbp - GS_DEFAULT_TAG], rdx
@@ -625,15 +625,15 @@ DEF_FUNC sre_match_start_method
     ; rdi = args (fat array), rsi = nargs
     push rbx
     mov rbx, [rdi]             ; self = args[0] payload
-    lea rcx, [rdi + 16]        ; user args
+    lea rcx, [rdi + 8]         ; user args
     lea rdx, [rsi - 1]         ; user nargs
 
     ; Get group index (default 0)
     xor esi, esi               ; default group = 0
     test rdx, rdx
     jz .start_default
-    mov rsi, [rcx]             ; group arg payload
-    mov edx, [rcx + 8]        ; group arg tag
+    mov rsi, [rcx]             ; group arg Value
+    V_UNPACK rsi, rdx
     mov rdi, rbx
     call sre_match_resolve_group_idx
     ; rsi = resolved int index
@@ -670,15 +670,15 @@ DEF_FUNC sre_match_end_method
     ; rdi = args (fat array), rsi = nargs
     push rbx
     mov rbx, [rdi]             ; self = args[0] payload
-    lea rcx, [rdi + 16]        ; user args
+    lea rcx, [rdi + 8]         ; user args
     lea rdx, [rsi - 1]         ; user nargs
 
     ; Get group index (default 0)
     xor esi, esi               ; default group = 0
     test rdx, rdx
     jz .end_default
-    mov rsi, [rcx]             ; group arg payload
-    mov edx, [rcx + 8]        ; group arg tag
+    mov rsi, [rcx]             ; group arg Value
+    V_UNPACK rsi, rdx
     mov rdi, rbx
     call sre_match_resolve_group_idx
     ; rsi = resolved int index
@@ -715,14 +715,14 @@ DEF_FUNC sre_match_span_method
     push rbx
     push r12
     mov rbx, [rdi]             ; self = args[0] payload
-    lea rcx, [rdi + 16]        ; user args
+    lea rcx, [rdi + 8]         ; user args
     lea rdx, [rsi - 1]         ; user nargs
 
     xor r12d, r12d             ; group = 0
     test rdx, rdx
     jz .span_default
-    mov rsi, [rcx]             ; group arg payload
-    mov edx, [rcx + 8]        ; group arg tag
+    mov rsi, [rcx]             ; group arg Value
+    V_UNPACK rsi, rdx
     mov rdi, rbx
     call sre_match_resolve_group_idx
     mov r12, rsi               ; resolved int index
@@ -799,8 +799,8 @@ DEF_FUNC sre_match_groupdict_method, GD_FRAME
     lea rdx, [rsi - 1]        ; user nargs
     cmp rdx, 1
     jb .gd_no_default
-    mov rcx, [rdi + 16]       ; default payload
-    mov r8d, [rdi + 24]       ; default tag
+    mov rcx, [rdi + 8]       ; default payload
+    V_UNPACK rcx, r8       ; args[1]
 .gd_no_default:
     mov [rbp - GD_DEFAULT], rcx
     mov [rbp - GD_DEFAULT_TAG], r8
@@ -894,8 +894,8 @@ END_FUNC sre_match_groupdict_method
 DEF_FUNC sre_match_expand_method
     ; rdi = args (fat array), rsi = nargs
     ; args[1] = template
-    mov rax, [rdi + 16]       ; template payload
-    mov rdx, [rdi + 24]       ; template tag
+    mov rax, [rdi + 8]       ; template payload
+    V_UNPACK rax, rdx       ; args[1]
     INCREF_VAL rax, rdx
     leave
     ret

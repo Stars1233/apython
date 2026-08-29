@@ -72,10 +72,9 @@ DEF_FUNC asyncio_run_func, AR_FRAME
     jne .ar_error
 
     ; Get coroutine from args[0]
-    mov rax, [rdi]             ; coro payload
-    mov edx, [rdi + 8]        ; coro tag
-    cmp edx, TAG_PTR
-    jne .ar_type_error
+    mov rax, [rdi]             ; args[0] = coro
+    V_TEST_PTR rax, rdx
+    ja .ar_type_error
 
     mov rbx, rax               ; rbx = coro
 
@@ -140,8 +139,8 @@ DEF_FUNC asyncio_sleep_func
     jne .as_error
 
     ; Get delay from args[0]
-    mov rax, [rdi]             ; payload
-    mov edx, [rdi + 8]        ; tag
+    mov rax, [rdi]             ; args[0]
+    V_UNPACK rax, rdx
 
     ; Normalize: int_unwrap flattens bool, compact heap ints and int
     ; subclasses to (value, TAG_SMALLINT); floats pass through untouched.
@@ -262,8 +261,8 @@ DEF_FUNC asyncio_wait_for_func, WF_FRAME
 
     ; Convert timeout (args[1]) to nanoseconds
     pop rdi                    ; restore args
-    mov rax, [rdi + 16]       ; args[1] payload
-    mov edx, [rdi + 24]       ; args[1] tag
+    mov rax, [rdi + 8]       ; args[1] payload
+    V_UNPACK rax, rdx       ; args[1]
 
     ; Normalize: int_unwrap flattens bool, compact heap ints and int
     ; subclasses to (value, TAG_SMALLINT); floats pass through untouched.
@@ -487,13 +486,12 @@ DEF_FUNC asyncio_gather_func
     jge .ag_done
     push rcx
 
-    ; Get coro from args[i] (16 bytes per arg, scale by shifting)
+    ; Get coro from args[i] (one Value per slot)
     mov rdi, rcx
-    shl rdi, 4                 ; * 16
-    mov edx, [rbx + rdi + 8]  ; tag
-    cmp edx, TAG_PTR
-    jne .ag_type_error
-    mov rdi, [rbx + rdi]      ; payload
+    shl rdi, 3
+    mov rdi, [rbx + rdi]      ; coro Value
+    V_TEST_PTR rdi, rdx
+    ja .ag_type_error
     call task_new
     push rax
 

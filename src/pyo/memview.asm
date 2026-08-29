@@ -33,8 +33,8 @@ DEF_FUNC memoryview_type_call, MV_FRAME
     jne .mv_error
     mov rdi, [rsi]                     ; arg0 payload
     ; Must be a bytes-like object (reject all non-pointer tags)
-    cmp qword [rsi + 8], TAG_PTR
-    jne .mv_error
+    V_TEST_PTR_M [rsi], r11      ; args[0] a pointer?
+    ja .mv_error
     mov rax, [rdi + PyObject.ob_type]
     lea rcx, [rel bytes_type]
     cmp rax, rcx

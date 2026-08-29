@@ -244,19 +244,18 @@ DEF_FUNC_BARE op_binary_subscr
     test rcx, rcx
     jz .subscr_error
 
-    ; Build fat args: [cls, key] — 2×16 = 32 bytes
-    sub rsp, 32
-    mov rax, [rsp + 32 + BSUB_OBJ]  ; obj (type/cls)
-    mov [rsp], rax                    ; args[0] payload = cls
-    mov qword [rsp + 8], TAG_PTR     ; args[0] tag (type is always heap)
-    mov rax, [rsp + 32 + BSUB_KEY]  ; key
-    mov [rsp + 16], rax              ; args[1] payload = key
-    mov rax, [rsp + 32 + BSUB_KTAG] ; key tag
-    mov [rsp + 24], rax              ; args[1] tag
+    ; Build the args array: [cls, key]
+    sub rsp, 16
+    mov rax, [rsp + 16 + BSUB_OBJ]  ; obj (type/cls) — always a pointer
+    mov [rsp], rax                   ; args[0] = cls
+    mov rax, [rsp + 16 + BSUB_KEY]  ; key
+    mov r8, [rsp + 16 + BSUB_KTAG]  ; key tag
+    V_PACK rax, r8
+    mov [rsp + 8], rax               ; args[1] = key
     mov rsi, rsp                     ; args ptr
     mov edx, 2                       ; nargs = 2
     call rcx
-    add rsp, 32                      ; pop fat args
+    add rsp, 16                      ; pop args
     jmp .subscr_done
 
 .subscr_error:
@@ -376,24 +375,23 @@ DEF_FUNC_BARE op_store_subscr
     test rax, rax
     jz .store_type_error
 
-    ; Build fat args array: [self, key, value] — 3×16 = 48 bytes
-    sub rsp, 48
-    mov r8, [rsp + 48 + SSUB_OBJ]   ; self payload
+    ; Build the args array: [self, key, value]
+    sub rsp, 32               ; three Values, rsp stays aligned
+    mov r8, [rsp + 32 + SSUB_OBJ]   ; self (a heap instance, so already a Value)
     mov [rsp], r8
-    mov qword [rsp + 8], TAG_PTR    ; self tag (heap instance)
-    mov r8, [rsp + 48 + SSUB_KEY]   ; key payload
+    mov r8, [rsp + 32 + SSUB_KEY]   ; key payload
+    mov r9, [rsp + 32 + SSUB_KTAG]
+    V_PACK r8, r9
+    mov [rsp + 8], r8
+    mov r8, [rsp + 32 + SSUB_VAL]   ; value payload
+    mov r9, [rsp + 32 + SSUB_VTAG]
+    V_PACK r8, r9
     mov [rsp + 16], r8
-    mov r8, [rsp + 48 + SSUB_KTAG]  ; key tag
-    mov [rsp + 24], r8
-    mov r8, [rsp + 48 + SSUB_VAL]   ; value payload
-    mov [rsp + 32], r8
-    mov r8, [rsp + 48 + SSUB_VTAG]  ; value tag
-    mov [rsp + 40], r8
     mov rdi, rcx              ; callable
     mov rsi, rsp              ; args ptr
     mov edx, 3                ; nargs
     call rax
-    add rsp, 48               ; pop fat args array
+    add rsp, 32               ; pop the args array
     ; rax = result (discard — __setitem__ returns None)
     jmp .store_done
 

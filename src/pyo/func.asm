@@ -212,12 +212,8 @@ DEF_FUNC func_call
     mov r8, rcx
     mov r11, rcx
     shl r8, 3                      ; localsplus at 8-byte stride
-    mov rax, rcx
-    shl rax, 4                     ; args at 16-byte stride
-    mov rdx, [r14 + rax]           ; arg payload
-    mov r9, [r14 + rax + 8]        ; arg tag
-    INCREF_VAL rdx, r9
-    V_PACK rdx, r9
+    mov rdx, [r14 + r8]            ; the argument Value
+    INCREF_V rdx, r9
     mov [r12 + PyFrame.localsplus + r8], rdx
     inc ecx
     cmp ecx, r10d
@@ -259,12 +255,10 @@ DEF_FUNC func_call
     lea edi, [r8d + esi]
     movsxd rdi, edi
     mov r10, rdi
-    shl r10, 4                      ; source index * 16 (args stride)
-    mov r9, [r14 + r10]             ; value payload from args
-    mov r11, [r14 + r10 + 8]        ; value tag from args
+    shl r10, 3                      ; one Value per argument slot
+    mov r9, [r14 + r10]             ; the argument Value
     mov r10, [rax + PyTupleObject.ob_item]
-    INCREF_VAL r9, r11
-    V_PACK r9, r11
+    INCREF_V r9, r11
     mov [r10 + rsi * 8], r9
     inc esi
     jmp .fill_varargs
@@ -573,11 +567,8 @@ DEF_FUNC func_bind_kwargs
 
     ; Assign: localsplus[j] = args[value_index], INCREF
     mov rax, [rsp+24]
-    shl rax, 4                ; args at 16-byte stride
-    mov rdi, [r13 + rax]      ; arg payload
-    mov rsi, [r13 + rax + 8]  ; arg tag
-    INCREF_VAL rdi, rsi
-    V_PACK rdi, rsi
+    mov rdi, [r13 + rax*8]    ; the argument Value
+    INCREF_V rdi, rsi
     mov [r12 + PyFrame.localsplus + rdx*8], rdi
     jmp .kw_next
 
@@ -592,10 +583,7 @@ DEF_FUNC func_bind_kwargs
     mov rsi, [r14 + PyTupleObject.ob_item]
     mov rsi, [rsi + rax*8]         ; key = kw_name (already a Value)
     mov rax, [rsp+24]
-    shl rax, 4                     ; * 16 (16-byte args stride)
-    mov rcx, [r13 + rax + 8]      ; value tag
-    mov rdx, [r13 + rax]          ; value payload
-    V_PACK rdx, rcx
+    mov rdx, [r13 + rax*8]         ; the value Value
     call dict_set
     jmp .kw_next
 

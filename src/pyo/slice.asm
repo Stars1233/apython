@@ -407,8 +407,8 @@ DEF_FUNC slice_type_call
     ; slice(stop) → slice(None, stop, None)
     lea rdi, [rel none_singleton]  ; start = None
     mov ecx, TAG_PTR               ; start_tag
-    mov rsi, [rbx]                 ; stop payload
-    mov r8d, [rbx + 8]            ; stop_tag
+    mov rsi, [rbx]                 ; args[0] = stop
+    V_UNPACK rsi, r8
     lea rdx, [rel none_singleton]  ; step = None
     mov r9d, TAG_PTR               ; step_tag
     call slice_new
@@ -417,10 +417,10 @@ DEF_FUNC slice_type_call
 
 .stc_two:
     ; slice(start, stop) → slice(start, stop, None)
-    mov rdi, [rbx]             ; start payload
-    mov ecx, [rbx + 8]        ; start_tag
-    mov rsi, [rbx + 16]       ; stop payload
-    mov r8d, [rbx + 24]       ; stop_tag
+    mov rdi, [rbx]             ; args[0] = start
+    V_UNPACK rdi, rcx
+    mov rsi, [rbx + 8]         ; args[1] = stop
+    V_UNPACK rsi, r8
     lea rdx, [rel none_singleton]  ; step = None
     mov r9d, TAG_PTR           ; step_tag
     call slice_new
@@ -429,12 +429,12 @@ DEF_FUNC slice_type_call
 
 .stc_three:
     ; slice(start, stop, step)
-    mov rdi, [rbx]             ; start payload
-    mov ecx, [rbx + 8]        ; start_tag
-    mov rsi, [rbx + 16]       ; stop payload
-    mov r8d, [rbx + 24]       ; stop_tag
-    mov rdx, [rbx + 32]       ; step payload
-    mov r9d, [rbx + 40]       ; step_tag
+    mov rdi, [rbx]             ; args[0] = start
+    V_UNPACK rdi, rcx
+    mov rsi, [rbx + 8]         ; args[1] = stop
+    V_UNPACK rsi, r8
+    mov rdx, [rbx + 16]       ; step payload
+    V_UNPACK rdx, r9       ; args[2]
     call slice_new
     mov edx, TAG_PTR
     jmp .stc_done

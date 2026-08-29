@@ -155,7 +155,7 @@ DEF_FUNC eg_type_call, EGC_FRAME
 
     ; args[0] = msg (must be str), args[1] = excs (list or tuple)
     mov rbx, [rsi]          ; msg
-    mov r12, [rsi + 16]     ; excs
+    mov r12, [rsi + 8]     ; excs
 
     ; Check if excs is a tuple already
     mov rax, [r12 + PyObject.ob_type]

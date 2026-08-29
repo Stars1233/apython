@@ -239,31 +239,13 @@ DEF_FUNC op_call, CL_FRAME
     jmp .call_with_args
 
 .call_with_args:
-    ; Build temporary fat args array on machine stack from payload+tag stacks
+    ; The arguments are already a contiguous Value array on the value stack,
+    ; so tp_call gets a pointer straight into it — no copy.
     mov rcx, [rbp - CL_TOTAL]              ; total nargs
-    mov [rbp - CL_SAVED_RSP], rsp
-    test rcx, rcx
-    jz .args_ready
-    mov rax, rcx
-    shl rax, 4                             ; total_nargs * 16
-    sub rsp, rax
-    mov [rbp - CL_SAVED_RSP], rsp
-    mov r8, rsp                            ; dst ptr (fat args)
-    ; Pre-compute the source base pointer (deepest arg = total_nargs below TOS)
     mov rax, rcx
     neg rax
-    lea r9, [r13 + rax*8]                  ; deepest arg
-.copy_loop:
-    ; tp_call still takes a 16-byte-stride (payload, tag) array, so unpack
-    ; each Value on the way in.  P5b removes this copy entirely.
-    mov rax, [r9]
-    V_UNPACK rax, rdx
-    mov [r8], rax
-    mov [r8 + 8], rdx
-    add r9, 8
-    add r8, 16
-    dec ecx
-    jnz .copy_loop
+    lea rax, [r13 + rax*8]                 ; deepest arg = args base
+    mov [rbp - CL_SAVED_RSP], rax
 .args_ready:
     mov rdi, [rbp - CL_CALLABLE]           ; callable
     mov rsi, [rbp - CL_SAVED_RSP]          ; args_ptr
@@ -272,11 +254,6 @@ DEF_FUNC op_call, CL_FRAME
     call rax
     mov [rbp - CL_RETVAL], rax             ; save return value
     mov [rbp - CL_RETTAG], rdx             ; save return tag
-    mov rcx, [rbp - CL_TOTAL]
-    test rcx, rcx
-    jz .cleanup
-    shl rcx, 4
-    add rsp, rcx
     jmp .cleanup
 
 .cleanup:
@@ -502,49 +479,20 @@ DEF_FUNC op_call_function_ex
     jnz .cfex_merge_kwargs
 
 .cfex_empty_kwargs:
-    ; No kwargs (or empty kwargs dict) — simple path: call with positional args only
+    ; No kwargs (or empty kwargs dict) — simple path: call with positional args
+    ; only.  A list's and a tuple's ob_item are both already a contiguous
+    ; Value array, which is exactly what tp_call wants, so pass it straight in.
     mov rsi, [rbp - CFX_ARGS]                  ; args sequence
     mov rcx, [rsi + PyObject.ob_type]
     lea rdx, [rel tuple_type]
     cmp rcx, rdx
     je .cfex_tuple_args
-    ; List: extract payload+tag to temp fat array
-    mov rcx, [rsi + PyListObject.ob_size]
     mov rsi, [rsi + PyListObject.ob_item]
-    jmp .cfex_extract_fat
+    jmp .cfex_args_ready
 
 .cfex_tuple_args:
-    ; Tuple: extract payload+tag to temp fat array
-    mov rcx, [rsi + PyTupleObject.ob_size]
     mov rsi, [rsi + PyTupleObject.ob_item]
 
-.cfex_extract_fat:
-    ; rsi = payloads ptr, rbx = tags ptr, rcx = count
-    push rsi                       ; save items ptr
-    push rcx                       ; save count
-    mov rdi, rcx
-    shl rdi, 4                     ; count * 16
-    add rdi, 16                    ; alloc size (16B per arg + pad)
-    call ap_malloc
-    mov [rbp - CFX_TEMP], rax      ; save temp buffer
-    mov [rel cfex_temp_pending], rax  ; register for exception cleanup
-    pop rcx                        ; restore count
-    pop rsi                        ; restore items ptr
-    xor edx, edx
-.cfex_extract_loop:
-    cmp rdx, rcx
-    jge .cfex_extract_done
-    mov r8, [rsi + rdx * 8]        ; payload
-    V_UNPACK r8, r9
-    mov rdi, [rbp - CFX_TEMP]
-    mov r10, rdx
-    shl r10, 4                     ; dest offset * 16
-    mov [rdi + r10], r8            ; store payload at 16B stride
-    mov [rdi + r10 + 8], r9       ; store tag
-    inc rdx
-    jmp .cfex_extract_loop
-.cfex_extract_done:
-    mov rsi, [rbp - CFX_TEMP]      ; use temp buffer as args
 .cfex_args_ready:
     ; Clear cfex_temp_pending BEFORE the call, so exception unwind
     ; won't free it (we free it ourselves in the normal path below).
@@ -582,13 +530,13 @@ DEF_FUNC op_call_function_ex
     mov rcx, [rax + PyVarObject.ob_size]
     mov [rbp - CFX_NPOS], rcx
 
-    ; Allocate merged args buffer: (n_pos + n_kw) * 16
+    ; Allocate merged args buffer: (n_pos + n_kw) Values
     mov rdi, [rbp - CFX_NPOS]
     add rdi, [rbp - CFX_NKW]
-    shl rdi, 4                    ; * 16 bytes per fat arg
+    shl rdi, 3
     test rdi, rdi
     jnz .cfex_alloc_merged
-    mov rdi, 16                   ; minimum 16 bytes
+    mov rdi, 8                    ; minimum one slot
 .cfex_alloc_merged:
     call ap_malloc
     mov [rbp - CFX_MERGED], rax
@@ -611,12 +559,8 @@ DEF_FUNC op_call_function_ex
     jz .cfex_pos_copied
     xor edx, edx
 .cfex_copy_pos_loop:
-    mov r8, [rsi + rdx * 8]       ; payload
-    V_UNPACK r8, r9
-    mov r10, rdx
-    shl r10, 4                    ; *16 for merged buffer
-    mov [rdi + r10], r8           ; store payload at 16B stride
-    mov [rdi + r10 + 8], r9      ; store tag
+    mov r8, [rsi + rdx * 8]       ; the argument Value
+    mov [rdi + rdx * 8], r8
     inc rdx
     cmp rdx, rcx
     jb .cfex_copy_pos_loop
@@ -647,25 +591,14 @@ DEF_FUNC op_call_function_ex
     mov rdi, [rax + DictEntry.value]
 
     ; Store value in merged buffer at position [n_pos + kw_idx]
-    ; Also read value_tag from dict entry for fat arg
     push rcx
     push rdx
     mov rcx, [rbp - CFX_NPOS]
     add rcx, rdx                 ; merged index = n_pos + kw_idx
-    shl rcx, 4                   ; * 16 for fat args
     mov rax, [rbp - CFX_MERGED]
-    mov [rax + rcx], rdi         ; merged[n_pos + kw_idx].payload = value
-    ; Read value_tag — rax from earlier imul still points to entry (but was clobbered)
-    ; Recalculate entry pointer
-    mov r8, [rsp + 8]           ; restore dict scan index (pushed rcx)
-    imul r8, r8, DictEntry_size
-    add r8, rbx                  ; r8 = entry ptr
-    mov r9, [r8 + DictEntry.value]
-    V_UNPACK r9, r10
-    mov [rax + rcx], r9         ; merged[...].payload
-    mov [rax + rcx + 8], r10    ; merged[...].tag
+    mov [rax + rcx * 8], rdi     ; merged[n_pos + kw_idx] = the value Value
 
-    ; Store key in kw_names tuple at kw_idx (fat: *16 + TAG_PTR)
+    ; Store key in kw_names tuple at kw_idx
     mov rax, [rbp - CFX_KWNAMES]
     mov r8, [rax + PyTupleObject.ob_item]       ; payloads
     mov [r8 + rdx * 8], rsi
@@ -935,7 +868,7 @@ DEF_FUNC op_with_except_start, WES_FRAME
     ; Build args array: [exc_type, exc_val, exc_tb]
     ; method_call will prepend self automatically
     mov rcx, [rbp - WES_VAL]               ; val
-    sub rsp, 48                      ; 3 fat args (16 bytes each)
+    sub rsp, 32                      ; 3 Values, rsp stays aligned
     ; Get type of exception
     test rcx, rcx
     jz .wes_none_exc
@@ -943,28 +876,23 @@ DEF_FUNC op_with_except_start, WES_FRAME
     ja .wes_none_exc
     ; Exception case
     mov rdx, [rcx + PyObject.ob_type]
-    mov [rsp], rdx                   ; exc_type payload
-    mov qword [rsp + 8], TAG_PTR     ; exc_type tag
-    mov [rsp + 16], rcx              ; exc_val payload
-    mov qword [rsp + 24], TAG_PTR    ; exc_val tag
+    mov [rsp], rdx                   ; exc_type
+    mov [rsp + 8], rcx               ; exc_val
     jmp .wes_set_tb
 .wes_none_exc:
     lea rdx, [rel none_singleton]
     mov [rsp], rdx                   ; exc_type = None
-    mov qword [rsp + 8], TAG_PTR     ; exc_type tag
-    mov [rsp + 16], rdx              ; exc_val = None
-    mov qword [rsp + 24], TAG_PTR    ; exc_val tag
+    mov [rsp + 8], rdx               ; exc_val = None
 .wes_set_tb:
     lea rdx, [rel none_singleton]
-    mov [rsp + 32], rdx              ; exc_tb = None
-    mov qword [rsp + 40], TAG_PTR    ; exc_tb tag
+    mov [rsp + 16], rdx              ; exc_tb = None
 
     ; Call bound_exit(exc_type, exc_val, exc_tb)
     mov rdi, [rbp - WES_FUNC]                 ; callable = bound method
     mov rsi, rsp                     ; args ptr
     mov rdx, 3                       ; nargs = 3 (method_call adds self)
     call rax
-    add rsp, 48
+    add rsp, 32
     mov [rbp - WES_RESULT], rax                ; save result
     mov [rbp - WES_RETTAG], rdx                ; save result tag
 

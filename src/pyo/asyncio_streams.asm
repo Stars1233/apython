@@ -129,8 +129,8 @@ DEF_FUNC stream_reader_read, SR_FRAME
 
 .srr_got_n:
     ; args[0] = n
-    mov rax, [rdi]             ; payload
-    mov edx, [rdi + 8]        ; tag
+    mov rax, [rdi]             ; args[0]
+    V_UNPACK rax, rdx
     cmp edx, TAG_SMALLINT
     jne .srr_type_error
     mov ebx, eax               ; nbytes
@@ -312,8 +312,8 @@ DEF_FUNC stream_reader_read_impl
     cmp rsi, 2
     jb .srri_create
     ; args[1] = n
-    mov rax, [rdi + 16]       ; payload
-    mov edx, [rdi + 24]       ; tag
+    mov rax, [rdi + 8]       ; payload
+    V_UNPACK rax, rdx       ; args[1]
     cmp edx, TAG_SMALLINT
     jne .srri_create
     mov r12d, eax
@@ -572,15 +572,15 @@ DEF_FUNC stream_writer_write_impl
     jb .swwi_error
 
     ; args[1] = data (string)
-    mov rax, [rdi + 16]       ; data payload
-    mov rdx, [rdi + 24]       ; data tag
+    mov rax, [rdi + 8]       ; data payload
+    V_UNPACK rax, rdx       ; args[1]
 
     cmp edx, TAG_PTR
     jne .swwi_type_error
 
     ; Heap string: get data ptr and length
     mov r12, rax               ; string object
-    mov r13, [rax + 16]       ; str.ob_size (PyStrObject.ob_size = +16)
+    mov r13, [rax + PyStrObject.ob_size]
     lea rdi, [rax + 32]       ; str.data (PyStrObject.data = +32)
 
     ; .swwi_do_write:
@@ -847,8 +847,8 @@ DEF_FUNC asyncio_open_connection_func, OC_FRAME
     jne .oc_error
 
     ; args[0] = host (string), args[1] = port (int)
-    mov rax, [rdi + 16]       ; port payload
-    mov edx, [rdi + 24]       ; port tag
+    mov rax, [rdi + 8]       ; port payload
+    V_UNPACK rax, rdx       ; args[1]
     cmp edx, TAG_SMALLINT
     jne .oc_port_error
     mov r12d, eax              ; r12d = port number
@@ -937,8 +937,8 @@ DEF_FUNC asyncio_start_server_func, SS_FRAME
     jne .ss_error
 
     ; args[0] = callback, args[1] = host, args[2] = port
-    mov rax, [rdi + 32]       ; port payload
-    mov edx, [rdi + 40]       ; port tag
+    mov rax, [rdi + 16]       ; port payload
+    V_UNPACK rax, rdx       ; args[2]
     cmp edx, TAG_SMALLINT
     jne .ss_port_error
     mov r12d, eax              ; r12d = port
@@ -1050,7 +1050,7 @@ DEF_FUNC_LOCAL _stream_strcmp
 
     ; Get string data and length from Python str object
     ; PyStrObject: ob_size at +16, data at +32
-    mov rdi, [r12 + 16]       ; length (PyStrObject.ob_size)
+    mov rdi, [r12 + PyStrObject.ob_size]
     lea rsi, [r12 + 32]       ; data (PyStrObject.data)
 
     ; Compare byte by byte
