@@ -601,6 +601,7 @@ DEF_FUNC sre_pattern_findall_method, FA_FRAME
     ; edx already set
     push rax
     push rdx
+    V_PACK rsi, rdx         ; list_append takes a Value
     call list_append
     pop rdx
     pop rax
@@ -626,6 +627,7 @@ DEF_FUNC sre_pattern_findall_method, FA_FRAME
     ; edx already set
     push rax
     push rdx
+    V_PACK rsi, rdx         ; list_append takes a Value
     call list_append
     pop rdx
     pop rax
@@ -690,7 +692,6 @@ DEF_FUNC sre_pattern_findall_method, FA_FRAME
     ; Append tuple to list
     mov rdi, r14
     mov rsi, rbx
-    mov edx, TAG_PTR
     call list_append
     mov rdi, rbx
     call obj_decref
@@ -1404,6 +1405,7 @@ DEF_FUNC sre_pattern_split_method, SP_FRAME
     ; edx already set
     push rax
     push rdx
+    V_PACK rsi, rdx         ; list_append takes a Value
     call list_append
     pop rdx
     pop rax
@@ -1443,6 +1445,7 @@ DEF_FUNC sre_pattern_split_method, SP_FRAME
     ; edx already set
     push rax
     push rdx
+    V_PACK rsi, rdx         ; list_append takes a Value
     call list_append
     pop rdx
     pop rax
@@ -1488,6 +1491,7 @@ DEF_FUNC sre_pattern_split_method, SP_FRAME
     ; edx already set
     push rax
     push rdx
+    V_PACK rsi, rdx         ; list_append takes a Value
     call list_append
     pop rdx
     pop rax

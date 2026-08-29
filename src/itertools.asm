@@ -1590,6 +1590,7 @@ DEF_FUNC builtin_sorted, SO_FRAME
     push rax
     mov rdi, r12
     mov rsi, rax
+    V_PACK rsi, rdx         ; list_append takes a Value
     call list_append
     pop rdi
     pop rsi

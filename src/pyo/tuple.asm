@@ -1029,6 +1029,7 @@ DEF_FUNC tuple_type_call, TTC_FRAME
     mov rsi, rax
     ; edx = tag
     extern list_append
+    V_PACK rsi, rdx         ; list_append takes a Value
     call list_append
     pop rsi                 ; item tag
     pop rdi                 ; item payload

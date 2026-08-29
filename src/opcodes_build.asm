@@ -501,7 +501,6 @@ DEF_FUNC op_build_list, 16
     mov rax, rdx
     shl rax, 3                ; index * 8
     mov rsi, [r13 + rax]      ; item (ownership transfers, no extra INCREF)
-    V_UNPACK rsi, rdx         ; list_append still takes (payload, tag)
     call list_append
     pop rdx
     inc rdx
@@ -1040,6 +1039,7 @@ DEF_FUNC_BARE op_list_append
     push r8                    ; save value tag (deeper)
     push rsi                   ; save value payload
     mov rdx, r8                ; item tag for list_append
+    V_PACK rsi, rdx         ; list_append takes a Value
     call list_append
     ; list_append does INCREF, so DECREF to compensate
     pop rdi                    ; value payload
@@ -1097,7 +1097,6 @@ DEF_FUNC op_list_extend, 32
     mov rax, [rbp-16]         ; iterable (tuple)
     mov r9, [rax + PyTupleObject.ob_item]
     mov rsi, [r9 + r8 * 8]    ; payload
-    V_UNPACK rsi, rdx
     push r8
     call list_append
     pop r8
@@ -1121,7 +1120,6 @@ DEF_FUNC op_list_extend, 32
     mov rdx, [rbp-32]         ; payloads ptr
     mov rax, [rbp-16]         ; iterable list
     mov rsi, [rdx + r8 * 8]   ; item payload
-    V_UNPACK rsi, rdx
     push r8
     call list_append
     pop r8
@@ -1159,6 +1157,7 @@ DEF_FUNC op_list_extend, 32
     mov rdi, [rbp-8]          ; list
     mov rsi, rax
     ; edx = tag (already set)
+    V_PACK rsi, rdx         ; list_append takes a Value
     call list_append
     ; DECREF item (list_append INCREFs)
     pop rsi                    ; tag
@@ -2174,6 +2173,7 @@ DEF_FUNC op_unpack_ex
     mov rdi, [rsp + 16]        ; rest list (2 pushes deep)
     push rsi
     ; edx = item tag from .ue_getitem (already set)
+    V_PACK rsi, rdx         ; list_append takes a Value
     call list_append           ; list_append does INCREF
     pop rsi                    ; discard
     pop rax
@@ -2255,6 +2255,7 @@ DEF_FUNC op_unpack_ex
     push rdx
     mov rdi, [rsp + 16]       ; temp_list (2 pushes deeper)
     mov rsi, rax
+    V_PACK rsi, rdx         ; list_append takes a Value
     call list_append
     pop rsi                    ; tag
     pop rdi                    ; payload

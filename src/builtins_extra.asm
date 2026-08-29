@@ -2863,7 +2863,6 @@ DEF_FUNC builtin_dir, DIR_FRAME
     push rax
     mov rdi, rbx
     mov rsi, rax
-    mov edx, TAG_PTR
     call list_append
     pop rdi
     call obj_decref

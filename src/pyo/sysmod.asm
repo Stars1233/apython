@@ -87,7 +87,6 @@ DEF_FUNC sys_module_init, 32
     push rax
     mov rdi, r12
     mov rsi, rax
-    mov edx, TAG_PTR
     call list_append
     pop rdi
     call obj_decref
@@ -126,7 +125,6 @@ DEF_FUNC sys_module_init, 32
     push rax
     mov rdi, r13
     mov rsi, rax
-    mov edx, TAG_PTR
     call list_append
     pop rdi
     call obj_decref

@@ -1006,7 +1006,6 @@ DEF_FUNC str_method_split
     mov rdi, r13
     mov rsi, rax
     push rax
-    mov edx, TAG_PTR
     call list_append
     pop rdi
     call obj_decref         ; list_append did INCREF
@@ -1067,7 +1066,6 @@ DEF_FUNC str_method_split
     mov rdi, r13
     mov rsi, rax
     push rax
-    mov edx, TAG_PTR
     call list_append
     pop rdi
     call obj_decref
@@ -1086,7 +1084,6 @@ DEF_FUNC str_method_split
     mov rdi, r13
     mov rsi, rax
     push rax
-    mov edx, TAG_PTR
     call list_append
     pop rdi
     call obj_decref
@@ -3315,6 +3312,7 @@ DEF_FUNC str_method_splitlines
     push rax
     mov rdi, r13
     mov rsi, rax
+    V_PACK rsi, rdx         ; list_append takes a Value
     call list_append
     pop rdi
     call obj_decref
@@ -3344,6 +3342,7 @@ DEF_FUNC str_method_splitlines
     push rax
     mov rdi, r13
     mov rsi, rax
+    V_PACK rsi, rdx         ; list_append takes a Value
     call list_append
     pop rdi
     call obj_decref
@@ -3365,6 +3364,7 @@ DEF_FUNC str_method_splitlines
     push rax
     mov rdi, r13
     mov rsi, rax
+    V_PACK rsi, rdx         ; list_append takes a Value
     call list_append
     pop rdi
     call obj_decref
@@ -3450,6 +3450,7 @@ DEF_FUNC str_method_translate
     push rax
     mov rdi, r13
     mov rsi, rax
+    V_PACK rsi, rdx         ; list_append takes a Value
     call list_append
     pop rdi
     call obj_decref
@@ -3470,6 +3471,7 @@ DEF_FUNC str_method_translate
     push rax
     mov rdi, r13
     mov rsi, rax
+    V_PACK rsi, rdx         ; list_append takes a Value
     call list_append
     pop rdi
     call obj_decref
@@ -3494,6 +3496,7 @@ DEF_FUNC str_method_translate
     push rax
     mov rdi, r13
     mov rsi, rax
+    V_PACK rsi, rdx         ; list_append takes a Value
     call list_append
     pop rdi
     call obj_decref
@@ -3832,6 +3835,7 @@ DEF_FUNC list_method_append
     mov rsi, [rdi + 16]     ; item payload
     mov rdx, [rdi + 24]     ; item tag (16-byte stride)
     mov rdi, rax
+    V_PACK rsi, rdx         ; list_append takes a Value
     call list_append
 
     lea rax, [rel none_singleton]
@@ -5392,7 +5396,6 @@ DEF_FUNC list_method_copy
     push rcx
     mov rax, [rbx + PyListObject.ob_item]
     mov rsi, [rax + rcx * 8]    ; payload
-    V_UNPACK rsi, rdx
     mov rdi, r13
     call list_append
     pop rcx
@@ -5637,7 +5640,6 @@ DEF_FUNC list_method_extend, LE_FRAME
     push rcx
     mov rax, [r12 + PyListObject.ob_item]
     mov rsi, [rax + rcx * 8]       ; payload
-    V_UNPACK rsi, rdx
     mov rdi, [rbp - LE_SELF]
     call list_append
     pop rcx
@@ -5653,7 +5655,6 @@ DEF_FUNC list_method_extend, LE_FRAME
     push rcx
     mov rax, [r12 + PyTupleObject.ob_item]
     mov rsi, [rax + rcx * 8]      ; payload
-    V_UNPACK rsi, rdx
     mov rdi, [rbp - LE_SELF]
     call list_append
     pop rcx
@@ -5691,6 +5692,7 @@ DEF_FUNC list_method_extend, LE_FRAME
     mov rdi, [rbp - LE_SELF]
     mov rsi, rax
     ; edx = tag (already set)
+    V_PACK rsi, rdx         ; list_append takes a Value
     call list_append
     ; DECREF item (list_append INCREFs internally)
     pop rsi                     ; tag
@@ -8607,7 +8609,6 @@ DEF_FUNC bytes_method_split
     mov rdi, r13
     mov rsi, rax
     push rax
-    mov edx, TAG_PTR
     call list_append
     pop rdi
     call obj_decref
@@ -8673,7 +8674,6 @@ DEF_FUNC bytes_method_split
     mov rdi, r13
     mov rsi, rax
     push rax
-    mov edx, TAG_PTR
     call list_append
     pop rdi
     call obj_decref
@@ -8699,7 +8699,6 @@ DEF_FUNC bytes_method_split
     mov rdi, r13
     mov rsi, rax
     push rax
-    mov edx, TAG_PTR
     call list_append
     pop rdi
     call obj_decref

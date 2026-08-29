@@ -507,7 +507,6 @@ DEF_FUNC asyncio_gather_func
     push rax                   ; save task for DECREF
     mov rdi, r13
     mov rsi, rax
-    mov edx, TAG_PTR
     call list_append
 
     ; DECREF task (list_append INCREFs, release our initial ref)

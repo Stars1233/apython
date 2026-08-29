@@ -449,7 +449,6 @@ DEF_FUNC eg_split, EGS_FRAME
     mov r8, [rax + PyTupleObject.ob_item]
     mov rsi, [r8 + rcx*8]
     mov rdi, [rbp - EGS_MLIST]
-    mov edx, TAG_PTR
     call list_append
     jmp .split_next
 
@@ -461,7 +460,6 @@ DEF_FUNC eg_split, EGS_FRAME
     mov r8, [rax + PyTupleObject.ob_item]
     mov rsi, [r8 + rcx*8]
     mov rdi, [rbp - EGS_RLIST]
-    mov edx, TAG_PTR
     call list_append
 
 .split_next:
@@ -702,7 +700,6 @@ DEF_FUNC prep_reraise_star, PRS_FRAME
     mov r9, [rax + PyTupleObject.ob_item]       ; payloads
     mov rsi, [r9 + rcx*8]
     mov rdi, [rbp - PRS_FLAT]
-    mov edx, TAG_PTR
     call list_append
     pop rax
     pop r8
@@ -722,7 +719,6 @@ DEF_FUNC prep_reraise_star, PRS_FRAME
     mov rsi, [rax + PyListObject.ob_item]       ; payloads
     mov rsi, [rsi + rdx*8]                       ; list item payload
     mov rdi, [rbp - PRS_FLAT]
-    mov edx, TAG_PTR
     call list_append
     pop rcx
     pop rdx

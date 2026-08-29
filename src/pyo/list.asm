@@ -152,8 +152,8 @@ DEF_FUNC list_copy
 END_FUNC list_copy
 
 ;; ============================================================================
-;; list_append(PyListObject *list, PyObject *item, int item_tag)
-;; Append item, grow if needed. INCREF item. rdx = item_tag.
+;; list_append(rdi=list, rsi=item Value)
+;; Append item, growing if needed.  INCREFs the item.
 ;; ============================================================================
 DEF_FUNC list_append
     push rbx
@@ -164,8 +164,7 @@ DEF_FUNC list_append
     ; Check if list is being sorted (ob_item == NULL)
     cmp qword [rbx + PyListObject.ob_item], 0
     je list_sorting_error
-    mov r12, rsi               ; item payload
-    mov r13, rdx               ; item tag
+    mov r12, rsi               ; item Value
 
     ; Check if need to grow
     mov rax, [rbx + PyListObject.ob_size]
@@ -188,8 +187,7 @@ DEF_FUNC list_append
     ; Append the item
     mov rax, [rbx + PyListObject.ob_size]
     mov rcx, [rbx + PyListObject.ob_item]
-    INCREF_VAL r12, r13
-    V_PACK r12, r13
+    INCREF_V r12, r13
     mov [rcx + rax * 8], r12
 
     ; Increment size
@@ -582,6 +580,7 @@ DEF_FUNC list_ass_subscript, LAS_FRAME
     push rdx
     mov rdi, [rsp + 16]       ; temp list (2 pushes deeper)
     mov rsi, rax
+    V_PACK rsi, rdx         ; list_append takes a Value
     call list_append
     pop rsi
     pop rdi
@@ -1635,7 +1634,6 @@ DEF_FUNC list_inplace_concat, LIC_FRAME
     push rcx
     mov rax, [r12 + PyListObject.ob_item]
     mov rsi, [rax + rcx * 8]
-    V_UNPACK rsi, rdx
     mov rdi, rbx
     call list_append
     pop rcx
@@ -1651,7 +1649,6 @@ DEF_FUNC list_inplace_concat, LIC_FRAME
     push rcx
     mov rax, [r12 + PyTupleObject.ob_item]
     mov rsi, [rax + rcx * 8]
-    V_UNPACK rsi, rdx
     mov rdi, rbx
     call list_append
     pop rcx
@@ -1685,6 +1682,7 @@ DEF_FUNC list_inplace_concat, LIC_FRAME
     push rdx
     mov rdi, rbx
     mov rsi, rax
+    V_PACK rsi, rdx         ; list_append takes a Value
     call list_append
     pop rsi
     pop rdi
@@ -1900,6 +1898,7 @@ DEF_FUNC list_type_call, LTC_FRAME
     mov rdi, rbx
     mov rsi, rax
     ; edx = tag from tp_iternext (already set)
+    V_PACK rsi, rdx         ; list_append takes a Value
     call list_append
     ; DECREF item (list_append INCREFs internally, tag-aware)
     pop rsi                 ; item tag

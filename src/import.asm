@@ -110,7 +110,6 @@ DEF_FUNC import_init
     push rax
     mov rdi, [rel sys_path_list]
     mov rsi, rax
-    mov edx, TAG_PTR
     call list_append
     pop rdi
     call obj_decref
@@ -121,7 +120,6 @@ DEF_FUNC import_init
     push rax
     mov rdi, [rel sys_path_list]
     mov rsi, rax
-    mov edx, TAG_PTR
     call list_append
     pop rdi
     call obj_decref
@@ -204,7 +202,6 @@ DEF_FUNC import_init
     push rax
     mov rdi, [rel sys_path_list]
     mov rsi, rax
-    mov edx, TAG_PTR
     call list_append
     pop rdi
     call obj_decref
@@ -1231,7 +1228,6 @@ DEF_FUNC import_load_module, IF_FRAME
     push r8
     mov rdi, r8
     mov rsi, [rsp + 8]         ; pkg dir str
-    mov edx, TAG_PTR
     call list_append
     ; DECREF pkg dir str
     mov rdi, [rsp + 8]
