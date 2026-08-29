@@ -287,8 +287,8 @@ TAG_IO_WAIT  equ 8           ; payload = fd | (direction << 32) — async I/O se
     add r13, 8
 %endmacro
 
-; Push an empty slot.
-%macro VPUSH_NULL128 0
+; Push a NULL Value (the empty callable slot CALL expects).
+%macro VPUSH_NULL 0
     mov qword [r13], 0
     add r13, 8
 %endmacro

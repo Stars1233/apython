@@ -25,7 +25,6 @@ extern obj_decref
 extern str_from_cstr_heap
 extern str_type
 extern str_repr
-extern fat_to_obj
 
 ; Recursion detection for container repr
 ; Simple fixed-size stack of object pointers currently being repr'd.
@@ -270,17 +269,10 @@ DEF_FUNC tuple_repr, 24
 
     ; Get element at index r12
     mov rax, [rbx + PyTupleObject.ob_item]
-    mov rdi, [rax + r12 * 8]       ; payload
-    V_UNPACK rdi, rsi
-    ; TAG_FLOAT shortcut: call float_repr directly (no heap float object)
-    cmp esi, TAG_FLOAT
-    je .tr_float_elem
-    call fat_to_obj                ; rax = PyObject* (owned ref)
-    push rax                       ; save for DECREF later
-    mov rdi, rax
-    call obj_repr
+    mov rdi, [rax + r12 * 8]       ; the element Value
+    call obj_repr                  ; obj_repr decodes it itself
     test rax, rax
-    jz .tr_decref_elem
+    jz .tr_next
 
     push rax
     mov rcx, [rax + PyStrObject.ob_size]
@@ -296,32 +288,6 @@ DEF_FUNC tuple_repr, 24
 
     pop rdi
     call obj_decref                ; DECREF repr string
-    jmp .tr_decref_elem
-
-.tr_float_elem:
-    ; rdi = raw double bits; call float_repr directly
-    extern float_repr
-    call float_repr                ; rax = payload, edx = tag
-    test edx, edx
-    jz .tr_next                    ; skip on error
-    push rax
-    mov rcx, [rax + PyStrObject.ob_size]
-    BUF_ENSURE rcx
-    mov rsi, [rsp]
-    lea rsi, [rsi + PyStrObject.data]
-    mov rdi, [rbp-8]
-    add rdi, [rbp-16]
-    mov rcx, [rsp]
-    mov rcx, [rcx + PyStrObject.ob_size]
-    add [rbp-16], rcx
-    rep movsb
-    pop rdi
-    call obj_decref                ; DECREF repr string
-    jmp .tr_next
-
-.tr_decref_elem:
-    pop rdi                        ; fat_to_obj result
-    call obj_decref                ; DECREF fat_to_obj result
 
 .tr_next:
     inc r12

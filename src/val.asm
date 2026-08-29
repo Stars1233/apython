@@ -250,34 +250,3 @@ DEF_FUNC val_unpack
     ret
 END_FUNC val_unpack
 
-;; ============================================================================
-;; fat_to_obj(rdi: payload, rsi: tag) -> rax: PyObject* (owned ref)
-;;
-;; Legacy Value64 helper: convert a fat (payload, tag) pair to a heap
-;; PyObject*.  Floats have no heap representation, so TAG_FLOAT returns NULL
-;; and the sole caller (repr.asm) special-cases it.  Removed in P4.
-;; ============================================================================
-DEF_FUNC fat_to_obj
-    cmp esi, TAG_PTR
-    je .ptr
-    cmp esi, TAG_SMALLINT
-    je .smallint
-    ; TAG_FLOAT, TAG_NULL or unknown: return NULL
-    xor eax, eax
-    leave
-    ret
-
-.ptr:
-    ; Heap pointer: INCREF and return
-    mov rax, rdi
-    inc qword [rax + PyObject.ob_refcnt]
-    leave
-    ret
-
-.smallint:
-    ; Create a heap-allocated PyIntObject from raw int64 payload
-    call int_from_i64_gmp      ; rdi already has the int value
-    leave
-    ret
-
-END_FUNC fat_to_obj

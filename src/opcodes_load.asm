@@ -108,7 +108,7 @@ DEF_FUNC_BARE op_load_global
     ; Check bit 0: if set, push NULL first
     test ecx, 1
     jz .no_push_null
-    VPUSH_NULL128
+    VPUSH_NULL
 .no_push_null:
     ; Name index = arg >> 1
     shr ecx, 1
@@ -218,7 +218,7 @@ DEF_FUNC_BARE op_load_global_module
     ; Guards passed — now push NULL if needed
     test ecx, 1
     jz .lgm_no_null
-    VPUSH_NULL128
+    VPUSH_NULL
 .lgm_no_null:
     INCREF_VAL rax, rdx
     VPUSH_VAL rax, rdx
@@ -264,7 +264,7 @@ DEF_FUNC_BARE op_load_global_builtin
     ; Guards passed — now push NULL if needed
     test ecx, 1
     jz .lgb_no_null
-    VPUSH_NULL128
+    VPUSH_NULL
 .lgb_no_null:
     INCREF_VAL rax, rdx
     VPUSH_VAL rax, rdx
@@ -554,7 +554,7 @@ DEF_FUNC op_load_attr, LA_FRAME
 .la_descr_get_flag1:
     ; flag=1: push NULL + result
     xor ecx, ecx
-    VPUSH_NULL128
+    VPUSH_NULL
     VPUSH_VAL rax, rdx
     jmp .la_done
 
@@ -726,7 +726,7 @@ DEF_FUNC op_load_attr, LA_FRAME
     mov rdi, [rbp - LA_OBJ]
     call obj_decref        ; DECREF obj
     xor eax, eax
-    VPUSH_NULL128              ; push NULL
+    VPUSH_NULL              ; push NULL
     mov rax, [rbp - LA_ATTR]
     mov rdx, [rbp - LA_ATTR_TAG]
     VPUSH_VAL rax, rdx         ; push attr
@@ -761,7 +761,7 @@ DEF_FUNC op_load_attr, LA_FRAME
 .la_sm_flag1:
     ; flag=1: push NULL + func (no self binding)
     xor eax, eax
-    VPUSH_NULL128
+    VPUSH_NULL
     mov rax, [rbp - LA_ATTR]
     VPUSH_PTR rax
     jmp .la_done
@@ -793,7 +793,7 @@ DEF_FUNC op_load_attr, LA_FRAME
 .la_prop_flag1:
     ; flag=1: push NULL + result (it's a value, not a method)
     xor ecx, ecx
-    VPUSH_NULL128
+    VPUSH_NULL
     VPUSH_VAL rax, rdx
     jmp .la_done
 
@@ -1087,7 +1087,7 @@ DEF_FUNC op_load_super_attr, LSA_FRAME
     mov rdi, [rbp - LSA_SELF]
     call obj_decref
     xor eax, eax
-    VPUSH_NULL128                  ; push NULL
+    VPUSH_NULL                  ; push NULL
     pop rax
     mov rdx, [rbp - LSA_ATTR_TAG]
     VPUSH_VAL rax, rdx             ; push attr

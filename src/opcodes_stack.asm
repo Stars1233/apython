@@ -37,7 +37,7 @@ END_FUNC op_pop_top
 ;; Used before LOAD_GLOBAL/LOAD_ATTR to mark callable slots.
 ;; ============================================================================
 DEF_FUNC_BARE op_push_null
-    VPUSH_NULL128
+    VPUSH_NULL
     DISPATCH
 END_FUNC op_push_null
 
