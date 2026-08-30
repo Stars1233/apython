@@ -55,15 +55,13 @@ one-line fix.
   was registered against a subclass of ABC rather than against ABC itself.
   Direct registration and real inheritance both work.
 
-- **The source compiler covers expressions only.**  `compiler/` holds a real
-  tokenizer, parser, code generator and assembler, and `eval()` and
-  `compile(..., "eval")` run through them -- so arithmetic, comparisons and
-  chains, boolean short-circuiting, conditionals and names all work.  What is
-  missing is everything above an expression: statements, `def`, `lambda`,
-  calls, strings and containers.  So `exec()` still does not exist, and
-  `collections.namedtuple` still stops at its `eval("lambda ...")`, which
-  blocks 33 of the 196 stdlib modules -- functools, enum, re, inspect, typing,
-  dataclasses, textwrap.  Calls and `lambda` are what unblock it.
+- **The source compiler has no classes, comprehensions or generators yet.**
+  `compiler/` handles expressions, statements, control flow, functions,
+  lambdas and closures, and `eval()`, `exec()` and `compile()` all run through
+  it -- including `collections.namedtuple`'s
+  `eval("lambda _cls, ...: _tuple_new(...)")`, which used to be the wall.
+  What is still missing above that: `class`, `try`/`except`/`finally`, `with`,
+  comprehensions, generators, `async`, f-strings and `match`.
 
 - **No platform module, so `os` cannot import.**  `os.py` looks for `posix`
   and raises "no os specific module found" without it.  That is the single

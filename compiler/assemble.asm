@@ -32,6 +32,7 @@ extern bytes_from_data
 extern code_new
 extern code_spec_clear
 extern comp_error
+extern sym_at
 extern obj_decref
 extern tuple_new
 extern op_meta
@@ -1031,15 +1032,18 @@ DEF_FUNC asm_assemble, AA_FRAME
     jz .oom
     mov [rbp - AA_SPEC + CodeSpec.names], rax
 
-    xor edi, edi                        ; no locals yet: an empty tuple
-    call tuple_new
+    ; co_localsplusnames comes from the scope's settled layout: varnames, then
+    ; the cells needing a new slot, then the free variables last.  Emitting it
+    ; in any other order breaks COPY_FREE_VARS, which finds the free slots by
+    ; counting back from nlocalsplus.
+    mov rdi, rbx
+    mov rsi, r12
+    call asm_localsplus_tuple
     test rax, rax
     jz .oom
     mov [rbp - AA_SPEC + CodeSpec.localsplusnames], rax
-
-    xor edi, edi
-    xor esi, esi
-    call bytes_from_data                ; localspluskinds, matching length zero
+    mov rdi, rax
+    call asm_kinds_bytes
     mov [rbp - AA_SPEC + CodeSpec.localspluskinds], rax
 
     xor edi, edi
@@ -1063,7 +1067,9 @@ DEF_FUNC asm_assemble, AA_FRAME
     mov [rbp - AA_SPEC + CodeSpec.posonlyargcount], eax
     mov eax, [r12 + CompUnit.kwonly]
     mov [rbp - AA_SPEC + CodeSpec.kwonlyargcount], eax
-    mov eax, [r12 + CompUnit.nlocals]
+    mov rdi, rbx
+    mov rsi, r12
+    call asm_nlocals
     mov [rbp - AA_SPEC + CodeSpec.nlocals], eax
     mov eax, [r12 + CompUnit.stacksize]
     mov [rbp - AA_SPEC + CodeSpec.stacksize], eax
@@ -1114,6 +1120,94 @@ DEF_FUNC asm_assemble, AA_FRAME
     leave
     ret
 END_FUNC asm_assemble
+
+
+;; ============================================================================
+;; asm_localsplus_tuple(Comp *c, CompUnit *u) -> rax = tuple, or 0
+;; ============================================================================
+DEF_FUNC asm_localsplus_tuple, 16
+    push rbx
+    push r12
+    mov rbx, rdi
+    mov r12, rsi
+    mov rax, [r12 + CompUnit.comp]
+    test rax, rax
+    jz .empty
+    mov rdi, rax
+    mov esi, [r12 + CompUnit.scope]
+    call sym_at
+    lea rdi, [rax + Scope.localsplus]
+    call asm_tuple_from_values
+    pop r12
+    pop rbx
+    leave
+    ret
+.empty:
+    xor edi, edi
+    call tuple_new
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC asm_localsplus_tuple
+
+;; ============================================================================
+;; asm_nlocals(Comp *c, CompUnit *u) -> eax = len(varnames)
+;; The true count, not nlocalsplus: cells and free variables are not locals.
+;; ============================================================================
+DEF_FUNC asm_nlocals, 8
+    push rbx
+    mov rax, [rsi + CompUnit.comp]
+    test rax, rax
+    jz .zero
+    mov rdi, rax
+    mov esi, [rsi + CompUnit.scope]
+    call sym_at
+    mov eax, [rax + Scope.nlocals]
+    pop rbx
+    leave
+    ret
+.zero:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+END_FUNC asm_nlocals
+
+;; ============================================================================
+;; asm_kinds_bytes(PyTupleObject *localsplusnames) -> rax = bytes, or 0
+;; apython never reads co_localspluskinds, but emitting it correctly costs a
+;; dozen lines and keeps introspection honest if it is ever wired up.
+;; ============================================================================
+DEF_FUNC asm_kinds_bytes, 16
+    push rbx
+    push r12
+    mov rbx, rdi
+    mov r12, [rdi + PyVarObject.ob_size]
+    mov rdi, r12
+    add rdi, 8
+    call ap_malloc
+    mov rbx, rax
+    xor ecx, ecx
+.fill:
+    cmp rcx, r12
+    jae .make
+    mov byte [rbx + rcx], CO_FAST_LOCAL
+    inc rcx
+    jmp .fill
+.make:
+    mov rdi, rbx
+    mov rsi, r12
+    call bytes_from_data
+    push rax
+    mov rdi, rbx
+    call ap_free
+    pop rax
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC asm_kinds_bytes
 
 
 ASM_INIT

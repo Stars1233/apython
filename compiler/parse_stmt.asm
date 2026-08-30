@@ -74,8 +74,11 @@ DEF_FUNC par_module, PM_FRAME
     call par_advance
     jmp .loop
 .stmt:
+    ; par_statement_any, not par_simple_stmts: a compound statement consumes
+    ; its own suite and the DEDENT that ends it, so there is no NEWLINE left
+    ; for the simple-statement path to demand.
     mov rdi, rbx
-    call par_simple_stmts
+    call par_statement_any
     test eax, eax
     jz .fail
     jmp .loop
@@ -1241,6 +1244,8 @@ DEF_FUNC par_statement_any, 8
     je .compound
     cmp eax, TOK_FOR
     je .compound
+    cmp eax, TOK_DEF
+    je .compound
     mov rdi, rbx
     call par_simple_stmts
     pop rbx
@@ -1594,6 +1599,493 @@ DEF_FUNC par_for_target, PFT_FRAME
     ret
 END_FUNC par_for_target
 
+;; ============================================================================
+;; par_params(Comp *c, int close) -> rax = an AST_ARGUMENTS node, 0 on error
+;;
+;; The child list holds the positional parameters followed by the keyword-only
+;; ones -- the order co_varnames needs -- while `*args` and `**kwargs` hang off
+;; .b and .c.  They cannot go in the list: localsplus puts them after the
+;; keyword-only slots, and func_call finds them by arithmetic on co_argcount
+;; and co_kwonlyargcount rather than by searching.
+;;
+;;   .a      an AST_EXTRA node carrying argcount / posonly / kwonly
+;;   .b      the *args parameter, or 0
+;;   .c      the **kwargs parameter, or 0
+;;   .clist  positional parameters, then keyword-only ones
+;; ============================================================================
+PP_COMP   equ 8
+PP_CLOSE  equ 16
+PP_LINE   equ 24
+PP_MARK   equ 32
+PP_NPOS   equ 40
+PP_NKW    equ 48
+PP_POSONLY equ 56
+PP_STAR   equ 64
+PP_VARARG equ 72
+PP_VARKW  equ 80
+PP_NODE   equ 88
+PP_FRAME  equ 88          ; + 1 push = 96
+DEF_FUNC par_params, PP_FRAME
+    push rbx
+    mov rbx, rdi
+    mov [rbp - PP_CLOSE], rsi
+    call par_peek
+    mov ecx, [rax + Token.lineno]
+    mov [rbp - PP_LINE], rcx
+    mov rdi, rbx
+    call ast_mark
+    mov [rbp - PP_MARK], rax
+    mov qword [rbp - PP_NPOS], 0
+    mov qword [rbp - PP_NKW], 0
+    mov qword [rbp - PP_POSONLY], 0
+    mov qword [rbp - PP_STAR], 0        ; have we passed the * marker?
+    mov qword [rbp - PP_VARARG], 0
+    mov qword [rbp - PP_VARKW], 0
+
+.loop:
+    mov rdi, rbx
+    call par_kind
+    cmp rax, [rbp - PP_CLOSE]
+    je .build
+    cmp eax, TOK_ENDMARKER
+    je .build
+
+    cmp eax, TOK_SLASH
+    je .posonly_marker
+    cmp eax, TOK_STAR
+    je .star_marker
+    cmp eax, TOK_DOUBLESTAR
+    je .varkw
+
+    ; An ordinary parameter.
+    mov rdi, rbx
+    mov rsi, 1
+    cmp qword [rbp - PP_CLOSE], TOK_COLON
+    jne .ann_ok1
+    xor esi, esi
+.ann_ok1:
+    call par_param_here
+    test rax, rax
+    jz .fail
+    mov rdi, rbx
+    mov rsi, rax
+    call ast_push
+    cmp qword [rbp - PP_STAR], 0
+    je .count_pos
+    inc qword [rbp - PP_NKW]
+    jmp .comma
+.count_pos:
+    inc qword [rbp - PP_NPOS]
+    jmp .comma
+
+.posonly_marker:
+    ; Everything so far was positional-only.
+    mov rax, [rbp - PP_NPOS]
+    mov [rbp - PP_POSONLY], rax
+    mov rdi, rbx
+    call par_advance
+    jmp .comma
+
+.star_marker:
+    mov rdi, rbx
+    call par_advance
+    mov qword [rbp - PP_STAR], 1
+    ; A bare `*` only separates; `*args` also collects.
+    mov rdi, rbx
+    call par_kind
+    cmp eax, TOK_COMMA
+    je .comma
+    cmp rax, [rbp - PP_CLOSE]
+    je .build
+    mov rdi, rbx
+    mov rsi, 1
+    cmp qword [rbp - PP_CLOSE], TOK_COLON
+    jne .ann_ok2
+    xor esi, esi
+.ann_ok2:
+    call par_param_here
+    test rax, rax
+    jz .fail
+    mov [rbp - PP_VARARG], rax
+    jmp .comma
+
+.varkw:
+    mov rdi, rbx
+    call par_advance
+    mov rdi, rbx
+    mov rsi, 1
+    cmp qword [rbp - PP_CLOSE], TOK_COLON
+    jne .ann_ok3
+    xor esi, esi
+.ann_ok3:
+    call par_param_here
+    test rax, rax
+    jz .fail
+    mov [rbp - PP_VARKW], rax
+    jmp .comma
+
+.comma:
+    mov rdi, rbx
+    call par_kind
+    cmp eax, TOK_COMMA
+    jne .build
+    mov rdi, rbx
+    call par_advance
+    jmp .loop
+
+.build:
+    mov rdi, rbx
+    mov esi, AST_ARGUMENTS
+    mov rdx, [rbp - PP_LINE]
+    mov rcx, [rbp - PP_MARK]
+    call par_finish_list
+    test rax, rax
+    jz .fail
+    mov [rbp - PP_NODE], rax
+
+    ; The counts live on an auxiliary node: five fields are not enough.
+    mov rdi, rbx
+    mov esi, AST_EXTRA
+    xor edx, edx
+    mov rcx, [rbp - PP_LINE]
+    mov r8, [rbp - PP_NPOS]
+    mov r9, [rbp - PP_POSONLY]
+    call ast_make
+    mov rsi, rax
+    push rsi
+    mov rdi, rbx
+    call ast_at
+    pop rsi
+    mov rdx, [rbp - PP_NKW]
+    mov [rax + AstNode.c], edx
+
+    mov rdi, rbx
+    push rsi
+    mov rsi, [rbp - PP_NODE]
+    call ast_at
+    pop rsi
+    mov [rax + AstNode.a], esi
+    mov rdx, [rbp - PP_VARARG]
+    mov [rax + AstNode.b], edx
+    mov rdx, [rbp - PP_VARKW]
+    mov [rax + AstNode.c], edx
+
+    mov rax, [rbp - PP_NODE]
+    pop rbx
+    leave
+    ret
+.fail:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+END_FUNC par_params
+
+;; ============================================================================
+;; par_one_param(Comp *c) -> rax = an AST_ARG node, 0 on error
+;;   .a = the name, .b = its annotation node, .c = its default expression
+;; ============================================================================
+POP_COMP  equ 8
+POP_LINE  equ 16
+POP_NAME  equ 24
+POP_ANN   equ 32
+POP_DEF   equ 40
+POP_NODE  equ 48
+POP_FRAME equ 64          ; + 2 pushes = 80
+DEF_FUNC par_one_param, POP_FRAME
+    push rbx
+    push r12
+    mov rbx, rdi
+    mov r12, rsi                        ; annotations allowed?
+    call par_peek
+    mov ecx, [rax + Token.lineno]
+    mov [rbp - POP_LINE], rcx
+    mov qword [rbp - POP_ANN], 0
+    mov qword [rbp - POP_DEF], 0
+
+    mov rdi, rbx
+    call par_name_obj
+    test rax, rax
+    jz .fail
+    mov [rbp - POP_NAME], rax
+
+    ; A lambda's parameter list is terminated by a colon, so a colon there is
+    ; the end of the list rather than an annotation -- and lambda parameters
+    ; cannot be annotated at all.
+    test r12, r12
+    jz .no_ann
+    mov rdi, rbx
+    call par_kind
+    cmp eax, TOK_COLON
+    jne .no_ann
+    mov rdi, rbx
+    call par_advance
+    mov rdi, rbx
+    mov esi, BP_NONE
+    call par_expr
+    test rax, rax
+    jz .fail
+    mov [rbp - POP_ANN], rax
+.no_ann:
+    mov rdi, rbx
+    call par_kind
+    cmp eax, TOK_EQUAL
+    jne .build
+    mov rdi, rbx
+    call par_advance
+    mov rdi, rbx
+    mov esi, BP_NONE
+    call par_expr
+    test rax, rax
+    jz .fail
+    mov [rbp - POP_DEF], rax
+
+.build:
+    mov rdi, rbx
+    mov esi, AST_ARG
+    xor edx, edx
+    mov rcx, [rbp - POP_LINE]
+    mov r8, [rbp - POP_NAME]
+    mov r9, [rbp - POP_ANN]
+    call ast_make
+    mov [rbp - POP_NODE], rax
+    mov rdi, rbx
+    mov rsi, rax
+    call ast_at
+    mov rdx, [rbp - POP_DEF]
+    mov [rax + AstNode.c], edx
+    mov rax, [rbp - POP_NODE]
+    pop r12
+    pop rbx
+    leave
+    ret
+.fail:
+    xor eax, eax
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC par_one_param
+
+;; ============================================================================
+;; par_param_here(Comp *c) -> one parameter, annotations allowed only when the
+;; list is not a lambda's.  par_params keeps the terminator in PP_CLOSE, and a
+;; colon terminator means a lambda.
+;; ============================================================================
+DEF_FUNC_BARE par_param_here
+    ; PP_CLOSE lives in the caller's frame; par_params passes it through rsi.
+    jmp par_one_param
+END_FUNC par_param_here
+
+;; ============================================================================
+;; ps_def - `def name(params) [-> ann]: body`
+;;   .a = the name, .b = the AST_ARGUMENTS node, .clist = the body statements
+;; ============================================================================
+PDF_COMP  equ 8
+PDF_LINE  equ 16
+PDF_NAME  equ 24
+PDF_ARGS  equ 32
+PDF_MARK  equ 40
+PDF_NODE  equ 48
+PDF_FRAME equ 56          ; + 1 push = 64
+DEF_FUNC_LOCAL ps_def, PDF_FRAME
+    push rbx
+    mov rbx, rdi
+    call par_peek
+    mov ecx, [rax + Token.lineno]
+    mov [rbp - PDF_LINE], rcx
+    mov rdi, rbx
+    call par_advance                    ; `def`
+
+    mov rdi, rbx
+    call par_name_obj
+    test rax, rax
+    jz .fail
+    mov [rbp - PDF_NAME], rax
+
+    mov rdi, rbx
+    mov esi, TOK_LPAR
+    CSTRING rdx, "expected '(' after the function name"
+    call par_expect
+    test eax, eax
+    jz .fail
+    mov rdi, rbx
+    mov esi, TOK_RPAR
+    call par_params
+    test rax, rax
+    jz .fail
+    mov [rbp - PDF_ARGS], rax
+    mov rdi, rbx
+    mov esi, TOK_RPAR
+    CSTRING rdx, "'(' was never closed"
+    call par_expect
+    test eax, eax
+    jz .fail
+
+    ; A return annotation is parsed and discarded: apython's MAKE_FUNCTION
+    ; drops annotations anyway, so evaluating one would only add a side effect
+    ; that CPython has and we cannot honour.
+    mov rdi, rbx
+    call par_kind
+    cmp eax, TOK_RARROW
+    jne .suite
+    mov rdi, rbx
+    call par_advance
+    mov rdi, rbx
+    mov esi, BP_NONE
+    call par_expr
+    test rax, rax
+    jz .fail
+
+.suite:
+    ; The body is collected directly into the def's own child list.
+    mov rdi, rbx
+    call ast_mark
+    mov [rbp - PDF_MARK], rax
+    mov rdi, rbx
+    call par_suite_into
+    test eax, eax
+    jz .fail
+
+    mov rdi, rbx
+    mov esi, AST_FUNCTIONDEF
+    mov rdx, [rbp - PDF_LINE]
+    mov rcx, [rbp - PDF_MARK]
+    call par_finish_list
+    test rax, rax
+    jz .fail
+    mov [rbp - PDF_NODE], rax
+    mov rdi, rbx
+    mov rsi, rax
+    call ast_at
+    mov rdx, [rbp - PDF_NAME]
+    mov [rax + AstNode.a], edx
+    mov rdx, [rbp - PDF_ARGS]
+    mov [rax + AstNode.b], edx
+    mov rax, [rbp - PDF_NODE]
+    pop rbx
+    leave
+    ret
+.fail:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+END_FUNC ps_def
+
+;; ============================================================================
+;; par_suite_into(Comp *c) -> rax = 1 ok, 0 error
+;; Like par_suite, but pushes the statements onto the caller's pending list
+;; instead of wrapping them in a block node.
+;; ============================================================================
+DEF_FUNC par_suite_into, 8
+    push rbx
+    mov rbx, rdi
+    mov esi, TOK_COLON
+    CSTRING rdx, "expected ':'"
+    call par_expect
+    test eax, eax
+    jz .fail
+    mov rdi, rbx
+    call par_kind
+    cmp eax, TOK_NEWLINE
+    je .block
+    mov rdi, rbx
+    call par_simple_stmts
+    pop rbx
+    leave
+    ret
+.block:
+    mov rdi, rbx
+    call par_advance
+    mov rdi, rbx
+    mov esi, TOK_INDENT
+    CSTRING rdx, "expected an indented block"
+    call par_expect
+    test eax, eax
+    jz .fail
+.stmts:
+    mov rdi, rbx
+    call par_kind
+    cmp eax, TOK_DEDENT
+    je .close
+    cmp eax, TOK_ENDMARKER
+    je .close
+    cmp eax, TOK_NEWLINE
+    jne .one
+    mov rdi, rbx
+    call par_advance
+    jmp .stmts
+.one:
+    mov rdi, rbx
+    call par_statement_any
+    test eax, eax
+    jz .fail
+    jmp .stmts
+.close:
+    mov rdi, rbx
+    call par_kind
+    cmp eax, TOK_ENDMARKER
+    je .ok
+    mov rdi, rbx
+    call par_advance
+.ok:
+    mov eax, 1
+    pop rbx
+    leave
+    ret
+.fail:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+END_FUNC par_suite_into
+
+;; ============================================================================
+;; ps_return - `return` and `return value`
+;; ============================================================================
+DEF_FUNC_LOCAL ps_return, PK_FRAME
+    push rbx
+    mov rbx, rdi
+    call par_peek
+    mov ecx, [rax + Token.lineno]
+    mov [rbp - PK_LINE], rcx
+    mov rdi, rbx
+    call par_advance
+    mov qword [rbp - PK_A], 0
+    mov rdi, rbx
+    call par_kind
+    cmp eax, TOK_NEWLINE
+    je .build
+    cmp eax, TOK_SEMI
+    je .build
+    cmp eax, TOK_ENDMARKER
+    je .build
+    cmp eax, TOK_DEDENT
+    je .build
+    mov rdi, rbx
+    call par_exprlist_stmt
+    test rax, rax
+    jz .fail
+    mov [rbp - PK_A], rax
+.build:
+    mov rdi, rbx
+    mov esi, AST_RETURN
+    xor edx, edx
+    mov rcx, [rbp - PK_LINE]
+    mov r8, [rbp - PK_A]
+    xor r9d, r9d
+    call ast_make
+    pop rbx
+    leave
+    ret
+.fail:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+END_FUNC ps_return
+
 section .rodata
 
 ;; ---------------------------------------------------------------------------
@@ -1669,7 +2161,7 @@ stmt_table:
     dq ps_simple    ; 63 TOK_BREAK
     dq 0            ; 64 TOK_CLASS
     dq ps_simple    ; 65 TOK_CONTINUE
-    dq 0            ; 66 TOK_DEF
+    dq ps_def                  ; 66 TOK_DEF
     dq ps_del       ; 67 TOK_DEL
     dq 0            ; 68 TOK_ELIF
     dq 0            ; 69 TOK_ELSE
@@ -1688,7 +2180,7 @@ stmt_table:
     dq 0            ; 82 TOK_OR
     dq ps_simple    ; 83 TOK_PASS
     dq ps_raise     ; 84 TOK_RAISE
-    dq 0            ; 85 TOK_RETURN
+    dq ps_return               ; 85 TOK_RETURN
     dq 0            ; 86 TOK_TRY
     dq ps_while                ; 87 TOK_WHILE
     dq 0            ; 88 TOK_WITH

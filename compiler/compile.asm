@@ -27,6 +27,9 @@ extern exc_SyntaxError_type
 extern obj_dealloc
 
 extern lex_run
+extern sym_build
+extern sym_finalize
+extern sym_free_all
 extern str_new_heap
 
 extern asm_assemble
@@ -188,6 +191,9 @@ DEF_FUNC comp_init, CI_FRAME
     lea rdi, [rbx + Comp.objs]
     mov esi, 8
     call buf_init
+    lea rdi, [rbx + Comp.scopes]
+    mov esi, Scope_size
+    call buf_init
 
     ; Reserve node 0 as the null node, so a 0 index reads as "absent" without
     ; any call site needing a separate presence flag.
@@ -241,6 +247,10 @@ DEF_FUNC comp_free, 8
     jmp .obj_loop
 .objs_done:
 
+    mov rdi, rbx
+    call sym_free_all
+    lea rdi, [rbx + Comp.scopes]
+    call buf_free
     lea rdi, [rbx + Comp.objs]
     call buf_free
     lea rdi, [rbx + Comp.pending]
@@ -431,6 +441,25 @@ DEF_FUNC compile_source, CS_FRAME
     test rax, rax
     jz .failed
     mov [rbp - CS_ROOT], rax
+
+    ; The symbol table has to run before anything is emitted: it is what
+    ; decides whether each name is a fast local, a cell, a free variable or a
+    ; global, and no emitter can answer that from the syntax alone.
+    mov rdi, rbx
+    mov rsi, [rbp - CS_ROOT]
+    mov rdx, [rbp - CS_MODE]
+    call sym_build
+    test eax, eax
+    jz .failed
+    mov [r12 + CompUnit.scope], eax
+    mov [r12 + CompUnit.comp], rbx
+    mov [rbx + Comp.cur_scope], eax
+    mov rdi, rbx
+    mov rsi, rax
+    xor edx, edx                        ; a module has no parameters
+    call sym_finalize
+    test eax, eax
+    jz .failed
 
     ; RESUME must be the first instruction of every code object: the frame
     ; setup, the eval breaker and the tracing hook all key off it.  It carries

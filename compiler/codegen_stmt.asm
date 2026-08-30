@@ -32,6 +32,9 @@ extern cg_expr
 extern cg_label_bind
 extern cg_label_new
 extern cg_name
+extern cg_nameop
+extern cg_s_functiondef
+extern cg_s_return
 extern comp_error
 
 extern comp_empty_string
@@ -206,14 +209,14 @@ DEF_FUNC cg_store, CSV_FRAME
     mov esi, [rax + AstNode.a]
     mov rdi, rbx
     call ast_obj_at
-    mov rdi, r12
-    mov rsi, rax
-    call cg_name
     mov rdx, rax
-    mov rdi, r12
-    mov esi, OP_STORE_NAME
     mov rcx, [rbp - CSV_LINE]
-    call cg_emit
+    mov [r12 + CompUnit.curline], ecx
+    mov rdi, rbx
+    mov rsi, r12
+    mov ecx, CTX_STORE
+    xor r8d, r8d
+    call cg_nameop
     jmp .ok
 
 .attribute:
@@ -684,14 +687,14 @@ DEF_FUNC cg_delete_target, CST_FRAME
     mov esi, [rax + AstNode.a]
     mov rdi, rbx
     call ast_obj_at
-    mov rdi, r12
-    mov rsi, rax
-    call cg_name
     mov rdx, rax
-    mov rdi, r12
-    mov esi, OP_DELETE_NAME
     mov rcx, [rbp - CST_LINE]
-    call cg_emit
+    mov [r12 + CompUnit.curline], ecx
+    mov rdi, rbx
+    mov rsi, r12
+    mov ecx, CTX_DEL
+    xor r8d, r8d
+    call cg_nameop
     jmp .ok
 .attribute:
     mov rdi, rbx
@@ -1923,7 +1926,7 @@ cg_stmt_table:
     dq cg_s_pass        ; 50 AST_PASS
     dq cg_s_break                      ; 51 AST_BREAK
     dq cg_s_continue                   ; 52 AST_CONTINUE
-    dq 0                ; 53 AST_RETURN
+    dq cg_s_return                     ; 53 AST_RETURN
     dq cg_s_delete      ; 54 AST_DELETE
     dq cg_s_raise       ; 55 AST_RAISE
     dq cg_s_assert      ; 56 AST_ASSERT
@@ -1932,7 +1935,7 @@ cg_stmt_table:
     dq cg_s_import      ; 59 AST_IMPORT
     dq cg_s_importfrom  ; 60 AST_IMPORTFROM
     dq 0                ; 61 AST_ALIAS
-    dq 0                ; 62 AST_FUNCTIONDEF
+    dq cg_s_functiondef                ; 62 AST_FUNCTIONDEF
     dq 0                ; 63 AST_CLASSDEF
     dq 0                ; 64 AST_TRY
     dq 0                ; 65 AST_HANDLER

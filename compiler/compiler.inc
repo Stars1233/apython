@@ -423,6 +423,9 @@ struc Comp
     .children:  resb Buf_size       ; u32[] committed child lists
     .pending:   resb Buf_size       ; u32[] LIFO scratch for lists under construction
     .objs:      resb Buf_size       ; PyObject*[], owned
+    .scopes:    resb Buf_size       ; Scope[]; index 0 reserved
+    .cur_scope: resd 1
+    .pad1:      resd 1
     .err:       resb CompErr_size
     .lex:       resb Lexer_size
 endstruc
@@ -468,6 +471,9 @@ struc CompUnit
     .name:      resq 1          ; PyStrObject*, borrowed
     .qualname:  resq 1
     .filename:  resq 1
+    .comp:      resq 1          ; the owning Comp, for scope lookups
+    .scope:     resd 1          ; this unit's Scope index
+    .pad3:      resd 1
 endstruc
 
 ; co_stacksize is emitted with this much slack.  frame_free recomputes a
@@ -477,5 +483,74 @@ endstruc
 ; The margin makes a single-slot modelling error in a rarely-exercised opcode
 ; harmless rather than fatal; it comes out once the depth pass is trusted.
 COMP_STACK_SLACK equ 4
+
+;; ===========================================================================
+;; Symbol table.
+;;
+;; One Scope per binding block.  Two passes: the first records what each block
+;; binds and uses, the second classifies every name as local, cell, free,
+;; explicit global or implicit global.  The classification is what decides
+;; which opcode a name compiles to, and the rule that matters most is a
+;; negative one: module and class blocks are NOT function-like, so nothing in
+;; them is ever a fast local.  Every name there goes through LOAD_NAME against
+;; the frame's locals mapping -- which is exactly the dict exec(src, d) passes,
+;; and the reason that call can hand results back.
+;;
+;; Scopes live in a Buf and are addressed by index; index 0 is reserved so that
+;; a 0 parent means "no enclosing scope".
+;; ===========================================================================
+
+SCOPE_MODULE   equ 0
+SCOPE_CLASS    equ 1
+SCOPE_FUNCTION equ 2
+SCOPE_LAMBDA   equ 3
+SCOPE_COMP     equ 4
+
+; What a block does with a name.  Mirrors CPython's symtable flags closely
+; enough that its analyze_name rules can be followed step for step.
+DEF_GLOBAL   equ 0x001
+DEF_LOCAL    equ 0x002
+DEF_PARAM    equ 0x004
+DEF_NONLOCAL equ 0x008
+DEF_IMPORT   equ 0x010
+DEF_USE      equ 0x020
+
+; The resolved answer, stored in bits 12..14.
+SCOPE_SHIFT      equ 12
+SCOPE_MASK       equ 0x7000
+SYM_LOCAL           equ 1
+SYM_GLOBAL_EXPLICIT equ 2
+SYM_GLOBAL_IMPLICIT equ 3
+SYM_FREE            equ 4
+SYM_CELL            equ 5
+
+; Scope.flags
+SCF_GENERATOR equ 0x01
+SCF_COROUTINE equ 0x02
+SCF_VARARGS   equ 0x04
+SCF_VARKW     equ 0x08
+SCF_NESTED    equ 0x10
+
+struc Scope
+    .parent:    resd 1          ; scope index, 0 = none
+    .kind:      resd 1          ; SCOPE_*
+    .flags:     resd 1          ; SCF_*
+    .node:      resd 1          ; the AST node this block belongs to
+    .symbols:   resq 1          ; PyDictObject*: name -> SmallInt(flags)
+    .name:      resq 1          ; PyStrObject*, borrowed from comp.objs
+    .argcount:  resd 1
+    .posonly:   resd 1
+    .kwonly:    resd 1
+    .co_flags:  resd 1
+    .varnames:  resb Buf_size   ; u64 name Values, parameters first
+    .cellvars:  resb Buf_size
+    .freevars:  resb Buf_size
+    .localsplus: resb Buf_size  ; varnames ++ new cellvars ++ freevars
+    .children:  resb Buf_size   ; u32 scope indices, in source order
+    .nlocals:   resd 1          ; == len(varnames)
+    .ncells:    resd 1
+    .nfrees:    resd 1
+    .pad2:      resd 1
+endstruc
 
 %endif ; COMPILER_INC

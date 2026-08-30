@@ -47,6 +47,7 @@ extern buf_push_u8
 extern bytes_from_data
 extern str_new_heap
 extern comp_intern
+extern par_params
 extern int_from_cstr_base
 extern strtod
 
@@ -2178,6 +2179,72 @@ DEF_FUNC_BARE par_peek_next
     ret
 END_FUNC par_peek_next
 
+;; ============================================================================
+;; pf_lambda(Comp *c) -> node   -- `lambda params: expr`
+;;
+;; The body is parsed at BP_TERNARY, so `lambda: a, b` is a tuple containing a
+;; lambda rather than a lambda returning a tuple -- the comma is not part of
+;; the body, and never has been.
+;; ============================================================================
+PLM_COMP  equ 8
+PLM_LINE  equ 16
+PLM_ARGS  equ 24
+PLM_NODE  equ 32
+PLM_FRAME equ 40          ; + 1 push = 48
+DEF_FUNC_LOCAL pf_lambda, PLM_FRAME
+    push rbx
+    mov rbx, rdi
+    call par_peek
+    mov ecx, [rax + Token.lineno]
+    mov [rbp - PLM_LINE], rcx
+    mov rdi, rbx
+    call par_advance                    ; `lambda`
+
+    mov rdi, rbx
+    mov esi, TOK_COLON
+    call par_params
+    test rax, rax
+    jz .fail
+    mov [rbp - PLM_ARGS], rax
+
+    mov rdi, rbx
+    mov esi, TOK_COLON
+    CSTRING rdx, "expected ':' after the lambda parameters"
+    call par_expect
+    test eax, eax
+    jz .fail
+
+    mov rdi, rbx
+    mov esi, BP_TERNARY
+    call par_expr
+    test rax, rax
+    jz .fail
+    mov [rbp - PLM_NODE], rax
+
+    mov rdi, rbx
+    mov esi, AST_LAMBDA
+    xor edx, edx
+    mov rcx, [rbp - PLM_LINE]
+    xor r8d, r8d
+    mov r9, [rbp - PLM_ARGS]
+    call ast_make
+    mov [rbp - PLM_ARGS], rax
+    mov rdi, rbx
+    mov rsi, rax
+    call ast_at
+    mov rdx, [rbp - PLM_NODE]
+    mov [rax + AstNode.c], edx          ; the body expression
+    mov rax, [rbp - PLM_ARGS]
+    pop rbx
+    leave
+    ret
+.fail:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+END_FUNC pf_lambda
+
 section .rodata
 
 ;; ---------------------------------------------------------------------------
@@ -2435,8 +2502,8 @@ prule_table:
     dq 0           , in_compare  
     db BP_COMPARE , BP_COMPARE , 0                 , PR_CHAIN    ; TOK_IS
     dd 0
-    dq 0           , 0           
-    db BP_NONE    , BP_NONE    , 0                 , 0           ; TOK_LAMBDA
+    dq pf_lambda   , 0           
+    db BP_NONE    , BP_NONE    , 0                 , 0           ; TOK_LAMBDA -- body at BP_TERNARY: `lambda: a, b` is a tuple, not a lambda of a tuple
     dd 0
     dq 0           , 0           
     db BP_NONE    , BP_NONE    , 0                 , 0           ; TOK_NONLOCAL

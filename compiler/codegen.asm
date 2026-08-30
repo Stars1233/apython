@@ -22,6 +22,8 @@ extern buf_free
 extern buf_init
 extern buf_push_u32
 extern buf_reserve
+extern cg_e_lambda
+extern cg_nameop
 extern comp_error
 
 extern ap_memcmp
@@ -528,13 +530,9 @@ DEF_FUNC_LOCAL cg_e_const, CE_FRAME
     ret
 END_FUNC cg_e_const
 
-;; cg_e_name - LOAD_NAME
+;; cg_e_name - a name load, through cg_nameop
 ;;
-;; LOAD_NAME, not LOAD_FAST and not LOAD_GLOBAL.  At module and class scope
-;; nothing is function-like, so every name goes through the frame's locals
-;; mapping -- which is exactly the dict a caller hands to exec(src, d), and the
-;; reason that call works at all.  Function scopes will select differently once
-;; the symbol table exists.
+;; Which opcode that becomes is the symbol table's decision, not the syntax's.
 DEF_FUNC_LOCAL cg_e_name, CE_FRAME
     push rbx
     push r12
@@ -546,20 +544,17 @@ DEF_FUNC_LOCAL cg_e_name, CE_FRAME
     mov rdi, rbx
     mov rsi, r13
     call ast_at
-    mov [rbp - CE_NPTR], rax
+    mov ecx, [rax + AstNode.lineno]
+    mov [r12 + CompUnit.curline], ecx
     mov esi, [rax + AstNode.a]
     mov rdi, rbx
     call ast_obj_at
-    mov rdi, r12
-    mov rsi, rax
-    call cg_name
     mov rdx, rax
-    mov rax, [rbp - CE_NPTR]
-    mov ecx, [rax + AstNode.lineno]
-    mov rdi, r12
-    mov esi, OP_LOAD_NAME
-    call cg_emit
-    mov eax, 1
+    mov rdi, rbx
+    mov rsi, r12
+    mov ecx, CTX_LOAD
+    xor r8d, r8d
+    call cg_nameop
     pop r13
     pop r12
     pop rbx
@@ -2216,7 +2211,7 @@ cg_expr_table:
     dq cg_e_boolop      ;  5 AST_BOOLOP
     dq cg_e_compare     ;  6 AST_COMPARE
     dq cg_e_ifexp       ;  7 AST_IFEXP
-    dq 0                ;  8 AST_LAMBDA
+    dq cg_e_lambda                     ;  8 AST_LAMBDA
     dq cg_e_seq         ;  9 AST_TUPLE
     dq cg_e_seq         ; 10 AST_LIST
     dq cg_e_seq         ; 11 AST_SET

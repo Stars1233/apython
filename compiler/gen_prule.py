@@ -23,6 +23,8 @@ R("TOK_TRUE",     prefix="pf_const")
 R("TOK_FALSE",    prefix="pf_const")
 R("TOK_NONE",     prefix="pf_const")
 R("TOK_ELLIPSIS", prefix="pf_const")
+R("TOK_LAMBDA",   prefix="pf_lambda",
+  note="body at BP_TERNARY: `lambda: a, b` is a tuple, not a lambda of a tuple")
 
 # --- brackets: prefix opens a display, infix continues a primary ---------
 R("TOK_LPAR",   prefix="pf_group",  infix="in_call",

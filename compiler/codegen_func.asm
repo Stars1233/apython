@@ -1,0 +1,993 @@
+; codegen_func.asm - Functions, lambdas and closures
+;
+; A nested function gets its own CompUnit, is assembled to a complete code
+; object, and is stored as a constant of the enclosing one; MAKE_FUNCTION turns
+; that constant into a function at run time.
+;
+; Closures are the part with no room for approximation.  A local that some
+; nested block reads has to live in a cell so both frames share one storage
+; location, and three opcodes have to agree about where those cells are:
+; MAKE_CELL boxes a slot in place, LOAD_CLOSURE reads a cell out of the
+; enclosing frame, and COPY_FREE_VARS writes the incoming ones into the LAST
+; nfree slots of localsplus -- it computes the destination as
+; nlocalsplus - oparg and nothing else tells it where they are.
+
+%include "macros.inc"
+%include "object.inc"
+%include "types.inc"
+%include "value.inc"
+%include "opcodes.inc"
+%include "compiler.inc"
+
+extern ast_at
+extern ast_child
+extern ast_obj_at
+extern asm_assemble
+extern cg_body
+extern cg_const
+extern cg_emit
+extern cg_expr
+extern cg_name
+extern cg_unit_free
+extern cg_unit_init
+extern comp_error
+extern comp_intern
+extern obj_decref
+extern str_from_cstr_heap
+extern sym_at
+extern sym_finalize
+extern sym_is_function_like
+extern sym_lp_index
+extern sym_scope_of
+
+extern exc_SyntaxError_type
+
+; --- Named frame-layout constants ---
+CF_COMP   equ 8
+CF_PARENT equ 16
+CF_NODE   equ 24
+CF_SCOPE  equ 32
+CF_LINE   equ 40
+CF_ARGS   equ 48
+CF_CODE   equ 56
+CF_NAME   equ 64
+CF_I      equ 72
+CF_N      equ 80
+CF_FLAGS  equ 88
+CF_UNIT   equ 96 + CompUnit_size
+CF_FRAME  equ ((CF_UNIT + 15) / 16) * 16 + 8      ; + 3 pushes = 16-aligned
+
+section .text
+
+;; ============================================================================
+;; cg_nameop(Comp *c, CompUnit *u, PyStrObject *name, int ctx, int want_null)
+;;   -> rax = 1 ok, 0 error
+;;
+;; The single place a name turns into an opcode.  Everything it needs comes
+;; from the symbol table, because nothing about the syntax says which of
+;; LOAD_FAST, LOAD_NAME, LOAD_GLOBAL or LOAD_DEREF is right: `x` in a function
+;; is a fast local if the function assigns it anywhere at all, including after
+;; the use.
+;;
+;; The negative rule matters as much as the positive ones.  Module and class
+;; blocks are not function-like, so a local there is still LOAD_NAME -- it
+;; lives in the frame's locals mapping, which is the dict exec(src, d) passes.
+;; ============================================================================
+CN2_COMP  equ 8
+CN2_UNIT  equ 16
+CN2_NAME  equ 24
+CN2_CTX   equ 32
+CN2_NULL  equ 40
+CN2_SCOPE equ 48
+CN2_FRAME equ 56          ; + 3 pushes = 80
+DEF_FUNC cg_nameop, CN2_FRAME
+    push rbx
+    push r12
+    push r13
+    mov rbx, rdi
+    mov r12, rsi
+    mov [rbp - CN2_NAME], rdx
+    mov [rbp - CN2_CTX], rcx
+    mov [rbp - CN2_NULL], r8
+
+    mov r13d, [r12 + CompUnit.scope]
+    mov [rbp - CN2_SCOPE], r13
+
+    mov rdi, rbx
+    mov rsi, r13
+    mov rdx, [rbp - CN2_NAME]
+    call sym_scope_of
+    mov r8d, eax
+
+    cmp r8d, SYM_CELL
+    je .deref
+    cmp r8d, SYM_FREE
+    je .deref
+    cmp r8d, SYM_GLOBAL_EXPLICIT
+    je .global
+    cmp r8d, SYM_LOCAL
+    je .maybe_fast
+    ; SYM_GLOBAL_IMPLICIT, or a name the table never saw.
+    mov rdi, rbx
+    mov rsi, r13
+    call sym_is_function_like
+    test eax, eax
+    jnz .global
+    jmp .by_name
+
+.maybe_fast:
+    mov rdi, rbx
+    mov rsi, r13
+    call sym_is_function_like
+    test eax, eax
+    jz .by_name
+
+    ; A fast local: the oparg is its localsplus slot.
+    mov rdi, rbx
+    mov rsi, [rbp - CN2_SCOPE]
+    mov rdx, [rbp - CN2_NAME]
+    call sym_lp_index
+    cmp eax, -1
+    je .missing
+    mov edx, eax
+    mov esi, OP_LOAD_FAST
+    cmp qword [rbp - CN2_CTX], CTX_LOAD
+    je .emit
+    mov esi, OP_STORE_FAST
+    cmp qword [rbp - CN2_CTX], CTX_STORE
+    je .emit
+    mov esi, OP_DELETE_FAST
+    jmp .emit
+
+.deref:
+    mov rdi, rbx
+    mov rsi, [rbp - CN2_SCOPE]
+    mov rdx, [rbp - CN2_NAME]
+    call sym_lp_index
+    cmp eax, -1
+    je .missing
+    mov edx, eax
+    mov esi, OP_LOAD_DEREF
+    cmp qword [rbp - CN2_CTX], CTX_LOAD
+    je .emit
+    mov esi, OP_STORE_DEREF
+    cmp qword [rbp - CN2_CTX], CTX_STORE
+    je .emit
+    mov esi, OP_DELETE_DEREF
+    jmp .emit
+
+.global:
+    mov rdi, r12
+    mov rsi, [rbp - CN2_NAME]
+    call cg_name
+    mov edx, eax
+    mov esi, OP_STORE_GLOBAL
+    cmp qword [rbp - CN2_CTX], CTX_STORE
+    je .emit
+    mov esi, OP_DELETE_GLOBAL
+    cmp qword [rbp - CN2_CTX], CTX_DEL
+    je .emit
+    ; LOAD_GLOBAL's oparg is the name index shifted left, with bit 0 asking the
+    ; interpreter to push a NULL alongside -- which is how a call's empty self
+    ; slot gets filled without a separate PUSH_NULL.
+    shl edx, 1
+    or edx, [rbp - CN2_NULL]
+    mov esi, OP_LOAD_GLOBAL
+    jmp .emit
+
+.by_name:
+    mov rdi, r12
+    mov rsi, [rbp - CN2_NAME]
+    call cg_name
+    mov edx, eax
+    mov esi, OP_LOAD_NAME
+    cmp qword [rbp - CN2_CTX], CTX_LOAD
+    je .emit
+    mov esi, OP_STORE_NAME
+    cmp qword [rbp - CN2_CTX], CTX_STORE
+    je .emit
+    mov esi, OP_DELETE_NAME
+
+.emit:
+    mov rdi, r12
+    xor ecx, ecx
+    mov ecx, [r12 + CompUnit.curline]
+    call cg_emit
+    mov eax, 1
+    jmp .ret
+
+.missing:
+    mov rdi, rbx
+    lea rsi, [rel exc_SyntaxError_type]
+    CSTRING rdx, "internal error: name has no local slot"
+    xor ecx, ecx
+    xor r8d, r8d
+    call comp_error
+    xor eax, eax
+.ret:
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC cg_nameop
+
+;; ============================================================================
+;; cg_function(Comp *c, CompUnit *parent, uint32_t node, int is_lambda)
+;;   -> rax = 1 ok, 0 error
+;;
+;; Compile a nested function into its own code object, push it as a constant of
+;; the enclosing unit, and emit MAKE_FUNCTION.  The order the operands are
+;; pushed in is fixed by the opcode: defaults, keyword defaults, annotations,
+;; closure, then the code object on top.
+;; ============================================================================
+DEF_FUNC cg_function, CF_FRAME
+    push rbx
+    push r12
+    push r13
+    mov rbx, rdi
+    mov [rbp - CF_PARENT], rsi
+    mov r13, rdx
+    mov [rbp - CF_NODE], rdx
+    mov [rbp - CF_FLAGS], rcx
+
+    mov rdi, rbx
+    mov rsi, r13
+    call ast_at
+    movzx ecx, word [rax + AstNode.flags]   ; the scope the symbol table made
+    mov [rbp - CF_SCOPE], rcx
+    mov ecx, [rax + AstNode.lineno]
+    mov [rbp - CF_LINE], rcx
+    mov ecx, [rax + AstNode.b]
+    mov [rbp - CF_ARGS], rcx
+
+    ; Fix this scope's variable layout before anything is emitted into it.
+    mov rax, [rbp - CF_SCOPE]
+    mov [rbx + Comp.cur_scope], eax
+    mov rdi, rbx
+    mov rsi, [rbp - CF_SCOPE]
+    mov rdx, [rbp - CF_ARGS]
+    call sym_finalize
+    test eax, eax
+    jz .fail
+
+    ; --- defaults are evaluated HERE, in the enclosing scope ---
+    mov rdi, rbx
+    mov rsi, [rbp - CF_PARENT]
+    mov rdx, [rbp - CF_ARGS]
+    call cg_defaults
+    cmp rax, -1
+    je .fail
+    mov [rbp - CF_I], rax               ; the MAKE_FUNCTION flag bits so far
+
+    ; --- the closure tuple, if the body captured anything ---
+    mov rdi, rbx
+    mov rsi, [rbp - CF_PARENT]
+    mov rdx, [rbp - CF_SCOPE]
+    mov rcx, [rbp - CF_LINE]
+    call cg_closure_tuple
+    cmp rax, -1
+    je .fail
+    or [rbp - CF_I], rax
+
+    ; --- compile the body into a unit of its own ---
+    mov rdi, rbx
+    lea rsi, [rbp - CF_UNIT]
+    mov rdx, r13
+    mov rcx, [rbp - CF_FLAGS]
+    call cg_compile_body
+    mov [rbp - CF_CODE], rax
+    test rax, rax
+    jz .fail
+
+    ; The finished code object becomes a constant of the enclosing unit.
+    mov rdi, [rbp - CF_PARENT]
+    mov rsi, [rbp - CF_CODE]
+    call cg_const
+    mov rdx, rax
+    mov rdi, [rbp - CF_PARENT]
+    mov esi, OP_LOAD_CONST
+    mov rcx, [rbp - CF_LINE]
+    call cg_emit
+
+    mov rdi, [rbp - CF_PARENT]
+    mov esi, OP_MAKE_FUNCTION
+    mov rdx, [rbp - CF_I]
+    mov rcx, [rbp - CF_LINE]
+    call cg_emit
+
+    ; Restore the enclosing scope for whatever follows.
+    mov rax, [rbp - CF_PARENT]
+    mov eax, [rax + CompUnit.scope]
+    mov [rbx + Comp.cur_scope], eax
+    mov eax, 1
+    jmp .ret
+.fail:
+    xor eax, eax
+.ret:
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC cg_function
+
+;; ============================================================================
+;; cg_defaults(Comp *c, CompUnit *u, uint32_t args) -> rax = MAKE_FUNCTION bits
+;;   or -1 on error.
+;;
+;; Positional defaults become one tuple; keyword-only defaults become a dict of
+;; name to value.  Both are built in the DEFINING scope, which is why
+;; `def f(x=n)` captures n as it is now rather than at call time.
+;; ============================================================================
+CD2_COMP  equ 8
+CD2_UNIT  equ 16
+CD2_ARGS  equ 24
+CD2_I     equ 32
+CD2_N     equ 40
+CD2_NPOS  equ 48
+CD2_NKW   equ 56
+CD2_LINE  equ 64
+CD2_BITS  equ 72
+CD2_EXTRA equ 80
+CD2_FRAME equ 88          ; + 3 pushes = 112
+DEF_FUNC cg_defaults, CD2_FRAME
+    push rbx
+    push r12
+    push r13
+    mov rbx, rdi
+    ; The unit and the arguments node go in frame slots, not registers: r12 is
+    ; reused below as a counter and r13 as a scratch node.
+    mov [rbp - CD2_UNIT], rsi
+    mov [rbp - CD2_ARGS], rdx
+    mov r13, rdx
+    mov qword [rbp - CD2_BITS], 0
+    test r13, r13
+    jz .done
+
+    mov rdi, rbx
+    mov rsi, r13
+    call ast_at
+    mov ecx, [rax + AstNode.lineno]
+    mov [rbp - CD2_LINE], rcx
+    mov ecx, [rax + AstNode.a]          ; the AST_EXTRA counts node
+    mov [rbp - CD2_EXTRA], rcx
+    mov rdi, rbx
+    mov rsi, rcx
+    call ast_at
+    mov ecx, [rax + AstNode.a]
+    mov [rbp - CD2_NPOS], rcx
+    mov ecx, [rax + AstNode.c]
+    mov [rbp - CD2_NKW], rcx
+
+    ; --- positional defaults, as a tuple ---
+    xor r12d, r12d                      ; how many there are
+    mov qword [rbp - CD2_I], 0
+.pos_loop:
+    mov rax, [rbp - CD2_I]
+    cmp rax, [rbp - CD2_NPOS]
+    jae .pos_done
+    call .arg_at
+    mov rdi, rbx
+    mov rsi, rax
+    call ast_at
+    mov ecx, [rax + AstNode.c]
+    test ecx, ecx
+    jz .pos_next                        ; no default on this parameter
+    mov edx, ecx
+    mov rdi, rbx
+    mov rsi, [rbp - CD2_UNIT]
+    call cg_expr
+    test eax, eax
+    jz .fail
+    inc r12
+.pos_next:
+    inc qword [rbp - CD2_I]
+    jmp .pos_loop
+.pos_done:
+    test r12, r12
+    jz .kwdefaults
+    mov rdi, [rbp - CD2_UNIT]
+    mov esi, OP_BUILD_TUPLE
+    mov rdx, r12
+    mov rcx, [rbp - CD2_LINE]
+    call cg_emit
+    or qword [rbp - CD2_BITS], MAKE_FUNC_DEFAULTS
+
+.kwdefaults:
+    ; --- keyword-only defaults, as a dict of name to value ---
+    xor r12d, r12d
+    mov rax, [rbp - CD2_NPOS]
+    mov [rbp - CD2_I], rax
+    mov rcx, [rbp - CD2_NPOS]
+    add rcx, [rbp - CD2_NKW]
+    mov [rbp - CD2_N], rcx
+.kw_loop:
+    mov rax, [rbp - CD2_I]
+    cmp rax, [rbp - CD2_N]
+    jae .kw_done
+    call .arg_at
+    mov r13, rax
+    mov rdi, rbx
+    mov rsi, rax
+    call ast_at
+    mov ecx, [rax + AstNode.c]
+    test ecx, ecx
+    jz .kw_next
+    ; the parameter's name, as a constant
+    mov esi, [rax + AstNode.a]
+    mov rdi, rbx
+    call ast_obj_at
+    mov rdi, [rbp - CD2_UNIT]
+    mov rsi, rax
+    call cg_const
+    mov rdx, rax
+    mov rdi, [rbp - CD2_UNIT]
+    mov esi, OP_LOAD_CONST
+    mov rcx, [rbp - CD2_LINE]
+    call cg_emit
+    ; then its default
+    mov rdi, rbx
+    mov rsi, r13
+    call ast_at
+    mov edx, [rax + AstNode.c]
+    mov rdi, rbx
+    mov rsi, [rbp - CD2_UNIT]
+    call cg_expr
+    test eax, eax
+    jz .fail
+    inc r12
+.kw_next:
+    inc qword [rbp - CD2_I]
+    jmp .kw_loop
+.kw_done:
+    test r12, r12
+    jz .done
+    mov rdi, [rbp - CD2_UNIT]
+    mov esi, OP_BUILD_MAP
+    mov rdx, r12
+    mov rcx, [rbp - CD2_LINE]
+    call cg_emit
+    or qword [rbp - CD2_BITS], MAKE_FUNC_KWDEFAULTS
+
+.done:
+    mov rax, [rbp - CD2_BITS]
+    jmp .ret
+.fail:
+    mov rax, -1
+.ret:
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
+; Local: the i'th parameter node of the arguments list.
+.arg_at:
+    sub rsp, 8
+    mov rdi, rbx
+    mov rsi, [rbp - CD2_ARGS]
+    call ast_at
+    mov rsi, rax
+    mov rdx, [rbp - CD2_I]
+    mov rdi, rbx
+    call ast_child
+    add rsp, 8
+    ret
+END_FUNC cg_defaults
+
+;; ============================================================================
+;; cg_closure_tuple(Comp *c, CompUnit *u, uint32_t scope, int line)
+;;   -> rax = MAKE_FUNC_CLOSURE, 0 when the body captured nothing, -1 on error
+;;
+;; One LOAD_CLOSURE per free variable, in the child's freevars order, built
+;; into a tuple.  The slot each one is read from is the ENCLOSING scope's --
+;; where the name is a cell -- while the order is the child's, because
+;; COPY_FREE_VARS drops them into the child's last nfree slots positionally.
+;; ============================================================================
+CC3_COMP  equ 8
+CC3_UNIT  equ 16
+CC3_SCOPE equ 24
+CC3_LINE  equ 32
+CC3_I     equ 40
+CC3_N     equ 48
+CC3_FRAME equ 56          ; + 3 pushes = 80
+DEF_FUNC cg_closure_tuple, CC3_FRAME
+    push rbx
+    push r12
+    push r13
+    mov rbx, rdi
+    mov r12, rsi
+    mov [rbp - CC3_SCOPE], rdx
+    mov [rbp - CC3_LINE], rcx
+
+    mov rdi, rbx
+    mov rsi, [rbp - CC3_SCOPE]
+    call sym_at
+    mov r13, rax
+    mov rcx, [r13 + Scope.freevars + Buf.len]
+    mov [rbp - CC3_N], rcx
+    test rcx, rcx
+    jz .none
+
+    mov qword [rbp - CC3_I], 0
+.loop:
+    mov rax, [rbp - CC3_I]
+    cmp rax, [rbp - CC3_N]
+    jae .build
+    mov rdi, rbx
+    mov rsi, [rbp - CC3_SCOPE]
+    call sym_at
+    mov rdx, [rax + Scope.freevars + Buf.data]
+    mov rcx, [rbp - CC3_I]
+    mov rdx, [rdx + rcx*8]              ; the name
+    mov rdi, rbx
+    mov esi, [r12 + CompUnit.scope]     ; look it up in the ENCLOSING scope
+    call sym_lp_index
+    cmp eax, -1
+    je .not_found
+    mov edx, eax
+    mov rdi, r12
+    mov esi, OP_LOAD_CLOSURE
+    mov rcx, [rbp - CC3_LINE]
+    call cg_emit
+    inc qword [rbp - CC3_I]
+    jmp .loop
+.build:
+    mov rdi, r12
+    mov esi, OP_BUILD_TUPLE
+    mov rdx, [rbp - CC3_N]
+    mov rcx, [rbp - CC3_LINE]
+    call cg_emit
+    mov eax, MAKE_FUNC_CLOSURE
+    jmp .ret
+.none:
+    xor eax, eax
+    jmp .ret
+.not_found:
+    mov rdi, rbx
+    lea rsi, [rel exc_SyntaxError_type]
+    CSTRING rdx, "internal error: free variable has no cell in the enclosing scope"
+    xor ecx, ecx
+    xor r8d, r8d
+    call comp_error
+    mov rax, -1
+.ret:
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC cg_closure_tuple
+
+
+;; ============================================================================
+;; cg_compile_body(Comp *c, CompUnit *u, uint32_t node, int is_lambda)
+;;   -> rax = PyCodeObject*, or 0
+;;
+;; The nested unit's prologue is fixed and its order matters:
+;;
+;;     MAKE_CELL i         for each cell, in ascending localsplus order
+;;     COPY_FREE_VARS n    if the body captured anything
+;;     RESUME 0
+;;
+;; MAKE_CELL boxes whatever is already in the slot, so a parameter that is also
+;; a cell is wrapped in place after func_call has bound it -- it is not moved.
+;; COPY_FREE_VARS writes into the last n slots and derives that from
+;; nlocalsplus, which is why the layout puts free variables last.
+;; ============================================================================
+CB_COMP   equ 8
+CB_UNIT   equ 16
+CB_NODE   equ 24
+CB_LAMBDA equ 32
+CB_SCOPE  equ 40
+CB_LINE   equ 48
+CB_I      equ 56
+CB_N      equ 64
+CB_NAME   equ 72
+CB_ARGS   equ 80
+CB_FRAME  equ 88          ; + 3 pushes = 112
+DEF_FUNC cg_compile_body, CB_FRAME
+    push rbx
+    push r12
+    push r13
+    mov rbx, rdi
+    mov r12, rsi
+    mov r13, rdx
+    mov [rbp - CB_LAMBDA], rcx
+
+    mov rdi, rbx
+    mov rsi, r13
+    call ast_at
+    movzx ecx, word [rax + AstNode.flags]
+    mov [rbp - CB_SCOPE], rcx
+    mov ecx, [rax + AstNode.lineno]
+    mov [rbp - CB_LINE], rcx
+    mov ecx, [rax + AstNode.b]
+    mov [rbp - CB_ARGS], rcx
+
+    ; The function's name, for co_name and tracebacks.
+    cmp qword [rbp - CB_LAMBDA], 0
+    jne .lambda_name
+    mov rdi, rbx
+    mov rsi, r13
+    call ast_at
+    mov esi, [rax + AstNode.a]
+    mov rdi, rbx
+    call ast_obj_at
+    INCREF rax
+    jmp .have_name
+.lambda_name:
+    lea rdi, [rel cg_lambda_name]
+    call str_from_cstr_heap
+.have_name:
+    mov [rbp - CB_NAME], rax
+
+    mov rdi, r12
+    mov rax, [rbp - CB_UNIT]
+    mov rsi, [rbx + Comp.filename]
+    mov rdx, [rbp - CB_NAME]
+    call cg_unit_init
+    mov rax, [rbp - CB_SCOPE]
+    mov [r12 + CompUnit.scope], eax
+    mov [r12 + CompUnit.comp], rbx
+    mov rax, [rbp - CB_LINE]
+    mov [r12 + CompUnit.firstline], eax
+    mov [r12 + CompUnit.curline], eax
+
+    ; A function-like scope gets its own fast locals.
+    mov dword [r12 + CompUnit.flags], CO_OPTIMIZED | CO_NEWLOCALS
+    mov rdi, rbx
+    mov rsi, r12
+    mov rdx, [rbp - CB_ARGS]
+    call cg_set_arg_counts
+    test eax, eax
+    jz .fail
+
+    ; --- prologue ---
+    mov rdi, rbx
+    mov rsi, r12
+    mov rdx, [rbp - CB_SCOPE]
+    call cg_cell_prologue
+    test eax, eax
+    jz .fail
+
+    mov rdi, r12
+    mov esi, OP_RESUME
+    xor edx, edx
+    xor ecx, ecx
+    call cg_emit
+    or byte [rax + Instr.flags], IF_NOLINE
+
+    ; --- body ---
+    cmp qword [rbp - CB_LAMBDA], 0
+    jne .lambda_body
+    mov rdi, rbx
+    mov rsi, r12
+    mov rdx, r13
+    call cg_body
+    test eax, eax
+    jz .fail
+    ; Falling off the end of a function returns None.
+    mov rdi, r12
+    call cg_return_none
+    jmp .assemble
+
+.lambda_body:
+    mov rdi, rbx
+    mov rsi, r13
+    call ast_at
+    mov edx, [rax + AstNode.c]
+    mov rdi, rbx
+    mov rsi, r12
+    call cg_expr
+    test eax, eax
+    jz .fail
+    mov rdi, r12
+    mov esi, OP_RETURN_VALUE
+    xor edx, edx
+    mov rcx, [rbp - CB_LINE]
+    call cg_emit
+
+.assemble:
+    mov rdi, rbx
+    mov rsi, r12
+    call asm_assemble
+    mov [rbp - CB_I], rax
+    push rax
+    mov rdi, r12
+    call cg_unit_free
+    mov rdi, [rbp - CB_NAME]
+    call obj_decref
+    pop rax
+    jmp .ret
+.fail:
+    mov rdi, r12
+    call cg_unit_free
+    mov rdi, [rbp - CB_NAME]
+    call obj_decref
+    xor eax, eax
+.ret:
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC cg_compile_body
+
+;; ============================================================================
+;; cg_set_arg_counts(Comp *c, CompUnit *u, uint32_t args) -> rax = 1
+;; Copy the parameter counts onto the unit and set CO_VARARGS / CO_VARKEYWORDS.
+;; func_call reads all four to place arguments, so a wrong count here is an
+;; argument landing in the wrong slot rather than an error.
+;; ============================================================================
+DEF_FUNC cg_set_arg_counts, 16
+    push rbx
+    push r12
+    mov rbx, rdi
+    mov r12, rsi
+    mov dword [r12 + CompUnit.argcount], 0
+    mov dword [r12 + CompUnit.posonly], 0
+    mov dword [r12 + CompUnit.kwonly], 0
+    test rdx, rdx
+    jz .done
+    mov [rbp - 8], rdx
+    mov rdi, rbx
+    mov rsi, rdx
+    call ast_at
+    mov ecx, [rax + AstNode.b]
+    test ecx, ecx
+    jz .no_vararg
+    or dword [r12 + CompUnit.flags], CO_VARARGS
+.no_vararg:
+    mov rdi, rbx
+    mov rsi, [rbp - 8]
+    call ast_at
+    mov ecx, [rax + AstNode.c]
+    test ecx, ecx
+    jz .no_varkw
+    or dword [r12 + CompUnit.flags], CO_VARKEYWORDS
+.no_varkw:
+    mov rdi, rbx
+    mov rsi, [rbp - 8]
+    call ast_at
+    mov esi, [rax + AstNode.a]          ; the AST_EXTRA counts node
+    mov rdi, rbx
+    call ast_at
+    mov ecx, [rax + AstNode.a]
+    mov [r12 + CompUnit.argcount], ecx
+    mov ecx, [rax + AstNode.b]
+    mov [r12 + CompUnit.posonly], ecx
+    mov ecx, [rax + AstNode.c]
+    mov [r12 + CompUnit.kwonly], ecx
+.done:
+    mov eax, 1
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC cg_set_arg_counts
+
+;; ============================================================================
+;; cg_cell_prologue(Comp *c, CompUnit *u, uint32_t scope) -> rax = 1 ok
+;; ============================================================================
+CP2_COMP  equ 8
+CP2_UNIT  equ 16
+CP2_SCOPE equ 24
+CP2_I     equ 32
+CP2_N     equ 40
+CP2_FRAME equ 40          ; + 3 pushes = 64
+DEF_FUNC cg_cell_prologue, CP2_FRAME
+    push rbx
+    push r12
+    push r13
+    mov rbx, rdi
+    mov r12, rsi
+    mov [rbp - CP2_SCOPE], rdx
+
+    mov rdi, rbx
+    mov rsi, rdx
+    call sym_at
+    mov r13, rax
+    mov rcx, [r13 + Scope.cellvars + Buf.len]
+    mov [rbp - CP2_N], rcx
+    mov qword [rbp - CP2_I], 0
+.cell_loop:
+    mov rax, [rbp - CP2_I]
+    cmp rax, [rbp - CP2_N]
+    jae .frees
+    mov rdi, rbx
+    mov rsi, [rbp - CP2_SCOPE]
+    call sym_at
+    mov rdx, [rax + Scope.cellvars + Buf.data]
+    mov rcx, [rbp - CP2_I]
+    mov rdx, [rdx + rcx*8]
+    mov rdi, rbx
+    mov rsi, [rbp - CP2_SCOPE]
+    call sym_lp_index
+    cmp eax, -1
+    je .next_cell
+    mov edx, eax
+    mov rdi, r12
+    mov esi, OP_MAKE_CELL
+    xor ecx, ecx
+    call cg_emit
+    or byte [rax + Instr.flags], IF_NOLINE
+.next_cell:
+    inc qword [rbp - CP2_I]
+    jmp .cell_loop
+
+.frees:
+    mov rdi, rbx
+    mov rsi, [rbp - CP2_SCOPE]
+    call sym_at
+    mov rcx, [rax + Scope.freevars + Buf.len]
+    test rcx, rcx
+    jz .done
+    mov rdi, r12
+    mov esi, OP_COPY_FREE_VARS
+    mov rdx, rcx
+    xor ecx, ecx
+    call cg_emit
+    or byte [rax + Instr.flags], IF_NOLINE
+.done:
+    mov eax, 1
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC cg_cell_prologue
+
+;; ============================================================================
+;; cg_return_none(CompUnit *u)
+;; ============================================================================
+DEF_FUNC cg_return_none, 16
+    push rbx
+    push r12
+    mov rbx, rdi
+    extern none_singleton
+    lea rsi, [rel none_singleton]
+    INCREF rsi
+    mov rdi, rbx
+    call cg_const
+    mov rdx, rax
+    mov rdi, rbx
+    mov esi, OP_RETURN_CONST
+    xor ecx, ecx
+    call cg_emit
+    or byte [rax + Instr.flags], IF_NOLINE
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC cg_return_none
+
+;; ============================================================================
+;; cg_s_functiondef / cg_s_lambda_expr / cg_s_return
+;; ============================================================================
+CSF_COMP  equ 8
+CSF_UNIT  equ 16
+CSF_NODE  equ 24
+CSF_LINE  equ 32
+CSF_FRAME equ 40          ; + 3 pushes = 64
+DEF_FUNC cg_s_functiondef, CSF_FRAME
+    push rbx
+    push r12
+    push r13
+    mov rbx, rdi
+    mov r12, rsi
+    mov r13, rdx
+    mov rdi, rbx
+    mov rsi, r13
+    call ast_at
+    mov ecx, [rax + AstNode.lineno]
+    mov [rbp - CSF_LINE], rcx
+    mov [r12 + CompUnit.curline], ecx
+
+    mov rdi, rbx
+    mov rsi, r12
+    mov rdx, r13
+    xor ecx, ecx                        ; not a lambda
+    call cg_function
+    test eax, eax
+    jz .fail
+
+    ; Bind the function to its name in the defining scope.
+    mov rdi, rbx
+    mov rsi, r13
+    call ast_at
+    mov esi, [rax + AstNode.a]
+    mov rdi, rbx
+    call ast_obj_at
+    mov rdx, rax
+    mov rdi, rbx
+    mov rsi, r12
+    mov ecx, CTX_STORE
+    xor r8d, r8d
+    call cg_nameop
+    jmp .ret
+.fail:
+    xor eax, eax
+.ret:
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC cg_s_functiondef
+
+DEF_FUNC cg_e_lambda, CSF_FRAME
+    push rbx
+    push r12
+    push r13
+    mov rbx, rdi
+    mov r12, rsi
+    mov r13, rdx
+    mov rdi, rbx
+    mov rsi, r13
+    call ast_at
+    mov ecx, [rax + AstNode.lineno]
+    mov [r12 + CompUnit.curline], ecx
+    mov rdi, rbx
+    mov rsi, r12
+    mov rdx, r13
+    mov ecx, 1                          ; a lambda
+    call cg_function
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC cg_e_lambda
+
+DEF_FUNC cg_s_return, CSF_FRAME
+    push rbx
+    push r12
+    push r13
+    mov rbx, rdi
+    mov r12, rsi
+    mov r13, rdx
+    mov rdi, rbx
+    mov rsi, r13
+    call ast_at
+    mov ecx, [rax + AstNode.lineno]
+    mov [rbp - CSF_LINE], rcx
+    mov [r12 + CompUnit.curline], ecx
+    mov ecx, [rax + AstNode.a]
+    test ecx, ecx
+    jz .bare
+
+    mov edx, ecx
+    mov rdi, rbx
+    mov rsi, r12
+    call cg_expr
+    test eax, eax
+    jz .fail
+    mov rdi, r12
+    mov esi, OP_RETURN_VALUE
+    xor edx, edx
+    mov rcx, [rbp - CSF_LINE]
+    call cg_emit
+    mov eax, 1
+    jmp .ret
+.bare:
+    mov rdi, r12
+    call cg_return_none
+    mov eax, 1
+    jmp .ret
+.fail:
+    xor eax, eax
+.ret:
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC cg_s_return
+
+section .rodata
+cg_lambda_name: db "<lambda>", 0
+
+
+ASM_INIT
