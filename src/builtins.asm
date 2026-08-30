@@ -2001,6 +2001,21 @@ BCL_BASES equ 48        ; the bases tuple built from args[2:]
     cmp rcx, rsi
     jge .bc_no_base
     mov rdx, [rbx + rcx*8]
+    ; A base must be a class.  `class C(1)` used to store and INCREF the
+    ; integer, and mro_compute then walked tp_base off it.
+    push rsi
+    push r8
+    push r9
+    push rdx
+    mov rdi, rdx
+    extern type_check_is_class
+    call type_check_is_class
+    pop rdx
+    pop r9
+    pop r8
+    pop rsi
+    test eax, eax
+    jz .build_class_base_error
     ; Prevent subclassing bool
     extern bool_type
     lea rcx, [rel bool_type]
@@ -2080,6 +2095,11 @@ BCL_BASES equ 48        ; the bases tuple built from args[2:]
 .build_class_error:
     lea rdi, [rel exc_TypeError_type]
     CSTRING rsi, "__build_class__ requires 2+ arguments"
+    call raise_exception
+
+.build_class_base_error:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "bases must be types"
     call raise_exception
 
 .build_class_bool_error:

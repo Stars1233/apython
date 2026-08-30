@@ -268,6 +268,11 @@ DEF_FUNC main
     lea rdx, [rel int_type]
     cmp rcx, rdx
     je .se_bigint
+    ; True and False are ints: sys.exit(False) exits 0, not 1.
+    extern bool_type
+    lea rdx, [rel bool_type]
+    cmp rcx, rdx
+    je .se_bigint
     extern str_type
     lea rdx, [rel str_type]
     cmp rcx, rdx

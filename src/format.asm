@@ -516,10 +516,12 @@ END_FUNC format_apply_spec
 ; The digit buffer is indexed upward from its base, so its *base* must sit
 ; low enough that the whole thing stays below rbp: [rbp-136, rbp-8).  Putting
 ; the base at rbp-8 let nine digits or more run over the saved registers.
-FIB_BUF   equ 136        ; 128 bytes of digits
+FIB_BUF   equ 136        ; 128 bytes of digits, for a value that fits int64
 FIB_LEN   equ 144
 FIB_NEG   equ 152
-FIB_FRAME equ 176
+FIB_HEAP  equ 160        ; heap digit buffer to free, or 0 (wide values)
+FIB_OUTSZ equ 168        ; bytes reserved for the assembled output
+FIB_FRAME equ 192
 
 DEF_FUNC_LOCAL format_int_body, FIB_FRAME
     push rbx
@@ -533,6 +535,7 @@ DEF_FUNC_LOCAL format_int_body, FIB_FRAME
     ; The caller's frame holds the spec.  rbp of format_apply_spec is the
     ; saved rbp at [rbp].
     mov r14, [rbp]                      ; caller's rbp
+    mov qword [rbp - FIB_HEAP], 0
 
     ; Value -> i64.  A value too wide for int64 is out of scope for the
     ; non-decimal bases here; base 10 goes through str() instead.
@@ -609,8 +612,18 @@ DEF_FUNC_LOCAL format_int_body, FIB_FRAME
     mov [rbp - FIB_LEN], rcx
 
 .fib_assemble:
-    ; Assemble: sign, prefix, grouped digits (reversed).
-    sub rsp, 256
+    ; Assemble: sign, prefix, grouped digits (reversed).  The output is sized
+    ; from the digit count -- grouping adds one separator per three digits --
+    ; because a fixed 256-byte buffer overflowed the stack on any value with
+    ; more than about 250 digits.
+    mov rax, [rbp - FIB_LEN]
+    mov rcx, rax
+    shr rcx, 1
+    add rax, rcx
+    add rax, 64
+    and rax, -16
+    mov [rbp - FIB_OUTSZ], rax
+    sub rsp, rax
     mov rdi, rsp
     xor r8d, r8d                        ; output length
 
@@ -700,8 +713,16 @@ DEF_FUNC_LOCAL format_int_body, FIB_FRAME
     mov rsi, r8
     mov r13, [rbp - FIB_NEG]
     call str_new_heap
-    add rsp, 256
+    add rsp, [rbp - FIB_OUTSZ]
     mov [r14 - FS_SIGNCH], r13
+    mov rcx, [rbp - FIB_HEAP]
+    test rcx, rcx
+    jz .fib_no_heap
+    push rax
+    mov rdi, rcx
+    call ap_free
+    pop rax
+.fib_no_heap:
     pop r15
     pop r14
     pop r13
@@ -758,8 +779,22 @@ DEF_FUNC_LOCAL format_int_body, FIB_FRAME
     inc rcx
     jmp .fib_wb_len
 .fib_wb_reverse:
-    ; FIB_BUF holds the digits least-significant first
+    ; The digits go least-significant first into FIB_BUF, which holds 128 --
+    ; enough for any int64 but not for a GMP value, whose string is
+    ; unbounded.  format(10**140, 'd') wrote past the saved rbp.
     lea rbx, [rbp - FIB_BUF]
+    cmp rcx, 120
+    jb .fib_wb_have_buf
+    push rcx
+    push rsi
+    lea rdi, [rcx + 16]
+    extern ap_malloc
+    call ap_malloc
+    mov [rbp - FIB_HEAP], rax
+    mov rbx, rax
+    pop rsi
+    pop rcx
+.fib_wb_have_buf:
     xor edx, edx
 .fib_wb_rev_loop:
     cmp rdx, rcx
@@ -781,8 +816,11 @@ DEF_FUNC_LOCAL format_int_body, FIB_FRAME
     jmp .fib_assemble
 
 .fib_wide_error:
-    lea rdi, [rel exc_ValueError_type]
-    CSTRING rsi, "integer too large for this format"
+    extern exc_OverflowError_type
+    lea rdi, [rel exc_OverflowError_type]
+    CSTRING rsi, "%c arg not in range(0x110000)"
+    call raise_exception
+    ud2
 END_FUNC format_int_body
 
 ;; ============================================================================

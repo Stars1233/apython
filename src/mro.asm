@@ -63,11 +63,49 @@ DEF_FUNC_BARE type_mro_next
     ret
 .mn_base:
     mov rax, [rsi + PyTypeObject.tp_base]
+    test rax, rax
+    jnz .mn_out
+    ; A static type's chain ends at 0, not at object; every lookup and
+    ; subclass test stopped one type short of object.
+    lea rax, [rel object_type]
+    cmp rsi, rax
+    je .mn_none
+.mn_out:
     ret
 .mn_none:
     xor eax, eax
     ret
 END_FUNC type_mro_next
+
+; type_check_is_class(rdi = Value) -> eax 0/1
+; True when the value is a type object: its metatype is type_type,
+; user_type_metatype or exc_metatype.
+global type_check_is_class
+DEF_FUNC_BARE type_check_is_class
+    V_TEST_PTR rdi, rax
+    ja .tc_no
+    test rdi, rdi
+    jz .tc_no
+    mov rax, [rdi + PyObject.ob_type]
+    extern type_type
+    lea rcx, [rel type_type]
+    cmp rax, rcx
+    je .tc_yes
+    extern user_type_metatype
+    lea rcx, [rel user_type_metatype]
+    cmp rax, rcx
+    je .tc_yes
+    extern exc_metatype
+    lea rcx, [rel exc_metatype]
+    cmp rax, rcx
+    je .tc_yes
+.tc_no:
+    xor eax, eax
+    ret
+.tc_yes:
+    mov eax, 1
+    ret
+END_FUNC type_check_is_class
 
 ; ----------------------------------------------------------------------------
 ; type_is_subtype(rdi = candidate subtype, rsi = type) -> eax 0/1
@@ -109,12 +147,17 @@ DEF_FUNC_BARE type_mro_len
     ret
 .ml_chain:
     xor eax, eax
+    lea rcx, [rel object_type]
 .ml_walk:
     test rdi, rdi
     jz .ml_done
     inc rax
+    cmp rdi, rcx
+    je .ml_done                     ; object terminates the chain
     mov rdi, [rdi + PyTypeObject.tp_base]
-    jmp .ml_walk
+    test rdi, rdi
+    jnz .ml_walk
+    inc rax                         ; the implicit object at the end
 .ml_done:
     ret
 .ml_zero:
@@ -143,11 +186,22 @@ DEF_FUNC_BARE type_mro_fill
     jmp .mf_copy
 .mf_chain:
     test rdi, rdi
-    jz .mf_done
+    jz .mf_object
     mov [rsi + rax*8], rdi
     inc rax
     mov rdi, [rdi + PyTypeObject.tp_base]
     jmp .mf_chain
+.mf_object:
+    ; Most static types leave tp_base at 0 rather than pointing at object, so
+    ; a chain walk ends one short and object never entered the linearization:
+    ; isinstance(D(), object) was False for `class D(dict)`.
+    test rax, rax
+    jz .mf_done
+    lea rcx, [rel object_type]
+    cmp [rsi + rax*8 - 8], rcx
+    je .mf_done
+    mov [rsi + rax*8], rcx
+    inc rax
 .mf_done:
     ret
 END_FUNC type_mro_fill
