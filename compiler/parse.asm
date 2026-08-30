@@ -582,8 +582,11 @@ END_FUNC in_boolop
 ;; in_ternary(Comp *c, node body) -> node   -- body if test else orelse
 ;;
 ;; The condition is parsed at BP_OR so it cannot itself be a ternary, and the
-;; alternative at BP_TERNARY so that a if b else c if d else e nests to the
-;; right.  Both facts are just the minimum binding power, no lookahead.
+;; alternative one level BELOW the ternary so that `a if b else c if d else e`
+;; nests to the right.  Parsing it AT BP_TERNARY does not do that: the driver
+;; continues only while lbp > min_bp, so an equal power stops -- and the
+;; expression came out left-nested, which for `"pos" if x > 0 else "zero" if
+;; x == 0 else "neg"` answers "neg" for a positive x.
 IT_COMP  equ 8
 IT_BODY  equ 16
 IT_LINE  equ 24
@@ -616,7 +619,7 @@ DEF_FUNC_LOCAL in_ternary, IT_FRAME
     jz .fail
 
     mov rdi, rbx
-    mov esi, BP_TERNARY
+    mov esi, BP_WALRUS
     call par_expr
     test rax, rax
     jz .fail
@@ -2067,7 +2070,12 @@ DEF_FUNC_LOCAL pf_starred, PST_FRAME
     mov rdi, rbx
     call par_advance
     mov rdi, rbx
-    mov esi, BP_OR                      ; binds tighter than a comma or colon
+    ; A star takes an or_expr: `[*a | b]` is `[*(a | b)]`, while `[*a in b]`
+    ; and `[*a or b]` are syntax errors.  Recursing below BP_COMPARE swallowed
+    ; the `in` of a for statement, so `for a, *b in z` had no loop keyword left
+    ; -- while `for *a, b in z` parsed, because there the star was not the
+    ; element the `in` followed.
+    mov esi, BP_STAROP
     call par_expr
     test rax, rax
     jz .fail
@@ -2544,9 +2552,12 @@ END_FUNC par_peek_next
 ;; ============================================================================
 ;; pf_lambda(Comp *c) -> node   -- `lambda params: expr`
 ;;
-;; The body is parsed at BP_TERNARY, so `lambda: a, b` is a tuple containing a
-;; lambda rather than a lambda returning a tuple -- the comma is not part of
-;; the body, and never has been.
+;; The body is parsed one level below the ternary, so `lambda x: a if c else b`
+;; is a lambda returning a conditional -- at BP_TERNARY the `if` binds no
+;; tighter than the minimum and stops, leaving the lambda as the conditional's
+;; body and its parameter out of scope.  A comma is still not part of the body,
+;; because a comma is not in the table at all: `lambda: a, b` is a tuple
+;; containing a lambda.
 ;; ============================================================================
 PLM_COMP  equ 8
 PLM_LINE  equ 16
@@ -2577,7 +2588,7 @@ DEF_FUNC_LOCAL pf_lambda, PLM_FRAME
     jz .fail
 
     mov rdi, rbx
-    mov esi, BP_TERNARY
+    mov esi, BP_WALRUS
     call par_expr
     test rax, rax
     jz .fail
@@ -2887,7 +2898,7 @@ DEF_FUNC_LOCAL pf_yield, PY_FRAME
     je .bare
 
     mov rdi, rbx
-    mov esi, BP_TERNARY
+    mov esi, BP_WALRUS
     call par_expr
     test rax, rax
     jz .fail
@@ -2902,7 +2913,7 @@ DEF_FUNC_LOCAL pf_yield, PY_FRAME
     call par_advance
     mov qword [rbp - PY_KIND], AST_YIELDFROM
     mov rdi, rbx
-    mov esi, BP_TERNARY
+    mov esi, BP_WALRUS
     call par_expr
     test rax, rax
     jz .fail
@@ -2967,6 +2978,60 @@ DEF_FUNC_LOCAL pf_await, PAW_FRAME
     leave
     ret
 END_FUNC pf_await
+
+;; ============================================================================
+;; in_walrus(Comp *c, node left) -> node   -- `name := value`
+;;
+;; Only a plain name may be assigned to.  `(a.b := 1)` and `(a[0] := 1)` are
+;; syntax errors in CPython too, which is why the check is here rather than in
+;; the code generator: there is nothing sensible to emit for them.
+;; ============================================================================
+IW_LINE  equ 8
+IW_LEFT  equ 16
+IW_FRAME equ 24           ; + 1 push = 32
+DEF_FUNC_LOCAL in_walrus, IW_FRAME
+    push rbx
+    mov rbx, rdi
+    mov [rbp - IW_LEFT], rsi
+    call par_peek
+    mov ecx, [rax + Token.lineno]
+    mov [rbp - IW_LINE], rcx
+
+    mov rdi, rbx
+    mov rsi, [rbp - IW_LEFT]
+    call ast_at
+    movzx ecx, byte [rax + AstNode.kind]
+    cmp ecx, AST_NAME
+    jne .bad_target
+    mov byte [rax + AstNode.subkind], CTX_STORE
+
+    mov rdi, rbx
+    call par_advance                    ; `:=`
+    mov rdi, rbx
+    mov esi, BP_LAMBDA
+    call par_expr
+    test rax, rax
+    jz .fail
+    mov r9, rax
+    mov rdi, rbx
+    mov esi, AST_NAMEDEXPR
+    xor edx, edx
+    mov rcx, [rbp - IW_LINE]
+    mov r8, [rbp - IW_LEFT]
+    call ast_make
+    pop rbx
+    leave
+    ret
+.bad_target:
+    mov rdi, rbx
+    CSTRING rsi, "cannot use ':=' with that target"
+    call par_syntax_error
+.fail:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+END_FUNC in_walrus
 
 section .rodata
 
@@ -3108,8 +3173,8 @@ prule_table:
     dq 0           , 0           
     db BP_NONE    , BP_NONE    , 0                 , 0           ; TOK_EQUAL
     dd 0
-    dq 0           , 0           
-    db BP_NONE    , BP_NONE    , 0                 , 0           ; TOK_COLONEQUAL
+    dq 0           , in_walrus   
+    db BP_WALRUS  , BP_LAMBDA  , 0                 , 0           ; TOK_COLONEQUAL -- right-associative, and its RHS may be a lambda but not a ternary
     dd 0
     dq 0           , 0           
     db BP_NONE    , BP_NONE    , 0                 , 0           ; TOK_RARROW
@@ -3226,7 +3291,7 @@ prule_table:
     db BP_COMPARE , BP_COMPARE , 0                 , PR_CHAIN    ; TOK_IS
     dd 0
     dq pf_lambda   , 0           
-    db BP_NONE    , BP_NONE    , 0                 , 0           ; TOK_LAMBDA -- body at BP_TERNARY: `lambda: a, b` is a tuple, not a lambda of a tuple
+    db BP_NONE    , BP_NONE    , 0                 , 0           ; TOK_LAMBDA -- body one level below the ternary: `lambda: a, b` is still a tuple
     dd 0
     dq 0           , 0           
     db BP_NONE    , BP_NONE    , 0                 , 0           ; TOK_NONLOCAL

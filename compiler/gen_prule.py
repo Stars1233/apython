@@ -25,10 +25,12 @@ R("TOK_NONE",     prefix="pf_const")
 R("TOK_ELLIPSIS", prefix="pf_const")
 R("TOK_YIELD",    prefix="pf_yield",
   note="an expression, not a statement: `x = yield v` receives from send()")
+R("TOK_COLONEQUAL", infix="in_walrus", lbp="BP_WALRUS", rbp="BP_LAMBDA",
+  note="right-associative, and its RHS may be a lambda but not a ternary")
 R("TOK_AWAIT",    prefix="pf_await",  rbp="BP_AWAIT",
   note="operand is a primary: BP_AWAIT sits between `**` and postfix")
 R("TOK_LAMBDA",   prefix="pf_lambda",
-  note="body at BP_TERNARY: `lambda: a, b` is a tuple, not a lambda of a tuple")
+  note="body one level below the ternary: `lambda: a, b` is still a tuple")
 
 # --- brackets: prefix opens a display, infix continues a primary ---------
 R("TOK_LPAR",   prefix="pf_group",  infix="in_call",

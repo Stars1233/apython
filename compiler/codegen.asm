@@ -22,6 +22,7 @@ extern buf_free
 extern buf_init
 extern buf_push_u32
 extern buf_reserve
+extern cg_store
 extern cg_e_comprehension
 extern cg_e_formattedvalue
 extern cg_e_joinedstr
@@ -439,6 +440,65 @@ DEF_FUNC_BARE cg_pop_handler
 .none:
     ret
 END_FUNC cg_pop_handler
+
+;; ============================================================================
+;; ============================================================================
+;; cg_e_namedexpr(Comp *c, CompUnit *u, uint32_t node) -> 1 ok, 0 error
+;;
+;;     <value>; COPY 1; <store name>
+;;
+;; The walrus is an expression whose value is what it assigned, so the value is
+;; duplicated rather than stored and reloaded -- `if (n := f()) > 5` must call
+;; f once.
+;; ============================================================================
+CNE_COMP  equ 8
+CNE_UNIT  equ 16
+CNE_NODE  equ 24
+CNE_LINE  equ 32
+CNE_FRAME equ 40          ; + 3 pushes = 64
+DEF_FUNC_LOCAL cg_e_namedexpr, CNE_FRAME
+    push rbx
+    push r12
+    push r13
+    mov rbx, rdi
+    mov r12, rsi
+    mov r13, rdx
+
+    mov rdi, rbx
+    mov rsi, r13
+    call ast_at
+    mov ecx, [rax + AstNode.lineno]
+    mov [rbp - CNE_LINE], rcx
+    mov edx, [rax + AstNode.b]          ; the value
+    mov rdi, rbx
+    mov rsi, r12
+    call cg_expr
+    test eax, eax
+    jz .fail
+
+    mov rdi, r12
+    mov esi, OP_COPY
+    mov edx, 1
+    mov rcx, [rbp - CNE_LINE]
+    call cg_emit
+
+    mov rdi, rbx
+    mov rsi, r13
+    call ast_at
+    mov edx, [rax + AstNode.a]          ; the target name
+    mov rdi, rbx
+    mov rsi, r12
+    call cg_store
+    jmp .ret
+.fail:
+    xor eax, eax
+.ret:
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC cg_e_namedexpr
 
 ;; ============================================================================
 ;; cg_cmpop(CompUnit *u, int cmpop, int lineno) -> emits one comparison
@@ -2644,7 +2704,7 @@ cg_expr_table:
     dq 0                ; 17 AST_STARRED
     dq 0                ; 18 AST_DOUBLESTARRED
     dq 0                ; 19 AST_KEYWORD
-    dq 0                ; 20 AST_NAMEDEXPR
+    dq cg_e_namedexpr   ; 20 AST_NAMEDEXPR
     dq cg_e_yield                      ; 21 AST_YIELD
     dq cg_e_yieldfrom                  ; 22 AST_YIELDFROM
     dq cg_e_await       ; 23 AST_AWAIT

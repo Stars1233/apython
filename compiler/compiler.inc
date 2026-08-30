@@ -406,6 +406,10 @@ BP_OR       equ 6
 BP_AND      equ 8
 BP_NOT      equ 10
 BP_COMPARE  equ 12
+; A starred element's operand: an or_expr, so `|` is absorbed and `in` is not.
+; It sits between the two rather than on either, because the driver continues
+; only while lbp > min_bp.
+BP_STAROP   equ 13
 BP_BITOR    equ 14
 BP_BITXOR   equ 16
 BP_BITAND   equ 18
