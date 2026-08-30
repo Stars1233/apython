@@ -60,12 +60,42 @@ DEF_FUNC_BARE op_import_name
     ; rdx already holds the raw integer payload (no decoding needed for fat values)
 
 .do_import:
+    ; A relative import is resolved against the importing module's package
+    ; before anything else happens; import_module only knows absolute names.
+    test rdx, rdx
+    jz .absolute
+    push rax
+    mov rdi, rax                ; the name as written
+    mov rsi, [r12 + PyFrame.globals]
+    extern import_resolve_relative
+    call import_resolve_relative
+    mov rdx, rax                ; the resolved name, owned
+    pop rax
+    mov [rsp + 24], rdx         ; keep it where the saved name lives
+    mov rax, rdx
+    mov rdx, 0                  ; it is absolute now
+    mov r9d, 1                  ; and the name is ours to release
+    jmp .have_name
+.absolute:
+    xor r9d, r9d
+.have_name:
+    push r9
+
     ; import_module(name_str, fromlist, level)
     mov rdi, rax                ; name
-    mov rsi, [rsp + 8]         ; fromlist
+    mov rsi, [rsp + 16]        ; fromlist
     ; rdx = level (already set)
     call import_module
     ; rax = module (new reference)
+
+    pop r9
+    test r9d, r9d
+    jz .no_resolved_name
+    push rax
+    mov rdi, [rsp + 32]         ; the resolved name we built
+    call obj_decref
+    pop rax
+.no_resolved_name:
 
     add rsp, 8                  ; discard level (SmallInt, no refcount)
 

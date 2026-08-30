@@ -107,6 +107,121 @@ IM_PATH_MARGIN equ 64
 ; import_add_exe_relative_path(rdi = suffix cstr)
 ; Appends <directory of the running binary>/<suffix> to sys.path.  Falls back
 ; to the plain relative entry when /proc/self/exe cannot be read.
+
+; ----------------------------------------------------------------------------
+; import_resolve_relative(rdi = name str, rsi = globals dict, rdx = level)
+;   -> rax = the absolute name, a new reference
+;
+; `from . import x` inside a package: level counts how far up from the
+; importing module's package to start.  Level was read off the stack and then
+; ignored, so every relative import in the stdlib looked like an import of the
+; empty name.
+; ----------------------------------------------------------------------------
+IRR_NAME  equ 8
+IRR_LEVEL equ 16
+IRR_PKG   equ 24
+IRR_LEN   equ 32
+IRR_BUF   equ 1064          ; 1024 bytes, [rbp-1064, rbp-40)
+global import_resolve_relative
+IRR_FRAME equ 1072
+DEF_FUNC import_resolve_relative, IRR_FRAME
+    push rbx
+    push r12
+    mov [rbp - IRR_NAME], rdi
+    mov [rbp - IRR_LEVEL], rdx
+
+    ; The importing module's package.  __package__ is set at import time; for
+    ; a package itself it is the package's own name.
+    test rsi, rsi
+    jz .irr_no_package
+    push rsi
+    lea rdi, [rel irr_package_key]
+    call str_from_cstr_heap
+    mov rbx, rax
+    pop rdi
+    mov rsi, rbx
+    call dict_get
+    push rax
+    mov rdi, rbx
+    call obj_decref
+    pop rax
+    test rax, rax
+    jz .irr_no_package
+    V_TEST_PTR rax, rcx
+    ja .irr_no_package
+    mov rcx, [rax + PyObject.ob_type]
+    lea rdx, [rel str_type]
+    cmp rcx, rdx
+    jne .irr_no_package
+    mov [rbp - IRR_PKG], rax
+    mov rcx, [rax + PyStrObject.ob_size]
+    test rcx, rcx
+    jz .irr_no_package
+
+    ; Copy the package name, then drop one trailing component per extra level.
+    lea rbx, [rbp - IRR_BUF]
+    cmp rcx, IRR_BUF - 64
+    jae .irr_no_package
+    mov [rbp - IRR_LEN], rcx
+    mov rdi, rbx
+    mov rax, [rbp - IRR_PKG]
+    lea rsi, [rax + PyStrObject.data]
+    mov rdx, rcx
+    call ap_memcpy
+
+    mov r12, [rbp - IRR_LEVEL]
+    dec r12
+.irr_strip:
+    test r12, r12
+    jle .irr_have_base
+    mov rcx, [rbp - IRR_LEN]
+.irr_find_dot:
+    test rcx, rcx
+    jz .irr_beyond_top
+    dec rcx
+    cmp byte [rbx + rcx], '.'
+    jne .irr_find_dot
+    mov [rbp - IRR_LEN], rcx
+    dec r12
+    jmp .irr_strip
+
+.irr_have_base:
+    ; Append ".name" when there is a name; `from . import x` has none.
+    mov rax, [rbp - IRR_NAME]
+    mov rdx, [rax + PyStrObject.ob_size]
+    test rdx, rdx
+    jz .irr_build
+    mov rcx, [rbp - IRR_LEN]
+    mov byte [rbx + rcx], '.'
+    inc rcx
+    mov [rbp - IRR_LEN], rcx
+    lea rdi, [rbx + rcx]
+    lea rsi, [rax + PyStrObject.data]
+    push rdx
+    call ap_memcpy
+    pop rdx
+    add [rbp - IRR_LEN], rdx
+
+.irr_build:
+    mov rdi, rbx
+    mov rsi, [rbp - IRR_LEN]
+    call str_new_heap
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.irr_beyond_top:
+    lea rdi, [rel exc_ImportError_type]
+    CSTRING rsi, "attempted relative import beyond top-level package"
+    call raise_exception
+.irr_no_package:
+    lea rdi, [rel exc_ImportError_type]
+    CSTRING rsi, "attempted relative import with no known parent package"
+    call raise_exception
+END_FUNC import_resolve_relative
+
+
 ; ----------------------------------------------------------------------------
 IAR_SUFFIX equ 8
 IAR_LEN    equ 16
@@ -411,8 +526,6 @@ DEF_FUNC import_module, IF_FRAME
     mov [rbp - IF_LEVEL], rdx       ; level
     DUNDER_EXC_SAVE [rbp - IF_EXC]  ; see .import_error
 
-    ; For now, skip relative import handling (level > 0)
-    ; TODO: resolve relative imports
 
     ; Get name as C string for comparisons
     mov rdi, [rbp - IF_NAME]
@@ -1655,6 +1768,7 @@ END_FUNC import_load_module
 section .rodata
 
 im_no_module_prefix: db "No module named '", 0
+irr_package_key:    db "__package__", 0
 im_lib_path:        db "lib", 0
 im_tests_cpython_path: db "tests/cpython", 0
 im_time_name:       db "time", 0
