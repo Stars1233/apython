@@ -172,6 +172,7 @@ test_str_methods_extra
 test_str_methods_fix
 test_str_predicates
 test_super_descriptors
+test_syntax_error_location
 test_sys_exit
 test_traceback
 test_tuples

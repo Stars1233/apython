@@ -385,6 +385,62 @@ DEF_FUNC exc_repr, ER_FRAME
     ret
 END_FUNC exc_repr
 
+;; ============================================================================
+;; exc_is_syntax(PyObject *exc) -> eax = 1 when it is a SyntaxError carrying a
+;; location: args == (msg, (filename, lineno, offset, text)).
+;; ============================================================================
+DEF_FUNC exc_is_syntax
+    push rbx
+    mov rbx, rdi
+    lea rsi, [rel exc_SyntaxError_type]
+    call exc_isinstance
+    test eax, eax
+    jz .no
+    mov rax, [rbx + PyExceptionObject.exc_args]
+    test rax, rax
+    jz .no
+    cmp qword [rax + PyTupleObject.ob_size], 2
+    jne .no
+    mov rax, [rax + PyTupleObject.ob_item]
+    mov rax, [rax + 8]
+    V_TEST_PTR rax, rcx
+    ja .no
+    test rax, rax
+    jz .no
+    mov rcx, [rax + PyObject.ob_type]
+    lea rdx, [rel tuple_type]
+    cmp rcx, rdx
+    jne .no
+    cmp qword [rax + PyTupleObject.ob_size], 4
+    jne .no
+    mov eax, 1
+    pop rbx
+    leave
+    ret
+.no:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+END_FUNC exc_is_syntax
+
+;; ============================================================================
+;; exc_syntax_str(PyObject *exc) -> PyStrObject*, the bare message
+;;
+;; CPython appends " (filename, line N)" here.  The traceback printer shows the
+;; same information in its own File/line/caret block, so this is the one place
+;; the two differ, and only for code that prints a caught SyntaxError itself.
+;; ============================================================================
+DEF_FUNC exc_syntax_str
+    mov rax, [rdi + PyExceptionObject.exc_args]
+    mov rax, [rax + PyTupleObject.ob_item]
+    mov rdi, [rax]
+    call obj_str
+    V_UNPACK rax, rdx
+    leave
+    ret
+END_FUNC exc_syntax_str
+
 ; exc_str(PyExceptionObject *exc) -> PyObject* (string)
 ; Returns the message string, or type name if no message.
 ES_EXC   equ 8
@@ -405,6 +461,30 @@ DEF_FUNC exc_str, ES_FRAME
     mov rcx, [rax + PyTupleObject.ob_size]
     test rcx, rcx
     jz .es_empty
+    ; A syntax error's args are (msg, (filename, lineno, offset, text)), and
+    ; str() renders the pair the way CPython does rather than showing the
+    ; tuple: "msg (filename, line N)".
+    cmp rcx, 2
+    jne .es_not_syntax
+    mov rdi, rbx
+    call exc_is_syntax
+    test eax, eax
+    jz .es_not_syntax
+    mov rdi, rbx
+    call exc_syntax_str
+    test rax, rax
+    jz .es_not_syntax
+    mov edx, TAG_PTR
+    pop rbx
+    leave
+    ret
+.es_not_syntax:
+    ; exc_is_syntax is a call, so the args pointer and the count it left in rax
+    ; and rcx are gone; both have to come back before the ordinary paths use
+    ; them.
+    mov rax, [rbx + PyExceptionObject.exc_args]
+    mov rcx, [rax + PyTupleObject.ob_size]
+
     cmp rcx, 1
     jne .es_tuple
 

@@ -12,6 +12,7 @@
 %include "macros.inc"
 %include "object.inc"
 %include "types.inc"
+%include "errcodes.inc"
 %include "opcodes.inc"
 %include "value.inc"
 %include "compiler.inc"
@@ -25,6 +26,10 @@ extern buf_init
 extern buf_reserve
 extern comp_error
 extern exc_SyntaxError_type
+extern exc_IndentationError_type
+extern exc_TabError_type
+extern tuple_new
+extern obj_decref
 extern obj_dealloc
 
 extern lex_run
@@ -310,6 +315,17 @@ DEF_FUNC comp_set_pending, 8
     mov rdi, [rbx + Comp.err + CompErr.type]
     mov rsi, [rbx + Comp.err + CompErr.msg]
     call exc_from_cstr
+
+    ; A syntax error carries where it happened, in CPython's shape:
+    ; args = (msg, (filename, lineno, offset, text)).  The traceback printer
+    ; reads that tuple to produce the File/line/caret block, and str() reads it
+    ; for the "(file, line N)" suffix; without it a syntax error is a bare
+    ; message with nothing to locate it by.
+    push rax
+    mov rdi, rbx
+    mov rsi, rax
+    call comp_attach_location
+    pop rax
 
     ; Chain onto whatever was already being handled, as a raise would.
     mov rsi, [rel current_exception]
@@ -698,5 +714,179 @@ DEF_FUNC comp_lex_span, CLS_FRAME
     leave
     ret
 END_FUNC comp_lex_span
+
+;; ============================================================================
+;; comp_attach_location(Comp *c, PyExceptionObject *exc)
+;; Replace the exception's args with (msg, (filename, lineno, offset, text)).
+;; Best-effort: on any allocation failure the bare message is left alone.
+;; ============================================================================
+AL_COMP  equ 8
+AL_EXC   equ 16
+AL_INNER equ 24
+AL_OUTER equ 32
+AL_TEXT  equ 40
+AL_FRAME equ 56           ; + 3 pushes = 80
+DEF_FUNC comp_attach_location, AL_FRAME
+    push rbx
+    push r12
+    push r13
+    mov rbx, rdi
+    mov r12, rsi
+
+    ; Only the syntax errors carry a position.
+    mov rax, [rbx + Comp.err + CompErr.type]
+    lea rcx, [rel exc_SyntaxError_type]
+    cmp rax, rcx
+    je .go
+    lea rcx, [rel exc_IndentationError_type]
+    cmp rax, rcx
+    je .go
+    lea rcx, [rel exc_TabError_type]
+    cmp rax, rcx
+    jne .done
+.go:
+    mov edi, 4
+    call tuple_new
+    test rax, rax
+    jz .done
+    mov [rbp - AL_INNER], rax
+
+    mov rdx, [rax + PyTupleObject.ob_item]
+    mov rcx, [rbx + Comp.filename]
+    test rcx, rcx
+    jnz .have_file
+    lea rcx, [rel none_singleton]
+.have_file:
+    INCREF rcx
+    mov [rdx], rcx
+
+    mov rsi, [rbp - AL_INNER]
+    mov rsi, [rsi + PyTupleObject.ob_item]
+    mov ecx, [rbx + Comp.err + CompErr.lineno]
+    V_PACK_I64 rcx, rdx
+    mov [rsi + 8], rcx
+    ; CPython's offset is one-based; the column recorded here is not.
+    mov ecx, [rbx + Comp.err + CompErr.col]
+    inc rcx
+    V_PACK_I64 rcx, rdx
+    mov [rsi + 16], rcx
+
+    mov rdi, rbx
+    mov esi, [rbx + Comp.err + CompErr.lineno]
+    call comp_line_text
+    test rax, rax
+    jnz .have_text
+    ; A slot in a tuple must hold a real Value: None, not NULL.  A NULL there
+    ; is not an empty string, it is a hole that anything reading the tuple
+    ; walks straight into.
+    lea rax, [rel none_singleton]
+    INCREF rax
+.have_text:
+    mov rdx, [rbp - AL_INNER]
+    mov rdx, [rdx + PyTupleObject.ob_item]
+    mov [rdx + 24], rax
+
+    mov edi, 2
+    call tuple_new
+    test rax, rax
+    jz .free_inner
+    mov [rbp - AL_OUTER], rax
+    mov rdx, [rax + PyTupleObject.ob_item]
+
+    ; args[0] is the message the exception already carries.
+    mov rcx, [r12 + PyExceptionObject.exc_args]
+    test rcx, rcx
+    jz .no_msg
+    cmp qword [rcx + PyTupleObject.ob_size], 0
+    jle .no_msg
+    mov rcx, [rcx + PyTupleObject.ob_item]
+    mov rcx, [rcx]
+    INCREF_V rcx, r8
+    mov [rdx], rcx
+    jmp .have_msg
+.no_msg:
+    mov qword [rdx], 0
+.have_msg:
+    mov rcx, [rbp - AL_INNER]
+    mov [rdx + 8], rcx
+
+    mov rdi, [r12 + PyExceptionObject.exc_args]
+    mov rax, [rbp - AL_OUTER]
+    mov [r12 + PyExceptionObject.exc_args], rax
+    test rdi, rdi
+    jz .done
+    call obj_decref
+    jmp .done
+
+.free_inner:
+    mov rdi, [rbp - AL_INNER]
+    call obj_decref
+.done:
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC comp_attach_location
+
+;; ============================================================================
+;; comp_line_text(Comp *c, int lineno) -> PyStrObject*, or 0
+;; The source of one line, newline included, as CPython's SyntaxError.text is.
+;; ============================================================================
+LT_COMP  equ 8
+LT_LINE  equ 16
+LT_POS   equ 24
+LT_START equ 32
+LT_FRAME equ 40           ; + 1 push = 48
+DEF_FUNC comp_line_text, LT_FRAME
+    push rbx
+    mov rbx, rdi
+    mov [rbp - LT_LINE], rsi
+    cmp rsi, 1
+    jl .none
+    mov rax, [rbx + Comp.src]
+    test rax, rax
+    jz .none
+
+    ; Walk to the start of the wanted line.
+    xor ecx, ecx                        ; byte position
+    mov edx, 1                          ; current line number
+.scan:
+    cmp rdx, [rbp - LT_LINE]
+    jae .found
+    cmp rcx, [rbx + Comp.srclen]
+    jae .none
+    cmp byte [rax + rcx], 10
+    jne .scan_next
+    inc rdx
+.scan_next:
+    inc rcx
+    jmp .scan
+.found:
+    mov [rbp - LT_START], rcx
+    ; And to its end, keeping the newline the way CPython does.
+.end_scan:
+    cmp rcx, [rbx + Comp.srclen]
+    jae .have_end
+    inc rcx
+    cmp byte [rax + rcx - 1], 10
+    jne .end_scan
+.have_end:
+    mov rdx, rcx
+    sub rdx, [rbp - LT_START]
+    jz .none
+    add rax, [rbp - LT_START]
+    mov rdi, rax
+    mov rsi, rdx
+    call str_new_heap
+    pop rbx
+    leave
+    ret
+.none:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+END_FUNC comp_line_text
 
 ASM_INIT

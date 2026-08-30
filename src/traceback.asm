@@ -30,6 +30,8 @@ extern sys_open
 extern sys_read
 extern sys_close
 extern obj_str
+extern exc_is_syntax
+extern str_type
 extern obj_decref
 extern str_type
 extern traceback_type
@@ -647,6 +649,12 @@ DEF_FUNC tb_print_one, TP_FRAME
     call tb_print_repeated
 
 .tp_body:
+    ; A syntax error shows where it happened before it says what it was, the
+    ; way CPython does: the file and line, the source of that line, and a caret
+    ; under the column.  Its args carry (msg, (filename, lineno, offset, text)).
+    mov rdi, [rbp - TP_EXC]
+    call tb_syntax_header
+
     ; "TypeName: str(exc)", with the colon omitted when str(exc) is empty.
     mov rdi, [rbp - TP_EXC]
     mov rax, [rdi + PyObject.ob_type]
@@ -687,6 +695,133 @@ DEF_FUNC tb_print_one, TP_FRAME
     leave
     ret
 END_FUNC tb_print_one
+
+;; ============================================================================
+;; tb_syntax_header(PyObject *exc)
+;; The File/line/source/caret block a syntax error is printed with.  Does
+;; nothing for anything else, or for a syntax error with no location.
+;; ============================================================================
+SH_EXC   equ 8
+SH_INNER equ 16
+SH_TEXT  equ 24
+SH_COL   equ 32
+SH_I     equ 40
+SH_FRAME equ 40           ; + 1 push = 48
+DEF_FUNC tb_syntax_header, SH_FRAME
+    push rbx
+    mov rbx, rdi
+    call exc_is_syntax
+    test eax, eax
+    jz .done
+
+    mov rax, [rbx + PyExceptionObject.exc_args]
+    mov rax, [rax + PyTupleObject.ob_item]
+    mov rax, [rax + 8]
+    mov [rbp - SH_INNER], rax
+    mov rax, [rax + PyTupleObject.ob_item]
+
+    push rax
+    CSTRING rdi, `  File "`
+    call tb_write_cstr
+    pop rax
+    push rax
+    mov rdi, [rax]
+    call tb_write_str
+    pop rax
+    push rax
+    CSTRING rdi, `", line `
+    call tb_write_cstr
+    pop rax
+    push rax
+    mov rdi, [rax + 8]
+    V_TO_I64 rdi
+    call tb_write_dec
+    pop rax
+    push rax
+    CSTRING rdi, `\n`
+    call tb_write_cstr
+    pop rax
+
+    ; The source line, indented four spaces and stripped of leading blanks the
+    ; way CPython prints it, then a caret under the offending column.
+    mov rcx, [rax + 24]
+    mov [rbp - SH_TEXT], rcx
+    mov rcx, [rax + 16]
+    V_TO_I64 rcx
+    mov [rbp - SH_COL], rcx
+    mov rax, [rbp - SH_TEXT]
+    V_TEST_PTR rax, rcx
+    ja .done
+    test rax, rax
+    jz .done
+    mov rcx, [rax + PyObject.ob_type]
+    lea rdx, [rel str_type]
+    cmp rcx, rdx
+    jne .done
+
+    ; Skip the leading whitespace, and take the caret's column with it.
+    xor ecx, ecx
+.skip:
+    cmp rcx, [rax + PyStrObject.ob_size]
+    jae .have_skip
+    mov dl, [rax + PyStrObject.data + rcx]
+    cmp dl, ' '
+    je .skip_next
+    cmp dl, 9
+    jne .have_skip
+.skip_next:
+    inc rcx
+    jmp .skip
+.have_skip:
+    mov [rbp - SH_I], rcx
+
+    push rax
+    CSTRING rdi, "    "
+    call tb_write_cstr
+    pop rax
+    mov rdi, rax
+    add rdi, PyStrObject.data
+    add rdi, [rbp - SH_I]
+    mov rsi, [rax + PyStrObject.ob_size]
+    sub rsi, [rbp - SH_I]
+    ; Trim the trailing newline; the caret line supplies its own.
+    cmp rsi, 0
+    jle .no_text
+    cmp byte [rdi + rsi - 1], 10
+    jne .write_text
+    dec rsi
+.write_text:
+    call tb_write
+    CSTRING rdi, `\n`
+    call tb_write_cstr
+.no_text:
+
+    ; The caret, under the column.  The offset is one-based and the leading
+    ; whitespace has already been dropped, so both come off it.
+    CSTRING rdi, "    "
+    call tb_write_cstr
+    mov rcx, [rbp - SH_COL]
+    dec rcx
+    sub rcx, [rbp - SH_I]
+    jns .pad
+    xor ecx, ecx
+.pad:
+    mov [rbp - SH_I], rcx
+.pad_loop:
+    cmp qword [rbp - SH_I], 0
+    jle .caret
+    CSTRING rdi, " "
+    call tb_write_cstr
+    dec qword [rbp - SH_I]
+    jmp .pad_loop
+.caret:
+    CSTRING rdi, `^\n`
+    call tb_write_cstr
+.done:
+    pop rbx
+    leave
+    ret
+END_FUNC tb_syntax_header
 
 section .bss
 tb_seen:   resq TB_SEEN_MAX
