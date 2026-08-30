@@ -41,6 +41,7 @@ test_compile_fstring
 test_compile_func
 test_compile_match
 test_compile_operators
+test_compile_pep695
 test_compile_scope_unbound
 test_compile_subscript_except
 test_compile_try
@@ -80,6 +81,7 @@ test_format
 test_format_spec
 test_fstrings
 test_functions
+test_future_import
 test_gc_generations
 test_gen_adv
 test_generator_close_throw

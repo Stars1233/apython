@@ -37,6 +37,7 @@ extern par_kind
 extern par_peek
 extern par_syntax_error
 extern par_looks_like_match
+extern par_soft_keyword_is
 extern ps_match
 extern in_call_public
 
@@ -171,9 +172,27 @@ DEF_FUNC par_statement, 8
     mov rdi, rbx
     call par_looks_like_match
     test eax, eax
-    jz .as_expr
+    jz .maybe_alias
     mov rdi, rbx
     call ps_match
+    pop rbx
+    leave
+    ret
+.maybe_alias:
+    ; `type` is a soft keyword as well as a builtin, so only the statement
+    ; shape -- `type X =` or `type X[` -- is taken as one.
+    mov rdi, rbx
+    lea rsi, [rel ps_type_kw]
+    mov edx, 4
+    call par_soft_keyword_is
+    test eax, eax
+    jz .as_expr
+    mov rdi, rbx
+    call par_looks_like_type_alias
+    test eax, eax
+    jz .as_expr
+    mov rdi, rbx
+    call ps_type_alias
     pop rbx
     leave
     ret
@@ -1939,6 +1958,11 @@ DEF_FUNC_LOCAL ps_def, PDF_FRAME
     mov [rbp - PDF_NAME], rax
 
     mov rdi, rbx
+    call par_skip_type_params
+    test eax, eax
+    jz .fail
+
+    mov rdi, rbx
     mov esi, TOK_LPAR
     CSTRING rdx, "expected '(' after the function name"
     call par_expect
@@ -2132,6 +2156,192 @@ DEF_FUNC_LOCAL ps_async, PAS_FRAME
     leave
     ret
 END_FUNC ps_async
+
+;; ============================================================================
+;; par_skip_type_params(Comp *c) -> rax = 1 ok, 0 error
+;;
+;; PEP 695's `def f[T](...)`, `class C[T]:` and `type X[T] = ...`.
+;;
+;; The parameters are read and discarded.  A type parameter is visible only to
+;; annotations, and annotations are not evaluated here at all -- op_make_function
+;; pops and discards them -- so there is nothing for the names to be bound for.
+;; Accepting the syntax is what matters: without this the whole definition is a
+;; syntax error rather than a function that ignores its type parameters.
+;; ============================================================================
+STP_DEPTH equ 8
+STP_FRAME equ 24          ; + 1 push = 32
+DEF_FUNC par_skip_type_params, STP_FRAME
+    push rbx
+    mov rbx, rdi
+    call par_kind
+    cmp eax, TOK_LSQB
+    jne .none
+    mov qword [rbp - STP_DEPTH], 0
+.loop:
+    mov rdi, rbx
+    call par_kind
+    cmp eax, TOK_ENDMARKER
+    je .unterminated
+    cmp eax, TOK_NEWLINE
+    je .unterminated
+    cmp eax, TOK_LSQB
+    jne .not_open
+    inc qword [rbp - STP_DEPTH]
+.not_open:
+    cmp eax, TOK_RSQB
+    jne .step
+    dec qword [rbp - STP_DEPTH]
+    cmp qword [rbp - STP_DEPTH], 0
+    jne .step
+    mov rdi, rbx
+    call par_advance
+    mov eax, 1
+    pop rbx
+    leave
+    ret
+.step:
+    mov rdi, rbx
+    call par_advance
+    jmp .loop
+.unterminated:
+    mov rdi, rbx
+    CSTRING rsi, "'[' was never closed"
+    call par_syntax_error
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+.none:
+    mov eax, 1
+    pop rbx
+    leave
+    ret
+END_FUNC par_skip_type_params
+
+;; ============================================================================
+;; par_looks_like_type_alias(Comp *c) -> rax = 1 for a PEP 695 `type X = ...`
+;; `type` is a soft keyword and also a builtin, so `type(x)`, `type = f` and
+;; `type.mro` all have to keep working: the statement form is NAME NAME, or
+;; NAME NAME '[', and nothing else is.
+;; ============================================================================
+DEF_FUNC_BARE par_looks_like_type_alias
+    mov eax, [rdi + Comp.tok_idx]
+    inc eax
+    mov rdx, [rdi + Comp.tokens + Buf.len]
+    cmp rax, rdx
+    jae .no
+    mov rcx, [rdi + Comp.tokens + Buf.data]
+    mov rsi, rax
+    imul rsi, rsi, Token_size
+    movzx esi, word [rcx + rsi + Token.kind]
+    cmp esi, TOK_NAME
+    jne .no
+    ; The token after the alias name settles it: '=' or a parameter list.
+    inc rax
+    cmp rax, rdx
+    jae .no
+    imul rax, rax, Token_size
+    movzx eax, word [rcx + rax + Token.kind]
+    cmp eax, TOK_EQUAL
+    je .yes
+    cmp eax, TOK_LSQB
+    je .yes
+.no:
+    xor eax, eax
+    ret
+.yes:
+    mov eax, 1
+    ret
+END_FUNC par_looks_like_type_alias
+
+;; ============================================================================
+;; ps_type_alias(Comp *c) -> node   -- `type X = V` and `type X[T] = V`
+;;
+;; Compiled as the assignment `X = V`.  CPython makes X a TypeAliasType whose
+;; value is evaluated lazily; there is no such type here, and nothing that
+;; would observe the difference, since annotations are never evaluated.  The
+;; alias is the value, which is what code that reads it back expects.
+;; ============================================================================
+PTA_LINE  equ 8
+PTA_NAME  equ 16
+PTA_MARK  equ 24
+PTA_VALUE equ 32
+PTA_NODE  equ 40
+PTA_FRAME equ 40          ; + 1 push = 48
+DEF_FUNC_LOCAL ps_type_alias, PTA_FRAME
+    push rbx
+    mov rbx, rdi
+    call par_peek
+    mov ecx, [rax + Token.lineno]
+    mov [rbp - PTA_LINE], rcx
+    mov rdi, rbx
+    call par_advance                    ; the soft keyword `type`
+
+    call par_peek
+    mov ecx, [rax + Token.lineno]
+    mov rdi, rbx
+    call par_name_obj
+    test rax, rax
+    jz .fail
+    mov r8, rax
+    mov rdi, rbx
+    mov esi, AST_NAME
+    mov edx, CTX_STORE
+    mov rcx, [rbp - PTA_LINE]
+    xor r9d, r9d
+    call ast_make
+    test rax, rax
+    jz .fail
+    mov [rbp - PTA_NAME], rax
+
+    mov rdi, rbx
+    call par_skip_type_params
+    test eax, eax
+    jz .fail
+
+    mov rdi, rbx
+    mov esi, TOK_EQUAL
+    CSTRING rdx, "expected '=' in a type alias"
+    call par_expect
+    test eax, eax
+    jz .fail
+
+    mov rdi, rbx
+    mov esi, BP_NONE
+    call par_expr
+    test rax, rax
+    jz .fail
+    mov [rbp - PTA_VALUE], rax
+
+    mov rdi, rbx
+    call ast_mark
+    mov [rbp - PTA_MARK], rax
+    mov rdi, rbx
+    mov rsi, [rbp - PTA_NAME]
+    call ast_push
+    mov rdi, rbx
+    mov esi, AST_ASSIGN
+    mov rdx, [rbp - PTA_LINE]
+    mov rcx, [rbp - PTA_MARK]
+    call par_finish_list
+    test rax, rax
+    jz .fail
+    mov [rbp - PTA_NODE], rax
+    mov rdi, rbx
+    mov rsi, rax
+    call ast_at
+    mov rdx, [rbp - PTA_VALUE]
+    mov [rax + AstNode.b], edx
+    mov rax, [rbp - PTA_NODE]
+    pop rbx
+    leave
+    ret
+.fail:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+END_FUNC ps_type_alias
 
 ;; ============================================================================
 ;; ps_return - `return` and `return value`
@@ -2499,6 +2709,11 @@ DEF_FUNC_LOCAL ps_class, PC_FRAME
     mov [rbp - PC_NAME], rax
     mov qword [rbp - PC_BASES], 0
 
+    mov rdi, rbx
+    call par_skip_type_params
+    test eax, eax
+    jz .fail
+
     ; The base list is an argument list, keywords and all -- `class C(B,
     ; metaclass=M)` -- so it is parsed by the same code that parses a call.
     mov rdi, rbx
@@ -2762,3 +2977,6 @@ augop_table:
     dd -1, 0
 
 ASM_INIT
+
+section .rodata
+ps_type_kw: db "type", 0
