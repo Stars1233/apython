@@ -60,6 +60,22 @@ one-line fix.
   `__cause__` / `__context__` preamble -- matches; only the caret line is
   missing.
 
+## Missing pieces
+
+These are absences rather than wrong answers — the interpreter raises rather
+than lying — but they are ordinary Python that does not work:
+
+- `time.time` and `time.sleep`.  The `time` module has only `monotonic` and
+  `process_time`; `asyncio.sleep` exists.
+- `itertools.zip_longest`, `permutations`, `combinations`, `takewhile`,
+  `dropwhile`, `filterfalse`, `groupby`, `tee`, `pairwise`.
+- The `re` wrapper module.  The `_sre` engine underneath is complete, but
+  without a shipped `re.py` an `import re` finds CPython's, which needs
+  `enum` and `types`.
+- `collections.deque`.
+- Six builtin exceptions: `IOError` / `EnvironmentError`, `FileExistsError`,
+  `IndentationError`, `TabError`, `UnicodeTranslateError`.
+
 ## Robustness
 
 - **Recursive deallocation overflows the stack**: `a=[]`, then 300k times

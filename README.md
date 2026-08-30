@@ -4,11 +4,11 @@ A Python 3.12 bytecode interpreter in x86-64 NASM assembly, exploring the fastes
 
 ## What is this?
 
-apython reads `.pyc` files and executes Python 3.12 bytecode directly — no CPython, no JIT, no interpreter overhead layers. The entire interpreter is **~78,000 lines of x86-64 assembly**, from the eval loop to the type system to the garbage collector to async I/O. It implements 27+ types, 106 opcodes, generators, async/await, pattern matching, a regex engine, cycle-collecting GC, and a pure-assembly asyncio event loop.
+apython reads `.pyc` files and executes Python 3.12 bytecode directly — no CPython, no JIT, no interpreter overhead layers. The entire interpreter is **~86,000 lines of x86-64 assembly**, from the eval loop to the type system to the garbage collector to async I/O. It implements 27+ types, 126 opcode handlers, generators, async/await, multiple inheritance with a C3 MRO, pattern matching, real tracebacks, a regex engine, cycle-collecting GC, and a pure-assembly asyncio event loop.
 
 ## Key design choices
 
-- **~78K lines of focused x86-64 NASM assembly** — no C runtime
+- **~86K lines of focused x86-64 NASM assembly** — no C runtime
 - **NaN-boxed 64-bit values** — one machine word per Python value. Pointers are stored raw (so a dereference costs nothing), floats are offset-encoded into the NaN space, and integers in ±2^50 are immediates — no heap allocation and no refcounting for any of them
 - **Raw Linux syscalls** — no libc dependency for I/O; buffered writes via direct `syscall`
 - **256-entry jump table dispatch** — x86-BTB-friendly single indirect jump per opcode
@@ -43,7 +43,7 @@ python3 -m py_compile script.py
 | Callables | function, method, builtin_function, code, staticmethod, classmethod, property |
 | Runtime | type, object, module, cell, exception, traceback, file |
 
-### Opcodes (106)
+### Opcodes (126 handlers)
 
 | Category | Opcodes |
 |----------|---------|
@@ -57,35 +57,44 @@ python3 -m py_compile script.py
 | Functions | MAKE_FUNCTION, CALL, CALL_FUNCTION_EX, CALL_INTRINSIC_1, CALL_INTRINSIC_2, KW_NAMES, RETURN_VALUE, RETURN_CONST, RETURN_GENERATOR, RESUME, COPY_FREE_VARS, MAKE_CELL |
 | Iteration | GET_ITER, FOR_ITER (+specialized list/range), END_FOR, GET_LEN |
 | Containers | BUILD_TUPLE, BUILD_LIST, BUILD_MAP, BUILD_SET, BUILD_SLICE, BUILD_STRING, BUILD_CONST_KEY_MAP, LIST_APPEND, LIST_EXTEND, SET_ADD, SET_UPDATE, MAP_ADD, DICT_MERGE, DICT_UPDATE, UNPACK_SEQUENCE, UNPACK_EX |
+| Exceptions | RAISE_VARARGS, RERAISE, PUSH_EXC_INFO, POP_EXCEPT, CHECK_EXC_MATCH, CHECK_EG_MATCH |
 | Formatting | FORMAT_VALUE |
 | Pattern matching | MATCH_MAPPING, MATCH_SEQUENCE, MATCH_KEYS, MATCH_CLASS |
 | Import | IMPORT_NAME, IMPORT_FROM |
 | Async | GET_AWAITABLE, GET_AITER, GET_ANEXT, GET_YIELD_FROM_ITER, SEND, END_SEND, YIELD_VALUE, CLEANUP_THROW, END_ASYNC_FOR, BEFORE_ASYNC_WITH |
 | With/Annotations | BEFORE_WITH, WITH_EXCEPT_START, SETUP_ANNOTATIONS |
+| Wide operands | EXTENDED_ARG |
 
-### Builtins (49 functions + 17 types + 31 exceptions)
+Sixteen of these are specialized forms the interpreter rewrites into the
+bytecode on first execution — `BINARY_OP_ADD_INT`, `COMPARE_OP_INT_JUMP_TRUE`,
+`FOR_ITER_LIST`, `LOAD_ATTR_METHOD`, `LOAD_GLOBAL_MODULE` and their siblings —
+each guarded so an operand of the wrong shape falls back to the general
+handler.
+
+### Builtins (51 functions + 18 types + 64 exceptions)
 
 **Functions:**
 print, len, repr, abs, round, pow, divmod, sum, min, max, any, all,
 hash, id, ord, chr, hex, bin, oct, ascii, format, input, eval, open,
-range, enumerate, zip, map, filter, reversed, sorted,
-type, isinstance, issubclass, callable, super,
+range, enumerate, zip, map, filter, reversed, sorted, chain,
+isinstance, issubclass, callable, super,
 iter, next, aiter, anext,
 getattr, hasattr, setattr, delattr, vars, dir,
-globals, locals, \_\_build\_class\_\_, \_\_import\_\_
+globals, locals, breakpoint, \_\_build\_class\_\_, \_\_import\_\_
 
 **Types:**
-int, float, str, bool, object, list, dict, tuple, set, frozenset,
+type, int, float, str, bool, object, list, dict, tuple, set, frozenset,
 bytes, bytearray, memoryview, slice, staticmethod, classmethod, property
 
-**Exceptions (31):**
-BaseException, Exception, TypeError, ValueError, KeyError, IndexError,
-AttributeError, NameError, RuntimeError, StopIteration, StopAsyncIteration,
-ZeroDivisionError, NotImplementedError, OverflowError, AssertionError,
-OSError, LookupError, ArithmeticError, RecursionError, ImportError,
-MemoryError, UnicodeError, TimeoutError, KeyboardInterrupt, SystemExit,
-Warning, DeprecationWarning, UserWarning,
-BaseExceptionGroup, ExceptionGroup, CancelledError
+**Exceptions (64):** 63 of CPython 3.12's 69 builtin exceptions, plus
+`CancelledError`.  BaseException, Exception, the ArithmeticError, LookupError
+and OSError trees (FileNotFoundError, PermissionError, ConnectionResetError,
+…), StopIteration, StopAsyncIteration, GeneratorExit, KeyboardInterrupt,
+SystemExit, RecursionError, UnicodeDecodeError / UnicodeEncodeError, the
+Warning family, and BaseExceptionGroup / ExceptionGroup — which derives from
+both BaseExceptionGroup and Exception, so `except Exception` catches it.
+Missing: `IOError` / `EnvironmentError` (the OSError aliases),
+`FileExistsError`, `IndentationError`, `TabError`, `UnicodeTranslateError`.
 
 ### Language features
 
@@ -102,19 +111,26 @@ BaseExceptionGroup, ExceptionGroup, CancelledError
 - `*args`, `**kwargs`, keyword-only arguments
 - Extended slicing (`a[1:10:2]`, `a[::-1]`)
 - `from module import *`
-- Multiple inheritance, `super()`
+- Multiple inheritance with a C3 MRO (`__mro__`, `__bases__`), cooperative `super()`
+- Real tracebacks: per-frame line numbers decoded from the PEP 626 location
+  table, source lines, repeated-frame elision, and the `__cause__` /
+  `__context__` chain
 
 ### Modules
 
 | Module | Description |
 |--------|-------------|
-| sys | argv, exit, version, path, modules, stdin/stdout/stderr, exc_info, maxsize |
+| sys | argv, exit (raises `SystemExit`), version, version_info, path, modules, stdin/stdout/stderr, exc_info, maxsize, platform, byteorder, executable, prefix, getrecursionlimit/setrecursionlimit, get/set_int_max_str_digits |
 | asyncio | Event loop with io_uring backend, coroutine runner, TCP streams (open_connection, start_server), sleep, gather |
-| re | SRE regex engine — compile, match, search, findall, finditer, sub, split |
-| time | time, sleep, monotonic |
-| itertools | chain, islice, count, repeat, zip_longest, product, permutations, combinations, starmap, takewhile, dropwhile, filterfalse, accumulate, groupby, tee, pairwise |
+| _sre | SRE regex engine — compile, and the pattern methods match, fullmatch, search, findall, finditer, sub, subn, split.  The `re` wrapper module is not shipped, so CPython's own `re` is what an `import re` finds, and it needs `enum` and `types`, which do not exist here |
+| time | monotonic, process_time.  `time.time` and `time.sleep` are not implemented; `asyncio.sleep` is |
+| itertools | chain, cycle, islice, count, repeat, product, starmap, accumulate.  zip_longest, permutations, combinations, takewhile, dropwhile, filterfalse, groupby, tee and pairwise are not implemented |
 | unittest | Pure Python test framework (TestCase, assertions, test runner) |
 | warnings | warn, simplefilter |
+
+Pure-Python modules shipped in `lib/` and importable as they are: `abc`,
+`collections`, `contextlib`, `copy`, `functools`, `io`, `operator`, `pickle`,
+`string`.
 
 ### Garbage collection
 
@@ -122,14 +138,30 @@ BaseExceptionGroup, ExceptionGroup, CancelledError
 
 ## Test suite
 
-**114 tests** covering arithmetic, strings, lists, dicts, tuples, sets, booleans, None, bytes, floats, comparisons, control flow, functions, recursion, for-loops, while-loops, range, classes, inheritance, generators, async/await, closures, decorators, comprehensions, f-strings, exceptions, pattern matching, slicing, `*args`/`**kwargs`, `with` statements, imports, itertools, and more.
+**149 test files** covering arithmetic, strings, lists, dicts, tuples, sets,
+booleans, None, bytes, floats, comparisons, control flow, functions,
+recursion, for-loops, while-loops, range, classes, inheritance, multiple
+inheritance, generators, async/await, closures, decorators, comprehensions,
+f-strings, exceptions, tracebacks, pattern matching, slicing,
+`*args`/`**kwargs`, `with` statements, imports, itertools, the NaN-boxed value
+encoding, and more.  Each is run against CPython 3.12 and the outputs
+diffed, so CPython is the oracle; the async tests run three times, once per
+I/O backend, for 168 results in all.
 
-**9 CPython compatibility tests** from the CPython standard library: augmented assignment, booleans, enumerate, floats, integers, keyword-only args, sorting, string methods, and string operators.
+**64 CPython standard-library test files** under `tests/cpython/`, all
+enforced — a failure in any of them fails the target.
 
 ```bash
-make check          # run all 114 tests (diff python3 vs ./apython output)
-make check-cpython  # run 9 CPython stdlib tests
+make check                  # 149 test files, diffed against python3
+make check-cpython          # 64 CPython stdlib test files
+./apython --selftest-value  # Value encode/decode boundaries
+make INT_STRESS=1 && bash tests/run_tests.sh   # every |n| >= 8 boxed on the heap
 ```
+
+`INT_STRESS=1` forces every integer of magnitude 8 or more onto the heap, so
+the ordinary suite exercises the heap-int paths that immediates normally
+hide.  It is not expected to pass `check-cpython`, whose `test_int.py`
+asserts things like `10 is 10`.
 
 All tests are Valgrind-clean.
 
@@ -147,25 +179,30 @@ src/
   opcodes_misc.asm      Comparison, control flow, format, pattern matching
   opcodes_async.asm     Async/await opcodes
   opcodes_import.asm    Import opcodes
-  builtins.asm          Built-in functions and type registry
+  builtins.asm          Built-in functions, type registry, type_from_parts
   builtins_extra.asm    Additional builtins (itertools constructors, etc.)
+  slots.asm             Slot wrappers installed from a heaptype's dunders
+  mro.asm               C3 linearization and MRO walking
+  format.asm            The format-spec mini-language
+  traceback.asm         PEP 626 line table and traceback rendering
   marshal.asm           .pyc marshal deserializer
   pyc.asm               .pyc file reader
   frame.asm             Frame allocation/deallocation
-  object.asm            Base PyObject operations, type_type
+  object.asm            Base PyObject operations, type_type, rich comparison
   memory.asm            Memory management
-  error.asm             Error handling and tracebacks
-  except.asm            Exception machinery
+  error.asm             fatal_error: unrecoverable failures, straight to stderr
+  except.asm            co_exceptiontable parser (handler lookup)
   gc.asm                3-generation cycle-collecting garbage collector
   import.asm            Module import system
   dunder.asm            Dunder method dispatch (__add__, __eq__, etc.)
   repr.asm              repr/str formatting
   val.asm               NaN-boxed Value encoding and helpers
-  methods.asm           Method resolution helpers
+  valtest.asm           --selftest-value: encode/decode boundary checks
+  methods.asm           Built-in type methods (str/list/dict/set/tuple/int)
   sre.asm               SRE regex bytecode engine
-  sre_module.asm        re module interface
+  sre_module.asm        _sre module interface
   itertools.asm         itertools module
-  pyo/                  34 type implementation files
+  pyo/                  33 type implementation files
     int.asm float.asm str.asm bytes.asm bytearray.asm memview.asm
     list.asm dict.asm tuple.asm set.asm bool.asm none.asm slice.asm
     func.asm class.asm code.asm module.asm cell.asm
@@ -178,10 +215,14 @@ src/
     syscall.asm memops.asm string.asm
 include/                Struct definitions, macros, constants (.inc files)
 lib/                    Pure Python support modules
+  abc.py contextlib.py copy.py functools.py io.py itertools.py
+  operator.py pickle.py string.py warnings.py
+  collections/          namedtuple, defaultdict, Counter, OrderedDict
   unittest/             Test framework (case.py, runner.py, mock.py)
-  warnings.py           Warnings module
   test/                 CPython test support infrastructure
-tests/                  114 test files + 9 CPython compatibility tests
+tests/                  149 test files
+  cpython/              64 CPython standard-library test files
+  expected/             recorded transcripts for the two tests CPython cannot serve as an oracle for
 ```
 
 ## Building
@@ -197,8 +238,9 @@ tests/                  114 test files + 9 CPython compatibility tests
 | Target | Description |
 |--------|-------------|
 | `make` | Build `./apython` |
-| `make check` | Run 114-test suite |
-| `make check-cpython` | Run 9 CPython compatibility tests |
+| `make check` | Run the 149-file test suite |
+| `make check-cpython` | Run the 64 CPython stdlib test files |
+| `make INT_STRESS=1` | Build with every integer of magnitude ≥ 8 heap-boxed |
 | `make clean` | Remove build artifacts |
 
 ## License

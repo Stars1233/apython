@@ -16,6 +16,9 @@ make check-cpython # CPython stdlib unit tests (harder, more thorough)
 ```
 
 **Always run BOTH `make check` AND `make check-cpython` to verify changes.**
+`make check` runs 149 test files (168 results: the async tests run against the
+default, poll and io_uring backends); `make check-cpython` runs all 64 files
+under `tests/cpython/`, none of them tolerated as failing.
 
 Two more gates worth running when touching the value representation:
 
@@ -100,13 +103,17 @@ and at the boundaries between converted and unconverted code.
 ## Source Layout
 
 - `src/eval.asm` — Bytecode dispatch loop (256-entry jump table)
-- `src/opcodes_*.asm` — Opcode handlers by category (load, store, stack, call, build, misc)
+- `src/opcodes_*.asm` — Opcode handlers by category (load, store, stack, call, build, misc, async, import)
 - `src/pyo/*.asm` — Type implementations (int, str, list, dict, tuple, func, class, iter, bool, none, bytes, code)
 - `src/marshal.asm` — .pyc marshal format deserializer
 - `src/pyc.asm` — .pyc file reader (magic validation, header parsing)
-- `src/builtins.asm` — Built-in functions (print, len, range, type, isinstance, etc.)
+- `src/builtins.asm` — Built-in functions (print, len, range, type, isinstance, etc.) and `type_from_parts`
+- `src/slots.asm` — Installs slot wrappers on a heaptype from the dunders it defines
+- `src/mro.asm` — C3 linearization, `type_mro_next`, `type_is_subtype`
+- `src/format.asm` — The format-spec mini-language (`format()`, f-strings, `%`)
+- `src/traceback.asm` — PEP 626 line-table decoding and traceback rendering
 - `src/frame.asm` — Frame alloc/dealloc
-- `src/object.asm` — Base PyObject ops (alloc, refcount, dealloc)
+- `src/object.asm` — Base PyObject ops (alloc, refcount, dealloc, `obj_richcompare_bool`)
 - `src/lib/` — Syscall wrappers, string/memory ops (replace libc)
 - `include/` — Struct definitions (.inc): object, types, frame, opcodes, macros, marshal, builtins, errcodes
 
@@ -114,7 +121,7 @@ and at the boundaries between converted and unconverted code.
 
 Defined in `include/*.inc`. All objects start with `PyObject` (ob_refcnt +0, ob_type +8).
 
-- **PyTypeObject** (types.inc, 192 bytes): tp_call +64, tp_getattr +72, tp_setattr +80, tp_as_number +128, tp_as_sequence +136, tp_as_mapping +144
+- **PyTypeObject** (types.inc): tp_call +64, tp_getattr +72, tp_setattr +80, tp_as_number +128, tp_as_sequence +136, tp_as_mapping +144, tp_base +152, tp_mro +168, tp_bases +184, tp_dictoffset +208
 - **PyFrame** (frame.inc): code +8, globals +16, locals +32, stack_ptr +48, stack_base +56, localsplus +80 (variable-size Value[])
 - **PyIntObject** (object.inc): mpz +16 (only initialised on overflow), ival +32, compact +40 (1 = the ival is live)
 - **DictEntry** (object.inc, 24 bytes): hash +0, key +8, value +16 — occupied ⇔ `key != 0`; empty ⇔ `key == 0 && hash == 0`; tombstone ⇔ `key == 0 && hash == -1`
@@ -171,6 +178,10 @@ Opcodes have trailing CACHE words that must be skipped. Key counts (each = 2 byt
 - **Double encode/decode:** a function that packs at its exit must not be reached by a tail `jmp` from another that also packs, and a call site must not decode a result its callee already handed over as a Value. Both show up as a value off by exactly 2^48 (floats) or by V_INT_BIAS (ints), not as a crash.
 - **Raw payload use after conversion:** once a slot holds a Value, reading it and using it as an int or as raw double bits needs `V_TO_I64` / `V_TO_F64` first. Pointers are the exception — a pointer is its own Value — which is why pointer-only code survived the conversion untouched and non-pointer code did not.
 - **Boxing in V_PACK:** `V_PACK` on a TAG_SMALLINT outside ±2^50 allocates a heap int. That is correct but it is an allocation, and the returned reference is owned — do not pack a borrowed integer payload and drop it.
+- **`current_exception` is also the exception *being handled*.** It stays set for the length of an `except` block, so `cmp qword [rel current_exception], 0` cannot mean "did that call raise?". Snapshot it before the call and compare (`DUNDER_EXC_SAVE` / `DUNDER_RAISED`), or a loop inside a handler re-raises what the handler caught.
+- **Following `tp_base` to resolve an attribute or answer a subclass question.** With multiple inheritance the answer lives on the MRO: use `MRO_NEXT walker, origin` (or `type_is_subtype`), keeping the type the search *started from* as the origin. A static type has no `tp_mro`, and for it `MRO_NEXT` still yields `tp_base`, so single-inheritance code reads the same.
+- **Writing through an inherited method table.** `type_from_parts` gives a builtin subclass its base's `tp_as_number` / `tp_as_sequence` / `tp_as_mapping` *pointer*. Writing a slot through it patches the builtin's own static table for the whole process; `slot_ensure_table` copies first. The same shape applies to anything else inherited by pointer.
+- **A removed load whose guard stayed.** The `(payload, tag)` conversion deleted many `key_tag` loads; where the `test`/`jz` that used them was left in place it now reads a stale register — `from mod import *` and `dict.popitem()` both failed this way, silently. When deleting a load, delete its test.
 
 ## Adding a New Test
 
