@@ -42,6 +42,10 @@ extern sym_at
 extern sym_finalize
 extern cg_cell_prologue
 extern cg_closure_tuple
+extern cg_send_loop
+extern cg_await_value
+extern cg_push_handler
+extern cg_pop_handler
 extern none_singleton
 
 extern exc_SyntaxError_type
@@ -55,7 +59,8 @@ CM2_SCOPE equ 40
 CM2_CODE  equ 48
 CM2_NAME  equ 56
 CM2_KIND  equ 64
-CM2_UNIT2 equ 72 + CompUnit_size
+CM2_AITER equ 72
+CM2_UNIT2 equ 80 + CompUnit_size
 CM2_FRAME equ ((CM2_UNIT2 + 15) / 16) * 16 + 8      ; + 3 pushes = 16-aligned
 
 section .text
@@ -150,14 +155,20 @@ DEF_FUNC cg_e_comprehension, CM2_FRAME
     mov rdi, rbx
     mov rsi, rax
     call ast_at
+    movzx ecx, byte [rax + AstNode.subkind]
+    mov [rbp - CM2_AITER], rcx
     mov edx, [rax + AstNode.b]
     mov rdi, rbx
     mov rsi, r12
     call cg_expr
     test eax, eax
     jz .fail
-    mov rdi, r12
     mov esi, OP_GET_ITER
+    cmp qword [rbp - CM2_AITER], 0
+    je .sync_outer
+    mov esi, OP_GET_AITER
+.sync_outer:
+    mov rdi, r12
     xor edx, edx
     mov rcx, [rbp - CM2_LINE]
     call cg_emit
@@ -166,6 +177,25 @@ DEF_FUNC cg_e_comprehension, CM2_FRAME
     mov edx, 1
     mov rcx, [rbp - CM2_LINE]
     call cg_emit
+
+    ; A list, set or dict comprehension that had to become a coroutine hands
+    ; back an awaitable rather than the container, so the await belongs here.
+    ; A generator expression does not: `(x async for x in y)` IS the async
+    ; generator, and awaiting it would consume it.
+    cmp qword [rbp - CM2_KIND], AST_GENEXP
+    je .no_await
+    mov rdi, rbx
+    mov rsi, [rbp - CM2_SCOPE]
+    call sym_at
+    test dword [rax + Scope.flags], SCF_COROUTINE
+    jz .no_await
+    mov rdi, r12
+    mov rsi, [rbp - CM2_LINE]
+    xor edx, edx
+    call cg_await_value
+    test eax, eax
+    jz .fail
+.no_await:
     mov eax, 1
     jmp .ret
 .fail:
@@ -204,7 +234,8 @@ CB2_SCOPE equ 40
 CB2_KIND  equ 48
 CB2_NAME  equ 56
 CB2_CODE  equ 64
-CB2_FRAME equ 72          ; + 3 pushes = 96
+CB2_ASYNC equ 72
+CB2_FRAME equ 88          ; + 3 pushes = 112
 DEF_FUNC cg_comp_body, CB2_FRAME
     push rbx
     push r12
@@ -255,10 +286,31 @@ DEF_FUNC cg_comp_body, CB2_FRAME
     mov dword [r12 + CompUnit.flags], CO_OPTIMIZED | CO_NEWLOCALS | CO_NESTED
     mov dword [r12 + CompUnit.argcount], 1      ; the implicit .0
 
+    ; A comprehension containing `async for` or `await` is a coroutine (or, if
+    ; it is also a generator expression, an async generator).  Which of the
+    ; three it is decides both the flag and whether the caller awaits the call.
+    mov rdi, rbx
+    mov rsi, [rbp - CB2_SCOPE]
+    call sym_at
+    mov edx, [rax + Scope.flags]
+    and edx, SCF_COROUTINE
+    mov [rbp - CB2_ASYNC], rdx
+    xor ecx, ecx
     cmp qword [rbp - CB2_KIND], AST_GENEXP
     jne .not_gen
-    or dword [r12 + CompUnit.flags], CO_GENERATOR
+    mov ecx, CO_GENERATOR
+    test rdx, rdx
+    jz .not_gen
+    mov ecx, CO_ASYNC_GENERATOR
+    jmp .not_gen
 .not_gen:
+    test rdx, rdx
+    jz .have_flag
+    test ecx, ecx
+    jnz .have_flag
+    mov ecx, CO_COROUTINE
+.have_flag:
+    or dword [r12 + CompUnit.flags], ecx
 
     mov rdi, rbx
     mov rsi, r12
@@ -270,7 +322,10 @@ DEF_FUNC cg_comp_body, CB2_FRAME
     ; A generator expression must announce itself before RESUME, or the body
     ; runs eagerly on the first call rather than producing a generator.
     cmp qword [rbp - CB2_KIND], AST_GENEXP
-    jne .no_gen_prologue
+    je .gen_prologue
+    cmp qword [rbp - CB2_ASYNC], 0
+    je .no_gen_prologue
+.gen_prologue:
     mov rdi, r12
     mov esi, OP_RETURN_GENERATOR
     xor edx, edx
@@ -383,7 +438,8 @@ CC5_N     equ 72
 CC5_J     equ 80
 CC5_KIND  equ 88
 CC5_CONT  equ 96
-CC5_FRAME equ 104         ; + 3 pushes = 128
+CC5_ASYNC equ 104
+CC5_FRAME equ 120         ; + 3 pushes = 144
 DEF_FUNC cg_comp_clause, CC5_FRAME
     push rbx
     push r12
@@ -424,6 +480,11 @@ DEF_FUNC cg_comp_clause, CC5_FRAME
     mov rdi, rbx
     call ast_child
     mov [rbp - CC5_CL], rax
+    mov rdi, rbx
+    mov rsi, rax
+    call ast_at
+    movzx ecx, byte [rax + AstNode.subkind]
+    mov [rbp - CC5_ASYNC], rcx
 
     ; The outermost iterable arrives as the parameter; the rest are evaluated
     ; here, one loop deeper each time.
@@ -451,8 +512,12 @@ DEF_FUNC cg_comp_clause, CC5_FRAME
     call cg_expr
     test eax, eax
     jz .fail
-    mov rdi, r12
     mov esi, OP_GET_ITER
+    cmp qword [rbp - CC5_ASYNC], 0
+    je .sync_iter
+    mov esi, OP_GET_AITER
+.sync_iter:
+    mov rdi, r12
     xor edx, edx
     mov rcx, [rbp - CC5_LINE]
     call cg_emit
@@ -470,11 +535,44 @@ DEF_FUNC cg_comp_clause, CC5_FRAME
     mov rdi, r12
     mov rsi, [rbp - CC5_TOP]
     call cg_label_bind
+    cmp qword [rbp - CC5_ASYNC], 0
+    jne .async_head
     mov rdi, r12
     mov esi, OP_FOR_ITER
     mov rdx, [rbp - CC5_EXIT]
     mov rcx, [rbp - CC5_LINE]
     call cg_emit_jump
+    jmp .have_item
+.async_head:
+    ; `async for` leaves the loop by raising StopAsyncIteration, so the exit
+    ; edge is an exception edge and the head has to sit in a protected region.
+    mov rdi, r12
+    mov rsi, [rbp - CC5_EXIT]
+    xor edx, edx
+    call cg_push_handler
+    mov rdi, r12
+    mov esi, OP_GET_ANEXT
+    xor edx, edx
+    mov rcx, [rbp - CC5_LINE]
+    call cg_emit
+    lea rsi, [rel none_singleton]
+    INCREF rsi
+    mov rdi, r12
+    call cg_const
+    mov rdx, rax
+    mov rdi, r12
+    mov esi, OP_LOAD_CONST
+    mov rcx, [rbp - CC5_LINE]
+    call cg_emit
+    mov rdi, r12
+    mov rsi, [rbp - CC5_LINE]
+    mov edx, 3
+    call cg_send_loop
+    test eax, eax
+    jz .fail
+    mov rdi, r12
+    call cg_pop_handler
+.have_item:
 
     mov rdi, rbx
     mov rsi, [rbp - CC5_CL]
@@ -537,8 +635,12 @@ DEF_FUNC cg_comp_clause, CC5_FRAME
     mov rdi, r12
     mov rsi, [rbp - CC5_EXIT]
     call cg_label_bind
-    mov rdi, r12
     mov esi, OP_END_FOR
+    cmp qword [rbp - CC5_ASYNC], 0
+    je .sync_end
+    mov esi, OP_END_ASYNC_FOR
+.sync_end:
+    mov rdi, r12
     xor edx, edx
     mov rcx, [rbp - CC5_LINE]
     call cg_emit
@@ -626,6 +728,14 @@ DEF_FUNC cg_comp_element, CE4_FRAME
     cmp qword [rbp - CE4_KIND], AST_GENEXP
     jne .accumulate
     ; A generator yields the element and resumes where it left off.
+    test dword [r12 + CompUnit.flags], CO_ASYNC_GENERATOR
+    jz .plain_yield
+    mov rdi, r12
+    mov esi, OP_CALL_INTRINSIC_1
+    mov edx, INTRINSIC_ASYNC_GEN_WRAP
+    mov rcx, [rbp - CE4_LINE]
+    call cg_emit
+.plain_yield:
     mov rdi, r12
     mov esi, OP_YIELD_VALUE
     xor edx, edx
@@ -715,6 +825,17 @@ DEF_FUNC cg_e_yield, CY_FRAME
     mov rcx, [rbp - CY_LINE]
     call cg_emit
 .emit:
+    ; An async generator yields through an __anext__ awaitable rather than
+    ; straight to the caller, so the value is boxed first; the interpreter's
+    ; asend/athrow machinery unwraps it on the other side.
+    test dword [r12 + CompUnit.flags], CO_ASYNC_GENERATOR
+    jz .plain_yield
+    mov rdi, r12
+    mov esi, OP_CALL_INTRINSIC_1
+    mov edx, INTRINSIC_ASYNC_GEN_WRAP
+    mov rcx, [rbp - CY_LINE]
+    call cg_emit
+.plain_yield:
     mov rdi, r12
     mov esi, OP_YIELD_VALUE
     xor edx, edx

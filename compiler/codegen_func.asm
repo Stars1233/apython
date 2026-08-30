@@ -669,9 +669,22 @@ DEF_FUNC cg_compile_body, CB_FRAME
     mov rdi, rbx
     mov rsi, [rbp - CB_SCOPE]
     call sym_at
-    test dword [rax + Scope.flags], SCF_GENERATOR
+    mov edx, [rax + Scope.flags]
+    test edx, SCF_GENERATOR | SCF_COROUTINE
     jz .not_generator
-    or dword [r12 + CompUnit.flags], CO_GENERATOR
+    ; The three kinds are mutually exclusive in co_flags, and which one this is
+    ; falls out of the two scope bits: `yield` alone is a generator, `await`
+    ; alone a coroutine, and both together an async generator -- which carries
+    ; neither of the other two flags.
+    mov ecx, CO_GENERATOR
+    test edx, SCF_COROUTINE
+    jz .have_kind
+    mov ecx, CO_COROUTINE
+    test edx, SCF_GENERATOR
+    jz .have_kind
+    mov ecx, CO_ASYNC_GENERATOR
+.have_kind:
+    or dword [r12 + CompUnit.flags], ecx
     mov rdi, r12
     mov esi, OP_RETURN_GENERATOR
     xor edx, edx

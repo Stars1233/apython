@@ -1255,6 +1255,8 @@ DEF_FUNC par_statement_any, 8
     je .compound
     cmp eax, TOK_AT
     je .compound
+    cmp eax, TOK_ASYNC
+    je .compound
     mov rdi, rbx
     call par_simple_stmts
     pop rbx
@@ -2050,6 +2052,63 @@ DEF_FUNC par_suite_into, 8
     ret
 END_FUNC par_suite_into
 
+
+;; ============================================================================
+;; ps_async(Comp *c) -> node   -- `async def`, `async for`, `async with`
+;;
+;; `async` only ever prefixes one of three statements, and each of the three
+;; already has a parser.  So consume the keyword, run the ordinary parser, and
+;; stamp subkind=1 on what comes back; every consumer of AST_FUNCTIONDEF,
+;; AST_FOR and AST_WITH reads that one bit rather than a parallel node kind.
+;; ============================================================================
+PAS_FRAME equ 24          ; + 1 push = 32
+DEF_FUNC_LOCAL ps_async, PAS_FRAME
+    push rbx
+    mov rbx, rdi
+    mov rdi, rbx
+    call par_advance                    ; `async`
+
+    mov rdi, rbx
+    call par_kind
+    mov rdi, rbx
+    cmp eax, TOK_DEF
+    je .def
+    cmp eax, TOK_FOR
+    je .for
+    cmp eax, TOK_WITH
+    je .with
+
+    mov rdi, rbx
+    CSTRING rsi, "expected 'def', 'for' or 'with' after 'async'"
+    call par_syntax_error
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+
+.def:
+    call ps_def
+    jmp .stamp
+.for:
+    call ps_for
+    jmp .stamp
+.with:
+    call ps_with
+.stamp:
+    test rax, rax
+    jz .done
+    push rax
+    mov rdi, rbx
+    mov rsi, rax
+    call ast_at
+    mov byte [rax + AstNode.subkind], 1
+    pop rax
+.done:
+    pop rbx
+    leave
+    ret
+END_FUNC ps_async
+
 ;; ============================================================================
 ;; ps_return - `return` and `return value`
 ;; ============================================================================
@@ -2612,7 +2671,7 @@ stmt_table:
     dq 0            ; 58 TOK_AND
     dq 0            ; 59 TOK_AS
     dq ps_assert    ; 60 TOK_ASSERT
-    dq 0            ; 61 TOK_ASYNC
+    dq ps_async                ; 61 TOK_ASYNC
     dq 0            ; 62 TOK_AWAIT
     dq ps_simple    ; 63 TOK_BREAK
     dq ps_class                ; 64 TOK_CLASS

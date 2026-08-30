@@ -2860,6 +2860,49 @@ DEF_FUNC_LOCAL pf_yield, PY_FRAME
     ret
 END_FUNC pf_yield
 
+;; ============================================================================
+;; pf_await(Comp *c) -> node   -- `await x`
+;;
+;; The operand is a *primary*, not a unary expression: the grammar is
+;; `await_primary: AWAIT primary`.  Recursing at BP_AWAIT gets that from the
+;; table alone -- calls, subscripts and attributes (BP_POSTFIX) bind into the
+;; operand, while `**` (BP_POWER, just below) does not, so `await f() ** 2` is
+;; `(await f()) ** 2` and `await -x` is rejected.
+;; ============================================================================
+PAW_LINE  equ 8
+PAW_FRAME equ 16          ; + 1 push = 24
+DEF_FUNC_LOCAL pf_await, PAW_FRAME
+    push rbx
+    mov rbx, rdi
+    call par_peek
+    mov ecx, [rax + Token.lineno]
+    mov [rbp - PAW_LINE], rcx
+    mov rdi, rbx
+    call par_advance                    ; `await`
+
+    mov rdi, rbx
+    mov esi, BP_AWAIT
+    call par_expr
+    test rax, rax
+    jz .fail
+    mov r8, rax
+
+    mov rdi, rbx
+    mov esi, AST_AWAIT
+    xor edx, edx
+    mov rcx, [rbp - PAW_LINE]
+    xor r9d, r9d
+    call ast_make
+    pop rbx
+    leave
+    ret
+.fail:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+END_FUNC pf_await
+
 section .rodata
 
 ;; ---------------------------------------------------------------------------
@@ -3066,8 +3109,8 @@ prule_table:
     dq 0           , 0           
     db BP_NONE    , BP_NONE    , 0                 , 0           ; TOK_ASYNC
     dd 0
-    dq 0           , 0           
-    db BP_NONE    , BP_NONE    , 0                 , 0           ; TOK_AWAIT
+    dq pf_await    , 0           
+    db BP_NONE    , BP_AWAIT   , 0                 , 0           ; TOK_AWAIT -- operand is a primary: BP_AWAIT sits between `**` and postfix
     dd 0
     dq 0           , 0           
     db BP_NONE    , BP_NONE    , 0                 , 0           ; TOK_BREAK

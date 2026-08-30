@@ -25,6 +25,8 @@ R("TOK_NONE",     prefix="pf_const")
 R("TOK_ELLIPSIS", prefix="pf_const")
 R("TOK_YIELD",    prefix="pf_yield",
   note="an expression, not a statement: `x = yield v` receives from send()")
+R("TOK_AWAIT",    prefix="pf_await",  rbp="BP_AWAIT",
+  note="operand is a primary: BP_AWAIT sits between `**` and postfix")
 R("TOK_LAMBDA",   prefix="pf_lambda",
   note="body at BP_TERNARY: `lambda: a, b` is a tuple, not a lambda of a tuple")
 

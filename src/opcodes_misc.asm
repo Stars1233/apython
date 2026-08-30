@@ -27,6 +27,7 @@ extern eval_return
 extern obj_dealloc
 extern obj_is_true
 extern fatal_error
+extern async_gen_wrap_value
 extern none_singleton
 extern bool_true
 extern bool_false
@@ -2423,9 +2424,13 @@ extern obj_decref
     DISPATCH
 
 .ci1_async_gen_wrap:
-    ; INTRINSIC_ASYNC_GEN_WRAP: wrap yielded value for async generators
-    ; In our implementation, this is a no-op — value passes through unchanged.
-    ; The async generator protocol is handled by async_gen_iternext.
+    ; INTRINSIC_ASYNC_GEN_WRAP: box the value an async generator is about to
+    ; yield, so ags_iternext can tell it from an `await` passing through the
+    ; same YIELD_VALUE.  Without the box every awaited value is delivered to
+    ; the consumer as though it were an item.
+    VPOP rdi
+    call async_gen_wrap_value
+    VPUSH_PTR rax
     DISPATCH
 
 .ci1_stopiter_error:

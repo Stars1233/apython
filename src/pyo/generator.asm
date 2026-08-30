@@ -417,20 +417,40 @@ DEF_FUNC ags_iternext
     ret
 
 .agsi_yielded:
-    ; Async gen yielded a value — store it and return it
     pop rdx                    ; result tag
     pop rax                    ; result payload
-
-    ; Store yielded value in wrapper's gi_return_value for SEND exhaustion path
     V_PACK rax, rdx
-    mov [rbx + AsyncGenASend.gi_return_value], rax
 
-    ; INCREF the value (we're storing + returning it)
-    INCREF_V rax, rdx
+    ; Only a boxed value is this generator's own item.  Anything else is an
+    ; `await` inside the body yielding outward, and has to reach the event loop
+    ; unchanged -- with the state left at 0, so the next SEND resumes the
+    ; generator rather than reporting it exhausted.
+    V_TEST_PTR rax, rcx
+    ja .agsi_passthrough
+    test rax, rax
+    jz .agsi_passthrough
+    mov rcx, [rax + PyObject.ob_type]
+    lea rdx, [rel async_gen_wrapped_type]
+    cmp rcx, rdx
+    jne .agsi_passthrough
 
-    ; Transition to state 1 (yielded)
+    ; The item: unwrap it, hand it to SEND through the exhaustion path, and
+    ; drop the box.  gi_return_value owns its reference (ags_dealloc frees it),
+    ; so the value is INCREF'd before the box that held it goes away.
+    mov rcx, [rax + AsyncGenWrapped.agw_value]
+    INCREF_V rcx, rdx
+    mov [rbx + AsyncGenASend.gi_return_value], rcx
+    mov rdi, rax
+    DECREF_REG rdi
     mov dword [rbx + AsyncGenASend.ags_state], 1
+    RET_NULL
+    pop r12
+    pop rbx
+    leave
+    ret
 
+.agsi_passthrough:
+    V_UNPACK rax, rdx
     pop r12
     pop rbx
     leave
@@ -493,6 +513,37 @@ DEF_FUNC_BARE ags_iter_self
     mov edx, TAG_PTR
     ret
 END_FUNC ags_iter_self
+
+;; ============================================================================
+;; async_gen_wrap_value(Value v) -> PyObject*, stealing v
+;; INTRINSIC_ASYNC_GEN_WRAP.  See AsyncGenWrapped in object.inc for why the box
+;; exists at all.
+;; ============================================================================
+DEF_FUNC async_gen_wrap_value
+    push rbx
+    mov rbx, rdi
+    mov edi, AsyncGenWrapped_size
+    call ap_malloc
+    mov qword [rax + PyObject.ob_refcnt], 1
+    lea rcx, [rel async_gen_wrapped_type]
+    mov [rax + PyObject.ob_type], rcx
+    mov [rax + AsyncGenWrapped.agw_value], rbx
+    pop rbx
+    leave
+    ret
+END_FUNC async_gen_wrap_value
+
+DEF_FUNC agw_dealloc
+    push rbx
+    mov rbx, rdi
+    mov rdi, [rbx + AsyncGenWrapped.agw_value]
+    DECREF_V rdi, rsi
+    mov rdi, rbx
+    call ap_free
+    pop rbx
+    leave
+    ret
+END_FUNC agw_dealloc
 
 ;; ============================================================================
 ;; ags_dealloc(AsyncGenASend *self)
@@ -1530,6 +1581,18 @@ async_gen_type:
     dq 0      ; tp_dictoffset
 
 ags_name_str: db "async_generator_asend", 0
+
+align 8
+agw_name_str: db "async_generator_wrapped_value", 0
+align 8
+global async_gen_wrapped_type
+async_gen_wrapped_type:
+    dq 1                        ; ob_refcnt (immortal)
+    dq type_type                ; ob_type
+    dq agw_name_str             ; tp_name
+    dq AsyncGenWrapped_size     ; tp_basicsize
+    dq agw_dealloc              ; tp_dealloc
+    times 20 dq 0               ; the rest: this box is never used as a value
 
 align 8
 global async_gen_asend_type

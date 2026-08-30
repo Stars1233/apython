@@ -577,6 +577,16 @@ endstruc
 ; SEND/tp_iternext on this object resumes the async gen.
 ; Layout must keep gi_return_value at +48, gi_return_tag at +56
 ; because op_send reads these offsets from the receiver on exhaustion.
+;; The box CALL_INTRINSIC_1 INTRINSIC_ASYNC_GEN_WRAP puts around a value an
+;; async generator yields.  An async generator's frame yields for two different
+;; reasons -- an item for its consumer, and an `await` passing through to the
+;; event loop -- and this box is the only thing that tells them apart.
+struc AsyncGenWrapped
+    .ob_refcnt:     resq 1  ; +0
+    .ob_type:       resq 1  ; +8
+    .agw_value:     resq 1  ; +16: the wrapped Value, owned
+endstruc
+
 struc AsyncGenASend
     .ob_refcnt:     resq 1  ; +0
     .ob_type:       resq 1  ; +8

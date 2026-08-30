@@ -356,6 +356,12 @@ DEF_FUNC sym_visit, SV_FRAME
     je .mark_generator
     cmp eax, AST_YIELDFROM
     je .mark_generator
+    cmp eax, AST_AWAIT
+    je .mark_coroutine
+    cmp eax, AST_FOR
+    je .maybe_async
+    cmp eax, AST_WITH
+    je .maybe_async
     jmp .children
 
 ;; A bare name: a use, or a binding, depending on the context the parser set.
@@ -554,6 +560,24 @@ DEF_FUNC sym_visit, SV_FRAME
     mov rsi, r12
     call sym_at
     or dword [rax + Scope.flags], SCF_GENERATOR
+    jmp .children
+
+;; `await` makes the enclosing block a coroutine, exactly as `yield` makes it a
+;; generator.  A block that has both is an async generator; the two flags are
+;; independent here and only combine in the code generator.
+.mark_coroutine:
+    mov rdi, rbx
+    mov rsi, r12
+    call sym_at
+    or dword [rax + Scope.flags], SCF_COROUTINE
+    jmp .children
+
+;; `async for` and `async with` carry the same implication as `await`; a plain
+;; one does not, so the bit has to be read before deciding.
+.maybe_async:
+    mov rax, [rbp - SV_NPTR]
+    cmp byte [rax + AstNode.subkind], 0
+    jne .mark_coroutine
     jmp .children
 
 ;; A comparison chain interleaves operator CODES with operand nodes in its
@@ -821,6 +845,19 @@ DEF_FUNC sym_enter_function, SE_FRAME
     mov rsi, r13
     call ast_at
     mov [rax + AstNode.flags], r12w
+
+    ; `async def` is a property of the block itself, not of anything inside it,
+    ; so it is stamped here rather than discovered by the walk.
+    movzx ecx, byte [rax + AstNode.kind]
+    cmp ecx, AST_FUNCTIONDEF
+    jne .not_async
+    cmp byte [rax + AstNode.subkind], 0
+    je .not_async
+    mov rdi, rbx
+    mov rsi, r12
+    call sym_at
+    or dword [rax + Scope.flags], SCF_COROUTINE
+.not_async:
 
     ; Parameters bind in the new scope, in signature order.  A class body has
     ; none: its .b is the base list, which belongs to the enclosing scope.
@@ -1437,6 +1474,19 @@ DEF_FUNC sym_build, SB_FRAME
     call ast_at
     mov [rax + AstNode.flags], r12w
 
+    ; `async def` is a property of the block itself, not of anything inside it,
+    ; so it is stamped here rather than discovered by the walk.
+    movzx ecx, byte [rax + AstNode.kind]
+    cmp ecx, AST_FUNCTIONDEF
+    jne .not_async
+    cmp byte [rax + AstNode.subkind], 0
+    je .not_async
+    mov rdi, rbx
+    mov rsi, r12
+    call sym_at
+    or dword [rax + Scope.flags], SCF_COROUTINE
+.not_async:
+
     ; In eval mode the root is a single expression, not a statement list.
     ; Walking its children as statements would visit nothing at all -- and a
     ; top-level `lambda a: ...` would have no parameters bound anywhere.
@@ -2003,6 +2053,19 @@ DEF_FUNC sym_enter_comp, SEC_FRAME
     call ast_at
     mov [rax + AstNode.flags], r12w
 
+    ; `async def` is a property of the block itself, not of anything inside it,
+    ; so it is stamped here rather than discovered by the walk.
+    movzx ecx, byte [rax + AstNode.kind]
+    cmp ecx, AST_FUNCTIONDEF
+    jne .not_async
+    cmp byte [rax + AstNode.subkind], 0
+    je .not_async
+    mov rdi, rbx
+    mov rsi, r12
+    call sym_at
+    or dword [rax + Scope.flags], SCF_COROUTINE
+.not_async:
+
     ; The implicit parameter.  CPython calls it `.0`, which no source can name.
     mov rdi, rbx
     lea rsi, [rel sym_dot_zero]
@@ -2034,9 +2097,23 @@ DEF_FUNC sym_enter_comp, SEC_FRAME
     call ast_child
     mov [rbp - SEC_CL], rax
 
-    ; The target binds in this scope; the conditions are evaluated here too.
+    ; `async for` makes the comprehension's own function a coroutine, exactly
+    ; as it would any other block.  Nothing visits the clause node itself --
+    ; this loop takes it apart field by field -- so the bit is read here.
     mov rdi, rbx
     mov rsi, rax
+    call ast_at
+    cmp byte [rax + AstNode.subkind], 0
+    je .not_async_clause
+    mov rdi, rbx
+    mov rsi, r12
+    call sym_at
+    or dword [rax + Scope.flags], SCF_COROUTINE
+.not_async_clause:
+
+    ; The target binds in this scope; the conditions are evaluated here too.
+    mov rdi, rbx
+    mov rsi, [rbp - SEC_CL]
     call ast_at
     mov edx, [rax + AstNode.a]
     mov rdi, rbx

@@ -35,6 +35,7 @@ extern cg_name
 extern ast_obj
 extern cg_nameop
 extern cg_unwind_finallys
+extern cg_s_asyncfor
 extern cg_s_classdef
 extern cg_s_decorated
 extern cg_s_try
@@ -1679,6 +1680,17 @@ DEF_FUNC_LOCAL cg_s_for, CST_FRAME
     call ast_at
     mov ecx, [rax + AstNode.lineno]
     mov [rbp - CST_LINE], rcx
+
+    ; `async for` shares nothing with this loop but its AST node: its exit edge
+    ; is an exception, not a sentinel.
+    cmp byte [rax + AstNode.subkind], 0
+    je .sync
+    mov rdi, rbx
+    mov rsi, r12
+    mov rdx, r13
+    call cg_s_asyncfor
+    jmp .fail
+.sync:
 
     mov edx, [rax + AstNode.b]          ; the iterable
     mov rdi, rbx

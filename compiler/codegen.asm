@@ -25,6 +25,7 @@ extern buf_reserve
 extern cg_e_comprehension
 extern cg_e_formattedvalue
 extern cg_e_joinedstr
+extern cg_e_await
 extern cg_e_yield
 extern cg_e_yieldfrom
 extern cg_e_lambda
@@ -2632,7 +2633,7 @@ cg_expr_table:
     dq 0                ; 20 AST_NAMEDEXPR
     dq cg_e_yield                      ; 21 AST_YIELD
     dq cg_e_yieldfrom                  ; 22 AST_YIELDFROM
-    dq 0                ; 23 AST_AWAIT
+    dq cg_e_await       ; 23 AST_AWAIT
     dq cg_e_joinedstr                  ; 24 AST_JOINEDSTR
     dq cg_e_formattedvalue                ; 25 AST_FORMATTEDVALUE
     dq cg_e_comprehension                ; 26 AST_LISTCOMP

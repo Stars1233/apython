@@ -28,6 +28,7 @@ extern cg_label_new
 extern cg_nameop
 extern cg_pop_handler
 extern cg_push_handler
+extern cg_await_value
 extern cg_store
 extern comp_error
 
@@ -40,6 +41,9 @@ extern exc_SyntaxError_type
 ; The finally stack holds AST node indices; this sentinel stands for "a with
 ; statement is open here", whose unwind action is a call to __exit__.
 CG_WITH_MARK equ 0x7fffffff
+; The same sentinel for an `async with`: its __exit__ call has to be awaited,
+; and the unwinder has no other way to tell the two apart.
+CG_AWITH_MARK equ 0x7ffffffe
 
 ; --- Named frame-layout constants ---
 CT2_COMP  equ 8
@@ -92,7 +96,8 @@ UF_UNIT  equ 16
 UF_DOWN  equ 24
 UF_I     equ 32
 UF_VAL   equ 40
-UF_FRAME equ 40           ; + 3 pushes = 64
+UF_ASYNC equ 48
+UF_FRAME equ 56           ; + 3 pushes = 80
 DEF_FUNC cg_unwind_finallys, UF_FRAME
     push rbx
     push r12
@@ -116,8 +121,14 @@ DEF_FUNC cg_unwind_finallys, UF_FRAME
     ; A `with` registers itself here too, as a sentinel: leaving it early has
     ; to call __exit__ for the same reason leaving a try/finally has to run the
     ; finally body.
+    xor r8d, r8d
     cmp edx, CG_WITH_MARK
+    je .a_with
+    mov r8d, 1
+    cmp edx, CG_AWITH_MARK
     jne .a_finally
+.a_with:
+    mov [rbp - UF_ASYNC], r8
     ; With a return value above the __exit__ function, lift the function back
     ; to the top so the call can reach it, and the value lands beneath the
     ; result that POP_TOP then discards.
@@ -132,6 +143,7 @@ DEF_FUNC cg_unwind_finallys, UF_FRAME
     mov rdi, rbx
     mov rsi, r12
     mov rdx, 0
+    mov rcx, [rbp - UF_ASYNC]
     call cg_call_exit_none
     test eax, eax
     jz .fail
@@ -805,7 +817,8 @@ WI_EXC   equ 56
 WI_CLEAN equ 64
 WI_SUPP  equ 72
 WI_N     equ 80
-WI_FRAME equ 88           ; + 3 pushes = 112
+WI_ASYNC equ 88
+WI_FRAME equ 104          ; + 3 pushes = 128
 DEF_FUNC cg_with_item, WI_FRAME
     push rbx
     push r12
@@ -823,6 +836,8 @@ DEF_FUNC cg_with_item, WI_FRAME
     mov [rbp - WI_LINE], rcx
     mov ecx, [rax + AstNode.nchild]
     mov [rbp - WI_N], rcx
+    movzx ecx, byte [rax + AstNode.subkind]
+    mov [rbp - WI_ASYNC], rcx
 
     mov rax, [rbp - WI_I]
     cmp rax, [rbp - WI_N]
@@ -856,11 +871,31 @@ DEF_FUNC cg_with_item, WI_FRAME
     call cg_expr
     test eax, eax
     jz .fail
+
+    ; `async with` differs only in the two awaits it threads through: one on
+    ; what __aenter__ returns, one on what each __aexit__ returns.  The block
+    ; structure, the suppression test and the cleanup region are identical.
+    cmp qword [rbp - WI_ASYNC], 0
+    jne .async_enter
     mov rdi, r12
     mov esi, OP_BEFORE_WITH
     xor edx, edx
     mov rcx, [rbp - WI_LINE]
     call cg_emit
+    jmp .entered
+.async_enter:
+    mov rdi, r12
+    mov esi, OP_BEFORE_ASYNC_WITH
+    xor edx, edx
+    mov rcx, [rbp - WI_LINE]
+    call cg_emit
+    mov rdi, r12
+    mov rsi, [rbp - WI_LINE]
+    mov edx, 1
+    call cg_await_value
+    test eax, eax
+    jz .fail
+.entered:
 
     mov rdi, r12
     call cg_label_new
@@ -896,8 +931,12 @@ DEF_FUNC cg_with_item, WI_FRAME
     mov rsi, [rbp - WI_EXC]
     mov edx, 1                          ; lasti
     call cg_push_handler
-    mov rdi, r12
     mov esi, CG_WITH_MARK
+    cmp qword [rbp - WI_ASYNC], 0
+    je .mark_sync
+    mov esi, CG_AWITH_MARK
+.mark_sync:
+    mov rdi, r12
     call cg_finally_push
 
 .body:
@@ -918,6 +957,7 @@ DEF_FUNC cg_with_item, WI_FRAME
     mov rdi, rbx
     mov rsi, r12
     mov rdx, [rbp - WI_LINE]
+    mov rcx, [rbp - WI_ASYNC]
     call cg_call_exit_none
     test eax, eax
     jz .fail
@@ -955,6 +995,15 @@ DEF_FUNC cg_with_item, WI_FRAME
     xor edx, edx
     mov rcx, [rbp - WI_LINE]
     call cg_emit
+    cmp qword [rbp - WI_ASYNC], 0
+    je .tested
+    mov rdi, r12
+    mov rsi, [rbp - WI_LINE]
+    mov edx, 2
+    call cg_await_value
+    test eax, eax
+    jz .fail
+.tested:
 
     mov rdi, r12
     call cg_label_new
@@ -1024,19 +1073,23 @@ DEF_FUNC cg_with_item, WI_FRAME
 END_FUNC cg_with_item
 
 ;; ============================================================================
-;; cg_call_exit_none(Comp *c, CompUnit *u, int line)
+;; cg_call_exit_none(Comp *c, CompUnit *u, int line, int is_async)
 ;; __exit__(None, None, None) on the normal path.  CALL's oparg is 2 because
-;; the first None sits in the slot a bound method's self would occupy.
+;; the first None sits in the slot a bound method's self would occupy.  An
+;; async manager's __aexit__ returns an awaitable, so the result is driven to
+;; completion before it is discarded.
 ;; ============================================================================
 CX_UNIT  equ 8
 CX_LINE  equ 16
 CX_I     equ 24
-CX_FRAME equ 32           ; + 2 pushes = 48
+CX_ASYNC equ 32
+CX_FRAME equ 48           ; + 2 pushes = 64
 DEF_FUNC cg_call_exit_none, CX_FRAME
     push rbx
     push r12
     mov rbx, rsi
     mov [rbp - CX_LINE], rdx
+    mov [rbp - CX_ASYNC], rcx
     mov qword [rbp - CX_I], 3
 .loop:
     lea rsi, [rel none_singleton]
@@ -1055,12 +1108,22 @@ DEF_FUNC cg_call_exit_none, CX_FRAME
     mov edx, 2
     mov rcx, [rbp - CX_LINE]
     call cg_emit
+    cmp qword [rbp - CX_ASYNC], 0
+    je .discard
+    mov rdi, rbx
+    mov rsi, [rbp - CX_LINE]
+    mov edx, 2
+    call cg_await_value
+    test eax, eax
+    jz .ret
+.discard:
     mov rdi, rbx
     mov esi, OP_POP_TOP
     xor edx, edx
     mov rcx, [rbp - CX_LINE]
     call cg_emit
     mov eax, 1
+.ret:
     pop r12
     pop rbx
     leave
