@@ -13,6 +13,12 @@ one-line fix.
   `upper`, `lower`, `title`, `capitalize` and `swapcase` all leave a
   non-ASCII byte as it is.  Needs Unicode case tables.
 
+- **`bytes.decode` does not validate UTF-8.**  CPython raises
+  UnicodeDecodeError for a stray continuation byte or a truncated sequence;
+  here the bytes come through as they are.  The resulting string is at least
+  self-consistent -- every walk over it treats such a byte as one code point
+  of one byte, so `len`, indexing, slicing and iteration agree.
+
 - **`str.encode` and `bytes.decode` know only utf-8, ascii and latin-1.**
   Any other name is a LookupError, where CPython would find the codec through
   the registry; reaching it from the interpreter would mean calling Python

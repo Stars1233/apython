@@ -37,3 +37,22 @@ print(t.encode(), t.encode().decode() == t)
 print("é" == "é", "é" < "f", sorted(["b", "é", "a", "日"]))
 d = {t: 1, s: 2}
 print(d[t], d[s], len(d))
+
+# Bytes that are not valid UTF-8 still have to make a self-consistent string:
+# len, indexing, slicing and iteration all walk the bytes, and they must agree
+# on where each code point starts.  A stray continuation byte or a truncated
+# sequence is one code point of one byte.  CPython rejects the bytes outright,
+# so both sides report only whether the result hangs together.
+try:
+    bad = b"a\x80b\xc3".decode()
+except UnicodeDecodeError:
+    bad = None
+if bad is None:
+    print("consistent")
+else:
+    print("consistent" if (
+        len(bad) == len(bad.encode())
+        and len(list(bad)) == len(bad)
+        and all(len(bad[i:i + 1].encode()) == 1 for i in range(len(bad)))
+        and bad.encode() == b"a\x80b\xc3"
+    ) else "INCONSISTENT")

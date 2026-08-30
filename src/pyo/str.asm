@@ -30,28 +30,93 @@ extern obj_dealloc
 
 
 ; ----------------------------------------------------------------------------
+; str_cp_width(rdi = bytes, rsi = byte length, rdx = offset) -> rax = width
+;
+; How many bytes the code point starting at `offset` occupies.  Every walk
+; over a string has to agree on this or the two index spaces drift apart: a
+; lead byte whose continuation bytes are missing, or a stray continuation byte
+; with no lead, is one code point of one byte, so a string that is not valid
+; UTF-8 has exactly as many code points as it has bytes and behaves the way it
+; did before there were two lengths at all.  bytes.decode() does not validate,
+; so such a string is reachable.
+; ----------------------------------------------------------------------------
+global str_cp_width
+DEF_FUNC_BARE str_cp_width
+    movzx ecx, byte [rdi + rdx]
+    cmp cl, 0x80
+    jb .one                         ; ASCII
+    cmp cl, 0xC0
+    jb .one                         ; a continuation byte with no lead
+    mov eax, 2
+    cmp cl, 0xE0
+    jb .have_width
+    mov eax, 3
+    cmp cl, 0xF0
+    jb .have_width
+    mov eax, 4
+    cmp cl, 0xF8
+    jb .have_width
+    jmp .one                        ; 0xF8..0xFF is not a lead byte
+
+.have_width:
+    ; Truncate at the end of the string, or at the first byte that is not a
+    ; continuation -- a sequence that was cut short is not one code point.
+    mov r8, rsi
+    sub r8, rdx                     ; bytes remaining
+    cmp rax, r8
+    jle .check_cont
+    mov rax, r8
+.check_cont:
+    mov r9d, 1
+.cont_loop:
+    cmp r9, rax
+    jge .done
+    lea r10, [rdx + r9]
+    movzx ecx, byte [rdi + r10]
+    and cl, 0xC0
+    cmp cl, 0x80
+    jne .truncate
+    inc r9
+    jmp .cont_loop
+.truncate:
+    mov rax, r9
+.done:
+    ret
+.one:
+    mov eax, 1
+    ret
+END_FUNC str_cp_width
+
+; ----------------------------------------------------------------------------
 ; str_count_codepoints(rdi = bytes, rsi = byte length) -> rax = code points
-; A UTF-8 continuation byte is 10xxxxxx; every other byte starts one code
-; point.  Invalid bytes are counted as one each, which keeps the count equal
-; to the byte length for anything that is not valid UTF-8 and so leaves such
-; a string behaving exactly as it did before.
 ; ----------------------------------------------------------------------------
 global str_count_codepoints
-DEF_FUNC_BARE str_count_codepoints
-    xor eax, eax
-    xor ecx, ecx
+DEF_FUNC str_count_codepoints
+    push rbx
+    push r12
+    push r13
+    push r14
+    mov rbx, rdi
+    mov r12, rsi
+    xor r13d, r13d                  ; byte cursor
+    xor r14d, r14d                  ; code points
 .scan:
-    cmp rcx, rsi
+    cmp r13, r12
     jge .done
-    movzx edx, byte [rdi + rcx]
-    and dl, 0xC0
-    cmp dl, 0x80
-    je .cont
-    inc rax
-.cont:
-    inc rcx
+    mov rdi, rbx
+    mov rsi, r12
+    mov rdx, r13
+    call str_cp_width
+    add r13, rax
+    inc r14
     jmp .scan
 .done:
+    mov rax, r14
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
     ret
 END_FUNC str_count_codepoints
 
@@ -79,33 +144,46 @@ END_FUNC str_set_length
 ; to report a position in code points.
 ; ----------------------------------------------------------------------------
 global str_byte_to_cp
-DEF_FUNC_BARE str_byte_to_cp
+DEF_FUNC str_byte_to_cp
     mov rax, [rdi + PyStrObject.ob_size]
     cmp rax, [rdi + PyStrObject.ob_length]
-    je .ascii
+    je .ascii                       ; one byte per code point
     test rsi, rsi
-    js .negative                    ; -1 means "not found"; pass it through
-    lea rdi, [rdi + PyStrObject.data]
-    xor eax, eax
-    xor ecx, ecx
+    js .ascii                       ; -1 means "not found"; pass it through
+
+    push rbx
+    push r12
+    push r13
+    push r14
+    mov r12, [rdi + PyStrObject.ob_size]
+    lea rbx, [rdi + PyStrObject.data]
+    mov r14, rsi                    ; the byte offset asked about
+    xor r13d, r13d                  ; byte cursor
+    xor eax, eax                    ; code points seen
 .walk:
-    cmp rcx, rsi
+    cmp r13, r14
     jge .done
-    movzx edx, byte [rdi + rcx]
-    and dl, 0xC0
-    cmp dl, 0x80
-    je .cont
+    cmp r13, r12
+    jge .done
+    push rax
+    mov rdi, rbx
+    mov rsi, r12
+    mov rdx, r13
+    call str_cp_width
+    add r13, rax
+    pop rax
     inc rax
-.cont:
-    inc rcx
     jmp .walk
 .done:
-    ret
-.negative:
-    mov rax, rsi
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
     ret
 .ascii:
     mov rax, rsi
+    leave
     ret
 END_FUNC str_byte_to_cp
 
@@ -114,32 +192,41 @@ END_FUNC str_byte_to_cp
 ; The index is not bounds-checked; an index at or past the end gives ob_size.
 ; ----------------------------------------------------------------------------
 global str_cp_offset
-DEF_FUNC_BARE str_cp_offset
+DEF_FUNC str_cp_offset
     mov rax, [rdi + PyStrObject.ob_size]
     cmp rax, [rdi + PyStrObject.ob_length]
     je .ascii                       ; one byte per code point
-    xor eax, eax                    ; byte cursor
-    xor ecx, ecx                    ; code points seen
-    mov r8, [rdi + PyStrObject.ob_size]
+
+    push rbx
+    push r12
+    push r13
+    push r14
+    mov r12, [rdi + PyStrObject.ob_size]
+    lea rbx, [rdi + PyStrObject.data]
+    mov r14, rsi                    ; the code point index asked about
+    xor r13d, r13d                  ; byte cursor
+    xor eax, eax                    ; code points seen
 .walk:
-    cmp rcx, rsi
-    jge .found
-    cmp rax, r8
-    jge .found
+    cmp rax, r14
+    jge .done
+    cmp r13, r12
+    jge .done
+    push rax
+    mov rdi, rbx
+    mov rsi, r12
+    mov rdx, r13
+    call str_cp_width
+    add r13, rax
+    pop rax
     inc rax
-.skip_cont:
-    cmp rax, r8
-    jge .counted
-    movzx edx, byte [rdi + PyStrObject.data + rax]
-    and dl, 0xC0
-    cmp dl, 0x80
-    jne .counted
-    inc rax
-    jmp .skip_cont
-.counted:
-    inc rcx
     jmp .walk
-.found:
+.done:
+    mov rax, r13
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
     ret
 .ascii:
     mov rax, rsi
@@ -147,6 +234,7 @@ DEF_FUNC_BARE str_cp_offset
     jle .ascii_done
     mov rax, [rdi + PyStrObject.ob_size]
 .ascii_done:
+    leave
     ret
 END_FUNC str_cp_offset
 
@@ -158,11 +246,19 @@ END_FUNC str_cp_offset
 ; The three codecs the interpreter can do itself.  Everything else goes
 ; through the codecs module, which is Python and cannot be reached from here.
 ; ----------------------------------------------------------------------------
-CI_BUF   equ 40
-CI_FRAME equ 48
+CI_BUF   equ 48
+CI_FRAME equ 64
 global codec_id
 DEF_FUNC codec_id, CI_FRAME
     push rbx
+    ; ap_strcmp compares eight bytes at a time, so the buffer has to be zeroed
+    ; past the terminator or it reads uninitialised stack.
+    mov qword [rbp - CI_BUF], 0
+    mov qword [rbp - CI_BUF + 8], 0
+    mov qword [rbp - CI_BUF + 16], 0
+    mov qword [rbp - CI_BUF + 24], 0
+    mov qword [rbp - CI_BUF + 32], 0
+    mov qword [rbp - CI_BUF + 40], 0
     test rdi, rdi
     jz .ci_utf8
     mov rax, [rdi + PyObject.ob_type]
@@ -1930,22 +2026,19 @@ DEF_FUNC str_iter_next
 
     ; One whole code point, however many bytes that is: the index is a byte
     ; offset, and iterating a byte at a time cut multi-byte characters apart.
-    mov r8, [rax + PyStrObject.ob_size]
-    lea r9, [rcx + 1]
-.si_width:
-    cmp r9, r8
-    jge .si_have_width
-    movzx edx, byte [rax + PyStrObject.data + r9]
-    and dl, 0xC0
-    cmp dl, 0x80
-    jne .si_have_width
-    inc r9
-    jmp .si_width
-.si_have_width:
-    mov [rbx + PyStrIterObject.it_index], r9
+    ; str_cp_width, so this walk agrees with the ones len() and indexing use.
+    push rcx
+    mov rsi, [rax + PyStrObject.ob_size]
     lea rdi, [rax + PyStrObject.data]
+    mov rdx, rcx
+    call str_cp_width
+    pop rcx
+    add rax, rcx                    ; the byte offset just past this code point
+    mov [rbx + PyStrIterObject.it_index], rax
+    mov rdx, [rbx + PyStrIterObject.it_seq]
+    lea rdi, [rdx + PyStrObject.data]
     add rdi, rcx
-    mov rsi, r9
+    mov rsi, rax
     sub rsi, rcx
     call str_new
 

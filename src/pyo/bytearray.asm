@@ -35,7 +35,8 @@ DEF_FUNC bytearray_type_call, BA_FRAME
     mov [rbp - BA_TYPE], rdi           ; save type
     mov rdi, rsi
     mov rsi, rdx
-    lea rdx, [rel ba_name_str]
+    extern bytearray_range_msg
+    lea rdx, [rel bytearray_range_msg]
     extern byteslike_source
     call byteslike_source
     mov [rbp - BA_BUF], rax

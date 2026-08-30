@@ -856,17 +856,17 @@ END_FUNC sys_path_add_script_dir
 ;; ============================================================================
 DEF_FUNC sys_intern_func
     cmp rsi, 1
-    jl .si_error
+    jne .si_error               ; exactly one argument, as CPython requires
     push rbx
     mov rbx, [rdi]
     V_TEST_PTR rbx, rax
-    ja .si_error_pop
+    ja .si_not_str
     test rbx, rbx
-    jz .si_error_pop
+    jz .si_not_str
     mov rax, [rbx + PyObject.ob_type]
     lea rcx, [rel str_type]
     cmp rax, rcx
-    jne .si_error_pop
+    jne .si_not_str
 
     mov rax, [rel sys_intern_table]
     test rax, rax
@@ -895,11 +895,15 @@ DEF_FUNC sys_intern_func
     leave
     V_PACK rax, rdx
     ret
-.si_error_pop:
+.si_not_str:
+    mov rsi, rbx
     pop rbx
+    extern raise_type_error_with_name
+    CSTRING rdi, `intern() argument must be str, not \x01`
+    call raise_type_error_with_name
 .si_error:
     lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "intern() argument must be str"
+    CSTRING rsi, "sys.intern() takes exactly one argument"
     call raise_exception
 END_FUNC sys_intern_func
 

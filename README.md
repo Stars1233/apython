@@ -141,7 +141,9 @@ Missing: `IOError` / `EnvironmentError` (the OSError aliases),
 Pure-Python modules shipped in `lib/` and importable as they are: `abc` (CPython's
 own, on the native `_abc`), `_codecs`, `_thread`, `collections`, `contextlib`,
 `copy`, `functools`, `io`, `itertools`, `operator`, `pickle`, `string`,
-`unittest`, `warnings`.  They are found relative to the interpreter binary and
+`unittest`, `warnings`.  Most of that tree comes from CPython and is covered by
+the Python Software Foundation License (`lib/LICENSE.python`) in addition to
+this repository's MIT license; `lib/README.md` says which files are which.  They are found relative to the interpreter binary and
 sit at the end of `sys.path`, so a real stdlib named by `PYTHONPATH` wins:
 these stand in for CPython's C modules, not for its Python ones.
 

@@ -682,14 +682,28 @@ DEF_FUNC _bytes_decode_impl, BD_FRAME
     mov [rbp - BD_SELF], rbx
     mov r12, [rbx + PyBytesObject.ob_size]
 
+    ; decode([encoding[, errors]]).  An encoding that is not a str is a
+    ; TypeError in CPython, not a silent fall back to utf-8.
+    cmp rsi, 3
+    jg .bd_too_many
     xor eax, eax
     cmp rsi, 2
     jl .bd_have_enc
     mov rax, [rdi + 8]
+    extern none_singleton
+    lea rcx, [rel none_singleton]
+    cmp rax, rcx
+    je .bd_default_enc
     V_TEST_PTR rax, rcx
-    ja .bd_zero_enc
+    ja .bd_bad_enc
+    test rax, rax
+    jz .bd_bad_enc
+    mov rcx, [rax + PyObject.ob_type]
+    lea rdx, [rel str_type]
+    cmp rcx, rdx
+    jne .bd_bad_enc
     jmp .bd_have_enc
-.bd_zero_enc:
+.bd_default_enc:
     xor eax, eax
 .bd_have_enc:
     mov rdi, rax
@@ -771,6 +785,16 @@ DEF_FUNC _bytes_decode_impl, BD_FRAME
     leave
     V_PACK rax, rdx
     ret
+
+.bd_bad_enc:
+    extern raise_type_error_with_name
+    mov rsi, rax
+    CSTRING rdi, `decode() argument 'encoding' must be str, not \x01`
+    call raise_type_error_with_name
+.bd_too_many:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "decode() takes at most 2 arguments"
+    call raise_exception
 
 .bd_not_decodable:
     extern exc_UnicodeDecodeError_type
@@ -1272,17 +1296,20 @@ global bytes_type_call
 ;; The buffer is over-allocated by 8 so bytes objects can zero-terminate.
 ;; ============================================================================
 BLS_ARGS  equ 8
-BLS_NAME  equ 16
+BLS_RANGEMSG equ 16
+BLS_BADITEM equ 56
 BLS_LEN   equ 24
 BLS_BUF   equ 32
 BLS_LIST  equ 40
-BLS_FRAME equ 48
+BLS_FRAME equ 64
 global byteslike_source
 DEF_FUNC byteslike_source, BLS_FRAME
     push rbx
     push r12
     mov [rbp - BLS_ARGS], rdi
-    mov [rbp - BLS_NAME], rdx
+    mov [rbp - BLS_RANGEMSG], rdx
+    mov qword [rbp - BLS_LIST], 0
+    mov qword [rbp - BLS_BUF], 0
     test rsi, rsi
     jz .bls_empty
     cmp rsi, 1
@@ -1428,10 +1455,37 @@ DEF_FUNC byteslike_source, BLS_FRAME
     mov rdi, [rbp - BLS_LIST]
     call obj_decref
     jmp .bls_empty
+    ; raise_exception abandons this frame, so the list and the buffer have to
+    ; go first or a loop that keeps catching the error keeps leaking them.
+.bls_release:
+    mov rdi, [rbp - BLS_LIST]
+    test rdi, rdi
+    jz .bls_release_buf
+    mov qword [rbp - BLS_LIST], 0
+    call obj_decref
+.bls_release_buf:
+    mov rdi, [rbp - BLS_BUF]
+    test rdi, rdi
+    jz .bls_released
+    mov qword [rbp - BLS_BUF], 0
+    call ap_free
+.bls_released:
+    ret
+
 .bls_iter_bad:
+    ; A non-integer item is a TypeError, as it is in CPython; only an integer
+    ; that will not fit in a byte is a ValueError.
+    mov [rbp - BLS_BADITEM], rdi
+    call .bls_release
+    extern raise_type_error_with_name
+    CSTRING rdi, `'\x01' object cannot be interpreted as an integer`
+    mov rsi, [rbp - BLS_BADITEM]
+    call raise_type_error_with_name
 .bls_iter_range:
+    call .bls_release
     lea rdi, [rel exc_ValueError_type]
-    CSTRING rsi, "byte must be in range(0, 256)"
+    ; bytes() and bytearray() word this differently; the caller says which.
+    mov rsi, [rbp - BLS_RANGEMSG]
     call raise_exception
 
 .bls_negative:
@@ -1462,7 +1516,7 @@ DEF_FUNC bytes_type_call, BTC_FRAME
     mov [rbp - BTC_TYPE], rdi
     mov rdi, rsi
     mov rsi, rdx
-    lea rdx, [rel btc_name_str]
+    lea rdx, [rel bytes_range_msg]
     call byteslike_source
     mov [rbp - BTC_BUF], rax
     mov [rbp - BTC_LEN], rdx
@@ -1581,4 +1635,6 @@ bytes_iter_type:
     dq 0 ; tp_dictoffset
 
 section .rodata
-btc_name_str: db "bytes", 0
+bytes_range_msg: db "bytes must be in range(0, 256)", 0
+global bytearray_range_msg
+bytearray_range_msg: db "byte must be in range(0, 256)", 0

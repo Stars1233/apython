@@ -4615,16 +4615,29 @@ DEF_FUNC str_method_encode, SE_FRAME
     mov [rbp - SE_LEN], r12
     mov qword [rbp - SE_ERRS], 0
 
+    ; encode([encoding[, errors]]).  An encoding that is not a str is a
+    ; TypeError in CPython, not a silent fall back to utf-8.
+    cmp rsi, 3
+    jg .se_too_many
     xor eax, eax
     cmp rsi, 2
     jl .se_have_enc
     mov rax, [rdi + 8]
+    extern none_singleton
+    lea rcx, [rel none_singleton]
+    cmp rax, rcx
+    je .se_default_enc
     V_TEST_PTR rax, rcx
-    ja .se_have_enc
-    cmp rsi, 3
-    jl .se_have_enc
-    mov rcx, [rdi + 16]
-    mov [rbp - SE_ERRS], rcx
+    ja .se_bad_enc
+    test rax, rax
+    jz .se_bad_enc
+    mov rcx, [rax + PyObject.ob_type]
+    lea rdx, [rel str_type]
+    cmp rcx, rdx
+    jne .se_bad_enc
+    jmp .se_have_enc
+.se_default_enc:
+    xor eax, eax
 .se_have_enc:
     mov rdi, rax
     extern codec_id
@@ -4711,6 +4724,16 @@ DEF_FUNC str_method_encode, SE_FRAME
     leave
     V_PACK rax, rdx
     ret
+
+.se_bad_enc:
+    extern raise_type_error_with_name
+    CSTRING rdi, `encode() argument 'encoding' must be str, not \x01`
+    mov rsi, rax
+    call raise_type_error_with_name
+.se_too_many:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "encode() takes at most 2 arguments"
+    call raise_exception
 
 .se_not_encodable:
     extern exc_UnicodeEncodeError_type
