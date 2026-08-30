@@ -25,6 +25,7 @@ extern frame_free
 extern frame_pool_drain
 extern eval_frame
 extern pyc_read_file
+extern code_from_path
 extern fatal_error
 extern obj_decref
 extern str_from_cstr_heap
@@ -162,9 +163,10 @@ DEF_FUNC main
     ; Initialize subsystems
     call bool_init
 
-    ; Load .pyc file -> code object
+    ; Load the file -> code object.  A .py is compiled here; anything else is
+    ; read as marshalled bytecode.
     mov rdi, rbx
-    call pyc_read_file
+    call code_from_path
     test rax, rax
     jz .load_failed
     mov r12, rax                ; r12 = code object
@@ -423,7 +425,29 @@ DEF_FUNC main
     call fatal_error
 
 .load_failed:
-    CSTRING rdi, "Error: failed to load .pyc file"
+    ; A source file that failed to compile has a real SyntaxError pending, with
+    ; a line number in it; saying "failed to load" instead would throw that
+    ; away.  Nothing has run yet, so there is no traceback to print.
+    mov rdi, [rel current_exception]
+    test rdi, rdi
+    jz .load_failed_plain
+    call traceback_print
+    mov rdi, [rel current_exception]
+    call obj_decref
+    mov qword [rel current_exception], 0
+    ; .exit_cleanup DECREFs the globals dict and the code object, and at this
+    ; point neither exists -- nothing has been loaded yet.  Return straight out
+    ; with the status instead.
+    mov eax, 1
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+.load_failed_plain:
+    CSTRING rdi, "Error: failed to load file"
     call fatal_error
 END_FUNC main
 

@@ -39,6 +39,8 @@ extern eval_frame
 extern frame_new
 extern frame_free
 extern pyc_read_file
+extern code_from_path
+extern path_is_source
 extern sys_open
 extern sys_close
 
@@ -1129,6 +1131,64 @@ DEF_FUNC import_search_dirs, SD_FRAME
     test rax, rax
     jns .sd_found_module
 
+    ; --- Pattern 4: <dir>/<leaf>/__init__.py (a package, from source) ---
+    ; The source patterns come last, so a .pyc that is already there still
+    ; wins and nothing an existing user has changes behaviour.
+    mov r13, [rbx + PyStrObject.ob_size]
+    test r13, r13
+    jz .sd_p4_no_slash
+    inc r13
+.sd_p4_no_slash:
+    mov rdi, r12
+    add rdi, r13
+    mov rsi, [rbp - SD_LEAF]
+    mov rdx, [rbp - SD_LEAFLEN]
+    call ap_memcpy
+    add r13, [rbp - SD_LEAFLEN]
+
+    mov rdi, r12
+    add rdi, r13
+    lea rsi, [rel im_pkg_py_suffix]
+    mov rdx, im_pkg_py_suffix_len
+    call ap_memcpy
+    add r13, im_pkg_py_suffix_len
+    mov byte [r12 + r13], 0
+
+    mov rdi, r12
+    xor esi, esi
+    xor edx, edx
+    call sys_open
+    test rax, rax
+    jns .sd_found_package
+
+    ; --- Pattern 5: <dir>/<leaf>.py (a module, from source) ---
+    mov r13, [rbx + PyStrObject.ob_size]
+    test r13, r13
+    jz .sd_p5_no_slash
+    inc r13
+.sd_p5_no_slash:
+    mov rdi, r12
+    add rdi, r13
+    mov rsi, [rbp - SD_LEAF]
+    mov rdx, [rbp - SD_LEAFLEN]
+    call ap_memcpy
+    add r13, [rbp - SD_LEAFLEN]
+
+    mov rdi, r12
+    add rdi, r13
+    lea rsi, [rel im_py_suffix]
+    mov rdx, im_py_suffix_len
+    call ap_memcpy
+    add r13, im_py_suffix_len
+    mov byte [r12 + r13], 0
+
+    mov rdi, r12
+    xor esi, esi
+    xor edx, edx
+    call sys_open
+    test rax, rax
+    jns .sd_found_module
+
 .sd_next:
     inc qword [rbp - SD_IDX]
     jmp .sd_loop
@@ -1350,6 +1410,62 @@ DEF_FUNC import_search_syspath, SS_FRAME
     test rax, rax
     jns .ss_found_module
 
+    ; --- Pattern 4: <dir>/<full>/__init__.py (a package, from source) ---
+    mov r13, [rbx + PyStrObject.ob_size]
+    test r13, r13
+    jz .ss_p4_no_slash
+    inc r13
+.ss_p4_no_slash:
+    mov rdi, r12
+    add rdi, r13
+    mov rsi, [rbp - SS_FULL]
+    mov rdx, r15                ; the dotted component's length, from pattern 1
+    call ap_memcpy
+    add r13, r15
+
+    mov rdi, r12
+    add rdi, r13
+    lea rsi, [rel im_pkg_py_suffix]
+    mov rdx, im_pkg_py_suffix_len
+    call ap_memcpy
+    add r13, im_pkg_py_suffix_len
+    mov byte [r12 + r13], 0
+
+    mov rdi, r12
+    xor esi, esi
+    xor edx, edx
+    call sys_open
+    test rax, rax
+    jns .ss_found_package
+
+    ; --- Pattern 5: <dir>/<leaf>.py (a module, from source) ---
+    mov r13, [rbx + PyStrObject.ob_size]
+    test r13, r13
+    jz .ss_p5_no_slash
+    inc r13
+.ss_p5_no_slash:
+    mov rdi, r12
+    add rdi, r13
+    mov rsi, [rbp - SS_LEAF]
+    mov rdx, [rbp - SS_LEAFLEN]
+    call ap_memcpy
+    add r13, [rbp - SS_LEAFLEN]
+
+    mov rdi, r12
+    add rdi, r13
+    lea rsi, [rel im_py_suffix]
+    mov rdx, im_py_suffix_len
+    call ap_memcpy
+    add r13, im_py_suffix_len
+    mov byte [r12 + r13], 0
+
+    mov rdi, r12
+    xor esi, esi
+    xor edx, edx
+    call sys_open
+    test rax, rax
+    jns .ss_found_module
+
 .ss_next:
     inc qword [rbp - SS_IDX]
     jmp .ss_loop
@@ -1424,9 +1540,9 @@ DEF_FUNC import_load_module, IF_FRAME
     mov qword [rel marshal_ref_count], 0
     mov qword [rel marshal_ref_cap], 0
 
-    ; Read .pyc file -> code object
+    ; Read the file -> code object; a .py is compiled on the spot.
     mov rdi, r12
-    call pyc_read_file
+    call code_from_path
     test rax, rax
     jz .load_failed
     mov r14, rax                ; r14 = code object
@@ -1520,27 +1636,35 @@ DEF_FUNC import_load_module, IF_FRAME
     pop rdi
     call obj_decref
 
-    ; Compute package directory from path
-    ; path = ".../pkg/__pycache__/__init__.cpython-312.pyc"
-    ; We want ".../pkg"
+    ; Compute package directory from path.  A cached package is
+    ; ".../pkg/__pycache__/__init__.cpython-312.pyc" -- two components to
+    ; strip -- while a source package is ".../pkg/__init__.py", which is one.
+    ; Either way we want ".../pkg".
+    mov rdi, r12
+    call path_is_source
+    push rax
     mov rdi, r12
     call ap_strlen
+    pop r8
     mov rcx, rax
-    ; Walk backwards past two slashes to get to pkg dir
     dec rcx
 .find_slash1:
     dec rcx
     js .use_dot_path
     cmp byte [r12 + rcx], '/'
     jne .find_slash1
-    ; Found first slash (before __init__.cpython...)
+    ; Found the slash before __init__.*; for a source package that is already
+    ; the package directory.
+    test r8, r8
+    jnz .have_pkg_dir
     dec rcx
 .find_slash2:
     dec rcx
     js .use_dot_path
     cmp byte [r12 + rcx], '/'
     jne .find_slash2
-    ; Found second slash (before __pycache__)
+    ; Found the second slash, the one before __pycache__.
+.have_pkg_dir:
     ; pkg dir = path[0..rcx]
     mov rdi, r12
     mov rsi, rcx
@@ -1796,6 +1920,12 @@ im_pycache_prefix_len  equ $ - im_pycache_prefix - 1
 
 im_pyc_suffix:         db ".cpython-312.pyc", 0
 im_pyc_suffix_len      equ $ - im_pyc_suffix - 1
+
+im_pkg_py_suffix:      db "/__init__.py", 0
+im_pkg_py_suffix_len   equ $ - im_pkg_py_suffix - 1
+
+im_py_suffix:          db ".py", 0
+im_py_suffix_len       equ $ - im_py_suffix - 1
 
 section .bss
 import_path_buf_ptr: resq 1    ; malloc'd path buffer (lazy-allocated)

@@ -93,6 +93,11 @@ for test_py in "$TESTDIR"/test_*.py; do
         expected=$($PYTHON "$test_py" 2>&1) || true
     fi
 
+    # tests/srcpkg exists to be imported from source.  Producing the expected
+    # output above ran CPython over it, which left a __pycache__ behind -- and
+    # with one there apython reads the .pyc and the test proves nothing.
+    rm -rf "$TESTDIR"/srcpkg/__pycache__ "$TESTDIR"/srcpkg/*/__pycache__
+
     # Run with apython
     actual=$($APYTHON "$pyc_file" 2>&1) || true
 
