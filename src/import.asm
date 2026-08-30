@@ -24,6 +24,9 @@ extern none_singleton
 extern dict_new
 extern dict_get
 extern dict_set
+extern dict_del
+extern current_exception
+extern eval_exception_unwind
 extern list_new
 extern list_append
 extern tuple_new
@@ -57,6 +60,7 @@ extern sys_path_add_script_dir
 ; builtins
 extern builtins_dict_global
 extern exc_ImportError_type
+extern exc_ModuleNotFoundError_type
 
 ; Builtin modules
 extern time_module_create
@@ -74,7 +78,8 @@ IF_MLEN     equ 56           ; saved marshal_len
 IF_MREFS    equ 64           ; saved marshal_refs
 IF_MRCNT    equ 72           ; saved marshal_ref_count
 IF_MRCAP    equ 80           ; saved marshal_ref_cap
-IF_FRAME    equ 88
+IF_EXC      equ 88           ; current_exception on entry (see .import_error)
+IF_FRAME    equ 96
 
 ; --- import_find_and_load frame layout ---
 ; path_component buffer lives on stack below frame locals
@@ -199,21 +204,100 @@ DEF_FUNC import_init
     mov rdi, rbx                ; DECREF module (dict_set INCREF'd)
     call obj_decref
 
-    ; Add system python3 lib path to sys.path for re module access
-    lea rdi, [rel im_python3_lib_path]
-    call str_from_cstr_heap
+    ; PYTHONPATH, colon-separated, appended in order.
+    ;
+    ; CPython's own /usr/lib/python3.12 used to be appended here
+    ; unconditionally, nominally "for re module access" -- which never
+    ; worked, because apython cannot run that stdlib.  What it did do, once
+    ; a failing module body stopped being swallowed, was turn "module not
+    ; available" into "module half-imports and then raises from inside
+    ; types.py".  A stdlib on the path has to be the caller's decision.
+    CSTRING rdi, "PYTHONPATH"
+    extern getenv
+    call getenv
+    test rax, rax
+    jz .no_pythonpath
+    mov r12, rax                ; cursor over the value
+.pp_entry:
+    cmp byte [r12], 0
+    je .no_pythonpath
+    ; measure up to ':' or NUL
+    xor ecx, ecx
+.pp_scan:
+    movzx eax, byte [r12 + rcx]
+    test al, al
+    jz .pp_have_len
+    cmp al, ':'
+    je .pp_have_len
+    inc rcx
+    jmp .pp_scan
+.pp_have_len:
+    test rcx, rcx
+    jz .pp_skip_sep             ; empty entry
+    mov rdi, r12
+    mov rsi, rcx
+    push rcx
+    call str_new_heap
+    pop rcx
     push rax
+    push rcx
     mov rdi, [rel sys_path_list]
     mov rsi, rax
     call list_append
+    pop rcx
     pop rdi
     call obj_decref
+.pp_skip_sep:
+    add r12, rcx
+    cmp byte [r12], 0
+    je .no_pythonpath
+    inc r12                     ; step over the ':'
+    jmp .pp_entry
+.no_pythonpath:
 
     pop r12
     pop rbx
     leave
     ret
 END_FUNC import_init
+
+; ============================================================================
+; import_raise_not_found(rdi = module name C string) -- does not return
+; Raises ModuleNotFoundError("No module named 'x'"), matching CPython.
+; ============================================================================
+IRNF_BUF equ 256
+DEF_FUNC_LOCAL import_raise_not_found, IRNF_BUF
+    mov rsi, rdi                ; the name
+    lea rdi, [rbp - IRNF_BUF]
+    xor ecx, ecx
+    lea rdx, [rel im_no_module_prefix]
+.irnf_prefix:
+    movzx eax, byte [rdx]
+    test al, al
+    jz .irnf_name
+    inc rdx
+    mov [rdi + rcx], al
+    inc rcx
+    jmp .irnf_prefix
+.irnf_name:
+    movzx eax, byte [rsi]
+    test al, al
+    jz .irnf_close
+    inc rsi
+    cmp rcx, IRNF_BUF - 4
+    jae .irnf_close
+    mov [rdi + rcx], al
+    inc rcx
+    jmp .irnf_name
+.irnf_close:
+    mov byte [rdi + rcx], 0x27      ; closing quote
+    inc rcx
+    mov byte [rdi + rcx], 0
+    mov rsi, rdi
+    lea rdi, [rel exc_ModuleNotFoundError_type]
+    call raise_exception
+    ud2
+END_FUNC import_raise_not_found
 
 ; ============================================================================
 ; import_module(PyObject *name_str, PyObject *fromlist, int64_t level) -> PyObject*
@@ -233,6 +317,7 @@ DEF_FUNC import_module, IF_FRAME
     mov [rbp - IF_NAME], rdi        ; name_str
     mov [rbp - IF_FROMLIST], rsi    ; fromlist
     mov [rbp - IF_LEVEL], rdx       ; level
+    DUNDER_EXC_SAVE [rbp - IF_EXC]  ; see .import_error
 
     ; For now, skip relative import handling (level > 0)
     ; TODO: resolve relative imports
@@ -411,11 +496,26 @@ DEF_FUNC import_module, IF_FRAME
     jmp .done
 
 .import_error:
-    ; Raise ImportError
-    lea rdi, [rel exc_ImportError_type]
-    lea rsi, [rbx]              ; module name cstr
-    call raise_exception
+    ; If the module was found and its body raised, that exception is the
+    ; error; raising ImportError over it would replace the real cause with
+    ; a generic "no module named X".
+    ;
+    ; Compared against the value saved on entry, not against 0:
+    ; current_exception is also the exception *being handled*, so inside
+    ; `except ImportError:` -- which is how the whole stdlib probes for its
+    ; optional C accelerators -- a bare test sees the handled exception and
+    ; re-propagates it in place of the real one.
+    DUNDER_RAISED [rbp - IF_EXC], .propagate_pending
+
+    ; ModuleNotFoundError, not a bare ImportError: it is an ImportError
+    ; subclass and stdlib code catches it specifically.  CPython's wording
+    ; is "No module named 'x'".
+    mov rdi, rbx                ; module name cstr
+    call import_raise_not_found
     ; does not return
+
+.propagate_pending:
+    jmp eval_exception_unwind
 
 .done:
     pop r15
@@ -1098,6 +1198,7 @@ DEF_FUNC import_load_module, IF_FRAME
     mov rbx, rdi                ; name_str
     mov r12, rsi                ; path_cstr
     mov r13d, edx               ; is_package
+    DUNDER_EXC_SAVE [rbp - IF_EXC]
 
     ; Save marshal globals
     mov rax, [rel marshal_buf]
@@ -1349,7 +1450,15 @@ DEF_FUNC import_load_module, IF_FRAME
     mov rdi, r12
     call eval_frame
     V_UNPACK rax, rdx           ; eval_frame returns a Value
-    ; rax = return value (ignore), edx = tag
+    ; A module body that raised returns a NULL Value with current_exception
+    ; set.  This used to be discarded -- "rax = return value (ignore)" -- so
+    ; the module was returned as if it had loaded, the exception stayed
+    ; pending, and the importer's own try/except never saw it.  Every other
+    ; eval_frame caller propagates; see opcodes_call.asm .propagate_exc.
+    test edx, edx
+    jnz .body_returned
+    DUNDER_RAISED [rbp - IF_EXC], .body_raised
+.body_returned:
     ; XDECREF return value (tag-aware)
     mov rdi, rax
     mov rsi, rdx
@@ -1362,6 +1471,10 @@ DEF_FUNC import_load_module, IF_FRAME
 
     ; DECREF code object
     mov rdi, r14
+    call obj_decref
+
+    ; The module owns the dict now; release the reference dict_new gave us.
+    mov rdi, r15
     call obj_decref
 
     ; Return module (already in sys.modules with INCREF from dict_set)
@@ -1405,6 +1518,43 @@ DEF_FUNC import_load_module, IF_FRAME
     pop rbx
     leave
     ret
+
+.body_raised:
+    ; Undo the whole load and hand the caller a NULL with the body's
+    ; exception still pending.
+    mov rdi, r12
+    call frame_free
+    mov rdi, r14
+    call obj_decref
+
+    ; Drop the half-built module from sys.modules, as CPython's
+    ; remove_module() does, so a retry re-executes the body instead of
+    ; handing back an empty module.  The body may have deleted the entry
+    ; itself, so look before deleting -- dict_del raises on a missing key.
+    mov rdi, [rel sys_modules_dict]
+    mov rsi, rbx
+    call dict_get
+    V_UNPACK rax, rdx
+    test edx, edx
+    jz .br_not_cached
+    mov rdi, [rel sys_modules_dict]
+    mov rsi, rbx
+    call dict_del
+.br_not_cached:
+
+    mov rdi, r13                ; our own reference to the module
+    call obj_decref
+    mov rdi, r15                ; and to its dict
+    call obj_decref
+
+    xor eax, eax
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
 END_FUNC import_load_module
 
 ; ============================================================================
@@ -1412,12 +1562,12 @@ END_FUNC import_load_module
 ; ============================================================================
 section .rodata
 
+im_no_module_prefix: db "No module named '", 0
 im_lib_path:        db "lib", 0
 im_tests_cpython_path: db "tests/cpython", 0
 im_time_name:       db "time", 0
 im_asyncio_name:    db "asyncio", 0
 im_sre_name:        db "_sre", 0
-im_python3_lib_path: db "/usr/lib/python3.12", 0
 im_builtins:        db "builtins", 0
 im_dunder_name:     db "__name__", 0
 im_dunder_file:     db "__file__", 0

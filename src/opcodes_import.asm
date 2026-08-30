@@ -42,6 +42,13 @@ DEF_FUNC_BARE op_import_name
     push rsi                    ; fromlist payload
     push rdx                    ; level
 
+    ; The two operands are ours now.  eval_saved_r13 was captured by
+    ; eval_dispatch *before* those pops, so a non-local unwind out of
+    ; import_module would have walked the value stack back down over both
+    ; slots and DECREF'd them a second time -- a double free of the
+    ; fromlist tuple on every failing import.
+    mov [rel eval_saved_r13], r13
+
     ; Decode level from SmallInt
     cmp ecx, TAG_SMALLINT
     je .decode_smallint
@@ -78,10 +85,20 @@ DEF_FUNC_BARE op_import_name
     DISPATCH
 
 .import_failed:
-    ; Should not reach here — import_module raises on failure
+    ; import_module raises for a module it cannot find, but returns NULL for
+    ; one whose body raised -- that exception is already pending and must be
+    ; propagated, not replaced.
+    extern current_exception
+    extern eval_exception_unwind
+    cmp qword [rel current_exception], 0
+    jne .propagate_import_exc
     lea rdi, [rel exc_ImportError_type]
     CSTRING rsi, "import failed"
     call raise_exception
+
+.propagate_import_exc:
+    mov [rel eval_saved_r13], r13
+    jmp eval_exception_unwind
 END_FUNC op_import_name
 
 ; ============================================================================
@@ -229,9 +246,18 @@ DEF_FUNC op_import_from, IF2_FRAME
     DISPATCH
 
 .if_error:
+    ; A submodule whose body raised leaves its exception pending; reporting
+    ; "cannot import name" over it would hide the real cause.
+    cmp qword [rel current_exception], 0
+    jne .propagate_from_exc
     lea rdi, [rel exc_ImportError_type]
     CSTRING rsi, "cannot import name"
     call raise_exception
+
+.propagate_from_exc:
+    mov [rel eval_saved_r13], r13
+    leave
+    jmp eval_exception_unwind
 END_FUNC op_import_from
 
 section .rodata

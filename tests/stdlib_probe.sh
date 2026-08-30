@@ -15,8 +15,9 @@
 # ratchet, not a report.
 #
 # Needs CPython's Lib/ (a source checkout, not an installed python).  Point
-# $CPYTHON_LIB at it; the target skips cleanly when it is not there, so a
-# build never depends on an out-of-tree checkout.
+# $CPYTHON_LIB at it; it reaches the interpreter as PYTHONPATH.  The target
+# skips cleanly when it is not there, so a build never depends on an
+# out-of-tree checkout.
 
 set -u
 
@@ -60,6 +61,15 @@ list_modules() {
       done ) | sort -u | grep -v '^test'
 }
 
+# apython reads .pyc, never .py, so the reference tree has to be byte-compiled
+# before anything can be found in it.  A source checkout is not, and CPython
+# gitignores __pycache__, so doing it in place is invisible.  Skip CPython's
+# own test suite -- it is large and nothing here imports it.
+if [ ! -f "$CPYTHON_LIB/__pycache__/os.cpython-312.pyc" ]; then
+    echo "byte-compiling $CPYTHON_LIB (one time)..."
+    $PYTHON -m compileall -q -j0 -x '[/\\]test[/\\]' "$CPYTHON_LIB" >/dev/null 2>&1
+fi
+
 RESULTS="$WORK/results.txt"
 : > "$RESULTS"
 
@@ -71,7 +81,10 @@ probe_one() {
         return
     fi
     local out rc
-    out=$(cd "$CPYTHON_LIB" && timeout 20 "$APY" \
+    # Run from inside Lib/ so apython's own lib/ and tests/cpython shims --
+    # both *relative* sys.path entries -- do not resolve and shadow the real
+    # stdlib.  What is being measured is CPython's library, not our stand-ins.
+    out=$(cd "$CPYTHON_LIB" && PYTHONPATH="$CPYTHON_LIB" timeout 20 "$APY" \
           "$WORK/__pycache__/probe.cpython-312.pyc" 2>&1)
     rc=$?
     if [ "$out" = "OK" ]; then

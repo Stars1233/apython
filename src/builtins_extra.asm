@@ -4666,7 +4666,26 @@ DEF_FUNC builtin_import_fn
     xor esi, esi               ; fromlist = NULL
     xor edx, edx              ; level = 0
     call import_module
-    ; Returns (rax=module, edx=TAG_PTR)
+    ; import_module never sets rdx, so V_PACK was branching on whatever the
+    ; last call left there -- re-encoding the module *pointer* as an int or a
+    ; double, i.e. a Value whose payload is a pointer but whose tag says
+    ; otherwise.  A module is a pointer; a pointer is its own Value.
+    mov edx, TAG_PTR
+    test rax, rax
+    jnz .imp_done
+    ; NULL means the module body raised and the exception is still pending.
+    extern current_exception
+    extern eval_exception_unwind
+    cmp qword [rel current_exception], 0
+    jne .imp_propagate
+    lea rdi, [rel exc_ImportError_type]
+    extern exc_ImportError_type
+    CSTRING rsi, "import failed"
+    call raise_exception
+.imp_propagate:
+    leave
+    jmp eval_exception_unwind
+.imp_done:
     leave
     V_PACK rax, rdx             ; builtins return one Value
     ret

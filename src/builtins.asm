@@ -2099,6 +2099,16 @@ BCL_BASES equ 48        ; the bases tuple built from args[2:]
     mov rdi, r12
     call eval_frame
     V_UNPACK rax, rdx           ; eval_frame returns a Value
+    ; A class body that raised returns NULL with current_exception set.  The
+    ; same omission the module-body path had: the exception was left pending
+    ; and the class built anyway, so `class C: raise X` inside a try/except
+    ; produced a class *and* an error reported somewhere else entirely.
+    test edx, edx
+    jnz .bc_body_ok
+    extern current_exception
+    cmp qword [rel current_exception], 0
+    jne .bc_body_raised
+.bc_body_ok:
     ; DECREF return value (should be None — TAG_NONE, not a pointer)
     mov rsi, rdx
     DECREF_VAL rax, rsi
@@ -2137,6 +2147,21 @@ BCL_BASES equ 48        ; the bases tuple built from args[2:]
     lea rdi, [rel exc_TypeError_type]
     CSTRING rsi, "__build_class__ requires 2+ arguments"
     call raise_exception
+
+.bc_body_raised:
+    ; Release the frame and the namespace, then let the body's exception
+    ; keep unwinding in the caller's frame.
+    mov rdi, r12
+    call frame_free
+    mov rdi, r15
+    call obj_decref
+    mov rdi, [rbp - BCL_BASES]
+    test rdi, rdi
+    jz .bc_body_raised_go
+    call obj_decref
+.bc_body_raised_go:
+    extern eval_exception_unwind
+    jmp eval_exception_unwind
 
 .build_class_base_error:
     lea rdi, [rel exc_TypeError_type]
