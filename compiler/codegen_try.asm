@@ -97,7 +97,8 @@ UF_DOWN  equ 24
 UF_I     equ 32
 UF_VAL   equ 40
 UF_ASYNC equ 48
-UF_FRAME equ 56           ; + 3 pushes = 80
+UF_NODE  equ 56
+UF_FRAME equ 72           ; + 3 pushes = 96
 DEF_FUNC cg_unwind_finallys, UF_FRAME
     push rbx
     push r12
@@ -126,7 +127,20 @@ DEF_FUNC cg_unwind_finallys, UF_FRAME
     je .a_with
     mov r8d, 1
     cmp edx, CG_AWITH_MARK
-    jne .a_finally
+    je .a_with
+    ; An except clause registers its own handler node.  Leaving one early has
+    ; to pop the exception state and unbind the name, or the exception stays
+    ; "being handled" for the rest of the process -- which the interpreter
+    ; reports as an unhandled exception at exit, long after the return.
+    push rdx
+    mov rdi, rbx
+    mov rsi, rdx
+    call ast_at
+    movzx ecx, byte [rax + AstNode.kind]
+    pop rdx
+    cmp ecx, AST_HANDLER
+    je .an_except
+    jmp .a_finally
 .a_with:
     mov [rbp - UF_ASYNC], r8
     ; With a return value above the __exit__ function, lift the function back
@@ -148,6 +162,39 @@ DEF_FUNC cg_unwind_finallys, UF_FRAME
     test eax, eax
     jz .fail
     jmp .loop
+.an_except:
+    ; The return value sits above the exception state PUSH_EXC_INFO left, so
+    ; it has to be lifted out of the way before POP_EXCEPT reaches it.
+    mov [rbp - UF_NODE], rdx
+    cmp qword [rbp - UF_VAL], 0
+    je .exc_no_swap
+    mov rdi, r12
+    mov esi, OP_SWAP
+    mov edx, 2
+    xor ecx, ecx
+    call cg_emit
+.exc_no_swap:
+    mov rdi, r12
+    mov esi, OP_POP_EXCEPT
+    xor edx, edx
+    xor ecx, ecx
+    call cg_emit
+    or byte [rax + Instr.flags], IF_NOLINE
+    mov rdi, rbx
+    mov rsi, [rbp - UF_NODE]
+    call ast_at
+    mov ecx, [rax + AstNode.b]          ; the bound name, if any
+    test ecx, ecx
+    jz .loop
+    mov rdi, rbx
+    mov rsi, r12
+    mov rdx, rcx
+    xor ecx, ecx
+    call cg_clear_exc_name
+    test eax, eax
+    jz .fail
+    jmp .loop
+
 .a_finally:
     ; While emitting the finally body, it is no longer one of the blocks a
     ; nested return has to unwind -- otherwise a `return` inside a `finally`
@@ -612,10 +659,19 @@ DEF_FUNC cg_one_except, OE_FRAME
     call cg_push_handler
 
 .body:
+    ; Registering the handler node itself, rather than a sentinel, is what
+    ; lets cg_unwind_finallys find the bound name to unbind.
+    mov rdi, r12
+    mov rsi, r13
+    call cg_finally_push
     mov rdi, rbx
     mov rsi, r12
     mov rdx, r13
     call cg_body
+    push rax
+    mov rdi, r12
+    call cg_finally_pop
+    pop rax
     test eax, eax
     jz .fail
 

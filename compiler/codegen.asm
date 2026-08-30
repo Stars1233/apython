@@ -1258,7 +1258,11 @@ CS_KIND  equ 56
 CS_OPEN  equ 64
 CS_ADD   equ 72
 CS_EXT   equ 80
-CS_FRAME equ 88          ; + 3 pushes = 112
+; The element being emitted.  It was a bare r14 -- which is the caller's, and
+; main keeps argv there across the compile, so a display anywhere in the file
+; handed back a different argv and the crash landed in sys.argv construction.
+CS_ELT   equ 88
+CS_FRAME equ 104         ; + 3 pushes = 128
 DEF_FUNC_LOCAL cg_e_seq, CS_FRAME
     push rbx
     push r12
@@ -1348,7 +1352,7 @@ DEF_FUNC_LOCAL cg_e_seq, CS_FRAME
     mov rdx, [rbp - CS_I]
     mov rdi, rbx
     call ast_child
-    mov r14, rax
+    mov [rbp - CS_ELT], rax
     mov rdi, rbx
     mov rsi, rax
     call ast_at
@@ -1358,7 +1362,7 @@ DEF_FUNC_LOCAL cg_e_seq, CS_FRAME
 
     mov rdi, rbx
     mov rsi, r12
-    mov rdx, r14
+    mov rdx, [rbp - CS_ELT]
     call cg_expr
     test eax, eax
     jz .fail
@@ -1371,7 +1375,7 @@ DEF_FUNC_LOCAL cg_e_seq, CS_FRAME
 
 .up_star:
     mov rdi, rbx
-    mov rsi, r14
+    mov rsi, [rbp - CS_ELT]
     call ast_at
     mov edx, [rax + AstNode.a]
     mov rdi, rbx
@@ -1425,7 +1429,8 @@ CD_N     equ 40
 CD_LINE  equ 48
 CD_RUN   equ 56
 CD_ANY   equ 64
-CD_FRAME equ 72          ; + 3 pushes = 96
+CD_ELT   equ 72          ; see CS_ELT: this was a bare r14 too
+CD_FRAME equ 88          ; + 3 pushes = 112
 DEF_FUNC_LOCAL cg_e_dict, CD_FRAME
     push rbx
     push r12
@@ -1488,7 +1493,7 @@ DEF_FUNC_LOCAL cg_e_dict, CD_FRAME
     shl rdx, 1
     mov rdi, rbx
     call ast_child
-    mov r14, rax
+    mov [rbp - CD_ELT], rax
     mov rdi, rbx
     mov rsi, rax
     call ast_at
@@ -1499,7 +1504,7 @@ DEF_FUNC_LOCAL cg_e_dict, CD_FRAME
     ; A literal pair: emit key and value, and count it into the pending run.
     mov rdi, rbx
     mov rsi, r12
-    mov rdx, r14
+    mov rdx, [rbp - CD_ELT]
     call cg_expr
     test eax, eax
     jz .fail
@@ -1525,7 +1530,7 @@ DEF_FUNC_LOCAL cg_e_dict, CD_FRAME
 .unpack_entry:
     call .flush_run
     mov rdi, rbx
-    mov rsi, r14
+    mov rsi, [rbp - CD_ELT]
     call ast_at
     mov edx, [rax + AstNode.a]
     mov rdi, rbx

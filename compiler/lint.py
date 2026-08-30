@@ -94,6 +94,97 @@ def check_section(files):
                             "add `section .text` before it"))
     return bad
 
+CALLEE_SAVED = ('rbx', 'r12', 'r13', 'r14', 'r15')
+
+def check_callee_saved(files):
+    """A return path that does not restore every callee-saved register.
+
+    The SysV ABI makes rbx and r12-r15 the caller's to keep, and the whole
+    interpreter relies on it: main holds argc and argv in r14 and r15 across
+    the compile, and the eval loop keeps the frame, the stack top and the
+    consts pointer there.  A compiler function that pushes r14 and returns
+    down a path that forgets to pop it hands main a different argv, and the
+    crash lands in sys.argv construction with nothing pointing back here.
+
+    The check is exact rather than statistical: every function in this tree
+    opens with a run of pushes and closes each return with the mirroring run
+    of pops, so the pops directly above a `ret` must reverse the entry pushes.
+    A local subroutine inside a function -- one that adjusts rsp and returns
+    without touching the saved registers -- is not a function return and is
+    skipped.
+    """
+    bad = []
+    for path in files:
+        src = open(path).read()
+        for m in re.finditer(r'^(DEF_FUNC(?:_LOCAL|_BARE)?)\s+(\w+)(?:\s*,[^\n]*)?$(.*?)^END_FUNC',
+                             src, re.M | re.S):
+            name, body = m.group(2), m.group(3)
+            code = [l.split(';')[0].strip() for l in body.splitlines()]
+            code = [c for c in code if c and not c.endswith(':')]
+            entry = []
+            for c in code:
+                pm = re.match(r'push\s+(%s)$' % '|'.join(CALLEE_SAVED), c)
+                if pm:
+                    entry.append(pm.group(1))
+                elif c.startswith('push '):
+                    continue                    # a scratch push, not a save
+                else:
+                    break
+            if not entry:
+                continue
+            if re.search(r'^\s*call\s+\.', body, re.M):
+                continue                        # has local subroutines: their
+                                                # `ret`s are not function returns
+            for i, c in enumerate(code):
+                if not re.match(r'ret\b', c):
+                    continue
+                got = []
+                j = i - 1
+                while j >= 0:
+                    prev = code[j]
+                    om = re.match(r'pop\s+(%s)$' % '|'.join(CALLEE_SAVED), prev)
+                    if om:
+                        got.append(om.group(1))
+                    elif prev == 'leave' or re.match(r'(mov|add|sub|xor|lea|test|cmp|movzx|movsxd|or|and)\b', prev):
+                        pass                    # the result being set up, or the frame torn down
+                    else:
+                        break
+                    j -= 1
+                if got != entry:
+                    bad.append((path, 0,
+                                "%s returns without restoring %s"
+                                % (name, ", ".join(r for r in entry if r not in got) or "them in order"),
+                                "entry pushes %s; this return pops %s"
+                                % (" ".join(entry), " ".join(reversed(got)) or "nothing")))
+                    break
+    return bad
+
+def check_saved_writes(files):
+    """A function that writes a callee-saved register it never pushed.
+
+    The mirror image of the check above: not a missing pop but a missing save.
+    It costs the caller the same register either way.
+    """
+    bad = []
+    for path in files:
+        src = open(path).read()
+        for m in re.finditer(r'^(DEF_FUNC(?:_LOCAL|_BARE)?)\s+(\w+)(?:\s*,[^\n]*)?$(.*?)^END_FUNC',
+                             src, re.M | re.S):
+            name, body = m.group(2), m.group(3)
+            saved = set(re.findall(r'^\s*push\s+(%s)\s*$' % '|'.join(CALLEE_SAVED),
+                                   body, re.M))
+            for wm in re.finditer(
+                    r'^\s*(?:mov|lea|add|sub|xor|or|and|inc|dec|movzx|movsxd|imul|shl|shr|pop|not|neg)'
+                    r'\s+(%s)\s*(?:,|$)' % '|'.join(CALLEE_SAVED), body, re.M):
+                reg = wm.group(1)
+                if reg not in saved:
+                    line = body[:wm.start()].count('\n')
+                    bad.append((path, 0,
+                                "%s writes %s without saving it" % (name, reg),
+                                wm.group(0).strip()))
+                    break
+    return bad
+
 def check_alignment(files):
     bad = []
     for path in files:
@@ -138,7 +229,8 @@ def main():
     fields = dword_fields(['compiler/compiler.inc', 'include/object.inc',
                            'include/frame.inc', 'include/types.inc'])
     problems = (check_field_widths(files, fields) + check_alignment(files)
-                + check_tailjumps(files) + check_section(files))
+                + check_tailjumps(files) + check_section(files)
+                + check_callee_saved(files) + check_saved_writes(files))
     for path, n, what, detail in problems:
         where = "%s:%d" % (path, n) if n else path
         print("%s: %s\n    %s" % (where, what, detail))

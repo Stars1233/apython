@@ -350,6 +350,8 @@ DEF_FUNC sym_visit, SV_FRAME
     je .alias
     cmp eax, AST_ARG
     je .arg
+    cmp eax, AST_HANDLER
+    je .handler
     cmp eax, AST_COMPARE
     je .compare
     cmp eax, AST_YIELD
@@ -452,6 +454,24 @@ DEF_FUNC sym_visit, SV_FRAME
     mov ecx, DEF_PARAM | DEF_LOCAL
     call sym_add
     jmp .ok
+
+;; `except E as e:` binds e in this block, exactly as an assignment would --
+;; and it is a local in a function, not a global.  Nothing else visits the
+;; name, because it hangs off .b rather than the child list.
+.handler:
+    mov rax, [rbp - SV_NPTR]
+    mov ecx, [rax + AstNode.b]
+    test ecx, ecx
+    jz .children
+    mov esi, ecx
+    mov rdi, rbx
+    call ast_obj_at
+    mov rdx, rax
+    mov rdi, rbx
+    mov rsi, r12
+    mov ecx, DEF_LOCAL
+    call sym_add
+    jmp .children
 
 ;; `def f(...)`: f binds here; the body gets its own scope.
 .funcdef:

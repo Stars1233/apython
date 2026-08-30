@@ -2179,16 +2179,109 @@ DEF_FUNC par_slice_piece, 8
 END_FUNC par_slice_piece
 
 ;; ============================================================================
-;; in_subscript(Comp *c, node value) -> node   -- value[index] or value[a:b:c]
+;; par_subscript_item(Comp *c) -> node   -- one index or one slice
+;; The piece between the brackets, or between two commas: `a`, `a:b`, `a:b:c`,
+;; `:`, `::2` all land here.
+;; ============================================================================
+SI_LOWER equ 8
+SI_UPPER equ 16
+SI_STEP  equ 24
+SI_SLICE equ 32
+SI_LINE  equ 40
+SI_FRAME equ 40           ; + 1 push = 48
+DEF_FUNC_LOCAL par_subscript_item, SI_FRAME
+    push rbx
+    mov rbx, rdi
+    call par_peek
+    mov ecx, [rax + Token.lineno]
+    mov [rbp - SI_LINE], rcx
+    mov qword [rbp - SI_UPPER], 0
+    mov qword [rbp - SI_STEP], 0
+    mov qword [rbp - SI_SLICE], 0
+
+    mov rdi, rbx
+    call par_slice_piece
+    mov [rbp - SI_LOWER], rax
+
+    mov rdi, rbx
+    call par_kind
+    cmp eax, TOK_COLON
+    jne .plain
+
+    mov qword [rbp - SI_SLICE], 2       ; at least lower:upper
+    mov rdi, rbx
+    call par_advance
+    mov rdi, rbx
+    call par_slice_piece
+    mov [rbp - SI_UPPER], rax
+
+    mov rdi, rbx
+    call par_kind
+    cmp eax, TOK_COLON
+    jne .make_slice
+    mov qword [rbp - SI_SLICE], 3
+    mov rdi, rbx
+    call par_advance
+    mov rdi, rbx
+    call par_slice_piece
+    mov [rbp - SI_STEP], rax
+    jmp .make_slice
+
+.plain:
+    ; A missing index is only legal as part of a slice: `d[]` is not.
+    cmp qword [rbp - SI_LOWER], 0
+    je .need_index
+    mov rax, [rbp - SI_LOWER]
+    pop rbx
+    leave
+    ret
+
+.make_slice:
+    mov rdi, rbx
+    mov esi, AST_SLICE
+    mov rdx, [rbp - SI_SLICE]           ; subkind: 2 or 3 pieces
+    mov rcx, [rbp - SI_LINE]
+    mov r8, [rbp - SI_LOWER]
+    mov r9, [rbp - SI_UPPER]
+    call ast_make
+    test rax, rax
+    jz .fail
+    mov [rbp - SI_LOWER], rax
+    mov rdi, rbx
+    mov rsi, rax
+    call ast_at
+    mov rdx, [rbp - SI_STEP]
+    mov [rax + AstNode.c], edx
+    mov rax, [rbp - SI_LOWER]
+    pop rbx
+    leave
+    ret
+
+.need_index:
+    mov rdi, rbx
+    CSTRING rsi, "expected an index expression"
+    call par_syntax_error
+.fail:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+END_FUNC par_subscript_item
+
+;; ============================================================================
+;; in_subscript(Comp *c, node value) -> node   -- value[index]
+;;
+;; A comma inside the brackets makes the index a tuple: `d[1, 2]` subscripts
+;; with `(1, 2)`, and `d[a:b, c]` with `(slice(a, b), c)`.  There is no
+;; separate n-ary subscript node -- the tuple IS the index, which is why
+;; `d[1,]` and `d[(1,)]` are the same expression.
 ;; ============================================================================
 IS_COMP  equ 8
 IS_VAL   equ 16
 IS_LINE  equ 24
-IS_LOWER equ 32
-IS_UPPER equ 40
-IS_STEP  equ 48
-IS_SLICE equ 56
-IS_FRAME equ 56          ; + 1 push = 64
+IS_IDX   equ 32
+IS_MARK  equ 40
+IS_FRAME equ 40           ; + 1 push = 48
 DEF_FUNC_LOCAL in_subscript, IS_FRAME
     push rbx
     mov rbx, rdi
@@ -2199,41 +2292,54 @@ DEF_FUNC_LOCAL in_subscript, IS_FRAME
     mov rdi, rbx
     call par_advance                    ; consume '['
 
-    mov qword [rbp - IS_UPPER], 0
-    mov qword [rbp - IS_STEP], 0
-    mov qword [rbp - IS_SLICE], 0
-
     mov rdi, rbx
-    call par_slice_piece
-    mov [rbp - IS_LOWER], rax
-
-    mov rdi, rbx
-    call par_kind
-    cmp eax, TOK_COLON
-    jne .plain_index
-
-    mov qword [rbp - IS_SLICE], 2       ; at least lower:upper
-    mov rdi, rbx
-    call par_advance
-    mov rdi, rbx
-    call par_slice_piece
-    mov [rbp - IS_UPPER], rax
+    call par_subscript_item
+    test rax, rax
+    jz .fail
+    mov [rbp - IS_IDX], rax
 
     mov rdi, rbx
     call par_kind
-    cmp eax, TOK_COLON
+    cmp eax, TOK_COMMA
     jne .close
-    mov qword [rbp - IS_SLICE], 3
+
+    ; A tuple index.  The first item is already parsed, so it is pushed before
+    ; the loop rather than inside it.
+    mov rdi, rbx
+    call ast_mark
+    mov [rbp - IS_MARK], rax
+    mov rdi, rbx
+    mov rsi, [rbp - IS_IDX]
+    call ast_push
+.comma_loop:
+    mov rdi, rbx
+    call par_kind
+    cmp eax, TOK_COMMA
+    jne .finish_tuple
     mov rdi, rbx
     call par_advance
     mov rdi, rbx
-    call par_slice_piece
-    mov [rbp - IS_STEP], rax
-    jmp .close
+    call par_kind
+    cmp eax, TOK_RSQB
+    je .finish_tuple                    ; a trailing comma
+    mov rdi, rbx
+    call par_subscript_item
+    test rax, rax
+    jz .fail
+    mov rdi, rbx
+    mov rsi, rax
+    call ast_push
+    jmp .comma_loop
 
-.plain_index:
-    cmp qword [rbp - IS_LOWER], 0
-    je .need_index
+.finish_tuple:
+    mov rdi, rbx
+    mov esi, AST_TUPLE
+    mov rdx, [rbp - IS_LINE]
+    mov rcx, [rbp - IS_MARK]
+    call par_finish_list
+    test rax, rax
+    jz .fail
+    mov [rbp - IS_IDX], rax
 
 .close:
     mov rdi, rbx
@@ -2243,49 +2349,17 @@ DEF_FUNC_LOCAL in_subscript, IS_FRAME
     test eax, eax
     jz .fail
 
-    cmp qword [rbp - IS_SLICE], 0
-    jne .make_slice
     mov rdi, rbx
     mov esi, AST_SUBSCRIPT
     mov edx, CTX_LOAD
     mov rcx, [rbp - IS_LINE]
     mov r8, [rbp - IS_VAL]
-    mov r9, [rbp - IS_LOWER]
+    mov r9, [rbp - IS_IDX]
     call ast_make
     pop rbx
     leave
     ret
 
-.make_slice:
-    mov rdi, rbx
-    mov esi, AST_SLICE
-    mov rdx, [rbp - IS_SLICE]           ; subkind: 2 or 3 pieces
-    mov rcx, [rbp - IS_LINE]
-    mov r8, [rbp - IS_LOWER]
-    mov r9, [rbp - IS_UPPER]
-    call ast_make
-    mov [rbp - IS_LOWER], rax
-    mov rdi, rbx
-    mov rsi, rax
-    call ast_at
-    mov rdx, [rbp - IS_STEP]
-    mov [rax + AstNode.c], edx
-
-    mov rdi, rbx
-    mov esi, AST_SUBSCRIPT
-    mov edx, CTX_LOAD
-    mov rcx, [rbp - IS_LINE]
-    mov r8, [rbp - IS_VAL]
-    mov r9, [rbp - IS_LOWER]
-    call ast_make
-    pop rbx
-    leave
-    ret
-
-.need_index:
-    mov rdi, rbx
-    CSTRING rsi, "expected an index expression"
-    call par_syntax_error
 .fail:
     xor eax, eax
     pop rbx
