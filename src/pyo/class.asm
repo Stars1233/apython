@@ -1123,10 +1123,24 @@ DEF_FUNC instance_str, IS_FRAME
 
 .is_no_dunder:
 
-    ; No __str__.  Prefer the underlying builtin's tp_str, then __repr__.
+    ; No __str__.  Prefer the underlying builtin's tp_str -- but only when it
+    ; is really its own, which means different from its tp_repr.  Most builtins
+    ; do what object does and let str() fall through to repr(): CPython says
+    ; `int.__str__ is object.__str__`, and so does list's.  Taking the base's
+    ; tp_str unconditionally meant an int subclass that defined __repr__ still
+    ; printed as the number.
+    push r12
     mov rdi, [rbx + PyObject.ob_type]
     mov rsi, PyTypeObject.tp_str
     call base_slot
+    mov r12, rax
+    mov rdi, [rbx + PyObject.ob_type]
+    mov rsi, PyTypeObject.tp_repr
+    call base_slot
+    cmp rax, r12
+    mov rax, r12
+    pop r12
+    je .is_generic              ; the base defers to its own repr; so do we
     test rax, rax
     jz .is_generic
     lea rcx, [rel instance_str]
@@ -1471,10 +1485,11 @@ DEF_FUNC type_call
     test eax, eax
     jnz .exc_subclass_call
 
-    ; Check if this type is an int subclass
-    mov rax, [rbx + PyTypeObject.tp_flags]
-    test rax, TYPE_FLAG_INT_SUBCLASS
-    jnz .int_subclass_call
+    ; An int subclass used to short-circuit here, before anything looked for a
+    ; __new__ of its own -- so a class that defines one never had it called,
+    ; and its extra arguments reached int()'s two-argument form instead:
+    ; `NIC(7, "SEVEN")` came back as "int() second arg must be an integer".
+    ; The shortcut now waits at .new_not_found, beside the str one.
 
     ; === Look up __new__ in MRO (stop at object_type) ===
     lea rdi, [rel new_name_cstr]
@@ -1509,6 +1524,20 @@ DEF_FUNC type_call
     ; DECREF name string
     mov rdi, r15
     call obj_decref
+    ; An int subclass carries its value inline, so it cannot come from
+    ; instance_new either.
+    mov rax, [rbx + PyTypeObject.tp_flags]
+    test rax, TYPE_FLAG_INT_SUBCLASS
+    jz .nnf_check_str
+    mov rdi, rbx
+    mov rsi, r12
+    mov rdx, r13
+    call int_sub_new
+    test edx, edx
+    jz .int_sub_error
+    mov r14, rax
+    jmp .lookup_init
+.nnf_check_str:
     ; A str subclass is variable-size, so it cannot come from instance_new.
     mov rax, [rbx + PyTypeObject.tp_flags]
     test rax, TYPE_FLAG_STR_SUBCLASS

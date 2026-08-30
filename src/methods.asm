@@ -7722,6 +7722,8 @@ DEF_FUNC %1_dunder_%2
     mov rax, [rax + PyTypeObject.tp_%2]
     test rax, rax
     jz %%immediate
+    ; int_repr reads edx as the argument's tag, and this one is a pointer.
+    mov edx, TAG_PTR
     call rax
     leave
     ret
@@ -7735,6 +7737,84 @@ DEF_FUNC %1_dunder_%2
     call raise_exception
 END_FUNC %1_dunder_%2
 %endmacro
+
+;; A builtin container's __len__ and __iter__, reachable by name.  They were
+;; slots and nothing else, so `cache.__len__` -- how functools' lru_cache reads
+;; its size without paying for the len() call -- raised AttributeError.  Like
+;; the str/repr thunks these read the *defining* type's slot, so a subclass
+;; inherits the base's behaviour rather than re-dispatching into itself.
+%macro DEF_DUNDER_LEN 1
+DEF_FUNC %1_dunder_len
+    test rsi, rsi
+    jz %%bad
+    mov rdi, [rdi]
+    lea rax, [rel %1_type]
+    mov rcx, [rax + PyTypeObject.tp_as_mapping]
+    test rcx, rcx
+    jz %%seq
+    mov rcx, [rcx + PyMappingMethods.mp_length]
+    test rcx, rcx
+    jnz %%have
+%%seq:
+    mov rcx, [rax + PyTypeObject.tp_as_sequence]
+    test rcx, rcx
+    jz %%bad
+    mov rcx, [rcx + PySequenceMethods.sq_length]
+    test rcx, rcx
+    jz %%bad
+%%have:
+    call rcx
+    mov edx, TAG_SMALLINT
+    leave
+    V_PACK rax, rdx
+    ret
+%%bad:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "object has no len()"
+    call raise_exception
+END_FUNC %1_dunder_len
+%endmacro
+
+%macro DEF_DUNDER_ITER 1
+DEF_FUNC %1_dunder_iter
+    test rsi, rsi
+    jz %%bad
+    mov rdi, [rdi]
+    lea rax, [rel %1_type]
+    mov rax, [rax + PyTypeObject.tp_iter]
+    test rax, rax
+    jz %%bad
+    call rax
+    test rax, rax
+    jz %%failed
+    mov edx, TAG_PTR
+    leave
+    V_PACK rax, rdx
+    ret
+%%failed:
+    xor eax, eax
+    xor edx, edx
+    leave
+    V_PACK rax, rdx
+    ret
+%%bad:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "object is not iterable"
+    call raise_exception
+END_FUNC %1_dunder_iter
+%endmacro
+
+; list and tuple already have hand-written ones.
+DEF_DUNDER_LEN dict
+DEF_DUNDER_LEN str
+DEF_DUNDER_LEN set
+DEF_DUNDER_LEN bytes
+DEF_DUNDER_ITER dict
+DEF_DUNDER_ITER list
+DEF_DUNDER_ITER tuple
+DEF_DUNDER_ITER str
+DEF_DUNDER_ITER set
+DEF_DUNDER_ITER bytes
 
 DEF_DUNDER_STRREPR str, str
 DEF_DUNDER_STRREPR str, repr
@@ -9837,17 +9917,57 @@ END_FUNC int_method_to_bytes
 extern classmethod_type
 
 IFB_BYTES equ 8
-IFB_FRAME equ 16
+IFB_CLS   equ 16
+IFB_VAL   equ 24
+IFB_OWNED equ 32
+IFB_NARGS equ 40
+IFB_ARGS  equ 48
+IFB_FRAME equ 64          ; + 2 pushes = 80
 
 DEF_FUNC int_classmethod_from_bytes, IFB_FRAME
     push rbx
     push r12
 
-    ; args[1] = bytes object
-    mov rax, [rdi + 8]            ; payload
+    cmp rsi, 2
+    jl .ifb_error
+    mov [rbp - IFB_ARGS], rdi       ; the conversion below clobbers rdi
+    mov rax, [rdi]
+    mov [rbp - IFB_CLS], rax        ; cls, for a subclass result
+    mov qword [rbp - IFB_OWNED], 0
+
+    ; args[1] is any iterable of ints, not only a bytes: ipaddress passes a
+    ; map object.  Anything that is not already a bytes goes through bytes()
+    ; first, which is where CPython's own conversion lives too.
+    mov rax, [rdi + 8]
+    V_TEST_PTR rax, rcx
+    ja .ifb_convert
+    test rax, rax
+    jz .ifb_convert
+    mov rcx, [rax + PyObject.ob_type]
+    lea rdx, [rel bytes_type]
+    cmp rcx, rdx
+    je .ifb_have_bytes
+.ifb_convert:
+    mov [rbp - IFB_VAL], rax
+    mov [rbp - IFB_NARGS], rsi      ; a push here would misalign the call
+    lea rdi, [rel bytes_type]
+    lea rsi, [rbp - IFB_VAL]
+    mov edx, 1
+    extern obj_call_n
+    call obj_call_n
+    mov rsi, [rbp - IFB_NARGS]
+    test rax, rax
+    jz .ifb_failed
+    mov [rbp - IFB_OWNED], rax
+.ifb_have_bytes:
     mov [rbp - IFB_BYTES], rax
 
-    ; args[2] = byteorder
+    ; args[2] = byteorder.  It has defaulted to 'big' since 3.11, and reading
+    ; it unconditionally walked off the end of the argument array -- which is
+    ; how ipaddress calls it.
+    cmp rsi, 3
+    jl .ifb_big
+    mov rdi, [rbp - IFB_ARGS]
     mov rcx, [rdi + 16]            ; payload
     V_UNPACK rcx, rdx       ; args[2]
     cmp edx, TAG_PTR
@@ -9905,12 +10025,55 @@ DEF_FUNC int_classmethod_from_bytes, IFB_FRAME
     jmp .ifb_little_loop
 
 .ifb_return:
+    mov rdi, [rbp - IFB_OWNED]
+    test rdi, rdi
+    jz .ifb_no_owned
+    mov qword [rbp - IFB_OWNED], 0
+    call obj_decref
+.ifb_no_owned:
+    ; A classmethod builds an instance of the class it was reached through:
+    ; `I.from_bytes(b)` is an I, not an int.
+    mov rax, [rbp - IFB_CLS]
+    V_TEST_PTR rax, rcx
+    ja .ifb_plain
+    test rax, rax
+    jz .ifb_plain
+    lea rcx, [rel int_type]
+    cmp rax, rcx
+    je .ifb_plain
+    mov rcx, [rax + PyTypeObject.tp_flags]
+    test rcx, TYPE_FLAG_INT_SUBCLASS
+    jz .ifb_plain
+    mov rax, r12
+    V_PACK_I64 rax, rcx
+    mov [rbp - IFB_VAL], rax
+    mov rdi, [rbp - IFB_CLS]
+    lea rsi, [rbp - IFB_VAL]
+    mov edx, 1
+    extern int_sub_new
+    call int_sub_new
+    pop r12
+    pop rbx
+    leave
+    V_PACK rax, rdx
+    ret
+
+.ifb_plain:
     mov rax, r12
     RET_TAG_SMALLINT
     pop r12
     pop rbx
     leave
     V_PACK rax, rdx             ; builtins return one Value
+    ret
+
+.ifb_failed:
+    xor eax, eax
+    xor edx, edx
+    pop r12
+    pop rbx
+    leave
+    V_PACK rax, rdx
     ret
 
 .ifb_error:
@@ -11847,6 +12010,17 @@ DEF_FUNC methods_init
     call obj_decref
 
     ; Store dict in str_type.tp_dict
+
+    ; the slots, reachable by name: the stdlib reaches for them directly.
+    mov rdi, rbx
+    lea rsi, [rel mn___len__]
+    lea rdx, [rel str_dunder_len]
+    call add_method_to_dict
+    mov rdi, rbx
+    lea rsi, [rel mn___iter__]
+    lea rdx, [rel str_dunder_iter]
+    call add_method_to_dict
+
     lea rax, [rel str_type]
     mov [rax + PyTypeObject.tp_dict], rbx
     ; INCREF the dict (type holds ref; dict_new gave us refcnt=1, which we keep)
@@ -11993,6 +12167,13 @@ DEF_FUNC methods_init
     call add_class_getitem
 
     ; Store in list_type.tp_dict
+
+    ; the slots, reachable by name: the stdlib reaches for them directly.
+    mov rdi, rbx
+    lea rsi, [rel mn___iter__]
+    lea rdx, [rel list_dunder_iter]
+    call add_method_to_dict
+
     lea rax, [rel list_type]
     mov [rax + PyTypeObject.tp_dict], rbx
 
@@ -12123,6 +12304,17 @@ DEF_FUNC methods_init
     call add_class_getitem
 
     ; Store in dict_type.tp_dict
+
+    ; the slots, reachable by name: the stdlib reaches for them directly.
+    mov rdi, rbx
+    lea rsi, [rel mn___len__]
+    lea rdx, [rel dict_dunder_len]
+    call add_method_to_dict
+    mov rdi, rbx
+    lea rsi, [rel mn___iter__]
+    lea rdx, [rel dict_dunder_iter]
+    call add_method_to_dict
+
     lea rax, [rel dict_type]
     mov [rax + PyTypeObject.tp_dict], rbx
 
@@ -12196,6 +12388,13 @@ DEF_FUNC methods_init
     call add_class_getitem
 
     ; Store in tuple_type.tp_dict
+
+    ; the slots, reachable by name: the stdlib reaches for them directly.
+    mov rdi, rbx
+    lea rsi, [rel mn___iter__]
+    lea rdx, [rel tuple_dunder_iter]
+    call add_method_to_dict
+
     lea rax, [rel tuple_type]
     mov [rax + PyTypeObject.tp_dict], rbx
 
@@ -12296,6 +12495,17 @@ DEF_FUNC methods_init
 
     ; Store in set_type.tp_dict, and in frozenset's: the two share every
     ; method that does not mutate, and frozenset had no dict at all.
+
+    ; frozenset shares this dict, and set's slots, so one pair covers both.
+    mov rdi, rbx
+    lea rsi, [rel mn___len__]
+    lea rdx, [rel set_dunder_len]
+    call add_method_to_dict
+    mov rdi, rbx
+    lea rsi, [rel mn___iter__]
+    lea rdx, [rel set_dunder_iter]
+    call add_method_to_dict
+
     lea rax, [rel set_type]
     mov [rax + PyTypeObject.tp_dict], rbx
     lea rax, [rel frozenset_type]
@@ -12774,6 +12984,17 @@ DEF_FUNC methods_init
     call add_method_to_dict
 
     ; Store in bytes_type.tp_dict
+
+    ; the slots, reachable by name: the stdlib reaches for them directly.
+    mov rdi, rbx
+    lea rsi, [rel mn___len__]
+    lea rdx, [rel bytes_dunder_len]
+    call add_method_to_dict
+    mov rdi, rbx
+    lea rsi, [rel mn___iter__]
+    lea rdx, [rel bytes_dunder_iter]
+    call add_method_to_dict
+
     lea rax, [rel bytes_type]
     mov [rax + PyTypeObject.tp_dict], rbx
 
@@ -12893,6 +13114,7 @@ du_keys_name:   db "keys", 0
 mn___format__:  db "__format__", 0
 mn___sizeof__:  db "__sizeof__", 0
 mn___doc__:     db "__doc__", 0
+mn___iter__:    db "__iter__", 0
 mn___dir__:     db "__dir__", 0
 mn___reduce__:  db "__reduce__", 0
 mn___reduce_ex__: db "__reduce_ex__", 0

@@ -2193,11 +2193,12 @@ TFP_BASES equ 56            ; the bases tuple, or NULL
     mov rax, [r12 + PyTypeObject.tp_flags]
     test rax, TYPE_FLAG_INT_SUBCLASS
     jz .bc_check_builtin_sub
+    ; tp_repr and tp_str stay instance_repr/instance_str.  They already find
+    ; the class's own __repr__ first and fall back to the builtin base's slot
+    ; when there is none -- which is how a list subclass prints as a list.
+    ; Overwriting them with int's here meant an int subclass that defined
+    ; __repr__ never had it called.
     extern int_type
-    mov rdi, [rel int_type + PyTypeObject.tp_repr]
-    mov [r12 + PyTypeObject.tp_repr], rdi
-    mov rdi, [rel int_type + PyTypeObject.tp_str]
-    mov [r12 + PyTypeObject.tp_str], rdi
     mov rdi, [rel int_type + PyTypeObject.tp_as_number]
     mov [r12 + PyTypeObject.tp_as_number], rdi
     mov rdi, [rel int_type + PyTypeObject.tp_richcompare]

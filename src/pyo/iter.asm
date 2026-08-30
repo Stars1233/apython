@@ -410,6 +410,81 @@ DEF_FUNC range_obj_sq_item
 END_FUNC range_obj_sq_item
 
 ;; ============================================================================
+;; range_obj_mp_subscript(PyRangeObject *self, Value key, int keytag) -> Value
+;;
+;; r[i] and r[a:b:c].  Only integer indexing existed, so a slice reached
+;; sq_item and came back as "range object index out of range" --
+;; `range(len(x))[::-1]`, which re/_compiler.py uses to walk a subpattern
+;; backwards, could not run.  Slicing a range gives a range, computed the way
+;; CPython's compute_slice does: the slice's resolved indices are positions in
+;; this range, so each maps back through start + i*step.
+;; ============================================================================
+extern slice_type
+extern slice_indices
+extern obj_as_index
+RMS_SELF  equ 8
+RMS_START equ 16
+RMS_STEP  equ 24
+RMS_FRAME equ 40          ; + 1 push = 56
+DEF_FUNC range_obj_mp_subscript, RMS_FRAME
+    push rbx
+    mov rbx, rdi
+    ; Classify from the Value, not from the tag in edx: BINARY_SUBSCR builds
+    ; the Value with V_PACK, which clobbers the register the tag was in.
+    mov rax, rsi
+    V_TEST_PTR rax, rcx
+    ja .rms_int                     ; an immediate can only be an index
+    test rax, rax
+    jz .rms_int
+    mov rcx, [rax + PyObject.ob_type]
+    lea rdx, [rel slice_type]
+    cmp rcx, rdx
+    je .rms_slice
+
+.rms_int:
+    ; obj_as_index covers int, bool, an int subclass and __index__.
+    mov rdi, rsi
+    V_UNPACK rdi, rdx
+    call obj_as_index
+    mov rdi, rbx
+    mov rsi, rax
+    call range_obj_sq_item          ; already a Value
+    pop rbx
+    leave
+    ret
+
+.rms_slice:
+    mov [rbp - RMS_SELF], rbx
+    mov [rbp - RMS_START], rsi      ; the slice, across the length call
+    mov rdi, rbx
+    call range_obj_sq_length
+    mov rdi, [rbp - RMS_START]      ; the slice
+    mov rsi, rax                    ; the range's length
+    call slice_indices              ; rax = start, rdx = stop, rcx = step
+
+    ; substart = r.start + start * r.step,  substop = r.start + stop * r.step,
+    ; substep  = r.step * step.
+    mov r8, [rbx + PyRangeObject.step]
+    imul rax, r8
+    add rax, [rbx + PyRangeObject.start]
+    mov [rbp - RMS_START], rax
+    imul rdx, r8
+    add rdx, [rbx + PyRangeObject.start]
+    imul rcx, r8
+    mov [rbp - RMS_STEP], rcx
+
+    mov rdi, [rbp - RMS_START]
+    mov rsi, rdx
+    mov rdx, [rbp - RMS_STEP]
+    call range_new
+    mov edx, TAG_PTR
+    pop rbx
+    leave
+    V_PACK rax, rdx
+    ret
+END_FUNC range_obj_mp_subscript
+
+;; ============================================================================
 ;; range_obj_reversed: __reversed__ for range objects
 ;; Returns a new range_iterator that iterates in reverse.
 ;; ============================================================================
@@ -760,7 +835,7 @@ range_obj_type:
     dq 0                        ; tp_new
     dq 0                        ; tp_as_number
     dq range_obj_seq_methods    ; tp_as_sequence
-    dq 0                        ; tp_as_mapping
+    dq range_obj_map_methods    ; tp_as_mapping
     dq 0                        ; tp_base
     dq 0                        ; tp_dict
     dq 0                        ; tp_mro
@@ -771,6 +846,12 @@ range_obj_type:
     dq 0 ; tp_dictoffset
 
 ; Range object sequence methods
+align 8
+range_obj_map_methods:
+    dq range_obj_sq_length      ; mp_length
+    dq range_obj_mp_subscript   ; mp_subscript
+    dq 0                        ; mp_ass_subscript
+
 align 8
 range_obj_seq_methods:
     dq range_obj_sq_length      ; sq_length

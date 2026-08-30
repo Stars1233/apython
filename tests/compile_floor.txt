@@ -52,6 +52,7 @@ test_compile_precedence
 test_compile_scope_unbound
 test_compile_subscript_except
 test_compile_try
+test_container_dunders
 test_control_flow
 test_defaults
 test_del_and_gc_state
@@ -108,8 +109,10 @@ test_inheritance
 test_instance_layout
 test_int_bases_and_float_spec
 test_int_bytes
+test_int_from_bytes
 test_int_methods
 test_introspection
+test_int_subclass_new
 test_iterable_arguments
 test_iterator_slots
 test_itertools
@@ -153,6 +156,7 @@ test_property
 test_raise_cause
 test_raise_from
 test_range
+test_range_slice
 test_recursion_and_repr
 test_recursion
 test_relative_import
