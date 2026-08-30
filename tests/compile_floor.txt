@@ -32,6 +32,7 @@ test_codecs
 test_comparisons
 test_compile_async
 test_compile_class
+test_compile_except_star
 test_compile_exec
 test_compile_expr2
 test_compile_expr
@@ -64,6 +65,7 @@ test_exc_catchable
 test_exception_context
 test_exceptions
 test_exception_str_repr
+test_except_star
 test_extended_slice
 test_float_fromhex
 test_float_methods

@@ -2171,7 +2171,8 @@ PT2_HMARK equ 56
 PT2_TYPE  equ 64
 PT2_NAME  equ 72
 PT2_BODY  equ 80
-PT2_FRAME equ 88          ; + 1 push = 96
+PT2_STAR  equ 88
+PT2_FRAME equ 104         ; + 1 push = 112
 DEF_FUNC_LOCAL ps_try, PT2_FRAME
     push rbx
     mov rbx, rdi
@@ -2191,6 +2192,7 @@ DEF_FUNC_LOCAL ps_try, PT2_FRAME
     mov qword [rbp - PT2_HAND], 0
     mov qword [rbp - PT2_ELSE], 0
     mov qword [rbp - PT2_FIN], 0
+    mov qword [rbp - PT2_STAR], 0
 
     ; --- except clauses ---
     mov rdi, rbx
@@ -2210,6 +2212,18 @@ DEF_FUNC_LOCAL ps_try, PT2_FRAME
     call par_advance
     mov qword [rbp - PT2_TYPE], 0
     mov qword [rbp - PT2_NAME], 0
+
+    ; `except*` is a different statement, not a variant of one clause: all of
+    ; a try's handlers are star handlers or none are, and the flag belongs to
+    ; the try.  The mixed form is a syntax error CPython also rejects.
+    mov rdi, rbx
+    call par_kind
+    cmp eax, TOK_STAR
+    jne .not_star
+    mov rdi, rbx
+    call par_advance
+    mov qword [rbp - PT2_STAR], 1
+.not_star:
 
     mov rdi, rbx
     call par_kind
@@ -2325,6 +2339,8 @@ DEF_FUNC_LOCAL ps_try, PT2_FRAME
     mov [rax + AstNode.b], edx
     mov rdx, [rbp - PT2_FIN]
     mov [rax + AstNode.c], edx
+    mov rdx, [rbp - PT2_STAR]
+    mov [rax + AstNode.subkind], dl
     mov rax, [rbp - PT2_NODE]
     pop rbx
     leave

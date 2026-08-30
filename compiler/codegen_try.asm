@@ -28,6 +28,7 @@ extern cg_label_new
 extern cg_nameop
 extern cg_pop_handler
 extern cg_push_handler
+extern cg_except_star_clauses
 extern cg_await_value
 extern cg_store
 extern comp_error
@@ -44,6 +45,10 @@ CG_WITH_MARK equ 0x7fffffff
 ; The same sentinel for an `async with`: its __exit__ call has to be awaited,
 ; and the unwinder has no other way to tell the two apart.
 CG_AWITH_MARK equ 0x7ffffffe
+; An `except*` clause body.  Nothing may leave one early: the unwinding would
+; have to reconstruct a partly-matched exception group, and Python does not
+; define what that means, so CPython rejects the attempt outright.
+CG_ESTAR_MARK equ 0x7ffffffd
 
 ; --- Named frame-layout constants ---
 CT2_COMP  equ 8
@@ -122,6 +127,8 @@ DEF_FUNC cg_unwind_finallys, UF_FRAME
     ; A `with` registers itself here too, as a sentinel: leaving it early has
     ; to call __exit__ for the same reason leaving a try/finally has to run the
     ; finally body.
+    cmp edx, CG_ESTAR_MARK
+    je .in_except_star
     xor r8d, r8d
     cmp edx, CG_WITH_MARK
     je .a_with
@@ -162,6 +169,15 @@ DEF_FUNC cg_unwind_finallys, UF_FRAME
     test eax, eax
     jz .fail
     jmp .loop
+.in_except_star:
+    mov rdi, rbx
+    lea rsi, [rel exc_SyntaxError_type]
+    CSTRING rdx, "'break', 'continue' and 'return' cannot appear in an except* block"
+    xor ecx, ecx
+    xor r8d, r8d
+    call comp_error
+    jmp .fail
+
 .an_except:
     ; The return value sits above the exception state PUSH_EXC_INFO left, so
     ; it has to be lifted out of the way before POP_EXCEPT reaches it.
@@ -496,6 +512,17 @@ DEF_FUNC cg_except_clauses, CT2_FRAME
     mov [rbp - CT2_H], rcx
     cmp qword [rbp - CT2_H], 0
     je .no_handlers
+
+    ; `except*` shares nothing with this but the clause nodes.
+    cmp byte [rax + AstNode.subkind], 0
+    je .plain
+    mov rdi, rbx
+    mov rsi, r12
+    mov rdx, r13
+    mov rcx, [rbp - CT2_END]
+    call cg_except_star_clauses
+    jmp .ret
+.plain:
 
     mov rdi, r12
     call cg_label_new

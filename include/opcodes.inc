@@ -200,6 +200,9 @@ INTRINSIC_UNARY_POSITIVE     equ 5
 INTRINSIC_LIST_TO_TUPLE      equ 6
 INTRINSIC_TYPEVAR            equ 7
 
+; CALL_INTRINSIC_2 selectors.
+INTRINSIC_PREP_RERAISE_STAR  equ 1
+
 ; co_localspluskinds bytes.  apython never reads this field, but emitting it
 ; correctly costs nothing and keeps introspection honest if it is ever wired up.
 CO_FAST_LOCAL       equ 0x20
