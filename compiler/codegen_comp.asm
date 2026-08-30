@@ -830,6 +830,123 @@ DEF_FUNC cg_e_yieldfrom, CY_FRAME
     ret
 END_FUNC cg_e_yieldfrom
 
+;; ============================================================================
+;; cg_e_joinedstr(Comp *c, CompUnit *u, uint32_t node) -> 1 ok, 0 error
+;; Each piece in order, then one BUILD_STRING over all of them.
+;; ============================================================================
+CJ2_COMP  equ 8
+CJ2_UNIT  equ 16
+CJ2_NODE  equ 24
+CJ2_LINE  equ 32
+CJ2_I     equ 40
+CJ2_N     equ 48
+CJ2_FRAME equ 56          ; + 3 pushes = 80
+DEF_FUNC cg_e_joinedstr, CJ2_FRAME
+    push rbx
+    push r12
+    push r13
+    mov rbx, rdi
+    mov r12, rsi
+    mov r13, rdx
+    mov rdi, rbx
+    mov rsi, r13
+    call ast_at
+    mov ecx, [rax + AstNode.lineno]
+    mov [rbp - CJ2_LINE], rcx
+    mov ecx, [rax + AstNode.nchild]
+    mov [rbp - CJ2_N], rcx
+    mov qword [rbp - CJ2_I], 0
+.loop:
+    mov rax, [rbp - CJ2_I]
+    cmp rax, [rbp - CJ2_N]
+    jae .join
+    mov rdi, rbx
+    mov rsi, r13
+    call ast_at
+    mov rsi, rax
+    mov rdx, [rbp - CJ2_I]
+    mov rdi, rbx
+    call ast_child
+    mov rdx, rax
+    mov rdi, rbx
+    mov rsi, r12
+    call cg_expr
+    test eax, eax
+    jz .fail
+    inc qword [rbp - CJ2_I]
+    jmp .loop
+.join:
+    mov rdi, r12
+    mov esi, OP_BUILD_STRING
+    mov rdx, [rbp - CJ2_N]
+    mov rcx, [rbp - CJ2_LINE]
+    call cg_emit
+    mov eax, 1
+.fail:
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC cg_e_joinedstr
+
+;; ============================================================================
+;; cg_e_formattedvalue(Comp *c, CompUnit *u, uint32_t node) -> 1 ok, 0 error
+;;
+;;     <value>; [<spec>]; FORMAT_VALUE conv | (spec ? 4 : 0)
+;;
+;; The conversion is in the low two bits (0 none, 1 !s, 2 !r, 3 !a) and bit 2
+;; says a format spec was pushed as well.
+;; ============================================================================
+DEF_FUNC cg_e_formattedvalue, CJ2_FRAME
+    push rbx
+    push r12
+    push r13
+    mov rbx, rdi
+    mov r12, rsi
+    mov r13, rdx
+    mov rdi, rbx
+    mov rsi, r13
+    call ast_at
+    mov ecx, [rax + AstNode.lineno]
+    mov [rbp - CJ2_LINE], rcx
+    movzx ecx, byte [rax + AstNode.subkind]
+    mov [rbp - CJ2_N], rcx              ; the conversion
+    mov edx, [rax + AstNode.a]
+    mov rdi, rbx
+    mov rsi, r12
+    call cg_expr
+    test eax, eax
+    jz .fail
+
+    mov rdi, rbx
+    mov rsi, r13
+    call ast_at
+    mov ecx, [rax + AstNode.b]
+    test ecx, ecx
+    jz .no_spec
+    mov edx, ecx
+    mov rdi, rbx
+    mov rsi, r12
+    call cg_expr
+    test eax, eax
+    jz .fail
+    or qword [rbp - CJ2_N], 4
+.no_spec:
+    mov rdi, r12
+    mov esi, OP_FORMAT_VALUE
+    mov rdx, [rbp - CJ2_N]
+    mov rcx, [rbp - CJ2_LINE]
+    call cg_emit
+    mov eax, 1
+.fail:
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC cg_e_formattedvalue
+
 section .rodata
 cm_listcomp: db "<listcomp>", 0
 cm_setcomp:  db "<setcomp>", 0

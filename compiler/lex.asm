@@ -314,7 +314,13 @@ END_FUNC lex_str_prefix
 ASM_INIT
 
 ;; ============================================================================
-;; lex_run(Comp *c) -> rax = 1 on success, 0 with comp.err recorded
+;; lex_run(Comp *c, const char *start, const char *end, int lineno)
+;;   -> rax = 1 on success, 0 with comp.err recorded
+;;
+;; With start == 0 it tokenizes the whole of comp.src.  With a span it appends
+;; that span's tokens to the same array, which is how an f-string's replacement
+;; fields are parsed: the tokens go on the end, the parser's cursor is pointed
+;; at them, and the ordinary expression parser does the rest.
 ;;
 ;; Registers held across the whole loop:
 ;;   rbx = Comp*        r12 = read cursor        r13 = end of source
@@ -335,18 +341,34 @@ DEF_FUNC lex_run, LR_FRAME
     mov [rbp - LR_COMP], rdi
     lea r14, [rbx + Comp.lex]
 
+    ; lex_run_range passes an explicit span; lex_run covers the whole source.
+    test rsi, rsi
+    jnz .have_span
     mov r12, [rbx + Comp.src]
     mov r13, r12
     add r13, [rbx + Comp.srclen]
-
+    mov ecx, 1
+    jmp .set_state
+.have_span:
+    mov r12, rsi
+    mov r13, rdx
+    mov ecx, r8d
+.set_state:
     mov [r14 + Lexer.cur], r12
     mov [r14 + Lexer.end], r13
     mov [r14 + Lexer.line_start], r12
-    mov dword [r14 + Lexer.lineno], 1
+    mov [r14 + Lexer.lineno], ecx
     mov dword [r14 + Lexer.paren_depth], 0
     mov dword [r14 + Lexer.indent_top], 0
     mov dword [r14 + Lexer.indents], 0
+    ; A span is a fragment in the middle of a line -- an f-string's replacement
+    ; field -- so it does not begin a logical line.  Starting it at one would
+    ; read `f'{ x }'`'s leading space as an indent.
     mov dword [r14 + Lexer.atbol], 1
+    test rsi, rsi
+    jz .whole_file
+    mov dword [r14 + Lexer.atbol], 0
+.whole_file:
 
 .top:
     cmp dword [r14 + Lexer.atbol], 0

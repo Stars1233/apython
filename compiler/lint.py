@@ -70,6 +70,30 @@ def check_tailjumps(files):
                                 "use DEF_FUNC_BARE for a tail-jump"))
     return bad
 
+def check_section(files):
+    """A function defined while a data section is current lands in that section.
+
+    NASM is happy to emit code into .rodata, and it links; the fault comes when
+    something calls it and the CPU refuses to execute non-executable memory.
+    The symptom is a SIGSEGV on the function's own `push rbp`, which looks like
+    stack corruption and is not.
+    """
+    bad = []
+    for path in files:
+        section = 'text'
+        for n, line in enumerate(open(path), 1):
+            code = line.split(';')[0].strip()
+            m = re.match(r'section\s+\.(\w+)', code)
+            if m:
+                section = m.group(1)
+                continue
+            if re.match(r'(DEF_FUNC|DEF_FUNC_BARE|DEF_FUNC_LOCAL)\b', code) \
+               and section != 'text':
+                bad.append((path, n,
+                            "function defined while section .%s is current" % section,
+                            "add `section .text` before it"))
+    return bad
+
 def check_alignment(files):
     bad = []
     for path in files:
@@ -114,7 +138,7 @@ def main():
     fields = dword_fields(['compiler/compiler.inc', 'include/object.inc',
                            'include/frame.inc', 'include/types.inc'])
     problems = (check_field_widths(files, fields) + check_alignment(files)
-                + check_tailjumps(files))
+                + check_tailjumps(files) + check_section(files))
     for path, n, what, detail in problems:
         where = "%s:%d" % (path, n) if n else path
         print("%s: %s\n    %s" % (where, what, detail))

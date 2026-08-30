@@ -18,6 +18,7 @@
 
 extern ap_free
 extern ap_malloc
+extern ap_memcpy
 extern ap_memset
 extern buf_free
 extern buf_init
@@ -425,6 +426,9 @@ DEF_FUNC compile_source, CS_FRAME
     call cs_unit_setup
 
     mov rdi, rbx
+    xor esi, esi                        ; the whole source
+    xor edx, edx
+    xor ecx, ecx
     call lex_run
     test eax, eax
     jz .failed
@@ -637,5 +641,62 @@ cs_empty: db "", 0
 
 cs_module_name: db "<module>", 0
 
+
+section .text
+
+;; ============================================================================
+;; comp_lex_span(Comp *c, const char *start, const char *end, int lineno)
+;;   -> rax = the token index the span's tokens start at, or -1
+;;
+;; Appends a span's tokens to the array and hands back where they begin, so a
+;; caller can point the parser's cursor at them.  The lexer state is saved and
+;; restored around it: an f-string's field is lexed in the middle of a file
+;; whose own indent stack and paren depth must survive.
+;; ============================================================================
+CLS_COMP  equ 8
+CLS_START equ 16
+CLS_END   equ 24
+CLS_LINE  equ 32
+CLS_IDX   equ 40
+CLS_SAVE  equ 48 + Lexer_size
+CLS_FRAME equ ((CLS_SAVE + 15) / 16) * 16 + 8      ; + 1 push = 16-aligned
+DEF_FUNC comp_lex_span, CLS_FRAME
+    push rbx
+    mov rbx, rdi
+    mov [rbp - CLS_START], rsi
+    mov [rbp - CLS_END], rdx
+    mov [rbp - CLS_LINE], rcx
+
+    mov rax, [rbx + Comp.tokens + Buf.len]
+    mov [rbp - CLS_IDX], rax
+
+    lea rdi, [rbp - CLS_SAVE]
+    lea rsi, [rbx + Comp.lex]
+    mov edx, Lexer_size
+    call ap_memcpy
+
+    mov rdi, rbx
+    mov rsi, [rbp - CLS_START]
+    mov rdx, [rbp - CLS_END]
+    mov rcx, [rbp - CLS_LINE]
+    call lex_run
+    push rax
+    lea rdi, [rbx + Comp.lex]
+    lea rsi, [rbp - CLS_SAVE]
+    mov edx, Lexer_size
+    call ap_memcpy
+    pop rax
+    test eax, eax
+    jz .fail
+    mov rax, [rbp - CLS_IDX]
+    pop rbx
+    leave
+    ret
+.fail:
+    mov rax, -1
+    pop rbx
+    leave
+    ret
+END_FUNC comp_lex_span
 
 ASM_INIT

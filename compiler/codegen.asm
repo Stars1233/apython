@@ -23,6 +23,8 @@ extern buf_init
 extern buf_push_u32
 extern buf_reserve
 extern cg_e_comprehension
+extern cg_e_formattedvalue
+extern cg_e_joinedstr
 extern cg_e_yield
 extern cg_e_yieldfrom
 extern cg_e_lambda
@@ -2631,8 +2633,8 @@ cg_expr_table:
     dq cg_e_yield                      ; 21 AST_YIELD
     dq cg_e_yieldfrom                  ; 22 AST_YIELDFROM
     dq 0                ; 23 AST_AWAIT
-    dq 0                ; 24 AST_JOINEDSTR
-    dq 0                ; 25 AST_FORMATTEDVALUE
+    dq cg_e_joinedstr                  ; 24 AST_JOINEDSTR
+    dq cg_e_formattedvalue                ; 25 AST_FORMATTEDVALUE
     dq cg_e_comprehension                ; 26 AST_LISTCOMP
     dq cg_e_comprehension                ; 27 AST_SETCOMP
     dq cg_e_comprehension                ; 28 AST_DICTCOMP

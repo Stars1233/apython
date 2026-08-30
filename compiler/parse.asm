@@ -48,6 +48,7 @@ extern bytes_from_data
 extern str_new_heap
 extern comp_intern
 extern par_for_target
+extern par_fstring_pieces
 extern par_params
 extern int_from_cstr_base
 extern strtod
@@ -1077,8 +1078,6 @@ DEF_FUNC par_string_body, PB_FRAME
     mov [rbp - PB_OUT], rdx
 
     movzx eax, word [rsi + Token.flags]
-    test eax, TF_STR_FMT
-    jnz .fstring_unsupported
     xor ecx, ecx
     test eax, TF_STR_RAW
     setnz cl
@@ -1343,6 +1342,13 @@ DEF_FUNC_LOCAL pf_string, PS2_FRAME
     and ecx, TF_STR_BYTES
     mov [rbp - PS2_BYTES], rcx
 
+    ; Adjacent literals concatenate even when only some of them are f-strings,
+    ; so the whole run is checked before deciding which shape to build.
+    mov rdi, rbx
+    call par_run_has_fstring
+    test eax, eax
+    jnz .fstring_run
+
     lea rdi, [rbp - PS2_BUF]
     mov esi, 1
     call buf_init
@@ -1410,7 +1416,147 @@ DEF_FUNC_LOCAL pf_string, PS2_FRAME
     pop rbx
     leave
     ret
+    jmp .fstring_unreachable
+.fstring_run:
+    mov rdi, rbx
+    call ast_mark
+    mov [rbp - PS2_BYTES], rax
+.frun_loop:
+    mov rdi, rbx
+    call par_peek
+    mov rsi, rax
+    mov rdi, rbx
+    mov rdx, [rbp - PS2_BYTES]
+    call par_fstring_piece_any
+    test eax, eax
+    jz .fail2
+    mov rdi, rbx
+    call par_advance
+    mov rdi, rbx
+    call par_kind
+    cmp eax, TOK_STRING
+    je .frun_loop
+    mov rdi, rbx
+    mov esi, AST_JOINEDSTR
+    mov rdx, [rbp - PS2_LINE]
+    mov rcx, [rbp - PS2_BYTES]
+    call par_finish_list
+    pop rbx
+    leave
+    ret
+.fail2:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+.fstring_unreachable:
 END_FUNC pf_string
+
+;; ============================================================================
+;; par_run_has_fstring(Comp *c) -> rax = 1 when any literal in the adjacent run
+;; carries the f prefix.
+;; ============================================================================
+DEF_FUNC_BARE par_run_has_fstring
+    mov eax, [rdi + Comp.tok_idx]
+    mov rdx, [rdi + Comp.tokens + Buf.data]
+    mov rcx, [rdi + Comp.tokens + Buf.len]
+.loop:
+    cmp rax, rcx
+    jae .no
+    mov r8, rax
+    shl r8, TOKEN_SHIFT
+    movzx r9d, word [rdx + r8 + Token.kind]
+    cmp r9d, TOK_STRING
+    jne .no
+    movzx r9d, word [rdx + r8 + Token.flags]
+    test r9d, TF_STR_FMT
+    jnz .yes
+    inc rax
+    jmp .loop
+.yes:
+    mov eax, 1
+    ret
+.no:
+    xor eax, eax
+    ret
+END_FUNC par_run_has_fstring
+
+;; ============================================================================
+;; par_fstring_piece_any(Comp *c, Token *t, uint64_t mark) -> 1 ok, 0 error
+;; One literal of a run, whether or not it is an f-string.
+;; ============================================================================
+PFA_COMP  equ 8
+PFA_TOK   equ 16
+PFA_MARK  equ 24
+PFA_BUF   equ 64
+PFA_FRAME equ 72          ; + 1 push = 80
+DEF_FUNC par_fstring_piece_any, PFA_FRAME
+    push rbx
+    mov rbx, rdi
+    mov [rbp - PFA_TOK], rsi
+    mov [rbp - PFA_MARK], rdx
+    movzx eax, word [rsi + Token.flags]
+    test eax, TF_STR_BYTES
+    jnz .mixed
+    test eax, TF_STR_FMT
+    jnz .fstring
+
+    ; A plain literal inside an f-string run becomes one constant piece.
+    lea rdi, [rbp - PFA_BUF]
+    mov esi, 1
+    call buf_init
+    mov rdi, rbx
+    mov rsi, [rbp - PFA_TOK]
+    lea rdx, [rbp - PFA_BUF]
+    call par_string_body
+    test eax, eax
+    jz .fail
+    mov rdi, [rbp - PFA_BUF + Buf.data]
+    mov rsi, [rbp - PFA_BUF + Buf.len]
+    call comp_intern
+    test rax, rax
+    jz .fail
+    mov rdi, rbx
+    mov rsi, rax
+    call ast_obj
+    mov r8, rax
+    mov rcx, [rbp - PFA_TOK]
+    mov ecx, [rcx + Token.lineno]
+    mov rdi, rbx
+    mov esi, AST_CONST
+    xor edx, edx
+    xor r9d, r9d
+    call ast_make
+    mov rdi, rbx
+    mov rsi, rax
+    call ast_push
+    lea rdi, [rbp - PFA_BUF]
+    call buf_free
+    mov eax, 1
+    pop rbx
+    leave
+    ret
+
+.fstring:
+    mov rdi, rbx
+    mov rsi, [rbp - PFA_TOK]
+    mov rdx, [rbp - PFA_MARK]
+    call par_fstring_pieces
+    pop rbx
+    leave
+    ret
+.mixed:
+    mov rdi, rbx
+    CSTRING rsi, "cannot mix bytes and f-string literals"
+    call par_syntax_error
+.fail:
+    lea rdi, [rbp - PFA_BUF]
+    call buf_free
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+END_FUNC par_fstring_piece_any
 
 ;; ============================================================================
 ;; par_exprlist(Comp *c, int close, int *saw_comma) -> rax = child-list mark
