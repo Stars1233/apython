@@ -476,6 +476,38 @@ DEF_FUNC sys_module_init, 32
     mov rdi, [rbp - 24]
     call obj_decref
 
+    ; --- sys.builtin_module_names ---
+    ; The modules that are compiled in rather than found on sys.path.  os.py
+    ; reads it to decide which platform module to import, and several others
+    ; use it to tell a built-in apart from a shadowing file.
+    mov edi, SM_BUILTIN_COUNT
+    call tuple_new
+    mov [rbp - 24], rax
+    xor r13d, r13d
+.sm_bmn_loop:
+    cmp r13, SM_BUILTIN_COUNT
+    jge .sm_bmn_done
+    lea rax, [rel sm_builtin_names]
+    mov rdi, [rax + r13*8]
+    call str_from_cstr_heap
+    mov rcx, [rbp - 24]
+    mov rcx, [rcx + PyTupleObject.ob_item]
+    mov [rcx + r13*8], rax
+    inc r13
+    jmp .sm_bmn_loop
+.sm_bmn_done:
+    lea rdi, [rel sm_builtin_module_names]
+    call str_from_cstr_heap
+    push rax
+    mov rdi, r15
+    mov rsi, rax
+    mov rdx, [rbp - 24]
+    call dict_set
+    pop rdi
+    call obj_decref
+    mov rdi, [rbp - 24]
+    call obj_decref
+
     ; --- sys.byteorder ---
     lea rdi, [rel sm_little]
     call str_from_cstr_heap
@@ -832,6 +864,16 @@ sm_apython_name: db "apython", 0
 sm_cache_tag:    db "cache_tag", 0
 sm_cache_tag_val: db "cpython-312", 0
 sm_warnoptions:  db "warnoptions", 0
+sm_builtin_module_names: db "builtin_module_names", 0
+sm_bmn_abc:      db "_abc", 0
+sm_bmn_sre:      db "_sre", 0
+sm_bmn_builtins: db "builtins", 0
+sm_bmn_sys:      db "sys", 0
+sm_bmn_time:     db "time", 0
+align 8
+sm_builtin_names:
+    dq sm_bmn_abc, sm_bmn_sre, sm_bmn_builtins, sm_bmn_sys, sm_bmn_time
+SM_BUILTIN_COUNT equ 5
 sm_byteorder:    db "byteorder", 0
 sm_little:       db "little", 0
 sm_getdefaultencoding: db "getdefaultencoding", 0

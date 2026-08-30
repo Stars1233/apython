@@ -7378,6 +7378,55 @@ END_FUNC tuple_method_count
 ;;                         SET METHODS
 ;; ############################################################################
 
+
+;; ============================================================================
+;; generic_method_contains(args, nargs) -> bool
+;; args[0]=self, args[1]=item
+;;
+;; `x in c` reaches sq_contains directly, but the method itself was never in
+;; any type's dict, so `frozenset(names).__contains__` -- keyword.py's
+;; iskeyword, among others -- raised AttributeError.  One implementation
+;; serves every type that has the slot.
+;; ============================================================================
+DEF_FUNC generic_method_contains
+    cmp rsi, 2
+    jne .gmc_error
+    mov rax, [rdi]              ; self
+    V_TEST_PTR rax, rcx
+    ja .gmc_error
+    test rax, rax
+    jz .gmc_error
+    mov rcx, [rax + PyObject.ob_type]
+    mov rcx, [rcx + PyTypeObject.tp_as_sequence]
+    test rcx, rcx
+    jz .gmc_error
+    mov rcx, [rcx + PySequenceMethods.sq_contains]
+    test rcx, rcx
+    jz .gmc_error
+    mov rsi, [rdi + 8]          ; the item, as a Value
+    mov rdi, rax
+    call rcx
+    test eax, eax
+    jz .gmc_false
+    lea rax, [rel bool_true]
+    inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
+    leave
+    V_PACK rax, rdx
+    ret
+.gmc_false:
+    lea rax, [rel bool_false]
+    inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
+    leave
+    V_PACK rax, rdx
+    ret
+.gmc_error:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "__contains__() takes exactly one argument"
+    call raise_exception
+END_FUNC generic_method_contains
+
 ;; ============================================================================
 ;; set_method_add(args, nargs) -> None
 ;; args[0]=self, args[1]=elem
@@ -10813,6 +10862,11 @@ DEF_FUNC methods_init
     call add_new_staticmethod
 
     mov rdi, rbx
+    lea rsi, [rel mn___contains__]
+    lea rdx, [rel generic_method_contains]
+    call add_method_to_dict
+
+    mov rdi, rbx
     call add_class_getitem
 
     ; Store in dict_type.tp_dict
@@ -10980,9 +11034,19 @@ DEF_FUNC methods_init
     mov rdi, rbx
     call add_class_getitem
 
-    ; Store in set_type.tp_dict
+    mov rdi, rbx
+    lea rsi, [rel mn___contains__]
+    lea rdx, [rel generic_method_contains]
+    call add_method_to_dict
+
+    ; Store in set_type.tp_dict, and in frozenset's: the two share every
+    ; method that does not mutate, and frozenset had no dict at all.
     lea rax, [rel set_type]
     mov [rax + PyTypeObject.tp_dict], rbx
+    lea rax, [rel frozenset_type]
+    mov [rax + PyTypeObject.tp_dict], rbx
+    mov rdi, rbx
+    call obj_incref
 
     ;; --- object_type methods (just __new__) ---
     call dict_new

@@ -40,6 +40,11 @@ one-line fix.
   was registered against a subclass of ABC rather than against ABC itself.
   Direct registration and real inheritance both work.
 
+- **`_thread` is a single-threaded stand-in.**  `lib/_thread.py` gives
+  `get_ident` a constant, makes locks uncontended, and raises from
+  `start_new_thread`.  Everything in the stdlib that only takes a lock works;
+  anything that expects a second thread does not.
+
 - **`_abc_instancecheck` does not honour a spoofed `__class__`.**  CPython
   checks both `instance.__class__` and `type(instance)`; this checks only the
   type, so an object that lies about its class -- a mock, mostly -- is judged

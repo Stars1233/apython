@@ -15,12 +15,14 @@ ok graphlib
 ok heapq
 ok __hello__
 ok idlelib
+ok keyword
 ok nturl2path
 ok opcode
 ok operator
 ok __phello__
 ok pydoc_data
 ok quopri
+ok reprlib
 ok _sitebuiltins
 ok stat
 ok token

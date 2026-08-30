@@ -101,6 +101,75 @@ IM_PATH_MARGIN equ 64
 ; ============================================================================
 ; import_init(int argc, char **argv)
 ; Initialize the import system: sys module + builtins in sys.modules
+
+; ----------------------------------------------------------------------------
+; import_add_exe_relative_path(rdi = suffix cstr)
+; Appends <directory of the running binary>/<suffix> to sys.path.  Falls back
+; to the plain relative entry when /proc/self/exe cannot be read.
+; ----------------------------------------------------------------------------
+IAR_SUFFIX equ 8
+IAR_LEN    equ 16
+IAR_BUF    equ 4128            ; 4096 bytes of path, [rbp-4128, rbp-32)
+IAR_FRAME  equ 4144
+DEF_FUNC_LOCAL import_add_exe_relative_path, IAR_FRAME
+    push rbx
+    push r12
+    mov [rbp - IAR_SUFFIX], rdi
+
+    lea rbx, [rbp - IAR_BUF]
+    CSTRING rdi, "/proc/self/exe"
+    mov rsi, rbx
+    mov edx, 4000
+    extern readlink
+    call readlink
+    test rax, rax
+    jle .iar_relative
+    mov r12, rax                ; length of the resolved path
+
+    ; Cut back to the last '/', keeping it, so "…/apython" becomes "…/".
+.iar_trim:
+    test r12, r12
+    jz .iar_relative
+    dec r12
+    cmp byte [rbx + r12], '/'
+    jne .iar_trim
+    inc r12
+
+    ; Append the suffix.
+    mov rsi, [rbp - IAR_SUFFIX]
+.iar_copy:
+    movzx eax, byte [rsi]
+    test al, al
+    jz .iar_done
+    cmp r12, 4090
+    jae .iar_relative
+    mov [rbx + r12], al
+    inc r12
+    inc rsi
+    jmp .iar_copy
+.iar_done:
+    mov rdi, rbx
+    mov rsi, r12
+    call str_new_heap
+    jmp .iar_append
+
+.iar_relative:
+    mov rdi, [rbp - IAR_SUFFIX]
+    call str_from_cstr_heap
+
+.iar_append:
+    push rax
+    mov rdi, [rel sys_path_list]
+    mov rsi, rax
+    call list_append
+    pop rdi
+    call obj_decref
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC import_add_exe_relative_path
+
 ; ============================================================================
 DEF_FUNC import_init
     push rbx
@@ -112,26 +181,6 @@ DEF_FUNC import_init
     mov rdi, rbx
     mov rsi, r12
     call sys_module_init
-
-    ; Add "lib" to sys.path for stdlib modules
-    lea rdi, [rel im_lib_path]
-    call str_from_cstr_heap
-    push rax
-    mov rdi, [rel sys_path_list]
-    mov rsi, rax
-    call list_append
-    pop rdi
-    call obj_decref
-
-    ; Add "tests/cpython" to sys.path for test support
-    lea rdi, [rel im_tests_cpython_path]
-    call str_from_cstr_heap
-    push rax
-    mov rdi, [rel sys_path_list]
-    mov rsi, rax
-    call list_append
-    pop rdi
-    call obj_decref
 
     ; Register builtins module in sys.modules
     lea rdi, [rel im_builtins]
@@ -270,6 +319,17 @@ DEF_FUNC import_init
     inc r12                     ; step over the ':'
     jmp .pp_entry
 .no_pythonpath:
+
+    ; The modules apython ships itself, last.  They are found relative to the
+    ; interpreter binary rather than the working directory -- a relative "lib"
+    ; entry only resolved when apython happened to be run from its own source
+    ; tree, so `import itertools` worked there and nowhere else.  Last, so a
+    ; real stdlib named by PYTHONPATH wins: these stand in for CPython's C
+    ; modules, not for its Python ones.
+    lea rdi, [rel im_lib_path]
+    call import_add_exe_relative_path
+    lea rdi, [rel im_tests_cpython_path]
+    call import_add_exe_relative_path
 
     pop r12
     pop rbx
