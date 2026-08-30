@@ -402,7 +402,17 @@ END_FUNC float_format_spec
 ;;   hash(float(n)) == hash(n)
 ;; For non-integer floats, returns a hash derived from the raw bits.
 ;; ============================================================================
-DEF_FUNC_BARE float_hash
+;; _Py_HashDouble, exactly.  The old code returned the truncated integer for
+;; an integral float and an xor of the raw bits otherwise, so hash(1.5) bore
+;; no relation to CPython's and hash(2**61) != hash(float(2**61)) -- an int
+;; and an equal float landed in different dict slots.
+FH_EXP   equ 8
+FH_M     equ 16
+FH_FRAME equ 32
+DEF_FUNC float_hash, FH_FRAME
+    push rbx
+    push r12
+    push r13
     movq xmm0, rdi
 
     ; Check NaN (unordered with itself)
@@ -417,45 +427,130 @@ DEF_FUNC_BARE float_hash
     ucomisd xmm0, xmm1
     je .fh_neg_inf
 
-    ; Check if integer-valued: truncate to i64, convert back, compare
-    cvttsd2si rax, xmm0
-    cvtsi2sd xmm1, rax
+    ; sign, then frexp: v = m * 2^e with |m| in [0.5, 1)
+    xor r13d, r13d                      ; sign = +1
+    xorpd xmm1, xmm1
     ucomisd xmm0, xmm1
-    jne .fh_fractional
-    jp .fh_fractional
+    jae .fh_positive
+    mov r13d, 1                         ; sign = -1
+    movsd xmm1, [rel fh_sign_mask]
+    xorpd xmm0, xmm1                    ; m = -m
+.fh_positive:
+    lea rdi, [rbp - FH_EXP]
+    extern frexp
+    call frexp wrt ..plt
+    movsd [rbp - FH_M], xmm0
+    movsxd r12, dword [rbp - FH_EXP]    ; r12 = e
 
-    ; Integer-valued: return the integer value (matches int_hash behavior)
+    xor ebx, ebx                        ; x = 0
+    mov r10, PYHASH_MODULUS
+.fh_loop:
+    movsd xmm0, [rbp - FH_M]
+    xorpd xmm1, xmm1
+    ucomisd xmm0, xmm1
+    jp .fh_loop_done
+    je .fh_loop_done
+
+    ; x = ((x << 28) & MODULUS) | (x >> 33)
+    mov rax, rbx
+    shl rax, 28
+    and rax, r10
+    mov rcx, rbx
+    shr rcx, 33
+    or rax, rcx
+    mov rbx, rax
+
+    ; m *= 2**28; e -= 28
+    mulsd xmm0, [rel fh_two28]
+    sub r12, 28
+
+    ; y = (uint64)m; m -= y; x += y
+    cvttsd2si rax, xmm0
+    mov r11, rax
+    cvtsi2sd xmm1, rax
+    subsd xmm0, xmm1
+    movsd [rbp - FH_M], xmm0
+    add rbx, r11
+    cmp rbx, r10
+    jb .fh_loop
+    sub rbx, r10
+    jmp .fh_loop
+.fh_loop_done:
+
+    ; e mod 61, taken toward -infinity
+    test r12, r12
+    js .fh_neg_exp
+    mov rax, r12
+    xor edx, edx
+    mov rcx, 61
+    div rcx
+    mov r12, rdx
+    jmp .fh_rotate
+.fh_neg_exp:
+    mov rax, r12
+    not rax                             ; -1 - e
+    xor edx, edx
+    mov rcx, 61
+    div rcx
+    mov r12, 60
+    sub r12, rdx
+.fh_rotate:
+    ; x = ((x << e) & MODULUS) | (x >> (61 - e))
+    mov rax, rbx
+    mov rcx, r12
+    shl rax, cl
+    and rax, r10
+    mov rdx, rbx
+    mov rcx, 61
+    sub rcx, r12
+    shr rdx, cl
+    or rax, rdx
+
+    test r13d, r13d
+    jz .fh_signed
+    neg rax
+.fh_signed:
     cmp rax, -1
     jne .fh_done
     mov rax, -2
 .fh_done:
+    pop r13
+    pop r12
+    pop rbx
+    leave
     ret
 
 .fh_nan:
     xor eax, eax              ; hash(nan) = 0
+    pop r13
+    pop r12
+    pop rbx
+    leave
     ret
 
 .fh_pos_inf:
     mov rax, 314159            ; hash(inf) = 314159 (CPython convention)
+    pop r13
+    pop r12
+    pop rbx
+    leave
     ret
 
 .fh_neg_inf:
     mov rax, -314159           ; hash(-inf) = -314159
-    ret
-
-.fh_fractional:
-    ; Non-integer float: XOR high and low 32 bits of raw double
-    mov rax, rdi
-    mov rdx, rdi
-    shr rdx, 32
-    xor rax, rdx
-    ; Ensure never -1
-    cmp rax, -1
-    jne .fh_frac_done
-    mov rax, -2
-.fh_frac_done:
+    pop r13
+    pop r12
+    pop rbx
+    leave
     ret
 END_FUNC float_hash
+
+section .rodata
+align 16
+fh_sign_mask: dq 0x8000000000000000, 0
+align 8
+fh_two28:     dq 0x41B0000000000000      ; 2.0**28
+section .text
 
 ;; ============================================================================
 ;; float_bool(rdi = raw double bits) -> int (0 or 1) in eax
