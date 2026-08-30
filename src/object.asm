@@ -10,6 +10,8 @@ extern ap_malloc
 extern ap_free
 extern sys_write
 extern str_from_cstr
+extern dict_get
+extern ap_strcmp
 extern none_singleton
 extern bool_false
 extern bool_true
@@ -1034,60 +1036,106 @@ END_FUNC obj_print
 ;; type_repr(PyObject *type_obj) -> PyStrObject*
 ;; Formats "<class 'name'>" for a type object.
 ;; ============================================================================
-DEF_FUNC type_repr
+TR_TYPE  equ 8
+TR_LEN   equ 16
+TR_BUF   equ 272            ; 256 bytes, [rbp-272, rbp-16)
+TR_FRAME equ 288
+DEF_FUNC type_repr, TR_FRAME
     push rbx
-    sub rsp, 72                ; 64 bytes buffer + 8 alignment
+    push r12
+    mov [rbp - TR_TYPE], rdi
 
-    ; rdi = type object ptr
     mov rax, [rdi + PyTypeObject.tp_name]  ; C string pointer
     test rax, rax
     jz .type_repr_unknown
 
-    ; Build "<class 'NAME'>" in stack buffer
-    mov rbx, rax               ; rbx = tp_name C string
+    lea rbx, [rbp - TR_BUF]
+    CSTRING rsi, `<class '`
+    xor r12d, r12d
+.tr_open:
+    movzx eax, byte [rsi]
+    test al, al
+    jz .tr_module
+    inc rsi
+    mov [rbx + r12], al
+    inc r12
+    jmp .tr_open
 
-    ; Calculate name length
-    xor ecx, ecx
-.name_len:
-    cmp byte [rbx + rcx], 0
-    je .name_len_done
-    inc ecx
-    jmp .name_len
-.name_len_done:
-    ; ecx = name len; buffer at [rsp]
-    lea rdi, [rsp]
-
-    ; Write "<class '"
-    mov byte [rdi], '<'
-    mov byte [rdi+1], 'c'
-    mov byte [rdi+2], 'l'
-    mov byte [rdi+3], 'a'
-    mov byte [rdi+4], 's'
-    mov byte [rdi+5], 's'
-    mov byte [rdi+6], ' '
-    mov byte [rdi+7], 0x27     ; single quote
-
-    ; Copy name bytes
-    xor r8d, r8d
-.copy_name:
-    cmp r8d, ecx
-    je .copy_name_done
-    mov al, [rbx + r8]
-    mov [rdi + 8 + r8], al
-    inc r8d
-    jmp .copy_name
-.copy_name_done:
-    ; Append "'>" and null terminator
-    lea eax, [r8d + 8]
-    mov byte [rdi + rax], 0x27  ; single quote
-    mov byte [rdi + rax + 1], '>'
-    mov byte [rdi + rax + 2], 0
-
-    ; Create string from buffer
-    ; rdi already = [rsp] = buffer start
+.tr_module:
+    ; CPython qualifies a class with its module: <class '__main__.C'>.  Only
+    ; the bare name was printed, so every class repr differed from CPython's.
+    ; Builtins live in "builtins" and are shown unqualified.
+    mov rdi, [rbp - TR_TYPE]
+    mov rdi, [rdi + PyTypeObject.tp_dict]
+    test rdi, rdi
+    jz .tr_name
+    mov [rbp - TR_LEN], rdi         ; the type dict
+    CSTRING rdi, "__module__"
     call str_from_cstr
+    mov rsi, rax
+    mov rdi, [rbp - TR_LEN]
+    call dict_get
+    V_UNPACK rax, rdx
+    test edx, edx
+    jz .tr_name
+    cmp edx, TAG_PTR
+    jne .tr_name
+    mov rcx, [rax + PyObject.ob_type]
+    lea rdx, [rel str_type]
+    cmp rcx, rdx
+    jne .tr_name
+    mov rdx, [rax + PyStrObject.ob_size]
+    test rdx, rdx
+    jz .tr_name
+    cmp rdx, 8
+    jne .tr_copy_module
+    lea rdi, [rax + PyStrObject.data]
+    CSTRING rsi, "builtins"
+    push rax
+    push rdx
+    call ap_strcmp
+    pop rdx
+    pop rax
+    test eax, eax
+    jz .tr_name                 ; module is "builtins": leave it off
+.tr_copy_module:
+    lea rsi, [rax + PyStrObject.data]
+    xor ecx, ecx
+.tr_mod_loop:
+    cmp rcx, rdx
+    jge .tr_mod_done
+    cmp r12, 200
+    jae .tr_mod_done
+    mov al, [rsi + rcx]
+    mov [rbx + r12], al
+    inc r12
+    inc rcx
+    jmp .tr_mod_loop
+.tr_mod_done:
+    mov byte [rbx + r12], '.'
+    inc r12
 
-    add rsp, 72
+.tr_name:
+    mov rax, [rbp - TR_TYPE]
+    mov rsi, [rax + PyTypeObject.tp_name]
+.tr_name_loop:
+    movzx eax, byte [rsi]
+    test al, al
+    jz .tr_close
+    inc rsi
+    cmp r12, 250
+    jae .tr_close
+    mov [rbx + r12], al
+    inc r12
+    jmp .tr_name_loop
+
+.tr_close:
+    mov byte [rbx + r12], 0x27
+    mov byte [rbx + r12 + 1], '>'
+    mov byte [rbx + r12 + 2], 0
+    mov rdi, rbx
+    call str_from_cstr
+    pop r12
     pop rbx
     leave
     ret
@@ -1095,7 +1143,7 @@ DEF_FUNC type_repr
 .type_repr_unknown:
     lea rdi, [rel type_repr_unknown_str]
     call str_from_cstr
-    add rsp, 72
+    pop r12
     pop rbx
     leave
     ret

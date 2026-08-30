@@ -1523,6 +1523,49 @@ TFP_BASES equ 56            ; the bases tuple, or NULL
     ; tp_dict = class_dict (ownership transferred from r15, no INCREF needed)
     mov [r12 + PyTypeObject.tp_dict], r15
 
+    ; A class statement's body sets __module__ itself; three-argument type()
+    ; hands over a bare namespace, and without __module__ the repr comes out
+    ; unqualified.  Fill it from the running frame's __name__, as CPython does.
+    lea rdi, [rel bc_module_name]
+    call str_from_cstr_heap
+    push rax
+    mov rdi, r15
+    mov rsi, rax
+    call dict_get
+    V_UNPACK rax, rdx
+    test edx, edx
+    jnz .bc_have_module
+    extern eval_saved_r12
+    mov rcx, [rel eval_saved_r12]
+    test rcx, rcx
+    jz .bc_have_module
+    mov rcx, [rcx + PyFrame.globals]
+    test rcx, rcx
+    jz .bc_have_module
+    lea rdi, [rel bc_dunder_name_name]
+    call str_from_cstr_heap
+    push rax
+    mov rdi, [rel eval_saved_r12]
+    mov rdi, [rdi + PyFrame.globals]
+    mov rsi, rax
+    call dict_get
+    V_UNPACK rax, rdx
+    pop rdi
+    push rax
+    push rdx
+    call obj_decref                 ; the "__name__" key
+    pop rdx
+    pop rax
+    test edx, edx
+    jz .bc_have_module
+    mov rdi, r15
+    mov rsi, [rsp]                  ; the "__module__" key
+    mov rdx, rax
+    call dict_set
+.bc_have_module:
+    pop rdi
+    call obj_decref
+
     ; INCREF class_name (type object refers to it via tp_name)
     mov rdi, r14
     call obj_incref
@@ -2047,6 +2090,8 @@ END_FUNC builtin___build_class__
 
 section .rodata
 bc_init_name: db "__init__", 0
+bc_module_name: db "__module__", 0
+bc_dunder_name_name: db "__name__", 0
 bc_classcell_name: db "__classcell__", 0
 bc_slots_name: db "__slots__", 0
 section .text

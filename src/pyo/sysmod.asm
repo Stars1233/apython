@@ -362,6 +362,39 @@ DEF_FUNC sys_module_init, 32
     pop rdi
     call obj_decref
 
+    ; --- sys.getrecursionlimit / sys.setrecursionlimit ---
+    lea rdi, [rel sys_getrecursionlimit_func]
+    lea rsi, [rel sm_getrecursionlimit]
+    call builtin_func_new
+    push rax
+    lea rdi, [rel sm_getrecursionlimit]
+    call str_from_cstr_heap
+    push rax
+    mov rdi, r15
+    mov rsi, rax
+    mov rdx, [rsp + 8]
+    call dict_set
+    pop rdi
+    call obj_decref
+    pop rdi
+    call obj_decref
+
+    lea rdi, [rel sys_setrecursionlimit_func]
+    lea rsi, [rel sm_setrecursionlimit]
+    call builtin_func_new
+    push rax
+    lea rdi, [rel sm_setrecursionlimit]
+    call str_from_cstr_heap
+    push rax
+    mov rdi, r15
+    mov rsi, rax
+    mov rdx, [rsp + 8]
+    call dict_set
+    pop rdi
+    call obj_decref
+    pop rdi
+    call obj_decref
+
     ; --- sys.byteorder ---
     lea rdi, [rel sm_little]
     call str_from_cstr_heap
@@ -465,6 +498,55 @@ DEF_FUNC sys_module_init, 32
     leave
     ret
 END_FUNC sys_module_init
+
+; ============================================================================
+; sys.getrecursionlimit() / sys.setrecursionlimit(n)
+; The interpreter has had a recursion counter since the bare SIGSEGV was
+; replaced with a RecursionError; these expose the limit it checks.
+; ============================================================================
+DEF_FUNC sys_getrecursionlimit_func
+    mov rax, [rel recursion_limit]
+    extern recursion_limit
+    mov edx, TAG_SMALLINT
+    leave
+    V_PACK rax, rdx
+    ret
+END_FUNC sys_getrecursionlimit_func
+
+DEF_FUNC sys_setrecursionlimit_func
+    cmp rsi, 1
+    jne .srl_error
+    mov rdi, [rdi]
+    V_UNPACK rdi, rdx
+    extern int_is_integer
+    push rdi
+    push rdx
+    call int_is_integer
+    pop rdx
+    pop rdi
+    test eax, eax
+    jz .srl_error
+    extern int_to_i64
+    call int_to_i64
+    cmp rax, 1
+    jl .srl_value_error
+    mov [rel recursion_limit], rax
+    lea rax, [rel none_singleton]
+    inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
+    leave
+    V_PACK rax, rdx
+    ret
+.srl_error:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "setrecursionlimit() argument must be an int"
+    call raise_exception
+.srl_value_error:
+    extern exc_ValueError_type
+    lea rdi, [rel exc_ValueError_type]
+    CSTRING rsi, "recursion limit must be greater or equal than 1"
+    call raise_exception
+END_FUNC sys_setrecursionlimit_func
 
 ; ============================================================================
 ; sys_exit_func(PyObject **args, int64_t nargs) -> PyObject*
@@ -661,6 +743,8 @@ sm_stdin_name:   db "<stdin>", 0
 sm_mode_w:       db "w", 0
 sm_mode_r:       db "r", 0
 sm_exit:         db "exit", 0
+sm_getrecursionlimit: db "getrecursionlimit", 0
+sm_setrecursionlimit: db "setrecursionlimit", 0
 sm_byteorder:    db "byteorder", 0
 sm_little:       db "little", 0
 sm_getdefaultencoding: db "getdefaultencoding", 0
