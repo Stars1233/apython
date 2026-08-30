@@ -500,6 +500,11 @@ align 16
     je .print_default_sep_fallback
 
     mov rcx, [rax + PyStrObject.ob_size]
+    ; The per-argument copy checks the 4096-byte buffer; this one did not, so
+    ; print(..., sep="X"*5000) wrote past the frame over the return address.
+    lea rdx, [r15 + rcx + 2]
+    cmp rdx, 4096
+    jae .print_sep_direct
     ; Copy sep bytes into buffer
     lea rdi, [rbp - PR_FRAME + r15]
     lea rsi, [rax + PyStrObject.data]
@@ -511,6 +516,23 @@ align 16
     pop rcx
 .print_sep_done:
     add r15, rcx
+    jmp .print_loop
+
+.print_sep_direct:
+    ; Flush what is buffered, then write the separator straight out.
+    test r15, r15
+    jz .print_sep_write
+    mov rdi, [rbp - PR_FILE_FD]
+    lea rsi, [rbp - PR_FRAME]
+    mov rdx, r15
+    call sys_write
+    xor r15d, r15d
+.print_sep_write:
+    mov rax, [rbp - PR_SEP]
+    mov rdi, [rbp - PR_FILE_FD]
+    lea rsi, [rax + PyStrObject.data]
+    mov rdx, [rax + PyStrObject.ob_size]
+    call sys_write
     jmp .print_loop
 
 .print_default_sep_fallback:
@@ -562,8 +584,11 @@ align 16
     cmp rax, rcx
     je .print_default_end
 
-    ; Custom end string
+    ; Custom end string, bounded the same way
     mov rcx, [rax + PyStrObject.ob_size]
+    lea rdx, [r15 + rcx + 2]
+    cmp rdx, 4096
+    jae .print_end_direct
     lea rdi, [rbp - PR_FRAME + r15]
     lea rsi, [rax + PyStrObject.data]
     mov rdx, rcx
@@ -574,6 +599,22 @@ align 16
     pop rcx
 .print_end_copy_done:
     add r15, rcx
+    jmp .print_do_flush
+
+.print_end_direct:
+    test r15, r15
+    jz .print_end_write
+    mov rdi, [rbp - PR_FILE_FD]
+    lea rsi, [rbp - PR_FRAME]
+    mov rdx, r15
+    call sys_write
+    xor r15d, r15d
+.print_end_write:
+    mov rax, [rbp - PR_END]
+    mov rdi, [rbp - PR_FILE_FD]
+    lea rsi, [rax + PyStrObject.data]
+    mov rdx, [rax + PyStrObject.ob_size]
+    call sys_write
     jmp .print_do_flush
 
 .print_default_end:

@@ -1100,9 +1100,15 @@ DEF_FUNC_BARE op_raise_varargs
     ; cause is at [rsp+8], cause_tag at [rsp+16]
     mov rax, [rsp + 8]      ; cause payload
     mov rcx, [rsp + 16]     ; cause tag
-    ; Only store cause if it's a pointer (heap exception object)
+    ; `raise X from Y` suppresses the implicit context either way, and
+    ; `from None` leaves no cause at all -- storing the None singleton there
+    ; made the traceback printer read a traceback off a 16-byte object.
+    mov qword [rdi + PyExceptionObject.exc_suppress], 1
     test ecx, TAG_RC_BIT
     jz .raise_from_no_cause
+    lea rdx, [rel none_singleton]
+    cmp rax, rdx
+    je .raise_from_no_cause
     ; Store cause (transfer ownership — no INCREF, we own the ref from VPOP)
     mov [rdi + PyExceptionObject.exc_cause], rax
     jmp .raise_from_done

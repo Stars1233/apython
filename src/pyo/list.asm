@@ -388,15 +388,16 @@ DEF_FUNC list_ass_subscript, LAS_FRAME
     ; Check if key is a SmallInt (ecx = key tag from caller)
     cmp ecx, TAG_SMALLINT
     je .las_int                ; SmallInt -> int path
+    cmp ecx, TAG_PTR           ; a float key is neither: classify fully
+    jne .las_key_type_error    ; before dereferencing, or its raw f64 bits
+                               ; get used as an address -- a[1.5] = 9 was a
+                               ; segfault, while a[1.5] already raised
     mov rax, [rsi + PyObject.ob_type]
     lea rcx, [rel slice_type]
     cmp rax, rcx
     je .las_slice
-    ; Validate key is a heap int before converting
-    extern int_type
-    lea rcx, [rel int_type]
-    cmp rax, rcx
-    jne .las_key_type_error
+    ; A bool is an int here too, as it is on the read path
+    REQUIRE_INT_TYPE rax, rcx, .las_key_type_error
 
 .las_int:
     ; Convert key to i64

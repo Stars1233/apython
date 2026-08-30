@@ -234,8 +234,24 @@ DEF_FUNC_LOCAL sp_arg_i64
     call int_unwrap
     cmp edx, TAG_SMALLINT
     je .sai_small
+    ; int_to_i64 reads PyIntObject fields off whatever it is given, so a str
+    ; pos fed __gmpz_get_si a garbage limb pointer.
+    push rdi
+    push rdx
+    extern int_is_integer
+    call int_is_integer
+    pop rdx
+    pop rdi
+    test eax, eax
+    jz .sai_type_error
     call int_to_i64
     jmp .sai_out
+.sai_type_error:
+    extern exc_TypeError_type
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "an integer is required"
+    extern raise_exception
+    call raise_exception
 .sai_small:
     mov rax, rdi
 .sai_out:
@@ -927,35 +943,39 @@ DEF_FUNC sre_pattern_sub_method, SUB_FRAME
     mov edx, 1                 ; nargs
     mov rax, [rbp - SUB_CALLABLE]
     call rax
-    V_UNPACK rax, rdx           ; tp_call returns a Value
-    ; rax = replacement string payload, edx = replacement tag
+    ; tp_call returns a Value, and str_concat below takes Values: unpacking
+    ; here decoded it a second time, so a non-str replacement had its payload
+    ; used as an address.
     add rsp, 16               ; pop fat array
 
     ; Save replacement string
     push rax
-    push rdx
+    push rax                  ; keep the stack 16-byte aligned
 
     ; DECREF match object
     mov rdi, r14
     call obj_decref
 
-    ; Concat replacement with result
-    pop rcx                    ; replacement tag → ecx for str_concat
-    pop rsi                    ; replacement string payload
-    push rsi                   ; save repl payload for DECREF
-    push rcx                   ; save repl tag for DECREF
+    ; Concat replacement with result.  str_concat itself rejects a non-str.
+    pop rsi                    ; (alignment copy)
+    pop rsi                    ; the replacement Value
+    push rsi                   ; save for DECREF
+    push rsi                   ; alignment
     mov rdi, [rbp - SUB_RESULT]
     call str_concat
+    push rax
     push rax
     mov rdi, [rbp - SUB_RESULT]
     call obj_decref
     pop rax
+    pop rax
     mov [rbp - SUB_RESULT], rax
 
     ; DECREF replacement string from tp_call
-    pop rdx                    ; repl tag
-    pop rax                    ; repl payload
-    DECREF_VAL rax, rdx
+    pop rax
+    pop rax
+    mov rdi, rax
+    XDECREF_V rdi, rdx
 
     pop r13
     pop r12

@@ -46,6 +46,7 @@ struc PyExceptionObject
     .exc_cause:     resq 1  ; +48: ptr to __cause__ or NULL
     .exc_args:      resq 1  ; +56: ptr to args tuple or NULL
     .exc_dict:      resq 1  ; +64: ptr to instance dict or NULL (for custom attrs)
+    .exc_suppress:  resq 1  ; +72: __suppress_context__ (set by `raise .. from`)
 endstruc
 
 ; Exception group object (extends PyExceptionObject with eg_exceptions)
@@ -59,6 +60,7 @@ struc PyExceptionGroupObject
     .exc_cause:     resq 1  ; +48
     .exc_args:      resq 1  ; +56
     .exc_dict:      resq 1  ; +64: ptr to instance dict or NULL
+    .exc_suppress:  resq 1  ; +72: __suppress_context__
     .eg_exceptions: resq 1  ; +72: tuple of sub-exceptions
 endstruc
 

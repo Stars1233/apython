@@ -766,6 +766,16 @@ DEF_FUNC instance_dealloc, ID_FRAME
     add rcx, 8
     jmp .id_have_hdr
 .id_no_dict_hdr:
+    ; No dict word: a str subclass, whose header is the base's, not
+    ; PyInstanceObject's.  Using 24 there found a phantom slot at +24 --
+    ; PyStrObject.ob_hash -- and XDECREF'd the hash as if it were a pointer.
+    mov rcx, [rax + PyTypeObject.tp_base]
+    test rcx, rcx
+    jz .id_no_dict_hdr_default
+    mov rcx, [rcx + PyTypeObject.tp_basicsize]
+    test rcx, rcx
+    jnz .id_have_hdr
+.id_no_dict_hdr_default:
     mov rcx, PyInstanceObject_size
 .id_have_hdr:
     mov rax, [rax + PyTypeObject.tp_basicsize]

@@ -482,28 +482,68 @@ TP_LASTL equ 40          ; line number of the previous entry
 TP_CNT   equ 48          ; length of the current run of identical entries
 TP_FRAME equ 64
 TB_RECURSIVE_CUTOFF equ 3
+TB_SEEN_MAX equ 64
 global traceback_print
-DEF_FUNC traceback_print, TP_FRAME
+DEF_FUNC traceback_print
+    mov qword [rel tb_seen_n], 0
+    mov rsi, rdi
+    xor edi, edi
+    call tb_print_one
+    leave
+    ret
+END_FUNC traceback_print
+
+; tb_print_one(rsi = exception) -- the body; tb_seen guards against a cycle in
+; the __cause__ / __context__ chain, which `raise e from e` otherwise turns
+; into unbounded recursion.
+DEF_FUNC tb_print_one, TP_FRAME
     push rbx
+    mov rdi, rsi
     test rdi, rdi
     jz .tp_out
     mov [rbp - TP_EXC], rdi
+
+    ; Already reported? then this is a cycle; stop here.
+    mov rcx, [rel tb_seen_n]
+    xor edx, edx
+    lea r8, [rel tb_seen]
+.tp_seen_scan:
+    cmp rdx, rcx
+    jge .tp_seen_add
+    cmp [r8 + rdx*8], rdi
+    je .tp_skip
+    inc rdx
+    jmp .tp_seen_scan
+.tp_seen_add:
+    cmp rcx, TB_SEEN_MAX
+    jae .tp_seen_done
+    mov [r8 + rcx*8], rdi
+    inc rcx
+    mov [rel tb_seen_n], rcx
+.tp_seen_done:
 
     ; A __cause__ or __context__ is reported first, then the linking sentence.
     mov rax, [rdi + PyExceptionObject.exc_cause]
     test rax, rax
     jnz .tp_cause
+    ; `raise X from ...` suppresses the implicit context.
+    cmp qword [rdi + PyExceptionObject.exc_suppress], 0
+    jne .tp_header
     mov rax, [rdi + PyExceptionObject.exc_context]
     test rax, rax
     jz .tp_header
-    mov rdi, rax
-    call traceback_print
+    mov rsi, rax
+    call tb_print_one
+    test eax, eax
+    jz .tp_header
     CSTRING rdi, `\nDuring handling of the above exception, another exception occurred:\n\n`
     call tb_write_cstr
     jmp .tp_header
 .tp_cause:
-    mov rdi, rax
-    call traceback_print
+    mov rsi, rax
+    call tb_print_one
+    test eax, eax
+    jz .tp_header
     CSTRING rdi, `\nThe above exception was the direct cause of the following exception:\n\n`
     call tb_write_cstr
 
@@ -636,8 +676,19 @@ DEF_FUNC traceback_print, TP_FRAME
 .tp_newline:
     CSTRING rdi, `\n`
     call tb_write_cstr
-.tp_out:
+    mov eax, 1                      ; something was printed
     pop rbx
     leave
     ret
-END_FUNC traceback_print
+.tp_skip:
+.tp_out:
+    xor eax, eax                    ; nothing printed: NULL, or a cycle
+    pop rbx
+    leave
+    ret
+END_FUNC tb_print_one
+
+section .bss
+tb_seen:   resq TB_SEEN_MAX
+tb_seen_n: resq 1
+section .text

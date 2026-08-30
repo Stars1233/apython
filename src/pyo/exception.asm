@@ -79,6 +79,7 @@ DEF_FUNC exc_new, EN_FRAME
     mov qword [rax + PyExceptionObject.exc_cause], 0
     mov qword [rax + PyExceptionObject.exc_args], 0
     mov qword [rax + PyExceptionObject.exc_dict], 0
+    mov qword [rax + PyExceptionObject.exc_suppress], 0
 
     ; INCREF the message
     INCREF_V r12, r13
@@ -482,6 +483,13 @@ DEF_FUNC exc_getattr
     test eax, eax
     jz .get_cause
 
+    ; Check "__suppress_context__"
+    lea rdi, [r12 + PyStrObject.data]
+    CSTRING rsi, "__suppress_context__"
+    call ap_strcmp
+    test eax, eax
+    jz .get_suppress
+
     ; Check "__traceback__"
     lea rdi, [r12 + PyStrObject.data]
     CSTRING rsi, "__traceback__"
@@ -680,6 +688,26 @@ DEF_FUNC exc_getattr
     pop rbx
     leave
     V_PACK rax, rdx             ; return one Value
+    ret
+
+.get_suppress:
+    mov rax, [rbx + PyExceptionObject.exc_suppress]
+    test rax, rax
+    jz .suppress_false
+    extern bool_true
+    lea rax, [rel bool_true]
+    jmp .suppress_ret
+.suppress_false:
+    extern bool_false
+    lea rax, [rel bool_false]
+.suppress_ret:
+    INCREF rax
+    mov edx, TAG_PTR
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
     ret
 
 .get_cause:
