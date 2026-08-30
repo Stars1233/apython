@@ -61,7 +61,9 @@ LA_CLASS     equ 48   ; used by classmethod path
 LA_ATTR_TAG  equ 56
 LA_OBJ_TAG   equ 64
 LA_OBJVAL    equ 72   ; the object as a Value, for the generic tail
-LA_FRAME     equ 80
+LA_WALK      equ 80   ; the MRO cursor while searching the type dicts
+LA_TAGTYPE   equ 88   ; the type an immediate resolved to, the walk's origin
+LA_FRAME     equ 96
 
 ; op_load_super_attr frame layout (DEF_FUNC op_load_super_attr, LSA_FRAME)
 LSA_SELF     equ 8
@@ -437,16 +439,29 @@ DEF_FUNC op_load_attr, LA_FRAME
     jmp .la_got_attr
 
 .la_resolve_tag_dict:
-    ; No tp_getattr — try type's tp_dict
-    mov rax, [r8 + PyTypeObject.tp_dict]
+    ; No tp_getattr: walk the MRO's tp_dicts, so an immediate reaches what
+    ; object supplies too -- `(1).__eq__` lives there and nowhere else.
+    mov [rbp - LA_TAGTYPE], r8
+    mov [rbp - LA_WALK], r8
+.la_tag_loop:
+    mov rax, [rbp - LA_WALK]
     test rax, rax
     jz .la_attr_error
+    mov rax, [rax + PyTypeObject.tp_dict]
+    test rax, rax
+    jz .la_tag_next
     mov rdi, rax
     mov rsi, [rbp - LA_NAME]
     call dict_get
     V_UNPACK rax, rdx           ; dict_get returns a Value
     test edx, edx
-    jz .la_attr_error
+    jnz .la_tag_found
+.la_tag_next:
+    mov rax, [rbp - LA_WALK]
+    MRO_NEXT rax, [rbp - LA_TAGTYPE]
+    mov [rbp - LA_WALK], rax
+    jmp .la_tag_loop
+.la_tag_found:
     mov [rbp - LA_ATTR], rax
     mov [rbp - LA_ATTR_TAG], rdx
     INCREF_VAL rax, rdx
@@ -476,20 +491,33 @@ DEF_FUNC op_load_attr, LA_FRAME
     jmp .la_got_attr
 
 .la_try_dict:
-    ; No tp_getattr - try obj's type's tp_dict directly
+    ; No tp_getattr, or it found nothing: walk the MRO's tp_dicts.  Reading only
+    ; the exact type's hid everything object supplies -- `[].__len__` and
+    ; `None.__new__` among them.
     mov rdi, [rbp - LA_OBJ]
     mov rax, [rdi + PyObject.ob_type]
-    mov rax, [rax + PyTypeObject.tp_dict]
+    mov [rbp - LA_WALK], rax
+.la_dict_loop:
+    mov rax, [rbp - LA_WALK]
     test rax, rax
     jz .la_attr_error
-
-    ; dict_get(type->tp_dict, name)
+    mov rax, [rax + PyTypeObject.tp_dict]
+    test rax, rax
+    jz .la_dict_next
     mov rdi, rax
     mov rsi, [rbp - LA_NAME]
     call dict_get
     V_UNPACK rax, rdx           ; dict_get returns a Value
     test edx, edx
-    jz .la_attr_error
+    jnz .la_dict_found
+.la_dict_next:
+    mov rdi, [rbp - LA_OBJ]
+    mov rcx, [rdi + PyObject.ob_type]
+    mov rax, [rbp - LA_WALK]
+    MRO_NEXT rax, rcx
+    mov [rbp - LA_WALK], rax
+    jmp .la_dict_loop
+.la_dict_found:
 
     ; INCREF the result (dict_get returns borrowed ref — may be SmallInt)
     mov [rbp - LA_ATTR], rax
@@ -1372,6 +1400,7 @@ GA_CLASS    equ 48
 GA_TYPE     equ 56
 GA_SAVE     equ 64
 GA_SAVETAG  equ 72
+GA_WALK     equ 80          ; the MRO cursor
 GA_FRAME    equ 88          ; + 1 push = 96
 DEF_FUNC obj_getattr_opt, GA_FRAME
     push rbx
@@ -1418,16 +1447,31 @@ DEF_FUNC obj_getattr_opt, GA_FRAME
     ret
 
 .ga_type_dict:
+    ; Walk the MRO, not just the exact type.  Stopping at the first tp_dict
+    ; made everything object supplies invisible from an instance: `None.__new__`
+    ; raised while `object.__new__` was fine, because only lookups on a TYPE
+    ; walked.
     mov rax, [rbp - GA_TYPE]
-    mov rax, [rax + PyTypeObject.tp_dict]
+    mov [rbp - GA_WALK], rax
+.ga_mro_loop:
+    mov rax, [rbp - GA_WALK]
     test rax, rax
     jz .ga_generic
+    mov rax, [rax + PyTypeObject.tp_dict]
+    test rax, rax
+    jz .ga_mro_next
     mov rdi, rax
     mov rsi, [rbp - GA_NAME]
     call dict_get
     V_UNPACK rax, rdx
     test edx, edx
-    jz .ga_generic
+    jnz .ga_from_type
+.ga_mro_next:
+    mov rax, [rbp - GA_WALK]
+    MRO_NEXT rax, [rbp - GA_TYPE]
+    mov [rbp - GA_WALK], rax
+    jmp .ga_mro_loop
+.ga_from_type:
     mov [rbp - GA_ATTR], rax
     mov [rbp - GA_ATTRTAG], rdx
     INCREF_VAL rax, rdx

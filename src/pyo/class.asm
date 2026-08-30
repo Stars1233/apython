@@ -29,6 +29,7 @@ extern exc_TypeError_type
 extern func_type
 extern type_type
 extern tuple_type_call
+extern kw_names_pending
 extern ap_memcpy
 extern eval_exception_unwind
 extern none_singleton
@@ -1074,6 +1075,11 @@ END_FUNC instance_str
 ; Local frame offsets for .normal_type_call (rbp-relative, after 5 pushes + sub rsp, 24)
 TC_NEW_FUNC equ 48              ; [rbp - 48]: saved __new__ func pointer
 TC_NEW_TAG  equ 56              ; [rbp - 56]: saved __new__ result tag
+; The keywords this call was made with.  __new__ consumes kw_names_pending, so
+; __init__ has to be handed it again -- otherwise `M(name, bases, ns, **kwds)`
+; reaches __init__ with the keyword values as extra positional arguments, and
+; that is how a metaclass with class keywords fails.
+TC_KWNAMES  equ 64
 
 DEF_FUNC type_call
     ; Special case: type(x) with 1 arg when calling type itself
@@ -1228,7 +1234,9 @@ DEF_FUNC type_call
     push r13
     push r14
     push r15
-    sub rsp, 24                 ; 16 bytes local + 8 align (5 pushes + rbp = 48, +24 = 72 -> rsp 16-aligned)
+    sub rsp, 40                 ; locals + align (5 pushes + rbp = 48, +40 = 88)
+    mov rax, [rel kw_names_pending]
+    mov [rbp - TC_KWNAMES], rax
     mov qword [rbp - TC_NEW_TAG], TAG_PTR  ; default return tag
 
     mov rbx, rdi                ; rbx = type
@@ -1489,12 +1497,30 @@ DEF_FUNC type_call
     mov rax, [rax + PyTypeObject.tp_call]
     test rax, rax
     jz .init_not_callable
+    mov r11, rax                        ; tp_call, kept across the check below
 
-    ; Call tp_call(__init_func, args_with_instance, nargs+1)
+    ; Call tp_call(__init_func, args_with_instance, nargs+1), with the same
+    ; keywords the class was called with: __new__ has consumed them by now.
+    ;
+    ; The keywords the class was called with: __new__ has consumed
+    ; kw_names_pending by now, and without handing them back a metaclass's
+    ; __init__ sees the keyword VALUES as extra positional arguments.
+    ;
+    ; Only a Python-level __init__ gets them, and a builtin one is left exactly
+    ; as it was -- not even cleared.  `L(sequence=())` reaches list's
+    ; constructor as its __init__ and is rejected by it, which is where that
+    ; TypeError comes from.
+    mov rax, [rbx + PyObject.ob_type]
+    lea rdx, [rel func_type]
+    cmp rax, rdx
+    jne .init_no_kw
+    mov rcx, [rbp - TC_KWNAMES]
+    mov [rel kw_names_pending], rcx     ; func_call clears it again
+.init_no_kw:
     mov rdi, rbx                ; callable = __init__ func
     mov rsi, r15                ; args ptr
     lea rdx, [r13 + 1]          ; nargs + 1
-    call rax
+    call r11
     V_UNPACK rax, rdx           ; tp_call returns a Value
 
     ; DECREF __init__'s return value (should be None — TAG_NONE, not a pointer)
@@ -1511,7 +1537,7 @@ DEF_FUNC type_call
     mov rax, r14
     mov rdx, [rbp - TC_NEW_TAG]
 
-    add rsp, 24                 ; undo alignment
+    add rsp, 40                 ; undo the locals; must match the sub above
     pop r15
     pop r14
     pop r13
@@ -1579,7 +1605,7 @@ DEF_FUNC type_call
 .exc_sub_no_init:
     mov rax, r14
     mov edx, TAG_PTR
-    add rsp, 24                 ; undo alignment
+    add rsp, 40                 ; undo the locals; must match the sub above
     pop r15
     pop r14
     pop r13
@@ -1639,7 +1665,7 @@ DEF_FUNC type_call
 .int_sub_done:
     mov edx, TAG_PTR            ; subclass instance is always a heap ptr
 .int_sub_epilogue:
-    add rsp, 24                 ; undo alignment
+    add rsp, 40                 ; undo the locals; must match the sub above
     pop r15
     pop r14
     pop r13

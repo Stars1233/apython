@@ -63,6 +63,7 @@ test_dict_numkey
 test_dict_ops
 test_dict_order
 test_dicts
+test_dict_update_mapping
 test_dict_views
 test_dunder_protocols
 test_dunders
@@ -117,6 +118,7 @@ test_match_class
 test_match_mapping_types
 test_match
 test_membership
+test_metaclass_prepare
 test_metaclass
 test_methods
 test_misc_ops
@@ -179,6 +181,7 @@ test_str_methods_extra
 test_str_methods_fix
 test_str_mod_subclass
 test_str_predicates
+test_subclass_item_slots
 test_super_descriptors
 test_syntax_error_location
 test_sys_exit
