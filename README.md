@@ -4,7 +4,7 @@ A Python 3.12 bytecode interpreter in x86-64 NASM assembly, exploring the fastes
 
 ## What is this?
 
-apython reads `.pyc` files and executes Python 3.12 bytecode directly — no CPython, no JIT, no interpreter overhead layers. The entire interpreter is **~86,000 lines of x86-64 assembly**, from the eval loop to the type system to the garbage collector to async I/O. It implements 27+ types, 126 opcode handlers, generators, async/await, multiple inheritance with a C3 MRO, pattern matching, real tracebacks, a regex engine, cycle-collecting GC, and a pure-assembly asyncio event loop.
+apython reads `.pyc` files and executes Python 3.12 bytecode directly — no CPython, no JIT, no interpreter overhead layers. The entire interpreter is **~86,000 lines of x86-64 assembly**, from the eval loop to the type system to the garbage collector to async I/O. It implements 27+ types, 126 opcode handlers, generators, async/await, multiple inheritance with a C3 MRO, metaclasses, abstract base classes, weak references, pattern matching, real tracebacks, a regex engine, cycle-collecting GC, and a pure-assembly asyncio event loop.  Strings hold UTF-8 and count themselves in code points.
 
 ## Key design choices
 
@@ -112,6 +112,14 @@ Missing: `IOError` / `EnvironmentError` (the OSError aliases),
 - Extended slicing (`a[1:10:2]`, `a[::-1]`)
 - `from module import *`
 - Multiple inheritance with a C3 MRO (`__mro__`, `__bases__`), cooperative `super()`
+- Metaclasses: `metaclass=`, an inherited metatype, `type.__new__`,
+  `__instancecheck__` / `__subclasscheck__`
+- Abstract base classes, on a native `_abc`: `abstractmethod`, virtual
+  subclass registration, `__subclasshook__`
+- Weak references and proxies, with callbacks
+- Unicode strings: UTF-8 storage, code-point indexing, slicing, iteration and
+  widths; utf-8 / ascii / latin-1 codecs
+- Relative imports (`from . import x`, `from ..pkg import y`)
 - Real tracebacks: per-frame line numbers decoded from the PEP 626 location
   table, source lines, repeated-frame elision, and the `__cause__` /
   `__context__` chain
@@ -120,17 +128,32 @@ Missing: `IOError` / `EnvironmentError` (the OSError aliases),
 
 | Module | Description |
 |--------|-------------|
-| sys | argv, exit (raises `SystemExit`), version, version_info, path, modules, stdin/stdout/stderr, exc_info, maxsize, platform, byteorder, executable, prefix, getrecursionlimit/setrecursionlimit, get/set_int_max_str_digits |
+| sys | argv, exit (raises `SystemExit`), version, version_info, path, modules, stdin/stdout/stderr, exc_info, maxsize, platform, byteorder, executable, prefix, implementation, builtin_module_names, warnoptions, intern, getrecursionlimit/setrecursionlimit, get/set_int_max_str_digits |
+| _abc | The ABC accelerator abc.py is built on: get_cache_token, _abc_init, _abc_register, _abc_instancecheck, _abc_subclasscheck, _get_dump, _reset_registry, _reset_caches |
+| _weakref | Real weak references: ref (subclassable, with callbacks), proxy, getweakrefcount, getweakrefs, _remove_dead_weakref |
 | asyncio | Event loop with io_uring backend, coroutine runner, TCP streams (open_connection, start_server), sleep, gather |
-| _sre | SRE regex engine — compile, and the pattern methods match, fullmatch, search, findall, finditer, sub, subn, split.  The `re` wrapper module is not shipped, so CPython's own `re` is what an `import re` finds, and it needs `enum` and `types`, which do not exist here |
+| _sre | SRE regex engine — compile, and the pattern methods match, fullmatch, search, findall, finditer, sub, subn, split.  The `re` wrapper module is not shipped, so CPython's own `re` is what an `import re` finds, and that needs a real `eval()` by way of `collections.namedtuple` |
 | time | monotonic, process_time.  `time.time` and `time.sleep` are not implemented; `asyncio.sleep` is |
 | itertools | chain, cycle, islice, count, repeat, product, starmap, accumulate.  zip_longest, permutations, combinations, takewhile, dropwhile, filterfalse, groupby, tee and pairwise are not implemented |
 | unittest | Pure Python test framework (TestCase, assertions, test runner) |
 | warnings | warn, simplefilter |
 
-Pure-Python modules shipped in `lib/` and importable as they are: `abc`,
-`collections`, `contextlib`, `copy`, `functools`, `io`, `operator`, `pickle`,
-`string`.
+Pure-Python modules shipped in `lib/` and importable as they are: `abc` (CPython's
+own, on the native `_abc`), `_codecs`, `_thread`, `collections`, `contextlib`,
+`copy`, `functools`, `io`, `itertools`, `operator`, `pickle`, `string`,
+`unittest`, `warnings`.  They are found relative to the interpreter binary and
+sit at the end of `sys.path`, so a real stdlib named by `PYTHONPATH` wins:
+these stand in for CPython's C modules, not for its Python ones.
+
+### How much of CPython's standard library imports
+
+`make check-stdlib` imports all 196 modules of a CPython 3.12 `Lib/` in a
+fresh process each and compares the result against `tests/stdlib_floor.txt`,
+which records the set that works.  It is a ratchet: a module that imported and
+no longer does fails the target.  Point `$CPYTHON_LIB` at a source checkout;
+the target skips cleanly when there is not one.
+
+`bugs.md` records what the rest fail on, with counts.
 
 ### Garbage collection
 
@@ -138,22 +161,25 @@ Pure-Python modules shipped in `lib/` and importable as they are: `abc`,
 
 ## Test suite
 
-**149 test files** covering arithmetic, strings, lists, dicts, tuples, sets,
+**161 test files** covering arithmetic, strings, lists, dicts, tuples, sets,
 booleans, None, bytes, floats, comparisons, control flow, functions,
 recursion, for-loops, while-loops, range, classes, inheritance, multiple
 inheritance, generators, async/await, closures, decorators, comprehensions,
 f-strings, exceptions, tracebacks, pattern matching, slicing,
-`*args`/`**kwargs`, `with` statements, imports, itertools, the NaN-boxed value
-encoding, and more.  Each is run against CPython 3.12 and the outputs
-diffed, so CPython is the oracle; the async tests run three times, once per
-I/O backend, for 168 results in all.
+`*args`/`**kwargs`, `with` statements, imports, relative imports, itertools,
+metaclasses, abstract base classes, weak references, Unicode, the codecs, the
+cycle collector across generations, the NaN-boxed value encoding, and more.
+Each is run against CPython 3.12 and the outputs diffed, so CPython is the
+oracle; the async tests run three times, once per I/O backend, for 180
+results in all.
 
 **64 CPython standard-library test files** under `tests/cpython/`, all
 enforced — a failure in any of them fails the target.
 
 ```bash
-make check                  # 149 test files, diffed against python3
+make check                  # test files, diffed against python3
 make check-cpython          # 64 CPython stdlib test files
+make check-stdlib           # how much of a CPython Lib/ imports (a ratchet)
 ./apython --selftest-value  # Value encode/decode boundaries
 make INT_STRESS=1 && bash tests/run_tests.sh   # every |n| >= 8 boxed on the heap
 ```
@@ -208,7 +234,8 @@ src/
     func.asm class.asm code.asm module.asm cell.asm
     iter.asm generator.asm exception.asm exc_group.asm fileobj.asm
     descriptors.asm sre_match.asm sre_pattern.asm
-    sysmod.asm asyncmod.asm timemod.asm
+    sysmod.asm asyncmod.asm timemod.asm abcmod.asm weakrefmod.asm
+    namespace.asm
     eventloop.asm eventloop_poll.asm eventloop_iouring.asm
     asyncio_streams.asm
   lib/                  Syscall wrappers, string/memory ops
@@ -220,7 +247,7 @@ lib/                    Pure Python support modules
   collections/          namedtuple, defaultdict, Counter, OrderedDict
   unittest/             Test framework (case.py, runner.py, mock.py)
   test/                 CPython test support infrastructure
-tests/                  149 test files
+tests/                  161 test files
   cpython/              64 CPython standard-library test files
   expected/             recorded transcripts for the two tests CPython cannot serve as an oracle for
 ```
