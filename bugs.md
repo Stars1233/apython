@@ -217,6 +217,11 @@ the Makefile and `check-cpython` enforces all 64 files.
 
 ### Known, not fixed
 
+- `bytes()` and `bytearray()` accept only an existing bytes object: the
+  no-argument, integer-count and iterable-of-ints forms all raise TypeError.
+  `bytearray` is also not subscriptable -- it has `sq_length` but no
+  `sq_item` and no `tp_as_mapping` -- so `b[0]`, `b[1:]` and
+  `reversed(bytearray(...))` raise.
 - A heaptype's layout base is the widest of its bases, not CPython's solid
   base.  `class C(A, B)` where A and B are unrelated builtin subclasses of
   different layouts is accepted and laid out as the wider one, where CPython
