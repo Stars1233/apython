@@ -1220,6 +1220,36 @@ DEF_FUNC type_call
     mov r13d, edx               ; r13d = nargs
     movsxd r13, r13d            ; sign-extend to 64 bits
 
+    ; An abstract class refuses to be instantiated.  __abstractmethods__ is
+    ; the set ABCMeta leaves on the class; a non-empty one is the whole test,
+    ; and it lives in the class's own dict, never inherited -- a concrete
+    ; subclass gets an empty set of its own.
+    mov rax, [rbx + PyTypeObject.tp_dict]
+    test rax, rax
+    jz .tc_not_abstract
+    push rax
+    lea rdi, [rel tc_abstract_name]
+    call str_from_cstr_heap
+    mov rcx, rax
+    pop rdi
+    push rcx
+    mov rsi, rcx
+    call dict_get
+    pop rdi
+    push rax
+    call obj_decref
+    pop rax
+    test rax, rax
+    jz .tc_not_abstract
+    V_TEST_PTR rax, rcx
+    ja .tc_not_abstract
+    cmp qword [rax + PyDictObject.ob_size], 0
+    je .tc_not_abstract
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "Can't instantiate abstract class with abstract methods"
+    call raise_exception
+.tc_not_abstract:
+
     ; Check if this type inherits from an exception type
     extern type_is_exc_subclass
     mov rdi, rbx
@@ -1639,7 +1669,8 @@ END_FUNC type_call
 ;; ============================================================================
 extern tuple_new
 TGA_ORIGIN equ 8            ; the type the MRO walk started from
-TGA_FRAME  equ 16
+TGA_META   equ 16           ; its metatype, for the second walk
+TGA_FRAME  equ 32
 DEF_FUNC type_getattr, TGA_FRAME
     push rbx
     push r12
@@ -1843,6 +1874,71 @@ DEF_FUNC type_getattr, TGA_FRAME
     ret
 
 .tga_not_found:
+    ; Then the metatype's own MRO.  A metaclass's methods are attributes of
+    ; the classes it makes, bound to the class the way an ordinary class's
+    ; methods bind to its instances -- `ByteString.register` is ABCMeta's,
+    ; two links up the metatype chain.  Only a user metaclass is walked: the
+    ; three builtin metatypes hold entries meant for `type` itself, and
+    ; offering those on every class would shadow what a class inherits from
+    ; object.
+    mov r12, [rbp - TGA_ORIGIN]
+    mov r12, [r12 + PyObject.ob_type]
+    test r12, r12
+    jz .tga_really_not_found
+    lea rax, [rel type_type]
+    cmp r12, rax
+    je .tga_really_not_found
+    lea rax, [rel user_type_metatype]
+    cmp r12, rax
+    je .tga_really_not_found
+    extern exc_metatype
+    lea rax, [rel exc_metatype]
+    cmp r12, rax
+    je .tga_really_not_found
+    mov [rbp - TGA_META], r12
+
+.tga_meta_walk:
+    mov rdi, [r12 + PyTypeObject.tp_dict]
+    test rdi, rdi
+    jz .tga_meta_next
+    mov rsi, rbx
+    call dict_get
+    V_UNPACK rax, rdx
+    test edx, edx
+    jnz .tga_meta_found
+.tga_meta_next:
+    MRO_NEXT r12, [rbp - TGA_META]
+    test r12, r12
+    jnz .tga_meta_walk
+    jmp .tga_really_not_found
+
+.tga_meta_found:
+    cmp edx, TAG_PTR
+    jne .tga_meta_plain
+    mov rcx, [rax + PyObject.ob_type]
+    lea rdx, [rel func_type]
+    cmp rcx, rdx
+    jne .tga_meta_plain
+    mov rdi, rax
+    mov rsi, [rbp - TGA_ORIGIN]
+    call method_new
+    mov edx, TAG_PTR
+    pop r12
+    pop rbx
+    leave
+    V_PACK rax, rdx
+    ret
+.tga_meta_plain:
+    mov r12, rdx
+    INCREF_VAL rax, rdx
+    mov rdx, r12
+    pop r12
+    pop rbx
+    leave
+    V_PACK rax, rdx
+    ret
+
+.tga_really_not_found:
     RET_NULL
     pop r12
     pop rbx
@@ -1989,6 +2085,132 @@ DEF_FUNC method_getattr
     ret
 END_FUNC method_getattr
 
+
+;; ============================================================================
+;; method_repr(PyMethodObject *self) -> str
+;; "<bound method Qual of <self repr>>".  Bound methods had no tp_repr at all,
+;; so printing one produced nothing printable.
+;; ============================================================================
+MR_SELF  equ 8
+MR_LEN   equ 16
+MR_BUF   equ 1048
+MR_FRAME equ 1056
+DEF_FUNC method_repr, MR_FRAME
+    push rbx
+    push r12
+    mov [rbp - MR_SELF], rdi
+    lea rbx, [rbp - MR_BUF]
+    xor r12d, r12d
+
+    CSTRING rsi, "<bound method "
+.mr_pre:
+    movzx eax, byte [rsi]
+    test al, al
+    jz .mr_qual
+    inc rsi
+    mov [rbx + r12], al
+    inc r12
+    jmp .mr_pre
+
+.mr_qual:
+    ; the function's __qualname__, or its __name__ if it has none
+    mov rax, [rbp - MR_SELF]
+    mov rax, [rax + PyMethodObject.im_func]
+    test rax, rax
+    jz .mr_of
+    ; A qualified name is what CPython shows; the code object carries one,
+    ; and a builtin has only its own name field.
+    mov rcx, [rax + PyObject.ob_type]
+    lea rdx, [rel func_type]
+    cmp rcx, rdx
+    jne .mr_builtin_name
+    mov rdi, [rax + PyFuncObject.func_code]
+    test rdi, rdi
+    jz .mr_of
+    mov rdi, [rdi + PyCodeObject.co_qualname]
+    test rdi, rdi
+    jnz .mr_copy_name
+    mov rax, [rbp - MR_SELF]
+    mov rax, [rax + PyMethodObject.im_func]
+    mov rdi, [rax + PyFuncObject.func_name]
+    test rdi, rdi
+    jz .mr_of
+    jmp .mr_copy_name
+.mr_builtin_name:
+    mov rdi, [rax + PyBuiltinObject.func_name]
+    test rdi, rdi
+    jz .mr_of
+.mr_copy_name:
+    mov rcx, [rdi + PyStrObject.ob_size]
+    lea rsi, [rdi + PyStrObject.data]
+    xor edx, edx
+.mr_name_loop:
+    cmp rdx, rcx
+    jge .mr_of
+    cmp r12, MR_BUF - 64
+    jae .mr_of
+    movzx eax, byte [rsi + rdx]
+    mov [rbx + r12], al
+    inc r12
+    inc rdx
+    jmp .mr_name_loop
+
+.mr_of:
+    CSTRING rsi, " of "
+.mr_of_loop:
+    movzx eax, byte [rsi]
+    test al, al
+    jz .mr_self_repr
+    inc rsi
+    mov [rbx + r12], al
+    inc r12
+    jmp .mr_of_loop
+
+.mr_self_repr:
+    mov rax, [rbp - MR_SELF]
+    mov rdi, [rax + PyMethodObject.im_self]
+    test rdi, rdi
+    jz .mr_close
+    mov [rbp - MR_LEN], r12
+    extern obj_repr
+    call obj_repr
+    V_UNPACK rax, rdx
+    test rax, rax
+    jz .mr_close
+    mov r12, [rbp - MR_LEN]
+    mov rcx, [rax + PyStrObject.ob_size]
+    lea rsi, [rax + PyStrObject.data]
+    xor edx, edx
+.mr_self_loop:
+    cmp rdx, rcx
+    jge .mr_self_done
+    cmp r12, MR_BUF - 8
+    jae .mr_self_done
+    push rax
+    movzx eax, byte [rsi + rdx]
+    mov [rbx + r12], al
+    pop rax
+    inc r12
+    inc rdx
+    jmp .mr_self_loop
+.mr_self_done:
+    mov rdi, rax
+    call obj_decref
+
+.mr_close:
+    mov byte [rbx + r12], '>'
+    inc r12
+    mov rdi, rbx
+    mov rsi, r12
+    extern str_new_heap
+    call str_new_heap
+    mov edx, TAG_PTR
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC method_repr
+
 ;; ============================================================================
 ;; object_type_call(args, nargs) -> PyObject*
 ;; object() returns a bare instance of object_type
@@ -2094,6 +2316,7 @@ section .data
 
 instance_repr_cstr: db "<instance>", 0
 init_name_cstr:     db "__init__", 0
+tc_abstract_name: db "__abstractmethods__", 0
 new_name_cstr:      db "__new__", 0
 tga_name_str:       db "__name__", 0
 method_name_str:    db "method", 0
@@ -2190,8 +2413,8 @@ method_type:
     dq method_name_str          ; tp_name
     dq PyMethodObject_size      ; tp_basicsize
     dq method_dealloc           ; tp_dealloc
-    dq 0                        ; tp_repr
-    dq 0                        ; tp_str
+    dq method_repr              ; tp_repr
+    dq method_repr              ; tp_str
     dq 0                        ; tp_hash
     dq method_call              ; tp_call
     dq method_getattr           ; tp_getattr

@@ -1668,6 +1668,50 @@ TFP_BASES equ 56            ; the bases tuple, or NULL
     ; tp_dict = class_dict (ownership transferred from r15, no INCREF needed)
     mov [r12 + PyTypeObject.tp_dict], r15
 
+    ; __new__ is an implicit staticmethod.  Without the wrapper, looking it up
+    ; through the class or through super() binds it like an ordinary method
+    ; and prepends the instance, so `super().__new__(cls, *args)` arrived one
+    ; argument too long -- which is exactly how every metaclass in the stdlib
+    ; calls it.
+    lea rdi, [rel bc_new_name]
+    call str_from_cstr_heap
+    push rax
+    mov rdi, r15
+    mov rsi, rax
+    call dict_get
+    mov rbx, rax                ; the current __new__, as a Value
+    V_TEST_PTR rbx, rax
+    ja .tfp_new_done
+    test rbx, rbx
+    jz .tfp_new_done
+    mov rax, [rbx + PyObject.ob_type]
+    extern func_type
+    lea rcx, [rel func_type]
+    cmp rax, rcx
+    jne .tfp_new_done
+    sub rsp, 16
+    mov [rsp], rbx
+    extern staticmethod_type
+    extern staticmethod_construct
+    lea rdi, [rel staticmethod_type]
+    mov rsi, rsp
+    mov edx, 1
+    call staticmethod_construct
+    V_UNPACK rax, rdx
+    add rsp, 16
+    test rax, rax
+    jz .tfp_new_done
+    mov rbx, rax
+    mov rdi, r15
+    mov rsi, [rsp]              ; the "__new__" key
+    mov rdx, rbx
+    call dict_set
+    mov rdi, rbx
+    call obj_decref             ; the dict holds it now
+.tfp_new_done:
+    pop rdi
+    call obj_decref             ; the key
+
     ; A class statement's body sets __module__ itself; three-argument type()
     ; hands over a bare namespace, and without __module__ the repr comes out
     ; unqualified.  Fill it from the running frame's __name__, as CPython does.
@@ -2588,8 +2632,11 @@ DEF_FUNC builtins_init
 
     mov rdi, rbx
     lea rsi, [rel bi_name_range]
-    lea rdx, [rel builtin_range]
-    call add_builtin
+    extern range_obj_type
+    extern range_type_call
+    lea rdx, [rel range_obj_type]
+    lea rcx, [rel range_type_call]
+    call add_builtin_type
 
     mov rdi, rbx
     lea rsi, [rel bi_name_type]
@@ -2747,23 +2794,35 @@ DEF_FUNC builtins_init
 
     mov rdi, rbx
     lea rsi, [rel bi_name_zip]
-    lea rdx, [rel builtin_zip]
-    call add_builtin
+    extern zip_iter_type
+    extern zip_type_call
+    lea rdx, [rel zip_iter_type]
+    lea rcx, [rel zip_type_call]
+    call add_builtin_type
 
     mov rdi, rbx
     lea rsi, [rel bi_name_map]
-    lea rdx, [rel builtin_map]
-    call add_builtin
+    extern map_iter_type
+    extern map_type_call
+    lea rdx, [rel map_iter_type]
+    lea rcx, [rel map_type_call]
+    call add_builtin_type
 
     mov rdi, rbx
     lea rsi, [rel bi_name_filter]
-    lea rdx, [rel builtin_filter]
-    call add_builtin
+    extern filter_iter_type
+    extern filter_type_call
+    lea rdx, [rel filter_iter_type]
+    lea rcx, [rel filter_type_call]
+    call add_builtin_type
 
     mov rdi, rbx
     lea rsi, [rel bi_name_reversed]
-    lea rdx, [rel builtin_reversed]
-    call add_builtin
+    extern reversed_iter_type
+    extern reversed_type_call
+    lea rdx, [rel reversed_iter_type]
+    lea rcx, [rel reversed_type_call]
+    call add_builtin_type
 
     mov rdi, rbx
     lea rsi, [rel bi_name_sorted]
@@ -3385,6 +3444,7 @@ section .rodata
 bi_name_breakpoint:   db "breakpoint", 0
 bi_name_print:        db "print", 0
 bi_name_len:          db "len", 0
+bc_new_name:          db "__new__", 0
 bi_name_range:        db "range", 0
 bi_name_type:         db "type", 0
 bi_name_isinstance:   db "isinstance", 0

@@ -24,11 +24,26 @@ one-line fix.
   where CPython gives `dict_keys(['a'])`; the same for `.values()` and
   `.items()`.
 
-- **`bytes()` and `bytearray()` accept only an existing bytes object.**  The
-  no-argument, integer-count and iterable-of-ints forms all raise TypeError.
-  `bytearray` is also not subscriptable -- it has `sq_length` but no
-  `sq_item` and no `tp_as_mapping` -- so `b[0]`, `b[1:]` and
-  `reversed(bytearray(...))` raise.
+- **`bytearray` is not subscriptable.**  It has `sq_length` but no `sq_item`
+  and no `tp_as_mapping`, so `b[0]`, `b[1:]` and `reversed(bytearray(...))`
+  raise.  It is iterable, and the constructors take every form CPython's do.
+
+- **The `_abc` registry and caches hold strong references.**  CPython uses
+  weak ones, so a class registered against an ABC can be collected and the
+  ABC's caches shrink; here a registered class lives as long as the ABC.
+  Registries are process-lifetime and small in practice.  Revisit if
+  `_weakref` lands.
+
+- **`_abc_subclasscheck` does not recurse into `cls.__subclasses__()`.**
+  CPython's step 6 finds a registration made on a *subclass* of the ABC;
+  types keep no subclass list here, so `issubclass(X, ABC)` is False when X
+  was registered against a subclass of ABC rather than against ABC itself.
+  Direct registration and real inheritance both work.
+
+- **`_abc_instancecheck` does not honour a spoofed `__class__`.**  CPython
+  checks both `instance.__class__` and `type(instance)`; this checks only the
+  type, so an object that lies about its class -- a mock, mostly -- is judged
+  by what it really is.
 
 - **A `str` subclass has no instance `__dict__`.**  A str keeps its
   characters inline, so there is no fixed offset past the header to put one
