@@ -36,6 +36,7 @@ extern ast_obj
 extern cg_nameop
 extern cg_unwind_finallys
 extern cg_s_asyncfor
+extern cg_s_match
 extern cg_s_classdef
 extern cg_s_decorated
 extern cg_s_try
@@ -1992,7 +1993,7 @@ cg_stmt_table:
     dq 0                ; 67 AST_WITHITEM
     dq 0                ; 68 AST_ARGUMENTS
     dq 0                ; 69 AST_ARG
-    dq 0                ; 70 AST_MATCH
+    dq cg_s_match       ; 70 AST_MATCH
     dq 0                ; 71 AST_EXTRA
     dq cg_s_decorated   ; 72 AST_DECORATED
     dq 0                ; 73 

@@ -2840,15 +2840,22 @@ DEF_FUNC_BARE op_match_mapping
     V_TEST_PTR rdi, rax
     ja .mm_false                   ; an immediate is not a mapping
     mov rax, [rdi + PyObject.ob_type]
-    ; Check if it's a dict or has tp_as_mapping with mp_subscript
     lea rcx, [rel dict_type]
     cmp rax, rcx
     je .mm_true
-    mov rax, [rax + PyTypeObject.tp_as_mapping]
-    test rax, rax
-    jz .mm_false
-    mov rax, [rax + PyMappingMethods.mp_subscript]
-    test rax, rax
+
+    ; Having mp_subscript is not enough: a list has one, so a list answered
+    ; yes here and MATCH_KEYS then looked keys up in it and crashed.  CPython
+    ; asks a type flag only real mappings carry; the nearest thing available is
+    ; dict and its subclasses, so anything else that is subscriptable is
+    ; rejected -- the same shape as MATCH_SEQUENCE excluding dict on its side.
+    push rdi
+    mov rdi, rax
+    lea rsi, [rel dict_type]
+    extern type_is_subtype
+    call type_is_subtype
+    pop rdi
+    test eax, eax
     jz .mm_false
 .mm_true:
     lea rax, [rel bool_true]

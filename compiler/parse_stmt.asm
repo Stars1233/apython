@@ -36,6 +36,8 @@ extern par_finish_list
 extern par_kind
 extern par_peek
 extern par_syntax_error
+extern par_looks_like_match
+extern ps_match
 extern in_call_public
 
 extern exc_SyntaxError_type
@@ -162,6 +164,20 @@ DEF_FUNC par_statement, 8
     push rbx
     mov rbx, rdi
     call par_kind
+    ; `match` is a soft keyword, so it arrives as a NAME and cannot be in
+    ; stmt_table: only its context tells it from a variable of the same name.
+    cmp eax, TOK_NAME
+    jne .not_soft
+    mov rdi, rbx
+    call par_looks_like_match
+    test eax, eax
+    jz .as_expr
+    mov rdi, rbx
+    call ps_match
+    pop rbx
+    leave
+    ret
+.not_soft:
     cmp eax, TOK_COUNT
     jae .as_expr
     lea rcx, [rel stmt_table]
@@ -1257,6 +1273,14 @@ DEF_FUNC par_statement_any, 8
     je .compound
     cmp eax, TOK_ASYNC
     je .compound
+    ; `match` is a soft keyword: an ordinary name everywhere but here.
+    cmp eax, TOK_NAME
+    jne .simple
+    mov rdi, rbx
+    call par_looks_like_match
+    test eax, eax
+    jnz .compound
+.simple:
     mov rdi, rbx
     call par_simple_stmts
     pop rbx

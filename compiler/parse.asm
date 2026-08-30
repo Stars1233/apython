@@ -64,24 +64,7 @@ extern exc_SyntaxError_type
 ;; Binding powers, in steps of two so that a right-associative operator is
 ;; simply "recurse at lbp - 1" and there is still room between levels.
 ;; ---------------------------------------------------------------------------
-BP_NONE     equ 0
-BP_LAMBDA   equ 2
-BP_WALRUS   equ 3
-BP_TERNARY  equ 4
-BP_OR       equ 6
-BP_AND      equ 8
-BP_NOT      equ 10
-BP_COMPARE  equ 12
-BP_BITOR    equ 14
-BP_BITXOR   equ 16
-BP_BITAND   equ 18
-BP_SHIFT    equ 20
-BP_ARITH    equ 22
-BP_TERM     equ 24
-BP_UNARY    equ 26
-BP_POWER    equ 28
-BP_AWAIT    equ 30
-BP_POSTFIX  equ 32
+; The binding powers live in compiler.inc: pattern.asm needs them too.
 
 ; PRule.flags
 PR_CHAIN    equ 0x01     ; a comparison operator: folds into one n-ary node

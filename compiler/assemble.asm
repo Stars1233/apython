@@ -1007,6 +1007,15 @@ DEF_FUNC asm_assemble, AA_FRAME
     dec ecx
     jnz .zero
 
+    ; Every jump's label must have been bound.  An unbound one holds -1, which
+    ; the resolver reads as an unsigned value past the end of the stream and
+    ; quietly turns into a jump off the end -- the failure then looks like a
+    ; corrupt instruction stream somewhere unrelated.
+    mov rdi, r12
+    call asm_check_labels
+    test eax, eax
+    jz .bad_jump
+
     ; --- pass 1: offsets and EXTENDED_ARG prefixes ---
     mov rdi, r12
     call asm_resolve
@@ -1678,5 +1687,52 @@ END_FUNC asm_debug_handlers
 
 section .rodata
 dh_env: db "APYTHON_DUMP_HANDLERS", 0
+
+;; ============================================================================
+;; asm_check_labels(CompUnit *u) -> rax = 1 if every jump target is bound
+;; ============================================================================
+CL_UNIT  equ 8
+CL_I     equ 16
+CL_N     equ 24
+CL_FRAME equ 24           ; + 1 push = 32
+section .text
+DEF_FUNC asm_check_labels, CL_FRAME
+    push rbx
+    mov rbx, rdi
+    mov rax, [rbx + CompUnit.instrs + Buf.len]
+    mov [rbp - CL_N], rax
+    mov qword [rbp - CL_I], 0
+.loop:
+    mov rax, [rbp - CL_I]
+    cmp rax, [rbp - CL_N]
+    jae .ok
+    mov rdx, [rbx + CompUnit.instrs + Buf.data]
+    shl rax, INSTR_SHIFT
+    add rdx, rax
+    ; A jump is exactly an instruction whose oparg is a label id.
+    test byte [rdx + Instr.flags], IF_LABELARG
+    jz .next
+    mov ecx, [rdx + Instr.oparg]
+    mov rax, [rbx + CompUnit.labels + Buf.len]
+    cmp rcx, rax
+    jae .bad
+    mov rax, [rbx + CompUnit.labels + Buf.data]
+    mov eax, [rax + rcx*4]
+    cmp eax, -1
+    je .bad
+.next:
+    inc qword [rbp - CL_I]
+    jmp .loop
+.ok:
+    mov eax, 1
+    pop rbx
+    leave
+    ret
+.bad:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+END_FUNC asm_check_labels
 
 ASM_INIT

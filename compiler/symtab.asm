@@ -352,6 +352,16 @@ DEF_FUNC sym_visit, SV_FRAME
     je .arg
     cmp eax, AST_HANDLER
     je .handler
+    cmp eax, AST_PAT_CAPTURE
+    je .pat_capture
+    cmp eax, AST_PAT_AS
+    je .pat_as
+    cmp eax, AST_PAT_KEYWORD
+    je .pat_keyword
+    cmp eax, AST_PAT_MAPPING
+    je .pat_mapping
+    cmp eax, AST_PAT_VALUE
+    je .children
     cmp eax, AST_COMPARE
     je .compare
     cmp eax, AST_YIELD
@@ -475,6 +485,69 @@ DEF_FUNC sym_visit, SV_FRAME
     mov ecx, DEF_LOCAL | DEF_UNBOUND
     call sym_add
     jmp .children
+
+;; A pattern's names are bindings, not uses: `case x` stores into x.  They live
+;; in .a or .b as OBJECT indices, so the generic walk must not follow them --
+;; the two index spaces collide, and following one lands on an unrelated node.
+.pat_capture:
+    mov rax, [rbp - SV_NPTR]
+    mov ecx, [rax + AstNode.a]
+    test ecx, ecx
+    jz .ok                              ; the `_` wildcard binds nothing
+    jmp .bind_pat_name
+.pat_as:
+    ; .a is the inner pattern (a node), .b the bound name (an object).
+    mov rax, [rbp - SV_NPTR]
+    mov edx, [rax + AstNode.a]
+    test edx, edx
+    jz .as_name
+    mov rdi, rbx
+    mov rsi, r12
+    call sym_visit
+    test eax, eax
+    jz .fail
+.as_name:
+    mov rax, [rbp - SV_NPTR]
+    mov ecx, [rax + AstNode.b]
+    jmp .bind_pat_name
+.pat_keyword:
+    ; .a is the keyword's name (an object); .b is the sub-pattern.
+    mov rax, [rbp - SV_NPTR]
+    mov edx, [rax + AstNode.b]
+    mov rdi, rbx
+    mov rsi, r12
+    call sym_visit
+    jmp .ret
+.pat_mapping:
+    ; .b is the **rest name, an object; the child list is visited as usual.
+    mov rax, [rbp - SV_NPTR]
+    mov ecx, [rax + AstNode.b]
+    test ecx, ecx
+    jz .children
+    push rcx
+    mov rax, [rbp - SV_NPTR]
+    mov ecx, [rax + AstNode.nchild]
+    mov [rbp - SV_N], rcx
+    pop rcx
+    mov esi, ecx
+    mov rdi, rbx
+    call ast_obj_at
+    mov rdx, rax
+    mov rdi, rbx
+    mov rsi, r12
+    mov ecx, DEF_LOCAL
+    call sym_add
+    jmp .children
+.bind_pat_name:
+    mov esi, ecx
+    mov rdi, rbx
+    call ast_obj_at
+    mov rdx, rax
+    mov rdi, rbx
+    mov rsi, r12
+    mov ecx, DEF_LOCAL
+    call sym_add
+    jmp .ok
 
 ;; `def f(...)`: f binds here; the body gets its own scope.
 .funcdef:

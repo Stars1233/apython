@@ -243,7 +243,22 @@ AST_MATCH       equ 70   ; a=subject, clist=cases
 AST_EXTRA       equ 71   ; raw payload continuation for nodes needing >5 slots
 AST_DECORATED   equ 72   ; clist=decorators, a=the def or class they wrap
 
-AST_COUNT       equ 80
+; --- match ---
+; A pattern is not an expression: `case x` binds x rather than reading it, and
+; `case C(a)` calls nothing.  They get their own node kinds for that reason --
+; sharing AST_NAME and AST_CALL would make every consumer ask which it was.
+AST_CASE        equ 73   ; a=pattern b=guard, clist=body
+AST_PAT_VALUE   equ 74   ; a=expr; subkind 1 = compare by identity (None/True/False)
+AST_PAT_CAPTURE equ 75   ; a=obj index (name), 0 for the `_` wildcard
+AST_PAT_SEQUENCE equ 76  ; clist=sub-patterns, b=1+index of the starred one, 0 if none
+AST_PAT_MAPPING equ 77   ; clist=key expr / value pattern pairs, b=obj index of **rest
+AST_PAT_CLASS   equ 78   ; a=class expr, clist=positional then keyword patterns,
+                         ; b=how many are positional
+AST_PAT_KEYWORD equ 79   ; a=obj index (name) b=pattern
+AST_PAT_OR      equ 80   ; clist=alternatives
+AST_PAT_AS      equ 81   ; a=pattern (0 = wildcard) b=obj index (name)
+
+AST_COUNT       equ 88
 
 ; AstNode.subkind for expression context
 CTX_LOAD  equ 0
@@ -378,6 +393,30 @@ CMODE_SINGLE equ 2
 ; frames only, so deeply nested parentheses would otherwise blow the machine
 ; stack before anything noticed.
 COMP_MAX_DEPTH equ 200
+
+;; ===========================================================================
+;; Pratt binding powers.  Higher binds tighter; a handler that recurses at its
+;; own power is left-associative, one below is right-associative.
+;; ===========================================================================
+BP_NONE     equ 0
+BP_LAMBDA   equ 2
+BP_WALRUS   equ 3
+BP_TERNARY  equ 4
+BP_OR       equ 6
+BP_AND      equ 8
+BP_NOT      equ 10
+BP_COMPARE  equ 12
+BP_BITOR    equ 14
+BP_BITXOR   equ 16
+BP_BITAND   equ 18
+BP_SHIFT    equ 20
+BP_ARITH    equ 22
+BP_TERM     equ 24
+BP_UNARY    equ 26
+BP_POWER    equ 28
+BP_AWAIT    equ 30
+BP_POSTFIX  equ 32
+
 
 ;; ===========================================================================
 ;; Lexer state.  One pass over the source fills comp.tokens; the parser then
