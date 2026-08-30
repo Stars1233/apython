@@ -1489,6 +1489,42 @@ DEF_FUNC op_format_value, FV_FRAME
     mov [rbp - FV_VALUE], rdi  ; save value
     mov [rbp - FV_VTAG], rax   ; save value tag
 
+    ; !s / !r / !a apply *before* the format spec.  The conversion used to be
+    ; handled only on the no-spec path, so f"{x!r:>6}" formatted x itself and
+    ; dropped the repr; !a was never handled at all.
+    mov eax, [rbp - FV_ARG]
+    and eax, 3
+    jz .fv_converted
+    test qword [rbp - FV_HASSPEC], 4
+    jz .fv_converted            ; the no-spec path below already converts
+    mov rdi, [rbp - FV_VALUE]
+    mov rsi, [rbp - FV_VTAG]
+    V_PACK rdi, rsi
+    cmp eax, 1
+    je .fv_conv_str
+    extern obj_repr
+    call obj_repr               ; !r and !a: repr, which is ASCII already
+    jmp .fv_conv_done
+.fv_conv_str:
+    extern obj_str
+    call obj_str
+.fv_conv_done:
+    V_UNPACK rax, rdx
+    test edx, edx
+    jz .fv_conv_failed
+    push rax
+    push rdx
+    mov rdi, [rbp - FV_VALUE]
+    mov rsi, [rbp - FV_VTAG]
+    DECREF_VAL rdi, rsi
+    pop rdx
+    pop rax
+    mov [rbp - FV_VALUE], rax
+    mov [rbp - FV_VTAG], rdx
+    ; the converted string formats as a string from here on
+    mov qword [rbp - FV_ARG], 4
+.fv_converted:
+
     ; If format spec present AND value is float, use float_format_spec
     test qword [rbp - FV_HASSPEC], 4
     jz .fv_no_format_spec
@@ -1530,6 +1566,12 @@ DEF_FUNC op_format_value, FV_FRAME
     V_UNPACK rax, rdx
     jmp .fv_have_result
 
+.fv_conv_failed:
+    extern eval_exception_unwind
+    mov [rel eval_saved_r13], r13
+    leave
+    jmp eval_exception_unwind
+
 .fv_type_error:
     lea rdi, [rel exc_TypeError_type]
     CSTRING rsi, "format spec must be str"
@@ -1542,7 +1584,7 @@ DEF_FUNC op_format_value, FV_FRAME
     mov eax, [rbp - FV_ARG]
     and eax, 3
     cmp eax, 2
-    je .fv_repr
+    jge .fv_repr               ; !r and !a both go through repr
     test eax, eax
     jnz .fv_use_str            ; !s asks for str() explicitly
 

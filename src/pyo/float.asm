@@ -68,6 +68,23 @@ DEF_FUNC_BARE float_to_f64
     lea rcx, [rel bool_type]
     cmp rax, rcx
     je .from_gmp_int           ; bool singletons have embedded mpz
+    ; An int subclass wraps its value; unwrap and retry, or 1.0 == MyInt(1)
+    ; came out False.
+    mov rcx, [rax + PyTypeObject.tp_flags]
+    test rcx, TYPE_FLAG_INT_SUBCLASS
+    jz .ret_zero
+    mov edx, esi
+    extern int_unwrap
+    call int_unwrap
+    mov esi, edx
+    cmp esi, TAG_SMALLINT
+    je .from_smallint
+    test rdi, rdi
+    jz .ret_zero
+    mov rax, [rdi + PyObject.ob_type]
+    lea rcx, [rel int_type]
+    cmp rax, rcx
+    je .from_gmp_int
 
     ; Not a number - return 0.0
 .ret_zero:
@@ -907,6 +924,15 @@ DEF_FUNC float_compare, 40
     lea r9, [rel float_type]
     cmp rax, r9
     je .fc_left_ok
+    ; A bool is an int, and float_to_f64 already handles one; only this
+    ; whitelist was missing it, so True < 2.5 raised and 1.0 == True was
+    ; False -- which also put True and 1.0 in different dict slots.
+    lea r9, [rel bool_type]
+    cmp rax, r9
+    je .fc_left_ok
+    mov rax, [rax + PyTypeObject.tp_flags]
+    test rax, TYPE_FLAG_INT_SUBCLASS
+    jnz .fc_left_ok
     jmp .fc_not_impl
 .fc_left_ok:
     ; Right tag
@@ -923,6 +949,12 @@ DEF_FUNC float_compare, 40
     lea r9, [rel float_type]
     cmp rax, r9
     je .fc_right_ok
+    lea r9, [rel bool_type]
+    cmp rax, r9
+    je .fc_right_ok
+    mov rax, [rax + PyTypeObject.tp_flags]
+    test rax, TYPE_FLAG_INT_SUBCLASS
+    jnz .fc_right_ok
     jmp .fc_not_impl
 .fc_right_ok:
     mov [rbp-24], edx          ; save op (4 bytes)

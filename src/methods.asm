@@ -1405,19 +1405,10 @@ DEF_FUNC_LOCAL str_split_impl, SPI_FRAME
 .spi_ws_piece:
     cmp qword [rbp - SPI_MAX], 0
     jne .spi_ws_scan
-    ; out of splits: the rest is one piece, minus trailing whitespace
+    ; Out of splits: the rest is one piece, *including* its trailing
+    ; whitespace.  CPython skips only the whitespace before the remainder --
+    ; ' a b '.split(None, 1) is ['a', 'b '], not ['a', 'b'].
     mov r13, [rbp - SPI_LEN]
-.spi_ws_rtrim:
-    cmp r13, r12
-    jle .spi_ws_emit_last
-    movzx edi, byte [rbx + PyStrObject.data + r13 - 1]
-    xor esi, esi
-    xor edx, edx
-    call strip_char_matches
-    test eax, eax
-    jz .spi_ws_emit_last
-    dec r13
-    jmp .spi_ws_rtrim
 .spi_ws_emit_last:
     mov rsi, r13
     sub rsi, r12
@@ -1471,18 +1462,8 @@ DEF_FUNC_LOCAL str_split_impl, SPI_FRAME
 .spi_wsr_piece:
     cmp qword [rbp - SPI_MAX], 0
     jne .spi_wsr_scan
+    ; Likewise from the other end: ' a b '.rsplit(None, 1) is [' a', 'b'].
     mov r13, 0
-.spi_wsr_ltrim:
-    cmp r13, r12
-    jge .spi_wsr_emit_last
-    movzx edi, byte [rbx + PyStrObject.data + r13]
-    xor esi, esi
-    xor edx, edx
-    call strip_char_matches
-    test eax, eax
-    jz .spi_wsr_emit_last
-    inc r13
-    jmp .spi_wsr_ltrim
 .spi_wsr_emit_last:
     mov rsi, r12
     sub rsi, r13
@@ -3654,11 +3635,14 @@ END_FUNC str_method_expandtabs
 ;; str_method_splitlines(args, nargs) -> list of lines
 ;; args[0]=self, args[1]=keepends (optional bool, default False)
 ;; ============================================================================
-DEF_FUNC str_method_splitlines
+SL_STEP  equ 8           ; how far past the break the next line starts
+SL_FRAME equ 16
+DEF_FUNC str_method_splitlines, SL_FRAME
     push rbx
     push r12
     push r13
     push r14
+    mov qword [rbp - SL_STEP], 1
 
     mov rbx, [rdi]           ; self
     mov r12, [rbx + PyStrObject.ob_size]
@@ -3704,7 +3688,9 @@ DEF_FUNC str_method_splitlines
     ; \r\n: end_pos = r8 + 2
     test r14d, r14d
     jz .sl_no_keep_crlf
-    ; keepends: include \r\n
+    ; keepends: include \r\n.  The shared tail advances by one, so the \n
+    ; was seen again as its own line break and produced a spurious entry.
+    mov qword [rbp - SL_STEP], 2
     lea rdx, [r8 + 2]
     sub rdx, rcx
     jmp .sl_emit_line
@@ -3755,8 +3741,9 @@ DEF_FUNC str_method_splitlines
     call obj_decref
     pop r8
     pop rcx
-    lea rcx, [r8 + 1]
-    lea r8, [r8 + 1]
+    add r8, [rbp - SL_STEP]
+    mov rcx, r8
+    mov qword [rbp - SL_STEP], 1
     jmp .sl_loop
 
 .sl_last:

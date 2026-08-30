@@ -362,7 +362,22 @@ DEF_FUNC ags_iternext
     mov qword [rel current_exception], 0
     call eval_frame
     pop rcx
+    ; Same as gen_send: an exception the async generator body raised is the
+    ; result, and restoring over it ended the iteration silently.
+    cmp qword [rel current_exception], 0
+    jne .agsend_raised
     mov [rel current_exception], rcx
+    jmp .agsend_settled
+.agsend_raised:
+    test rcx, rcx
+    jz .agsend_settled
+    push rax
+    push rdx
+    mov rdi, rcx
+    call obj_decref
+    pop rdx
+    pop rax
+.agsend_settled:
     add rsp, 8
     V_UNPACK rax, rdx           ; eval_frame returns a Value
     ; rax = result payload, rdx = result tag
@@ -625,7 +640,24 @@ DEF_FUNC gen_send
     mov qword [rel current_exception], 0
     call eval_frame
     pop rcx
+    ; If the generator body raised, that exception is the result and must not
+    ; be overwritten by the caller's saved one -- gen_iternext was fixed for
+    ; this; the identical block here was not, so send() after a raise gave
+    ; StopIteration instead of the exception.
+    cmp qword [rel current_exception], 0
+    jne .gsend_raised
     mov [rel current_exception], rcx
+    jmp .gsend_settled
+.gsend_raised:
+    test rcx, rcx
+    jz .gsend_settled
+    push rax
+    push rdx
+    mov rdi, rcx
+    call obj_decref
+    pop rdx
+    pop rax
+.gsend_settled:
     add rsp, 8
     V_UNPACK rax, rdx           ; eval_frame returns a Value
     mov r12, rax               ; save return value payload
@@ -979,10 +1011,14 @@ DEF_FUNC gen_getattr
     ret
 
 .gga_send:
-    ; Return raw builtin — LOAD_ATTR handles binding via flag
+    ; A *bound* method: returning the raw builtin left self to LOAD_ATTR's
+    ; method fast path, so `f = gen.send; f(None)` and `gen.send(*args)` both
+    ; called it with no generator.
     call _get_gen_send_builtin
     mov rdi, rax
-    call obj_incref
+    mov rsi, rbx
+    extern method_new
+    call method_new
     mov edx, TAG_PTR
     pop r12
     pop rbx
@@ -991,9 +1027,14 @@ DEF_FUNC gen_getattr
     ret
 
 .gga_close:
+    ; A *bound* method: returning the raw builtin left self to LOAD_ATTR's
+    ; method fast path, so `f = gen.send; f(None)` and `gen.send(*args)` both
+    ; called it with no generator.
     call _get_gen_close_builtin
     mov rdi, rax
-    call obj_incref
+    mov rsi, rbx
+    extern method_new
+    call method_new
     mov edx, TAG_PTR
     pop r12
     pop rbx
@@ -1002,9 +1043,14 @@ DEF_FUNC gen_getattr
     ret
 
 .gga_throw:
+    ; A *bound* method: returning the raw builtin left self to LOAD_ATTR's
+    ; method fast path, so `f = gen.send; f(None)` and `gen.send(*args)` both
+    ; called it with no generator.
     call _get_gen_throw_builtin
     mov rdi, rax
-    call obj_incref
+    mov rsi, rbx
+    extern method_new
+    call method_new
     mov edx, TAG_PTR
     pop r12
     pop rbx
@@ -1158,9 +1204,14 @@ DEF_FUNC async_gen_getattr
     ret
 
 .aga_send:
+    ; A *bound* method: returning the raw builtin left self to LOAD_ATTR's
+    ; method fast path, so `f = gen.send; f(None)` and `gen.send(*args)` both
+    ; called it with no generator.
     call _get_gen_send_builtin
     mov rdi, rax
-    call obj_incref
+    mov rsi, rbx
+    extern method_new
+    call method_new
     mov edx, TAG_PTR
     pop r12
     pop rbx
@@ -1169,9 +1220,14 @@ DEF_FUNC async_gen_getattr
     ret
 
 .aga_close:
+    ; A *bound* method: returning the raw builtin left self to LOAD_ATTR's
+    ; method fast path, so `f = gen.send; f(None)` and `gen.send(*args)` both
+    ; called it with no generator.
     call _get_gen_close_builtin
     mov rdi, rax
-    call obj_incref
+    mov rsi, rbx
+    extern method_new
+    call method_new
     mov edx, TAG_PTR
     pop r12
     pop rbx
@@ -1180,9 +1236,14 @@ DEF_FUNC async_gen_getattr
     ret
 
 .aga_throw:
+    ; A *bound* method: returning the raw builtin left self to LOAD_ATTR's
+    ; method fast path, so `f = gen.send; f(None)` and `gen.send(*args)` both
+    ; called it with no generator.
     call _get_gen_throw_builtin
     mov rdi, rax
-    call obj_incref
+    mov rsi, rbx
+    extern method_new
+    call method_new
     mov edx, TAG_PTR
     pop r12
     pop rbx
@@ -1215,17 +1276,33 @@ DEF_FUNC _gen_send_impl
     test edx, edx             ; check tag, not payload (SmallInt-0 vs NULL)
     jnz .gsi_ret
 
+    ; A NULL result means exhaustion only when nothing is pending; the
+    ; generator body may have raised, and turning that into StopIteration
+    ; swallowed it.
+    cmp qword [rel current_exception], 0
+    jne .gsi_propagate
+
     ; StopIteration — raise with actual return value from generator
     lea rdi, [rel exc_StopIteration_type]
     mov rsi, [rbx + PyGenObject.gi_return_value]   ; already a Value
     test rsi, rsi
-    jnz .gsi_have_val
-    ; No return value stored — use None
-    lea rsi, [rel none_singleton]
+    jz .gsi_no_val
+    ; A generator that returns None raises a bare StopIteration in CPython,
+    ; so str(e) is "" rather than "None".
+    lea rax, [rel none_singleton]
+    cmp rsi, rax
+    jne .gsi_have_val
+.gsi_no_val:
+    xor esi, esi
 .gsi_have_val:
     call exc_new
     mov rdi, rax
     call raise_exception_obj
+
+.gsi_propagate:
+    extern eval_exception_unwind
+    leave
+    jmp eval_exception_unwind
 
 .gsi_ret:
     pop rbx

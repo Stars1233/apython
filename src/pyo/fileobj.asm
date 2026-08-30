@@ -181,8 +181,9 @@ END_FUNC fileobj_write
 DEF_FUNC fileobj_flush
     lea rax, [rel none_singleton]
     inc qword [rax + PyObject.ob_refcnt]
-    leave
-    V_PACK rax, rdx             ; builtins return one Value
+    mov edx, TAG_PTR            ; rdx was whatever the caller left; V_PACK
+    leave                       ; then read it as an int tag and biased the
+    V_PACK rax, rdx             ; singleton pointer into a large integer
     ret
 END_FUNC fileobj_flush
 
@@ -200,23 +201,32 @@ END_FUNC fileobj_fileno
 
 ; ============================================================================
 ; fileobj_isatty(PyObject **args, int64_t nargs) -> PyObject*
-; Returns True for fd <= 2, False otherwise
+; Asks the kernel.  Assuming fd <= 2 is a terminal answered True for a
+; redirected stdout, which is exactly when a program checks.
 ; ============================================================================
-DEF_FUNC fileobj_isatty
+IAT_BUF   equ 72          ; struct termios is 60 bytes
+IAT_FRAME equ 80
+DEF_FUNC fileobj_isatty, IAT_FRAME
     mov rax, [rdi]              ; self
-    mov rcx, [rax + PyFileObject.file_fd]
-    cmp rcx, 2
-    jbe .is_tty
+    mov rdi, [rax + PyFileObject.file_fd]
+    mov esi, 0x5401             ; TCGETS
+    lea rdx, [rbp - IAT_BUF]
+    extern sys_ioctl
+    call sys_ioctl
+    test rax, rax
+    jns .is_tty
     lea rax, [rel bool_false]
     inc qword [rax + PyObject.ob_refcnt]
-    leave
-    V_PACK rax, rdx             ; builtins return one Value
+    mov edx, TAG_PTR            ; rdx was whatever the caller left; V_PACK
+    leave                       ; then read it as an int tag and biased the
+    V_PACK rax, rdx             ; singleton pointer into a large integer
     ret
 .is_tty:
     lea rax, [rel bool_true]
     inc qword [rax + PyObject.ob_refcnt]
-    leave
-    V_PACK rax, rdx             ; builtins return one Value
+    mov edx, TAG_PTR            ; rdx was whatever the caller left; V_PACK
+    leave                       ; then read it as an int tag and biased the
+    V_PACK rax, rdx             ; singleton pointer into a large integer
     ret
 END_FUNC fileobj_isatty
 
@@ -231,14 +241,16 @@ DEF_FUNC fileobj_writable
     je .yes
     lea rax, [rel bool_false]
     inc qword [rax + PyObject.ob_refcnt]
-    leave
-    V_PACK rax, rdx             ; builtins return one Value
+    mov edx, TAG_PTR            ; rdx was whatever the caller left; V_PACK
+    leave                       ; then read it as an int tag and biased the
+    V_PACK rax, rdx             ; singleton pointer into a large integer
     ret
 .yes:
     lea rax, [rel bool_true]
     inc qword [rax + PyObject.ob_refcnt]
-    leave
-    V_PACK rax, rdx             ; builtins return one Value
+    mov edx, TAG_PTR            ; rdx was whatever the caller left; V_PACK
+    leave                       ; then read it as an int tag and biased the
+    V_PACK rax, rdx             ; singleton pointer into a large integer
     ret
 END_FUNC fileobj_writable
 
@@ -252,14 +264,16 @@ DEF_FUNC fileobj_readable
     je .yes
     lea rax, [rel bool_false]
     inc qword [rax + PyObject.ob_refcnt]
-    leave
-    V_PACK rax, rdx             ; builtins return one Value
+    mov edx, TAG_PTR            ; rdx was whatever the caller left; V_PACK
+    leave                       ; then read it as an int tag and biased the
+    V_PACK rax, rdx             ; singleton pointer into a large integer
     ret
 .yes:
     lea rax, [rel bool_true]
     inc qword [rax + PyObject.ob_refcnt]
-    leave
-    V_PACK rax, rdx             ; builtins return one Value
+    mov edx, TAG_PTR            ; rdx was whatever the caller left; V_PACK
+    leave                       ; then read it as an int tag and biased the
+    V_PACK rax, rdx             ; singleton pointer into a large integer
     ret
 END_FUNC fileobj_readable
 
@@ -269,8 +283,9 @@ END_FUNC fileobj_readable
 DEF_FUNC fileobj_seekable
     lea rax, [rel bool_false]
     inc qword [rax + PyObject.ob_refcnt]
-    leave
-    V_PACK rax, rdx             ; builtins return one Value
+    mov edx, TAG_PTR            ; rdx was whatever the caller left; V_PACK
+    leave                       ; then read it as an int tag and biased the
+    V_PACK rax, rdx             ; singleton pointer into a large integer
     ret
 END_FUNC fileobj_seekable
 
@@ -312,8 +327,9 @@ DEF_FUNC fileobj_close_method
     call sys_close
     lea rax, [rel none_singleton]
     inc qword [rax + PyObject.ob_refcnt]
-    leave
-    V_PACK rax, rdx             ; builtins return one Value
+    mov edx, TAG_PTR            ; rdx was whatever the caller left; V_PACK
+    leave                       ; then read it as an int tag and biased the
+    V_PACK rax, rdx             ; singleton pointer into a large integer
     ret
 END_FUNC fileobj_close_method
 

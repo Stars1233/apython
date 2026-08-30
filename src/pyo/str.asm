@@ -1095,8 +1095,38 @@ DEF_FUNC str_mod, SM_FRAME
 .sm_sc_seek_done:
     mov byte [rdi], '>'
     test r11d, r11d
-    jz .sm_sc_align_done
+    jz .sm_sc_numeric_zero
     mov byte [rdi], '<'
+    jmp .sm_sc_align_done
+
+.sm_sc_numeric_zero:
+    ; A '0' flag on a numeric conversion pads between the sign and the
+    ; digits, which is '=' alignment; '>' put the zeros in front of the sign,
+    ; so "%05d" % -42 came out "00-42".
+    mov rcx, [rbp-SM_CONV]
+    cmp cl, 's'
+    je .sm_sc_align_done
+    cmp cl, 'r'
+    je .sm_sc_align_done
+    mov rax, [rbp-SM_SPECST]
+.sm_sc_flagskip:
+    cmp rax, [rbp-SM_POS]
+    jge .sm_sc_align_done
+    movzx ecx, byte [rbx + rax]
+    cmp cl, '+'
+    je .sm_sc_flagnext
+    cmp cl, ' '
+    je .sm_sc_flagnext
+    cmp cl, '#'
+    je .sm_sc_flagnext
+    cmp cl, '0'
+    jne .sm_sc_align_done
+    mov byte [rdi], '='
+    jmp .sm_sc_align_done
+.sm_sc_flagnext:
+    inc rax
+    jmp .sm_sc_flagskip
+
 .sm_sc_align_done:
     mov r10d, 1
 
@@ -1110,6 +1140,18 @@ DEF_FUNC str_mod, SM_FRAME
     movzx ecx, byte [rbx + rax]
     cmp cl, '-'
     je .sm_sc_copy_next
+    ; A '0' flag means nothing for %s and %r; CPython pads those with spaces.
+    cmp cl, '0'
+    jne .sm_sc_copy_keep
+    cmp r10d, 1
+    jne .sm_sc_copy_keep        ; a digit of the width, not the flag
+    mov rcx, [rbp-SM_CONV]
+    cmp cl, 's'
+    je .sm_sc_copy_next
+    cmp cl, 'r'
+    je .sm_sc_copy_next
+    movzx ecx, byte [rbx + rax]
+.sm_sc_copy_keep:
     cmp r10, 36                 ; the spec buffer is 40 bytes and grows up
     jge .sm_sc_copy_done
     mov [rdi + r10], cl

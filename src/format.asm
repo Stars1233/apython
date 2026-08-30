@@ -257,6 +257,15 @@ DEF_FUNC format_apply_spec, FS_FRAME
     jne .fs_unsupported
     jmp .fs_body_str
 
+.fs_bad_numeric_type:
+    ; A numeric type letter on a non-number: format("abc", "f") converted the
+    ; string through float_to_f64 and printed 0.000000.
+    extern exc_ValueError_type
+    lea rdi, [rel exc_ValueError_type]
+    CSTRING rsi, "Unknown format code for object of type 'str'"
+    call raise_exception
+    ud2
+
 .fs_unsupported:
     mov rsi, [rbp - FS_VALUE]
     CSTRING rdi, `unsupported format string passed to \x01.__format__`
@@ -264,6 +273,12 @@ DEF_FUNC format_apply_spec, FS_FRAME
     call raise_type_error_with_name
 
 .fs_typed:
+    ; A numeric type letter needs a number.
+    cmp rcx, 's'
+    je .fs_body_str
+    lea rax, [rel str_type]
+    cmp r15, rax
+    je .fs_bad_numeric_type
     cmp rcx, 'b'
     je .fs_body_int
     cmp rcx, 'o'
@@ -879,19 +894,44 @@ DEF_FUNC_LOCAL format_float_body, FFB_FRAME
 .ffb_have_prec:
     mov byte [rbx], '.'
     mov ecx, 1
-    ; up to two digits of precision is plenty for this buffer
-    cmp rax, 9
-    jle .ffb_one_digit
+    ; CPython caps a float precision well below this; anything past three
+    ; digits is not representable in the underlying formatter either.  Two
+    ; digits used to be assumed, so ".100f" became ".10" plus a stray '0'
+    ; that was read as the type letter.
+    cmp rax, 999
+    jle .ffb_prec_ok
+    mov rax, 999
+.ffb_prec_ok:
     mov r8, rax
+    mov r9, 100
     xor edx, edx
-    mov r9, 10
     mov rax, r8
-    div r9
+    div r9                              ; rax = hundreds, rdx = rest
+    test rax, rax
+    jz .ffb_prec_tens
     add al, '0'
     mov [rbx + rcx], al
     inc rcx
+    mov r11d, 1                         ; a leading digit was emitted
+    jmp .ffb_prec_have_h
+.ffb_prec_tens:
+    xor r11d, r11d
+.ffb_prec_have_h:
     mov rax, rdx
+    xor edx, edx
+    mov r9, 10
+    div r9                              ; rax = tens, rdx = units
+    mov r10, rdx                        ; keep the units
+    test rax, rax
+    jnz .ffb_prec_emit_tens
+    test r11d, r11d
+    jz .ffb_one_digit
+.ffb_prec_emit_tens:
+    add al, '0'
+    mov [rbx + rcx], al
+    inc rcx
 .ffb_one_digit:
+    mov rax, r10
     add al, '0'
     mov [rbx + rcx], al
     inc rcx
