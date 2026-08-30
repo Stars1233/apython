@@ -42,7 +42,7 @@ HEADERS = $(wildcard include/*.inc) $(wildcard compiler/*.inc)
 # Python compiler for tests
 PYTHON = python3
 
-.PHONY: all clean check gen-cpython-tests check-cpython check-stdlib check-source lib-pyc
+.PHONY: all clean check gen-cpython-tests check-cpython check-cpython-source check-stdlib check-source lib-pyc
 
 all: $(TARGET) lib-pyc
 
@@ -122,6 +122,13 @@ gen-cpython-tests: lib-pyc
 	    $(PYTHON) -m py_compile tests/cpython/$$t.py || exit 1; \
 	done
 	@echo "Done."
+
+# The same corpus, compiled by OUR compiler rather than CPython's: apython is
+# handed the .py.  Ratchets against tests/cpython_source_floor.txt.  It is a
+# harder corpus than tests/ -- it is CPython's own, written to be adversarial --
+# and most of the compiler's later bugs were found here.
+check-cpython-source: $(TARGET) lib-pyc
+	@bash tests/cpython_source_probe.sh
 
 check-cpython: $(TARGET) gen-cpython-tests
 	@for t in $(CPYTHON_TESTS); do \

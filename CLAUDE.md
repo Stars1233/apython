@@ -4,7 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-Python 3.12 bytecode interpreter in x86-64 NASM assembly. Reads `.pyc` files and executes bytecode directly.
+Python 3.12 implementation in x86-64 NASM assembly: a bytecode interpreter, and
+a compiler for the source language written in the same assembly.  Reads `.py`
+through `compiler/`, or `.pyc` through the marshal reader.
 
 ## Build & Test
 
@@ -15,6 +17,7 @@ make check        # full test suite: compile .py→.pyc, diff python3 vs ./apyth
 make check-cpython # CPython stdlib unit tests (harder, more thorough)
 make check-stdlib # how much of a CPython 3.12 Lib/ imports; a ratchet
 make check-source # the whole corpus compiled by OUR compiler; a ratchet
+make check-cpython-source  # the CPython corpus, compiled by OUR compiler
 ```
 
 ```bash
@@ -33,14 +36,20 @@ when a new one crashes.  Raise the floor with
 default, poll and io_uring backends); `make check-cpython` runs all 64 files
 under `tests/cpython/`, none of them tolerated as failing.
 
-`make check-source` hands apython the `.py` instead of the `.pyc`, so our own
-compiler produces the bytecode, and diffs the result against `python3`.  It is
-the only thing that exercises the compiler on a large body of ordinary code --
-most of its bugs were found there rather than by a test written for them.  It
-ratchets against `tests/compile_floor.txt`; raise the floor with
-`bash tests/source_probe.sh --record` in the commit that earns it.  It also
-reaches interpreter paths a `.pyc` cannot, because CPython's constant folder
-settles `3 * "ab"` and `True & False` before they ever become opcodes.
+`make check-source` and `make check-cpython-source` hand apython the `.py`
+instead of the `.pyc`, so our own compiler produces the bytecode, and diff the
+result against `python3`.  They are the only things that exercise the compiler
+on a large body of ordinary code -- most of its bugs were found there rather
+than by a test written for them, including several that need a whole file
+rather than a snippet to appear at all.  They also reach interpreter paths a
+`.pyc` cannot, because CPython's constant folder settles `3 * "ab"`,
+`True & False` and `-7 // 2` before any of them becomes an opcode.
+
+`check-cpython-source` is the harder of the two: that corpus is CPython's own
+and written to be adversarial.  Each ratchets against a floor file
+(`tests/compile_floor.txt`, `tests/cpython_source_floor.txt`); raise one with
+`bash tests/source_probe.sh --record` or
+`bash tests/cpython_source_probe.sh --record` in the commit that earns it.
 
 Two more gates worth running when touching the value representation:
 
@@ -142,31 +151,40 @@ and at the boundaries between converted and unconverted code.
 
 ## Source Compiler (`compiler/`)
 
-Turns Python 3.12 source into a `PyCodeObject` that this interpreter runs.
-Reached through `eval()` and `compile(src, file, "eval")`.
+Turns Python 3.12 source into a `PyCodeObject` this interpreter runs.  Reached
+through `compile()`, `exec()`, `eval()`, `./apython foo.py`, and `import` of a
+`.py` when no `.pyc` is there.  The whole language: `match`, `except*`,
+f-strings, async, comprehensions, PEP 695 type parameters.
 
 | file | role |
 |------|------|
-| `compiler.inc` | token kinds, AST kinds, `Buf`/`Arena`/`Comp`/`CompUnit`/`Instr` |
+| `compiler.inc` | token kinds, AST kinds, binding powers, `Buf`/`Comp`/`CompUnit`/`Instr` |
 | `tables.asm` | **generated** — char classes, keywords, operators, opcode metadata |
 | `gen_tables.py` | regenerates `tables.asm` from CPython 3.12's `opcode`/`dis` |
+| `gen_prule.py` | regenerates the expression grammar table inside `parse.asm` |
 | `arena.asm` | growable `Buf` and bump `Arena` (the tree has neither otherwise) |
 | `lex.asm` | tokenizer: indentation, operators, names, numbers, strings |
 | `ast.asm` | 32-byte nodes in a `Buf`, addressed by u32 index |
 | `parse.asm` | Pratt expression parser + `prule_table`, the precedence grammar |
-| `codegen.asm` | AST kind → emitter jump table |
-| `assemble.asm` | EXTENDED_ARG fixpoint, stack depth, line table, byte emission |
+| `parse_stmt.asm` | statements, and the soft keywords `match` and `type` |
+| `pattern.asm` | `match` patterns |
+| `fstring.asm` | f-string fields, lexed as spans of the same source |
+| `symtab.asm` | scopes, local/cell/free classification, name mangling |
+| `codegen.asm` | AST kind → emitter jump table; `_stmt`/`_func`/`_try`/`_comp`/`_async`/`_match`/`_egroup` for the rest |
+| `assemble.asm` | EXTENDED_ARG fixpoint, stack depth, exception table, line table |
 | `compile.asm` | pipeline driver and lifetime |
-| `evalexec.asm` | the `eval()` and `compile()` builtins |
+| `evalexec.asm` | the `compile()`, `exec()` and `eval()` builtins |
+| `srcfile.asm` | `code_from_path`: `./apython foo.py` and import from source |
 | `comperr.asm` | error recording |
+| `dis.asm` | `--dis`, for diffing against `python3 -m dis` |
 | `comptest.asm` | `--selftest-compile` |
 | `lint.py` | static checks, run by `make check` |
 
 **Never call `raise_exception` from `compiler/`.** It tail-jumps into
 `eval_exception_unwind`, which calls `fatal_error` when there is no live
-interpreter frame — and `./apython foo.py` will compile before any frame
-exists. Record the error with `comp_error()` and return 0/NULL; the driver
-turns it into a pending exception after every buffer is freed.
+interpreter frame — and `./apython foo.py` compiles before any frame exists.
+Record the error with `comp_error()` and return 0/NULL; the driver turns it
+into a pending exception after every buffer is freed.
 
 `op_meta` in `tables.asm` is the keystone: one row per opcode drives CACHE
 padding, instruction sizing, stack-depth accounting and successor computation.
@@ -174,12 +192,48 @@ Because every emission routes through it, a forgotten CACHE is not a mistake an
 emitter can make. Its numbers are CPython's, taken from the running
 interpreter's own modules rather than transcribed.
 
-Regenerate with `python3 compiler/gen_tables.py > compiler/tables.asm`; the
-output is committed, so building never needs Python.
+Regenerate with `python3 compiler/gen_tables.py > compiler/tables.asm` and
+`python3 compiler/gen_prule.py`; both outputs are committed, so building never
+needs Python.
 
-**Gates:** `./apython --selftest-compile` (Buf/Arena invariants, and the
-tokenizer against baked-in token sequences), `python3 compiler/lint.py`, and
-`tests/test_compile_expr.py`. All three run inside `make check`.
+**Gates:** `make check-source` and `make check-cpython-source` (both corpora
+compiled by this compiler and diffed against `python3` — where nearly every bug
+below was found), `./apython --selftest-compile`, `python3 compiler/lint.py`,
+and the `tests/test_compile_*.py` files.  All but the two `-source` targets run
+inside `make check`.
+
+### Compiler bug patterns
+
+These cost real time; the shapes recur.
+
+- **A binding power that is equal where it should be one below.** The Pratt
+  driver continues while `lbp > min_bp`, so an operand parsed AT an operator's
+  own power stops before it.  A ternary's else branch at `BP_TERNARY` nests
+  left, a lambda body at `BP_TERNARY` loses its own `if`.  Both produce wrong
+  answers, not errors.
+- **Two index spaces that collide.** Object indices and node indices come from
+  different arenas and overlap freely.  `sym_visit`'s generic walk follows a
+  node's `a`/`b`/`c`, and any kind whose fields are *object* indices has to be
+  on the exclusion list — `AST_HANDLER` was not, so `except E as e` visited
+  whatever node sat at e's object index.  Nothing smaller than a whole file
+  brings the two into range.
+- **A stack effect read from the interpreter rather than from CPython.**
+  `MATCH_KEYS` consumes neither the subject nor the keys tuple; a depth taken
+  from what the handler *looks* like it does is silently one out, and the
+  damage surfaces somewhere else.
+- **A jump to a label that was never bound.** It held -1, which the resolver
+  read as an unsigned offset past the end of the stream.  `asm_check_labels`
+  now rejects it; before that it was a jump off the end.
+- **A return value clobbered by the epilogue.** `cg_class_value` restored the
+  enclosing scope through `eax` on its way out, so every failure was reported
+  as a success and the caller emitted code for something that was never built.
+- **A function emitted while a data section is current.** NASM allows it and it
+  links; the fault arrives when the CPU refuses to execute the page, as a
+  SIGSEGV on the function's own `push rbp`.  `lint.py` checks for it.
+- **A callee-saved register used without saving it.** `main` keeps argc and
+  argv in r14 and r15 across the compile, so a scratch r14 in an emitter hands
+  back a different argv and the crash lands in `sys.argv` construction.
+  `lint.py` checks both directions.
 
 ## Key Structs
 
