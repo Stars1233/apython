@@ -12,6 +12,13 @@
 # report the ignored exception on stderr, but with different wording, so the
 # usual differential comparison cannot be used.  tests/expected/ holds a
 # recorded transcript; the asserts are what actually establish correctness.
+#
+# The transcript is NOT a claim of parity.  CPython finalizes the cyclic Node
+# pairs below at interpreter shutdown and reports each raising __del__ --
+# eighty lines that apython does not emit, because it does not run __del__ on
+# cyclic garbage at shutdown.  That gap is recorded in bugs.md; what this
+# test establishes is that a raising __del__ does not poison the exception
+# state or latch the collector off, which the asserts check directly.
 
 
 class Boom:
