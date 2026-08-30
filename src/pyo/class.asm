@@ -321,8 +321,9 @@ END_FUNC instance_new
 ;; rdi = instance, rsi = name (PyStrObject*)
 ;; Returns: owned reference to attribute value, or NULL
 ;; ============================================================================
-IG_NAME  equ 8
-IG_FRAME equ 16
+IG_NAME   equ 8
+IG_ORIGIN equ 16        ; the type the MRO walk started from
+IG_FRAME  equ 32
 DEF_FUNC instance_getattr, IG_FRAME
     push rbx
     push r12
@@ -344,8 +345,9 @@ DEF_FUNC instance_getattr, IG_FRAME
 
 .check_type_dict:
 
-    ; Not in inst_dict -- walk type MRO: check type->tp_dict, then tp_base chain
+    ; Not in inst_dict -- walk the type's MRO, checking each tp_dict.
     mov rcx, [rbx + PyObject.ob_type]   ; rcx = type (the class)
+    mov [rbp - IG_ORIGIN], rcx
 .walk_mro:
     mov rdi, [rcx + PyTypeObject.tp_dict]
     test rdi, rdi
@@ -360,7 +362,7 @@ DEF_FUNC instance_getattr, IG_FRAME
     jnz .found_type                     ; found in type's dict
 
 .try_base:
-    mov rcx, [rcx + PyTypeObject.tp_base]
+    MRO_NEXT rcx, [rbp - IG_ORIGIN]
     test rcx, rcx
     jnz .walk_mro
 
@@ -536,8 +538,9 @@ DEF_FUNC instance_setattr
     mov r12, rsi                ; name
     mov r13, rdx                ; value Value
 
-    ; Walk type dict chain looking for member descriptor (slot)
+    ; Walk the type's MRO looking for a member descriptor (slot)
     mov rax, [rbx + PyObject.ob_type]
+    mov r14, rax                ; origin of the walk
 .sa_walk:
     mov rdi, [rax + PyTypeObject.tp_dict]
     test rdi, rdi
@@ -552,7 +555,7 @@ DEF_FUNC instance_setattr
     jnz .sa_found_type
 
 .sa_try_base:
-    mov rax, [rax + PyTypeObject.tp_base]
+    MRO_NEXT rax, r14
     test rax, rax
     jnz .sa_walk
     jmp .sa_no_slot
@@ -1034,9 +1037,7 @@ DEF_FUNC type_call
     cmp rax, rcx
     jne .type_three_bad_name
 
-    ; bases: an empty tuple means object, one entry means that base.  More
-    ; than one would be multiple inheritance, which __build_class__ does not
-    ; do either.
+    ; bases: the tuple goes through as it is; an empty one means object.
     mov rsi, [rbx + 8]
     V_TEST_PTR rsi, rax
     ja .type_three_bad_bases
@@ -1046,13 +1047,7 @@ DEF_FUNC type_call
     jne .type_three_bad_bases
     mov rcx, [rsi + PyTupleObject.ob_size]
     test rcx, rcx
-    jz .type_three_no_base
-    cmp rcx, 1
-    jne .type_three_bad_bases
-    mov rax, [rsi + PyTupleObject.ob_item]
-    mov rsi, [rax]                      ; the single base
-    jmp .type_three_have_base
-.type_three_no_base:
+    jnz .type_three_have_base
     xor esi, esi
 .type_three_have_base:
 
@@ -1179,7 +1174,7 @@ DEF_FUNC type_call
     jnz .new_found
 
 .new_try_base:
-    mov rcx, [rcx + PyTypeObject.tp_base]
+    MRO_NEXT rcx, rbx
     test rcx, rcx
     jnz .new_mro_walk
 
@@ -1317,7 +1312,7 @@ DEF_FUNC type_call
     jnz .init_found
 
 .init_try_base:
-    mov rcx, [rcx + PyTypeObject.tp_base]
+    MRO_NEXT rcx, rbx
     test rcx, rcx
     jnz .init_mro_walk
 
@@ -1559,12 +1554,16 @@ END_FUNC type_call
 ;; rdi = type object, rsi = name (PyStrObject*)
 ;; Returns: owned reference to attribute value, or NULL
 ;; ============================================================================
-DEF_FUNC type_getattr
+extern tuple_new
+TGA_ORIGIN equ 8            ; the type the MRO walk started from
+TGA_FRAME  equ 16
+DEF_FUNC type_getattr, TGA_FRAME
     push rbx
     push r12
 
     mov rbx, rsi                ; rbx = name
-    mov r12, rdi                ; r12 = type
+    mov r12, rdi                ; r12 = type (walks)
+    mov [rbp - TGA_ORIGIN], rdi
 
     ; Check for __name__: compare name string data with "__name__"
     lea rdi, [rbx + PyStrObject.data]
@@ -1572,6 +1571,18 @@ DEF_FUNC type_getattr
     call ap_strcmp
     test eax, eax
     jz .tga_return_name
+
+    lea rdi, [rbx + PyStrObject.data]
+    CSTRING rsi, "__mro__"
+    call ap_strcmp
+    test eax, eax
+    jz .tga_return_mro
+
+    lea rdi, [rbx + PyStrObject.data]
+    CSTRING rsi, "__bases__"
+    call ap_strcmp
+    test eax, eax
+    jz .tga_return_bases
 
     ; Check type->tp_dict, then walk tp_base chain
 .tga_walk:
@@ -1586,10 +1597,100 @@ DEF_FUNC type_getattr
     jnz .tga_found
 
 .tga_next_base:
-    mov r12, [r12 + PyTypeObject.tp_base]
+    MRO_NEXT r12, [rbp - TGA_ORIGIN]
     test r12, r12
     jnz .tga_walk
     jmp .tga_not_found
+
+.tga_return_mro:
+    mov rax, [rbp - TGA_ORIGIN]
+    mov rax, [rax + PyTypeObject.tp_mro]
+    test rax, rax
+    jz .tga_synth_mro
+    jmp .tga_return_tuple
+.tga_return_bases:
+    mov rax, [rbp - TGA_ORIGIN]
+    mov rax, [rax + PyTypeObject.tp_bases]
+    test rax, rax
+    jnz .tga_return_tuple
+    ; A static type keeps no tuple; build one from tp_base.
+    mov rcx, [rbp - TGA_ORIGIN]
+    mov rcx, [rcx + PyTypeObject.tp_base]
+    test rcx, rcx
+    jz .tga_empty_tuple
+    push rcx
+    mov edi, 1
+    call tuple_new
+    pop rcx
+    mov rdx, [rax + PyTupleObject.ob_item]
+    mov [rdx], rcx
+    push rax
+    mov rdi, rcx
+    call obj_incref
+    pop rax
+    mov edx, TAG_PTR
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.tga_synth_mro:
+    ; Likewise for __mro__: walk the base chain into a fresh tuple.
+    mov rdi, [rbp - TGA_ORIGIN]
+    extern type_mro_len
+    call type_mro_len
+    push rax
+    mov rdi, rax
+    call tuple_new
+    pop rcx
+    mov r12, rax
+    mov rdi, [rbp - TGA_ORIGIN]
+    mov rsi, [rax + PyTupleObject.ob_item]
+    extern type_mro_fill
+    call type_mro_fill
+    ; The tuple owns a reference to each entry.
+    mov rcx, [r12 + PyTupleObject.ob_item]
+    xor edx, edx
+.tga_mro_incref:
+    cmp rdx, rax
+    jge .tga_mro_done
+    push rax
+    push rdx
+    push rcx
+    mov rdi, [rcx + rdx*8]
+    call obj_incref
+    pop rcx
+    pop rdx
+    pop rax
+    inc rdx
+    jmp .tga_mro_incref
+.tga_mro_done:
+    mov rax, r12
+    mov edx, TAG_PTR
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.tga_empty_tuple:
+    xor edi, edi
+    call tuple_new
+    mov edx, TAG_PTR
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.tga_return_tuple:
+    mov rdi, rax
+    push rax
+    call obj_incref
+    pop rax
+    mov edx, TAG_PTR
+    pop r12
+    pop rbx
+    leave
+    ret
 
 .tga_found:
     ; Found — INCREF and return

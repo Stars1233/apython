@@ -17,6 +17,7 @@
 %include "types.inc"
 
 extern ap_free
+extern object_type
 extern ap_malloc
 extern gc_alloc
 extern gc_track
@@ -587,13 +588,21 @@ END_FUNC eg_split
 ;; ============================================================================
 DEF_FUNC_BARE eg_is_base_exception_group
     mov rax, [rdi + PyObject.ob_type]
+    mov r10, rax                    ; origin of the walk
     lea rdx, [rel eg_dealloc]
 .walk:
     test rax, rax
     jz .no
     cmp [rax + PyTypeObject.tp_dealloc], rdx
     je .yes
-    mov rax, [rax + PyTypeObject.tp_base]
+    push r10
+    push rdx
+    mov rdi, r10
+    mov rsi, rax
+    extern type_mro_next
+    call type_mro_next
+    pop rdx
+    pop r10
     jmp .walk
 .yes:
     mov eax, 1
@@ -872,9 +881,39 @@ exc_ExceptionGroup_type:
     dq 0                        ; tp_as_mapping
     dq exc_BaseExceptionGroup_type ; tp_base
     dq 0                        ; tp_dict
-    dq 0                        ; tp_mro
+    dq eg_mro_tuple             ; tp_mro
     dq 0                        ; tp_flags
-    dq 0                        ; tp_bases
+    dq eg_bases_tuple           ; tp_bases
     dq 0                        ; tp_traverse
     dq 0                        ; tp_clear
     dq 0 ; tp_dictoffset
+
+;; ExceptionGroup is the one builtin with two bases: BaseExceptionGroup for
+;; the group machinery and Exception so that `except Exception` catches it.
+;; A tp_base chain cannot say that, so it carries a real MRO.
+align 8
+eg_mro_items:
+    dq exc_ExceptionGroup_type
+    dq exc_BaseExceptionGroup_type
+    dq exc_Exception_type
+    dq exc_BaseException_type
+    dq object_type
+align 8
+eg_mro_tuple:
+    dq 1                        ; ob_refcnt (immortal)
+    dq tuple_type               ; ob_type
+    dq 5                        ; ob_size
+    dq -1                       ; ob_hash
+    dq eg_mro_items             ; ob_item
+
+align 8
+eg_bases_items:
+    dq exc_BaseExceptionGroup_type
+    dq exc_Exception_type
+align 8
+eg_bases_tuple:
+    dq 1                        ; ob_refcnt (immortal)
+    dq tuple_type               ; ob_type
+    dq 2                        ; ob_size
+    dq -1                       ; ob_hash
+    dq eg_bases_items           ; ob_item

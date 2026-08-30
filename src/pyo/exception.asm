@@ -121,18 +121,10 @@ DEF_FUNC_BARE exc_is_exception
     ja .nope
     test rdi, rdi
     jz .nope
-    mov rax, [rdi + PyObject.ob_type]
-    lea rcx, [rel exc_BaseException_type]
-.walk_base:
-    test rax, rax
-    jz .nope
-    cmp rax, rcx
-    je .yes
-    mov rax, [rax + PyTypeObject.tp_base]
-    jmp .walk_base
-.yes:
-    mov eax, 1
-    ret
+    mov rdi, [rdi + PyObject.ob_type]
+    lea rsi, [rel exc_BaseException_type]
+    extern type_is_subtype
+    jmp type_is_subtype
 .nope:
     xor eax, eax
     ret
@@ -461,6 +453,8 @@ global exc_getattr
 DEF_FUNC exc_getattr
     push rbx
     push r12
+    push r13
+    push r14
 
     mov rbx, rdi            ; exc
     mov r12, rsi            ; name str
@@ -516,16 +510,25 @@ DEF_FUNC exc_getattr
     test eax, eax
     jz .get_value
 
-    ; Not found — try type dict (for user-defined exception subclass attrs)
-    mov rdi, [rbx + PyObject.ob_type]
-    mov rdi, [rdi + PyTypeObject.tp_dict]
-    test rdi, rdi
+    ; Not found — walk the type's MRO (for user-defined subclass attrs).
+    ; Only the exact type's dict used to be consulted, so a method defined on
+    ; an exception's *base* was invisible.
+    mov r13, [rbx + PyObject.ob_type]   ; origin
+    mov r14, r13                        ; walker
+.eg_type_walk:
+    test r14, r14
     jz .check_exc_dict
+    mov rdi, [r14 + PyTypeObject.tp_dict]
+    test rdi, rdi
+    jz .eg_type_next
     mov rsi, r12
     call dict_get
     V_UNPACK rax, rdx           ; dict_get returns a Value
     test edx, edx
     jnz .found_in_type
+.eg_type_next:
+    MRO_NEXT r14, r13
+    jmp .eg_type_walk
 
 .check_exc_dict:
     ; Check exc_dict for custom instance attributes
@@ -540,6 +543,8 @@ DEF_FUNC exc_getattr
 
 .not_found:
     RET_NULL
+    pop r14
+    pop r13
     pop r12
     pop rbx
     leave
@@ -548,6 +553,8 @@ DEF_FUNC exc_getattr
 
 .found_in_dict:
     INCREF_VAL rax, rdx
+    pop r14
+    pop r13
     pop r12
     pop rbx
     leave
@@ -555,11 +562,42 @@ DEF_FUNC exc_getattr
     ret
 
 .found_in_type:
+    ; A plain function found on the class is a method and has to be bound;
+    ; returning it raw made exc.method() call it with no self.  Descriptors
+    ; are returned as they are, for LOAD_ATTR to unwrap.
+    cmp edx, TAG_PTR
+    jne .fit_raw
+    mov rcx, [rax + PyObject.ob_type]
+    extern func_type
+    lea rdx, [rel func_type]
+    cmp rcx, rdx
+    je .fit_bind
+    extern builtin_func_type
+    lea rdx, [rel builtin_func_type]
+    cmp rcx, rdx
+    je .fit_bind
+    mov edx, TAG_PTR
+.fit_raw:
     INCREF_VAL rax, rdx     ; tag-aware INCREF (rdx = tag from dict_get)
+    pop r14
+    pop r13
     pop r12
     pop rbx
     leave
     V_PACK rax, rdx             ; return one Value
+    ret
+
+.fit_bind:
+    mov rdi, rax
+    mov rsi, rbx
+    extern method_new
+    call method_new
+    mov edx, TAG_PTR
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
     ret
 
 .get_args:
@@ -568,6 +606,8 @@ DEF_FUNC exc_getattr
     jz .return_empty_tuple
     INCREF rax
     mov edx, TAG_PTR
+    pop r14
+    pop r13
     pop r12
     pop rbx
     leave
@@ -578,6 +618,8 @@ DEF_FUNC exc_getattr
     xor edi, edi
     call tuple_new
     mov edx, TAG_PTR
+    pop r14
+    pop r13
     pop r12
     pop rbx
     leave
@@ -609,6 +651,8 @@ DEF_FUNC exc_getattr
     mov rax, [rcx]
     INCREF_V rax, rdx
     mov edx, TAG_PTR
+    pop r14
+    pop r13
     pop r12
     pop rbx
     leave
@@ -616,6 +660,8 @@ DEF_FUNC exc_getattr
 .code_tuple:
     INCREF rax
     mov edx, TAG_PTR
+    pop r14
+    pop r13
     pop r12
     pop rbx
     leave
@@ -628,6 +674,8 @@ DEF_FUNC exc_getattr
     jz .return_none
     INCREF rax
     mov edx, TAG_PTR
+    pop r14
+    pop r13
     pop r12
     pop rbx
     leave
@@ -640,6 +688,8 @@ DEF_FUNC exc_getattr
     jz .return_none
     INCREF rax
     mov edx, TAG_PTR
+    pop r14
+    pop r13
     pop r12
     pop rbx
     leave
@@ -652,6 +702,8 @@ DEF_FUNC exc_getattr
     jz .return_none
     INCREF rax
     mov edx, TAG_PTR
+    pop r14
+    pop r13
     pop r12
     pop rbx
     leave
@@ -671,6 +723,8 @@ DEF_FUNC exc_getattr
     mov rax, [rcx]
     INCREF_V rax, rdx
     V_UNPACK rax, rdx
+    pop r14
+    pop r13
     pop r12
     pop rbx
     leave
@@ -682,6 +736,8 @@ DEF_FUNC exc_getattr
     lea rax, [rel none_singleton]
     INCREF rax
     mov edx, TAG_PTR
+    pop r14
+    pop r13
     pop r12
     pop rbx
     leave
@@ -754,18 +810,10 @@ DEF_FUNC_BARE exc_isinstance
     jne .not_a_class
 
 .is_class:
-    ; Single type: walk tp_base chain
-    mov rax, [rdi + PyExceptionObject.ob_type]
-.walk:
-    test rax, rax
-    jz .not_match
-    cmp rax, rsi
-    je .match
-    mov rax, [rax + PyTypeObject.tp_base]
-    jmp .walk
-.match:
-    mov eax, 1
-    ret
+    ; Single type: the exception's MRO, so a class with several bases is
+    ; caught by an `except` naming any of them.
+    mov rdi, [rdi + PyExceptionObject.ob_type]
+    jmp type_is_subtype
 .not_a_class:
     lea rdi, [rel exc_TypeError_type]
     CSTRING rsi, "catching classes that do not inherit from BaseException is not allowed"
@@ -817,6 +865,7 @@ global type_is_exc_subclass
 DEF_FUNC_BARE type_is_exc_subclass
     lea rdx, [rel exc_dealloc]
     lea rcx, [rel eg_dealloc]
+    mov r10, rdi                    ; origin of the walk
 .tie_walk:
     test rdi, rdi
     jz .tie_no
@@ -825,7 +874,13 @@ DEF_FUNC_BARE type_is_exc_subclass
     je .tie_yes
     cmp rax, rcx
     je .tie_yes
-    mov rdi, [rdi + PyTypeObject.tp_base]
+    push r10
+    mov rsi, rdi
+    mov rdi, r10
+    extern type_mro_next
+    call type_mro_next
+    pop r10
+    mov rdi, rax
     jmp .tie_walk
 .tie_yes:
     mov eax, 1

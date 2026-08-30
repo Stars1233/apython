@@ -426,10 +426,12 @@ BI_ARGS   equ 8
 BI_NARGS  equ 16
 BI_OBJ    equ 24       ; original string/bytes obj for error messages
 BI_BASE   equ 32       ; base value for error messages
-BI_FRAME  equ 32
+BI_ORIGIN equ 40       ; the argument's type, for the bytes-family MRO walk
+BI_FRAME  equ 48
 
 DEF_FUNC builtin_int_fn, BI_FRAME
     push rbx
+    mov qword [rbp - BI_ORIGIN], 0
 
     test rsi, rsi
     jz .int_no_args
@@ -489,6 +491,10 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     ; Check bytes, bytearray, or subclasses (walk base chain)
     mov rcx, rax
 .int_check_bytes_chain:
+    cmp qword [rbp - BI_ORIGIN], 0
+    jne .int_chain_have_origin
+    mov [rbp - BI_ORIGIN], rcx
+.int_chain_have_origin:
     lea rdx, [rel bytes_type]
     cmp rcx, rdx
     je .int_from_bytes
@@ -498,7 +504,7 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     lea rdx, [rel memoryview_type]
     cmp rcx, rdx
     je .int_from_memoryview
-    mov rcx, [rcx + PyTypeObject.tp_base]
+    MRO_NEXT rcx, [rbp - BI_ORIGIN]
     test rcx, rcx
     jnz .int_check_bytes_chain
 
@@ -1121,13 +1127,17 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     ; Check bytes, bytearray, or subclasses (walk base chain)
     mov rcx, rax
 .int_base_check_bytes_chain:
+    cmp qword [rbp - BI_ORIGIN], 0
+    jne .int_base_chain_have_origin
+    mov [rbp - BI_ORIGIN], rcx
+.int_base_chain_have_origin:
     lea rdx, [rel bytes_type]
     cmp rcx, rdx
     je .int_base_from_bytes
     lea rdx, [rel bytearray_type]
     cmp rcx, rdx
     je .int_base_from_bytes            ; same layout as bytes
-    mov rcx, [rcx + PyTypeObject.tp_base]
+    MRO_NEXT rcx, [rbp - BI_ORIGIN]
     test rcx, rcx
     jnz .int_base_check_bytes_chain
     jmp .int_base_type_error_str
@@ -2919,7 +2929,8 @@ END_FUNC builtin_locals
 ; ============================================================================
 DIR_LIST    equ 8       ; result list
 DIR_OBJ     equ 16      ; the object
-DIR_FRAME   equ 24
+DIR_ORIGIN  equ 24      ; the type whose MRO is being listed
+DIR_FRAME   equ 32
 
 global builtin_dir
 DEF_FUNC builtin_dir, DIR_FRAME
@@ -2954,13 +2965,15 @@ DEF_FUNC builtin_dir, DIR_FRAME
     cmp rcx, rdx
     je .dir_from_type
 
-    ; Instance: get its type, iterate the type's dict chain
+    ; Instance: get its type, iterate its MRO
     mov r12, [rax + PyObject.ob_type]   ; r12 = type
+    mov [rbp - DIR_ORIGIN], r12
     jmp .dir_walk_chain
 
 .dir_from_type:
-    ; obj IS a type: iterate its tp_dict chain
+    ; obj IS a type: iterate its own MRO
     mov r12, [rbp - DIR_OBJ]
+    mov [rbp - DIR_ORIGIN], r12
 
 .dir_walk_chain:
     ; r12 = current type to get keys from
@@ -3012,7 +3025,7 @@ DEF_FUNC builtin_dir, DIR_FRAME
     call obj_decref
 
 .dir_next_base:
-    mov r12, [r12 + PyTypeObject.tp_base]
+    MRO_NEXT r12, [rbp - DIR_ORIGIN]
     jmp .dir_walk_chain
 
 .dir_done:

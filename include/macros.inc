@@ -556,4 +556,17 @@ TAG_IO_WAIT  equ 8           ; payload = fd | (direction << 32) — async I/O se
 ; Mark stack as non-executable and reset to .text section
 ASM_INIT
 
+
+; MRO_NEXT walker, origin -- advance `walker` to the next entry of `origin`'s
+; method resolution order, or 0 at the end.  For a type with no tp_mro (every
+; static builtin type) this is exactly the old `mov walker, [walker+tp_base]`.
+; Clobbers rax, rcx, rdx, rsi, rdi, r8-r11.
+%macro MRO_NEXT 2
+    mov rdi, %2
+    mov rsi, %1
+    extern type_mro_next
+    call type_mro_next
+    mov %1, rax
+%endmacro
+
 %endif ; MACROS_INC

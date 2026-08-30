@@ -50,7 +50,8 @@ SA_DESC   equ 32    ; general descriptor (MRO walk)
 SA_OTAG   equ 40
 SA_VTAG   equ 48
 SA_EXC    equ 56
-SA_FRAME  equ 64
+SA_ORIGIN equ 64   ; the type the descriptor walk started from
+SA_FRAME  equ 80
 
 ; op_delete_attr: rbp-frame (16 bytes)
 DA_NAME   equ 8
@@ -156,6 +157,7 @@ END_FUNC op_store_global
 ;; Followed by 4 CACHE entries (8 bytes) that must be skipped.
 ;; ============================================================================
 DEF_FUNC op_store_attr, SA_FRAME
+    mov qword [rbp - SA_ORIGIN], 0
     DUNDER_EXC_SAVE [rbp - SA_EXC]
 
     ; Get name (payload array: 8-byte stride)
@@ -185,6 +187,10 @@ DEF_FUNC op_store_attr, SA_FRAME
 .sa_walk_mro:
     test rcx, rcx
     jz .sa_no_property
+    cmp qword [rbp - SA_ORIGIN], 0
+    jne .sa_have_origin
+    mov [rbp - SA_ORIGIN], rcx
+.sa_have_origin:
 
     mov rdi, [rcx + PyTypeObject.tp_dict]
     test rdi, rdi
@@ -198,7 +204,7 @@ DEF_FUNC op_store_attr, SA_FRAME
     test edx, edx               ; the tag, not the payload: a hit may be int 0
     jnz .sa_found_in_type         ; found attr in type dict
 .sa_walk_next:
-    mov rcx, [rcx + PyTypeObject.tp_base]
+    MRO_NEXT rcx, [rbp - SA_ORIGIN]
     jmp .sa_walk_mro
 
 .sa_found_in_type:

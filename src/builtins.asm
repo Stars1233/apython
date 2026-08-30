@@ -960,14 +960,14 @@ DEF_FUNC builtin_isinstance
     jne .isinstance_type_error
 
 .isinstance_check:
-    ; Walk the full type chain: rdx = current type, rcx = target type
-    mov rax, rdx               ; save original obj type
-.isinstance_walk:
-    cmp rdx, rcx
-    je .isinstance_true
-    mov rdx, [rdx + PyTypeObject.tp_base]
-    test rdx, rdx
-    jnz .isinstance_walk
+    ; The MRO, not the tp_base chain: a class with several bases is an
+    ; instance of all of them.
+    extern type_is_subtype
+    mov rdi, rdx
+    mov rsi, rcx
+    call type_is_subtype
+    test eax, eax
+    jnz .isinstance_true
     jmp .isinstance_false
 
 .isinstance_tuple:
@@ -980,16 +980,17 @@ DEF_FUNC builtin_isinstance
 .isinstance_tuple_loop:
     cmp r8, rcx
     jge .isinstance_false
-    mov rdx, r12               ; reset to obj's type
     push rcx
     push r8
-    mov rcx, [rsi + r8*8]           ; type from tuple
-.isinstance_tuple_walk:
-    cmp rdx, rcx
-    je .isinstance_tuple_match
-    mov rdx, [rdx + PyTypeObject.tp_base]
-    test rdx, rdx
-    jnz .isinstance_tuple_walk
+    push rsi
+    push rsi                   ; keep the stack 16-byte aligned
+    mov rdi, r12               ; obj's type
+    mov rsi, [rsi + r8*8]      ; type from tuple
+    call type_is_subtype
+    pop rsi
+    pop rsi
+    test eax, eax
+    jnz .isinstance_tuple_match
     pop r8
     pop rcx
     inc r8
@@ -1084,13 +1085,13 @@ DEF_FUNC builtin_issubclass
     cmp rax, r10
     jne .issubclass_arg2_error
 
-    ; Single type check: walk rdx -> tp_base chain looking for rcx
+    ; Single type check, over the MRO
 .issubclass_walk:
-    cmp rdx, rcx
-    je .issubclass_true
-    mov rdx, [rdx + PyTypeObject.tp_base]
-    test rdx, rdx
-    jnz .issubclass_walk
+    mov rdi, rdx
+    mov rsi, rcx
+    call type_is_subtype
+    test eax, eax
+    jnz .issubclass_true
     jmp .issubclass_false
 
 .issubclass_tuple:
@@ -1103,16 +1104,13 @@ DEF_FUNC builtin_issubclass
 .issubclass_tuple_loop:
     cmp r8, r13
     jge .issubclass_false
-    mov rdx, r12               ; reset to cls
-    mov rcx, [rsi + r8*8]     ; type from tuple
     push rsi
     push r8
-.issubclass_tuple_walk:
-    cmp rdx, rcx
-    je .issubclass_tuple_match
-    mov rdx, [rdx + PyTypeObject.tp_base]
-    test rdx, rdx
-    jnz .issubclass_tuple_walk
+    mov rdi, r12               ; cls
+    mov rsi, [rsi + r8*8]      ; type from tuple
+    call type_is_subtype
+    test eax, eax
+    jnz .issubclass_tuple_match
     pop r8
     pop rsi
     inc r8
@@ -1351,7 +1349,7 @@ DEF_FUNC builtin_float, BF_FRAME
 END_FUNC builtin_float
 
 ;; ============================================================================
-;; type_from_parts(rdi = name str, rsi = base type or NULL, rdx = namespace dict)
+;; type_from_parts(rdi = name str, rsi = bases tuple or NULL, rdx = namespace dict)
 ;;   -> rax = the new type object, one strong reference
 ;;
 ;; The heaptype construction shared by __build_class__ and the three-argument
@@ -1361,7 +1359,7 @@ END_FUNC builtin_float
 ;; it, printing <class ''> and then aborting with a double free.
 ;;
 ;; The frame is built by hand, not by DEF_FUNC's size argument, so that the
-;; body's [rbp-48] slot keeps meaning what it meant inside __build_class__.
+;; body's [rbp - TFP_BASE] slot keeps meaning what it meant inside __build_class__.
 ;; ============================================================================
 global type_from_parts
 DEF_FUNC type_from_parts
@@ -1372,9 +1370,40 @@ DEF_FUNC type_from_parts
     push r15
     sub rsp, 24
 
+TFP_BASE  equ 48            ; the layout base: the widest of the bases
+TFP_BASES equ 56            ; the bases tuple, or NULL
     mov r14, rdi                ; class name str
     mov r15, rdx                ; namespace dict, becomes tp_dict
-    mov [rbp-48], rsi           ; base type, or NULL
+    mov [rbp - TFP_BASES], rsi
+
+    ; The layout base is the widest base, not simply the first: `class
+    ; C(Mixin, list)` has to be laid out as a list.  Ties go to the earlier
+    ; base, which is what CPython's solid-base rule gives for the ordinary
+    ; single-inheritance case.
+    xor eax, eax                ; best base
+    test rsi, rsi
+    jz .tfp_base_done
+    mov rcx, [rsi + PyTupleObject.ob_size]
+    mov r8, [rsi + PyTupleObject.ob_item]
+    xor r9, r9
+    xor r10, r10                ; best basicsize
+.tfp_base_scan:
+    cmp r9, rcx
+    jge .tfp_base_done
+    mov r11, [r8 + r9*8]
+    test r11, r11
+    jz .tfp_base_next
+    mov rdx, [r11 + PyTypeObject.tp_basicsize]
+    cmp rdx, r10
+    jbe .tfp_base_next
+    mov r10, rdx
+    mov rax, r11
+.tfp_base_next:
+    inc r9
+    jmp .tfp_base_scan
+.tfp_base_done:
+    mov [rbp - TFP_BASE], rax   ; layout base, or NULL
+    mov rdx, r15                ; restore namespace (scan clobbered rdx)
 
     ; Allocate the type object (GC-tracked)
     mov edi, TYPE_OBJECT_SIZE
@@ -1404,7 +1433,7 @@ DEF_FUNC type_from_parts
     ; __slots__ classes already do.
     mov qword [r12 + PyTypeObject.tp_basicsize], PyInstanceObject_size
     mov qword [r12 + PyTypeObject.tp_dictoffset], PyInstanceObject.inst_dict
-    mov rax, [rbp-48]               ; base class
+    mov rax, [rbp - TFP_BASE]               ; base class
     test rax, rax
     jz .bc_layout_done
     ; If the base already has a dict slot -- another heaptype, or an int
@@ -1481,7 +1510,7 @@ DEF_FUNC type_from_parts
     call obj_incref
 
     ; === Parse __slots__ from class_dict ===
-    ; r12=type, r15=class_dict, [rbp-48]=base_class
+    ; r12=type, r15=class_dict, [rbp - TFP_BASE]=base_class
     lea rdi, [rel bc_slots_name]
     call str_from_cstr_heap
     push rax                        ; save __slots__ str
@@ -1607,30 +1636,72 @@ DEF_FUNC type_from_parts
     mov [r12 + PyTypeObject.tp_init], rbx
 
     ; Set tp_base: use explicit base class, or default to object_type
-    mov rax, [rbp-48]
+    mov rax, [rbp - TFP_BASE]
     test rax, rax
     jnz .bc_have_base
     lea rax, [rel object_type]
-    mov [rbp-48], rax           ; update saved base for later use
+    mov [rbp - TFP_BASE], rax           ; update saved base for later use
 .bc_have_base:
     mov [r12 + PyTypeObject.tp_base], rax
     mov rdi, rax
     call obj_incref
 
-    ; Inherit type flag subclass bits from base type
-    mov rax, [rbp-48]
-    mov rax, [rax + PyTypeObject.tp_flags]
-    ; The container bits were defined and set on the base types but never
-    ; inherited, so nothing downstream could tell a list subclass from any
-    ; other user class.
-    and rax, TYPE_FLAG_INT_SUBCLASS | TYPE_FLAG_STR_SUBCLASS | \
+    ; tp_bases and tp_mro.  With these in place a lookup or a subclass test
+    ; can see every base, not just the first.
+    mov rax, [rbp - TFP_BASES]
+    test rax, rax
+    jnz .bc_have_bases_tuple
+    ; No explicit bases: the linearization is (C, object).
+    mov edi, 1
+    extern tuple_new
+    call tuple_new
+    mov rcx, [rax + PyTupleObject.ob_item]
+    lea rdx, [rel object_type]
+    mov [rcx], rdx
+    mov rdi, rdx
+    mov [rbp - TFP_BASES], rax
+    call obj_incref
+    jmp .bc_bases_ready
+.bc_have_bases_tuple:
+    mov rdi, rax
+    call obj_incref
+.bc_bases_ready:
+    mov rax, [rbp - TFP_BASES]
+    mov [r12 + PyTypeObject.tp_bases], rax
+    mov rdi, r12
+    mov rsi, rax
+    extern mro_compute
+    call mro_compute
+    mov [r12 + PyTypeObject.tp_mro], rax
+
+    ; Inherit the family bits from every base, not only the layout one: a
+    ; `class C(Mixin, list)` is still a list subclass.  The container bits
+    ; were defined and set on the base types but never inherited at all, so
+    ; nothing downstream could tell a list subclass from any other class.
+    mov rax, [rbp - TFP_BASES]
+    mov rcx, [rax + PyTupleObject.ob_size]
+    mov r8, [rax + PyTupleObject.ob_item]
+    xor r9, r9
+    xor r10, r10
+.bc_flag_scan:
+    cmp r9, rcx
+    jge .bc_flags_done
+    mov r11, [r8 + r9*8]
+    test r11, r11
+    jz .bc_flag_next
+    or r10, [r11 + PyTypeObject.tp_flags]
+.bc_flag_next:
+    inc r9
+    jmp .bc_flag_scan
+.bc_flags_done:
+    and r10, TYPE_FLAG_INT_SUBCLASS | TYPE_FLAG_STR_SUBCLASS | \
              TYPE_FLAG_LIST_SUBCLASS | TYPE_FLAG_TUPLE_SUBCLASS | \
              TYPE_FLAG_DICT_SUBCLASS | TYPE_FLAG_SET_SUBCLASS
-    or [r12 + PyTypeObject.tp_flags], rax
+    or [r12 + PyTypeObject.tp_flags], r10
 
     ; If base is an exception type, inherit exception-compatible methods
     extern type_is_exc_subclass
-    mov rdi, [rbp-48]
+    mov rdi, [rbp - TFP_BASE]
     call type_is_exc_subclass
     test eax, eax
     jz .bc_check_int_sub
@@ -1682,7 +1753,7 @@ DEF_FUNC type_from_parts
 .bc_check_builtin_sub:
     ; Inherit the base's constructor (tp_new) for bytearray, memoryview and
     ; bytes subclasses.
-    mov rax, [rbp-48]              ; base class
+    mov rax, [rbp - TFP_BASE]              ; base class
     test rax, rax
     jz .bc_no_set_base
 
@@ -1721,7 +1792,7 @@ DEF_FUNC type_from_parts
     ; is not a container at all: d["k"] = 1 raised, because a heaptype's
     ; tp_as_mapping is NULL.  type_install_slots runs after this and
     ; overrides whichever ones the class defines for itself.
-    mov rax, [rbp-48]              ; base class
+    mov rax, [rbp - TFP_BASE]              ; base class
     mov rcx, [rax + PyTypeObject.tp_as_number]
     mov [r12 + PyTypeObject.tp_as_number], rcx
     mov rcx, [rax + PyTypeObject.tp_as_sequence]
@@ -1748,7 +1819,7 @@ DEF_FUNC type_from_parts
     call type_install_slots
 
     ; Call parent's __init_subclass__ if present
-    mov rax, [rbp-48]          ; base class
+    mov rax, [rbp - TFP_BASE]          ; base class
     test rax, rax
     jz .bc_no_init_subclass
 
@@ -1840,7 +1911,8 @@ DEF_FUNC builtin___build_class__
     push r13
     push r14
     push r15
-    sub rsp, 24             ; 3 slots: [rbp-48]=base_class, [rbp-56]=unused, [rbp-64]=align
+BCL_BASES equ 48        ; the bases tuple built from args[2:]
+    sub rsp, 24             ; [rbp-48] = bases tuple, rest padding
 
     ; Check nargs >= 2
     cmp rsi, 2
@@ -1849,20 +1921,43 @@ DEF_FUNC builtin___build_class__
     mov rbx, rdi            ; rbx = args
     ; r12 will be used later for the type object
 
-    ; Save base class if present (args[2])
+    ; Collect every base into a tuple.  Only args[2] used to be read, so
+    ; `class C(A, B)` silently produced a class that had never heard of B.
     xor eax, eax
+    mov [rbp - BCL_BASES], rax
     cmp rsi, 3
     jl .bc_no_base
-    mov rax, [rbx + 16]    ; base = args[2]
-
+    push rsi
+    lea rdi, [rsi - 2]      ; nbases
+    extern tuple_new
+    call tuple_new
+    pop rsi
+    mov [rbp - BCL_BASES], rax
+    mov r8, [rax + PyTupleObject.ob_item]
+    xor r9, r9
+.bc_base_copy:
+    lea rcx, [r9 + 2]
+    cmp rcx, rsi
+    jge .bc_no_base
+    mov rdx, [rbx + rcx*8]
     ; Prevent subclassing bool
     extern bool_type
     lea rcx, [rel bool_type]
-    cmp rax, rcx
+    cmp rdx, rcx
     je .build_class_bool_error
+    mov [r8 + r9*8], rdx
+    push rsi
+    push r8
+    push r9
+    mov rdi, rdx
+    call obj_incref
+    pop r9
+    pop r8
+    pop rsi
+    inc r9
+    jmp .bc_base_copy
 
 .bc_no_base:
-    mov [rbp-48], rax       ; save base_class (or NULL)
 
     mov r13, [rbx]          ; r13 = body_func (args[0])
     mov r14, [rbx + 8]     ; r14 = class_name (args[1])
@@ -1895,12 +1990,19 @@ DEF_FUNC builtin___build_class__
     mov rdi, r12
     call frame_free
 
-    ; Build the heaptype from (name, base, namespace); the three-argument
+    ; Build the heaptype from (name, bases, namespace); the three-argument
     ; type() reaches the same code.
     mov rdi, r14
-    mov rsi, [rbp-48]
+    mov rsi, [rbp - BCL_BASES]
     mov rdx, r15
     call type_from_parts
+    push rax
+    mov rdi, [rbp - BCL_BASES]
+    test rdi, rdi
+    jz .bc_bases_released
+    call obj_decref         ; type_from_parts took its own reference
+.bc_bases_released:
+    pop rax
 
     add rsp, 24
     pop r15

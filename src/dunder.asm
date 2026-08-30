@@ -41,9 +41,10 @@ DEF_FUNC dunder_lookup
     push rbx
     push r12
     push r13
-    push r14                ; alignment
+    push r14                ; holds the origin type
 
-    mov rbx, rdi            ; rbx = type (walks chain)
+    mov rbx, rdi            ; rbx = type (walks the MRO)
+    mov r14, rdi            ; r14 = origin of the walk
     mov r12, rsi            ; r12 = name C string
 
     ; Create PyStrObject from C string for dict lookup (heap — dict key, DECREFed)
@@ -67,7 +68,7 @@ DEF_FUNC dunder_lookup
     jnz .found
 
 .try_base:
-    mov rbx, [rbx + PyTypeObject.tp_base]
+    MRO_NEXT rbx, r14
     jmp .walk
 
 .found:

@@ -2875,7 +2875,8 @@ MC_RESULT    equ 40
 MC_MATCHARGS equ 48
 MC_IDX       equ 56
 MC_SUBJ_TAG  equ 64
-MC_FRAME     equ 72
+MC_ORIGIN    equ 72   ; the subject's type, for the __match_args__ walk
+MC_FRAME     equ 88
 
 extern none_type
 extern str_type
@@ -2917,14 +2918,14 @@ DEF_FUNC op_match_class, MC_FRAME
     lea rdx, [rel float_type]
 
 .mc_got_type:
-    ; rdx = subject's type, walk tp_base chain vs class
-    mov rcx, [rbp - MC_CLASS]
-.mc_isinstance_walk:
-    cmp rdx, rcx
-    je .mc_isinstance_ok
-    mov rdx, [rdx + PyTypeObject.tp_base]
-    test rdx, rdx
-    jnz .mc_isinstance_walk
+    ; rdx = subject's type; the test is over its MRO, not its tp_base chain
+    mov [rbp - MC_ORIGIN], rdx
+    mov rdi, rdx
+    mov rsi, [rbp - MC_CLASS]
+    extern type_is_subtype
+    call type_is_subtype
+    test eax, eax
+    jnz .mc_isinstance_ok
     ; Not an instance of class — fail
     jmp .mc_fail
 
@@ -2964,7 +2965,7 @@ DEF_FUNC op_match_class, MC_FRAME
     jnz .mc_matchargs_found
 
 .mc_matchargs_next_base:
-    mov r8, [r8 + PyTypeObject.tp_base]
+    MRO_NEXT r8, [rbp - MC_ORIGIN]
     test r8, r8
     jnz .mc_matchargs_walk
 

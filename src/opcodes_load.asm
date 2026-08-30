@@ -70,7 +70,8 @@ LSA_FLAG     equ 32
 LSA_ATTR_TAG equ 40
 LSA_ATTR     equ 48
 LSA_BIND     equ 56
-LSA_FRAME    equ 64
+LSA_ORIGIN   equ 64      ; the MRO super() searches: the instance's, not the class's
+LSA_FRAME    equ 80
 
 ;; ============================================================================
 ;; op_load_const - Load constant from co_consts[arg]
@@ -1023,9 +1024,37 @@ DEF_FUNC op_load_super_attr, LSA_FRAME
     VPOP rdi              ; global_super -- DECREF and discard
     DECREF_V rdi, rsi
 
-    ; Walk from class->tp_base up the chain looking for name
-    mov rax, [rbp - LSA_CLASS]     ; class
-    mov rax, [rax + PyTypeObject.tp_base]
+    ; super() searches the *instance's* MRO starting just past the class the
+    ; method was defined in -- that is the whole point of it in a diamond,
+    ; and following the defining class's own tp_base chain skipped the
+    ; sibling branch entirely.
+    extern type_is_subtype
+    mov rdi, [rbp - LSA_SELF]
+    mov rdi, [rdi + PyObject.ob_type]
+    mov rsi, [rbp - LSA_CLASS]
+    call type_is_subtype
+    test eax, eax
+    jz .lsa_origin_try_self
+    mov rax, [rbp - LSA_SELF]
+    mov rax, [rax + PyObject.ob_type]
+    jmp .lsa_have_origin
+.lsa_origin_try_self:
+    ; A classmethod gets the class itself as the second argument.
+    mov rdi, [rbp - LSA_SELF]
+    mov rsi, [rbp - LSA_CLASS]
+    call type_is_subtype
+    test eax, eax
+    jz .lsa_origin_class
+    mov rax, [rbp - LSA_SELF]
+    jmp .lsa_have_origin
+.lsa_origin_class:
+    mov rax, [rbp - LSA_CLASS]
+.lsa_have_origin:
+    mov [rbp - LSA_ORIGIN], rax
+    mov rdi, rax
+    mov rsi, [rbp - LSA_CLASS]
+    extern type_mro_next
+    call type_mro_next
     test rax, rax
     jz .lsa_not_found
 
@@ -1046,7 +1075,8 @@ DEF_FUNC op_load_super_attr, LSA_FRAME
     jnz .lsa_found
 
 .lsa_next_base:
-    mov rax, [rcx + PyTypeObject.tp_base]
+    MRO_NEXT rcx, [rbp - LSA_ORIGIN]
+    mov rax, rcx
     test rax, rax
     jnz .lsa_walk
 

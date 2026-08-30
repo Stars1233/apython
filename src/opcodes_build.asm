@@ -946,6 +946,12 @@ END_FUNC op_get_iter
 align 16
 DEF_FUNC_BARE op_for_iter
     push rcx                   ; save jump offset on machine stack
+    ; Snapshot what was pending before the step.  current_exception doubles
+    ; as "the exception being handled", so inside an `except` block it is
+    ; non-NULL for reasons that have nothing to do with this iterator; only
+    ; a *change* across the call means the iterator raised.
+    extern current_exception
+    push qword [rel current_exception]
 
     ; Peek at iterator (don't pop yet)
     VPEEK rdi
@@ -999,14 +1005,15 @@ DEF_FUNC_BARE op_for_iter
     jnz .next_got_value
 
 .next_null:
-    ; A NULL result means exhaustion only when nothing is pending.  This
-    ; check used to guard the __next__ path alone, so an exception raised
-    ; inside a *generator* -- which has a real tp_iternext -- ended the loop
-    ; silently and surfaced only at interpreter exit.
-    extern current_exception
+    ; A NULL result means exhaustion unless the step left a *new* exception.
+    ; This check used to guard the __next__ path alone, so an exception
+    ; raised inside a *generator* -- which has a real tp_iternext -- ended
+    ; the loop silently and surfaced only at interpreter exit.
     mov rax, [rel current_exception]
+    cmp rax, [rsp]             ; unchanged from before the step?
+    je .exhausted
     test rax, rax
-    jz .exhausted              ; clean exhaustion
+    jz .exhausted
 
     extern exc_StopIteration_type
     mov rcx, [rax + PyObject.ob_type]
@@ -1014,14 +1021,16 @@ DEF_FUNC_BARE op_for_iter
     cmp rcx, rdx
     jne .next_propagate        ; a real error ends the loop by raising
 
-    ; A StopIteration reaching here is the exhaustion signal itself.
+    ; A StopIteration reaching here is the exhaustion signal itself; put back
+    ; whatever was being handled before.
     mov rdi, rax
     call obj_decref
-    mov qword [rel current_exception], 0
+    mov rax, [rsp]
+    mov [rel current_exception], rax
     jmp .exhausted
 
 .next_propagate:
-    add rsp, 8                 ; discard the saved jump offset
+    add rsp, 16                ; discard the saved exception and jump offset
     mov [rel eval_saved_r13], r13
     extern eval_exception_unwind
     jmp eval_exception_unwind
@@ -1029,7 +1038,7 @@ DEF_FUNC_BARE op_for_iter
 .next_got_value:
 
     ; Got a value - push it (iterator stays on stack)
-    add rsp, 8                 ; discard saved jump offset
+    add rsp, 16                ; discard saved exception and jump offset
     VPUSH_VAL rax, rdx
 
     ; Skip 1 CACHE entry = 2 bytes
@@ -1039,6 +1048,7 @@ DEF_FUNC_BARE op_for_iter
 .exhausted:
     ; CPython 3.12: FOR_ITER exhausted pops the iterator and jumps by (arg + 1)
     ; instruction words past the CACHE. The +1 skips the END_FOR instruction.
+    add rsp, 8                 ; drop the saved exception snapshot
     pop rcx                    ; restore jump offset
     lea rcx, [rcx + 1]        ; arg + 1 (skip END_FOR too)
     add rbx, 2                 ; skip cache first

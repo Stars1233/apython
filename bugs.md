@@ -217,10 +217,10 @@ the Makefile and `check-cpython` enforces all 64 files.
 
 ### Known, not fixed
 
-- **Multiple inheritance does not exist.**  `__build_class__` reads only
-  `args[2]`, so `class C(A, B)` produces a class that has never heard of B
-  and `c.b()` is an AttributeError -- silently, which is the worst shape.
-  Needs a C3 MRO.
+- A heaptype's layout base is the widest of its bases, not CPython's solid
+  base.  `class C(A, B)` where A and B are unrelated builtin subclasses of
+  different layouts is accepted and laid out as the wider one, where CPython
+  raises "multiple bases have instance lay-out conflict".
 - **Recursive deallocation overflows the stack**: `a=[]`, then 300k times
   `a=[a]`, then `del a`.  Needs a trashcan mechanism.
 - **Crafted `.pyc` and `_sre` bytecode are trusted.**  Marshal validates
