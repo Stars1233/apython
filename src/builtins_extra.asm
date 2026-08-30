@@ -2735,6 +2735,23 @@ DEF_FUNC builtin_getattr
     ret
 
 .getattr_not_found:
+    ; The attributes every object has, same tail LOAD_ATTR uses.
+    mov rdi, [rbx]              ; args[0] as a Value
+    mov rsi, r14                ; name str
+    extern obj_generic_attr
+    call obj_generic_attr
+    test rax, rax
+    jz .getattr_really_missing
+    mov edx, TAG_PTR
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    V_PACK rax, rdx
+    ret
+
+.getattr_really_missing:
     cmp r12, 3
     jne .getattr_raise
 
@@ -2854,6 +2871,25 @@ DEF_FUNC builtin_hasattr
     ret
 
 .hasattr_not_found:
+    mov rdi, [rbx]
+    mov rsi, r13
+    call obj_generic_attr
+    test rax, rax
+    jz .hasattr_definitely_not
+    mov rdi, rax
+    call obj_decref
+    lea rax, [rel bool_true]
+    inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
+    add rsp, 8
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    V_PACK rax, rdx
+    ret
+
+.hasattr_definitely_not:
     lea rax, [rel bool_false]
     inc qword [rax + PyObject.ob_refcnt]
     mov edx, TAG_PTR

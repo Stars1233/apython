@@ -211,6 +211,11 @@ DEF_FUNC gc_track
 
     ; gc = obj - GC_HEAD_SIZE
     lea rdi, [rbx - GC_HEAD_SIZE]
+    ; Already in a list?  Appending a second time makes the node's own links
+    ; point into two places at once, and the next removal writes through the
+    ; stale pair -- an arbitrary 8-byte store into freed memory.
+    cmp qword [rdi + PyGC_Head.gc_next], 0
+    jne .already_tracked
     ; Append to gen0 list
     lea rsi, [rel gc_gen0]
     call gc_list_append
@@ -237,6 +242,11 @@ DEF_FUNC gc_track
     pop rbx
     leave
     ret
+
+.already_tracked:
+    pop rbx
+    leave
+    ret
 END_FUNC gc_track
 
 ; ============================================================================
@@ -252,6 +262,14 @@ DEF_FUNC gc_untrack
     je .not_tracked
 
     call gc_list_remove
+
+    ; Mark the node untracked.  gc_list_remove only fixes up the neighbours;
+    ; it leaves this node's own links pointing into the list.  Every "is it
+    ; tracked?" test in the collector and in gc_dealloc reads gc_next, so a
+    ; stale one made a second untrack unlink a node that was no longer in any
+    ; list -- writing through pointers into freed memory.
+    mov qword [rdi + PyGC_Head.gc_next], 0
+    mov qword [rdi + PyGC_Head.gc_prev], 0
 
     ; We don't track which gen it's in, so decrement gen0 count
     ; (approximate — during collection, counts are managed differently)
@@ -889,16 +907,24 @@ DEF_FUNC dict_clear_gc
     pop r13
     pop r12
 
-    ; Clear entry
+    ; Clear entry.  It has to become a *tombstone*, not just a zeroed key:
+    ; ENTRY_CLASSIFY reads key==0 with any hash other than -1 as "empty",
+    ; which ends a probe early, so a surviving key further along the chain
+    ; becomes unreachable.
     mov qword [r12 + DictEntry.key], 0
     mov qword [r12 + DictEntry.value], 0
+    mov qword [r12 + DictEntry.hash], ENTRY_TOMBSTONE_HASH
 
 .next:
     add r12, DICT_ENTRY_SIZE
     test r13, r13
     jnz .loop
 .done:
+    ; Keep the header coherent with the table we just emptied.
+    mov rax, [rbx + PyDictObject.ob_size]
+    add [rbx + PyDictObject.dk_tombstones], rax
     mov qword [rbx + PyDictObject.ob_size], 0
+    inc qword [rbx + PyDictObject.dk_version]
 
     pop r13
     pop r12

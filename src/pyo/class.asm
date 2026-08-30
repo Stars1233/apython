@@ -3,6 +3,7 @@
 
 %include "macros.inc"
 %include "object.inc"
+%include "builtins.inc"
 %include "types.inc"
 %include "frame.inc"
 
@@ -876,16 +877,42 @@ DEF_FUNC instance_repr, IR_FRAME
     mov rbx, rdi
     DUNDER_EXC_SAVE [rbp - IR_EXC]
 
-    ; Try __repr__ dunder
+    ; Try __repr__ dunder.  object.__repr__ lives in object_type's dict now,
+    ; so the MRO search finds it for *every* class -- but it is the default,
+    ; not an override, and taking it would print "<L object>" for a list
+    ; subclass instead of the list.  Skip it and let the base slot answer.
     extern dunder_repr
     extern dunder_call_1
+    extern dunder_lookup
+    mov rdi, [rbx + PyObject.ob_type]
     lea rsi, [rel dunder_repr]
-    ; r12 is callee-saved and still holds eval frame from caller chain
+    call dunder_lookup
+    V_UNPACK rax, rdx
+    test edx, edx
+    jz .ir_no_dunder
+    extern object_method_repr
+    extern builtin_func_type
+    cmp edx, TAG_PTR
+    jne .ir_call_dunder
+    mov rcx, [rax + PyObject.ob_type]
+    lea r8, [rel builtin_func_type]
+    cmp rcx, r8
+    jne .ir_call_dunder
+    mov rcx, [rax + PyBuiltinObject.func_ptr]
+    lea r8, [rel object_method_repr]
+    cmp rcx, r8
+    je .ir_no_dunder            ; the inherited default: not an override
+
+.ir_call_dunder:
+    mov rdi, rbx
+    lea rsi, [rel dunder_repr]
     call dunder_call_1
     V_UNPACK rax, rdx           ; returns a Value
     test edx, edx
     jnz .done
     DUNDER_RAISED [rbp - IR_EXC], .failed   ; __repr__ ran and raised
+
+.ir_no_dunder:
 
     ; No __repr__.  If a builtin lies under this class, use its repr: a
     ; list subclass should print as a list.
@@ -936,14 +963,38 @@ DEF_FUNC instance_str, IS_FRAME
     mov rbx, rdi
     DUNDER_EXC_SAVE [rbp - IS_EXC]
 
-    ; Try __str__ dunder
+    ; Try __str__ dunder, skipping the inherited object.__str__ default for
+    ; the same reason instance_repr does: taking it would print a str
+    ; subclass as its repr instead of its text.
     extern dunder_str
+    extern object_method_str
+    mov rdi, [rbx + PyObject.ob_type]
+    lea rsi, [rel dunder_str]
+    call dunder_lookup
+    V_UNPACK rax, rdx
+    test edx, edx
+    jz .is_no_dunder
+    cmp edx, TAG_PTR
+    jne .is_call_dunder
+    mov rcx, [rax + PyObject.ob_type]
+    lea r8, [rel builtin_func_type]
+    cmp rcx, r8
+    jne .is_call_dunder
+    mov rcx, [rax + PyBuiltinObject.func_ptr]
+    lea r8, [rel object_method_str]
+    cmp rcx, r8
+    je .is_no_dunder
+
+.is_call_dunder:
+    mov rdi, rbx
     lea rsi, [rel dunder_str]
     call dunder_call_1
     V_UNPACK rax, rdx           ; returns a Value
     test edx, edx
     jnz .done
     DUNDER_RAISED [rbp - IS_EXC], .failed   ; __str__ ran and raised
+
+.is_no_dunder:
 
     ; No __str__.  Prefer the underlying builtin's tp_str, then __repr__.
     mov rdi, [rbx + PyObject.ob_type]
@@ -1583,6 +1634,12 @@ DEF_FUNC type_getattr, TGA_FRAME
     jz .tga_return_name
 
     lea rdi, [rbx + PyStrObject.data]
+    CSTRING rsi, "__dict__"
+    call ap_strcmp
+    test eax, eax
+    jz .tga_return_dict
+
+    lea rdi, [rbx + PyStrObject.data]
     CSTRING rsi, "__mro__"
     call ap_strcmp
     test eax, eax
@@ -1611,6 +1668,28 @@ DEF_FUNC type_getattr, TGA_FRAME
     test r12, r12
     jnz .tga_walk
     jmp .tga_not_found
+
+.tga_return_dict:
+    ; A class dict is exposed read-only, as CPython does: types.py takes
+    ; MappingProxyType straight out of `type(type.__dict__)`, so the wrapper
+    ; has to exist and be its own type.  A static type may have no tp_dict
+    ; at all; give it an empty one rather than reporting no __dict__.
+    mov r12, [rbp - TGA_ORIGIN]
+    mov rdi, [r12 + PyTypeObject.tp_dict]
+    test rdi, rdi
+    jnz .tga_have_tp_dict
+    extern dict_new
+    call dict_new
+    mov [r12 + PyTypeObject.tp_dict], rax
+    mov rdi, rax
+.tga_have_tp_dict:
+    extern mappingproxy_new
+    call mappingproxy_new
+    mov edx, TAG_PTR
+    pop r12
+    pop rbx
+    leave
+    ret
 
 .tga_return_mro:
     mov rax, [rbp - TGA_ORIGIN]
@@ -1717,8 +1796,23 @@ DEF_FUNC type_getattr, TGA_FRAME
     ret
 
 .tga_return_name:
-    ; Return str from tp_name (C string)
+    ; __name__ is the last dotted component of tp_name: CPython stores
+    ; "types.GenericAlias" but reports "GenericAlias", keeping the qualified
+    ; form for the repr.
     mov rdi, [r12 + PyTypeObject.tp_name]
+    mov rsi, rdi
+    xor ecx, ecx
+.tga_name_scan:
+    movzx eax, byte [rsi + rcx]
+    test al, al
+    jz .tga_name_done
+    cmp al, '.'
+    jne .tga_name_next
+    lea rdi, [rsi + rcx + 1]
+.tga_name_next:
+    inc rcx
+    jmp .tga_name_scan
+.tga_name_done:
     call str_from_cstr
     pop r12
     pop rbx

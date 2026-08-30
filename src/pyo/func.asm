@@ -748,6 +748,8 @@ END_FUNC func_setattr
 ; rdi = function, rsi = name
 ; ---------------------------------------------------------------------------
 extern ap_strcmp
+extern str_type
+extern str_from_cstr_heap
 DEF_FUNC func_getattr
     push rbx
     push r12
@@ -782,6 +784,41 @@ DEF_FUNC func_getattr
     call ap_strcmp
     test eax, eax
     jz .return_code
+
+    ; Check for __defaults__
+    lea rdi, [rel fn_attr_defaults]
+    lea rsi, [r12 + PyStrObject.data]
+    call ap_strcmp
+    test eax, eax
+    jz .return_defaults
+
+    ; Check for __closure__
+    lea rdi, [rel fn_attr_closure]
+    lea rsi, [r12 + PyStrObject.data]
+    call ap_strcmp
+    test eax, eax
+    jz .return_closure
+
+    ; Check for __globals__
+    lea rdi, [rel fn_attr_globals]
+    lea rsi, [r12 + PyStrObject.data]
+    call ap_strcmp
+    test eax, eax
+    jz .return_globals
+
+    ; Check for __doc__
+    lea rdi, [rel fn_attr_doc]
+    lea rsi, [r12 + PyStrObject.data]
+    call ap_strcmp
+    test eax, eax
+    jz .return_doc
+
+    ; Check for __module__
+    lea rdi, [rel fn_attr_module]
+    lea rsi, [r12 + PyStrObject.data]
+    call ap_strcmp
+    test eax, eax
+    jz .return_module
 
     ; Check for __dict__
     lea rdi, [rel fn_attr_dict]
@@ -848,6 +885,80 @@ DEF_FUNC func_getattr
     leave
     V_PACK rax, rdx             ; return one Value
     ret
+
+.return_defaults:
+    ; The field was always there; nothing exposed it.
+    mov rax, [rbx + PyFuncObject.func_defaults]
+    jmp .return_or_none
+
+.return_closure:
+    mov rax, [rbx + PyFuncObject.func_closure]
+    jmp .return_or_none
+
+.return_globals:
+    mov rax, [rbx + PyFuncObject.func_globals]
+    jmp .return_or_none
+
+.return_or_none:
+    test rax, rax
+    jnz .return_ptr_attr
+    lea rax, [rel none_singleton]
+.return_ptr_attr:
+    INCREF rax
+    mov edx, TAG_PTR
+    pop r12
+    pop rbx
+    leave
+    V_PACK rax, rdx
+    ret
+
+.return_doc:
+    ; A docstring is co_consts[0] when it is a string, exactly as CPython
+    ; builds __doc__ at function creation.
+    mov rax, [rbx + PyFuncObject.func_code]
+    test rax, rax
+    jz .doc_none
+    mov rax, [rax + PyCodeObject.co_consts]
+    test rax, rax
+    jz .doc_none
+    cmp qword [rax + PyTupleObject.ob_size], 0
+    jle .doc_none
+    mov rax, [rax + PyTupleObject.ob_item]
+    mov rax, [rax]
+    V_TEST_PTR rax, rcx
+    ja .doc_none
+    test rax, rax
+    jz .doc_none
+    mov rcx, [rax + PyObject.ob_type]
+    lea rdx, [rel str_type]
+    cmp rcx, rdx
+    jne .doc_none
+    jmp .return_ptr_attr
+.doc_none:
+    lea rax, [rel none_singleton]
+    jmp .return_ptr_attr
+
+.return_module:
+    ; The defining module's __name__, out of the function's globals.
+    mov rdi, [rbx + PyFuncObject.func_globals]
+    test rdi, rdi
+    jz .doc_none
+    lea rdi, [rel fn_dunder_name_key]
+    call str_from_cstr_heap
+    push rax
+    mov rdi, [rbx + PyFuncObject.func_globals]
+    mov rsi, rax
+    call dict_get
+    V_UNPACK rax, rdx
+    pop rdi
+    push rax
+    push rdx
+    call obj_decref
+    pop rdx
+    pop rax
+    test edx, edx
+    jz .doc_none
+    jmp .return_ptr_attr
 
 .return_code:
     mov rax, [rbx + PyFuncObject.func_code]
@@ -1103,6 +1214,12 @@ fn_attr_dict:   db "__dict__", 0
 fn_attr_code:   db "__code__", 0
 fn_attr_kwdefaults: db "__kwdefaults__", 0
 fn_attr_qualname: db "__qualname__", 0
+fn_attr_defaults: db "__defaults__", 0
+fn_attr_closure: db "__closure__", 0
+fn_attr_globals: db "__globals__", 0
+fn_attr_doc:    db "__doc__", 0
+fn_attr_module: db "__module__", 0
+fn_dunder_name_key: db "__name__", 0
 
 ; func_type - Type object for function objects
 align 8

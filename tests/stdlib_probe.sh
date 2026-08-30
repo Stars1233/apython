@@ -119,6 +119,7 @@ if [ "${1:-}" = "--record" ]; then
         echo "# Regenerate with: bash tests/stdlib_probe.sh --record"
         echo "# A module listed here must keep importing; crashes must not rise."
         echo "crash_ceiling $CRASH"
+        grep -E ' (CRASH|HANG)$' "$RESULTS" | awk '{print "crash " $1}' | sort
         grep ' OK$' "$RESULTS" | awk '{print "ok " $1}' | sort
     } > "$FLOOR"
     echo
@@ -153,16 +154,25 @@ if [ -n "$REGRESSED" ]; then
     echo
     rc=1
 fi
-if [ "$CRASH" -gt "$CEILING" ]; then
+# The crash *set* is recorded, not just the count: a module that starts
+# crashing must be caught even if another stopped.
+awk '/^crash /{print $2}' "$FLOOR" | sort > "$WORK/floor_crash.txt"
+grep -E ' (CRASH|HANG)$' "$RESULTS" | awk '{print $1}' | sort > "$WORK/now_crash.txt"
+NEWCRASH=$(comm -13 "$WORK/floor_crash.txt" "$WORK/now_crash.txt")
+FIXEDCRASH=$(comm -23 "$WORK/floor_crash.txt" "$WORK/now_crash.txt")
+if [ -n "$NEWCRASH" ]; then
     echo
-    echo -e "${RED}CRASHES ROSE${NC} — $CRASH now, ceiling is $CEILING:"
-    grep -E ' (CRASH|HANG)$' "$RESULTS" | awk '{print $1}' \
-        | tr '\n' ' ' | fold -s -w 76 | sed 's/^/  /'
+    echo -e "${RED}NEW CRASHES${NC} — these did not crash before:"
+    echo "$NEWCRASH" | tr '\n' ' ' | fold -s -w 76 | sed 's/^/  /'
     echo
     rc=1
-elif [ "$CRASH" -lt "$CEILING" ]; then
+fi
+if [ -n "$FIXEDCRASH" ]; then
     echo
-    echo -e "${GREEN}crashes fell${NC}: $CRASH, ceiling was $CEILING (record to tighten)"
+    echo -e "${GREEN}no longer crashing${NC}:"
+    echo "$FIXEDCRASH" | tr '\n' ' ' | fold -s -w 76 | sed 's/^/  /'
+    echo
+    echo "  (record to tighten)"
 fi
 
 if [ $rc -eq 0 ]; then

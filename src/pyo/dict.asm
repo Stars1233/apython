@@ -877,6 +877,7 @@ END_FUNC dict_dealloc
 ;; dict_len(PyObject *self) -> int64_t
 ;; Returns ob_size (number of items)
 ;; ============================================================================
+global dict_len
 dict_len:
     mov rax, [rdi + PyDictObject.ob_size]
     ret

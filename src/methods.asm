@@ -6764,6 +6764,144 @@ DEF_FUNC dict_method_copy
     ret
 END_FUNC dict_method_copy
 
+;; add_class_getitem(rdi = type dict)
+;; PEP 585: list[int] and friends.  The __class_getitem__ path in
+;; op_binary_subscr is already wired for type objects; what was missing was an
+;; entry to find.  _collections_abc takes GenericAlias from `type(list[int])`.
+DEF_FUNC_LOCAL add_class_getitem
+    push rbx
+    push r12
+    mov rbx, rdi
+    extern generic_alias_class_getitem
+    lea rdi, [rel generic_alias_class_getitem]
+    lea rsi, [rel mn___class_getitem__]
+    call builtin_func_new
+    push rax
+    mov edi, PyClassMethodObject_size
+    lea rsi, [rel classmethod_type]
+    call gc_alloc
+    pop rcx
+    mov [rax + PyClassMethodObject.cm_callable], rcx
+    mov r12, rax
+    mov rdi, rax
+    call gc_track
+    lea rdi, [rel mn___class_getitem__]
+    call str_from_cstr_heap
+    push rax
+    mov rdi, rbx
+    mov rsi, rax
+    mov rdx, r12
+    call dict_set
+    pop rdi
+    call obj_decref
+    mov rdi, r12
+    call obj_decref
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC add_class_getitem
+
+;; ============================================================================
+;; object.__init__ / __str__ / __repr__
+;;
+;; object_type.tp_dict held only __new__.  types.py builds its type zoo out of
+;; `type(object.__init__)` and `type(object().__str__)`, so these have to be
+;; reachable before it can import -- and `super().__init__()` in a class that
+;; derives straight from object needs the first one anyway.
+;; ============================================================================
+extern str_from_cstr
+DEF_FUNC object_method_init
+    ; object.__init__(self, ...) accepts anything and does nothing.
+    lea rax, [rel none_singleton]
+    inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
+    leave
+    V_PACK rax, rdx
+    ret
+END_FUNC object_method_init
+
+DEF_FUNC object_method_str
+    ; object.__str__ defers to __repr__, which is what CPython does.  It must
+    ; not call obj_str: that dispatches back to tp_str, which looks up
+    ; __str__, which finds this again.
+    test rsi, rsi
+    jz .oms_bad
+    mov rdi, [rdi]
+    extern obj_repr
+    call obj_repr
+    leave
+    ret
+.oms_bad:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "__str__() takes exactly one argument"
+    call raise_exception
+END_FUNC object_method_str
+
+;; object.__repr__ is the *default* implementation, not a re-dispatch: it
+;; writes "<Name object>" straight out.  Calling obj_repr here would come
+;; back through tp_repr to this same method.
+OMR_BUF   equ 136
+OMR_FRAME equ 160
+DEF_FUNC object_method_repr, OMR_FRAME
+    test rsi, rsi
+    jz .omr_bad
+    mov rdi, [rdi]
+    V_TEST_PTR rdi, rax
+    ja .omr_plain
+    test rdi, rdi
+    jz .omr_plain
+    mov rsi, [rdi + PyObject.ob_type]
+    mov rsi, [rsi + PyTypeObject.tp_name]
+    test rsi, rsi
+    jz .omr_plain
+
+    lea rdi, [rbp - OMR_BUF]
+    xor ecx, ecx
+    mov byte [rdi], '<'
+    inc rcx
+.omr_name:
+    movzx eax, byte [rsi]
+    test al, al
+    jz .omr_tail
+    inc rsi
+    cmp rcx, 100
+    jae .omr_tail
+    mov [rdi + rcx], al
+    inc rcx
+    jmp .omr_name
+.omr_tail:
+    CSTRING rsi, " object>"
+.omr_tail_copy:
+    movzx eax, byte [rsi]
+    test al, al
+    jz .omr_emit
+    inc rsi
+    mov [rdi + rcx], al
+    inc rcx
+    jmp .omr_tail_copy
+.omr_emit:
+    mov byte [rdi + rcx], 0
+    call str_from_cstr
+    mov edx, TAG_PTR
+    leave
+    V_PACK rax, rdx
+    ret
+
+.omr_plain:
+    CSTRING rdi, "<object>"
+    call str_from_cstr
+    mov edx, TAG_PTR
+    leave
+    V_PACK rax, rdx
+    ret
+
+.omr_bad:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "__repr__() takes exactly one argument"
+    call raise_exception
+END_FUNC object_method_repr
+
 ;; ============================================================================
 ;; dict_classmethod_fromkeys(args, nargs) -> new dict
 ;; args[0]=cls (type), args[1]=iterable, optional args[2]=value (default None)
@@ -10552,6 +10690,9 @@ DEF_FUNC methods_init
     mov rdi, rbx
     call add_new_staticmethod
 
+    mov rdi, rbx
+    call add_class_getitem
+
     ; Store in list_type.tp_dict
     lea rax, [rel list_type]
     mov [rax + PyTypeObject.tp_dict], rbx
@@ -10658,6 +10799,9 @@ DEF_FUNC methods_init
     mov rdi, rbx
     call add_new_staticmethod
 
+    mov rdi, rbx
+    call add_class_getitem
+
     ; Store in dict_type.tp_dict
     lea rax, [rel dict_type]
     mov [rax + PyTypeObject.tp_dict], rbx
@@ -10726,6 +10870,9 @@ DEF_FUNC methods_init
 
     mov rdi, rbx
     call add_new_staticmethod
+
+    mov rdi, rbx
+    call add_class_getitem
 
     ; Store in tuple_type.tp_dict
     lea rax, [rel tuple_type]
@@ -10817,6 +10964,9 @@ DEF_FUNC methods_init
     mov rdi, rbx
     call add_new_staticmethod
 
+    mov rdi, rbx
+    call add_class_getitem
+
     ; Store in set_type.tp_dict
     lea rax, [rel set_type]
     mov [rax + PyTypeObject.tp_dict], rbx
@@ -10862,8 +11012,74 @@ DEF_FUNC methods_init
     pop rdi
     call obj_decref
 
+    ; __init__, __str__ and __repr__ so the base type is introspectable
+    mov rdi, rbx
+    lea rsi, [rel mn___init__]
+    lea rdx, [rel object_method_init]
+    call add_method_to_dict
+
+    mov rdi, rbx
+    lea rsi, [rel mn___str__]
+    lea rdx, [rel object_method_str]
+    call add_method_to_dict
+
+    mov rdi, rbx
+    lea rsi, [rel mn___repr__]
+    lea rdx, [rel object_method_repr]
+    call add_method_to_dict
+
     ; Store in object_type.tp_dict
     lea rax, [rel object_type]
+    mov [rax + PyTypeObject.tp_dict], rbx
+
+    ;; --- function type: expose its introspection attributes on the type ---
+    ;; types.py takes GetSetDescriptorType from `type(FunctionType.__code__)`
+    ;; and MemberDescriptorType from `type(FunctionType.__globals__)`, so both
+    ;; have to be reachable *through the type*, not just on an instance.
+    ;; func_getattr already answers them for instances.
+    call dict_new
+    mov rbx, rax
+
+    lea rdi, [rel mn___code__]
+    call str_from_cstr_heap
+    push rax
+    xor edi, edi
+    xor esi, esi
+    mov rdx, rax
+    extern getset_descr_new
+    call getset_descr_new
+    push rax
+    mov rdi, rbx
+    mov rsi, [rsp + 8]
+    mov rdx, rax
+    call dict_set
+    pop rdi
+    call obj_decref
+    pop rdi
+    call obj_decref
+
+    mov rdi, PyFuncObject.func_globals
+    lea rsi, [rel mn___globals__]
+    push rdi
+    mov rdi, rsi
+    call str_from_cstr_heap
+    pop rdi
+    push rax
+    mov rsi, rax
+    extern member_descr_new
+    call member_descr_new
+    push rax
+    mov rdi, rbx
+    mov rsi, [rsp + 8]
+    mov rdx, rax
+    call dict_set
+    pop rdi
+    call obj_decref
+    pop rdi
+    call obj_decref
+
+    extern func_type
+    lea rax, [rel func_type]
     mov [rax + PyTypeObject.tp_dict], rbx
 
     ;; --- int_type methods ---
@@ -11151,3 +11367,8 @@ mn___mul__:     db "__mul__", 0
 mn___rmul__:    db "__rmul__", 0
 mn___iadd__:    db "__iadd__", 0
 mn___init__:    db "__init__", 0
+mn___str__:     db "__str__", 0
+mn___code__:    db "__code__", 0
+mn___class_getitem__: db "__class_getitem__", 0
+mn___globals__: db "__globals__", 0
+mn___repr__:    db "__repr__", 0

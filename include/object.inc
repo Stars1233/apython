@@ -219,6 +219,41 @@ struc PyModuleObject
 endstruc
 
 ; Member descriptor object (for __slots__)
+; PEP 585 generic alias: list[int].  _collections_abc takes GenericAlias from
+; `type(list[int])`, and every annotation-bearing stdlib module needs it.
+struc PyGenericAliasObject
+    .ob_refcnt: resq 1  ; +0
+    .ob_type:   resq 1  ; +8
+    .ga_origin: resq 1  ; +16: the type being subscripted (owned)
+    .ga_args:   resq 1  ; +24: the argument, a tuple if it was one (owned)
+endstruc
+
+; A getset descriptor: a named pair of C accessors living in a type's dict.
+; CPython exposes func.__code__, code.co_name and friends this way, and
+; types.py takes GetSetDescriptorType from one of them.
+struc PyGetSetDescrObject
+    .ob_refcnt: resq 1  ; +0
+    .ob_type:   resq 1  ; +8
+    .gs_get:    resq 1  ; +16: C getter(self) -> Value, or 0
+    .gs_set:    resq 1  ; +24: C setter(self, value) -> int, or 0
+    .gs_name:   resq 1  ; +32: ptr to the name (PyStrObject*, owned)
+endstruc
+
+; types.SimpleNamespace: attributes are the entries of a dict.
+struc PySimpleNamespaceObject
+    .ob_refcnt: resq 1  ; +0
+    .ob_type:   resq 1  ; +8
+    .ns_dict:   resq 1  ; +16: the attribute dict (owned)
+endstruc
+
+; Read-only view of a mapping.  type.__dict__ is one of these in CPython,
+; and types.py takes MappingProxyType from it.
+struc PyMappingProxyObject
+    .ob_refcnt: resq 1  ; +0
+    .ob_type:   resq 1  ; +8
+    .mp_mapping: resq 1 ; +16: the wrapped dict (owned)
+endstruc
+
 struc PyMemberDescrObject
     .ob_refcnt: resq 1  ; +0
     .ob_type:   resq 1  ; +8

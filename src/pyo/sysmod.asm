@@ -395,6 +395,87 @@ DEF_FUNC sys_module_init, 32
     pop rdi
     call obj_decref
 
+    ; --- sys.implementation ---
+    ; types.py takes SimpleNamespace from `type(sys.implementation)`, so this
+    ; has to be a namespace rather than a tuple or a dict.  cache_tag is what
+    ; a loader uses to find .pyc files, and apython reads CPython 3.12 ones.
+    ; r14/r15 belong to the module dicts here, so the namespace lives in a
+    ; frame slot.
+    extern namespace_new
+    extern namespace_set
+    call namespace_new
+    mov [rbp - 24], rax
+
+    lea rdi, [rel sm_apython_name]
+    call str_from_cstr_heap
+    push rax
+    mov rdi, [rbp - 24]
+    lea rsi, [rel sm_name]
+    mov rdx, rax
+    call namespace_set
+    pop rdi
+    call obj_decref
+
+    lea rdi, [rel sm_cache_tag_val]
+    call str_from_cstr_heap
+    push rax
+    mov rdi, [rbp - 24]
+    lea rsi, [rel sm_cache_tag]
+    mov rdx, rax
+    call namespace_set
+    pop rdi
+    call obj_decref
+
+    ; version comes back out of the sys dict rather than a stale register
+    lea rdi, [rel sm_version_info]
+    call str_from_cstr_heap
+    push rax
+    mov rdi, r15
+    mov rsi, rax
+    call dict_get
+    V_UNPACK rax, rdx
+    pop rdi
+    push rax
+    push rdx
+    call obj_decref
+    pop rdx
+    pop rax
+    test edx, edx
+    jz .no_impl_version
+    mov rdi, [rbp - 24]
+    lea rsi, [rel sm_version]
+    mov rdx, rax
+    call namespace_set
+.no_impl_version:
+
+    lea rdi, [rel sm_implementation]
+    call str_from_cstr_heap
+    push rax
+    mov rdi, r15
+    mov rsi, rax
+    mov rdx, [rbp - 24]
+    call dict_set
+    pop rdi
+    call obj_decref
+    mov rdi, [rbp - 24]
+    call obj_decref
+
+    ; --- sys.warnoptions (empty; nothing parses -W yet) ---
+    xor edi, edi
+    call list_new
+    mov [rbp - 24], rax
+    lea rdi, [rel sm_warnoptions]
+    call str_from_cstr_heap
+    push rax
+    mov rdi, r15
+    mov rsi, rax
+    mov rdx, [rbp - 24]
+    call dict_set
+    pop rdi
+    call obj_decref
+    mov rdi, [rbp - 24]
+    call obj_decref
+
     ; --- sys.byteorder ---
     lea rdi, [rel sm_little]
     call str_from_cstr_heap
@@ -745,6 +826,12 @@ sm_mode_r:       db "r", 0
 sm_exit:         db "exit", 0
 sm_getrecursionlimit: db "getrecursionlimit", 0
 sm_setrecursionlimit: db "setrecursionlimit", 0
+sm_implementation: db "implementation", 0
+sm_name:         db "name", 0
+sm_apython_name: db "apython", 0
+sm_cache_tag:    db "cache_tag", 0
+sm_cache_tag_val: db "cpython-312", 0
+sm_warnoptions:  db "warnoptions", 0
 sm_byteorder:    db "byteorder", 0
 sm_little:       db "little", 0
 sm_getdefaultencoding: db "getdefaultencoding", 0

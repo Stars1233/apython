@@ -60,7 +60,8 @@ LA_FROM_TYPE equ 40
 LA_CLASS     equ 48   ; used by classmethod path
 LA_ATTR_TAG  equ 56
 LA_OBJ_TAG   equ 64
-LA_FRAME     equ 72
+LA_OBJVAL    equ 72   ; the object as a Value, for the generic tail
+LA_FRAME     equ 80
 
 ; op_load_super_attr frame layout (DEF_FUNC op_load_super_attr, LSA_FRAME)
 LSA_SELF     equ 8
@@ -381,7 +382,10 @@ DEF_FUNC op_load_attr, LA_FRAME
     mov rsi, [rsi + rax]    ; name string
     mov [rbp - LA_NAME], rsi
 
-    ; Pop obj
+    ; Pop obj.  Keep the Value as well as the (payload, tag) pair: the
+    ; generic tail classifies a Value, and an immediate's payload is not one.
+    VPEEK rcx
+    mov [rbp - LA_OBJVAL], rcx
     VPOP_VAL rdi, rax
     mov [rbp - LA_OBJ], rdi
     mov [rbp - LA_OBJ_TAG], rax
@@ -492,9 +496,26 @@ DEF_FUNC op_load_attr, LA_FRAME
     jmp .la_got_attr
 
 .la_attr_error:
-    lea rdi, [rel exc_AttributeError_type]
-    CSTRING rsi, "object has no attribute"
-    call raise_exception
+    ; Last: the attributes every object has -- __class__, __dict__ -- which
+    ; no individual tp_getattr provides.  A type that defines one itself has
+    ; already been consulted above and wins.
+    mov rdi, [rbp - LA_OBJVAL]
+    mov rsi, [rbp - LA_NAME]
+    extern obj_generic_attr
+    call obj_generic_attr
+    test rax, rax
+    jz .la_no_such_attr
+    mov [rbp - LA_ATTR], rax
+    mov qword [rbp - LA_ATTR_TAG], TAG_PTR
+    mov qword [rbp - LA_FROM_TYPE], 0
+    jmp .la_got_attr
+
+.la_no_such_attr:
+    mov rdi, [rbp - LA_OBJVAL]
+    mov rsi, [rbp - LA_NAME]
+    extern raise_no_attribute
+    xor edx, edx
+    call raise_no_attribute
 
 .la_got_attr:
     ; === Descriptor protocol: check for staticmethod/classmethod ===
@@ -608,9 +629,12 @@ DEF_FUNC op_load_attr, LA_FRAME
     mov rdx, [rbp - LA_ATTR_TAG]
     VPUSH_VAL rax, rdx
 
-    ; DECREF obj
+    ; DECREF obj -- tag-aware.  An immediate's payload is not an address,
+    ; and this path is reachable with one now that the generic tail
+    ; (__class__, __dict__) answers for every kind of value.
     mov rdi, [rbp - LA_OBJ]
-    call obj_decref
+    mov rsi, [rbp - LA_OBJ_TAG]
+    DECREF_VAL rdi, rsi
 
     jmp .la_done
 

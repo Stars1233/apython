@@ -11,6 +11,7 @@ extern ap_free
 extern sys_write
 extern str_from_cstr
 extern dict_get
+extern dict_new
 extern ap_strcmp
 extern none_singleton
 extern bool_false
@@ -540,6 +541,94 @@ DEF_FUNC raise_no_attribute, RNA_FRAME
     call raise_exception
     ud2
 END_FUNC raise_no_attribute
+
+;; ============================================================================
+;; obj_generic_attr(rdi = object Value, rsi = name str) -> Value, or 0
+;;
+;; The attributes every object has regardless of type.  They used to be
+;; nobody's job: each tp_getattr special-cased its own names and there was no
+;; shared tail, so `(5).__class__` and `obj.__dict__` were AttributeErrors on
+;; every type in the tree.  Called from the miss path of the attribute
+;; lookups, so a type that defines one of these itself still wins.
+;;
+;; Returns a new reference, or 0 when the name is not one of these.
+;; ============================================================================
+OGA_OBJ   equ 8
+OGA_NAME  equ 16
+OGA_FRAME equ 32
+global obj_generic_attr
+DEF_FUNC obj_generic_attr, OGA_FRAME
+    push rbx
+    mov [rbp - OGA_OBJ], rdi
+    mov [rbp - OGA_NAME], rsi
+
+    test rsi, rsi
+    jz .oga_none
+    mov rax, [rsi + PyObject.ob_type]
+    lea rcx, [rel str_type]
+    cmp rax, rcx
+    jne .oga_none
+
+    lea rdi, [rsi + PyStrObject.data]
+    CSTRING rsi, "__class__"
+    call ap_strcmp
+    test eax, eax
+    jz .oga_class
+
+    mov rdi, [rbp - OGA_NAME]
+    lea rdi, [rdi + PyStrObject.data]
+    CSTRING rsi, "__dict__"
+    call ap_strcmp
+    test eax, eax
+    jz .oga_dict
+
+.oga_none:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+
+.oga_class:
+    ; Every value has a type, including the immediates.
+    mov rdi, [rbp - OGA_OBJ]
+    call value_type
+    test rax, rax
+    jz .oga_none
+    mov rdi, rax
+    push rax
+    call obj_incref
+    pop rax
+    pop rbx
+    leave
+    ret
+
+.oga_dict:
+    ; Only an object with a real instance dict has one.  tp_dictoffset is 0
+    ; for every static type and for the layouts that cannot host a dict
+    ; (str subclasses, __slots__ classes) -- those correctly have no
+    ; __dict__, as in CPython.
+    mov rdi, [rbp - OGA_OBJ]
+    V_TEST_PTR rdi, rax
+    ja .oga_none
+    test rdi, rdi
+    jz .oga_none
+    LOAD_INST_DICT rbx, rdi, .oga_none
+    test rbx, rbx
+    jnz .oga_dict_have
+    ; Not created yet: an instance gets its dict on first use, so asking for
+    ; it has to create one or the attribute would come and go.
+    call dict_new
+    mov rbx, rax
+    mov rdi, [rbp - OGA_OBJ]
+    STORE_INST_DICT rdi, rbx, rcx, .oga_dict_have
+.oga_dict_have:
+    mov rdi, rbx
+    call obj_incref
+    mov rax, rbx
+    pop rbx
+    leave
+    ret
+END_FUNC obj_generic_attr
 
 ; obj_richcompare_bool(rdi = left Value, rsi = right Value, edx = op)
 ;   -> eax = 1 (true), 0 (false), or -1 (an exception is pending)
@@ -1150,6 +1239,15 @@ DEF_FUNC type_repr, TR_FRAME
 END_FUNC type_repr
 
 section .rodata
+align 8
+extern union_type_or
+global type_number_methods
+type_number_methods:
+    times 15 dq 0
+    dq union_type_or          ; nb_or (+120): `int | str` builds a UnionType
+    times 20 dq 0
+
+section .rodata
 obj_print_newline: db 10
 obj_print_null_str: db "<NULL>", 10
 type_repr_unknown_str: db "<class '?'>", 0
@@ -1175,7 +1273,7 @@ type_type:
     dq 0                      ; tp_iternext
     dq 0                      ; tp_init
     dq 0                      ; tp_new
-    dq 0                      ; tp_as_number
+    dq type_number_methods    ; tp_as_number -- PEP 604: int | str
     dq 0                      ; tp_as_sequence
     dq 0                      ; tp_as_mapping
     dq 0                      ; tp_base
