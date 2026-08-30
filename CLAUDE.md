@@ -14,6 +14,7 @@ make clean        # remove build/ and apython
 make check        # full test suite: compile .py→.pyc, diff python3 vs ./apython output
 make check-cpython # CPython stdlib unit tests (harder, more thorough)
 make check-stdlib # how much of a CPython 3.12 Lib/ imports; a ratchet
+make check-source # the whole corpus compiled by OUR compiler; a ratchet
 ```
 
 ```bash
@@ -31,6 +32,15 @@ when a new one crashes.  Raise the floor with
 `make check` runs 149 test files (168 results: the async tests run against the
 default, poll and io_uring backends); `make check-cpython` runs all 64 files
 under `tests/cpython/`, none of them tolerated as failing.
+
+`make check-source` hands apython the `.py` instead of the `.pyc`, so our own
+compiler produces the bytecode, and diffs the result against `python3`.  It is
+the only thing that exercises the compiler on a large body of ordinary code --
+most of its bugs were found there rather than by a test written for them.  It
+ratchets against `tests/compile_floor.txt`; raise the floor with
+`bash tests/source_probe.sh --record` in the commit that earns it.  It also
+reaches interpreter paths a `.pyc` cannot, because CPython's constant folder
+settles `3 * "ab"` and `True & False` before they ever become opcodes.
 
 Two more gates worth running when touching the value representation:
 

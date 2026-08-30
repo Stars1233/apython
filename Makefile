@@ -42,7 +42,7 @@ HEADERS = $(wildcard include/*.inc) $(wildcard compiler/*.inc)
 # Python compiler for tests
 PYTHON = python3
 
-.PHONY: all clean check gen-cpython-tests check-cpython check-stdlib lib-pyc
+.PHONY: all clean check gen-cpython-tests check-cpython check-stdlib check-source lib-pyc
 
 all: $(TARGET) lib-pyc
 
@@ -78,6 +78,12 @@ clean:
 # Test target: compile .py to .pyc, run both python3 and apython, diff
 check: $(TARGET) lib-pyc
 	@bash tests/run_tests.sh
+
+# Run the whole test corpus through our own compiler rather than CPython's:
+# apython is handed the .py and compiles it itself.  Ratchets against
+# tests/compile_floor.txt.
+check-source: $(TARGET) lib-pyc
+	@bash tests/source_probe.sh
 
 # How much of CPython 3.12's own Lib/ can we import?  Ratchets against
 # tests/stdlib_floor.txt.  Needs a CPython source checkout; set CPYTHON_LIB
