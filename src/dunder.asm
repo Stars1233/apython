@@ -8,6 +8,23 @@
 %include "object.inc"
 %include "types.inc"
 
+extern kw_names_pending
+
+; A dunder is invoked on behalf of an operation, not as the call the user
+; wrote, so it must not inherit that call's keyword names.  Without this,
+; sorted(MyIterable(), reverse=True) reached __iter__ with reverse=True still
+; pending and raised "unexpected keyword argument".  The leak only became
+; reachable once heaptypes had real slots to dispatch through.
+%macro DUNDER_KW_SAVE 1
+    mov %1, [rel kw_names_pending]
+    mov qword [rel kw_names_pending], 0
+%endmacro
+
+%macro DUNDER_KW_RESTORE 1
+    mov [rel kw_names_pending], %1
+%endmacro
+
+extern none_singleton
 extern str_from_cstr_heap
 extern dict_get
 extern obj_decref
@@ -24,9 +41,10 @@ DEF_FUNC dunder_lookup
     push rbx
     push r12
     push r13
-    push r14                ; alignment
+    push r14                ; holds the origin type
 
-    mov rbx, rdi            ; rbx = type (walks chain)
+    mov rbx, rdi            ; rbx = type (walks the MRO)
+    mov r14, rdi            ; r14 = origin of the walk
     mov r12, rsi            ; r12 = name C string
 
     ; Create PyStrObject from C string for dict lookup (heap — dict key, DECREFed)
@@ -44,13 +62,13 @@ DEF_FUNC dunder_lookup
     jz .try_base
 
     mov rsi, r13
-    mov edx, TAG_PTR
     call dict_get           ; dict_get(tp_dict, name_str) -> borrowed ref
+    V_UNPACK rax, rdx           ; dict_get returns a Value
     test edx, edx
     jnz .found
 
 .try_base:
-    mov rbx, [rbx + PyTypeObject.tp_base]
+    MRO_NEXT rbx, r14
     jmp .walk
 
 .found:
@@ -66,6 +84,7 @@ DEF_FUNC dunder_lookup
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .not_found:
@@ -78,6 +97,7 @@ DEF_FUNC dunder_lookup
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 END_FUNC dunder_lookup
 
@@ -100,11 +120,14 @@ DEF_FUNC dunder_call_1
     mov rdi, [rbx + PyObject.ob_type]
     ; rsi = name already set
     call dunder_lookup
+    V_UNPACK rax, rdx           ; returns a Value
     test edx, edx
     jz .not_found
-    ; Guard: non-pointer dunder (e.g. set to None) → not callable
+    ; Guard: a dunder explicitly set to None, or any non-pointer, is not callable
     test edx, TAG_RC_BIT
     jz .not_found
+    IS_NONE rax, r9
+    je .not_found
 
     ; Call: tp_call(dunder_func, &[self], 1)
     mov r12, rax            ; r12 = dunder func
@@ -113,11 +136,19 @@ DEF_FUNC dunder_call_1
     test rax, rax
     jz .not_found
 
-    SPUSH_PTR rbx            ; args[0] = self (fat arg)
+    sub rsp, 16             ; one Value; 16 keeps rsp aligned
+    mov [rsp], rbx          ; args[0] = self
     mov rdi, r12            ; callable
     mov rsi, rsp            ; args ptr
     mov edx, 1              ; nargs
-    call rax
+    push r15
+    push r15                ; pushed twice: rsp must stay 16-byte aligned
+    DUNDER_KW_SAVE r15      ; at the call, and the args pointer was taken
+    call rax                ; before these, so it is unaffected
+    V_UNPACK rax, rdx           ; tp_call returns a Value
+    DUNDER_KW_RESTORE r15
+    pop r15
+    pop r15
     add rsp, 16             ; pop args
     ; rax = result payload, rdx = result tag
 
@@ -126,6 +157,7 @@ DEF_FUNC dunder_call_1
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .not_found:
@@ -135,6 +167,7 @@ DEF_FUNC dunder_call_1
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 END_FUNC dunder_call_1
 
@@ -160,11 +193,14 @@ DEF_FUNC dunder_call_2
     mov rdi, [rbx + PyObject.ob_type]
     mov rsi, rdx            ; name
     call dunder_lookup
+    V_UNPACK rax, rdx           ; returns a Value
     test edx, edx
     jz .not_found
-    ; Guard: non-pointer dunder (e.g. set to None) → not callable
+    ; Guard: a dunder explicitly set to None, or any non-pointer, is not callable
     test edx, TAG_RC_BIT
     jz .not_found
+    IS_NONE rax, r9
+    je .not_found
 
     ; Call: tp_call(dunder_func, &[self, other], 2)
     mov r13, rax            ; r13 = dunder func
@@ -173,16 +209,22 @@ DEF_FUNC dunder_call_2
     test rax, rax
     jz .not_found
 
-    sub rsp, 32             ; 2 args × 16B
-    mov [rsp], rbx          ; args[0].payload = self
-    mov qword [rsp+8], TAG_PTR   ; args[0].tag
-    mov [rsp+16], r12       ; args[1].payload = other
-    mov [rsp+24], r14       ; args[1].tag = other_tag
+    sub rsp, 16             ; 2 Values
+    mov [rsp], rbx          ; args[0] = self
+    V_PACK r12, r14         ; args[1] = other
+    mov [rsp+8], r12
     mov rdi, r13            ; callable
     mov rsi, rsp            ; args ptr
     mov edx, 2              ; nargs
-    call rax
-    add rsp, 32             ; pop args
+    push r15
+    push r15                ; pushed twice: rsp must stay 16-byte aligned
+    DUNDER_KW_SAVE r15      ; at the call, and the args pointer was taken
+    call rax                ; before these, so it is unaffected
+    V_UNPACK rax, rdx           ; tp_call returns a Value
+    DUNDER_KW_RESTORE r15
+    pop r15
+    pop r15
+    add rsp, 16             ; pop args
     ; rax = result payload, rdx = result tag
 
     pop r14
@@ -190,6 +232,7 @@ DEF_FUNC dunder_call_2
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .not_found:
@@ -199,6 +242,7 @@ DEF_FUNC dunder_call_2
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 END_FUNC dunder_call_2
 
@@ -228,11 +272,14 @@ DEF_FUNC dunder_call_3
     mov rdi, [rbx + PyObject.ob_type]
     mov rsi, rcx            ; name
     call dunder_lookup
+    V_UNPACK rax, rdx           ; returns a Value
     test edx, edx
     jz .not_found
-    ; Guard: non-pointer dunder (e.g. set to None) → not callable
+    ; Guard: a dunder explicitly set to None, or any non-pointer, is not callable
     test edx, TAG_RC_BIT
     jz .not_found
+    IS_NONE rax, r9
+    je .not_found
 
     ; Call: tp_call(dunder_func, &[self, arg1, arg2], 3)
     mov r14, rax            ; r14 = dunder func
@@ -241,18 +288,23 @@ DEF_FUNC dunder_call_3
     test rax, rax
     jz .not_found
 
-    sub rsp, 48             ; 3 args × 16B
-    mov [rsp], rbx          ; args[0].payload = self
-    mov qword [rsp+8], TAG_PTR
-    mov [rsp+16], r12       ; args[1].payload = arg1
-    mov qword [rsp+24], TAG_PTR
-    mov [rsp+32], r13       ; args[2].payload = arg2
-    mov [rsp+40], r15       ; args[2].tag = arg2_tag
+    sub rsp, 32             ; 3 Values, rounded up to keep rsp aligned
+    mov [rsp], rbx          ; args[0] = self
+    mov [rsp+8], r12        ; args[1] = arg1
+    V_PACK r13, r15         ; args[2] = arg2
+    mov [rsp+16], r13
     mov rdi, r14            ; callable
     mov rsi, rsp            ; args ptr
     mov edx, 3              ; nargs
-    call rax
-    add rsp, 48             ; pop args
+    push r15
+    push r15                ; pushed twice: rsp must stay 16-byte aligned
+    DUNDER_KW_SAVE r15      ; at the call, and the args pointer was taken
+    call rax                ; before these, so it is unaffected
+    V_UNPACK rax, rdx           ; tp_call returns a Value
+    DUNDER_KW_RESTORE r15
+    pop r15
+    pop r15
+    add rsp, 32             ; pop args
     ; rax = result payload, rdx = result tag
 
     pop r15
@@ -261,6 +313,7 @@ DEF_FUNC dunder_call_3
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .not_found:
@@ -271,6 +324,7 @@ DEF_FUNC dunder_call_3
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 END_FUNC dunder_call_3
 

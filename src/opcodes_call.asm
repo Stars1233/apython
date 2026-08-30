@@ -4,8 +4,6 @@
 ;   rbx = bytecode instruction pointer (current position in co_code[])
 ;   r12 = current frame pointer (PyFrame*)
 ;   r13 = value stack payload top pointer
-;   r14 = locals_tag_base pointer (frame's tag sidecar for localsplus[])
-;   r15 = value stack tag top pointer
 ;
 ; ecx = opcode argument on entry (set by eval_dispatch)
 ; rbx has already been advanced past the 2-byte instruction word.
@@ -22,7 +20,6 @@ section .text
 extern eval_dispatch
 extern eval_saved_rbx
 extern eval_saved_r13
-extern eval_saved_r15
 extern opcode_table
 extern obj_dealloc
 extern obj_decref
@@ -52,7 +49,6 @@ CL_TPCALL    equ 56
 CL_RETTAG    equ 64
 CL_CALL_TAG  equ 72
 CL_SAVED_R13 equ 80
-CL_SAVED_R15 equ 88
 CL_FRAME     equ 96
 
 ; op_make_function locals (DEF_FUNC op_make_function, MF_FRAME)
@@ -119,7 +115,6 @@ DEF_FUNC op_call, CL_FRAME
 
     ; Save value stack pointers in case callee clobbers callee-saved regs
     mov [rbp - CL_SAVED_R13], r13
-    mov [rbp - CL_SAVED_R15], r15
 
     mov [rbp - CL_NARGS], rcx                ; save nargs
     mov qword [rbp - CL_IS_METHOD], 0          ; is_method = 0
@@ -144,8 +139,7 @@ DEF_FUNC op_call, CL_FRAME
 
     ; === Method call: callable is in the deeper slot ===
     mov [rbp - CL_CALLABLE], rdi               ; callable = func_or_null
-    lea rdx, [r15 + rax]
-    movzx edx, byte [rdx]                      ; callable tag
+    V_TAG_OF rdx, rdi                          ; callable tag
     mov [rbp - CL_CALL_TAG], rdx
     mov qword [rbp - CL_IS_METHOD], 1          ; is_method = 1
     jmp .setup_call
@@ -158,8 +152,7 @@ DEF_FUNC op_call, CL_FRAME
     lea rdi, [r13 + rax*8]
     mov rdi, [rdi]
     mov [rbp - CL_CALLABLE], rdi               ; callable = callable_or_self
-    lea rdx, [r15 + rax]
-    movzx edx, byte [rdx]                      ; callable tag
+    V_TAG_OF rdx, rdi                          ; callable tag
     mov [rbp - CL_CALL_TAG], rdx
 
 .setup_call:
@@ -188,6 +181,7 @@ DEF_FUNC op_call, CL_FRAME
     mov rdi, rcx              ; type
     lea rsi, [rel dunder_call]
     call dunder_lookup
+    V_UNPACK rax, rdx           ; returns a Value
     test edx, edx
     jz .not_callable
     ; Found __call__ — use its tp_call to dispatch
@@ -246,50 +240,27 @@ DEF_FUNC op_call, CL_FRAME
     jmp .call_with_args
 
 .call_with_args:
-    ; Build temporary fat args array on machine stack from payload+tag stacks
+    ; The arguments are already a contiguous Value array on the value stack,
+    ; so tp_call gets a pointer straight into it — no copy.
     mov rcx, [rbp - CL_TOTAL]              ; total nargs
-    mov [rbp - CL_SAVED_RSP], rsp
-    test rcx, rcx
-    jz .args_ready
-    mov rax, rcx
-    shl rax, 4                             ; total_nargs * 16
-    sub rsp, rax
-    mov [rbp - CL_SAVED_RSP], rsp
-    mov r8, rsp                            ; dst ptr (fat args)
-    ; Pre-compute source base pointers (deepest arg = total_nargs below TOS)
     mov rax, rcx
     neg rax
-    lea r9, [r13 + rax*8]                  ; src payload start (deepest arg)
-    lea r10, [r15 + rax]                   ; src tag start (deepest arg)
-.copy_loop:
-    mov rax, [r9]
-    movzx edx, byte [r10]
-    mov [r8], rax
-    mov [r8 + 8], rdx
-    add r9, 8
-    inc r10
-    add r8, 16
-    dec ecx
-    jnz .copy_loop
+    lea rax, [r13 + rax*8]                 ; deepest arg = args base
+    mov [rbp - CL_SAVED_RSP], rax
 .args_ready:
     mov rdi, [rbp - CL_CALLABLE]           ; callable
     mov rsi, [rbp - CL_SAVED_RSP]          ; args_ptr
     mov rdx, [rbp - CL_TOTAL]              ; total nargs
     mov rax, [rbp - CL_TPCALL]             ; tp_call
     call rax
+    V_UNPACK rax, rdx           ; tp_call returns a Value
     mov [rbp - CL_RETVAL], rax             ; save return value
     mov [rbp - CL_RETTAG], rdx             ; save return tag
-    mov rcx, [rbp - CL_TOTAL]
-    test rcx, rcx
-    jz .cleanup
-    shl rcx, 4
-    add rsp, rcx
     jmp .cleanup
 
 .cleanup:
     ; Restore value stack pointers (defensive against callee clobber)
     mov r13, [rbp - CL_SAVED_R13]
-    mov r15, [rbp - CL_SAVED_R15]
 
     ; === Unified cleanup ===
     ; Clear kw_names_pending: func_call clears it for Python functions,
@@ -311,12 +282,12 @@ DEF_FUNC op_call, CL_FRAME
 .args_done:
 
     ; Pop shallower slot (self for method, callable for function) and DECREF
-    VPOP_VAL rdi, rsi
-    DECREF_VAL rdi, rsi
+    VPOP rdi
+    DECREF_V rdi, rsi
 
     ; Pop deeper slot (callable for method, NULL for function) and DECREF
-    VPOP_VAL rdi, rsi
-    XDECREF_VAL rdi, rsi
+    VPOP rdi
+    XDECREF_V rdi, rsi
     ; Check for exception (TAG_NULL return with current_exception set)
     ; Must check TAG (not payload) — None and SmallInt(0) have payload=0
     mov rax, [rbp - CL_RETVAL]
@@ -343,7 +314,6 @@ DEF_FUNC op_call, CL_FRAME
     extern eval_exception_unwind
     leave
     mov [rel eval_saved_r13], r13  ; update — cleanup already popped/DECREF'd args
-    mov [rel eval_saved_r15], r15
     jmp eval_exception_unwind
 
 .not_callable:
@@ -390,8 +360,8 @@ DEF_FUNC op_make_function, MF_FRAME
     ; annotations (0x04) - pop and discard
     test ecx, MAKE_FUNC_ANNOTATIONS
     jz .mf_no_annotations
-    VPOP_VAL rdi, rsi
-    DECREF_VAL rdi, rsi
+    VPOP rdi
+    DECREF_V rdi, rsi
     mov ecx, [rbp - MF_FLAGS]              ; reload flags (DECREF clobbers ecx)
 .mf_no_annotations:
 
@@ -485,6 +455,35 @@ DEF_FUNC op_call_function_ex
     VPOP rax
     mov [rbp - CFX_ARGS], rax
 
+    ; Normalize the argument sequence.  CPython emits CALL_FUNCTION_EX with
+    ; whatever iterable the * was applied to -- f(*aset), f(*"ab"), f(*gen),
+    ; f(*range(3)) all arrive here as-is.  Only tuple and list carry an
+    ; ob_item array that can be handed straight to tp_call; the old code
+    ; assumed "not a tuple" meant "a list" and read [obj+16] as the argument
+    ; count and [obj+32] as the Value array, which is memory corruption on
+    ; every other type and a plain dereference of the payload for f(*5).
+    V_TEST_PTR_M [rbp - CFX_ARGS], rcx
+    ja .cfex_args_not_iterable
+    mov rcx, [rax + PyObject.ob_type]
+    lea rdx, [rel tuple_type]
+    cmp rcx, rdx
+    je .cfex_args_ok
+    extern list_type
+    lea rdx, [rel list_type]
+    cmp rcx, rdx
+    je .cfex_args_ok
+    ; Anything else: materialise it through the iterator protocol.  This
+    ; raises for a non-iterable, which is what CPython does too.
+    extern tuple_type_call
+    lea rdi, [rel tuple_type]
+    lea rsi, [rbp - CFX_ARGS]
+    mov edx, 1
+    call tuple_type_call
+    mov rdi, [rbp - CFX_ARGS]       ; the original iterable, still owned
+    mov [rbp - CFX_ARGS], rax
+    call obj_decref
+.cfex_args_ok:
+
     ; Pop func
     VPOP_VAL rax, rdx
     mov [rbp - CFX_FUNC], rax
@@ -511,51 +510,20 @@ DEF_FUNC op_call_function_ex
     jnz .cfex_merge_kwargs
 
 .cfex_empty_kwargs:
-    ; No kwargs (or empty kwargs dict) — simple path: call with positional args only
+    ; No kwargs (or empty kwargs dict) — simple path: call with positional args
+    ; only.  A list's and a tuple's ob_item are both already a contiguous
+    ; Value array, which is exactly what tp_call wants, so pass it straight in.
     mov rsi, [rbp - CFX_ARGS]                  ; args sequence
     mov rcx, [rsi + PyObject.ob_type]
     lea rdx, [rel tuple_type]
     cmp rcx, rdx
     je .cfex_tuple_args
-    ; List: extract payload+tag to temp fat array
-    mov rcx, [rsi + PyListObject.ob_size]
-    mov rbx, [rsi + PyListObject.ob_item_tags]
     mov rsi, [rsi + PyListObject.ob_item]
-    jmp .cfex_extract_fat
+    jmp .cfex_args_ready
 
 .cfex_tuple_args:
-    ; Tuple: extract payload+tag to temp fat array
-    mov rcx, [rsi + PyTupleObject.ob_size]
-    mov rbx, [rsi + PyTupleObject.ob_item_tags]
     mov rsi, [rsi + PyTupleObject.ob_item]
 
-.cfex_extract_fat:
-    ; rsi = payloads ptr, rbx = tags ptr, rcx = count
-    push rsi                       ; save items ptr
-    push rcx                       ; save count
-    mov rdi, rcx
-    shl rdi, 4                     ; count * 16
-    add rdi, 16                    ; alloc size (16B per arg + pad)
-    call ap_malloc
-    mov [rbp - CFX_TEMP], rax      ; save temp buffer
-    mov [rel cfex_temp_pending], rax  ; register for exception cleanup
-    pop rcx                        ; restore count
-    pop rsi                        ; restore items ptr
-    xor edx, edx
-.cfex_extract_loop:
-    cmp rdx, rcx
-    jge .cfex_extract_done
-    mov r8, [rsi + rdx * 8]        ; payload
-    movzx r9d, byte [rbx + rdx]    ; tag
-    mov rdi, [rbp - CFX_TEMP]
-    mov r10, rdx
-    shl r10, 4                     ; dest offset * 16
-    mov [rdi + r10], r8            ; store payload at 16B stride
-    mov [rdi + r10 + 8], r9       ; store tag
-    inc rdx
-    jmp .cfex_extract_loop
-.cfex_extract_done:
-    mov rsi, [rbp - CFX_TEMP]      ; use temp buffer as args
 .cfex_args_ready:
     ; Clear cfex_temp_pending BEFORE the call, so exception unwind
     ; won't free it (we free it ourselves in the normal path below).
@@ -565,6 +533,7 @@ DEF_FUNC op_call_function_ex
     mov rdi, [rbp - CFX_FUNC]
     mov rax, [rbp - CFX_TPCALL]
     call rax
+    V_UNPACK rax, rdx           ; tp_call returns a Value
     mov [rbp - CFX_RESULT], rax
     mov [rbp - CFX_RETTAG], rdx
 
@@ -593,13 +562,13 @@ DEF_FUNC op_call_function_ex
     mov rcx, [rax + PyVarObject.ob_size]
     mov [rbp - CFX_NPOS], rcx
 
-    ; Allocate merged args buffer: (n_pos + n_kw) * 16
+    ; Allocate merged args buffer: (n_pos + n_kw) Values
     mov rdi, [rbp - CFX_NPOS]
     add rdi, [rbp - CFX_NKW]
-    shl rdi, 4                    ; * 16 bytes per fat arg
+    shl rdi, 3
     test rdi, rdi
     jnz .cfex_alloc_merged
-    mov rdi, 16                   ; minimum 16 bytes
+    mov rdi, 8                    ; minimum one slot
 .cfex_alloc_merged:
     call ap_malloc
     mov [rbp - CFX_MERGED], rax
@@ -611,11 +580,9 @@ DEF_FUNC op_call_function_ex
     lea rdx, [rel tuple_type]
     cmp rcx, rdx
     je .cfex_merge_tuple_src
-    mov rbx, [rsi + PyListObject.ob_item_tags]
     mov rsi, [rsi + PyListObject.ob_item]
     jmp .cfex_merge_copy_pos
 .cfex_merge_tuple_src:
-    mov rbx, [rsi + PyTupleObject.ob_item_tags]
     mov rsi, [rsi + PyTupleObject.ob_item]
 .cfex_merge_copy_pos:
     mov rdi, [rbp - CFX_MERGED]
@@ -624,12 +591,8 @@ DEF_FUNC op_call_function_ex
     jz .cfex_pos_copied
     xor edx, edx
 .cfex_copy_pos_loop:
-    mov r8, [rsi + rdx * 8]       ; payload
-    movzx r9d, byte [rbx + rdx]   ; tag
-    mov r10, rdx
-    shl r10, 4                    ; *16 for merged buffer
-    mov [rdi + r10], r8           ; store payload at 16B stride
-    mov [rdi + r10 + 8], r9      ; store tag
+    mov r8, [rsi + rdx * 8]       ; the argument Value
+    mov [rdi + rdx * 8], r8
     inc rdx
     cmp rdx, rcx
     jb .cfex_copy_pos_loop
@@ -657,33 +620,20 @@ DEF_FUNC op_call_function_ex
     mov rsi, [rax + DictEntry.key]
     test rsi, rsi
     jz .cfex_dict_skip
-    cmp byte [rax + DictEntry.value_tag], 0
-    je .cfex_dict_skip
     mov rdi, [rax + DictEntry.value]
 
     ; Store value in merged buffer at position [n_pos + kw_idx]
-    ; Also read value_tag from dict entry for fat arg
     push rcx
     push rdx
     mov rcx, [rbp - CFX_NPOS]
     add rcx, rdx                 ; merged index = n_pos + kw_idx
-    shl rcx, 4                   ; * 16 for fat args
     mov rax, [rbp - CFX_MERGED]
-    mov [rax + rcx], rdi         ; merged[n_pos + kw_idx].payload = value
-    ; Read value_tag — rax from earlier imul still points to entry (but was clobbered)
-    ; Recalculate entry pointer
-    mov r8, [rsp + 8]           ; restore dict scan index (pushed rcx)
-    imul r8, r8, DictEntry_size
-    add r8, rbx                  ; r8 = entry ptr
-    movzx r9d, byte [r8 + DictEntry.value_tag]
-    mov [rax + rcx + 8], r9     ; merged[...].tag = value_tag
+    mov [rax + rcx * 8], rdi     ; merged[n_pos + kw_idx] = the value Value
 
-    ; Store key in kw_names tuple at kw_idx (fat: *16 + TAG_PTR)
+    ; Store key in kw_names tuple at kw_idx
     mov rax, [rbp - CFX_KWNAMES]
     mov r8, [rax + PyTupleObject.ob_item]       ; payloads
-    mov r9, [rax + PyTupleObject.ob_item_tags]  ; tags
-    mov [r8 + rdx * 8], rsi                     ; payload
-    mov byte [r9 + rdx], TAG_PTR                ; tag
+    mov [r8 + rdx * 8], rsi
     INCREF rsi                   ; tuple owns a ref
     pop rdx
     pop rcx
@@ -705,6 +655,7 @@ DEF_FUNC op_call_function_ex
     add rdx, [rbp - CFX_NKW]
     mov rax, [rbp - CFX_TPCALL]
     call rax
+    V_UNPACK rax, rdx           ; tp_call returns a Value
     mov [rbp - CFX_RESULT], rax
     mov [rbp - CFX_RETTAG], rdx
 
@@ -722,6 +673,11 @@ DEF_FUNC op_call_function_ex
     call obj_decref
 
     jmp .cfex_cleanup_shared
+
+.cfex_args_not_iterable:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "argument after * must be an iterable"
+    call raise_exception
 
 .cfex_cleanup:
     ; Clear kw_names_pending (safety)
@@ -770,7 +726,6 @@ DEF_FUNC op_call_function_ex
     pop rbx
     pop rbp
     mov [rel eval_saved_r13], r13
-    mov [rel eval_saved_r15], r15
     jmp eval_exception_unwind
 
 .cfex_not_callable:
@@ -805,23 +760,48 @@ DEF_FUNC op_before_with
     mov [rbp - BW_MGR], rax
     mov rbx, rax                    ; rbx = mgr
 
-    ; Look up __exit__ on mgr's type
-    mov rax, [rbx + PyObject.ob_type]
-    mov rax, [rax + PyTypeObject.tp_dict]
-    test rax, rax
-    jz .bw_no_exit
+    ; An int or float manager has no type pointer to walk: its payload is a
+    ; value, not an address.  `with 5:` dereferenced it.
+    cmp edx, TAG_PTR
+    jne .bw_not_a_manager
 
-    ; Get "__exit__" from type dict (heap — dict key, DECREFed)
+    ; Get "__exit__" from the type dict (heap — dict key, DECREFed)
     lea rdi, [rel bw_str_exit]
     call str_from_cstr_heap
     mov r12, rax                    ; r12 = exit name str
     mov rdi, [rbx + PyObject.ob_type]
     mov rdi, [rdi + PyTypeObject.tp_dict]
+    test rdi, rdi
+    jz .bw_exit_via_getattr
     mov rsi, r12
-    mov edx, TAG_PTR
     call dict_get
+    V_UNPACK rax, rdx           ; dict_get returns a Value
+    test edx, edx
+    jnz .bw_have_exit
+
+.bw_exit_via_getattr:
+    ; Some types serve their attributes from tp_getattr rather than a type
+    ; dict -- a file object is one -- so `with open(...) as f` reported that
+    ; a file is not a context manager.
+    mov rax, [rbx + PyObject.ob_type]
+    mov rax, [rax + PyTypeObject.tp_getattr]
+    test rax, rax
+    jz .bw_no_exit_decref_name
+    mov rdi, rbx
+    mov rsi, r12
+    call rax
+    V_UNPACK rax, rdx
     test edx, edx
     jz .bw_no_exit_decref_name
+    ; tp_getattr already bound it to the instance.
+    mov rdi, r12
+    push rax
+    call obj_decref
+    pop rax
+    VPUSH_PTR rax
+    jmp .bw_exit_pushed
+
+.bw_have_exit:
 
     ; Got __exit__ function — create bound method(exit_func, mgr)
     mov [rbp - BW_EXIT], rax
@@ -835,24 +815,53 @@ DEF_FUNC op_before_with
 
     ; Push bound __exit__ method (single item, matching CPython)
     VPUSH_PTR rax
+.bw_exit_pushed:
 
     ; Now look up __enter__ on mgr's type
-    mov rdi, [rbx + PyObject.ob_type]
-    mov rdi, [rdi + PyTypeObject.tp_dict]
-    test rdi, rdi
-    jz .bw_no_enter
-
     lea rdi, [rel bw_str_enter]
     call str_from_cstr_heap
     mov r12, rax                    ; r12 = enter name str
     mov rdi, [rbx + PyObject.ob_type]
     mov rdi, [rdi + PyTypeObject.tp_dict]
+    test rdi, rdi
+    jz .bw_enter_via_getattr
     mov rsi, r12
-    mov edx, TAG_PTR
     call dict_get
+    V_UNPACK rax, rdx           ; dict_get returns a Value
+    test edx, edx
+    jnz .bw_have_enter
+
+.bw_enter_via_getattr:
+    ; As for __exit__: a type may serve its attributes from tp_getattr.
+    mov rax, [rbx + PyObject.ob_type]
+    mov rax, [rax + PyTypeObject.tp_getattr]
+    test rax, rax
+    jz .bw_no_enter_decref_name
+    mov rdi, rbx
+    mov rsi, r12
+    call rax
+    V_UNPACK rax, rdx
     test edx, edx
     jz .bw_no_enter_decref_name
+    ; Already bound, so it takes no self argument.
+    push rax
+    mov rdi, r12
+    call obj_decref
+    pop rax
+    mov rcx, [rax + PyObject.ob_type]
+    mov rcx, [rcx + PyTypeObject.tp_call]
+    test rcx, rcx
+    jz .bw_no_enter
+    mov rdi, rax
+    xor esi, esi
+    xor edx, edx
+    call rcx
+    V_UNPACK rax, rdx
+    mov [rbp - BW_ENTER], rax
+    mov [rbp - BW_RETTAG], rdx
+    jmp .bw_enter_called
 
+.bw_have_enter:
     ; Got __enter__ function - call it with mgr as self
     push rax                        ; save func
     mov rdi, r12
@@ -872,9 +881,11 @@ DEF_FUNC op_before_with
     mov rsi, rsp                   ; args ptr
     mov rdx, 1                     ; nargs = 1
     call rcx
+    V_UNPACK rax, rdx           ; tp_call returns a Value
     add rsp, 16                    ; pop fat arg
     mov [rbp - BW_ENTER], rax              ; save __enter__ result
     mov [rbp - BW_RETTAG], rdx             ; save __enter__ result tag
+.bw_enter_called:
 
     ; DECREF mgr
     mov rdi, [rbp - BW_MGR]
@@ -895,16 +906,23 @@ DEF_FUNC op_before_with
     mov rdi, r12
     call obj_decref
 .bw_no_exit:
-    lea rdi, [rel exc_AttributeError_type]
-    CSTRING rsi, "__exit__"
+    ; CPython reports a missing __enter__/__exit__ as a protocol TypeError,
+    ; not as a bare AttributeError on the dunder name.
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "object does not support the context manager protocol"
     call raise_exception
 
 .bw_no_enter_decref_name:
     mov rdi, r12
     call obj_decref
 .bw_no_enter:
-    lea rdi, [rel exc_AttributeError_type]
-    CSTRING rsi, "__enter__"
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "object does not support the context manager protocol"
+    call raise_exception
+
+.bw_not_a_manager:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "object does not support the context manager protocol"
     call raise_exception
 END_FUNC op_before_with
 
@@ -951,36 +969,32 @@ DEF_FUNC op_with_except_start, WES_FRAME
     ; Build args array: [exc_type, exc_val, exc_tb]
     ; method_call will prepend self automatically
     mov rcx, [rbp - WES_VAL]               ; val
-    sub rsp, 48                      ; 3 fat args (16 bytes each)
+    sub rsp, 32                      ; 3 Values, rsp stays aligned
     ; Get type of exception
     test rcx, rcx
     jz .wes_none_exc
-    cmp byte [r15 - 1], TAG_SMALLINT       ; val tag from stack
-    je .wes_none_exc
+    V_TEST_PTR rcx, rdx                    ; only a real object can be an exception
+    ja .wes_none_exc
     ; Exception case
     mov rdx, [rcx + PyObject.ob_type]
-    mov [rsp], rdx                   ; exc_type payload
-    mov qword [rsp + 8], TAG_PTR     ; exc_type tag
-    mov [rsp + 16], rcx              ; exc_val payload
-    mov qword [rsp + 24], TAG_PTR    ; exc_val tag
+    mov [rsp], rdx                   ; exc_type
+    mov [rsp + 8], rcx               ; exc_val
     jmp .wes_set_tb
 .wes_none_exc:
     lea rdx, [rel none_singleton]
     mov [rsp], rdx                   ; exc_type = None
-    mov qword [rsp + 8], TAG_PTR     ; exc_type tag
-    mov [rsp + 16], rdx              ; exc_val = None
-    mov qword [rsp + 24], TAG_PTR    ; exc_val tag
+    mov [rsp + 8], rdx               ; exc_val = None
 .wes_set_tb:
     lea rdx, [rel none_singleton]
-    mov [rsp + 32], rdx              ; exc_tb = None
-    mov qword [rsp + 40], TAG_PTR    ; exc_tb tag
+    mov [rsp + 16], rdx              ; exc_tb = None
 
     ; Call bound_exit(exc_type, exc_val, exc_tb)
     mov rdi, [rbp - WES_FUNC]                 ; callable = bound method
     mov rsi, rsp                     ; args ptr
     mov rdx, 3                       ; nargs = 3 (method_call adds self)
     call rax
-    add rsp, 48
+    V_UNPACK rax, rdx           ; tp_call returns a Value
+    add rsp, 32
     mov [rbp - WES_RESULT], rax                ; save result
     mov [rbp - WES_RETTAG], rdx                ; save result tag
 

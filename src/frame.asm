@@ -160,26 +160,12 @@ DEF_FUNC frame_new
     mov [r11 + PyFrame.locals], r14
     mov qword [r11 + PyFrame.instr_ptr], 0
     mov qword [r11 + PyFrame.stack_ptr], 0
-    mov qword [r11 + PyFrame.stack_tag_ptr], 0
     mov dword [r11 + PyFrame.return_offset], 0
 
     ; Set nlocalsplus and func_obj
     mov ecx, [rbx + PyCodeObject.co_nlocalsplus]
     mov [r11 + PyFrame.nlocalsplus], ecx
     mov qword [r11 + PyFrame.func_obj], 0
-
-    ; Allocate tag array: nlocalsplus + stacksize bytes
-    test r15, r15
-    jz .no_tags
-    mov rdi, r15            ; total slots = tag bytes
-    push r11
-    call ap_malloc
-    pop r11
-    mov [r11 + PyFrame.locals_tag_base], rax
-    jmp .tags_done
-.no_tags:
-    mov qword [r11 + PyFrame.locals_tag_base], 0
-.tags_done:
 
     ; stack_base = &localsplus[nlocalsplus] (8 bytes/slot)
     mov ecx, [r11 + PyFrame.nlocalsplus]
@@ -189,31 +175,15 @@ DEF_FUNC frame_new
     lea rsi, [rdi + rdx]    ; rsi = &localsplus[nlocalsplus]
     mov [r11 + PyFrame.stack_base], rsi
 
-    ; stack_tag_base = locals_tag_base + nlocalsplus
-    mov rdx, [r11 + PyFrame.locals_tag_base]
+    ; Zero the locals (one Value per slot; an empty slot is 0)
     mov ecx, [r11 + PyFrame.nlocalsplus]
-    lea rsi, [rdx + rcx]
-    mov [r11 + PyFrame.stack_tag_base], rsi
-
-    ; Zero all localsplus payload entries (8 bytes/slot)
-    ; ecx still holds nlocalsplus
     test ecx, ecx
-    jz .zero_tags
+    jz .done
     push r11                ; save frame pointer
     lea rdi, [r11 + PyFrame.localsplus]
     xor eax, eax
-    mov ecx, ecx            ; zero-extend ecx
     rep stosq               ; store ecx qwords of 0 at [rdi]
     pop r11                 ; restore frame pointer
-
-.zero_tags:
-    ; Zero ALL tag entries (locals + stack; r15 = nlocalsplus + stacksize)
-    mov ecx, r15d
-    test ecx, ecx
-    jz .done
-    mov rdi, [r11 + PyFrame.locals_tag_base]
-    xor eax, eax
-    rep stosb
 
 .done:
     mov rax, r11            ; return frame pointer
@@ -242,26 +212,16 @@ DEF_FUNC frame_free
     cmp r13d, r12d
     jge .free_frame
 
-    ; Reload tag base each iteration (XDECREF_VAL may clobber rdx)
-    mov rdx, [rbx + PyFrame.locals_tag_base]
     mov rax, r13
     shl rax, 3              ; r13 * 8
     mov rdi, [rbx + PyFrame.localsplus + rax]
-    movzx rsi, byte [rdx + r13]  ; tag
-    ; XDECREF_VAL: tag-aware, handles TAG_NULL, TAG_SMALLINT etc.
-    XDECREF_VAL rdi, rsi
+    XDECREF_V rdi, rsi      ; no-op for NULL and for immediates
 
 .next:
     inc r13d
     jmp .loop
 
 .free_frame:
-    ; Free locals tag array
-    mov rdi, [rbx + PyFrame.locals_tag_base]
-    test rdi, rdi
-    jz .skip_free_tags
-    call ap_free
-.skip_free_tags:
     ; Calculate frame size for pool return
     mov rdi, [rbx + PyFrame.code]
     mov eax, [rdi + PyCodeObject.co_nlocalsplus]

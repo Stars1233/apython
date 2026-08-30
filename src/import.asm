@@ -88,6 +88,9 @@ FL_STKSZ    equ 4096         ; stack buffer for path component
 
 ; Path buffer size
 PATHBUF_SIZE equ 8192
+; Room for the longest suffix this file appends after the directory and the
+; module component: "/__pycache__/__init__.cpython-312.pyc" is 37 bytes.
+IM_PATH_MARGIN equ 64
 
 ; ============================================================================
 ; import_init(int argc, char **argv)
@@ -110,7 +113,6 @@ DEF_FUNC import_init
     push rax
     mov rdi, [rel sys_path_list]
     mov rsi, rax
-    mov edx, TAG_PTR
     call list_append
     pop rdi
     call obj_decref
@@ -121,7 +123,6 @@ DEF_FUNC import_init
     push rax
     mov rdi, [rel sys_path_list]
     mov rsi, rax
-    mov edx, TAG_PTR
     call list_append
     pop rdi
     call obj_decref
@@ -147,8 +148,6 @@ DEF_FUNC import_init
     pop rsi                     ; key = "builtins"
     push rsi                    ; re-save key for DECREF
     mov rdx, rbx
-    mov ecx, TAG_PTR
-    mov r8d, TAG_PTR
     call dict_set
     pop rdi                     ; DECREF key (dict_set INCREF'd)
     call obj_decref
@@ -164,8 +163,6 @@ DEF_FUNC import_init
     mov rdi, [rel sys_modules_dict]
     mov rsi, rax                ; key = "time"
     mov rdx, rbx                ; value = time module
-    mov ecx, TAG_PTR
-    mov r8d, TAG_PTR
     call dict_set
     pop rdi                     ; DECREF key
     call obj_decref
@@ -181,8 +178,6 @@ DEF_FUNC import_init
     mov rdi, [rel sys_modules_dict]
     mov rsi, rax                ; key = "asyncio"
     mov rdx, rbx                ; value = asyncio module
-    mov ecx, TAG_PTR
-    mov r8d, TAG_PTR
     call dict_set
     pop rdi                     ; DECREF key
     call obj_decref
@@ -198,8 +193,6 @@ DEF_FUNC import_init
     mov rdi, [rel sys_modules_dict]
     mov rsi, rax                ; key = "_sre"
     mov rdx, rbx                ; value = _sre module
-    mov ecx, TAG_PTR
-    mov r8d, TAG_PTR
     call dict_set
     pop rdi                     ; DECREF key
     call obj_decref
@@ -212,7 +205,6 @@ DEF_FUNC import_init
     push rax
     mov rdi, [rel sys_path_list]
     mov rsi, rax
-    mov edx, TAG_PTR
     call list_append
     pop rdi
     call obj_decref
@@ -253,8 +245,8 @@ DEF_FUNC import_module, IF_FRAME
     ; Check sys.modules first
     mov rdi, [rel sys_modules_dict]
     mov rsi, [rbp - IF_NAME]
-    mov edx, TAG_PTR
     call dict_get
+    V_UNPACK rax, rdx           ; dict_get returns a Value
     test edx, edx
     jnz .found_cached
 
@@ -308,8 +300,8 @@ DEF_FUNC import_module, IF_FRAME
     ; Check sys.modules for first component
     mov rdi, [rel sys_modules_dict]
     mov rsi, rax
-    mov edx, TAG_PTR
     call dict_get
+    V_UNPACK rax, rdx           ; dict_get returns a Value
     test edx, edx
     jnz .have_first_component
 
@@ -331,8 +323,8 @@ DEF_FUNC import_module, IF_FRAME
     ; Now try to import the full dotted name
     mov rdi, [rel sys_modules_dict]
     mov rsi, [rbp - IF_NAME]
-    mov edx, TAG_PTR
     call dict_get
+    V_UNPACK rax, rdx           ; dict_get returns a Value
     test edx, edx
     jnz .have_full_dotted
 
@@ -366,8 +358,6 @@ DEF_FUNC import_module, IF_FRAME
     jz .no_parent_dict
     mov rsi, rax                ; key = leaf name
     mov rdx, r13                ; value = leaf module
-    mov ecx, TAG_PTR
-    mov r8d, TAG_PTR
     call dict_set
 .no_parent_dict:
     pop rdi
@@ -455,8 +445,8 @@ DEF_FUNC import_find_and_load, FL_FRAME
     ; Check sys.modules first — avoid re-loading already-imported modules
     mov rdi, [rel sys_modules_dict]
     mov rsi, [rbp - FL_NAME]
-    mov edx, TAG_PTR
     call dict_get
+    V_UNPACK rax, rdx           ; dict_get returns a Value
     test edx, edx
     jnz .found_in_sysmod
 
@@ -516,8 +506,8 @@ DEF_FUNC import_find_and_load, FL_FRAME
     ; Look up parent in sys.modules
     mov rdi, [rel sys_modules_dict]
     mov rsi, r12
-    mov edx, TAG_PTR
     call dict_get
+    V_UNPACK rax, rdx           ; dict_get returns a Value
     mov r13, rax                ; r13 = parent module payload (or 0)
     push rdx                    ; save dict_get tag for found check
 
@@ -693,10 +683,9 @@ DEF_FUNC import_search_dirs, SD_FRAME
     ; Get dir string (fat list: 16-byte stride)
     mov rdi, [rbp - SD_DIRS]
     mov rcx, [rdi + PyListObject.ob_item]
-    mov rdx, [rdi + PyListObject.ob_item_tags]
     mov rax, [rbp - SD_IDX]
     mov rbx, [rcx + rax * 8]      ; rbx = dir str obj payload
-    movzx r8d, byte [rdx + rax]   ; dir tag
+    V_UNPACK rbx, r8
     cmp r8d, TAG_SMALLINT
     je .sd_next                 ; skip SmallInts
     test rbx, rbx
@@ -705,9 +694,20 @@ DEF_FUNC import_search_dirs, SD_FRAME
     ; Build path in import_path_buf_ptr
     mov r12, [rel import_path_buf_ptr]  ; r12 = dest buf
 
-    ; Copy dir to buffer
+    ; Bound the assembled path before writing any of it.  Nothing checked
+    ; it: a sys.path entry longer than the buffer memcpy'd straight past the
+    ; end of the 8192-byte heap block, so sys.path.insert(0, "A"*9000)
+    ; followed by any import corrupted the heap.  Too long simply means the
+    ; module is not findable here.
     lea rsi, [rbx + PyStrObject.data]
     mov r13, [rbx + PyStrObject.ob_size] ; r13 = offset (dir length)
+    mov rax, r13
+    add rax, [rbp - SD_LEAFLEN]
+    add rax, IM_PATH_MARGIN
+    cmp rax, PATHBUF_SIZE
+    jae .sd_next
+
+    ; Copy dir to buffer
     test r13, r13
     jz .sd_no_dir
     mov rdi, r12
@@ -908,10 +908,9 @@ DEF_FUNC import_search_syspath, SS_FRAME
     ; Get dir string (fat list: 16-byte stride)
     mov rdi, [rbp - SS_DIRS]
     mov rcx, [rdi + PyListObject.ob_item]
-    mov rdx, [rdi + PyListObject.ob_item_tags]
     mov rax, [rbp - SS_IDX]
     mov rbx, [rcx + rax * 8]      ; rbx = dir str obj payload
-    movzx r8d, byte [rdx + rax]   ; dir tag
+    V_UNPACK rbx, r8
     cmp r8d, TAG_SMALLINT
     je .ss_next                 ; skip SmallInts
     test rbx, rbx
@@ -919,9 +918,16 @@ DEF_FUNC import_search_syspath, SS_FRAME
 
     mov r12, [rel import_path_buf_ptr]  ; dest buf
 
-    ; Copy dir to buffer
+    ; Same bound as the search loop above.
     lea rsi, [rbx + PyStrObject.data]
     mov r13, [rbx + PyStrObject.ob_size]
+    mov rax, r13
+    add rax, [rbp - SS_LEAFLEN]
+    add rax, IM_PATH_MARGIN
+    cmp rax, PATHBUF_SIZE
+    jae .ss_next
+
+    ; Copy dir to buffer
     test r13, r13
     jz .ss_no_dir
     mov rdi, r12
@@ -944,6 +950,12 @@ DEF_FUNC import_search_syspath, SS_FRAME
     call ap_strlen
     mov r15, rax                ; r15 = full component length
     pop r13
+    ; The dotted component can be longer than the leaf checked above.
+    mov rax, r13
+    add rax, r15
+    add rax, IM_PATH_MARGIN
+    cmp rax, PATHBUF_SIZE
+    jae .ss_next
 
     mov rdi, r12
     add rdi, r13
@@ -1145,8 +1157,6 @@ DEF_FUNC import_load_module, IF_FRAME
     mov rdi, r15
     mov rsi, rax
     mov rdx, rbx                ; name_str
-    mov ecx, TAG_PTR
-    mov r8d, TAG_PTR
     call dict_set
     pop rdi
     call obj_decref
@@ -1161,8 +1171,6 @@ DEF_FUNC import_load_module, IF_FRAME
     mov rdi, r15
     mov rsi, rax
     mov rdx, [rsp + 8]
-    mov ecx, TAG_PTR
-    mov r8d, TAG_PTR
     call dict_set
     pop rdi
     call obj_decref
@@ -1176,8 +1184,6 @@ DEF_FUNC import_load_module, IF_FRAME
     mov rdi, r15
     mov rsi, rax
     lea rdx, [rel none_singleton]
-    mov ecx, TAG_PTR
-    mov r8d, TAG_PTR
     call dict_set
     pop rdi
     call obj_decref
@@ -1189,8 +1195,6 @@ DEF_FUNC import_load_module, IF_FRAME
     mov rdi, r15
     mov rsi, rax
     lea rdx, [rel none_singleton]
-    mov ecx, TAG_PTR
-    mov r8d, TAG_PTR
     call dict_set
     pop rdi
     call obj_decref
@@ -1206,8 +1210,6 @@ DEF_FUNC import_load_module, IF_FRAME
     mov rdi, r15
     mov rsi, rax
     mov rdx, rbx                ; name_str
-    mov ecx, TAG_PTR
-    mov r8d, TAG_PTR
     call dict_set
     pop rdi
     call obj_decref
@@ -1253,7 +1255,6 @@ DEF_FUNC import_load_module, IF_FRAME
     push r8
     mov rdi, r8
     mov rsi, [rsp + 8]         ; pkg dir str
-    mov edx, TAG_PTR
     call list_append
     ; DECREF pkg dir str
     mov rdi, [rsp + 8]
@@ -1266,8 +1267,6 @@ DEF_FUNC import_load_module, IF_FRAME
     mov rdi, r15
     mov rsi, rax
     mov rdx, [rsp + 8]         ; list
-    mov ecx, TAG_PTR
-    mov r8d, TAG_PTR
     call dict_set
     pop rdi                     ; key
     call obj_decref
@@ -1308,8 +1307,6 @@ DEF_FUNC import_load_module, IF_FRAME
     mov rdi, r15
     mov rsi, rax
     mov rdx, [rsp + 8]
-    mov ecx, TAG_PTR
-    mov r8d, TAG_PTR
     call dict_set
     pop rdi
     call obj_decref
@@ -1327,8 +1324,6 @@ DEF_FUNC import_load_module, IF_FRAME
     mov rdi, [rel sys_modules_dict]
     mov rsi, rbx                ; name_str
     mov rdx, r13
-    mov ecx, TAG_PTR
-    mov r8d, TAG_PTR
     call dict_set
 
     ; Set __builtins__ in module dict
@@ -1338,8 +1333,6 @@ DEF_FUNC import_load_module, IF_FRAME
     mov rdi, r15
     mov rsi, rax
     mov rdx, [rel builtins_dict_global]
-    mov ecx, TAG_PTR
-    mov r8d, TAG_PTR
     call dict_set
     pop rdi
     call obj_decref
@@ -1355,6 +1348,7 @@ DEF_FUNC import_load_module, IF_FRAME
 
     mov rdi, r12
     call eval_frame
+    V_UNPACK rax, rdx           ; eval_frame returns a Value
     ; rax = return value (ignore), edx = tag
     ; XDECREF return value (tag-aware)
     mov rdi, rax

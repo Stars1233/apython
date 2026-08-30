@@ -445,7 +445,6 @@ DEF_FUNC uring_wait_and_drain
     ; Set send_value = None, enqueue
     lea rcx, [rel none_singleton]
     mov [rdi + AsyncTask.send_value], rcx
-    mov qword [rdi + AsyncTask.send_tag], TAG_PTR
 
     push rbx
     call ready_enqueue

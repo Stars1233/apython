@@ -84,7 +84,7 @@ DEF_FUNC call_iternext
     jz .ci_null
     lea rsi, [rel dunder_next]
     call dunder_call_1
-    test edx, edx
+    test rax, rax
     jnz .ci_ret               ; got a value, return it
 
     ; NULL from __next__ — check for StopIteration
@@ -150,6 +150,7 @@ DEF_FUNC get_iterator
     lea rsi, [rel dunder_iter]
     extern dunder_call_1
     call dunder_call_1
+    V_UNPACK rax, rdx           ; returns a Value
     test edx, edx
     jnz .validate_iter
 
@@ -187,6 +188,7 @@ DEF_FUNC get_iterator
     lea rsi, [rel dunder_next]
     extern dunder_lookup
     call dunder_lookup
+    V_UNPACK rax, rdx           ; returns a Value
     test edx, edx
     jz .iter_bad                   ; no __next__ found
     ; Has __next__, good
@@ -216,6 +218,7 @@ DEF_FUNC get_iterator
     extern dunder_getitem
     lea rsi, [rel dunder_getitem]
     call dunder_lookup
+    V_UNPACK rax, rdx           ; returns a Value
     test edx, edx
     jz .no_iter                    ; no __getitem__
     ; Has __getitem__ — create seq_iter
@@ -234,9 +237,7 @@ DEF_FUNC get_iterator
     ; Exception was raised by __iter__. Propagate it via eval_exception_unwind.
     extern eval_exception_unwind
     extern eval_saved_r13
-    extern eval_saved_r15
     mov [rel eval_saved_r13], r13
-    mov [rel eval_saved_r15], r15
     pop rbx
     leave
     jmp eval_exception_unwind
@@ -281,17 +282,17 @@ DEF_FUNC builtin_enumerate, EN_FRAME
 
     ; Save iterable to local (args[0])
     mov rbx, [rbp - EN_ARGS]
-    mov rax, [rbx]
+    mov rax, [rbx]              ; args[0] = the iterable
+    V_UNPACK rax, rdx
     mov [rbp - EN_ITER], rax
-    mov rax, [rbx + 8]
-    mov [rbp - EN_ITERTAG], rax
+    mov [rbp - EN_ITERTAG], rdx
 
     cmp r12, 2
     jne .enum_get_iter
 
     ; start = int(args[1])  (positional)
-    mov rdi, [rbx + 16]
-    mov edx, [rbx + 24]
+    mov rdi, [rbx + 8]
+    V_UNPACK rdi, rdx       ; args[1]
     cmp edx, TAG_SMALLINT
     jne .enum_type_error
     call int_to_i64
@@ -321,11 +322,11 @@ DEF_FUNC builtin_enumerate, EN_FRAME
     mov r10, [rax + PyTupleObject.ob_item]        ; kw names payloads
     mov r10, [r10 + r9*8]
 
-    ; Compute value offset in args: (original_n_pos + kw_idx) * 16
+    ; Compute value offset in args: (original_n_pos + kw_idx) * 8
     ; Use r8 (original n_pos), NOT [rbp - EN_NPOS] which may have been updated
     mov r11, r8
     add r11, r9
-    shl r11, 4
+    shl r11, 3
 
     ; Compare with "start"
     push rax
@@ -351,8 +352,8 @@ DEF_FUNC builtin_enumerate, EN_FRAME
     push r8
     push r9
     mov rbx, [rbp - EN_ARGS]
-    mov rdi, [rbx + r11]           ; value payload
-    mov edx, [rbx + r11 + 8]      ; value tag
+    mov rdi, [rbx + r11]           ; the value Value
+    V_UNPACK rdi, rdx
     cmp edx, TAG_SMALLINT
     jne .enum_type_error
     call int_to_i64
@@ -394,8 +395,8 @@ DEF_FUNC builtin_enumerate, EN_FRAME
     mov rbx, [rbp - EN_ARGS]
     push rdi
     push rsi
-    mov rdi, [rbx + r11]
-    mov rsi, [rbx + r11 + 8]
+    mov rdi, [rbx + r11]           ; the iterable Value
+    V_UNPACK rdi, rsi
     mov [rbp - EN_ITER], rdi
     mov [rbp - EN_ITERTAG], rsi
     pop rsi
@@ -427,10 +428,10 @@ DEF_FUNC builtin_enumerate, EN_FRAME
     jne .enum_get_iter
     ; No iterable= kwarg — iterable is positional args[0]
     mov rbx, [rbp - EN_ARGS]
-    mov rax, [rbx]
+    mov rax, [rbx]              ; args[0] = the iterable
+    V_UNPACK rax, rdx
     mov [rbp - EN_ITER], rax
-    mov rax, [rbx + 8]
-    mov [rbp - EN_ITERTAG], rax
+    mov [rbp - EN_ITERTAG], rdx
 
 .enum_get_iter:
     ; Get iterator from saved iterable (locals, not args - args on value stack)
@@ -482,34 +483,25 @@ DEF_FUNC_LOCAL enumerate_iternext
     ; Call underlying iterator's iternext
     mov rdi, [rbx + IT_FIELD1]       ; it_iter
     call call_iternext
-    test edx, edx
+    test rax, rax
     jz .enum_exhausted
-    mov r12, rax             ; r12 = value payload from iternext
-    push rdx                 ; save value tag from iternext
+    mov r12, rax             ; r12 = value Value from iternext
 
-    ; Inline SmallInt for current count (int_from_i64 always returns SmallInt)
-    mov r13, [rbx + IT_FIELD2]       ; r13 = count (raw i64 = SmallInt payload)
+    mov r13, [rbx + IT_FIELD2]       ; r13 = count
     inc qword [rbx + IT_FIELD2]      ; increment for next time
-    push qword TAG_SMALLINT          ; count tag (always SmallInt)
+    V_PACK_I64 r13, rcx              ; the count as a Value
 
     ; Create 2-tuple
     mov rdi, 2
     call tuple_new
-    ; rax = new tuple
     ; Fill: tuple[0] = count, tuple[1] = value
-    mov r8, [rax + PyTupleObject.ob_item]       ; payloads
-    mov r9, [rax + PyTupleObject.ob_item_tags]  ; tags
-    pop rcx                  ; count tag
-    mov [r8], r13            ; count payload (slot 0)
-    mov byte [r9], cl        ; count tag
-    pop rcx                  ; value tag
-    mov [r8 + 8], r12        ; value payload (slot 1)
-    mov byte [r9 + 1], cl    ; value tag
+    mov r8, [rax + PyTupleObject.ob_item]
+    mov [r8], r13            ; slot 0
+    mov [r8 + 8], r12        ; slot 1
 
     pop r13
     pop r12
     pop rbx
-    mov edx, TAG_PTR               ; fat return tag
     leave
     ret
 
@@ -585,10 +577,10 @@ DEF_FUNC builtin_zip, ZP_FRAME
     mov r10, [rax + PyTupleObject.ob_item]        ; kw names payloads
     mov r10, [r10 + r9*8]
 
-    ; Compute value offset: (n_pos + kw_idx) * 16
+    ; Compute value offset: (n_pos + kw_idx) * 8
     mov r11, r12
     add r11, r9
-    shl r11, 4
+    shl r11, 3
 
     ; Compare with "strict"
     push rax
@@ -647,9 +639,9 @@ DEF_FUNC builtin_zip, ZP_FRAME
     jge .zip_create
 
     mov rax, r14
-    shl rax, 4                  ; rax = i * 16
+    shl rax, 3                  ; one Value per slot
     mov rdi, [rbx + rax]
-    mov rsi, [rbx + rax + 8]   ; arg tag
+    V_UNPACK rdi, rsi
     push r13
     push r14
     call get_iterator
@@ -679,6 +671,7 @@ DEF_FUNC builtin_zip, ZP_FRAME
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .zip_zero:
@@ -699,6 +692,7 @@ DEF_FUNC builtin_zip, ZP_FRAME
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 END_FUNC builtin_zip
 
@@ -733,14 +727,12 @@ DEF_FUNC_LOCAL zip_iternext
     mov rax, [rdi + PyObject.ob_type]
     mov rax, [rax + PyTypeObject.tp_iternext]
     call rax
-    test edx, edx
+    test rax, rax
     jz .zip_partial_cleanup
 
-    ; Store value in tuple (rdx = tag from iternext)
-    mov r8, [r14 + PyTupleObject.ob_item]        ; payloads
-    mov r9, [r14 + PyTupleObject.ob_item_tags]   ; tags
-    mov [r8 + r15*8], rax                        ; payload
-    mov byte [r9 + r15], dl                      ; tag
+    ; Store the item Value in the tuple
+    mov r8, [r14 + PyTupleObject.ob_item]
+    mov [r8 + r15 * 8], rax
 
     inc r15
     jmp .zip_next_loop
@@ -752,7 +744,6 @@ DEF_FUNC_LOCAL zip_iternext
     pop r13
     pop r12
     pop rbx
-    mov edx, TAG_PTR
     leave
     ret
 
@@ -764,11 +755,9 @@ DEF_FUNC_LOCAL zip_iternext
     cmp rcx, r15
     jge .zip_free_tuple
     push rcx
-    mov r8, [r14 + PyTupleObject.ob_item]        ; payloads
-    mov r9, [r14 + PyTupleObject.ob_item_tags]   ; tags
+    mov r8, [r14 + PyTupleObject.ob_item]
     mov rdi, [r8 + rcx*8]
-    movzx esi, byte [r9 + rcx]
-    DECREF_VAL rdi, rsi
+    DECREF_V rdi, rsi
     pop rcx
     inc rcx
     jmp .zip_cleanup_loop
@@ -779,10 +768,8 @@ DEF_FUNC_LOCAL zip_iternext
 .zip_zero_loop:
     cmp rcx, r12
     jge .zip_do_free
-    mov r8, [r14 + PyTupleObject.ob_item]        ; payloads
-    mov r9, [r14 + PyTupleObject.ob_item_tags]   ; tags
+    mov r8, [r14 + PyTupleObject.ob_item]
     mov qword [r8 + rcx*8], 0
-    mov byte [r9 + rcx], 0
     inc rcx
     jmp .zip_zero_loop
 .zip_do_free:
@@ -809,7 +796,7 @@ DEF_FUNC_LOCAL zip_iternext
     mov rax, [rdi + PyObject.ob_type]
     mov rax, [rax + PyTypeObject.tp_iternext]
     call rax
-    test edx, edx
+    test rax, rax
     jnz .zip_strict_decref_err  ; non-NULL = this one is longer
 
     inc r14
@@ -818,8 +805,7 @@ DEF_FUNC_LOCAL zip_iternext
 .zip_strict_decref_err:
     ; DECREF the extra value we got from the longer iterator
     mov rdi, rax
-    mov rsi, rdx
-    DECREF_VAL rdi, rsi
+    DECREF_V rdi, rsi
 .zip_strict_mismatch:
     ; Set exception without longjmp — return NULL so callers can clean up
     extern exc_from_cstr
@@ -907,10 +893,9 @@ DEF_FUNC builtin_map
     jl .map_error
 
     ; INCREF func (only if refcounted)
-    mov r13, [rbx]          ; r13 = func payload
-    mov eax, [rbx + 8]      ; func tag (low 32 bits)
-    test eax, TAG_RC_BIT
-    jz .map_have_func
+    mov r13, [rbx]          ; r13 = func Value
+    V_TEST_PTR r13, rax
+    ja .map_have_func
     INCREF r13
 .map_have_func:
 
@@ -929,9 +914,9 @@ DEF_FUNC builtin_map
     jge .map_create
 
     lea rax, [rcx + 1]
-    shl rax, 4                  ; (i+1) * 16
-    mov rdi, [rbx + rax]        ; args[i+1] payload
-    mov rsi, [rbx + rax + 8]    ; args[i+1] tag
+    shl rax, 3                  ; one Value per slot
+    mov rdi, [rbx + rax]        ; args[i+1]
+    V_UNPACK rdi, rsi
     push rcx
     call get_iterator
     pop rcx
@@ -960,6 +945,7 @@ DEF_FUNC builtin_map
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .map_error:
@@ -973,8 +959,9 @@ END_FUNC builtin_map
 ;; IMPORTANT: Do not clobber r12 before calling tp_call, because func_call
 ;; reads r12 expecting the eval loop's current frame pointer.
 MI_SELF    equ 8
-MI_ARGS    equ 16     ; pointer to fat args array on stack
-MI_FRAME   equ 16
+MI_ARGS    equ 16     ; pointer to the Value args array on the stack
+MI_ASIZE   equ 24     ; bytes reserved for it
+MI_FRAME   equ 32
 DEF_FUNC_LOCAL map_iternext, MI_FRAME
     push rbx
     push r13
@@ -985,11 +972,12 @@ DEF_FUNC_LOCAL map_iternext, MI_FRAME
     mov r14, [rbx + MAP_COUNT]       ; iter count
     mov r15, [rbx + MAP_ITERS]       ; iters array
 
-    ; Allocate fat args on stack: count * 16 bytes
-    mov rax, r14
-    shl rax, 4                       ; count * 16
+    ; Allocate the args array on the stack: count Values, 16-byte aligned
+    lea rax, [r14*8 + 15]
+    and rax, -16
     sub rsp, rax
     mov [rbp - MI_ARGS], rsp         ; save args base
+    mov [rbp - MI_ASIZE], rax
 
     ; For each iterator, get next value
     xor r13d, r13d                   ; i = 0
@@ -1001,15 +989,14 @@ DEF_FUNC_LOCAL map_iternext, MI_FRAME
     mov rax, [rdi + PyObject.ob_type]
     mov rax, [rax + PyTypeObject.tp_iternext]
     call rax
-    test edx, edx
+    test rax, rax
     jz .map_partial_cleanup
 
-    ; Store value in fat args array
+    ; Store the item Value in the args array
     mov rcx, r13
-    shl rcx, 4
+    shl rcx, 3
     mov r8, [rbp - MI_ARGS]
-    mov [r8 + rcx], rax              ; payload
-    mov [r8 + rcx + 8], rdx          ; tag
+    mov [r8 + rcx], rax
 
     inc r13
     jmp .map_next_loop
@@ -1022,6 +1009,7 @@ DEF_FUNC_LOCAL map_iternext, MI_FRAME
     mov rsi, [rbp - MI_ARGS]         ; args pointer
     mov rdx, r14                     ; nargs = count
     call rax
+    V_UNPACK rax, rdx           ; tp_call returns a Value
     push rax                         ; save result payload
     push rdx                         ; save result tag
 
@@ -1031,12 +1019,11 @@ DEF_FUNC_LOCAL map_iternext, MI_FRAME
     cmp r13, r14
     jge .map_decref_done
     mov rcx, r13
-    shl rcx, 4
+    shl rcx, 3
     mov r8, [rbp - MI_ARGS]
     mov rdi, [r8 + rcx]
-    mov rsi, [r8 + rcx + 8]
     push r13
-    DECREF_VAL rdi, rsi
+    DECREF_V rdi, rsi
     pop r13
     inc r13
     jmp .map_decref_loop
@@ -1045,10 +1032,9 @@ DEF_FUNC_LOCAL map_iternext, MI_FRAME
     pop rdx                          ; restore result tag
     pop rax                          ; restore result payload
 
-    ; Deallocate fat args from stack
-    mov rcx, r14
-    shl rcx, 4
-    add rsp, rcx
+    ; Deallocate the args array from the stack
+    add rsp, [rbp - MI_ASIZE]
+    V_PACK rax, rdx
 
     pop r15
     pop r14
@@ -1065,20 +1051,17 @@ DEF_FUNC_LOCAL map_iternext, MI_FRAME
     jge .map_cleanup_done
     push rcx
     mov rax, rcx
-    shl rax, 4
+    shl rax, 3
     mov r8, [rbp - MI_ARGS]
     mov rdi, [r8 + rax]
-    mov rsi, [r8 + rax + 8]
-    DECREF_VAL rdi, rsi
+    DECREF_V rdi, rsi
     pop rcx
     inc rcx
     jmp .map_cleanup_loop
 
 .map_cleanup_done:
-    ; Deallocate fat args from stack
-    mov rcx, r14
-    shl rcx, 4
-    add rsp, rcx
+    ; Deallocate the args array from the stack
+    add rsp, [rbp - MI_ASIZE]
 
     RET_NULL
     pop r15
@@ -1161,8 +1144,8 @@ DEF_FUNC builtin_filter
 
 .filter_get_iter:
     ; Get iterator from args[1]
-    mov rdi, [rbx + 16]
-    mov rsi, [rbx + 24]       ; args[1] tag
+    mov rdi, [rbx + 8]
+    V_UNPACK rdi, rsi       ; args[1]
     call get_iterator
     mov rbx, rax             ; rbx = underlying iterator
 
@@ -1181,6 +1164,7 @@ DEF_FUNC builtin_filter
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .filter_error:
@@ -1206,8 +1190,9 @@ DEF_FUNC_LOCAL filter_iternext
     mov rax, [rdi + PyObject.ob_type]
     mov rax, [rax + PyTypeObject.tp_iternext]
     call rax
-    test edx, edx
+    test rax, rax
     jz .filter_exhausted
+    V_UNPACK rax, rdx
     mov r13, rax             ; r13 = item payload (we own ref)
     push rdx                 ; save item tag from iternext
 
@@ -1217,16 +1202,18 @@ DEF_FUNC_LOCAL filter_iternext
     jz .filter_identity
 
     ; Call func(item) and test truthiness of result
-    sub rsp, 16             ; args[0] (16B slot)
-    mov [rsp], r13          ; args[0].payload = item
-    mov rax, [rsp + 16]    ; item tag (saved above push)
-    mov [rsp + 8], rax     ; args[0].tag
+    sub rsp, 16             ; one Value; 16 keeps rsp aligned
+    mov rax, [rsp + 16]     ; item tag (pushed above)
+    mov rcx, r13
+    V_PACK rcx, rax         ; args[0] = item
+    mov [rsp], rcx
     mov rdi, r14             ; func
     mov rax, [rdi + PyObject.ob_type]
     mov rax, [rax + PyTypeObject.tp_call]
     mov rsi, rsp             ; &args[0]
     mov edx, 1
     call rax
+    V_UNPACK rax, rdx           ; tp_call returns a Value
     add rsp, 16             ; pop args
     mov r14, rax             ; r14 = result payload
     mov r15, rdx             ; r15 = result tag
@@ -1234,6 +1221,7 @@ DEF_FUNC_LOCAL filter_iternext
     ; Test truthiness of result
     mov rdi, r14
     mov esi, r15d
+    V_PACK rdi, rsi
     call obj_is_true
     push rax                 ; save truthiness
 
@@ -1256,6 +1244,7 @@ DEF_FUNC_LOCAL filter_iternext
     ; Test truthiness of item itself
     mov rdi, r13
     mov esi, [rsp]           ; item tag (saved on stack)
+    V_PACK rdi, rsi
     call obj_is_true
     test eax, eax
     jnz .filter_accept
@@ -1269,6 +1258,7 @@ DEF_FUNC_LOCAL filter_iternext
 .filter_accept:
     mov rax, r13             ; payload
     pop rdx                  ; tag from iternext
+    V_PACK rax, rdx
     pop r15
     pop r14
     pop r13
@@ -1332,9 +1322,9 @@ DEF_FUNC builtin_reversed
 
     mov r12, [rbx]          ; r12 = sequence
 
-    ; Non-pointer tag — cannot reverse
-    test dword [rbx + 8], TAG_RC_BIT
-    jz .rev_type_error
+    ; Only a heap pointer can be reversed
+    V_TEST_PTR r12, rax
+    ja .rev_type_error
 
     ; Check for range_obj_type — use specialized __reversed__
     mov rax, [r12 + PyObject.ob_type]
@@ -1349,22 +1339,22 @@ DEF_FUNC builtin_reversed
     lea rsi, [rel .dunder_reversed_name]
     extern dunder_lookup
     call dunder_lookup
+    V_UNPACK rax, rdx           ; returns a Value
     test edx, edx
     jz .rev_no_dunder      ; not found at all
 
-    ; Found __reversed__. Check if it's None (blocked).
-    cmp eax, 0
-    jne .rev_call_dunder
-    cmp edx, TAG_NONE
-    je .rev_type_error      ; __reversed__ = None means blocked
-    ; Check for bool_false (payload=0, TAG_PTR pointing to bool_false)
-    ; If payload is 0 with TAG_PTR, it might be a None-like block...actually skip for now.
+    ; Found __reversed__.  Setting it to None blocks reversal.
+    IS_NONE rax, rcx
+    je .rev_type_error
+    test rax, rax
+    jz .rev_type_error
 
 .rev_call_dunder:
     ; Call __reversed__ via dunder_call_1
     mov rdi, r12
     lea rsi, [rel .dunder_reversed_name]
     call dunder_call_1
+    V_UNPACK rax, rdx           ; returns a Value
     test edx, edx
     jnz .rev_dunder_ok      ; got a result
     jmp .rev_type_error     ; __reversed__ raised
@@ -1374,6 +1364,7 @@ DEF_FUNC builtin_reversed
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 section .rodata
@@ -1390,6 +1381,7 @@ section .text
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .rev_no_dunder:
@@ -1403,11 +1395,14 @@ section .text
     mov rcx, [rcx + PySequenceMethods.sq_length]
     test rcx, rcx
     jz .rev_try_heap_len
-    ; Also need sq_item for iteration
+    ; Also need sq_item for iteration.  A heaptype with __len__ now carries
+    ; sq_length from the slot wiring but no sq_item, so erroring here refused
+    ; reversed() on the ordinary __len__ + __getitem__ class it used to work
+    ; for; that class is handled below.
     mov rdx, [rax + PyTypeObject.tp_as_sequence]
     mov rdx, [rdx + PySequenceMethods.sq_item]
     test rdx, rdx
-    jz .rev_type_error
+    jz .rev_try_heap_len
     mov rdi, r12
     call rcx
     jmp .rev_have_len
@@ -1424,6 +1419,7 @@ section .text
     extern dunder_len
     lea rsi, [rel dunder_len]
     call dunder_lookup
+    V_UNPACK rax, rdx           ; returns a Value
     test edx, edx
     pop rcx                 ; restore type
     jz .rev_type_error      ; no __len__
@@ -1433,6 +1429,7 @@ section .text
     extern dunder_getitem
     lea rsi, [rel dunder_getitem]
     call dunder_lookup
+    V_UNPACK rax, rdx           ; returns a Value
     test edx, edx
     jz .rev_type_error      ; no __getitem__
 
@@ -1441,12 +1438,15 @@ section .text
     extern dunder_len
     lea rsi, [rel dunder_len]
     call dunder_call_1
+    V_UNPACK rax, rdx           ; returns a Value
     ; rax = length (SmallInt payload), edx = TAG_SMALLINT
     jmp .rev_have_len
 
 .rev_try_ob_size:
-    ; Fallback: read ob_size at +16 (tuples, lists already handled above)
-    mov rax, [r12 + PyVarObject.ob_size]
+    ; No __reversed__, no sequence protocol: not reversible.  Reading ob_size
+    ; off whatever this is made reversed(None) and reversed(True) return an
+    ; empty iterator instead of raising.
+    jmp .rev_type_error
 
 .rev_have_len:
     ; rax = length
@@ -1471,6 +1471,7 @@ section .text
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .rev_error:
@@ -1479,9 +1480,10 @@ section .text
     call raise_exception
 
 .rev_type_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "argument to reversed() must be a sequence"
-    call raise_exception
+    mov rsi, r12
+    CSTRING rdi, `'\x01' object is not reversible`
+    extern raise_type_error_with_name
+    call raise_type_error_with_name
 END_FUNC builtin_reversed
 
 ;; reversed_iternext(self) -> PyObject* or NULL
@@ -1506,7 +1508,7 @@ DEF_FUNC_LOCAL reversed_iternext
     test rcx, rcx
     jz .revi_try_getitem
     call rcx
-    ; rax = item (with INCREF from sq_item), rdx = tag
+    V_UNPACK rax, rdx          ; sq_item returns a Value
     jmp .revi_got_item
 
 .revi_try_getitem:
@@ -1518,6 +1520,7 @@ DEF_FUNC_LOCAL reversed_iternext
     mov ecx, TAG_SMALLINT
     extern dunder_call_2
     call dunder_call_2
+    V_UNPACK rax, rdx           ; returns a Value
     test edx, edx
     jz .revi_exhausted           ; __getitem__ failed
 
@@ -1525,7 +1528,8 @@ DEF_FUNC_LOCAL reversed_iternext
     ; Decrement index
     dec qword [rbx + IT_FIELD2]
 
-    ; rax = payload, rdx = tag from sq_item/dunder_call_2
+    ; sq_item and dunder_call_2 both still return a fat pair
+    V_PACK rax, rdx
     pop rbx
     leave
     ret
@@ -1566,8 +1570,10 @@ END_FUNC reversed_dealloc
 SO_ARGS       equ 8
 SO_NARGS      equ 16
 SO_SORT_BUF   equ 72     ; END of sort args buffer (grows down from here)
-SO_FRAME      equ 72     ; 24 + 48
+SO_EXC        equ 80     ; the exception pending before iteration began
+SO_FRAME      equ 96
 DEF_FUNC builtin_sorted, SO_FRAME
+    DUNDER_EXC_SAVE [rbp - SO_EXC]
     push rbx
     push r12
     push r13
@@ -1577,8 +1583,8 @@ DEF_FUNC builtin_sorted, SO_FRAME
 
     ; Get iterator from args[0]
     mov rax, rdi
-    mov rdi, [rax]              ; args[0] payload
-    mov esi, [rax + 8]         ; args[0] tag
+    mov rdi, [rax]              ; args[0]
+    V_UNPACK rdi, rsi
     call get_iterator
     mov rbx, rax               ; rbx = iterator
 
@@ -1592,6 +1598,7 @@ DEF_FUNC builtin_sorted, SO_FRAME
     mov rax, [rdi + PyObject.ob_type]
     mov rax, [rax + PyTypeObject.tp_iternext]
     call rax
+    V_UNPACK rax, rdx           ; tp_iternext returns a Value
     test edx, edx
     jz .sorted_done_iter
 
@@ -1599,6 +1606,7 @@ DEF_FUNC builtin_sorted, SO_FRAME
     push rax
     mov rdi, r12
     mov rsi, rax
+    V_PACK rsi, rdx         ; list_append takes a Value
     call list_append
     pop rdi
     pop rsi
@@ -1609,10 +1617,19 @@ DEF_FUNC builtin_sorted, SO_FRAME
     mov rdi, rbx
     call obj_decref
 
-    ; Build args for list_method_sort in fixed frame buffer
-    ; args[0] = list
+    ; call_iternext answers NULL both for a clean exhaustion and for a
+    ; __next__ that raised something other than StopIteration -- it clears
+    ; StopIteration itself and leaves anything else pending.  list() checks;
+    ; sorted() did not, so sorted(x) quietly returned a partial result while
+    ; the exception waited to surface somewhere unrelated.  The comparison is
+    ; against the value saved on entry, not against 0: current_exception is
+    ; also the exception *being handled*, so inside an `except` block a bare
+    ; test made sorted() re-raise it.
+    DUNDER_RAISED [rbp - SO_EXC], .sorted_propagate
+
+    ; Build args for list_method_sort in the fixed frame buffer
+    ; args[0] = list (a pointer is its own Value)
     mov [rbp - SO_SORT_BUF], r12
-    mov qword [rbp - SO_SORT_BUF + 8], TAG_PTR
 
     mov rax, [rel kw_names_pending]
     test rax, rax
@@ -1631,13 +1648,11 @@ DEF_FUNC builtin_sorted, SO_FRAME
     mov rax, [rbp - SO_ARGS]
     mov r10, rsi
     add r10, r9
-    shl r10, 4
+    shl r10, 3
     lea r8, [r9 + 1]
-    shl r8, 4
+    shl r8, 3
     mov r11, [rax + r10]
     mov [rbp - SO_SORT_BUF + r8], r11
-    mov r11, [rax + r10 + 8]
-    mov [rbp - SO_SORT_BUF + r8 + 8], r11
     inc r9
     jmp .sorted_kw_copy
 .sorted_kw_copy_done:
@@ -1652,7 +1667,7 @@ DEF_FUNC builtin_sorted, SO_FRAME
     call list_method_sort
 
 .sorted_return:
-    DECREF_VAL rax, rdx
+    DECREF_V rax, rdx
 
     mov rax, r12
     mov edx, TAG_PTR
@@ -1661,12 +1676,19 @@ DEF_FUNC builtin_sorted, SO_FRAME
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .sorted_error:
     lea rdi, [rel exc_TypeError_type]
     CSTRING rsi, "sorted() requires exactly 1 argument"
     call raise_exception
+.sorted_propagate:
+    mov rdi, r12
+    call obj_decref             ; the partially built list
+    leave
+    mov [rel eval_saved_r13], r13
+    jmp eval_exception_unwind
 END_FUNC builtin_sorted
 
 ;; ============================================================================
@@ -1719,11 +1741,13 @@ DEF_FUNC_LOCAL seq_iter_iternext
     mov ecx, TAG_SMALLINT          ; other_tag for index
     extern dunder_call_2
     call dunder_call_2
+    V_UNPACK rax, rdx           ; returns a Value
     test edx, edx
     jz .si_check_exc               ; NULL — check for IndexError
 
     ; Got a value — increment index
     inc qword [rbx + IT_FIELD2]
+    V_PACK rax, rdx
     pop rbx
     leave
     ret
@@ -1811,9 +1835,9 @@ DEF_FUNC builtin_chain
     jge .chain_create
 
     mov rax, r14
-    shl rax, 4                  ; rax = i * 16
-    mov rdi, [rbx + rax]        ; args[i] payload
-    mov rsi, [rbx + rax + 8]    ; args[i] tag
+    shl rax, 3                  ; one Value per slot
+    mov rdi, [rbx + rax]        ; args[i]
+    V_UNPACK rdi, rsi
     push r13
     push r14
     call get_iterator
@@ -1842,6 +1866,7 @@ DEF_FUNC builtin_chain
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .chain_zero:
@@ -1862,6 +1887,7 @@ DEF_FUNC builtin_chain
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 END_FUNC builtin_chain
 
@@ -1884,7 +1910,7 @@ DEF_FUNC_LOCAL chain_iternext
 
     ; Call iternext via helper (handles __next__, clears StopIteration)
     call call_iternext
-    test edx, edx
+    test rax, rax
     jnz .chain_got_value
 
     ; call_iternext clears StopIteration automatically.
@@ -1991,6 +2017,7 @@ enumerate_iter_type:
     dq 0                        ; tp_bases
     dq 0                        ; tp_traverse
     dq 0                        ; tp_clear
+    dq 0 ; tp_dictoffset
 
 ; Zip iterator type
 align 8
@@ -2022,6 +2049,7 @@ zip_iter_type:
     dq 0                        ; tp_bases
     dq 0                        ; tp_traverse
     dq 0                        ; tp_clear
+    dq 0 ; tp_dictoffset
 
 ; Map iterator type
 align 8
@@ -2053,6 +2081,7 @@ map_iter_type:
     dq 0                        ; tp_bases
     dq 0                        ; tp_traverse
     dq 0                        ; tp_clear
+    dq 0 ; tp_dictoffset
 
 ; Filter iterator type
 align 8
@@ -2084,6 +2113,7 @@ filter_iter_type:
     dq 0                        ; tp_bases
     dq 0                        ; tp_traverse
     dq 0                        ; tp_clear
+    dq 0 ; tp_dictoffset
 
 ; Sequence iterator type (__getitem__ protocol)
 align 8
@@ -2115,6 +2145,7 @@ seq_iter_type:
     dq 0                        ; tp_bases
     dq 0                        ; tp_traverse
     dq 0                        ; tp_clear
+    dq 0 ; tp_dictoffset
 
 ; Reversed iterator type
 align 8
@@ -2146,6 +2177,7 @@ reversed_iter_type:
     dq 0                        ; tp_bases
     dq 0                        ; tp_traverse
     dq 0                        ; tp_clear
+    dq 0 ; tp_dictoffset
 
 ; Chain iterator type
 align 8
@@ -2177,3 +2209,4 @@ chain_iter_type:
     dq 0                        ; tp_bases
     dq 0                        ; tp_traverse
     dq 0                        ; tp_clear
+    dq 0 ; tp_dictoffset

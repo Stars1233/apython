@@ -8,7 +8,6 @@
 extern eval_dispatch
 extern eval_saved_rbx
 extern eval_saved_r13
-extern eval_saved_r15
 extern eval_co_names
 extern opcode_table
 extern import_module
@@ -124,6 +123,7 @@ DEF_FUNC op_import_from, IF2_FRAME
 
     ; Call tp_getattr(module, name_str)
     call rax
+    V_UNPACK rax, rdx           ; tp_getattr returns a Value
     test edx, edx
     jnz .if_got_attr
 
@@ -133,8 +133,8 @@ DEF_FUNC op_import_from, IF2_FRAME
     test rdi, rdi
     jz .if_try_submodule
     mov rsi, [rbp - IF_ATTR]
-    mov edx, TAG_PTR
     call dict_get
+    V_UNPACK rax, rdx           ; dict_get returns a Value
     test edx, edx
     jnz .if_found_in_dict
     jmp .if_try_submodule
@@ -146,8 +146,8 @@ DEF_FUNC op_import_from, IF2_FRAME
     test rdi, rdi
     jz .if_try_submodule
     mov rsi, [rbp - IF_ATTR]
-    mov edx, TAG_PTR
     call dict_get
+    V_UNPACK rax, rdx           ; dict_get returns a Value
     test edx, edx
     jnz .if_found_in_dict
     jmp .if_try_submodule
@@ -178,8 +178,8 @@ DEF_FUNC op_import_from, IF2_FRAME
     mov rdi, [rbp - IF2_MOD]
     mov rdi, [rdi + PyModuleObject.mod_dict]
     mov rsi, rax
-    mov edx, TAG_PTR
     call dict_get
+    V_UNPACK rax, rdx           ; dict_get returns a Value
     mov rcx, rax                ; rcx = pkg_name str (or NULL)
     pop rdi                     ; __name__ str key
     push rcx                    ; save pkg_name

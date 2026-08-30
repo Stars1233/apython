@@ -1,0 +1,6 @@
+Exception ignored in __del__
+Exception ignored in __del__
+Exception ignored in __del__
+Exception ignored in __del__
+Exception ignored in __del__
+PASS: del and gc state

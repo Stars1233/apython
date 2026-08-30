@@ -8,6 +8,8 @@
 %include "frame.inc"
 
 extern bool_init
+extern ap_strcmp
+extern value_selftest_main
 extern builtins_init
 extern methods_init
 extern import_init
@@ -68,6 +70,23 @@ DEF_FUNC main
     ret
 .not_version:
 
+    ; Check for --selftest-value flag (NaN-box encoding self-test)
+    mov rdi, [r15 + 8]          ; rdi = argv[1]
+    lea rsi, [rel selftest_flag]
+    call ap_strcmp
+    test eax, eax
+    jne .not_selftest
+    call bool_init
+    call value_selftest_main
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+.not_selftest:
+
     ; Check for -t flag (opcode tracing)
     mov rax, [r15 + 8]         ; rax = argv[1]
     cmp byte [rax], '-'
@@ -127,8 +146,6 @@ DEF_FUNC main
     mov rdx, rax                ; value = "__main__" str
     mov rsi, [rsp + 8]          ; key = "__name__" str
     mov rdi, [rsp + 16]         ; dict = globals (from stack)
-    mov ecx, TAG_PTR
-    mov r8d, TAG_PTR
     call dict_set
     pop rdi                     ; value str
     call obj_decref
@@ -142,8 +159,6 @@ DEF_FUNC main
     mov rdi, [rsp + 8]         ; globals dict
     mov rsi, rax
     lea rdx, [rel none_singleton]
-    mov ecx, TAG_PTR
-    mov r8d, TAG_PTR
     call dict_set
     pop rdi
     call obj_decref
@@ -156,8 +171,6 @@ DEF_FUNC main
     mov rdi, [rsp + 8]         ; globals dict
     mov rsi, rax
     mov rdx, [rel builtins_dict_global]
-    mov ecx, TAG_PTR
-    mov r8d, TAG_PTR
     call dict_set
     pop rdi
     call obj_decref
@@ -177,8 +190,6 @@ DEF_FUNC main
     mov rdi, [rel sys_modules_dict]
     mov rsi, [rsp + 8]         ; key = "__main__" str
     mov rdx, rax               ; value = module object
-    mov ecx, TAG_PTR
-    mov r8d, TAG_PTR
     call dict_set
     pop rdi                     ; module object (owned by sys.modules now)
     call obj_decref
@@ -198,6 +209,7 @@ DEF_FUNC main
     ; Execute the bytecode
     mov rdi, rbx
     call eval_frame
+    V_UNPACK rax, rdx           ; eval_frame returns a Value
     ; rax = return value (ignore for module-level code)
 
     ; Clean up
@@ -210,63 +222,19 @@ DEF_FUNC main
     test rdi, rdi
     jz .exit_ok
 
-    ; Print exception to stderr: "ExceptionType: message\n"
-    ; Get type name
-    mov rax, [rdi + PyObject.ob_type]
-    mov rsi, [rax + PyTypeObject.tp_name]
-    ; strlen of type name
+    ; An uncaught SystemExit is the process status, not an error report.
     push rdi
-    mov rdi, rsi
-    xor ecx, ecx
-.strlen_type:
-    cmp byte [rdi + rcx], 0
-    je .strlen_type_done
-    inc ecx
-    jmp .strlen_type
-.strlen_type_done:
-    mov edx, ecx
-    push rsi
-    push rdx
-    mov edi, 2                  ; stderr
-    extern sys_write
-    call sys_write
-    pop rdx
-    pop rsi
+    lea rsi, [rel exc_SystemExit_type]
+    extern exc_SystemExit_type
+    extern exc_isinstance
+    call exc_isinstance
     pop rdi
+    test eax, eax
+    jnz .system_exit
 
-    ; Check for message (must be TAG_PTR)
-    extern PyExceptionObject
-    cmp qword [rdi + PyExceptionObject.exc_value_tag], TAG_PTR
-    jne .print_newline
-    mov rax, [rdi + PyExceptionObject.exc_value]
-    test rax, rax
-    jz .print_newline
-
-    ; Print ": "
-    push rax
-    mov edi, 2
-    lea rsi, [rel colon_space]
-    mov edx, 2
-    call sys_write
-    pop rax
-
-    ; Print message (must be a string)
-    mov rcx, [rax + PyObject.ob_type]
-    extern str_type
-    lea rdx, [rel str_type]
-    cmp rcx, rdx
-    jne .print_newline
-
-    lea rsi, [rax + PyStrObject.data]
-    mov rdx, [rax + PyStrObject.ob_size]
-    mov edi, 2
-    call sys_write
-
-.print_newline:
-    mov edi, 2
-    lea rsi, [rel newline_char]
-    mov edx, 1
-    call sys_write
+    ; Print the traceback and the exception, CPython's shape.
+    extern traceback_print
+    call traceback_print
 
     ; DECREF the exception object before exiting
     mov rdi, [rel current_exception]
@@ -275,6 +243,78 @@ DEF_FUNC main
 
     ; Exit 1
     mov ebx, 1
+    jmp .exit_cleanup
+
+.system_exit:
+    ; SystemExit.code: absent or None -> 0, an int -> that status, anything
+    ; else -> print it on stderr and exit 1.
+    mov rax, [rdi + PyExceptionObject.exc_args]
+    test rax, rax
+    jz .se_zero
+    mov rcx, [rax + PyTupleObject.ob_size]
+    test rcx, rcx
+    jz .se_zero
+    mov rcx, [rax + PyTupleObject.ob_item]
+    mov rax, [rcx]                 ; args[0] as a Value
+    lea rcx, [rel none_singleton]
+    cmp rax, rcx
+    je .se_zero
+    V_IS_INT rax, rcx
+    jae .se_int
+    V_TEST_PTR rax, rcx
+    ja .se_one                     ; a float status is not a status
+    mov rcx, [rax + PyObject.ob_type]
+    extern int_type
+    lea rdx, [rel int_type]
+    cmp rcx, rdx
+    je .se_bigint
+    ; True and False are ints: sys.exit(False) exits 0, not 1.
+    extern bool_type
+    lea rdx, [rel bool_type]
+    cmp rcx, rdx
+    je .se_bigint
+    extern str_type
+    lea rdx, [rel str_type]
+    cmp rcx, rdx
+    jne .se_one
+    ; A message: print it and exit 1.
+    mov rdx, [rax + PyStrObject.ob_size]
+    lea rsi, [rax + PyStrObject.data]
+    mov edi, 2
+    call sys_write
+    mov edi, 2
+    lea rsi, [rel newline_char]
+    mov edx, 1
+    call sys_write
+    jmp .se_one
+
+.se_bigint:
+    ; A heap int still has to fit a process status; take it modulo 256 the
+    ; way the kernel does with the low byte of the syscall argument.
+    mov rdi, rax
+    mov edx, TAG_PTR
+    extern int_to_i64
+    call int_to_i64
+    mov ebx, eax
+    and ebx, 0xFF
+    jmp .se_finish
+
+.se_int:
+    V_TO_I64 rax
+    mov ebx, eax
+    and ebx, 0xFF
+    jmp .se_finish
+
+.se_one:
+    mov ebx, 1
+    jmp .se_finish
+
+.se_zero:
+    xor ebx, ebx
+.se_finish:
+    mov rdi, [rel current_exception]
+    call obj_decref
+    mov qword [rel current_exception], 0
     jmp .exit_cleanup
 
 .exit_ok:
@@ -335,6 +375,7 @@ DEF_FUNC main
 END_FUNC main
 
 section .rodata
+selftest_flag: db "--selftest-value", 0
 version_msg: db "apython ", VERSION_STR, 10
 version_msg_len equ $ - version_msg
 __name__cstr: db "__name__", 0

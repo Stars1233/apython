@@ -128,14 +128,15 @@ DEF_FUNC module_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .normal_lookup:
     ; dict_get(mod_dict, name_str)
     mov rdi, [rbx + PyModuleObject.mod_dict]
     mov rsi, r12
-    mov edx, TAG_PTR
     call dict_get
+    V_UNPACK rax, rdx           ; dict_get returns a Value
 
     ; INCREF if found (dict_get returns borrowed ref)
     test edx, edx
@@ -144,6 +145,7 @@ DEF_FUNC module_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .not_found:
@@ -151,6 +153,7 @@ DEF_FUNC module_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 END_FUNC module_getattr
 
@@ -162,9 +165,7 @@ DEF_FUNC module_setattr
     ; dict_set(mod_dict, name, value, value_tag, key_tag)
     mov rax, rdi                ; self
     mov rdi, [rax + PyModuleObject.mod_dict]
-    ; rsi = name_str, rdx = value (already in place)
-    ; ecx = value_tag (from caller, already in place)
-    mov r8d, TAG_PTR            ; key_tag (name is always heap string)
+    ; rsi = name_str and rdx = value are both already Values
     call dict_set
     xor eax, eax               ; return 0 (success)
     leave
@@ -228,3 +229,4 @@ module_type:
     dq 0                        ; tp_bases
     dq module_traverse                        ; tp_traverse
     dq module_clear_gc                        ; tp_clear
+    dq 0            ; tp_dictoffset

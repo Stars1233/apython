@@ -18,6 +18,8 @@
 %include "errcodes.inc"
 %include "eventloop.inc"
 
+extern bool_true
+extern bool_false
 extern ap_malloc
 extern gc_alloc
 extern gc_track
@@ -135,12 +137,10 @@ DEF_FUNC task_new
     pop rax
 
     mov qword [rax + AsyncTask.result], 0
-    mov qword [rax + AsyncTask.result_tag], 0
     mov qword [rax + AsyncTask.exception], 0
     ; send_value starts as None
     lea rcx, [rel none_singleton]
     mov [rax + AsyncTask.send_value], rcx
-    mov qword [rax + AsyncTask.send_tag], TAG_PTR
     mov dword [rax + AsyncTask.done], 0
     mov dword [rax + AsyncTask.cancelling], 0
     mov dword [rax + AsyncTask.n_waiters], 0
@@ -169,7 +169,7 @@ DEF_FUNC task_dealloc
 
     ; XDECREF result
     mov rdi, [rbx + AsyncTask.result]
-    mov rsi, [rbx + AsyncTask.result_tag]
+    V_UNPACK rdi, rsi
     XDECREF_VAL rdi, rsi
 
     ; XDECREF exception
@@ -262,24 +262,34 @@ DEF_FUNC task_step, TS_FRAME
 
     ; gen_send(coro, send_value, send_tag)
     mov rdi, [rbx + AsyncTask.coro]
-    mov rsi, [rbx + AsyncTask.send_value]
-    mov edx, [rbx + AsyncTask.send_tag]
+    mov rsi, [rbx + AsyncTask.send_value]   ; already a Value
     call gen_send
-    ; rax = result payload, edx = tag
+    V_UNPACK rax, rdx          ; gen_send returns a Value
 
     ; Check for exhaustion (NULL tag = coroutine returned)
     test edx, edx
     jz .ts_finished
 
-    ; Dispatch on result tag
+    ; Dispatch on the yielded value.  Sleep and io-wait carry raw data and
+    ; need their own tags; a yielded task or wait_for is an ordinary object,
+    ; so it is identified by its type rather than by a tag of its own.
     cmp edx, TAG_SLEEP
     je .ts_sleep
     cmp edx, TAG_IO_WAIT
     je .ts_io_wait
-    cmp edx, TAG_TASK
+    cmp edx, TAG_PTR
+    jne .ts_plain_value
+    ; rcx/rsi are scratch here; r13 must not be touched -- it is the VM value
+    ; stack pointer and task_step does not save it.
+    mov rcx, [rax + PyObject.ob_type]
+    lea rsi, [rel task_type]
+    cmp rcx, rsi
     je .ts_await_task
-    cmp edx, TAG_WAIT_FOR
+    extern wait_for_awaitable_type
+    lea rsi, [rel wait_for_awaitable_type]
+    cmp rcx, rsi
     je .ts_wait_for
+.ts_plain_value:
 
     ; Unknown yield value — coroutine yielded a regular value
     ; For asyncio: this means the coroutine is waiting
@@ -338,9 +348,7 @@ DEF_FUNC task_step, TS_FRAME
 
     ; No exception — set send_value to its result, re-enqueue
     mov rax, [r12 + AsyncTask.result]
-    mov rdx, [r12 + AsyncTask.result_tag]
     mov [rbx + AsyncTask.send_value], rax
-    mov [rbx + AsyncTask.send_tag], rdx
     mov rdi, rbx
     call ready_enqueue
     jmp .ts_decref_awaited
@@ -352,12 +360,11 @@ DEF_FUNC task_step, TS_FRAME
     lea rax, [rel none_singleton]
     INCREF rax
     mov [rbx + AsyncTask.send_value], rax
-    mov qword [rbx + AsyncTask.send_tag], TAG_PTR
     mov rdi, rbx
     call ready_enqueue
 
 .ts_decref_awaited:
-    ; DECREF awaited task (INCREFed by task_iternext before yielding TAG_TASK)
+    ; DECREF awaited task (INCREFed by task_iternext before yielding itself)
     mov rdi, r12
     call obj_decref
     jmp .ts_ret
@@ -395,7 +402,6 @@ DEF_FUNC task_step, TS_FRAME
     lea rax, [rel none_singleton]
     INCREF rax
     mov [rbx + AsyncTask.send_value], rax
-    mov qword [rbx + AsyncTask.send_tag], TAG_PTR
     mov rdi, rbx
     call ready_enqueue
     ; DECREF wfa
@@ -408,10 +414,8 @@ DEF_FUNC task_step, TS_FRAME
     ; The return value is in gen.gi_return_value
     mov rdi, [rbx + AsyncTask.coro]
     mov rax, [rdi + PyGenObject.gi_return_value]
-    mov rdx, [rdi + PyGenObject.gi_return_tag]
     mov [rbx + AsyncTask.result], rax
-    mov [rbx + AsyncTask.result_tag], rdx
-    INCREF_VAL rax, rdx
+    INCREF_V rax, rdx
     mov dword [rbx + AsyncTask.done], 1
 
     ; Wake waiters
@@ -445,10 +449,8 @@ DEF_FUNC task_step, TS_FRAME
     ; Store return value as result (from gi_return_value since gen exhausted)
     mov rdi, [rbx + AsyncTask.coro]
     mov rax, [rdi + PyGenObject.gi_return_value]
-    mov rdx, [rdi + PyGenObject.gi_return_tag]
     mov [rbx + AsyncTask.result], rax
-    mov [rbx + AsyncTask.result_tag], rdx
-    INCREF_VAL rax, rdx
+    INCREF_V rax, rdx
     jmp .ts_cancel_done
 .ts_cancel_no_exc:
     ; No exception found — create one
@@ -504,10 +506,10 @@ DEF_FUNC task_wake_waiters
 
     ; Set send_value = task's result (INCREF for each waiter)
     mov rax, [rbx + AsyncTask.result]
-    mov rdx, [rbx + AsyncTask.result_tag]
+    V_UNPACK rax, rdx
     INCREF_VAL rax, rdx
+    V_PACK rax, rdx
     mov [rdi + AsyncTask.send_value], rax
-    mov [rdi + AsyncTask.send_tag], rdx
     jmp .tw_enqueue
 
 .tw_set_cancel:
@@ -517,7 +519,6 @@ DEF_FUNC task_wake_waiters
     lea rax, [rel none_singleton]
     INCREF rax
     mov [rdi + AsyncTask.send_value], rax
-    mov qword [rdi + AsyncTask.send_tag], TAG_PTR
 
 .tw_enqueue:
     ; Enqueue waiter
@@ -650,7 +651,7 @@ DEF_FUNC eventloop_run, ER_FRAME
 .er_done:
     ; Return root task's result
     mov rax, [rbx + AsyncTask.result]
-    mov rdx, [rbx + AsyncTask.result_tag]
+    V_UNPACK rax, rdx
     INCREF_VAL rax, rdx
 
     pop r12
@@ -698,6 +699,7 @@ DEF_FUNC task_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .ta_done_method:
@@ -708,6 +710,7 @@ DEF_FUNC task_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .ta_result_method:
@@ -718,6 +721,7 @@ DEF_FUNC task_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .ta_cancel_method:
@@ -728,6 +732,7 @@ DEF_FUNC task_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .ta_cancelled_method:
@@ -738,6 +743,7 @@ DEF_FUNC task_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 END_FUNC task_getattr
 
@@ -751,18 +757,18 @@ DEF_FUNC_BARE task_iter_self
 END_FUNC task_iter_self
 
 ;; ============================================================================
-;; task_iternext — tp_iternext for task: yield TAG_TASK or stop
-;; When awaited, yields itself as TAG_TASK so event loop can track dependency.
+;; task_iternext — tp_iternext for task: yield self or stop.
+;; When awaited, yields itself so the event loop can track the dependency;
+;; task_step recognizes it by its type.
 ;; ============================================================================
 DEF_FUNC_BARE task_iternext
     ; If done, return NULL (signals StopIteration to SEND)
     cmp dword [rdi + AsyncTask.done], 1
     je .ti_done
 
-    ; Not done — yield self as TAG_TASK
+    ; Not done — yield self; task_step identifies it by ob_type
     inc qword [rdi + PyObject.ob_refcnt]
     mov rax, rdi
-    mov edx, TAG_TASK
     ret
 
 .ti_done:
@@ -773,9 +779,7 @@ DEF_FUNC_BARE task_iternext
 
     ; No exception — copy result for StopIteration protocol
     mov rax, [rdi + AsyncTask.result]
-    mov rdx, [rdi + AsyncTask.result_tag]
     mov [rdi + AsyncTask.send_value], rax
-    mov [rdi + AsyncTask.send_tag], rdx
     ; Return NULL to signal completion
     RET_NULL
     ret
@@ -803,8 +807,9 @@ END_FUNC task_repr
 DEF_FUNC _task_done_impl
     mov rax, [rdi]             ; self = args[0]
     mov eax, [rax + AsyncTask.done]
-    mov edx, TAG_BOOL
+    RET_BOOL_RAX
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 END_FUNC _task_done_impl
 
@@ -818,10 +823,11 @@ DEF_FUNC _task_result_impl
     test rcx, rcx
     jnz .tr_exception
     ; Return result
-    mov rdx, [rax + AsyncTask.result_tag]
     mov rax, [rax + AsyncTask.result]
-    INCREF_VAL rax, rdx
+    INCREF_V rax, rdx
+    V_UNPACK rax, rdx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .tr_not_done:
@@ -840,8 +846,9 @@ DEF_FUNC _task_cancel_impl
     mov rax, [rdi]
     mov dword [rax + AsyncTask.cancelling], 1
     mov eax, 1
-    mov edx, TAG_BOOL
+    RET_BOOL_RAX
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 END_FUNC _task_cancel_impl
 
@@ -849,8 +856,9 @@ END_FUNC _task_cancel_impl
 DEF_FUNC _task_cancelled_impl
     mov rax, [rdi]
     mov eax, [rax + AsyncTask.cancelling]
-    mov edx, TAG_BOOL
+    RET_BOOL_RAX
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 END_FUNC _task_cancelled_impl
 
@@ -950,6 +958,7 @@ task_type:
     dq 0                        ; tp_bases
     dq 0                        ; tp_traverse
     dq 0                        ; tp_clear
+    dq 0 ; tp_dictoffset
 
 section .bss
 align 8

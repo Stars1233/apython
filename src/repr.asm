@@ -15,9 +15,7 @@
 ; Set entry layout (must match set.asm)
 SET_ENTRY_HASH    equ 0
 SET_ENTRY_KEY     equ 8
-SET_ENTRY_KEY_TAG equ 16
-SET_ENTRY_SIZE    equ 24
-SET_TOMBSTONE     equ 0xDEAD
+SET_ENTRY_SIZE    equ 16
 
 extern ap_malloc
 extern ap_free
@@ -27,16 +25,29 @@ extern obj_decref
 extern str_from_cstr_heap
 extern str_type
 extern str_repr
-extern fat_to_obj
 
 ; Recursion detection for container repr
 ; Simple fixed-size stack of object pointers currently being repr'd.
 section .data
 align 8
+global repr_depth           ; eval_exception_unwind resets this: a raise from
+                            ; inside a nested __repr__ skips repr_pop
 repr_depth: dq 0                  ; current depth (number of entries)
 repr_stack: times 64 dq 0         ; up to 64 nested containers
 
 section .text
+
+; obj_repr returns NULL both for "this type has no repr" and for "the repr
+; raised".  A container propagating that NULL must have an exception pending,
+; or the caller sees a bare NULL Value and pushes it.
+%macro REPR_ENSURE_EXC 0
+    cmp qword [rel current_exception], 0
+    jne %%have_exc
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "object has no repr"
+    call raise_exception
+%%have_exc:
+%endmacro
 
 ; Check if ptr is in repr_stack. Returns 1 in eax if found, 0 if not.
 ; Does NOT clobber rdi.
@@ -70,6 +81,8 @@ repr_push:
 .rp_overflow:
     extern exc_RecursionError_type
     extern raise_exception
+extern exc_TypeError_type
+extern current_exception
     lea rdi, [rel exc_RecursionError_type]
     CSTRING rsi, "maximum recursion depth exceeded while getting the repr of an object"
     call raise_exception
@@ -165,14 +178,12 @@ DEF_FUNC list_repr, 24                ; buf ptr, used, capacity
 
     ; Get element (payload + tag arrays)
     mov rax, [rbx + PyListObject.ob_item]
-    mov rcx, [rbx + PyListObject.ob_item_tags]
     mov rdi, [rax + r12 * 8]      ; payload
-    movzx esi, byte [rcx + r12]   ; tag
 
     ; Call obj_repr(payload, tag)
     call obj_repr
     test rax, rax
-    jz .lr_next
+    jz .lr_elem_failed
 
     ; Append repr string to buffer
     push rax                   ; save repr str for DECREF
@@ -226,6 +237,21 @@ DEF_FUNC list_repr, 24                ; buf ptr, used, capacity
     leave
     ret
 
+.lr_elem_failed:
+    ; An element's repr failed.  Skipping it left the exception pending with
+    ; a perfectly good-looking string as the result, so it surfaced later at
+    ; an unrelated instruction instead of at the repr() call.
+    mov rdi, [rbp-8]
+    call ap_free
+    call repr_pop
+    REPR_ENSURE_EXC
+    RET_NULL
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
 .lr_recursive:
     ; Return "[...]" for recursive reference
     CSTRING rdi, "[...]"
@@ -248,6 +274,15 @@ DEF_FUNC tuple_repr, 24
     push r13
 
     mov rbx, rdi               ; rbx = tuple
+
+    ; Cycle guard, as list_repr has.  Without it a tuple that reaches itself
+    ; -- l = []; t = (l,); l.append(t) -- recursed to a stack overflow.
+    mov rdi, rbx
+    call repr_check_active
+    test eax, eax
+    jnz .tr_recursive
+    mov rdi, rbx
+    call repr_push
 
     mov r13, [rbx + PyTupleObject.ob_size]
 
@@ -274,19 +309,10 @@ DEF_FUNC tuple_repr, 24
 
     ; Get element at index r12
     mov rax, [rbx + PyTupleObject.ob_item]
-    mov rcx, [rbx + PyTupleObject.ob_item_tags]
-    mov rdi, [rax + r12 * 8]       ; payload
-    movzx esi, byte [rcx + r12]    ; tag
-    ; TAG_FLOAT shortcut: call float_repr directly (no heap float object)
-    cmp esi, TAG_FLOAT
-    je .tr_float_elem
-    call fat_to_obj                ; rax = PyObject* (owned ref)
-    push rax                       ; save for DECREF later
-    mov rdi, rax
-    mov esi, TAG_PTR               ; fat_to_obj always returns heap ptr
-    call obj_repr
+    mov rdi, [rax + r12 * 8]       ; the element Value
+    call obj_repr                  ; obj_repr decodes it itself
     test rax, rax
-    jz .tr_decref_elem
+    jz .tr_elem_failed
 
     push rax
     mov rcx, [rax + PyStrObject.ob_size]
@@ -302,32 +328,6 @@ DEF_FUNC tuple_repr, 24
 
     pop rdi
     call obj_decref                ; DECREF repr string
-    jmp .tr_decref_elem
-
-.tr_float_elem:
-    ; rdi = raw double bits; call float_repr directly
-    extern float_repr
-    call float_repr                ; rax = payload, edx = tag
-    test edx, edx
-    jz .tr_next                    ; skip on error
-    push rax
-    mov rcx, [rax + PyStrObject.ob_size]
-    BUF_ENSURE rcx
-    mov rsi, [rsp]
-    lea rsi, [rsi + PyStrObject.data]
-    mov rdi, [rbp-8]
-    add rdi, [rbp-16]
-    mov rcx, [rsp]
-    mov rcx, [rcx + PyStrObject.ob_size]
-    add [rbp-16], rcx
-    rep movsb
-    pop rdi
-    call obj_decref                ; DECREF repr string
-    jmp .tr_next
-
-.tr_decref_elem:
-    pop rdi                        ; fat_to_obj result
-    call obj_decref                ; DECREF fat_to_obj result
 
 .tr_next:
     inc r12
@@ -356,6 +356,29 @@ DEF_FUNC tuple_repr, 24
 
     pop rax
     mov edx, TAG_PTR           ; ap_free clobbers rdx
+    call repr_pop
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.tr_elem_failed:
+    mov rdi, [rbp-8]
+    call ap_free
+    call repr_pop
+    REPR_ENSURE_EXC
+    RET_NULL
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.tr_recursive:
+    CSTRING rdi, "(...)"
+    call str_from_cstr_heap
+    mov edx, TAG_PTR
     pop r13
     pop r12
     pop rbx
@@ -376,6 +399,14 @@ DEF_FUNC dict_repr, 24
 
     mov rbx, rdi
 
+    ; Cycle guard: d = {}; d['k'] = d; repr(d) recursed to a segfault.
+    mov rdi, rbx
+    call repr_check_active
+    test eax, eax
+    jnz .dr_recursive
+    mov rdi, rbx
+    call repr_push
+
     ; Allocate buffer
     mov edi, 256
     call ap_malloc
@@ -393,12 +424,10 @@ DEF_FUNC dict_repr, 24
     cmp r12, r13
     jge .dr_done
 
-    ; Check if entry is occupied (key_tag != 0 and != TOMBSTONE)
+    ; Occupied entries have a non-zero key Value
     mov rax, [rbx + PyDictObject.entries]
     imul rcx, r12, DICT_ENTRY_SIZE
-    cmp byte [rax + rcx + DictEntry.key_tag], 0
-    je .dr_next_entry
-    cmp byte [rax + rcx + DictEntry.key_tag], DICT_TOMBSTONE
+    cmp qword [rax + rcx + DictEntry.key], 0
     je .dr_next_entry
 
     ; Print separator if not first
@@ -413,11 +442,10 @@ DEF_FUNC dict_repr, 24
     mov rax, [rbx + PyDictObject.entries]
     imul rcx, r12, DICT_ENTRY_SIZE
     mov rdi, [rax + rcx + DictEntry.key]
-    movzx esi, byte [rax + rcx + DictEntry.key_tag]
     push r12                   ; save entry index across calls
     call obj_repr
     test rax, rax
-    jz .dr_after_key
+    jz .dr_elem_failed
 
     push rax
     mov rcx, [rax + PyStrObject.ob_size]
@@ -443,12 +471,11 @@ DEF_FUNC dict_repr, 24
     pop r12                    ; restore entry index
     mov rax, [rbx + PyDictObject.entries]
     imul rcx, r12, DICT_ENTRY_SIZE
-    movzx esi, byte [rax + rcx + DictEntry.value_tag]  ; value tag
-    mov rdi, [rax + rcx + DictEntry.value]      ; value payload
+    mov rdi, [rax + rcx + DictEntry.value]
     push r12
     call obj_repr
     test rax, rax
-    jz .dr_after_val
+    jz .dr_elem_failed
 
     push rax
     mov rcx, [rax + PyStrObject.ob_size]
@@ -488,6 +515,31 @@ DEF_FUNC dict_repr, 24
 
     pop rax
     mov edx, TAG_PTR           ; ap_free clobbers rdx
+    call repr_pop
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.dr_elem_failed:
+    mov rdi, [rbp-8]
+    call ap_free
+    call repr_pop
+    REPR_ENSURE_EXC
+    RET_NULL
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.dr_recursive:
+    CSTRING rdi, "{...}"
+    call str_from_cstr_heap
+    mov edx, TAG_PTR
     pop r14
     pop r13
     pop r12
@@ -508,9 +560,14 @@ DEF_FUNC set_repr, 24
 
     mov rbx, rdi
 
-    ; Check empty set
+    ; Check empty set.  An empty frozenset or subclass is Name(), not set().
     cmp qword [rbx + PyDictObject.ob_size], 0
     jne .sr_notempty
+    extern set_type
+    mov rax, [rbx + PyObject.ob_type]
+    lea rcx, [rel set_type]
+    cmp rax, rcx
+    jne .sr_empty_named
     lea rdi, [rel set_repr_empty_str]
     call str_from_cstr_heap
     pop r14
@@ -520,12 +577,70 @@ DEF_FUNC set_repr, 24
     leave
     ret
 
+.sr_empty_named:
+    ; "Name()" -- built with str_from_cstr into a small stack buffer.
+    mov rsi, [rax + PyTypeObject.tp_name]
+    lea rdi, [rbp-24]           ; the three locals are unused on this path
+    xor ecx, ecx
+.sr_empty_copy:
+    cmp ecx, 20
+    jge .sr_empty_close
+    movzx edx, byte [rsi + rcx]
+    test dl, dl
+    jz .sr_empty_close
+    mov [rdi + rcx], dl
+    inc ecx
+    jmp .sr_empty_copy
+.sr_empty_close:
+    mov byte [rdi + rcx], '('
+    mov byte [rdi + rcx + 1], ')'
+    mov byte [rdi + rcx + 2], 0
+    call str_from_cstr_heap
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
 .sr_notempty:
+    ; Cycle guard.  The empty-set exit above must stay ahead of the push.
+    mov rdi, rbx
+    call repr_check_active
+    test eax, eax
+    jnz .sr_recursive
+    mov rdi, rbx
+    call repr_push
+
     mov edi, 256
     call ap_malloc
     mov [rbp-8], rax
     mov qword [rbp-16], 0
     mov qword [rbp-24], 256
+
+    ; Anything that is not exactly `set` prints as Name({...}): that is how
+    ; CPython renders frozenset, and a subclass of either.  Neither was
+    ; handled, so repr(frozenset([1])) came out as {1}.
+    extern set_type
+    mov rax, [rbx + PyObject.ob_type]
+    lea rcx, [rel set_type]
+    cmp rax, rcx
+    je .sr_no_prefix
+    mov r14, [rax + PyTypeObject.tp_name]
+.sr_name_loop:
+    movzx r13d, byte [r14]      ; not rax: BUF_ENSURE clobbers it
+    test r13b, r13b
+    jz .sr_name_done
+    BUF_ENSURE 1
+    mov rcx, [rbp-8]
+    mov rdx, [rbp-16]
+    mov [rcx + rdx], r13b
+    inc qword [rbp-16]
+    inc r14
+    jmp .sr_name_loop
+.sr_name_done:
+    BUF_BYTE '('
+.sr_no_prefix:
 
     BUF_BYTE '{'
 
@@ -537,13 +652,10 @@ DEF_FUNC set_repr, 24
     cmp r12, r13
     jge .sr_done
 
-    ; SetEntry is SET_ENTRY_SIZE bytes: hash(8) + key(8) + key_tag(8)
+    ; SetEntry is SET_ENTRY_SIZE bytes: hash(8) + key Value(8)
     mov rax, [rbx + PyDictObject.entries]
     imul rcx, r12, SET_ENTRY_SIZE
-    cmp qword [rax + rcx + SET_ENTRY_KEY_TAG], 0              ; empty
-    je .sr_next
-    cmp qword [rax + rcx + SET_ENTRY_KEY_TAG], SET_TOMBSTONE  ; deleted
-    je .sr_next
+    SET_ENTRY_CLASSIFY rax + rcx, .sr_next, .sr_next
     mov rdi, [rax + rcx + SET_ENTRY_KEY]                      ; key payload
 
     ; Print separator if not first
@@ -556,13 +668,12 @@ DEF_FUNC set_repr, 24
 
     ; Reload entry data (BUF macros may clobber rdi, esi)
     mov rax, [rbx + PyDictObject.entries]
-    imul rcx, r12, 24
-    mov rdi, [rax + rcx + 8]     ; key
-    mov rsi, [rax + rcx + 16]    ; key_tag (full 64-bit)
+    imul rcx, r12, SET_ENTRY_SIZE
+    mov rdi, [rax + rcx + SET_ENTRY_KEY]
     push r12
     call obj_repr
     test rax, rax
-    jz .sr_after_elem
+    jz .sr_elem_failed
 
     push rax
     mov rcx, [rax + PyStrObject.ob_size]
@@ -587,8 +698,14 @@ DEF_FUNC set_repr, 24
     jmp .sr_loop
 
 .sr_done:
-    BUF_ENSURE 2
+    BUF_ENSURE 3
     BUF_BYTE '}'
+    mov rax, [rbx + PyObject.ob_type]
+    lea rcx, [rel set_type]
+    cmp rax, rcx
+    je .sr_no_suffix
+    BUF_BYTE ')'
+.sr_no_suffix:
     mov rax, [rbp-8]
     mov rcx, [rbp-16]
     mov byte [rax + rcx], 0
@@ -602,6 +719,31 @@ DEF_FUNC set_repr, 24
 
     pop rax
     mov edx, TAG_PTR           ; ap_free clobbers rdx
+    call repr_pop
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.sr_elem_failed:
+    mov rdi, [rbp-8]
+    call ap_free
+    call repr_pop
+    REPR_ENSURE_EXC
+    RET_NULL
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.sr_recursive:
+    CSTRING rdi, "{...}"
+    call str_from_cstr_heap
+    mov edx, TAG_PTR
     pop r14
     pop r13
     pop r12

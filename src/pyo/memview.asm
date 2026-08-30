@@ -13,6 +13,8 @@ extern obj_incref
 extern obj_decref
 extern raise_exception
 extern exc_TypeError_type
+extern int_type
+extern bool_type
 extern exc_IndexError_type
 extern bytes_type
 extern int_to_i64
@@ -33,8 +35,8 @@ DEF_FUNC memoryview_type_call, MV_FRAME
     jne .mv_error
     mov rdi, [rsi]                     ; arg0 payload
     ; Must be a bytes-like object (reject all non-pointer tags)
-    cmp qword [rsi + 8], TAG_PTR
-    jne .mv_error
+    V_TEST_PTR_M [rsi], r11      ; args[0] a pointer?
+    ja .mv_error
     mov rax, [rdi + PyObject.ob_type]
     lea rcx, [rel bytes_type]
     cmp rax, rcx
@@ -109,12 +111,16 @@ MS_OBJ   equ 8
 MS_KEY   equ 16
 MS_FRAME equ 16
 DEF_FUNC memoryview_subscript, MS_FRAME
+    V_UNPACK rsi, rdx           ; key Value -> (payload, tag)
     mov [rbp - MS_OBJ], rdi
     mov [rbp - MS_KEY], rsi
 
     ; Check if key is a SmallInt (edx = key tag from caller)
     cmp edx, TAG_SMALLINT
     je .ms_int_index                   ; SmallInt index
+    cmp edx, TAG_PTR            ; a float key is neither: classify
+    jne .ms_type_error          ; fully before dereferencing, or raw
+                                ; f64 bits get used as an address
     mov rax, [rsi + PyObject.ob_type]
     lea rcx, [rel slice_type]
     cmp rax, rcx
@@ -169,6 +175,7 @@ DEF_FUNC memoryview_subscript, MS_FRAME
 
     mov edx, TAG_PTR
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .ms_int_index:
@@ -188,10 +195,13 @@ DEF_FUNC memoryview_subscript, MS_FRAME
     movzx eax, byte [rdx + rsi]
     RET_TAG_SMALLINT
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .ms_int_index_heap:
     ; Heap int index — convert to i64
+    mov rax, [rsi + PyObject.ob_type]   ; int_to_i64 reads PyIntObject.compact
+    REQUIRE_INT_TYPE rax, rcx, .ms_type_error   ; unconditionally
     push rdi
     mov rdi, rsi
     call int_to_i64
@@ -207,6 +217,11 @@ DEF_FUNC memoryview_subscript, MS_FRAME
 .ms_step_error:
     lea rdi, [rel exc_TypeError_type]
     CSTRING rsi, "memoryview: unsupported step"
+    call raise_exception
+
+.ms_type_error:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "memoryview: invalid slice key"
     call raise_exception
 END_FUNC memoryview_subscript
 
@@ -272,3 +287,4 @@ memoryview_type:
     dq 0                             ; tp_bases
     dq 0                        ; tp_traverse
     dq 0                        ; tp_clear
+    dq 0 ; tp_dictoffset

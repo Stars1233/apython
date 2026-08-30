@@ -7,8 +7,6 @@
 ;   rbx = bytecode instruction pointer (IP into co_code[])
 ;   r12 = current frame pointer (PyFrame*)
 ;   r13 = value stack payload top pointer
-;   r14 = locals_tag_base pointer (frame's tag sidecar for localsplus[])
-;   r15 = value stack tag top pointer
 ;
 ; ecx = opcode argument on handler entry (set by eval_dispatch)
 ; rbx has already been advanced past the 2-byte instruction word.
@@ -29,7 +27,6 @@ section .text
 extern eval_dispatch
 extern eval_saved_rbx
 extern eval_saved_r13
-extern eval_saved_r15
 extern opcode_table
 extern obj_dealloc
 extern obj_incref
@@ -62,9 +59,9 @@ DEF_FUNC_BARE op_get_awaitable
     ; TOS = object to await
     VPEEK rdi                  ; rdi = TOS payload (don't pop yet)
 
-    ; Must be TAG_PTR to check ob_type
-    cmp byte [r15 - 1], TAG_PTR
-    jne .gaw_error
+    ; Must be a real object to check ob_type
+    V_TEST_PTR rdi, rax
+    ja .gaw_error
 
     ; Check if it's a coroutine — already awaitable
     mov rax, [rdi + PyObject.ob_type]
@@ -184,9 +181,9 @@ DEF_FUNC_BARE op_get_anext
     ; Peek TOS = async iterator (don't pop — async for loop needs it)
     VPEEK rdi
 
-    ; Must be TAG_PTR
-    cmp byte [r15 - 1], TAG_PTR
-    jne .gan_error
+    ; Must be a real object
+    V_TEST_PTR rdi, rax
+    ja .gan_error
 
     ; Call tp_iternext on the async iterator
     mov rax, [rdi + PyObject.ob_type]
@@ -196,6 +193,7 @@ DEF_FUNC_BARE op_get_anext
 
     call rax                   ; tp_iternext(aiter) -> awaitable or NULL
     ; rax = result payload, edx = tag
+    V_UNPACK rax, rdx           ; tp_iternext returns a Value
     test edx, edx
     jz .gan_stop               ; NULL = exhausted
 
@@ -256,10 +254,10 @@ DEF_FUNC op_before_async_with, BAW_FRAME
     mov rdi, [rbx + PyObject.ob_type]
     mov rdi, [rdi + PyTypeObject.tp_dict]
     mov rsi, r12
-    mov edx, TAG_PTR
     call dict_get
+    V_UNPACK rax, rdx           ; dict_get returns a Value
     ; rax = value payload, edx = tag
-    test edx, edx
+    test edx, edx               ; the tag, not the payload: a hit may be int 0
     jz .baw_no_exit_decref_name
     cmp edx, TAG_PTR
     jne .baw_no_exit_decref_name
@@ -289,8 +287,8 @@ DEF_FUNC op_before_async_with, BAW_FRAME
     mov rdi, [rbx + PyObject.ob_type]
     mov rdi, [rdi + PyTypeObject.tp_dict]
     mov rsi, r12
-    mov edx, TAG_PTR
     call dict_get
+    V_UNPACK rax, rdx           ; dict_get returns a Value
     test edx, edx
     jz .baw_no_enter_decref_name
     cmp edx, TAG_PTR
@@ -315,6 +313,7 @@ DEF_FUNC op_before_async_with, BAW_FRAME
     mov rsi, rsp               ; args ptr
     mov rdx, 1                 ; nargs = 1
     call rcx
+    V_UNPACK rax, rdx           ; tp_call returns a Value
     add rsp, 16                ; pop fat arg
     mov [rbp - BAW_ENTER], rax
     mov edx, edx               ; zero-extend 32-bit tag to 64-bit
@@ -370,12 +369,11 @@ DEF_FUNC_BARE op_end_async_for
     ; ecx = arg (jump offset in instructions)
 
     ; TOS = exc_val (the exception that was raised)
-    VPEEK rdi                  ; peek at exc payload
-    movzx rsi, byte [r15 - 1]  ; exc tag
+    VPEEK rdi                  ; peek at the exception Value
 
     ; Check if it's StopAsyncIteration
-    cmp rsi, TAG_PTR
-    jne .eaf_reraise
+    V_TEST_PTR rdi, rsi
+    ja .eaf_reraise
 
     ; Get exception type
     mov rax, [rdi + PyObject.ob_type]
@@ -407,8 +405,8 @@ DEF_FUNC_BARE op_end_async_for
     DECREF_VAL rdi, rsi
 
     ; Pop aiter
-    VPOP_VAL rdi, rsi
-    DECREF_VAL rdi, rsi
+    VPOP rdi
+    DECREF_V rdi, rsi
     pop rcx                    ; restore arg
 
     ; Jump forward by arg instructions (each = 2 bytes)
@@ -452,11 +450,10 @@ DEF_FUNC_BARE op_cleanup_throw
     cmp qword [rdi + PyTupleObject.ob_size], 0
     je .ct_si_none
     ; value = args[0] (fat value in 16-byte slot)
-    mov r8, [rdi + PyTupleObject.ob_item]       ; payloads
-    mov r9, [rdi + PyTupleObject.ob_item_tags]  ; tags
-    mov r8, [r8]                                ; value payload
-    movzx r9d, byte [r9]                        ; value tag
-    INCREF_VAL r8, r9
+    mov r8, [rdi + PyTupleObject.ob_item]
+    mov r8, [r8]                                ; value Value
+    INCREF_V r8, r9
+    V_UNPACK r8, r9
     jmp .ct_si_got_val
 .ct_si_none:
     lea r8, [rel none_singleton]
@@ -470,8 +467,8 @@ DEF_FUNC_BARE op_cleanup_throw
     VPOP rdi
     call obj_decref
     ; Pop and DECREF_VAL the sub-iterator
-    VPOP_VAL rdi, rsi
-    DECREF_VAL rdi, rsi
+    VPOP rdi
+    DECREF_V rdi, rsi
     ; Restore extracted value and push
     pop r9
     pop r8

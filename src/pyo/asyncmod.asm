@@ -72,10 +72,9 @@ DEF_FUNC asyncio_run_func, AR_FRAME
     jne .ar_error
 
     ; Get coroutine from args[0]
-    mov rax, [rdi]             ; coro payload
-    mov edx, [rdi + 8]        ; coro tag
-    cmp edx, TAG_PTR
-    jne .ar_type_error
+    mov rax, [rdi]             ; args[0] = coro
+    V_TEST_PTR rax, rdx
+    ja .ar_type_error
 
     mov rbx, rax               ; rbx = coro
 
@@ -111,6 +110,7 @@ DEF_FUNC asyncio_run_func, AR_FRAME
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .ar_error:
@@ -140,8 +140,16 @@ DEF_FUNC asyncio_sleep_func
     jne .as_error
 
     ; Get delay from args[0]
-    mov rax, [rdi]             ; payload
-    mov edx, [rdi + 8]        ; tag
+    mov rax, [rdi]             ; args[0]
+    V_UNPACK rax, rdx
+
+    ; Normalize: int_unwrap flattens bool, compact heap ints and int
+    ; subclasses to (value, TAG_SMALLINT); floats pass through untouched.
+    push rdi
+    mov rdi, rax
+    call int_unwrap
+    mov rax, rdi
+    pop rdi
 
     ; Convert to nanoseconds
     ; Supports: float (seconds), int (seconds)
@@ -178,6 +186,7 @@ DEF_FUNC asyncio_sleep_func
     mov edx, TAG_PTR
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .as_error:
@@ -207,10 +216,10 @@ sleep_awaitable_iternext:
     cmp dword [rdi + SleepAwaitable.yielded], 0
     jne .sai_done
 
-    ; First call: yield TAG_SLEEP with delay_ns
+    ; First call: yield the SLEEP sentinel Value carrying delay_ns
     mov dword [rdi + SleepAwaitable.yielded], 1
     mov rax, [rdi + SleepAwaitable.delay_ns]
-    mov edx, TAG_SLEEP
+    or rax, [rel v_sleep_lo]
     ret
 
 .sai_done:
@@ -254,8 +263,17 @@ DEF_FUNC asyncio_wait_for_func, WF_FRAME
 
     ; Convert timeout (args[1]) to nanoseconds
     pop rdi                    ; restore args
-    mov rax, [rdi + 16]       ; args[1] payload
-    mov edx, [rdi + 24]       ; args[1] tag
+    mov rax, [rdi + 8]       ; args[1] payload
+    V_UNPACK rax, rdx       ; args[1]
+
+    ; Normalize: int_unwrap flattens bool, compact heap ints and int
+    ; subclasses to (value, TAG_SMALLINT); floats pass through untouched.
+    extern int_unwrap
+    push rdi
+    mov rdi, rax
+    call int_unwrap
+    mov rax, rdi
+    pop rdi
 
     cmp edx, TAG_FLOAT
     je .wf_float_timeout
@@ -290,11 +308,11 @@ DEF_FUNC asyncio_wait_for_func, WF_FRAME
     mov dword [rax + WaitForAwaitable.state], 0
     mov qword [rax + WaitForAwaitable.outer_task], 0
     mov qword [rax + WaitForAwaitable.gi_return_value], 0
-    mov qword [rax + WaitForAwaitable.gi_return_tag], 0
 
     mov edx, TAG_PTR
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .wf_error:
@@ -319,7 +337,7 @@ END_FUNC wait_for_awaitable_iter_self
 
 ;; ============================================================================
 ;; wait_for_awaitable_iternext — tp_iternext for WaitForAwaitable
-;; State 0: first call — yield self as TAG_WAIT_FOR for task_step to intercept.
+;; State 0: first call — yield self; task_step intercepts it by ob_type.
 ;; State 1: resumed — check inner task, return result or raise TimeoutError.
 ;; State 2+: exhausted.
 ;; ============================================================================
@@ -338,11 +356,10 @@ wait_for_awaitable_iternext:
     ret
 
 .wfai_first:
-    ; State 0 → 1: yield (self, TAG_WAIT_FOR) for task_step
+    ; State 0 → 1: yield self for task_step (identified by ob_type)
     mov dword [rdi + WaitForAwaitable.state], 1
     INCREF rdi
     mov rax, rdi
-    mov edx, TAG_WAIT_FOR
     ret
 
 .wfai_check:
@@ -364,10 +381,8 @@ wait_for_awaitable_iternext:
     ; Copy result to gi_return_value for SEND exhaustion protocol
     mov rax, [rbx + WaitForAwaitable.inner_task]
     mov rcx, [rax + AsyncTask.result]
-    mov rdx, [rax + AsyncTask.result_tag]
     mov [rbx + WaitForAwaitable.gi_return_value], rcx
-    mov [rbx + WaitForAwaitable.gi_return_tag], rdx
-    INCREF_VAL rcx, rdx
+    INCREF_V rcx, rdx
 
     RET_NULL
     pop rbx
@@ -411,7 +426,7 @@ wait_for_awaitable_dealloc:
     push rdi
     ; XDECREF_VAL gi_return_value
     mov rax, [rdi + WaitForAwaitable.gi_return_value]
-    mov rdx, [rdi + WaitForAwaitable.gi_return_tag]
+    V_UNPACK rax, rdx
     XDECREF_VAL rax, rdx
     pop rdi
     jmp ap_free                ; tail call
@@ -437,6 +452,7 @@ DEF_FUNC asyncio_create_task_func, ACT_FRAME
     mov rax, [rbp - ACT_TASK]
     mov edx, TAG_PTR
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .act_error:
@@ -474,13 +490,12 @@ DEF_FUNC asyncio_gather_func
     jge .ag_done
     push rcx
 
-    ; Get coro from args[i] (16 bytes per arg, scale by shifting)
+    ; Get coro from args[i] (one Value per slot)
     mov rdi, rcx
-    shl rdi, 4                 ; * 16
-    mov edx, [rbx + rdi + 8]  ; tag
-    cmp edx, TAG_PTR
-    jne .ag_type_error
-    mov rdi, [rbx + rdi]      ; payload
+    shl rdi, 3
+    mov rdi, [rbx + rdi]      ; coro Value
+    V_TEST_PTR rdi, rdx
+    ja .ag_type_error
     call task_new
     push rax
 
@@ -493,7 +508,6 @@ DEF_FUNC asyncio_gather_func
     push rax                   ; save task for DECREF
     mov rdi, r13
     mov rsi, rax
-    mov edx, TAG_PTR
     call list_append
 
     ; DECREF task (list_append INCREFs, release our initial ref)
@@ -515,6 +529,7 @@ DEF_FUNC asyncio_gather_func
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .ag_type_error:
@@ -542,6 +557,7 @@ DEF_FUNC asyncio_get_running_loop_func
     pop rax
     mov edx, TAG_PTR
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .grl_error:
@@ -577,8 +593,6 @@ DEF_FUNC asyncio_module_create
     mov rdi, r12
     mov rsi, rax
     mov rdx, [rsp + 8]
-    mov ecx, TAG_PTR
-    mov r8d, TAG_PTR
     call dict_set
     pop rdi
     call obj_decref
@@ -596,8 +610,6 @@ DEF_FUNC asyncio_module_create
     mov rdi, r12
     mov rsi, rax
     mov rdx, [rsp + 8]
-    mov ecx, TAG_PTR
-    mov r8d, TAG_PTR
     call dict_set
     pop rdi
     call obj_decref
@@ -615,8 +627,6 @@ DEF_FUNC asyncio_module_create
     mov rdi, r12
     mov rsi, rax
     mov rdx, [rsp + 8]
-    mov ecx, TAG_PTR
-    mov r8d, TAG_PTR
     call dict_set
     pop rdi
     call obj_decref
@@ -634,8 +644,6 @@ DEF_FUNC asyncio_module_create
     mov rdi, r12
     mov rsi, rax
     mov rdx, [rsp + 8]
-    mov ecx, TAG_PTR
-    mov r8d, TAG_PTR
     call dict_set
     pop rdi
     call obj_decref
@@ -653,8 +661,6 @@ DEF_FUNC asyncio_module_create
     mov rdi, r12
     mov rsi, rax
     mov rdx, [rsp + 8]
-    mov ecx, TAG_PTR
-    mov r8d, TAG_PTR
     call dict_set
     pop rdi
     call obj_decref
@@ -672,8 +678,6 @@ DEF_FUNC asyncio_module_create
     mov rdi, r12
     mov rsi, rax
     mov rdx, [rsp + 8]
-    mov ecx, TAG_PTR
-    mov r8d, TAG_PTR
     call dict_set
     pop rdi
     call obj_decref
@@ -691,8 +695,6 @@ DEF_FUNC asyncio_module_create
     mov rdi, r12
     mov rsi, rax
     mov rdx, [rsp + 8]
-    mov ecx, TAG_PTR
-    mov r8d, TAG_PTR
     call dict_set
     pop rdi
     call obj_decref
@@ -710,8 +712,6 @@ DEF_FUNC asyncio_module_create
     mov rdi, r12
     mov rsi, rax
     mov rdx, [rsp + 8]
-    mov ecx, TAG_PTR
-    mov r8d, TAG_PTR
     call dict_set
     pop rdi
     call obj_decref
@@ -725,8 +725,6 @@ DEF_FUNC asyncio_module_create
     mov rdi, r12
     mov rsi, rax
     lea rdx, [rel stream_reader_type]
-    mov ecx, TAG_PTR
-    mov r8d, TAG_PTR
     call dict_set
     pop rdi
     call obj_decref
@@ -738,8 +736,6 @@ DEF_FUNC asyncio_module_create
     mov rdi, r12
     mov rsi, rax
     lea rdx, [rel stream_writer_type]
-    mov ecx, TAG_PTR
-    mov r8d, TAG_PTR
     call dict_set
     pop rdi
     call obj_decref
@@ -816,8 +812,10 @@ sleep_awaitable_type:
     dq 0                        ; tp_bases
     dq 0                        ; tp_traverse
     dq 0                        ; tp_clear
+    dq 0 ; tp_dictoffset
 
 align 8
+global wait_for_awaitable_type
 wait_for_awaitable_type:
     dq 1                        ; ob_refcnt (immortal)
     dq type_type                ; ob_type
@@ -845,3 +843,4 @@ wait_for_awaitable_type:
     dq 0                        ; tp_bases
     dq 0                        ; tp_traverse
     dq 0                        ; tp_clear
+    dq 0 ; tp_dictoffset

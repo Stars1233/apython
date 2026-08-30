@@ -129,8 +129,8 @@ DEF_FUNC stream_reader_read, SR_FRAME
 
 .srr_got_n:
     ; args[0] = n
-    mov rax, [rdi]             ; payload
-    mov edx, [rdi + 8]        ; tag
+    mov rax, [rdi]             ; args[0]
+    V_UNPACK rax, rdx
     cmp edx, TAG_SMALLINT
     jne .srr_type_error
     mov ebx, eax               ; nbytes
@@ -244,6 +244,7 @@ DEF_FUNC stream_reader_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .srga_read:
@@ -258,6 +259,7 @@ DEF_FUNC stream_reader_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .srga_close:
@@ -276,6 +278,7 @@ DEF_FUNC stream_reader_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .srga_readline:
@@ -290,6 +293,7 @@ DEF_FUNC stream_reader_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 END_FUNC stream_reader_getattr
 
@@ -308,8 +312,8 @@ DEF_FUNC stream_reader_read_impl
     cmp rsi, 2
     jb .srri_create
     ; args[1] = n
-    mov rax, [rdi + 16]       ; payload
-    mov edx, [rdi + 24]       ; tag
+    mov rax, [rdi + 8]       ; payload
+    V_UNPACK rax, rdx       ; args[1]
     cmp edx, TAG_SMALLINT
     jne .srri_create
     mov r12d, eax
@@ -330,6 +334,7 @@ DEF_FUNC stream_reader_read_impl
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 END_FUNC stream_reader_read_impl
 
@@ -356,6 +361,7 @@ DEF_FUNC stream_reader_readline_impl
     mov edx, TAG_PTR
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 END_FUNC stream_reader_readline_impl
 
@@ -383,7 +389,7 @@ DEF_FUNC_BARE read_awaitable_iternext
     mov rdx, POLLIN
     shl rdx, 32
     or rax, rdx
-    mov edx, TAG_IO_WAIT
+    or rax, [rel v_iowait_lo]   ; IO_WAIT sentinel Value
     ret
 
 .rai_read:
@@ -499,6 +505,7 @@ DEF_FUNC stream_writer_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .swga_write:
@@ -512,6 +519,7 @@ DEF_FUNC stream_writer_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .swga_close:
@@ -531,6 +539,7 @@ DEF_FUNC stream_writer_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .swga_drain:
@@ -545,6 +554,7 @@ DEF_FUNC stream_writer_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 END_FUNC stream_writer_getattr
 
@@ -564,15 +574,15 @@ DEF_FUNC stream_writer_write_impl
     jb .swwi_error
 
     ; args[1] = data (string)
-    mov rax, [rdi + 16]       ; data payload
-    mov rdx, [rdi + 24]       ; data tag
+    mov rax, [rdi + 8]       ; data payload
+    V_UNPACK rax, rdx       ; args[1]
 
     cmp edx, TAG_PTR
     jne .swwi_type_error
 
     ; Heap string: get data ptr and length
     mov r12, rax               ; string object
-    mov r13, [rax + 16]       ; str.ob_size (PyStrObject.ob_size = +16)
+    mov r13, [rax + PyStrObject.ob_size]
     lea rdi, [rax + 32]       ; str.data (PyStrObject.data = +32)
 
     ; .swwi_do_write:
@@ -595,6 +605,7 @@ DEF_FUNC stream_writer_write_impl
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .swwi_error:
@@ -616,6 +627,7 @@ DEF_FUNC stream_writer_write_impl
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 END_FUNC stream_writer_write_impl
 
@@ -640,6 +652,7 @@ DEF_FUNC stream_writer_drain_impl
     mov edx, TAG_PTR
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 END_FUNC stream_writer_drain_impl
 
@@ -686,7 +699,7 @@ DEF_FUNC_BARE connect_awaitable_iternext
     mov rdx, POLLOUT
     shl rdx, 32
     or rax, rdx
-    mov edx, TAG_IO_WAIT
+    or rax, [rel v_iowait_lo]   ; IO_WAIT sentinel Value
     ret
 
 .cai_result:
@@ -711,17 +724,13 @@ DEF_FUNC_BARE connect_awaitable_iternext
     call tuple_new
     mov rbx, rax               ; rbx = tuple
 
-    ; Set tuple[0] = reader (ob_item starts at +32)
-    mov [rax + 32], r12        ; ob_item[0] payload
-    mov qword [rax + 40], TAG_PTR  ; ob_item[0] tag
-
-    ; Set tuple[1] = writer
+    ; Set tuple[0] = reader, tuple[1] = writer
+    mov r9, [rax + PyTupleObject.ob_item]
+    mov [r9], r12
     pop rcx                    ; writer
-    mov [rax + 48], rcx        ; ob_item[1] payload
-    mov qword [rax + 56], TAG_PTR  ; ob_item[1] tag
+    mov [r9 + 8], rcx
 
     mov rax, rbx
-    mov edx, TAG_PTR
 
     pop r12
     pop rbx
@@ -755,7 +764,7 @@ DEF_FUNC_BARE accept_awaitable_iternext
     mov rdx, POLLIN
     shl rdx, 32
     or rax, rdx
-    mov edx, TAG_IO_WAIT
+    or rax, [rel v_iowait_lo]   ; IO_WAIT sentinel Value
     ret
 
 .aai_accept:
@@ -800,14 +809,12 @@ DEF_FUNC_BARE accept_awaitable_iternext
     call tuple_new
     mov r12, rax               ; tuple
 
-    mov [rax + 32], rbx            ; ob_item[0] = reader
-    mov qword [rax + 40], TAG_PTR
+    mov r9, [rax + PyTupleObject.ob_item]
+    mov [r9], rbx                  ; ob_item[0] = reader
     pop rcx                        ; writer
-    mov [rax + 48], rcx            ; ob_item[1] = writer
-    mov qword [rax + 56], TAG_PTR
+    mov [r9 + 8], rcx              ; ob_item[1] = writer
 
     mov rax, r12
-    mov edx, TAG_PTR
     pop r12
     pop rbx
     ret
@@ -845,8 +852,8 @@ DEF_FUNC asyncio_open_connection_func, OC_FRAME
     jne .oc_error
 
     ; args[0] = host (string), args[1] = port (int)
-    mov rax, [rdi + 16]       ; port payload
-    mov edx, [rdi + 24]       ; port tag
+    mov rax, [rdi + 8]       ; port payload
+    V_UNPACK rax, rdx       ; args[1]
     cmp edx, TAG_SMALLINT
     jne .oc_port_error
     mov r12d, eax              ; r12d = port number
@@ -900,6 +907,7 @@ DEF_FUNC asyncio_open_connection_func, OC_FRAME
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .oc_error:
@@ -935,8 +943,8 @@ DEF_FUNC asyncio_start_server_func, SS_FRAME
     jne .ss_error
 
     ; args[0] = callback, args[1] = host, args[2] = port
-    mov rax, [rdi + 32]       ; port payload
-    mov edx, [rdi + 40]       ; port tag
+    mov rax, [rdi + 16]       ; port payload
+    V_UNPACK rax, rdx       ; args[2]
     cmp edx, TAG_SMALLINT
     jne .ss_port_error
     mov r12d, eax              ; r12d = port
@@ -1007,6 +1015,7 @@ DEF_FUNC asyncio_start_server_func, SS_FRAME
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .ss_error:
@@ -1048,7 +1057,7 @@ DEF_FUNC_LOCAL _stream_strcmp
 
     ; Get string data and length from Python str object
     ; PyStrObject: ob_size at +16, data at +32
-    mov rdi, [r12 + 16]       ; length (PyStrObject.ob_size)
+    mov rdi, [r12 + PyStrObject.ob_size]
     lea rsi, [r12 + 32]       ; data (PyStrObject.data)
 
     ; Compare byte by byte
@@ -1131,6 +1140,7 @@ stream_reader_type:
     dq 0                        ; tp_bases
     dq 0                        ; tp_traverse
     dq 0                        ; tp_clear
+    dq 0 ; tp_dictoffset
 
 global stream_writer_type
 stream_writer_type:
@@ -1160,6 +1170,7 @@ stream_writer_type:
     dq 0                        ; tp_bases
     dq 0                        ; tp_traverse
     dq 0                        ; tp_clear
+    dq 0 ; tp_dictoffset
 
 read_awaitable_type:
     dq 1                        ; ob_refcnt (immortal)
@@ -1188,6 +1199,7 @@ read_awaitable_type:
     dq 0                        ; tp_bases
     dq 0                        ; tp_traverse
     dq 0                        ; tp_clear
+    dq 0 ; tp_dictoffset
 
 drain_awaitable_type:
     dq 1                        ; ob_refcnt (immortal)
@@ -1216,6 +1228,7 @@ drain_awaitable_type:
     dq 0                        ; tp_bases
     dq 0                        ; tp_traverse
     dq 0                        ; tp_clear
+    dq 0 ; tp_dictoffset
 
 connect_awaitable_type:
     dq 1                        ; ob_refcnt (immortal)
@@ -1244,6 +1257,7 @@ connect_awaitable_type:
     dq 0                        ; tp_bases
     dq 0                        ; tp_traverse
     dq 0                        ; tp_clear
+    dq 0 ; tp_dictoffset
 
 accept_awaitable_type:
     dq 1                        ; ob_refcnt (immortal)
@@ -1272,3 +1286,4 @@ accept_awaitable_type:
     dq 0                        ; tp_bases
     dq 0                        ; tp_traverse
     dq 0                        ; tp_clear
+    dq 0 ; tp_dictoffset

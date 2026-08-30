@@ -54,6 +54,9 @@ gc_gen2_collections: dq 0
 ; GC state
 global gc_enabled
 gc_enabled:     dq 1
+global gc_collecting        ; eval_exception_unwind resets this: a raising
+                            ; __del__ during a collection longjmps out and
+                            ; would otherwise latch it on for good
 gc_collecting:  dq 0    ; reentrancy guard
 
 ; Generation table (for indexed access)
@@ -389,7 +392,7 @@ DEF_FUNC gc_collect_gen, GCG_FRAME
     jz .phase2_next
 
     ; Call tp_traverse(obj, visit_decref, NULL)
-    ; Use r14 for visit callback in VISIT_FAT macro
+    ; Use r14 for the visit callback used by the VISIT_* macros
     push rbx
     mov rdi, r13               ; obj
     lea r14, [rel gc_visit_decref]  ; visit callback
@@ -687,7 +690,7 @@ section .text
 ; ============================================================================
 ; Convention: tp_traverse(rdi=obj, r14=visit_callback)
 ;             tp_clear(rdi=obj)
-; VISIT_FAT and VISIT_PTR macros use r14 as the callback.
+; The VISIT_* macros use r14 as the callback.
 
 ; ---- list_traverse / list_clear ----
 DEF_FUNC list_traverse
@@ -698,18 +701,15 @@ DEF_FUNC list_traverse
 
     mov rbx, rdi                       ; obj
     mov r12, [rbx + PyListObject.ob_item]       ; payloads
-    mov r15, [rbx + PyListObject.ob_item_tags]  ; tags
     mov r13, [rbx + PyListObject.ob_size]
     test r13, r13
     jz .done
 
 .loop:
     dec r13
-    mov rdi, [r12]                     ; payload
-    movzx esi, byte [r15]             ; tag
-    VISIT_FAT rdi, rsi
+    mov rdi, [r12]
+    VISIT_V rdi, rsi
     add r12, 8
-    inc r15
     test r13, r13
     jnz .loop
 .done:
@@ -729,7 +729,6 @@ DEF_FUNC list_clear
 
     mov rbx, rdi
     mov r12, [rbx + PyListObject.ob_item]       ; payloads
-    mov r15, [rbx + PyListObject.ob_item_tags]  ; tags
     mov r13, [rbx + PyListObject.ob_size]
     mov qword [rbx + PyListObject.ob_size], 0
 
@@ -738,14 +737,12 @@ DEF_FUNC list_clear
 .loop:
     dec r13
     mov rdi, [r12]
-    movzx esi, byte [r15]
     push r12
-    push r15
-    DECREF_VAL rdi, rsi
-    pop r15
+    push r12
+    DECREF_V rdi, rsi
+    pop r12
     pop r12
     add r12, 8
-    inc r15
     test r13, r13
     jnz .loop
 .done:
@@ -767,16 +764,13 @@ DEF_FUNC tuple_traverse
     mov rbx, rdi
     mov r13, [rbx + PyTupleObject.ob_size]
     mov r12, [rbx + PyTupleObject.ob_item]       ; payloads
-    mov r15, [rbx + PyTupleObject.ob_item_tags]  ; tags (callee-saved, survives VISIT_FAT)
     test r13, r13
     jz .done
 .loop:
     dec r13
     mov rdi, [r12]
-    movzx esi, byte [r15]
-    VISIT_FAT rdi, rsi
+    VISIT_V rdi, rsi
     add r12, 8
-    inc r15
     test r13, r13
     jnz .loop
 .done:
@@ -797,7 +791,6 @@ DEF_FUNC tuple_clear
     mov rbx, rdi
     mov r13, [rbx + PyTupleObject.ob_size]
     mov r12, [rbx + PyTupleObject.ob_item]       ; payloads
-    mov r15, [rbx + PyTupleObject.ob_item_tags]  ; tags
     mov qword [rbx + PyTupleObject.ob_size], 0
 
     test r13, r13
@@ -805,14 +798,12 @@ DEF_FUNC tuple_clear
 .loop:
     dec r13
     mov rdi, [r12]
-    movzx esi, byte [r15]
     push r12
-    push r15
-    DECREF_VAL rdi, rsi
-    pop r15
+    push r12
+    DECREF_V rdi, rsi
+    pop r12
     pop r12
     add r12, 8
-    inc r15
     test r13, r13
     jnz .loop
 .done:
@@ -842,19 +833,16 @@ DEF_FUNC dict_traverse
 .loop:
     dec r13
     ; Check for empty/tombstone
-    cmp byte [r12 + DictEntry.key_tag], 0
-    je .next
-    cmp byte [r12 + DictEntry.key_tag], DICT_TOMBSTONE_GC
-    je .next
+    ENTRY_CLASSIFY r12, .next, .next
 
     ; Visit key
     mov rdi, [r12 + DictEntry.key]
-    movzx esi, byte [r12 + DictEntry.key_tag]
-    VISIT_FAT rdi, rsi
+
+    VISIT_V rdi, rsi
     ; Visit value
     mov rdi, [r12 + DictEntry.value]
-    movzx esi, byte [r12 + DictEntry.value_tag]
-    VISIT_FAT rdi, rsi
+
+    VISIT_V rdi, rsi
 
 .next:
     add r12, DICT_ENTRY_SIZE
@@ -881,16 +869,13 @@ DEF_FUNC dict_clear_gc
     jz .done
 .loop:
     dec r13
-    cmp byte [r12 + DictEntry.key_tag], 0
-    je .next
-    cmp byte [r12 + DictEntry.key_tag], DICT_TOMBSTONE_GC
-    je .next
+    ENTRY_CLASSIFY r12, .next, .next
 
     ; DECREF key
     push r12
     push r13
     mov rdi, [r12 + DictEntry.key]
-    movzx esi, byte [r12 + DictEntry.key_tag]
+    V_UNPACK rdi, rsi
     DECREF_VAL rdi, rsi
     pop r13
     pop r12
@@ -899,15 +884,13 @@ DEF_FUNC dict_clear_gc
     push r12
     push r13
     mov rdi, [r12 + DictEntry.value]
-    movzx esi, byte [r12 + DictEntry.value_tag]
+    V_UNPACK rdi, rsi
     DECREF_VAL rdi, rsi
     pop r13
     pop r12
 
     ; Clear entry
-    mov byte [r12 + DictEntry.key_tag], 0
     mov qword [r12 + DictEntry.key], 0
-    mov byte [r12 + DictEntry.value_tag], 0
     mov qword [r12 + DictEntry.value], 0
 
 .next:
@@ -926,10 +909,8 @@ END_FUNC dict_clear_gc
 
 ; ---- set_traverse / set_clear ----
 ; Set entries are 24 bytes (hash+key+key_tag_qword), distinct from DictEntry (32 bytes).
-SET_ENTRY_SIZE_GC    equ 24
+SET_ENTRY_SIZE_GC    equ 16
 SET_ENTRY_KEY_GC     equ 8
-SET_ENTRY_KEY_TAG_GC equ 16
-SET_TOMBSTONE_GC     equ 0xDEAD
 
 DEF_FUNC set_traverse
     push rbx
@@ -944,15 +925,11 @@ DEF_FUNC set_traverse
 .st_loop:
     dec r13
     ; Check for empty (key_tag == 0) or tombstone (key_tag == 0xDEAD)
-    cmp qword [r12 + SET_ENTRY_KEY_TAG_GC], 0
-    je .st_next
-    cmp qword [r12 + SET_ENTRY_KEY_TAG_GC], SET_TOMBSTONE_GC
-    je .st_next
+    SET_ENTRY_CLASSIFY r12, .st_next, .st_next
 
     ; Visit key
     mov rdi, [r12 + SET_ENTRY_KEY_GC]
-    movzx esi, byte [r12 + SET_ENTRY_KEY_TAG_GC]
-    VISIT_FAT rdi, rsi
+    VISIT_V rdi, rsi
 
 .st_next:
     add r12, SET_ENTRY_SIZE_GC
@@ -979,22 +956,17 @@ DEF_FUNC set_clear_gc
     jz .sc_done
 .sc_loop:
     dec r13
-    cmp qword [r12 + SET_ENTRY_KEY_TAG_GC], 0
-    je .sc_next
-    cmp qword [r12 + SET_ENTRY_KEY_TAG_GC], SET_TOMBSTONE_GC
-    je .sc_next
+    SET_ENTRY_CLASSIFY r12, .sc_next, .sc_next
 
     ; DECREF key
     push r12
     push r13
     mov rdi, [r12 + SET_ENTRY_KEY_GC]
-    movzx esi, byte [r12 + SET_ENTRY_KEY_TAG_GC]
-    DECREF_VAL rdi, rsi
+    DECREF_V rdi, rsi
     pop r13
     pop r12
 
     ; Clear entry
-    mov qword [r12 + SET_ENTRY_KEY_TAG_GC], 0
     mov qword [r12 + SET_ENTRY_KEY_GC], 0
 
 .sc_next:
@@ -1077,8 +1049,7 @@ DEF_FUNC cell_traverse
     mov rbx, rdi
 
     mov rdi, [rbx + PyCellObject.ob_ref]
-    mov rsi, [rbx + PyCellObject.ob_ref_tag]
-    VISIT_FAT rdi, rsi
+    VISIT_V rdi, rsi
 
     pop rbx
     leave
@@ -1090,10 +1061,8 @@ DEF_FUNC cell_clear
     mov rbx, rdi
 
     mov rdi, [rbx + PyCellObject.ob_ref]
-    mov rsi, [rbx + PyCellObject.ob_ref_tag]
     mov qword [rbx + PyCellObject.ob_ref], 0
-    mov qword [rbx + PyCellObject.ob_ref_tag], TAG_NULL
-    DECREF_VAL rdi, rsi
+    DECREF_V rdi, rsi
 
     pop rbx
     leave
@@ -1155,8 +1124,8 @@ DEF_FUNC gen_traverse
 
     ; Visit return value (fat)
     mov rdi, [rbx + PyGenObject.gi_return_value]
-    mov rsi, [rbx + PyGenObject.gi_return_tag]
-    VISIT_FAT rdi, rsi
+
+    VISIT_V rdi, rsi
 
     ; Traverse frame localsplus if frame exists
     mov r12, [rbx + PyGenObject.gi_frame]
@@ -1169,13 +1138,11 @@ DEF_FUNC gen_traverse
     test r13d, r13d
     jz .done
 
-    mov r11, [r12 + PyFrame.locals_tag_base]
-    lea r12, [r12 + PyFrame.localsplus]  ; start of payload array
+    lea r12, [r12 + PyFrame.localsplus]  ; start of the Value array
 .frame_loop:
     dec r13d
     mov rdi, [r12 + r13*8]
-    movzx rsi, byte [r11 + r13]
-    VISIT_FAT rdi, rsi
+    VISIT_V rdi, rsi
     test r13d, r13d
     jnz .frame_loop
 
@@ -1193,9 +1160,8 @@ DEF_FUNC gen_clear
 
     ; Clear return value
     mov rdi, [rbx + PyGenObject.gi_return_value]
-    mov rsi, [rbx + PyGenObject.gi_return_tag]
+    V_UNPACK rdi, rsi
     mov qword [rbx + PyGenObject.gi_return_value], 0
-    mov qword [rbx + PyGenObject.gi_return_tag], TAG_NULL
     XDECREF_VAL rdi, rsi
 
     ; Free frame if held (frame_free DECREFs localsplus)
@@ -1219,24 +1185,44 @@ DEF_FUNC instance_traverse
 
     mov rbx, rdi
 
-    ; Visit inst_dict
-    mov rdi, [rbx + PyInstanceObject.inst_dict]
+    ; Visit the instance dict, wherever this family keeps it
+    LOAD_INST_DICT rdi, rbx, .no_inst_dict
     VISIT_PTR rdi
+.no_inst_dict:
 
-    ; Visit __slots__ values (fat value slots after PyInstanceObject header)
+    ; Visit __slots__ values (one Value each, after the instance header).
+    ; The header ends at tp_dictoffset plus the dict word, or at
+    ; PyInstanceObject_size when the family keeps no dict.
     mov rax, [rbx + PyObject.ob_type]
+    mov rcx, [rax + PyTypeObject.tp_dictoffset]
+    test rcx, rcx
+    jz .it_no_dict_hdr
+    add rcx, 8
+    jmp .it_have_hdr
+.it_no_dict_hdr:
+    ; No dict word: a str subclass, whose header is the base's, not
+    ; PyInstanceObject's.  Using 24 there found a phantom slot at +24 --
+    ; PyStrObject.ob_hash -- and XDECREF'd the hash as if it were a pointer.
+    mov rcx, [rax + PyTypeObject.tp_base]
+    test rcx, rcx
+    jz .it_no_dict_hdr_default
+    mov rcx, [rcx + PyTypeObject.tp_basicsize]
+    test rcx, rcx
+    jnz .it_have_hdr
+.it_no_dict_hdr_default:
+    mov rcx, PyInstanceObject_size
+.it_have_hdr:
     mov rax, [rax + PyTypeObject.tp_basicsize]
-    sub rax, PyInstanceObject_size
+    sub rax, rcx
     jle .done
-    shr rax, 4                  ; nslots
+    shr rax, 3                  ; nslots
     mov r13, rax
-    lea r12, [rbx + PyInstanceObject_size]
+    lea r12, [rbx + rcx]
 
 .slot_loop:
     mov rdi, [r12]
-    mov rsi, [r12 + 8]
-    VISIT_FAT rdi, rsi
-    add r12, 16
+    VISIT_V rdi, rsi
+    add r12, 8
     dec r13
     jnz .slot_loop
 
@@ -1252,9 +1238,13 @@ DEF_FUNC instance_clear
     push rbx
     mov rbx, rdi
 
-    ; XDECREF + NULL inst_dict
-    mov rdi, [rbx + PyInstanceObject.inst_dict]
-    mov qword [rbx + PyInstanceObject.inst_dict], 0
+    ; XDECREF + NULL the instance dict, wherever this family keeps it
+    mov rax, [rbx + PyObject.ob_type]
+    mov rax, [rax + PyTypeObject.tp_dictoffset]
+    test rax, rax
+    jz .done
+    mov rdi, [rbx + rax]
+    mov qword [rbx + rax], 0
     test rdi, rdi
     jz .done
     call obj_decref
@@ -1272,8 +1262,7 @@ DEF_FUNC exc_traverse
 
     ; Visit exc_value (fat)
     mov rdi, [rbx + PyExceptionObject.exc_value]
-    mov rsi, [rbx + PyExceptionObject.exc_value_tag]
-    VISIT_FAT rdi, rsi
+    VISIT_V rdi, rsi
 
     ; Visit heap ptrs
     mov rdi, [rbx + PyExceptionObject.exc_tb]
@@ -1296,10 +1285,8 @@ DEF_FUNC exc_clear_gc
 
     ; DECREF_VAL exc_value
     mov rdi, [rbx + PyExceptionObject.exc_value]
-    mov rsi, [rbx + PyExceptionObject.exc_value_tag]
     mov qword [rbx + PyExceptionObject.exc_value], 0
-    mov qword [rbx + PyExceptionObject.exc_value_tag], TAG_NULL
-    DECREF_VAL rdi, rsi
+    DECREF_V rdi, rsi
 
     ; XDECREF + NULL heap ptrs
     mov rdi, [rbx + PyExceptionObject.exc_tb]
@@ -1479,14 +1466,11 @@ DEF_FUNC slice_traverse
     mov rbx, rdi
 
     mov rdi, [rbx + PySliceObject.start]
-    mov rsi, [rbx + PySliceObject.start_tag]
-    VISIT_FAT rdi, rsi
+    VISIT_V rdi, rsi
     mov rdi, [rbx + PySliceObject.stop]
-    mov rsi, [rbx + PySliceObject.stop_tag]
-    VISIT_FAT rdi, rsi
+    VISIT_V rdi, rsi
     mov rdi, [rbx + PySliceObject.step]
-    mov rsi, [rbx + PySliceObject.step_tag]
-    VISIT_FAT rdi, rsi
+    VISIT_V rdi, rsi
 
     pop rbx
     leave
@@ -1498,22 +1482,16 @@ DEF_FUNC slice_clear_gc
     mov rbx, rdi
 
     mov rdi, [rbx + PySliceObject.start]
-    mov rsi, [rbx + PySliceObject.start_tag]
     mov qword [rbx + PySliceObject.start], 0
-    mov qword [rbx + PySliceObject.start_tag], TAG_NULL
-    DECREF_VAL rdi, rsi
+    DECREF_V rdi, rsi
 
     mov rdi, [rbx + PySliceObject.stop]
-    mov rsi, [rbx + PySliceObject.stop_tag]
     mov qword [rbx + PySliceObject.stop], 0
-    mov qword [rbx + PySliceObject.stop_tag], TAG_NULL
-    DECREF_VAL rdi, rsi
+    DECREF_V rdi, rsi
 
     mov rdi, [rbx + PySliceObject.step]
-    mov rsi, [rbx + PySliceObject.step_tag]
     mov qword [rbx + PySliceObject.step], 0
-    mov qword [rbx + PySliceObject.step_tag], TAG_NULL
-    DECREF_VAL rdi, rsi
+    DECREF_V rdi, rsi
 
     pop rbx
     leave
@@ -1619,13 +1597,13 @@ DEF_FUNC task_traverse
 
     ; Visit result (fat)
     mov rdi, [rbx + AsyncTask.result]
-    mov rsi, [rbx + AsyncTask.result_tag]
-    VISIT_FAT rdi, rsi
+
+    VISIT_V rdi, rsi
 
     ; Visit send_value (fat)
     mov rdi, [rbx + AsyncTask.send_value]
-    mov rsi, [rbx + AsyncTask.send_tag]
-    VISIT_FAT rdi, rsi
+
+    VISIT_V rdi, rsi
 
     ; Visit exception
     mov rdi, [rbx + AsyncTask.exception]
@@ -1668,16 +1646,14 @@ DEF_FUNC task_clear
 
     ; DECREF_VAL result
     mov rdi, [rbx + AsyncTask.result]
-    mov rsi, [rbx + AsyncTask.result_tag]
+    V_UNPACK rdi, rsi
     mov qword [rbx + AsyncTask.result], 0
-    mov qword [rbx + AsyncTask.result_tag], TAG_NULL
     DECREF_VAL rdi, rsi
 
     ; DECREF_VAL send_value
     mov rdi, [rbx + AsyncTask.send_value]
-    mov rsi, [rbx + AsyncTask.send_tag]
+    V_UNPACK rdi, rsi
     mov qword [rbx + AsyncTask.send_value], 0
-    mov qword [rbx + AsyncTask.send_tag], TAG_NULL
     DECREF_VAL rdi, rsi
 
     pop rbx
@@ -1695,8 +1671,8 @@ DEF_FUNC wait_for_traverse
     mov rdi, [rbx + WaitForAwaitable.outer_task]
     VISIT_PTR rdi
     mov rdi, [rbx + WaitForAwaitable.gi_return_value]
-    mov rsi, [rbx + WaitForAwaitable.gi_return_tag]
-    VISIT_FAT rdi, rsi
+
+    VISIT_V rdi, rsi
 
     pop rbx
     leave
@@ -1721,9 +1697,8 @@ DEF_FUNC wait_for_clear
 .no_outer:
 
     mov rdi, [rbx + WaitForAwaitable.gi_return_value]
-    mov rsi, [rbx + WaitForAwaitable.gi_return_tag]
+    V_UNPACK rdi, rsi
     mov qword [rbx + WaitForAwaitable.gi_return_value], 0
-    mov qword [rbx + WaitForAwaitable.gi_return_tag], TAG_NULL
     DECREF_VAL rdi, rsi
 
     pop rbx

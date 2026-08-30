@@ -32,6 +32,8 @@ extern build_class_pending
 extern sys_write
 extern range_new
 extern int_to_i64
+extern current_exception
+extern obj_as_index
 extern init_iter_types
 extern obj_repr
 extern eval_frame
@@ -218,10 +220,11 @@ DEF_FUNC_BARE builtin_func_call
 .bfc_no_max_check:
     ; Extract func_ptr from self
     mov rax, [rdi + PyBuiltinObject.func_ptr]
-    ; Call func_ptr(args, nargs)
+    ; Call func_ptr(args, nargs) — builtins return a Value, so this stays a
+    ; tail call.
     mov rdi, rsi                ; args
     mov rsi, rdx                ; nargs
-    jmp rax                     ; tail call
+    jmp rax
 
 .bfc_too_few:
     extern exc_TypeError_type
@@ -342,8 +345,8 @@ DEF_FUNC builtin_print, PR_FRAME
     ; Get kwarg value position: n_pos + kw_index
     mov r11, r12                   ; n_pos
     add r11, r9                    ; n_pos + kw_index
-    shl r11, 4                     ; * 16 for fat stride
-    ; value at [rbx + r11], tag at [rbx + r11 + 8]
+    shl r11, 3                     ; one Value per slot
+    ; value at [rbx + r11]
 
     ; Check "sep"
     push r10
@@ -394,26 +397,23 @@ DEF_FUNC builtin_print, PR_FRAME
 
 .print_kw_sep:
     mov rax, [rbx + r11]
+    V_UNPACK rax, rdx
     mov [rbp - PR_SEP], rax
-    mov rax, [rbx + r11 + 8]
-    mov [rbp - PR_SEP_TAG], rax
+    mov [rbp - PR_SEP_TAG], rdx
     jmp .print_kw_next
 
 .print_kw_end:
     mov rax, [rbx + r11]
+    V_UNPACK rax, rdx
     mov [rbp - PR_END], rax
-    mov rax, [rbx + r11 + 8]
-    mov [rbp - PR_END_TAG], rax
+    mov [rbp - PR_END_TAG], rdx
     jmp .print_kw_next
 
 .print_kw_file:
     ; file kwarg: get file descriptor from file object
-    mov rax, [rbx + r11 + 8]       ; tag
-    cmp eax, TAG_PTR
-    jne .print_kw_next              ; non-pointer file= → ignore
-    mov rax, [rbx + r11]           ; file object payload
-    test rax, rax
-    jz .print_kw_next
+    mov rax, [rbx + r11]           ; file object Value
+    V_TEST_PTR rax, rdx
+    ja .print_kw_next               ; non-pointer file= → ignore
     mov rax, [rax + PyFileObject.file_fd]
     mov [rbp - PR_FILE_FD], rax
     jmp .print_kw_next
@@ -437,9 +437,8 @@ align 16
 
     ; Get string representation: obj_str(args[i]) with tag
     mov rax, r13
-    shl rax, 4                  ; index * 16 for 16-byte stride
-    mov rsi, [rbx + rax + 8]   ; tag
-    mov rdi, [rbx + rax]       ; payload
+    shl rax, 3                  ; one Value per slot
+    mov rdi, [rbx + rax]       ; arg Value
     call obj_str
     ; obj_str returns (rax=payload, edx=tag)
     mov r14, rax                ; r14 = result payload
@@ -490,8 +489,6 @@ align 16
 .print_custom_sep:
     ; Custom sep — check if None (means default " ")
     mov rax, [rbp - PR_SEP_TAG]
-    cmp eax, TAG_NONE
-    je .print_default_sep_fallback
     cmp eax, TAG_PTR
     jne .print_default_sep_fallback
 
@@ -503,6 +500,11 @@ align 16
     je .print_default_sep_fallback
 
     mov rcx, [rax + PyStrObject.ob_size]
+    ; The per-argument copy checks the 4096-byte buffer; this one did not, so
+    ; print(..., sep="X"*5000) wrote past the frame over the return address.
+    lea rdx, [r15 + rcx + 2]
+    cmp rdx, 4096
+    jae .print_sep_direct
     ; Copy sep bytes into buffer
     lea rdi, [rbp - PR_FRAME + r15]
     lea rsi, [rax + PyStrObject.data]
@@ -514,6 +516,23 @@ align 16
     pop rcx
 .print_sep_done:
     add r15, rcx
+    jmp .print_loop
+
+.print_sep_direct:
+    ; Flush what is buffered, then write the separator straight out.
+    test r15, r15
+    jz .print_sep_write
+    mov rdi, [rbp - PR_FILE_FD]
+    lea rsi, [rbp - PR_FRAME]
+    mov rdx, r15
+    call sys_write
+    xor r15d, r15d
+.print_sep_write:
+    mov rax, [rbp - PR_SEP]
+    mov rdi, [rbp - PR_FILE_FD]
+    lea rsi, [rax + PyStrObject.data]
+    mov rdx, [rax + PyStrObject.ob_size]
+    call sys_write
     jmp .print_loop
 
 .print_default_sep_fallback:
@@ -558,8 +577,6 @@ align 16
 .print_custom_end:
     ; Check if None (means default "\n")
     mov rax, [rbp - PR_END_TAG]
-    cmp eax, TAG_NONE
-    je .print_default_end
     cmp eax, TAG_PTR
     jne .print_default_end
     mov rax, [rbp - PR_END]
@@ -567,8 +584,11 @@ align 16
     cmp rax, rcx
     je .print_default_end
 
-    ; Custom end string
+    ; Custom end string, bounded the same way
     mov rcx, [rax + PyStrObject.ob_size]
+    lea rdx, [r15 + rcx + 2]
+    cmp rdx, 4096
+    jae .print_end_direct
     lea rdi, [rbp - PR_FRAME + r15]
     lea rsi, [rax + PyStrObject.data]
     mov rdx, rcx
@@ -579,6 +599,22 @@ align 16
     pop rcx
 .print_end_copy_done:
     add r15, rcx
+    jmp .print_do_flush
+
+.print_end_direct:
+    test r15, r15
+    jz .print_end_write
+    mov rdi, [rbp - PR_FILE_FD]
+    lea rsi, [rbp - PR_FRAME]
+    mov rdx, r15
+    call sys_write
+    xor r15d, r15d
+.print_end_write:
+    mov rax, [rbp - PR_END]
+    mov rdi, [rbp - PR_FILE_FD]
+    lea rsi, [rax + PyStrObject.data]
+    mov rdx, [rax + PyStrObject.ob_size]
+    call sys_write
     jmp .print_do_flush
 
 .print_default_end:
@@ -603,6 +639,7 @@ align 16
     pop rbx
     mov edx, TAG_PTR
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 END_FUNC builtin_print
 
@@ -611,18 +648,18 @@ END_FUNC builtin_print
 ;; Returns len() of the first argument
 ;; Phase 4 stub: checks ob_size for variable-size objects
 ;; ============================================================================
-DEF_FUNC builtin_len
+LEN_EXC   equ 8
+LEN_FRAME equ 16
+DEF_FUNC builtin_len, LEN_FRAME
     push rbx
 
     ; Check nargs == 1
     cmp rsi, 1
     jne .len_error
 
-    mov eax, [rdi + 8]          ; args[0] tag
-    cmp eax, TAG_PTR
-    jne .len_type_error
-
     mov rbx, [rdi]              ; rbx = args[0]
+    V_TEST_PTR rbx, rax
+    ja .len_type_error
 
     ; Check if the object has a mapping mp_length
     mov rax, [rbx + PyObject.ob_type]
@@ -658,15 +695,17 @@ DEF_FUNC builtin_len
     mov rax, [rbx + PyObject.ob_type]
     mov rdx, [rax + PyTypeObject.tp_flags]
     test rdx, TYPE_FLAG_HEAPTYPE
-    jz .try_ob_size
+    jz .len_type_error
 
     extern dunder_len
     extern dunder_call_1
     mov rdi, rbx
+    DUNDER_EXC_SAVE [rbp - LEN_EXC]
     lea rsi, [rel dunder_len]
     call dunder_call_1
+    V_UNPACK rax, rdx           ; returns a Value
     test edx, edx
-    jz .try_ob_size
+    jz .no_dunder_len
 
     ; __len__ returned a result — extract integer value
     push rdx                ; save tag for SmallInt check
@@ -691,10 +730,17 @@ DEF_FUNC builtin_len
     add rsp, 8              ; discard saved tag
     jmp .make_int
 
-.try_ob_size:
-    ; Fallback: read ob_size at PyVarObject offset +16
-    ; This works for strings, tuples, lists, dicts, bytes
-    mov rax, [rbx + PyVarObject.ob_size]
+.no_dunder_len:
+    ; A NULL from dunder_call_1 means either "no __len__ on this type" or
+    ; "__len__ raised"; only the first is a fallback.
+    DUNDER_RAISED [rbp - LEN_EXC], .len_failed
+
+    ; There is no last-resort ob_size read here any more.  Every real
+    ; container reaches len() through sq_length, mp_length or __len__; the
+    ; fallback only caught things that have no length at all, and read +16 --
+    ; which for an iterator is it_seq, so len(reversed([1,2,3])) returned a
+    ; heap address.
+    jmp .len_type_error
 
 .make_int:
     ; rax = length; create an int object
@@ -702,6 +748,13 @@ DEF_FUNC builtin_len
     call int_from_i64
     ; int_from_i64 returns (rax=payload, edx=tag) — preserve edx
 
+    pop rbx
+    leave
+    V_PACK rax, rdx             ; builtins return one Value
+    ret
+
+.len_failed:
+    RET_NULL
     pop rbx
     leave
     ret
@@ -742,9 +795,10 @@ DEF_FUNC builtin_range
 
 .range_1:
     ; range(stop): start=0, stop=args[0], step=1
-    mov rdi, [rbx]
-    mov edx, [rbx + 8]
-    call int_to_i64
+    mov rdi, [rbx]             ; args[0]
+    V_UNPACK rdi, rdx
+    call obj_as_index      ; raises for a non-integer, rather than
+                           ; decoding its payload as one
     mov rsi, rax               ; stop
     xor edi, edi               ; start = 0
     mov edx, 1                 ; step = 1
@@ -753,13 +807,15 @@ DEF_FUNC builtin_range
 
 .range_2:
     ; range(start, stop): step=1
-    mov rdi, [rbx]
-    mov edx, [rbx + 8]
-    call int_to_i64
+    mov rdi, [rbx]             ; args[0]
+    V_UNPACK rdi, rdx
+    call obj_as_index      ; raises for a non-integer, rather than
+                           ; decoding its payload as one
     mov r13, rax               ; start
-    mov rdi, [rbx + 16]
-    mov edx, [rbx + 24]
-    call int_to_i64
+    mov rdi, [rbx + 8]
+    V_UNPACK rdi, rdx       ; args[1]
+    call obj_as_index      ; raises for a non-integer, rather than
+                           ; decoding its payload as one
     mov rsi, rax               ; stop
     mov rdi, r13               ; start
     mov edx, 1                 ; step = 1
@@ -768,21 +824,35 @@ DEF_FUNC builtin_range
 
 .range_3:
     ; range(start, stop, step)
-    mov rdi, [rbx]
-    mov edx, [rbx + 8]
-    call int_to_i64
+    mov rdi, [rbx]             ; args[0]
+    V_UNPACK rdi, rdx
+    call obj_as_index      ; raises for a non-integer, rather than
+                           ; decoding its payload as one
     push rax                   ; start
-    mov rdi, [rbx + 16]
-    mov edx, [rbx + 24]
-    call int_to_i64
+    mov rdi, [rbx + 8]
+    V_UNPACK rdi, rdx       ; args[1]
+    call obj_as_index      ; raises for a non-integer, rather than
+                           ; decoding its payload as one
     push rax                   ; stop
-    mov rdi, [rbx + 32]
-    mov edx, [rbx + 40]
-    call int_to_i64
+    mov rdi, [rbx + 16]
+    V_UNPACK rdi, rdx       ; args[2]
+    call obj_as_index      ; raises for a non-integer, rather than
+                           ; decoding its payload as one
     mov rdx, rax               ; step
+    ; A zero step makes range_obj_sq_length divide by zero and makes
+    ; range_iter_next advance by nothing, so len(range(0,5,0)) was SIGFPE
+    ; and `for i in range(0,5,0)` hung.
+    test rdx, rdx
+    jz .range_zero_step
     pop rsi                    ; stop
     pop rdi                    ; start
     call range_new
+    jmp .range_done
+
+.range_zero_step:
+    lea rdi, [rel exc_ValueError_type]
+    CSTRING rsi, "range() arg 3 must not be zero"
+    call raise_exception
 
 .range_done:
     pop r13
@@ -790,6 +860,7 @@ DEF_FUNC builtin_range
     pop rbx
     mov edx, TAG_PTR
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 END_FUNC builtin_range
 
@@ -806,20 +877,16 @@ DEF_FUNC builtin_type
     mov rdi, [rsi]             ; obj = args[0] payload
 
     ; SmallInt check (tag at args[0]+8)
-    cmp qword [rsi + 8], TAG_SMALLINT
-    je .type_smallint
+    V_TEST_INT_M [rsi], r11      ; args[0] an int immediate?
+    jae .type_smallint
 
     ; Float check
-    cmp qword [rsi + 8], TAG_FLOAT
-    je .type_float
+    V_TEST_F64_M [rsi], r11      ; args[0] a float?
+    jbe .type_float
 
     ; Bool check
-    cmp qword [rsi + 8], TAG_BOOL
-    je .type_bool
 
     ; None check
-    cmp qword [rsi + 8], TAG_NONE
-    je .type_none
 
     mov rax, [rdi + PyObject.ob_type]
     INCREF rax
@@ -880,20 +947,16 @@ DEF_FUNC builtin_isinstance
     extern bool_true
     extern bool_false
 
-    mov rax, [rdi]             ; rax = args[0] = obj payload
-    mov r8d, [rdi + 8]        ; r8d = args[0] tag
-    mov rcx, [rdi + 16]       ; rcx = args[1] = type_to_check payload
-    mov r9d, [rdi + 24]       ; r9d = args[1] tag
+    mov rax, [rdi]             ; rax = args[0] = obj
+    V_UNPACK rax, r8
+    mov rcx, [rdi + 8]         ; rcx = args[1] = type_to_check
+    V_UNPACK rcx, r9
 
     ; Get obj's type (tag-aware for all inline types)
     cmp r8d, TAG_SMALLINT
     je .isinstance_smallint
     cmp r8d, TAG_FLOAT
     je .isinstance_float
-    cmp r8d, TAG_BOOL
-    je .isinstance_bool
-    cmp r8d, TAG_NONE
-    je .isinstance_none
     cmp r8d, TAG_PTR
     jne .isinstance_false      ; unknown non-pointer tag → False
     mov rdx, [rax + PyObject.ob_type]
@@ -938,14 +1001,14 @@ DEF_FUNC builtin_isinstance
     jne .isinstance_type_error
 
 .isinstance_check:
-    ; Walk the full type chain: rdx = current type, rcx = target type
-    mov rax, rdx               ; save original obj type
-.isinstance_walk:
-    cmp rdx, rcx
-    je .isinstance_true
-    mov rdx, [rdx + PyTypeObject.tp_base]
-    test rdx, rdx
-    jnz .isinstance_walk
+    ; The MRO, not the tp_base chain: a class with several bases is an
+    ; instance of all of them.
+    extern type_is_subtype
+    mov rdi, rdx
+    mov rsi, rcx
+    call type_is_subtype
+    test eax, eax
+    jnz .isinstance_true
     jmp .isinstance_false
 
 .isinstance_tuple:
@@ -958,16 +1021,17 @@ DEF_FUNC builtin_isinstance
 .isinstance_tuple_loop:
     cmp r8, rcx
     jge .isinstance_false
-    mov rdx, r12               ; reset to obj's type
     push rcx
     push r8
-    mov rcx, [rsi + r8*8]           ; type from tuple
-.isinstance_tuple_walk:
-    cmp rdx, rcx
-    je .isinstance_tuple_match
-    mov rdx, [rdx + PyTypeObject.tp_base]
-    test rdx, rdx
-    jnz .isinstance_tuple_walk
+    push rsi
+    push rsi                   ; keep the stack 16-byte aligned
+    mov rdi, r12               ; obj's type
+    mov rsi, [rsi + r8*8]      ; type from tuple
+    call type_is_subtype
+    pop rsi
+    pop rsi
+    test eax, eax
+    jnz .isinstance_tuple_match
     pop r8
     pop rcx
     inc r8
@@ -984,6 +1048,7 @@ DEF_FUNC builtin_isinstance
     pop rbx
     mov edx, TAG_PTR
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .isinstance_true:
@@ -993,6 +1058,7 @@ DEF_FUNC builtin_isinstance
     pop rbx
     mov edx, TAG_PTR
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .isinstance_type_error:
@@ -1020,10 +1086,10 @@ DEF_FUNC builtin_issubclass
     cmp rsi, 2
     jne .issubclass_error
 
-    mov rdx, [rdi]             ; rdx = args[0] = cls payload
-    mov r8d, [rdi + 8]        ; r8d = args[0] tag
-    mov rcx, [rdi + 16]       ; rcx = args[1] = parent payload
-    mov r9d, [rdi + 24]       ; r9d = args[1] tag
+    mov rdx, [rdi]             ; rdx = args[0] = cls
+    V_UNPACK rdx, r8
+    mov rcx, [rdi + 8]         ; rcx = args[1] = parent
+    V_UNPACK rcx, r9
 
     ; Validate first arg is a type (TAG_PTR with recognized metatype)
     cmp r8d, TAG_PTR
@@ -1060,13 +1126,13 @@ DEF_FUNC builtin_issubclass
     cmp rax, r10
     jne .issubclass_arg2_error
 
-    ; Single type check: walk rdx -> tp_base chain looking for rcx
+    ; Single type check, over the MRO
 .issubclass_walk:
-    cmp rdx, rcx
-    je .issubclass_true
-    mov rdx, [rdx + PyTypeObject.tp_base]
-    test rdx, rdx
-    jnz .issubclass_walk
+    mov rdi, rdx
+    mov rsi, rcx
+    call type_is_subtype
+    test eax, eax
+    jnz .issubclass_true
     jmp .issubclass_false
 
 .issubclass_tuple:
@@ -1079,16 +1145,13 @@ DEF_FUNC builtin_issubclass
 .issubclass_tuple_loop:
     cmp r8, r13
     jge .issubclass_false
-    mov rdx, r12               ; reset to cls
-    mov rcx, [rsi + r8*8]     ; type from tuple
     push rsi
     push r8
-.issubclass_tuple_walk:
-    cmp rdx, rcx
-    je .issubclass_tuple_match
-    mov rdx, [rdx + PyTypeObject.tp_base]
-    test rdx, rdx
-    jnz .issubclass_tuple_walk
+    mov rdi, r12               ; cls
+    mov rsi, [rsi + r8*8]      ; type from tuple
+    call type_is_subtype
+    test eax, eax
+    jnz .issubclass_tuple_match
     pop r8
     pop rsi
     inc r8
@@ -1106,6 +1169,7 @@ DEF_FUNC builtin_issubclass
     pop rbx
     mov edx, TAG_PTR
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .issubclass_true:
@@ -1116,6 +1180,7 @@ DEF_FUNC builtin_issubclass
     pop rbx
     mov edx, TAG_PTR
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .issubclass_arg1_error:
@@ -1143,11 +1208,11 @@ DEF_FUNC builtin_repr
     cmp rsi, 1
     jne .repr_error
 
-    mov rsi, [rdi + 8]         ; arg[0] tag
-    mov rdi, [rdi]             ; arg[0] payload
+    mov rdi, [rdi]             ; args[0]
     call obj_repr
     ; rdx = tag from obj_repr
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .repr_error:
@@ -1170,8 +1235,7 @@ DEF_FUNC builtin_bool
     jne .bool_error
 
     ; bool(x) - test truthiness
-    mov rsi, [rdi + 8]         ; rsi = arg[0] tag
-    mov rdi, [rdi]             ; rdi = arg[0] payload
+    mov rdi, [rdi]             ; args[0]
     extern obj_is_true
     call obj_is_true           ; eax = 0 or 1
     test eax, eax
@@ -1217,8 +1281,8 @@ DEF_FUNC builtin_float, BF_FRAME
     jne .float_error
 
     ; float(x) - convert x
-    mov rsi, [rdi + 8]         ; rsi = x tag (args[0] tag)
-    mov rdi, [rdi]             ; rdi = x payload
+    mov rdi, [rdi]             ; args[0]
+    V_UNPACK rdi, rsi
 
     ; TAG_FLOAT fast-path: already a float, return as-is
     cmp esi, TAG_FLOAT
@@ -1234,7 +1298,36 @@ DEF_FUNC builtin_float, BF_FRAME
     cmp rax, rcx
     je .float_from_str
 
+    ; A class defining __float__ now carries nb_float; float_to_f64 below
+    ; knows nothing about it and returned 0.0 for such an object.
+    mov rcx, [rax + PyTypeObject.tp_as_number]
+    test rcx, rcx
+    jz .float_numeric
+    mov rcx, [rcx + PyNumberMethods.nb_float]
+    test rcx, rcx
+    jz .float_numeric
+    call rcx                    ; nb_float returns a Value
+    mov rdi, rax
+    V_UNPACK rdi, rdx
+    cmp edx, TAG_FLOAT
+    jne .float_numeric          ; not a float: let the generic path complain
+    mov rax, rdi
+    mov edx, TAG_FLOAT
+    leave
+    ret
+
 .float_numeric:
+    ; float_to_f64 answers 0.0 for anything it does not recognise, so
+    ; float(None) and float([1]) quietly produced 0.0.
+    push rdi
+    push rsi
+    extern binop_is_number
+    call binop_is_number
+    pop rsi
+    pop rdi
+    test eax, eax
+    jz .float_bad_type
+
     extern float_to_f64
     call float_to_f64          ; xmm0 = double
     extern float_from_f64
@@ -1242,6 +1335,13 @@ DEF_FUNC builtin_float, BF_FRAME
 
     leave
     ret
+
+.float_bad_type:
+    V_PACK rdi, rsi
+    mov rsi, rdi
+    CSTRING rdi, `float() argument must be a string or a real number, not '\x01'`
+    extern raise_type_error_with_name
+    call raise_type_error_with_name
 
 .float_passthrough:
     mov rax, rdi
@@ -1308,74 +1408,61 @@ DEF_FUNC builtin_float, BF_FRAME
 END_FUNC builtin_float
 
 ;; ============================================================================
-;; builtin___build_class__(PyObject **args, int64_t nargs) -> PyObject*
-;; __build_class__(body_func, class_name, *bases)
+;; type_from_parts(rdi = name str, rsi = bases tuple or NULL, rdx = namespace dict)
+;;   -> rax = the new type object, one strong reference
 ;;
-;; 1. body_func = args[0], class_name = args[1]
-;; 2. Create a class dict
-;; 3. Execute body_func with class_dict as locals
-;; 4. Create a new type object with class_dict as tp_dict
-;; 5. Return the new type
+;; The heaptype construction shared by __build_class__ and the three-argument
+;; type().  Extracted rather than duplicated: type() used to fall through to
+;; type_call's .normal_type_call, which treats type_type as an ordinary class
+;; -- it allocated an instance-sized block and let type fields be written into
+;; it, printing <class ''> and then aborting with a double free.
+;;
+;; The frame is built by hand, not by DEF_FUNC's size argument, so that the
+;; body's [rbp - TFP_BASE] slot keeps meaning what it meant inside __build_class__.
 ;; ============================================================================
-DEF_FUNC builtin___build_class__
+global type_from_parts
+DEF_FUNC type_from_parts
     push rbx
     push r12
     push r13
     push r14
     push r15
-    sub rsp, 24             ; 3 slots: [rbp-48]=base_class, [rbp-56]=unused, [rbp-64]=align
+    sub rsp, 24
 
-    ; Check nargs >= 2
-    cmp rsi, 2
-    jl .build_class_error
+TFP_BASE  equ 48            ; the layout base: the widest of the bases
+TFP_BASES equ 56            ; the bases tuple, or NULL
+    mov r14, rdi                ; class name str
+    mov r15, rdx                ; namespace dict, becomes tp_dict
+    mov [rbp - TFP_BASES], rsi
 
-    mov rbx, rdi            ; rbx = args
-    ; r12 will be used later for the type object
-
-    ; Save base class if present (args[2])
-    xor eax, eax
-    cmp rsi, 3
-    jl .bc_no_base
-    mov rax, [rbx + 32]    ; base = args[2]
-
-    ; Prevent subclassing bool
-    extern bool_type
-    lea rcx, [rel bool_type]
-    cmp rax, rcx
-    je .build_class_bool_error
-
-.bc_no_base:
-    mov [rbp-48], rax       ; save base_class (or NULL)
-
-    mov r13, [rbx]          ; r13 = body_func (args[0])
-    mov r14, [rbx + 16]     ; r14 = class_name (args[1])
-
-    ; Create class dict (will become tp_dict)
-    call dict_new
-    mov r15, rax            ; r15 = class_dict
-
-    ; Execute body function with class_dict as locals
-    ; frame_new(code, globals, builtins, locals)
-    mov rdi, [r13 + PyFuncObject.func_code]     ; code from body func
-    mov rsi, [r13 + PyFuncObject.func_globals]  ; globals from body func
-    mov rdx, [rel builtins_dict_global]         ; builtins dict
-    mov rcx, r15                                ; class_dict as locals
-    call frame_new
-    mov r12, rax            ; r12 = new frame
-
-    ; Store body function in frame for COPY_FREE_VARS (closure support)
-    mov [r12 + PyFrame.func_obj], r13
-
-    ; eval_frame(frame)
-    mov rdi, r12
-    call eval_frame
-    ; DECREF return value (should be None — TAG_NONE, not a pointer)
-    mov rsi, rdx
-    DECREF_VAL rax, rsi
-
-    ; Free the frame
-    mov rdi, r12
-    call frame_free
+    ; The layout base is the widest base, not simply the first: `class
+    ; C(Mixin, list)` has to be laid out as a list.  Ties go to the earlier
+    ; base, which is what CPython's solid-base rule gives for the ordinary
+    ; single-inheritance case.
+    xor eax, eax                ; best base
+    test rsi, rsi
+    jz .tfp_base_done
+    mov rcx, [rsi + PyTupleObject.ob_size]
+    mov r8, [rsi + PyTupleObject.ob_item]
+    xor r9, r9
+    xor r10, r10                ; best basicsize
+.tfp_base_scan:
+    cmp r9, rcx
+    jge .tfp_base_done
+    mov r11, [r8 + r9*8]
+    test r11, r11
+    jz .tfp_base_next
+    mov rdx, [r11 + PyTypeObject.tp_basicsize]
+    cmp rdx, r10
+    jbe .tfp_base_next
+    mov r10, rdx
+    mov rax, r11
+.tfp_base_next:
+    inc r9
+    jmp .tfp_base_scan
+.tfp_base_done:
+    mov [rbp - TFP_BASE], rax   ; layout base, or NULL
+    mov rdx, r15                ; restore namespace (scan clobbered rdx)
 
     ; Allocate the type object (GC-tracked)
     mov edi, TYPE_OBJECT_SIZE
@@ -1394,7 +1481,54 @@ DEF_FUNC builtin___build_class__
     lea rax, [r14 + PyStrObject.data]
     mov [r12 + PyTypeObject.tp_name], rax
 
+    ; Instance layout.  A heaptype embeds its base's layout and puts its own
+    ; __dict__ immediately after it, so both numbers come from the base:
+    ; tp_dictoffset is the base's basicsize, and tp_basicsize is that plus
+    ; the dict word.  With no base that yields 16 and 24 -- exactly
+    ; PyInstanceObject, which is where those constants came from.
+    ;
+    ; A variable-size base such as str keeps its data inline, so there is no
+    ; fixed offset past the header for a dict; those get none, as bytes and
+    ; __slots__ classes already do.
     mov qword [r12 + PyTypeObject.tp_basicsize], PyInstanceObject_size
+    mov qword [r12 + PyTypeObject.tp_dictoffset], PyInstanceObject.inst_dict
+    mov rax, [rbp - TFP_BASE]               ; base class
+    test rax, rax
+    jz .bc_layout_done
+    ; If the base already has a dict slot -- another heaptype, or an int
+    ; subclass -- share it rather than adding a second one, which would
+    ; collide with whatever the base put there.
+    mov rcx, [rax + PyTypeObject.tp_dictoffset]
+    test rcx, rcx
+    jnz .bc_layout_inherit
+
+    mov rcx, [rax + PyTypeObject.tp_flags]
+    test rcx, TYPE_FLAG_STR_SUBCLASS
+    jnz .bc_layout_no_dict
+    test rcx, TYPE_FLAG_INT_SUBCLASS
+    jnz .bc_layout_done             ; int subclasses wrap rather than embed
+
+    ; A builtin base with a fixed-size header: the dict goes just past it.
+    mov rcx, [rax + PyTypeObject.tp_basicsize]
+    test rcx, rcx
+    jz .bc_layout_done
+    mov [r12 + PyTypeObject.tp_dictoffset], rcx
+    add rcx, 8
+    mov [r12 + PyTypeObject.tp_basicsize], rcx
+    jmp .bc_layout_done
+
+.bc_layout_inherit:
+    mov [r12 + PyTypeObject.tp_dictoffset], rcx
+    mov rcx, [rax + PyTypeObject.tp_basicsize]
+    mov [r12 + PyTypeObject.tp_basicsize], rcx
+    jmp .bc_layout_done
+
+.bc_layout_no_dict:
+    mov qword [r12 + PyTypeObject.tp_dictoffset], 0
+    mov rcx, [rax + PyTypeObject.tp_basicsize]
+    mov [r12 + PyTypeObject.tp_basicsize], rcx
+
+.bc_layout_done:
 
     ; Wire instance methods
     lea rax, [rel instance_dealloc]
@@ -1430,19 +1564,62 @@ DEF_FUNC builtin___build_class__
     ; tp_dict = class_dict (ownership transferred from r15, no INCREF needed)
     mov [r12 + PyTypeObject.tp_dict], r15
 
+    ; A class statement's body sets __module__ itself; three-argument type()
+    ; hands over a bare namespace, and without __module__ the repr comes out
+    ; unqualified.  Fill it from the running frame's __name__, as CPython does.
+    lea rdi, [rel bc_module_name]
+    call str_from_cstr_heap
+    push rax
+    mov rdi, r15
+    mov rsi, rax
+    call dict_get
+    V_UNPACK rax, rdx
+    test edx, edx
+    jnz .bc_have_module
+    extern eval_saved_r12
+    mov rcx, [rel eval_saved_r12]
+    test rcx, rcx
+    jz .bc_have_module
+    mov rcx, [rcx + PyFrame.globals]
+    test rcx, rcx
+    jz .bc_have_module
+    lea rdi, [rel bc_dunder_name_name]
+    call str_from_cstr_heap
+    push rax
+    mov rdi, [rel eval_saved_r12]
+    mov rdi, [rdi + PyFrame.globals]
+    mov rsi, rax
+    call dict_get
+    V_UNPACK rax, rdx
+    pop rdi
+    push rax
+    push rdx
+    call obj_decref                 ; the "__name__" key
+    pop rdx
+    pop rax
+    test edx, edx
+    jz .bc_have_module
+    mov rdi, r15
+    mov rsi, [rsp]                  ; the "__module__" key
+    mov rdx, rax
+    call dict_set
+.bc_have_module:
+    pop rdi
+    call obj_decref
+
     ; INCREF class_name (type object refers to it via tp_name)
     mov rdi, r14
     call obj_incref
 
     ; === Parse __slots__ from class_dict ===
-    ; r12=type, r15=class_dict, [rbp-48]=base_class
+    ; r12=type, r15=class_dict, [rbp - TFP_BASE]=base_class
     lea rdi, [rel bc_slots_name]
     call str_from_cstr_heap
     push rax                        ; save __slots__ str
     mov rdi, r15                    ; class_dict
     mov rsi, rax
-    mov edx, TAG_PTR
     call dict_get
+    V_UNPACK rax, rdx           ; dict_get returns a Value
     pop rdi                         ; __slots__ str
     push rdx                        ; save dict_get tag
     push rax                        ; save dict_get value
@@ -1474,18 +1651,16 @@ DEF_FUNC builtin___build_class__
     jz .bc_no_slots
 
     ; Determine base_basicsize
-    mov rax, [rbp-48]               ; base_class
-    test rax, rax
-    jz .bc_use_default_basic
-    mov rdi, [rax + PyTypeObject.tp_basicsize]
-    jmp .bc_have_basic
-.bc_use_default_basic:
-    mov rdi, PyInstanceObject_size
+    ; Slots are laid out after the whole instance header, which is what
+    ; tp_basicsize was just set to -- the base's layout plus the dict word.
+    ; Using the *base's* basicsize instead puts the first slot on top of the
+    ; dict pointer.
+    mov rdi, [r12 + PyTypeObject.tp_basicsize]
 .bc_have_basic:
     ; rdi = base_basicsize
-    ; Set tp_basicsize = base_basicsize + nslots * 16
+    ; Set tp_basicsize = base_basicsize + nslots * 8 (one Value per slot)
     mov rax, r13
-    shl rax, 4                      ; nslots * 16
+    shl rax, 3                      ; nslots * 8
     add rax, rdi                    ; + base_basicsize
     mov [r12 + PyTypeObject.tp_basicsize], rax
 
@@ -1505,16 +1680,15 @@ DEF_FUNC builtin___build_class__
 
     ; Get slot name: slots_tuple[i]
     mov rax, [rbx + PyTupleObject.ob_item]       ; payloads
-    mov r11, [rbx + PyTupleObject.ob_item_tags]  ; tags
     mov rcx, [rax + rdx*8]                        ; name payload
-    movzx r8d, byte [r11 + rdx]                   ; name tag
+    V_UNPACK rcx, r8
     cmp r8d, TAG_PTR
     jne .bc_slot_skip               ; skip non-string slots
 
-    ; Compute offset = base_basicsize + i * 16
+    ; Compute offset = base_basicsize + i * 8
     mov rdi, [rsp + 8]             ; base_basicsize
     mov rax, [rsp]                 ; i
-    shl rax, 4
+    shl rax, 3
     add rdi, rax                   ; offset
 
     ; Create descriptor: member_descr_new(offset, name_str)
@@ -1529,8 +1703,6 @@ DEF_FUNC builtin___build_class__
     pop rsi                        ; name (key)
     mov rdx, rax                   ; descriptor (value)
     push rax                       ; save descriptor for DECREF
-    mov ecx, TAG_PTR               ; value_tag
-    mov r8, TAG_PTR                ; key_tag
     call dict_set
 
     ; DECREF our ref on descriptor (dict now owns one via INCREF in dict_set)
@@ -1554,8 +1726,8 @@ DEF_FUNC builtin___build_class__
 
     mov rdi, r15            ; class_dict
     mov rsi, rax            ; "__init__" str
-    mov edx, TAG_PTR
     call dict_get
+    V_UNPACK rax, rdx           ; dict_get returns a Value
     mov rbx, rax            ; rbx = __init__ func or NULL
 
     ; DECREF the "__init__" string
@@ -1566,25 +1738,72 @@ DEF_FUNC builtin___build_class__
     mov [r12 + PyTypeObject.tp_init], rbx
 
     ; Set tp_base: use explicit base class, or default to object_type
-    mov rax, [rbp-48]
+    mov rax, [rbp - TFP_BASE]
     test rax, rax
     jnz .bc_have_base
     lea rax, [rel object_type]
-    mov [rbp-48], rax           ; update saved base for later use
+    mov [rbp - TFP_BASE], rax           ; update saved base for later use
 .bc_have_base:
     mov [r12 + PyTypeObject.tp_base], rax
     mov rdi, rax
     call obj_incref
 
-    ; Inherit type flag subclass bits from base type
-    mov rax, [rbp-48]
-    mov rax, [rax + PyTypeObject.tp_flags]
-    and rax, TYPE_FLAG_INT_SUBCLASS | TYPE_FLAG_STR_SUBCLASS
-    or [r12 + PyTypeObject.tp_flags], rax
+    ; tp_bases and tp_mro.  With these in place a lookup or a subclass test
+    ; can see every base, not just the first.
+    mov rax, [rbp - TFP_BASES]
+    test rax, rax
+    jnz .bc_have_bases_tuple
+    ; No explicit bases: the linearization is (C, object).
+    mov edi, 1
+    extern tuple_new
+    call tuple_new
+    mov rcx, [rax + PyTupleObject.ob_item]
+    lea rdx, [rel object_type]
+    mov [rcx], rdx
+    mov rdi, rdx
+    mov [rbp - TFP_BASES], rax
+    call obj_incref
+    jmp .bc_bases_ready
+.bc_have_bases_tuple:
+    mov rdi, rax
+    call obj_incref
+.bc_bases_ready:
+    mov rax, [rbp - TFP_BASES]
+    mov [r12 + PyTypeObject.tp_bases], rax
+    mov rdi, r12
+    mov rsi, rax
+    extern mro_compute
+    call mro_compute
+    mov [r12 + PyTypeObject.tp_mro], rax
+
+    ; Inherit the family bits from every base, not only the layout one: a
+    ; `class C(Mixin, list)` is still a list subclass.  The container bits
+    ; were defined and set on the base types but never inherited at all, so
+    ; nothing downstream could tell a list subclass from any other class.
+    mov rax, [rbp - TFP_BASES]
+    mov rcx, [rax + PyTupleObject.ob_size]
+    mov r8, [rax + PyTupleObject.ob_item]
+    xor r9, r9
+    xor r10, r10
+.bc_flag_scan:
+    cmp r9, rcx
+    jge .bc_flags_done
+    mov r11, [r8 + r9*8]
+    test r11, r11
+    jz .bc_flag_next
+    or r10, [r11 + PyTypeObject.tp_flags]
+.bc_flag_next:
+    inc r9
+    jmp .bc_flag_scan
+.bc_flags_done:
+    and r10, TYPE_FLAG_INT_SUBCLASS | TYPE_FLAG_STR_SUBCLASS | \
+             TYPE_FLAG_LIST_SUBCLASS | TYPE_FLAG_TUPLE_SUBCLASS | \
+             TYPE_FLAG_DICT_SUBCLASS | TYPE_FLAG_SET_SUBCLASS
+    or [r12 + PyTypeObject.tp_flags], r10
 
     ; If base is an exception type, inherit exception-compatible methods
     extern type_is_exc_subclass
-    mov rdi, [rbp-48]
+    mov rdi, [rbp - TFP_BASE]
     call type_is_exc_subclass
     test eax, eax
     jz .bc_check_int_sub
@@ -1634,12 +1853,23 @@ DEF_FUNC builtin___build_class__
     jmp .bc_no_set_base
 
 .bc_check_builtin_sub:
-    ; Check if base has a tp_call that should be inherited
-    ; (for bytearray, memoryview, bytes subclasses)
-    mov rax, [rbp-48]              ; base class
+    ; Inherit the base's constructor (tp_new) for bytearray, memoryview and
+    ; bytes subclasses.
+    mov rax, [rbp - TFP_BASE]              ; base class
     test rax, rax
     jz .bc_no_set_base
-    mov rdi, [rax + PyTypeObject.tp_call]
+
+    ; Not for the container families.  Inheriting tp_new sends type_call
+    ; straight to the base constructor, which returns a plain list (or
+    ; tuple, dict, set) and never reaches __init__ -- so the subclass name
+    ; was lost and its __init__ never ran.  Leaving tp_new NULL routes them
+    ; through .normal_type_call, the same path an ordinary class takes.
+    mov rcx, [r12 + PyTypeObject.tp_flags]
+    test rcx, TYPE_FLAG_LIST_SUBCLASS | TYPE_FLAG_TUPLE_SUBCLASS | \
+              TYPE_FLAG_DICT_SUBCLASS | TYPE_FLAG_SET_SUBCLASS | \
+              TYPE_FLAG_STR_SUBCLASS
+    jnz .bc_container_sub
+    mov rdi, [rax + PyTypeObject.tp_new]
     test rdi, rdi
     jz .bc_no_set_base
     ; Don't inherit object_type_call or type_call
@@ -1650,18 +1880,48 @@ DEF_FUNC builtin___build_class__
     lea rcx, [rel type_call]
     cmp rdi, rcx
     je .bc_no_set_base
-    ; Inherit tp_call from base (for bytearray, etc.)
-    mov [r12 + PyTypeObject.tp_call], rdi
+    ; Inherit the constructor from the base (for bytearray, etc.)
+    mov [r12 + PyTypeObject.tp_new], rdi
     ; Use builtin_sub_dealloc instead of instance_dealloc
     ; (builtin subclasses don't have inst_dict at +16)
     extern builtin_sub_dealloc
     lea rax, [rel builtin_sub_dealloc]
     mov [r12 + PyTypeObject.tp_dealloc], rax
 
+.bc_container_sub:
+    ; Inherit the base's protocol slots.  These have no Python-level dunder
+    ; that instance_getattr could route to, so a subclass with none of them
+    ; is not a container at all: d["k"] = 1 raised, because a heaptype's
+    ; tp_as_mapping is NULL.  type_install_slots runs after this and
+    ; overrides whichever ones the class defines for itself.
+    mov rax, [rbp - TFP_BASE]              ; base class
+    mov rcx, [rax + PyTypeObject.tp_as_number]
+    mov [r12 + PyTypeObject.tp_as_number], rcx
+    mov rcx, [rax + PyTypeObject.tp_as_sequence]
+    mov [r12 + PyTypeObject.tp_as_sequence], rcx
+    mov rcx, [rax + PyTypeObject.tp_as_mapping]
+    mov [r12 + PyTypeObject.tp_as_mapping], rcx
+    mov rcx, [rax + PyTypeObject.tp_hash]
+    mov [r12 + PyTypeObject.tp_hash], rcx
+    mov rcx, [rax + PyTypeObject.tp_richcompare]
+    mov [r12 + PyTypeObject.tp_richcompare], rcx
+    mov rcx, [rax + PyTypeObject.tp_iter]
+    mov [r12 + PyTypeObject.tp_iter], rcx
+    mov rcx, [rax + PyTypeObject.tp_iternext]
+    mov [r12 + PyTypeObject.tp_iternext], rcx
+
 .bc_no_set_base:
 
+    ; Fill the type's slots from the dunders it defines.  Until now a
+    ; heaptype's tp_iter, tp_iternext, tp_hash, tp_call, tp_richcompare and
+    ; tp_as_* were all left at zero, and every operation that wanted one had
+    ; to grow its own dunder fallback -- or, more often, not.
+    extern type_install_slots
+    mov rdi, r12
+    call type_install_slots
+
     ; Call parent's __init_subclass__ if present
-    mov rax, [rbp-48]          ; base class
+    mov rax, [rbp - TFP_BASE]          ; base class
     test rax, rax
     jz .bc_no_init_subclass
 
@@ -1670,6 +1930,7 @@ DEF_FUNC builtin___build_class__
     mov rdi, rax               ; base class (as type)
     CSTRING rsi, "__init_subclass__"
     call dunder_lookup
+    V_UNPACK rax, rdx           ; returns a Value
     test edx, edx
     jz .bc_no_init_subclass
 
@@ -1685,9 +1946,10 @@ DEF_FUNC builtin___build_class__
     mov rsi, rsp               ; args
     mov edx, 1                 ; nargs = 1
     call rcx
+    V_UNPACK rax, rdx           ; tp_call returns a Value
     add rsp, 16                ; pop fat args
     ; DECREF result if non-NULL
-    test rax, rax
+    test edx, edx               ; the tag, not the payload: a hit may be int 0
     jz .bc_no_init_subclass
     mov rdi, rax
     call obj_decref
@@ -1700,8 +1962,8 @@ DEF_FUNC builtin___build_class__
     push rax                ; save key str
     mov rdi, r15            ; class_dict
     mov rsi, rax
-    mov edx, TAG_PTR
     call dict_get           ; returns cell or NULL
+    V_UNPACK rax, rdx           ; dict_get returns a Value
     pop rdi                 ; key str
     push rdx                ; save dict_get tag
     push rax                ; save cell payload
@@ -1711,8 +1973,7 @@ DEF_FUNC builtin___build_class__
     test edx, edx
     jz .bc_no_classcell
     ; cell.ob_ref = new type (r12), with tag
-    mov [rax + PyCellObject.ob_ref], r12
-    mov qword [rax + PyCellObject.ob_ref_tag], TAG_PTR
+    mov [rax + PyCellObject.ob_ref], r12        ; a type pointer is its own Value
     mov rdi, r12
     call obj_incref         ; cell holds a ref to the type
 .bc_no_classcell:
@@ -1732,13 +1993,154 @@ DEF_FUNC builtin___build_class__
     pop r13
     pop r12
     pop rbx
-    mov edx, TAG_PTR
     leave
     ret
+END_FUNC type_from_parts
+
+;; ============================================================================
+;; builtin___build_class__(PyObject **args, int64_t nargs) -> PyObject*
+;; __build_class__(body_func, class_name, *bases)
+;;
+;; 1. body_func = args[0], class_name = args[1]
+;; 2. Create a class dict
+;; 3. Execute body_func with class_dict as locals
+;; 4. Create a new type object with class_dict as tp_dict
+;; 5. Return the new type
+;; ============================================================================
+DEF_FUNC builtin___build_class__
+    push rbx
+    push r12
+    push r13
+    push r14
+    push r15
+BCL_BASES equ 48        ; the bases tuple built from args[2:]
+    sub rsp, 24             ; [rbp-48] = bases tuple, rest padding
+
+    ; Check nargs >= 2
+    cmp rsi, 2
+    jl .build_class_error
+
+    mov rbx, rdi            ; rbx = args
+    ; r12 will be used later for the type object
+
+    ; Collect every base into a tuple.  Only args[2] used to be read, so
+    ; `class C(A, B)` silently produced a class that had never heard of B.
+    xor eax, eax
+    mov [rbp - BCL_BASES], rax
+    cmp rsi, 3
+    jl .bc_no_base
+    push rsi
+    lea rdi, [rsi - 2]      ; nbases
+    extern tuple_new
+    call tuple_new
+    pop rsi
+    mov [rbp - BCL_BASES], rax
+    mov r8, [rax + PyTupleObject.ob_item]
+    xor r9, r9
+.bc_base_copy:
+    lea rcx, [r9 + 2]
+    cmp rcx, rsi
+    jge .bc_no_base
+    mov rdx, [rbx + rcx*8]
+    ; A base must be a class.  `class C(1)` used to store and INCREF the
+    ; integer, and mro_compute then walked tp_base off it.
+    push rsi
+    push r8
+    push r9
+    push rdx
+    mov rdi, rdx
+    extern type_check_is_class
+    call type_check_is_class
+    pop rdx
+    pop r9
+    pop r8
+    pop rsi
+    test eax, eax
+    jz .build_class_base_error
+    ; Prevent subclassing bool
+    extern bool_type
+    lea rcx, [rel bool_type]
+    cmp rdx, rcx
+    je .build_class_bool_error
+    mov [r8 + r9*8], rdx
+    push rsi
+    push r8
+    push r9
+    mov rdi, rdx
+    call obj_incref
+    pop r9
+    pop r8
+    pop rsi
+    inc r9
+    jmp .bc_base_copy
+
+.bc_no_base:
+
+    mov r13, [rbx]          ; r13 = body_func (args[0])
+    mov r14, [rbx + 8]     ; r14 = class_name (args[1])
+
+    ; Create class dict (will become tp_dict)
+    call dict_new
+    mov r15, rax            ; r15 = class_dict
+
+    ; Execute body function with class_dict as locals
+    ; frame_new(code, globals, builtins, locals)
+    mov rdi, [r13 + PyFuncObject.func_code]     ; code from body func
+    mov rsi, [r13 + PyFuncObject.func_globals]  ; globals from body func
+    mov rdx, [rel builtins_dict_global]         ; builtins dict
+    mov rcx, r15                                ; class_dict as locals
+    call frame_new
+    mov r12, rax            ; r12 = new frame
+
+    ; Store body function in frame for COPY_FREE_VARS (closure support)
+    mov [r12 + PyFrame.func_obj], r13
+
+    ; eval_frame(frame)
+    mov rdi, r12
+    call eval_frame
+    V_UNPACK rax, rdx           ; eval_frame returns a Value
+    ; DECREF return value (should be None — TAG_NONE, not a pointer)
+    mov rsi, rdx
+    DECREF_VAL rax, rsi
+
+    ; Free the frame
+    mov rdi, r12
+    call frame_free
+
+    ; Build the heaptype from (name, bases, namespace); the three-argument
+    ; type() reaches the same code.
+    mov rdi, r14
+    mov rsi, [rbp - BCL_BASES]
+    mov rdx, r15
+    call type_from_parts
+    push rax
+    mov rdi, [rbp - BCL_BASES]
+    test rdi, rdi
+    jz .bc_bases_released
+    call obj_decref         ; type_from_parts took its own reference
+.bc_bases_released:
+    pop rax
+
+    add rsp, 24
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    mov edx, TAG_PTR
+    leave
+    V_PACK rax, rdx             ; builtins return one Value
+    ret
+
 
 .build_class_error:
     lea rdi, [rel exc_TypeError_type]
     CSTRING rsi, "__build_class__ requires 2+ arguments"
+    call raise_exception
+
+.build_class_base_error:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "bases must be types"
     call raise_exception
 
 .build_class_bool_error:
@@ -1749,6 +2151,8 @@ END_FUNC builtin___build_class__
 
 section .rodata
 bc_init_name: db "__init__", 0
+bc_module_name: db "__module__", 0
+bc_dunder_name_name: db "__name__", 0
 bc_classcell_name: db "__classcell__", 0
 bc_slots_name: db "__slots__", 0
 section .text
@@ -1782,8 +2186,6 @@ DEF_FUNC_LOCAL add_builtin
     mov rdi, rbx
     mov rsi, rax               ; key
     mov rdx, [rsp + 8]        ; func obj
-    mov ecx, TAG_PTR
-    mov r8d, TAG_PTR
     call dict_set
 
     ; DECREF key and value
@@ -1810,22 +2212,22 @@ DEF_FUNC_LOCAL add_builtin_type
     mov rbx, rdi               ; dict
     mov r12, rdx               ; type_obj
 
-    ; Set tp_call on the type object
-    mov [r12 + PyTypeObject.tp_call], rcx
+    ; Install the constructor in tp_new.  It must NOT go in tp_call: tp_call
+    ; on a type governs whether that type's INSTANCES are callable.
+    mov [r12 + PyTypeObject.tp_new], rcx
 
     ; Create key string (heap — used as dict key, then DECREFed)
     push r12
     mov rdi, rsi
     call str_from_cstr_heap
     mov rcx, rax               ; key str
+    V_PACK rdx, rcx
 
     ; dict_set(dict, key, type_obj)
     mov rdi, rbx
     mov rsi, rcx
     pop rdx                    ; type_obj
     push rcx                   ; save key for DECREF
-    mov ecx, TAG_PTR
-    mov r8d, TAG_PTR
     call dict_set
 
     ; DECREF key
@@ -2657,8 +3059,6 @@ DEF_FUNC_LOCAL add_exc_type_builtin
     mov rdi, rbx
     mov rsi, rax               ; key
     mov rdx, r12               ; type object
-    mov ecx, TAG_PTR
-    mov r8d, TAG_PTR
     call dict_set
 
     ; DECREF key
@@ -2857,3 +3257,4 @@ builtin_func_type:
     dq 0                        ; tp_bases
     dq 0                        ; tp_traverse
     dq 0                        ; tp_clear
+    dq 0 ; tp_dictoffset

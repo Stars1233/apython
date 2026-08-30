@@ -31,6 +31,11 @@ struc PyTypeObject
     .tp_bases:       resq 1  ; +184 ptr to bases tuple
     .tp_traverse:    resq 1  ; +192 GC traverse function ptr
     .tp_clear:       resq 1  ; +200 GC clear function ptr
+    ; Byte offset of the instance __dict__ within an instance, or 0 for a
+    ; type whose instances have none.  Only ever read for a heaptype, which
+    ; is gc_alloc'd and zero-filled, so a static table that predates this
+    ; field cannot be misread.
+    .tp_dictoffset:  resq 1  ; +208
 endstruc
 
 TYPE_OBJECT_SIZE equ PyTypeObject_size
@@ -71,6 +76,11 @@ struc PyNumberMethods
     .nb_ior:           resq 1  ; +240
     .nb_ifloor_divide: resq 1  ; +248
     .nb_itrue_divide:  resq 1  ; +256
+    ; The @ operator.  These were missing entirely, and binary_op_offsets
+    ; mapped NB_MATRIX_MULTIPLY to offset 0 -- which is nb_add -- so 3 @ 4
+    ; silently returned 7.
+    .nb_matmul:        resq 1  ; +264
+    .nb_imatmul:       resq 1  ; +272
 endstruc
 
 ; Sequence methods structure
@@ -101,6 +111,7 @@ TYPE_FLAG_STR_SUBCLASS equ 0x0200
 TYPE_FLAG_LIST_SUBCLASS equ 0x0400
 TYPE_FLAG_TUPLE_SUBCLASS equ 0x0800
 TYPE_FLAG_DICT_SUBCLASS equ 0x1000
+TYPE_FLAG_SET_SUBCLASS equ 0x4000   ; 0x2000 is TYPE_FLAG_HAS_SLOTS
 TYPE_FLAG_HAS_SLOTS     equ 0x2000
 
 ; Comparison opcodes (used by tp_richcompare)

@@ -6,6 +6,7 @@
 %include "types.inc"
 %include "frame.inc"
 
+extern none_singleton
 extern ap_malloc
 extern gc_alloc
 extern gc_track
@@ -193,9 +194,7 @@ DEF_FUNC func_call
     movsxd rcx, ecx
     mov rdx, rcx
     shl rcx, 3                 ; localsplus 8 bytes/slot
-    mov [r12 + PyFrame.localsplus + rcx], rax
-    mov rsi, [r12 + PyFrame.locals_tag_base]
-    mov byte [rsi + rdx], TAG_PTR  ; dict is always heap ptr
+    mov [r12 + PyFrame.localsplus + rcx], rax   ; a dict pointer is its own Value
 
 .no_kwargs_dict:
     ; === Phase 2: Copy positional args ===
@@ -213,14 +212,9 @@ DEF_FUNC func_call
     mov r8, rcx
     mov r11, rcx
     shl r8, 3                      ; localsplus at 8-byte stride
-    mov rax, rcx
-    shl rax, 4                     ; args at 16-byte stride
-    mov rdx, [r14 + rax]           ; arg payload
-    mov r9, [r14 + rax + 8]        ; arg tag
+    mov rdx, [r14 + r8]            ; the argument Value
+    INCREF_V rdx, r9
     mov [r12 + PyFrame.localsplus + r8], rdx
-    mov rsi, [r12 + PyFrame.locals_tag_base]
-    mov byte [rsi + r11], r9b
-    INCREF_VAL rdx, r9
     inc ecx
     cmp ecx, r10d
     jb .bind_positional
@@ -261,23 +255,18 @@ DEF_FUNC func_call
     lea edi, [r8d + esi]
     movsxd rdi, edi
     mov r10, rdi
-    shl r10, 4                      ; source index * 16 (args stride)
-    mov r9, [r14 + r10]             ; value payload from args
-    mov r11, [r14 + r10 + 8]        ; value tag from args
-    mov r10, [rax + PyTupleObject.ob_item]       ; payloads
-    mov rdi, [rax + PyTupleObject.ob_item_tags]  ; tags
-    mov [r10 + rsi*8], r9           ; payload
-    mov byte [rdi + rsi], r11b      ; tag
-    INCREF_VAL r9, r11
+    shl r10, 3                      ; one Value per argument slot
+    mov r9, [r14 + r10]             ; the argument Value
+    mov r10, [rax + PyTupleObject.ob_item]
+    INCREF_V r9, r11
+    mov [r10 + rsi * 8], r9
     inc esi
     jmp .fill_varargs
 
 .store_varargs:
-    mov rsi, [r12 + PyFrame.locals_tag_base]
     mov r11, rdx
     shl rdx, 3                 ; localsplus 8 bytes/slot
-    mov [r12 + PyFrame.localsplus + rdx], rax
-    mov byte [rsi + r11], TAG_PTR
+    mov [r12 + PyFrame.localsplus + rdx], rax   ; a tuple pointer is its own Value
     jmp .varargs_done
 
 .empty_varargs:
@@ -285,11 +274,9 @@ DEF_FUNC func_call
     xor edi, edi
     call tuple_new
     pop rdx                     ; rdx = slot index
-    mov rsi, [r12 + PyFrame.locals_tag_base]
     mov r11, rdx
     shl rdx, 3                 ; localsplus 8 bytes/slot
-    mov [r12 + PyFrame.localsplus + rdx], rax
-    mov byte [rsi + r11], TAG_PTR
+    mov [r12 + PyFrame.localsplus + rdx], rax   ; a tuple pointer is its own Value
 
 .varargs_done:
     ; === Phase 4: Match keyword args ===
@@ -333,8 +320,7 @@ DEF_FUNC func_call
     jge .pos_defaults_done
 
     mov r10, rdi
-    mov r11, [r12 + PyFrame.locals_tag_base]
-    cmp byte [r11 + r10], 0
+    cmp qword [r12 + PyFrame.localsplus + r10*8], 0
     jne .defaults_next
 
     ; Must have a default (i >= m)
@@ -346,16 +332,14 @@ DEF_FUNC func_call
     mov r8, rdi
     sub r8, rsi
     mov r9, [rax + PyTupleObject.ob_item]       ; payloads
-    mov r10, [rax + PyTupleObject.ob_item_tags] ; tags
     mov r9, [r9 + r8*8]                          ; payload
-    movzx r10d, byte [r10 + r8]                  ; tag
+    V_UNPACK r9, r10
     movsxd r8, edi
     mov r11, r8
     shl r8, 3                  ; localsplus 8 bytes/slot
-    mov [r12 + PyFrame.localsplus + r8], r9
-    mov r8, [r12 + PyFrame.locals_tag_base]
-    mov byte [r8 + r11], r10b
     INCREF_VAL r9, r10
+    V_PACK r9, r10
+    mov [r12 + PyFrame.localsplus + r8], r9
 
 .defaults_next:
     inc edi
@@ -383,8 +367,7 @@ DEF_FUNC func_call
     jge .kw_defaults_done
 
     movsxd r8, esi
-    mov r11, [r12 + PyFrame.locals_tag_base]
-    cmp byte [r11 + r8], 0
+    cmp qword [r12 + PyFrame.localsplus + r8*8], 0
     jne .kw_defaults_next
 
     ; Slot is NULL - look up param name in kwdefaults dict
@@ -402,8 +385,8 @@ DEF_FUNC func_call
 
     ; dict_get(kwdefaults, param_name) -> borrowed ref or NULL
     mov rdi, rax            ; kwdefaults dict
-    mov edx, TAG_PTR
     call dict_get
+    V_UNPACK rax, rdx           ; dict_get returns a Value
 
     mov r8, rax             ; r8 = value payload (or NULL)
     mov r10, rdx            ; r10 = value tag from dict_get
@@ -418,10 +401,9 @@ DEF_FUNC func_call
     movsxd r9, esi
     mov r11, r9
     shl r9, 3                  ; localsplus 8 bytes/slot
-    mov [r12 + PyFrame.localsplus + r9], r8
-    mov rsi, [r12 + PyFrame.locals_tag_base]
-    mov byte [rsi + r11], r10b  ; tag from dict_get
     INCREF_VAL r8, r10
+    V_PACK r8, r10
+    mov [r12 + PyFrame.localsplus + r9], r8
 
 .kw_defaults_next:
     inc esi
@@ -439,8 +421,7 @@ DEF_FUNC func_call
     cmp esi, ecx
     jge .args_valid
     movsxd r8, esi
-    mov r9, [r12 + PyFrame.locals_tag_base]
-    cmp byte [r9 + r8], 0
+    cmp qword [r12 + PyFrame.localsplus + r8*8], 0
     je .args_missing
     inc esi
     jmp .check_args_loop
@@ -457,6 +438,7 @@ DEF_FUNC func_call
     ; === Phase 7: Call eval_frame ===
     mov rdi, r12
     call eval_frame
+    V_UNPACK rax, rdx           ; eval_frame returns a Value
     mov [rsp+16], rax       ; save return value payload
     mov [rsp+24], rdx       ; save return value tag
 
@@ -477,6 +459,7 @@ DEF_FUNC func_call
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; tp_call returns one Value
     ret
 END_FUNC func_call
 
@@ -580,19 +563,15 @@ DEF_FUNC func_bind_kwargs
 .kw_found:
     ; ecx = j (param index in localsplus)
     movsxd rdx, ecx
-    mov r11, [r12 + PyFrame.locals_tag_base]
     ; Check if slot already filled (would be "multiple values" error)
-    cmp byte [r11 + rdx], 0
+    cmp qword [r12 + PyFrame.localsplus + rdx*8], 0
     jne .kw_next            ; skip silently (TODO: error)
 
     ; Assign: localsplus[j] = args[value_index], INCREF
     mov rax, [rsp+24]
-    shl rax, 4                ; args at 16-byte stride
-    mov rdi, [r13 + rax]      ; arg payload
-    mov rsi, [r13 + rax + 8]  ; arg tag
+    mov rdi, [r13 + rax*8]    ; the argument Value
+    INCREF_V rdi, rsi
     mov [r12 + PyFrame.localsplus + rdx*8], rdi
-    mov byte [r11 + rdx], sil
-    INCREF_VAL rdi, rsi
     jmp .kw_next
 
 .kw_not_found:
@@ -601,15 +580,12 @@ DEF_FUNC func_bind_kwargs
     test rdi, rdi
     jz .kw_unexpected       ; no **kwargs, raise TypeError
 
-    ; dict_set(kwargs_dict, key, value, value_tag)
+    ; dict_set(kwargs_dict, key Value, value Value)
     mov rax, [rsp+16]
-    mov rsi, [r14 + PyTupleObject.ob_item]           ; payloads
-    mov rsi, [rsi + rax*8]                           ; key = kw_name
+    mov rsi, [r14 + PyTupleObject.ob_item]
+    mov rsi, [rsi + rax*8]         ; key = kw_name (already a Value)
     mov rax, [rsp+24]
-    shl rax, 4                     ; * 16 (16-byte args stride)
-    mov rcx, [r13 + rax + 8]      ; value tag
-    mov rdx, [r13 + rax]          ; value payload
-    mov r8d, TAG_PTR
+    mov rdx, [r13 + rax*8]         ; the value Value
     call dict_set
     jmp .kw_next
 
@@ -709,8 +685,7 @@ DEF_FUNC func_setattr
 
     mov rbx, rdi            ; rbx = func
     mov r12, rsi            ; r12 = name
-    mov r13, rdx            ; r13 = value
-    mov r14d, ecx           ; r14d = value_tag (from caller)
+    mov r13, rdx            ; r13 = value Value
 
     ; Check for __kwdefaults__
     lea rdi, [rel fn_attr_kwdefaults]
@@ -730,11 +705,9 @@ DEF_FUNC func_setattr
     mov rdi, rax
 
 .have_dict:
-    ; dict_set(func_dict, name, value, value_tag, key_tag)
+    ; dict_set(func_dict, name Value, value Value)
     mov rsi, r12
     mov rdx, r13
-    mov ecx, r14d           ; value_tag from caller
-    mov r8d, TAG_PTR        ; key_tag (name is always heap string)
     call dict_set
 
     pop r14
@@ -751,9 +724,9 @@ DEF_FUNC func_setattr
     jz .no_old_kwd
     call obj_decref
 .no_old_kwd:
-    ; Store new kwdefaults — INCREF if pointer, store NULL if non-pointer
-    test r14d, TAG_RC_BIT
-    jz .store_kwd_null
+    ; Store new kwdefaults — only a heap pointer can be a dict
+    V_TEST_PTR r13, r14
+    ja .store_kwd_null
     mov rdi, r13
     call obj_incref
     mov [rbx + PyFuncObject.func_kwdefaults], r13
@@ -823,8 +796,8 @@ DEF_FUNC func_getattr
     jz .not_found
 
     mov rsi, r12
-    mov edx, TAG_PTR
     call dict_get
+    V_UNPACK rax, rdx           ; dict_get returns a Value
     test edx, edx
     jz .not_found
 
@@ -833,6 +806,7 @@ DEF_FUNC func_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .return_name:
@@ -842,6 +816,7 @@ DEF_FUNC func_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .return_qualname:
@@ -855,6 +830,7 @@ DEF_FUNC func_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .return_dict:
@@ -870,6 +846,7 @@ DEF_FUNC func_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .return_code:
@@ -879,6 +856,7 @@ DEF_FUNC func_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .return_kwdefaults:
@@ -887,10 +865,11 @@ DEF_FUNC func_getattr
     jnz .return_kwdefaults_obj
     ; Return None if no kwdefaults
     xor eax, eax
-    mov edx, TAG_NONE
+    RET_NONE
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 .return_kwdefaults_obj:
     INCREF rax
@@ -898,6 +877,7 @@ DEF_FUNC func_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .not_found:
@@ -905,6 +885,7 @@ DEF_FUNC func_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 END_FUNC func_getattr
 
@@ -1153,3 +1134,4 @@ func_type:
     dq 0                    ; tp_bases
     dq func_traverse                        ; tp_traverse
     dq func_clear                        ; tp_clear
+    dq 0       ; tp_dictoffset

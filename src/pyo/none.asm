@@ -70,6 +70,8 @@ none_number_methods:
     dq 0                        ; nb_ior          +240
     dq 0                        ; nb_ifloor_divide +248
     dq 0                        ; nb_itrue_divide +256
+    dq 0 ; nb_matmul
+    dq 0 ; nb_imatmul
 
 ; NoneType type object
 align 8
@@ -101,6 +103,7 @@ none_type:
     dq 0                    ; tp_bases
     dq 0                        ; tp_traverse
     dq 0                        ; tp_clear
+    dq 0 ; tp_dictoffset
 
 ; None singleton - immortal object, never freed
 align 8
@@ -154,6 +157,7 @@ notimpl_type:
     dq 0                    ; tp_bases
     dq 0                        ; tp_traverse
     dq 0                        ; tp_clear
+    dq 0 ; tp_dictoffset
 
 ; NotImplemented singleton - immortal object, never freed
 align 8
@@ -207,6 +211,7 @@ ellipsis_type:
     dq 0                    ; tp_bases
     dq 0                    ; tp_traverse
     dq 0                    ; tp_clear
+    dq 0 ; tp_dictoffset
 
 ; Ellipsis singleton - immortal object, never freed
 align 8

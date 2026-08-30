@@ -23,6 +23,7 @@ SYS_listen          equ 50
 SYS_getsockname     equ 51
 SYS_setsockopt      equ 54
 SYS_fcntl           equ 72
+SYS_ioctl           equ 16
 SYS_io_uring_setup  equ 425
 SYS_io_uring_enter  equ 426
 SYS_exit_group      equ 231
@@ -187,3 +188,10 @@ DEF_FUNC_BARE sys_fcntl
     syscall
     ret
 END_FUNC sys_fcntl
+
+; sys_ioctl(fd, request, arg) -> int
+DEF_FUNC_BARE sys_ioctl
+    mov rax, SYS_ioctl
+    syscall
+    ret
+END_FUNC sys_ioctl

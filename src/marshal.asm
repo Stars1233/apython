@@ -7,6 +7,7 @@
 %include "marshal.inc"
 
 
+extern int_promote_mpz
 extern none_singleton
 extern bool_true
 extern bool_false
@@ -136,8 +137,8 @@ DEF_FUNC marshal_init_refs
     cmp qword [rel marshal_ref_cap], 0
     jne .already_allocated
 
-    ; Allocate initial ref array (16 bytes per entry: payload + tag)
-    mov rdi, MARSHAL_REFS_INIT_CAP * 16
+    ; Allocate the initial ref array (one Value per entry)
+    mov rdi, MARSHAL_REFS_INIT_CAP * 8
     call ap_malloc
     mov [rel marshal_refs], rax
     mov qword [rel marshal_ref_cap], MARSHAL_REFS_INIT_CAP
@@ -168,22 +169,19 @@ DEF_FUNC marshal_add_ref
     shl rax, 1                 ; new_cap = old_cap * 2
     mov [rel marshal_ref_cap], rax
     mov rsi, rax
-    shl rsi, 4                 ; new_cap * 16
+    shl rsi, 3                 ; new_cap * 8
     call ap_realloc
     mov [rel marshal_refs], rax
 
 .store:
+    ; The refs array takes ownership — INCREF, then pack and store
+    INCREF_VAL rbx, r12
+    V_PACK rbx, r12
     mov rax, [rel marshal_ref_count]
     mov rcx, [rel marshal_refs]
-    shl rax, 4                 ; count * 16
-    mov [rcx + rax], rbx       ; refs[count].payload
-    mov [rcx + rax + 8], r12   ; refs[count].tag
-    shr rax, 4                 ; restore count
+    mov [rcx + rax*8], rbx
     inc rax
     mov [rel marshal_ref_count], rax
-
-    ; Refs array takes ownership — INCREF the stored value
-    INCREF_VAL rbx, r12
 
     pop r12
     pop rbx
@@ -209,11 +207,8 @@ DEF_FUNC marshal_cleanup_refs
 .cleanup_loop:
     cmp r12, r13
     jge .cleanup_done
-    mov rax, r12
-    shl rax, 4
-    mov rdi, [rbx + rax]      ; payload
-    mov rsi, [rbx + rax + 8]  ; tag
-    DECREF_VAL rdi, rsi
+    mov rdi, [rbx + r12*8]
+    DECREF_V rdi, rsi
     inc r12
     jmp .cleanup_loop
 .cleanup_done:
@@ -329,7 +324,7 @@ mfinish:
 ;--------------------------------------------------------------------------
 mdo_none:
     xor eax, eax
-    mov edx, TAG_NONE
+    RET_NONE
     jmp mfinish
 
 ;--------------------------------------------------------------------------
@@ -463,6 +458,8 @@ mdo_long:
     mov qword [r15 + PyObject.ob_refcnt], 1
     lea rax, [rel int_type]
     mov [r15 + PyObject.ob_type], rax
+    mov qword [r15 + PyIntObject.compact], 0  ; GMP-backed
+    INT_NEED_MPZ r15
     lea rdi, [r15 + PyIntObject.mpz]
     call __gmpz_init wrt ..plt
 
@@ -516,7 +513,9 @@ mdo_long:
     mov rdx, [rsp + 16 + 8]   ; shift amount (from outer stack frame)
     call __gmpz_mul_2exp wrt ..plt
     ; Add: gmpz_add(result, result, temp)
+    INT_NEED_MPZ r15
     lea rdi, [r15 + PyIntObject.mpz]
+    INT_NEED_MPZ r15
     lea rsi, [r15 + PyIntObject.mpz]
     mov rdx, rsp
     call __gmpz_add wrt ..plt
@@ -534,7 +533,9 @@ mdo_long:
     ; Apply sign
     test r13, r13
     jns .long_gmp_not_neg
+    INT_NEED_MPZ r15
     lea rdi, [r15 + PyIntObject.mpz]
+    INT_NEED_MPZ r15
     lea rsi, [r15 + PyIntObject.mpz]
     call __gmpz_neg wrt ..plt
 .long_gmp_not_neg:
@@ -688,11 +689,10 @@ mdo_small_tuple:
     pop r13
     ; Store element in tuple (tag in rdx from marshal_read_object)
     mov r8, [r14 + PyTupleObject.ob_item]       ; payloads
-    mov r9, [r14 + PyTupleObject.ob_item_tags]  ; tags
     mov rcx, r15
     shl rcx, 3                 ; index * 8
-    mov [r8 + rcx], rax         ; payload
-    mov byte [r9 + r15], dl     ; tag
+    V_PACK rax, rdx
+    mov [r8 + rcx], rax
     inc r15
     jmp .stuple_loop
 
@@ -703,9 +703,7 @@ mdo_small_tuple:
     jz .stuple_no_fixup
     mov rax, [rsp + 8]        ; ref index
     mov rcx, [rel marshal_refs]
-    shl rax, 4                 ; index * 16
-    mov [rcx + rax], r14      ; fix up placeholder payload
-    mov qword [rcx + rax + 8], TAG_PTR  ; fix up tag
+    mov [rcx + rax*8], r14     ; a pointer is its own Value
     mov rdi, r14
     call obj_incref            ; refs array takes ownership of real object
 .stuple_no_fixup:
@@ -763,11 +761,10 @@ mdo_tuple:
     pop r13
     ; Store element in tuple (tag in rdx from marshal_read_object)
     mov r8, [r14 + PyTupleObject.ob_item]       ; payloads
-    mov r9, [r14 + PyTupleObject.ob_item_tags]  ; tags
     mov rcx, r15
     shl rcx, 3                 ; index * 8
-    mov [r8 + rcx], rax         ; payload
-    mov byte [r9 + r15], dl     ; tag
+    V_PACK rax, rdx
+    mov [r8 + rcx], rax
     inc r15
     jmp .tuple_loop
 
@@ -778,9 +775,7 @@ mdo_tuple:
     jz .tuple_no_fixup
     mov rax, [rsp + 8]        ; ref index
     mov rcx, [rel marshal_refs]
-    shl rax, 4                 ; index * 16
-    mov [rcx + rax], r14      ; fix up placeholder payload
-    mov qword [rcx + rax + 8], TAG_PTR  ; fix up tag
+    mov [rcx + rax*8], r14     ; a pointer is its own Value
     mov rdi, r14
     call obj_incref            ; refs array takes ownership of real object
 .tuple_no_fixup:
@@ -804,15 +799,9 @@ mdo_ref:
     cmp rdi, [rel marshal_ref_count]
     jge mdo_ref_oob
     mov rcx, [rel marshal_refs]
-    shl rdi, 4                 ; index * 16
-    mov rax, [rcx + rdi]      ; payload
-    mov rdx, [rcx + rdi + 8]  ; tag
-    ; Back-references: INCREF only if refcounted (TAG_PTR)
-    cmp edx, TAG_PTR
-    jne .ref_done
-    test rax, rax
-    jz .ref_done
-    inc qword [rax + PyObject.ob_refcnt]
+    mov rax, [rcx + rdi*8]
+    INCREF_V rax, rdx
+    V_UNPACK rax, rdx
 .ref_done:
     jmp mfinish
 
@@ -853,7 +842,8 @@ mdo_ref_oob:
 ;   [rsp + 96] saved FLAG_REF (8 bytes)
 ;   [rsp +104] ref index placeholder (8 bytes, used only if FLAG_REF)
 ;   [rsp +112] co_posonlyargcount (4 bytes)
-; Total: 116 bytes needed, using 128 for alignment.
+;   [rsp +116] co_firstlineno (4 bytes)
+; Total: 120 bytes needed, using 128 for alignment.
 ;--------------------------------------------------------------------------
 mdo_code:
     push r13                   ; r13 = code object pointer (after alloc)
@@ -915,7 +905,8 @@ mdo_code:
     call marshal_read_object   ; co_qualname (str)
     mov [rsp + 72], rax
 
-    call marshal_read_long     ; co_firstlineno (discard)
+    call marshal_read_long     ; co_firstlineno
+    mov [rsp + 116], eax
 
     call marshal_read_object   ; co_linetable (bytes)
     mov [rsp + 80], rax
@@ -997,6 +988,13 @@ mdo_code:
     mov rax, [rsp + 88]        ; co_exceptiontable
     mov [r13 + PyCodeObject.co_exceptiontable], rax
 
+    ; co_linetable and co_firstlineno are kept now: they are what turns a
+    ; bytecode offset back into a source line for tracebacks.
+    mov rax, [rsp + 80]        ; co_linetable bytes object (reference kept)
+    mov [r13 + PyCodeObject.co_linetable], rax
+    mov eax, [rsp + 116]
+    mov [r13 + PyCodeObject.co_firstlineno], eax
+
     ; Bytecode length and positional-only arg count
     mov dword [r13 + PyCodeObject.co_code_len], r14d
     mov eax, [rsp + 112]
@@ -1012,18 +1010,13 @@ mdo_code:
     call ap_memcpy
 .code_no_bytecode:
 
-    ; DECREF co_code and co_linetable bytes objects (data was copied/unused).
+    ; DECREF the co_code bytes object (its data was copied inline).
     ; Safe because marshal_add_ref now INCREFs, so refs array holds its own ref.
     mov rdi, [rsp + 16]        ; co_code bytes object
     test rdi, rdi
     jz .code_skip_decref_code
     call obj_decref
 .code_skip_decref_code:
-    mov rdi, [rsp + 80]        ; co_linetable bytes object
-    test rdi, rdi
-    jz .code_skip_decref_lt
-    call obj_decref
-.code_skip_decref_lt:
 
     ; Update ref placeholder if FLAG_REF was set
     mov r12, [rsp + 96]        ; restore FLAG_REF into r12
@@ -1031,9 +1024,7 @@ mdo_code:
     jz .code_no_fixup
     mov rax, [rsp + 104]       ; ref index
     mov rcx, [rel marshal_refs]
-    shl rax, 4                 ; index * 16
-    mov [rcx + rax], r13      ; fix up placeholder payload
-    mov qword [rcx + rax + 8], TAG_PTR  ; fix up tag
+    mov [rcx + rax*8], r13     ; a pointer is its own Value
     mov rdi, r13
     call obj_incref            ; refs array takes ownership of real object
 .code_no_fixup:
@@ -1114,7 +1105,7 @@ mdo_set_common:
     push rax                   ; save element payload
     mov rdi, r14               ; set
     mov rsi, rax               ; element
-    ; rdx = element tag from marshal_read_object
+    V_PACK rsi, rdx            ; set_add takes a key Value
     call set_add
     pop rdi                    ; element payload
     pop rsi                    ; element tag
@@ -1133,9 +1124,7 @@ mdo_set_common:
     jz .fset_no_fixup
     mov rax, [rsp + 8]        ; ref index
     mov rcx, [rel marshal_refs]
-    shl rax, 4                 ; index * 16
-    mov [rcx + rax], r14      ; fix up placeholder payload
-    mov qword [rcx + rax + 8], TAG_PTR  ; fix up tag
+    mov [rcx + rax*8], r14     ; a pointer is its own Value
     mov rdi, r14
     call obj_incref            ; refs array takes ownership of real object
 .fset_no_fixup:

@@ -343,7 +343,6 @@ DEF_FUNC poll_wait_and_drain
     ; Set send_value to None (timer expired, no I/O result)
     lea rax, [rel none_singleton]
     mov [rbx + AsyncTask.send_value], rax
-    mov qword [rbx + AsyncTask.send_tag], TAG_PTR
     mov rdi, rbx
     call ready_enqueue
     jmp .pwd_timer_check
@@ -372,7 +371,6 @@ DEF_FUNC poll_wait_and_drain
     ; Set send_value to None (fd ready notification)
     lea rax, [rel none_singleton]
     mov [rbx + AsyncTask.send_value], rax
-    mov qword [rbx + AsyncTask.send_tag], TAG_PTR
 
     ; Remove this fd entry (swap with last, decrement)
     dec r12d

@@ -4,8 +4,6 @@
 ;   rbx = bytecode instruction pointer (current position in co_code[])
 ;   r12 = current frame pointer (PyFrame*)
 ;   r13 = value stack payload top pointer
-;   r14 = locals_tag_base pointer (frame's tag sidecar for localsplus[])
-;   r15 = value stack tag top pointer
 ;
 ; ecx = opcode argument on entry (set by eval_dispatch)
 ; rbx has already been advanced past the 2-byte instruction word.
@@ -21,10 +19,8 @@ section .text
 extern eval_dispatch
 extern eval_saved_rbx
 extern eval_saved_r13
-extern eval_saved_r15
 extern eval_co_names
 extern eval_co_consts
-extern eval_co_consts_tags
 extern opcode_table
 extern obj_dealloc
 extern dict_get
@@ -72,7 +68,10 @@ LSA_CLASS    equ 16
 LSA_NAME     equ 24
 LSA_FLAG     equ 32
 LSA_ATTR_TAG equ 40
-LSA_FRAME    equ 48
+LSA_ATTR     equ 48
+LSA_BIND     equ 56
+LSA_ORIGIN   equ 64      ; the MRO super() searches: the instance's, not the class's
+LSA_FRAME    equ 80
 
 ;; ============================================================================
 ;; op_load_const - Load constant from co_consts[arg]
@@ -80,11 +79,9 @@ LSA_FRAME    equ 48
 DEF_FUNC_BARE op_load_const
     ; ecx = arg (index into co_consts)
     mov rax, [rel eval_co_consts]
-    mov rax, [rax + rcx * 8]   ; payload
-    mov rdx, [rel eval_co_consts_tags]
-    movzx edx, byte [rdx + rcx] ; tag
-    INCREF_VAL rax, rdx
-    VPUSH_VAL rax, rdx
+    mov rax, [rax + rcx * 8]
+    INCREF_V rax, rdx
+    VPUSH rax
     DISPATCH
 END_FUNC op_load_const
 
@@ -93,10 +90,9 @@ END_FUNC op_load_const
 ;; ============================================================================
 DEF_FUNC_BARE op_load_fast
     ; ecx = arg (slot index in localsplus)
-    mov rax, [r12 + PyFrame.localsplus + rcx*8]       ; payload
-    movzx rdx, byte [r14 + rcx]                       ; tag (r14 = locals_tag_base)
-    INCREF_VAL rax, rdx     ; tag-aware INCREF
-    VPUSH_VAL rax, rdx
+    mov rax, [r12 + PyFrame.localsplus + rcx*8]
+    INCREF_V rax, rdx
+    VPUSH rax
     DISPATCH
 END_FUNC op_load_fast
 
@@ -115,7 +111,7 @@ DEF_FUNC_BARE op_load_global
     ; Check bit 0: if set, push NULL first
     test ecx, 1
     jz .no_push_null
-    VPUSH_NULL128
+    VPUSH_NULL
 .no_push_null:
     ; Name index = arg >> 1
     shr ecx, 1
@@ -150,7 +146,7 @@ DEF_FUNC_BARE op_load_global
     imul rax, rax, DICT_ENTRY_SIZE
     add rdi, rax               ; rdi = entry ptr
     mov rax, [rdi + DictEntry.value]
-    movzx edx, byte [rdi + DictEntry.value_tag]
+    V_UNPACK rax, rdx
     add rsp, 8                 ; discard saved name
     jmp .lg_push_result
 
@@ -183,7 +179,7 @@ DEF_FUNC_BARE op_load_global
     imul rax, rax, DICT_ENTRY_SIZE
     add rdi, rax               ; rdi = entry ptr
     mov rax, [rdi + DictEntry.value]
-    movzx edx, byte [rdi + DictEntry.value_tag]
+    V_UNPACK rax, rdx
     jmp .lg_push_result
 
 .not_found:
@@ -217,15 +213,15 @@ DEF_FUNC_BARE op_load_global_module
     movzx eax, word [rbx + 2]  ; CACHE[1] = index
     imul rax, rax, DICT_ENTRY_SIZE
     add rdi, rax               ; rdi = entry ptr
-    movzx edx, byte [rdi + DictEntry.value_tag]
     test edx, edx
     jz .lgm_deopt              ; TAG_NULL = deleted entry
     mov rax, [rdi + DictEntry.value]
+    V_UNPACK rax, rdx
 
     ; Guards passed — now push NULL if needed
     test ecx, 1
     jz .lgm_no_null
-    VPUSH_NULL128
+    VPUSH_NULL
 .lgm_no_null:
     INCREF_VAL rax, rdx
     VPUSH_VAL rax, rdx
@@ -263,15 +259,15 @@ DEF_FUNC_BARE op_load_global_builtin
     movzx eax, word [rbx + 2]  ; CACHE[1] = index
     imul rax, rax, DICT_ENTRY_SIZE
     add rdi, rax               ; rdi = entry ptr
-    movzx edx, byte [rdi + DictEntry.value_tag]
     test edx, edx
     jz .lgb_deopt              ; TAG_NULL = deleted entry
     mov rax, [rdi + DictEntry.value]
+    V_UNPACK rax, rdx
 
     ; Guards passed — now push NULL if needed
     test ecx, 1
     jz .lgb_no_null
-    VPUSH_NULL128
+    VPUSH_NULL
 .lgb_no_null:
     INCREF_VAL rax, rdx
     VPUSH_VAL rax, rdx
@@ -303,8 +299,8 @@ DEF_FUNC_BARE op_load_name
 
     ; Try locals first: dict_get(locals, name)
     mov rsi, [rsp]             ; rsi = name
-    mov edx, TAG_PTR
     call dict_get
+    V_UNPACK rax, rdx           ; dict_get returns a Value
     test edx, edx
     jnz .found
 
@@ -312,8 +308,8 @@ DEF_FUNC_BARE op_load_name
     ; Try globals: dict_get(globals, name)
     mov rdi, [r12 + PyFrame.globals]
     mov rsi, [rsp]             ; rsi = name
-    mov edx, TAG_PTR
     call dict_get
+    V_UNPACK rax, rdx           ; dict_get returns a Value
     test edx, edx
     jnz .found
 
@@ -321,8 +317,8 @@ DEF_FUNC_BARE op_load_name
     mov rdi, [r12 + PyFrame.builtins]
     pop rsi                    ; rsi = name
     push rsi                   ; save for error message
-    mov edx, TAG_PTR
     call dict_get
+    V_UNPACK rax, rdx           ; dict_get returns a Value
     test edx, edx
     jnz .found
 
@@ -393,14 +389,10 @@ DEF_FUNC op_load_attr, LA_FRAME
     ; Dispatch on obj tag — resolve non-pointer tags to their type
     cmp qword [rbp - LA_OBJ_TAG], TAG_PTR
     je .la_is_ptr
-    cmp qword [rbp - LA_OBJ_TAG], TAG_BOOL
-    je .la_resolve_bool
     cmp qword [rbp - LA_OBJ_TAG], TAG_SMALLINT
     je .la_resolve_int
     cmp qword [rbp - LA_OBJ_TAG], TAG_FLOAT
     je .la_resolve_float
-    cmp qword [rbp - LA_OBJ_TAG], TAG_NONE
-    je .la_resolve_none
     jmp .la_attr_error
 
     ; --- Non-pointer tag resolution: look up attr in type's tp_getattr or tp_dict ---
@@ -430,6 +422,7 @@ DEF_FUNC op_load_attr, LA_FRAME
     ; Call tp_getattr(self_payload, name) — rdi already has payload
     mov rsi, [rbp - LA_NAME]
     call rax
+    V_UNPACK rax, rdx           ; tp_getattr returns a Value
     test edx, edx
     jz .la_attr_error
     mov [rbp - LA_ATTR], rax
@@ -443,8 +436,8 @@ DEF_FUNC op_load_attr, LA_FRAME
     jz .la_attr_error
     mov rdi, rax
     mov rsi, [rbp - LA_NAME]
-    mov edx, TAG_PTR
     call dict_get
+    V_UNPACK rax, rdx           ; dict_get returns a Value
     test edx, edx
     jz .la_attr_error
     mov [rbp - LA_ATTR], rax
@@ -467,6 +460,7 @@ DEF_FUNC op_load_attr, LA_FRAME
     mov rdi, [rbp - LA_OBJ]
     mov rsi, [rbp - LA_NAME]
     call rax
+    V_UNPACK rax, rdx           ; tp_getattr returns a Value
     test edx, edx
     jz .la_try_dict             ; tp_getattr returned NULL — fallback to tp_dict
     mov [rbp - LA_ATTR], rax
@@ -485,8 +479,8 @@ DEF_FUNC op_load_attr, LA_FRAME
     ; dict_get(type->tp_dict, name)
     mov rdi, rax
     mov rsi, [rbp - LA_NAME]
-    mov edx, TAG_PTR
     call dict_get
+    V_UNPACK rax, rdx           ; dict_get returns a Value
     test edx, edx
     jz .la_attr_error
 
@@ -531,6 +525,7 @@ DEF_FUNC op_load_attr, LA_FRAME
     mov rdi, rcx               ; attr's type
     lea rsi, [rel dunder_get]
     call dunder_lookup
+    V_UNPACK rax, rdx           ; returns a Value
     test edx, edx
     jz .la_check_flag          ; no __get__, treat normally
 
@@ -541,6 +536,7 @@ DEF_FUNC op_load_attr, LA_FRAME
     lea rcx, [rel dunder_get]
     mov r8d, TAG_PTR             ; type(obj) is always heap ptr
     call dunder_call_3
+    V_UNPACK rax, rdx           ; returns a Value
 
     ; rax = result from __get__, rdx = result tag
     SAVE_FAT_RESULT            ; save (rax,rdx) across DECREF calls
@@ -561,7 +557,7 @@ DEF_FUNC op_load_attr, LA_FRAME
 .la_descr_get_flag1:
     ; flag=1: push NULL + result
     xor ecx, ecx
-    VPUSH_NULL128
+    VPUSH_NULL
     VPUSH_VAL rax, rdx
     jmp .la_done
 
@@ -733,7 +729,7 @@ DEF_FUNC op_load_attr, LA_FRAME
     mov rdi, [rbp - LA_OBJ]
     call obj_decref        ; DECREF obj
     xor eax, eax
-    VPUSH_NULL128              ; push NULL
+    VPUSH_NULL              ; push NULL
     mov rax, [rbp - LA_ATTR]
     mov rdx, [rbp - LA_ATTR_TAG]
     VPUSH_VAL rax, rdx         ; push attr
@@ -768,7 +764,7 @@ DEF_FUNC op_load_attr, LA_FRAME
 .la_sm_flag1:
     ; flag=1: push NULL + func (no self binding)
     xor eax, eax
-    VPUSH_NULL128
+    VPUSH_NULL
     mov rax, [rbp - LA_ATTR]
     VPUSH_PTR rax
     jmp .la_done
@@ -800,7 +796,7 @@ DEF_FUNC op_load_attr, LA_FRAME
 .la_prop_flag1:
     ; flag=1: push NULL + result (it's a value, not a method)
     xor ecx, ecx
-    VPUSH_NULL128
+    VPUSH_NULL
     VPUSH_VAL rax, rdx
     jmp .la_done
 
@@ -887,9 +883,9 @@ DEF_FUNC_BARE op_load_attr_method
     ; VPEEK obj (don't pop -- stays as self if guards pass, or for deopt)
     VPEEK rdi
 
-    ; Non-pointer check (tag at r15-1 for TOS) — must be TAG_PTR to use IC
-    cmp byte [r15 - 1], TAG_PTR
-    jne .lam_deopt
+    ; The inline cache only applies to real objects
+    V_TEST_PTR rdi, rax
+    ja .lam_deopt
 
     ; Guard 1: ob_type == cached type_ptr
     mov rax, [rdi + PyObject.ob_type]
@@ -908,7 +904,6 @@ DEF_FUNC_BARE op_load_attr_method
     INCREF rax
     mov rcx, [r13 - 8]            ; save obj (payload of TOS)
     mov [r13 - 8], rax            ; overwrite obj position with method
-    mov byte [r15 - 1], TAG_PTR   ; ensure method tag is correct (defensive)
     VPUSH_PTR rcx                  ; push obj on top as self
 
     ; Skip 9 CACHE entries = 18 bytes
@@ -929,10 +924,9 @@ END_FUNC op_load_attr_method
 ;; In Python 3.12, LOAD_CLOSURE is same opcode behavior as LOAD_FAST.
 ;; ============================================================================
 DEF_FUNC_BARE op_load_closure
-    mov rax, [r12 + PyFrame.localsplus + rcx*8]       ; payload
-    movzx rdx, byte [r14 + rcx]                       ; tag (r14 = locals_tag_base)
-    INCREF_VAL rax, rdx     ; tag-aware INCREF
-    VPUSH_VAL rax, rdx
+    mov rax, [r12 + PyFrame.localsplus + rcx*8]
+    INCREF_V rax, rdx
+    VPUSH rax
     DISPATCH
 END_FUNC op_load_closure
 
@@ -946,12 +940,11 @@ DEF_FUNC_BARE op_load_deref
     mov rax, [r12 + PyFrame.localsplus + rcx*8]  ; rax = cell object (payload)
     test rax, rax
     jz .deref_error
-    mov rdx, [rax + PyCellObject.ob_ref_tag]  ; rdx = value tag
-    mov rax, [rax + PyCellObject.ob_ref]       ; rax = value payload
-    test rdx, rdx                              ; check tag for NULL (empty cell)
+    mov rax, [rax + PyCellObject.ob_ref]       ; rax = contained Value
+    test rax, rax                              ; 0 means an empty cell
     jz .deref_error
-    INCREF_VAL rax, rdx
-    VPUSH_VAL rax, rdx
+    INCREF_V rax, rdx
+    VPUSH rax
     DISPATCH
 
 .deref_error:
@@ -968,12 +961,11 @@ END_FUNC op_load_deref
 ;; Used after DELETE_FAST and in exception handlers.
 ;; ============================================================================
 DEF_FUNC_BARE op_load_fast_check
-    cmp byte [r14 + rcx], 0  ; check tag for TAG_NULL (r14 = locals_tag_base)
-    je .lfc_error
-    mov rax, [r12 + PyFrame.localsplus + rcx*8]       ; payload
-    movzx rdx, byte [r14 + rcx]                       ; tag
-    INCREF_VAL rax, rdx     ; tag-aware INCREF
-    VPUSH_VAL rax, rdx
+    mov rax, [r12 + PyFrame.localsplus + rcx*8]
+    test rax, rax           ; an empty slot is 0
+    jz .lfc_error
+    INCREF_V rax, rdx
+    VPUSH rax
     DISPATCH
 
 .lfc_error:
@@ -990,12 +982,10 @@ END_FUNC op_load_fast_check
 ;; If slot is NULL, pushes NULL (no error).
 ;; ============================================================================
 DEF_FUNC_BARE op_load_fast_and_clear
-    mov rax, [r12 + PyFrame.localsplus + rcx*8]       ; payload (may be NULL)
-    movzx rdx, byte [r14 + rcx]                       ; tag (r14 = locals_tag_base)
-    mov qword [r12 + PyFrame.localsplus + rcx*8], 0   ; clear payload
-    mov byte [r14 + rcx], 0                           ; clear tag
-    ; Push with preserved tag - no INCREF needed (transferring ownership)
-    VPUSH_VAL rax, rdx
+    mov rax, [r12 + PyFrame.localsplus + rcx*8]       ; may be empty (0)
+    mov qword [r12 + PyFrame.localsplus + rcx*8], 0
+    ; Ownership transfers to the stack, so no INCREF
+    VPUSH rax
     DISPATCH
 END_FUNC op_load_fast_and_clear
 
@@ -1031,31 +1021,62 @@ DEF_FUNC op_load_super_attr, LSA_FRAME
     mov [rbp - LSA_SELF], rax
     VPOP_VAL rax, rdx              ; class
     mov [rbp - LSA_CLASS], rax
-    VPOP_VAL rdi, rsi              ; global_super -- DECREF and discard
-    DECREF_VAL rdi, rsi
+    VPOP rdi              ; global_super -- DECREF and discard
+    DECREF_V rdi, rsi
 
-    ; Walk from class->tp_base up the chain looking for name
-    mov rax, [rbp - LSA_CLASS]     ; class
-    mov rax, [rax + PyTypeObject.tp_base]
+    ; super() searches the *instance's* MRO starting just past the class the
+    ; method was defined in -- that is the whole point of it in a diamond,
+    ; and following the defining class's own tp_base chain skipped the
+    ; sibling branch entirely.
+    extern type_is_subtype
+    mov rdi, [rbp - LSA_SELF]
+    mov rdi, [rdi + PyObject.ob_type]
+    mov rsi, [rbp - LSA_CLASS]
+    call type_is_subtype
+    test eax, eax
+    jz .lsa_origin_try_self
+    mov rax, [rbp - LSA_SELF]
+    mov rax, [rax + PyObject.ob_type]
+    jmp .lsa_have_origin
+.lsa_origin_try_self:
+    ; A classmethod gets the class itself as the second argument.
+    mov rdi, [rbp - LSA_SELF]
+    mov rsi, [rbp - LSA_CLASS]
+    call type_is_subtype
+    test eax, eax
+    jz .lsa_origin_class
+    mov rax, [rbp - LSA_SELF]
+    jmp .lsa_have_origin
+.lsa_origin_class:
+    mov rax, [rbp - LSA_CLASS]
+.lsa_have_origin:
+    mov [rbp - LSA_ORIGIN], rax
+    mov rdi, rax
+    mov rsi, [rbp - LSA_CLASS]
+    extern type_mro_next
+    call type_mro_next
     test rax, rax
     jz .lsa_not_found
 
 .lsa_walk:
-    ; Check this type's tp_dict
+    ; rcx tracks the current type for the .lsa_next_base step, including the
+    ; no-tp_dict path that used to fall through with rcx undefined.
+    mov rcx, rax
     mov rdi, [rax + PyTypeObject.tp_dict]
     test rdi, rdi
     jz .lsa_next_base
 
     push rax                       ; save current type
     mov rsi, [rbp - LSA_NAME]      ; name
-    mov edx, TAG_PTR
     call dict_get
+    V_UNPACK rax, rdx           ; dict_get returns a Value
     pop rcx                        ; restore current type
-    test edx, edx
+    test edx, edx               ; the tag, not the payload: a hit may be int 0
     jnz .lsa_found
 
 .lsa_next_base:
-    mov rax, [rcx + PyTypeObject.tp_base]
+    MRO_NEXT rcx, [rbp - LSA_ORIGIN]
+    mov rax, rcx
     test rax, rax
     jnz .lsa_walk
 
@@ -1081,6 +1102,24 @@ DEF_FUNC op_load_super_attr, LSA_FRAME
 
     pop rax                        ; restore attr
 
+    ; A staticmethod reached through super() must be unwrapped and pushed
+    ; unbound.  super().__new__(cls) supplies cls itself, so binding self here
+    ; would call __new__(cls, cls, ...) — and a staticmethod wrapper has no
+    ; tp_call, so it would raise "object is not callable" first.  LOAD_ATTR
+    ; does the same thing at .la_handle_staticmethod.
+    ; rax is the decoded payload here, not a Value, so the tag is what says
+    ; whether it is safe to dereference.
+    cmp qword [rbp - LSA_ATTR_TAG], TAG_PTR
+    jne .lsa_check_flag
+    mov rcx, [rax + PyObject.ob_type]
+    lea rdx, [rel staticmethod_type]
+    cmp rcx, rdx
+    je .lsa_staticmethod
+    lea rdx, [rel classmethod_type]
+    cmp rcx, rdx
+    je .lsa_classmethod
+
+.lsa_check_flag:
     ; Check method flag
     cmp qword [rbp - LSA_FLAG], 0
     je .lsa_attr_mode
@@ -1093,15 +1132,122 @@ DEF_FUNC op_load_super_attr, LSA_FRAME
     jmp .lsa_done
 
 .lsa_attr_mode:
-    ; Attr mode: DECREF self, push NULL + attr
+    ; Attr mode: super().meth is a *bound* method, exactly as it is in
+    ; CPython -- the lookup goes through the descriptor protocol.  Pushing
+    ; the raw function meant super().__init__(*args) called it with no self,
+    ; so the first argument stood in for self and the real instance was
+    ; never touched: a list subclass whose __init__ did super().__init__(*a)
+    ; came out empty.  The non-star form works because the compiler emits
+    ; method mode for it, which is why this went unnoticed.
+    cmp qword [rbp - LSA_ATTR_TAG], TAG_PTR
+    jne .lsa_attr_plain
+    mov rcx, [rax + PyObject.ob_type]
+    extern func_type
+    lea rdx, [rel func_type]
+    cmp rcx, rdx
+    je .lsa_attr_bind
+    ; A builtin method is equally a descriptor: super().__init__ on a list
+    ; subclass resolves to list.__init__, which is one of these.
+    extern builtin_func_type
+    lea rdx, [rel builtin_func_type]
+    cmp rcx, rdx
+    jne .lsa_attr_plain
+
+.lsa_attr_bind:
+    mov [rbp - LSA_ATTR], rax
+    mov rdi, rax
+    mov rsi, [rbp - LSA_SELF]
+    call method_new                ; INCREFs both
+    push rax                       ; the bound method, ours
+    mov rdi, [rbp - LSA_ATTR]
+    call obj_decref                ; release our ref on the function
+    mov rdi, [rbp - LSA_SELF]
+    call obj_decref                ; and on self
+    pop rax
+    VPUSH_NULL
+    VPUSH_PTR rax
+    jmp .lsa_done
+
+.lsa_attr_plain:
+    ; Not a function: a plain class attribute, returned as-is.
     push rax                      ; save attr
     mov rdi, [rbp - LSA_SELF]
     call obj_decref
     xor eax, eax
-    VPUSH_NULL128                  ; push NULL
+    VPUSH_NULL                  ; push NULL
     pop rax
     mov rdx, [rbp - LSA_ATTR_TAG]
     VPUSH_VAL rax, rdx             ; push attr
+    jmp .lsa_done
+
+.lsa_staticmethod:
+    ; Unwrap sm_callable, release the wrapper and self, push (NULL, callable)
+    ; in both flag modes — a staticmethod never binds self.
+    mov rcx, [rax + PyStaticMethodObject.sm_callable]
+    mov [rbp - LSA_ATTR], rcx
+    push rax                       ; save the wrapper
+    mov rdi, rcx
+    call obj_incref                ; we now own the callable
+    pop rdi                        ; the wrapper
+    call obj_decref
+    mov rdi, [rbp - LSA_SELF]
+    call obj_decref                ; not binding self
+    VPUSH_NULL
+    mov rax, [rbp - LSA_ATTR]
+    VPUSH_PTR rax
+    jmp .lsa_done
+
+.lsa_classmethod:
+    ; Unwrap cm_callable and bind it to the derived class, not to self:
+    ; super().cm() must pass type(self), matching .la_handle_classmethod.
+    mov rcx, [rax + PyClassMethodObject.cm_callable]
+    mov [rbp - LSA_ATTR], rcx
+    push rax                       ; save the wrapper
+    mov rdi, rcx
+    call obj_incref                ; we now own the callable
+    pop rdi                        ; the wrapper
+    call obj_decref
+
+    ; class = self when self is already a type, else type(self)
+    mov rdi, [rbp - LSA_SELF]
+    mov rax, [rdi + PyObject.ob_type]
+    lea rcx, [rel user_type_metatype]
+    cmp rax, rcx
+    je .lsa_cm_self_is_type
+    mov [rbp - LSA_BIND], rax
+    mov rdi, rax
+    call obj_incref
+    jmp .lsa_cm_have_class
+.lsa_cm_self_is_type:
+    mov [rbp - LSA_BIND], rdi
+    call obj_incref
+.lsa_cm_have_class:
+    mov rdi, [rbp - LSA_SELF]
+    call obj_decref                ; the class stands in for self
+
+    cmp qword [rbp - LSA_FLAG], 0
+    jne .lsa_cm_flag1
+
+    ; Attr mode: push NULL + a method bound to the class
+    mov rdi, [rbp - LSA_ATTR]
+    mov rsi, [rbp - LSA_BIND]
+    call method_new                ; INCREFs both
+    push rax                       ; save the bound method
+    mov rdi, [rbp - LSA_ATTR]
+    call obj_decref
+    mov rdi, [rbp - LSA_BIND]
+    call obj_decref
+    pop rax
+    VPUSH_NULL
+    VPUSH_PTR rax
+    jmp .lsa_done
+
+.lsa_cm_flag1:
+    ; Method mode: func deeper, the class as self on top
+    mov rax, [rbp - LSA_ATTR]
+    VPUSH_PTR rax
+    mov rax, [rbp - LSA_BIND]
+    VPUSH_PTR rax
     jmp .lsa_done
 
 .lsa_done:

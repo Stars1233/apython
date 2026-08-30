@@ -2,11 +2,14 @@
 ; Provides _sre.compile() and SRE constants needed by the re module.
 
 %include "macros.inc"
+extern val_to_i64
 %include "object.inc"
 %include "types.inc"
 %include "builtins.inc"
 %include "sre.inc"
 
+extern bool_true
+extern bool_false
 extern ap_malloc
 extern ap_free
 extern obj_decref
@@ -67,36 +70,36 @@ DEF_FUNC sre_compile_func, SC_FRAME
     cmp rsi, 6
     jb .compile_error_args
 
-    ; Extract args (fat values: 16-byte stride)
+    ; Extract args (one Value per slot)
     ; args[0] = pattern string
-    mov rax, [rdi]              ; payload
+    mov rax, [rdi]
     mov [rbp - SC_PATTERN], rax
 
-    ; args[1] = flags (SmallInt)
-    mov rax, [rdi + 16]        ; payload
-    mov [rbp - SC_FLAGS], rax
-
     ; args[2] = code (list of ints)
-    mov rax, [rdi + 32]        ; payload
+    mov rax, [rdi + 16]
     mov [rbp - SC_CODE], rax
 
-    ; args[3] = groups (SmallInt)
-    mov rax, [rdi + 48]        ; payload
+    ; args[1] = flags, args[3] = groups — both ints, immediate or boxed
+    mov rdi, [rdi + 8]
+    call val_to_i64
+    mov [rbp - SC_FLAGS], rax
+    mov rdi, [rbp - SC_ARGS]
+    mov rdi, [rdi + 24]
+    call val_to_i64
     mov [rbp - SC_GROUPS], rax
+    mov rdi, [rbp - SC_ARGS]
 
     ; args[4] = groupindex (dict or None)
-    mov rax, [rdi + 64]        ; payload
-    mov rcx, [rdi + 72]        ; tag
-    cmp ecx, TAG_NONE
+    mov rax, [rdi + 32]
+    IS_NONE rax, rcx
     jne .have_groupindex
     xor eax, eax               ; NULL for None
 .have_groupindex:
     mov [rbp - SC_GINDEX], rax
 
     ; args[5] = indexgroup (tuple or None)
-    mov rax, [rdi + 80]        ; payload
-    mov rcx, [rdi + 88]        ; tag
-    cmp ecx, TAG_NONE
+    mov rax, [rdi + 40]
+    IS_NONE rax, rcx
     jne .have_indexgroup
     xor eax, eax
 .have_indexgroup:
@@ -116,16 +119,21 @@ DEF_FUNC sre_compile_func, SC_FRAME
 
     ; Iterate code list, extract each SmallInt as u32
     mov r15, [r12 + PyListObject.ob_item]       ; payloads
-    mov rbx, [r12 + PyListObject.ob_item_tags]  ; tags
     xor ecx, ecx               ; index
 .code_loop:
     cmp rcx, r13
     jge .code_done
-    ; Validate tag is TAG_SMALLINT
-    movzx edx, byte [rbx + rcx]
+    ; Normalize first: int_unwrap flattens bool, compact heap ints and int
+    ; subclasses to (value, TAG_SMALLINT), so the check accepts any integer.
+    extern int_unwrap
+    mov rdi, [r15 + rcx*8]
+    V_UNPACK rdi, rdx
+    push rcx
+    call int_unwrap
+    pop rcx
     cmp edx, TAG_SMALLINT
     jne .code_type_error
-    mov rax, [r15 + rcx*8]     ; payload (SmallInt value)
+    mov eax, edi               ; unwrapped value
     mov [r14 + rcx*4], eax    ; store as u32
     inc rcx
     jmp .code_loop
@@ -187,6 +195,7 @@ DEF_FUNC sre_compile_func, SC_FRAME
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .compile_error_args:
@@ -213,13 +222,15 @@ DEF_FUNC sre_ascii_iscased_func
     jbe .aic_true
 .aic_false:
     xor eax, eax
-    mov edx, TAG_BOOL
+    RET_BOOL_RAX
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 .aic_true:
     mov eax, 1
-    mov edx, TAG_BOOL
+    RET_BOOL_RAX
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 .aic_error:
     lea rdi, [rel exc_TypeError_type]
@@ -242,6 +253,7 @@ DEF_FUNC sre_ascii_tolower_func
 .atl_done:
     RET_TAG_SMALLINT
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 .atl_error:
     lea rdi, [rel exc_TypeError_type]
@@ -276,18 +288,21 @@ DEF_FUNC sre_unicode_iscased_func
     jb .uic_false
     ; Simplified: assume cased if in Latin Extended or other letter ranges
     mov eax, 1
-    mov edx, TAG_BOOL
+    RET_BOOL_RAX
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 .uic_false:
     xor eax, eax
-    mov edx, TAG_BOOL
+    RET_BOOL_RAX
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 .uic_true:
     mov eax, 1
-    mov edx, TAG_BOOL
+    RET_BOOL_RAX
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 .uic_error:
     lea rdi, [rel exc_TypeError_type]
@@ -320,6 +335,7 @@ DEF_FUNC sre_unicode_tolower_func
 .utl_done:
     RET_TAG_SMALLINT
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 .utl_error:
     lea rdi, [rel exc_TypeError_type]
@@ -334,8 +350,15 @@ END_FUNC sre_unicode_tolower_func
 DEF_FUNC sre_getlower_func
     cmp rsi, 2
     jne .gl_error
-    mov eax, [rdi]             ; char
-    mov ecx, [rdi + 16]       ; flags
+    push rdi
+    mov rdi, [rdi]             ; args[0] = char
+    call val_to_i64
+    pop rdi
+    push rax
+    mov rdi, [rdi + 8]         ; args[1] = flags
+    call val_to_i64
+    mov ecx, eax
+    pop rax                    ; char
     ; If ASCII flag, use ASCII tolower
     test ecx, SRE_FLAG_ASCII
     jnz .gl_ascii
@@ -367,6 +390,7 @@ DEF_FUNC sre_getlower_func
 .gl_done:
     RET_TAG_SMALLINT
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 .gl_error:
     lea rdi, [rel exc_TypeError_type]
@@ -384,10 +408,11 @@ DEF_FUNC sre_template_func
     cmp rsi, 2
     jb .tmpl_error
     ; Return the template argument (args[1]) with INCREF
-    mov rax, [rdi + 16]       ; template payload
-    mov edx, [rdi + 24]       ; template tag
+    mov rax, [rdi + 8]       ; template payload
+    V_UNPACK rax, rdx       ; args[1]
     INCREF_VAL rax, rdx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 .tmpl_error:
     lea rdi, [rel exc_TypeError_type]
@@ -403,6 +428,7 @@ DEF_FUNC sre_getcodesize_func
     mov eax, SRE_CODESIZE
     RET_TAG_SMALLINT
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 END_FUNC sre_getcodesize_func
 
@@ -424,8 +450,6 @@ END_FUNC sre_getcodesize_func
     mov rdi, r12
     mov rsi, rax
     mov rdx, [rsp + 8]
-    mov ecx, TAG_PTR
-    mov r8d, TAG_PTR
     call dict_set
     pop rdi
     call obj_decref
@@ -442,8 +466,7 @@ END_FUNC sre_getcodesize_func
     mov rdi, r12
     mov rsi, rax
     mov rdx, %2
-    mov ecx, TAG_SMALLINT
-    mov r8d, TAG_PTR
+    V_PACK_I64 rdx, rcx      ; dict_set takes Values
     call dict_set
     pop rdi
     call obj_decref
@@ -462,8 +485,6 @@ END_FUNC sre_getcodesize_func
     pop rsi
     push rdx
     push rsi
-    mov ecx, TAG_PTR
-    mov r8d, TAG_PTR
     call dict_set
     pop rdi
     call obj_decref

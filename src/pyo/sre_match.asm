@@ -119,12 +119,10 @@ DEF_FUNC sre_match_new, MN_FRAME
     cmp rcx, [rax + PyVarObject.ob_size]
     jge .mn_no_lastgroup
     ; indexgroup tuple: payloads/tags arrays
-    mov r8, [rax + PyTupleObject.ob_item]       ; payloads
-    mov rdx, [rax + PyTupleObject.ob_item_tags] ; tags
-    movzx edx, byte [rdx + rcx]                 ; tag
-    cmp edx, TAG_PTR
-    jne .mn_no_lastgroup        ; None or non-string → NULL
-    mov rax, [r8 + rcx*8]       ; payload (string ptr)
+    mov r8, [rax + PyTupleObject.ob_item]
+    mov rax, [r8 + rcx*8]
+    V_TEST_PTR rax, rdx
+    ja .mn_no_lastgroup         ; None or non-string → NULL
     inc qword [rax + PyObject.ob_refcnt]
     mov [rbx + SRE_MatchObject.lastgroup], rax
 .mn_no_lastgroup:
@@ -362,7 +360,7 @@ DEF_FUNC sre_match_get_group_str
 
 .group_none:
     xor eax, eax
-    mov edx, TAG_NONE
+    RET_NONE
     pop r14
     pop r13
     pop r12
@@ -398,10 +396,10 @@ DEF_FUNC sre_match_resolve_group_idx
 
     ; dict_get(groupindex, key, key_tag)
     ; rsi = key (already set), edx = TAG_PTR
-    mov edx, TAG_PTR
     call dict_get
+    V_UNPACK rax, rdx           ; dict_get returns a Value
     ; rax = val payload, edx = val tag
-    test edx, edx
+    test edx, edx               ; the tag, not the payload: a hit may be int 0
     jz .rgi_no_group_pop2
     ; group_idx = val payload (SmallInt)
     mov rsi, rax
@@ -437,7 +435,7 @@ DEF_FUNC sre_match_group_method
     push r13
 
     mov rbx, [rdi]             ; self = args[0] payload
-    lea r12, [rdi + 16]        ; user args start at args[1]
+    lea r12, [rdi + 8]         ; user args start at args[1]
     lea r13, [rsi - 1]         ; user nargs
 
     ; No args: return group(0)
@@ -461,9 +459,9 @@ DEF_FUNC sre_match_group_method
     push r13
     ; Get group index from args (may be string or int)
     mov rax, rcx
-    shl rax, 4                 ; 16-byte stride
-    mov rsi, [r12 + rax]       ; group arg payload
-    mov edx, [r12 + rax + 8]  ; group arg tag
+    shl rax, 3                 ; one Value per slot
+    mov rsi, [r12 + rax]       ; group arg Value
+    V_UNPACK rsi, rdx
     mov rdi, rbx
     call sre_match_resolve_group_idx
     ; rsi = resolved int index
@@ -478,9 +476,8 @@ DEF_FUNC sre_match_group_method
     INCREF_VAL rax, rdx
     ; Write payload and tag
     mov rsi, [rdi + PyTupleObject.ob_item]       ; payloads
-    mov r8, [rdi + PyTupleObject.ob_item_tags]   ; tags
-    mov [rsi + rcx*8], rax       ; payload
-    mov byte [r8 + rcx], dl      ; tag
+    V_PACK rax, rdx
+    mov [rsi + rcx * 8], rax
     inc rcx
     jmp .group_multi_loop
 
@@ -491,6 +488,7 @@ DEF_FUNC sre_match_group_method
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .group_zero:
@@ -501,11 +499,12 @@ DEF_FUNC sre_match_group_method
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .group_single:
-    mov rsi, [r12]             ; group arg payload
-    mov edx, [r12 + 8]        ; group arg tag
+    mov rsi, [r12]             ; group arg Value
+    V_UNPACK rsi, rdx
     mov rdi, rbx
     call sre_match_resolve_group_idx
     ; rsi = resolved int index
@@ -515,6 +514,7 @@ DEF_FUNC sre_match_group_method
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 END_FUNC sre_match_group_method
 
@@ -535,16 +535,16 @@ DEF_FUNC sre_match_groups_method, GS_FRAME
     push r15
 
     mov rbx, [rdi]             ; self = args[0] payload
-    lea r12, [rdi + 16]        ; user args
+    lea r12, [rdi + 8]         ; user args
     lea r13, [rsi - 1]         ; user nargs
 
     ; default arg (default = None)
     xor eax, eax
-    mov edx, TAG_NONE
+    RET_NONE
     cmp r13, 1
     jb .groups_no_default
-    mov rax, [r12]             ; default payload
-    mov edx, [r12 + 8]        ; default tag
+    mov rax, [r12]             ; default Value
+    V_UNPACK rax, rdx
 .groups_no_default:
     mov [rbp - GS_DEFAULT], rax
     mov [rbp - GS_DEFAULT_TAG], rdx
@@ -573,7 +573,7 @@ DEF_FUNC sre_match_groups_method, GS_FRAME
     mov rsi, rcx
     call sre_match_get_group_str
     ; If None and default was given, substitute default
-    cmp edx, TAG_NONE
+    IS_NONE rax, rcx
     jne .groups_use_val
     ; Use default instead of None (borrowed ref, needs INCREF for tuple)
     mov rax, [rbp - GS_DEFAULT]
@@ -589,9 +589,8 @@ DEF_FUNC sre_match_groups_method, GS_FRAME
     lea esi, [ecx - 1]        ; tuple index = group - 1
     movsx rsi, esi
     mov r8, [rdi + PyTupleObject.ob_item]       ; payloads
-    mov r9, [rdi + PyTupleObject.ob_item_tags]  ; tags
-    mov [r8 + rsi*8], rax       ; payload
-    mov byte [r9 + rsi], dl     ; tag
+    V_PACK rax, rdx
+    mov [r8 + rsi * 8], rax
     pop rcx
     inc ecx
     jmp .groups_loop
@@ -605,6 +604,7 @@ DEF_FUNC sre_match_groups_method, GS_FRAME
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .groups_empty:
@@ -618,6 +618,7 @@ DEF_FUNC sre_match_groups_method, GS_FRAME
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 END_FUNC sre_match_groups_method
 
@@ -629,15 +630,15 @@ DEF_FUNC sre_match_start_method
     ; rdi = args (fat array), rsi = nargs
     push rbx
     mov rbx, [rdi]             ; self = args[0] payload
-    lea rcx, [rdi + 16]        ; user args
+    lea rcx, [rdi + 8]         ; user args
     lea rdx, [rsi - 1]         ; user nargs
 
     ; Get group index (default 0)
     xor esi, esi               ; default group = 0
     test rdx, rdx
     jz .start_default
-    mov rsi, [rcx]             ; group arg payload
-    mov edx, [rcx + 8]        ; group arg tag
+    mov rsi, [rcx]             ; group arg Value
+    V_UNPACK rsi, rdx
     mov rdi, rbx
     call sre_match_resolve_group_idx
     ; rsi = resolved int index
@@ -658,6 +659,7 @@ DEF_FUNC sre_match_start_method
 
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .start_error:
@@ -674,15 +676,15 @@ DEF_FUNC sre_match_end_method
     ; rdi = args (fat array), rsi = nargs
     push rbx
     mov rbx, [rdi]             ; self = args[0] payload
-    lea rcx, [rdi + 16]        ; user args
+    lea rcx, [rdi + 8]         ; user args
     lea rdx, [rsi - 1]         ; user nargs
 
     ; Get group index (default 0)
     xor esi, esi               ; default group = 0
     test rdx, rdx
     jz .end_default
-    mov rsi, [rcx]             ; group arg payload
-    mov edx, [rcx + 8]        ; group arg tag
+    mov rsi, [rcx]             ; group arg Value
+    V_UNPACK rsi, rdx
     mov rdi, rbx
     call sre_match_resolve_group_idx
     ; rsi = resolved int index
@@ -702,6 +704,7 @@ DEF_FUNC sre_match_end_method
 
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .end_error:
@@ -719,14 +722,14 @@ DEF_FUNC sre_match_span_method
     push rbx
     push r12
     mov rbx, [rdi]             ; self = args[0] payload
-    lea rcx, [rdi + 16]        ; user args
+    lea rcx, [rdi + 8]         ; user args
     lea rdx, [rsi - 1]         ; user nargs
 
     xor r12d, r12d             ; group = 0
     test rdx, rdx
     jz .span_default
-    mov rsi, [rcx]             ; group arg payload
-    mov edx, [rcx + 8]        ; group arg tag
+    mov rsi, [rcx]             ; group arg Value
+    V_UNPACK rsi, rdx
     mov rdi, rbx
     call sre_match_resolve_group_idx
     mov r12, rsi               ; resolved int index
@@ -756,20 +759,17 @@ DEF_FUNC sre_match_span_method
     pop r9
     pop r8
 
-    mov r10, [rax + PyTupleObject.ob_item]       ; payloads
-    mov r11, [rax + PyTupleObject.ob_item_tags]  ; tags
-    ; Set start: tuple[0] = (r8, TAG_SMALLINT)
+    mov r10, [rax + PyTupleObject.ob_item]
+    V_PACK_I64 r8, r11
     mov [r10], r8
-    mov byte [r11], TAG_SMALLINT
-
-    ; Set end: tuple[1] = (r9, TAG_SMALLINT)
+    V_PACK_I64 r9, r11
     mov [r10 + 8], r9
-    mov byte [r11 + 1], TAG_SMALLINT
     mov edx, TAG_PTR
 
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .span_error:
@@ -802,13 +802,13 @@ DEF_FUNC sre_match_groupdict_method, GD_FRAME
     mov [rbp - GD_SELF], rax
 
     ; default arg (default = None)
-    xor ecx, ecx
-    mov r8d, TAG_NONE
+    LOAD_NONE rcx
+    mov r8d, TAG_PTR
     lea rdx, [rsi - 1]        ; user nargs
     cmp rdx, 1
     jb .gd_no_default
-    mov rcx, [rdi + 16]       ; default payload
-    mov r8d, [rdi + 24]       ; default tag
+    mov rcx, [rdi + 8]       ; default payload
+    V_UNPACK rcx, r8       ; args[1]
 .gd_no_default:
     mov [rbp - GD_DEFAULT], rcx
     mov [rbp - GD_DEFAULT_TAG], r8
@@ -841,26 +841,22 @@ DEF_FUNC sre_match_groupdict_method, GD_FRAME
     imul rax, DICT_ENTRY_SIZE
     lea r12, [rcx + rax]       ; r12 = entry ptr
 
-    ; Skip empty/tombstone entries
-    movzx eax, byte [r12 + DictEntry.key_tag]
-    test eax, eax
-    jz .gd_next                ; empty slot (key_tag == 0)
-    cmp qword [r12 + DictEntry.hash], -1
-    je .gd_next                ; tombstone
+    ; Skip empty and tombstoned entries
+    ENTRY_CLASSIFY r12, .gd_next, .gd_next
 
-    ; name = entry->key, name_tag = entry->key_tag
-    mov r13, [r12 + DictEntry.key]       ; name payload
-    movzx r14d, byte [r12 + DictEntry.key_tag]   ; name tag
+    mov r13, [r12 + DictEntry.key]       ; name Value
+    V_UNPACK r13, r14                    ; -> (payload, tag)
 
-    ; group_idx = entry->value (SmallInt payload)
-    mov rsi, [r12 + DictEntry.value]     ; group index
+    ; group_idx = entry->value, an integer Value
+    mov rsi, [r12 + DictEntry.value]
+    V_UNPACK rsi, rax
 
     ; sre_match_get_group_str(self, group_idx)
     mov rdi, [rbp - GD_SELF]
     call sre_match_get_group_str
     ; rax = val payload, edx = val tag
     ; If None, substitute default
-    cmp edx, TAG_NONE
+    IS_NONE rax, r8
     jne .gd_use_val
     mov rax, [rbp - GD_DEFAULT]
     mov edx, [rbp - GD_DEFAULT_TAG]
@@ -874,7 +870,9 @@ DEF_FUNC sre_match_groupdict_method, GD_FRAME
     ; rdx = val (still in rax from call), edx = val_tag
     mov rdx, [rsp + 8]        ; val payload
     mov ecx, [rsp]            ; val tag
+    V_PACK rdx, rcx
     mov r8, r14                ; key tag
+    V_PACK rsi, r8
     call dict_set
     pop rdx
     pop rax
@@ -893,6 +891,7 @@ DEF_FUNC sre_match_groupdict_method, GD_FRAME
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 END_FUNC sre_match_groupdict_method
 
@@ -904,10 +903,11 @@ END_FUNC sre_match_groupdict_method
 DEF_FUNC sre_match_expand_method
     ; rdi = args (fat array), rsi = nargs
     ; args[1] = template
-    mov rax, [rdi + 16]       ; template payload
-    mov rdx, [rdi + 24]       ; template tag
+    mov rax, [rdi + 8]       ; template payload
+    V_UNPACK rax, rdx       ; args[1]
     INCREF_VAL rax, rdx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 END_FUNC sre_match_expand_method
 
@@ -922,6 +922,7 @@ DEF_FUNC sre_match_copy_method
     inc qword [rax + PyObject.ob_refcnt]
     mov edx, TAG_PTR
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 END_FUNC sre_match_copy_method
 
@@ -930,6 +931,7 @@ END_FUNC sre_match_copy_method
 ; __getitem__ for match[group] indexing.
 ; ============================================================================
 DEF_FUNC sre_match_subscript
+    V_UNPACK rsi, rdx           ; key Value -> (payload, tag)
     ; rdi = self, rsi = key payload, rdx = key tag
     push rbx
     push r12
@@ -953,10 +955,10 @@ DEF_FUNC sre_match_subscript
 
     ; dict_get(groupindex, key, key_tag)
     mov rsi, r12               ; key
-    mov edx, TAG_PTR           ; key_tag (string is TAG_PTR)
     call dict_get
+    V_UNPACK rax, rdx           ; dict_get returns a Value
     ; rax = val payload, edx = val tag
-    test edx, edx
+    test edx, edx               ; the tag, not the payload: a hit may be int 0
     jz .ms_no_such_group
 
     ; group_idx = val payload (SmallInt)
@@ -970,6 +972,7 @@ DEF_FUNC sre_match_subscript
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .ms_no_such_group:
@@ -1097,6 +1100,7 @@ DEF_FUNC sre_match_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
     ; --- Methods (create bound methods) ---
@@ -1141,6 +1145,7 @@ DEF_FUNC sre_match_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
     ; --- Attributes ---
@@ -1151,6 +1156,7 @@ DEF_FUNC sre_match_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .mga_string:
@@ -1160,6 +1166,7 @@ DEF_FUNC sre_match_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .mga_pos:
@@ -1168,6 +1175,7 @@ DEF_FUNC sre_match_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .mga_endpos:
@@ -1176,6 +1184,7 @@ DEF_FUNC sre_match_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .mga_lastindex:
@@ -1186,13 +1195,15 @@ DEF_FUNC sre_match_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 .mga_lastindex_none:
     xor eax, eax
-    mov edx, TAG_NONE
+    RET_NONE
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .mga_lastgroup:
@@ -1204,13 +1215,15 @@ DEF_FUNC sre_match_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 .mga_lastgroup_none:
     xor eax, eax
-    mov edx, TAG_NONE
+    RET_NONE
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .mga_regs:
@@ -1249,21 +1262,16 @@ DEF_FUNC sre_match_getattr
     pop rcx                    ; end
     pop rdx                    ; start
 
-    mov r8, [rax + PyTupleObject.ob_item]       ; payloads
-    mov r9, [rax + PyTupleObject.ob_item_tags]  ; tags
-    ; Set inner[0] = start (SmallInt)
+    mov r8, [rax + PyTupleObject.ob_item]
+    ; inner[0] = start, inner[1] = end
+    V_PACK_I64 rdx, r9
     mov [r8], rdx
-    mov byte [r9], TAG_SMALLINT
-
-    ; Set inner[1] = end (SmallInt)
+    V_PACK_I64 rcx, r9
     mov [r8 + 8], rcx
-    mov byte [r9 + 1], TAG_SMALLINT
 
     ; Set outer[i] = inner (TAG_PTR)
     mov r10, [r15 + PyTupleObject.ob_item]       ; payloads
-    mov r11, [r15 + PyTupleObject.ob_item_tags]  ; tags
-    mov [r10 + r13*8], rax
-    mov byte [r11 + r13], TAG_PTR
+    mov [r10 + r13 * 8], rax
 
     inc r13
     jmp .mga_regs_loop
@@ -1277,6 +1285,7 @@ DEF_FUNC sre_match_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .mga_expand:
@@ -1338,6 +1347,8 @@ sre_match_number_methods:
     dq 0                       ; nb_ior
     dq 0                       ; nb_ifloor_divide
     dq 0                       ; nb_itrue_divide
+    dq 0 ; nb_matmul
+    dq 0 ; nb_imatmul
 
 align 8
 global sre_match_type
@@ -1368,6 +1379,7 @@ sre_match_type:
     dq 0                       ; tp_bases
     dq 0                        ; tp_traverse
     dq 0                        ; tp_clear
+    dq 0 ; tp_dictoffset
 
 section .rodata
 sm_type_name:      db "re.Match", 0

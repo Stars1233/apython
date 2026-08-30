@@ -4,13 +4,12 @@ A Python 3.12 bytecode interpreter in x86-64 NASM assembly, exploring the fastes
 
 ## What is this?
 
-apython reads `.pyc` files and executes Python 3.12 bytecode directly — no CPython, no JIT, no interpreter overhead layers. The entire interpreter is **~74,000 lines of x86-64 assembly**, from the eval loop to the type system to the garbage collector to async I/O. It implements 27+ types, 106 opcodes, generators, async/await, pattern matching, a regex engine, cycle-collecting GC, and a pure-assembly asyncio event loop.
+apython reads `.pyc` files and executes Python 3.12 bytecode directly — no CPython, no JIT, no interpreter overhead layers. The entire interpreter is **~78,000 lines of x86-64 assembly**, from the eval loop to the type system to the garbage collector to async I/O. It implements 27+ types, 106 opcodes, generators, async/await, pattern matching, a regex engine, cycle-collecting GC, and a pure-assembly asyncio event loop.
 
 ## Key design choices
 
-- **~74K lines of focused x86-64 NASM assembly** — no C runtime
-- **128-bit fat values** — inline integers, floats, bools and small strings in 16-byte (payload, tag) pairs, skipping heap allocation and refcounting entirely
-- **SmallStr optimization** — strings up to 15 bytes stored inline in the 128-bit value slot, zero allocation
+- **~78K lines of focused x86-64 NASM assembly** — no C runtime
+- **NaN-boxed 64-bit values** — one machine word per Python value. Pointers are stored raw (so a dereference costs nothing), floats are offset-encoded into the NaN space, and integers in ±2^50 are immediates — no heap allocation and no refcounting for any of them
 - **Raw Linux syscalls** — no libc dependency for I/O; buffered writes via direct `syscall`
 - **256-entry jump table dispatch** — x86-BTB-friendly single indirect jump per opcode
 - **GMP for arbitrary precision** — big integers via libgmp when values exceed int64_t range
@@ -161,7 +160,7 @@ src/
   import.asm            Module import system
   dunder.asm            Dunder method dispatch (__add__, __eq__, etc.)
   repr.asm              repr/str formatting
-  val.asm               128-bit fat value operations
+  val.asm               NaN-boxed Value encoding and helpers
   methods.asm           Method resolution helpers
   sre.asm               SRE regex bytecode engine
   sre_module.asm        re module interface
@@ -169,7 +168,7 @@ src/
   pyo/                  34 type implementation files
     int.asm float.asm str.asm bytes.asm bytearray.asm memview.asm
     list.asm dict.asm tuple.asm set.asm bool.asm none.asm slice.asm
-    func.asm class.asm code.asm module.asm cell.asm smallstr.asm
+    func.asm class.asm code.asm module.asm cell.asm
     iter.asm generator.asm exception.asm exc_group.asm fileobj.asm
     descriptors.asm sre_match.asm sre_pattern.asm
     sysmod.asm asyncmod.asm timemod.asm

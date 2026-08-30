@@ -1,34 +1,70 @@
-# Test exception __traceback__
+# A raise now records every frame it passes through, so __traceback__ is a
+# real chain instead of one empty entry with line 0.  The rendered report is
+# on stderr; what is checkable here is the chain itself.
 
-# Basic: __traceback__ is not None after catch
-try:
-    raise ValueError("test")
-except ValueError as e:
-    tb = e.__traceback__
-    print("has tb:", tb is not None)
-    print("type:", type(tb).__name__)
 
-# tb_lineno and tb_next attributes exist
-try:
-    raise TypeError("oops")
-except TypeError as e:
-    tb = e.__traceback__
-    print("tb_next:", tb.tb_next)
-    # tb_lineno is an int
-    print("lineno type:", type(tb.tb_lineno).__name__)
+def raiser():
+    raise ValueError("boom")
 
-# Traceback from function call
-def throws():
-    raise RuntimeError("inner")
 
-try:
-    throws()
-except RuntimeError as e:
-    tb = e.__traceback__
-    print("func tb:", tb is not None)
+def middle():
+    raiser()
 
-# No traceback on fresh exception (not raised)
-e2 = ValueError("not raised")
-print("fresh tb:", e2.__traceback__)
 
-print("done")
+def outer():
+    middle()
+
+
+def chain(fn):
+    try:
+        fn()
+    except BaseException as e:
+        out = []
+        tb = e.__traceback__
+        while tb is not None:
+            out.append(tb.tb_lineno)
+            tb = tb.tb_next
+        return out
+
+
+print(chain(outer))
+print(chain(raiser))
+print(chain(lambda: 1 / 0))
+print(chain(lambda: {}["k"]))
+print(chain(lambda: [][3]))
+
+
+# A caught-and-recovered exception in the middle does not add its frames to
+# the next one.
+def swallow():
+    try:
+        raiser()
+    except ValueError:
+        pass
+    raise TypeError("second")
+
+
+print(chain(swallow))
+
+
+# Deep recursion keeps a chain rather than blowing up while freeing it.
+def deep(n):
+    if n:
+        return deep(n - 1)
+    raise IndexError("bottom")
+
+
+print(len(chain(lambda: deep(200))))
+
+# A generator's frames appear too.
+def gen():
+    yield 1
+    raise KeyError("g")
+
+
+def drain():
+    for _ in gen():
+        pass
+
+
+print(chain(drain))

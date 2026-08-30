@@ -10,6 +10,7 @@
 %include "object.inc"
 %include "types.inc"
 
+extern int_promote_mpz
 extern str_from_cstr
 extern str_from_data
 extern bool_true
@@ -55,8 +56,6 @@ DEF_FUNC_BARE float_to_f64
     cmp esi, TAG_SMALLINT
     je .from_smallint
 
-    cmp esi, TAG_BOOL
-    je .from_smallint          ; TAG_BOOL payload is 0 or 1, same as SmallInt
 
     ; TAG_PTR: check for GMP int or bool singleton
     test rdi, rdi
@@ -69,6 +68,23 @@ DEF_FUNC_BARE float_to_f64
     lea rcx, [rel bool_type]
     cmp rax, rcx
     je .from_gmp_int           ; bool singletons have embedded mpz
+    ; An int subclass wraps its value; unwrap and retry, or 1.0 == MyInt(1)
+    ; came out False.
+    mov rcx, [rax + PyTypeObject.tp_flags]
+    test rcx, TYPE_FLAG_INT_SUBCLASS
+    jz .ret_zero
+    mov edx, esi
+    extern int_unwrap
+    call int_unwrap
+    mov esi, edx
+    cmp esi, TAG_SMALLINT
+    je .from_smallint
+    test rdi, rdi
+    jz .ret_zero
+    mov rax, [rdi + PyObject.ob_type]
+    lea rcx, [rel int_type]
+    cmp rax, rcx
+    je .from_gmp_int
 
     ; Not a number - return 0.0
 .ret_zero:
@@ -88,6 +104,7 @@ DEF_FUNC_BARE float_to_f64
     push rbp
     mov rbp, rsp
     and rsp, -16              ; ensure 16-byte alignment for GMP call
+    INT_NEED_MPZ rdi
     lea rdi, [rdi + PyIntObject.mpz]
     call __gmpz_get_d wrt ..plt
     ; result in xmm0
@@ -99,9 +116,16 @@ END_FUNC float_to_f64
 ;; float_repr(rdi = raw double bits) -> PyStrObject*
 ;; Uses shortest representation that round-trips.
 ;; ============================================================================
+; Named slots for the second buffer the notation choice needs.
+FR_VAL   equ 8
+FR_PREC  equ 16
+FR_BUF   equ 64          ; 48 bytes, [rbp-64, rbp-16)
+FR_EBUF  equ 128         ; 48 bytes, [rbp-128, rbp-80)
+FR_EXP   equ 136
+
 DEF_FUNC float_repr
     and rsp, -16              ; ensure 16-byte alignment for libc calls
-    sub rsp, 80
+    sub rsp, 160
     ; Stack layout:
     ;   [rbp-8]   = original double value (8 bytes)
     ;   [rbp-16]  = precision counter (8 bytes, only low 4 used)
@@ -127,16 +151,16 @@ DEF_FUNC float_repr
     mov qword [rbp-16], 1     ; prec = 1
 
 .repr_loop:
-    lea rdi, [rbp-64]         ; buf
+    lea rdi, [rbp - FR_BUF]   ; buf
     mov esi, 48                ; bufsz
     lea rdx, [rel fmt_g]      ; "%.*g"
-    mov ecx, [rbp-16]         ; prec
-    movsd xmm0, [rbp-8]      ; value
+    mov ecx, [rbp - FR_PREC]  ; prec
+    movsd xmm0, [rbp - FR_VAL] ; value
     mov eax, 1                ; 1 xmm register used
     call snprintf wrt ..plt
 
     ; Round-trip check: strtod(buf, NULL) == val?
-    lea rdi, [rbp-64]         ; buf
+    lea rdi, [rbp - FR_BUF]   ; buf
     xor esi, esi              ; endptr = NULL
     call strtod wrt ..plt
     ; xmm0 = reparsed value
@@ -149,6 +173,100 @@ DEF_FUNC float_repr
     jle .repr_loop
 
 .repr_found:
+    ; The loop above found the shortest digit count that round-trips, but it
+    ; let %g pick the notation -- and %g goes exponential as soon as the
+    ; exponent reaches the precision, so repr(100.0) came out as "1e+02".
+    ; CPython chooses the digits first and the notation second: fixed when
+    ; the decimal exponent is in [-4, 16), exponential otherwise.
+    lea rdi, [rbp - FR_EBUF]
+    mov esi, 48
+    lea rdx, [rel fmt_e]
+    mov ecx, [rbp - FR_PREC]
+    dec ecx                   ; %e takes digits after the point
+    movsd xmm0, [rbp - FR_VAL]
+    mov eax, 1
+    call snprintf wrt ..plt
+
+    ; Read the exponent out of "d.dddde<sign>dd".
+    lea rsi, [rbp - FR_EBUF]
+    xor ecx, ecx
+.fr_find_e:
+    movzx eax, byte [rsi + rcx]
+    test al, al
+    jz .fr_use_e              ; no exponent: nothing to decide
+    cmp al, 'e'
+    je .fr_got_e
+    inc rcx
+    jmp .fr_find_e
+.fr_got_e:
+    inc rcx
+    xor r8d, r8d              ; negative?
+    movzx eax, byte [rsi + rcx]
+    cmp al, '-'
+    jne .fr_exp_sign_done
+    mov r8d, 1
+    inc rcx
+    jmp .fr_exp_digits
+.fr_exp_sign_done:
+    cmp al, '+'
+    jne .fr_exp_digits
+    inc rcx
+.fr_exp_digits:
+    xor r9d, r9d
+.fr_exp_loop:
+    movzx eax, byte [rsi + rcx]
+    cmp al, '0'
+    jb .fr_exp_done
+    cmp al, '9'
+    ja .fr_exp_done
+    imul r9, r9, 10
+    sub rax, '0'
+    add r9, rax
+    inc rcx
+    jmp .fr_exp_loop
+.fr_exp_done:
+    test r8d, r8d
+    jz .fr_exp_positive
+    neg r9
+.fr_exp_positive:
+    mov [rbp - FR_EXP], r9
+
+    cmp r9, -4
+    jl .fr_use_e
+    cmp r9, 16
+    jge .fr_use_e
+
+    ; Fixed notation: digits after the point = (significant - 1) - exponent
+    mov rcx, [rbp - FR_PREC]
+    dec rcx
+    sub rcx, r9
+    jns .fr_fixed_prec_ok
+    xor ecx, ecx
+.fr_fixed_prec_ok:
+    lea rdi, [rbp - FR_BUF]
+    mov esi, 48
+    lea rdx, [rel fmt_f]
+    movsd xmm0, [rbp - FR_VAL]
+    mov eax, 1
+    call snprintf wrt ..plt
+    jmp .fr_notation_done
+
+.fr_use_e:
+    ; Exponential: the %e rendering is already what CPython would print.
+    lea rdi, [rbp - FR_BUF]
+    lea rsi, [rbp - FR_EBUF]
+    xor ecx, ecx
+.fr_copy_e:
+    movzx eax, byte [rsi + rcx]
+    mov [rdi + rcx], al
+    test al, al
+    jz .fr_notation_done
+    inc rcx
+    cmp rcx, 47
+    jl .fr_copy_e
+    mov byte [rdi + rcx], 0
+
+.fr_notation_done:
     ; Check if buf needs ".0" appended (no '.', no 'e', no 'E')
     lea rdi, [rbp-64]
     xor ecx, ecx
@@ -301,7 +419,17 @@ END_FUNC float_format_spec
 ;;   hash(float(n)) == hash(n)
 ;; For non-integer floats, returns a hash derived from the raw bits.
 ;; ============================================================================
-DEF_FUNC_BARE float_hash
+;; _Py_HashDouble, exactly.  The old code returned the truncated integer for
+;; an integral float and an xor of the raw bits otherwise, so hash(1.5) bore
+;; no relation to CPython's and hash(2**61) != hash(float(2**61)) -- an int
+;; and an equal float landed in different dict slots.
+FH_EXP   equ 8
+FH_M     equ 16
+FH_FRAME equ 32
+DEF_FUNC float_hash, FH_FRAME
+    push rbx
+    push r12
+    push r13
     movq xmm0, rdi
 
     ; Check NaN (unordered with itself)
@@ -316,45 +444,130 @@ DEF_FUNC_BARE float_hash
     ucomisd xmm0, xmm1
     je .fh_neg_inf
 
-    ; Check if integer-valued: truncate to i64, convert back, compare
-    cvttsd2si rax, xmm0
-    cvtsi2sd xmm1, rax
+    ; sign, then frexp: v = m * 2^e with |m| in [0.5, 1)
+    xor r13d, r13d                      ; sign = +1
+    xorpd xmm1, xmm1
     ucomisd xmm0, xmm1
-    jne .fh_fractional
-    jp .fh_fractional
+    jae .fh_positive
+    mov r13d, 1                         ; sign = -1
+    movsd xmm1, [rel fh_sign_mask]
+    xorpd xmm0, xmm1                    ; m = -m
+.fh_positive:
+    lea rdi, [rbp - FH_EXP]
+    extern frexp
+    call frexp wrt ..plt
+    movsd [rbp - FH_M], xmm0
+    movsxd r12, dword [rbp - FH_EXP]    ; r12 = e
 
-    ; Integer-valued: return the integer value (matches int_hash behavior)
+    xor ebx, ebx                        ; x = 0
+    mov r10, PYHASH_MODULUS
+.fh_loop:
+    movsd xmm0, [rbp - FH_M]
+    xorpd xmm1, xmm1
+    ucomisd xmm0, xmm1
+    jp .fh_loop_done
+    je .fh_loop_done
+
+    ; x = ((x << 28) & MODULUS) | (x >> 33)
+    mov rax, rbx
+    shl rax, 28
+    and rax, r10
+    mov rcx, rbx
+    shr rcx, 33
+    or rax, rcx
+    mov rbx, rax
+
+    ; m *= 2**28; e -= 28
+    mulsd xmm0, [rel fh_two28]
+    sub r12, 28
+
+    ; y = (uint64)m; m -= y; x += y
+    cvttsd2si rax, xmm0
+    mov r11, rax
+    cvtsi2sd xmm1, rax
+    subsd xmm0, xmm1
+    movsd [rbp - FH_M], xmm0
+    add rbx, r11
+    cmp rbx, r10
+    jb .fh_loop
+    sub rbx, r10
+    jmp .fh_loop
+.fh_loop_done:
+
+    ; e mod 61, taken toward -infinity
+    test r12, r12
+    js .fh_neg_exp
+    mov rax, r12
+    xor edx, edx
+    mov rcx, 61
+    div rcx
+    mov r12, rdx
+    jmp .fh_rotate
+.fh_neg_exp:
+    mov rax, r12
+    not rax                             ; -1 - e
+    xor edx, edx
+    mov rcx, 61
+    div rcx
+    mov r12, 60
+    sub r12, rdx
+.fh_rotate:
+    ; x = ((x << e) & MODULUS) | (x >> (61 - e))
+    mov rax, rbx
+    mov rcx, r12
+    shl rax, cl
+    and rax, r10
+    mov rdx, rbx
+    mov rcx, 61
+    sub rcx, r12
+    shr rdx, cl
+    or rax, rdx
+
+    test r13d, r13d
+    jz .fh_signed
+    neg rax
+.fh_signed:
     cmp rax, -1
     jne .fh_done
     mov rax, -2
 .fh_done:
+    pop r13
+    pop r12
+    pop rbx
+    leave
     ret
 
 .fh_nan:
     xor eax, eax              ; hash(nan) = 0
+    pop r13
+    pop r12
+    pop rbx
+    leave
     ret
 
 .fh_pos_inf:
     mov rax, 314159            ; hash(inf) = 314159 (CPython convention)
+    pop r13
+    pop r12
+    pop rbx
+    leave
     ret
 
 .fh_neg_inf:
     mov rax, -314159           ; hash(-inf) = -314159
-    ret
-
-.fh_fractional:
-    ; Non-integer float: XOR high and low 32 bits of raw double
-    mov rax, rdi
-    mov rdx, rdi
-    shr rdx, 32
-    xor rax, rdx
-    ; Ensure never -1
-    cmp rax, -1
-    jne .fh_frac_done
-    mov rax, -2
-.fh_frac_done:
+    pop r13
+    pop r12
+    pop rbx
+    leave
     ret
 END_FUNC float_hash
+
+section .rodata
+align 16
+fh_sign_mask: dq 0x8000000000000000, 0
+align 8
+fh_two28:     dq 0x41B0000000000000      ; 2.0**28
+section .text
 
 ;; ============================================================================
 ;; float_bool(rdi = raw double bits) -> int (0 or 1) in eax
@@ -397,33 +610,44 @@ END_FUNC float_bool
 %endmacro
 
 DEF_FUNC float_add, 32
+    V_UNPACK rdi, rdx           ; left  Value -> (payload, tag)
+    V_UNPACK rsi, rcx           ; right Value -> (payload, tag)
     FLOAT_BINOP_SETUP
     movsd xmm0, [rbp-8]
     addsd xmm0, [rbp-16]
     call float_from_f64
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 END_FUNC float_add
 
 DEF_FUNC float_sub, 32
+    V_UNPACK rdi, rdx           ; left  Value -> (payload, tag)
+    V_UNPACK rsi, rcx           ; right Value -> (payload, tag)
     FLOAT_BINOP_SETUP
     movsd xmm0, [rbp-8]
     subsd xmm0, [rbp-16]
     call float_from_f64
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 END_FUNC float_sub
 
 DEF_FUNC float_mul, 32
+    V_UNPACK rdi, rdx           ; left  Value -> (payload, tag)
+    V_UNPACK rsi, rcx           ; right Value -> (payload, tag)
     FLOAT_BINOP_SETUP
     movsd xmm0, [rbp-8]
     mulsd xmm0, [rbp-16]
     call float_from_f64
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 END_FUNC float_mul
 
 DEF_FUNC float_truediv, 32
+    V_UNPACK rdi, rdx           ; left  Value -> (payload, tag)
+    V_UNPACK rsi, rcx           ; right Value -> (payload, tag)
     FLOAT_BINOP_SETUP
 
     ; Check for division by zero
@@ -436,6 +660,7 @@ DEF_FUNC float_truediv, 32
     divsd xmm0, xmm1
     call float_from_f64
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .div_zero:
@@ -445,6 +670,8 @@ DEF_FUNC float_truediv, 32
 END_FUNC float_truediv
 
 DEF_FUNC float_floordiv, 32
+    V_UNPACK rdi, rdx           ; left  Value -> (payload, tag)
+    V_UNPACK rsi, rcx           ; right Value -> (payload, tag)
     FLOAT_BINOP_SETUP
 
     ; Check for division by zero
@@ -459,6 +686,7 @@ DEF_FUNC float_floordiv, 32
     roundsd xmm0, xmm0, 1     ; 1 = floor
     call float_from_f64
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .floordiv_zero:
@@ -468,6 +696,8 @@ DEF_FUNC float_floordiv, 32
 END_FUNC float_floordiv
 
 DEF_FUNC float_mod, 32
+    V_UNPACK rdi, rdx           ; left  Value -> (payload, tag)
+    V_UNPACK rsi, rcx           ; right Value -> (payload, tag)
     FLOAT_BINOP_SETUP
 
     ; Check for division by zero
@@ -487,6 +717,7 @@ DEF_FUNC float_mod, 32
     movapd xmm0, xmm2
     call float_from_f64
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .mod_zero:
@@ -522,6 +753,8 @@ END_FUNC float_pos
 ;; non-integer exponents, repeated squaring for integer exponents.
 ;; ============================================================================
 DEF_FUNC float_pow, 32
+    V_UNPACK rdi, rdx           ; left  Value -> (payload, tag)
+    V_UNPACK rsi, rcx           ; right Value -> (payload, tag)
     FLOAT_BINOP_SETUP
     ; [rbp-8] = left double, [rbp-16] = right double
 
@@ -540,6 +773,7 @@ DEF_FUNC float_pow, 32
     sqrtsd xmm0, xmm0
     call float_from_f64
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 .not_sqrt:
     ; Fast path: exp == 2.0 → mulsd
@@ -550,6 +784,7 @@ DEF_FUNC float_pow, 32
     mulsd xmm0, xmm0
     call float_from_f64
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .check_int_exp:
@@ -581,6 +816,7 @@ DEF_FUNC float_pow, 32
     movapd xmm0, xmm2
     call float_from_f64
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .fpow_neg:
@@ -602,6 +838,7 @@ DEF_FUNC float_pow, 32
     divsd xmm0, xmm2
     call float_from_f64
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .fpow_general:
@@ -628,6 +865,7 @@ DEF_FUNC float_pow, 32
     add rsp, 16
     call float_from_f64
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 END_FUNC float_pow
 
@@ -668,14 +906,14 @@ END_FUNC float_int
 ;; Handles mixed int/float comparisons.
 ;; ============================================================================
 DEF_FUNC float_compare, 40
+    V_UNPACK rdi, rcx           ; left  Value -> (payload, tag)
+    V_UNPACK rsi, r8            ; right Value -> (payload, tag)
     ; rdi=left, rsi=right, edx=op, ecx=left_tag, r8d=right_tag
     ; Validate both operands are numeric (float, int, or bool)
     ; Left tag
     cmp ecx, TAG_FLOAT
     je .fc_left_ok
     cmp ecx, TAG_SMALLINT
-    je .fc_left_ok
-    cmp ecx, TAG_BOOL
     je .fc_left_ok
     cmp ecx, TAG_PTR
     jne .fc_not_impl
@@ -686,14 +924,21 @@ DEF_FUNC float_compare, 40
     lea r9, [rel float_type]
     cmp rax, r9
     je .fc_left_ok
+    ; A bool is an int, and float_to_f64 already handles one; only this
+    ; whitelist was missing it, so True < 2.5 raised and 1.0 == True was
+    ; False -- which also put True and 1.0 in different dict slots.
+    lea r9, [rel bool_type]
+    cmp rax, r9
+    je .fc_left_ok
+    mov rax, [rax + PyTypeObject.tp_flags]
+    test rax, TYPE_FLAG_INT_SUBCLASS
+    jnz .fc_left_ok
     jmp .fc_not_impl
 .fc_left_ok:
     ; Right tag
     cmp r8d, TAG_FLOAT
     je .fc_right_ok
     cmp r8d, TAG_SMALLINT
-    je .fc_right_ok
-    cmp r8d, TAG_BOOL
     je .fc_right_ok
     cmp r8d, TAG_PTR
     jne .fc_not_impl
@@ -704,6 +949,12 @@ DEF_FUNC float_compare, 40
     lea r9, [rel float_type]
     cmp rax, r9
     je .fc_right_ok
+    lea r9, [rel bool_type]
+    cmp rax, r9
+    je .fc_right_ok
+    mov rax, [rax + PyTypeObject.tp_flags]
+    test rax, TYPE_FLAG_INT_SUBCLASS
+    jnz .fc_right_ok
     jmp .fc_not_impl
 .fc_right_ok:
     mov [rbp-24], edx          ; save op (4 bytes)
@@ -856,6 +1107,8 @@ float_number_methods:
     dq 0                        ; nb_ior          +240
     dq 0                        ; nb_ifloor_divide +248
     dq 0                        ; nb_itrue_divide +256
+    dq 0 ; nb_matmul
+    dq 0 ; nb_imatmul
 
 align 8
 extern type_type
@@ -888,3 +1141,4 @@ float_type:
     dq 0                      ; tp_bases
     dq 0                        ; tp_traverse
     dq 0                        ; tp_clear
+    dq 0 ; tp_dictoffset

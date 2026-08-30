@@ -5,6 +5,10 @@
 %include "object.inc"
 %include "types.inc"
 
+extern obj_richcompare_bool
+extern eval_exception_unwind
+extern bool_true
+extern bool_false
 extern ap_malloc
 extern gc_alloc
 extern gc_track
@@ -27,7 +31,7 @@ extern dict_traverse
 extern dict_clear_gc
 
 ; Initial capacity (must be power of 2)
-DICT_INIT_CAP equ 8
+; DICT_INIT_CAP now lives in object.inc, shared with the subclass path
 
 ; Tombstone marker for deleted dict entries.
 ; When an entry is deleted, key_tag is set to this value so that
@@ -111,14 +115,11 @@ DEF_FUNC dict_type_call
     jne .dtc_error
 
     ; Check if arg is a dict
-    mov rdi, [rbx]             ; args[0] payload
-    mov eax, [rbx + 8]        ; args[0] tag
-    cmp eax, TAG_PTR
-    jne .dtc_try_iterable
+    mov rdi, [rbx]             ; args[0]
+    V_TEST_PTR rdi, rax
+    ja .dtc_try_iterable
     mov rax, [rdi + PyObject.ob_type]
-    lea rcx, [rel dict_type]
-    cmp rax, rcx
-    jne .dtc_try_iterable
+    REQUIRE_DICT_TYPE rax, rcx, .dtc_try_iterable
 
     ; dict(other_dict) → create new dict and copy entries
     push rdi                   ; save source dict
@@ -134,7 +135,7 @@ DEF_FUNC dict_type_call
     jge .dtc_copy_done
     imul rax, rcx, DICT_ENTRY_SIZE
     add rax, [rdi + PyDictObject.entries]
-    cmp byte [rax + DictEntry.value_tag], 0
+    cmp qword [rax + DictEntry.key], 0   ; occupied?
     je .dtc_copy_next
     push rcx
     push r8
@@ -142,8 +143,6 @@ DEF_FUNC dict_type_call
     mov rdi, r15               ; new dict
     mov rsi, [rax + DictEntry.key]
     mov rdx, [rax + DictEntry.value]
-    movzx ecx, byte [rax + DictEntry.value_tag]
-    movzx r8d, byte [rax + DictEntry.key_tag]
     call dict_set
     pop rdi
     pop r8
@@ -157,10 +156,9 @@ DEF_FUNC dict_type_call
 
 .dtc_try_iterable:
     ; Not a dict — try iterating as sequence of (key, value) pairs
-    mov rdi, [rbx]             ; args[0] payload
-    movzx esi, byte [rbx + 8] ; args[0] tag
-    cmp esi, TAG_PTR
-    jne .dtc_error
+    mov rdi, [rbx]             ; args[0]
+    V_TEST_PTR rdi, rsi
+    ja .dtc_error
     ; Get iterator
     push rdi
     mov rax, [rdi + PyObject.ob_type]
@@ -183,6 +181,7 @@ DEF_FUNC dict_type_call
     mov rax, [rdi + PyObject.ob_type]
     mov rax, [rax + PyTypeObject.tp_iternext]
     call rax
+    V_UNPACK rax, rdx           ; tp_iternext returns a Value
     test edx, edx
     jz .dtc_iter_done          ; exhausted
 
@@ -199,14 +198,9 @@ DEF_FUNC dict_type_call
     ; Extract key and value from tuple
     push rax                   ; save tuple for DECREF
     mov rcx, [rax + PyTupleObject.ob_item]
-    mov r8, [rax + PyTupleObject.ob_item_tags]
     mov rdi, r15               ; dict
-    mov rsi, [rcx]             ; key payload
-    mov rdx, [rcx + 8]        ; value payload
-    movzx eax, byte [r8 + 1]  ; value tag (index 1)
-    push rax                   ; save value tag
-    movzx r8d, byte [r8]      ; key tag (index 0)
-    pop rcx                    ; rcx = value tag
+    mov rsi, [rcx]             ; key Value
+    mov rdx, [rcx + 8]        ; value Value
     call dict_set
     pop rdi                    ; tuple
     call obj_decref
@@ -248,7 +242,6 @@ DEF_FUNC dict_type_call
 
     ; kw_names.ob_item has the key strings, args[n_pos + i] has values
     mov rax, [r14 + PyTupleObject.ob_item]      ; keys payload array
-    mov rdx, [r14 + PyTupleObject.ob_item_tags]  ; keys tag array
     xor r8d, r8d              ; kw index
 .dtc_kw_loop:
     cmp r8, r13
@@ -262,7 +255,7 @@ DEF_FUNC dict_type_call
 
     ; Get key from kw_names
     mov rsi, [rax + r8*8]         ; key payload (string)
-    movzx r8d, byte [rdx + r8]   ; key tag
+    V_UNPACK rsi, r8
 
     ; Get value from args
     lea r9, [rcx + r8]            ; wait, need original r8 (kw index)
@@ -279,20 +272,15 @@ DEF_FUNC dict_type_call
 
     ; key from kw_names tuple items
     mov r9, [r14 + PyTupleObject.ob_item]
-    mov rsi, [r9 + r8*8]         ; key payload
-    mov r9, [r14 + PyTupleObject.ob_item_tags]
-    movzx r10d, byte [r9 + r8]  ; key tag → r10d (save for later)
+    mov rsi, [r9 + r8*8]         ; key Value
 
     ; value from args: index = n_pos + kw_index
     add rcx, r8                   ; rcx = n_pos + kw_index
-    shl rcx, 4                    ; rcx * 16 (each arg is 16 bytes)
-    mov rdx, [rbx + rcx]         ; value payload
-    movzx eax, byte [rbx + rcx + 8]  ; value tag
+    shl rcx, 3                    ; one Value per arg slot
+    mov rdx, [rbx + rcx]         ; value Value
 
-    ; dict_set(dict, key, value, value_tag, key_tag)
+    ; dict_set(dict, key Value, value Value)
     mov rdi, r15
-    mov ecx, eax                  ; value tag
-    mov r8d, r10d                 ; key tag
     call dict_set
 
     pop rdx
@@ -322,169 +310,30 @@ END_FUNC dict_type_call
 
 ;; ============================================================================
 ;; dict_keys_equal(rdi=a_key, rsi=b_key, edx=a_tag, ecx=b_tag) -> int (1=equal, 0=not)
-;; Internal helper: value equality for SmallInts, string comparison for heap ptrs.
+;;
+;; Was identity, then a hand-rolled cross-type numeric compare, then a
+;; strcmp, then tp_richcompare -- most of PyObject_RichCompareBool, with the
+;; reflected call missing.  So a key whose __eq__ lives on the *lookup* side
+;; rather than the stored side was never found.
 ;; ============================================================================
-extern float_to_f64
-extern int_type
-extern bool_type
-
 DEF_FUNC_LOCAL dict_keys_equal
-    ; Fast path: both payload AND tag identical → equal
-    ; Handles SmallInt==SmallInt, same heap ptr
-    cmp rdi, rsi
-    jne .dke_diff_payload
-    cmp rdx, rcx
-    jne .dke_diff_payload
-    mov eax, 1
-    leave
-    ret
-
-.dke_diff_payload:
-    ; Check cross-type numeric equality
-    ; SmallInt(1) == Float(1.0) == Bool(True) in dict keys
-    ; Also handles TAG_PTR for heap int/bool objects
-    cmp edx, TAG_SMALLINT
-    je .dke_a_numeric
-    cmp edx, TAG_FLOAT
-    je .dke_a_numeric
-    cmp edx, TAG_BOOL
-    je .dke_a_numeric
-    cmp edx, TAG_PTR
-    jne .dke_not_numeric
-    ; TAG_PTR: check if int_type or bool_type
-    mov rax, [rdi + PyObject.ob_type]
-    lea r8, [rel int_type]
-    cmp rax, r8
-    je .dke_a_numeric
-    lea r8, [rel bool_type]
-    cmp rax, r8
-    je .dke_a_numeric
-    jmp .dke_not_numeric
-.dke_a_numeric:
-    cmp ecx, TAG_SMALLINT
-    je .dke_both_numeric
-    cmp ecx, TAG_FLOAT
-    je .dke_both_numeric
-    cmp ecx, TAG_BOOL
-    je .dke_both_numeric
-    cmp ecx, TAG_PTR
-    jne .dke_not_equal          ; a numeric, b not → not equal
-    ; TAG_PTR: check if int_type or bool_type
-    mov rax, [rsi + PyObject.ob_type]
-    lea r8, [rel int_type]
-    cmp rax, r8
-    je .dke_both_numeric
-    lea r8, [rel bool_type]
-    cmp rax, r8
-    je .dke_both_numeric
-    jmp .dke_not_equal          ; a numeric, b not numeric → not equal
-.dke_both_numeric:
-    ; Convert both to f64 and compare
-    ; Save b_key and b_tag (caller-saved regs clobbered by float_to_f64)
-    push rsi                    ; save b_key
-    push rcx                    ; save b_tag
-    mov esi, edx                ; a_tag
-    ; rdi = a_key (already set)
-    call float_to_f64           ; xmm0 = a as double
-    sub rsp, 8
-    movsd [rsp], xmm0           ; save a's double on stack
-    mov rdi, [rsp + 16]         ; restore b_key (+8 sub + 8 push rcx)
-    mov esi, [rsp + 8]          ; restore b_tag (ecx saved as qword)
-    call float_to_f64           ; xmm0 = b as double
-    movsd xmm1, [rsp]          ; restore a's double
-    add rsp, 24                 ; pop scratch + saved rcx + saved rsi
-    ucomisd xmm0, xmm1
-    jne .dke_not_equal
-    jp .dke_not_equal           ; NaN ≠ NaN
-    mov eax, 1
-    leave
-    ret
-.dke_not_numeric:
-    ; Different payloads — if either is not TAG_PTR, can't be equal
-    cmp edx, TAG_PTR
-    jne .dke_not_equal
-    cmp ecx, TAG_PTR
-    jne .dke_not_equal
-
-    ; Both heap ptrs with different addresses — check string equality
-    push rbx
-    push r12
-    mov rbx, rdi
-    mov r12, rsi
-
-    mov rax, [rbx + PyObject.ob_type]
-    lea rcx, [rel str_type]
-    cmp rax, rcx
-    jne .dke_try_richcompare
-
-    mov rax, [r12 + PyObject.ob_type]
-    cmp rax, rcx
-    jne .dke_try_richcompare
-
-    ; Both strings — compare data
-    lea rdi, [rbx + PyStrObject.data]
-    lea rsi, [r12 + PyStrObject.data]
-    call ap_strcmp
-    test eax, eax
-    jnz .dke_ne_pop
-
-    ; Equal strings
-    mov eax, 1
-    pop r12
-    pop rbx
-    leave
-    ret
-
-.dke_try_richcompare:
-    ; Both heap ptrs, not strings — try tp_richcompare
-    extern obj_is_true
-    mov rax, [rbx + PyObject.ob_type]
-    mov rax, [rax + PyTypeObject.tp_richcompare]
-    test rax, rax
-    jz .dke_ne_pop
-    ; Call tp_richcompare(a, b, PY_EQ, a_tag=TAG_PTR, b_tag=TAG_PTR)
-    mov rdi, rbx
-    mov rsi, r12
+    V_PACK rdi, rdx             ; both are immediates or pointers, so the
+    V_PACK rsi, rcx             ; round-trip cannot box anything
     mov edx, PY_EQ
-    mov ecx, TAG_PTR
-    mov r8d, TAG_PTR
-    call rax
-    ; Check result: if NULL/TAG_NULL → not equal
-    test edx, edx
-    jz .dke_ne_pop
-    ; Check if result is truthy
-    mov rdi, rax
-    mov rsi, rdx
-    push rax
-    push rdx
-    call obj_is_true
-    mov ebx, eax           ; save truthiness
-    pop rdx
-    pop rdi
-    push rbx
-    mov rsi, rdx
-    DECREF_VAL rdi, rsi
-    pop rax                 ; truthiness result
-    pop r12
-    pop rbx
+    call obj_richcompare_bool
+    cmp eax, -1
+    je .dke_error
     leave
     ret
 
-.dke_ne_pop:
-    xor eax, eax
-    pop r12
-    pop rbx
+.dke_error:
+    ; The probe loop has no error channel; the exception is already pending.
     leave
-    ret
-
-.dke_not_equal:
-    xor eax, eax
-    leave
-    ret
+    jmp eval_exception_unwind
 END_FUNC dict_keys_equal
 
 ;; ============================================================================
-;; dict_get(rdi=dict, rsi=key, edx=key_tag) -> (rax=value, rdx=value_tag) or (0, TAG_NULL)
+;; dict_get(rdi=dict, rsi=key Value) -> rax = value Value, or 0 when absent
 ;; Linear probing lookup
 ;; ============================================================================
 DG_KTAG equ 8
@@ -495,6 +344,7 @@ DEF_FUNC dict_get, 8
     push r14
     push r15
 
+    V_UNPACK rsi, rdx           ; decode the key Value
     mov rbx, rdi                ; rbx = dict
     mov r12, rsi                ; r12 = key
     mov [rbp - DG_KTAG], rdx    ; save key_tag
@@ -502,6 +352,7 @@ DEF_FUNC dict_get, 8
     ; Hash the key
     mov rdi, r12
     mov rsi, rdx                ; key tag
+    V_PACK rdi, rsi
     call obj_hash
     mov r13, rax                ; r13 = hash
 
@@ -525,15 +376,9 @@ align 16
     ; Compute entry address: entries + slot * DICT_ENTRY_SIZE
     mov rax, [rbx + PyDictObject.entries]
     imul rdx, rcx, DICT_ENTRY_SIZE
-    add rax, rdx                ; rax = entry ptr
-
-    ; Check if slot is empty (key_tag == 0 means never-used → stop)
+    add rax, rdx                ; rax = entry ptr    ; Classify the slot, then load its key
+    ENTRY_CLASSIFY rax, .not_found, .next_slot
     mov rdi, [rax + DictEntry.key]
-    cmp byte [rax + DictEntry.key_tag], 0
-    je .not_found
-    ; Skip tombstoned (deleted) entries
-    cmp byte [rax + DictEntry.key_tag], DICT_TOMBSTONE
-    je .next_slot
 
     ; Check hash first (fast reject)
     cmp r13, [rax + DictEntry.hash]
@@ -542,7 +387,7 @@ align 16
     ; Hash matches - check key equality
     ; rdi already has entry.key
     mov rsi, r12                ; our key
-    movzx edx, byte [rax + DictEntry.key_tag]  ; entry's key tag
+    V_UNPACK rdi, rdx         ; dict_keys_equal takes (payload, tag)
     push rcx                    ; save slot
     push rax                    ; save entry ptr
     mov rcx, [rbp - DG_KTAG]   ; our key tag
@@ -552,9 +397,8 @@ align 16
     test eax, eax
     jz .next_slot
 
-    ; Found - return entry.value + tag
+    ; Found - return the entry's value Value
     mov rax, [rdx + DictEntry.value]
-    movzx edx, byte [rdx + DictEntry.value_tag]
     jmp .done
 
 .next_slot:
@@ -595,6 +439,7 @@ DEF_FUNC dict_get_index, 8
 
     mov rdi, r12
     mov rsi, rdx                ; key tag
+    V_PACK rdi, rsi
     call obj_hash
     mov r13, rax                ; r13 = hash
 
@@ -615,16 +460,13 @@ DEF_FUNC dict_get_index, 8
     add rax, rdx
 
     mov rdi, [rax + DictEntry.key]
-    cmp byte [rax + DictEntry.key_tag], 0
-    je .gi_not_found
-    cmp byte [rax + DictEntry.key_tag], DICT_TOMBSTONE
-    je .gi_next
+    ENTRY_CLASSIFY rax, .gi_not_found, .gi_next
 
     cmp r13, [rax + DictEntry.hash]
     jne .gi_next
 
     mov rsi, r12
-    movzx edx, byte [rax + DictEntry.key_tag]
+    V_UNPACK rdi, rdx         ; dict_keys_equal takes (payload, tag)
     push rcx
     mov rcx, [rbp - GI_KTAG]
     call dict_keys_equal
@@ -694,15 +536,9 @@ DEF_FUNC_LOCAL dict_find_slot, 16
     ; entry = entries + slot * DICT_ENTRY_SIZE
     mov rax, [rbx + PyDictObject.entries]
     imul rdx, rcx, DICT_ENTRY_SIZE
-    add rax, rdx                ; rax = entry ptr
-
-    ; Empty slot? (check key_tag for TAG_NULL=0)
+    add rax, rdx                ; rax = entry ptr    ; Classify the slot, then load its key
+    ENTRY_CLASSIFY rax, .found_empty, .find_tombstone
     mov rdi, [rax + DictEntry.key]
-    cmp byte [rax + DictEntry.key_tag], 0
-    je .found_empty
-    ; Tombstone? Remember first one, keep probing (key may be further)
-    cmp byte [rax + DictEntry.key_tag], DICT_TOMBSTONE
-    je .find_tombstone
 
     ; Hash match?
     cmp r13, [rax + DictEntry.hash]
@@ -711,14 +547,15 @@ DEF_FUNC_LOCAL dict_find_slot, 16
     ; Key equality check
     ; rdi = entry.key
     mov rsi, r12
-    movzx edx, byte [rax + DictEntry.key_tag]  ; entry's key tag
+    V_UNPACK rdi, rdx         ; dict_keys_equal takes (payload, tag)
     push rcx
     push rax
     mov rcx, [rbp - FS_KTAG]   ; our key tag
     call dict_keys_equal
+    mov edi, eax                ; save equality result (survives the pops)
     pop rax                     ; entry ptr
     pop rcx                     ; slot
-    test eax, eax
+    test edi, edi
     jnz .found_existing
 
 .find_next:
@@ -823,10 +660,7 @@ DEF_FUNC_LOCAL dict_resize
     add rax, r12                ; rax = old entry ptr
 
     ; Skip empty slots (key_tag == 0) and tombstones (key_tag == DICT_TOMBSTONE)
-    cmp byte [rax + DictEntry.key_tag], 0
-    je .rehash_next
-    cmp byte [rax + DictEntry.key_tag], DICT_TOMBSTONE
-    je .rehash_next
+    ENTRY_CLASSIFY rax, .rehash_next, .rehash_next
 
     ; Compute new slot: hash & (new_capacity - 1)
     push rcx                    ; save outer index
@@ -835,20 +669,16 @@ DEF_FUNC_LOCAL dict_resize
     dec rdx                     ; new mask
     and rcx, rdx                ; starting slot
 
-    ; Save entry data (including key_tag)
+    ; Save entry data
     push qword [rax + DictEntry.hash]
     push qword [rax + DictEntry.key]
     push qword [rax + DictEntry.value]
-    movzx edx, byte [rax + DictEntry.value_tag]
-    push rdx
-    movzx edx, byte [rax + DictEntry.key_tag]
-    push rdx
 
     ; Linear probe in new table to find empty slot
 .rehash_probe:
     imul rax, rcx, DICT_ENTRY_SIZE
     add rax, r15                ; new entry ptr
-    cmp byte [rax + DictEntry.key_tag], 0
+    cmp qword [rax + DictEntry.key], 0   ; empty or tombstone?
     je .rehash_insert
 
     inc rcx
@@ -859,10 +689,6 @@ DEF_FUNC_LOCAL dict_resize
 
 .rehash_insert:
     ; rax = target entry ptr in new table
-    pop rdx
-    mov byte [rax + DictEntry.key_tag], dl
-    pop rdx
-    mov byte [rax + DictEntry.value_tag], dl
     pop qword [rax + DictEntry.value]
     pop qword [rax + DictEntry.key]
     pop qword [rax + DictEntry.hash]
@@ -888,7 +714,7 @@ DEF_FUNC_LOCAL dict_resize
 END_FUNC dict_resize
 
 ;; ============================================================================
-;; dict_set(rdi=dict, rsi=key, rdx=value, rcx=value_tag, r8=key_tag)
+;; dict_set(rdi=dict, rsi=key Value, rdx=value Value)
 ;; Insert or update a key-value pair.
 ;; ============================================================================
 DS_VTAG equ 8
@@ -899,6 +725,10 @@ DEF_FUNC dict_set, 16
     push r13
     push r14
 
+    ; Decode the two Values into the (payload, tag) pairs the body uses.
+    V_UNPACK rsi, r8            ; key
+    V_UNPACK rdx, rcx           ; value
+
     mov rbx, rdi                ; dict
     mov r12, rsi                ; key
     mov r13, rdx                ; value
@@ -908,6 +738,7 @@ DEF_FUNC dict_set, 16
     ; Hash the key
     mov rdi, r12
     mov rsi, r8                 ; key tag
+    V_PACK rdi, rsi
     call obj_hash
     mov r14, rax                ; r14 = hash
 
@@ -923,23 +754,17 @@ DEF_FUNC dict_set, 16
     jnz .update_existing
 
     ; --- Insert new entry ---
-    ; Store hash, key, key_tag, value, value_tag
+    ; Store hash, key and value.  INCREF each while its tag is in hand,
+    ; then pack; a packed Value carries the tag with it from here on.
     mov [rax + DictEntry.hash], r14
-    mov [rax + DictEntry.key], r12
     mov rcx, [rbp - DS_KTAG]
-    mov byte [rax + DictEntry.key_tag], cl
-    mov [rax + DictEntry.value], r13
-
-    ; Store value tag from caller
+    INCREF_VAL r12, rcx
+    V_PACK r12, rcx
+    mov [rax + DictEntry.key], r12
     mov rcx, [rbp - DS_VTAG]
-    mov byte [rax + DictEntry.value_tag], cl
-
-    ; INCREF key (tag-aware)
-    movzx esi, byte [rax + DictEntry.key_tag]
-    INCREF_VAL r12, rsi
-    ; INCREF value (tag-aware)
-    movzx esi, byte [rax + DictEntry.value_tag]
-    INCREF_VAL r13, rsi
+    INCREF_VAL r13, rcx
+    V_PACK r13, rcx
+    mov [rax + DictEntry.value], r13
 
     ; Increment ob_size
     inc qword [rbx + PyDictObject.ob_size]
@@ -964,17 +789,15 @@ DEF_FUNC dict_set, 16
     ; DECREF old value (fat)
     push rax                    ; save entry ptr
     mov rdi, [rax + DictEntry.value]
-    movzx esi, byte [rax + DictEntry.value_tag]
+    V_UNPACK rdi, rsi
     DECREF_VAL rdi, rsi
     pop rax                     ; restore entry ptr
 
-    ; Store new value and INCREF it
-    mov [rax + DictEntry.value], r13
-    ; Store new value tag from caller
+    ; Store the new value and INCREF it
     mov rcx, [rbp - DS_VTAG]
-    mov byte [rax + DictEntry.value_tag], cl
-    movzx esi, byte [rax + DictEntry.value_tag]
-    INCREF_VAL r13, rsi                ; value may be SmallInt
+    INCREF_VAL r13, rcx
+    V_PACK r13, rcx
+    mov [rax + DictEntry.value], r13
 
 .done:
     ; Bump version counter (skip 0 on wrap)
@@ -1016,20 +839,17 @@ DEF_FUNC dict_dealloc
 
     ; Skip empty slots and tombstones
     mov rdi, [rax + DictEntry.key]
-    cmp byte [rax + DictEntry.key_tag], 0
-    je .dealloc_next
-    cmp byte [rax + DictEntry.key_tag], DICT_TOMBSTONE
-    je .dealloc_next
+    V_UNPACK rdi, rsi
+    ENTRY_CLASSIFY rax, .dealloc_next, .dealloc_next
 
     ; DECREF key (tag-aware)
     push rax
-    movzx esi, byte [rax + DictEntry.key_tag]
     DECREF_VAL rdi, rsi
 
     ; DECREF value (tag-aware)
     pop rax
     mov rdi, [rax + DictEntry.value]
-    movzx esi, byte [rax + DictEntry.value_tag]
+    V_UNPACK rdi, rsi
     DECREF_VAL rdi, rsi
 
 .dealloc_next:
@@ -1068,10 +888,9 @@ dict_len:
 DEF_FUNC dict_subscript
     push rbx
 
-    mov rbx, rsi               ; save key for error msg
-
-    ; dict_get(dict, key, key_tag) — edx already has key_tag
-    call dict_get
+    mov rbx, rsi               ; save the key Value for the error message
+    call dict_get              ; both take a key Value
+    V_UNPACK rax, rdx           ; dict_get returns a Value
     test edx, edx
     jz .key_error
 
@@ -1079,43 +898,46 @@ DEF_FUNC dict_subscript
     INCREF_VAL rax, rdx                ; value may be SmallInt
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .key_error:
-    lea rdi, [rel exc_KeyError_type]
-    CSTRING rsi, "key not found"
-    call raise_exception
+    ; The key itself is the argument, as in CPython: d["k"] reports
+    ; KeyError('k'), not a fixed "key not found".  rbx already holds it.
+    mov rdi, rbx               ; the key Value, saved on entry
+    extern raise_key_error
+    call raise_key_error
 END_FUNC dict_subscript
 
 ;; ============================================================================
-;; dict_ass_subscript(rdi=dict, rsi=key, rdx=value, ecx=key_tag, r8d=value_tag)
+;; dict_ass_subscript(rdi=dict, rsi=key Value, rdx=value Value)
+;; A value Value of 0 (NULL) means "delete this key".
 ;; mp_ass_subscript: set key=value or delete key from dict
 ;; ============================================================================
 DEF_FUNC_BARE dict_ass_subscript
-    ; If value tag is TAG_NULL (0), this is a delete operation
-    ; (Can't check payload: SmallInt 0 has payload=0 but tag=TAG_SMALLINT)
-    test r8, r8                 ; r8 = value_tag from caller
+    ; A NULL Value is 0 and no real Value is, so this test needs no tag
+    test rdx, rdx
     jz .das_delete
-    ; dict_set wants (rdi=dict, rsi=key, rdx=value, rcx=value_tag, r8=key_tag)
-    ; Caller passes rcx=key_tag, r8=value_tag — swap them
-    xchg rcx, r8
     jmp dict_set
 .das_delete:
-    ; dict_del wants (rdi=dict, rsi=key, rdx=key_tag)
-    mov rdx, rcx               ; key_tag from caller's rcx
     jmp dict_del
 END_FUNC dict_ass_subscript
 
 ;; ============================================================================
-;; dict_del(rdi=dict, rsi=key, edx=key_tag) -> int (0=ok, -1=not found)
+;; dict_del(rdi=dict, rsi=key Value) -> int (0=ok, -1=not found)
 ;; Delete key from dict. DECREFs both key and value.
 ;; ============================================================================
 DD_KTAG equ 8
-DEF_FUNC dict_del, 8
+DD_KEYV equ 16
+DD_FRAME equ 16
+DEF_FUNC dict_del, DD_FRAME
     push rbx
     push r12
     push r13
     push r14
+
+    mov [rbp - DD_KEYV], rsi    ; keep the Value for the KeyError message
+    V_UNPACK rsi, rdx           ; decode the key Value
     push r15
 
     mov rbx, rdi                ; dict
@@ -1125,6 +947,7 @@ DEF_FUNC dict_del, 8
     ; Hash the key
     mov rdi, r12
     mov rsi, rdx                ; key tag
+    V_PACK rdi, rsi
     call obj_hash
     mov r13, rax                ; hash
 
@@ -1145,18 +968,14 @@ DEF_FUNC dict_del, 8
     imul rdx, rcx, DICT_ENTRY_SIZE
     add rax, rdx
 
+    ENTRY_CLASSIFY rax, .dd_not_found, .dd_next
     mov rdi, [rax + DictEntry.key]
-    cmp byte [rax + DictEntry.key_tag], 0
-    je .dd_not_found
-    ; Skip tombstoned (deleted) entries
-    cmp byte [rax + DictEntry.key_tag], DICT_TOMBSTONE
-    je .dd_next
 
     cmp r13, [rax + DictEntry.hash]
     jne .dd_next
 
     mov rsi, r12
-    movzx edx, byte [rax + DictEntry.key_tag]  ; entry's key tag
+    V_UNPACK rdi, rdx         ; dict_keys_equal takes (payload, tag)
     push rcx
     push rax
     mov rcx, [rbp - DD_KTAG]   ; our key tag
@@ -1166,25 +985,18 @@ DEF_FUNC dict_del, 8
     test eax, eax
     jz .dd_next
 
-    ; Found: tombstone entry, DECREF key and value, decrement size
-    movzx esi, byte [rdx + DictEntry.key_tag]
-    push rsi
+    ; Found: tombstone the entry, release its key and value, shrink the dict
     mov rdi, [rdx + DictEntry.key]
+    mov rsi, [rdx + DictEntry.value]
     mov qword [rdx + DictEntry.key], 0
-    mov byte [rdx + DictEntry.key_tag], DICT_TOMBSTONE  ; tombstone, not empty
-    push qword [rdx + DictEntry.value]
-    movzx esi, byte [rdx + DictEntry.value_tag]
-    push rsi
     mov qword [rdx + DictEntry.value], 0
-    mov byte [rdx + DictEntry.value_tag], 0
-
-    ; DECREF key (tag-aware)
-    mov rsi, [rsp + 16]         ; key_tag (3 pushes deep)
-    DECREF_VAL rdi, rsi
-    pop rsi                     ; value_tag
-    pop rdi                     ; value payload
-    DECREF_VAL rdi, rsi         ; DECREF value (fat)
-    add rsp, 8                  ; pop key_tag
+    mov qword [rdx + DictEntry.hash], ENTRY_TOMBSTONE_HASH   ; tombstone
+    push rsi                    ; value Value
+    push rsi                    ; (keep the stack 16-byte aligned)
+    DECREF_V rdi, rax
+    pop rdi
+    pop rdi                     ; value Value
+    DECREF_V rdi, rax
     dec qword [rbx + PyDictObject.ob_size]
     inc qword [rbx + PyDictObject.dk_tombstones]
     ; Bump version counter
@@ -1203,10 +1015,8 @@ DEF_FUNC dict_del, 8
     jmp .dd_probe
 
 .dd_not_found:
-    lea rdi, [rel exc_KeyError_type]
-    CSTRING rsi, "key not found"
-    call raise_exception
-    ; raise_exception does not return
+    mov rdi, [rbp - DD_KEYV]
+    call raise_key_error
 
 .dd_done:
     pop r15
@@ -1280,10 +1090,7 @@ DEF_FUNC_BARE dict_iter_next
     ; Check if entry at index has a key (key_tag != TAG_NULL)
     imul rax, rcx, DictEntry_size
     add rax, rsi
-    cmp byte [rax + DictEntry.key_tag], 0
-    je .di_skip
-    cmp byte [rax + DictEntry.key_tag], DICT_TOMBSTONE
-    je .di_skip
+    ENTRY_CLASSIFY rax, .di_skip, .di_skip
 
     ; Found a valid entry — advance index
     inc rcx
@@ -1295,16 +1102,14 @@ DEF_FUNC_BARE dict_iter_next
     ja .di_return_item
 
     ; kind=0: return key
-    movzx edx, byte [rax + DictEntry.key_tag]
     mov rax, [rax + DictEntry.key]
-    INCREF_VAL rax, rdx
+    INCREF_V rax, rdx
     ret
 
 .di_return_value:
     ; kind=1: return value
-    movzx edx, byte [rax + DictEntry.value_tag]
     mov rax, [rax + DictEntry.value]
-    INCREF_VAL rax, rdx
+    INCREF_V rax, rdx
     ret
 
 .di_return_item:
@@ -1321,24 +1126,18 @@ DEF_FUNC_BARE dict_iter_next
     mov r12, rax                ; r12 = new tuple
 
     mov r9, [r12 + PyTupleObject.ob_item]
-    mov r10, [r12 + PyTupleObject.ob_item_tags]
 
     ; tuple[0] = key
     mov rax, [rbx + DictEntry.key]
-    movzx edx, byte [rbx + DictEntry.key_tag]
+    INCREF_V rax, rdx
     mov [r9], rax
-    mov byte [r10], dl
-    INCREF_VAL rax, rdx
 
     ; tuple[1] = value
     mov rax, [rbx + DictEntry.value]
-    movzx edx, byte [rbx + DictEntry.value_tag]
+    INCREF_V rax, rdx
     mov [r9 + 8], rax
-    mov byte [r10 + 1], dl
-    INCREF_VAL rax, rdx
 
     mov rax, r12
-    mov edx, TAG_PTR
 
     pop r12
     pop rbx
@@ -1392,8 +1191,8 @@ dict_iter_self:
 ;; For the 'in' operator: checks if key exists in dict.
 ;; ============================================================================
 DEF_FUNC_BARE dict_contains
-    ; edx already has key_tag, pass through to dict_get
     call dict_get
+    V_UNPACK rax, rdx           ; dict_get returns a Value
     test edx, edx
     jz .dc_no
     mov eax, 1
@@ -1516,7 +1315,7 @@ END_FUNC dict_view_iter
 ;; ============================================================================
 DEF_FUNC_BARE dict_keys_view_contains
     mov rdi, [rdi + PyDictViewObject.dv_dict]
-    jmp dict_contains           ; (rdi=dict, rsi=key, rdx=key_tag)
+    jmp dict_contains           ; (rdi=dict, rsi=key Value)
 END_FUNC dict_keys_view_contains
 
 ;; ============================================================================
@@ -1530,6 +1329,8 @@ DNO_NEW   equ 24
 DNO_FRAME equ 32
 
 DEF_FUNC dict_nb_or, DNO_FRAME
+    V_UNPACK rdi, rdx           ; left  Value -> (payload, tag)
+    V_UNPACK rsi, rcx           ; right Value -> (payload, tag)
     mov [rbp - DNO_LEFT], rdi       ; left dict
     mov [rbp - DNO_RIGHT], rsi      ; right dict
 
@@ -1548,7 +1349,7 @@ DEF_FUNC dict_nb_or, DNO_FRAME
     imul rax, rcx, DICT_ENTRY_SIZE
     add rax, [rdi + PyDictObject.entries]
     ; Check if entry is occupied (value_tag != 0)
-    cmp byte [rax + DictEntry.value_tag], 0
+    cmp qword [rax + DictEntry.key], 0   ; occupied?
     je .dno_left_next
 
     ; dict_set(dict, key, value, value_tag, key_tag)
@@ -1558,8 +1359,6 @@ DEF_FUNC dict_nb_or, DNO_FRAME
     mov rdi, [rbp - DNO_NEW]
     mov rsi, [rax + DictEntry.key]
     mov rdx, [rax + DictEntry.value]
-    movzx ecx, byte [rax + DictEntry.value_tag]    ; value_tag
-    movzx r8d, byte [rax + DictEntry.key_tag]      ; key_tag
     call dict_set
     pop rdi
     pop r8
@@ -1580,7 +1379,7 @@ DEF_FUNC dict_nb_or, DNO_FRAME
 
     imul rax, rcx, DICT_ENTRY_SIZE
     add rax, [rdi + PyDictObject.entries]
-    cmp byte [rax + DictEntry.value_tag], 0
+    cmp qword [rax + DictEntry.key], 0   ; occupied?
     je .dno_right_next
 
     push rcx
@@ -1589,8 +1388,6 @@ DEF_FUNC dict_nb_or, DNO_FRAME
     mov rdi, [rbp - DNO_NEW]
     mov rsi, [rax + DictEntry.key]
     mov rdx, [rax + DictEntry.value]
-    movzx ecx, byte [rax + DictEntry.value_tag]    ; value_tag
-    movzx r8d, byte [rax + DictEntry.key_tag]      ; key_tag
     call dict_set
     pop rdi
     pop r8
@@ -1604,6 +1401,7 @@ DEF_FUNC dict_nb_or, DNO_FRAME
     mov rax, [rbp - DNO_NEW]
     mov edx, TAG_PTR
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 END_FUNC dict_nb_or
 
@@ -1617,6 +1415,8 @@ DIO_RIGHT equ 16
 DIO_FRAME equ 24
 
 DEF_FUNC dict_nb_ior, DIO_FRAME
+    V_UNPACK rdi, rdx           ; left  Value -> (payload, tag)
+    V_UNPACK rsi, rcx           ; right Value -> (payload, tag)
     mov [rbp - DIO_LEFT], rdi       ; left dict
     mov [rbp - DIO_RIGHT], rsi      ; right dict
 
@@ -1630,7 +1430,7 @@ DEF_FUNC dict_nb_ior, DIO_FRAME
 
     imul rax, rcx, DICT_ENTRY_SIZE
     add rax, [rdi + PyDictObject.entries]
-    cmp byte [rax + DictEntry.value_tag], 0
+    cmp qword [rax + DictEntry.key], 0   ; occupied?
     je .dio_next
 
     push rcx
@@ -1639,8 +1439,6 @@ DEF_FUNC dict_nb_ior, DIO_FRAME
     mov rdi, [rbp - DIO_LEFT]
     mov rsi, [rax + DictEntry.key]
     mov rdx, [rax + DictEntry.value]
-    movzx ecx, byte [rax + DictEntry.value_tag]
-    movzx r8d, byte [rax + DictEntry.key_tag]
     call dict_set
     pop rdi
     pop r8
@@ -1656,6 +1454,7 @@ DEF_FUNC dict_nb_ior, DIO_FRAME
     INCREF rax
     mov edx, TAG_PTR
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 END_FUNC dict_nb_ior
 
@@ -1675,16 +1474,29 @@ DRC_LTAG  equ 40
 DRC_FRAME equ 48
 
 DEF_FUNC dict_richcompare, DRC_FRAME
+    V_UNPACK rdi, rcx           ; left  Value -> (payload, tag)
+    V_UNPACK rsi, r8            ; right Value -> (payload, tag)
     ; edx = op (PY_EQ=2, PY_NE=3)
     mov [rbp - DRC_LEFT], rdi
     mov [rbp - DRC_RIGHT], rsi
     mov [rbp - DRC_OP], edx
+
+    ; The right operand is dereferenced as a dict below, so it has to be
+    ; one: an immediate's payload is not an address, and any other object's
+    ; fields are not ob_size/capacity/entries.
+    cmp r8d, TAG_PTR
+    jne .drc_not_impl
+    lea rax, [rel dict_type]
+    cmp [rsi + PyObject.ob_type], rax
+    jne .drc_not_impl
 
     ; Only handle EQ (2) and NE (3)
     cmp edx, 2
     je .drc_do_eq
     cmp edx, 3
     je .drc_do_eq
+
+.drc_not_impl:
     ; Unsupported op — return NotImplemented (NULL)
     RET_NULL
     leave
@@ -1712,22 +1524,22 @@ DEF_FUNC dict_richcompare, DRC_FRAME
     add rax, [rdi + PyDictObject.entries]
 
     ; Skip empty entries
-    cmp byte [rax + DictEntry.value_tag], 0
+    cmp qword [rax + DictEntry.key], 0   ; occupied?
     je .drc_next
 
     ; Save entry data to stack slots (safe across function calls)
     push r9
     push r10
     mov r11, [rax + DictEntry.value]        ; left value
-    movzx r9d, byte [rax + DictEntry.value_tag]    ; left value tag
+    V_UNPACK r11, r9
     mov [rbp - DRC_LVAL], r11               ; save to stack slot
     mov [rbp - DRC_LTAG], r9                ; save to stack slot
 
     ; Lookup key in right dict
     mov rdi, [rbp - DRC_RIGHT]
     mov rsi, [rax + DictEntry.key]
-    movzx edx, byte [rax + DictEntry.key_tag]
     call dict_get
+    V_UNPACK rax, rdx           ; dict_get returns a Value
     ; rax = right value, edx = tag (0 = not found)
     ; NOTE: r11 and r9 are caller-saved and may be clobbered by dict_get
     test edx, edx
@@ -1768,12 +1580,28 @@ DEF_FUNC dict_richcompare, DRC_FRAME
     mov edx, 2                      ; PY_EQ
     mov ecx, TAG_PTR
     mov r8d, TAG_PTR
+    V_PACK rdi, rcx             ; left  -> Value
+    V_PACK rsi, r8              ; right -> Value
     call rax
-    ; Result: (rax=payload, edx=tag)
-    ; Check if result is True (TAG_BOOL with payload=1)
-    cmp edx, TAG_BOOL
-    jne .drc_not_equal_pop
-    test eax, eax
+    V_UNPACK rax, rdx           ; tp_richcompare returns a Value
+    ; Result: (rax=payload, edx=tag).  True and False are heap singletons
+    ; now, so test truthiness instead of looking for an inline bool payload.
+    extern obj_is_true
+    test edx, edx
+    jz .drc_not_equal_pop           ; NULL result: treat as not equal
+    mov rdi, rax
+    mov rsi, rdx
+    push rax
+    push rdx
+    V_PACK rdi, rsi
+    call obj_is_true
+    pop rdx
+    pop rdi
+    mov r11d, eax                   ; truthiness
+    push r11
+    DECREF_VAL rdi, rdx
+    pop r11
+    test r11d, r11d
     jz .drc_not_equal_pop
     jmp .drc_values_match
 
@@ -1785,7 +1613,7 @@ DEF_FUNC dict_richcompare, DRC_FRAME
     cmp dword [rbp - DRC_OP], 3     ; NE?
     je .drc_ret_true
     xor eax, eax                    ; False
-    mov edx, TAG_BOOL
+    RET_BOOL_RAX
     leave
     ret
 
@@ -1803,13 +1631,13 @@ DEF_FUNC dict_richcompare, DRC_FRAME
     je .drc_ret_false
 .drc_ret_true:
     mov eax, 1                      ; True
-    mov edx, TAG_BOOL
+    RET_BOOL_RAX
     leave
     ret
 
 .drc_ret_false:
     xor eax, eax                    ; False
-    mov edx, TAG_BOOL
+    RET_BOOL_RAX
     leave
     ret
 END_FUNC dict_richcompare
@@ -1852,6 +1680,7 @@ DEF_FUNC dict_reversed
     mov edx, TAG_PTR
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 END_FUNC dict_reversed
 
@@ -1876,19 +1705,15 @@ DEF_FUNC_BARE dict_rev_iter_next
     ; Check if entry at index has a valid key
     imul rax, rcx, DictEntry_size
     add rax, rsi
-    cmp byte [rax + DictEntry.key_tag], 0
-    je .dri_skip
-    cmp byte [rax + DictEntry.key_tag], DICT_TOMBSTONE
-    je .dri_skip
+    ENTRY_CLASSIFY rax, .dri_skip, .dri_skip
 
     ; Found a valid entry — save decremented index
     dec rcx
     mov [rdi + PyDictIterObject.it_index], rcx
 
     ; Return key
-    movzx edx, byte [rax + DictEntry.key_tag]
     mov rax, [rax + DictEntry.key]
-    INCREF_VAL rax, rdx
+    INCREF_V rax, rdx
     ret
 
 .dri_skip:
@@ -1965,6 +1790,8 @@ dict_number_methods:
     dq dict_nb_ior              ; nb_ior          +240 (dict inplace merge |=)
     dq 0                        ; nb_ifloor_divide +248
     dq 0                        ; nb_itrue_divide +256
+    dq 0 ; nb_matmul
+    dq 0 ; nb_imatmul
 
 ; Dict sequence methods (for 'in' operator)
 align 8
@@ -1991,14 +1818,14 @@ dict_type:
     dq dict_repr                ; tp_str
     extern hash_not_implemented
     dq hash_not_implemented     ; tp_hash (raises TypeError)
-    dq dict_type_call           ; tp_call
+    dq 0                ; tp_call  (instances are not callable)
     dq 0                        ; tp_getattr
     dq 0                        ; tp_setattr
     dq dict_richcompare         ; tp_richcompare
     dq dict_tp_iter             ; tp_iter
     dq 0                        ; tp_iternext
     dq 0                        ; tp_init
-    dq 0                        ; tp_new
+    dq dict_type_call       ; tp_new  (constructor)
     dq dict_number_methods      ; tp_as_number
     dq dict_sequence_methods    ; tp_as_sequence (for 'in' operator)
     dq dict_mapping_methods     ; tp_as_mapping
@@ -2009,6 +1836,7 @@ dict_type:
     dq 0                        ; tp_bases
     dq dict_traverse                        ; tp_traverse
     dq dict_clear_gc                        ; tp_clear
+    dq 0          ; tp_dictoffset
 
 ; Dict key iterator type
 align 8
@@ -2040,6 +1868,7 @@ dict_iter_type:
     dq 0                        ; tp_bases
     dq 0                        ; tp_traverse
     dq 0                        ; tp_clear
+    dq 0 ; tp_dictoffset
 
 ; Dict reverse key iterator type
 align 8
@@ -2071,6 +1900,7 @@ dict_rev_iter_type:
     dq 0                        ; tp_bases
     dq 0                        ; tp_traverse
     dq 0                        ; tp_clear
+    dq 0 ; tp_dictoffset
 
 ; Dict keys view sequence methods (len + contains)
 align 8
@@ -2126,6 +1956,7 @@ dict_keys_view_type:
     dq 0                        ; tp_bases
     dq 0                        ; tp_traverse
     dq 0                        ; tp_clear
+    dq 0 ; tp_dictoffset
 
 ; Dict values view type
 align 8
@@ -2157,6 +1988,7 @@ dict_values_view_type:
     dq 0                        ; tp_bases
     dq 0                        ; tp_traverse
     dq 0                        ; tp_clear
+    dq 0 ; tp_dictoffset
 
 ; Dict items view type
 align 8
@@ -2188,3 +2020,4 @@ dict_items_view_type:
     dq 0                        ; tp_bases
     dq 0                        ; tp_traverse
     dq 0                        ; tp_clear
+    dq 0 ; tp_dictoffset

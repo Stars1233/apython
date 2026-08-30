@@ -1,0 +1,34 @@
+_sre constants OK
+getcodesize OK
+compile OK
+match OK
+group OK
+start/end/span OK
+search OK
+no match OK
+fullmatch OK
+findall OK
+sub OK
+split OK
+groups OK
+__getitem__ OK
+regs OK
+subn OK
+subn count limit OK
+expand OK
+copy/deepcopy OK
+finditer OK
+scanner OK
+named __getitem__ OK
+groupdict OK
+finditer empty OK
+match attributes OK
+pattern attributes OK
+lastgroup (named) OK
+lastgroup (none) OK
+string group names OK
+pattern hash/eq OK
+callable sub OK
+callable subn OK
+callable subn count limit OK
+All _sre tests passed!

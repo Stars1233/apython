@@ -13,6 +13,7 @@
 %include "types.inc"
 %include "gc.inc"
 
+extern int_promote_mpz
 extern ap_malloc
 extern gc_alloc
 extern gc_track
@@ -24,6 +25,8 @@ extern obj_dealloc
 extern obj_decref
 extern str_from_cstr
 extern none_singleton
+extern bool_type
+extern exc_ValueError_type
 extern int_type
 extern type_type
 extern slice_traverse
@@ -71,18 +74,19 @@ DEF_FUNC slice_new
 .fill_fields:
     pop r9                  ; step_tag
     ; ob_refcnt=1, ob_type set by gc_alloc (or still set from pool)
-    mov [rax + PySliceObject.start], rbx
-    mov [rax + PySliceObject.start_tag], r14
-    mov [rax + PySliceObject.stop], r12
-    mov [rax + PySliceObject.stop_tag], r15
-    mov [rax + PySliceObject.step], r13
-    mov [rax + PySliceObject.step_tag], r9
-
-    ; INCREF all three (tag-aware)
     push rax
+
+    ; INCREF each while its tag is still around, then pack into a Value
     INCREF_VAL rbx, r14
     INCREF_VAL r12, r15
     INCREF_VAL r13, r9
+    V_PACK rbx, r14
+    V_PACK r12, r15
+    V_PACK r13, r9
+    mov rax, [rsp]
+    mov [rax + PySliceObject.start], rbx
+    mov [rax + PySliceObject.stop], r12
+    mov [rax + PySliceObject.step], r13
 
     ; Track in GC
     mov rdi, [rsp]          ; obj ptr saved on stack
@@ -108,14 +112,11 @@ DEF_FUNC slice_dealloc
     mov rbx, rdi
 
     mov rdi, [rbx + PySliceObject.start]
-    mov rsi, [rbx + PySliceObject.start_tag]
-    DECREF_VAL rdi, rsi
+    DECREF_V rdi, rsi
     mov rdi, [rbx + PySliceObject.stop]
-    mov rsi, [rbx + PySliceObject.stop_tag]
-    DECREF_VAL rdi, rsi
+    DECREF_V rdi, rsi
     mov rdi, [rbx + PySliceObject.step]
-    mov rsi, [rbx + PySliceObject.step_tag]
-    DECREF_VAL rdi, rsi
+    DECREF_V rdi, rsi
 
     ; Untrack from GC
     mov rdi, rbx
@@ -158,21 +159,28 @@ pyobj_to_i64:
     cmp esi, TAG_SMALLINT
     je .smallint
     ; Check for None: inline TAG_NONE or pointer-to-none_singleton
-    cmp esi, TAG_NONE
-    je .is_none
     lea rax, [rel none_singleton]
     cmp rdi, rax
     je .is_none
+    ; Everything below treats the payload as a PyIntObject, so it has to be
+    ; one: a float's payload is raw IEEE bits, and "abc"[::1.5] handed those
+    ; to INT_NEED_MPZ.
+    cmp esi, TAG_PTR
+    jne .not_an_index
+    mov rax, [rdi + PyObject.ob_type]
+    REQUIRE_INT_TYPE rax, rcx, .not_an_index
     ; GMP int: check if it fits in i64, clamp if not
     push rbp
     mov rbp, rsp
     push rdi                     ; save obj ptr
+    INT_NEED_MPZ rdi
     lea rdi, [rdi + PyIntObject.mpz]
     extern __gmpz_fits_slong_p
     call __gmpz_fits_slong_p wrt ..plt
     test eax, eax
     jz .gmp_clamp               ; doesn't fit → clamp
     pop rdi                      ; restore obj ptr
+    INT_NEED_MPZ rdi
     lea rdi, [rdi + PyIntObject.mpz]
     extern __gmpz_get_si
     call __gmpz_get_si wrt ..plt
@@ -181,6 +189,7 @@ pyobj_to_i64:
 .gmp_clamp:
     ; Value too large for i64 — clamp based on sign
     pop rdi                      ; restore obj ptr
+    INT_NEED_MPZ rdi
     lea rdi, [rdi + PyIntObject.mpz]
     extern __gmpz_cmp_si
     xor esi, esi               ; compare with 0
@@ -200,6 +209,10 @@ pyobj_to_i64:
 .is_none:
     mov rax, 0x7FFFFFFFFFFFFFFF  ; sentinel for "not specified"
     ret
+.not_an_index:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "slice indices must be integers or None"
+    call raise_exception
 END_FUNC pyobj_to_i64
 
 ;; ============================================================================
@@ -218,39 +231,30 @@ DEF_FUNC slice_indices
     mov rbx, rdi           ; slice
     mov r14, rsi           ; length
 
-    ; Check for None using both TAG_NONE and (none_singleton, TAG_PTR) forms.
-    ; This avoids collision between NONE_SENTINEL and sys.maxsize.
     extern none_singleton
 
     ; Get step (default 1)
-    cmp qword [rbx + PySliceObject.step_tag], TAG_NONE
-    je .step_is_none
-    cmp qword [rbx + PySliceObject.step_tag], TAG_PTR
-    jne .step_not_none
-    lea rcx, [rel none_singleton]
-    cmp [rbx + PySliceObject.step], rcx
-    je .step_is_none
-.step_not_none:
     mov rdi, [rbx + PySliceObject.step]
-    mov esi, [rbx + PySliceObject.step_tag]
+    IS_NONE rdi, rcx
+    je .step_is_none
+    V_UNPACK rdi, rsi
     call pyobj_to_i64
     jmp .have_step
 .step_is_none:
     mov rax, 1
 .have_step:
+    ; A zero step reaches `neg rcx` and then `div rcx` in every caller's
+    ; slice loop: "abc"[::0] and [10,11][10:0:0] were SIGFPE.  One check
+    ; here covers all six callers.
+    test rax, rax
+    jz .step_is_zero
     mov r15, rax           ; r15 = step
 
     ; Get start (default: 0 if step>0, length-1 if step<0)
-    cmp qword [rbx + PySliceObject.start_tag], TAG_NONE
-    je .start_is_none
-    cmp qword [rbx + PySliceObject.start_tag], TAG_PTR
-    jne .start_not_none
-    lea rcx, [rel none_singleton]
-    cmp [rbx + PySliceObject.start], rcx
-    je .start_is_none
-.start_not_none:
     mov rdi, [rbx + PySliceObject.start]
-    mov esi, [rbx + PySliceObject.start_tag]
+    IS_NONE rdi, rcx
+    je .start_is_none
+    V_UNPACK rdi, rsi
     call pyobj_to_i64
     jmp .have_start
 .start_is_none:
@@ -281,16 +285,10 @@ DEF_FUNC slice_indices
     mov r12, rax           ; r12 = start
 
     ; Get stop (default: length if step>0, -1 if step<0)
-    cmp qword [rbx + PySliceObject.stop_tag], TAG_NONE
-    je .stop_is_none
-    cmp qword [rbx + PySliceObject.stop_tag], TAG_PTR
-    jne .stop_not_none
-    lea rcx, [rel none_singleton]
-    cmp [rbx + PySliceObject.stop], rcx
-    je .stop_is_none
-.stop_not_none:
     mov rdi, [rbx + PySliceObject.stop]
-    mov esi, [rbx + PySliceObject.stop_tag]
+    IS_NONE rdi, rcx
+    je .stop_is_none
+    V_UNPACK rdi, rsi
     call pyobj_to_i64
     jmp .have_stop
 .stop_is_none:
@@ -336,6 +334,10 @@ DEF_FUNC slice_indices
     pop rbx
     leave
     ret
+.step_is_zero:
+    lea rdi, [rel exc_ValueError_type]
+    CSTRING rsi, "slice step cannot be zero"
+    call raise_exception
 END_FUNC slice_indices
 
 ;; ============================================================================
@@ -368,36 +370,45 @@ DEF_FUNC slice_getattr
     test eax, eax
     jz .sg_step
 
-    ; Unknown attribute
-    lea rdi, [rel exc_AttributeError_type]
-    CSTRING rsi, "slice object has no such attribute"
-    call raise_exception
-
-.sg_start:
-    mov rax, [rbx + PySliceObject.start]
-    mov rdx, [rbx + PySliceObject.start_tag]
-    INCREF_VAL rax, rdx
+    ; Unknown attribute.  Every other tp_getattr signals "not found" with a
+    ; NULL return and lets the caller decide; raising here meant
+    ; hasattr(slice(1,2), "indices") propagated the AttributeError instead of
+    ; answering False, and getattr(s, "x", default) could not reach its
+    ; default -- raise_exception never comes back.
+    RET_NULL
     pop r12
     pop rbx
     leave
+    ret
+
+.sg_start:
+    mov rax, [rbx + PySliceObject.start]
+    INCREF_V rax, rdx
+    V_UNPACK rax, rdx
+    pop r12
+    pop rbx
+    leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .sg_stop:
     mov rax, [rbx + PySliceObject.stop]
-    mov rdx, [rbx + PySliceObject.stop_tag]
-    INCREF_VAL rax, rdx
+    INCREF_V rax, rdx
+    V_UNPACK rax, rdx
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .sg_step:
     mov rax, [rbx + PySliceObject.step]
-    mov rdx, [rbx + PySliceObject.step_tag]
-    INCREF_VAL rax, rdx
+    INCREF_V rax, rdx
+    V_UNPACK rax, rdx
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 END_FUNC slice_getattr
 
@@ -424,8 +435,8 @@ DEF_FUNC slice_type_call
     ; slice(stop) → slice(None, stop, None)
     lea rdi, [rel none_singleton]  ; start = None
     mov ecx, TAG_PTR               ; start_tag
-    mov rsi, [rbx]                 ; stop payload
-    mov r8d, [rbx + 8]            ; stop_tag
+    mov rsi, [rbx]                 ; args[0] = stop
+    V_UNPACK rsi, r8
     lea rdx, [rel none_singleton]  ; step = None
     mov r9d, TAG_PTR               ; step_tag
     call slice_new
@@ -434,10 +445,10 @@ DEF_FUNC slice_type_call
 
 .stc_two:
     ; slice(start, stop) → slice(start, stop, None)
-    mov rdi, [rbx]             ; start payload
-    mov ecx, [rbx + 8]        ; start_tag
-    mov rsi, [rbx + 16]       ; stop payload
-    mov r8d, [rbx + 24]       ; stop_tag
+    mov rdi, [rbx]             ; args[0] = start
+    V_UNPACK rdi, rcx
+    mov rsi, [rbx + 8]         ; args[1] = stop
+    V_UNPACK rsi, r8
     lea rdx, [rel none_singleton]  ; step = None
     mov r9d, TAG_PTR           ; step_tag
     call slice_new
@@ -446,12 +457,12 @@ DEF_FUNC slice_type_call
 
 .stc_three:
     ; slice(start, stop, step)
-    mov rdi, [rbx]             ; start payload
-    mov ecx, [rbx + 8]        ; start_tag
-    mov rsi, [rbx + 16]       ; stop payload
-    mov r8d, [rbx + 24]       ; stop_tag
-    mov rdx, [rbx + 32]       ; step payload
-    mov r9d, [rbx + 40]       ; step_tag
+    mov rdi, [rbx]             ; args[0] = start
+    V_UNPACK rdi, rcx
+    mov rsi, [rbx + 8]         ; args[1] = stop
+    V_UNPACK rsi, r8
+    mov rdx, [rbx + 16]       ; step payload
+    V_UNPACK rdx, r9       ; args[2]
     call slice_new
     mov edx, TAG_PTR
     jmp .stc_done
@@ -492,14 +503,14 @@ slice_type:
     dq slice_repr             ; tp_repr
     dq slice_repr             ; tp_str
     dq 0                      ; tp_hash
-    dq slice_type_call        ; tp_call
+    dq 0                ; tp_call  (instances are not callable)
     dq slice_getattr          ; tp_getattr
     dq 0                      ; tp_setattr
     dq 0                      ; tp_richcompare
     dq 0                      ; tp_iter
     dq 0                      ; tp_iternext
     dq 0                      ; tp_init
-    dq 0                      ; tp_new
+    dq slice_type_call      ; tp_new  (constructor)
     dq 0                      ; tp_as_number
     dq 0                      ; tp_as_sequence
     dq 0                      ; tp_as_mapping
@@ -510,3 +521,4 @@ slice_type:
     dq 0                      ; tp_bases
     dq slice_traverse                        ; tp_traverse
     dq slice_clear_gc                        ; tp_clear
+    dq 0           ; tp_dictoffset

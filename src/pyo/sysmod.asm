@@ -17,6 +17,9 @@ extern str_from_cstr
 extern str_from_cstr_heap
 extern str_new
 extern str_type
+extern sys_write
+extern int_type
+extern bool_type
 extern int_from_i64
 extern int_to_i64
 extern none_singleton
@@ -70,8 +73,6 @@ DEF_FUNC sys_module_init, 32
     mov rdi, r15
     mov rsi, rax
     mov rdx, r14
-    mov ecx, TAG_PTR
-    mov r8d, TAG_PTR
     call dict_set
     pop rdi
     call obj_decref
@@ -89,7 +90,6 @@ DEF_FUNC sys_module_init, 32
     push rax
     mov rdi, r12
     mov rsi, rax
-    mov edx, TAG_PTR
     call list_append
     pop rdi
     call obj_decref
@@ -101,8 +101,6 @@ DEF_FUNC sys_module_init, 32
     mov rdi, r15
     mov rsi, rax
     mov rdx, r12
-    mov ecx, TAG_PTR
-    mov r8d, TAG_PTR
     call dict_set
     pop rdi
     call obj_decref
@@ -130,7 +128,6 @@ DEF_FUNC sys_module_init, 32
     push rax
     mov rdi, r13
     mov rsi, rax
-    mov edx, TAG_PTR
     call list_append
     pop rdi
     call obj_decref
@@ -148,8 +145,6 @@ DEF_FUNC sys_module_init, 32
     mov rdi, r15
     mov rsi, rax
     mov rdx, r13
-    mov ecx, TAG_PTR
-    mov r8d, TAG_PTR
     call dict_set
     pop rdi
     call obj_decref
@@ -166,9 +161,9 @@ DEF_FUNC sys_module_init, 32
     push rax
     mov rdi, r15
     mov rsi, rax               ; key = "maxsize" (str)
-    mov rdx, [rsp + 8]        ; value payload (SmallInt)
+    mov rdx, [rsp + 8]        ; value payload
     mov ecx, [rsp + 16]       ; value tag (from int_from_i64)
-    mov r8d, TAG_PTR           ; key tag (str is always TAG_PTR)
+    V_PACK rdx, rcx           ; dict_set takes Values
     call dict_set
     pop rdi
     call obj_decref            ; DECREF key string
@@ -185,8 +180,6 @@ DEF_FUNC sys_module_init, 32
     mov rdi, r15
     mov rsi, rax
     mov rdx, [rsp + 8]
-    mov ecx, TAG_PTR
-    mov r8d, TAG_PTR
     call dict_set
     pop rdi
     call obj_decref
@@ -203,8 +196,6 @@ DEF_FUNC sys_module_init, 32
     mov rdi, r15
     mov rsi, rax
     mov rdx, [rsp + 8]
-    mov ecx, TAG_PTR
-    mov r8d, TAG_PTR
     call dict_set
     pop rdi
     call obj_decref
@@ -216,31 +207,28 @@ DEF_FUNC sys_module_init, 32
     call tuple_new
     mov rbx, rax                ; rbx = version_info tuple
     mov r8, [rbx + PyTupleObject.ob_item]       ; payloads
-    mov r9, [rbx + PyTupleObject.ob_item_tags]  ; tags
     ; (3, 12, 0, 'final', 0)
-    ; slot 0: 3 (SmallInt)
+    ; slot 0: 3
     mov rdi, 3
+    V_PACK_I64 rdi, rcx
     mov [r8], rdi
-    mov byte [r9], TAG_SMALLINT
-    ; slot 1: 12 (SmallInt)
+    ; slot 1: 12
     mov rdi, 12
+    V_PACK_I64 rdi, rcx
     mov [r8 + 8], rdi
-    mov byte [r9 + 1], TAG_SMALLINT
-    ; slot 2: 0 (SmallInt)
+    ; slot 2: 0
     xor edi, edi
+    V_PACK_I64 rdi, rcx
     mov [r8 + 16], rdi
-    mov byte [r9 + 2], TAG_SMALLINT
     ; slot 3: 'final' (string, TAG_PTR)
     lea rdi, [rel sm_final]
     call str_from_cstr_heap
     mov r8, [rbx + PyTupleObject.ob_item]       ; reload payloads (clobbered)
-    mov r9, [rbx + PyTupleObject.ob_item_tags]  ; reload tags
     mov [r8 + 24], rax
-    mov byte [r9 + 3], TAG_PTR
-    ; slot 4: 0 (SmallInt)
+    ; slot 4: 0
     xor edi, edi
+    V_PACK_I64 rdi, rcx
     mov [r8 + 32], rdi
-    mov byte [r9 + 4], TAG_SMALLINT
 
     lea rdi, [rel sm_version_info]
     call str_from_cstr_heap
@@ -248,8 +236,6 @@ DEF_FUNC sys_module_init, 32
     mov rdi, r15
     mov rsi, rax
     mov rdx, rbx
-    mov ecx, TAG_PTR
-    mov r8d, TAG_PTR
     call dict_set
     pop rdi
     call obj_decref
@@ -267,8 +253,6 @@ DEF_FUNC sys_module_init, 32
     mov rdi, r15
     mov rsi, rax
     mov rdx, [rsp + 8]
-    mov ecx, TAG_PTR
-    mov r8d, TAG_PTR
     call dict_set
     pop rdi
     call obj_decref
@@ -285,8 +269,6 @@ DEF_FUNC sys_module_init, 32
     mov rdi, r15
     mov rsi, rax
     mov rdx, [rsp + 8]
-    mov ecx, TAG_PTR
-    mov r8d, TAG_PTR
     call dict_set
     pop rdi
     call obj_decref
@@ -302,8 +284,6 @@ DEF_FUNC sys_module_init, 32
     mov rdi, r15
     mov rsi, rax
     mov rdx, [rsp + 8]
-    mov ecx, TAG_PTR
-    mov r8d, TAG_PTR
     call dict_set
     pop rdi
     call obj_decref
@@ -323,8 +303,6 @@ DEF_FUNC sys_module_init, 32
     mov rdi, r15
     mov rsi, rax
     mov rdx, [rsp + 8]
-    mov ecx, TAG_PTR
-    mov r8d, TAG_PTR
     call dict_set
     pop rdi
     call obj_decref
@@ -343,8 +321,6 @@ DEF_FUNC sys_module_init, 32
     mov rdi, r15
     mov rsi, rax
     mov rdx, [rsp + 8]
-    mov ecx, TAG_PTR
-    mov r8d, TAG_PTR
     call dict_set
     pop rdi
     call obj_decref
@@ -363,8 +339,6 @@ DEF_FUNC sys_module_init, 32
     mov rdi, r15
     mov rsi, rax
     mov rdx, [rsp + 8]
-    mov ecx, TAG_PTR
-    mov r8d, TAG_PTR
     call dict_set
     pop rdi
     call obj_decref
@@ -382,8 +356,39 @@ DEF_FUNC sys_module_init, 32
     mov rdi, r15
     mov rsi, rax
     mov rdx, [rsp + 8]
-    mov ecx, TAG_PTR
-    mov r8d, TAG_PTR
+    call dict_set
+    pop rdi
+    call obj_decref
+    pop rdi
+    call obj_decref
+
+    ; --- sys.getrecursionlimit / sys.setrecursionlimit ---
+    lea rdi, [rel sys_getrecursionlimit_func]
+    lea rsi, [rel sm_getrecursionlimit]
+    call builtin_func_new
+    push rax
+    lea rdi, [rel sm_getrecursionlimit]
+    call str_from_cstr_heap
+    push rax
+    mov rdi, r15
+    mov rsi, rax
+    mov rdx, [rsp + 8]
+    call dict_set
+    pop rdi
+    call obj_decref
+    pop rdi
+    call obj_decref
+
+    lea rdi, [rel sys_setrecursionlimit_func]
+    lea rsi, [rel sm_setrecursionlimit]
+    call builtin_func_new
+    push rax
+    lea rdi, [rel sm_setrecursionlimit]
+    call str_from_cstr_heap
+    push rax
+    mov rdi, r15
+    mov rsi, rax
+    mov rdx, [rsp + 8]
     call dict_set
     pop rdi
     call obj_decref
@@ -400,8 +405,6 @@ DEF_FUNC sys_module_init, 32
     mov rdi, r15
     mov rsi, rax
     mov rdx, [rsp + 8]
-    mov ecx, TAG_PTR
-    mov r8d, TAG_PTR
     call dict_set
     pop rdi
     call obj_decref
@@ -428,8 +431,6 @@ DEF_FUNC sys_module_init, 32
     mov rdi, r15
     mov rsi, rax
     mov rdx, [rsp + 8]
-    mov ecx, TAG_PTR
-    mov r8d, TAG_PTR
     call dict_set
     pop rdi
     call obj_decref
@@ -447,8 +448,6 @@ DEF_FUNC sys_module_init, 32
     mov rdi, r15
     mov rsi, rax
     mov rdx, [rsp + 8]
-    mov ecx, TAG_PTR
-    mov r8d, TAG_PTR
     call dict_set
     pop rdi
     call obj_decref
@@ -466,8 +465,6 @@ DEF_FUNC sys_module_init, 32
     mov rdi, r15
     mov rsi, rax
     mov rdx, [rsp + 8]
-    mov ecx, TAG_PTR
-    mov r8d, TAG_PTR
     call dict_set
     pop rdi
     call obj_decref
@@ -489,8 +486,6 @@ DEF_FUNC sys_module_init, 32
     mov rdi, r14                ; sys.modules dict
     mov rsi, rax
     mov rdx, [rel sys_module_obj]
-    mov ecx, TAG_PTR
-    mov r8d, TAG_PTR
     call dict_set
     pop rdi
     call obj_decref
@@ -505,25 +500,82 @@ DEF_FUNC sys_module_init, 32
 END_FUNC sys_module_init
 
 ; ============================================================================
+; sys.getrecursionlimit() / sys.setrecursionlimit(n)
+; The interpreter has had a recursion counter since the bare SIGSEGV was
+; replaced with a RecursionError; these expose the limit it checks.
+; ============================================================================
+DEF_FUNC sys_getrecursionlimit_func
+    mov rax, [rel recursion_limit]
+    extern recursion_limit
+    mov edx, TAG_SMALLINT
+    leave
+    V_PACK rax, rdx
+    ret
+END_FUNC sys_getrecursionlimit_func
+
+DEF_FUNC sys_setrecursionlimit_func
+    cmp rsi, 1
+    jne .srl_error
+    mov rdi, [rdi]
+    V_UNPACK rdi, rdx
+    extern int_is_integer
+    push rdi
+    push rdx
+    call int_is_integer
+    pop rdx
+    pop rdi
+    test eax, eax
+    jz .srl_error
+    extern int_to_i64
+    call int_to_i64
+    cmp rax, 1
+    jl .srl_value_error
+    mov [rel recursion_limit], rax
+    lea rax, [rel none_singleton]
+    inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
+    leave
+    V_PACK rax, rdx
+    ret
+.srl_error:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "setrecursionlimit() argument must be an int"
+    call raise_exception
+.srl_value_error:
+    extern exc_ValueError_type
+    lea rdi, [rel exc_ValueError_type]
+    CSTRING rsi, "recursion limit must be greater or equal than 1"
+    call raise_exception
+END_FUNC sys_setrecursionlimit_func
+
+; ============================================================================
 ; sys_exit_func(PyObject **args, int64_t nargs) -> PyObject*
 ; sys.exit([code]) — exit the process
 ; ============================================================================
 DEF_FUNC sys_exit_func
-    cmp rsi, 0
-    je .exit_0
+    ; sys.exit raises SystemExit; it does not call the exit syscall.  Calling
+    ; it directly skipped every `finally` block and context-manager __exit__
+    ; between here and the top, and made `except SystemExit` unwritable.
+    ; main.asm turns an uncaught SystemExit into the process status.
+    xor edx, edx                ; no argument -> SystemExit()
     cmp rsi, 1
-    jne .exit_0
-
-    ; Get exit code from args[0]
-    mov rdx, [rdi + 8]        ; args[0] tag
-    mov rdi, [rdi]
-    call int_to_i64
-    mov edi, eax
-    call sys_exit
-
-.exit_0:
-    xor edi, edi
-    call sys_exit
+    jne .se_raise
+    mov rdx, [rdi]              ; args[0], already a Value
+    lea rax, [rel none_singleton]
+    cmp rdx, rax
+    jne .se_raise
+    xor edx, edx                ; sys.exit(None) is SystemExit(None) -> args ()
+.se_raise:
+    mov rsi, rdx
+    lea rdi, [rel exc_SystemExit_type]
+    xor edx, edx
+    extern exc_SystemExit_type
+    extern exc_new
+    call exc_new
+    mov rdi, rax
+    extern raise_exception_obj
+    call raise_exception_obj
+    ud2
 END_FUNC sys_exit_func
 
 ; ============================================================================
@@ -534,6 +586,7 @@ DEF_FUNC sys_getdefaultencoding_func
     lea rdi, [rel sm_utf8]
     call str_from_cstr_heap
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 END_FUNC sys_getdefaultencoding_func
 
@@ -547,6 +600,7 @@ DEF_FUNC sys_get_int_max_str_digits_func
     mov rdi, [rel sys_int_max_str_digits]
     call int_from_i64
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 .get_imsd_error:
     extern exc_TypeError_type
@@ -563,8 +617,9 @@ DEF_FUNC sys_set_int_max_str_digits_func
     cmp rsi, 1
     jne .set_imsd_error
 
-    mov edx, [rdi + 8]
-    mov rdi, [rdi]
+    mov rdi, [rdi]            ; args[0]
+
+    V_UNPACK rdi, rdx
     call int_to_i64
     ; rax = new limit
     test rax, rax
@@ -578,6 +633,7 @@ DEF_FUNC sys_set_int_max_str_digits_func
     inc qword [rax + PyObject.ob_refcnt]
     mov edx, TAG_PTR
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .set_imsd_value_error:
@@ -642,18 +698,15 @@ DEF_FUNC sys_path_add_script_dir
     mov rdi, [rel sys_path_list]
     ; Set list item 0
     mov rcx, [rdi + PyListObject.ob_item]       ; payloads
-    mov r8, [rdi + PyListObject.ob_item_tags]   ; tags
     ; DECREF old item[0]
     mov rdi, [rcx]
-    movzx esi, byte [r8]
-    DECREF_VAL rdi, rsi
+    DECREF_V rdi, rsi
     pop rax                     ; restore new path payload
     pop rdx                     ; restore new path tag
+    V_PACK rax, rdx
     mov rdi, [rel sys_path_list]
     mov rcx, [rdi + PyListObject.ob_item]
-    mov r8, [rdi + PyListObject.ob_item_tags]
-    mov [rcx], rax              ; store new path payload
-    mov byte [r8], dl           ; store actual tag
+    mov [rcx], rax
 
     pop r12
     pop rbx
@@ -665,6 +718,7 @@ END_FUNC sys_path_add_script_dir
 ; Data
 ; ============================================================================
 section .rodata
+sys_exit_nl: db 10
 
 sm_sys:          db "sys", 0
 sm_modules:      db "modules", 0
@@ -689,6 +743,8 @@ sm_stdin_name:   db "<stdin>", 0
 sm_mode_w:       db "w", 0
 sm_mode_r:       db "r", 0
 sm_exit:         db "exit", 0
+sm_getrecursionlimit: db "getrecursionlimit", 0
+sm_setrecursionlimit: db "setrecursionlimit", 0
 sm_byteorder:    db "byteorder", 0
 sm_little:       db "little", 0
 sm_getdefaultencoding: db "getdefaultencoding", 0

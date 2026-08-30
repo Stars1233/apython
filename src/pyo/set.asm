@@ -15,6 +15,8 @@ extern obj_decref
 extern obj_dealloc
 extern obj_incref
 extern str_type
+extern eval_exception_unwind
+extern obj_richcompare_bool
 extern ap_strcmp
 extern ap_memset
 extern fatal_error
@@ -26,14 +28,12 @@ extern set_clear_gc
 ; Set entry layout constants
 SET_ENTRY_HASH    equ 0
 SET_ENTRY_KEY     equ 8
-SET_ENTRY_KEY_TAG equ 16
-SET_ENTRY_SIZE    equ 24
+SET_ENTRY_SIZE    equ 16
 
 ; Initial capacity (must be power of 2)
 SET_INIT_CAP equ 8
 
 ; Tombstone marker for deleted entries (must not collide with any tag)
-SET_TOMBSTONE equ 0xDEAD
 
 ;; ============================================================================
 ;; set_new() -> PySetObject* (uses PyDictObject layout)
@@ -75,67 +75,28 @@ END_FUNC set_new
 
 ;; ============================================================================
 ;; set_keys_equal(a, b, a_tag, b_tag) -> int (1=equal, 0=not)
-;; Internal helper: payload+tag fast path, TAG_PTR guard
+;;
+;; Was an identity check plus a string compare, and nothing else: no
+;; cross-type numeric equality, so 1.0 in {1} was False where the same
+;; lookup in a dict succeeded, and no __eq__, so a user class could never
+;; find its own key.  Set membership is PyObject_RichCompareBool, the same
+;; as everywhere else.
 ;; rdi=a payload, rsi=b payload, rdx=a_tag, rcx=b_tag
 ;; ============================================================================
 DEF_FUNC_LOCAL set_keys_equal
-    ; Fast path: both payload AND tag identical → equal
-    ; Handles SmallInt==SmallInt, same heap ptr
-    cmp rdi, rsi
-    jne .ske_diff_payload
-    cmp rdx, rcx
-    jne .ske_diff_payload
-    mov eax, 1
+    V_PACK rdi, rdx             ; both are immediates or pointers, so the
+    V_PACK rsi, rcx             ; round-trip cannot box anything
+    mov edx, PY_EQ
+    call obj_richcompare_bool
+    cmp eax, -1
+    je .ske_error
     leave
     ret
 
-.ske_diff_payload:
-    ; If either is not TAG_PTR, can't be equal
-    cmp edx, TAG_PTR
-    jne .ske_not_equal
-    cmp ecx, TAG_PTR
-    jne .ske_not_equal
-
-    ; Both heap ptrs with different addresses — check string equality
-    push rbx
-    push r12
-    mov rbx, rdi
-    mov r12, rsi
-
-    mov rax, [rbx + PyObject.ob_type]
-    lea rcx, [rel str_type]
-    cmp rax, rcx
-    jne .ske_ne_pop2
-
-    mov rax, [r12 + PyObject.ob_type]
-    cmp rax, rcx
-    jne .ske_ne_pop2
-
-    ; Both strings — compare data
-    lea rdi, [rbx + PyStrObject.data]
-    lea rsi, [r12 + PyStrObject.data]
-    call ap_strcmp
-    test eax, eax
-    jnz .ske_ne_pop2
-
-    ; Equal strings
-    mov eax, 1
-    pop r12
-    pop rbx
+.ske_error:
+    ; The caller has no error channel; the exception is already pending.
     leave
-    ret
-
-.ske_ne_pop2:
-    xor eax, eax
-    pop r12
-    pop rbx
-    leave
-    ret
-
-.ske_not_equal:
-    xor eax, eax
-    leave
-    ret
+    jmp eval_exception_unwind
 END_FUNC set_keys_equal
 
 ;; ============================================================================
@@ -177,14 +138,8 @@ DEF_FUNC_LOCAL set_find_slot
     imul rdx, rcx, SET_ENTRY_SIZE
     add rax, rdx                ; rax = entry ptr
 
-    ; Empty slot? Check key_tag (TAG_NULL=0 means empty)
+    SET_ENTRY_CLASSIFY rax, .found_empty, .find_next
     mov rdi, [rax + SET_ENTRY_KEY]
-    cmp qword [rax + SET_ENTRY_KEY_TAG], 0
-    je .found_empty
-
-    ; Tombstone? Continue probing past deleted entries
-    cmp qword [rax + SET_ENTRY_KEY_TAG], SET_TOMBSTONE
-    je .find_next
 
     ; Hash match?
     cmp r13, [rax + SET_ENTRY_HASH]
@@ -194,7 +149,8 @@ DEF_FUNC_LOCAL set_find_slot
     ; rdi = entry.key (already loaded above)
     push rcx                    ; save slot
     push rax                    ; save entry ptr
-    mov rdx, [rax + SET_ENTRY_KEY_TAG]  ; a_tag (entry key)
+
+    V_UNPACK rdi, rdx           ; set_keys_equal takes (payload, tag)
     mov rsi, r12                        ; b = lookup key
     mov rcx, [rbp - SFS_KEY_TAG]        ; b_tag (lookup key tag)
     call set_keys_equal
@@ -285,11 +241,8 @@ DEF_FUNC_LOCAL set_resize
     imul rax, rcx, SET_ENTRY_SIZE
     add rax, r12                ; rax = old entry ptr
 
-    ; Skip empty slots (TAG_NULL=0) and tombstones (SET_TOMBSTONE)
-    cmp qword [rax + SET_ENTRY_KEY_TAG], 0
-    je .rehash_next
-    cmp qword [rax + SET_ENTRY_KEY_TAG], SET_TOMBSTONE
-    je .rehash_next
+    ; Skip slots that are not occupied
+    SET_ENTRY_CLASSIFY rax, .rehash_next, .rehash_next
 
     ; Compute new slot: hash & (new_capacity - 1)
     push rcx                    ; save outer index
@@ -301,13 +254,12 @@ DEF_FUNC_LOCAL set_resize
     ; Save entry data
     push qword [rax + SET_ENTRY_HASH]
     push qword [rax + SET_ENTRY_KEY]
-    push qword [rax + SET_ENTRY_KEY_TAG]
 
     ; Linear probe in new table to find empty slot
 .rehash_probe:
     imul rax, rcx, SET_ENTRY_SIZE
     add rax, r15                ; new entry ptr
-    cmp qword [rax + SET_ENTRY_KEY_TAG], 0
+    cmp qword [rax + SET_ENTRY_KEY], 0   ; occupied?
     je .rehash_insert
 
     inc rcx
@@ -318,7 +270,6 @@ DEF_FUNC_LOCAL set_resize
 
 .rehash_insert:
     ; rax = target entry ptr in new table
-    pop qword [rax + SET_ENTRY_KEY_TAG]
     pop qword [rax + SET_ENTRY_KEY]
     pop qword [rax + SET_ENTRY_HASH]
 
@@ -344,7 +295,7 @@ END_FUNC set_resize
 
 ;; ============================================================================
 ;; set_add(set, key, key_tag) -> void
-;; Add a key to the set. rdx = key_tag.
+;; set_add(rdi=set, rsi=key Value) -> int
 ;; ============================================================================
 DEF_FUNC set_add
     push rbx
@@ -352,6 +303,7 @@ DEF_FUNC set_add
     push r13
     push r14
 
+    V_UNPACK rsi, rdx           ; decode the key Value
     mov rbx, rdi                ; set
     mov r12, rsi                ; key
     mov r14, rdx                ; key_tag
@@ -359,6 +311,7 @@ DEF_FUNC set_add
     ; Hash the key
     mov rdi, r12
     mov rsi, r14                ; key_tag (saved from rdx on entry)
+    V_PACK rdi, rsi
     call obj_hash
     mov r13, rax                ; r13 = hash
 
@@ -374,15 +327,11 @@ DEF_FUNC set_add
     jnz .done                   ; key already exists, do nothing
 
     ; --- Insert new entry ---
-    ; Store hash and key
+    ; Store hash and key; INCREF while the tag is in hand, then pack
     mov [rax + SET_ENTRY_HASH], r13
-    mov [rax + SET_ENTRY_KEY], r12
-
-    ; Store key tag from caller
-    mov [rax + SET_ENTRY_KEY_TAG], r14
-
-    ; INCREF key (tag-aware)
     INCREF_VAL r12, r14
+    V_PACK r12, r14
+    mov [rax + SET_ENTRY_KEY], r12
 
     ; Increment ob_size
     inc qword [rbx + PyDictObject.ob_size]
@@ -420,6 +369,7 @@ DEF_FUNC set_contains
     push r13
     push r14
 
+    V_UNPACK rsi, rdx           ; decode the key Value
     mov rbx, rdi                ; set
     mov r12, rsi                ; key
     mov r14, rdx                ; key_tag
@@ -427,6 +377,7 @@ DEF_FUNC set_contains
     ; Hash the key
     mov rdi, r12
     mov rsi, r14                ; key_tag
+    V_PACK rdi, rsi
     call obj_hash
     mov r13, rax                ; r13 = hash
 
@@ -457,6 +408,8 @@ SRC_OTHER equ 16
 SRC_OP    equ 24
 SRC_FRAME equ 24
 DEF_FUNC set_richcompare, SRC_FRAME
+    V_UNPACK rdi, rcx           ; left  Value -> (payload, tag)
+    V_UNPACK rsi, r8            ; right Value -> (payload, tag)
     push rbx
     push r12
     push r13
@@ -510,18 +463,14 @@ DEF_FUNC set_richcompare, SRC_FRAME
     ; Get entry at index
     imul rax, rcx, SET_ENTRY_SIZE
     add rax, [rbx + PyDictObject.entries]
-    ; Check if occupied (key_tag != 0 and != tombstone)
-    movzx edx, word [rax + SET_ENTRY_KEY_TAG]
-    test edx, edx
-    jz .src_eq_next
-    cmp edx, SET_TOMBSTONE
+    ; Occupied entries have a non-zero key Value
+    cmp qword [rax + SET_ENTRY_KEY], 0
     je .src_eq_next
 
     ; Entry is occupied — check if key is in other set
     push rcx
     mov rdi, r12               ; other set
     mov rsi, [rax + SET_ENTRY_KEY]   ; key
-    movzx edx, word [rax + SET_ENTRY_KEY_TAG]
     call set_contains
     pop rcx
     test eax, eax
@@ -542,15 +491,11 @@ DEF_FUNC set_richcompare, SRC_FRAME
     jge .src_true
     imul rax, rcx, SET_ENTRY_SIZE
     add rax, [rbx + PyDictObject.entries]
-    movzx edx, word [rax + SET_ENTRY_KEY_TAG]
-    test edx, edx
-    jz .src_le_next
-    cmp edx, SET_TOMBSTONE
+    cmp qword [rax + SET_ENTRY_KEY], 0   ; occupied?
     je .src_le_next
     push rcx
     mov rdi, r12
     mov rsi, [rax + SET_ENTRY_KEY]
-    movzx edx, word [rax + SET_ENTRY_KEY_TAG]
     call set_contains
     pop rcx
     test eax, eax
@@ -570,15 +515,11 @@ DEF_FUNC set_richcompare, SRC_FRAME
     jge .src_true
     imul rax, rcx, SET_ENTRY_SIZE
     add rax, [rbx + PyDictObject.entries]
-    movzx edx, word [rax + SET_ENTRY_KEY_TAG]
-    test edx, edx
-    jz .src_ge_next
-    cmp edx, SET_TOMBSTONE
+    cmp qword [rax + SET_ENTRY_KEY], 0   ; occupied?
     je .src_ge_next
     push rcx
     mov rdi, r12
     mov rsi, [rax + SET_ENTRY_KEY]
-    movzx edx, word [rax + SET_ENTRY_KEY_TAG]
     call set_contains
     pop rcx
     test eax, eax
@@ -666,6 +607,7 @@ DEF_FUNC set_remove, SR_KEY_TAG
     push r14
     push r15
 
+    V_UNPACK rsi, rdx           ; decode the key Value
     mov rbx, rdi                ; set
     mov r12, rsi                ; key
     mov [rbp - SR_KEY_TAG], rdx ; save key_tag
@@ -673,6 +615,7 @@ DEF_FUNC set_remove, SR_KEY_TAG
     ; Hash the key
     mov rdi, r12
     mov rsi, rdx                ; key_tag
+    V_PACK rdi, rsi
     call obj_hash
     mov r13, rax                ; hash
 
@@ -694,12 +637,7 @@ DEF_FUNC set_remove, SR_KEY_TAG
     add rax, rdx
 
     mov rdi, [rax + SET_ENTRY_KEY]
-    cmp qword [rax + SET_ENTRY_KEY_TAG], 0
-    je .sr_not_found
-
-    ; Skip tombstones — continue probing
-    cmp qword [rax + SET_ENTRY_KEY_TAG], SET_TOMBSTONE
-    je .sr_next
+    SET_ENTRY_CLASSIFY rax, .sr_not_found, .sr_next
 
     cmp r13, [rax + SET_ENTRY_HASH]
     jne .sr_next
@@ -707,7 +645,8 @@ DEF_FUNC set_remove, SR_KEY_TAG
     ; rdi = entry.key (already loaded)
     push rcx                    ; save slot
     push rax                    ; save entry ptr
-    mov rdx, [rax + SET_ENTRY_KEY_TAG]  ; a_tag (entry key)
+
+    V_UNPACK rdi, rdx           ; set_keys_equal takes (payload, tag)
     mov rsi, r12                        ; b = lookup key
     mov rcx, [rbp - SR_KEY_TAG]         ; b_tag (lookup key tag)
     call set_keys_equal
@@ -718,9 +657,9 @@ DEF_FUNC set_remove, SR_KEY_TAG
 
     ; Found: tombstone entry, DECREF key, decrement size
     mov rdi, [rdx + SET_ENTRY_KEY]
-    mov rsi, [rdx + SET_ENTRY_KEY_TAG]
+    V_UNPACK rdi, rsi
     mov qword [rdx + SET_ENTRY_KEY], 0
-    mov qword [rdx + SET_ENTRY_KEY_TAG], SET_TOMBSTONE  ; tombstone, not empty
+    mov qword [rdx + SET_ENTRY_HASH], ENTRY_TOMBSTONE_HASH   ; tombstone
     DECREF_VAL rdi, rsi
     dec qword [rbx + PyDictObject.ob_size]
     inc qword [rbx + PyDictObject.dk_tombstones]
@@ -769,15 +708,12 @@ DEF_FUNC set_dealloc
     imul rax, r14, SET_ENTRY_SIZE
     add rax, r12
 
-    ; Skip empty slots (TAG_NULL=0) and tombstones (SET_TOMBSTONE)
-    cmp qword [rax + SET_ENTRY_KEY_TAG], 0
-    je .dealloc_next
-    cmp qword [rax + SET_ENTRY_KEY_TAG], SET_TOMBSTONE
-    je .dealloc_next
+    ; Skip slots that are not occupied
+    SET_ENTRY_CLASSIFY rax, .dealloc_next, .dealloc_next
 
     ; DECREF key (fat value)
     mov rdi, [rax + SET_ENTRY_KEY]
-    mov rsi, [rax + SET_ENTRY_KEY_TAG]
+    V_UNPACK rdi, rsi
     DECREF_VAL rdi, rsi
 
 .dealloc_next:
@@ -821,12 +757,11 @@ DEF_FUNC set_type_call, STC_FRAME
     jne .stc_error
 
     ; set(iterable): create set, iterate and add
-    mov r12, [rsi]          ; iterable payload
-    mov rcx, [rsi + 8]     ; iterable tag
+    mov r12, [rsi]          ; args[0]
 
-    ; Check iterable is a pointer type before dereferencing
-    cmp ecx, TAG_PTR
-    jne .stc_not_iterable
+    ; Only a heap pointer can be iterable
+    V_TEST_PTR r12, rcx
+    ja .stc_not_iterable
 
     call set_new
     mov rbx, rax            ; rbx = new set
@@ -846,6 +781,7 @@ DEF_FUNC set_type_call, STC_FRAME
     mov rax, [rdi + PyObject.ob_type]
     mov rax, [rax + PyTypeObject.tp_iternext]
     call rax
+    V_UNPACK rax, rdx           ; tp_iternext returns a Value
     test edx, edx           ; check tag (NULL = exhausted)
     jz .stc_iter_done
 
@@ -856,6 +792,7 @@ DEF_FUNC set_type_call, STC_FRAME
     push rax                ; save key payload
     push rdx                ; save key tag
     push rdx                ; alignment padding (3 pushes = odd, matches ABI)
+    V_PACK rsi, rdx         ; set_add takes a key Value
     call set_add
     add rsp, 8              ; drop alignment padding
     pop rsi                 ; key tag
@@ -963,18 +900,13 @@ DEF_FUNC_BARE set_iter_next
     imul rax, rcx, SET_ENTRY_SIZE
     add rax, rsi
     mov r8, [rax + SET_ENTRY_KEY]
-    cmp qword [rax + SET_ENTRY_KEY_TAG], 0
-    je .si_skip
-    ; Skip tombstones
-    cmp qword [rax + SET_ENTRY_KEY_TAG], SET_TOMBSTONE
-    je .si_skip
+    SET_ENTRY_CLASSIFY rax, .si_skip, .si_skip
 
-    ; Found a valid entry -- return the key with tag
+    ; Found a valid entry -- return the key Value
     inc rcx
     mov [rdi + PyDictIterObject.it_index], rcx
-    mov rdx, [rax + SET_ENTRY_KEY_TAG]  ; key tag
     mov rax, r8
-    INCREF_VAL rax, rdx
+    INCREF_V rax, rdx
     ret
 
 .si_skip:
@@ -1034,10 +966,9 @@ DEF_FUNC frozenset_type_call, FTC_FRAME
     jne .ftc_error
 
     ; frozenset(iterable): create set, iterate and add, then set type
-    mov r12, [rsi]          ; iterable payload
-    mov rcx, [rsi + 8]     ; iterable tag
-    cmp ecx, TAG_PTR
-    jne .ftc_not_iterable
+    mov r12, [rsi]          ; args[0]
+    V_TEST_PTR r12, rcx
+    ja .ftc_not_iterable
 
     call set_new
     mov rbx, rax
@@ -1056,6 +987,7 @@ DEF_FUNC frozenset_type_call, FTC_FRAME
     mov rax, [rdi + PyObject.ob_type]
     mov rax, [rax + PyTypeObject.tp_iternext]
     call rax
+    V_UNPACK rax, rdx           ; tp_iternext returns a Value
     test edx, edx
     jz .ftc_iter_done
 
@@ -1064,6 +996,7 @@ DEF_FUNC frozenset_type_call, FTC_FRAME
     push rax
     push rdx
     push rdx
+    V_PACK rsi, rdx         ; set_add takes a key Value
     call set_add
     add rsp, 8
     pop rsi
@@ -1124,10 +1057,8 @@ SNB_FRAME equ 32
 
 ;; set_nb_or(left, right, ltag, rtag) -> new set (union)
 DEF_FUNC set_nb_or, SNB_FRAME
-    mov [rbp - 32], rdi         ; args[0].payload = left
-    mov [rbp - 24], rdx         ; args[0].tag = ltag
-    mov [rbp - 16], rsi         ; args[1].payload = right
-    mov [rbp - 8], rcx          ; args[1].tag = rtag
+    mov [rbp - 32], rdi         ; args[0] = left
+    mov [rbp - 24], rsi         ; args[1] = right
     lea rdi, [rbp - 32]
     mov esi, 2
     call set_method_union
@@ -1137,10 +1068,8 @@ END_FUNC set_nb_or
 
 ;; set_nb_and(left, right, ltag, rtag) -> new set (intersection)
 DEF_FUNC set_nb_and, SNB_FRAME
-    mov [rbp - 32], rdi
-    mov [rbp - 24], rdx
-    mov [rbp - 16], rsi
-    mov [rbp - 8], rcx
+    mov [rbp - 32], rdi         ; args[0] = left
+    mov [rbp - 24], rsi         ; args[1] = right
     lea rdi, [rbp - 32]
     mov esi, 2
     call set_method_intersection
@@ -1150,10 +1079,8 @@ END_FUNC set_nb_and
 
 ;; set_nb_sub(left, right, ltag, rtag) -> new set (difference)
 DEF_FUNC set_nb_sub, SNB_FRAME
-    mov [rbp - 32], rdi
-    mov [rbp - 24], rdx
-    mov [rbp - 16], rsi
-    mov [rbp - 8], rcx
+    mov [rbp - 32], rdi         ; args[0] = left
+    mov [rbp - 24], rsi         ; args[1] = right
     lea rdi, [rbp - 32]
     mov esi, 2
     call set_method_difference
@@ -1163,10 +1090,8 @@ END_FUNC set_nb_sub
 
 ;; set_nb_xor(left, right, ltag, rtag) -> new set (symmetric_difference)
 DEF_FUNC set_nb_xor, SNB_FRAME
-    mov [rbp - 32], rdi
-    mov [rbp - 24], rdx
-    mov [rbp - 16], rsi
-    mov [rbp - 8], rcx
+    mov [rbp - 32], rdi         ; args[0] = left
+    mov [rbp - 24], rsi         ; args[1] = right
     lea rdi, [rbp - 32]
     mov esi, 2
     call set_method_symmetric_difference
@@ -1222,6 +1147,8 @@ set_number_methods:
     dq 0                        ; nb_ior          +240
     dq 0                        ; nb_ifloor_divide +248
     dq 0                        ; nb_itrue_divide +256
+    dq 0 ; nb_matmul
+    dq 0 ; nb_imatmul
 
 ; Set sequence methods (for sq_contains -> "in" operator, and sq_length -> len())
 align 8
@@ -1249,24 +1176,25 @@ set_type:
     dq set_repr                 ; tp_str
     extern hash_not_implemented
     dq hash_not_implemented     ; tp_hash (raises TypeError)
-    dq set_type_call            ; tp_call
+    dq 0                ; tp_call  (instances are not callable)
     dq 0                        ; tp_getattr
     dq 0                        ; tp_setattr
     dq set_richcompare          ; tp_richcompare
     dq set_tp_iter              ; tp_iter
     dq 0                        ; tp_iternext
     dq 0                        ; tp_init
-    dq 0                        ; tp_new
+    dq set_type_call        ; tp_new  (constructor)
     dq set_number_methods       ; tp_as_number
     dq set_seq_methods          ; tp_as_sequence
     dq 0                        ; tp_as_mapping
     dq 0                        ; tp_base
     dq 0                        ; tp_dict
     dq 0                        ; tp_mro
-    dq TYPE_FLAG_HAVE_GC                        ; tp_flags
+    dq TYPE_FLAG_HAVE_GC | TYPE_FLAG_SET_SUBCLASS ; tp_flags
     dq 0                        ; tp_bases
     dq set_traverse                        ; tp_traverse
     dq set_clear_gc                        ; tp_clear
+    dq 0         ; tp_dictoffset
 
 ; Frozenset type object
 align 8
@@ -1280,24 +1208,25 @@ frozenset_type:
     dq set_repr                 ; tp_repr (TODO: frozenset({...}) format)
     dq set_repr                 ; tp_str
     dq 0                        ; tp_hash (TODO: implement)
-    dq frozenset_type_call      ; tp_call
+    dq 0                ; tp_call  (instances are not callable)
     dq 0                        ; tp_getattr
     dq 0                        ; tp_setattr
     dq set_richcompare          ; tp_richcompare
     dq set_tp_iter              ; tp_iter (reuse set iter)
     dq 0                        ; tp_iternext
     dq 0                        ; tp_init
-    dq 0                        ; tp_new
+    dq frozenset_type_call  ; tp_new  (constructor)
     dq set_number_methods       ; tp_as_number
     dq set_seq_methods          ; tp_as_sequence (reuse set methods)
     dq 0                        ; tp_as_mapping
     dq 0                        ; tp_base
     dq 0                        ; tp_dict
     dq 0                        ; tp_mro
-    dq TYPE_FLAG_HAVE_GC                        ; tp_flags
+    dq TYPE_FLAG_HAVE_GC | TYPE_FLAG_SET_SUBCLASS ; tp_flags
     dq 0                        ; tp_bases
     dq set_traverse                        ; tp_traverse
     dq set_clear_gc                        ; tp_clear
+    dq 0         ; tp_dictoffset
 
 ; Set iterator type
 align 8
@@ -1329,3 +1258,4 @@ set_iter_type:
     dq 0                        ; tp_bases
     dq 0                        ; tp_traverse
     dq 0                        ; tp_clear
+    dq 0 ; tp_dictoffset

@@ -1,4 +1,11 @@
-# Test _sre module basic functionality
+# Test the _sre module: constants, compile, match objects, and the
+# pattern methods built on them.
+#
+# This test has no CPython oracle.  It feeds hand-written SRE bytecode to
+# _sre.compile(), a private API that does not validate what it is given, and
+# CPython segfaults on the group pattern below.  So run_tests.sh compares
+# against the recorded transcript in tests/expected/test_sre.txt instead.
+# Every step here asserts, so the transcript records a verified run.
 import _sre
 
 # Test that constants exist

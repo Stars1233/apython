@@ -4,6 +4,7 @@
 %include "object.inc"
 %include "types.inc"
 
+extern none_singleton
 extern ap_free
 extern ap_strcmp
 extern obj_decref
@@ -48,6 +49,13 @@ DEF_FUNC code_dealloc
     jz .skip_kinds
     call obj_decref
 .skip_kinds:
+
+    ; DECREF co_linetable
+    mov rdi, [rbx + PyCodeObject.co_linetable]
+    test rdi, rdi
+    jz .skip_linetable
+    call obj_decref
+.skip_linetable:
 
     ; DECREF co_filename
     mov rdi, [rbx + PyCodeObject.co_filename]
@@ -129,6 +137,7 @@ DEF_FUNC code_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .return_kwonlyargcount:
@@ -137,6 +146,7 @@ DEF_FUNC code_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .return_argcount:
@@ -145,6 +155,7 @@ DEF_FUNC code_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .return_varnames:
@@ -156,14 +167,16 @@ DEF_FUNC code_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .return_none:
     xor eax, eax
-    mov edx, TAG_NONE
+    RET_NONE
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 END_FUNC code_getattr
 
@@ -205,3 +218,4 @@ code_type:
     dq 0                ; tp_bases
     dq 0                ; tp_traverse
     dq 0                ; tp_clear
+    dq 0 ; tp_dictoffset

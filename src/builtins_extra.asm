@@ -8,8 +8,12 @@
 %include "frame.inc"
 
 ; External symbols used
+extern int_promote_mpz
 extern int_from_i64
 extern int_to_i64
+extern obj_as_index
+extern int_base_str
+extern int_is_integer
 extern __gmpz_fits_slong_p
 extern int_neg
 extern int_add
@@ -76,17 +80,15 @@ DEF_FUNC builtin_abs
 
     mov rbx, [rdi]
 
-    cmp qword [rdi + 8], TAG_SMALLINT
-    je .abs_smallint
+    V_TEST_INT_M [rdi], r11      ; args[0] an int immediate?
+    jae .abs_smallint
 
-    cmp qword [rdi + 8], TAG_FLOAT
-    je .abs_inline_float
+    V_TEST_F64_M [rdi], r11      ; args[0] a float?
+    jbe .abs_inline_float
 
-    cmp qword [rdi + 8], TAG_BOOL
-    je .abs_bool_tag
 
-    cmp qword [rdi + 8], TAG_PTR
-    jne .abs_type_error
+    V_TEST_PTR_M [rdi], r11      ; args[0] a pointer?
+    ja .abs_type_error
 
     mov rax, [rbx + PyObject.ob_type]
     lea rcx, [rel float_type]
@@ -101,7 +103,26 @@ DEF_FUNC builtin_abs
     extern bool_type
     lea rcx, [rel bool_type]
     cmp rax, rcx
-    jne .abs_type_error
+    je .abs_bool
+
+    ; Anything else goes through the numeric protocol, which now carries
+    ; __abs__ for a user class.  abs(obj) used to be a flat TypeError.
+    mov rcx, [rax + PyTypeObject.tp_as_number]
+    test rcx, rcx
+    jz .abs_type_error
+    mov rcx, [rcx + PyNumberMethods.nb_absolute]
+    test rcx, rcx
+    jz .abs_type_error
+    mov rdi, rbx                ; a pointer is its own Value
+    call rcx
+    V_UNPACK rax, rdx
+    add rsp, 8
+    pop rbx
+    leave
+    V_PACK rax, rdx
+    ret
+
+.abs_bool:
     ; Bool singleton: check if True (mpz=1) or False (mpz=0), both non-negative
     ; Return as SmallInt: True.abs = 1, False.abs = 0
     extern bool_true
@@ -113,11 +134,13 @@ DEF_FUNC builtin_abs
     add rsp, 8
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .abs_gmp_check:
 
     ; GMP int: check _mp_size at PyIntObject.mpz + 4
+    INT_NEED_MPZ rbx
     mov eax, [rbx + PyIntObject.mpz + 4]
     test eax, eax
     jl .abs_gmp_neg
@@ -128,19 +151,22 @@ DEF_FUNC builtin_abs
     add rsp, 8
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .abs_gmp_neg:
-    mov rdi, rbx
+    mov rdi, rbx               ; a heap int pointer is its own Value
     call int_neg
-    ; rdx = tag already set by callee
+    V_UNPACK rax, rdx           ; int_neg returns a Value
     add rsp, 8
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .abs_smallint:
     mov rax, rbx
+    V_TO_I64 rax
     test rax, rax
     jns .abs_si_pos
     neg rax
@@ -149,6 +175,7 @@ DEF_FUNC builtin_abs
     add rsp, 8
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .abs_bool_tag:
@@ -158,16 +185,19 @@ DEF_FUNC builtin_abs
     add rsp, 8
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .abs_inline_float:
-    ; TAG_FLOAT: clear sign bit inline
+    ; A float immediate: clear the sign bit inline
+    V_TO_F64 rbx
     btr rbx, 63
     mov rax, rbx
     mov edx, TAG_FLOAT
     add rsp, 8
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .abs_float:
@@ -179,6 +209,7 @@ DEF_FUNC builtin_abs
     add rsp, 8
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .abs_type_error:
@@ -206,28 +237,53 @@ DEF_FUNC builtin_divmod
     cmp rsi, 2
     jne .divmod_error
 
-    mov rbx, [rdi]              ; a payload
-    mov r13, [rdi + 8]          ; a tag
-    mov r12, [rdi + 16]         ; b payload (args[1], 16-byte stride)
-    mov r14, [rdi + 24]         ; b tag
+    mov rbx, [rdi]              ; args[0] = a
+    V_UNPACK rbx, r13
+    mov r12, [rdi + 8]          ; args[1] = b
+    V_UNPACK r12, r14
 
-    ; Compute a // b: int_floordiv(rdi=left, edx=left_tag, rsi=right, ecx=right_tag)
+    ; Dispatch through the left operand's numeric protocol, the way the //
+    ; and % operators do.  This used to call int_floordiv unconditionally,
+    ; so divmod(1.5, 1.5) handed raw f64 bits to integer code.
+    mov rdi, rbx
+    mov edx, r13d
+    extern value_number_methods
+    call value_number_methods
+    test rax, rax
+    jz .divmod_type_error
+    mov rax, [rax + PyNumberMethods.nb_floor_divide]
+    test rax, rax
+    jz .divmod_type_error
+
     mov rdi, rbx
     mov edx, r13d
     mov rsi, r12
     mov ecx, r14d
-    extern int_floordiv
-    call int_floordiv
+    V_PACK rdi, rdx
+    V_PACK rsi, rcx
+    call rax
+    V_UNPACK rax, rdx           ; int_floordiv returns a Value
     mov r15, rax                ; r15 = quotient payload
     push rdx                   ; save quotient tag (stack slot)
 
-    ; Compute a % b: int_mod(rdi=left, edx=left_tag, rsi=right, ecx=right_tag)
+    ; Same for the remainder.
+    mov rdi, rbx
+    mov edx, r13d
+    call value_number_methods
+    test rax, rax
+    jz .divmod_type_error
+    mov rax, [rax + PyNumberMethods.nb_remainder]
+    test rax, rax
+    jz .divmod_type_error
+
     mov rdi, rbx
     mov edx, r13d
     mov rsi, r12
     mov ecx, r14d
-    extern int_mod
-    call int_mod
+    V_PACK rdi, rdx
+    V_PACK rsi, rcx
+    call rax
+    V_UNPACK rax, rdx           ; int_mod returns a Value
     mov r12, rax                ; r12 = remainder payload
     mov r13, rdx                ; r13 = remainder tag
 
@@ -235,13 +291,12 @@ DEF_FUNC builtin_divmod
     mov edi, 2
     extern tuple_new
     call tuple_new
-    mov rbx, [rax + PyTupleObject.ob_item]       ; payloads
-    mov rsi, [rax + PyTupleObject.ob_item_tags]  ; tags
-    mov [rbx], r15                               ; quotient payload
+    mov rbx, [rax + PyTupleObject.ob_item]
     pop rcx                                      ; quotient tag
-    mov byte [rsi], cl
-    mov [rbx + 8], r12                           ; remainder payload
-    mov byte [rsi + 1], r13b                     ; remainder tag
+    V_PACK r15, rcx
+    mov [rbx], r15
+    V_PACK r12, r13
+    mov [rbx + 8], r12
     mov edx, TAG_PTR
 
     pop r15
@@ -250,11 +305,17 @@ DEF_FUNC builtin_divmod
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .divmod_error:
     lea rdi, [rel exc_TypeError_type]
     CSTRING rsi, "divmod expected 2 arguments"
+    call raise_exception
+
+.divmod_type_error:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "unsupported operand type(s) for divmod()"
     call raise_exception
 END_FUNC builtin_divmod
 
@@ -367,10 +428,12 @@ BI_ARGS   equ 8
 BI_NARGS  equ 16
 BI_OBJ    equ 24       ; original string/bytes obj for error messages
 BI_BASE   equ 32       ; base value for error messages
-BI_FRAME  equ 32
+BI_ORIGIN equ 40       ; the argument's type, for the bytes-family MRO walk
+BI_FRAME  equ 48
 
 DEF_FUNC builtin_int_fn, BI_FRAME
     push rbx
+    mov qword [rbp - BI_ORIGIN], 0
 
     test rsi, rsi
     jz .int_no_args
@@ -386,18 +449,16 @@ DEF_FUNC builtin_int_fn, BI_FRAME
 .int_one_arg:
     mov rbx, [rdi]
 
-    cmp qword [rdi + 8], TAG_SMALLINT
-    je .int_return_smallint
+    V_TEST_INT_M [rdi], r11      ; args[0] an int immediate?
+    jae .int_return_smallint
 
-    cmp qword [rdi + 8], TAG_FLOAT
-    je .int_from_inline_float
+    V_TEST_F64_M [rdi], r11      ; args[0] a float?
+    jbe .int_from_inline_float
 
-    cmp qword [rdi + 8], TAG_BOOL
-    je .int_from_bool_tag
 
     ; Must be TAG_PTR to dereference
-    cmp qword [rdi + 8], TAG_PTR
-    jne .int_type_error
+    V_TEST_PTR_M [rdi], r11      ; args[0] a pointer?
+    ja .int_type_error
 
     mov rax, [rbx + PyObject.ob_type]
 
@@ -432,6 +493,10 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     ; Check bytes, bytearray, or subclasses (walk base chain)
     mov rcx, rax
 .int_check_bytes_chain:
+    cmp qword [rbp - BI_ORIGIN], 0
+    jne .int_chain_have_origin
+    mov [rbp - BI_ORIGIN], rcx
+.int_chain_have_origin:
     lea rdx, [rel bytes_type]
     cmp rcx, rdx
     je .int_from_bytes
@@ -441,7 +506,7 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     lea rdx, [rel memoryview_type]
     cmp rcx, rdx
     je .int_from_memoryview
-    mov rcx, [rcx + PyTypeObject.tp_base]
+    MRO_NEXT rcx, [rbp - BI_ORIGIN]
     test rcx, rcx
     jnz .int_check_bytes_chain
 
@@ -454,6 +519,7 @@ DEF_FUNC builtin_int_fn, BI_FRAME
 
 .int_return_smallint:
     mov rax, rbx
+    V_TO_I64 rax
     RET_TAG_SMALLINT
     jmp .int_ret
 
@@ -470,8 +536,9 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     jmp .int_ret
 
 .int_from_inline_float:
-    ; TAG_FLOAT: rbx = raw double bits — delegate to float_int for NaN/inf checks
+    ; A float immediate — delegate to float_int for the NaN/inf checks
     mov rdi, rbx
+    V_TO_F64 rdi
     call float_int
     jmp .int_ret
 
@@ -633,6 +700,7 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     mov rdi, [rbx + PyObject.ob_type]
     CSTRING rsi, "__int__"
     call dunder_lookup
+    V_UNPACK rax, rdx           ; returns a Value
     test edx, edx
     jz .int_from_int_sub_extract ; no __int__, extract int_value
     ; Call __int__(self) — rax = func (borrowed ref)
@@ -645,6 +713,7 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     mov rsi, rsp
     mov edx, 1
     call rcx
+    V_UNPACK rax, rdx           ; tp_call returns a Value
     add rsp, 16
     ; Check for exception (NULL return)
     test edx, edx
@@ -675,7 +744,7 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     ; rbx = PyIntSubclassObject with no __int__ method
     ; Extract the int_value and return it
     mov rax, [rbx + PyIntSubclassObject.int_value]
-    mov rdx, [rbx + PyIntSubclassObject.int_value_tag]
+    V_UNPACK rax, rdx
     cmp edx, TAG_SMALLINT
     je .int_ret                  ; SmallInt — no INCREF needed
     INCREF rax
@@ -687,6 +756,7 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     mov rdi, [rbx + PyObject.ob_type]
     CSTRING rsi, "__int__"
     call dunder_lookup
+    V_UNPACK rax, rdx           ; returns a Value
     test edx, edx
     jnz .int_call_dunder
 
@@ -694,6 +764,7 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     mov rdi, [rbx + PyObject.ob_type]
     CSTRING rsi, "__index__"
     call dunder_lookup
+    V_UNPACK rax, rdx           ; returns a Value
     test edx, edx
     jnz .int_call_dunder
 
@@ -701,6 +772,7 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     mov rdi, [rbx + PyObject.ob_type]
     CSTRING rsi, "__trunc__"
     call dunder_lookup
+    V_UNPACK rax, rdx           ; returns a Value
     test edx, edx
     jnz .int_call_dunder_trunc
 
@@ -717,6 +789,7 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     mov rsi, rsp
     mov edx, 1
     call rcx
+    V_UNPACK rax, rdx           ; tp_call returns a Value
     add rsp, 16
     ; Check for exception (NULL return)
     test edx, edx
@@ -756,6 +829,7 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     mov rsi, rsp
     mov edx, 1
     call rcx
+    V_UNPACK rax, rdx           ; tp_call returns a Value
     add rsp, 16
     ; rax = result of __trunc__()
     ; Check for exception (NULL return)
@@ -781,6 +855,7 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     mov rdi, [rax + PyObject.ob_type]
     CSTRING rsi, "__index__"
     call dunder_lookup
+    V_UNPACK rax, rdx           ; returns a Value
     test edx, edx
     jnz .int_call_trunc_index
     ; No __index__ — raise TypeError with type name
@@ -804,6 +879,7 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     mov rsi, rsp
     mov edx, 1
     call rcx
+    V_UNPACK rax, rdx           ; tp_call returns a Value
     add rsp, 16
     ; rax = __index__ result, rbx = __trunc__ result (still needs DECREF)
     ; Save __index__ result and DECREF __trunc__ result first
@@ -950,12 +1026,13 @@ DEF_FUNC builtin_int_fn, BI_FRAME
 ; ------- int(x, base) -------
 .int_two_args:
     mov [rbp - BI_ARGS], rdi       ; save args pointer
-    ; Get base from args[1] (contiguous 16-byte fat value from CALL)
-    mov rax, [rdi + 16]            ; args[1] payload (16-byte stride)
-    cmp qword [rdi + 24], TAG_SMALLINT  ; args[1] tag
+    ; Get base from args[1]
+    mov rax, [rdi + 8]            ; args[1]
+    V_UNPACK rax, rdx
+    cmp edx, TAG_SMALLINT
     je .int_base_smallint
-    ; Reject non-pointer tags (TAG_FLOAT, TAG_NONE, TAG_BOOL)
-    cmp qword [rdi + 24], TAG_PTR
+    ; Reject the non-pointer immediates (float, and NULL)
+    cmp edx, TAG_PTR
     jne .int_base_type_error
     ; base is a heap object — check if it's an int or has __index__
     ; args already saved in [rbp - BI_ARGS]
@@ -974,6 +1051,7 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     mov rdi, rcx                  ; type
     CSTRING rsi, "__index__"
     call dunder_lookup
+    V_UNPACK rax, rdx           ; returns a Value
     test edx, edx
     jz .int_base_no_index
     ; Call __index__(base_obj)
@@ -985,6 +1063,7 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     lea rsi, [rsp]               ; args[0] = base_obj (fat arg on stack)
     mov edx, 1
     call rcx
+    V_UNPACK rax, rdx           ; tp_call returns a Value
     add rsp, 16                  ; pop fat arg
     ; rax = __index__ result, should be int
     test edx, edx
@@ -993,6 +1072,7 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     je .int_base_si_from_index
     ; heap int — check if it fits in i64 first
     push rax
+    INT_NEED_MPZ rax
     lea rdi, [rax + PyIntObject.mpz]
     call __gmpz_fits_slong_p wrt ..plt
     test eax, eax
@@ -1009,6 +1089,7 @@ DEF_FUNC builtin_int_fn, BI_FRAME
 .int_base_heap_int:
     ; rax = heap int object (GMP). Check if it fits in i64.
     push rax
+    INT_NEED_MPZ rax
     lea rdi, [rax + PyIntObject.mpz]
     call __gmpz_fits_slong_p wrt ..plt
     test eax, eax
@@ -1036,8 +1117,8 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     mov rdi, [rbp - BI_ARGS]
     mov rbx, [rdi]                 ; args[0] payload
     mov [rbp - BI_OBJ], rbx       ; save original obj for error msg
-    cmp qword [rdi + 8], TAG_PTR  ; args[0] tag
-    jne .int_base_type_error_str  ; non-pointer: can't have base with non-str
+    V_TEST_PTR_M [rdi], r11      ; args[0] a pointer?
+    ja .int_base_type_error_str
     mov rax, [rbx + PyObject.ob_type]
     lea rcx, [rel str_type]
     cmp rax, rcx
@@ -1048,13 +1129,17 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     ; Check bytes, bytearray, or subclasses (walk base chain)
     mov rcx, rax
 .int_base_check_bytes_chain:
+    cmp qword [rbp - BI_ORIGIN], 0
+    jne .int_base_chain_have_origin
+    mov [rbp - BI_ORIGIN], rcx
+.int_base_chain_have_origin:
     lea rdx, [rel bytes_type]
     cmp rcx, rdx
     je .int_base_from_bytes
     lea rdx, [rel bytearray_type]
     cmp rcx, rdx
     je .int_base_from_bytes            ; same layout as bytes
-    mov rcx, [rcx + PyTypeObject.tp_base]
+    MRO_NEXT rcx, [rbp - BI_ORIGIN]
     test rcx, rcx
     jnz .int_base_check_bytes_chain
     jmp .int_base_type_error_str
@@ -1184,7 +1269,6 @@ DEF_FUNC builtin_int_fn, BI_FRAME
 
     ; Get repr of original object (always a heap ptr)
     mov rdi, [rbp - BI_OBJ]
-    mov esi, TAG_PTR
     call obj_repr
     test rax, rax
     jnz .ile_have_repr
@@ -1252,8 +1336,7 @@ DEF_FUNC builtin_str_fn
     cmp rsi, 1
     jne .str_error
 
-    mov rsi, [rdi + 8]         ; arg[0] tag
-    mov rdi, [rdi]             ; arg[0] payload
+    mov rdi, [rdi]             ; args[0]
     call obj_str
     leave
     ret
@@ -1278,8 +1361,8 @@ DEF_FUNC builtin_ord
     cmp rsi, 1
     jne .ord_nargs_error
 
-    cmp qword [rdi + 8], TAG_PTR
-    jne .ord_type_error            ; non-string tag
+    V_TEST_PTR_M [rdi], r11      ; args[0] a pointer?
+    ja .ord_type_error
 
     mov rdi, [rdi]                 ; args[0] payload
 
@@ -1288,12 +1371,72 @@ DEF_FUNC builtin_ord
     cmp rax, rcx
     jne .ord_type_error
 
-    cmp qword [rdi + PyStrObject.ob_size], 1
-    jne .ord_len_error
-
+    ; A string is stored as UTF-8, so one character can be up to four bytes.
+    ; Requiring ob_size == 1 made ord(chr(233)) a TypeError.
+    mov rcx, [rdi + PyStrObject.ob_size]
+    test rcx, rcx
+    jz .ord_len_error
     movzx eax, byte [rdi + PyStrObject.data]
+    test al, 0x80
+    jz .ord_ascii
+    ; Multi-byte: decode and check it is the whole string.
+    mov r8d, eax
+    and r8d, 0xF8
+    cmp r8d, 0xF0
+    je .ord_four
+    mov r8d, eax
+    and r8d, 0xF0
+    cmp r8d, 0xE0
+    je .ord_three
+    mov r8d, eax
+    and r8d, 0xE0
+    cmp r8d, 0xC0
+    jne .ord_len_error
+    cmp rcx, 2
+    jne .ord_len_error
+    and eax, 0x1F
+    shl eax, 6
+    movzx edx, byte [rdi + PyStrObject.data + 1]
+    and edx, 0x3F
+    or eax, edx
+    jmp .ord_done
+.ord_three:
+    cmp rcx, 3
+    jne .ord_len_error
+    and eax, 0x0F
+    shl eax, 12
+    movzx edx, byte [rdi + PyStrObject.data + 1]
+    and edx, 0x3F
+    shl edx, 6
+    or eax, edx
+    movzx edx, byte [rdi + PyStrObject.data + 2]
+    and edx, 0x3F
+    or eax, edx
+    jmp .ord_done
+.ord_four:
+    cmp rcx, 4
+    jne .ord_len_error
+    and eax, 0x07
+    shl eax, 18
+    movzx edx, byte [rdi + PyStrObject.data + 1]
+    and edx, 0x3F
+    shl edx, 12
+    or eax, edx
+    movzx edx, byte [rdi + PyStrObject.data + 2]
+    and edx, 0x3F
+    shl edx, 6
+    or eax, edx
+    movzx edx, byte [rdi + PyStrObject.data + 3]
+    and edx, 0x3F
+    or eax, edx
+    jmp .ord_done
+.ord_ascii:
+    cmp rcx, 1
+    jne .ord_len_error
+.ord_done:
     RET_TAG_SMALLINT
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .ord_type_error:
@@ -1320,8 +1463,9 @@ DEF_FUNC builtin_chr, 16
     cmp rsi, 1
     jne .chr_nargs_error
 
-    mov edx, [rdi + 8]
-    mov rdi, [rdi]
+    mov rdi, [rdi]            ; args[0]
+
+    V_UNPACK rdi, rdx
     call int_to_i64
 
     cmp rax, 0
@@ -1338,6 +1482,7 @@ DEF_FUNC builtin_chr, 16
     lea rdi, [rbp - 16]
     call str_from_cstr
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .chr_utf8_encode:
@@ -1357,6 +1502,7 @@ DEF_FUNC builtin_chr, 16
     lea rdi, [rbp - 16]
     call str_from_cstr
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .chr_3byte:
@@ -1381,6 +1527,7 @@ DEF_FUNC builtin_chr, 16
     lea rdi, [rbp - 16]
     call str_from_cstr
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .chr_4byte:
@@ -1407,6 +1554,7 @@ DEF_FUNC builtin_chr, 16
     lea rdi, [rbp - 16]
     call str_from_cstr
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .chr_range_error:
@@ -1423,86 +1571,91 @@ END_FUNC builtin_chr
 ; ============================================================================
 ; 6. builtin_hex(args, nargs) - hex(n)
 ; ============================================================================
-DEF_FUNC builtin_hex, 80
-
+PFX_STR   equ 8
+PFX_FRAME equ 16
+HEXB_VAL   equ 8
+HEXB_STR   equ 16
+HEXB_OUT   equ 24
+HEXB_FRAME equ 32
+DEF_FUNC builtin_hex, HEXB_FRAME
+    push rbx
+    push r12
     cmp rsi, 1
     jne .hex_nargs_error
 
-    mov edx, [rdi + 8]
+    ; obj_as_index truncates a value too wide for int64, so builtin_hex(2**70)
+    ; came out as "0x0".  It is still what validates the argument and
+    ; honours __index__; int_base_str renders any width through GMP.
     mov rdi, [rdi]
-    call int_to_i64
+    mov [rbp - HEXB_VAL], rdi
+    V_UNPACK rdi, rdx
+    call int_is_integer
+    test eax, eax
+    jnz .hex_have_value
+    mov rdi, [rbp - HEXB_VAL]
+    call obj_as_index
+    mov rdx, TAG_SMALLINT
+    V_PACK rax, rdx
+    mov [rbp - HEXB_VAL], rax
+.hex_have_value:
+    mov rdi, [rbp - HEXB_VAL]
+    mov esi, 16
+    xor edx, edx
+    call int_base_str
+    mov [rbp - HEXB_STR], rax
 
-    test rax, rax
-    jz .hex_zero
-
-    test rax, rax
-    jns .hex_positive
-
-    ; Negative
-    neg rax
-    mov byte [rbp - 80], '-'
-    mov byte [rbp - 79], '0'
-    mov byte [rbp - 78], 'x'
-    lea rdi, [rbp - 77]
-    mov r8d, 3
-    jmp .hex_digits
-
+    mov rbx, rax
+    cmp byte [rbx], '-'
+    jne .hex_positive
+    inc rbx
 .hex_positive:
-    mov byte [rbp - 80], '0'
-    mov byte [rbp - 79], 'x'
-    lea rdi, [rbp - 78]
-    mov r8d, 2
-
-.hex_digits:
-    ; Write hex digits in reverse into temp area, then copy in correct order
-    lea rsi, [rbp - 16]
     xor ecx, ecx
+.hex_len:
+    cmp byte [rbx + rcx], 0
+    je .hex_have_len
+    inc rcx
+    jmp .hex_len
+.hex_have_len:
+    mov r12, rcx
+    lea rdi, [rcx + 8]
+    call ap_malloc
+    mov [rbp - HEXB_OUT], rax
+    xor edx, edx
+    mov r8, [rbp - HEXB_STR]
+    cmp byte [r8], '-'
+    jne .hex_no_sign
+    mov byte [rax], '-'
+    mov edx, 1
+.hex_no_sign:
+    mov byte [rax + rdx], '0'
+    mov byte [rax + rdx + 1], 'x'
+    add rdx, 2
+    xor r9d, r9d
+.hex_copy:
+    cmp r9, r12
+    jge .hex_copied
+    mov r10b, [rbx + r9]
+    mov [rax + rdx], r10b
+    inc rdx
+    inc r9
+    jmp .hex_copy
+.hex_copied:
+    mov byte [rax + rdx], 0
 
-.hex_digit_loop:
-    test rax, rax
-    jz .hex_reverse
-
-    mov rdx, rax
-    and edx, 0xF
-    cmp edx, 10
-    jb .hex_dec_digit
-    add edx, ('a' - 10)
-    jmp .hex_store_digit
-.hex_dec_digit:
-    add edx, '0'
-.hex_store_digit:
-    mov byte [rsi], dl
-    dec rsi
-    inc ecx
-    shr rax, 4
-    jmp .hex_digit_loop
-
-.hex_reverse:
-    ; Digits at [rsi+1 .. rsi+ecx], LSB first (reversed)
-    ; Copy them MSB-first into rdi
-    inc rsi
-    mov edx, ecx
-.hex_copy_loop:
-    test ecx, ecx
-    jz .hex_done_copy
-    mov al, byte [rsi]
-    mov byte [rdi], al
-    inc rsi
-    inc rdi
-    dec ecx
-    jmp .hex_copy_loop
-
-.hex_done_copy:
-    mov byte [rdi], 0
-    lea rdi, [rbp - 80]
+    mov rdi, [rbp - HEXB_STR]
+    call ap_free
+    mov rdi, [rbp - HEXB_OUT]
     call str_from_cstr
+    mov rbx, rax
+    mov r12, rdx
+    mov rdi, [rbp - HEXB_OUT]
+    call ap_free
+    mov rax, rbx
+    mov rdx, r12
+    pop r12
+    pop rbx
     leave
-    ret
-
-.hex_zero:
-    CSTRING rdi, "0x0"
-    call str_from_cstr
-    leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .hex_nargs_error:
@@ -1519,17 +1672,20 @@ DEF_FUNC builtin_id
     cmp rsi, 1
     jne .id_error
 
-    cmp qword [rdi + 8], TAG_SMALLINT  ; check args[0] tag
-    mov rdi, [rdi]                     ; args[0] payload
-    je .id_smallint
+    V_TEST_INT_M [rdi], rax            ; args[0] an int immediate?
+    mov rdi, [rdi]                     ; args[0]
+    jae .id_smallint
 
     call int_from_i64
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .id_smallint:
+    V_TO_I64 rdi
     call int_from_i64
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .id_error:
@@ -1550,17 +1706,13 @@ DEF_FUNC builtin_hash_fn
 
     mov rbx, [rdi]
 
-    cmp qword [rdi + 8], TAG_SMALLINT  ; check args[0] tag
-    je .hash_smallint
+    V_TEST_INT_M [rdi], r11      ; args[0] an int immediate?
+    jae .hash_smallint
 
-    cmp qword [rdi + 8], TAG_FLOAT
-    je .hash_float
+    V_TEST_F64_M [rdi], r11      ; args[0] a float?
+    jbe .hash_float
 
     ; Check non-pointer tags before dereference
-    cmp qword [rdi + 8], TAG_BOOL
-    je .hash_bool
-    cmp qword [rdi + 8], TAG_NONE
-    je .hash_none
 
     mov rax, [rbx + PyObject.ob_type]
     mov rcx, [rax + PyTypeObject.tp_hash]
@@ -1568,38 +1720,42 @@ DEF_FUNC builtin_hash_fn
     jz .hash_type_error
 
     mov rdi, rbx
+    mov edx, TAG_PTR            ; tp_hash forwards edx to int_unwrap
     call rcx
     mov rdi, rax
     call int_from_i64
     add rsp, 8
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .hash_float:
-    ; TAG_FLOAT: call float_hash for PEP-correct integer-float matching
+    ; A float immediate: float_hash gives the PEP-correct int/float match
     extern float_hash
     mov rdi, rbx
+    V_TO_F64 rdi
     call float_hash
     mov rdi, rax
     call int_from_i64
     add rsp, 8
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .hash_smallint:
-    mov rax, rbx
-    ; Apply -1 → -2 convention (hash must never return -1)
-    cmp rax, -1
-    jne .hash_si_ok
-    mov rax, -2
+    extern int_hash_i64
+    mov rdi, rbx
+    V_TO_I64 rdi
+    call int_hash_i64
 .hash_si_ok:
     mov rdi, rax
     call int_from_i64
     add rsp, 8
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .hash_bool:
@@ -1631,10 +1787,10 @@ DEF_FUNC builtin_callable
     cmp rsi, 1
     jne .callable_error
 
-    cmp qword [rdi + 8], TAG_SMALLINT  ; check args[0] tag
-    je .callable_false
-    cmp qword [rdi + 8], TAG_PTR
-    jne .callable_false             ; non-pointer tag (TAG_FLOAT etc.)
+    V_TEST_INT_M [rdi], r11      ; args[0] an int immediate?
+    jae .callable_false
+    V_TEST_PTR_M [rdi], r11      ; args[0] a pointer?
+    ja .callable_false
     mov rdi, [rdi]                     ; args[0] payload
 
     ; Get type of arg
@@ -1688,6 +1844,7 @@ DEF_FUNC builtin_callable
     inc qword [rax + PyObject.ob_refcnt]
     mov edx, TAG_PTR
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .callable_false:
@@ -1695,6 +1852,7 @@ DEF_FUNC builtin_callable
     inc qword [rax + PyObject.ob_refcnt]
     mov edx, TAG_PTR
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .callable_error:
@@ -1711,14 +1869,15 @@ DEF_FUNC builtin_iter_fn
     cmp rsi, 1
     jne .iter_error
 
-    mov esi, [rdi + 8]                 ; args[0] tag
-    mov rdi, [rdi]                     ; args[0] payload
+    mov rdi, [rdi]                     ; args[0]
+    V_UNPACK rdi, rsi
 
     ; Use get_iterator which handles tp_iter, __iter__, __getitem__, validation
     extern get_iterator
     call get_iterator
     mov edx, TAG_PTR
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .iter_error:
@@ -1741,23 +1900,25 @@ DEF_FUNC builtin_next_fn
 
 .next_two_args:
     ; next(iterator, default) — return default on StopIteration
-    push qword [rdi + 24]          ; save default tag
-    push qword [rdi + 16]          ; save default payload
+    push qword [rdi + 8]           ; save the default Value
+    push qword [rdi + 8]           ; keep rsp 16-byte aligned
     ; Fall through to same iterator logic, but with default on stack
-    cmp qword [rdi + 8], TAG_PTR
-    jne .next_two_type_error
+    V_TEST_PTR_M [rdi], r11      ; args[0] a pointer?
+    ja .next_two_type_error
     mov rdi, [rdi]                 ; args[0] = iterator
     mov rax, [rdi + PyObject.ob_type]
     mov rax, [rax + PyTypeObject.tp_iternext]
     test rax, rax
     jz .next_two_type_error
     call rax
+    V_UNPACK rax, rdx           ; tp_iternext returns a Value
     test edx, edx
     jz .next_two_default           ; exhausted → return default
     ; Got value — discard saved default
     add rsp, 16
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 .next_two_default:
     ; Clear any StopIteration exception
@@ -1771,11 +1932,13 @@ DEF_FUNC builtin_next_fn
     call obj_decref
     pop rdi
 .next_two_ret_default:
-    pop rax                        ; default payload
-    pop rdx                        ; default tag
-    INCREF_VAL rax, rdx
+    pop rax                        ; the default Value
+    add rsp, 8                     ; drop the alignment copy
+    INCREF_V rax, rdx
+    V_UNPACK rax, rdx              ; next() still returns a fat pair
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 .next_two_type_error:
     add rsp, 16                    ; discard saved default
@@ -1783,10 +1946,10 @@ DEF_FUNC builtin_next_fn
 
 .next_one_arg:
 
-    cmp qword [rdi + 8], TAG_SMALLINT  ; check args[0] tag
-    je .next_type_error
-    cmp qword [rdi + 8], TAG_PTR
-    jne .next_type_error            ; non-pointer tag (TAG_FLOAT etc.)
+    V_TEST_INT_M [rdi], r11      ; args[0] an int immediate?
+    jae .next_type_error
+    V_TEST_PTR_M [rdi], r11      ; args[0] a pointer?
+    ja .next_type_error
     mov rdi, [rdi]                     ; args[0] payload
 
     mov rax, [rdi + PyObject.ob_type]
@@ -1804,6 +1967,7 @@ DEF_FUNC builtin_next_fn
     lea rsi, [rel dunder_next]
     extern dunder_call_1
     call dunder_call_1
+    V_UNPACK rax, rdx           ; returns a Value
     test edx, edx
     jnz .next_got_val                  ; got a value
     ; NULL from __next__ — check for StopIteration in current_exception
@@ -1823,11 +1987,13 @@ DEF_FUNC builtin_next_fn
     RET_NULL
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .next_have_iternext:
     mov rbx, rdi                       ; save iterator for StopIteration.value
     call rax
+    V_UNPACK rax, rdx                  ; tp_iternext returns a Value
     test edx, edx
     jz .next_stop
 
@@ -1835,6 +2001,7 @@ DEF_FUNC builtin_next_fn
     ; tp_iternext / __next__ returns fat (rax=payload, rdx=tag)
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .next_stop:
@@ -1842,14 +2009,12 @@ DEF_FUNC builtin_next_fn
     lea rax, [rel gen_type]
     cmp [rbx + PyObject.ob_type], rax
     jne .next_stop_no_val
-    ; Get generator's return value for StopIteration
+    ; Get generator's return value for StopIteration (already a Value)
     mov rsi, [rbx + PyGenObject.gi_return_value]
-    mov rdx, [rbx + PyGenObject.gi_return_tag]
-    test edx, edx
+    test rsi, rsi
     jnz .next_stop_with_val
 .next_stop_no_val:
     lea rsi, [rel none_singleton]
-    mov edx, TAG_PTR
 .next_stop_with_val:
     lea rdi, [rel exc_StopIteration_type]
     call exc_new
@@ -1879,14 +2044,15 @@ DEF_FUNC builtin_any
     cmp rsi, 1
     jne .any_error
 
-    cmp qword [rdi + 8], TAG_PTR
-    jne .any_type_error
+    V_TEST_PTR_M [rdi], r11      ; args[0] a pointer?
+    ja .any_type_error
     mov rdi, [rdi]
     mov rax, [rdi + PyObject.ob_type]
     mov rcx, [rax + PyTypeObject.tp_iter]
     test rcx, rcx
     jz .any_type_error
     call rcx
+    V_UNPACK rax, rdx           ; tp_call returns a Value
     mov rbx, rax
 
     mov rax, [rbx + PyObject.ob_type]
@@ -1895,6 +2061,7 @@ DEF_FUNC builtin_any
 .any_loop:
     mov rdi, rbx
     call r12
+    V_UNPACK rax, rdx           ; tp_iternext returns a Value
     test edx, edx             ; TAG_NULL = exhausted
     jz .any_false
 
@@ -1903,6 +2070,7 @@ DEF_FUNC builtin_any
 
     mov rdi, r13
     mov rsi, r14
+    V_PACK rdi, rsi
     call obj_is_true
     test eax, eax
     jnz .any_found_true
@@ -1925,6 +2093,7 @@ DEF_FUNC builtin_any
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .any_false:
@@ -1938,6 +2107,7 @@ DEF_FUNC builtin_any
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .any_type_error:
@@ -1963,8 +2133,8 @@ DEF_FUNC builtin_all
     cmp rsi, 1
     jne .all_error
 
-    cmp qword [rdi + 8], TAG_PTR
-    jne .all_type_error
+    V_TEST_PTR_M [rdi], r11      ; args[0] a pointer?
+    ja .all_type_error
     mov rdi, [rdi]
     mov rax, [rdi + PyObject.ob_type]
     mov rcx, [rax + PyTypeObject.tp_iter]
@@ -1979,6 +2149,7 @@ DEF_FUNC builtin_all
 .all_loop:
     mov rdi, rbx
     call r12
+    V_UNPACK rax, rdx           ; tp_iternext returns a Value
     test edx, edx             ; TAG_NULL = exhausted
     jz .all_true
 
@@ -1987,6 +2158,7 @@ DEF_FUNC builtin_all
 
     mov rdi, r13
     mov rsi, r14
+    V_PACK rdi, rsi
     call obj_is_true
     test eax, eax
     jz .all_found_false
@@ -2009,6 +2181,7 @@ DEF_FUNC builtin_all
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .all_true:
@@ -2022,6 +2195,7 @@ DEF_FUNC builtin_all
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .all_type_error:
@@ -2062,16 +2236,16 @@ DEF_FUNC builtin_sum
     jmp .sum_get_iter
 
 .sum_has_start:
-    mov r13, [rbx + 16]            ; args[1] payload (start value, 16-byte stride)
-    mov eax, [rbx + 24]            ; args[1] tag
+    mov r13, [rbx + 8]            ; args[1] payload (start value, 16-byte stride)
+    V_UNPACK r13, rax       ; args[1]
     mov [rsp], eax                 ; accum_tag
     cmp eax, TAG_PTR
     jne .sum_get_iter
     inc qword [r13 + PyObject.ob_refcnt]
 
 .sum_get_iter:
-    cmp qword [rbx + 8], TAG_PTR       ; args[0] tag
-    jne .sum_type_error
+    V_TEST_PTR_M [rbx], r11      ; args[0] a pointer?
+    ja .sum_type_error
     mov rdi, [rbx]                     ; args[0] payload (iterable)
     mov rax, [rdi + PyObject.ob_type]
     mov rcx, [rax + PyTypeObject.tp_iter]
@@ -2086,6 +2260,7 @@ DEF_FUNC builtin_sum
 .sum_loop:
     mov rdi, rbx
     call r12
+    V_UNPACK rax, rdx           ; tp_iternext returns a Value
     test edx, edx
     jz .sum_done
 
@@ -2101,11 +2276,17 @@ DEF_FUNC builtin_sum
     je .sum_float_add
     cmp ecx, TAG_FLOAT
     je .sum_float_add
+    V_PACK rdi, rdx
+    V_PACK rsi, rcx
     call int_add
+    V_UNPACK rax, rdx           ; int_add returns a Value
     jmp .sum_have_result
 .sum_float_add:
     extern float_add
+    V_PACK rdi, rdx
+    V_PACK rsi, rcx
     call float_add
+    V_UNPACK rax, rdx           ; float_add returns a Value
 .sum_have_result:
     ; rax = new accum payload, edx = new accum tag
 
@@ -2142,6 +2323,7 @@ DEF_FUNC builtin_sum
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .sum_type_error:
@@ -2206,8 +2388,8 @@ DEF_FUNC_LOCAL minmax_impl, MM_FRAME
     mov r12, rsi                   ; nargs
     mov r13, 1                     ; index = 1
 
-    mov r14, [rbx]                 ; args[0] payload = current best
-    mov rax, [rbx + 8]            ; args[0] tag (64-bit)
+    mov r14, [rbx]                 ; args[0] = current best
+    V_UNPACK r14, rax
     mov [rbp - MM_TAG], rax
     INCREF_VAL r14, rax
 
@@ -2216,9 +2398,9 @@ DEF_FUNC_LOCAL minmax_impl, MM_FRAME
     jge .mm_done
 
     mov rax, r13
-    shl rax, 4
-    mov r15, [rbx + rax]          ; candidate payload
-    mov rcx, [rbx + rax + 8]     ; candidate tag
+    shl rax, 3
+    mov r15, [rbx + rax]          ; candidate Value
+    V_UNPACK r15, rcx
 
     ; SmallInt fast path: both SmallInt?
     cmp qword [rbp - MM_TAG], TAG_SMALLINT
@@ -2268,6 +2450,8 @@ DEF_FUNC_LOCAL minmax_impl, MM_FRAME
     mov rax, rcx                   ; fn ptr
     mov rcx, r8                    ; left_tag = candidate tag
     mov r8, [rbp - MM_TAG]         ; right_tag = best tag
+    V_PACK rdi, rcx             ; left  -> Value
+    V_PACK rsi, r8              ; right -> Value
     call rax
 
     lea rcx, [rel bool_true]
@@ -2281,10 +2465,11 @@ DEF_FUNC_LOCAL minmax_impl, MM_FRAME
     DECREF_VAL rdi, rsi
     mov r14, r15
     mov rax, r13
-    shl rax, 4
-    mov rax, [rbx + rax + 8]
-    mov [rbp - MM_TAG], rax
-    INCREF_VAL r14, rax
+    shl rax, 3
+    mov rax, [rbx + rax]
+    V_UNPACK rax, rcx
+    mov [rbp - MM_TAG], rcx
+    INCREF_VAL r14, rcx
 
     mov rdi, [rbp - MM_CMP_RES]
     call obj_decref
@@ -2307,13 +2492,14 @@ DEF_FUNC_LOCAL minmax_impl, MM_FRAME
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
     ; --- Iterator path: min/max(iterable) ---
 .mm_iter_path:
     ; Get iterator from args[0]
-    cmp qword [rdi + 8], TAG_PTR
-    jne .mm_iter_type_error
+    V_TEST_PTR_M [rdi], r11      ; args[0] a pointer?
+    ja .mm_iter_type_error
     mov rdi, [rdi]                     ; iterable
     mov rax, [rdi + PyObject.ob_type]
     mov rcx, [rax + PyTypeObject.tp_iter]
@@ -2330,6 +2516,7 @@ DEF_FUNC_LOCAL minmax_impl, MM_FRAME
     ; Get first element → initial best
     mov rdi, [rbp - MM_ITER]
     call rbx
+    V_UNPACK rax, rdx           ; tp_iternext returns a Value
     test edx, edx
     jz .mm_iter_empty
 
@@ -2341,6 +2528,7 @@ DEF_FUNC_LOCAL minmax_impl, MM_FRAME
 .mm_iter_loop:
     mov rdi, [rbp - MM_ITER]
     call qword [rbp - MM_ITERNX]
+    V_UNPACK rax, rdx           ; tp_iternext returns a Value
     test edx, edx
     jz .mm_iter_done
 
@@ -2392,7 +2580,10 @@ DEF_FUNC_LOCAL minmax_impl, MM_FRAME
     mov edx, [rbp - MM_CMP_OP]
     mov rcx, r12
     mov r8, [rbp - MM_TAG]
+    V_PACK rdi, rcx             ; left  -> Value
+    V_PACK rsi, r8              ; right -> Value
     call rax
+    V_UNPACK rax, rdx           ; tp_richcompare returns a Value
 
     lea rcx, [rel bool_true]
     cmp rax, rcx
@@ -2431,6 +2622,7 @@ DEF_FUNC_LOCAL minmax_impl, MM_FRAME
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .mm_iter_empty:
@@ -2469,10 +2661,10 @@ DEF_FUNC builtin_getattr
     ja .getattr_error
 
     mov r13, [rbx]                 ; args[0] payload (obj)
-    mov r14, [rbx + 16]            ; args[1] payload (name, 16-byte stride)
+    mov r14, [rbx + 8]            ; args[1] payload (name, 16-byte stride)
 
-    cmp qword [rbx + 8], TAG_PTR       ; args[0] tag
-    jne .getattr_try_type_dict
+    V_TEST_PTR_M [rbx], r11      ; args[0] a pointer?
+    ja .getattr_try_type_dict
 
     mov rax, [r13 + PyObject.ob_type]
     mov rcx, [rax + PyTypeObject.tp_getattr]
@@ -2482,22 +2674,19 @@ DEF_FUNC builtin_getattr
     mov rdi, r13
     mov rsi, r14
     call rcx
+    V_UNPACK rax, rdx           ; tp_getattr returns a Value
     test edx, edx              ; check tag, not payload (SmallInt(0) has payload=0)
     jnz .getattr_found
 
     jmp .getattr_try_type_dict
 
 .getattr_try_type_dict:
-    cmp qword [rbx + 8], TAG_SMALLINT
-    je .getattr_smallint_type
-    cmp qword [rbx + 8], TAG_FLOAT
-    je .getattr_float_type
-    cmp qword [rbx + 8], TAG_BOOL
-    je .getattr_bool_type
-    cmp qword [rbx + 8], TAG_NONE
-    je .getattr_none_type
-    cmp qword [rbx + 8], TAG_PTR
-    jne .getattr_not_found         ; unknown tag
+    V_TEST_INT_M [rbx], r11      ; args[0] an int immediate?
+    jae .getattr_smallint_type
+    V_TEST_F64_M [rbx], r11      ; args[0] a float?
+    jbe .getattr_float_type
+    V_TEST_PTR_M [rbx], r11      ; args[0] a pointer?
+    ja .getattr_not_found
     mov rax, [r13 + PyObject.ob_type]
     jmp .getattr_check_dict
 
@@ -2520,8 +2709,8 @@ DEF_FUNC builtin_getattr
 
     mov rdi, rcx
     mov rsi, r14
-    mov edx, TAG_PTR
     call dict_get
+    V_UNPACK rax, rdx           ; dict_get returns a Value
     test edx, edx
     jz .getattr_not_found
 
@@ -2531,6 +2720,7 @@ DEF_FUNC builtin_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .getattr_found:
@@ -2541,14 +2731,15 @@ DEF_FUNC builtin_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .getattr_not_found:
     cmp r12, 3
     jne .getattr_raise
 
-    mov rax, [rbx + 32]           ; args[2] payload (default, 16-byte stride)
-    mov rdx, [rbx + 40]           ; args[2] tag
+    mov rax, [rbx + 16]           ; args[2] payload (default, 16-byte stride)
+    V_UNPACK rax, rdx       ; args[2]
     INCREF_VAL rax, rdx
 .getattr_ret_default_si:
     pop r14
@@ -2556,6 +2747,7 @@ DEF_FUNC builtin_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .getattr_raise:
@@ -2585,10 +2777,10 @@ DEF_FUNC builtin_hasattr
     mov rbx, rdi                   ; save args ptr
 
     mov r12, [rbx]                 ; args[0] payload (obj)
-    mov r13, [rbx + 16]            ; args[1] payload (name, 16-byte stride)
+    mov r13, [rbx + 8]            ; args[1] payload (name, 16-byte stride)
 
-    cmp qword [rbx + 8], TAG_PTR       ; args[0] tag
-    jne .hasattr_try_type_dict
+    V_TEST_PTR_M [rbx], r11      ; args[0] a pointer?
+    ja .hasattr_try_type_dict
 
     mov rax, [r12 + PyObject.ob_type]
     mov rcx, [rax + PyTypeObject.tp_getattr]
@@ -2598,6 +2790,7 @@ DEF_FUNC builtin_hasattr
     mov rdi, r12
     mov rsi, r13
     call rcx
+    V_UNPACK rax, rdx           ; tp_getattr returns a Value
     test edx, edx              ; check tag, not payload (SmallInt(0) has payload=0)
     jz .hasattr_try_type_dict
 
@@ -2612,19 +2805,16 @@ DEF_FUNC builtin_hasattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .hasattr_try_type_dict:
-    cmp qword [rbx + 8], TAG_SMALLINT
-    je .hasattr_smallint_type
-    cmp qword [rbx + 8], TAG_FLOAT
-    je .hasattr_float_type
-    cmp qword [rbx + 8], TAG_BOOL
-    je .hasattr_bool_type
-    cmp qword [rbx + 8], TAG_NONE
-    je .hasattr_none_type
-    cmp qword [rbx + 8], TAG_PTR
-    jne .hasattr_not_found         ; unknown tag
+    V_TEST_INT_M [rbx], r11      ; args[0] an int immediate?
+    jae .hasattr_smallint_type
+    V_TEST_F64_M [rbx], r11      ; args[0] a float?
+    jbe .hasattr_float_type
+    V_TEST_PTR_M [rbx], r11      ; args[0] a pointer?
+    ja .hasattr_not_found
     mov rax, [r12 + PyObject.ob_type]
     jmp .hasattr_check_dict
 
@@ -2647,8 +2837,8 @@ DEF_FUNC builtin_hasattr
 
     mov rdi, rcx
     mov rsi, r13
-    mov edx, TAG_PTR
     call dict_get
+    V_UNPACK rax, rdx           ; dict_get returns a Value
     test edx, edx
     jz .hasattr_not_found
 
@@ -2660,6 +2850,7 @@ DEF_FUNC builtin_hasattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .hasattr_not_found:
@@ -2671,6 +2862,7 @@ DEF_FUNC builtin_hasattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .hasattr_error:
@@ -2692,20 +2884,19 @@ DEF_FUNC builtin_setattr
 
     mov rbx, rdi
 
-    cmp qword [rbx + 8], TAG_PTR       ; args[0] tag
-    jne .setattr_type_error
+    V_TEST_PTR_M [rbx], r11      ; args[0] a pointer?
+    ja .setattr_no_attr
     mov rdi, [rbx]                     ; args[0] payload (obj)
 
     mov rax, [rdi + PyObject.ob_type]
     mov rax, [rax + PyTypeObject.tp_setattr]
     test rax, rax
-    jz .setattr_type_error
+    jz .setattr_no_attr
 
     push rax                           ; save tp_setattr
     mov rdi, [rbx]                     ; args[0] payload (obj)
-    mov rsi, [rbx + 16]               ; args[1] payload (name, 16-byte stride)
-    mov rdx, [rbx + 32]               ; args[2] payload (value, 16-byte stride)
-    mov rcx, [rbx + 40]               ; args[2] tag (value tag, 16-byte stride)
+    mov rsi, [rbx + 8]               ; args[1] payload (name, 16-byte stride)
+    mov rdx, [rbx + 16]               ; args[2] payload (value, 16-byte stride)
     pop rax                            ; restore tp_setattr
     call rax
 
@@ -2715,12 +2906,17 @@ DEF_FUNC builtin_setattr
     add rsp, 8
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
-.setattr_type_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "object does not support attribute assignment"
-    call raise_exception
+.setattr_no_attr:
+    ; CPython reports the missing attribute, not a generic "unsupported":
+    ; setattr(5, "x", 1) is AttributeError: 'int' object has no attribute 'x'.
+    mov rdi, [rbx]
+    mov rsi, [rbx + 8]
+    mov edx, 1
+    extern raise_no_attribute
+    call raise_no_attribute
 
 .setattr_error:
     lea rdi, [rel exc_TypeError_type]
@@ -2742,6 +2938,7 @@ DEF_FUNC builtin_globals
     INCREF rax
     mov edx, TAG_PTR
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .globals_error:
@@ -2772,6 +2969,7 @@ DEF_FUNC builtin_locals
     INCREF rax
     mov edx, TAG_PTR
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .locals_use_globals:
@@ -2780,6 +2978,7 @@ DEF_FUNC builtin_locals
     INCREF rax
     mov edx, TAG_PTR
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .locals_error:
@@ -2794,7 +2993,8 @@ END_FUNC builtin_locals
 ; ============================================================================
 DIR_LIST    equ 8       ; result list
 DIR_OBJ     equ 16      ; the object
-DIR_FRAME   equ 24
+DIR_ORIGIN  equ 24      ; the type whose MRO is being listed
+DIR_FRAME   equ 32
 
 global builtin_dir
 DEF_FUNC builtin_dir, DIR_FRAME
@@ -2805,9 +3005,8 @@ DEF_FUNC builtin_dir, DIR_FRAME
     cmp rsi, 1
     jne .dir_error
 
-    mov rax, [rdi + 8]      ; args[0] tag
-    mov r12, rax             ; save obj_tag in r12 temporarily
-    mov rax, [rdi]           ; obj payload
+    mov rax, [rdi]           ; args[0]
+    V_UNPACK rax, r12        ; r12 = obj tag
     mov [rbp - DIR_OBJ], rax
 
     ; Create result list
@@ -2830,13 +3029,15 @@ DEF_FUNC builtin_dir, DIR_FRAME
     cmp rcx, rdx
     je .dir_from_type
 
-    ; Instance: get its type, iterate the type's dict chain
+    ; Instance: get its type, iterate its MRO
     mov r12, [rax + PyObject.ob_type]   ; r12 = type
+    mov [rbp - DIR_ORIGIN], r12
     jmp .dir_walk_chain
 
 .dir_from_type:
-    ; obj IS a type: iterate its tp_dict chain
+    ; obj IS a type: iterate its own MRO
     mov r12, [rbp - DIR_OBJ]
+    mov [rbp - DIR_ORIGIN], r12
 
 .dir_walk_chain:
     ; r12 = current type to get keys from
@@ -2859,6 +3060,7 @@ DEF_FUNC builtin_dir, DIR_FRAME
     jz .dir_iter_done
     mov rdi, r13
     call rax                ; tp_iternext(iter) -> key or NULL
+    V_UNPACK rax, rdx           ; tp_iternext returns a Value
     test edx, edx
     jz .dir_iter_done
 
@@ -2866,6 +3068,7 @@ DEF_FUNC builtin_dir, DIR_FRAME
     push rax                ; save key
     mov rdi, rbx            ; list
     mov rsi, rax            ; key
+    V_PACK rsi, rdx         ; list_contains takes a Value
     call list_contains
     test eax, eax
     pop rax                 ; restore key
@@ -2875,7 +3078,6 @@ DEF_FUNC builtin_dir, DIR_FRAME
     push rax
     mov rdi, rbx
     mov rsi, rax
-    mov edx, TAG_PTR
     call list_append
     pop rdi
     call obj_decref
@@ -2887,7 +3089,7 @@ DEF_FUNC builtin_dir, DIR_FRAME
     call obj_decref
 
 .dir_next_base:
-    mov r12, [r12 + PyTypeObject.tp_base]
+    MRO_NEXT r12, [rbp - DIR_ORIGIN]
     jmp .dir_walk_chain
 
 .dir_done:
@@ -2897,6 +3099,7 @@ DEF_FUNC builtin_dir, DIR_FRAME
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .dir_error:
@@ -2915,8 +3118,8 @@ DEF_FUNC builtin_eval_fn
     jne .evl_error
 
     ; Get the string argument
-    cmp qword [rdi + 8], TAG_SMALLINT  ; args[0] tag
-    je .evl_type_error                 ; SmallInt: not a string
+    V_TEST_INT_M [rdi], r11      ; args[0] an int immediate?
+    jae .evl_type_error
     mov rdi, [rdi]                     ; args[0] payload
     mov rax, [rdi + PyObject.ob_type]
     lea rcx, [rel str_type]
@@ -2939,6 +3142,7 @@ DEF_FUNC builtin_eval_fn
     ; Classify: SmallInt (bit63) or heap ptr
     ; rdx = tag already set by callee
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .evl_error:
@@ -2960,7 +3164,10 @@ END_FUNC builtin_eval_fn
 extern exc_RuntimeError_type
 
 global builtin_round_fn
-RND_FRAME equ 16
+RND_NDIGITS equ 16      ; historical: referenced as [rbp - RND_NDIGITS]
+RND_XPAY    equ 24
+RND_XTAG    equ 32
+RND_FRAME   equ 48
 DEF_FUNC builtin_round_fn, RND_FRAME
     push rbx
 
@@ -2971,9 +3178,14 @@ DEF_FUNC builtin_round_fn, RND_FRAME
     jmp .rnd_error
 
 .rnd_one_arg:
-    ; round(x) — return int
-    mov rax, [rdi]          ; payload
-    mov ecx, [rdi + 8]     ; tag
+    ; round(x) — return int.  Normalize first: int_unwrap flattens bool,
+    ; compact heap ints and int subclasses to (value, TAG_SMALLINT).
+    extern int_unwrap
+    mov rdi, [rdi]            ; args[0]
+    V_UNPACK rdi, rdx
+    call int_unwrap
+    mov rax, rdi            ; payload
+    mov ecx, edx            ; tag
 
     cmp ecx, TAG_SMALLINT
     je .rnd_int_ret          ; int → return as-is
@@ -2994,12 +3206,15 @@ DEF_FUNC builtin_round_fn, RND_FRAME
     lea rcx, [rel int_type]
     cmp [rax + PyObject.ob_type], rcx
     jne .rnd_type_error
-    ; It's a heap int — convert to i64 and return as SmallInt
+    ; It's a heap int — convert to i64 and return as SmallInt.
+    ; int_to_i64 dispatches on edx, so the tag must be supplied.
     mov rdi, rax
+    mov edx, TAG_PTR
     call int_to_i64
     RET_TAG_SMALLINT
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 .rnd_one_raw_float:
     movq xmm0, rax
@@ -3010,20 +3225,32 @@ DEF_FUNC builtin_round_fn, RND_FRAME
     RET_TAG_SMALLINT
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .rnd_int_ret:
     RET_TAG_SMALLINT
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .rnd_two_arg:
-    ; round(x, ndigits)
-    mov rax, [rdi]          ; x payload
-    mov ecx, [rdi + 8]     ; x tag
-    mov rbx, [rdi + 16]    ; ndigits payload
-    mov r8d, [rdi + 24]    ; ndigits tag
+    ; round(x, ndigits) — normalize both operands (see .rnd_one_arg)
+    extern int_unwrap
+    mov r9, rdi                 ; args array
+    mov rdi, [r9]            ; args[0]
+    V_UNPACK rdi, rdx
+    call int_unwrap
+    mov [rbp - RND_XPAY], rdi
+    mov [rbp - RND_XTAG], rdx
+    mov rdi, [r9 + 8]
+    V_UNPACK rdi, rdx       ; args[1]
+    call int_unwrap
+    mov rbx, rdi                ; ndigits payload
+    mov r8d, edx                ; ndigits tag
+    mov rax, [rbp - RND_XPAY]   ; x payload
+    mov ecx, [rbp - RND_XTAG]   ; x tag
 
     ; ndigits must be int
     cmp r8d, TAG_SMALLINT
@@ -3047,7 +3274,7 @@ DEF_FUNC builtin_round_fn, RND_FRAME
 .rnd_two_got_float:
 
     ; round(float, ndigits): multiply by 10^ndigits, round, divide
-    mov [rbp - RND_FRAME], rbx  ; save ndigits
+    mov [rbp - RND_NDIGITS], rbx  ; save ndigits
 
     ; Compute 10^ndigits (ndigits in rbx as int64)
     mov rax, 1               ; multiplier = 1
@@ -3071,6 +3298,7 @@ DEF_FUNC builtin_round_fn, RND_FRAME
     mov edx, TAG_FLOAT
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .rnd_two_neg_scale:
@@ -3092,6 +3320,7 @@ DEF_FUNC builtin_round_fn, RND_FRAME
     mov edx, TAG_FLOAT
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .rnd_two_int:
@@ -3120,6 +3349,7 @@ DEF_FUNC builtin_round_fn, RND_FRAME
     RET_TAG_SMALLINT
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .rnd_error:
@@ -3139,7 +3369,11 @@ END_FUNC builtin_round_fn
 ; 3 args: pow(base, exp, mod) — modular exponentiation
 ; ============================================================================
 global builtin_pow_fn
-POW_FRAME equ 24
+POW_BASE equ 8
+POW_BTAG equ 16
+POW_EXP  equ 24
+POW_ETAG equ 32
+POW_FRAME equ 48
 DEF_FUNC builtin_pow_fn, POW_FRAME
     push rbx
     push r12
@@ -3153,16 +3387,40 @@ DEF_FUNC builtin_pow_fn, POW_FRAME
 
 .pow_two:
     ; pow(base, exp) — extract operands and delegate to int_power/float path
-    mov rax, [rdi]          ; base payload
-    mov ecx, [rdi + 8]     ; base tag
-    mov rbx, [rdi + 16]    ; exp payload
-    mov r8d, [rdi + 24]    ; exp tag
+    mov rax, [rdi]          ; args[0] = base
+    V_UNPACK rax, rcx
+    mov rbx, [rdi + 8]      ; args[1] = exp
+    V_UNPACK rbx, r8
 
-    ; Both SmallInt? Delegate to int_power (handles GMP overflow)
-    cmp ecx, TAG_SMALLINT
-    jne .pow_two_float
-    cmp r8d, TAG_SMALLINT
-    jne .pow_two_float
+    ; Both integers?  Delegate to int_power, which handles SmallInt, heap
+    ; ints and int subclasses (and GMP overflow) itself.
+    extern int_is_integer
+    mov [rbp - POW_BTAG], rcx
+    mov [rbp - POW_ETAG], r8
+    mov r12, rax                ; base payload
+    mov r13, rbx                ; exp payload
+    mov rdi, rax
+    mov edx, ecx
+    call int_is_integer
+    test eax, eax
+    jz .pow_reload_float
+    mov rdi, r13
+    mov edx, [rbp - POW_ETAG]
+    call int_is_integer
+    test eax, eax
+    jz .pow_reload_float
+    mov rax, r12
+    mov rbx, r13
+    mov ecx, [rbp - POW_BTAG]
+    mov r8d, [rbp - POW_ETAG]
+    jmp .pow_two_int
+.pow_reload_float:
+    mov rax, r12
+    mov rbx, r13
+    mov ecx, [rbp - POW_BTAG]
+    mov r8d, [rbp - POW_ETAG]
+    jmp .pow_two_float
+.pow_two_int:
 
     ; int ** int — call int_power(base, exp, base_tag, exp_tag)
     extern int_power
@@ -3170,12 +3428,16 @@ DEF_FUNC builtin_pow_fn, POW_FRAME
     mov rsi, rbx            ; exp payload
     mov edx, ecx            ; base tag (TAG_SMALLINT)
     mov ecx, r8d            ; exp tag (TAG_SMALLINT)
+    V_PACK rdi, rdx
+    V_PACK rsi, rcx
     call int_power
+    V_UNPACK rax, rdx       ; int_power returns a Value
     ; rax = result payload, edx = result tag
     pop r13
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .pow_two_float:
@@ -3250,6 +3512,7 @@ DEF_FUNC builtin_pow_fn, POW_FRAME
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .pow_f_neg:
@@ -3274,6 +3537,7 @@ DEF_FUNC builtin_pow_fn, POW_FRAME
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .pow_f_general:
@@ -3305,18 +3569,37 @@ DEF_FUNC builtin_pow_fn, POW_FRAME
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .pow_three:
-    ; pow(base, exp, mod) — modular exponentiation
-    mov rax, [rdi]          ; base
-    mov ecx, [rdi + 8]     ; base tag
-    mov rbx, [rdi + 16]    ; exp
-    mov r8d, [rdi + 24]    ; exp tag
-    mov r12, [rdi + 32]    ; mod
-    mov r9d, [rdi + 40]    ; mod tag
+    ; pow(base, exp, mod) — modular exponentiation.
+    ; Normalize the operands first: int_unwrap flattens bool, compact heap
+    ; ints and int subclasses to (value, TAG_SMALLINT).  Genuinely huge
+    ; GMP-backed ints stay TAG_PTR and are rejected below, as before.
+    extern int_unwrap
+    mov r13, rdi                ; args array
+    mov rdi, [r13]              ; args[0]
+    V_UNPACK rdi, rdx
+    call int_unwrap
+    mov [rbp - POW_BASE], rdi
+    mov [rbp - POW_BTAG], rdx
+    mov rdi, [r13 + 8]
+    V_UNPACK rdi, rdx       ; args[1]
+    call int_unwrap
+    mov [rbp - POW_EXP], rdi
+    mov [rbp - POW_ETAG], rdx
+    mov rdi, [r13 + 16]
+    V_UNPACK rdi, rdx       ; args[2]
+    call int_unwrap
+    mov r12, rdi                ; mod
+    mov r9d, edx                ; mod tag
+    mov rax, [rbp - POW_BASE]   ; base
+    mov ecx, [rbp - POW_BTAG]   ; base tag
+    mov rbx, [rbp - POW_EXP]    ; exp
+    mov r8d, [rbp - POW_ETAG]   ; exp tag
 
-    ; All must be SmallInt
+    ; All must now be plain int64
     cmp ecx, TAG_SMALLINT
     jne .pow_type_error
     cmp r8d, TAG_SMALLINT
@@ -3402,6 +3685,7 @@ DEF_FUNC builtin_pow_fn, POW_FRAME
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .pow_neg_mod_exp:
@@ -3426,6 +3710,7 @@ DEF_FUNC builtin_pow_fn, POW_FRAME
 END_FUNC builtin_pow_fn
 
 section .rodata
+fmt_dunder_name: db "__format__", 0
 align 8
 const_one: dq 0x3FF0000000000000   ; 1.0 in IEEE 754
 
@@ -3449,11 +3734,9 @@ DEF_FUNC builtin_input_fn, INP_FRAME
     jne .inp_error
 
     ; Print prompt to stdout
-    mov rax, [rdi]          ; prompt payload
-    mov rcx, [rdi + 8]     ; prompt tag (64-bit)
-
-    cmp rcx, TAG_PTR
-    jne .inp_type_error
+    mov rax, [rdi]          ; args[0] = prompt
+    V_TEST_PTR rax, rcx
+    ja .inp_type_error
     ; Write prompt string data
     mov rsi, rax
     add rsi, PyStrObject.data  ; buf ptr
@@ -3486,6 +3769,7 @@ DEF_FUNC builtin_input_fn, INP_FRAME
     ; rdi already points to buffer
     call str_from_cstr
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .inp_empty:
@@ -3493,6 +3777,7 @@ DEF_FUNC builtin_input_fn, INP_FRAME
     CSTRING rdi, ""
     call str_from_cstr
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .inp_error:
@@ -3530,10 +3815,9 @@ DEF_FUNC builtin_open_fn, OPN_FRAME
 
 .opn_default_mode:
     ; filename only — default mode 'r'
-    mov rax, [rdi]          ; filename str
-    mov rcx, [rdi + 8]     ; filename tag (64-bit)
-    cmp rcx, TAG_PTR
-    jne .opn_type_error
+    mov rax, [rdi]          ; args[0] = filename
+    V_TEST_PTR rax, rcx
+    ja .opn_type_error
     mov rbx, rax            ; save filename str
 
     ; Open read-only: O_RDONLY=0
@@ -3552,16 +3836,15 @@ DEF_FUNC builtin_open_fn, OPN_FRAME
     jmp .opn_create_fileobj
 
 .opn_with_mode:
-    mov rax, [rdi]          ; filename str
-    mov rcx, [rdi + 8]     ; filename tag (64-bit)
+    mov rax, [rdi]          ; args[0] = filename
     push rdi                ; save args ptr
-    cmp rcx, TAG_PTR
-    jne .opn_type_error_pop
+    V_TEST_PTR rax, rcx
+    ja .opn_type_error_pop
     mov rbx, rax            ; save filename str
     pop rdi                 ; restore args ptr
 
-    mov rax, [rdi + 16]    ; mode str
-    mov rcx, [rdi + 24]    ; mode tag (64-bit)
+    mov rax, [rdi + 8]    ; mode str
+    V_UNPACK rax, rcx       ; args[1]
     cmp rcx, TAG_PTR
     jne .opn_type_error
     mov r13, rax            ; save mode str
@@ -3641,6 +3924,7 @@ DEF_FUNC builtin_open_fn, OPN_FRAME
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .opn_file_error:
@@ -3672,77 +3956,90 @@ END_FUNC builtin_open_fn
 ; Returns binary string representation: '0b...' or '-0b...'
 ; ============================================================================
 global builtin_bin
-DEF_FUNC builtin_bin, 80
-
+BIN_PFX_STR equ 8
+BINB_VAL   equ 8
+BINB_STR   equ 16
+BINB_OUT   equ 24
+BINB_FRAME equ 32
+DEF_FUNC builtin_bin, BINB_FRAME
+    push rbx
+    push r12
     cmp rsi, 1
     jne .bin_nargs_error
 
-    mov edx, [rdi + 8]
+    ; obj_as_index truncates a value too wide for int64, so builtin_bin(2**70)
+    ; came out as "0b0".  It is still what validates the argument and
+    ; honours __index__; int_base_str renders any width through GMP.
     mov rdi, [rdi]
-    call int_to_i64
+    mov [rbp - BINB_VAL], rdi
+    V_UNPACK rdi, rdx
+    call int_is_integer
+    test eax, eax
+    jnz .bin_have_value
+    mov rdi, [rbp - BINB_VAL]
+    call obj_as_index
+    mov rdx, TAG_SMALLINT
+    V_PACK rax, rdx
+    mov [rbp - BINB_VAL], rax
+.bin_have_value:
+    mov rdi, [rbp - BINB_VAL]
+    mov esi, 2
+    xor edx, edx
+    call int_base_str
+    mov [rbp - BINB_STR], rax
 
-    test rax, rax
-    jz .bin_zero
-
-    test rax, rax
-    jns .bin_positive
-
-    ; Negative
-    neg rax
-    mov byte [rbp - 80], '-'
-    mov byte [rbp - 79], '0'
-    mov byte [rbp - 78], 'b'
-    lea rdi, [rbp - 77]
-    mov r8d, 3
-    jmp .bin_digits
-
+    mov rbx, rax
+    cmp byte [rbx], '-'
+    jne .bin_positive
+    inc rbx
 .bin_positive:
-    mov byte [rbp - 80], '0'
-    mov byte [rbp - 79], 'b'
-    lea rdi, [rbp - 78]
-    mov r8d, 2
-
-.bin_digits:
-    lea rsi, [rbp - 16]
     xor ecx, ecx
+.bin_len:
+    cmp byte [rbx + rcx], 0
+    je .bin_have_len
+    inc rcx
+    jmp .bin_len
+.bin_have_len:
+    mov r12, rcx
+    lea rdi, [rcx + 8]
+    call ap_malloc
+    mov [rbp - BINB_OUT], rax
+    xor edx, edx
+    mov r8, [rbp - BINB_STR]
+    cmp byte [r8], '-'
+    jne .bin_no_sign
+    mov byte [rax], '-'
+    mov edx, 1
+.bin_no_sign:
+    mov byte [rax + rdx], '0'
+    mov byte [rax + rdx + 1], 'b'
+    add rdx, 2
+    xor r9d, r9d
+.bin_copy:
+    cmp r9, r12
+    jge .bin_copied
+    mov r10b, [rbx + r9]
+    mov [rax + rdx], r10b
+    inc rdx
+    inc r9
+    jmp .bin_copy
+.bin_copied:
+    mov byte [rax + rdx], 0
 
-.bin_digit_loop:
-    test rax, rax
-    jz .bin_reverse
-
-    mov rdx, rax
-    and edx, 1
-    add edx, '0'
-    mov byte [rsi], dl
-    dec rsi
-    inc ecx
-    shr rax, 1
-    jmp .bin_digit_loop
-
-.bin_reverse:
-    inc rsi
-    mov edx, ecx
-.bin_copy_loop:
-    test ecx, ecx
-    jz .bin_done_copy
-    mov al, byte [rsi]
-    mov byte [rdi], al
-    inc rsi
-    inc rdi
-    dec ecx
-    jmp .bin_copy_loop
-
-.bin_done_copy:
-    mov byte [rdi], 0
-    lea rdi, [rbp - 80]
+    mov rdi, [rbp - BINB_STR]
+    call ap_free
+    mov rdi, [rbp - BINB_OUT]
     call str_from_cstr
+    mov rbx, rax
+    mov r12, rdx
+    mov rdi, [rbp - BINB_OUT]
+    call ap_free
+    mov rax, rbx
+    mov rdx, r12
+    pop r12
+    pop rbx
     leave
-    ret
-
-.bin_zero:
-    CSTRING rdi, "0b0"
-    call str_from_cstr
-    leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .bin_nargs_error:
@@ -3756,77 +4053,90 @@ END_FUNC builtin_bin
 ; Returns octal string representation: '0o...' or '-0o...'
 ; ============================================================================
 global builtin_oct
-DEF_FUNC builtin_oct, 80
-
+OCT_PFX_STR equ 8
+OCTB_VAL   equ 8
+OCTB_STR   equ 16
+OCTB_OUT   equ 24
+OCTB_FRAME equ 32
+DEF_FUNC builtin_oct, OCTB_FRAME
+    push rbx
+    push r12
     cmp rsi, 1
     jne .oct_nargs_error
 
-    mov edx, [rdi + 8]
+    ; obj_as_index truncates a value too wide for int64, so builtin_oct(2**70)
+    ; came out as "0o0".  It is still what validates the argument and
+    ; honours __index__; int_base_str renders any width through GMP.
     mov rdi, [rdi]
-    call int_to_i64
+    mov [rbp - OCTB_VAL], rdi
+    V_UNPACK rdi, rdx
+    call int_is_integer
+    test eax, eax
+    jnz .oct_have_value
+    mov rdi, [rbp - OCTB_VAL]
+    call obj_as_index
+    mov rdx, TAG_SMALLINT
+    V_PACK rax, rdx
+    mov [rbp - OCTB_VAL], rax
+.oct_have_value:
+    mov rdi, [rbp - OCTB_VAL]
+    mov esi, 8
+    xor edx, edx
+    call int_base_str
+    mov [rbp - OCTB_STR], rax
 
-    test rax, rax
-    jz .oct_zero
-
-    test rax, rax
-    jns .oct_positive
-
-    ; Negative
-    neg rax
-    mov byte [rbp - 80], '-'
-    mov byte [rbp - 79], '0'
-    mov byte [rbp - 78], 'o'
-    lea rdi, [rbp - 77]
-    mov r8d, 3
-    jmp .oct_digits
-
+    mov rbx, rax
+    cmp byte [rbx], '-'
+    jne .oct_positive
+    inc rbx
 .oct_positive:
-    mov byte [rbp - 80], '0'
-    mov byte [rbp - 79], 'o'
-    lea rdi, [rbp - 78]
-    mov r8d, 2
-
-.oct_digits:
-    lea rsi, [rbp - 16]
     xor ecx, ecx
+.oct_len:
+    cmp byte [rbx + rcx], 0
+    je .oct_have_len
+    inc rcx
+    jmp .oct_len
+.oct_have_len:
+    mov r12, rcx
+    lea rdi, [rcx + 8]
+    call ap_malloc
+    mov [rbp - OCTB_OUT], rax
+    xor edx, edx
+    mov r8, [rbp - OCTB_STR]
+    cmp byte [r8], '-'
+    jne .oct_no_sign
+    mov byte [rax], '-'
+    mov edx, 1
+.oct_no_sign:
+    mov byte [rax + rdx], '0'
+    mov byte [rax + rdx + 1], 'o'
+    add rdx, 2
+    xor r9d, r9d
+.oct_copy:
+    cmp r9, r12
+    jge .oct_copied
+    mov r10b, [rbx + r9]
+    mov [rax + rdx], r10b
+    inc rdx
+    inc r9
+    jmp .oct_copy
+.oct_copied:
+    mov byte [rax + rdx], 0
 
-.oct_digit_loop:
-    test rax, rax
-    jz .oct_reverse
-
-    mov rdx, rax
-    and edx, 7
-    add edx, '0'
-    mov byte [rsi], dl
-    dec rsi
-    inc ecx
-    shr rax, 3
-    jmp .oct_digit_loop
-
-.oct_reverse:
-    inc rsi
-    mov edx, ecx
-.oct_copy_loop:
-    test ecx, ecx
-    jz .oct_done_copy
-    mov al, byte [rsi]
-    mov byte [rdi], al
-    inc rsi
-    inc rdi
-    dec ecx
-    jmp .oct_copy_loop
-
-.oct_done_copy:
-    mov byte [rdi], 0
-    lea rdi, [rbp - 80]
+    mov rdi, [rbp - OCTB_STR]
+    call ap_free
+    mov rdi, [rbp - OCTB_OUT]
     call str_from_cstr
+    mov rbx, rax
+    mov r12, rdx
+    mov rdi, [rbp - OCTB_OUT]
+    call ap_free
+    mov rax, rbx
+    mov rdx, r12
+    pop r12
+    pop rbx
     leave
-    ret
-
-.oct_zero:
-    CSTRING rdi, "0o0"
-    call str_from_cstr
-    leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .oct_nargs_error:
@@ -3849,8 +4159,7 @@ DEF_FUNC builtin_ascii_fn, AA_FRAME
     jne .aa_nargs_error
 
     ; Get repr(obj)
-    mov esi, [rdi + 8]       ; tag
-    mov rdi, [rdi]            ; payload
+    mov rdi, [rdi]            ; args[0]
     call obj_repr
     test edx, edx
     jz .aa_nargs_error
@@ -3874,6 +4183,7 @@ DEF_FUNC builtin_ascii_fn, AA_FRAME
     mov rax, [rbp - AA_REPR]
     mov edx, TAG_PTR
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .aa_need_escape:
@@ -3959,6 +4269,7 @@ DEF_FUNC builtin_ascii_fn, AA_FRAME
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .aa_nargs_error:
@@ -3986,16 +4297,16 @@ DEF_FUNC builtin_format_fn, FMT_FRAME
     push rbx
     mov rbx, rsi               ; rbx = nargs
 
-    ; Save obj
+    ; Save obj.  args[0] is a Value; the slot below used to be filled from
+    ; args[1] as though it were a separate tag, which is what the fat-value
+    ; representation looked like -- so it held the format spec instead.
     mov rax, [rdi]
     mov [rbp - FMT_OBJ], rax
-    mov rax, [rdi + 8]
-    mov [rbp - FMT_OBJ_TAG], rax
 
     ; Get format spec (empty string if not provided)
     cmp rbx, 2
     jb .fmt_empty_spec
-    mov rax, [rdi + 16]
+    mov rax, [rdi + 8]
     mov [rbp - FMT_SPEC], rax
     jmp .fmt_have_spec
 
@@ -4005,14 +4316,64 @@ DEF_FUNC builtin_format_fn, FMT_FRAME
     mov [rbp - FMT_SPEC], rax
 
 .fmt_have_spec:
-    ; For now, always use str(value) as fallback.
-    ; TODO: implement __format__ protocol for non-empty format specs.
-    jmp .fmt_use_str
+    ; A class defining __format__ formats itself.  This used to fall straight
+    ; through to str(), so f"{obj:>5}" ignored both the spec and the method.
+    V_TEST_PTR_M [rbp - FMT_OBJ], rcx
+    ja .fmt_apply_spec
+    mov rdi, [rbp - FMT_OBJ]
+    mov rax, [rdi + PyObject.ob_type]
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_HEAPTYPE
+    jz .fmt_apply_spec
+    mov rsi, [rbp - FMT_SPEC]
+    extern dunder_call_2
+    lea rdx, [rel fmt_dunder_name]
+    mov ecx, TAG_PTR
+    call dunder_call_2
+    V_UNPACK rax, rdx
+    test edx, edx
+    jnz .fmt_dunder_ok
+    ; NULL means either "no __format__" or "__format__ raised"; falling
+    ; through in the second case replaced the real exception.
+    cmp qword [rel current_exception], 0
+    jne .fmt_propagate
+    jmp .fmt_apply_spec
+.fmt_dunder_ok:
+    ; If an empty spec was allocated here, release it.
+    cmp rbx, 2
+    jge .fmt_done
+    push rax
+    push rdx
+    mov rdi, [rbp - FMT_SPEC]
+    call obj_decref
+    pop rdx
+    pop rax
+    jmp .fmt_done
+
+.fmt_propagate:
+    extern eval_exception_unwind
+    leave
+    jmp eval_exception_unwind
+
+.fmt_apply_spec:
+    ; Not a class with its own __format__: apply the spec directly.
+    extern format_apply_spec
+    mov rdi, [rbp - FMT_OBJ]
+    mov rsi, [rbp - FMT_SPEC]
+    call format_apply_spec
+    V_UNPACK rax, rdx
+    cmp rbx, 2
+    jge .fmt_done
+    push rax
+    push rdx
+    mov rdi, [rbp - FMT_SPEC]
+    call obj_decref
+    pop rdx
+    pop rax
+    jmp .fmt_done
 
 .fmt_use_str:
     ; Just call str(value) — simple fallback
-    mov rdi, [rbp - FMT_OBJ]
-    mov rsi, [rbp - FMT_OBJ_TAG]
+    mov rdi, [rbp - FMT_OBJ]    ; already a Value
     call obj_str
     ; If we allocated an empty spec, DECREF it
     cmp rbx, 2
@@ -4026,6 +4387,7 @@ DEF_FUNC builtin_format_fn, FMT_FRAME
 .fmt_done:
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .fmt_nargs_error:
@@ -4050,9 +4412,8 @@ DEF_FUNC builtin_vars_fn, VR_FRAME
     jne .vars_nargs_error
 
     ; vars(obj): return obj.__dict__
-    mov rax, [rdi + 8]        ; tag
-    cmp eax, TAG_PTR
-    jne .vars_no_dict
+    V_TEST_PTR_M [rdi], rax   ; args[0] a pointer?
+    ja .vars_no_dict
 
     mov rdi, [rdi]            ; obj pointer
     ; Try inst_dict (user-defined class instances)
@@ -4068,6 +4429,7 @@ DEF_FUNC builtin_vars_fn, VR_FRAME
     INCREF rax
     mov edx, TAG_PTR
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .vars_empty_dict:
@@ -4075,6 +4437,7 @@ DEF_FUNC builtin_vars_fn, VR_FRAME
     call dict_new
     mov edx, TAG_PTR
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .vars_no_arg:
@@ -4082,7 +4445,7 @@ DEF_FUNC builtin_vars_fn, VR_FRAME
     extern builtin_locals
     xor edi, edi
     xor esi, esi
-    call builtin_locals
+    call builtin_locals         ; already returns a Value
     leave
     ret
 
@@ -4114,12 +4477,12 @@ DEF_FUNC builtin_delattr_fn, DA2_FRAME
     ; Get obj and name
     mov rax, [rdi]             ; obj payload
     mov [rbp - DA2_OBJ], rax
-    mov rax, [rdi + 16]       ; name payload
+    mov rax, [rdi + 8]       ; name payload
     mov [rbp - DA2_NAME], rax
 
     ; obj must be a heap pointer
-    cmp dword [rdi + 8], TAG_PTR
-    jne .da2_type_error
+    V_TEST_PTR_M [rdi], r11      ; args[0] a pointer?
+    ja .da2_type_error
 
     ; Get type and tp_setattr
     mov rdi, [rbp - DA2_OBJ]
@@ -4140,6 +4503,7 @@ DEF_FUNC builtin_delattr_fn, DA2_FRAME
     INCREF rax
     mov edx, TAG_PTR
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .da2_type_error:
@@ -4169,12 +4533,11 @@ DEF_FUNC builtin_aiter_fn
     jne .aiter_nargs_error
 
     ; Get the object
-    mov esi, [rdi + 8]        ; tag
-    mov rdi, [rdi]            ; payload
+    mov rdi, [rdi]            ; args[0]
 
     ; Must be a heap pointer
-    cmp esi, TAG_PTR
-    jne .aiter_type_error
+    V_TEST_PTR rdi, rsi
+    ja .aiter_type_error
 
     ; Call tp_iter
     mov rax, [rdi + PyObject.ob_type]
@@ -4185,6 +4548,7 @@ DEF_FUNC builtin_aiter_fn
     call rax                   ; tp_iter returns rax=ptr only
     mov edx, TAG_PTR
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .aiter_type_error:
@@ -4226,10 +4590,10 @@ DEF_FUNC builtin_anext_fn, AN_FRAME
     ; Save default if present
     cmp rsi, 2
     jb .an_no_default
-    mov rax, [rdi + 16]
+    mov rax, [rdi + 8]
+    V_UNPACK rax, rdx
     mov [rbp - AN_DEFAULT], rax
-    mov eax, [rdi + 24]
-    mov [rbp - AN_DEFTAG], rax
+    mov [rbp - AN_DEFTAG], rdx
     jmp .an_call
 
 .an_no_default:
@@ -4246,6 +4610,7 @@ DEF_FUNC builtin_anext_fn, AN_FRAME
 
     mov rdi, [rbp - AN_ITER]
     call rax                   ; returns (rax, edx)
+    V_UNPACK rax, rdx           ; tp_iternext returns a Value
     test edx, edx
     jnz .an_got_value
 
@@ -4259,15 +4624,18 @@ DEF_FUNC builtin_anext_fn, AN_FRAME
     mov edx, [rbp - AN_DEFTAG]
     INCREF_VAL rax, rdx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .an_got_value:
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .an_reraise:
     ; No default — let the exception propagate
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .an_type_error:
@@ -4300,6 +4668,7 @@ DEF_FUNC builtin_import_fn
     call import_module
     ; Returns (rax=module, edx=TAG_PTR)
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .imp_nargs_error:
@@ -4315,6 +4684,7 @@ global builtin_breakpoint
 DEF_FUNC_BARE builtin_breakpoint
     ; No-op: return None
     xor eax, eax
-    mov edx, TAG_NONE
+    RET_NONE
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 END_FUNC builtin_breakpoint

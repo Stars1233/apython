@@ -18,6 +18,19 @@ GREEN='\033[0;32m'
 YELLOW='\033[0;33m'
 NC='\033[0m'
 
+# Value encoding self-test: verifies the NaN-box boundaries directly, before
+# any Python-level test can be misled by a mis-encoded value.
+printf "%-40s " "value encoding selftest"
+if $APYTHON --selftest-value > /tmp/apython_selftest.out 2>&1; then
+    printf "${GREEN}PASS${NC}\n"
+    PASS=$((PASS + 1))
+else
+    printf "${RED}FAIL${NC}\n"
+    cat /tmp/apython_selftest.out
+    FAIL=$((FAIL + 1))
+    ERRORS="$ERRORS value-selftest"
+fi
+
 # Pre-compile all non-test .py files (helper modules)
 for helper_py in "$TESTDIR"/*.py; do
     case "$(basename "$helper_py")" in
@@ -39,8 +52,17 @@ for test_py in "$TESTDIR"/test_*.py; do
         continue
     fi
 
-    # Run with Python
-    expected=$($PYTHON "$test_py" 2>&1) || true
+    # Oracle: normally CPython itself.  A handful of tests exercise private
+    # APIs that CPython does not validate and that crash it outright — those
+    # record their expected output in tests/expected/ instead.  Such a test
+    # must be self-checking (assert on every step) so the recording is a
+    # transcript of a verified run, not the definition of correct.
+    expected_file="$TESTDIR/expected/${test_name}.txt"
+    if [ -f "$expected_file" ]; then
+        expected=$(cat "$expected_file")
+    else
+        expected=$($PYTHON "$test_py" 2>&1) || true
+    fi
 
     # Run with apython
     actual=$($APYTHON "$pyc_file" 2>&1) || true

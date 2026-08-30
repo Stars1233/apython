@@ -127,8 +127,18 @@ DEF_FUNC fileobj_write
     ; args[0] = self (file obj), args[1] = string to write
     mov rax, rdi                ; rax = args
     mov rdi, [rax]              ; rdi = self (file obj)
-    mov rsi, [rax + 16]        ; rsi = string arg payload (16-byte stride)
-    mov r9, [rax + 24]         ; r9 = string arg tag
+    mov rsi, [rax + 8]        ; rsi = the string argument Value
+    V_UNPACK rsi, r9       ; args[1]
+
+    ; The data pointer is taken below, so the argument has to be a str: an
+    ; immediate's payload is not an address, and nothing else carries its
+    ; text at PyStrObject.data.  write(5) read and emitted wild memory.
+    cmp r9d, TAG_PTR
+    jne .write_type_error
+    mov rcx, [rsi + PyObject.ob_type]
+    lea rdx, [rel str_type]
+    cmp rcx, rdx
+    jne .write_type_error
 
     ; Get fd
     mov rcx, [rdi + PyFileObject.file_fd]
@@ -148,6 +158,7 @@ DEF_FUNC fileobj_write
     ; Return char count as int
     call int_from_i64
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .write_error:
@@ -155,6 +166,11 @@ DEF_FUNC fileobj_write
     extern exc_TypeError_type
     lea rdi, [rel exc_TypeError_type]
     CSTRING rsi, "write() takes exactly 1 argument"
+    call raise_exception
+
+.write_type_error:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "write() argument must be str"
     call raise_exception
 END_FUNC fileobj_write
 
@@ -165,7 +181,9 @@ END_FUNC fileobj_write
 DEF_FUNC fileobj_flush
     lea rax, [rel none_singleton]
     inc qword [rax + PyObject.ob_refcnt]
-    leave
+    mov edx, TAG_PTR            ; rdx was whatever the caller left; V_PACK
+    leave                       ; then read it as an int tag and biased the
+    V_PACK rax, rdx             ; singleton pointer into a large integer
     ret
 END_FUNC fileobj_flush
 
@@ -177,26 +195,38 @@ DEF_FUNC fileobj_fileno
     mov rdi, [rax + PyFileObject.file_fd]
     call int_from_i64
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 END_FUNC fileobj_fileno
 
 ; ============================================================================
 ; fileobj_isatty(PyObject **args, int64_t nargs) -> PyObject*
-; Returns True for fd <= 2, False otherwise
+; Asks the kernel.  Assuming fd <= 2 is a terminal answered True for a
+; redirected stdout, which is exactly when a program checks.
 ; ============================================================================
-DEF_FUNC fileobj_isatty
+IAT_BUF   equ 72          ; struct termios is 60 bytes
+IAT_FRAME equ 80
+DEF_FUNC fileobj_isatty, IAT_FRAME
     mov rax, [rdi]              ; self
-    mov rcx, [rax + PyFileObject.file_fd]
-    cmp rcx, 2
-    jbe .is_tty
+    mov rdi, [rax + PyFileObject.file_fd]
+    mov esi, 0x5401             ; TCGETS
+    lea rdx, [rbp - IAT_BUF]
+    extern sys_ioctl
+    call sys_ioctl
+    test rax, rax
+    jns .is_tty
     lea rax, [rel bool_false]
     inc qword [rax + PyObject.ob_refcnt]
-    leave
+    mov edx, TAG_PTR            ; rdx was whatever the caller left; V_PACK
+    leave                       ; then read it as an int tag and biased the
+    V_PACK rax, rdx             ; singleton pointer into a large integer
     ret
 .is_tty:
     lea rax, [rel bool_true]
     inc qword [rax + PyObject.ob_refcnt]
-    leave
+    mov edx, TAG_PTR            ; rdx was whatever the caller left; V_PACK
+    leave                       ; then read it as an int tag and biased the
+    V_PACK rax, rdx             ; singleton pointer into a large integer
     ret
 END_FUNC fileobj_isatty
 
@@ -211,12 +241,16 @@ DEF_FUNC fileobj_writable
     je .yes
     lea rax, [rel bool_false]
     inc qword [rax + PyObject.ob_refcnt]
-    leave
+    mov edx, TAG_PTR            ; rdx was whatever the caller left; V_PACK
+    leave                       ; then read it as an int tag and biased the
+    V_PACK rax, rdx             ; singleton pointer into a large integer
     ret
 .yes:
     lea rax, [rel bool_true]
     inc qword [rax + PyObject.ob_refcnt]
-    leave
+    mov edx, TAG_PTR            ; rdx was whatever the caller left; V_PACK
+    leave                       ; then read it as an int tag and biased the
+    V_PACK rax, rdx             ; singleton pointer into a large integer
     ret
 END_FUNC fileobj_writable
 
@@ -230,12 +264,16 @@ DEF_FUNC fileobj_readable
     je .yes
     lea rax, [rel bool_false]
     inc qword [rax + PyObject.ob_refcnt]
-    leave
+    mov edx, TAG_PTR            ; rdx was whatever the caller left; V_PACK
+    leave                       ; then read it as an int tag and biased the
+    V_PACK rax, rdx             ; singleton pointer into a large integer
     ret
 .yes:
     lea rax, [rel bool_true]
     inc qword [rax + PyObject.ob_refcnt]
-    leave
+    mov edx, TAG_PTR            ; rdx was whatever the caller left; V_PACK
+    leave                       ; then read it as an int tag and biased the
+    V_PACK rax, rdx             ; singleton pointer into a large integer
     ret
 END_FUNC fileobj_readable
 
@@ -245,11 +283,42 @@ END_FUNC fileobj_readable
 DEF_FUNC fileobj_seekable
     lea rax, [rel bool_false]
     inc qword [rax + PyObject.ob_refcnt]
-    leave
+    mov edx, TAG_PTR            ; rdx was whatever the caller left; V_PACK
+    leave                       ; then read it as an int tag and biased the
+    V_PACK rax, rdx             ; singleton pointer into a large integer
     ret
 END_FUNC fileobj_seekable
 
 ; ============================================================================
+; fileobj_enter(args, nargs) -> the file itself
+DEF_FUNC fileobj_enter
+    mov rax, [rdi]
+    inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
+    leave
+    V_PACK rax, rdx
+    ret
+END_FUNC fileobj_enter
+
+; fileobj_exit(args, nargs) -> False, after closing
+DEF_FUNC fileobj_exit
+    call fileobj_close_method
+    ; The result is None; __exit__ answers False so an exception propagates.
+    V_UNPACK rax, rdx
+    push rax
+    push rdx
+    mov rdi, rax
+    call obj_decref
+    add rsp, 16
+    extern bool_false
+    lea rax, [rel bool_false]
+    inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
+    leave
+    V_PACK rax, rdx
+    ret
+END_FUNC fileobj_exit
+
 ; fileobj_close_method(PyObject **args, int64_t nargs) -> PyObject*
 ; ============================================================================
 DEF_FUNC fileobj_close_method
@@ -258,7 +327,9 @@ DEF_FUNC fileobj_close_method
     call sys_close
     lea rax, [rel none_singleton]
     inc qword [rax + PyObject.ob_refcnt]
-    leave
+    mov edx, TAG_PTR            ; rdx was whatever the caller left; V_PACK
+    leave                       ; then read it as an int tag and biased the
+    V_PACK rax, rdx             ; singleton pointer into a large integer
     ret
 END_FUNC fileobj_close_method
 
@@ -296,6 +367,7 @@ DEF_FUNC fileobj_read, FR_FRAME
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .fr_empty:
@@ -304,6 +376,7 @@ DEF_FUNC fileobj_read, FR_FRAME
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 END_FUNC fileobj_read
 
@@ -354,6 +427,7 @@ DEF_FUNC fileobj_readline, FRL_FRAME
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 END_FUNC fileobj_readline
 
@@ -426,6 +500,20 @@ DEF_FUNC fileobj_getattr
     test eax, eax
     jz .ret_close
 
+    ; A file is a context manager: `with open(...) as f` is the ordinary way
+    ; to use one, and it raised TypeError because neither dunder existed.
+    lea rdi, [r12 + PyStrObject.data]
+    lea rsi, [rel fa_enter]
+    call ap_strcmp
+    test eax, eax
+    jz .ret_enter
+
+    lea rdi, [r12 + PyStrObject.data]
+    lea rsi, [rel fa_exit]
+    call ap_strcmp
+    test eax, eax
+    jz .ret_exit
+
     ; Check "read"
     lea rdi, [r12 + PyStrObject.data]
     CSTRING rsi, "read"
@@ -494,6 +582,7 @@ DEF_FUNC fileobj_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .ret_write:
@@ -544,6 +633,18 @@ DEF_FUNC fileobj_getattr
     call builtin_func_new
     jmp .bind_method
 
+.ret_enter:
+    lea rdi, [rel fileobj_enter]
+    lea rsi, [rel fa_enter]
+    call builtin_func_new
+    jmp .bind_method
+
+.ret_exit:
+    lea rdi, [rel fileobj_exit]
+    lea rsi, [rel fa_exit]
+    call builtin_func_new
+    jmp .bind_method
+
 .ret_read:
     lea rdi, [rel fileobj_read]
     CSTRING rsi, "read"
@@ -573,6 +674,7 @@ DEF_FUNC fileobj_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .ret_encoding:
@@ -581,6 +683,7 @@ DEF_FUNC fileobj_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .ret_errors:
@@ -589,6 +692,7 @@ DEF_FUNC fileobj_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .ret_name:
@@ -598,6 +702,7 @@ DEF_FUNC fileobj_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .ret_mode:
@@ -607,6 +712,7 @@ DEF_FUNC fileobj_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .ret_closed:
@@ -616,6 +722,7 @@ DEF_FUNC fileobj_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .ret_newlines:
@@ -625,6 +732,7 @@ DEF_FUNC fileobj_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .ret_line_buffering:
@@ -634,6 +742,7 @@ DEF_FUNC fileobj_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 END_FUNC fileobj_getattr
@@ -655,6 +764,8 @@ fa_writable:  db "writable", 0
 fa_readable:  db "readable", 0
 fa_seekable:  db "seekable", 0
 fa_close:     db "close", 0
+fa_enter:     db "__enter__", 0
+fa_exit:      db "__exit__", 0
 fa_encoding:  db "encoding", 0
 fa_errors:    db "errors", 0
 fa_name:      db "name", 0
@@ -698,3 +809,4 @@ file_type:
     dq 0                        ; tp_bases
     dq 0                        ; tp_traverse
     dq 0                        ; tp_clear
+    dq 0 ; tp_dictoffset

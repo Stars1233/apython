@@ -5,6 +5,7 @@
 %include "object.inc"
 %include "types.inc"
 
+extern none_singleton
 extern ap_malloc
 extern ap_free
 extern ap_strlen
@@ -18,6 +19,10 @@ extern fatal_error
 extern raise_exception
 extern exc_IndexError_type
 extern exc_TypeError_type
+extern int_type
+extern obj_as_index
+extern int_fits_i64
+extern exc_OverflowError_type
 extern slice_type
 extern slice_indices
 extern type_type
@@ -146,8 +151,34 @@ DEF_FUNC str_repr
     mov [r13 + PyObject.ob_type], rcx
     mov qword [r13 + PyStrObject.ob_hash], -1
 
+    ; Pick the delimiter as CPython does: a single quote normally, a double
+    ; quote when the text contains ' and no ", so the quote inside needs no
+    ; backslash.  This always used ' and escaped, so repr("a'b") came out as
+    ; 'a\'b' where CPython gives "a'b".
+    push r14
+    mov r14d, 0x27
+    xor eax, eax                ; saw a single quote?
+    xor ecx, ecx
+.sr_scan:
+    cmp rcx, r12
+    jge .sr_scan_done
+    movzx edx, byte [rbx + PyStrObject.data + rcx]
+    cmp dl, 0x22                ; a double quote rules the switch out
+    je .sr_scan_keep
+    cmp dl, 0x27
+    jne .sr_scan_next
+    mov eax, 1
+.sr_scan_next:
+    inc rcx
+    jmp .sr_scan
+.sr_scan_done:
+    test eax, eax
+    jz .sr_scan_keep
+    mov r14d, 0x22
+.sr_scan_keep:
+
     ; Write opening quote
-    mov byte [r13 + PyStrObject.data], "'"
+    mov [r13 + PyStrObject.data], r14b
 
     ; Copy with escaping: rsi=src, rdi=dst, rcx=src index
     lea rsi, [rbx + PyStrObject.data]
@@ -167,7 +198,7 @@ DEF_FUNC str_repr
     je .sr_esc_t
     cmp al, 0x5C             ; backslash
     je .sr_esc_bs
-    cmp al, 0x27             ; single quote
+    cmp eax, r14d            ; the delimiter in use
     je .sr_esc_sq
 
     ; Normal character
@@ -206,14 +237,14 @@ DEF_FUNC str_repr
 
 .sr_esc_sq:
     mov byte [rdi], 0x5C
-    mov byte [rdi + 1], 0x27
+    mov [rdi + 1], r14b      ; the delimiter in use
     add rdi, 2
     inc rcx
     jmp .sr_loop
 
 .sr_done:
     ; Write closing quote and null
-    mov byte [rdi], "'"
+    mov [rdi], r14b
     mov qword [rdi + 1], 0  ; 8-byte zero-fill for ap_strcmp
 
     ; Calculate actual ob_size: (rdi - data_start) + 1 for closing quote
@@ -224,6 +255,7 @@ DEF_FUNC str_repr
 
     mov rax, r13
     mov edx, TAG_PTR
+    pop r14
     pop r13
     pop r12
     pop rbx
@@ -304,14 +336,14 @@ END_FUNC str_hash
 ;; Binary op handler passes right_tag in ecx. Direct callers must set ecx=TAG_PTR.
 ;; ============================================================================
 DEF_FUNC str_concat
+    V_UNPACK rdi, rdx           ; left  Value -> (payload, tag)
+    V_UNPACK rsi, rcx           ; right Value -> (payload, tag)
     ; Check right tag first — non-TAG_PTR means not a heap string
     cmp ecx, TAG_PTR
     jne .concat_type_error
     ; Verify right operand is a string (ob_type == str_type)
     mov rax, [rsi + PyObject.ob_type]
-    lea rdx, [rel str_type]
-    cmp rax, rdx
-    jne .concat_type_error
+    REQUIRE_STR_TYPE rax, rdx, .concat_type_error
 
     push rbx
     push r12
@@ -359,6 +391,7 @@ DEF_FUNC str_concat
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .concat_type_error:
@@ -372,6 +405,8 @@ END_FUNC str_concat
 ;; String repetition via nb_multiply
 ;; ============================================================================
 DEF_FUNC str_repeat
+    V_UNPACK rdi, rdx           ; left  Value -> (payload, tag)
+    V_UNPACK rsi, rcx           ; right Value -> (payload, tag)
     push rbx
     push r12
     push r13
@@ -380,6 +415,27 @@ DEF_FUNC str_repeat
     mov rbx, rdi            ; str
     mov rdi, rsi            ; int (count payload)
     mov edx, ecx            ; count tag (right operand)
+    ; A count too large for int64 truncates through __gmpz_get_si, so
+    ; "a" * (2**64) quietly returned "".
+    ; The count must be an index.  int_fits_i64 and int_to_i64 both read
+    ; PyIntObject fields, so a str or a float count was dereferenced as one:
+    ; "a" * "2" segfaulted and [1] * None reported an OverflowError.
+    push rdi
+    push rdx
+    mov rsi, rdi
+    mov rcx, rdx
+    V_PACK rsi, rcx
+    extern seq_repeat_check_count
+    call seq_repeat_check_count
+    pop rdx
+    pop rdi
+    push rdi
+    push rdx
+    call int_fits_i64
+    pop rdx
+    pop rdi
+    test eax, eax
+    jz .srep_overflow
     call int_to_i64
     mov r12, rax             ; r12 = repeat count
 
@@ -390,8 +446,13 @@ DEF_FUNC str_repeat
 .positive:
 
     mov r13, [rbx + PyStrObject.ob_size]   ; r13 = str length
-    imul r14, r13, 1                        ; r14 = str length (copy)
+    mov r14, r13
     imul r14, r12                           ; r14 = total length
+    ; ("a"*16) * (2**60) wrapped to 0, allocated 40 bytes, and then ran the
+    ; copy loop 2**60 times into it.
+    jo .srep_overflow
+    cmp r14, 0x10000000                     ; 256M bytes
+    ja .srep_overflow
 
     ; Allocate new string (+ 8 for NUL padding for 8-byte strcmp)
     lea rdi, [r14 + PyStrObject.data + 8]
@@ -433,7 +494,12 @@ DEF_FUNC str_repeat
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
+.srep_overflow:
+    lea rdi, [rel exc_OverflowError_type]
+    CSTRING rsi, "repeated string is too long"
+    call raise_exception
 END_FUNC str_repeat
 
 ;; ============================================================================
@@ -443,6 +509,7 @@ END_FUNC str_repeat
 ;; args can be a single value or a tuple
 ;; ============================================================================
 extern obj_str
+extern exc_ValueError_type
 extern obj_repr
 extern tuple_type
 extern obj_decref
@@ -455,9 +522,21 @@ SM_CAP     equ 32
 SM_ISTUPLE equ 40
 SM_NARGS   equ 48
 SM_ATAG    equ 56
-SM_FRAME   equ 56
+SM_KEYVAL  equ 64        ; value picked out by a %(name)s mapping key, or 0
+SM_HASKEY  equ 72
+SM_SPECST  equ 80        ; start of the flags/width/precision text
+SM_POS     equ 88        ; input position, across calls
+SM_SPEC    equ 128       ; 40 bytes of translated format spec, [rbp-128, rbp-88)
+SM_CONV    equ 136
+SM_SPECOBJ equ 144
+SM_VALUE   equ 152
+SM_PIECE   equ 160
+SM_OWNVAL  equ 168
+SM_FRAME   equ 176
 
 DEF_FUNC str_mod, SM_FRAME
+    V_UNPACK rdi, rdx           ; left  Value -> (payload, tag)
+    V_UNPACK rsi, rcx           ; right Value -> (payload, tag)
     ; Stack layout:
     ; [rbp-SM_FMT]     = fmt string
     ; [rbp-SM_ARGS]    = args (single value or tuple)
@@ -501,6 +580,7 @@ DEF_FUNC str_mod, SM_FRAME
     mov qword [rbp-SM_CAP], 8192
     xor r14d, r14d             ; r14 = output pos
     xor r15d, r15d             ; r15 = arg index
+    mov qword [rbp-SM_HASKEY], 0
 
     ; Walk format string
     mov rbx, [rbp-SM_FMT]     ; fmt string
@@ -536,6 +616,54 @@ DEF_FUNC str_mod, SM_FRAME
     inc rcx
     cmp rcx, r12
     jge .sm_done
+
+    ; %(name)s -- a mapping key.  This was never parsed, so the whole
+    ; directive was copied through and "%(a)s" % {"a": 1} returned itself.
+    mov qword [rbp-SM_HASKEY], 0
+    cmp byte [rbx + rcx], '('
+    jne .sm_mark_spec
+    inc rcx
+    mov r8, rcx                     ; start of the key
+.sm_key_scan:
+    cmp rcx, r12
+    jge .sm_key_unterminated
+    cmp byte [rbx + rcx], ')'
+    je .sm_key_end
+    inc rcx
+    jmp .sm_key_scan
+.sm_key_end:
+    ; Build the key string and look it up in the mapping.
+    push rcx
+    push r8
+    lea rdi, [rbx + r8]
+    mov rsi, rcx
+    sub rsi, r8
+    call str_new_heap
+    pop r8
+    pop rcx
+    push rcx
+    push rax                        ; the key, ours to release
+    mov rdi, [rbp-SM_ARGS]
+    mov rsi, rax
+    extern dict_get
+    call dict_get
+    mov r9, rax
+    pop rdi
+    push r9
+    call obj_decref
+    pop r9
+    pop rcx
+    test r9, r9
+    jz .sm_key_error
+    mov [rbp-SM_KEYVAL], r9
+    mov qword [rbp-SM_HASKEY], 1
+    inc rcx                         ; step past ')'
+
+.sm_mark_spec:
+    ; Remember where the flags start.  This used to sit on .sm_skip_flags
+    ; itself, which .sm_skip_one jumps back to once per flag -- so the marker
+    ; ended up *after* the flags and "%-5s" looked like it had none.
+    mov [rbp-SM_SPECST], rcx
 
 .sm_skip_flags:
     movzx eax, byte [rbx + rcx]
@@ -585,6 +713,46 @@ DEF_FUNC str_mod, SM_FRAME
     jmp .sm_skip_prec
 
 .sm_dispatch:
+    ; A directive carrying flags, width or precision was skipped outright,
+    ; so "%5s" % "x" returned "x".  Those go through the format-spec engine;
+    ; a bare %s or %d keeps the direct path below.
+    mov rax, [rbp-SM_SPECST]
+    cmp rax, rcx
+    jne .sm_use_spec
+    ; The direct path below never learned %X, %o or %b, so those went out
+    ; literally even with no flags; and its %x handled only an int immediate,
+    ; printing "0" for a heap int.  All four go through the spec engine.
+    movzx eax, byte [rbx + rcx]
+    cmp al, 'X'
+    je .sm_use_spec
+    cmp al, 'x'
+    je .sm_use_spec
+    cmp al, 'o'
+    je .sm_use_spec
+    cmp al, 'b'
+    je .sm_use_spec
+    ; %e, %g and their uppercase forms went out literally, and %f fell back
+    ; to str(), so "%f" % 1.5 was "1.5" rather than "1.500000".
+    cmp al, 'e'
+    je .sm_use_spec
+    cmp al, 'E'
+    je .sm_use_spec
+    cmp al, 'f'
+    je .sm_use_spec
+    cmp al, 'F'
+    je .sm_use_spec
+    cmp al, 'g'
+    je .sm_use_spec
+    cmp al, 'G'
+    je .sm_use_spec
+    jmp .sm_dispatch_plain
+.sm_use_spec:
+    mov [rbp-SM_POS], rcx
+    call .sm_spec_conv
+    mov rcx, [rbp-SM_POS]
+    jmp .sm_loop
+
+.sm_dispatch_plain:
     movzx eax, byte [rbx + rcx]
     inc rcx                    ; consume conversion char
 
@@ -621,6 +789,7 @@ DEF_FUNC str_mod, SM_FRAME
     ; rax = arg payload, rdx = arg tag
     mov rdi, rax
     mov rsi, rdx               ; tag for obj_str
+    V_PACK rdi, rsi
     call obj_str
     ; rax = str result
     jmp .sm_copy_str
@@ -629,8 +798,6 @@ DEF_FUNC str_mod, SM_FRAME
     push rcx
     call .sm_get_arg
     ; If TAG_BOOL, convert to TAG_SMALLINT so we get "0"/"1" not "False"/"True"
-    cmp edx, TAG_BOOL
-    je .sm_int_from_bool
     ; If TAG_PTR pointing to bool_type, extract 0/1 as SmallInt
     cmp edx, TAG_PTR
     jne .sm_int_go
@@ -659,6 +826,7 @@ DEF_FUNC str_mod, SM_FRAME
 .sm_int_go:
     mov rdi, rax
     mov rsi, rdx               ; tag for obj_str (64-bit)
+    V_PACK rdi, rsi
     call obj_str               ; int.__str__ = int_repr
     jmp .sm_copy_str
 
@@ -667,6 +835,7 @@ DEF_FUNC str_mod, SM_FRAME
     call .sm_get_arg
     mov rdi, rax
     mov rsi, rdx               ; tag for obj_repr (64-bit)
+    V_PACK rdi, rsi
     call obj_repr
     jmp .sm_copy_str
 
@@ -675,8 +844,6 @@ DEF_FUNC str_mod, SM_FRAME
     push rcx
     call .sm_get_arg
     ; Convert TAG_BOOL to TAG_SMALLINT
-    cmp edx, TAG_BOOL
-    je .sm_hex_from_bool
     ; Handle TAG_PTR bool singletons
     cmp edx, TAG_PTR
     jne .sm_hex_go
@@ -815,6 +982,13 @@ DEF_FUNC str_mod, SM_FRAME
 .sm_get_arg:
     ; Get arg at index r15, increment r15
     ; Returns arg payload in rax, tag in rdx (borrowed ref)
+    cmp qword [rbp-SM_HASKEY], 1
+    jne .sm_arg_positional
+    mov rax, [rbp-SM_KEYVAL]
+    V_UNPACK rax, rdx
+    mov qword [rbp-SM_HASKEY], 0
+    ret
+.sm_arg_positional:
     cmp qword [rbp-SM_ISTUPLE], 1
     je .sm_arg_tuple
     ; Single value
@@ -828,14 +1002,13 @@ DEF_FUNC str_mod, SM_FRAME
     cmp rdx, [rax + PyTupleObject.ob_size]
     jge .sm_arg_none
     mov rcx, [rax + PyTupleObject.ob_item]       ; payloads
-    mov r8, [rax + PyTupleObject.ob_item_tags]   ; tags
     mov rax, [rcx + rdx*8]                       ; arg payload
-    movzx edx, byte [r8 + rdx]                   ; arg tag from tuple
+    V_UNPACK rax, rdx
     inc r15
     ret
 .sm_arg_none:
     xor eax, eax              ; payload = 0
-    mov edx, TAG_NONE         ; tag = TAG_NONE
+    RET_NONE         ; tag = TAG_NONE
     inc r15
     ret
 
@@ -882,6 +1055,184 @@ DEF_FUNC str_mod, SM_FRAME
     mov edx, TAG_PTR
     leave
     ret
+.sm_key_unterminated:
+    lea rdi, [rel exc_ValueError_type]
+    CSTRING rsi, "incomplete format key"
+    call raise_exception
+
+.sm_key_error:
+    extern exc_KeyError_type
+    lea rdi, [rel exc_KeyError_type]
+    CSTRING rsi, "format key not found"
+    call raise_exception
+;; Format one directive through format_apply_spec.  On entry SM_POS is the
+;; index of the conversion character and SM_SPECST the start of the flags;
+;; on exit SM_POS is just past it.  r13 (buffer), r14 (output position),
+;; r15 (argument index), rbx and r12 belong to the caller's loop, so
+;; everything here lives in frame slots.
+.sm_spec_conv:
+    mov r8, [rbp-SM_POS]
+    movzx r9d, byte [rbx + r8]      ; the conversion character
+    mov [rbp-SM_CONV], r9
+    inc r8
+    mov [rbp-SM_POS], r8
+
+    ; Alignment first: '-' means left, and % right-aligns everything else,
+    ; including strings -- unlike format(), whose default for str is left.
+    lea rdi, [rbp-SM_SPEC]
+    xor r10d, r10d
+    mov rax, [rbp-SM_SPECST]
+    xor r11d, r11d
+.sm_sc_seek_minus:
+    cmp rax, [rbp-SM_POS]
+    jge .sm_sc_seek_done
+    cmp byte [rbx + rax], '-'
+    jne .sm_sc_seek_next
+    mov r11d, 1
+.sm_sc_seek_next:
+    inc rax
+    jmp .sm_sc_seek_minus
+.sm_sc_seek_done:
+    mov byte [rdi], '>'
+    test r11d, r11d
+    jz .sm_sc_numeric_zero
+    mov byte [rdi], '<'
+    jmp .sm_sc_align_done
+
+.sm_sc_numeric_zero:
+    ; A '0' flag on a numeric conversion pads between the sign and the
+    ; digits, which is '=' alignment; '>' put the zeros in front of the sign,
+    ; so "%05d" % -42 came out "00-42".
+    mov rcx, [rbp-SM_CONV]
+    cmp cl, 's'
+    je .sm_sc_align_done
+    cmp cl, 'r'
+    je .sm_sc_align_done
+    mov rax, [rbp-SM_SPECST]
+.sm_sc_flagskip:
+    cmp rax, [rbp-SM_POS]
+    jge .sm_sc_align_done
+    movzx ecx, byte [rbx + rax]
+    cmp cl, '+'
+    je .sm_sc_flagnext
+    cmp cl, ' '
+    je .sm_sc_flagnext
+    cmp cl, '#'
+    je .sm_sc_flagnext
+    cmp cl, '0'
+    jne .sm_sc_align_done
+    mov byte [rdi], '='
+    jmp .sm_sc_align_done
+.sm_sc_flagnext:
+    inc rax
+    jmp .sm_sc_flagskip
+
+.sm_sc_align_done:
+    mov r10d, 1
+
+    ; Then the flags, width and precision verbatim, minus the '-'.
+    mov rax, [rbp-SM_SPECST]
+.sm_sc_copy:
+    mov rcx, [rbp-SM_POS]
+    dec rcx
+    cmp rax, rcx
+    jge .sm_sc_copy_done
+    movzx ecx, byte [rbx + rax]
+    cmp cl, '-'
+    je .sm_sc_copy_next
+    ; A '0' flag means nothing for %s and %r; CPython pads those with spaces.
+    cmp cl, '0'
+    jne .sm_sc_copy_keep
+    cmp r10d, 1
+    jne .sm_sc_copy_keep        ; a digit of the width, not the flag
+    mov rcx, [rbp-SM_CONV]
+    cmp cl, 's'
+    je .sm_sc_copy_next
+    cmp cl, 'r'
+    je .sm_sc_copy_next
+    movzx ecx, byte [rbx + rax]
+.sm_sc_copy_keep:
+    cmp r10, 36                 ; the spec buffer is 40 bytes and grows up
+    jge .sm_sc_copy_done
+    mov [rdi + r10], cl
+    inc r10
+.sm_sc_copy_next:
+    inc rax
+    jmp .sm_sc_copy
+.sm_sc_copy_done:
+
+    ; The conversion letter, mapped onto a spec type.
+    mov rcx, [rbp-SM_CONV]
+    cmp cl, 'i'
+    jne .sm_sc_not_i
+    mov cl, 'd'
+.sm_sc_not_i:
+    cmp cl, 'r'
+    jne .sm_sc_store_type
+    mov cl, 's'                     ; repr is applied to the value below
+.sm_sc_store_type:
+    mov [rdi + r10], cl
+    inc r10
+
+    lea rdi, [rbp-SM_SPEC]
+    mov rsi, r10
+    call str_new_heap
+    mov [rbp-SM_SPECOBJ], rax
+
+    call .sm_get_arg
+    V_PACK rax, rdx
+    mov [rbp-SM_VALUE], rax
+    mov rcx, [rbp-SM_CONV]
+    cmp cl, 'r'
+    jne .sm_sc_have_value
+    mov rdi, rax
+    call obj_repr
+    V_UNPACK rax, rdx
+    V_PACK rax, rdx
+    mov [rbp-SM_VALUE], rax
+    mov qword [rbp-SM_OWNVAL], 1
+    jmp .sm_sc_format
+.sm_sc_have_value:
+    mov qword [rbp-SM_OWNVAL], 0
+
+.sm_sc_format:
+    mov rdi, [rbp-SM_VALUE]
+    mov rsi, [rbp-SM_SPECOBJ]
+    extern format_apply_spec
+    call format_apply_spec
+    V_UNPACK rax, rdx
+    mov [rbp-SM_PIECE], rax
+
+    mov rdi, [rbp-SM_SPECOBJ]
+    call obj_decref
+    cmp qword [rbp-SM_OWNVAL], 0
+    je .sm_sc_no_own
+    mov rdi, [rbp-SM_VALUE]
+    call obj_decref
+.sm_sc_no_own:
+
+    ; Append the piece to the caller's buffer, advancing its position.
+    mov rax, [rbp-SM_PIECE]
+    mov r8, [rax + PyStrObject.ob_size]
+    lea rdi, [r14 + r8]
+    call .sm_ensure_cap
+    mov rax, [rbp-SM_PIECE]
+    mov r8, [rax + PyStrObject.ob_size]
+    lea rsi, [rax + PyStrObject.data]
+    xor ecx, ecx
+.sm_sc_append:
+    cmp rcx, r8
+    jge .sm_sc_appended
+    movzx eax, byte [rsi + rcx]
+    mov [r13 + r14], al
+    inc r14
+    inc rcx
+    jmp .sm_sc_append
+.sm_sc_appended:
+    mov rdi, [rbp-SM_PIECE]
+    call obj_decref
+    ret
+
 END_FUNC str_mod
 
 ;; ============================================================================
@@ -893,6 +1244,8 @@ END_FUNC str_mod
 ;; ============================================================================
 
 DEF_FUNC str_compare
+    V_UNPACK rdi, rcx           ; left  Value -> (payload, tag)
+    V_UNPACK rsi, r8            ; right Value -> (payload, tag)
     push rbx
 
     mov ebx, edx            ; save op
@@ -905,9 +1258,7 @@ DEF_FUNC str_compare
     jz .not_string
     ; Heap pointer — verify ob_type == str_type
     mov rax, [rsi + PyObject.ob_type]
-    lea rdx, [rel str_type]
-    cmp rax, rdx
-    jne .not_string
+    REQUIRE_STR_TYPE rax, rdx, .not_string
     lea rsi, [rsi + PyStrObject.data]
 
     ; --- Resolve left operand to a data pointer (-> rdi) ---
@@ -1024,6 +1375,7 @@ DEF_FUNC str_getitem
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .index_error:
@@ -1037,6 +1389,7 @@ END_FUNC str_getitem
 ;; mp_subscript: index with int or slice key (for BINARY_SUBSCR)
 ;; ============================================================================
 DEF_FUNC str_subscript
+    V_UNPACK rsi, rdx           ; key Value -> (payload, tag)
     push rbx
 
     mov rbx, rdi            ; save self
@@ -1044,18 +1397,23 @@ DEF_FUNC str_subscript
     ; Check if key is a SmallInt (edx = key tag from caller)
     cmp edx, TAG_SMALLINT
     je .ss_int               ; SmallInt -> int path
+    cmp edx, TAG_PTR            ; a float key is neither: classify
+    jne .ss_type_error          ; fully before dereferencing, or raw
+                                ; f64 bits get used as an address
     mov rax, [rsi + PyObject.ob_type]
     lea rcx, [rel slice_type]
     cmp rax, rcx
     je .ss_slice
 
 .ss_int:
-    ; Convert key to i64
+    ; obj_as_index covers int, bool, an int subclass and __index__, and
+    ; raises for anything else -- int_to_i64 would read PyIntObject.compact
+    ; off whatever it was given.
     mov rdi, rsi
-    call int_to_i64
+    call obj_as_index
     mov rsi, rax
 
-    ; Call str_getitem
+    ; Call str_getitem — already returns a Value
     mov rdi, rbx
     call str_getitem
 
@@ -1069,22 +1427,27 @@ DEF_FUNC str_subscript
     call str_getslice
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
+
+.ss_type_error:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "string indices must be integers"
+    call raise_exception
 END_FUNC str_subscript
 
 ;; ============================================================================
-;; str_contains(PyObject *self, PyObject *substr, int substr_tag) -> int (0/1)
+;; str_contains(rdi=self, rsi=substr Value) -> int (0/1)
 ;; sq_contains: check if substr is in self using strstr
 ;; ============================================================================
 DEF_FUNC str_contains
+    V_UNPACK rsi, rdx           ; decode the operand Value
 
     ; Validate substr is a string (TAG_PTR with ob_type == str_type)
     cmp edx, TAG_PTR
     jne .str_contains_type_error
     mov rax, [rsi + PyObject.ob_type]
-    lea rcx, [rel str_type]
-    cmp rax, rcx
-    jne .str_contains_type_error
+    REQUIRE_STR_TYPE rax, rcx, .str_contains_type_error
 
     extern ap_strstr
     lea rdi, [rdi + PyStrObject.data]
@@ -1363,6 +1726,8 @@ str_number_methods:
     dq 0                        ; nb_ior          +240
     dq 0                        ; nb_ifloor_divide +248
     dq 0                        ; nb_itrue_divide +256
+    dq 0 ; nb_matmul
+    dq 0 ; nb_imatmul
 
 ; String sequence methods
 align 8
@@ -1413,6 +1778,7 @@ str_type:
     dq 0                ; tp_bases
     dq 0                        ; tp_traverse
     dq 0                        ; tp_clear
+    dq 0 ; tp_dictoffset
 
 ; str_iter type data
 align 8
@@ -1446,3 +1812,4 @@ str_iter_type:
     dq 0                        ; tp_bases
     dq 0                        ; tp_traverse
     dq 0                        ; tp_clear
+    dq 0 ; tp_dictoffset

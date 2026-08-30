@@ -4,8 +4,6 @@
 ;   rbx = bytecode instruction pointer (current position in co_code[])
 ;   r12 = current frame pointer (PyFrame*)
 ;   r13 = value stack payload top pointer
-;   r14 = locals_tag_base pointer (frame's tag sidecar for localsplus[])
-;   r15 = value stack tag top pointer
 ;
 ; ecx = opcode argument on entry (set by eval_dispatch)
 ; rbx has already been advanced past the 2-byte instruction word.
@@ -21,7 +19,6 @@ section .text
 extern eval_dispatch
 extern eval_saved_rbx
 extern eval_saved_r13
-extern eval_saved_r15
 extern eval_co_names
 extern opcode_table
 extern obj_dealloc
@@ -29,6 +26,8 @@ extern obj_decref
 extern dict_set
 extern fatal_error
 extern raise_exception
+extern eval_exception_unwind
+extern current_exception
 extern obj_incref
 extern exc_AttributeError_type
 extern exc_TypeError_type
@@ -50,7 +49,9 @@ SA_NAME   equ 24
 SA_DESC   equ 32    ; general descriptor (MRO walk)
 SA_OTAG   equ 40
 SA_VTAG   equ 48
-SA_FRAME  equ 48
+SA_EXC    equ 56
+SA_ORIGIN equ 64   ; the type the descriptor walk started from
+SA_FRAME  equ 80
 
 ; op_delete_attr: rbp-frame (16 bytes)
 DA_NAME   equ 8
@@ -72,13 +73,10 @@ DS_FRAME  equ 32
 ;; ============================================================================
 DEF_FUNC_BARE op_store_fast
     ; ecx = arg (slot index)
-    VPOP_VAL rax, r8             ; rax = new value payload, r8 = new value tag
-    mov rdi, [r12 + PyFrame.localsplus + rcx*8]       ; rdi = old value (payload)
-    movzx r9, byte [r14 + rcx]                        ; r9 = old value tag (r14 = locals_tag_base)
-    mov [r12 + PyFrame.localsplus + rcx*8], rax       ; store new payload
-    mov byte [r14 + rcx], r8b                         ; store new tag
-    ; XDECREF_VAL old value (tag-aware)
-    XDECREF_VAL rdi, r9
+    VPOP rax                                          ; new value
+    mov rdi, [r12 + PyFrame.localsplus + rcx*8]       ; old value
+    mov [r12 + PyFrame.localsplus + rcx*8], rax
+    XDECREF_V rdi, r9
     DISPATCH
 END_FUNC op_store_fast
 
@@ -108,7 +106,7 @@ DEF_FUNC_BARE op_store_name
     mov rsi, r8                ; rsi = name (key)
     mov rdx, r9                ; rdx = value payload
     mov rcx, r10               ; rcx = value tag
-    mov r8d, TAG_PTR
+    V_PACK rdx, rcx
     push r9
     push r10
     call dict_set
@@ -136,7 +134,7 @@ DEF_FUNC_BARE op_store_global
     mov rsi, r8                ; rsi = name (key)
     mov rdx, r9                ; rdx = value payload
     mov rcx, r10               ; rcx = value tag
-    mov r8d, TAG_PTR
+    V_PACK rdx, rcx
     push r9
     push r10
     call dict_set
@@ -159,6 +157,8 @@ END_FUNC op_store_global
 ;; Followed by 4 CACHE entries (8 bytes) that must be skipped.
 ;; ============================================================================
 DEF_FUNC op_store_attr, SA_FRAME
+    mov qword [rbp - SA_ORIGIN], 0
+    DUNDER_EXC_SAVE [rbp - SA_EXC]
 
     ; Get name (payload array: 8-byte stride)
     shl ecx, 3
@@ -187,6 +187,10 @@ DEF_FUNC op_store_attr, SA_FRAME
 .sa_walk_mro:
     test rcx, rcx
     jz .sa_no_property
+    cmp qword [rbp - SA_ORIGIN], 0
+    jne .sa_have_origin
+    mov [rbp - SA_ORIGIN], rcx
+.sa_have_origin:
 
     mov rdi, [rcx + PyTypeObject.tp_dict]
     test rdi, rdi
@@ -194,13 +198,13 @@ DEF_FUNC op_store_attr, SA_FRAME
 
     push rcx                      ; save current type
     mov rsi, [rbp - SA_NAME]      ; name
-    mov edx, TAG_PTR
     call dict_get
+    V_UNPACK rax, rdx           ; dict_get returns a Value
     pop rcx
-    test edx, edx
+    test edx, edx               ; the tag, not the payload: a hit may be int 0
     jnz .sa_found_in_type         ; found attr in type dict
 .sa_walk_next:
-    mov rcx, [rcx + PyTypeObject.tp_base]
+    MRO_NEXT rcx, [rbp - SA_ORIGIN]
     jmp .sa_walk_mro
 
 .sa_found_in_type:
@@ -220,6 +224,7 @@ DEF_FUNC op_store_attr, SA_FRAME
     mov rsi, [rbp - SA_OBJ]      ; obj
     mov rdx, [rbp - SA_VAL]      ; value
     mov ecx, [rbp - SA_VTAG]     ; value tag
+    V_PACK rdx, rcx              ; property_descr_set takes a value Value
     call property_descr_set
     jmp .sa_descr_cleanup
 
@@ -236,6 +241,7 @@ DEF_FUNC op_store_attr, SA_FRAME
     mov rdi, rcx                  ; descriptor's type
     lea rsi, [rel dunder_set]
     call dunder_lookup
+    V_UNPACK rax, rdx           ; returns a Value
     test edx, edx
     jz .sa_no_property
 
@@ -246,6 +252,7 @@ DEF_FUNC op_store_attr, SA_FRAME
     lea rcx, [rel dunder_set]
     mov r8d, [rbp - SA_VTAG]    ; value tag
     call dunder_call_3
+    V_UNPACK rax, rdx           ; returns a Value
     ; DECREF result if non-NULL
     test edx, edx
     jz .sa_descr_cleanup
@@ -262,6 +269,11 @@ DEF_FUNC op_store_attr, SA_FRAME
     mov rsi, [rbp - SA_OTAG]
     DECREF_VAL rdi, rsi
 
+    ; A descriptor __set__ that raised returns normally, leaving the
+    ; exception pending; without this it surfaced later at an unrelated
+    ; instruction.  Compared against entry, because current_exception is
+    ; already set whenever this runs inside an except block.
+    DUNDER_RAISED [rbp - SA_EXC], .sa_propagate
     add rbx, 8
     leave
     DISPATCH
@@ -279,6 +291,7 @@ DEF_FUNC op_store_attr, SA_FRAME
     mov rsi, [rbp - SA_NAME]
     mov rdx, [rbp - SA_VAL]
     mov ecx, [rbp - SA_VTAG]
+    V_PACK rdx, rcx             ; tp_setattr takes a value Value
     call rax
 
     ; DECREF value (tag-aware)
@@ -290,9 +303,17 @@ DEF_FUNC op_store_attr, SA_FRAME
     mov rsi, [rbp - SA_OTAG]
     DECREF_VAL rdi, rsi
 
+    DUNDER_RAISED [rbp - SA_EXC], .sa_propagate
     add rbx, 8                ; skip 4 CACHE entries
     leave
     DISPATCH
+
+.sa_propagate:
+    ; Same shape as op_call's .propagate_exc: the unwinder reads the current
+    ; IP from eval_saved_rbx, which DISPATCH set, so rbx is not advanced.
+    leave
+    mov [rel eval_saved_r13], r13
+    jmp eval_exception_unwind
 
 .sa_no_setattr:
     lea rdi, [rel exc_AttributeError_type]
@@ -308,21 +329,13 @@ END_FUNC op_store_attr
 ;; DECREFs old cell value.
 ;; ============================================================================
 DEF_FUNC_BARE op_store_deref
-    VPOP_VAL rax, r8               ; rax = new payload, r8 = new tag
-    mov rdx, [r12 + PyFrame.localsplus + rcx*8]  ; rdx = cell object (payload)
+    VPOP rax                       ; new Value
+    mov rdx, [r12 + PyFrame.localsplus + rcx*8]  ; cell object
 
     ; Ownership transfers from stack to cell - no INCREF needed
-
-    ; Get old value + tag from cell
-    mov rdi, [rdx + PyCellObject.ob_ref]
-    mov rsi, [rdx + PyCellObject.ob_ref_tag]
-
-    ; Store new value + tag in cell
+    mov rdi, [rdx + PyCellObject.ob_ref]        ; old Value
     mov [rdx + PyCellObject.ob_ref], rax
-    mov [rdx + PyCellObject.ob_ref_tag], r8
-
-    ; DECREF old value (tag-aware, handles NULL automatically)
-    DECREF_VAL rdi, rsi
+    DECREF_V rdi, rsi
     DISPATCH
 END_FUNC op_store_deref
 
@@ -334,11 +347,8 @@ END_FUNC op_store_deref
 DEF_FUNC_BARE op_delete_deref
     mov rax, [r12 + PyFrame.localsplus + rcx*8]  ; rax = cell object (payload)
     mov rdi, [rax + PyCellObject.ob_ref]
-    mov rsi, [rax + PyCellObject.ob_ref_tag]
     mov qword [rax + PyCellObject.ob_ref], 0
-    mov qword [rax + PyCellObject.ob_ref_tag], 0   ; TAG_NULL
-    ; DECREF old value (tag-aware)
-    DECREF_VAL rdi, rsi
+    DECREF_V rdi, rsi
     DISPATCH
 END_FUNC op_delete_deref
 
@@ -348,11 +358,9 @@ END_FUNC op_delete_deref
 ;; DECREF old value if present.
 ;; ============================================================================
 DEF_FUNC_BARE op_delete_fast
-    mov rdi, [r12 + PyFrame.localsplus + rcx*8]       ; old value (payload)
-    movzx rsi, byte [r14 + rcx]                       ; old value tag (r14 = locals_tag_base)
-    mov qword [r12 + PyFrame.localsplus + rcx*8], 0   ; clear payload
-    mov byte [r14 + rcx], 0                           ; clear tag
-    XDECREF_VAL rdi, rsi
+    mov rdi, [r12 + PyFrame.localsplus + rcx*8]       ; old value
+    mov qword [r12 + PyFrame.localsplus + rcx*8], 0
+    XDECREF_V rdi, rsi
     DISPATCH
 END_FUNC op_delete_fast
 
@@ -368,14 +376,12 @@ DEF_FUNC_BARE op_delete_name
     test rdi, rdi
     jz .dn_globals
     push rsi
-    mov edx, TAG_PTR
     call dict_del
     pop rsi
     test eax, eax
     jz .dn_ok                  ; found and deleted
 .dn_globals:
     mov rdi, [r12 + PyFrame.globals]
-    mov edx, TAG_PTR
     call dict_del
     test eax, eax
     jnz .dn_error
@@ -395,7 +401,6 @@ DEF_FUNC_BARE op_delete_global
     LOAD_CO_NAMES rsi
     mov rsi, [rsi + rcx]      ; name
     mov rdi, [r12 + PyFrame.globals]
-    mov edx, TAG_PTR
     call dict_del
     test eax, eax
     jnz .dg_error
@@ -473,7 +478,7 @@ DEF_FUNC op_delete_subscr, DS_FRAME
     cmp qword [rbp - DS_OTAG], TAG_PTR
     jne .ds_error
 
-    ; Call mp_ass_subscript(obj, key, NULL)
+    ; Call mp_ass_subscript(obj, key Value, NULL) -- a NULL value means delete
     mov rax, [rdi + PyObject.ob_type]
     mov rax, [rax + PyTypeObject.tp_as_mapping]
     test rax, rax
@@ -482,9 +487,9 @@ DEF_FUNC op_delete_subscr, DS_FRAME
     test rax, rax
     jz .ds_error
 
-    xor edx, edx               ; value = NULL (delete)
-    mov rcx, [rbp - DS_KTAG]  ; key tag (4th arg)
-    xor r8d, r8d               ; value tag = TAG_NULL (5th arg)
+    mov rcx, [rbp - DS_KTAG]
+    V_PACK rsi, rcx            ; key Value
+    xor edx, edx               ; value = 0 (delete)
     call rax
 
     ; DECREF key and obj (tag-aware)

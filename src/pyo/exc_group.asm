@@ -17,6 +17,7 @@
 %include "types.inc"
 
 extern ap_free
+extern object_type
 extern ap_malloc
 extern gc_alloc
 extern gc_track
@@ -72,7 +73,6 @@ DEF_FUNC eg_new, EGN_FRAME
     mov [rax + PyExceptionGroupObject.ob_type], rbx
     mov [rax + PyExceptionGroupObject.exc_type], rbx
     mov [rax + PyExceptionGroupObject.exc_value], r12
-    mov qword [rax + PyExceptionGroupObject.exc_value_tag], TAG_PTR
     mov qword [rax + PyExceptionGroupObject.exc_tb], 0
     mov qword [rax + PyExceptionGroupObject.exc_context], 0
     mov qword [rax + PyExceptionGroupObject.exc_cause], 0
@@ -97,34 +97,29 @@ DEF_FUNC eg_new, EGN_FRAME
     mov rcx, [rbp - EGN_EG]
 
     mov r8, [rax + PyTupleObject.ob_item]       ; payloads
-    mov r9, [rax + PyTupleObject.ob_item_tags]  ; tags
 
     ; args[0] = msg_str
     test r12, r12
     jz .args_no_msg
     INCREF r12
     mov [r8], r12
-    mov byte [r9], TAG_PTR                       ; slot 0 tag
     jmp .args_set_excs
 .args_no_msg:
     ; Push None for msg if NULL
     lea rdx, [rel none_singleton]
     INCREF rdx
     mov [r8], rdx
-    mov byte [r9], TAG_PTR                       ; slot 0 tag
 .args_set_excs:
     ; args[1] = exc_tuple (fat slot 1 at offset +16)
     test r13, r13
     jz .args_no_excs
     INCREF r13
     mov [r8 + 8], r13
-    mov byte [r9 + 1], TAG_PTR                   ; slot 1 tag
     jmp .args_done
 .args_no_excs:
     lea rdx, [rel none_singleton]
     INCREF rdx
     mov [r8 + 8], rdx
-    mov byte [r9 + 1], TAG_PTR                   ; slot 1 tag
 .args_done:
     mov [rcx + PyExceptionGroupObject.exc_args], rax
     mov rax, rcx
@@ -161,7 +156,7 @@ DEF_FUNC eg_type_call, EGC_FRAME
 
     ; args[0] = msg (must be str), args[1] = excs (list or tuple)
     mov rbx, [rsi]          ; msg
-    mov r12, [rsi + 16]     ; excs
+    mov r12, [rsi + 8]     ; excs
 
     ; Check if excs is a tuple already
     mov rax, [r12 + PyObject.ob_type]
@@ -188,19 +183,17 @@ DEF_FUNC eg_type_call, EGC_FRAME
     ; Copy list items to tuple
     mov rcx, [r12 + PyListObject.ob_size]
     mov r8, [r12 + PyListObject.ob_item]       ; list payloads
-    mov r9, [r12 + PyListObject.ob_item_tags]  ; list tags
     xor edx, edx
 .copy_list:
     mov rcx, [r12 + PyListObject.ob_size]  ; reload loop limit (clobbered below)
     cmp rdx, rcx
     jge .list_done
     mov rdi, [r8 + rdx*8]      ; list item payload
-    movzx r11d, byte [r9 + rdx] ; list item tag
+    V_UNPACK rdi, r11
     INCREF_VAL rdi, r11
     mov r10, [r13 + PyTupleObject.ob_item]       ; tuple payloads
-    mov rsi, [r13 + PyTupleObject.ob_item_tags]  ; tuple tags
-    mov [r10 + rdx*8], rdi
-    mov byte [rsi + rdx], r11b
+    V_PACK rdi, r11
+    mov [r10 + rdx * 8], rdi
     inc rdx
     jmp .copy_list
 .list_done:
@@ -273,10 +266,8 @@ DEF_FUNC eg_dealloc
     push rbx
     mov rbx, rdi
 
-    ; XDECREF exc_value (tag-aware: may be SmallInt)
     mov rdi, [rbx + PyExceptionGroupObject.exc_value]
-    mov rsi, [rbx + PyExceptionGroupObject.exc_value_tag]
-    XDECREF_VAL rdi, rsi
+    XDECREF_V rdi, rsi
 .no_val:
 
     ; XDECREF exc_tb
@@ -374,6 +365,7 @@ DEF_FUNC eg_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .get_exceptions:
@@ -386,6 +378,7 @@ DEF_FUNC eg_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .return_none:
@@ -395,6 +388,7 @@ DEF_FUNC eg_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 END_FUNC eg_getattr
 
@@ -459,7 +453,6 @@ DEF_FUNC eg_split, EGS_FRAME
     mov r8, [rax + PyTupleObject.ob_item]
     mov rsi, [r8 + rcx*8]
     mov rdi, [rbp - EGS_MLIST]
-    mov edx, TAG_PTR
     call list_append
     jmp .split_next
 
@@ -471,7 +464,6 @@ DEF_FUNC eg_split, EGS_FRAME
     mov r8, [rax + PyTupleObject.ob_item]
     mov rsi, [r8 + rcx*8]
     mov rdi, [rbp - EGS_RLIST]
-    mov edx, TAG_PTR
     call list_append
 
 .split_next:
@@ -493,19 +485,17 @@ DEF_FUNC eg_split, EGS_FRAME
     pop rcx
     mov rax, [rbp - EGS_MLIST]
     mov r8, [rax + PyListObject.ob_item]       ; list payloads
-    mov r9, [rax + PyListObject.ob_item_tags]  ; list tags
     xor edx, edx
 .copy_match:
     cmp rdx, rcx
     jge .match_tuple_done
     push rcx
     mov rdi, [r8 + rdx*8]      ; list item payload
-    movzx r11d, byte [r9 + rdx] ; list item tag
+    V_UNPACK rdi, r11
     INCREF_VAL rdi, r11
     mov r10, [rbx + PyTupleObject.ob_item]       ; tuple payloads
-    mov rsi, [rbx + PyTupleObject.ob_item_tags]  ; tuple tags
-    mov [r10 + rdx*8], rdi
-    mov byte [rsi + rdx], r11b
+    V_PACK rdi, r11
+    mov [r10 + rdx * 8], rdi
     pop rcx
     inc rdx
     jmp .copy_match
@@ -540,19 +530,17 @@ DEF_FUNC eg_split, EGS_FRAME
     pop rcx
     mov rax, [rbp - EGS_RLIST]
     mov r8, [rax + PyListObject.ob_item]       ; list payloads
-    mov r9, [rax + PyListObject.ob_item_tags]  ; list tags
     xor edx, edx
 .copy_rest:
     cmp rdx, rcx
     jge .rest_tuple_done
     push rcx
     mov rdi, [r8 + rdx*8]      ; list item payload
-    movzx r11d, byte [r9 + rdx] ; list item tag
+    V_UNPACK rdi, r11
     INCREF_VAL rdi, r11
     mov r10, [rbx + PyTupleObject.ob_item]       ; tuple payloads
-    mov rsi, [rbx + PyTupleObject.ob_item_tags]  ; tuple tags
-    mov [r10 + rdx*8], rdi
-    mov byte [rsi + rdx], r11b
+    V_PACK rdi, r11
+    mov [r10 + rdx * 8], rdi
     pop rcx
     inc rdx
     jmp .copy_rest
@@ -600,13 +588,21 @@ END_FUNC eg_split
 ;; ============================================================================
 DEF_FUNC_BARE eg_is_base_exception_group
     mov rax, [rdi + PyObject.ob_type]
+    mov r10, rax                    ; origin of the walk
     lea rdx, [rel eg_dealloc]
 .walk:
     test rax, rax
     jz .no
     cmp [rax + PyTypeObject.tp_dealloc], rdx
     je .yes
-    mov rax, [rax + PyTypeObject.tp_base]
+    push r10
+    push rdx
+    mov rdi, r10
+    mov rsi, rax
+    extern type_mro_next
+    call type_mro_next
+    pop rdx
+    pop r10
     jmp .walk
 .yes:
     mov eax, 1
@@ -638,7 +634,6 @@ DEF_FUNC prep_reraise_star, PRS_FRAME
 
     ; Phase 1: Count non-None entries, find first non-None
     mov rcx, [rsi + PyListObject.ob_size]
-    mov r9, [rsi + PyListObject.ob_item_tags]   ; tag array
     mov rsi, [rsi + PyListObject.ob_item]
     xor ebx, ebx                ; non-None count
     xor r12d, r12d              ; first non-None ptr
@@ -647,11 +642,8 @@ DEF_FUNC prep_reraise_star, PRS_FRAME
 .scan:
     cmp rdx, rcx
     jge .scan_done
-    movzx eax, byte [r9 + rdx] ; tag
-    cmp al, TAG_NONE
-    je .scan_next
-    mov rdi, [rsi + rdx*8]     ; list item payload (8-byte stride)
-    cmp rdi, r8                 ; also check none_singleton (mixed repr)
+    mov rdi, [rsi + rdx*8]     ; list item
+    cmp rdi, r8                 ; skip None
     je .scan_next
     inc ebx
     test r12, r12
@@ -687,13 +679,8 @@ DEF_FUNC prep_reraise_star, PRS_FRAME
     cmp rdx, rcx
     jge .flat_done
     mov rax, [rbp - PRS_LIST]
-    mov r9, [rax + PyListObject.ob_item_tags]  ; tag array
     mov rsi, [rax + PyListObject.ob_item]      ; payload array
-    ; Check for None via tag
-    movzx eax, byte [r9 + rdx]
-    cmp al, TAG_NONE
-    je .flat_next
-    mov rdi, [rsi + rdx*8]                    ; list item payload (8-byte stride)
+    mov rdi, [rsi + rdx*8]                    ; list item
     lea r8, [rel none_singleton]
     cmp rdi, r8
     je .flat_next
@@ -725,7 +712,6 @@ DEF_FUNC prep_reraise_star, PRS_FRAME
     mov r9, [rax + PyTupleObject.ob_item]       ; payloads
     mov rsi, [r9 + rcx*8]
     mov rdi, [rbp - PRS_FLAT]
-    mov edx, TAG_PTR
     call list_append
     pop rax
     pop r8
@@ -745,7 +731,6 @@ DEF_FUNC prep_reraise_star, PRS_FRAME
     mov rsi, [rax + PyListObject.ob_item]       ; payloads
     mov rsi, [rsi + rdx*8]                       ; list item payload
     mov rdi, [rbp - PRS_FLAT]
-    mov edx, TAG_PTR
     call list_append
     pop rcx
     pop rdx
@@ -765,19 +750,17 @@ DEF_FUNC prep_reraise_star, PRS_FRAME
     pop rcx
     mov rax, [rbp - PRS_FLAT]
     mov r8, [rax + PyListObject.ob_item]       ; list payloads
-    mov r9, [rax + PyListObject.ob_item_tags]  ; list tags
     xor edx, edx
 .copy_flat:
     cmp rdx, rcx
     jge .copy_flat_done
     push rcx
     mov rdi, [r8 + rdx*8]      ; list item payload
-    movzx r11d, byte [r9 + rdx] ; list item tag
+    V_UNPACK rdi, r11
     INCREF_VAL rdi, r11
     mov r10, [rbx + PyTupleObject.ob_item]       ; tuple payloads
-    mov rsi, [rbx + PyTupleObject.ob_item_tags]  ; tuple tags
-    mov [r10 + rdx*8], rdi
-    mov byte [rsi + rdx], r11b
+    V_PACK rdi, r11
+    mov [r10 + rdx * 8], rdi
     pop rcx
     inc rdx
     jmp .copy_flat
@@ -853,14 +836,14 @@ exc_BaseExceptionGroup_type:
     dq exc_repr                 ; tp_repr
     dq eg_str                   ; tp_str
     dq 0                        ; tp_hash
-    dq eg_type_call             ; tp_call — enables constructor
+    dq 0                ; tp_call  (instances are not callable)
     dq eg_getattr               ; tp_getattr
     dq 0                        ; tp_setattr
     dq 0                        ; tp_richcompare
     dq 0                        ; tp_iter
     dq 0                        ; tp_iternext
     dq 0                        ; tp_init
-    dq 0                        ; tp_new
+    dq eg_type_call         ; tp_new  (constructor)
     dq 0                        ; tp_as_number
     dq 0                        ; tp_as_sequence
     dq 0                        ; tp_as_mapping
@@ -871,6 +854,7 @@ exc_BaseExceptionGroup_type:
     dq 0                        ; tp_bases
     dq 0                        ; tp_traverse
     dq 0                        ; tp_clear
+    dq 0 ; tp_dictoffset
 
 ; ExceptionGroup type — base = BaseExceptionGroup (also inherits from Exception)
 align 8
@@ -884,21 +868,52 @@ exc_ExceptionGroup_type:
     dq exc_repr                 ; tp_repr
     dq eg_str                   ; tp_str
     dq 0                        ; tp_hash
-    dq eg_type_call             ; tp_call — enables constructor
+    dq 0                ; tp_call  (instances are not callable)
     dq eg_getattr               ; tp_getattr
     dq 0                        ; tp_setattr
     dq 0                        ; tp_richcompare
     dq 0                        ; tp_iter
     dq 0                        ; tp_iternext
     dq 0                        ; tp_init
-    dq 0                        ; tp_new
+    dq eg_type_call         ; tp_new  (constructor)
     dq 0                        ; tp_as_number
     dq 0                        ; tp_as_sequence
     dq 0                        ; tp_as_mapping
     dq exc_BaseExceptionGroup_type ; tp_base
     dq 0                        ; tp_dict
-    dq 0                        ; tp_mro
+    dq eg_mro_tuple             ; tp_mro
     dq 0                        ; tp_flags
-    dq 0                        ; tp_bases
+    dq eg_bases_tuple           ; tp_bases
     dq 0                        ; tp_traverse
     dq 0                        ; tp_clear
+    dq 0 ; tp_dictoffset
+
+;; ExceptionGroup is the one builtin with two bases: BaseExceptionGroup for
+;; the group machinery and Exception so that `except Exception` catches it.
+;; A tp_base chain cannot say that, so it carries a real MRO.
+align 8
+eg_mro_items:
+    dq exc_ExceptionGroup_type
+    dq exc_BaseExceptionGroup_type
+    dq exc_Exception_type
+    dq exc_BaseException_type
+    dq object_type
+align 8
+eg_mro_tuple:
+    dq 1                        ; ob_refcnt (immortal)
+    dq tuple_type               ; ob_type
+    dq 5                        ; ob_size
+    dq -1                       ; ob_hash
+    dq eg_mro_items             ; ob_item
+
+align 8
+eg_bases_items:
+    dq exc_BaseExceptionGroup_type
+    dq exc_Exception_type
+align 8
+eg_bases_tuple:
+    dq 1                        ; ob_refcnt (immortal)
+    dq tuple_type               ; ob_type
+    dq 2                        ; ob_size
+    dq -1                       ; ob_hash
+    dq eg_bases_items           ; ob_item

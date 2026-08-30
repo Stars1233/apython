@@ -21,13 +21,42 @@ endstruc
 VAR_HEADER_SIZE equ PyVarObject_size  ; 24
 
 ; Integer object (GMP-backed)
+; CPython's integer hash modulus (PyHASH_MODULUS = 2^61 - 1 on 64-bit).
+; sign(v) * (|v| mod PYHASH_MODULUS); see int_hash_i64 in src/pyo/int.asm.
+PYHASH_MODULUS equ 0x1FFFFFFFFFFFFFFF
+
 ; mpz_t is a struct: { int _mp_alloc, int _mp_size, mp_limb_t *_mp_d }
 ; On x86-64 GMP: sizeof(mpz_t) = 16 bytes (4+4+8)
+; An integer is "compact" when its value fits in int64: .ival holds it and
+; .mpz is UNINITIALIZED, so creating one costs no GMP init and no limb
+; allocation.  Anything wider is GMP-backed (.compact == 0, .mpz valid).
+; Reading .mpz on a possibly-compact object requires INT_NEED_MPZ first,
+; which promotes in place.  .mpz stays at +16 so existing GMP code is
+; unaffected.
 struc PyIntObject
     .ob_refcnt: resq 1    ; +0
     .ob_type:   resq 1    ; +8
     .mpz:       resb 16   ; +16: inline mpz_t (alloc:4, size:4, *d:8)
+    .ival:      resq 1    ; +32: int64 value      (valid iff .compact != 0)
+    .compact:   resq 1    ; +40: 1 = compact, 0 = GMP-backed
 endstruc
+
+; Promote a possibly-compact PyIntObject to GMP form in place.  Two
+; instructions when it is already GMP-backed; int_promote_mpz preserves every
+; register, so this is safe to drop in front of any .mpz access.
+%macro INT_NEED_MPZ 1           ; %1 = register holding PyIntObject*
+    cmp qword [%1 + PyIntObject.compact], 0
+    je %%done
+%ifidni %1, rdi
+    call int_promote_mpz
+%else
+    push rdi
+    mov rdi, %1
+    call int_promote_mpz
+    pop rdi
+%endif
+%%done:
+%endmacro
 
 ; Float object
 struc PyFloatObject
@@ -77,7 +106,6 @@ struc PyListObject
     .ob_size:   resq 1    ; +16: item count
     .allocated: resq 1    ; +24: capacity
     .ob_item:   resq 1    ; +32: ptr to payload (u64[]) array
-    .ob_item_tags: resq 1 ; +40: ptr to tag (u8[]) array
 endstruc
 
 ; Tuple object
@@ -87,7 +115,6 @@ struc PyTupleObject
     .ob_size:   resq 1    ; +16: item count
     .ob_hash:   resq 1    ; +24: cached hash (-1 = not computed)
     .ob_item:   resq 1     ; +32: ptr to payload (u64[]) array
-    .ob_item_tags: resq 1  ; +40: ptr to tag (u8[]) array
 endstruc
 
 ; Dict object
@@ -102,17 +129,47 @@ struc PyDictObject
 endstruc
 
 ; Dict entry
+; An entry's state lives in .key and .hash rather than in a tag byte:
+;   occupied  -> .key != 0
+;   empty     -> .key == 0 and .hash == 0
+;   tombstone -> .key == 0 and .hash == -1
+; A key Value is never 0, and CPython's hash never returns -1 (it maps -1 to
+; -2), so the three states are distinct and each test is an imm32 compare.
 struc DictEntry
-    .hash:      resq 1     ; +0: cached hash
-    .key:       resq 1     ; +8: key payload
-    .value:     resq 1     ; +16: value payload
-    .key_tag:   resb 1     ; +24: key tag (u8)
-    .value_tag: resb 1     ; +25: value tag (u8)
-    .pad:       resb 6     ; +26: padding
+    .hash:      resq 1     ; +0:  cached hash of key (-1 marks a tombstone)
+    .key:       resq 1     ; +8:  key Value (0 when not occupied)
+    .value:     resq 1     ; +16: value Value
 endstruc
 
-DICT_ENTRY_SIZE equ DictEntry_size  ; 32
-DICT_TOMBSTONE  equ 0xFF
+DICT_ENTRY_SIZE equ DictEntry_size  ; 24
+DICT_INIT_CAP   equ 8               ; initial hash-table slots for dict and set
+ENTRY_TOMBSTONE_HASH equ -1
+
+; A set entry mirrors DictEntry minus the value: hash at +0, key Value at +8.
+SET_ENTRY_HASH equ 0
+SET_ENTRY_KEY  equ 8
+
+; Set-entry counterpart of ENTRY_CLASSIFY.
+%macro SET_ENTRY_CLASSIFY 3     ; %1 = entry ptr, %2 = empty label, %3 = tombstone label
+    cmp qword [%1 + SET_ENTRY_KEY], 0
+    jne %%occupied
+    cmp qword [%1 + SET_ENTRY_HASH], ENTRY_TOMBSTONE_HASH
+    je %3
+    jmp %2
+%%occupied:
+%endmacro
+
+; Classify a dict or set entry during a probe.  Jumps to %2 when the slot was
+; never used (probing can stop) and to %3 when it holds a tombstone (probing
+; must continue); falls through when the slot is occupied.
+%macro ENTRY_CLASSIFY 3         ; %1 = entry ptr, %2 = empty label, %3 = tombstone label
+    cmp qword [%1 + DictEntry.key], 0
+    jne %%occupied
+    cmp qword [%1 + DictEntry.hash], ENTRY_TOMBSTONE_HASH
+    je %3
+    jmp %2
+%%occupied:
+%endmacro
 
 ; Function object
 struc PyFuncObject
@@ -147,7 +204,10 @@ struc PyCodeObject
     .co_exceptiontable: resq 1  ; +96: ptr to bytes
     .co_code_len:       resd 1  ; +104: bytecode length in bytes
     .co_posonlyargcount: resd 1 ; +108: positional-only arg count
-    .co_code:                   ; +112: bytecode (variable)
+    .co_firstlineno:    resd 1  ; +112: line of the `def`/module start
+    .co_pad0:           resd 1  ; +116: (alignment)
+    .co_linetable:      resq 1  ; +120: ptr to bytes (PEP 626 table) or NULL
+    .co_code:                   ; +128: bytecode (variable)
 endstruc
 
 ; Module object
@@ -178,8 +238,7 @@ struc PyIntSubclassObject
     .ob_refcnt:   resq 1  ; +0
     .ob_type:     resq 1  ; +8  (type is the subclass)
     .inst_dict:   resq 1  ; +16: ptr to instance __dict__
-    .int_value:   resq 1  ; +24: SmallInt payload or GMP pointer
-    .int_value_tag: resq 1  ; +32: tag for int_value
+    .int_value:   resq 1  ; +24: the wrapped integer, as a Value
 endstruc
 
 ; Iterator objects
@@ -247,20 +306,16 @@ endstruc
 struc PySliceObject
     .ob_refcnt:   resq 1
     .ob_type:     resq 1
-    .start:       resq 1    ; +16
-    .start_tag:   resq 1    ; +24
-    .stop:        resq 1    ; +32
-    .stop_tag:    resq 1    ; +40
-    .step:        resq 1    ; +48
-    .step_tag:    resq 1    ; +56
+    .start:       resq 1    ; +16: Value
+    .stop:        resq 1    ; +24: Value
+    .step:        resq 1    ; +32: Value
 endstruc
 
 ; Cell object (for closures)
 struc PyCellObject
     .ob_refcnt: resq 1
     .ob_type:   resq 1
-    .ob_ref:    resq 1    ; +16: contained value payload (or 0 if empty)
-    .ob_ref_tag: resq 1   ; +24: contained value tag (TAG_NULL if empty)
+    .ob_ref:    resq 1    ; +16: contained Value (0 if empty)
 endstruc
 
 ; Bound method
@@ -302,8 +357,7 @@ struc PyGenObject
     .gi_running: resq 1   ; +24: 1 if currently executing
     .gi_code:   resq 1    ; +32: code object
     .gi_name:   resq 1    ; +40: name string
-    .gi_return_value: resq 1 ; +48: return value payload (for StopIteration.value)
-    .gi_return_tag:   resq 1 ; +56: return value tag
+    .gi_return_value: resq 1 ; +48: return Value (for StopIteration.value)
 endstruc
 
 ; File object (for sys.stdout, sys.stderr, sys.stdin)
@@ -320,11 +374,13 @@ struc AsyncTask
     .ob_refcnt:    resq 1  ; +0
     .ob_type:      resq 1  ; +8
     .coro:         resq 1  ; +16: PyGenObject* (coroutine)
-    .result:       resq 1  ; +24: result value payload
-    .result_tag:   resq 1  ; +32: result value tag
+    .result:       resq 1  ; +24: result Value
+    .pad_result:   resq 1  ; +32: (was result_tag)
     .exception:    resq 1  ; +40: exception or NULL
-    .send_value:   resq 1  ; +48: value to send on next resume (payload)
-    .send_tag:     resq 1  ; +56: value to send on next resume (tag)
+    ; +48 must line up with PyGenObject.gi_return_value: op_send reads that
+    ; offset on whatever object a coroutine yielded, a task included.
+    .send_value:   resq 1  ; +48: Value to send on next resume
+    .pad_send:     resq 1  ; +56: (was send_tag)
     .done:         resd 1  ; +64: 0=pending, 1=done
     .cancelling:   resd 1  ; +68: 1=cancel requested
     .n_waiters:    resd 1  ; +72: number of waiters
@@ -355,8 +411,7 @@ struc WaitForAwaitable
     .state:           resd 1  ; +32: 0=init, 1=yielded, 2=done
     .pad:             resd 1  ; +36
     .outer_task:      resq 1  ; +40: AsyncTask* (the waiter, set by task_step)
-    .gi_return_value: resq 1  ; +48: result payload (matches PyGenObject offset)
-    .gi_return_tag:   resq 1  ; +56: result tag (matches PyGenObject offset)
+    .gi_return_value: resq 1  ; +48: result Value (matches PyGenObject offset)
 endstruc
 
 ; Async stream reader
@@ -391,10 +446,9 @@ struc WriteAwaitable
     .ob_type:   resq 1  ; +8
     .fd:        resd 1  ; +16: socket fd
     .pad1:      resd 1  ; +20
-    .data:      resq 1  ; +24: string payload ptr (INCREF'd)
-    .data_tag:  resq 1  ; +32: string tag
-    .yielded:   resd 1  ; +40: 0=not yet, 1=done
-    .pad2:      resd 1  ; +44
+    .data:      resq 1  ; +24: string Value (INCREF'd)
+    .yielded:   resd 1  ; +32: 0=not yet, 1=done
+    .pad2:      resd 1  ; +36
 endstruc
 
 ; DrainAwaitable — awaitable for stream.drain()
@@ -433,8 +487,7 @@ struc AsyncGenASend
     .pad0:          resd 1  ; +28
     .pad1:          resq 1  ; +32
     .pad2:          resq 1  ; +40
-    .gi_return_value: resq 1 ; +48: yielded value (for SEND exhaustion path)
-    .gi_return_tag:   resq 1 ; +56: yielded value tag
+    .gi_return_value: resq 1 ; +48: yielded Value (for SEND exhaustion path)
 endstruc
 
 ; Sentinel values

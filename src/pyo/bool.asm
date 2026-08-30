@@ -89,46 +89,22 @@ END_FUNC bool_from_int
 
 ; bool_and(rdi=left, rsi=right, edx=left_tag, ecx=right_tag)
 DEF_FUNC_BARE bool_and
-    cmp edx, TAG_BOOL
-    jne .delegate
-    cmp ecx, TAG_BOOL
-    jne .delegate
-    ; Both TAG_BOOL: payload is 0 or 1
-    and rdi, rsi
-    mov rax, rdi
-    mov edx, TAG_BOOL
-    ret
-.delegate:
+    ; True and False are PyIntObject-shaped singletons, so int_and handles them
+    ; directly and already returns a bool when both operands are bools.
     jmp int_and
 END_FUNC bool_and
 
 ; bool_or(rdi=left, rsi=right, edx=left_tag, ecx=right_tag)
 DEF_FUNC_BARE bool_or
-    cmp edx, TAG_BOOL
-    jne .delegate
-    cmp ecx, TAG_BOOL
-    jne .delegate
-    ; Both TAG_BOOL
-    or rdi, rsi
-    mov rax, rdi
-    mov edx, TAG_BOOL
-    ret
-.delegate:
+    ; True and False are PyIntObject-shaped singletons, so int_or handles them
+    ; directly and already returns a bool when both operands are bools.
     jmp int_or
 END_FUNC bool_or
 
 ; bool_xor(rdi=left, rsi=right, edx=left_tag, ecx=right_tag)
 DEF_FUNC_BARE bool_xor
-    cmp edx, TAG_BOOL
-    jne .delegate
-    cmp ecx, TAG_BOOL
-    jne .delegate
-    ; Both TAG_BOOL
-    xor rdi, rsi
-    mov rax, rdi
-    mov edx, TAG_BOOL
-    ret
-.delegate:
+    ; True and False are PyIntObject-shaped singletons, so int_xor handles them
+    ; directly and already returns a bool when both operands are bools.
     jmp int_xor
 END_FUNC bool_xor
 
@@ -139,17 +115,27 @@ END_FUNC bool_xor
 ;; know we're called from bool's number methods, so tag is TAG_BOOL)
 ;; ============================================================================
 
-; bool_positive: +False -> 0, +True -> 1 (as SmallInt)
+; bool_positive: +False -> 0, +True -> 1
+; True and False are ordinary heap singletons, so rdi is a pointer -- not the
+; 0/1 payload this used to be handed before the value representation changed.
+; Nothing called it until __pos__ started reaching real slots, which is why
+; the stale convention went unnoticed.
 DEF_FUNC_BARE bool_positive
-    mov rax, rdi           ; payload (0 or 1)
-    RET_TAG_SMALLINT
+    lea rcx, [rel bool_true]
+    xor eax, eax
+    cmp rdi, rcx
+    sete al
+    V_PACK_I64 rax, rcx
     ret
 END_FUNC bool_positive
 
-; bool_absolute: abs(False) -> 0, abs(True) -> 1 (as SmallInt)
+; bool_absolute: abs(False) -> 0, abs(True) -> 1
 DEF_FUNC_BARE bool_absolute
-    mov rax, rdi           ; payload (0 or 1), already non-negative
-    RET_TAG_SMALLINT
+    lea rcx, [rel bool_true]
+    xor eax, eax
+    cmp rdi, rcx
+    sete al
+    V_PACK_I64 rax, rcx
     ret
 END_FUNC bool_absolute
 
@@ -185,6 +171,7 @@ DEF_FUNC bool_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .real:
@@ -202,6 +189,7 @@ DEF_FUNC bool_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 .real_one:
     mov eax, 1
@@ -209,6 +197,7 @@ DEF_FUNC bool_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 .real_tag_bool:
     mov rax, rbx               ; 0 or 1
@@ -216,6 +205,7 @@ DEF_FUNC bool_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .imag:
@@ -225,6 +215,7 @@ DEF_FUNC bool_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 END_FUNC bool_getattr
 
@@ -270,6 +261,8 @@ bool_number_methods:
     dq 0                        ; nb_ior          +240
     dq 0                        ; nb_ifloor_divide +248
     dq 0                        ; nb_itrue_divide +256
+    dq 0 ; nb_matmul
+    dq 0 ; nb_imatmul
 
 ; Bool type object
 align 8
@@ -301,6 +294,7 @@ bool_type:
     dq 0                    ; tp_bases
     dq 0                        ; tp_traverse
     dq 0                        ; tp_clear
+    dq 0 ; tp_dictoffset
 
 ; True singleton - has embedded mpz_t value of 1
 align 8
@@ -312,6 +306,8 @@ bool_true:
     dd 0                    ; _mp_alloc (set by gmpz_init)
     dd 0                    ; _mp_size  (set by gmpz_set_si)
     dq 0                    ; _mp_d     (set by gmpz_init)
+    dq 0                    ; ival      (unused: singletons are GMP-backed)
+    dq 0                    ; compact   (0 = GMP-backed)
 
 ; False singleton - has embedded mpz_t value of 0
 align 8
@@ -322,6 +318,8 @@ bool_false:
     dd 0                    ; _mp_alloc
     dd 0                    ; _mp_size
     dq 0                    ; _mp_d
+    dq 0                    ; ival      (unused: singletons are GMP-backed)
+    dq 0                    ; compact   (0 = GMP-backed)
 
 ; bool_init() - Initialize True/False singletons' mpz values and set tp_base
 ; Must be called once at startup

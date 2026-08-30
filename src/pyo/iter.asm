@@ -58,12 +58,10 @@ DEF_FUNC_BARE list_iter_next
     cmp rcx, [rax + PyListObject.ob_size]
     jge .exhausted_mark
 
-    ; Get item (payload + tag arrays)
+    ; Get item
     mov rdx, [rax + PyListObject.ob_item]
-    mov r8, [rax + PyListObject.ob_item_tags]
-    mov rax, [rdx + rcx * 8]     ; payload
-    movzx edx, byte [r8 + rcx]   ; tag
-    INCREF_VAL rax, rdx
+    mov rax, [rdx + rcx * 8]     ; item Value
+    INCREF_V rax, rdx
 
     ; Advance index
     inc qword [rdi + PyListIterObject.it_index]
@@ -151,8 +149,7 @@ DEF_FUNC tuple_iter_new
 END_FUNC tuple_iter_new
 
 ;; ============================================================================
-;; tuple_iter_next(PyTupleIterObject *self) -> (rax=payload, rdx=tag) or NULL
-;; Fat tuple: 16-byte slots
+;; tuple_iter_next(PyTupleIterObject *self) -> rax = item Value, 0 when exhausted
 ;; ============================================================================
 DEF_FUNC_BARE tuple_iter_next
     mov rax, [rdi + PyTupleIterObject.it_seq]
@@ -161,12 +158,10 @@ DEF_FUNC_BARE tuple_iter_next
     cmp rcx, [rax + PyTupleObject.ob_size]
     jge .exhausted
 
-    ; Get item (payload + tag arrays)
-    mov rdx, [rax + PyTupleObject.ob_item_tags]
+    ; Get item
     mov rax, [rax + PyTupleObject.ob_item]
-    mov rax, [rax + rcx * 8]       ; payload
-    movzx edx, byte [rdx + rcx]    ; tag
-    INCREF_VAL rax, rdx
+    mov rax, [rax + rcx * 8]       ; item Value
+    INCREF_V rax, rdx
 
     inc qword [rdi + PyTupleIterObject.it_index]
     ret
@@ -268,7 +263,7 @@ DEF_FUNC_BARE range_iter_next
     mov [rdi + PyRangeIterObject.it_current], rax
 
     mov rax, r8
-    RET_TAG_SMALLINT
+    V_PACK_I64 rax, rdx         ; range values can exceed the immediate range
     ret
 
 .exhausted:
@@ -404,6 +399,7 @@ DEF_FUNC range_obj_sq_item
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .index_error:
@@ -676,6 +672,7 @@ list_iter_type:
     dq 0                    ; tp_bases
     dq 0                        ; tp_traverse
     dq 0                        ; tp_clear
+    dq 0 ; tp_dictoffset
 
 ; Tuple iterator type
 align 8
@@ -707,6 +704,7 @@ tuple_iter_type:
     dq 0                    ; tp_bases
     dq 0                        ; tp_traverse
     dq 0                        ; tp_clear
+    dq 0 ; tp_dictoffset
 
 ; Range iterator type
 align 8
@@ -738,6 +736,7 @@ range_iter_type:
     dq 0                    ; tp_bases
     dq 0                        ; tp_traverse
     dq 0                        ; tp_clear
+    dq 0 ; tp_dictoffset
 
 ; Range object type (reusable sequence, creates fresh iterators)
 align 8
@@ -769,6 +768,7 @@ range_obj_type:
     dq 0                        ; tp_bases
     dq 0                        ; tp_traverse
     dq 0                        ; tp_clear
+    dq 0 ; tp_dictoffset
 
 ; Range object sequence methods
 align 8

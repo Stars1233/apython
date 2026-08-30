@@ -9,6 +9,18 @@ NASM = nasm
 NASMFLAGS = -f elf64 -I include/ -g -F dwarf \
     -DVERSION_MAJOR=$(VERSION_MAJOR) -DVERSION_MINOR=$(VERSION_MINOR) \
     -DVERSION_PATCH=$(VERSION_PATCH) -DVERSION_STR=\"$(VERSION)\"
+# INT_STRESS=N boxes every |int| >= N as a heap PyIntObject, so the normal
+# test suite exercises the heap-int paths.  Use it to shake out code that only
+# handles SmallInt operands.  INT_STRESS=1 defaults the threshold to 8.
+ifdef INT_STRESS
+ifeq ($(INT_STRESS),1)
+INT_STRESS_THRESHOLD = 8
+else
+INT_STRESS_THRESHOLD = $(INT_STRESS)
+endif
+NASMFLAGS += -DINT_STRESS_BOX=$(INT_STRESS_THRESHOLD)
+endif
+
 CC = cc
 LDFLAGS = -no-pie -lc -lgmp
 TARGET = apython
@@ -18,6 +30,11 @@ SRCS = $(wildcard src/*.asm)
 PYO_SRCS = $(wildcard src/pyo/*.asm)
 LIB_SRCS = $(wildcard src/lib/*.asm)
 OBJS = $(SRCS:src/%.asm=build/%.o) $(PYO_SRCS:src/pyo/%.asm=build/%.o) $(LIB_SRCS:src/lib/%.asm=build/%.o)
+
+# Every object depends on every header: nasm has no depfile support here, and
+# a stale build after editing a struct layout in include/*.inc is a silent,
+# very confusing failure.
+HEADERS = $(wildcard include/*.inc)
 
 # Python compiler for tests
 PYTHON = python3
@@ -29,13 +46,13 @@ all: $(TARGET)
 $(TARGET): $(OBJS)
 	$(CC) -o $@ $^ $(LDFLAGS)
 
-build/%.o: src/%.asm | build
+build/%.o: src/%.asm $(HEADERS) | build
 	$(NASM) $(NASMFLAGS) -o $@ $<
 
-build/%.o: src/pyo/%.asm | build
+build/%.o: src/pyo/%.asm $(HEADERS) | build
 	$(NASM) $(NASMFLAGS) -o $@ $<
 
-build/%.o: src/lib/%.asm | build
+build/%.o: src/lib/%.asm $(HEADERS) | build
 	$(NASM) $(NASMFLAGS) -o $@ $<
 
 build:
@@ -189,9 +206,9 @@ check-cpython: $(TARGET) gen-cpython-tests
 	@echo "Running CPython test_augassign.py..."
 	@./apython tests/cpython/__pycache__/test_augassign.cpython-312.pyc
 	@echo "Running CPython test_list.py..."
-	@-./apython tests/cpython/__pycache__/test_list.cpython-312.pyc
+	@./apython tests/cpython/__pycache__/test_list.cpython-312.pyc
 	@echo "Running CPython test_tuple.py..."
-	@-./apython tests/cpython/__pycache__/test_tuple.cpython-312.pyc
+	@./apython tests/cpython/__pycache__/test_tuple.cpython-312.pyc
 	@echo "Running CPython test_dict.py..."
 	@./apython tests/cpython/__pycache__/test_dict.cpython-312.pyc
 	@echo "Running CPython test_set.py..."

@@ -195,7 +195,7 @@ DEF_FUNC sre_pattern_do_match, PM_FRAME
 
     ; Return None
     xor eax, eax
-    mov edx, TAG_NONE
+    RET_NONE
 
     pop r14
     pop r13
@@ -209,13 +209,71 @@ END_FUNC sre_pattern_do_match
 ; sre_pattern_match_method(self, args, nargs)
 ; Pattern.match(string, pos=0, endpos=sys.maxsize)
 ; ============================================================================
+;; ============================================================================
+;; sp_arg_i64(rdi: argument Value) -> rax: int64
+;;
+;; pos/endpos arguments used to be read straight out of the payload word,
+;; which is only correct while every integer is a SmallInt.  Normalize here
+;; so bool, compact heap ints, GMP ints and int subclasses all work.
+;; Clobbers rax, rcx, rdx, rdi, rsi, r8-r11 like any call.
+;; ============================================================================
+extern int_unwrap
+extern int_to_i64
+DEF_FUNC_LOCAL sp_arg_i64
+    ; Preserves every register except rax; the callers keep the pattern,
+    ; the string and the argument count live across these calls.
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    push r8
+    push r9
+    push r10
+    push r11
+    V_UNPACK rdi, rdx          ; the argument Value
+    call int_unwrap
+    cmp edx, TAG_SMALLINT
+    je .sai_small
+    ; int_to_i64 reads PyIntObject fields off whatever it is given, so a str
+    ; pos fed __gmpz_get_si a garbage limb pointer.
+    push rdi
+    push rdx
+    extern int_is_integer
+    call int_is_integer
+    pop rdx
+    pop rdi
+    test eax, eax
+    jz .sai_type_error
+    call int_to_i64
+    jmp .sai_out
+.sai_type_error:
+    extern exc_TypeError_type
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "an integer is required"
+    extern raise_exception
+    call raise_exception
+.sai_small:
+    mov rax, rdi
+.sai_out:
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    leave
+    ret
+END_FUNC sp_arg_i64
+
 DEF_FUNC sre_pattern_match_method
     ; rdi = args (fat array), rsi = nargs
     ; args[0] = self (pattern), args[1..] = user args
     push rbx
     push r12
     mov rbx, [rdi]             ; pattern = args[0] payload
-    lea r12, [rdi + 16]        ; user args start at args[1]
+    lea r12, [rdi + 8]         ; user args start at args[1]
     lea rdx, [rsi - 1]         ; user nargs
 
     ; Get string arg
@@ -230,7 +288,9 @@ DEF_FUNC sre_pattern_match_method
     xor ecx, ecx
     cmp r8, 2
     jb .match_no_pos
-    mov rcx, [r12 + 16]       ; pos
+    mov rdi, [r12 + 8]
+    call sp_arg_i64
+    mov rcx, rax               ; pos
 .match_no_pos:
     mov rdx, rcx               ; rdx = pos
 
@@ -238,7 +298,9 @@ DEF_FUNC sre_pattern_match_method
     mov rcx, 0x7FFFFFFFFFFFFFFF
     cmp r8, 3
     jb .match_no_endpos
-    mov rcx, [r12 + 32]       ; endpos
+    mov rdi, [r12 + 16]
+    call sp_arg_i64
+    mov rcx, rax               ; endpos
 .match_no_endpos:
 
     mov rdi, rbx               ; pattern
@@ -251,6 +313,7 @@ DEF_FUNC sre_pattern_match_method
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .match_error:
@@ -268,7 +331,7 @@ DEF_FUNC sre_pattern_search_method
     push r12
     push r13
     mov rbx, [rdi]             ; pattern = args[0] payload
-    lea r12, [rdi + 16]        ; user args
+    lea r12, [rdi + 8]         ; user args
     lea r13, [rsi - 1]         ; user nargs
 
     cmp r13, 0
@@ -279,14 +342,18 @@ DEF_FUNC sre_pattern_search_method
     xor edx, edx
     cmp r13, 2
     jb .search_no_pos
-    mov rdx, [r12 + 16]       ; pos
+    mov rdi, [r12 + 8]
+    call sp_arg_i64
+    mov rdx, rax               ; pos
 .search_no_pos:
 
     ; endpos (default max)
     mov rcx, 0x7FFFFFFFFFFFFFFF
     cmp r13, 3
     jb .search_no_endpos
-    mov rcx, [r12 + 32]       ; endpos
+    mov rdi, [r12 + 16]
+    call sp_arg_i64
+    mov rcx, rax               ; endpos
 .search_no_endpos:
 
     mov rdi, rbx
@@ -297,6 +364,7 @@ DEF_FUNC sre_pattern_search_method
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .search_error:
@@ -314,7 +382,7 @@ DEF_FUNC sre_pattern_fullmatch_method
     push r12
     push r13
     mov rbx, [rdi]             ; pattern = args[0] payload
-    lea r12, [rdi + 16]        ; user args
+    lea r12, [rdi + 8]         ; user args
     lea r13, [rsi - 1]         ; user nargs
 
     cmp r13, 0
@@ -325,14 +393,18 @@ DEF_FUNC sre_pattern_fullmatch_method
     xor edx, edx
     cmp r13, 2
     jb .fm_no_pos
-    mov rdx, [r12 + 16]       ; pos
+    mov rdi, [r12 + 8]
+    call sp_arg_i64
+    mov rdx, rax               ; pos
 .fm_no_pos:
 
     ; endpos (default max)
     mov rcx, 0x7FFFFFFFFFFFFFFF
     cmp r13, 3
     jb .fm_no_endpos
-    mov rcx, [r12 + 32]       ; endpos
+    mov rdi, [r12 + 16]
+    call sp_arg_i64
+    mov rcx, rax               ; endpos
 .fm_no_endpos:
 
     mov rdi, rbx
@@ -343,6 +415,7 @@ DEF_FUNC sre_pattern_fullmatch_method
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .fm_error:
@@ -435,7 +508,7 @@ DEF_FUNC sre_substr_from_state
 
 .ss_none:
     xor eax, eax
-    mov edx, TAG_NONE
+    RET_NONE
     leave
     ret
 END_FUNC sre_substr_from_state
@@ -467,14 +540,18 @@ DEF_FUNC sre_pattern_findall_method, FA_FRAME
     cmp rdx, 0
     je .fa_error
 
-    mov rax, [rdi + 16]       ; string = args[1] payload
+    mov rax, [rdi + 8]       ; string = args[1] payload
     mov [rbp - FA_STR], rax
 
     ; pos (default 0)
     xor ecx, ecx
     cmp rdx, 2
     jb .fa_no_pos
-    mov rcx, [rdi + 32]       ; args[2] = pos
+    push rdi
+    mov rdi, [rdi + 16]
+    call sp_arg_i64
+    pop rdi
+    mov rcx, rax               ; args[2] = pos
 .fa_no_pos:
     push rcx                   ; save pos
 
@@ -482,7 +559,11 @@ DEF_FUNC sre_pattern_findall_method, FA_FRAME
     mov r8, 0x7FFFFFFFFFFFFFFF
     cmp rdx, 3
     jb .fa_no_endpos
-    mov r8, [rdi + 48]        ; args[3] = endpos
+    push rdi
+    mov rdi, [rdi + 24]
+    call sp_arg_i64
+    pop rdi
+    mov r8, rax                ; args[3] = endpos
 .fa_no_endpos:
     push r8                    ; save endpos
 
@@ -538,6 +619,7 @@ DEF_FUNC sre_pattern_findall_method, FA_FRAME
     ; edx already set
     push rax
     push rdx
+    V_PACK rsi, rdx         ; list_append takes a Value
     call list_append
     pop rdx
     pop rax
@@ -563,6 +645,7 @@ DEF_FUNC sre_pattern_findall_method, FA_FRAME
     ; edx already set
     push rax
     push rdx
+    V_PACK rsi, rdx         ; list_append takes a Value
     call list_append
     pop rdx
     pop rax
@@ -605,7 +688,7 @@ DEF_FUNC sre_pattern_findall_method, FA_FRAME
 
 .fa_mg_none:
     xor eax, eax
-    mov edx, TAG_NONE
+    RET_NONE
 
 .fa_mg_set:
     ; Set tuple[group-1] = (rax, edx)
@@ -616,9 +699,8 @@ DEF_FUNC sre_pattern_findall_method, FA_FRAME
     lea esi, [ecx - 1]
     movsx rsi, esi
     mov r8, [rbx + PyTupleObject.ob_item]       ; payloads
-    mov r9, [rbx + PyTupleObject.ob_item_tags]  ; tags
-    mov [r8 + rsi*8], rax
-    mov byte [r9 + rsi], dl
+    V_PACK rax, rdx
+    mov [r8 + rsi * 8], rax
 
     pop rcx
     inc ecx
@@ -628,7 +710,6 @@ DEF_FUNC sre_pattern_findall_method, FA_FRAME
     ; Append tuple to list
     mov rdi, r14
     mov rsi, rbx
-    mov edx, TAG_PTR
     call list_append
     mov rdi, rbx
     call obj_decref
@@ -672,6 +753,7 @@ DEF_FUNC sre_pattern_findall_method, FA_FRAME
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .fa_error:
@@ -711,14 +793,12 @@ DEF_FUNC sre_pattern_sub_method, SUB_FRAME
     jb .sub_error
 
     ; repl = user_args[0], string = user_args[1]
-    mov rax, [rdi + 16]       ; args[1] = repl
+    mov rax, [rdi + 8]       ; args[1] = repl
+    V_UNPACK rax, rcx
     mov [rbp - SUB_REPL], rax
-    mov rax, [rdi + 32]       ; args[2] = string
-    mov [rbp - SUB_STR], rax
-
-    ; Save repl tag for str_concat usage
-    mov rcx, [rdi + 24]       ; repl tag = args[1] tag
     mov [rbp - SUB_REPL_TAG], rcx
+    mov rax, [rdi + 16]       ; args[2] = string
+    mov [rbp - SUB_STR], rax
 
     ; Check if repl is callable by type whitelist
     ; (tp_call check alone fails because add_builtin_type patches tp_call
@@ -755,7 +835,10 @@ DEF_FUNC sre_pattern_sub_method, SUB_FRAME
     xor eax, eax
     cmp rdx, 3
     jb .sub_no_count
-    mov rax, [rdi + 48]       ; args[3] = count
+    push rdi
+    mov rdi, [rdi + 24]       ; args[3] = count
+    call sp_arg_i64
+    pop rdi
 .sub_no_count:
     mov [rbp - SUB_COUNT], rax
     mov qword [rbp - SUB_NSUBS], 0
@@ -851,9 +934,8 @@ DEF_FUNC sre_pattern_sub_method, SUB_FRAME
     mov r14, rax               ; r14 = match
 
     ; Build 1-arg fat array on stack: [match_payload, match_tag]
-    sub rsp, 16
-    mov [rsp], r14             ; payload = match ptr
-    mov qword [rsp + 8], TAG_PTR  ; tag = TAG_PTR
+    sub rsp, 16                ; one Value; 16 keeps rsp aligned
+    mov [rsp], r14             ; args[0] = the match object
 
     ; Call tp_call(repl, args, 1)
     mov rdi, [rbp - SUB_REPL]
@@ -861,34 +943,39 @@ DEF_FUNC sre_pattern_sub_method, SUB_FRAME
     mov edx, 1                 ; nargs
     mov rax, [rbp - SUB_CALLABLE]
     call rax
-    ; rax = replacement string payload, edx = replacement tag
+    ; tp_call returns a Value, and str_concat below takes Values: unpacking
+    ; here decoded it a second time, so a non-str replacement had its payload
+    ; used as an address.
     add rsp, 16               ; pop fat array
 
     ; Save replacement string
     push rax
-    push rdx
+    push rax                  ; keep the stack 16-byte aligned
 
     ; DECREF match object
     mov rdi, r14
     call obj_decref
 
-    ; Concat replacement with result
-    pop rcx                    ; replacement tag → ecx for str_concat
-    pop rsi                    ; replacement string payload
-    push rsi                   ; save repl payload for DECREF
-    push rcx                   ; save repl tag for DECREF
+    ; Concat replacement with result.  str_concat itself rejects a non-str.
+    pop rsi                    ; (alignment copy)
+    pop rsi                    ; the replacement Value
+    push rsi                   ; save for DECREF
+    push rsi                   ; alignment
     mov rdi, [rbp - SUB_RESULT]
     call str_concat
+    push rax
     push rax
     mov rdi, [rbp - SUB_RESULT]
     call obj_decref
     pop rax
+    pop rax
     mov [rbp - SUB_RESULT], rax
 
     ; DECREF replacement string from tp_call
-    pop rdx                    ; repl tag
-    pop rax                    ; repl payload
-    DECREF_VAL rax, rdx
+    pop rax
+    pop rax
+    mov rdi, rax
+    XDECREF_V rdi, rdx
 
     pop r13
     pop r12
@@ -956,6 +1043,7 @@ DEF_FUNC sre_pattern_sub_method, SUB_FRAME
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .sub_error:
@@ -994,14 +1082,12 @@ DEF_FUNC sre_pattern_subn_method, SN_FRAME
     cmp rdx, 2
     jb .subn_error
 
-    mov rax, [rdi + 16]
+    mov rax, [rdi + 8]
+    V_UNPACK rax, rcx
     mov [rbp - SN_REPL], rax
-    mov rax, [rdi + 32]
-    mov [rbp - SN_STR], rax
-
-    ; Save repl tag for str_concat usage
-    mov rcx, [rdi + 24]        ; repl tag = args[1] tag
     mov [rbp - SN_REPL_TAG], rcx
+    mov rax, [rdi + 16]
+    mov [rbp - SN_STR], rax
 
     ; Check if repl is callable by type whitelist
     mov qword [rbp - SN_CALLABLE], 0
@@ -1033,7 +1119,10 @@ DEF_FUNC sre_pattern_subn_method, SN_FRAME
     xor eax, eax
     cmp rdx, 3
     jb .subn_no_count
-    mov rax, [rdi + 48]
+    push rdi
+    mov rdi, [rdi + 24]
+    call sp_arg_i64
+    pop rdi
 .subn_no_count:
     mov [rbp - SN_COUNT], rax
     mov qword [rbp - SN_NSUBS], 0
@@ -1121,9 +1210,8 @@ DEF_FUNC sre_pattern_subn_method, SN_FRAME
     mov r14, rax
 
     ; Build 1-arg fat array on stack
-    sub rsp, 16
+    sub rsp, 16                ; one Value; 16 keeps rsp aligned
     mov [rsp], r14
-    mov qword [rsp + 8], TAG_PTR
 
     ; Call tp_call(repl, args, 1)
     mov rdi, [rbp - SN_REPL]
@@ -1131,6 +1219,7 @@ DEF_FUNC sre_pattern_subn_method, SN_FRAME
     mov edx, 1
     mov rax, [rbp - SN_CALLABLE]
     call rax
+    V_UNPACK rax, rdx           ; tp_call returns a Value
     add rsp, 16
 
     push rax
@@ -1217,16 +1306,14 @@ DEF_FUNC sre_pattern_subn_method, SN_FRAME
     mov rbx, rax
 
     mov r8, [rbx + PyTupleObject.ob_item]       ; payloads
-    mov r9, [rbx + PyTupleObject.ob_item_tags]  ; tags
 
     mov r12, [rbp - SN_RESULT]
     inc qword [r12 + PyObject.ob_refcnt]
     mov [r8], r12
-    mov byte [r9], TAG_PTR
 
     mov rax, [rbp - SN_NSUBS]
+    V_PACK_I64 rax, r9
     mov [r8 + 8], rax
-    mov byte [r9 + 1], TAG_SMALLINT
 
     ; DECREF result string (tuple holds a ref)
     mov rdi, r12
@@ -1241,6 +1328,7 @@ DEF_FUNC sre_pattern_subn_method, SN_FRAME
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .subn_error:
@@ -1276,14 +1364,17 @@ DEF_FUNC sre_pattern_split_method, SP_FRAME
     cmp rdx, 0
     je .split_error
 
-    mov rax, [rdi + 16]       ; string = args[1] payload
+    mov rax, [rdi + 8]       ; string = args[1] payload
     mov [rbp - SP_STR], rax
 
     ; maxsplit
     xor eax, eax
     cmp rdx, 2
     jb .split_no_max
-    mov rax, [rdi + 32]       ; args[2] = maxsplit
+    push rdi
+    mov rdi, [rdi + 16]       ; args[2] = maxsplit
+    call sp_arg_i64
+    pop rdi
 .split_no_max:
     mov [rbp - SP_MAX], rax
     mov qword [rbp - SP_NSPLIT], 0
@@ -1344,6 +1435,7 @@ DEF_FUNC sre_pattern_split_method, SP_FRAME
     ; edx already set
     push rax
     push rdx
+    V_PACK rsi, rdx         ; list_append takes a Value
     call list_append
     pop rdx
     pop rax
@@ -1375,7 +1467,7 @@ DEF_FUNC sre_pattern_split_method, SP_FRAME
 
 .split_cap_none:
     xor eax, eax
-    mov edx, TAG_NONE
+    RET_NONE
 
 .split_cap_append:
     mov rdi, r14
@@ -1383,6 +1475,7 @@ DEF_FUNC sre_pattern_split_method, SP_FRAME
     ; edx already set
     push rax
     push rdx
+    V_PACK rsi, rdx         ; list_append takes a Value
     call list_append
     pop rdx
     pop rax
@@ -1428,6 +1521,7 @@ DEF_FUNC sre_pattern_split_method, SP_FRAME
     ; edx already set
     push rax
     push rdx
+    V_PACK rsi, rdx         ; list_append takes a Value
     call list_append
     pop rdx
     pop rax
@@ -1445,6 +1539,7 @@ DEF_FUNC sre_pattern_split_method, SP_FRAME
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .split_error:
@@ -1561,6 +1656,7 @@ DEF_FUNC sre_pattern_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .ga_match:
@@ -1629,6 +1725,7 @@ DEF_FUNC sre_pattern_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .ga_pattern_attr:
@@ -1639,6 +1736,7 @@ DEF_FUNC sre_pattern_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .ga_flags:
@@ -1648,6 +1746,7 @@ DEF_FUNC sre_pattern_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .ga_groups:
@@ -1657,6 +1756,7 @@ DEF_FUNC sre_pattern_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .ga_groupindex:
@@ -1668,6 +1768,7 @@ DEF_FUNC sre_pattern_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 .ga_empty_dict:
     call dict_new
@@ -1675,6 +1776,7 @@ DEF_FUNC sre_pattern_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 END_FUNC sre_pattern_getattr
 
@@ -1714,6 +1816,7 @@ DEF_FUNC sre_pattern_copy_method
     inc qword [rax + PyObject.ob_refcnt]
     mov edx, TAG_PTR
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 END_FUNC sre_pattern_copy_method
 
@@ -1755,6 +1858,8 @@ END_FUNC sre_pattern_hash
 extern str_compare
 
 DEF_FUNC sre_pattern_richcompare
+    V_UNPACK rdi, rcx           ; left  Value -> (payload, tag)
+    V_UNPACK rsi, r8            ; right Value -> (payload, tag)
     push rbx
     push r12
     push r13
@@ -1771,7 +1876,7 @@ DEF_FUNC sre_pattern_richcompare
 
     ; Return NotImplemented → for now return False
     xor eax, eax
-    mov edx, TAG_NONE
+    RET_NONE
     jmp .prc_ret
 
 .prc_compare:
@@ -1819,11 +1924,11 @@ DEF_FUNC sre_pattern_richcompare
 
 .prc_true:
     mov eax, 1
-    mov edx, TAG_BOOL
+    RET_BOOL_RAX
     jmp .prc_ret
 .prc_false:
     xor eax, eax
-    mov edx, TAG_BOOL
+    RET_BOOL_RAX
 .prc_ret:
     pop r13
     pop r12
@@ -1844,7 +1949,7 @@ DEF_FUNC sre_pattern_finditer_method
     push r13
 
     mov rbx, [rdi]             ; self = pattern
-    lea r12, [rdi + 16]        ; user args
+    lea r12, [rdi + 8]         ; user args
     lea r13, [rsi - 1]         ; user nargs
 
     cmp r13, 0
@@ -1857,14 +1962,18 @@ DEF_FUNC sre_pattern_finditer_method
     xor edx, edx
     cmp r13, 2
     jb .fi_no_pos
-    mov rdx, [r12 + 16]       ; pos
+    mov rdi, [r12 + 8]
+    call sp_arg_i64
+    mov rdx, rax               ; pos
 .fi_no_pos:
 
     ; endpos (default large)
     mov rcx, 0x7FFFFFFFFFFFFFFF
     cmp r13, 3
     jb .fi_no_endpos
-    mov rcx, [r12 + 32]       ; endpos
+    mov rdi, [r12 + 16]
+    call sp_arg_i64
+    mov rcx, rax               ; endpos
 .fi_no_endpos:
 
     ; scanner_new(pattern, string, pos, endpos)
@@ -1880,6 +1989,7 @@ DEF_FUNC sre_pattern_finditer_method
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .fi_error:
@@ -2035,7 +2145,6 @@ DEF_FUNC sre_scanner_iternext, SI_FRAME
     mov [rbx + SRE_ScannerObject.pos], rax
 
     pop rax                    ; match object
-    mov edx, TAG_PTR
 
     pop r13
     pop r12
@@ -2068,9 +2177,10 @@ DEF_FUNC sre_scanner_search_method
     test edx, edx
     jnz .ssm_done
     xor eax, eax
-    mov edx, TAG_NONE
+    RET_NONE
 .ssm_done:
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 END_FUNC sre_scanner_search_method
 
@@ -2151,6 +2261,7 @@ DEF_FUNC sre_scanner_match_method, SM2_FRAME
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .sm2_no_match:
@@ -2159,12 +2270,13 @@ DEF_FUNC sre_scanner_match_method, SM2_FRAME
 
 .sm2_none:
     xor eax, eax
-    mov edx, TAG_NONE
+    RET_NONE
 
     pop r13
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 END_FUNC sre_scanner_match_method
 
@@ -2201,6 +2313,7 @@ DEF_FUNC sre_scanner_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .sga_match:
@@ -2228,6 +2341,7 @@ DEF_FUNC sre_scanner_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .sga_pattern:
@@ -2237,6 +2351,7 @@ DEF_FUNC sre_scanner_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 END_FUNC sre_scanner_getattr
 
@@ -2275,6 +2390,7 @@ sre_scanner_type:
     dq 0                       ; tp_bases
     dq 0                        ; tp_traverse
     dq 0                        ; tp_clear
+    dq 0 ; tp_dictoffset
 
 align 8
 
@@ -2307,6 +2423,7 @@ sre_pattern_type:
     dq 0                       ; tp_bases
     dq 0                        ; tp_traverse
     dq 0                        ; tp_clear
+    dq 0 ; tp_dictoffset
 
 section .rodata
 sp_type_name:     db "re.Pattern", 0

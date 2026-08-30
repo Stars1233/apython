@@ -35,6 +35,11 @@ extern str_type
 extern type_getattr
 extern type_repr
 extern type_type
+extern raise_exception_obj
+extern str_new_heap
+extern obj_repr
+extern obj_str
+extern raise_exception
 extern exc_traverse
 extern exc_clear_gc
 extern tuple_new
@@ -60,8 +65,7 @@ DEF_FUNC exc_new, EN_FRAME
     push r13
 
     mov rbx, rdi            ; type
-    mov r12, rsi            ; msg_str
-    mov r13, rdx            ; msg_tag
+    mov r12, rsi            ; msg Value (0 = no message)
 
     ; Allocate exception object (GC-tracked)
     mov edi, PyExceptionObject_size
@@ -70,27 +74,25 @@ DEF_FUNC exc_new, EN_FRAME
     ; ob_refcnt=1, ob_type set by gc_alloc
     mov [rax + PyExceptionObject.exc_type], rbx
     mov [rax + PyExceptionObject.exc_value], r12
-    mov [rax + PyExceptionObject.exc_value_tag], r13
     mov qword [rax + PyExceptionObject.exc_tb], 0
     mov qword [rax + PyExceptionObject.exc_context], 0
     mov qword [rax + PyExceptionObject.exc_cause], 0
     mov qword [rax + PyExceptionObject.exc_args], 0
     mov qword [rax + PyExceptionObject.exc_dict], 0
+    mov qword [rax + PyExceptionObject.exc_suppress], 0
 
-    ; INCREF the message (tag-aware)
-    INCREF_VAL r12, r13
+    ; INCREF the message
+    INCREF_V r12, r13
 
-    ; Create args tuple: (msg_str,) if msg present, else ()
+    ; Create args tuple: (msg,) if msg present, else ()
     mov [rbp - EN_EXC], rax   ; save exc
-    test r13, r13             ; check tag for TAG_NULL, not payload (SmallInt(0) has payload=0)
+    test r12, r12             ; a NULL Value is 0 and no real Value is
     jz .empty_args
     mov edi, 1
     call tuple_new
-    INCREF_VAL r12, r13
-    mov r8, [rax + PyTupleObject.ob_item]       ; payloads
-    mov r9, [rax + PyTupleObject.ob_item_tags]  ; tags
+    INCREF_V r12, r13
+    mov r8, [rax + PyTupleObject.ob_item]
     mov [r8], r12
-    mov byte [r9], r13b                         ; msg tag
     jmp .set_args
 .empty_args:
     xor edi, edi
@@ -111,6 +113,97 @@ DEF_FUNC exc_new, EN_FRAME
     leave
     ret
 END_FUNC exc_new
+
+; exc_is_exception(rdi = object) -> eax 0/1
+; True when the object is an instance of BaseException, i.e. when reading
+; PyExceptionObject.exc_context off it is defined.
+DEF_FUNC_BARE exc_is_exception
+    V_TEST_PTR rdi, rax
+    ja .nope
+    test rdi, rdi
+    jz .nope
+    mov rdi, [rdi + PyObject.ob_type]
+    lea rsi, [rel exc_BaseException_type]
+    extern type_is_subtype
+    jmp type_is_subtype
+.nope:
+    xor eax, eax
+    ret
+END_FUNC exc_is_exception
+
+; exc_set_context(rdi = new exception, rsi = exception being handled)
+; Implements CPython's implicit chaining: the exception raised while another
+; is being handled gets that one as its __context__.  The chain is first
+; scanned for `new` so a re-raise cannot make it point at itself.
+ESC_NEW equ 8
+ESC_OLD equ 16
+ESC_FRAME equ 16
+DEF_FUNC exc_set_context, ESC_FRAME
+    cmp rdi, rsi
+    je .esc_done
+    mov [rbp - ESC_NEW], rdi
+    mov [rbp - ESC_OLD], rsi
+    call exc_is_exception
+    test eax, eax
+    jz .esc_done
+    mov rdi, [rbp - ESC_OLD]
+    call exc_is_exception
+    test eax, eax
+    jz .esc_done
+
+    mov rdi, [rbp - ESC_NEW]
+    mov rsi, [rbp - ESC_OLD]
+    ; Break an existing link back to `new` so the chain stays acyclic.
+    mov rax, rsi
+.esc_scan:
+    mov rcx, [rax + PyExceptionObject.exc_context]
+    test rcx, rcx
+    jz .esc_link
+    cmp rcx, rdi
+    jne .esc_next
+    mov qword [rax + PyExceptionObject.exc_context], 0
+    push rdi
+    push rsi
+    mov rdi, rcx
+    call obj_decref
+    pop rsi
+    pop rdi
+    jmp .esc_link
+.esc_next:
+    mov rax, rcx
+    jmp .esc_scan
+
+.esc_link:
+    ; Drop whatever context `new` already had, then take a reference to `old`.
+    mov rax, [rdi + PyExceptionObject.exc_context]
+    test rax, rax
+    jz .esc_store
+    push rdi
+    push rsi
+    mov rdi, rax
+    call obj_decref
+    pop rsi
+    pop rdi
+.esc_store:
+    INCREF rsi
+    mov [rdi + PyExceptionObject.exc_context], rsi
+.esc_done:
+    leave
+    ret
+END_FUNC exc_set_context
+
+; raise_key_error(rdi = key Value) -- does not return.
+; CPython reports the missing key itself as the exception's single argument,
+; so that KeyError('k') and str(e) == "'k'" carry which key was absent.
+DEF_FUNC raise_key_error
+    mov rsi, rdi                ; exc_new takes the message as a Value
+    lea rdi, [rel exc_KeyError_type]
+    xor edx, edx
+    call exc_new
+    mov rdi, rax
+    call raise_exception_obj
+    ud2
+END_FUNC raise_key_error
 
 ; exc_from_cstr(PyTypeObject *type, const char *msg) -> PyExceptionObject*
 ; Creates exception with a C string message (converted to PyStrObject).
@@ -133,8 +226,7 @@ DEF_FUNC exc_from_cstr
     ; exc_new INCREFs the str, so we need to DECREF our copy
     push rax
     mov rdi, [rax + PyExceptionObject.exc_value]
-    mov rsi, [rax + PyExceptionObject.exc_value_tag]
-    DECREF_VAL rdi, rsi
+    DECREF_V rdi, rsi
     pop rax
 
     pop rbx
@@ -151,8 +243,7 @@ DEF_FUNC exc_dealloc
 
     ; XDECREF exc_value (tag-aware: may be SmallInt)
     mov rdi, [rbx + PyExceptionObject.exc_value]
-    mov rsi, [rbx + PyExceptionObject.exc_value_tag]
-    XDECREF_VAL rdi, rsi
+    XDECREF_V rdi, rsi
 .no_value:
 
     ; XDECREF exc_tb
@@ -201,67 +292,93 @@ END_FUNC exc_dealloc
 
 ; exc_repr(PyExceptionObject *exc) -> PyObject* (string)
 ; Returns "TypeName(msg)" or just "TypeName()" if no message.
-DEF_FUNC exc_repr
+ER_EXC   equ 8
+ER_POS   equ 16
+ER_BUF   equ 528         ; 512 bytes, [rbp-528, rbp-16)
+ER_FRAME equ 544
+DEF_FUNC exc_repr, ER_FRAME
     push rbx
     push r12
-    sub rsp, 256            ; buffer for formatting
+    push r13
 
-    mov rbx, rdi            ; exc
+    mov rbx, rdi
+    mov [rbp - ER_EXC], rdi
 
-    ; Get type name
+    ; repr(exc) is TypeName(arg_reprs...).  This printed the stored value
+    ; unquoted and only ever one of them, so repr(ValueError('a','b')) was
+    ; "ValueError(a)".
+    lea rdi, [rbp - ER_BUF]
+    xor r13d, r13d                  ; output length
     mov rax, [rbx + PyExceptionObject.ob_type]
-    mov r12, [rax + PyTypeObject.tp_name]  ; C string ptr
-
-    ; Build string: "TypeName(msg)" into stack buffer
-    lea rdi, [rbp - 256 - 16]   ; buffer start (well within stack)
-    ; Copy type name
-    mov rsi, r12
-.copy_name:
-    lodsb
+    mov rsi, [rax + PyTypeObject.tp_name]
+.er_copy_name:
+    movzx eax, byte [rsi]
     test al, al
-    jz .name_done
-    stosb
-    jmp .copy_name
-.name_done:
-    mov byte [rdi], '('
-    inc rdi
+    jz .er_name_done
+    cmp r13, 480
+    jge .er_name_done
+    mov [rdi + r13], al
+    inc r13
+    inc rsi
+    jmp .er_copy_name
+.er_name_done:
+    mov byte [rdi + r13], '('
+    inc r13
 
-    ; Copy message if present (must be a heap string)
-    cmp qword [rbx + PyExceptionObject.exc_value_tag], TAG_PTR
-    jne .no_msg
-    mov rax, [rbx + PyExceptionObject.exc_value]
+    mov rax, [rbx + PyExceptionObject.exc_args]
     test rax, rax
-    jz .no_msg
-
-    ; Check if message is a string
-    mov rcx, [rax + PyObject.ob_type]
-    lea rdx, [rel str_type]
-    cmp rcx, rdx
-    jne .no_msg
-
-    ; Copy string data
-    mov rsi, rax
-    add rsi, PyStrObject.data
-    mov rcx, [rax + PyStrObject.ob_size]
-.copy_msg:
+    jz .er_close
+    mov r12, [rax + PyTupleObject.ob_size]
+    xor ecx, ecx
+    mov [rbp - ER_POS], rcx
+.er_arg_loop:
+    mov rcx, [rbp - ER_POS]
+    cmp rcx, r12
+    jge .er_close
     test rcx, rcx
-    jz .msg_done
-    lodsb
-    stosb
-    dec rcx
-    jmp .copy_msg
+    jz .er_no_comma
+    lea rdi, [rbp - ER_BUF]
+    mov byte [rdi + r13], ','
+    mov byte [rdi + r13 + 1], ' '
+    add r13, 2
+.er_no_comma:
+    mov rax, [rbx + PyExceptionObject.exc_args]
+    mov rax, [rax + PyTupleObject.ob_item]
+    mov rdi, [rax + rcx * 8]
+    call obj_repr
+    V_UNPACK rax, rdx
+    test rax, rax
+    jz .er_next
+    push rax
+    mov r8, [rax + PyStrObject.ob_size]
+    lea rsi, [rax + PyStrObject.data]
+    lea rdi, [rbp - ER_BUF]
+    xor ecx, ecx
+.er_copy_arg:
+    cmp rcx, r8
+    jge .er_arg_copied
+    cmp r13, 500
+    jge .er_arg_copied
+    movzx eax, byte [rsi + rcx]
+    mov [rdi + r13], al
+    inc r13
+    inc rcx
+    jmp .er_copy_arg
+.er_arg_copied:
+    pop rdi
+    call obj_decref
+.er_next:
+    inc qword [rbp - ER_POS]
+    jmp .er_arg_loop
 
-.no_msg:
-.msg_done:
-    mov byte [rdi], ')'
-    inc rdi
-    mov byte [rdi], 0
-
-    ; Create string from buffer
-    lea rdi, [rbp - 256 - 16]
-    call str_from_cstr
-
-    add rsp, 256
+.er_close:
+    lea rdi, [rbp - ER_BUF]
+    mov byte [rdi + r13], ')'
+    inc r13
+    mov rsi, r13
+    call str_new_heap
+    mov edx, TAG_PTR
+    pop r13
     pop r12
     pop rbx
     leave
@@ -270,31 +387,63 @@ END_FUNC exc_repr
 
 ; exc_str(PyExceptionObject *exc) -> PyObject* (string)
 ; Returns the message string, or type name if no message.
-DEF_FUNC exc_str
+ES_EXC   equ 8
+ES_FRAME equ 16
+DEF_FUNC exc_str, ES_FRAME
+    push rbx
+    mov rbx, rdi
+    mov [rbp - ES_EXC], rdi
 
-    ; Return exc_value if it's a heap string
-    cmp qword [rdi + PyExceptionObject.exc_value_tag], TAG_PTR
-    jne .use_type_name
-    mov rax, [rdi + PyExceptionObject.exc_value]
+    ; str(exc) is defined by args, not by a single stored value: '' for none,
+    ; str(args[0]) for one, and the tuple's repr for more.  This returned the
+    ; stored value when it happened to be a string and the *type name*
+    ; otherwise, so str(ValueError()) was "ValueError" and
+    ; str(ValueError("a","b")) was "a".
+    mov rax, [rbx + PyExceptionObject.exc_args]
     test rax, rax
-    jz .use_type_name
+    jz .es_empty
+    mov rcx, [rax + PyTupleObject.ob_size]
+    test rcx, rcx
+    jz .es_empty
+    cmp rcx, 1
+    jne .es_tuple
 
-    ; Check if it's a string
-    mov rcx, [rax + PyObject.ob_type]
-    lea rdx, [rel str_type]
+    ; KeyError is the one that shows its single argument's repr, so that a
+    ; missing key prints with its quotes.
+    mov rcx, [rbx + PyExceptionObject.ob_type]
+    lea rdx, [rel exc_KeyError_type]
     cmp rcx, rdx
-    jne .use_type_name
+    je .es_one_repr
 
-    ; INCREF and return the message
-    INCREF rax
+    mov rcx, [rax + PyTupleObject.ob_item]
+    mov rdi, [rcx]
+    call obj_str
+    V_UNPACK rax, rdx
+    pop rbx
     leave
     ret
 
-.use_type_name:
-    ; Return type name as string
-    mov rax, [rdi + PyExceptionObject.ob_type]
-    mov rdi, [rax + PyTypeObject.tp_name]
+.es_one_repr:
+    mov rcx, [rax + PyTupleObject.ob_item]
+    mov rdi, [rcx]
+    call obj_repr
+    V_UNPACK rax, rdx
+    pop rbx
+    leave
+    ret
+
+.es_tuple:
+    mov rdi, rax
+    call obj_repr
+    V_UNPACK rax, rdx
+    pop rbx
+    leave
+    ret
+
+.es_empty:
+    CSTRING rdi, ""
     call str_from_cstr
+    pop rbx
     leave
     ret
 END_FUNC exc_str
@@ -305,6 +454,8 @@ global exc_getattr
 DEF_FUNC exc_getattr
     push rbx
     push r12
+    push r13
+    push r14
 
     mov rbx, rdi            ; exc
     mov r12, rsi            ; name str
@@ -332,12 +483,33 @@ DEF_FUNC exc_getattr
     test eax, eax
     jz .get_cause
 
+    ; Check "__suppress_context__"
+    lea rdi, [r12 + PyStrObject.data]
+    CSTRING rsi, "__suppress_context__"
+    call ap_strcmp
+    test eax, eax
+    jz .get_suppress
+
     ; Check "__traceback__"
     lea rdi, [r12 + PyStrObject.data]
     CSTRING rsi, "__traceback__"
     call ap_strcmp
     test eax, eax
     jz .get_tb
+
+    ; Check "code" (for SystemExit.code).  Only SystemExit has it; on any
+    ; other exception `code` is an ordinary instance attribute.
+    lea rdi, [r12 + PyStrObject.data]
+    CSTRING rsi, "code"
+    call ap_strcmp
+    test eax, eax
+    jnz .not_code
+    mov rdi, rbx
+    lea rsi, [rel exc_SystemExit_type]
+    call exc_isinstance
+    test eax, eax
+    jnz .get_code
+.not_code:
 
     ; Check "value" (for StopIteration.value)
     lea rdi, [r12 + PyStrObject.data]
@@ -346,16 +518,38 @@ DEF_FUNC exc_getattr
     test eax, eax
     jz .get_value
 
-    ; Not found — try type dict (for user-defined exception subclass attrs)
-    mov rdi, [rbx + PyObject.ob_type]
-    mov rdi, [rdi + PyTypeObject.tp_dict]
+    ; The instance dict comes first: a class attribute used to shadow the
+    ; instance attribute of the same name, so `e.x = 2` then `e.x` read the
+    ; class default.
+    mov rdi, [rbx + PyExceptionObject.exc_dict]
     test rdi, rdi
-    jz .check_exc_dict
+    jz .eg_type_start
     mov rsi, r12
-    mov edx, TAG_PTR
     call dict_get
+    V_UNPACK rax, rdx
+    test edx, edx
+    jnz .found_in_dict
+.eg_type_start:
+
+    ; Then the type's MRO (for user-defined subclass attrs).  Only the exact
+    ; type's dict used to be consulted, so a method defined on an exception's
+    ; *base* was invisible.
+    mov r13, [rbx + PyObject.ob_type]   ; origin
+    mov r14, r13                        ; walker
+.eg_type_walk:
+    test r14, r14
+    jz .check_exc_dict
+    mov rdi, [r14 + PyTypeObject.tp_dict]
+    test rdi, rdi
+    jz .eg_type_next
+    mov rsi, r12
+    call dict_get
+    V_UNPACK rax, rdx           ; dict_get returns a Value
     test edx, edx
     jnz .found_in_type
+.eg_type_next:
+    MRO_NEXT r14, r13
+    jmp .eg_type_walk
 
 .check_exc_dict:
     ; Check exc_dict for custom instance attributes
@@ -363,27 +557,65 @@ DEF_FUNC exc_getattr
     test rdi, rdi
     jz .not_found
     mov rsi, r12
-    mov edx, TAG_PTR
     call dict_get
+    V_UNPACK rax, rdx           ; dict_get returns a Value
     test edx, edx
     jnz .found_in_dict
 
 .not_found:
     RET_NULL
+    pop r14
+    pop r13
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .found_in_dict:
     INCREF_VAL rax, rdx
+    pop r14
+    pop r13
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .found_in_type:
+    ; A plain function found on the class is a method and has to be bound;
+    ; returning it raw made exc.method() call it with no self.  Descriptors
+    ; are returned as they are, for LOAD_ATTR to unwrap.
+    cmp edx, TAG_PTR
+    jne .fit_raw
+    mov rcx, [rax + PyObject.ob_type]
+    extern func_type
+    lea rdx, [rel func_type]
+    cmp rcx, rdx
+    je .fit_bind
+    extern builtin_func_type
+    lea rdx, [rel builtin_func_type]
+    cmp rcx, rdx
+    je .fit_bind
+    mov edx, TAG_PTR
+.fit_raw:
     INCREF_VAL rax, rdx     ; tag-aware INCREF (rdx = tag from dict_get)
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    V_PACK rax, rdx             ; return one Value
+    ret
+
+.fit_bind:
+    mov rdi, rax
+    mov rsi, rbx
+    extern method_new
+    call method_new
+    mov edx, TAG_PTR
+    pop r14
+    pop r13
     pop r12
     pop rbx
     leave
@@ -395,18 +627,66 @@ DEF_FUNC exc_getattr
     jz .return_empty_tuple
     INCREF rax
     mov edx, TAG_PTR
+    pop r14
+    pop r13
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .return_empty_tuple:
     xor edi, edi
     call tuple_new
     mov edx, TAG_PTR
+    pop r14
+    pop r13
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
+    ret
+
+.get_code:
+    ; An explicit `e.code = x` wins; otherwise code is args[0] when there is
+    ; exactly one argument, the whole args tuple when there are more, and
+    ; None when there are none.
+    mov rdi, [rbx + PyExceptionObject.exc_dict]
+    test rdi, rdi
+    jz .code_from_args
+    mov rsi, r12
+    call dict_get
+    V_UNPACK rax, rdx
+    test edx, edx
+    jnz .found_in_dict
+.code_from_args:
+    mov rax, [rbx + PyExceptionObject.exc_args]
+    test rax, rax
+    jz .return_none
+    mov rcx, [rax + PyTupleObject.ob_size]
+    test rcx, rcx
+    jz .return_none
+    cmp rcx, 1
+    jne .code_tuple
+    mov rcx, [rax + PyTupleObject.ob_item]
+    mov rax, [rcx]
+    INCREF_V rax, rdx
+    mov edx, TAG_PTR
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+.code_tuple:
+    INCREF rax
+    mov edx, TAG_PTR
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .get_context:
@@ -415,6 +695,29 @@ DEF_FUNC exc_getattr
     jz .return_none
     INCREF rax
     mov edx, TAG_PTR
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    V_PACK rax, rdx             ; return one Value
+    ret
+
+.get_suppress:
+    mov rax, [rbx + PyExceptionObject.exc_suppress]
+    test rax, rax
+    jz .suppress_false
+    extern bool_true
+    lea rax, [rel bool_true]
+    jmp .suppress_ret
+.suppress_false:
+    extern bool_false
+    lea rax, [rel bool_false]
+.suppress_ret:
+    INCREF rax
+    mov edx, TAG_PTR
+    pop r14
+    pop r13
     pop r12
     pop rbx
     leave
@@ -426,9 +729,12 @@ DEF_FUNC exc_getattr
     jz .return_none
     INCREF rax
     mov edx, TAG_PTR
+    pop r14
+    pop r13
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .get_tb:
@@ -437,9 +743,12 @@ DEF_FUNC exc_getattr
     jz .return_none
     INCREF rax
     mov edx, TAG_PTR
+    pop r14
+    pop r13
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .get_value:
@@ -451,14 +760,16 @@ DEF_FUNC exc_getattr
     cmp qword [rax + PyTupleObject.ob_size], 0
     je .return_none
     ; Return args[0]
-    mov rcx, [rax + PyTupleObject.ob_item]       ; payloads
-    mov r8, [rax + PyTupleObject.ob_item_tags]   ; tags
-    mov rax, [rcx]                               ; payload
-    movzx edx, byte [r8]                         ; tag
-    INCREF_VAL rax, rdx
+    mov rcx, [rax + PyTupleObject.ob_item]
+    mov rax, [rcx]
+    INCREF_V rax, rdx
+    V_UNPACK rax, rdx
+    pop r14
+    pop r13
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .return_none:
@@ -466,9 +777,12 @@ DEF_FUNC exc_getattr
     lea rax, [rel none_singleton]
     INCREF rax
     mov edx, TAG_PTR
+    pop r14
+    pop r13
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 END_FUNC exc_getattr
 
@@ -493,11 +807,8 @@ DEF_FUNC exc_setattr
     pop rdx
     pop rsi
 .esa_have_dict:
-    ; dict_set(dict, key, value, value_tag, key_tag)
     mov rdi, [rbx + PyExceptionObject.exc_dict]
-    ; rsi = name (key), rdx = value already set
-    ; ecx = value_tag, r8d = key_tag (TAG_PTR for string name)
-    mov r8d, TAG_PTR
+    ; rsi = name and rdx = value are both already Values
     call dict_set
 
     xor eax, eax            ; return 0 (success)
@@ -514,24 +825,40 @@ END_FUNC exc_setattr
 extern tuple_type
 DEF_FUNC_BARE exc_isinstance
     ; rdi = exc, rsi = target type (or tuple of types)
-    ; Check if rsi is a tuple
+    ; The target is an arbitrary expression -- `except 5:` is legal syntax --
+    ; so classify it before dereferencing.  An immediate's payload is not an
+    ; address; this walked ob_type off it.  Putting the check here covers all
+    ; five callers and the recursion through nested tuples below.
+    V_TEST_PTR rsi, rax
+    ja .not_a_class
     mov rax, [rsi + PyObject.ob_type]
     lea rcx, [rel tuple_type]
     cmp rax, rcx
     je .tuple_match
 
-    ; Single type: walk tp_base chain
-    mov rax, [rdi + PyExceptionObject.ob_type]
-.walk:
-    test rax, rax
-    jz .not_match
-    cmp rax, rsi
-    je .match
-    mov rax, [rax + PyTypeObject.tp_base]
-    jmp .walk
-.match:
-    mov eax, 1
-    ret
+    ; A class is anything whose type is one of the three metatypes: the
+    ; builtin exception types carry exc_metatype, a `class E(Exception)`
+    ; heaptype carries user_type_metatype, and everything else type_type.
+    lea rcx, [rel exc_metatype]
+    cmp rax, rcx
+    je .is_class
+    lea rcx, [rel type_type]
+    cmp rax, rcx
+    je .is_class
+    extern user_type_metatype
+    lea rcx, [rel user_type_metatype]
+    cmp rax, rcx
+    jne .not_a_class
+
+.is_class:
+    ; Single type: the exception's MRO, so a class with several bases is
+    ; caught by an `except` naming any of them.
+    mov rdi, [rdi + PyExceptionObject.ob_type]
+    jmp type_is_subtype
+.not_a_class:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "catching classes that do not inherit from BaseException is not allowed"
+    call raise_exception
 .not_match:
     xor eax, eax
     ret
@@ -579,6 +906,7 @@ global type_is_exc_subclass
 DEF_FUNC_BARE type_is_exc_subclass
     lea rdx, [rel exc_dealloc]
     lea rcx, [rel eg_dealloc]
+    mov r10, rdi                    ; origin of the walk
 .tie_walk:
     test rdi, rdi
     jz .tie_no
@@ -587,7 +915,13 @@ DEF_FUNC_BARE type_is_exc_subclass
     je .tie_yes
     cmp rax, rcx
     je .tie_yes
-    mov rdi, [rdi + PyTypeObject.tp_base]
+    push r10
+    mov rsi, rdi
+    mov rdi, r10
+    extern type_mro_next
+    call type_mro_next
+    pop r10
+    mov rdi, rax
     jmp .tie_walk
 .tie_yes:
     mov eax, 1
@@ -622,25 +956,29 @@ DEF_FUNC exc_type_call, ETC_FRAME
     mov [rbp - ETC_ARGS], rsi
     mov [rbp - ETC_NARGS], rdx
 
-    ; Check if the type has its own tp_call (e.g., ExceptionGroup)
-    mov rax, [rbx + PyTypeObject.tp_call]
+    ; Check if the type has its own constructor (e.g., ExceptionGroup).
+    ; It lives in tp_new; tp_call would make instances callable.
+    mov rax, [rbx + PyTypeObject.tp_new]
     test rax, rax
     jz .default_exc_create
-    ; Delegate to type's own tp_call
+    ; Delegate to the type's own constructor, which still returns a fat pair
     mov rdi, rbx
     mov rsi, [rbp - ETC_ARGS]
     mov rdx, [rbp - ETC_NARGS]
     pop r12
     pop rbx
     leave
-    jmp rax
+    sub rsp, 8                  ; keep the callee's rsp 16-byte aligned
+    call rax
+    add rsp, 8
+    V_PACK rax, rdx
+    ret
 
 .default_exc_create:
     ; Get message from args[0] if nargs >= 1
     test edx, edx
     jz .no_args
-    mov rdx, [rsi + 8]      ; rdx = args[0] tag
-    mov rsi, [rsi]           ; rsi = args[0] (message payload)
+    mov rsi, [rsi]           ; args[0] is already the message Value
     jmp .create
 .no_args:
     xor esi, esi             ; msg = NULL (no message)
@@ -669,14 +1007,11 @@ DEF_FUNC exc_type_call, ETC_FRAME
     cmp rdx, rcx
     jge .replace_args
     mov rcx, rdx
-    shl rcx, 4                    ; source index * 16 (args at 16B stride)
-    mov rdi, [rsi + rcx]          ; payload
-    mov r8, [rsi + rcx + 8]       ; tag
-    INCREF_VAL rdi, r8
-    mov r9, [r12 + PyTupleObject.ob_item]       ; payloads
-    mov r10, [r12 + PyTupleObject.ob_item_tags] ; tags
-    mov [r9 + rdx*8], rdi
-    mov byte [r10 + rdx], r8b
+    shl rcx, 3                    ; one Value per arg slot
+    mov rdi, [rsi + rcx]          ; the argument Value
+    INCREF_V rdi, r8
+    mov r9, [r12 + PyTupleObject.ob_item]
+    mov [r9 + rdx * 8], rdi
     inc rdx
     jmp .copy_args
 .replace_args:
@@ -699,6 +1034,7 @@ DEF_FUNC exc_type_call, ETC_FRAME
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; tp_call returns one Value
     ret
 END_FUNC exc_type_call
 
@@ -717,6 +1053,8 @@ DEF_FUNC traceback_new
     mov [rax + PyTracebackObject.ob_type], rcx
     mov qword [rax + PyTracebackObject.tb_next], 0
     mov qword [rax + PyTracebackObject.tb_lineno], 0
+    mov qword [rax + PyTracebackObject.tb_code], 0
+    mov qword [rax + PyTracebackObject.tb_lasti], 0
     leave
     ret
 END_FUNC traceback_new
@@ -726,14 +1064,29 @@ END_FUNC traceback_new
 global traceback_dealloc
 DEF_FUNC traceback_dealloc
     push rbx
+    push r12
     mov rbx, rdi
-    mov rdi, [rbx + PyTracebackObject.tb_next]
+.td_node:
+    ; Iterative, not recursive: a traceback chain is as deep as the call
+    ; stack was, and freeing it recursively would overflow on exactly the
+    ; deep-recursion case that produced it.
+    mov rdi, [rbx + PyTracebackObject.tb_code]
     test rdi, rdi
-    jz .no_next
+    jz .td_no_code
+    mov qword [rbx + PyTracebackObject.tb_code], 0
     call obj_decref
-.no_next:
+.td_no_code:
+    mov r12, [rbx + PyTracebackObject.tb_next]
     mov rdi, rbx
     call ap_free
+    test r12, r12
+    jz .td_done
+    dec qword [r12 + PyTracebackObject.ob_refcnt]
+    jnz .td_done                   ; still referenced elsewhere
+    mov rbx, r12
+    jmp .td_node
+.td_done:
+    pop r12
     pop rbx
     leave
     ret
@@ -775,6 +1128,7 @@ DEF_FUNC traceback_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .tb_get_lineno:
@@ -783,6 +1137,7 @@ DEF_FUNC traceback_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .tb_get_next:
@@ -794,6 +1149,7 @@ DEF_FUNC traceback_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 
 .tb_return_none:
@@ -803,6 +1159,7 @@ DEF_FUNC traceback_getattr
     pop r12
     pop rbx
     leave
+    V_PACK rax, rdx             ; return one Value
     ret
 END_FUNC traceback_getattr
 
@@ -906,6 +1263,7 @@ exc_metatype:
     dq 0                    ; tp_bases
     dq 0                    ; tp_traverse
     dq 0                    ; tp_clear
+    dq 0 ; tp_dictoffset
 
 exc_meta_name: db "exception_metatype", 0
 
@@ -939,6 +1297,7 @@ traceback_type:
     dq 0                    ; tp_bases
     dq 0                        ; tp_traverse
     dq 0                        ; tp_clear
+    dq 0 ; tp_dictoffset
 tb_type_name: db "traceback", 0
 
 ; Macro to define an exception type singleton
@@ -973,6 +1332,7 @@ global %1
     dq 0                    ; tp_bases
     dq exc_traverse         ; tp_traverse
     dq exc_clear_gc         ; tp_clear
+    dq 0         ; tp_dictoffset
 %endmacro
 
 ; Define all exception types

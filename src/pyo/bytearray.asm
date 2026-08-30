@@ -14,6 +14,7 @@ extern type_type
 extern raise_exception
 extern exc_TypeError_type
 extern bytes_type
+extern bytearray_repr
 
 section .text
 
@@ -31,8 +32,8 @@ DEF_FUNC bytearray_type_call, BA_FRAME
     jne .ba_error
     mov rdi, [rsi]                     ; arg0 payload
     ; Must be a bytes object
-    cmp qword [rsi + 8], TAG_SMALLINT
-    je .ba_error                       ; SmallInt → error
+    V_TEST_PTR_M [rsi], r11     ; a float is not an int immediate either, and
+    ja .ba_error                ; its payload is raw f64 bits, not an address
     mov rax, [rdi + PyObject.ob_type]
     lea rcx, [rel bytes_type]
     cmp rax, rcx
@@ -135,8 +136,8 @@ bytearray_type:
     dq ba_name_str                  ; tp_name
     dq PyByteArrayObject.data       ; tp_basicsize
     dq bytearray_dealloc            ; tp_dealloc
-    dq 0                            ; tp_repr
-    dq 0                            ; tp_str
+    dq bytearray_repr               ; tp_repr
+    dq bytearray_repr               ; tp_str
     dq 0                            ; tp_hash
     dq 0                            ; tp_call (set by add_builtin_type)
     dq 0                            ; tp_getattr
@@ -156,3 +157,4 @@ bytearray_type:
     dq 0                            ; tp_bases
     dq 0                        ; tp_traverse
     dq 0                        ; tp_clear
+    dq 0 ; tp_dictoffset
