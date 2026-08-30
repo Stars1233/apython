@@ -5,6 +5,7 @@
 %include "object.inc"
 %include "types.inc"
 %include "frame.inc"
+%include "opcodes.inc"
 
 extern none_singleton
 extern ap_malloc
@@ -26,9 +27,6 @@ extern func_clear
 extern exc_TypeError_type
 extern raise_exception
 
-; CO_FLAGS
-CO_VARARGS equ 0x04
-CO_VARKEYWORDS equ 0x08
 
 ; ---------------------------------------------------------------------------
 ; func_new(PyCodeObject *code, PyObject *globals) -> PyFuncObject*

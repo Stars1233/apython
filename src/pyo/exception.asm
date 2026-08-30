@@ -1203,6 +1203,8 @@ exc_name_TimeoutError:      db "TimeoutError", 0
 exc_name_GeneratorExit:     db "GeneratorExit", 0
 exc_name_ModuleNotFoundError: db "ModuleNotFoundError", 0
 exc_name_SyntaxError:       db "SyntaxError", 0
+exc_name_IndentationError:  db "IndentationError", 0
+exc_name_TabError:          db "TabError", 0
 exc_name_EOFError:          db "EOFError", 0
 exc_name_UnicodeDecodeError: db "UnicodeDecodeError", 0
 exc_name_UnicodeEncodeError: db "UnicodeEncodeError", 0
@@ -1371,6 +1373,8 @@ DEF_EXC_TYPE exc_TimeoutError_type, exc_name_TimeoutError, exc_Exception_type
 DEF_EXC_TYPE exc_GeneratorExit_type, exc_name_GeneratorExit, exc_BaseException_type
 DEF_EXC_TYPE exc_ModuleNotFoundError_type, exc_name_ModuleNotFoundError, exc_ImportError_type
 DEF_EXC_TYPE exc_SyntaxError_type, exc_name_SyntaxError, exc_Exception_type
+DEF_EXC_TYPE exc_IndentationError_type, exc_name_IndentationError, exc_SyntaxError_type
+DEF_EXC_TYPE exc_TabError_type, exc_name_TabError, exc_IndentationError_type
 DEF_EXC_TYPE exc_EOFError_type, exc_name_EOFError, exc_Exception_type
 DEF_EXC_TYPE exc_UnicodeDecodeError_type, exc_name_UnicodeDecodeError, exc_UnicodeError_type
 DEF_EXC_TYPE exc_UnicodeEncodeError_type, exc_name_UnicodeEncodeError, exc_UnicodeError_type

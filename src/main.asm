@@ -10,6 +10,7 @@
 extern bool_init
 extern ap_strcmp
 extern value_selftest_main
+extern compile_selftest_main
 extern builtins_init
 extern methods_init
 extern import_init
@@ -86,6 +87,23 @@ DEF_FUNC main
     leave
     ret
 .not_selftest:
+
+    ; Check for --selftest-compile flag (source compiler self-test)
+    mov rdi, [r15 + 8]          ; rdi = argv[1]
+    lea rsi, [rel selftest_compile_flag]
+    call ap_strcmp
+    test eax, eax
+    jne .not_selftest_compile
+    call bool_init
+    call compile_selftest_main
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+.not_selftest_compile:
 
     ; Check for -t flag (opcode tracing)
     mov rax, [r15 + 8]         ; rax = argv[1]
@@ -376,6 +394,7 @@ END_FUNC main
 
 section .rodata
 selftest_flag: db "--selftest-value", 0
+selftest_compile_flag: db "--selftest-compile", 0
 version_msg: db "apython ", VERSION_STR, 10
 version_msg_len equ $ - version_msg
 __name__cstr: db "__name__", 0

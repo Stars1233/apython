@@ -16,6 +16,11 @@ make check-cpython # CPython stdlib unit tests (harder, more thorough)
 make check-stdlib # how much of a CPython 3.12 Lib/ imports; a ratchet
 ```
 
+```bash
+./apython --selftest-compile   # source-compiler invariants and tokenizer
+python3 compiler/lint.py       # static checks over compiler/*.asm
+```
+
 **Always run BOTH `make check` AND `make check-cpython` to verify changes.**
 
 `make check-stdlib` needs a CPython source checkout; point `$CPYTHON_LIB` at
@@ -122,7 +127,49 @@ and at the boundaries between converted and unconverted code.
 - `src/frame.asm` — Frame alloc/dealloc
 - `src/object.asm` — Base PyObject ops (alloc, refcount, dealloc, `obj_richcompare_bool`)
 - `src/lib/` — Syscall wrappers, string/memory ops (replace libc)
+- `compiler/` — The Python **source** compiler (see below)
 - `include/` — Struct definitions (.inc): object, types, frame, opcodes, macros, marshal, builtins, errcodes
+
+## Source Compiler (`compiler/`)
+
+Turns Python 3.12 source into a `PyCodeObject` that this interpreter runs.
+Reached through `eval()` and `compile(src, file, "eval")`.
+
+| file | role |
+|------|------|
+| `compiler.inc` | token kinds, AST kinds, `Buf`/`Arena`/`Comp`/`CompUnit`/`Instr` |
+| `tables.asm` | **generated** — char classes, keywords, operators, opcode metadata |
+| `gen_tables.py` | regenerates `tables.asm` from CPython 3.12's `opcode`/`dis` |
+| `arena.asm` | growable `Buf` and bump `Arena` (the tree has neither otherwise) |
+| `lex.asm` | tokenizer: indentation, operators, names, numbers, strings |
+| `ast.asm` | 32-byte nodes in a `Buf`, addressed by u32 index |
+| `parse.asm` | Pratt expression parser + `prule_table`, the precedence grammar |
+| `codegen.asm` | AST kind → emitter jump table |
+| `assemble.asm` | EXTENDED_ARG fixpoint, stack depth, line table, byte emission |
+| `compile.asm` | pipeline driver and lifetime |
+| `evalexec.asm` | the `eval()` and `compile()` builtins |
+| `comperr.asm` | error recording |
+| `comptest.asm` | `--selftest-compile` |
+| `lint.py` | static checks, run by `make check` |
+
+**Never call `raise_exception` from `compiler/`.** It tail-jumps into
+`eval_exception_unwind`, which calls `fatal_error` when there is no live
+interpreter frame — and `./apython foo.py` will compile before any frame
+exists. Record the error with `comp_error()` and return 0/NULL; the driver
+turns it into a pending exception after every buffer is freed.
+
+`op_meta` in `tables.asm` is the keystone: one row per opcode drives CACHE
+padding, instruction sizing, stack-depth accounting and successor computation.
+Because every emission routes through it, a forgotten CACHE is not a mistake an
+emitter can make. Its numbers are CPython's, taken from the running
+interpreter's own modules rather than transcribed.
+
+Regenerate with `python3 compiler/gen_tables.py > compiler/tables.asm`; the
+output is committed, so building never needs Python.
+
+**Gates:** `./apython --selftest-compile` (Buf/Arena invariants, and the
+tokenizer against baked-in token sequences), `python3 compiler/lint.py`, and
+`tests/test_compile_expr.py`. All three run inside `make check`.
 
 ## Key Structs
 
@@ -191,6 +238,19 @@ Opcodes have trailing CACHE words that must be skipped. Key counts (each = 2 byt
 - **`current_exception` is also the exception *being handled*.** It stays set for the length of an `except` block, so `cmp qword [rel current_exception], 0` cannot mean "did that call raise?". Snapshot it before the call and compare (`DUNDER_EXC_SAVE` / `DUNDER_RAISED`), or a loop inside a handler re-raises what the handler caught.
 - **Following `tp_base` to resolve an attribute or answer a subclass question.** With multiple inheritance the answer lives on the MRO: use `MRO_NEXT walker, origin` (or `type_is_subtype`), keeping the type the search *started from* as the origin. A static type has no `tp_mro`, and for it `MRO_NEXT` still yields `tp_base`, so single-inheritance code reads the same.
 - **Writing through an inherited method table.** `type_from_parts` gives a builtin subclass its base's `tp_as_number` / `tp_as_sequence` / `tp_as_mapping` *pointer*. Writing a slot through it patches the builtin's own static table for the whole process; `slot_ensure_table` copies first. The same shape applies to anything else inherited by pointer.
+- **A 64-bit read of a 4-byte struct field.** `mov rdx, [rsi + Token.len]`
+  assembles fine and silently ORs in the next field as the high half; here it
+  produced a multi-gigabyte `ap_memcpy`. Use the 32-bit form (`mov edx`), which
+  zero-extends. `compiler/lint.py` checks this.
+- **A call made with `rsp` misaligned.** After `DEF_FUNC`'s `push rbp`, a
+  `sub rsp, N` and P register pushes, the SysV ABI wants `(N + 8*P) % 16 == 0`.
+  Much of `src/` predates this and violates it harmlessly, but the compiler
+  calls `strtod`, and glibc's float paths do use aligned SSE. `compiler/lint.py`
+  checks it; pad the frame rather than the push list.
+- **A frame slot overlapping a struct in the same frame.** A hand-picked
+  `equ` for a large struct silently overlaps the scalar slots above it the
+  first time the struct grows, and the symptom is one field reading as garbage.
+  Derive the offset instead: `CS_UNIT equ 48 + CompUnit_size`.
 - **A removed load whose guard stayed.** The `(payload, tag)` conversion deleted many `key_tag` loads; where the `test`/`jz` that used them was left in place it now reads a stale register — `from mod import *` and `dict.popitem()` both failed this way, silently. When deleting a load, delete its test.
 
 ## Adding a New Test

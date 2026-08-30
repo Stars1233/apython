@@ -3148,53 +3148,10 @@ DEF_FUNC builtin_dir, DIR_FRAME
     call raise_exception
 END_FUNC builtin_dir
 
-; ============================================================================
-; builtin_eval_fn(args, nargs) - restricted literal evaluator
-; Only evaluates integer literals (for test_int.py compatibility)
-; ============================================================================
-global builtin_eval_fn
-DEF_FUNC builtin_eval_fn
-    cmp rsi, 1
-    jne .evl_error
+; builtin_eval_fn used to live here: a stub that parsed a single integer
+; literal and raised ValueError for anything else.  It is now a real
+; evaluator in compiler/evalexec.asm, backed by the source compiler.
 
-    ; Get the string argument
-    V_TEST_INT_M [rdi], r11      ; args[0] an int immediate?
-    jae .evl_type_error
-    mov rdi, [rdi]                     ; args[0] payload
-    mov rax, [rdi + PyObject.ob_type]
-    lea rcx, [rel str_type]
-    cmp rax, rcx
-    jne .evl_type_error
-
-    ; Try parsing as integer literal with base 0 (auto-detect)
-    lea rdi, [rdi + PyStrObject.data]
-    xor esi, esi                ; base 0 = auto-detect
-    call int_from_cstr_base
-    test edx, edx            ; check tag (not payload — SmallInt 0 is valid)
-    jnz .evl_done
-
-    ; Parse failed — raise SyntaxError
-    lea rdi, [rel exc_ValueError_type]
-    CSTRING rsi, "invalid syntax"
-    call raise_exception
-
-.evl_done:
-    ; Classify: SmallInt (bit63) or heap ptr
-    ; rdx = tag already set by callee
-    leave
-    V_PACK rax, rdx             ; builtins return one Value
-    ret
-
-.evl_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "eval() takes exactly 1 argument"
-    call raise_exception
-
-.evl_type_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "eval() arg 1 must be a string"
-    call raise_exception
-END_FUNC builtin_eval_fn
 
 ; ============================================================================
 ; builtin_round_fn(args, nargs) - round(number[, ndigits])

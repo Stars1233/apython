@@ -3069,6 +3069,18 @@ DEF_FUNC builtins_init
     lea rdx, [rel exc_SyntaxError_type]
     call add_exc_type_builtin
 
+    extern exc_IndentationError_type
+    mov rdi, rbx
+    lea rsi, [rel bi_name_IndentationError]
+    lea rdx, [rel exc_IndentationError_type]
+    call add_exc_type_builtin
+
+    extern exc_TabError_type
+    mov rdi, rbx
+    lea rsi, [rel bi_name_TabError]
+    lea rdx, [rel exc_TabError_type]
+    call add_exc_type_builtin
+
     extern exc_EOFError_type
     mov rdi, rbx
     lea rsi, [rel bi_name_EOFError]
@@ -3284,6 +3296,13 @@ DEF_FUNC builtins_init
     lea rdx, [rel builtin_eval_fn]
     call add_builtin
 
+    ; compile
+    mov rdi, rbx
+    lea rsi, [rel bi_name_compile]
+    extern builtin_compile_fn
+    lea rdx, [rel builtin_compile_fn]
+    call add_builtin
+
     ; round
     mov rdi, rbx
     lea rsi, [rel bi_name_round]
@@ -3489,6 +3508,7 @@ bi_name_globals:      db "globals", 0
 bi_name_locals:       db "locals", 0
 bi_name_dir:          db "dir", 0
 bi_name_eval:         db "eval", 0
+bi_name_compile:      db "compile", 0
 bi_name_super:        db "super", 0
 bi_name_staticmethod: db "staticmethod", 0
 bi_name_classmethod:  db "classmethod", 0
@@ -3532,6 +3552,8 @@ bi_name_TimeoutError:      db "TimeoutError", 0
 bi_name_GeneratorExit:     db "GeneratorExit", 0
 bi_name_ModuleNotFoundError: db "ModuleNotFoundError", 0
 bi_name_SyntaxError:       db "SyntaxError", 0
+bi_name_IndentationError:  db "IndentationError", 0
+bi_name_TabError:          db "TabError", 0
 bi_name_EOFError:          db "EOFError", 0
 bi_name_UnicodeDecodeError: db "UnicodeDecodeError", 0
 bi_name_UnicodeEncodeError: db "UnicodeEncodeError", 0

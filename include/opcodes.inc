@@ -176,10 +176,24 @@ MAKE_FUNC_KWDEFAULTS equ 0x02
 MAKE_FUNC_ANNOTATIONS equ 0x04
 MAKE_FUNC_CLOSURE   equ 0x08
 
-; co_flags constants (CPython 3.12)
+; co_flags constants (CPython 3.12).  CO_VARARGS and CO_VARKEYWORDS used to be
+; defined privately in src/pyo/func.asm; the compiler has to set them, and two
+; independent definitions of the same constant is how a silent one-slot argument
+; offset gets introduced.  One definition, here.
+CO_OPTIMIZED        equ 0x01
+CO_NEWLOCALS        equ 0x02
+CO_VARARGS          equ 0x04
+CO_VARKEYWORDS      equ 0x08
+CO_NESTED           equ 0x10
 CO_GENERATOR        equ 0x20
 CO_COROUTINE        equ 0x80
-CO_ASYNC_GENERATOR  equ 0x200
 CO_ITERABLE_COROUTINE equ 0x100
+CO_ASYNC_GENERATOR  equ 0x200
+
+; co_localspluskinds bytes.  apython never reads this field, but emitting it
+; correctly costs nothing and keeps introspection honest if it is ever wired up.
+CO_FAST_LOCAL       equ 0x20
+CO_FAST_CELL        equ 0x40
+CO_FAST_FREE        equ 0x80
 
 %endif ; OPCODES_INC

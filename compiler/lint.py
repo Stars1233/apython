@@ -1,0 +1,102 @@
+#!/usr/bin/env python3
+"""Static checks over compiler/*.asm for two bug classes that are invisible
+at assembly time and expensive to find at runtime.
+
+Both of these actually bit during development, which is why they are checked:
+
+  1. Reading a 4-byte struct field with a 64-bit `mov`.  NASM assembles it
+     happily; it silently picks up the next field as the high half.  A
+     `mov rdx, [rsi + Token.len]` read the length OR'd with the column, and
+     turned into a multi-gigabyte memcpy.
+
+  2. A call made with rsp not 16-byte aligned.  The SysV ABI requires it and
+     glibc's floating-point paths (strtod, which the number scanner uses) do
+     use aligned SSE stores.  After DEF_FUNC's `push rbp`, `sub rsp, N` and P
+     register pushes, alignment holds when (N + 8*P) is a multiple of 16.
+
+Run standalone, or as part of `make check`.
+"""
+import re, sys, glob, os
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+R64 = (r'\b(?:rax|rbx|rcx|rdx|rsi|rdi|rbp|rsp|r8|r9|r10|r11|r12|r13|r14|r15)\b')
+
+def dword_fields(paths):
+    """Struct fields declared `resd 1`, as "Struct.field"."""
+    out = set()
+    for p in paths:
+        src = open(p).read()
+        for m in re.finditer(r'struc\s+(\w+)(.*?)endstruc', src, re.S):
+            st, body = m.group(1), m.group(2)
+            for f in re.finditer(r'^\s*\.(\w+):\s*resd\s+1\s*(?:;.*)?$', body, re.M):
+                out.add("%s.%s" % (st, f.group(1)))
+    return out
+
+def check_field_widths(files, fields):
+    bad = []
+    for path in files:
+        for n, line in enumerate(open(path), 1):
+            code = line.split(';')[0]
+            m = re.match(r'\s*(?:mov|add|sub|or|and|cmp|test)\s+(%s)\s*,\s*\[([^\]]+)\]' % R64, code)
+            if not m:
+                continue
+            for fld in fields:
+                if re.search(r'\b%s\b' % re.escape(fld), m.group(2)):
+                    bad.append((path, n, "64-bit read of 4-byte field %s" % fld, code.strip()))
+    return bad
+
+def check_alignment(files):
+    bad = []
+    for path in files:
+        src = open(path).read()
+        for m in re.finditer(r'^(DEF_FUNC(?:_LOCAL)?)\s+(\w+)(?:\s*,\s*([^\s;]+))?\s*(?:;.*)?$(.*?)^END_FUNC',
+                             src, re.M | re.S):
+            name, frame, body = m.group(2), m.group(3), m.group(4)
+            if not re.search(r'^\s*call\s', body, re.M):
+                continue
+            n = 0
+            if frame:
+                if frame.isdigit():
+                    n = int(frame)
+                else:
+                    e = re.search(r'^%s\s+equ\s+(.+?)\s*(?:;.*)?$' % re.escape(frame), src, re.M)
+                    if not e:
+                        continue                    # defined elsewhere; skip
+                    expr = e.group(1)
+                    try:
+                        n = eval(expr, {"__builtins__": {}}, {})   # plain arithmetic only
+                    except Exception:
+                        continue                    # symbolic (struct sizes); skip
+            # Count pushes before the first non-push instruction.
+            p = 0
+            for line in body.strip().splitlines():
+                s = line.split(';')[0].strip()
+                if not s:
+                    continue
+                if s.startswith('push '):
+                    p += 1
+                else:
+                    break
+            if (n + 8 * p) % 16:
+                bad.append((path, 0,
+                            "rsp misaligned at calls in %s (frame %d + %d pushes)" % (name, n, p),
+                            "make the frame %d bytes" % (n + (16 - (n + 8 * p) % 16))))
+    return bad
+
+def main():
+    os.chdir(ROOT)
+    files = sorted(glob.glob('compiler/*.asm'))
+    fields = dword_fields(['compiler/compiler.inc', 'include/object.inc',
+                           'include/frame.inc', 'include/types.inc'])
+    problems = check_field_widths(files, fields) + check_alignment(files)
+    for path, n, what, detail in problems:
+        where = "%s:%d" % (path, n) if n else path
+        print("%s: %s\n    %s" % (where, what, detail))
+    if problems:
+        print("\n%d problem(s)" % len(problems))
+        return 1
+    print("compiler lint: ok (%d files, %d dword fields checked)" % (len(files), len(fields)))
+    return 0
+
+if __name__ == '__main__':
+    sys.exit(main())
