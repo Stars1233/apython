@@ -2859,7 +2859,9 @@ END_FUNC par_peek_second_is_for
 ;; ============================================================================
 PY_LINE  equ 8
 PY_KIND  equ 16
-PY_FRAME equ 24          ; + 1 push = 32
+PY_FIRST equ 24
+PY_MARK  equ 32
+PY_FRAME equ 40          ; + 1 push = 48
 DEF_FUNC_LOCAL pf_yield, PY_FRAME
     push rbx
     mov rbx, rdi
@@ -2902,7 +2904,62 @@ DEF_FUNC_LOCAL pf_yield, PY_FRAME
     call par_expr
     test rax, rax
     jz .fail
-    mov r8, rax
+    mov [rbp - PY_FIRST], rax
+
+    ; `yield a, b` yields the tuple, the way a bare `a, b` builds one.
+    mov rdi, rbx
+    call par_kind
+    cmp eax, TOK_COMMA
+    jne .one
+    mov rdi, rbx
+    call ast_mark
+    mov [rbp - PY_MARK], rax
+    mov rdi, rbx
+    mov rsi, [rbp - PY_FIRST]
+    call ast_push
+.tuple_loop:
+    mov rdi, rbx
+    call par_advance                    ; the comma
+    mov rdi, rbx
+    call par_kind
+    ; A trailing comma ends it: `yield 1,` is a one-tuple.
+    cmp eax, TOK_NEWLINE
+    je .tuple_done
+    cmp eax, TOK_ENDMARKER
+    je .tuple_done
+    cmp eax, TOK_SEMI
+    je .tuple_done
+    cmp eax, TOK_RPAR
+    je .tuple_done
+    cmp eax, TOK_RSQB
+    je .tuple_done
+    cmp eax, TOK_RBRACE
+    je .tuple_done
+    cmp eax, TOK_DEDENT
+    je .tuple_done
+    mov rdi, rbx
+    mov esi, BP_WALRUS
+    call par_expr
+    test rax, rax
+    jz .fail
+    mov rdi, rbx
+    mov rsi, rax
+    call ast_push
+    mov rdi, rbx
+    call par_kind
+    cmp eax, TOK_COMMA
+    je .tuple_loop
+.tuple_done:
+    mov rdi, rbx
+    mov esi, AST_TUPLE
+    mov rdx, [rbp - PY_LINE]
+    mov rcx, [rbp - PY_MARK]
+    call par_finish_list
+    test rax, rax
+    jz .fail
+    mov [rbp - PY_FIRST], rax
+.one:
+    mov r8, [rbp - PY_FIRST]
     jmp .build
 .bare:
     xor r8d, r8d

@@ -155,6 +155,7 @@ test_slice_and_star_args
 test_slice_assign
 test_slicing
 test_slots
+test_smallint_identity
 test_smallstr_builtins
 test_smallstr_classes
 test_smallstr_edge
