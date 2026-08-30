@@ -185,7 +185,21 @@ DEF_FUNC gen_iternext
 
     ; Resume execution
     mov rdi, r12
+    ; A generator is its own execution context: an exception it is in the
+    ; middle of handling must not leak into the caller.  PUSH_EXC_INFO sets
+    ; current_exception and POP_EXCEPT clears it, but a generator that yields
+    ; from inside an except block never reaches its POP_EXCEPT -- so the
+    ; caller was left with the exception still pending, and the interpreter
+    ; reported it at exit.  Its own POP_EXCEPT restores from the value stack
+    ; when it resumes, so nothing is lost by putting the caller's back.
+    push rax
+    mov rax, [rel current_exception]
+    push rax
+    mov qword [rel current_exception], 0
     call eval_frame
+    pop rcx
+    mov [rel current_exception], rcx
+    add rsp, 8
     V_UNPACK rax, rdx           ; eval_frame returns a Value
     ; rax = yielded/returned value payload, rdx = tag
 
@@ -319,7 +333,21 @@ DEF_FUNC ags_iternext
 
     ; Resume execution of the async generator
     mov rdi, [r12 + PyGenObject.gi_frame]
+    ; A generator is its own execution context: an exception it is in the
+    ; middle of handling must not leak into the caller.  PUSH_EXC_INFO sets
+    ; current_exception and POP_EXCEPT clears it, but a generator that yields
+    ; from inside an except block never reaches its POP_EXCEPT -- so the
+    ; caller was left with the exception still pending, and the interpreter
+    ; reported it at exit.  Its own POP_EXCEPT restores from the value stack
+    ; when it resumes, so nothing is lost by putting the caller's back.
+    push rax
+    mov rax, [rel current_exception]
+    push rax
+    mov qword [rel current_exception], 0
     call eval_frame
+    pop rcx
+    mov [rel current_exception], rcx
+    add rsp, 8
     V_UNPACK rax, rdx           ; eval_frame returns a Value
     ; rax = result payload, rdx = result tag
     push rax
@@ -568,7 +596,21 @@ DEF_FUNC gen_send
 
     ; Resume execution
     mov rdi, r12
+    ; A generator is its own execution context: an exception it is in the
+    ; middle of handling must not leak into the caller.  PUSH_EXC_INFO sets
+    ; current_exception and POP_EXCEPT clears it, but a generator that yields
+    ; from inside an except block never reaches its POP_EXCEPT -- so the
+    ; caller was left with the exception still pending, and the interpreter
+    ; reported it at exit.  Its own POP_EXCEPT restores from the value stack
+    ; when it resumes, so nothing is lost by putting the caller's back.
+    push rax
+    mov rax, [rel current_exception]
+    push rax
+    mov qword [rel current_exception], 0
     call eval_frame
+    pop rcx
+    mov [rel current_exception], rcx
+    add rsp, 8
     V_UNPACK rax, rdx           ; eval_frame returns a Value
     mov r12, rax               ; save return value payload
     mov r13, rdx               ; save return value tag (sent value no longer needed)
@@ -642,7 +684,8 @@ END_FUNC gen_send
 ;; ============================================================================
 GT_GEN   equ 8
 GT_EXC   equ 16
-GT_FRAME equ 16
+GT_SAVED_EXC equ 24    ; the caller's pending exception, put aside
+GT_FRAME equ 32
 DEF_FUNC gen_throw, GT_FRAME
     push rbx
     push r12
@@ -663,21 +706,43 @@ DEF_FUNC gen_throw, GT_FRAME
     ; Mark as running
     mov qword [rbx + PyGenObject.gi_running], 1
 
-    ; Create exception and set as current_exception
-    ; XDECREF any pre-existing current_exception first
-    mov rdi, [rel current_exception]
-    test rdi, rdi
-    jz .gt_no_prev_exc
-    push r12
-    push r13
-    call obj_decref
-    pop r13
-    pop r12
-.gt_no_prev_exc:
+    ; Set the thrown exception as current.  The caller's is put aside rather
+    ; than released: it belongs to the caller, and DECREFing it here freed an
+    ; exception that was still being handled out there.
+    mov rax, [rel current_exception]
+    mov [rbp - GT_SAVED_EXC], rax
+    ; throw() takes either an exception class or an already-built instance.
+    ; This always called exc_new on it, so g.throw(ValueError("x")) built an
+    ; exception whose type was the *instance* -- and `except ValueError`
+    ; inside the generator never matched, so every throw came back out as a
+    ; re-raise.
+    mov rax, [r12 + PyObject.ob_type]
+    extern exc_metatype
+    lea rcx, [rel exc_metatype]
+    cmp rax, rcx
+    je .gt_from_class
+    extern user_type_metatype
+    lea rcx, [rel user_type_metatype]
+    cmp rax, rcx
+    je .gt_from_class
+    extern type_type
+    lea rcx, [rel type_type]
+    cmp rax, rcx
+    je .gt_from_class
+
+    ; Already an instance: take a reference and use it as-is.
+    mov rdi, r12
+    call obj_incref
+    mov rax, r12
+    jmp .gt_have_exc
+
+.gt_from_class:
     mov rdi, r12               ; exc_type
     xor esi, esi               ; no message
     xor edx, edx               ; TAG_NULL
     call exc_new
+
+.gt_have_exc:
     mov [rel current_exception], rax
 
     ; Push dummy value onto frame stack (eval_frame expects TOS after YIELD_VALUE)
@@ -695,6 +760,9 @@ DEF_FUNC gen_throw, GT_FRAME
 
     ; Resume execution — eval_frame will see throw_pending and unwind
     mov rdi, r13
+    ; The exception being thrown is handed in through current_exception, so
+    ; it must survive the resume; the caller's was put aside above and goes
+    ; back below, once it is known whether the generator handled it.
     call eval_frame
     V_UNPACK rax, rdx           ; eval_frame returns a Value
     mov r12, rax               ; save result payload
@@ -708,7 +776,18 @@ DEF_FUNC gen_throw, GT_FRAME
     cmp qword [rdi + PyFrame.instr_ptr], 0
     jne .gt_yielded
 
+    ; Exhausted.  If something is still pending, the generator did not
+    ; handle the throw and it propagates -- which is what CPython does, and
+    ; raising StopIteration over the top of it freed it twice.  Otherwise
+    ; the caller's own pending exception goes back.
+    cmp qword [rel current_exception], 0
+    jne .gt_exhausted_propagating
+    mov rcx, [rbp - GT_SAVED_EXC]
+    mov [rel current_exception], rcx
+.gt_exhausted_propagating:
+
     ; Exhausted: free frame
+    mov rdi, [rbx + PyGenObject.gi_frame]
     call frame_free
     mov qword [rbx + PyGenObject.gi_frame], 0
     V_PACK r12, r13
@@ -723,6 +802,12 @@ DEF_FUNC gen_throw, GT_FRAME
     ret
 
 .gt_yielded:
+    ; The generator is suspended, perhaps inside an except block where
+    ; PUSH_EXC_INFO has set current_exception.  That state belongs to the
+    ; generator, not the caller: its own POP_EXCEPT restores it from the
+    ; value stack when it resumes.
+    mov rcx, [rbp - GT_SAVED_EXC]
+    mov [rel current_exception], rcx
     mov rax, r12
     mov rdx, r13
     pop r13
@@ -760,18 +845,57 @@ END_FUNC gen_throw
 ;; Close the generator by marking it as exhausted.
 ;; rdi = generator
 ;; ============================================================================
-DEF_FUNC gen_close
+GC_GEN   equ 8
+GC_FRAME equ 16
+DEF_FUNC gen_close, GC_FRAME
     push rbx
     mov rbx, rdi
+    mov [rbp - GC_GEN], rbx
 
-    ; Free frame if present
     mov rdi, [rbx + PyGenObject.gi_frame]
     test rdi, rdi
+    jz .gc_done                     ; already exhausted: nothing to unwind
+
+    ; Throw GeneratorExit in, so that finally blocks and context managers
+    ; run.  This used to free the frame outright, so a generator's finally
+    ; simply never executed.
+    extern exc_GeneratorExit_type
+    mov rdi, rbx
+    lea rsi, [rel exc_GeneratorExit_type]
+    call gen_throw
+    test edx, edx
+    jnz .gc_ignored_exit
+
+    ; The generator finished.  GeneratorExit and StopIteration coming back
+    ; out are the expected outcomes and are swallowed; anything else is a
+    ; real error from the cleanup and propagates.
+    mov rax, [rel current_exception]
+    test rax, rax
     jz .gc_done
-    call frame_free
-    mov qword [rbx + PyGenObject.gi_frame], 0
+    mov rcx, [rax + PyObject.ob_type]
+    lea rdx, [rel exc_GeneratorExit_type]
+    cmp rcx, rdx
+    je .gc_swallow
+    extern exc_StopIteration_type
+    lea rdx, [rel exc_StopIteration_type]
+    cmp rcx, rdx
+    jne .gc_propagate
+
+.gc_swallow:
+    mov rdi, [rel current_exception]
+    mov qword [rel current_exception], 0
+    call obj_decref
 
 .gc_done:
+    ; Make sure the frame is gone even if the generator never started.
+    mov rbx, [rbp - GC_GEN]
+    mov rdi, [rbx + PyGenObject.gi_frame]
+    test rdi, rdi
+    jz .gc_no_frame
+    call frame_free
+    mov qword [rbx + PyGenObject.gi_frame], 0
+.gc_no_frame:
+
     lea rax, [rel none_singleton]
     mov rdi, rax
     push rax
@@ -782,6 +906,19 @@ DEF_FUNC gen_close
     pop rbx
     leave
     ret
+
+.gc_ignored_exit:
+    ; It yielded instead of finishing, which Python reports.
+    lea rdi, [rel exc_RuntimeError_type]
+    extern exc_RuntimeError_type
+    CSTRING rsi, "generator ignored GeneratorExit"
+    call raise_exception
+
+.gc_propagate:
+    pop rbx
+    leave
+    mov [rel eval_saved_r13], r13
+    jmp eval_exception_unwind
 END_FUNC gen_close
 
 ;; ============================================================================
@@ -1110,6 +1247,13 @@ DEF_FUNC _gen_throw_impl
     test edx, edx
     jnz .gti_ret
 
+    ; The generator did not handle it: in Python the exception propagates
+    ; out of throw().  Raising StopIteration instead also DECREF'd the
+    ; still-pending exception a second time, which is where the double free
+    ; came from.
+    cmp qword [rel current_exception], 0
+    jne .gti_propagate
+
     ; Exhausted — raise StopIteration with return value
     lea rdi, [rel exc_StopIteration_type]
     mov rsi, [rbx + PyGenObject.gi_return_value]   ; already a Value
@@ -1126,6 +1270,14 @@ DEF_FUNC _gen_throw_impl
     leave
     V_PACK rax, rdx             ; builtins return one Value
     ret
+
+.gti_propagate:
+    extern eval_exception_unwind
+    extern eval_saved_r13
+    pop rbx
+    leave
+    mov [rel eval_saved_r13], r13
+    jmp eval_exception_unwind
 
 .gti_error:
     lea rdi, [rel exc_TypeError_type]

@@ -765,23 +765,43 @@ DEF_FUNC op_before_with
     cmp edx, TAG_PTR
     jne .bw_not_a_manager
 
-    ; Look up __exit__ on mgr's type
-    mov rax, [rbx + PyObject.ob_type]
-    mov rax, [rax + PyTypeObject.tp_dict]
-    test rax, rax
-    jz .bw_no_exit
-
-    ; Get "__exit__" from type dict (heap — dict key, DECREFed)
+    ; Get "__exit__" from the type dict (heap — dict key, DECREFed)
     lea rdi, [rel bw_str_exit]
     call str_from_cstr_heap
     mov r12, rax                    ; r12 = exit name str
     mov rdi, [rbx + PyObject.ob_type]
     mov rdi, [rdi + PyTypeObject.tp_dict]
+    test rdi, rdi
+    jz .bw_exit_via_getattr
     mov rsi, r12
     call dict_get
     V_UNPACK rax, rdx           ; dict_get returns a Value
     test edx, edx
+    jnz .bw_have_exit
+
+.bw_exit_via_getattr:
+    ; Some types serve their attributes from tp_getattr rather than a type
+    ; dict -- a file object is one -- so `with open(...) as f` reported that
+    ; a file is not a context manager.
+    mov rax, [rbx + PyObject.ob_type]
+    mov rax, [rax + PyTypeObject.tp_getattr]
+    test rax, rax
     jz .bw_no_exit_decref_name
+    mov rdi, rbx
+    mov rsi, r12
+    call rax
+    V_UNPACK rax, rdx
+    test edx, edx
+    jz .bw_no_exit_decref_name
+    ; tp_getattr already bound it to the instance.
+    mov rdi, r12
+    push rax
+    call obj_decref
+    pop rax
+    VPUSH_PTR rax
+    jmp .bw_exit_pushed
+
+.bw_have_exit:
 
     ; Got __exit__ function — create bound method(exit_func, mgr)
     mov [rbp - BW_EXIT], rax
@@ -795,24 +815,53 @@ DEF_FUNC op_before_with
 
     ; Push bound __exit__ method (single item, matching CPython)
     VPUSH_PTR rax
+.bw_exit_pushed:
 
     ; Now look up __enter__ on mgr's type
-    mov rdi, [rbx + PyObject.ob_type]
-    mov rdi, [rdi + PyTypeObject.tp_dict]
-    test rdi, rdi
-    jz .bw_no_enter
-
     lea rdi, [rel bw_str_enter]
     call str_from_cstr_heap
     mov r12, rax                    ; r12 = enter name str
     mov rdi, [rbx + PyObject.ob_type]
     mov rdi, [rdi + PyTypeObject.tp_dict]
+    test rdi, rdi
+    jz .bw_enter_via_getattr
     mov rsi, r12
     call dict_get
     V_UNPACK rax, rdx           ; dict_get returns a Value
     test edx, edx
-    jz .bw_no_enter_decref_name
+    jnz .bw_have_enter
 
+.bw_enter_via_getattr:
+    ; As for __exit__: a type may serve its attributes from tp_getattr.
+    mov rax, [rbx + PyObject.ob_type]
+    mov rax, [rax + PyTypeObject.tp_getattr]
+    test rax, rax
+    jz .bw_no_enter_decref_name
+    mov rdi, rbx
+    mov rsi, r12
+    call rax
+    V_UNPACK rax, rdx
+    test edx, edx
+    jz .bw_no_enter_decref_name
+    ; Already bound, so it takes no self argument.
+    push rax
+    mov rdi, r12
+    call obj_decref
+    pop rax
+    mov rcx, [rax + PyObject.ob_type]
+    mov rcx, [rcx + PyTypeObject.tp_call]
+    test rcx, rcx
+    jz .bw_no_enter
+    mov rdi, rax
+    xor esi, esi
+    xor edx, edx
+    call rcx
+    V_UNPACK rax, rdx
+    mov [rbp - BW_ENTER], rax
+    mov [rbp - BW_RETTAG], rdx
+    jmp .bw_enter_called
+
+.bw_have_enter:
     ; Got __enter__ function - call it with mgr as self
     push rax                        ; save func
     mov rdi, r12
@@ -836,6 +885,7 @@ DEF_FUNC op_before_with
     add rsp, 16                    ; pop fat arg
     mov [rbp - BW_ENTER], rax              ; save __enter__ result
     mov [rbp - BW_RETTAG], rdx             ; save __enter__ result tag
+.bw_enter_called:
 
     ; DECREF mgr
     mov rdi, [rbp - BW_MGR]

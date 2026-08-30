@@ -275,6 +275,35 @@ DEF_FUNC fileobj_seekable
 END_FUNC fileobj_seekable
 
 ; ============================================================================
+; fileobj_enter(args, nargs) -> the file itself
+DEF_FUNC fileobj_enter
+    mov rax, [rdi]
+    inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
+    leave
+    V_PACK rax, rdx
+    ret
+END_FUNC fileobj_enter
+
+; fileobj_exit(args, nargs) -> False, after closing
+DEF_FUNC fileobj_exit
+    call fileobj_close_method
+    ; The result is None; __exit__ answers False so an exception propagates.
+    V_UNPACK rax, rdx
+    push rax
+    push rdx
+    mov rdi, rax
+    call obj_decref
+    add rsp, 16
+    extern bool_false
+    lea rax, [rel bool_false]
+    inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
+    leave
+    V_PACK rax, rdx
+    ret
+END_FUNC fileobj_exit
+
 ; fileobj_close_method(PyObject **args, int64_t nargs) -> PyObject*
 ; ============================================================================
 DEF_FUNC fileobj_close_method
@@ -455,6 +484,20 @@ DEF_FUNC fileobj_getattr
     test eax, eax
     jz .ret_close
 
+    ; A file is a context manager: `with open(...) as f` is the ordinary way
+    ; to use one, and it raised TypeError because neither dunder existed.
+    lea rdi, [r12 + PyStrObject.data]
+    lea rsi, [rel fa_enter]
+    call ap_strcmp
+    test eax, eax
+    jz .ret_enter
+
+    lea rdi, [r12 + PyStrObject.data]
+    lea rsi, [rel fa_exit]
+    call ap_strcmp
+    test eax, eax
+    jz .ret_exit
+
     ; Check "read"
     lea rdi, [r12 + PyStrObject.data]
     CSTRING rsi, "read"
@@ -571,6 +614,18 @@ DEF_FUNC fileobj_getattr
 .ret_close:
     lea rdi, [rel fileobj_close_method]
     lea rsi, [rel fa_close]
+    call builtin_func_new
+    jmp .bind_method
+
+.ret_enter:
+    lea rdi, [rel fileobj_enter]
+    lea rsi, [rel fa_enter]
+    call builtin_func_new
+    jmp .bind_method
+
+.ret_exit:
+    lea rdi, [rel fileobj_exit]
+    lea rsi, [rel fa_exit]
     call builtin_func_new
     jmp .bind_method
 
@@ -693,6 +748,8 @@ fa_writable:  db "writable", 0
 fa_readable:  db "readable", 0
 fa_seekable:  db "seekable", 0
 fa_close:     db "close", 0
+fa_enter:     db "__enter__", 0
+fa_exit:      db "__exit__", 0
 fa_encoding:  db "encoding", 0
 fa_errors:    db "errors", 0
 fa_name:      db "name", 0
