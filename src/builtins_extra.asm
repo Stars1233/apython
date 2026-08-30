@@ -2825,13 +2825,13 @@ DEF_FUNC builtin_setattr
     mov rbx, rdi
 
     V_TEST_PTR_M [rbx], r11      ; args[0] a pointer?
-    ja .setattr_type_error
+    ja .setattr_no_attr
     mov rdi, [rbx]                     ; args[0] payload (obj)
 
     mov rax, [rdi + PyObject.ob_type]
     mov rax, [rax + PyTypeObject.tp_setattr]
     test rax, rax
-    jz .setattr_type_error
+    jz .setattr_no_attr
 
     push rax                           ; save tp_setattr
     mov rdi, [rbx]                     ; args[0] payload (obj)
@@ -2849,10 +2849,14 @@ DEF_FUNC builtin_setattr
     V_PACK rax, rdx             ; builtins return one Value
     ret
 
-.setattr_type_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "object does not support attribute assignment"
-    call raise_exception
+.setattr_no_attr:
+    ; CPython reports the missing attribute, not a generic "unsupported":
+    ; setattr(5, "x", 1) is AttributeError: 'int' object has no attribute 'x'.
+    mov rdi, [rbx]
+    mov rsi, [rbx + 8]
+    mov edx, 1
+    extern raise_no_attribute
+    call raise_no_attribute
 
 .setattr_error:
     lea rdi, [rel exc_TypeError_type]

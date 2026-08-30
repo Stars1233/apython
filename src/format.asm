@@ -59,6 +59,7 @@ FS_TYPE   equ 72         ; type letter, or 0
 FS_VALUE  equ 80
 FS_BODY   equ 88         ; rendered body, a str object
 FS_SIGNCH equ 96         ; the sign actually emitted, or 0
+FS_SPECLEN equ 104       ; length of the spec as given
 FS_FRAME  equ 112
 
 ;; ============================================================================
@@ -89,6 +90,7 @@ DEF_FUNC format_apply_spec, FS_FRAME
 
     mov rbx, rsi                        ; spec str
     mov r12, [rbx + PyStrObject.ob_size]
+    mov [rbp - FS_SPECLEN], r12
     lea r13, [rbx + PyStrObject.data]
     xor r14d, r14d                      ; position
 
@@ -249,7 +251,17 @@ DEF_FUNC format_apply_spec, FS_FRAME
     lea rax, [rel bool_type]
     cmp r15, rax
     je .fs_body_int
+    ; Anything else uses object.__format__, which accepts only an empty
+    ; spec.  format(None, ">5") padded None instead of raising.
+    cmp qword [rbp - FS_SPECLEN], 0
+    jne .fs_unsupported
     jmp .fs_body_str
+
+.fs_unsupported:
+    mov rsi, [rbp - FS_VALUE]
+    CSTRING rdi, `unsupported format string passed to \x01.__format__`
+    extern raise_type_error_with_name
+    call raise_type_error_with_name
 
 .fs_typed:
     cmp rcx, 'b'

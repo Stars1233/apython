@@ -1440,8 +1440,10 @@ section .text
     jmp .rev_have_len
 
 .rev_try_ob_size:
-    ; Fallback: read ob_size at +16 (tuples, lists already handled above)
-    mov rax, [r12 + PyVarObject.ob_size]
+    ; No __reversed__, no sequence protocol: not reversible.  Reading ob_size
+    ; off whatever this is made reversed(None) and reversed(True) return an
+    ; empty iterator instead of raising.
+    jmp .rev_type_error
 
 .rev_have_len:
     ; rax = length
@@ -1475,9 +1477,10 @@ section .text
     call raise_exception
 
 .rev_type_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "argument to reversed() must be a sequence"
-    call raise_exception
+    mov rsi, r12
+    CSTRING rdi, `'\x01' object is not reversible`
+    extern raise_type_error_with_name
+    call raise_type_error_with_name
 END_FUNC builtin_reversed
 
 ;; reversed_iternext(self) -> PyObject* or NULL

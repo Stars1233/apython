@@ -32,6 +32,7 @@ extern bool_true
 extern bool_false
 extern int_type
 extern float_type
+extern bool_type
 extern float_number_methods
 extern cell_new
 extern gen_new
@@ -122,6 +123,39 @@ END_FUNC op_return_const
 ;; Pops right (b) then left (a), dispatches through type's tp_as_number.
 ;; Followed by 1 CACHE entry (2 bytes) that must be skipped.
 ;; ============================================================================
+; binop_is_number(rdi = payload, rsi = tag) -> eax 0/1
+; True for the three things float arithmetic may be coerced with: an int
+; immediate, a float immediate, and a heap int or bool.
+DEF_FUNC_BARE binop_is_number
+    cmp rsi, TAG_SMALLINT
+    je .bn_yes
+    cmp rsi, TAG_FLOAT
+    je .bn_yes
+    test rsi, TAG_RC_BIT
+    jz .bn_no
+    test rdi, rdi
+    jz .bn_no
+    mov rax, [rdi + PyObject.ob_type]
+    lea rcx, [rel int_type]
+    cmp rax, rcx
+    je .bn_yes
+    lea rcx, [rel bool_type]
+    cmp rax, rcx
+    je .bn_yes
+    lea rcx, [rel float_type]
+    cmp rax, rcx
+    je .bn_yes
+    mov rax, [rax + PyTypeObject.tp_flags]
+    test rax, TYPE_FLAG_INT_SUBCLASS
+    jnz .bn_yes
+.bn_no:
+    xor eax, eax
+    ret
+.bn_yes:
+    mov eax, 1
+    ret
+END_FUNC binop_is_number
+
 DEF_FUNC_BARE op_binary_op
     ; ecx = NB_* op code
     ; Save the op index before pops (VPOP doesn't clobber ecx)
@@ -180,8 +214,21 @@ DEF_FUNC_BARE op_binary_op
     ; This handles int+float, float+int, float+float
     ; Skip for NB_REMAINDER (6) / NB_INPLACE_REMAINDER (19) when left is not float,
     ; because str % value should use str_mod, not float methods.
+    ; ... but only when the *other* operand is a number too.  Coercing
+    ; unconditionally meant "a" + 1.5 evaluated to 1.5 and [1] * 1.5 to 0.0,
+    ; reading the string or the list as a double.
     cmp qword [rsp + BO_LTAG], TAG_FLOAT
-    je .use_float_methods
+    jne .binop_check_right_float
+    mov rdi, [rsp + BO_RIGHT]
+    mov rsi, [rsp + BO_RTAG]
+    call binop_is_number
+    mov rdi, [rsp + BO_LEFT]
+    mov rsi, [rsp + BO_RIGHT]
+    test eax, eax
+    jz .no_float_coerce
+    jmp .use_float_methods
+
+.binop_check_right_float:
     cmp qword [rsp + BO_RTAG], TAG_FLOAT
     jne .no_float_coerce
     ; Right is float — check if this is remainder op (str % float should NOT coerce)
@@ -189,6 +236,13 @@ DEF_FUNC_BARE op_binary_op
     je .no_float_coerce
     cmp r9d, 19                 ; NB_INPLACE_REMAINDER
     je .no_float_coerce
+    mov rdi, [rsp + BO_LEFT]
+    mov rsi, [rsp + BO_LTAG]
+    call binop_is_number
+    mov rdi, [rsp + BO_LEFT]
+    mov rsi, [rsp + BO_RIGHT]
+    test eax, eax
+    jz .no_float_coerce
     jmp .use_float_methods
 
 .no_float_coerce:

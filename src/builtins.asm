@@ -1276,6 +1276,17 @@ DEF_FUNC builtin_float, BF_FRAME
     ret
 
 .float_numeric:
+    ; float_to_f64 answers 0.0 for anything it does not recognise, so
+    ; float(None) and float([1]) quietly produced 0.0.
+    push rdi
+    push rsi
+    extern binop_is_number
+    call binop_is_number
+    pop rsi
+    pop rdi
+    test eax, eax
+    jz .float_bad_type
+
     extern float_to_f64
     call float_to_f64          ; xmm0 = double
     extern float_from_f64
@@ -1283,6 +1294,13 @@ DEF_FUNC builtin_float, BF_FRAME
 
     leave
     ret
+
+.float_bad_type:
+    V_PACK rdi, rsi
+    mov rsi, rdi
+    CSTRING rdi, `float() argument must be a string or a real number, not '\x01'`
+    extern raise_type_error_with_name
+    call raise_type_error_with_name
 
 .float_passthrough:
     mov rax, rdi

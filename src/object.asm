@@ -380,6 +380,165 @@ DEF_FUNC_BARE value_type
     ret
 END_FUNC value_type
 
+; raise_type_error_with_name(rdi = template C string with a single %s marker
+;                            written as \x01, rsi = Value whose type to name)
+; Composes the message into a static buffer and raises TypeError.  Does not
+; return.
+RTN_BUFSZ equ 160
+global raise_type_error_with_name
+DEF_FUNC raise_type_error_with_name
+    push rbx
+    push r12
+    mov rbx, rdi
+    mov rdi, rsi
+    call value_type
+    mov r12, rax                    ; type, or 0
+
+    lea rdi, [rel rtn_buf]
+    xor ecx, ecx
+.rtn_copy:
+    movzx eax, byte [rbx]
+    test al, al
+    jz .rtn_end
+    inc rbx
+    cmp al, 1
+    je .rtn_insert
+    cmp rcx, RTN_BUFSZ - 2
+    jae .rtn_copy
+    mov [rdi + rcx], al
+    inc rcx
+    jmp .rtn_copy
+.rtn_insert:
+    test r12, r12
+    jz .rtn_copy
+    mov rsi, [r12 + PyTypeObject.tp_name]
+.rtn_name:
+    movzx eax, byte [rsi]
+    test al, al
+    jz .rtn_copy
+    inc rsi
+    cmp rcx, RTN_BUFSZ - 2
+    jae .rtn_copy
+    mov [rdi + rcx], al
+    inc rcx
+    jmp .rtn_name
+.rtn_end:
+    mov byte [rdi + rcx], 0
+    lea rdi, [rel exc_TypeError_type]
+    lea rsi, [rel rtn_buf]
+    extern exc_TypeError_type
+    extern raise_exception
+    call raise_exception
+    ud2
+END_FUNC raise_type_error_with_name
+
+section .bss
+rtn_buf: resb RTN_BUFSZ
+section .text
+
+; seq_repeat_check_count(rsi = count Value) -- raises TypeError unless the
+; count is an int (or a bool, which is one).  Does not return on failure.
+global seq_repeat_check_count
+DEF_FUNC_BARE seq_repeat_check_count
+    V_IS_INT rsi, rax
+    jae .src_ok
+    V_TEST_PTR rsi, rax
+    ja .src_bad
+    test rsi, rsi
+    jz .src_bad
+    mov rax, [rsi + PyObject.ob_type]
+    lea rcx, [rel int_type]
+    cmp rax, rcx
+    je .src_ok
+    lea rcx, [rel bool_type]
+    cmp rax, rcx
+    je .src_ok
+    mov rax, [rax + PyTypeObject.tp_flags]
+    test rax, TYPE_FLAG_INT_SUBCLASS
+    jnz .src_ok
+.src_bad:
+    CSTRING rdi, `can't multiply sequence by non-int of type '\x01'`
+    jmp raise_type_error_with_name
+.src_ok:
+    ret
+END_FUNC seq_repeat_check_count
+
+; raise_no_attribute(rdi = object Value, rsi = attribute-name str, edx = 1 for
+; a set, 0 for a get) -- raises the AttributeError CPython raises.  Does not
+; return.
+RNA_OBJ  equ 8
+RNA_NAME equ 16
+RNA_FRAME equ 16
+extern str_type
+global raise_no_attribute
+DEF_FUNC raise_no_attribute, RNA_FRAME
+    push rbx
+    push r12
+    mov [rbp - RNA_NAME], rsi
+    call value_type
+    mov r12, rax
+
+    lea rbx, [rel rtn_buf]
+    xor ecx, ecx
+    mov byte [rbx], 39                  ; '
+    inc rcx
+    test r12, r12
+    jz .rna_after_type
+    mov rsi, [r12 + PyTypeObject.tp_name]
+.rna_type:
+    movzx eax, byte [rsi]
+    test al, al
+    jz .rna_after_type
+    inc rsi
+    cmp rcx, RTN_BUFSZ - 2
+    jae .rna_after_type
+    mov [rbx + rcx], al
+    inc rcx
+    jmp .rna_type
+.rna_after_type:
+    CSTRING rsi, `' object has no attribute '`
+.rna_mid:
+    movzx eax, byte [rsi]
+    test al, al
+    jz .rna_name
+    inc rsi
+    cmp rcx, RTN_BUFSZ - 2
+    jae .rna_name
+    mov [rbx + rcx], al
+    inc rcx
+    jmp .rna_mid
+.rna_name:
+    mov rsi, [rbp - RNA_NAME]
+    test rsi, rsi
+    jz .rna_close
+    mov rax, [rsi + PyObject.ob_type]
+    lea rdx, [rel str_type]
+    cmp rax, rdx
+    jne .rna_close
+    mov rdx, [rsi + PyStrObject.ob_size]
+    lea rsi, [rsi + PyStrObject.data]
+    xor eax, eax
+.rna_name_copy:
+    cmp rax, rdx
+    jge .rna_close
+    cmp rcx, RTN_BUFSZ - 3
+    jae .rna_close
+    mov r8b, [rsi + rax]
+    mov [rbx + rcx], r8b
+    inc rcx
+    inc rax
+    jmp .rna_name_copy
+.rna_close:
+    mov byte [rbx + rcx], 39            ; '
+    inc rcx
+    mov byte [rbx + rcx], 0
+    lea rdi, [rel exc_AttributeError_type]
+    extern exc_AttributeError_type
+    mov rsi, rbx
+    call raise_exception
+    ud2
+END_FUNC raise_no_attribute
+
 ; obj_richcompare_bool(rdi = left Value, rsi = right Value, edx = op)
 ;   -> eax = 1 (true), 0 (false), or -1 (an exception is pending)
 ;

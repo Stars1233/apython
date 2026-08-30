@@ -417,6 +417,18 @@ DEF_FUNC str_repeat
     mov edx, ecx            ; count tag (right operand)
     ; A count too large for int64 truncates through __gmpz_get_si, so
     ; "a" * (2**64) quietly returned "".
+    ; The count must be an index.  int_fits_i64 and int_to_i64 both read
+    ; PyIntObject fields, so a str or a float count was dereferenced as one:
+    ; "a" * "2" segfaulted and [1] * None reported an OverflowError.
+    push rdi
+    push rdx
+    mov rsi, rdi
+    mov rcx, rdx
+    V_PACK rsi, rcx
+    extern seq_repeat_check_count
+    call seq_repeat_check_count
+    pop rdx
+    pop rdi
     push rdi
     push rdx
     call int_fits_i64

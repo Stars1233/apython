@@ -889,8 +889,8 @@ _bytes_decode_cache: dq 0
 align 8
 bytes_sequence_methods:
     dq bytes_len            ; sq_length       +0
-    dq 0                    ; sq_concat       +8
-    dq 0                    ; sq_repeat       +16
+    dq bytes_concat         ; sq_concat       +8
+    dq bytes_repeat         ; sq_repeat       +16
     dq bytes_getitem        ; sq_item         +24
     dq 0                    ; sq_ass_item     +32
     dq bytes_contains       ; sq_contains     +40
@@ -964,9 +964,9 @@ section .data
 ; bytes number methods (for % formatting)
 align 8
 bytes_number_methods:
-    dq 0                    ; nb_add          +0
+    dq bytes_concat         ; nb_add          +0
     dq 0                    ; nb_subtract     +8
-    dq 0                    ; nb_multiply     +16
+    dq bytes_repeat         ; nb_multiply     +16
     dq bytes_mod            ; nb_remainder    +24
     dq 0                    ; nb_divmod       +32
     dq 0                    ; nb_power        +40
@@ -1008,6 +1008,147 @@ bytes_mapping_methods:
     dq 0                    ; mp_ass_subscript +16
 
 section .text
+
+;; ============================================================================
+;; bytes_concat(left Value, right Value) -> Value
+;; bytes had neither sq_concat nor nb_add, so `x + y` on two bytes variables
+;; raised TypeError; only the constant-folded form worked.
+;; ============================================================================
+DEF_FUNC bytes_concat
+    push rbx
+    push r12
+    push r13
+    mov rbx, rdi
+    mov r12, rsi
+
+    V_TEST_PTR rbx, rax
+    ja .bc_type_error
+    V_TEST_PTR r12, rax
+    ja .bc_type_error
+    mov rax, [rbx + PyObject.ob_type]
+    lea rcx, [rel bytes_type]
+    cmp rax, rcx
+    jne .bc_type_error
+    mov rax, [r12 + PyObject.ob_type]
+    cmp rax, rcx
+    jne .bc_type_error
+
+    mov r13, [rbx + PyBytesObject.ob_size]
+    add r13, [r12 + PyBytesObject.ob_size]
+    lea rdi, [r13 + PyBytesObject.data + 8]
+    call ap_malloc
+    mov qword [rax + PyObject.ob_refcnt], 1
+    lea rcx, [rel bytes_type]
+    mov [rax + PyObject.ob_type], rcx
+    mov [rax + PyBytesObject.ob_size], r13
+
+    push rax
+    lea rdi, [rax + PyBytesObject.data]
+    lea rsi, [rbx + PyBytesObject.data]
+    mov rdx, [rbx + PyBytesObject.ob_size]
+    call ap_memcpy
+    mov rax, [rsp]
+    mov rdi, [rbx + PyBytesObject.ob_size]
+    lea rdi, [rax + PyBytesObject.data + rdi]
+    lea rsi, [r12 + PyBytesObject.data]
+    mov rdx, [r12 + PyBytesObject.ob_size]
+    call ap_memcpy
+    pop rax
+    mov qword [rax + PyBytesObject.data + r13], 0
+    mov edx, TAG_PTR
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.bc_type_error:
+    mov rsi, r12
+    CSTRING rdi, `can't concat \x01 to bytes`
+    extern raise_type_error_with_name
+    call raise_type_error_with_name
+END_FUNC bytes_concat
+
+;; ============================================================================
+;; bytes_repeat(bytes Value, count Value) -> Value
+;; ============================================================================
+DEF_FUNC bytes_repeat
+    push rbx
+    push r12
+    push r13
+    push r14
+    mov rbx, rdi
+    mov r14, rsi
+
+    mov rsi, r14
+    extern seq_repeat_check_count
+    call seq_repeat_check_count
+
+    mov rdi, r14
+    V_UNPACK rdi, rdx
+    push rdi
+    push rdx
+    extern int_fits_i64
+    call int_fits_i64
+    pop rdx
+    pop rdi
+    test eax, eax
+    jz .brep_overflow
+    extern int_to_i64
+    call int_to_i64
+    mov r12, rax
+    test r12, r12
+    jg .brep_positive
+    xor r12d, r12d
+.brep_positive:
+
+    mov r13, [rbx + PyBytesObject.ob_size]
+    mov r14, r13
+    imul r14, r12
+    jo .brep_overflow
+    cmp r14, 0x10000000
+    ja .brep_overflow
+
+    lea rdi, [r14 + PyBytesObject.data + 8]
+    call ap_malloc
+    push rax
+    mov qword [rax + PyObject.ob_refcnt], 1
+    lea rcx, [rel bytes_type]
+    mov [rax + PyObject.ob_type], rcx
+    mov [rax + PyBytesObject.ob_size], r14
+
+    lea rdi, [rax + PyBytesObject.data]
+    xor ecx, ecx
+.brep_loop:
+    cmp rcx, r12
+    jge .brep_done
+    push rcx
+    push rdi
+    lea rsi, [rbx + PyBytesObject.data]
+    mov rdx, r13
+    call ap_memcpy
+    pop rdi
+    pop rcx
+    add rdi, r13
+    inc rcx
+    jmp .brep_loop
+.brep_done:
+    pop rax
+    mov qword [rax + PyBytesObject.data + r14], 0
+    mov edx, TAG_PTR
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.brep_overflow:
+    lea rdi, [rel exc_OverflowError_type]
+    extern exc_OverflowError_type
+    CSTRING rsi, "repeated bytes are too long"
+    call raise_exception
+END_FUNC bytes_repeat
 
 ;; ============================================================================
 ;; bytes_type_call(type, args, nargs) -> PyBytesObject*

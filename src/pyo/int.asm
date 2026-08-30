@@ -1889,6 +1889,15 @@ DEF_FUNC_BARE int_unwrap
     ; Only dereference if TAG_PTR (heap pointer); other tags return unchanged
     test edx, TAG_RC_BIT
     jz .iuw_done                 ; TAG_FLOAT, TAG_NONE, TAG_NULL → not an int
+    ; True and False are GMP-backed singletons, so nothing downstream could
+    ; take an int64 fast path on them; round(True) reported that bool cannot
+    ; be rounded.  Flatten them here, where every int operation passes.
+    lea rcx, [rel bool_true]
+    cmp rdi, rcx
+    je .iuw_true
+    lea rcx, [rel bool_false]
+    cmp rdi, rcx
+    je .iuw_false
     mov rax, [rdi + PyObject.ob_type]
     lea rcx, [rel int_type]
     cmp rax, rcx
@@ -1906,8 +1915,12 @@ DEF_FUNC_BARE int_unwrap
     mov edx, TAG_SMALLINT
 .iuw_done:
     ret
-.iuw_bool:
-    ; TAG_BOOL payload (0 or 1) -> TAG_SMALLINT (same payload)
+.iuw_true:
+    mov edi, 1
+    mov edx, TAG_SMALLINT
+    ret
+.iuw_false:
+    xor edi, edi
     mov edx, TAG_SMALLINT
     ret
 END_FUNC int_unwrap
