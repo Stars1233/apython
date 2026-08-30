@@ -160,3 +160,46 @@ print(err(format, "abc", "f"), err(format, "abc", "d"), format("abc", ">5") + "|
 x = "A"
 print(f"{x!r}", f"{x!s}", f"{x!a}", f"{x!r:>6}", f"{x:>6}")
 print(f"{5!r:>5}", f"{[1, 2]!r:>10}")
+
+
+# reversed() on the ordinary __len__ + __getitem__ class
+class Seq:
+    def __len__(self): return 3
+    def __getitem__(self, i): return i * 10
+
+
+print(list(reversed(Seq())))
+
+
+# An exception raised inside __format__ reaches the caller
+class BadFormat:
+    def __format__(self, spec): raise KeyError("boom")
+
+
+print(err(format, BadFormat(), ""), err(format, BadFormat(), ">5"))
+try:
+    "%s" % 1
+    x = f"{BadFormat()}"
+except KeyError:
+    print("f-string propagated")
+try:
+    x = f"{BadFormat():>5}"
+except KeyError:
+    print("f-string with spec propagated")
+
+
+# An exception's instance attribute wins over a class attribute
+class WithDefault(Exception):
+    x = 1
+
+
+w = WithDefault("m")
+print(w.x)
+w.x = 2
+print(w.x, WithDefault.x)
+
+
+# ord() decodes a multi-byte character
+for c in (65, 127, 128, 233, 0x20AC, 0x1F600):
+    print(c, ord(chr(c)))
+print(err(ord, "ab"), err(ord, ""), err(ord, 5), ord("A"), chr(65))

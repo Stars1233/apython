@@ -1548,6 +1548,10 @@ DEF_FUNC op_format_value, FV_FRAME
     V_UNPACK rax, rdx
     test edx, edx
     jnz .fv_have_result         ; __format__ produced the string
+    ; NULL is either "no __format__" or "__format__ raised"; falling through
+    ; in the second case replaced the exception with a formatting result.
+    cmp qword [rel current_exception], 0
+    jne .fv_conv_failed
     mov rdi, [rbp - FV_VALUE]   ; no __format__: fall through as before
 
 .fv_spec_not_ptr:
@@ -1614,6 +1618,8 @@ DEF_FUNC op_format_value, FV_FRAME
     pop rax
     test edx, edx
     jnz .fv_have_result
+    cmp qword [rel current_exception], 0
+    jne .fv_conv_failed
     ; No __format__: fall through to str() as before.
     mov rdi, [rbp - FV_VALUE]
     mov rsi, [rbp - FV_VTAG]

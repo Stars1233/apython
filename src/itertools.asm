@@ -1395,11 +1395,14 @@ section .text
     mov rcx, [rcx + PySequenceMethods.sq_length]
     test rcx, rcx
     jz .rev_try_heap_len
-    ; Also need sq_item for iteration
+    ; Also need sq_item for iteration.  A heaptype with __len__ now carries
+    ; sq_length from the slot wiring but no sq_item, so erroring here refused
+    ; reversed() on the ordinary __len__ + __getitem__ class it used to work
+    ; for; that class is handled below.
     mov rdx, [rax + PyTypeObject.tp_as_sequence]
     mov rdx, [rdx + PySequenceMethods.sq_item]
     test rdx, rdx
-    jz .rev_type_error
+    jz .rev_try_heap_len
     mov rdi, r12
     call rcx
     jmp .rev_have_len

@@ -518,9 +518,22 @@ DEF_FUNC exc_getattr
     test eax, eax
     jz .get_value
 
-    ; Not found — walk the type's MRO (for user-defined subclass attrs).
-    ; Only the exact type's dict used to be consulted, so a method defined on
-    ; an exception's *base* was invisible.
+    ; The instance dict comes first: a class attribute used to shadow the
+    ; instance attribute of the same name, so `e.x = 2` then `e.x` read the
+    ; class default.
+    mov rdi, [rbx + PyExceptionObject.exc_dict]
+    test rdi, rdi
+    jz .eg_type_start
+    mov rsi, r12
+    call dict_get
+    V_UNPACK rax, rdx
+    test edx, edx
+    jnz .found_in_dict
+.eg_type_start:
+
+    ; Then the type's MRO (for user-defined subclass attrs).  Only the exact
+    ; type's dict used to be consulted, so a method defined on an exception's
+    ; *base* was invisible.
     mov r13, [rbx + PyObject.ob_type]   ; origin
     mov r14, r13                        ; walker
 .eg_type_walk:

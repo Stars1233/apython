@@ -1371,10 +1371,69 @@ DEF_FUNC builtin_ord
     cmp rax, rcx
     jne .ord_type_error
 
-    cmp qword [rdi + PyStrObject.ob_size], 1
-    jne .ord_len_error
-
+    ; A string is stored as UTF-8, so one character can be up to four bytes.
+    ; Requiring ob_size == 1 made ord(chr(233)) a TypeError.
+    mov rcx, [rdi + PyStrObject.ob_size]
+    test rcx, rcx
+    jz .ord_len_error
     movzx eax, byte [rdi + PyStrObject.data]
+    test al, 0x80
+    jz .ord_ascii
+    ; Multi-byte: decode and check it is the whole string.
+    mov r8d, eax
+    and r8d, 0xF8
+    cmp r8d, 0xF0
+    je .ord_four
+    mov r8d, eax
+    and r8d, 0xF0
+    cmp r8d, 0xE0
+    je .ord_three
+    mov r8d, eax
+    and r8d, 0xE0
+    cmp r8d, 0xC0
+    jne .ord_len_error
+    cmp rcx, 2
+    jne .ord_len_error
+    and eax, 0x1F
+    shl eax, 6
+    movzx edx, byte [rdi + PyStrObject.data + 1]
+    and edx, 0x3F
+    or eax, edx
+    jmp .ord_done
+.ord_three:
+    cmp rcx, 3
+    jne .ord_len_error
+    and eax, 0x0F
+    shl eax, 12
+    movzx edx, byte [rdi + PyStrObject.data + 1]
+    and edx, 0x3F
+    shl edx, 6
+    or eax, edx
+    movzx edx, byte [rdi + PyStrObject.data + 2]
+    and edx, 0x3F
+    or eax, edx
+    jmp .ord_done
+.ord_four:
+    cmp rcx, 4
+    jne .ord_len_error
+    and eax, 0x07
+    shl eax, 18
+    movzx edx, byte [rdi + PyStrObject.data + 1]
+    and edx, 0x3F
+    shl edx, 12
+    or eax, edx
+    movzx edx, byte [rdi + PyStrObject.data + 2]
+    and edx, 0x3F
+    shl edx, 6
+    or eax, edx
+    movzx edx, byte [rdi + PyStrObject.data + 3]
+    and edx, 0x3F
+    or eax, edx
+    jmp .ord_done
+.ord_ascii:
+    cmp rcx, 1
+    jne .ord_len_error
+.ord_done:
     RET_TAG_SMALLINT
     leave
     V_PACK rax, rdx             ; builtins return one Value
@@ -4272,7 +4331,13 @@ DEF_FUNC builtin_format_fn, FMT_FRAME
     call dunder_call_2
     V_UNPACK rax, rdx
     test edx, edx
-    jz .fmt_apply_spec             ; no __format__ on this class
+    jnz .fmt_dunder_ok
+    ; NULL means either "no __format__" or "__format__ raised"; falling
+    ; through in the second case replaced the real exception.
+    cmp qword [rel current_exception], 0
+    jne .fmt_propagate
+    jmp .fmt_apply_spec
+.fmt_dunder_ok:
     ; If an empty spec was allocated here, release it.
     cmp rbx, 2
     jge .fmt_done
@@ -4283,6 +4348,11 @@ DEF_FUNC builtin_format_fn, FMT_FRAME
     pop rdx
     pop rax
     jmp .fmt_done
+
+.fmt_propagate:
+    extern eval_exception_unwind
+    leave
+    jmp eval_exception_unwind
 
 .fmt_apply_spec:
     ; Not a class with its own __format__: apply the spec directly.
