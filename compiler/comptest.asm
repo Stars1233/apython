@@ -296,6 +296,9 @@ DEF_FUNC_LOCAL ct_group3_lex, CT3_FRAME
     call comp_init
 
     lea rdi, [rel ct_comp]
+    xor esi, esi                        ; the whole source, not a span
+    xor edx, edx
+    xor ecx, ecx
     call lex_run
     test eax, eax
     jz .case_fail                       ; the lexer reported an error
