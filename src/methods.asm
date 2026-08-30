@@ -2286,6 +2286,177 @@ DEF_FUNC str_method_isdigit
     ret
 END_FUNC str_method_isdigit
 
+
+;; ============================================================================
+;; str_method_isidentifier / isprintable / isascii / isdecimal / isnumeric
+;;
+;; ASCII-only, like the rest of the str predicates here: a str is still a byte
+;; string, so a non-ASCII byte can only be reported honestly as "not one of
+;; these".  isidentifier is what functools, enum, dataclasses and textwrap all
+;; reach for; the other four keep the family complete.
+;; ============================================================================
+DEF_FUNC str_method_isidentifier
+    mov rax, [rdi]
+    mov rcx, [rax + PyStrObject.ob_size]
+    test rcx, rcx
+    jz .false
+    ; First character: a letter or underscore.
+    movzx esi, byte [rax + PyStrObject.data]
+    cmp sil, '_'
+    je .rest
+    call .is_alpha_sil
+    jz .false
+.rest:
+    mov edx, 1
+.loop:
+    cmp rdx, rcx
+    jge .true
+    movzx esi, byte [rax + PyStrObject.data + rdx]
+    cmp sil, '_'
+    je .next
+    cmp sil, '0'
+    jb .not_alnum
+    cmp sil, '9'
+    jbe .next
+.not_alnum:
+    push rax
+    push rcx
+    push rdx
+    call .is_alpha_sil
+    pop rdx
+    pop rcx
+    pop rax
+    jz .false
+.next:
+    inc rdx
+    jmp .loop
+
+; Sets ZF when sil is not an ASCII letter.
+.is_alpha_sil:
+    cmp sil, 'A'
+    jb .not_letter
+    cmp sil, 'Z'
+    jbe .letter
+    cmp sil, 'a'
+    jb .not_letter
+    cmp sil, 'z'
+    ja .not_letter
+.letter:
+    test esp, esp               ; clears ZF (rsp is never zero)
+    ret
+.not_letter:
+    xor r8d, r8d                ; sets ZF
+    ret
+
+.true:
+    lea rax, [rel bool_true]
+    inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
+    leave
+    V_PACK rax, rdx
+    ret
+.false:
+    lea rax, [rel bool_false]
+    inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
+    leave
+    V_PACK rax, rdx
+    ret
+END_FUNC str_method_isidentifier
+
+;; Every byte printable and not a space-only string; the empty string is True.
+DEF_FUNC str_method_isprintable
+    mov rax, [rdi]
+    mov rcx, [rax + PyStrObject.ob_size]
+    xor edx, edx
+.loop:
+    cmp rdx, rcx
+    jge .true
+    movzx esi, byte [rax + PyStrObject.data + rdx]
+    cmp sil, 0x20
+    jb .false
+    cmp sil, 0x7e
+    ja .false
+    inc rdx
+    jmp .loop
+.true:
+    lea rax, [rel bool_true]
+    inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
+    leave
+    V_PACK rax, rdx
+    ret
+.false:
+    lea rax, [rel bool_false]
+    inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
+    leave
+    V_PACK rax, rdx
+    ret
+END_FUNC str_method_isprintable
+
+DEF_FUNC str_method_isascii
+    mov rax, [rdi]
+    mov rcx, [rax + PyStrObject.ob_size]
+    xor edx, edx
+.loop:
+    cmp rdx, rcx
+    jge .true
+    movzx esi, byte [rax + PyStrObject.data + rdx]
+    cmp sil, 0x7f
+    ja .false
+    inc rdx
+    jmp .loop
+.true:
+    lea rax, [rel bool_true]
+    inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
+    leave
+    V_PACK rax, rdx
+    ret
+.false:
+    lea rax, [rel bool_false]
+    inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
+    leave
+    V_PACK rax, rdx
+    ret
+END_FUNC str_method_isascii
+
+;; isdecimal and isnumeric agree with isdigit over ASCII, which is all a byte
+;; string can represent.
+DEF_FUNC str_method_isdecimal
+    mov rax, [rdi]
+    mov rcx, [rax + PyStrObject.ob_size]
+    test rcx, rcx
+    jz .false
+    xor edx, edx
+.loop:
+    cmp rdx, rcx
+    jge .true
+    movzx esi, byte [rax + PyStrObject.data + rdx]
+    cmp sil, '0'
+    jb .false
+    cmp sil, '9'
+    ja .false
+    inc rdx
+    jmp .loop
+.true:
+    lea rax, [rel bool_true]
+    inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
+    leave
+    V_PACK rax, rdx
+    ret
+.false:
+    lea rax, [rel bool_false]
+    inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
+    leave
+    V_PACK rax, rdx
+    ret
+END_FUNC str_method_isdecimal
+
 ;; ============================================================================
 ;; str_method_isalpha(args, nargs) -> bool_true/bool_false
 ;; args[0] = self
@@ -10718,6 +10889,31 @@ DEF_FUNC methods_init
     call add_method_to_dict
 
     mov rdi, rbx
+    lea rsi, [rel mn_isidentifier]
+    lea rdx, [rel str_method_isidentifier]
+    call add_method_to_dict
+
+    mov rdi, rbx
+    lea rsi, [rel mn_isprintable]
+    lea rdx, [rel str_method_isprintable]
+    call add_method_to_dict
+
+    mov rdi, rbx
+    lea rsi, [rel mn_isascii]
+    lea rdx, [rel str_method_isascii]
+    call add_method_to_dict
+
+    mov rdi, rbx
+    lea rsi, [rel mn_isdecimal]
+    lea rdx, [rel str_method_isdecimal]
+    call add_method_to_dict
+
+    mov rdi, rbx
+    lea rsi, [rel mn_isnumeric]
+    lea rdx, [rel str_method_isdecimal]
+    call add_method_to_dict
+
+    mov rdi, rbx
     lea rsi, [rel mn_removeprefix]
     lea rdx, [rel str_method_removeprefix]
     call add_method_to_dict
@@ -11713,6 +11909,11 @@ mn_rstrip:      db "rstrip", 0
 mn_rfind:       db "rfind", 0
 mn_isdigit:     db "isdigit", 0
 mn_isalpha:     db "isalpha", 0
+mn_isidentifier: db "isidentifier", 0
+mn_isprintable: db "isprintable", 0
+mn_isascii:     db "isascii", 0
+mn_isdecimal:   db "isdecimal", 0
+mn_isnumeric:   db "isnumeric", 0
 mn_removeprefix: db "removeprefix", 0
 mn_removesuffix: db "removesuffix", 0
 mn_encode:      db "encode", 0

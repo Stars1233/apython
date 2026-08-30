@@ -40,6 +40,22 @@ one-line fix.
   was registered against a subclass of ABC rather than against ABC itself.
   Direct registration and real inheritance both work.
 
+- **`eval()` and `exec()` do not compile source.**  `eval` parses an integer
+  literal and nothing else; there is no Python compiler here, only a .pyc
+  reader.  `collections.namedtuple` builds its `__new__` with
+  `eval("lambda ...")`, so it and everything that uses it -- functools, enum,
+  re, inspect, typing, dataclasses, textwrap -- stop there.  33 of the 196
+  stdlib modules fail on exactly this.
+
+- **No platform module, so `os` cannot import.**  `os.py` looks for `posix`
+  and raises "no os specific module found" without it.  That is the single
+  largest blocker in the stdlib: 47 of the 196 modules fail on it.
+
+- **Missing C modules, by how many stdlib modules each blocks:** `_io` (10),
+  `math` (9), `_codecs` (6), `_struct` (5), `_socket` (5), `binascii` (4),
+  `_imp` (3), `_string` (2), `errno` (2), and one each for a long tail.
+  `complex` does not exist as a type either, which stops `copyreg` and `copy`.
+
 - **Weak references keep no per-object slot.**  The links live in a side
   table keyed by the referent's address rather than in the object, so
   `tp_weaklistoffset` does not exist and `__weakref__` is not an attribute.
