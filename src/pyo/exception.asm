@@ -495,6 +495,20 @@ DEF_FUNC exc_getattr
     test eax, eax
     jz .get_tb
 
+    ; Check "code" (for SystemExit.code).  Only SystemExit has it; on any
+    ; other exception `code` is an ordinary instance attribute.
+    lea rdi, [r12 + PyStrObject.data]
+    CSTRING rsi, "code"
+    call ap_strcmp
+    test eax, eax
+    jnz .not_code
+    mov rdi, rbx
+    lea rsi, [rel exc_SystemExit_type]
+    call exc_isinstance
+    test eax, eax
+    jnz .get_code
+.not_code:
+
     ; Check "value" (for StopIteration.value)
     lea rdi, [r12 + PyStrObject.data]
     CSTRING rsi, "value"
@@ -563,6 +577,44 @@ DEF_FUNC exc_getattr
 .return_empty_tuple:
     xor edi, edi
     call tuple_new
+    mov edx, TAG_PTR
+    pop r12
+    pop rbx
+    leave
+    V_PACK rax, rdx             ; return one Value
+    ret
+
+.get_code:
+    ; An explicit `e.code = x` wins; otherwise code is args[0] when there is
+    ; exactly one argument, the whole args tuple when there are more, and
+    ; None when there are none.
+    mov rdi, [rbx + PyExceptionObject.exc_dict]
+    test rdi, rdi
+    jz .code_from_args
+    mov rsi, r12
+    call dict_get
+    V_UNPACK rax, rdx
+    test edx, edx
+    jnz .found_in_dict
+.code_from_args:
+    mov rax, [rbx + PyExceptionObject.exc_args]
+    test rax, rax
+    jz .return_none
+    mov rcx, [rax + PyTupleObject.ob_size]
+    test rcx, rcx
+    jz .return_none
+    cmp rcx, 1
+    jne .code_tuple
+    mov rcx, [rax + PyTupleObject.ob_item]
+    mov rax, [rcx]
+    INCREF_V rax, rdx
+    mov edx, TAG_PTR
+    pop r12
+    pop rbx
+    leave
+    ret
+.code_tuple:
+    INCREF rax
     mov edx, TAG_PTR
     pop r12
     pop rbx

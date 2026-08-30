@@ -471,55 +471,29 @@ END_FUNC sys_module_init
 ; sys.exit([code]) — exit the process
 ; ============================================================================
 DEF_FUNC sys_exit_func
-    cmp rsi, 0
-    je .exit_0
+    ; sys.exit raises SystemExit; it does not call the exit syscall.  Calling
+    ; it directly skipped every `finally` block and context-manager __exit__
+    ; between here and the top, and made `except SystemExit` unwritable.
+    ; main.asm turns an uncaught SystemExit into the process status.
+    xor edx, edx                ; no argument -> SystemExit()
     cmp rsi, 1
-    jne .exit_0
-
-    ; Get exit code from args[0].  int_to_i64 reads PyIntObject.compact
-    ; unconditionally, so it may only be handed something that really is an
-    ; int -- sys.exit("usage") used to read a string's payload as one and
-    ; then dereference the mpz limb pointer it found there.
-    mov rdi, [rdi]            ; args[0] Value
-    V_UNPACK rdi, rdx
-    cmp edx, TAG_SMALLINT
-    je .exit_int
-    cmp edx, TAG_PTR
-    jne .exit_nonzero         ; a float exit status is not a status
-    mov rax, [rdi + PyObject.ob_type]
-    lea rcx, [rel none_singleton]
-    cmp rdi, rcx
-    je .exit_0                ; sys.exit(None) is a success exit
-    lea rcx, [rel str_type]
-    cmp rax, rcx
-    je .exit_message
-    REQUIRE_INT_TYPE rax, rcx, .exit_nonzero
-
-.exit_int:
-    ; int_to_i64 takes the payload plus the tag in edx, not a packed Value.
-    call int_to_i64
-    mov edi, eax
-    call sys_exit
-
-.exit_message:
-    ; A non-integer argument is a message: CPython prints it on stderr and
-    ; exits 1.  Compute both operands before clobbering rdi.
-    mov rdx, [rdi + PyStrObject.ob_size]    ; length
-    lea rsi, [rdi + PyStrObject.data]       ; data
-    mov edi, 2                              ; stderr
-    call sys_write
-    mov edi, 2
-    lea rsi, [rel sys_exit_nl]
-    mov edx, 1
-    call sys_write
-
-.exit_nonzero:
-    mov edi, 1
-    call sys_exit
-
-.exit_0:
-    xor edi, edi
-    call sys_exit
+    jne .se_raise
+    mov rdx, [rdi]              ; args[0], already a Value
+    lea rax, [rel none_singleton]
+    cmp rdx, rax
+    jne .se_raise
+    xor edx, edx                ; sys.exit(None) is SystemExit(None) -> args ()
+.se_raise:
+    mov rsi, rdx
+    lea rdi, [rel exc_SystemExit_type]
+    xor edx, edx
+    extern exc_SystemExit_type
+    extern exc_new
+    call exc_new
+    mov rdi, rax
+    extern raise_exception_obj
+    call raise_exception_obj
+    ud2
 END_FUNC sys_exit_func
 
 ; ============================================================================

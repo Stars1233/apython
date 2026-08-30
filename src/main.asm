@@ -222,6 +222,16 @@ DEF_FUNC main
     test rdi, rdi
     jz .exit_ok
 
+    ; An uncaught SystemExit is the process status, not an error report.
+    push rdi
+    lea rsi, [rel exc_SystemExit_type]
+    extern exc_SystemExit_type
+    extern exc_isinstance
+    call exc_isinstance
+    pop rdi
+    test eax, eax
+    jnz .system_exit
+
     ; Print exception to stderr: "ExceptionType: message\n"
     ; Get type name
     mov rax, [rdi + PyObject.ob_type]
@@ -284,6 +294,73 @@ DEF_FUNC main
 
     ; Exit 1
     mov ebx, 1
+    jmp .exit_cleanup
+
+.system_exit:
+    ; SystemExit.code: absent or None -> 0, an int -> that status, anything
+    ; else -> print it on stderr and exit 1.
+    mov rax, [rdi + PyExceptionObject.exc_args]
+    test rax, rax
+    jz .se_zero
+    mov rcx, [rax + PyTupleObject.ob_size]
+    test rcx, rcx
+    jz .se_zero
+    mov rcx, [rax + PyTupleObject.ob_item]
+    mov rax, [rcx]                 ; args[0] as a Value
+    lea rcx, [rel none_singleton]
+    cmp rax, rcx
+    je .se_zero
+    V_IS_INT rax, rcx
+    jae .se_int
+    V_TEST_PTR rax, rcx
+    ja .se_one                     ; a float status is not a status
+    mov rcx, [rax + PyObject.ob_type]
+    extern int_type
+    lea rdx, [rel int_type]
+    cmp rcx, rdx
+    je .se_bigint
+    extern str_type
+    lea rdx, [rel str_type]
+    cmp rcx, rdx
+    jne .se_one
+    ; A message: print it and exit 1.
+    mov rdx, [rax + PyStrObject.ob_size]
+    lea rsi, [rax + PyStrObject.data]
+    mov edi, 2
+    call sys_write
+    mov edi, 2
+    lea rsi, [rel newline_char]
+    mov edx, 1
+    call sys_write
+    jmp .se_one
+
+.se_bigint:
+    ; A heap int still has to fit a process status; take it modulo 256 the
+    ; way the kernel does with the low byte of the syscall argument.
+    mov rdi, rax
+    mov edx, TAG_PTR
+    extern int_to_i64
+    call int_to_i64
+    mov ebx, eax
+    and ebx, 0xFF
+    jmp .se_finish
+
+.se_int:
+    V_TO_I64 rax
+    mov ebx, eax
+    and ebx, 0xFF
+    jmp .se_finish
+
+.se_one:
+    mov ebx, 1
+    jmp .se_finish
+
+.se_zero:
+    xor ebx, ebx
+.se_finish:
+    mov rdi, [rel current_exception]
+    call obj_decref
+    mov qword [rel current_exception], 0
     jmp .exit_cleanup
 
 .exit_ok:
