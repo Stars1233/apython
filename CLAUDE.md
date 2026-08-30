@@ -315,6 +315,12 @@ Opcodes have trailing CACHE words that must be skipped. Key counts (each = 2 byt
   `equ` for a large struct silently overlaps the scalar slots above it the
   first time the struct grows, and the symptom is one field reading as garbage.
   Derive the offset instead: `CS_UNIT equ 48 + CompUnit_size`.
+- **Asking "is this object a class?" by comparing metatypes.** `ob_type is user_type_metatype` is false for a class built by a metaclass of its own, so a classmethod reached through such a class bound the *metaclass*. Test `TYPE_FLAG_METATYPE` on the object's type instead; it is set on `type`, on the two metatypes we ship, and on any class deriving from `type`.
+- **An empty `bases` tuple is not the same as no bases.** `type(n, (), d)` substituted `object`; the metaclass paths did not, and those classes got an MRO of just `[C]` — not even instances of `object`. Invisible until a merge needs the `object` that anchors the end.
+- **A builtin's behaviour that lives only in a slot.** The stdlib asks questions by name: `hasattr(f, '__get__')` decides whether something is a descriptor, `member_type.__str__ is object.__str__` decides whether a type defines its own `str()`. A slot with no matching entry in `tp_dict` answers those wrong. When adding one, the thunk must call the *defining* type's slot, not the argument's, or a subclass re-dispatches into itself.
+- **A constructor in `tp_call` rather than `tp_new`.** `tp_call` on a type is what makes that type's *instances* callable; the constructor goes in `tp_new`, which `type_call` consults. `mappingproxy` had neither, so calling it fell through to the ordinary class-construction path and left its fields holding whatever was there.
+- **Reading a key's tag out of `edx` in an `mp_subscript`.** `BINARY_SUBSCR` builds the key Value with `V_PACK`, which *clobbers* the register the tag was in — the value left behind happens to equal `TAG_SMALLINT` for positive ints and not for negative ones. Classify from the Value itself with `V_TEST_PTR`.
+- **A constant that is a Value, not a pointer.** `ast_obj_at` hands back whatever the object arena holds, and `class C: 42` puts an immediate int there. Reading `ob_type` off one dereferences the number.
 - **A removed load whose guard stayed.** The `(payload, tag)` conversion deleted many `key_tag` loads; where the `test`/`jz` that used them was left in place it now reads a stale register — `from mod import *` and `dict.popitem()` both failed this way, silently. When deleting a load, delete its test.
 
 ## Adding a New Test
