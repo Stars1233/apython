@@ -39,7 +39,7 @@ HEADERS = $(wildcard include/*.inc)
 # Python compiler for tests
 PYTHON = python3
 
-.PHONY: all clean check gen-cpython-tests check-cpython
+.PHONY: all clean check gen-cpython-tests check-cpython check-stdlib
 
 all: $(TARGET)
 
@@ -64,6 +64,12 @@ clean:
 # Test target: compile .py to .pyc, run both python3 and apython, diff
 check: $(TARGET)
 	@bash tests/run_tests.sh
+
+# How much of CPython 3.12's own Lib/ can we import?  Ratchets against
+# tests/stdlib_floor.txt.  Needs a CPython source checkout; set CPYTHON_LIB
+# to point at its Lib/ directory.  Skips cleanly when it is absent.
+check-stdlib: $(TARGET)
+	@bash tests/stdlib_probe.sh
 
 # Compile a single .py to .pyc
 tests/__pycache__/%.cpython-312.pyc: tests/%.py
