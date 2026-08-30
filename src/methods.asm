@@ -11045,6 +11045,42 @@ DEF_FUNC methods_init
     lea rax, [rel object_type]
     mov [rax + PyTypeObject.tp_dict], rbx
 
+    ;; --- type_type: __new__, so a metaclass can call super().__new__ ---
+    extern type_type
+    call dict_new
+    mov rbx, rax
+
+    extern type_method_new
+    lea rdi, [rel type_method_new]
+    lea rsi, [rel mn___new__]
+    call builtin_func_new
+    push rax
+    mov edi, PyStaticMethodObject_size
+    lea rsi, [rel staticmethod_type]
+    call gc_alloc
+    pop rcx
+    mov [rax + PyStaticMethodObject.sm_callable], rcx
+    mov r12, rax
+    mov rdi, rax
+    call gc_track
+    lea rdi, [rel mn___new__]
+    call str_from_cstr_heap
+    push rax
+    mov rdi, rbx
+    mov rsi, rax
+    mov rdx, r12
+    call dict_set
+    pop rdi
+    call obj_decref
+    mov rdi, r12
+    call obj_decref
+
+    mov rdi, rbx
+    call add_class_getitem
+
+    lea rax, [rel type_type]
+    mov [rax + PyTypeObject.tp_dict], rbx
+
     ;; --- function type: expose its introspection attributes on the type ---
     ;; types.py takes GetSetDescriptorType from `type(FunctionType.__code__)`
     ;; and MemberDescriptorType from `type(FunctionType.__globals__)`, so both

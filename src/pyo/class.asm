@@ -1076,6 +1076,13 @@ DEF_FUNC type_call
     V_TEST_F64_M [rsi], r11      ; args[0] a float?
     jbe .type_float
     mov rax, [rax + PyObject.ob_type]
+    ; The heaptype metatype is an implementation split, not a language type:
+    ; CPython has one `type`, and `type(C) is type` for an ordinary class.
+    lea rcx, [rel user_type_metatype]
+    cmp rax, rcx
+    jne .type_of_have_type
+    lea rax, [rel type_type]
+.type_of_have_type:
     inc qword [rax + PyObject.ob_refcnt]
     mov edx, TAG_PTR
     leave

@@ -889,6 +889,13 @@ DEF_FUNC builtin_type
     ; None check
 
     mov rax, [rdi + PyObject.ob_type]
+    ; See value_type: the heaptype metatype is not a language-visible type.
+    extern user_type_metatype
+    lea rcx, [rel user_type_metatype]
+    cmp rax, rcx
+    jne .type_have_type
+    lea rax, [rel type_type]
+.type_have_type:
     INCREF rax
 
     mov edx, TAG_PTR
@@ -937,7 +944,9 @@ END_FUNC builtin_type
 ;; isinstance(obj, type) -> True/False
 ;; Walks the full tp_base chain for inheritance.
 ;; ============================================================================
-DEF_FUNC builtin_isinstance
+ISI_OBJ   equ 8         ; the object as a Value, for __instancecheck__
+ISI_FRAME equ 16
+DEF_FUNC builtin_isinstance, ISI_FRAME
     push rbx
     push r12
 
@@ -947,6 +956,8 @@ DEF_FUNC builtin_isinstance
     extern bool_true
     extern bool_false
 
+    mov rax, [rdi]
+    mov [rbp - ISI_OBJ], rax   ; the object as a Value, for __instancecheck__
     mov rax, [rdi]             ; rax = args[0] = obj
     V_UNPACK rax, r8
     mov rcx, [rdi + 8]         ; rcx = args[1] = type_to_check
@@ -987,18 +998,33 @@ DEF_FUNC builtin_isinstance
     lea r8, [rel tuple_type]
     cmp rax, r8
     je .isinstance_tuple
-    ; Validate it's a type (ob_type == type_type, user_type_metatype, or exc_metatype)
-    lea r8, [rel type_type]
-    cmp rax, r8
+    ; Any class, including one built by a user metaclass.
+    push rcx
+    push rdx
+    mov rdi, rcx
+    extern type_check_is_class
+    call type_check_is_class
+    pop rdx
+    pop rcx
+    test eax, eax
+    jz .isinstance_type_error
+
+    ; A metaclass may define __instancecheck__ -- that is how ABCMeta makes
+    ; isinstance() consult a registry rather than the MRO.
+    push rcx
+    push rdx
+    mov rdi, rcx                ; the class
+    mov rsi, [rbp - ISI_OBJ]    ; the object
+    CSTRING rdx, "__instancecheck__"
+    extern type_custom_check
+    call type_custom_check
+    pop rdx
+    pop rcx
+    cmp eax, -1
     je .isinstance_check
-    extern user_type_metatype
-    lea r8, [rel user_type_metatype]
-    cmp rax, r8
-    je .isinstance_check
-    extern exc_metatype
-    lea r8, [rel exc_metatype]
-    cmp rax, r8
-    jne .isinstance_type_error
+    test eax, eax
+    jz .isinstance_false
+    jmp .isinstance_true
 
 .isinstance_check:
     ; The MRO, not the tp_base chain: a class with several bases is an
@@ -1025,9 +1051,18 @@ DEF_FUNC builtin_isinstance
     push r8
     push rsi
     push rsi                   ; keep the stack 16-byte aligned
+    mov rdi, [rsi + r8*8]      ; the class from the tuple
+    mov rsi, [rbp - ISI_OBJ]   ; the object
+    CSTRING rdx, "__instancecheck__"
+    call type_custom_check
+    cmp eax, -1
+    jne .isinstance_tuple_verdict
+    mov rsi, [rsp]             ; the saved payload array
+    mov r8, [rsp + 16]
     mov rdi, r12               ; obj's type
     mov rsi, [rsi + r8*8]      ; type from tuple
     call type_is_subtype
+.isinstance_tuple_verdict:
     pop rsi
     pop rsi
     test eax, eax
@@ -1091,22 +1126,20 @@ DEF_FUNC builtin_issubclass
     mov rcx, [rdi + 8]         ; rcx = args[1] = parent
     V_UNPACK rcx, r9
 
-    ; Validate first arg is a type (TAG_PTR with recognized metatype)
+    ; Validate first arg is a type.  A user metaclass makes its instances
+    ; classes too, so this is a subtype test, not three pointer compares.
     cmp r8d, TAG_PTR
     jne .issubclass_arg1_error
-    mov rax, [rdx + PyObject.ob_type]
-    lea r10, [rel type_type]
-    cmp rax, r10
-    je .issubclass_arg1_ok
-    extern user_type_metatype
-    lea r10, [rel user_type_metatype]
-    cmp rax, r10
-    je .issubclass_arg1_ok
-    extern exc_metatype
-    lea r10, [rel exc_metatype]
-    cmp rax, r10
-    jne .issubclass_arg1_error
-.issubclass_arg1_ok:
+    push rcx
+    push rdx
+    push r9
+    mov rdi, rdx
+    call type_check_is_class
+    pop r9
+    pop rdx
+    pop rcx
+    test eax, eax
+    jz .issubclass_arg1_error
 
     ; Check if second arg is a tuple
     cmp r9d, TAG_PTR
@@ -1115,22 +1148,37 @@ DEF_FUNC builtin_issubclass
     lea r10, [rel tuple_type]
     cmp rax, r10
     je .issubclass_tuple
-    ; Validate second arg is a type (recognized metatype)
-    lea r10, [rel type_type]
-    cmp rax, r10
-    je .issubclass_walk
-    lea r10, [rel user_type_metatype]
-    cmp rax, r10
-    je .issubclass_walk
-    lea r10, [rel exc_metatype]
-    cmp rax, r10
-    jne .issubclass_arg2_error
+    ; Validate second arg is a type
+    push rcx
+    push rdx
+    mov rdi, rcx
+    call type_check_is_class
+    pop rdx
+    pop rcx
+    test eax, eax
+    jz .issubclass_arg2_error
 
-    ; Single type check, over the MRO
+    ; Single type check.  A metaclass __subclasscheck__ -- ABCMeta's, above
+    ; all -- decides before the MRO is walked, since a virtual subclass is
+    ; not in anyone's MRO.
 .issubclass_walk:
+    push rcx
+    push rdx
+    mov rdi, rcx                ; the parent class
+    mov rsi, rdx                ; the candidate subclass
+    CSTRING rdx, "__subclasscheck__"
+    call type_custom_check
+    pop rdx
+    pop rcx
+    cmp eax, -1
+    jne .issubclass_from_hook
     mov rdi, rdx
     mov rsi, rcx
     call type_is_subtype
+    test eax, eax
+    jnz .issubclass_true
+    jmp .issubclass_false
+.issubclass_from_hook:
     test eax, eax
     jnz .issubclass_true
     jmp .issubclass_false
@@ -1147,9 +1195,18 @@ DEF_FUNC builtin_issubclass
     jge .issubclass_false
     push rsi
     push r8
+    mov rdi, [rsi + r8*8]      ; the parent from the tuple
+    mov rsi, r12               ; cls
+    CSTRING rdx, "__subclasscheck__"
+    call type_custom_check
+    cmp eax, -1
+    jne .issubclass_tuple_verdict
+    mov rax, [rsp + 8]         ; the saved payload array
+    mov r8, [rsp]
     mov rdi, r12               ; cls
-    mov rsi, [rsi + r8*8]      ; type from tuple
+    mov rsi, [rax + r8*8]      ; type from tuple
     call type_is_subtype
+.issubclass_tuple_verdict:
     test eax, eax
     jnz .issubclass_tuple_match
     pop r8
@@ -1406,6 +1463,53 @@ DEF_FUNC builtin_float, BF_FRAME
     CSTRING rsi, "float() takes at most 1 argument"
     call raise_exception
 END_FUNC builtin_float
+
+;; ============================================================================
+;; type.__new__(mcls, name, bases, ns) -> a new class whose metatype is mcls
+;;
+;; A metaclass __new__ almost always ends in
+;; `super().__new__(mcls, name, bases, ns)`, and without this that resolved to
+;; object.__new__ and produced an *instance* of the metaclass rather than a
+;; class.  ABCMeta is written exactly that way, so abc.py depends on it.
+;; ============================================================================
+global type_method_new
+DEF_FUNC type_method_new
+    push rbx
+    push r12
+    cmp rsi, 4
+    jne .tmn_error
+    mov rbx, rdi                    ; args
+    mov r12, [rdi]                  ; mcls
+
+    mov rdi, [rbx + 8]              ; name
+    mov rsi, [rbx + 16]             ; bases
+    mov rdx, [rbx + 24]             ; namespace
+    ; type_from_parts adopts a reference to each
+    push rdi
+    call obj_incref
+    pop rdi
+    push rdi
+    mov rdi, rdx
+    call obj_incref
+    pop rdi
+    mov rsi, [rbx + 16]
+    mov rdx, [rbx + 24]
+    call type_from_parts
+
+    ; The metatype is whatever __new__ was handed, not the default.
+    mov [rax + PyObject.ob_type], r12
+    mov edx, TAG_PTR
+    pop r12
+    pop rbx
+    leave
+    V_PACK rax, rdx
+    ret
+
+.tmn_error:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "type.__new__() takes exactly 3 arguments"
+    call raise_exception
+END_FUNC type_method_new
 
 ;; ============================================================================
 ;; type_from_parts(rdi = name str, rsi = bases tuple or NULL, rdx = namespace dict)
@@ -1801,6 +1905,33 @@ TFP_BASES equ 56            ; the bases tuple, or NULL
              TYPE_FLAG_DICT_SUBCLASS | TYPE_FLAG_SET_SUBCLASS
     or [r12 + PyTypeObject.tp_flags], r10
 
+    ; A class deriving from `type` is a metatype: its instances are classes,
+    ; so it uses type's attribute slots.  Leaving instance_getattr/setattr
+    ; wired made `cls.x = 1` inside a metaclass __new__ walk tp_dictoffset on
+    ; a PyTypeObject and write through a bogus offset.
+    mov rdi, [rbp - TFP_BASE]
+    test rdi, rdi
+    jz .bc_not_metatype
+    lea rsi, [rel type_type]
+    extern type_is_subtype
+    call type_is_subtype
+    test eax, eax
+    jz .bc_not_metatype
+    extern type_getattr
+    extern type_setattr
+    lea rax, [rel type_getattr]
+    mov [r12 + PyTypeObject.tp_getattr], rax
+    lea rax, [rel type_setattr]
+    mov [r12 + PyTypeObject.tp_setattr], rax
+    mov qword [r12 + PyTypeObject.tp_dictoffset], 0
+    mov qword [r12 + PyTypeObject.tp_basicsize], TYPE_OBJECT_SIZE
+    ; Calling a metatype builds a class, so it needs type's tp_call, not the
+    ; instance-constructing one a heaptype gets by default.
+    extern type_call
+    lea rax, [rel type_call]
+    mov [r12 + PyTypeObject.tp_call], rax
+.bc_not_metatype:
+
     ; If base is an exception type, inherit exception-compatible methods
     extern type_is_exc_subclass
     mov rdi, [rbp - TFP_BASE]
@@ -2014,13 +2145,55 @@ DEF_FUNC builtin___build_class__
     push r14
     push r15
 BCL_BASES equ 48        ; the bases tuple built from args[2:]
-    sub rsp, 24             ; [rbp-48] = bases tuple, rest padding
+BCL_META  equ 56        ; the metaclass= keyword, or 0
+BCL_NPOS  equ 64        ; positional arg count (nargs minus the keywords)
+    sub rsp, 48
 
     ; Check nargs >= 2
     cmp rsi, 2
     jl .build_class_error
 
     mov rbx, rdi            ; rbx = args
+    mov qword [rbp - BCL_META], 0
+    mov [rbp - BCL_NPOS], rsi
+
+    ; `class C(metaclass=M)` passes M as a keyword, and it arrives in the
+    ; positional array with its name in kw_names_pending.  Without splitting
+    ; them off, M was treated as a *base* -- which is why metaclass= appeared
+    ; to be ignored: the metatype never got a chance to run.
+    mov rax, [rel kw_names_pending]
+    test rax, rax
+    jz .bc_no_kwargs
+    mov rcx, [rax + PyTupleObject.ob_size]
+    sub [rbp - BCL_NPOS], rcx
+    mov r8, [rax + PyTupleObject.ob_item]
+    xor r9d, r9d
+.bc_kw_loop:
+    cmp r9, rcx
+    jge .bc_no_kwargs
+    mov rdx, [r8 + r9*8]            ; the keyword name
+    push rcx
+    push r8
+    push r9
+    lea rdi, [rdx + PyStrObject.data]
+    CSTRING rsi, "metaclass"
+    call ap_strcmp
+    pop r9
+    pop r8
+    pop rcx
+    test eax, eax
+    jne .bc_kw_next
+    mov rdx, [rbp - BCL_NPOS]
+    add rdx, r9
+    mov rax, [rbx + rdx*8]          ; its value
+    mov [rbp - BCL_META], rax
+.bc_kw_next:
+    inc r9
+    jmp .bc_kw_loop
+.bc_no_kwargs:
+    ; Consumed: anything we call from here on must not see them again.
+    mov qword [rel kw_names_pending], 0
+    mov rsi, [rbp - BCL_NPOS]
     ; r12 will be used later for the type object
 
     ; Collect every base into a tuple.  Only args[2] used to be read, so
@@ -2117,6 +2290,113 @@ BCL_BASES equ 48        ; the bases tuple built from args[2:]
     mov rdi, r12
     call frame_free
 
+    ; A metaclass is inherited: `class D(C)` where type(C) is M gives D the
+    ; metatype M as well.  CPython picks the most derived metatype among the
+    ; bases; the winner is the one that is a subtype of every other, and
+    ; starting from `type` makes an ordinary base contribute nothing.
+    cmp qword [rbp - BCL_META], 0
+    jne .bc_metaclass_settled
+    mov rcx, [rbp - BCL_BASES]
+    test rcx, rcx
+    jz .bc_metaclass_settled
+    lea r8, [rel type_type]                 ; r8 = winner so far
+    mov r9, [rcx + PyTupleObject.ob_size]
+    mov r10, [rcx + PyTupleObject.ob_item]
+    xor r11d, r11d
+.bc_meta_scan:
+    cmp r11, r9
+    jge .bc_meta_scan_done
+    mov rdi, [r10 + r11*8]
+    V_TEST_PTR rdi, rax
+    ja .bc_meta_scan_next
+    test rdi, rdi
+    jz .bc_meta_scan_next
+    mov rdi, [rdi + PyObject.ob_type]       ; the base's metatype
+    cmp rdi, r8
+    je .bc_meta_scan_next
+    push r8
+    push r9
+    push r10
+    push r11
+    mov rsi, r8
+    call type_is_subtype                    ; is it more derived than the winner?
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    test eax, eax
+    jz .bc_meta_scan_next
+    mov rdi, [r10 + r11*8]
+    mov r8, [rdi + PyObject.ob_type]
+.bc_meta_scan_next:
+    inc r11
+    jmp .bc_meta_scan
+.bc_meta_scan_done:
+    ; The three built-in metatypes go through type_from_parts as before --
+    ; they have no __new__ of their own to run.
+    lea rax, [rel type_type]
+    cmp r8, rax
+    je .bc_metaclass_settled
+    extern user_type_metatype
+    lea rax, [rel user_type_metatype]
+    cmp r8, rax
+    je .bc_metaclass_settled
+    extern exc_metatype
+    lea rax, [rel exc_metatype]
+    cmp r8, rax
+    je .bc_metaclass_settled
+    mov [rbp - BCL_META], r8
+
+.bc_metaclass_settled:
+    ; With a metaclass, CPython calls meta(name, bases, ns) rather than
+    ; building the type itself -- that is what runs M.__new__ and
+    ; M.__init__, and what makes type(C) be M.
+    cmp qword [rbp - BCL_META], 0
+    je .bc_no_metaclass
+    mov rdi, [rbp - BCL_META]
+    extern type_check_is_class
+    push rdi
+    call type_check_is_class
+    pop rdi
+    test eax, eax
+    jz .bc_no_metaclass
+
+    ; meta(name, bases, ns) through its type's tp_call
+    mov rax, [rdi + PyObject.ob_type]
+    mov rax, [rax + PyTypeObject.tp_call]
+    test rax, rax
+    jz .bc_no_metaclass
+    sub rsp, 32
+    mov [rsp], r14                      ; name
+    mov rcx, [rbp - BCL_BASES]
+    test rcx, rcx
+    jnz .bc_meta_have_bases
+    push rax
+    push rdi
+    xor edi, edi
+    call tuple_new
+    mov rcx, rax
+    mov [rbp - BCL_BASES], rax
+    pop rdi
+    pop rax
+.bc_meta_have_bases:
+    mov [rsp + 8], rcx                  ; bases
+    mov [rsp + 16], r15                 ; namespace
+    mov rsi, rsp
+    mov edx, 3
+    call rax
+    V_UNPACK rax, rdx
+    add rsp, 32
+    push rax
+    mov rdi, [rbp - BCL_BASES]
+    test rdi, rdi
+    jz .bc_meta_done
+    call obj_decref
+.bc_meta_done:
+    pop rax
+    jmp .bc_have_class
+
+.bc_no_metaclass:
     ; Build the heaptype from (name, bases, namespace); the three-argument
     ; type() reaches the same code.
     mov rdi, r14
@@ -2131,7 +2411,8 @@ BCL_BASES equ 48        ; the bases tuple built from args[2:]
 .bc_bases_released:
     pop rax
 
-    add rsp, 24
+.bc_have_class:
+    add rsp, 48
     pop r15
     pop r14
     pop r13

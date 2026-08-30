@@ -371,6 +371,16 @@ DEF_FUNC_BARE value_type
     test rdi, rdi
     jz .vt_null
     mov rax, [rdi + PyObject.ob_type]
+    ; A heaptype's metatype is an internal split -- it exists only so that
+    ; heaptypes get a tp_dealloc that static types must not have.  CPython
+    ; has one `type`, and `type(C) is type` for an ordinary class, so report
+    ; the one the language defines.
+    extern user_type_metatype
+    lea rcx, [rel user_type_metatype]
+    cmp rax, rcx
+    jne .vt_done
+    lea rax, [rel type_type]
+.vt_done:
     ret
 .vt_int:
     lea rax, [rel int_type]

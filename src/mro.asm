@@ -23,6 +23,8 @@
 extern ap_malloc
 extern ap_free
 extern tuple_new
+extern obj_decref
+extern obj_dealloc
 extern obj_incref
 extern object_type
 extern raise_exception
@@ -99,6 +101,15 @@ DEF_FUNC_BARE type_check_is_class
     lea rcx, [rel exc_metatype]
     cmp rax, rcx
     je .tc_yes
+    ; A user metaclass is a class too: `class C(metaclass=M)` gives C an
+    ; ob_type of M, which is none of the three built-in metatypes.
+    push rdi
+    mov rdi, rax
+    lea rsi, [rel type_type]
+    call type_is_subtype
+    pop rdi
+    test eax, eax
+    jnz .tc_yes
 .tc_no:
     xor eax, eax
     ret
@@ -106,6 +117,88 @@ DEF_FUNC_BARE type_check_is_class
     mov eax, 1
     ret
 END_FUNC type_check_is_class
+
+; ----------------------------------------------------------------------------
+; type_custom_check(rdi = class, rsi = object Value, rdx = dunder name cstr)
+;   -> eax: 1 = yes, 0 = no, -1 = no override, decide the normal way
+;
+; A metaclass may define __instancecheck__ / __subclasscheck__; ABCMeta does,
+; and that is how isinstance() consults a virtual-subclass registry instead of
+; the MRO.  Only a *user* metatype is consulted -- the three builtin metatypes
+; have no such method, and looking one up on every isinstance() would cost a
+; dict probe per call.
+; ----------------------------------------------------------------------------
+TCI_CLS   equ 8
+TCI_OBJ   equ 16
+TCI_NAME  equ 24
+TCI_FRAME equ 32
+global type_custom_check
+DEF_FUNC type_custom_check, TCI_FRAME
+    push rbx
+    mov [rbp - TCI_CLS], rdi
+    mov [rbp - TCI_OBJ], rsi
+    mov [rbp - TCI_NAME], rdx
+
+    mov rdi, [rdi + PyObject.ob_type]       ; the metatype
+    lea rax, [rel type_type]
+    cmp rdi, rax
+    je .tcc_none
+    extern user_type_metatype
+    lea rax, [rel user_type_metatype]
+    cmp rdi, rax
+    je .tcc_none
+    extern exc_metatype
+    lea rax, [rel exc_metatype]
+    cmp rdi, rax
+    je .tcc_none
+
+    mov rsi, [rbp - TCI_NAME]
+    extern dunder_lookup
+    call dunder_lookup
+    V_UNPACK rax, rdx
+    test edx, edx
+    jz .tcc_none
+
+    ; call it as method(cls, obj)
+    mov rdi, rax
+    mov rcx, [rdi + PyObject.ob_type]
+    mov rcx, [rcx + PyTypeObject.tp_call]
+    test rcx, rcx
+    jz .tcc_none
+    sub rsp, 16
+    mov rax, [rbp - TCI_CLS]
+    mov [rsp], rax
+    mov rax, [rbp - TCI_OBJ]
+    mov [rsp + 8], rax
+    mov rsi, rsp
+    mov edx, 2
+    call rcx
+    V_UNPACK rax, rdx
+    add rsp, 16
+    test edx, edx
+    jz .tcc_none
+
+    push rax
+    push rdx
+    mov rdi, rax
+    V_PACK rdi, rdx
+    extern obj_is_true
+    call obj_is_true
+    mov ebx, eax
+    pop rdx
+    pop rdi
+    DECREF_VAL rdi, rdx
+    mov eax, ebx
+    pop rbx
+    leave
+    ret
+
+.tcc_none:
+    mov eax, -1
+    pop rbx
+    leave
+    ret
+END_FUNC type_custom_check
 
 ; ----------------------------------------------------------------------------
 ; type_is_subtype(rdi = candidate subtype, rsi = type) -> eax 0/1
