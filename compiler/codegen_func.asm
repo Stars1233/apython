@@ -36,6 +36,7 @@ extern comp_intern
 extern comp_intern_cstr
 extern obj_decref
 extern str_from_cstr_heap
+extern str_type
 extern sym_at
 extern cg_call_args_only
 extern sym_finalize
@@ -609,6 +610,103 @@ CB_N      equ 64
 CB_NAME   equ 72
 CB_ARGS   equ 80
 CB_FRAME  equ 88          ; + 3 pushes = 112
+;; ============================================================================
+;; cg_docstring(Comp *c, CompUnit *u, uint32_t body) -> rax = 1 ok, 0 error
+;;
+;; A module or class body whose first statement is a bare string literal binds
+;; it as __doc__.  A function needs nothing here -- func_doc reads co_consts[0],
+;; which the same statement fills -- but a module and a class have to store it
+;; by name, and without that `C.__doc__` was None for every documented class.
+;; Anything else as the first statement, including an expression that merely
+;; begins with a string, leaves __doc__ alone.
+;; ============================================================================
+CDS_COMP  equ 8
+CDS_UNIT  equ 16
+CDS_LINE  equ 24
+CDS_FRAME equ 40          ; + 1 push = 56
+global cg_docstring
+DEF_FUNC cg_docstring, CDS_FRAME
+    push rbx
+    mov rbx, rdi
+    mov [rbp - CDS_UNIT], rsi
+
+    mov rdi, rbx
+    mov rsi, rdx
+    call ast_at
+    movzx ecx, word [rax + AstNode.nchild]
+    test ecx, ecx
+    jz .cds_none
+    mov rsi, rax
+    xor edx, edx
+    mov rdi, rbx
+    call ast_child                      ; the first statement
+    mov rdi, rbx
+    mov rsi, rax
+    call ast_at
+    movzx ecx, byte [rax + AstNode.kind]
+    cmp ecx, AST_EXPR_STMT
+    jne .cds_none
+    mov ecx, [rax + AstNode.lineno]
+    mov [rbp - CDS_LINE], rcx
+    mov edx, [rax + AstNode.a]          ; the expression
+    mov rdi, rbx
+    mov rsi, rdx
+    call ast_at
+    movzx ecx, byte [rax + AstNode.kind]
+    cmp ecx, AST_CONST
+    jne .cds_none
+    mov esi, [rax + AstNode.a]
+    mov rdi, rbx
+    call ast_obj_at
+    test rax, rax
+    jz .cds_none
+    ; A constant is a Value: `class C: 42` puts an immediate int here, and
+    ; reading ob_type off one dereferences the number.
+    V_TEST_PTR rax, rcx
+    ja .cds_none
+    mov rcx, [rax + PyObject.ob_type]
+    lea rdx, [rel str_type]
+    cmp rcx, rdx
+    jne .cds_none
+
+    ; LOAD_CONST <the string>; STORE_NAME __doc__
+    mov rdi, [rbp - CDS_UNIT]
+    mov rsi, rax
+    call cg_const
+    mov rdx, rax
+    mov rdi, [rbp - CDS_UNIT]
+    mov esi, OP_LOAD_CONST
+    mov rcx, [rbp - CDS_LINE]
+    call cg_emit
+    or byte [rax + Instr.flags], IF_NOLINE
+
+    mov rdi, rbx
+    lea rsi, [rel cg_doc_dunder]
+    call comp_intern_cstr
+    test rax, rax
+    jz .cds_fail
+    mov rdi, [rbp - CDS_UNIT]
+    mov rsi, rax
+    call cg_name
+    mov rdx, rax
+    mov rdi, [rbp - CDS_UNIT]
+    mov esi, OP_STORE_NAME
+    mov rcx, [rbp - CDS_LINE]
+    call cg_emit
+    or byte [rax + Instr.flags], IF_NOLINE
+
+.cds_none:
+    mov eax, 1
+    pop rbx
+    leave
+    ret
+.cds_fail:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+END_FUNC cg_docstring
+
 DEF_FUNC cg_compile_body, CB_FRAME
     push rbx
     push r12
@@ -733,6 +831,12 @@ DEF_FUNC cg_compile_body, CB_FRAME
     mov rdx, [rbp - CB_NAME]
     mov rcx, [rbp - CB_LINE]
     call cg_class_prologue
+    test eax, eax
+    jz .fail
+    mov rdi, rbx
+    mov rsi, r12
+    mov rdx, r13
+    call cg_docstring
     test eax, eax
     jz .fail
 .body_start:
@@ -1597,6 +1701,7 @@ cg_classcell_dunder: db "__classcell__", 0
 cg_name_dunder:     db "__name__", 0
 cg_module_dunder:   db "__module__", 0
 cg_qualname_dunder: db "__qualname__", 0
+cg_doc_dunder:      db "__doc__", 0
 
 cg_lambda_name: db "<lambda>", 0
 

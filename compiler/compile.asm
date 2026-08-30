@@ -494,6 +494,16 @@ DEF_FUNC compile_source, CS_FRAME
     cmp qword [rbp - CS_MODE], CMODE_EVAL
     je .gen_eval
 
+    ; A leading string literal is the module's __doc__, not a statement whose
+    ; value is thrown away.
+    mov rdi, rbx
+    mov rsi, r12
+    mov rdx, [rbp - CS_ROOT]
+    extern cg_docstring
+    call cg_docstring
+    test eax, eax
+    jz .failed
+
     mov rdi, rbx
     mov rsi, r12
     mov rdx, [rbp - CS_ROOT]

@@ -13,11 +13,13 @@ ok _compat_pickle
 ok concurrent
 ok email
 ok encodings
+ok enum
 ok functools
 ok __future__
 ok graphlib
 ok heapq
 ok __hello__
+ok http
 ok idlelib
 ok keyword
 ok nturl2path

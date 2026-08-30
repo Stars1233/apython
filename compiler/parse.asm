@@ -2686,8 +2686,14 @@ DEF_FUNC par_comprehension, PCM_FRAME
     test eax, eax
     jz .fail
 
+    ; Both the iterable and each condition are a `disjunction`, so `or` and
+    ; `and` belong to them and the ternary `if` does not.  BP_TERNARY is
+    ; exactly that line: the driver continues while lbp > min_bp, so `or` (6)
+    ; is taken and TOK_IF, whose lbp *is* BP_TERNARY, is left to us.  Asking
+    ; for BP_OR here stopped one operator too early and reported the `or` as
+    ; an unclosed comprehension.
     mov rdi, rbx
-    mov esi, BP_OR                      ; leaves a trailing `if` to us
+    mov esi, BP_TERNARY
     call par_expr
     test rax, rax
     jz .fail
@@ -2705,7 +2711,7 @@ DEF_FUNC par_comprehension, PCM_FRAME
     mov rdi, rbx
     call par_advance
     mov rdi, rbx
-    mov esi, BP_OR
+    mov esi, BP_TERNARY                 ; a disjunction; see above
     call par_expr
     test rax, rax
     jz .fail

@@ -1871,7 +1871,8 @@ CC2_NPOS  equ 56
 CC2_NKW   equ 64
 CC2_CHILD equ 72
 CC2_MARK  equ 80
-CC2_FRAME equ 88          ; + 3 pushes = 112
+CC2_EX    equ 88
+CC2_FRAME equ 104         ; + 3 pushes = 128
 DEF_FUNC_LOCAL cg_e_call, CC2_FRAME
     push rbx
     push r12
@@ -1887,6 +1888,26 @@ DEF_FUNC_LOCAL cg_e_call, CC2_FRAME
     mov [rbp - CC2_N], rcx
     mov ecx, [rax + AstNode.lineno]
     mov [rbp - CC2_LINE], rcx
+
+    ; Whether the call is unpacked has to be settled before the callable is
+    ; emitted.  CALL_FUNCTION_EX reads [NULL, callable, args], and the
+    ; method-call form fills that NULL slot with the instance instead -- so an
+    ; unpacked call cannot use it.  Deciding this down at .args, after
+    ; LOAD_ATTR had already gone out with bit 0 set, left `o.m(*a)` calling
+    ; the object rather than the method.
+    mov rdi, rbx
+    mov rsi, r13
+    mov edx, AST_STARRED
+    call cg_has_star
+    mov [rbp - CC2_EX], rax
+    test eax, eax
+    jnz .ex_known
+    mov rdi, rbx
+    mov rsi, r13
+    mov edx, AST_DOUBLESTARRED
+    call cg_has_star
+    mov [rbp - CC2_EX], rax
+.ex_known:
 
     ; --- the callable, with the method-call shortcut where it applies ---
     mov rdi, rbx
@@ -1915,12 +1936,28 @@ DEF_FUNC_LOCAL cg_e_call, CC2_FRAME
     jmp .args
 
 .method_call:
+    ; An unpacked call needs the NULL slot the method form would consume, and
+    ; nothing else emits one here: LOAD_GLOBAL for `super` goes out without
+    ; bit 0 set, so the PUSH_NULL has to be ours.
+    cmp qword [rbp - CC2_EX], 0
+    je .method_have_null
+    mov rdi, r12
+    mov esi, OP_PUSH_NULL
+    xor edx, edx
+    mov rcx, [rbp - CC2_LINE]
+    call cg_emit
+.method_have_null:
+
     ; super().m(...) is not an ordinary attribute load: LOAD_SUPER_ATTR takes
     ; the place of both the call to super and the attribute lookup.
     mov rdi, rbx
     mov rsi, r12
     mov rdx, [rbp - CC2_CHILD]
     mov ecx, 1                          ; the method form
+    cmp qword [rbp - CC2_EX], 0
+    je .method_super_form
+    xor ecx, ecx
+.method_super_form:
     call cg_super_attr
     cmp rax, -1
     je .fail
@@ -1947,25 +1984,19 @@ DEF_FUNC_LOCAL cg_e_call, CC2_FRAME
     mov rdi, r12
     mov rsi, rax
     call cg_name
-    lea rdx, [rax + rax + 1]            ; (index << 1) | 1
+    lea rdx, [rax + rax]                ; index << 1
+    cmp qword [rbp - CC2_EX], 0
+    jne .attr_oparg_ready
+    inc rdx                             ; bit 0: the method form
+.attr_oparg_ready:
     mov rdi, r12
     mov esi, OP_LOAD_ATTR
     mov rcx, [rbp - CC2_LINE]
     call cg_emit
 
 .args:
-    mov rdi, rbx
-    mov rsi, r13
-    mov edx, AST_STARRED
-    call cg_has_star
-    test eax, eax
-    jnz .unpacked
-    mov rdi, rbx
-    mov rsi, r13
-    mov edx, AST_DOUBLESTARRED
-    call cg_has_star
-    test eax, eax
-    jnz .unpacked
+    cmp qword [rbp - CC2_EX], 0
+    jne .unpacked
 
     ; --- the plain shape ---
     ; Positional arguments must all precede the keyword ones; CALL's oparg is a
