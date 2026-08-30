@@ -367,6 +367,7 @@ END_FUNC op_load_build_class
 ;;
 ;; Followed by 9 CACHE entries (18 bytes) that must be skipped.
 ;; ============================================================================
+extern module_type
 DEF_FUNC op_load_attr, LA_FRAME
 
     ; Extract flag and name_index
@@ -687,6 +688,13 @@ DEF_FUNC op_load_attr, LA_FRAME
     je .la_not_method              ; heaptype class attribute → [NULL, func]
     test dword [rax + PyTypeObject.tp_flags], TYPE_FLAG_HEAPTYPE
     jnz .la_not_method             ; heaptype instance attr → [NULL, func]
+    ; A module's tp_getattr answers out of the module's own namespace, not out
+    ; of a type -- `m.f` is the global f, never a method bound to m.  It is not
+    ; a heaptype, so without this it fell into the built-in case below and was
+    ; called with the module as its first argument.
+    lea rcx, [rel module_type]
+    cmp rax, rcx
+    je .la_not_method
     jmp .la_method_push            ; built-in tp_getattr → [func, self]
 
 .la_ic_check:
