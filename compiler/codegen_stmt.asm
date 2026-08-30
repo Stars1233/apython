@@ -784,7 +784,7 @@ END_FUNC cg_s_scope
 
 ;; cg_s_assert - `assert test, msg`
 ;;     <test>; POP_JUMP_IF_TRUE end
-;;     LOAD_ASSERTION_ERROR; [<msg>]; CALL 0/1; RAISE_VARARGS 1
+;;     LOAD_ASSERTION_ERROR; [<msg>; CALL 0]; RAISE_VARARGS 1
 ;;   end:
 DEF_FUNC_LOCAL cg_s_assert, CST_FRAME
     push rbx
@@ -837,16 +837,16 @@ DEF_FUNC_LOCAL cg_s_assert, CST_FRAME
     call cg_expr
     test eax, eax
     jz .fail
-.no_msg:
+    ; With a message, LOAD_ASSERTION_ERROR sits in the callable slot and the
+    ; message in the one a bound method's self would occupy, so CALL's oparg
+    ; counts zero further arguments.  Without one there is nothing to call:
+    ; RAISE_VARARGS instantiates the class itself.
     mov rdi, r12
     mov esi, OP_CALL
     xor edx, edx
-    cmp qword [rbp - CST_TMP2], 0
-    je .call_arity
-    mov edx, 1
-.call_arity:
     mov rcx, [rbp - CST_LINE]
     call cg_emit
+.no_msg:
     mov rdi, r12
     mov esi, OP_RAISE_VARARGS
     mov edx, 1

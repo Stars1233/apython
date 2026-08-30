@@ -2124,7 +2124,10 @@ align 8
 str_sequence_methods:
     dq str_len              ; sq_length       +0
     dq 0                    ; sq_concat       +8
-    dq 0                    ; sq_repeat       +16
+    ; str_repeat is also nb_multiply, but it has to be here as well: the
+    ; reflected form `3 * "ab"` reaches a sequence only through sq_repeat, and
+    ; with this NULL the int's nb_multiply took the string and read its length.
+    dq str_repeat           ; sq_repeat       +16
     dq str_getitem          ; sq_item         +24
     dq 0                    ; sq_ass_item     +32
     dq str_contains         ; sq_contains     +40

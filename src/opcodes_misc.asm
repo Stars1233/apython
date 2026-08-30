@@ -232,11 +232,10 @@ DEF_FUNC_BARE op_binary_op
 .binop_check_right_float:
     cmp qword [rsp + BO_RTAG], TAG_FLOAT
     jne .no_float_coerce
-    ; Right is float — check if this is remainder op (str % float should NOT coerce)
-    cmp r9d, 6                  ; NB_REMAINDER
-    je .no_float_coerce
-    cmp r9d, 19                 ; NB_INPLACE_REMAINDER
-    je .no_float_coerce
+    ; `"fmt" % 1.5` must reach str_mod rather than float division, and it does:
+    ; the binop_is_number test below says no for a str.  Excluding NB_REMAINDER
+    ; outright said no for an int as well, so `n % 2.0` went to int's
+    ; nb_remainder with a float on the right and dereferenced it as a PyInt.
     mov rdi, [rsp + BO_LEFT]
     mov rsi, [rsp + BO_LTAG]
     call binop_is_number

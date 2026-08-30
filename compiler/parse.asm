@@ -411,14 +411,22 @@ DEF_FUNC_LOCAL pf_unary, PFU_FRAME
     ; BINARY_OP code.  Reading it here turned -5 into `not 5`.
     mov edx, UOP_NEG
     cmp eax, TOK_MINUS
-    je .have_op
+    je .arith_unary
     mov edx, UOP_POS
     cmp eax, TOK_PLUS
-    je .have_op
+    je .arith_unary
     mov edx, UOP_INVERT
     cmp eax, TOK_TILDE
     je .have_op
     mov edx, UOP_NOT
+    jmp .have_op
+.arith_unary:
+    ; The same row's rbp is the BINARY power, which is below `*`, `/`, `//` and
+    ; `%` -- so taking it here parsed `-7 // 2` as `-(7 // 2)`, which is -3
+    ; rather than -4.  Unary minus binds tighter than a term: the grammar is
+    ; `factor: ('+'|'-'|'~') factor`.  BP_UNARY is still below BP_POWER, which
+    ; is what keeps `-2**2` equal to -4.
+    mov qword [rbp - PFU_RBP], BP_UNARY
 .have_op:
     mov [rbp - PFU_OP], rdx
 
