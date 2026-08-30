@@ -6,12 +6,14 @@
 %include "types.inc"
 %include "errcodes.inc"
 %include "frame.inc"
+%include "compiler.inc"
 
 extern bool_init
 extern ap_strcmp
 extern value_selftest_main
 extern compile_selftest_main
 extern dis_main
+extern dis_mode
 extern builtins_init
 extern methods_init
 extern import_init
@@ -117,7 +119,17 @@ DEF_FUNC main
     cmp r14, 3                  ; argc
     jl .usage
     call bool_init
+    ; `--dis -x <source>` disassembles in exec mode rather than eval mode.
     mov rdi, [r15 + 16]         ; argv[2]
+    cmp byte [rdi], '-'
+    jne .dis_go
+    cmp byte [rdi + 1], 'x'
+    jne .dis_go
+    cmp r14, 4
+    jl .usage
+    mov qword [rel dis_mode], CMODE_EXEC
+    mov rdi, [r15 + 24]
+.dis_go:
     call dis_main
     pop r15
     pop r14

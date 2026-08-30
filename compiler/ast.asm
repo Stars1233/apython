@@ -222,4 +222,106 @@ DEF_FUNC_BARE ast_obj_at
     ret
 END_FUNC ast_obj_at
 
+;; ============================================================================
+;; ast_set_ctx(Comp *c, uint32_t node, int ctx) -> rax = 1 ok, 0 not assignable
+;;
+;; Python parses an assignment target as an ordinary expression and only then
+;; decides it was a target -- `a, b = t` and `a, b` are the same production
+;; until the `=` appears.  This walks the parsed expression and re-marks it,
+;; which is also where "cannot assign to a literal" is discovered: a node kind
+;; with no store form simply fails here.
+;;
+;; Only the container kinds recurse: `[a, b] = t` and `(a, b) = t` both unpack,
+;; while `f(x) = 1` does not, because a call has no store form.
+;; ============================================================================
+SC_COMP  equ 8
+SC_NODE  equ 16
+SC_CTX   equ 24
+SC_I     equ 32
+SC_N     equ 40
+SC_FRAME equ 40          ; + 3 pushes = 64
+DEF_FUNC ast_set_ctx, SC_FRAME
+    push rbx
+    push r12
+    push r13
+    mov rbx, rdi
+    mov r12, rsi
+    mov [rbp - SC_CTX], rdx
+
+    test r12, r12
+    jz .bad
+    mov rdi, rbx
+    mov rsi, r12
+    call ast_at
+    mov r13, rax
+    movzx eax, byte [r13 + AstNode.kind]
+
+    cmp eax, AST_NAME
+    je .simple
+    cmp eax, AST_ATTRIBUTE
+    je .simple
+    cmp eax, AST_SUBSCRIPT
+    je .simple
+    cmp eax, AST_TUPLE
+    je .container
+    cmp eax, AST_LIST
+    je .container
+    cmp eax, AST_STARRED
+    je .starred
+    jmp .bad
+
+.simple:
+    mov rdx, [rbp - SC_CTX]
+    mov [r13 + AstNode.subkind], dl
+    mov eax, 1
+    jmp .ret
+
+.starred:
+    mov rdx, [rbp - SC_CTX]
+    mov [r13 + AstNode.subkind], dl
+    mov edx, [r13 + AstNode.a]
+    mov rdi, rbx
+    mov rsi, rdx
+    mov rdx, [rbp - SC_CTX]
+    call ast_set_ctx
+    jmp .ret
+
+.container:
+    mov rdx, [rbp - SC_CTX]
+    mov [r13 + AstNode.subkind], dl
+    mov ecx, [r13 + AstNode.nchild]
+    mov [rbp - SC_N], rcx
+    mov qword [rbp - SC_I], 0
+.loop:
+    mov rax, [rbp - SC_I]
+    cmp rax, [rbp - SC_N]
+    jae .ok
+    mov rdi, rbx
+    mov rsi, r12
+    call ast_at
+    mov rsi, rax
+    mov rdx, [rbp - SC_I]
+    mov rdi, rbx
+    call ast_child
+    mov rsi, rax
+    mov rdi, rbx
+    mov rdx, [rbp - SC_CTX]
+    call ast_set_ctx
+    test eax, eax
+    jz .bad
+    inc qword [rbp - SC_I]
+    jmp .loop
+.ok:
+    mov eax, 1
+    jmp .ret
+.bad:
+    xor eax, eax
+.ret:
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC ast_set_ctx
+
 ASM_INIT

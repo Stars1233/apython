@@ -30,7 +30,11 @@ extern lex_run
 extern str_new_heap
 
 extern asm_assemble
+extern ast_obj
+extern ast_obj_at
+extern cg_const
 extern cg_emit
+extern none_singleton
 extern cg_expr
 extern cg_unit_free
 extern cg_unit_init
@@ -40,6 +44,8 @@ extern exc_set_context
 extern obj_decref
 extern par_expect
 extern par_expr
+extern par_module
+extern cg_body
 extern par_kind
 extern par_advance
 extern str_from_cstr_heap
@@ -192,6 +198,14 @@ DEF_FUNC comp_init, CI_FRAME
     xor esi, esi
     mov edx, AstNode_size
     call ap_memset
+
+    ; Reserve objs[0] for the same reason.  Without it the first literal in a
+    ; compilation gets index 0, and every caller that tests an object index for
+    ; zero reads it as a failure -- which is exactly what `import sys` hit.
+    lea rdi, [rbx + Comp.objs]
+    mov esi, 1
+    call buf_reserve
+    mov qword [rax], 0
 
     pop rbx
     leave
@@ -406,9 +420,14 @@ DEF_FUNC compile_source, CS_FRAME
     jz .failed
 
     cmp qword [rbp - CS_MODE], CMODE_EVAL
-    jne .unsupported_mode
+    je .parse_eval
+    mov rdi, rbx
+    call par_module
+    jmp .parsed
+.parse_eval:
     mov rdi, rbx
     call par_eval_root
+.parsed:
     test rax, rax
     jz .failed
     mov [rbp - CS_ROOT], rax
@@ -423,20 +442,37 @@ DEF_FUNC compile_source, CS_FRAME
     call cg_emit
     or byte [rax + Instr.flags], IF_NOLINE
 
+    cmp qword [rbp - CS_MODE], CMODE_EVAL
+    je .gen_eval
+
+    mov rdi, rbx
+    mov rsi, r12
+    mov rdx, [rbp - CS_ROOT]
+    call cg_body
+    test eax, eax
+    jz .failed
+    ; A module body has no value of its own: it always returns None, and exec()
+    ; discards even that.
+    mov rdi, r12
+    mov rsi, [rbp - CS_ROOT]
+    call cs_return_none
+    jmp .assemble
+
+.gen_eval:
     mov rdi, rbx
     mov rsi, r12
     mov rdx, [rbp - CS_ROOT]
     call cg_expr
     test eax, eax
     jz .failed
-
-    ; An eval-mode code object returns the expression's own value; only a
-    ; module body ends with an implicit None.
+    ; An eval-mode code object returns the expression's own value.
     mov rdi, r12
     mov esi, OP_RETURN_VALUE
     xor edx, edx
     mov ecx, 1
     call cg_emit
+
+.assemble:
 
     mov rdi, rbx
     mov rsi, r12
@@ -460,14 +496,6 @@ DEF_FUNC compile_source, CS_FRAME
     pop rbx
     leave
     ret
-
-.unsupported_mode:
-    mov rdi, rbx
-    lea rsi, [rel exc_SyntaxError_type]
-    CSTRING rdx, "only 'eval' mode is implemented so far"
-    xor ecx, ecx
-    xor r8d, r8d
-    call comp_error
 .failed:
     mov rdi, rbx
     call comp_set_pending
@@ -497,7 +525,51 @@ DEF_FUNC cs_unit_setup, 16      ; + 2 pushes = 32
     ret
 END_FUNC cs_unit_setup
 
+;; ============================================================================
+;; cs_return_none(CompUnit *u, uint32_t root)
+;; The implicit `return None` every module body ends with.
+;; ============================================================================
+DEF_FUNC cs_return_none, 8
+    push rbx
+    mov rbx, rdi
+    lea rsi, [rel none_singleton]
+    INCREF rsi
+    mov rdi, rbx
+    call cg_const
+    mov rdx, rax
+    mov rdi, rbx
+    mov esi, OP_RETURN_CONST
+    xor ecx, ecx
+    call cg_emit
+    or byte [rax + Instr.flags], IF_NOLINE
+    pop rbx
+    leave
+    ret
+END_FUNC cs_return_none
+
+;; ============================================================================
+;; comp_empty_string(Comp *c) -> rax = a borrowed empty PyStrObject*
+;; `from . import x` has no module name, but IMPORT_NAME still needs one.
+;; ============================================================================
+DEF_FUNC comp_empty_string, 8
+    push rbx
+    mov rbx, rdi
+    lea rdi, [rel cs_empty]
+    call str_from_cstr_heap
+    mov rdi, rbx
+    mov rsi, rax
+    call ast_obj                        ; parked in comp.objs, so it is freed
+    mov rdi, rbx
+    mov rsi, rax
+    call ast_obj_at
+    pop rbx
+    leave
+    ret
+END_FUNC comp_empty_string
+
 section .rodata
+cs_empty: db "", 0
+
 cs_module_name: db "<module>", 0
 
 

@@ -202,7 +202,7 @@ DEF_FUNC dis_main, 16           ; + 2 pushes = 32
     mov rdi, rbx
     mov rsi, r12
     mov rdx, rax
-    mov ecx, CMODE_EVAL
+    mov ecx, [rel dis_mode]
     call compile_source
     mov rbx, rax
     pop rdi
@@ -228,5 +228,10 @@ END_FUNC dis_main
 
 section .rodata
 dis_filename: db "<dis>", 0
+
+section .data
+align 8
+global dis_mode
+dis_mode: dq CMODE_EVAL
 
 ASM_INIT

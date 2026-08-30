@@ -3303,6 +3303,13 @@ DEF_FUNC builtins_init
     lea rdx, [rel builtin_compile_fn]
     call add_builtin
 
+    ; exec
+    mov rdi, rbx
+    lea rsi, [rel bi_name_exec]
+    extern builtin_exec_fn
+    lea rdx, [rel builtin_exec_fn]
+    call add_builtin
+
     ; round
     mov rdi, rbx
     lea rsi, [rel bi_name_round]
@@ -3509,6 +3516,7 @@ bi_name_locals:       db "locals", 0
 bi_name_dir:          db "dir", 0
 bi_name_eval:         db "eval", 0
 bi_name_compile:      db "compile", 0
+bi_name_exec:         db "exec", 0
 bi_name_super:        db "super", 0
 bi_name_staticmethod: db "staticmethod", 0
 bi_name_classmethod:  db "classmethod", 0

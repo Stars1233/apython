@@ -27,6 +27,7 @@ extern eval_frame
 extern eval_saved_r12
 extern frame_free
 extern frame_new
+extern obj_dealloc
 extern obj_decref
 extern none_singleton
 extern obj_incref
@@ -376,17 +377,35 @@ DEF_FUNC builtin_compile_fn, CO_FRAME
     cmp rax, rcx
     jne .bad_mode
 
-    ; Only "eval" for now.
+    ; "eval", "exec" or "single".  Interactive echo is not reproducible here --
+    ; apython has no PRINT_EXPR -- so "single" compiles as "exec".
+    mov ecx, CMODE_EXEC
     cmp qword [r13 + PyStrObject.ob_size], 4
-    jne .unsupported_mode
+    jne .check_single
     mov eax, [r13 + PyStrObject.data]
     cmp eax, 'eval'
+    je .mode_eval
+    cmp eax, 'exec'
+    je .have_mode
+    jmp .unsupported_mode
+.mode_eval:
+    mov ecx, CMODE_EVAL
+    jmp .have_mode
+.check_single:
+    cmp qword [r13 + PyStrObject.ob_size], 6
     jne .unsupported_mode
-
+    mov eax, [r13 + PyStrObject.data]
+    cmp eax, 'sing'
+    jne .unsupported_mode
+    mov eax, [r13 + PyStrObject.data + 2]
+    cmp eax, 'ngle'
+    jne .unsupported_mode
+.have_mode:
+    mov [rbp - CO_MODE], rcx
     lea rdi, [rbx + PyStrObject.data]
     mov rsi, [rbx + PyStrObject.ob_size]
     mov rdx, r12
-    mov ecx, CMODE_EVAL
+    mov rcx, [rbp - CO_MODE]
     call compile_source
     test rax, rax
     jz .propagate
@@ -422,9 +441,109 @@ DEF_FUNC builtin_compile_fn, CO_FRAME
     call raise_exception
 .unsupported_mode:
     lea rdi, [rel exc_ValueError_type]
-    CSTRING rsi, "compile() mode must be 'eval' (only eval is implemented so far)"
+    CSTRING rsi, "compile() mode must be 'exec', 'eval' or 'single'"
     call raise_exception
 END_FUNC builtin_compile_fn
+
+;; ============================================================================
+;; builtin_exec_fn(args, nargs) -> Value
+;;   exec(source[, globals[, locals]])
+;;
+;; The same namespace rules as eval, with two differences that matter: exec
+;; does NOT strip leading whitespace from its source -- exec("  x=1") is an
+;; IndentationError where eval("  1+1") is fine -- and it always returns None,
+;; discarding whatever the module body's implicit return produced.
+;; ============================================================================
+DEF_FUNC builtin_exec_fn, EV_FRAME
+    push rbx
+    push r12
+    push r13
+    mov [rbp - EV_ARGS], rdi
+    mov [rbp - EV_NARGS], rsi
+
+    test rsi, rsi
+    jz .bad_nargs
+    cmp rsi, 3
+    ja .bad_nargs
+
+    call ev_resolve_ns
+    mov [rbp - EV_GLOB], rax
+    mov [rbp - EV_LOC], rdx
+
+    mov rdi, rax
+    call ev_inject_builtins
+    mov [rbp - EV_BLT], rax
+
+    mov rdi, [rbp - EV_ARGS]
+    mov rbx, [rdi]
+    test rbx, rbx
+    jz .bad_source
+    mov rax, [rbx + PyObject.ob_type]
+    lea rcx, [rel code_type]
+    cmp rax, rcx
+    je .have_code
+    lea rcx, [rel str_type]
+    cmp rax, rcx
+    jne .bad_source
+
+    lea rdi, [rel ev_string_name]
+    call str_from_cstr_heap
+    mov [rbp - EV_CODE], rax
+    lea rdi, [rbx + PyStrObject.data]
+    mov rsi, [rbx + PyStrObject.ob_size]
+    mov rdx, [rbp - EV_CODE]
+    mov ecx, CMODE_EXEC
+    call compile_source
+    mov r12, rax
+    mov rdi, [rbp - EV_CODE]
+    call obj_decref
+    test r12, r12
+    jz .propagate
+    mov [rbp - EV_CODE], r12
+    jmp .run
+
+.have_code:
+    INCREF rbx
+    mov [rbp - EV_CODE], rbx
+
+.run:
+    mov rdi, [rbp - EV_CODE]
+    mov rsi, [rbp - EV_GLOB]
+    mov rdx, [rbp - EV_BLT]
+    mov rcx, [rbp - EV_LOC]
+    call ev_run_code
+    mov rbx, rax
+    mov rdi, [rbp - EV_CODE]
+    call obj_decref
+    ; A NULL result means the body raised; propagate it rather than returning
+    ; None over the top of a live exception.
+    test rbx, rbx
+    jz .propagate
+    DECREF_V rbx, rcx                   ; the body's None; exec has no result
+    RET_NONE
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.propagate:
+    RET_NULL
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.bad_nargs:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "exec() takes 1 to 3 arguments"
+    call raise_exception
+.bad_source:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "exec() arg 1 must be a string or code object"
+    call raise_exception
+END_FUNC builtin_exec_fn
 
 section .rodata
 ev_builtins_name: db "__builtins__", 0
