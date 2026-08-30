@@ -368,6 +368,8 @@ END_FUNC op_load_build_class
 ;; Followed by 9 CACHE entries (18 bytes) that must be skipped.
 ;; ============================================================================
 extern module_type
+extern classmethod_type
+extern staticmethod_type
 DEF_FUNC op_load_attr, LA_FRAME
 
     ; Extract flag and name_index
@@ -671,9 +673,10 @@ DEF_FUNC op_load_attr, LA_FRAME
     ; Only when attr came from type dict (no tp_getattr path)
     cmp qword [rbp - LA_FROM_TYPE], 0
     jne .la_ic_check               ; from type dict → IC + method_push
-    ; from_type=0: came from tp_getattr
-    ; For heaptype instances, instance dict attrs are NOT methods — push [NULL, func]
-    ; For built-in types, tp_getattr returns methods that need self binding
+    ; from_type=0: came from tp_getattr.  Most builtin types' tp_getattr hands
+    ; back an unbound method that still needs self; the exceptions are the ones
+    ; whose tp_getattr reads out of a namespace rather than off a type, where
+    ; the answer is already a plain function.
     cmp qword [rbp - LA_OBJ_TAG], TAG_PTR
     jne .la_method_push            ; non-ptr obj can't be heaptype
     mov rdi, [rbp - LA_OBJ]
@@ -693,6 +696,14 @@ DEF_FUNC op_load_attr, LA_FRAME
     ; a heaptype, so without this it fell into the built-in case below and was
     ; called with the module as its first argument.
     lea rcx, [rel module_type]
+    cmp rax, rcx
+    je .la_not_method
+    ; The same for a classmethod or staticmethod wrapper: its __func__ is the
+    ; function it wraps, not a method of the wrapper.
+    lea rcx, [rel classmethod_type]
+    cmp rax, rcx
+    je .la_not_method
+    lea rcx, [rel staticmethod_type]
     cmp rax, rcx
     je .la_not_method
     jmp .la_method_push            ; built-in tp_getattr → [func, self]

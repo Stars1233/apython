@@ -1425,8 +1425,50 @@ END_FUNC union_repr
 section .data
 
 sm_name_str: db "staticmethod", 0
+descr_func_name: db "__func__", 0
+align 8
 cm_name_str: db "classmethod", 0
 prop_name_str: db "property", 0
+
+;; ============================================================================
+section .text
+
+;; ============================================================================
+;; descr_func_attr(wrapper, PyStrObject *name) -> Value
+;;
+;; __func__, the wrapped function.  It is the only way to reach the function
+;; through the wrapper, and collections.namedtuple needs it: after building
+;; _make as a classmethod it does `_make.__func__.__doc__ = ...`.
+;;
+;; One function serves both wrappers -- sm_callable and cm_callable are the
+;; same slot -- so both type tables point straight at it.
+;; ============================================================================
+DEF_FUNC descr_func_attr
+    push rbx
+    mov rbx, rdi
+    lea rdi, [rsi + PyStrObject.data]
+    lea rsi, [rel descr_func_name]
+    call ap_strcmp
+    test eax, eax
+    jne .none
+    mov rax, [rbx + PyClassMethodObject.cm_callable]
+    test rax, rax
+    jz .none
+    INCREF rax
+    mov edx, TAG_PTR
+    V_PACK rax, rdx
+    pop rbx
+    leave
+    ret
+.none:
+    xor eax, eax
+    xor edx, edx
+    pop rbx
+    leave
+    ret
+END_FUNC descr_func_attr
+
+section .data
 
 ; staticmethod_type - type descriptor for staticmethod wrapper
 align 8
@@ -1441,7 +1483,7 @@ staticmethod_type:
     dq 0                        ; tp_str
     dq 0                        ; tp_hash
     dq 0                ; tp_call  (instances are not callable)
-    dq 0                        ; tp_getattr
+    dq descr_func_attr          ; tp_getattr
     dq 0                        ; tp_setattr
     dq 0                        ; tp_richcompare
     dq 0                        ; tp_iter
@@ -1473,7 +1515,7 @@ classmethod_type:
     dq 0                        ; tp_str
     dq 0                        ; tp_hash
     dq 0                ; tp_call  (instances are not callable)
-    dq 0                        ; tp_getattr
+    dq descr_func_attr          ; tp_getattr
     dq 0                        ; tp_setattr
     dq 0                        ; tp_richcompare
     dq 0                        ; tp_iter

@@ -911,8 +911,28 @@ DEF_FUNC func_getattr
     ret
 
 .return_doc:
-    ; A docstring is co_consts[0] when it is a string, exactly as CPython
-    ; builds __doc__ at function creation.
+    ; An assignment wins over the source docstring: `f.__doc__ = ...` is stored
+    ; in func_dict like any other attribute, and reading past it here made the
+    ; assignment look like a no-op.  collections.namedtuple writes docstrings
+    ; this way.
+    mov rdi, [rbx + PyFuncObject.func_dict]
+    test rdi, rdi
+    jz .doc_from_code
+    mov rsi, r12
+    call dict_get
+    V_UNPACK rax, rdx
+    test edx, edx
+    jz .doc_from_code
+    INCREF_VAL rax, rdx
+    pop r12
+    pop rbx
+    leave
+    V_PACK rax, rdx
+    ret
+
+.doc_from_code:
+    ; Otherwise a docstring is co_consts[0] when it is a string, exactly as
+    ; CPython builds __doc__ at function creation.
     mov rax, [rbx + PyFuncObject.func_code]
     test rax, rax
     jz .doc_none
