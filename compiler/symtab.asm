@@ -1516,11 +1516,22 @@ DEF_FUNC sym_promote_cells, SPC_FRAME
     ; closure breaks: in `def f(): a=1; def g(): def h(): return a`, g never
     ; mentions a, so nothing else would ever mark it free there -- and h would
     ; have no cell to read.
+    ; A class block travels too, even though it is not function-like and holds
+    ; no fast locals of its own: a method's free variable resolves past the
+    ; class body to the enclosing function, and the class body carries it
+    ; through in co_freevars so it can hand it on.  Without this,
+    ; `def f(): class M: def g(self): return M` had nowhere to put M.
+    mov rdi, rbx
+    mov rsi, r12
+    call sym_at
+    cmp dword [rax + Scope.kind], SCOPE_CLASS
+    je .travels
     mov rdi, rbx
     mov rsi, r12
     call sym_is_function_like
     test eax, eax
     jz .next_name
+.travels:
     mov rdi, rbx
     mov rsi, r12
     mov rdx, [rbp - SPC_NAME]

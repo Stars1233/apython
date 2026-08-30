@@ -1165,6 +1165,20 @@ DEF_FUNC cg_class_value, CC4_FRAME
     test rax, rax
     jz .fail
 
+    ; A class body needs a closure like any other nested block.  Its methods'
+    ; free variables resolve past the class scope to the enclosing function,
+    ; and the body carries them through -- so without this its COPY_FREE_VARS
+    ; had nothing to copy, and `def f(): class M: def g(self): return M` read
+    ; an empty cell.
+    mov rdi, rbx
+    mov rsi, r12
+    mov rdx, [rbp - CC4_SCOPE]
+    mov rcx, [rbp - CC4_LINE]
+    call cg_closure_tuple
+    cmp rax, -1
+    je .fail
+    mov [rbp - CC4_NAME], rax
+
     mov rdi, r12
     mov rsi, [rbp - CC4_CODE]
     call cg_const
@@ -1175,7 +1189,7 @@ DEF_FUNC cg_class_value, CC4_FRAME
     call cg_emit
     mov rdi, r12
     mov esi, OP_MAKE_FUNCTION
-    xor edx, edx
+    mov rdx, [rbp - CC4_NAME]
     mov rcx, [rbp - CC4_LINE]
     call cg_emit
 
@@ -1220,9 +1234,11 @@ DEF_FUNC cg_class_value, CC4_FRAME
 .fail:
     xor eax, eax
 .ret:
-    ; Restore the enclosing scope for whatever follows.
-    mov eax, [r12 + CompUnit.scope]
-    mov [rbx + Comp.cur_scope], eax
+    ; Restore the enclosing scope for whatever follows -- through rcx, because
+    ; eax is the return value.  Reading the scope into eax here reported every
+    ; failure as a success, since a nested scope's index is never 0.
+    mov ecx, [r12 + CompUnit.scope]
+    mov [rbx + Comp.cur_scope], ecx
     pop r13
     pop r12
     pop rbx
