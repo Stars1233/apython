@@ -48,6 +48,7 @@ extern obj_richcompare_bool
 extern int_to_i64
 extern builtin_func_new
 extern raise_exception
+extern raise_key_error
 extern fatal_error
 extern exc_TypeError_type
 extern exc_ValueError_type
@@ -6406,9 +6407,8 @@ dict_method_pop_v2 equ dict_method_pop
     ret
 
 .dpop2_error:
-    lea rdi, [rel exc_KeyError_type]
-    CSTRING rsi, "key not found"
-    call raise_exception
+    mov rdi, [r14 + 8]         ; the key Value, still in the argument array
+    call raise_key_error
 END_FUNC dict_method_pop
 
 ;; ============================================================================

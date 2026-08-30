@@ -902,9 +902,11 @@ DEF_FUNC dict_subscript
     ret
 
 .key_error:
-    lea rdi, [rel exc_KeyError_type]
-    CSTRING rsi, "key not found"
-    call raise_exception
+    ; The key itself is the argument, as in CPython: d["k"] reports
+    ; KeyError('k'), not a fixed "key not found".  rbx already holds it.
+    mov rdi, rbx               ; the key Value, saved on entry
+    extern raise_key_error
+    call raise_key_error
 END_FUNC dict_subscript
 
 ;; ============================================================================
@@ -926,12 +928,15 @@ END_FUNC dict_ass_subscript
 ;; Delete key from dict. DECREFs both key and value.
 ;; ============================================================================
 DD_KTAG equ 8
-DEF_FUNC dict_del, 8
+DD_KEYV equ 16
+DD_FRAME equ 16
+DEF_FUNC dict_del, DD_FRAME
     push rbx
     push r12
     push r13
     push r14
 
+    mov [rbp - DD_KEYV], rsi    ; keep the Value for the KeyError message
     V_UNPACK rsi, rdx           ; decode the key Value
     push r15
 
@@ -1010,10 +1015,8 @@ DEF_FUNC dict_del, 8
     jmp .dd_probe
 
 .dd_not_found:
-    lea rdi, [rel exc_KeyError_type]
-    CSTRING rsi, "key not found"
-    call raise_exception
-    ; raise_exception does not return
+    mov rdi, [rbp - DD_KEYV]
+    call raise_key_error
 
 .dd_done:
     pop r15

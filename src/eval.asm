@@ -135,6 +135,7 @@ extern exc_table_find_handler
 extern exc_isinstance
 extern exc_new
 extern exc_from_cstr
+extern exc_set_context
 extern obj_decref
 extern obj_incref
 extern obj_dealloc
@@ -623,12 +624,14 @@ DEF_FUNC raise_exception
     call exc_from_cstr
     ; rax = exception object
 
-    ; Store in current_exception
-    ; First XDECREF any existing exception
+    ; Store in current_exception, chaining onto whatever is being handled.
     push rax
-    mov rdi, [rel current_exception]
-    test rdi, rdi
+    mov rsi, [rel current_exception]
+    test rsi, rsi
     jz .no_prev
+    mov rdi, rax
+    call exc_set_context
+    mov rdi, [rel current_exception]
     call obj_decref
 .no_prev:
     pop rax
@@ -643,15 +646,17 @@ END_FUNC raise_exception
 ; Takes ownership of the exc reference (caller must pass an owned ref).
 DEF_FUNC raise_exception_obj
 
-    ; XDECREF any existing exception
+    ; Implicit chaining: current_exception is the exception being handled when
+    ; we are inside an `except` block (op_pop_except clears it on the way out),
+    ; which is exactly CPython's rule for __context__.
     push rdi
-    mov rax, [rel current_exception]
-    test rax, rax
+    mov rsi, [rel current_exception]
+    test rsi, rsi
     jz .no_prev2
-    push rdi
-    mov rdi, rax
+    call exc_set_context
+
+    mov rdi, [rel current_exception]
     call obj_decref
-    pop rdi
 .no_prev2:
     pop rdi
     mov [rel current_exception], rdi
@@ -1045,15 +1050,14 @@ DEF_FUNC_BARE op_raise_varargs
 
 .raise_exc_obj:
     ; rdi = exception object
-    ; Store as current_exception
+    ; Store as current_exception, chaining onto the one being handled.
     push rdi
-    mov rax, [rel current_exception]
-    test rax, rax
+    mov rsi, [rel current_exception]
+    test rsi, rsi
     jz .no_prev_raise
-    push rdi
-    mov rdi, rax
+    call exc_set_context
+    mov rdi, [rel current_exception]
     call obj_decref
-    pop rdi
 .no_prev_raise:
     pop rdi
     mov [rel current_exception], rdi
