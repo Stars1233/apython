@@ -273,8 +273,14 @@ DEF_FUNC marshal_read_object
     je mdo_unicode
     cmp ebx, MARSHAL_TYPE_STRING
     je mdo_bytes
+    ; TYPE_INTERNED is a *str* that happened to be interned when it was
+    ; written, not a byte string -- CPython's reader falls it through to
+    ; TYPE_UNICODE.  It was decoded as bytes here, so every non-ASCII
+    ; identifier came out of a .pyc as bytes.  Which strings are interned
+    ; varies between CPython patch releases, so the same source could work
+    ; on one machine and not another.
     cmp ebx, MARSHAL_TYPE_INTERNED
-    je mdo_bytes
+    je mdo_unicode
     cmp ebx, MARSHAL_TYPE_SMALL_TUPLE
     je mdo_small_tuple
     cmp ebx, MARSHAL_TYPE_TUPLE
@@ -602,7 +608,7 @@ mdo_ascii:
     jmp mfinish
 
 ;--------------------------------------------------------------------------
-; TYPE_UNICODE handler
+; TYPE_UNICODE / TYPE_INTERNED handler
 ; Read 4-byte length, then bytes -> str_new_heap (treat as UTF-8)
 ;--------------------------------------------------------------------------
 mdo_unicode:
@@ -623,7 +629,7 @@ mdo_unicode:
     jmp mfinish
 
 ;--------------------------------------------------------------------------
-; TYPE_STRING / TYPE_INTERNED handler
+; TYPE_STRING handler
 ; Read 4-byte length, then bytes -> bytes_from_data
 ;--------------------------------------------------------------------------
 mdo_bytes:

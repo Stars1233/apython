@@ -39,12 +39,19 @@ HEADERS = $(wildcard include/*.inc)
 # Python compiler for tests
 PYTHON = python3
 
-.PHONY: all clean check gen-cpython-tests check-cpython check-stdlib
+.PHONY: all clean check gen-cpython-tests check-cpython check-stdlib lib-pyc
 
-all: $(TARGET)
+all: $(TARGET) lib-pyc
 
 $(TARGET): $(OBJS)
 	$(CC) -o $@ $^ $(LDFLAGS)
+
+# apython reads .pyc and never .py, so the modules it ships in lib/ are not
+# importable until they are byte-compiled.  This is part of building the
+# interpreter, not of testing it: `make check` used to run before anything
+# compiled them, so any test that imported one failed on a fresh checkout.
+lib-pyc:
+	@find lib -name '*.py' -exec $(PYTHON) -m py_compile {} \; 2>/dev/null || true
 
 build/%.o: src/%.asm $(HEADERS) | build
 	$(NASM) $(NASMFLAGS) -o $@ $<
@@ -60,9 +67,10 @@ build:
 
 clean:
 	rm -rf build $(TARGET) tests/__pycache__
+	find lib -name '__pycache__' -type d -exec rm -rf {} + 2>/dev/null || true
 
 # Test target: compile .py to .pyc, run both python3 and apython, diff
-check: $(TARGET)
+check: $(TARGET) lib-pyc
 	@bash tests/run_tests.sh
 
 # How much of CPython 3.12's own Lib/ can we import?  Ratchets against
@@ -76,9 +84,7 @@ tests/__pycache__/%.cpython-312.pyc: tests/%.py
 	$(PYTHON) -m py_compile $<
 
 # CPython test suite targets
-gen-cpython-tests:
-	@echo "Compiling lib/ tree..."
-	@find lib -name '*.py' -exec $(PYTHON) -m py_compile {} \;
+gen-cpython-tests: lib-pyc
 	@echo "Compiling tests/cpython/test_int.py..."
 	@$(PYTHON) -m py_compile tests/cpython/test_int.py
 	@echo "Compiling tests/cpython/test_float.py..."
