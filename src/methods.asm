@@ -6446,8 +6446,21 @@ DEF_FUNC dict_method_clear
     imul rdx, r12, DICT_ENTRY_SIZE
     call ap_memset
 
+    ; And reset the sparse index array, or every slot would still point at a
+    ; dense entry that is now blank.
+    mov rdi, [rbx + PyDictObject.dk_indices]
+    test rdi, rdi
+    jz .dc_no_indices
+    mov rcx, r12
+    mov rax, DICT_IX_EMPTY
+    rep stosq
+.dc_no_indices:
+
     ; Reset size to 0
     mov qword [rbx + PyDictObject.ob_size], 0
+    mov qword [rbx + PyDictObject.dk_nentries], 0
+    mov qword [rbx + PyDictObject.dk_tombstones], 0
+    inc qword [rbx + PyDictObject.dk_version]
 
     lea rax, [rel none_singleton]
     inc qword [rax + PyObject.ob_refcnt]

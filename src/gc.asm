@@ -920,10 +920,18 @@ DEF_FUNC dict_clear_gc
     test r13, r13
     jnz .loop
 .done:
-    ; Keep the header coherent with the table we just emptied.
-    mov rax, [rbx + PyDictObject.ob_size]
-    add [rbx + PyDictObject.dk_tombstones], rax
+    ; Keep the header coherent with the table we just emptied: the sparse
+    ; index array has to forget the entries too.
+    mov rdi, [rbx + PyDictObject.dk_indices]
+    test rdi, rdi
+    jz .no_indices
+    mov rcx, [rbx + PyDictObject.capacity]
+    mov rax, DICT_IX_EMPTY
+    rep stosq
+.no_indices:
     mov qword [rbx + PyDictObject.ob_size], 0
+    mov qword [rbx + PyDictObject.dk_nentries], 0
+    mov qword [rbx + PyDictObject.dk_tombstones], 0
     inc qword [rbx + PyDictObject.dk_version]
 
     pop r13

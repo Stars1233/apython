@@ -125,8 +125,21 @@ struc PyDictObject
     .capacity:  resq 1    ; +24: hash table capacity
     .entries:   resq 1    ; +32: ptr to entry array
     .dk_version: resq 1   ; +40: version counter (bumped on mutation)
-    .dk_tombstones: resq 1 ; +48: count of tombstoned entries
+    .dk_tombstones: resq 1 ; +48: count of deleted (holed) entries
+    ; Compact layout, appended so `set` -- which shares this header but has
+    ; its own entry code -- is unaffected by their presence.
+    .dk_indices: resq 1   ; +56: ptr to int64[capacity], -1 empty, -2 dummy,
+                          ;      else an index into .entries
+    .dk_nentries: resq 1  ; +64: high-water mark of .entries in use
 endstruc
+
+; The dict is CPython's compact layout: a sparse index array over a *dense*
+; entry array appended in insertion order.  Iteration walks the dense array,
+; which is why dict order is insertion order.  The unused tail of .entries is
+; kept zeroed, so a walker that scans 0..capacity and skips key == 0 reads
+; the same items in the same order without knowing about .dk_nentries.
+DICT_IX_EMPTY equ -1
+DICT_IX_DUMMY equ -2
 
 ; Dict entry
 ; An entry's state lives in .key and .hash rather than in a tag byte:

@@ -247,6 +247,21 @@ DEF_FUNC builtin_sub_init_base
     jmp .bsib_done
 
 .bsib_dict:
+    ; A dict now owns two arrays, and a set only one -- so let the dict's own
+    ; allocator build them rather than hand-rolling a header that would be
+    ; missing dk_indices.
+    mov rdi, rbx
+    mov rax, [rbx + PyObject.ob_type]
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_SET_SUBCLASS
+    jnz .bsib_set_table
+    mov rsi, DICT_INIT_CAP
+    extern dict_alloc_tables
+    call dict_alloc_tables
+    mov qword [rbx + PyDictObject.dk_nentries], 0
+    jmp .bsib_done
+
+.bsib_set_table:
+    ; A set keeps the old single-array layout.
     mov edi, DICT_INIT_CAP * DICT_ENTRY_SIZE
     call ap_malloc
     mov [rbx + PyDictObject.entries], rax
