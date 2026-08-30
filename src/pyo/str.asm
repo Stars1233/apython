@@ -28,6 +28,128 @@ extern slice_indices
 extern type_type
 extern obj_dealloc
 
+
+; ----------------------------------------------------------------------------
+; str_count_codepoints(rdi = bytes, rsi = byte length) -> rax = code points
+; A UTF-8 continuation byte is 10xxxxxx; every other byte starts one code
+; point.  Invalid bytes are counted as one each, which keeps the count equal
+; to the byte length for anything that is not valid UTF-8 and so leaves such
+; a string behaving exactly as it did before.
+; ----------------------------------------------------------------------------
+global str_count_codepoints
+DEF_FUNC_BARE str_count_codepoints
+    xor eax, eax
+    xor ecx, ecx
+.scan:
+    cmp rcx, rsi
+    jge .done
+    movzx edx, byte [rdi + rcx]
+    and dl, 0xC0
+    cmp dl, 0x80
+    je .cont
+    inc rax
+.cont:
+    inc rcx
+    jmp .scan
+.done:
+    ret
+END_FUNC str_count_codepoints
+
+; ----------------------------------------------------------------------------
+; str_set_length(rdi = PyStrObject*) -- fill ob_length from the bytes.
+; ----------------------------------------------------------------------------
+global str_set_length
+DEF_FUNC str_set_length
+    push rbx
+    mov rbx, rdi
+    mov rsi, [rbx + PyStrObject.ob_size]
+    lea rdi, [rbx + PyStrObject.data]
+    call str_count_codepoints
+    mov [rbx + PyStrObject.ob_length], rax
+    mov rax, rbx
+    pop rbx
+    leave
+    ret
+END_FUNC str_set_length
+
+
+; ----------------------------------------------------------------------------
+; str_byte_to_cp(rdi = PyStrObject*, rsi = byte offset) -> rax = code point index
+; The inverse of str_cp_offset, for the methods that search in bytes and have
+; to report a position in code points.
+; ----------------------------------------------------------------------------
+global str_byte_to_cp
+DEF_FUNC_BARE str_byte_to_cp
+    mov rax, [rdi + PyStrObject.ob_size]
+    cmp rax, [rdi + PyStrObject.ob_length]
+    je .ascii
+    test rsi, rsi
+    js .negative                    ; -1 means "not found"; pass it through
+    lea rdi, [rdi + PyStrObject.data]
+    xor eax, eax
+    xor ecx, ecx
+.walk:
+    cmp rcx, rsi
+    jge .done
+    movzx edx, byte [rdi + rcx]
+    and dl, 0xC0
+    cmp dl, 0x80
+    je .cont
+    inc rax
+.cont:
+    inc rcx
+    jmp .walk
+.done:
+    ret
+.negative:
+    mov rax, rsi
+    ret
+.ascii:
+    mov rax, rsi
+    ret
+END_FUNC str_byte_to_cp
+
+; ----------------------------------------------------------------------------
+; str_cp_offset(rdi = PyStrObject*, rsi = code point index) -> rax = byte offset
+; The index is not bounds-checked; an index at or past the end gives ob_size.
+; ----------------------------------------------------------------------------
+global str_cp_offset
+DEF_FUNC_BARE str_cp_offset
+    mov rax, [rdi + PyStrObject.ob_size]
+    cmp rax, [rdi + PyStrObject.ob_length]
+    je .ascii                       ; one byte per code point
+    xor eax, eax                    ; byte cursor
+    xor ecx, ecx                    ; code points seen
+    mov r8, [rdi + PyStrObject.ob_size]
+.walk:
+    cmp rcx, rsi
+    jge .found
+    cmp rax, r8
+    jge .found
+    inc rax
+.skip_cont:
+    cmp rax, r8
+    jge .counted
+    movzx edx, byte [rdi + PyStrObject.data + rax]
+    and dl, 0xC0
+    cmp dl, 0x80
+    jne .counted
+    inc rax
+    jmp .skip_cont
+.counted:
+    inc rcx
+    jmp .walk
+.found:
+    ret
+.ascii:
+    mov rax, rsi
+    cmp rax, [rdi + PyStrObject.ob_size]
+    jle .ascii_done
+    mov rax, [rdi + PyStrObject.ob_size]
+.ascii_done:
+    ret
+END_FUNC str_cp_offset
+
 ; str_from_cstr_heap(const char *cstr) -> (rax=PyStrObject*, edx=TAG_PTR)
 ; Always heap-allocates. For struct fields that need a real pointer.
 DEF_FUNC str_from_cstr_heap
@@ -62,6 +184,9 @@ DEF_FUNC str_from_cstr_heap
 
     ; Zero-fill 8 bytes at NUL terminator for ap_strcmp 8-byte reads
     mov qword [rax + PyStrObject.data + r12], 0
+
+    mov rdi, rax
+    call str_set_length
 
     mov edx, TAG_PTR
     pop r12
@@ -106,6 +231,9 @@ DEF_FUNC str_new_heap
 
     ; Zero-fill 8 bytes at NUL position for ap_strcmp 8-byte reads
     mov qword [r13 + PyStrObject.data + r12], 0
+
+    mov rdi, r13
+    call str_set_length
 
     mov rax, r13
     mov edx, TAG_PTR
@@ -253,6 +381,8 @@ DEF_FUNC str_repr
     inc rdi                    ; + closing quote
     mov [r13 + PyStrObject.ob_size], rdi
 
+    mov rdi, r13
+    call str_set_length
     mov rax, r13
     mov edx, TAG_PTR
     pop r14
@@ -367,6 +497,10 @@ DEF_FUNC str_concat
     mov [rax + PyObject.ob_type], rcx
     mov [rax + PyStrObject.ob_size], r13
     mov qword [rax + PyStrObject.ob_hash], -1
+    ; Concatenating whole strings concatenates their code points too.
+    mov rcx, [rbx + PyStrObject.ob_length]
+    add rcx, [r12 + PyStrObject.ob_length]
+    mov [rax + PyStrObject.ob_length], rcx
 
     ; Copy first string
     lea rdi, [rax + PyStrObject.data]
@@ -465,6 +599,9 @@ DEF_FUNC str_repeat
     mov [rax + PyObject.ob_type], rcx
     mov [rax + PyStrObject.ob_size], r14
     mov qword [rax + PyStrObject.ob_hash], -1
+    mov rcx, [rbx + PyStrObject.ob_length]
+    imul rcx, r12
+    mov [rax + PyStrObject.ob_length], rcx
 
     ; Copy str r12 times
     lea rdi, [rax + PyStrObject.data]
@@ -1339,7 +1476,9 @@ END_FUNC str_compare
 ;; sq_length: returns ob_size
 ;; ============================================================================
 DEF_FUNC_BARE str_len
-    mov rax, [rdi + PyStrObject.ob_size]
+    ; Code points, which is what Python counts.  Equal to the byte length for
+    ; anything ASCII, which is nearly everything.
+    mov rax, [rdi + PyStrObject.ob_length]
     ret
 END_FUNC str_len
 
@@ -1350,28 +1489,39 @@ END_FUNC str_len
 DEF_FUNC str_getitem
     push rbx
     push r12
+    push r13
 
     mov rbx, rdi            ; self
-    mov r12, rsi            ; index
+    mov r12, rsi            ; index, in code points
 
     ; Handle negative index
     test r12, r12
     jns .positive
-    add r12, [rbx + PyStrObject.ob_size]
+    add r12, [rbx + PyStrObject.ob_length]
 .positive:
 
     ; Bounds check
-    cmp r12, [rbx + PyStrObject.ob_size]
+    cmp r12, [rbx + PyStrObject.ob_length]
     jge .index_error
     cmp r12, 0
     jl .index_error
 
-    ; Create single-char string
+    ; Where the code point starts, and how many bytes it occupies.
+    mov rdi, rbx
+    mov rsi, r12
+    call str_cp_offset
+    mov r13, rax
+    mov rdi, rbx
+    lea rsi, [r12 + 1]
+    call str_cp_offset
+    sub rax, r13            ; the width of this one code point
+
     lea rdi, [rbx + PyStrObject.data]
-    add rdi, r12
-    mov rsi, 1
+    add rdi, r13
+    mov rsi, rax
     call str_new
 
+    pop r13
     pop r12
     pop rbx
     leave
@@ -1483,111 +1633,132 @@ END_FUNC str_bool
 ;; str_getslice(PyStrObject *str, PySliceObject *slice) -> PyStrObject*
 ;; Creates a new string from a slice of the original.
 ;; ============================================================================
-DEF_FUNC str_getslice
+SGS_STR   equ 8
+SGS_START equ 16
+SGS_STEP  equ 24
+SGS_LEN   equ 32
+SGS_OUT   equ 40
+SGS_POS   equ 48
+SGS_I     equ 56
+SGS_FRAME equ 64
+DEF_FUNC str_getslice, SGS_FRAME
     push rbx
     push r12
-    push r13
-    push r14
-    push r15
-    sub rsp, 8                 ; align
 
-    mov rbx, rdi               ; str
-    mov r12, rsi               ; slice
+    mov [rbp - SGS_STR], rdi
+    mov rbx, rdi
 
-    ; Get slice indices
-    mov rdi, r12
-    mov rsi, [rbx + PyStrObject.ob_size]
+    ; Slice indices are code-point indices, so the length handed to
+    ; slice_indices is the code point count.  For an ASCII string that is the
+    ; byte count and everything below reduces to the byte-wise version.
+    mov rdi, rsi                ; the slice
+    mov rsi, [rbx + PyStrObject.ob_length]
     call slice_indices
-    mov r13, rax               ; start
-    mov r14, rdx               ; stop
-    mov r15, rcx               ; step
+    mov [rbp - SGS_START], rax
+    mov [rbp - SGS_STEP], rcx
+    mov r12, rdx                ; stop
 
-    ; Compute slicelength
-    test r15, r15
+    ; slicelength
+    test rcx, rcx
     jg .sgs_pos_step
-    ; Negative step
-    mov rax, r13
-    sub rax, r14
+    mov rax, [rbp - SGS_START]
+    sub rax, r12
+    jle .sgs_empty
     dec rax
-    mov rcx, r15
+    mov rcx, [rbp - SGS_STEP]
     neg rcx
     xor edx, edx
     div rcx
     inc rax
     jmp .sgs_have_len
-
 .sgs_pos_step:
-    mov rax, r14
-    sub rax, r13
+    mov rax, r12
+    sub rax, [rbp - SGS_START]
     jle .sgs_empty
     dec rax
     xor edx, edx
-    div r15
+    div qword [rbp - SGS_STEP]
     inc rax
     jmp .sgs_have_len
-
 .sgs_empty:
     xor eax, eax
-
 .sgs_have_len:
-    ; rax = slicelength
-    push rax                   ; save slicelength
+    mov [rbp - SGS_LEN], rax
 
-    ; For step=1, fast path: use str_new with contiguous data
-    cmp r15, 1
+    ; A contiguous slice is a byte range, so it can be copied whole.
+    cmp qword [rbp - SGS_STEP], 1
     jne .sgs_general
-
-    ; Fast path: contiguous slice (heap — merges with general heap path)
+    mov rdi, rbx
+    mov rsi, [rbp - SGS_START]
+    call str_cp_offset
+    mov r12, rax
+    mov rdi, rbx
+    mov rsi, [rbp - SGS_START]
+    add rsi, [rbp - SGS_LEN]
+    call str_cp_offset
+    sub rax, r12
     lea rdi, [rbx + PyStrObject.data]
-    add rdi, r13               ; data + start
-    mov rsi, rax               ; length = slicelength
+    add rdi, r12
+    mov rsi, rax
     call str_new_heap
-    add rsp, 8                 ; discard slicelength
     jmp .sgs_ret
 
 .sgs_general:
-    ; General case: build char by char on stack buffer
-    ; Allocate: header + slicelength + 1
-    mov rdi, rax
-    add rdi, PyStrObject.data + 8  ; +8 NUL padding for ap_strcmp
+    ; A strided slice copies whole code points, so the result's byte length is
+    ; not known in advance; the source's is an upper bound.
+    mov rdi, [rbx + PyStrObject.ob_size]
+    add rdi, PyStrObject.data + 8
     call ap_malloc
-    push rax                   ; save new str obj
-
-    ; Fill header
-    mov rcx, [rsp + 8]        ; slicelength
+    mov [rbp - SGS_OUT], rax
     mov qword [rax + PyObject.ob_refcnt], 1
     lea rdx, [rel str_type]
     mov [rax + PyObject.ob_type], rdx
-    mov [rax + PyStrObject.ob_size], rcx
     mov qword [rax + PyStrObject.ob_hash], -1
 
-    ; Copy chars: for i=0..slicelength-1, dst[i] = src[start + i*step]
-    xor ecx, ecx
+    mov qword [rbp - SGS_POS], 0
+    mov qword [rbp - SGS_I], 0
 .sgs_copy:
-    cmp rcx, [rsp + 8]        ; slicelength
-    jge .sgs_null_term
-    mov rax, rcx
-    imul rax, r15              ; i * step
-    add rax, r13               ; start + i*step
-    movzx edx, byte [rbx + PyStrObject.data + rax]
-    mov rax, [rsp]             ; new str
-    mov [rax + PyStrObject.data + rcx], dl
+    mov rax, [rbp - SGS_I]
+    cmp rax, [rbp - SGS_LEN]
+    jge .sgs_finish
+    imul rax, [rbp - SGS_STEP]
+    add rax, [rbp - SGS_START]   ; the source code point index
+    mov r12, rax
+    mov rdi, rbx
+    mov rsi, r12
+    call str_cp_offset
+    push rax
+    mov rdi, rbx
+    lea rsi, [r12 + 1]
+    call str_cp_offset
+    pop rcx
+    sub rax, rcx                 ; rax = width, rcx = byte offset
+    push rax
+.sgs_bytes:
+    test rax, rax
+    jz .sgs_bytes_done
+    movzx edx, byte [rbx + PyStrObject.data + rcx]
+    mov r8, [rbp - SGS_OUT]
+    mov r9, [rbp - SGS_POS]
+    mov [r8 + PyStrObject.data + r9], dl
+    inc qword [rbp - SGS_POS]
     inc rcx
+    dec rax
+    jmp .sgs_bytes
+.sgs_bytes_done:
+    pop rax
+    inc qword [rbp - SGS_I]
     jmp .sgs_copy
 
-.sgs_null_term:
-    mov rax, [rsp]             ; new str
-    mov rcx, [rsp + 8]        ; slicelength
-    mov qword [rax + PyStrObject.data + rcx], 0  ; 8-byte zero-fill for ap_strcmp
-
-    pop rax                    ; new str
-    add rsp, 8                 ; discard slicelength
+.sgs_finish:
+    mov rax, [rbp - SGS_OUT]
+    mov rcx, [rbp - SGS_POS]
+    mov [rax + PyStrObject.ob_size], rcx
+    mov qword [rax + PyStrObject.data + rcx], 0
+    mov rcx, [rbp - SGS_LEN]
+    mov [rax + PyStrObject.ob_length], rcx
 
 .sgs_ret:
-    add rsp, 8                 ; undo alignment
-    pop r15
-    pop r14
-    pop r13
     pop r12
     pop rbx
     mov edx, TAG_PTR
@@ -1644,14 +1815,27 @@ DEF_FUNC str_iter_next
     cmp rcx, [rax + PyStrObject.ob_size]
     jge .si_exhausted
 
-    ; Create single-char string from current byte position
+    ; One whole code point, however many bytes that is: the index is a byte
+    ; offset, and iterating a byte at a time cut multi-byte characters apart.
+    mov r8, [rax + PyStrObject.ob_size]
+    lea r9, [rcx + 1]
+.si_width:
+    cmp r9, r8
+    jge .si_have_width
+    movzx edx, byte [rax + PyStrObject.data + r9]
+    and dl, 0xC0
+    cmp dl, 0x80
+    jne .si_have_width
+    inc r9
+    jmp .si_width
+.si_have_width:
+    mov [rbx + PyStrIterObject.it_index], r9
     lea rdi, [rax + PyStrObject.data]
     add rdi, rcx
-    mov rsi, 1
+    mov rsi, r9
+    sub rsi, rcx
     call str_new
 
-    ; Advance index - str_new already set rax/rdx correctly
-    inc qword [rbx + PyStrIterObject.it_index]
     pop rbx
     leave
     ret

@@ -66,12 +66,18 @@ struc PyFloatObject
 endstruc
 
 ; String object
+; A str stores UTF-8 and carries both lengths: ob_size is what the bytes
+; occupy, ob_length is how many code points that is.  Python counts in code
+; points, C counts in bytes, and almost every string here is ASCII -- where
+; the two are equal, which is the fast path every code-point-aware operation
+; checks first.
 struc PyStrObject
     .ob_refcnt: resq 1    ; +0
     .ob_type:   resq 1    ; +8
     .ob_size:   resq 1    ; +16: length in bytes
     .ob_hash:   resq 1    ; +24: cached hash (-1 = not computed)
-    .data:                 ; +32: null-terminated UTF-8 bytes (variable)
+    .ob_length: resq 1    ; +32: length in code points
+    .data:                 ; +40: null-terminated UTF-8 bytes (variable)
 endstruc
 
 ; Bytes object

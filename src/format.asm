@@ -302,15 +302,21 @@ DEF_FUNC format_apply_spec, FS_FRAME
     test edx, edx
     jz .fs_failed
     mov [rbp - FS_BODY], rax
-    ; precision truncates a string
+    ; A precision truncates a string, and it counts characters: cutting at a
+    ; byte offset would split a multi-byte one in half.
     mov rcx, [rbp - FS_PREC]
     cmp rcx, 0
     jl .fs_pad
-    cmp rcx, [rax + PyStrObject.ob_size]
+    cmp rcx, [rax + PyStrObject.ob_length]
     jge .fs_pad
-    lea rdi, [rax + PyStrObject.data]
-    mov rsi, rcx
     push rax
+    mov rdi, rax
+    mov rsi, rcx
+    extern str_cp_offset
+    call str_cp_offset
+    mov rsi, rax
+    mov rdi, [rsp]
+    add rdi, PyStrObject.data
     call str_new_heap
     mov [rbp - FS_BODY], rax
     pop rdi
@@ -329,14 +335,20 @@ DEF_FUNC format_apply_spec, FS_FRAME
 
     ; ---- pad to width ------------------------------------------------------
 .fs_pad:
+    ; A width counts characters.  r12 stays the body's byte length -- it is
+    ; what gets copied -- but the comparison and the padding count are in code
+    ; points, and the buffer is the body's bytes plus that many ASCII pads.
     mov rbx, [rbp - FS_BODY]
     mov r12, [rbx + PyStrObject.ob_size]
+    mov rax, [rbx + PyStrObject.ob_length]
     mov r13, [rbp - FS_WIDTH]
-    cmp r12, r13
+    cmp rax, r13
     jge .fs_return_body
 
     mov r14, r13
-    sub r14, r12                        ; total padding
+    sub r14, rax                        ; total padding, in characters
+    mov r13, r12
+    add r13, r14                        ; the buffer, in bytes
 
     ; Default alignment: '>' for numbers, '<' for everything else.
     mov rcx, [rbp - FS_ALIGN]
@@ -374,6 +386,7 @@ DEF_FUNC format_apply_spec, FS_FRAME
     mov [r15 + PyObject.ob_type], rcx
     mov qword [r15 + PyStrObject.ob_hash], -1
     mov [r15 + PyStrObject.ob_size], r13
+    mov [r15 + PyStrObject.ob_length], r13   ; corrected once the bytes are in
 
     mov rcx, [rbp - FS_ALIGN]
     cmp rcx, '<'
@@ -455,6 +468,9 @@ DEF_FUNC format_apply_spec, FS_FRAME
     lea rcx, [r15 + PyStrObject.data]
     add rcx, r13
     mov qword [rcx], 0                  ; NUL plus padding for ap_strcmp
+    mov rdi, r15
+    extern str_set_length
+    call str_set_length
     mov rdi, rbx
     call obj_decref
     mov rax, r15
@@ -975,6 +991,7 @@ DEF_FUNC_LOCAL format_float_body, FFB_FRAME
     mov rcx, [rbx + PyStrObject.ob_size]
     inc rcx
     mov [rax + PyStrObject.ob_size], rcx
+    mov [rax + PyStrObject.ob_length], rcx
     mov rcx, [r12 - FS_SIGN]
     mov [rax + PyStrObject.data], cl
     push rax

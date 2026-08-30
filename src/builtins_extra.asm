@@ -26,6 +26,7 @@ extern obj_dealloc
 extern ap_free
 extern ap_memcpy
 extern strlen
+extern str_new
 extern str_from_cstr
 extern str_from_cstr_heap
 extern obj_str
@@ -1477,10 +1478,13 @@ DEF_FUNC builtin_chr, 16
     cmp rax, 0x7F
     ja .chr_utf8_encode
 
+    ; str_new, not str_from_cstr: chr(0) is a one-character string holding a
+    ; NUL, and measuring it with strlen made it empty.
     mov byte [rbp - 16], al
     mov byte [rbp - 15], 0
     lea rdi, [rbp - 16]
-    call str_from_cstr
+    mov esi, 1
+    call str_new
     leave
     V_PACK rax, rdx             ; builtins return one Value
     ret

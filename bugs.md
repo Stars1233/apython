@@ -9,10 +9,18 @@ one-line fix.
 
 ## Correctness
 
-- **A `str` is a byte string, not a sequence of code points.**  `chr(233)` is
-  two bytes, so `len(chr(233))` is 2 where CPython says 1, and indexing,
-  slicing and iteration all work in bytes.  `ord()` decodes UTF-8, so it
-  round-trips, but nothing else does.  `chr(0)` produces an empty string.
+- **Case conversion is ASCII-only.**  `"é".upper()` is `"é"`, not `"É"`;
+  `upper`, `lower`, `title`, `capitalize` and `swapcase` all leave a
+  non-ASCII byte as it is.  Needs Unicode case tables.
+
+- **`str.encode` and `bytes.decode` ignore the codec name.**  Both always do
+  UTF-8, so `"é".encode("ascii")` returns the UTF-8 bytes instead of raising
+  UnicodeEncodeError.  There is no `_codecs` module and no `encodings`
+  package.
+
+- **`str.format` does not accept attribute or index access in a field.**
+  `"{0.attr}"` and `"{0[key]}"` are not resolved; a field is a position, a
+  name, or empty.  A nested spec, `"{:{}}"`, is likewise not substituted.
 
 - **`tuple(t) is t` is False.**  CPython returns the argument unchanged when
   it is already an exact tuple.

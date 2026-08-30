@@ -118,6 +118,7 @@ DEF_FUNC str_sub_new, SSN_FRAME
     call gc_alloc                   ; sets ob_refcnt and ob_type
     mov [rax + PyStrObject.ob_size], r12
     mov qword [rax + PyStrObject.ob_hash], -1
+    mov [rax + PyStrObject.ob_length], r12   ; corrected after the copy
     mov qword [rax + PyStrObject.data + r12], 0
 
     test rbx, rbx
@@ -127,6 +128,9 @@ DEF_FUNC str_sub_new, SSN_FRAME
     lea rsi, [rbx + PyStrObject.data]
     mov rdx, r12
     call ap_memcpy
+    mov rdi, [rsp]
+    extern str_set_length
+    call str_set_length
     mov rdi, [rbp - SSN_SRC]
     call obj_decref
     pop rax

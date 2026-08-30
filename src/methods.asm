@@ -773,10 +773,14 @@ DEF_FUNC str_method_find
     test rax, rax
     jz .find_not_found
 
-    ; Compute index: result_ptr - self.data
+    ; Compute index: result_ptr - self.data.  The search runs in bytes but the
+    ; answer Python wants is a code point index.
     lea rcx, [rbx + PyStrObject.data]
     sub rax, rcx
-    ; rax = index
+    mov rdi, rbx
+    mov rsi, rax
+    extern str_byte_to_cp
+    call str_byte_to_cp
     mov rdi, rax
     call int_from_i64
 
@@ -1566,250 +1570,460 @@ END_FUNC str_method_split
 
 
 ;; ============================================================================
-;; str_method_format(args, nargs) -> new formatted string
-;; args[0]=self (format string), args[1..]=positional arguments
-;; Handles {} (auto-index) and {N} (explicit index).
+;; fmtbuf_append(rdi = &{buf, used, cap}, rsi = data, rdx = length)
 ;; ============================================================================
-DEF_FUNC str_method_format
+DEF_FUNC_LOCAL fmtbuf_append
+    push rbx
+    push r12
+    push r13
+    mov rbx, rdi
+    mov r12, rsi
+    mov r13, rdx
+    test r13, r13
+    jz .fa_done
+    mov rax, [rbx + 8]
+    add rax, r13
+    cmp rax, [rbx + 16]
+    jbe .fa_room
+.fa_grow:
+    mov rcx, [rbx + 16]
+    shl rcx, 1
+    cmp rcx, rax
+    jae .fa_have_cap
+    mov rcx, rax
+.fa_have_cap:
+    mov [rbx + 16], rcx
+    mov rdi, [rbx]
+    mov rsi, rcx
+    call ap_realloc
+    mov [rbx], rax
+.fa_room:
+    mov rdi, [rbx]
+    add rdi, [rbx + 8]
+    mov rsi, r12
+    mov rdx, r13
+    call ap_memcpy
+    add [rbx + 8], r13
+.fa_done:
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC fmtbuf_append
+
+;; ============================================================================
+;; str_method_format(args, nargs) -> new formatted string
+;;
+;; The whole replacement-field grammar: {}, {2}, {name}, an optional !r/!s/!a
+;; conversion and an optional :spec, which is handed to the same formatter an
+;; f-string uses.  Only {} and {N} were understood before, and anything else
+;; made the function bail and return whatever it had accumulated -- so
+;; "{:>6}".format("ab") was the empty string.
+;; ============================================================================
+SF_STATE  equ 24            ; {buf, used, cap} as three consecutive qwords
+SF_ARGS   equ 32
+SF_NPOS   equ 40
+SF_AUTO   equ 48
+SF_KWN    equ 56            ; the kw_names tuple, or 0
+SF_NKW    equ 64
+SF_FSTART equ 72
+SF_FEND   equ 80
+SF_CONV   equ 88
+SF_SSTART equ 96
+SF_SEND   equ 104
+SF_VALUE  equ 112
+SF_FRAME  equ 128
+DEF_FUNC str_method_format, SF_FRAME
     push rbx
     push r12
     push r13
     push r14
     push r15
-    sub rsp, 24             ; [rbp-48]=buf, [rbp-56]=buf_used, [rbp-64]=buf_cap
 
-    mov rbx, rdi            ; args array
-    mov r14, rsi            ; nargs
+    mov [rbp - SF_ARGS], rdi
+    mov rbx, rdi
 
-    ; Get format string data
-    mov rax, [rbx]          ; self = format string
-    lea r12, [rax + PyStrObject.data]  ; r12 = fmt data ptr
-    mov r13d, [rax + PyStrObject.ob_size] ; r13 = fmt length
+    ; Keyword arguments arrive as trailing values with their names in
+    ; kw_names_pending; clear it so a nested call cannot see ours.
+    mov rax, [rel kw_names_pending]
+    mov [rbp - SF_KWN], rax
+    mov qword [rbp - SF_NKW], 0
+    test rax, rax
+    jz .fm_no_kw
+    mov rcx, [rax + PyTupleObject.ob_size]
+    mov [rbp - SF_NKW], rcx
+    sub rsi, rcx
+    mov qword [rel kw_names_pending], 0
+.fm_no_kw:
+    dec rsi                     ; drop self
+    mov [rbp - SF_NPOS], rsi
 
-    ; Allocate initial output buffer
-    lea rdi, [r13 + 64]    ; generous initial size
+    mov rax, [rbx]
+    lea r12, [rax + PyStrObject.data]
+    mov r13, [rax + PyStrObject.ob_size]
+
+    lea rdi, [r13 + 64]
     call ap_malloc
-    mov [rbp-48], rax       ; buf
-    mov qword [rbp-56], 0   ; buf_used = 0
+    mov [rbp - SF_STATE], rax
+    mov qword [rbp - SF_STATE + 8], 0
     lea rax, [r13 + 64]
-    mov [rbp-64], rax       ; buf_cap
+    mov [rbp - SF_STATE + 16], rax
 
-    xor ecx, ecx            ; ecx = source index
-    xor r15d, r15d          ; r15d = auto-index counter
+    xor r15d, r15d              ; cursor
+    mov qword [rbp - SF_AUTO], 0
 
-.fmt_loop:
-    cmp ecx, r13d
-    jge .fmt_done
-    movzx eax, byte [r12 + rcx]
+.fm_loop:
+    cmp r15, r13
+    jge .fm_done
+    movzx eax, byte [r12 + r15]
     cmp al, '{'
-    je .fmt_brace
+    je .fm_open
     cmp al, '}'
-    je .fmt_close_brace
-    ; Regular char — append to buffer
-    push rcx
-    ; Ensure space
-    mov rdi, [rbp-56]       ; used
-    inc rdi                 ; need 1 more
-    cmp rdi, [rbp-64]
-    jbe .fmt_char_ok
-    ; Grow buffer
-    mov rdi, [rbp-64]
-    shl rdi, 1
-    mov [rbp-64], rdi
-    mov rsi, rdi
-    mov rdi, [rbp-48]
-    call ap_realloc
-    mov [rbp-48], rax
-.fmt_char_ok:
-    pop rcx
-    mov rdi, [rbp-48]
-    mov rax, [rbp-56]
-    movzx edx, byte [r12 + rcx]
-    mov [rdi + rax], dl
-    inc qword [rbp-56]
-    inc ecx
-    jmp .fmt_loop
+    je .fm_close
+.fm_literal:
+    lea rdi, [rbp - SF_STATE]
+    lea rsi, [r12 + r15]
+    mov edx, 1
+    call fmtbuf_append
+    inc r15
+    jmp .fm_loop
 
-.fmt_brace:
-    inc ecx                 ; skip '{'
-    cmp ecx, r13d
-    jge .fmt_done
-    movzx eax, byte [r12 + rcx]
-    ; Check for {{ (literal brace)
+.fm_close:
+    ; "}}" is a literal brace; a lone one is an error, as in CPython.
+    lea rcx, [r15 + 1]
+    cmp rcx, r13
+    jge .fm_lone_brace
+    cmp byte [r12 + rcx], '}'
+    jne .fm_lone_brace
+    lea rdi, [rbp - SF_STATE]
+    lea rsi, [r12 + r15]
+    mov edx, 1
+    call fmtbuf_append
+    add r15, 2
+    jmp .fm_loop
+
+.fm_open:
+    lea rcx, [r15 + 1]
+    cmp rcx, r13
+    jge .fm_unterminated
+    cmp byte [r12 + rcx], '{'
+    jne .fm_field
+    lea rdi, [rbp - SF_STATE]
+    lea rsi, [r12 + r15]
+    mov edx, 1
+    call fmtbuf_append
+    add r15, 2
+    jmp .fm_loop
+
+.fm_field:
+    inc r15
+    mov [rbp - SF_FSTART], r15
+    mov qword [rbp - SF_CONV], 0
+    mov qword [rbp - SF_SSTART], 0
+    mov qword [rbp - SF_SEND], 0
+    xor r14d, r14d              ; bracket depth
+.fm_scan_field:
+    cmp r15, r13
+    jge .fm_unterminated
+    movzx eax, byte [r12 + r15]
+    cmp al, '['
+    jne .fm_scan_not_open
+    inc r14
+    jmp .fm_scan_next
+.fm_scan_not_open:
+    cmp al, ']'
+    jne .fm_scan_check_end
+    dec r14
+    jmp .fm_scan_next
+.fm_scan_check_end:
+    test r14, r14
+    jnz .fm_scan_next
+    cmp al, '!'
+    je .fm_field_end
+    cmp al, ':'
+    je .fm_field_end
+    cmp al, '}'
+    je .fm_field_end
+.fm_scan_next:
+    inc r15
+    jmp .fm_scan_field
+
+.fm_field_end:
+    mov [rbp - SF_FEND], r15
+    movzx eax, byte [r12 + r15]
+    cmp al, '!'
+    jne .fm_after_conv
+    inc r15
+    cmp r15, r13
+    jge .fm_unterminated
+    movzx eax, byte [r12 + r15]
+    mov [rbp - SF_CONV], rax
+    inc r15
+.fm_after_conv:
+    cmp r15, r13
+    jge .fm_unterminated
+    movzx eax, byte [r12 + r15]
+    cmp al, ':'
+    jne .fm_after_spec
+    inc r15
+    mov [rbp - SF_SSTART], r15
+    xor r14d, r14d
+.fm_scan_spec:
+    cmp r15, r13
+    jge .fm_unterminated
+    movzx eax, byte [r12 + r15]
     cmp al, '{'
-    je .fmt_literal_brace
-    ; Check for } (empty placeholder = auto-index)
+    jne .fm_spec_not_open
+    inc r14
+    jmp .fm_spec_next
+.fm_spec_not_open:
     cmp al, '}'
-    je .fmt_auto_index
-    ; Check for digit (explicit index)
-    cmp al, '0'
-    jb .fmt_done            ; unexpected char, bail
-    cmp al, '9'
-    ja .fmt_done
-    ; Parse number
-    xor edx, edx            ; edx = arg_index
-.fmt_parse_num:
-    movzx eax, byte [r12 + rcx]
-    cmp al, '}'
-    je .fmt_have_index
-    sub al, '0'
-    imul edx, 10
-    movzx eax, al
-    add edx, eax
-    inc ecx
-    cmp ecx, r13d
-    jl .fmt_parse_num
-    jmp .fmt_done
-.fmt_have_index:
-    inc ecx                 ; skip '}'
-    jmp .fmt_insert_arg
+    jne .fm_spec_next
+    test r14, r14
+    jz .fm_spec_end
+    dec r14
+.fm_spec_next:
+    inc r15
+    jmp .fm_scan_spec
+.fm_spec_end:
+    mov [rbp - SF_SEND], r15
+.fm_after_spec:
+    cmp r15, r13
+    jge .fm_unterminated
+    cmp byte [r12 + r15], '}'
+    jne .fm_unterminated
+    inc r15                     ; past the closing brace
 
-.fmt_auto_index:
-    inc ecx                 ; skip '}'
-    mov edx, r15d           ; edx = auto-index
-    inc r15d
-    ; fall through to .fmt_insert_arg
+    mov rdi, [rbp - SF_ARGS]
+    mov rsi, [rbp - SF_NPOS]
+    mov rdx, [rbp - SF_KWN]
+    mov rcx, r12
+    add rcx, [rbp - SF_FSTART]
+    mov r8, [rbp - SF_FEND]
+    sub r8, [rbp - SF_FSTART]
+    lea r9, [rbp - SF_AUTO]
+    call fm_resolve_field
+    mov [rbp - SF_VALUE], rax
 
-.fmt_insert_arg:
-    ; edx = arg index (0-based among format args, which are args[1..])
-    lea eax, [edx + 1]     ; args index (skip self)
-    cmp rax, r14
-    jge .fmt_loop           ; out of range, skip
-    push rcx
-    push rdx
-    ; Get the arg object and convert to string
-    shl rax, 3              ; one Value per slot
-    mov rdi, [rbx + rax]    ; arg Value
-    V_UNPACK rdi, r8
-    ; Convert arg to string via obj_str(payload, tag)
-    ; obj_str handles all tags: SmallInt, Float, Bool, None, TAG_PTR
-    push rdi
-    cmp r8d, TAG_PTR
-    jne .fmt_inline_str      ; SmallInt, Float, Bool, None → obj_str
-    ; TAG_PTR path: call tp_str directly (avoids extra push/pop in obj_str)
-    mov rax, [rdi + PyObject.ob_type]
-    mov rax, [rax + PyTypeObject.tp_str]
-    test rax, rax
-    jz .fmt_use_repr
-    pop rdi
-    mov edx, TAG_PTR            ; tp_str/int_repr dispatches on edx
-    call rax
-    jmp .fmt_heap_str
-.fmt_use_repr:
-    pop rdi
-    mov rax, [rdi + PyObject.ob_type]
-    mov rax, [rax + PyTypeObject.tp_repr]
-    test rax, rax
-    jz .fmt_skip_arg
-    mov edx, TAG_PTR            ; tp_repr/int_repr dispatches on edx
-    call rax
-    jmp .fmt_heap_str
-.fmt_inline_str:
-    pop rdi
-    mov esi, r8d           ; tag
-    V_PACK rdi, rsi
-    call obj_str           ; handles SmallInt, Float, Bool, None
-.fmt_heap_str:
-    push rax                ; save str obj for DECREF
-    mov edx, [rax + PyStrObject.ob_size]
-    lea rsi, [rax + PyStrObject.data]
-    ; Ensure buffer has space
-    mov rdi, [rbp-56]
-    add rdi, rdx
-    cmp rdi, [rbp-64]
-    jbe .fmt_copy_ok
-    mov rdi, [rbp-64]
-.fmt_grow_copy:
-    shl rdi, 1
-    mov rax, [rbp-56]
-    add rax, rdx
-    cmp rdi, rax
-    jb .fmt_grow_copy
-    mov [rbp-64], rdi
-    mov rsi, rdi
-    mov rdi, [rbp-48]
-    call ap_realloc
-    mov [rbp-48], rax
-    ; Re-read str data (rax was clobbered)
-    mov rax, [rsp]          ; str obj
-    mov edx, [rax + PyStrObject.ob_size]
-    lea rsi, [rax + PyStrObject.data]
-.fmt_copy_ok:
-    ; Copy string data
-    mov rdi, [rbp-48]
-    add rdi, [rbp-56]
-    xor ecx, ecx
-.fmt_copy_str:
-    cmp ecx, edx
-    jge .fmt_copy_done
-    mov al, [rsi + rcx]
-    mov [rdi + rcx], al
-    inc ecx
-    jmp .fmt_copy_str
-.fmt_copy_done:
-    movzx eax, dx
-    add [rbp-56], rax
-
-    ; DECREF the temporary string
-    pop rdi                 ; str obj
-    call obj_decref
-.fmt_skip_arg:
-    pop rdx
-    pop rcx
-    jmp .fmt_loop
-
-.fmt_literal_brace:
-    ; {{ → output single {
-    push rcx
-    mov rdi, [rbp-48]
-    mov rax, [rbp-56]
-    mov byte [rdi + rax], '{'
-    inc qword [rbp-56]
-    pop rcx
-    inc ecx                 ; skip second {
-    jmp .fmt_loop
-
-.fmt_close_brace:
-    ; }} → output single }
-    inc ecx                 ; skip first }
-    cmp ecx, r13d
-    jge .fmt_done
-    movzx eax, byte [r12 + rcx]
-    cmp al, '}'
-    jne .fmt_loop           ; lone } — ignore (CPython raises error, we skip)
-    push rcx
-    mov rdi, [rbp-48]
-    mov rax, [rbp-56]
-    mov byte [rdi + rax], '}'
-    inc qword [rbp-56]
-    pop rcx
-    inc ecx                 ; skip second }
-    jmp .fmt_loop
-
-.fmt_done:
-    ; NUL-terminate and create string
-    mov rdi, [rbp-48]
-    mov rax, [rbp-56]
-    mov byte [rdi + rax], 0
-    call str_from_cstr_heap
+    ; !r and !a render the repr; !s the str.  Anything else is left alone.
+    mov rcx, [rbp - SF_CONV]
+    test rcx, rcx
+    jz .fm_no_conv
+    cmp rcx, 'r'
+    je .fm_conv_repr
+    cmp rcx, 'a'
+    je .fm_conv_repr
+    cmp rcx, 's'
+    jne .fm_no_conv
+    mov rdi, [rbp - SF_VALUE]
+    call obj_str
+    jmp .fm_conv_done
+.fm_conv_repr:
+    mov rdi, [rbp - SF_VALUE]
+    call obj_repr
+.fm_conv_done:
     push rax
+    mov rdi, [rbp - SF_VALUE]
+    DECREF_V rdi, rcx
+    pop rax
+    mov [rbp - SF_VALUE], rax
+.fm_no_conv:
 
-    ; Free buffer
-    mov rdi, [rbp-48]
+    ; The spec, as a str, handed to the formatter f-strings use.
+    mov rcx, [rbp - SF_SEND]
+    sub rcx, [rbp - SF_SSTART]
+    jle .fm_plain_str
+    mov rdi, r12
+    add rdi, [rbp - SF_SSTART]
+    mov rsi, rcx
+    call str_new_heap
+    push rax
+    mov rdi, [rbp - SF_VALUE]
+    mov rsi, rax
+    extern format_apply_spec
+    call format_apply_spec
+    mov r14, rax
+    pop rdi
+    call obj_decref
+    jmp .fm_have_text
+
+.fm_plain_str:
+    mov rdi, [rbp - SF_VALUE]
+    call obj_str
+    mov r14, rax
+
+.fm_have_text:
+    mov rdi, [rbp - SF_VALUE]
+    DECREF_V rdi, rcx
+    test r14, r14
+    jz .fm_loop
+    lea rdi, [rbp - SF_STATE]
+    lea rsi, [r14 + PyStrObject.data]
+    mov rdx, [r14 + PyStrObject.ob_size]
+    call fmtbuf_append
+    mov rdi, r14
+    call obj_decref
+    jmp .fm_loop
+
+.fm_lone_brace:
+    lea rdi, [rel exc_ValueError_type]
+    CSTRING rsi, "Single '}' encountered in format string"
+    call raise_exception
+
+.fm_unterminated:
+    lea rdi, [rel exc_ValueError_type]
+    CSTRING rsi, "Single '{' encountered in format string"
+    call raise_exception
+
+.fm_done:
+    mov rdi, [rbp - SF_STATE]
+    mov rsi, [rbp - SF_STATE + 8]
+    call str_new_heap
+    push rax
+    mov rdi, [rbp - SF_STATE]
     call ap_free
-
     pop rax
     mov edx, TAG_PTR
-    add rsp, 24
     pop r15
     pop r14
     pop r13
     pop r12
     pop rbx
     leave
-    V_PACK rax, rdx             ; builtins return one Value
+    V_PACK rax, rdx
     ret
 END_FUNC str_method_format
+
+;; ============================================================================
+;; fm_resolve_field(rdi = args, rsi = npos, rdx = kw_names or 0,
+;;                  rcx = field bytes, r8 = field length, r9 = &auto counter)
+;;   -> rax = the argument the field names, a new reference
+;; Empty means the next positional, all digits an explicit one, anything else
+;; a keyword.
+;; ============================================================================
+RF_ARGS  equ 8
+RF_NPOS  equ 16
+RF_KWN   equ 24
+RF_NAME  equ 32
+RF_LEN   equ 40
+RF_AUTO  equ 48
+RF_FRAME equ 64
+DEF_FUNC_LOCAL fm_resolve_field, RF_FRAME
+    push rbx
+    push r12
+    mov [rbp - RF_ARGS], rdi
+    mov [rbp - RF_NPOS], rsi
+    mov [rbp - RF_KWN], rdx
+    mov [rbp - RF_NAME], rcx
+    mov [rbp - RF_LEN], r8
+    mov [rbp - RF_AUTO], r9
+
+    test r8, r8
+    jz .rf_auto
+
+    ; All digits?
+    xor r12d, r12d              ; the parsed index
+    xor ecx, ecx
+.rf_digits:
+    cmp rcx, [rbp - RF_LEN]
+    jge .rf_positional
+    mov rdx, [rbp - RF_NAME]
+    movzx eax, byte [rdx + rcx]
+    cmp al, '0'
+    jb .rf_keyword
+    cmp al, '9'
+    ja .rf_keyword
+    imul r12, r12, 10
+    sub eax, '0'
+    add r12, rax
+    inc rcx
+    jmp .rf_digits
+
+.rf_auto:
+    mov rax, [rbp - RF_AUTO]
+    mov r12, [rax]
+    inc qword [rax]
+.rf_positional:
+    cmp r12, [rbp - RF_NPOS]
+    jge .rf_index_error
+    mov rax, [rbp - RF_ARGS]
+    lea rcx, [r12 + 1]          ; args[0] is self
+    mov rax, [rax + rcx*8]
+    INCREF_V rax, rcx
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.rf_keyword:
+    mov rax, [rbp - RF_KWN]
+    test rax, rax
+    jz .rf_key_error
+    mov rbx, [rax + PyTupleObject.ob_size]
+    xor r12d, r12d
+.rf_kw_scan:
+    cmp r12, rbx
+    jge .rf_key_error
+    mov rax, [rbp - RF_KWN]
+    mov rax, [rax + PyTupleObject.ob_item]
+    mov rdi, [rax + r12*8]
+    add rdi, PyStrObject.data
+    mov rsi, [rbp - RF_NAME]
+    mov rdx, [rbp - RF_LEN]
+    call fm_name_equals
+    test eax, eax
+    jnz .rf_kw_found
+    inc r12
+    jmp .rf_kw_scan
+.rf_kw_found:
+    ; The keyword values sit after the positional ones.
+    mov rax, [rbp - RF_ARGS]
+    mov rcx, [rbp - RF_NPOS]
+    add rcx, r12
+    inc rcx                     ; past self
+    mov rax, [rax + rcx*8]
+    INCREF_V rax, rcx
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.rf_index_error:
+    lea rdi, [rel exc_IndexError_type]
+    CSTRING rsi, "Replacement index out of range for positional args tuple"
+    call raise_exception
+.rf_key_error:
+    lea rdi, [rel exc_KeyError_type]
+    CSTRING rsi, "format() got no such keyword argument"
+    call raise_exception
+END_FUNC fm_resolve_field
+
+;; fm_name_equals(rdi = NUL-terminated name, rsi = bytes, rdx = length) -> eax
+DEF_FUNC_LOCAL fm_name_equals
+    xor ecx, ecx
+.ne_loop:
+    cmp rcx, rdx
+    jge .ne_at_end
+    movzx eax, byte [rdi + rcx]
+    test al, al
+    jz .ne_no
+    movzx r8d, byte [rsi + rcx]
+    cmp al, r8b
+    jne .ne_no
+    inc rcx
+    jmp .ne_loop
+.ne_at_end:
+    cmp byte [rdi + rcx], 0
+    jne .ne_no
+    mov eax, 1
+    leave
+    ret
+.ne_no:
+    xor eax, eax
+    leave
+    ret
+END_FUNC fm_name_equals
 
 ;; ============================================================================
 ;; str_method_format_map(args, nargs) -> formatted string
@@ -2127,10 +2341,12 @@ DEF_FUNC str_method_index
     test rax, rax
     jz .str_index_not_found
 
-    ; Compute index: result_ptr - self.data
+    ; Byte offset in, code point index out.
     lea rcx, [rbx + PyStrObject.data]
     sub rax, rcx
-    ; rax = index
+    mov rdi, rbx
+    mov rsi, rax
+    call str_byte_to_cp
     mov rdi, rax
     call int_from_i64
 
@@ -2206,7 +2422,10 @@ DEF_FUNC str_method_rfind
     jmp .rfind_loop
 
 .rfind_found:
-    mov rdi, rcx
+    mov rdi, rbx
+    mov rsi, rcx
+    call str_byte_to_cp
+    mov rdi, rax
     call int_from_i64
     pop r14
     pop r13
@@ -2217,7 +2436,7 @@ DEF_FUNC str_method_rfind
     ret
 
 .rfind_empty_sub:
-    mov rdi, r13
+    mov rdi, [rbx + PyStrObject.ob_length]
     call int_from_i64
     pop r14
     pop r13
@@ -2934,10 +3153,11 @@ END_FUNC str_method_casefold
 ;; args[0]=self, args[1]=width, args[2]=fillchar (optional, default ' ')
 ;; ============================================================================
 PA_SELF   equ 8
-PA_LEN    equ 16
+PA_LEN    equ 16            ; length in bytes, for the copies
 PA_ARGS   equ 24
 PA_NARGS  equ 32
-PA_FRAME  equ 32
+PA_CPLEN  equ 40            ; length in code points, which is what a width means
+PA_FRAME  equ 48
 DEF_FUNC str_method_center, PA_FRAME
     push rbx
     push r12
@@ -2949,6 +3169,8 @@ DEF_FUNC str_method_center, PA_FRAME
     mov r12, [rbx + PyStrObject.ob_size]; self_len
     mov [rbp - PA_SELF], rbx
     mov [rbp - PA_LEN], r12
+    mov rax, [rbx + PyStrObject.ob_length]
+    mov [rbp - PA_CPLEN], rax
 
     ; Get width
     mov rdi, [rbp - PA_ARGS]
@@ -2966,9 +3188,13 @@ DEF_FUNC str_method_center, PA_FRAME
     mov rdx, [rax + 16]                 ; args[2] payload (char str)
     movzx ecx, byte [rdx + PyStrObject.data]
 .center_have_fill:
-    ; If width <= self_len, return copy of self
-    cmp r13, r12
+    ; A width counts characters, so it is compared against the code point
+    ; length; what has to be allocated is that many characters' worth of
+    ; bytes -- the padding, which is ASCII, plus whatever the string occupies.
+    cmp r13, [rbp - PA_CPLEN]
     jle .center_return_self
+    sub r13, [rbp - PA_CPLEN]
+    add r13, r12
 
     ; Allocate new string of size width
     mov rdi, r13
@@ -3047,6 +3273,8 @@ DEF_FUNC str_method_ljust, PA_FRAME
     mov r12, [rbx + PyStrObject.ob_size]
     mov [rbp - PA_SELF], rbx
     mov [rbp - PA_LEN], r12
+    mov rax, [rbx + PyStrObject.ob_length]
+    mov [rbp - PA_CPLEN], rax
 
     ; Get width
     mov rax, [rbp - PA_ARGS]
@@ -3069,8 +3297,10 @@ DEF_FUNC str_method_ljust, PA_FRAME
 .ljust_fill_ss:
     movzx ecx, dl
 .ljust_have_fill:
-    cmp r13, r12
+    cmp r13, [rbp - PA_CPLEN]
     jle .ljust_return_self
+    sub r13, [rbp - PA_CPLEN]
+    add r13, r12
 
     ; Allocate, fill, copy self at start
     mov rdi, r13
@@ -3135,6 +3365,8 @@ DEF_FUNC str_method_rjust, PA_FRAME
     mov r12, [rbx + PyStrObject.ob_size]
     mov [rbp - PA_SELF], rbx
     mov [rbp - PA_LEN], r12
+    mov rax, [rbx + PyStrObject.ob_length]
+    mov [rbp - PA_CPLEN], rax
 
     mov rax, [rbp - PA_ARGS]
     mov rdi, [rax + 8]
@@ -3155,8 +3387,10 @@ DEF_FUNC str_method_rjust, PA_FRAME
 .rjust_fill_ss:
     movzx ecx, dl
 .rjust_have_fill:
-    cmp r13, r12
+    cmp r13, [rbp - PA_CPLEN]
     jle .rjust_return_self
+    sub r13, [rbp - PA_CPLEN]
+    add r13, r12
 
     mov rdi, r13
     push rcx
@@ -3222,6 +3456,8 @@ DEF_FUNC str_method_zfill, PA_FRAME
     mov r12, [rbx + PyStrObject.ob_size]
     mov [rbp - PA_SELF], rbx
     mov [rbp - PA_LEN], r12
+    mov rax, [rbx + PyStrObject.ob_length]
+    mov [rbp - PA_CPLEN], rax
 
     mov rax, [rbp - PA_ARGS]
     mov rdi, [rax + 8]
@@ -3229,8 +3465,10 @@ DEF_FUNC str_method_zfill, PA_FRAME
     call int_to_i64
     mov r13, rax                         ; width
 
-    cmp r13, r12
+    cmp r13, [rbp - PA_CPLEN]
     jle .zfill_return_self
+    sub r13, [rbp - PA_CPLEN]
+    add r13, r12
 
     ; Allocate filled with '0'
     mov rdi, r13
@@ -3336,6 +3574,9 @@ DEF_FUNC str_method_rindex
     jmp .rindex_loop
 
 .rindex_found:
+    mov rdi, rbx
+    mov rsi, rax
+    call str_byte_to_cp
     mov rdi, rax
     call int_from_i64
     pop r13
