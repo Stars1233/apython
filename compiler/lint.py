@@ -45,6 +45,31 @@ def check_field_widths(files, fields):
                     bad.append((path, n, "64-bit read of 4-byte field %s" % fld, code.strip()))
     return bad
 
+def check_tailjumps(files):
+    """A DEF_FUNC pushes rbp; tail-jumping out of one leaks that frame.
+
+    `DEF_FUNC f / ... / jmp g / END_FUNC` returns through g's `leave; ret`,
+    which pops the wrong thing and lands on a corrupted stack.  Tail-jumps are
+    fine, but only from DEF_FUNC_BARE.
+    """
+    bad = []
+    for path in files:
+        src = open(path).read()
+        for m in re.finditer(r'^(DEF_FUNC(?:_LOCAL)?)\s+(\w+)(?:\s*,[^\n]*)?$(.*?)^END_FUNC',
+                             src, re.M | re.S):
+            name, body = m.group(2), m.group(3)
+            for jm in re.finditer(r'^\s*jmp\s+([a-z_][a-z0-9_]*)\s*(?:;.*)?$', body, re.M):
+                target = jm.group(1)
+                # A jump to a global function, not a local label or a register.
+                if re.search(r'^(DEF_FUNC(_BARE|_LOCAL)?)\s+%s\b' % re.escape(target),
+                             "\n".join(open(p).read() for p in files), re.M) \
+                   or target in ('buf_grow','buf_push_u32','buf_push_ptr','str_new_heap',
+                                 'cg_has_star','asm_loc_varint','asm_effect_var'):
+                    bad.append((path, 0,
+                                "%s tail-jumps to %s but pushed rbp" % (name, target),
+                                "use DEF_FUNC_BARE for a tail-jump"))
+    return bad
+
 def check_alignment(files):
     bad = []
     for path in files:
@@ -88,7 +113,8 @@ def main():
     files = sorted(glob.glob('compiler/*.asm'))
     fields = dword_fields(['compiler/compiler.inc', 'include/object.inc',
                            'include/frame.inc', 'include/types.inc'])
-    problems = check_field_widths(files, fields) + check_alignment(files)
+    problems = (check_field_widths(files, fields) + check_alignment(files)
+                + check_tailjumps(files))
     for path, n, what, detail in problems:
         where = "%s:%d" % (path, n) if n else path
         print("%s: %s\n    %s" % (where, what, detail))

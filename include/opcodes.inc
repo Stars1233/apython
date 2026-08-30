@@ -190,6 +190,16 @@ CO_COROUTINE        equ 0x80
 CO_ITERABLE_COROUTINE equ 0x100
 CO_ASYNC_GENERATOR  equ 0x200
 
+; CALL_INTRINSIC_1 / _2 selectors, matching CPython 3.12's intrinsics table.
+INTRINSIC_1_INVALID          equ 0
+INTRINSIC_PRINT              equ 1
+INTRINSIC_IMPORT_STAR        equ 2
+INTRINSIC_STOPITERATION_ERROR equ 3
+INTRINSIC_ASYNC_GEN_WRAP     equ 4
+INTRINSIC_UNARY_POSITIVE     equ 5
+INTRINSIC_LIST_TO_TUPLE      equ 6
+INTRINSIC_TYPEVAR            equ 7
+
 ; co_localspluskinds bytes.  apython never reads this field, but emitting it
 ; correctly costs nothing and keeps introspection honest if it is ever wired up.
 CO_FAST_LOCAL       equ 0x20

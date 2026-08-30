@@ -1794,6 +1794,7 @@ opn_FOR_ITER_RANGE: db "FOR_ITER_RANGE", 0
 ; ============================================================================
 section .data
 align 8
+global opcode_names
 opcode_names:
     dq opn_CACHE                      ; 0
     dq opn_POP_TOP                    ; 1

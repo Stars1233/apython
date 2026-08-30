@@ -11,6 +11,7 @@ extern bool_init
 extern ap_strcmp
 extern value_selftest_main
 extern compile_selftest_main
+extern dis_main
 extern builtins_init
 extern methods_init
 extern import_init
@@ -104,6 +105,28 @@ DEF_FUNC main
     leave
     ret
 .not_selftest_compile:
+
+    ; Check for --dis: compile argv[2] as an expression and print its bytecode.
+    ; Fidelity is semantic rather than byte-for-byte, so putting this beside
+    ; `python3 -m dis` is the quickest way to localise a codegen bug.
+    mov rdi, [r15 + 8]
+    lea rsi, [rel dis_flag]
+    call ap_strcmp
+    test eax, eax
+    jne .not_dis
+    cmp r14, 3                  ; argc
+    jl .usage
+    call bool_init
+    mov rdi, [r15 + 16]         ; argv[2]
+    call dis_main
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+.not_dis:
 
     ; Check for -t flag (opcode tracing)
     mov rax, [r15 + 8]         ; rax = argv[1]
@@ -395,6 +418,7 @@ END_FUNC main
 section .rodata
 selftest_flag: db "--selftest-value", 0
 selftest_compile_flag: db "--selftest-compile", 0
+dis_flag: db "--dis", 0
 version_msg: db "apython ", VERSION_STR, 10
 version_msg_len equ $ - version_msg
 __name__cstr: db "__name__", 0

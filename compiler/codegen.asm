@@ -25,6 +25,8 @@ extern buf_reserve
 extern comp_error
 
 extern ap_memcmp
+extern none_singleton
+extern tuple_new
 extern exc_SyntaxError_type
 
 ; --- Named frame-layout constants ---
@@ -996,6 +998,1129 @@ DEF_FUNC_LOCAL cg_e_compare, CB_FRAME
     ret
 END_FUNC cg_e_compare
 
+;; ============================================================================
+;; cg_children(Comp *c, CompUnit *u, uint32_t node) -> rax = 1 ok, 0 error
+;; Emit every child of a node in order, each leaving one value on the stack.
+;; ============================================================================
+CH_COMP  equ 8
+CH_UNIT  equ 16
+CH_NODE  equ 24
+CH_I     equ 32
+CH_N     equ 40
+CH_FRAME equ 40          ; + 3 pushes = 64
+DEF_FUNC cg_children, CH_FRAME
+    push rbx
+    push r12
+    push r13
+    mov rbx, rdi
+    mov r12, rsi
+    mov r13, rdx
+    mov rdi, rbx
+    mov rsi, r13
+    call ast_at
+    mov ecx, [rax + AstNode.nchild]
+    mov [rbp - CH_N], rcx
+    mov qword [rbp - CH_I], 0
+.loop:
+    mov rax, [rbp - CH_I]
+    cmp rax, [rbp - CH_N]
+    jae .done
+    mov rdi, rbx
+    mov rsi, r13
+    call ast_at
+    mov rsi, rax
+    mov rdx, [rbp - CH_I]
+    mov rdi, rbx
+    call ast_child
+    mov rdx, rax
+    mov rdi, rbx
+    mov rsi, r12
+    call cg_expr
+    test eax, eax
+    jz .fail
+    inc qword [rbp - CH_I]
+    jmp .loop
+.done:
+    mov eax, 1
+.fail:
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC cg_children
+
+;; ============================================================================
+;; cg_has_star(Comp *c, uint32_t node, int kind) -> rax = 1 if any child has it
+;; ============================================================================
+DEF_FUNC cg_has_star, 8
+    push rbx
+    push r12
+    push r13
+    mov rbx, rdi
+    mov r12, rsi
+    mov r13, rdx
+    mov rdi, rbx
+    mov rsi, r12
+    call ast_at
+    mov ecx, [rax + AstNode.nchild]
+    xor edx, edx
+.loop:
+    cmp rdx, rcx
+    jae .no
+    push rcx
+    push rdx
+    mov rdi, rbx
+    mov rsi, r12
+    call ast_at
+    mov rsi, rax
+    mov rdx, [rsp]
+    mov rdi, rbx
+    call ast_child
+    mov rdi, rbx
+    mov rsi, rax
+    call ast_at
+    movzx eax, byte [rax + AstNode.kind]
+    pop rdx
+    pop rcx
+    cmp eax, r13d
+    je .yes
+    inc rdx
+    jmp .loop
+.yes:
+    mov eax, 1
+    jmp .ret
+.no:
+    xor eax, eax
+.ret:
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC cg_has_star
+
+;; ============================================================================
+;; cg_e_seq - tuple, list and set displays
+;;
+;; Without any unpacking this is just the elements followed by one BUILD_*.
+;; With a `*x` among them the container is built empty and extended, because
+;; BUILD_* takes a fixed count and cannot absorb an iterable of unknown length.
+;; A tuple takes the list route and is converted at the end, which is what
+;; CPython does and why INTRINSIC_LIST_TO_TUPLE exists.
+;; ============================================================================
+CS_COMP  equ 8
+CS_UNIT  equ 16
+CS_NODE  equ 24
+CS_I     equ 32
+CS_N     equ 40
+CS_LINE  equ 48
+CS_KIND  equ 56
+CS_OPEN  equ 64
+CS_ADD   equ 72
+CS_EXT   equ 80
+CS_FRAME equ 88          ; + 3 pushes = 112
+DEF_FUNC_LOCAL cg_e_seq, CS_FRAME
+    push rbx
+    push r12
+    push r13
+    mov rbx, rdi
+    mov r12, rsi
+    mov r13, rdx
+
+    mov rdi, rbx
+    mov rsi, r13
+    call ast_at
+    movzx ecx, byte [rax + AstNode.kind]
+    mov [rbp - CS_KIND], rcx
+    mov ecx, [rax + AstNode.nchild]
+    mov [rbp - CS_N], rcx
+    mov ecx, [rax + AstNode.lineno]
+    mov [rbp - CS_LINE], rcx
+
+    ; Pick the opcode trio for this container kind.
+    mov rax, [rbp - CS_KIND]
+    cmp eax, AST_LIST
+    je .as_list
+    cmp eax, AST_SET
+    je .as_set
+    ; a tuple
+    mov qword [rbp - CS_OPEN], OP_BUILD_LIST
+    mov qword [rbp - CS_ADD], OP_LIST_APPEND
+    mov qword [rbp - CS_EXT], OP_LIST_EXTEND
+    jmp .have_ops
+.as_list:
+    mov qword [rbp - CS_OPEN], OP_BUILD_LIST
+    mov qword [rbp - CS_ADD], OP_LIST_APPEND
+    mov qword [rbp - CS_EXT], OP_LIST_EXTEND
+    jmp .have_ops
+.as_set:
+    mov qword [rbp - CS_OPEN], OP_BUILD_SET
+    mov qword [rbp - CS_ADD], OP_SET_ADD
+    mov qword [rbp - CS_EXT], OP_SET_UPDATE
+.have_ops:
+
+    mov rdi, rbx
+    mov rsi, r13
+    mov edx, AST_STARRED
+    call cg_has_star
+    test eax, eax
+    jnz .unpacked
+
+    ; The simple shape: every element, then one BUILD_*.
+    mov rdi, rbx
+    mov rsi, r12
+    mov rdx, r13
+    call cg_children
+    test eax, eax
+    jz .fail
+    mov rax, [rbp - CS_KIND]
+    mov esi, OP_BUILD_TUPLE
+    cmp eax, AST_TUPLE
+    je .emit_build
+    mov esi, OP_BUILD_LIST
+    cmp eax, AST_LIST
+    je .emit_build
+    mov esi, OP_BUILD_SET
+.emit_build:
+    mov rdi, r12
+    mov rdx, [rbp - CS_N]
+    mov rcx, [rbp - CS_LINE]
+    call cg_emit
+    mov eax, 1
+    jmp .ret
+
+.unpacked:
+    mov rdi, r12
+    mov rsi, [rbp - CS_OPEN]
+    xor edx, edx
+    mov rcx, [rbp - CS_LINE]
+    call cg_emit
+
+    mov qword [rbp - CS_I], 0
+.up_loop:
+    mov rax, [rbp - CS_I]
+    cmp rax, [rbp - CS_N]
+    jae .up_done
+    mov rdi, rbx
+    mov rsi, r13
+    call ast_at
+    mov rsi, rax
+    mov rdx, [rbp - CS_I]
+    mov rdi, rbx
+    call ast_child
+    mov r14, rax
+    mov rdi, rbx
+    mov rsi, rax
+    call ast_at
+    movzx eax, byte [rax + AstNode.kind]
+    cmp eax, AST_STARRED
+    je .up_star
+
+    mov rdi, rbx
+    mov rsi, r12
+    mov rdx, r14
+    call cg_expr
+    test eax, eax
+    jz .fail
+    mov rdi, r12
+    mov rsi, [rbp - CS_ADD]
+    mov edx, 1
+    mov rcx, [rbp - CS_LINE]
+    call cg_emit
+    jmp .up_next
+
+.up_star:
+    mov rdi, rbx
+    mov rsi, r14
+    call ast_at
+    mov edx, [rax + AstNode.a]
+    mov rdi, rbx
+    mov rsi, r12
+    call cg_expr
+    test eax, eax
+    jz .fail
+    mov rdi, r12
+    mov rsi, [rbp - CS_EXT]
+    mov edx, 1
+    mov rcx, [rbp - CS_LINE]
+    call cg_emit
+
+.up_next:
+    inc qword [rbp - CS_I]
+    jmp .up_loop
+.up_done:
+    ; A tuple was accumulated as a list; convert it.
+    cmp qword [rbp - CS_KIND], AST_TUPLE
+    jne .up_ok
+    mov rdi, r12
+    mov esi, OP_CALL_INTRINSIC_1
+    mov edx, INTRINSIC_LIST_TO_TUPLE
+    mov rcx, [rbp - CS_LINE]
+    call cg_emit
+.up_ok:
+    mov eax, 1
+    jmp .ret
+.fail:
+    xor eax, eax
+.ret:
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC cg_e_seq
+
+;; ============================================================================
+;; cg_e_dict - {k: v, **m}
+;; The child list is key/value pairs; a `**m` entry occupies a pair whose value
+;; slot is unused, so the walk stays uniform.  Runs of literal pairs are built
+;; with one BUILD_MAP and merged in, which is what keeps {**a, 1: 2} to two
+;; DICT_UPDATEs rather than one per key.
+;; ============================================================================
+CD_COMP  equ 8
+CD_UNIT  equ 16
+CD_NODE  equ 24
+CD_I     equ 32
+CD_N     equ 40
+CD_LINE  equ 48
+CD_RUN   equ 56
+CD_ANY   equ 64
+CD_FRAME equ 72          ; + 3 pushes = 96
+DEF_FUNC_LOCAL cg_e_dict, CD_FRAME
+    push rbx
+    push r12
+    push r13
+    mov rbx, rdi
+    mov r12, rsi
+    mov r13, rdx
+
+    mov rdi, rbx
+    mov rsi, r13
+    call ast_at
+    mov ecx, [rax + AstNode.nchild]
+    shr rcx, 1                          ; pairs
+    mov [rbp - CD_N], rcx
+    mov ecx, [rax + AstNode.lineno]
+    mov [rbp - CD_LINE], rcx
+
+    mov rdi, rbx
+    mov rsi, r13
+    mov edx, AST_DOUBLESTARRED
+    call cg_has_star
+    mov [rbp - CD_ANY], rax
+    test rax, rax
+    jnz .with_unpack
+
+    ; No ** at all: keys and values in order, then one BUILD_MAP.
+    mov rdi, rbx
+    mov rsi, r12
+    mov rdx, r13
+    call cg_children
+    test eax, eax
+    jz .fail
+    mov rdi, r12
+    mov esi, OP_BUILD_MAP
+    mov rdx, [rbp - CD_N]
+    mov rcx, [rbp - CD_LINE]
+    call cg_emit
+    mov eax, 1
+    jmp .ret
+
+.with_unpack:
+    mov rdi, r12
+    mov esi, OP_BUILD_MAP
+    xor edx, edx
+    mov rcx, [rbp - CD_LINE]
+    call cg_emit
+    mov qword [rbp - CD_I], 0
+    mov qword [rbp - CD_RUN], 0
+
+.loop:
+    mov rax, [rbp - CD_I]
+    cmp rax, [rbp - CD_N]
+    jae .flush_last
+
+    mov rdi, rbx
+    mov rsi, r13
+    call ast_at
+    mov rsi, rax
+    mov rdx, [rbp - CD_I]
+    shl rdx, 1
+    mov rdi, rbx
+    call ast_child
+    mov r14, rax
+    mov rdi, rbx
+    mov rsi, rax
+    call ast_at
+    movzx eax, byte [rax + AstNode.kind]
+    cmp eax, AST_DOUBLESTARRED
+    je .unpack_entry
+
+    ; A literal pair: emit key and value, and count it into the pending run.
+    mov rdi, rbx
+    mov rsi, r12
+    mov rdx, r14
+    call cg_expr
+    test eax, eax
+    jz .fail
+    mov rdi, rbx
+    mov rsi, r13
+    call ast_at
+    mov rsi, rax
+    mov rdx, [rbp - CD_I]
+    shl rdx, 1
+    inc rdx
+    mov rdi, rbx
+    call ast_child
+    mov rdx, rax
+    mov rdi, rbx
+    mov rsi, r12
+    call cg_expr
+    test eax, eax
+    jz .fail
+    inc qword [rbp - CD_RUN]
+    inc qword [rbp - CD_I]
+    jmp .loop
+
+.unpack_entry:
+    call .flush_run
+    mov rdi, rbx
+    mov rsi, r14
+    call ast_at
+    mov edx, [rax + AstNode.a]
+    mov rdi, rbx
+    mov rsi, r12
+    call cg_expr
+    test eax, eax
+    jz .fail
+    mov rdi, r12
+    mov esi, OP_DICT_UPDATE
+    mov edx, 1
+    mov rcx, [rbp - CD_LINE]
+    call cg_emit
+    inc qword [rbp - CD_I]
+    jmp .loop
+
+.flush_last:
+    call .flush_run
+    mov eax, 1
+    jmp .ret
+
+; Local: turn any pending literal pairs into a map and merge it in.
+; `call .flush_run` pushes a return address, so rsp is 8 out for the calls
+; below; correct it rather than leave libc a misaligned stack.
+.flush_run:
+    sub rsp, 8
+    cmp qword [rbp - CD_RUN], 0
+    je .flush_none
+    mov rdi, r12
+    mov esi, OP_BUILD_MAP
+    mov rdx, [rbp - CD_RUN]
+    mov rcx, [rbp - CD_LINE]
+    call cg_emit
+    mov rdi, r12
+    mov esi, OP_DICT_UPDATE
+    mov edx, 1
+    mov rcx, [rbp - CD_LINE]
+    call cg_emit
+    mov qword [rbp - CD_RUN], 0
+.flush_none:
+    add rsp, 8
+    ret
+
+.fail:
+    xor eax, eax
+.ret:
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC cg_e_dict
+
+;; ============================================================================
+;; cg_e_attribute - value.name -> LOAD_ATTR (index << 1)
+;; Bit 0 of the oparg is the method-call form, which pushes self alongside the
+;; function; it is set by cg_e_call, not here.
+;; ============================================================================
+DEF_FUNC_LOCAL cg_e_attribute, CE_FRAME
+    push rbx
+    push r12
+    push r13
+    mov rbx, rdi
+    mov r12, rsi
+    mov r13, rdx
+    mov rdi, rbx
+    mov rsi, r13
+    call ast_at
+    mov edx, [rax + AstNode.a]
+    mov rdi, rbx
+    mov rsi, r12
+    call cg_expr
+    test eax, eax
+    jz .fail
+    mov rdi, rbx
+    mov rsi, r13
+    call ast_at
+    mov [rbp - CE_NPTR], rax
+    mov esi, [rax + AstNode.b]
+    mov rdi, rbx
+    call ast_obj_at
+    mov rdi, r12
+    mov rsi, rax
+    call cg_name
+    lea rdx, [rax + rax]                ; index << 1; bit 0 stays clear
+    mov rax, [rbp - CE_NPTR]
+    mov ecx, [rax + AstNode.lineno]
+    mov rdi, r12
+    mov esi, OP_LOAD_ATTR
+    call cg_emit
+    mov eax, 1
+.fail:
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC cg_e_attribute
+
+;; ============================================================================
+;; cg_e_subscript - value[index] -> BINARY_SUBSCR
+;; ============================================================================
+DEF_FUNC_LOCAL cg_e_subscript, CE_FRAME
+    push rbx
+    push r12
+    push r13
+    mov rbx, rdi
+    mov r12, rsi
+    mov r13, rdx
+    mov rdi, rbx
+    mov rsi, r13
+    call ast_at
+    mov edx, [rax + AstNode.a]
+    mov rdi, rbx
+    mov rsi, r12
+    call cg_expr
+    test eax, eax
+    jz .fail
+    mov rdi, rbx
+    mov rsi, r13
+    call ast_at
+    mov edx, [rax + AstNode.b]
+    mov rdi, rbx
+    mov rsi, r12
+    call cg_expr
+    test eax, eax
+    jz .fail
+    mov rdi, rbx
+    mov rsi, r13
+    call ast_at
+    mov ecx, [rax + AstNode.lineno]
+    mov rdi, r12
+    mov esi, OP_BINARY_SUBSCR
+    xor edx, edx
+    call cg_emit
+    mov eax, 1
+.fail:
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC cg_e_subscript
+
+;; ============================================================================
+;; cg_e_slice - a:b or a:b:c, as the operand of a subscript
+;; An omitted bound is None, which is what makes x[:n] and x[None:n] the same
+;; thing to the sequence protocol.
+;; ============================================================================
+CSL_COMP  equ 8
+CSL_UNIT  equ 16
+CSL_NODE  equ 24
+CSL_LINE  equ 32
+CSL_N     equ 40
+CSL_FRAME equ 40          ; + 3 pushes = 64
+DEF_FUNC_LOCAL cg_e_slice, CSL_FRAME
+    push rbx
+    push r12
+    push r13
+    mov rbx, rdi
+    mov r12, rsi
+    mov r13, rdx
+
+    mov rdi, rbx
+    mov rsi, r13
+    call ast_at
+    movzx ecx, byte [rax + AstNode.subkind]
+    mov [rbp - CSL_N], rcx
+    mov ecx, [rax + AstNode.lineno]
+    mov [rbp - CSL_LINE], rcx
+
+    mov edx, AstNode.a
+    call .piece
+    test eax, eax
+    jz .fail
+    mov edx, AstNode.b
+    call .piece
+    test eax, eax
+    jz .fail
+    cmp qword [rbp - CSL_N], 3
+    jne .build
+    mov edx, AstNode.c
+    call .piece
+    test eax, eax
+    jz .fail
+.build:
+    mov rdi, r12
+    mov esi, OP_BUILD_SLICE
+    mov rdx, [rbp - CSL_N]
+    mov rcx, [rbp - CSL_LINE]
+    call cg_emit
+    mov eax, 1
+    jmp .ret
+
+; Local: emit one bound, or None when it was omitted.  See the note in
+; cg_e_dict about `call .label` and stack alignment.
+.piece:
+    sub rsp, 8
+    push rdx
+    mov rdi, rbx
+    mov rsi, r13
+    call ast_at
+    pop rdx
+    mov edx, [rax + rdx]
+    test edx, edx
+    jz .piece_none
+    mov rdi, rbx
+    mov rsi, r12
+    call cg_expr
+    add rsp, 8
+    ret
+.piece_none:
+    lea rsi, [rel none_singleton]
+    INCREF rsi
+    mov rdi, r12
+    call cg_const
+    mov rdx, rax
+    mov rdi, r12
+    mov esi, OP_LOAD_CONST
+    mov rcx, [rbp - CSL_LINE]
+    call cg_emit
+    mov eax, 1
+    add rsp, 8
+    ret
+
+.fail:
+    xor eax, eax
+.ret:
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC cg_e_slice
+
+;; ============================================================================
+;; cg_e_call - func(args)
+;;
+;; Two shapes, chosen by whether the call has any `*a` or `**k`.
+;;
+;; Plain: PUSH_NULL, the callable, the arguments, an optional KW_NAMES naming
+;; the trailing keyword ones, then CALL n.  The NULL slot is where a bound
+;; method's self goes; when the callable is an attribute, LOAD_ATTR's bit 0
+;; fills it instead and no PUSH_NULL is emitted -- that is the whole point of
+;; the method-call form, and it is why `o.m(1)` is three instructions.
+;;
+;; Unpacked: the positional arguments are gathered into a list, extended by
+;; each `*a`, converted to a tuple, and the keywords into a dict merged by each
+;; `**k`; then CALL_FUNCTION_EX.  A fixed-count CALL cannot absorb an iterable
+;; whose length is unknown until run time.
+;; ============================================================================
+CC2_COMP  equ 8
+CC2_UNIT  equ 16
+CC2_NODE  equ 24
+CC2_I     equ 32
+CC2_N     equ 40
+CC2_LINE  equ 48
+CC2_NPOS  equ 56
+CC2_NKW   equ 64
+CC2_CHILD equ 72
+CC2_MARK  equ 80
+CC2_FRAME equ 88          ; + 3 pushes = 112
+DEF_FUNC_LOCAL cg_e_call, CC2_FRAME
+    push rbx
+    push r12
+    push r13
+    mov rbx, rdi
+    mov r12, rsi
+    mov r13, rdx
+
+    mov rdi, rbx
+    mov rsi, r13
+    call ast_at
+    mov ecx, [rax + AstNode.nchild]
+    mov [rbp - CC2_N], rcx
+    mov ecx, [rax + AstNode.lineno]
+    mov [rbp - CC2_LINE], rcx
+
+    ; --- the callable, with the method-call shortcut where it applies ---
+    mov rdi, rbx
+    mov rsi, r13
+    call ast_at
+    mov edx, [rax + AstNode.a]
+    mov [rbp - CC2_CHILD], rdx
+    mov rdi, rbx
+    mov rsi, rdx
+    call ast_at
+    movzx eax, byte [rax + AstNode.kind]
+    cmp eax, AST_ATTRIBUTE
+    je .method_call
+
+    mov rdi, r12
+    mov esi, OP_PUSH_NULL
+    xor edx, edx
+    mov rcx, [rbp - CC2_LINE]
+    call cg_emit
+    mov rdi, rbx
+    mov rsi, r12
+    mov rdx, [rbp - CC2_CHILD]
+    call cg_expr
+    test eax, eax
+    jz .fail
+    jmp .args
+
+.method_call:
+    ; LOAD_ATTR with bit 0 set pushes the function and the instance, filling
+    ; the slot PUSH_NULL would otherwise occupy.
+    mov rdi, rbx
+    mov rsi, [rbp - CC2_CHILD]
+    call ast_at
+    mov edx, [rax + AstNode.a]
+    mov rdi, rbx
+    mov rsi, r12
+    call cg_expr
+    test eax, eax
+    jz .fail
+    mov rdi, rbx
+    mov rsi, [rbp - CC2_CHILD]
+    call ast_at
+    mov esi, [rax + AstNode.b]
+    mov rdi, rbx
+    call ast_obj_at
+    mov rdi, r12
+    mov rsi, rax
+    call cg_name
+    lea rdx, [rax + rax + 1]            ; (index << 1) | 1
+    mov rdi, r12
+    mov esi, OP_LOAD_ATTR
+    mov rcx, [rbp - CC2_LINE]
+    call cg_emit
+
+.args:
+    mov rdi, rbx
+    mov rsi, r13
+    mov edx, AST_STARRED
+    call cg_has_star
+    test eax, eax
+    jnz .unpacked
+    mov rdi, rbx
+    mov rsi, r13
+    mov edx, AST_DOUBLESTARRED
+    call cg_has_star
+    test eax, eax
+    jnz .unpacked
+
+    ; --- the plain shape ---
+    ; Positional arguments must all precede the keyword ones; CALL's oparg is a
+    ; single count and KW_NAMES names only a suffix of it.
+    mov qword [rbp - CC2_NPOS], 0
+    mov qword [rbp - CC2_NKW], 0
+    mov qword [rbp - CC2_I], 0
+.plain_loop:
+    mov rax, [rbp - CC2_I]
+    cmp rax, [rbp - CC2_N]
+    jae .plain_kwnames
+    call .child_at
+    mov [rbp - CC2_CHILD], rax
+    mov rdi, rbx
+    mov rsi, rax
+    call ast_at
+    movzx eax, byte [rax + AstNode.kind]
+    cmp eax, AST_KEYWORD
+    je .plain_kw
+
+    cmp qword [rbp - CC2_NKW], 0
+    jne .pos_after_kw
+    mov rdi, rbx
+    mov rsi, r12
+    mov rdx, [rbp - CC2_CHILD]
+    call cg_expr
+    test eax, eax
+    jz .fail
+    inc qword [rbp - CC2_NPOS]
+    inc qword [rbp - CC2_I]
+    jmp .plain_loop
+
+.plain_kw:
+    mov rdi, rbx
+    mov rsi, [rbp - CC2_CHILD]
+    call ast_at
+    mov edx, [rax + AstNode.b]
+    mov rdi, rbx
+    mov rsi, r12
+    call cg_expr
+    test eax, eax
+    jz .fail
+    inc qword [rbp - CC2_NKW]
+    inc qword [rbp - CC2_I]
+    jmp .plain_loop
+
+.plain_kwnames:
+    cmp qword [rbp - CC2_NKW], 0
+    je .plain_call
+    ; KW_NAMES takes a constant tuple naming the trailing arguments.
+    mov rdi, rbx
+    mov rsi, r13
+    call cg_kwnames_tuple
+    test eax, eax
+    jz .fail
+    mov rdi, r12
+    mov rsi, rax
+    call cg_const
+    mov rdx, rax
+    mov rdi, r12
+    mov esi, OP_KW_NAMES
+    mov rcx, [rbp - CC2_LINE]
+    call cg_emit
+.plain_call:
+    mov rdi, r12
+    mov esi, OP_CALL
+    mov rdx, [rbp - CC2_NPOS]
+    add rdx, [rbp - CC2_NKW]
+    mov rcx, [rbp - CC2_LINE]
+    call cg_emit
+    mov eax, 1
+    jmp .ret
+
+.unpacked:
+    ; Positional arguments become a list, extended by each *a, then a tuple.
+    mov rdi, r12
+    mov esi, OP_BUILD_LIST
+    xor edx, edx
+    mov rcx, [rbp - CC2_LINE]
+    call cg_emit
+    mov qword [rbp - CC2_I], 0
+.pos_loop:
+    mov rax, [rbp - CC2_I]
+    cmp rax, [rbp - CC2_N]
+    jae .pos_done
+    call .child_at
+    mov [rbp - CC2_CHILD], rax
+    mov rdi, rbx
+    mov rsi, rax
+    call ast_at
+    movzx eax, byte [rax + AstNode.kind]
+    cmp eax, AST_KEYWORD
+    je .pos_next
+    cmp eax, AST_DOUBLESTARRED
+    je .pos_next
+    cmp eax, AST_STARRED
+    je .pos_star
+
+    mov rdi, rbx
+    mov rsi, r12
+    mov rdx, [rbp - CC2_CHILD]
+    call cg_expr
+    test eax, eax
+    jz .fail
+    mov rdi, r12
+    mov esi, OP_LIST_APPEND
+    mov edx, 1
+    mov rcx, [rbp - CC2_LINE]
+    call cg_emit
+    jmp .pos_next
+.pos_star:
+    mov rdi, rbx
+    mov rsi, [rbp - CC2_CHILD]
+    call ast_at
+    mov edx, [rax + AstNode.a]
+    mov rdi, rbx
+    mov rsi, r12
+    call cg_expr
+    test eax, eax
+    jz .fail
+    mov rdi, r12
+    mov esi, OP_LIST_EXTEND
+    mov edx, 1
+    mov rcx, [rbp - CC2_LINE]
+    call cg_emit
+.pos_next:
+    inc qword [rbp - CC2_I]
+    jmp .pos_loop
+.pos_done:
+    mov rdi, r12
+    mov esi, OP_CALL_INTRINSIC_1
+    mov edx, INTRINSIC_LIST_TO_TUPLE
+    mov rcx, [rbp - CC2_LINE]
+    call cg_emit
+
+    ; Keywords become a dict, merged by each **k.  It is emitted only when
+    ; there are any: CALL_FUNCTION_EX's bit 0 says whether one is present.
+    mov rdi, rbx
+    mov rsi, r13
+    mov edx, AST_DOUBLESTARRED
+    call cg_has_star
+    mov [rbp - CC2_NKW], rax
+    test rax, rax
+    jnz .need_kwdict
+    mov rdi, rbx
+    mov rsi, r13
+    call cg_call_has_keyword
+    mov [rbp - CC2_NKW], rax
+    test rax, rax
+    jz .ex_call
+
+.need_kwdict:
+    mov rdi, r12
+    mov esi, OP_BUILD_MAP
+    xor edx, edx
+    mov rcx, [rbp - CC2_LINE]
+    call cg_emit
+    mov qword [rbp - CC2_I], 0
+.kw_loop:
+    mov rax, [rbp - CC2_I]
+    cmp rax, [rbp - CC2_N]
+    jae .ex_call
+    call .child_at
+    mov [rbp - CC2_CHILD], rax
+    mov rdi, rbx
+    mov rsi, rax
+    call ast_at
+    movzx eax, byte [rax + AstNode.kind]
+    cmp eax, AST_KEYWORD
+    je .kw_named
+    cmp eax, AST_DOUBLESTARRED
+    je .kw_unpack
+    jmp .kw_next
+
+.kw_named:
+    ; One key and one value, built into a one-entry map and merged.
+    mov rdi, rbx
+    mov rsi, [rbp - CC2_CHILD]
+    call ast_at
+    mov esi, [rax + AstNode.a]
+    mov rdi, rbx
+    call ast_obj_at
+    mov rdi, r12
+    mov rsi, rax
+    call cg_const
+    mov rdx, rax
+    mov rdi, r12
+    mov esi, OP_LOAD_CONST
+    mov rcx, [rbp - CC2_LINE]
+    call cg_emit
+    mov rdi, rbx
+    mov rsi, [rbp - CC2_CHILD]
+    call ast_at
+    mov edx, [rax + AstNode.b]
+    mov rdi, rbx
+    mov rsi, r12
+    call cg_expr
+    test eax, eax
+    jz .fail
+    mov rdi, r12
+    mov esi, OP_BUILD_MAP
+    mov edx, 1
+    mov rcx, [rbp - CC2_LINE]
+    call cg_emit
+    mov rdi, r12
+    mov esi, OP_DICT_MERGE
+    mov edx, 1
+    mov rcx, [rbp - CC2_LINE]
+    call cg_emit
+    jmp .kw_next
+
+.kw_unpack:
+    mov rdi, rbx
+    mov rsi, [rbp - CC2_CHILD]
+    call ast_at
+    mov edx, [rax + AstNode.a]
+    mov rdi, rbx
+    mov rsi, r12
+    call cg_expr
+    test eax, eax
+    jz .fail
+    mov rdi, r12
+    mov esi, OP_DICT_MERGE
+    mov edx, 1
+    mov rcx, [rbp - CC2_LINE]
+    call cg_emit
+.kw_next:
+    inc qword [rbp - CC2_I]
+    jmp .kw_loop
+
+.ex_call:
+    mov rdi, r12
+    mov esi, OP_CALL_FUNCTION_EX
+    xor edx, edx
+    cmp qword [rbp - CC2_NKW], 0
+    je .ex_emit
+    mov edx, 1
+.ex_emit:
+    mov rcx, [rbp - CC2_LINE]
+    call cg_emit
+    mov eax, 1
+    jmp .ret
+
+.pos_after_kw:
+    mov rdi, rbx
+    lea rsi, [rel exc_SyntaxError_type]
+    CSTRING rdx, "positional argument follows keyword argument"
+    xor ecx, ecx
+    xor r8d, r8d
+    call comp_error
+.fail:
+    xor eax, eax
+    jmp .ret
+
+; Local: the i'th argument node.  Only leaf calls follow, so the 8-byte skew
+; from `call .child_at` does not reach libc.
+.child_at:
+    mov rdi, rbx
+    mov rsi, r13
+    call ast_at
+    mov rsi, rax
+    mov rdx, [rbp - CC2_I]
+    mov rdi, rbx
+    call ast_child
+    ret
+
+.ret:
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC cg_e_call
+
+;; ============================================================================
+;; cg_call_has_keyword(Comp *c, uint32_t call) -> rax = 1 if any named argument
+;; ============================================================================
+; DEF_FUNC_BARE, not DEF_FUNC: this tail-jumps into another function that sets
+; up its own frame, so pushing rbp here would leak it.
+DEF_FUNC_BARE cg_call_has_keyword
+    mov edx, AST_KEYWORD
+    jmp cg_has_star
+END_FUNC cg_call_has_keyword
+
+;; ============================================================================
+;; cg_kwnames_tuple(Comp *c, uint32_t call) -> rax = an owned tuple Value, or 0
+;;
+;; The names of the trailing keyword arguments, in order, as one constant.  The
+;; tuple takes its own reference to each name, so it survives independently of
+;; the compilation that produced it.
+;; ============================================================================
+KT_COMP  equ 8
+KT_NODE  equ 16
+KT_TUP   equ 24
+KT_I     equ 32
+KT_N     equ 40
+KT_K     equ 48
+KT_FRAME equ 56          ; + 3 pushes = 80
+DEF_FUNC cg_kwnames_tuple, KT_FRAME
+    push rbx
+    push r12
+    push r13
+    mov rbx, rdi
+    mov r13, rsi
+
+    mov rdi, rbx
+    mov rsi, r13
+    call ast_at
+    mov ecx, [rax + AstNode.nchild]
+    mov [rbp - KT_N], rcx
+
+    ; Count the keyword arguments first, so the tuple is sized exactly.
+    xor r12d, r12d
+    mov qword [rbp - KT_I], 0
+.count:
+    mov rax, [rbp - KT_I]
+    cmp rax, [rbp - KT_N]
+    jae .counted
+    mov rdi, rbx
+    mov rsi, r13
+    call ast_at
+    mov rsi, rax
+    mov rdx, [rbp - KT_I]
+    mov rdi, rbx
+    call ast_child
+    mov rdi, rbx
+    mov rsi, rax
+    call ast_at
+    movzx eax, byte [rax + AstNode.kind]
+    cmp eax, AST_KEYWORD
+    jne .count_next
+    inc r12
+.count_next:
+    inc qword [rbp - KT_I]
+    jmp .count
+.counted:
+
+    mov rdi, r12
+    call tuple_new
+    test rax, rax
+    jz .fail
+    mov [rbp - KT_TUP], rax
+
+    mov qword [rbp - KT_I], 0
+    mov qword [rbp - KT_K], 0
+.fill:
+    mov rax, [rbp - KT_I]
+    cmp rax, [rbp - KT_N]
+    jae .done
+    mov rdi, rbx
+    mov rsi, r13
+    call ast_at
+    mov rsi, rax
+    mov rdx, [rbp - KT_I]
+    mov rdi, rbx
+    call ast_child
+    mov r12, rax
+    mov rdi, rbx
+    mov rsi, rax
+    call ast_at
+    movzx ecx, byte [rax + AstNode.kind]
+    cmp ecx, AST_KEYWORD
+    jne .fill_next
+    mov esi, [rax + AstNode.a]
+    mov rdi, rbx
+    call ast_obj_at
+    mov rdx, [rbp - KT_TUP]
+    mov rdx, [rdx + PyTupleObject.ob_item]
+    mov rcx, [rbp - KT_K]
+    mov [rdx + rcx*8], rax
+    INCREF_V rax, rdx
+    inc qword [rbp - KT_K]
+.fill_next:
+    inc qword [rbp - KT_I]
+    jmp .fill
+.done:
+    mov rax, [rbp - KT_TUP]
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+.fail:
+    xor eax, eax
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC cg_kwnames_tuple
+
 section .rodata
 
 ;; COMPARE_OP oparg = (index << 4) | mask.  apython reads only the high nibble,
@@ -1013,37 +2138,37 @@ cmp_oparg_table:
 ;; not implemented yet", and cg_expr reports it rather than emitting nothing.
 align 8
 cg_expr_table:
-    dq 0              ;  0 AST_NULL
-    dq cg_e_const     ;  1 AST_CONST
-    dq cg_e_name      ;  2 AST_NAME
-    dq cg_e_binop     ;  3 AST_BINOP
-    dq cg_e_unaryop   ;  4 AST_UNARYOP
-    dq cg_e_boolop    ;  5 AST_BOOLOP
-    dq cg_e_compare   ;  6 AST_COMPARE
-    dq cg_e_ifexp     ;  7 AST_IFEXP
-    dq 0              ;  8 AST_LAMBDA
-    dq 0              ;  9 AST_TUPLE
-    dq 0              ; 10 AST_LIST
-    dq 0              ; 11 AST_SET
-    dq 0              ; 12 AST_DICT
-    dq 0              ; 13 AST_CALL
-    dq 0              ; 14 AST_ATTRIBUTE
-    dq 0              ; 15 AST_SUBSCRIPT
-    dq 0              ; 16 AST_SLICE
-    dq 0              ; 17 AST_STARRED
-    dq 0              ; 18 AST_DOUBLESTARRED
-    dq 0              ; 19 AST_KEYWORD
-    dq 0              ; 20 AST_NAMEDEXPR
-    dq 0              ; 21 AST_YIELD
-    dq 0              ; 22 AST_YIELDFROM
-    dq 0              ; 23 AST_AWAIT
-    dq 0              ; 24 AST_JOINEDSTR
-    dq 0              ; 25 AST_FORMATTEDVALUE
-    dq 0              ; 26 AST_LISTCOMP
-    dq 0              ; 27 AST_SETCOMP
-    dq 0              ; 28 AST_DICTCOMP
-    dq 0              ; 29 AST_GENEXP
-    dq 0              ; 30 AST_COMPREHENSION
+    dq 0                ;  0 AST_NULL
+    dq cg_e_const       ;  1 AST_CONST
+    dq cg_e_name        ;  2 AST_NAME
+    dq cg_e_binop       ;  3 AST_BINOP
+    dq cg_e_unaryop     ;  4 AST_UNARYOP
+    dq cg_e_boolop      ;  5 AST_BOOLOP
+    dq cg_e_compare     ;  6 AST_COMPARE
+    dq cg_e_ifexp       ;  7 AST_IFEXP
+    dq 0                ;  8 AST_LAMBDA
+    dq cg_e_seq         ;  9 AST_TUPLE
+    dq cg_e_seq         ; 10 AST_LIST
+    dq cg_e_seq         ; 11 AST_SET
+    dq cg_e_dict        ; 12 AST_DICT
+    dq cg_e_call        ; 13 AST_CALL
+    dq cg_e_attribute   ; 14 AST_ATTRIBUTE
+    dq cg_e_subscript   ; 15 AST_SUBSCRIPT
+    dq cg_e_slice       ; 16 AST_SLICE
+    dq 0                ; 17 AST_STARRED
+    dq 0                ; 18 AST_DOUBLESTARRED
+    dq 0                ; 19 AST_KEYWORD
+    dq 0                ; 20 AST_NAMEDEXPR
+    dq 0                ; 21 AST_YIELD
+    dq 0                ; 22 AST_YIELDFROM
+    dq 0                ; 23 AST_AWAIT
+    dq 0                ; 24 AST_JOINEDSTR
+    dq 0                ; 25 AST_FORMATTEDVALUE
+    dq 0                ; 26 AST_LISTCOMP
+    dq 0                ; 27 AST_SETCOMP
+    dq 0                ; 28 AST_DICTCOMP
+    dq 0                ; 29 AST_GENEXP
+    dq 0                ; 30 AST_COMPREHENSION
     times (AST_COUNT - 31) dq 0
 
 

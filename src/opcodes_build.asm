@@ -1183,6 +1183,7 @@ DEF_FUNC op_list_extend, 32
     inc r8
     cmp r8, [rbp-24]          ; count
     jb .extend_list_loop
+    jmp .extend_done          ; or we fall into .extend_generic and re-append
 
 .extend_generic:
     ; Generic iterable: tp_iter + tp_iternext loop

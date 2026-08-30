@@ -41,11 +41,17 @@ extern comp_error
 extern ap_free
 extern ap_malloc
 extern ap_memcpy
+extern buf_free
+extern buf_init
+extern buf_push_u8
+extern bytes_from_data
+extern str_new_heap
 extern comp_intern
 extern int_from_cstr_base
 extern strtod
 
 extern bool_false
+extern ellipsis_singleton
 extern bool_true
 extern none_singleton
 
@@ -378,151 +384,6 @@ END_FUNC par_number
 
 ;; ============================================================================
 ;; Prefix handlers.  Each consumes its own token and returns a node index.
-;; ============================================================================
-
-;; pf_number(Comp *c) -> node
-PFN_COMP  equ 8
-PFN_LINE  equ 16
-PFN_FRAME equ 24         ; + 1 push = 32
-DEF_FUNC_LOCAL pf_number, PFN_FRAME
-    push rbx
-    mov rbx, rdi
-    call par_peek
-    mov ecx, [rax + Token.lineno]
-    mov [rbp - PFN_LINE], rcx
-    mov rdi, rbx
-    mov rsi, rax
-    call par_number
-    test rax, rax
-    jz .fail
-    mov rdi, rbx
-    mov rsi, rax
-    call ast_obj                        ; takes ownership of the Value
-    mov r8, rax
-    mov rdi, rbx
-    call par_advance
-    mov rdi, rbx
-    mov esi, AST_CONST
-    xor edx, edx
-    mov rcx, [rbp - PFN_LINE]
-    xor r9d, r9d
-    call ast_make
-    pop rbx
-    leave
-    ret
-.fail:
-    xor eax, eax
-    pop rbx
-    leave
-    ret
-END_FUNC pf_number
-
-;; pf_const(Comp *c) -> node   -- True, False, None share one handler
-DEF_FUNC_LOCAL pf_const, PFN_FRAME
-    push rbx
-    mov rbx, rdi
-    call par_peek
-    mov ecx, [rax + Token.lineno]
-    mov [rbp - PFN_LINE], rcx
-    movzx edx, word [rax + Token.kind]
-
-    lea rsi, [rel none_singleton]
-    cmp edx, TOK_TRUE
-    jne .not_true
-    lea rsi, [rel bool_true]
-    jmp .have
-.not_true:
-    cmp edx, TOK_FALSE
-    jne .have
-    lea rsi, [rel bool_false]
-.have:
-    ; These are ordinary heap singletons, and a pointer is its own Value.  They
-    ; are immortal, but comp_free will DECREF the table entry, so take a
-    ; reference to keep the accounting uniform.
-    inc qword [rsi + PyObject.ob_refcnt]
-    mov rdi, rbx
-    call ast_obj
-    mov r8, rax
-    mov rdi, rbx
-    call par_advance
-    mov rdi, rbx
-    mov esi, AST_CONST
-    xor edx, edx
-    mov rcx, [rbp - PFN_LINE]
-    xor r9d, r9d
-    call ast_make
-    pop rbx
-    leave
-    ret
-END_FUNC pf_const
-
-;; pf_name(Comp *c) -> node
-PFM_COMP  equ 8
-PFM_LINE  equ 16
-PFM_TOK   equ 24
-PFM_FRAME equ 24         ; + 1 push = 32
-DEF_FUNC_LOCAL pf_name, PFM_FRAME
-    push rbx
-    mov rbx, rdi
-    call par_peek
-    mov [rbp - PFM_TOK], rax
-    mov ecx, [rax + Token.lineno]
-    mov [rbp - PFM_LINE], rcx
-
-    mov rdi, [rax + Token.start]
-    mov esi, [rax + Token.len]
-    call comp_intern                    ; -> an owned PyStrObject*
-    test rax, rax
-    jz .fail
-    mov rdi, rbx
-    mov rsi, rax
-    call ast_obj
-    mov r8, rax
-    mov rdi, rbx
-    call par_advance
-    mov rdi, rbx
-    mov esi, AST_NAME
-    mov edx, CTX_LOAD
-    mov rcx, [rbp - PFM_LINE]
-    xor r9d, r9d
-    call ast_make
-    pop rbx
-    leave
-    ret
-.fail:
-    xor eax, eax
-    pop rbx
-    leave
-    ret
-END_FUNC pf_name
-
-;; pf_group(Comp *c) -> node   -- a parenthesized expression
-DEF_FUNC_LOCAL pf_group, PFN_FRAME
-    push rbx
-    mov rbx, rdi
-    call par_advance                    ; consume '('
-    mov rdi, rbx
-    mov esi, BP_NONE
-    call par_expr
-    test rax, rax
-    jz .fail
-    mov [rbp - PFN_LINE], rax
-    mov rdi, rbx
-    mov esi, TOK_RPAR
-    CSTRING rdx, "'(' was never closed"
-    call par_expect
-    test eax, eax
-    jz .fail
-    mov rax, [rbp - PFN_LINE]
-    pop rbx
-    leave
-    ret
-.fail:
-    xor eax, eax
-    pop rbx
-    leave
-    ret
-END_FUNC pf_group
 
 ;; pf_unary(Comp *c) -> node   -- +x, -x, ~x, not x
 PFU_COMP  equ 8
@@ -970,15 +831,1364 @@ DEF_FUNC par_cmpop, 8           ; + 1 push = 16
     ret
 END_FUNC par_cmpop
 
+;; ============================================================================
+;; Prefix handlers.  Each consumes its own token and returns a node index.
+;; ============================================================================
+
+;; pf_number(Comp *c) -> node
+PFN_COMP  equ 8
+PFN_LINE  equ 16
+PFN_FRAME equ 24         ; + 1 push = 32
+DEF_FUNC_LOCAL pf_number, PFN_FRAME
+    push rbx
+    mov rbx, rdi
+    call par_peek
+    mov ecx, [rax + Token.lineno]
+    mov [rbp - PFN_LINE], rcx
+    mov rdi, rbx
+    mov rsi, rax
+    call par_number
+    test rax, rax
+    jz .fail
+    mov rdi, rbx
+    mov rsi, rax
+    call ast_obj                        ; takes ownership of the Value
+    mov r8, rax
+    mov rdi, rbx
+    call par_advance
+    mov rdi, rbx
+    mov esi, AST_CONST
+    xor edx, edx
+    mov rcx, [rbp - PFN_LINE]
+    xor r9d, r9d
+    call ast_make
+    pop rbx
+    leave
+    ret
+.fail:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+END_FUNC pf_number
+
+;; pf_const(Comp *c) -> node   -- True, False, None share one handler
+DEF_FUNC_LOCAL pf_const, PFN_FRAME
+    push rbx
+    mov rbx, rdi
+    call par_peek
+    mov ecx, [rax + Token.lineno]
+    mov [rbp - PFN_LINE], rcx
+    movzx edx, word [rax + Token.kind]
+
+    lea rsi, [rel none_singleton]
+    cmp edx, TOK_TRUE
+    jne .not_true
+    lea rsi, [rel bool_true]
+    jmp .have
+.not_true:
+    cmp edx, TOK_FALSE
+    jne .not_false
+    lea rsi, [rel bool_false]
+    jmp .have
+.not_false:
+    cmp edx, TOK_ELLIPSIS
+    jne .have
+    lea rsi, [rel ellipsis_singleton]
+.have:
+    ; These are ordinary heap singletons, and a pointer is its own Value.  They
+    ; are immortal, but comp_free will DECREF the table entry, so take a
+    ; reference to keep the accounting uniform.
+    inc qword [rsi + PyObject.ob_refcnt]
+    mov rdi, rbx
+    call ast_obj
+    mov r8, rax
+    mov rdi, rbx
+    call par_advance
+    mov rdi, rbx
+    mov esi, AST_CONST
+    xor edx, edx
+    mov rcx, [rbp - PFN_LINE]
+    xor r9d, r9d
+    call ast_make
+    pop rbx
+    leave
+    ret
+END_FUNC pf_const
+
+;; pf_name(Comp *c) -> node
+PFM_COMP  equ 8
+PFM_LINE  equ 16
+PFM_TOK   equ 24
+PFM_FRAME equ 24         ; + 1 push = 32
+DEF_FUNC_LOCAL pf_name, PFM_FRAME
+    push rbx
+    mov rbx, rdi
+    call par_peek
+    mov [rbp - PFM_TOK], rax
+    mov ecx, [rax + Token.lineno]
+    mov [rbp - PFM_LINE], rcx
+
+    mov rdi, [rax + Token.start]
+    mov esi, [rax + Token.len]
+    call comp_intern                    ; -> an owned PyStrObject*
+    test rax, rax
+    jz .fail
+    mov rdi, rbx
+    mov rsi, rax
+    call ast_obj
+    mov r8, rax
+    mov rdi, rbx
+    call par_advance
+    mov rdi, rbx
+    mov esi, AST_NAME
+    mov edx, CTX_LOAD
+    mov rcx, [rbp - PFM_LINE]
+    xor r9d, r9d
+    call ast_make
+    pop rbx
+    leave
+    ret
+.fail:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+END_FUNC pf_name
+
+;; ============================================================================
+;; par_utf8_emit(Buf *b, uint32_t cp)
+;; Append one code point as UTF-8.  \x, \u, \U and \N all funnel through here,
+;; so a string literal's bytes and its code-point count agree by construction.
+;; ============================================================================
+DEF_FUNC par_utf8_emit, 8
+    push rbx
+    push r12
+    mov rbx, rdi
+    mov r12, rsi
+
+    cmp r12, 0x80
+    jb .one
+    cmp r12, 0x800
+    jb .two
+    cmp r12, 0x10000
+    jb .three
+
+    mov rsi, r12
+    shr rsi, 18
+    or esi, 0xF0
+    mov rdi, rbx
+    call buf_push_u8
+    mov rsi, r12
+    shr rsi, 12
+    and esi, 0x3F
+    or esi, 0x80
+    mov rdi, rbx
+    call buf_push_u8
+    jmp .tail2
+.three:
+    mov rsi, r12
+    shr rsi, 12
+    or esi, 0xE0
+    mov rdi, rbx
+    call buf_push_u8
+.tail2:
+    mov rsi, r12
+    shr rsi, 6
+    and esi, 0x3F
+    or esi, 0x80
+    mov rdi, rbx
+    call buf_push_u8
+    jmp .tail1
+.two:
+    mov rsi, r12
+    shr rsi, 6
+    or esi, 0xC0
+    mov rdi, rbx
+    call buf_push_u8
+.tail1:
+    mov rsi, r12
+    and esi, 0x3F
+    or esi, 0x80
+    mov rdi, rbx
+    call buf_push_u8
+    jmp .done
+.one:
+    mov rdi, rbx
+    mov rsi, r12
+    call buf_push_u8
+.done:
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC par_utf8_emit
+
+;; ============================================================================
+;; par_hexval(int ch) -> eax = 0..15, or -1
+;; ============================================================================
+DEF_FUNC_BARE par_hexval
+    mov eax, edi
+    sub eax, '0'
+    cmp eax, 9
+    jbe .done
+    mov eax, edi
+    or eax, 0x20
+    sub eax, 'a'
+    cmp eax, 5
+    ja .bad
+    add eax, 10
+.done:
+    ret
+.bad:
+    mov eax, -1
+    ret
+END_FUNC par_hexval
+
+;; ============================================================================
+;; par_string_body(Comp *c, Token *t, Buf *out) -> rax = 1 ok, 0 error
+;;
+;; Decodes one string token into `out`.  The token still carries its prefix and
+;; quotes, so the span is found here rather than in the lexer -- the lexer's job
+;; was to find where the literal ended, which is a different question from what
+;; it means.
+;;
+;; In a raw literal a backslash stays in the output but still escapes a quote
+;; for the purposes of finding the end, which is why r"\" is unterminated in
+;; Python as well.
+;; ============================================================================
+PB_COMP  equ 8
+PB_TOK   equ 16
+PB_OUT   equ 24
+PB_P     equ 32
+PB_END   equ 40
+PB_RAW   equ 48
+PB_BYTES equ 56
+PB_ACC   equ 64
+PB_FRAME equ 72          ; + 3 pushes = 96
+DEF_FUNC par_string_body, PB_FRAME
+    push rbx
+    push r12
+    push r13
+    mov rbx, rdi
+    mov [rbp - PB_TOK], rsi
+    mov [rbp - PB_OUT], rdx
+
+    movzx eax, word [rsi + Token.flags]
+    test eax, TF_STR_FMT
+    jnz .fstring_unsupported
+    xor ecx, ecx
+    test eax, TF_STR_RAW
+    setnz cl
+    mov [rbp - PB_RAW], rcx
+    xor ecx, ecx
+    test eax, TF_STR_BYTES
+    setnz cl
+    mov [rbp - PB_BYTES], rcx
+
+    mov r12, [rsi + Token.start]
+    mov r13d, [rsi + Token.len]
+    add r13, r12                        ; one past the literal
+
+    ; Skip the prefix letters, then the opening quote run.
+.skip_prefix:
+    movzx eax, byte [r12]
+    cmp al, 39                          ; '
+    je .at_quote
+    cmp al, 34                          ; "
+    je .at_quote
+    inc r12
+    jmp .skip_prefix
+.at_quote:
+    movzx ecx, byte [r12]
+    mov edx, 1
+    lea rax, [r12 + 2]
+    cmp rax, r13
+    jae .have_quotes
+    movzx eax, byte [r12 + 1]
+    cmp eax, ecx
+    jne .have_quotes
+    movzx eax, byte [r12 + 2]
+    cmp eax, ecx
+    jne .have_quotes
+    mov edx, 3
+.have_quotes:
+    add r12, rdx
+    sub r13, rdx                        ; drop the closing quote run
+    mov [rbp - PB_P], r12
+    mov [rbp - PB_END], r13
+
+.loop:
+    mov r12, [rbp - PB_P]
+    cmp r12, [rbp - PB_END]
+    jae .ok
+    movzx eax, byte [r12]
+    cmp al, 92                          ; backslash
+    je .escape
+    mov rdi, [rbp - PB_OUT]
+    mov esi, eax
+    call buf_push_u8
+    inc qword [rbp - PB_P]
+    jmp .loop
+
+.escape:
+    cmp qword [rbp - PB_RAW], 0
+    je .real_escape
+    ; Raw: the backslash is data, and so is whatever follows it.
+    mov rdi, [rbp - PB_OUT]
+    mov esi, 92
+    call buf_push_u8
+    inc qword [rbp - PB_P]
+    jmp .loop
+
+.real_escape:
+    inc qword [rbp - PB_P]
+    mov r12, [rbp - PB_P]
+    cmp r12, [rbp - PB_END]
+    jae .bad_escape
+    movzx eax, byte [r12]
+    inc qword [rbp - PB_P]
+
+    cmp al, 10                          ; a backslash-newline vanishes
+    je .loop
+    cmp al, 'n'
+    je .e_nl
+    cmp al, 't'
+    je .e_tab
+    cmp al, 'r'
+    je .e_cr
+    cmp al, 92
+    je .e_literal
+    cmp al, 39
+    je .e_literal
+    cmp al, 34
+    je .e_literal
+    cmp al, '0'
+    jb .e_unknown
+    cmp al, '7'
+    jbe .e_octal
+    cmp al, 'a'
+    je .e_bell
+    cmp al, 'b'
+    je .e_bs
+    cmp al, 'f'
+    je .e_ff
+    cmp al, 'v'
+    je .e_vt
+    cmp al, 'x'
+    je .e_hex2
+    cmp al, 'u'
+    je .e_hex4
+    cmp al, 'U'
+    je .e_hex8
+.e_unknown:
+    ; An unrecognised escape keeps the backslash, as Python does (with a
+    ; SyntaxWarning it does not raise on).
+    push rax
+    mov rdi, [rbp - PB_OUT]
+    mov esi, 92
+    call buf_push_u8
+    pop rax
+.e_literal:
+    mov rdi, [rbp - PB_OUT]
+    mov esi, eax
+    call buf_push_u8
+    jmp .loop
+.e_nl:   mov eax, 10
+         jmp .e_literal
+.e_tab:  mov eax, 9
+         jmp .e_literal
+.e_cr:   mov eax, 13
+         jmp .e_literal
+.e_bell: mov eax, 7
+         jmp .e_literal
+.e_bs:   mov eax, 8
+         jmp .e_literal
+.e_ff:   mov eax, 12
+         jmp .e_literal
+.e_vt:   mov eax, 11
+         jmp .e_literal
+
+.e_octal:
+    ; Up to three octal digits, counting the one already consumed.
+    sub eax, '0'
+    mov [rbp - PB_ACC], rax
+    mov ecx, 2
+.oct_loop:
+    mov r12, [rbp - PB_P]
+    cmp r12, [rbp - PB_END]
+    jae .oct_done
+    movzx eax, byte [r12]
+    cmp al, '0'
+    jb .oct_done
+    cmp al, '7'
+    ja .oct_done
+    sub eax, '0'
+    mov rdx, [rbp - PB_ACC]
+    shl rdx, 3
+    or rdx, rax
+    mov [rbp - PB_ACC], rdx
+    inc qword [rbp - PB_P]
+    dec ecx
+    jnz .oct_loop
+.oct_done:
+    mov rdi, [rbp - PB_OUT]
+    mov rsi, [rbp - PB_ACC]
+    cmp qword [rbp - PB_BYTES], 0
+    jne .raw_byte
+    call par_utf8_emit
+    jmp .loop
+.raw_byte:
+    and esi, 0xff
+    call buf_push_u8
+    jmp .loop
+
+.e_hex2:
+    mov r13d, 2
+    jmp .hex_common
+.e_hex4:
+    mov r13d, 4
+    jmp .hex_common
+.e_hex8:
+    mov r13d, 8
+.hex_common:
+    ; \u and \U have no meaning in a bytes literal; only \x does.
+    cmp r13d, 2
+    je .hex_go
+    cmp qword [rbp - PB_BYTES], 0
+    jne .bad_escape
+.hex_go:
+    mov qword [rbp - PB_ACC], 0
+.hex_loop:
+    test r13d, r13d
+    jz .hex_done
+    mov r12, [rbp - PB_P]
+    cmp r12, [rbp - PB_END]
+    jae .bad_escape
+    movzx edi, byte [r12]
+    call par_hexval
+    cmp eax, -1
+    je .bad_escape
+    mov rdx, [rbp - PB_ACC]
+    shl rdx, 4
+    or rdx, rax
+    mov [rbp - PB_ACC], rdx
+    inc qword [rbp - PB_P]
+    dec r13d
+    jmp .hex_loop
+.hex_done:
+    mov rsi, [rbp - PB_ACC]
+    cmp qword [rbp - PB_BYTES], 0
+    jne .hex_byte
+    mov rdi, [rbp - PB_OUT]
+    call par_utf8_emit
+    jmp .loop
+.hex_byte:
+    mov rdi, [rbp - PB_OUT]
+    and esi, 0xff
+    call buf_push_u8
+    jmp .loop
+
+.ok:
+    mov eax, 1
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+.bad_escape:
+    mov rdi, rbx
+    CSTRING rsi, "invalid escape sequence in string literal"
+    call par_syntax_error
+    xor eax, eax
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+.fstring_unsupported:
+    mov rdi, rbx
+    CSTRING rsi, "f-strings are not supported yet"
+    call par_syntax_error
+    xor eax, eax
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC par_string_body
+
+;; ============================================================================
+;; pf_string(Comp *c) -> node
+;;
+;; Adjacent string literals concatenate: "a" "b" is one constant, not two.  The
+;; whole run is consumed here, which is why it happens in the prefix handler
+;; rather than as an infix operator -- there is no operator to speak of.
+;; ============================================================================
+PS2_COMP  equ 8
+PS2_LINE  equ 16
+PS2_BYTES equ 24
+PS2_BUF   equ 64         ; a Buf at [rbp - 64]
+PS2_FRAME equ 72         ; + 1 push = 80
+DEF_FUNC_LOCAL pf_string, PS2_FRAME
+    push rbx
+    mov rbx, rdi
+
+    call par_peek
+    mov ecx, [rax + Token.lineno]
+    mov [rbp - PS2_LINE], rcx
+    movzx ecx, word [rax + Token.flags]
+    and ecx, TF_STR_BYTES
+    mov [rbp - PS2_BYTES], rcx
+
+    lea rdi, [rbp - PS2_BUF]
+    mov esi, 1
+    call buf_init
+
+.piece:
+    mov rdi, rbx
+    call par_peek
+    mov rsi, rax
+    ; Mixing bytes and str in one concatenation is an error, not a coercion.
+    movzx ecx, word [rsi + Token.flags]
+    and ecx, TF_STR_BYTES
+    cmp rcx, [rbp - PS2_BYTES]
+    jne .mixed
+    mov rdi, rbx
+    lea rdx, [rbp - PS2_BUF]
+    call par_string_body
+    test eax, eax
+    jz .fail
+    mov rdi, rbx
+    call par_advance
+    mov rdi, rbx
+    call par_kind
+    cmp eax, TOK_STRING
+    je .piece
+
+    mov rdi, [rbp - PS2_BUF + Buf.data]
+    mov rsi, [rbp - PS2_BUF + Buf.len]
+    cmp qword [rbp - PS2_BYTES], 0
+    jne .make_bytes
+    call str_new_heap
+    jmp .have_object
+.make_bytes:
+    call bytes_from_data
+.have_object:
+    test rax, rax
+    jz .fail
+    mov rdi, rbx
+    mov rsi, rax
+    call ast_obj
+    mov r8, rax
+
+    push r8
+    lea rdi, [rbp - PS2_BUF]
+    call buf_free
+    pop r8
+
+    mov rdi, rbx
+    mov esi, AST_CONST
+    xor edx, edx
+    mov rcx, [rbp - PS2_LINE]
+    xor r9d, r9d
+    call ast_make
+    pop rbx
+    leave
+    ret
+
+.mixed:
+    mov rdi, rbx
+    CSTRING rsi, "cannot mix bytes and str literals"
+    call par_syntax_error
+.fail:
+    lea rdi, [rbp - PS2_BUF]
+    call buf_free
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+END_FUNC pf_string
+
+;; ============================================================================
+;; par_exprlist(Comp *c, int close, int *saw_comma) -> rax = child-list mark
+;;
+;; Parses a comma-separated run up to `close`, pushing each element onto the
+;; pending stack.  A trailing comma is allowed and recorded, because for a
+;; parenthesised run it is the difference between (a) and (a,).
+;;
+;; Returns the mark to hand to ast_commit; rax = -1 on error.
+;; ============================================================================
+PL_COMP  equ 8
+PL_CLOSE equ 16
+PL_FLAG  equ 24
+PL_MARK  equ 32
+PL_FRAME equ 40          ; + 1 push = 48
+DEF_FUNC par_exprlist, PL_FRAME
+    push rbx
+    mov rbx, rdi
+    mov [rbp - PL_CLOSE], rsi
+    mov [rbp - PL_FLAG], rdx
+    mov qword [rdx], 0
+
+    mov rdi, rbx
+    call ast_mark
+    mov [rbp - PL_MARK], rax
+
+.loop:
+    mov rdi, rbx
+    call par_kind
+    cmp rax, [rbp - PL_CLOSE]
+    je .done
+    cmp eax, TOK_ENDMARKER
+    je .done
+
+    mov rdi, rbx
+    mov esi, BP_NONE
+    call par_expr
+    test rax, rax
+    jz .fail
+    mov rdi, rbx
+    mov rsi, rax
+    call ast_push
+
+    mov rdi, rbx
+    call par_kind
+    cmp eax, TOK_COMMA
+    jne .done
+    mov rdx, [rbp - PL_FLAG]
+    mov qword [rdx], 1
+    mov rdi, rbx
+    call par_advance
+    jmp .loop
+
+.done:
+    mov rax, [rbp - PL_MARK]
+    pop rbx
+    leave
+    ret
+.fail:
+    mov rax, -1
+    pop rbx
+    leave
+    ret
+END_FUNC par_exprlist
+
+;; ============================================================================
+;; par_finish_list(Comp *c, int kind, int line, uint64_t mark) -> node
+;; Commits the staged children onto a fresh node.
+;; ============================================================================
+PF_COMP  equ 8
+PF_MARK  equ 16
+PF_NODE  equ 24
+PF_FRAME equ 24          ; + 1 push = 32
+DEF_FUNC par_finish_list, PF_FRAME
+    push rbx
+    mov rbx, rdi
+    mov [rbp - PF_MARK], rcx
+    xor r8d, r8d
+    xor r9d, r9d
+    mov rcx, rdx                        ; lineno
+    mov rdx, 0                          ; subkind
+    call ast_make
+    mov [rbp - PF_NODE], rax
+    mov rdi, rbx
+    mov rsi, [rbp - PF_MARK]
+    call ast_commit
+    mov r8, rax
+    mov r9, rdx
+    mov rdi, rbx
+    mov rsi, [rbp - PF_NODE]
+    call ast_at
+    mov [rax + AstNode.clist], r8d
+    mov [rax + AstNode.nchild], r9d
+    mov rax, [rbp - PF_NODE]
+    pop rbx
+    leave
+    ret
+END_FUNC par_finish_list
+
+;; ============================================================================
+;; pf_group(Comp *c) -> node   -- (), (a), (a, b), (a,)
+;;
+;; A parenthesised single expression is just that expression; it becomes a
+;; tuple only when a comma appears.  That is why the trailing-comma flag is
+;; tracked: (a) is a, and (a,) is a one-tuple.
+;; ============================================================================
+PG_COMP  equ 8
+PG_LINE  equ 16
+PG_MARK  equ 24
+PG_COMMA equ 32
+PG_FRAME equ 40          ; + 1 push = 48
+DEF_FUNC_LOCAL pf_group, PG_FRAME
+    push rbx
+    mov rbx, rdi
+    call par_peek
+    mov ecx, [rax + Token.lineno]
+    mov [rbp - PG_LINE], rcx
+    mov rdi, rbx
+    call par_advance                    ; consume '('
+
+    mov rdi, rbx
+    mov esi, TOK_RPAR
+    lea rdx, [rbp - PG_COMMA]
+    call par_exprlist
+    cmp rax, -1
+    je .fail
+    mov [rbp - PG_MARK], rax
+
+    mov rdi, rbx
+    mov esi, TOK_RPAR
+    CSTRING rdx, "'(' was never closed"
+    call par_expect
+    test eax, eax
+    jz .fail
+
+    ; One element and no comma: the parentheses were only grouping.
+    mov rax, [rbx + Comp.pending + Buf.len]
+    sub rax, [rbp - PG_MARK]
+    cmp rax, 1
+    jne .make_tuple
+    cmp qword [rbp - PG_COMMA], 0
+    jne .make_tuple
+    mov rax, [rbx + Comp.pending + Buf.data]
+    mov rcx, [rbx + Comp.pending + Buf.len]
+    dec rcx
+    mov eax, [rax + rcx*4]
+    mov [rbx + Comp.pending + Buf.len], rcx
+    pop rbx
+    leave
+    ret
+
+.make_tuple:
+    mov rdi, rbx
+    mov esi, AST_TUPLE
+    mov rdx, [rbp - PG_LINE]
+    mov rcx, [rbp - PG_MARK]
+    call par_finish_list
+    pop rbx
+    leave
+    ret
+.fail:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+END_FUNC pf_group
+
+;; ============================================================================
+;; pf_list(Comp *c) -> node   -- [a, b]
+;; ============================================================================
+DEF_FUNC_LOCAL pf_list, PG_FRAME
+    push rbx
+    mov rbx, rdi
+    call par_peek
+    mov ecx, [rax + Token.lineno]
+    mov [rbp - PG_LINE], rcx
+    mov rdi, rbx
+    call par_advance
+
+    mov rdi, rbx
+    mov esi, TOK_RSQB
+    lea rdx, [rbp - PG_COMMA]
+    call par_exprlist
+    cmp rax, -1
+    je .fail
+    mov [rbp - PG_MARK], rax
+
+    mov rdi, rbx
+    mov esi, TOK_RSQB
+    CSTRING rdx, "'[' was never closed"
+    call par_expect
+    test eax, eax
+    jz .fail
+
+    mov rdi, rbx
+    mov esi, AST_LIST
+    mov rdx, [rbp - PG_LINE]
+    mov rcx, [rbp - PG_MARK]
+    call par_finish_list
+    pop rbx
+    leave
+    ret
+.fail:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+END_FUNC pf_list
+
+;; ============================================================================
+;; pf_dictset(Comp *c) -> node   -- {}, {a: b}, {a, b}, {**m}
+;;
+;; One opening brace, three possible displays.  Which it is is decided by the
+;; token after the first element: a colon means a dict, anything else a set, and
+;; a bare `**` means a dict too.  An empty {} is a dict, not a set, because
+;; there is no set literal for the empty set.
+;; ============================================================================
+PD_COMP  equ 8
+PD_LINE  equ 16
+PD_MARK  equ 24
+PD_ISDICT equ 32
+PD_FRAME equ 40          ; + 1 push = 48
+DEF_FUNC_LOCAL pf_dictset, PD_FRAME
+    push rbx
+    mov rbx, rdi
+    call par_peek
+    mov ecx, [rax + Token.lineno]
+    mov [rbp - PD_LINE], rcx
+    mov rdi, rbx
+    call par_advance                    ; consume '{'
+
+    mov rdi, rbx
+    call ast_mark
+    mov [rbp - PD_MARK], rax
+    mov qword [rbp - PD_ISDICT], 1      ; an empty {} is a dict
+
+    mov rdi, rbx
+    call par_kind
+    cmp eax, TOK_RBRACE
+    je .close
+
+    ; The first element decides the shape.
+    mov rdi, rbx
+    call par_kind
+    cmp eax, TOK_DOUBLESTAR
+    je .dict_unpack                     ; {**m, ...}: a dict, and parse it now
+    mov rdi, rbx
+    mov esi, BP_NONE
+    call par_expr
+    test rax, rax
+    jz .fail
+    mov r8, rax
+    mov rdi, rbx
+    call par_kind
+    cmp eax, TOK_COLON
+    je .dict_first
+    ; A set: push what we already parsed and carry on.
+    mov qword [rbp - PD_ISDICT], 0
+    mov rdi, rbx
+    mov rsi, r8
+    call ast_push
+    jmp .more
+.dict_first:
+    mov rdi, rbx
+    mov rsi, r8
+    call ast_push                       ; the key
+    mov rdi, rbx
+    call par_advance                    ; consume ':'
+    mov rdi, rbx
+    mov esi, BP_NONE
+    call par_expr
+    test rax, rax
+    jz .fail
+    mov rdi, rbx
+    mov rsi, rax
+    call ast_push                       ; the value
+    jmp .more
+
+.more:
+    mov rdi, rbx
+    call par_kind
+    cmp eax, TOK_COMMA
+    jne .close
+    mov rdi, rbx
+    call par_advance
+    mov rdi, rbx
+    call par_kind
+    cmp eax, TOK_RBRACE
+    je .close                           ; a trailing comma
+
+    cmp qword [rbp - PD_ISDICT], 0
+    je .set_item
+
+    ; dict: either `**m` or `key: value`
+    mov rdi, rbx
+    call par_kind
+    cmp eax, TOK_DOUBLESTAR
+    je .dict_unpack
+    mov rdi, rbx
+    mov esi, BP_NONE
+    call par_expr
+    test rax, rax
+    jz .fail
+    mov rdi, rbx
+    mov rsi, rax
+    call ast_push
+    mov rdi, rbx
+    mov esi, TOK_COLON
+    CSTRING rdx, "expected ':' in dict display"
+    call par_expect
+    test eax, eax
+    jz .fail
+    mov rdi, rbx
+    mov esi, BP_NONE
+    call par_expr
+    test rax, rax
+    jz .fail
+    mov rdi, rbx
+    mov rsi, rax
+    call ast_push
+    jmp .more
+.dict_unpack:
+    mov rdi, rbx
+    mov esi, BP_NONE
+    call par_expr                       ; pf_starred builds the ** node
+    test rax, rax
+    jz .fail
+    mov rdi, rbx
+    mov rsi, rax
+    call ast_push
+    ; A ** entry occupies one slot where a pair occupies two; pushing the node
+    ; twice keeps the list in key/value pairs so codegen can walk it uniformly.
+    mov rdi, rbx
+    xor esi, esi
+    call ast_push
+    jmp .more
+
+.set_item:
+    mov rdi, rbx
+    mov esi, BP_NONE
+    call par_expr
+    test rax, rax
+    jz .fail
+    mov rdi, rbx
+    mov rsi, rax
+    call ast_push
+    jmp .more
+
+.close:
+    mov rdi, rbx
+    mov esi, TOK_RBRACE
+    CSTRING rdx, "'{' was never closed"
+    call par_expect
+    test eax, eax
+    jz .fail
+
+    mov esi, AST_SET
+    cmp qword [rbp - PD_ISDICT], 0
+    je .have_kind
+    mov esi, AST_DICT
+.have_kind:
+    mov rdi, rbx
+    mov rdx, [rbp - PD_LINE]
+    mov rcx, [rbp - PD_MARK]
+    call par_finish_list
+    pop rbx
+    leave
+    ret
+.fail:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+END_FUNC pf_dictset
+
+;; ============================================================================
+;; pf_starred(Comp *c) -> node   -- *x and **x
+;; Legal only inside a display, a call or a target list; the emitters reject it
+;; anywhere else, which is what makes `*x + 1` a syntax error.
+;; ============================================================================
+PST_COMP  equ 8
+PST_LINE  equ 16
+PST_KIND  equ 24
+PST_FRAME equ 24         ; + 1 push = 32
+DEF_FUNC_LOCAL pf_starred, PST_FRAME
+    push rbx
+    mov rbx, rdi
+    call par_peek
+    mov ecx, [rax + Token.lineno]
+    mov [rbp - PST_LINE], rcx
+    movzx eax, word [rax + Token.kind]
+    mov edx, AST_STARRED
+    cmp eax, TOK_DOUBLESTAR
+    jne .have
+    mov edx, AST_DOUBLESTARRED
+.have:
+    mov [rbp - PST_KIND], rdx
+    mov rdi, rbx
+    call par_advance
+    mov rdi, rbx
+    mov esi, BP_OR                      ; binds tighter than a comma or colon
+    call par_expr
+    test rax, rax
+    jz .fail
+    mov r8, rax
+    mov rdi, rbx
+    mov rsi, [rbp - PST_KIND]
+    xor edx, edx
+    mov rcx, [rbp - PST_LINE]
+    xor r9d, r9d
+    call ast_make
+    pop rbx
+    leave
+    ret
+.fail:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+END_FUNC pf_starred
+
+;; ============================================================================
+;; in_attr(Comp *c, node value) -> node   -- value.name
+;; ============================================================================
+IA_COMP  equ 8
+IA_VAL   equ 16
+IA_LINE  equ 24
+IA_FRAME equ 24          ; + 1 push = 32
+DEF_FUNC_LOCAL in_attr, IA_FRAME
+    push rbx
+    mov rbx, rdi
+    mov [rbp - IA_VAL], rsi
+    call par_peek
+    mov ecx, [rax + Token.lineno]
+    mov [rbp - IA_LINE], rcx
+    mov rdi, rbx
+    call par_advance                    ; consume '.'
+
+    mov rdi, rbx
+    call par_kind
+    cmp eax, TOK_NAME
+    jne .need_name
+    mov rdi, rbx
+    call par_peek
+    mov rdi, [rax + Token.start]
+    mov esi, [rax + Token.len]
+    call comp_intern
+    test rax, rax
+    jz .fail
+    mov rdi, rbx
+    mov rsi, rax
+    call ast_obj
+    mov r9, rax
+    mov rdi, rbx
+    call par_advance
+
+    mov rdi, rbx
+    mov esi, AST_ATTRIBUTE
+    mov edx, CTX_LOAD
+    mov rcx, [rbp - IA_LINE]
+    mov r8, [rbp - IA_VAL]
+    call ast_make
+    pop rbx
+    leave
+    ret
+.need_name:
+    mov rdi, rbx
+    CSTRING rsi, "expected an attribute name after '.'"
+    call par_syntax_error
+.fail:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+END_FUNC in_attr
+
+;; ============================================================================
+;; par_slice_piece(Comp *c) -> node, or 0 for an omitted bound
+;; ============================================================================
+DEF_FUNC par_slice_piece, 8
+    push rbx
+    mov rbx, rdi
+    call par_kind
+    cmp eax, TOK_COLON
+    je .omitted
+    cmp eax, TOK_RSQB
+    je .omitted
+    cmp eax, TOK_COMMA
+    je .omitted
+    mov rdi, rbx
+    mov esi, BP_NONE
+    call par_expr
+    pop rbx
+    leave
+    ret
+.omitted:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+END_FUNC par_slice_piece
+
+;; ============================================================================
+;; in_subscript(Comp *c, node value) -> node   -- value[index] or value[a:b:c]
+;; ============================================================================
+IS_COMP  equ 8
+IS_VAL   equ 16
+IS_LINE  equ 24
+IS_LOWER equ 32
+IS_UPPER equ 40
+IS_STEP  equ 48
+IS_SLICE equ 56
+IS_FRAME equ 56          ; + 1 push = 64
+DEF_FUNC_LOCAL in_subscript, IS_FRAME
+    push rbx
+    mov rbx, rdi
+    mov [rbp - IS_VAL], rsi
+    call par_peek
+    mov ecx, [rax + Token.lineno]
+    mov [rbp - IS_LINE], rcx
+    mov rdi, rbx
+    call par_advance                    ; consume '['
+
+    mov qword [rbp - IS_UPPER], 0
+    mov qword [rbp - IS_STEP], 0
+    mov qword [rbp - IS_SLICE], 0
+
+    mov rdi, rbx
+    call par_slice_piece
+    mov [rbp - IS_LOWER], rax
+
+    mov rdi, rbx
+    call par_kind
+    cmp eax, TOK_COLON
+    jne .plain_index
+
+    mov qword [rbp - IS_SLICE], 2       ; at least lower:upper
+    mov rdi, rbx
+    call par_advance
+    mov rdi, rbx
+    call par_slice_piece
+    mov [rbp - IS_UPPER], rax
+
+    mov rdi, rbx
+    call par_kind
+    cmp eax, TOK_COLON
+    jne .close
+    mov qword [rbp - IS_SLICE], 3
+    mov rdi, rbx
+    call par_advance
+    mov rdi, rbx
+    call par_slice_piece
+    mov [rbp - IS_STEP], rax
+    jmp .close
+
+.plain_index:
+    cmp qword [rbp - IS_LOWER], 0
+    je .need_index
+
+.close:
+    mov rdi, rbx
+    mov esi, TOK_RSQB
+    CSTRING rdx, "'[' was never closed"
+    call par_expect
+    test eax, eax
+    jz .fail
+
+    cmp qword [rbp - IS_SLICE], 0
+    jne .make_slice
+    mov rdi, rbx
+    mov esi, AST_SUBSCRIPT
+    mov edx, CTX_LOAD
+    mov rcx, [rbp - IS_LINE]
+    mov r8, [rbp - IS_VAL]
+    mov r9, [rbp - IS_LOWER]
+    call ast_make
+    pop rbx
+    leave
+    ret
+
+.make_slice:
+    mov rdi, rbx
+    mov esi, AST_SLICE
+    mov rdx, [rbp - IS_SLICE]           ; subkind: 2 or 3 pieces
+    mov rcx, [rbp - IS_LINE]
+    mov r8, [rbp - IS_LOWER]
+    mov r9, [rbp - IS_UPPER]
+    call ast_make
+    mov [rbp - IS_LOWER], rax
+    mov rdi, rbx
+    mov rsi, rax
+    call ast_at
+    mov rdx, [rbp - IS_STEP]
+    mov [rax + AstNode.c], edx
+
+    mov rdi, rbx
+    mov esi, AST_SUBSCRIPT
+    mov edx, CTX_LOAD
+    mov rcx, [rbp - IS_LINE]
+    mov r8, [rbp - IS_VAL]
+    mov r9, [rbp - IS_LOWER]
+    call ast_make
+    pop rbx
+    leave
+    ret
+
+.need_index:
+    mov rdi, rbx
+    CSTRING rsi, "expected an index expression"
+    call par_syntax_error
+.fail:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+END_FUNC in_subscript
+
+;; ============================================================================
+;; in_call(Comp *c, node func) -> node   -- func(args)
+;;
+;; The child list holds the arguments in source order.  A keyword argument is
+;; an AST_KEYWORD node carrying its name, and `*a` / `**k` are AST_STARRED and
+;; AST_DOUBLESTARRED; codegen decides from what it finds whether a plain CALL
+;; will do or whether the call has to be assembled through CALL_FUNCTION_EX.
+;; ============================================================================
+ICL_COMP  equ 8
+ICL_FUNC  equ 16
+ICL_LINE  equ 24
+ICL_MARK  equ 32
+ICL_NAME  equ 40
+ICL_FRAME equ 40         ; + 1 push = 48
+DEF_FUNC_LOCAL in_call, ICL_FRAME
+    push rbx
+    mov rbx, rdi
+    mov [rbp - ICL_FUNC], rsi
+    call par_peek
+    mov ecx, [rax + Token.lineno]
+    mov [rbp - ICL_LINE], rcx
+    mov rdi, rbx
+    call par_advance                    ; consume '('
+
+    mov rdi, rbx
+    call ast_mark
+    mov [rbp - ICL_MARK], rax
+
+.arg_loop:
+    mov rdi, rbx
+    call par_kind
+    cmp eax, TOK_RPAR
+    je .close
+    cmp eax, TOK_ENDMARKER
+    je .close
+
+    ; A keyword argument is NAME '=' expr, and only that: the '=' has to be
+    ; the very next token, or `f(a == b)` would be misread.
+    mov rdi, rbx
+    call par_kind
+    cmp eax, TOK_NAME
+    jne .positional
+    mov rdi, rbx
+    call par_peek_next
+    cmp eax, TOK_EQUAL
+    jne .positional
+
+    mov rdi, rbx
+    call par_peek
+    mov rdi, [rax + Token.start]
+    mov esi, [rax + Token.len]
+    call comp_intern
+    test rax, rax
+    jz .fail
+    mov rdi, rbx
+    mov rsi, rax
+    call ast_obj
+    mov [rbp - ICL_NAME], rax
+    mov rdi, rbx
+    call par_advance                    ; the name
+    mov rdi, rbx
+    call par_advance                    ; the '='
+    mov rdi, rbx
+    mov esi, BP_NONE
+    call par_expr
+    test rax, rax
+    jz .fail
+    mov r9, rax
+    mov rdi, rbx
+    mov esi, AST_KEYWORD
+    xor edx, edx
+    mov rcx, [rbp - ICL_LINE]
+    mov r8, [rbp - ICL_NAME]
+    call ast_make
+    jmp .push_arg
+
+.positional:
+    mov rdi, rbx
+    mov esi, BP_NONE
+    call par_expr
+    test rax, rax
+    jz .fail
+.push_arg:
+    mov rdi, rbx
+    mov rsi, rax
+    call ast_push
+
+    mov rdi, rbx
+    call par_kind
+    cmp eax, TOK_COMMA
+    jne .close
+    mov rdi, rbx
+    call par_advance
+    jmp .arg_loop
+
+.close:
+    mov rdi, rbx
+    mov esi, TOK_RPAR
+    CSTRING rdx, "'(' was never closed"
+    call par_expect
+    test eax, eax
+    jz .fail
+
+    mov rdi, rbx
+    mov esi, AST_CALL
+    xor edx, edx
+    mov rcx, [rbp - ICL_LINE]
+    mov r8, [rbp - ICL_FUNC]
+    xor r9d, r9d
+    call ast_make
+    mov [rbp - ICL_NAME], rax
+    mov rdi, rbx
+    mov rsi, [rbp - ICL_MARK]
+    call ast_commit
+    mov r8, rax
+    mov r9, rdx
+    mov rdi, rbx
+    mov rsi, [rbp - ICL_NAME]
+    call ast_at
+    mov [rax + AstNode.clist], r8d
+    mov [rax + AstNode.nchild], r9d
+    mov rax, [rbp - ICL_NAME]
+    pop rbx
+    leave
+    ret
+.fail:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+END_FUNC in_call
+
+;; ============================================================================
+;; par_peek_next(Comp *c) -> eax = the kind of the token after the current one
+;; One token of lookahead, which is all the grammar needs at a point where an
+;; array of tokens makes it free.
+;; ============================================================================
+DEF_FUNC_BARE par_peek_next
+    mov eax, [rdi + Comp.tok_idx]
+    inc eax
+    mov rcx, [rdi + Comp.tokens + Buf.len]
+    dec rcx
+    cmp rax, rcx
+    jbe .ok
+    mov eax, ecx
+.ok:
+    mov rdx, [rdi + Comp.tokens + Buf.data]
+    shl rax, TOKEN_SHIFT
+    movzx eax, word [rdx + rax + Token.kind]
+    ret
+END_FUNC par_peek_next
+
 section .rodata
 
 ;; ---------------------------------------------------------------------------
 ;; prule_table - the expression grammar, one row per token kind.
 ;;
+;; GENERATED.  Edit ROWS in compiler/gen_prule.py and re-run it.
+;;
 ;; Reading a row: `prefix` runs when the token starts an expression, `infix`
 ;; when it follows one.  lbp is how tightly the token binds to what is already
 ;; parsed -- 0 means it is not an infix operator and therefore ends the
-;; expression.  rbp is the minimum the handler recurses at, which is what
+;; expression.  rbp is the minimum its handler recurses at, which is what
 ;; encodes associativity: equal to lbp is left-associative, one below is
 ;; right-associative.
 ;;
@@ -1006,25 +2216,25 @@ prule_table:
     dq pf_number   , 0           
     db BP_NONE    , BP_NONE    , 0                 , 0           ; TOK_NUMBER
     dd 0
-    dq 0           , 0           
-    db BP_NONE    , BP_NONE    , 0                 , 0           ; TOK_STRING
+    dq pf_string   , 0           
+    db BP_NONE    , BP_NONE    , 0                 , 0           ; TOK_STRING -- consumes a whole run: adjacent literals concatenate
     dd 0
     dq 0           , 0           
     db BP_NONE    , BP_NONE    , 0                 , 0           ; TOK_FSTRING
     dd 0
-    dq pf_group    , 0           
-    db BP_NONE    , BP_NONE    , 0                 , 0           ; TOK_LPAR
+    dq pf_group    , in_call     
+    db BP_POSTFIX , BP_POSTFIX , 0                 , 0           ; TOK_LPAR -- group or tuple; as an infix, a call
     dd 0
     dq 0           , 0           
     db BP_NONE    , BP_NONE    , 0                 , 0           ; TOK_RPAR
     dd 0
-    dq 0           , 0           
-    db BP_NONE    , BP_NONE    , 0                 , 0           ; TOK_LSQB
+    dq pf_list     , in_subscript
+    db BP_POSTFIX , BP_POSTFIX , 0                 , 0           ; TOK_LSQB
     dd 0
     dq 0           , 0           
     db BP_NONE    , BP_NONE    , 0                 , 0           ; TOK_RSQB
     dd 0
-    dq 0           , 0           
+    dq pf_dictset  , 0           
     db BP_NONE    , BP_NONE    , 0                 , 0           ; TOK_LBRACE
     dd 0
     dq 0           , 0           
@@ -1039,10 +2249,10 @@ prule_table:
     dq 0           , 0           
     db BP_NONE    , BP_NONE    , 0                 , 0           ; TOK_SEMI
     dd 0
-    dq 0           , 0           
-    db BP_NONE    , BP_NONE    , 0                 , 0           ; TOK_DOT
+    dq 0           , in_attr     
+    db BP_POSTFIX , BP_POSTFIX , 0                 , 0           ; TOK_DOT
     dd 0
-    dq 0           , 0           
+    dq pf_const    , 0           
     db BP_NONE    , BP_NONE    , 0                 , 0           ; TOK_ELLIPSIS
     dd 0
     dq pf_unary    , in_binop    
@@ -1051,11 +2261,11 @@ prule_table:
     dq pf_unary    , in_binop    
     db BP_ARITH   , BP_ARITH   , NB_SUBTRACT       , 0           ; TOK_MINUS
     dd 0
-    dq 0           , in_binop    
+    dq pf_starred  , in_binop    
     db BP_TERM    , BP_TERM    , NB_MULTIPLY       , 0           ; TOK_STAR
     dd 0
-    dq 0           , in_binop    
-    db BP_POWER   , BP_UNARY   , NB_POWER          , 0           ; TOK_DOUBLESTAR -- rbp one level BELOW lbp: right-associative, and its RHS accepts unary
+    dq pf_starred  , in_binop    
+    db BP_POWER   , BP_UNARY   , NB_POWER          , 0           ; TOK_DOUBLESTAR -- rbp one level BELOW lbp: right-associative, and its RHS takes a unary
     dd 0
     dq 0           , in_binop    
     db BP_TERM    , BP_TERM    , NB_TRUE_DIVIDE    , 0           ; TOK_SLASH
