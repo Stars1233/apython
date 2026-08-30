@@ -941,6 +941,129 @@ DEF_FUNC_BARE int_to_i64
 END_FUNC int_to_i64
 
 ;; ============================================================================
+;; int_base_str(rdi = int Value, esi = base 2..36, edx = 1 for uppercase)
+;;   -> rax = ap_malloc'd NUL-terminated C string, '-' prefixed when negative
+;;
+;; hex(), oct(), bin() and the b/o/x/X format types all truncated a value too
+;; wide for int64 -- hex(2**70) was "0x0" -- or refused it outright.  GMP can
+;; render any base directly; a negative base asks it for uppercase digits.
+;; ============================================================================
+IBS_BASE  equ 8
+IBS_UPPER equ 16
+IBS_RSP   equ 24
+IBS_FRAME equ 32
+global int_base_str
+DEF_FUNC int_base_str, IBS_FRAME
+    push rbx
+    push r12
+    mov [rbp - IBS_BASE], rsi
+    mov [rbp - IBS_UPPER], rdx
+    ; GMP reaches SSE code that faults on a misaligned stack, and this is
+    ; called from paths whose alignment differs.
+    mov [rbp - IBS_RSP], rsp
+    and rsp, -16
+
+    V_UNPACK rdi, rdx
+    call int_unwrap
+    cmp edx, TAG_SMALLINT
+    je .ibs_small
+
+    mov rbx, rdi
+    INT_NEED_MPZ rbx
+    lea rdi, [rbx + PyIntObject.mpz]
+    mov rsi, [rbp - IBS_BASE]
+    call __gmpz_sizeinbase wrt ..plt
+    lea rdi, [rax + 3]
+    call ap_malloc
+    mov r12, rax
+    mov rdi, r12
+    mov rsi, [rbp - IBS_BASE]
+    cmp qword [rbp - IBS_UPPER], 0
+    je .ibs_lower
+    neg rsi                     ; a negative base gives uppercase digits
+.ibs_lower:
+    INT_NEED_MPZ rbx
+    lea rdx, [rbx + PyIntObject.mpz]
+    call __gmpz_get_str wrt ..plt
+    mov rax, r12
+    mov rsp, [rbp - IBS_RSP]
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.ibs_small:
+    mov rbx, rdi
+    mov edi, 72
+    call ap_malloc
+    mov r12, rax
+    test rbx, rbx
+    jnz .ibs_nonzero
+    mov byte [r12], '0'
+    mov byte [r12 + 1], 0
+    mov rax, r12
+    mov rsp, [rbp - IBS_RSP]
+    pop r12
+    pop rbx
+    leave
+    ret
+.ibs_nonzero:
+    mov r8, rbx
+    xor r9d, r9d                ; negative?
+    test r8, r8
+    jns .ibs_abs
+    mov r9d, 1
+    neg r8
+.ibs_abs:
+    lea rdi, [r12 + 71]
+    mov byte [rdi], 0
+.ibs_digit:
+    mov rax, r8
+    xor edx, edx
+    div qword [rbp - IBS_BASE]
+    mov r8, rax
+    cmp dl, 10
+    jb .ibs_num
+    sub dl, 10
+    cmp qword [rbp - IBS_UPPER], 0
+    je .ibs_alpha_lower
+    add dl, 'A'
+    jmp .ibs_put
+.ibs_alpha_lower:
+    add dl, 'a'
+    jmp .ibs_put
+.ibs_num:
+    add dl, '0'
+.ibs_put:
+    dec rdi
+    mov [rdi], dl
+    test r8, r8
+    jnz .ibs_digit
+    test r9d, r9d
+    jz .ibs_move
+    dec rdi
+    mov byte [rdi], '-'
+.ibs_move:
+    mov rsi, rdi
+    mov rdi, r12
+.ibs_shift:
+    mov al, [rsi]
+    mov [rdi], al
+    test al, al
+    jz .ibs_shifted
+    inc rsi
+    inc rdi
+    jmp .ibs_shift
+.ibs_shifted:
+    mov rax, r12
+    mov rsp, [rbp - IBS_RSP]
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC int_base_str
+
+;; ============================================================================
 ;; int_repr(PyObject *self) -> PyStrObject*
 ;; String representation. SmallInt uses snprintf, GMP uses gmpz_get_str.
 ;; ============================================================================

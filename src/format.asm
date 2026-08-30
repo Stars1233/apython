@@ -608,6 +608,7 @@ DEF_FUNC_LOCAL format_int_body, FIB_FRAME
 .fib_digits_done:
     mov [rbp - FIB_LEN], rcx
 
+.fib_assemble:
     ; Assemble: sign, prefix, grouped digits (reversed).
     sub rsp, 256
     mov rdi, rsp
@@ -710,29 +711,78 @@ DEF_FUNC_LOCAL format_int_body, FIB_FRAME
     ret
 
 .fib_wide:
-    ; Too wide for int64: only the decimal form is supported, and str()
-    ; already produces it.
+    ; Too wide for int64.  Decimal comes straight from str(); the other bases
+    ; used to be refused outright ("integer too large for this format"), so
+    ; f"{2**70:x}" raised.  int_base_str renders any of them through GMP; the
+    ; digits are reversed into FIB_BUF so the assembly stage below -- sign,
+    ; prefix, grouping, padding -- runs unchanged.
     mov rax, [r14 - FS_TYPE]
+    xor edx, edx                        ; uppercase?
+    mov esi, 10
     test rax, rax
-    jz .fib_wide_ok
+    jz .fib_wb_go
     cmp rax, 'd'
-    jne .fib_wide_error
-.fib_wide_ok:
+    je .fib_wb_go
+    cmp rax, 'n'
+    je .fib_wb_go
+    mov esi, 2
+    cmp rax, 'b'
+    je .fib_wb_go
+    mov esi, 8
+    cmp rax, 'o'
+    je .fib_wb_go
+    mov esi, 16
+    cmp rax, 'x'
+    je .fib_wb_go
+    mov edx, 1
+    cmp rax, 'X'
+    je .fib_wb_go
+    jmp .fib_wide_error
+.fib_wb_go:
     mov rdi, [r14 - FS_VALUE]
-    call obj_str
-    V_UNPACK rax, rdx
-    pop r15
-    pop r14
-    pop r13
-    pop r12
-    pop rbx
-    leave
-    ret
+    extern int_base_str
+    call int_base_str
+    mov r12, rax                        ; the C string
+
+    mov qword [rbp - FIB_NEG], 0
+    mov rsi, r12
+    cmp byte [rsi], '-'
+    jne .fib_wb_scan
+    mov qword [rbp - FIB_NEG], 1
+    inc rsi
+.fib_wb_scan:
+    xor ecx, ecx
+.fib_wb_len:
+    cmp byte [rsi + rcx], 0
+    je .fib_wb_reverse
+    inc rcx
+    jmp .fib_wb_len
+.fib_wb_reverse:
+    ; FIB_BUF holds the digits least-significant first
+    lea rbx, [rbp - FIB_BUF]
+    xor edx, edx
+.fib_wb_rev_loop:
+    cmp rdx, rcx
+    jge .fib_wb_reversed
+    mov r8, rcx
+    sub r8, rdx
+    dec r8
+    mov al, [rsi + r8]
+    mov [rbx + rdx], al
+    inc rdx
+    jmp .fib_wb_rev_loop
+.fib_wb_reversed:
+    mov [rbp - FIB_LEN], rcx
+    push rcx
+    mov rdi, r12
+    extern ap_free
+    call ap_free
+    pop rcx
+    jmp .fib_assemble
 
 .fib_wide_error:
     lea rdi, [rel exc_ValueError_type]
     CSTRING rsi, "integer too large for this format"
-    call raise_exception
 END_FUNC format_int_body
 
 ;; ============================================================================
@@ -768,7 +818,27 @@ DEF_FUNC_LOCAL format_float_body, FFB_FRAME
     xor ecx, ecx
     mov rax, [r12 - FS_PREC]
     cmp rax, 0
-    jl .ffb_no_prec
+    jge .ffb_have_prec
+    ; e, f and g default to six digits; only a bare spec means repr.  Without
+    ; this f"{1.5:f}" was "1.5" rather than "1.500000".
+    mov rdx, [r12 - FS_TYPE]
+    cmp rdx, 'e'
+    je .ffb_default_prec
+    cmp rdx, 'E'
+    je .ffb_default_prec
+    cmp rdx, 'f'
+    je .ffb_default_prec
+    cmp rdx, 'F'
+    je .ffb_default_prec
+    cmp rdx, 'g'
+    je .ffb_default_prec
+    cmp rdx, 'G'
+    je .ffb_default_prec
+    cmp rdx, '%'
+    jne .ffb_no_prec
+.ffb_default_prec:
+    mov rax, 6
+.ffb_have_prec:
     mov byte [rbx], '.'
     mov ecx, 1
     ; up to two digits of precision is plenty for this buffer

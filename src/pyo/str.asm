@@ -720,13 +720,30 @@ DEF_FUNC str_mod, SM_FRAME
     cmp rax, rcx
     jne .sm_use_spec
     ; The direct path below never learned %X, %o or %b, so those went out
-    ; literally even with no flags.
+    ; literally even with no flags; and its %x handled only an int immediate,
+    ; printing "0" for a heap int.  All four go through the spec engine.
     movzx eax, byte [rbx + rcx]
     cmp al, 'X'
+    je .sm_use_spec
+    cmp al, 'x'
     je .sm_use_spec
     cmp al, 'o'
     je .sm_use_spec
     cmp al, 'b'
+    je .sm_use_spec
+    ; %e, %g and their uppercase forms went out literally, and %f fell back
+    ; to str(), so "%f" % 1.5 was "1.5" rather than "1.500000".
+    cmp al, 'e'
+    je .sm_use_spec
+    cmp al, 'E'
+    je .sm_use_spec
+    cmp al, 'f'
+    je .sm_use_spec
+    cmp al, 'F'
+    je .sm_use_spec
+    cmp al, 'g'
+    je .sm_use_spec
+    cmp al, 'G'
     je .sm_use_spec
     jmp .sm_dispatch_plain
 .sm_use_spec:

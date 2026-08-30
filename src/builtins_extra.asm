@@ -12,6 +12,8 @@ extern int_promote_mpz
 extern int_from_i64
 extern int_to_i64
 extern obj_as_index
+extern int_base_str
+extern int_is_integer
 extern __gmpz_fits_slong_p
 extern int_neg
 extern int_add
@@ -1510,90 +1512,89 @@ END_FUNC builtin_chr
 ; ============================================================================
 ; 6. builtin_hex(args, nargs) - hex(n)
 ; ============================================================================
-DEF_FUNC builtin_hex, 80
-
+PFX_STR   equ 8
+PFX_FRAME equ 16
+HEXB_VAL   equ 8
+HEXB_STR   equ 16
+HEXB_OUT   equ 24
+HEXB_FRAME equ 32
+DEF_FUNC builtin_hex, HEXB_FRAME
+    push rbx
+    push r12
     cmp rsi, 1
     jne .hex_nargs_error
 
-    mov rdi, [rdi]            ; args[0]
-
+    ; obj_as_index truncates a value too wide for int64, so builtin_hex(2**70)
+    ; came out as "0x0".  It is still what validates the argument and
+    ; honours __index__; int_base_str renders any width through GMP.
+    mov rdi, [rdi]
+    mov [rbp - HEXB_VAL], rdi
     V_UNPACK rdi, rdx
-    ; obj_as_index rather than int_to_i64: it rejects a non-integer instead
-    ; of decoding its payload as one, and it honours __index__, which is what
-    ; makes hex() work on a class that defines it.
+    call int_is_integer
+    test eax, eax
+    jnz .hex_have_value
+    mov rdi, [rbp - HEXB_VAL]
     call obj_as_index
+    mov rdx, TAG_SMALLINT
+    V_PACK rax, rdx
+    mov [rbp - HEXB_VAL], rax
+.hex_have_value:
+    mov rdi, [rbp - HEXB_VAL]
+    mov esi, 16
+    xor edx, edx
+    call int_base_str
+    mov [rbp - HEXB_STR], rax
 
-    test rax, rax
-    jz .hex_zero
-
-    test rax, rax
-    jns .hex_positive
-
-    ; Negative
-    neg rax
-    mov byte [rbp - 80], '-'
-    mov byte [rbp - 79], '0'
-    mov byte [rbp - 78], 'x'
-    lea rdi, [rbp - 77]
-    mov r8d, 3
-    jmp .hex_digits
-
+    mov rbx, rax
+    cmp byte [rbx], '-'
+    jne .hex_positive
+    inc rbx
 .hex_positive:
-    mov byte [rbp - 80], '0'
-    mov byte [rbp - 79], 'x'
-    lea rdi, [rbp - 78]
-    mov r8d, 2
-
-.hex_digits:
-    ; Write hex digits in reverse into temp area, then copy in correct order
-    lea rsi, [rbp - 16]
     xor ecx, ecx
+.hex_len:
+    cmp byte [rbx + rcx], 0
+    je .hex_have_len
+    inc rcx
+    jmp .hex_len
+.hex_have_len:
+    mov r12, rcx
+    lea rdi, [rcx + 8]
+    call ap_malloc
+    mov [rbp - HEXB_OUT], rax
+    xor edx, edx
+    mov r8, [rbp - HEXB_STR]
+    cmp byte [r8], '-'
+    jne .hex_no_sign
+    mov byte [rax], '-'
+    mov edx, 1
+.hex_no_sign:
+    mov byte [rax + rdx], '0'
+    mov byte [rax + rdx + 1], 'x'
+    add rdx, 2
+    xor r9d, r9d
+.hex_copy:
+    cmp r9, r12
+    jge .hex_copied
+    mov r10b, [rbx + r9]
+    mov [rax + rdx], r10b
+    inc rdx
+    inc r9
+    jmp .hex_copy
+.hex_copied:
+    mov byte [rax + rdx], 0
 
-.hex_digit_loop:
-    test rax, rax
-    jz .hex_reverse
-
-    mov rdx, rax
-    and edx, 0xF
-    cmp edx, 10
-    jb .hex_dec_digit
-    add edx, ('a' - 10)
-    jmp .hex_store_digit
-.hex_dec_digit:
-    add edx, '0'
-.hex_store_digit:
-    mov byte [rsi], dl
-    dec rsi
-    inc ecx
-    shr rax, 4
-    jmp .hex_digit_loop
-
-.hex_reverse:
-    ; Digits at [rsi+1 .. rsi+ecx], LSB first (reversed)
-    ; Copy them MSB-first into rdi
-    inc rsi
-    mov edx, ecx
-.hex_copy_loop:
-    test ecx, ecx
-    jz .hex_done_copy
-    mov al, byte [rsi]
-    mov byte [rdi], al
-    inc rsi
-    inc rdi
-    dec ecx
-    jmp .hex_copy_loop
-
-.hex_done_copy:
-    mov byte [rdi], 0
-    lea rdi, [rbp - 80]
+    mov rdi, [rbp - HEXB_STR]
+    call ap_free
+    mov rdi, [rbp - HEXB_OUT]
     call str_from_cstr
-    leave
-    V_PACK rax, rdx             ; builtins return one Value
-    ret
-
-.hex_zero:
-    CSTRING rdi, "0x0"
-    call str_from_cstr
+    mov rbx, rax
+    mov r12, rdx
+    mov rdi, [rbp - HEXB_OUT]
+    call ap_free
+    mov rax, rbx
+    mov rdx, r12
+    pop r12
+    pop rbx
     leave
     V_PACK rax, rdx             ; builtins return one Value
     ret
@@ -3896,81 +3897,88 @@ END_FUNC builtin_open_fn
 ; Returns binary string representation: '0b...' or '-0b...'
 ; ============================================================================
 global builtin_bin
-DEF_FUNC builtin_bin, 80
-
+BIN_PFX_STR equ 8
+BINB_VAL   equ 8
+BINB_STR   equ 16
+BINB_OUT   equ 24
+BINB_FRAME equ 32
+DEF_FUNC builtin_bin, BINB_FRAME
+    push rbx
+    push r12
     cmp rsi, 1
     jne .bin_nargs_error
 
-    mov rdi, [rdi]            ; args[0]
-
+    ; obj_as_index truncates a value too wide for int64, so builtin_bin(2**70)
+    ; came out as "0b0".  It is still what validates the argument and
+    ; honours __index__; int_base_str renders any width through GMP.
+    mov rdi, [rdi]
+    mov [rbp - BINB_VAL], rdi
     V_UNPACK rdi, rdx
-    ; obj_as_index rather than int_to_i64: it rejects a non-integer instead
-    ; of decoding its payload as one, and it honours __index__, which is what
-    ; makes hex() work on a class that defines it.
+    call int_is_integer
+    test eax, eax
+    jnz .bin_have_value
+    mov rdi, [rbp - BINB_VAL]
     call obj_as_index
+    mov rdx, TAG_SMALLINT
+    V_PACK rax, rdx
+    mov [rbp - BINB_VAL], rax
+.bin_have_value:
+    mov rdi, [rbp - BINB_VAL]
+    mov esi, 2
+    xor edx, edx
+    call int_base_str
+    mov [rbp - BINB_STR], rax
 
-    test rax, rax
-    jz .bin_zero
-
-    test rax, rax
-    jns .bin_positive
-
-    ; Negative
-    neg rax
-    mov byte [rbp - 80], '-'
-    mov byte [rbp - 79], '0'
-    mov byte [rbp - 78], 'b'
-    lea rdi, [rbp - 77]
-    mov r8d, 3
-    jmp .bin_digits
-
+    mov rbx, rax
+    cmp byte [rbx], '-'
+    jne .bin_positive
+    inc rbx
 .bin_positive:
-    mov byte [rbp - 80], '0'
-    mov byte [rbp - 79], 'b'
-    lea rdi, [rbp - 78]
-    mov r8d, 2
-
-.bin_digits:
-    lea rsi, [rbp - 16]
     xor ecx, ecx
+.bin_len:
+    cmp byte [rbx + rcx], 0
+    je .bin_have_len
+    inc rcx
+    jmp .bin_len
+.bin_have_len:
+    mov r12, rcx
+    lea rdi, [rcx + 8]
+    call ap_malloc
+    mov [rbp - BINB_OUT], rax
+    xor edx, edx
+    mov r8, [rbp - BINB_STR]
+    cmp byte [r8], '-'
+    jne .bin_no_sign
+    mov byte [rax], '-'
+    mov edx, 1
+.bin_no_sign:
+    mov byte [rax + rdx], '0'
+    mov byte [rax + rdx + 1], 'b'
+    add rdx, 2
+    xor r9d, r9d
+.bin_copy:
+    cmp r9, r12
+    jge .bin_copied
+    mov r10b, [rbx + r9]
+    mov [rax + rdx], r10b
+    inc rdx
+    inc r9
+    jmp .bin_copy
+.bin_copied:
+    mov byte [rax + rdx], 0
 
-.bin_digit_loop:
-    test rax, rax
-    jz .bin_reverse
-
-    mov rdx, rax
-    and edx, 1
-    add edx, '0'
-    mov byte [rsi], dl
-    dec rsi
-    inc ecx
-    shr rax, 1
-    jmp .bin_digit_loop
-
-.bin_reverse:
-    inc rsi
-    mov edx, ecx
-.bin_copy_loop:
-    test ecx, ecx
-    jz .bin_done_copy
-    mov al, byte [rsi]
-    mov byte [rdi], al
-    inc rsi
-    inc rdi
-    dec ecx
-    jmp .bin_copy_loop
-
-.bin_done_copy:
-    mov byte [rdi], 0
-    lea rdi, [rbp - 80]
+    mov rdi, [rbp - BINB_STR]
+    call ap_free
+    mov rdi, [rbp - BINB_OUT]
     call str_from_cstr
-    leave
-    V_PACK rax, rdx             ; builtins return one Value
-    ret
-
-.bin_zero:
-    CSTRING rdi, "0b0"
-    call str_from_cstr
+    mov rbx, rax
+    mov r12, rdx
+    mov rdi, [rbp - BINB_OUT]
+    call ap_free
+    mov rax, rbx
+    mov rdx, r12
+    pop r12
+    pop rbx
     leave
     V_PACK rax, rdx             ; builtins return one Value
     ret
@@ -3986,81 +3994,88 @@ END_FUNC builtin_bin
 ; Returns octal string representation: '0o...' or '-0o...'
 ; ============================================================================
 global builtin_oct
-DEF_FUNC builtin_oct, 80
-
+OCT_PFX_STR equ 8
+OCTB_VAL   equ 8
+OCTB_STR   equ 16
+OCTB_OUT   equ 24
+OCTB_FRAME equ 32
+DEF_FUNC builtin_oct, OCTB_FRAME
+    push rbx
+    push r12
     cmp rsi, 1
     jne .oct_nargs_error
 
-    mov rdi, [rdi]            ; args[0]
-
+    ; obj_as_index truncates a value too wide for int64, so builtin_oct(2**70)
+    ; came out as "0o0".  It is still what validates the argument and
+    ; honours __index__; int_base_str renders any width through GMP.
+    mov rdi, [rdi]
+    mov [rbp - OCTB_VAL], rdi
     V_UNPACK rdi, rdx
-    ; obj_as_index rather than int_to_i64: it rejects a non-integer instead
-    ; of decoding its payload as one, and it honours __index__, which is what
-    ; makes hex() work on a class that defines it.
+    call int_is_integer
+    test eax, eax
+    jnz .oct_have_value
+    mov rdi, [rbp - OCTB_VAL]
     call obj_as_index
+    mov rdx, TAG_SMALLINT
+    V_PACK rax, rdx
+    mov [rbp - OCTB_VAL], rax
+.oct_have_value:
+    mov rdi, [rbp - OCTB_VAL]
+    mov esi, 8
+    xor edx, edx
+    call int_base_str
+    mov [rbp - OCTB_STR], rax
 
-    test rax, rax
-    jz .oct_zero
-
-    test rax, rax
-    jns .oct_positive
-
-    ; Negative
-    neg rax
-    mov byte [rbp - 80], '-'
-    mov byte [rbp - 79], '0'
-    mov byte [rbp - 78], 'o'
-    lea rdi, [rbp - 77]
-    mov r8d, 3
-    jmp .oct_digits
-
+    mov rbx, rax
+    cmp byte [rbx], '-'
+    jne .oct_positive
+    inc rbx
 .oct_positive:
-    mov byte [rbp - 80], '0'
-    mov byte [rbp - 79], 'o'
-    lea rdi, [rbp - 78]
-    mov r8d, 2
-
-.oct_digits:
-    lea rsi, [rbp - 16]
     xor ecx, ecx
+.oct_len:
+    cmp byte [rbx + rcx], 0
+    je .oct_have_len
+    inc rcx
+    jmp .oct_len
+.oct_have_len:
+    mov r12, rcx
+    lea rdi, [rcx + 8]
+    call ap_malloc
+    mov [rbp - OCTB_OUT], rax
+    xor edx, edx
+    mov r8, [rbp - OCTB_STR]
+    cmp byte [r8], '-'
+    jne .oct_no_sign
+    mov byte [rax], '-'
+    mov edx, 1
+.oct_no_sign:
+    mov byte [rax + rdx], '0'
+    mov byte [rax + rdx + 1], 'o'
+    add rdx, 2
+    xor r9d, r9d
+.oct_copy:
+    cmp r9, r12
+    jge .oct_copied
+    mov r10b, [rbx + r9]
+    mov [rax + rdx], r10b
+    inc rdx
+    inc r9
+    jmp .oct_copy
+.oct_copied:
+    mov byte [rax + rdx], 0
 
-.oct_digit_loop:
-    test rax, rax
-    jz .oct_reverse
-
-    mov rdx, rax
-    and edx, 7
-    add edx, '0'
-    mov byte [rsi], dl
-    dec rsi
-    inc ecx
-    shr rax, 3
-    jmp .oct_digit_loop
-
-.oct_reverse:
-    inc rsi
-    mov edx, ecx
-.oct_copy_loop:
-    test ecx, ecx
-    jz .oct_done_copy
-    mov al, byte [rsi]
-    mov byte [rdi], al
-    inc rsi
-    inc rdi
-    dec ecx
-    jmp .oct_copy_loop
-
-.oct_done_copy:
-    mov byte [rdi], 0
-    lea rdi, [rbp - 80]
+    mov rdi, [rbp - OCTB_STR]
+    call ap_free
+    mov rdi, [rbp - OCTB_OUT]
     call str_from_cstr
-    leave
-    V_PACK rax, rdx             ; builtins return one Value
-    ret
-
-.oct_zero:
-    CSTRING rdi, "0o0"
-    call str_from_cstr
+    mov rbx, rax
+    mov r12, rdx
+    mov rdi, [rbp - OCTB_OUT]
+    call ap_free
+    mov rax, rbx
+    mov rdx, r12
+    pop r12
+    pop rbx
     leave
     V_PACK rax, rdx             ; builtins return one Value
     ret
