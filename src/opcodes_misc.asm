@@ -1660,33 +1660,36 @@ section .data
 ;; where the corresponding method function pointer resides.
 align 8
 binary_op_offsets:
-    dq 0    ; NB_ADD (0)              -> nb_add          (+0)
-    dq 104  ; NB_AND (1)              -> nb_and          (+104)
-    dq 144  ; NB_FLOOR_DIVIDE (2)     -> nb_floor_divide (+144)
-    dq 88   ; NB_LSHIFT (3)           -> nb_lshift       (+88)
-    dq 0    ; NB_MATRIX_MULTIPLY (4)  -> unsupported (placeholder)
-    dq 16   ; NB_MULTIPLY (5)         -> nb_multiply     (+16)
-    dq 24   ; NB_REMAINDER (6)        -> nb_remainder    (+24)
-    dq 120  ; NB_OR (7)               -> nb_or           (+120)
-    dq 40   ; NB_POWER (8)            -> nb_power        (+40)
-    dq 96   ; NB_RSHIFT (9)           -> nb_rshift       (+96)
-    dq 8    ; NB_SUBTRACT (10)        -> nb_subtract     (+8)
-    dq 152  ; NB_TRUE_DIVIDE (11)     -> nb_true_divide  (+152)
-    dq 112  ; NB_XOR (12)             -> nb_xor          (+112)
-    ; Inplace variants (13-25) map to inplace PyNumberMethods offsets:
-    dq 168  ; NB_INPLACE_ADD (13)              -> nb_iadd
-    dq 224  ; NB_INPLACE_AND (14)              -> nb_iand
-    dq 248  ; NB_INPLACE_FLOOR_DIVIDE (15)     -> nb_ifloor_divide
-    dq 208  ; NB_INPLACE_LSHIFT (16)           -> nb_ilshift
-    dq 0    ; NB_INPLACE_MATRIX_MULTIPLY (17)  -> unsupported
-    dq 184  ; NB_INPLACE_MULTIPLY (18)         -> nb_imul
-    dq 192  ; NB_INPLACE_REMAINDER (19)        -> nb_irem
-    dq 240  ; NB_INPLACE_OR (20)               -> nb_ior
-    dq 200  ; NB_INPLACE_POWER (21)            -> nb_ipow
-    dq 216  ; NB_INPLACE_RSHIFT (22)           -> nb_irshift
-    dq 176  ; NB_INPLACE_SUBTRACT (23)         -> nb_isub
-    dq 256  ; NB_INPLACE_TRUE_DIVIDE (24)      -> nb_itrue_divide
-    dq 232  ; NB_INPLACE_XOR (25)              -> nb_ixor
+    ; Symbolic, not literal: these are byte offsets into PyNumberMethods, and
+    ; a reorder of that struc used to mis-dispatch every binary operator in
+    ; silence.  NB_MATRIX_MULTIPLY was a literal 0 -- nb_add -- so 3 @ 4
+    ; returned 7.
+    dq PyNumberMethods.nb_add            ; NB_ADD (0)
+    dq PyNumberMethods.nb_and            ; NB_AND (1)
+    dq PyNumberMethods.nb_floor_divide   ; NB_FLOOR_DIVIDE (2)
+    dq PyNumberMethods.nb_lshift         ; NB_LSHIFT (3)
+    dq PyNumberMethods.nb_matmul         ; NB_MATRIX_MULTIPLY (4)
+    dq PyNumberMethods.nb_multiply       ; NB_MULTIPLY (5)
+    dq PyNumberMethods.nb_remainder      ; NB_REMAINDER (6)
+    dq PyNumberMethods.nb_or             ; NB_OR (7)
+    dq PyNumberMethods.nb_power          ; NB_POWER (8)
+    dq PyNumberMethods.nb_rshift         ; NB_RSHIFT (9)
+    dq PyNumberMethods.nb_subtract       ; NB_SUBTRACT (10)
+    dq PyNumberMethods.nb_true_divide    ; NB_TRUE_DIVIDE (11)
+    dq PyNumberMethods.nb_xor            ; NB_XOR (12)
+    dq PyNumberMethods.nb_iadd           ; NB_INPLACE_ADD (13)
+    dq PyNumberMethods.nb_iand           ; NB_INPLACE_AND (14)
+    dq PyNumberMethods.nb_ifloor_divide  ; NB_INPLACE_FLOOR_DIVIDE (15)
+    dq PyNumberMethods.nb_ilshift        ; NB_INPLACE_LSHIFT (16)
+    dq PyNumberMethods.nb_imatmul        ; NB_INPLACE_MATRIX_MULTIPLY (17)
+    dq PyNumberMethods.nb_imul           ; NB_INPLACE_MULTIPLY (18)
+    dq PyNumberMethods.nb_irem           ; NB_INPLACE_REMAINDER (19)
+    dq PyNumberMethods.nb_ior            ; NB_INPLACE_OR (20)
+    dq PyNumberMethods.nb_ipow           ; NB_INPLACE_POWER (21)
+    dq PyNumberMethods.nb_irshift        ; NB_INPLACE_RSHIFT (22)
+    dq PyNumberMethods.nb_isub           ; NB_INPLACE_SUBTRACT (23)
+    dq PyNumberMethods.nb_itrue_divide   ; NB_INPLACE_TRUE_DIVIDE (24)
+    dq PyNumberMethods.nb_ixor           ; NB_INPLACE_XOR (25)
 
 section .text
 

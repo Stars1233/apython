@@ -794,7 +794,43 @@ DEF_FUNC_LOCAL format_float_body, FFB_FRAME
     cmp qword [rax + PyStrObject.ob_size], 0
     jle .ffb_done
     cmp byte [rax + PyStrObject.data], '-'
+    je .ffb_negative
+
+    ; float_format_spec knows nothing about the sign flag, so a '+' or a
+    ; leading space has to be put on here: "%+.1f" % 1.25 was "1.2".
+    mov rcx, [r12 - FS_SIGN]
+    cmp rcx, '+'
+    je .ffb_add_sign
+    cmp rcx, ' '
     jne .ffb_done
+.ffb_add_sign:
+    mov rbx, rax                    ; the unsigned digits
+    mov rsi, [rbx + PyStrObject.ob_size]
+    lea rdi, [rsi + PyStrObject.data + 9]
+    call ap_malloc
+    mov qword [rax + PyObject.ob_refcnt], 1
+    lea rdx, [rel str_type]
+    mov [rax + PyObject.ob_type], rdx
+    mov qword [rax + PyStrObject.ob_hash], -1
+    mov rcx, [rbx + PyStrObject.ob_size]
+    inc rcx
+    mov [rax + PyStrObject.ob_size], rcx
+    mov rcx, [r12 - FS_SIGN]
+    mov [rax + PyStrObject.data], cl
+    push rax
+    lea rdi, [rax + PyStrObject.data + 1]
+    lea rsi, [rbx + PyStrObject.data]
+    mov rdx, [rbx + PyStrObject.ob_size]
+    call ap_memcpy
+    pop rax
+    mov rcx, [rax + PyStrObject.ob_size]
+    mov qword [rax + PyStrObject.data + rcx], 0
+    push rax
+    mov rdi, rbx
+    call obj_decref
+    pop rax
+
+.ffb_negative:
     mov qword [r12 - FS_SIGNCH], 1
 
 .ffb_done:

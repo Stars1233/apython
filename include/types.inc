@@ -76,6 +76,11 @@ struc PyNumberMethods
     .nb_ior:           resq 1  ; +240
     .nb_ifloor_divide: resq 1  ; +248
     .nb_itrue_divide:  resq 1  ; +256
+    ; The @ operator.  These were missing entirely, and binary_op_offsets
+    ; mapped NB_MATRIX_MULTIPLY to offset 0 -- which is nb_add -- so 3 @ 4
+    ; silently returned 7.
+    .nb_matmul:        resq 1  ; +264
+    .nb_imatmul:       resq 1  ; +272
 endstruc
 
 ; Sequence methods structure

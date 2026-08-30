@@ -497,6 +497,7 @@ END_FUNC str_repeat
 ;; args can be a single value or a tuple
 ;; ============================================================================
 extern obj_str
+extern exc_ValueError_type
 extern obj_repr
 extern tuple_type
 extern obj_decref
@@ -509,7 +510,17 @@ SM_CAP     equ 32
 SM_ISTUPLE equ 40
 SM_NARGS   equ 48
 SM_ATAG    equ 56
-SM_FRAME   equ 56
+SM_KEYVAL  equ 64        ; value picked out by a %(name)s mapping key, or 0
+SM_HASKEY  equ 72
+SM_SPECST  equ 80        ; start of the flags/width/precision text
+SM_POS     equ 88        ; input position, across calls
+SM_SPEC    equ 128       ; 40 bytes of translated format spec, [rbp-128, rbp-88)
+SM_CONV    equ 136
+SM_SPECOBJ equ 144
+SM_VALUE   equ 152
+SM_PIECE   equ 160
+SM_OWNVAL  equ 168
+SM_FRAME   equ 176
 
 DEF_FUNC str_mod, SM_FRAME
     V_UNPACK rdi, rdx           ; left  Value -> (payload, tag)
@@ -557,6 +568,7 @@ DEF_FUNC str_mod, SM_FRAME
     mov qword [rbp-SM_CAP], 8192
     xor r14d, r14d             ; r14 = output pos
     xor r15d, r15d             ; r15 = arg index
+    mov qword [rbp-SM_HASKEY], 0
 
     ; Walk format string
     mov rbx, [rbp-SM_FMT]     ; fmt string
@@ -592,6 +604,54 @@ DEF_FUNC str_mod, SM_FRAME
     inc rcx
     cmp rcx, r12
     jge .sm_done
+
+    ; %(name)s -- a mapping key.  This was never parsed, so the whole
+    ; directive was copied through and "%(a)s" % {"a": 1} returned itself.
+    mov qword [rbp-SM_HASKEY], 0
+    cmp byte [rbx + rcx], '('
+    jne .sm_mark_spec
+    inc rcx
+    mov r8, rcx                     ; start of the key
+.sm_key_scan:
+    cmp rcx, r12
+    jge .sm_key_unterminated
+    cmp byte [rbx + rcx], ')'
+    je .sm_key_end
+    inc rcx
+    jmp .sm_key_scan
+.sm_key_end:
+    ; Build the key string and look it up in the mapping.
+    push rcx
+    push r8
+    lea rdi, [rbx + r8]
+    mov rsi, rcx
+    sub rsi, r8
+    call str_new_heap
+    pop r8
+    pop rcx
+    push rcx
+    push rax                        ; the key, ours to release
+    mov rdi, [rbp-SM_ARGS]
+    mov rsi, rax
+    extern dict_get
+    call dict_get
+    mov r9, rax
+    pop rdi
+    push r9
+    call obj_decref
+    pop r9
+    pop rcx
+    test r9, r9
+    jz .sm_key_error
+    mov [rbp-SM_KEYVAL], r9
+    mov qword [rbp-SM_HASKEY], 1
+    inc rcx                         ; step past ')'
+
+.sm_mark_spec:
+    ; Remember where the flags start.  This used to sit on .sm_skip_flags
+    ; itself, which .sm_skip_one jumps back to once per flag -- so the marker
+    ; ended up *after* the flags and "%-5s" looked like it had none.
+    mov [rbp-SM_SPECST], rcx
 
 .sm_skip_flags:
     movzx eax, byte [rbx + rcx]
@@ -641,6 +701,29 @@ DEF_FUNC str_mod, SM_FRAME
     jmp .sm_skip_prec
 
 .sm_dispatch:
+    ; A directive carrying flags, width or precision was skipped outright,
+    ; so "%5s" % "x" returned "x".  Those go through the format-spec engine;
+    ; a bare %s or %d keeps the direct path below.
+    mov rax, [rbp-SM_SPECST]
+    cmp rax, rcx
+    jne .sm_use_spec
+    ; The direct path below never learned %X, %o or %b, so those went out
+    ; literally even with no flags.
+    movzx eax, byte [rbx + rcx]
+    cmp al, 'X'
+    je .sm_use_spec
+    cmp al, 'o'
+    je .sm_use_spec
+    cmp al, 'b'
+    je .sm_use_spec
+    jmp .sm_dispatch_plain
+.sm_use_spec:
+    mov [rbp-SM_POS], rcx
+    call .sm_spec_conv
+    mov rcx, [rbp-SM_POS]
+    jmp .sm_loop
+
+.sm_dispatch_plain:
     movzx eax, byte [rbx + rcx]
     inc rcx                    ; consume conversion char
 
@@ -870,6 +953,13 @@ DEF_FUNC str_mod, SM_FRAME
 .sm_get_arg:
     ; Get arg at index r15, increment r15
     ; Returns arg payload in rax, tag in rdx (borrowed ref)
+    cmp qword [rbp-SM_HASKEY], 1
+    jne .sm_arg_positional
+    mov rax, [rbp-SM_KEYVAL]
+    V_UNPACK rax, rdx
+    mov qword [rbp-SM_HASKEY], 0
+    ret
+.sm_arg_positional:
     cmp qword [rbp-SM_ISTUPLE], 1
     je .sm_arg_tuple
     ; Single value
@@ -936,6 +1026,142 @@ DEF_FUNC str_mod, SM_FRAME
     mov edx, TAG_PTR
     leave
     ret
+.sm_key_unterminated:
+    lea rdi, [rel exc_ValueError_type]
+    CSTRING rsi, "incomplete format key"
+    call raise_exception
+
+.sm_key_error:
+    extern exc_KeyError_type
+    lea rdi, [rel exc_KeyError_type]
+    CSTRING rsi, "format key not found"
+    call raise_exception
+;; Format one directive through format_apply_spec.  On entry SM_POS is the
+;; index of the conversion character and SM_SPECST the start of the flags;
+;; on exit SM_POS is just past it.  r13 (buffer), r14 (output position),
+;; r15 (argument index), rbx and r12 belong to the caller's loop, so
+;; everything here lives in frame slots.
+.sm_spec_conv:
+    mov r8, [rbp-SM_POS]
+    movzx r9d, byte [rbx + r8]      ; the conversion character
+    mov [rbp-SM_CONV], r9
+    inc r8
+    mov [rbp-SM_POS], r8
+
+    ; Alignment first: '-' means left, and % right-aligns everything else,
+    ; including strings -- unlike format(), whose default for str is left.
+    lea rdi, [rbp-SM_SPEC]
+    xor r10d, r10d
+    mov rax, [rbp-SM_SPECST]
+    xor r11d, r11d
+.sm_sc_seek_minus:
+    cmp rax, [rbp-SM_POS]
+    jge .sm_sc_seek_done
+    cmp byte [rbx + rax], '-'
+    jne .sm_sc_seek_next
+    mov r11d, 1
+.sm_sc_seek_next:
+    inc rax
+    jmp .sm_sc_seek_minus
+.sm_sc_seek_done:
+    mov byte [rdi], '>'
+    test r11d, r11d
+    jz .sm_sc_align_done
+    mov byte [rdi], '<'
+.sm_sc_align_done:
+    mov r10d, 1
+
+    ; Then the flags, width and precision verbatim, minus the '-'.
+    mov rax, [rbp-SM_SPECST]
+.sm_sc_copy:
+    mov rcx, [rbp-SM_POS]
+    dec rcx
+    cmp rax, rcx
+    jge .sm_sc_copy_done
+    movzx ecx, byte [rbx + rax]
+    cmp cl, '-'
+    je .sm_sc_copy_next
+    cmp r10, 36                 ; the spec buffer is 40 bytes and grows up
+    jge .sm_sc_copy_done
+    mov [rdi + r10], cl
+    inc r10
+.sm_sc_copy_next:
+    inc rax
+    jmp .sm_sc_copy
+.sm_sc_copy_done:
+
+    ; The conversion letter, mapped onto a spec type.
+    mov rcx, [rbp-SM_CONV]
+    cmp cl, 'i'
+    jne .sm_sc_not_i
+    mov cl, 'd'
+.sm_sc_not_i:
+    cmp cl, 'r'
+    jne .sm_sc_store_type
+    mov cl, 's'                     ; repr is applied to the value below
+.sm_sc_store_type:
+    mov [rdi + r10], cl
+    inc r10
+
+    lea rdi, [rbp-SM_SPEC]
+    mov rsi, r10
+    call str_new_heap
+    mov [rbp-SM_SPECOBJ], rax
+
+    call .sm_get_arg
+    V_PACK rax, rdx
+    mov [rbp-SM_VALUE], rax
+    mov rcx, [rbp-SM_CONV]
+    cmp cl, 'r'
+    jne .sm_sc_have_value
+    mov rdi, rax
+    call obj_repr
+    V_UNPACK rax, rdx
+    V_PACK rax, rdx
+    mov [rbp-SM_VALUE], rax
+    mov qword [rbp-SM_OWNVAL], 1
+    jmp .sm_sc_format
+.sm_sc_have_value:
+    mov qword [rbp-SM_OWNVAL], 0
+
+.sm_sc_format:
+    mov rdi, [rbp-SM_VALUE]
+    mov rsi, [rbp-SM_SPECOBJ]
+    extern format_apply_spec
+    call format_apply_spec
+    V_UNPACK rax, rdx
+    mov [rbp-SM_PIECE], rax
+
+    mov rdi, [rbp-SM_SPECOBJ]
+    call obj_decref
+    cmp qword [rbp-SM_OWNVAL], 0
+    je .sm_sc_no_own
+    mov rdi, [rbp-SM_VALUE]
+    call obj_decref
+.sm_sc_no_own:
+
+    ; Append the piece to the caller's buffer, advancing its position.
+    mov rax, [rbp-SM_PIECE]
+    mov r8, [rax + PyStrObject.ob_size]
+    lea rdi, [r14 + r8]
+    call .sm_ensure_cap
+    mov rax, [rbp-SM_PIECE]
+    mov r8, [rax + PyStrObject.ob_size]
+    lea rsi, [rax + PyStrObject.data]
+    xor ecx, ecx
+.sm_sc_append:
+    cmp rcx, r8
+    jge .sm_sc_appended
+    movzx eax, byte [rsi + rcx]
+    mov [r13 + r14], al
+    inc r14
+    inc rcx
+    jmp .sm_sc_append
+.sm_sc_appended:
+    mov rdi, [rbp-SM_PIECE]
+    call obj_decref
+    ret
+
 END_FUNC str_mod
 
 ;; ============================================================================
@@ -1429,6 +1655,8 @@ str_number_methods:
     dq 0                        ; nb_ior          +240
     dq 0                        ; nb_ifloor_divide +248
     dq 0                        ; nb_itrue_divide +256
+    dq 0 ; nb_matmul
+    dq 0 ; nb_imatmul
 
 ; String sequence methods
 align 8

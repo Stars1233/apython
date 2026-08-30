@@ -1787,6 +1787,8 @@ dict_number_methods:
     dq dict_nb_ior              ; nb_ior          +240 (dict inplace merge |=)
     dq 0                        ; nb_ifloor_divide +248
     dq 0                        ; nb_itrue_divide +256
+    dq 0 ; nb_matmul
+    dq 0 ; nb_imatmul
 
 ; Dict sequence methods (for 'in' operator)
 align 8

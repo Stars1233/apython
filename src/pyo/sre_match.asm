@@ -1347,6 +1347,8 @@ sre_match_number_methods:
     dq 0                       ; nb_ior
     dq 0                       ; nb_ifloor_divide
     dq 0                       ; nb_itrue_divide
+    dq 0 ; nb_matmul
+    dq 0 ; nb_imatmul
 
 align 8
 global sre_match_type
