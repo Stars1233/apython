@@ -90,6 +90,7 @@ test_generator_close_throw
 test_generators
 test_gen_return2
 test_gen_return
+test_getattr_descriptors
 test_immediate_operands
 test_import_errors
 test_import_from
@@ -135,6 +136,7 @@ test_phase4
 test_phase6
 test_pow
 test_print_file
+test_property_callables
 test_property
 test_raise_cause
 test_raise_from
@@ -175,6 +177,7 @@ test_str_is
 test_str_maketrans
 test_str_methods_extra
 test_str_methods_fix
+test_str_mod_subclass
 test_str_predicates
 test_super_descriptors
 test_syntax_error_location

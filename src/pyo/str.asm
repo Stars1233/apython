@@ -858,6 +858,7 @@ extern obj_str
 extern exc_ValueError_type
 extern obj_repr
 extern tuple_type
+extern dict_type
 extern obj_decref
 
 ; str_mod stack offsets
@@ -878,7 +879,8 @@ SM_SPECOBJ equ 144
 SM_VALUE   equ 152
 SM_PIECE   equ 160
 SM_OWNVAL  equ 168
-SM_FRAME   equ 176
+SM_ISMAP   equ 176       ; the right operand is a mapping: %(name)s, no arity check
+SM_FRAME   equ 184
 
 DEF_FUNC str_mod, SM_FRAME
     V_UNPACK rdi, rdx           ; left  Value -> (payload, tag)
@@ -905,13 +907,24 @@ DEF_FUNC str_mod, SM_FRAME
     ; Determine if args is a tuple
     ; rcx = right_tag (args tag) from op_binary_op caller
     mov qword [rbp-SM_ISTUPLE], 0  ; is_tuple = false
+    mov qword [rbp-SM_ISMAP], 0
     mov qword [rbp-SM_NARGS], 1   ; nargs = 1 (single value)
     cmp ecx, TAG_PTR
     jne .sm_not_tuple           ; non-heap → single value (SmallInt/Float/Bool/None)
+    ; A mapping is addressed by key, so it has no argument count to check.
+    push rsi
     mov rax, [rsi + PyObject.ob_type]
-    lea rcx, [rel tuple_type]
-    cmp rax, rcx
-    jne .sm_not_tuple
+    REQUIRE_DICT_TYPE rax, rcx, .sm_not_map
+    mov qword [rbp-SM_ISMAP], 1
+.sm_not_map:
+    pop rsi
+    mov rcx, [rbp-SM_ATAG]
+    ; A tuple SUBCLASS is a tuple here.  The exact-type test this replaces took
+    ; one for a single value, so `'(x=%r, y=%r)' % self` -- which is what
+    ; collections.namedtuple's __repr__ is -- read one argument for two
+    ; conversions and walked off the end of the list.
+    mov rax, [rsi + PyObject.ob_type]
+    REQUIRE_TUPLE_TYPE rax, rcx, .sm_not_tuple
     mov qword [rbp-SM_ISTUPLE], 1  ; is_tuple = true
     mov rax, [rsi + PyTupleObject.ob_size]
     mov [rbp-SM_NARGS], rax    ; nargs = tuple size
@@ -1353,10 +1366,12 @@ DEF_FUNC str_mod, SM_FRAME
     inc r15
     ret
 .sm_arg_none:
-    xor eax, eax              ; payload = 0
-    RET_NONE         ; tag = TAG_NONE
-    inc r15
-    ret
+    ; Past the end of the argument list.  Substituting None here quietly
+    ; formatted a missing argument as "None"; the format string is wrong and
+    ; Python says so.
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "not enough arguments for format string"
+    call raise_exception
 
 ;; .sm_ensure_cap — ensure buffer can hold rdi bytes total
 ;; rdi = required capacity. Preserves r14, r15, rbx, r12. Updates r13.
@@ -1380,6 +1395,16 @@ DEF_FUNC str_mod, SM_FRAME
     ret
 
 .sm_done:
+    ; Every argument must have been consumed.  A single non-tuple value counts
+    ; as one; a mapping is addressed by key and has no count to check.
+    cmp qword [rbp-SM_HASKEY], 1
+    je .sm_arity_ok
+    cmp qword [rbp-SM_ISMAP], 1
+    je .sm_arity_ok
+    cmp r15, [rbp-SM_NARGS]
+    jb .sm_too_many
+.sm_arity_ok:
+
     ; Null-terminate and create string
     mov byte [r13 + r14], 0
 
@@ -1401,6 +1426,11 @@ DEF_FUNC str_mod, SM_FRAME
     mov edx, TAG_PTR
     leave
     ret
+.sm_too_many:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "not all arguments converted during string formatting"
+    call raise_exception
+
 .sm_key_unterminated:
     lea rdi, [rel exc_ValueError_type]
     CSTRING rsi, "incomplete format key"

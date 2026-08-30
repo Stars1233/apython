@@ -1343,3 +1343,249 @@ DEF_FUNC raise_name_not_defined, RNND_FRAME
     lea rsi, [rbp - RNND_BUF]
     call raise_exception
 END_FUNC raise_name_not_defined
+
+;; ============================================================================
+;; obj_getattr_opt(Value obj, PyStrObject *name) -> rax = Value, or 0
+;;
+;; One attribute lookup, with the descriptor protocol run over the result --
+;; the same answer `obj.name` gives.  Returns 0 when there is no such
+;; attribute; a getter that raises unwinds out of here the way it unwinds out
+;; of any other call, so 0 never means "raised".
+;;
+;; getattr() and hasattr() each used to do their own partial version of this,
+;; stopping at the raw type-dict entry.  That returned the property object
+;; itself rather than calling it, so `p.v` and `getattr(p, "v")` disagreed --
+;; and collections.namedtuple, which reaches its fields through descriptors
+;; built at runtime, was on the wrong side of the difference.
+;;
+;; op_load_attr still has its own copy: it needs the unbound attribute and the
+;; from-type flag to decide the two-slot push its method form uses, which a
+;; function returning one value cannot give it.  tests/test_getattr_descriptors.py
+;; pins the two to agree.
+;; ============================================================================
+GA_OBJ      equ 8
+GA_NAME     equ 16
+GA_ATTR     equ 24
+GA_ATTRTAG  equ 32
+GA_FROMTYPE equ 40
+GA_CLASS    equ 48
+GA_TYPE     equ 56
+GA_SAVE     equ 64
+GA_SAVETAG  equ 72
+GA_FRAME    equ 88          ; + 1 push = 96
+DEF_FUNC obj_getattr_opt, GA_FRAME
+    push rbx
+    mov [rbp - GA_OBJ], rdi
+    mov [rbp - GA_NAME], rsi
+    mov qword [rbp - GA_FROMTYPE], 0
+
+    ; The type to look in, and whether the object is a real pointer.
+    V_TEST_PTR rdi, rax
+    ja .ga_immediate
+    test rdi, rdi
+    jz .ga_none
+    mov rax, [rdi + PyObject.ob_type]
+    mov [rbp - GA_TYPE], rax
+
+    ; tp_getattr resolves the whole thing when a type has one.
+    mov rcx, [rax + PyTypeObject.tp_getattr]
+    test rcx, rcx
+    jz .ga_type_dict
+    mov rdi, [rbp - GA_OBJ]
+    mov rsi, [rbp - GA_NAME]
+    call rcx
+    V_UNPACK rax, rdx
+    test edx, edx
+    jz .ga_type_dict
+    mov [rbp - GA_ATTR], rax
+    mov [rbp - GA_ATTRTAG], rdx
+    jmp .ga_have_attr
+
+.ga_immediate:
+    ; An int or a float immediate: its type is fixed by the tag.
+    lea rax, [rel float_type]
+    V_IS_INT rdi, rcx
+    jb .ga_have_type
+    lea rax, [rel int_type]
+.ga_have_type:
+    mov [rbp - GA_TYPE], rax
+    jmp .ga_type_dict
+
+.ga_none:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+
+.ga_type_dict:
+    mov rax, [rbp - GA_TYPE]
+    mov rax, [rax + PyTypeObject.tp_dict]
+    test rax, rax
+    jz .ga_generic
+    mov rdi, rax
+    mov rsi, [rbp - GA_NAME]
+    call dict_get
+    V_UNPACK rax, rdx
+    test edx, edx
+    jz .ga_generic
+    mov [rbp - GA_ATTR], rax
+    mov [rbp - GA_ATTRTAG], rdx
+    INCREF_VAL rax, rdx
+    mov qword [rbp - GA_FROMTYPE], 1
+    jmp .ga_have_attr
+
+.ga_generic:
+    ; The attributes every object has -- __class__, __dict__ -- which no
+    ; individual tp_getattr provides.
+    mov rdi, [rbp - GA_OBJ]
+    mov rsi, [rbp - GA_NAME]
+    call obj_generic_attr
+    test rax, rax
+    jz .ga_missing
+    mov [rbp - GA_ATTR], rax
+    mov qword [rbp - GA_ATTRTAG], TAG_PTR
+
+.ga_have_attr:
+    ; --- the descriptor protocol, over whatever the lookup produced ---
+    cmp qword [rbp - GA_ATTRTAG], TAG_PTR
+    jne .ga_plain
+    mov rax, [rbp - GA_ATTR]
+    mov rcx, [rax + PyObject.ob_type]
+
+    lea rdx, [rel staticmethod_type]
+    cmp rcx, rdx
+    je .ga_static
+
+    lea rdx, [rel classmethod_type]
+    cmp rcx, rdx
+    je .ga_class
+
+    lea rdx, [rel property_type]
+    cmp rcx, rdx
+    je .ga_property
+
+    ; A user-defined descriptor: a heaptype whose own type defines __get__.
+    test dword [rcx + PyTypeObject.tp_flags], TYPE_FLAG_HEAPTYPE
+    jz .ga_plain
+    mov rdi, rcx
+    lea rsi, [rel dunder_get]
+    call dunder_lookup
+    V_UNPACK rax, rdx
+    test edx, edx
+    jz .ga_plain
+    mov rdi, [rbp - GA_ATTR]
+    mov rsi, [rbp - GA_OBJ]
+    mov rdx, [rbp - GA_TYPE]
+    lea rcx, [rel dunder_get]
+    mov r8d, TAG_PTR
+    call dunder_call_3
+    mov [rbp - GA_SAVE], rax
+    mov rdi, [rbp - GA_ATTR]
+    call obj_decref
+    mov rax, [rbp - GA_SAVE]
+    pop rbx
+    leave
+    ret
+
+.ga_static:
+    mov rax, [rbp - GA_ATTR]
+    mov rbx, [rax + PyStaticMethodObject.sm_callable]
+    INCREF rbx
+    mov rdi, rax
+    call obj_decref
+    mov rax, rbx
+    pop rbx
+    leave
+    ret
+
+.ga_class:
+    ; Bound to the class: to the object itself when that is already a type,
+    ; and to its type otherwise.
+    mov rax, [rbp - GA_ATTR]
+    mov rbx, [rax + PyClassMethodObject.cm_callable]
+    mov rdi, [rbp - GA_OBJ]
+    mov rcx, [rdi + PyObject.ob_type]
+    lea rdx, [rel type_type]
+    cmp rcx, rdx
+    je .ga_class_self
+    lea rdx, [rel user_type_metatype]
+    cmp rcx, rdx
+    je .ga_class_self
+    mov rdi, [rbp - GA_TYPE]
+.ga_class_self:
+    mov [rbp - GA_CLASS], rdi
+    mov rdi, rbx
+    mov rsi, [rbp - GA_CLASS]
+    call method_new
+    mov [rbp - GA_SAVE], rax
+    mov rdi, [rbp - GA_ATTR]
+    call obj_decref
+    mov rax, [rbp - GA_SAVE]
+    pop rbx
+    leave
+    ret
+
+.ga_property:
+    mov rdi, [rbp - GA_ATTR]
+    mov rsi, [rbp - GA_OBJ]
+    call property_descr_get
+    ; property_descr_get hands back the (payload, tag) pair, already unpacked.
+    ; Unpacking it again read the payload as a Value: a small int came back as
+    ; a pointer to its own numeric value, and the first thing to touch it died.
+    mov [rbp - GA_SAVE], rax
+    mov [rbp - GA_SAVETAG], rdx
+    mov rdi, [rbp - GA_ATTR]
+    call obj_decref
+    mov rax, [rbp - GA_SAVE]
+    mov rdx, [rbp - GA_SAVETAG]
+    V_PACK rax, rdx
+    pop rbx
+    leave
+    ret
+
+.ga_plain:
+    ; A function found on the type binds to the instance; one found on the
+    ; instance does not.
+    cmp qword [rbp - GA_FROMTYPE], 0
+    je .ga_done
+    cmp qword [rbp - GA_ATTRTAG], TAG_PTR
+    jne .ga_done
+    mov rdi, [rbp - GA_OBJ]
+    V_TEST_PTR rdi, rax
+    ja .ga_done                         ; an immediate cannot be a self
+    mov rax, [rbp - GA_ATTR]
+    mov rcx, [rax + PyObject.ob_type]
+    cmp qword [rcx + PyTypeObject.tp_call], 0
+    je .ga_done
+    ; A type is callable but is not a method of its instance.
+    lea rdx, [rel type_type]
+    cmp rcx, rdx
+    je .ga_done
+    lea rdx, [rel user_type_metatype]
+    cmp rcx, rdx
+    je .ga_done
+    mov rdi, rax
+    mov rsi, [rbp - GA_OBJ]
+    call method_new
+    mov [rbp - GA_SAVE], rax
+    mov rdi, [rbp - GA_ATTR]
+    call obj_decref
+    mov rax, [rbp - GA_SAVE]
+    pop rbx
+    leave
+    ret
+
+.ga_done:
+    mov rax, [rbp - GA_ATTR]
+    mov rdx, [rbp - GA_ATTRTAG]
+    V_PACK rax, rdx
+    pop rbx
+    leave
+    ret
+
+.ga_missing:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+END_FUNC obj_getattr_opt

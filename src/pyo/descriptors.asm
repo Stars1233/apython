@@ -28,6 +28,7 @@ extern raise_exception
 extern exc_TypeError_type
 extern exc_AttributeError_type
 extern ap_strcmp
+extern obj_call_n
 extern method_new
 extern builtin_func_new
 
@@ -575,20 +576,17 @@ DEF_FUNC property_descr_get
     test rax, rax
     jz .pdg_no_getter
 
-    ; Call fget(obj): fget.tp_call(fget, &obj, 1)
+    ; fget(obj), through the general call path.  Reaching for tp_call directly
+    ; missed a getter that is an instance of a class defining __call__ -- an
+    ; operator.itemgetter, say, which is exactly what collections.namedtuple
+    ; builds its fields from -- and reported it as an unreadable attribute.
+    SPUSH_PTR r12               ; args[0] = obj
     mov rdi, rax
-    mov rax, [rdi + PyObject.ob_type]
-    mov rax, [rax + PyTypeObject.tp_call]
-    test rax, rax
-    jz .pdg_no_getter
-
-    ; Build fat args on stack
-    SPUSH_PTR r12              ; args[0] = obj
-    mov rsi, rsp                ; args ptr
-    mov edx, 1                  ; nargs = 1
-    call rax
-    V_UNPACK rax, rdx           ; tp_call returns a Value
-    add rsp, 16                 ; pop fat args
+    mov rsi, rsp
+    mov edx, 1
+    call obj_call_n
+    add rsp, 16
+    V_UNPACK rax, rdx           ; the pair the callers of this expect
 
     pop r12
     pop rbx
