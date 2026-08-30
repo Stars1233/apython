@@ -40,6 +40,20 @@ one-line fix.
   was registered against a subclass of ABC rather than against ABC itself.
   Direct registration and real inheritance both work.
 
+- **Weak references keep no per-object slot.**  The links live in a side
+  table keyed by the referent's address rather than in the object, so
+  `tp_weaklistoffset` does not exist and `__weakref__` is not an attribute.
+  Everything observable through `_weakref` works; a C extension expecting the
+  slot would not.
+
+- **`object.__lt__`, `__le__`, `__gt__` and `__ge__` are missing.**  They
+  exist in CPython and always return NotImplemented.  Adding them here would
+  shadow a builtin base's own comparison, because a heaptype's slot is
+  installed from whatever the MRO's dunder lookup finds and there are no slot
+  wrappers to tell object's default apart at that point.  `__eq__`, `__ne__`
+  and `__hash__` are present and are skipped explicitly when slots are
+  installed.
+
 - **`_thread` is a single-threaded stand-in.**  `lib/_thread.py` gives
   `get_ident` a constant, makes locks uncontended, and raises from
   `start_new_thread`.  Everything in the stdlib that only takes a lock works;

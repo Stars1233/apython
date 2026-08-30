@@ -67,6 +67,7 @@ extern time_module_create
 extern asyncio_module_create
 extern sre_module_create
 extern abc_module_create
+extern weakref_module_create
 
 ; --- import_module frame layout ---
 IF_NAME     equ 8            ; import name str
@@ -267,6 +268,21 @@ DEF_FUNC import_init
     pop rdi                     ; DECREF key
     call obj_decref
     mov rdi, rbx                ; DECREF module (dict_set INCREF'd)
+    call obj_decref
+
+    ; Register _weakref module in sys.modules
+    call weakref_module_create
+    mov rbx, rax
+    lea rdi, [rel im_weakref_name]
+    call str_from_cstr_heap
+    push rax
+    mov rdi, [rel sys_modules_dict]
+    mov rsi, rax
+    mov rdx, rbx
+    call dict_set
+    pop rdi
+    call obj_decref
+    mov rdi, rbx
     call obj_decref
 
     ; PYTHONPATH, colon-separated, appended in order.
@@ -1645,6 +1661,7 @@ im_time_name:       db "time", 0
 im_asyncio_name:    db "asyncio", 0
 im_sre_name:        db "_sre", 0
 im_abc_name:        db "_abc", 0
+im_weakref_name:    db "_weakref", 0
 im_builtins:        db "builtins", 0
 im_dunder_name:     db "__name__", 0
 im_dunder_file:     db "__file__", 0

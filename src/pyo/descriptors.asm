@@ -785,7 +785,39 @@ DEF_FUNC_BARE mappingproxy_repr
     jmp dict_repr
 END_FUNC mappingproxy_repr
 
-DEF_FUNC mappingproxy_getattr
+MPG_MAP   equ 8
+MPG_NAME  equ 16
+MPG_PTR   equ 24
+MPG_FRAME equ 32
+DEF_FUNC mappingproxy_getattr, MPG_FRAME
+    ; A proxy is read-only, so the methods that would write through it are
+    ; refused before the wrapped dict is consulted.  Without this, giving dict
+    ; a __setitem__ method made `C.__dict__.__setitem__(k, v)` quietly mutate
+    ; the class.
+    mov [rbp - MPG_MAP], rdi
+    mov [rbp - MPG_NAME], rsi
+    lea rax, [rel mpg_readonly_names]
+    mov [rbp - MPG_PTR], rax
+.mpg_deny_loop:
+    mov rax, [rbp - MPG_PTR]
+    mov rsi, [rax]
+    test rsi, rsi
+    jz .mpg_allowed
+    add qword [rbp - MPG_PTR], 8
+    mov rdi, [rbp - MPG_NAME]
+    add rdi, PyStrObject.data
+    extern ap_strcmp
+    call ap_strcmp
+    test eax, eax
+    jnz .mpg_deny_loop
+    xor eax, eax
+    xor edx, edx
+    leave
+    ret
+
+.mpg_allowed:
+    mov rdi, [rbp - MPG_MAP]
+    mov rsi, [rbp - MPG_NAME]
     ; keys/values/items/get and the rest live on the wrapped dict
     mov rdi, [rdi + PyMappingProxyObject.mp_mapping]
     extern dict_type
@@ -1684,3 +1716,16 @@ mappingproxy_map_methods:
 _prop_setter_cache: dq 0
 _prop_getter_cache: dq 0
 _prop_deleter_cache: dq 0
+
+section .rodata
+mpg_n_setitem: db "__setitem__", 0
+mpg_n_delitem: db "__delitem__", 0
+mpg_n_clear:   db "clear", 0
+mpg_n_pop:     db "pop", 0
+mpg_n_popitem: db "popitem", 0
+mpg_n_setdefault: db "setdefault", 0
+mpg_n_update:  db "update", 0
+align 8
+mpg_readonly_names:
+    dq mpg_n_setitem, mpg_n_delitem, mpg_n_clear, mpg_n_pop
+    dq mpg_n_popitem, mpg_n_setdefault, mpg_n_update, 0

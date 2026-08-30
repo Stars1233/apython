@@ -885,12 +885,32 @@ section .text
     pop rcx
 
     test edx, edx
-    jnz .cmp_do_call_result     ; got result, proceed
+    jnz .cmp_have_dunder_result ; got result, proceed
 
     ; Dunder not found. If NE, try __eq__ + negate (auto-derivation)
     cmp ecx, PY_NE
     jne .cmp_identity           ; not NE → identity fallback
 
+    ; Every class inherits object's comparison dunders now, and object's
+    ; answer for two different objects is NotImplemented.  That is not a
+    ; result: it means "no opinion", so the identity fallback below is what
+    ; must run, exactly as when the dunder was absent.
+.cmp_have_dunder_result:
+    cmp edx, TAG_PTR
+    jne .cmp_do_call_result
+    lea r8, [rel notimpl_singleton]
+    cmp rax, r8
+    jne .cmp_do_call_result
+    push rcx
+    mov rdi, rax
+    extern obj_decref
+    call obj_decref
+    pop rcx
+    cmp ecx, PY_NE
+    je .cmp_ne_from_eq
+    jmp .cmp_identity
+
+.cmp_ne_from_eq:
     ; Try __eq__ on left's heaptype
     mov rdi, [rsp + BO_LEFT]
     mov rsi, [rsp + BO_RIGHT]
@@ -903,6 +923,18 @@ section .text
     pop rcx
     test edx, edx
     jz .cmp_identity            ; __eq__ also not found → identity
+    cmp edx, TAG_PTR
+    jne .cmp_ne_negate
+    extern notimpl_singleton
+    lea r8, [rel notimpl_singleton]
+    cmp rax, r8
+    jne .cmp_ne_negate
+    push rcx
+    mov rdi, rax
+    call obj_decref
+    pop rcx
+    jmp .cmp_identity
+.cmp_ne_negate:
 
     ; Negate __eq__ result: if True → False, if False → True
     ; Check for TAG_PTR bool (bool_true/bool_false singletons)

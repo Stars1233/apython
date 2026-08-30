@@ -83,6 +83,19 @@ DEF_FUNC_BARE obj_dealloc
     push rbx
     mov rbx, rdi
 
+    ; Weak references to this object have to be emptied, and their callbacks
+    ; run, before it is freed.  The links live in a side table rather than in
+    ; the object, so the check is one compare against a counter that stays
+    ; zero in a program that makes no weak references.
+    extern weakref_live
+    cmp qword [rel weakref_live], 0
+    je .no_weakrefs
+    extern weakref_clear_for
+    mov rdi, rbx
+    call weakref_clear_for
+    mov rdi, rbx
+.no_weakrefs:
+
     ; Get type's tp_dealloc
     mov rax, [rbx + PyObject.ob_type]
     test rax, rax

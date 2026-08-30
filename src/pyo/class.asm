@@ -685,6 +685,18 @@ DEF_FUNC type_setattr
     pop rcx
     call dict_set
 
+    ; Assigning a dunder after the class exists has to take effect, the way
+    ; `C.__eq__ = f` does in CPython: the slot is installed at class creation
+    ; from what the body defined, and nothing re-ran this.  Only a heaptype
+    ; has slots to install; a static type's are in its table.
+    mov rax, [rbx + PyTypeObject.tp_flags]
+    test rax, TYPE_FLAG_HEAPTYPE
+    jz .ts_done
+    mov rdi, rbx
+    extern type_install_slots
+    call type_install_slots
+.ts_done:
+
     pop rbx
     leave
     ret

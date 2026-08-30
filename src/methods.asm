@@ -5,6 +5,7 @@
 %include "object.inc"
 %include "types.inc"
 %include "builtins.inc"
+%include "opcodes.inc"
 
 
 ; External functions
@@ -7379,6 +7380,263 @@ END_FUNC tuple_method_count
 ;; ############################################################################
 
 
+
+;; ============================================================================
+;; Slot-backed dunder methods
+;;
+;; The operators reach the type slots directly, but the methods themselves
+;; were absent from most builtin type dicts, so `dict.__setitem__` and
+;; `ref.__hash__` -- both of which collections and weakref bind at class
+;; definition time -- raised AttributeError.  One implementation per slot,
+;; dispatching through whatever the receiver's type provides.
+;; ============================================================================
+
+
+
+;; object.__eq__ / __ne__ / __hash__ and the ordering four.
+;;
+;; These must not go back through the comparison protocol: a heaptype's
+;; tp_richcompare looks __eq__ up in the MRO, finds object's, and if that
+;; re-entered the protocol the two would call each other forever.  CPython's
+;; are self-contained for the same reason -- identity for __eq__, the type's
+;; own EQ slot for __ne__, the address for __hash__.
+
+DEF_FUNC object_method_eq
+    cmp rsi, 2
+    jne .ome_error
+    mov rax, [rdi]
+    cmp rax, [rdi + 8]
+    je .ome_true
+    lea rax, [rel notimpl_singleton]
+    inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
+    leave
+    V_PACK rax, rdx
+    ret
+.ome_true:
+    lea rax, [rel bool_true]
+    inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
+    leave
+    V_PACK rax, rdx
+    ret
+.ome_error:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "__eq__() takes exactly one argument"
+    call raise_exception
+END_FUNC object_method_eq
+
+;; __ne__ delegates to the type's own EQ comparison and inverts it, so a class
+;; that defines only __eq__ still gets a correct !=.
+DEF_FUNC object_method_ne
+    cmp rsi, 2
+    jne .omn_error
+    push rbx
+    mov rbx, [rdi + 8]          ; other
+    mov rdi, [rdi]              ; self
+    V_TEST_PTR rdi, rax
+    ja .omn_identity
+    test rdi, rdi
+    jz .omn_identity
+    mov rax, [rdi + PyObject.ob_type]
+    mov rax, [rax + PyTypeObject.tp_richcompare]
+    test rax, rax
+    jz .omn_identity
+    mov rsi, rbx
+    mov edx, CMP_EQ
+    call rax
+    V_UNPACK rax, rdx
+    test edx, edx
+    jz .omn_notimpl
+    lea rcx, [rel notimpl_singleton]
+    cmp rax, rcx
+    je .omn_release_notimpl
+    push rax
+    push rdx
+    mov rdi, rax
+    V_PACK rdi, rdx
+    extern obj_is_true
+    call obj_is_true
+    mov ebx, eax
+    pop rdx
+    pop rdi
+    DECREF_VAL rdi, rdx
+    test ebx, ebx
+    jz .omn_true
+    lea rax, [rel bool_false]
+    jmp .omn_out
+.omn_true:
+    lea rax, [rel bool_true]
+    jmp .omn_out
+.omn_release_notimpl:
+    mov rdi, rax
+    call obj_decref
+.omn_notimpl:
+    lea rax, [rel notimpl_singleton]
+    jmp .omn_out
+.omn_identity:
+    cmp rdi, rbx
+    je .omn_same
+    lea rax, [rel bool_true]
+    jmp .omn_out
+.omn_same:
+    lea rax, [rel bool_false]
+.omn_out:
+    inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
+    pop rbx
+    leave
+    V_PACK rax, rdx
+    ret
+.omn_error:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "__ne__() takes exactly one argument"
+    call raise_exception
+END_FUNC object_method_ne
+
+DEF_FUNC object_method_notimpl
+    lea rax, [rel notimpl_singleton]
+    inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
+    leave
+    V_PACK rax, rdx
+    ret
+END_FUNC object_method_notimpl
+
+;; The address, which is what obj_hash falls back to when a type has no
+;; tp_hash -- reached directly so that a heaptype's slot cannot bounce back.
+DEF_FUNC object_method_hash
+    cmp rsi, 1
+    jl .omh_error
+    mov rax, [rdi]
+    add rax, [rel v_int_bias]
+    leave
+    ret
+.omh_error:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "__hash__() takes no arguments"
+    call raise_exception
+END_FUNC object_method_hash
+
+
+;; generic_method_getitem(args, nargs): args[0]=self, args[1]=key
+DEF_FUNC generic_method_getitem
+    cmp rsi, 2
+    jne .gmg_error
+    mov rax, [rdi]
+    V_TEST_PTR rax, rcx
+    ja .gmg_error
+    test rax, rax
+    jz .gmg_error
+    mov rsi, [rdi + 8]
+    mov rdi, rax
+    mov rcx, [rax + PyObject.ob_type]
+    mov rdx, [rcx + PyTypeObject.tp_as_mapping]
+    test rdx, rdx
+    jz .gmg_seq
+    mov rdx, [rdx + PyMappingMethods.mp_subscript]
+    test rdx, rdx
+    jz .gmg_seq
+    call rdx
+    leave
+    ret
+.gmg_seq:
+    mov rdx, [rcx + PyTypeObject.tp_as_sequence]
+    test rdx, rdx
+    jz .gmg_error
+    mov rdx, [rdx + PySequenceMethods.sq_item]
+    test rdx, rdx
+    jz .gmg_error
+    V_TO_I64 rsi
+    call rdx
+    leave
+    ret
+.gmg_error:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "object is not subscriptable"
+    call raise_exception
+END_FUNC generic_method_getitem
+
+;; generic_method_setitem(args, nargs): args[0]=self, args[1]=key, args[2]=value
+DEF_FUNC generic_method_setitem
+    cmp rsi, 3
+    jne .gms_error
+    mov rax, [rdi]
+    V_TEST_PTR rax, rcx
+    ja .gms_error
+    test rax, rax
+    jz .gms_error
+    mov rcx, [rax + PyObject.ob_type]
+    mov rcx, [rcx + PyTypeObject.tp_as_mapping]
+    test rcx, rcx
+    jz .gms_error
+    mov rcx, [rcx + PyMappingMethods.mp_ass_subscript]
+    test rcx, rcx
+    jz .gms_error
+    mov rsi, [rdi + 8]
+    mov rdx, [rdi + 16]
+    mov rdi, rax
+    call rcx
+    lea rax, [rel none_singleton]
+    inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
+    leave
+    V_PACK rax, rdx
+    ret
+.gms_error:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "object does not support item assignment"
+    call raise_exception
+END_FUNC generic_method_setitem
+
+;; generic_method_delitem(args, nargs): args[0]=self, args[1]=key
+DEF_FUNC generic_method_delitem
+    cmp rsi, 2
+    jne .gmd_error
+    mov rax, [rdi]
+    V_TEST_PTR rax, rcx
+    ja .gmd_error
+    test rax, rax
+    jz .gmd_error
+    mov rcx, [rax + PyObject.ob_type]
+    mov rcx, [rcx + PyTypeObject.tp_as_mapping]
+    test rcx, rcx
+    jz .gmd_error
+    mov rcx, [rcx + PyMappingMethods.mp_ass_subscript]
+    test rcx, rcx
+    jz .gmd_error
+    mov rsi, [rdi + 8]
+    xor edx, edx                ; a NULL value means delete
+    mov rdi, rax
+    call rcx
+    lea rax, [rel none_singleton]
+    inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
+    leave
+    V_PACK rax, rdx
+    ret
+.gmd_error:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "object does not support item deletion"
+    call raise_exception
+END_FUNC generic_method_delitem
+
+;; generic_method_hash(args, nargs): args[0]=self
+DEF_FUNC generic_method_hash
+    cmp rsi, 1
+    jne .gmh_error
+    mov rdi, [rdi]
+    extern obj_hash
+    call obj_hash
+    add rax, [rel v_int_bias]
+    leave
+    ret
+.gmh_error:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "__hash__() takes no arguments"
+    call raise_exception
+END_FUNC generic_method_hash
+
 ;; ============================================================================
 ;; generic_method_contains(args, nargs) -> bool
 ;; args[0]=self, args[1]=item
@@ -10867,6 +11125,16 @@ DEF_FUNC methods_init
     call add_method_to_dict
 
     mov rdi, rbx
+    lea rsi, [rel mn___setitem__]
+    lea rdx, [rel generic_method_setitem]
+    call add_method_to_dict
+
+    mov rdi, rbx
+    lea rsi, [rel mn___delitem__]
+    lea rdx, [rel generic_method_delitem]
+    call add_method_to_dict
+
+    mov rdi, rbx
     call add_class_getitem
 
     ; Store in dict_type.tp_dict
@@ -11048,6 +11316,21 @@ DEF_FUNC methods_init
     mov rdi, rbx
     call obj_incref
 
+    ;; --- weakref methods ---
+    ; weakref.py binds ref.__hash__ and ref.__eq__ into its subclasses at
+    ; class definition time, so those have to exist as methods.
+    call dict_new
+    mov rbx, rax
+    mov rdi, rbx
+    lea rsi, [rel mn___hash__]
+    lea rdx, [rel generic_method_hash]
+    call add_method_to_dict
+    mov rdi, rbx
+    call add_class_getitem
+    extern weakref_type
+    lea rax, [rel weakref_type]
+    mov [rax + PyTypeObject.tp_dict], rbx
+
     ;; --- object_type methods (just __new__) ---
     call dict_new
     mov rbx, rax
@@ -11103,6 +11386,26 @@ DEF_FUNC methods_init
     mov rdi, rbx
     lea rsi, [rel mn___repr__]
     lea rdx, [rel object_method_repr]
+    call add_method_to_dict
+
+    ; The comparisons, which every class inherits and the stdlib binds by
+    ; name: `__ne__ = MutableMapping.__ne__` reaches object's.
+    mov rdi, rbx
+    lea rsi, [rel mn___eq__]
+    lea rdx, [rel object_method_eq]
+    call add_method_to_dict
+    mov rdi, rbx
+    lea rsi, [rel mn___ne__]
+    lea rdx, [rel object_method_ne]
+    call add_method_to_dict
+    ; Not the ordering four: a builtin subclass looks __lt__ up in its MRO
+    ; and would find object's NotImplemented before reaching the base type's
+    ; own comparison, so `sorted([L([2]), L([1])])` on a list subclass would
+    ; stop working.  CPython reaches those through slot wrappers this does
+    ; not have yet.
+    mov rdi, rbx
+    lea rsi, [rel mn___hash__]
+    lea rdx, [rel object_method_hash]
     call add_method_to_dict
 
     ; Store in object_type.tp_dict
@@ -11475,6 +11778,13 @@ mn___setitem__: db "__setitem__", 0
 mn___delitem__: db "__delitem__", 0
 mn___contains__: db "__contains__", 0
 mn___len__:     db "__len__", 0
+mn___eq__: db "__eq__", 0
+mn___ne__: db "__ne__", 0
+mn___lt__: db "__lt__", 0
+mn___le__: db "__le__", 0
+mn___gt__: db "__gt__", 0
+mn___ge__: db "__ge__", 0
+mn___hash__:    db "__hash__", 0
 mn___add__:     db "__add__", 0
 mn___mul__:     db "__mul__", 0
 mn___rmul__:    db "__rmul__", 0

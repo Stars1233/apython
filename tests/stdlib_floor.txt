@@ -5,6 +5,7 @@ crash_ceiling 0
 ok abc
 ok asyncio
 ok bisect
+ok collections
 ok _collections_abc
 ok colorsys
 ok _compat_pickle
@@ -20,6 +21,7 @@ ok nturl2path
 ok opcode
 ok operator
 ok __phello__
+ok _py_abc
 ok pydoc_data
 ok quopri
 ok reprlib
@@ -29,6 +31,8 @@ ok token
 ok turtledemo
 ok types
 ok urllib
+ok weakref
+ok _weakrefset
 ok wsgiref
 ok xml
 ok xmlrpc

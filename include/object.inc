@@ -108,6 +108,17 @@ struc PyListObject
     .ob_item:   resq 1    ; +32: ptr to payload (u64[]) array
 endstruc
 
+
+; Weak reference (src/pyo/weakrefmod.asm).  The referent is borrowed and is
+; zeroed when it dies; the side table in that file owns the reference objects.
+struc PyWeakRefObject
+    .ob_refcnt:   resq 1  ; +0
+    .ob_type:     resq 1  ; +8
+    .wr_object:   resq 1  ; +16: the referent, 0 once it is gone
+    .wr_callback: resq 1  ; +24: owned callable, or 0
+    .wr_hash:     resq 1  ; +32: cached hash, -1 until computed
+endstruc
+
 ; Tuple object
 struc PyTupleObject
     .ob_refcnt: resq 1    ; +0
