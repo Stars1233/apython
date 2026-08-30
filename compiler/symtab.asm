@@ -34,6 +34,7 @@ extern buf_init
 extern buf_push_ptr
 extern buf_reserve
 extern comp_error
+extern comp_intern_cstr
 
 extern dict_get
 extern dict_new
@@ -335,12 +336,26 @@ DEF_FUNC sym_visit, SV_FRAME
     je .funcdef
     cmp eax, AST_LAMBDA
     je .lambda
+    cmp eax, AST_CLASSDEF
+    je .classdef
+    cmp eax, AST_LISTCOMP
+    je .comprehension
+    cmp eax, AST_SETCOMP
+    je .comprehension
+    cmp eax, AST_DICTCOMP
+    je .comprehension
+    cmp eax, AST_GENEXP
+    je .comprehension
     cmp eax, AST_ALIAS
     je .alias
     cmp eax, AST_ARG
     je .arg
     cmp eax, AST_COMPARE
     je .compare
+    cmp eax, AST_YIELD
+    je .mark_generator
+    cmp eax, AST_YIELDFROM
+    je .mark_generator
     jmp .children
 
 ;; A bare name: a use, or a binding, depending on the context the parser set.
@@ -458,6 +473,66 @@ DEF_FUNC sym_visit, SV_FRAME
     call sym_enter_function
     jmp .ret
 
+.comprehension:
+    ; A comprehension compiles to a nested function taking the outermost
+    ; iterable as its one argument, so the iterable itself is evaluated in the
+    ; ENCLOSING scope while everything else belongs to the new one.  That is
+    ; also what keeps the loop variable from leaking, without any special rule.
+    mov rdi, rbx
+    mov rsi, r13
+    call ast_at
+    mov rsi, rax
+    xor edx, edx
+    mov rdi, rbx
+    call ast_child                      ; the first clause
+    mov rdi, rbx
+    mov rsi, rax
+    call ast_at
+    mov edx, [rax + AstNode.b]          ; its iterable
+    mov rdi, rbx
+    mov rsi, r12
+    call sym_visit
+    test eax, eax
+    jz .fail
+    mov rdi, rbx
+    mov rsi, r12
+    mov rdx, r13
+    call sym_enter_comp
+    jmp .ret
+
+.classdef:
+    ; The class name binds in the enclosing block; the body gets a scope of its
+    ; own, which is NOT function-like -- so nothing in it is a fast local, and
+    ; its names are invisible to the methods defined inside it.
+    mov rax, [rbp - SV_NPTR]
+    mov esi, [rax + AstNode.a]
+    mov rdi, rbx
+    call ast_obj_at
+    mov rdx, rax
+    mov rdi, rbx
+    mov rsi, r12
+    mov ecx, DEF_LOCAL
+    call sym_add
+    ; The bases and keywords are evaluated in the enclosing scope.
+    mov rdi, rbx
+    mov rsi, r13
+    call ast_at
+    mov edx, [rax + AstNode.b]
+    test edx, edx
+    jz .class_body
+    mov rdi, rbx
+    mov rsi, r12
+    call sym_visit
+    test eax, eax
+    jz .fail
+.class_body:
+    mov rdi, rbx
+    mov rsi, r12
+    mov rdx, r13
+    mov ecx, SCOPE_CLASS
+    call sym_enter_function
+    jmp .ret
+
 .lambda:
     mov rdi, rbx
     mov rsi, r12
@@ -471,6 +546,15 @@ DEF_FUNC sym_visit, SV_FRAME
     mov ecx, SCOPE_LAMBDA
     call sym_enter_function
     jmp .ret
+
+.mark_generator:
+    ; Any yield anywhere in a function makes the whole function a generator --
+    ; the flag belongs to the scope, not to the statement.
+    mov rdi, rbx
+    mov rsi, r12
+    call sym_at
+    or dword [rax + Scope.flags], SCF_GENERATOR
+    jmp .children
 
 ;; A comparison chain interleaves operator CODES with operand nodes in its
 ;; child list, so only the odd slots are nodes.  Walking the whole list treats
@@ -738,14 +822,23 @@ DEF_FUNC sym_enter_function, SE_FRAME
     call ast_at
     mov [rax + AstNode.flags], r12w
 
-    ; Parameters bind in the new scope, in signature order.
+    ; Parameters bind in the new scope, in signature order.  A class body has
+    ; none: its .b is the base list, which belongs to the enclosing scope.
     mov rdi, rbx
     mov rsi, r13
     call ast_at
+    movzx ecx, byte [rax + AstNode.kind]
+    cmp ecx, AST_CLASSDEF
+    je .no_params
     mov ecx, [rax + AstNode.b]
     mov [rbp - SE_ARGS], rcx
     test ecx, ecx
     jz .body
+    jmp .have_args
+.no_params:
+    mov qword [rbp - SE_ARGS], 0
+    jmp .body
+.have_args:
     mov rdi, rbx
     mov rsi, rcx
     call ast_at
@@ -842,6 +935,13 @@ DEF_FUNC sym_enter_function, SE_FRAME
     test eax, eax
     jz .fail
 .ok:
+    ; A method that mentions `super` or `__class__` needs the class itself, and
+    ; gets it through a cell the class body leaves behind.  Zero-argument
+    ; super() is exactly this and nothing else: the name is implicit, so the
+    ; symbol table has to add the use that the source never wrote.
+    mov rdi, rbx
+    mov rsi, r12
+    call sym_note_super
     mov eax, 1
     jmp .ret
 .fail:
@@ -1038,7 +1138,21 @@ DEF_FUNC sym_enclosing_binds, SEB_FRAME
     mov rsi, r12
     call sym_is_function_like
     test eax, eax
-    jz .loop                            ; a class block provides nothing
+    jnz .check_binds
+    ; A class block provides nothing to nested blocks -- with one exception.
+    ; `__class__` is visible to them, which is what makes zero-argument super()
+    ; and an explicit __class__ reference work inside a method.
+    mov rdi, rbx
+    lea rsi, [rel sym_class_name]
+    call comp_intern_cstr
+    test rax, rax
+    jz .loop
+    mov rdi, rax
+    mov rsi, [rbp - SEB_NAME]
+    call sym_str_eq
+    test eax, eax
+    jz .loop
+.check_binds:
 
     mov rdi, rbx
     mov rsi, r12
@@ -1774,6 +1888,272 @@ DEF_FUNC sym_lp_index, 8
     leave
     ret
 END_FUNC sym_lp_index
+
+
+;; ============================================================================
+;; sym_note_super(Comp *c, uint32_t scope) -> rax = 1
+;; If this block mentions `super` or `__class__` and sits directly inside a
+;; class body, record a use of `__class__` here and a binding of it there.
+;; ============================================================================
+SNS_COMP  equ 8
+SNS_SCOPE equ 16
+SNS_PARENT equ 24
+SNS_NAME  equ 32
+SNS_FRAME equ 48          ; + 2 pushes = 64
+DEF_FUNC sym_note_super, SNS_FRAME
+    push rbx
+    push r12
+    mov rbx, rdi
+    mov r12, rsi
+
+    mov rdi, rbx
+    mov rsi, r12
+    call sym_at
+    mov ecx, [rax + Scope.parent]
+    mov [rbp - SNS_PARENT], rcx
+    test ecx, ecx
+    jz .done
+    mov rdi, rbx
+    mov rsi, rcx
+    call sym_at
+    cmp dword [rax + Scope.kind], SCOPE_CLASS
+    jne .done
+
+    ; Does the block mention either name?
+    mov rdi, rbx
+    lea rsi, [rel sym_super_name]
+    call comp_intern_cstr
+    test rax, rax
+    jz .done
+    mov rdx, rax
+    mov rdi, rbx
+    mov rsi, r12
+    call sym_get
+    test eax, eax
+    jnz .needs_class
+
+    mov rdi, rbx
+    lea rsi, [rel sym_class_name]
+    call comp_intern_cstr
+    test rax, rax
+    jz .done
+    mov rdx, rax
+    mov rdi, rbx
+    mov rsi, r12
+    call sym_get
+    test eax, eax
+    jz .done
+
+.needs_class:
+    mov rdi, rbx
+    lea rsi, [rel sym_class_name]
+    call comp_intern_cstr
+    test rax, rax
+    jz .done
+    mov [rbp - SNS_NAME], rax
+    mov rdi, rbx
+    mov rsi, r12
+    mov rdx, rax
+    mov ecx, DEF_USE
+    call sym_add
+    mov rdi, rbx
+    mov rsi, [rbp - SNS_PARENT]
+    mov rdx, [rbp - SNS_NAME]
+    mov ecx, DEF_LOCAL
+    call sym_add
+.done:
+    mov eax, 1
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC sym_note_super
+
+;; ============================================================================
+;; sym_enter_comp(Comp *c, uint32_t parent, uint32_t node) -> 1 ok, 0 error
+;; The comprehension's own scope: one parameter named `.0` for the outermost
+;; iterable, then the targets, conditions and element.
+;; ============================================================================
+SEC_COMP  equ 8
+SEC_PARENT equ 16
+SEC_NODE  equ 24
+SEC_SCOPE equ 32
+SEC_I     equ 40
+SEC_N     equ 48
+SEC_CL    equ 56
+SEC_FRAME equ 56          ; + 3 pushes = 80
+DEF_FUNC sym_enter_comp, SEC_FRAME
+    push rbx
+    push r12
+    push r13
+    mov rbx, rdi
+    mov [rbp - SEC_PARENT], rsi
+    mov r13, rdx
+    mov [rbp - SEC_NODE], rdx
+
+    mov rdi, rbx
+    mov rsi, [rbp - SEC_PARENT]
+    mov edx, SCOPE_COMP
+    mov rcx, r13
+    call sym_new
+    mov r12, rax
+    mov [rbp - SEC_SCOPE], rax
+    mov rdi, rbx
+    mov rsi, r13
+    call ast_at
+    mov [rax + AstNode.flags], r12w
+
+    ; The implicit parameter.  CPython calls it `.0`, which no source can name.
+    mov rdi, rbx
+    lea rsi, [rel sym_dot_zero]
+    call comp_intern_cstr
+    test rax, rax
+    jz .fail
+    mov rdx, rax
+    mov rdi, rbx
+    mov rsi, r12
+    mov ecx, DEF_PARAM | DEF_LOCAL
+    call sym_add
+
+    mov rdi, rbx
+    mov rsi, r13
+    call ast_at
+    mov ecx, [rax + AstNode.nchild]
+    mov [rbp - SEC_N], rcx
+    mov qword [rbp - SEC_I], 0
+.clause_loop:
+    mov rax, [rbp - SEC_I]
+    cmp rax, [rbp - SEC_N]
+    jae .element
+    mov rdi, rbx
+    mov rsi, r13
+    call ast_at
+    mov rsi, rax
+    mov rdx, [rbp - SEC_I]
+    mov rdi, rbx
+    call ast_child
+    mov [rbp - SEC_CL], rax
+
+    ; The target binds in this scope; the conditions are evaluated here too.
+    mov rdi, rbx
+    mov rsi, rax
+    call ast_at
+    mov edx, [rax + AstNode.a]
+    mov rdi, rbx
+    mov rsi, r12
+    call sym_visit
+    test eax, eax
+    jz .fail
+
+    ; Every iterable but the outermost is evaluated inside the comprehension.
+    cmp qword [rbp - SEC_I], 0
+    je .conds
+    mov rdi, rbx
+    mov rsi, [rbp - SEC_CL]
+    call ast_at
+    mov edx, [rax + AstNode.b]
+    mov rdi, rbx
+    mov rsi, r12
+    call sym_visit
+    test eax, eax
+    jz .fail
+.conds:
+    mov rdi, rbx
+    mov rsi, [rbp - SEC_CL]
+    call ast_at
+    mov rsi, rax
+    mov rdi, rbx
+    mov rdx, r12
+    call sym_visit_children
+    test eax, eax
+    jz .fail
+    inc qword [rbp - SEC_I]
+    jmp .clause_loop
+
+.element:
+    mov rdi, rbx
+    mov rsi, r13
+    call ast_at
+    mov edx, [rax + AstNode.a]
+    mov rdi, rbx
+    mov rsi, r12
+    call sym_visit
+    test eax, eax
+    jz .fail
+    mov rdi, rbx
+    mov rsi, r13
+    call ast_at
+    mov edx, [rax + AstNode.b]          ; a dict comprehension's value
+    test edx, edx
+    jz .ok
+    mov rdi, rbx
+    mov rsi, r12
+    call sym_visit
+    test eax, eax
+    jz .fail
+.ok:
+    mov eax, 1
+    jmp .ret
+.fail:
+    xor eax, eax
+.ret:
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC sym_enter_comp
+
+;; ============================================================================
+;; sym_visit_children(Comp *c, AstNode *n, uint32_t scope) -> 1 ok, 0 error
+;; Visit a node's child list only.
+;; ============================================================================
+SVC_COMP  equ 8
+SVC_NODE  equ 16
+SVC_SCOPE equ 24
+SVC_I     equ 32
+SVC_N     equ 40
+SVC_CLIST equ 48
+SVC_FRAME equ 48          ; + 2 pushes = 64
+DEF_FUNC sym_visit_children, SVC_FRAME
+    push rbx
+    push r12
+    mov rbx, rdi
+    mov r12, rdx
+    mov ecx, [rsi + AstNode.nchild]
+    mov [rbp - SVC_N], rcx
+    mov ecx, [rsi + AstNode.clist]
+    mov [rbp - SVC_CLIST], rcx
+    mov qword [rbp - SVC_I], 0
+.loop:
+    mov rax, [rbp - SVC_I]
+    cmp rax, [rbp - SVC_N]
+    jae .ok
+    mov rdx, [rbx + Comp.children + Buf.data]
+    mov rcx, [rbp - SVC_CLIST]
+    add rcx, rax
+    mov edx, [rdx + rcx*4]
+    mov rdi, rbx
+    mov rsi, r12
+    call sym_visit
+    test eax, eax
+    jz .fail
+    inc qword [rbp - SVC_I]
+    jmp .loop
+.ok:
+    mov eax, 1
+.fail:
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC sym_visit_children
+
+section .rodata
+sym_dot_zero: db ".0", 0
+
+sym_super_name: db "super", 0
+sym_class_name: db "__class__", 0
 
 
 ASM_INIT

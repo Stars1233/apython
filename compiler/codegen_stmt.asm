@@ -32,8 +32,11 @@ extern cg_expr
 extern cg_label_bind
 extern cg_label_new
 extern cg_name
+extern ast_obj
 extern cg_nameop
 extern cg_unwind_finallys
+extern cg_s_classdef
+extern cg_s_decorated
 extern cg_s_try
 extern cg_s_with
 extern cg_s_functiondef
@@ -1970,7 +1973,7 @@ cg_stmt_table:
     dq cg_s_importfrom  ; 60 AST_IMPORTFROM
     dq 0                ; 61 AST_ALIAS
     dq cg_s_functiondef                ; 62 AST_FUNCTIONDEF
-    dq 0                ; 63 AST_CLASSDEF
+    dq cg_s_classdef                   ; 63 AST_CLASSDEF
     dq cg_s_try                        ; 64 AST_TRY
     dq 0                ; 65 AST_HANDLER
     dq cg_s_with                       ; 66 AST_WITH
@@ -1979,7 +1982,7 @@ cg_stmt_table:
     dq 0                ; 69 AST_ARG
     dq 0                ; 70 AST_MATCH
     dq 0                ; 71 AST_EXTRA
-    dq 0                ; 72 
+    dq cg_s_decorated   ; 72 AST_DECORATED
     dq 0                ; 73 
     dq 0                ; 74 
     dq 0                ; 75 

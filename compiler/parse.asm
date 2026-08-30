@@ -47,6 +47,7 @@ extern buf_push_u8
 extern bytes_from_data
 extern str_new_heap
 extern comp_intern
+extern par_for_target
 extern par_params
 extern int_from_cstr_base
 extern strtod
@@ -1530,6 +1531,33 @@ DEF_FUNC_LOCAL pf_group, PG_FRAME
     mov rdi, rbx
     call par_advance                    ; consume '('
 
+    ; `(x for ...)` is a generator expression rather than a group; as with a
+    ; list, the two are the same production until the token after the element.
+    mov rdi, rbx
+    call par_kind
+    cmp eax, TOK_RPAR
+    je .as_list
+    mov rdi, rbx
+    call par_peek_second_is_for
+    test eax, eax
+    jz .as_list
+    mov rdi, rbx
+    mov esi, BP_NONE
+    call par_expr
+    test rax, rax
+    jz .fail
+    mov rdi, rbx
+    mov esi, AST_GENEXP
+    mov rdx, rax
+    xor ecx, ecx
+    mov r8, [rbp - PG_LINE]
+    mov r9, TOK_RPAR
+    call par_comprehension
+    pop rbx
+    leave
+    ret
+
+.as_list:
     mov rdi, rbx
     mov esi, TOK_RPAR
     lea rdx, [rbp - PG_COMMA]
@@ -1578,7 +1606,11 @@ DEF_FUNC_LOCAL pf_group, PG_FRAME
 END_FUNC pf_group
 
 ;; ============================================================================
-;; pf_list(Comp *c) -> node   -- [a, b]
+;; pf_list(Comp *c) -> node   -- [a, b] or [e for x in it]
+;;
+;; A display and a comprehension are the same production until the token after
+;; the first element, so the element is parsed once and the shape decided
+;; afterwards.
 ;; ============================================================================
 DEF_FUNC_LOCAL pf_list, PG_FRAME
     push rbx
@@ -1587,28 +1619,80 @@ DEF_FUNC_LOCAL pf_list, PG_FRAME
     mov ecx, [rax + Token.lineno]
     mov [rbp - PG_LINE], rcx
     mov rdi, rbx
-    call par_advance
+    call par_advance                    ; consume '['
+    mov qword [rbp - PG_COMMA], 0
 
     mov rdi, rbx
-    mov esi, TOK_RSQB
-    lea rdx, [rbp - PG_COMMA]
-    call par_exprlist
-    cmp rax, -1
-    je .fail
+    call ast_mark
     mov [rbp - PG_MARK], rax
 
+    mov rdi, rbx
+    call par_kind
+    cmp eax, TOK_RSQB
+    je .close                           ; []
+
+    mov rdi, rbx
+    mov esi, BP_NONE
+    call par_expr
+    test rax, rax
+    jz .fail
+    mov r8, rax
+
+    mov rdi, rbx
+    call par_kind
+    cmp eax, TOK_FOR
+    je .comp
+    cmp eax, TOK_ASYNC
+    je .comp
+
+    mov rdi, rbx
+    mov rsi, r8
+    call ast_push
+.more:
+    mov rdi, rbx
+    call par_kind
+    cmp eax, TOK_COMMA
+    jne .close
+    mov rdi, rbx
+    call par_advance
+    mov rdi, rbx
+    call par_kind
+    cmp eax, TOK_RSQB
+    je .close                           ; a trailing comma
+    mov rdi, rbx
+    mov esi, BP_NONE
+    call par_expr
+    test rax, rax
+    jz .fail
+    mov rdi, rbx
+    mov rsi, rax
+    call ast_push
+    jmp .more
+
+.close:
     mov rdi, rbx
     mov esi, TOK_RSQB
     CSTRING rdx, "'[' was never closed"
     call par_expect
     test eax, eax
     jz .fail
-
     mov rdi, rbx
     mov esi, AST_LIST
     mov rdx, [rbp - PG_LINE]
     mov rcx, [rbp - PG_MARK]
     call par_finish_list
+    pop rbx
+    leave
+    ret
+
+.comp:
+    mov rdi, rbx
+    mov esi, AST_LISTCOMP
+    mov rdx, r8
+    xor ecx, ecx
+    mov r8, [rbp - PG_LINE]
+    mov r9, TOK_RSQB
+    call par_comprehension
     pop rbx
     leave
     ret
@@ -1631,7 +1715,9 @@ PD_COMP  equ 8
 PD_LINE  equ 16
 PD_MARK  equ 24
 PD_ISDICT equ 32
-PD_FRAME equ 40          ; + 1 push = 48
+PD_KEY    equ 40
+PD_VALUE  equ 48
+PD_FRAME equ 56          ; + 1 push = 64
 DEF_FUNC_LOCAL pf_dictset, PD_FRAME
     push rbx
     mov rbx, rdi
@@ -1666,16 +1752,29 @@ DEF_FUNC_LOCAL pf_dictset, PD_FRAME
     call par_kind
     cmp eax, TOK_COLON
     je .dict_first
+    cmp eax, TOK_FOR
+    je .setcomp
+    cmp eax, TOK_ASYNC
+    je .setcomp
     ; A set: push what we already parsed and carry on.
     mov qword [rbp - PD_ISDICT], 0
     mov rdi, rbx
     mov rsi, r8
     call ast_push
     jmp .more
-.dict_first:
+.setcomp:
     mov rdi, rbx
-    mov rsi, r8
-    call ast_push                       ; the key
+    mov esi, AST_SETCOMP
+    mov rdx, r8
+    xor ecx, ecx
+    mov r8, [rbp - PD_LINE]
+    mov r9, TOK_RBRACE
+    call par_comprehension
+    pop rbx
+    leave
+    ret
+.dict_first:
+    mov [rbp - PD_KEY], r8
     mov rdi, rbx
     call par_advance                    ; consume ':'
     mov rdi, rbx
@@ -1683,10 +1782,31 @@ DEF_FUNC_LOCAL pf_dictset, PD_FRAME
     call par_expr
     test rax, rax
     jz .fail
+    mov [rbp - PD_VALUE], rax
     mov rdi, rbx
-    mov rsi, rax
-    call ast_push                       ; the value
+    call par_kind
+    cmp eax, TOK_FOR
+    je .dictcomp
+    cmp eax, TOK_ASYNC
+    je .dictcomp
+    mov rdi, rbx
+    mov rsi, [rbp - PD_KEY]
+    call ast_push
+    mov rdi, rbx
+    mov rsi, [rbp - PD_VALUE]
+    call ast_push
     jmp .more
+.dictcomp:
+    mov rdi, rbx
+    mov esi, AST_DICTCOMP
+    mov rdx, [rbp - PD_KEY]
+    mov rcx, [rbp - PD_VALUE]
+    mov r8, [rbp - PD_LINE]
+    mov r9, TOK_RBRACE
+    call par_comprehension
+    pop rbx
+    leave
+    ret
 
 .more:
     mov rdi, rbx
@@ -2109,6 +2229,28 @@ DEF_FUNC_LOCAL in_call, ICL_FRAME
     call par_expr
     test rax, rax
     jz .fail
+    ; `f(x for x in y)` is a generator expression as the sole argument, with no
+    ; parentheses of its own -- the call's own brackets serve.
+    push rax
+    mov rdi, rbx
+    call par_kind
+    mov ecx, eax
+    pop rax
+    cmp ecx, TOK_FOR
+    je .genexp_arg
+    cmp ecx, TOK_ASYNC
+    je .genexp_arg
+    jmp .push_arg
+.genexp_arg:
+    mov rdi, rbx
+    mov esi, AST_GENEXP
+    mov rdx, rax
+    xor ecx, ecx
+    mov r8, [rbp - ICL_LINE]
+    xor r9d, r9d                        ; the caller consumes the ')'
+    call par_comprehension
+    test rax, rax
+    jz .fail
 .push_arg:
     mov rdi, rbx
     mov rsi, rax
@@ -2158,6 +2300,15 @@ DEF_FUNC_LOCAL in_call, ICL_FRAME
     leave
     ret
 END_FUNC in_call
+
+;; ============================================================================
+;; in_call_public(Comp *c, node func) -> node
+;; The class statement's base list is an argument list, keywords and all, so it
+;; is parsed by the same code rather than a near-copy of it.
+;; ============================================================================
+DEF_FUNC_BARE in_call_public
+    jmp in_call
+END_FUNC in_call_public
 
 ;; ============================================================================
 ;; par_peek_next(Comp *c) -> eax = the kind of the token after the current one
@@ -2244,6 +2395,324 @@ DEF_FUNC_LOCAL pf_lambda, PLM_FRAME
     leave
     ret
 END_FUNC pf_lambda
+
+;; ============================================================================
+;; par_comprehension(Comp *c, int kind, uint32_t elt, uint32_t val, int line,
+;;                   int close) -> node
+;;
+;; The `for` clauses of a comprehension, after its element has been parsed.
+;; Each clause is an AST_COMPREHENSION carrying a target, an iterable and any
+;; number of conditions; nesting is left to right, so `[x for a in b for x in a]`
+;; is two clauses in that order.
+;;
+;; The iterable of each clause is parsed at BP_OR so a trailing `if` belongs to
+;; the comprehension rather than becoming a conditional expression -- that is
+;; what the minimum binding power is for.
+;; ============================================================================
+PCM_KIND  equ 8
+PCM_ELT   equ 16
+PCM_VAL   equ 24
+PCM_LINE  equ 32
+PCM_CLOSE equ 40
+PCM_MARK  equ 48
+PCM_TGT   equ 56
+PCM_ITER  equ 64
+PCM_CMARK equ 72
+PCM_NODE  equ 80
+PCM_ASYNC equ 88
+PCM_FRAME equ 88          ; + 1 push = 96
+DEF_FUNC par_comprehension, PCM_FRAME
+    push rbx
+    mov rbx, rdi
+    mov [rbp - PCM_KIND], rsi
+    mov [rbp - PCM_ELT], rdx
+    mov [rbp - PCM_VAL], rcx
+    mov [rbp - PCM_LINE], r8
+    mov [rbp - PCM_CLOSE], r9
+
+    mov rdi, rbx
+    call ast_mark
+    mov [rbp - PCM_MARK], rax
+
+.clause:
+    mov qword [rbp - PCM_ASYNC], 0
+    mov rdi, rbx
+    call par_kind
+    cmp eax, TOK_ASYNC
+    jne .not_async
+    mov qword [rbp - PCM_ASYNC], 1
+    mov rdi, rbx
+    call par_advance
+.not_async:
+    mov rdi, rbx
+    mov esi, TOK_FOR
+    CSTRING rdx, "expected 'for' in comprehension"
+    call par_expect
+    test eax, eax
+    jz .fail
+
+    mov rdi, rbx
+    call par_for_target
+    test rax, rax
+    jz .fail
+    mov [rbp - PCM_TGT], rax
+
+    mov rdi, rbx
+    mov esi, TOK_IN
+    CSTRING rdx, "expected 'in' in comprehension"
+    call par_expect
+    test eax, eax
+    jz .fail
+
+    mov rdi, rbx
+    mov esi, BP_OR                      ; leaves a trailing `if` to us
+    call par_expr
+    test rax, rax
+    jz .fail
+    mov [rbp - PCM_ITER], rax
+
+    ; Any number of conditions.
+    mov rdi, rbx
+    call ast_mark
+    mov [rbp - PCM_CMARK], rax
+.conds:
+    mov rdi, rbx
+    call par_kind
+    cmp eax, TOK_IF
+    jne .close_clause
+    mov rdi, rbx
+    call par_advance
+    mov rdi, rbx
+    mov esi, BP_OR
+    call par_expr
+    test rax, rax
+    jz .fail
+    mov rdi, rbx
+    mov rsi, rax
+    call ast_push
+    jmp .conds
+
+.close_clause:
+    mov rdi, rbx
+    mov esi, AST_COMPREHENSION
+    mov rdx, [rbp - PCM_LINE]
+    mov rcx, [rbp - PCM_CMARK]
+    call par_finish_list
+    test rax, rax
+    jz .fail
+    mov [rbp - PCM_NODE], rax
+    mov rdi, rbx
+    mov rsi, rax
+    call ast_at
+    mov rdx, [rbp - PCM_TGT]
+    mov [rax + AstNode.a], edx
+    mov rdx, [rbp - PCM_ITER]
+    mov [rax + AstNode.b], edx
+    mov rdx, [rbp - PCM_ASYNC]
+    mov [rax + AstNode.subkind], dl
+    mov rdi, rbx
+    mov rsi, [rbp - PCM_NODE]
+    call ast_push
+
+    mov rdi, rbx
+    call par_kind
+    cmp eax, TOK_FOR
+    je .clause
+    cmp eax, TOK_ASYNC
+    je .clause
+
+    ; Close the comprehension itself.
+    mov rdi, rbx
+    mov rsi, [rbp - PCM_KIND]
+    mov rdx, [rbp - PCM_LINE]
+    mov rcx, [rbp - PCM_MARK]
+    call par_finish_list
+    test rax, rax
+    jz .fail
+    mov [rbp - PCM_NODE], rax
+    mov rdi, rbx
+    mov rsi, rax
+    call ast_at
+    mov rdx, [rbp - PCM_ELT]
+    mov [rax + AstNode.a], edx
+    mov rdx, [rbp - PCM_VAL]
+    mov [rax + AstNode.b], edx
+
+    cmp qword [rbp - PCM_CLOSE], 0
+    je .done
+    mov rdi, rbx
+    mov rsi, [rbp - PCM_CLOSE]
+    CSTRING rdx, "the comprehension was never closed"
+    call par_expect
+    test eax, eax
+    jz .fail
+.done:
+    mov rax, [rbp - PCM_NODE]
+    pop rbx
+    leave
+    ret
+.fail:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+END_FUNC par_comprehension
+
+;; ============================================================================
+;; par_peek_second_is_for(Comp *c) -> rax = 1 when a `for` follows the first
+;; element of the bracketed run, without consuming anything.
+;;
+;; A generator expression cannot be told from a parenthesised expression by one
+;; token of lookahead, so this scans ahead to the matching depth.  It is the
+;; only place the parser looks further than the next token, and having the
+;; whole token array is what makes it a loop rather than a re-lex.
+;; ============================================================================
+DEF_FUNC par_peek_second_is_for, 8
+    push rbx
+    push r12
+    push r13
+    mov rbx, rdi
+    mov r12d, [rdi + Comp.tok_idx]
+    mov r13, [rdi + Comp.tokens + Buf.len]
+    xor ecx, ecx                        ; bracket depth
+    ; Start AT the current token, not after it: `([x for x in y], z)` opens a
+    ; bracket first, and skipping it would leave the inner `for` looking like a
+    ; top-level one.
+.loop:
+    cmp r12, r13
+    jae .no
+    mov rax, [rbx + Comp.tokens + Buf.data]
+    mov rdx, r12
+    shl rdx, TOKEN_SHIFT
+    movzx eax, word [rax + rdx + Token.kind]
+    cmp eax, TOK_ENDMARKER
+    je .no
+    cmp eax, TOK_LPAR
+    je .deeper
+    cmp eax, TOK_LSQB
+    je .deeper
+    cmp eax, TOK_LBRACE
+    je .deeper
+    cmp eax, TOK_RPAR
+    je .shallower
+    cmp eax, TOK_RSQB
+    je .shallower
+    cmp eax, TOK_RBRACE
+    je .shallower
+    test ecx, ecx
+    jnz .next                           ; inside brackets: keep scanning
+    cmp eax, TOK_FOR
+    je .yes
+    cmp eax, TOK_COMMA
+    je .no                              ; a tuple, not a comprehension
+    jmp .next
+.deeper:
+    inc ecx
+    jmp .next
+.shallower:
+    test ecx, ecx
+    jz .no                              ; the closing bracket of our own run
+    dec ecx
+.next:
+    inc r12
+    jmp .loop
+.yes:
+    mov eax, 1
+    jmp .ret
+.no:
+    xor eax, eax
+.ret:
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC par_peek_second_is_for
+
+;; ============================================================================
+;; pf_yield(Comp *c) -> node   -- `yield`, `yield x`, `yield from x`
+;;
+;; A yield is an expression, not a statement: `x = yield v` is how a generator
+;; receives what send() passes back.
+;; ============================================================================
+PY_LINE  equ 8
+PY_KIND  equ 16
+PY_FRAME equ 24          ; + 1 push = 32
+DEF_FUNC_LOCAL pf_yield, PY_FRAME
+    push rbx
+    mov rbx, rdi
+    call par_peek
+    mov ecx, [rax + Token.lineno]
+    mov [rbp - PY_LINE], rcx
+    mov rdi, rbx
+    call par_advance                    ; `yield`
+
+    mov rdi, rbx
+    call par_kind
+    cmp eax, TOK_FROM
+    je .from
+
+    ; A bare `yield` ends wherever an expression would not start.
+    mov qword [rbp - PY_KIND], AST_YIELD
+    mov rdi, rbx
+    call par_kind
+    cmp eax, TOK_NEWLINE
+    je .bare
+    cmp eax, TOK_SEMI
+    je .bare
+    cmp eax, TOK_ENDMARKER
+    je .bare
+    cmp eax, TOK_RPAR
+    je .bare
+    cmp eax, TOK_RSQB
+    je .bare
+    cmp eax, TOK_RBRACE
+    je .bare
+    cmp eax, TOK_COMMA
+    je .bare
+    cmp eax, TOK_COLON
+    je .bare
+    cmp eax, TOK_DEDENT
+    je .bare
+
+    mov rdi, rbx
+    mov esi, BP_TERNARY
+    call par_expr
+    test rax, rax
+    jz .fail
+    mov r8, rax
+    jmp .build
+.bare:
+    xor r8d, r8d
+    jmp .build
+
+.from:
+    mov rdi, rbx
+    call par_advance
+    mov qword [rbp - PY_KIND], AST_YIELDFROM
+    mov rdi, rbx
+    mov esi, BP_TERNARY
+    call par_expr
+    test rax, rax
+    jz .fail
+    mov r8, rax
+
+.build:
+    mov rdi, rbx
+    mov rsi, [rbp - PY_KIND]
+    xor edx, edx
+    mov rcx, [rbp - PY_LINE]
+    xor r9d, r9d
+    call ast_make
+    pop rbx
+    leave
+    ret
+.fail:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+END_FUNC pf_yield
 
 section .rodata
 
@@ -2532,8 +3001,8 @@ prule_table:
     dq 0           , 0           
     db BP_NONE    , BP_NONE    , 0                 , 0           ; TOK_WITH
     dd 0
-    dq 0           , 0           
-    db BP_NONE    , BP_NONE    , 0                 , 0           ; TOK_YIELD
+    dq pf_yield    , 0           
+    db BP_NONE    , BP_NONE    , 0                 , 0           ; TOK_YIELD -- an expression, not a statement: `x = yield v` receives from send()
     dd 0
 
 ASM_INIT

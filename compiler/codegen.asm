@@ -22,7 +22,13 @@ extern buf_free
 extern buf_init
 extern buf_push_u32
 extern buf_reserve
+extern cg_e_comprehension
+extern cg_e_yield
+extern cg_e_yieldfrom
 extern cg_e_lambda
+extern comp_intern_cstr
+extern sym_at
+extern sym_str_eq
 extern cg_nameop
 extern comp_error
 
@@ -1581,6 +1587,16 @@ DEF_FUNC_LOCAL cg_e_attribute, CE_FRAME
     mov rbx, rdi
     mov r12, rsi
     mov r13, rdx
+    ; A bare super().x goes through LOAD_SUPER_ATTR as well.
+    mov rdi, rbx
+    mov rsi, r12
+    mov rdx, r13
+    xor ecx, ecx                        ; not a method call
+    call cg_super_attr
+    cmp rax, -1
+    je .fail
+    test rax, rax
+    jnz .done_super
     mov rdi, rbx
     mov rsi, r13
     call ast_at
@@ -1606,6 +1622,7 @@ DEF_FUNC_LOCAL cg_e_attribute, CE_FRAME
     mov rdi, r12
     mov esi, OP_LOAD_ATTR
     call cg_emit
+.done_super:
     mov eax, 1
 .fail:
     pop r13
@@ -1821,6 +1838,18 @@ DEF_FUNC_LOCAL cg_e_call, CC2_FRAME
     jmp .args
 
 .method_call:
+    ; super().m(...) is not an ordinary attribute load: LOAD_SUPER_ATTR takes
+    ; the place of both the call to super and the attribute lookup.
+    mov rdi, rbx
+    mov rsi, r12
+    mov rdx, [rbp - CC2_CHILD]
+    mov ecx, 1                          ; the method form
+    call cg_super_attr
+    cmp rax, -1
+    je .fail
+    test rax, rax
+    jnz .args
+
     ; LOAD_ATTR with bit 0 set pushes the function and the instance, filling
     ; the slot PUSH_NULL would otherwise occupy.
     mov rdi, rbx
@@ -2126,6 +2155,8 @@ DEF_FUNC_LOCAL cg_e_call, CC2_FRAME
     call ast_child
     ret
 
+.ret_ok:
+    mov eax, 1
 .ret:
     pop r13
     pop r12
@@ -2133,6 +2164,199 @@ DEF_FUNC_LOCAL cg_e_call, CC2_FRAME
     leave
     ret
 END_FUNC cg_e_call
+
+;; ============================================================================
+;; cg_try_zero_super(Comp *c, CompUnit *u, uint32_t call)
+;;   -> rax = 1 if it emitted the call, 0 if this is not one, -1 on error
+;;
+;; Emits  PUSH_NULL; LOAD_GLOBAL super; LOAD_DEREF __class__; LOAD_FAST self;
+;;        CALL 2
+;; for a bare `super()` inside a method.  The first parameter is whatever the
+;; method called it -- `self` by convention only -- so it comes from the
+;; scope's first varname rather than from a hard-coded name.
+;; ============================================================================
+ZS_ATTR   equ 8
+ZS_METH   equ 16
+ZS_LINE   equ 24
+ZS_CALL   equ 32
+ZS_NARGS  equ 40
+ZS_TWOARG equ 48
+ZS_I      equ 56
+ZS_FRAME  equ 56          ; + 3 pushes = 80
+DEF_FUNC cg_super_attr, ZS_FRAME
+    push rbx
+    push r12
+    push r13
+    mov rbx, rdi
+    mov r12, rsi
+    mov [rbp - ZS_ATTR], rdx
+    mov [rbp - ZS_METH], rcx
+
+    ; The attribute's value has to be a call to the name `super`.
+    mov rdi, rbx
+    mov rsi, rdx
+    call ast_at
+    mov ecx, [rax + AstNode.lineno]
+    mov [rbp - ZS_LINE], rcx
+    mov ecx, [rax + AstNode.a]
+    mov [rbp - ZS_CALL], rcx
+    test ecx, ecx
+    jz .no
+    mov rdi, rbx
+    mov rsi, rcx
+    call ast_at
+    movzx ecx, byte [rax + AstNode.kind]
+    cmp ecx, AST_CALL
+    jne .no
+    mov ecx, [rax + AstNode.nchild]
+    mov [rbp - ZS_NARGS], rcx
+    cmp rcx, 2
+    ja .no                              ; super() takes zero or two arguments
+    cmp rcx, 1
+    je .no
+    mov edx, [rax + AstNode.a]
+    mov rdi, rbx
+    mov rsi, rdx
+    call ast_at
+    movzx ecx, byte [rax + AstNode.kind]
+    cmp ecx, AST_NAME
+    jne .no
+    mov esi, [rax + AstNode.a]
+    mov rdi, rbx
+    call ast_obj_at
+    mov r13, rax
+    mov rdi, rbx
+    lea rsi, [rel cg_super_name]
+    call comp_intern_cstr
+    test rax, rax
+    jz .no
+    mov rdi, r13
+    mov rsi, rax
+    call sym_str_eq
+    test eax, eax
+    jz .no
+
+    ; LOAD_SUPER_ATTR wants the super builtin, the class and the instance, in
+    ; that order.  apython has no callable super type -- this opcode is the
+    ; only way it is reachable -- so the zero-argument form is expanded here
+    ; into the class cell and the method's first parameter.
+    mov rdi, rbx
+    lea rsi, [rel cg_super_name]
+    call comp_intern_cstr
+    mov rdx, rax
+    mov rdi, rbx
+    mov rsi, r12
+    mov ecx, CTX_LOAD
+    xor r8d, r8d
+    call cg_nameop
+    test eax, eax
+    jz .err
+
+    cmp qword [rbp - ZS_NARGS], 2
+    je .explicit
+
+    ; Zero-argument: __class__ from the cell, and the first parameter.
+    cmp dword [r12 + CompUnit.argcount], 0
+    je .bad_context
+    mov rdi, rbx
+    lea rsi, [rel cg_classvar_name]
+    call comp_intern_cstr
+    mov rdx, rax
+    mov rdi, rbx
+    mov rsi, r12
+    mov ecx, CTX_LOAD
+    xor r8d, r8d
+    call cg_nameop
+    test eax, eax
+    jz .err
+
+    mov rdi, rbx
+    mov esi, [r12 + CompUnit.scope]
+    call sym_at
+    mov rcx, [rax + Scope.varnames + Buf.len]
+    test rcx, rcx
+    jz .bad_context
+    mov rax, [rax + Scope.varnames + Buf.data]
+    mov rdx, [rax]
+    mov rdi, rbx
+    mov rsi, r12
+    mov ecx, CTX_LOAD
+    xor r8d, r8d
+    call cg_nameop
+    test eax, eax
+    jz .err
+    mov qword [rbp - ZS_TWOARG], 0
+    jmp .emit
+
+.explicit:
+    mov qword [rbp - ZS_I], 0
+.explicit_loop:
+    mov rax, [rbp - ZS_I]
+    cmp rax, 2
+    jae .two_done
+    mov rdi, rbx
+    mov rsi, [rbp - ZS_CALL]
+    call ast_at
+    mov rsi, rax
+    mov rdx, [rbp - ZS_I]
+    mov rdi, rbx
+    call ast_child
+    mov rdx, rax
+    mov rdi, rbx
+    mov rsi, r12
+    call cg_expr
+    test eax, eax
+    jz .err
+    inc qword [rbp - ZS_I]
+    jmp .explicit_loop
+.two_done:
+    mov qword [rbp - ZS_TWOARG], 2
+
+.emit:
+    mov rdi, rbx
+    mov rsi, [rbp - ZS_ATTR]
+    call ast_at
+    mov esi, [rax + AstNode.b]
+    mov rdi, rbx
+    call ast_obj_at
+    mov rdi, r12
+    mov rsi, rax
+    call cg_name
+    shl rax, 2
+    or rax, [rbp - ZS_TWOARG]
+    or rax, [rbp - ZS_METH]
+    mov rdx, rax
+    mov rdi, r12
+    mov esi, OP_LOAD_SUPER_ATTR
+    mov rcx, [rbp - ZS_LINE]
+    call cg_emit
+    mov eax, 1
+    jmp .ret
+
+.bad_context:
+    mov rdi, rbx
+    lea rsi, [rel exc_SyntaxError_type]
+    CSTRING rdx, "super(): no arguments and no enclosing method"
+    xor ecx, ecx
+    xor r8d, r8d
+    call comp_error
+.err:
+    mov rax, -1
+    jmp .ret
+.no:
+    xor eax, eax
+.ret:
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC cg_super_attr
+
+section .rodata
+cg_super_name:    db "super", 0
+cg_classvar_name: db "__class__", 0
+section .text
 
 ;; ============================================================================
 ;; cg_call_has_keyword(Comp *c, uint32_t call) -> rax = 1 if any named argument
@@ -2251,6 +2475,121 @@ DEF_FUNC cg_kwnames_tuple, KT_FRAME
     ret
 END_FUNC cg_kwnames_tuple
 
+;; ============================================================================
+;; cg_call_args_only(Comp *c, CompUnit *u, uint32_t call) -> rax = argument
+;;   count, or -1 on error
+;;
+;; The positional and keyword arguments of a parsed call, without the callable
+;; or the CALL itself.  The class statement's base list is an argument list, so
+;; it reuses this rather than a near-copy; a keyword there is `metaclass=M`,
+;; which __build_class__ takes like any other.
+;; ============================================================================
+CA_COMP  equ 8
+CA_UNIT  equ 16
+CA_NODE  equ 24
+CA_I     equ 32
+CA_N     equ 40
+CA_LINE  equ 48
+CA_NKW   equ 56
+CA_FRAME equ 56          ; + 3 pushes = 80
+DEF_FUNC cg_call_args_only, CA_FRAME
+    push rbx
+    push r12
+    push r13
+    mov rbx, rdi
+    mov r12, rsi
+    mov r13, rdx
+    mov rdi, rbx
+    mov rsi, r13
+    call ast_at
+    mov ecx, [rax + AstNode.nchild]
+    mov [rbp - CA_N], rcx
+    mov ecx, [rax + AstNode.lineno]
+    mov [rbp - CA_LINE], rcx
+    mov qword [rbp - CA_NKW], 0
+    mov qword [rbp - CA_I], 0
+.loop:
+    mov rax, [rbp - CA_I]
+    cmp rax, [rbp - CA_N]
+    jae .kwnames
+    mov rdi, rbx
+    mov rsi, r13
+    call ast_at
+    mov rsi, rax
+    mov rdx, [rbp - CA_I]
+    mov rdi, rbx
+    call ast_child
+    mov r13, r13
+    mov rdx, rax
+    push rdx
+    mov rdi, rbx
+    mov rsi, rax
+    call ast_at
+    movzx eax, byte [rax + AstNode.kind]
+    pop rdx
+    cmp eax, AST_KEYWORD
+    je .keyword
+    cmp eax, AST_STARRED
+    je .unsupported
+    cmp eax, AST_DOUBLESTARRED
+    je .unsupported
+    mov rdi, rbx
+    mov rsi, r12
+    call cg_expr
+    test eax, eax
+    jz .fail
+    jmp .next
+.keyword:
+    mov rdi, rbx
+    mov rsi, rdx
+    call ast_at
+    mov edx, [rax + AstNode.b]
+    mov rdi, rbx
+    mov rsi, r12
+    call cg_expr
+    test eax, eax
+    jz .fail
+    inc qword [rbp - CA_NKW]
+.next:
+    inc qword [rbp - CA_I]
+    jmp .loop
+
+.kwnames:
+    cmp qword [rbp - CA_NKW], 0
+    je .done
+    mov rdi, rbx
+    mov rsi, r13
+    call cg_kwnames_tuple
+    test rax, rax
+    jz .fail
+    mov rdi, r12
+    mov rsi, rax
+    call cg_const
+    mov rdx, rax
+    mov rdi, r12
+    mov esi, OP_KW_NAMES
+    mov rcx, [rbp - CA_LINE]
+    call cg_emit
+.done:
+    mov rax, [rbp - CA_N]
+    jmp .ret
+.unsupported:
+    mov rdi, rbx
+    lea rsi, [rel exc_SyntaxError_type]
+    CSTRING rdx, "unpacking is not supported in a class base list"
+    xor ecx, ecx
+    xor r8d, r8d
+    call comp_error
+.fail:
+    mov rax, -1
+.ret:
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC cg_call_args_only
+
 section .rodata
 
 ;; COMPARE_OP oparg = (index << 4) | mask.  apython reads only the high nibble,
@@ -2289,15 +2628,15 @@ cg_expr_table:
     dq 0                ; 18 AST_DOUBLESTARRED
     dq 0                ; 19 AST_KEYWORD
     dq 0                ; 20 AST_NAMEDEXPR
-    dq 0                ; 21 AST_YIELD
-    dq 0                ; 22 AST_YIELDFROM
+    dq cg_e_yield                      ; 21 AST_YIELD
+    dq cg_e_yieldfrom                  ; 22 AST_YIELDFROM
     dq 0                ; 23 AST_AWAIT
     dq 0                ; 24 AST_JOINEDSTR
     dq 0                ; 25 AST_FORMATTEDVALUE
-    dq 0                ; 26 AST_LISTCOMP
-    dq 0                ; 27 AST_SETCOMP
-    dq 0                ; 28 AST_DICTCOMP
-    dq 0                ; 29 AST_GENEXP
+    dq cg_e_comprehension                ; 26 AST_LISTCOMP
+    dq cg_e_comprehension                ; 27 AST_SETCOMP
+    dq cg_e_comprehension                ; 28 AST_DICTCOMP
+    dq cg_e_comprehension                ; 29 AST_GENEXP
     dq 0                ; 30 AST_COMPREHENSION
     times (AST_COUNT - 31) dq 0
 

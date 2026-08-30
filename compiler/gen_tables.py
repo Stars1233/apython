@@ -189,6 +189,13 @@ for c in range(256):
 w("")
 
 # --- opcode metadata ------------------------------------------------------
+# dis.stack_effect reports 0 for RETURN_GENERATOR, but the generator prologue
+# is always RETURN_GENERATOR; POP_TOP; RESUME -- and that POP_TOP does not run
+# when the prologue is emitted.  It runs on the first resume, discarding the
+# value send() pushed.  Modelling the opcode as pushing one keeps the pair
+# balanced, which is what the depth pass needs; nothing else emits it.
+EFFECT_OVERRIDE = {"RETURN_GENERATOR": 1}
+
 NOFALL = {"RETURN_VALUE","RETURN_CONST","RAISE_VARARGS","RERAISE",
           "JUMP_FORWARD","JUMP_BACKWARD","JUMP_BACKWARD_NO_INTERRUPT",
           "INTERPRETER_EXIT"}
@@ -219,6 +226,10 @@ for op in range(256):
     if isjump:                     flags |= 0x02     # OM_JUMP
     if name in BACKWARD:           flags |= 0x04     # OM_JUMPBACK
     if name in NOFALL:             flags |= 0x08     # OM_NOFALL
+
+    if name in EFFECT_OVERRIDE:
+        meta[op] = (cache, EFFECT_OVERRIDE[name], flags, 0, name)
+        continue
 
     e = effects(op, False)
     if e is None:

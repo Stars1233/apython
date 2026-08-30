@@ -241,6 +241,7 @@ AST_ARGUMENTS   equ 68   ; clist=arg nodes, a=extra node
 AST_ARG         equ 69   ; a=obj index (name) b=annotation c=default
 AST_MATCH       equ 70   ; a=subject, clist=cases
 AST_EXTRA       equ 71   ; raw payload continuation for nodes needing >5 slots
+AST_DECORATED   equ 72   ; clist=decorators, a=the def or class they wrap
 
 AST_COUNT       equ 80
 

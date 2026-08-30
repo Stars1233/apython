@@ -2555,6 +2555,39 @@ END_FUNC add_builtin
 ;; Registers a type object directly in builtins (for isinstance to work).
 ;; Sets type_obj.tp_call = tp_call_fn so the type is callable.
 ;; rdi=dict, rsi=name_cstr, rdx=type_obj, rcx=tp_call_fn
+;; ============================================================================
+;; add_builtin_str(dict, const char *key, const char *value)
+;; Bind a plain string constant in the builtins dict.
+;; ============================================================================
+ABS_DICT equ 8
+ABS_KEY  equ 16
+ABS_VAL  equ 24
+ABS_FRAME equ 24
+DEF_FUNC_LOCAL add_builtin_str, ABS_FRAME
+    push rbx
+    push r12
+    mov [rbp - ABS_DICT], rdi
+    mov [rbp - ABS_KEY], rsi
+    mov rdi, rdx
+    call str_from_cstr_heap
+    mov r12, rax
+    mov rdi, [rbp - ABS_KEY]
+    call str_from_cstr_heap
+    mov rbx, rax
+    mov rdi, [rbp - ABS_DICT]
+    mov rsi, rbx
+    mov rdx, r12
+    call dict_set
+    mov rdi, rbx
+    call obj_decref
+    mov rdi, r12
+    call obj_decref
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC add_builtin_str
+
 DEF_FUNC_LOCAL add_builtin_type
     push rbx
     push r12
@@ -2606,6 +2639,15 @@ DEF_FUNC builtins_init
 
     ; Store globally for __build_class__ to access
     mov [rel builtins_dict_global], rbx
+
+    ; builtins.__name__ is "builtins", as it is in CPython.  A class body's
+    ; prologue does LOAD_NAME __name__ to fill in __module__, and with a bare
+    ; dict for globals -- which is what exec(src, {}) gives it -- the lookup
+    ; falls all the way through to here.
+    mov rdi, rbx
+    lea rsi, [rel bi_dunder_name]
+    lea rdx, [rel bi_builtins_name]
+    call add_builtin_str
 
     ; Create __build_class__ wrapper and store globally
     lea rdi, [rel builtin___build_class__]
@@ -3515,6 +3557,8 @@ bi_name_globals:      db "globals", 0
 bi_name_locals:       db "locals", 0
 bi_name_dir:          db "dir", 0
 bi_name_eval:         db "eval", 0
+bi_dunder_name:       db "__name__", 0
+bi_builtins_name:     db "builtins", 0
 bi_name_compile:      db "compile", 0
 bi_name_exec:         db "exec", 0
 bi_name_super:        db "super", 0

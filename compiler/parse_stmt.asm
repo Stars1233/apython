@@ -36,6 +36,7 @@ extern par_finish_list
 extern par_kind
 extern par_peek
 extern par_syntax_error
+extern in_call_public
 
 extern exc_SyntaxError_type
 
@@ -1250,6 +1251,10 @@ DEF_FUNC par_statement_any, 8
     je .compound
     cmp eax, TOK_WITH
     je .compound
+    cmp eax, TOK_CLASS
+    je .compound
+    cmp eax, TOK_AT
+    je .compound
     mov rdi, rbx
     call par_simple_stmts
     pop rbx
@@ -2368,6 +2373,175 @@ DEF_FUNC_LOCAL ps_with, PT2_FRAME
     ret
 END_FUNC ps_with
 
+;; ============================================================================
+;; ps_class - `class C(bases, **kw): body`
+;;   .a = the name, .b = an AST_CALL holding the bases and keywords,
+;;   .clist = the body statements
+;; ============================================================================
+PC_LINE   equ 8
+PC_NAME   equ 16
+PC_BASES  equ 24
+PC_MARK   equ 32
+PC_NODE   equ 40
+PC_FRAME  equ 40          ; + 1 push = 48
+DEF_FUNC_LOCAL ps_class, PC_FRAME
+    push rbx
+    mov rbx, rdi
+    call par_peek
+    mov ecx, [rax + Token.lineno]
+    mov [rbp - PC_LINE], rcx
+    mov rdi, rbx
+    call par_advance                    ; `class`
+
+    mov rdi, rbx
+    call par_name_obj
+    test rax, rax
+    jz .fail
+    mov [rbp - PC_NAME], rax
+    mov qword [rbp - PC_BASES], 0
+
+    ; The base list is an argument list, keywords and all -- `class C(B,
+    ; metaclass=M)` -- so it is parsed by the same code that parses a call.
+    mov rdi, rbx
+    call par_kind
+    cmp eax, TOK_LPAR
+    jne .body
+    mov rdi, rbx
+    mov esi, 0                          ; a placeholder callee
+    call in_call_public
+    test rax, rax
+    jz .fail
+    mov [rbp - PC_BASES], rax
+
+.body:
+    mov rdi, rbx
+    call ast_mark
+    mov [rbp - PC_MARK], rax
+    mov rdi, rbx
+    call par_suite_into
+    test eax, eax
+    jz .fail
+
+    mov rdi, rbx
+    mov esi, AST_CLASSDEF
+    mov rdx, [rbp - PC_LINE]
+    mov rcx, [rbp - PC_MARK]
+    call par_finish_list
+    test rax, rax
+    jz .fail
+    mov [rbp - PC_NODE], rax
+    mov rdi, rbx
+    mov rsi, rax
+    call ast_at
+    mov rdx, [rbp - PC_NAME]
+    mov [rax + AstNode.a], edx
+    mov rdx, [rbp - PC_BASES]
+    mov [rax + AstNode.b], edx
+    mov rax, [rbp - PC_NODE]
+    pop rbx
+    leave
+    ret
+.fail:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+END_FUNC ps_class
+
+;; ============================================================================
+;; ps_decorated - one or more `@decorator` lines, then a def or class
+;;
+;; The decorators are evaluated top to bottom and applied bottom to top, which
+;; is why they are collected in order and the calls emitted in reverse.
+;; ============================================================================
+PDC_LINE  equ 8
+PDC_MARK  equ 16
+PDC_TARGET equ 24
+PDC_NODE  equ 32
+PDC_FRAME equ 40          ; + 1 push = 48
+DEF_FUNC_LOCAL ps_decorated, PDC_FRAME
+    push rbx
+    mov rbx, rdi
+    call par_peek
+    mov ecx, [rax + Token.lineno]
+    mov [rbp - PDC_LINE], rcx
+
+    mov rdi, rbx
+    call ast_mark
+    mov [rbp - PDC_MARK], rax
+.loop:
+    mov rdi, rbx
+    call par_kind
+    cmp eax, TOK_AT
+    jne .target
+    mov rdi, rbx
+    call par_advance
+    mov rdi, rbx
+    mov esi, BP_NONE
+    call par_expr
+    test rax, rax
+    jz .fail
+    mov rdi, rbx
+    mov rsi, rax
+    call ast_push
+    mov rdi, rbx
+    mov esi, TOK_NEWLINE
+    CSTRING rdx, "expected a newline after the decorator"
+    call par_expect
+    test eax, eax
+    jz .fail
+.skip_blank:
+    mov rdi, rbx
+    call par_kind
+    cmp eax, TOK_NEWLINE
+    jne .loop
+    mov rdi, rbx
+    call par_advance
+    jmp .skip_blank
+
+.target:
+    mov rdi, rbx
+    call par_kind
+    cmp eax, TOK_DEF
+    je .have_target
+    cmp eax, TOK_CLASS
+    je .have_target
+    mov rdi, rbx
+    CSTRING rsi, "expected 'def' or 'class' after a decorator"
+    call par_syntax_error
+    jmp .fail
+.have_target:
+    mov rdi, rbx
+    call par_statement
+    test rax, rax
+    jz .fail
+    mov [rbp - PDC_TARGET], rax
+
+    ; The decorated node carries the decorator list; the emitter applies them.
+    mov rdi, rbx
+    mov esi, AST_DECORATED
+    mov rdx, [rbp - PDC_LINE]
+    mov rcx, [rbp - PDC_MARK]
+    call par_finish_list
+    test rax, rax
+    jz .fail
+    mov [rbp - PDC_NODE], rax
+    mov rdi, rbx
+    mov rsi, rax
+    call ast_at
+    mov rdx, [rbp - PDC_TARGET]
+    mov [rax + AstNode.a], edx
+    mov rax, [rbp - PDC_NODE]
+    pop rbx
+    leave
+    ret
+.fail:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+END_FUNC ps_decorated
+
 section .rodata
 
 ;; ---------------------------------------------------------------------------
@@ -2403,7 +2577,7 @@ stmt_table:
     dq 0            ; 23 TOK_SLASH
     dq 0            ; 24 TOK_DOUBLESLASH
     dq 0            ; 25 TOK_PERCENT
-    dq 0            ; 26 TOK_AT
+    dq ps_decorated            ; 26 TOK_AT
     dq 0            ; 27 TOK_VBAR
     dq 0            ; 28 TOK_AMPER
     dq 0            ; 29 TOK_CIRCUMFLEX
@@ -2441,7 +2615,7 @@ stmt_table:
     dq 0            ; 61 TOK_ASYNC
     dq 0            ; 62 TOK_AWAIT
     dq ps_simple    ; 63 TOK_BREAK
-    dq 0            ; 64 TOK_CLASS
+    dq ps_class                ; 64 TOK_CLASS
     dq ps_simple    ; 65 TOK_CONTINUE
     dq ps_def                  ; 66 TOK_DEF
     dq ps_del       ; 67 TOK_DEL

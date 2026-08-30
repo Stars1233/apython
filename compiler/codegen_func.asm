@@ -33,10 +33,13 @@ extern cg_unit_init
 extern comp_error
 extern cg_unwind_finallys
 extern comp_intern
+extern comp_intern_cstr
 extern obj_decref
 extern str_from_cstr_heap
 extern sym_at
+extern cg_call_args_only
 extern sym_finalize
+extern sym_scope_of
 extern sym_is_function_like
 extern sym_lp_index
 extern sym_scope_of
@@ -608,8 +611,8 @@ DEF_FUNC cg_compile_body, CB_FRAME
     mov [rbp - CB_ARGS], rcx
 
     ; The function's name, for co_name and tracebacks.
-    cmp qword [rbp - CB_LAMBDA], 0
-    jne .lambda_name
+    cmp qword [rbp - CB_LAMBDA], 1
+    je .lambda_name
     mov rdi, rbx
     mov rsi, r13
     call ast_at
@@ -636,8 +639,15 @@ DEF_FUNC cg_compile_body, CB_FRAME
     mov [r12 + CompUnit.firstline], eax
     mov [r12 + CompUnit.curline], eax
 
-    ; A function-like scope gets its own fast locals.
+    ; A function-like scope gets its own fast locals.  A class body does not:
+    ; co_flags is 0 there, and every name goes through the mapping
+    ; __build_class__ hands it -- which is what makes class attributes work.
     mov dword [r12 + CompUnit.flags], CO_OPTIMIZED | CO_NEWLOCALS
+    cmp qword [rbp - CB_LAMBDA], 2
+    jne .not_class_flags
+    mov dword [r12 + CompUnit.flags], 0
+    mov qword [rbp - CB_ARGS], 0
+.not_class_flags:
     mov rdi, rbx
     mov rsi, r12
     mov rdx, [rbp - CB_ARGS]
@@ -653,6 +663,29 @@ DEF_FUNC cg_compile_body, CB_FRAME
     test eax, eax
     jz .fail
 
+    ; A generator announces itself before RESUME.  The opcode is the trigger,
+    ; not the flag -- op_return_generator does not consult co_flags -- so both
+    ; have to be set, or the body runs eagerly on the first call.
+    mov rdi, rbx
+    mov rsi, [rbp - CB_SCOPE]
+    call sym_at
+    test dword [rax + Scope.flags], SCF_GENERATOR
+    jz .not_generator
+    or dword [r12 + CompUnit.flags], CO_GENERATOR
+    mov rdi, r12
+    mov esi, OP_RETURN_GENERATOR
+    xor edx, edx
+    xor ecx, ecx
+    call cg_emit
+    or byte [rax + Instr.flags], IF_NOLINE
+    mov rdi, r12
+    mov esi, OP_POP_TOP
+    xor edx, edx
+    xor ecx, ecx
+    call cg_emit
+    or byte [rax + Instr.flags], IF_NOLINE
+.not_generator:
+
     mov rdi, r12
     mov esi, OP_RESUME
     xor edx, edx
@@ -660,16 +693,43 @@ DEF_FUNC cg_compile_body, CB_FRAME
     call cg_emit
     or byte [rax + Instr.flags], IF_NOLINE
 
+    ; A class body opens by recording where it came from, which is what makes
+    ; C.__module__ and C.__qualname__ exist.
+    cmp qword [rbp - CB_LAMBDA], 2
+    jne .body_start
+    mov rdi, rbx
+    mov rsi, r12
+    mov rdx, [rbp - CB_NAME]
+    mov rcx, [rbp - CB_LINE]
+    call cg_class_prologue
+    test eax, eax
+    jz .fail
+.body_start:
+
     ; --- body ---
-    cmp qword [rbp - CB_LAMBDA], 0
-    jne .lambda_body
+    cmp qword [rbp - CB_LAMBDA], 1
+    je .lambda_body
     mov rdi, rbx
     mov rsi, r12
     mov rdx, r13
     call cg_body
     test eax, eax
     jz .fail
-    ; Falling off the end of a function returns None.
+    ; A class body whose methods needed the class returns the cell holding it,
+    ; under the name __build_class__ looks for.  Anything else -- including a
+    ; class body with no such method -- falls off the end returning None.
+    cmp qword [rbp - CB_LAMBDA], 2
+    jne .plain_return
+    mov rdi, rbx
+    mov rsi, r12
+    mov rdx, [rbp - CB_SCOPE]
+    mov rcx, [rbp - CB_LINE]
+    call cg_classcell_epilogue
+    cmp rax, -1
+    je .fail
+    test rax, rax
+    jnz .assemble
+.plain_return:
     mov rdi, r12
     call cg_return_none
     jmp .assemble
@@ -1003,7 +1063,494 @@ DEF_FUNC cg_s_return, CSF_FRAME
     ret
 END_FUNC cg_s_return
 
+;; ============================================================================
+;; cg_s_classdef - `class C(bases): body`
+;;
+;;     PUSH_NULL; LOAD_BUILD_CLASS
+;;     <the body as a function>; LOAD_CONST 'C'; <bases...>; CALL 2+n
+;;     STORE the name
+;;
+;; __build_class__ takes the body as a function and calls it with a fresh
+;; mapping as its locals; that is why the body compiles to a code object with
+;; co_flags 0 and LOAD_NAME semantics rather than fast locals.
+;; ============================================================================
+CC4_COMP  equ 8
+CC4_UNIT  equ 16
+CC4_NODE  equ 24
+CC4_LINE  equ 32
+CC4_SCOPE equ 40
+CC4_CODE  equ 48
+CC4_NAME  equ 56
+CC4_BASES equ 64
+CC4_NARGS equ 72
+CC4_UNIT2 equ 80 + CompUnit_size
+CC4_FRAME equ ((CC4_UNIT2 + 15) / 16) * 16 + 8      ; + 3 pushes = 16-aligned
+DEF_FUNC cg_class_value, CC4_FRAME
+    push rbx
+    push r12
+    push r13
+    mov rbx, rdi
+    mov r12, rsi
+    mov r13, rdx
+
+    mov rdi, rbx
+    mov rsi, r13
+    call ast_at
+    mov ecx, [rax + AstNode.lineno]
+    mov [rbp - CC4_LINE], rcx
+    mov [r12 + CompUnit.curline], ecx
+    movzx ecx, word [rax + AstNode.flags]
+    mov [rbp - CC4_SCOPE], rcx
+    mov ecx, [rax + AstNode.b]
+    mov [rbp - CC4_BASES], rcx
+
+    mov rdi, r12
+    mov esi, OP_PUSH_NULL
+    xor edx, edx
+    mov rcx, [rbp - CC4_LINE]
+    call cg_emit
+    mov rdi, r12
+    mov esi, OP_LOAD_BUILD_CLASS
+    xor edx, edx
+    mov rcx, [rbp - CC4_LINE]
+    call cg_emit
+
+    ; The body, compiled as a function of no arguments.
+    mov rax, [rbp - CC4_SCOPE]
+    mov [rbx + Comp.cur_scope], eax
+    mov rdi, rbx
+    mov rsi, [rbp - CC4_SCOPE]
+    xor edx, edx
+    call sym_finalize
+    test eax, eax
+    jz .fail
+
+    mov rdi, rbx
+    lea rsi, [rbp - CC4_UNIT2]
+    mov rdx, r13
+    mov ecx, 2                          ; a class body
+    call cg_compile_body
+    mov [rbp - CC4_CODE], rax
+    test rax, rax
+    jz .fail
+
+    mov rdi, r12
+    mov rsi, [rbp - CC4_CODE]
+    call cg_const
+    mov rdx, rax
+    mov rdi, r12
+    mov esi, OP_LOAD_CONST
+    mov rcx, [rbp - CC4_LINE]
+    call cg_emit
+    mov rdi, r12
+    mov esi, OP_MAKE_FUNCTION
+    xor edx, edx
+    mov rcx, [rbp - CC4_LINE]
+    call cg_emit
+
+    ; The class name, as a constant: __build_class__ takes it as an argument,
+    ; quite separately from the name the result is bound to.
+    mov rdi, rbx
+    mov rsi, r13
+    call ast_at
+    mov esi, [rax + AstNode.a]
+    mov rdi, rbx
+    call ast_obj_at
+    mov rdi, r12
+    mov rsi, rax
+    call cg_const
+    mov rdx, rax
+    mov rdi, r12
+    mov esi, OP_LOAD_CONST
+    mov rcx, [rbp - CC4_LINE]
+    call cg_emit
+
+    mov qword [rbp - CC4_NARGS], 2
+    cmp qword [rbp - CC4_BASES], 0
+    je .call
+
+    ; The bases were parsed as a call's argument list; emit them the same way.
+    mov rdi, rbx
+    mov rsi, r12
+    mov rdx, [rbp - CC4_BASES]
+    call cg_call_args_only
+    cmp rax, -1
+    je .fail
+    add [rbp - CC4_NARGS], rax
+
+.call:
+    mov rdi, r12
+    mov esi, OP_CALL
+    mov rdx, [rbp - CC4_NARGS]
+    mov rcx, [rbp - CC4_LINE]
+    call cg_emit
+    mov eax, 1
+    jmp .ret
+.fail:
+    xor eax, eax
+.ret:
+    ; Restore the enclosing scope for whatever follows.
+    mov eax, [r12 + CompUnit.scope]
+    mov [rbx + Comp.cur_scope], eax
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC cg_class_value
+
+;; ============================================================================
+;; cg_s_classdef - build the class and bind its name.
+;; ============================================================================
+DEF_FUNC cg_s_classdef, CSF_FRAME
+    push rbx
+    push r12
+    push r13
+    mov rbx, rdi
+    mov r12, rsi
+    mov r13, rdx
+    call cg_class_value
+    test eax, eax
+    jz .fail
+    mov rdi, rbx
+    mov rsi, r13
+    call ast_at
+    mov esi, [rax + AstNode.a]
+    mov rdi, rbx
+    call ast_obj_at
+    mov rdx, rax
+    mov rdi, rbx
+    mov rsi, r12
+    mov ecx, CTX_STORE
+    xor r8d, r8d
+    call cg_nameop
+    jmp .ret
+.fail:
+    xor eax, eax
+.ret:
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC cg_s_classdef
+
+;; ============================================================================
+;; cg_s_decorated - `@d1 @d2 def f(): ...`
+;;
+;; The decorators are evaluated top to bottom and applied bottom to top, so the
+;; callables are pushed in source order and the calls come out reversed.
+;; ============================================================================
+CD3_COMP  equ 8
+CD3_UNIT  equ 16
+CD3_NODE  equ 24
+CD3_LINE  equ 32
+CD3_I     equ 40
+CD3_N     equ 48
+CD3_TGT   equ 56
+CD3_NAME  equ 64
+CD3_FRAME equ 72          ; + 3 pushes = 96
+DEF_FUNC cg_s_decorated, CD3_FRAME
+    push rbx
+    push r12
+    push r13
+    mov rbx, rdi
+    mov r12, rsi
+    mov r13, rdx
+
+    mov rdi, rbx
+    mov rsi, r13
+    call ast_at
+    mov ecx, [rax + AstNode.lineno]
+    mov [rbp - CD3_LINE], rcx
+    mov ecx, [rax + AstNode.nchild]
+    mov [rbp - CD3_N], rcx
+    mov ecx, [rax + AstNode.a]
+    mov [rbp - CD3_TGT], rcx
+
+    ; Push each decorator, in source order, with its NULL self slot.
+    mov qword [rbp - CD3_I], 0
+.push_loop:
+    mov rax, [rbp - CD3_I]
+    cmp rax, [rbp - CD3_N]
+    jae .make
+    mov rdi, r12
+    mov esi, OP_PUSH_NULL
+    xor edx, edx
+    mov rcx, [rbp - CD3_LINE]
+    call cg_emit
+    mov rdi, rbx
+    mov rsi, r13
+    call ast_at
+    mov rsi, rax
+    mov rdx, [rbp - CD3_I]
+    mov rdi, rbx
+    call ast_child
+    mov rdx, rax
+    mov rdi, rbx
+    mov rsi, r12
+    call cg_expr
+    test eax, eax
+    jz .fail
+    inc qword [rbp - CD3_I]
+    jmp .push_loop
+
+.make:
+    ; Build the function or class itself, WITHOUT binding its name: the
+    ; decorators run first and the result of the last one is what gets bound.
+    mov rdi, rbx
+    mov rsi, r13
+    call ast_at
+    mov edx, [rax + AstNode.a]
+    mov rdi, rbx
+    mov rsi, rdx
+    call ast_at
+    movzx eax, byte [rax + AstNode.kind]
+    cmp eax, AST_CLASSDEF
+    je .class_target
+
+    mov rdi, rbx
+    mov rsi, r12
+    mov rdx, [rbp - CD3_TGT]
+    xor ecx, ecx
+    call cg_function
+    test eax, eax
+    jz .fail
+    mov rdi, rbx
+    mov rsi, [rbp - CD3_TGT]
+    call ast_at
+    mov esi, [rax + AstNode.a]
+    mov rdi, rbx
+    call ast_obj_at
+    mov [rbp - CD3_NAME], rax
+    jmp .apply
+
+.class_target:
+    mov rdi, rbx
+    mov rsi, r12
+    mov rdx, [rbp - CD3_TGT]
+    call cg_class_value
+    test eax, eax
+    jz .fail
+    mov rdi, rbx
+    mov rsi, [rbp - CD3_TGT]
+    call ast_at
+    mov esi, [rax + AstNode.a]
+    mov rdi, rbx
+    call ast_obj_at
+    mov [rbp - CD3_NAME], rax
+
+.apply:
+    ; One CALL per decorator, innermost first.
+    mov rax, [rbp - CD3_N]
+    mov [rbp - CD3_I], rax
+.apply_loop:
+    cmp qword [rbp - CD3_I], 0
+    je .bind
+    mov rdi, r12
+    mov esi, OP_CALL
+    mov edx, 1
+    mov rcx, [rbp - CD3_LINE]
+    call cg_emit
+    dec qword [rbp - CD3_I]
+    jmp .apply_loop
+
+.bind:
+    mov rdx, [rbp - CD3_NAME]
+    mov rdi, rbx
+    mov rsi, r12
+    mov ecx, CTX_STORE
+    xor r8d, r8d
+    call cg_nameop
+    jmp .ret
+.fail:
+    xor eax, eax
+.ret:
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC cg_s_decorated
+
+;; ============================================================================
+;; cg_class_prologue(Comp *c, CompUnit *u, PyStrObject *name, int line)
+;;     LOAD_NAME __name__ ; STORE_NAME __module__
+;;     LOAD_CONST 'C'     ; STORE_NAME __qualname__
+;; ============================================================================
+CQ_COMP  equ 8
+CQ_UNIT  equ 16
+CQ_NAME  equ 24
+CQ_LINE  equ 32
+CQ_FRAME equ 40           ; + 3 pushes = 64
+DEF_FUNC cg_class_prologue, CQ_FRAME
+    push rbx
+    push r12
+    push r13
+    mov rbx, rdi
+    mov r12, rsi
+    mov [rbp - CQ_NAME], rdx
+    mov [rbp - CQ_LINE], rcx
+
+    mov rdi, rbx
+    lea rsi, [rel cg_name_dunder]
+    call comp_intern_cstr
+    test rax, rax
+    jz .fail
+    mov rdi, r12
+    mov rsi, rax
+    call cg_name
+    mov rdx, rax
+    mov rdi, r12
+    mov esi, OP_LOAD_NAME
+    mov rcx, [rbp - CQ_LINE]
+    call cg_emit
+
+    mov rdi, rbx
+    lea rsi, [rel cg_module_dunder]
+    call comp_intern_cstr
+    test rax, rax
+    jz .fail
+    mov rdi, r12
+    mov rsi, rax
+    call cg_name
+    mov rdx, rax
+    mov rdi, r12
+    mov esi, OP_STORE_NAME
+    mov rcx, [rbp - CQ_LINE]
+    call cg_emit
+
+    mov rdi, r12
+    mov rsi, [rbp - CQ_NAME]
+    INCREF rsi
+    call cg_const
+    mov rdx, rax
+    mov rdi, r12
+    mov esi, OP_LOAD_CONST
+    mov rcx, [rbp - CQ_LINE]
+    call cg_emit
+
+    mov rdi, rbx
+    lea rsi, [rel cg_qualname_dunder]
+    call comp_intern_cstr
+    test rax, rax
+    jz .fail
+    mov rdi, r12
+    mov rsi, rax
+    call cg_name
+    mov rdx, rax
+    mov rdi, r12
+    mov esi, OP_STORE_NAME
+    mov rcx, [rbp - CQ_LINE]
+    call cg_emit
+
+    mov eax, 1
+    jmp .cq_ret
+.fail:
+    xor eax, eax
+.cq_ret:
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC cg_class_prologue
+
+;; ============================================================================
+;; cg_classcell_epilogue(Comp *c, CompUnit *u, uint32_t scope, int line)
+;;   -> rax = 1 if it emitted a return, 0 if there was nothing to do, -1 error
+;;
+;;     LOAD_CLOSURE __class__ ; COPY 1 ; STORE_NAME __classcell__ ; RETURN_VALUE
+;;
+;; __build_class__ looks for __classcell__ in the namespace the body produced
+;; and fills the cell with the finished class, which is what a method's
+;; __class__ free variable then reads.
+;; ============================================================================
+CE3_COMP  equ 8
+CE3_UNIT  equ 16
+CE3_SCOPE equ 24
+CE3_LINE  equ 32
+CE3_FRAME equ 40          ; + 3 pushes = 64
+DEF_FUNC cg_classcell_epilogue, CE3_FRAME
+    push rbx
+    push r12
+    push r13
+    mov rbx, rdi
+    mov r12, rsi
+    mov [rbp - CE3_SCOPE], rdx
+    mov [rbp - CE3_LINE], rcx
+
+    mov rdi, rbx
+    lea rsi, [rel cg_class_dunder]
+    call comp_intern_cstr
+    test rax, rax
+    jz .none
+    mov r13, rax
+    mov rdi, rbx
+    mov rsi, [rbp - CE3_SCOPE]
+    mov rdx, r13
+    call sym_scope_of
+    cmp eax, SYM_CELL
+    jne .none
+
+    mov rdi, rbx
+    mov rsi, [rbp - CE3_SCOPE]
+    mov rdx, r13
+    call sym_lp_index
+    cmp eax, -1
+    je .none
+    mov edx, eax
+    mov rdi, r12
+    mov esi, OP_LOAD_CLOSURE
+    mov rcx, [rbp - CE3_LINE]
+    call cg_emit
+    mov rdi, r12
+    mov esi, OP_COPY
+    mov edx, 1
+    mov rcx, [rbp - CE3_LINE]
+    call cg_emit
+
+    mov rdi, rbx
+    lea rsi, [rel cg_classcell_dunder]
+    call comp_intern_cstr
+    test rax, rax
+    jz .oops
+    mov rdi, r12
+    mov rsi, rax
+    call cg_name
+    mov rdx, rax
+    mov rdi, r12
+    mov esi, OP_STORE_NAME
+    mov rcx, [rbp - CE3_LINE]
+    call cg_emit
+    mov rdi, r12
+    mov esi, OP_RETURN_VALUE
+    xor edx, edx
+    mov rcx, [rbp - CE3_LINE]
+    call cg_emit
+    mov eax, 1
+    jmp .ret
+.oops:
+    mov rax, -1
+    jmp .ret
+.none:
+    xor eax, eax
+.ret:
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC cg_classcell_epilogue
+
 section .rodata
+cg_class_dunder:     db "__class__", 0
+cg_classcell_dunder: db "__classcell__", 0
+
+cg_name_dunder:     db "__name__", 0
+cg_module_dunder:   db "__module__", 0
+cg_qualname_dunder: db "__qualname__", 0
+
 cg_lambda_name: db "<lambda>", 0
 
 

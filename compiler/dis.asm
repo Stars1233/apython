@@ -12,9 +12,11 @@
 %include "macros.inc"
 %include "object.inc"
 %include "opcodes.inc"
+%include "value.inc"
 %include "compiler.inc"
 
 extern ap_strlen
+extern code_type
 extern compile_source
 extern current_exception
 extern obj_decref
@@ -210,9 +212,7 @@ DEF_FUNC dis_main, 16           ; + 2 pushes = 32
     test rbx, rbx
     jz .failed
     mov rdi, rbx
-    call code_disassemble
-    mov rdi, rbx
-    call code_dump_exctab
+    call code_dump_all
     xor eax, eax
     pop r12
     pop rbx
@@ -339,5 +339,60 @@ DEF_FUNC code_dump_exctab, DX_FRAME
 
 .real_done:
 END_FUNC code_dump_exctab
+
+section .text
+
+;; ============================================================================
+;; code_dump_all(PyCodeObject *code)
+;; The code object and everything nested in its constants.  A compiler bug in a
+;; method or a comprehension is invisible from the module's own bytecode, so
+;; the recursion is the point.
+;; ============================================================================
+DA_CODE  equ 8
+DA_I     equ 16
+DA_FRAME equ 24           ; + 2 pushes = 40
+DEF_FUNC code_dump_all, DA_FRAME
+    push rbx
+    push r12
+    mov rbx, rdi
+    mov rdi, rbx
+    call code_disassemble
+    mov rdi, rbx
+    call code_dump_exctab
+
+    mov r12, [rbx + PyCodeObject.co_consts]
+    test r12, r12
+    jz .done
+    mov qword [rbp - DA_I], 0
+.loop:
+    mov rax, [rbp - DA_I]
+    cmp rax, [r12 + PyVarObject.ob_size]
+    jae .done
+    mov rdx, [r12 + PyTupleObject.ob_item]
+    mov rcx, [rbp - DA_I]
+    mov rax, [rdx + rcx*8]
+    ; Only a pointer can be a code object; an immediate int or float is not.
+    V_TEST_PTR rax, r8
+    ja .next
+    test rax, rax
+    jz .next
+    mov rdx, [rax + PyObject.ob_type]
+    lea rcx, [rel code_type]
+    cmp rdx, rcx
+    jne .next
+    push rax
+    CSTRING rdi, `--- nested code object\n`
+    call dis_puts
+    pop rdi
+    call code_dump_all
+.next:
+    inc qword [rbp - DA_I]
+    jmp .loop
+.done:
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC code_dump_all
 
 ASM_INIT

@@ -947,7 +947,7 @@ op_meta:                ; { cache, effect, flags, jump effect }
     db 0     , 0     , 0                                 , 0        ;  72
     db 0     , 0     , 0                                 , 0        ;  73
     db 0     , 1     , 0                                 , 0        ;  74 LOAD_ASSERTION_ERROR
-    db 0     , 0     , 0                                 , 0        ;  75 RETURN_GENERATOR
+    db 0     , 1     , 0                                 , 0        ;  75 RETURN_GENERATOR
     db 0     , 0     , 0                                 , 0        ;  76
     db 0     , 0     , 0                                 , 0        ;  77
     db 0     , 0     , 0                                 , 0        ;  78

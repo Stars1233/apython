@@ -577,6 +577,42 @@ DEF_FUNC cs_return_none, 8
 END_FUNC cs_return_none
 
 ;; ============================================================================
+;; comp_intern_cstr(Comp *c, const char *s) -> rax = a borrowed PyStrObject*
+;;
+;; For names the compiler invents rather than reads from the source --
+;; __module__, __qualname__, the leading component of a dotted import.  They go
+;; into comp.objs like every other literal, because CompUnit.names holds
+;; BORROWED references: a string created and released at the call site leaves a
+;; dangling pointer in co_names, and the failure surfaces as a wild jump inside
+;; dict_lookup at run time.
+;; ============================================================================
+DEF_FUNC comp_intern_cstr, 16
+    push rbx
+    push r12
+    mov rbx, rdi
+    mov rdi, rsi
+    call str_from_cstr_heap
+    test rax, rax
+    jz .fail
+    mov rdi, rbx
+    mov rsi, rax
+    call ast_obj
+    mov rdi, rbx
+    mov rsi, rax
+    call ast_obj_at
+    pop r12
+    pop rbx
+    leave
+    ret
+.fail:
+    xor eax, eax
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC comp_intern_cstr
+
+;; ============================================================================
 ;; comp_empty_string(Comp *c) -> rax = a borrowed empty PyStrObject*
 ;; `from . import x` has no module name, but IMPORT_NAME still needs one.
 ;; ============================================================================
