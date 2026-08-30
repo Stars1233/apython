@@ -1,8 +1,7 @@
 # Modules that import under apython, and the crash count.
 # Regenerate with: bash tests/stdlib_probe.sh --record
 # A module listed here must keep importing; crashes must not rise.
-crash_ceiling 1
-crash ast
+crash_ceiling 0
 ok asyncio
 ok bisect
 ok colorsys

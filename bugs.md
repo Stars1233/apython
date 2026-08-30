@@ -76,19 +76,6 @@ than lying — but they are ordinary Python that does not work:
 - Six builtin exceptions: `IOError` / `EnvironmentError`, `FileExistsError`,
   `IndentationError`, `TabError`, `UnicodeTranslateError`.
 
-- **A deep chain of failing imports corrupts the heap on teardown.**
-  `import ast` against CPython's Lib (which fails at `_weakref`) reports the
-  error correctly and then aborts at exit with "double free or corruption".
-  Valgrind puts the invalid write in `gc_list_remove` (`src/gc.asm:110`),
-  reached from `gc_dealloc` while a code object's `co_consts` are released:
-  a node's `gc_prev`/`gc_next` is off by `GC_HEAD_SIZE`, i.e. an object
-  pointer where a GC head belongs, or a stale one.  Predates the import
-  fixes -- those merely made the teardown reachable.  Three nearby defects
-  were fixed while narrowing it (`gc_untrack` not clearing the node's own
-  links, `gc_track` not guarding against a second insertion, `dict_clear_gc`
-  not tombstoning), none of which is the cause.  `tests/stdlib_floor.txt`
-  records `ast` and `pyclbr` as the two modules that reach it.
-
 ## Robustness
 
 - **Recursive deallocation overflows the stack**: `a=[]`, then 300k times

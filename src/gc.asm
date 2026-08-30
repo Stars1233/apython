@@ -388,8 +388,14 @@ DEF_FUNC gc_collect_gen, GCG_FRAME
     lea rax, [rbx + GC_HEAD_SIZE]
     mov rcx, [rax + PyObject.ob_refcnt]
 
-    ; Store gc_refs in gc_prev: (gc_refs << GC_PREV_SHIFT) | 0 (tracked state)
+    ; Store gc_refs in gc_prev, with the COLLECTING bit set.  That bit is
+    ; what marks a node as belonging to *this* collection: phase 2 traverses
+    ; young objects but reaches referents in older generations too, and those
+    ; still hold a real prev pointer in the same field.  Without the mark,
+    ; gc_visit_decref subtracted 4 from an older node's prev pointer and the
+    ; list was silently corrupt until something tried to unlink through it.
     shl rcx, GC_PREV_SHIFT
+    or rcx, GC_PREV_MASK_COLLECTING
     mov [rbx + PyGC_Head.gc_prev], rcx
 
     mov rbx, [rbx + PyGC_Head.gc_next]
@@ -499,56 +505,48 @@ DEF_FUNC gc_collect_gen, GCG_FRAME
     jmp .phase4_loop
 .phase4_done:
 
-    ; ---- Phase 5: Clear unreachable objects, then let DECREF handle dealloc ----
-    ; First pass: call tp_clear on all unreachable objects
+    ; ---- Phase 5: Clear the unreachable set, letting DECREF free it ----
+    ; One pass, and the head is re-read from the sentinel every time round.
+    ; Caching a next pointer across tp_clear is what broke here: clearing one
+    ; object drops references to others in the same list, so the node that
+    ; had been saved as "next" was often freed before the walk reached it.
+    ; Holding a reference across tp_clear is the other half -- it keeps the
+    ; object under our own feet alive, exactly as delete_garbage does.
+.phase5_loop:
     mov rbx, [r15 + PyGC_Head.gc_next]
-
-.phase5_clear_loop:
     cmp rbx, r15
-    je .phase5_clear_done
+    je .phase5_done
 
-    mov r13, [rbx + PyGC_Head.gc_next]  ; save next
+    lea r13, [rbx + GC_HEAD_SIZE]          ; r13 = obj
+    inc qword [r13 + PyObject.ob_refcnt]
 
-    lea rdi, [rbx + GC_HEAD_SIZE]  ; obj
-    mov rax, [rdi + PyObject.ob_type]
+    mov rax, [r13 + PyObject.ob_type]
     mov rax, [rax + PyTypeObject.tp_clear]
     test rax, rax
-    jz .phase5_clear_next
-    ; rdi already = obj
-    call rax                   ; tp_clear(obj)
+    jz .phase5_no_clear
+    mov rdi, r13
+    call rax                               ; tp_clear(obj)
+.phase5_no_clear:
 
-.phase5_clear_next:
-    mov rbx, r13
-    jmp .phase5_clear_loop
-.phase5_clear_done:
-
-    ; Second pass: unlink from unreachable list and DECREF each object.
-    ; tp_clear broke the cycles, so DECREF should reach 0 and trigger dealloc.
-    mov rbx, [r15 + PyGC_Head.gc_next]
-
-.phase5_dealloc_loop:
-    cmp rbx, r15
-    je .phase5_dealloc_done
-
-    mov r13, [rbx + PyGC_Head.gc_next]  ; save next
-
-    ; Unlink from unreachable (so gc_dealloc doesn't double-remove)
+    ; Still at the head?  Then clearing it did not take it out of the list,
+    ; and the loop has to, or it never advances.  Survivors join the young
+    ; list and are promoted with it; CPython moves them to `old` the same way.
+    cmp qword [r15 + PyGC_Head.gc_next], rbx
+    jne .phase5_drop
     mov rdi, rbx
     call gc_list_remove
-    ; Mark as untracked
-    mov qword [rbx + PyGC_Head.gc_next], 0
-    mov qword [rbx + PyGC_Head.gc_prev], 0
+    mov rdi, rbx
+    mov rsi, r12
+    call gc_list_append
 
-    ; DECREF the object
-    lea rdi, [rbx + GC_HEAD_SIZE]
+.phase5_drop:
+    mov rdi, r13
     dec qword [rdi + PyObject.ob_refcnt]
-    jnz .phase5_dealloc_next
+    jnz .phase5_loop
     call obj_dealloc
+    jmp .phase5_loop
 
-.phase5_dealloc_next:
-    mov rbx, r13
-    jmp .phase5_dealloc_loop
-.phase5_dealloc_done:
+.phase5_done:
 
     ; ---- Move surviving reachable objects to next generation ----
     mov eax, [rbp - GCG_GEN]
@@ -640,8 +638,11 @@ DEF_FUNC_BARE gc_visit_decref
     ; Check if object is tracked (gc_next != 0)
     cmp qword [rax + PyGC_Head.gc_next], 0
     je .skip
-    ; Decrement gc_refs (stored in gc_prev bits 2+)
+    ; Only nodes in the generation being collected carry gc_refs here; every
+    ; other tracked object still has a live prev pointer in this field.
     mov rcx, [rax + PyGC_Head.gc_prev]
+    test rcx, GC_PREV_MASK_COLLECTING
+    jz .skip
     mov rdx, rcx
     and rdx, ~GC_PREV_MASK    ; extract state bits (low 2)
     shr rcx, GC_PREV_SHIFT    ; gc_refs
