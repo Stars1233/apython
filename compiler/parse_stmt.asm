@@ -40,6 +40,7 @@ extern par_syntax_error
 extern exc_SyntaxError_type
 
 BP_NONE equ 0
+BP_COMPARE equ 12
 
 ; --- Named frame-layout constants ---
 PM_COMP  equ 8
@@ -1132,6 +1133,467 @@ DEF_FUNC_LOCAL ps_from, PFR_FRAME
     ret
 END_FUNC ps_from
 
+;; ============================================================================
+;; par_suite(Comp *c) -> rax = an AST_BLOCK node, 0 on error
+;;
+;; Either `: stmt; stmt` on one line, or `: NEWLINE INDENT stmts DEDENT`.  The
+;; block node exists so an empty `else` and a missing one stay distinguishable:
+;; node 0 means there was no clause at all.
+;; ============================================================================
+PSU_COMP  equ 8
+PSU_MARK  equ 16
+PSU_LINE  equ 24
+PSU_FRAME equ 24          ; + 1 push = 32
+DEF_FUNC par_suite, PSU_FRAME
+    push rbx
+    mov rbx, rdi
+    call par_peek
+    mov ecx, [rax + Token.lineno]
+    mov [rbp - PSU_LINE], rcx
+
+    mov rdi, rbx
+    mov esi, TOK_COLON
+    CSTRING rdx, "expected ':'"
+    call par_expect
+    test eax, eax
+    jz .fail
+
+    mov rdi, rbx
+    call ast_mark
+    mov [rbp - PSU_MARK], rax
+
+    mov rdi, rbx
+    call par_kind
+    cmp eax, TOK_NEWLINE
+    je .block
+
+    ; A one-line suite: `if x: a; b`
+    mov rdi, rbx
+    call par_simple_stmts
+    test eax, eax
+    jz .fail
+    jmp .done
+
+.block:
+    mov rdi, rbx
+    call par_advance                    ; the NEWLINE
+    mov rdi, rbx
+    mov esi, TOK_INDENT
+    CSTRING rdx, "expected an indented block"
+    call par_expect
+    test eax, eax
+    jz .fail
+.stmts:
+    mov rdi, rbx
+    call par_kind
+    cmp eax, TOK_DEDENT
+    je .end_block
+    cmp eax, TOK_ENDMARKER
+    je .end_block
+    cmp eax, TOK_NEWLINE
+    jne .one
+    mov rdi, rbx
+    call par_advance
+    jmp .stmts
+.one:
+    mov rdi, rbx
+    call par_statement_any
+    test eax, eax
+    jz .fail
+    jmp .stmts
+.end_block:
+    mov rdi, rbx
+    call par_kind
+    cmp eax, TOK_ENDMARKER
+    je .done
+    mov rdi, rbx
+    call par_advance                    ; the DEDENT
+
+.done:
+    mov rdi, rbx
+    mov esi, AST_BLOCK
+    mov rdx, [rbp - PSU_LINE]
+    mov rcx, [rbp - PSU_MARK]
+    call par_finish_list
+    pop rbx
+    leave
+    ret
+.fail:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+END_FUNC par_suite
+
+;; ============================================================================
+;; par_statement_any(Comp *c) -> rax = 1 ok, 0 error
+;; One statement, compound or simple, pushed onto the pending stack.  A
+;; compound statement is a whole logical unit and consumes its own NEWLINEs; a
+;; simple one is part of a `;`-separated line.
+;; ============================================================================
+DEF_FUNC par_statement_any, 8
+    push rbx
+    mov rbx, rdi
+    call par_kind
+    cmp eax, TOK_IF
+    je .compound
+    cmp eax, TOK_WHILE
+    je .compound
+    cmp eax, TOK_FOR
+    je .compound
+    mov rdi, rbx
+    call par_simple_stmts
+    pop rbx
+    leave
+    ret
+.compound:
+    mov rdi, rbx
+    call par_statement
+    test rax, rax
+    jz .fail
+    mov rdi, rbx
+    mov rsi, rax
+    call ast_push
+    mov eax, 1
+    pop rbx
+    leave
+    ret
+.fail:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+END_FUNC par_statement_any
+
+;; ============================================================================
+;; ps_if - `if`, `elif` chains and `else`
+;; An `elif` is parsed as an `if` nested inside the outer one's else block,
+;; which is what makes an arbitrarily long chain need no special handling in
+;; either the parser or the code generator.
+;; ============================================================================
+PIF_COMP  equ 8
+PIF_LINE  equ 16
+PIF_TEST  equ 24
+PIF_BODY  equ 32
+PIF_ELSE  equ 40
+PIF_NODE  equ 48
+PIF_MARK  equ 56
+PIF_FRAME equ 56          ; + 1 push = 64
+DEF_FUNC_LOCAL ps_if, PIF_FRAME
+    push rbx
+    mov rbx, rdi
+    call par_peek
+    mov ecx, [rax + Token.lineno]
+    mov [rbp - PIF_LINE], rcx
+    mov rdi, rbx
+    call par_advance                    ; `if` or `elif`
+
+    mov rdi, rbx
+    mov esi, BP_NONE
+    call par_expr
+    test rax, rax
+    jz .fail
+    mov [rbp - PIF_TEST], rax
+
+    mov rdi, rbx
+    call par_suite
+    test rax, rax
+    jz .fail
+    mov [rbp - PIF_BODY], rax
+    mov qword [rbp - PIF_ELSE], 0
+
+    mov rdi, rbx
+    call par_kind
+    cmp eax, TOK_ELIF
+    je .elif
+    cmp eax, TOK_ELSE
+    jne .build
+
+    mov rdi, rbx
+    call par_advance
+    mov rdi, rbx
+    call par_suite
+    test rax, rax
+    jz .fail
+    mov [rbp - PIF_ELSE], rax
+    jmp .build
+
+.elif:
+    ; Wrap the nested `if` in a block so the else branch has a uniform shape.
+    mov rdi, rbx
+    call ast_mark
+    mov [rbp - PIF_MARK], rax
+    mov rdi, rbx
+    call ps_if
+    test rax, rax
+    jz .fail
+    mov rdi, rbx
+    mov rsi, rax
+    call ast_push
+    mov rdi, rbx
+    mov esi, AST_BLOCK
+    mov rdx, [rbp - PIF_LINE]
+    mov rcx, [rbp - PIF_MARK]
+    call par_finish_list
+    test rax, rax
+    jz .fail
+    mov [rbp - PIF_ELSE], rax
+
+.build:
+    mov rdi, rbx
+    mov esi, AST_IF
+    xor edx, edx
+    mov rcx, [rbp - PIF_LINE]
+    mov r8, [rbp - PIF_TEST]
+    mov r9, [rbp - PIF_ELSE]
+    call ast_make
+    mov [rbp - PIF_NODE], rax
+    mov rdi, rbx
+    mov rsi, rax
+    call ast_at
+    mov rdx, [rbp - PIF_BODY]
+    mov [rax + AstNode.c], edx
+    mov rax, [rbp - PIF_NODE]
+    pop rbx
+    leave
+    ret
+.fail:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+END_FUNC ps_if
+
+;; ============================================================================
+;; ps_while - `while test: body [else: body]`
+;; ============================================================================
+DEF_FUNC_LOCAL ps_while, PIF_FRAME
+    push rbx
+    mov rbx, rdi
+    call par_peek
+    mov ecx, [rax + Token.lineno]
+    mov [rbp - PIF_LINE], rcx
+    mov rdi, rbx
+    call par_advance
+
+    mov rdi, rbx
+    mov esi, BP_NONE
+    call par_expr
+    test rax, rax
+    jz .fail
+    mov [rbp - PIF_TEST], rax
+
+    mov rdi, rbx
+    call par_suite
+    test rax, rax
+    jz .fail
+    mov [rbp - PIF_BODY], rax
+    mov qword [rbp - PIF_ELSE], 0
+
+    mov rdi, rbx
+    call par_kind
+    cmp eax, TOK_ELSE
+    jne .build
+    mov rdi, rbx
+    call par_advance
+    mov rdi, rbx
+    call par_suite
+    test rax, rax
+    jz .fail
+    mov [rbp - PIF_ELSE], rax
+
+.build:
+    mov rdi, rbx
+    mov esi, AST_WHILE
+    xor edx, edx
+    mov rcx, [rbp - PIF_LINE]
+    mov r8, [rbp - PIF_TEST]
+    mov r9, [rbp - PIF_ELSE]
+    call ast_make
+    mov [rbp - PIF_NODE], rax
+    mov rdi, rbx
+    mov rsi, rax
+    call ast_at
+    mov rdx, [rbp - PIF_BODY]
+    mov [rax + AstNode.c], edx
+    mov rax, [rbp - PIF_NODE]
+    pop rbx
+    leave
+    ret
+.fail:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+END_FUNC ps_while
+
+;; ============================================================================
+;; ps_for - `for target in iter: body [else: body]`
+;; The target is parsed as an expression and re-marked, exactly as an
+;; assignment target is -- `for a, b in pairs` unpacks for the same reason
+;; `a, b = pair` does.
+;; ============================================================================
+PFO_TGT   equ 64
+PFO_ITER  equ 72
+PFO_FRAME equ 80          ; + 1 push = 88 -- see below
+DEF_FUNC_LOCAL ps_for, PIF_FRAME
+    push rbx
+    mov rbx, rdi
+    call par_peek
+    mov ecx, [rax + Token.lineno]
+    mov [rbp - PIF_LINE], rcx
+    mov rdi, rbx
+    call par_advance
+
+    mov rdi, rbx
+    call par_for_target
+    test rax, rax
+    jz .fail
+    mov [rbp - PIF_TEST], rax           ; the target
+
+    mov rdi, rbx
+    mov esi, TOK_IN
+    CSTRING rdx, "expected 'in' after the loop target"
+    call par_expect
+    test eax, eax
+    jz .fail
+
+    mov rdi, rbx
+    call par_exprlist_stmt              ; `for x in a, b` iterates the tuple
+    test rax, rax
+    jz .fail
+    mov [rbp - PIF_NODE], rax           ; the iterable
+
+    mov rdi, rbx
+    call par_suite
+    test rax, rax
+    jz .fail
+    mov [rbp - PIF_BODY], rax
+    mov qword [rbp - PIF_ELSE], 0
+
+    mov rdi, rbx
+    call par_kind
+    cmp eax, TOK_ELSE
+    jne .build
+    mov rdi, rbx
+    call par_advance
+    mov rdi, rbx
+    call par_suite
+    test rax, rax
+    jz .fail
+    mov [rbp - PIF_ELSE], rax
+
+.build:
+    mov rdi, rbx
+    mov esi, AST_FOR
+    xor edx, edx
+    mov rcx, [rbp - PIF_LINE]
+    mov r8, [rbp - PIF_TEST]            ; a = target
+    mov r9, [rbp - PIF_NODE]            ; b = iterable
+    call ast_make
+    mov [rbp - PIF_MARK], rax
+    mov rdi, rbx
+    mov rsi, rax
+    call ast_at
+    mov rdx, [rbp - PIF_BODY]
+    mov [rax + AstNode.c], edx          ; c = body block
+    mov rdx, [rbp - PIF_ELSE]
+    mov [rax + AstNode.clist], edx      ; clist doubles as the else block here
+    mov rax, [rbp - PIF_MARK]
+    pop rbx
+    leave
+    ret
+.fail:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+END_FUNC ps_for
+
+;; ============================================================================
+;; par_for_target(Comp *c) -> node, marked for storing
+;; Stops at `in`, which par_expr would otherwise take as a comparison.
+;; ============================================================================
+PFT_COMP  equ 8
+PFT_FIRST equ 16
+PFT_LINE  equ 24
+PFT_MARK  equ 32
+PFT_FRAME equ 40          ; + 1 push = 48
+DEF_FUNC par_for_target, PFT_FRAME
+    push rbx
+    mov rbx, rdi
+    call par_peek
+    mov ecx, [rax + Token.lineno]
+    mov [rbp - PFT_LINE], rcx
+
+    mov rdi, rbx
+    mov esi, BP_COMPARE                 ; above `in`, so the loop keyword ends it
+    call par_expr
+    test rax, rax
+    jz .fail
+    mov [rbp - PFT_FIRST], rax
+
+    mov rdi, rbx
+    call par_kind
+    cmp eax, TOK_COMMA
+    jne .single
+
+    mov rdi, rbx
+    call ast_mark
+    mov [rbp - PFT_MARK], rax
+    mov rdi, rbx
+    mov rsi, [rbp - PFT_FIRST]
+    call ast_push
+.loop:
+    mov rdi, rbx
+    call par_advance                    ; the comma
+    mov rdi, rbx
+    call par_kind
+    cmp eax, TOK_IN
+    je .close
+    mov rdi, rbx
+    mov esi, BP_COMPARE
+    call par_expr
+    test rax, rax
+    jz .fail
+    mov rdi, rbx
+    mov rsi, rax
+    call ast_push
+    mov rdi, rbx
+    call par_kind
+    cmp eax, TOK_COMMA
+    je .loop
+.close:
+    mov rdi, rbx
+    mov esi, AST_TUPLE
+    mov rdx, [rbp - PFT_LINE]
+    mov rcx, [rbp - PFT_MARK]
+    call par_finish_list
+    test rax, rax
+    jz .fail
+    mov [rbp - PFT_FIRST], rax
+.single:
+    mov rdi, rbx
+    mov rsi, [rbp - PFT_FIRST]
+    mov edx, CTX_STORE
+    call ast_set_ctx
+    test eax, eax
+    jz .bad
+    mov rax, [rbp - PFT_FIRST]
+    pop rbx
+    leave
+    ret
+.bad:
+    mov rdi, rbx
+    CSTRING rsi, "cannot assign to that loop target"
+    call par_syntax_error
+.fail:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+END_FUNC par_for_target
+
 section .rodata
 
 ;; ---------------------------------------------------------------------------
@@ -1213,10 +1675,10 @@ stmt_table:
     dq 0            ; 69 TOK_ELSE
     dq 0            ; 70 TOK_EXCEPT
     dq 0            ; 71 TOK_FINALLY
-    dq 0            ; 72 TOK_FOR
+    dq ps_for                  ; 72 TOK_FOR
     dq ps_from      ; 73 TOK_FROM
     dq ps_scope     ; 74 TOK_GLOBAL
-    dq 0            ; 75 TOK_IF
+    dq ps_if                   ; 75 TOK_IF
     dq ps_import    ; 76 TOK_IMPORT
     dq 0            ; 77 TOK_IN
     dq 0            ; 78 TOK_IS
@@ -1228,7 +1690,7 @@ stmt_table:
     dq ps_raise     ; 84 TOK_RAISE
     dq 0            ; 85 TOK_RETURN
     dq 0            ; 86 TOK_TRY
-    dq 0            ; 87 TOK_WHILE
+    dq ps_while                ; 87 TOK_WHILE
     dq 0            ; 88 TOK_WITH
     dq 0            ; 89 TOK_YIELD
 

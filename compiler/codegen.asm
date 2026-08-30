@@ -57,6 +57,9 @@ DEF_FUNC cg_unit_init, CU_FRAME
     lea rdi, [rbx + CompUnit.instrs]
     mov esi, Instr_size
     call buf_init
+    lea rdi, [rbx + CompUnit.loops]
+    mov esi, LoopFrame_size
+    call buf_init
     lea rdi, [rbx + CompUnit.labels]
     mov esi, 4
     call buf_init
@@ -104,6 +107,8 @@ DEF_FUNC cg_unit_free, 8
     lea rdi, [rbx + CompUnit.consts]
     call buf_free
     lea rdi, [rbx + CompUnit.labels]
+    call buf_free
+    lea rdi, [rbx + CompUnit.loops]
     call buf_free
     lea rdi, [rbx + CompUnit.instrs]
     call buf_free
@@ -293,6 +298,71 @@ DEF_FUNC cg_emit_jump, CJ_FRAME
     leave
     ret
 END_FUNC cg_emit_jump
+
+;; ============================================================================
+;; cg_emit_jump_back(CompUnit *u, int opcode, uint64_t label, int lineno)
+;; A backward jump.  The delta is measured the other way round, so the flag
+;; matters: with IF_JREL_FWD the assembler would compute a negative delta and
+;; the fixpoint's sanity check would reject it.
+;; ============================================================================
+DEF_FUNC cg_emit_jump_back, CJ_FRAME
+    push rbx
+    mov rbx, rsi
+    call cg_emit
+    mov byte [rax + Instr.flags], IF_LABELARG | IF_JREL_BACK
+    cmp rbx, OP_JUMP_BACKWARD
+    jne .done
+    or byte [rax + Instr.flags], IF_NOFALL
+.done:
+    pop rbx
+    leave
+    ret
+END_FUNC cg_emit_jump_back
+
+;; ============================================================================
+;; cg_loop_push(CompUnit *u, uint64_t brk, uint64_t cont, uint64_t npop)
+;; cg_loop_pop(CompUnit *u)
+;; cg_loop_top(CompUnit *u) -> rax = LoopFrame*, or 0 outside any loop
+;; ============================================================================
+DEF_FUNC cg_loop_push, 16
+    push rbx
+    push r12
+    mov rbx, rdi
+    mov r12, rsi
+    mov [rbp - 8], rdx
+    mov [rbp - 16], rcx
+    lea rdi, [rbx + CompUnit.loops]
+    mov esi, 1
+    call buf_reserve
+    mov [rax + LoopFrame.brk], r12d
+    mov rdx, [rbp - 8]
+    mov [rax + LoopFrame.cont], edx
+    mov rdx, [rbp - 16]
+    mov [rax + LoopFrame.npop], edx
+    mov dword [rax + LoopFrame.pad], 0
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC cg_loop_push
+
+DEF_FUNC_BARE cg_loop_pop
+    dec qword [rdi + CompUnit.loops + Buf.len]
+    ret
+END_FUNC cg_loop_pop
+
+DEF_FUNC_BARE cg_loop_top
+    mov rax, [rdi + CompUnit.loops + Buf.len]
+    test rax, rax
+    jz .none
+    dec rax
+    shl rax, 4                          ; sizeof(LoopFrame)
+    add rax, [rdi + CompUnit.loops + Buf.data]
+    ret
+.none:
+    xor eax, eax
+    ret
+END_FUNC cg_loop_top
 
 ;; ============================================================================
 ;; cg_cmpop(CompUnit *u, int cmpop, int lineno) -> emits one comparison

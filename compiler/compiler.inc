@@ -439,8 +439,20 @@ endstruc
 ;; .consts and .names hold BORROWED references: every literal already lives in
 ;; comp.objs, which owns it.  The tuples built at assembly time take their own.
 ;; ===========================================================================
+;; A loop being generated: where `break` and `continue` go, and how much the
+;; value stack has to be unwound to get there.  A for loop leaves its iterator
+;; on the stack across the body, so `break` must drop it; `continue` jumps back
+;; to the FOR_ITER, which still wants it.
+struc LoopFrame
+    .brk:    resd 1          ; label for `break`
+    .cont:   resd 1          ; label for `continue`
+    .npop:   resd 1          ; stack items `break` must pop first
+    .pad:    resd 1
+endstruc                     ; 16
+
 struc CompUnit
     .instrs:    resb Buf_size   ; Instr[]
+    .loops:     resb Buf_size   ; LoopFrame[], innermost last
     .labels:    resb Buf_size   ; int32[]: label id -> instruction index, -1 unbound
     .consts:    resb Buf_size   ; Value[]   (borrowed)
     .names:     resb Buf_size   ; PyStrObject*[] (borrowed)

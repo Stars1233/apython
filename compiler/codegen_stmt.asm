@@ -24,6 +24,10 @@ extern cg_children
 extern cg_const
 extern cg_emit
 extern cg_emit_jump
+extern cg_emit_jump_back
+extern cg_loop_pop
+extern cg_loop_push
+extern cg_loop_top
 extern cg_expr
 extern cg_label_bind
 extern cg_label_new
@@ -1417,6 +1421,450 @@ DEF_FUNC cg_fromlist_star, 16          ; + 2 pushes = 32
     ret
 END_FUNC cg_fromlist_star
 
+;; ============================================================================
+;; cg_block(Comp *c, CompUnit *u, uint32_t block) -> rax = 1 ok, 0 error
+;; An absent clause is node 0 and emits nothing, which is how a missing `else`
+;; stays distinct from an empty one.
+;; ============================================================================
+DEF_FUNC cg_block, CST_FRAME
+    test rdx, rdx
+    jz .empty
+    call cg_body
+    leave
+    ret
+.empty:
+    mov eax, 1
+    leave
+    ret
+END_FUNC cg_block
+
+;; ============================================================================
+;; cg_s_if - if / elif / else
+;;
+;;     <test>; POP_JUMP_IF_FALSE orelse
+;;     <body>; JUMP_FORWARD end
+;;   orelse:
+;;     <else>
+;;   end:
+;;
+;; An `elif` arrives here as an `if` nested in the else block, so a chain of
+;; any length needs nothing extra.
+;; ============================================================================
+DEF_FUNC_LOCAL cg_s_if, CST_FRAME
+    push rbx
+    push r12
+    push r13
+    mov rbx, rdi
+    mov r12, rsi
+    mov r13, rdx
+
+    mov rdi, rbx
+    mov rsi, r13
+    call ast_at
+    mov ecx, [rax + AstNode.lineno]
+    mov [rbp - CST_LINE], rcx
+
+    mov rdi, r12
+    call cg_label_new
+    mov [rbp - CST_TMP], rax            ; orelse
+    mov rdi, r12
+    call cg_label_new
+    mov [rbp - CST_TMP2], rax           ; end
+
+    mov rdi, rbx
+    mov rsi, r13
+    call ast_at
+    mov edx, [rax + AstNode.a]
+    mov rdi, rbx
+    mov rsi, r12
+    call cg_expr
+    test eax, eax
+    jz .fail
+    mov rdi, r12
+    mov esi, OP_POP_JUMP_IF_FALSE
+    mov rdx, [rbp - CST_TMP]
+    mov rcx, [rbp - CST_LINE]
+    call cg_emit_jump
+
+    mov rdi, rbx
+    mov rsi, r13
+    call ast_at
+    mov edx, [rax + AstNode.c]          ; the body block
+    mov rdi, rbx
+    mov rsi, r12
+    call cg_block
+    test eax, eax
+    jz .fail
+
+    mov rdi, rbx
+    mov rsi, r13
+    call ast_at
+    mov ecx, [rax + AstNode.b]
+    test ecx, ecx
+    jz .no_else                         ; nothing to jump over
+    mov rdi, r12
+    mov esi, OP_JUMP_FORWARD
+    mov rdx, [rbp - CST_TMP2]
+    mov rcx, [rbp - CST_LINE]
+    call cg_emit_jump
+.no_else:
+    mov rdi, r12
+    mov rsi, [rbp - CST_TMP]
+    call cg_label_bind
+
+    mov rdi, rbx
+    mov rsi, r13
+    call ast_at
+    mov edx, [rax + AstNode.b]
+    mov rdi, rbx
+    mov rsi, r12
+    call cg_block
+    test eax, eax
+    jz .fail
+
+    mov rdi, r12
+    mov rsi, [rbp - CST_TMP2]
+    call cg_label_bind
+    mov eax, 1
+.fail:
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC cg_s_if
+
+;; ============================================================================
+;; cg_s_while - while / else
+;;
+;;   top:  <test>; POP_JUMP_IF_FALSE orelse
+;;         <body>; JUMP_BACKWARD top
+;;   orelse: <else>
+;;   end:
+;;
+;; The `else` clause runs when the condition finally fails, NOT when the loop
+;; is broken out of -- which is why `break` targets `end` and the falling-off
+;; path targets `orelse`.  CPython additionally duplicates the test to rotate
+;; the loop; that is an optimization, and this shape is the one it optimizes.
+;; ============================================================================
+DEF_FUNC_LOCAL cg_s_while, CST_FRAME
+    push rbx
+    push r12
+    push r13
+    mov rbx, rdi
+    mov r12, rsi
+    mov r13, rdx
+
+    mov rdi, rbx
+    mov rsi, r13
+    call ast_at
+    mov ecx, [rax + AstNode.lineno]
+    mov [rbp - CST_LINE], rcx
+
+    mov rdi, r12
+    call cg_label_new
+    mov [rbp - CST_I], rax              ; top
+    mov rdi, r12
+    call cg_label_new
+    mov [rbp - CST_TMP], rax            ; orelse
+    mov rdi, r12
+    call cg_label_new
+    mov [rbp - CST_TMP2], rax           ; end
+
+    mov rdi, r12
+    mov rsi, [rbp - CST_I]
+    call cg_label_bind
+
+    mov rdi, rbx
+    mov rsi, r13
+    call ast_at
+    mov edx, [rax + AstNode.a]
+    mov rdi, rbx
+    mov rsi, r12
+    call cg_expr
+    test eax, eax
+    jz .fail
+    mov rdi, r12
+    mov esi, OP_POP_JUMP_IF_FALSE
+    mov rdx, [rbp - CST_TMP]
+    mov rcx, [rbp - CST_LINE]
+    call cg_emit_jump
+
+    mov rdi, r12
+    mov rsi, [rbp - CST_TMP2]           ; break
+    mov rdx, [rbp - CST_I]              ; continue
+    xor ecx, ecx                        ; nothing to pop
+    call cg_loop_push
+
+    mov rdi, rbx
+    mov rsi, r13
+    call ast_at
+    mov edx, [rax + AstNode.c]
+    mov rdi, rbx
+    mov rsi, r12
+    call cg_block
+    push rax
+    mov rdi, r12
+    call cg_loop_pop
+    pop rax
+    test eax, eax
+    jz .fail
+
+    mov rdi, r12
+    mov esi, OP_JUMP_BACKWARD
+    mov rdx, [rbp - CST_I]
+    mov rcx, [rbp - CST_LINE]
+    call cg_emit_jump_back
+
+    mov rdi, r12
+    mov rsi, [rbp - CST_TMP]
+    call cg_label_bind
+    mov rdi, rbx
+    mov rsi, r13
+    call ast_at
+    mov edx, [rax + AstNode.b]
+    mov rdi, rbx
+    mov rsi, r12
+    call cg_block
+    test eax, eax
+    jz .fail
+
+    mov rdi, r12
+    mov rsi, [rbp - CST_TMP2]
+    call cg_label_bind
+    mov eax, 1
+.fail:
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC cg_s_while
+
+;; ============================================================================
+;; cg_s_for - for / else
+;;
+;;         <iter>; GET_ITER
+;;   top:  FOR_ITER exit
+;;         <store target>; <body>; JUMP_BACKWARD top
+;;   exit: END_FOR
+;;         <else>
+;;   end:
+;;
+;; FOR_ITER's target is the END_FOR itself, not what follows it: the
+;; interpreter adds one to the delta so the exhausted path lands past it.  The
+;; iterator stays on the stack across the body, so `break` has to drop it while
+;; `continue` -- which jumps back to a FOR_ITER that still wants it -- does not.
+;; ============================================================================
+DEF_FUNC_LOCAL cg_s_for, CST_FRAME
+    push rbx
+    push r12
+    push r13
+    mov rbx, rdi
+    mov r12, rsi
+    mov r13, rdx
+
+    mov rdi, rbx
+    mov rsi, r13
+    call ast_at
+    mov ecx, [rax + AstNode.lineno]
+    mov [rbp - CST_LINE], rcx
+
+    mov edx, [rax + AstNode.b]          ; the iterable
+    mov rdi, rbx
+    mov rsi, r12
+    call cg_expr
+    test eax, eax
+    jz .fail
+    mov rdi, r12
+    mov esi, OP_GET_ITER
+    xor edx, edx
+    mov rcx, [rbp - CST_LINE]
+    call cg_emit
+
+    mov rdi, r12
+    call cg_label_new
+    mov [rbp - CST_I], rax              ; top
+    mov rdi, r12
+    call cg_label_new
+    mov [rbp - CST_TMP], rax            ; exit, at the END_FOR
+    mov rdi, r12
+    call cg_label_new
+    mov [rbp - CST_TMP2], rax           ; end, past the else clause
+
+    mov rdi, r12
+    mov rsi, [rbp - CST_I]
+    call cg_label_bind
+    mov rdi, r12
+    mov esi, OP_FOR_ITER
+    mov rdx, [rbp - CST_TMP]
+    mov rcx, [rbp - CST_LINE]
+    call cg_emit_jump
+
+    mov rdi, rbx
+    mov rsi, r13
+    call ast_at
+    mov edx, [rax + AstNode.a]          ; the loop target
+    mov rdi, rbx
+    mov rsi, r12
+    call cg_store
+    test eax, eax
+    jz .fail
+
+    mov rdi, r12
+    mov rsi, [rbp - CST_TMP2]           ; break
+    mov rdx, [rbp - CST_I]              ; continue
+    mov ecx, 1                          ; break must drop the iterator
+    call cg_loop_push
+
+    mov rdi, rbx
+    mov rsi, r13
+    call ast_at
+    mov edx, [rax + AstNode.c]
+    mov rdi, rbx
+    mov rsi, r12
+    call cg_block
+    push rax
+    mov rdi, r12
+    call cg_loop_pop
+    pop rax
+    test eax, eax
+    jz .fail
+
+    mov rdi, r12
+    mov esi, OP_JUMP_BACKWARD
+    mov rdx, [rbp - CST_I]
+    mov rcx, [rbp - CST_LINE]
+    call cg_emit_jump_back
+
+    mov rdi, r12
+    mov rsi, [rbp - CST_TMP]
+    call cg_label_bind
+    mov rdi, r12
+    mov esi, OP_END_FOR
+    xor edx, edx
+    mov rcx, [rbp - CST_LINE]
+    call cg_emit
+
+    mov rdi, rbx
+    mov rsi, r13
+    call ast_at
+    mov edx, [rax + AstNode.clist]      ; the else block
+    mov rdi, rbx
+    mov rsi, r12
+    call cg_block
+    test eax, eax
+    jz .fail
+
+    mov rdi, r12
+    mov rsi, [rbp - CST_TMP2]
+    call cg_label_bind
+    mov eax, 1
+.fail:
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC cg_s_for
+
+;; ============================================================================
+;; cg_s_break / cg_s_continue
+;; ============================================================================
+DEF_FUNC_LOCAL cg_s_break, CST_FRAME
+    push rbx
+    push r12
+    push r13
+    mov rbx, rdi
+    mov r12, rsi
+    mov r13, rdx
+    mov rdi, rbx
+    mov rsi, r13
+    call ast_at
+    mov ecx, [rax + AstNode.lineno]
+    mov [rbp - CST_LINE], rcx
+    mov rdi, r12
+    call cg_loop_top
+    test rax, rax
+    jz .outside
+    mov ecx, [rax + LoopFrame.npop]
+    mov [rbp - CST_I], rcx
+    mov ecx, [rax + LoopFrame.brk]
+    mov [rbp - CST_TMP], rcx
+.pop_loop:
+    cmp qword [rbp - CST_I], 0
+    je .jump
+    mov rdi, r12
+    mov esi, OP_POP_TOP
+    xor edx, edx
+    mov rcx, [rbp - CST_LINE]
+    call cg_emit
+    dec qword [rbp - CST_I]
+    jmp .pop_loop
+.jump:
+    mov rdi, r12
+    mov esi, OP_JUMP_FORWARD
+    mov rdx, [rbp - CST_TMP]
+    mov rcx, [rbp - CST_LINE]
+    call cg_emit_jump
+    mov eax, 1
+    jmp .ret
+.outside:
+    mov rdi, rbx
+    lea rsi, [rel exc_SyntaxError_type]
+    CSTRING rdx, "'break' outside loop"
+    xor ecx, ecx
+    xor r8d, r8d
+    call comp_error
+    xor eax, eax
+.ret:
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC cg_s_break
+
+DEF_FUNC_LOCAL cg_s_continue, CST_FRAME
+    push rbx
+    push r12
+    push r13
+    mov rbx, rdi
+    mov r12, rsi
+    mov r13, rdx
+    mov rdi, rbx
+    mov rsi, r13
+    call ast_at
+    mov ecx, [rax + AstNode.lineno]
+    mov [rbp - CST_LINE], rcx
+    mov rdi, r12
+    call cg_loop_top
+    test rax, rax
+    jz .outside
+    mov ecx, [rax + LoopFrame.cont]
+    mov rdi, r12
+    mov esi, OP_JUMP_BACKWARD
+    mov rdx, rcx
+    mov rcx, [rbp - CST_LINE]
+    call cg_emit_jump_back
+    mov eax, 1
+    jmp .ret
+.outside:
+    mov rdi, rbx
+    lea rsi, [rel exc_SyntaxError_type]
+    CSTRING rdx, "'continue' not properly in loop"
+    xor ecx, ecx
+    xor r8d, r8d
+    call comp_error
+    xor eax, eax
+.ret:
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC cg_s_continue
+
 section .rodata
 ;; AST kind -> statement emitter.  A zero entry is reported by cg_stmt as
 ;; unsupported rather than silently emitting nothing.
@@ -1468,13 +1916,13 @@ cg_stmt_table:
     dq cg_s_assign      ; 43 AST_ASSIGN
     dq cg_s_augassign   ; 44 AST_AUGASSIGN
     dq cg_s_annassign   ; 45 AST_ANNASSIGN
-    dq 0                ; 46 AST_IF
-    dq 0                ; 47 AST_WHILE
-    dq 0                ; 48 AST_FOR
-    dq 0                ; 49 AST_BLOCK
+    dq cg_s_if                         ; 46 AST_IF
+    dq cg_s_while                      ; 47 AST_WHILE
+    dq cg_s_for                        ; 48 AST_FOR
+    dq cg_body                         ; 49 AST_BLOCK
     dq cg_s_pass        ; 50 AST_PASS
-    dq 0                ; 51 AST_BREAK
-    dq 0                ; 52 AST_CONTINUE
+    dq cg_s_break                      ; 51 AST_BREAK
+    dq cg_s_continue                   ; 52 AST_CONTINUE
     dq 0                ; 53 AST_RETURN
     dq cg_s_delete      ; 54 AST_DELETE
     dq cg_s_raise       ; 55 AST_RAISE
