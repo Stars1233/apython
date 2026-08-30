@@ -66,12 +66,18 @@ struc PyFloatObject
 endstruc
 
 ; String object
+; A str stores UTF-8 and carries both lengths: ob_size is what the bytes
+; occupy, ob_length is how many code points that is.  Python counts in code
+; points, C counts in bytes, and almost every string here is ASCII -- where
+; the two are equal, which is the fast path every code-point-aware operation
+; checks first.
 struc PyStrObject
     .ob_refcnt: resq 1    ; +0
     .ob_type:   resq 1    ; +8
     .ob_size:   resq 1    ; +16: length in bytes
     .ob_hash:   resq 1    ; +24: cached hash (-1 = not computed)
-    .data:                 ; +32: null-terminated UTF-8 bytes (variable)
+    .ob_length: resq 1    ; +32: length in code points
+    .data:                 ; +40: null-terminated UTF-8 bytes (variable)
 endstruc
 
 ; Bytes object
@@ -108,6 +114,17 @@ struc PyListObject
     .ob_item:   resq 1    ; +32: ptr to payload (u64[]) array
 endstruc
 
+
+; Weak reference (src/pyo/weakrefmod.asm).  The referent is borrowed and is
+; zeroed when it dies; the side table in that file owns the reference objects.
+struc PyWeakRefObject
+    .ob_refcnt:   resq 1  ; +0
+    .ob_type:     resq 1  ; +8
+    .wr_object:   resq 1  ; +16: the referent, 0 once it is gone
+    .wr_callback: resq 1  ; +24: owned callable, or 0
+    .wr_hash:     resq 1  ; +32: cached hash, -1 until computed
+endstruc
+
 ; Tuple object
 struc PyTupleObject
     .ob_refcnt: resq 1    ; +0
@@ -125,8 +142,21 @@ struc PyDictObject
     .capacity:  resq 1    ; +24: hash table capacity
     .entries:   resq 1    ; +32: ptr to entry array
     .dk_version: resq 1   ; +40: version counter (bumped on mutation)
-    .dk_tombstones: resq 1 ; +48: count of tombstoned entries
+    .dk_tombstones: resq 1 ; +48: count of deleted (holed) entries
+    ; Compact layout, appended so `set` -- which shares this header but has
+    ; its own entry code -- is unaffected by their presence.
+    .dk_indices: resq 1   ; +56: ptr to int64[capacity], -1 empty, -2 dummy,
+                          ;      else an index into .entries
+    .dk_nentries: resq 1  ; +64: high-water mark of .entries in use
 endstruc
+
+; The dict is CPython's compact layout: a sparse index array over a *dense*
+; entry array appended in insertion order.  Iteration walks the dense array,
+; which is why dict order is insertion order.  The unused tail of .entries is
+; kept zeroed, so a walker that scans 0..capacity and skips key == 0 reads
+; the same items in the same order without knowing about .dk_nentries.
+DICT_IX_EMPTY equ -1
+DICT_IX_DUMMY equ -2
 
 ; Dict entry
 ; An entry's state lives in .key and .hash rather than in a tag byte:
@@ -219,6 +249,41 @@ struc PyModuleObject
 endstruc
 
 ; Member descriptor object (for __slots__)
+; PEP 585 generic alias: list[int].  _collections_abc takes GenericAlias from
+; `type(list[int])`, and every annotation-bearing stdlib module needs it.
+struc PyGenericAliasObject
+    .ob_refcnt: resq 1  ; +0
+    .ob_type:   resq 1  ; +8
+    .ga_origin: resq 1  ; +16: the type being subscripted (owned)
+    .ga_args:   resq 1  ; +24: the argument, a tuple if it was one (owned)
+endstruc
+
+; A getset descriptor: a named pair of C accessors living in a type's dict.
+; CPython exposes func.__code__, code.co_name and friends this way, and
+; types.py takes GetSetDescriptorType from one of them.
+struc PyGetSetDescrObject
+    .ob_refcnt: resq 1  ; +0
+    .ob_type:   resq 1  ; +8
+    .gs_get:    resq 1  ; +16: C getter(self) -> Value, or 0
+    .gs_set:    resq 1  ; +24: C setter(self, value) -> int, or 0
+    .gs_name:   resq 1  ; +32: ptr to the name (PyStrObject*, owned)
+endstruc
+
+; types.SimpleNamespace: attributes are the entries of a dict.
+struc PySimpleNamespaceObject
+    .ob_refcnt: resq 1  ; +0
+    .ob_type:   resq 1  ; +8
+    .ns_dict:   resq 1  ; +16: the attribute dict (owned)
+endstruc
+
+; Read-only view of a mapping.  type.__dict__ is one of these in CPython,
+; and types.py takes MappingProxyType from it.
+struc PyMappingProxyObject
+    .ob_refcnt: resq 1  ; +0
+    .ob_type:   resq 1  ; +8
+    .mp_mapping: resq 1 ; +16: the wrapped dict (owned)
+endstruc
+
 struc PyMemberDescrObject
     .ob_refcnt: resq 1  ; +0
     .ob_type:   resq 1  ; +8

@@ -132,6 +132,57 @@ DEF_FUNC code_getattr
     test eax, eax
     jz .return_varnames
 
+    ; Everything else is a straight field read.  Only three of the seventeen
+    ; co_* were reachable from Python, which is most of what inspect,
+    ; dataclasses and traceback formatting want from a code object.
+    lea r8, [rel code_attr_table]
+.cg_scan:
+    mov rdi, [r8]                   ; name cstr, 0 terminates the table
+    test rdi, rdi
+    jz .cg_not_found
+    push r8
+    lea rsi, [r12 + PyStrObject.data]
+    call ap_strcmp
+    pop r8
+    test eax, eax
+    jz .cg_found
+    add r8, 24
+    jmp .cg_scan
+
+.cg_found:
+    mov rcx, [r8 + 8]               ; byte offset into PyCodeObject
+    mov rdx, [r8 + 16]              ; 0 = qword ptr, 1 = dword int
+    test rdx, rdx
+    jnz .cg_int_field
+    mov rax, [rbx + rcx]
+    test rax, rax
+    jz .cg_none
+    INCREF rax
+    mov edx, TAG_PTR
+    pop r12
+    pop rbx
+    leave
+    V_PACK rax, rdx
+    ret
+.cg_none:
+    lea rax, [rel none_singleton]
+    INCREF rax
+    mov edx, TAG_PTR
+    pop r12
+    pop rbx
+    leave
+    V_PACK rax, rdx
+    ret
+.cg_int_field:
+    movsxd rax, dword [rbx + rcx]
+    mov edx, TAG_SMALLINT
+    pop r12
+    pop rbx
+    leave
+    V_PACK rax, rdx
+    ret
+
+.cg_not_found:
     ; Not found
     RET_NULL
     pop r12
@@ -179,6 +230,37 @@ DEF_FUNC code_getattr
     V_PACK rax, rdx             ; return one Value
     ret
 END_FUNC code_getattr
+
+section .rodata
+align 8
+; {name, offset, is_int} -- 0 name terminates
+co_n_name:        db "co_name", 0
+co_n_qualname:    db "co_qualname", 0
+co_n_filename:    db "co_filename", 0
+co_n_consts:      db "co_consts", 0
+co_n_names:       db "co_names", 0
+co_n_localsplusnames: db "co_localsplusnames", 0
+co_n_firstlineno: db "co_firstlineno", 0
+co_n_flags:       db "co_flags", 0
+co_n_nlocals:     db "co_nlocals", 0
+co_n_stacksize:   db "co_stacksize", 0
+co_n_posonly:     db "co_posonlyargcount", 0
+align 8
+code_attr_table:
+    dq co_n_name,        PyCodeObject.co_name,        0
+    dq co_n_qualname,    PyCodeObject.co_qualname,    0
+    dq co_n_filename,    PyCodeObject.co_filename,    0
+    dq co_n_consts,      PyCodeObject.co_consts,      0
+    dq co_n_names,       PyCodeObject.co_names,       0
+    dq co_n_localsplusnames, PyCodeObject.co_localsplusnames, 0
+    dq co_n_firstlineno, PyCodeObject.co_firstlineno, 1
+    dq co_n_flags,       PyCodeObject.co_flags,       1
+    dq co_n_nlocals,     PyCodeObject.co_nlocals,     1
+    dq co_n_stacksize,   PyCodeObject.co_stacksize,   1
+    dq co_n_posonly,     PyCodeObject.co_posonlyargcount, 1
+    dq 0, 0, 0
+section .text
+
 
 section .data
 

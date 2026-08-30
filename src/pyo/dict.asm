@@ -44,37 +44,69 @@ extern dict_clear_gc
 ;; ============================================================================
 DEF_FUNC dict_new
     push rbx
-
-    ; Allocate PyDictObject header (GC-tracked)
+    ; Header
     mov edi, PyDictObject_size
     lea rsi, [rel dict_type]
     call gc_alloc
-    mov rbx, rax                ; rbx = dict (ob_refcnt=1, ob_type set)
-
+    mov rbx, rax
     mov qword [rbx + PyDictObject.ob_size], 0
     mov qword [rbx + PyDictObject.capacity], DICT_INIT_CAP
     mov qword [rbx + PyDictObject.dk_version], 1
     mov qword [rbx + PyDictObject.dk_tombstones], 0
+    mov qword [rbx + PyDictObject.dk_nentries], 0
 
-    ; Allocate entries array: capacity * DICT_ENTRY_SIZE
-    mov edi, DICT_INIT_CAP * DICT_ENTRY_SIZE
-    call ap_malloc
-    mov [rbx + PyDictObject.entries], rax
-
-    ; Zero out entries (NULL key = empty slot)
-    mov rdi, rax
-    xor esi, esi
-    mov edx, DICT_INIT_CAP * DICT_ENTRY_SIZE
-    call ap_memset
+    mov rdi, rbx
+    mov rsi, DICT_INIT_CAP
+    call dict_alloc_tables
 
     mov rdi, rbx
     call gc_track
-
     mov rax, rbx
     pop rbx
     leave
     ret
 END_FUNC dict_new
+
+;; ============================================================================
+;; dict_alloc_tables(rdi = dict, rsi = capacity)
+;; Allocates the dense entry array (zeroed, so the unused tail reads as empty)
+;; and the sparse index array (all DICT_IX_EMPTY).  Sets .capacity.
+;; ============================================================================
+global dict_alloc_tables
+DEF_FUNC dict_alloc_tables
+    push rbx
+    push r12
+    push r13
+    mov rbx, rdi
+    mov r12, rsi
+    mov [rbx + PyDictObject.capacity], r12
+
+    ; dense entries, zero-filled
+    mov rdi, r12
+    imul rdi, rdi, DICT_ENTRY_SIZE
+    call ap_malloc
+    mov [rbx + PyDictObject.entries], rax
+    mov rdi, rax
+    mov rcx, r12
+    imul rcx, rcx, DICT_ENTRY_SIZE / 8
+    xor eax, eax
+    rep stosq
+
+    ; sparse indices, all empty
+    lea rdi, [r12 * 8]
+    call ap_malloc
+    mov [rbx + PyDictObject.dk_indices], rax
+    mov rdi, rax
+    mov rcx, r12
+    mov rax, DICT_IX_EMPTY
+    rep stosq
+
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC dict_alloc_tables
 
 ;; ============================================================================
 ;; dict_type_call(PyTypeObject *type, PyObject **args, int64_t nargs) -> PyDictObject*
@@ -317,8 +349,7 @@ END_FUNC dict_type_call
 ;; rather than the stored side was never found.
 ;; ============================================================================
 DEF_FUNC_LOCAL dict_keys_equal
-    V_PACK rdi, rdx             ; both are immediates or pointers, so the
-    V_PACK rsi, rcx             ; round-trip cannot box anything
+    ; Both arguments are Values.
     mov edx, PY_EQ
     call obj_richcompare_bool
     cmp eax, -1
@@ -340,81 +371,19 @@ DG_KTAG equ 8
 DEF_FUNC dict_get, 8
     push rbx
     push r12
-    push r13
-    push r14
-    push r15
-
-    V_UNPACK rsi, rdx           ; decode the key Value
-    mov rbx, rdi                ; rbx = dict
-    mov r12, rsi                ; r12 = key
-    mov [rbp - DG_KTAG], rdx    ; save key_tag
-
-    ; Hash the key
-    mov rdi, r12
-    mov rsi, rdx                ; key tag
-    V_PACK rdi, rsi
-    call obj_hash
-    mov r13, rax                ; r13 = hash
-
-    ; capacity mask = capacity - 1 (capacity is power of 2)
-    mov r14, [rbx + PyDictObject.capacity]
-    lea r15, [r14 - 1]          ; r15 = mask
-
-    ; Starting slot = hash & mask
-    mov rcx, r13
-    and rcx, r15                ; rcx = slot index
-
-    ; r14 reused as probe counter
-    xor r14d, r14d              ; probes done
-
-align 16
-.probe_loop:
-    ; Check if we've probed all slots
-    cmp r14, [rbx + PyDictObject.capacity]
-    jge .not_found
-
-    ; Compute entry address: entries + slot * DICT_ENTRY_SIZE
-    mov rax, [rbx + PyDictObject.entries]
-    imul rdx, rcx, DICT_ENTRY_SIZE
-    add rax, rdx                ; rax = entry ptr    ; Classify the slot, then load its key
-    ENTRY_CLASSIFY rax, .not_found, .next_slot
-    mov rdi, [rax + DictEntry.key]
-
-    ; Check hash first (fast reject)
-    cmp r13, [rax + DictEntry.hash]
-    jne .next_slot
-
-    ; Hash matches - check key equality
-    ; rdi already has entry.key
-    mov rsi, r12                ; our key
-    V_UNPACK rdi, rdx         ; dict_keys_equal takes (payload, tag)
-    push rcx                    ; save slot
-    push rax                    ; save entry ptr
-    mov rcx, [rbp - DG_KTAG]   ; our key tag
-    call dict_keys_equal
-    pop rdx                     ; restore entry ptr into rdx
-    pop rcx                     ; restore slot
-    test eax, eax
-    jz .next_slot
-
-    ; Found - return the entry's value Value
-    mov rax, [rdx + DictEntry.value]
-    jmp .done
-
-.next_slot:
-    ; Linear probe: slot = (slot + 1) & mask
-    inc rcx
-    and rcx, r15
-    inc r14
-    jmp .probe_loop
-
-.not_found:
-    RET_NULL
-
-.done:
-    pop r15
-    pop r14
-    pop r13
+    mov rbx, rdi                ; the dict; rdi does not survive the call
+    call dict_lookup            ; rax = entries index or -1
+    test rax, rax
+    js .dg_miss
+    mov rcx, [rbx + PyDictObject.entries]
+    imul rax, rax, DICT_ENTRY_SIZE
+    mov rax, [rcx + rax + DictEntry.value]
+    pop r12
+    pop rbx
+    leave
+    ret
+.dg_miss:
+    xor eax, eax
     pop r12
     pop rbx
     leave
@@ -422,76 +391,110 @@ align 16
 END_FUNC dict_get
 
 ;; ============================================================================
+;; dict_lookup(rdi = dict, rsi = key Value) -> rax = entries index, or -1
+;;   rdx = the indices slot the key hashes to (where an insert would go, or
+;;         the first dummy on the probe path), r8 = hash
+;; The one probe loop; every read path goes through it.
+;; ============================================================================
+DL_DICT  equ 8
+DL_KEY   equ 16
+DL_HASH  equ 24
+DL_MASK  equ 32
+DL_SLOT  equ 40
+DL_FREE  equ 48
+DL_FRAME equ 64
+global dict_lookup
+DEF_FUNC dict_lookup, DL_FRAME
+    push rbx
+    push r12
+    push r13
+    mov [rbp - DL_DICT], rdi
+    mov [rbp - DL_KEY], rsi
+
+    mov rdi, rsi
+    call obj_hash
+    mov [rbp - DL_HASH], rax
+
+    mov rbx, [rbp - DL_DICT]
+    mov rcx, [rbx + PyDictObject.capacity]
+    dec rcx
+    mov [rbp - DL_MASK], rcx
+    and rax, rcx
+    mov [rbp - DL_SLOT], rax
+    mov qword [rbp - DL_FREE], -1
+    xor r13d, r13d              ; probes
+
+.dl_probe:
+    cmp r13, [rbx + PyDictObject.capacity]
+    jge .dl_miss
+    mov rax, [rbx + PyDictObject.dk_indices]
+    mov rcx, [rbp - DL_SLOT]
+    mov r12, [rax + rcx*8]      ; the index stored here
+    cmp r12, DICT_IX_EMPTY
+    je .dl_miss
+    cmp r12, DICT_IX_DUMMY
+    jne .dl_occupied
+    ; remember the first reusable slot for an insert
+    cmp qword [rbp - DL_FREE], -1
+    jne .dl_next
+    mov [rbp - DL_FREE], rcx
+    jmp .dl_next
+
+.dl_occupied:
+    mov rax, [rbx + PyDictObject.entries]
+    imul rcx, r12, DICT_ENTRY_SIZE
+    add rax, rcx
+    mov rcx, [rbp - DL_HASH]
+    cmp rcx, [rax + DictEntry.hash]
+    jne .dl_next
+    mov rdi, [rax + DictEntry.key]
+    mov rsi, [rbp - DL_KEY]
+    call dict_keys_equal
+    test eax, eax
+    jz .dl_next
+    mov rax, r12                ; found: the entries index
+    jmp .dl_out
+
+.dl_next:
+    mov rcx, [rbp - DL_SLOT]
+    inc rcx
+    and rcx, [rbp - DL_MASK]
+    mov [rbp - DL_SLOT], rcx
+    inc r13
+    jmp .dl_probe
+
+.dl_miss:
+    ; An insert goes into the first dummy seen, else this empty slot.
+    mov rcx, [rbp - DL_FREE]
+    cmp rcx, -1
+    jne .dl_have_free
+    mov rcx, [rbp - DL_SLOT]
+.dl_have_free:
+    mov [rbp - DL_SLOT], rcx
+    mov rax, -1
+
+.dl_out:
+    mov rdx, [rbp - DL_SLOT]
+    mov r8, [rbp - DL_HASH]
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC dict_lookup
+
+;; ============================================================================
 ;; dict_get_index(rdi=dict, rsi=key, edx=key_tag) -> int64
 ;; Like dict_get but returns the slot index (for IC caching), -1 if not found.
 ;; ============================================================================
 GI_KTAG equ 8
 DEF_FUNC dict_get_index, 8
+    ; The index into the *dense* array, which the LOAD_GLOBAL inline cache
+    ; caches.  A dense index never moves except on a resize, and the cache is
+    ; already guarded by dk_version, so it is strictly more stable than the
+    ; hash slot this used to return.
     push rbx
-    push r12
-    push r13
-    push r14
-    push r15
-
-    mov rbx, rdi                ; rbx = dict
-    mov r12, rsi                ; r12 = key
-    mov [rbp - GI_KTAG], rdx    ; save key_tag
-
-    mov rdi, r12
-    mov rsi, rdx                ; key tag
-    V_PACK rdi, rsi
-    call obj_hash
-    mov r13, rax                ; r13 = hash
-
-    mov r14, [rbx + PyDictObject.capacity]
-    lea r15, [r14 - 1]          ; r15 = mask
-
-    mov rcx, r13
-    and rcx, r15                ; rcx = slot index
-
-    xor r14d, r14d              ; probes done
-
-.gi_probe:
-    cmp r14, [rbx + PyDictObject.capacity]
-    jge .gi_not_found
-
-    mov rax, [rbx + PyDictObject.entries]
-    imul rdx, rcx, DICT_ENTRY_SIZE
-    add rax, rdx
-
-    mov rdi, [rax + DictEntry.key]
-    ENTRY_CLASSIFY rax, .gi_not_found, .gi_next
-
-    cmp r13, [rax + DictEntry.hash]
-    jne .gi_next
-
-    mov rsi, r12
-    V_UNPACK rdi, rdx         ; dict_keys_equal takes (payload, tag)
-    push rcx
-    mov rcx, [rbp - GI_KTAG]
-    call dict_keys_equal
-    pop rcx
-    test eax, eax
-    jz .gi_next
-
-    ; Found: return slot index
-    mov rax, rcx
-    jmp .gi_done
-
-.gi_next:
-    inc rcx
-    and rcx, r15
-    inc r14
-    jmp .gi_probe
-
-.gi_not_found:
-    mov rax, -1
-
-.gi_done:
-    pop r15
-    pop r14
-    pop r13
-    pop r12
+    call dict_lookup
     pop rbx
     leave
     ret
@@ -506,206 +509,89 @@ END_FUNC dict_get_index
 ;; ============================================================================
 FS_KTAG     equ 8
 FS_TOMBPTR  equ 16
-DEF_FUNC_LOCAL dict_find_slot, 16
-    push rbx
-    push r12
-    push r13
-    push r14
-    push r15
-
-    mov rbx, rdi                ; dict
-    mov r12, rsi                ; key
-    mov r13, rdx                ; hash
-    mov [rbp - FS_KTAG], rcx    ; save key_tag
-    mov qword [rbp - FS_TOMBPTR], 0  ; no tombstone seen yet
-
-    ; mask = capacity - 1
-    mov r14, [rbx + PyDictObject.capacity]
-    lea r15, [r14 - 1]          ; mask
-
-    ; slot = hash & mask
-    mov rcx, r13
-    and rcx, r15
-
-    xor r14d, r14d              ; probe counter
-
-.find_loop:
-    cmp r14, [rbx + PyDictObject.capacity]
-    jge .table_full
-
-    ; entry = entries + slot * DICT_ENTRY_SIZE
-    mov rax, [rbx + PyDictObject.entries]
-    imul rdx, rcx, DICT_ENTRY_SIZE
-    add rax, rdx                ; rax = entry ptr    ; Classify the slot, then load its key
-    ENTRY_CLASSIFY rax, .found_empty, .find_tombstone
-    mov rdi, [rax + DictEntry.key]
-
-    ; Hash match?
-    cmp r13, [rax + DictEntry.hash]
-    jne .find_next
-
-    ; Key equality check
-    ; rdi = entry.key
-    mov rsi, r12
-    V_UNPACK rdi, rdx         ; dict_keys_equal takes (payload, tag)
-    push rcx
-    push rax
-    mov rcx, [rbp - FS_KTAG]   ; our key tag
-    call dict_keys_equal
-    mov edi, eax                ; save equality result (survives the pops)
-    pop rax                     ; entry ptr
-    pop rcx                     ; slot
-    test edi, edi
-    jnz .found_existing
-
-.find_next:
-    inc rcx
-    and rcx, r15
-    inc r14
-    jmp .find_loop
-
-.find_tombstone:
-    ; Remember first tombstone for reuse on insert
-    cmp qword [rbp - FS_TOMBPTR], 0
-    jne .find_next              ; already have one, keep looking
-    mov [rbp - FS_TOMBPTR], rax
-    jmp .find_next
-
-.found_empty:
-    ; No match found — return tombstone slot if we found one, else empty slot
-    mov rdx, [rbp - FS_TOMBPTR]
-    test rdx, rdx
-    jz .return_empty
-    mov rax, rdx                ; use tombstone slot
-.return_empty:
-    xor edx, edx               ; rdx = 0 (new insert)
-    pop r15
-    pop r14
-    pop r13
-    pop r12
-    pop rbx
-    leave
-    ret
-
-.found_existing:
-    ; rax = entry ptr, rdx = 1 (existing)
-    mov edx, 1
-    pop r15
-    pop r14
-    pop r13
-    pop r12
-    pop rbx
-    leave
-    ret
-
-.table_full:
-    ; Check if we have a tombstone — use it instead of dying
-    mov rax, [rbp - FS_TOMBPTR]
-    test rax, rax
-    jnz .return_empty
-    ; No tombstone and truly full — fatal
-    lea rdi, [rel .err_full]
-    call fatal_error
-
-section .rodata
-.err_full: db "dict: hash table full", 0
-section .text
-END_FUNC dict_find_slot
 
 ;; ============================================================================
 ;; dict_resize(PyDictObject *dict)
 ;; Double capacity and rehash all entries
 ;; ============================================================================
-DEF_FUNC_LOCAL dict_resize
+DR_DICT  equ 8
+DR_OLDE  equ 16
+DR_OLDN  equ 24
+DR_FRAME equ 32
+DEF_FUNC dict_resize, DR_FRAME
     push rbx
     push r12
     push r13
-    push r14
-    push r15
+    mov rbx, rdi
+    mov [rbp - DR_DICT], rbx
+    mov rax, [rbx + PyDictObject.entries]
+    mov [rbp - DR_OLDE], rax
+    mov rax, [rbx + PyDictObject.dk_nentries]
+    mov [rbp - DR_OLDN], rax
 
-    mov rbx, rdi                ; dict
-
-    ; Save old entries and capacity
-    mov r12, [rbx + PyDictObject.entries]    ; old entries
-    mov r13, [rbx + PyDictObject.capacity]   ; old capacity
-
-    ; New capacity = old * 2
-    lea r14, [r13 * 2]          ; r14 = new capacity
-    mov [rbx + PyDictObject.capacity], r14
-    mov qword [rbx + PyDictObject.dk_tombstones], 0  ; rehash clears tombstones
-
-    ; Allocate new entries array
-    imul rdi, r14, DICT_ENTRY_SIZE
-    call ap_malloc
-    mov r15, rax                ; r15 = new entries
-
-    ; Zero new entries
-    mov rdi, r15
-    xor esi, esi
-    imul rdx, r14, DICT_ENTRY_SIZE
-    call ap_memset
-
-    ; Store new entries pointer
-    mov [rbx + PyDictObject.entries], r15
-
-    ; Rehash: iterate old entries, re-insert non-empty ones
-    xor ecx, ecx               ; ecx = index into old entries
-
-.rehash_loop:
-    cmp rcx, r13                ; compared against old capacity
-    jge .rehash_done
-
-    ; old_entry = old_entries + i * DICT_ENTRY_SIZE
-    imul rax, rcx, DICT_ENTRY_SIZE
-    add rax, r12                ; rax = old entry ptr
-
-    ; Skip empty slots (key_tag == 0) and tombstones (key_tag == DICT_TOMBSTONE)
-    ENTRY_CLASSIFY rax, .rehash_next, .rehash_next
-
-    ; Compute new slot: hash & (new_capacity - 1)
-    push rcx                    ; save outer index
-    mov rcx, [rax + DictEntry.hash]
-    mov rdx, r14
-    dec rdx                     ; new mask
-    and rcx, rdx                ; starting slot
-
-    ; Save entry data
-    push qword [rax + DictEntry.hash]
-    push qword [rax + DictEntry.key]
-    push qword [rax + DictEntry.value]
-
-    ; Linear probe in new table to find empty slot
-.rehash_probe:
-    imul rax, rcx, DICT_ENTRY_SIZE
-    add rax, r15                ; new entry ptr
-    cmp qword [rax + DictEntry.key], 0   ; empty or tombstone?
-    je .rehash_insert
-
-    inc rcx
-    mov rax, r14
-    dec rax
-    and rcx, rax                ; slot = (slot+1) & new_mask
-    jmp .rehash_probe
-
-.rehash_insert:
-    ; rax = target entry ptr in new table
-    pop qword [rax + DictEntry.value]
-    pop qword [rax + DictEntry.key]
-    pop qword [rax + DictEntry.hash]
-
-    pop rcx                     ; restore outer index
-
-.rehash_next:
-    inc ecx
-    jmp .rehash_loop
-
-.rehash_done:
-    ; Free old entries array
-    mov rdi, r12
+    ; Grow only when the live count warrants it; a table full of holes is
+    ; compacted at the same capacity instead.
+    mov r12, [rbx + PyDictObject.capacity]
+    mov rdx, r12
+    shr rdx, 1
+    cmp [rbx + PyDictObject.ob_size], rdx
+    jl .dr_same_cap
+    shl r12, 1
+.dr_same_cap:
+    ; r12, not rcx: ap_free below is a call and rcx is caller-saved.
+    mov rdi, [rbx + PyDictObject.dk_indices]
     call ap_free
+    mov rdi, rbx
+    mov rsi, r12
+    call dict_alloc_tables
 
-    pop r15
-    pop r14
+    ; Re-append the live entries in their existing order, dropping holes.
+    mov qword [rbx + PyDictObject.dk_nentries], 0
+    mov qword [rbx + PyDictObject.dk_tombstones], 0
+    xor r12d, r12d              ; index into the old dense array
+.dr_loop:
+    cmp r12, [rbp - DR_OLDN]
+    jge .dr_done
+    mov rax, [rbp - DR_OLDE]
+    imul rcx, r12, DICT_ENTRY_SIZE
+    add rax, rcx
+    cmp qword [rax + DictEntry.key], 0
+    je .dr_next
+
+    ; place it: hash is already known, so probe the fresh index array
+    mov r13, [rax + DictEntry.hash]
+    mov rcx, [rbx + PyDictObject.capacity]
+    dec rcx
+    mov rdx, r13
+    and rdx, rcx                ; slot
+.dr_probe:
+    mov rsi, [rbx + PyDictObject.dk_indices]
+    cmp qword [rsi + rdx*8], DICT_IX_EMPTY
+    je .dr_place
+    inc rdx
+    and rdx, rcx
+    jmp .dr_probe
+.dr_place:
+    mov rdi, [rbx + PyDictObject.dk_nentries]
+    mov [rsi + rdx*8], rdi
+    mov rsi, [rbx + PyDictObject.entries]
+    imul rcx, rdi, DICT_ENTRY_SIZE
+    add rsi, rcx
+    mov rcx, [rax + DictEntry.hash]
+    mov [rsi + DictEntry.hash], rcx
+    mov rcx, [rax + DictEntry.key]
+    mov [rsi + DictEntry.key], rcx
+    mov rcx, [rax + DictEntry.value]
+    mov [rsi + DictEntry.value], rcx
+    inc qword [rbx + PyDictObject.dk_nentries]
+
+.dr_next:
+    inc r12
+    jmp .dr_loop
+
+.dr_done:
+    mov rdi, [rbp - DR_OLDE]
+    call ap_free
     pop r13
     pop r12
     pop rbx
@@ -719,94 +605,80 @@ END_FUNC dict_resize
 ;; ============================================================================
 DS_VTAG equ 8
 DS_KTAG equ 16
-DEF_FUNC dict_set, 16
+DS_DICT  equ 8
+DS_KEY   equ 16
+DS_VAL   equ 24
+DS_FRAME equ 32
+DEF_FUNC dict_set, DS_FRAME
     push rbx
     push r12
     push r13
-    push r14
+    mov [rbp - DS_DICT], rdi
+    mov [rbp - DS_KEY], rsi
+    mov [rbp - DS_VAL], rdx
 
-    ; Decode the two Values into the (payload, tag) pairs the body uses.
-    V_UNPACK rsi, r8            ; key
-    V_UNPACK rdx, rcx           ; value
+    call dict_lookup            ; rax = index or -1, rdx = slot, r8 = hash
+    mov rbx, [rbp - DS_DICT]
+    test rax, rax
+    js .ds_insert
 
-    mov rbx, rdi                ; dict
-    mov r12, rsi                ; key
-    mov r13, rdx                ; value
-    mov [rbp - DS_VTAG], rcx    ; save value_tag
-    mov [rbp - DS_KTAG], r8     ; save key_tag
+    ; Update in place: the key keeps its position, as in CPython.
+    mov rcx, [rbx + PyDictObject.entries]
+    imul rax, rax, DICT_ENTRY_SIZE
+    add rcx, rax
+    mov rdi, [rcx + DictEntry.value]
+    mov rsi, [rbp - DS_VAL]
+    mov [rcx + DictEntry.value], rsi
+    INCREF_V rsi, rax
+    DECREF_V rdi, rax
+    jmp .ds_bump
 
-    ; Hash the key
-    mov rdi, r12
-    mov rsi, r8                 ; key tag
-    V_PACK rdi, rsi
-    call obj_hash
-    mov r14, rax                ; r14 = hash
-
-    ; Find slot
-    mov rdi, rbx                ; dict
-    mov rsi, r12                ; key
-    mov rdx, r14                ; hash
-    mov rcx, [rbp - DS_KTAG]   ; key_tag
-    call dict_find_slot
-    ; rax = entry ptr, edx = 1 if existing, 0 if empty
-
-    test edx, edx
-    jnz .update_existing
-
-    ; --- Insert new entry ---
-    ; Store hash, key and value.  INCREF each while its tag is in hand,
-    ; then pack; a packed Value carries the tag with it from here on.
-    mov [rax + DictEntry.hash], r14
-    mov rcx, [rbp - DS_KTAG]
-    INCREF_VAL r12, rcx
-    V_PACK r12, rcx
-    mov [rax + DictEntry.key], r12
-    mov rcx, [rbp - DS_VTAG]
-    INCREF_VAL r13, rcx
-    V_PACK r13, rcx
-    mov [rax + DictEntry.value], r13
-
-    ; Increment ob_size
-    inc qword [rbx + PyDictObject.ob_size]
-
-    ; Check load factor: (ob_size + tombstones) > capacity * 3/4
-    mov rax, [rbx + PyDictObject.capacity]
-    mov rcx, rax
-    shr rcx, 2                  ; capacity / 4
-    imul rcx, rcx, 3            ; capacity * 3/4
-    mov rax, [rbx + PyDictObject.ob_size]
-    add rax, [rbx + PyDictObject.dk_tombstones]
-    cmp rax, rcx
-    jle .done
-
-    ; Resize needed
+.ds_insert:
+    mov r12, rdx                ; the indices slot to claim
+    mov r13, r8                 ; hash
+    ; Room for one more dense entry?
+    mov rax, [rbx + PyDictObject.dk_nentries]
+    inc rax
+    mov rcx, [rbx + PyDictObject.capacity]
+    mov rdx, rcx
+    shr rdx, 2
+    lea rdx, [rdx + rdx*2]      ; capacity * 3/4
+    cmp rax, rdx
+    jle .ds_have_room
     mov rdi, rbx
     call dict_resize
-    jmp .done
+    ; the slot is stale after a rebuild; find it again
+    mov rdi, rbx
+    mov rsi, [rbp - DS_KEY]
+    call dict_lookup
+    mov r12, rdx
+    mov r13, r8
 
-.update_existing:
-    ; rax = entry ptr with matching key
-    ; DECREF old value (fat)
-    push rax                    ; save entry ptr
-    mov rdi, [rax + DictEntry.value]
-    V_UNPACK rdi, rsi
-    DECREF_VAL rdi, rsi
-    pop rax                     ; restore entry ptr
+.ds_have_room:
+    mov rax, [rbx + PyDictObject.dk_nentries]
+    mov rcx, [rbx + PyDictObject.entries]
+    imul rdx, rax, DICT_ENTRY_SIZE
+    add rcx, rdx
+    mov [rcx + DictEntry.hash], r13
+    mov rdx, [rbp - DS_KEY]
+    mov [rcx + DictEntry.key], rdx
+    INCREF_V rdx, rsi
+    mov rdx, [rbp - DS_VAL]
+    mov [rcx + DictEntry.value], rdx
+    INCREF_V rdx, rsi
 
-    ; Store the new value and INCREF it
-    mov rcx, [rbp - DS_VTAG]
-    INCREF_VAL r13, rcx
-    V_PACK r13, rcx
-    mov [rax + DictEntry.value], r13
+    ; point the sparse slot at it
+    mov rcx, [rbx + PyDictObject.dk_indices]
+    mov [rcx + r12*8], rax
+    inc qword [rbx + PyDictObject.dk_nentries]
+    inc qword [rbx + PyDictObject.ob_size]
 
-.done:
-    ; Bump version counter (skip 0 on wrap)
+.ds_bump:
     inc qword [rbx + PyDictObject.dk_version]
-    cmp qword [rbx + PyDictObject.dk_version], 0
-    jne .ver_ok
+    jnz .ds_done
     mov qword [rbx + PyDictObject.dk_version], 1
-.ver_ok:
-    pop r14
+.ds_done:
+    xor eax, eax
     pop r13
     pop r12
     pop rbx
@@ -822,50 +694,39 @@ DEF_FUNC dict_dealloc
     push rbx
     push r12
     push r13
-    push r14
-
-    mov rbx, rdi                ; self (dict)
-    mov r12, [rbx + PyDictObject.entries]
-    mov r13, [rbx + PyDictObject.capacity]
-    xor r14d, r14d              ; index
-
-.dealloc_loop:
-    cmp r14, r13
-    jge .dealloc_entries_done
-
-    ; entry = entries + index * DICT_ENTRY_SIZE
-    imul rax, r14, DICT_ENTRY_SIZE
-    add rax, r12
-
-    ; Skip empty slots and tombstones
+    mov rbx, rdi
+    mov r13, [rbx + PyDictObject.dk_nentries]
+    mov r12, 0
+.dde_loop:
+    cmp r12, r13
+    jge .dde_done
+    mov rax, [rbx + PyDictObject.entries]
+    imul rcx, r12, DICT_ENTRY_SIZE
+    add rax, rcx
     mov rdi, [rax + DictEntry.key]
-    V_UNPACK rdi, rsi
-    ENTRY_CLASSIFY rax, .dealloc_next, .dealloc_next
-
-    ; DECREF key (tag-aware)
+    test rdi, rdi
+    jz .dde_next
     push rax
-    DECREF_VAL rdi, rsi
-
-    ; DECREF value (tag-aware)
+    DECREF_V rdi, rsi
     pop rax
     mov rdi, [rax + DictEntry.value]
-    V_UNPACK rdi, rsi
-    DECREF_VAL rdi, rsi
-
-.dealloc_next:
-    inc r14
-    jmp .dealloc_loop
-
-.dealloc_entries_done:
-    ; Free entries array
-    mov rdi, r12
+    DECREF_V rdi, rsi
+.dde_next:
+    inc r12
+    jmp .dde_loop
+.dde_done:
+    mov rdi, [rbx + PyDictObject.entries]
+    test rdi, rdi
+    jz .dde_no_entries
     call ap_free
-
-    ; Free dict object itself (GC-aware)
+.dde_no_entries:
+    mov rdi, [rbx + PyDictObject.dk_indices]
+    test rdi, rdi
+    jz .dde_no_idx
+    call ap_free
+.dde_no_idx:
     mov rdi, rbx
     call gc_dealloc
-
-    pop r14
     pop r13
     pop r12
     pop rbx
@@ -877,6 +738,7 @@ END_FUNC dict_dealloc
 ;; dict_len(PyObject *self) -> int64_t
 ;; Returns ob_size (number of items)
 ;; ============================================================================
+global dict_len
 dict_len:
     mov rax, [rdi + PyDictObject.ob_size]
     ret
@@ -927,105 +789,53 @@ END_FUNC dict_ass_subscript
 ;; dict_del(rdi=dict, rsi=key Value) -> int (0=ok, -1=not found)
 ;; Delete key from dict. DECREFs both key and value.
 ;; ============================================================================
-DD_KTAG equ 8
-DD_KEYV equ 16
-DD_FRAME equ 16
+DD_DICT  equ 8
+DD_KEYV  equ 16
+DD_FRAME equ 32
 DEF_FUNC dict_del, DD_FRAME
     push rbx
     push r12
-    push r13
-    push r14
+    mov [rbp - DD_DICT], rdi
+    mov [rbp - DD_KEYV], rsi
 
-    mov [rbp - DD_KEYV], rsi    ; keep the Value for the KeyError message
-    V_UNPACK rsi, rdx           ; decode the key Value
-    push r15
+    call dict_lookup            ; rax = index or -1, rdx = slot
+    mov rbx, [rbp - DD_DICT]
+    test rax, rax
+    js .dd_missing
+    mov r12, rdx                ; the slot to mark dummy
 
-    mov rbx, rdi                ; dict
-    mov r12, rsi                ; key
-    mov [rbp - DD_KTAG], rdx    ; save key_tag
-
-    ; Hash the key
-    mov rdi, r12
-    mov rsi, rdx                ; key tag
-    V_PACK rdi, rsi
-    call obj_hash
-    mov r13, rax                ; hash
-
-    ; capacity mask
-    mov r14, [rbx + PyDictObject.capacity]
-    lea r15, [r14 - 1]          ; mask
-
-    ; Starting slot
-    mov rcx, r13
-    and rcx, r15
-    xor r14d, r14d              ; probe counter
-
-.dd_probe:
-    cmp r14, [rbx + PyDictObject.capacity]
-    jge .dd_not_found
-
-    mov rax, [rbx + PyDictObject.entries]
-    imul rdx, rcx, DICT_ENTRY_SIZE
-    add rax, rdx
-
-    ENTRY_CLASSIFY rax, .dd_not_found, .dd_next
-    mov rdi, [rax + DictEntry.key]
-
-    cmp r13, [rax + DictEntry.hash]
-    jne .dd_next
-
-    mov rsi, r12
-    V_UNPACK rdi, rdx         ; dict_keys_equal takes (payload, tag)
-    push rcx
-    push rax
-    mov rcx, [rbp - DD_KTAG]   ; our key tag
-    call dict_keys_equal
-    pop rdx                     ; entry ptr
-    pop rcx
-    test eax, eax
-    jz .dd_next
-
-    ; Found: tombstone the entry, release its key and value, shrink the dict
-    mov rdi, [rdx + DictEntry.key]
-    mov rsi, [rdx + DictEntry.value]
-    mov qword [rdx + DictEntry.key], 0
-    mov qword [rdx + DictEntry.value], 0
-    mov qword [rdx + DictEntry.hash], ENTRY_TOMBSTONE_HASH   ; tombstone
-    push rsi                    ; value Value
-    push rsi                    ; (keep the stack 16-byte aligned)
+    ; Hole the dense entry.  It keeps its position so the surrounding order
+    ; is preserved; the index array forgets it.
+    mov rcx, [rbx + PyDictObject.entries]
+    imul rax, rax, DICT_ENTRY_SIZE
+    add rcx, rax
+    mov rdi, [rcx + DictEntry.key]
+    mov rsi, [rcx + DictEntry.value]
+    mov qword [rcx + DictEntry.key], 0
+    mov qword [rcx + DictEntry.value], 0
+    mov qword [rcx + DictEntry.hash], ENTRY_TOMBSTONE_HASH
+    push rsi
     DECREF_V rdi, rax
     pop rdi
-    pop rdi                     ; value Value
     DECREF_V rdi, rax
+
+    mov rcx, [rbx + PyDictObject.dk_indices]
+    mov qword [rcx + r12*8], DICT_IX_DUMMY
     dec qword [rbx + PyDictObject.ob_size]
     inc qword [rbx + PyDictObject.dk_tombstones]
-    ; Bump version counter
     inc qword [rbx + PyDictObject.dk_version]
-    cmp qword [rbx + PyDictObject.dk_version], 0
-    jne .dd_ver_ok
+    jnz .dd_done
     mov qword [rbx + PyDictObject.dk_version], 1
-.dd_ver_ok:
-    xor eax, eax               ; return 0 = success
-    jmp .dd_done
-
-.dd_next:
-    inc rcx
-    and rcx, r15
-    inc r14
-    jmp .dd_probe
-
-.dd_not_found:
-    mov rdi, [rbp - DD_KEYV]
-    call raise_key_error
-
 .dd_done:
-    pop r15
-    pop r14
-    pop r13
+    xor eax, eax
     pop r12
     pop rbx
     leave
     ret
+
+.dd_missing:
+    mov rdi, [rbp - DD_KEYV]
+    call raise_key_error
 END_FUNC dict_del
 
 ; dict_repr is in src/repr.asm

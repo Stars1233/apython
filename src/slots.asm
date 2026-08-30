@@ -23,6 +23,7 @@
 %include "macros.inc"
 %include "object.inc"
 %include "types.inc"
+%include "builtins.inc"
 
 ; Where a slot lives: directly in PyTypeObject, or in one of the three
 ; method tables it points at.  A table is allocated for a type only when it
@@ -396,6 +397,42 @@ DEF_FUNC slot_tp_iternext
     ret
 END_FUNC slot_tp_iternext
 
+
+;; ----------------------------------------------------------------------------
+;; slot_is_object_default(rdi = the value a dunder lookup returned) -> eax 0/1
+;; True when it is one of the implementations object itself supplies.
+;; ----------------------------------------------------------------------------
+DEF_FUNC_LOCAL slot_is_object_default
+    V_TEST_PTR rdi, rax
+    ja .no
+    test rdi, rdi
+    jz .no
+    mov rax, [rdi + PyObject.ob_type]
+    extern builtin_func_type
+    lea rcx, [rel builtin_func_type]
+    cmp rax, rcx
+    jne .no
+    mov rax, [rdi + PyBuiltinObject.func_ptr]
+    lea rcx, [rel object_default_impls]
+    xor edx, edx
+.scan:
+    mov rsi, [rcx + rdx*8]
+    test rsi, rsi
+    jz .no
+    cmp rax, rsi
+    je .yes
+    inc rdx
+    jmp .scan
+.yes:
+    mov eax, 1
+    leave
+    ret
+.no:
+    xor eax, eax
+    leave
+    ret
+END_FUNC slot_is_object_default
+
 ;; ============================================================================
 ;; type_install_slots(rdi = heaptype)
 ;;
@@ -405,7 +442,8 @@ END_FUNC slot_tp_iternext
 ;; ============================================================================
 TIS_TYPE  equ 8
 TIS_ENTRY equ 16
-TIS_FRAME equ 16
+TIS_FOUND equ 24
+TIS_FRAME equ 32
 
 global type_install_slots
 DEF_FUNC type_install_slots, TIS_FRAME
@@ -428,6 +466,7 @@ DEF_FUNC type_install_slots, TIS_FRAME
     mov rbx, [rbp - TIS_ENTRY]
     test edx, edx
     jz .skip                    ; the class does not define this dunder
+    mov [rbp - TIS_FOUND], rax
     ; A dunder explicitly set to None disables the protocol in Python, so
     ; leave the slot empty rather than installing a wrapper that would call
     ; None.
@@ -435,6 +474,18 @@ DEF_FUNC type_install_slots, TIS_FRAME
     lea rcx, [rel none_singleton]
     cmp rax, rcx
     je .skip
+    ; object's own defaults are not a definition.  They live in
+    ; object_type.tp_dict so that `MutableMapping.__ne__` and friends can be
+    ; bound by name, but a builtin subclass that inherits one must keep the
+    ; base type's C-level slot: installing a wrapper here would make
+    ; `T((1,)) == (1,)` on a tuple subclass go through object's identity test
+    ; instead of tuple's comparison.
+    mov rdi, rax
+    call slot_is_object_default
+    mov rbx, [rbp - TIS_ENTRY]
+    test eax, eax
+    jnz .skip
+    mov rax, [rbp - TIS_FOUND]
 
     mov rcx, [rbp - TIS_TYPE]
     mov rsi, [rbx + SlotEntry.kind]
@@ -509,3 +560,16 @@ slot_table:
     dq sl_gt_name,     SLOT_DIRECT,   PyTypeObject.tp_richcompare, slot_tp_richcompare
     dq sl_ge_name,     SLOT_DIRECT,   PyTypeObject.tp_richcompare, slot_tp_richcompare
     dq 0, 0, 0, 0
+
+section .data
+align 8
+extern object_method_eq
+extern object_method_ne
+extern object_method_hash
+extern object_method_str
+extern object_method_repr
+extern object_method_init
+object_default_impls:
+    dq object_method_eq, object_method_ne, object_method_hash
+    dq object_method_str, object_method_repr, object_method_init
+    dq 0

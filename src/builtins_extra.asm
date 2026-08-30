@@ -26,6 +26,7 @@ extern obj_dealloc
 extern ap_free
 extern ap_memcpy
 extern strlen
+extern str_new
 extern str_from_cstr
 extern str_from_cstr_heap
 extern obj_str
@@ -1477,10 +1478,13 @@ DEF_FUNC builtin_chr, 16
     cmp rax, 0x7F
     ja .chr_utf8_encode
 
+    ; str_new, not str_from_cstr: chr(0) is a one-character string holding a
+    ; NUL, and measuring it with strlen made it empty.
     mov byte [rbp - 16], al
     mov byte [rbp - 15], 0
     lea rdi, [rbp - 16]
-    call str_from_cstr
+    mov esi, 1
+    call str_new
     leave
     V_PACK rax, rdx             ; builtins return one Value
     ret
@@ -2735,6 +2739,23 @@ DEF_FUNC builtin_getattr
     ret
 
 .getattr_not_found:
+    ; The attributes every object has, same tail LOAD_ATTR uses.
+    mov rdi, [rbx]              ; args[0] as a Value
+    mov rsi, r14                ; name str
+    extern obj_generic_attr
+    call obj_generic_attr
+    test rax, rax
+    jz .getattr_really_missing
+    mov edx, TAG_PTR
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    V_PACK rax, rdx
+    ret
+
+.getattr_really_missing:
     cmp r12, 3
     jne .getattr_raise
 
@@ -2854,6 +2875,25 @@ DEF_FUNC builtin_hasattr
     ret
 
 .hasattr_not_found:
+    mov rdi, [rbx]
+    mov rsi, r13
+    call obj_generic_attr
+    test rax, rax
+    jz .hasattr_definitely_not
+    mov rdi, rax
+    call obj_decref
+    lea rax, [rel bool_true]
+    inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
+    add rsp, 8
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    V_PACK rax, rdx
+    ret
+
+.hasattr_definitely_not:
     lea rax, [rel bool_false]
     inc qword [rax + PyObject.ob_refcnt]
     mov edx, TAG_PTR
@@ -4666,7 +4706,26 @@ DEF_FUNC builtin_import_fn
     xor esi, esi               ; fromlist = NULL
     xor edx, edx              ; level = 0
     call import_module
-    ; Returns (rax=module, edx=TAG_PTR)
+    ; import_module never sets rdx, so V_PACK was branching on whatever the
+    ; last call left there -- re-encoding the module *pointer* as an int or a
+    ; double, i.e. a Value whose payload is a pointer but whose tag says
+    ; otherwise.  A module is a pointer; a pointer is its own Value.
+    mov edx, TAG_PTR
+    test rax, rax
+    jnz .imp_done
+    ; NULL means the module body raised and the exception is still pending.
+    extern current_exception
+    extern eval_exception_unwind
+    cmp qword [rel current_exception], 0
+    jne .imp_propagate
+    lea rdi, [rel exc_ImportError_type]
+    extern exc_ImportError_type
+    CSTRING rsi, "import failed"
+    call raise_exception
+.imp_propagate:
+    leave
+    jmp eval_exception_unwind
+.imp_done:
     leave
     V_PACK rax, rdx             ; builtins return one Value
     ret

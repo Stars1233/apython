@@ -665,15 +665,142 @@ DEF_FUNC bytes_getattr
 END_FUNC bytes_getattr
 
 ;; ============================================================================
-;; _bytes_decode_impl(args, nargs) — b.decode()
+;; _bytes_decode_impl(args, nargs) — b.decode([encoding[, errors]])
+;;
+;; utf-8 is the bytes as they stand; ascii is that with a range check; latin-1
+;; turns each byte into a code point, which is where the byte string and the
+;; text stop being the same thing.
 ;; ============================================================================
-DEF_FUNC _bytes_decode_impl
-    ; nargs should be 1 (just self)
-    mov rdi, [rdi]             ; self = args[0]
-    call bytes_decode
+BD_SELF  equ 8
+BD_OUT   equ 16
+BD_POS   equ 24
+BD_FRAME equ 32
+DEF_FUNC _bytes_decode_impl, BD_FRAME
+    push rbx
+    push r12
+    mov rbx, [rdi]
+    mov [rbp - BD_SELF], rbx
+    mov r12, [rbx + PyBytesObject.ob_size]
+
+    ; decode([encoding[, errors]]).  An encoding that is not a str is a
+    ; TypeError in CPython, not a silent fall back to utf-8.
+    cmp rsi, 3
+    jg .bd_too_many
+    xor eax, eax
+    cmp rsi, 2
+    jl .bd_have_enc
+    mov rax, [rdi + 8]
+    extern none_singleton
+    lea rcx, [rel none_singleton]
+    cmp rax, rcx
+    je .bd_default_enc
+    V_TEST_PTR rax, rcx
+    ja .bd_bad_enc
+    test rax, rax
+    jz .bd_bad_enc
+    mov rcx, [rax + PyObject.ob_type]
+    lea rdx, [rel str_type]
+    cmp rcx, rdx
+    jne .bd_bad_enc
+    jmp .bd_have_enc
+.bd_default_enc:
+    xor eax, eax
+.bd_have_enc:
+    mov rdi, rax
+    extern codec_id
+    call codec_id
+    cmp eax, 1
+    je .bd_ascii
+    cmp eax, 2
+    je .bd_latin1
+
+.bd_utf8:
+    mov rbx, [rbp - BD_SELF]
+    lea rdi, [rbx + PyBytesObject.data]
+    mov rsi, r12
+    call str_new
+    pop r12
+    pop rbx
     leave
-    V_PACK rax, rdx             ; builtins return one Value
+    V_PACK rax, rdx
     ret
+
+.bd_ascii:
+    xor ecx, ecx
+.bd_ascii_scan:
+    cmp rcx, r12
+    jge .bd_utf8
+    movzx eax, byte [rbx + PyBytesObject.data + rcx]
+    test al, 0x80
+    jnz .bd_not_decodable
+    inc rcx
+    jmp .bd_ascii_scan
+
+.bd_latin1:
+    ; Each byte is one code point, so a byte at or above 0x80 becomes two
+    ; bytes of UTF-8: the result can be twice as long.
+    lea rdi, [r12 + r12]
+    add rdi, PyStrObject.data + 8
+    call ap_malloc
+    mov [rbp - BD_OUT], rax
+    mov qword [rax + PyObject.ob_refcnt], 1
+    lea rcx, [rel str_type]
+    mov [rax + PyObject.ob_type], rcx
+    mov qword [rax + PyStrObject.ob_hash], -1
+    mov [rax + PyStrObject.ob_length], r12
+    mov qword [rbp - BD_POS], 0
+    xor ecx, ecx
+.bd_l1_loop:
+    cmp rcx, r12
+    jge .bd_l1_done
+    mov rbx, [rbp - BD_SELF]
+    movzx eax, byte [rbx + PyBytesObject.data + rcx]
+    mov rdx, [rbp - BD_OUT]
+    mov r8, [rbp - BD_POS]
+    test al, 0x80
+    jnz .bd_l1_two
+    mov [rdx + PyStrObject.data + r8], al
+    inc qword [rbp - BD_POS]
+    jmp .bd_l1_next
+.bd_l1_two:
+    mov r9d, eax
+    shr r9d, 6
+    or r9b, 0xC0
+    mov [rdx + PyStrObject.data + r8], r9b
+    and eax, 0x3F
+    or al, 0x80
+    mov [rdx + PyStrObject.data + r8 + 1], al
+    add qword [rbp - BD_POS], 2
+.bd_l1_next:
+    inc rcx
+    jmp .bd_l1_loop
+.bd_l1_done:
+    mov rax, [rbp - BD_OUT]
+    mov rcx, [rbp - BD_POS]
+    mov [rax + PyStrObject.ob_size], rcx
+    mov qword [rax + PyStrObject.data + rcx], 0
+    mov edx, TAG_PTR
+    pop r12
+    pop rbx
+    leave
+    V_PACK rax, rdx
+    ret
+
+.bd_bad_enc:
+    extern raise_type_error_with_name
+    mov rsi, rax
+    CSTRING rdi, `decode() argument 'encoding' must be str, not \x01`
+    call raise_type_error_with_name
+.bd_too_many:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "decode() takes at most 2 arguments"
+    call raise_exception
+
+.bd_not_decodable:
+    extern exc_UnicodeDecodeError_type
+    lea rdi, [rel exc_UnicodeDecodeError_type]
+    CSTRING rsi, "byte not in range for this encoding"
+    call raise_exception
 END_FUNC _bytes_decode_impl
 
 ;; ============================================================================
@@ -1155,31 +1282,250 @@ END_FUNC bytes_repeat
 ;; Constructor: bytes(bytes_obj) — copies data, uses passed-in type for subclass
 ;; ============================================================================
 global bytes_type_call
-BTC_TYPE  equ 8
-BTC_FRAME equ 8
-DEF_FUNC bytes_type_call, BTC_FRAME
-    ; rdi=type, rsi=args, rdx=nargs
-    mov [rbp - BTC_TYPE], rdi
-    cmp rdx, 1
-    jne .btc_error
-    mov rdi, [rsi]              ; arg0 payload
-    V_TEST_PTR_M [rsi], r11     ; a float is not an int immediate either, and
-    ja .btc_error               ; its payload is raw f64 bits, not an address
+
+;; ============================================================================
+;; byteslike_source(rdi = args, rsi = nargs, rdx = name cstr)
+;;   -> rax = ap_malloc'd buffer (0 when empty), rdx = length
+;;
+;; The raw bytes a bytes() or bytearray() call asks for, gathered before
+;; anything is allocated.  CPython accepts no argument, a count, another
+;; bytes-like, or any iterable of ints; the constructors here used to accept
+;; a bytes object and nothing else, which is what stopped _collections_abc
+;; at `type(iter(bytearray()))` and with it every module behind it.
+;;
+;; The buffer is over-allocated by 8 so bytes objects can zero-terminate.
+;; ============================================================================
+BLS_ARGS  equ 8
+BLS_RANGEMSG equ 16
+BLS_BADITEM equ 56
+BLS_LEN   equ 24
+BLS_BUF   equ 32
+BLS_LIST  equ 40
+BLS_FRAME equ 64
+global byteslike_source
+DEF_FUNC byteslike_source, BLS_FRAME
+    push rbx
+    push r12
+    mov [rbp - BLS_ARGS], rdi
+    mov [rbp - BLS_RANGEMSG], rdx
+    mov qword [rbp - BLS_LIST], 0
+    mov qword [rbp - BLS_BUF], 0
+    test rsi, rsi
+    jz .bls_empty
+    cmp rsi, 1
+    jne .bls_too_many
+
+    mov rdi, [rdi]              ; the one argument, as a Value
+    V_IS_INT rdi, rax
+    jae .bls_count
+    V_TEST_PTR rdi, rax
+    ja .bls_bad_type
+    test rdi, rdi
+    jz .bls_bad_type
+
     mov rax, [rdi + PyObject.ob_type]
     lea rcx, [rel bytes_type]
     cmp rax, rcx
-    jne .btc_error
+    je .bls_copy_bytes
+    extern bytearray_type
+    lea rcx, [rel bytearray_type]
+    cmp rax, rcx
+    je .bls_copy_bytearray
+    extern int_type
+    lea rcx, [rel int_type]
+    cmp rax, rcx
+    je .bls_count_obj
+    extern str_type
+    lea rcx, [rel str_type]
+    cmp rax, rcx
+    je .bls_need_encoding
+    jmp .bls_iterable
 
-    ; Copy bytes data into new object
-    mov rcx, [rdi + PyBytesObject.ob_size]
-    push rdi
-    push rcx
-    ; Check if type needs GC allocation (heap type subclass)
+.bls_empty:
+    xor eax, eax
+    xor edx, edx
+    pop r12
+    pop rbx
+    leave
+    ret
+
+    ; bytes(n) / bytearray(n): n zero bytes.
+.bls_count:
+    V_TO_I64 rdi
+    mov rbx, rdi
+    jmp .bls_count_have
+.bls_count_obj:
+    call int_to_i64
+    mov rbx, rax
+.bls_count_have:
+    test rbx, rbx
+    js .bls_negative
+    jz .bls_empty
+    lea rdi, [rbx + 8]
+    call ap_malloc
+    mov r12, rax
+    mov rdi, rax
+    xor esi, esi
+    lea rdx, [rbx + 8]
+    extern ap_memset
+    call ap_memset
+    mov rax, r12
+    mov rdx, rbx
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.bls_copy_bytes:
+    mov rbx, [rdi + PyBytesObject.ob_size]
+    lea r12, [rdi + PyBytesObject.data]
+    jmp .bls_copy
+
+.bls_copy_bytearray:
+    mov rbx, [rdi + PyByteArrayObject.ob_size]
+    lea r12, [rdi + PyByteArrayObject.data]
+
+.bls_copy:
+    test rbx, rbx
+    jz .bls_empty
+    lea rdi, [rbx + 8]
+    call ap_malloc
+    push rax
+    mov rdi, rax
+    mov rsi, r12
+    mov rdx, rbx
+    call ap_memcpy
+    pop rax
+    mov qword [rax + rbx], 0
+    mov rdx, rbx
+    pop r12
+    pop rbx
+    leave
+    ret
+
+    ; Any other iterable: materialise it as a list, then take one byte per
+    ; item.  Going through list() rather than the iterator protocol directly
+    ; keeps __iter__/__next__ on heap types working for free.
+.bls_iterable:
+    extern list_type
+    extern list_type_call
+    lea rdi, [rel list_type]
+    mov rsi, [rbp - BLS_ARGS]
+    mov edx, 1
+    call list_type_call
+    V_UNPACK rax, rdx
+    test rax, rax
+    jz .bls_bad_type
+    mov [rbp - BLS_LIST], rax
+    mov rbx, [rax + PyListObject.ob_size]
+    test rbx, rbx
+    jz .bls_iter_empty
+    lea rdi, [rbx + 8]
+    call ap_malloc
+    mov [rbp - BLS_BUF], rax
+    mov r12, rax
+    mov rax, [rbp - BLS_LIST]
+    mov rax, [rax + PyListObject.ob_item]
+    xor ecx, ecx
+.bls_iter_loop:
+    cmp rcx, rbx
+    jge .bls_iter_done
+    mov rdi, [rax + rcx*8]
+    V_IS_INT rdi, rdx
+    jb .bls_iter_bad
+    V_TO_I64 rdi
+    cmp rdi, 0
+    jl .bls_iter_range
+    cmp rdi, 255
+    jg .bls_iter_range
+    mov [r12 + rcx], dil
+    inc rcx
+    jmp .bls_iter_loop
+.bls_iter_done:
+    mov qword [r12 + rbx], 0
+    mov rdi, [rbp - BLS_LIST]
+    call obj_decref
+    mov rax, r12
+    mov rdx, rbx
+    pop r12
+    pop rbx
+    leave
+    ret
+.bls_iter_empty:
+    mov rdi, [rbp - BLS_LIST]
+    call obj_decref
+    jmp .bls_empty
+    ; raise_exception abandons this frame, so the list and the buffer have to
+    ; go first or a loop that keeps catching the error keeps leaking them.
+.bls_release:
+    mov rdi, [rbp - BLS_LIST]
+    test rdi, rdi
+    jz .bls_release_buf
+    mov qword [rbp - BLS_LIST], 0
+    call obj_decref
+.bls_release_buf:
+    mov rdi, [rbp - BLS_BUF]
+    test rdi, rdi
+    jz .bls_released
+    mov qword [rbp - BLS_BUF], 0
+    call ap_free
+.bls_released:
+    ret
+
+.bls_iter_bad:
+    ; A non-integer item is a TypeError, as it is in CPython; only an integer
+    ; that will not fit in a byte is a ValueError.
+    mov [rbp - BLS_BADITEM], rdi
+    call .bls_release
+    extern raise_type_error_with_name
+    CSTRING rdi, `'\x01' object cannot be interpreted as an integer`
+    mov rsi, [rbp - BLS_BADITEM]
+    call raise_type_error_with_name
+.bls_iter_range:
+    call .bls_release
+    lea rdi, [rel exc_ValueError_type]
+    ; bytes() and bytearray() word this differently; the caller says which.
+    mov rsi, [rbp - BLS_RANGEMSG]
+    call raise_exception
+
+.bls_negative:
+    lea rdi, [rel exc_ValueError_type]
+    CSTRING rsi, "negative count"
+    call raise_exception
+.bls_need_encoding:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "string argument without an encoding"
+    call raise_exception
+.bls_too_many:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "encoding and errors arguments are not supported"
+    call raise_exception
+.bls_bad_type:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "cannot convert this object to bytes"
+    call raise_exception
+END_FUNC byteslike_source
+
+BTC_TYPE  equ 8
+BTC_BUF   equ 16
+BTC_LEN   equ 24
+BTC_FRAME equ 32
+DEF_FUNC bytes_type_call, BTC_FRAME
+    ; rdi=type, rsi=args, rdx=nargs
+    push rbx
+    mov [rbp - BTC_TYPE], rdi
+    mov rdi, rsi
+    mov rsi, rdx
+    lea rdx, [rel bytes_range_msg]
+    call byteslike_source
+    mov [rbp - BTC_BUF], rax
+    mov [rbp - BTC_LEN], rdx
+
+    mov rcx, rdx
     mov rdx, [rbp - BTC_TYPE]
     test qword [rdx + PyTypeObject.tp_flags], TYPE_FLAG_HAVE_GC
     lea rdi, [rcx + PyBytesObject.data + 8]
     jz .btc_plain_alloc
-    ; GC alloc for subclass
     mov rsi, rdx
     call gc_alloc
     jmp .btc_alloc_done
@@ -1189,39 +1535,38 @@ DEF_FUNC bytes_type_call, BTC_FRAME
     mov rdx, [rbp - BTC_TYPE]
     mov [rax + PyBytesObject.ob_type], rdx
 .btc_alloc_done:
-    pop rcx
-    pop rsi
-    mov [rax + PyBytesObject.ob_size], rcx
-    ; INCREF the type (needed for heap type subclasses)
+    mov rbx, rax
+    mov rcx, [rbp - BTC_LEN]
+    mov [rbx + PyBytesObject.ob_size], rcx
     mov rdx, [rbp - BTC_TYPE]
     inc qword [rdx + PyObject.ob_refcnt]
 
-    push rax
-    lea rdi, [rax + PyBytesObject.data]
-    lea rsi, [rsi + PyBytesObject.data]
+    test rcx, rcx
+    jz .btc_no_copy
+    lea rdi, [rbx + PyBytesObject.data]
+    mov rsi, [rbp - BTC_BUF]
     mov rdx, rcx
     call ap_memcpy
-    ; Null-terminate with 8-byte zero-fill
-    pop rax
-    mov rcx, [rax + PyBytesObject.ob_size]
-    mov qword [rax + PyBytesObject.data + rcx], 0
-    ; gc_track if heap type subclass
+.btc_no_copy:
+    mov rcx, [rbp - BTC_LEN]
+    mov qword [rbx + PyBytesObject.data + rcx], 0
+    mov rdi, [rbp - BTC_BUF]
+    test rdi, rdi
+    jz .btc_no_free
+    call ap_free
+.btc_no_free:
+
     mov rdx, [rbp - BTC_TYPE]
     test qword [rdx + PyTypeObject.tp_flags], TYPE_FLAG_HAVE_GC
     jz .btc_no_track
-    push rax
-    mov rdi, rax
+    mov rdi, rbx
     call gc_track
-    pop rax
 .btc_no_track:
+    mov rax, rbx
     mov edx, TAG_PTR
+    pop rbx
     leave
     ret
-
-.btc_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "bytes() argument must be a bytes object"
-    call raise_exception
 END_FUNC bytes_type_call
 
 section .data
@@ -1288,3 +1633,8 @@ bytes_iter_type:
     dq 0                        ; tp_traverse
     dq 0                        ; tp_clear
     dq 0 ; tp_dictoffset
+
+section .rodata
+bytes_range_msg: db "bytes must be in range(0, 256)", 0
+global bytearray_range_msg
+bytearray_range_msg: db "byte must be in range(0, 256)", 0

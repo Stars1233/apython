@@ -9,10 +9,25 @@ one-line fix.
 
 ## Correctness
 
-- **A `str` is a byte string, not a sequence of code points.**  `chr(233)` is
-  two bytes, so `len(chr(233))` is 2 where CPython says 1, and indexing,
-  slicing and iteration all work in bytes.  `ord()` decodes UTF-8, so it
-  round-trips, but nothing else does.  `chr(0)` produces an empty string.
+- **Case conversion is ASCII-only.**  `"é".upper()` is `"é"`, not `"É"`;
+  `upper`, `lower`, `title`, `capitalize` and `swapcase` all leave a
+  non-ASCII byte as it is.  Needs Unicode case tables.
+
+- **`bytes.decode` does not validate UTF-8.**  CPython raises
+  UnicodeDecodeError for a stray continuation byte or a truncated sequence;
+  here the bytes come through as they are.  The resulting string is at least
+  self-consistent -- every walk over it treats such a byte as one code point
+  of one byte, so `len`, indexing, slicing and iteration agree.
+
+- **`str.encode` and `bytes.decode` know only utf-8, ascii and latin-1.**
+  Any other name is a LookupError, where CPython would find the codec through
+  the registry; reaching it from the interpreter would mean calling Python
+  from a builtin method.  The `errors` argument is accepted and ignored --
+  every failure is strict.
+
+- **`str.format` does not accept attribute or index access in a field.**
+  `"{0.attr}"` and `"{0[key]}"` are not resolved; a field is a position, a
+  name, or empty.  A nested spec, `"{:{}}"`, is likewise not substituted.
 
 - **`tuple(t) is t` is False.**  CPython returns the argument unchanged when
   it is already an exact tuple.
@@ -24,11 +39,61 @@ one-line fix.
   where CPython gives `dict_keys(['a'])`; the same for `.values()` and
   `.items()`.
 
-- **`bytes()` and `bytearray()` accept only an existing bytes object.**  The
-  no-argument, integer-count and iterable-of-ints forms all raise TypeError.
-  `bytearray` is also not subscriptable -- it has `sq_length` but no
-  `sq_item` and no `tp_as_mapping` -- so `b[0]`, `b[1:]` and
-  `reversed(bytearray(...))` raise.
+- **`bytearray` is not subscriptable.**  It has `sq_length` but no `sq_item`
+  and no `tp_as_mapping`, so `b[0]`, `b[1:]` and `reversed(bytearray(...))`
+  raise.  It is iterable, and the constructors take every form CPython's do.
+
+- **The `_abc` registry and caches hold strong references.**  CPython uses
+  weak ones, so a class registered against an ABC can be collected and the
+  ABC's caches shrink; here a registered class lives as long as the ABC.
+  Registries are process-lifetime and small in practice.  Revisit if
+  `_weakref` lands.
+
+- **`_abc_subclasscheck` does not recurse into `cls.__subclasses__()`.**
+  CPython's step 6 finds a registration made on a *subclass* of the ABC;
+  types keep no subclass list here, so `issubclass(X, ABC)` is False when X
+  was registered against a subclass of ABC rather than against ABC itself.
+  Direct registration and real inheritance both work.
+
+- **`eval()` and `exec()` do not compile source.**  `eval` parses an integer
+  literal and nothing else; there is no Python compiler here, only a .pyc
+  reader.  `collections.namedtuple` builds its `__new__` with
+  `eval("lambda ...")`, so it and everything that uses it -- functools, enum,
+  re, inspect, typing, dataclasses, textwrap -- stop there.  33 of the 196
+  stdlib modules fail on exactly this.
+
+- **No platform module, so `os` cannot import.**  `os.py` looks for `posix`
+  and raises "no os specific module found" without it.  That is the single
+  largest blocker in the stdlib: 47 of the 196 modules fail on it.
+
+- **Missing C modules, by how many stdlib modules each blocks:** `_io` (10),
+  `math` (9), `_codecs` (6), `_struct` (5), `_socket` (5), `binascii` (4),
+  `_imp` (3), `_string` (2), `errno` (2), and one each for a long tail.
+  `complex` does not exist as a type either, which stops `copyreg` and `copy`.
+
+- **Weak references keep no per-object slot.**  The links live in a side
+  table keyed by the referent's address rather than in the object, so
+  `tp_weaklistoffset` does not exist and `__weakref__` is not an attribute.
+  Everything observable through `_weakref` works; a C extension expecting the
+  slot would not.
+
+- **`object.__lt__`, `__le__`, `__gt__` and `__ge__` are missing.**  They
+  exist in CPython and always return NotImplemented.  Adding them here would
+  shadow a builtin base's own comparison, because a heaptype's slot is
+  installed from whatever the MRO's dunder lookup finds and there are no slot
+  wrappers to tell object's default apart at that point.  `__eq__`, `__ne__`
+  and `__hash__` are present and are skipped explicitly when slots are
+  installed.
+
+- **`_thread` is a single-threaded stand-in.**  `lib/_thread.py` gives
+  `get_ident` a constant, makes locks uncontended, and raises from
+  `start_new_thread`.  Everything in the stdlib that only takes a lock works;
+  anything that expects a second thread does not.
+
+- **`_abc_instancecheck` does not honour a spoofed `__class__`.**  CPython
+  checks both `instance.__class__` and `type(instance)`; this checks only the
+  type, so an object that lies about its class -- a mock, mostly -- is judged
+  by what it really is.
 
 - **A `str` subclass has no instance `__dict__`.**  A str keeps its
   characters inline, so there is no fixed offset past the header to put one
@@ -59,6 +124,22 @@ one-line fix.
   frames, line numbers, source lines, the repeated-frame elision, the
   `__cause__` / `__context__` preamble -- matches; only the caret line is
   missing.
+
+## Missing pieces
+
+These are absences rather than wrong answers — the interpreter raises rather
+than lying — but they are ordinary Python that does not work:
+
+- `time.time` and `time.sleep`.  The `time` module has only `monotonic` and
+  `process_time`; `asyncio.sleep` exists.
+- `itertools.zip_longest`, `permutations`, `combinations`, `takewhile`,
+  `dropwhile`, `filterfalse`, `groupby`, `tee`, `pairwise`.
+- The `re` wrapper module.  The `_sre` engine underneath is complete, but
+  without a shipped `re.py` an `import re` finds CPython's, which needs
+  `enum` and `types`.
+- `collections.deque`.
+- Six builtin exceptions: `IOError` / `EnvironmentError`, `FileExistsError`,
+  `IndentationError`, `TabError`, `UnicodeTranslateError`.
 
 ## Robustness
 

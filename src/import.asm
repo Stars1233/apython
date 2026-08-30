@@ -24,6 +24,9 @@ extern none_singleton
 extern dict_new
 extern dict_get
 extern dict_set
+extern dict_del
+extern current_exception
+extern eval_exception_unwind
 extern list_new
 extern list_append
 extern tuple_new
@@ -57,11 +60,14 @@ extern sys_path_add_script_dir
 ; builtins
 extern builtins_dict_global
 extern exc_ImportError_type
+extern exc_ModuleNotFoundError_type
 
 ; Builtin modules
 extern time_module_create
 extern asyncio_module_create
 extern sre_module_create
+extern abc_module_create
+extern weakref_module_create
 
 ; --- import_module frame layout ---
 IF_NAME     equ 8            ; import name str
@@ -74,7 +80,8 @@ IF_MLEN     equ 56           ; saved marshal_len
 IF_MREFS    equ 64           ; saved marshal_refs
 IF_MRCNT    equ 72           ; saved marshal_ref_count
 IF_MRCAP    equ 80           ; saved marshal_ref_cap
-IF_FRAME    equ 88
+IF_EXC      equ 88           ; current_exception on entry (see .import_error)
+IF_FRAME    equ 96
 
 ; --- import_find_and_load frame layout ---
 ; path_component buffer lives on stack below frame locals
@@ -95,6 +102,190 @@ IM_PATH_MARGIN equ 64
 ; ============================================================================
 ; import_init(int argc, char **argv)
 ; Initialize the import system: sys module + builtins in sys.modules
+
+; ----------------------------------------------------------------------------
+; import_add_exe_relative_path(rdi = suffix cstr)
+; Appends <directory of the running binary>/<suffix> to sys.path.  Falls back
+; to the plain relative entry when /proc/self/exe cannot be read.
+
+; ----------------------------------------------------------------------------
+; import_resolve_relative(rdi = name str, rsi = globals dict, rdx = level)
+;   -> rax = the absolute name, a new reference
+;
+; `from . import x` inside a package: level counts how far up from the
+; importing module's package to start.  Level was read off the stack and then
+; ignored, so every relative import in the stdlib looked like an import of the
+; empty name.
+; ----------------------------------------------------------------------------
+IRR_NAME  equ 8
+IRR_LEVEL equ 16
+IRR_PKG   equ 24
+IRR_LEN   equ 32
+IRR_BUF   equ 1064          ; 1024 bytes, [rbp-1064, rbp-40)
+global import_resolve_relative
+IRR_FRAME equ 1072
+DEF_FUNC import_resolve_relative, IRR_FRAME
+    push rbx
+    push r12
+    mov [rbp - IRR_NAME], rdi
+    mov [rbp - IRR_LEVEL], rdx
+
+    ; The importing module's package.  __package__ is set at import time; for
+    ; a package itself it is the package's own name.
+    test rsi, rsi
+    jz .irr_no_package
+    push rsi
+    lea rdi, [rel irr_package_key]
+    call str_from_cstr_heap
+    mov rbx, rax
+    pop rdi
+    mov rsi, rbx
+    call dict_get
+    push rax
+    mov rdi, rbx
+    call obj_decref
+    pop rax
+    test rax, rax
+    jz .irr_no_package
+    V_TEST_PTR rax, rcx
+    ja .irr_no_package
+    mov rcx, [rax + PyObject.ob_type]
+    lea rdx, [rel str_type]
+    cmp rcx, rdx
+    jne .irr_no_package
+    mov [rbp - IRR_PKG], rax
+    mov rcx, [rax + PyStrObject.ob_size]
+    test rcx, rcx
+    jz .irr_no_package
+
+    ; Copy the package name, then drop one trailing component per extra level.
+    lea rbx, [rbp - IRR_BUF]
+    cmp rcx, IRR_BUF - 64
+    jae .irr_no_package
+    mov [rbp - IRR_LEN], rcx
+    mov rdi, rbx
+    mov rax, [rbp - IRR_PKG]
+    lea rsi, [rax + PyStrObject.data]
+    mov rdx, rcx
+    call ap_memcpy
+
+    mov r12, [rbp - IRR_LEVEL]
+    dec r12
+.irr_strip:
+    test r12, r12
+    jle .irr_have_base
+    mov rcx, [rbp - IRR_LEN]
+.irr_find_dot:
+    test rcx, rcx
+    jz .irr_beyond_top
+    dec rcx
+    cmp byte [rbx + rcx], '.'
+    jne .irr_find_dot
+    mov [rbp - IRR_LEN], rcx
+    dec r12
+    jmp .irr_strip
+
+.irr_have_base:
+    ; Append ".name" when there is a name; `from . import x` has none.
+    mov rax, [rbp - IRR_NAME]
+    mov rdx, [rax + PyStrObject.ob_size]
+    test rdx, rdx
+    jz .irr_build
+    mov rcx, [rbp - IRR_LEN]
+    mov byte [rbx + rcx], '.'
+    inc rcx
+    mov [rbp - IRR_LEN], rcx
+    lea rdi, [rbx + rcx]
+    lea rsi, [rax + PyStrObject.data]
+    push rdx
+    call ap_memcpy
+    pop rdx
+    add [rbp - IRR_LEN], rdx
+
+.irr_build:
+    mov rdi, rbx
+    mov rsi, [rbp - IRR_LEN]
+    call str_new_heap
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.irr_beyond_top:
+    lea rdi, [rel exc_ImportError_type]
+    CSTRING rsi, "attempted relative import beyond top-level package"
+    call raise_exception
+.irr_no_package:
+    lea rdi, [rel exc_ImportError_type]
+    CSTRING rsi, "attempted relative import with no known parent package"
+    call raise_exception
+END_FUNC import_resolve_relative
+
+
+; ----------------------------------------------------------------------------
+IAR_SUFFIX equ 8
+IAR_LEN    equ 16
+IAR_BUF    equ 4128            ; 4096 bytes of path, [rbp-4128, rbp-32)
+IAR_FRAME  equ 4144
+DEF_FUNC_LOCAL import_add_exe_relative_path, IAR_FRAME
+    push rbx
+    push r12
+    mov [rbp - IAR_SUFFIX], rdi
+
+    lea rbx, [rbp - IAR_BUF]
+    CSTRING rdi, "/proc/self/exe"
+    mov rsi, rbx
+    mov edx, 4000
+    extern readlink
+    call readlink
+    test rax, rax
+    jle .iar_relative
+    mov r12, rax                ; length of the resolved path
+
+    ; Cut back to the last '/', keeping it, so "…/apython" becomes "…/".
+.iar_trim:
+    test r12, r12
+    jz .iar_relative
+    dec r12
+    cmp byte [rbx + r12], '/'
+    jne .iar_trim
+    inc r12
+
+    ; Append the suffix.
+    mov rsi, [rbp - IAR_SUFFIX]
+.iar_copy:
+    movzx eax, byte [rsi]
+    test al, al
+    jz .iar_done
+    cmp r12, 4090
+    jae .iar_relative
+    mov [rbx + r12], al
+    inc r12
+    inc rsi
+    jmp .iar_copy
+.iar_done:
+    mov rdi, rbx
+    mov rsi, r12
+    call str_new_heap
+    jmp .iar_append
+
+.iar_relative:
+    mov rdi, [rbp - IAR_SUFFIX]
+    call str_from_cstr_heap
+
+.iar_append:
+    push rax
+    mov rdi, [rel sys_path_list]
+    mov rsi, rax
+    call list_append
+    pop rdi
+    call obj_decref
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC import_add_exe_relative_path
+
 ; ============================================================================
 DEF_FUNC import_init
     push rbx
@@ -106,26 +297,6 @@ DEF_FUNC import_init
     mov rdi, rbx
     mov rsi, r12
     call sys_module_init
-
-    ; Add "lib" to sys.path for stdlib modules
-    lea rdi, [rel im_lib_path]
-    call str_from_cstr_heap
-    push rax
-    mov rdi, [rel sys_path_list]
-    mov rsi, rax
-    call list_append
-    pop rdi
-    call obj_decref
-
-    ; Add "tests/cpython" to sys.path for test support
-    lea rdi, [rel im_tests_cpython_path]
-    call str_from_cstr_heap
-    push rax
-    mov rdi, [rel sys_path_list]
-    mov rsi, rax
-    call list_append
-    pop rdi
-    call obj_decref
 
     ; Register builtins module in sys.modules
     lea rdi, [rel im_builtins]
@@ -199,21 +370,141 @@ DEF_FUNC import_init
     mov rdi, rbx                ; DECREF module (dict_set INCREF'd)
     call obj_decref
 
-    ; Add system python3 lib path to sys.path for re module access
-    lea rdi, [rel im_python3_lib_path]
+    ; Register _abc module in sys.modules
+    call abc_module_create
+    mov rbx, rax                ; _abc module
+    lea rdi, [rel im_abc_name]
     call str_from_cstr_heap
     push rax
+    mov rdi, [rel sys_modules_dict]
+    mov rsi, rax                ; key = "_abc"
+    mov rdx, rbx                ; value = _abc module
+    call dict_set
+    pop rdi                     ; DECREF key
+    call obj_decref
+    mov rdi, rbx                ; DECREF module (dict_set INCREF'd)
+    call obj_decref
+
+    ; Register _weakref module in sys.modules
+    call weakref_module_create
+    mov rbx, rax
+    lea rdi, [rel im_weakref_name]
+    call str_from_cstr_heap
+    push rax
+    mov rdi, [rel sys_modules_dict]
+    mov rsi, rax
+    mov rdx, rbx
+    call dict_set
+    pop rdi
+    call obj_decref
+    mov rdi, rbx
+    call obj_decref
+
+    ; PYTHONPATH, colon-separated, appended in order.
+    ;
+    ; CPython's own /usr/lib/python3.12 used to be appended here
+    ; unconditionally, nominally "for re module access" -- which never
+    ; worked, because apython cannot run that stdlib.  What it did do, once
+    ; a failing module body stopped being swallowed, was turn "module not
+    ; available" into "module half-imports and then raises from inside
+    ; types.py".  A stdlib on the path has to be the caller's decision.
+    CSTRING rdi, "PYTHONPATH"
+    extern getenv
+    call getenv
+    test rax, rax
+    jz .no_pythonpath
+    mov r12, rax                ; cursor over the value
+.pp_entry:
+    cmp byte [r12], 0
+    je .no_pythonpath
+    ; measure up to ':' or NUL
+    xor ecx, ecx
+.pp_scan:
+    movzx eax, byte [r12 + rcx]
+    test al, al
+    jz .pp_have_len
+    cmp al, ':'
+    je .pp_have_len
+    inc rcx
+    jmp .pp_scan
+.pp_have_len:
+    test rcx, rcx
+    jz .pp_skip_sep             ; empty entry
+    mov rdi, r12
+    mov rsi, rcx
+    push rcx
+    call str_new_heap
+    pop rcx
+    push rax
+    push rcx
     mov rdi, [rel sys_path_list]
     mov rsi, rax
     call list_append
+    pop rcx
     pop rdi
     call obj_decref
+.pp_skip_sep:
+    add r12, rcx
+    cmp byte [r12], 0
+    je .no_pythonpath
+    inc r12                     ; step over the ':'
+    jmp .pp_entry
+.no_pythonpath:
+
+    ; The modules apython ships itself, last.  They are found relative to the
+    ; interpreter binary rather than the working directory -- a relative "lib"
+    ; entry only resolved when apython happened to be run from its own source
+    ; tree, so `import itertools` worked there and nowhere else.  Last, so a
+    ; real stdlib named by PYTHONPATH wins: these stand in for CPython's C
+    ; modules, not for its Python ones.
+    lea rdi, [rel im_lib_path]
+    call import_add_exe_relative_path
+    lea rdi, [rel im_tests_cpython_path]
+    call import_add_exe_relative_path
 
     pop r12
     pop rbx
     leave
     ret
 END_FUNC import_init
+
+; ============================================================================
+; import_raise_not_found(rdi = module name C string) -- does not return
+; Raises ModuleNotFoundError("No module named 'x'"), matching CPython.
+; ============================================================================
+IRNF_BUF equ 256
+DEF_FUNC_LOCAL import_raise_not_found, IRNF_BUF
+    mov rsi, rdi                ; the name
+    lea rdi, [rbp - IRNF_BUF]
+    xor ecx, ecx
+    lea rdx, [rel im_no_module_prefix]
+.irnf_prefix:
+    movzx eax, byte [rdx]
+    test al, al
+    jz .irnf_name
+    inc rdx
+    mov [rdi + rcx], al
+    inc rcx
+    jmp .irnf_prefix
+.irnf_name:
+    movzx eax, byte [rsi]
+    test al, al
+    jz .irnf_close
+    inc rsi
+    cmp rcx, IRNF_BUF - 4
+    jae .irnf_close
+    mov [rdi + rcx], al
+    inc rcx
+    jmp .irnf_name
+.irnf_close:
+    mov byte [rdi + rcx], 0x27      ; closing quote
+    inc rcx
+    mov byte [rdi + rcx], 0
+    mov rsi, rdi
+    lea rdi, [rel exc_ModuleNotFoundError_type]
+    call raise_exception
+    ud2
+END_FUNC import_raise_not_found
 
 ; ============================================================================
 ; import_module(PyObject *name_str, PyObject *fromlist, int64_t level) -> PyObject*
@@ -233,9 +524,8 @@ DEF_FUNC import_module, IF_FRAME
     mov [rbp - IF_NAME], rdi        ; name_str
     mov [rbp - IF_FROMLIST], rsi    ; fromlist
     mov [rbp - IF_LEVEL], rdx       ; level
+    DUNDER_EXC_SAVE [rbp - IF_EXC]  ; see .import_error
 
-    ; For now, skip relative import handling (level > 0)
-    ; TODO: resolve relative imports
 
     ; Get name as C string for comparisons
     mov rdi, [rbp - IF_NAME]
@@ -411,11 +701,26 @@ DEF_FUNC import_module, IF_FRAME
     jmp .done
 
 .import_error:
-    ; Raise ImportError
-    lea rdi, [rel exc_ImportError_type]
-    lea rsi, [rbx]              ; module name cstr
-    call raise_exception
+    ; If the module was found and its body raised, that exception is the
+    ; error; raising ImportError over it would replace the real cause with
+    ; a generic "no module named X".
+    ;
+    ; Compared against the value saved on entry, not against 0:
+    ; current_exception is also the exception *being handled*, so inside
+    ; `except ImportError:` -- which is how the whole stdlib probes for its
+    ; optional C accelerators -- a bare test sees the handled exception and
+    ; re-propagates it in place of the real one.
+    DUNDER_RAISED [rbp - IF_EXC], .propagate_pending
+
+    ; ModuleNotFoundError, not a bare ImportError: it is an ImportError
+    ; subclass and stdlib code catches it specifically.  CPython's wording
+    ; is "No module named 'x'".
+    mov rdi, rbx                ; module name cstr
+    call import_raise_not_found
     ; does not return
+
+.propagate_pending:
+    jmp eval_exception_unwind
 
 .done:
     pop r15
@@ -1098,6 +1403,7 @@ DEF_FUNC import_load_module, IF_FRAME
     mov rbx, rdi                ; name_str
     mov r12, rsi                ; path_cstr
     mov r13d, edx               ; is_package
+    DUNDER_EXC_SAVE [rbp - IF_EXC]
 
     ; Save marshal globals
     mov rax, [rel marshal_buf]
@@ -1349,7 +1655,15 @@ DEF_FUNC import_load_module, IF_FRAME
     mov rdi, r12
     call eval_frame
     V_UNPACK rax, rdx           ; eval_frame returns a Value
-    ; rax = return value (ignore), edx = tag
+    ; A module body that raised returns a NULL Value with current_exception
+    ; set.  This used to be discarded -- "rax = return value (ignore)" -- so
+    ; the module was returned as if it had loaded, the exception stayed
+    ; pending, and the importer's own try/except never saw it.  Every other
+    ; eval_frame caller propagates; see opcodes_call.asm .propagate_exc.
+    test edx, edx
+    jnz .body_returned
+    DUNDER_RAISED [rbp - IF_EXC], .body_raised
+.body_returned:
     ; XDECREF return value (tag-aware)
     mov rdi, rax
     mov rsi, rdx
@@ -1362,6 +1676,10 @@ DEF_FUNC import_load_module, IF_FRAME
 
     ; DECREF code object
     mov rdi, r14
+    call obj_decref
+
+    ; The module owns the dict now; release the reference dict_new gave us.
+    mov rdi, r15
     call obj_decref
 
     ; Return module (already in sys.modules with INCREF from dict_set)
@@ -1405,6 +1723,43 @@ DEF_FUNC import_load_module, IF_FRAME
     pop rbx
     leave
     ret
+
+.body_raised:
+    ; Undo the whole load and hand the caller a NULL with the body's
+    ; exception still pending.
+    mov rdi, r12
+    call frame_free
+    mov rdi, r14
+    call obj_decref
+
+    ; Drop the half-built module from sys.modules, as CPython's
+    ; remove_module() does, so a retry re-executes the body instead of
+    ; handing back an empty module.  The body may have deleted the entry
+    ; itself, so look before deleting -- dict_del raises on a missing key.
+    mov rdi, [rel sys_modules_dict]
+    mov rsi, rbx
+    call dict_get
+    V_UNPACK rax, rdx
+    test edx, edx
+    jz .br_not_cached
+    mov rdi, [rel sys_modules_dict]
+    mov rsi, rbx
+    call dict_del
+.br_not_cached:
+
+    mov rdi, r13                ; our own reference to the module
+    call obj_decref
+    mov rdi, r15                ; and to its dict
+    call obj_decref
+
+    xor eax, eax
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
 END_FUNC import_load_module
 
 ; ============================================================================
@@ -1412,12 +1767,15 @@ END_FUNC import_load_module
 ; ============================================================================
 section .rodata
 
+im_no_module_prefix: db "No module named '", 0
+irr_package_key:    db "__package__", 0
 im_lib_path:        db "lib", 0
 im_tests_cpython_path: db "tests/cpython", 0
 im_time_name:       db "time", 0
 im_asyncio_name:    db "asyncio", 0
 im_sre_name:        db "_sre", 0
-im_python3_lib_path: db "/usr/lib/python3.12", 0
+im_abc_name:        db "_abc", 0
+im_weakref_name:    db "_weakref", 0
 im_builtins:        db "builtins", 0
 im_dunder_name:     db "__name__", 0
 im_dunder_file:     db "__file__", 0

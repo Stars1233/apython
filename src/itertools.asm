@@ -1701,6 +1701,48 @@ DEF_FUNC_BARE enumerate_type_call
     jmp builtin_enumerate
 END_FUNC enumerate_type_call
 
+; range, zip, map, filter and reversed are types in CPython, not functions:
+; `Sequence.register(range)` and `Iterator.register(zip)` in _collections_abc
+; both fail outright if they are anything else, and `isinstance(x, range)`
+; needs a type to test against.  The object types already existed; these
+; wrappers are what let the name be bound to the type instead of the
+; constructor function.
+global range_type_call
+DEF_FUNC_BARE range_type_call
+    mov rdi, rsi
+    mov rsi, rdx
+    extern builtin_range
+    jmp builtin_range
+END_FUNC range_type_call
+
+global zip_type_call
+DEF_FUNC_BARE zip_type_call
+    mov rdi, rsi
+    mov rsi, rdx
+    jmp builtin_zip
+END_FUNC zip_type_call
+
+global map_type_call
+DEF_FUNC_BARE map_type_call
+    mov rdi, rsi
+    mov rsi, rdx
+    jmp builtin_map
+END_FUNC map_type_call
+
+global filter_type_call
+DEF_FUNC_BARE filter_type_call
+    mov rdi, rsi
+    mov rsi, rdx
+    jmp builtin_filter
+END_FUNC filter_type_call
+
+global reversed_type_call
+DEF_FUNC_BARE reversed_type_call
+    mov rdi, rsi
+    mov rsi, rdx
+    jmp builtin_reversed
+END_FUNC reversed_type_call
+
 ;; ============================================================================
 ;; Sequence iterator (__getitem__ protocol)
 ;; Layout: +0 refcnt, +8 type, +16 it_obj (source), +24 it_index (i64)

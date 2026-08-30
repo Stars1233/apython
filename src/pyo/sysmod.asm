@@ -395,6 +395,119 @@ DEF_FUNC sys_module_init, 32
     pop rdi
     call obj_decref
 
+    ; --- sys.implementation ---
+    ; types.py takes SimpleNamespace from `type(sys.implementation)`, so this
+    ; has to be a namespace rather than a tuple or a dict.  cache_tag is what
+    ; a loader uses to find .pyc files, and apython reads CPython 3.12 ones.
+    ; r14/r15 belong to the module dicts here, so the namespace lives in a
+    ; frame slot.
+    extern namespace_new
+    extern namespace_set
+    call namespace_new
+    mov [rbp - 24], rax
+
+    lea rdi, [rel sm_apython_name]
+    call str_from_cstr_heap
+    push rax
+    mov rdi, [rbp - 24]
+    lea rsi, [rel sm_name]
+    mov rdx, rax
+    call namespace_set
+    pop rdi
+    call obj_decref
+
+    lea rdi, [rel sm_cache_tag_val]
+    call str_from_cstr_heap
+    push rax
+    mov rdi, [rbp - 24]
+    lea rsi, [rel sm_cache_tag]
+    mov rdx, rax
+    call namespace_set
+    pop rdi
+    call obj_decref
+
+    ; version comes back out of the sys dict rather than a stale register
+    lea rdi, [rel sm_version_info]
+    call str_from_cstr_heap
+    push rax
+    mov rdi, r15
+    mov rsi, rax
+    call dict_get
+    V_UNPACK rax, rdx
+    pop rdi
+    push rax
+    push rdx
+    call obj_decref
+    pop rdx
+    pop rax
+    test edx, edx
+    jz .no_impl_version
+    mov rdi, [rbp - 24]
+    lea rsi, [rel sm_version]
+    mov rdx, rax
+    call namespace_set
+.no_impl_version:
+
+    lea rdi, [rel sm_implementation]
+    call str_from_cstr_heap
+    push rax
+    mov rdi, r15
+    mov rsi, rax
+    mov rdx, [rbp - 24]
+    call dict_set
+    pop rdi
+    call obj_decref
+    mov rdi, [rbp - 24]
+    call obj_decref
+
+    ; --- sys.warnoptions (empty; nothing parses -W yet) ---
+    xor edi, edi
+    call list_new
+    mov [rbp - 24], rax
+    lea rdi, [rel sm_warnoptions]
+    call str_from_cstr_heap
+    push rax
+    mov rdi, r15
+    mov rsi, rax
+    mov rdx, [rbp - 24]
+    call dict_set
+    pop rdi
+    call obj_decref
+    mov rdi, [rbp - 24]
+    call obj_decref
+
+    ; --- sys.builtin_module_names ---
+    ; The modules that are compiled in rather than found on sys.path.  os.py
+    ; reads it to decide which platform module to import, and several others
+    ; use it to tell a built-in apart from a shadowing file.
+    mov edi, SM_BUILTIN_COUNT
+    call tuple_new
+    mov [rbp - 24], rax
+    xor r13d, r13d
+.sm_bmn_loop:
+    cmp r13, SM_BUILTIN_COUNT
+    jge .sm_bmn_done
+    lea rax, [rel sm_builtin_names]
+    mov rdi, [rax + r13*8]
+    call str_from_cstr_heap
+    mov rcx, [rbp - 24]
+    mov rcx, [rcx + PyTupleObject.ob_item]
+    mov [rcx + r13*8], rax
+    inc r13
+    jmp .sm_bmn_loop
+.sm_bmn_done:
+    lea rdi, [rel sm_builtin_module_names]
+    call str_from_cstr_heap
+    push rax
+    mov rdi, r15
+    mov rsi, rax
+    mov rdx, [rbp - 24]
+    call dict_set
+    pop rdi
+    call obj_decref
+    mov rdi, [rbp - 24]
+    call obj_decref
+
     ; --- sys.byteorder ---
     lea rdi, [rel sm_little]
     call str_from_cstr_heap
@@ -426,6 +539,23 @@ DEF_FUNC sys_module_init, 32
     call builtin_func_new
     push rax
     lea rdi, [rel sm_getdefaultencoding]
+    call str_from_cstr_heap
+    push rax
+    mov rdi, r15
+    mov rsi, rax
+    mov rdx, [rsp + 8]
+    call dict_set
+    pop rdi
+    call obj_decref
+    pop rdi
+    call obj_decref
+
+    ; --- sys.intern function ---
+    lea rdi, [rel sys_intern_func]
+    lea rsi, [rel sm_intern]
+    call builtin_func_new
+    push rax
+    lea rdi, [rel sm_intern]
     call str_from_cstr_heap
     push rax
     mov rdi, r15
@@ -717,6 +847,66 @@ END_FUNC sys_path_add_script_dir
 ; ============================================================================
 ; Data
 ; ============================================================================
+
+;; ============================================================================
+;; sys.intern(string) -> string
+;;
+;; A real intern table, so `sys.intern(a) is sys.intern(b)` for equal strings.
+;; functools and enum both intern names and then compare them with `is`.
+;; ============================================================================
+DEF_FUNC sys_intern_func
+    cmp rsi, 1
+    jne .si_error               ; exactly one argument, as CPython requires
+    push rbx
+    mov rbx, [rdi]
+    V_TEST_PTR rbx, rax
+    ja .si_not_str
+    test rbx, rbx
+    jz .si_not_str
+    mov rax, [rbx + PyObject.ob_type]
+    lea rcx, [rel str_type]
+    cmp rax, rcx
+    jne .si_not_str
+
+    mov rax, [rel sys_intern_table]
+    test rax, rax
+    jnz .si_have_table
+    call dict_new
+    mov [rel sys_intern_table], rax
+.si_have_table:
+    mov rdi, [rel sys_intern_table]
+    mov rsi, rbx
+    call dict_get
+    test rax, rax
+    jz .si_insert
+    mov rbx, rax
+    jmp .si_return
+.si_insert:
+    mov rdi, [rel sys_intern_table]
+    mov rsi, rbx
+    mov rdx, rbx
+    call dict_set
+.si_return:
+    mov rdi, rbx
+    call obj_incref
+    mov rax, rbx
+    mov edx, TAG_PTR
+    pop rbx
+    leave
+    V_PACK rax, rdx
+    ret
+.si_not_str:
+    mov rsi, rbx
+    pop rbx
+    extern raise_type_error_with_name
+    CSTRING rdi, `intern() argument must be str, not \x01`
+    call raise_type_error_with_name
+.si_error:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "sys.intern() takes exactly one argument"
+    call raise_exception
+END_FUNC sys_intern_func
+
 section .rodata
 sys_exit_nl: db 10
 
@@ -745,6 +935,25 @@ sm_mode_r:       db "r", 0
 sm_exit:         db "exit", 0
 sm_getrecursionlimit: db "getrecursionlimit", 0
 sm_setrecursionlimit: db "setrecursionlimit", 0
+sm_implementation: db "implementation", 0
+sm_name:         db "name", 0
+sm_apython_name: db "apython", 0
+sm_cache_tag:    db "cache_tag", 0
+sm_cache_tag_val: db "cpython-312", 0
+sm_warnoptions:  db "warnoptions", 0
+sm_builtin_module_names: db "builtin_module_names", 0
+sm_bmn_abc:      db "_abc", 0
+sm_bmn_weakref:  db "_weakref", 0
+sm_bmn_sre:      db "_sre", 0
+sm_bmn_builtins: db "builtins", 0
+sm_bmn_sys:      db "sys", 0
+sm_bmn_time:     db "time", 0
+align 8
+sm_builtin_names:
+    dq sm_bmn_abc, sm_bmn_weakref, sm_bmn_sre, sm_bmn_builtins, sm_bmn_sys
+    dq sm_bmn_time
+SM_BUILTIN_COUNT equ 6
+sm_intern:       db "intern", 0
 sm_byteorder:    db "byteorder", 0
 sm_little:       db "little", 0
 sm_getdefaultencoding: db "getdefaultencoding", 0
@@ -770,3 +979,7 @@ sys_stdout_obj: resq 1
 
 global sys_int_max_str_digits
 sys_int_max_str_digits: resq 1
+
+section .data
+align 8
+sys_intern_table: dq 0

@@ -5,6 +5,7 @@
 %include "object.inc"
 %include "types.inc"
 %include "builtins.inc"
+%include "opcodes.inc"
 
 
 ; External functions
@@ -772,10 +773,14 @@ DEF_FUNC str_method_find
     test rax, rax
     jz .find_not_found
 
-    ; Compute index: result_ptr - self.data
+    ; Compute index: result_ptr - self.data.  The search runs in bytes but the
+    ; answer Python wants is a code point index.
     lea rcx, [rbx + PyStrObject.data]
     sub rax, rcx
-    ; rax = index
+    mov rdi, rbx
+    mov rsi, rax
+    extern str_byte_to_cp
+    call str_byte_to_cp
     mov rdi, rax
     call int_from_i64
 
@@ -1565,250 +1570,460 @@ END_FUNC str_method_split
 
 
 ;; ============================================================================
-;; str_method_format(args, nargs) -> new formatted string
-;; args[0]=self (format string), args[1..]=positional arguments
-;; Handles {} (auto-index) and {N} (explicit index).
+;; fmtbuf_append(rdi = &{buf, used, cap}, rsi = data, rdx = length)
 ;; ============================================================================
-DEF_FUNC str_method_format
+DEF_FUNC_LOCAL fmtbuf_append
+    push rbx
+    push r12
+    push r13
+    mov rbx, rdi
+    mov r12, rsi
+    mov r13, rdx
+    test r13, r13
+    jz .fa_done
+    mov rax, [rbx + 8]
+    add rax, r13
+    cmp rax, [rbx + 16]
+    jbe .fa_room
+.fa_grow:
+    mov rcx, [rbx + 16]
+    shl rcx, 1
+    cmp rcx, rax
+    jae .fa_have_cap
+    mov rcx, rax
+.fa_have_cap:
+    mov [rbx + 16], rcx
+    mov rdi, [rbx]
+    mov rsi, rcx
+    call ap_realloc
+    mov [rbx], rax
+.fa_room:
+    mov rdi, [rbx]
+    add rdi, [rbx + 8]
+    mov rsi, r12
+    mov rdx, r13
+    call ap_memcpy
+    add [rbx + 8], r13
+.fa_done:
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC fmtbuf_append
+
+;; ============================================================================
+;; str_method_format(args, nargs) -> new formatted string
+;;
+;; The whole replacement-field grammar: {}, {2}, {name}, an optional !r/!s/!a
+;; conversion and an optional :spec, which is handed to the same formatter an
+;; f-string uses.  Only {} and {N} were understood before, and anything else
+;; made the function bail and return whatever it had accumulated -- so
+;; "{:>6}".format("ab") was the empty string.
+;; ============================================================================
+SF_STATE  equ 24            ; {buf, used, cap} as three consecutive qwords
+SF_ARGS   equ 32
+SF_NPOS   equ 40
+SF_AUTO   equ 48
+SF_KWN    equ 56            ; the kw_names tuple, or 0
+SF_NKW    equ 64
+SF_FSTART equ 72
+SF_FEND   equ 80
+SF_CONV   equ 88
+SF_SSTART equ 96
+SF_SEND   equ 104
+SF_VALUE  equ 112
+SF_FRAME  equ 128
+DEF_FUNC str_method_format, SF_FRAME
     push rbx
     push r12
     push r13
     push r14
     push r15
-    sub rsp, 24             ; [rbp-48]=buf, [rbp-56]=buf_used, [rbp-64]=buf_cap
 
-    mov rbx, rdi            ; args array
-    mov r14, rsi            ; nargs
+    mov [rbp - SF_ARGS], rdi
+    mov rbx, rdi
 
-    ; Get format string data
-    mov rax, [rbx]          ; self = format string
-    lea r12, [rax + PyStrObject.data]  ; r12 = fmt data ptr
-    mov r13d, [rax + PyStrObject.ob_size] ; r13 = fmt length
+    ; Keyword arguments arrive as trailing values with their names in
+    ; kw_names_pending; clear it so a nested call cannot see ours.
+    mov rax, [rel kw_names_pending]
+    mov [rbp - SF_KWN], rax
+    mov qword [rbp - SF_NKW], 0
+    test rax, rax
+    jz .fm_no_kw
+    mov rcx, [rax + PyTupleObject.ob_size]
+    mov [rbp - SF_NKW], rcx
+    sub rsi, rcx
+    mov qword [rel kw_names_pending], 0
+.fm_no_kw:
+    dec rsi                     ; drop self
+    mov [rbp - SF_NPOS], rsi
 
-    ; Allocate initial output buffer
-    lea rdi, [r13 + 64]    ; generous initial size
+    mov rax, [rbx]
+    lea r12, [rax + PyStrObject.data]
+    mov r13, [rax + PyStrObject.ob_size]
+
+    lea rdi, [r13 + 64]
     call ap_malloc
-    mov [rbp-48], rax       ; buf
-    mov qword [rbp-56], 0   ; buf_used = 0
+    mov [rbp - SF_STATE], rax
+    mov qword [rbp - SF_STATE + 8], 0
     lea rax, [r13 + 64]
-    mov [rbp-64], rax       ; buf_cap
+    mov [rbp - SF_STATE + 16], rax
 
-    xor ecx, ecx            ; ecx = source index
-    xor r15d, r15d          ; r15d = auto-index counter
+    xor r15d, r15d              ; cursor
+    mov qword [rbp - SF_AUTO], 0
 
-.fmt_loop:
-    cmp ecx, r13d
-    jge .fmt_done
-    movzx eax, byte [r12 + rcx]
+.fm_loop:
+    cmp r15, r13
+    jge .fm_done
+    movzx eax, byte [r12 + r15]
     cmp al, '{'
-    je .fmt_brace
+    je .fm_open
     cmp al, '}'
-    je .fmt_close_brace
-    ; Regular char — append to buffer
-    push rcx
-    ; Ensure space
-    mov rdi, [rbp-56]       ; used
-    inc rdi                 ; need 1 more
-    cmp rdi, [rbp-64]
-    jbe .fmt_char_ok
-    ; Grow buffer
-    mov rdi, [rbp-64]
-    shl rdi, 1
-    mov [rbp-64], rdi
-    mov rsi, rdi
-    mov rdi, [rbp-48]
-    call ap_realloc
-    mov [rbp-48], rax
-.fmt_char_ok:
-    pop rcx
-    mov rdi, [rbp-48]
-    mov rax, [rbp-56]
-    movzx edx, byte [r12 + rcx]
-    mov [rdi + rax], dl
-    inc qword [rbp-56]
-    inc ecx
-    jmp .fmt_loop
+    je .fm_close
+.fm_literal:
+    lea rdi, [rbp - SF_STATE]
+    lea rsi, [r12 + r15]
+    mov edx, 1
+    call fmtbuf_append
+    inc r15
+    jmp .fm_loop
 
-.fmt_brace:
-    inc ecx                 ; skip '{'
-    cmp ecx, r13d
-    jge .fmt_done
-    movzx eax, byte [r12 + rcx]
-    ; Check for {{ (literal brace)
+.fm_close:
+    ; "}}" is a literal brace; a lone one is an error, as in CPython.
+    lea rcx, [r15 + 1]
+    cmp rcx, r13
+    jge .fm_lone_brace
+    cmp byte [r12 + rcx], '}'
+    jne .fm_lone_brace
+    lea rdi, [rbp - SF_STATE]
+    lea rsi, [r12 + r15]
+    mov edx, 1
+    call fmtbuf_append
+    add r15, 2
+    jmp .fm_loop
+
+.fm_open:
+    lea rcx, [r15 + 1]
+    cmp rcx, r13
+    jge .fm_unterminated
+    cmp byte [r12 + rcx], '{'
+    jne .fm_field
+    lea rdi, [rbp - SF_STATE]
+    lea rsi, [r12 + r15]
+    mov edx, 1
+    call fmtbuf_append
+    add r15, 2
+    jmp .fm_loop
+
+.fm_field:
+    inc r15
+    mov [rbp - SF_FSTART], r15
+    mov qword [rbp - SF_CONV], 0
+    mov qword [rbp - SF_SSTART], 0
+    mov qword [rbp - SF_SEND], 0
+    xor r14d, r14d              ; bracket depth
+.fm_scan_field:
+    cmp r15, r13
+    jge .fm_unterminated
+    movzx eax, byte [r12 + r15]
+    cmp al, '['
+    jne .fm_scan_not_open
+    inc r14
+    jmp .fm_scan_next
+.fm_scan_not_open:
+    cmp al, ']'
+    jne .fm_scan_check_end
+    dec r14
+    jmp .fm_scan_next
+.fm_scan_check_end:
+    test r14, r14
+    jnz .fm_scan_next
+    cmp al, '!'
+    je .fm_field_end
+    cmp al, ':'
+    je .fm_field_end
+    cmp al, '}'
+    je .fm_field_end
+.fm_scan_next:
+    inc r15
+    jmp .fm_scan_field
+
+.fm_field_end:
+    mov [rbp - SF_FEND], r15
+    movzx eax, byte [r12 + r15]
+    cmp al, '!'
+    jne .fm_after_conv
+    inc r15
+    cmp r15, r13
+    jge .fm_unterminated
+    movzx eax, byte [r12 + r15]
+    mov [rbp - SF_CONV], rax
+    inc r15
+.fm_after_conv:
+    cmp r15, r13
+    jge .fm_unterminated
+    movzx eax, byte [r12 + r15]
+    cmp al, ':'
+    jne .fm_after_spec
+    inc r15
+    mov [rbp - SF_SSTART], r15
+    xor r14d, r14d
+.fm_scan_spec:
+    cmp r15, r13
+    jge .fm_unterminated
+    movzx eax, byte [r12 + r15]
     cmp al, '{'
-    je .fmt_literal_brace
-    ; Check for } (empty placeholder = auto-index)
+    jne .fm_spec_not_open
+    inc r14
+    jmp .fm_spec_next
+.fm_spec_not_open:
     cmp al, '}'
-    je .fmt_auto_index
-    ; Check for digit (explicit index)
-    cmp al, '0'
-    jb .fmt_done            ; unexpected char, bail
-    cmp al, '9'
-    ja .fmt_done
-    ; Parse number
-    xor edx, edx            ; edx = arg_index
-.fmt_parse_num:
-    movzx eax, byte [r12 + rcx]
-    cmp al, '}'
-    je .fmt_have_index
-    sub al, '0'
-    imul edx, 10
-    movzx eax, al
-    add edx, eax
-    inc ecx
-    cmp ecx, r13d
-    jl .fmt_parse_num
-    jmp .fmt_done
-.fmt_have_index:
-    inc ecx                 ; skip '}'
-    jmp .fmt_insert_arg
+    jne .fm_spec_next
+    test r14, r14
+    jz .fm_spec_end
+    dec r14
+.fm_spec_next:
+    inc r15
+    jmp .fm_scan_spec
+.fm_spec_end:
+    mov [rbp - SF_SEND], r15
+.fm_after_spec:
+    cmp r15, r13
+    jge .fm_unterminated
+    cmp byte [r12 + r15], '}'
+    jne .fm_unterminated
+    inc r15                     ; past the closing brace
 
-.fmt_auto_index:
-    inc ecx                 ; skip '}'
-    mov edx, r15d           ; edx = auto-index
-    inc r15d
-    ; fall through to .fmt_insert_arg
+    mov rdi, [rbp - SF_ARGS]
+    mov rsi, [rbp - SF_NPOS]
+    mov rdx, [rbp - SF_KWN]
+    mov rcx, r12
+    add rcx, [rbp - SF_FSTART]
+    mov r8, [rbp - SF_FEND]
+    sub r8, [rbp - SF_FSTART]
+    lea r9, [rbp - SF_AUTO]
+    call fm_resolve_field
+    mov [rbp - SF_VALUE], rax
 
-.fmt_insert_arg:
-    ; edx = arg index (0-based among format args, which are args[1..])
-    lea eax, [edx + 1]     ; args index (skip self)
-    cmp rax, r14
-    jge .fmt_loop           ; out of range, skip
-    push rcx
-    push rdx
-    ; Get the arg object and convert to string
-    shl rax, 3              ; one Value per slot
-    mov rdi, [rbx + rax]    ; arg Value
-    V_UNPACK rdi, r8
-    ; Convert arg to string via obj_str(payload, tag)
-    ; obj_str handles all tags: SmallInt, Float, Bool, None, TAG_PTR
-    push rdi
-    cmp r8d, TAG_PTR
-    jne .fmt_inline_str      ; SmallInt, Float, Bool, None → obj_str
-    ; TAG_PTR path: call tp_str directly (avoids extra push/pop in obj_str)
-    mov rax, [rdi + PyObject.ob_type]
-    mov rax, [rax + PyTypeObject.tp_str]
-    test rax, rax
-    jz .fmt_use_repr
-    pop rdi
-    mov edx, TAG_PTR            ; tp_str/int_repr dispatches on edx
-    call rax
-    jmp .fmt_heap_str
-.fmt_use_repr:
-    pop rdi
-    mov rax, [rdi + PyObject.ob_type]
-    mov rax, [rax + PyTypeObject.tp_repr]
-    test rax, rax
-    jz .fmt_skip_arg
-    mov edx, TAG_PTR            ; tp_repr/int_repr dispatches on edx
-    call rax
-    jmp .fmt_heap_str
-.fmt_inline_str:
-    pop rdi
-    mov esi, r8d           ; tag
-    V_PACK rdi, rsi
-    call obj_str           ; handles SmallInt, Float, Bool, None
-.fmt_heap_str:
-    push rax                ; save str obj for DECREF
-    mov edx, [rax + PyStrObject.ob_size]
-    lea rsi, [rax + PyStrObject.data]
-    ; Ensure buffer has space
-    mov rdi, [rbp-56]
-    add rdi, rdx
-    cmp rdi, [rbp-64]
-    jbe .fmt_copy_ok
-    mov rdi, [rbp-64]
-.fmt_grow_copy:
-    shl rdi, 1
-    mov rax, [rbp-56]
-    add rax, rdx
-    cmp rdi, rax
-    jb .fmt_grow_copy
-    mov [rbp-64], rdi
-    mov rsi, rdi
-    mov rdi, [rbp-48]
-    call ap_realloc
-    mov [rbp-48], rax
-    ; Re-read str data (rax was clobbered)
-    mov rax, [rsp]          ; str obj
-    mov edx, [rax + PyStrObject.ob_size]
-    lea rsi, [rax + PyStrObject.data]
-.fmt_copy_ok:
-    ; Copy string data
-    mov rdi, [rbp-48]
-    add rdi, [rbp-56]
-    xor ecx, ecx
-.fmt_copy_str:
-    cmp ecx, edx
-    jge .fmt_copy_done
-    mov al, [rsi + rcx]
-    mov [rdi + rcx], al
-    inc ecx
-    jmp .fmt_copy_str
-.fmt_copy_done:
-    movzx eax, dx
-    add [rbp-56], rax
-
-    ; DECREF the temporary string
-    pop rdi                 ; str obj
-    call obj_decref
-.fmt_skip_arg:
-    pop rdx
-    pop rcx
-    jmp .fmt_loop
-
-.fmt_literal_brace:
-    ; {{ → output single {
-    push rcx
-    mov rdi, [rbp-48]
-    mov rax, [rbp-56]
-    mov byte [rdi + rax], '{'
-    inc qword [rbp-56]
-    pop rcx
-    inc ecx                 ; skip second {
-    jmp .fmt_loop
-
-.fmt_close_brace:
-    ; }} → output single }
-    inc ecx                 ; skip first }
-    cmp ecx, r13d
-    jge .fmt_done
-    movzx eax, byte [r12 + rcx]
-    cmp al, '}'
-    jne .fmt_loop           ; lone } — ignore (CPython raises error, we skip)
-    push rcx
-    mov rdi, [rbp-48]
-    mov rax, [rbp-56]
-    mov byte [rdi + rax], '}'
-    inc qword [rbp-56]
-    pop rcx
-    inc ecx                 ; skip second }
-    jmp .fmt_loop
-
-.fmt_done:
-    ; NUL-terminate and create string
-    mov rdi, [rbp-48]
-    mov rax, [rbp-56]
-    mov byte [rdi + rax], 0
-    call str_from_cstr_heap
+    ; !r and !a render the repr; !s the str.  Anything else is left alone.
+    mov rcx, [rbp - SF_CONV]
+    test rcx, rcx
+    jz .fm_no_conv
+    cmp rcx, 'r'
+    je .fm_conv_repr
+    cmp rcx, 'a'
+    je .fm_conv_repr
+    cmp rcx, 's'
+    jne .fm_no_conv
+    mov rdi, [rbp - SF_VALUE]
+    call obj_str
+    jmp .fm_conv_done
+.fm_conv_repr:
+    mov rdi, [rbp - SF_VALUE]
+    call obj_repr
+.fm_conv_done:
     push rax
+    mov rdi, [rbp - SF_VALUE]
+    DECREF_V rdi, rcx
+    pop rax
+    mov [rbp - SF_VALUE], rax
+.fm_no_conv:
 
-    ; Free buffer
-    mov rdi, [rbp-48]
+    ; The spec, as a str, handed to the formatter f-strings use.
+    mov rcx, [rbp - SF_SEND]
+    sub rcx, [rbp - SF_SSTART]
+    jle .fm_plain_str
+    mov rdi, r12
+    add rdi, [rbp - SF_SSTART]
+    mov rsi, rcx
+    call str_new_heap
+    push rax
+    mov rdi, [rbp - SF_VALUE]
+    mov rsi, rax
+    extern format_apply_spec
+    call format_apply_spec
+    mov r14, rax
+    pop rdi
+    call obj_decref
+    jmp .fm_have_text
+
+.fm_plain_str:
+    mov rdi, [rbp - SF_VALUE]
+    call obj_str
+    mov r14, rax
+
+.fm_have_text:
+    mov rdi, [rbp - SF_VALUE]
+    DECREF_V rdi, rcx
+    test r14, r14
+    jz .fm_loop
+    lea rdi, [rbp - SF_STATE]
+    lea rsi, [r14 + PyStrObject.data]
+    mov rdx, [r14 + PyStrObject.ob_size]
+    call fmtbuf_append
+    mov rdi, r14
+    call obj_decref
+    jmp .fm_loop
+
+.fm_lone_brace:
+    lea rdi, [rel exc_ValueError_type]
+    CSTRING rsi, "Single '}' encountered in format string"
+    call raise_exception
+
+.fm_unterminated:
+    lea rdi, [rel exc_ValueError_type]
+    CSTRING rsi, "Single '{' encountered in format string"
+    call raise_exception
+
+.fm_done:
+    mov rdi, [rbp - SF_STATE]
+    mov rsi, [rbp - SF_STATE + 8]
+    call str_new_heap
+    push rax
+    mov rdi, [rbp - SF_STATE]
     call ap_free
-
     pop rax
     mov edx, TAG_PTR
-    add rsp, 24
     pop r15
     pop r14
     pop r13
     pop r12
     pop rbx
     leave
-    V_PACK rax, rdx             ; builtins return one Value
+    V_PACK rax, rdx
     ret
 END_FUNC str_method_format
+
+;; ============================================================================
+;; fm_resolve_field(rdi = args, rsi = npos, rdx = kw_names or 0,
+;;                  rcx = field bytes, r8 = field length, r9 = &auto counter)
+;;   -> rax = the argument the field names, a new reference
+;; Empty means the next positional, all digits an explicit one, anything else
+;; a keyword.
+;; ============================================================================
+RF_ARGS  equ 8
+RF_NPOS  equ 16
+RF_KWN   equ 24
+RF_NAME  equ 32
+RF_LEN   equ 40
+RF_AUTO  equ 48
+RF_FRAME equ 64
+DEF_FUNC_LOCAL fm_resolve_field, RF_FRAME
+    push rbx
+    push r12
+    mov [rbp - RF_ARGS], rdi
+    mov [rbp - RF_NPOS], rsi
+    mov [rbp - RF_KWN], rdx
+    mov [rbp - RF_NAME], rcx
+    mov [rbp - RF_LEN], r8
+    mov [rbp - RF_AUTO], r9
+
+    test r8, r8
+    jz .rf_auto
+
+    ; All digits?
+    xor r12d, r12d              ; the parsed index
+    xor ecx, ecx
+.rf_digits:
+    cmp rcx, [rbp - RF_LEN]
+    jge .rf_positional
+    mov rdx, [rbp - RF_NAME]
+    movzx eax, byte [rdx + rcx]
+    cmp al, '0'
+    jb .rf_keyword
+    cmp al, '9'
+    ja .rf_keyword
+    imul r12, r12, 10
+    sub eax, '0'
+    add r12, rax
+    inc rcx
+    jmp .rf_digits
+
+.rf_auto:
+    mov rax, [rbp - RF_AUTO]
+    mov r12, [rax]
+    inc qword [rax]
+.rf_positional:
+    cmp r12, [rbp - RF_NPOS]
+    jge .rf_index_error
+    mov rax, [rbp - RF_ARGS]
+    lea rcx, [r12 + 1]          ; args[0] is self
+    mov rax, [rax + rcx*8]
+    INCREF_V rax, rcx
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.rf_keyword:
+    mov rax, [rbp - RF_KWN]
+    test rax, rax
+    jz .rf_key_error
+    mov rbx, [rax + PyTupleObject.ob_size]
+    xor r12d, r12d
+.rf_kw_scan:
+    cmp r12, rbx
+    jge .rf_key_error
+    mov rax, [rbp - RF_KWN]
+    mov rax, [rax + PyTupleObject.ob_item]
+    mov rdi, [rax + r12*8]
+    add rdi, PyStrObject.data
+    mov rsi, [rbp - RF_NAME]
+    mov rdx, [rbp - RF_LEN]
+    call fm_name_equals
+    test eax, eax
+    jnz .rf_kw_found
+    inc r12
+    jmp .rf_kw_scan
+.rf_kw_found:
+    ; The keyword values sit after the positional ones.
+    mov rax, [rbp - RF_ARGS]
+    mov rcx, [rbp - RF_NPOS]
+    add rcx, r12
+    inc rcx                     ; past self
+    mov rax, [rax + rcx*8]
+    INCREF_V rax, rcx
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.rf_index_error:
+    lea rdi, [rel exc_IndexError_type]
+    CSTRING rsi, "Replacement index out of range for positional args tuple"
+    call raise_exception
+.rf_key_error:
+    lea rdi, [rel exc_KeyError_type]
+    CSTRING rsi, "format() got no such keyword argument"
+    call raise_exception
+END_FUNC fm_resolve_field
+
+;; fm_name_equals(rdi = NUL-terminated name, rsi = bytes, rdx = length) -> eax
+DEF_FUNC_LOCAL fm_name_equals
+    xor ecx, ecx
+.ne_loop:
+    cmp rcx, rdx
+    jge .ne_at_end
+    movzx eax, byte [rdi + rcx]
+    test al, al
+    jz .ne_no
+    movzx r8d, byte [rsi + rcx]
+    cmp al, r8b
+    jne .ne_no
+    inc rcx
+    jmp .ne_loop
+.ne_at_end:
+    cmp byte [rdi + rcx], 0
+    jne .ne_no
+    mov eax, 1
+    leave
+    ret
+.ne_no:
+    xor eax, eax
+    leave
+    ret
+END_FUNC fm_name_equals
 
 ;; ============================================================================
 ;; str_method_format_map(args, nargs) -> formatted string
@@ -2126,10 +2341,12 @@ DEF_FUNC str_method_index
     test rax, rax
     jz .str_index_not_found
 
-    ; Compute index: result_ptr - self.data
+    ; Byte offset in, code point index out.
     lea rcx, [rbx + PyStrObject.data]
     sub rax, rcx
-    ; rax = index
+    mov rdi, rbx
+    mov rsi, rax
+    call str_byte_to_cp
     mov rdi, rax
     call int_from_i64
 
@@ -2205,7 +2422,10 @@ DEF_FUNC str_method_rfind
     jmp .rfind_loop
 
 .rfind_found:
-    mov rdi, rcx
+    mov rdi, rbx
+    mov rsi, rcx
+    call str_byte_to_cp
+    mov rdi, rax
     call int_from_i64
     pop r14
     pop r13
@@ -2216,7 +2436,7 @@ DEF_FUNC str_method_rfind
     ret
 
 .rfind_empty_sub:
-    mov rdi, r13
+    mov rdi, [rbx + PyStrObject.ob_length]
     call int_from_i64
     pop r14
     pop r13
@@ -2284,6 +2504,177 @@ DEF_FUNC str_method_isdigit
     V_PACK rax, rdx             ; builtins return one Value
     ret
 END_FUNC str_method_isdigit
+
+
+;; ============================================================================
+;; str_method_isidentifier / isprintable / isascii / isdecimal / isnumeric
+;;
+;; ASCII-only, like the rest of the str predicates here: a str is still a byte
+;; string, so a non-ASCII byte can only be reported honestly as "not one of
+;; these".  isidentifier is what functools, enum, dataclasses and textwrap all
+;; reach for; the other four keep the family complete.
+;; ============================================================================
+DEF_FUNC str_method_isidentifier
+    mov rax, [rdi]
+    mov rcx, [rax + PyStrObject.ob_size]
+    test rcx, rcx
+    jz .false
+    ; First character: a letter or underscore.
+    movzx esi, byte [rax + PyStrObject.data]
+    cmp sil, '_'
+    je .rest
+    call .is_alpha_sil
+    jz .false
+.rest:
+    mov edx, 1
+.loop:
+    cmp rdx, rcx
+    jge .true
+    movzx esi, byte [rax + PyStrObject.data + rdx]
+    cmp sil, '_'
+    je .next
+    cmp sil, '0'
+    jb .not_alnum
+    cmp sil, '9'
+    jbe .next
+.not_alnum:
+    push rax
+    push rcx
+    push rdx
+    call .is_alpha_sil
+    pop rdx
+    pop rcx
+    pop rax
+    jz .false
+.next:
+    inc rdx
+    jmp .loop
+
+; Sets ZF when sil is not an ASCII letter.
+.is_alpha_sil:
+    cmp sil, 'A'
+    jb .not_letter
+    cmp sil, 'Z'
+    jbe .letter
+    cmp sil, 'a'
+    jb .not_letter
+    cmp sil, 'z'
+    ja .not_letter
+.letter:
+    test esp, esp               ; clears ZF (rsp is never zero)
+    ret
+.not_letter:
+    xor r8d, r8d                ; sets ZF
+    ret
+
+.true:
+    lea rax, [rel bool_true]
+    inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
+    leave
+    V_PACK rax, rdx
+    ret
+.false:
+    lea rax, [rel bool_false]
+    inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
+    leave
+    V_PACK rax, rdx
+    ret
+END_FUNC str_method_isidentifier
+
+;; Every byte printable and not a space-only string; the empty string is True.
+DEF_FUNC str_method_isprintable
+    mov rax, [rdi]
+    mov rcx, [rax + PyStrObject.ob_size]
+    xor edx, edx
+.loop:
+    cmp rdx, rcx
+    jge .true
+    movzx esi, byte [rax + PyStrObject.data + rdx]
+    cmp sil, 0x20
+    jb .false
+    cmp sil, 0x7e
+    ja .false
+    inc rdx
+    jmp .loop
+.true:
+    lea rax, [rel bool_true]
+    inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
+    leave
+    V_PACK rax, rdx
+    ret
+.false:
+    lea rax, [rel bool_false]
+    inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
+    leave
+    V_PACK rax, rdx
+    ret
+END_FUNC str_method_isprintable
+
+DEF_FUNC str_method_isascii
+    mov rax, [rdi]
+    mov rcx, [rax + PyStrObject.ob_size]
+    xor edx, edx
+.loop:
+    cmp rdx, rcx
+    jge .true
+    movzx esi, byte [rax + PyStrObject.data + rdx]
+    cmp sil, 0x7f
+    ja .false
+    inc rdx
+    jmp .loop
+.true:
+    lea rax, [rel bool_true]
+    inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
+    leave
+    V_PACK rax, rdx
+    ret
+.false:
+    lea rax, [rel bool_false]
+    inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
+    leave
+    V_PACK rax, rdx
+    ret
+END_FUNC str_method_isascii
+
+;; isdecimal and isnumeric agree with isdigit over ASCII, which is all a byte
+;; string can represent.
+DEF_FUNC str_method_isdecimal
+    mov rax, [rdi]
+    mov rcx, [rax + PyStrObject.ob_size]
+    test rcx, rcx
+    jz .false
+    xor edx, edx
+.loop:
+    cmp rdx, rcx
+    jge .true
+    movzx esi, byte [rax + PyStrObject.data + rdx]
+    cmp sil, '0'
+    jb .false
+    cmp sil, '9'
+    ja .false
+    inc rdx
+    jmp .loop
+.true:
+    lea rax, [rel bool_true]
+    inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
+    leave
+    V_PACK rax, rdx
+    ret
+.false:
+    lea rax, [rel bool_false]
+    inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
+    leave
+    V_PACK rax, rdx
+    ret
+END_FUNC str_method_isdecimal
 
 ;; ============================================================================
 ;; str_method_isalpha(args, nargs) -> bool_true/bool_false
@@ -2762,10 +3153,11 @@ END_FUNC str_method_casefold
 ;; args[0]=self, args[1]=width, args[2]=fillchar (optional, default ' ')
 ;; ============================================================================
 PA_SELF   equ 8
-PA_LEN    equ 16
+PA_LEN    equ 16            ; length in bytes, for the copies
 PA_ARGS   equ 24
 PA_NARGS  equ 32
-PA_FRAME  equ 32
+PA_CPLEN  equ 40            ; length in code points, which is what a width means
+PA_FRAME  equ 48
 DEF_FUNC str_method_center, PA_FRAME
     push rbx
     push r12
@@ -2777,6 +3169,8 @@ DEF_FUNC str_method_center, PA_FRAME
     mov r12, [rbx + PyStrObject.ob_size]; self_len
     mov [rbp - PA_SELF], rbx
     mov [rbp - PA_LEN], r12
+    mov rax, [rbx + PyStrObject.ob_length]
+    mov [rbp - PA_CPLEN], rax
 
     ; Get width
     mov rdi, [rbp - PA_ARGS]
@@ -2794,9 +3188,13 @@ DEF_FUNC str_method_center, PA_FRAME
     mov rdx, [rax + 16]                 ; args[2] payload (char str)
     movzx ecx, byte [rdx + PyStrObject.data]
 .center_have_fill:
-    ; If width <= self_len, return copy of self
-    cmp r13, r12
+    ; A width counts characters, so it is compared against the code point
+    ; length; what has to be allocated is that many characters' worth of
+    ; bytes -- the padding, which is ASCII, plus whatever the string occupies.
+    cmp r13, [rbp - PA_CPLEN]
     jle .center_return_self
+    sub r13, [rbp - PA_CPLEN]
+    add r13, r12
 
     ; Allocate new string of size width
     mov rdi, r13
@@ -2875,6 +3273,8 @@ DEF_FUNC str_method_ljust, PA_FRAME
     mov r12, [rbx + PyStrObject.ob_size]
     mov [rbp - PA_SELF], rbx
     mov [rbp - PA_LEN], r12
+    mov rax, [rbx + PyStrObject.ob_length]
+    mov [rbp - PA_CPLEN], rax
 
     ; Get width
     mov rax, [rbp - PA_ARGS]
@@ -2897,8 +3297,10 @@ DEF_FUNC str_method_ljust, PA_FRAME
 .ljust_fill_ss:
     movzx ecx, dl
 .ljust_have_fill:
-    cmp r13, r12
+    cmp r13, [rbp - PA_CPLEN]
     jle .ljust_return_self
+    sub r13, [rbp - PA_CPLEN]
+    add r13, r12
 
     ; Allocate, fill, copy self at start
     mov rdi, r13
@@ -2963,6 +3365,8 @@ DEF_FUNC str_method_rjust, PA_FRAME
     mov r12, [rbx + PyStrObject.ob_size]
     mov [rbp - PA_SELF], rbx
     mov [rbp - PA_LEN], r12
+    mov rax, [rbx + PyStrObject.ob_length]
+    mov [rbp - PA_CPLEN], rax
 
     mov rax, [rbp - PA_ARGS]
     mov rdi, [rax + 8]
@@ -2983,8 +3387,10 @@ DEF_FUNC str_method_rjust, PA_FRAME
 .rjust_fill_ss:
     movzx ecx, dl
 .rjust_have_fill:
-    cmp r13, r12
+    cmp r13, [rbp - PA_CPLEN]
     jle .rjust_return_self
+    sub r13, [rbp - PA_CPLEN]
+    add r13, r12
 
     mov rdi, r13
     push rcx
@@ -3050,6 +3456,8 @@ DEF_FUNC str_method_zfill, PA_FRAME
     mov r12, [rbx + PyStrObject.ob_size]
     mov [rbp - PA_SELF], rbx
     mov [rbp - PA_LEN], r12
+    mov rax, [rbx + PyStrObject.ob_length]
+    mov [rbp - PA_CPLEN], rax
 
     mov rax, [rbp - PA_ARGS]
     mov rdi, [rax + 8]
@@ -3057,8 +3465,10 @@ DEF_FUNC str_method_zfill, PA_FRAME
     call int_to_i64
     mov r13, rax                         ; width
 
-    cmp r13, r12
+    cmp r13, [rbp - PA_CPLEN]
     jle .zfill_return_self
+    sub r13, [rbp - PA_CPLEN]
+    add r13, r12
 
     ; Allocate filled with '0'
     mov rdi, r13
@@ -3164,6 +3574,9 @@ DEF_FUNC str_method_rindex
     jmp .rindex_loop
 
 .rindex_found:
+    mov rdi, rbx
+    mov rsi, rax
+    call str_byte_to_cp
     mov rdi, rax
     call int_from_i64
     pop r13
@@ -4186,30 +4599,147 @@ END_FUNC str_method_removesuffix
 ;; args[0]=self, args[1]=encoding (optional, default 'utf-8')
 ;; For now, supports 'utf-8' and 'ascii' — both just copy raw bytes.
 ;; ============================================================================
-DEF_FUNC str_method_encode
+SE_SELF  equ 8
+SE_LEN   equ 16
+SE_OUT   equ 24
+SE_POS   equ 32
+SE_ERRS  equ 40
+SE_FRAME equ 48
+DEF_FUNC str_method_encode, SE_FRAME
     push rbx
     push r12
-    ; args[0] = self (str)
-    mov rbx, [rdi]             ; rbx = self str obj
-    mov r12, [rbx + PyStrObject.ob_size]  ; r12 = length
-    ; Allocate bytes object
+    ; args[0] = self, args[1] = encoding, args[2] = errors
+    mov rbx, [rdi]
+    mov [rbp - SE_SELF], rbx
+    mov r12, [rbx + PyStrObject.ob_size]
+    mov [rbp - SE_LEN], r12
+    mov qword [rbp - SE_ERRS], 0
+
+    ; encode([encoding[, errors]]).  An encoding that is not a str is a
+    ; TypeError in CPython, not a silent fall back to utf-8.
+    cmp rsi, 3
+    jg .se_too_many
+    xor eax, eax
+    cmp rsi, 2
+    jl .se_have_enc
+    mov rax, [rdi + 8]
+    extern none_singleton
+    lea rcx, [rel none_singleton]
+    cmp rax, rcx
+    je .se_default_enc
+    V_TEST_PTR rax, rcx
+    ja .se_bad_enc
+    test rax, rax
+    jz .se_bad_enc
+    mov rcx, [rax + PyObject.ob_type]
+    lea rdx, [rel str_type]
+    cmp rcx, rdx
+    jne .se_bad_enc
+    jmp .se_have_enc
+.se_default_enc:
+    xor eax, eax
+.se_have_enc:
+    mov rdi, rax
+    extern codec_id
+    call codec_id
+    cmp eax, 1
+    je .se_ascii
+    cmp eax, 2
+    je .se_latin1
+
+.se_utf8:
+    ; The bytes are already UTF-8.
     mov rdi, r12
     extern bytes_new
     call bytes_new
-    ; Copy string data into bytes object
+    push rax
     lea rdi, [rax + PyBytesObject.data]
+    mov rbx, [rbp - SE_SELF]
     lea rsi, [rbx + PyStrObject.data]
     mov rdx, r12
-    push rax                   ; save bytes obj
     extern ap_memcpy
     call ap_memcpy
-    pop rax                    ; return bytes obj
+    pop rax
     mov edx, TAG_PTR
     pop r12
     pop rbx
     leave
-    V_PACK rax, rdx             ; builtins return one Value
+    V_PACK rax, rdx
     ret
+
+.se_ascii:
+    ; Every byte of a valid ASCII string is below 0x80, and a multi-byte
+    ; character is exactly the case that is not encodable.
+    xor ecx, ecx
+.se_ascii_scan:
+    cmp rcx, r12
+    jge .se_utf8
+    movzx eax, byte [rbx + PyStrObject.data + rcx]
+    test al, 0x80
+    jnz .se_not_encodable
+    inc rcx
+    jmp .se_ascii_scan
+
+.se_latin1:
+    ; One byte per code point, for the code points that fit in one.
+    mov rdi, [rbx + PyStrObject.ob_length]
+    call bytes_new
+    mov [rbp - SE_OUT], rax
+    mov qword [rbp - SE_POS], 0
+    xor ecx, ecx                    ; byte cursor into the source
+.se_l1_loop:
+    cmp rcx, [rbp - SE_LEN]
+    jge .se_l1_done
+    mov rbx, [rbp - SE_SELF]
+    movzx eax, byte [rbx + PyStrObject.data + rcx]
+    test al, 0x80
+    jz .se_l1_emit
+    ; A two-byte form can reach U+00FF; anything wider cannot be Latin-1.
+    mov edx, eax
+    and edx, 0xE0
+    cmp edx, 0xC0
+    jne .se_not_encodable
+    and eax, 0x1F
+    cmp eax, 3
+    ja .se_not_encodable
+    shl eax, 6
+    inc rcx
+    movzx edx, byte [rbx + PyStrObject.data + rcx]
+    and edx, 0x3F
+    or eax, edx
+.se_l1_emit:
+    mov rdx, [rbp - SE_OUT]
+    mov r8, [rbp - SE_POS]
+    mov [rdx + PyBytesObject.data + r8], al
+    inc qword [rbp - SE_POS]
+    inc rcx
+    jmp .se_l1_loop
+.se_l1_done:
+    mov rax, [rbp - SE_OUT]
+    mov rcx, [rbp - SE_POS]
+    mov [rax + PyBytesObject.ob_size], rcx
+    mov edx, TAG_PTR
+    pop r12
+    pop rbx
+    leave
+    V_PACK rax, rdx
+    ret
+
+.se_bad_enc:
+    extern raise_type_error_with_name
+    CSTRING rdi, `encode() argument 'encoding' must be str, not \x01`
+    mov rsi, rax
+    call raise_type_error_with_name
+.se_too_many:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "encode() takes at most 2 arguments"
+    call raise_exception
+
+.se_not_encodable:
+    extern exc_UnicodeEncodeError_type
+    lea rdi, [rel exc_UnicodeEncodeError_type]
+    CSTRING rsi, "character not in range for this encoding"
+    call raise_exception
 END_FUNC str_method_encode
 
 
@@ -6446,8 +6976,21 @@ DEF_FUNC dict_method_clear
     imul rdx, r12, DICT_ENTRY_SIZE
     call ap_memset
 
+    ; And reset the sparse index array, or every slot would still point at a
+    ; dense entry that is now blank.
+    mov rdi, [rbx + PyDictObject.dk_indices]
+    test rdi, rdi
+    jz .dc_no_indices
+    mov rcx, r12
+    mov rax, DICT_IX_EMPTY
+    rep stosq
+.dc_no_indices:
+
     ; Reset size to 0
     mov qword [rbx + PyDictObject.ob_size], 0
+    mov qword [rbx + PyDictObject.dk_nentries], 0
+    mov qword [rbx + PyDictObject.dk_tombstones], 0
+    inc qword [rbx + PyDictObject.dk_version]
 
     lea rax, [rel none_singleton]
     inc qword [rax + PyObject.ob_refcnt]
@@ -6763,6 +7306,144 @@ DEF_FUNC dict_method_copy
     V_PACK rax, rdx             ; builtins return one Value
     ret
 END_FUNC dict_method_copy
+
+;; add_class_getitem(rdi = type dict)
+;; PEP 585: list[int] and friends.  The __class_getitem__ path in
+;; op_binary_subscr is already wired for type objects; what was missing was an
+;; entry to find.  _collections_abc takes GenericAlias from `type(list[int])`.
+DEF_FUNC_LOCAL add_class_getitem
+    push rbx
+    push r12
+    mov rbx, rdi
+    extern generic_alias_class_getitem
+    lea rdi, [rel generic_alias_class_getitem]
+    lea rsi, [rel mn___class_getitem__]
+    call builtin_func_new
+    push rax
+    mov edi, PyClassMethodObject_size
+    lea rsi, [rel classmethod_type]
+    call gc_alloc
+    pop rcx
+    mov [rax + PyClassMethodObject.cm_callable], rcx
+    mov r12, rax
+    mov rdi, rax
+    call gc_track
+    lea rdi, [rel mn___class_getitem__]
+    call str_from_cstr_heap
+    push rax
+    mov rdi, rbx
+    mov rsi, rax
+    mov rdx, r12
+    call dict_set
+    pop rdi
+    call obj_decref
+    mov rdi, r12
+    call obj_decref
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC add_class_getitem
+
+;; ============================================================================
+;; object.__init__ / __str__ / __repr__
+;;
+;; object_type.tp_dict held only __new__.  types.py builds its type zoo out of
+;; `type(object.__init__)` and `type(object().__str__)`, so these have to be
+;; reachable before it can import -- and `super().__init__()` in a class that
+;; derives straight from object needs the first one anyway.
+;; ============================================================================
+extern str_from_cstr
+DEF_FUNC object_method_init
+    ; object.__init__(self, ...) accepts anything and does nothing.
+    lea rax, [rel none_singleton]
+    inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
+    leave
+    V_PACK rax, rdx
+    ret
+END_FUNC object_method_init
+
+DEF_FUNC object_method_str
+    ; object.__str__ defers to __repr__, which is what CPython does.  It must
+    ; not call obj_str: that dispatches back to tp_str, which looks up
+    ; __str__, which finds this again.
+    test rsi, rsi
+    jz .oms_bad
+    mov rdi, [rdi]
+    extern obj_repr
+    call obj_repr
+    leave
+    ret
+.oms_bad:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "__str__() takes exactly one argument"
+    call raise_exception
+END_FUNC object_method_str
+
+;; object.__repr__ is the *default* implementation, not a re-dispatch: it
+;; writes "<Name object>" straight out.  Calling obj_repr here would come
+;; back through tp_repr to this same method.
+OMR_BUF   equ 136
+OMR_FRAME equ 160
+DEF_FUNC object_method_repr, OMR_FRAME
+    test rsi, rsi
+    jz .omr_bad
+    mov rdi, [rdi]
+    V_TEST_PTR rdi, rax
+    ja .omr_plain
+    test rdi, rdi
+    jz .omr_plain
+    mov rsi, [rdi + PyObject.ob_type]
+    mov rsi, [rsi + PyTypeObject.tp_name]
+    test rsi, rsi
+    jz .omr_plain
+
+    lea rdi, [rbp - OMR_BUF]
+    xor ecx, ecx
+    mov byte [rdi], '<'
+    inc rcx
+.omr_name:
+    movzx eax, byte [rsi]
+    test al, al
+    jz .omr_tail
+    inc rsi
+    cmp rcx, 100
+    jae .omr_tail
+    mov [rdi + rcx], al
+    inc rcx
+    jmp .omr_name
+.omr_tail:
+    CSTRING rsi, " object>"
+.omr_tail_copy:
+    movzx eax, byte [rsi]
+    test al, al
+    jz .omr_emit
+    inc rsi
+    mov [rdi + rcx], al
+    inc rcx
+    jmp .omr_tail_copy
+.omr_emit:
+    mov byte [rdi + rcx], 0
+    call str_from_cstr
+    mov edx, TAG_PTR
+    leave
+    V_PACK rax, rdx
+    ret
+
+.omr_plain:
+    CSTRING rdi, "<object>"
+    call str_from_cstr
+    mov edx, TAG_PTR
+    leave
+    V_PACK rax, rdx
+    ret
+
+.omr_bad:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "__repr__() takes exactly one argument"
+    call raise_exception
+END_FUNC object_method_repr
 
 ;; ============================================================================
 ;; dict_classmethod_fromkeys(args, nargs) -> new dict
@@ -7226,6 +7907,312 @@ END_FUNC tuple_method_count
 ;; ############################################################################
 ;;                         SET METHODS
 ;; ############################################################################
+
+
+
+;; ============================================================================
+;; Slot-backed dunder methods
+;;
+;; The operators reach the type slots directly, but the methods themselves
+;; were absent from most builtin type dicts, so `dict.__setitem__` and
+;; `ref.__hash__` -- both of which collections and weakref bind at class
+;; definition time -- raised AttributeError.  One implementation per slot,
+;; dispatching through whatever the receiver's type provides.
+;; ============================================================================
+
+
+
+;; object.__eq__ / __ne__ / __hash__ and the ordering four.
+;;
+;; These must not go back through the comparison protocol: a heaptype's
+;; tp_richcompare looks __eq__ up in the MRO, finds object's, and if that
+;; re-entered the protocol the two would call each other forever.  CPython's
+;; are self-contained for the same reason -- identity for __eq__, the type's
+;; own EQ slot for __ne__, the address for __hash__.
+
+DEF_FUNC object_method_eq
+    cmp rsi, 2
+    jne .ome_error
+    mov rax, [rdi]
+    cmp rax, [rdi + 8]
+    je .ome_true
+    lea rax, [rel notimpl_singleton]
+    inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
+    leave
+    V_PACK rax, rdx
+    ret
+.ome_true:
+    lea rax, [rel bool_true]
+    inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
+    leave
+    V_PACK rax, rdx
+    ret
+.ome_error:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "__eq__() takes exactly one argument"
+    call raise_exception
+END_FUNC object_method_eq
+
+;; __ne__ delegates to the type's own EQ comparison and inverts it, so a class
+;; that defines only __eq__ still gets a correct !=.
+DEF_FUNC object_method_ne
+    cmp rsi, 2
+    jne .omn_error
+    push rbx
+    mov rbx, [rdi + 8]          ; other
+    mov rdi, [rdi]              ; self
+    V_TEST_PTR rdi, rax
+    ja .omn_identity
+    test rdi, rdi
+    jz .omn_identity
+    mov rax, [rdi + PyObject.ob_type]
+    mov rax, [rax + PyTypeObject.tp_richcompare]
+    test rax, rax
+    jz .omn_identity
+    mov rsi, rbx
+    mov edx, CMP_EQ
+    call rax
+    V_UNPACK rax, rdx
+    test edx, edx
+    jz .omn_notimpl
+    lea rcx, [rel notimpl_singleton]
+    cmp rax, rcx
+    je .omn_release_notimpl
+    push rax
+    push rdx
+    mov rdi, rax
+    V_PACK rdi, rdx
+    extern obj_is_true
+    call obj_is_true
+    mov ebx, eax
+    pop rdx
+    pop rdi
+    DECREF_VAL rdi, rdx
+    test ebx, ebx
+    jz .omn_true
+    lea rax, [rel bool_false]
+    jmp .omn_out
+.omn_true:
+    lea rax, [rel bool_true]
+    jmp .omn_out
+.omn_release_notimpl:
+    mov rdi, rax
+    call obj_decref
+.omn_notimpl:
+    lea rax, [rel notimpl_singleton]
+    jmp .omn_out
+.omn_identity:
+    cmp rdi, rbx
+    je .omn_same
+    lea rax, [rel bool_true]
+    jmp .omn_out
+.omn_same:
+    lea rax, [rel bool_false]
+.omn_out:
+    inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
+    pop rbx
+    leave
+    V_PACK rax, rdx
+    ret
+.omn_error:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "__ne__() takes exactly one argument"
+    call raise_exception
+END_FUNC object_method_ne
+
+DEF_FUNC object_method_notimpl
+    lea rax, [rel notimpl_singleton]
+    inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
+    leave
+    V_PACK rax, rdx
+    ret
+END_FUNC object_method_notimpl
+
+;; The address, which is what obj_hash falls back to when a type has no
+;; tp_hash -- reached directly so that a heaptype's slot cannot bounce back.
+DEF_FUNC object_method_hash
+    cmp rsi, 1
+    jl .omh_error
+    mov rax, [rdi]
+    add rax, [rel v_int_bias]
+    leave
+    ret
+.omh_error:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "__hash__() takes no arguments"
+    call raise_exception
+END_FUNC object_method_hash
+
+
+;; generic_method_getitem(args, nargs): args[0]=self, args[1]=key
+DEF_FUNC generic_method_getitem
+    cmp rsi, 2
+    jne .gmg_error
+    mov rax, [rdi]
+    V_TEST_PTR rax, rcx
+    ja .gmg_error
+    test rax, rax
+    jz .gmg_error
+    mov rsi, [rdi + 8]
+    mov rdi, rax
+    mov rcx, [rax + PyObject.ob_type]
+    mov rdx, [rcx + PyTypeObject.tp_as_mapping]
+    test rdx, rdx
+    jz .gmg_seq
+    mov rdx, [rdx + PyMappingMethods.mp_subscript]
+    test rdx, rdx
+    jz .gmg_seq
+    call rdx
+    leave
+    ret
+.gmg_seq:
+    mov rdx, [rcx + PyTypeObject.tp_as_sequence]
+    test rdx, rdx
+    jz .gmg_error
+    mov rdx, [rdx + PySequenceMethods.sq_item]
+    test rdx, rdx
+    jz .gmg_error
+    V_TO_I64 rsi
+    call rdx
+    leave
+    ret
+.gmg_error:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "object is not subscriptable"
+    call raise_exception
+END_FUNC generic_method_getitem
+
+;; generic_method_setitem(args, nargs): args[0]=self, args[1]=key, args[2]=value
+DEF_FUNC generic_method_setitem
+    cmp rsi, 3
+    jne .gms_error
+    mov rax, [rdi]
+    V_TEST_PTR rax, rcx
+    ja .gms_error
+    test rax, rax
+    jz .gms_error
+    mov rcx, [rax + PyObject.ob_type]
+    mov rcx, [rcx + PyTypeObject.tp_as_mapping]
+    test rcx, rcx
+    jz .gms_error
+    mov rcx, [rcx + PyMappingMethods.mp_ass_subscript]
+    test rcx, rcx
+    jz .gms_error
+    mov rsi, [rdi + 8]
+    mov rdx, [rdi + 16]
+    mov rdi, rax
+    call rcx
+    lea rax, [rel none_singleton]
+    inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
+    leave
+    V_PACK rax, rdx
+    ret
+.gms_error:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "object does not support item assignment"
+    call raise_exception
+END_FUNC generic_method_setitem
+
+;; generic_method_delitem(args, nargs): args[0]=self, args[1]=key
+DEF_FUNC generic_method_delitem
+    cmp rsi, 2
+    jne .gmd_error
+    mov rax, [rdi]
+    V_TEST_PTR rax, rcx
+    ja .gmd_error
+    test rax, rax
+    jz .gmd_error
+    mov rcx, [rax + PyObject.ob_type]
+    mov rcx, [rcx + PyTypeObject.tp_as_mapping]
+    test rcx, rcx
+    jz .gmd_error
+    mov rcx, [rcx + PyMappingMethods.mp_ass_subscript]
+    test rcx, rcx
+    jz .gmd_error
+    mov rsi, [rdi + 8]
+    xor edx, edx                ; a NULL value means delete
+    mov rdi, rax
+    call rcx
+    lea rax, [rel none_singleton]
+    inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
+    leave
+    V_PACK rax, rdx
+    ret
+.gmd_error:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "object does not support item deletion"
+    call raise_exception
+END_FUNC generic_method_delitem
+
+;; generic_method_hash(args, nargs): args[0]=self
+DEF_FUNC generic_method_hash
+    cmp rsi, 1
+    jne .gmh_error
+    mov rdi, [rdi]
+    extern obj_hash
+    call obj_hash
+    add rax, [rel v_int_bias]
+    leave
+    ret
+.gmh_error:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "__hash__() takes no arguments"
+    call raise_exception
+END_FUNC generic_method_hash
+
+;; ============================================================================
+;; generic_method_contains(args, nargs) -> bool
+;; args[0]=self, args[1]=item
+;;
+;; `x in c` reaches sq_contains directly, but the method itself was never in
+;; any type's dict, so `frozenset(names).__contains__` -- keyword.py's
+;; iskeyword, among others -- raised AttributeError.  One implementation
+;; serves every type that has the slot.
+;; ============================================================================
+DEF_FUNC generic_method_contains
+    cmp rsi, 2
+    jne .gmc_error
+    mov rax, [rdi]              ; self
+    V_TEST_PTR rax, rcx
+    ja .gmc_error
+    test rax, rax
+    jz .gmc_error
+    mov rcx, [rax + PyObject.ob_type]
+    mov rcx, [rcx + PyTypeObject.tp_as_sequence]
+    test rcx, rcx
+    jz .gmc_error
+    mov rcx, [rcx + PySequenceMethods.sq_contains]
+    test rcx, rcx
+    jz .gmc_error
+    mov rsi, [rdi + 8]          ; the item, as a Value
+    mov rdi, rax
+    call rcx
+    test eax, eax
+    jz .gmc_false
+    lea rax, [rel bool_true]
+    inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
+    leave
+    V_PACK rax, rdx
+    ret
+.gmc_false:
+    lea rax, [rel bool_false]
+    inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
+    leave
+    V_PACK rax, rdx
+    ret
+.gmc_error:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "__contains__() takes exactly one argument"
+    call raise_exception
+END_FUNC generic_method_contains
 
 ;; ============================================================================
 ;; set_method_add(args, nargs) -> None
@@ -10260,6 +11247,31 @@ DEF_FUNC methods_init
     call add_method_to_dict
 
     mov rdi, rbx
+    lea rsi, [rel mn_isidentifier]
+    lea rdx, [rel str_method_isidentifier]
+    call add_method_to_dict
+
+    mov rdi, rbx
+    lea rsi, [rel mn_isprintable]
+    lea rdx, [rel str_method_isprintable]
+    call add_method_to_dict
+
+    mov rdi, rbx
+    lea rsi, [rel mn_isascii]
+    lea rdx, [rel str_method_isascii]
+    call add_method_to_dict
+
+    mov rdi, rbx
+    lea rsi, [rel mn_isdecimal]
+    lea rdx, [rel str_method_isdecimal]
+    call add_method_to_dict
+
+    mov rdi, rbx
+    lea rsi, [rel mn_isnumeric]
+    lea rdx, [rel str_method_isdecimal]
+    call add_method_to_dict
+
+    mov rdi, rbx
     lea rsi, [rel mn_removeprefix]
     lea rdx, [rel str_method_removeprefix]
     call add_method_to_dict
@@ -10552,6 +11564,9 @@ DEF_FUNC methods_init
     mov rdi, rbx
     call add_new_staticmethod
 
+    mov rdi, rbx
+    call add_class_getitem
+
     ; Store in list_type.tp_dict
     lea rax, [rel list_type]
     mov [rax + PyTypeObject.tp_dict], rbx
@@ -10658,6 +11673,24 @@ DEF_FUNC methods_init
     mov rdi, rbx
     call add_new_staticmethod
 
+    mov rdi, rbx
+    lea rsi, [rel mn___contains__]
+    lea rdx, [rel generic_method_contains]
+    call add_method_to_dict
+
+    mov rdi, rbx
+    lea rsi, [rel mn___setitem__]
+    lea rdx, [rel generic_method_setitem]
+    call add_method_to_dict
+
+    mov rdi, rbx
+    lea rsi, [rel mn___delitem__]
+    lea rdx, [rel generic_method_delitem]
+    call add_method_to_dict
+
+    mov rdi, rbx
+    call add_class_getitem
+
     ; Store in dict_type.tp_dict
     lea rax, [rel dict_type]
     mov [rax + PyTypeObject.tp_dict], rbx
@@ -10726,6 +11759,9 @@ DEF_FUNC methods_init
 
     mov rdi, rbx
     call add_new_staticmethod
+
+    mov rdi, rbx
+    call add_class_getitem
 
     ; Store in tuple_type.tp_dict
     lea rax, [rel tuple_type]
@@ -10817,8 +11853,36 @@ DEF_FUNC methods_init
     mov rdi, rbx
     call add_new_staticmethod
 
-    ; Store in set_type.tp_dict
+    mov rdi, rbx
+    call add_class_getitem
+
+    mov rdi, rbx
+    lea rsi, [rel mn___contains__]
+    lea rdx, [rel generic_method_contains]
+    call add_method_to_dict
+
+    ; Store in set_type.tp_dict, and in frozenset's: the two share every
+    ; method that does not mutate, and frozenset had no dict at all.
     lea rax, [rel set_type]
+    mov [rax + PyTypeObject.tp_dict], rbx
+    lea rax, [rel frozenset_type]
+    mov [rax + PyTypeObject.tp_dict], rbx
+    mov rdi, rbx
+    call obj_incref
+
+    ;; --- weakref methods ---
+    ; weakref.py binds ref.__hash__ and ref.__eq__ into its subclasses at
+    ; class definition time, so those have to exist as methods.
+    call dict_new
+    mov rbx, rax
+    mov rdi, rbx
+    lea rsi, [rel mn___hash__]
+    lea rdx, [rel generic_method_hash]
+    call add_method_to_dict
+    mov rdi, rbx
+    call add_class_getitem
+    extern weakref_type
+    lea rax, [rel weakref_type]
     mov [rax + PyTypeObject.tp_dict], rbx
 
     ;; --- object_type methods (just __new__) ---
@@ -10862,8 +11926,130 @@ DEF_FUNC methods_init
     pop rdi
     call obj_decref
 
+    ; __init__, __str__ and __repr__ so the base type is introspectable
+    mov rdi, rbx
+    lea rsi, [rel mn___init__]
+    lea rdx, [rel object_method_init]
+    call add_method_to_dict
+
+    mov rdi, rbx
+    lea rsi, [rel mn___str__]
+    lea rdx, [rel object_method_str]
+    call add_method_to_dict
+
+    mov rdi, rbx
+    lea rsi, [rel mn___repr__]
+    lea rdx, [rel object_method_repr]
+    call add_method_to_dict
+
+    ; The comparisons, which every class inherits and the stdlib binds by
+    ; name: `__ne__ = MutableMapping.__ne__` reaches object's.
+    mov rdi, rbx
+    lea rsi, [rel mn___eq__]
+    lea rdx, [rel object_method_eq]
+    call add_method_to_dict
+    mov rdi, rbx
+    lea rsi, [rel mn___ne__]
+    lea rdx, [rel object_method_ne]
+    call add_method_to_dict
+    ; Not the ordering four: a builtin subclass looks __lt__ up in its MRO
+    ; and would find object's NotImplemented before reaching the base type's
+    ; own comparison, so `sorted([L([2]), L([1])])` on a list subclass would
+    ; stop working.  CPython reaches those through slot wrappers this does
+    ; not have yet.
+    mov rdi, rbx
+    lea rsi, [rel mn___hash__]
+    lea rdx, [rel object_method_hash]
+    call add_method_to_dict
+
     ; Store in object_type.tp_dict
     lea rax, [rel object_type]
+    mov [rax + PyTypeObject.tp_dict], rbx
+
+    ;; --- type_type: __new__, so a metaclass can call super().__new__ ---
+    extern type_type
+    call dict_new
+    mov rbx, rax
+
+    extern type_method_new
+    lea rdi, [rel type_method_new]
+    lea rsi, [rel mn___new__]
+    call builtin_func_new
+    push rax
+    mov edi, PyStaticMethodObject_size
+    lea rsi, [rel staticmethod_type]
+    call gc_alloc
+    pop rcx
+    mov [rax + PyStaticMethodObject.sm_callable], rcx
+    mov r12, rax
+    mov rdi, rax
+    call gc_track
+    lea rdi, [rel mn___new__]
+    call str_from_cstr_heap
+    push rax
+    mov rdi, rbx
+    mov rsi, rax
+    mov rdx, r12
+    call dict_set
+    pop rdi
+    call obj_decref
+    mov rdi, r12
+    call obj_decref
+
+    mov rdi, rbx
+    call add_class_getitem
+
+    lea rax, [rel type_type]
+    mov [rax + PyTypeObject.tp_dict], rbx
+
+    ;; --- function type: expose its introspection attributes on the type ---
+    ;; types.py takes GetSetDescriptorType from `type(FunctionType.__code__)`
+    ;; and MemberDescriptorType from `type(FunctionType.__globals__)`, so both
+    ;; have to be reachable *through the type*, not just on an instance.
+    ;; func_getattr already answers them for instances.
+    call dict_new
+    mov rbx, rax
+
+    lea rdi, [rel mn___code__]
+    call str_from_cstr_heap
+    push rax
+    xor edi, edi
+    xor esi, esi
+    mov rdx, rax
+    extern getset_descr_new
+    call getset_descr_new
+    push rax
+    mov rdi, rbx
+    mov rsi, [rsp + 8]
+    mov rdx, rax
+    call dict_set
+    pop rdi
+    call obj_decref
+    pop rdi
+    call obj_decref
+
+    mov rdi, PyFuncObject.func_globals
+    lea rsi, [rel mn___globals__]
+    push rdi
+    mov rdi, rsi
+    call str_from_cstr_heap
+    pop rdi
+    push rax
+    mov rsi, rax
+    extern member_descr_new
+    call member_descr_new
+    push rax
+    mov rdi, rbx
+    mov rsi, [rsp + 8]
+    mov rdx, rax
+    call dict_set
+    pop rdi
+    call obj_decref
+    pop rdi
+    call obj_decref
+
+    extern func_type
+    lea rax, [rel func_type]
     mov [rax + PyTypeObject.tp_dict], rbx
 
     ;; --- int_type methods ---
@@ -11081,6 +12267,11 @@ mn_rstrip:      db "rstrip", 0
 mn_rfind:       db "rfind", 0
 mn_isdigit:     db "isdigit", 0
 mn_isalpha:     db "isalpha", 0
+mn_isidentifier: db "isidentifier", 0
+mn_isprintable: db "isprintable", 0
+mn_isascii:     db "isascii", 0
+mn_isdecimal:   db "isdecimal", 0
+mn_isnumeric:   db "isnumeric", 0
 mn_removeprefix: db "removeprefix", 0
 mn_removesuffix: db "removesuffix", 0
 mn_encode:      db "encode", 0
@@ -11146,8 +12337,20 @@ mn___setitem__: db "__setitem__", 0
 mn___delitem__: db "__delitem__", 0
 mn___contains__: db "__contains__", 0
 mn___len__:     db "__len__", 0
+mn___eq__: db "__eq__", 0
+mn___ne__: db "__ne__", 0
+mn___lt__: db "__lt__", 0
+mn___le__: db "__le__", 0
+mn___gt__: db "__gt__", 0
+mn___ge__: db "__ge__", 0
+mn___hash__:    db "__hash__", 0
 mn___add__:     db "__add__", 0
 mn___mul__:     db "__mul__", 0
 mn___rmul__:    db "__rmul__", 0
 mn___iadd__:    db "__iadd__", 0
 mn___init__:    db "__init__", 0
+mn___str__:     db "__str__", 0
+mn___code__:    db "__code__", 0
+mn___class_getitem__: db "__class_getitem__", 0
+mn___globals__: db "__globals__", 0
+mn___repr__:    db "__repr__", 0

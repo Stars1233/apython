@@ -42,6 +42,13 @@ DEF_FUNC_BARE op_import_name
     push rsi                    ; fromlist payload
     push rdx                    ; level
 
+    ; The two operands are ours now.  eval_saved_r13 was captured by
+    ; eval_dispatch *before* those pops, so a non-local unwind out of
+    ; import_module would have walked the value stack back down over both
+    ; slots and DECREF'd them a second time -- a double free of the
+    ; fromlist tuple on every failing import.
+    mov [rel eval_saved_r13], r13
+
     ; Decode level from SmallInt
     cmp ecx, TAG_SMALLINT
     je .decode_smallint
@@ -53,12 +60,42 @@ DEF_FUNC_BARE op_import_name
     ; rdx already holds the raw integer payload (no decoding needed for fat values)
 
 .do_import:
+    ; A relative import is resolved against the importing module's package
+    ; before anything else happens; import_module only knows absolute names.
+    test rdx, rdx
+    jz .absolute
+    push rax
+    mov rdi, rax                ; the name as written
+    mov rsi, [r12 + PyFrame.globals]
+    extern import_resolve_relative
+    call import_resolve_relative
+    mov rdx, rax                ; the resolved name, owned
+    pop rax
+    mov [rsp + 24], rdx         ; keep it where the saved name lives
+    mov rax, rdx
+    mov rdx, 0                  ; it is absolute now
+    mov r9d, 1                  ; and the name is ours to release
+    jmp .have_name
+.absolute:
+    xor r9d, r9d
+.have_name:
+    push r9
+
     ; import_module(name_str, fromlist, level)
     mov rdi, rax                ; name
-    mov rsi, [rsp + 8]         ; fromlist
+    mov rsi, [rsp + 16]        ; fromlist
     ; rdx = level (already set)
     call import_module
     ; rax = module (new reference)
+
+    pop r9
+    test r9d, r9d
+    jz .no_resolved_name
+    push rax
+    mov rdi, [rsp + 32]         ; the resolved name we built
+    call obj_decref
+    pop rax
+.no_resolved_name:
 
     add rsp, 8                  ; discard level (SmallInt, no refcount)
 
@@ -78,10 +115,20 @@ DEF_FUNC_BARE op_import_name
     DISPATCH
 
 .import_failed:
-    ; Should not reach here — import_module raises on failure
+    ; import_module raises for a module it cannot find, but returns NULL for
+    ; one whose body raised -- that exception is already pending and must be
+    ; propagated, not replaced.
+    extern current_exception
+    extern eval_exception_unwind
+    cmp qword [rel current_exception], 0
+    jne .propagate_import_exc
     lea rdi, [rel exc_ImportError_type]
     CSTRING rsi, "import failed"
     call raise_exception
+
+.propagate_import_exc:
+    mov [rel eval_saved_r13], r13
+    jmp eval_exception_unwind
 END_FUNC op_import_name
 
 ; ============================================================================
@@ -229,9 +276,18 @@ DEF_FUNC op_import_from, IF2_FRAME
     DISPATCH
 
 .if_error:
+    ; A submodule whose body raised leaves its exception pending; reporting
+    ; "cannot import name" over it would hide the real cause.
+    cmp qword [rel current_exception], 0
+    jne .propagate_from_exc
     lea rdi, [rel exc_ImportError_type]
     CSTRING rsi, "cannot import name"
     call raise_exception
+
+.propagate_from_exc:
+    mov [rel eval_saved_r13], r13
+    leave
+    jmp eval_exception_unwind
 END_FUNC op_import_from
 
 section .rodata
