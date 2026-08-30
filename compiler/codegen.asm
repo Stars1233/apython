@@ -709,8 +709,17 @@ DEF_FUNC_LOCAL cg_e_unaryop, CE_FRAME
     call ast_at
     movzx edx, byte [rax + AstNode.subkind]
     mov ecx, [rax + AstNode.lineno]
+    ; `+x` is not the identity: it calls __pos__, which a numeric class is free
+    ; to define as anything.  CPython routes it through an intrinsic rather
+    ; than a dedicated opcode.
     cmp edx, UOP_POS
-    je .done                            ; +x is the identity
+    jne .not_pos
+    mov rdi, r12
+    mov esi, OP_CALL_INTRINSIC_1
+    mov edx, INTRINSIC_UNARY_POSITIVE
+    call cg_emit
+    jmp .done
+.not_pos:
     mov esi, OP_UNARY_NEGATIVE
     cmp edx, UOP_NEG
     je .have_op

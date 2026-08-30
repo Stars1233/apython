@@ -538,6 +538,11 @@ DEF_PARAM    equ 0x004
 DEF_NONLOCAL equ 0x008
 DEF_IMPORT   equ 0x010
 DEF_USE      equ 0x020
+; The name is unbound somewhere in this block -- an explicit `del`, or the
+; implicit one at the end of an `except E as e` clause.  A local that can be
+; unbound has to be read with LOAD_FAST_CHECK, or reading it after the delete
+; returns whatever was in the slot instead of raising.
+DEF_UNBOUND  equ 0x040
 
 ; The resolved answer, stored in bits 12..14.
 SCOPE_SHIFT      equ 12

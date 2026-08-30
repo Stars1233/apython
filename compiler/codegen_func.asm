@@ -40,6 +40,7 @@ extern sym_at
 extern cg_call_args_only
 extern sym_finalize
 extern sym_scope_of
+extern sym_flags_of
 extern sym_is_function_like
 extern sym_lp_index
 extern sym_scope_of
@@ -83,7 +84,8 @@ CN2_NAME  equ 24
 CN2_CTX   equ 32
 CN2_NULL  equ 40
 CN2_SCOPE equ 48
-CN2_FRAME equ 56          ; + 3 pushes = 80
+CN2_SLOT  equ 56
+CN2_FRAME equ 72          ; + 3 pushes = 96
 DEF_FUNC cg_nameop, CN2_FRAME
     push rbx
     push r12
@@ -134,9 +136,25 @@ DEF_FUNC cg_nameop, CN2_FRAME
     cmp eax, -1
     je .missing
     mov edx, eax
-    mov esi, OP_LOAD_FAST
     cmp qword [rbp - CN2_CTX], CTX_LOAD
-    je .emit
+    jne .fast_store
+    ; A local that is deleted anywhere in the block -- or bound by an
+    ; `except E as e`, which deletes it at the end of the clause -- may be
+    ; empty here.  LOAD_FAST would hand back whatever the slot holds; only
+    ; LOAD_FAST_CHECK raises for it.
+    mov [rbp - CN2_SLOT], rdx
+    mov rdi, rbx
+    mov rsi, [rbp - CN2_SCOPE]
+    mov rdx, [rbp - CN2_NAME]
+    call sym_flags_of
+    mov esi, OP_LOAD_FAST
+    test eax, DEF_UNBOUND
+    jz .fast_load
+    mov esi, OP_LOAD_FAST_CHECK
+.fast_load:
+    mov rdx, [rbp - CN2_SLOT]
+    jmp .emit
+.fast_store:
     mov esi, OP_STORE_FAST
     cmp qword [rbp - CN2_CTX], CTX_STORE
     je .emit

@@ -380,6 +380,9 @@ DEF_FUNC sym_visit, SV_FRAME
     cmp ecx, CTX_LOAD
     je .name_flags
     mov r8d, DEF_LOCAL
+    cmp ecx, CTX_DEL
+    jne .name_flags
+    or r8d, DEF_UNBOUND
 .name_flags:
     mov rdi, rbx
     mov rsi, r12
@@ -469,7 +472,7 @@ DEF_FUNC sym_visit, SV_FRAME
     mov rdx, rax
     mov rdi, rbx
     mov rsi, r12
-    mov ecx, DEF_LOCAL
+    mov ecx, DEF_LOCAL | DEF_UNBOUND
     call sym_add
     jmp .children
 
@@ -715,6 +718,24 @@ DEF_FUNC sym_visit, SV_FRAME
     je .field_none
     cmp eax, AST_CLASSDEF
     je .field_none
+    cmp eax, AST_HANDLER
+    je .field_handler
+    mov rdi, rbx
+    mov rsi, r12
+    call sym_visit
+    add rsp, 8
+    ret
+.field_handler:
+    ; a is the exception type (a node); b is the bound name (an object).
+    ; Walking b as a node is not a no-op: object indices and node indices come
+    ; from different arenas and collide freely, so `except E as e` would visit
+    ; whatever node happens to sit at e's object index -- and if that node is a
+    ; function or a lambda, it gets a SECOND scope, overwriting the scope index
+    ; stamped on it by the first.  The real owner then reads someone else's
+    ; scope, and its closure comes out empty.
+    mov rax, [rbp - SV_NPTR]
+    cmp edx, [rax + AstNode.a]
+    jne .field_none
     mov rdi, rbx
     mov rsi, r12
     call sym_visit
@@ -1576,6 +1597,17 @@ DEF_FUNC sym_scope_of, 16
     leave
     ret
 END_FUNC sym_scope_of
+
+;; ============================================================================
+;; sym_flags_of(Comp *c, uint32_t scope, PyStrObject *name) -> eax = DEF_*
+;; The raw flags, for the one question the resolved scope does not answer:
+;; whether the name can be unbound where it is read.
+;; ============================================================================
+DEF_FUNC sym_flags_of, 16
+    call sym_get
+    leave
+    ret
+END_FUNC sym_flags_of
 
 
 ;; ============================================================================
