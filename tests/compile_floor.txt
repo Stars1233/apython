@@ -17,6 +17,7 @@ test_async_with
 test_bitwise
 test_bool_arith
 test_bool
+test_builtin_dunder_str
 test_builtin_kwargs
 test_builtins_extra
 test_builtins
@@ -119,6 +120,7 @@ test_list_insert_pop
 test_list_remove_eq
 test_lists
 test_map_multi
+test_mappingproxy_call
 test_marshal_interned
 test_match_class
 test_match_mapping_types

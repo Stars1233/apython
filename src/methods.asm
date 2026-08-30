@@ -7699,6 +7699,52 @@ DEF_FUNC object_method_repr, OMR_FRAME
 END_FUNC object_method_repr
 
 ;; ============================================================================
+;; A builtin's own __str__ and __repr__, reachable by name.
+;;
+;; They were not: `str.__str__` resolved through the MRO to object's, and enum
+;; asks precisely that question -- "if member_type.__str__ is object.__str__,
+;; use its __repr__ instead" -- so every StrEnum member printed as
+;; <Names object>.  The thunk calls the *defining* type's slot, not the
+;; argument's, which is what keeps it right on a subclass and out of the
+;; recursion a re-dispatch would cause.  An immediate int or float has no
+;; ob_type to read a slot from, so it goes through obj_repr, which knows them.
+;; ============================================================================
+%macro DEF_DUNDER_STRREPR 2     ; %1 = type prefix, %2 = tp_str or tp_repr
+DEF_FUNC %1_dunder_%2
+    test rsi, rsi
+    jz %%bad
+    mov rdi, [rdi]
+    V_TEST_PTR rdi, rax
+    ja %%immediate
+    test rdi, rdi
+    jz %%immediate
+    lea rax, [rel %1_type]
+    mov rax, [rax + PyTypeObject.tp_%2]
+    test rax, rax
+    jz %%immediate
+    call rax
+    leave
+    ret
+%%immediate:
+    call obj_repr
+    leave
+    ret
+%%bad:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "expected exactly one argument"
+    call raise_exception
+END_FUNC %1_dunder_%2
+%endmacro
+
+DEF_DUNDER_STRREPR str, str
+DEF_DUNDER_STRREPR str, repr
+DEF_DUNDER_STRREPR bytes, str
+DEF_DUNDER_STRREPR bytes, repr
+DEF_DUNDER_STRREPR int, repr
+DEF_DUNDER_STRREPR float, repr
+
+
+;; ============================================================================
 ;; dict_classmethod_fromkeys(args, nargs) -> new dict
 ;; args[0]=cls (type), args[1]=iterable, optional args[2]=value (default None)
 ;; Creates dict from iterable keys with given value.
@@ -11522,6 +11568,16 @@ DEF_FUNC methods_init
     call dict_new
     mov rbx, rax            ; rbx = str method dict
 
+    ; str's own __str__ and __repr__, by name.  See DEF_DUNDER_STRREPR.
+    mov rdi, rbx
+    lea rsi, [rel mn___str__]
+    lea rdx, [rel str_dunder_str]
+    call add_method_to_dict
+    mov rdi, rbx
+    lea rsi, [rel mn___repr__]
+    lea rdx, [rel str_dunder_repr]
+    call add_method_to_dict
+
     ; int.__new__ / str.__new__: enum builds each member with
     ; `member_type.__new__(cls, *args)`, and decides which base is the data
     ; type by asking whether __new__ is in its __dict__.
@@ -12528,6 +12584,11 @@ DEF_FUNC methods_init
     call dict_new
     mov rbx, rax
 
+    mov rdi, rbx
+    lea rsi, [rel mn___repr__]
+    lea rdx, [rel int_dunder_repr]
+    call add_method_to_dict
+
     ; int.__new__ / str.__new__: enum builds each member with
     ; `member_type.__new__(cls, *args)`, and decides which base is the data
     ; type by asking whether __new__ is in its __dict__.
@@ -12600,6 +12661,11 @@ DEF_FUNC methods_init
     mov rbx, rax
 
     mov rdi, rbx
+    lea rsi, [rel mn___repr__]
+    lea rdx, [rel float_dunder_repr]
+    call add_method_to_dict
+
+    mov rdi, rbx
     lea rsi, [rel mn_is_integer]
     lea rdx, [rel float_method_is_integer]
     call add_method_to_dict
@@ -12657,6 +12723,15 @@ DEF_FUNC methods_init
     ;; --- bytes_type methods (extend tp_dict, keep tp_getattr for .decode()) ---
     call dict_new
     mov rbx, rax
+
+    mov rdi, rbx
+    lea rsi, [rel mn___str__]
+    lea rdx, [rel bytes_dunder_str]
+    call add_method_to_dict
+    mov rdi, rbx
+    lea rsi, [rel mn___repr__]
+    lea rdx, [rel bytes_dunder_repr]
+    call add_method_to_dict
 
     mov rdi, rbx
     lea rsi, [rel mn_hex]

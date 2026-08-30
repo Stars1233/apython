@@ -718,6 +718,45 @@ extern dict_get
 extern str_new_heap
 extern obj_repr
 extern obj_incref
+;; ============================================================================
+;; mappingproxy_construct(PyObject *type, PyObject **args, int64_t nargs)
+;; tp_new for mappingproxy_type: MappingProxyType(mapping).
+;;
+;; The type existed only to be *named* by types.py, so it had no constructor at
+;; all -- and calling it fell through to the ordinary class-construction path,
+;; which allocated a proxy-sized block and left mp_mapping holding whatever was
+;; there.  enum's `__members__` is a MappingProxyType(...) call.  It goes in
+;; tp_new, not tp_call: tp_call on a type is what makes that type's *instances*
+;; callable.
+;; ============================================================================
+DEF_FUNC mappingproxy_construct
+    cmp rdx, 1
+    jne .mpc_error
+    mov rdi, [rsi]                  ; the mapping
+    V_TEST_PTR rdi, rax
+    ja .mpc_error
+    test rdi, rdi
+    jz .mpc_error
+    mov rax, [rdi + PyObject.ob_type]
+    lea rcx, [rel dict_type]
+    cmp rax, rcx
+    je .mpc_wrap
+    ; A proxy of a proxy wraps the same dict, as CPython's does.
+    lea rcx, [rel mappingproxy_type]
+    cmp rax, rcx
+    jne .mpc_error
+    mov rdi, [rdi + PyMappingProxyObject.mp_mapping]
+.mpc_wrap:
+    call mappingproxy_new
+    mov edx, TAG_PTR            ; a constructor returns the (payload, tag) pair
+    leave
+    ret
+.mpc_error:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "mappingproxy() argument must be a mapping, not a sequence"
+    call raise_exception
+END_FUNC mappingproxy_construct
+
 global mappingproxy_new
 DEF_FUNC mappingproxy_new
     push rbx
@@ -1913,7 +1952,7 @@ mappingproxy_type:
     dq mappingproxy_iter            ; tp_iter
     dq 0                            ; tp_iternext
     dq 0                            ; tp_init
-    dq 0                            ; tp_new
+    dq mappingproxy_construct       ; tp_new
     dq 0                            ; tp_as_number
     dq mappingproxy_seq_methods     ; tp_as_sequence
     dq mappingproxy_map_methods     ; tp_as_mapping
