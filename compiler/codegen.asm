@@ -62,6 +62,14 @@ DEF_FUNC cg_unit_init, CU_FRAME
     lea rdi, [rbx + CompUnit.loops]
     mov esi, LoopFrame_size
     call buf_init
+    lea rdi, [rbx + CompUnit.handlers]
+    mov esi, Handler_size
+    call buf_init
+    lea rdi, [rbx + CompUnit.finallys]
+    mov esi, 4
+    call buf_init
+    mov dword [rbx + CompUnit.cur_handler], -1
+    mov qword [rbx + CompUnit.comp], 0
     lea rdi, [rbx + CompUnit.labels]
     mov esi, 4
     call buf_init
@@ -110,6 +118,10 @@ DEF_FUNC cg_unit_free, 8
     call buf_free
     lea rdi, [rbx + CompUnit.labels]
     call buf_free
+    lea rdi, [rbx + CompUnit.finallys]
+    call buf_free
+    lea rdi, [rbx + CompUnit.handlers]
+    call buf_free
     lea rdi, [rbx + CompUnit.loops]
     call buf_free
     lea rdi, [rbx + CompUnit.instrs]
@@ -141,7 +153,10 @@ DEF_FUNC cg_emit, CM_FRAME
     mov rdx, [rbp - CM_OP]
     mov [rax + Instr.opcode], dl
     mov byte [rax + Instr.flags], 0
-    mov word [rax + Instr.handler], 0
+    ; Stamp the innermost active handler, biased by one so 0 means "none".
+    mov edx, [rbx + CompUnit.cur_handler]
+    inc edx
+    mov [rax + Instr.handler], dx
     mov rdx, [rbp - CM_ARG]
     mov [rax + Instr.oparg], edx
     mov rdx, [rbp - CM_LINE]
@@ -341,7 +356,8 @@ DEF_FUNC cg_loop_push, 16
     mov [rax + LoopFrame.cont], edx
     mov rdx, [rbp - 16]
     mov [rax + LoopFrame.npop], edx
-    mov dword [rax + LoopFrame.pad], 0
+    mov edx, [rbx + CompUnit.finallys + Buf.len]
+    mov [rax + LoopFrame.fdepth], edx
     pop r12
     pop rbx
     leave
@@ -365,6 +381,55 @@ DEF_FUNC_BARE cg_loop_top
     xor eax, eax
     ret
 END_FUNC cg_loop_top
+
+;; ============================================================================
+;; cg_push_handler(CompUnit *u, uint64_t target, uint64_t lasti)
+;; cg_pop_handler(CompUnit *u)
+;; Everything emitted between the two is covered by this handler.
+;; ============================================================================
+DEF_FUNC cg_push_handler, 16
+    push rbx
+    push r12
+    mov rbx, rdi
+    mov r12, rsi
+    mov [rbp - 8], rdx
+    lea rdi, [rbx + CompUnit.handlers]
+    mov esi, 1
+    call buf_reserve
+    mov [rax + Handler.target], r12d
+    mov rdx, [rbp - 8]
+    mov [rax + Handler.lasti], edx
+    mov dword [rax + Handler.depth], -1
+    mov edx, [rbx + CompUnit.cur_handler]
+    mov [rax + Handler.parent], edx
+    ; Where the region opens, rather than where its stamp first appears.  A
+    ; cleanup block emitted later carries the ENCLOSING handler's stamp and
+    ; runs at a different depth, so scanning for the first stamped instruction
+    ; would read that block's depth instead of the body's -- and if the body
+    ; always raises, the first stamped instruction is unreachable dead code.
+    mov edx, [rbx + CompUnit.instrs + Buf.len]
+    mov [rax + Handler.open], edx
+    mov dword [rax + Handler.pad5], 0
+    mov rax, [rbx + CompUnit.handlers + Buf.len]
+    dec rax
+    mov [rbx + CompUnit.cur_handler], eax
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC cg_push_handler
+
+DEF_FUNC_BARE cg_pop_handler
+    mov eax, [rdi + CompUnit.cur_handler]
+    cmp eax, -1
+    je .none
+    mov rdx, [rdi + CompUnit.handlers + Buf.data]
+    imul rax, rax, Handler_size
+    mov eax, [rdx + rax + Handler.parent]
+    mov [rdi + CompUnit.cur_handler], eax
+.none:
+    ret
+END_FUNC cg_pop_handler
 
 ;; ============================================================================
 ;; cg_cmpop(CompUnit *u, int cmpop, int lineno) -> emits one comparison

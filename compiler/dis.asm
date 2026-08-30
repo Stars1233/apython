@@ -211,6 +211,8 @@ DEF_FUNC dis_main, 16           ; + 2 pushes = 32
     jz .failed
     mov rdi, rbx
     call code_disassemble
+    mov rdi, rbx
+    call code_dump_exctab
     xor eax, eax
     pop r12
     pop rbx
@@ -233,5 +235,109 @@ section .data
 align 8
 global dis_mode
 dis_mode: dq CMODE_EVAL
+
+section .text
+
+;; ============================================================================
+;; code_dump_exctab(PyCodeObject *code)
+;; Decode co_exceptiontable the way exc_table_find_handler does and print it.
+;; A table that reads back wrong here is the fastest signal that the encoder
+;; and the decoder disagree.
+;; ============================================================================
+DX_CODE  equ 8
+DX_POS   equ 16
+DX_LEN   equ 24
+DX_DATA  equ 32
+DX_FRAME equ 40           ; + 3 pushes = 64
+DEF_FUNC code_dump_exctab, DX_FRAME
+    push rbx
+    push r12
+    push r13
+    mov rbx, rdi
+    mov rax, [rbx + PyCodeObject.co_exceptiontable]
+    test rax, rax
+    jz .none
+    mov r13, [rax + PyBytesObject.ob_size]
+    test r13, r13
+    jz .none
+    lea r12, [rax + PyBytesObject.data]
+    mov [rbp - DX_DATA], r12
+    mov [rbp - DX_LEN], r13
+    mov qword [rbp - DX_POS], 0
+    CSTRING rdi, `exceptiontable:\n`
+    call dis_puts
+.entry:
+    mov rax, [rbp - DX_POS]
+    cmp rax, [rbp - DX_LEN]
+    jae .done
+    CSTRING rdi, "  "
+    call dis_puts
+    call .varint
+    mov rdi, rax
+    mov esi, 4
+    call dis_num
+    CSTRING rdi, " size "
+    call dis_puts
+    call .varint
+    mov rdi, rax
+    mov esi, 4
+    call dis_num
+    CSTRING rdi, " -> "
+    call dis_puts
+    call .varint
+    mov rdi, rax
+    mov esi, 4
+    call dis_num
+    CSTRING rdi, " depth_lasti "
+    call dis_puts
+    call .varint
+    mov rdi, rax
+    mov esi, 4
+    call dis_num
+    CSTRING rdi, `\n`
+    call dis_puts
+    jmp .entry
+.none:
+    CSTRING rdi, `exceptiontable: (empty)\n`
+    call dis_puts
+.done:
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
+    jmp .real_done
+
+; Local: the same MSB-first 6-bit decode exc_table_find_handler performs.
+.varint:
+    sub rsp, 8
+    mov r12, [rbp - DX_DATA]
+    mov rcx, [rbp - DX_POS]
+    movzx edx, byte [r12 + rcx]
+    inc rcx
+    mov [rbp - DX_POS], rcx
+    mov eax, edx
+    and eax, 0x3f
+.vloop:
+    test edx, 0x40
+    jz .vdone
+    mov rcx, [rbp - DX_POS]
+    cmp rcx, [rbp - DX_LEN]
+    jae .vdone
+    shl eax, 6
+    movzx edx, byte [r12 + rcx]
+    inc rcx
+    mov [rbp - DX_POS], rcx
+    mov ecx, edx
+    and ecx, 0x3f
+    or eax, ecx
+    jmp .vloop
+.vdone:
+    add rsp, 8
+    ret
+
+.real_done:
+END_FUNC code_dump_exctab
 
 ASM_INIT

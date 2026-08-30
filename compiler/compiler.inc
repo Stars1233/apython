@@ -424,6 +424,7 @@ struc Comp
     .pending:   resb Buf_size       ; u32[] LIFO scratch for lists under construction
     .objs:      resb Buf_size       ; PyObject*[], owned
     .scopes:    resb Buf_size       ; Scope[]; index 0 reserved
+    .cur_unit:  resq 1              ; the CompUnit being emitted into
     .cur_scope: resd 1
     .pad1:      resd 1
     .err:       resb CompErr_size
@@ -442,6 +443,23 @@ endstruc
 ;; .consts and .names hold BORROWED references: every literal already lives in
 ;; comp.objs, which owns it.  The tuples built at assembly time take their own.
 ;; ===========================================================================
+;; A protected region under construction.  Handlers form a tree through
+;; .parent; every instruction is stamped with the innermost one that covers it,
+;; and the ranges are recovered afterwards by run-length encoding that stamp.
+;; Computing ranges that way rather than from a stack of open regions is what
+;; makes them come out disjoint and sorted by construction -- which matters,
+;; because exc_table_find_handler scans linearly and takes the FIRST match, so
+;; overlapping entries would silently pick the wrong handler.
+struc Handler
+    .target:  resd 1          ; label the handler starts at
+    .lasti:   resd 1          ; 0 or 1: does the unwinder push the offset?
+    .depth:   resd 1          ; value-stack depth to truncate to; -1 until the
+                              ; depth pass runs
+    .parent:  resd 1          ; enclosing handler index, -1 = none
+    .open:    resd 1          ; instruction index where the region was opened
+    .pad5:    resd 1
+endstruc                      ; 24
+
 ;; A loop being generated: where `break` and `continue` go, and how much the
 ;; value stack has to be unwound to get there.  A for loop leaves its iterator
 ;; on the stack across the body, so `break` must drop it; `continue` jumps back
@@ -450,12 +468,17 @@ struc LoopFrame
     .brk:    resd 1          ; label for `break`
     .cont:   resd 1          ; label for `continue`
     .npop:   resd 1          ; stack items `break` must pop first
-    .pad:    resd 1
+    .fdepth: resd 1          ; height of the finally stack at loop entry, so
+                             ; break and continue unwind only what they leave
 endstruc                     ; 16
 
 struc CompUnit
     .instrs:    resb Buf_size   ; Instr[]
     .loops:     resb Buf_size   ; LoopFrame[], innermost last
+    .handlers:  resb Buf_size   ; Handler[]
+    .finallys:  resb Buf_size   ; u32 AST nodes of the enclosing finally bodies
+    .cur_handler: resd 1        ; index into .handlers, -1 = unprotected
+    .pad4:      resd 1
     .labels:    resb Buf_size   ; int32[]: label id -> instruction index, -1 unbound
     .consts:    resb Buf_size   ; Value[]   (borrowed)
     .names:     resb Buf_size   ; PyStrObject*[] (borrowed)

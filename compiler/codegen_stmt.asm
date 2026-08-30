@@ -33,6 +33,9 @@ extern cg_label_bind
 extern cg_label_new
 extern cg_name
 extern cg_nameop
+extern cg_unwind_finallys
+extern cg_s_try
+extern cg_s_with
 extern cg_s_functiondef
 extern cg_s_return
 extern comp_error
@@ -82,6 +85,7 @@ DEF_FUNC cg_stmt, CST_FRAME
     mov rax, [rcx + rax*8]
     test rax, rax
     jz .unsupported
+    mov [rbx + Comp.cur_unit], r12
     mov rdi, rbx
     mov rsi, r12
     mov rdx, r13
@@ -1790,6 +1794,19 @@ DEF_FUNC_LOCAL cg_s_break, CST_FRAME
     call cg_loop_top
     test rax, rax
     jz .outside
+    ; A break or continue leaving a try/finally inside the loop has to run that
+    ; finally body on its way out, exactly as a return does.
+    mov ecx, [rax + LoopFrame.fdepth]
+    mov [rbp - CST_N], rcx
+    mov rdi, rbx
+    mov rsi, r12
+    mov rdx, rcx
+    xor ecx, ecx                        ; break and continue carry no value
+    call cg_unwind_finallys
+    test eax, eax
+    jz .fail_unwind
+    mov rdi, r12
+    call cg_loop_top
     mov ecx, [rax + LoopFrame.npop]
     mov [rbp - CST_I], rcx
     mov ecx, [rax + LoopFrame.brk]
@@ -1811,6 +1828,9 @@ DEF_FUNC_LOCAL cg_s_break, CST_FRAME
     mov rcx, [rbp - CST_LINE]
     call cg_emit_jump
     mov eax, 1
+    jmp .ret
+.fail_unwind:
+    xor eax, eax
     jmp .ret
 .outside:
     mov rdi, rbx
@@ -1844,6 +1864,17 @@ DEF_FUNC_LOCAL cg_s_continue, CST_FRAME
     call cg_loop_top
     test rax, rax
     jz .outside
+    mov ecx, [rax + LoopFrame.fdepth]
+    mov [rbp - CST_N], rcx
+    mov rdi, rbx
+    mov rsi, r12
+    mov rdx, rcx
+    xor ecx, ecx                        ; break and continue carry no value
+    call cg_unwind_finallys
+    test eax, eax
+    jz .fail_unwind
+    mov rdi, r12
+    call cg_loop_top
     mov ecx, [rax + LoopFrame.cont]
     mov rdi, r12
     mov esi, OP_JUMP_BACKWARD
@@ -1851,6 +1882,9 @@ DEF_FUNC_LOCAL cg_s_continue, CST_FRAME
     mov rcx, [rbp - CST_LINE]
     call cg_emit_jump_back
     mov eax, 1
+    jmp .ret
+.fail_unwind:
+    xor eax, eax
     jmp .ret
 .outside:
     mov rdi, rbx
@@ -1937,9 +1971,9 @@ cg_stmt_table:
     dq 0                ; 61 AST_ALIAS
     dq cg_s_functiondef                ; 62 AST_FUNCTIONDEF
     dq 0                ; 63 AST_CLASSDEF
-    dq 0                ; 64 AST_TRY
+    dq cg_s_try                        ; 64 AST_TRY
     dq 0                ; 65 AST_HANDLER
-    dq 0                ; 66 AST_WITH
+    dq cg_s_with                       ; 66 AST_WITH
     dq 0                ; 67 AST_WITHITEM
     dq 0                ; 68 AST_ARGUMENTS
     dq 0                ; 69 AST_ARG

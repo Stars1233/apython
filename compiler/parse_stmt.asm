@@ -1246,6 +1246,10 @@ DEF_FUNC par_statement_any, 8
     je .compound
     cmp eax, TOK_DEF
     je .compound
+    cmp eax, TOK_TRY
+    je .compound
+    cmp eax, TOK_WITH
+    je .compound
     mov rdi, rbx
     call par_simple_stmts
     pop rbx
@@ -2086,6 +2090,284 @@ DEF_FUNC_LOCAL ps_return, PK_FRAME
     ret
 END_FUNC ps_return
 
+;; ============================================================================
+;; ps_try - try / except / else / finally
+;;   .clist = body statements
+;;   .a     = a block of AST_HANDLER clauses
+;;   .b     = the else block
+;;   .c     = the finally block
+;; ============================================================================
+PT2_LINE  equ 8
+PT2_MARK  equ 16
+PT2_HAND  equ 24
+PT2_ELSE  equ 32
+PT2_FIN   equ 40
+PT2_NODE  equ 48
+PT2_HMARK equ 56
+PT2_TYPE  equ 64
+PT2_NAME  equ 72
+PT2_BODY  equ 80
+PT2_FRAME equ 88          ; + 1 push = 96
+DEF_FUNC_LOCAL ps_try, PT2_FRAME
+    push rbx
+    mov rbx, rdi
+    call par_peek
+    mov ecx, [rax + Token.lineno]
+    mov [rbp - PT2_LINE], rcx
+    mov rdi, rbx
+    call par_advance                    ; `try`
+
+    mov rdi, rbx
+    call ast_mark
+    mov [rbp - PT2_MARK], rax
+    mov rdi, rbx
+    call par_suite_into
+    test eax, eax
+    jz .fail
+    mov qword [rbp - PT2_HAND], 0
+    mov qword [rbp - PT2_ELSE], 0
+    mov qword [rbp - PT2_FIN], 0
+
+    ; --- except clauses ---
+    mov rdi, rbx
+    call par_kind
+    cmp eax, TOK_EXCEPT
+    jne .else_clause
+
+    mov rdi, rbx
+    call ast_mark
+    mov [rbp - PT2_HMARK], rax
+.except_loop:
+    mov rdi, rbx
+    call par_kind
+    cmp eax, TOK_EXCEPT
+    jne .close_handlers
+    mov rdi, rbx
+    call par_advance
+    mov qword [rbp - PT2_TYPE], 0
+    mov qword [rbp - PT2_NAME], 0
+
+    mov rdi, rbx
+    call par_kind
+    cmp eax, TOK_COLON
+    je .handler_suite
+    mov rdi, rbx
+    mov esi, BP_NONE
+    call par_expr
+    test rax, rax
+    jz .fail
+    mov [rbp - PT2_TYPE], rax
+    mov rdi, rbx
+    call par_kind
+    cmp eax, TOK_AS
+    jne .handler_suite
+    mov rdi, rbx
+    call par_advance
+    mov rdi, rbx
+    call par_name_obj
+    test rax, rax
+    jz .fail
+    mov [rbp - PT2_NAME], rax
+
+.handler_suite:
+    mov rdi, rbx
+    call ast_mark
+    mov [rbp - PT2_BODY], rax
+    mov rdi, rbx
+    call par_suite_into
+    test eax, eax
+    jz .fail
+    mov rdi, rbx
+    mov esi, AST_HANDLER
+    mov rdx, [rbp - PT2_LINE]
+    mov rcx, [rbp - PT2_BODY]
+    call par_finish_list
+    test rax, rax
+    jz .fail
+    mov [rbp - PT2_BODY], rax
+    mov rdi, rbx
+    mov rsi, rax
+    call ast_at
+    mov rdx, [rbp - PT2_TYPE]
+    mov [rax + AstNode.a], edx
+    mov rdx, [rbp - PT2_NAME]
+    mov [rax + AstNode.b], edx
+    mov rdi, rbx
+    mov rsi, [rbp - PT2_BODY]
+    call ast_push
+    jmp .except_loop
+
+.close_handlers:
+    mov rdi, rbx
+    mov esi, AST_BLOCK
+    mov rdx, [rbp - PT2_LINE]
+    mov rcx, [rbp - PT2_HMARK]
+    call par_finish_list
+    test rax, rax
+    jz .fail
+    mov [rbp - PT2_HAND], rax
+
+.else_clause:
+    mov rdi, rbx
+    call par_kind
+    cmp eax, TOK_ELSE
+    jne .finally_clause
+    mov rdi, rbx
+    call par_advance
+    mov rdi, rbx
+    call par_suite
+    test rax, rax
+    jz .fail
+    mov [rbp - PT2_ELSE], rax
+
+.finally_clause:
+    mov rdi, rbx
+    call par_kind
+    cmp eax, TOK_FINALLY
+    jne .check
+    mov rdi, rbx
+    call par_advance
+    mov rdi, rbx
+    call par_suite
+    test rax, rax
+    jz .fail
+    mov [rbp - PT2_FIN], rax
+
+.check:
+    cmp qword [rbp - PT2_HAND], 0
+    jne .build
+    cmp qword [rbp - PT2_FIN], 0
+    jne .build
+    mov rdi, rbx
+    CSTRING rsi, "try statement must have except or finally"
+    call par_syntax_error
+    jmp .fail
+
+.build:
+    mov rdi, rbx
+    mov esi, AST_TRY
+    mov rdx, [rbp - PT2_LINE]
+    mov rcx, [rbp - PT2_MARK]
+    call par_finish_list
+    test rax, rax
+    jz .fail
+    mov [rbp - PT2_NODE], rax
+    mov rdi, rbx
+    mov rsi, rax
+    call ast_at
+    mov rdx, [rbp - PT2_HAND]
+    mov [rax + AstNode.a], edx
+    mov rdx, [rbp - PT2_ELSE]
+    mov [rax + AstNode.b], edx
+    mov rdx, [rbp - PT2_FIN]
+    mov [rax + AstNode.c], edx
+    mov rax, [rbp - PT2_NODE]
+    pop rbx
+    leave
+    ret
+.fail:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+END_FUNC ps_try
+
+;; ============================================================================
+;; ps_with - `with a as x, b: body`
+;;   .clist = AST_WITHITEM nodes, .a = the body block
+;; ============================================================================
+DEF_FUNC_LOCAL ps_with, PT2_FRAME
+    push rbx
+    mov rbx, rdi
+    call par_peek
+    mov ecx, [rax + Token.lineno]
+    mov [rbp - PT2_LINE], rcx
+    mov rdi, rbx
+    call par_advance                    ; `with`
+
+    mov rdi, rbx
+    call ast_mark
+    mov [rbp - PT2_MARK], rax
+.item_loop:
+    mov rdi, rbx
+    mov esi, BP_NONE
+    call par_expr
+    test rax, rax
+    jz .fail
+    mov [rbp - PT2_TYPE], rax
+    mov qword [rbp - PT2_NAME], 0
+    mov rdi, rbx
+    call par_kind
+    cmp eax, TOK_AS
+    jne .make_item
+    mov rdi, rbx
+    call par_advance
+    mov rdi, rbx
+    mov esi, BP_COMPARE
+    call par_expr
+    test rax, rax
+    jz .fail
+    mov rsi, rax
+    mov [rbp - PT2_NAME], rax
+    mov rdi, rbx
+    mov edx, CTX_STORE
+    call ast_set_ctx
+    test eax, eax
+    jz .bad_target
+.make_item:
+    mov rdi, rbx
+    mov esi, AST_WITHITEM
+    xor edx, edx
+    mov rcx, [rbp - PT2_LINE]
+    mov r8, [rbp - PT2_TYPE]
+    mov r9, [rbp - PT2_NAME]
+    call ast_make
+    mov rdi, rbx
+    mov rsi, rax
+    call ast_push
+    mov rdi, rbx
+    call par_kind
+    cmp eax, TOK_COMMA
+    jne .with_body
+    mov rdi, rbx
+    call par_advance
+    jmp .item_loop
+
+.with_body:
+    mov rdi, rbx
+    call par_suite
+    test rax, rax
+    jz .fail
+    mov [rbp - PT2_BODY], rax
+
+    mov rdi, rbx
+    mov esi, AST_WITH
+    mov rdx, [rbp - PT2_LINE]
+    mov rcx, [rbp - PT2_MARK]
+    call par_finish_list
+    test rax, rax
+    jz .fail
+    mov [rbp - PT2_NODE], rax
+    mov rdi, rbx
+    mov rsi, rax
+    call ast_at
+    mov rdx, [rbp - PT2_BODY]
+    mov [rax + AstNode.a], edx
+    mov rax, [rbp - PT2_NODE]
+    pop rbx
+    leave
+    ret
+.bad_target:
+    mov rdi, rbx
+    CSTRING rsi, "cannot assign to that with-target"
+    call par_syntax_error
+.fail:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+END_FUNC ps_with
+
 section .rodata
 
 ;; ---------------------------------------------------------------------------
@@ -2181,9 +2463,9 @@ stmt_table:
     dq ps_simple    ; 83 TOK_PASS
     dq ps_raise     ; 84 TOK_RAISE
     dq ps_return               ; 85 TOK_RETURN
-    dq 0            ; 86 TOK_TRY
+    dq ps_try                  ; 86 TOK_TRY
     dq ps_while                ; 87 TOK_WHILE
-    dq 0            ; 88 TOK_WITH
+    dq ps_with                 ; 88 TOK_WITH
     dq 0            ; 89 TOK_YIELD
 
 section .rodata

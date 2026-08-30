@@ -424,7 +424,7 @@ END_FUNC asm_effect_var
 ;; ============================================================================
 ;; asm_effect(CompUnit *u, uint64_t i, int jump) -> eax = net stack effect
 ;; ============================================================================
-DEF_FUNC_BARE asm_effect
+DEF_FUNC asm_effect, 8          ; a frame, because .variable now calls out
     mov rax, [rdi + CompUnit.instrs + Buf.data]
     mov r8, rsi
     shl r8, INSTR_SHIFT
@@ -442,12 +442,19 @@ DEF_FUNC_BARE asm_effect
 .check:
     cmp edx, -128                       ; SE_VAR
     je .variable
-    mov eax, edx
+    ; movsxd, not mov: a stack effect is signed, and zero-extending -1 into rax
+    ; gives 0x00000000FFFFFFFF.  Added to a depth that then gets packed with a
+    ; jump target in one qword, it sets bit 32 and corrupts the target.
+    movsxd rax, edx
+    leave
     ret
 .variable:
     movzx edi, byte [rax + Instr.opcode]
     mov esi, [rax + Instr.oparg]
-    jmp asm_effect_var
+    call asm_effect_var
+    movsxd rax, eax
+    leave
+    ret
 END_FUNC asm_effect
 
 ;; ============================================================================
@@ -497,7 +504,7 @@ DEF_FUNC asm_stackdepth, AS_FRAME
     ; The worklist holds (index << 32) | depth; depths here are small and
     ; non-negative, so one qword carries both.
     lea rdi, [r14*8]
-    add rdi, 64
+    add rdi, 512                        ; room for handler targets as well
     call ap_malloc
     mov [rbp - AS_WORK], rax
     mov r13, rax
@@ -505,6 +512,7 @@ DEF_FUNC asm_stackdepth, AS_FRAME
     mov qword [r13], 0                  ; entry: instruction 0 at depth 0
     inc r12
 
+.round:
 .work:
     test r12, r12
     jz .done
@@ -596,6 +604,31 @@ DEF_FUNC asm_stackdepth, AS_FRAME
     jmp .walk
 
 .done:
+    ; Now that normal flow has settled, seed every handler that has become
+    ; reachable and go round again.  A handler's recorded depth is the depth at
+    ; the FIRST instruction it protects; its target is entered with the
+    ; exception (and the offset, when lasti is set) already pushed, hence the
+    ; +1.  Nested handlers become reachable only through an outer one's edge,
+    ; which is why this repeats rather than running once.
+    mov rdi, rbx
+    mov rsi, [rbp - AS_DEPTH]
+    lea rdx, [rbp - AS_MAX]
+    call asm_seed_handlers
+    test eax, eax
+    jz .settled
+    ; Push the newly reachable handler targets and rerun the worklist.
+    mov rdi, rbx
+    mov rsi, [rbp - AS_DEPTH]
+    mov rdx, r13
+    call asm_push_handler_targets
+    mov r12, rax
+    ; Go round again whenever a depth was newly determined, not only when a
+    ; target was pushed: seeding one handler can make a nested one's region
+    ; reachable, and that one has to be seeded too.  This terminates because a
+    ; depth only ever goes from unknown to known.
+    jmp .round
+
+.settled:
     mov rdi, [rbp - AS_WORK]
     call ap_free
     mov rdi, [rbp - AS_DEPTH]
@@ -1046,10 +1079,22 @@ DEF_FUNC asm_assemble, AA_FRAME
     call asm_kinds_bytes
     mov [rbp - AA_SPEC + CodeSpec.localspluskinds], rax
 
-    xor edi, edi
-    xor esi, esi
-    call bytes_from_data                ; no exception table yet
+    ; --- the exception table ---
+    mov rdi, r12
+    call asm_debug_handlers             ; only under APYTHON_DUMP_HANDLERS
+    lea rdi, [rbp - AA_LTBUF]
+    mov esi, 1
+    call buf_init
+    mov rdi, r12
+    lea rsi, [rbp - AA_LTBUF]
+    mov rdx, [rbp - AA_TOTAL]
+    call asm_exctab
+    mov rdi, [rbp - AA_LTBUF + Buf.data]
+    mov rsi, [rbp - AA_LTBUF + Buf.len]
+    call bytes_from_data
     mov [rbp - AA_SPEC + CodeSpec.exceptiontable], rax
+    lea rdi, [rbp - AA_LTBUF]
+    call buf_free
 
     mov rax, [r12 + CompUnit.filename]
     INCREF rax
@@ -1209,5 +1254,429 @@ DEF_FUNC asm_kinds_bytes, 16
     ret
 END_FUNC asm_kinds_bytes
 
+
+;; ============================================================================
+;; asm_exc_varint(Buf *out, uint32_t v, int msb)
+;;
+;; The exception table's varints are 6-bit chunks MOST significant first, with
+;; bit 6 as the continuation flag -- the opposite order from the line table's,
+;; which is least-significant first.  Two encodings in one code object; the
+;; only way to know which is which is to read the decoders.
+;;
+;; `msb` sets bit 7, which marks the first byte of an entry.
+;; exc_table_find_handler masks it off (`and eax, 0x3f`), so it is written for
+;; CPython's benefit rather than apython's -- but a decoder that does check it
+;; would reject a table without it.
+;; ============================================================================
+EV2_OUT   equ 8
+EV2_V     equ 16
+EV2_MSB   equ 24
+EV2_FRAME equ 24          ; + 2 pushes = 40
+DEF_FUNC asm_exc_varint, EV2_FRAME
+    push rbx
+    push r12
+    mov rbx, rdi
+    mov r12, rsi
+    mov [rbp - EV2_MSB], rdx
+
+    mov ecx, 24
+.find_top:
+    cmp ecx, 0
+    je .emit_last
+    mov rax, r12
+    mov r8, rcx
+    push rcx
+    mov ecx, r8d
+    shr rax, cl
+    pop rcx
+    test rax, rax
+    jnz .emit_chunks
+    sub ecx, 6
+    jmp .find_top
+
+.emit_chunks:
+    ; ecx is the shift of the highest non-zero chunk; walk down from there.
+    mov r8, rcx
+.chunk_loop:
+    mov rax, r12
+    mov rcx, r8
+    shr rax, cl
+    and eax, 0x3f
+    or eax, 0x40                        ; more chunks follow
+    or rax, [rbp - EV2_MSB]
+    mov qword [rbp - EV2_MSB], 0        ; only the first byte carries it
+    push r8
+    mov rdi, rbx
+    mov rsi, rax
+    call buf_push_u8
+    pop r8
+    sub r8, 6
+    cmp r8, 0
+    jg .chunk_loop
+.emit_last:
+    mov rax, r12
+    and eax, 0x3f
+    or rax, [rbp - EV2_MSB]
+    mov rdi, rbx
+    mov rsi, rax
+    call buf_push_u8
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC asm_exc_varint
+
+;; ============================================================================
+;; asm_exctab(CompUnit *u, Buf *out, uint64_t total)
+;;
+;; Every instruction carries the innermost handler covering it, so the ranges
+;; are just the maximal runs of one stamp.  They come out ascending and
+;; disjoint for free, which is what exc_table_find_handler needs: it scans
+;; linearly and returns the FIRST entry containing the offset, so an overlap
+;; would silently select the wrong handler.
+;; ============================================================================
+AX_UNIT  equ 8
+AX_OUT   equ 16
+AX_TOTAL equ 24
+AX_I     equ 32
+AX_J     equ 40
+AX_N     equ 48
+AX_H     equ 56
+AX_START equ 64
+AX_FRAME equ 72          ; + 3 pushes = 96
+DEF_FUNC asm_exctab, AX_FRAME
+%ifdef COMP_DEBUG_HANDLERS
+%endif
+    push rbx
+    push r12
+    push r13
+    mov rbx, rdi
+    mov [rbp - AX_OUT], rsi
+    mov [rbp - AX_TOTAL], rdx
+    mov rax, [rbx + CompUnit.instrs + Buf.len]
+    mov [rbp - AX_N], rax
+    mov qword [rbp - AX_I], 0
+
+.scan:
+    mov rax, [rbp - AX_I]
+    cmp rax, [rbp - AX_N]
+    jae .done
+    mov rdx, [rbx + CompUnit.instrs + Buf.data]
+    mov rcx, rax
+    shl rcx, INSTR_SHIFT
+    movzx r12d, word [rdx + rcx + Instr.handler]
+    test r12d, r12d
+    jz .next_unprotected
+    mov [rbp - AX_H], r12
+    mov ecx, [rdx + rcx + Instr.offset]
+    mov [rbp - AX_START], rcx
+
+    ; Extend while the stamp is unchanged.
+    mov rax, [rbp - AX_I]
+    mov [rbp - AX_J], rax
+.extend:
+    mov rax, [rbp - AX_J]
+    inc rax
+    cmp rax, [rbp - AX_N]
+    jae .emit
+    mov rdx, [rbx + CompUnit.instrs + Buf.data]
+    mov rcx, rax
+    shl rcx, INSTR_SHIFT
+    movzx ecx, word [rdx + rcx + Instr.handler]
+    cmp rcx, [rbp - AX_H]
+    jne .emit
+    mov [rbp - AX_J], rax
+    jmp .extend
+
+.emit:
+    ; The run ends after instruction AX_J, so its size runs to that
+    ; instruction's offset plus its own length.
+    mov rdi, rbx
+    mov rsi, [rbp - AX_J]
+    call asm_isize
+    mov rdx, [rbx + CompUnit.instrs + Buf.data]
+    mov rcx, [rbp - AX_J]
+    shl rcx, INSTR_SHIFT
+    mov ecx, [rdx + rcx + Instr.offset]
+    add rax, rcx
+    sub rax, [rbp - AX_START]
+    mov r13, rax                        ; the size, in code units
+    test r13, r13
+    jz .after
+
+    ; The handler this run belongs to.
+    mov rax, [rbp - AX_H]
+    dec rax                             ; the stamp is biased by one
+    imul rax, rax, Handler_size
+    add rax, [rbx + CompUnit.handlers + Buf.data]
+    mov r12, rax
+    cmp dword [r12 + Handler.depth], -1
+    je .after                           ; unreachable protected code
+
+    mov rdi, [rbp - AX_OUT]
+    mov rsi, [rbp - AX_START]
+    mov edx, 0x80                       ; the entry-start marker
+    call asm_exc_varint
+    mov rdi, [rbp - AX_OUT]
+    mov rsi, r13
+    xor edx, edx
+    call asm_exc_varint
+
+    ; The target, resolved through the label table.
+    mov rax, [rbx + CompUnit.labels + Buf.data]
+    mov ecx, [r12 + Handler.target]
+    mov ecx, [rax + rcx*4]
+    cmp rcx, [rbx + CompUnit.instrs + Buf.len]
+    jb .target_bound
+    mov rsi, [rbp - AX_TOTAL]
+    jmp .have_target
+.target_bound:
+    mov rax, [rbx + CompUnit.instrs + Buf.data]
+    mov rdx, rcx
+    shl rdx, INSTR_SHIFT
+    mov esi, [rax + rdx + Instr.offset]
+.have_target:
+    mov rdi, [rbp - AX_OUT]
+    xor edx, edx
+    call asm_exc_varint
+
+    ; depth_lasti packs both into one value.
+    mov eax, [r12 + Handler.depth]
+    shl eax, 1
+    or eax, [r12 + Handler.lasti]
+    mov rdi, [rbp - AX_OUT]
+    mov rsi, rax
+    xor edx, edx
+    call asm_exc_varint
+
+.after:
+    mov rax, [rbp - AX_J]
+    inc rax
+    mov [rbp - AX_I], rax
+    jmp .scan
+.next_unprotected:
+    inc qword [rbp - AX_I]
+    jmp .scan
+.done:
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC asm_exctab
+
+
+;; ============================================================================
+;; asm_region_depth(CompUnit *u, uint64_t h, int32_t *depths)
+;;   -> rax = the depth where the region was opened, or -1 if unreached
+;;
+;; The unwinder truncates the value stack to this depth and then pushes the
+;; exception, so it is the count of items belonging to enclosing constructs
+;; that have to survive.  A region therefore has to START at the depth its body
+;; runs at -- which is why the `with` emitter opens its region after the
+;; enter-result has been consumed rather than before.
+;;
+;; Taking the minimum over the region instead looks tempting and is wrong: an
+;; except clause ends with POP_EXCEPT, which legitimately drops below the level
+;; the handler needs restored.
+;; ============================================================================
+DEF_FUNC_BARE asm_region_depth
+    dec rsi                             ; the stamp is biased by one
+    mov rax, [rdi + CompUnit.handlers + Buf.data]
+    imul rsi, rsi, Handler_size
+    mov r8d, [rax + rsi + Handler.open]
+    cmp r8, [rdi + CompUnit.instrs + Buf.len]
+    jae .none
+    ; movsxd, not mov: the sentinel is -1 as a signed 32-bit value, and a
+    ; zero-extending load turns it into 0x00000000FFFFFFFF, which no longer
+    ; compares equal to -1.  The handler then took a garbage depth and the
+    ; depth worklist churned on it forever.
+    movsxd rax, dword [rdx + r8*4]
+    ret                                 ; -1 here means "not reached yet"
+.none:
+    mov rax, -1
+    ret
+END_FUNC asm_region_depth
+
+;; ============================================================================
+;; asm_seed_handlers(CompUnit *u, int32_t *depths, uint64_t *maxdepth)
+;;   -> rax = 1 if any handler's depth was newly determined
+;; ============================================================================
+SH_UNIT  equ 8
+SH_DEPTH equ 16
+SH_MAX   equ 24
+SH_I     equ 32
+SH_N     equ 40
+SH_ANY   equ 48
+SH_FRAME equ 56           ; + 3 pushes = 80
+DEF_FUNC asm_seed_handlers, SH_FRAME
+    push rbx
+    push r12
+    push r13
+    mov rbx, rdi
+    mov [rbp - SH_DEPTH], rsi
+    mov [rbp - SH_MAX], rdx
+    mov qword [rbp - SH_ANY], 0
+    mov rax, [rbx + CompUnit.handlers + Buf.len]
+    mov [rbp - SH_N], rax
+    mov qword [rbp - SH_I], 0
+.loop:
+    mov rax, [rbp - SH_I]
+    cmp rax, [rbp - SH_N]
+    jae .done
+    mov rdx, [rbx + CompUnit.handlers + Buf.data]
+    imul rax, rax, Handler_size
+    lea r12, [rdx + rax]
+    cmp dword [r12 + Handler.depth], -1
+    jne .next                           ; already known
+
+    mov rdi, rbx
+    mov rsi, [rbp - SH_I]
+    inc rsi                             ; the stamp is biased
+    mov rdx, [rbp - SH_DEPTH]
+    call asm_region_depth
+    cmp rax, -1
+    je .next                            ; the region is not reachable yet
+    mov [r12 + Handler.depth], eax
+    mov qword [rbp - SH_ANY], 1
+.next:
+    inc qword [rbp - SH_I]
+    jmp .loop
+.done:
+    mov rax, [rbp - SH_ANY]
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC asm_seed_handlers
+
+;; ============================================================================
+;; asm_push_handler_targets(CompUnit *u, int32_t *depths, uint64_t *work)
+;;   -> rax = how many entries were pushed
+;; ============================================================================
+PT_UNIT  equ 8
+PT_DEPTH equ 16
+PT_WORK  equ 24
+PT_I     equ 32
+PT_N     equ 40
+PT_CNT   equ 48
+PT_FRAME equ 56           ; + 3 pushes = 80
+DEF_FUNC asm_push_handler_targets, PT_FRAME
+    push rbx
+    push r12
+    push r13
+    mov rbx, rdi
+    mov [rbp - PT_DEPTH], rsi
+    mov r13, rdx
+    mov qword [rbp - PT_CNT], 0
+    mov rax, [rbx + CompUnit.handlers + Buf.len]
+    mov [rbp - PT_N], rax
+    mov qword [rbp - PT_I], 0
+.loop:
+    mov rax, [rbp - PT_I]
+    cmp rax, [rbp - PT_N]
+    jae .done
+    mov rdx, [rbx + CompUnit.handlers + Buf.data]
+    imul rax, rax, Handler_size
+    lea r12, [rdx + rax]
+    mov ecx, [r12 + Handler.depth]
+    cmp ecx, -1
+    je .next
+
+    ; The target is entered with the exception pushed, plus the offset when
+    ; lasti is set.
+    mov eax, ecx
+    add eax, [r12 + Handler.lasti]
+    inc eax
+    mov rdx, [rbx + CompUnit.labels + Buf.data]
+    mov ecx, [r12 + Handler.target]
+    mov ecx, [rdx + rcx*4]
+    ; Only push it if the target has not been visited at this depth already.
+    mov rdx, [rbp - PT_DEPTH]
+    cmp rcx, [rbx + CompUnit.instrs + Buf.len]
+    jae .next
+    cmp dword [rdx + rcx*4], -1
+    jne .next
+    shl rcx, 32
+    or rcx, rax
+    mov rdx, [rbp - PT_CNT]
+    mov [r13 + rdx*8], rcx
+    inc qword [rbp - PT_CNT]
+.next:
+    inc qword [rbp - PT_I]
+    jmp .loop
+.done:
+    mov rax, [rbp - PT_CNT]
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC asm_push_handler_targets
+
+
+;; ============================================================================
+;; asm_debug_handlers(CompUnit *u)
+;; Prints the handler table when APYTHON_DUMP_HANDLERS is set.  The exception
+;; table is the one part of the output that cannot be read off the instruction
+;; stream, so having the raw handlers to compare against is worth the dozen
+;; lines.
+;; ============================================================================
+extern getenv
+extern dis_num
+extern dis_puts
+DH_UNIT  equ 8
+DH_I     equ 16
+DH_FRAME equ 24           ; + 2 pushes = 40
+DEF_FUNC asm_debug_handlers, DH_FRAME
+    push rbx
+    push r12
+    mov rbx, rdi
+    lea rdi, [rel dh_env]
+    call getenv wrt ..plt
+    test rax, rax
+    jz .done
+    mov qword [rbp - DH_I], 0
+.loop:
+    mov rax, [rbp - DH_I]
+    cmp rax, [rbx + CompUnit.handlers + Buf.len]
+    jae .done
+    imul rax, rax, Handler_size
+    add rax, [rbx + CompUnit.handlers + Buf.data]
+    mov r12, rax
+    CSTRING rdi, "handler "
+    call dis_puts
+    mov rdi, [rbp - DH_I]
+    mov esi, 3
+    call dis_num
+    CSTRING rdi, " open "
+    call dis_puts
+    movsxd rdi, dword [r12 + Handler.open]
+    mov esi, 4
+    call dis_num
+    CSTRING rdi, " depth "
+    call dis_puts
+    movsxd rdi, dword [r12 + Handler.depth]
+    mov esi, 4
+    call dis_num
+    CSTRING rdi, " parent "
+    call dis_puts
+    movsxd rdi, dword [r12 + Handler.parent]
+    mov esi, 4
+    call dis_num
+    CSTRING rdi, `\n`
+    call dis_puts
+    inc qword [rbp - DH_I]
+    jmp .loop
+.done:
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC asm_debug_handlers
+
+section .rodata
+dh_env: db "APYTHON_DUMP_HANDLERS", 0
 
 ASM_INIT

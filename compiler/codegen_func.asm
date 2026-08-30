@@ -31,6 +31,7 @@ extern cg_name
 extern cg_unit_free
 extern cg_unit_init
 extern comp_error
+extern cg_unwind_finallys
 extern comp_intern
 extern obj_decref
 extern str_from_cstr_heap
@@ -964,6 +965,15 @@ DEF_FUNC cg_s_return, CSF_FRAME
     call cg_expr
     test eax, eax
     jz .fail
+    ; A return leaving a try/finally has to run the finally body first, and
+    ; the value it is returning is already on the stack while that happens.
+    mov rdi, rbx
+    mov rsi, r12
+    xor edx, edx
+    mov ecx, 1                          ; the return value is on top
+    call cg_unwind_finallys
+    test eax, eax
+    jz .fail
     mov rdi, r12
     mov esi, OP_RETURN_VALUE
     xor edx, edx
@@ -972,6 +982,13 @@ DEF_FUNC cg_s_return, CSF_FRAME
     mov eax, 1
     jmp .ret
 .bare:
+    mov rdi, rbx
+    mov rsi, r12
+    xor edx, edx
+    xor ecx, ecx                        ; nothing on the stack yet
+    call cg_unwind_finallys
+    test eax, eax
+    jz .fail
     mov rdi, r12
     call cg_return_none
     mov eax, 1
