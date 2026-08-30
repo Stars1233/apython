@@ -1232,6 +1232,8 @@ DEF_FUNC instance_traverse
     mov rcx, [rax + PyTypeObject.tp_dictoffset]
     test rcx, rcx
     jz .it_no_dict_hdr
+    cmp rcx, TP_DICT_AT_TAIL
+    je .it_no_dict_hdr          ; the dict is past the data, not in the header
     add rcx, 8
     jmp .it_have_hdr
 .it_no_dict_hdr:
@@ -1274,14 +1276,12 @@ DEF_FUNC instance_clear
     mov rbx, rdi
 
     ; XDECREF + NULL the instance dict, wherever this family keeps it
-    mov rax, [rbx + PyObject.ob_type]
-    mov rax, [rax + PyTypeObject.tp_dictoffset]
-    test rax, rax
-    jz .done
-    mov rdi, [rbx + rax]
-    mov qword [rbx + rax], 0
+    LOAD_INST_DICT rdi, rbx, .done
     test rdi, rdi
     jz .done
+    xor eax, eax
+    STORE_INST_DICT rbx, rax, rcx, .ic_decref
+.ic_decref:
     call obj_decref
 
 .done:

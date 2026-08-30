@@ -1302,7 +1302,7 @@ type_type:
     dq 0                      ; tp_base
     dq 0                      ; tp_dict
     dq 0                      ; tp_mro
-    dq 0                      ; tp_flags
+    dq TYPE_FLAG_METATYPE     ; tp_flags — instances of `type` are classes
     dq 0                      ; tp_bases
     dq 0                        ; tp_traverse
     dq 0                        ; tp_clear

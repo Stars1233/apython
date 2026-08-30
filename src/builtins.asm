@@ -8,6 +8,8 @@
 %include "builtins.inc"
 
 extern dict_new
+extern dunder_call_3
+extern dunder_lookup
 extern dict_get
 extern dict_set
 extern str_from_cstr
@@ -1479,8 +1481,10 @@ global type_method_new
 DEF_FUNC type_method_new
     push rbx
     push r12
+    ; type.__new__(mcls, name, bases, ns, **kwds): the keywords are for
+    ; __init_subclass__ and are not ours to reject.
     cmp rsi, 4
-    jne .tmn_error
+    jl .tmn_error
     mov rbx, rdi                    ; args
     mov r12, [rdi]                  ; mcls
 
@@ -1498,6 +1502,8 @@ DEF_FUNC type_method_new
     mov rsi, [rbx + 16]
     mov rdx, [rbx + 24]
     call type_from_parts
+    test rax, rax
+    jz .tmn_failed                  ; a __set_name__ raised, and it is pending
 
     ; The metatype is whatever __new__ was handed, not the default.
     mov [rax + PyObject.ob_type], r12
@@ -1508,11 +1514,168 @@ DEF_FUNC type_method_new
     V_PACK rax, rdx
     ret
 
+.tmn_failed:
+    xor eax, eax
+    xor edx, edx
+    pop r12
+    pop rbx
+    leave
+    ret
+
 .tmn_error:
     lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "type.__new__() takes exactly 3 arguments"
+    CSTRING rsi, "type.__new__() takes at least 3 arguments"
     call raise_exception
 END_FUNC type_method_new
+
+
+;; ============================================================================
+;; type_apply_set_name(PyTypeObject *cls, PyDictObject *ns)
+;;
+;; Call __set_name__(owner, name) on every value in the class body that defines
+;; one, once the class exists.  It is the hook a descriptor uses to learn what
+;; it was assigned to, and enum is built on it: each member starts as a
+;; _proto_member and __set_name__ is what replaces it with the real member.
+;;
+;; The names are snapshotted first, because a __set_name__ is entitled to
+;; setattr on the owner -- which is this very dict, and rehashing it under the
+;; walk would lose entries.
+;;
+;; Returns 0 when one of them raised.  Returning the class anyway would leave
+;; the exception pending with nothing to attach it to, and the next opcode to
+;; look at a NULL would be the one that crashed.
+;; ============================================================================
+TSN_CLS   equ 8
+TSN_NS    equ 16
+TSN_KEYS  equ 24
+TSN_I     equ 32
+TSN_N     equ 40
+TSN_NAME  equ 48
+TSN_FRAME equ 56          ; + 3 pushes = 80
+DEF_FUNC type_apply_set_name, TSN_FRAME
+    push rbx
+    push r12
+    push r13
+    mov [rbp - TSN_CLS], rdi
+    mov [rbp - TSN_NS], rsi
+    test rsi, rsi
+    jz .done
+
+    ; --- snapshot the keys ---
+    mov r12, [rsi + PyDictObject.capacity]
+    mov r13, [rsi + PyDictObject.entries]
+    xor ebx, ebx
+    xor ecx, ecx
+.count:
+    cmp rcx, r12
+    jae .counted
+    imul rax, rcx, DICT_ENTRY_SIZE
+    cmp qword [r13 + rax + DictEntry.key], 0
+    je .count_next
+    inc rbx
+.count_next:
+    inc rcx
+    jmp .count
+.counted:
+    test rbx, rbx
+    jz .done
+    mov [rbp - TSN_N], rbx
+    mov rdi, rbx
+    call tuple_new
+    test rax, rax
+    jz .done
+    mov [rbp - TSN_KEYS], rax
+    mov rdx, [rax + PyTupleObject.ob_item]
+    mov rsi, [rbp - TSN_NS]
+    mov r12, [rsi + PyDictObject.capacity]
+    mov r13, [rsi + PyDictObject.entries]
+    xor ebx, ebx
+    xor ecx, ecx
+.fill:
+    cmp rcx, r12
+    jae .filled
+    imul rax, rcx, DICT_ENTRY_SIZE
+    mov rdi, [r13 + rax + DictEntry.key]
+    test rdi, rdi
+    jz .fill_next
+    INCREF_V rdi, r8
+    mov [rdx + rbx*8], rdi
+    inc rbx
+.fill_next:
+    inc rcx
+    jmp .fill
+.filled:
+
+    ; --- call each value's __set_name__, if its TYPE defines one ---
+    mov qword [rbp - TSN_I], 0
+.loop:
+    mov rax, [rbp - TSN_I]
+    cmp rax, [rbp - TSN_N]
+    jae .release
+    mov rcx, [rbp - TSN_KEYS]
+    mov rcx, [rcx + PyTupleObject.ob_item]
+    mov rcx, [rcx + rax*8]
+    mov [rbp - TSN_NAME], rcx
+
+    mov rdi, [rbp - TSN_NS]
+    mov rsi, rcx
+    call dict_get
+    V_UNPACK rax, rdx
+    test edx, edx
+    jz .next                            ; deleted while we walked
+    ; The classification is the TAG's to make: after V_UNPACK rax holds a
+    ; payload, and testing a payload as if it were a Value calls a small int a
+    ; pointer.
+    cmp edx, TAG_PTR
+    jne .next
+    test rax, rax
+    jz .next
+    mov rbx, rax
+
+    ; Looked up on the type, not the instance: an instance attribute called
+    ; __set_name__ is not the hook.
+    mov rdi, [rbx + PyObject.ob_type]
+    lea rsi, [rel tsn_name]
+    call dunder_lookup
+    V_UNPACK rax, rdx
+    test edx, edx
+    jz .next
+
+    mov rdi, rbx                        ; self = the value
+    mov rsi, [rbp - TSN_CLS]            ; owner
+    mov rdx, [rbp - TSN_NAME]           ; name
+    lea rcx, [rel tsn_name]
+    mov r8d, TAG_PTR
+    call dunder_call_3
+    V_UNPACK rax, rdx
+    test edx, edx
+    jz .raised
+    mov rdi, rax
+    DECREF_V rdi, rsi
+.next:
+    inc qword [rbp - TSN_I]
+    jmp .loop
+
+.release:
+    mov rdi, [rbp - TSN_KEYS]
+    call obj_decref
+.done:
+    mov eax, 1
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+.raised:
+    mov rdi, [rbp - TSN_KEYS]
+    call obj_decref
+    xor eax, eax
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC type_apply_set_name
 
 ;; ============================================================================
 ;; type_from_parts(rdi = name str, rsi = bases tuple or NULL, rdx = namespace dict)
@@ -1595,8 +1758,9 @@ TFP_BASES equ 56            ; the bases tuple, or NULL
     ; PyInstanceObject, which is where those constants came from.
     ;
     ; A variable-size base such as str keeps its data inline, so there is no
-    ; fixed offset past the header for a dict; those get none, as bytes and
-    ; __slots__ classes already do.
+    ; fixed offset past the header for a dict.  It gets one at the tail
+    ; instead, which is what TP_DICT_AT_TAIL means; bytes and __slots__ classes
+    ; still get none.
     mov qword [r12 + PyTypeObject.tp_basicsize], PyInstanceObject_size
     mov qword [r12 + PyTypeObject.tp_dictoffset], PyInstanceObject.inst_dict
     mov rax, [rbp - TFP_BASE]               ; base class
@@ -1631,7 +1795,7 @@ TFP_BASES equ 56            ; the bases tuple, or NULL
     jmp .bc_layout_done
 
 .bc_layout_no_dict:
-    mov qword [r12 + PyTypeObject.tp_dictoffset], 0
+    mov qword [r12 + PyTypeObject.tp_dictoffset], TP_DICT_AT_TAIL
     mov rcx, [rax + PyTypeObject.tp_basicsize]
     mov [r12 + PyTypeObject.tp_basicsize], rcx
 
@@ -1903,8 +2067,17 @@ TFP_BASES equ 56            ; the bases tuple, or NULL
     ; can see every base, not just the first.
     mov rax, [rbp - TFP_BASES]
     test rax, rax
-    jnz .bc_have_bases_tuple
-    ; No explicit bases: the linearization is (C, object).
+    jz .bc_no_bases
+    cmp qword [rax + PyTupleObject.ob_size], 0
+    jne .bc_have_bases_tuple
+.bc_no_bases:
+    ; No explicit bases: the linearization is (C, object).  An *empty* tuple
+    ; means the same thing as none at all and reaches here through
+    ; `class C(metaclass=M)` and `type.__new__(M, n, (), d)`, which the NULL
+    ; test alone missed -- those classes got an MRO of just [C], so they were
+    ; not even instances of object.  It stays invisible until a merge needs
+    ; the object at the end: enum's `StrEnum(str, ReprEnum)` linearised to
+    ; [StrEnum, str, object, ReprEnum, Enum].
     mov edi, 1
     extern tuple_new
     call tuple_new
@@ -1977,6 +2150,9 @@ TFP_BASES equ 56            ; the bases tuple, or NULL
     extern type_call
     lea rax, [rel type_call]
     mov [r12 + PyTypeObject.tp_call], rax
+    ; And say so in a bit, so that "is this object a class?" is one test
+    ; rather than a comparison against the two metatypes we happen to ship.
+    or qword [r12 + PyTypeObject.tp_flags], TYPE_FLAG_METATYPE
 .bc_not_metatype:
 
     ; If base is an exception type, inherit exception-compatible methods
@@ -2161,10 +2337,33 @@ TFP_BASES equ 56            ; the bases tuple, or NULL
     mov rdi, r12
     call gc_track
 
+    ; Now that the class exists, tell every descriptor in it what it is called.
+    mov rdi, r12
+    mov rsi, r15
+    call type_apply_set_name
+    test eax, eax
+    jz .tfp_set_name_failed
+
     ; Return the new type object - clear pending flag first
     mov qword [rel build_class_pending], 0
     mov rax, r12
 
+    add rsp, 24
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.tfp_set_name_failed:
+    ; A __set_name__ raised.  The class is discarded and the exception carried
+    ; out as a NULL return, which is what every builtin does.
+    mov qword [rel build_class_pending], 0
+    mov rdi, r12
+    call obj_decref
+    xor eax, eax
     add rsp, 24
     pop r15
     pop r14
@@ -2757,6 +2956,8 @@ BCL_OKWV  equ 72
     call obj_decref         ; type_from_parts took its own reference
 .bc_bases_released:
     pop rax
+    test rax, rax
+    jz .bc_have_class       ; NULL, with the exception already pending
 
 .bc_have_class:
     add rsp, 64        ; must match the sub above: the epilogue unwinds
@@ -2805,6 +3006,7 @@ END_FUNC builtin___build_class__
 
 section .rodata
 bc_prepare_name: db "__prepare__", 0
+tsn_name: db "__set_name__", 0
 bc_init_name: db "__init__", 0
 bc_module_name: db "__module__", 0
 bc_dunder_name_name: db "__name__", 0

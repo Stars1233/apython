@@ -1341,7 +1341,7 @@ exc_metatype:
     dq 0                    ; tp_base
     dq 0                    ; tp_dict
     dq 0                    ; tp_mro
-    dq 0                    ; tp_flags (no HAVE_GC — exc types are static, not gc_alloc'd)
+    dq TYPE_FLAG_METATYPE   ; tp_flags (no HAVE_GC — exc types are static, not gc_alloc'd)
     dq 0                    ; tp_bases
     dq 0                    ; tp_traverse
     dq 0                    ; tp_clear

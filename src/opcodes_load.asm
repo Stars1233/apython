@@ -709,14 +709,9 @@ DEF_FUNC op_load_attr, LA_FRAME
     jne .la_method_push            ; non-ptr obj can't be heaptype
     mov rdi, [rbp - LA_OBJ]
     mov rax, [rdi + PyObject.ob_type]
-    ; If obj IS a type (ob_type == type_type or user_type_metatype),
-    ; attribute is unbound → [NULL, func]
-    lea rcx, [rel type_type]
-    cmp rax, rcx
-    je .la_not_method              ; class attribute → [NULL, func]
-    lea rcx, [rel user_type_metatype]
-    cmp rax, rcx
-    je .la_not_method              ; heaptype class attribute → [NULL, func]
+    ; If obj IS a type, the attribute is unbound → [NULL, func]
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_METATYPE
+    jnz .la_not_method             ; class attribute → [NULL, func]
     test dword [rax + PyTypeObject.tp_flags], TYPE_FLAG_HEAPTYPE
     jnz .la_not_method             ; heaptype instance attr → [NULL, func]
     ; A module's tp_getattr answers out of the module's own namespace, not out
@@ -886,11 +881,13 @@ DEF_FUNC op_load_attr, LA_FRAME
     mov [rbp - LA_ATTR], rax
 
     ; Determine class: if obj is a type, class=obj. Else class=type(obj).
+    ; "obj is a type" is a flag on its metatype, not a comparison against the
+    ; two we ship: a class built by a metaclass of its own is still a class,
+    ; and asking the narrow question bound the metaclass instead.
     mov rdi, [rbp - LA_OBJ]    ; obj
     mov rax, [rdi + PyObject.ob_type]
-    lea rcx, [rel user_type_metatype]
-    cmp rax, rcx
-    je .la_cm_obj_is_type
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_METATYPE
+    jnz .la_cm_obj_is_type
 
     ; obj is an instance -> class = ob_type
     mov [rbp - LA_CLASS], rax  ; save class
@@ -1282,9 +1279,8 @@ DEF_FUNC op_load_super_attr, LSA_FRAME
     ; class = self when self is already a type, else type(self)
     mov rdi, [rbp - LSA_SELF]
     mov rax, [rdi + PyObject.ob_type]
-    lea rcx, [rel user_type_metatype]
-    cmp rax, rcx
-    je .lsa_cm_self_is_type
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_METATYPE
+    jnz .lsa_cm_self_is_type
     mov [rbp - LSA_BIND], rax
     mov rdi, rax
     call obj_incref
@@ -1549,12 +1545,8 @@ DEF_FUNC obj_getattr_opt, GA_FRAME
     mov rbx, [rax + PyClassMethodObject.cm_callable]
     mov rdi, [rbp - GA_OBJ]
     mov rcx, [rdi + PyObject.ob_type]
-    lea rdx, [rel type_type]
-    cmp rcx, rdx
-    je .ga_class_self
-    lea rdx, [rel user_type_metatype]
-    cmp rcx, rdx
-    je .ga_class_self
+    test qword [rcx + PyTypeObject.tp_flags], TYPE_FLAG_METATYPE
+    jnz .ga_class_self
     mov rdi, [rbp - GA_TYPE]
 .ga_class_self:
     mov [rbp - GA_CLASS], rdi
@@ -1602,12 +1594,8 @@ DEF_FUNC obj_getattr_opt, GA_FRAME
     cmp qword [rcx + PyTypeObject.tp_call], 0
     je .ga_done
     ; A type is callable but is not a method of its instance.
-    lea rdx, [rel type_type]
-    cmp rcx, rdx
-    je .ga_done
-    lea rdx, [rel user_type_metatype]
-    cmp rcx, rdx
-    je .ga_done
+    test qword [rcx + PyTypeObject.tp_flags], TYPE_FLAG_METATYPE
+    jnz .ga_done
     mov rdi, rax
     mov rsi, [rbp - GA_OBJ]
     call method_new

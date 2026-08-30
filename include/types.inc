@@ -113,6 +113,11 @@ TYPE_FLAG_TUPLE_SUBCLASS equ 0x0800
 TYPE_FLAG_DICT_SUBCLASS equ 0x1000
 TYPE_FLAG_SET_SUBCLASS equ 0x4000   ; 0x2000 is TYPE_FLAG_HAS_SLOTS
 TYPE_FLAG_HAS_SLOTS     equ 0x2000
+; Instances of this type are classes.  "Is this object a class?" used to be
+; asked as `ob_type is user_type_metatype`, which is false for a class built by
+; a metaclass of its own -- so a classmethod reached through such a class bound
+; the metaclass instead of the class.
+TYPE_FLAG_METATYPE      equ 0x8000
 
 ; Comparison opcodes (used by tp_richcompare)
 PY_LT equ 0
