@@ -232,60 +232,9 @@ DEF_FUNC main
     test eax, eax
     jnz .system_exit
 
-    ; Print exception to stderr: "ExceptionType: message\n"
-    ; Get type name
-    mov rax, [rdi + PyObject.ob_type]
-    mov rsi, [rax + PyTypeObject.tp_name]
-    ; strlen of type name
-    push rdi
-    mov rdi, rsi
-    xor ecx, ecx
-.strlen_type:
-    cmp byte [rdi + rcx], 0
-    je .strlen_type_done
-    inc ecx
-    jmp .strlen_type
-.strlen_type_done:
-    mov edx, ecx
-    push rsi
-    push rdx
-    mov edi, 2                  ; stderr
-    extern sys_write
-    call sys_write
-    pop rdx
-    pop rsi
-    pop rdi
-
-    ; Check for message (must be a real object)
-    mov rax, [rdi + PyExceptionObject.exc_value]
-    V_TEST_PTR rax, rcx
-    ja .print_newline
-
-    ; Print ": "
-    push rax
-    mov edi, 2
-    lea rsi, [rel colon_space]
-    mov edx, 2
-    call sys_write
-    pop rax
-
-    ; Print message (must be a string)
-    mov rcx, [rax + PyObject.ob_type]
-    extern str_type
-    lea rdx, [rel str_type]
-    cmp rcx, rdx
-    jne .print_newline
-
-    lea rsi, [rax + PyStrObject.data]
-    mov rdx, [rax + PyStrObject.ob_size]
-    mov edi, 2
-    call sys_write
-
-.print_newline:
-    mov edi, 2
-    lea rsi, [rel newline_char]
-    mov edx, 1
-    call sys_write
+    ; Print the traceback and the exception, CPython's shape.
+    extern traceback_print
+    call traceback_print
 
     ; DECREF the exception object before exiting
     mov rdi, [rel current_exception]

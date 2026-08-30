@@ -118,7 +118,7 @@ Defined in `include/*.inc`. All objects start with `PyObject` (ob_refcnt +0, ob_
 - **PyFrame** (frame.inc): code +8, globals +16, locals +32, stack_ptr +48, stack_base +56, localsplus +80 (variable-size Value[])
 - **PyIntObject** (object.inc): mpz +16 (only initialised on overflow), ival +32, compact +40 (1 = the ival is live)
 - **DictEntry** (object.inc, 24 bytes): hash +0, key +8, value +16 — occupied ⇔ `key != 0`; empty ⇔ `key == 0 && hash == 0`; tombstone ⇔ `key == 0 && hash == -1`
-- **PyCodeObject** (object.inc): co_consts, co_names, co_code starts at +112
+- **PyCodeObject** (object.inc): co_consts, co_names, co_firstlineno +112, co_linetable +120, co_code starts at +128
 
 ## Opcode Handler Pattern
 

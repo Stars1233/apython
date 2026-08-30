@@ -204,7 +204,10 @@ struc PyCodeObject
     .co_exceptiontable: resq 1  ; +96: ptr to bytes
     .co_code_len:       resd 1  ; +104: bytecode length in bytes
     .co_posonlyargcount: resd 1 ; +108: positional-only arg count
-    .co_code:                   ; +112: bytecode (variable)
+    .co_firstlineno:    resd 1  ; +112: line of the `def`/module start
+    .co_pad0:           resd 1  ; +116: (alignment)
+    .co_linetable:      resq 1  ; +120: ptr to bytes (PEP 626 table) or NULL
+    .co_code:                   ; +128: bytecode (variable)
 endstruc
 
 ; Module object

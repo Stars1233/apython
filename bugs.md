@@ -232,6 +232,13 @@ the Makefile and `check-cpython` enforces all 64 files.
   MemoryError.  `ap_malloc` exits fatally rather than returning NULL, so the
   two cases cannot be told apart.
 - The container repr cycle stack is 64 deep; CPython's limit is far higher.
+- Traceback rendering has no caret line.  CPython underlines the failing
+  expression (`^^^^^^^^`, and `~~^~~` for binary operators and subscripts)
+  using the column fields of the location table and, for the anchor forms, a
+  tokenizer over the source segment.  Everything else in the report --
+  frames, line numbers, source lines, the repeated-frame elision, the
+  __cause__ / __context__ preamble -- matches; only the caret line is
+  missing.
 - A `str` subclass has no instance `__dict__`.  A str keeps its characters
   inline, so there is no fixed offset past the header to put one at; CPython
   uses a negative `tp_dictoffset` scaled by `tp_itemsize`.  These behave like

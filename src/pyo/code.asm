@@ -50,6 +50,13 @@ DEF_FUNC code_dealloc
     call obj_decref
 .skip_kinds:
 
+    ; DECREF co_linetable
+    mov rdi, [rbx + PyCodeObject.co_linetable]
+    test rdi, rdi
+    jz .skip_linetable
+    call obj_decref
+.skip_linetable:
+
     ; DECREF co_filename
     mov rdi, [rbx + PyCodeObject.co_filename]
     test rdi, rdi

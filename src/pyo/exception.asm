@@ -957,6 +957,8 @@ DEF_FUNC traceback_new
     mov [rax + PyTracebackObject.ob_type], rcx
     mov qword [rax + PyTracebackObject.tb_next], 0
     mov qword [rax + PyTracebackObject.tb_lineno], 0
+    mov qword [rax + PyTracebackObject.tb_code], 0
+    mov qword [rax + PyTracebackObject.tb_lasti], 0
     leave
     ret
 END_FUNC traceback_new
@@ -966,14 +968,29 @@ END_FUNC traceback_new
 global traceback_dealloc
 DEF_FUNC traceback_dealloc
     push rbx
+    push r12
     mov rbx, rdi
-    mov rdi, [rbx + PyTracebackObject.tb_next]
+.td_node:
+    ; Iterative, not recursive: a traceback chain is as deep as the call
+    ; stack was, and freeing it recursively would overflow on exactly the
+    ; deep-recursion case that produced it.
+    mov rdi, [rbx + PyTracebackObject.tb_code]
     test rdi, rdi
-    jz .no_next
+    jz .td_no_code
+    mov qword [rbx + PyTracebackObject.tb_code], 0
     call obj_decref
-.no_next:
+.td_no_code:
+    mov r12, [rbx + PyTracebackObject.tb_next]
     mov rdi, rbx
     call ap_free
+    test r12, r12
+    jz .td_done
+    dec qword [r12 + PyTracebackObject.ob_refcnt]
+    jnz .td_done                   ; still referenced elsewhere
+    mov rbx, r12
+    jmp .td_node
+.td_done:
+    pop r12
     pop rbx
     leave
     ret

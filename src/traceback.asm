@@ -1,0 +1,643 @@
+; ============================================================================
+; traceback.asm -- source line lookup and traceback rendering
+;
+; Python 3.12 stores locations in co_linetable using the PEP 626 format: each
+; entry begins with a byte 0x80 | (code << 3) | (length - 1), where `length`
+; is how many code units the entry covers and `code` selects what follows.
+; Only the line delta matters here; the column fields are decoded far enough
+; to be skipped.
+;
+;   code 0-9   short form, one trailing byte, line delta 0
+;   code 10-12 one-line form, two trailing bytes, line delta = code - 10
+;   code 13    no columns, one signed varint line delta
+;   code 14    long form, signed varint line delta then three varints
+;   code 15    no location at all
+;
+; The renderer walks the chain a raise builds -- newest entry at the head, so
+; tb_next order is outermost first, "most recent call last" -- and prints what
+; CPython's default excepthook prints, including the __cause__ / __context__
+; preamble.
+; ============================================================================
+
+%include "include/object.inc"
+%include "include/types.inc"
+%include "include/errcodes.inc"
+%include "include/macros.inc"
+%include "include/value.inc"
+
+extern sys_write
+extern sys_open
+extern sys_read
+extern sys_close
+extern obj_str
+extern obj_decref
+extern str_type
+extern traceback_type
+extern ap_malloc
+
+TB_CHUNK equ 4096
+TB_LINE  equ 1024
+TB_PATH  equ 4096
+
+section .text
+
+; ----------------------------------------------------------------------------
+; tb_read_varint -- reads a PEP 626 varint from [r8], advancing r8.
+; Result in ecx.  rax, rdx, rsi, r9, r10 are preserved; r11 is clobbered.
+; ----------------------------------------------------------------------------
+DEF_FUNC_BARE tb_read_varint
+    push rax
+    push rdx
+    xor eax, eax                    ; accumulated value
+    xor edx, edx                    ; shift
+.rv_loop:
+    movzx r11d, byte [r8]
+    inc r8
+    and r11d, 63
+    push rcx
+    mov ecx, edx
+    shl r11, cl
+    pop rcx
+    or rax, r11
+    add edx, 6
+    movzx r11d, byte [r8 - 1]
+    test r11d, 64
+    jnz .rv_loop
+    mov ecx, eax
+    pop rdx
+    pop rax
+    ret
+END_FUNC tb_read_varint
+
+; tb_read_svarint -- zig-zag signed varint; result in ecx.
+DEF_FUNC_BARE tb_read_svarint
+    call tb_read_varint
+    mov r11d, ecx
+    shr ecx, 1
+    test r11d, 1
+    jz .sv_done
+    neg ecx
+.sv_done:
+    ret
+END_FUNC tb_read_svarint
+
+; ----------------------------------------------------------------------------
+; code_addr2line(rdi = PyCodeObject*, rsi = instruction offset in code units)
+;   -> eax = line number, or 0 when the table does not cover the offset
+; ----------------------------------------------------------------------------
+global code_addr2line
+DEF_FUNC_BARE code_addr2line
+    mov r8, [rdi + PyCodeObject.co_linetable]
+    test r8, r8
+    jz .a2l_none
+    mov eax, [rdi + PyCodeObject.co_firstlineno]    ; running line
+    mov r9, [r8 + PyBytesObject.ob_size]
+    lea r8, [r8 + PyBytesObject.data]               ; cursor
+    add r9, r8                                      ; end
+    xor r10d, r10d                                  ; code-unit offset of entry
+
+.a2l_entry:
+    cmp r8, r9
+    jae .a2l_none
+    movzx ecx, byte [r8]
+    inc r8
+    test cl, 0x80
+    jz .a2l_none                                    ; desynchronised
+    mov edx, ecx
+    and edx, 7
+    inc edx                                         ; edx = length in units
+    shr ecx, 3
+    and ecx, 0x0F                                   ; ecx = code
+
+    cmp ecx, 15
+    je .a2l_check                                   ; no location, delta 0
+    cmp ecx, 14
+    je .a2l_long
+    cmp ecx, 13
+    je .a2l_nocol
+    cmp ecx, 10
+    jb .a2l_short
+    sub ecx, 10                                     ; one-line form
+    add eax, ecx
+    add r8, 2
+    jmp .a2l_check
+
+.a2l_short:
+    inc r8
+    jmp .a2l_check
+
+.a2l_nocol:
+    call tb_read_svarint
+    add eax, ecx
+    jmp .a2l_check
+
+.a2l_long:
+    call tb_read_svarint
+    push rcx                                        ; line delta
+    call tb_read_varint                             ; end line delta
+    call tb_read_varint                             ; start column + 1
+    call tb_read_varint                             ; end column + 1
+    pop rcx
+    add eax, ecx
+
+.a2l_check:
+    cmp rsi, r10
+    jb .a2l_advance
+    lea r11, [r10 + rdx]
+    cmp rsi, r11
+    jae .a2l_advance
+    ret                                             ; eax = line
+
+.a2l_advance:
+    add r10, rdx
+    jmp .a2l_entry
+
+.a2l_none:
+    xor eax, eax
+    ret
+END_FUNC code_addr2line
+
+; ----------------------------------------------------------------------------
+; traceback_here(rdi = exception, rsi = code object, rdx = lasti in code units)
+; Prepends a frame to the exception's traceback, as PyTraceBack_Here does.
+; ----------------------------------------------------------------------------
+TH_EXC   equ 8
+TH_CODE  equ 16
+TH_LASTI equ 24
+TH_TB    equ 32
+TH_FRAME equ 32
+global traceback_here
+DEF_FUNC traceback_here, TH_FRAME
+    mov [rbp - TH_EXC], rdi
+    mov [rbp - TH_CODE], rsi
+    mov [rbp - TH_LASTI], rdx
+
+    mov edi, PyTracebackObject_size
+    call ap_malloc
+    mov qword [rax + PyObject.ob_refcnt], 1
+    lea rcx, [rel traceback_type]
+    mov [rax + PyObject.ob_type], rcx
+    mov qword [rax + PyTracebackObject.tb_lineno], 0
+
+    mov rcx, [rbp - TH_EXC]
+    mov rdx, [rcx + PyExceptionObject.exc_tb]
+    mov [rax + PyTracebackObject.tb_next], rdx      ; adopts the old chain
+    mov rdx, [rbp - TH_CODE]
+    mov [rax + PyTracebackObject.tb_code], rdx
+    mov rdx, [rbp - TH_LASTI]
+    mov [rax + PyTracebackObject.tb_lasti], rdx
+    mov [rcx + PyExceptionObject.exc_tb], rax
+    mov [rbp - TH_TB], rax
+
+    mov rdi, [rbp - TH_CODE]
+    test rdi, rdi
+    jz .th_done
+    ; The code object must outlive the frame it came from.
+    inc qword [rdi + PyObject.ob_refcnt]
+    mov rsi, [rbp - TH_LASTI]
+    call code_addr2line
+    movsx rax, eax
+    mov rcx, [rbp - TH_TB]
+    mov [rcx + PyTracebackObject.tb_lineno], rax
+.th_done:
+    leave
+    ret
+END_FUNC traceback_here
+
+; ----------------------------------------------------------------------------
+; tb_write(rdi = buf, rsi = len) -- stderr
+; ----------------------------------------------------------------------------
+DEF_FUNC_BARE tb_write
+    mov rdx, rsi
+    mov rsi, rdi
+    mov edi, 2
+    jmp sys_write
+END_FUNC tb_write
+
+; tb_write_cstr(rdi = NUL-terminated string)
+DEF_FUNC tb_write_cstr
+    push rbx
+    mov rbx, rdi
+    xor ecx, ecx
+.len:
+    cmp byte [rbx + rcx], 0
+    je .have
+    inc rcx
+    jmp .len
+.have:
+    mov rdi, rbx
+    mov rsi, rcx
+    call tb_write
+    pop rbx
+    leave
+    ret
+END_FUNC tb_write_cstr
+
+; tb_write_str(rdi = PyStrObject* or NULL) -- writes nothing for a non-str
+DEF_FUNC tb_write_str
+    test rdi, rdi
+    jz .ws_out
+    mov rax, [rdi + PyObject.ob_type]
+    lea rcx, [rel str_type]
+    cmp rax, rcx
+    jne .ws_out
+    mov rsi, [rdi + PyStrObject.ob_size]
+    add rdi, PyStrObject.data
+    call tb_write
+.ws_out:
+    leave
+    ret
+END_FUNC tb_write_str
+
+; tb_write_dec(rdi = signed value)
+TD_BUF   equ 32
+TD_FRAME equ 48
+DEF_FUNC tb_write_dec, TD_FRAME
+    mov rax, rdi
+    lea rcx, [rbp - TD_BUF]
+    add rcx, 24                     ; one past the digit area
+    mov r8, rcx
+    xor r9d, r9d
+    test rax, rax
+    jns .td_pos
+    mov r9d, 1
+    neg rax
+.td_pos:
+    mov r10, 10
+.td_loop:
+    xor edx, edx
+    div r10
+    add dl, '0'
+    dec rcx
+    mov [rcx], dl
+    test rax, rax
+    jnz .td_loop
+    test r9d, r9d
+    jz .td_out
+    dec rcx
+    mov byte [rcx], '-'
+.td_out:
+    mov rdi, rcx
+    mov rsi, r8
+    sub rsi, rcx
+    call tb_write
+    leave
+    ret
+END_FUNC tb_write_dec
+
+; ----------------------------------------------------------------------------
+; tb_write_source(rdi = filename str, rsi = line number)
+; Prints the source line stripped and indented four spaces.  A file that
+; cannot be opened simply produces nothing, which is what CPython does.
+; The file is scanned in chunks, so a large source costs no extra memory and
+; the frame stays small enough to use while unwinding.
+; ----------------------------------------------------------------------------
+TS_FD    equ 8
+TS_TGT   equ 16
+TS_CUR   equ 24
+TS_LEN   equ 32
+TS_PATH  equ 48 + TB_PATH
+TS_LBUF  equ TS_PATH + TB_LINE
+TS_CBUF  equ TS_LBUF + TB_CHUNK
+TS_FRAME equ TS_CBUF + 16
+DEF_FUNC tb_write_source, TS_FRAME
+    push rbx
+    push r12
+    push r13
+    mov [rbp - TS_TGT], rsi
+    mov qword [rbp - TS_CUR], 1
+    mov qword [rbp - TS_LEN], 0
+    mov qword [rbp - TS_FD], -1
+
+    test rsi, rsi
+    jle .ts_out
+    test rdi, rdi
+    jz .ts_out
+    mov rax, [rdi + PyObject.ob_type]
+    lea rcx, [rel str_type]
+    cmp rax, rcx
+    jne .ts_out
+    mov rdx, [rdi + PyStrObject.ob_size]
+    cmp rdx, TB_PATH - 1
+    jae .ts_out
+
+    ; Copy the filename into a NUL-terminated buffer for open(2)
+    lea rcx, [rbp - TS_PATH]
+    lea rsi, [rdi + PyStrObject.data]
+    xor eax, eax
+.ts_copy:
+    cmp rax, rdx
+    jge .ts_copied
+    mov r8b, [rsi + rax]
+    mov [rcx + rax], r8b
+    inc rax
+    jmp .ts_copy
+.ts_copied:
+    mov byte [rcx + rax], 0
+
+    lea rdi, [rbp - TS_PATH]
+    xor esi, esi                    ; O_RDONLY
+    xor edx, edx
+    call sys_open
+    test eax, eax
+    js .ts_out
+    movsx rax, eax
+    mov [rbp - TS_FD], rax
+
+.ts_read:
+    mov rdi, [rbp - TS_FD]
+    lea rsi, [rbp - TS_CBUF]
+    mov edx, TB_CHUNK
+    call sys_read
+    test rax, rax
+    jle .ts_flush
+    mov r12, rax                    ; bytes read
+    xor rbx, rbx                    ; index
+.ts_scan:
+    cmp rbx, r12
+    jge .ts_read
+    lea rax, [rbp - TS_CBUF]
+    movzx r13d, byte [rax + rbx]
+    inc rbx
+    cmp r13b, 10
+    je .ts_newline
+    mov rax, [rbp - TS_CUR]
+    cmp rax, [rbp - TS_TGT]
+    jne .ts_scan
+    mov rax, [rbp - TS_LEN]
+    cmp rax, TB_LINE - 1
+    jae .ts_scan
+    lea rcx, [rbp - TS_LBUF]
+    mov [rcx + rax], r13b
+    inc rax
+    mov [rbp - TS_LEN], rax
+    jmp .ts_scan
+.ts_newline:
+    mov rax, [rbp - TS_CUR]
+    cmp rax, [rbp - TS_TGT]
+    je .ts_flush
+    inc rax
+    mov [rbp - TS_CUR], rax
+    jmp .ts_scan
+
+.ts_flush:
+    mov rax, [rbp - TS_CUR]
+    cmp rax, [rbp - TS_TGT]
+    jne .ts_close
+    mov rdx, [rbp - TS_LEN]
+    test rdx, rdx
+    jz .ts_close
+    ; Strip leading whitespace, then trailing.
+    xor rcx, rcx
+.ts_lstrip:
+    cmp rcx, rdx
+    jge .ts_close
+    lea rax, [rbp - TS_LBUF]
+    mov r8b, [rax + rcx]
+    cmp r8b, ' '
+    je .ts_lnext
+    cmp r8b, 9
+    je .ts_lnext
+    cmp r8b, 13
+    je .ts_lnext
+    jmp .ts_lstripped
+.ts_lnext:
+    inc rcx
+    jmp .ts_lstrip
+.ts_lstripped:
+.ts_rstrip:
+    cmp rdx, rcx
+    jle .ts_close
+    lea rax, [rbp - TS_LBUF]
+    mov r8b, [rax + rdx - 1]
+    cmp r8b, ' '
+    je .ts_rnext
+    cmp r8b, 9
+    je .ts_rnext
+    cmp r8b, 13
+    je .ts_rnext
+    jmp .ts_emit
+.ts_rnext:
+    dec rdx
+    jmp .ts_rstrip
+.ts_emit:
+    push rcx
+    push rdx
+    CSTRING rdi, "    "
+    call tb_write_cstr
+    pop rdx
+    pop rcx
+    lea rdi, [rbp - TS_LBUF]
+    add rdi, rcx
+    mov rsi, rdx
+    sub rsi, rcx
+    call tb_write
+    CSTRING rdi, `\n`
+    call tb_write_cstr
+
+.ts_close:
+    mov rdi, [rbp - TS_FD]
+    cmp rdi, 0
+    jl .ts_out
+    call sys_close
+.ts_out:
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC tb_write_source
+
+; tb_print_repeated(rdi = run length) -- the elision line CPython prints
+DEF_FUNC tb_print_repeated
+    push rbx
+    lea rbx, [rdi - TB_RECURSIVE_CUTOFF]
+    CSTRING rdi, "  [Previous line repeated "
+    call tb_write_cstr
+    mov rdi, rbx
+    call tb_write_dec
+    CSTRING rdi, " more time"
+    call tb_write_cstr
+    cmp rbx, 1
+    je .pr_one
+    CSTRING rdi, "s"
+    call tb_write_cstr
+.pr_one:
+    CSTRING rdi, `]\n`
+    call tb_write_cstr
+    pop rbx
+    leave
+    ret
+END_FUNC tb_print_repeated
+
+; ----------------------------------------------------------------------------
+; traceback_print(rdi = exception)
+; Prints the CPython-shaped report for an uncaught exception, on stderr.
+; ----------------------------------------------------------------------------
+TP_EXC   equ 8
+TP_TB    equ 16
+TP_TMP   equ 24
+TP_LASTC equ 32          ; code object of the previous entry
+TP_LASTL equ 40          ; line number of the previous entry
+TP_CNT   equ 48          ; length of the current run of identical entries
+TP_FRAME equ 64
+TB_RECURSIVE_CUTOFF equ 3
+global traceback_print
+DEF_FUNC traceback_print, TP_FRAME
+    push rbx
+    test rdi, rdi
+    jz .tp_out
+    mov [rbp - TP_EXC], rdi
+
+    ; A __cause__ or __context__ is reported first, then the linking sentence.
+    mov rax, [rdi + PyExceptionObject.exc_cause]
+    test rax, rax
+    jnz .tp_cause
+    mov rax, [rdi + PyExceptionObject.exc_context]
+    test rax, rax
+    jz .tp_header
+    mov rdi, rax
+    call traceback_print
+    CSTRING rdi, `\nDuring handling of the above exception, another exception occurred:\n\n`
+    call tb_write_cstr
+    jmp .tp_header
+.tp_cause:
+    mov rdi, rax
+    call traceback_print
+    CSTRING rdi, `\nThe above exception was the direct cause of the following exception:\n\n`
+    call tb_write_cstr
+
+.tp_header:
+    mov rdi, [rbp - TP_EXC]
+    mov rax, [rdi + PyExceptionObject.exc_tb]
+    test rax, rax
+    jz .tp_body
+    mov [rbp - TP_TB], rax
+    mov qword [rbp - TP_LASTC], 0
+    mov qword [rbp - TP_LASTL], -1
+    mov qword [rbp - TP_CNT], 0
+    CSTRING rdi, `Traceback (most recent call last):\n`
+    call tb_write_cstr
+
+.tp_frame:
+    mov rbx, [rbp - TP_TB]
+    test rbx, rbx
+    jz .tp_tail_repeat
+
+    ; Collapse a run of identical frames the way CPython does: print the
+    ; first three, then "[Previous line repeated N more times]".  Without it
+    ; a RecursionError printed a thousand copies of one line.
+    mov rax, [rbx + PyTracebackObject.tb_code]
+    cmp rax, [rbp - TP_LASTC]
+    jne .tp_newrun
+    mov rax, [rbx + PyTracebackObject.tb_lineno]
+    cmp rax, [rbp - TP_LASTL]
+    je .tp_samerun
+.tp_newrun:
+    mov rdi, [rbp - TP_CNT]
+    cmp rdi, TB_RECURSIVE_CUTOFF
+    jle .tp_run_reset
+    push rbx
+    call tb_print_repeated
+    pop rbx
+.tp_run_reset:
+    mov rax, [rbx + PyTracebackObject.tb_code]
+    mov [rbp - TP_LASTC], rax
+    mov rax, [rbx + PyTracebackObject.tb_lineno]
+    mov [rbp - TP_LASTL], rax
+    mov qword [rbp - TP_CNT], 0
+.tp_samerun:
+    inc qword [rbp - TP_CNT]
+    cmp qword [rbp - TP_CNT], TB_RECURSIVE_CUTOFF
+    jg .tp_next
+
+    push rbx
+    CSTRING rdi, `  File "`
+    call tb_write_cstr
+    pop rbx
+    mov rax, [rbx + PyTracebackObject.tb_code]
+    test rax, rax
+    jz .tp_noname
+    push rbx
+    mov rdi, [rax + PyCodeObject.co_filename]
+    call tb_write_str
+    pop rbx
+    push rbx
+    CSTRING rdi, `", line `
+    call tb_write_cstr
+    pop rbx
+    push rbx
+    mov rdi, [rbx + PyTracebackObject.tb_lineno]
+    call tb_write_dec
+    pop rbx
+    push rbx
+    CSTRING rdi, ", in "
+    call tb_write_cstr
+    pop rbx
+    push rbx
+    mov rax, [rbx + PyTracebackObject.tb_code]
+    mov rdi, [rax + PyCodeObject.co_name]
+    call tb_write_str
+    pop rbx
+    push rbx
+    CSTRING rdi, `\n`
+    call tb_write_cstr
+    pop rbx
+    mov rax, [rbx + PyTracebackObject.tb_code]
+    mov rdi, [rax + PyCodeObject.co_filename]
+    mov rsi, [rbx + PyTracebackObject.tb_lineno]
+    push rbx
+    call tb_write_source
+    pop rbx
+    jmp .tp_next
+.tp_noname:
+    push rbx
+    CSTRING rdi, `?", line ?\n`
+    call tb_write_cstr
+    pop rbx
+.tp_next:
+    mov rax, [rbx + PyTracebackObject.tb_next]
+    mov [rbp - TP_TB], rax
+    jmp .tp_frame
+
+.tp_tail_repeat:
+    mov rdi, [rbp - TP_CNT]
+    cmp rdi, TB_RECURSIVE_CUTOFF
+    jle .tp_body
+    call tb_print_repeated
+
+.tp_body:
+    ; "TypeName: str(exc)", with the colon omitted when str(exc) is empty.
+    mov rdi, [rbp - TP_EXC]
+    mov rax, [rdi + PyObject.ob_type]
+    mov rdi, [rax + PyTypeObject.tp_name]
+    call tb_write_cstr
+
+    mov rdi, [rbp - TP_EXC]
+    call obj_str
+    V_UNPACK rax, rdx
+    test rax, rax
+    jz .tp_newline
+    mov [rbp - TP_TMP], rax
+    mov rcx, [rax + PyObject.ob_type]
+    lea rdx, [rel str_type]
+    cmp rcx, rdx
+    jne .tp_release
+    cmp qword [rax + PyStrObject.ob_size], 0
+    je .tp_release
+    CSTRING rdi, ": "
+    call tb_write_cstr
+    mov rdi, [rbp - TP_TMP]
+    call tb_write_str
+.tp_release:
+    mov rdi, [rbp - TP_TMP]
+    call obj_decref
+
+.tp_newline:
+    CSTRING rdi, `\n`
+    call tb_write_cstr
+.tp_out:
+    pop rbx
+    leave
+    ret
+END_FUNC traceback_print

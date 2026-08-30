@@ -276,6 +276,9 @@ DEF_FUNC eval_frame
     ; .throw_resume, or every generator throw falls into it.
     mov [rel eval_saved_rbx], rbx
     mov [rel eval_saved_r13], r13
+    ; CPython refuses the call before the frame exists, so its traceback ends
+    ; at the caller.  This frame is already up; keep it out of the report.
+    mov byte [rel tb_suppress_frame], 1
     lea rdi, [rel exc_RecursionError_type]
     CSTRING rsi, "maximum recursion depth exceeded"
     call raise_exception
@@ -497,17 +500,29 @@ extern exc_RecursionError_type
     mov r12, [rel eval_saved_r12]   ; restore frame pointer
     mov r13, [rel eval_saved_r13]   ; restore value stack pointer
 
-    ; Attach traceback to exception if none exists yet
+    ; Record this frame in the exception's traceback.  Every frame the
+    ; exception passes through gets an entry, which is what makes a real
+    ; "most recent call last" report possible; the old code attached one
+    ; empty entry to the first frame and nothing after that.
+    cmp byte [rel tb_suppress_frame], 0
+    je .tb_record
+    mov byte [rel tb_suppress_frame], 0
+    jmp .skip_tb
+.tb_record:
     mov rax, [rel current_exception]
     test rax, rax
     jz .skip_tb
-    cmp qword [rax + PyExceptionObject.exc_tb], 0
-    jne .skip_tb
-    push rax                         ; save exception ptr
-    extern traceback_new
-    call traceback_new               ; rax = new traceback object
-    pop rdx                          ; rdx = exception
-    mov [rdx + PyExceptionObject.exc_tb], rax  ; attach (transfer ownership)
+    mov rsi, [r12 + PyFrame.code]
+    test rsi, rsi
+    jz .skip_tb
+    mov rdi, rax
+    lea rdx, [rsi + PyCodeObject.co_code]
+    mov rcx, rbx                     ; pre-advance IP
+    sub rcx, rdx
+    sar rcx, 1                       ; code units
+    mov rdx, rcx
+    extern traceback_here
+    call traceback_here
 .skip_tb:
 
     ; Re-derive the co_consts / co_names globals from the code object
@@ -1126,6 +1141,12 @@ DEF_FUNC_BARE op_reraise
 .no_prev_rr:
     pop rdi
     mov [rel current_exception], rdi
+    ; RERAISE must not add a traceback entry: CPython records one at its
+    ; `error:` label, which RERAISE skips by jumping straight to the unwind.
+    ; Without this the implicit cleanup handler at the end of every `except`
+    ; block added a second entry for the same frame, pointing at the
+    ; `except` line.
+    mov byte [rel tb_suppress_frame], 1
     jmp eval_exception_unwind
 END_FUNC op_reraise
 
@@ -1583,6 +1604,8 @@ section .bss
 global current_exception
 current_exception: resq 1    ; PyExceptionObject* or NULL
 eval_base_rsp: resq 1        ; machine stack pointer at eval dispatch level
+global tb_suppress_frame
+tb_suppress_frame: resb 1    ; 1 = the next unwind adds no traceback entry
 global eval_saved_rbx
 eval_saved_rbx: resq 1       ; bytecode IP saved at dispatch (for exception unwind)
 global eval_saved_r12

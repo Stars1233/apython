@@ -987,24 +987,7 @@ DEF_FUNC_BARE op_for_iter
     V_UNPACK rax, rdx           ; returns a Value
     test edx, edx
     jnz .check_next_result     ; got a value
-
-    ; NULL from __next__ — check for StopIteration
-    extern current_exception
-    mov rax, [rel current_exception]
-    test rax, rax
-    jz .exhausted              ; no exception, clean exhaustion
-
-    extern exc_StopIteration_type
-    mov rcx, [rax + PyObject.ob_type]
-    lea rdx, [rel exc_StopIteration_type]
-    cmp rcx, rdx
-    jne .exhausted             ; other exception: leave it, propagate later
-
-    ; Clear StopIteration
-    mov rdi, rax
-    call obj_decref
-    mov qword [rel current_exception], 0
-    jmp .exhausted
+    jmp .next_null
 
 .have_iternext:
     call rax
@@ -1013,7 +996,37 @@ DEF_FUNC_BARE op_for_iter
     ; rax = payload, rdx = tag (TAG_NULL if exhausted)
 
     test edx, edx
-    jz .exhausted
+    jnz .next_got_value
+
+.next_null:
+    ; A NULL result means exhaustion only when nothing is pending.  This
+    ; check used to guard the __next__ path alone, so an exception raised
+    ; inside a *generator* -- which has a real tp_iternext -- ended the loop
+    ; silently and surfaced only at interpreter exit.
+    extern current_exception
+    mov rax, [rel current_exception]
+    test rax, rax
+    jz .exhausted              ; clean exhaustion
+
+    extern exc_StopIteration_type
+    mov rcx, [rax + PyObject.ob_type]
+    lea rdx, [rel exc_StopIteration_type]
+    cmp rcx, rdx
+    jne .next_propagate        ; a real error ends the loop by raising
+
+    ; A StopIteration reaching here is the exhaustion signal itself.
+    mov rdi, rax
+    call obj_decref
+    mov qword [rel current_exception], 0
+    jmp .exhausted
+
+.next_propagate:
+    add rsp, 8                 ; discard the saved jump offset
+    mov [rel eval_saved_r13], r13
+    extern eval_exception_unwind
+    jmp eval_exception_unwind
+
+.next_got_value:
 
     ; Got a value - push it (iterator stays on stack)
     add rsp, 8                 ; discard saved jump offset

@@ -842,7 +842,8 @@ mdo_ref_oob:
 ;   [rsp + 96] saved FLAG_REF (8 bytes)
 ;   [rsp +104] ref index placeholder (8 bytes, used only if FLAG_REF)
 ;   [rsp +112] co_posonlyargcount (4 bytes)
-; Total: 116 bytes needed, using 128 for alignment.
+;   [rsp +116] co_firstlineno (4 bytes)
+; Total: 120 bytes needed, using 128 for alignment.
 ;--------------------------------------------------------------------------
 mdo_code:
     push r13                   ; r13 = code object pointer (after alloc)
@@ -904,7 +905,8 @@ mdo_code:
     call marshal_read_object   ; co_qualname (str)
     mov [rsp + 72], rax
 
-    call marshal_read_long     ; co_firstlineno (discard)
+    call marshal_read_long     ; co_firstlineno
+    mov [rsp + 116], eax
 
     call marshal_read_object   ; co_linetable (bytes)
     mov [rsp + 80], rax
@@ -986,6 +988,13 @@ mdo_code:
     mov rax, [rsp + 88]        ; co_exceptiontable
     mov [r13 + PyCodeObject.co_exceptiontable], rax
 
+    ; co_linetable and co_firstlineno are kept now: they are what turns a
+    ; bytecode offset back into a source line for tracebacks.
+    mov rax, [rsp + 80]        ; co_linetable bytes object (reference kept)
+    mov [r13 + PyCodeObject.co_linetable], rax
+    mov eax, [rsp + 116]
+    mov [r13 + PyCodeObject.co_firstlineno], eax
+
     ; Bytecode length and positional-only arg count
     mov dword [r13 + PyCodeObject.co_code_len], r14d
     mov eax, [rsp + 112]
@@ -1001,18 +1010,13 @@ mdo_code:
     call ap_memcpy
 .code_no_bytecode:
 
-    ; DECREF co_code and co_linetable bytes objects (data was copied/unused).
+    ; DECREF the co_code bytes object (its data was copied inline).
     ; Safe because marshal_add_ref now INCREFs, so refs array holds its own ref.
     mov rdi, [rsp + 16]        ; co_code bytes object
     test rdi, rdi
     jz .code_skip_decref_code
     call obj_decref
 .code_skip_decref_code:
-    mov rdi, [rsp + 80]        ; co_linetable bytes object
-    test rdi, rdi
-    jz .code_skip_decref_lt
-    call obj_decref
-.code_skip_decref_lt:
 
     ; Update ref placeholder if FLAG_REF was set
     mov r12, [rsp + 96]        ; restore FLAG_REF into r12

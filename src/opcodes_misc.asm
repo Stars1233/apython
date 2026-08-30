@@ -2316,7 +2316,21 @@ extern obj_decref
     ; Not StopIteration — pop from TOS, set as current_exception, re-raise
     VPOP_VAL rax, rsi              ; exception (ref transferred from stack)
     mov [rel eval_saved_r13], r13  ; update — popped and transferred
+    mov rcx, [rel current_exception]
     mov [rel current_exception], rax
+    cmp rcx, rax
+    je .ci1_si_go
+    test rcx, rcx
+    jz .ci1_si_go
+    push rax
+    mov rdi, rcx
+    call obj_decref
+    pop rax
+.ci1_si_go:
+    ; This is a re-raise, so it adds no traceback entry -- the frame already
+    ; recorded one where the exception was first raised.
+    extern tb_suppress_frame
+    mov byte [rel tb_suppress_frame], 1
     jmp eval_exception_unwind
 
 .ci1_unary_positive:

@@ -198,7 +198,23 @@ DEF_FUNC gen_iternext
     mov qword [rel current_exception], 0
     call eval_frame
     pop rcx
+    ; If the generator body raised, that exception is the result and must not
+    ; be overwritten by the caller's saved one -- doing so turned every
+    ; exception raised after the first yield into a silent StopIteration.
+    cmp qword [rel current_exception], 0
+    jne .gs_gen_raised
     mov [rel current_exception], rcx
+    jmp .gs_exc_settled
+.gs_gen_raised:
+    test rcx, rcx
+    jz .gs_exc_settled
+    push rax
+    push rdx
+    mov rdi, rcx
+    call obj_decref
+    pop rdx
+    pop rax
+.gs_exc_settled:
     add rsp, 8
     V_UNPACK rax, rdx           ; eval_frame returns a Value
     ; rax = yielded/returned value payload, rdx = tag

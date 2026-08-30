@@ -67,7 +67,9 @@ struc PyTracebackObject
     .ob_refcnt: resq 1  ; +0
     .ob_type:   resq 1  ; +8
     .tb_next:   resq 1  ; +16: ptr to next traceback or NULL
-    .tb_lineno: resq 1  ; +24: line number (i64)
+    .tb_lineno: resq 1  ; +24: line number (i64), 0 when unknown
+    .tb_code:   resq 1  ; +32: owned ref to the PyCodeObject, or NULL
+    .tb_lasti:  resq 1  ; +40: instruction offset in code units
 endstruc
 
 ; Fatal error codes (non-Python, internal)
