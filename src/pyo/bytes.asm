@@ -665,15 +665,118 @@ DEF_FUNC bytes_getattr
 END_FUNC bytes_getattr
 
 ;; ============================================================================
-;; _bytes_decode_impl(args, nargs) — b.decode()
+;; _bytes_decode_impl(args, nargs) — b.decode([encoding[, errors]])
+;;
+;; utf-8 is the bytes as they stand; ascii is that with a range check; latin-1
+;; turns each byte into a code point, which is where the byte string and the
+;; text stop being the same thing.
 ;; ============================================================================
-DEF_FUNC _bytes_decode_impl
-    ; nargs should be 1 (just self)
-    mov rdi, [rdi]             ; self = args[0]
-    call bytes_decode
+BD_SELF  equ 8
+BD_OUT   equ 16
+BD_POS   equ 24
+BD_FRAME equ 32
+DEF_FUNC _bytes_decode_impl, BD_FRAME
+    push rbx
+    push r12
+    mov rbx, [rdi]
+    mov [rbp - BD_SELF], rbx
+    mov r12, [rbx + PyBytesObject.ob_size]
+
+    xor eax, eax
+    cmp rsi, 2
+    jl .bd_have_enc
+    mov rax, [rdi + 8]
+    V_TEST_PTR rax, rcx
+    ja .bd_zero_enc
+    jmp .bd_have_enc
+.bd_zero_enc:
+    xor eax, eax
+.bd_have_enc:
+    mov rdi, rax
+    extern codec_id
+    call codec_id
+    cmp eax, 1
+    je .bd_ascii
+    cmp eax, 2
+    je .bd_latin1
+
+.bd_utf8:
+    mov rbx, [rbp - BD_SELF]
+    lea rdi, [rbx + PyBytesObject.data]
+    mov rsi, r12
+    call str_new
+    pop r12
+    pop rbx
     leave
-    V_PACK rax, rdx             ; builtins return one Value
+    V_PACK rax, rdx
     ret
+
+.bd_ascii:
+    xor ecx, ecx
+.bd_ascii_scan:
+    cmp rcx, r12
+    jge .bd_utf8
+    movzx eax, byte [rbx + PyBytesObject.data + rcx]
+    test al, 0x80
+    jnz .bd_not_decodable
+    inc rcx
+    jmp .bd_ascii_scan
+
+.bd_latin1:
+    ; Each byte is one code point, so a byte at or above 0x80 becomes two
+    ; bytes of UTF-8: the result can be twice as long.
+    lea rdi, [r12 + r12]
+    add rdi, PyStrObject.data + 8
+    call ap_malloc
+    mov [rbp - BD_OUT], rax
+    mov qword [rax + PyObject.ob_refcnt], 1
+    lea rcx, [rel str_type]
+    mov [rax + PyObject.ob_type], rcx
+    mov qword [rax + PyStrObject.ob_hash], -1
+    mov [rax + PyStrObject.ob_length], r12
+    mov qword [rbp - BD_POS], 0
+    xor ecx, ecx
+.bd_l1_loop:
+    cmp rcx, r12
+    jge .bd_l1_done
+    mov rbx, [rbp - BD_SELF]
+    movzx eax, byte [rbx + PyBytesObject.data + rcx]
+    mov rdx, [rbp - BD_OUT]
+    mov r8, [rbp - BD_POS]
+    test al, 0x80
+    jnz .bd_l1_two
+    mov [rdx + PyStrObject.data + r8], al
+    inc qword [rbp - BD_POS]
+    jmp .bd_l1_next
+.bd_l1_two:
+    mov r9d, eax
+    shr r9d, 6
+    or r9b, 0xC0
+    mov [rdx + PyStrObject.data + r8], r9b
+    and eax, 0x3F
+    or al, 0x80
+    mov [rdx + PyStrObject.data + r8 + 1], al
+    add qword [rbp - BD_POS], 2
+.bd_l1_next:
+    inc rcx
+    jmp .bd_l1_loop
+.bd_l1_done:
+    mov rax, [rbp - BD_OUT]
+    mov rcx, [rbp - BD_POS]
+    mov [rax + PyStrObject.ob_size], rcx
+    mov qword [rax + PyStrObject.data + rcx], 0
+    mov edx, TAG_PTR
+    pop r12
+    pop rbx
+    leave
+    V_PACK rax, rdx
+    ret
+
+.bd_not_decodable:
+    extern exc_UnicodeDecodeError_type
+    lea rdi, [rel exc_UnicodeDecodeError_type]
+    CSTRING rsi, "byte not in range for this encoding"
+    call raise_exception
 END_FUNC _bytes_decode_impl
 
 ;; ============================================================================

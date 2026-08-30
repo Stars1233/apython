@@ -150,6 +150,119 @@ DEF_FUNC_BARE str_cp_offset
     ret
 END_FUNC str_cp_offset
 
+
+; ----------------------------------------------------------------------------
+; codec_id(rdi = encoding str, or 0 for the default) -> eax
+;   0 = utf-8, 1 = ascii, 2 = latin-1.  Raises LookupError for anything else.
+;
+; The three codecs the interpreter can do itself.  Everything else goes
+; through the codecs module, which is Python and cannot be reached from here.
+; ----------------------------------------------------------------------------
+CI_BUF   equ 40
+CI_FRAME equ 48
+global codec_id
+DEF_FUNC codec_id, CI_FRAME
+    push rbx
+    test rdi, rdi
+    jz .ci_utf8
+    mov rax, [rdi + PyObject.ob_type]
+    lea rcx, [rel str_type]
+    cmp rax, rcx
+    jne .ci_unknown
+    mov rcx, [rdi + PyStrObject.ob_size]
+    test rcx, rcx
+    jz .ci_utf8
+    cmp rcx, 31
+    ja .ci_unknown
+
+    ; Normalise: lowercase, and '_' for '-', as CPython's normalizestring does.
+    lea rbx, [rbp - CI_BUF]
+    xor edx, edx
+.ci_norm:
+    cmp rdx, rcx
+    jge .ci_norm_done
+    movzx eax, byte [rdi + PyStrObject.data + rdx]
+    cmp al, '-'
+    jne .ci_not_dash
+    mov al, '_'
+    jmp .ci_store
+.ci_not_dash:
+    cmp al, 'A'
+    jb .ci_store
+    cmp al, 'Z'
+    ja .ci_store
+    add al, 32
+.ci_store:
+    mov [rbx + rdx], al
+    inc rdx
+    jmp .ci_norm
+.ci_norm_done:
+    mov byte [rbx + rdx], 0
+
+    mov rdi, rbx
+    CSTRING rsi, "utf_8"
+    call ap_strcmp
+    test eax, eax
+    jz .ci_utf8
+    mov rdi, rbx
+    CSTRING rsi, "utf8"
+    call ap_strcmp
+    test eax, eax
+    jz .ci_utf8
+    mov rdi, rbx
+    CSTRING rsi, "ascii"
+    call ap_strcmp
+    test eax, eax
+    jz .ci_ascii
+    mov rdi, rbx
+    CSTRING rsi, "us_ascii"
+    call ap_strcmp
+    test eax, eax
+    jz .ci_ascii
+    mov rdi, rbx
+    CSTRING rsi, "latin_1"
+    call ap_strcmp
+    test eax, eax
+    jz .ci_latin1
+    mov rdi, rbx
+    CSTRING rsi, "latin1"
+    call ap_strcmp
+    test eax, eax
+    jz .ci_latin1
+    mov rdi, rbx
+    CSTRING rsi, "iso_8859_1"
+    call ap_strcmp
+    test eax, eax
+    jz .ci_latin1
+    mov rdi, rbx
+    CSTRING rsi, "iso8859_1"
+    call ap_strcmp
+    test eax, eax
+    jz .ci_latin1
+    jmp .ci_unknown
+
+.ci_utf8:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+.ci_ascii:
+    mov eax, 1
+    pop rbx
+    leave
+    ret
+.ci_latin1:
+    mov eax, 2
+    pop rbx
+    leave
+    ret
+.ci_unknown:
+    extern exc_LookupError_type
+    lea rdi, [rel exc_LookupError_type]
+    CSTRING rsi, "unknown encoding"
+    call raise_exception
+END_FUNC codec_id
+
 ; str_from_cstr_heap(const char *cstr) -> (rax=PyStrObject*, edx=TAG_PTR)
 ; Always heap-allocates. For struct fields that need a real pointer.
 DEF_FUNC str_from_cstr_heap

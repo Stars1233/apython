@@ -4599,30 +4599,124 @@ END_FUNC str_method_removesuffix
 ;; args[0]=self, args[1]=encoding (optional, default 'utf-8')
 ;; For now, supports 'utf-8' and 'ascii' — both just copy raw bytes.
 ;; ============================================================================
-DEF_FUNC str_method_encode
+SE_SELF  equ 8
+SE_LEN   equ 16
+SE_OUT   equ 24
+SE_POS   equ 32
+SE_ERRS  equ 40
+SE_FRAME equ 48
+DEF_FUNC str_method_encode, SE_FRAME
     push rbx
     push r12
-    ; args[0] = self (str)
-    mov rbx, [rdi]             ; rbx = self str obj
-    mov r12, [rbx + PyStrObject.ob_size]  ; r12 = length
-    ; Allocate bytes object
+    ; args[0] = self, args[1] = encoding, args[2] = errors
+    mov rbx, [rdi]
+    mov [rbp - SE_SELF], rbx
+    mov r12, [rbx + PyStrObject.ob_size]
+    mov [rbp - SE_LEN], r12
+    mov qword [rbp - SE_ERRS], 0
+
+    xor eax, eax
+    cmp rsi, 2
+    jl .se_have_enc
+    mov rax, [rdi + 8]
+    V_TEST_PTR rax, rcx
+    ja .se_have_enc
+    cmp rsi, 3
+    jl .se_have_enc
+    mov rcx, [rdi + 16]
+    mov [rbp - SE_ERRS], rcx
+.se_have_enc:
+    mov rdi, rax
+    extern codec_id
+    call codec_id
+    cmp eax, 1
+    je .se_ascii
+    cmp eax, 2
+    je .se_latin1
+
+.se_utf8:
+    ; The bytes are already UTF-8.
     mov rdi, r12
     extern bytes_new
     call bytes_new
-    ; Copy string data into bytes object
+    push rax
     lea rdi, [rax + PyBytesObject.data]
+    mov rbx, [rbp - SE_SELF]
     lea rsi, [rbx + PyStrObject.data]
     mov rdx, r12
-    push rax                   ; save bytes obj
     extern ap_memcpy
     call ap_memcpy
-    pop rax                    ; return bytes obj
+    pop rax
     mov edx, TAG_PTR
     pop r12
     pop rbx
     leave
-    V_PACK rax, rdx             ; builtins return one Value
+    V_PACK rax, rdx
     ret
+
+.se_ascii:
+    ; Every byte of a valid ASCII string is below 0x80, and a multi-byte
+    ; character is exactly the case that is not encodable.
+    xor ecx, ecx
+.se_ascii_scan:
+    cmp rcx, r12
+    jge .se_utf8
+    movzx eax, byte [rbx + PyStrObject.data + rcx]
+    test al, 0x80
+    jnz .se_not_encodable
+    inc rcx
+    jmp .se_ascii_scan
+
+.se_latin1:
+    ; One byte per code point, for the code points that fit in one.
+    mov rdi, [rbx + PyStrObject.ob_length]
+    call bytes_new
+    mov [rbp - SE_OUT], rax
+    mov qword [rbp - SE_POS], 0
+    xor ecx, ecx                    ; byte cursor into the source
+.se_l1_loop:
+    cmp rcx, [rbp - SE_LEN]
+    jge .se_l1_done
+    mov rbx, [rbp - SE_SELF]
+    movzx eax, byte [rbx + PyStrObject.data + rcx]
+    test al, 0x80
+    jz .se_l1_emit
+    ; A two-byte form can reach U+00FF; anything wider cannot be Latin-1.
+    mov edx, eax
+    and edx, 0xE0
+    cmp edx, 0xC0
+    jne .se_not_encodable
+    and eax, 0x1F
+    cmp eax, 3
+    ja .se_not_encodable
+    shl eax, 6
+    inc rcx
+    movzx edx, byte [rbx + PyStrObject.data + rcx]
+    and edx, 0x3F
+    or eax, edx
+.se_l1_emit:
+    mov rdx, [rbp - SE_OUT]
+    mov r8, [rbp - SE_POS]
+    mov [rdx + PyBytesObject.data + r8], al
+    inc qword [rbp - SE_POS]
+    inc rcx
+    jmp .se_l1_loop
+.se_l1_done:
+    mov rax, [rbp - SE_OUT]
+    mov rcx, [rbp - SE_POS]
+    mov [rax + PyBytesObject.ob_size], rcx
+    mov edx, TAG_PTR
+    pop r12
+    pop rbx
+    leave
+    V_PACK rax, rdx
+    ret
+
+.se_not_encodable:
+    extern exc_UnicodeEncodeError_type
+    lea rdi, [rel exc_UnicodeEncodeError_type]
+    CSTRING rsi, "character not in range for this encoding"
+    call raise_exception
 END_FUNC str_method_encode
 
 

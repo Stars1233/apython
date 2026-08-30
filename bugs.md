@@ -13,10 +13,11 @@ one-line fix.
   `upper`, `lower`, `title`, `capitalize` and `swapcase` all leave a
   non-ASCII byte as it is.  Needs Unicode case tables.
 
-- **`str.encode` and `bytes.decode` ignore the codec name.**  Both always do
-  UTF-8, so `"é".encode("ascii")` returns the UTF-8 bytes instead of raising
-  UnicodeEncodeError.  There is no `_codecs` module and no `encodings`
-  package.
+- **`str.encode` and `bytes.decode` know only utf-8, ascii and latin-1.**
+  Any other name is a LookupError, where CPython would find the codec through
+  the registry; reaching it from the interpreter would mean calling Python
+  from a builtin method.  The `errors` argument is accepted and ignored --
+  every failure is strict.
 
 - **`str.format` does not accept attribute or index access in a field.**
   `"{0.attr}"` and `"{0[key]}"` are not resolved; a field is a position, a
