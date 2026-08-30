@@ -6889,9 +6889,10 @@ DEF_FUNC dict_method_popitem
 
     mov r13, [rax + DictEntry.key]
     test r13, r13
-    jz .dpopitem_prev
-    test rcx, rcx
-    jz .dpopitem_prev           ; TAG_NULL = empty slot
+    jz .dpopitem_prev           ; a NULL key is an empty slot or a tombstone
+    ; A second test of rcx used to stand here, left over from a removed
+    ; key-tag load; rcx now holds the byte offset, which is 0 at slot 0, so
+    ; an occupied slot 0 was skipped and popitem() reported an empty dict.
     mov r14, [rax + DictEntry.value]
     V_UNPACK r14, rcx
     jmp .dpopitem_found

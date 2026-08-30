@@ -2305,12 +2305,12 @@ extern obj_decref
     imul rcx, DICT_ENTRY_SIZE
     lea rbx, [rsi + rcx]              ; rbx = entry ptr (callee-saved)
 
-    ; Skip empty: key_tag == 0
-    test r8d, r8d
-    jz .is_dict_next
-
-    ; Get key payload
+    ; Skip an empty or tombstoned slot.  This tested r8 -- left over from the
+    ; previous iteration since the key-tag load it guarded was removed -- so
+    ; `from mod import *` bound nothing at all.
     mov rsi, [rbx + DictEntry.key]
+    test rsi, rsi
+    jz .is_dict_next
     V_UNPACK rsi, r8
 
     ; Skip names starting with '_'

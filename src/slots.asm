@@ -66,40 +66,60 @@ section .text
 DEF_FUNC_LOCAL slot_ensure_table
     push rbx
     push r12
+    push r13
+    push r14
     mov rbx, rdi
-    mov r12d, esi
 
-    cmp r12d, SLOT_NUMBER
-    je .number
-    cmp r12d, SLOT_SEQUENCE
-    je .sequence
-    ; mapping
-    mov rax, [rbx + PyTypeObject.tp_as_mapping]
+    cmp esi, SLOT_NUMBER
+    je .set_number
+    cmp esi, SLOT_SEQUENCE
+    je .set_sequence
+    mov r13, PyTypeObject.tp_as_mapping
+    mov r14, PyMappingMethods_size
+    jmp .go
+.set_number:
+    mov r13, PyTypeObject.tp_as_number
+    mov r14, PyNumberMethods_size
+    jmp .go
+.set_sequence:
+    mov r13, PyTypeObject.tp_as_sequence
+    mov r14, PySequenceMethods_size
+
+.go:
+    mov rax, [rbx + r13]
     test rax, rax
-    jnz .have
-    mov edi, PyMappingMethods_size
+    jz .fresh
+
+    ; The table may be the *base's*: __build_class__ inherits the protocol
+    ; slots of a builtin base by copying the pointer.  Writing a wrapper
+    ; through it patched the builtin's own static table, so one `class
+    ; MyInt(int)` with a __neg__ gave every int in the process that __neg__.
+    mov rcx, [rbx + PyTypeObject.tp_base]
+    test rcx, rcx
+    jz .have
+    cmp rax, [rcx + r13]
+    jne .have                       ; already this type's own copy
+    mov r12, rax                    ; the shared table
+    mov rdi, r14
     call .alloc_zeroed
-    mov [rbx + PyTypeObject.tp_as_mapping], rax
+    push rax
+    mov rdi, rax
+    mov rsi, r12
+    mov rdx, r14
+    extern ap_memcpy
+    call ap_memcpy
+    pop rax
+    mov [rbx + r13], rax
     jmp .have
 
-.number:
-    mov rax, [rbx + PyTypeObject.tp_as_number]
-    test rax, rax
-    jnz .have
-    mov edi, PyNumberMethods_size
+.fresh:
+    mov rdi, r14
     call .alloc_zeroed
-    mov [rbx + PyTypeObject.tp_as_number], rax
-    jmp .have
-
-.sequence:
-    mov rax, [rbx + PyTypeObject.tp_as_sequence]
-    test rax, rax
-    jnz .have
-    mov edi, PySequenceMethods_size
-    call .alloc_zeroed
-    mov [rbx + PyTypeObject.tp_as_sequence], rax
+    mov [rbx + r13], rax
 
 .have:
+    pop r14
+    pop r13
     pop r12
     pop rbx
     leave

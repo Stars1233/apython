@@ -1567,8 +1567,10 @@ END_FUNC reversed_dealloc
 SO_ARGS       equ 8
 SO_NARGS      equ 16
 SO_SORT_BUF   equ 72     ; END of sort args buffer (grows down from here)
-SO_FRAME      equ 72     ; 24 + 48
+SO_EXC        equ 80     ; the exception pending before iteration began
+SO_FRAME      equ 96
 DEF_FUNC builtin_sorted, SO_FRAME
+    DUNDER_EXC_SAVE [rbp - SO_EXC]
     push rbx
     push r12
     push r13
@@ -1616,9 +1618,11 @@ DEF_FUNC builtin_sorted, SO_FRAME
     ; __next__ that raised something other than StopIteration -- it clears
     ; StopIteration itself and leaves anything else pending.  list() checks;
     ; sorted() did not, so sorted(x) quietly returned a partial result while
-    ; the exception waited to surface somewhere unrelated.
-    cmp qword [rel current_exception], 0
-    jne .sorted_propagate
+    ; the exception waited to surface somewhere unrelated.  The comparison is
+    ; against the value saved on entry, not against 0: current_exception is
+    ; also the exception *being handled*, so inside an `except` block a bare
+    ; test made sorted() re-raise it.
+    DUNDER_RAISED [rbp - SO_EXC], .sorted_propagate
 
     ; Build args for list_method_sort in the fixed frame buffer
     ; args[0] = list (a pointer is its own Value)
