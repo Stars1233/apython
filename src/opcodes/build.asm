@@ -37,6 +37,7 @@ extern dict_type
 extern eval_saved_rbx
 extern obj_dealloc
 extern opcode_table
+extern opcode_dispatch_table
 
 ;; Stack/frame layout constants for tag-aware handlers.
 ;; Push-based: "tags behind payloads" — payload offsets match old code.

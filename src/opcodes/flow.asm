@@ -37,6 +37,7 @@ extern obj_decref
 extern eval_saved_rbx
 extern obj_dealloc
 extern opcode_table
+extern opcode_dispatch_table
 
 ;; Stack layout constants for binary_op / compare_op generic paths.
 ;; After 4 pushes: right, right_tag, left, left_tag

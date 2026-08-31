@@ -227,14 +227,6 @@ whoever copies a neighbouring file.
   per-directory exemption.  NASM itself is run with no warning flags, so
   nothing else catches any of it.
 
-- **Two macro comments describe behaviour the macro does not have.**
-  `include/macros.inc:130` says `DISPATCH` "falls back to centralized
-  `eval_dispatch` when tracing is enabled" — it does not test `trace_opcodes` at
-  all, so `DISPATCH`-terminated handlers are silently untraced, and only the
-  handlers that jump to the real `eval_dispatch` show up.  `macros.inc:107` says
-  `DECREF_REG` "doesn't push/pop if arg is rdi"; it never push/pops and always
-  clobbers `rdi`.
-
 - **Nine headers in `src/pyo/` name a file that no longer exists.**  Line 1 of
   `dict.asm` says `dict_obj.asm`; likewise `bytes`, `class`, `code`, `int`,
   `iter`, `list`, `str` and `tuple`.  A one-line fix each, but the header is
@@ -246,8 +238,3 @@ whoever copies a neighbouring file.
   returns `(rax = payload, edx = tag)`.  The signature line is the only
   machine-unchecked part of a function's contract, so a wrong one is worse than
   none.
-
-- **`INCREF` has a vestigial `%%skip:` label** that nothing branches to
-  (`include/macros.inc:92`), left from when the macro guarded against SmallInts.
-  It now increments unconditionally, so the label suggests a check that is not
-  there.

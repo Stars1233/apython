@@ -504,9 +504,8 @@ There are two mechanisms: the out-of-line functions and the inline macros.
 `DECREF_REG`.
 
 **`INCREF` does not check anything.**  It is an unconditional
-`inc qword [reg + PyObject.ob_refcnt]` — the `%%skip:` label inside it is dead,
-left over from when it guarded against SmallInts.  Handing it an immediate int
-or a NULL writes through a non-pointer.  Use `INCREF_V` when the operand is a
+`inc qword [reg + PyObject.ob_refcnt]`.  Handing it an immediate int or a NULL
+writes through a non-pointer.  Use `INCREF_V` when the operand is a
 Value whose kind you have not established, or `call obj_incref`, which at least
 checks for NULL.
 
@@ -523,7 +522,7 @@ prefer the `_V` forms in Value-native code.
 
 | Macro | Notes |
 |-------|-------|
-| `DISPATCH` | Decode and jump.  Clobbers `rax`, `rcx`, `rdx`; advances `rbx` by 2; never returns |
+| `DISPATCH` | Decode and jump, through the `opcode_dispatch_table` pointer so `-t` can swap in the tracing table.  Clobbers `rax`, `rcx`, `rdx`; advances `rbx` by 2; never returns |
 | `CSTRING reg, "text"` | Inline rodata string.  **Always leaves you in `.text`** — using it from a data section relocates what follows |
 | `LOAD_CO_NAMES reg` | `co_names` data pointer |
 | `RET_NULL` | Error return: `xor eax,eax` / `xor edx,edx` |

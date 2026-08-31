@@ -88,10 +88,12 @@
     section .text
 %endmacro
 
-; Reference counting (heap pointers only — callers must not pass SmallInts)
+; Reference counting (heap pointers only — callers must not pass SmallInts).
+; INCREF checks nothing: hand it an immediate int or a NULL and it writes
+; through a non-pointer.  Use INCREF_V for a Value whose kind is not
+; established, or obj_incref, which at least checks for NULL.
 %macro INCREF 1
     inc qword [%1 + PyObject.ob_refcnt]
-    %%skip:
 %endmacro
 
 %macro DECREF 1
@@ -104,7 +106,8 @@
     %%skip:
 %endmacro
 
-; Safe DECREF for register (doesn't push/pop if arg is rdi)
+; DECREF for a register operand.  Always clobbers rdi, and the zero path calls
+; obj_dealloc, so every caller-saved register dies there.
 %macro DECREF_REG 1
     dec qword [%1 + PyObject.ob_refcnt]
     jnz %%skip
@@ -115,20 +118,22 @@
 
 ; Opcode dispatch - inline decode + jump (direct threading)
 ; Each DISPATCH site gets its own BTB entry for better branch prediction.
-; Falls back to centralized eval_dispatch when tracing is enabled.
+;
+; The jump goes through opcode_dispatch_table, a pointer, rather than straight
+; at opcode_table.  That is what makes `-t` work: tracing swaps the pointer for
+; a table of 256 entries that all reach eval_trace_thunk, which prints and then
+; jumps to the real handler.  The cost is a load where there used to be an lea,
+; and no branch at all -- the previous arrangement tested a flag only inside
+; eval_dispatch, which nothing reaches, so `-t` printed one opcode per frame.
 %macro DISPATCH 0
     mov [rel eval_saved_rbx], rbx  ; save bytecode IP for exception unwind
     mov [rel eval_saved_r13], r13  ; save value stack ptr for exception unwind
     movzx eax, byte [rbx]         ; load opcode
     movzx ecx, byte [rbx+1]      ; load arg into ecx
     add rbx, 2                     ; advance past instruction word
-    lea rdx, [rel opcode_table]
+    mov rdx, [rel opcode_dispatch_table]
     jmp [rdx + rax*8]             ; dispatch to handler
 %endmacro
-
-; Align stack to 16 bytes before call (System V ABI requirement)
-; Usage: ALIGN_STACK_CALL func_name
-; Note: most of the time push rbp / mov rbp, rsp handles this
 
 ; Save/restore callee-saved registers used in eval loop
 %macro SAVE_EVAL_REGS 0

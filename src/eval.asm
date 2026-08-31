@@ -288,24 +288,28 @@ END_FUNC eval_frame
 ; Reads the next opcode and arg, advances rbx, and jumps to the handler.
 align 16
 DEF_FUNC_BARE eval_dispatch
-    mov [rel eval_saved_rbx], rbx  ; save bytecode IP for exception unwind
-    mov [rel eval_saved_r13], r13  ; save value stack ptr for exception unwind
-    movzx eax, byte [rbx]      ; load opcode
-    movzx ecx, byte [rbx+1]    ; load arg into ecx
-    add rbx, 2                  ; advance past instruction word
-    cmp byte [rel trace_opcodes], 0
-    jz .no_trace
+    DISPATCH
+END_FUNC eval_dispatch
+
+;; ============================================================================
+;; eval_trace_thunk - the -t handler, reached in place of every real one
+;;
+;; opcode_trace_table has all 256 entries pointing here, so `-t` costs one
+;; store to opcode_dispatch_table and nothing at all when it is off.  rax holds
+;; the opcode and ecx the argument, exactly as the real handler expects them,
+;; so this prints and jumps straight on.
+;; ============================================================================
+DEF_FUNC_BARE eval_trace_thunk
     push rax
-    push rcx
+    push rcx                    ; two pushes: rsp keeps whatever alignment it had
     mov edi, eax
     mov esi, ecx
     call trace_print_opcode
     pop rcx
     pop rax
-.no_trace:
     lea rdx, [rel opcode_table]
-    jmp [rdx + rax*8]              ; dispatch to handler
-END_FUNC eval_dispatch
+    jmp [rdx + rax*8]
+END_FUNC eval_trace_thunk
 
 ; eval_return - Return from eval_frame
 ; rax contains the return value. Restores callee-saved regs and returns.
@@ -1323,7 +1327,7 @@ op_extended_arg:
     movzx edx, byte [rbx+1]   ; next arg
     or ecx, edx               ; combine args
     add rbx, 2                 ; advance past next instruction
-    lea rdx, [rel opcode_table]
+    mov rdx, [rel opcode_dispatch_table]
     jmp [rdx + rax*8]         ; dispatch with combined arg in ecx
 
 ; ---------------------------------------------------------------------------
@@ -1341,6 +1345,19 @@ op_load_assertion_error:
 ; ---------------------------------------------------------------------------
 section .data
 align 8
+
+; What DISPATCH jumps through.  Normally the real table; `-t` points it at
+; opcode_trace_table instead, which is how tracing reaches handlers that
+; dispatch inline -- which is all of them.
+global opcode_dispatch_table
+opcode_dispatch_table: dq opcode_table
+
+; 256 identical entries: the thunk reads the opcode out of rax, so it does not
+; need one entry per opcode to know which it is.
+global opcode_trace_table
+opcode_trace_table:
+    times 256 dq eval_trace_thunk
+
 global opcode_table
 opcode_table:
     dq op_cache              ; 0   = CACHE
@@ -1635,8 +1652,6 @@ cfex_kwnames_pending: resq 1 ; kw_names tuple from op_call_function_ex kwargs, o
 global build_class_pending
 build_class_pending: resq 1  ; type object from builtin___build_class__ during construction, or NULL
 
-global trace_opcodes
-trace_opcodes: resb 1           ; nonzero = trace opcodes to stderr
 
 global throw_pending
 throw_pending: resb 1           ; nonzero = gen_throw set current_exception before resume

@@ -13,6 +13,7 @@ extern eval_co_names
 extern eval_saved_rbx
 extern obj_dealloc
 extern opcode_table
+extern opcode_dispatch_table
 
 ; ============================================================================
 ; op_import_name - Opcode 108: IMPORT_NAME

@@ -42,6 +42,7 @@ extern eval_saved_r13
 extern eval_saved_rbx
 extern obj_dealloc
 extern opcode_table
+extern opcode_dispatch_table
 
 ;; ============================================================================
 ;; op_get_awaitable - GET_AWAITABLE (131)

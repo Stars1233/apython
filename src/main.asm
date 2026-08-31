@@ -184,8 +184,12 @@ DEF_FUNC main, 8
     jne .no_trace_flag
     cmp byte [rax + 2], 0
     jne .no_trace_flag
-    extern trace_opcodes
-    mov byte [rel trace_opcodes], 1
+    ; Point dispatch at the tracing table.  Setting a flag was not enough:
+    ; every handler dispatches inline and only eval_dispatch tested it.
+    extern opcode_dispatch_table
+    extern opcode_trace_table
+    lea rax, [rel opcode_trace_table]
+    mov [rel opcode_dispatch_table], rax
     add r15, 8                  ; skip -t in argv
     dec r14d                    ; adjust argc
     cmp r14d, 2

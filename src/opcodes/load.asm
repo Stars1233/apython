@@ -45,6 +45,7 @@ extern none_type
 extern eval_co_names
 extern obj_dealloc
 extern opcode_table
+extern opcode_dispatch_table
 
 ; --- Named frame-layout constants ---
 

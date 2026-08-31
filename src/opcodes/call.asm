@@ -30,6 +30,7 @@ extern ap_free
 extern tuple_new
 extern eval_saved_rbx
 extern opcode_table
+extern opcode_dispatch_table
 
 ; --- Named frame-layout constants ---
 
