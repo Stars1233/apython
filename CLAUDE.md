@@ -32,7 +32,7 @@ its `Lib/` (default `~/tmp/repo/cpython/Lib`).  It compares against
 `tests/stdlib_floor.txt` and fails when a module that used to import stops, or
 when a new one crashes.  Raise the floor with
 `bash tests/stdlib_probe.sh --record` in the commit that earns it.
-`make check` runs 232 test files (255 results: the async tests run against the
+`make check` runs 233 test files (256 results: the async tests run against the
 default, poll and io_uring backends); `make check-cpython` runs all 64 files
 under `tests/cpython/`, none of them tolerated as failing.
 
@@ -46,7 +46,8 @@ rather than a snippet to appear at all.  They also reach interpreter paths a
 `True & False` and `-7 // 2` before any of them becomes an opcode.
 
 `check-cpython-source` is the harder of the two: that corpus is CPython's own
-and written to be adversarial.  Each ratchets against a floor file
+and written to be adversarial; all 64 of its files now run identically through
+our compiler.  Each ratchets against a floor file
 (`tests/compile_floor.txt`, `tests/cpython_source_floor.txt`); raise one with
 `bash tests/source_probe.sh --record` or
 `bash tests/cpython_source_probe.sh --record` in the commit that earns it.
@@ -176,6 +177,9 @@ f-strings, async, comprehensions, PEP 695 type parameters.
 | `evalexec.asm` | the `compile()`, `exec()` and `eval()` builtins |
 | `srcfile.asm` | `code_from_path`: `./apython foo.py` and import from source |
 | `comperr.asm` | error recording |
+| `unicodename.asm` | **generated** -- the names `\N{...}` resolves |
+| `gen_unicodename.py` | regenerates `unicodename.asm` from `unicodedata` |
+| `uniname.asm` | the search over it, plus the algorithmic CJK family |
 | `dis.asm` | `--dis`, for diffing against `python3 -m dis` |
 | `comptest.asm` | `--selftest-compile` |
 | `lint.py` | static checks, run by `make check` |
@@ -192,9 +196,10 @@ Because every emission routes through it, a forgotten CACHE is not a mistake an
 emitter can make. Its numbers are CPython's, taken from the running
 interpreter's own modules rather than transcribed.
 
-Regenerate with `python3 compiler/gen_tables.py > compiler/tables.asm` and
-`python3 compiler/gen_prule.py`; both outputs are committed, so building never
-needs Python.
+Regenerate with `python3 compiler/gen_tables.py > compiler/tables.asm`,
+`python3 compiler/gen_prule.py`, and
+`python3 compiler/gen_unicodename.py > compiler/unicodename.asm`; all three
+outputs are committed, so building never needs Python.
 
 **Gates:** `make check-source` and `make check-cpython-source` (both corpora
 compiled by this compiler and diffed against `python3` — where nearly every bug

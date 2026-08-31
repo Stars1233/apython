@@ -1,6 +1,7 @@
 # CPython-corpus files that run under our own compiler.
 # Recorded by: bash tests/cpython_source_probe.sh --record
 # A name here that stops running is a regression.
+test_int
 test_float
 test_bool
 test_str_ops

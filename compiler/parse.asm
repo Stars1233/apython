@@ -1170,6 +1170,8 @@ DEF_FUNC par_escape_one, PSE_FRAME
     je .e_hex4
     cmp al, 'U'
     je .e_hex8
+    cmp al, 'N'
+    je .e_named
 .e_unknown:
     ; An unrecognised escape keeps the backslash, as Python does (with a
     ; SyntaxWarning it does not raise on).
@@ -1231,6 +1233,50 @@ DEF_FUNC par_escape_one, PSE_FRAME
     and esi, 0xff
     call buf_push_u8
     jmp .pe_done
+
+.e_named:
+    ; \N{NAME}.  In a bytes literal it is not an escape at all -- CPython
+    ; leaves the backslash in place with a warning -- so only str takes it.
+    cmp qword [rbp - PSE_BYTES], 0
+    jne .e_unknown
+    mov r12, [rbp - PSE_P]
+    cmp r12, [rbp - PSE_END]
+    jae .pe_bad
+    cmp byte [r12], '{'
+    jne .pe_bad
+    inc r12
+    mov r13, r12                        ; where the name starts
+.named_scan:
+    cmp r12, [rbp - PSE_END]
+    jae .pe_bad
+    cmp byte [r12], '}'
+    je .named_close
+    inc r12
+    jmp .named_scan
+.named_close:
+    mov rdi, r13
+    mov rsi, r12
+    sub rsi, r13
+    inc r12
+    mov [rbp - PSE_P], r12
+    extern uniname_lookup
+    call uniname_lookup
+    cmp rax, -1
+    je .named_unknown
+    mov rsi, rax
+    mov rdi, [rbp - PSE_OUT]
+    call par_utf8_emit
+    jmp .pe_done
+.named_unknown:
+    mov rdi, rbx
+    CSTRING rsi, "unknown Unicode character name"
+    call par_syntax_error
+    xor eax, eax
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
 
 .e_hex2:
     mov r13d, 2
