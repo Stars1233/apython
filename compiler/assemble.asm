@@ -425,7 +425,7 @@ END_FUNC asm_effect_var
 ;; ============================================================================
 ;; asm_effect(CompUnit *u, uint64_t i, int jump) -> eax = net stack effect
 ;; ============================================================================
-DEF_FUNC asm_effect, 8          ; a frame, because .variable now calls out
+DEF_FUNC asm_effect, 16         ; a frame, because .variable now calls out
     mov rax, [rdi + CompUnit.instrs + Buf.data]
     mov r8, rsi
     shl r8, INSTR_SHIFT
@@ -1384,7 +1384,7 @@ END_FUNC asm_kinds_bytes
 EV2_OUT   equ 8
 EV2_V     equ 16
 EV2_MSB   equ 24
-EV2_FRAME equ 24          ; + 2 pushes = 40
+EV2_FRAME equ 32          ; + 2 pushes = 40
 DEF_FUNC asm_exc_varint, EV2_FRAME
     push rbx
     push r12
@@ -1748,7 +1748,7 @@ extern dis_num
 extern dis_puts
 DH_UNIT  equ 8
 DH_I     equ 16
-DH_FRAME equ 24           ; + 2 pushes = 40
+DH_FRAME equ 32           ; + 2 pushes = 40
 DEF_FUNC asm_debug_handlers, DH_FRAME
     push rbx
     push r12

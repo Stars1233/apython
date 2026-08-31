@@ -1621,7 +1621,7 @@ END_FUNC cg_s_import
 CNC_COMP  equ 8
 CNC_UNIT  equ 16
 CNC_I     equ 24
-CNC_FRAME equ 40          ; + 2 pushes = 56
+CNC_FRAME equ 48          ; + 2 pushes = 56
 DEF_FUNC cg_name_component, CNC_FRAME
     push rbx
     push r12
@@ -1994,7 +1994,8 @@ END_FUNC cg_fromlist_star
 ;; An absent clause is node 0 and emits nothing, which is how a missing `else`
 ;; stays distinct from an empty one.
 ;; ============================================================================
-DEF_FUNC cg_block, CST_FRAME
+DEF_FUNC cg_block               ; no frame: it uses no slot, and one here
+                                ; would misalign rsp at the cg_body call
     test rdx, rdx
     jz .empty
     call cg_body

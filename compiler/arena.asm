@@ -225,7 +225,7 @@ END_FUNC arena_init
 ;; path links a fresh chunk, sized to whichever is larger of ARENA_CHUNK and
 ;; the request itself, so an oversized single allocation still works.
 ;; ============================================================================
-DEF_FUNC arena_alloc, 8         ; the 8 pads the slow path's 3 pushes to 16
+DEF_FUNC arena_alloc, 8         ; lint: pushes=3 -- the slow path's, at .new_chunk
     add rsi, 7
     and rsi, -8                         ; round the request up to 8
 

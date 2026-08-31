@@ -683,7 +683,7 @@ CIN_P     equ 16
 CIN_LEN   equ 24
 CIN_BUF   equ 56
 CIN_FRAME equ 56          ; + 2 pushes = 72 -> padded below
-DEF_FUNC comp_intern_name, 72
+DEF_FUNC comp_intern_name, 80
     push rbx
     push r12
     mov [rbp - CIN_COMP], rdi

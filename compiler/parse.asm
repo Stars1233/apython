@@ -1021,7 +1021,7 @@ END_FUNC pf_name
 ;; Append one code point as UTF-8.  \x, \u, \U and \N all funnel through here,
 ;; so a string literal's bytes and its code-point count agree by construction.
 ;; ============================================================================
-DEF_FUNC par_utf8_emit, 8
+DEF_FUNC par_utf8_emit, 16
     push rbx
     push r12
     mov rbx, rdi
@@ -3181,7 +3181,7 @@ END_FUNC pf_yield
 ;; `(await f()) ** 2` and `await -x` is rejected.
 ;; ============================================================================
 PAW_LINE  equ 8
-PAW_FRAME equ 16          ; + 1 push = 24
+PAW_FRAME equ 24          ; + 1 push = 24
 DEF_FUNC_LOCAL pf_await, PAW_FRAME
     push rbx
     mov rbx, rdi

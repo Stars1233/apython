@@ -350,7 +350,7 @@ section .text
 ;; ============================================================================
 DA_CODE  equ 8
 DA_I     equ 16
-DA_FRAME equ 24           ; + 2 pushes = 40
+DA_FRAME equ 32           ; + 2 pushes = 40
 DEF_FUNC code_dump_all, DA_FRAME
     push rbx
     push r12

@@ -189,7 +189,12 @@ def check_alignment(files):
     bad = []
     for path in files:
         src = open(path).read()
-        for m in re.finditer(r'^(DEF_FUNC(?:_LOCAL)?)\s+(\w+)(?:\s*,\s*([^\s;]+))?\s*(?:;.*)?$(.*?)^END_FUNC',
+        # `.` matches a newline under re.S, so a trailing `;.*` comment used to
+        # swallow the rest of the file: a DEF_FUNC whose declaration carried a
+        # comment took everything to the last END_FUNC as its body, and 87 of
+        # 290 functions were never examined at all.  The other checks in this
+        # file already use [^\n]* for the same reason.
+        for m in re.finditer(r'^(DEF_FUNC(?:_LOCAL)?)\s+(\w+)(?:\s*,\s*([^\s;]+))?[^\n]*$(.*?)^END_FUNC',
                              src, re.M | re.S):
             name, frame, body = m.group(2), m.group(3), m.group(4)
             if not re.search(r'^\s*call\s', body, re.M):
@@ -207,16 +212,22 @@ def check_alignment(files):
                         n = eval(expr, {"__builtins__": {}}, {})   # plain arithmetic only
                     except Exception:
                         continue                    # symbolic (struct sizes); skip
-            # Count pushes before the first non-push instruction.
-            p = 0
-            for line in body.strip().splitlines():
-                s = line.split(';')[0].strip()
-                if not s:
-                    continue
-                if s.startswith('push '):
-                    p += 1
-                else:
-                    break
+            # Count pushes before the first non-push instruction.  A function
+            # whose pushes are on a branch rather than in the prologue can say
+            # so on its declaration; arena_alloc is the only one that needs to.
+            ann = re.search(r';[^\n]*\blint:\s*pushes=(\d+)', m.group(0).split('\n')[0])
+            if ann:
+                p = int(ann.group(1))
+            else:
+                p = 0
+                for line in body.strip().splitlines():
+                    s = line.split(';')[0].strip()
+                    if not s or s.startswith('%'):
+                        continue        # a preprocessor directive, not code
+                    if s.startswith('push '):
+                        p += 1
+                    else:
+                        break
             if (n + 8 * p) % 16:
                 bad.append((path, 0,
                             "rsp misaligned at calls in %s (frame %d + %d pushes)" % (name, n, p),
@@ -225,7 +236,11 @@ def check_alignment(files):
 
 def main():
     os.chdir(ROOT)
-    files = sorted(glob.glob('compiler/*.asm'))
+    # compiler/ plus the one file in src/ that reaches the compiler: main holds
+    # argc and argv across compile_source, and DEF_FUNC main + 5 pushes enters
+    # glibc's strtod misaligned on any source file with a float literal.  The
+    # rest of src/ predates the alignment rule and would drown the signal.
+    files = sorted(glob.glob('compiler/*.asm')) + ['src/main.asm']
     fields = dword_fields(['compiler/compiler.inc', 'include/object.inc',
                            'include/frame.inc', 'include/types.inc'])
     problems = (check_field_widths(files, fields) + check_alignment(files)
