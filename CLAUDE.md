@@ -32,7 +32,7 @@ its `Lib/` (default `~/tmp/repo/cpython/Lib`).  It compares against
 `tests/stdlib_floor.txt` and fails when a module that used to import stops, or
 when a new one crashes.  Raise the floor with
 `bash tests/stdlib_probe.sh --record` in the commit that earns it.
-`make check` runs 233 test files (256 results: the async tests run against the
+`make check` runs 250 test files (275 results: the async tests run against the
 default, poll and io_uring backends); `make check-cpython` runs all 64 files
 under `tests/cpython/`, none of them tolerated as failing.
 
