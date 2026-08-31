@@ -13,7 +13,6 @@ extern gc_dealloc
 extern ap_free
 extern obj_decref
 extern obj_dealloc
-extern str_from_cstr
 extern obj_hash
 extern int_to_i64
 extern fatal_error
@@ -67,11 +66,11 @@ DEF_FUNC tuple_new
 .try_pool_3:
     lea rcx, [rel tuple_pool_3_head]
 .try_pool:
-    mov rax, [rcx]              ; head
+    mov rax, [rcx + TUPLE_POOL_HEAD]  ; head
     test rax, rax
     jz .alloc_fresh
     mov rdx, [rax + PyObject.ob_refcnt]  ; next link
-    mov [rcx], rdx
+    mov [rcx + TUPLE_POOL_HEAD], rdx
     dec dword [rcx + 8]         ; count--
     mov qword [rax + PyObject.ob_refcnt], 1
     mov rbx, rax
@@ -204,6 +203,11 @@ END_FUNC tuple_len
 ; DECREF_VAL each fat item, then free self or return to pool
 TUPLE_POOL_MAX equ 16
 
+; Same (head, count) record shape as the frame pools, and the same reason to
+; name the offset rather than write [rcx + 8].
+TUPLE_POOL_HEAD  equ 0
+TUPLE_POOL_COUNT equ 8
+
 DEF_FUNC tuple_dealloc
     push rbx
     push r12
@@ -240,7 +244,7 @@ DEF_FUNC tuple_dealloc
 .pool_3:
     lea rcx, [rel tuple_pool_3_head]
 .try_push:
-    cmp dword [rcx + 8], TUPLE_POOL_MAX
+    cmp dword [rcx + TUPLE_POOL_COUNT], TUPLE_POOL_MAX
     jge .free_self
     ; Untrack from GC before pooling
     push rcx              ; save pool head ptr (caller-saved, clobbered by gc_untrack)
@@ -248,9 +252,9 @@ DEF_FUNC tuple_dealloc
     call gc_untrack
     pop rcx               ; restore pool head ptr
     ; Push to pool: reuse ob_refcnt as next-pointer
-    mov rdx, [rcx]
+    mov rdx, [rcx + TUPLE_POOL_HEAD]
     mov [rbx + PyObject.ob_refcnt], rdx
-    mov [rcx], rbx
+    mov [rcx + TUPLE_POOL_HEAD], rbx
     inc dword [rcx + 8]         ; count++
     pop r13
     pop r12

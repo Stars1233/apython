@@ -26,17 +26,14 @@
 
 extern str_new_heap
 extern ap_malloc
-extern str_from_cstr_heap
 extern obj_str
 extern obj_as_index
 extern int_fits_i64
-extern int_to_i64
 extern float_format_spec
 extern ap_memcpy
 extern obj_decref
 extern raise_exception
 extern exc_ValueError_type
-extern exc_TypeError_type
 extern str_type
 extern int_type
 extern bool_type

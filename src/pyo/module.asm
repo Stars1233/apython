@@ -255,8 +255,6 @@ extern obj_repr
 extern type_type
 extern raise_exception
 extern exc_TypeError_type
-extern kw_names_pending
-extern obj_generic_attr
 
 section .text
 

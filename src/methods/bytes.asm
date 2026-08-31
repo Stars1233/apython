@@ -29,12 +29,8 @@ extern bool_false
 extern bool_true
 
 ; Set entry layout constants (must match set.asm)
-SET_ENTRY_HASH    equ 0
-SET_ENTRY_KEY     equ 8
-SET_ENTRY_SIZE    equ 16
 
 ; --- moved to a sibling file by the split ---
-extern methods_init
 
 section .text
 

@@ -11,14 +11,12 @@
 
 extern int_promote_mpz
 extern str_from_cstr
-extern str_from_data
 extern bool_true
 extern bool_false
 extern none_singleton
 extern int_from_i64
 extern int_type
 extern raise_exception
-extern exc_TypeError_type
 extern exc_ZeroDivisionError_type
 extern exc_ValueError_type
 extern obj_incref

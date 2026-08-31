@@ -23,7 +23,6 @@ extern ast_make
 extern ast_mark
 extern ast_obj
 extern ast_push
-extern ast_at
 extern buf_free
 extern buf_init
 extern buf_push_u8
@@ -33,10 +32,8 @@ extern comp_lex_span
 
 extern par_expr
 extern par_finish_list
-extern par_kind
 extern par_syntax_error
 
-extern exc_SyntaxError_type
 
 BP_NONE equ 0
 

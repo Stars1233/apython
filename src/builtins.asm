@@ -115,6 +115,10 @@ extern exc_TimeoutError_type
 ; --- moved to a sibling file by the split ---
 extern builtin___build_class__
 
+extern none_type
+
+extern int_type
+
 section .text
 
 ;; ============================================================================
@@ -845,80 +849,6 @@ DEF_FUNC builtin_range
     ret
 END_FUNC builtin_range
 
-;; ============================================================================
-;; builtin_type(PyObject **args, int64_t nargs) -> PyObject*
-;; type(obj) -> returns obj's type
-;; ============================================================================
-DEF_FUNC builtin_type
-
-    cmp rsi, 1
-    jne .type_error
-
-    mov rsi, rdi               ; save args ptr
-    mov rdi, [rsi]             ; obj = args[0] payload
-
-    ; SmallInt check (tag at args[0]+8)
-    V_TEST_INT_M [rsi], r11      ; args[0] an int immediate?
-    jae .type_smallint
-
-    ; Float check
-    V_TEST_F64_M [rsi], r11      ; args[0] a float?
-    jbe .type_float
-
-    ; Bool check
-
-    ; None check
-
-    mov rax, [rdi + PyObject.ob_type]
-    ; See value_type: the heaptype metatype is not a language-visible type.
-    extern user_type_metatype
-    lea rcx, [rel user_type_metatype]
-    cmp rax, rcx
-    jne .type_have_type
-    lea rax, [rel type_type]
-.type_have_type:
-    INCREF rax
-
-    mov edx, TAG_PTR
-    leave
-    ret
-
-.type_smallint:
-    extern int_type
-    lea rax, [rel int_type]
-    INCREF rax
-    mov edx, TAG_PTR
-    leave
-    ret
-
-.type_float:
-    lea rax, [rel float_type]
-    INCREF rax
-    mov edx, TAG_PTR
-    leave
-    ret
-
-.type_bool:
-    extern bool_type
-    lea rax, [rel bool_type]
-    INCREF rax
-    mov edx, TAG_PTR
-    leave
-    ret
-
-.type_none:
-    extern none_type
-    lea rax, [rel none_type]
-    INCREF rax
-    mov edx, TAG_PTR
-    leave
-    ret
-
-.type_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "type() takes 1 argument"
-    call raise_exception
-END_FUNC builtin_type
 
 ;; ============================================================================
 ;; builtin_isinstance(PyObject **args, int64_t nargs) -> PyObject*

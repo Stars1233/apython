@@ -28,12 +28,8 @@ extern bool_false
 extern bool_true
 
 ; Set entry layout constants (must match set.asm)
-SET_ENTRY_HASH    equ 0
-SET_ENTRY_KEY     equ 8
-SET_ENTRY_SIZE    equ 16
 
 ; --- moved to a sibling file by the split ---
-extern methods_init
 
 section .text
 
@@ -154,15 +150,6 @@ DEF_FUNC int_method_bit_count
     ret
 END_FUNC int_method_bit_count
 
-;; ============================================================================
-;; int_method___index__(args, nargs) -> SmallInt
-;; ============================================================================
-DEF_FUNC int_method___index__
-    call int_method_self_to_i64
-    RET_TAG_SMALLINT
-    leave
-    ret
-END_FUNC int_method___index__
 
 ;; ============================================================================
 ;; int_method_conjugate(args, nargs) -> SmallInt
@@ -175,26 +162,13 @@ DEF_FUNC int_method_conjugate
     ret
 END_FUNC int_method_conjugate
 
-;; ============================================================================
-;; int_method___abs__(args, nargs) -> SmallInt
-;; ============================================================================
-DEF_FUNC int_method___abs__
-    call int_method_self_to_i64
-    mov rcx, rax
-    neg rcx
-    cmovs rcx, rax              ; rcx = abs(self)
-    mov rax, rcx
-    RET_TAG_SMALLINT
-    leave
-    ret
-END_FUNC int_method___abs__
+
 
 ;; ============================================================================
 ;; int_method_to_bytes(args, nargs) -> bytes
 ;; args[0]=self, args[1]=length, args[2]=byteorder ("big" or "little")
 ;; Optional kwarg: signed=False (via kw_names_pending)
 ;; ============================================================================
-extern kw_names_pending
 
 ITB_SELF  equ 8
 ITB_LEN   equ 16
@@ -477,27 +451,7 @@ DEF_FUNC int_classmethod_from_bytes, IFB_FRAME
     call raise_exception
 END_FUNC int_classmethod_from_bytes
 
-;; ============================================================================
-;; int_method___int__(args, nargs) -> SmallInt
-;; ============================================================================
-DEF_FUNC int_method___int__
-    call int_method_self_to_i64
-    RET_TAG_SMALLINT
-    leave
-    ret
-END_FUNC int_method___int__
 
-;; ============================================================================
-;; int_method___float__(args, nargs) -> Float
-;; ============================================================================
-DEF_FUNC int_method___float__
-    call int_method_self_to_i64
-    cvtsi2sd xmm0, rax
-    movq rax, xmm0             ; raw double bits
-    mov edx, TAG_FLOAT
-    leave
-    ret
-END_FUNC int_method___float__
 
 
 ;; ############################################################################
@@ -554,50 +508,9 @@ DEF_FUNC_BARE float_method_conjugate
     ret
 END_FUNC float_method_conjugate
 
-;; ============================================================================
-;; float_method___int__(args, nargs) -> SmallInt
-;; ============================================================================
-DEF_FUNC_BARE float_method___int__
-    mov rax, [rdi]              ; args[0] = self
-    V_TO_F64 rax                ; raw double bits
-    movq xmm0, rax
-    cvttsd2si rax, xmm0        ; truncate to i64
-    mov edx, TAG_SMALLINT
-    ret
-END_FUNC float_method___int__
 
-;; ============================================================================
-;; float_method___float__(args, nargs) -> Float (return self)
-;; ============================================================================
-DEF_FUNC_BARE float_method___float__
-    mov rax, [rdi]              ; args[0] = self
-    V_TO_F64 rax                ; raw double bits
-    mov edx, TAG_FLOAT
-    ret
-END_FUNC float_method___float__
 
-;; ============================================================================
-;; float_method___trunc__(args, nargs) -> SmallInt
-;; ============================================================================
-DEF_FUNC_BARE float_method___trunc__
-    mov rax, [rdi]              ; args[0] = self
-    V_TO_F64 rax                ; raw double bits
-    movq xmm0, rax
-    cvttsd2si rax, xmm0        ; truncate to i64
-    mov edx, TAG_SMALLINT
-    ret
-END_FUNC float_method___trunc__
 
-;; ============================================================================
-;; float_method___abs__(args, nargs) -> Float
-;; ============================================================================
-DEF_FUNC_BARE float_method___abs__
-    mov rax, [rdi]              ; args[0] = self
-    V_TO_F64 rax                ; raw double bits
-    btr rax, 63                 ; clear sign bit
-    mov edx, TAG_FLOAT
-    ret
-END_FUNC float_method___abs__
 
 ;; ============================================================================
 ;; float_method_as_integer_ratio(args, nargs) -> 2-tuple (numerator, denominator)

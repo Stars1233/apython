@@ -21,7 +21,6 @@
 extern ap_malloc
 extern ap_free
 extern tuple_new
-extern obj_decref
 extern obj_dealloc
 extern obj_incref
 extern object_type

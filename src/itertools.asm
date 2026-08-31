@@ -8,8 +8,6 @@
 
 extern ap_malloc
 extern gc_alloc
-extern gc_track
-extern gc_dealloc
 extern ap_free
 extern obj_incref
 extern obj_decref
@@ -25,7 +23,6 @@ extern current_exception
 extern tuple_new
 extern list_new
 extern list_append
-extern int_from_i64
 extern int_to_i64
 extern list_method_sort
 extern type_type

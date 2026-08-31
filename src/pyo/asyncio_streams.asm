@@ -17,10 +17,8 @@
 extern ap_malloc
 extern ap_free
 extern obj_incref
-extern obj_decref
 extern obj_dealloc
 extern str_from_cstr
-extern str_from_cstr_heap
 extern str_new_heap
 extern int_from_i64
 extern none_singleton
@@ -33,7 +31,6 @@ extern tuple_new
 extern raise_exception
 extern exc_TypeError_type
 extern exc_OSError_type
-extern exc_ValueError_type
 extern sys_socket
 extern sys_connect
 extern sys_bind
@@ -44,8 +41,6 @@ extern sys_close
 extern sys_read
 extern sys_write
 extern sys_fcntl
-extern sys_recvfrom
-extern sys_sendto
 
 ; Socket constants
 AF_INET     equ 2
@@ -97,114 +92,6 @@ END_FUNC stream_reader_dealloc
 ;; stream_reader_read(args, nargs) — builtin for reader.read(n)
 ;; args[0] = nbytes (int)
 ;; Returns a ReadAwaitable
-SR_FRAME equ 8
-DEF_FUNC stream_reader_read, SR_FRAME
-    push rbx
-    push r12
-
-    ; self is bound via method_new, so args[0] = self, args[1] = n
-    ; But builtin_func_call strips self for us... Actually method_call prepends self.
-    ; method_call: (self, args, nargs) → prepends self to args
-    ; Actually: builtin methods via method_new get self in first arg slot
-    ; With method_call: args[0] = n, self is prepended → args shifted
-    ; Let's handle: self = args[0], n = args[1] for method calls
-    ; Actually, method_call gives (args, nargs) where args[0] = self, args[1..] = user args
-
-    cmp rsi, 1
-    jb .srr_default
-    ; nargs >= 1: self is implicit via method
-
-    ; Get self (the reader object — from method binding)
-    ; Actually with builtin_func_call: (self, args, nargs) -> strips self, passes (args, nargs)
-    ; So args[0] = n (the user arg)
-    cmp rsi, 1
-    je .srr_got_n
-    ; nargs=0: use default buffer size
-.srr_default:
-    mov ebx, STREAM_BUFSIZE
-    jmp .srr_create
-
-.srr_got_n:
-    ; args[0] = n
-    mov rax, [rdi]             ; args[0]
-    V_UNPACK rax, rdx
-    cmp edx, TAG_SMALLINT
-    jne .srr_type_error
-    mov ebx, eax               ; nbytes
-    jmp .srr_create
-
-.srr_type_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "read() argument must be an integer"
-    call raise_exception
-
-.srr_create:
-    ; We need the fd from self — but self isn't passed to us directly
-    ; by builtin_func_call. We need to use method_call pattern where
-    ; self is prepended. Let me re-check the method binding approach.
-    ; When getattr returns a bound method (method_new), method_call
-    ; prepends self as args[0]. So nargs includes self.
-    ; Re-read: builtin_func_call strips self, passes remaining args.
-    ; Hmm, actually builtin_func_call: (self, args, nargs) where self
-    ; is the bound object. It transforms: rdi=args, rsi=nargs (dropping self).
-    ; So we DON'T get self in args[]. We need a different approach.
-    ;
-    ; Look at fileobj pattern: it uses method_new which creates a bound method.
-    ; method_call: prepends im_self to args, then calls im_func's tp_call.
-    ; builtin_func_call's tp_call signature: (self, args, nargs)
-    ; But builtin_func_call does: rdi=args+16, rsi=nargs-1 — it STRIPS self.
-    ;
-    ; So for a method (method_new(func, reader)):
-    ; - method_call prepends reader → args = [reader, n], nargs = 2
-    ; - builtin_func_call strips reader → rdi=&args[1]=&n, rsi=1
-    ; - BUT: we lost access to self!
-    ;
-    ; The fileobj pattern uses a DIFFERENT approach: the builtin accesses
-    ; self via the method object on the stack. Let me re-check.
-    ; Actually in fileobj, the write builtin expects self in args:
-    ;   args[0] = data (the stripped args after builtin_func_call)
-    ; And the fd comes from... the method binding?
-    ;
-    ; Looking again at fileobj_write: it reads args[0] as the data to write.
-    ; The fd comes from the SELF which is NOT passed after stripping.
-    ; Hmm, let me re-read builtin_func_call more carefully.
-
-    ; OK, I need to understand the actual calling convention.
-    ; Let's just use the pattern where args[0] = self (reader), args[1] = n
-    ; because method_call prepends self. If builtin_func_call strips it,
-    ; we need to look one slot before args[0] to find self.
-    ; That's how fileobj does it:
-    ;   mov rdi, [rdi - 16]  ; self = args[-1] (the stripped self)
-    ; Actually no. Let me just check.
-    jmp .srr_create2
-
-.srr_create2:
-    ; For now: create ReadAwaitable with fd from the reader
-    ; We need fd. Since builtin_func_call doesn't give us self,
-    ; let's store fd in a closure-like way. Actually, method_call
-    ; in this runtime: self is args[0], user args start at args[1].
-    ; builtin_func_call does NOT strip self — it passes (args, nargs)
-    ; directly to func_ptr. Let me verify by reading the code.
-    ;
-    ; Given the complexity, let's use a simpler approach:
-    ; stream_reader_getattr returns bound methods where the builtin
-    ; closure captures the fd. But we can't do closures in asm easily.
-    ;
-    ; Simplest approach: DON'T use builtin_func_call. Instead, implement
-    ; tp_call on the StreamReader type itself. When called with args,
-    ; the method name is looked up via getattr, which returns an awaitable.
-    ;
-    ; Actually, the simplest approach for the asyncio module is:
-    ; reader.read(n) → getattr returns a ReadAwaitable directly.
-    ; That avoids bound methods entirely.
-
-    ; Let's abort this approach and implement it via getattr returning awaitables.
-    RET_NULL
-    pop r12
-    pop rbx
-    leave
-    ret
-END_FUNC stream_reader_read
 
 ;; stream_reader_getattr(self, name) -> fat value
 ;; Dispatches: "read" -> returns ReadAwaitable, "close" -> close fd

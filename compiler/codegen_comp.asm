@@ -21,7 +21,6 @@
 extern asm_assemble
 extern ast_at
 extern ast_child
-extern ast_obj_at
 extern cg_const
 extern ast_obj
 extern cg_emit
@@ -48,7 +47,6 @@ extern cg_push_handler
 extern cg_pop_handler
 extern none_singleton
 
-extern exc_SyntaxError_type
 
 ; --- Named frame-layout constants ---
 CM2_LINE  equ 32

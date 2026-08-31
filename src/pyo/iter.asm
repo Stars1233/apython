@@ -6,12 +6,8 @@
 
 extern ap_malloc
 extern gc_alloc
-extern gc_track
-extern gc_dealloc
 extern ap_free
 extern obj_decref
-extern str_from_cstr
-extern int_from_i64
 extern fatal_error
 extern list_type
 extern tuple_type
@@ -553,7 +549,6 @@ END_FUNC range_obj_reversed
 ;; Returns "range(start, stop)" or "range(start, stop, step)" if step != 1
 ;; ============================================================================
 extern str_from_cstr_heap
-extern obj_repr
 ROR_BUF equ 8
 ROR_POS equ 16
 ROR_FRAME equ 16

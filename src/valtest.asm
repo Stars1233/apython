@@ -12,7 +12,6 @@
 %include "object.inc"
 
 extern sys_write
-extern int_from_i64_gmp
 extern int_to_i64
 extern obj_dealloc
 extern val_from_i64

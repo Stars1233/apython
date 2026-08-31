@@ -172,7 +172,6 @@ kw_table:               ; { packed text, token, length }
     dq 0x000000646c656979
     dw TOK_YIELD             , 5
     dd 0
-KW_ENT_SIZE equ 16
 
 align 8
 global kw_index
@@ -593,7 +592,6 @@ op_table:               ; { packed text, length, token }
     dd 0x0000007e
     db 1, TOK_TILDE                ; '~'
     dw 0
-OP_ENT_SIZE equ 8
 
 align 8
 global op_index

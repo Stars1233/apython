@@ -16,11 +16,9 @@ extern ap_malloc
 extern gc_alloc
 extern gc_track
 extern gc_untrack
-extern gc_dealloc
 extern ap_free
 extern obj_incref
 extern obj_dealloc
-extern obj_decref
 extern str_from_cstr
 extern none_singleton
 extern bool_type
@@ -31,7 +29,6 @@ extern slice_traverse
 extern slice_clear_gc
 extern raise_exception
 extern exc_TypeError_type
-extern exc_AttributeError_type
 extern ap_strcmp
 
 ;; ============================================================================

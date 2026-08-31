@@ -45,9 +45,7 @@ extern str_type
 extern staticmethod_type
 extern classmethod_type
 extern property_type
-extern property_descr_get
 extern eval_frame
-extern frame_new
 extern frame_free
 
 ;; ============================================================================

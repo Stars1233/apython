@@ -23,7 +23,6 @@ extern tuple_type_call
 extern obj_dealloc
 
 ; Set entry layout constants (must match set.asm)
-SET_ENTRY_HASH    equ 0
 SET_ENTRY_KEY     equ 8
 SET_ENTRY_SIZE    equ 16
 extern set_add
@@ -32,7 +31,6 @@ extern set_remove
 extern set_new
 
 ; --- moved to a sibling file by the split ---
-extern methods_init
 
 section .text
 

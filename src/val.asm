@@ -12,7 +12,6 @@ extern none_singleton
 extern bool_true
 extern bool_false
 extern obj_incref
-extern obj_decref
 extern int_from_i64_gmp
 
 ;; ============================================================================
@@ -120,71 +119,6 @@ DEF_FUNC val_to_i64
     ret
 END_FUNC val_to_i64
 
-;; ============================================================================
-;; val_pack(rdi: payload, esi: tag) -> rax: Value
-;;
-;; MIGRATION SHIM.  Converts an old (payload, tag) pair into a Value.
-;; Ownership transfers 1:1: an owned (payload, tag) yields an owned Value.
-;;
-;; None, True and False have no tag of their own: they are ordinary heap
-;; singletons, so they travel the TAG_PTR path.  This whole function
-;; disappears in P6.
-;; ============================================================================
-DEF_FUNC val_pack
-    cmp esi, TAG_PTR
-    je .passthru
-    cmp esi, TAG_SMALLINT
-    je .smallint
-    cmp esi, TAG_FLOAT
-    je .float
-    cmp esi, TAG_NULL
-    je .null
-    cmp esi, TAG_SLEEP
-    je .sleep
-    cmp esi, TAG_IO_WAIT
-    je .iowait
-.null:
-    xor eax, eax
-    leave
-    ret
-
-.passthru:
-    mov rax, rdi
-    leave
-    ret
-
-.smallint:
-    mov rax, rdi
-    V_FROM_I64 rax, rcx, .smallint_box
-    leave
-    ret
-.smallint_box:
-    call int_from_i64_gmp
-    leave
-    ret
-
-.float:
-    mov rax, rdi
-    V_FROM_F64 rax, rcx
-    leave
-    ret
-
-.sleep:
-    mov rax, rdi
-    and rax, [rel v_mask48]
-    mov rcx, V_SLEEP_LO
-    or rax, rcx
-    leave
-    ret
-
-.iowait:
-    mov rax, rdi
-    and rax, [rel v_mask48]
-    mov rcx, V_IOWAIT_LO
-    or rax, rcx
-    leave
-    ret
-END_FUNC val_pack
 
 ;; ============================================================================
 ;; val_unpack(rdi: Value) -> rax: payload, edx: tag

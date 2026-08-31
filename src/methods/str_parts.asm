@@ -36,15 +36,10 @@ extern int_to_i64
 extern raise_exception
 extern exc_TypeError_type
 extern exc_ValueError_type
-extern str_byte_to_cp
 
 ; Set entry layout constants (must match set.asm)
-SET_ENTRY_HASH    equ 0
-SET_ENTRY_KEY     equ 8
-SET_ENTRY_SIZE    equ 16
 
 ; --- moved to a sibling file by the split ---
-extern methods_init
 extern str_method_join
 
 section .text

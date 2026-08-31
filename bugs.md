@@ -70,6 +70,23 @@ one-line fix.
   Everything observable through `_weakref` works; a C extension expecting the
   slot would not.
 
+- **`int` and `float` have no `__abs__`, `__int__`, `__float__`, `__index__` or
+  `__trunc__`.**  `abs(-5)` works, `(-5).__abs__()` is an AttributeError, and
+  the stdlib asks by name -- `operator.index` goes through `__index__`, and a
+  class delegating to `int.__int__` finds nothing.  `src/methods/num.asm`
+  carried eight implementations of these, written but never registered and
+  never converted to the one-Value return convention; they also truncated a
+  big int through `self_to_i64`, so they have been deleted.
+
+  Registering the *builtins* under those names instead does not work, which is
+  the reason this is still open: `builtin_abs` and `builtin_int_fn` resolve a
+  non-exact operand through the numeric protocol, which for a subclass finds
+  the very dunder being registered.  `int(M(0))` where `class M(int)` then
+  recurses until the stack goes.  They need implementations that read the
+  value out of the `PyIntObject` directly, the way `int()` does for an exact
+  int -- the trap CLAUDE.md records as "the thunk must call the *defining*
+  type's slot, not the argument's".
+
 - **`object.__lt__`, `__le__`, `__gt__` and `__ge__` are missing.**  They
   exist in CPython and always return NotImplemented.  Adding them here would
   shadow a builtin base's own comparison, because a heaptype's slot is

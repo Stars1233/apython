@@ -20,8 +20,6 @@ extern bool_true
 extern bool_false
 extern ap_malloc
 extern gc_alloc
-extern gc_track
-extern gc_dealloc
 extern ap_free
 extern obj_incref
 extern obj_decref
@@ -35,13 +33,10 @@ extern ap_strcmp
 extern raise_exception
 extern raise_exception_obj
 extern exc_new
-extern exc_TypeError_type
 extern exc_RuntimeError_type
 extern exc_CancelledError_type
-extern exc_StopIteration_type
 extern current_exception
 extern eval_exception_unwind
-extern coro_type
 extern builtin_func_new
 extern getenv
 

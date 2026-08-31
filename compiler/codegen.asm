@@ -798,8 +798,6 @@ END_FUNC cg_e_unaryop
 ;; The value that decided the result is what the expression evaluates to, which
 ;; is why the operand is duplicated rather than tested and discarded.
 CB_ALT   equ 8           ; the else / cleanup label
-CB_NODE  equ 16
-CB_COMP  equ 24
 CB_END   equ 32
 CB_I     equ 40
 CB_N     equ 48
@@ -1299,8 +1297,6 @@ END_FUNC cg_has_star
 ;; A tuple takes the list route and is converted at the end, which is what
 ;; CPython does and why INTRINSIC_LIST_TO_TUPLE exists.
 ;; ============================================================================
-CS_COMP  equ 8
-CS_UNIT  equ 16
 CS_I     equ 32
 CS_N     equ 40
 CS_LINE  equ 48

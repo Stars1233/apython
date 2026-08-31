@@ -19,14 +19,10 @@
 %include "compiler.inc"
 
 extern ast_at
-extern ast_child
 extern ast_make
 extern ast_mark
-extern ast_obj
 extern ast_push
-extern comp_intern
 extern comp_error
-extern exc_SyntaxError_type
 extern par_advance
 extern par_expect
 extern par_expr
@@ -35,7 +31,6 @@ extern par_kind
 extern par_peek
 extern par_suite_into
 extern par_syntax_error
-extern par_statement_any
 extern ap_memcmp
 extern par_name_obj
 extern par_exprlist_stmt

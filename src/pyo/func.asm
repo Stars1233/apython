@@ -14,7 +14,6 @@ extern ap_malloc
 extern gc_alloc
 extern gc_track
 extern gc_dealloc
-extern ap_free
 extern obj_decref
 extern obj_incref
 extern obj_dealloc
@@ -1282,7 +1281,6 @@ extern ap_malloc
 extern gc_alloc
 extern gc_track
 extern gc_dealloc
-extern ap_free
 extern obj_incref
 extern obj_dealloc
 extern str_from_cstr
@@ -1319,45 +1317,7 @@ DEF_FUNC cell_new
     ret
 END_FUNC cell_new
 
-;; ============================================================================
-;; cell_get(PyCellObject *cell) -> PyObject*
-;; Returns the contained object (may be NULL). Does NOT INCREF.
-;; ============================================================================
-DEF_FUNC_BARE cell_get
-    mov rax, [rdi + PyCellObject.ob_ref]
-    V_UNPACK rax, rdx
-    ret
-END_FUNC cell_get
 
-;; ============================================================================
-;; cell_set(PyCellObject *cell, PyObject *obj)
-;; Sets the contained object, DECREFs old, INCREFs new.
-;; ============================================================================
-DEF_FUNC cell_set
-    push rbx
-    push r12
-    push r13
-
-    mov rbx, rdi               ; cell
-    mov r12, rsi               ; new payload
-    mov r13, rdx               ; new tag
-
-    ; INCREF the new value while its tag is still around, then pack it
-    INCREF_VAL r12, r13
-    V_PACK r12, r13
-
-    ; Release the old one
-    mov rdi, [rbx + PyCellObject.ob_ref]
-    DECREF_V rdi, rsi
-
-    mov [rbx + PyCellObject.ob_ref], r12
-
-    pop r13
-    pop r12
-    pop rbx
-    leave
-    ret
-END_FUNC cell_set
 
 ;; ============================================================================
 ;; cell_dealloc(PyCellObject *self)

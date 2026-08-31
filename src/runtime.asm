@@ -31,7 +31,6 @@ SYS_close           equ 3
 SYS_fstat           equ 5
 SYS_mmap            equ 9
 SYS_munmap          equ 11
-SYS_lseek           equ 8
 SYS_socket          equ 41
 SYS_connect         equ 42
 SYS_accept4         equ 288
@@ -39,7 +38,6 @@ SYS_sendto          equ 44
 SYS_recvfrom        equ 45
 SYS_bind            equ 49
 SYS_listen          equ 50
-SYS_getsockname     equ 51
 SYS_setsockopt      equ 54
 SYS_fcntl           equ 72
 SYS_ioctl           equ 16
@@ -87,13 +85,6 @@ DEF_FUNC_BARE sys_fstat
     ret
 END_FUNC sys_fstat
 
-; sys_lseek(int fd, off_t offset, int whence) -> off_t
-DEF_FUNC_BARE sys_lseek
-    mov rax, SYS_lseek
-    ; rdi=fd, rsi=offset, rdx=whence already in place
-    syscall
-    ret
-END_FUNC sys_lseek
 
 ; sys_exit(int code) -> noreturn
 DEF_FUNC_BARE sys_exit
@@ -194,12 +185,6 @@ DEF_FUNC_BARE sys_setsockopt
     ret
 END_FUNC sys_setsockopt
 
-; sys_getsockname(fd, addr*, addrlen*) -> int
-DEF_FUNC_BARE sys_getsockname
-    mov rax, SYS_getsockname
-    syscall
-    ret
-END_FUNC sys_getsockname
 
 ; sys_fcntl(fd, cmd, arg) -> int
 DEF_FUNC_BARE sys_fcntl
@@ -567,11 +552,6 @@ DEF_FUNC fatal_error
     call sys_exit
 END_FUNC fatal_error
 
-; runtime_error(const char *msg)
-; For now, same as fatal_error
-DEF_FUNC_BARE runtime_error
-    jmp fatal_error
-END_FUNC runtime_error
 
 ; error_unimplemented_opcode(int opcode)
 ; Reports unimplemented bytecode opcode and exits

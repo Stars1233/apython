@@ -109,7 +109,6 @@ CN_RIGHT equ 0     ; container payload
 CN_LEFT  equ 8     ; value payload
 CN_RTAG  equ 16    ; container tag
 CN_LTAG  equ 24    ; value tag
-CN_INV   equ 32    ; invert flag
 CN_SIZE  equ 40
 
 ;; ============================================================================

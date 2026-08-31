@@ -20,9 +20,7 @@ extern arena_alloc
 extern arena_free
 extern arena_init
 extern buf_free
-extern buf_grow
 extern buf_init
-extern buf_push_ptr
 extern buf_push_u32
 extern buf_push_u8
 extern buf_reserve

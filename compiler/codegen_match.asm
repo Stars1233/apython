@@ -38,7 +38,6 @@ extern ast_at
 extern comp_keep
 extern ast_child
 extern ast_obj_at
-extern cg_block
 extern cg_body
 extern cg_const
 extern cg_emit
@@ -49,7 +48,6 @@ extern cg_label_bind
 extern cg_label_new
 extern cg_nameop
 extern comp_error
-extern comp_intern_cstr
 extern exc_SyntaxError_type
 extern none_singleton
 extern bool_true
@@ -605,7 +603,6 @@ PAT_MAX_ITEMS equ 64
 ;; MATCH_SEQUENCE leaves the subject in place and pushes a flag, so the first
 ;; two failures still have the subject to drop -- that is ladder depth 1.
 ;; ============================================================================
-PS2_COMP  equ 8
 PS2_FAIL  equ 32
 PS2_LINE  equ 40
 PS2_I     equ 48

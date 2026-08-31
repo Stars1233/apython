@@ -36,13 +36,8 @@ extern list_sorting_error
 extern obj_dealloc
 
 ; Set entry layout constants (must match set.asm)
-SET_ENTRY_HASH    equ 0
-SET_ENTRY_KEY     equ 8
-SET_ENTRY_SIZE    equ 16
 
 ; --- moved to a sibling file by the split ---
-extern add_method_to_dict_checked
-extern methods_init
 
 section .text
 

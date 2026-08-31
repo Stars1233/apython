@@ -9,13 +9,11 @@
 extern ap_malloc
 extern ap_free
 extern ap_memcpy
-extern ap_strcmp
 extern obj_decref
 extern obj_incref
 extern obj_dealloc
 extern str_from_cstr_heap
 extern str_new_heap
-extern int_from_i64
 extern dict_new
 extern dict_set
 extern dict_get
@@ -28,7 +26,6 @@ extern type_type
 extern builtin_func_new
 extern sre_utf8_codepoint_to_byte
 extern method_new
-extern sre_pattern_type
 extern sre_strcmp
 
 ; ============================================================================

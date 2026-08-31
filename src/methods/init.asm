@@ -53,9 +53,6 @@ extern str_dunder_str
 extern tuple_dunder_iter
 
 ; Set entry layout constants (must match set.asm)
-SET_ENTRY_HASH    equ 0
-SET_ENTRY_KEY     equ 8
-SET_ENTRY_SIZE    equ 16
 
 ; --- moved to a sibling file by the split ---
 extern bytes_method_count
@@ -1515,6 +1512,7 @@ DEF_FUNC methods_init
     lea rdx, [rel int_method_to_bytes]
     call add_method_to_dict
 
+
     ; Add from_bytes as classmethod
     lea rdi, [rel int_classmethod_from_bytes]
     lea rsi, [rel mn_from_bytes]
@@ -1583,6 +1581,7 @@ DEF_FUNC methods_init
     lea rsi, [rel mn_hex]
     lea rdx, [rel float_method_hex]
     call add_method_to_dict
+
 
     ; Add fromhex as classmethod
     lea rdi, [rel float_classmethod_fromhex]

@@ -12,7 +12,6 @@ extern ap_memcpy
 extern ap_strcmp
 extern bool_true
 extern bool_false
-extern int_from_i64
 extern int_to_i64
 extern fatal_error
 extern raise_exception

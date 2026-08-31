@@ -33,7 +33,6 @@ extern cg_unit_free
 extern cg_unit_init
 extern comp_error
 extern cg_unwind_finallys
-extern comp_intern
 extern comp_intern_cstr
 extern obj_decref
 extern str_from_cstr_heap
@@ -595,14 +594,11 @@ END_FUNC cg_closure_tuple
 ;; COPY_FREE_VARS writes into the last n slots and derives that from
 ;; nlocalsplus, which is why the layout puts free variables last.
 ;; ============================================================================
-CB_COMP   equ 8
 CB_UNIT   equ 16
-CB_NODE   equ 24
 CB_LAMBDA equ 32
 CB_SCOPE  equ 40
 CB_LINE   equ 48
 CB_I      equ 56
-CB_N      equ 64
 CB_NAME   equ 72
 CB_ARGS   equ 80
 CB_FRAME  equ 88          ; + 3 pushes = 112

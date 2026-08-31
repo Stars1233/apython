@@ -47,7 +47,6 @@ extern list_contains
 extern dict_tp_iter
 extern type_type
 extern user_type_metatype
-extern ap_strcmp
 extern dict_new
 
 ; ============================================================================
@@ -55,7 +54,6 @@ extern dict_new
 ; ============================================================================
 
 ; --- moved to a sibling file by the split ---
-extern builtin_abs
 
 section .text
 

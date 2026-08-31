@@ -27,7 +27,6 @@ extern slice_type
 extern slice_indices
 extern ap_strcmp
 extern builtin_func_new
-extern method_new
 
 section .text
 
@@ -608,21 +607,6 @@ DEF_FUNC_LOCAL bytes_repr_impl, 1024
     ret
 END_FUNC bytes_repr_impl
 
-;; ============================================================================
-;; bytes_decode(PyBytesObject *self) -> PyStrObject*
-;; Decode bytes as UTF-8 string
-;; ============================================================================
-DEF_FUNC bytes_decode
-    ; Simply create a string from the bytes data
-    ; Assumes UTF-8 encoding
-    lea rdi, [rdi + PyBytesObject.data]
-    mov rsi, [rdi - PyBytesObject.data + PyBytesObject.ob_size]
-    ; rdi = data ptr, rsi = length
-    ; str_new(data, length)
-    call str_new
-    leave
-    ret
-END_FUNC bytes_decode
 
 ;; ============================================================================
 ;; bytes_getattr(PyBytesObject *self, PyObject *name) -> PyObject*
@@ -2055,17 +2039,6 @@ DEF_FUNC memoryview_type_call, MV_FRAME
     call raise_exception
 END_FUNC memoryview_type_call
 
-;; ============================================================================
-;; memoryview_dealloc(obj)
-;; ============================================================================
-DEF_FUNC memoryview_dealloc
-    mov rdi, [rdi + PyMemoryViewObject.mv_source]
-    call obj_decref
-    ; Free the memoryview itself (rdi was clobbered, but we need original obj)
-    ; Actually, we need the original obj pointer. Rethink:
-    leave
-    ret                                ; leak for now... fix below
-END_FUNC memoryview_dealloc
 
 ;; Proper dealloc:
 DEF_FUNC memoryview_dealloc_proper

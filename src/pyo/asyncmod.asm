@@ -14,14 +14,11 @@
 
 extern ap_malloc
 extern gc_alloc
-extern gc_track
-extern gc_dealloc
 extern ap_free
 extern obj_decref
 extern obj_incref
 extern obj_dealloc
 extern str_from_cstr_heap
-extern float_from_f64
 extern dict_new
 extern dict_set
 extern module_new
@@ -32,19 +29,13 @@ extern raise_exception_obj
 extern exc_TypeError_type
 extern exc_RuntimeError_type
 extern exc_TimeoutError_type
-extern exc_CancelledError_type
-extern exc_new
 extern type_type
-extern coro_type
 extern task_new
-extern task_type
 extern eventloop_init
 extern eventloop_teardown
 extern eventloop_run
 extern eventloop
 extern ready_enqueue
-extern task_add_waiter
-extern str_from_cstr
 extern list_new
 extern list_append
 extern asyncio_open_connection_func

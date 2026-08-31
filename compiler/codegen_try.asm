@@ -31,7 +31,6 @@ extern cg_push_handler
 extern cg_store
 extern comp_error
 
-extern buf_push_u32
 extern buf_push_ptr
 extern none_singleton
 extern cg_const

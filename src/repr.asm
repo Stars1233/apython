@@ -12,7 +12,6 @@
 
 
 ; Set entry layout (must match set.asm)
-SET_ENTRY_HASH    equ 0
 SET_ENTRY_KEY     equ 8
 SET_ENTRY_SIZE    equ 16
 
@@ -23,7 +22,6 @@ extern obj_repr
 extern obj_decref
 extern str_from_cstr_heap
 extern str_type
-extern str_repr
 
 ; Recursion detection for container repr
 ; Simple fixed-size stack of object pointers currently being repr'd.

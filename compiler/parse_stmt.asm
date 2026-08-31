@@ -43,7 +43,6 @@ extern par_soft_keyword_is
 extern ps_match
 extern in_call_public
 
-extern exc_SyntaxError_type
 
 BP_NONE equ 0
 BP_COMPARE equ 12

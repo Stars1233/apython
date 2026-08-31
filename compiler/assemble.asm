@@ -33,7 +33,6 @@ extern code_new
 extern code_spec_clear
 extern comp_error
 extern sym_at
-extern obj_decref
 extern tuple_new
 extern op_meta
 

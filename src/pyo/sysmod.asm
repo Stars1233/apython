@@ -5,17 +5,13 @@
 %include "object.inc"
 
 extern ap_malloc
-extern ap_free
 extern ap_strlen
-extern ap_memcpy
 extern obj_decref
 extern obj_incref
 extern obj_dealloc
-extern str_from_cstr
 extern str_from_cstr_heap
 extern str_new
 extern str_type
-extern sys_write
 extern int_type
 extern bool_type
 extern int_from_i64
@@ -31,10 +27,8 @@ extern list_append
 extern tuple_new
 extern type_type
 extern module_new
-extern module_type
 extern fileobj_new
 extern builtin_func_new
-extern sys_exit
 extern fatal_error
 extern raise_exception
 

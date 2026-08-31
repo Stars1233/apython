@@ -41,13 +41,9 @@ extern obj_dealloc
 extern str_type
 
 ; Set entry layout constants (must match set.asm)
-SET_ENTRY_HASH    equ 0
-SET_ENTRY_KEY     equ 8
-SET_ENTRY_SIZE    equ 16
 
 ; --- moved to a sibling file by the split ---
 extern list_method_insert
-extern methods_init
 
 section .text
 
@@ -598,7 +594,6 @@ FND_SELF  equ 24
 FND_DIR   equ 32
 FND_WPTR  equ 56            ; the 3-word window: 56, 48, 40
 FND_WLEN  equ 48
-FND_WOFF  equ 40
 FND_FRAME equ 64            ; + 0 pushes = 64
 global str_find_impl
 DEF_FUNC str_find_impl, FND_FRAME

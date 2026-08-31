@@ -18,8 +18,6 @@ extern bool_false
 extern type_type
 extern sys_write
 extern sys_close
-extern dict_new
-extern dict_set
 extern builtin_func_new
 
 ; ============================================================================
@@ -338,7 +336,6 @@ END_FUNC fileobj_close_method
 ; args[0] = self (fileobj)
 ; ============================================================================
 extern sys_read
-extern ap_memcpy
 
 FR_FRAME equ 8208  ; 8192 buf + 16 overhead
 DEF_FUNC fileobj_read, FR_FRAME

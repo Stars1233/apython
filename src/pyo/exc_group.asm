@@ -18,8 +18,6 @@ extern ap_free
 extern object_type
 extern ap_malloc
 extern gc_alloc
-extern gc_track
-extern gc_dealloc
 extern ap_strcmp
 extern exc_BaseException_type
 extern exc_Exception_type
@@ -38,11 +36,8 @@ extern obj_decref
 extern obj_dealloc
 extern obj_incref
 extern raise_exception
-extern str_from_cstr
 extern tuple_new
 extern tuple_type
-extern type_getattr
-extern type_repr
 extern type_type
 
 ;; ============================================================================

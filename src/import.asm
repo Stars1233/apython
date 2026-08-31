@@ -8,15 +8,12 @@ extern ap_malloc
 extern ap_free
 extern ap_memcpy
 extern ap_strlen
-extern ap_strcmp
-extern ap_memcmp
 extern obj_decref
 extern obj_incref
 extern obj_dealloc
 extern str_from_cstr_heap
 extern str_new_heap
 extern str_type
-extern int_from_i64
 extern none_singleton
 extern dict_new
 extern dict_get
@@ -26,16 +23,13 @@ extern current_exception
 extern eval_exception_unwind
 extern list_new
 extern list_append
-extern tuple_new
 extern type_type
 extern module_new
-extern module_type
 extern fatal_error
 extern raise_exception
 extern eval_frame
 extern frame_new
 extern frame_free
-extern pyc_read_file
 extern code_from_path
 extern path_is_source
 extern sys_open
@@ -52,9 +46,7 @@ extern marshal_ref_cap
 ; sys module globals
 extern sys_modules_dict
 extern sys_path_list
-extern sys_module_obj
 extern sys_module_init
-extern sys_path_add_script_dir
 
 ; builtins
 extern builtins_dict_global

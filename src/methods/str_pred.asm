@@ -21,7 +21,6 @@ extern ap_malloc
 extern ap_free
 extern ap_memcpy
 extern ap_memset
-extern ap_memcmp
 extern str_new_heap
 extern bool_true
 extern bool_false
@@ -29,17 +28,12 @@ extern int_from_i64
 extern int_to_i64
 extern raise_exception
 extern exc_TypeError_type
-extern exc_ValueError_type
 extern str_byte_to_cp
 extern str_type
 
 ; Set entry layout constants (must match set.asm)
-SET_ENTRY_HASH    equ 0
-SET_ENTRY_KEY     equ 8
-SET_ENTRY_SIZE    equ 16
 
 ; --- moved to a sibling file by the split ---
-extern methods_init
 
 section .text
 

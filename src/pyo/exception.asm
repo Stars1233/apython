@@ -1008,13 +1008,6 @@ DEF_FUNC_BARE type_is_exc_subclass
     ret
 END_FUNC type_is_exc_subclass
 
-; exc_type_from_id(int exc_id) -> PyTypeObject*
-; Look up exception type from EXC_* constant.
-DEF_FUNC_BARE exc_type_from_id
-    lea rax, [rel exception_type_table]
-    mov rax, [rax + rdi*8]
-    ret
-END_FUNC exc_type_from_id
 
 ; exc_type_call(PyTypeObject *type, PyObject **args, int64_t nargs) -> PyObject*
 ; tp_call for exception metatype. Creates an exception instance.

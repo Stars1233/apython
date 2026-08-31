@@ -7,7 +7,6 @@
 
 extern ap_malloc
 extern ap_free
-extern sys_write
 extern str_from_cstr
 extern dict_get
 extern dict_new
@@ -29,26 +28,6 @@ extern type_getattr
 extern type_setattr
 extern type_call
 
-; obj_alloc(size_t size, PyTypeObject *type) -> PyObject*
-; Allocate a new object with refcount=1 and given type
-DEF_FUNC obj_alloc
-    push rbx
-    push r12
-    mov rbx, rdi            ; size
-    mov r12, rsi            ; type
-
-    mov rdi, rbx
-    call ap_malloc
-
-    ; Initialize header
-    mov qword [rax + PyObject.ob_refcnt], 1
-    mov [rax + PyObject.ob_type], r12
-
-    pop r12
-    pop rbx
-    leave
-    ret
-END_FUNC obj_alloc
 
 ; obj_incref(PyObject *obj)
 ; Increment reference count; NULL-safe.
@@ -124,7 +103,6 @@ END_FUNC obj_dealloc
 ; obj_repr(rdi=value) -> PyObject* (string)
 ; Decodes the Value, then dispatches: int immediate → int_repr, pointer → tp_repr.
 DEF_FUNC obj_repr
-    extern str_repr
     V_UNPACK rdi, rsi
 
     cmp esi, TAG_SMALLINT
@@ -1125,46 +1103,6 @@ DEF_FUNC_BARE obj_is_true
     ret
 END_FUNC obj_is_true
 
-; obj_print(PyObject *obj)
-; Print an object's string representation to stdout followed by newline
-DEF_FUNC obj_print
-    push rbx
-    mov rbx, rdi
-
-    ; Get string representation via obj_str(payload, tag)
-    call obj_str
-    test rax, rax
-    jz .print_null
-
-    mov rbx, rax            ; rbx = str obj (heap)
-
-    ; sys_write(1, str_data, ob_size)
-    mov edi, 1
-    lea rsi, [rbx + PyStrObject.data]
-    mov rdx, [rbx + PyStrObject.ob_size]
-    call sys_write
-
-    ; sys_write(1, "\n", 1)
-    mov edi, 1
-    lea rsi, [rel obj_print_newline]
-    mov edx, 1
-    call sys_write
-
-    pop rbx
-    leave
-    ret
-
-.print_null:
-    ; sys_write(1, "<NULL>\n", 7)
-    mov edi, 1
-    lea rsi, [rel obj_print_null_str]
-    mov edx, 7
-    call sys_write
-
-    pop rbx
-    leave
-    ret
-END_FUNC obj_print
 
 ;; ============================================================================
 ;; type_repr(PyObject *type_obj) -> PyStrObject*

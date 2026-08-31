@@ -17,13 +17,9 @@ extern obj_hash
 extern obj_decref
 extern obj_dealloc
 extern str_type
-extern ap_strcmp
-extern ap_memset
 extern fatal_error
 extern raise_exception
-extern exc_KeyError_type
 extern obj_incref
-extern str_from_cstr
 extern type_type
 extern tuple_type
 extern dict_traverse
@@ -113,7 +109,6 @@ END_FUNC dict_alloc_tables
 ;; ============================================================================
 extern kw_names_pending
 extern dict_method_update
-extern ap_strcmp
 
 global dict_type_call
 DEF_FUNC dict_type_call
@@ -562,7 +557,6 @@ END_FUNC dict_resize
 ;; dict_set(rdi=dict, rsi=key Value, rdx=value Value)
 ;; Insert or update a key-value pair.
 ;; ============================================================================
-DS_KTAG equ 16
 DS_DICT  equ 8
 DS_KEY   equ 16
 DS_VAL   equ 24

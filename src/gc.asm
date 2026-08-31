@@ -66,15 +66,6 @@ GEN_ENTRY_SIZE equ 32   ; 4 qwords per generation entry
 
 section .text
 
-; ============================================================================
-; gc_list_init(rdi=sentinel)
-; Initialize a doubly-linked list sentinel to point to itself
-; ============================================================================
-DEF_FUNC_BARE gc_list_init
-    mov [rdi + PyGC_Head.gc_next], rdi
-    mov [rdi + PyGC_Head.gc_prev], rdi
-    ret
-END_FUNC gc_list_init
 
 ; ============================================================================
 ; gc_list_append(rdi=node, rsi=list_sentinel)
@@ -112,16 +103,6 @@ DEF_FUNC_BARE gc_list_remove
     ret
 END_FUNC gc_list_remove
 
-; ============================================================================
-; gc_list_is_empty(rdi=sentinel) -> eax (1=empty, 0=not)
-; ============================================================================
-DEF_FUNC_BARE gc_list_is_empty
-    mov rax, [rdi + PyGC_Head.gc_next]
-    cmp rax, rdi
-    sete al
-    movzx eax, al
-    ret
-END_FUNC gc_list_is_empty
 
 ; ============================================================================
 ; gc_list_merge(rdi=from_sentinel, rsi=to_sentinel)
@@ -821,7 +802,6 @@ DEF_FUNC tuple_clear
 END_FUNC tuple_clear
 
 ; ---- dict_traverse / dict_clear ----
-extern ap_memset
 
 DEF_FUNC dict_traverse
     push rbx

@@ -8,7 +8,6 @@ extern ap_malloc
 extern obj_decref
 extern obj_incref
 extern str_from_cstr_heap
-extern int_from_i64
 extern float_from_f64
 extern dict_new
 extern dict_set

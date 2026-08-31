@@ -48,34 +48,10 @@ extern opcode_dispatch_table
 ;; Stack layout constants for binary_op / compare_op generic paths.
 ;; After 4 pushes: right, right_tag, left, left_tag
 ;; Offsets relative to rsp immediately after the 4 pushes.
-BO_RIGHT equ 0
-BO_RTAG  equ 8
-BO_LEFT  equ 16
-BO_LTAG  equ 24
-BO_SIZE  equ 32
-
-;; Stack layout constants for op_format_value (DEF_FUNC, 48 bytes).
-FV_ARG     equ 8
-FV_HASSPEC equ 16
-FV_SPEC    equ 24
-FV_VALUE   equ 32
-FV_STAG    equ 40    ; fmt_spec tag
-FV_VTAG    equ 48    ; value tag
-FV_FRAME   equ 48
 
 ;; Stack layout constants for op_build_string (DEF_FUNC, 16 bytes).
-BS_COUNT   equ 8
-BS_ACCUM   equ 16
-BS_FRAME   equ 16
 
 ;; Stack layout constants for op_send (DEF_FUNC, 48 bytes).
-SND_ARG    equ 8
-SND_SENT   equ 16
-SND_RECV   equ 24
-SND_RESULT equ 32
-SND_STAG   equ 40    ; sent_value tag
-SND_RTAG   equ 48    ; result tag
-SND_FRAME  equ 48
 
 ;; Stack layout constants for op_match_keys (DEF_FUNC, 32 bytes).
 MK_KEYS    equ 8
@@ -85,8 +61,6 @@ MK_NKEYS   equ 32
 MK_FRAME   equ 32
 
 ; --- moved to a sibling file by the split ---
-extern op_build_string
-extern op_format_value
 extern op_send
 
 section .text

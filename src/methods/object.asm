@@ -19,7 +19,6 @@ extern obj_decref
 extern obj_repr
 extern obj_str
 extern str_type
-extern dict_get
 extern dict_set
 extern dict_del
 extern none_singleton
@@ -29,25 +28,22 @@ extern int_from_i64
 extern raise_exception
 extern exc_TypeError_type
 extern int_type
-extern object_type
 extern obj_is_true
 extern notimpl_singleton
-extern bytes_type
 extern dict_type
-extern float_type
 extern list_type
 extern obj_dealloc
-extern set_type
 extern tuple_type
 
 ; Set entry layout constants (must match set.asm)
-SET_ENTRY_HASH    equ 0
-SET_ENTRY_KEY     equ 8
-SET_ENTRY_SIZE    equ 16
 
 ; --- moved to a sibling file by the split ---
-extern add_method_to_dict
-extern methods_init
+
+extern bytes_type
+
+extern float_type
+
+extern set_type
 
 section .text
 
@@ -631,43 +627,6 @@ DEF_FUNC object_method_hash
     call raise_exception
 END_FUNC object_method_hash
 
-;; generic_method_getitem(args, nargs): args[0]=self, args[1]=key
-DEF_FUNC generic_method_getitem
-    cmp rsi, 2
-    jne .gmg_error
-    mov rax, [rdi]
-    V_TEST_PTR rax, rcx
-    ja .gmg_error
-    test rax, rax
-    jz .gmg_error
-    mov rsi, [rdi + 8]
-    mov rdi, rax
-    mov rcx, [rax + PyObject.ob_type]
-    mov rdx, [rcx + PyTypeObject.tp_as_mapping]
-    test rdx, rdx
-    jz .gmg_seq
-    mov rdx, [rdx + PyMappingMethods.mp_subscript]
-    test rdx, rdx
-    jz .gmg_seq
-    call rdx
-    leave
-    ret
-.gmg_seq:
-    mov rdx, [rcx + PyTypeObject.tp_as_sequence]
-    test rdx, rdx
-    jz .gmg_error
-    mov rdx, [rdx + PySequenceMethods.sq_item]
-    test rdx, rdx
-    jz .gmg_error
-    V_TO_I64 rsi
-    call rdx
-    leave
-    ret
-.gmg_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "object is not subscriptable"
-    call raise_exception
-END_FUNC generic_method_getitem
 
 ;; ============================================================================
 ;; dict.__getitem__ / __setitem__ / __delitem__
@@ -755,69 +714,7 @@ DEF_FUNC dict_dunder_delitem
     call raise_exception
 END_FUNC dict_dunder_delitem
 
-;; generic_method_setitem(args, nargs): args[0]=self, args[1]=key, args[2]=value
-DEF_FUNC generic_method_setitem
-    cmp rsi, 3
-    jne .gms_error
-    mov rax, [rdi]
-    V_TEST_PTR rax, rcx
-    ja .gms_error
-    test rax, rax
-    jz .gms_error
-    mov rcx, [rax + PyObject.ob_type]
-    mov rcx, [rcx + PyTypeObject.tp_as_mapping]
-    test rcx, rcx
-    jz .gms_error
-    mov rcx, [rcx + PyMappingMethods.mp_ass_subscript]
-    test rcx, rcx
-    jz .gms_error
-    mov rsi, [rdi + 8]
-    mov rdx, [rdi + 16]
-    mov rdi, rax
-    call rcx
-    lea rax, [rel none_singleton]
-    inc qword [rax + PyObject.ob_refcnt]
-    mov edx, TAG_PTR
-    leave
-    V_PACK rax, rdx
-    ret
-.gms_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "object does not support item assignment"
-    call raise_exception
-END_FUNC generic_method_setitem
 
-;; generic_method_delitem(args, nargs): args[0]=self, args[1]=key
-DEF_FUNC generic_method_delitem
-    cmp rsi, 2
-    jne .gmd_error
-    mov rax, [rdi]
-    V_TEST_PTR rax, rcx
-    ja .gmd_error
-    test rax, rax
-    jz .gmd_error
-    mov rcx, [rax + PyObject.ob_type]
-    mov rcx, [rcx + PyTypeObject.tp_as_mapping]
-    test rcx, rcx
-    jz .gmd_error
-    mov rcx, [rcx + PyMappingMethods.mp_ass_subscript]
-    test rcx, rcx
-    jz .gmd_error
-    mov rsi, [rdi + 8]
-    xor edx, edx                ; a NULL value means delete
-    mov rdi, rax
-    call rcx
-    lea rax, [rel none_singleton]
-    inc qword [rax + PyObject.ob_refcnt]
-    mov edx, TAG_PTR
-    leave
-    V_PACK rax, rdx
-    ret
-.gmd_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "object does not support item deletion"
-    call raise_exception
-END_FUNC generic_method_delitem
 
 ;; generic_method_hash(args, nargs): args[0]=self
 DEF_FUNC generic_method_hash

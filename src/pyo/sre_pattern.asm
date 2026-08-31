@@ -8,24 +8,19 @@
 extern ap_malloc
 extern ap_free
 extern ap_realloc
-extern ap_memcpy
 extern obj_decref
 extern obj_incref
 extern obj_dealloc
 extern str_from_cstr_heap
 extern str_new_heap
 extern str_concat
-extern int_from_i64
 extern dict_new
-extern dict_set
-extern dict_get
 extern list_new
 extern list_append
 extern tuple_new
 extern none_singleton
 extern raise_exception
 extern exc_TypeError_type
-extern exc_ValueError_type
 extern type_type
 extern str_type
 extern builtin_func_new
@@ -45,7 +40,6 @@ extern sre_utf8_codepoint_to_byte
 
 ; SRE match object
 extern sre_match_new
-extern sre_match_type
 
 ; ============================================================================
 ; Forward declarations

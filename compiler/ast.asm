@@ -331,8 +331,6 @@ section .text
 extern ap_malloc
 extern ap_realloc
 extern ap_free
-extern ap_memcpy
-extern ap_memset
 
 ; --- Named frame-layout constants ---
 

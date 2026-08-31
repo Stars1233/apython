@@ -19,9 +19,7 @@ extern ap_malloc
 extern ap_free
 extern ap_realloc
 extern ap_memcpy
-extern ap_memcmp
 extern obj_incref
-extern obj_decref
 extern raise_exception
 extern exc_RuntimeError_type
 
@@ -2998,60 +2996,6 @@ DEF_FUNC sre_search, 32
     ret
 END_FUNC sre_search
 
-; ============================================================================
-; sre_count(SRE_State* state, u32* pattern, i64 maxcount) -> i64
-; Count successive matches of a single-char pattern.
-; Used by REPEAT_ONE optimization.
-; ============================================================================
-DEF_FUNC sre_count
-    push rbx
-    push r12
-    push r13
-    push r14
-
-    mov r12, rdi               ; state
-    mov rbx, rsi               ; pattern
-    mov r14, rdx               ; maxcount
-
-    mov r13, [r12 + SRE_State.str_pos]
-    xor ecx, ecx               ; count = 0
-
-    ; Get string length
-    mov rdi, r12
-    call sre_string_len
-    mov r8, rax                ; string length
-
-.count_loop:
-    cmp rcx, r14
-    jge .count_done
-    cmp r13, r8
-    jge .count_done
-
-    ; Try match at pos
-    push rcx
-    push r8
-    mov [r12 + SRE_State.str_pos], r13
-    mov rdi, r12
-    mov rsi, rbx
-    call sre_match
-    pop r8
-    pop rcx
-    test eax, eax
-    jz .count_done
-
-    mov r13, [r12 + SRE_State.str_pos]
-    inc rcx
-    jmp .count_loop
-
-.count_done:
-    mov rax, rcx
-    pop r14
-    pop r13
-    pop r12
-    pop rbx
-    leave
-    ret
-END_FUNC sre_count
 
 ; ============================================================================
 ; sre_utf8_codepoint_to_byte(char* str, i64 byte_len, i64 target_cp_idx,

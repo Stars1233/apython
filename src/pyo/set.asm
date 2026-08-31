@@ -16,10 +16,8 @@ extern obj_incref
 extern str_type
 extern eval_exception_unwind
 extern obj_richcompare_bool
-extern ap_strcmp
 extern ap_memset
 extern fatal_error
-extern str_from_cstr
 extern type_type
 extern set_traverse
 extern set_clear_gc

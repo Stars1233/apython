@@ -22,7 +22,6 @@
 extern ap_malloc
 extern ap_free
 extern gc_alloc
-extern gc_track
 extern obj_incref
 extern obj_decref
 extern obj_dealloc

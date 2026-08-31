@@ -19,7 +19,6 @@ extern str_from_cstr_heap
 extern bool_true
 extern bool_false
 extern none_singleton
-extern bool_from_int
 extern type_type
 
 ; GMP functions
@@ -27,8 +26,6 @@ extern bool_type
 extern __gmpz_init
 extern __gmpz_init_set_si
 extern __gmpz_clear
-extern __gmpz_set_si
-extern __gmpz_set
 extern __gmpz_get_si
 extern __gmpz_fits_slong_p
 extern __gmpz_tdiv_ui
@@ -36,8 +33,6 @@ extern __gmpz_get_str
 extern __gmpz_add
 extern __gmpz_sub
 extern __gmpz_mul
-extern __gmpz_tdiv_q
-extern __gmpz_tdiv_r
 extern __gmpz_fdiv_q
 extern __gmpz_fdiv_r
 extern __gmpz_neg
@@ -56,40 +51,10 @@ extern __gmpz_get_d
 
 extern raise_exception
 extern strlen
-extern exc_TypeError_type
 extern exc_ValueError_type
 extern exc_ZeroDivisionError_type
 extern float_from_f64
 
-;; ============================================================================
-;; int_new_from_mpz - internal: alloc int obj, init mpz, copy source
-;; Input:  rdi = ptr to source mpz_t
-;; Output: rax = new PyIntObject*
-;; ============================================================================
-DEF_FUNC_LOCAL int_new_from_mpz
-    push rbx
-    push r12
-    mov rbx, rdi
-    mov edi, PyIntObject_size
-    call ap_malloc
-    mov r12, rax
-    mov qword [r12 + PyObject.ob_refcnt], 1
-    lea rax, [rel int_type]
-    mov [r12 + PyObject.ob_type], rax
-    mov qword [r12 + PyIntObject.compact], 0  ; GMP-backed
-    INT_NEED_MPZ r12
-    lea rdi, [r12 + PyIntObject.mpz]
-    call __gmpz_init wrt ..plt
-    INT_NEED_MPZ r12
-    lea rdi, [r12 + PyIntObject.mpz]
-    mov rsi, rbx
-    call __gmpz_set wrt ..plt
-    mov rax, r12
-    pop r12
-    pop rbx
-    leave
-    ret
-END_FUNC int_new_from_mpz
 
 ;; ============================================================================
 
@@ -206,55 +171,6 @@ DEF_FUNC_BARE smallint_to_pyint
     jmp int_from_i64_gmp
 END_FUNC smallint_to_pyint
 
-;; ============================================================================
-;; int_from_cstr(const char *str, int base) -> PyIntObject*
-;; Create integer from C string. Returns NULL on parse failure.
-;; ============================================================================
-DEF_FUNC int_from_cstr
-    push rbx
-    push r12
-    push r13
-    and rsp, -16           ; align for GMP calls
-    mov rbx, rdi
-    mov r13d, esi
-    mov edi, PyIntObject_size
-    call ap_malloc
-    mov r12, rax
-    mov qword [r12 + PyObject.ob_refcnt], 1
-    lea rax, [rel int_type]
-    mov [r12 + PyObject.ob_type], rax
-    mov qword [r12 + PyIntObject.compact], 0  ; GMP-backed
-    INT_NEED_MPZ r12
-    lea rdi, [r12 + PyIntObject.mpz]
-    call __gmpz_init wrt ..plt
-    INT_NEED_MPZ r12
-    lea rdi, [r12 + PyIntObject.mpz]
-    mov rsi, rbx
-    mov edx, r13d
-    call __gmpz_set_str wrt ..plt
-    test eax, eax
-    jnz .parse_fail
-    mov rax, r12
-    lea rsp, [rbp - 24]
-    pop r13
-    pop r12
-    pop rbx
-    leave
-    ret
-.parse_fail:
-    INT_NEED_MPZ r12
-    lea rdi, [r12 + PyIntObject.mpz]
-    call __gmpz_clear wrt ..plt
-    mov rdi, r12
-    call ap_free
-    RET_NULL
-    lea rsp, [rbp - 24]
-    pop r13
-    pop r12
-    pop rbx
-    leave
-    ret
-END_FUNC int_from_cstr
 
 ;; ============================================================================
 ;; int_from_cstr_base(char *str, int base) -> PyObject* or NULL

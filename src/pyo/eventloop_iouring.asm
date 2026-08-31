@@ -14,7 +14,6 @@ extern sys_munmap
 extern sys_close
 extern ready_enqueue
 extern ap_malloc
-extern ap_free
 extern none_singleton
 
 ; mmap constants

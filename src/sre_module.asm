@@ -14,16 +14,13 @@ extern obj_decref
 extern obj_incref
 extern obj_dealloc
 extern str_from_cstr_heap
-extern int_from_i64
 extern dict_new
 extern dict_set
-extern dict_get
 extern module_new
 extern builtin_func_new
 extern none_singleton
 extern raise_exception
 extern exc_TypeError_type
-extern exc_ValueError_type
 extern list_type
 extern tuple_type
 

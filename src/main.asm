@@ -21,7 +21,6 @@ extern frame_new
 extern frame_free
 extern frame_pool_drain
 extern eval_frame
-extern pyc_read_file
 extern code_from_path
 extern fatal_error
 extern obj_decref

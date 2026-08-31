@@ -46,13 +46,10 @@ extern bool_true
 extern bool_false
 extern int_from_i64
 extern str_new_heap
-extern str_from_cstr
 extern tuple_new
 extern bytes_from_data
 extern ap_malloc
 extern gc_alloc
-extern gc_track
-extern gc_dealloc
 extern ap_free
 extern obj_dealloc
 extern ap_realloc

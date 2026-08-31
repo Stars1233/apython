@@ -136,19 +136,13 @@ extern exc_set_context
 extern obj_decref
 extern obj_incref
 extern obj_dealloc
-extern obj_str
 extern sys_write
 extern sys_exit
 extern str_type
-extern str_from_cstr
 extern none_singleton
 
 ; Exception type singletons (for raising)
 extern exc_TypeError_type
-extern exc_ValueError_type
-extern exc_BaseException_type
-extern exc_BaseExceptionGroup_type
-extern exc_Exception_type
 extern exc_ExceptionGroup_type
 
 ; ExceptionGroup support

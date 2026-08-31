@@ -14,9 +14,6 @@ extern ap_memmove
 extern ap_memcpy
 extern obj_decref
 extern obj_dealloc
-extern str_from_cstr
-extern str_new
-extern obj_repr
 extern fatal_error
 extern raise_exception
 extern exc_IndexError_type
@@ -38,11 +35,7 @@ extern c_recursion_depth
 extern exc_RecursionError_type
 extern int_fits_i64
 extern str_type
-extern float_type
 extern bool_type
-extern none_type
-extern float_compare
-extern obj_is_true
 extern list_sorting_error
 
 ;; ============================================================================

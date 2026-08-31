@@ -40,7 +40,6 @@ extern comp_error
 
 extern ap_free
 extern ap_malloc
-extern ap_memcpy
 extern buf_free
 extern buf_init
 extern buf_push_u8
@@ -1473,7 +1472,6 @@ END_FUNC par_string_body
 ;; whole run is consumed here, which is why it happens in the prefix handler
 ;; rather than as an infix operator -- there is no operator to speak of.
 ;; ============================================================================
-PS2_COMP  equ 8
 PS2_LINE  equ 16
 PS2_BYTES equ 24
 PS2_BUF   equ 64         ; a Buf at [rbp - 64]

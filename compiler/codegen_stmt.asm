@@ -21,7 +21,6 @@ extern ast_child
 extern ast_obj_at
 extern sym_at
 extern comp_intern_cstr
-extern cg_children
 extern cg_const
 extern comp_keep
 extern cg_emit
@@ -34,7 +33,6 @@ extern cg_expr
 extern cg_label_bind
 extern cg_label_new
 extern cg_name
-extern ast_obj
 extern cg_nameop
 extern cg_unwind_finallys
 extern cg_s_asyncfor
@@ -48,9 +46,7 @@ extern cg_s_return
 extern comp_error
 
 extern comp_empty_string
-extern comp_intern
 extern none_singleton
-extern obj_decref
 extern str_from_cstr_heap
 extern tuple_new
 
