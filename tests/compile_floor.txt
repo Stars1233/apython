@@ -10,6 +10,7 @@ test_async_coro
 test_async_for
 test_async_gen_await
 test_async_gen
+test_async_gen_sleep
 test_async_run
 test_async_tasks
 test_async_wait_for

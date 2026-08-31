@@ -304,7 +304,7 @@ DEF_FUNC async_gen_iternext
 END_FUNC async_gen_iternext
 
 ;; ============================================================================
-;; ags_iternext(AsyncGenASend *self) -> fat value or NULL
+;; ags_iternext(AsyncGenASend *self) -> one Value, or 0
 ;; Called by SEND loop. Drives the async generator.
 ;;
 ;; State machine:
@@ -313,7 +313,8 @@ END_FUNC async_gen_iternext
 ;;   2 (closed)   → raise StopAsyncIteration
 ;;
 ;; rdi = AsyncGenASend wrapper
-;; Returns: (rax=payload, edx=tag) or (rax=0, edx=0) for exhaustion
+;; Returns: a Value in rax, or 0 for exhaustion.  tp_iternext's contract is one
+;; Value; every producer packs and every consumer unpacks exactly once.
 ;; ============================================================================
 DEF_FUNC ags_iternext
     push rbx
@@ -450,7 +451,10 @@ DEF_FUNC ags_iternext
     ret
 
 .agsi_passthrough:
-    V_UNPACK rax, rdx
+    ; .agsi_yielded already packed this, and tp_iternext's contract is one
+    ; Value -- op_send unpacks what it gets back.  Decoding here as well left a
+    ; pointer intact but stripped the tag off the SLEEP and IO_WAIT sentinels,
+    ; so the event loop read a nanosecond count as an object pointer.
     pop r12
     pop rbx
     leave
