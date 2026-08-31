@@ -54,6 +54,16 @@ CG_AWITH_MARK equ 0x7ffffffe
 ; have to reconstruct a partly-matched exception group, and Python does not
 ; define what that means, so CPython rejects the attempt outright.
 CG_ESTAR_MARK equ 0x7ffffffd
+; The exception-path copy of a finally body runs with the two words
+; PUSH_EXC_INFO left on the stack -- the previous exception state, then the
+; exception itself.  Leaving the clause early has to take them down, and the
+; block stack is the only place that knows they are there.  CPython records the
+; same thing as a FINALLY_END fblock.
+CG_FINEND_MARK equ 0x7ffffffc
+; A duplicated finally body emitted with a pending return value underneath it.
+; A `break`, `continue` or `return` written inside that body discards the value
+; on its way out -- CPython's POP_VALUE fblock.
+CG_POPVAL_MARK equ 0x7ffffffb
 
 ; --- Named frame-layout constants ---
 CT2_COMP  equ 8
@@ -104,6 +114,27 @@ DEF_FUNC_BARE cg_finally_pop
     dec qword [rdi + CompUnit.finallys + Buf.len]
     ret
 END_FUNC cg_finally_pop
+
+;; ============================================================================
+;; cg_finally_push_here(CompUnit *u, uint32_t block)
+;; As cg_finally_push, but stamps the entry with the handler that is current
+;; *now* rather than with its parent.
+;;
+;; cg_finally_push takes the parent because leaving a block early has to emit
+;; its cleanup outside the block's own protected region.  The POP_VALUE
+;; sentinel is not a protected region: cg_unwind_finallys pushes it around a
+;; finally body it is already emitting under the enclosing handler, so taking
+;; the parent again would put the two instructions one region too far out.
+;; ============================================================================
+DEF_FUNC cg_finally_push_here, 16
+    mov edx, [rdi + CompUnit.cur_handler]
+    shl rdx, 32
+    or rsi, rdx
+    lea rdi, [rdi + CompUnit.finallys]
+    call buf_push_ptr
+    leave
+    ret
+END_FUNC cg_finally_push_here
 
 ;; ============================================================================
 ;; cg_unwind_finallys(Comp *c, CompUnit *u, uint64_t down_to, int value_on_top)
@@ -215,6 +246,10 @@ DEF_FUNC cg_unwind_finallys, UF_FRAME
     ; finally body.
     cmp edx, CG_ESTAR_MARK
     je .in_except_star
+    cmp edx, CG_FINEND_MARK
+    je .a_finally_end
+    cmp edx, CG_POPVAL_MARK
+    je .a_pop_value
     xor r8d, r8d
     cmp edx, CG_WITH_MARK
     je .a_with
@@ -263,6 +298,59 @@ DEF_FUNC cg_unwind_finallys, UF_FRAME
     xor r8d, r8d
     call comp_error
     jmp .fail
+
+.a_finally_end:
+    ; PUSH_EXC_INFO left the previous exception state, then the exception, on
+    ; the stack.  Drop the exception and restore the state; with a return value
+    ; on top, each of those has to reach past it, which is the pair of SWAPs
+    ; CPython's FINALLY_END fblock emits.
+    cmp qword [rbp - UF_VAL], 0
+    je .fe_no_swap1
+    mov rdi, r12
+    mov esi, OP_SWAP
+    mov edx, 2
+    xor ecx, ecx
+    call cg_emit
+.fe_no_swap1:
+    mov rdi, r12
+    mov esi, OP_POP_TOP
+    xor edx, edx
+    xor ecx, ecx
+    call cg_emit
+    cmp qword [rbp - UF_VAL], 0
+    je .fe_no_swap2
+    mov rdi, r12
+    mov esi, OP_SWAP
+    mov edx, 2
+    xor ecx, ecx
+    call cg_emit
+.fe_no_swap2:
+    mov rdi, r12
+    mov esi, OP_POP_EXCEPT
+    xor edx, edx
+    xor ecx, ecx
+    call cg_emit
+    or byte [rax + Instr.flags], IF_NOLINE
+    jmp .loop
+
+.a_pop_value:
+    ; A return value is pending underneath this copy of the finally body, and
+    ; a break, continue or return inside the body discards it on the way out.
+    ; With a value of its own on top, lift that out of the way first.
+    cmp qword [rbp - UF_VAL], 0
+    je .pv_no_swap
+    mov rdi, r12
+    mov esi, OP_SWAP
+    mov edx, 2
+    xor ecx, ecx
+    call cg_emit
+.pv_no_swap:
+    mov rdi, r12
+    mov esi, OP_POP_TOP
+    xor edx, edx
+    xor ecx, ecx
+    call cg_emit
+    jmp .loop
 
 .an_except:
     ; The return value sits above the exception state PUSH_EXC_INFO left, so
@@ -328,6 +416,16 @@ DEF_FUNC cg_unwind_finallys, UF_FRAME
 
     mov rax, [rbp - UF_I]
     mov [r12 + CompUnit.finallys + Buf.len], rax
+
+    ; With a return value pending underneath, a break, continue or return
+    ; inside this copy of the body has to discard it -- CPython's POP_VALUE.
+    cmp qword [rbp - UF_VAL], 0
+    je .fin_no_popval
+    mov rdi, r12
+    mov esi, CG_POPVAL_MARK
+    call cg_finally_push_here
+.fin_no_popval:
+
     mov rdi, rbx
     mov rsi, r12
     mov rdx, [rbp - UF_BLK]
@@ -537,10 +635,24 @@ DEF_FUNC cg_s_try, CT2_FRAME
     mov rcx, [rbp - CT2_LINE]
     call cg_emit
 
+    ; The exception state PUSH_EXC_INFO just pushed is live for the whole of
+    ; this copy of the finally body.  A `return`, `break` or `continue` written
+    ; inside the clause leaves through cg_unwind_finallys, which has no other
+    ; way to know the two words are there: without this the value stack kept
+    ; prev_exc and exc, and the exception stayed "being handled" long past the
+    ; return -- reported as unhandled at process exit.
+    mov rdi, r12
+    mov esi, CG_FINEND_MARK
+    call cg_finally_push
+
     mov rdi, rbx
     mov rsi, r12
     mov rdx, [rbp - CT2_FIN]
     call cg_block
+    mov [rbp - CT2_I], rax
+    mov rdi, r12
+    call cg_finally_pop
+    mov rax, [rbp - CT2_I]
     test eax, eax
     jz .fail
     mov rdi, r12

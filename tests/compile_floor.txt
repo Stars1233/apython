@@ -46,6 +46,7 @@ test_compile_exec
 test_compile_expr2
 test_compile_expr
 test_compile_finally_block_stack
+test_compile_finally_exit
 test_compile_flow
 test_compile_for_else_scope
 test_compile_fstring
