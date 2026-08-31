@@ -63,12 +63,14 @@ one-line fix.
 
 - **No platform module, so `os` cannot import.**  `os.py` looks for `posix`
   and raises "no os specific module found" without it.  That is the single
-  largest blocker in the stdlib: 47 of the 196 modules fail on it.
+  largest single blocker in the stdlib -- roughly a quarter of the modules
+  `check-stdlib` probes fail on it.  `make check-stdlib` gives the current
+  figure.
 
-- **Missing C modules, by how many stdlib modules each blocks:** `_io` (10),
-  `math` (9), `_codecs` (6), `_struct` (5), `_socket` (5), `binascii` (4),
-  `_imp` (3), `_string` (2), `errno` (2), and one each for a long tail.
-  `complex` does not exist as a type either, which stops `copyreg` and `copy`.
+- **Missing C modules**, in rough order of how many stdlib modules each
+  blocks: `_io`, `math`, `_codecs`, `_struct`, `_socket`, `binascii`, `_imp`,
+  `_string`, `errno`, then a long tail of one apiece.  `complex` does not exist
+  as a type either, which stops `copyreg` and `copy`.
 
 - **Weak references keep no per-object slot.**  The links live in a side
   table keyed by the referent's address rather than in the object, so
@@ -80,9 +82,9 @@ one-line fix.
   `__trunc__`.**  `abs(-5)` works, `(-5).__abs__()` is an AttributeError, and
   the stdlib asks by name -- `operator.index` goes through `__index__`, and a
   class delegating to `int.__int__` finds nothing.  `src/methods/num.asm`
-  carried eight implementations of these, written but never registered and
-  never converted to the one-Value return convention; they also truncated a
-  big int through `self_to_i64`, so they have been deleted.
+  carried implementations of these, written but never registered and never
+  converted to the one-Value return convention; they also truncated a big int
+  through `self_to_i64`, so they have been deleted.
 
   Registering the *builtins* under those names instead does not work, which is
   the reason this is still open: `builtin_abs` and `builtin_int_fn` resolve a
@@ -174,7 +176,7 @@ than lying — but they are ordinary Python that does not work:
   either**, for the same reason and with the same history: `code_traverse`,
   `task_traverse`/`task_clear` and `wait_for_traverse`/`wait_for_clear` were
   written, never installed in a slot, and have now been deleted alongside the
-  iterator eight.  A `Task` holds its coroutine, which holds a frame, whose
+  iterator ones.  A `Task` holds its coroutine, which holds a frame, whose
   locals can hold the task -- an ordinary cycle that never collects.
 
   Tracking `Task` needs one thing fixed first: the ready queue links tasks
@@ -189,8 +191,8 @@ than lying — but they are ordinary Python that does not work:
   `task_clear` also has to start clearing `exception` and the waiters array,
   which the deleted version did not.
 
-- **There is no full collection and no `gc` module.**  `gc_collect` was a
-  four-line wrapper on `gc_collect_gen(2)` whose comment named two callers --
+- **There is no full collection and no `gc` module.**  `gc_collect` was a thin
+  wrapper on `gc_collect_gen` whose comment named two callers --
   `gc.collect()` and exit cleanup -- neither of which exists; it has been
   deleted with the rest.  Only the automatic generational collections run, so
   `tests/test_gc_generations.py` has to provoke them with churn rather than ask
@@ -201,9 +203,9 @@ than lying — but they are ordinary Python that does not work:
   `src/opcodes/arith.asm` routes `NB_INPLACE_ADD` to the same `sq_concat`, so
   each step copies the whole accumulated string.  CPython's ceval resizes in
   place when the left operand's refcount is 1.  Measured, though, the two are
-  level -- 40k appends of ten bytes take 1.19s here against 1.20s under
-  CPython 3.12 -- because that optimization does not fire for the ordinary
-  module-level accumulator either.  Doing it would make apython faster than
+  level: repeated appends cost the same here as under CPython 3.12, because
+  that optimization does not fire for the ordinary module-level accumulator
+  either.  Doing it would make apython faster than
   CPython on this shape rather than close a gap, and it needs the eval loop to
   give up its stack reference before the concat, so it is recorded rather than
   done.
@@ -236,30 +238,27 @@ justification, or it risks blessing a divergence instead of catching it.
 
 Everything here assembles and runs.  These are places the tree does not follow
 STYLE.md, listed so the gap is a known quantity rather than a surprise to
-whoever copies a neighbouring file.
+whoever copies a neighbouring file.  Counts are deliberately absent -- grep
+gives a current one, and a number written here is wrong by the next commit.
 
-- **360 raw `[rbp +- N]` frame offsets across 29 files.**  STYLE.md requires
-  named `equ` constants; these survive from before that rule.  Four files hold
-  most of them: `src/opcodes/build.asm` (117), `src/repr.asm` (64),
-  `src/pyo/float.asm` (57) and `src/pyo/sysmod.asm` (17).  The `[rsp +- N]`
-  form is a different thing and is explicitly allowed, which is why earlier
-  counts here were roughly twice as large.
+- **Raw `[rbp +- N]` frame offsets** where STYLE.md requires named `equ`
+  constants; they survive from before the rule.  `src/builtins_num.asm` and
+  `src/pyo/sysmod.asm` hold the most of what is left, and the rest is spread
+  thin.  The `[rsp +- N]` form is a different thing and is explicitly allowed,
+  so count only the `rbp` ones.
   A hand-picked offset silently overlaps the slot above it the first time a
   struct in the same frame grows, which is the failure this rule exists to
   prevent.
 
-- **195 of 402 `XX_FRAME equ` constants carry no alignment arithmetic in a
-  trailing comment**, which STYLE.md asks for because it is how a reader checks
-  the `(N + 8*pushes) % 16 == 0` rule without recounting the pushes.
+- **`XX_FRAME equ` constants with no alignment arithmetic in a trailing
+  comment**, which STYLE.md asks for because it is how a reader checks the
+  `(N + 8*pushes) % 16 == 0` rule without recounting the pushes.  Roughly half
+  of them lack it.
 
-- **360 separator lines use a single `;` where STYLE.md asks for `;;`**, and
-  395 functions have no separator or docblock at all.  Heaviest:
-  `src/pyo/sre_pattern.asm`, `src/builtins_obj.asm`, `src/sre.asm`.
+- **Separator lines using a single `;` where STYLE.md asks for `;;`**, and
+  functions with no separator or docblock at all.  Heaviest in
+  `src/pyo/sre_pattern.asm`, `src/builtins_obj.asm` and `src/sre.asm`.
 
-- **418 uppercase hex digits** (`0xC0` for `0xc0`) across 32 hand-written
-  files, concentrated in `src/sre.asm` (137) and `src/pyo/int.asm` (48).
-
-- **117 redundant `global X` immediately above `DEF_FUNC X`.**  Harmless --
-  `DEF_FUNC` already emits the `global` with a size expression -- but it reads
-  like the `global` + bare-label form that lint now rejects, so the two look
-  alike and only one is correct.
+- **Docblocks with no `->` signature line.**  Most separated functions have
+  none; the signature is the only part of a function's contract that nothing
+  checks, so its absence is a real gap rather than a cosmetic one.

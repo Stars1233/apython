@@ -33,9 +33,10 @@ its `Lib/` (default `~/tmp/repo/cpython/Lib`).  It compares against
 `tests/stdlib_floor.txt` and fails when a module that used to import stops, or
 when a new one crashes.  Raise the floor with
 `bash tests/stdlib_probe.sh --record` in the commit that earns it.
-`make check` runs 250 test files (275 results: the async tests run against the
-default, poll and io_uring backends); `make check-cpython` runs all 64 files
-under `tests/cpython/`, none of them tolerated as failing.
+`make check` runs every `tests/test_*.py`, and reports more results than there
+are files because the async tests run against the default, poll and io_uring
+backends; `make check-cpython` runs everything under `tests/cpython/`, none of
+it tolerated as failing.
 
 `make check-source` and `make check-cpython-source` hand apython the `.py`
 instead of the `.pyc`, so our own compiler produces the bytecode.  They are the
@@ -66,7 +67,7 @@ differing file against that band before calling it a regression; the script
 header lists it in full.
 
 `check-cpython-source` is the harder of the two: that corpus is CPython's own
-and written to be adversarial.  All 64 of its files match -- a claim that, until
+and written to be adversarial.  Every file in it matches -- a claim that, until
 2026-08-31, had never actually been tested, because the probe only checked the
 exit status.  Each ratchets against a floor file
 (`tests/compile_floor.txt`, `tests/cpython_source_floor.txt`); raise one with
@@ -88,7 +89,7 @@ asserts things like `10 is 10`).
 Until 2026-08-31 this command did nothing: the flag reached `NASMFLAGS` but no
 object depended on it, so after an ordinary `make` it relinked the *unstressed*
 binary and the run proved nothing.  Objects now depend on `build/.flags`.  Its
-first real run found three failures, all one bug -- the item arm of
+first real run found a bug immediately -- the item arm of
 `bytes()`/`bytearray()` over an iterable tested `V_IS_INT` and so accepted an
 int *immediate* only.
 
@@ -164,7 +165,8 @@ and at the boundaries between converted and unconverted code.
 
 No hand-written file exceeds 100k bytes; only generated asm may.
 
-- `src/eval.asm` — Bytecode dispatch loop (256-entry jump table)
+- `src/eval.asm` — Bytecode dispatch loop (256-entry jump table), the
+  exception unwinder, and `raise_exception`
 - `src/opcodes/*.asm` — Opcode handlers by category: `load` (loads, stores and
   the stack shuffles), `call`, `build`, `arith` (BINARY_OP/COMPARE_OP/unary and
   the specialized int/float superinstructions), `flow` (returns, jumps,

@@ -15,7 +15,7 @@ NASM is invoked with **no warning flags** (`-f elf64 -I include/ -I compiler/
 frame, or a clobbered callee-saved register.  `compiler/lint.py` is the only
 net, and it runs inside `make check`.
 
-Six checks run over **every** hand-written `.asm` in the tree:
+These run over **every** hand-written `.asm` in the tree:
 
 | Rule | Check | Severity |
 |------|-------|----------|
@@ -27,7 +27,7 @@ Six checks run over **every** hand-written `.asm` in the tree:
 | Every `.inc` has a guard named for the file, echoed on the `%endif` | `check_guards` | error |
 | A `global X` has a definition of `X` in the same file | `check_exports` | error |
 
-Four more are scoped to `compiler/*.asm` plus `src/main.asm`:
+These are scoped to `compiler/*.asm` plus `src/main.asm`:
 
 | Rule | Check | Severity |
 |------|-------|----------|
@@ -36,21 +36,21 @@ Four more are scoped to `compiler/*.asm` plus `src/main.asm`:
 | Every `ret` pops an exact mirror of the entry pushes | `check_callee_saved` | error |
 | `rbx`, `r12`-`r15` are never written without being pushed first | `check_saved_writes` | error |
 
-**Why the split.**  The tree-wide six had zero violations when they were turned
-on, so they cost nothing and now cannot regress.  The scoped four do not: 315
-functions in `src/` violate the alignment rule harmlessly, 174 confuse
-`check_callee_saved`'s walker, and 34 of the 39 tail-jumps are to
+**Why the split.**  The tree-wide checks had zero violations when they were
+turned on, so they cost nothing and now cannot regress.  The scoped ones do
+not: much of `src/` violates the alignment rule harmlessly, a good deal of it
+confuses `check_callee_saved`'s walker, and most tail-jumps there go to
 `eval_exception_unwind`, which never returns — those are allowlisted in
-`NORETURN`, and the ~5 that remain are real.  Paying that down is what would
-let the other four widen.  Everywhere the checks do not reach, the rules are
-convention; write new code to them regardless.
+`NORETURN`, and the handful that remain are real.  Paying that down is what
+would let the scoped checks widen.  Everywhere the checks do not reach, the
+rules are convention; write new code to them regardless.
 
 A tail `jmp` to a function that never returns is not a tail call and is
 exempt — add such a target to `NORETURN` in `lint.py`.
 
 Lint's reach depends on structure, so the layout rules below are load-bearing:
 `DEF_FUNC` and `END_FUNC` must sit flush at column 0, and a function missing its
-`END_FUNC` is invisible to four of the six checks.
+`END_FUNC` is invisible to every check that scans between the two markers.
 
 ## File Structure
 

@@ -4,11 +4,11 @@ A Python 3.12 bytecode interpreter in x86-64 NASM assembly, exploring the fastes
 
 ## What is this?
 
-apython compiles and executes Python 3.12 directly — no CPython, no JIT, no interpreter overhead layers.  It reads `.py` source through a compiler written in the same assembly, and `.pyc` bytecode through a marshal reader. The entire interpreter is **~86,000 lines of x86-64 assembly**, from the eval loop to the type system to the garbage collector to async I/O. It implements a complete Python 3.12 compiler — tokenizer, Pratt parser, symbol table, code generator and assembler — plus 27+ types, 126 opcode handlers, generators, async/await, multiple inheritance with a C3 MRO, metaclasses, abstract base classes, weak references, pattern matching, real tracebacks, a regex engine, cycle-collecting GC, and a pure-assembly asyncio event loop.  Strings hold UTF-8 and count themselves in code points.
+apython compiles and executes Python 3.12 directly — no CPython, no JIT, no interpreter overhead layers.  It reads `.py` source through a compiler written in the same assembly, and `.pyc` bytecode through a marshal reader. The entire interpreter is **~86,000 lines of x86-64 assembly**, from the eval loop to the type system to the garbage collector to async I/O. It implements a complete Python 3.12 compiler — tokenizer, Pratt parser, symbol table, code generator and assembler — plus the full type and opcode set, generators, async/await, multiple inheritance with a C3 MRO, metaclasses, abstract base classes, weak references, pattern matching, real tracebacks, a regex engine, cycle-collecting GC, and a pure-assembly asyncio event loop.  Strings hold UTF-8 and count themselves in code points.
 
 ## Key design choices
 
-- **~86K lines of focused x86-64 NASM assembly** — no C runtime
+- **Written entirely in x86-64 NASM assembly** — no C runtime
 - **NaN-boxed 64-bit values** — one machine word per Python value. Pointers are stored raw (so a dereference costs nothing), floats are offset-encoded into the NaN space, and integers in ±2^50 are immediates — no heap allocation and no refcounting for any of them
 - **Raw Linux syscalls** — no libc dependency for I/O; buffered writes via direct `syscall`
 - **256-entry jump table dispatch** — x86-BTB-friendly single indirect jump per opcode
@@ -40,7 +40,7 @@ python3 -m py_compile script.py
 
 ## Implemented features
 
-### Types (27+)
+### Types
 
 | Category | Types |
 |----------|-------|
@@ -51,7 +51,7 @@ python3 -m py_compile script.py
 | Callables | function, method, builtin_function, code, staticmethod, classmethod, property |
 | Runtime | type, object, module, cell, exception, traceback, file |
 
-### Opcodes (126 handlers)
+### Opcodes
 
 | Category | Opcodes |
 |----------|---------|
@@ -79,7 +79,7 @@ bytecode on first execution — `BINARY_OP_ADD_INT`, `COMPARE_OP_INT_JUMP_TRUE`,
 each guarded so an operand of the wrong shape falls back to the general
 handler.
 
-### Builtins (51 functions + 18 types + 64 exceptions)
+### Builtins
 
 **Functions:**
 print, len, repr, abs, round, pow, divmod, sum, min, max, any, all,
@@ -160,7 +160,7 @@ these stand in for CPython's C modules, not for its Python ones.
 
 ### How much of CPython's standard library imports
 
-`make check-stdlib` imports all 196 modules of a CPython 3.12 `Lib/` in a
+`make check-stdlib` imports every module of a CPython 3.12 `Lib/` in a
 fresh process each and compares the result against `tests/stdlib_floor.txt`,
 which records the set that works.  It is a ratchet: a module that imported and
 no longer does fails the target.  Point `$CPYTHON_LIB` at a source checkout;
@@ -174,7 +174,7 @@ the target skips cleanly when there is not one.
 
 ## Test suite
 
-**161 test files** covering arithmetic, strings, lists, dicts, tuples, sets,
+The suite covers arithmetic, strings, lists, dicts, tuples, sets,
 booleans, None, bytes, floats, comparisons, control flow, functions,
 recursion, for-loops, while-loops, range, classes, inheritance, multiple
 inheritance, generators, async/await, closures, decorators, comprehensions,
@@ -183,15 +183,15 @@ f-strings, exceptions, tracebacks, pattern matching, slicing,
 metaclasses, abstract base classes, weak references, Unicode, the codecs, the
 cycle collector across generations, the NaN-boxed value encoding, and more.
 Each is run against CPython 3.12 and the outputs diffed, so CPython is the
-oracle; the async tests run three times, once per I/O backend, for 180
-results in all.
+oracle; the async tests run three times, once per I/O backend, so there are
+more results than files.
 
-**64 CPython standard-library test files** under `tests/cpython/`, all
+**CPython's own standard-library test files** under `tests/cpython/`, all
 enforced — a failure in any of them fails the target.
 
 ```bash
 make check                   # test files, diffed against python3
-make check-cpython           # 64 CPython stdlib test files
+make check-cpython           # the CPython stdlib test corpus
 make check-source            # the same test files, compiled by OUR compiler
 make check-cpython-source    # the CPython corpus, compiled by OUR compiler
 make check-stdlib            # how much of a CPython Lib/ imports (a ratchet)
@@ -255,7 +255,7 @@ src/
     list.asm dict.asm set.asm num.asm bytes.asm
     object.asm          object's own dunders, and the DEF_DUNDER_* generators
     init.asm            registers them all into each type's tp_dict
-  pyo/                  31 type implementation files
+  pyo/                  type implementations
     int.asm float.asm str.asm bytes.asm
     list.asm dict.asm tuple.asm set.asm singleton.asm slice.asm
     func.asm class.asm code.asm module.asm
@@ -293,8 +293,8 @@ lib/                    Pure Python support modules
   collections/          namedtuple, defaultdict, Counter, OrderedDict
   unittest/             Test framework (case.py, runner.py, mock.py)
   test/                 CPython test support infrastructure
-tests/                  161 test files
-  cpython/              64 CPython standard-library test files
+tests/                  the test suite
+  cpython/              CPython standard-library test files
   expected/             recorded transcripts for the two tests CPython cannot serve as an oracle for
 ```
 
@@ -311,8 +311,8 @@ tests/                  161 test files
 | Target | Description |
 |--------|-------------|
 | `make` | Build `./apython` |
-| `make check` | Run the 149-file test suite |
-| `make check-cpython` | Run the 64 CPython stdlib test files |
+| `make check` | Run the test suite |
+| `make check-cpython` | Run the CPython stdlib test corpus |
 | `make INT_STRESS=1` | Build with every integer of magnitude ≥ 8 heap-boxed |
 | `make clean` | Remove build artifacts |
 
