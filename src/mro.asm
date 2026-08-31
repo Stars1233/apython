@@ -14,9 +14,9 @@
 ; change shape.
 ; ============================================================================
 
-%include "include/object.inc"
-%include "include/macros.inc"
-%include "include/value.inc"
+%include "object.inc"
+%include "macros.inc"
+%include "value.inc"
 
 extern ap_malloc
 extern ap_free

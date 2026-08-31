@@ -1,5 +1,11 @@
 ; ============================================================================
-; traceback.asm -- source line lookup and traceback rendering
+; traceback.asm -- the code object's side tables, and traceback rendering
+;
+; Both compressed tables CPython hangs off a code object are decoded here:
+; co_linetable, for the line a traceback names, and co_exceptiontable, for
+; the handler the unwinder jumps to.  They are different encodings of the
+; same idea -- a varint stream indexed by instruction offset -- and the two
+; varint readers below are siblings.
 ;
 ; Python 3.12 stores locations in co_linetable using the PEP 626 format: each
 ; entry begins with a byte 0x80 | (code << 3) | (length - 1), where `length`
@@ -19,9 +25,17 @@
 ; preamble.
 ; ============================================================================
 
-%include "include/object.inc"
-%include "include/macros.inc"
-%include "include/value.inc"
+%include "object.inc"
+%include "macros.inc"
+%include "value.inc"
+
+%include "object.inc"
+
+
+
+%include "object.inc"
+%include "macros.inc"
+%include "value.inc"
 
 extern sys_write
 extern sys_open
@@ -889,3 +903,124 @@ section .bss
 tb_seen:   resq TB_SEEN_MAX
 tb_seen_n: resq 1
 section .text
+
+;; ============================================================================
+;; (was src/except.asm)
+;; ============================================================================
+
+section .text
+
+; exc_table_find_handler(PyCodeObject *code, int bytecode_offset_halfwords)
+;   -> rax = handler target (in halfwords), rdx = stack depth, rcx = push_lasti
+;   -> rax = -1 if no handler found
+;
+; bytecode_offset_halfwords = (rbx - &code.co_code) / 2
+;
+; rdi = code object
+; esi = bytecode offset in instruction units (halfwords, i.e., 2-byte units)
+DEF_FUNC exc_table_find_handler
+    push rbx
+    push r12
+    push r13
+    push r14
+    push r15
+
+    mov r12d, esi           ; r12d = target offset (in instruction units)
+
+    ; Get co_exceptiontable (PyBytesObject*)
+    mov rax, [rdi + PyCodeObject.co_exceptiontable]
+    test rax, rax
+    jz .not_found
+
+    ; Get table data pointer and size
+    mov r13, [rax + PyBytesObject.ob_size]  ; r13 = table length
+    test r13, r13
+    jz .not_found
+    lea r14, [rax + PyBytesObject.data]     ; r14 = table data start
+    xor r15d, r15d                          ; r15 = current position in table
+
+.scan_entry:
+    cmp r15, r13
+    jge .not_found
+
+    ; Read start (unsigned varint)
+    call .read_varint
+    mov ebx, eax            ; ebx = start
+
+    ; Read length (unsigned varint)
+    ; NOTE: .read_varint clobbers ecx/esi, so use r8/r9 for length/target
+    call .read_varint
+    mov r8d, eax            ; r8d = length (safe from .read_varint)
+
+    ; Read target (unsigned varint)
+    call .read_varint
+    mov r9d, eax            ; r9d = target (safe from .read_varint)
+
+    ; Read depth_lasti (unsigned varint)
+    call .read_varint
+    ; eax = depth_lasti: depth = eax >> 1, push_lasti = eax & 1
+    mov edi, eax            ; edi = depth_lasti
+
+    ; Check if bytecode_offset is in range [start, start+length)
+    cmp r12d, ebx
+    jb .scan_entry           ; offset < start, try next
+    lea edx, [ebx + r8d]    ; edx = start + length
+    cmp r12d, edx
+    jge .scan_entry          ; offset >= start + length, try next
+
+    ; Found a matching handler!
+    ; Return: rax = target, edx = depth, ecx = push_lasti
+    mov eax, r9d            ; handler target in instruction units
+    mov ecx, edi
+    and ecx, 1              ; push_lasti flag
+    shr edi, 1
+    mov edx, edi            ; stack depth
+
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.not_found:
+    mov rax, -1
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
+; Internal: read an unsigned varint from table at r14+r15
+; Returns value in eax, advances r15
+; Big-endian 6-bit chunks: first byte = high bits, bit 6 = continue
+; Algorithm: val = b & 63; while (b & 64) { val <<= 6; b = next; val |= b & 63; }
+.read_varint:
+    cmp r15, r13
+    jge .varint_zero         ; safety: don't read past end
+    movzx edx, byte [r14 + r15]
+    inc r15
+    mov eax, edx
+    and eax, 0x3F           ; initial value = bits 0-5 of first byte
+
+.varint_loop:
+    test edx, 0x40          ; check continue bit
+    jz .varint_done
+    cmp r15, r13
+    jge .varint_done         ; safety
+    shl eax, 6              ; shift accumulated value LEFT
+    movzx edx, byte [r14 + r15]
+    inc r15
+    mov ecx, edx
+    and ecx, 0x3F
+    or eax, ecx             ; OR in new 6 bits at bottom
+    jmp .varint_loop
+
+.varint_zero:
+    xor eax, eax
+.varint_done:
+    ret
+END_FUNC exc_table_find_handler
