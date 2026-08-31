@@ -1,4 +1,8 @@
-; opcodes_load.asm - Opcode handlers for loading values onto the stack
+; opcodes_load.asm - Opcode handlers that move operands around
+;
+; LOAD_*, STORE_*/DELETE_*, and the pure stack shuffles POP_TOP, PUSH_NULL,
+; COPY and SWAP.  Nothing here computes anything: every handler moves a Value
+; between localsplus, a dict, and the value stack.
 ;
 ; Register convention (callee-saved, preserved across handlers):
 ;   rbx = bytecode instruction pointer (current position in co_code[])
@@ -7,6 +11,11 @@
 ;
 ; ecx = opcode argument on entry (set by eval_dispatch)
 ; rbx has already been advanced past the 2-byte instruction word.
+
+%include "macros.inc"
+%include "object.inc"
+%include "opcodes.inc"
+
 
 %include "macros.inc"
 %include "object.inc"
@@ -1669,3 +1678,625 @@ DEF_FUNC obj_getattr_opt, GA_FRAME
     leave
     ret
 END_FUNC obj_getattr_opt
+
+;; ============================================================================
+;; (was src/opcodes_store.asm)
+;; ============================================================================
+
+section .text
+
+section .text
+
+extern eval_dispatch
+extern eval_saved_rbx
+extern eval_saved_r13
+extern eval_co_names
+extern opcode_table
+extern obj_dealloc
+extern obj_decref
+extern dict_set
+extern dict_type
+extern fatal_error
+extern raise_exception
+extern eval_exception_unwind
+extern current_exception
+extern obj_incref
+extern exc_AttributeError_type
+extern exc_TypeError_type
+extern exc_NameError_type
+extern dict_del
+extern dict_get
+extern property_type
+extern property_descr_set
+extern dunder_set
+extern dunder_call_3
+extern dunder_lookup
+
+;; --- Named frame-layout constants ---
+
+; op_store_attr: rbp-frame (48 bytes)
+SA_OBJ    equ 8
+SA_VAL    equ 16
+SA_NAME   equ 24
+SA_DESC   equ 32    ; general descriptor (MRO walk)
+SA_OTAG   equ 40
+SA_VTAG   equ 48
+SA_EXC    equ 56
+SA_ORIGIN equ 64   ; the type the descriptor walk started from
+SA_FRAME  equ 80
+
+; op_delete_attr: rbp-frame (16 bytes)
+DA_NAME   equ 8
+DA_OBJ    equ 16
+DA_FRAME  equ 16
+
+; op_delete_subscr: rbp-frame (32 bytes)
+DS_OBJ    equ 8
+DS_KEY    equ 16
+DS_OTAG   equ 24
+DS_KTAG   equ 32
+DS_FRAME  equ 32
+
+;; ============================================================================
+;; op_store_fast - Store TOS into localsplus[arg]
+;;
+;; Pops value from stack, stores in fast local slot, XDECREF old value.
+;; VPOP does not clobber ecx (it only does sub r13,8 / mov reg,[r13]).
+;; ============================================================================
+DEF_FUNC_BARE op_store_fast
+    ; ecx = arg (slot index)
+    VPOP rax                                          ; new value
+    mov rdi, [r12 + PyFrame.localsplus + rcx*8]       ; old value
+    mov [r12 + PyFrame.localsplus + rcx*8], rax
+    XDECREF_V rdi, r9
+    DISPATCH
+END_FUNC op_store_fast
+
+;; ============================================================================
+;; op_store_name - Store TOS under co_names[arg] in locals or globals dict
+;;
+;; If frame->locals is not NULL, store there; otherwise store in globals.
+;; Uses dict_set(dict, key, value) extern.
+;; dict_set signature: dict_set(PyDictObject *dict, PyObject *key, PyObject *value)
+;; ============================================================================
+DEF_FUNC_BARE op_store_name
+    ; ecx = arg (index into co_names)
+    ; Get name string before popping (payload array: 8-byte stride)
+    shl ecx, 3
+    LOAD_CO_NAMES r8
+    mov r8, [r8 + rcx]        ; r8 = name (key) - caller-saved, safe temp
+    VPOP_VAL r9, r10           ; r9 = value payload, r10 = value tag
+
+    ; Determine target dict: locals if present, else globals
+    mov rdi, [r12 + PyFrame.locals]
+    test rdi, rdi
+    jnz .have_dict
+    mov rdi, [r12 + PyFrame.globals]
+.have_dict:
+    ; A class body prepared by a metaclass executes in whatever mapping
+    ; __prepare__ returned, and that mapping's __setitem__ is the whole point
+    ; of preparing one -- enum's _EnumDict records every member there.  Writing
+    ; straight into dict storage skips it, so anything but an exact dict goes
+    ; through mp_ass_subscript.
+    mov rax, [rdi + PyObject.ob_type]
+    lea rcx, [rel dict_type]
+    cmp rax, rcx
+    jne .mapping_set
+
+    ; dict_set(dict, key, value, value_tag, key_tag)
+    ; rdi = dict (already set)
+    mov rsi, r8                ; rsi = name (key)
+    mov rdx, r9                ; rdx = value payload
+    mov rcx, r10               ; rcx = value tag
+    V_PACK rdx, rcx
+    push r9
+    push r10
+    call dict_set
+    pop r10
+    pop r9
+    ; DECREF value to release the stack's reference (dict_set INCREFed it)
+    DECREF_VAL r9, r10
+    DISPATCH
+
+.mapping_set:
+    mov rax, [rax + PyTypeObject.tp_as_mapping]
+    test rax, rax
+    jz .have_dict_plain
+    mov rax, [rax + PyMappingMethods.mp_ass_subscript]
+    test rax, rax
+    jz .have_dict_plain
+    mov rsi, r8                ; key
+    mov rdx, r9
+    mov rcx, r10
+    V_PACK rdx, rcx            ; value Value
+    push r9
+    push r10
+    call rax
+    pop r10
+    pop r9
+    DECREF_VAL r9, r10
+    DISPATCH
+
+.have_dict_plain:
+    ; No mapping protocol at all: fall back to writing the dict directly, which
+    ; is what it was before and is right for anything dict-shaped.
+    mov rsi, r8
+    mov rdx, r9
+    mov rcx, r10
+    V_PACK rdx, rcx
+    push r9
+    push r10
+    call dict_set
+    pop r10
+    pop r9
+    DECREF_VAL r9, r10
+    DISPATCH
+END_FUNC op_store_name
+
+;; ============================================================================
+;; op_store_global - Store TOS under co_names[arg] in globals dict
+;;
+;; Same as store_name but always uses globals.
+;; ============================================================================
+DEF_FUNC_BARE op_store_global
+    ; ecx = arg (index into co_names, payload array: 8-byte stride)
+    shl ecx, 3
+    LOAD_CO_NAMES r8
+    mov r8, [r8 + rcx]        ; r8 = name (key)
+    VPOP_VAL r9, r10           ; r9 = value payload, r10 = value tag
+
+    ; Always store in globals
+    mov rdi, [r12 + PyFrame.globals]
+    mov rsi, r8                ; rsi = name (key)
+    mov rdx, r9                ; rdx = value payload
+    mov rcx, r10               ; rcx = value tag
+    V_PACK rdx, rcx
+    push r9
+    push r10
+    call dict_set
+    pop r10
+    pop r9
+    ; DECREF value to release the stack's reference (dict_set INCREFed it)
+    DECREF_VAL r9, r10
+    DISPATCH
+END_FUNC op_store_global
+
+;; ============================================================================
+;; op_store_attr - Store TOS-1 as attribute of TOS
+;;
+;; Python 3.12 STORE_ATTR (opcode 95):
+;;   ecx = name index in co_names
+;;
+;; Stack: ... | value | obj |  (obj=TOS, value=TOS-1)
+;; Pops obj, pops value, sets obj.name = value via tp_setattr.
+;; DECREF obj and value after the store.
+;; Followed by 4 CACHE entries (8 bytes) that must be skipped.
+;; ============================================================================
+DEF_FUNC op_store_attr, SA_FRAME
+    mov qword [rbp - SA_ORIGIN], 0
+    DUNDER_EXC_SAVE [rbp - SA_EXC]
+
+    ; Get name (payload array: 8-byte stride)
+    shl ecx, 3
+    LOAD_CO_NAMES rax
+    mov rax, [rax + rcx]
+    mov [rbp - SA_NAME], rax
+
+    ; Pop obj (TOS)
+    VPOP_VAL rdi, rax
+    mov [rbp - SA_OBJ], rdi
+    mov [rbp - SA_OTAG], rax
+
+    ; Pop value
+    VPOP_VAL rdi, rax
+    mov [rbp - SA_VAL], rdi
+    mov [rbp - SA_VTAG], rax
+
+    ; Non-pointer obj can't have attrs set (SmallInt, Float, None, Bool)
+    cmp qword [rbp - SA_OTAG], TAG_PTR
+    jne .sa_no_setattr
+
+    ; Check for property/descriptor in type dict (walk MRO) before regular setattr
+    mov rdi, [rbp - SA_OBJ]       ; obj
+    mov rcx, [rdi + PyObject.ob_type]  ; rcx = type (walks chain)
+
+.sa_walk_mro:
+    test rcx, rcx
+    jz .sa_no_property
+    cmp qword [rbp - SA_ORIGIN], 0
+    jne .sa_have_origin
+    mov [rbp - SA_ORIGIN], rcx
+.sa_have_origin:
+
+    mov rdi, [rcx + PyTypeObject.tp_dict]
+    test rdi, rdi
+    jz .sa_walk_next
+
+    push rcx                      ; save current type
+    mov rsi, [rbp - SA_NAME]      ; name
+    call dict_get
+    V_UNPACK rax, rdx           ; dict_get returns a Value
+    pop rcx
+    test edx, edx               ; the tag, not the payload: a hit may be int 0
+    jnz .sa_found_in_type         ; found attr in type dict
+.sa_walk_next:
+    MRO_NEXT rcx, [rbp - SA_ORIGIN]
+    jmp .sa_walk_mro
+
+.sa_found_in_type:
+
+    ; Check if it's a descriptor (only TAG_PTR can be a descriptor)
+    cmp edx, TAG_PTR
+    jne .sa_no_property           ; non-pointer — not a descriptor
+    mov rcx, [rax + PyObject.ob_type]
+
+    ; Check property first (fast path)
+    lea rdx, [rel property_type]
+    cmp rcx, rdx
+    jne .sa_check_general_set
+
+    ; Found property descriptor — call fset(obj, value, ecx=value_tag)
+    mov rdi, rax                  ; property
+    mov rsi, [rbp - SA_OBJ]      ; obj
+    mov rdx, [rbp - SA_VAL]      ; value
+    mov ecx, [rbp - SA_VTAG]     ; value tag
+    V_PACK rdx, rcx              ; property_descr_set takes a value Value
+    call property_descr_set
+    jmp .sa_descr_cleanup
+
+.sa_check_general_set:
+    ; Check for general __set__ on heaptype descriptor
+    mov rdx, [rcx + PyTypeObject.tp_flags]
+    test rdx, TYPE_FLAG_HEAPTYPE
+    jz .sa_no_property
+
+    ; Save the descriptor for potential __set__ call
+    mov [rbp - SA_DESC], rax      ; save descriptor (borrowed ref, still in dict)
+
+    ; Check if descriptor's type has __set__
+    mov rdi, rcx                  ; descriptor's type
+    lea rsi, [rel dunder_set]
+    call dunder_lookup
+    V_UNPACK rax, rdx           ; returns a Value
+    test edx, edx
+    jz .sa_no_property
+
+    ; Has __set__! Call descriptor.__set__(obj, value)
+    mov rdi, [rbp - SA_DESC]     ; descriptor
+    mov rsi, [rbp - SA_OBJ]     ; obj
+    mov rdx, [rbp - SA_VAL]     ; value
+    lea rcx, [rel dunder_set]
+    mov r8d, [rbp - SA_VTAG]    ; value tag
+    call dunder_call_3
+    V_UNPACK rax, rdx           ; returns a Value
+    ; DECREF result if non-NULL
+    test edx, edx
+    jz .sa_descr_cleanup
+    DECREF_VAL rax, rdx
+
+.sa_descr_cleanup:
+
+    ; DECREF value (tag-aware)
+    mov rdi, [rbp - SA_VAL]
+    mov rsi, [rbp - SA_VTAG]
+    DECREF_VAL rdi, rsi
+    ; DECREF obj (tag-aware)
+    mov rdi, [rbp - SA_OBJ]
+    mov rsi, [rbp - SA_OTAG]
+    DECREF_VAL rdi, rsi
+
+    ; A descriptor __set__ that raised returns normally, leaving the
+    ; exception pending; without this it surfaced later at an unrelated
+    ; instruction.  Compared against entry, because current_exception is
+    ; already set whenever this runs inside an except block.
+    DUNDER_RAISED [rbp - SA_EXC], .sa_propagate
+    add rbx, 8
+    leave
+    DISPATCH
+
+.sa_no_property:
+    ; Check tp_setattr
+    mov rdi, [rbp - SA_OBJ]
+    mov rax, [rdi + PyObject.ob_type]
+    mov rax, [rax + PyTypeObject.tp_setattr]
+    test rax, rax
+    jz .sa_no_setattr
+
+    ; Call tp_setattr(obj, name, value, ecx=value_tag)
+    mov rdi, [rbp - SA_OBJ]
+    mov rsi, [rbp - SA_NAME]
+    mov rdx, [rbp - SA_VAL]
+    mov ecx, [rbp - SA_VTAG]
+    V_PACK rdx, rcx             ; tp_setattr takes a value Value
+    call rax
+
+    ; DECREF value (tag-aware)
+    mov rdi, [rbp - SA_VAL]
+    mov rsi, [rbp - SA_VTAG]
+    DECREF_VAL rdi, rsi
+    ; DECREF obj (tag-aware)
+    mov rdi, [rbp - SA_OBJ]
+    mov rsi, [rbp - SA_OTAG]
+    DECREF_VAL rdi, rsi
+
+    DUNDER_RAISED [rbp - SA_EXC], .sa_propagate
+    add rbx, 8                ; skip 4 CACHE entries
+    leave
+    DISPATCH
+
+.sa_propagate:
+    ; Same shape as op_call's .propagate_exc: the unwinder reads the current
+    ; IP from eval_saved_rbx, which DISPATCH set, so rbx is not advanced.
+    leave
+    mov [rel eval_saved_r13], r13
+    jmp eval_exception_unwind
+
+.sa_no_setattr:
+    lea rdi, [rel exc_AttributeError_type]
+    CSTRING rsi, "cannot set attribute"
+    call raise_exception
+END_FUNC op_store_attr
+
+;; ============================================================================
+;; op_store_deref - Store TOS into cell at localsplus[arg]
+;;
+;; Gets cell from localsplus[arg], sets cell.ob_ref = TOS.
+;; Ownership transfers from stack to cell (no INCREF needed).
+;; DECREFs old cell value.
+;; ============================================================================
+DEF_FUNC_BARE op_store_deref
+    VPOP rax                       ; new Value
+    mov rdx, [r12 + PyFrame.localsplus + rcx*8]  ; cell object
+
+    ; Ownership transfers from stack to cell - no INCREF needed
+    mov rdi, [rdx + PyCellObject.ob_ref]        ; old Value
+    mov [rdx + PyCellObject.ob_ref], rax
+    DECREF_V rdi, rsi
+    DISPATCH
+END_FUNC op_store_deref
+
+;; ============================================================================
+;; op_delete_deref - Set cell at localsplus[arg] to empty (NULL)
+;;
+;; DECREFs old value if present.
+;; ============================================================================
+DEF_FUNC_BARE op_delete_deref
+    mov rax, [r12 + PyFrame.localsplus + rcx*8]  ; rax = cell object (payload)
+    mov rdi, [rax + PyCellObject.ob_ref]
+    mov qword [rax + PyCellObject.ob_ref], 0
+    DECREF_V rdi, rsi
+    DISPATCH
+END_FUNC op_delete_deref
+
+;; ============================================================================
+;; op_delete_fast - Delete local variable (set localsplus[arg] = NULL)
+;;
+;; DECREF old value if present.
+;; ============================================================================
+DEF_FUNC_BARE op_delete_fast
+    mov rdi, [r12 + PyFrame.localsplus + rcx*8]       ; old value
+    mov qword [r12 + PyFrame.localsplus + rcx*8], 0
+    XDECREF_V rdi, rsi
+    DISPATCH
+END_FUNC op_delete_fast
+
+;; ============================================================================
+;; op_delete_name - Delete name from locals or globals dict
+;; ============================================================================
+DEF_FUNC_BARE op_delete_name
+    shl ecx, 3                ; payload array: 8-byte stride
+    LOAD_CO_NAMES rsi
+    mov rsi, [rsi + rcx]      ; name
+    ; Try locals first
+    mov rdi, [r12 + PyFrame.locals]
+    test rdi, rdi
+    jz .dn_globals
+    push rsi
+    call dict_del
+    pop rsi
+    test eax, eax
+    jz .dn_ok                  ; found and deleted
+.dn_globals:
+    mov rdi, [r12 + PyFrame.globals]
+    call dict_del
+    test eax, eax
+    jnz .dn_error
+.dn_ok:
+    DISPATCH
+.dn_error:
+    lea rdi, [rel exc_NameError_type]
+    CSTRING rsi, "name not defined"
+    call raise_exception
+END_FUNC op_delete_name
+
+;; ============================================================================
+;; op_delete_global - Delete name from globals dict
+;; ============================================================================
+DEF_FUNC_BARE op_delete_global
+    shl ecx, 3                ; payload array: 8-byte stride
+    LOAD_CO_NAMES rsi
+    mov rsi, [rsi + rcx]      ; name
+    mov rdi, [r12 + PyFrame.globals]
+    call dict_del
+    test eax, eax
+    jnz .dg_error
+    DISPATCH
+.dg_error:
+    lea rdi, [rel exc_NameError_type]
+    CSTRING rsi, "name not defined"
+    call raise_exception
+END_FUNC op_delete_global
+
+;; ============================================================================
+;; op_delete_attr - Delete attribute from object
+;;
+;; Calls tp_setattr(obj, name, NULL) to delete.
+;; Followed by 4 CACHE entries (8 bytes) - WAIT, DELETE_ATTR has no CACHE in 3.12.
+;; ============================================================================
+DEF_FUNC op_delete_attr, DA_FRAME
+
+    shl ecx, 3                ; payload array: 8-byte stride
+    LOAD_CO_NAMES rax
+    mov rax, [rax + rcx]      ; name
+    mov [rbp - DA_NAME], rax
+
+    VPOP_VAL rdi, rax
+    mov [rbp - DA_OBJ], rdi
+
+    ; Non-pointer obj can't have attrs deleted
+    cmp rax, TAG_PTR
+    jne .da_error
+
+    ; Call tp_setattr(obj, name, NULL) to delete attr
+    mov rax, [rdi + PyObject.ob_type]
+    mov rax, [rax + PyTypeObject.tp_setattr]
+    test rax, rax
+    jz .da_error_decref
+
+    mov rdi, [rbp - DA_OBJ]
+    mov rsi, [rbp - DA_NAME]
+    xor edx, edx               ; value = NULL means delete
+    xor ecx, ecx               ; value tag = TAG_NULL
+    call rax
+
+    ; DECREF obj
+    mov rdi, [rbp - DA_OBJ]
+    call obj_decref
+
+    leave
+    DISPATCH
+
+.da_error_decref:
+    mov rdi, [rbp - DA_OBJ]
+    call obj_decref
+.da_error:
+    lea rdi, [rel exc_AttributeError_type]
+    CSTRING rsi, "cannot delete attribute"
+    call raise_exception
+END_FUNC op_delete_attr
+
+;; ============================================================================
+;; op_delete_subscr - Delete obj[key]
+;;
+;; Pops key (TOS), pops obj (TOS1).
+;; Calls mp_ass_subscript(obj, key, NULL) to delete.
+;; ============================================================================
+DEF_FUNC op_delete_subscr, DS_FRAME
+
+    VPOP_VAL rsi, rax            ; key + tag
+    VPOP_VAL rdi, rcx            ; obj + tag
+    mov [rbp - DS_OBJ], rdi     ; save obj
+    mov [rbp - DS_KEY], rsi     ; save key
+    mov [rbp - DS_OTAG], rcx    ; save obj tag
+    mov [rbp - DS_KTAG], rax    ; save key tag
+
+    ; Non-pointer obj can't have items deleted
+    cmp qword [rbp - DS_OTAG], TAG_PTR
+    jne .ds_error
+
+    ; Call mp_ass_subscript(obj, key Value, NULL) -- a NULL value means delete
+    mov rax, [rdi + PyObject.ob_type]
+    mov rax, [rax + PyTypeObject.tp_as_mapping]
+    test rax, rax
+    jz .ds_error
+    mov rax, [rax + PyMappingMethods.mp_ass_subscript]
+    test rax, rax
+    jz .ds_error
+
+    mov rcx, [rbp - DS_KTAG]
+    V_PACK rsi, rcx            ; key Value
+    xor edx, edx               ; value = 0 (delete)
+    call rax
+
+    ; DECREF key and obj (tag-aware)
+    mov rdi, [rbp - DS_KEY]
+    mov rsi, [rbp - DS_KTAG]
+    DECREF_VAL rdi, rsi
+    mov rdi, [rbp - DS_OBJ]
+    mov rsi, [rbp - DS_OTAG]
+    DECREF_VAL rdi, rsi
+
+    leave
+    DISPATCH
+
+.ds_error:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "object does not support item deletion"
+    call raise_exception
+END_FUNC op_delete_subscr
+
+;; ============================================================================
+;; (was src/opcodes_stack.asm)
+;; ============================================================================
+
+section .text
+
+section .text
+
+extern eval_dispatch
+extern eval_saved_rbx
+extern eval_saved_r13
+extern opcode_table
+extern obj_dealloc
+
+;; ============================================================================
+;; op_pop_top - Pop and discard top of stack, DECREF it
+;; ============================================================================
+DEF_FUNC_BARE op_pop_top
+    VPOP rax
+    DECREF_V rax, rdx
+    DISPATCH
+END_FUNC op_pop_top
+
+;; ============================================================================
+;; op_push_null - Push NULL (0) sentinel onto the value stack
+;;
+;; Used before LOAD_GLOBAL/LOAD_ATTR to mark callable slots.
+;; ============================================================================
+DEF_FUNC_BARE op_push_null
+    VPUSH_NULL
+    DISPATCH
+END_FUNC op_push_null
+
+;; ============================================================================
+;; op_copy - Copy the i-th item (1-based from top) to top of stack
+;;
+;; ecx = arg = position (1 = top of stack)
+;; Stack layout: ... [r13 - N*8] ... [r13 - 8] [r13]
+;;                                                ^ TOS (position 1)
+;; ============================================================================
+DEF_FUNC_BARE op_copy
+    ; ecx = position (1-indexed from top)
+    ; Compute address: r13 - ecx*8 (8 bytes/slot)
+    mov rax, rcx
+    mov rdx, r13
+    shl rax, 3
+    sub rdx, rax               ; slot i
+    mov rax, [rdx]             ; peek the Value at position i
+    INCREF_V rax, rsi
+    mov [r13], rax
+    add r13, 8
+    DISPATCH
+END_FUNC op_copy
+
+;; ============================================================================
+;; op_swap - Swap TOS with the i-th item (1-indexed from top)
+;;
+;; ecx = arg = position (1 = top, so swap(1) is a no-op, swap(2) swaps
+;;   top two items, etc.)
+;; TOS is at [r13-8], i-th item is at [r13 - i*8]
+;; No reference count changes needed (just moving pointers).
+;; ============================================================================
+DEF_FUNC_BARE op_swap
+    ; ecx = position (1-indexed from top)
+    ; Swap TOS with the i-th item -- one word each now
+    mov rax, rcx
+    mov rdx, r13
+    shl rax, 3
+    sub rdx, rax               ; slot i
+    mov r9, [rdx]
+    mov r10, [r13 - 8]
+    mov [rdx], r10
+    mov [r13 - 8], r9
+    DISPATCH
+END_FUNC op_swap
