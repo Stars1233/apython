@@ -1,0 +1,576 @@
+; runtime.asm - The freestanding layer: syscalls, memory, strings, and dying
+;
+; Everything here is below the object model and cannot allocate a Python object
+; or raise a Python exception.  It is the bottom of the call graph: ap_malloc
+; calls fatal_error when it is out of memory, and fatal_error can only reach
+; sys_write and sys_exit.  That chain used to span three directories and two
+; source trees; it is one file now, and the externs between them are gone.
+;
+; These are PLT-free by design -- the memory and string operations are open
+; coded rather than calling into libc, so a Python-level operation does not
+; pay a PLT indirection per byte.
+
+%include "macros.inc"
+%include "object.inc"
+
+
+;; ============================================================================
+;; Linux x86-64 syscall wrappers
+;; (was src/lib/syscall.asm)
+;; ============================================================================
+
+section .text
+
+; Eliminates libc stdio dependency for all I/O paths
+
+; Syscall numbers (x86-64)
+SYS_read            equ 0
+SYS_write           equ 1
+SYS_open            equ 2
+SYS_close           equ 3
+SYS_fstat           equ 5
+SYS_mmap            equ 9
+SYS_munmap          equ 11
+SYS_lseek           equ 8
+SYS_socket          equ 41
+SYS_connect         equ 42
+SYS_accept4         equ 288
+SYS_sendto          equ 44
+SYS_recvfrom        equ 45
+SYS_bind            equ 49
+SYS_listen          equ 50
+SYS_getsockname     equ 51
+SYS_setsockopt      equ 54
+SYS_fcntl           equ 72
+SYS_ioctl           equ 16
+SYS_io_uring_setup  equ 425
+SYS_io_uring_enter  equ 426
+SYS_exit_group      equ 231
+
+; sys_write(int fd, const void *buf, size_t len) -> ssize_t
+DEF_FUNC_BARE sys_write
+    mov rax, SYS_write
+    ; rdi=fd, rsi=buf, rdx=len already in place
+    syscall
+    ret
+END_FUNC sys_write
+
+; sys_read(int fd, void *buf, size_t len) -> ssize_t
+DEF_FUNC_BARE sys_read
+    mov rax, SYS_read
+    ; rdi=fd, rsi=buf, rdx=len already in place
+    syscall
+    ret
+END_FUNC sys_read
+
+; sys_open(const char *path, int flags, int mode) -> int fd
+DEF_FUNC_BARE sys_open
+    mov rax, SYS_open
+    ; rdi=path, rsi=flags, rdx=mode already in place
+    syscall
+    ret
+END_FUNC sys_open
+
+; sys_close(int fd) -> int
+DEF_FUNC_BARE sys_close
+    mov rax, SYS_close
+    ; rdi=fd already in place
+    syscall
+    ret
+END_FUNC sys_close
+
+; sys_fstat(int fd, struct stat *buf) -> int
+DEF_FUNC_BARE sys_fstat
+    mov rax, SYS_fstat
+    ; rdi=fd, rsi=buf already in place
+    syscall
+    ret
+END_FUNC sys_fstat
+
+; sys_lseek(int fd, off_t offset, int whence) -> off_t
+DEF_FUNC_BARE sys_lseek
+    mov rax, SYS_lseek
+    ; rdi=fd, rsi=offset, rdx=whence already in place
+    syscall
+    ret
+END_FUNC sys_lseek
+
+; sys_exit(int code) -> noreturn
+DEF_FUNC_BARE sys_exit
+    mov rax, SYS_exit_group
+    ; rdi=code already in place
+    syscall
+    ; should never reach here
+    hlt
+END_FUNC sys_exit
+
+; sys_mmap(addr, len, prot, flags, fd, offset) -> void*
+DEF_FUNC_BARE sys_mmap
+    mov rax, SYS_mmap
+    mov r10, rcx               ; Linux syscall: 4th arg in r10, not rcx
+    syscall
+    ret
+END_FUNC sys_mmap
+
+; sys_munmap(addr, len) -> int
+DEF_FUNC_BARE sys_munmap
+    mov rax, SYS_munmap
+    syscall
+    ret
+END_FUNC sys_munmap
+
+; sys_io_uring_setup(entries, params*) -> int fd
+DEF_FUNC_BARE sys_io_uring_setup
+    mov rax, SYS_io_uring_setup
+    syscall
+    ret
+END_FUNC sys_io_uring_setup
+
+; sys_io_uring_enter(fd, to_submit, min_complete, flags, sig, sigsz) -> int
+DEF_FUNC_BARE sys_io_uring_enter
+    mov rax, SYS_io_uring_enter
+    mov r10, rcx               ; 4th arg
+    syscall
+    ret
+END_FUNC sys_io_uring_enter
+
+; sys_socket(domain, type, protocol) -> int fd
+DEF_FUNC_BARE sys_socket
+    mov rax, SYS_socket
+    syscall
+    ret
+END_FUNC sys_socket
+
+; sys_bind(fd, addr*, addrlen) -> int
+DEF_FUNC_BARE sys_bind
+    mov rax, SYS_bind
+    syscall
+    ret
+END_FUNC sys_bind
+
+; sys_listen(fd, backlog) -> int
+DEF_FUNC_BARE sys_listen
+    mov rax, SYS_listen
+    syscall
+    ret
+END_FUNC sys_listen
+
+; sys_accept4(fd, addr*, addrlen*, flags) -> int
+DEF_FUNC_BARE sys_accept4
+    mov rax, SYS_accept4
+    mov r10, rcx               ; 4th arg
+    syscall
+    ret
+END_FUNC sys_accept4
+
+; sys_connect(fd, addr*, addrlen) -> int
+DEF_FUNC_BARE sys_connect
+    mov rax, SYS_connect
+    syscall
+    ret
+END_FUNC sys_connect
+
+; sys_sendto(fd, buf, len, flags, dest_addr*, addrlen) -> ssize_t
+DEF_FUNC_BARE sys_sendto
+    mov rax, SYS_sendto
+    mov r10, rcx               ; 4th arg
+    syscall
+    ret
+END_FUNC sys_sendto
+
+; sys_recvfrom(fd, buf, len, flags, src_addr*, addrlen*) -> ssize_t
+DEF_FUNC_BARE sys_recvfrom
+    mov rax, SYS_recvfrom
+    mov r10, rcx               ; 4th arg
+    syscall
+    ret
+END_FUNC sys_recvfrom
+
+; sys_setsockopt(fd, level, optname, optval*, optlen) -> int
+DEF_FUNC_BARE sys_setsockopt
+    mov rax, SYS_setsockopt
+    mov r10, rcx               ; 4th arg
+    syscall
+    ret
+END_FUNC sys_setsockopt
+
+; sys_getsockname(fd, addr*, addrlen*) -> int
+DEF_FUNC_BARE sys_getsockname
+    mov rax, SYS_getsockname
+    syscall
+    ret
+END_FUNC sys_getsockname
+
+; sys_fcntl(fd, cmd, arg) -> int
+DEF_FUNC_BARE sys_fcntl
+    mov rax, SYS_fcntl
+    syscall
+    ret
+END_FUNC sys_fcntl
+
+; sys_ioctl(fd, request, arg) -> int
+DEF_FUNC_BARE sys_ioctl
+    mov rax, SYS_ioctl
+    syscall
+    ret
+END_FUNC sys_ioctl
+
+;; ============================================================================
+;; Memory operations, PLT-free
+;; (was src/lib/memops.asm)
+;; ============================================================================
+
+section .text
+
+; Replaces libc memcpy and memset
+; Uses rep movsb / rep stosb (optimal on ERMS-capable CPUs, Ivy Bridge+)
+
+; ap_memcpy(void *dst, const void *src, size_t n) -> void *dst
+DEF_FUNC_BARE ap_memcpy
+    mov rax, rdi            ; save dst for return
+    mov rcx, rdx            ; rcx = count
+    rep movsb               ; rdi=dst, rsi=src already in place
+    ret
+END_FUNC ap_memcpy
+
+; ap_memset(void *dst, int val, size_t n) -> void *dst
+DEF_FUNC_BARE ap_memset
+    mov r8, rdi             ; save dst for return
+    mov al, sil             ; val (byte)
+    mov rcx, rdx            ; rcx = count
+    rep stosb               ; rdi=dst already in place
+    mov rax, r8             ; return original dst
+    ret
+END_FUNC ap_memset
+
+; ap_memmove(void *dst, const void *src, size_t n) -> void *dst
+; Handles overlapping regions. n must be a multiple of 8.
+; Forward: rep movsq (fast). Backward: manual qword loop (avoids std penalty).
+DEF_FUNC_BARE ap_memmove
+    mov rax, rdi            ; save dst for return
+    mov rcx, rdx            ; rcx = byte count
+    test rcx, rcx
+    jz .memmove_done
+    cmp rdi, rsi
+    je .memmove_done        ; dst == src, nop
+    jb .memmove_fwd         ; dst < src: forward safe
+.memmove_bk:
+    ; dst > src: copy backward to avoid overlap corruption
+    ; Point rsi/rdi to last byte, set direction flag, copy bytes
+    lea rsi, [rsi + rcx - 1]
+    lea rdi, [rdi + rcx - 1]
+    std
+    rep movsb
+    cld
+    ret
+.memmove_fwd:
+    ; dst < src: forward copy — qwords then byte remainder
+    push rdx                ; save original count
+    shr rcx, 3
+    rep movsq
+    pop rcx
+    and rcx, 7
+    rep movsb
+.memmove_done:
+    ret
+END_FUNC ap_memmove
+
+; ap_memcmp(const void *s1, const void *s2, size_t n) -> int
+; Returns 0 if equal, <0 if s1<s2, >0 if s1>s2
+DEF_FUNC_BARE ap_memcmp
+    mov rcx, rdx            ; rcx = count
+    repe cmpsb              ; rdi=s1, rsi=s2
+    je .memcmp_equal
+    movzx eax, byte [rdi - 1]
+    movzx ecx, byte [rsi - 1]
+    sub eax, ecx
+    ret
+.memcmp_equal:
+    xor eax, eax
+    ret
+END_FUNC ap_memcmp
+
+;; ============================================================================
+;; String operations, PLT-free
+;; (was src/lib/string.asm)
+;; ============================================================================
+
+section .text
+
+; Replaces libc strlen, strcmp, strstr
+
+; ap_strlen(const char *s) -> size_t
+; Uses repne scasb (fast on modern x86-64 with FAST_SHORT_REP)
+DEF_FUNC_BARE ap_strlen
+    mov rdi, rdi            ; s already in rdi
+    xor eax, eax            ; search for NUL byte
+    mov rcx, -1             ; max search length
+    repne scasb
+    not rcx
+    dec rcx                 ; rcx = length (not counting NUL)
+    mov rax, rcx
+    ret
+END_FUNC ap_strlen
+
+; ap_strcmp(const char *a, const char *b) -> int
+; 8-byte fast path with byte-at-a-time fallback, returns <0 / 0 / >0
+;
+; Safety: reading 8 bytes at a time is safe because all callers compare
+; PyStrObject.data which is inline after the header. Object allocation
+; always provides >=8 bytes past .data even for 1-char strings, due to
+; minimum object size and alignment.
+DEF_FUNC_BARE ap_strcmp
+    ; rdi = a, rsi = b
+.fast8:
+    mov rax, [rdi]          ; load 8 bytes from a
+    mov rdx, [rsi]          ; load 8 bytes from b
+    cmp rax, rdx
+    jne .byte_loop          ; mismatch -> fall back
+
+    ; Check if NUL within these 8 bytes (Mycroft's trick)
+    mov rcx, rax
+    mov r8, 0x0101010101010101
+    sub rcx, r8
+    not rax
+    and rcx, rax
+    mov r8, 0x8080808080808080
+    and rcx, r8
+    jnz .equal              ; NUL found -> strings equal
+
+    add rdi, 8
+    add rsi, 8
+    jmp .fast8
+
+.equal:
+    xor eax, eax
+    ret
+
+.byte_loop:
+    movzx eax, byte [rdi]
+    movzx ecx, byte [rsi]
+    sub eax, ecx
+    jnz .done               ; bytes differ
+    test cl, cl
+    jz .done                 ; both NUL
+    inc rdi
+    inc rsi
+    jmp .byte_loop
+.done:
+    ret
+END_FUNC ap_strcmp
+
+; ap_strstr(const char *haystack, const char *needle) -> char* or NULL
+; Simple O(n*m) search. Returns pointer to first match or NULL.
+DEF_FUNC_BARE ap_strstr
+    ; rdi = haystack, rsi = needle
+    ; If needle is empty, return haystack
+    cmp byte [rsi], 0
+    je .return_haystack
+
+.outer:
+    movzx eax, byte [rdi]
+    test al, al
+    jz .not_found               ; end of haystack
+    ; Try to match needle starting here
+    mov rcx, rdi                ; rcx = haystack cursor
+    mov rdx, rsi                ; rdx = needle cursor
+.inner:
+    movzx eax, byte [rdx]
+    test al, al
+    jz .found                   ; end of needle = full match
+    cmp al, [rcx]
+    jne .advance                ; mismatch
+    inc rcx
+    inc rdx
+    jmp .inner
+.advance:
+    inc rdi
+    jmp .outer
+
+.found:
+    mov rax, rdi
+    ret
+.return_haystack:
+    mov rax, rdi
+    ret
+.not_found:
+    xor eax, eax
+    ret
+END_FUNC ap_strstr
+
+;; ============================================================================
+;; Allocation
+;; (was src/memory.asm)
+;; ============================================================================
+
+section .text
+
+; Wraps libc malloc/free/realloc with error checking
+
+extern malloc
+extern free
+extern realloc
+; ap_malloc(size_t size) -> void*
+; Allocates memory, fatal error on failure
+DEF_FUNC ap_malloc
+    push rbx
+    mov rbx, rdi            ; save size
+    call malloc wrt ..plt
+    test rax, rax
+    jz .oom
+    pop rbx
+    leave
+    ret
+.oom:
+    lea rdi, [rel mem_oom_msg]
+    call fatal_error        ; never returns
+END_FUNC ap_malloc
+
+; ap_free(void *ptr)
+; Frees memory; NULL-safe
+DEF_FUNC_BARE ap_free
+    test rdi, rdi
+    jz .null
+    jmp free wrt ..plt
+.null:
+    ret
+END_FUNC ap_free
+
+; ap_realloc(void *ptr, size_t size) -> void*
+; Reallocates memory, fatal error on failure
+DEF_FUNC ap_realloc
+    push rbx
+    mov rbx, rsi            ; save size for error case
+    call realloc wrt ..plt
+    test rax, rax
+    jz .oom
+    pop rbx
+    leave
+    ret
+.oom:
+    lea rdi, [rel mem_oom_msg]
+    call fatal_error        ; never returns
+END_FUNC ap_realloc
+
+section .rodata
+mem_oom_msg: db "Fatal: out of memory", 0
+
+;; ============================================================================
+;; Dying without an interpreter
+;; (was src/error.asm)
+;; ============================================================================
+
+section .text
+
+; Uses raw Linux syscalls instead of libc stdio
+
+; fatal_error(const char *msg)
+; Prints "Error: <msg>\n" to stderr and exits with code 1. Never returns.
+DEF_FUNC fatal_error
+    push rbx
+    mov rbx, rdi            ; save msg
+
+    ; sys_write(2, "Error: ", 7)
+    mov edi, 2
+    lea rsi, [rel err_prefix]
+    mov edx, 7
+    call sys_write
+
+    ; strlen(msg) inline
+    mov rdi, rbx
+    xor ecx, ecx
+.strlen_loop:
+    cmp byte [rdi + rcx], 0
+    je .strlen_done
+    inc rcx
+    jmp .strlen_loop
+.strlen_done:
+
+    ; sys_write(2, msg, len)
+    mov edi, 2
+    mov rsi, rbx
+    mov rdx, rcx
+    call sys_write
+
+    ; sys_write(2, "\n", 1)
+    mov edi, 2
+    lea rsi, [rel err_newline]
+    mov edx, 1
+    call sys_write
+
+    ; sys_exit(1)
+    mov edi, 1
+    call sys_exit
+END_FUNC fatal_error
+
+; runtime_error(const char *msg)
+; For now, same as fatal_error
+DEF_FUNC_BARE runtime_error
+    jmp fatal_error
+END_FUNC runtime_error
+
+; error_unimplemented_opcode(int opcode)
+; Reports unimplemented bytecode opcode and exits
+DEF_FUNC error_unimplemented_opcode, 32             ; space for decimal digits
+
+    mov eax, edi            ; opcode value
+
+    ; Convert opcode int to decimal string on stack
+    lea rdi, [rbp - 1]     ; write digits right-to-left
+    mov byte [rdi], 10      ; trailing newline
+    lea rcx, [rbp - 1]     ; rcx = end (points at newline)
+    mov r8d, 10
+
+.digit_loop:
+    xor edx, edx
+    div r8d                 ; eax = quot, edx = rem
+    dec rdi
+    add dl, '0'
+    mov [rdi], dl
+    test eax, eax
+    jnz .digit_loop
+
+    ; rdi = start of digits, rcx = newline position
+    ; length = rcx - rdi + 1 (include newline)
+    mov r8, rcx
+    sub r8, rdi
+    inc r8                  ; r8 = length of digits + newline
+
+    ; Save digit start and length
+    mov rbx, rdi
+    mov r9, r8
+
+    ; sys_write(2, prefix, prefix_len)
+    mov edi, 2
+    lea rsi, [rel err_op_prefix]
+    mov edx, err_op_prefix_len
+    call sys_write
+
+    ; sys_write(2, digits_and_newline, len)
+    mov edi, 2
+    mov rsi, rbx
+    mov rdx, r9
+    call sys_write
+
+    ; sys_exit(1)
+    mov edi, 1
+    call sys_exit
+END_FUNC error_unimplemented_opcode
+
+; list_sorting_error - raise ValueError when list is mutated during sort
+; Called when ob_item == NULL (list is being sorted)
+; Does not return - jumps to exception unwinder
+DEF_FUNC_BARE list_sorting_error
+    extern exc_ValueError_type
+    lea rdi, [rel exc_ValueError_type]
+    lea rsi, [rel list_modified_msg]
+    extern raise_exception
+    jmp raise_exception        ; tail call, doesn't return
+END_FUNC list_sorting_error
+
+section .rodata
+err_prefix: db "Error: "
+err_newline: db 10
+err_op_prefix: db "Error: unimplemented opcode "
+err_op_prefix_len equ $ - err_op_prefix
+list_modified_msg: db "list modified during sort", 0

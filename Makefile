@@ -28,7 +28,6 @@ TARGET = apython
 # Source files
 SRCS = $(wildcard src/*.asm)
 PYO_SRCS = $(wildcard src/pyo/*.asm)
-LIB_SRCS = $(wildcard src/lib/*.asm)
 # The Python source compiler is its own subsystem, peer to src/.
 COMPILER_SRCS = $(wildcard compiler/*.asm)
 # Objects mirror the source tree.  A flat build/ would put every basename in
@@ -37,7 +36,6 @@ COMPILER_SRCS = $(wildcard compiler/*.asm)
 # other file is never assembled, and the only symptom is a pile of undefined
 # references at link time naming nothing useful.
 OBJS = $(SRCS:src/%.asm=build/%.o) $(PYO_SRCS:src/pyo/%.asm=build/pyo/%.o) \
-       $(LIB_SRCS:src/lib/%.asm=build/lib/%.o) \
        $(COMPILER_SRCS:compiler/%.asm=build/compiler/%.o)
 
 # Every object depends on every header: nasm has no depfile support here, and
@@ -78,14 +76,11 @@ build/%.o: src/%.asm $(HEADERS) | build
 build/pyo/%.o: src/pyo/%.asm $(HEADERS) | build
 	$(NASM) $(NASMFLAGS) -o $@ $<
 
-build/lib/%.o: src/lib/%.asm $(HEADERS) | build
-	$(NASM) $(NASMFLAGS) -o $@ $<
-
 build/compiler/%.o: compiler/%.asm $(HEADERS) | build
 	$(NASM) $(NASMFLAGS) -o $@ $<
 
 build:
-	mkdir -p build build/pyo build/lib build/compiler
+	mkdir -p build build/pyo build/compiler
 
 # The generated compiler/tables.asm and compiler/unicodename.asm are checked-in
 # sources, not build products -- see `regen` below.  clean must never touch them.
