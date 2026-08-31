@@ -4,6 +4,10 @@
 %include "macros.inc"
 %include "object.inc"
 
+
+%include "macros.inc"
+%include "object.inc"
+
 extern ap_malloc
 extern ap_free
 extern gc_alloc
@@ -1062,7 +1066,6 @@ DEF_FUNC bytes_mod, BM_FRAME
 
     ; Convert result str to bytes
     mov rdi, [r12 + PyStrObject.ob_size]
-    extern bytes_new
     call bytes_new
     mov rbx, rax               ; rbx = bytes result
     ; Copy str data into bytes
@@ -1326,7 +1329,6 @@ DEF_FUNC byteslike_source, BLS_FRAME
     lea rcx, [rel bytes_type]
     cmp rax, rcx
     je .bls_copy_bytes
-    extern bytearray_type
     lea rcx, [rel bytearray_type]
     cmp rax, rcx
     je .bls_copy_bytearray
@@ -1647,3 +1649,535 @@ section .rodata
 bytes_range_msg: db "bytes must be in range(0, 256)", 0
 global bytearray_range_msg
 bytearray_range_msg: db "byte must be in range(0, 256)", 0
+
+;; ============================================================================
+;; (was src/pyo/bytearray.asm)
+;; ============================================================================
+
+section .text
+
+extern ap_malloc
+extern ap_free
+extern ap_memcpy
+extern gc_alloc
+extern gc_track
+extern type_type
+extern raise_exception
+extern exc_TypeError_type
+extern obj_decref
+extern v_int_bias
+
+section .text
+
+;; ============================================================================
+;; bytearray_type_call(type, args, nargs) -> PyByteArrayObject*
+;; Constructor: bytearray(bytes_obj)
+;; ============================================================================
+global bytearray_type_call
+BA_TYPE  equ 8
+BA_BUF   equ 16
+BA_LEN   equ 24
+BA_FRAME equ 32
+DEF_FUNC bytearray_type_call, BA_FRAME
+    ; rdi=type, rsi=args, rdx=nargs
+    push rbx
+    mov [rbp - BA_TYPE], rdi           ; save type
+    mov rdi, rsi
+    mov rsi, rdx
+    lea rdx, [rel bytearray_range_msg]
+    call byteslike_source
+    mov [rbp - BA_BUF], rax
+    mov [rbp - BA_LEN], rdx
+
+    mov rcx, rdx
+    mov rdx, [rbp - BA_TYPE]
+    test qword [rdx + PyTypeObject.tp_flags], TYPE_FLAG_HAVE_GC
+    lea rdi, [rcx + PyByteArrayObject.data]
+    jz .ba_plain_alloc
+    mov rsi, rdx
+    call gc_alloc
+    jmp .ba_alloc_done
+.ba_plain_alloc:
+    call ap_malloc
+    mov qword [rax + PyByteArrayObject.ob_refcnt], 1
+    mov rdx, [rbp - BA_TYPE]
+    mov [rax + PyByteArrayObject.ob_type], rdx
+.ba_alloc_done:
+    mov rbx, rax
+    mov rcx, [rbp - BA_LEN]
+    mov [rbx + PyByteArrayObject.ob_size], rcx
+    mov rdx, [rbp - BA_TYPE]
+    inc qword [rdx + PyObject.ob_refcnt]
+
+    test rcx, rcx
+    jz .ba_no_copy
+    lea rdi, [rbx + PyByteArrayObject.data]
+    mov rsi, [rbp - BA_BUF]
+    mov rdx, rcx
+    call ap_memcpy
+.ba_no_copy:
+    mov rdi, [rbp - BA_BUF]
+    test rdi, rdi
+    jz .ba_no_free
+    call ap_free
+.ba_no_free:
+
+    mov rdx, [rbp - BA_TYPE]
+    test qword [rdx + PyTypeObject.tp_flags], TYPE_FLAG_HAVE_GC
+    jz .ba_no_track
+    mov rdi, rbx
+    call gc_track
+.ba_no_track:
+    mov rax, rbx
+    mov edx, TAG_PTR
+    pop rbx
+    leave
+    ret
+END_FUNC bytearray_type_call
+
+;; ============================================================================
+;; bytearray_dealloc(obj)
+;; ============================================================================
+DEF_FUNC_BARE bytearray_dealloc
+    jmp ap_free
+END_FUNC bytearray_dealloc
+
+;; ============================================================================
+;; bytearray_len(obj) -> int64
+;; ============================================================================
+DEF_FUNC_BARE bytearray_len
+    mov rax, [rdi + PyByteArrayObject.ob_size]
+    ret
+END_FUNC bytearray_len
+
+
+;; ============================================================================
+;; bytearray_tp_iter / bytearray_iter_next
+;; A bytearray was not iterable at all, so `for b in ba` and every stdlib
+;; census that does type(iter(bytearray())) stopped here.  Same shape as the
+;; bytes iterator; the index is checked against the current length each time,
+;; so a bytearray that shrinks under the iterator just ends early.
+;; ============================================================================
+DEF_FUNC bytearray_tp_iter
+    push rbx
+    mov rbx, rdi
+    mov edi, PyBytesIterObject_size
+    call ap_malloc
+    mov qword [rax + PyObject.ob_refcnt], 1
+    lea rcx, [rel bytearray_iter_type]
+    mov [rax + PyObject.ob_type], rcx
+    mov [rax + PyBytesIterObject.it_seq], rbx
+    mov qword [rax + PyBytesIterObject.it_index], 0
+    inc qword [rbx + PyObject.ob_refcnt]
+    pop rbx
+    leave
+    ret
+END_FUNC bytearray_tp_iter
+
+DEF_FUNC_BARE bytearray_iter_next
+    mov rax, [rdi + PyBytesIterObject.it_seq]
+    mov rcx, [rdi + PyBytesIterObject.it_index]
+    cmp rcx, [rax + PyByteArrayObject.ob_size]
+    jge .exhausted
+    movzx eax, byte [rax + PyByteArrayObject.data + rcx]
+    add rax, [rel v_int_bias]
+    inc qword [rdi + PyBytesIterObject.it_index]
+    ret
+.exhausted:
+    xor eax, eax
+    ret
+END_FUNC bytearray_iter_next
+
+DEF_FUNC bytearray_iter_self
+    inc qword [rdi + PyObject.ob_refcnt]
+    mov rax, rdi
+    leave
+    ret
+END_FUNC bytearray_iter_self
+
+DEF_FUNC bytearray_iter_dealloc
+    push rbx
+    mov rbx, rdi
+    mov rdi, [rbx + PyBytesIterObject.it_seq]
+    test rdi, rdi
+    jz .free
+    call obj_decref
+.free:
+    mov rdi, rbx
+    call ap_free
+    pop rbx
+    leave
+    ret
+END_FUNC bytearray_iter_dealloc
+
+;; ============================================================================
+;; Type object
+;; ============================================================================
+section .data
+
+align 8
+ba_name_str:  db "bytearray", 0
+
+align 8
+bytearray_seq_methods:
+    dq bytearray_len       ; +0: sq_length
+    dq 0                   ; +8: sq_concat
+    dq 0                   ; +16: sq_repeat
+    dq 0                   ; +24: sq_item
+    dq 0                   ; +32: sq_ass_item
+    dq 0                   ; +40: sq_contains
+    dq 0                   ; +48: sq_inplace_concat
+    dq 0                   ; +56: sq_inplace_repeat
+
+align 8
+global bytearray_type
+bytearray_type:
+    dq 1                            ; ob_refcnt
+    dq type_type                    ; ob_type
+    dq ba_name_str                  ; tp_name
+    dq PyByteArrayObject.data       ; tp_basicsize
+    dq bytearray_dealloc            ; tp_dealloc
+    dq bytearray_repr               ; tp_repr
+    dq bytearray_repr               ; tp_str
+    dq 0                            ; tp_hash
+    dq 0                            ; tp_call (set by add_builtin_type)
+    dq 0                            ; tp_getattr
+    dq 0                            ; tp_setattr
+    dq 0                            ; tp_richcompare
+    dq bytearray_tp_iter            ; tp_iter
+    dq 0                            ; tp_iternext
+    dq 0                            ; tp_init
+    dq 0                            ; tp_new
+    dq 0                            ; tp_as_number
+    dq bytearray_seq_methods        ; tp_as_sequence
+    dq 0                            ; tp_as_mapping
+    dq 0                            ; tp_base
+    dq 0                            ; tp_dict
+    dq 0                            ; tp_mro
+    dq TYPE_FLAG_BASETYPE           ; tp_flags (allow subclassing)
+    dq 0                            ; tp_bases
+    dq 0                        ; tp_traverse
+    dq 0                        ; tp_clear
+    dq 0 ; tp_dictoffset
+
+align 8
+ba_iter_name_str: db "bytearray_iterator", 0
+
+align 8
+global bytearray_iter_type
+bytearray_iter_type:
+    dq 1                            ; ob_refcnt
+    dq type_type                    ; ob_type
+    dq ba_iter_name_str             ; tp_name
+    dq PyBytesIterObject_size       ; tp_basicsize
+    dq bytearray_iter_dealloc       ; tp_dealloc
+    dq 0                            ; tp_repr
+    dq 0                            ; tp_str
+    dq 0                            ; tp_hash
+    dq 0                            ; tp_call
+    dq 0                            ; tp_getattr
+    dq 0                            ; tp_setattr
+    dq 0                            ; tp_richcompare
+    dq bytearray_iter_self          ; tp_iter
+    dq bytearray_iter_next          ; tp_iternext
+    dq 0                            ; tp_init
+    dq 0                            ; tp_new
+    dq 0                            ; tp_as_number
+    dq 0                            ; tp_as_sequence
+    dq 0                            ; tp_as_mapping
+    dq 0                            ; tp_base
+    dq 0                            ; tp_dict
+    dq 0                            ; tp_mro
+    dq 0                            ; tp_flags
+    dq 0                            ; tp_bases
+    dq 0                            ; tp_traverse
+    dq 0                            ; tp_clear
+    dq 0                            ; tp_dictoffset
+
+;; ============================================================================
+;; (was src/pyo/memview.asm)
+;; ============================================================================
+
+section .text
+
+extern ap_malloc
+extern ap_free
+extern ap_memcpy
+extern type_type
+extern obj_incref
+extern obj_decref
+extern raise_exception
+extern exc_TypeError_type
+extern int_type
+extern bool_type
+extern exc_IndexError_type
+extern int_to_i64
+extern slice_type
+extern slice_indices
+
+section .text
+
+;; ============================================================================
+;; memoryview_type_call(type, args, nargs) -> PyMemoryViewObject*
+;; Constructor: memoryview(bytes_obj)
+;; ============================================================================
+global memoryview_type_call
+MV_FRAME equ 8
+DEF_FUNC memoryview_type_call, MV_FRAME
+    ; rdi=type, rsi=args, rdx=nargs
+    cmp rdx, 1
+    jne .mv_error
+    mov rdi, [rsi]                     ; arg0 payload
+    ; Must be a bytes-like object (reject all non-pointer tags)
+    V_TEST_PTR_M [rsi], r11      ; args[0] a pointer?
+    ja .mv_error
+    mov rax, [rdi + PyObject.ob_type]
+    lea rcx, [rel bytes_type]
+    cmp rax, rcx
+    jne .mv_check_bytearray
+
+.mv_from_bytes:
+    ; rdi = bytes obj
+    push rdi
+    mov edi, PyMemoryViewObject_size
+    call ap_malloc
+    pop rdi                            ; source bytes
+
+    ; Init header
+    mov qword [rax + PyMemoryViewObject.ob_refcnt], 1
+    lea rcx, [rel memoryview_type]
+    mov [rax + PyMemoryViewObject.ob_type], rcx
+    mov [rax + PyMemoryViewObject.mv_source], rdi
+    push rax                           ; save result
+    push rdi                           ; save for INCREF
+    INCREF rdi
+    pop rdi
+    pop rax
+    ; Set buffer pointer and length
+    mov rcx, [rdi + PyBytesObject.ob_size]
+    mov [rax + PyMemoryViewObject.mv_len], rcx
+    lea rcx, [rdi + PyBytesObject.data]
+    mov [rax + PyMemoryViewObject.mv_buf], rcx
+    mov edx, TAG_PTR
+    leave
+    ret
+
+.mv_check_bytearray:
+    lea rcx, [rel bytearray_type]
+    cmp rax, rcx
+    je .mv_from_bytes                  ; same layout as bytes
+    jmp .mv_error
+
+.mv_error:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "memoryview: a bytes-like object is required"
+    call raise_exception
+END_FUNC memoryview_type_call
+
+;; ============================================================================
+;; memoryview_dealloc(obj)
+;; ============================================================================
+DEF_FUNC memoryview_dealloc
+    mov rdi, [rdi + PyMemoryViewObject.mv_source]
+    call obj_decref
+    ; Free the memoryview itself (rdi was clobbered, but we need original obj)
+    ; Actually, we need the original obj pointer. Rethink:
+    leave
+    ret                                ; leak for now... fix below
+END_FUNC memoryview_dealloc
+
+;; Proper dealloc:
+DEF_FUNC memoryview_dealloc_proper
+    push rdi                           ; save self
+    mov rdi, [rdi + PyMemoryViewObject.mv_source]
+    call obj_decref
+    pop rdi                            ; restore self
+    call ap_free
+    leave
+    ret
+END_FUNC memoryview_dealloc_proper
+
+;; ============================================================================
+;; memoryview_subscript(obj, key) -> PyMemoryViewObject* (slice)
+;; ============================================================================
+MS_OBJ   equ 8
+MS_KEY   equ 16
+MS_FRAME equ 16
+DEF_FUNC memoryview_subscript, MS_FRAME
+    V_UNPACK rsi, rdx           ; key Value -> (payload, tag)
+    mov [rbp - MS_OBJ], rdi
+    mov [rbp - MS_KEY], rsi
+
+    ; Check if key is a SmallInt (edx = key tag from caller)
+    cmp edx, TAG_SMALLINT
+    je .ms_int_index                   ; SmallInt index
+    cmp edx, TAG_PTR            ; a float key is neither: classify
+    jne .ms_type_error          ; fully before dereferencing, or raw
+                                ; f64 bits get used as an address
+    mov rax, [rsi + PyObject.ob_type]
+    lea rcx, [rel slice_type]
+    cmp rax, rcx
+    jne .ms_int_index_heap
+
+    ; Slice: call slice_indices(slice, length) -> rax=start, rdx=stop, rcx=step
+    mov rdi, rsi                       ; slice obj
+    mov rsi, [rbp - MS_OBJ]
+    mov rsi, [rsi + PyMemoryViewObject.mv_len]  ; length
+    call slice_indices
+    ; rax=start, rdx=stop, rcx=step
+
+    ; Only support step=1 for now
+    cmp rcx, 1
+    jne .ms_step_error
+
+    mov r8, rax                        ; start
+    sub rdx, rax
+    mov r9, rdx                        ; slicelength = stop - start
+
+    ; Create new memoryview pointing to slice of source
+    push r8                            ; save start
+    push r9                            ; save slicelength
+    mov edi, PyMemoryViewObject_size
+    call ap_malloc
+    pop r9                             ; slicelength
+    pop r8                             ; start
+
+    ; Init the new memoryview
+    mov qword [rax + PyMemoryViewObject.ob_refcnt], 1
+    lea rcx, [rel memoryview_type]
+    mov [rax + PyMemoryViewObject.ob_type], rcx
+
+    ; Share the same source object
+    mov rdi, [rbp - MS_OBJ]
+    mov rcx, [rdi + PyMemoryViewObject.mv_source]
+    mov [rax + PyMemoryViewObject.mv_source], rcx
+
+    ; Buffer = original buffer + start
+    mov rdx, [rdi + PyMemoryViewObject.mv_buf]
+    add rdx, r8
+    mov [rax + PyMemoryViewObject.mv_buf], rdx
+
+    ; Length = slicelength
+    mov [rax + PyMemoryViewObject.mv_len], r9
+
+    ; INCREF source
+    push rax
+    mov rdi, rcx
+    INCREF rdi
+    pop rax
+
+    mov edx, TAG_PTR
+    leave
+    V_PACK rax, rdx             ; return one Value
+    ret
+
+.ms_int_index:
+    ; SmallInt index — return single byte as SmallInt
+    mov rdi, [rbp - MS_OBJ]
+    ; Handle negative index
+    mov rcx, [rdi + PyMemoryViewObject.mv_len]
+    test rsi, rsi
+    jns .ms_check_bounds
+    add rsi, rcx
+.ms_check_bounds:
+    cmp rsi, 0
+    jl .ms_index_error
+    cmp rsi, rcx
+    jge .ms_index_error
+    mov rdx, [rdi + PyMemoryViewObject.mv_buf]
+    movzx eax, byte [rdx + rsi]
+    RET_TAG_SMALLINT
+    leave
+    V_PACK rax, rdx             ; return one Value
+    ret
+
+.ms_int_index_heap:
+    ; Heap int index — convert to i64
+    mov rax, [rsi + PyObject.ob_type]   ; int_to_i64 reads PyIntObject.compact
+    REQUIRE_INT_TYPE rax, rcx, .ms_type_error   ; unconditionally
+    push rdi
+    mov rdi, rsi
+    call int_to_i64
+    mov rsi, rax
+    pop rdi
+    jmp .ms_check_bounds
+
+.ms_index_error:
+    lea rdi, [rel exc_IndexError_type]
+    CSTRING rsi, "index out of range"
+    call raise_exception
+
+.ms_step_error:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "memoryview: unsupported step"
+    call raise_exception
+
+.ms_type_error:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "memoryview: invalid slice key"
+    call raise_exception
+END_FUNC memoryview_subscript
+
+;; ============================================================================
+;; memoryview_len(obj) -> int64
+;; ============================================================================
+DEF_FUNC_BARE memoryview_len
+    mov rax, [rdi + PyMemoryViewObject.mv_len]
+    ret
+END_FUNC memoryview_len
+
+;; ============================================================================
+;; Type object
+;; ============================================================================
+section .data
+
+align 8
+mv_name_str:  db "memoryview", 0
+
+align 8
+memoryview_seq_methods:
+    dq memoryview_len       ; +0: sq_length
+    dq 0                    ; +8: sq_concat
+    dq 0                    ; +16: sq_repeat
+    dq 0                    ; +24: sq_item
+    dq 0                    ; +32: sq_ass_item
+    dq 0                    ; +40: sq_contains
+    dq 0                    ; +48: sq_inplace_concat
+    dq 0                    ; +56: sq_inplace_repeat
+
+align 8
+memoryview_mapping_methods:
+    dq memoryview_len       ; +0: mp_length
+    dq memoryview_subscript ; +8: mp_subscript
+    dq 0                    ; +16: mp_ass_subscript
+
+align 8
+global memoryview_type
+memoryview_type:
+    dq 1                             ; ob_refcnt
+    dq type_type                     ; ob_type
+    dq mv_name_str                   ; tp_name
+    dq PyMemoryViewObject_size       ; tp_basicsize
+    dq memoryview_dealloc_proper     ; tp_dealloc
+    dq 0                             ; tp_repr
+    dq 0                             ; tp_str
+    dq 0                             ; tp_hash
+    dq 0                             ; tp_call (set by add_builtin_type)
+    dq 0                             ; tp_getattr
+    dq 0                             ; tp_setattr
+    dq 0                             ; tp_richcompare
+    dq 0                             ; tp_iter
+    dq 0                             ; tp_iternext
+    dq 0                             ; tp_init
+    dq 0                             ; tp_new
+    dq 0                             ; tp_as_number
+    dq memoryview_seq_methods        ; tp_as_sequence
+    dq memoryview_mapping_methods    ; tp_as_mapping
+    dq 0                             ; tp_base
+    dq 0                             ; tp_dict
+    dq 0                             ; tp_mro
+    dq 0                             ; tp_flags
+    dq 0                             ; tp_bases
+    dq 0                        ; tp_traverse
+    dq 0                        ; tp_clear
+    dq 0 ; tp_dictoffset
