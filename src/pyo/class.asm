@@ -24,6 +24,7 @@ extern ap_strcmp
 extern type_repr
 extern fatal_error
 extern raise_exception
+extern attr_error_pending
 extern exc_AttributeError_type
 extern exc_TypeError_type
 extern func_type
@@ -442,6 +443,7 @@ DEF_FUNC instance_getattr, IG_FRAME
     push rbx
     push r12
     push r13
+    mov qword [rel attr_error_pending], 0
 
     mov rbx, rdi                ; rbx = self (instance)
     mov r12, rsi                ; r12 = name
@@ -622,8 +624,34 @@ DEF_FUNC instance_getattr, IG_FRAME
     ret
 
 .getattr_raised:
-    ; Returning NULL here would have LOAD_ATTR report a plain AttributeError,
-    ; discarding whatever __getattr__ actually raised.
+    ; An AttributeError from __getattr__ is the protocol saying "absent", and
+    ; getattr(o, n, default) and hasattr() have to be able to see that and
+    ; answer.  Unwinding from here skips their native frames entirely, so they
+    ; never got the chance.  Hand back NULL with the exception still pending
+    ; and a flag saying so; raise_no_attribute propagates it rather than
+    ; replacing it, so `o.missing` still reports what __getattr__ raised.
+    ;
+    ; Anything else is a genuine failure in the middle of a lookup and keeps
+    ; unwinding, which is what it did before.
+    mov rax, [rel current_exception]
+    test rax, rax
+    jz .getattr_unwind
+    push rax
+    mov rdi, [rax + PyObject.ob_type]
+    lea rsi, [rel exc_AttributeError_type]
+    extern type_is_subtype
+    call type_is_subtype
+    pop rcx
+    test eax, eax
+    jz .getattr_unwind
+    mov qword [rel attr_error_pending], 1
+    RET_NULL
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+.getattr_unwind:
     leave
     jmp eval_exception_unwind
 

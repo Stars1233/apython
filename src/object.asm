@@ -19,6 +19,8 @@ extern bool_true
 extern int_repr
 extern int_type
 extern current_exception
+extern eval_saved_r13
+extern eval_exception_unwind
 extern int_to_i64
 extern float_type
 extern float_repr
@@ -459,6 +461,13 @@ DEF_FUNC raise_type_error_with_name
 END_FUNC raise_type_error_with_name
 
 section .bss
+; Set by instance_getattr when __getattr__ raised an AttributeError and it
+; handed the exception back rather than unwinding.  Cleared on entry to every
+; instance_getattr, so it cannot survive a lookup, and consumed by
+; raise_no_attribute.
+global attr_error_pending
+attr_error_pending: resq 1
+
 rtn_buf: resb RTN_BUFSZ
 section .text
 
@@ -500,6 +509,21 @@ global raise_no_attribute
 DEF_FUNC raise_no_attribute, RNA_FRAME
     push rbx
     push r12
+    ; A __getattr__ that raised AttributeError already said what it wanted
+    ; said.  Replacing it here with a generic message threw that away, so
+    ; instance_getattr hands it over with this flag rather than unwinding --
+    ; which would skip getattr()'s and hasattr()'s own frames.
+    cmp qword [rel attr_error_pending], 0
+    je .rna_fresh
+    mov qword [rel attr_error_pending], 0
+    cmp qword [rel current_exception], 0
+    je .rna_fresh
+    pop r12
+    pop rbx
+    leave
+    mov [rel eval_saved_r13], r13
+    jmp eval_exception_unwind
+.rna_fresh:
     mov [rbp - RNA_NAME], rsi
     call value_type
     mov r12, rax

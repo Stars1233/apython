@@ -34,6 +34,7 @@ extern obj_repr
 extern obj_is_true
 extern obj_incref
 extern obj_decref
+extern type_is_subtype
 extern dict_get
 extern raise_exception
 extern obj_getattr_opt
@@ -2681,7 +2682,8 @@ DEF_FUNC builtin_getattr, 24
     ; or an AttributeError, would bury the real exception.  current_exception
     ; is also whatever is being HANDLED, so it has to be compared against the
     ; snapshot rather than tested for emptiness.
-    DUNDER_RAISED [rbp - 8], .getattr_propagate
+    DUNDER_RAISED [rbp - 8], .getattr_check_type
+.getattr_absent:
     cmp r12, 3
     jne .getattr_raise
     mov rax, [rbx + 16]            ; args[2], the default
@@ -2690,6 +2692,30 @@ DEF_FUNC builtin_getattr, 24
     pop rbx
     leave
     ret
+
+.getattr_check_type:
+    ; Something was raised.  Only an AttributeError means "absent" -- that is
+    ; the exception the __getattr__ and descriptor protocols use to say so, and
+    ; the only one CPython swallows here.  Anything else is a real failure and
+    ; returning the default would bury it.
+    mov rax, [rel current_exception]
+    test rax, rax
+    jz .getattr_absent
+    mov rdi, [rax + PyObject.ob_type]
+    lea rsi, [rel exc_AttributeError_type]
+    call type_is_subtype           ; a subclass of AttributeError counts too
+    test eax, eax
+    jz .getattr_propagate
+    ; With no default to fall back on, CPython re-raises what was raised --
+    ; __getattr__'s own message, not a manufactured one -- so leave it pending.
+    cmp r12, 3
+    jne .getattr_propagate
+    ; Clear it before releasing, so a dealloc that re-enters cannot see a
+    ; pointer that is about to go away.
+    mov rdi, [rel current_exception]
+    mov qword [rel current_exception], 0
+    call obj_decref
+    jmp .getattr_absent
 
 .getattr_propagate:
     xor eax, eax                   ; NULL with the exception pending: op_call unwinds
@@ -2737,13 +2763,28 @@ DEF_FUNC builtin_hasattr, 24
     ret
 .hasattr_missing:
     ; hasattr swallows a missing attribute, not a getter that blew up.
-    DUNDER_RAISED [rbp - 8], .hasattr_propagate
+    DUNDER_RAISED [rbp - 8], .hasattr_check_type
 .hasattr_false:
     lea rax, [rel bool_false]
     INCREF rax
     pop rbx
     leave
     ret
+.hasattr_check_type:
+    ; As getattr: only an AttributeError reads as absent.
+    mov rax, [rel current_exception]
+    test rax, rax
+    jz .hasattr_false
+    mov rdi, [rax + PyObject.ob_type]
+    lea rsi, [rel exc_AttributeError_type]
+    call type_is_subtype
+    test eax, eax
+    jz .hasattr_propagate
+    mov rdi, [rel current_exception]
+    mov qword [rel current_exception], 0
+    call obj_decref
+    jmp .hasattr_false
+
 .hasattr_propagate:
     xor eax, eax
     xor edx, edx
