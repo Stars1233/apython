@@ -1513,19 +1513,22 @@ DEF_FUNC_LOCAL cg_s_import, CIM_FRAME
     test ecx, ecx
     jnz .with_as
 
-    ; No `as`: bind the first component of the dotted name.
-    mov esi, [rax + AstNode.a]
+    ; The name this import binds, through the symbol table like any other
+    ; assignment.  STORE_NAME unconditionally wrote into a locals mapping that
+    ; a function frame does not have, so `def f(): import sys` left sys empty.
+    mov esi, [rax + AstNode.c]
     mov rdi, rbx
     call ast_obj_at
+    mov rdx, rax
+    mov rcx, [rbp - CIM_LINE]
+    mov [r12 + CompUnit.curline], ecx
     mov rdi, rbx
     mov rsi, r12
-    mov rdx, rax
-    call cg_name_first_component
-    mov rdx, rax
-    mov rdi, r12
-    mov esi, OP_STORE_NAME
-    mov rcx, [rbp - CIM_LINE]
-    call cg_emit
+    mov ecx, CTX_STORE
+    xor r8d, r8d
+    call cg_nameop
+    test eax, eax
+    jz .fail
     jmp .next
 
 .with_as:
@@ -1576,14 +1579,16 @@ DEF_FUNC_LOCAL cg_s_import, CIM_FRAME
     mov rsi, [rbp - CIM_TARGET]
     mov rdi, rbx
     call ast_obj_at
-    mov rdi, r12
-    mov rsi, rax
-    call cg_name
     mov rdx, rax
-    mov rdi, r12
-    mov esi, OP_STORE_NAME
     mov rcx, [rbp - CIM_LINE]
-    call cg_emit
+    mov [r12 + CompUnit.curline], ecx
+    mov rdi, rbx
+    mov rsi, r12
+    mov ecx, CTX_STORE
+    xor r8d, r8d
+    call cg_nameop
+    test eax, eax
+    jz .fail
     ; The package IMPORT_NAME left behind, if the walk ever ran.
     cmp qword [rbp - CIM_J], 1
     je .next
@@ -1597,6 +1602,10 @@ DEF_FUNC_LOCAL cg_s_import, CIM_FRAME
     jmp .loop
 .done:
     mov eax, 1
+    jmp .ret
+.fail:
+    xor eax, eax
+.ret:
     pop r13
     pop r12
     pop rbx
@@ -1675,62 +1684,6 @@ DEF_FUNC cg_name_component, CNC_FRAME
     ret
 END_FUNC cg_name_component
 
-;; ============================================================================
-;; cg_name_first_component(Comp *c, CompUnit *u, PyStrObject *dotted)
-;;   -> co_names index
-;; `import a.b` binds `a`; this interns the leading component of the name.
-;; ============================================================================
-CNF_COMP  equ 24
-CNF_FRAME equ 40          ; + 2 pushes = 56
-DEF_FUNC cg_name_first_component, CNF_FRAME
-    push rbx
-    push r12
-    mov [rbp - CNF_COMP], rdi           ; the Comp, for comp_intern_keep
-    mov rbx, rsi
-    mov r12, rdx
-    lea rdi, [r12 + PyStrObject.data]
-    mov rcx, [r12 + PyStrObject.ob_size]
-    xor edx, edx
-.scan:
-    cmp rdx, rcx
-    jae .whole
-    cmp byte [rdi + rdx], '.'
-    je .found
-    inc rdx
-    jmp .scan
-.whole:
-    ; No dot: the name is already its own first component.
-    mov rdi, rbx
-    mov rsi, r12
-    call cg_name
-    pop r12
-    pop rbx
-    leave
-    ret
-.found:
-    ; comp_intern_keep, not comp_intern: CompUnit.names holds a borrowed
-    ; pointer, and releasing the string here left a dangling one in co_names.
-    ; The failure was a wild jump inside dict_lookup at run time, which is
-    ; exactly what comp_intern_cstr's comment warns about.
-    mov rsi, rdi                        ; the text
-    mov rdi, [rbp - CNF_COMP]
-    call comp_intern_keep               ; rdx already holds the length
-    test rax, rax
-    jz .fail
-    mov rdi, rbx
-    mov rsi, rax
-    call cg_name
-    pop r12
-    pop rbx
-    leave
-    ret
-.fail:
-    xor eax, eax
-    pop r12
-    pop rbx
-    leave
-    ret
-END_FUNC cg_name_first_component
 
 ;; ============================================================================
 ;; cg_s_importfrom - `from a import b as c` and `from . import x`
@@ -1919,14 +1872,16 @@ DEF_FUNC_LOCAL cg_s_importfrom, CIF_FRAME
     mov esi, ecx
     mov rdi, rbx
     call ast_obj_at
-    mov rdi, r12
-    mov rsi, rax
-    call cg_name
     mov rdx, rax
-    mov rdi, r12
-    mov esi, OP_STORE_NAME
     mov rcx, [rbp - CIF_LINE]
-    call cg_emit
+    mov [r12 + CompUnit.curline], ecx
+    mov rdi, rbx
+    mov rsi, r12
+    mov ecx, CTX_STORE
+    xor r8d, r8d
+    call cg_nameop
+    test eax, eax
+    jz .fail
     inc qword [rbp - CIF_I]
     jmp .loop
 

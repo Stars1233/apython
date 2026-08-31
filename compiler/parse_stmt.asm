@@ -830,6 +830,54 @@ DEF_FUNC_LOCAL ps_raise, PK_FRAME
 END_FUNC ps_raise
 
 ;; ============================================================================
+;; par_bound_name(Comp *c, uint32_t dotted) -> rax = obj index of the name the
+;;   import binds, or 0 on error.
+;;
+;; `import a.b` binds `a`, not `a.b`: the submodule is reached through the
+;; attribute.  The head is mangled the way every other identifier in a class
+;; body is -- CPython puts the raw dotted name in IMPORT_NAME and the mangled
+;; head in STORE_NAME -- and here, with Comp.private still live, is the only
+;; place that can do it.  By the time the symbol table runs, the class the
+;; mangling depends on is gone.
+;; ============================================================================
+PBN_COMP  equ 8
+PBN_FRAME equ 24          ; + 1 push = 32
+DEF_FUNC_LOCAL par_bound_name, PBN_FRAME
+    push rbx
+    mov rbx, rdi
+    call ast_obj_at                     ; rax = the dotted PyStrObject*
+    test rax, rax
+    jz .fail
+    mov rcx, [rax + PyStrObject.ob_size]
+    lea rsi, [rax + PyStrObject.data]
+    xor edx, edx
+.scan:
+    cmp rdx, rcx
+    jae .have
+    cmp byte [rsi + rdx], '.'
+    je .have
+    inc rdx
+    jmp .scan
+.have:
+    mov rdi, rbx
+    call comp_intern_name               ; an owned, mangled PyStrObject*
+    test rax, rax
+    jz .fail
+    mov rdi, rbx
+    mov rsi, rax
+    call ast_obj                        ; the arena takes ownership
+    pop rbx
+    leave
+    ret
+.fail:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+END_FUNC par_bound_name
+
+;; ============================================================================
+;; ============================================================================
 ;; par_dotted_name(Comp *c) -> rax = obj index of the joined name, 0 on error
 ;; `a.b.c` becomes the single string "a.b.c", which is what IMPORT_NAME wants.
 ;; ============================================================================
@@ -986,8 +1034,27 @@ DEF_FUNC_LOCAL ps_import, PK2_FRAME
     mov r8, r12
     mov r9, [rbp - PK_B]
     call ast_make
+    mov [rbp - PK_NODE], rax
+    ; The name this alias binds, decided here rather than in codegen: only the
+    ; parser still knows the enclosing class, and mangling needs it.
+    mov rdx, [rbp - PK_B]
+    test rdx, rdx
+    jnz .bound_is_as
     mov rdi, rbx
-    mov rsi, rax
+    mov rsi, r12
+    call par_bound_name
+    test rax, rax
+    jz .fail
+    mov rdx, rax
+.bound_is_as:
+    mov rdi, rbx
+    mov rsi, [rbp - PK_NODE]
+    push rdx
+    call ast_at
+    pop rdx
+    mov [rax + AstNode.c], edx
+    mov rdi, rbx
+    mov rsi, [rbp - PK_NODE]
     call ast_push
     mov rdi, rbx
     call par_kind
@@ -1111,6 +1178,19 @@ DEF_FUNC_LOCAL ps_from, PFR_FRAME
     mov r8, [rbp - PK_A]
     mov r9, [rbp - PK_B]
     call ast_make
+    ; Both halves are already mangled by par_name_obj, so the bound name is
+    ; just the asname when there is one and the imported name otherwise.
+    push rax
+    mov rdi, rbx
+    mov rsi, rax
+    call ast_at
+    mov rdx, [rbp - PK_B]
+    test rdx, rdx
+    jnz .from_bound_as
+    mov rdx, [rbp - PK_A]
+.from_bound_as:
+    mov [rax + AstNode.c], edx
+    pop rax
     mov rdi, rbx
     mov rsi, rax
     call ast_push

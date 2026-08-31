@@ -232,6 +232,8 @@ AST_NONLOCAL    equ 58   ; clist=obj indices
 AST_IMPORT      equ 59   ; clist=alias nodes
 AST_IMPORTFROM  equ 60   ; a=obj index (module), clist=aliases, subkind=level
 AST_ALIAS       equ 61   ; a=obj index (name) b=obj index (asname or 0)
+                         ; c=obj index of the name actually bound: the asname,
+                         ; or the mangled leading component of the dotted name
 AST_FUNCTIONDEF equ 62   ; a=obj index (name) b=args, clist=body, c=extra node
 AST_CLASSDEF    equ 63   ; a=obj index (name) b=bases call, clist=body, c=extra
 AST_TRY         equ 64   ; clist=body, a=handlers block, b=orelse, c=finalbody

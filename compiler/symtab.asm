@@ -439,11 +439,12 @@ DEF_FUNC sym_visit, SV_FRAME
 
 ;; `import a` and `from m import a as b` bind a name in this block.
 .alias:
+    ; The name the import BINDS, which the parser worked out: the asname, or
+    ; the mangled leading component of the dotted name.  Binding .a instead
+    ; recorded a local literally called "a.b" for `import a.b`, where CPython
+    ; binds `a` -- so the symbol table and the store disagreed about the name.
     mov rax, [rbp - SV_NPTR]
-    mov ecx, [rax + AstNode.b]          ; the `as` name, if any
-    test ecx, ecx
-    jnz .alias_name
-    mov ecx, [rax + AstNode.a]
+    mov ecx, [rax + AstNode.c]
     test ecx, ecx
     jz .ok                              ; `import *` binds nothing statically
 .alias_name:
