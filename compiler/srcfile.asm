@@ -113,14 +113,21 @@ DEF_FUNC src_read_file, SR_FRAME
     sub rdx, rax
     call sys_read
     test rax, rax
-    jle .read_short
+    jz .read_done
+    cmp rax, -4                         ; -EINTR: interrupted, not finished
+    je .read_loop
+    js .read_error
     add [rbp - SR_GOT], rax
     jmp .read_loop
-.read_short:
-    ; A short read is the real length: /proc and other synthetic files report
-    ; a size of 0 from fstat and still have contents, and a file that shrank
-    ; between the fstat and the read is not an error either.
-    jmp .read_done
+    ; A zero read is the real length: /proc and other synthetic files report a
+    ; size of 0 from fstat and still have contents, and a file that shrank
+    ; between the fstat and the read is not an error either.  A NEGATIVE one is
+    ; not that -- folding EISDIR or EIO in here reported a directory as an
+    ; empty module, and a failed read partway through as a truncated one.
+.read_error:
+    mov rdi, [rbp - SR_BUF]
+    call ap_free
+    jmp .close_fail
 
 .read_done:
     mov rdi, [rbp - SR_FD]

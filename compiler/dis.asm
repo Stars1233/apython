@@ -73,26 +73,29 @@ DEF_FUNC dis_num, DN_FRAME
     div rcx
     add dl, '0'
     mov [rsi], dl
-    inc rbx
     test rax, rax
     jnz .digits
     test r8d, r8d
     jz .pad
     dec rsi
     mov byte [rsi], '-'
-    inc rbx
 .pad:
-    ; rbx counted digits; pad out to the requested width.
-    lea rdx, [rbp - 7]
-    sub rdx, rsi                        ; bytes produced, including the trailer
+    ; Pad out to the width the caller asked for.  It was counted into rbx and
+    ; then never read -- .padloop compared against a hard-coded 12 -- so every
+    ; column came out the same width whatever was requested, and nothing lined
+    ; up beside `python3 -m dis`, which is the only reason this tool exists.
+    lea rdx, [rbp - 8]
+    sub rdx, rsi                        ; digits, sign included
 .padloop:
-    cmp rdx, 12
+    cmp rdx, rbx
     jae .emit
     dec rsi
     mov byte [rsi], ' '
     inc rdx
     jmp .padloop
 .emit:
+    lea rdx, [rbp - 7]
+    sub rdx, rsi                        ; add the trailing space back
     mov edi, 1
     call sys_write
     pop rbx
