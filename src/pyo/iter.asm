@@ -549,7 +549,7 @@ END_FUNC range_obj_reversed
 extern str_from_cstr_heap
 ROR_BUF equ 8
 ROR_POS equ 16
-ROR_FRAME equ 16
+ROR_FRAME equ 16            ; + 4 pushes = 48
 DEF_FUNC range_obj_repr, ROR_FRAME
     push rbx
     push r12

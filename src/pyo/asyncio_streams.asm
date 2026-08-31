@@ -711,7 +711,7 @@ END_FUNC accept_awaitable_dealloc
 ;; asyncio.open_connection(host, port) — create TCP connection
 ;; Returns a ConnectAwaitable
 ;; ============================================================================
-OC_FRAME equ 32
+OC_FRAME equ 32             ; + 3 pushes = 56, not 16-aligned
 DEF_FUNC asyncio_open_connection_func, OC_FRAME
     push rbx
     push r12
@@ -795,7 +795,7 @@ END_FUNC asyncio_open_connection_func
 ;; first accepted connection. A full implementation would accept in a loop.
 ;; Returns a ConnectAwaitable that resolves to (reader, writer) on accept.
 ;; ============================================================================
-SS_FRAME equ 48
+SS_FRAME equ 48             ; + 3 pushes = 72, not 16-aligned
 DEF_FUNC asyncio_start_server_func, SS_FRAME
     push rbx
     push r12

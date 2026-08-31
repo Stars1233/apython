@@ -167,7 +167,7 @@ CEM_MATCH  equ 24
 CEM_REST   equ 32
 CEM_TMP1   equ 40
 CEM_TMP2   equ 48
-CEM_FRAME  equ 48
+CEM_FRAME  equ 48           ; + 0 pushes = 48
 DEF_FUNC op_check_eg_match, CEM_FRAME
 
     VPOP rsi                 ; rsi = match_type

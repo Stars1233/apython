@@ -19,7 +19,7 @@ extern type_type
 ; --- code_new frame layout ---
 CN_SPEC  equ 8
 CN_CODE  equ 16
-CN_FRAME equ 16
+CN_FRAME equ 16             ; + 2 pushes = 32
 
 ;; ============================================================================
 ;; code_new(CodeSpec *spec) -> PyCodeObject*

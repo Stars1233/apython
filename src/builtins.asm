@@ -631,7 +631,7 @@ END_FUNC builtin_print
 ;; builtin, and falls back to the sequence and mapping length slots.
 ;; ============================================================================
 LEN_EXC   equ 8
-LEN_FRAME equ 16
+LEN_FRAME equ 16            ; + 1 push = 24, not 16-aligned
 DEF_FUNC builtin_len, LEN_FRAME
     push rbx
 
@@ -845,7 +845,7 @@ END_FUNC builtin_range
 ;; Walks the full tp_base chain for inheritance.
 ;; ============================================================================
 ISI_OBJ   equ 8         ; the object as a Value, for __instancecheck__
-ISI_FRAME equ 16
+ISI_FRAME equ 16            ; + 2 pushes = 32
 DEF_FUNC builtin_isinstance, ISI_FRAME
     push rbx
     push r12
@@ -1208,7 +1208,7 @@ END_FUNC builtin_bool
 ;; float(x)   -> convert x to float (int, float, or string)
 ;; ============================================================================
 global builtin_float
-BF_FRAME equ 32
+BF_FRAME equ 32             ; + 0 pushes = 32
 BF_START  equ 8              ; the string strtod was handed
 BF_ENDPTR equ 16            ; where strtod stopped
 DEF_FUNC builtin_float, BF_FRAME
@@ -1352,7 +1352,7 @@ END_FUNC builtin_float
 ;; ============================================================================
 ABS_DICT equ 8
 ABS_KEY  equ 16
-ABS_FRAME equ 24
+ABS_FRAME equ 24            ; + 2 pushes = 40, not 16-aligned
 DEF_FUNC_LOCAL add_builtin_str, ABS_FRAME
     push rbx
     push r12

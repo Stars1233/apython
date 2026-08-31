@@ -99,7 +99,7 @@ WC_OBJ   equ 8
 WC_LIST  equ 16
 WC_IDX   equ 24
 WC_EXC   equ 32
-WC_FRAME equ 48
+WC_FRAME equ 48             ; + 2 pushes = 64
 DEF_FUNC weakref_clear_for, WC_FRAME
     push rbx
     push r12
@@ -210,7 +210,7 @@ WM_TYPE  equ 8
 WM_OBJ   equ 16
 WM_CB    equ 24
 WM_REF   equ 32
-WM_FRAME equ 48
+WM_FRAME equ 48             ; + 1 push = 56, not 16-aligned
 DEF_FUNC_LOCAL weakref_make, WM_FRAME
     push rbx
     mov [rbp - WM_TYPE], rdi
@@ -360,7 +360,7 @@ END_FUNC ref_deref
 
 RR_SELF  equ 8
 RR_BUF   equ 1040
-RR_FRAME equ 1056
+RR_FRAME equ 1056           ; + 2 pushes = 1072
 DEF_FUNC_LOCAL ref_repr, RR_FRAME
     push rbx
     push r12
@@ -441,7 +441,7 @@ END_FUNC ref_hash
 RC_SELF  equ 8
 RC_OTHER equ 16
 RC_OP    equ 24
-RC_FRAME equ 32
+RC_FRAME equ 32             ; + 0 pushes = 32
 DEF_FUNC_LOCAL ref_richcompare, RC_FRAME
     mov [rbp - RC_SELF], rdi
     mov [rbp - RC_OTHER], rsi
@@ -809,7 +809,7 @@ END_FUNC wr_remove_dead_func
     call obj_decref
 %endmacro
 
-WRM_FRAME equ 8
+WRM_FRAME equ 8             ; + 2 pushes = 24, not 16-aligned
 DEF_FUNC weakref_module_create, WRM_FRAME
     push rbx
     push r12

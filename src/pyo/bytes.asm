@@ -650,7 +650,7 @@ END_FUNC bytes_getattr
 BD_SELF  equ 8
 BD_OUT   equ 16
 BD_POS   equ 24
-BD_FRAME equ 32
+BD_FRAME equ 32             ; + 2 pushes = 48
 DEF_FUNC _bytes_decode_impl, BD_FRAME
     push rbx
     push r12
@@ -1001,7 +1001,7 @@ section .text
 ;; ============================================================================
 BM_FMT   equ 8
 BM_ARGS  equ 16
-BM_FRAME equ 16
+BM_FRAME equ 16             ; + 0 pushes = 16
 
 DEF_FUNC bytes_mod, BM_FRAME
     V_UNPACK rdi, rdx           ; left  Value -> (payload, tag)
@@ -1344,7 +1344,7 @@ BLS_RANGEMSG equ 16
 BLS_BADITEM equ 56
 BLS_BUF   equ 32
 BLS_LIST  equ 40
-BLS_FRAME equ 64
+BLS_FRAME equ 64            ; + 2 pushes = 80
 DEF_FUNC byteslike_source, BLS_FRAME
     push rbx
     push r12
@@ -1550,7 +1550,7 @@ END_FUNC byteslike_source
 BTC_TYPE  equ 8
 BTC_BUF   equ 16
 BTC_LEN   equ 24
-BTC_FRAME equ 32
+BTC_FRAME equ 32            ; + 1 push = 40, not 16-aligned
 DEF_FUNC bytes_type_call, BTC_FRAME
     ; rdi=type, rsi=args, rdx=nargs
     push rbx
@@ -1717,7 +1717,7 @@ global bytearray_type_call
 BA_TYPE  equ 8
 BA_BUF   equ 16
 BA_LEN   equ 24
-BA_FRAME equ 32
+BA_FRAME equ 32             ; + 1 push = 40, not 16-aligned
 DEF_FUNC bytearray_type_call, BA_FRAME
     ; rdi=type, rsi=args, rdx=nargs
     push rbx
@@ -1961,7 +1961,7 @@ section .text
 ;; Constructor: memoryview(bytes_obj)
 ;; ============================================================================
 global memoryview_type_call
-MV_FRAME equ 8
+MV_FRAME equ 8              ; + 0 pushes = 8, not 16-aligned
 DEF_FUNC memoryview_type_call, MV_FRAME
     ; rdi=type, rsi=args, rdx=nargs
     cmp rdx, 1
@@ -2028,7 +2028,7 @@ END_FUNC memoryview_dealloc_proper
 ;; ============================================================================
 MS_OBJ   equ 8
 MS_KEY   equ 16
-MS_FRAME equ 16
+MS_FRAME equ 16             ; + 0 pushes = 16
 DEF_FUNC memoryview_subscript, MS_FRAME
     V_UNPACK rsi, rdx           ; key Value -> (payload, tag)
     mov [rbp - MS_OBJ], rdi

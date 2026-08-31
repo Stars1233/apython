@@ -360,7 +360,7 @@ NR_IDX   equ 24
 NR_COUNT equ 32
 NR_CAP   equ 40
 NR_BUF   equ 1080        ; 1024 bytes, [rbp-1080, rbp-56)
-NR_FRAME equ 1088
+NR_FRAME equ 1088           ; + 2 pushes = 1104
 DEF_FUNC namespace_repr, NR_FRAME
     push rbx
     push r13

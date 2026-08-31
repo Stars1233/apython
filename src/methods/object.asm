@@ -230,7 +230,7 @@ END_FUNC object_method_str
 ;; writes "<Name object>" straight out.  Calling obj_repr here would come
 ;; back through tp_repr to this same method.
 OMR_BUF   equ 136
-OMR_FRAME equ 160
+OMR_FRAME equ 160           ; + 0 pushes = 160
 DEF_FUNC object_method_repr, OMR_FRAME
     test rsi, rsi
     jz .omr_bad

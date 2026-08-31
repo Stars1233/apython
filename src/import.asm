@@ -75,14 +75,14 @@ IF_EXC      equ 88           ; current_exception on entry (see .import_error)
 IF_POS      equ 96           ; byte position while walking a dotted name
 IF_PARENT   equ 104          ; the module the next component hangs off
 IF_LEAF     equ 112          ; the module the walk has reached
-IF_FRAME    equ 128
+IF_FRAME    equ 128         ; + 5 pushes = 168, not 16-aligned
 
 ; --- import_find_and_load frame layout ---
 ; path_component buffer lives on stack below frame locals
 FL_NAME     equ 8            ; name_str (PyObject*)
 FL_LEAF     equ 16           ; leaf name cstr ptr
 FL_LEAFLEN  equ 24           ; leaf name length
-FL_FRAME    equ 48
+FL_FRAME    equ 48          ; + 5 pushes = 88, not 16-aligned
 FL_STKSZ    equ 4096         ; stack buffer for path component
 
 ; Path buffer size
@@ -115,7 +115,7 @@ IRR_PKG   equ 24
 IRR_LEN   equ 32
 IRR_BUF   equ 1064          ; 1024 bytes, [rbp-1064, rbp-40)
 global import_resolve_relative
-IRR_FRAME equ 1072
+IRR_FRAME equ 1072          ; + 2 pushes = 1088
 DEF_FUNC import_resolve_relative, IRR_FRAME
     push rbx
     push r12
@@ -212,7 +212,7 @@ END_FUNC import_resolve_relative
 ; ----------------------------------------------------------------------------
 IAR_SUFFIX equ 8
 IAR_BUF    equ 4128            ; 4096 bytes of path, [rbp-4128, rbp-32)
-IAR_FRAME  equ 4144
+IAR_FRAME  equ 4144         ; + 2 pushes = 4160
 DEF_FUNC_LOCAL import_add_exe_relative_path, IAR_FRAME
     push rbx
     push r12
@@ -998,7 +998,7 @@ SD_LEAFLEN  equ 24            ; leaf length
 SD_FULLPATH equ 32            ; optional full path component (with slashes)
 SD_IDX      equ 40            ; current search index
 SD_COUNT    equ 48            ; number of dirs
-SD_FRAME    equ 56
+SD_FRAME    equ 56          ; + 5 pushes = 96
 
 DEF_FUNC import_search_dirs, SD_FRAME
     push rbx
@@ -1282,7 +1282,7 @@ SS_LEAFLEN  equ 24
 SS_FULL     equ 32            ; full path component (dots->slashes)
 SS_IDX      equ 40
 SS_COUNT    equ 48
-SS_FRAME    equ 56
+SS_FRAME    equ 56          ; + 5 pushes = 96
 
 DEF_FUNC import_search_syspath, SS_FRAME
     push rbx

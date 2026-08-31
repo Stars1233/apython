@@ -60,7 +60,7 @@ section .text
 ; Reads the class's own tp_dict.  Borrowed; the caller does not own it.
 ; ----------------------------------------------------------------------------
 AG_CLS   equ 8
-AG_FRAME equ 16
+AG_FRAME equ 16             ; + 1 push = 24, not 16-aligned
 DEF_FUNC_LOCAL abc_state_get, AG_FRAME
     push rbx
     mov [rbp - AG_CLS], rdi
@@ -95,7 +95,7 @@ END_FUNC abc_state_get
 ; ----------------------------------------------------------------------------
 AS_CLS   equ 8
 AS_VAL   equ 16
-AS_FRAME equ 16
+AS_FRAME equ 16             ; + 1 push = 24, not 16-aligned
 DEF_FUNC_LOCAL abc_state_set, AS_FRAME
     push rbx
     mov [rbp - AS_CLS], rdi
@@ -127,7 +127,7 @@ END_FUNC abc_state_set
 ; ----------------------------------------------------------------------------
 AF_CLS   equ 8
 AF_NAME  equ 16
-AF_FRAME equ 16
+AF_FRAME equ 16             ; + 1 push = 24, not 16-aligned
 DEF_FUNC_LOCAL abc_fresh_set, AF_FRAME
     push rbx
     mov [rbp - AF_CLS], rdi
@@ -162,7 +162,7 @@ END_FUNC abc_get_cache_token
 ; ----------------------------------------------------------------------------
 AGA_OBJ  equ 8
 AGA_NAME equ 16
-AGA_FRAME equ 32
+AGA_FRAME equ 32            ; + 0 pushes = 32
 DEF_FUNC_LOCAL abc_getattr, AGA_FRAME
     V_TEST_PTR rdi, rax
     ja .aga_none
@@ -248,7 +248,7 @@ CA_SET   equ 16
 CA_IDX   equ 24
 CA_DICT  equ 32
 CA_KEY   equ 48
-CA_FRAME equ 64
+CA_FRAME equ 64             ; + 2 pushes = 80
 DEF_FUNC_LOCAL abc_compute_abstracts, CA_FRAME
     push rbx
     push r12
@@ -360,7 +360,7 @@ END_FUNC abc_compute_abstracts
 ; _abc_init(cls) -> None
 ; ----------------------------------------------------------------------------
 AI_CLS   equ 8
-AI_FRAME equ 16
+AI_FRAME equ 16             ; + 0 pushes = 16
 DEF_FUNC abc_init_func, AI_FRAME
     cmp rsi, 1
     jl .bad
@@ -442,7 +442,7 @@ SC_NEG    equ 32
 SC_HOOK   equ 40
 SC_IDX    equ 48
 SC_REG    equ 56
-SC_FRAME  equ 64
+SC_FRAME  equ 64            ; + 2 pushes = 80
 DEF_FUNC abc_subclasscheck, SC_FRAME
     push rbx
     push r12
@@ -703,7 +703,7 @@ END_FUNC abc_subclasscheck_func
 ; ----------------------------------------------------------------------------
 IC_CLS   equ 8
 IC_SUB   equ 16
-IC_FRAME equ 16
+IC_FRAME equ 16             ; + 0 pushes = 16
 DEF_FUNC abc_instancecheck_func, IC_FRAME
     cmp rsi, 2
     jl .bad
@@ -755,7 +755,7 @@ END_FUNC abc_instancecheck_func
 ; ----------------------------------------------------------------------------
 RG_CLS   equ 8
 RG_SUB   equ 16
-RG_FRAME equ 16
+RG_FRAME equ 16             ; + 0 pushes = 16
 DEF_FUNC abc_register_func, RG_FRAME
     cmp rsi, 2
     jl .bad
@@ -812,7 +812,7 @@ END_FUNC abc_register_func
 ; ----------------------------------------------------------------------------
 GD_CLS   equ 8
 GD_TUP   equ 16
-GD_FRAME equ 16
+GD_FRAME equ 16             ; + 0 pushes = 16
 DEF_FUNC abc_get_dump_func, GD_FRAME
     cmp rsi, 1
     jl .bad
@@ -869,7 +869,7 @@ END_FUNC abc_reset_registry_func
 ; _reset_caches(cls) -> None
 ; ----------------------------------------------------------------------------
 RC_CLS   equ 8
-RC_FRAME equ 16
+RC_FRAME equ 16             ; + 0 pushes = 16
 DEF_FUNC abc_reset_caches_func, RC_FRAME
     cmp rsi, 1
     jl .bad
@@ -893,7 +893,7 @@ END_FUNC abc_reset_caches_func
 ; Module construction
 ; ============================================================================
 
-ABC_FRAME equ 8
+ABC_FRAME equ 8             ; + 2 pushes = 24, not 16-aligned
 DEF_FUNC abc_module_create, ABC_FRAME
     push rbx
     push r12

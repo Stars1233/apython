@@ -817,7 +817,7 @@ PA_LEN    equ 16            ; length in bytes, for the copies
 PA_ARGS   equ 24
 PA_NARGS  equ 32
 PA_CPLEN  equ 40            ; length in code points, which is what a width means
-PA_FRAME  equ 48
+PA_FRAME  equ 48            ; + 3 pushes = 72, not 16-aligned
 DEF_FUNC str_method_center, PA_FRAME
     push rbx
     push r12

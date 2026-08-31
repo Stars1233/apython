@@ -794,7 +794,7 @@ END_FUNC mappingproxy_repr
 MPG_MAP   equ 8
 MPG_NAME  equ 16
 MPG_PTR   equ 24
-MPG_FRAME equ 32
+MPG_FRAME equ 32            ; + 0 pushes = 32
 DEF_FUNC mappingproxy_getattr, MPG_FRAME
     ; A proxy is read-only, so the methods that would write through it are
     ; refused before the wrapped dict is consulted.  Without this, giving dict
@@ -972,7 +972,7 @@ END_FUNC generic_alias_class_getitem
 ;; repr: "list[int]" -- origin name, then the argument's repr.
 GAR_BUF   equ 264
 GAR_SELF  equ 272
-GAR_FRAME equ 288
+GAR_FRAME equ 288           ; + 5 pushes = 328, not 16-aligned
 DEF_FUNC generic_alias_repr, GAR_FRAME
     push rbx
     push r12
@@ -1370,7 +1370,7 @@ END_FUNC union_operand_ok
 ;; repr: "int | str"
 UR_BUF   equ 264
 UR_SELF  equ 272
-UR_FRAME equ 288
+UR_FRAME equ 288            ; + 5 pushes = 328, not 16-aligned
 DEF_FUNC union_repr, UR_FRAME
     push rbx
     push r12

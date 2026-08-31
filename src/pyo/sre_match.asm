@@ -36,7 +36,7 @@ extern sre_strcmp
 MN_STATE    equ 8
 MN_PAT      equ 16
 MN_STR      equ 24
-MN_FRAME    equ 24
+MN_FRAME    equ 24          ; + 3 pushes = 48
 
 DEF_FUNC sre_match_new, MN_FRAME
     push rbx
@@ -513,7 +513,7 @@ END_FUNC sre_match_group_method
 ; ============================================================================
 GS_DEFAULT     equ 8
 GS_DEFAULT_TAG equ 16
-GS_FRAME       equ 16
+GS_FRAME       equ 16       ; + 5 pushes = 56, not 16-aligned
 
 DEF_FUNC sre_match_groups_method, GS_FRAME
     ; rdi = args (fat array), rsi = nargs
@@ -772,7 +772,7 @@ GD_IDX         equ 32
 GD_CAP         equ 40
 GD_DEFAULT     equ 48
 GD_DEFAULT_TAG equ 56
-GD_FRAME       equ 56
+GD_FRAME       equ 56       ; + 4 pushes = 88, not 16-aligned
 
 DEF_FUNC sre_match_groupdict_method, GD_FRAME
     ; rdi = args (fat array), rsi = nargs

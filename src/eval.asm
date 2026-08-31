@@ -350,7 +350,7 @@ TP_OPCODE equ 8
 TP_ARG    equ 16
 TP_NAME   equ 24
 TP_NL     equ 25            ; the digits are written backwards from here
-TP_FRAME  equ 48
+TP_FRAME  equ 48            ; + 0 pushes = 48
 
 DEF_FUNC trace_print_opcode, TP_FRAME
     mov dword [rbp - TP_OPCODE], edi

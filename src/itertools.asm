@@ -247,7 +247,7 @@ EN_NPOS    equ 16
 EN_START   equ 24
 EN_ITER    equ 32     ; local: iterable pointer
 EN_ITERTAG equ 40     ; local: iterable tag
-EN_FRAME   equ 48
+EN_FRAME   equ 48           ; + 3 pushes = 72, not 16-aligned
 DEF_FUNC builtin_enumerate, EN_FRAME
     push rbx
     push r12
@@ -532,7 +532,7 @@ ZP_ARGS    equ 8
 ZP_NARGS   equ 16
 ZP_NPOS    equ 24
 ZP_STRICT  equ 32
-ZP_FRAME   equ 32
+ZP_FRAME   equ 32           ; + 4 pushes = 64
 DEF_FUNC builtin_zip, ZP_FRAME
     push rbx
     push r12
@@ -945,7 +945,7 @@ END_FUNC builtin_map
 ;; reads r12 expecting the eval loop's current frame pointer.
 MI_ARGS    equ 16     ; pointer to the Value args array on the stack
 MI_ASIZE   equ 24     ; bytes reserved for it
-MI_FRAME   equ 32
+MI_FRAME   equ 32           ; + 4 pushes = 64
 DEF_FUNC_LOCAL map_iternext, MI_FRAME
     push rbx
     push r13
@@ -1551,7 +1551,7 @@ SO_ARGS       equ 8
 SO_NARGS      equ 16
 SO_SORT_BUF   equ 72     ; END of sort args buffer (grows down from here)
 SO_EXC        equ 80     ; the exception pending before iteration began
-SO_FRAME      equ 96
+SO_FRAME      equ 96        ; + 0 pushes = 96
 DEF_FUNC builtin_sorted, SO_FRAME
     DUNDER_EXC_SAVE [rbp - SO_EXC]
     push rbx

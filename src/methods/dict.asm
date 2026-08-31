@@ -308,7 +308,7 @@ DU_PAIRV  equ 48        ; scratch Value, so &it can be passed as an args array
 DU_PAIR   equ 56        ; materialised pair, owned, or 0
 DU_KWNAMES equ 64       ; the consumed kw_names_pending tuple, borrowed
 DU_OTHER  equ 72        ; the positional argument, borrowed
-DU_FRAME  equ 96
+DU_FRAME  equ 96            ; + 4 pushes = 128
 
 DEF_FUNC dict_method_update, DU_FRAME
     push rbx
@@ -724,7 +724,7 @@ DFK_ITER  equ 8
 DFK_DICT  equ 16
 DFK_VAL   equ 24
 DFK_VTAG  equ 32
-DFK_FRAME equ 40
+DFK_FRAME equ 40            ; + 3 pushes = 64
 
 DEF_FUNC dict_classmethod_fromkeys, DFK_FRAME
     push rbx

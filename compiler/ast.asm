@@ -339,7 +339,7 @@ extern ap_free
 ; would leave rsp misaligned for libc's SSE stores.
 BP_BUF   equ 8
 BP_VAL   equ 16
-BP_FRAME equ 16
+BP_FRAME equ 16             ; + 0 pushes = 16
 
 section .text
 

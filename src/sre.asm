@@ -382,7 +382,7 @@ END_FUNC sre_category
 ; Check if ch is in a character set (IN opcode's set data).
 ; Set format: sequence of (opcode, args...) terminated by SRE_OP_FAILURE.
 ; ============================================================================
-SM_FRAME  equ 16
+SM_FRAME  equ 16            ; + 2 pushes = 32
 
 DEF_FUNC sre_charset, SM_FRAME
     push rbx
@@ -1043,7 +1043,7 @@ END_FUNC sre_uni_isword
 SSI_ENDPOS   equ 8       ; endpos (ASCII path); reused as state ptr (Unicode path)
 SSI_BYTELEN  equ 16      ; byte length (Unicode path only)
 SSI_UENDPOS  equ 24      ; endpos saved before clobber (Unicode path only)
-SSI_FRAME    equ 48
+SSI_FRAME    equ 48         ; + 4 pushes = 80
 
 DEF_FUNC sre_state_init, SSI_FRAME
     push rbx

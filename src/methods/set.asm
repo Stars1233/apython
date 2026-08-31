@@ -380,7 +380,7 @@ END_FUNC set_method_union
 ;; ============================================================================
 SU_SELF   equ 8
 SU_TMP    equ 16        ; materialised sequence, owned, or 0
-SU_FRAME  equ 32
+SU_FRAME  equ 32            ; + 3 pushes = 56, not 16-aligned
 
 DEF_FUNC set_method_update, SU_FRAME
     push rbx

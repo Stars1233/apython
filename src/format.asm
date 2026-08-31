@@ -56,7 +56,7 @@ FS_VALUE  equ 80
 FS_BODY   equ 88         ; rendered body, a str object
 FS_SIGNCH equ 96         ; the sign actually emitted, or 0
 FS_SPECLEN equ 104       ; length of the spec as given
-FS_FRAME  equ 112
+FS_FRAME  equ 112           ; + 5 pushes = 152, not 16-aligned
 
 ;; ============================================================================
 ;; format_apply_spec(rdi = value Value, rsi = spec str) -> Value (a str)
@@ -543,7 +543,7 @@ FIB_LEN   equ 144
 FIB_NEG   equ 152
 FIB_HEAP  equ 160        ; heap digit buffer to free, or 0 (wide values)
 FIB_OUTSZ equ 168        ; bytes reserved for the assembled output
-FIB_FRAME equ 192
+FIB_FRAME equ 192           ; + 5 pushes = 232, not 16-aligned
 
 DEF_FUNC_LOCAL format_int_body, FIB_FRAME
     push rbx
@@ -850,7 +850,7 @@ END_FUNC format_int_body
 ;; the caller.
 ;; ============================================================================
 FFB_SPEC  equ 8          ; the synthesised ".<prec><type>" spec
-FFB_FRAME equ 48
+FFB_FRAME equ 48            ; + 2 pushes = 64
 
 DEF_FUNC_LOCAL format_float_body, FFB_FRAME
     push rbx

@@ -171,7 +171,7 @@ TH_EXC   equ 8
 TH_CODE  equ 16
 TH_LASTI equ 24
 TH_TB    equ 32
-TH_FRAME equ 32
+TH_FRAME equ 32             ; + 0 pushes = 32
 DEF_FUNC traceback_here, TH_FRAME
     mov [rbp - TH_EXC], rdi
     mov [rbp - TH_CODE], rsi
@@ -256,7 +256,7 @@ END_FUNC tb_write_str
 
 ; tb_write_dec(rdi = signed value)
 TD_BUF   equ 32
-TD_FRAME equ 48
+TD_FRAME equ 48             ; + 0 pushes = 48
 DEF_FUNC tb_write_dec, TD_FRAME
     mov rax, rdi
     lea rcx, [rbp - TD_BUF]
@@ -485,7 +485,7 @@ TP_TMP   equ 24
 TP_LASTC equ 32          ; code object of the previous entry
 TP_LASTL equ 40          ; line number of the previous entry
 TP_CNT   equ 48          ; length of the current run of identical entries
-TP_FRAME equ 64
+TP_FRAME equ 64             ; + 1 push = 72, not 16-aligned
 TB_RECURSIVE_CUTOFF equ 3
 TB_SEEN_MAX equ 64
 DEF_FUNC traceback_print

@@ -780,7 +780,7 @@ END_FUNC gen_send
 ;; rdi = generator, rsi = exc_type (PyTypeObject*)
 ;; ============================================================================
 GT_SAVED_EXC equ 24    ; the caller's pending exception, put aside
-GT_FRAME equ 32
+GT_FRAME equ 32             ; + 3 pushes = 56, not 16-aligned
 DEF_FUNC gen_throw, GT_FRAME
     push rbx
     push r12
@@ -941,7 +941,7 @@ END_FUNC gen_throw
 ;; rdi = generator
 ;; ============================================================================
 GC_GEN   equ 8
-GC_FRAME equ 16
+GC_FRAME equ 16             ; + 1 push = 24, not 16-aligned
 DEF_FUNC gen_close, GC_FRAME
     push rbx
     mov rbx, rdi

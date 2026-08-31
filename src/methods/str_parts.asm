@@ -125,7 +125,7 @@ END_FUNC str_method_istitle
 ;; ============================================================================
 PT_SELF   equ 8
 PT_SEP    equ 16
-PT_FRAME  equ 16
+PT_FRAME  equ 16            ; + 3 pushes = 40, not 16-aligned
 DEF_FUNC str_method_partition, PT_FRAME
     push rbx
     push r12
@@ -360,7 +360,7 @@ END_FUNC str_method_rpartition
 ET_TAB    equ 8
 ET_BUF    equ 16
 ET_RES    equ 24
-ET_FRAME  equ 32
+ET_FRAME  equ 32            ; + 4 pushes = 64
 DEF_FUNC str_method_expandtabs, ET_FRAME
     push rbx
     push r12
@@ -503,7 +503,7 @@ END_FUNC str_method_expandtabs
 ;; args[0]=self, args[1]=keepends (optional bool, default False)
 ;; ============================================================================
 SL_STEP  equ 8           ; how far past the break the next line starts
-SL_FRAME equ 16
+SL_FRAME equ 16             ; + 4 pushes = 48
 DEF_FUNC str_method_splitlines, SL_FRAME
     push rbx
     push r12
@@ -809,7 +809,7 @@ END_FUNC str_method_translate
 ;; ============================================================================
 SMT_FROM  equ 8
 SMT_TO    equ 16
-SMT_FRAME equ 24
+SMT_FRAME equ 24            ; + 3 pushes = 48
 
 DEF_FUNC str_staticmethod_maketrans, SMT_FRAME
     push rbx
@@ -1040,7 +1040,7 @@ SE_LEN   equ 16
 SE_OUT   equ 24
 SE_POS   equ 32
 SE_ERRS  equ 40
-SE_FRAME equ 48
+SE_FRAME equ 48             ; + 2 pushes = 64
 DEF_FUNC str_method_encode, SE_FRAME
     push rbx
     push r12

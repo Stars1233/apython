@@ -46,7 +46,7 @@ extern bytes_type
 BH_SELF   equ 8
 BH_BUF    equ 16
 BH_HEXLEN equ 24
-BH_FRAME  equ 32
+BH_FRAME  equ 32            ; + 0 pushes = 32
 
 DEF_FUNC bytes_method_hex, BH_FRAME
     mov rax, [rdi]              ; self = bytes obj ptr
@@ -234,7 +234,7 @@ END_FUNC bytes_method_endswith
 ;; ============================================================================
 BC_SELF   equ 8
 BC_SUB    equ 16
-BC_FRAME  equ 24
+BC_FRAME  equ 24            ; + 0 pushes = 24, not 16-aligned
 
 DEF_FUNC bytes_method_count, BC_FRAME
     cmp rsi, 2
@@ -324,7 +324,7 @@ END_FUNC bytes_method_count
 ;; ============================================================================
 BF_SELF   equ 8
 BF_SUB    equ 16
-BF_FRAME  equ 24
+BF_FRAME  equ 24            ; + 0 pushes = 24, not 16-aligned
 
 DEF_FUNC bytes_method_find, BF_FRAME
     cmp rsi, 2
@@ -412,7 +412,7 @@ BR_NEW    equ 24
 BR_BUF    equ 32
 BR_BUFSZ  equ 40
 BR_WPOS   equ 48
-BR_FRAME  equ 56
+BR_FRAME  equ 56            ; + 5 pushes = 96
 
 DEF_FUNC bytes_method_replace, BR_FRAME
     push rbx
@@ -773,7 +773,7 @@ BJ_TOTAL  equ 24
 BJ_BUF    equ 32
 BJ_WPOS   equ 40
 BJ_TMP    equ 48        ; materialised sequence, owned, or 0
-BJ_FRAME  equ 64
+BJ_FRAME  equ 64            ; + 5 pushes = 104, not 16-aligned
 
 ; Release the sequence bytes.join() materialised for itself, if it made one.
 %macro BJ_RELEASE_TMP 0

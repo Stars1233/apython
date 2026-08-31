@@ -1316,7 +1316,7 @@ LI_IDX    equ 32
 LI_SIZE   equ 40
 LI_ARGS   equ 48   ; save args pointer
 LI_NARGS  equ 56   ; save nargs
-LI_FRAME  equ 56
+LI_FRAME  equ 56            ; + 2 pushes = 72, not 16-aligned
 DEF_FUNC list_method_index, LI_FRAME
     push rbx
     push r12
@@ -1429,7 +1429,7 @@ END_FUNC list_method_index
 ;; args[0]=self, args[1]=value
 ;; ============================================================================
 LC_IDX    equ 8
-LC_FRAME  equ 8
+LC_FRAME  equ 8             ; + 4 pushes = 40, not 16-aligned
 
 DEF_FUNC list_method_count, LC_FRAME
     push rbx
@@ -1793,7 +1793,7 @@ END_FUNC list_method_clear
 ;; ============================================================================
 LE_SELF   equ 8
 LE_ITER   equ 16
-LE_FRAME  equ 16
+LE_FRAME  equ 16            ; + 3 pushes = 40, not 16-aligned
 DEF_FUNC list_method_extend, LE_FRAME
     push rbx
     push r12

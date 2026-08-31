@@ -237,7 +237,7 @@ END_FUNC ready_dequeue
 ;; Resume the task's coroutine via gen_send. Dispatch on result tag.
 ;; ============================================================================
 TS_TASK  equ 8
-TS_FRAME equ 8
+TS_FRAME equ 8              ; + 2 pushes = 24, not 16-aligned
 DEF_FUNC task_step, TS_FRAME
     push rbx
     push r12
@@ -605,7 +605,7 @@ END_FUNC task_add_waiter
 ;; Returns when root_task completes.
 ;; ============================================================================
 ER_ROOT equ 8
-ER_FRAME equ 8
+ER_FRAME equ 8              ; + 2 pushes = 24, not 16-aligned
 DEF_FUNC eventloop_run, ER_FRAME
     push rbx
     push r12

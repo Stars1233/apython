@@ -144,7 +144,7 @@ END_FUNC int_sub_new
 ;; ============================================================================
 SSN_TYPE  equ 8
 SSN_SRC   equ 16
-SSN_FRAME equ 32
+SSN_FRAME equ 32            ; + 2 pushes = 48
 
 DEF_FUNC str_sub_new, SSN_FRAME
     push rbx
@@ -251,7 +251,7 @@ END_FUNC str_sub_new
 ;; ============================================================================
 TSF_INST  equ 8
 TSF_TMP   equ 16
-TSF_FRAME equ 32
+TSF_FRAME equ 32            ; + 3 pushes = 56, not 16-aligned
 
 DEF_FUNC tuple_sub_fill, TSF_FRAME
     push rbx
@@ -425,7 +425,7 @@ END_FUNC instance_new
 ;; ============================================================================
 IG_NAME   equ 8
 IG_ORIGIN equ 16        ; the type the MRO walk started from
-IG_FRAME  equ 32
+IG_FRAME  equ 32            ; + 3 pushes = 56, not 16-aligned
 DEF_FUNC instance_getattr, IG_FRAME
     push rbx
     push r12
@@ -862,7 +862,7 @@ END_FUNC type_setattr
 ;; rdi = instance
 ;; ============================================================================
 ID_EXC   equ 8
-ID_FRAME equ 16
+ID_FRAME equ 16             ; + 1 push = 24, not 16-aligned
 DEF_FUNC instance_dealloc, ID_FRAME
     push rbx
 
@@ -1053,7 +1053,7 @@ DEF_FUNC_LOCAL base_slot
 END_FUNC base_slot
 
 IR_EXC   equ 8
-IR_FRAME equ 16
+IR_FRAME equ 16             ; + 1 push = 24, not 16-aligned
 DEF_FUNC instance_repr, IR_FRAME
     push rbx
     mov rbx, rdi
@@ -1139,7 +1139,7 @@ END_FUNC instance_repr
 ;; rdi = instance
 ;; ============================================================================
 IS_EXC   equ 8
-IS_FRAME equ 16
+IS_FRAME equ 16             ; + 1 push = 24, not 16-aligned
 DEF_FUNC instance_str, IS_FRAME
     push rbx
     mov rbx, rdi
@@ -1958,7 +1958,7 @@ END_FUNC type_call
 extern tuple_new
 TGA_ORIGIN equ 8            ; the type the MRO walk started from
 TGA_META   equ 16           ; its metatype, for the second walk
-TGA_FRAME  equ 32
+TGA_FRAME  equ 32           ; + 2 pushes = 48
 DEF_FUNC type_getattr, TGA_FRAME
     push rbx
     push r12
@@ -2384,7 +2384,7 @@ END_FUNC method_getattr
 MR_SELF  equ 8
 MR_LEN   equ 16
 MR_BUF   equ 1048
-MR_FRAME equ 1056
+MR_FRAME equ 1056           ; + 2 pushes = 1072
 DEF_FUNC method_repr, MR_FRAME
     push rbx
     push r12

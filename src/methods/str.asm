@@ -187,7 +187,7 @@ END_FUNC strip_char_matches
 SSI_CHARS equ 8
 SSI_CLEN  equ 16
 SSI_MODE  equ 24
-SSI_FRAME equ 32
+SSI_FRAME equ 32            ; + 4 pushes = 64
 
 DEF_FUNC_LOCAL str_strip_impl, SSI_FRAME
     push rbx
@@ -292,7 +292,7 @@ SAD_NARGS equ 16
 SAD_FN    equ 24
 SAD_TUP   equ 32
 SAD_IDX   equ 40
-SAD_FRAME equ 48
+SAD_FRAME equ 48            ; + 0 pushes = 48
 
 DEF_FUNC_LOCAL str_affix_dispatch, SAD_FRAME
     mov [rbp - SAD_ARGS], rdi
@@ -1154,7 +1154,7 @@ SPI_MAX    equ 32        ; remaining splits allowed, -1 for no limit
 SPI_LIST   equ 40
 SPI_RIGHT  equ 48
 SPI_LEN    equ 56
-SPI_FRAME  equ 64
+SPI_FRAME  equ 64           ; + 4 pushes = 96
 
 DEF_FUNC_LOCAL str_split_impl, SPI_FRAME
     push rbx
@@ -1537,7 +1537,7 @@ SF_CONV   equ 88
 SF_SSTART equ 96
 SF_SEND   equ 104
 SF_VALUE  equ 112
-SF_FRAME  equ 128
+SF_FRAME  equ 128           ; + 5 pushes = 168, not 16-aligned
 DEF_FUNC str_method_format, SF_FRAME
     push rbx
     push r12
@@ -1808,7 +1808,7 @@ RF_KWN   equ 24
 RF_NAME  equ 32
 RF_LEN   equ 40
 RF_AUTO  equ 48
-RF_FRAME equ 64
+RF_FRAME equ 64             ; + 2 pushes = 80
 DEF_FUNC_LOCAL fm_resolve_field, RF_FRAME
     push rbx
     push r12
@@ -1931,7 +1931,7 @@ FM_MAP    equ 16
 FM_BUF    equ 24
 FM_USED   equ 32
 FM_CAP    equ 40
-FM_FRAME  equ 48
+FM_FRAME  equ 48            ; + 5 pushes = 88, not 16-aligned
 
 DEF_FUNC str_method_format_map, FM_FRAME
     push rbx

@@ -311,7 +311,7 @@ END_FUNC gc_dealloc
 GCG_GEN     equ 8
 GCG_YOUNG   equ 24    ; 16-byte PyGC_Head sentinel on stack (next+prev)
 GCG_UNREACH equ 40    ; 16-byte PyGC_Head sentinel on stack
-GCG_FRAME   equ 48
+GCG_FRAME   equ 48          ; + 5 pushes = 88, not 16-aligned
 
 DEF_FUNC gc_collect_gen, GCG_FRAME
     push rbx

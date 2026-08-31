@@ -146,7 +146,7 @@ extern import_find_and_load
 
 IF_ATTR  equ 8
 IF2_MOD  equ 16
-IF2_FRAME equ 16
+IF2_FRAME equ 16            ; + 0 pushes = 16
 
 DEF_FUNC op_import_from, IF2_FRAME
     ; Get attribute name from co_names[ecx] (payload array: 8-byte stride)

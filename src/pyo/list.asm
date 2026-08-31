@@ -352,7 +352,7 @@ END_FUNC list_subscript
 ;; ============================================================================
 LAS_VTAG  equ 8
 LAS_TEMP  equ 16       ; temp list from generic iterable (NULL if not used)
-LAS_FRAME equ 16
+LAS_FRAME equ 16            ; + 2 pushes = 32
 DEF_FUNC list_ass_subscript, LAS_FRAME
     push rbx
     push r12
@@ -989,7 +989,7 @@ LC_LIST    equ 8
 LC_VALUE   equ 16    ; the value being searched for, as a Value
 LC_IDX     equ 32
 LC_SIZE    equ 40
-LC_FRAME   equ 48
+LC_FRAME   equ 48           ; + 0 pushes = 48
 DEF_FUNC list_contains, LC_FRAME
     mov [rbp - LC_LIST], rdi   ; list
     mov [rbp - LC_VALUE], rsi  ; the value Value
@@ -1480,7 +1480,7 @@ END_FUNC list_repeat
 ;; ============================================================================
 LIC_SELF   equ 8
 LIC_ITER   equ 16
-LIC_FRAME  equ 16
+LIC_FRAME  equ 16           ; + 0 pushes = 16
 DEF_FUNC list_inplace_concat, LIC_FRAME
     V_UNPACK rdi, rdx           ; left  Value -> (payload, tag)
     V_UNPACK rsi, rcx           ; right Value -> (payload, tag)
@@ -1601,7 +1601,7 @@ END_FUNC list_inplace_concat
 ;; Returns (left, TAG_PTR) — same object.
 ;; ============================================================================
 LIR_OLDSIZE equ 16
-LIR_FRAME   equ 16
+LIR_FRAME   equ 16          ; + 0 pushes = 16
 DEF_FUNC list_inplace_repeat, LIR_FRAME
     V_UNPACK rdi, rdx           ; left  Value -> (payload, tag)
     V_UNPACK rsi, rcx           ; right Value -> (payload, tag)
@@ -1732,7 +1732,7 @@ END_FUNC list_inplace_repeat
 ; Frame layout
 LTC_LIST    equ 8       ; new list object
 LTC_ITER    equ 16      ; iterator object
-LTC_FRAME   equ 24
+LTC_FRAME   equ 24          ; + 3 pushes = 48
 
 DEF_FUNC list_type_call, LTC_FRAME
     push rbx
@@ -1936,7 +1936,7 @@ LRC_LEFT     equ 8
 LRC_RIGHT    equ 16
 LRC_OP       equ 24
 LRC_IDX      equ 32
-LRC_FRAME    equ 48
+LRC_FRAME    equ 48         ; + 0 pushes = 48
 
 ;; CPython's list_richcompare, followed exactly.  The old version precomputed
 ;; min(len) once and, on finding an unequal element, returned that element's

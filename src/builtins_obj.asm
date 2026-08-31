@@ -742,7 +742,7 @@ MM_CMP_RES equ 16
 MM_ITER    equ 24
 MM_ITERNX  equ 32
 MM_CMP_OP  equ 40
-MM_FRAME   equ 48
+MM_FRAME   equ 48           ; + 5 pushes = 88, not 16-aligned
 
 DEF_FUNC_BARE builtin_min
     xor edx, edx                   ; PY_LT = 0
@@ -1296,7 +1296,7 @@ END_FUNC builtin_locals
 DIR_LIST    equ 8       ; result list
 DIR_OBJ     equ 16      ; the object
 DIR_ORIGIN  equ 24      ; the type whose MRO is being listed
-DIR_FRAME   equ 32
+DIR_FRAME   equ 32          ; + 3 pushes = 56, not 16-aligned
 
 DEF_FUNC builtin_dir, DIR_FRAME
     push rbx
@@ -1492,7 +1492,7 @@ extern sys_open
 extern file_type
 
 global builtin_open_fn
-OPN_FRAME equ 32
+OPN_FRAME equ 32            ; + 3 pushes = 56, not 16-aligned
 DEF_FUNC builtin_open_fn, OPN_FRAME
     push rbx
     push r12
@@ -1640,7 +1640,7 @@ END_FUNC builtin_open_fn
 ; ============================================================================
 global builtin_ascii_fn
 AA_REPR   equ 8
-AA_FRAME  equ 16
+AA_FRAME  equ 16            ; + 0 pushes = 16
 DEF_FUNC builtin_ascii_fn, AA_FRAME
 
     cmp rsi, 1
@@ -1771,7 +1771,7 @@ END_FUNC builtin_ascii_fn
 global builtin_format_fn
 FMT_OBJ     equ 8
 FMT_SPEC    equ 24
-FMT_FRAME   equ 32
+FMT_FRAME   equ 32          ; + 0 pushes = 32
 DEF_FUNC builtin_format_fn, FMT_FRAME
 
     cmp rsi, 1
@@ -1886,7 +1886,7 @@ END_FUNC builtin_format_fn
 ; ============================================================================
 extern eval_saved_r12
 global builtin_vars_fn
-VR_FRAME equ 8
+VR_FRAME equ 8              ; + 0 pushes = 8, not 16-aligned
 DEF_FUNC builtin_vars_fn, VR_FRAME
 
     test rsi, rsi
@@ -1946,7 +1946,7 @@ END_FUNC builtin_vars_fn
 global builtin_delattr_fn
 DA2_OBJ   equ 8
 DA2_NAME  equ 16
-DA2_FRAME equ 24
+DA2_FRAME equ 24            ; + 0 pushes = 24, not 16-aligned
 DEF_FUNC builtin_delattr_fn, DA2_FRAME
 
     cmp rsi, 2
@@ -2039,7 +2039,7 @@ AN_ITER    equ 8
 AN_DEFAULT equ 16
 AN_DEFTAG  equ 24
 AN_NARGS   equ 32
-AN_FRAME   equ 40
+AN_FRAME   equ 40           ; + 0 pushes = 40, not 16-aligned
 DEF_FUNC builtin_anext_fn, AN_FRAME
 
     cmp rsi, 1

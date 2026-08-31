@@ -513,7 +513,7 @@ END_FUNC slot_is_object_default
 TIS_TYPE  equ 8
 TIS_ENTRY equ 16
 TIS_FOUND equ 24
-TIS_FRAME equ 32
+TIS_FRAME equ 32            ; + 2 pushes = 48
 
 DEF_FUNC type_install_slots, TIS_FRAME
     push rbx

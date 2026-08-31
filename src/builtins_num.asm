@@ -295,7 +295,7 @@ END_FUNC builtin_divmod
 
 ; tp_call wrappers: shift (type, args, nargs) → (args, nargs)
 global int_type_call
-ITC_FRAME  equ 8
+ITC_FRAME  equ 8            ; + 0 pushes = 8, not 16-aligned
 DEF_FUNC int_type_call, ITC_FRAME
     ; rdi=type, rsi=args, rdx=nargs
     mov rdi, rsi
@@ -388,7 +388,7 @@ BI_NARGS  equ 16
 BI_OBJ    equ 24       ; original string/bytes obj for error messages
 BI_BASE   equ 32       ; base value for error messages
 BI_ORIGIN equ 40       ; the argument's type, for the bytes-family MRO walk
-BI_FRAME  equ 48
+BI_FRAME  equ 48            ; + 1 push = 56, not 16-aligned
 
 DEF_FUNC builtin_int_fn, BI_FRAME
     push rbx
@@ -1478,7 +1478,7 @@ END_FUNC builtin_chr
 HEXB_VAL   equ 8
 HEXB_STR   equ 16
 HEXB_OUT   equ 24
-HEXB_FRAME equ 32
+HEXB_FRAME equ 32           ; + 2 pushes = 48
 DEF_FUNC builtin_hex, HEXB_FRAME
     push rbx
     push r12
@@ -1578,7 +1578,7 @@ global builtin_round_fn
 RND_NDIGITS equ 16      ; historical: referenced as [rbp - RND_NDIGITS]
 RND_XPAY    equ 24
 RND_XTAG    equ 32
-RND_FRAME   equ 48
+RND_FRAME   equ 48          ; + 1 push = 56, not 16-aligned
 DEF_FUNC builtin_round_fn, RND_FRAME
     push rbx
 
@@ -1780,7 +1780,7 @@ POW_BASE equ 8
 POW_BTAG equ 16
 POW_EXP  equ 24
 POW_ETAG equ 32
-POW_FRAME equ 48
+POW_FRAME equ 48            ; + 3 pushes = 72, not 16-aligned
 DEF_FUNC builtin_pow_fn, POW_FRAME
     push rbx
     push r12
@@ -2116,7 +2116,7 @@ global builtin_bin
 BINB_VAL   equ 8
 BINB_STR   equ 16
 BINB_OUT   equ 24
-BINB_FRAME equ 32
+BINB_FRAME equ 32           ; + 2 pushes = 48
 DEF_FUNC builtin_bin, BINB_FRAME
     push rbx
     push r12
@@ -2210,7 +2210,7 @@ global builtin_oct
 OCTB_VAL   equ 8
 OCTB_STR   equ 16
 OCTB_OUT   equ 24
-OCTB_FRAME equ 32
+OCTB_FRAME equ 32           ; + 2 pushes = 48
 DEF_FUNC builtin_oct, OCTB_FRAME
     push rbx
     push r12

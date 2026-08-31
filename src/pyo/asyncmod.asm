@@ -49,7 +49,7 @@ extern stream_writer_type
 ;; asyncio_run(args, nargs) — asyncio.run(coro)
 ;; Main event loop entry point.
 ;; ============================================================================
-AR_FRAME equ 16
+AR_FRAME equ 16             ; + 2 pushes = 32
 DEF_FUNC asyncio_run_func, AR_FRAME
     push rbx
     push r12
@@ -218,7 +218,7 @@ END_FUNC sleep_awaitable_dealloc
 ;; ============================================================================
 WF_INNER equ 8
 WF_DELAY equ 16
-WF_FRAME equ 16
+WF_FRAME equ 16             ; + 1 push = 24, not 16-aligned
 DEF_FUNC asyncio_wait_for_func, WF_FRAME
     push rbx
 
@@ -406,7 +406,7 @@ END_FUNC wait_for_awaitable_dealloc
 ;; asyncio_create_task(args, nargs) — asyncio.create_task(coro)
 ;; ============================================================================
 ACT_TASK equ 8
-ACT_FRAME equ 16
+ACT_FRAME equ 16            ; + 0 pushes = 16
 DEF_FUNC asyncio_create_task_func, ACT_FRAME
     cmp rsi, 1
     jne .act_error

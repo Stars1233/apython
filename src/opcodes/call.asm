@@ -45,7 +45,7 @@ CL_TPCALL    equ 56
 CL_RETTAG    equ 64
 CL_CALL_TAG  equ 72
 CL_SAVED_R13 equ 80
-CL_FRAME     equ 96
+CL_FRAME     equ 96         ; + 0 pushes = 96
 
 ; op_make_function locals (DEF_FUNC op_make_function, MF_FRAME)
 MF_FLAGS   equ 8
@@ -54,7 +54,7 @@ MF_CLOSURE equ 24
 MF_DEFAULTS equ 32
 MF_KWDEFS  equ 40
 MF_CTAG    equ 48
-MF_FRAME   equ 48
+MF_FRAME   equ 48           ; + 0 pushes = 48
 
 ; op_call_function_ex locals (manual frame, push rbx; push r12; sub rsp, 48)
 CFX_FUNC    equ 32
@@ -74,7 +74,7 @@ WES_FUNC   equ 8
 WES_VAL    equ 24
 WES_RESULT equ 32
 WES_RETTAG equ 40
-WES_FRAME  equ 48
+WES_FRAME  equ 48           ; + 0 pushes = 48
 
 ;; ============================================================================
 ;; op_call - Call a callable object

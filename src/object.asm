@@ -473,7 +473,7 @@ END_FUNC seq_repeat_check_count
 ; a set, 0 for a get) -- raises the AttributeError CPython raises.  Does not
 ; return.
 RNA_NAME equ 16
-RNA_FRAME equ 16
+RNA_FRAME equ 16            ; + 2 pushes = 32
 extern str_type
 DEF_FUNC raise_no_attribute, RNA_FRAME
     push rbx
@@ -571,7 +571,7 @@ END_FUNC raise_no_attribute
 ;; ============================================================================
 OGA_OBJ   equ 8
 OGA_NAME  equ 16
-OGA_FRAME equ 32
+OGA_FRAME equ 32            ; + 1 push = 40, not 16-aligned
 DEF_FUNC obj_generic_attr, OGA_FRAME
     push rbx
     mov [rbp - OGA_OBJ], rdi
@@ -663,7 +663,7 @@ ORB_RIGHT equ 16
 ORB_OP    equ 24
 ORB_EXC   equ 32
 ORB_RES   equ 40
-ORB_FRAME equ 48
+ORB_FRAME equ 48            ; + 0 pushes = 48
 
 DEF_FUNC obj_richcompare_bool, ORB_FRAME
     mov [rbp - ORB_LEFT], rdi
@@ -1092,7 +1092,7 @@ END_FUNC obj_is_true
 TR_TYPE  equ 8
 TR_LEN   equ 16
 TR_BUF   equ 272            ; 256 bytes, [rbp-272, rbp-16)
-TR_FRAME equ 288
+TR_FRAME equ 288            ; + 2 pushes = 304
 DEF_FUNC type_repr, TR_FRAME
     push rbx
     push r12

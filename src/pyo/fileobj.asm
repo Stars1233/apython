@@ -196,7 +196,7 @@ END_FUNC fileobj_fileno
 ; redirected stdout, which is exactly when a program checks.
 ; ============================================================================
 IAT_BUF   equ 72          ; struct termios is 60 bytes
-IAT_FRAME equ 80
+IAT_FRAME equ 80            ; + 0 pushes = 80
 DEF_FUNC fileobj_isatty, IAT_FRAME
     mov rax, [rdi]              ; self
     mov rdi, [rax + PyFileObject.file_fd]
@@ -356,7 +356,7 @@ END_FUNC fileobj_read
 ; fileobj_readline(PyObject **args, int64_t nargs) -> str
 ; Read one line from file
 ; ============================================================================
-FRL_FRAME equ 8208
+FRL_FRAME equ 8208          ; + 3 pushes = 8232, not 16-aligned
 DEF_FUNC fileobj_readline, FRL_FRAME
     push rbx
     push r12

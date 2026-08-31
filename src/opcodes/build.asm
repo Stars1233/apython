@@ -83,7 +83,7 @@ BSLC_SLICE equ 32
 BSLC_STAG  equ 40    ; start tag
 BSLC_PTAG  equ 48    ; stop tag
 BSLC_OTAG  equ 56    ; obj tag
-BSLC_FRAME equ 56
+BSLC_FRAME equ 56           ; + 0 pushes = 56, not 16-aligned
 
 ; op_store_slice: rbp-frame layout [rbp - ...]
 SSLC_START equ 8
@@ -95,7 +95,7 @@ SSLC_STAG  equ 48    ; start tag
 SSLC_PTAG  equ 56    ; stop tag
 SSLC_OTAG  equ 64    ; obj tag
 SSLC_VTAG  equ 72    ; value tag
-SSLC_FRAME equ 72
+SSLC_FRAME equ 72           ; + 0 pushes = 72, not 16-aligned
 
 ; op_map_add: 2-operand push layout [rsp+...]
 MA_VAL   equ 0     ; value (TOS, pushed last)

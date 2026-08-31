@@ -126,7 +126,7 @@ END_FUNC type_check_is_class
 TCI_CLS   equ 8
 TCI_OBJ   equ 16
 TCI_NAME  equ 24
-TCI_FRAME equ 32
+TCI_FRAME equ 32            ; + 1 push = 40, not 16-aligned
 DEF_FUNC type_custom_check, TCI_FRAME
     push rbx
     mov [rbp - TCI_CLS], rdi
@@ -307,7 +307,7 @@ MC_POOL  equ 40         ; concatenated sequence contents
 MC_OUT   equ 48         ; result array
 MC_OUTN  equ 56
 MC_TOTAL equ 64
-MC_FRAME equ 80
+MC_FRAME equ 80             ; + 5 pushes = 120, not 16-aligned
 SEQ_START equ 0
 SEQ_LEN   equ 8
 SEQ_POS   equ 16

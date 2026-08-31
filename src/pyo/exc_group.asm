@@ -47,7 +47,7 @@ extern type_type
 ;; msg_str and exc_tuple are INCREFed. type is immortal.
 ;; ============================================================================
 EGN_EG    equ 8
-EGN_FRAME equ 8
+EGN_FRAME equ 8             ; + 3 pushes = 32
 DEF_FUNC eg_new, EGN_FRAME
     push rbx
     push r12
@@ -133,7 +133,7 @@ END_FUNC eg_new
 EGC_TYPE  equ 8
 EGC_ARGS  equ 16
 EGC_NARGS equ 24
-EGC_FRAME equ 24
+EGC_FRAME equ 24            ; + 3 pushes = 48
 DEF_FUNC eg_type_call, EGC_FRAME
     push rbx
     push r12
@@ -389,7 +389,7 @@ EGS_MLIST    equ 24
 EGS_RLIST    equ 32
 EGS_IDX      equ 40
 EGS_COUNT    equ 48
-EGS_FRAME    equ 48
+EGS_FRAME    equ 48         ; + 3 pushes = 72, not 16-aligned
 DEF_FUNC eg_split, EGS_FRAME
     push rbx
     push r12
@@ -608,7 +608,7 @@ PRS_ORIG  equ 8
 PRS_LIST  equ 16
 PRS_FIRST equ 24
 PRS_FLAT  equ 32
-PRS_FRAME equ 32
+PRS_FRAME equ 32            ; + 2 pushes = 48
 DEF_FUNC prep_reraise_star, PRS_FRAME
     push rbx
     push r12

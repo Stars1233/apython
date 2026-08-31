@@ -216,7 +216,7 @@ BAW_RETTAG equ 8
 BAW_MGR    equ 16
 BAW_EXIT   equ 24
 BAW_ENTER  equ 32
-BAW_FRAME  equ 32
+BAW_FRAME  equ 32           ; + 2 pushes = 48
 
 DEF_FUNC op_before_async_with, BAW_FRAME
     push rbx

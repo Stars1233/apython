@@ -181,7 +181,7 @@ IB_BASE   equ 16         ; resolved base
 IB_SIGN   equ 24         ; 0 = positive, 1 = negative
 IB_BUF    equ 32         ; cleaned buffer ptr
 IB_OBJ    equ 40         ; allocated PyIntObject ptr
-IB_FRAME  equ 48
+IB_FRAME  equ 48            ; + 0 pushes = 48
 
 DEF_FUNC int_from_cstr_base, IB_FRAME
 
@@ -861,7 +861,7 @@ END_FUNC int_to_i64
 IBS_BASE  equ 8
 IBS_UPPER equ 16
 IBS_RSP   equ 24
-IBS_FRAME equ 32
+IBS_FRAME equ 32            ; + 2 pushes = 48
 DEF_FUNC int_base_str, IBS_FRAME
     push rbx
     push r12
@@ -978,7 +978,7 @@ END_FUNC int_base_str
 ;; ============================================================================
 IR_SAVED  equ 16            ; rbp less the two callee-saved pushes
 IR_BUF    equ 32            ; 24-byte digit buffer, written backwards
-IR_FRAME  equ 32
+IR_FRAME  equ 32            ; the frame is built by hand
 DEF_FUNC_BARE int_repr
     cmp edx, TAG_SMALLINT
     je .smallint

@@ -61,7 +61,7 @@ LA_OBJ_TAG   equ 64
 LA_OBJVAL    equ 72   ; the object as a Value, for the generic tail
 LA_WALK      equ 80   ; the MRO cursor while searching the type dicts
 LA_TAGTYPE   equ 88   ; the type an immediate resolved to, the walk's origin
-LA_FRAME     equ 96
+LA_FRAME     equ 96         ; + 0 pushes = 96
 
 ; op_load_super_attr frame layout (DEF_FUNC op_load_super_attr, LSA_FRAME)
 LSA_SELF     equ 8
@@ -72,7 +72,7 @@ LSA_ATTR_TAG equ 40
 LSA_ATTR     equ 48
 LSA_BIND     equ 56
 LSA_ORIGIN   equ 64      ; the MRO super() searches: the instance's, not the class's
-LSA_FRAME    equ 80
+LSA_FRAME    equ 80         ; + 0 pushes = 80
 
 ;; ============================================================================
 ;; op_load_const - Load constant from co_consts[arg]
@@ -1703,19 +1703,19 @@ SA_OTAG   equ 40
 SA_VTAG   equ 48
 SA_EXC    equ 56
 SA_ORIGIN equ 64   ; the type the descriptor walk started from
-SA_FRAME  equ 80
+SA_FRAME  equ 80            ; + 0 pushes = 80
 
 ; op_delete_attr: rbp-frame (16 bytes)
 DA_NAME   equ 8
 DA_OBJ    equ 16
-DA_FRAME  equ 16
+DA_FRAME  equ 16            ; + 0 pushes = 16
 
 ; op_delete_subscr: rbp-frame (32 bytes)
 DS_OBJ    equ 8
 DS_KEY    equ 16
 DS_OTAG   equ 24
 DS_KTAG   equ 32
-DS_FRAME  equ 32
+DS_FRAME  equ 32            ; + 0 pushes = 32
 
 ;; ============================================================================
 ;; op_store_fast - Store TOS into localsplus[arg]

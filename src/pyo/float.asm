@@ -432,7 +432,7 @@ END_FUNC float_format_spec
 ;; and an equal float landed in different dict slots.
 FH_EXP   equ 8
 FH_M     equ 16
-FH_FRAME equ 32
+FH_FRAME equ 32             ; + 3 pushes = 56, not 16-aligned
 DEF_FUNC float_hash, FH_FRAME
     push rbx
     push r12

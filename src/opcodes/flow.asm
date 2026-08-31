@@ -50,12 +50,12 @@ FV_SPEC    equ 24
 FV_VALUE   equ 32
 FV_STAG    equ 40    ; fmt_spec tag
 FV_VTAG    equ 48    ; value tag
-FV_FRAME   equ 48
+FV_FRAME   equ 48           ; + 0 pushes = 48
 
 ;; Stack layout constants for op_build_string (DEF_FUNC, 16 bytes).
 BS_COUNT   equ 8
 BS_ACCUM   equ 16
-BS_FRAME   equ 16
+BS_FRAME   equ 16           ; + 0 pushes = 16
 
 ;; Stack layout constants for op_send (DEF_FUNC, 48 bytes).
 SND_ARG    equ 8
@@ -64,7 +64,7 @@ SND_RECV   equ 24
 SND_RESULT equ 32
 SND_STAG   equ 40    ; sent_value tag
 SND_RTAG   equ 48    ; result tag
-SND_FRAME  equ 48
+SND_FRAME  equ 48           ; + 0 pushes = 48
 
 ;; Stack layout constants for op_match_keys (DEF_FUNC, 32 bytes).
 

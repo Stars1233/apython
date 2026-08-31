@@ -472,7 +472,7 @@ END_FUNC tuple_getslice
 ;; Linear scan with identity then __eq__.
 ;; ============================================================================
 TCN_IDX   equ 8
-TCN_FRAME equ 16
+TCN_FRAME equ 16            ; + 3 pushes = 40, not 16-aligned
 DEF_FUNC tuple_contains, TCN_FRAME
     push rbx
     push r12
@@ -722,7 +722,7 @@ TRC_RIGHT    equ 16
 TRC_OP       equ 24
 TRC_IDX      equ 32
 TRC_MINLEN   equ 40
-TRC_FRAME    equ 40
+TRC_FRAME    equ 40         ; + 0 pushes = 40, not 16-aligned
 
 ; Comparing two structures that reach each other -- a=[]; a.append(a);
 ; b=[]; b.append(b); a==b -- recursed until the machine stack ran out; the
@@ -1083,7 +1083,7 @@ END_FUNC tuple_richcompare_inner
 ;; ============================================================================
 TTC_LIST    equ 8       ; temp list
 TTC_ITER    equ 16      ; iterator
-TTC_FRAME   equ 24
+TTC_FRAME   equ 24          ; + 4 pushes = 56, not 16-aligned
 
 DEF_FUNC tuple_type_call, TTC_FRAME
     push rbx

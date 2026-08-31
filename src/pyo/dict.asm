@@ -353,7 +353,7 @@ DL_HASH  equ 24
 DL_MASK  equ 32
 DL_SLOT  equ 40
 DL_FREE  equ 48
-DL_FRAME equ 64
+DL_FRAME equ 64             ; + 3 pushes = 88, not 16-aligned
 DEF_FUNC dict_lookup, DL_FRAME
     push rbx
     push r12
@@ -464,7 +464,7 @@ END_FUNC dict_get_index
 DR_DICT  equ 8
 DR_OLDE  equ 16
 DR_OLDN  equ 24
-DR_FRAME equ 32
+DR_FRAME equ 32             ; + 3 pushes = 56, not 16-aligned
 DEF_FUNC dict_resize, DR_FRAME
     push rbx
     push r12
@@ -553,7 +553,7 @@ END_FUNC dict_resize
 DS_DICT  equ 8
 DS_KEY   equ 16
 DS_VAL   equ 24
-DS_FRAME equ 32
+DS_FRAME equ 32             ; + 3 pushes = 56, not 16-aligned
 DEF_FUNC dict_set, DS_FRAME
     push rbx
     push r12
@@ -736,7 +736,7 @@ END_FUNC dict_ass_subscript
 ;; ============================================================================
 DD_DICT  equ 8
 DD_KEYV  equ 16
-DD_FRAME equ 32
+DD_FRAME equ 32             ; + 2 pushes = 48
 DEF_FUNC dict_del, DD_FRAME
     push rbx
     push r12
@@ -1076,7 +1076,7 @@ END_FUNC dict_keys_view_contains
 DNO_LEFT  equ 8
 DNO_RIGHT equ 16
 DNO_NEW   equ 24
-DNO_FRAME equ 32
+DNO_FRAME equ 32            ; + 0 pushes = 32
 
 DEF_FUNC dict_nb_or, DNO_FRAME
     V_UNPACK rdi, rdx           ; left  Value -> (payload, tag)
@@ -1162,7 +1162,7 @@ END_FUNC dict_nb_or
 ;; ============================================================================
 DIO_LEFT  equ 8
 DIO_RIGHT equ 16
-DIO_FRAME equ 24
+DIO_FRAME equ 24            ; + 0 pushes = 24, not 16-aligned
 
 DEF_FUNC dict_nb_ior, DIO_FRAME
     V_UNPACK rdi, rdx           ; left  Value -> (payload, tag)
@@ -1220,7 +1220,7 @@ DRC_RIGHT equ 16
 DRC_OP    equ 24
 DRC_LVAL  equ 32
 DRC_LTAG  equ 40
-DRC_FRAME equ 48
+DRC_FRAME equ 48            ; + 0 pushes = 48
 
 DEF_FUNC dict_richcompare, DRC_FRAME
     V_UNPACK rdi, rcx           ; left  Value -> (payload, tag)

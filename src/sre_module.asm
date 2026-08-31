@@ -49,7 +49,7 @@ SC_GINDEX   equ 56
 SC_IGROUP   equ 64
 SC_CODEBUF  equ 72
 SC_CODELEN  equ 80
-SC_FRAME    equ 88
+SC_FRAME    equ 88          ; + 5 pushes = 128
 
 DEF_FUNC sre_compile_func, SC_FRAME
     push rbx
@@ -460,7 +460,7 @@ END_FUNC sre_getcodesize_func
 ; sre_module_create() -> PyObject*
 ; Creates and returns the _sre module with all functions and constants.
 ; ============================================================================
-SMC_FRAME   equ 8
+SMC_FRAME   equ 8           ; + 3 pushes = 32
 
 DEF_FUNC sre_module_create, SMC_FRAME
     push rbx

@@ -400,7 +400,7 @@ END_FUNC set_contains
 SRC_SELF  equ 8
 SRC_OTHER equ 16
 SRC_OP    equ 24
-SRC_FRAME equ 24
+SRC_FRAME equ 24            ; + 0 pushes = 24, not 16-aligned
 DEF_FUNC set_richcompare, SRC_FRAME
     V_UNPACK rdi, rcx           ; left  Value -> (payload, tag)
     V_UNPACK rsi, r8            ; right Value -> (payload, tag)
@@ -739,7 +739,7 @@ END_FUNC set_dealloc
 extern raise_exception
 extern exc_TypeError_type
 
-STC_FRAME equ 8
+STC_FRAME equ 8             ; + 2 pushes = 24, not 16-aligned
 DEF_FUNC set_type_call, STC_FRAME
     push rbx
     push r12
@@ -944,7 +944,7 @@ END_FUNC set_iter_self
 ;; rdi = self (frozenset_type), rsi = args (16-byte fat slots), rdx = nargs
 ;; ============================================================================
 global frozenset_type_call
-FTC_FRAME equ 8
+FTC_FRAME equ 8             ; + 2 pushes = 24, not 16-aligned
 DEF_FUNC frozenset_type_call, FTC_FRAME
     push rbx
     push r12
@@ -1039,7 +1039,7 @@ extern set_method_intersection
 extern set_method_difference
 extern set_method_symmetric_difference
 
-SNB_FRAME equ 32
+SNB_FRAME equ 32            ; + 0 pushes = 32
 
 ;; set_nb_or(left, right, ltag, rtag) -> new set (union)
 ; The two operands, laid out as the args array the method form expects.

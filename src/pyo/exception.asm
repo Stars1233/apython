@@ -53,7 +53,7 @@ extern exc_ExceptionGroup_type
 ; msg_str is INCREFed. type is stored but not INCREFed (types are immortal).
 ; rdx = msg_tag (TAG_PTR for heap objs, TAG_SMALLINT for ints, 0 for NULL).
 EN_EXC equ 8
-EN_FRAME equ 16
+EN_FRAME equ 16             ; + 3 pushes = 40, not 16-aligned
 DEF_FUNC exc_new, EN_FRAME
     push rbx
     push r12
@@ -132,7 +132,7 @@ END_FUNC exc_is_exception
 ; scanned for `new` so a re-raise cannot make it point at itself.
 ESC_NEW equ 8
 ESC_OLD equ 16
-ESC_FRAME equ 16
+ESC_FRAME equ 16            ; + 0 pushes = 16
 DEF_FUNC exc_set_context, ESC_FRAME
     cmp rdi, rsi
     je .esc_done
@@ -290,7 +290,7 @@ END_FUNC exc_dealloc
 ER_EXC   equ 8
 ER_POS   equ 16
 ER_BUF   equ 528         ; 512 bytes, [rbp-528, rbp-16)
-ER_FRAME equ 544
+ER_FRAME equ 544            ; + 3 pushes = 568, not 16-aligned
 DEF_FUNC exc_repr, ER_FRAME
     push rbx
     push r12
@@ -439,7 +439,7 @@ END_FUNC exc_syntax_str
 ; exc_str(PyExceptionObject *exc) -> PyObject* (string)
 ; Returns the message string, or type name if no message.
 ES_EXC   equ 8
-ES_FRAME equ 16
+ES_FRAME equ 16             ; + 1 push = 24, not 16-aligned
 DEF_FUNC exc_str, ES_FRAME
     push rbx
     mov rbx, rdi
@@ -1010,7 +1010,7 @@ END_FUNC type_is_exc_subclass
 ETC_EXC   equ 8
 ETC_ARGS  equ 16
 ETC_NARGS equ 24
-ETC_FRAME equ 24
+ETC_FRAME equ 24            ; + 2 pushes = 40, not 16-aligned
 DEF_FUNC exc_type_call, ETC_FRAME
     push rbx
     push r12

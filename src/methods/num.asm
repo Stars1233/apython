@@ -173,7 +173,7 @@ END_FUNC int_method_conjugate
 ITB_SELF  equ 8
 ITB_LEN   equ 16
 ITB_SIGN  equ 24
-ITB_FRAME equ 32
+ITB_FRAME equ 32            ; + 2 pushes = 48
 
 DEF_FUNC int_method_to_bytes, ITB_FRAME
     push rbx
@@ -510,7 +510,7 @@ END_FUNC float_method_conjugate
 ;; ============================================================================
 extern exc_OverflowError_type
 
-FIR_FRAME equ 8
+FIR_FRAME equ 8             ; + 1 push = 16
 DEF_FUNC float_method_as_integer_ratio, FIR_FRAME
     push rbx
 
@@ -657,7 +657,7 @@ END_FUNC float_method_as_integer_ratio
 ;; Format double as '0x1.XXXXp+YY' hex string.
 ;; ============================================================================
 FH_BUF    equ 8
-FH_FRAME  equ 16
+FH_FRAME  equ 16            ; + 2 pushes = 32
 
 DEF_FUNC float_method_hex, FH_FRAME
     push rbx
@@ -871,7 +871,7 @@ END_FUNC float_method_hex
 ;; Parses hex float string and returns TAG_FLOAT.
 ;; ============================================================================
 FFH_STR   equ 8
-FFH_FRAME equ 16
+FFH_FRAME equ 16            ; + 3 pushes = 40, not 16-aligned
 
 DEF_FUNC float_classmethod_fromhex, FFH_FRAME
     push rbx

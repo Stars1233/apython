@@ -58,7 +58,7 @@ MK_KEYS    equ 8
 MK_SUBJ    equ 16
 MK_VALS    equ 24
 MK_NKEYS   equ 32
-MK_FRAME   equ 32
+MK_FRAME   equ 32           ; + 0 pushes = 32
 
 ; --- moved to a sibling file by the split ---
 extern op_send
@@ -603,7 +603,7 @@ global op_load_from_dict_or_deref
 
 LFDOD_DICT  equ 8
 LFDOD_ARG   equ 16
-LFDOD_FRAME equ 16
+LFDOD_FRAME equ 16          ; + 0 pushes = 16
 
 DEF_FUNC op_load_from_dict_or_deref, LFDOD_FRAME
     mov [rbp - LFDOD_ARG], ecx    ; save arg (localsplus index)
@@ -847,7 +847,7 @@ MC_MATCHARGS equ 48
 MC_IDX       equ 56
 MC_SUBJ_TAG  equ 64
 MC_ORIGIN    equ 72   ; the subject's type, for the __match_args__ walk
-MC_FRAME     equ 88
+MC_FRAME     equ 88         ; + 0 pushes = 88, not 16-aligned
 
 extern str_type
 

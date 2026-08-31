@@ -393,7 +393,7 @@ END_FUNC str_search_window
 ; through the codecs module, which is Python and cannot be reached from here.
 ; ----------------------------------------------------------------------------
 CI_BUF   equ 48
-CI_FRAME equ 64
+CI_FRAME equ 64             ; + 1 push = 72, not 16-aligned
 DEF_FUNC codec_id, CI_FRAME
     push rbx
     ; ap_strcmp compares eight bytes at a time, so the buffer has to be zeroed
@@ -1049,7 +1049,7 @@ SM_VALUE   equ 152
 SM_PIECE   equ 160
 SM_OWNVAL  equ 168
 SM_ISMAP   equ 176       ; the right operand is a mapping: %(name)s, no arity check
-SM_FRAME   equ 184
+SM_FRAME   equ 184          ; + 0 pushes = 184, not 16-aligned
 
 DEF_FUNC str_mod, SM_FRAME
     V_UNPACK rdi, rdx           ; left  Value -> (payload, tag)
@@ -2034,7 +2034,7 @@ SGS_LEN   equ 32
 SGS_OUT   equ 40
 SGS_POS   equ 48
 SGS_I     equ 56
-SGS_FRAME equ 64
+SGS_FRAME equ 64            ; + 2 pushes = 80
 DEF_FUNC str_getslice, SGS_FRAME
     push rbx
     push r12
