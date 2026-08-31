@@ -13,10 +13,11 @@
 
 
 ; External functions
+extern ap_memfind
+extern str_find_impl
 extern ap_malloc
 extern ap_free
 extern ap_memcpy
-extern ap_strstr
 extern ap_memcmp
 extern obj_decref
 extern str_new_heap
@@ -53,61 +54,9 @@ section .text
 ;; Like rfind but raises ValueError if not found
 ;; args[0]=self, args[1]=substr
 ;; ============================================================================
-DEF_FUNC str_method_rindex
-    push rbx
-    push r12
-    push r13
-
-    mov rbx, [rdi]           ; self
-    mov r12, [rdi + 8]      ; substr
-    mov r13, [rbx + PyStrObject.ob_size]
-    mov rcx, [r12 + PyStrObject.ob_size]
-
-    ; Search from end: try each position from (len-sublen) down to 0
-    mov rax, r13
-    sub rax, rcx
-    js .rindex_not_found      ; substr longer than self
-.rindex_loop:
-    cmp rax, 0
-    jl .rindex_not_found
-    push rax
-    push rcx
-    lea rdi, [rbx + PyStrObject.data]
-    add rdi, rax
-    lea rsi, [r12 + PyStrObject.data]
-    mov rdx, rcx
-    call ap_memcmp
-    mov r8d, eax              ; save memcmp result
-    pop rcx
-    pop rax                   ; restore position
-    test r8d, r8d
-    jz .rindex_found
-    dec rax
-    jmp .rindex_loop
-
-.rindex_found:
-    mov rdi, rbx
-    mov rsi, rax
-    call str_byte_to_cp
-    mov rdi, rax
-    call int_from_i64
-    pop r13
-    pop r12
-    pop rbx
-    leave
-    V_PACK rax, rdx             ; builtins return one Value
-    ret
-
-.rindex_not_found:
-    lea rdi, [rel exc_ValueError_type]
-    CSTRING rsi, "substring not found"
-    call raise_exception
-    pop r13
-    pop r12
-    pop rbx
-    leave
-    V_PACK rax, rdx             ; builtins return one Value
-    ret
+DEF_FUNC_BARE str_method_rindex
+    mov edx, 3                  ; reverse, raise on a miss
+    jmp str_find_impl
 END_FUNC str_method_rindex
 
 ;; ============================================================================
@@ -196,10 +145,12 @@ DEF_FUNC str_method_partition, PT_FRAME
     mov [rbp - PT_SELF], rbx
     mov [rbp - PT_SEP], r12
 
-    ; Find sep in self
+    ; Find sep in self.  Length-aware: ap_strstr stopped at the first NUL.
     lea rdi, [rbx + PyStrObject.data]
-    lea rsi, [r12 + PyStrObject.data]
-    call ap_strstr
+    mov rsi, [rbx + PyStrObject.ob_size]
+    lea rdx, [r12 + PyStrObject.data]
+    mov rcx, [r12 + PyStrObject.ob_size]
+    call ap_memfind
     test rax, rax
     jz .part_not_found
 

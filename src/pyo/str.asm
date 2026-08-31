@@ -237,6 +237,119 @@ DEF_FUNC str_cp_offset
     ret
 END_FUNC str_cp_offset
 
+;; ============================================================================
+;; str_search_window(rdi = self, rsi = args, rdx = nargs, rcx = out[3])
+;;   [out +  0] = pointer to the first byte of the window
+;;   [out +  8] = window length in bytes
+;;   [out + 16] = the window's start as a byte offset into self
+;;   -> eax = 1 when the window is usable, 0 when nothing can match in it
+;;
+;; The optional start/end arguments shared by find, rfind, index, rindex and
+;; count, resolved once.  Every one of those methods used to ignore them
+;; outright -- "abcabc".find("b", 3) was 1 -- because each read args[0] and
+;; args[1] and stopped.
+;;
+;; They are *code point* indices and clamp like a slice: negative counts from
+;; the end, end is capped at the length, and a start past the end matches
+;; nothing at all.  The search itself runs over bytes, so both are converted
+;; through str_cp_offset; for ASCII, which is the common case, that is the
+;; identity and costs one compare.
+;; ============================================================================
+SSW_SELF  equ 8
+SSW_ARGS  equ 16
+SSW_NARGS equ 24
+SSW_OUT   equ 32
+SSW_START equ 40
+SSW_END   equ 48
+SSW_FRAME equ 48            ; + 0 pushes = 48
+global str_search_window
+DEF_FUNC str_search_window, SSW_FRAME
+    mov [rbp - SSW_SELF], rdi
+    mov [rbp - SSW_ARGS], rsi
+    mov [rbp - SSW_NARGS], rdx
+    mov [rbp - SSW_OUT], rcx
+
+    ; Defaults: the whole string.
+    xor eax, eax
+    mov [rbp - SSW_START], rax
+    mov rax, [rdi + PyStrObject.ob_length]
+    mov [rbp - SSW_END], rax
+
+    cmp qword [rbp - SSW_NARGS], 3
+    jl .ssw_bounds_done
+
+    mov rdi, [rbp - SSW_ARGS]
+    mov rdi, [rdi + 16]             ; args[2] = start
+    IS_NONE rdi, rax
+    je .ssw_start_done              ; None means the default, as in CPython
+    V_UNPACK rdi, rdx
+    call obj_as_index
+    mov rdi, [rbp - SSW_SELF]
+    test rax, rax
+    jns .ssw_start_set
+    add rax, [rdi + PyStrObject.ob_length]
+    jns .ssw_start_set
+    xor eax, eax                    ; still negative: clamp to the start
+.ssw_start_set:
+    mov [rbp - SSW_START], rax
+.ssw_start_done:
+
+    cmp qword [rbp - SSW_NARGS], 4
+    jl .ssw_bounds_done
+    mov rdi, [rbp - SSW_ARGS]
+    mov rdi, [rdi + 24]             ; args[3] = end
+    IS_NONE rdi, rax
+    je .ssw_bounds_done
+    V_UNPACK rdi, rdx
+    call obj_as_index
+    mov rdi, [rbp - SSW_SELF]
+    test rax, rax
+    jns .ssw_end_set
+    add rax, [rdi + PyStrObject.ob_length]
+    jns .ssw_end_set
+    xor eax, eax
+.ssw_end_set:
+    cmp rax, [rdi + PyStrObject.ob_length]
+    jle .ssw_end_store
+    mov rax, [rdi + PyStrObject.ob_length]
+.ssw_end_store:
+    mov [rbp - SSW_END], rax
+
+.ssw_bounds_done:
+    mov rdi, [rbp - SSW_SELF]
+    mov rax, [rbp - SSW_START]
+    cmp rax, [rdi + PyStrObject.ob_length]
+    jg .ssw_nothing                 ; start past the end
+    cmp rax, [rbp - SSW_END]
+    jg .ssw_nothing                 ; start past end: an empty window matches nothing
+
+    mov rsi, rax
+    call str_cp_offset              ; start, in bytes
+    mov [rbp - SSW_START], rax
+    mov rdi, [rbp - SSW_SELF]
+    mov rsi, [rbp - SSW_END]
+    call str_cp_offset              ; end, in bytes
+    mov rsi, [rbp - SSW_START]
+    sub rax, rsi                    ; window length
+
+    mov rcx, [rbp - SSW_OUT]
+    mov rdi, [rbp - SSW_SELF]
+    lea rdx, [rdi + PyStrObject.data]
+    add rdx, rsi
+    mov [rcx], rdx
+    mov [rcx + 8], rax
+    mov [rcx + 16], rsi
+    mov eax, 1
+    leave
+    ret
+
+.ssw_nothing:
+    xor eax, eax
+    leave
+    ret
+END_FUNC str_search_window
+
+
 
 ; ----------------------------------------------------------------------------
 ; codec_id(rdi = encoding str, or 0 for the default) -> eax
@@ -476,8 +589,9 @@ DEF_FUNC str_repr
     mov rbx, rdi            ; rbx = self
     mov r12, [rbx + PyStrObject.ob_size]  ; r12 = src length
 
-    ; Allocate worst case: header + 2 quotes + 2*length + 8 (NUL padding)
-    lea rdi, [r12*2 + PyStrObject.data + 10]
+    ; Allocate worst case: header + 2 quotes + 4*length + 8 (NUL padding).
+    ; Four, not two: a control character escapes to \xNN.
+    lea rdi, [r12*4 + PyStrObject.data + 10]
     call ap_malloc
     mov r13, rax             ; r13 = new str
 
@@ -536,6 +650,10 @@ DEF_FUNC str_repr
     je .sr_esc_bs
     cmp eax, r14d            ; the delimiter in use
     je .sr_esc_sq
+    cmp al, 0x20             ; the other C0 controls have no letter escape
+    jb .sr_esc_hex
+    cmp al, 0x7f             ; and neither does DEL
+    je .sr_esc_hex
 
     ; Normal character
     mov [rdi], al
@@ -578,6 +696,26 @@ DEF_FUNC str_repr
     inc rcx
     jmp .sr_loop
 
+.sr_esc_hex:
+    ; \xNN, for a control character with no letter escape of its own.  These
+    ; used to be copied through raw, so repr("\x00") emitted an actual NUL --
+    ; unreadable, and not something eval() could read back.
+    mov byte [rdi], 0x5C
+    mov byte [rdi + 1], 'x'
+    lea r8, [rel sr_hexdigits]
+    mov edx, eax
+    shr edx, 4
+    and edx, 0x0f
+    movzx edx, byte [r8 + rdx]
+    mov [rdi + 2], dl
+    mov edx, eax
+    and edx, 0x0f
+    movzx edx, byte [r8 + rdx]
+    mov [rdi + 3], dl
+    add rdi, 4
+    inc rcx
+    jmp .sr_loop
+
 .sr_done:
     ; Write closing quote and null
     mov [rdi], r14b
@@ -600,6 +738,11 @@ DEF_FUNC str_repr
     leave
     ret
 END_FUNC str_repr
+
+section .rodata
+sr_hexdigits: db "0123456789abcdef"
+
+section .text
 
 ;; ============================================================================
 ;; str_str(PyObject *self) -> PyObject*
@@ -1837,10 +1980,14 @@ DEF_FUNC str_contains
     mov rax, [rsi + PyObject.ob_type]
     REQUIRE_STR_TYPE rax, rcx, .str_contains_type_error
 
-    extern ap_strstr
+    ; Length-aware: ap_strstr stopped at the first NUL, so "b" in "a\x00b"
+    ; was False.
+    extern ap_memfind
+    mov rcx, [rsi + PyStrObject.ob_size]
+    lea rdx, [rsi + PyStrObject.data]
+    mov rsi, [rdi + PyStrObject.ob_size]
     lea rdi, [rdi + PyStrObject.data]
-    lea rsi, [rsi + PyStrObject.data]
-    call ap_strstr
+    call ap_memfind
     test rax, rax
     setnz al
     movzx eax, al

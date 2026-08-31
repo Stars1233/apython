@@ -13,11 +13,14 @@
 
 
 ; External functions
+extern str_search_window
+extern ap_memfind
+extern str_byte_to_cp
+extern str_find_impl
 extern ap_malloc
 extern ap_free
 extern ap_memcpy
 extern ap_memset
-extern ap_strstr
 extern ap_memcmp
 extern str_new_heap
 extern bool_true
@@ -44,55 +47,99 @@ section .text
 ;; str_method_count(args, nargs) -> SmallInt count of occurrences
 ;; args[0]=self, args[1]=sub
 ;; ============================================================================
-DEF_FUNC str_method_count
+;; start and end were ignored and the scan used the C-string ap_strstr, so
+;; "abcabc".count("b", 3) was 2 and "a\x00b".count("b") was 0.  Counting an
+;; empty needle over a window gives one position per code point plus one, which
+;; is what CPython reports.
+CNT_ARGS  equ 8
+CNT_NARGS equ 16
+CNT_SELF  equ 24
+CNT_N     equ 32
+CNT_WPTR  equ 56            ; the 3-word window: 56, 48, 40
+CNT_WLEN  equ 48
+CNT_WOFF  equ 40
+CNT_FRAME equ 64            ; + 2 pushes = 80
+DEF_FUNC str_method_count, CNT_FRAME
     push rbx
     push r12
-    push r13
-    push r14
+    mov [rbp - CNT_ARGS], rdi
+    mov [rbp - CNT_NARGS], rsi
 
-    ; Validate args[1] is a string
-    mov rax, [rdi + 8]         ; args[1]
+    mov rax, [rdi + 8]              ; args[1]
     V_TEST_PTR rax, rcx
     ja .count_type_error
     mov rcx, [rax + PyObject.ob_type]
     REQUIRE_STR_TYPE rcx, rdx, .count_type_error
 
-    mov rbx, [rdi]          ; self
-    mov r12, [rdi + 8]     ; substr (now guaranteed heap str)
-    xor r13d, r13d          ; r13 = count
-    mov r14, [r12 + PyStrObject.ob_size]  ; sub length
+    mov rcx, [rdi]
+    mov [rbp - CNT_SELF], rcx
+    mov qword [rbp - CNT_N], 0
 
-    ; If sub is empty, return len+1
-    test r14, r14
+    mov rdi, rcx
+    mov rsi, [rbp - CNT_ARGS]
+    mov rdx, [rbp - CNT_NARGS]
+    lea rcx, [rbp - CNT_WPTR]
+    call str_search_window
+    test eax, eax
+    jz .count_done                  ; nothing can match: zero
+
+    mov rbx, [rbp - CNT_WPTR]       ; rbx = cursor into the window
+    mov r12, [rbp - CNT_WLEN]       ; r12 = bytes left
+
+    mov rax, [rbp - CNT_ARGS]
+    mov rax, [rax + 8]
+    mov rax, [rax + PyStrObject.ob_size]
+    test rax, rax
     jz .count_empty_sub
 
-    ; Start scanning from self.data
-    lea rdi, [rbx + PyStrObject.data]
-
 .count_scan:
-    lea rsi, [r12 + PyStrObject.data]
-    push rdi
-    call ap_strstr
-    pop rdi                 ; restore (not needed, but stack balance)
+    mov rdi, rbx
+    mov rsi, r12
+    mov rdx, [rbp - CNT_ARGS]
+    mov rdx, [rdx + 8]
+    mov rcx, [rdx + PyStrObject.ob_size]
+    lea rdx, [rdx + PyStrObject.data]
+    call ap_memfind
     test rax, rax
     jz .count_done
 
-    ; Found one occurrence
-    inc r13
-    ; Advance past this match
-    lea rdi, [rax + r14]    ; move past the match
+    inc qword [rbp - CNT_N]
+    ; Advance past the match; non-overlapping, as CPython counts.
+    mov rdx, [rbp - CNT_ARGS]
+    mov rdx, [rdx + 8]
+    mov rdx, [rdx + PyStrObject.ob_size]
+    add rax, rdx
+    sub r12, rax
+    add r12, rbx                    ; bytes left = old_left - (rax - rbx)
+    mov rbx, rax
     jmp .count_scan
 
 .count_empty_sub:
-    ; Empty substring: count = len(self) + 1
-    mov r13, [rbx + PyStrObject.ob_size]
-    inc r13
+    ; One position before each code point in the window, plus one at the end.
+    mov rdi, [rbp - CNT_SELF]
+    mov rax, [rdi + PyStrObject.ob_size]
+    cmp rax, [rdi + PyStrObject.ob_length]
+    jne .count_empty_walk
+    mov rax, r12                    ; ASCII: one code point per byte
+    inc rax
+    mov [rbp - CNT_N], rax
+    jmp .count_done
+.count_empty_walk:
+    ; Non-ASCII: convert both ends of the window to code point indices.
+    mov rsi, [rbp - CNT_WOFF]
+    call str_byte_to_cp
+    mov rbx, rax
+    mov rdi, [rbp - CNT_SELF]
+    mov rsi, [rbp - CNT_WOFF]
+    add rsi, r12
+    call str_byte_to_cp
+    sub rax, rbx
+    inc rax
+    mov [rbp - CNT_N], rax
 
 .count_done:
-    mov rdi, r13
+    mov rdi, [rbp - CNT_N]
     call int_from_i64
-    pop r14
-    pop r13
     pop r12
     pop rbx
     leave
@@ -109,52 +156,9 @@ END_FUNC str_method_count
 ;; str_method_index(args, nargs) -> SmallInt index (raises ValueError if not found)
 ;; args[0]=self, args[1]=substr
 ;; ============================================================================
-DEF_FUNC str_method_index
-    push rbx
-    push r12
-
-    ; Validate args[1] is a string
-    mov rax, [rdi + 8]         ; args[1]
-    V_TEST_PTR rax, rcx
-    ja .idx_type_error
-    mov rcx, [rax + PyObject.ob_type]
-    REQUIRE_STR_TYPE rcx, rdx, .idx_type_error
-
-    mov rbx, [rdi]          ; self
-    mov r12, [rdi + 8]     ; substr
-
-    ; Use ap_strstr to find substring
-    lea rdi, [rbx + PyStrObject.data]
-    lea rsi, [r12 + PyStrObject.data]
-    call ap_strstr
-
-    test rax, rax
-    jz .str_index_not_found
-
-    ; Byte offset in, code point index out.
-    lea rcx, [rbx + PyStrObject.data]
-    sub rax, rcx
-    mov rdi, rbx
-    mov rsi, rax
-    call str_byte_to_cp
-    mov rdi, rax
-    call int_from_i64
-
-    pop r12
-    pop rbx
-    leave
-    V_PACK rax, rdx             ; builtins return one Value
-    ret
-
-.str_index_not_found:
-    lea rdi, [rel exc_ValueError_type]
-    CSTRING rsi, "substring not found"
-    call raise_exception
-
-.idx_type_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "must be str, not other type"
-    call raise_exception
+DEF_FUNC_BARE str_method_index
+    mov edx, 2                  ; forward, raise on a miss
+    jmp str_find_impl
 END_FUNC str_method_index
 
 ;; ============================================================================
@@ -162,95 +166,9 @@ END_FUNC str_method_index
 ;; args[0]=self, args[1]=substr
 ;; Find rightmost occurrence of substr in self.
 ;; ============================================================================
-DEF_FUNC str_method_rfind
-    push rbx
-    push r12
-    push r13
-    push r14
-
-    ; Validate args[1] is a string
-    mov rax, [rdi + 8]         ; args[1]
-    V_TEST_PTR rax, rcx
-    ja .rfind_type_error
-    mov rcx, [rax + PyObject.ob_type]
-    REQUIRE_STR_TYPE rcx, rdx, .rfind_type_error
-
-    mov rbx, [rdi]          ; self
-    mov r12, [rdi + 8]     ; substr (now guaranteed heap str)
-    mov r13, [rbx + PyStrObject.ob_size]   ; self length
-    mov r14, [r12 + PyStrObject.ob_size]   ; sub length
-
-    ; If sub_len > self_len, return -1
-    cmp r14, r13
-    jg .rfind_not_found
-
-    ; If sub_len == 0, return self_len
-    test r14, r14
-    jz .rfind_empty_sub
-
-    ; Walk backward from (self_len - sub_len) down to 0
-    mov rcx, r13
-    sub rcx, r14            ; rcx = last possible start position
-
-.rfind_loop:
-    cmp rcx, 0
-    jl .rfind_not_found
-
-    ; Compare sub with self[rcx..rcx+sub_len]
-    push rcx
-    lea rdi, [rbx + PyStrObject.data]
-    add rdi, rcx
-    lea rsi, [r12 + PyStrObject.data]
-    mov rdx, r14
-    call ap_memcmp
-    pop rcx
-
-    test eax, eax
-    jz .rfind_found
-
-    dec rcx
-    jmp .rfind_loop
-
-.rfind_found:
-    mov rdi, rbx
-    mov rsi, rcx
-    call str_byte_to_cp
-    mov rdi, rax
-    call int_from_i64
-    pop r14
-    pop r13
-    pop r12
-    pop rbx
-    leave
-    V_PACK rax, rdx             ; builtins return one Value
-    ret
-
-.rfind_empty_sub:
-    mov rdi, [rbx + PyStrObject.ob_length]
-    call int_from_i64
-    pop r14
-    pop r13
-    pop r12
-    pop rbx
-    leave
-    V_PACK rax, rdx             ; builtins return one Value
-    ret
-
-.rfind_not_found:
-    mov rdi, -1
-    call int_from_i64
-    pop r14
-    pop r13
-    pop r12
-    pop rbx
-    leave
-    V_PACK rax, rdx             ; builtins return one Value
-    ret
-
-.rfind_type_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "must be str, not other type"
-    call raise_exception
+DEF_FUNC_BARE str_method_rfind
+    mov edx, 1                  ; reverse
+    jmp str_find_impl
 END_FUNC str_method_rfind
 
 ;; ============================================================================

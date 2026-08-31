@@ -359,44 +359,108 @@ DEF_FUNC_BARE ap_strcmp
     ret
 END_FUNC ap_strcmp
 
-; ap_strstr(const char *haystack, const char *needle) -> char* or NULL
-; Simple O(n*m) search. Returns pointer to first match or NULL.
-DEF_FUNC_BARE ap_strstr
-    ; rdi = haystack, rsi = needle
-    ; If needle is empty, return haystack
-    cmp byte [rsi], 0
-    je .return_haystack
 
-.outer:
-    movzx eax, byte [rdi]
-    test al, al
-    jz .not_found               ; end of haystack
-    ; Try to match needle starting here
-    mov rcx, rdi                ; rcx = haystack cursor
-    mov rdx, rsi                ; rdx = needle cursor
-.inner:
-    movzx eax, byte [rdx]
-    test al, al
-    jz .found                   ; end of needle = full match
-    cmp al, [rcx]
-    jne .advance                ; mismatch
-    inc rcx
-    inc rdx
-    jmp .inner
-.advance:
-    inc rdi
-    jmp .outer
+;; ============================================================================
+;; ap_memfind(rdi = hay, rsi = hlen, rdx = needle, rcx = nlen)
+;;   -> rax = pointer to the first match, or 0
+;;
+;; ap_strstr's length-aware sibling.  A Python str is counted, not
+;; NUL-terminated: "a\x00b" is three characters, and every search over it that
+;; went through ap_strstr stopped at the NUL and reported the tail missing.
+;;
+;; An empty needle matches at hay, as it does in CPython.  A needle longer than
+;; what is left cannot match, which is also the loop's termination condition.
+;; The first byte is checked before the inner loop is entered, so a mismatching
+;; position costs one compare rather than a call frame -- ap_strstr re-entered
+;; its inner loop at every offset, which is what made str.replace quadratic.
+;; ============================================================================
+DEF_FUNC_BARE ap_memfind
+    test rcx, rcx
+    jz .amf_empty               ; the empty needle matches immediately
+    mov r8, rsi
+    sub r8, rcx                 ; r8 = last offset a match could start at
+    js .amf_none                ; needle longer than haystack
+    movzx r9d, byte [rdx]       ; r9b = the needle's first byte
+    xor r10, r10                ; r10 = current offset
+                                ; rsi is free from here: r8 is all it was for
 
-.found:
+.amf_outer:
+    cmp r10, r8
+    jg .amf_none
+    cmp r9b, [rdi + r10]
+    jne .amf_next
+    ; First byte matches; compare the rest against the candidate.
+    lea r11, [rdi + r10]
+    mov rax, 1
+.amf_inner:
+    cmp rax, rcx
+    jge .amf_hit
+    mov sil, [rdx + rax]
+    cmp sil, [r11 + rax]
+    jne .amf_next
+    inc rax
+    jmp .amf_inner
+.amf_next:
+    inc r10
+    jmp .amf_outer
+
+.amf_hit:
+    mov rax, r11
+    ret
+.amf_empty:
     mov rax, rdi
     ret
-.return_haystack:
-    mov rax, rdi
-    ret
-.not_found:
+.amf_none:
     xor eax, eax
     ret
-END_FUNC ap_strstr
+END_FUNC ap_memfind
+
+;; ============================================================================
+;; ap_memrfind(rdi = hay, rsi = hlen, rdx = needle, rcx = nlen)
+;;   -> rax = pointer to the *last* match, or 0
+;;
+;; ap_memfind walking down instead of up, for rfind and rindex.  An empty
+;; needle matches at the end of the range, which is what "the last place it
+;; occurs" means and what CPython returns.
+;; ============================================================================
+DEF_FUNC_BARE ap_memrfind
+    mov r8, rsi
+    sub r8, rcx                 ; r8 = last offset a match could start at
+    js .amr_none                ; needle longer than haystack
+    test rcx, rcx
+    jz .amr_empty               ; empty needle: matches at the far end
+    movzx r9d, byte [rdx]
+    mov r10, r8                 ; r10 = current offset, counting down
+
+.amr_outer:
+    cmp r10, 0
+    jl .amr_none
+    cmp r9b, [rdi + r10]
+    jne .amr_next
+    lea r11, [rdi + r10]
+    mov rax, 1
+.amr_inner:
+    cmp rax, rcx
+    jge .amr_hit
+    mov sil, [rdx + rax]
+    cmp sil, [r11 + rax]
+    jne .amr_next
+    inc rax
+    jmp .amr_inner
+.amr_next:
+    dec r10
+    jmp .amr_outer
+
+.amr_hit:
+    mov rax, r11
+    ret
+.amr_empty:
+    lea rax, [rdi + r8]
+    ret
+.amr_none:
+    xor eax, eax
+    ret
+END_FUNC ap_memrfind
 
 ;; ============================================================================
 ;; Allocation

@@ -10,11 +10,11 @@
 
 
 ; External functions
+extern str_cp_width
 extern ap_malloc
 extern ap_free
 extern ap_realloc
 extern ap_memcpy
-extern ap_strstr
 extern ap_memcmp
 extern obj_decref
 extern obj_repr
@@ -381,7 +381,10 @@ END_FUNC str_affix_dispatch
 
 AFF_ARGS  equ 8
 AFF_NARGS equ 16
-AFF_FRAME equ 16
+AFF_WPTR  equ 40            ; the 3-word window str_search_window fills
+AFF_WLEN  equ 32
+AFF_WOFF  equ 24
+AFF_FRAME equ 56            ; + 5 pushes = 96
 DEF_FUNC_LOCAL str_startswith_one, AFF_FRAME
     push rbx
     push r12
@@ -401,55 +404,26 @@ DEF_FUNC_LOCAL str_startswith_one, AFF_FRAME
 
     mov r13, [r12 + PyStrObject.ob_size]  ; prefix length
 
-    ; start/end narrow the region examined, and were ignored: only args[0]
-    ; and args[1] were ever read, so "abc".startswith("b", 1) was False.
-    ; r14 = start, r15 = end (exclusive), both clamped like a slice.
+    ; start and end narrow the region examined.  They are *code point* indices
+    ; and were applied as byte offsets, so "αβαβ".startswith("β", 1) was False:
+    ; offset 1 landed inside alpha's two bytes.  str_search_window converts.
     push r14
     push r15
-    xor r14d, r14d
-    mov r15, [rbx + PyStrObject.ob_size]
-    cmp qword [rbp - AFF_NARGS], 3
-    jl .sw_have_bounds
-    mov rdi, [rbp - AFF_ARGS]
-    mov rdi, [rdi + 16]
-    V_UNPACK rdi, rdx
-    call obj_as_index
-    mov r14, rax
-    test r14, r14
-    jns .sw_start_ok
-    add r14, [rbx + PyStrObject.ob_size]
-    jns .sw_start_ok
-    xor r14d, r14d
-.sw_start_ok:
-    cmp qword [rbp - AFF_NARGS], 4
-    jl .sw_have_bounds
-    mov rdi, [rbp - AFF_ARGS]
-    mov rdi, [rdi + 24]
-    V_UNPACK rdi, rdx
-    call obj_as_index
-    test rax, rax
-    jns .sw_end_ok
-    add rax, [rbx + PyStrObject.ob_size]
-    jns .sw_end_ok
-    xor eax, eax
-.sw_end_ok:
-    cmp rax, [rbx + PyStrObject.ob_size]
-    jle .sw_end_clamped
-    mov rax, [rbx + PyStrObject.ob_size]
-.sw_end_clamped:
-    mov r15, rax
-.sw_have_bounds:
-    cmp r14, r15
+    mov rdi, rbx
+    mov rsi, [rbp - AFF_ARGS]
+    mov rdx, [rbp - AFF_NARGS]
+    lea rcx, [rbp - AFF_WPTR]
+    call str_search_window
+    test eax, eax
+    jz .sw_false_pop
+    mov r14, [rbp - AFF_WOFF]       ; window start, in bytes
+    mov r15, [rbp - AFF_WLEN]       ; window length, in bytes
+
+    ; The prefix must fit inside the window
+    cmp r13, r15
     jg .sw_false_pop
 
-    ; The prefix must fit inside [start, end)
-    mov rax, r15
-    sub rax, r14
-    cmp r13, rax
-    jg .sw_false_pop
-
-    lea rdi, [rbx + PyStrObject.data]
-    add rdi, r14
+    mov rdi, [rbp - AFF_WPTR]
     lea rsi, [r12 + PyStrObject.data]
     xor ecx, ecx
 .sw_cmp:
@@ -527,55 +501,25 @@ DEF_FUNC_LOCAL str_endswith_one, AFF_FRAME
     mov r13, [r12 + PyStrObject.ob_size]  ; suffix length
     mov r14, [rbx + PyStrObject.ob_size]  ; self length
 
-    ; If suffix longer than self, False
-    ; start/end narrow the region examined, and were ignored here too.
+    ; start and end narrow the region examined.  Code point indices, applied as
+    ; byte offsets until now -- the same bug startswith had.
     push r15
-    xor r14d, r14d                  ; start
-    mov r15, [rbx + PyStrObject.ob_size]
-    cmp qword [rbp - AFF_NARGS], 3
-    jl .ew_have_bounds
-    mov rdi, [rbp - AFF_ARGS]
-    mov rdi, [rdi + 16]
-    V_UNPACK rdi, rdx
-    call obj_as_index
-    mov r14, rax
-    test r14, r14
-    jns .ew_start_ok
-    add r14, [rbx + PyStrObject.ob_size]
-    jns .ew_start_ok
-    xor r14d, r14d
-.ew_start_ok:
-    cmp qword [rbp - AFF_NARGS], 4
-    jl .ew_have_bounds
-    mov rdi, [rbp - AFF_ARGS]
-    mov rdi, [rdi + 24]
-    V_UNPACK rdi, rdx
-    call obj_as_index
-    test rax, rax
-    jns .ew_end_ok
-    add rax, [rbx + PyStrObject.ob_size]
-    jns .ew_end_ok
-    xor eax, eax
-.ew_end_ok:
-    cmp rax, [rbx + PyStrObject.ob_size]
-    jle .ew_end_clamped
-    mov rax, [rbx + PyStrObject.ob_size]
-.ew_end_clamped:
-    mov r15, rax
-.ew_have_bounds:
-    cmp r14, r15
+    mov rdi, rbx
+    mov rsi, [rbp - AFF_ARGS]
+    mov rdx, [rbp - AFF_NARGS]
+    lea rcx, [rbp - AFF_WPTR]
+    call str_search_window
+    test eax, eax
+    jz .ew_false_pop
+    mov r14, [rbp - AFF_WPTR]       ; window base pointer
+    mov r15, [rbp - AFF_WLEN]       ; window length, in bytes
+
+    ; The suffix must fit inside the window
+    cmp r13, r15
     jg .ew_false_pop
 
-    ; The suffix must fit inside [start, end)
-    mov rax, r15
-    sub rax, r14
-    cmp r13, rax
-    jg .ew_false_pop
-
-    mov rcx, r15
-    sub rcx, r13                    ; offset = end - suffix_len
-    lea rdi, [rbx + PyStrObject.data]
-    add rdi, rcx
+    lea rdi, [r14 + r15]
+    sub rdi, r13                    ; the window's last suffix_len bytes
     lea rsi, [r12 + PyStrObject.data]
     xor ecx, ecx
 .ew_cmp:
@@ -630,62 +574,106 @@ DEF_FUNC_BARE str_method_endswith
 END_FUNC str_method_endswith
 
 ;; ============================================================================
-;; str_method_find(args, nargs) -> SmallInt index or -1
-;; args[0]=self, args[1]=substr
+;; str_method_find(args, nargs) -> SmallInt code point index, or -1
+;; args[0]=self, args[1]=substr, args[2]=start, args[3]=end
+;;
+;; str_find_impl carries find, rfind, index and rindex; they differ only in
+;; which direction the scan runs and in what a miss does.  Both of those used
+;; to ignore start and end outright -- "abcabc".find("b", 3) was 1 -- and both
+;; searched with the C-string ap_strstr, so they also stopped at the first NUL:
+;; "a\x00b".find("b") was -1.
+;;
+;; edx on entry is a bitmask: bit 0 = scan in reverse, bit 1 = raise
+;; ValueError on a miss instead of returning -1.  So 0 = find, 1 = rfind,
+;; 2 = index, 3 = rindex.
 ;; ============================================================================
-DEF_FUNC str_method_find
-    push rbx
-    push r12
+extern str_search_window
+extern ap_memfind
+extern ap_memrfind
+extern str_byte_to_cp
 
-    ; Validate args[1] is a string
-    mov rax, [rdi + 8]         ; args[1]
+FND_ARGS  equ 8
+FND_NARGS equ 16
+FND_SELF  equ 24
+FND_DIR   equ 32
+FND_WPTR  equ 56            ; the 3-word window: 56, 48, 40
+FND_WLEN  equ 48
+FND_WOFF  equ 40
+FND_FRAME equ 64            ; + 0 pushes = 64
+global str_find_impl
+DEF_FUNC str_find_impl, FND_FRAME
+    mov [rbp - FND_ARGS], rdi
+    mov [rbp - FND_NARGS], rsi
+    mov [rbp - FND_DIR], rdx
+
+    mov rax, [rdi + 8]              ; args[1]
     V_TEST_PTR rax, rcx
     ja .find_type_error
     mov rcx, [rax + PyObject.ob_type]
     REQUIRE_STR_TYPE rcx, rdx, .find_type_error
 
-    mov rbx, [rdi]          ; self
-    mov r12, [rdi + 8]     ; substr (now guaranteed heap str)
+    mov rcx, [rdi]                  ; self
+    mov [rbp - FND_SELF], rcx
 
-    ; Use ap_strstr to find substring
-    lea rdi, [rbx + PyStrObject.data]
-    lea rsi, [r12 + PyStrObject.data]
-    call ap_strstr
+    mov rdi, rcx
+    mov rsi, [rbp - FND_ARGS]
+    mov rdx, [rbp - FND_NARGS]
+    lea rcx, [rbp - FND_WPTR]
+    call str_search_window
+    test eax, eax
+    jz .find_not_found
 
+    mov rdi, [rbp - FND_WPTR]
+    mov rsi, [rbp - FND_WLEN]
+    mov rdx, [rbp - FND_ARGS]
+    mov rdx, [rdx + 8]              ; the needle
+    mov rcx, [rdx + PyStrObject.ob_size]
+    lea rdx, [rdx + PyStrObject.data]
+    test qword [rbp - FND_DIR], 1
+    jnz .find_reverse
+    call ap_memfind
+    jmp .find_have_hit
+.find_reverse:
+    call ap_memrfind
+.find_have_hit:
     test rax, rax
     jz .find_not_found
 
-    ; Compute index: result_ptr - self.data.  The search runs in bytes but the
-    ; answer Python wants is a code point index.
-    lea rcx, [rbx + PyStrObject.data]
-    sub rax, rcx
-    mov rdi, rbx
+    ; A pointer into self.data; Python wants a code point index.
+    mov rdi, [rbp - FND_SELF]
+    sub rax, rdi
+    sub rax, PyStrObject.data
     mov rsi, rax
-    extern str_byte_to_cp
     call str_byte_to_cp
     mov rdi, rax
     call int_from_i64
-
-    pop r12
-    pop rbx
     leave
     V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .find_not_found:
+    test qword [rbp - FND_DIR], 2
+    jnz .find_missing
     mov rdi, -1
     call int_from_i64
-
-    pop r12
-    pop rbx
     leave
     V_PACK rax, rdx             ; builtins return one Value
     ret
+
+.find_missing:
+    lea rdi, [rel exc_ValueError_type]
+    CSTRING rsi, "substring not found"
+    call raise_exception
 
 .find_type_error:
     lea rdi, [rel exc_TypeError_type]
     CSTRING rsi, "must be str, not other type"
     call raise_exception
+END_FUNC str_find_impl
+
+DEF_FUNC_BARE str_method_find
+    xor edx, edx
+    jmp str_find_impl
 END_FUNC str_method_find
 
 ;; ============================================================================
@@ -693,13 +681,20 @@ END_FUNC str_method_find
 ;; args[0]=self, args[1]=old, args[2]=new
 ;; Uses callee-saved regs for key state, stack locals for buffer management.
 ;; ============================================================================
+RPL_BUF    equ 48           ; the growing result buffer
+RPL_ALLOC  equ 56           ; its allocated size
+RPL_WPOS   equ 64           ; how much of it is written
+RPL_SLEN   equ 72           ; self's length in bytes
+RPL_LEFT   equ 80           ; replacements still allowed, -1 = unlimited
+RPL_ARGS   equ 88
+RPL_LOCALS equ 56           ; + 5 pushes = 96
 DEF_FUNC str_method_replace
     push rbx
     push r12
     push r13
     push r14
     push r15
-    sub rsp, 40             ; [rbp-48]=buf_ptr, [rbp-56]=buf_alloc, [rbp-64]=write_pos, [rbp-72]=self_len, [rbp-80]=pad
+    sub rsp, RPL_LOCALS
 
     ; Validate args[1] is a string
     mov rax, [rdi + 8]         ; args[1]
@@ -715,12 +710,28 @@ DEF_FUNC str_method_replace
     mov rcx, [rax + PyObject.ob_type]
     REQUIRE_STR_TYPE rcx, rdx, .repl_type_error
 
+    ; The third argument caps how many replacements happen, and was ignored:
+    ; "aXbXc".replace("X", "-", 1) replaced both.  A negative count means
+    ; unlimited, which is also what its absence means.
+    mov qword [rbp - RPL_LEFT], -1
+    cmp rsi, 4
+    jl .repl_count_done
+    mov [rbp - RPL_ARGS], rdi
+    mov rdi, [rdi + 24]         ; args[3]
+    V_UNPACK rdi, rdx
+    call obj_as_index
+    mov rdi, [rbp - RPL_ARGS]
+    test rax, rax
+    js .repl_count_done
+    mov [rbp - RPL_LEFT], rax
+.repl_count_done:
+
     ; rbx = self, r12 = old_str, r13 = new_str, r14 = self_len, r15 = scan_pos
     mov rbx, [rdi]          ; self
     mov r12, [rdi + 8]     ; old
     mov r13, [rdi + 16]     ; new
     mov r14, [rbx + PyStrObject.ob_size]
-    mov [rbp-72], r14
+    mov [rbp - RPL_SLEN], r14
 
     ; If old_str is empty, interleave new_str between each char
     cmp qword [r12 + PyStrObject.ob_size], 0
@@ -728,25 +739,32 @@ DEF_FUNC str_method_replace
 
     ; Allocate initial buffer: self_len * 2 + 64
     lea rdi, [r14 * 2 + 64]
-    mov [rbp-56], rdi       ; buf_alloc
+    mov [rbp - RPL_ALLOC], rdi       ; buf_alloc
     call ap_malloc
-    mov [rbp-48], rax       ; buf_ptr
-    mov qword [rbp-64], 0   ; write_pos = 0
+    mov [rbp - RPL_BUF], rax       ; buf_ptr
+    mov qword [rbp - RPL_WPOS], 0   ; write_pos = 0
 
     xor r15d, r15d          ; r15 = scan position
 
 .replace_scan:
+    cmp qword [rbp - RPL_LEFT], 0
+    je .replace_copy_tail       ; the count is spent; the rest stays as it is
+
     ; Check if remaining text is long enough for old_str
     mov rax, r14
     sub rax, r15
     cmp rax, [r12 + PyStrObject.ob_size]
     jl .replace_copy_tail
 
-    ; Search for old_str from scan pos
+    ; Search for old_str from scan pos.  ap_strstr stopped at the first NUL,
+    ; so "a\x00b".replace("b", "!") left the string alone.
     lea rdi, [rbx + PyStrObject.data]
     add rdi, r15
-    lea rsi, [r12 + PyStrObject.data]
-    call ap_strstr
+    mov rsi, r14
+    sub rsi, r15
+    lea rdx, [r12 + PyStrObject.data]
+    mov rcx, [r12 + PyStrObject.ob_size]
+    call ap_memfind
     test rax, rax
     jz .replace_copy_tail
 
@@ -758,18 +776,18 @@ DEF_FUNC str_method_replace
     ; --- ensure buffer space ---
     mov rcx, rax
     sub rcx, r15            ; prefix_len = found_pos - scan_pos
-    mov rdx, [rbp-64]       ; write_pos
+    mov rdx, [rbp - RPL_WPOS]       ; write_pos
     add rdx, rcx
     add rdx, [r13 + PyStrObject.ob_size]
     add rdx, r14            ; generous upper bound for rest
-    cmp rdx, [rbp-56]
+    cmp rdx, [rbp - RPL_ALLOC]
     jl .replace_space_ok
     shl rdx, 1
-    mov [rbp-56], rdx
-    mov rdi, [rbp-48]
+    mov [rbp - RPL_ALLOC], rdx
+    mov rdi, [rbp - RPL_BUF]
     mov rsi, rdx
     call ap_realloc
-    mov [rbp-48], rax
+    mov [rbp - RPL_BUF], rax
 .replace_space_ok:
 
     ; --- copy prefix: bytes from scan_pos to found_pos ---
@@ -780,15 +798,15 @@ DEF_FUNC str_method_replace
     test rcx, rcx
     jz .replace_no_prefix
 
-    mov rdi, [rbp-48]
-    add rdi, [rbp-64]
+    mov rdi, [rbp - RPL_BUF]
+    add rdi, [rbp - RPL_WPOS]
     lea rsi, [rbx + PyStrObject.data]
     add rsi, r15
     mov rdx, rcx
     push rcx
     call ap_memcpy
     pop rcx
-    add [rbp-64], rcx
+    add [rbp - RPL_WPOS], rcx
 
 .replace_no_prefix:
     ; --- copy new_str ---
@@ -796,16 +814,20 @@ DEF_FUNC str_method_replace
     test rcx, rcx
     jz .replace_adv
 
-    mov rdi, [rbp-48]
-    add rdi, [rbp-64]
+    mov rdi, [rbp - RPL_BUF]
+    add rdi, [rbp - RPL_WPOS]
     lea rsi, [r13 + PyStrObject.data]
     mov rdx, rcx
     push rcx
     call ap_memcpy
     pop rcx
-    add [rbp-64], rcx
+    add [rbp - RPL_WPOS], rcx
 
 .replace_adv:
+    cmp qword [rbp - RPL_LEFT], 0
+    jl .replace_adv_unlimited
+    dec qword [rbp - RPL_LEFT]
+.replace_adv_unlimited:
     pop rax                 ; found_pos
     add rax, [r12 + PyStrObject.ob_size]
     mov r15, rax            ; advance scan past old_str
@@ -818,28 +840,28 @@ DEF_FUNC str_method_replace
     test rcx, rcx
     jz .replace_make_str
 
-    mov rdi, [rbp-48]
-    add rdi, [rbp-64]
+    mov rdi, [rbp - RPL_BUF]
+    add rdi, [rbp - RPL_WPOS]
     lea rsi, [rbx + PyStrObject.data]
     add rsi, r15
     mov rdx, rcx
     push rcx
     call ap_memcpy
     pop rcx
-    add [rbp-64], rcx
+    add [rbp - RPL_WPOS], rcx
 
 .replace_make_str:
-    mov rdi, [rbp-48]
-    mov rsi, [rbp-64]       ; result length
+    mov rdi, [rbp - RPL_BUF]
+    mov rsi, [rbp - RPL_WPOS]       ; result length
     call str_new_heap
     push rax
 
-    mov rdi, [rbp-48]
+    mov rdi, [rbp - RPL_BUF]
     call ap_free
 
     pop rax
     mov edx, TAG_PTR
-    add rsp, 40
+    add rsp, RPL_LOCALS
     pop r15
     pop r14
     pop r13
@@ -858,46 +880,82 @@ DEF_FUNC str_method_replace
     imul rax, rcx              ; (self_len + 1) * new_len
     add rax, r14               ; + self_len
     add rax, 1                 ; + NUL
-    mov [rbp-56], rax          ; buf_alloc
+    mov [rbp - RPL_ALLOC], rax          ; buf_alloc
     mov rdi, rax
     call ap_malloc
-    mov [rbp-48], rax          ; buf_ptr
-    mov qword [rbp-64], 0      ; write_pos = 0
+    mov [rbp - RPL_BUF], rax          ; buf_ptr
+    mov qword [rbp - RPL_WPOS], 0      ; write_pos = 0
 
     xor r15d, r15d             ; scan_pos = 0
 
 .ri_loop:
+    cmp qword [rbp - RPL_LEFT], 0
+    je .ri_tail                 ; the count is spent
     ; Copy new_str
     mov rcx, [r13 + PyStrObject.ob_size]
     test rcx, rcx
     jz .ri_skip_new
-    mov rdi, [rbp-48]
-    add rdi, [rbp-64]
+    mov rdi, [rbp - RPL_BUF]
+    add rdi, [rbp - RPL_WPOS]
     lea rsi, [r13 + PyStrObject.data]
     mov rdx, rcx
     push rcx
     call ap_memcpy
     pop rcx
-    add [rbp-64], rcx
+    add [rbp - RPL_WPOS], rcx
 .ri_skip_new:
+    cmp qword [rbp - RPL_LEFT], 0
+    jl .ri_unlimited
+    dec qword [rbp - RPL_LEFT]
+.ri_unlimited:
     ; Check if all chars copied
     cmp r15, r14
     jge .replace_make_str
-    ; Copy one char from self
-    mov rdi, [rbp-48]
-    add rdi, [rbp-64]
-    movzx eax, byte [rbx + PyStrObject.data + r15]
-    mov [rdi], al
-    inc qword [rbp-64]
-    inc r15
+
+    ; Copy one *code point* from self, not one byte: inserting between the
+    ; bytes of a multi-byte character split it, so "αβ".replace("", "-") came
+    ; back as four mojibake halves instead of "-α-β-".  r15 is callee-saved,
+    ; so str_cp_width preserves it.
+    lea rdi, [rbx + PyStrObject.data]
+    mov rsi, r14
+    mov rdx, r15
+    call str_cp_width
+    mov rcx, rax                ; the character's width in bytes
+    mov rdi, [rbp - RPL_BUF]
+    add rdi, [rbp - RPL_WPOS]
+    lea rsi, [rbx + PyStrObject.data]
+    add rsi, r15
+    mov rdx, rcx
+    push rcx
+    call ap_memcpy
+    pop rcx
+    add [rbp - RPL_WPOS], rcx
+    add r15, rcx
     jmp .ri_loop
+
+.ri_tail:
+    ; The count ran out; everything still unscanned is copied verbatim.
+    mov rcx, r14
+    sub rcx, r15
+    test rcx, rcx
+    jz .replace_make_str
+    mov rdi, [rbp - RPL_BUF]
+    add rdi, [rbp - RPL_WPOS]
+    lea rsi, [rbx + PyStrObject.data]
+    add rsi, r15
+    mov rdx, rcx
+    push rcx
+    call ap_memcpy
+    pop rcx
+    add [rbp - RPL_WPOS], rcx
+    jmp .replace_make_str
 
 .replace_copy_self:
     lea rdi, [rbx + PyStrObject.data]
     mov rsi, r14
     call str_new_heap
     mov edx, TAG_PTR
-    add rsp, 40
+    add rsp, RPL_LOCALS
     pop r15
     pop r14
     pop r13
