@@ -536,6 +536,11 @@ DEF_FUNC par_fstring_field, FF_FRAME
     call ast_push
     cmp qword [rbp - FF_CONV], 0
     jne .no_debug
+    ; `=` implies !r only when there is no format spec.  With one, CPython
+    ; formats the value itself: f"{x=:.2f}" is x=1.50, where repr()ing first
+    ; hands ".2f" a str and raises.
+    cmp qword [rbp - FF_SSTART], 0
+    jne .no_debug
     mov qword [rbp - FF_CONV], 2        ; `{x=}` implies !r
 .no_debug:
 

@@ -368,6 +368,14 @@ DEF_FUNC lex_run, LR_FRAME
     test rsi, rsi
     jz .whole_file
     mov dword [r14 + Lexer.atbol], 0
+    ; A replacement field is scanned as its own span, and PEP 701 lets a
+    ; newline inside one be a continuation rather than the end of a statement.
+    ; At depth 0 the newline emitted NEWLINE and the next line's leading space
+    ; became an INDENT, in the middle of an expression.  Depth 1 is what makes
+    ; .newline suppress the token and .top skip the indent measurement;
+    ; .op_close already refuses to go below zero, so an unbalanced `)` inside
+    ; the span cannot re-enable it.
+    mov dword [r14 + Lexer.paren_depth], 1
 .whole_file:
 
 .top:

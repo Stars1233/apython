@@ -53,6 +53,7 @@ test_compile_finally_block_stack
 test_compile_finally_exit
 test_compile_flow
 test_compile_for_else_scope
+test_compile_fstring_debug
 test_compile_fstring
 test_compile_func
 test_compile_global_closure
