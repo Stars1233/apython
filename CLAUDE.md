@@ -179,6 +179,19 @@ No hand-written file exceeds 100k bytes; only generated asm may.
 - `src/pyo/*.asm` — Type implementations (int, str, list, dict, tuple, func,
   class, iter, singleton, bytes, code)
 - `src/marshal.asm` — .pyc marshal deserializer, and the .pyc file reader
+- `src/main.asm` — argument parsing, startup order, and the `-t`/`--dis` modes
+- `src/import.asm` — the import system: finders, `sys.modules`, packages
+- `src/itertools.asm` — the *iterator builtins* (`enumerate`, `zip`, `map`,
+  `filter`, `reversed`, `sorted`, `chain`, `get_iterator`), not the `itertools`
+  module, which is `lib/itertools.py`
+- `src/dunder.asm` — dunder lookup and the `dunder_call_*` helpers, the
+  fallback path when a heaptype has no slot
+- `src/repr.asm` — the container reprs and the recursion stack they share
+- `src/gc.asm` — the generational collector, and the `tp_traverse`/`tp_clear`
+  callbacks for every type that has them
+- `src/sre.asm` / `src/sre_module.asm` — the regex engine and its module
+  wrapper; the pattern and match objects live in `src/pyo/`
+- `src/valtest.asm` — `--selftest-value`
 - `src/builtins.asm` — `PyBuiltinObject`, the core builtins, and `builtins_init`
 - `src/builtins_num.asm` / `src/builtins_obj.asm` — the numeric builtins, and the
   object/iteration/IO builtins

@@ -699,7 +699,7 @@ DEF_FUNC sys_exit_func
 END_FUNC sys_exit_func
 
 ; ============================================================================
-; sys_getdefaultencoding_func(PyObject **args, int64_t nargs) -> PyObject*
+; sys_getdefaultencoding_func(PyObject **args, int64_t nargs) -> rax = Value
 ; Returns "utf-8"
 ; ============================================================================
 DEF_FUNC sys_getdefaultencoding_func
@@ -711,7 +711,7 @@ DEF_FUNC sys_getdefaultencoding_func
 END_FUNC sys_getdefaultencoding_func
 
 ; ============================================================================
-; sys_get_int_max_str_digits_func(PyObject **args, int64_t nargs) -> PyObject*
+; sys_get_int_max_str_digits_func(PyObject **args, int64_t nargs) -> rax = Value
 ; Returns the current int max str digits limit
 ; ============================================================================
 DEF_FUNC sys_get_int_max_str_digits_func
@@ -728,7 +728,7 @@ DEF_FUNC sys_get_int_max_str_digits_func
 END_FUNC sys_get_int_max_str_digits_func
 
 ; ============================================================================
-; sys_set_int_max_str_digits_func(PyObject **args, int64_t nargs) -> PyObject*
+; sys_set_int_max_str_digits_func(PyObject **args, int64_t nargs) -> rax = Value
 ; Sets the int max str digits limit. 0 = unlimited, otherwise >= 640
 ; ============================================================================
 DEF_FUNC sys_set_int_max_str_digits_func

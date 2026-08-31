@@ -966,7 +966,7 @@ DEF_FUNC sre_match_subscript
 END_FUNC sre_match_subscript
 
 ; ============================================================================
-; sre_match_getattr(PyObject* self, PyObject* name) -> PyObject*
+; sre_match_getattr(PyObject* self, PyObject* name) -> rax = Value
 ; ============================================================================
 DEF_FUNC sre_match_getattr
     push rbx

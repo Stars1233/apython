@@ -22,7 +22,7 @@ CLOCK_MONOTONIC          equ 1
 CLOCK_PROCESS_CPUTIME_ID equ 2
 
 ; ============================================================================
-; time_process_time_func(PyObject **args, int64_t nargs) -> PyObject*
+; time_process_time_func(PyObject **args, int64_t nargs) -> rax = Value
 ; Returns process CPU time as a float (seconds)
 ; ============================================================================
 DEF_FUNC time_process_time_func, 16
@@ -54,7 +54,7 @@ DEF_FUNC time_process_time_func, 16
 END_FUNC time_process_time_func
 
 ; ============================================================================
-; time_monotonic_func(PyObject **args, int64_t nargs) -> PyObject*
+; time_monotonic_func(PyObject **args, int64_t nargs) -> rax = Value
 ; Returns monotonic clock as a float (seconds)
 ; ============================================================================
 DEF_FUNC time_monotonic_func, 16

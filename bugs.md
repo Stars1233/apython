@@ -232,37 +232,28 @@ Everything here assembles and runs.  These are places the tree does not follow
 STYLE.md, listed so the gap is a known quantity rather than a surprise to
 whoever copies a neighbouring file.
 
-- **756 raw numeric frame offsets across 53 files.**  STYLE.md requires named
-  `equ` constants; `[rbp-8]` and `[rsp+32]` survive from before that rule.  The
-  concentration is `src/opcodes/build.asm` (151), `src/marshal.asm` (85),
-  `src/repr.asm` (64) and `src/pyo/float.asm` (57).
+- **360 raw `[rbp +- N]` frame offsets across 29 files.**  STYLE.md requires
+  named `equ` constants; these survive from before that rule.  Four files hold
+  most of them: `src/opcodes/build.asm` (117), `src/repr.asm` (64),
+  `src/pyo/float.asm` (57) and `src/pyo/sysmod.asm` (17).  The `[rsp +- N]`
+  form is a different thing and is explicitly allowed, which is why earlier
+  counts here were roughly twice as large.
   A hand-picked offset silently overlaps the slot above it the first time a
   struct in the same frame grows, which is the failure this rule exists to
   prevent.
 
-- **124 redundant `global X` immediately above `DEF_FUNC X`.**  Harmless —
-  `DEF_FUNC` already emits the `global` with a size expression — but the bare
-  `global` is what the previous item's files use *instead*, so the two read
+- **195 of 402 `XX_FRAME equ` constants carry no alignment arithmetic in a
+  trailing comment**, which STYLE.md asks for because it is how a reader checks
+  the `(N + 8*pushes) % 16 == 0` rule without recounting the pushes.
+
+- **360 separator lines use a single `;` where STYLE.md asks for `;;`**, and
+  395 functions have no separator or docblock at all.  Heaviest:
+  `src/pyo/sre_pattern.asm`, `src/builtins_obj.asm`, `src/sre.asm`.
+
+- **418 uppercase hex digits** (`0xC0` for `0xc0`) across 32 hand-written
+  files, concentrated in `src/sre.asm` (137) and `src/pyo/int.asm` (48).
+
+- **117 redundant `global X` immediately above `DEF_FUNC X`.**  Harmless --
+  `DEF_FUNC` already emits the `global` with a size expression -- but it reads
+  like the `global` + bare-label form that lint now rejects, so the two look
   alike and only one is correct.
-
-- **Four of `compiler/lint.py`'s ten checks still cover only 21 of the ~92
-  `.asm` files** (`compiler/*.asm` plus `src/main.asm`).  The other six now run
-  tree-wide, because the tree had zero violations of them; these four cannot
-  follow until the debt behind them is paid: 315 functions in `src/` violate
-  the rsp-alignment rule (harmlessly, but the check cannot tell), 174 defeat
-  `check_callee_saved`'s walker, and 58 writes to `rbx`/`r12`-`r15` in
-  `src/opcodes/` are the eval-loop registers by design and need a
-  per-directory exemption.  NASM itself is run with no warning flags, so
-  nothing else catches any of it.
-
-- **Nine headers in `src/pyo/` name a file that no longer exists.**  Line 1 of
-  `dict.asm` says `dict_obj.asm`; likewise `bytes`, `class`, `code`, `int`,
-  `iter`, `list`, `str` and `tuple`.  A one-line fix each, but the header is
-  the first thing read.
-
-- **Some docblocks describe a thin return where the function returns a fat
-  pair.**  `src/builtins.asm:652` documents
-  `builtin_len(PyObject **args, int64_t nargs) -> PyObject*`, but the function
-  returns `(rax = payload, edx = tag)`.  The signature line is the only
-  machine-unchecked part of a function's contract, so a wrong one is worse than
-  none.

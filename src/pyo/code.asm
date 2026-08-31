@@ -1,4 +1,4 @@
-; code_obj.asm - Code object type
+; pyo/code.asm - Code object type
 
 %include "macros.inc"
 %include "object.inc"

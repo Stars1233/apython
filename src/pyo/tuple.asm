@@ -1,4 +1,4 @@
-; tuple_obj.asm - Tuple type implementation
+; pyo/tuple.asm - Tuple type implementation
 ; Fat tuples: each element is 16 bytes (payload + tag) inline
 
 %include "macros.inc"
@@ -146,7 +146,7 @@ DEF_FUNC_BARE tuple_getitem
     RAISE exc_IndexError_type, "tuple index out of range"
 END_FUNC tuple_getitem
 
-; tuple_subscript(PyTupleObject *tuple, PyObject *key) -> PyObject*
+; tuple_subscript(PyTupleObject *tuple, PyObject *key) -> rax = Value
 ; mp_subscript: index with int or slice key (for BINARY_SUBSCR)
 ; Returns (rax=payload, edx=tag) fat value
 DEF_FUNC tuple_subscript

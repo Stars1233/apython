@@ -252,7 +252,7 @@ DEF_FUNC_LOCAL property_dealloc
 END_FUNC property_dealloc
 
 ;; ============================================================================
-;; property_getattr(PyPropertyObject *self, PyObject *name) -> PyObject*
+;; property_getattr(PyPropertyObject *self, PyObject *name) -> rax = Value
 ;; Handles: "setter", "getter", "deleter", "fget", "fset", "fdel"
 ;; ============================================================================
 DEF_FUNC property_getattr

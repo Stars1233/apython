@@ -1,4 +1,4 @@
-; class_obj.asm - Class instances and bound methods for apython
+; pyo/class.asm - Class instances and bound methods for apython
 ; Phase 10: class instantiation, attribute access, __init__ dispatch
 
 %include "macros.inc"
@@ -420,7 +420,7 @@ DEF_FUNC instance_new
 END_FUNC instance_new
 
 ;; ============================================================================
-;; instance_getattr(PyInstanceObject *self, PyObject *name) -> PyObject*
+;; instance_getattr(PyInstanceObject *self, PyObject *name) -> rax = Value
 ;; Look up an attribute on an instance.
 ;; 1. Check self->inst_dict — return raw value
 ;; 2. If not found, check type->tp_dict (walk tp_base chain)
@@ -2284,7 +2284,7 @@ DEF_FUNC method_new
 END_FUNC method_new
 
 ;; ============================================================================
-;; method_call(self_method, args, nargs) -> PyObject*
+;; method_call(self_method, args, nargs) -> rax = Value
 ;; Call a bound method: prepend im_self to args, dispatch to im_func's tp_call.
 ;; rdi = PyMethodObject*, rsi = args, rdx = nargs
 ;; ============================================================================

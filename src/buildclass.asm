@@ -1332,7 +1332,7 @@ DEF_FUNC_LOCAL bc_prepare_namespace, BPN_FRAME
 END_FUNC bc_prepare_namespace
 
 ;; ============================================================================
-;; builtin___build_class__(PyObject **args, int64_t nargs) -> PyObject*
+;; builtin___build_class__(PyObject **args, int64_t nargs) -> rax = Value
 ;; __build_class__(body_func, class_name, *bases)
 ;;
 ;; 1. body_func = args[0], class_name = args[1]

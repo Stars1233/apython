@@ -627,9 +627,9 @@ align 16
 END_FUNC builtin_print
 
 ;; ============================================================================
-;; builtin_len(PyObject **args, int64_t nargs) -> PyObject*
-;; Returns len() of the first argument
-;; Phase 4 stub: checks ob_size for variable-size objects
+;; builtin_len(PyObject **args, int64_t nargs) -> rax = Value
+;; Returns len() of the first argument.  Reads ob_size for a variable-size
+;; builtin, and falls back to the sequence and mapping length slots.
 ;; ============================================================================
 LEN_EXC   equ 8
 LEN_FRAME equ 16
@@ -750,7 +750,7 @@ DEF_FUNC builtin_len, LEN_FRAME
 END_FUNC builtin_len
 
 ;; ============================================================================
-;; builtin_range(PyObject **args, int64_t nargs) -> PyObject*
+;; builtin_range(PyObject **args, int64_t nargs) -> rax = Value
 ;; range(stop) or range(start, stop) or range(start, stop, step)
 ;; ============================================================================
 DEF_FUNC builtin_range
@@ -841,7 +841,7 @@ END_FUNC builtin_range
 
 
 ;; ============================================================================
-;; builtin_isinstance(PyObject **args, int64_t nargs) -> PyObject*
+;; builtin_isinstance(PyObject **args, int64_t nargs) -> rax = Value
 ;; isinstance(obj, type) -> True/False
 ;; Walks the full tp_base chain for inheritance.
 ;; ============================================================================
@@ -1005,7 +1005,7 @@ DEF_FUNC builtin_isinstance, ISI_FRAME
 END_FUNC builtin_isinstance
 
 ;; ============================================================================
-;; builtin_issubclass(PyObject **args, int64_t nargs) -> PyObject*
+;; builtin_issubclass(PyObject **args, int64_t nargs) -> rax = Value
 ;; issubclass(cls, parent) -> True/False
 ;; Walks the full tp_base chain for inheritance.
 ;; Supports tuple second arg: issubclass(cls, (type1, type2, ...))
@@ -1148,7 +1148,7 @@ DEF_FUNC builtin_issubclass
 END_FUNC builtin_issubclass
 
 ;; ============================================================================
-;; builtin_repr(PyObject **args, int64_t nargs) -> PyObject*
+;; builtin_repr(PyObject **args, int64_t nargs) -> rax = Value
 ;; repr(obj)
 ;; ============================================================================
 DEF_FUNC builtin_repr

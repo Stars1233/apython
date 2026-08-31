@@ -1007,7 +1007,7 @@ DEF_FUNC_BARE type_is_exc_subclass
 END_FUNC type_is_exc_subclass
 
 
-; exc_type_call(PyTypeObject *type, PyObject **args, int64_t nargs) -> PyObject*
+; exc_type_call(PyTypeObject *type, PyObject **args, int64_t nargs) -> rax = Value
 ; tp_call for exception metatype. Creates an exception instance.
 ; rdi = exception type (the class being called, e.g. ValueError)
 ; rsi = args array

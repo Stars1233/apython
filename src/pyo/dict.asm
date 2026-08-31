@@ -1,5 +1,5 @@
-; dict_obj.asm - Dict type implementation
-; Phase 4: open-addressing hash table with linear probing
+; pyo/dict.asm - Dict type implementation
+; Open-addressing hash table with linear probing
 
 %include "macros.inc"
 %include "object.inc"

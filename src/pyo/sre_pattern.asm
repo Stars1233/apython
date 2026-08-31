@@ -1524,7 +1524,7 @@ DEF_FUNC sre_pattern_split_method, SP_FRAME
 END_FUNC sre_pattern_split_method
 
 ; ============================================================================
-; sre_pattern_getattr(PyObject* self, PyObject* name) -> PyObject*
+; sre_pattern_getattr(PyObject* self, PyObject* name) -> rax = Value
 ; ============================================================================
 DEF_FUNC sre_pattern_getattr
     push rbx

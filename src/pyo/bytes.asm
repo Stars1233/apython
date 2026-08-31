@@ -1,4 +1,4 @@
-; bytes_obj.asm - Bytes type implementation
+; pyo/bytes.asm - Bytes type implementation
 ; Immutable sequence of raw bytes with inline storage
 
 %include "macros.inc"
@@ -112,7 +112,7 @@ DEF_FUNC_BARE bytes_len
 END_FUNC bytes_len
 
 ;; ============================================================================
-;; bytes_getitem(PyBytesObject *self, int64_t index) -> PyObject* (SmallInt 0-255)
+;; bytes_getitem(PyBytesObject *self, int64_t index) -> rax = Value (SmallInt 0-255)
 ;; sq_item: return byte at index as integer
 ;; ============================================================================
 DEF_FUNC_BARE bytes_getitem
@@ -139,7 +139,7 @@ DEF_FUNC_BARE bytes_getitem
 END_FUNC bytes_getitem
 
 ;; ============================================================================
-;; bytes_subscript(PyBytesObject *self, PyObject *key) -> PyObject*
+;; bytes_subscript(PyBytesObject *self, PyObject *key) -> rax = Value
 ;; mp_subscript: handles both int and slice keys
 ;; ============================================================================
 DEF_FUNC bytes_subscript
@@ -601,7 +601,7 @@ END_FUNC bytes_repr_impl
 
 
 ;; ============================================================================
-;; bytes_getattr(PyBytesObject *self, PyObject *name) -> PyObject*
+;; bytes_getattr(PyBytesObject *self, PyObject *name) -> rax = Value
 ;; Attribute lookup for bytes: handles decode, hex, etc.
 ;; ============================================================================
 DEF_FUNC bytes_getattr

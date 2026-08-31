@@ -1,4 +1,4 @@
-; int_obj.asm - Integer type (fat value TAG_SMALLINT + GMP arbitrary precision)
+; pyo/int.asm - Integer type (fat value TAG_SMALLINT + GMP arbitrary precision)
 ;
 ; Fat value TAG_SMALLINT: tag=1, payload=raw signed i64, full 64-bit range
 ; No heap allocation or refcounting needed for inline integers.
@@ -1193,7 +1193,7 @@ DEF_FUNC_BARE int_bool
 END_FUNC int_bool
 
 ;; ============================================================================
-;; int_add(PyObject *a, PyObject *b) -> PyObject*
+;; int_add(PyObject *a, PyObject *b) -> rax = Value
 ;; SmallInt x SmallInt fast path with overflow check.
 ;; ============================================================================
 DEF_FUNC_BARE int_add
@@ -1302,7 +1302,7 @@ DEF_FUNC_BARE int_add
 END_FUNC int_add
 
 ;; ============================================================================
-;; int_sub(PyObject *a, PyObject *b) -> PyObject*
+;; int_sub(PyObject *a, PyObject *b) -> rax = Value
 ;; ============================================================================
 DEF_FUNC_BARE int_sub
     V_UNPACK rdi, rdx           ; left  Value -> (payload, tag)
@@ -1402,7 +1402,7 @@ DEF_FUNC_BARE int_sub
 END_FUNC int_sub
 
 ;; ============================================================================
-;; int_mul(PyObject *a, PyObject *b) -> PyObject*
+;; int_mul(PyObject *a, PyObject *b) -> rax = Value
 ;; SmallInt x SmallInt: use imul with overflow detection
 ;; ============================================================================
 DEF_FUNC_BARE int_mul
@@ -1507,7 +1507,7 @@ DEF_FUNC_BARE int_mul
 END_FUNC int_mul
 
 ;; ============================================================================
-;; int_floordiv(PyObject *a, PyObject *b) -> PyObject*
+;; int_floordiv(PyObject *a, PyObject *b) -> rax = Value
 ;; ============================================================================
 DEF_FUNC_BARE int_floordiv
     V_UNPACK rdi, rdx           ; left  Value -> (payload, tag)
@@ -1645,7 +1645,7 @@ DEF_FUNC_BARE int_floordiv
 END_FUNC int_floordiv
 
 ;; ============================================================================
-;; int_mod(PyObject *a, PyObject *b) -> PyObject*
+;; int_mod(PyObject *a, PyObject *b) -> rax = Value
 ;; ============================================================================
 DEF_FUNC_BARE int_mod
     V_UNPACK rdi, rdx           ; left  Value -> (payload, tag)
@@ -1797,7 +1797,7 @@ DEF_FUNC_BARE int_pos
 END_FUNC int_pos
 
 ;; ============================================================================
-;; int_neg(PyObject *a) -> PyObject*
+;; int_neg(PyObject *a) -> rax = Value
 ;; ============================================================================
 DEF_FUNC_BARE int_neg
     V_UNPACK rdi, rdx           ; operand Value -> (payload, tag)
@@ -2185,7 +2185,7 @@ DEF_FUNC_BARE int_dealloc
 END_FUNC int_dealloc
 
 ;; ============================================================================
-;; Bitwise AND: int_and(PyObject *a, PyObject *b) -> PyObject*
+;; Bitwise AND: int_and(PyObject *a, PyObject *b) -> rax = Value
 ;; ============================================================================
 DEF_FUNC_BARE int_and
     V_UNPACK rdi, rdx           ; left  Value -> (payload, tag)
@@ -2284,7 +2284,7 @@ DEF_FUNC_BARE int_and
 END_FUNC int_and
 
 ;; ============================================================================
-;; Bitwise OR: int_or(PyObject *a, PyObject *b) -> PyObject*
+;; Bitwise OR: int_or(PyObject *a, PyObject *b) -> rax = Value
 ;; ============================================================================
 DEF_FUNC_BARE int_or
     V_UNPACK rdi, rdx           ; left  Value -> (payload, tag)
@@ -2383,7 +2383,7 @@ DEF_FUNC_BARE int_or
 END_FUNC int_or
 
 ;; ============================================================================
-;; Bitwise XOR: int_xor(PyObject *a, PyObject *b) -> PyObject*
+;; Bitwise XOR: int_xor(PyObject *a, PyObject *b) -> rax = Value
 ;; ============================================================================
 DEF_FUNC_BARE int_xor
     V_UNPACK rdi, rdx           ; left  Value -> (payload, tag)
@@ -2483,7 +2483,7 @@ DEF_FUNC_BARE int_xor
 END_FUNC int_xor
 
 ;; ============================================================================
-;; Bitwise NOT: int_invert(PyObject *a, PyObject *b_unused) -> PyObject*
+;; Bitwise NOT: int_invert(PyObject *a, PyObject *b_unused) -> rax = Value
 ;; ~x = -(x+1)
 ;; ============================================================================
 DEF_FUNC_BARE int_invert
@@ -2585,7 +2585,7 @@ DEF_FUNC int_shrink
 END_FUNC int_shrink
 
 ;; ============================================================================
-;; Left shift: int_lshift(PyObject *a, PyObject *b) -> PyObject*
+;; Left shift: int_lshift(PyObject *a, PyObject *b) -> rax = Value
 ;; ============================================================================
 DEF_FUNC int_lshift
     V_UNPACK rdi, rdx           ; left  Value -> (payload, tag)
@@ -2686,7 +2686,7 @@ DEF_FUNC int_lshift
 END_FUNC int_lshift
 
 ;; ============================================================================
-;; Right shift: int_rshift(PyObject *a, PyObject *b) -> PyObject*
+;; Right shift: int_rshift(PyObject *a, PyObject *b) -> rax = Value
 ;; ============================================================================
 DEF_FUNC int_rshift
     V_UNPACK rdi, rdx           ; left  Value -> (payload, tag)
@@ -2797,7 +2797,7 @@ DEF_FUNC int_rshift
 END_FUNC int_rshift
 
 ;; ============================================================================
-;; Power: int_power(PyObject *a, PyObject *b) -> PyObject*
+;; Power: int_power(PyObject *a, PyObject *b) -> rax = Value
 ;; For small positive exponents, use GMP mpz_pow_ui
 ;; ============================================================================
 DEF_FUNC int_power
@@ -2939,7 +2939,7 @@ DEF_FUNC int_power
 END_FUNC int_power
 
 ;; ============================================================================
-;; True divide: int_true_divide(PyObject *a, PyObject *b) -> PyObject* (float)
+;; True divide: int_true_divide(PyObject *a, PyObject *b) -> rax = Value (float)
 ;; int / int always returns float in Python
 ;; ============================================================================
 DEF_FUNC int_true_divide

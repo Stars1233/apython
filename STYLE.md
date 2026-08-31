@@ -85,7 +85,7 @@ line is a bare `ASM_INIT`.
 
 A one-line header is fine for a small file, but the mature files state the
 invariant that makes the file reviewable — see `compiler/codegen.asm` and
-`compiler/comperr.asm`.  That is the form to imitate.
+`src/traceback.asm`.  That is the form to imitate.
 
 Two relaxations the codebase uses on purpose:
 
@@ -195,10 +195,10 @@ an opcode with N trailing CACHE entries, with a comment naming the count:
     DISPATCH
 ```
 
-The counts are listed in CLAUDE.md and in `include/opcodes.inc`.  The
-`CACHE_*` constants there are currently unreferenced — every handler hardcodes
-the byte count — so the comment is the only thing tying the two together.  Get
-this wrong and execution resumes in the middle of an instruction.
+The counts are listed in CLAUDE.md.  `include/opcodes.inc` no longer carries
+`CACHE_*` constants, and every handler hardcodes the byte count, so the comment
+is the only thing tying the two together.  Get this wrong and execution resumes
+in the middle of an instruction.
 
 ## Section Separators
 
@@ -372,8 +372,8 @@ float paths use aligned SSE stores.
 Two mechanics worth knowing:
 
 - `; lint: pushes=N` on the `DEF_FUNC` line overrides the counted push run, for
-  a function whose alignment is set up on a path lint cannot see.  See
-  `compiler/arena.asm`.
+  a function whose alignment is set up on a path lint cannot see.  Nothing in
+  the tree needs it at present.
 - A frame size written as plain arithmetic is checked; one written in terms of
   a struct size (`CS_UNIT equ 48 + CompUnit_size`) silently opts the function
   out.  Such a function needs the arithmetic done by hand.
@@ -620,9 +620,10 @@ Record the error with `comp_error()` and return 0/NULL; the driver turns it into
 a pending exception after every buffer is freed.  `comp_error` itself returns 0
 so a failing path can `jmp` into it and be done.
 
-The exception is `evalexec.asm` — `compile()`, `exec()` and `eval()` are called
-*from* a running frame, so raising there is correct.  The rule is about the
-paths reachable from `main`.
+The exception is `compile()`, `exec()` and `eval()` — they are called *from* a
+running frame, so raising there is correct, and their eleven `raise_exception`
+sites in `compiler/compile.asm` are deliberate.  The rule is about the paths
+reachable from `main`.
 
 **The first error wins.**  The parser keeps running after one is recorded, in a
 panic mode where the token cursor reports ENDMARKER forever, so loops terminate

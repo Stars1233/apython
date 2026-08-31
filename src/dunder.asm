@@ -102,7 +102,7 @@ dunder_cache_vals: resq DUNDER_CACHE_SLOTS
 section .text
 
 ; ---------------------------------------------------------------------------
-; dunder_lookup(PyTypeObject *type, const char *name) -> PyObject*
+; dunder_lookup(PyTypeObject *type, const char *name) -> rax = Value
 ;
 ; Walk type->tp_base chain, looking up name in each type's tp_dict.
 ; rdi = type object, rsi = C string name

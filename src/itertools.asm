@@ -939,7 +939,7 @@ DEF_FUNC builtin_map
     RAISE exc_TypeError_type, "map() requires at least 2 arguments"
 END_FUNC builtin_map
 
-;; map_iternext(self) -> PyObject* or NULL
+;; map_iternext(self) -> rax = Value or NULL
 ;; Supports multiple iterables: calls func(next(it1), next(it2), ...)
 ;; IMPORTANT: Do not clobber r12 before calling tp_call, because func_call
 ;; reads r12 expecting the eval loop's current frame pointer.
@@ -1155,7 +1155,7 @@ DEF_FUNC builtin_filter
     RAISE exc_TypeError_type, "filter() requires exactly 2 arguments"
 END_FUNC builtin_filter
 
-;; filter_iternext(self) -> PyObject* or NULL
+;; filter_iternext(self) -> rax = Value or NULL
 ;; IMPORTANT: Do not clobber r12 before calling tp_call, because func_call
 ;; reads r12 expecting the eval loop's current frame pointer.
 DEF_FUNC_LOCAL filter_iternext
@@ -1466,7 +1466,7 @@ section .text
     call raise_type_error_with_name
 END_FUNC builtin_reversed
 
-;; reversed_iternext(self) -> PyObject* or NULL
+;; reversed_iternext(self) -> rax = Value or NULL
 DEF_FUNC_LOCAL reversed_iternext
     push rbx
 

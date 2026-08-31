@@ -111,7 +111,7 @@ DEF_FUNC_LOCAL fileobj_repr
 END_FUNC fileobj_repr
 
 ; ============================================================================
-; fileobj_write(PyObject **args, int64_t nargs) -> PyObject*
+; fileobj_write(PyObject **args, int64_t nargs) -> rax = Value
 ; write(str) -> int (char count)
 ; args[0] = self (file obj), args[1] = str to write
 ; Called as a builtin method via tp_dict dispatch
@@ -168,7 +168,7 @@ DEF_FUNC fileobj_write
 END_FUNC fileobj_write
 
 ; ============================================================================
-; fileobj_flush(PyObject **args, int64_t nargs) -> PyObject*
+; fileobj_flush(PyObject **args, int64_t nargs) -> rax = Value
 ; No-op for unbuffered I/O
 ; ============================================================================
 DEF_FUNC fileobj_flush
@@ -179,7 +179,7 @@ DEF_FUNC fileobj_flush
 END_FUNC fileobj_flush
 
 ; ============================================================================
-; fileobj_fileno(PyObject **args, int64_t nargs) -> PyObject*
+; fileobj_fileno(PyObject **args, int64_t nargs) -> rax = Value
 ; ============================================================================
 DEF_FUNC fileobj_fileno
     mov rax, [rdi]              ; self
@@ -191,7 +191,7 @@ DEF_FUNC fileobj_fileno
 END_FUNC fileobj_fileno
 
 ; ============================================================================
-; fileobj_isatty(PyObject **args, int64_t nargs) -> PyObject*
+; fileobj_isatty(PyObject **args, int64_t nargs) -> rax = Value
 ; Asks the kernel.  Assuming fd <= 2 is a terminal answered True for a
 ; redirected stdout, which is exactly when a program checks.
 ; ============================================================================
@@ -218,7 +218,7 @@ DEF_FUNC fileobj_isatty, IAT_FRAME
 END_FUNC fileobj_isatty
 
 ; ============================================================================
-; fileobj_writable(PyObject **args, int64_t nargs) -> PyObject*
+; fileobj_writable(PyObject **args, int64_t nargs) -> rax = Value
 ; ============================================================================
 DEF_FUNC fileobj_writable
     mov rax, [rdi]              ; self
@@ -238,7 +238,7 @@ DEF_FUNC fileobj_writable
 END_FUNC fileobj_writable
 
 ; ============================================================================
-; fileobj_readable(PyObject **args, int64_t nargs) -> PyObject*
+; fileobj_readable(PyObject **args, int64_t nargs) -> rax = Value
 ; ============================================================================
 DEF_FUNC fileobj_readable
     mov rax, [rdi]              ; self
@@ -257,7 +257,7 @@ DEF_FUNC fileobj_readable
 END_FUNC fileobj_readable
 
 ; ============================================================================
-; fileobj_seekable(PyObject **args, int64_t nargs) -> PyObject*
+; fileobj_seekable(PyObject **args, int64_t nargs) -> rax = Value
 ; ============================================================================
 DEF_FUNC fileobj_seekable
     RET_FALSE
@@ -294,7 +294,7 @@ DEF_FUNC fileobj_exit
     ret
 END_FUNC fileobj_exit
 
-; fileobj_close_method(PyObject **args, int64_t nargs) -> PyObject*
+; fileobj_close_method(PyObject **args, int64_t nargs) -> rax = Value
 ; ============================================================================
 DEF_FUNC fileobj_close_method
     mov rax, [rdi]              ; self
@@ -404,7 +404,7 @@ DEF_FUNC fileobj_readline, FRL_FRAME
 END_FUNC fileobj_readline
 
 ; ============================================================================
-; fileobj_getattr(PyObject *self, PyObject *name_str) -> PyObject*
+; fileobj_getattr(PyObject *self, PyObject *name_str) -> rax = Value
 ; Attribute access for file objects: encoding, errors, name, mode, methods
 ; ============================================================================
 DEF_FUNC fileobj_getattr

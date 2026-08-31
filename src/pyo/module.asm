@@ -105,7 +105,7 @@ DEF_FUNC_LOCAL module_dealloc
 END_FUNC module_dealloc
 
 ; ============================================================================
-; module_getattr(PyObject *self, PyObject *name_str) -> PyObject*
+; module_getattr(PyObject *self, PyObject *name_str) -> rax = Value
 ; Look up attribute in module's dict
 ; ============================================================================
 DEF_FUNC module_getattr

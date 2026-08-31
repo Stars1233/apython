@@ -1,4 +1,4 @@
-; str_obj.asm - String type
+; pyo/str.asm - String type
 ; Phase 8: full string operations
 
 %include "macros.inc"
@@ -922,7 +922,7 @@ DEF_FUNC str_concat
 END_FUNC str_concat
 
 ;; ============================================================================
-;; str_repeat(PyObject *str_obj, PyObject *int_obj) -> PyObject*
+;; str_repeat(PyObject *str_obj, PyObject *int_obj) -> rax = Value
 ;; String repetition via nb_multiply
 ;; ============================================================================
 DEF_FUNC str_repeat
@@ -1886,7 +1886,7 @@ DEF_FUNC_BARE str_len
 END_FUNC str_len
 
 ;; ============================================================================
-;; str_getitem(PyObject *self, int64_t index) -> PyObject*
+;; str_getitem(PyObject *self, int64_t index) -> rax = Value
 ;; sq_item: return single-char string at index
 ;; ============================================================================
 DEF_FUNC str_getitem
@@ -1936,7 +1936,7 @@ DEF_FUNC str_getitem
 END_FUNC str_getitem
 
 ;; ============================================================================
-;; str_subscript(PyObject *self, PyObject *key) -> PyObject*
+;; str_subscript(PyObject *self, PyObject *key) -> rax = Value
 ;; mp_subscript: index with int or slice key (for BINARY_SUBSCR)
 ;; ============================================================================
 DEF_FUNC str_subscript

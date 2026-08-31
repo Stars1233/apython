@@ -308,7 +308,7 @@ DEF_FUNC_BARE eg_str
 END_FUNC eg_str
 
 ;; ============================================================================
-;; eg_getattr(PyExceptionGroupObject *eg, PyStrObject *name) -> PyObject* or NULL
+;; eg_getattr(PyExceptionGroupObject *eg, PyStrObject *name) -> rax = Value or NULL
 ;; Handle: message, exceptions, args, __context__, __cause__, __traceback__
 ;; ============================================================================
 DEF_FUNC eg_getattr

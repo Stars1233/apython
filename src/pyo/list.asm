@@ -1,4 +1,4 @@
-; list_obj.asm - List type implementation
+; pyo/list.asm - List type implementation
 ; Phase 9: dynamic array with amortized O(1) append
 
 %include "macros.inc"
@@ -200,7 +200,7 @@ DEF_FUNC list_append
 END_FUNC list_append
 
 ;; ============================================================================
-;; list_getitem(PyListObject *list, int64_t index) -> PyObject*
+;; list_getitem(PyListObject *list, int64_t index) -> rax = Value
 ;; sq_item: return item at index with bounds check and negative index support
 ;; ============================================================================
 DEF_FUNC list_getitem
@@ -288,7 +288,7 @@ DEF_FUNC list_setitem
 END_FUNC list_setitem
 
 ;; ============================================================================
-;; list_subscript(PyListObject *list, PyObject *key) -> PyObject*
+;; list_subscript(PyListObject *list, PyObject *key) -> rax = Value
 ;; mp_subscript: index with int or slice key (for BINARY_SUBSCR)
 ;; ============================================================================
 DEF_FUNC list_subscript

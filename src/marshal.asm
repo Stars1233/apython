@@ -251,7 +251,7 @@ DEF_FUNC marshal_cleanup_refs
 END_FUNC marshal_cleanup_refs
 
 ;--------------------------------------------------------------------------
-; marshal_read_object() -> PyObject*
+; marshal_read_object() -> rax = Value
 ; Main marshal deserialization dispatcher.
 ;
 ; Register convention within this function and its handlers:

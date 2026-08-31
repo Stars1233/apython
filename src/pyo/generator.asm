@@ -154,7 +154,7 @@ DEF_FUNC async_gen_new
 END_FUNC async_gen_new
 
 ;; ============================================================================
-;; gen_iternext(PyGenObject *self) -> PyObject* or NULL
+;; gen_iternext(PyGenObject *self) -> rax = Value or NULL
 ;; Resume the generator. Push None as sent value, call eval_frame.
 ;; Returns yielded value, or NULL if generator is exhausted.
 ;; rdi = generator
@@ -1018,7 +1018,7 @@ DEF_FUNC gen_close, GC_FRAME
 END_FUNC gen_close
 
 ;; ============================================================================
-;; gen_getattr(PyGenObject *self, PyObject *name) -> PyObject*
+;; gen_getattr(PyGenObject *self, PyObject *name) -> rax = Value
 ;; Attribute lookup for generators: handles send, close, throw
 ;; ============================================================================
 DEF_FUNC gen_getattr
@@ -1108,7 +1108,7 @@ DEF_FUNC gen_getattr
 END_FUNC gen_getattr
 
 ;; ============================================================================
-;; coro_getattr(PyGenObject *self, PyObject *name) -> PyObject*
+;; coro_getattr(PyGenObject *self, PyObject *name) -> rax = Value
 ;; Attribute lookup for coroutines: send, close, throw, cr_await, cr_running
 ;; ============================================================================
 DEF_FUNC coro_getattr
@@ -1197,7 +1197,7 @@ DEF_FUNC coro_getattr
 END_FUNC coro_getattr
 
 ;; ============================================================================
-;; async_gen_getattr(PyGenObject *self, PyObject *name) -> PyObject*
+;; async_gen_getattr(PyGenObject *self, PyObject *name) -> rax = Value
 ;; Attribute lookup for async generators: asend, aclose, athrow
 ;; Also supports send, close, throw (same underlying operations)
 ;; ============================================================================

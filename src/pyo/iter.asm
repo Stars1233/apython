@@ -1,4 +1,4 @@
-; iter_obj.asm - Iterator types and range object
+; pyo/iter.asm - Iterator types and range object
 ; Phase 9: list_iter, tuple_iter, range_iter, range_obj
 
 %include "macros.inc"
