@@ -609,16 +609,6 @@ DEF_FUNC gc_collect_gen, GCG_FRAME
     ret
 END_FUNC gc_collect_gen
 
-; ============================================================================
-; gc_collect()
-; Collect all generations. Called from Python gc.collect() and exit cleanup.
-; ============================================================================
-DEF_FUNC gc_collect
-    mov edi, 2                 ; collect all 3 generations
-    call gc_collect_gen
-    leave
-    ret
-END_FUNC gc_collect
 
 ; ============================================================================
 ; gc_visit_decref(rdi=obj)
@@ -1376,32 +1366,6 @@ DEF_FUNC module_clear_gc
     ret
 END_FUNC module_clear_gc
 
-; ---- code_traverse (no clear — code objects don't form cycles) ----
-DEF_FUNC code_traverse
-    push rbx
-    mov rbx, rdi
-
-    mov rdi, [rbx + PyCodeObject.co_consts]
-    VISIT_PTR rdi
-    mov rdi, [rbx + PyCodeObject.co_names]
-    VISIT_PTR rdi
-    mov rdi, [rbx + PyCodeObject.co_localsplusnames]
-    VISIT_PTR rdi
-    mov rdi, [rbx + PyCodeObject.co_localspluskinds]
-    VISIT_PTR rdi
-    mov rdi, [rbx + PyCodeObject.co_filename]
-    VISIT_PTR rdi
-    mov rdi, [rbx + PyCodeObject.co_name]
-    VISIT_PTR rdi
-    mov rdi, [rbx + PyCodeObject.co_qualname]
-    VISIT_PTR rdi
-    mov rdi, [rbx + PyCodeObject.co_exceptiontable]
-    VISIT_PTR rdi
-
-    pop rbx
-    leave
-    ret
-END_FUNC code_traverse
 
 ; ---- staticmethod_traverse / classmethod_traverse / property_traverse ----
 DEF_FUNC staticmethod_traverse
@@ -1525,126 +1489,6 @@ DEF_FUNC slice_clear_gc
     ret
 END_FUNC slice_clear_gc
 
-; ---- Iterator traverse functions (visit the underlying container ref) ----
-; ---- task_traverse / task_clear ----
-DEF_FUNC task_traverse
-    push rbx
-    push r12
-    push r13
 
-    mov rbx, rdi
 
-    ; Visit coro
-    mov rdi, [rbx + AsyncTask.coro]
-    VISIT_PTR rdi
 
-    ; Visit result (fat)
-    mov rdi, [rbx + AsyncTask.result]
-
-    VISIT_V rdi, rsi
-
-    ; Visit send_value (fat)
-    mov rdi, [rbx + AsyncTask.send_value]
-
-    VISIT_V rdi, rsi
-
-    ; Visit exception
-    mov rdi, [rbx + AsyncTask.exception]
-    VISIT_PTR rdi
-
-    ; Visit waiters array
-    mov r12, [rbx + AsyncTask.waiters]
-    test r12, r12
-    jz .done
-    mov r13d, [rbx + AsyncTask.n_waiters]
-    test r13d, r13d
-    jz .done
-.waiter_loop:
-    dec r13d
-    mov rdi, [r12]
-    VISIT_PTR rdi
-    add r12, 8
-    test r13d, r13d
-    jnz .waiter_loop
-
-.done:
-    pop r13
-    pop r12
-    pop rbx
-    leave
-    ret
-END_FUNC task_traverse
-
-DEF_FUNC task_clear
-    push rbx
-    mov rbx, rdi
-
-    ; XDECREF coro
-    mov rdi, [rbx + AsyncTask.coro]
-    mov qword [rbx + AsyncTask.coro], 0
-    test rdi, rdi
-    jz .no_coro
-    call obj_decref
-.no_coro:
-
-    ; DECREF_VAL result
-    mov rdi, [rbx + AsyncTask.result]
-    V_UNPACK rdi, rsi
-    mov qword [rbx + AsyncTask.result], 0
-    DECREF_VAL rdi, rsi
-
-    ; DECREF_VAL send_value
-    mov rdi, [rbx + AsyncTask.send_value]
-    V_UNPACK rdi, rsi
-    mov qword [rbx + AsyncTask.send_value], 0
-    DECREF_VAL rdi, rsi
-
-    pop rbx
-    leave
-    ret
-END_FUNC task_clear
-
-; ---- wait_for_traverse / wait_for_clear ----
-DEF_FUNC wait_for_traverse
-    push rbx
-    mov rbx, rdi
-
-    mov rdi, [rbx + WaitForAwaitable.inner_task]
-    VISIT_PTR rdi
-    mov rdi, [rbx + WaitForAwaitable.outer_task]
-    VISIT_PTR rdi
-    mov rdi, [rbx + WaitForAwaitable.gi_return_value]
-
-    VISIT_V rdi, rsi
-
-    pop rbx
-    leave
-    ret
-END_FUNC wait_for_traverse
-
-DEF_FUNC wait_for_clear
-    push rbx
-    mov rbx, rdi
-
-    mov rdi, [rbx + WaitForAwaitable.inner_task]
-    mov qword [rbx + WaitForAwaitable.inner_task], 0
-    test rdi, rdi
-    jz .no_inner
-    call obj_decref
-.no_inner:
-    mov rdi, [rbx + WaitForAwaitable.outer_task]
-    mov qword [rbx + WaitForAwaitable.outer_task], 0
-    test rdi, rdi
-    jz .no_outer
-    call obj_decref
-.no_outer:
-
-    mov rdi, [rbx + WaitForAwaitable.gi_return_value]
-    V_UNPACK rdi, rsi
-    mov qword [rbx + WaitForAwaitable.gi_return_value], 0
-    DECREF_VAL rdi, rsi
-
-    pop rbx
-    leave
-    ret
-END_FUNC wait_for_clear

@@ -147,6 +147,32 @@ than lying — but they are ordinary Python that does not work:
   means switching those four types to `gc_alloc` + `gc_track` and setting
   `TYPE_FLAG_HAVE_GC`.
 
+- **Code objects, asyncio `Task`s and `wait_for` wrappers are not GC-tracked
+  either**, for the same reason and with the same history: `code_traverse`,
+  `task_traverse`/`task_clear` and `wait_for_traverse`/`wait_for_clear` were
+  written, never installed in a slot, and have now been deleted alongside the
+  iterator eight.  A `Task` holds its coroutine, which holds a frame, whose
+  locals can hold the task -- an ordinary cycle that never collects.
+
+  Tracking `Task` needs one thing fixed first: the ready queue links tasks
+  through `AsyncTask.next` **without taking a reference**
+  (`ready_enqueue`, `src/pyo/eventloop.asm`).  Today nothing can free a queued
+  task out from under the queue, because the collector cannot see tasks at all;
+  make them visible and a cyclic task sitting in the queue becomes collectable,
+  leaving a dangling `next` pointer.  Either the queue takes a reference or the
+  collector treats it as a root.  The mechanical part is small -- `gc_alloc` +
+  `gc_track` in `task_new`, `gc_dealloc` instead of `ap_free` in
+  `task_dealloc`, `TYPE_FLAG_HAVE_GC` and the two slots -- and
+  `task_clear` also has to start clearing `exception` and the waiters array,
+  which the deleted version did not.
+
+- **There is no full collection and no `gc` module.**  `gc_collect` was a
+  four-line wrapper on `gc_collect_gen(2)` whose comment named two callers --
+  `gc.collect()` and exit cleanup -- neither of which exists; it has been
+  deleted with the rest.  Only the automatic generational collections run, so
+  `tests/test_gc_generations.py` has to provoke them with churn rather than ask
+  for one.
+
 
 - **Recursive deallocation overflows the stack**: `a=[]`, then 300k times
   `a=[a]`, then `del a`.  Needs a trashcan mechanism.
