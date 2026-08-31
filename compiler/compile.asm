@@ -26,6 +26,7 @@ extern buf_init
 extern buf_push_u8
 extern buf_reserve
 extern comp_error
+extern comp_failed
 extern exc_SyntaxError_type
 extern exc_IndentationError_type
 extern exc_TabError_type
@@ -548,6 +549,15 @@ DEF_FUNC compile_source, CS_FRAME
     call cg_emit
 
 .assemble:
+    ; A recorded error that no return value carried is still an error.  Every
+    ; emitter is supposed to answer 0 for one, but cg_e_attribute handed back
+    ; cg_super_attr's -1 instead and every caller read that as success, so the
+    ; module assembled and ran with the offending expression simply missing.
+    ; Asking comp_failed here closes the whole class rather than that instance.
+    mov rdi, rbx
+    call comp_failed
+    test eax, eax
+    jnz .failed
 
     mov rdi, rbx
     mov rsi, r12

@@ -1673,7 +1673,7 @@ DEF_FUNC_LOCAL cg_e_attribute, CE_FRAME
     cmp rax, -1
     je .fail
     test rax, rax
-    jnz .done_super
+    jnz .ret_ok
     mov rdi, rbx
     mov rsi, r13
     call ast_at
@@ -1699,9 +1699,17 @@ DEF_FUNC_LOCAL cg_e_attribute, CE_FRAME
     mov rdi, r12
     mov esi, OP_LOAD_ATTR
     call cg_emit
-.done_super:
+.ret_ok:
     mov eax, 1
+    jmp .ret
 .fail:
+    ; cg_super_attr answers -1 for an error it has already recorded, and this
+    ; label is reached with that -1 still in rax.  Falling into the epilogue
+    ; without zeroing handed it back, and every caller tests for zero -- so the
+    ; recorded SyntaxError was dropped and code was emitted for an expression
+    ; that was never built.
+    xor eax, eax
+.ret:
     pop r13
     pop r12
     pop rbx

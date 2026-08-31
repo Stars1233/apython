@@ -43,6 +43,7 @@ test_compile_class_closure
 test_compile_class
 test_compile_comp_if
 test_compile_docstring
+test_compile_error_dropped
 test_compile_except_star
 test_compile_exec
 test_compile_expr2
