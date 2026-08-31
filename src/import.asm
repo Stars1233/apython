@@ -3,7 +3,6 @@
 
 %include "macros.inc"
 %include "object.inc"
-%include "marshal.inc"
 
 extern ap_malloc
 extern ap_free
