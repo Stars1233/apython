@@ -4,15 +4,15 @@
 %include "object.inc"
 
 extern eval_dispatch
-extern eval_saved_rbx
 extern eval_saved_r13
-extern eval_co_names
-extern opcode_table
 extern import_module
 extern obj_decref
-extern obj_dealloc
 extern raise_exception
 extern exc_ImportError_type
+extern eval_co_names
+extern eval_saved_rbx
+extern obj_dealloc
+extern opcode_table
 
 ; ============================================================================
 ; op_import_name - Opcode 108: IMPORT_NAME

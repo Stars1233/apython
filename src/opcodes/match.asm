@@ -21,14 +21,7 @@
 section .text
 
 extern eval_dispatch
-extern eval_saved_rbx
 extern eval_saved_r13
-extern eval_co_names
-extern eval_co_consts
-extern opcode_table
-extern eval_return
-extern obj_dealloc
-extern obj_is_true
 extern fatal_error
 extern async_gen_wrap_value
 extern none_singleton
@@ -36,24 +29,20 @@ extern bool_true
 extern bool_false
 extern int_type
 extern float_type
-extern bool_type
-extern float_number_methods
-extern cell_new
-extern gen_new
-extern coro_new
-extern async_gen_new
 extern raise_exception
 extern exc_RuntimeError_type
 extern exc_StopIteration_type
 extern exc_TypeError_type
-extern exc_ZeroDivisionError_type
 extern current_exception
 extern eval_exception_unwind
-extern obj_incref
 extern obj_decref
 extern prep_reraise_star
 extern tuple_new
 extern list_type
+extern eval_co_names
+extern eval_saved_rbx
+extern obj_dealloc
+extern opcode_table
 
 ;; Stack layout constants for binary_op / compare_op generic paths.
 ;; After 4 pushes: right, right_tag, left, left_tag
@@ -95,43 +84,9 @@ MK_NKEYS   equ 32
 MK_FRAME   equ 32
 
 ; --- moved to a sibling file by the split ---
-extern binary_op_offsets
-extern binop_is_number
-extern fv_format_name
-extern op_binary_op
-extern op_binary_op_add_float
-extern op_binary_op_add_int
-extern op_binary_op_floordiv_int
-extern op_binary_op_mul_float
-extern op_binary_op_mul_int
-extern op_binary_op_sub_float
-extern op_binary_op_sub_int
-extern op_binary_op_truediv_float
 extern op_build_string
-extern op_compare_op
-extern op_compare_op_int
-extern op_compare_op_int_jump_false
-extern op_compare_op_int_jump_true
-extern op_copy_free_vars
-extern op_end_send
 extern op_format_value
-extern op_get_yield_from_iter
-extern op_jump_backward
-extern op_jump_backward_no_interrupt
-extern op_jump_forward
-extern op_make_cell
-extern op_pop_jump_if_false
-extern op_pop_jump_if_none
-extern op_pop_jump_if_not_none
-extern op_pop_jump_if_true
-extern op_return_const
-extern op_return_generator
-extern op_return_value
 extern op_send
-extern op_unary_invert
-extern op_unary_negative
-extern op_unary_not
-extern op_yield_value
 
 section .text
 
@@ -482,7 +437,6 @@ END_FUNC op_call_intrinsic_1
 ;; Opcode 30: GET_LEN
 ;; Used by match statements: push len, keep original on stack.
 ;; ============================================================================
-extern obj_len
 
 DEF_FUNC_BARE op_get_len
     ; PEEK TOS (don't pop)
@@ -535,7 +489,6 @@ END_FUNC op_get_len
 ;; ============================================================================
 extern dict_new
 extern dict_set
-extern str_from_cstr
 
 DEF_FUNC op_setup_annotations
     push rbx
@@ -936,7 +889,6 @@ MC_SUBJ_TAG  equ 64
 MC_ORIGIN    equ 72   ; the subject's type, for the __match_args__ walk
 MC_FRAME     equ 88
 
-extern none_type
 extern str_type
 
 DEF_FUNC op_match_class, MC_FRAME

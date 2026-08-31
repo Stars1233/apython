@@ -21,39 +21,21 @@
 section .text
 
 extern eval_dispatch
-extern eval_saved_rbx
-extern eval_saved_r13
-extern eval_co_names
-extern eval_co_consts
-extern opcode_table
-extern eval_return
-extern obj_dealloc
 extern obj_is_true
-extern fatal_error
-extern async_gen_wrap_value
-extern none_singleton
 extern bool_true
 extern bool_false
 extern int_type
 extern float_type
 extern bool_type
 extern float_number_methods
-extern cell_new
-extern gen_new
-extern coro_new
-extern async_gen_new
 extern raise_exception
-extern exc_RuntimeError_type
-extern exc_StopIteration_type
 extern exc_TypeError_type
-extern exc_ZeroDivisionError_type
-extern current_exception
-extern eval_exception_unwind
-extern obj_incref
 extern obj_decref
-extern prep_reraise_star
-extern tuple_new
-extern list_type
+extern eval_saved_r13
+extern eval_saved_rbx
+extern none_singleton
+extern obj_dealloc
+extern opcode_table
 
 ;; Stack layout constants for binary_op / compare_op generic paths.
 ;; After 4 pushes: right, right_tag, left, left_tag
@@ -95,36 +77,10 @@ MK_NKEYS   equ 32
 MK_FRAME   equ 32
 
 ; --- moved to a sibling file by the split ---
-extern fv_format_name
 extern op_build_string
-extern op_call_intrinsic_1
-extern op_call_intrinsic_2
-extern op_copy_free_vars
-extern op_end_send
 extern op_format_value
-extern op_get_len
-extern op_get_yield_from_iter
-extern op_jump_backward
-extern op_jump_backward_no_interrupt
-extern op_jump_forward
-extern op_load_from_dict_or_deref
-extern op_load_from_dict_or_globals
-extern op_load_locals
-extern op_make_cell
-extern op_match_class
 extern op_match_keys
-extern op_match_mapping
-extern op_match_sequence
-extern op_pop_jump_if_false
-extern op_pop_jump_if_none
-extern op_pop_jump_if_not_none
-extern op_pop_jump_if_true
-extern op_return_const
-extern op_return_generator
-extern op_return_value
 extern op_send
-extern op_setup_annotations
-extern op_yield_value
 
 section .text
 

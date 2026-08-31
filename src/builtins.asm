@@ -9,65 +9,42 @@
 %include "object.inc"
 
 extern dict_new
-extern dunder_call_3
-extern dunder_lookup
-extern dict_get
 extern dict_set
 extern str_from_cstr
 extern str_from_cstr_heap
-extern obj_getattr_opt
-extern obj_call_n
-extern tuple_new
 extern obj_str
-extern obj_incref
 extern obj_decref
-extern obj_dealloc
 extern none_singleton
 extern int_from_i64
 extern str_type
 extern bool_type
 extern float_type
 extern ap_malloc
-extern gc_alloc
-extern gc_track
-extern gc_dealloc
 extern ap_free
-extern fatal_error
 extern raise_exception
-extern build_class_pending
 extern sys_write
 extern range_new
 extern int_to_i64
-extern current_exception
 extern obj_as_index
 extern init_iter_types
 extern obj_repr
-extern eval_frame
-extern frame_new
-extern frame_free
 extern ap_memcpy
-extern instance_dealloc
-extern instance_repr
-extern instance_getattr
-extern instance_setattr
-extern type_call
 extern user_type_metatype
 extern super_type
 extern staticmethod_type
 extern classmethod_type
 extern property_type
-extern func_type
 extern type_type
 extern list_type
 extern dict_type
 extern tuple_type
 extern set_type
 extern bytes_type
+extern current_exception
 
 ; New builtin function implementations (in builtins_extra.asm)
 extern builtin_abs
 extern builtin_divmod
-extern builtin_int_fn
 extern int_type_call
 extern str_type_call
 extern bool_type_call
@@ -76,7 +53,6 @@ extern bytearray_type_call
 extern memoryview_type_call
 extern bytearray_type
 extern memoryview_type
-extern builtin_str_fn
 extern builtin_ord
 extern builtin_chr
 extern builtin_hex
@@ -95,11 +71,6 @@ extern builtin_hasattr
 extern builtin_setattr
 
 ; Iterator builtins (in itertools.asm)
-extern builtin_enumerate
-extern builtin_zip
-extern builtin_map
-extern builtin_filter
-extern builtin_reversed
 extern builtin_sorted
 extern builtin_chain
 extern builtin_globals
@@ -142,23 +113,7 @@ extern exc_StopAsyncIteration_type
 extern exc_TimeoutError_type
 
 ; --- moved to a sibling file by the split ---
-extern bc_call_kw
-extern bc_classcell_name
-extern bc_dunder_name_name
-extern bc_init_name
-extern bc_module_name
-extern bc_new_name
-extern bc_prepare_name
-extern bc_prepare_namespace
-extern bc_slots_name
-extern bc_split_kwargs
 extern builtin___build_class__
-extern class_kwnames_pending
-extern class_kwvalues_pending
-extern tsn_name
-extern type_apply_set_name
-extern type_from_parts
-extern type_method_new
 
 section .text
 

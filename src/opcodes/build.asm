@@ -15,14 +15,10 @@
 section .text
 
 extern eval_dispatch
-extern eval_saved_rbx
 extern eval_saved_r13
 extern eval_co_consts
-extern opcode_table
-extern obj_dealloc
 extern obj_decref
 extern obj_is_true
-extern fatal_error
 extern raise_exception
 extern exc_TypeError_type
 extern exc_ValueError_type
@@ -33,13 +29,14 @@ extern list_append
 extern dict_new
 extern dict_set
 extern slice_new
-extern slice_type
-extern slice_indices
 extern none_singleton
-extern obj_incref
 extern dict_get
 extern range_iter_type
 extern list_iter_type
+extern dict_type
+extern eval_saved_rbx
+extern obj_dealloc
+extern opcode_table
 
 ;; Stack/frame layout constants for tag-aware handlers.
 ;; Push-based: "tags behind payloads" — payload offsets match old code.
@@ -2129,7 +2126,6 @@ END_FUNC op_map_add
 ;; TOS = mapping, dict at stack[-(ecx+1)] after pop
 ;; Pop TOS, merge all key:value pairs into dict.
 ;; ============================================================================
-extern dict_type
 
 DEF_FUNC op_dict_update
     push rbx
@@ -2301,8 +2297,6 @@ END_FUNC op_dict_merge
 ;; then count_before items (in reverse order on stack).
 ;; ============================================================================
 extern list_type
-extern list_getitem
-extern tuple_getitem
 
 DEF_FUNC op_unpack_ex
     push rbx

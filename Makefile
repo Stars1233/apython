@@ -60,9 +60,11 @@ all: $(TARGET) lib-pyc
 # CPython 3.12, so a real file rule would break the build for everyone else the
 # moment a fresh clone's mtimes came out in the wrong order.
 regen:
-	$(PYTHON) compiler/gen_tables.py > compiler/tables.asm
+	$(PYTHON) compiler/gen_tables.py > compiler/tables.asm.new
+	mv compiler/tables.asm.new compiler/tables.asm
 	$(PYTHON) compiler/gen_prule.py
-	$(PYTHON) compiler/gen_unicodename.py > compiler/unicodename.asm
+	$(PYTHON) compiler/gen_unicodename.py > compiler/unicodename.asm.new
+	mv compiler/unicodename.asm.new compiler/unicodename.asm
 
 $(TARGET): $(OBJS)
 	$(CC) -o $@ $^ $(LDFLAGS)
@@ -74,23 +76,25 @@ $(TARGET): $(OBJS)
 lib-pyc:
 	@find lib -name '*.py' -exec $(PYTHON) -m py_compile {} \; 2>/dev/null || true
 
-build/%.o: src/%.asm $(HEADERS) | build
+build/%.o: src/%.asm $(HEADERS)
+	@mkdir -p $(@D)
 	$(NASM) $(NASMFLAGS) -o $@ $<
 
-build/pyo/%.o: src/pyo/%.asm $(HEADERS) | build
+build/pyo/%.o: src/pyo/%.asm $(HEADERS)
+	@mkdir -p $(@D)
 	$(NASM) $(NASMFLAGS) -o $@ $<
 
-build/methods/%.o: src/methods/%.asm $(HEADERS) | build
+build/methods/%.o: src/methods/%.asm $(HEADERS)
+	@mkdir -p $(@D)
 	$(NASM) $(NASMFLAGS) -o $@ $<
 
-build/opcodes/%.o: src/opcodes/%.asm $(HEADERS) | build
+build/opcodes/%.o: src/opcodes/%.asm $(HEADERS)
+	@mkdir -p $(@D)
 	$(NASM) $(NASMFLAGS) -o $@ $<
 
-build/compiler/%.o: compiler/%.asm $(HEADERS) | build
+build/compiler/%.o: compiler/%.asm $(HEADERS)
+	@mkdir -p $(@D)
 	$(NASM) $(NASMFLAGS) -o $@ $<
-
-build:
-	mkdir -p build build/pyo build/methods build/opcodes build/compiler
 
 # The generated compiler/tables.asm and compiler/unicodename.asm are checked-in
 # sources, not build products -- see `regen` below.  clean must never touch them.

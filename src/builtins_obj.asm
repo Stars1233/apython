@@ -9,25 +9,10 @@
 %include "object.inc"
 
 ; External symbols used
-extern int_promote_mpz
 extern int_from_i64
-extern int_to_i64
-extern obj_as_index
-extern int_base_str
-extern int_is_integer
-extern __gmpz_fits_slong_p
-extern int_neg
 extern int_add
-extern int_from_cstr
-extern int_from_cstr_base
-extern float_from_f64
-extern float_int
 extern ap_malloc
-extern obj_dealloc
 extern ap_free
-extern ap_memcpy
-extern strlen
-extern str_new
 extern str_from_cstr
 extern str_from_cstr_heap
 extern obj_str
@@ -36,7 +21,6 @@ extern obj_is_true
 extern obj_incref
 extern obj_decref
 extern type_is_subtype
-extern dict_get
 extern raise_exception
 extern obj_getattr_opt
 extern exc_new
@@ -44,14 +28,10 @@ extern current_exception
 extern eval_exception_unwind
 extern none_singleton
 extern eval_saved_r12
+extern obj_dealloc
 
-extern int_type
 extern float_type
-extern none_type
-extern builtin_bool
-extern builtin_float
 extern str_type
-extern bool_type
 extern bool_true
 extern bool_false
 
@@ -67,8 +47,6 @@ extern list_contains
 extern dict_tp_iter
 extern type_type
 extern user_type_metatype
-extern dunder_lookup
-extern kw_names_pending
 extern ap_strcmp
 extern dict_new
 
@@ -77,19 +55,7 @@ extern dict_new
 ; ============================================================================
 
 ; --- moved to a sibling file by the split ---
-extern bool_type_call
 extern builtin_abs
-extern builtin_bin
-extern builtin_chr
-extern builtin_divmod
-extern builtin_hex
-extern builtin_int_fn
-extern builtin_oct
-extern builtin_ord
-extern builtin_pow_fn
-extern builtin_round_fn
-extern float_type_call
-extern int_type_call
 
 section .text
 
@@ -1591,7 +1557,6 @@ END_FUNC builtin_input_fn
 ; 2 args: open with specified mode
 ; ============================================================================
 extern sys_open
-extern sys_close
 extern file_type
 
 global builtin_open_fn
@@ -1749,7 +1714,6 @@ END_FUNC builtin_open_fn
 ; builtin_ascii_fn(args, nargs) - ascii(obj)
 ; Like repr() but escapes non-ASCII characters to \xNN / \uNNNN / \UNNNNNNNN
 ; ============================================================================
-extern ap_realloc
 global builtin_ascii_fn
 AA_REPR   equ 8
 AA_FRAME  equ 16
@@ -2064,7 +2028,6 @@ END_FUNC builtin_vars_fn
 ; builtin_delattr_fn(args, nargs) - delattr(obj, name)
 ; Calls tp_setattr(obj, name, NULL) to delete
 ; ============================================================================
-extern dict_del
 global builtin_delattr_fn
 DA2_OBJ   equ 8
 DA2_NAME  equ 16
@@ -2166,7 +2129,6 @@ END_FUNC builtin_aiter_fn
 ; builtin_anext_fn(args, nargs) - anext(async_iterator[, default])
 ; Calls tp_iternext; on StopAsyncIteration returns default
 ; ============================================================================
-extern exc_StopAsyncIteration_type
 extern current_exception
 global builtin_anext_fn
 AN_ITER    equ 8

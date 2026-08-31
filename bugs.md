@@ -55,14 +55,6 @@ one-line fix.
   was registered against a subclass of ABC rather than against ABC itself.
   Direct registration and real inheritance both work.
 
-- **The source compiler has no classes, comprehensions or generators yet.**
-  `compiler/` handles expressions, statements, control flow, functions,
-  lambdas and closures, and `eval()`, `exec()` and `compile()` all run through
-  it -- including `collections.namedtuple`'s
-  `eval("lambda _cls, ...: _tuple_new(...)")`, which used to be the wall.
-  What is still missing above that: `class`, `try`/`except`/`finally`, `with`,
-  comprehensions, generators, `async`, f-strings and `match`.
-
 - **No platform module, so `os` cannot import.**  `os.py` looks for `posix`
   and raises "no os specific module found" without it.  That is the single
   largest blocker in the stdlib: 47 of the 196 modules fail on it.
@@ -139,8 +131,8 @@ than lying — but they are ordinary Python that does not work:
   without a shipped `re.py` an `import re` finds CPython's, which needs
   `enum` and `types`.
 - `collections.deque`.
-- Six builtin exceptions: `IOError` / `EnvironmentError`, `FileExistsError`,
-  `IndentationError`, `TabError`, `UnicodeTranslateError`.
+- Four builtin exceptions: `IOError` / `EnvironmentError`, `FileExistsError`,
+  `UnicodeTranslateError`.
 
 ## Robustness
 

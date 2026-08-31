@@ -8,45 +8,32 @@
 %include "object.inc"
 
 ; External symbols used
-extern int_promote_mpz
-extern int_from_i64
 extern int_to_i64
 extern obj_as_index
 extern int_base_str
 extern int_is_integer
 extern __gmpz_fits_slong_p
 extern int_neg
-extern int_add
-extern int_from_cstr
 extern int_from_cstr_base
 extern float_from_f64
 extern float_int
 extern ap_malloc
-extern obj_dealloc
 extern ap_free
 extern ap_memcpy
 extern strlen
 extern str_new
 extern str_from_cstr
 extern str_from_cstr_heap
-extern obj_str
 extern obj_repr
-extern obj_is_true
-extern obj_incref
 extern obj_decref
-extern type_is_subtype
-extern dict_get
 extern raise_exception
-extern obj_getattr_opt
 extern exc_new
 extern current_exception
 extern eval_exception_unwind
-extern none_singleton
-extern eval_saved_r12
+extern int_promote_mpz
 
 extern int_type
 extern float_type
-extern none_type
 extern builtin_bool
 extern builtin_float
 extern str_type
@@ -56,56 +43,15 @@ extern bool_false
 
 extern exc_TypeError_type
 extern exc_ValueError_type
-extern exc_AttributeError_type
-extern exc_StopIteration_type
-extern gen_type
-extern raise_exception_obj
-extern list_new
-extern list_append
-extern list_contains
-extern dict_tp_iter
-extern type_type
-extern user_type_metatype
 extern dunder_lookup
 extern kw_names_pending
 extern ap_strcmp
-extern dict_new
 
 ; ============================================================================
 ; 1. builtin_abs(args, nargs) - abs(x)
 ; ============================================================================
 
 ; --- moved to a sibling file by the split ---
-extern builtin_aiter_fn
-extern builtin_all
-extern builtin_anext_fn
-extern builtin_any
-extern builtin_ascii_fn
-extern builtin_breakpoint
-extern builtin_callable
-extern builtin_delattr_fn
-extern builtin_dir
-extern builtin_format_fn
-extern builtin_getattr
-extern builtin_globals
-extern builtin_hasattr
-extern builtin_hash_fn
-extern builtin_id
-extern builtin_import_fn
-extern builtin_input_fn
-extern builtin_iter_fn
-extern builtin_locals
-extern builtin_max
-extern builtin_min
-extern builtin_next_fn
-extern builtin_open_fn
-extern builtin_setattr
-extern builtin_str_fn
-extern builtin_sum
-extern builtin_vars_fn
-extern fmt_dunder_name
-extern minmax_impl
-extern str_type_call
 
 section .text
 
@@ -1680,7 +1626,6 @@ END_FUNC builtin_hex
 ; 1 arg: round to nearest int (banker's rounding)
 ; 2 args: round to ndigits decimal places
 ; ============================================================================
-extern exc_RuntimeError_type
 
 global builtin_round_fn
 RND_NDIGITS equ 16      ; historical: referenced as [rbp - RND_NDIGITS]

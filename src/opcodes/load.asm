@@ -21,19 +21,13 @@ section .text
 extern eval_dispatch
 extern eval_saved_rbx
 extern eval_saved_r13
-extern eval_co_names
 extern eval_co_consts
-extern opcode_table
-extern obj_dealloc
 extern dict_get
 extern dict_get_index
-extern fatal_error
 extern raise_exception
 extern obj_incref
 extern obj_decref
-extern type_type
 extern func_type
-extern cell_type
 extern exc_NameError_type
 extern exc_AttributeError_type
 extern method_new
@@ -42,14 +36,15 @@ extern staticmethod_type
 extern classmethod_type
 extern property_type
 extern property_descr_get
-extern user_type_metatype
 extern dunder_get
 extern dunder_call_3
 extern dunder_lookup
-extern str_type
 extern int_type
 extern float_type
 extern none_type
+extern eval_co_names
+extern obj_dealloc
+extern opcode_table
 
 ; --- Named frame-layout constants ---
 
@@ -1685,13 +1680,9 @@ section .text
 extern eval_dispatch
 extern eval_saved_rbx
 extern eval_saved_r13
-extern eval_co_names
-extern opcode_table
-extern obj_dealloc
 extern obj_decref
 extern dict_set
 extern dict_type
-extern fatal_error
 extern raise_exception
 extern eval_exception_unwind
 extern current_exception
@@ -2231,8 +2222,6 @@ section .text
 extern eval_dispatch
 extern eval_saved_rbx
 extern eval_saved_r13
-extern opcode_table
-extern obj_dealloc
 
 ;; ============================================================================
 ;; op_pop_top - Pop and discard top of stack, DECREF it

@@ -22,15 +22,9 @@
 section .text
 
 extern eval_dispatch
-extern eval_saved_rbx
-extern eval_saved_r13
-extern opcode_table
-extern obj_dealloc
-extern obj_incref
 extern obj_decref
 extern gen_type
 extern coro_type
-extern async_gen_type
 extern raise_exception
 extern raise_exception_obj
 extern exc_TypeError_type
@@ -44,6 +38,10 @@ extern dict_get
 extern method_new
 extern current_exception
 extern eval_exception_unwind
+extern eval_saved_r13
+extern eval_saved_rbx
+extern obj_dealloc
+extern opcode_table
 
 ;; ============================================================================
 ;; op_get_awaitable - GET_AWAITABLE (131)

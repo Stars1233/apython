@@ -14,61 +14,24 @@
 
 
 ; External functions
-extern ap_malloc
 extern gc_alloc
 extern gc_track
-extern ap_free
-extern ap_realloc
-extern ap_memcpy
-extern ap_memset
-extern ap_memmove
-extern ap_strcmp
-extern ap_strlen
-extern ap_strstr
-extern ap_memcmp
 extern obj_incref
 extern obj_decref
-extern obj_dealloc
-extern obj_repr
-extern obj_str
 extern str_from_cstr_heap
-extern str_new_heap
 extern str_type
-extern list_new
-extern list_append
-extern obj_as_index
 extern list_type
-extern tuple_new
 extern tuple_type
 extern dict_new
-extern dict_get
-extern obj_getattr_opt
-extern obj_call_n
 extern dict_set
-extern dict_del
 extern dict_type
 extern none_singleton
-extern bool_true
-extern bool_false
-extern int_from_i64
-extern eval_exception_unwind
-extern obj_richcompare_bool
-extern int_to_i64
 extern builtin_func_new
-extern raise_exception
-extern raise_key_error
-extern fatal_error
-extern exc_TypeError_type
-extern exc_ValueError_type
-extern exc_IndexError_type
-extern exc_KeyError_type
 extern int_type
 extern set_type
 extern object_type
 extern object_new_fn
 extern staticmethod_type
-extern obj_is_true
-extern list_sorting_error
 extern bytes_dunder_iter
 extern bytes_dunder_len
 extern bytes_dunder_repr
@@ -94,11 +57,6 @@ extern tuple_dunder_iter
 SET_ENTRY_HASH    equ 0
 SET_ENTRY_KEY     equ 8
 SET_ENTRY_SIZE    equ 16
-extern set_add
-extern set_contains
-extern set_remove
-extern set_new
-extern set_tp_iter
 
 ; --- moved to a sibling file by the split ---
 extern bytes_method_count
@@ -125,31 +83,16 @@ extern dict_method_setdefault
 extern dict_method_update
 extern dict_method_values
 extern float_classmethod_fromhex
-extern float_method___abs__
-extern float_method___float__
-extern float_method___int__
-extern float_method___trunc__
 extern float_method_as_integer_ratio
 extern float_method_conjugate
 extern float_method_hex
 extern float_method_is_integer
-extern fm_name_equals
-extern fm_resolve_field
-extern fmtbuf_append
 extern generic_method_contains
-extern generic_method_delitem
-extern generic_method_getitem
 extern generic_method_hash
-extern generic_method_setitem
 extern int_classmethod_from_bytes
-extern int_method___abs__
-extern int_method___float__
-extern int_method___index__
-extern int_method___int__
 extern int_method_bit_count
 extern int_method_bit_length
 extern int_method_conjugate
-extern int_method_self_to_i64
 extern int_method_to_bytes
 extern list_dunder_contains
 extern list_dunder_delitem
@@ -177,7 +120,6 @@ extern object_method_hash
 extern object_method_init
 extern object_method_init_subclass
 extern object_method_ne
-extern object_method_notimpl
 extern object_method_reduce
 extern object_method_repr
 extern object_method_sizeof
@@ -197,8 +139,6 @@ extern set_method_remove
 extern set_method_symmetric_difference
 extern set_method_union
 extern set_method_update
-extern str_affix_dispatch
-extern str_endswith_one
 extern str_method_capitalize
 extern str_method_casefold
 extern str_method_center
@@ -244,11 +184,7 @@ extern str_method_title
 extern str_method_translate
 extern str_method_upper
 extern str_method_zfill
-extern str_split_impl
-extern str_startswith_one
 extern str_staticmethod_maketrans
-extern str_strip_impl
-extern strip_char_matches
 extern tuple_dunder_add
 extern tuple_dunder_contains
 extern tuple_dunder_getitem

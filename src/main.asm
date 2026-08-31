@@ -494,7 +494,8 @@ help_msg:
     db "usage: apython [option] ... [file]", 10
     db "Options:", 10
     db "-h     : print this help message and exit (also -? or --help)", 10
-    db "-t     : print each opcode as it is executed", 10
+    db "-t     : trace opcodes (partial: DISPATCH-terminated handlers are", 10
+    db "         not traced -- see bugs.md)", 10
     db "--version : print the apython version number and exit", 10
     db "--dis [-x] <source> : print the bytecode compiled from <source>;", 10
     db "         -x compiles in exec mode rather than eval mode", 10

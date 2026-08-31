@@ -15,13 +15,9 @@
 section .text
 
 extern eval_dispatch
-extern eval_saved_rbx
 extern eval_saved_r13
-extern opcode_table
 extern obj_dealloc
 extern obj_decref
-extern obj_incref
-extern fatal_error
 extern raise_exception
 extern func_new
 extern exc_TypeError_type
@@ -32,6 +28,8 @@ extern cfex_kwnames_pending
 extern ap_malloc
 extern ap_free
 extern tuple_new
+extern eval_saved_rbx
+extern opcode_table
 
 ; --- Named frame-layout constants ---
 
@@ -419,7 +417,6 @@ END_FUNC op_make_function
 ;; After: ... | result
 ;; ============================================================================
 extern tuple_type
-extern dict_type
 
 ; Additional frame slots for kwargs merging
 CFX_TPCALL  equ 72
@@ -744,7 +741,6 @@ END_FUNC op_call_function_ex
 ;; ============================================================================
 extern dict_get
 extern str_from_cstr_heap
-extern exc_AttributeError_type
 extern method_new
 
 DEF_FUNC op_before_with
