@@ -1,4 +1,4 @@
-; opcodes_match.asm - Structural pattern matching and the intrinsics
+; opcodes/match.asm - Structural pattern matching and the intrinsics
 ;
 ; The MATCH_* family behind `match`, CALL_INTRINSIC_1/2, and the handful of
 ; introspection opcodes that go with them: GET_LEN, SETUP_ANNOTATIONS,

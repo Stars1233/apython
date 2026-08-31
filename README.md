@@ -221,14 +221,6 @@ All tests are Valgrind-clean.
 src/
   main.asm              Entry point, --version
   eval.asm              Bytecode dispatch loop (256-entry jump table)
-  opcodes_load.asm      Loads, stores, and the stack shuffles
-  opcodes_call.asm      Call/function opcodes
-  opcodes_build.asm     Container build opcodes
-  opcodes_arith.asm     Binary/unary ops, comparisons, superinstructions
-  opcodes_flow.asm      Returns, jumps, f-strings, generators
-  opcodes_match.asm     Pattern matching and the intrinsics
-  opcodes_async.asm     Async/await opcodes
-  opcodes_import.asm    Import opcodes
   builtins.asm          Builtin function object, core builtins, the registry
   builtins_num.asm      Numeric builtins (int, abs, round, pow, hex/bin/oct)
   builtins_obj.asm      Object/iteration/IO builtins (getattr, iter, open, ...)
@@ -248,11 +240,21 @@ src/
   repr.asm              repr/str formatting
   val.asm               NaN-boxed Value encoding and helpers
   valtest.asm           --selftest-value: encode/decode boundary checks
-  methods_*.asm         Built-in type methods, one file per type, plus
-                        methods_init.asm which registers them all
   sre.asm               SRE regex bytecode engine
   sre_module.asm        _sre module interface
   itertools.asm         itertools module
+  opcodes/              Opcode handlers, one file per category
+    load.asm            Loads, stores, and the stack shuffles
+    call.asm build.asm  Calls; container construction
+    arith.asm           Binary/unary ops, comparisons, superinstructions
+    flow.asm            Returns, jumps, f-strings, generators
+    match.asm           Pattern matching and the intrinsics
+    async.asm import.asm
+  methods/              Builtin type methods, one file per type
+    str.asm str_pred.asm str_parts.asm
+    list.asm dict.asm set.asm num.asm bytes.asm
+    object.asm          object's own dunders, and the DEF_DUNDER_* generators
+    init.asm            registers them all into each type's tp_dict
   pyo/                  31 type implementation files
     int.asm float.asm str.asm bytes.asm
     list.asm dict.asm tuple.asm set.asm singleton.asm slice.asm

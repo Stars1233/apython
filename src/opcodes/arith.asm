@@ -1,4 +1,4 @@
-; opcodes_arith.asm - Arithmetic and comparison opcode handlers
+; opcodes/arith.asm - Arithmetic and comparison opcode handlers
 ;
 ; BINARY_OP and COMPARE_OP, the unary operators, and the specialized and fused
 ; int/float superinstructions the quickening pass emits in their place.

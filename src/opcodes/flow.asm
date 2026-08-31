@@ -1,4 +1,4 @@
-; opcodes_flow.asm - Control flow, f-strings, and generators
+; opcodes/flow.asm - Control flow, f-strings, and generators
 ;
 ; RETURN_*, the conditional and unconditional jumps, FORMAT_VALUE and
 ; BUILD_STRING, cell creation, and the generator/coroutine send protocol.

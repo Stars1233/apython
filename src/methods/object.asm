@@ -1,4 +1,4 @@
-; methods_object.asm - object's own dunders, and the slot-backed ones
+; methods/object.asm - object's own dunders, and the slot-backed ones
 ;
 ; object.__init__/__str__/__repr__/__format__ and friends, plus the three
 ; DEF_DUNDER_* macros that generate __len__, __iter__, __str__ and __repr__

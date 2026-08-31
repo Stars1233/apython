@@ -176,7 +176,7 @@ whoever copies a neighbouring file.
 
 - **756 raw numeric frame offsets across 53 files.**  STYLE.md requires named
   `equ` constants; `[rbp-8]` and `[rsp+32]` survive from before that rule.  The
-  concentration is `src/opcodes_build.asm` (151), `src/marshal.asm` (85),
+  concentration is `src/opcodes/build.asm` (151), `src/marshal.asm` (85),
   `src/repr.asm` (64) and `src/pyo/float.asm` (57).
   A hand-picked offset silently overlaps the slot above it the first time a
   struct in the same frame grows, which is the failure this rule exists to

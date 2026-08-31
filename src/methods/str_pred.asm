@@ -1,4 +1,4 @@
-; methods_str_pred.asm - str: the is* predicates, case mapping, justification
+; methods/str_pred.asm - str: the is* predicates, case mapping, justification
 ;
 ; Also count, index and rfind, which sit with them because the predicates and
 ; the searches share the same code-point walk.

@@ -1,4 +1,4 @@
-; methods_init.asm - Registering every builtin type's methods
+; methods/init.asm - Registering every builtin type's methods
 ;
 ; methods_init walks one block per type, each building a dict and hanging it
 ; off that type's tp_dict.  The four add_* helpers and the mn_* name strings

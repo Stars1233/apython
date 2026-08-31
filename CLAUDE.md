@@ -138,15 +138,17 @@ and at the boundaries between converted and unconverted code.
 No hand-written file exceeds 100k bytes; only generated asm may.
 
 - `src/eval.asm` — Bytecode dispatch loop (256-entry jump table)
-- `src/opcodes_*.asm` — Opcode handlers by category: `load` (loads, stores and
+- `src/opcodes/*.asm` — Opcode handlers by category: `load` (loads, stores and
   the stack shuffles), `call`, `build`, `arith` (BINARY_OP/COMPARE_OP/unary and
   the specialized int/float superinstructions), `flow` (returns, jumps,
   f-strings, generators), `match` (the MATCH_* family and the intrinsics),
   `async`, `import`
-- `src/methods_*.asm` — Builtin type methods, one file per type: `str`,
+- `src/methods/*.asm` — Builtin type methods, one file per type: `str`,
   `str_pred`, `str_parts`, `list`, `dict`, `set`, `num`, `bytes`, `object`
   (object's own dunders plus the `DEF_DUNDER_*` generators), and `init`, which
-  registers them all into each type's `tp_dict`
+  registers them all into each type's `tp_dict`.  These share basenames with
+  `src/pyo/` on purpose: `methods/dict.asm` is dict's methods, `pyo/dict.asm`
+  is dict itself
 - `src/pyo/*.asm` — Type implementations (int, str, list, dict, tuple, func,
   class, iter, singleton, bytes, code)
 - `src/marshal.asm` — .pyc marshal deserializer, and the .pyc file reader

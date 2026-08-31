@@ -1,4 +1,4 @@
-; opcodes_import.asm - IMPORT_NAME and IMPORT_FROM opcode handlers
+; opcodes/import.asm - IMPORT_NAME and IMPORT_FROM opcode handlers
 
 %include "macros.inc"
 %include "object.inc"

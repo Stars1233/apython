@@ -1,4 +1,4 @@
-; methods_str.asm - str: case, strip, search, replace, join, split, format
+; methods/str.asm - str: case, strip, search, replace, join, split, format
 ;
 ; Methods are registered into each type's tp_dict by methods_init, in
 ; methods_init.asm.  A method is name(PyObject *self, PyObject **args,

@@ -84,7 +84,7 @@ Two relaxations the codebase uses on purpose:
 ## Opcode Handler Files
 
 Repeat the register convention comment block at the top of every
-`opcodes_*.asm` file:
+`src/opcodes/*.asm` file:
 
 ```nasm
 ; Register convention (callee-saved, preserved across handlers):

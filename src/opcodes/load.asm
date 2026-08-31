@@ -1,4 +1,4 @@
-; opcodes_load.asm - Opcode handlers that move operands around
+; opcodes/load.asm - Opcode handlers that move operands around
 ;
 ; LOAD_*, STORE_*/DELETE_*, and the pure stack shuffles POP_TOP, PUSH_NULL,
 ; COPY and SWAP.  Nothing here computes anything: every handler moves a Value

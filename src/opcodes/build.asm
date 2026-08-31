@@ -1,4 +1,4 @@
-; opcodes_build.asm - Opcode handlers for subscript, build, and iteration opcodes
+; opcodes/build.asm - Opcode handlers for subscript, build, and iteration opcodes
 ;
 ; Register convention (callee-saved, preserved across handlers):
 ;   rbx = bytecode instruction pointer (current position in co_code[])

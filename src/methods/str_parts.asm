@@ -1,4 +1,4 @@
-; methods_str_parts.asm - str: taking a string apart and putting it back
+; methods/str_parts.asm - str: taking a string apart and putting it back
 ;
 ; partition, splitlines, expandtabs, translate, maketrans, removeprefix,
 ; removesuffix and encode.

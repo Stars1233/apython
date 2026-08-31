@@ -1,4 +1,4 @@
-; opcodes_call.asm - Opcode handler for CALL (Python 3.12)
+; opcodes/call.asm - Opcode handler for CALL (Python 3.12)
 ;
 ; Register convention (callee-saved, preserved across handlers):
 ;   rbx = bytecode instruction pointer (current position in co_code[])

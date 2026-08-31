@@ -1,4 +1,4 @@
-; opcodes_async.asm - Async/await opcode handlers
+; opcodes/async.asm - Async/await opcode handlers
 ;
 ; Implements: GET_AWAITABLE (131), GET_AITER (50), GET_ANEXT (51),
 ;             BEFORE_ASYNC_WITH (52), END_ASYNC_FOR (54), CLEANUP_THROW (55)

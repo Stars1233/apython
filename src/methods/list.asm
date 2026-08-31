@@ -1,4 +1,4 @@
-; methods_list.asm - list and tuple methods
+; methods/list.asm - list and tuple methods
 ;
 ; Methods are registered into each type's tp_dict by methods_init, in
 ; methods_init.asm.  A method is name(PyObject *self, PyObject **args,
