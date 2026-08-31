@@ -1550,8 +1550,10 @@ END_FUNC asm_exctab
 ;; The unwinder truncates the value stack to this depth and then pushes the
 ;; exception, so it is the count of items belonging to enclosing constructs
 ;; that have to survive.  A region therefore has to START at the depth its body
-;; runs at -- which is why the `with` emitter opens its region after the
-;; enter-result has been consumed rather than before.
+;; runs at -- and a `with` opens its region *before* the enter-result has been
+;; consumed, so that a failing unpack of its `as` target still runs __exit__.
+;; Handler.bias records how many items are live at `open` that the handler
+;; unwinds away.
 ;;
 ;; Taking the minimum over the region instead looks tempting and is wrong: an
 ;; except clause ends with POP_EXCEPT, which legitimately drops below the level
@@ -1559,9 +1561,9 @@ END_FUNC asm_exctab
 ;; ============================================================================
 DEF_FUNC_BARE asm_region_depth
     dec rsi                             ; the stamp is biased by one
-    mov rax, [rdi + CompUnit.handlers + Buf.data]
+    mov rcx, [rdi + CompUnit.handlers + Buf.data]
     imul rsi, rsi, Handler_size
-    mov r8d, [rax + rsi + Handler.open]
+    mov r8d, [rcx + rsi + Handler.open]
     cmp r8, [rdi + CompUnit.instrs + Buf.len]
     jae .none
     ; movsxd, not mov: the sentinel is -1 as a signed 32-bit value, and a
@@ -1569,7 +1571,12 @@ DEF_FUNC_BARE asm_region_depth
     ; compares equal to -1.  The handler then took a garbage depth and the
     ; depth worklist churned on it forever.
     movsxd rax, dword [rdx + r8*4]
-    ret                                 ; -1 here means "not reached yet"
+    test rax, rax
+    js .unreached                       ; -1 means "not reached yet"
+    sub eax, [rcx + rsi + Handler.bias]
+    ret
+.unreached:
+    ret
 .none:
     mov rax, -1
     ret

@@ -742,6 +742,7 @@ DEF_FUNC_BARE op_unpack_sequence
     mov rax, [rdi + PyObject.ob_type]
     jmp .unpack_tuple
 
+
 .unpack_type_error:
     ; Unknown type
     lea rdi, [rel exc_TypeError_type]
@@ -750,7 +751,8 @@ DEF_FUNC_BARE op_unpack_sequence
 
 .unpack_tuple:
     ; Validate count matches size
-    cmp rcx, [rdi + PyTupleObject.ob_size]
+    mov r8, [rdi + PyTupleObject.ob_size]
+    cmp rcx, r8
     jne .unpack_count_error
     ; Items are in payload/tag arrays
     mov rsi, [rdi + PyTupleObject.ob_item]
@@ -758,7 +760,8 @@ DEF_FUNC_BARE op_unpack_sequence
 
 .unpack_list:
     ; Validate count matches size
-    cmp rcx, [rdi + PyListObject.ob_size]
+    mov r8, [rdi + PyListObject.ob_size]
+    cmp rcx, r8
     jne .unpack_count_error
     ; Items in payload/tag arrays
     mov rsi, [rdi + PyListObject.ob_item]
@@ -795,18 +798,22 @@ DEF_FUNC_BARE op_unpack_sequence
     DISPATCH
 
 .unpack_count_error:
-    ; Count mismatch: expected ecx items, got different size
+    ; Count mismatch: rcx expected, r8 actually there.  The two directions get
+    ; different messages, and both carry the counts.
     pop rdi                    ; sequence payload
     pop rsi                    ; sequence tag
+    push rcx                   ; expected
+    push r8                    ; got
     DECREF_VAL rdi, rsi
-    lea rdi, [rel exc_ValueError_type]
-    CSTRING rsi, "not enough values to unpack"
-    call raise_exception
+    pop rsi                    ; got
+    pop rdi                    ; expected
+    call raise_unpack_count
 
 .unpack_str:
     ; String unpacking: a, b, c = "xyz"
     ; Validate length matches count
-    cmp rcx, [rdi + PyStrObject.ob_size]
+    mov r8, [rdi + PyStrObject.ob_size]
+    cmp rcx, r8
     jne .unpack_count_error
 
     ; Use rbp-frame for the string unpacking loop
@@ -863,6 +870,104 @@ DEF_FUNC_BARE op_unpack_sequence
     add rbx, 2
     DISPATCH
 END_FUNC op_unpack_sequence
+
+;; ============================================================================
+;; raise_unpack_count(rdi = expected, rsi = got)
+;; The two ValueErrors an unpack can raise, in CPython's wording:
+;;   "not enough values to unpack (expected 2, got 1)"
+;;   "too many values to unpack (expected 2)"
+;; One shared message said "not enough" for both, so unpacking three values
+;; into two reported the opposite of what happened.
+;; ============================================================================
+RUC_BUF   equ 128
+RUC_FRAME equ RUC_BUF + 24
+DEF_FUNC raise_unpack_count, RUC_FRAME
+    push rbx
+    push r12
+    mov rbx, rdi                        ; expected
+    mov r12, rsi                        ; got
+    lea rdi, [rbp - RUC_BUF]
+    cmp r12, rbx
+    jle .ruc_not_enough
+
+    CSTRING rsi, "too many values to unpack (expected "
+    call .ruc_cat
+    mov rax, rbx
+    call .ruc_itoa
+    CSTRING rsi, ")"
+    call .ruc_cat
+    jmp .ruc_raise
+
+.ruc_not_enough:
+    CSTRING rsi, "not enough values to unpack (expected "
+    call .ruc_cat
+    mov rax, rbx
+    call .ruc_itoa
+    CSTRING rsi, ", got "
+    call .ruc_cat
+    mov rax, r12
+    call .ruc_itoa
+    CSTRING rsi, ")"
+    call .ruc_cat
+
+.ruc_raise:
+    mov byte [rdi], 0
+    lea rsi, [rbp - RUC_BUF]
+    lea rdi, [rel exc_ValueError_type]
+    call raise_exception
+
+; Local: append the NUL-terminated rsi at rdi, leaving rdi past it.
+.ruc_cat:
+    mov al, [rsi]
+    test al, al
+    jz .ruc_cat_done
+    mov [rdi], al
+    inc rdi
+    inc rsi
+    jmp .ruc_cat
+.ruc_cat_done:
+    ret
+
+; Local: append rax in decimal at rdi, leaving rdi past it.
+.ruc_itoa:
+    push rbx
+    push r12
+    mov r12, rdi
+    mov rbx, rsp
+    sub rsp, 32
+    and rsp, -16
+    lea rcx, [rsp + 24]
+    mov byte [rcx], 0
+    mov r8, 10
+    test rax, rax
+    jnz .ruc_digits
+    dec rcx
+    mov byte [rcx], '0'
+    jmp .ruc_emit
+.ruc_digits:
+    xor edx, edx
+    div r8
+    add dl, '0'
+    dec rcx
+    mov [rcx], dl
+    test rax, rax
+    jnz .ruc_digits
+.ruc_emit:
+    mov rdi, r12
+.ruc_emit_loop:
+    mov al, [rcx]
+    test al, al
+    jz .ruc_emit_done
+    mov [rdi], al
+    inc rdi
+    inc rcx
+    jmp .ruc_emit_loop
+.ruc_emit_done:
+    mov rsp, rbx
+    pop r12
+    pop rbx
+    ret
+END_FUNC raise_unpack_count
 
 ;; ============================================================================
 ;; op_get_iter - Get iterator from TOS

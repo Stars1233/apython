@@ -1166,6 +1166,7 @@ DEF_FUNC cg_s_return, CSF_FRAME
     mov rsi, r12
     xor edx, edx
     mov ecx, 1                          ; the return value is on top
+    mov r8d, 1                          ; and every enclosing loop is left
     call cg_unwind_finallys
     test eax, eax
     jz .fail
@@ -1181,6 +1182,7 @@ DEF_FUNC cg_s_return, CSF_FRAME
     mov rsi, r12
     xor edx, edx
     xor ecx, ecx                        ; nothing on the stack yet
+    mov r8d, 1                          ; every enclosing loop is left
     call cg_unwind_finallys
     test eax, eax
     jz .fail

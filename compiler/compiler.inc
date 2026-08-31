@@ -501,7 +501,10 @@ struc Handler
                               ; depth pass runs
     .parent:  resd 1          ; enclosing handler index, -1 = none
     .open:    resd 1          ; instruction index where the region was opened
-    .pad5:    resd 1
+    .bias:    resd 1          ; items live at `open` that the handler unwinds
+                              ; away: a `with` opens its region with the
+                              ; enter-result still on the stack, so the depth
+                              ; read there is one above what the handler wants
 endstruc                      ; 24
 
 ;; A loop being generated: where `break` and `continue` go, and how much the
@@ -520,7 +523,7 @@ struc CompUnit
     .instrs:    resb Buf_size   ; Instr[]
     .loops:     resb Buf_size   ; LoopFrame[], innermost last
     .handlers:  resb Buf_size   ; Handler[]
-    .finallys:  resb Buf_size   ; u32 AST nodes of the enclosing finally bodies
+    .finallys:  resb Buf_size   ; per enclosing block: (handler << 32) | node
     .cur_handler: resd 1        ; index into .handlers, -1 = unprotected
     .pad4:      resd 1
     .labels:    resb Buf_size   ; int32[]: label id -> instruction index, -1 unbound

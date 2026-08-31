@@ -722,16 +722,42 @@ DEF_FUNC sym_visit, SV_FRAME
     call .visit_field
     test eax, eax
     jz .fail
+    ; Three pattern kinds keep something that is not a node index in .b: a
+    ; sequence pattern's star position, a class pattern's positional count,
+    ; and a mapping pattern's object index for **rest.  Walking one as a node
+    ; visits whatever sits at that index in the *node* arena -- the two index
+    ; spaces overlap freely -- and adds bindings from it.
+    mov rax, [rbp - SV_KIND]
+    cmp eax, AST_PAT_SEQUENCE
+    je .skip_b
+    cmp eax, AST_PAT_MAPPING
+    je .skip_b
+    cmp eax, AST_PAT_CLASS
+    je .skip_b
     mov rax, [rbp - SV_NPTR]
     mov edx, [rax + AstNode.b]
     call .visit_field
     test eax, eax
     jz .fail
+.skip_b:
     mov rax, [rbp - SV_NPTR]
     mov edx, [rax + AstNode.c]
     call .visit_field
     test eax, eax
     jz .fail
+
+    ; AST_FOR keeps its `else` block in clist, with nchild left at 0, so the
+    ; list walk below never reaches it.  The whole else body therefore went
+    ; unvisited: a def in one got no scope, and compiling it segfaulted.
+    mov rax, [rbp - SV_KIND]
+    cmp eax, AST_FOR
+    jne .not_for_else
+    mov rax, [rbp - SV_NPTR]
+    mov edx, [rax + AstNode.clist]
+    call .visit_field
+    test eax, eax
+    jz .fail
+.not_for_else:
 
     ; The a/b/c fields of some kinds hold object indices rather than nodes, so
     ; only kinds whose children really are nodes reach the list walk below.

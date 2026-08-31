@@ -76,7 +76,7 @@ DEF_FUNC cg_unit_init, CU_FRAME
     mov esi, Handler_size
     call buf_init
     lea rdi, [rbx + CompUnit.finallys]
-    mov esi, 4
+    mov esi, 8
     call buf_init
     mov dword [rbx + CompUnit.cur_handler], -1
     mov qword [rbx + CompUnit.comp], 0
@@ -419,7 +419,7 @@ DEF_FUNC cg_push_handler, 16
     ; always raises, the first stamped instruction is unreachable dead code.
     mov edx, [rbx + CompUnit.instrs + Buf.len]
     mov [rax + Handler.open], edx
-    mov dword [rax + Handler.pad5], 0
+    mov dword [rax + Handler.bias], 0
     mov rax, [rbx + CompUnit.handlers + Buf.len]
     dec rax
     mov [rbx + CompUnit.cur_handler], eax

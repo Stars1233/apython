@@ -34,6 +34,7 @@ extern cg_store
 extern comp_error
 
 extern buf_push_u32
+extern buf_push_ptr
 extern none_singleton
 extern cg_const
 
@@ -73,8 +74,24 @@ section .text
 ;; its way out.
 ;; ============================================================================
 DEF_FUNC cg_finally_push, 16
+    ; Each entry also carries the handler that was current when the block was
+    ; entered.  Leaving the block early has to emit its cleanup *outside* its
+    ; own protected region -- that is what leaving it means -- and without a
+    ; record of which region that was, the __exit__ call a `return` emits sat
+    ; inside the with's own handler.  An exception from it then entered
+    ; PUSH_EXC_INFO with a stack the region's recorded depth did not describe.
+    mov edx, [rdi + CompUnit.cur_handler]
+    cmp edx, -1
+    je .fp_no_parent
+    mov rax, [rdi + CompUnit.handlers + Buf.data]
+    movsxd rcx, edx
+    imul rcx, rcx, Handler_size
+    mov edx, [rax + rcx + Handler.parent]
+.fp_no_parent:
+    shl rdx, 32
+    or rsi, rdx
     lea rdi, [rdi + CompUnit.finallys]
-    call buf_push_u32
+    call buf_push_ptr
     leave
     ret
 END_FUNC cg_finally_push
@@ -103,7 +120,11 @@ UF_I     equ 32
 UF_VAL   equ 40
 UF_ASYNC equ 48
 UF_NODE  equ 56
-UF_FRAME equ 72           ; + 3 pushes = 96
+UF_SAVE  equ 64           ; cur_handler on entry, restored on the way out
+UF_J     equ 72           ; loops still to leave
+UF_POPL  equ 80           ; whether loop iterators come off too
+UF_NPOP  equ 88
+UF_FRAME equ 104          ; + 3 pushes = 128
 DEF_FUNC cg_unwind_finallys, UF_FRAME
     push rbx
     push r12
@@ -112,16 +133,73 @@ DEF_FUNC cg_unwind_finallys, UF_FRAME
     mov r12, rsi
     mov [rbp - UF_DOWN], rdx
     mov [rbp - UF_VAL], rcx
+    mov [rbp - UF_POPL], r8
+    mov rax, [r12 + CompUnit.loops + Buf.len]
+    mov [rbp - UF_J], rax
+    mov eax, [r12 + CompUnit.cur_handler]
+    mov [rbp - UF_SAVE], rax
     mov rax, [r12 + CompUnit.finallys + Buf.len]
     mov [rbp - UF_I], rax
 .loop:
+    ; A loop entered when the block stack was at least this high sits inside
+    ; everything still to unwind, so its iterator comes off first.  A `return`
+    ; leaves every enclosing loop; a `break` or `continue` leaves only the one
+    ; it names, whose own items its emitter pops itself.  Without this, a
+    ; `return` inside `with: for:` called the loop's iterator as if it were
+    ; __exit__.
+    cmp qword [rbp - UF_POPL], 0
+    je .no_loop_pop
+.loop_pop:
+    mov rax, [rbp - UF_J]
+    test rax, rax
+    jz .no_loop_pop
+    dec rax
+    mov rcx, [r12 + CompUnit.loops + Buf.data]
+    imul rdx, rax, LoopFrame_size
+    mov edx, [rcx + rdx + LoopFrame.fdepth]
+    cmp rdx, [rbp - UF_I]
+    jb .no_loop_pop
+    mov [rbp - UF_J], rax
+    mov rcx, [r12 + CompUnit.loops + Buf.data]
+    imul rdx, rax, LoopFrame_size
+    mov edx, [rcx + rdx + LoopFrame.npop]
+    mov [rbp - UF_NPOP], rdx
+.npop_loop:
+    cmp qword [rbp - UF_NPOP], 0
+    je .loop_pop
+    ; With a value on top the item to discard is underneath it, so lift it
+    ; out of the way first -- the same SWAP CPython emits here.
+    cmp qword [rbp - UF_VAL], 0
+    je .npop_no_swap
+    mov rdi, r12
+    mov esi, OP_SWAP
+    mov edx, 2
+    xor ecx, ecx
+    call cg_emit
+.npop_no_swap:
+    mov rdi, r12
+    mov esi, OP_POP_TOP
+    xor edx, edx
+    xor ecx, ecx
+    call cg_emit
+    dec qword [rbp - UF_NPOP]
+    jmp .npop_loop
+.no_loop_pop:
+
     mov rax, [rbp - UF_I]
     cmp rax, [rbp - UF_DOWN]
     jbe .done
     dec rax
     mov [rbp - UF_I], rax
     mov rdx, [r12 + CompUnit.finallys + Buf.data]
-    mov edx, [rdx + rax*4]
+    mov rdx, [rdx + rax*8]
+    ; The high half is the region enclosing this block.  Emitting the cleanup
+    ; there is what puts it outside the block's own region, exactly as
+    ; CPython's exception table has it.
+    mov rax, rdx
+    shr rax, 32
+    mov [r12 + CompUnit.cur_handler], eax
+    mov edx, edx                        ; the block, in the low half
     test edx, edx
     jz .loop
     ; A `with` registers itself here too, as a sentinel: leaving it early has
@@ -233,6 +311,11 @@ DEF_FUNC cg_unwind_finallys, UF_FRAME
 .done:
     mov eax, 1
 .fail:
+    ; The caller carries on emitting inside the blocks it has not left.
+    push rax
+    mov rax, [rbp - UF_SAVE]
+    mov [r12 + CompUnit.cur_handler], eax
+    pop rax
     pop r13
     pop r12
     pop rbx
@@ -901,6 +984,7 @@ WI_CLEAN equ 64
 WI_SUPP  equ 72
 WI_N     equ 80
 WI_ASYNC equ 88
+WI_TGT   equ 96           ; the `as` target, across the region open
 WI_FRAME equ 104          ; + 3 pushes = 128
 DEF_FUNC cg_with_item, WI_FRAME
     push rbx
@@ -994,6 +1078,30 @@ DEF_FUNC cg_with_item, WI_FRAME
     mov rsi, [rbp - WI_ITEM]
     call ast_at
     mov ecx, [rax + AstNode.b]
+    mov [rbp - WI_TGT], rcx
+
+    ; The region opens immediately after BEFORE_WITH, before the `as` target
+    ; is stored -- CPython's range starts there too.  Emitting the store
+    ; outside it meant a failing unpack skipped __exit__ entirely.
+    mov rdi, r12
+    mov rsi, [rbp - WI_EXC]
+    mov edx, 1                          ; lasti
+    call cg_push_handler
+    ; The enter-result is still on the stack where the region opens, and the
+    ; handler unwinds it away before PUSH_EXC_INFO.
+    mov eax, [r12 + CompUnit.cur_handler]
+    mov rdx, [r12 + CompUnit.handlers + Buf.data]
+    imul rax, rax, Handler_size
+    mov dword [rdx + rax + Handler.bias], 1
+    mov esi, CG_WITH_MARK
+    cmp qword [rbp - WI_ASYNC], 0
+    je .mark_sync
+    mov esi, CG_AWITH_MARK
+.mark_sync:
+    mov rdi, r12
+    call cg_finally_push
+
+    mov rcx, [rbp - WI_TGT]
     test ecx, ecx
     jz .discard
     mov rdx, rcx
@@ -1002,25 +1110,13 @@ DEF_FUNC cg_with_item, WI_FRAME
     call cg_store
     test eax, eax
     jz .fail
-    jmp .open_region
+    jmp .body
 .discard:
     mov rdi, r12
     mov esi, OP_POP_TOP
     xor edx, edx
     mov rcx, [rbp - WI_LINE]
     call cg_emit
-.open_region:
-    mov rdi, r12
-    mov rsi, [rbp - WI_EXC]
-    mov edx, 1                          ; lasti
-    call cg_push_handler
-    mov esi, CG_WITH_MARK
-    cmp qword [rbp - WI_ASYNC], 0
-    je .mark_sync
-    mov esi, CG_AWITH_MARK
-.mark_sync:
-    mov rdi, r12
-    call cg_finally_push
 
 .body:
     mov rdi, rbx

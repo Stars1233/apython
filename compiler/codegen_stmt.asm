@@ -511,8 +511,18 @@ DEF_FUNC_LOCAL cg_s_assign, CST_FRAME
 END_FUNC cg_s_assign
 
 ;; cg_s_augassign - `a += b`
-;; The target is loaded, combined and stored back.  A subscript or attribute
-;; target evaluates its object twice here, which CPython also does.
+;;
+;; The target is evaluated ONCE.  A name just loads and stores, but a subscript
+;; or an attribute has an object expression -- and an index expression -- that
+;; must not run twice: `d[next(it)] += 5` drew two values from the iterator,
+;; and `obj().n += 5` called obj() twice.  CPython duplicates the pieces it has
+;; already evaluated with COPY and puts them back in the order the store wants
+;; with SWAP:
+;;
+;;     obj; idx; COPY 2; COPY 2; BINARY_SUBSCR; rhs; BINARY_OP; SWAP 3; SWAP 2;
+;;     STORE_SUBSCR
+;;     obj; COPY 1; LOAD_ATTR n; rhs; BINARY_OP; SWAP 2; STORE_ATTR n
+;; ============================================================================
 DEF_FUNC_LOCAL cg_s_augassign, CST_FRAME
     push rbx
     push r12
@@ -531,8 +541,18 @@ DEF_FUNC_LOCAL cg_s_augassign, CST_FRAME
     mov ecx, [rax + AstNode.a]
     mov [rbp - CST_TMP2], rcx
 
-    ; Load the target's current value.  It was marked CTX_STORE by the parser,
-    ; so read it as a load by temporarily treating the node as an expression.
+    mov rdi, rbx
+    mov rsi, [rbp - CST_TMP2]
+    call ast_at
+    movzx ecx, byte [rax + AstNode.kind]
+    cmp ecx, AST_ATTRIBUTE
+    je .aug_attr
+    cmp ecx, AST_SUBSCRIPT
+    je .aug_subscr
+
+    ; A plain name: load, combine, store.  It was marked CTX_STORE by the
+    ; parser, so read it as a load by temporarily treating it as an
+    ; expression.
     mov rdi, rbx
     mov rsi, [rbp - CST_TMP2]
     call ast_at
@@ -544,21 +564,9 @@ DEF_FUNC_LOCAL cg_s_augassign, CST_FRAME
     test eax, eax
     jz .fail
 
-    mov rdi, rbx
-    mov rsi, r13
-    call ast_at
-    mov edx, [rax + AstNode.b]
-    mov rdi, rbx
-    mov rsi, r12
-    call cg_expr
+    call .aug_rhs_and_op
     test eax, eax
     jz .fail
-
-    mov rdi, r12
-    mov esi, OP_BINARY_OP
-    mov rdx, [rbp - CST_TMP]
-    mov rcx, [rbp - CST_LINE]
-    call cg_emit
 
     mov rdi, rbx
     mov rsi, [rbp - CST_TMP2]
@@ -569,6 +577,142 @@ DEF_FUNC_LOCAL cg_s_augassign, CST_FRAME
     mov rdx, [rbp - CST_TMP2]
     call cg_store
     jmp .ret
+
+.aug_attr:
+    ; obj; COPY 1; LOAD_ATTR n; rhs; BINARY_OP; SWAP 2; STORE_ATTR n
+    mov edx, [rax + AstNode.a]
+    mov rdi, rbx
+    mov rsi, r12
+    call cg_expr
+    test eax, eax
+    jz .fail
+    mov rdi, r12
+    mov esi, OP_COPY
+    mov edx, 1
+    mov rcx, [rbp - CST_LINE]
+    call cg_emit
+
+    call .aug_attr_name
+    mov rdx, rax
+    add rdx, rdx                        ; index << 1: not the method form
+    mov rdi, r12
+    mov esi, OP_LOAD_ATTR
+    mov rcx, [rbp - CST_LINE]
+    call cg_emit
+
+    call .aug_rhs_and_op
+    test eax, eax
+    jz .fail
+
+    mov rdi, r12
+    mov esi, OP_SWAP
+    mov edx, 2
+    mov rcx, [rbp - CST_LINE]
+    call cg_emit
+    call .aug_attr_name
+    mov rdx, rax
+    mov rdi, r12
+    mov esi, OP_STORE_ATTR
+    mov rcx, [rbp - CST_LINE]
+    call cg_emit
+    mov eax, 1
+    jmp .ret
+
+.aug_subscr:
+    ; obj; idx; COPY 2; COPY 2; BINARY_SUBSCR; rhs; BINARY_OP; SWAP 3; SWAP 2;
+    ; STORE_SUBSCR
+    mov ecx, [rax + AstNode.b]
+    mov [rbp - CST_I], rcx              ; the index expression
+    mov edx, [rax + AstNode.a]
+    mov rdi, rbx
+    mov rsi, r12
+    call cg_expr
+    test eax, eax
+    jz .fail
+    mov rdi, rbx
+    mov rsi, r12
+    mov rdx, [rbp - CST_I]
+    call cg_expr
+    test eax, eax
+    jz .fail
+
+    mov rdi, r12
+    mov esi, OP_COPY
+    mov edx, 2
+    mov rcx, [rbp - CST_LINE]
+    call cg_emit
+    mov rdi, r12
+    mov esi, OP_COPY
+    mov edx, 2
+    mov rcx, [rbp - CST_LINE]
+    call cg_emit
+    mov rdi, r12
+    mov esi, OP_BINARY_SUBSCR
+    xor edx, edx
+    mov rcx, [rbp - CST_LINE]
+    call cg_emit
+
+    call .aug_rhs_and_op
+    test eax, eax
+    jz .fail
+
+    mov rdi, r12
+    mov esi, OP_SWAP
+    mov edx, 3
+    mov rcx, [rbp - CST_LINE]
+    call cg_emit
+    mov rdi, r12
+    mov esi, OP_SWAP
+    mov edx, 2
+    mov rcx, [rbp - CST_LINE]
+    call cg_emit
+    mov rdi, r12
+    mov esi, OP_STORE_SUBSCR
+    xor edx, edx
+    mov rcx, [rbp - CST_LINE]
+    call cg_emit
+    mov eax, 1
+    jmp .ret
+
+; Local: the right-hand side and the in-place operator.
+.aug_rhs_and_op:
+    sub rsp, 8
+    mov rdi, rbx
+    mov rsi, r13
+    call ast_at
+    mov edx, [rax + AstNode.b]
+    mov rdi, rbx
+    mov rsi, r12
+    call cg_expr
+    test eax, eax
+    jz .rhs_fail
+    mov rdi, r12
+    mov esi, OP_BINARY_OP
+    mov rdx, [rbp - CST_TMP]
+    mov rcx, [rbp - CST_LINE]
+    call cg_emit
+    mov eax, 1
+    add rsp, 8
+    ret
+.rhs_fail:
+    xor eax, eax
+    add rsp, 8
+    ret
+
+; Local: the co_names index of the attribute the target names.
+.aug_attr_name:
+    sub rsp, 8
+    mov rdi, rbx
+    mov rsi, [rbp - CST_TMP2]
+    call ast_at
+    mov esi, [rax + AstNode.b]
+    mov rdi, rbx
+    call ast_obj_at
+    mov rdi, r12
+    mov rsi, rax
+    call cg_name
+    add rsp, 8
+    ret
 .fail:
     xor eax, eax
 .ret:
@@ -989,7 +1133,9 @@ CIM_LINE  equ 32
 CIM_I     equ 40
 CIM_N     equ 48
 CIM_ALIAS equ 56
-CIM_FRAME equ 72          ; + 3 pushes = 96
+CIM_TARGET equ 64         ; the `as` name's object index
+CIM_J     equ 72          ; which dotted component the walk is on
+CIM_FRAME equ 88          ; + 3 pushes = 112
 DEF_FUNC_LOCAL cg_s_import, CIM_FRAME
     push rbx
     push r12
@@ -1053,8 +1199,9 @@ DEF_FUNC_LOCAL cg_s_import, CIM_FRAME
     mov esi, [rax + AstNode.a]
     mov rdi, rbx
     call ast_obj_at
-    mov rdi, r12
-    mov rsi, rax
+    mov rdi, rbx
+    mov rsi, r12
+    mov rdx, rax
     call cg_name_first_component
     mov rdx, rax
     mov rdi, r12
@@ -1064,7 +1211,51 @@ DEF_FUNC_LOCAL cg_s_import, CIM_FRAME
     jmp .next
 
 .with_as:
-    mov esi, ecx
+    ; `import a.b.c as n` binds the *submodule*, not the top package: after
+    ; IMPORT_NAME leaves `a` on the stack, each remaining component is walked
+    ; with IMPORT_FROM.  Storing the IMPORT_NAME result straight into `n` gave
+    ; `import os.path as p` the `os` module.
+    mov [rbp - CIM_TARGET], rcx
+    mov qword [rbp - CIM_J], 1
+.from_loop:
+    mov rdi, rbx
+    mov rsi, [rbp - CIM_ALIAS]
+    call ast_at
+    mov esi, [rax + AstNode.a]
+    mov rdi, rbx
+    call ast_obj_at
+    mov rdi, rbx
+    mov rsi, r12
+    mov rdx, rax
+    mov rcx, [rbp - CIM_J]
+    call cg_name_component
+    cmp rax, -1
+    je .from_done
+    push rax
+    ; Everything but the first walk step leaves the previous module behind.
+    cmp qword [rbp - CIM_J], 1
+    je .no_shift
+    mov rdi, r12
+    mov esi, OP_SWAP
+    mov edx, 2
+    mov rcx, [rbp - CIM_LINE]
+    call cg_emit
+    mov rdi, r12
+    mov esi, OP_POP_TOP
+    xor edx, edx
+    mov rcx, [rbp - CIM_LINE]
+    call cg_emit
+.no_shift:
+    pop rdx
+    mov rdi, r12
+    mov esi, OP_IMPORT_FROM
+    mov rcx, [rbp - CIM_LINE]
+    call cg_emit
+    inc qword [rbp - CIM_J]
+    jmp .from_loop
+.from_done:
+
+    mov rsi, [rbp - CIM_TARGET]
     mov rdi, rbx
     call ast_obj_at
     mov rdi, r12
@@ -1073,6 +1264,14 @@ DEF_FUNC_LOCAL cg_s_import, CIM_FRAME
     mov rdx, rax
     mov rdi, r12
     mov esi, OP_STORE_NAME
+    mov rcx, [rbp - CIM_LINE]
+    call cg_emit
+    ; The package IMPORT_NAME left behind, if the walk ever ran.
+    cmp qword [rbp - CIM_J], 1
+    je .next
+    mov rdi, r12
+    mov esi, OP_POP_TOP
+    xor edx, edx
     mov rcx, [rbp - CIM_LINE]
     call cg_emit
 .next:
@@ -1088,14 +1287,89 @@ DEF_FUNC_LOCAL cg_s_import, CIM_FRAME
 END_FUNC cg_s_import
 
 ;; ============================================================================
-;; cg_name_first_component(CompUnit *u, PyStrObject *dotted) -> co_names index
-;; `import a.b` binds `a`; this interns the leading component of the name.
+;; cg_name_component(Comp *c, CompUnit *u, PyStrObject *dotted, uint64_t i)
+;;   -> co_names index of the i-th dot-separated component, or -1 if there is
+;;      no such component.  `import a.b.c as n` walks 1, 2, ... with it.
 ;; ============================================================================
-DEF_FUNC cg_name_first_component, 16          ; + 2 pushes = 32
+CNC_COMP  equ 8
+CNC_UNIT  equ 16
+CNC_I     equ 24
+CNC_FRAME equ 40          ; + 2 pushes = 56
+DEF_FUNC cg_name_component, CNC_FRAME
     push rbx
     push r12
-    mov rbx, rdi
-    mov r12, rsi
+    mov [rbp - CNC_COMP], rdi
+    mov [rbp - CNC_UNIT], rsi
+    mov [rbp - CNC_I], rcx
+    lea rbx, [rdx + PyStrObject.data]
+    mov r12, [rdx + PyStrObject.ob_size]
+
+    xor ecx, ecx                        ; byte position
+    xor r8d, r8d                        ; component number
+.find_start:
+    cmp r8, [rbp - CNC_I]
+    jae .have_start
+.scan_dot:
+    cmp rcx, r12
+    jae .none
+    cmp byte [rbx + rcx], '.'
+    je .past_dot
+    inc rcx
+    jmp .scan_dot
+.past_dot:
+    inc rcx
+    inc r8
+    jmp .find_start
+.have_start:
+    cmp rcx, r12
+    jae .none
+    mov r9, rcx
+.scan_end:
+    cmp rcx, r12
+    jae .have_end
+    cmp byte [rbx + rcx], '.'
+    je .have_end
+    inc rcx
+    jmp .scan_end
+.have_end:
+    ; comp_intern_keep, not comp_intern: CompUnit.names holds a borrowed
+    ; pointer, so the string has to outlive this call.
+    mov rdi, [rbp - CNC_COMP]
+    lea rsi, [rbx + r9]
+    mov rdx, rcx
+    sub rdx, r9
+    extern comp_intern_keep
+    call comp_intern_keep
+    test rax, rax
+    jz .none
+    mov rdi, [rbp - CNC_UNIT]
+    mov rsi, rax
+    call cg_name
+    pop r12
+    pop rbx
+    leave
+    ret
+.none:
+    mov rax, -1
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC cg_name_component
+
+;; ============================================================================
+;; cg_name_first_component(Comp *c, CompUnit *u, PyStrObject *dotted)
+;;   -> co_names index
+;; `import a.b` binds `a`; this interns the leading component of the name.
+;; ============================================================================
+CNF_COMP  equ 24
+CNF_FRAME equ 40          ; + 2 pushes = 56
+DEF_FUNC cg_name_first_component, CNF_FRAME
+    push rbx
+    push r12
+    mov [rbp - CNF_COMP], rdi           ; the Comp, for comp_intern_keep
+    mov rbx, rsi
+    mov r12, rdx
     lea rdi, [r12 + PyStrObject.data]
     mov rcx, [r12 + PyStrObject.ob_size]
     xor edx, edx
@@ -1116,18 +1390,18 @@ DEF_FUNC cg_name_first_component, 16          ; + 2 pushes = 32
     leave
     ret
 .found:
-    mov rsi, rdx
-    call comp_intern                     ; rdi already points at the text
+    ; comp_intern_keep, not comp_intern: CompUnit.names holds a borrowed
+    ; pointer, and releasing the string here left a dangling one in co_names.
+    ; The failure was a wild jump inside dict_lookup at run time, which is
+    ; exactly what comp_intern_cstr's comment warns about.
+    mov rsi, rdi                        ; the text
+    mov rdi, [rbp - CNF_COMP]
+    call comp_intern_keep               ; rdx already holds the length
     test rax, rax
     jz .fail
     mov rdi, rbx
     mov rsi, rax
-    push rax
     call cg_name
-    pop rdi
-    push rax
-    call obj_decref                      ; cg_name kept its own reference
-    pop rax
     pop r12
     pop rbx
     leave
@@ -1827,6 +2101,7 @@ DEF_FUNC_LOCAL cg_s_break, CST_FRAME
     mov rsi, r12
     mov rdx, rcx
     xor ecx, ecx                        ; break and continue carry no value
+    xor r8d, r8d                        ; the loop's own items are popped below
     call cg_unwind_finallys
     test eax, eax
     jz .fail_unwind
@@ -1895,6 +2170,7 @@ DEF_FUNC_LOCAL cg_s_continue, CST_FRAME
     mov rsi, r12
     mov rdx, rcx
     xor ecx, ecx                        ; break and continue carry no value
+    xor r8d, r8d                        ; the loop's own items are popped below
     call cg_unwind_finallys
     test eax, eax
     jz .fail_unwind

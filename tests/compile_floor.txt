@@ -33,6 +33,7 @@ test_codec_args
 test_codecs
 test_comparisons
 test_compile_async
+test_compile_augassign
 test_compile_call_ex
 test_compile_class_closure
 test_compile_class
@@ -43,10 +44,14 @@ test_compile_exec
 test_compile_expr2
 test_compile_expr
 test_compile_flow
+test_compile_for_else_scope
 test_compile_fstring
 test_compile_func
+test_compile_import_dotted
 test_compile_import_star
 test_compile_match
+test_compile_match_scope
+test_compile_mixed_string
 test_compile_operators
 test_compile_pep695
 test_compile_precedence
@@ -54,6 +59,8 @@ test_compile_scope_unbound
 test_compile_subscript_except
 test_compile_ternary_or
 test_compile_try
+test_compile_unwind
+test_compile_with_as_unpack
 test_container_dunders
 test_control_flow
 test_defaults

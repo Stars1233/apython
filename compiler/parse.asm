@@ -1545,9 +1545,16 @@ DEF_FUNC par_fstring_piece_any, PFA_FRAME
     leave
     ret
 .mixed:
+    ; This is reached before PFA_BUF has been initialised, so it must not fall
+    ; into .fail -- buf_free on an uninitialised stack word freed whatever
+    ; address happened to be there.
     mov rdi, rbx
     CSTRING rsi, "cannot mix bytes and f-string literals"
     call par_syntax_error
+    xor eax, eax
+    pop rbx
+    leave
+    ret
 .fail:
     lea rdi, [rbp - PFA_BUF]
     call buf_free
