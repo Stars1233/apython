@@ -32,7 +32,7 @@ its `Lib/` (default `~/tmp/repo/cpython/Lib`).  It compares against
 `tests/stdlib_floor.txt` and fails when a module that used to import stops, or
 when a new one crashes.  Raise the floor with
 `bash tests/stdlib_probe.sh --record` in the commit that earns it.
-`make check` runs 212 test files (235 results: the async tests run against the
+`make check` runs 232 test files (255 results: the async tests run against the
 default, poll and io_uring backends); `make check-cpython` runs all 64 files
 under `tests/cpython/`, none of them tolerated as failing.
 
@@ -315,6 +315,10 @@ Opcodes have trailing CACHE words that must be skipped. Key counts (each = 2 byt
   `equ` for a large struct silently overlaps the scalar slots above it the
   first time the struct grows, and the symptom is one field reading as garbage.
   Derive the offset instead: `CS_UNIT equ 48 + CompUnit_size`.
+- **Following a node's `a`/`b`/`c` without asking what kind it is.** The node and object arenas overlap freely, so a generic walk that visits a field holding an *object* index lands on an unrelated node. `sym_visit` keeps an exclusion list; `cg_has_annotation` recurses only into the compound statements whose fields really are blocks. A `for/else` is the other half of the same trap: it hides its else block in `clist` with `nchild` at 0, where no child-list walk reaches it.
+- **Leaving a block early must emit its cleanup outside that block's own region.** The exception table is built from a per-instruction handler stamp, so the `__exit__` a `return` emits carries whatever stamp is current — the with's own, unless the unwinder sets it to the enclosing one first. Each entry on the block stack records that enclosing handler for exactly this. A `return` also leaves every enclosing *loop*, whose iterator is on the stack under the return value.
+- **A borrowed pointer in `CompUnit.names` or `.consts`.** Both hold borrowed references; the object arena owns them. A string interned at the call site and released leaves a dangling pointer whose symptom is a wild jump inside `dict_lookup` at run time, and a code object never handed to the arena is simply never freed. `comp_intern_cstr` and `comp_intern_keep` are the way in.
+- **A variable-size builtin whose subclass gets a fixed-offset `__dict__`.** str and bytes keep their data inline, so a dict at the base's `tp_basicsize` lands *inside* it. They get `TP_DICT_AT_TAIL`; bytearray and memoryview, which can move or borrow their storage, get none at all — but still need `tp_basicsize` set, or the dealloc slot walk reads a negative count.
 - **Asking "is this object a class?" by comparing metatypes.** `ob_type is user_type_metatype` is false for a class built by a metaclass of its own, so a classmethod reached through such a class bound the *metaclass*. Test `TYPE_FLAG_METATYPE` on the object's type instead; it is set on `type`, on the two metatypes we ship, and on any class deriving from `type`.
 - **An empty `bases` tuple is not the same as no bases.** `type(n, (), d)` substituted `object`; the metaclass paths did not, and those classes got an MRO of just `[C]` — not even instances of `object`. Invisible until a merge needs the `object` that anchors the end.
 - **A builtin's behaviour that lives only in a slot.** The stdlib asks questions by name: `hasattr(f, '__get__')` decides whether something is a descriptor, `member_type.__str__ is object.__str__` decides whether a type defines its own `str()`. A slot with no matching entry in `tp_dict` answers those wrong. When adding one, the thunk must call the *defining* type's slot, not the argument's, or a subclass re-dispatches into itself.
