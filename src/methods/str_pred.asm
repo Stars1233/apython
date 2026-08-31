@@ -468,7 +468,7 @@ DEF_FUNC str_method_isspace
     je .isspace_next
     cmp sil, 0x09           ; tab
     jb .isspace_false
-    cmp sil, 0x0D           ; tab(09), newline(0A), VT(0B), FF(0C), CR(0D)
+    cmp sil, 0x0d           ; tab(09), newline(0A), VT(0B), FF(0C), CR(0D)
     ja .isspace_false
 .isspace_next:
     inc rdx

@@ -78,7 +78,6 @@ ISN_TYPE  equ 8
 ISN_VAL   equ 16
 ISN_TAG   equ 24
 ISN_FRAME equ 32          ; + 2 pushes = 48
-global int_sub_new
 DEF_FUNC int_sub_new, ISN_FRAME
     push rbx
     push r12
@@ -151,7 +150,6 @@ SSN_TYPE  equ 8
 SSN_SRC   equ 16
 SSN_FRAME equ 32
 
-global str_sub_new
 DEF_FUNC str_sub_new, SSN_FRAME
     push rbx
     push r12
@@ -259,7 +257,6 @@ TSF_INST  equ 8
 TSF_TMP   equ 16
 TSF_FRAME equ 32
 
-global tuple_sub_fill
 DEF_FUNC tuple_sub_fill, TSF_FRAME
     push rbx
     push r12
@@ -318,7 +315,6 @@ DEF_FUNC tuple_sub_fill, TSF_FRAME
     ret
 END_FUNC tuple_sub_fill
 
-global builtin_sub_init_base
 DEF_FUNC builtin_sub_init_base
     push rbx
     mov rbx, rdi
@@ -1010,7 +1006,6 @@ END_FUNC instance_dealloc
 ;; Dealloc for heap-type subclasses of builtin types (bytes, bytearray, etc.)
 ;; These don't have inst_dict — just DECREF the type and free.
 ;; ============================================================================
-global builtin_sub_dealloc
 DEF_FUNC builtin_sub_dealloc
     push rbx
     mov rbx, rdi
@@ -2515,7 +2510,6 @@ END_FUNC method_repr
 ;; object_type_call(args, nargs) -> PyObject*
 ;; object() returns a bare instance of object_type
 ;; ============================================================================
-global object_type_call
 DEF_FUNC_BARE object_type_call
     ; Create a bare instance with object_type (gc_alloc since HAVE_GC)
     push rbp
@@ -2539,7 +2533,6 @@ END_FUNC object_type_call
 ;; Implements object.__new__(cls) — creates a bare instance of cls.
 ;; args[0] = cls (the type to instantiate)
 ;; ============================================================================
-global object_new_fn
 DEF_FUNC object_new_fn
     ; args[0] = cls
     mov rdi, [rdi]              ; cls payload (PyTypeObject*)
@@ -2555,7 +2548,6 @@ END_FUNC object_new_fn
 ;; Deallocator for user-defined heap types (created by __build_class__).
 ;; Frees tp_dict, tp_name string, and the type object itself.
 ;; ============================================================================
-global user_type_dealloc
 DEF_FUNC user_type_dealloc
     push rbx
     mov rbx, rdi                ; rbx = type object

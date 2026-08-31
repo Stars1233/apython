@@ -439,7 +439,7 @@ DEF_FUNC asm_effect, 16         ; a frame, because .variable now calls out
     cmp edx, -128                       ; SE_VAR
     je .variable
     ; movsxd, not mov: a stack effect is signed, and zero-extending -1 into rax
-    ; gives 0x00000000FFFFFFFF.  Added to a depth that then gets packed with a
+    ; gives 0x00000000ffffffff.  Added to a depth that then gets packed with a
     ; jump target in one qword, it sets bit 32 and corrupts the target.
     movsxd rax, edx
     leave
@@ -1583,7 +1583,7 @@ DEF_FUNC_BARE asm_region_depth
     cmp r8, [rdi + CompUnit.instrs + Buf.len]
     jae .none
     ; movsxd, not mov: the sentinel is -1 as a signed 32-bit value, and a
-    ; zero-extending load turns it into 0x00000000FFFFFFFF, which no longer
+    ; zero-extending load turns it into 0x00000000ffffffff, which no longer
     ; compares equal to -1.  The handler then took a garbage depth and the
     ; depth worklist churned on it forever.
     movsxd rax, dword [rdx + r8*4]

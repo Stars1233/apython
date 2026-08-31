@@ -197,7 +197,6 @@ section .text
 ;; rdi=dict, rsi=name_cstr, rdx=func_ptr
 ;; Creates a builtin func wrapper and stores it in the dict.
 ;; ============================================================================
-global dict_add_builtin_func
 DEF_FUNC dict_add_builtin_func
     push rbx
     push r12

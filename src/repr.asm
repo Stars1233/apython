@@ -85,47 +85,51 @@ repr_pop:
     dec qword [rel repr_depth]
     ret
 
-; Internal buffer struct (on stack):
-;   [rbp-8]  = buf ptr
-;   [rbp-16] = buf used (length of content)
-;   [rbp-24] = buf capacity
+; The growable buffer every container repr builds into, as three frame slots.
+; All four reprs and the BUF_* macros share this layout, which is why it is
+; named once here rather than per function -- STYLE.md's alternative form for a
+; file whose functions share a frame.
+RB_PTR   equ 8              ; the buffer
+RB_USED  equ 16             ; bytes of content written
+RB_CAP   equ 24             ; bytes allocated
+RB_FRAME equ 24             ; + 3 pushes = 48
 
 ; buf_ensure_space(needed)
 ; Ensures buf has at least 'needed' more bytes available.
-; Uses [rbp-8], [rbp-16], [rbp-24]
+; Uses the RB_* slots
 ; Clobbers rdi, rsi, rax
 %macro BUF_ENSURE 1
-    mov rax, [rbp-16]          ; used
+    mov rax, [rbp - RB_USED]          ; used
     add rax, %1                ; used + needed
     inc rax                    ; +1 for NUL
-    cmp rax, [rbp-24]          ; compare with capacity
+    cmp rax, [rbp - RB_CAP]          ; compare with capacity
     jbe %%ok
     ; Grow: new_cap = max(cap*2, used+needed+1)
-    mov rdi, [rbp-24]
+    mov rdi, [rbp - RB_CAP]
     shl rdi, 1                 ; cap * 2
     cmp rdi, rax
     cmovb rdi, rax             ; max(cap*2, needed)
-    mov [rbp-24], rdi          ; save new capacity
+    mov [rbp - RB_CAP], rdi          ; save new capacity
     mov rsi, rdi               ; new size
-    mov rdi, [rbp-8]           ; old ptr
+    mov rdi, [rbp - RB_PTR]           ; old ptr
     call ap_realloc
-    mov [rbp-8], rax           ; save new ptr
+    mov [rbp - RB_PTR], rax           ; save new ptr
 %%ok:
 %endmacro
 
 ; Append a single byte to buffer
 %macro BUF_BYTE 1
-    mov rax, [rbp-8]
-    mov rcx, [rbp-16]
+    mov rax, [rbp - RB_PTR]
+    mov rcx, [rbp - RB_USED]
     mov byte [rax + rcx], %1
-    inc qword [rbp-16]
+    inc qword [rbp - RB_USED]
 %endmacro
 
 ;; ============================================================================
 ;; list_repr(PyListObject *self) -> PyStrObject*
 ;; Returns string like "[1, 2, 3]"
 ;; ============================================================================
-DEF_FUNC list_repr, 24                ; buf ptr, used, capacity
+DEF_FUNC list_repr, RB_FRAME                ; buf ptr, used, capacity
     push rbx                   ; self
     push r12                   ; index
     push r13                   ; count
@@ -148,9 +152,9 @@ DEF_FUNC list_repr, 24                ; buf ptr, used, capacity
     ; Allocate initial buffer (256 bytes)
     mov edi, 256
     call ap_malloc
-    mov [rbp-8], rax           ; buf ptr
-    mov qword [rbp-16], 0      ; used = 0
-    mov qword [rbp-24], 256    ; capacity = 256
+    mov [rbp - RB_PTR], rax           ; buf ptr
+    mov qword [rbp - RB_USED], 0      ; used = 0
+    mov qword [rbp - RB_CAP], 256    ; capacity = 256
 
     ; Append '['
     BUF_BYTE '['
@@ -185,11 +189,11 @@ DEF_FUNC list_repr, 24                ; buf ptr, used, capacity
     ; Copy repr data into buffer
     mov rsi, [rsp]             ; repr str
     lea rsi, [rsi + PyStrObject.data]
-    mov rdi, [rbp-8]
-    add rdi, [rbp-16]          ; buf + used
+    mov rdi, [rbp - RB_PTR]
+    add rdi, [rbp - RB_USED]          ; buf + used
     mov rcx, [rsp]
     mov rcx, [rcx + PyStrObject.ob_size]
-    add [rbp-16], rcx          ; used += len
+    add [rbp - RB_USED], rcx          ; used += len
     ; memcpy
     rep movsb
 
@@ -205,17 +209,17 @@ DEF_FUNC list_repr, 24                ; buf ptr, used, capacity
     ; Append ']' and NUL
     BUF_ENSURE 2
     BUF_BYTE ']'
-    mov rax, [rbp-8]
-    mov rcx, [rbp-16]
+    mov rax, [rbp - RB_PTR]
+    mov rcx, [rbp - RB_USED]
     mov byte [rax + rcx], 0    ; NUL terminate
 
     ; Convert to PyStrObject
-    mov rdi, [rbp-8]
+    mov rdi, [rbp - RB_PTR]
     call str_from_cstr_heap
     push rax                   ; save result
 
     ; Free buffer
-    mov rdi, [rbp-8]
+    mov rdi, [rbp - RB_PTR]
     call ap_free
 
     pop rax                    ; return str
@@ -234,7 +238,7 @@ DEF_FUNC list_repr, 24                ; buf ptr, used, capacity
     ; An element's repr failed.  Skipping it left the exception pending with
     ; a perfectly good-looking string as the result, so it surfaced later at
     ; an unrelated instruction instead of at the repr() call.
-    mov rdi, [rbp-8]
+    mov rdi, [rbp - RB_PTR]
     call ap_free
     call repr_pop
     REPR_ENSURE_EXC
@@ -261,7 +265,7 @@ END_FUNC list_repr
 ;; tuple_repr(PyTupleObject *self) -> PyStrObject*
 ;; Returns string like "(1, 2, 3)" or "(1,)" for single-element
 ;; ============================================================================
-DEF_FUNC tuple_repr, 24
+DEF_FUNC tuple_repr, RB_FRAME
     push rbx
     push r12
     push r13
@@ -282,9 +286,9 @@ DEF_FUNC tuple_repr, 24
     ; Allocate buffer
     mov edi, 256
     call ap_malloc
-    mov [rbp-8], rax
-    mov qword [rbp-16], 0
-    mov qword [rbp-24], 256
+    mov [rbp - RB_PTR], rax
+    mov qword [rbp - RB_USED], 0
+    mov qword [rbp - RB_CAP], 256
 
     BUF_BYTE '('
 
@@ -312,11 +316,11 @@ DEF_FUNC tuple_repr, 24
     BUF_ENSURE rcx
     mov rsi, [rsp]
     lea rsi, [rsi + PyStrObject.data]
-    mov rdi, [rbp-8]
-    add rdi, [rbp-16]
+    mov rdi, [rbp - RB_PTR]
+    add rdi, [rbp - RB_USED]
     mov rcx, [rsp]
     mov rcx, [rcx + PyStrObject.ob_size]
-    add [rbp-16], rcx
+    add [rbp - RB_USED], rcx
     rep movsb
 
     pop rdi
@@ -336,15 +340,15 @@ DEF_FUNC tuple_repr, 24
 
     BUF_ENSURE 2
     BUF_BYTE ')'
-    mov rax, [rbp-8]
-    mov rcx, [rbp-16]
+    mov rax, [rbp - RB_PTR]
+    mov rcx, [rbp - RB_USED]
     mov byte [rax + rcx], 0
 
-    mov rdi, [rbp-8]
+    mov rdi, [rbp - RB_PTR]
     call str_from_cstr_heap
     push rax
 
-    mov rdi, [rbp-8]
+    mov rdi, [rbp - RB_PTR]
     call ap_free
 
     pop rax
@@ -357,7 +361,7 @@ DEF_FUNC tuple_repr, 24
     ret
 
 .tr_elem_failed:
-    mov rdi, [rbp-8]
+    mov rdi, [rbp - RB_PTR]
     call ap_free
     call repr_pop
     REPR_ENSURE_EXC
@@ -384,7 +388,7 @@ END_FUNC tuple_repr
 ;; Returns string like "{'a': 1, 'b': 2}"
 ;; Iterates the entries array directly.
 ;; ============================================================================
-DEF_FUNC dict_repr, 24
+DEF_FUNC dict_repr, RB_FRAME
     push rbx                   ; self
     push r12                   ; entry index
     push r13                   ; capacity
@@ -403,9 +407,9 @@ DEF_FUNC dict_repr, 24
     ; Allocate buffer
     mov edi, 256
     call ap_malloc
-    mov [rbp-8], rax
-    mov qword [rbp-16], 0
-    mov qword [rbp-24], 256
+    mov [rbp - RB_PTR], rax
+    mov qword [rbp - RB_USED], 0
+    mov qword [rbp - RB_CAP], 256
 
     BUF_BYTE '{'
 
@@ -445,11 +449,11 @@ DEF_FUNC dict_repr, 24
     BUF_ENSURE rcx
     mov rsi, [rsp]
     lea rsi, [rsi + PyStrObject.data]
-    mov rdi, [rbp-8]
-    add rdi, [rbp-16]
+    mov rdi, [rbp - RB_PTR]
+    add rdi, [rbp - RB_USED]
     mov rcx, [rsp]
     mov rcx, [rcx + PyStrObject.ob_size]
-    add [rbp-16], rcx
+    add [rbp - RB_USED], rcx
     rep movsb
     pop rdi
     call obj_decref
@@ -475,11 +479,11 @@ DEF_FUNC dict_repr, 24
     BUF_ENSURE rcx
     mov rsi, [rsp]
     lea rsi, [rsi + PyStrObject.data]
-    mov rdi, [rbp-8]
-    add rdi, [rbp-16]
+    mov rdi, [rbp - RB_PTR]
+    add rdi, [rbp - RB_USED]
     mov rcx, [rsp]
     mov rcx, [rcx + PyStrObject.ob_size]
-    add [rbp-16], rcx
+    add [rbp - RB_USED], rcx
     rep movsb
     pop rdi
     call obj_decref
@@ -495,15 +499,15 @@ DEF_FUNC dict_repr, 24
 .dr_done:
     BUF_ENSURE 2
     BUF_BYTE '}'
-    mov rax, [rbp-8]
-    mov rcx, [rbp-16]
+    mov rax, [rbp - RB_PTR]
+    mov rcx, [rbp - RB_USED]
     mov byte [rax + rcx], 0
 
-    mov rdi, [rbp-8]
+    mov rdi, [rbp - RB_PTR]
     call str_from_cstr_heap
     push rax
 
-    mov rdi, [rbp-8]
+    mov rdi, [rbp - RB_PTR]
     call ap_free
 
     pop rax
@@ -517,7 +521,7 @@ DEF_FUNC dict_repr, 24
     ret
 
 .dr_elem_failed:
-    mov rdi, [rbp-8]
+    mov rdi, [rbp - RB_PTR]
     call ap_free
     call repr_pop
     REPR_ENSURE_EXC
@@ -545,7 +549,7 @@ END_FUNC dict_repr
 ;; set_repr(PySetObject *self) -> PyStrObject*
 ;; Returns string like "{1, 2, 3}" or "set()" for empty
 ;; ============================================================================
-DEF_FUNC set_repr, 24
+DEF_FUNC set_repr, RB_FRAME
     push rbx
     push r12
     push r13
@@ -573,7 +577,7 @@ DEF_FUNC set_repr, 24
 .sr_empty_named:
     ; "Name()" -- built with str_from_cstr into a small stack buffer.
     mov rsi, [rax + PyTypeObject.tp_name]
-    lea rdi, [rbp-24]           ; the three locals are unused on this path
+    lea rdi, [rbp - RB_CAP]           ; the three locals are unused on this path
     xor ecx, ecx
 .sr_empty_copy:
     cmp ecx, 20
@@ -607,9 +611,9 @@ DEF_FUNC set_repr, 24
 
     mov edi, 256
     call ap_malloc
-    mov [rbp-8], rax
-    mov qword [rbp-16], 0
-    mov qword [rbp-24], 256
+    mov [rbp - RB_PTR], rax
+    mov qword [rbp - RB_USED], 0
+    mov qword [rbp - RB_CAP], 256
 
     ; Anything that is not exactly `set` prints as Name({...}): that is how
     ; CPython renders frozenset, and a subclass of either.  Neither was
@@ -625,10 +629,10 @@ DEF_FUNC set_repr, 24
     test r13b, r13b
     jz .sr_name_done
     BUF_ENSURE 1
-    mov rcx, [rbp-8]
-    mov rdx, [rbp-16]
+    mov rcx, [rbp - RB_PTR]
+    mov rdx, [rbp - RB_USED]
     mov [rcx + rdx], r13b
-    inc qword [rbp-16]
+    inc qword [rbp - RB_USED]
     inc r14
     jmp .sr_name_loop
 .sr_name_done:
@@ -673,11 +677,11 @@ DEF_FUNC set_repr, 24
     BUF_ENSURE rcx
     mov rsi, [rsp]
     lea rsi, [rsi + PyStrObject.data]
-    mov rdi, [rbp-8]
-    add rdi, [rbp-16]
+    mov rdi, [rbp - RB_PTR]
+    add rdi, [rbp - RB_USED]
     mov rcx, [rsp]
     mov rcx, [rcx + PyStrObject.ob_size]
-    add [rbp-16], rcx
+    add [rbp - RB_USED], rcx
     rep movsb
     pop rdi
     call obj_decref
@@ -699,15 +703,15 @@ DEF_FUNC set_repr, 24
     je .sr_no_suffix
     BUF_BYTE ')'
 .sr_no_suffix:
-    mov rax, [rbp-8]
-    mov rcx, [rbp-16]
+    mov rax, [rbp - RB_PTR]
+    mov rcx, [rbp - RB_USED]
     mov byte [rax + rcx], 0
 
-    mov rdi, [rbp-8]
+    mov rdi, [rbp - RB_PTR]
     call str_from_cstr_heap
     push rax
 
-    mov rdi, [rbp-8]
+    mov rdi, [rbp - RB_PTR]
     call ap_free
 
     pop rax
@@ -721,7 +725,7 @@ DEF_FUNC set_repr, 24
     ret
 
 .sr_elem_failed:
-    mov rdi, [rbp-8]
+    mov rdi, [rbp - RB_PTR]
     call ap_free
     call repr_pop
     REPR_ENSURE_EXC

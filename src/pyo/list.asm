@@ -102,7 +102,6 @@ END_FUNC list_new
 ;; list_copy(PyListObject *src) -> PyListObject* (shallow copy)
 ;; Creates a new list with same items, INCREFs each.
 ;; ============================================================================
-global list_copy
 DEF_FUNC list_copy
     push rbx
     push r12
@@ -1924,7 +1923,6 @@ section .text
 ; b=[]; b.append(b); a==b -- recursed until the machine stack ran out; the
 ; identity fast path inside only catches a==a.  The body is wrapped so its
 ; several exits need not each be touched.
-global list_richcompare
 DEF_FUNC list_richcompare
     C_RECURSION_ENTER .lrc_too_deep
     call list_richcompare_inner

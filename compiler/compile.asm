@@ -98,11 +98,11 @@ DEF_FUNC comp_src_normalize, SN_FRAME
     ; Drop a UTF-8 byte-order mark.
     cmp r12, 3
     jb .no_bom
-    cmp byte [rbx], 0xEF
+    cmp byte [rbx], 0xef
     jne .no_bom
-    cmp byte [rbx + 1], 0xBB
+    cmp byte [rbx + 1], 0xbb
     jne .no_bom
-    cmp byte [rbx + 2], 0xBF
+    cmp byte [rbx + 2], 0xbf
     jne .no_bom
     add rbx, 3
     sub r12, 3
@@ -786,7 +786,6 @@ END_FUNC comp_intern_name
 ;; compilation ended, which also covers the error paths that used to abandon
 ;; it.  Takes ownership of v.
 ;; ============================================================================
-global comp_keep
 DEF_FUNC comp_keep, 16
     push rbx
     push r12

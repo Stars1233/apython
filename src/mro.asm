@@ -35,7 +35,6 @@ section .text
 ; The origin's tp_mro is authoritative when it exists; otherwise the answer is
 ; the current type's tp_base, which is what single inheritance always gave.
 ; ----------------------------------------------------------------------------
-global type_mro_next
 DEF_FUNC_BARE type_mro_next
     test rsi, rsi
     jz .mn_none
@@ -79,7 +78,6 @@ END_FUNC type_mro_next
 ; type_check_is_class(rdi = Value) -> eax 0/1
 ; True when the value is a type object: its metatype is type_type,
 ; user_type_metatype or exc_metatype.
-global type_check_is_class
 DEF_FUNC_BARE type_check_is_class
     V_TEST_PTR rdi, rax
     ja .tc_no
@@ -129,7 +127,6 @@ TCI_CLS   equ 8
 TCI_OBJ   equ 16
 TCI_NAME  equ 24
 TCI_FRAME equ 32
-global type_custom_check
 DEF_FUNC type_custom_check, TCI_FRAME
     push rbx
     mov [rbp - TCI_CLS], rdi
@@ -200,7 +197,6 @@ END_FUNC type_custom_check
 ; ----------------------------------------------------------------------------
 ; type_is_subtype(rdi = candidate subtype, rsi = type) -> eax 0/1
 ; ----------------------------------------------------------------------------
-global type_is_subtype
 DEF_FUNC_BARE type_is_subtype
     test rdi, rdi
     jz .st_no
@@ -316,7 +312,6 @@ SEQ_START equ 0
 SEQ_LEN   equ 8
 SEQ_POS   equ 16
 SEQ_SIZE  equ 24
-global mro_compute
 DEF_FUNC mro_compute, MC_FRAME
     push rbx
     push r12

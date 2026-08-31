@@ -100,7 +100,6 @@ WC_LIST  equ 16
 WC_IDX   equ 24
 WC_EXC   equ 32
 WC_FRAME equ 48
-global weakref_clear_for
 DEF_FUNC weakref_clear_for, WC_FRAME
     push rbx
     push r12
@@ -811,7 +810,6 @@ END_FUNC wr_remove_dead_func
 %endmacro
 
 WRM_FRAME equ 8
-global weakref_module_create
 DEF_FUNC weakref_module_create, WRM_FRAME
     push rbx
     push r12

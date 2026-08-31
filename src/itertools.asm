@@ -1672,7 +1672,6 @@ END_FUNC builtin_sorted
 ;; ============================================================================
 ;; Type call wrappers: tp_call(callable, args, nargs) -> builtin_*(args, nargs)
 ;; ============================================================================
-global enumerate_type_call
 DEF_FUNC_BARE enumerate_type_call
     mov rdi, rsi
     mov rsi, rdx
@@ -1685,7 +1684,6 @@ END_FUNC enumerate_type_call
 ; needs a type to test against.  The object types already existed; these
 ; wrappers are what let the name be bound to the type instead of the
 ; constructor function.
-global range_type_call
 DEF_FUNC_BARE range_type_call
     mov rdi, rsi
     mov rsi, rdx
@@ -1693,28 +1691,24 @@ DEF_FUNC_BARE range_type_call
     jmp builtin_range
 END_FUNC range_type_call
 
-global zip_type_call
 DEF_FUNC_BARE zip_type_call
     mov rdi, rsi
     mov rsi, rdx
     jmp builtin_zip
 END_FUNC zip_type_call
 
-global map_type_call
 DEF_FUNC_BARE map_type_call
     mov rdi, rsi
     mov rsi, rdx
     jmp builtin_map
 END_FUNC map_type_call
 
-global filter_type_call
 DEF_FUNC_BARE filter_type_call
     mov rdi, rsi
     mov rsi, rdx
     jmp builtin_filter
 END_FUNC filter_type_call
 
-global reversed_type_call
 DEF_FUNC_BARE reversed_type_call
     mov rdi, rsi
     mov rsi, rdx

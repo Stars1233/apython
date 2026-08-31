@@ -260,7 +260,7 @@ END_FUNC obj_str
 ; Convert a Value to a C index, or raise TypeError.  Callers used to hand
 ; whatever they were given straight to int_to_i64, which reads
 ; PyIntObject.compact unconditionally: a float's payload is raw IEEE bits, so
-; range(1.5) dereferenced 0x3FF8000000000000, and None's fields decoded as a
+; range(1.5) dereferenced 0x3ff8000000000000, and None's fields decoded as a
 ; garbage length, so range(None) hung.
 ;
 ; Takes the same (payload, tag) pair as int_to_i64 so a call site changes by
@@ -386,7 +386,6 @@ END_FUNC value_type
 ; Composes the message into a static buffer and raises TypeError.  Does not
 ; return.
 RTN_BUFSZ equ 160
-global raise_type_error_with_name
 DEF_FUNC raise_type_error_with_name
     push rbx
     push r12
@@ -446,7 +445,6 @@ section .text
 
 ; seq_repeat_check_count(rsi = count Value) -- raises TypeError unless the
 ; count is an int (or a bool, which is one).  Does not return on failure.
-global seq_repeat_check_count
 DEF_FUNC_BARE seq_repeat_check_count
     V_IS_INT rsi, rax
     jae .src_ok
@@ -477,7 +475,6 @@ END_FUNC seq_repeat_check_count
 RNA_NAME equ 16
 RNA_FRAME equ 16
 extern str_type
-global raise_no_attribute
 DEF_FUNC raise_no_attribute, RNA_FRAME
     push rbx
     push r12
@@ -575,7 +572,6 @@ END_FUNC raise_no_attribute
 OGA_OBJ   equ 8
 OGA_NAME  equ 16
 OGA_FRAME equ 32
-global obj_generic_attr
 DEF_FUNC obj_generic_attr, OGA_FRAME
     push rbx
     mov [rbp - OGA_OBJ], rdi
@@ -791,7 +787,6 @@ section .text
 ; hash_not_implemented() -> never returns
 ; Used as tp_hash for unhashable types (dict, list, set).
 ; Raises TypeError("unhashable type").
-global hash_not_implemented
 DEF_FUNC hash_not_implemented
     extern raise_exception
     extern exc_TypeError_type

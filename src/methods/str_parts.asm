@@ -1132,16 +1132,16 @@ DEF_FUNC str_method_encode, SE_FRAME
     jz .se_l1_emit
     ; A two-byte form can reach U+00FF; anything wider cannot be Latin-1.
     mov edx, eax
-    and edx, 0xE0
-    cmp edx, 0xC0
+    and edx, 0xe0
+    cmp edx, 0xc0
     jne .se_not_encodable
-    and eax, 0x1F
+    and eax, 0x1f
     cmp eax, 3
     ja .se_not_encodable
     shl eax, 6
     inc rcx
     movzx edx, byte [rbx + PyStrObject.data + rcx]
-    and edx, 0x3F
+    and edx, 0x3f
     or eax, edx
 .se_l1_emit:
     mov rdx, [rbp - SE_OUT]

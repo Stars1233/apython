@@ -58,7 +58,6 @@ STREAM_BUFSIZE equ 8192
 ;; ============================================================================
 
 ;; stream_reader_new(int fd) -> AsyncStreamReader*
-global stream_reader_new
 DEF_FUNC stream_reader_new
     push rbx
     mov ebx, edi               ; save fd
@@ -95,7 +94,6 @@ END_FUNC stream_reader_dealloc
 
 ;; stream_reader_getattr(self, name) -> fat value
 ;; Dispatches: "read" -> returns ReadAwaitable, "close" -> close fd
-global stream_reader_getattr
 DEF_FUNC stream_reader_getattr
     push rbx
     push r12
@@ -330,7 +328,6 @@ END_FUNC read_awaitable_dealloc
 ;; ============================================================================
 
 ;; stream_writer_new(int fd) -> AsyncStreamWriter*
-global stream_writer_new
 DEF_FUNC stream_writer_new
     push rbx
     mov ebx, edi               ; save fd
@@ -356,7 +353,6 @@ DEF_FUNC_BARE stream_writer_dealloc
 END_FUNC stream_writer_dealloc
 
 ;; stream_writer_getattr(self, name) -> fat value
-global stream_writer_getattr
 DEF_FUNC stream_writer_getattr
     push rbx
     push r12
@@ -716,7 +712,6 @@ END_FUNC accept_awaitable_dealloc
 ;; Returns a ConnectAwaitable
 ;; ============================================================================
 OC_FRAME equ 32
-global asyncio_open_connection_func
 DEF_FUNC asyncio_open_connection_func, OC_FRAME
     push rbx
     push r12
@@ -750,7 +745,7 @@ DEF_FUNC asyncio_open_connection_func, OC_FRAME
     xchg al, ah                ; swap bytes for 16-bit
     mov [rsp + 2], ax          ; sin_port (network byte order)
     ; sin_addr = INADDR_ANY = 0 for now (connect to localhost = 127.0.0.1)
-    mov dword [rsp + 4], 0x0100007F  ; 127.0.0.1 in network byte order
+    mov dword [rsp + 4], 0x0100007f  ; 127.0.0.1 in network byte order
     mov qword [rsp + 8], 0    ; sin_zero
 
     ; Set non-blocking
@@ -801,7 +796,6 @@ END_FUNC asyncio_open_connection_func
 ;; Returns a ConnectAwaitable that resolves to (reader, writer) on accept.
 ;; ============================================================================
 SS_FRAME equ 48
-global asyncio_start_server_func
 DEF_FUNC asyncio_start_server_func, SS_FRAME
     push rbx
     push r12

@@ -1026,12 +1026,12 @@ DEF_FUNC par_utf8_emit, 16
 
     mov rsi, r12
     shr rsi, 18
-    or esi, 0xF0
+    or esi, 0xf0
     mov rdi, rbx
     call buf_push_u8
     mov rsi, r12
     shr rsi, 12
-    and esi, 0x3F
+    and esi, 0x3f
     or esi, 0x80
     mov rdi, rbx
     call buf_push_u8
@@ -1039,13 +1039,13 @@ DEF_FUNC par_utf8_emit, 16
 .three:
     mov rsi, r12
     shr rsi, 12
-    or esi, 0xE0
+    or esi, 0xe0
     mov rdi, rbx
     call buf_push_u8
 .tail2:
     mov rsi, r12
     shr rsi, 6
-    and esi, 0x3F
+    and esi, 0x3f
     or esi, 0x80
     mov rdi, rbx
     call buf_push_u8
@@ -1053,12 +1053,12 @@ DEF_FUNC par_utf8_emit, 16
 .two:
     mov rsi, r12
     shr rsi, 6
-    or esi, 0xC0
+    or esi, 0xc0
     mov rdi, rbx
     call buf_push_u8
 .tail1:
     mov rsi, r12
-    and esi, 0x3F
+    and esi, 0x3f
     or esi, 0x80
     mov rdi, rbx
     call buf_push_u8

@@ -97,7 +97,6 @@ END_FUNC int_from_i64
 ;; PRESERVES EVERY REGISTER, so INT_NEED_MPZ can be dropped in front of any
 ;; .mpz access without auditing what is live around it.
 ;; ============================================================================
-global int_promote_mpz
 DEF_FUNC int_promote_mpz
     push rax
     push rcx
@@ -131,7 +130,6 @@ END_FUNC int_promote_mpz
 ;; int_new_compact(int64_t val) -> rax: PyIntObject*
 ;; Heap integer with no GMP init and no limb allocation.
 ;; ============================================================================
-global int_new_compact
 DEF_FUNC int_new_compact
     push rbx
     push r12
@@ -185,7 +183,6 @@ IB_BUF    equ 32         ; cleaned buffer ptr
 IB_OBJ    equ 40         ; allocated PyIntObject ptr
 IB_FRAME  equ 48
 
-global int_from_cstr_base
 DEF_FUNC int_from_cstr_base, IB_FRAME
 
     mov [rbp - IB_SRC], rdi
@@ -208,13 +205,13 @@ DEF_FUNC int_from_cstr_base, IB_FRAME
     cmp al, 11            ; \v
     je .skip_ws_1
     ; Check for UTF-8 multi-byte Unicode whitespace
-    cmp al, 0xC2
+    cmp al, 0xc2
     je .skip_ws_2byte
-    cmp al, 0xE2
+    cmp al, 0xe2
     je .skip_ws_3byte_e2
-    cmp al, 0xE3
+    cmp al, 0xe3
     je .skip_ws_3byte_e3
-    cmp al, 0xE1
+    cmp al, 0xe1
     je .skip_ws_3byte_e1
     jmp .ws_done
 .skip_ws_1:
@@ -222,7 +219,7 @@ DEF_FUNC int_from_cstr_base, IB_FRAME
     jmp .skip_ws
 .skip_ws_2byte:
     ; U+00A0 (NBSP): C2 A0
-    cmp byte [rdi + 1], 0xA0
+    cmp byte [rdi + 1], 0xa0
     jne .ws_done
     add rdi, 2
     jmp .skip_ws
@@ -237,24 +234,24 @@ DEF_FUNC int_from_cstr_base, IB_FRAME
     cmp cl, 0x81
     jne .ws_done
     ; E2 81 xx: check for U+205F (E2 81 9F)
-    cmp byte [rdi + 2], 0x9F
+    cmp byte [rdi + 2], 0x9f
     jne .ws_done
     add rdi, 3
     jmp .skip_ws
 .skip_ws_e2_80:
     movzx ecx, byte [rdi + 2]
-    ; U+2000-U+200A: third byte 0x80-0x8A
+    ; U+2000-U+200A: third byte 0x80-0x8a
     cmp cl, 0x80
     jb .ws_done
-    cmp cl, 0x8A
+    cmp cl, 0x8a
     jbe .skip_ws_3
-    ; U+2028-U+2029: third byte 0xA8-0xA9
-    cmp cl, 0xA8
+    ; U+2028-U+2029: third byte 0xa8-0xa9
+    cmp cl, 0xa8
     je .skip_ws_3
-    cmp cl, 0xA9
+    cmp cl, 0xa9
     je .skip_ws_3
-    ; U+202F: third byte 0xAF
-    cmp cl, 0xAF
+    ; U+202F: third byte 0xaf
+    cmp cl, 0xaf
     je .skip_ws_3
     jmp .ws_done
 .skip_ws_3byte_e3:
@@ -267,7 +264,7 @@ DEF_FUNC int_from_cstr_base, IB_FRAME
     jmp .skip_ws
 .skip_ws_3byte_e1:
     ; U+1680 (OGHAM SPACE): E1 9A 80
-    cmp byte [rdi + 1], 0x9A
+    cmp byte [rdi + 1], 0x9a
     jne .ws_done
     cmp byte [rdi + 2], 0x80
     jne .ws_done
@@ -459,13 +456,13 @@ DEF_FUNC int_from_cstr_base, IB_FRAME
     cmp r8b, 11
     je .copy_trail_ws
     ; Check for UTF-8 Unicode whitespace
-    cmp r8b, 0xC2
+    cmp r8b, 0xc2
     je .copy_trail_utf8_c2
-    cmp r8b, 0xE2
+    cmp r8b, 0xe2
     je .copy_trail_utf8_e2
-    cmp r8b, 0xE3
+    cmp r8b, 0xe3
     je .copy_trail_utf8_e3
-    cmp r8b, 0xE1
+    cmp r8b, 0xe1
     je .copy_trail_utf8_e1
 
     ; Check for underscore
@@ -473,9 +470,9 @@ DEF_FUNC int_from_cstr_base, IB_FRAME
     je .copy_underscore
 
     ; Check for Unicode digit (multi-byte UTF-8)
-    cmp r8b, 0xD9
+    cmp r8b, 0xd9
     je .copy_digit_arabic
-    cmp r8b, 0xE0
+    cmp r8b, 0xe0
     je .copy_digit_3byte
 
     ; Regular digit: copy it
@@ -488,12 +485,12 @@ DEF_FUNC int_from_cstr_base, IB_FRAME
 .copy_digit_arabic:
     ; Arabic-Indic digits U+0660-0669: D9 A0-A9 → '0'-'9'
     movzx r9d, byte [rsi + 1]
-    cmp r9b, 0xA0
+    cmp r9b, 0xa0
     jb .copy_not_ws         ; not a digit, treat as regular byte
-    cmp r9b, 0xA9
+    cmp r9b, 0xa9
     ja .copy_not_ws
-    ; Convert to ASCII: r9b - 0xA0 + '0'
-    sub r9b, 0xA0
+    ; Convert to ASCII: r9b - 0xa0 + '0'
+    sub r9b, 0xa0
     add r9b, '0'
     mov [rdi + rcx], r9b
     inc rcx
@@ -503,15 +500,15 @@ DEF_FUNC int_from_cstr_base, IB_FRAME
 
 .copy_digit_3byte:
     ; Devanagari digits U+0966-096F: E0 A5 A6-AF → '0'-'9'
-    cmp byte [rsi + 1], 0xA5
+    cmp byte [rsi + 1], 0xa5
     jne .copy_not_ws        ; not Devanagari, treat as regular byte
     movzx r9d, byte [rsi + 2]
-    cmp r9b, 0xA6
+    cmp r9b, 0xa6
     jb .copy_not_ws
-    cmp r9b, 0xAF
+    cmp r9b, 0xaf
     ja .copy_not_ws
-    ; Convert to ASCII: r9b - 0xA6 + '0'
-    sub r9b, 0xA6
+    ; Convert to ASCII: r9b - 0xa6 + '0'
+    sub r9b, 0xa6
     add r9b, '0'
     mov [rdi + rcx], r9b
     inc rcx
@@ -532,7 +529,7 @@ DEF_FUNC int_from_cstr_base, IB_FRAME
 
 .copy_trail_utf8_c2:
     ; U+00A0 (NBSP): C2 A0
-    cmp byte [rsi + 1], 0xA0
+    cmp byte [rsi + 1], 0xa0
     jne .copy_not_ws
     add rsi, 2
     jmp .trail_loop
@@ -543,7 +540,7 @@ DEF_FUNC int_from_cstr_base, IB_FRAME
     je .copy_trail_e2_80
     cmp r9b, 0x81
     jne .copy_not_ws
-    cmp byte [rsi + 2], 0x9F
+    cmp byte [rsi + 2], 0x9f
     jne .copy_not_ws
     add rsi, 3
     jmp .trail_loop
@@ -551,13 +548,13 @@ DEF_FUNC int_from_cstr_base, IB_FRAME
     movzx r9d, byte [rsi + 2]
     cmp r9b, 0x80
     jb .copy_not_ws
-    cmp r9b, 0x8A
+    cmp r9b, 0x8a
     jbe .copy_trail_utf8_3
-    cmp r9b, 0xA8
+    cmp r9b, 0xa8
     je .copy_trail_utf8_3
-    cmp r9b, 0xA9
+    cmp r9b, 0xa9
     je .copy_trail_utf8_3
-    cmp r9b, 0xAF
+    cmp r9b, 0xaf
     je .copy_trail_utf8_3
     jmp .copy_not_ws
 .copy_trail_utf8_e3:
@@ -570,7 +567,7 @@ DEF_FUNC int_from_cstr_base, IB_FRAME
     jmp .trail_loop
 .copy_trail_utf8_e1:
     ; U+1680: E1 9A 80
-    cmp byte [rsi + 1], 0x9A
+    cmp byte [rsi + 1], 0x9a
     jne .copy_not_ws
     cmp byte [rsi + 2], 0x80
     jne .copy_not_ws
@@ -607,18 +604,18 @@ DEF_FUNC int_from_cstr_base, IB_FRAME
     cmp r8b, 11
     je .trail_next
     ; Check for UTF-8 Unicode whitespace in trailing
-    cmp r8b, 0xC2
+    cmp r8b, 0xc2
     je .trail_utf8_c2
-    cmp r8b, 0xE2
+    cmp r8b, 0xe2
     je .trail_utf8_e2
-    cmp r8b, 0xE3
+    cmp r8b, 0xe3
     je .trail_utf8_e3
-    cmp r8b, 0xE1
+    cmp r8b, 0xe1
     je .trail_utf8_e1
     ; Non-whitespace after whitespace: error
     jmp .parse_error
 .trail_utf8_c2:
-    cmp byte [rsi + 1], 0xA0
+    cmp byte [rsi + 1], 0xa0
     jne .parse_error
     add rsi, 2
     jmp .trail_loop
@@ -628,7 +625,7 @@ DEF_FUNC int_from_cstr_base, IB_FRAME
     je .trail_e2_80
     cmp r9b, 0x81
     jne .parse_error
-    cmp byte [rsi + 2], 0x9F
+    cmp byte [rsi + 2], 0x9f
     jne .parse_error
     add rsi, 3
     jmp .trail_loop
@@ -636,13 +633,13 @@ DEF_FUNC int_from_cstr_base, IB_FRAME
     movzx r9d, byte [rsi + 2]
     cmp r9b, 0x80
     jb .parse_error
-    cmp r9b, 0x8A
+    cmp r9b, 0x8a
     jbe .trail_utf8_3
-    cmp r9b, 0xA8
+    cmp r9b, 0xa8
     je .trail_utf8_3
-    cmp r9b, 0xA9
+    cmp r9b, 0xa9
     je .trail_utf8_3
-    cmp r9b, 0xAF
+    cmp r9b, 0xaf
     je .trail_utf8_3
     jmp .parse_error
 .trail_utf8_e3:
@@ -653,7 +650,7 @@ DEF_FUNC int_from_cstr_base, IB_FRAME
     add rsi, 3
     jmp .trail_loop
 .trail_utf8_e1:
-    cmp byte [rsi + 1], 0x9A
+    cmp byte [rsi + 1], 0x9a
     jne .parse_error
     cmp byte [rsi + 2], 0x80
     jne .parse_error
@@ -865,7 +862,6 @@ IBS_BASE  equ 8
 IBS_UPPER equ 16
 IBS_RSP   equ 24
 IBS_FRAME equ 32
-global int_base_str
 DEF_FUNC int_base_str, IBS_FRAME
     push rbx
     push r12
@@ -1098,7 +1094,6 @@ END_FUNC int_repr
 ;; Shared by int_hash, obj_hash and builtin_hash so that all three agree; a
 ;; disagreement silently corrupts dict and set lookups.
 ;; ============================================================================
-global int_hash_i64
 DEF_FUNC_BARE int_hash_i64
     mov rcx, rdi
     sar rcx, 63                 ; rcx = sign mask (0 or -1)
@@ -1875,7 +1870,6 @@ END_FUNC int_neg
 ;; subclasses.  Builtins that used to test `tag == TAG_SMALLINT` need this
 ;; instead, or they reject every integer that lives on the heap.
 ;; ============================================================================
-global int_is_integer
 DEF_FUNC_BARE int_is_integer
     cmp edx, TAG_SMALLINT
     je .iii_yes
@@ -1901,7 +1895,6 @@ DEF_FUNC_BARE int_is_integer
     ret
 END_FUNC int_is_integer
 
-global int_unwrap
 DEF_FUNC_BARE int_unwrap
     ; rdi = payload, edx = tag -> rdi = unwrapped payload, edx = unwrapped tag
     ;
@@ -3007,7 +3000,7 @@ END_FUNC int_true_divide
 section .data
 
 align 8
-one_double: dq 0x3FF0000000000000  ; 1.0
+one_double: dq 0x3ff0000000000000  ; 1.0
 
 int_name_str: db "int", 0
 

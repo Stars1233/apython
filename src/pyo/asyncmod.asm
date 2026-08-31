@@ -534,7 +534,6 @@ END_FUNC asyncio_get_running_loop_func
 ;; asyncio_module_create() -> PyObject*
 ;; Creates and returns the asyncio module.
 ;; ============================================================================
-global asyncio_module_create
 DEF_FUNC asyncio_module_create
     push rbx
     push r12
@@ -729,7 +728,7 @@ END_FUNC asyncio_module_create
 ;; ============================================================================
 section .rodata
 align 8
-async_1e9: dq 0x41CDCD6500000000   ; 1e9 as IEEE 754 double
+async_1e9: dq 0x41cdcd6500000000   ; 1e9 as IEEE 754 double
 
 am_asyncio:          db "asyncio", 0
 am_run:              db "run", 0

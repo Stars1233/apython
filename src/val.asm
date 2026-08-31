@@ -141,7 +141,7 @@ DEF_FUNC val_unpack
     jae .int
 
     cmp ecx, VH_F64_MAX
-    jbe .float                  ; high16 in [0x0001, 0xFFF1]
+    jbe .float                  ; high16 in [0x0001, 0xfff1]
 
     cmp ecx, VH_SLEEP
     je .sleep

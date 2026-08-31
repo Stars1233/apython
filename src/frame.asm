@@ -249,7 +249,6 @@ END_FUNC frame_free
 ;; frame_pool_drain()
 ;; Free all entries in all pool freelists. Called at exit.
 ;; ============================================================================
-global frame_pool_drain
 DEF_FUNC frame_pool_drain
     push rbx
     push r12        ; alignment

@@ -527,7 +527,6 @@ END_FUNC exc_str
 
 ; exc_getattr(PyExceptionObject *exc, PyStrObject *name) -> PyObject* or NULL
 ; Handle attribute access on exception objects: args, __context__, __cause__, etc.
-global exc_getattr
 DEF_FUNC exc_getattr
     push rbx
     push r12
@@ -866,7 +865,6 @@ END_FUNC exc_getattr
 ; exc_setattr(PyExceptionObject *exc, PyStrObject *name, PyObject *value, int value_tag)
 ; Store a custom attribute on an exception object using exc_dict.
 ; rdi = exc, rsi = name, rdx = value, ecx = value_tag
-global exc_setattr
 DEF_FUNC exc_setattr
     push rbx
     mov rbx, rdi            ; exc
@@ -977,7 +975,6 @@ END_FUNC exc_isinstance
 ; type_is_exc_subclass(PyTypeObject *type) -> int (0/1)
 ; Walk tp_base chain checking for a type with tp_dealloc == exc_dealloc.
 ; Detects user-defined exception classes (e.g., class MyError(Exception): pass)
-global type_is_exc_subclass
 DEF_FUNC_BARE type_is_exc_subclass
     lea rdx, [rel exc_dealloc]
     lea rcx, [rel eg_dealloc]
@@ -1112,7 +1109,6 @@ END_FUNC exc_type_call
 
 ; traceback_new() -> PyTracebackObject*
 ; Allocates a new traceback with tb_next=NULL, tb_lineno=0.
-global traceback_new
 DEF_FUNC traceback_new
     mov edi, PyTracebackObject_size
     call ap_malloc
@@ -1129,7 +1125,6 @@ END_FUNC traceback_new
 
 ; traceback_dealloc(PyTracebackObject *tb)
 ; XDECREF tb_next, free self.
-global traceback_dealloc
 DEF_FUNC traceback_dealloc
     push rbx
     push r12
@@ -1162,7 +1157,6 @@ END_FUNC traceback_dealloc
 
 ; traceback_getattr(PyTracebackObject *tb, PyStrObject *name) -> (rax, edx)
 ; Handles tb_lineno, tb_next, tb_frame attributes.
-global traceback_getattr
 DEF_FUNC traceback_getattr
     push rbx
     push r12

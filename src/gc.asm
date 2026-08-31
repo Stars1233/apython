@@ -923,7 +923,7 @@ DEF_FUNC set_traverse
     jz .st_done
 .st_loop:
     dec r13
-    ; Check for empty (key_tag == 0) or tombstone (key_tag == 0xDEAD)
+    ; Check for empty (key_tag == 0) or tombstone (key_tag == 0xdead)
     SET_ENTRY_CLASSIFY r12, .st_next, .st_next
 
     ; Visit key

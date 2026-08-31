@@ -515,7 +515,6 @@ TIS_ENTRY equ 16
 TIS_FOUND equ 24
 TIS_FRAME equ 32
 
-global type_install_slots
 DEF_FUNC type_install_slots, TIS_FRAME
     push rbx
     push r12

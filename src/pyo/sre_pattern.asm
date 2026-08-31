@@ -285,7 +285,7 @@ DEF_FUNC sre_pattern_match_method
     mov rdx, rcx               ; rdx = pos
 
     ; endpos (default large)
-    mov rcx, 0x7FFFFFFFFFFFFFFF
+    mov rcx, 0x7fffffffffffffff
     cmp r8, 3
     jb .match_no_endpos
     mov rdi, [r12 + 16]
@@ -336,7 +336,7 @@ DEF_FUNC sre_pattern_search_method
 .search_no_pos:
 
     ; endpos (default max)
-    mov rcx, 0x7FFFFFFFFFFFFFFF
+    mov rcx, 0x7fffffffffffffff
     cmp r13, 3
     jb .search_no_endpos
     mov rdi, [r12 + 16]
@@ -385,7 +385,7 @@ DEF_FUNC sre_pattern_fullmatch_method
 .fm_no_pos:
 
     ; endpos (default max)
-    mov rcx, 0x7FFFFFFFFFFFFFFF
+    mov rcx, 0x7fffffffffffffff
     cmp r13, 3
     jb .fm_no_endpos
     mov rdi, [r12 + 16]
@@ -414,7 +414,6 @@ END_FUNC sre_pattern_fullmatch_method
 ; Extracts substring handling both ASCII and codepoint modes.
 ; Returns (0, TAG_NONE) if start or end is -1.
 ; ============================================================================
-global sre_substr_from_state
 DEF_FUNC sre_substr_from_state
     ; Check for unmatched group
     cmp rsi, -1
@@ -540,7 +539,7 @@ DEF_FUNC sre_pattern_findall_method, FA_FRAME
     push rcx                   ; save pos
 
     ; endpos (default max)
-    mov r8, 0x7FFFFFFFFFFFFFFF
+    mov r8, 0x7fffffffffffffff
     cmp rdx, 3
     jb .fa_no_endpos
     push rdi
@@ -836,7 +835,7 @@ DEF_FUNC sre_pattern_sub_method, SUB_FRAME
     mov rsi, [rbp - SUB_PAT]
     mov rdx, [rbp - SUB_STR]
     xor ecx, ecx
-    mov r8, 0x7FFFFFFFFFFFFFFF
+    mov r8, 0x7fffffffffffffff
     call sre_state_init
 
 .sub_loop:
@@ -1116,7 +1115,7 @@ DEF_FUNC sre_pattern_subn_method, SN_FRAME
     mov rsi, [rbp - SN_PAT]
     mov rdx, [rbp - SN_STR]
     xor ecx, ecx
-    mov r8, 0x7FFFFFFFFFFFFFFF
+    mov r8, 0x7fffffffffffffff
     call sre_state_init
 
 .subn_loop:
@@ -1371,7 +1370,7 @@ DEF_FUNC sre_pattern_split_method, SP_FRAME
     mov rsi, [rbp - SP_PAT]
     mov rdx, [rbp - SP_STR]
     xor ecx, ecx
-    mov r8, 0x7FFFFFFFFFFFFFFF
+    mov r8, 0x7fffffffffffffff
     call sre_state_init
 
 .split_loop:
@@ -1757,7 +1756,6 @@ END_FUNC sre_pattern_getattr
 ; ============================================================================
 ; Helper: strcmp for attribute lookup
 ; ============================================================================
-global sre_strcmp
 DEF_FUNC sre_strcmp
     ; rdi = str1, rsi = str2
 .cmp_loop:
@@ -1942,7 +1940,7 @@ DEF_FUNC sre_pattern_finditer_method
 .fi_no_pos:
 
     ; endpos (default large)
-    mov rcx, 0x7FFFFFFFFFFFFFFF
+    mov rcx, 0x7fffffffffffffff
     cmp r13, 3
     jb .fi_no_endpos
     mov rdi, [r12 + 16]

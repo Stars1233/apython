@@ -609,7 +609,6 @@ PRS_LIST  equ 16
 PRS_FIRST equ 24
 PRS_FLAT  equ 32
 PRS_FRAME equ 32
-global prep_reraise_star
 DEF_FUNC prep_reraise_star, PRS_FRAME
     push rbx
     push r12

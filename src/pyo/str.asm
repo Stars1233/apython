@@ -38,23 +38,22 @@ extern obj_dealloc
 ; did before there were two lengths at all.  bytes.decode() does not validate,
 ; so such a string is reachable.
 ; ----------------------------------------------------------------------------
-global str_cp_width
 DEF_FUNC_BARE str_cp_width
     movzx ecx, byte [rdi + rdx]
     cmp cl, 0x80
     jb .one                         ; ASCII
-    cmp cl, 0xC0
+    cmp cl, 0xc0
     jb .one                         ; a continuation byte with no lead
     mov eax, 2
-    cmp cl, 0xE0
+    cmp cl, 0xe0
     jb .have_width
     mov eax, 3
-    cmp cl, 0xF0
+    cmp cl, 0xf0
     jb .have_width
     mov eax, 4
-    cmp cl, 0xF8
+    cmp cl, 0xf8
     jb .have_width
-    jmp .one                        ; 0xF8..0xFF is not a lead byte
+    jmp .one                        ; 0xf8..0xff is not a lead byte
 
 .have_width:
     ; Truncate at the end of the string, or at the first byte that is not a
@@ -71,7 +70,7 @@ DEF_FUNC_BARE str_cp_width
     jge .done
     lea r10, [rdx + r9]
     movzx ecx, byte [rdi + r10]
-    and cl, 0xC0
+    and cl, 0xc0
     cmp cl, 0x80
     jne .truncate
     inc r9
@@ -98,7 +97,6 @@ END_FUNC str_cp_width
 ; (`cmp ob_size, ob_length`); it was never applied to the function that
 ; *establishes* ob_length, which is the one that cannot assume it.
 ; ----------------------------------------------------------------------------
-global str_count_codepoints
 DEF_FUNC str_count_codepoints
     push rbx
     push r12
@@ -162,7 +160,6 @@ END_FUNC str_count_codepoints
 ; ----------------------------------------------------------------------------
 ; str_set_length(rdi = PyStrObject*) -- fill ob_length from the bytes.
 ; ----------------------------------------------------------------------------
-global str_set_length
 DEF_FUNC str_set_length
     push rbx
     mov rbx, rdi
@@ -182,7 +179,6 @@ END_FUNC str_set_length
 ; The inverse of str_cp_offset, for the methods that search in bytes and have
 ; to report a position in code points.
 ; ----------------------------------------------------------------------------
-global str_byte_to_cp
 DEF_FUNC str_byte_to_cp
     mov rax, [rdi + PyStrObject.ob_size]
     cmp rax, [rdi + PyStrObject.ob_length]
@@ -230,7 +226,6 @@ END_FUNC str_byte_to_cp
 ; str_cp_offset(rdi = PyStrObject*, rsi = code point index) -> rax = byte offset
 ; The index is not bounds-checked; an index at or past the end gives ob_size.
 ; ----------------------------------------------------------------------------
-global str_cp_offset
 DEF_FUNC str_cp_offset
     mov rax, [rdi + PyStrObject.ob_size]
     cmp rax, [rdi + PyStrObject.ob_length]
@@ -302,7 +297,6 @@ SSW_OUT   equ 32
 SSW_START equ 40
 SSW_END   equ 48
 SSW_FRAME equ 48            ; + 0 pushes = 48
-global str_search_window
 DEF_FUNC str_search_window, SSW_FRAME
     mov [rbp - SSW_SELF], rdi
     mov [rbp - SSW_ARGS], rsi
@@ -400,7 +394,6 @@ END_FUNC str_search_window
 ; ----------------------------------------------------------------------------
 CI_BUF   equ 48
 CI_FRAME equ 64
-global codec_id
 DEF_FUNC codec_id, CI_FRAME
     push rbx
     ; ap_strcmp compares eight bytes at a time, so the buffer has to be zeroed
@@ -684,7 +677,7 @@ DEF_FUNC str_repr
     je .sr_esc_r
     cmp al, 9                ; tab
     je .sr_esc_t
-    cmp al, 0x5C             ; backslash
+    cmp al, 0x5c             ; backslash
     je .sr_esc_bs
     cmp eax, r14d            ; the delimiter in use
     je .sr_esc_sq
@@ -700,35 +693,35 @@ DEF_FUNC str_repr
     jmp .sr_loop
 
 .sr_esc_n:
-    mov byte [rdi], 0x5C     ; backslash
+    mov byte [rdi], 0x5c     ; backslash
     mov byte [rdi + 1], 'n'
     add rdi, 2
     inc rcx
     jmp .sr_loop
 
 .sr_esc_r:
-    mov byte [rdi], 0x5C
+    mov byte [rdi], 0x5c
     mov byte [rdi + 1], 'r'
     add rdi, 2
     inc rcx
     jmp .sr_loop
 
 .sr_esc_t:
-    mov byte [rdi], 0x5C
+    mov byte [rdi], 0x5c
     mov byte [rdi + 1], 't'
     add rdi, 2
     inc rcx
     jmp .sr_loop
 
 .sr_esc_bs:
-    mov byte [rdi], 0x5C
-    mov byte [rdi + 1], 0x5C
+    mov byte [rdi], 0x5c
+    mov byte [rdi + 1], 0x5c
     add rdi, 2
     inc rcx
     jmp .sr_loop
 
 .sr_esc_sq:
-    mov byte [rdi], 0x5C
+    mov byte [rdi], 0x5c
     mov [rdi + 1], r14b      ; the delimiter in use
     add rdi, 2
     inc rcx
@@ -738,7 +731,7 @@ DEF_FUNC str_repr
     ; \xNN, for a control character with no letter escape of its own.  These
     ; used to be copied through raw, so repr("\x00") emitted an actual NUL --
     ; unreadable, and not something eval() could read back.
-    mov byte [rdi], 0x5C
+    mov byte [rdi], 0x5c
     mov byte [rdi + 1], 'x'
     lea r8, [rel sr_hexdigits]
     mov edx, eax
@@ -1458,7 +1451,7 @@ DEF_FUNC str_mod, SM_FRAME
     test rax, rax
     jz .hex_reverse
     mov rdx, rax
-    and edx, 0xF
+    and edx, 0xf
     cmp dl, 10
     jb .hex_dec_digit
     add dl, ('a' - 10)
@@ -2178,7 +2171,6 @@ extern iter_self
 ;; str_tp_iter(PyStrObject *self) -> PyStrIterObject*
 ;; tp_iter for str type: create a new string iterator
 ;; ============================================================================
-global str_tp_iter
 DEF_FUNC str_tp_iter
     push rbx
 
@@ -2204,7 +2196,6 @@ END_FUNC str_tp_iter
 ;; str_iter_next(PyStrIterObject *self) -> PyObject* or NULL
 ;; Return next character as a 1-char string, or NULL if exhausted
 ;; ============================================================================
-global str_iter_next
 DEF_FUNC str_iter_next
     push rbx
 
@@ -2247,7 +2238,6 @@ END_FUNC str_iter_next
 
 ;; str_iter_dealloc(PyObject *self)
 ;; ============================================================================
-global str_iter_dealloc
 DEF_FUNC str_iter_dealloc
     push rbx
     mov rbx, rdi

@@ -615,7 +615,6 @@ CB_FRAME  equ 88          ; + 3 pushes = 112
 CDS_UNIT  equ 16
 CDS_LINE  equ 24
 CDS_FRAME equ 40          ; + 1 push = 56
-global cg_docstring
 DEF_FUNC cg_docstring, CDS_FRAME
     push rbx
     mov rbx, rdi

@@ -331,7 +331,7 @@ bool_type:
 align 8
 global bool_true
 bool_true:
-    dq 0x7FFFFFFFFFFFFFFF   ; ob_refcnt (immortal)
+    dq 0x7fffffffffffffff   ; ob_refcnt (immortal)
     dq bool_type            ; ob_type
     ; mpz_t inline: _mp_alloc(4 bytes), _mp_size(4 bytes), _mp_d(8 bytes)
     dd 0                    ; _mp_alloc (set by gmpz_init)
@@ -344,7 +344,7 @@ bool_true:
 align 8
 global bool_false
 bool_false:
-    dq 0x7FFFFFFFFFFFFFFF   ; ob_refcnt (immortal)
+    dq 0x7fffffffffffffff   ; ob_refcnt (immortal)
     dq bool_type            ; ob_type
     dd 0                    ; _mp_alloc
     dd 0                    ; _mp_size
@@ -398,7 +398,7 @@ END_FUNC none_repr
 ; none_hash(PyObject *self) -> int64
 ; Returns a fixed hash value for None
 DEF_FUNC_BARE none_hash
-    mov rax, 0x48FA9B36     ; arbitrary fixed hash
+    mov rax, 0x48fa9b36     ; arbitrary fixed hash
     ret
 END_FUNC none_hash
 
@@ -490,7 +490,7 @@ none_type:
 align 8
 global none_singleton
 none_singleton:
-    dq 0x7FFFFFFFFFFFFFFF   ; ob_refcnt (max value, never reaches zero)
+    dq 0x7fffffffffffffff   ; ob_refcnt (max value, never reaches zero)
     dq none_type            ; ob_type
 
 ; ============================================================================
@@ -544,7 +544,7 @@ notimpl_type:
 align 8
 global notimpl_singleton
 notimpl_singleton:
-    dq 0x7FFFFFFFFFFFFFFF   ; ob_refcnt (max value, never reaches zero)
+    dq 0x7fffffffffffffff   ; ob_refcnt (max value, never reaches zero)
     dq notimpl_type         ; ob_type
 
 ; ============================================================================
@@ -598,5 +598,5 @@ ellipsis_type:
 align 8
 global ellipsis_singleton
 ellipsis_singleton:
-    dq 0x7FFFFFFFFFFFFFFF   ; ob_refcnt (max value, never reaches zero)
+    dq 0x7fffffffffffffff   ; ob_refcnt (max value, never reaches zero)
     dq ellipsis_type        ; ob_type

@@ -68,7 +68,6 @@ section .text
 ;; object.__new__ and produced an *instance* of the metaclass rather than a
 ;; class.  ABCMeta is written exactly that way, so abc.py depends on it.
 ;; ============================================================================
-global type_method_new
 DEF_FUNC type_method_new
     push rbx
     push r12
@@ -291,7 +290,6 @@ global class_kwvalues_pending
 class_kwvalues_pending: dq 0
 
 section .text
-global type_from_parts
 DEF_FUNC type_from_parts
     push rbx
     push r12

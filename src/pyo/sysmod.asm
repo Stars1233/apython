@@ -148,7 +148,7 @@ DEF_FUNC sys_module_init, 32
     call obj_decref
 
     ; --- sys.maxsize ---
-    mov rdi, 0x7FFFFFFFFFFFFFFF
+    mov rdi, 0x7fffffffffffffff
     call int_from_i64
     push rdx                   ; save value tag
     push rax                   ; save value payload

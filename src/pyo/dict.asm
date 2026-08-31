@@ -67,7 +67,6 @@ END_FUNC dict_new
 ;; Allocates the dense entry array (zeroed, so the unused tail reads as empty)
 ;; and the sparse index array (all DICT_IX_EMPTY).  Sets .capacity.
 ;; ============================================================================
-global dict_alloc_tables
 DEF_FUNC dict_alloc_tables
     push rbx
     push r12
@@ -110,7 +109,6 @@ END_FUNC dict_alloc_tables
 extern kw_names_pending
 extern dict_method_update
 
-global dict_type_call
 DEF_FUNC dict_type_call
     push rbx
     push r12
@@ -358,7 +356,6 @@ DL_MASK  equ 32
 DL_SLOT  equ 40
 DL_FREE  equ 48
 DL_FRAME equ 64
-global dict_lookup
 DEF_FUNC dict_lookup, DL_FRAME
     push rbx
     push r12
@@ -970,7 +967,6 @@ END_FUNC dict_contains
 ;; dict_view_new(rdi=dict, rsi=kind, rdx=type_ptr) -> PyDictViewObject*
 ;; Create a new dict view. kind: 0=keys, 1=values, 2=items
 ;; ============================================================================
-global dict_view_new
 DEF_FUNC dict_view_new
     push rbx
     push r12
@@ -1033,7 +1029,6 @@ END_FUNC dict_view_len
 ;; dict_view_iter(rdi=view) -> PyDictIterObject*
 ;; Create an iterator for this view, using the view's kind.
 ;; ============================================================================
-global dict_view_iter
 DEF_FUNC dict_view_iter
     push rbx
     push r12

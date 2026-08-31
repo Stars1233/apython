@@ -488,7 +488,7 @@ DEF_FUNC_LOCAL bytes_repr_impl, 1024
     cmp eax, 0x27              ; where its bytes_repr does not
     je .br_escape_squote
 .br_not_squote:
-    cmp eax, 0x5C              ; backslash
+    cmp eax, 0x5c              ; backslash
     je .br_escape_bs
 
     ; Printable: emit directly
@@ -498,22 +498,22 @@ DEF_FUNC_LOCAL bytes_repr_impl, 1024
     jmp .br_loop
 
 .br_escape_squote:
-    mov byte [r13 + rcx], 0x5C     ; backslash
+    mov byte [r13 + rcx], 0x5c     ; backslash
     mov byte [r13 + rcx + 1], 0x27
     add ecx, 2
     inc edx
     jmp .br_loop
 
 .br_escape_quote:
-    mov byte [r13 + rcx], 0x5C     ; backslash
+    mov byte [r13 + rcx], 0x5c     ; backslash
     mov [r13 + rcx + 1], r15b      ; the delimiter in use
     add ecx, 2
     inc edx
     jmp .br_loop
 
 .br_escape_bs:
-    mov byte [r13 + rcx], 0x5C
-    mov byte [r13 + rcx + 1], 0x5C
+    mov byte [r13 + rcx], 0x5c
+    mov byte [r13 + rcx + 1], 0x5c
     add ecx, 2
     inc edx
     jmp .br_loop
@@ -521,9 +521,9 @@ DEF_FUNC_LOCAL bytes_repr_impl, 1024
 .br_hex:
     ; Non-printable: emit \xHH
     ; Common escapes first
-    cmp eax, 0x0A
+    cmp eax, 0x0a
     je .br_escape_n
-    cmp eax, 0x0D
+    cmp eax, 0x0d
     je .br_escape_r
     cmp eax, 0x09
     je .br_escape_t
@@ -531,7 +531,7 @@ DEF_FUNC_LOCAL bytes_repr_impl, 1024
     je .br_escape_0
 
     ; General \xHH
-    mov byte [r13 + rcx], 0x5C     ; backslash
+    mov byte [r13 + rcx], 0x5c     ; backslash
     mov byte [r13 + rcx + 1], 'x'
     push rdx
     ; High nibble
@@ -541,7 +541,7 @@ DEF_FUNC_LOCAL bytes_repr_impl, 1024
     movzx edx, byte [rsi + rdx]
     mov [r13 + rcx + 2], dl
     ; Low nibble
-    and eax, 0x0F
+    and eax, 0x0f
     movzx eax, byte [rsi + rax]
     mov [r13 + rcx + 3], al
     pop rdx
@@ -550,25 +550,25 @@ DEF_FUNC_LOCAL bytes_repr_impl, 1024
     jmp .br_loop
 
 .br_escape_n:
-    mov byte [r13 + rcx], 0x5C
+    mov byte [r13 + rcx], 0x5c
     mov byte [r13 + rcx + 1], 'n'
     add ecx, 2
     inc edx
     jmp .br_loop
 .br_escape_r:
-    mov byte [r13 + rcx], 0x5C
+    mov byte [r13 + rcx], 0x5c
     mov byte [r13 + rcx + 1], 'r'
     add ecx, 2
     inc edx
     jmp .br_loop
 .br_escape_t:
-    mov byte [r13 + rcx], 0x5C
+    mov byte [r13 + rcx], 0x5c
     mov byte [r13 + rcx + 1], 't'
     add ecx, 2
     inc edx
     jmp .br_loop
 .br_escape_0:
-    mov byte [r13 + rcx], 0x5C
+    mov byte [r13 + rcx], 0x5c
     mov byte [r13 + rcx + 1], 'x'
     mov byte [r13 + rcx + 2], '0'
     mov byte [r13 + rcx + 3], '0'
@@ -740,9 +740,9 @@ DEF_FUNC _bytes_decode_impl, BD_FRAME
 .bd_l1_two:
     mov r9d, eax
     shr r9d, 6
-    or r9b, 0xC0
+    or r9b, 0xc0
     mov [rdx + PyStrObject.data + r8], r9b
-    and eax, 0x3F
+    and eax, 0x3f
     or al, 0x80
     mov [rdx + PyStrObject.data + r8 + 1], al
     add qword [rbp - BD_POS], 2
@@ -1344,7 +1344,6 @@ BLS_BADITEM equ 56
 BLS_BUF   equ 32
 BLS_LIST  equ 40
 BLS_FRAME equ 64
-global byteslike_source
 DEF_FUNC byteslike_source, BLS_FRAME
     push rbx
     push r12

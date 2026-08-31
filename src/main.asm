@@ -53,10 +53,10 @@ DEF_FUNC main, 8
 
     ; Check for --version flag
     mov rax, [r15 + 8]          ; rax = argv[1]
-    cmp word [rax], 0x2D2D      ; "--" little-endian
+    cmp word [rax], 0x2d2d      ; "--" little-endian
     jne .not_version
     mov rcx, [rax + 2]          ; load 8 bytes: "version\0"
-    mov rdx, 0x006E6F6973726576 ; "version\0" little-endian
+    mov rdx, 0x006e6f6973726576 ; "version\0" little-endian
     cmp rcx, rdx
     jne .not_version
 
@@ -389,13 +389,13 @@ DEF_FUNC main, 8
     extern int_to_i64
     call int_to_i64
     mov ebx, eax
-    and ebx, 0xFF
+    and ebx, 0xff
     jmp .se_finish
 
 .se_int:
     V_TO_I64 rax
     mov ebx, eax
-    and ebx, 0xFF
+    and ebx, 0xff
     jmp .se_finish
 
 .se_one:

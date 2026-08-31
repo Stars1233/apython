@@ -26,13 +26,13 @@ int_cases:
     dq 0,                    1
     dq 1,                    1
     dq -1,                   1
-    dq 0x0003FFFFFFFFFFFF,   1      ; 2^50 - 1  (largest immediate)
-    dq 0xFFFC000000000000,   1      ; -2^50     (smallest immediate)
+    dq 0x0003ffffffffffff,   1      ; 2^50 - 1  (largest immediate)
+    dq 0xfffc000000000000,   1      ; -2^50     (smallest immediate)
     dq 0x0004000000000000,   0      ; 2^50      (first boxed)
-    dq 0xFFFBFFFFFFFFFFFF,   0      ; -2^50 - 1 (first boxed)
+    dq 0xfffbffffffffffff,   0      ; -2^50 - 1 (first boxed)
     dq 4611686018427387904,  0      ; 2^62
     dq -4611686018427387904, 0      ; -2^62
-    dq 0x7FFFFFFFFFFFFFFF,   0      ; INT64_MAX
+    dq 0x7fffffffffffffff,   0      ; INT64_MAX
     dq 0x8000000000000000,   0      ; INT64_MIN
 int_cases_end:
 INT_CASE_COUNT equ (int_cases_end - int_cases) / 16
@@ -42,21 +42,21 @@ align 16
 float_cases:
     dq 0x0000000000000000, 0x0000000000000000   ; +0.0
     dq 0x8000000000000000, 0x8000000000000000   ; -0.0
-    dq 0x3FF0000000000000, 0x3FF0000000000000   ; 1.0
-    dq 0xBFF0000000000000, 0xBFF0000000000000   ; -1.0
+    dq 0x3ff0000000000000, 0x3ff0000000000000   ; 1.0
+    dq 0xbff0000000000000, 0xbff0000000000000   ; -1.0
     dq 0x0000000000000001, 0x0000000000000001   ; smallest subnormal
-    dq 0x800FFFFFFFFFFFFF, 0x800FFFFFFFFFFFFF   ; largest negative subnormal
-    dq 0x7FEFFFFFFFFFFFFF, 0x7FEFFFFFFFFFFFFF   ; DBL_MAX
-    dq 0xFFEFFFFFFFFFFFFF, 0xFFEFFFFFFFFFFFFF   ; -DBL_MAX
-    dq 0x7FF0000000000000, 0x7FF0000000000000   ; +inf
-    dq 0xFFF0000000000000, 0xFFF0000000000000   ; -inf
-    dq 0x7FF8000000000000, 0x7FF8000000000000   ; canonical quiet NaN
-    dq 0x7FFFFFFFFFFFFFFF, 0x7FFFFFFFFFFFFFFF   ; positive NaN, max payload
-    dq 0xFFF0000000000001, 0xFFF0000000000001   ; negative NaN below V_NAN_LIM
-    dq 0xFFF0FFFFFFFFFFFF, 0xFFF0FFFFFFFFFFFF   ; negative NaN, last safe one
-    dq 0xFFF1000000000000, 0x7FF8000000000000   ; first purified NaN
-    dq 0xFFF8000000000000, 0x7FF8000000000000   ; x86 default QNaN (inf - inf)
-    dq 0xFFFFFFFFFFFFFFFF, 0x7FF8000000000000   ; all-ones NaN
+    dq 0x800fffffffffffff, 0x800fffffffffffff   ; largest negative subnormal
+    dq 0x7fefffffffffffff, 0x7fefffffffffffff   ; DBL_MAX
+    dq 0xffefffffffffffff, 0xffefffffffffffff   ; -DBL_MAX
+    dq 0x7ff0000000000000, 0x7ff0000000000000   ; +inf
+    dq 0xfff0000000000000, 0xfff0000000000000   ; -inf
+    dq 0x7ff8000000000000, 0x7ff8000000000000   ; canonical quiet NaN
+    dq 0x7fffffffffffffff, 0x7fffffffffffffff   ; positive NaN, max payload
+    dq 0xfff0000000000001, 0xfff0000000000001   ; negative NaN below V_NAN_LIM
+    dq 0xfff0ffffffffffff, 0xfff0ffffffffffff   ; negative NaN, last safe one
+    dq 0xfff1000000000000, 0x7ff8000000000000   ; first purified NaN
+    dq 0xfff8000000000000, 0x7ff8000000000000   ; x86 default QNaN (inf - inf)
+    dq 0xffffffffffffffff, 0x7ff8000000000000   ; all-ones NaN
 float_cases_end:
 FLOAT_CASE_COUNT equ (float_cases_end - float_cases) / 16
 
@@ -68,14 +68,14 @@ pack_cases:
     dq 0,                    TAG_NULL,     0,                    TAG_NULL
     dq 5,                    TAG_SMALLINT, 5,                    TAG_SMALLINT
     dq -5,                   TAG_SMALLINT, -5,                   TAG_SMALLINT
-    dq 0x0003FFFFFFFFFFFF,   TAG_SMALLINT, 0x0003FFFFFFFFFFFF,   TAG_SMALLINT
-    dq 0xFFFC000000000000,   TAG_SMALLINT, 0xFFFC000000000000,   TAG_SMALLINT
+    dq 0x0003ffffffffffff,   TAG_SMALLINT, 0x0003ffffffffffff,   TAG_SMALLINT
+    dq 0xfffc000000000000,   TAG_SMALLINT, 0xfffc000000000000,   TAG_SMALLINT
     dq 0x0004000000000000,   TAG_SMALLINT, 0x0004000000000000,   -1
     dq 0x8000000000000000,   TAG_SMALLINT, 0x8000000000000000,   -1
-    dq 0x3FF0000000000000,   TAG_FLOAT,    0x3FF0000000000000,   TAG_FLOAT
+    dq 0x3ff0000000000000,   TAG_FLOAT,    0x3ff0000000000000,   TAG_FLOAT
     dq 0x8000000000000000,   TAG_FLOAT,    0x8000000000000000,   TAG_FLOAT
-    dq 0xFFF0000000000000,   TAG_FLOAT,    0xFFF0000000000000,   TAG_FLOAT
-    dq 0xFFF8000000000000,   TAG_FLOAT,    0x7FF8000000000000,   TAG_FLOAT
+    dq 0xfff0000000000000,   TAG_FLOAT,    0xfff0000000000000,   TAG_FLOAT
+    dq 0xfff8000000000000,   TAG_FLOAT,    0x7ff8000000000000,   TAG_FLOAT
     dq 0x0000000000000001,   TAG_FLOAT,    0x0000000000000001,   TAG_FLOAT
     dq 12345678901,          TAG_SLEEP,    12345678901,          TAG_SLEEP
     dq 0x0000000300000007,   TAG_IO_WAIT,  0x0000000300000007,   TAG_IO_WAIT

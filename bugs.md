@@ -25,6 +25,12 @@ one-line fix.
   from a builtin method.  The `errors` argument is accepted and ignored --
   every failure is strict.
 
+- **`format(x, "")` is not `str(x)` for a float.**  `format(1.0, "")` gives
+  `"1"` where CPython gives `"1.0"`: an empty spec falls into the general
+  formatter with type `g` and precision 6, rather than short-circuiting to
+  `repr`.  `f"{1.0}"` and `str(1.0)` are both right; only the explicit
+  `format()` with an empty spec is not.
+
 - **`str.format` does not accept attribute or index access in a field.**
   `"{0.attr}"` and `"{0[key]}"` are not resolved; a field is a position, a
   name, or empty.  A nested spec, `"{:{}}"`, is likewise not substituted.

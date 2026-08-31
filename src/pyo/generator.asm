@@ -645,7 +645,6 @@ END_FUNC async_gen_repr
 ;; Resume generator with a sent value. Returns yielded value or NULL.
 ;; rdi = generator, rsi = value to send
 ;; ============================================================================
-global gen_send
 DEF_FUNC gen_send
     V_UNPACK rsi, rdx           ; sent Value -> (payload, tag)
     ; rdi = generator, rsi = value, edx = value_tag

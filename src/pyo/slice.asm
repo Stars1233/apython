@@ -191,7 +191,7 @@ DEF_FUNC_BARE pyobj_to_i64
     call __gmpz_cmp_si wrt ..plt
     test eax, eax
     js .gmp_clamp_neg
-    mov rax, 0x7FFFFFFFFFFFFFFE  ; positive: clamp to near-maxsize (not sentinel)
+    mov rax, 0x7ffffffffffffffe  ; positive: clamp to near-maxsize (not sentinel)
     leave
     ret
 .gmp_clamp_neg:
@@ -202,7 +202,7 @@ DEF_FUNC_BARE pyobj_to_i64
     mov rax, rdi
     ret
 .is_none:
-    mov rax, 0x7FFFFFFFFFFFFFFF  ; sentinel for "not specified"
+    mov rax, 0x7fffffffffffffff  ; sentinel for "not specified"
     ret
 .not_an_index:
     RAISE exc_TypeError_type, "slice indices must be integers or None"
@@ -336,7 +336,6 @@ END_FUNC slice_indices
 ;; Returns start, stop, step attributes.
 ;; rdi = self, rsi = name (PyStrObject*)
 ;; ============================================================================
-global slice_getattr
 DEF_FUNC slice_getattr
     push rbx
     push r12
@@ -408,7 +407,6 @@ END_FUNC slice_getattr
 ;; slice(stop), slice(start, stop), slice(start, stop, step)
 ;; rdi = self (slice_type), rsi = args (16-byte fat slots), rdx = nargs
 ;; ============================================================================
-global slice_type_call
 DEF_FUNC slice_type_call
     push rbx
 

@@ -1368,7 +1368,6 @@ END_FUNC op_load_super_attr
 ;; ============================================================================
 RNND_BUF   equ 256
 RNND_FRAME equ RNND_BUF
-global raise_name_not_defined
 DEF_FUNC raise_name_not_defined, RNND_FRAME
     ; Build "name 'X' is not defined" in stack buffer
     lea rcx, [rbp - RNND_BUF]

@@ -550,7 +550,6 @@ END_FUNC _prop_deleter_impl
 ;; Called by LOAD_ATTR when a property is found in the type dict.
 ;; Invokes prop.fget(obj). Returns result (owned ref).
 ;; ============================================================================
-global property_descr_get
 DEF_FUNC property_descr_get
     push rbx
     push r12
@@ -588,7 +587,6 @@ END_FUNC property_descr_get
 ;; Called by STORE_ATTR when a property is found in the type dict.
 ;; Invokes prop.fset(obj, value).
 ;; ============================================================================
-global property_descr_set
 DEF_FUNC property_descr_set
     push rbx
     push r12
@@ -640,7 +638,6 @@ END_FUNC property_descr_set
 ;; Create a member descriptor for a __slots__ slot.
 ;; rdi = byte offset in instance, rsi = slot name (INCREF'd, ownership taken)
 ;; ============================================================================
-global member_descr_new
 DEF_FUNC member_descr_new
     push rbx
     push r12
@@ -664,7 +661,6 @@ DEF_FUNC member_descr_new
 END_FUNC member_descr_new
 
 ;; member_descr_dealloc(PyMemberDescrObject *self)
-global member_descr_dealloc
 DEF_FUNC member_descr_dealloc
     push rbx
     mov rbx, rdi
@@ -737,7 +733,6 @@ DEF_FUNC mappingproxy_construct
     RAISE exc_TypeError_type, "mappingproxy() argument must be a mapping, not a sequence"
 END_FUNC mappingproxy_construct
 
-global mappingproxy_new
 DEF_FUNC mappingproxy_new
     push rbx
     mov rbx, rdi                    ; the dict
@@ -870,7 +865,6 @@ END_FUNC mappingproxy_getattr
 ;; exposes func.__code__ and the co_* fields, and types.py takes
 ;; GetSetDescriptorType straight off one of them.
 ;; ============================================================================
-global getset_descr_new
 DEF_FUNC getset_descr_new
     push rbx
     push r12
@@ -917,7 +911,6 @@ END_FUNC getset_descr_dealloc
 ;; two-field record: the origin type and the argument.  It is callable, so
 ;; `list[int]()` still builds a list.
 ;; ============================================================================
-global generic_alias_new
 DEF_FUNC generic_alias_new
     push rbx
     push r12
@@ -967,7 +960,6 @@ END_FUNC generic_alias_dealloc
 
 ;; The builtin registered as __class_getitem__ on each container type.
 ;; args[0] = cls, args[1] = the subscript.
-global generic_alias_class_getitem
 DEF_FUNC generic_alias_class_getitem
     cmp rsi, 2
     jl .gacg_bad
@@ -1301,7 +1293,6 @@ END_FUNC ga_emit_name
 ;; GenericAlias-shaped record whose args are the operand tuple; the repr is
 ;; the pipe form rather than the bracket form.
 ;; ============================================================================
-global union_type_or
 DEF_FUNC union_type_or
     ; nb_or(left, right) -> UnionType, for type | type
     push rbx
@@ -1496,7 +1487,6 @@ END_FUNC descr_func_attr
 ;; args[2] the owner type when given.
 ;; ============================================================================
 extern none_singleton
-global func_dunder_get
 DEF_FUNC func_dunder_get
     mov rax, [rdi]                      ; the function itself
     cmp rsi, 2
@@ -1518,7 +1508,6 @@ DEF_FUNC func_dunder_get
     ret
 END_FUNC func_dunder_get
 
-global staticmethod_dunder_get
 DEF_FUNC staticmethod_dunder_get
     mov rax, [rdi]
     mov rax, [rax + PyStaticMethodObject.sm_callable]
@@ -1534,7 +1523,6 @@ DEF_FUNC staticmethod_dunder_get
     ret
 END_FUNC staticmethod_dunder_get
 
-global classmethod_dunder_get
 DEF_FUNC classmethod_dunder_get
     push rbx
     mov rbx, [rdi]
@@ -1590,7 +1578,6 @@ END_FUNC classmethod_dunder_get
 ;; The descriptor protocol LOAD_ATTR and STORE_ATTR run natively, exposed by
 ;; name for the same reason the function ones are: `hasattr(p, '__get__')`.
 ;; ============================================================================
-global property_dunder_get
 DEF_FUNC property_dunder_get
     mov rax, [rdi]
     cmp rsi, 2
@@ -1613,7 +1600,6 @@ DEF_FUNC property_dunder_get
     ret
 END_FUNC property_dunder_get
 
-global property_dunder_set
 DEF_FUNC property_dunder_set
     cmp rsi, 3
     jl .pds2_bad
@@ -1630,7 +1616,6 @@ DEF_FUNC property_dunder_set
     RAISE exc_TypeError_type, "__set__() takes exactly 2 arguments"
 END_FUNC property_dunder_set
 
-global property_dunder_delete
 DEF_FUNC property_dunder_delete
     push rbx
     cmp rsi, 2

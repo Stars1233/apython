@@ -204,16 +204,16 @@ DEF_FUNC_LOCAL ct_group2_arena, CT2_FRAME
     mov esi, 64
     call arena_alloc
     mov [rbp - CT_P0], rax
-    mov rcx, 0xAAAAAAAAAAAAAAAA
+    mov rcx, 0xaaaaaaaaaaaaaaaa
     mov [rax], rcx
     lea rdi, [rbp - CT_ARENA]
     mov esi, 64
     call arena_alloc
     mov [rbp - CT_P1], rax
-    mov rcx, 0xBBBBBBBBBBBBBBBB
+    mov rcx, 0xbbbbbbbbbbbbbbbb
     mov [rax], rcx
     mov rdx, [rbp - CT_P0]
-    mov rcx, 0xAAAAAAAAAAAAAAAA
+    mov rcx, 0xaaaaaaaaaaaaaaaa
     cmp qword [rdx], rcx
     jne .fail
 
@@ -306,7 +306,7 @@ DEF_FUNC_LOCAL ct_group3_lex, CT3_FRAME
     xor ecx, ecx
 .tok_loop:
     movzx edx, byte [r13 + rcx]
-    cmp edx, 0xFF
+    cmp edx, 0xff
     je .expect_end
     cmp rcx, r8
     jae .case_fail                      ; ran out of tokens early
@@ -454,17 +454,17 @@ lex_cases:
 
 lx_src_arith:    db "1 + 2*3", 0
 lx_exp_arith:    db TOK_NUMBER, TOK_PLUS, TOK_NUMBER, TOK_STAR, TOK_NUMBER
-                 db TOK_NEWLINE, TOK_ENDMARKER, 0xFF
+                 db TOK_NEWLINE, TOK_ENDMARKER, 0xff
 
 lx_src_call:     db "x = foo(1, 'a')", 0
 lx_exp_call:     db TOK_NAME, TOK_EQUAL, TOK_NAME, TOK_LPAR, TOK_NUMBER
-                 db TOK_COMMA, TOK_STRING, TOK_RPAR, TOK_NEWLINE, TOK_ENDMARKER, 0xFF
+                 db TOK_COMMA, TOK_STRING, TOK_RPAR, TOK_NEWLINE, TOK_ENDMARKER, 0xff
 
 lx_src_indent:   db "if x:", 10, "    y = 1", 10, "z = 2", 10, 0
 lx_exp_indent:   db TOK_IF, TOK_NAME, TOK_COLON, TOK_NEWLINE
                  db TOK_INDENT, TOK_NAME, TOK_EQUAL, TOK_NUMBER, TOK_NEWLINE
                  db TOK_DEDENT, TOK_NAME, TOK_EQUAL, TOK_NUMBER, TOK_NEWLINE
-                 db TOK_ENDMARKER, 0xFF
+                 db TOK_ENDMARKER, 0xff
 
 ; A blank line and a comment-only line inside a suite must leave the indent
 ; stack alone and emit nothing at all.
@@ -472,16 +472,16 @@ lx_src_blank:    db "if a:", 10, "    b", 10, 10, "    # note", 10, "    c", 10,
 lx_exp_blank:    db TOK_IF, TOK_NAME, TOK_COLON, TOK_NEWLINE
                  db TOK_INDENT, TOK_NAME, TOK_NEWLINE
                  db TOK_NAME, TOK_NEWLINE
-                 db TOK_DEDENT, TOK_ENDMARKER, 0xFF
+                 db TOK_DEDENT, TOK_ENDMARKER, 0xff
 
 ; Inside brackets a newline is implicit continuation: no NEWLINE token.
 lx_src_implicit: db "f(1,", 10, "  2)", 10, 0
 lx_exp_implicit: db TOK_NAME, TOK_LPAR, TOK_NUMBER, TOK_COMMA, TOK_NUMBER
-                 db TOK_RPAR, TOK_NEWLINE, TOK_ENDMARKER, 0xFF
+                 db TOK_RPAR, TOK_NEWLINE, TOK_ENDMARKER, 0xff
 
 lx_src_explicit: db "a = 1 + \", 10, "    2", 10, 0
 lx_exp_explicit: db TOK_NAME, TOK_EQUAL, TOK_NUMBER, TOK_PLUS, TOK_NUMBER
-                 db TOK_NEWLINE, TOK_ENDMARKER, 0xFF
+                 db TOK_NEWLINE, TOK_ENDMARKER, 0xff
 
 ; Maximal munch: every one of these must take the longest operator, not the
 ; shortest.  op_table is sorted longest-first per first byte to make that free.
@@ -492,49 +492,49 @@ lx_exp_munch:    db TOK_NAME, TOK_DOUBLESTAREQUAL, TOK_NAME, TOK_DOUBLESLASHEQUA
                  db TOK_COLONEQUAL, TOK_NAME, TOK_NOTEQUAL, TOK_NAME
                  db TOK_LESSEQUAL, TOK_NAME, TOK_GREATEREQUAL, TOK_NAME
                  db TOK_EQEQUAL, TOK_NAME, TOK_ATEQUAL, TOK_NAME
-                 db TOK_NEWLINE, TOK_ENDMARKER, 0xFF
+                 db TOK_NEWLINE, TOK_ENDMARKER, 0xff
 
 lx_src_numbers:  db "0x1f 0b101 0o17 1_000 1.5 1e10 1.5e-3 2j .5 1.", 0
 lx_exp_numbers:  db TOK_NUMBER, TOK_NUMBER, TOK_NUMBER, TOK_NUMBER, TOK_NUMBER
                  db TOK_NUMBER, TOK_NUMBER, TOK_NUMBER, TOK_NUMBER, TOK_NUMBER
-                 db TOK_NEWLINE, TOK_ENDMARKER, 0xFF
+                 db TOK_NEWLINE, TOK_ENDMARKER, 0xff
 
 lx_src_strings:  db "b'x' rb", 34, "y", 34, " f'z' u'w' R'q'", 0
 lx_exp_strings:  db TOK_STRING, TOK_STRING, TOK_STRING, TOK_STRING, TOK_STRING
-                 db TOK_NEWLINE, TOK_ENDMARKER, 0xFF
+                 db TOK_NEWLINE, TOK_ENDMARKER, 0xff
 
 ; An identifier that is not a legal string prefix stays a name, so this is a
 ; name followed by a string -- which is why `print'x'` is a syntax error in
 ; Python 3 rather than a mysterious literal.
 lx_src_noprefix: db "print'x' xy'z'", 0
 lx_exp_noprefix: db TOK_NAME, TOK_STRING, TOK_NAME, TOK_STRING
-                 db TOK_NEWLINE, TOK_ENDMARKER, 0xFF
+                 db TOK_NEWLINE, TOK_ENDMARKER, 0xff
 
 lx_src_triple:   db "s = ", 34, 34, 34, "a", 10, "b", 34, 34, 34, 10, "t = 1", 10, 0
 lx_exp_triple:   db TOK_NAME, TOK_EQUAL, TOK_STRING, TOK_NEWLINE
                  db TOK_NAME, TOK_EQUAL, TOK_NUMBER, TOK_NEWLINE
-                 db TOK_ENDMARKER, 0xFF
+                 db TOK_ENDMARKER, 0xff
 
 ; Keywords and the identifiers that merely start like them.
 lx_src_kwnear:   db "is not in iss no lambda lambda_ None Nones", 0
 lx_exp_kwnear:   db TOK_IS, TOK_NOT, TOK_IN, TOK_NAME, TOK_NAME, TOK_LAMBDA
                  db TOK_NAME, TOK_NONE, TOK_NAME
-                 db TOK_NEWLINE, TOK_ENDMARKER, 0xFF
+                 db TOK_NEWLINE, TOK_ENDMARKER, 0xff
 
 ; A file that does not end in a newline still gets one, or the parser would
 ; see a statement that never terminates.
 lx_src_noeol:    db "x", 0
-lx_exp_noeol:    db TOK_NAME, TOK_NEWLINE, TOK_ENDMARKER, 0xFF
+lx_exp_noeol:    db TOK_NAME, TOK_NEWLINE, TOK_ENDMARKER, 0xff
 
 lx_src_empty:    db "", 0
-lx_exp_empty:    db TOK_ENDMARKER, 0xFF
+lx_exp_empty:    db TOK_ENDMARKER, 0xff
 
 ; Nested suites must unwind every level at end of input.
 lx_src_deep:     db "if a:", 10, "  if b:", 10, "    c", 10, 0
 lx_exp_deep:     db TOK_IF, TOK_NAME, TOK_COLON, TOK_NEWLINE, TOK_INDENT
                  db TOK_IF, TOK_NAME, TOK_COLON, TOK_NEWLINE, TOK_INDENT
                  db TOK_NAME, TOK_NEWLINE
-                 db TOK_DEDENT, TOK_DEDENT, TOK_ENDMARKER, 0xFF
+                 db TOK_DEDENT, TOK_DEDENT, TOK_ENDMARKER, 0xff
 
 ct_msg_ok:   db "compiler selftest: ok", 10
 ct_msg_ok_len equ $ - ct_msg_ok

@@ -463,7 +463,7 @@ DEF_FUNC float_method_is_integer
 
     ; Check for inf/nan — not integer
     movq rax, xmm0
-    mov rcx, 0x7FF0000000000000  ; inf exponent mask
+    mov rcx, 0x7ff0000000000000  ; inf exponent mask
     and rax, rcx
     cmp rax, rcx
     je .fii_false               ; inf or nan
@@ -519,7 +519,7 @@ DEF_FUNC float_method_as_integer_ratio, FIR_FRAME
 
     ; Check for inf/nan
     mov rcx, rax
-    mov rdx, 0x7FF0000000000000
+    mov rdx, 0x7ff0000000000000
     and rcx, rdx
     cmp rcx, rdx
     je .fir_error
@@ -535,13 +535,13 @@ DEF_FUNC float_method_as_integer_ratio, FIR_FRAME
     mov r8, rax                 ; save original bits
     mov rcx, rax
     shr rcx, 52
-    and ecx, 0x7FF              ; biased exponent
+    and ecx, 0x7ff              ; biased exponent
     sub ecx, 1023               ; unbiased exponent
     sub ecx, 52                 ; adjust for mantissa bits
 
     ; mantissa with implicit 1 bit
     mov rax, r8
-    mov rdx, 0x000FFFFFFFFFFFFF
+    mov rdx, 0x000fffffffffffff
     and rax, rdx
     bts rax, 52                 ; set implicit bit (bit 52)
 
@@ -554,7 +554,7 @@ DEF_FUNC float_method_as_integer_ratio, FIR_FRAME
     ; Reload exponent (ecx was clobbered by cl usage)
     mov rcx, r8
     shr rcx, 52
-    and ecx, 0x7FF
+    and ecx, 0x7ff
     sub ecx, 1023
     sub ecx, 52
     add ecx, edx               ; adjust exponent by trailing zeros stripped
@@ -689,7 +689,7 @@ DEF_FUNC float_method_hex, FH_FRAME
     jz .fh_zero
 
     ; Check for inf
-    mov rcx, 0x7FF0000000000000
+    mov rcx, 0x7ff0000000000000
     cmp rax, rcx
     je .fh_inf
 
@@ -702,11 +702,11 @@ DEF_FUNC float_method_hex, FH_FRAME
     ; Normal float: extract exponent and mantissa
     mov rdx, rax
     shr rdx, 52
-    and edx, 0x7FF              ; biased exponent
+    and edx, 0x7ff              ; biased exponent
     sub edx, 1023               ; unbiased
 
     mov rcx, rax
-    mov r8, 0x000FFFFFFFFFFFFF
+    mov r8, 0x000fffffffffffff
     and rcx, r8                 ; mantissa bits (52 bits)
 
     ; Write "0x1."
@@ -728,7 +728,7 @@ DEF_FUNC float_method_hex, FH_FRAME
     mov cl, r8b
     mov rdx, rax
     shr rdx, cl
-    and edx, 0x0F
+    and edx, 0x0f
     pop rcx
     cmp edx, 10
     jb .fh_digit
@@ -755,7 +755,7 @@ DEF_FUNC float_method_hex, FH_FRAME
     mov rax, rbx
     btr rax, 63
     shr rax, 52
-    and eax, 0x7FF
+    and eax, 0x7ff
     sub eax, 1023
 
     ; Write sign of exponent
@@ -1015,7 +1015,7 @@ DEF_FUNC float_classmethod_fromhex, FFH_FRAME
 .ffh_neg_exp_apply:
     neg r10d
     mov ecx, r10d
-    mov rax, 0x3FF0000000000000    ; 1.0
+    mov rax, 0x3ff0000000000000    ; 1.0
     movq xmm1, rax
     mov rax, 0x4000000000000000    ; 2.0
     movq xmm2, rax

@@ -185,7 +185,7 @@ DEF_FUNC builtin_abs
 
 .abs_float:
     movsd xmm0, [rbx + PyFloatObject.value]
-    mov rax, 0x7FFFFFFFFFFFFFFF
+    mov rax, 0x7fffffffffffffff
     movq xmm1, rax
     andpd xmm0, xmm1
     call float_from_f64
@@ -205,7 +205,6 @@ END_FUNC builtin_abs
 ; ============================================================================
 ; builtin_divmod(args, nargs) - divmod(a, b) -> (a // b, a % b)
 ; ============================================================================
-global builtin_divmod
 DEF_FUNC builtin_divmod
     push rbx
     push r12
@@ -359,7 +358,6 @@ DEF_FUNC int_type_call, ITC_FRAME
     jmp builtin_int_fn
 END_FUNC int_type_call
 
-global bool_type_call
 DEF_FUNC_BARE bool_type_call
     ; Check for kwargs — bool() doesn't accept keyword arguments
     mov rax, [rel kw_names_pending]
@@ -375,7 +373,6 @@ DEF_FUNC_BARE bool_type_call
     RAISE exc_TypeError_type, "bool() takes no keyword arguments"
 END_FUNC bool_type_call
 
-global float_type_call
 DEF_FUNC_BARE float_type_call
     mov rdi, rsi
     mov rsi, rdx
@@ -1294,36 +1291,36 @@ DEF_FUNC builtin_ord
     jz .ord_ascii
     ; Multi-byte: decode and check it is the whole string.
     mov r8d, eax
-    and r8d, 0xF8
-    cmp r8d, 0xF0
+    and r8d, 0xf8
+    cmp r8d, 0xf0
     je .ord_four
     mov r8d, eax
-    and r8d, 0xF0
-    cmp r8d, 0xE0
+    and r8d, 0xf0
+    cmp r8d, 0xe0
     je .ord_three
     mov r8d, eax
-    and r8d, 0xE0
-    cmp r8d, 0xC0
+    and r8d, 0xe0
+    cmp r8d, 0xc0
     jne .ord_len_error
     cmp rcx, 2
     jne .ord_len_error
-    and eax, 0x1F
+    and eax, 0x1f
     shl eax, 6
     movzx edx, byte [rdi + PyStrObject.data + 1]
-    and edx, 0x3F
+    and edx, 0x3f
     or eax, edx
     jmp .ord_done
 .ord_three:
     cmp rcx, 3
     jne .ord_len_error
-    and eax, 0x0F
+    and eax, 0x0f
     shl eax, 12
     movzx edx, byte [rdi + PyStrObject.data + 1]
-    and edx, 0x3F
+    and edx, 0x3f
     shl edx, 6
     or eax, edx
     movzx edx, byte [rdi + PyStrObject.data + 2]
-    and edx, 0x3F
+    and edx, 0x3f
     or eax, edx
     jmp .ord_done
 .ord_four:
@@ -1332,15 +1329,15 @@ DEF_FUNC builtin_ord
     and eax, 0x07
     shl eax, 18
     movzx edx, byte [rdi + PyStrObject.data + 1]
-    and edx, 0x3F
+    and edx, 0x3f
     shl edx, 12
     or eax, edx
     movzx edx, byte [rdi + PyStrObject.data + 2]
-    and edx, 0x3F
+    and edx, 0x3f
     shl edx, 6
     or eax, edx
     movzx edx, byte [rdi + PyStrObject.data + 3]
-    and edx, 0x3F
+    and edx, 0x3f
     or eax, edx
     jmp .ord_done
 .ord_ascii:
@@ -1377,11 +1374,11 @@ DEF_FUNC builtin_chr, 16
 
     cmp rax, 0
     jl .chr_range_error
-    cmp rax, 0x10FFFF
+    cmp rax, 0x10ffff
     ja .chr_range_error
 
     ; Single byte (ASCII)
-    cmp rax, 0x7F
+    cmp rax, 0x7f
     ja .chr_utf8_encode
 
     ; str_new, not str_from_cstr: chr(0) is a one-character string holding a
@@ -1396,16 +1393,16 @@ DEF_FUNC builtin_chr, 16
     ret
 
 .chr_utf8_encode:
-    cmp rax, 0x7FF
+    cmp rax, 0x7ff
     ja .chr_3byte
 
     ; 2-byte: 110xxxxx 10xxxxxx
     mov rcx, rax
     shr rcx, 6
-    or cl, 0xC0
+    or cl, 0xc0
     mov byte [rbp - 16], cl
     mov rcx, rax
-    and cl, 0x3F
+    and cl, 0x3f
     or cl, 0x80
     mov byte [rbp - 15], cl
     mov byte [rbp - 14], 0
@@ -1416,21 +1413,21 @@ DEF_FUNC builtin_chr, 16
     ret
 
 .chr_3byte:
-    cmp rax, 0xFFFF
+    cmp rax, 0xffff
     ja .chr_4byte
 
     ; 3-byte: 1110xxxx 10xxxxxx 10xxxxxx
     mov rcx, rax
     shr rcx, 12
-    or cl, 0xE0
+    or cl, 0xe0
     mov byte [rbp - 16], cl
     mov rcx, rax
     shr rcx, 6
-    and cl, 0x3F
+    and cl, 0x3f
     or cl, 0x80
     mov byte [rbp - 15], cl
     mov rcx, rax
-    and cl, 0x3F
+    and cl, 0x3f
     or cl, 0x80
     mov byte [rbp - 14], cl
     mov byte [rbp - 13], 0
@@ -1444,20 +1441,20 @@ DEF_FUNC builtin_chr, 16
     ; 4-byte: 11110xxx 10xxxxxx 10xxxxxx 10xxxxxx
     mov rcx, rax
     shr rcx, 18
-    or cl, 0xF0
+    or cl, 0xf0
     mov byte [rbp - 16], cl
     mov rcx, rax
     shr rcx, 12
-    and cl, 0x3F
+    and cl, 0x3f
     or cl, 0x80
     mov byte [rbp - 15], cl
     mov rcx, rax
     shr rcx, 6
-    and cl, 0x3F
+    and cl, 0x3f
     or cl, 0x80
     mov byte [rbp - 14], cl
     mov rcx, rax
-    and cl, 0x3F
+    and cl, 0x3f
     or cl, 0x80
     mov byte [rbp - 13], cl
     mov byte [rbp - 12], 0
@@ -2302,4 +2299,4 @@ END_FUNC builtin_oct
 ; with format()'s name string, which is now in builtins_obj.asm.
 section .rodata
 align 8
-const_one: dq 0x3FF0000000000000   ; 1.0 in IEEE 754
+const_one: dq 0x3ff0000000000000   ; 1.0 in IEEE 754

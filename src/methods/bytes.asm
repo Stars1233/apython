@@ -89,7 +89,7 @@ DEF_FUNC bytes_method_hex, BH_FRAME
     inc rdi
 
     ; Low nibble
-    and eax, 0x0F
+    and eax, 0x0f
     cmp eax, 10
     jb .bh_lo_digit
     add eax, ('a' - 10)

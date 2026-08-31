@@ -61,7 +61,6 @@ FS_FRAME  equ 112
 ;; ============================================================================
 ;; format_apply_spec(rdi = value Value, rsi = spec str) -> Value (a str)
 ;; ============================================================================
-global format_apply_spec
 DEF_FUNC format_apply_spec, FS_FRAME
     push rbx
     push r12

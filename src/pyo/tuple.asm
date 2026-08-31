@@ -728,7 +728,6 @@ TRC_FRAME    equ 40
 ; b=[]; b.append(b); a==b -- recursed until the machine stack ran out; the
 ; identity fast path inside only catches a==a.  The body is wrapped so its
 ; several exits need not each be touched.
-global tuple_richcompare
 DEF_FUNC tuple_richcompare
     C_RECURSION_ENTER .trc_too_deep
     call tuple_richcompare_inner
@@ -1086,7 +1085,6 @@ TTC_LIST    equ 8       ; temp list
 TTC_ITER    equ 16      ; iterator
 TTC_FRAME   equ 24
 
-global tuple_type_call
 DEF_FUNC tuple_type_call, TTC_FRAME
     push rbx
     push r12

@@ -92,7 +92,6 @@ END_FUNC tb_read_svarint
 ; code_addr2line(rdi = PyCodeObject*, rsi = instruction offset in code units)
 ;   -> eax = line number, or 0 when the table does not cover the offset
 ; ----------------------------------------------------------------------------
-global code_addr2line
 DEF_FUNC_BARE code_addr2line
     mov r8, [rdi + PyCodeObject.co_linetable]
     test r8, r8
@@ -114,7 +113,7 @@ DEF_FUNC_BARE code_addr2line
     and edx, 7
     inc edx                                         ; edx = length in units
     shr ecx, 3
-    and ecx, 0x0F                                   ; ecx = code
+    and ecx, 0x0f                                   ; ecx = code
 
     cmp ecx, 15
     je .a2l_check                                   ; no location, delta 0
@@ -173,7 +172,6 @@ TH_CODE  equ 16
 TH_LASTI equ 24
 TH_TB    equ 32
 TH_FRAME equ 32
-global traceback_here
 DEF_FUNC traceback_here, TH_FRAME
     mov [rbp - TH_EXC], rdi
     mov [rbp - TH_CODE], rsi
@@ -490,7 +488,6 @@ TP_CNT   equ 48          ; length of the current run of identical entries
 TP_FRAME equ 64
 TB_RECURSIVE_CUTOFF equ 3
 TB_SEEN_MAX equ 64
-global traceback_print
 DEF_FUNC traceback_print
     mov qword [rel tb_seen_n], 0
     mov rsi, rdi
@@ -995,7 +992,7 @@ DEF_FUNC exc_table_find_handler
     movzx edx, byte [r14 + r15]
     inc r15
     mov eax, edx
-    and eax, 0x3F           ; initial value = bits 0-5 of first byte
+    and eax, 0x3f           ; initial value = bits 0-5 of first byte
 
 .varint_loop:
     test edx, 0x40          ; check continue bit
@@ -1006,7 +1003,7 @@ DEF_FUNC exc_table_find_handler
     movzx edx, byte [r14 + r15]
     inc r15
     mov ecx, edx
-    and ecx, 0x3F
+    and ecx, 0x3f
     or eax, ecx             ; OR in new 6 bits at bottom
     jmp .varint_loop
 

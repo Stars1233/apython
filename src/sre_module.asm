@@ -268,9 +268,9 @@ DEF_FUNC sre_unicode_iscased_func
     jbe .uic_true
 .uic_check_ext:
     ; Extended Latin
-    cmp eax, 0xC0
+    cmp eax, 0xc0
     jb .uic_false
-    cmp eax, 0xFF
+    cmp eax, 0xff
     jbe .uic_true
     ; Basic check for common Unicode ranges
     cmp eax, 0x100
@@ -308,13 +308,13 @@ DEF_FUNC sre_unicode_tolower_func
     jb .utl_done
     cmp eax, 'Z'
     jbe .utl_lower
-    cmp eax, 0xC0
+    cmp eax, 0xc0
     jb .utl_done
-    cmp eax, 0xD6
+    cmp eax, 0xd6
     jbe .utl_lower
-    cmp eax, 0xD8
+    cmp eax, 0xd8
     jb .utl_done
-    cmp eax, 0xDE
+    cmp eax, 0xde
     jbe .utl_lower
     jmp .utl_done
 .utl_lower:
@@ -355,13 +355,13 @@ DEF_FUNC sre_getlower_func
     add eax, 32
     jmp .gl_done
 .gl_check_ext:
-    cmp eax, 0xC0
+    cmp eax, 0xc0
     jb .gl_done
-    cmp eax, 0xD6
+    cmp eax, 0xd6
     jbe .gl_do_lower
-    cmp eax, 0xD8
+    cmp eax, 0xd8
     jb .gl_done
-    cmp eax, 0xDE
+    cmp eax, 0xde
     ja .gl_done
 .gl_do_lower:
     add eax, 32

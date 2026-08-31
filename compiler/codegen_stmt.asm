@@ -734,7 +734,6 @@ HA_FRAME equ 48           ; + 2 pushes = 64
 ;; -- a classdef or a module.  Handed an AST_GLOBAL it would walk that node's
 ;; object indices as node indices, which is the trap cg_has_annotation below
 ;; refuses by allow-list.
-global cg_has_annotation_body
 DEF_FUNC cg_has_annotation_body, HA_FRAME
     push rbx
     push r12

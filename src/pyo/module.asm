@@ -261,7 +261,6 @@ section .text
 ;; ============================================================================
 ;; namespace_new() -> PySimpleNamespaceObject* with a fresh dict
 ;; ============================================================================
-global namespace_new
 DEF_FUNC namespace_new
     push rbx
     mov edi, PySimpleNamespaceObject_size
@@ -280,7 +279,6 @@ END_FUNC namespace_new
 
 ;; namespace_set(rdi = ns, rsi = name cstr, rdx = value Value)
 ;; Helper for building one from assembly; steals nothing, INCREFs via dict_set.
-global namespace_set
 DEF_FUNC namespace_set
     push rbx
     push r12

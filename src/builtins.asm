@@ -170,7 +170,6 @@ END_FUNC builtin_func_new
 ;; Like builtin_func_new but sets arg count bounds for validation.
 ;; rdx = min_args (including self), rcx = max_args (-1 = no max)
 ;; ============================================================================
-global builtin_func_new_checked
 DEF_FUNC builtin_func_new_checked
     push r14
     push r15
@@ -1172,7 +1171,6 @@ END_FUNC builtin_repr
 ;; bool()    -> False
 ;; bool(x)   -> True if x is truthy, False otherwise
 ;; ============================================================================
-global builtin_bool
 DEF_FUNC builtin_bool
 
     cmp rsi, 0

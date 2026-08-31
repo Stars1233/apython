@@ -419,20 +419,22 @@ END_FUNC op_store_subscr
 ;; ecx = count (number of items to pop)
 ;; Items are on stack bottom-to-top: first item deepest.
 ;; ============================================================================
+BT_COUNT    equ 8
+BT_TUPLE    equ 16
 DEF_FUNC op_build_tuple, 16
-    ; [rbp-8] = count
+    ; [rbp - BT_COUNT] = count
 
-    mov [rbp-8], rcx           ; save count
+    mov [rbp - BT_COUNT], rcx           ; save count
 
     ; Allocate tuple
     mov rdi, rcx
     call tuple_new
-    mov [rbp-16], rax          ; save tuple
+    mov [rbp - BT_TUPLE], rax          ; save tuple
 
     ; Fill items: tuple[i] = stack[-(count-i)]
     ; Items on stack: [r13 - count*8] = first, [r13 - 8] = last
-    mov rcx, [rbp-8]          ; count
-    mov rax, [rbp-16]         ; tuple
+    mov rcx, [rbp - BT_COUNT]          ; count
+    mov rax, [rbp - BT_TUPLE]         ; tuple
     xor edx, edx              ; index
     test rcx, rcx
     jz .build_tuple_done
@@ -447,16 +449,16 @@ DEF_FUNC op_build_tuple, 16
     shl rax, 3                 ; index * 8
     mov rsi, [r13 + rax]      ; item from stack
     V_UNPACK rsi, rdi         ; tuples still store (payload, tag)
-    mov rax, [rbp-16]
+    mov rax, [rbp - BT_TUPLE]
     mov r8, [rax + PyTupleObject.ob_item]       ; payloads
     V_PACK rsi, rdi
     mov [r8 + rdx * 8], rsi
     inc rdx
-    cmp rdx, [rbp-8]
+    cmp rdx, [rbp - BT_COUNT]
     jb .build_tuple_fill
 
 .build_tuple_done:
-    mov rax, [rbp-16]
+    mov rax, [rbp - BT_TUPLE]
     VPUSH_PTR rax
     leave
     DISPATCH
@@ -467,9 +469,11 @@ END_FUNC op_build_tuple
 ;;
 ;; ecx = count
 ;; ============================================================================
+BL_COUNT    equ 8
+BL_LIST     equ 16
 DEF_FUNC op_build_list, 16
 
-    mov [rbp-8], rcx           ; save count
+    mov [rbp - BL_COUNT], rcx           ; save count
 
     ; Allocate list with capacity
     mov rdi, rcx
@@ -478,10 +482,10 @@ DEF_FUNC op_build_list, 16
     mov rdi, 4                 ; minimum capacity
 .bl_has_cap:
     call list_new
-    mov [rbp-16], rax          ; save list
+    mov [rbp - BL_LIST], rax          ; save list
 
     ; Pop items and append
-    mov rcx, [rbp-8]
+    mov rcx, [rbp - BL_COUNT]
     test rcx, rcx
     jz .build_list_done
 
@@ -492,10 +496,10 @@ DEF_FUNC op_build_list, 16
 
     xor edx, edx
 .build_list_fill:
-    cmp rdx, [rbp-8]
+    cmp rdx, [rbp - BL_COUNT]
     jge .build_list_done
     push rdx
-    mov rdi, [rbp-16]         ; list
+    mov rdi, [rbp - BL_LIST]         ; list
     mov rax, rdx
     shl rax, 3                ; index * 8
     mov rsi, [r13 + rax]      ; item (ownership transfers, no extra INCREF)
@@ -510,12 +514,12 @@ DEF_FUNC op_build_list, 16
     ; adds another. We should DECREF each to compensate.
     ; Actually: stack items have a ref, list_append INCREFs, so now refcount is
     ; one too high. We need to DECREF each.
-    mov rcx, [rbp-8]
+    mov rcx, [rbp - BL_COUNT]
     test rcx, rcx
     jz .build_list_push
     xor edx, edx
 .build_list_fixref:
-    cmp rdx, [rbp-8]
+    cmp rdx, [rbp - BL_COUNT]
     jge .build_list_push
     mov rax, rdx
     shl rax, 3                ; index * 8
@@ -527,7 +531,7 @@ DEF_FUNC op_build_list, 16
     jmp .build_list_fixref
 
 .build_list_push:
-    mov rax, [rbp-16]
+    mov rax, [rbp - BL_LIST]
     VPUSH_PTR rax
     leave
     DISPATCH
@@ -539,15 +543,17 @@ END_FUNC op_build_list
 ;; ecx = count (number of key/value pairs)
 ;; Stack (bottom to top): key0, val0, key1, val1, ...
 ;; ============================================================================
+BM_COUNT    equ 8
+BM_DICT     equ 16
 DEF_FUNC op_build_map, 16
 
-    mov [rbp-8], rcx           ; save count
+    mov [rbp - BM_COUNT], rcx           ; save count
 
     call dict_new
-    mov [rbp-16], rax          ; save dict
+    mov [rbp - BM_DICT], rax          ; save dict
 
     ; Total items on stack = count * 2
-    mov rcx, [rbp-8]
+    mov rcx, [rbp - BM_COUNT]
     shl rcx, 1                 ; count * 2
     test rcx, rcx
     jz .build_map_done
@@ -558,10 +564,10 @@ DEF_FUNC op_build_map, 16
 
     xor edx, edx              ; pair index
 .build_map_fill:
-    cmp rdx, [rbp-8]
+    cmp rdx, [rbp - BM_COUNT]
     jge .build_map_done
     push rdx
-    mov rdi, [rbp-16]         ; dict
+    mov rdi, [rbp - BM_DICT]         ; dict
     mov rax, rdx
     shl rax, 4                 ; pair_index * 16 (2 payload slots)
     mov rsi, [r13 + rax]      ; key
@@ -573,7 +579,7 @@ DEF_FUNC op_build_map, 16
 
 .build_map_done:
     ; dict_set does INCREF on key+value, so DECREF all stack items
-    mov rcx, [rbp-8]
+    mov rcx, [rbp - BM_COUNT]
     shl rcx, 1
     test rcx, rcx
     jz .build_map_push
@@ -593,7 +599,7 @@ DEF_FUNC op_build_map, 16
     jmp .build_map_fixref
 
 .build_map_push:
-    mov rax, [rbp-16]
+    mov rax, [rbp - BM_DICT]
     VPUSH_PTR rax
     leave
     DISPATCH
@@ -605,19 +611,22 @@ END_FUNC op_build_map
 ;; ecx = count
 ;; Stack: val0, val1, ..., valN-1, keys_tuple (TOS)
 ;; ============================================================================
+CKM_COUNT   equ 8
+CKM_KEYS    equ 16
+CKM_DICT    equ 24
 DEF_FUNC op_build_const_key_map, 32
 
-    mov [rbp-8], rcx           ; count
+    mov [rbp - CKM_COUNT], rcx           ; count
 
     ; Pop keys tuple from TOS
     VPOP rax
-    mov [rbp-16], rax          ; keys tuple
+    mov [rbp - CKM_KEYS], rax          ; keys tuple
 
     call dict_new
-    mov [rbp-24], rax          ; dict
+    mov [rbp - CKM_DICT], rax          ; dict
 
     ; Pop values
-    mov rcx, [rbp-8]
+    mov rcx, [rbp - CKM_COUNT]
     test rcx, rcx
     jz .bckm_done
 
@@ -627,11 +636,11 @@ DEF_FUNC op_build_const_key_map, 32
 
     xor edx, edx
 .bckm_fill:
-    cmp rdx, [rbp-8]
+    cmp rdx, [rbp - CKM_COUNT]
     jge .bckm_done
     push rdx
-    mov rdi, [rbp-24]         ; dict
-    mov rax, [rbp-16]         ; keys tuple
+    mov rdi, [rbp - CKM_DICT]         ; dict
+    mov rax, [rbp - CKM_KEYS]         ; keys tuple
     mov r10, [rax + PyTupleObject.ob_item]       ; payloads
     mov rsi, [r10 + rdx*8]                        ; key payload
     mov r9, rdx
@@ -645,7 +654,7 @@ DEF_FUNC op_build_const_key_map, 32
 
 .bckm_done:
     ; DECREF values from stack
-    mov rcx, [rbp-8]
+    mov rcx, [rbp - CKM_COUNT]
     test rcx, rcx
     jz .bckm_push
     xor edx, edx
@@ -665,11 +674,11 @@ DEF_FUNC op_build_const_key_map, 32
 
 .bckm_decref_keys:
     ; DECREF keys tuple
-    mov rdi, [rbp-16]
+    mov rdi, [rbp - CKM_KEYS]
     call obj_decref
 
 .bckm_push:
-    mov rax, [rbp-24]
+    mov rax, [rbp - CKM_DICT]
     VPUSH_PTR rax
     leave
     DISPATCH
@@ -1204,20 +1213,25 @@ END_FUNC op_list_append
 ;; ecx = position (list at stack[-(ecx)] after pop)
 ;; Pop TOS (iterable), extend list.
 ;; ============================================================================
+; CURSOR holds the items pointer on the fast path, the iterator on the slow one
+LE_LIST     equ 8
+LE_ITERABLE equ 16
+LE_COUNT    equ 24
+LE_CURSOR   equ 32
 DEF_FUNC op_list_extend, 32
-    ; locals: [rbp-8]=list, [rbp-16]=iterable, [rbp-24]=count, [rbp-32]=items
+    ; locals: [rbp - LE_LIST]=list, [rbp - LE_ITERABLE]=iterable, [rbp - LE_COUNT]=count, [rbp - LE_CURSOR]=items
 
     ; TOS = iterable
     VPOP_VAL rsi, r8           ; rsi = iterable (tuple or list)
     cmp r8d, TAG_PTR
     jne .extend_type_error
-    mov [rbp-16], rsi          ; save iterable
+    mov [rbp - LE_ITERABLE], rsi          ; save iterable
 
     ; list is at stack[-(ecx)] after popping (payload slots)
     neg rcx
     shl rcx, 3                ; -ecx * 8
     mov rdi, [r13 + rcx]      ; rdi = list
-    mov [rbp-8], rdi           ; save list
+    mov [rbp - LE_LIST], rdi           ; save list
 
     ; Get iterable type to extract items
     mov rax, [rsi + PyObject.ob_type]
@@ -1237,20 +1251,20 @@ DEF_FUNC op_list_extend, 32
 
 .extend_tuple:
     mov rcx, [rsi + PyTupleObject.ob_size]
-    mov [rbp-24], rcx          ; count
+    mov [rbp - LE_COUNT], rcx          ; count
     test rcx, rcx
     jz .extend_done
     xor r8d, r8d               ; index
 .extend_tuple_loop:
-    mov rdi, [rbp-8]          ; list
-    mov rax, [rbp-16]         ; iterable (tuple)
+    mov rdi, [rbp - LE_LIST]          ; list
+    mov rax, [rbp - LE_ITERABLE]         ; iterable (tuple)
     mov r9, [rax + PyTupleObject.ob_item]
     mov rsi, [r9 + r8 * 8]    ; payload
     push r8
     call list_append
     pop r8
     inc r8
-    cmp r8, [rbp-24]
+    cmp r8, [rbp - LE_COUNT]
     jb .extend_tuple_loop
     jmp .extend_done
 
@@ -1258,28 +1272,28 @@ DEF_FUNC op_list_extend, 32
     mov rcx, [rsi + PyListObject.ob_size]
     mov rdx, [rsi + PyListObject.ob_item]
 
-    mov [rbp-24], rcx          ; count
-    mov [rbp-32], rdx          ; items ptr
+    mov [rbp - LE_COUNT], rcx          ; count
+    mov [rbp - LE_CURSOR], rdx          ; items ptr
 
     test rcx, rcx
     jz .extend_done
     xor r8d, r8d               ; index
 .extend_list_loop:
-    mov rdi, [rbp-8]          ; list
-    mov rdx, [rbp-32]         ; payloads ptr
-    mov rax, [rbp-16]         ; iterable list
+    mov rdi, [rbp - LE_LIST]          ; list
+    mov rdx, [rbp - LE_CURSOR]         ; payloads ptr
+    mov rax, [rbp - LE_ITERABLE]         ; iterable list
     mov rsi, [rdx + r8 * 8]   ; item payload
     push r8
     call list_append
     pop r8
     inc r8
-    cmp r8, [rbp-24]          ; count
+    cmp r8, [rbp - LE_COUNT]          ; count
     jb .extend_list_loop
     jmp .extend_done          ; or we fall into .extend_generic and re-append
 
 .extend_generic:
     ; Generic iterable: tp_iter + tp_iternext loop
-    mov rsi, [rbp-16]         ; iterable
+    mov rsi, [rbp - LE_ITERABLE]         ; iterable
     mov rax, [rsi + PyObject.ob_type]
     mov rax, [rax + PyTypeObject.tp_iter]
     test rax, rax
@@ -1288,15 +1302,15 @@ DEF_FUNC op_list_extend, 32
     call rax                   ; tp_iter(iterable) → iterator
     test rax, rax
     jz .extend_type_error
-    mov [rbp-32], rax          ; save iterator (reusing locals slot)
+    mov [rbp - LE_CURSOR], rax          ; save iterator (reusing locals slot)
 
 .extend_generic_loop:
-    mov rdi, [rbp-32]         ; iterator
+    mov rdi, [rbp - LE_CURSOR]         ; iterator
     mov rax, [rdi + PyObject.ob_type]
     mov rax, [rax + PyTypeObject.tp_iternext]
     test rax, rax
     jz .extend_generic_done
-    mov rdi, [rbp-32]
+    mov rdi, [rbp - LE_CURSOR]
     call rax                   ; tp_iternext(iter) → (payload, tag)
     V_UNPACK rax, rdx           ; tp_iternext returns a Value
     test edx, edx
@@ -1305,7 +1319,7 @@ DEF_FUNC op_list_extend, 32
     ; Append to list
     push rax
     push rdx
-    mov rdi, [rbp-8]          ; list
+    mov rdi, [rbp - LE_LIST]          ; list
     mov rsi, rax
     ; edx = tag (already set)
     V_PACK rsi, rdx         ; list_append takes a Value
@@ -1318,12 +1332,12 @@ DEF_FUNC op_list_extend, 32
 
 .extend_generic_done:
     ; DECREF iterator
-    mov rdi, [rbp-32]
+    mov rdi, [rbp - LE_CURSOR]
     call obj_decref
 
 .extend_done:
     ; DECREF iterable
-    mov rdi, [rbp-16]
+    mov rdi, [rbp - LE_ITERABLE]
     call obj_decref
 
     leave
@@ -2111,6 +2125,10 @@ END_FUNC op_map_add
 ;; Pop TOS, merge all key:value pairs into dict.
 ;; ============================================================================
 
+DU_SOURCE   equ 24
+DU_DICT     equ 32
+DU_CAP      equ 40
+DU_ENTRIES  equ 48
 DEF_FUNC op_dict_update
     push rbx
     push r14                   ; extra callee-saved
@@ -2119,13 +2137,13 @@ DEF_FUNC op_dict_update
     VPOP_VAL rsi, r8           ; rsi = mapping to merge from
     cmp r8d, TAG_PTR
     jne .du_type_error
-    mov [rbp-24], rsi
+    mov [rbp - DU_SOURCE], rsi
 
     ; dict is at stack[-(ecx)] after pop (payload slots)
     neg rcx
     shl rcx, 3                ; -ecx * 8
     mov rdi, [r13 + rcx]
-    mov [rbp-32], rdi          ; target dict
+    mov [rbp - DU_DICT], rdi          ; target dict
 
     ; mapping must be a dict (for now)
     mov rax, [rsi + PyObject.ob_type]
@@ -2134,17 +2152,17 @@ DEF_FUNC op_dict_update
     ; Iterate over source dict entries and copy to target
     ; Source dict: entries at [rsi + PyDictObject.entries], capacity at +24
     mov rax, [rsi + PyDictObject.capacity]
-    mov [rbp-40], rax          ; capacity
+    mov [rbp - DU_CAP], rax          ; capacity
     mov rax, [rsi + PyDictObject.entries]
-    mov [rbp-48], rax          ; entries ptr
+    mov [rbp - DU_ENTRIES], rax          ; entries ptr
     xor ebx, ebx              ; index
 
 .du_loop:
-    cmp rbx, [rbp-40]
+    cmp rbx, [rbp - DU_CAP]
     jge .du_done
 
     ; Check if entry has a key and value_tag != TAG_NULL
-    mov rax, [rbp-48]
+    mov rax, [rbp - DU_ENTRIES]
     imul rcx, rbx, DictEntry_size
     add rax, rcx
     mov rsi, [rax + DictEntry.key]
@@ -2154,7 +2172,7 @@ DEF_FUNC op_dict_update
 
     ; dict_set(target, key, value, value_tag, key_tag)
     push rbx
-    mov rdi, [rbp-32]
+    mov rdi, [rbp - DU_DICT]
     call dict_set
     pop rbx
 
@@ -2164,7 +2182,7 @@ DEF_FUNC op_dict_update
 
 .du_done:
     ; DECREF the mapping
-    mov rdi, [rbp-24]
+    mov rdi, [rbp - DU_SOURCE]
     call obj_decref
 
     add rsp, 32
@@ -2185,6 +2203,10 @@ END_FUNC op_dict_update
 ;; ============================================================================
 extern dict_get
 
+DM_SOURCE   equ 24
+DM_DICT     equ 32
+DM_CAP      equ 40
+DM_ENTRIES  equ 48
 DEF_FUNC op_dict_merge
     push rbx
     push r14
@@ -2193,13 +2215,13 @@ DEF_FUNC op_dict_merge
     VPOP_VAL rsi, r8           ; rsi = mapping to merge from
     cmp r8d, TAG_PTR
     jne .dm_type_error
-    mov [rbp-24], rsi
+    mov [rbp - DM_SOURCE], rsi
 
     ; dict is at stack[-(ecx)] after pop (payload slots)
     neg rcx
     shl rcx, 3
     mov rdi, [r13 + rcx]
-    mov [rbp-32], rdi          ; target dict
+    mov [rbp - DM_DICT], rdi          ; target dict
 
     ; mapping must be a dict
     mov rax, [rsi + PyObject.ob_type]
@@ -2207,16 +2229,16 @@ DEF_FUNC op_dict_merge
 
     ; Iterate over source dict entries
     mov rax, [rsi + PyDictObject.capacity]
-    mov [rbp-40], rax          ; capacity
+    mov [rbp - DM_CAP], rax          ; capacity
     mov rax, [rsi + PyDictObject.entries]
-    mov [rbp-48], rax          ; entries ptr
+    mov [rbp - DM_ENTRIES], rax          ; entries ptr
     xor ebx, ebx              ; index
 
 .dm_loop:
-    cmp rbx, [rbp-40]
+    cmp rbx, [rbp - DM_CAP]
     jge .dm_done
 
-    mov rax, [rbp-48]
+    mov rax, [rbp - DM_ENTRIES]
     imul rcx, rbx, DictEntry_size
     add rax, rcx
     mov rsi, [rax + DictEntry.key]
@@ -2226,7 +2248,7 @@ DEF_FUNC op_dict_merge
     ; Check for duplicate: dict_get(target, key, key_tag).  dict_get returns
     ; its tag in edx, so the key tag must not be restored over it.
     push rbx
-    mov rdi, [rbp-32]          ; target dict
+    mov rdi, [rbp - DM_DICT]          ; target dict
     call dict_get
     V_UNPACK rax, rdx           ; dict_get returns a Value
     test edx, edx
@@ -2234,13 +2256,13 @@ DEF_FUNC op_dict_merge
 
     ; dict_set(target, key, value, value_tag, key_tag)
     pop rbx
-    mov rax, [rbp-48]
+    mov rax, [rbp - DM_ENTRIES]
     imul rcx, rbx, DictEntry_size
     add rax, rcx
     mov rsi, [rax + DictEntry.key]
     mov rdx, [rax + DictEntry.value]
     push rbx
-    mov rdi, [rbp-32]
+    mov rdi, [rbp - DM_DICT]
     call dict_set
     pop rbx
 
@@ -2250,7 +2272,7 @@ DEF_FUNC op_dict_merge
 
 .dm_done:
     ; DECREF the mapping
-    mov rdi, [rbp-24]
+    mov rdi, [rbp - DM_SOURCE]
     call obj_decref
 
     add rsp, 32
@@ -2276,17 +2298,22 @@ END_FUNC op_dict_merge
 ;; ============================================================================
 extern list_type
 
+; IPAY/ITAG are the iterable as a (payload, tag) pair
+UEX_TOTAL   equ 32
+UEX_REST    equ 40
+UEX_ITAG    equ 48
+UEX_IPAY    equ 56
 DEF_FUNC op_unpack_ex
     push rbx
     push r14
     ; NOTE: do NOT push/pop r13 — the VPUSH macros advance it
     ; (tag stack top) and restoring it would desync from r13 (payload stack top)
-    sub rsp, 40                ; locals: [rbp-32]=total_len, [rbp-40]=rest_count,
-                               ;         [rbp-48]=iter_tag, [rbp-56]=iterable payload
+    sub rsp, 40                ; locals: [rbp - UEX_TOTAL]=total_len, [rbp - UEX_REST]=rest_count,
+                               ;         [rbp - UEX_ITAG]=iter_tag, [rbp - UEX_IPAY]=iterable payload
 
-    ; Decode arg: count_before = ecx & 0xFF, count_after = ecx >> 8
+    ; Decode arg: count_before = ecx & 0xff, count_after = ecx >> 8
     mov eax, ecx
-    and eax, 0xFF
+    and eax, 0xff
     mov ebx, eax               ; ebx = count_before
     mov eax, ecx
     shr eax, 8
@@ -2294,11 +2321,11 @@ DEF_FUNC op_unpack_ex
 
     ; Pop iterable
     VPOP_VAL rdi, rax
-    mov [rbp-48], rax          ; iterable tag
-    mov [rbp-56], rdi          ; iterable payload
+    mov [rbp - UEX_ITAG], rax          ; iterable tag
+    mov [rbp - UEX_IPAY], rdi          ; iterable payload
 
     ; Get length
-    mov rdi, [rbp-56]
+    mov rdi, [rbp - UEX_IPAY]
     mov rax, [rdi + PyObject.ob_type]
     lea rcx, [rel list_type]
     cmp rax, rcx
@@ -2325,12 +2352,12 @@ DEF_FUNC op_unpack_ex
     cmp rax, rcx
     jl .ue_not_enough
 
-    mov [rbp-32], rax          ; save total_len
+    mov [rbp - UEX_TOTAL], rax          ; save total_len
 
     ; Compute rest_count = total_len - count_before - count_after
     sub rax, rbx
     sub rax, r14
-    mov [rbp-40], rax          ; rest_count
+    mov [rbp - UEX_REST], rax          ; rest_count
 
     ; Push in reverse order (top of stack = last pushed = first in sequence)
     ; Stack order (bottom to top):
@@ -2348,7 +2375,7 @@ DEF_FUNC op_unpack_ex
 
     ; after items are at indices [total_len - count_after .. total_len - 1]
     ; Push them in reverse: index total_len-1, total_len-2, ..., total_len-count_after
-    mov rax, [rbp-32]          ; total_len
+    mov rax, [rbp - UEX_TOTAL]          ; total_len
     dec rax                    ; start from total_len - 1
 .ue_after_loop:
     test rcx, rcx
@@ -2357,7 +2384,7 @@ DEF_FUNC op_unpack_ex
     push rax
 
     ; Get item at index rax from iterable
-    mov rdi, [rbp-56]
+    mov rdi, [rbp - UEX_IPAY]
     mov rsi, rax
     call .ue_getitem           ; rax = payload, rdx = tag (borrowed)
     INCREF_VAL rax, rdx
@@ -2371,12 +2398,12 @@ DEF_FUNC op_unpack_ex
 
 .ue_no_after:
     ; 2. Build rest list
-    mov rdi, [rbp-40]          ; rest_count as initial capacity
+    mov rdi, [rbp - UEX_REST]          ; rest_count as initial capacity
     call list_new
     push rax                   ; save rest list
 
     ; Add items at indices [count_before .. count_before + rest_count - 1]
-    mov rcx, [rbp-40]          ; rest_count
+    mov rcx, [rbp - UEX_REST]          ; rest_count
     test rcx, rcx
     jz .ue_rest_done
     mov rax, rbx               ; start index = count_before
@@ -2386,7 +2413,7 @@ DEF_FUNC op_unpack_ex
     push rcx
     push rax
 
-    mov rdi, [rbp-56]
+    mov rdi, [rbp - UEX_IPAY]
     mov rsi, rax
     call .ue_getitem           ; rax = payload, rdx = tag (borrowed)
     mov rsi, rax
@@ -2414,7 +2441,7 @@ DEF_FUNC op_unpack_ex
 .ue_before_loop:
     push rcx
 
-    mov rdi, [rbp-56]
+    mov rdi, [rbp - UEX_IPAY]
     mov rsi, rcx
     call .ue_getitem           ; rax = payload, rdx = tag (borrowed)
     INCREF_VAL rax, rdx
@@ -2428,8 +2455,8 @@ DEF_FUNC op_unpack_ex
 
 .ue_no_before:
     ; DECREF iterable (tag-aware)
-    mov rdi, [rbp-56]
-    mov rsi, [rbp-48]         ; iterable tag
+    mov rdi, [rbp - UEX_IPAY]
+    mov rsi, [rbp - UEX_ITAG]         ; iterable tag
     DECREF_VAL rdi, rsi
 
     add rsp, 40
@@ -2440,14 +2467,14 @@ DEF_FUNC op_unpack_ex
 
 .ue_generic:
     ; Generic iterable: iterate into a temp list, then unpack from it
-    ; [rbp-56] = iterable payload, [rbp-48] = iterable tag
+    ; [rbp - UEX_IPAY] = iterable payload, [rbp - UEX_ITAG] = iterable tag
     ; ebx = count_before, r14 = count_after (must preserve)
-    mov rdi, [rbp-56]
+    mov rdi, [rbp - UEX_IPAY]
     mov rax, [rdi + PyObject.ob_type]
     mov rax, [rax + PyTypeObject.tp_iter]
     test rax, rax
     jz .ue_type_error
-    mov rdi, [rbp-56]
+    mov rdi, [rbp - UEX_IPAY]
     call rax                   ; tp_iter(iterable) → iterator
     test rax, rax
     jz .ue_type_error
@@ -2490,14 +2517,14 @@ DEF_FUNC op_unpack_ex
     call obj_decref            ; DECREF iterator
 
     ; DECREF original iterable
-    mov rdi, [rbp-56]
-    mov rsi, [rbp-48]
+    mov rdi, [rbp - UEX_IPAY]
+    mov rsi, [rbp - UEX_ITAG]
     DECREF_VAL rdi, rsi
 
     ; Replace iterable with temp list, update tag
     pop rax                    ; rax = temp_list
-    mov [rbp-56], rax
-    mov qword [rbp-48], TAG_PTR
+    mov [rbp - UEX_IPAY], rax
+    mov qword [rbp - UEX_ITAG], TAG_PTR
 
     ; Now fall through to .ue_list path (reload rdi — clobbered by DECREF_VAL above)
     mov rdi, rax
@@ -2553,16 +2580,18 @@ extern set_new
 extern set_add
 extern set_type
 
+BSE_COUNT   equ 8
+BSE_SET     equ 16
 DEF_FUNC op_build_set, 16
 
-    mov [rbp-8], rcx           ; save count
+    mov [rbp - BSE_COUNT], rcx           ; save count
 
     ; Allocate empty set
     call set_new
-    mov [rbp-16], rax          ; save set
+    mov [rbp - BSE_SET], rax          ; save set
 
     ; Pop items and add to set
-    mov rcx, [rbp-8]
+    mov rcx, [rbp - BSE_COUNT]
     test rcx, rcx
     jz .build_set_done
 
@@ -2573,10 +2602,10 @@ DEF_FUNC op_build_set, 16
 
     xor edx, edx
 .build_set_fill:
-    cmp rdx, [rbp-8]
+    cmp rdx, [rbp - BSE_COUNT]
     jge .build_set_done
     push rdx
-    mov rdi, [rbp-16]         ; set
+    mov rdi, [rbp - BSE_SET]         ; set
     mov rax, rdx
     shl rax, 3                ; index * 8
     mov rsi, [r13 + rax]     ; item
@@ -2587,12 +2616,12 @@ DEF_FUNC op_build_set, 16
 
 .build_set_done:
     ; set_add does INCREF on key, so DECREF all stack items to compensate
-    mov rcx, [rbp-8]
+    mov rcx, [rbp - BSE_COUNT]
     test rcx, rcx
     jz .build_set_push
     xor edx, edx
 .build_set_fixref:
-    cmp rdx, [rbp-8]
+    cmp rdx, [rbp - BSE_COUNT]
     jge .build_set_push
     mov rax, rdx
     shl rax, 3                ; index * 8
@@ -2604,7 +2633,7 @@ DEF_FUNC op_build_set, 16
     jmp .build_set_fixref
 
 .build_set_push:
-    mov rax, [rbp-16]
+    mov rax, [rbp - BSE_SET]
     VPUSH_PTR rax
     leave
     DISPATCH
@@ -2647,23 +2676,27 @@ END_FUNC op_set_add
 ;; ecx = position (set at stack[-(ecx)] after pop)
 ;; Pop TOS (iterable), add each item to set.
 ;; ============================================================================
+SU_SOURCE   equ 24
+SU_SET      equ 32
+SU_CAP      equ 40
+SU_ENTRIES  equ 48
 DEF_FUNC op_set_update
     push rbx
     push r14
-    sub rsp, 40                ; locals: [rbp-24]=set, [rbp-32]=iterable, [rbp-40]=iter, [rbp-48]=iter_tag
+    sub rsp, 40                ; locals: [rbp - SU_SOURCE]=set, [rbp - SU_SET]=iterable, [rbp - SU_CAP]=iter, [rbp - SU_ENTRIES]=iter_tag
 
     ; TOS = iterable
     VPOP_VAL rsi, rax          ; rsi = iterable
-    mov [rbp-48], rax          ; iterable tag
+    mov [rbp - SU_ENTRIES], rax          ; iterable tag
     cmp eax, TAG_PTR
     jne .su_type_error
-    mov [rbp-32], rsi          ; save iterable
+    mov [rbp - SU_SET], rsi          ; save iterable
 
     ; set is at stack[-(ecx)] after popping (payload slots)
     neg rcx
     shl rcx, 3                ; -ecx * 8
     mov rdi, [r13 + rcx]      ; rdi = set
-    mov [rbp-24], rdi          ; save set
+    mov [rbp - SU_SOURCE], rdi          ; save set
 
     ; Check if iterable is a set (direct iteration over entries)
     mov rax, [rsi + PyObject.ob_type]
@@ -2678,10 +2711,10 @@ DEF_FUNC op_set_update
     test rax, rax
     jz .su_type_error
     call rax
-    mov [rbp-40], rax          ; save iterator
+    mov [rbp - SU_CAP], rax          ; save iterator
 
 .su_iter_loop:
-    mov rdi, [rbp-40]          ; iterator
+    mov rdi, [rbp - SU_CAP]          ; iterator
     mov rax, [rdi + PyObject.ob_type]
     mov rax, [rax + PyTypeObject.tp_iternext]
     call rax
@@ -2692,7 +2725,7 @@ DEF_FUNC op_set_update
     ; rax = next item (owned ref), rdx = tag from tp_iternext
     push rdx                   ; save item tag
     push rax                   ; save item payload
-    mov rdi, [rbp-24]          ; set
+    mov rdi, [rbp - SU_SOURCE]          ; set
     mov rsi, rax               ; item
     V_PACK rsi, rdx            ; set_add takes a key Value
     call set_add               ; set_add does INCREF
@@ -2703,12 +2736,12 @@ DEF_FUNC op_set_update
 
 .su_iter_done:
     ; DECREF iterator (heap ptr, no tag needed)
-    mov rdi, [rbp-40]
+    mov rdi, [rbp - SU_CAP]
     call obj_decref
 
     ; DECREF iterable (tag-aware)
-    mov rdi, [rbp-32]
-    mov rsi, [rbp-48]
+    mov rdi, [rbp - SU_SET]
+    mov rsi, [rbp - SU_ENTRIES]
     DECREF_VAL rdi, rsi
 
     add rsp, 40
@@ -2720,14 +2753,14 @@ DEF_FUNC op_set_update
 .su_from_set:
     ; Iterable is a set - iterate entries directly
     mov rax, [rsi + PyDictObject.capacity]
-    mov [rbp-40], rax          ; capacity (reuse slot)
+    mov [rbp - SU_CAP], rax          ; capacity (reuse slot)
     xor ebx, ebx              ; index
 
 .su_set_loop:
-    cmp rbx, [rbp-40]
+    cmp rbx, [rbp - SU_CAP]
     jge .su_set_done
 
-    mov rax, [rbp-32]         ; source set
+    mov rax, [rbp - SU_SET]         ; source set
     mov rax, [rax + PyDictObject.entries]
     imul rcx, rbx, 16         ; SET_ENTRY_SIZE = 16
     add rax, rcx
@@ -2739,7 +2772,7 @@ DEF_FUNC op_set_update
 
     ; set_add(target_set, key Value)
     push rbx
-    mov rdi, [rbp-24]
+    mov rdi, [rbp - SU_SOURCE]
     call set_add
     pop rbx
 
@@ -2749,8 +2782,8 @@ DEF_FUNC op_set_update
 
 .su_set_done:
     ; DECREF iterable (tag-aware)
-    mov rdi, [rbp-32]
-    mov rsi, [rbp-48]
+    mov rdi, [rbp - SU_SET]
+    mov rsi, [rbp - SU_ENTRIES]
     DECREF_VAL rdi, rsi
 
     add rsp, 40

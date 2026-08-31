@@ -577,7 +577,6 @@ FND_DIR   equ 32
 FND_WPTR  equ 56            ; the 3-word window: 56, 48, 40
 FND_WLEN  equ 48
 FND_FRAME equ 64            ; + 0 pushes = 64
-global str_find_impl
 DEF_FUNC str_find_impl, FND_FRAME
     mov [rbp - FND_ARGS], rdi
     mov [rbp - FND_NARGS], rsi

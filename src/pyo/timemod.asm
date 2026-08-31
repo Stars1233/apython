@@ -85,7 +85,6 @@ END_FUNC time_monotonic_func
 ; time_module_create() -> PyObject*
 ; Creates and returns the time module
 ; ============================================================================
-global time_module_create
 DEF_FUNC time_module_create
     push rbx
     push r12
@@ -153,7 +152,7 @@ END_FUNC time_module_create
 ; ============================================================================
 section .rodata
 align 8
-tm_1e9: dq 0x41CDCD6500000000     ; 1e9 as IEEE 754 double
+tm_1e9: dq 0x41cdcd6500000000     ; 1e9 as IEEE 754 double
 
 tm_time:         db "time", 0
 tm_process_time: db "process_time", 0

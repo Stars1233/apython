@@ -894,7 +894,6 @@ END_FUNC abc_reset_caches_func
 ; ============================================================================
 
 ABC_FRAME equ 8
-global abc_module_create
 DEF_FUNC abc_module_create, ABC_FRAME
     push rbx
     push r12

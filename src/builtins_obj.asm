@@ -57,7 +57,6 @@ extern dict_new
 
 section .text
 
-global str_type_call
 DEF_FUNC_BARE str_type_call
     mov rdi, rsi
     mov rsi, rdx
@@ -1297,7 +1296,6 @@ DIR_OBJ     equ 16      ; the object
 DIR_ORIGIN  equ 24      ; the type whose MRO is being listed
 DIR_FRAME   equ 32
 
-global builtin_dir
 DEF_FUNC builtin_dir, DIR_FRAME
     push rbx
     push r12
@@ -1575,7 +1573,7 @@ DEF_FUNC builtin_open_fn, OPN_FRAME
     jmp .opn_do_open
 
 .opn_mode_x:
-    mov esi, 0xC1           ; O_WRONLY|O_CREAT|O_EXCL (1|0x40|0x80)
+    mov esi, 0xc1           ; O_WRONLY|O_CREAT|O_EXCL (1|0x40|0x80)
     jmp .opn_do_open
 
 .opn_do_open:
@@ -1720,7 +1718,7 @@ DEF_FUNC builtin_ascii_fn, AA_FRAME
     inc rdi
     ; Low nibble
     mov edx, eax
-    and edx, 0xF
+    and edx, 0xf
     cmp edx, 10
     jb .aa_lo_dec
     add edx, ('a' - 10)
@@ -1998,7 +1996,6 @@ END_FUNC builtin_delattr_fn
 ; builtin_aiter_fn(args, nargs) - aiter(async_iterable)
 ; Calls tp_iter on the async iterable
 ; ============================================================================
-global builtin_aiter_fn
 DEF_FUNC builtin_aiter_fn
 
     cmp rsi, 1
@@ -2118,7 +2115,6 @@ END_FUNC builtin_anext_fn
 ; Only uses first arg (name), ignores globals/locals/fromlist/level for now
 ; ============================================================================
 extern import_module
-global builtin_import_fn
 DEF_FUNC builtin_import_fn
 
     cmp rsi, 1
@@ -2158,7 +2154,6 @@ END_FUNC builtin_import_fn
 ; ============================================================================
 ; builtin_breakpoint(args, nargs) - breakpoint() stub (no-op)
 ; ============================================================================
-global builtin_breakpoint
 DEF_FUNC_BARE builtin_breakpoint
     ; No-op: return None
     xor eax, eax
