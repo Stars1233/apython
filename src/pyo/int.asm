@@ -791,9 +791,7 @@ DEF_FUNC int_from_cstr_base, IB_FRAME
     call ap_free
     extern raise_exception
     extern exc_ValueError_type
-    lea rdi, [rel exc_ValueError_type]
-    CSTRING rsi, "Exceeds the limit for integer string conversion"
-    call raise_exception
+    RAISE exc_ValueError_type, "Exceeds the limit for integer string conversion"
 
 .parse_error:
     ; Free cleaned buffer if allocated
@@ -1087,9 +1085,7 @@ DEF_FUNC_BARE int_repr
     ret
 
 .repr_limit_exceeded:
-    lea rdi, [rel exc_ValueError_type]
-    CSTRING rsi, "Exceeds the limit for integer string conversion"
-    call raise_exception
+    RAISE exc_ValueError_type, "Exceeds the limit for integer string conversion"
 END_FUNC int_repr
 
 ;; ============================================================================
@@ -1559,9 +1555,7 @@ DEF_FUNC_BARE int_floordiv
 .zdiv_error:
     push rbp
     mov rbp, rsp
-    lea rdi, [rel exc_ZeroDivisionError_type]
-    CSTRING rsi, "integer division or modulo by zero"
-    call raise_exception
+    RAISE exc_ZeroDivisionError_type, "integer division or modulo by zero"
 
 .gmp_path:
     push rbp
@@ -1647,9 +1641,7 @@ DEF_FUNC_BARE int_floordiv
     mov rdi, r12
     call int_dealloc
 .gmp_zdiv_nb:
-    lea rdi, [rel exc_ZeroDivisionError_type]
-    CSTRING rsi, "integer division or modulo by zero"
-    call raise_exception
+    RAISE exc_ZeroDivisionError_type, "integer division or modulo by zero"
 END_FUNC int_floordiv
 
 ;; ============================================================================
@@ -1701,9 +1693,7 @@ DEF_FUNC_BARE int_mod
 .mod_zdiv_error:
     push rbp
     mov rbp, rsp
-    lea rdi, [rel exc_ZeroDivisionError_type]
-    CSTRING rsi, "integer division or modulo by zero"
-    call raise_exception
+    RAISE exc_ZeroDivisionError_type, "integer division or modulo by zero"
 
 .gmp_path:
     push rbp
@@ -1788,9 +1778,7 @@ DEF_FUNC_BARE int_mod
     mov rdi, r12
     call int_dealloc
 .gmp_mod_zdiv_nb:
-    lea rdi, [rel exc_ZeroDivisionError_type]
-    CSTRING rsi, "integer division or modulo by zero"
-    call raise_exception
+    RAISE exc_ZeroDivisionError_type, "integer division or modulo by zero"
 END_FUNC int_mod
 
 ;; ============================================================================
@@ -2156,9 +2144,7 @@ DEF_FUNC int_compare
     ret
 
 .ret_true:
-    lea rax, [rel bool_true]
-    inc qword [rax + PyObject.ob_refcnt]
-    mov edx, TAG_PTR
+    RET_TRUE
     pop r14
     pop r13
     pop r12
@@ -2166,9 +2152,7 @@ DEF_FUNC int_compare
     leave
     ret
 .ret_false:
-    lea rax, [rel bool_false]
-    inc qword [rax + PyObject.ob_refcnt]
-    mov edx, TAG_PTR
+    RET_FALSE
     pop r14
     pop r13
     pop r12
@@ -2698,9 +2682,7 @@ DEF_FUNC int_lshift
     ret
 
 .neg_shift:
-    lea rdi, [rel exc_ValueError_type]
-    CSTRING rsi, "negative shift count"
-    call raise_exception
+    RAISE exc_ValueError_type, "negative shift count"
 END_FUNC int_lshift
 
 ;; ============================================================================
@@ -2811,9 +2793,7 @@ DEF_FUNC int_rshift
     ret
 
 .neg_shift:
-    lea rdi, [rel exc_ValueError_type]
-    CSTRING rsi, "negative shift count"
-    call raise_exception
+    RAISE exc_ValueError_type, "negative shift count"
 END_FUNC int_rshift
 
 ;; ============================================================================
@@ -3018,9 +2998,7 @@ DEF_FUNC int_true_divide
     ret
 
 .td_divzero:
-    lea rdi, [rel exc_ZeroDivisionError_type]
-    CSTRING rsi, "division by zero"
-    call raise_exception
+    RAISE exc_ZeroDivisionError_type, "division by zero"
 END_FUNC int_true_divide
 
 ;; ============================================================================

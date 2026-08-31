@@ -660,9 +660,7 @@ DEF_FUNC float_truediv, 32
     ret
 
 .div_zero:
-    lea rdi, [rel exc_ZeroDivisionError_type]
-    CSTRING rsi, "float division by zero"
-    call raise_exception
+    RAISE exc_ZeroDivisionError_type, "float division by zero"
 END_FUNC float_truediv
 
 DEF_FUNC float_floordiv, 32
@@ -686,9 +684,7 @@ DEF_FUNC float_floordiv, 32
     ret
 
 .floordiv_zero:
-    lea rdi, [rel exc_ZeroDivisionError_type]
-    CSTRING rsi, "float floor division by zero"
-    call raise_exception
+    RAISE exc_ZeroDivisionError_type, "float floor division by zero"
 END_FUNC float_floordiv
 
 DEF_FUNC float_mod, 32
@@ -717,9 +713,7 @@ DEF_FUNC float_mod, 32
     ret
 
 .mod_zero:
-    lea rdi, [rel exc_ZeroDivisionError_type]
-    CSTRING rsi, "float modulo"
-    call raise_exception
+    RAISE exc_ZeroDivisionError_type, "float modulo"
 END_FUNC float_mod
 
 DEF_FUNC_BARE float_neg
@@ -891,9 +885,7 @@ DEF_FUNC float_int
     ret
 
 .not_finite:
-    lea rdi, [rel exc_ValueError_type]
-    CSTRING rsi, "cannot convert float NaN or infinity to integer"
-    call raise_exception
+    RAISE exc_ValueError_type, "cannot convert float NaN or infinity to integer"
 END_FUNC float_int
 
 ;; ============================================================================
@@ -1032,15 +1024,11 @@ DEF_FUNC float_compare, 40
     ret
 
 .ret_true:
-    lea rax, [rel bool_true]
-    inc qword [rax + PyObject.ob_refcnt]
-    mov edx, TAG_PTR
+    RET_TRUE
     leave
     ret
 .ret_false:
-    lea rax, [rel bool_false]
-    inc qword [rax + PyObject.ob_refcnt]
-    mov edx, TAG_PTR
+    RET_FALSE
     leave
     ret
 END_FUNC float_compare

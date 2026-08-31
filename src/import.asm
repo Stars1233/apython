@@ -204,13 +204,9 @@ DEF_FUNC import_resolve_relative, IRR_FRAME
     ret
 
 .irr_beyond_top:
-    lea rdi, [rel exc_ImportError_type]
-    CSTRING rsi, "attempted relative import beyond top-level package"
-    call raise_exception
+    RAISE exc_ImportError_type, "attempted relative import beyond top-level package"
 .irr_no_package:
-    lea rdi, [rel exc_ImportError_type]
-    CSTRING rsi, "attempted relative import with no known parent package"
-    call raise_exception
+    RAISE exc_ImportError_type, "attempted relative import with no known parent package"
 END_FUNC import_resolve_relative
 
 ; ----------------------------------------------------------------------------

@@ -47,17 +47,13 @@ DEF_FUNC set_method_add
     mov rsi, [rax + 8]     ; elem payload
     call set_add
 
-    lea rax, [rel none_singleton]
-    inc qword [rax + PyObject.ob_refcnt]
-    mov edx, TAG_PTR
+    RET_NONE
     leave
     V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .sma_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "add() takes exactly one argument"
-    call raise_exception
+    RAISE exc_TypeError_type, "add() takes exactly one argument"
 END_FUNC set_method_add
 
 ;; ============================================================================
@@ -75,22 +71,16 @@ DEF_FUNC set_method_remove
     test eax, eax
     jnz .smr_keyerr
 
-    lea rax, [rel none_singleton]
-    inc qword [rax + PyObject.ob_refcnt]
-    mov edx, TAG_PTR
+    RET_NONE
     leave
     V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .smr_keyerr:
-    lea rdi, [rel exc_KeyError_type]
-    CSTRING rsi, "element not in set"
-    call raise_exception
+    RAISE exc_KeyError_type, "element not in set"
 
 .smr_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "remove() takes exactly one argument"
-    call raise_exception
+    RAISE exc_TypeError_type, "remove() takes exactly one argument"
 END_FUNC set_method_remove
 
 ;; ============================================================================
@@ -107,17 +97,13 @@ DEF_FUNC set_method_discard
     call set_remove
     ; Ignore return value (don't care if not found)
 
-    lea rax, [rel none_singleton]
-    inc qword [rax + PyObject.ob_refcnt]
-    mov edx, TAG_PTR
+    RET_NONE
     leave
     V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .smd_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "discard() takes exactly one argument"
-    call raise_exception
+    RAISE exc_TypeError_type, "discard() takes exactly one argument"
 END_FUNC set_method_discard
 
 ;; ============================================================================
@@ -178,14 +164,10 @@ DEF_FUNC set_method_pop, SMP_FRAME
     ret
 
 .smpop_empty:
-    lea rdi, [rel exc_KeyError_type]
-    CSTRING rsi, "pop from an empty set"
-    call raise_exception
+    RAISE exc_KeyError_type, "pop from an empty set"
 
 .smpop_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "pop() takes no arguments"
-    call raise_exception
+    RAISE exc_TypeError_type, "pop() takes no arguments"
 END_FUNC set_method_pop
 
 ;; ============================================================================
@@ -230,9 +212,7 @@ DEF_FUNC set_method_clear
 .smc_done:
     mov qword [rbx + PyDictObject.ob_size], 0
 
-    lea rax, [rel none_singleton]
-    inc qword [rax + PyObject.ob_refcnt]
-    mov edx, TAG_PTR
+    RET_NONE
     pop r13
     pop r12
     pop rbx
@@ -241,9 +221,7 @@ DEF_FUNC set_method_clear
     ret
 
 .smc_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "clear() takes no arguments"
-    call raise_exception
+    RAISE exc_TypeError_type, "clear() takes no arguments"
 END_FUNC set_method_clear
 
 ;; ============================================================================
@@ -303,9 +281,7 @@ DEF_FUNC set_method_copy
     ret
 
 .smcp_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "copy() takes no arguments"
-    call raise_exception
+    RAISE exc_TypeError_type, "copy() takes no arguments"
 END_FUNC set_method_copy
 
 ;; ============================================================================
@@ -391,9 +367,7 @@ DEF_FUNC set_method_union
     ret
 
 .smu_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "union() takes exactly one argument"
-    call raise_exception
+    RAISE exc_TypeError_type, "union() takes exactly one argument"
 END_FUNC set_method_union
 
 ;; ============================================================================
@@ -485,9 +459,7 @@ DEF_FUNC set_method_update, SU_FRAME
 
 .supd_done:
     extern none_singleton
-    lea rax, [rel none_singleton]
-    inc qword [rax + PyObject.ob_refcnt]
-    mov edx, TAG_PTR
+    RET_NONE
     pop r13
     pop r12
     pop rbx
@@ -564,9 +536,7 @@ DEF_FUNC set_method_intersection
     ret
 
 .smi_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "intersection() takes exactly one argument"
-    call raise_exception
+    RAISE exc_TypeError_type, "intersection() takes exactly one argument"
 END_FUNC set_method_intersection
 
 ;; ============================================================================
@@ -637,9 +607,7 @@ DEF_FUNC set_method_difference
     ret
 
 .smdf_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "difference() takes exactly one argument"
-    call raise_exception
+    RAISE exc_TypeError_type, "difference() takes exactly one argument"
 END_FUNC set_method_difference
 
 ;; ============================================================================
@@ -742,9 +710,7 @@ DEF_FUNC set_method_symmetric_difference
     ret
 
 .smsd_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "symmetric_difference() takes exactly one argument"
-    call raise_exception
+    RAISE exc_TypeError_type, "symmetric_difference() takes exactly one argument"
 END_FUNC set_method_symmetric_difference
 
 ;; ============================================================================
@@ -792,9 +758,7 @@ DEF_FUNC set_method_issubset
     jmp .smss_loop
 
 .smss_true:
-    lea rax, [rel bool_true]
-    inc qword [rax + PyObject.ob_refcnt]
-    mov edx, TAG_PTR
+    RET_TRUE
     pop r15
     pop r14
     pop r13
@@ -806,9 +770,7 @@ DEF_FUNC set_method_issubset
 
 .smss_false:
     pop rcx                 ; balance the push in loop
-    lea rax, [rel bool_false]
-    inc qword [rax + PyObject.ob_refcnt]
-    mov edx, TAG_PTR
+    RET_FALSE
     pop r15
     pop r14
     pop r13
@@ -819,9 +781,7 @@ DEF_FUNC set_method_issubset
     ret
 
 .smss_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "issubset() takes exactly one argument"
-    call raise_exception
+    RAISE exc_TypeError_type, "issubset() takes exactly one argument"
 END_FUNC set_method_issubset
 
 ;; ============================================================================
@@ -869,9 +829,7 @@ DEF_FUNC set_method_issuperset
     jmp .smis_loop
 
 .smis_true:
-    lea rax, [rel bool_true]
-    inc qword [rax + PyObject.ob_refcnt]
-    mov edx, TAG_PTR
+    RET_TRUE
     pop r15
     pop r14
     pop r13
@@ -883,9 +841,7 @@ DEF_FUNC set_method_issuperset
 
 .smis_false:
     pop rcx
-    lea rax, [rel bool_false]
-    inc qword [rax + PyObject.ob_refcnt]
-    mov edx, TAG_PTR
+    RET_FALSE
     pop r15
     pop r14
     pop r13
@@ -896,9 +852,7 @@ DEF_FUNC set_method_issuperset
     ret
 
 .smis_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "issuperset() takes exactly one argument"
-    call raise_exception
+    RAISE exc_TypeError_type, "issuperset() takes exactly one argument"
 END_FUNC set_method_issuperset
 
 ;; ============================================================================
@@ -946,9 +900,7 @@ DEF_FUNC set_method_isdisjoint
     jmp .smdj_loop
 
 .smdj_true:
-    lea rax, [rel bool_true]
-    inc qword [rax + PyObject.ob_refcnt]
-    mov edx, TAG_PTR
+    RET_TRUE
     pop r15
     pop r14
     pop r13
@@ -960,9 +912,7 @@ DEF_FUNC set_method_isdisjoint
 
 .smdj_false:
     pop rcx
-    lea rax, [rel bool_false]
-    inc qword [rax + PyObject.ob_refcnt]
-    mov edx, TAG_PTR
+    RET_FALSE
     pop r15
     pop r14
     pop r13
@@ -973,7 +923,5 @@ DEF_FUNC set_method_isdisjoint
     ret
 
 .smdj_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "isdisjoint() takes exactly one argument"
-    call raise_exception
+    RAISE exc_TypeError_type, "isdisjoint() takes exactly one argument"
 END_FUNC set_method_isdisjoint

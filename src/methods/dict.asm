@@ -78,9 +78,7 @@ DEF_FUNC dict_method_get
     ret
 
 .dg_ret_none:
-    lea rax, [rel none_singleton]
-    inc qword [rax + PyObject.ob_refcnt]
-    mov edx, TAG_PTR
+    RET_NONE
     pop r12
     pop rbx
     leave
@@ -281,9 +279,7 @@ DEF_FUNC dict_method_clear
     mov qword [rbx + PyDictObject.dk_tombstones], 0
     inc qword [rbx + PyDictObject.dk_version]
 
-    lea rax, [rel none_singleton]
-    inc qword [rax + PyObject.ob_refcnt]
-    mov edx, TAG_PTR
+    RET_NONE
     pop r14
     pop r13
     pop r12
@@ -457,9 +453,7 @@ DEF_FUNC dict_method_update, DU_FRAME
     ; raise_exception does not return -- it jumps into the unwinder -- so
     ; anything this frame owns has to go first.
     call .du_release
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "object is not subscriptable"
-    call raise_exception
+    RAISE exc_TypeError_type, "object is not subscriptable"
 
 .du_propagate:
     ; Something we called raised, and the exception is already pending.
@@ -566,9 +560,7 @@ DEF_FUNC dict_method_update, DU_FRAME
     jmp .du_kw_loop
 
 .du_done:
-    lea rax, [rel none_singleton]
-    inc qword [rax + PyObject.ob_refcnt]
-    mov edx, TAG_PTR
+    RET_NONE
     pop r14
     pop r13
     pop r12
@@ -579,14 +571,10 @@ DEF_FUNC dict_method_update, DU_FRAME
 
 .du_bad_pair:
     call .du_release
-    lea rdi, [rel exc_ValueError_type]
-    CSTRING rsi, "dictionary update sequence element has length != 2"
-    call raise_exception
+    RAISE exc_ValueError_type, "dictionary update sequence element has length != 2"
 
 .du_too_many:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "update expected at most 1 argument"
-    call raise_exception
+    RAISE exc_TypeError_type, "update expected at most 1 argument"
 END_FUNC dict_method_update
 
 ;; ============================================================================
@@ -897,9 +885,7 @@ DEF_FUNC dict_method_popitem
     ret
 
 .dpopitem_empty:
-    lea rdi, [rel exc_KeyError_type]
-    CSTRING rsi, "dictionary is empty"
-    call raise_exception
+    RAISE exc_KeyError_type, "dictionary is empty"
 END_FUNC dict_method_popitem
 
 section .rodata

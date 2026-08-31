@@ -205,9 +205,7 @@ DEF_FUNC_BARE pyobj_to_i64
     mov rax, 0x7FFFFFFFFFFFFFFF  ; sentinel for "not specified"
     ret
 .not_an_index:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "slice indices must be integers or None"
-    call raise_exception
+    RAISE exc_TypeError_type, "slice indices must be integers or None"
 END_FUNC pyobj_to_i64
 
 ;; ============================================================================
@@ -330,9 +328,7 @@ DEF_FUNC slice_indices
     leave
     ret
 .step_is_zero:
-    lea rdi, [rel exc_ValueError_type]
-    CSTRING rsi, "slice step cannot be zero"
-    call raise_exception
+    RAISE exc_ValueError_type, "slice step cannot be zero"
 END_FUNC slice_indices
 
 ;; ============================================================================
@@ -468,9 +464,7 @@ DEF_FUNC slice_type_call
     ret
 
 .stc_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "slice() takes 1 to 3 arguments"
-    call raise_exception
+    RAISE exc_TypeError_type, "slice() takes 1 to 3 arguments"
 END_FUNC slice_type_call
 
 ;; ============================================================================

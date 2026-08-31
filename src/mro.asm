@@ -536,7 +536,5 @@ DEF_FUNC mro_compute, MC_FRAME
     call ap_free
     mov rdi, [rbp - MC_OUT]
     call ap_free
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "Cannot create a consistent method resolution order (MRO) for bases"
-    call raise_exception
+    RAISE exc_TypeError_type, "Cannot create a consistent method resolution order (MRO) for bases"
 END_FUNC mro_compute

@@ -87,9 +87,7 @@ DEF_FUNC builtin_str_fn
     ret
 
 .str_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "str() takes at most 1 argument"
-    call raise_exception
+    RAISE exc_TypeError_type, "str() takes at most 1 argument"
 END_FUNC builtin_str_fn
 
 ; ============================================================================
@@ -117,9 +115,7 @@ DEF_FUNC builtin_id
     ret
 
 .id_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "id() takes exactly one argument"
-    call raise_exception
+    RAISE exc_TypeError_type, "id() takes exactly one argument"
 END_FUNC builtin_id
 
 ; ============================================================================
@@ -197,14 +193,10 @@ DEF_FUNC builtin_hash_fn
     jmp .hash_si_ok
 
 .hash_type_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "unhashable type"
-    call raise_exception
+    RAISE exc_TypeError_type, "unhashable type"
 
 .hash_nargs_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "hash() takes exactly one argument"
-    call raise_exception
+    RAISE exc_TypeError_type, "hash() takes exactly one argument"
 END_FUNC builtin_hash_fn
 
 ; ============================================================================
@@ -268,25 +260,19 @@ DEF_FUNC builtin_callable
     jmp .callable_false
 
 .callable_true:
-    lea rax, [rel bool_true]
-    inc qword [rax + PyObject.ob_refcnt]
-    mov edx, TAG_PTR
+    RET_TRUE
     leave
     V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .callable_false:
-    lea rax, [rel bool_false]
-    inc qword [rax + PyObject.ob_refcnt]
-    mov edx, TAG_PTR
+    RET_FALSE
     leave
     V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .callable_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "callable() takes exactly one argument"
-    call raise_exception
+    RAISE exc_TypeError_type, "callable() takes exactly one argument"
 END_FUNC builtin_callable
 
 ; ============================================================================
@@ -309,9 +295,7 @@ DEF_FUNC builtin_iter_fn
     ret
 
 .iter_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "iter() takes exactly one argument"
-    call raise_exception
+    RAISE exc_TypeError_type, "iter() takes exactly one argument"
 END_FUNC builtin_iter_fn
 
 ; ============================================================================
@@ -450,14 +434,10 @@ DEF_FUNC builtin_next_fn
     call raise_exception_obj
 
 .next_type_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "object is not an iterator"
-    call raise_exception
+    RAISE exc_TypeError_type, "object is not an iterator"
 
 .next_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "next() takes exactly one argument"
-    call raise_exception
+    RAISE exc_TypeError_type, "next() takes exactly one argument"
 END_FUNC builtin_next_fn
 
 ; ============================================================================
@@ -513,9 +493,7 @@ DEF_FUNC builtin_any
 .any_true:
     mov rdi, rbx
     call obj_decref
-    lea rax, [rel bool_true]
-    inc qword [rax + PyObject.ob_refcnt]
-    mov edx, TAG_PTR
+    RET_TRUE
     pop r14
     pop r13
     pop r12
@@ -527,9 +505,7 @@ DEF_FUNC builtin_any
 .any_false:
     mov rdi, rbx
     call obj_decref
-    lea rax, [rel bool_false]
-    inc qword [rax + PyObject.ob_refcnt]
-    mov edx, TAG_PTR
+    RET_FALSE
     pop r14
     pop r13
     pop r12
@@ -539,14 +515,10 @@ DEF_FUNC builtin_any
     ret
 
 .any_type_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "argument is not iterable"
-    call raise_exception
+    RAISE exc_TypeError_type, "argument is not iterable"
 
 .any_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "any() takes exactly one argument"
-    call raise_exception
+    RAISE exc_TypeError_type, "any() takes exactly one argument"
 END_FUNC builtin_any
 
 ; ============================================================================
@@ -601,9 +573,7 @@ DEF_FUNC builtin_all
 .all_false:
     mov rdi, rbx
     call obj_decref
-    lea rax, [rel bool_false]
-    inc qword [rax + PyObject.ob_refcnt]
-    mov edx, TAG_PTR
+    RET_FALSE
     pop r14
     pop r13
     pop r12
@@ -615,9 +585,7 @@ DEF_FUNC builtin_all
 .all_true:
     mov rdi, rbx
     call obj_decref
-    lea rax, [rel bool_true]
-    inc qword [rax + PyObject.ob_refcnt]
-    mov edx, TAG_PTR
+    RET_TRUE
     pop r14
     pop r13
     pop r12
@@ -627,14 +595,10 @@ DEF_FUNC builtin_all
     ret
 
 .all_type_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "argument is not iterable"
-    call raise_exception
+    RAISE exc_TypeError_type, "argument is not iterable"
 
 .all_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "all() takes exactly one argument"
-    call raise_exception
+    RAISE exc_TypeError_type, "all() takes exactly one argument"
 END_FUNC builtin_all
 
 ; ============================================================================
@@ -755,14 +719,10 @@ DEF_FUNC builtin_sum
     ret
 
 .sum_type_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "argument is not iterable"
-    call raise_exception
+    RAISE exc_TypeError_type, "argument is not iterable"
 
 .sum_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "sum expected 1-2 arguments"
-    call raise_exception
+    RAISE exc_TypeError_type, "sum expected 1-2 arguments"
 END_FUNC builtin_sum
 
 ; ============================================================================
@@ -1056,19 +1016,13 @@ DEF_FUNC_LOCAL minmax_impl, MM_FRAME
 .mm_iter_empty:
     mov rdi, [rbp - MM_ITER]
     call obj_decref
-    lea rdi, [rel exc_ValueError_type]
-    CSTRING rsi, "min()/max() arg is an empty sequence"
-    call raise_exception
+    RAISE exc_ValueError_type, "min()/max() arg is an empty sequence"
 
 .mm_iter_type_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "argument is not iterable"
-    call raise_exception
+    RAISE exc_TypeError_type, "argument is not iterable"
 
 .mm_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "min()/max() expected at least 1 argument"
-    call raise_exception
+    RAISE exc_TypeError_type, "min()/max() expected at least 1 argument"
 END_FUNC minmax_impl
 
 ; ============================================================================
@@ -1148,14 +1102,10 @@ DEF_FUNC builtin_getattr, 24
     ret
 
 .getattr_raise:
-    lea rdi, [rel exc_AttributeError_type]
-    CSTRING rsi, "object has no attribute"
-    call raise_exception
+    RAISE exc_AttributeError_type, "object has no attribute"
 
 .getattr_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "getattr expected 2 or 3 arguments"
-    call raise_exception
+    RAISE exc_TypeError_type, "getattr expected 2 or 3 arguments"
 END_FUNC builtin_getattr
 
 ; ============================================================================
@@ -1214,9 +1164,7 @@ DEF_FUNC builtin_hasattr, 24
     leave
     ret
 .hasattr_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "hasattr expected 2 arguments"
-    call raise_exception
+    RAISE exc_TypeError_type, "hasattr expected 2 arguments"
 END_FUNC builtin_hasattr
 
 ; ============================================================================
@@ -1248,9 +1196,7 @@ DEF_FUNC builtin_setattr
     pop rax                            ; restore tp_setattr
     call rax
 
-    lea rax, [rel none_singleton]
-    inc qword [rax + PyObject.ob_refcnt]
-    mov edx, TAG_PTR
+    RET_NONE
     add rsp, 8
     pop rbx
     leave
@@ -1267,9 +1213,7 @@ DEF_FUNC builtin_setattr
     call raise_no_attribute
 
 .setattr_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "setattr() takes exactly 3 arguments"
-    call raise_exception
+    RAISE exc_TypeError_type, "setattr() takes exactly 3 arguments"
 END_FUNC builtin_setattr
 
 ; ============================================================================
@@ -1290,9 +1234,7 @@ DEF_FUNC builtin_globals
     ret
 
 .globals_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "globals() takes no arguments"
-    call raise_exception
+    RAISE exc_TypeError_type, "globals() takes no arguments"
 END_FUNC builtin_globals
 
 ; ============================================================================
@@ -1343,9 +1285,7 @@ DEF_FUNC builtin_locals
     ret
 
 .locals_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "locals() takes no arguments"
-    call raise_exception
+    RAISE exc_TypeError_type, "locals() takes no arguments"
 END_FUNC builtin_locals
 
 ; ============================================================================
@@ -1464,9 +1404,7 @@ DEF_FUNC builtin_dir, DIR_FRAME
     ret
 
 .dir_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "dir() takes exactly 1 argument"
-    call raise_exception
+    RAISE exc_TypeError_type, "dir() takes exactly 1 argument"
 END_FUNC builtin_dir
 
 section .rodata
@@ -1539,14 +1477,10 @@ DEF_FUNC builtin_input_fn, INP_FRAME
     ret
 
 .inp_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "input() takes at most 1 argument"
-    call raise_exception
+    RAISE exc_TypeError_type, "input() takes at most 1 argument"
 
 .inp_type_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "input() prompt must be a string"
-    call raise_exception
+    RAISE exc_TypeError_type, "input() prompt must be a string"
 END_FUNC builtin_input_fn
 
 ; ============================================================================
@@ -1686,26 +1620,18 @@ DEF_FUNC builtin_open_fn, OPN_FRAME
 
 .opn_file_error:
     extern exc_FileNotFoundError_type
-    lea rdi, [rel exc_FileNotFoundError_type]
-    CSTRING rsi, "No such file or directory"
-    call raise_exception
+    RAISE exc_FileNotFoundError_type, "No such file or directory"
 
 .opn_bad_mode:
-    lea rdi, [rel exc_ValueError_type]
-    CSTRING rsi, "invalid mode string"
-    call raise_exception
+    RAISE exc_ValueError_type, "invalid mode string"
 
 .opn_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "open() takes 1 or 2 arguments"
-    call raise_exception
+    RAISE exc_TypeError_type, "open() takes 1 or 2 arguments"
 
 .opn_type_error_pop:
     add rsp, 8                 ; discard saved args ptr
 .opn_type_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "open() arguments must be strings"
-    call raise_exception
+    RAISE exc_TypeError_type, "open() arguments must be strings"
 END_FUNC builtin_open_fn
 
 ; ============================================================================
@@ -1835,9 +1761,7 @@ DEF_FUNC builtin_ascii_fn, AA_FRAME
     ret
 
 .aa_nargs_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "ascii() takes exactly one argument"
-    call raise_exception
+    RAISE exc_TypeError_type, "ascii() takes exactly one argument"
 END_FUNC builtin_ascii_fn
 
 ; ============================================================================
@@ -1952,9 +1876,7 @@ DEF_FUNC builtin_format_fn, FMT_FRAME
     ret
 
 .fmt_nargs_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "format() takes 1 or 2 arguments"
-    call raise_exception
+    RAISE exc_TypeError_type, "format() takes 1 or 2 arguments"
 END_FUNC builtin_format_fn
 
 ; ============================================================================
@@ -2011,14 +1933,10 @@ DEF_FUNC builtin_vars_fn, VR_FRAME
     ret
 
 .vars_no_dict:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "vars() argument must have __dict__ attribute"
-    call raise_exception
+    RAISE exc_TypeError_type, "vars() argument must have __dict__ attribute"
 
 .vars_nargs_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "vars() takes at most 1 argument"
-    call raise_exception
+    RAISE exc_TypeError_type, "vars() takes at most 1 argument"
 END_FUNC builtin_vars_fn
 
 ; ============================================================================
@@ -2067,19 +1985,13 @@ DEF_FUNC builtin_delattr_fn, DA2_FRAME
     ret
 
 .da2_type_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "delattr: first argument must be an object"
-    call raise_exception
+    RAISE exc_TypeError_type, "delattr: first argument must be an object"
 
 .da2_attr_error:
-    lea rdi, [rel exc_AttributeError_type]
-    CSTRING rsi, "object does not support attribute deletion"
-    call raise_exception
+    RAISE exc_AttributeError_type, "object does not support attribute deletion"
 
 .da2_nargs_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "delattr() takes exactly 2 arguments"
-    call raise_exception
+    RAISE exc_TypeError_type, "delattr() takes exactly 2 arguments"
 END_FUNC builtin_delattr_fn
 
 ; ============================================================================
@@ -2112,14 +2024,10 @@ DEF_FUNC builtin_aiter_fn
     ret
 
 .aiter_type_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "object is not an async iterable"
-    call raise_exception
+    RAISE exc_TypeError_type, "object is not an async iterable"
 
 .aiter_nargs_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "aiter() takes exactly 1 argument"
-    call raise_exception
+    RAISE exc_TypeError_type, "aiter() takes exactly 1 argument"
 END_FUNC builtin_aiter_fn
 
 ; ============================================================================
@@ -2198,14 +2106,10 @@ DEF_FUNC builtin_anext_fn, AN_FRAME
     ret
 
 .an_type_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "object is not an async iterator"
-    call raise_exception
+    RAISE exc_TypeError_type, "object is not an async iterator"
 
 .an_nargs_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "anext() takes 1 or 2 arguments"
-    call raise_exception
+    RAISE exc_TypeError_type, "anext() takes 1 or 2 arguments"
 END_FUNC builtin_anext_fn
 
 ; ============================================================================
@@ -2237,10 +2141,8 @@ DEF_FUNC builtin_import_fn
     extern eval_exception_unwind
     cmp qword [rel current_exception], 0
     jne .imp_propagate
-    lea rdi, [rel exc_ImportError_type]
     extern exc_ImportError_type
-    CSTRING rsi, "import failed"
-    call raise_exception
+    RAISE exc_ImportError_type, "import failed"
 .imp_propagate:
     leave
     jmp eval_exception_unwind
@@ -2250,9 +2152,7 @@ DEF_FUNC builtin_import_fn
     ret
 
 .imp_nargs_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "__import__() requires at least 1 argument"
-    call raise_exception
+    RAISE exc_TypeError_type, "__import__() requires at least 1 argument"
 END_FUNC builtin_import_fn
 
 ; ============================================================================

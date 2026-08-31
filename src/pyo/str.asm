@@ -465,9 +465,7 @@ DEF_FUNC codec_id, CI_FRAME
     ret
 .ci_unknown:
     extern exc_LookupError_type
-    lea rdi, [rel exc_LookupError_type]
-    CSTRING rsi, "unknown encoding"
-    call raise_exception
+    RAISE exc_LookupError_type, "unknown encoding"
 END_FUNC codec_id
 
 ; str_from_cstr_heap(const char *cstr) -> (rax=PyStrObject*, edx=TAG_PTR)
@@ -879,9 +877,7 @@ DEF_FUNC str_concat
     ret
 
 .concat_type_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "can only concatenate str (not other type) to str"
-    call raise_exception
+    RAISE exc_TypeError_type, "can only concatenate str (not other type) to str"
 END_FUNC str_concat
 
 ;; ============================================================================
@@ -984,9 +980,7 @@ DEF_FUNC str_repeat
     V_PACK rax, rdx             ; return one Value
     ret
 .srep_overflow:
-    lea rdi, [rel exc_OverflowError_type]
-    CSTRING rsi, "repeated string is too long"
-    call raise_exception
+    RAISE exc_OverflowError_type, "repeated string is too long"
 END_FUNC str_repeat
 
 ;; ============================================================================
@@ -1510,9 +1504,7 @@ DEF_FUNC str_mod, SM_FRAME
     ; Past the end of the argument list.  Substituting None here quietly
     ; formatted a missing argument as "None"; the format string is wrong and
     ; Python says so.
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "not enough arguments for format string"
-    call raise_exception
+    RAISE exc_TypeError_type, "not enough arguments for format string"
 
 ;; .sm_ensure_cap — ensure buffer can hold rdi bytes total
 ;; rdi = required capacity. Preserves r14, r15, rbx, r12. Updates r13.
@@ -1568,20 +1560,14 @@ DEF_FUNC str_mod, SM_FRAME
     leave
     ret
 .sm_too_many:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "not all arguments converted during string formatting"
-    call raise_exception
+    RAISE exc_TypeError_type, "not all arguments converted during string formatting"
 
 .sm_key_unterminated:
-    lea rdi, [rel exc_ValueError_type]
-    CSTRING rsi, "incomplete format key"
-    call raise_exception
+    RAISE exc_ValueError_type, "incomplete format key"
 
 .sm_key_error:
     extern exc_KeyError_type
-    lea rdi, [rel exc_KeyError_type]
-    CSTRING rsi, "format key not found"
-    call raise_exception
+    RAISE exc_KeyError_type, "format key not found"
 ;; Format one directive through format_apply_spec.  On entry SM_POS is the
 ;; index of the conversion character and SM_SPECST the start of the flags;
 ;; on exit SM_POS is just past it.  r13 (buffer), r14 (output position),
@@ -1836,16 +1822,12 @@ DEF_FUNC str_compare
     ret
 
 .ret_true:
-    lea rax, [rel bool_true]
-    inc qword [rax + PyObject.ob_refcnt]
-    mov edx, TAG_PTR
+    RET_TRUE
     pop rbx
     leave
     ret
 .ret_false:
-    lea rax, [rel bool_false]
-    inc qword [rax + PyObject.ob_refcnt]
-    mov edx, TAG_PTR
+    RET_FALSE
     pop rbx
     leave
     ret
@@ -1909,9 +1891,7 @@ DEF_FUNC str_getitem
     ret
 
 .index_error:
-    lea rdi, [rel exc_IndexError_type]
-    CSTRING rsi, "string index out of range"
-    call raise_exception
+    RAISE exc_IndexError_type, "string index out of range"
 END_FUNC str_getitem
 
 ;; ============================================================================
@@ -1961,9 +1941,7 @@ DEF_FUNC str_subscript
     ret
 
 .ss_type_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "string indices must be integers"
-    call raise_exception
+    RAISE exc_TypeError_type, "string indices must be integers"
 END_FUNC str_subscript
 
 ;; ============================================================================
@@ -1997,9 +1975,7 @@ DEF_FUNC str_contains
 .str_contains_type_error:
     extern exc_TypeError_type
     extern raise_exception
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "'in <string>' requires string as left operand"
-    call raise_exception
+    RAISE exc_TypeError_type, "'in <string>' requires string as left operand"
 END_FUNC str_contains
 
 ;; ============================================================================

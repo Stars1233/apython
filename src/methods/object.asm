@@ -117,9 +117,7 @@ DEF_FUNC scalar_dunder_new
     ret
 
 .sdn_bad:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "__new__() argument 1 must be a subclass of int or str"
-    call raise_exception
+    RAISE exc_TypeError_type, "__new__() argument 1 must be a subclass of int or str"
 END_FUNC scalar_dunder_new
 
 ;; ============================================================================
@@ -148,17 +146,11 @@ DEF_FUNC object_method_format
     leave
     ret
 .omf_bad:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "__format__() takes exactly one argument"
-    call raise_exception
+    RAISE exc_TypeError_type, "__format__() takes exactly one argument"
 .omf_bad_spec:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "__format__() argument must be str"
-    call raise_exception
+    RAISE exc_TypeError_type, "__format__() argument must be str"
 .omf_unsupported:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "unsupported format string passed to object.__format__"
-    call raise_exception
+    RAISE exc_TypeError_type, "unsupported format string passed to object.__format__"
 END_FUNC object_method_format
 
 ;; ============================================================================
@@ -206,18 +198,14 @@ END_FUNC object_method_dir
 ;; reduction would corrupt a pickle rather than refuse to make one.
 ;; ============================================================================
 DEF_FUNC object_method_reduce
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "cannot pickle this object: object.__reduce_ex__ is not implemented"
-    call raise_exception
+    RAISE exc_TypeError_type, "cannot pickle this object: object.__reduce_ex__ is not implemented"
 END_FUNC object_method_reduce
 
 ;; ============================================================================
 extern str_from_cstr
 DEF_FUNC object_method_init
     ; object.__init__(self, ...) accepts anything and does nothing.
-    lea rax, [rel none_singleton]
-    inc qword [rax + PyObject.ob_refcnt]
-    mov edx, TAG_PTR
+    RET_NONE
     leave
     V_PACK rax, rdx
     ret
@@ -235,9 +223,7 @@ DEF_FUNC object_method_str
     leave
     ret
 .oms_bad:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "__str__() takes exactly one argument"
-    call raise_exception
+    RAISE exc_TypeError_type, "__str__() takes exactly one argument"
 END_FUNC object_method_str
 
 ;; object.__repr__ is the *default* implementation, not a re-dispatch: it
@@ -299,9 +285,7 @@ DEF_FUNC object_method_repr, OMR_FRAME
     ret
 
 .omr_bad:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "__repr__() takes exactly one argument"
-    call raise_exception
+    RAISE exc_TypeError_type, "__repr__() takes exactly one argument"
 END_FUNC object_method_repr
 
 ;; ============================================================================
@@ -320,9 +304,7 @@ DEF_FUNC object_method_init_subclass
     V_PACK rax, rdx
     ret
 .omis_bad:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "__init_subclass__() takes no keyword arguments"
-    call raise_exception
+    RAISE exc_TypeError_type, "__init_subclass__() takes no keyword arguments"
 END_FUNC object_method_init_subclass
 
 ;; ============================================================================
@@ -359,9 +341,7 @@ DEF_FUNC %1_dunder_%2
     leave
     ret
 %%bad:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "expected exactly one argument"
-    call raise_exception
+    RAISE exc_TypeError_type, "expected exactly one argument"
 END_FUNC %1_dunder_%2
 %endmacro
 
@@ -396,9 +376,7 @@ DEF_FUNC %1_dunder_len
     V_PACK rax, rdx
     ret
 %%bad:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "object has no len()"
-    call raise_exception
+    RAISE exc_TypeError_type, "object has no len()"
 END_FUNC %1_dunder_len
 %endmacro
 
@@ -425,9 +403,7 @@ DEF_FUNC %1_dunder_iter
     V_PACK rax, rdx
     ret
 %%bad:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "object is not iterable"
-    call raise_exception
+    RAISE exc_TypeError_type, "object is not iterable"
 END_FUNC %1_dunder_iter
 %endmacro
 
@@ -532,16 +508,12 @@ DEF_FUNC object_method_eq
 .ome_true_pop:
     pop rbx
 .ome_true:
-    lea rax, [rel bool_true]
-    inc qword [rax + PyObject.ob_refcnt]
-    mov edx, TAG_PTR
+    RET_TRUE
     leave
     V_PACK rax, rdx
     ret
 .ome_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "__eq__() takes exactly one argument"
-    call raise_exception
+    RAISE exc_TypeError_type, "__eq__() takes exactly one argument"
 END_FUNC object_method_eq
 
 ;; __ne__ delegates to the type's own EQ comparison and inverts it, so a class
@@ -607,9 +579,7 @@ DEF_FUNC object_method_ne
     V_PACK rax, rdx
     ret
 .omn_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "__ne__() takes exactly one argument"
-    call raise_exception
+    RAISE exc_TypeError_type, "__ne__() takes exactly one argument"
 END_FUNC object_method_ne
 
 ;; The address, which is what obj_hash falls back to when a type has no
@@ -622,9 +592,7 @@ DEF_FUNC object_method_hash
     leave
     ret
 .omh_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "__hash__() takes no arguments"
-    call raise_exception
+    RAISE exc_TypeError_type, "__hash__() takes no arguments"
 END_FUNC object_method_hash
 
 
@@ -658,9 +626,7 @@ DEF_FUNC_BARE dict_dunder_getitem
     mov rdi, rax
     jmp dict_subscript
 .ddg_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "descriptor '__getitem__' requires a 'dict' object"
-    call raise_exception
+    RAISE exc_TypeError_type, "descriptor '__getitem__' requires a 'dict' object"
 END_FUNC dict_dunder_getitem
 
 DEF_FUNC dict_dunder_setitem
@@ -684,9 +650,7 @@ DEF_FUNC dict_dunder_setitem
     V_PACK rax, rdx
     ret
 .dds_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "object does not support item assignment"
-    call raise_exception
+    RAISE exc_TypeError_type, "object does not support item assignment"
 END_FUNC dict_dunder_setitem
 
 DEF_FUNC dict_dunder_delitem
@@ -709,9 +673,7 @@ DEF_FUNC dict_dunder_delitem
     V_PACK rax, rdx
     ret
 .ddd_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "object does not support item deletion"
-    call raise_exception
+    RAISE exc_TypeError_type, "object does not support item deletion"
 END_FUNC dict_dunder_delitem
 
 
@@ -727,9 +689,7 @@ DEF_FUNC generic_method_hash
     leave
     ret
 .gmh_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "__hash__() takes no arguments"
-    call raise_exception
+    RAISE exc_TypeError_type, "__hash__() takes no arguments"
 END_FUNC generic_method_hash
 
 ;; ============================================================================
@@ -761,21 +721,15 @@ DEF_FUNC generic_method_contains
     call rcx
     test eax, eax
     jz .gmc_false
-    lea rax, [rel bool_true]
-    inc qword [rax + PyObject.ob_refcnt]
-    mov edx, TAG_PTR
+    RET_TRUE
     leave
     V_PACK rax, rdx
     ret
 .gmc_false:
-    lea rax, [rel bool_false]
-    inc qword [rax + PyObject.ob_refcnt]
-    mov edx, TAG_PTR
+    RET_FALSE
     leave
     V_PACK rax, rdx
     ret
 .gmc_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "__contains__() takes exactly one argument"
-    call raise_exception
+    RAISE exc_TypeError_type, "__contains__() takes exactly one argument"
 END_FUNC generic_method_contains

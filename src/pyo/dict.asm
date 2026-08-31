@@ -293,9 +293,7 @@ DEF_FUNC dict_type_call
 
 .dtc_error:
     extern exc_TypeError_type
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "dict() argument must be a mapping or iterable"
-    call raise_exception
+    RAISE exc_TypeError_type, "dict() argument must be a mapping or iterable"
 END_FUNC dict_type_call
 
 ;; ============================================================================
@@ -915,9 +913,7 @@ DEF_FUNC_BARE dict_iter_next
     ret
 
 .di_mutation_error:
-    lea rdi, [rel exc_RuntimeError_type]
-    CSTRING rsi, "dictionary changed size during iteration"
-    call raise_exception
+    RAISE exc_RuntimeError_type, "dictionary changed size during iteration"
 END_FUNC dict_iter_next
 
 ;; ============================================================================
@@ -1485,9 +1481,7 @@ DEF_FUNC_BARE dict_rev_iter_next
     ret
 
 .dri_mutation_error:
-    lea rdi, [rel exc_RuntimeError_type]
-    CSTRING rsi, "dictionary changed size during iteration"
-    call raise_exception
+    RAISE exc_RuntimeError_type, "dictionary changed size during iteration"
 END_FUNC dict_rev_iter_next
 
 ;; ============================================================================

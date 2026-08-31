@@ -141,9 +141,7 @@ DEF_FUNC str_method_count, CNT_FRAME
     ret
 
 .count_type_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "must be str, not other type"
-    call raise_exception
+    RAISE exc_TypeError_type, "must be str, not other type"
 END_FUNC str_method_count
 
 ;; ============================================================================
@@ -191,17 +189,13 @@ DEF_FUNC str_method_isdigit
     jmp .isdigit_loop
 
 .isdigit_true:
-    lea rax, [rel bool_true]
-    inc qword [rax + PyObject.ob_refcnt]
-    mov edx, TAG_PTR
+    RET_TRUE
     leave
     V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .isdigit_false:
-    lea rax, [rel bool_false]
-    inc qword [rax + PyObject.ob_refcnt]
-    mov edx, TAG_PTR
+    RET_FALSE
     leave
     V_PACK rax, rdx             ; builtins return one Value
     ret
@@ -270,16 +264,12 @@ DEF_FUNC str_method_isidentifier
     ret
 
 .true:
-    lea rax, [rel bool_true]
-    inc qword [rax + PyObject.ob_refcnt]
-    mov edx, TAG_PTR
+    RET_TRUE
     leave
     V_PACK rax, rdx
     ret
 .false:
-    lea rax, [rel bool_false]
-    inc qword [rax + PyObject.ob_refcnt]
-    mov edx, TAG_PTR
+    RET_FALSE
     leave
     V_PACK rax, rdx
     ret
@@ -301,16 +291,12 @@ DEF_FUNC str_method_isprintable
     inc rdx
     jmp .loop
 .true:
-    lea rax, [rel bool_true]
-    inc qword [rax + PyObject.ob_refcnt]
-    mov edx, TAG_PTR
+    RET_TRUE
     leave
     V_PACK rax, rdx
     ret
 .false:
-    lea rax, [rel bool_false]
-    inc qword [rax + PyObject.ob_refcnt]
-    mov edx, TAG_PTR
+    RET_FALSE
     leave
     V_PACK rax, rdx
     ret
@@ -329,16 +315,12 @@ DEF_FUNC str_method_isascii
     inc rdx
     jmp .loop
 .true:
-    lea rax, [rel bool_true]
-    inc qword [rax + PyObject.ob_refcnt]
-    mov edx, TAG_PTR
+    RET_TRUE
     leave
     V_PACK rax, rdx
     ret
 .false:
-    lea rax, [rel bool_false]
-    inc qword [rax + PyObject.ob_refcnt]
-    mov edx, TAG_PTR
+    RET_FALSE
     leave
     V_PACK rax, rdx
     ret
@@ -363,16 +345,12 @@ DEF_FUNC str_method_isdecimal
     inc rdx
     jmp .loop
 .true:
-    lea rax, [rel bool_true]
-    inc qword [rax + PyObject.ob_refcnt]
-    mov edx, TAG_PTR
+    RET_TRUE
     leave
     V_PACK rax, rdx
     ret
 .false:
-    lea rax, [rel bool_false]
-    inc qword [rax + PyObject.ob_refcnt]
-    mov edx, TAG_PTR
+    RET_FALSE
     leave
     V_PACK rax, rdx
     ret
@@ -409,17 +387,13 @@ DEF_FUNC str_method_isalpha
     jmp .isalpha_loop
 
 .isalpha_true:
-    lea rax, [rel bool_true]
-    inc qword [rax + PyObject.ob_refcnt]
-    mov edx, TAG_PTR
+    RET_TRUE
     leave
     V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .isalpha_false:
-    lea rax, [rel bool_false]
-    inc qword [rax + PyObject.ob_refcnt]
-    mov edx, TAG_PTR
+    RET_FALSE
     leave
     V_PACK rax, rdx             ; builtins return one Value
     ret
@@ -460,17 +434,13 @@ DEF_FUNC str_method_isalnum
     jmp .isalnum_loop
 
 .isalnum_true:
-    lea rax, [rel bool_true]
-    inc qword [rax + PyObject.ob_refcnt]
-    mov edx, TAG_PTR
+    RET_TRUE
     leave
     V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .isalnum_false:
-    lea rax, [rel bool_false]
-    inc qword [rax + PyObject.ob_refcnt]
-    mov edx, TAG_PTR
+    RET_FALSE
     leave
     V_PACK rax, rdx             ; builtins return one Value
     ret
@@ -505,17 +475,13 @@ DEF_FUNC str_method_isspace
     jmp .isspace_loop
 
 .isspace_true:
-    lea rax, [rel bool_true]
-    inc qword [rax + PyObject.ob_refcnt]
-    mov edx, TAG_PTR
+    RET_TRUE
     leave
     V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .isspace_false:
-    lea rax, [rel bool_false]
-    inc qword [rax + PyObject.ob_refcnt]
-    mov edx, TAG_PTR
+    RET_FALSE
     leave
     V_PACK rax, rdx             ; builtins return one Value
     ret
@@ -559,17 +525,13 @@ DEF_FUNC str_method_isupper
     test r8d, r8d
     jz .isupper_false        ; no cased chars found
 
-    lea rax, [rel bool_true]
-    inc qword [rax + PyObject.ob_refcnt]
-    mov edx, TAG_PTR
+    RET_TRUE
     leave
     V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .isupper_false:
-    lea rax, [rel bool_false]
-    inc qword [rax + PyObject.ob_refcnt]
-    mov edx, TAG_PTR
+    RET_FALSE
     leave
     V_PACK rax, rdx             ; builtins return one Value
     ret
@@ -615,17 +577,13 @@ DEF_FUNC str_method_islower
     test r8d, r8d
     jz .islower_false        ; no cased chars found
 
-    lea rax, [rel bool_true]
-    inc qword [rax + PyObject.ob_refcnt]
-    mov edx, TAG_PTR
+    RET_TRUE
     leave
     V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .islower_false:
-    lea rax, [rel bool_false]
-    inc qword [rax + PyObject.ob_refcnt]
-    mov edx, TAG_PTR
+    RET_FALSE
     leave
     V_PACK rax, rdx             ; builtins return one Value
     ret

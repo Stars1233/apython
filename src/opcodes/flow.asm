@@ -368,9 +368,7 @@ DEF_FUNC op_format_value, FV_FRAME
     jmp eval_exception_unwind
 
 .fv_type_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "format spec must be str"
-    call raise_exception
+    RAISE exc_TypeError_type, "format spec must be str"
 
 .fv_no_format_spec:
     ; Apply conversion based on arg & 3
@@ -525,9 +523,7 @@ DEF_FUNC op_build_string, BS_FRAME
     DISPATCH
 
 .bs_type_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "build_string expects str"
-    call raise_exception
+    RAISE exc_TypeError_type, "build_string expects str"
 
 .bs_zero:
     ; Empty f-string: push empty string
@@ -927,9 +923,7 @@ DEF_FUNC_BARE op_get_yield_from_iter
     add rsp, 16                ; discard iterable payload + tag
 .gyfi_error_nopush:
     extern exc_TypeError_type
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "object is not iterable"
-    call raise_exception
+    RAISE exc_TypeError_type, "object is not iterable"
 END_FUNC op_get_yield_from_iter
 
 ;; ============================================================================

@@ -64,9 +64,7 @@ DEF_FUNC staticmethod_construct
     ret
 
 .sm_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "staticmethod expected 1 argument"
-    call raise_exception
+    RAISE exc_TypeError_type, "staticmethod expected 1 argument"
 END_FUNC staticmethod_construct
 
 ;; ============================================================================
@@ -121,9 +119,7 @@ DEF_FUNC classmethod_construct
     ret
 
 .cm_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "classmethod expected 1 argument"
-    call raise_exception
+    RAISE exc_TypeError_type, "classmethod expected 1 argument"
 END_FUNC classmethod_construct
 
 ;; ============================================================================
@@ -221,9 +217,7 @@ DEF_FUNC property_construct
     ret
 
 .pc_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "property expected 1 to 3 arguments"
-    call raise_exception
+    RAISE exc_TypeError_type, "property expected 1 to 3 arguments"
 END_FUNC property_construct
 
 ;; ============================================================================
@@ -469,9 +463,7 @@ DEF_FUNC _prop_setter_impl
     ret
 
 .psi_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "setter expected 1 argument"
-    call raise_exception
+    RAISE exc_TypeError_type, "setter expected 1 argument"
 END_FUNC _prop_setter_impl
 
 ;; ============================================================================
@@ -514,9 +506,7 @@ DEF_FUNC _prop_getter_impl
     ret
 
 .pgi_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "getter expected 1 argument"
-    call raise_exception
+    RAISE exc_TypeError_type, "getter expected 1 argument"
 END_FUNC _prop_getter_impl
 
 ;; ============================================================================
@@ -552,9 +542,7 @@ DEF_FUNC _prop_deleter_impl
     ret
 
 .pdi_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "deleter expected 1 argument"
-    call raise_exception
+    RAISE exc_TypeError_type, "deleter expected 1 argument"
 END_FUNC _prop_deleter_impl
 
 ;; ============================================================================
@@ -592,9 +580,7 @@ DEF_FUNC property_descr_get
     ret
 
 .pdg_no_getter:
-    lea rdi, [rel exc_AttributeError_type]
-    CSTRING rsi, "unreadable attribute"
-    call raise_exception
+    RAISE exc_AttributeError_type, "unreadable attribute"
 END_FUNC property_descr_get
 
 ;; ============================================================================
@@ -646,9 +632,7 @@ DEF_FUNC property_descr_set
     ret
 
 .pds_no_setter:
-    lea rdi, [rel exc_AttributeError_type]
-    CSTRING rsi, "can't set attribute"
-    call raise_exception
+    RAISE exc_AttributeError_type, "can't set attribute"
 END_FUNC property_descr_set
 
 ;; ============================================================================
@@ -750,9 +734,7 @@ DEF_FUNC mappingproxy_construct
     leave
     ret
 .mpc_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "mappingproxy() argument must be a mapping, not a sequence"
-    call raise_exception
+    RAISE exc_TypeError_type, "mappingproxy() argument must be a mapping, not a sequence"
 END_FUNC mappingproxy_construct
 
 global mappingproxy_new
@@ -998,9 +980,7 @@ DEF_FUNC generic_alias_class_getitem
     V_PACK rax, rdx
     ret
 .gacg_bad:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "__class_getitem__() takes exactly one argument"
-    call raise_exception
+    RAISE exc_TypeError_type, "__class_getitem__() takes exactly one argument"
 END_FUNC generic_alias_class_getitem
 
 ;; repr: "list[int]" -- origin name, then the argument's repr.
@@ -1189,9 +1169,7 @@ DEF_FUNC_BARE generic_alias_call
     jz .gac_bad
     jmp rcx
 .gac_bad:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "generic alias is not callable"
-    call raise_exception
+    RAISE exc_TypeError_type, "generic alias is not callable"
 END_FUNC generic_alias_call
 
 ;; __origin__ / __args__
@@ -1649,9 +1627,7 @@ DEF_FUNC property_dunder_set
     leave
     ret
 .pds2_bad:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "__set__() takes exactly 2 arguments"
-    call raise_exception
+    RAISE exc_TypeError_type, "__set__() takes exactly 2 arguments"
 END_FUNC property_dunder_set
 
 global property_dunder_delete
@@ -1685,9 +1661,7 @@ DEF_FUNC property_dunder_delete
     leave
     ret
 .pdd_no_deleter:
-    lea rdi, [rel exc_AttributeError_type]
-    CSTRING rsi, "can't delete attribute"
-    call raise_exception
+    RAISE exc_AttributeError_type, "can't delete attribute"
 END_FUNC property_dunder_delete
 
 section .data

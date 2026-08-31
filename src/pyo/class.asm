@@ -584,9 +584,7 @@ DEF_FUNC instance_getattr, IG_FRAME
 .slot_not_set:
     ; Slot exists but not initialized — raise AttributeError directly
     ; (must not return NULL or LOAD_ATTR fallback finds descriptor in tp_dict)
-    lea rdi, [rel exc_AttributeError_type]
-    CSTRING rsi, "slot attribute not set"
-    call raise_exception
+    RAISE exc_AttributeError_type, "slot attribute not set"
 
 .not_found:
     ; Ordinary lookup missed.  __getattr__ is Python's hook for exactly that
@@ -812,16 +810,12 @@ DEF_FUNC instance_setattr
     ret
 
 .sa_no_dict_error:
-    lea rdi, [rel exc_AttributeError_type]
-    CSTRING rsi, "object has no attribute"
-    call raise_exception
+    RAISE exc_AttributeError_type, "object has no attribute"
 
 .sa_no_dict_slot:
     ; This type's instances have no dict slot -- a str subclass, or a class
     ; with __slots__ -- so there is nowhere to put the attribute.
-    lea rdi, [rel exc_AttributeError_type]
-    CSTRING rsi, "object has no attribute"
-    call raise_exception
+    RAISE exc_AttributeError_type, "object has no attribute"
 END_FUNC instance_setattr
 
 ;; ============================================================================
@@ -1452,17 +1446,11 @@ DEF_FUNC type_call
     ret
 
 .type_three_bad_name:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "type() argument 1 must be str"
-    call raise_exception
+    RAISE exc_TypeError_type, "type() argument 1 must be str"
 .type_three_bad_bases:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "type() argument 2 must be a tuple of at most one base"
-    call raise_exception
+    RAISE exc_TypeError_type, "type() argument 2 must be a tuple of at most one base"
 .type_three_bad_ns:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "type() argument 3 must be dict"
-    call raise_exception
+    RAISE exc_TypeError_type, "type() argument 3 must be dict"
 
 .type_bool:
     extern bool_type
@@ -1543,9 +1531,7 @@ DEF_FUNC type_call
     ja .tc_not_abstract
     cmp qword [rax + PyDictObject.ob_size], 0
     je .tc_not_abstract
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "Can't instantiate abstract class with abstract methods"
-    call raise_exception
+    RAISE exc_TypeError_type, "Can't instantiate abstract class with abstract methods"
 .tc_not_abstract:
 
     ; Check if this type inherits from an exception type
@@ -1959,9 +1945,7 @@ DEF_FUNC type_call
     ret
 
 .init_not_callable:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "__init__ is not callable"
-    call raise_exception
+    RAISE exc_TypeError_type, "__init__ is not callable"
     ; does not return
 
 .new_not_callable:
@@ -1969,9 +1953,7 @@ DEF_FUNC type_call
     lea rax, [r13 + 1]
     shl rax, 4
     add rsp, rax
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "__new__ is not callable"
-    call raise_exception
+    RAISE exc_TypeError_type, "__new__ is not callable"
     ; does not return
 END_FUNC type_call
 

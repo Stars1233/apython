@@ -119,6 +119,8 @@ extern none_type
 
 extern int_type
 
+extern dict_add_builtin_func
+
 section .text
 
 ;; ============================================================================
@@ -215,13 +217,9 @@ DEF_FUNC_BARE builtin_func_call
 .bfc_too_few:
     extern exc_TypeError_type
     extern raise_exception
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "function takes at least 1 argument"
-    call raise_exception
+    RAISE exc_TypeError_type, "function takes at least 1 argument"
 .bfc_too_many:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "function takes at most N arguments"
-    call raise_exception
+    RAISE exc_TypeError_type, "function takes at most N arguments"
 END_FUNC builtin_func_call
 
 ;; ============================================================================
@@ -745,14 +743,10 @@ DEF_FUNC builtin_len, LEN_FRAME
     ret
 
 .len_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "len() takes exactly one argument"
-    call raise_exception
+    RAISE exc_TypeError_type, "len() takes exactly one argument"
 
 .len_type_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "object has no len()"
-    call raise_exception
+    RAISE exc_TypeError_type, "object has no len()"
 END_FUNC builtin_len
 
 ;; ============================================================================
@@ -774,9 +768,7 @@ DEF_FUNC builtin_range
     cmp r12, 3
     je .range_3
 
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "range expected 1 to 3 arguments"
-    call raise_exception
+    RAISE exc_TypeError_type, "range expected 1 to 3 arguments"
 
 .range_1:
     ; range(stop): start=0, stop=args[0], step=1
@@ -835,9 +827,7 @@ DEF_FUNC builtin_range
     jmp .range_done
 
 .range_zero_step:
-    lea rdi, [rel exc_ValueError_type]
-    CSTRING rsi, "range() arg 3 must not be zero"
-    call raise_exception
+    RAISE exc_ValueError_type, "range() arg 3 must not be zero"
 
 .range_done:
     pop r13
@@ -1008,14 +998,10 @@ DEF_FUNC builtin_isinstance, ISI_FRAME
     ret
 
 .isinstance_type_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "isinstance() arg 2 must be a type, a tuple of types, or a union"
-    call raise_exception
+    RAISE exc_TypeError_type, "isinstance() arg 2 must be a type, a tuple of types, or a union"
 
 .isinstance_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "isinstance() takes 2 arguments"
-    call raise_exception
+    RAISE exc_TypeError_type, "isinstance() takes 2 arguments"
 END_FUNC builtin_isinstance
 
 ;; ============================================================================
@@ -1152,19 +1138,13 @@ DEF_FUNC builtin_issubclass
     ret
 
 .issubclass_arg1_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "issubclass() arg 1 must be a class"
-    call raise_exception
+    RAISE exc_TypeError_type, "issubclass() arg 1 must be a class"
 
 .issubclass_arg2_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "issubclass() arg 2 must be a class, a tuple of classes, or a union"
-    call raise_exception
+    RAISE exc_TypeError_type, "issubclass() arg 2 must be a class, a tuple of classes, or a union"
 
 .issubclass_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "issubclass() takes 2 arguments"
-    call raise_exception
+    RAISE exc_TypeError_type, "issubclass() takes 2 arguments"
 END_FUNC builtin_issubclass
 
 ;; ============================================================================
@@ -1184,9 +1164,7 @@ DEF_FUNC builtin_repr
     ret
 
 .repr_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "repr() takes 1 argument"
-    call raise_exception
+    RAISE exc_TypeError_type, "repr() takes 1 argument"
 END_FUNC builtin_repr
 
 ;; ============================================================================
@@ -1208,30 +1186,22 @@ DEF_FUNC builtin_bool
     call obj_is_true           ; eax = 0 or 1
     test eax, eax
     jz .bool_ret_false
-    lea rax, [rel bool_true]
-    inc qword [rax + PyObject.ob_refcnt]
-    mov edx, TAG_PTR
+    RET_TRUE
     leave
     ret
 .bool_ret_false:
-    lea rax, [rel bool_false]
-    inc qword [rax + PyObject.ob_refcnt]
-    mov edx, TAG_PTR
+    RET_FALSE
     leave
     ret
 
 .bool_no_args:
     ; bool() -> False
-    lea rax, [rel bool_false]
-    inc qword [rax + PyObject.ob_refcnt]
-    mov edx, TAG_PTR
+    RET_FALSE
     leave
     ret
 
 .bool_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "bool() takes at most 1 argument"
-    call raise_exception
+    RAISE exc_TypeError_type, "bool() takes at most 1 argument"
 END_FUNC builtin_bool
 
 ;; ============================================================================
@@ -1358,9 +1328,7 @@ DEF_FUNC builtin_float, BF_FRAME
     ret
 
 .float_str_error:
-    lea rdi, [rel exc_ValueError_type]
-    CSTRING rsi, "could not convert string to float"
-    call raise_exception
+    RAISE exc_ValueError_type, "could not convert string to float"
 
 .float_no_args:
     ; float() -> 0.0
@@ -1370,54 +1338,9 @@ DEF_FUNC builtin_float, BF_FRAME
     ret
 
 .float_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "float() takes at most 1 argument"
-    call raise_exception
+    RAISE exc_TypeError_type, "float() takes at most 1 argument"
 END_FUNC builtin_float
 
-;; ============================================================================
-;; Helper: add_builtin(dict, name_cstr, func_ptr)
-;; Adds a builtin to the dict. Used by builtins_init.
-;; rdi=dict, rsi=name_cstr, rdx=func_ptr
-;; ============================================================================
-DEF_FUNC_LOCAL add_builtin
-    push rbx
-    push r12
-    push r13
-
-    mov rbx, rdi               ; dict
-    mov r12, rsi               ; name_cstr
-    mov r13, rdx               ; func_ptr
-
-    ; Create function wrapper
-    mov rdi, r13
-    mov rsi, r12
-    call builtin_func_new
-    push rax                   ; save func obj
-
-    ; Create key string (heap — used as dict key, then DECREFed)
-    mov rdi, r12
-    call str_from_cstr_heap
-    push rax                   ; save key
-
-    ; dict_set
-    mov rdi, rbx
-    mov rsi, rax               ; key
-    mov rdx, [rsp + 8]        ; func obj
-    call dict_set
-
-    ; DECREF key and value
-    pop rdi                    ; key
-    call obj_decref
-    pop rdi                    ; func obj
-    call obj_decref
-
-    pop r13
-    pop r12
-    pop rbx
-    leave
-    ret
-END_FUNC add_builtin
 
 ;; Helper: add_builtin_type(dict, name_cstr, type_obj, tp_call_fn)
 ;; Registers a type object directly in builtins (for isinstance to work).
@@ -1526,18 +1449,18 @@ DEF_FUNC builtins_init
     mov rdi, rbx
     lea rsi, [rel bi_name_build_class]
     lea rdx, [rel builtin___build_class__]
-    call add_builtin
+    call dict_add_builtin_func
 
     ; Add builtins using helper
     mov rdi, rbx
     lea rsi, [rel bi_name_print]
     lea rdx, [rel builtin_print]
-    call add_builtin
+    call dict_add_builtin_func
 
     mov rdi, rbx
     lea rsi, [rel bi_name_len]
     lea rdx, [rel builtin_len]
-    call add_builtin
+    call dict_add_builtin_func
 
     mov rdi, rbx
     lea rsi, [rel bi_name_range]
@@ -1555,17 +1478,17 @@ DEF_FUNC builtins_init
     mov rdi, rbx
     lea rsi, [rel bi_name_isinstance]
     lea rdx, [rel builtin_isinstance]
-    call add_builtin
+    call dict_add_builtin_func
 
     mov rdi, rbx
     lea rsi, [rel bi_name_issubclass]
     lea rdx, [rel builtin_issubclass]
-    call add_builtin
+    call dict_add_builtin_func
 
     mov rdi, rbx
     lea rsi, [rel bi_name_repr]
     lea rdx, [rel builtin_repr]
-    call add_builtin
+    call dict_add_builtin_func
 
     mov rdi, rbx
     lea rsi, [rel bi_name_float]
@@ -1591,12 +1514,12 @@ DEF_FUNC builtins_init
     mov rdi, rbx
     lea rsi, [rel bi_name_abs]
     lea rdx, [rel builtin_abs]
-    call add_builtin
+    call dict_add_builtin_func
 
     mov rdi, rbx
     lea rsi, [rel bi_name_divmod]
     lea rdx, [rel builtin_divmod]
-    call add_builtin
+    call dict_add_builtin_func
 
     ; Register int as the int_type object (not a function wrapper)
     ; so isinstance(42, int) works correctly
@@ -1615,82 +1538,82 @@ DEF_FUNC builtins_init
     mov rdi, rbx
     lea rsi, [rel bi_name_ord]
     lea rdx, [rel builtin_ord]
-    call add_builtin
+    call dict_add_builtin_func
 
     mov rdi, rbx
     lea rsi, [rel bi_name_chr]
     lea rdx, [rel builtin_chr]
-    call add_builtin
+    call dict_add_builtin_func
 
     mov rdi, rbx
     lea rsi, [rel bi_name_hex]
     lea rdx, [rel builtin_hex]
-    call add_builtin
+    call dict_add_builtin_func
 
     mov rdi, rbx
     lea rsi, [rel bi_name_id]
     lea rdx, [rel builtin_id]
-    call add_builtin
+    call dict_add_builtin_func
 
     mov rdi, rbx
     lea rsi, [rel bi_name_hash]
     lea rdx, [rel builtin_hash_fn]
-    call add_builtin
+    call dict_add_builtin_func
 
     mov rdi, rbx
     lea rsi, [rel bi_name_callable]
     lea rdx, [rel builtin_callable]
-    call add_builtin
+    call dict_add_builtin_func
 
     mov rdi, rbx
     lea rsi, [rel bi_name_iter]
     lea rdx, [rel builtin_iter_fn]
-    call add_builtin
+    call dict_add_builtin_func
 
     mov rdi, rbx
     lea rsi, [rel bi_name_next]
     lea rdx, [rel builtin_next_fn]
-    call add_builtin
+    call dict_add_builtin_func
 
     mov rdi, rbx
     lea rsi, [rel bi_name_any]
     lea rdx, [rel builtin_any]
-    call add_builtin
+    call dict_add_builtin_func
 
     mov rdi, rbx
     lea rsi, [rel bi_name_all]
     lea rdx, [rel builtin_all]
-    call add_builtin
+    call dict_add_builtin_func
 
     mov rdi, rbx
     lea rsi, [rel bi_name_sum]
     lea rdx, [rel builtin_sum]
-    call add_builtin
+    call dict_add_builtin_func
 
     mov rdi, rbx
     lea rsi, [rel bi_name_min]
     lea rdx, [rel builtin_min]
-    call add_builtin
+    call dict_add_builtin_func
 
     mov rdi, rbx
     lea rsi, [rel bi_name_max]
     lea rdx, [rel builtin_max]
-    call add_builtin
+    call dict_add_builtin_func
 
     mov rdi, rbx
     lea rsi, [rel bi_name_getattr]
     lea rdx, [rel builtin_getattr]
-    call add_builtin
+    call dict_add_builtin_func
 
     mov rdi, rbx
     lea rsi, [rel bi_name_hasattr]
     lea rdx, [rel builtin_hasattr]
-    call add_builtin
+    call dict_add_builtin_func
 
     mov rdi, rbx
     lea rsi, [rel bi_name_setattr]
     lea rdx, [rel builtin_setattr]
-    call add_builtin
+    call dict_add_builtin_func
 
     ; Register iterator builtins (from itertools.asm)
     extern enumerate_iter_type
@@ -1736,32 +1659,32 @@ DEF_FUNC builtins_init
     mov rdi, rbx
     lea rsi, [rel bi_name_sorted]
     lea rdx, [rel builtin_sorted]
-    call add_builtin
+    call dict_add_builtin_func
 
     mov rdi, rbx
     lea rsi, [rel bi_name_chain]
     lea rdx, [rel builtin_chain]
-    call add_builtin
+    call dict_add_builtin_func
 
     mov rdi, rbx
     lea rsi, [rel bi_name_globals]
     lea rdx, [rel builtin_globals]
-    call add_builtin
+    call dict_add_builtin_func
 
     mov rdi, rbx
     lea rsi, [rel bi_name_locals]
     lea rdx, [rel builtin_locals]
-    call add_builtin
+    call dict_add_builtin_func
 
     mov rdi, rbx
     lea rsi, [rel bi_name_dir]
     lea rdx, [rel builtin_dir]
-    call add_builtin
+    call dict_add_builtin_func
 
     mov rdi, rbx
     lea rsi, [rel bi_name_breakpoint]
     lea rdx, [rel builtin_breakpoint]
-    call add_builtin
+    call dict_add_builtin_func
 
     ; Register super type as builtin (LOAD_SUPER_ATTR needs it loadable)
     mov rdi, rbx
@@ -2203,112 +2126,112 @@ DEF_FUNC builtins_init
     lea rsi, [rel bi_name_eval]
     extern builtin_eval_fn
     lea rdx, [rel builtin_eval_fn]
-    call add_builtin
+    call dict_add_builtin_func
 
     ; compile
     mov rdi, rbx
     lea rsi, [rel bi_name_compile]
     extern builtin_compile_fn
     lea rdx, [rel builtin_compile_fn]
-    call add_builtin
+    call dict_add_builtin_func
 
     ; exec
     mov rdi, rbx
     lea rsi, [rel bi_name_exec]
     extern builtin_exec_fn
     lea rdx, [rel builtin_exec_fn]
-    call add_builtin
+    call dict_add_builtin_func
 
     ; round
     mov rdi, rbx
     lea rsi, [rel bi_name_round]
     extern builtin_round_fn
     lea rdx, [rel builtin_round_fn]
-    call add_builtin
+    call dict_add_builtin_func
 
     ; pow
     mov rdi, rbx
     lea rsi, [rel bi_name_pow]
     extern builtin_pow_fn
     lea rdx, [rel builtin_pow_fn]
-    call add_builtin
+    call dict_add_builtin_func
 
     ; input
     mov rdi, rbx
     lea rsi, [rel bi_name_input]
     extern builtin_input_fn
     lea rdx, [rel builtin_input_fn]
-    call add_builtin
+    call dict_add_builtin_func
 
     ; open
     mov rdi, rbx
     lea rsi, [rel bi_name_open]
     extern builtin_open_fn
     lea rdx, [rel builtin_open_fn]
-    call add_builtin
+    call dict_add_builtin_func
 
     ; bin
     mov rdi, rbx
     lea rsi, [rel bi_name_bin]
     extern builtin_bin
     lea rdx, [rel builtin_bin]
-    call add_builtin
+    call dict_add_builtin_func
 
     ; oct
     mov rdi, rbx
     lea rsi, [rel bi_name_oct]
     extern builtin_oct
     lea rdx, [rel builtin_oct]
-    call add_builtin
+    call dict_add_builtin_func
 
     ; ascii
     mov rdi, rbx
     lea rsi, [rel bi_name_ascii]
     extern builtin_ascii_fn
     lea rdx, [rel builtin_ascii_fn]
-    call add_builtin
+    call dict_add_builtin_func
 
     ; format
     mov rdi, rbx
     lea rsi, [rel bi_name_format]
     extern builtin_format_fn
     lea rdx, [rel builtin_format_fn]
-    call add_builtin
+    call dict_add_builtin_func
 
     ; vars
     mov rdi, rbx
     lea rsi, [rel bi_name_vars]
     extern builtin_vars_fn
     lea rdx, [rel builtin_vars_fn]
-    call add_builtin
+    call dict_add_builtin_func
 
     ; delattr
     mov rdi, rbx
     lea rsi, [rel bi_name_delattr]
     extern builtin_delattr_fn
     lea rdx, [rel builtin_delattr_fn]
-    call add_builtin
+    call dict_add_builtin_func
 
     ; aiter
     mov rdi, rbx
     lea rsi, [rel bi_name_aiter]
     extern builtin_aiter_fn
     lea rdx, [rel builtin_aiter_fn]
-    call add_builtin
+    call dict_add_builtin_func
 
     ; anext
     mov rdi, rbx
     lea rsi, [rel bi_name_anext]
     extern builtin_anext_fn
     lea rdx, [rel builtin_anext_fn]
-    call add_builtin
+    call dict_add_builtin_func
 
     ; __import__
     mov rdi, rbx
     lea rsi, [rel bi_name___import__]
     extern builtin_import_fn
     lea rdx, [rel builtin_import_fn]
-    call add_builtin
+    call dict_add_builtin_func
 
     ; slice
     mov rdi, rbx

@@ -824,9 +824,7 @@ DEF_FUNC _task_result_impl
     ret
 
 .tr_not_done:
-    lea rdi, [rel exc_RuntimeError_type]
-    CSTRING rsi, "Result is not ready"
-    call raise_exception
+    RAISE exc_RuntimeError_type, "Result is not ready"
 
 .tr_exception:
     mov rdi, rcx

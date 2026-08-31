@@ -354,9 +354,7 @@ DEF_FUNC namespace_setattr
     leave
     ret
 .nss_no_dict:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "namespace has no attribute storage"
-    call raise_exception
+    RAISE exc_TypeError_type, "namespace has no attribute storage"
 END_FUNC namespace_setattr
 
 ;; namespace_repr(rdi = self) -> str   "namespace(a=1, b=2)"

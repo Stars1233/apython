@@ -175,9 +175,7 @@ DEF_FUNC bytes_method_startswith
     ret
 
 .bsw_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "startswith() takes exactly one argument"
-    call raise_exception
+    RAISE exc_TypeError_type, "startswith() takes exactly one argument"
 END_FUNC bytes_method_startswith
 
 ;; ============================================================================
@@ -226,9 +224,7 @@ DEF_FUNC bytes_method_endswith
     ret
 
 .bew_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "endswith() takes exactly one argument"
-    call raise_exception
+    RAISE exc_TypeError_type, "endswith() takes exactly one argument"
 END_FUNC bytes_method_endswith
 
 ;; ============================================================================
@@ -318,9 +314,7 @@ DEF_FUNC bytes_method_count, BC_FRAME
     ret
 
 .bc_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "count() takes exactly one argument"
-    call raise_exception
+    RAISE exc_TypeError_type, "count() takes exactly one argument"
 END_FUNC bytes_method_count
 
 ;; ============================================================================
@@ -401,9 +395,7 @@ DEF_FUNC bytes_method_find, BF_FRAME
     ret
 
 .bf_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "find() takes exactly one argument"
-    call raise_exception
+    RAISE exc_TypeError_type, "find() takes exactly one argument"
 END_FUNC bytes_method_find
 
 ;; ============================================================================
@@ -581,9 +573,7 @@ DEF_FUNC bytes_method_replace, BR_FRAME
     ret
 
 .br_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "replace() takes exactly 2 arguments"
-    call raise_exception
+    RAISE exc_TypeError_type, "replace() takes exactly 2 arguments"
 END_FUNC bytes_method_replace
 
 ;; ============================================================================
@@ -770,9 +760,7 @@ DEF_FUNC bytes_method_split
     ret
 
 .bsp_empty_sep:
-    lea rdi, [rel exc_ValueError_type]
-    CSTRING rsi, "empty separator"
-    call raise_exception
+    RAISE exc_ValueError_type, "empty separator"
 END_FUNC bytes_method_split
 
 ;; ============================================================================
@@ -956,15 +944,11 @@ DEF_FUNC bytes_method_join, BJ_FRAME
     ret
 
 .bj_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "join() argument must be a list of bytes"
-    call raise_exception
+    RAISE exc_TypeError_type, "join() argument must be a list of bytes"
 
 .bj_item_error:
     BJ_RELEASE_TMP
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "sequence item: expected a bytes-like object"
-    call raise_exception
+    RAISE exc_TypeError_type, "sequence item: expected a bytes-like object"
 END_FUNC bytes_method_join
 
 section .rodata

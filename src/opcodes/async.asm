@@ -103,14 +103,10 @@ DEF_FUNC_BARE op_get_awaitable
     DISPATCH
 
 .gaw_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "object can't be used in 'await' expression"
-    call raise_exception
+    RAISE exc_TypeError_type, "object can't be used in 'await' expression"
 
 .gaw_gen_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "cannot 'await' a generator (use 'yield from' instead)"
-    call raise_exception
+    RAISE exc_TypeError_type, "cannot 'await' a generator (use 'yield from' instead)"
 END_FUNC op_get_awaitable
 
 ;; ============================================================================
@@ -162,9 +158,7 @@ DEF_FUNC_BARE op_get_aiter
     call obj_decref
 .gai_raise:
 .gai_iter_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "'async for' requires an object with __aiter__ method"
-    call raise_exception
+    RAISE exc_TypeError_type, "'async for' requires an object with __aiter__ method"
 END_FUNC op_get_aiter
 
 ;; ============================================================================
@@ -207,9 +201,7 @@ DEF_FUNC_BARE op_get_anext
     call raise_exception_obj
 
 .gan_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "'async for' requires an object with __anext__ method"
-    call raise_exception
+    RAISE exc_TypeError_type, "'async for' requires an object with __anext__ method"
 END_FUNC op_get_anext
 
 ;; ============================================================================
@@ -333,22 +325,16 @@ DEF_FUNC op_before_async_with, BAW_FRAME
     mov rdi, r12
     call obj_decref
 .baw_no_exit:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "'async with' requires __aexit__ method"
-    call raise_exception
+    RAISE exc_TypeError_type, "'async with' requires __aexit__ method"
 
 .baw_not_ptr:
     DECREF_VAL rax, rdx
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "'async with' requires a context manager object"
-    call raise_exception
+    RAISE exc_TypeError_type, "'async with' requires a context manager object"
 .baw_no_enter_decref_name:
     mov rdi, r12
     call obj_decref
 .baw_no_enter:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "'async with' requires __aenter__ method"
-    call raise_exception
+    RAISE exc_TypeError_type, "'async with' requires __aenter__ method"
 END_FUNC op_before_async_with
 
 ;; ============================================================================

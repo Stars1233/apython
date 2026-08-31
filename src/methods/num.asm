@@ -264,14 +264,10 @@ DEF_FUNC int_method_to_bytes, ITB_FRAME
     ret
 
 .itb_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "to_bytes() requires (length, byteorder) arguments"
-    call raise_exception
+    RAISE exc_TypeError_type, "to_bytes() requires (length, byteorder) arguments"
 
 .itb_order_error:
-    lea rdi, [rel exc_ValueError_type]
-    CSTRING rsi, "byteorder must be 'little' or 'big'"
-    call raise_exception
+    RAISE exc_ValueError_type, "byteorder must be 'little' or 'big'"
 END_FUNC int_method_to_bytes
 
 ;; ============================================================================
@@ -441,14 +437,10 @@ DEF_FUNC int_classmethod_from_bytes, IFB_FRAME
     ret
 
 .ifb_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "from_bytes() requires (bytes, byteorder) arguments"
-    call raise_exception
+    RAISE exc_TypeError_type, "from_bytes() requires (bytes, byteorder) arguments"
 
 .ifb_order_error:
-    lea rdi, [rel exc_ValueError_type]
-    CSTRING rsi, "byteorder must be 'little' or 'big'"
-    call raise_exception
+    RAISE exc_ValueError_type, "byteorder must be 'little' or 'big'"
 END_FUNC int_classmethod_from_bytes
 
 
@@ -657,9 +649,7 @@ DEF_FUNC float_method_as_integer_ratio, FIR_FRAME
     ret
 
 .fir_error:
-    lea rdi, [rel exc_OverflowError_type]
-    CSTRING rsi, "cannot convert float infinity or NaN to integer ratio"
-    call raise_exception
+    RAISE exc_OverflowError_type, "cannot convert float infinity or NaN to integer ratio"
 END_FUNC float_method_as_integer_ratio
 
 ;; ============================================================================
@@ -1077,7 +1067,5 @@ DEF_FUNC float_classmethod_fromhex, FFH_FRAME
     ret
 
 .ffh_parse_error:
-    lea rdi, [rel exc_ValueError_type]
-    CSTRING rsi, "invalid hexadecimal floating-point string"
-    call raise_exception
+    RAISE exc_ValueError_type, "invalid hexadecimal floating-point string"
 END_FUNC float_classmethod_fromhex

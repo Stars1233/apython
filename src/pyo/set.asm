@@ -25,7 +25,6 @@ extern set_clear_gc
 ; Set entry layout constants
 SET_ENTRY_HASH    equ 0
 SET_ENTRY_KEY     equ 8
-SET_ENTRY_SIZE    equ 16
 
 ; Initial capacity (must be power of 2)
 SET_INIT_CAP equ 8
@@ -823,14 +822,10 @@ DEF_FUNC set_type_call, STC_FRAME
     call obj_decref
 
 .stc_not_iterable:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "set() argument is not iterable"
-    call raise_exception
+    RAISE exc_TypeError_type, "set() argument is not iterable"
 
 .stc_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "set() takes at most 1 argument"
-    call raise_exception
+    RAISE exc_TypeError_type, "set() takes at most 1 argument"
 END_FUNC set_type_call
 
 ; set_repr is in src/repr.asm
@@ -1029,13 +1024,9 @@ DEF_FUNC frozenset_type_call, FTC_FRAME
     mov rdi, rbx
     call obj_decref
 .ftc_not_iterable:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "frozenset() argument is not iterable"
-    call raise_exception
+    RAISE exc_TypeError_type, "frozenset() argument is not iterable"
 .ftc_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "frozenset() takes at most 1 argument"
-    call raise_exception
+    RAISE exc_TypeError_type, "frozenset() takes at most 1 argument"
 END_FUNC frozenset_type_call
 
 

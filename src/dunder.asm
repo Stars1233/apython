@@ -413,9 +413,7 @@ DEF_FUNC obj_call_n, OCN_FRAME
     jmp .ret
 
 .not_callable:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "object is not callable"
-    call raise_exception
+    RAISE exc_TypeError_type, "object is not callable"
 .ret:
     pop r13
     pop r12

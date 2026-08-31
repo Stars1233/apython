@@ -225,19 +225,13 @@ DEF_FUNC eg_type_call, EGC_FRAME
     ret
 
 .bad_nargs:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "ExceptionGroup requires exactly 2 arguments"
-    call raise_exception
+    RAISE exc_TypeError_type, "ExceptionGroup requires exactly 2 arguments"
 
 .bad_excs:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "second argument must be a sequence of exceptions"
-    call raise_exception
+    RAISE exc_TypeError_type, "second argument must be a sequence of exceptions"
 
 .empty_excs:
-    lea rdi, [rel exc_ValueError_type]
-    CSTRING rsi, "second argument (exceptions) must be a non-empty sequence"
-    call raise_exception
+    RAISE exc_ValueError_type, "second argument (exceptions) must be a non-empty sequence"
 
 .empty_excs_decref:
     ; DECREF exc_tuple before raising
@@ -245,9 +239,7 @@ DEF_FUNC eg_type_call, EGC_FRAME
     mov rdi, r12
     call obj_decref
     pop r12
-    lea rdi, [rel exc_ValueError_type]
-    CSTRING rsi, "second argument (exceptions) must be a non-empty sequence"
-    call raise_exception
+    RAISE exc_ValueError_type, "second argument (exceptions) must be a non-empty sequence"
 
 END_FUNC eg_type_call
 

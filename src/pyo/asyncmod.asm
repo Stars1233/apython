@@ -100,19 +100,13 @@ DEF_FUNC asyncio_run_func, AR_FRAME
     ret
 
 .ar_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "asyncio.run() takes exactly 1 argument"
-    call raise_exception
+    RAISE exc_TypeError_type, "asyncio.run() takes exactly 1 argument"
 
 .ar_type_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "asyncio.run() requires a coroutine"
-    call raise_exception
+    RAISE exc_TypeError_type, "asyncio.run() requires a coroutine"
 
 .ar_reentrant:
-    lea rdi, [rel exc_RuntimeError_type]
-    CSTRING rsi, "asyncio.run() cannot be called from a running event loop"
-    call raise_exception
+    RAISE exc_RuntimeError_type, "asyncio.run() cannot be called from a running event loop"
 END_FUNC asyncio_run_func
 
 ;; ============================================================================
@@ -176,14 +170,10 @@ DEF_FUNC asyncio_sleep_func
     ret
 
 .as_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "asyncio.sleep() takes exactly 1 argument"
-    call raise_exception
+    RAISE exc_TypeError_type, "asyncio.sleep() takes exactly 1 argument"
 
 .as_type_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "asyncio.sleep() delay must be a number"
-    call raise_exception
+    RAISE exc_TypeError_type, "asyncio.sleep() delay must be a number"
 END_FUNC asyncio_sleep_func
 
 ;; ============================================================================
@@ -302,14 +292,10 @@ DEF_FUNC asyncio_wait_for_func, WF_FRAME
     ret
 
 .wf_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "asyncio.wait_for() takes exactly 2 arguments"
-    call raise_exception
+    RAISE exc_TypeError_type, "asyncio.wait_for() takes exactly 2 arguments"
 
 .wf_type_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "asyncio.wait_for() timeout must be a number"
-    call raise_exception
+    RAISE exc_TypeError_type, "asyncio.wait_for() timeout must be a number"
 END_FUNC asyncio_wait_for_func
 
 ;; ============================================================================
@@ -389,9 +375,7 @@ DEF_FUNC_BARE wait_for_awaitable_iternext
     mov rax, [rbx + WaitForAwaitable.inner_task]
     mov dword [rax + AsyncTask.cancelling], 1
 
-    lea rdi, [rel exc_TimeoutError_type]
-    CSTRING rsi, "asyncio.wait_for() timed out"
-    call raise_exception
+    RAISE exc_TimeoutError_type, "asyncio.wait_for() timed out"
     RET_NULL
     pop rbx
     ret
@@ -442,9 +426,7 @@ DEF_FUNC asyncio_create_task_func, ACT_FRAME
     ret
 
 .act_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "asyncio.create_task() takes exactly 1 argument"
-    call raise_exception
+    RAISE exc_TypeError_type, "asyncio.create_task() takes exactly 1 argument"
 END_FUNC asyncio_create_task_func
 
 ;; ============================================================================
@@ -523,9 +505,7 @@ DEF_FUNC asyncio_gather_func
     ; DECREF the partially-built list
     mov rdi, r13
     call obj_decref
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "asyncio.gather() arguments must be coroutines"
-    call raise_exception
+    RAISE exc_TypeError_type, "asyncio.gather() arguments must be coroutines"
 END_FUNC asyncio_gather_func
 
 ;; ============================================================================
@@ -547,9 +527,7 @@ DEF_FUNC asyncio_get_running_loop_func
     ret
 
 .grl_error:
-    lea rdi, [rel exc_RuntimeError_type]
-    CSTRING rsi, "no running event loop"
-    call raise_exception
+    RAISE exc_RuntimeError_type, "no running event loop"
 END_FUNC asyncio_get_running_loop_func
 
 ;; ============================================================================

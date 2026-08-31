@@ -121,9 +121,7 @@ DEF_FUNC_BARE op_import_name
     extern eval_exception_unwind
     cmp qword [rel current_exception], 0
     jne .propagate_import_exc
-    lea rdi, [rel exc_ImportError_type]
-    CSTRING rsi, "import failed"
-    call raise_exception
+    RAISE exc_ImportError_type, "import failed"
 
 .propagate_import_exc:
     mov [rel eval_saved_r13], r13
@@ -279,9 +277,7 @@ DEF_FUNC op_import_from, IF2_FRAME
     ; "cannot import name" over it would hide the real cause.
     cmp qword [rel current_exception], 0
     jne .propagate_from_exc
-    lea rdi, [rel exc_ImportError_type]
-    CSTRING rsi, "cannot import name"
-    call raise_exception
+    RAISE exc_ImportError_type, "cannot import name"
 
 .propagate_from_exc:
     mov [rel eval_saved_r13], r13

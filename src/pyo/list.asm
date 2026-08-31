@@ -232,9 +232,7 @@ DEF_FUNC list_getitem
     ret
 
 .index_error:
-    lea rdi, [rel exc_IndexError_type]
-    CSTRING rsi, "list index out of range"
-    call raise_exception
+    RAISE exc_IndexError_type, "list index out of range"
 END_FUNC list_getitem
 
 ;; ============================================================================
@@ -286,9 +284,7 @@ DEF_FUNC list_setitem
     ret
 
 .index_error:
-    lea rdi, [rel exc_IndexError_type]
-    CSTRING rsi, "list assignment index out of range"
-    call raise_exception
+    RAISE exc_IndexError_type, "list assignment index out of range"
 END_FUNC list_setitem
 
 ;; ============================================================================
@@ -349,9 +345,7 @@ DEF_FUNC list_subscript
     ret
 
 .ls_type_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "list indices must be integers or slices"
-    call raise_exception
+    RAISE exc_TypeError_type, "list indices must be integers or slices"
 END_FUNC list_subscript
 
 ;; ============================================================================
@@ -469,9 +463,7 @@ DEF_FUNC list_ass_subscript, LAS_FRAME
     ret
 
 .lid_index_error:
-    lea rdi, [rel exc_IndexError_type]
-    CSTRING rsi, "list assignment index out of range"
-    call raise_exception
+    RAISE exc_IndexError_type, "list assignment index out of range"
 
 .las_slice:
     ; Slice assignment: a[start:stop] = value
@@ -786,9 +778,7 @@ DEF_FUNC list_ass_subscript, LAS_FRAME
     pop r15
     pop r14
     pop r13
-    lea rdi, [rel exc_ValueError_type]
-    CSTRING rsi, "slice step cannot be zero"
-    call raise_exception
+    RAISE exc_ValueError_type, "slice step cannot be zero"
 
 ;; Extended slice assignment: a[start:stop:step] = iterable (step != 0, step != 1)
 ;; Registers on entry: rbx=list, r12=value, r13=start, r14=stop, r15=step
@@ -972,14 +962,10 @@ DEF_FUNC list_ass_subscript, LAS_FRAME
     pop r15
     pop r14
     pop r13
-    lea rdi, [rel exc_ValueError_type]
-    CSTRING rsi, "attempt to assign sequence of wrong size to extended slice"
-    call raise_exception
+    RAISE exc_ValueError_type, "attempt to assign sequence of wrong size to extended slice"
 
 .las_key_type_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "list indices must be integers or slices"
-    call raise_exception
+    RAISE exc_TypeError_type, "list indices must be integers or slices"
 
 .las_type_error:
     extern exc_TypeError_type
@@ -987,9 +973,7 @@ DEF_FUNC list_ass_subscript, LAS_FRAME
     pop r15
     pop r14
     pop r13
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "can only assign an iterable"
-    call raise_exception
+    RAISE exc_TypeError_type, "can only assign an iterable"
 END_FUNC list_ass_subscript
 
 ;; ============================================================================
@@ -1386,9 +1370,7 @@ DEF_FUNC list_concat
     V_PACK rax, rdx             ; return one Value
     ret
 .lc_type_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "can only concatenate list (not other) to list"
-    call raise_exception
+    RAISE exc_TypeError_type, "can only concatenate list (not other) to list"
 END_FUNC list_concat
 
 ;; ============================================================================
@@ -1491,9 +1473,7 @@ DEF_FUNC list_repeat
 
 .rep_overflow:
     extern exc_OverflowError_type
-    lea rdi, [rel exc_OverflowError_type]
-    CSTRING rsi, "too many items for list repetition"
-    call raise_exception
+    RAISE exc_OverflowError_type, "too many items for list repetition"
 END_FUNC list_repeat
 
 ;; ============================================================================
@@ -1615,9 +1595,7 @@ DEF_FUNC list_inplace_concat, LIC_FRAME
     ret
 
 .lic_type_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "can only concatenate list (not other) to list"
-    call raise_exception
+    RAISE exc_TypeError_type, "can only concatenate list (not other) to list"
 END_FUNC list_inplace_concat
 
 ;; ============================================================================
@@ -1747,9 +1725,7 @@ DEF_FUNC list_inplace_repeat, LIR_FRAME
     ret
 .lir_overflow:
     extern exc_OverflowError_type
-    lea rdi, [rel exc_OverflowError_type]
-    CSTRING rsi, "too many items for list repetition"
-    call raise_exception
+    RAISE exc_OverflowError_type, "too many items for list repetition"
 END_FUNC list_inplace_repeat
 
 ;; ============================================================================
@@ -1861,21 +1837,15 @@ DEF_FUNC list_type_call, LTC_FRAME
 
 .ltc_not_iterable:
     extern exc_TypeError_type
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "list() argument must be an iterable"
-    call raise_exception
+    RAISE exc_TypeError_type, "list() argument must be an iterable"
 
 .ltc_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "list expected at most 1 argument"
-    call raise_exception
+    RAISE exc_TypeError_type, "list expected at most 1 argument"
 
 .ltc_kwarg_error:
     ; Clear kw_names_pending to avoid stale state
     mov qword [rel kw_names_pending], 0
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "list() takes no keyword arguments"
-    call raise_exception
+    RAISE exc_TypeError_type, "list() takes no keyword arguments"
 END_FUNC list_type_call
 
 ;; ============================================================================
@@ -1963,9 +1933,7 @@ DEF_FUNC list_richcompare
     ret
 .lrc_too_deep:
     C_RECURSION_LEAVE
-    lea rdi, [rel exc_RecursionError_type]
-    CSTRING rsi, "maximum recursion depth exceeded in comparison"
-    call raise_exception
+    RAISE exc_RecursionError_type, "maximum recursion depth exceeded in comparison"
 END_FUNC list_richcompare
 
 LRC_LEFT     equ 8

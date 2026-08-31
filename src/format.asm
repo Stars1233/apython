@@ -257,9 +257,7 @@ DEF_FUNC format_apply_spec, FS_FRAME
     ; A numeric type letter on a non-number: format("abc", "f") converted the
     ; string through float_to_f64 and printed 0.000000.
     extern exc_ValueError_type
-    lea rdi, [rel exc_ValueError_type]
-    CSTRING rsi, "Unknown format code for object of type 'str'"
-    call raise_exception
+    RAISE exc_ValueError_type, "Unknown format code for object of type 'str'"
     ud2
 
 .fs_unsupported:
@@ -497,9 +495,7 @@ DEF_FUNC format_apply_spec, FS_FRAME
     ret
 
 .fs_bad_spec:
-    lea rdi, [rel exc_ValueError_type]
-    CSTRING rsi, "Invalid format specifier"
-    call raise_exception
+    RAISE exc_ValueError_type, "Invalid format specifier"
 
 ;; rdi = destination, rsi = count.  Writes the fill character.
 .fs_fill_run:
@@ -844,9 +840,7 @@ DEF_FUNC_LOCAL format_int_body, FIB_FRAME
 
 .fib_wide_error:
     extern exc_OverflowError_type
-    lea rdi, [rel exc_OverflowError_type]
-    CSTRING rsi, "%c arg not in range(0x110000)"
-    call raise_exception
+    RAISE exc_OverflowError_type, "%c arg not in range(0x110000)"
     ud2
 END_FUNC format_int_body
 

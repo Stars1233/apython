@@ -364,9 +364,7 @@ DEF_FUNC sre_match_get_group_str
     ret
 
 .group_out_of_range:
-    lea rdi, [rel exc_IndexError_type]
-    CSTRING rsi, "no such group"
-    call raise_exception
+    RAISE exc_IndexError_type, "no such group"
 END_FUNC sre_match_get_group_str
 
 ; ============================================================================
@@ -406,14 +404,10 @@ DEF_FUNC sre_match_resolve_group_idx
 .rgi_no_group_pop:
     pop rdi
 .rgi_no_group_pop2:
-    lea rdi, [rel exc_IndexError_type]
-    CSTRING rsi, "no such group"
-    call raise_exception
+    RAISE exc_IndexError_type, "no such group"
 
 .rgi_type_error:
-    lea rdi, [rel exc_IndexError_type]
-    CSTRING rsi, "no such group"
-    call raise_exception
+    RAISE exc_IndexError_type, "no such group"
 END_FUNC sre_match_resolve_group_idx
 
 ; ============================================================================
@@ -658,9 +652,7 @@ DEF_FUNC sre_match_start_method
     ret
 
 .start_error:
-    lea rdi, [rel exc_IndexError_type]
-    CSTRING rsi, "no such group"
-    call raise_exception
+    RAISE exc_IndexError_type, "no such group"
 END_FUNC sre_match_start_method
 
 ; ============================================================================
@@ -703,9 +695,7 @@ DEF_FUNC sre_match_end_method
     ret
 
 .end_error:
-    lea rdi, [rel exc_IndexError_type]
-    CSTRING rsi, "no such group"
-    call raise_exception
+    RAISE exc_IndexError_type, "no such group"
 END_FUNC sre_match_end_method
 
 ; ============================================================================
@@ -768,9 +758,7 @@ DEF_FUNC sre_match_span_method
     ret
 
 .span_error:
-    lea rdi, [rel exc_IndexError_type]
-    CSTRING rsi, "no such group"
-    call raise_exception
+    RAISE exc_IndexError_type, "no such group"
 END_FUNC sre_match_span_method
 
 ; ============================================================================
@@ -971,14 +959,10 @@ DEF_FUNC sre_match_subscript
     ret
 
 .ms_no_such_group:
-    lea rdi, [rel exc_IndexError_type]
-    CSTRING rsi, "no such group"
-    call raise_exception
+    RAISE exc_IndexError_type, "no such group"
 
 .ms_type_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "group index must be int or string"
-    call raise_exception
+    RAISE exc_TypeError_type, "group index must be int or string"
 END_FUNC sre_match_subscript
 
 ; ============================================================================

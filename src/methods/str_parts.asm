@@ -104,18 +104,14 @@ DEF_FUNC str_method_istitle
 .istitle_check:
     test r9d, r9d
     jz .istitle_false         ; no cased chars → False
-    lea rax, [rel bool_true]
-    inc qword [rax + PyObject.ob_refcnt]
-    mov edx, TAG_PTR
+    RET_TRUE
     pop r12
     pop rbx
     leave
     V_PACK rax, rdx             ; builtins return one Value
     ret
 .istitle_false:
-    lea rax, [rel bool_false]
-    inc qword [rax + PyObject.ob_refcnt]
-    mov edx, TAG_PTR
+    RET_FALSE
     pop r12
     pop rbx
     leave
@@ -884,14 +880,10 @@ DEF_FUNC str_staticmethod_maketrans, SMT_FRAME
     ret
 
 .smt_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "maketrans requires 2 string arguments"
-    call raise_exception
+    RAISE exc_TypeError_type, "maketrans requires 2 string arguments"
 
 .smt_len_error:
-    lea rdi, [rel exc_ValueError_type]
-    CSTRING rsi, "maketrans arguments must have equal length"
-    call raise_exception
+    RAISE exc_ValueError_type, "maketrans arguments must have equal length"
 END_FUNC str_staticmethod_maketrans
 
 ;; args[0]=self, args[1]=prefix
@@ -959,9 +951,7 @@ DEF_FUNC str_method_removeprefix
     ret
 
 .rp_type_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "must be str, not other type"
-    call raise_exception
+    RAISE exc_TypeError_type, "must be str, not other type"
 END_FUNC str_method_removeprefix
 
 ;; ============================================================================
@@ -1037,9 +1027,7 @@ DEF_FUNC str_method_removesuffix
     ret
 
 .rs_type_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "must be str, not other type"
-    call raise_exception
+    RAISE exc_TypeError_type, "must be str, not other type"
 END_FUNC str_method_removesuffix
 
 ;; ============================================================================
@@ -1179,13 +1167,9 @@ DEF_FUNC str_method_encode, SE_FRAME
     mov rsi, rax
     call raise_type_error_with_name
 .se_too_many:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "encode() takes at most 2 arguments"
-    call raise_exception
+    RAISE exc_TypeError_type, "encode() takes at most 2 arguments"
 
 .se_not_encodable:
     extern exc_UnicodeEncodeError_type
-    lea rdi, [rel exc_UnicodeEncodeError_type]
-    CSTRING rsi, "character not in range for this encoding"
-    call raise_exception
+    RAISE exc_UnicodeEncodeError_type, "character not in range for this encoding"
 END_FUNC str_method_encode

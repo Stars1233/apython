@@ -312,14 +312,10 @@ DEF_FUNC obj_as_index
     ret
 
 .oai_bad_index:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "__index__ returned non-int"
-    call raise_exception
+    RAISE exc_TypeError_type, "__index__ returned non-int"
 
 .oai_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "object cannot be interpreted as an integer"
-    call raise_exception
+    RAISE exc_TypeError_type, "object cannot be interpreted as an integer"
 END_FUNC obj_as_index
 
 ; value_number_methods(rdi = payload, edx = tag) -> rax = PyNumberMethods*, or 0
@@ -747,9 +743,7 @@ DEF_FUNC obj_richcompare_bool, ORB_FRAME
     je .orb_false
     cmp edx, PY_NE
     je .orb_true
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "unorderable types"
-    call raise_exception
+    RAISE exc_TypeError_type, "unorderable types"
 
 .orb_have_result:
     mov [rbp - ORB_RES], rax    ; the result Value, owned
@@ -801,9 +795,7 @@ global hash_not_implemented
 DEF_FUNC hash_not_implemented
     extern raise_exception
     extern exc_TypeError_type
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "unhashable type"
-    call raise_exception
+    RAISE exc_TypeError_type, "unhashable type"
 END_FUNC hash_not_implemented
 
 ; obj_hash(rdi=value) -> int64
@@ -1000,9 +992,7 @@ DEF_FUNC_BARE obj_is_true
 .dunder_bool_none_error:
     extern raise_exception
     extern exc_TypeError_type
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "cannot interpret 'NoneType' object as an integer"
-    call raise_exception
+    RAISE exc_TypeError_type, "cannot interpret 'NoneType' object as an integer"
 
 .dunder_bool_type_error:
     ; __bool__ didn't return bool — DECREF result and raise TypeError
@@ -1010,9 +1000,7 @@ DEF_FUNC_BARE obj_is_true
     mov rdi, rax
     mov esi, edx
     DECREF_VAL rdi, rsi
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "__bool__ should return bool, returned non-bool"
-    call raise_exception
+    RAISE exc_TypeError_type, "__bool__ should return bool, returned non-bool"
 
 .check_dunder_len:
     ; Try __len__ dunder
@@ -1057,9 +1045,7 @@ DEF_FUNC_BARE obj_is_true
 
 .len_negative_error:
     extern exc_ValueError_type
-    lea rdi, [rel exc_ValueError_type]
-    CSTRING rsi, "__len__() should return >= 0"
-    call raise_exception
+    RAISE exc_ValueError_type, "__len__() should return >= 0"
 
 .false:
     xor eax, eax

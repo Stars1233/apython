@@ -263,9 +263,7 @@ DEF_FUNC_LOCAL str_strip_impl, SSI_FRAME
     ret
 
 .ssi_type_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "strip arg must be None or str"
-    call raise_exception
+    RAISE exc_TypeError_type, "strip arg must be None or str"
 END_FUNC str_strip_impl
 
 ;; ============================================================================
@@ -359,17 +357,13 @@ DEF_FUNC_LOCAL str_affix_dispatch, SAD_FRAME
     ret
 
 .sad_true:
-    lea rax, [rel bool_true]
-    inc qword [rax + PyObject.ob_refcnt]
-    mov edx, TAG_PTR
+    RET_TRUE
     leave
     V_PACK rax, rdx
     ret
 
 .sad_false:
-    lea rax, [rel bool_false]
-    inc qword [rax + PyObject.ob_refcnt]
-    mov edx, TAG_PTR
+    RET_FALSE
     leave
     V_PACK rax, rdx
     ret
@@ -441,9 +435,7 @@ DEF_FUNC_LOCAL str_startswith_one, AFF_FRAME
     jmp .sw_false
 
 .sw_true:
-    lea rax, [rel bool_true]
-    inc qword [rax + PyObject.ob_refcnt]
-    mov edx, TAG_PTR
+    RET_TRUE
     pop r13
     pop r12
     pop rbx
@@ -452,9 +444,7 @@ DEF_FUNC_LOCAL str_startswith_one, AFF_FRAME
     ret
 
 .sw_false:
-    lea rax, [rel bool_false]
-    inc qword [rax + PyObject.ob_refcnt]
-    mov edx, TAG_PTR
+    RET_FALSE
     pop r13
     pop r12
     pop rbx
@@ -463,9 +453,7 @@ DEF_FUNC_LOCAL str_startswith_one, AFF_FRAME
     ret
 
 .sw_type_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "must be str, not other type"
-    call raise_exception
+    RAISE exc_TypeError_type, "must be str, not other type"
 END_FUNC str_startswith_one
 
 DEF_FUNC_BARE str_method_startswith
@@ -535,9 +523,7 @@ DEF_FUNC_LOCAL str_endswith_one, AFF_FRAME
     jmp .ew_false
 
 .ew_true:
-    lea rax, [rel bool_true]
-    inc qword [rax + PyObject.ob_refcnt]
-    mov edx, TAG_PTR
+    RET_TRUE
     pop r14
     pop r13
     pop r12
@@ -547,9 +533,7 @@ DEF_FUNC_LOCAL str_endswith_one, AFF_FRAME
     ret
 
 .ew_false:
-    lea rax, [rel bool_false]
-    inc qword [rax + PyObject.ob_refcnt]
-    mov edx, TAG_PTR
+    RET_FALSE
     pop r14
     pop r13
     pop r12
@@ -559,9 +543,7 @@ DEF_FUNC_LOCAL str_endswith_one, AFF_FRAME
     ret
 
 .ew_type_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "must be str, not other type"
-    call raise_exception
+    RAISE exc_TypeError_type, "must be str, not other type"
 END_FUNC str_endswith_one
 
 DEF_FUNC_BARE str_method_endswith
@@ -656,14 +638,10 @@ DEF_FUNC str_find_impl, FND_FRAME
     ret
 
 .find_missing:
-    lea rdi, [rel exc_ValueError_type]
-    CSTRING rsi, "substring not found"
-    call raise_exception
+    RAISE exc_ValueError_type, "substring not found"
 
 .find_type_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "must be str, not other type"
-    call raise_exception
+    RAISE exc_TypeError_type, "must be str, not other type"
 END_FUNC str_find_impl
 
 DEF_FUNC_BARE str_method_find
@@ -961,9 +939,7 @@ DEF_FUNC str_method_replace
     ret
 
 .repl_type_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "must be str, not other type"
-    call raise_exception
+    RAISE exc_TypeError_type, "must be str, not other type"
 END_FUNC str_method_replace
 
 ;; ============================================================================
@@ -1153,9 +1129,7 @@ DEF_FUNC str_method_join
     mov rdi, rbx
     call obj_decref         ; DECREF owned separator
     JOIN_RELEASE_TMP
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "sequence item: expected str instance"
-    call raise_exception
+    RAISE exc_TypeError_type, "sequence item: expected str instance"
 END_FUNC str_method_join
 
 ;; ============================================================================
@@ -1449,14 +1423,10 @@ DEF_FUNC_LOCAL str_split_impl, SPI_FRAME
     ret
 
 .spi_empty_sep:
-    lea rdi, [rel exc_ValueError_type]
-    CSTRING rsi, "empty separator"
-    call raise_exception
+    RAISE exc_ValueError_type, "empty separator"
 
 .spi_type_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "must be str or None, not other type"
-    call raise_exception
+    RAISE exc_TypeError_type, "must be str or None, not other type"
 
 ;; Append a piece (rdi = data, rsi = length) to the result list.
 .spi_emit:
@@ -1802,14 +1772,10 @@ DEF_FUNC str_method_format, SF_FRAME
     jmp .fm_loop
 
 .fm_lone_brace:
-    lea rdi, [rel exc_ValueError_type]
-    CSTRING rsi, "Single '}' encountered in format string"
-    call raise_exception
+    RAISE exc_ValueError_type, "Single '}' encountered in format string"
 
 .fm_unterminated:
-    lea rdi, [rel exc_ValueError_type]
-    CSTRING rsi, "Single '{' encountered in format string"
-    call raise_exception
+    RAISE exc_ValueError_type, "Single '{' encountered in format string"
 
 .fm_done:
     mov rdi, [rbp - SF_STATE]
@@ -1925,13 +1891,9 @@ DEF_FUNC_LOCAL fm_resolve_field, RF_FRAME
     ret
 
 .rf_index_error:
-    lea rdi, [rel exc_IndexError_type]
-    CSTRING rsi, "Replacement index out of range for positional args tuple"
-    call raise_exception
+    RAISE exc_IndexError_type, "Replacement index out of range for positional args tuple"
 .rf_key_error:
-    lea rdi, [rel exc_KeyError_type]
-    CSTRING rsi, "format() got no such keyword argument"
-    call raise_exception
+    RAISE exc_KeyError_type, "format() got no such keyword argument"
 END_FUNC fm_resolve_field
 
 ;; fm_name_equals(rdi = NUL-terminated name, rsi = bytes, rdx = length) -> eax
@@ -2162,9 +2124,7 @@ DEF_FUNC str_method_format_map, FM_FRAME
     ret
 
 .fmap_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "format_map() takes exactly one argument"
-    call raise_exception
+    RAISE exc_TypeError_type, "format_map() takes exactly one argument"
 END_FUNC str_method_format_map
 
 ;; ============================================================================

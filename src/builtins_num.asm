@@ -196,14 +196,10 @@ DEF_FUNC builtin_abs
     ret
 
 .abs_type_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "bad operand type for abs()"
-    call raise_exception
+    RAISE exc_TypeError_type, "bad operand type for abs()"
 
 .abs_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "abs() takes exactly one argument"
-    call raise_exception
+    RAISE exc_TypeError_type, "abs() takes exactly one argument"
 END_FUNC builtin_abs
 
 ; ============================================================================
@@ -292,14 +288,10 @@ DEF_FUNC builtin_divmod
     ret
 
 .divmod_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "divmod expected 2 arguments"
-    call raise_exception
+    RAISE exc_TypeError_type, "divmod expected 2 arguments"
 
 .divmod_type_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "unsupported operand type(s) for divmod()"
-    call raise_exception
+    RAISE exc_TypeError_type, "unsupported operand type(s) for divmod()"
 END_FUNC builtin_divmod
 
 ; tp_call wrappers: shift (type, args, nargs) → (args, nargs)
@@ -359,13 +351,9 @@ DEF_FUNC int_type_call, ITC_FRAME
 .itc_kw_no_pos:
     cmp r8, 0
     jne .itc_kw_reject
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "int() missing string argument"
-    call raise_exception
+    RAISE exc_TypeError_type, "int() missing string argument"
 .itc_kw_reject:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "'x' is an invalid keyword argument for int()"
-    call raise_exception
+    RAISE exc_TypeError_type, "'x' is an invalid keyword argument for int()"
 .itc_no_kw:
     leave
     jmp builtin_int_fn
@@ -384,9 +372,7 @@ DEF_FUNC_BARE bool_type_call
     mov qword [rel kw_names_pending], 0
     extern exc_TypeError_type
     extern raise_exception
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "bool() takes no keyword arguments"
-    call raise_exception
+    RAISE exc_TypeError_type, "bool() takes no keyword arguments"
 END_FUNC bool_type_call
 
 global float_type_call
@@ -711,9 +697,7 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     ; __int__ returned non-int
     mov rdi, rax
     call obj_decref
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "__int__ returned non-int (type float)"
-    call raise_exception
+    RAISE exc_TypeError_type, "__int__ returned non-int (type float)"
 
 .int_from_int_sub_extract:
     ; rbx = PyIntSubclassObject with no __int__ method
@@ -787,9 +771,7 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     ; Not int-like
     mov rdi, rax
     call obj_decref
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "__int__ returned non-int"
-    call raise_exception
+    RAISE exc_TypeError_type, "__int__ returned non-int"
 
 .int_call_dunder_trunc:
     ; rax = __trunc__ func, rbx = self
@@ -886,9 +868,7 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     mov rdi, rax
     call obj_decref
 .int_index_nonint_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "__index__ returned non-int"
-    call raise_exception
+    RAISE exc_TypeError_type, "__index__ returned non-int"
 
 .int_trunc_no_index:
     mov rax, [rbx + PyObject.ob_type]
@@ -960,15 +940,11 @@ DEF_FUNC builtin_int_fn, BI_FRAME
 
 .int_trunc_nonint_error:
     ; __trunc__ returned non-pointer non-int (TAG_FLOAT, TAG_NONE, etc)
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "__trunc__ returned non-Integral"
-    call raise_exception
+    RAISE exc_TypeError_type, "__trunc__ returned non-Integral"
 
 .int_dunder_returned_float:
     ; __int__/__trunc__ returned TAG_FLOAT — TypeError (non-int return)
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "__int__ returned non-int (type float)"
-    call raise_exception
+    RAISE exc_TypeError_type, "__int__ returned non-int (type float)"
 
 .int_convert_bool_result:
     ; rax = bool_true or bool_false, convert to SmallInt
@@ -989,14 +965,10 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     jmp .int_ret
 
 .int_type_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "int() argument must be a string or a number, not"
-    call raise_exception
+    RAISE exc_TypeError_type, "int() argument must be a string or a number, not"
 
 .int_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "int() takes at most 2 arguments"
-    call raise_exception
+    RAISE exc_TypeError_type, "int() takes at most 2 arguments"
 
 ; ------- int(x, base) -------
 .int_two_args:
@@ -1173,19 +1145,13 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     jmp .int_base_parse_error
 
 .int_base_type_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "int() second arg must be an integer"
-    call raise_exception
+    RAISE exc_TypeError_type, "int() second arg must be an integer"
 
 .int_base_type_error_str:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "int() can't convert non-string with explicit base"
-    call raise_exception
+    RAISE exc_TypeError_type, "int() can't convert non-string with explicit base"
 
 .int_base_range_error:
-    lea rdi, [rel exc_ValueError_type]
-    CSTRING rsi, "int() base must be >= 2 and <= 36, or 0"
-    call raise_exception
+    RAISE exc_ValueError_type, "int() base must be >= 2 and <= 36, or 0"
 
 .int_base_parse_error:
     ; Restore rbx from BI_OBJ (may have been clobbered in bytes path)
@@ -1387,19 +1353,13 @@ DEF_FUNC builtin_ord
     ret
 
 .ord_type_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "ord() expected string of length 1"
-    call raise_exception
+    RAISE exc_TypeError_type, "ord() expected string of length 1"
 
 .ord_len_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "ord() expected a character"
-    call raise_exception
+    RAISE exc_TypeError_type, "ord() expected a character"
 
 .ord_nargs_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "ord() takes exactly one argument"
-    call raise_exception
+    RAISE exc_TypeError_type, "ord() takes exactly one argument"
 END_FUNC builtin_ord
 
 ; ============================================================================
@@ -1508,14 +1468,10 @@ DEF_FUNC builtin_chr, 16
     ret
 
 .chr_range_error:
-    lea rdi, [rel exc_ValueError_type]
-    CSTRING rsi, "chr() arg not in range(0x110000)"
-    call raise_exception
+    RAISE exc_ValueError_type, "chr() arg not in range(0x110000)"
 
 .chr_nargs_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "chr() takes exactly one argument"
-    call raise_exception
+    RAISE exc_TypeError_type, "chr() takes exactly one argument"
 END_FUNC builtin_chr
 
 ; ============================================================================
@@ -1607,9 +1563,7 @@ DEF_FUNC builtin_hex, HEXB_FRAME
     ret
 
 .hex_nargs_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "hex() takes exactly one argument"
-    call raise_exception
+    RAISE exc_TypeError_type, "hex() takes exactly one argument"
 END_FUNC builtin_hex
 
 ; builtin_eval_fn used to live here: a stub that parsed a single integer
@@ -1812,14 +1766,10 @@ DEF_FUNC builtin_round_fn, RND_FRAME
     ret
 
 .rnd_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "round() takes 1 or 2 arguments"
-    call raise_exception
+    RAISE exc_TypeError_type, "round() takes 1 or 2 arguments"
 
 .rnd_type_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "type cannot be rounded"
-    call raise_exception
+    RAISE exc_TypeError_type, "type cannot be rounded"
 END_FUNC builtin_round_fn
 
 ; ============================================================================
@@ -2148,24 +2098,16 @@ DEF_FUNC builtin_pow_fn, POW_FRAME
     ret
 
 .pow_neg_mod_exp:
-    lea rdi, [rel exc_ValueError_type]
-    CSTRING rsi, "pow() 2nd argument cannot be negative when 3rd argument specified"
-    call raise_exception
+    RAISE exc_ValueError_type, "pow() 2nd argument cannot be negative when 3rd argument specified"
 
 .pow_zero_mod:
-    lea rdi, [rel exc_ValueError_type]
-    CSTRING rsi, "pow() 3rd argument cannot be 0"
-    call raise_exception
+    RAISE exc_ValueError_type, "pow() 3rd argument cannot be 0"
 
 .pow_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "pow() takes 2 or 3 arguments"
-    call raise_exception
+    RAISE exc_TypeError_type, "pow() takes 2 or 3 arguments"
 
 .pow_type_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "pow() arguments must be numeric"
-    call raise_exception
+    RAISE exc_TypeError_type, "pow() arguments must be numeric"
 END_FUNC builtin_pow_fn
 
 ; ============================================================================
@@ -2259,9 +2201,7 @@ DEF_FUNC builtin_bin, BINB_FRAME
     ret
 
 .bin_nargs_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "bin() takes exactly one argument"
-    call raise_exception
+    RAISE exc_TypeError_type, "bin() takes exactly one argument"
 END_FUNC builtin_bin
 
 ; ============================================================================
@@ -2355,9 +2295,7 @@ DEF_FUNC builtin_oct, OCTB_FRAME
     ret
 
 .oct_nargs_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "oct() takes exactly one argument"
-    call raise_exception
+    RAISE exc_TypeError_type, "oct() takes exactly one argument"
 END_FUNC builtin_oct
 
 ; const_one is read by round() and pow(); it lived in a .rodata block shared

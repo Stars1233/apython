@@ -175,6 +175,7 @@ ENTRY_TOMBSTONE_HASH equ -1
 ; A set entry mirrors DictEntry minus the value: hash at +0, key Value at +8.
 SET_ENTRY_HASH equ 0
 SET_ENTRY_KEY  equ 8
+SET_ENTRY_SIZE equ 16           ; the two fields above, and nothing else
 
 ; Set-entry counterpart of ENTRY_CLASSIFY.
 %macro SET_ENTRY_CLASSIFY 3     ; %1 = entry ptr, %2 = empty label, %3 = tombstone label

@@ -933,9 +933,7 @@ DEF_FUNC_BARE exc_isinstance
     mov rdi, [rdi + PyExceptionObject.ob_type]
     jmp type_is_subtype
 .not_a_class:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "catching classes that do not inherit from BaseException is not allowed"
-    call raise_exception
+    RAISE exc_TypeError_type, "catching classes that do not inherit from BaseException is not allowed"
 .not_match:
     xor eax, eax
     ret

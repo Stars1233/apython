@@ -542,9 +542,7 @@ DEF_FUNC_BARE op_binary_op
 .binop_no_method:
     ; No method found — raise TypeError
     extern raise_exception
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "unsupported operand type(s)"
-    call raise_exception
+    RAISE exc_TypeError_type, "unsupported operand type(s)"
 
 .binop_try_smallint_add:
     ; Check both TAG_SMALLINT
@@ -1074,10 +1072,8 @@ section .text
     mov rsi, [rsp + BO_RTAG]
     DECREF_VAL rdi, rsi
     add rsp, BO_SIZE
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "'<' not supported between instances"
     extern raise_exception
-    call raise_exception
+    RAISE exc_TypeError_type, "'<' not supported between instances"
     DISPATCH
 
 .cmp_id_eq_ne:
@@ -1189,9 +1185,7 @@ DEF_FUNC_BARE op_unary_negative
     DISPATCH
 
 .neg_type_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "bad operand type for unary -"
-    call raise_exception
+    RAISE exc_TypeError_type, "bad operand type for unary -"
 END_FUNC op_unary_negative
 
 ;; ============================================================================
@@ -1237,9 +1231,7 @@ DEF_FUNC_BARE op_unary_invert
     DISPATCH
 
 .inv_type_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "bad operand type for unary ~"
-    call raise_exception
+    RAISE exc_TypeError_type, "bad operand type for unary ~"
 END_FUNC op_unary_invert
 
 ;; ============================================================================

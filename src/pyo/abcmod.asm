@@ -394,9 +394,7 @@ DEF_FUNC abc_init_func, AI_FRAME
     leave
     ret
 .bad:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "_abc_init() requires a class"
-    call raise_exception
+    RAISE exc_TypeError_type, "_abc_init() requires a class"
 END_FUNC abc_init_func
 
 ; ----------------------------------------------------------------------------
@@ -693,9 +691,7 @@ DEF_FUNC abc_subclasscheck_func
     leave
     ret
 .bad:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "_abc_subclasscheck() takes 2 arguments"
-    call raise_exception
+    RAISE exc_TypeError_type, "_abc_subclasscheck() takes 2 arguments"
 END_FUNC abc_subclasscheck_func
 
 ; ----------------------------------------------------------------------------
@@ -751,9 +747,7 @@ DEF_FUNC abc_instancecheck_func, IC_FRAME
     leave
     ret
 .bad:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "_abc_instancecheck() takes 2 arguments"
-    call raise_exception
+    RAISE exc_TypeError_type, "_abc_instancecheck() takes 2 arguments"
 END_FUNC abc_instancecheck_func
 
 ; ----------------------------------------------------------------------------
@@ -806,17 +800,11 @@ DEF_FUNC abc_register_func, RG_FRAME
     leave
     ret
 .not_a_class:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "Can only register classes"
-    call raise_exception
+    RAISE exc_TypeError_type, "Can only register classes"
 .cycle:
-    lea rdi, [rel exc_RuntimeError_type]
-    CSTRING rsi, "Refusing to create an inheritance cycle"
-    call raise_exception
+    RAISE exc_RuntimeError_type, "Refusing to create an inheritance cycle"
 .bad:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "_abc_register() takes 2 arguments"
-    call raise_exception
+    RAISE exc_TypeError_type, "_abc_register() takes 2 arguments"
 END_FUNC abc_register_func
 
 ; ----------------------------------------------------------------------------
@@ -857,9 +845,7 @@ DEF_FUNC abc_get_dump_func, GD_FRAME
     leave
     ret
 .bad:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "_get_dump() requires a class"
-    call raise_exception
+    RAISE exc_TypeError_type, "_get_dump() requires a class"
 END_FUNC abc_get_dump_func
 
 ; ----------------------------------------------------------------------------
@@ -876,9 +862,7 @@ DEF_FUNC abc_reset_registry_func
     leave
     ret
 .bad:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "_reset_registry() requires a class"
-    call raise_exception
+    RAISE exc_TypeError_type, "_reset_registry() requires a class"
 END_FUNC abc_reset_registry_func
 
 ; ----------------------------------------------------------------------------
@@ -902,31 +886,12 @@ DEF_FUNC abc_reset_caches_func, RC_FRAME
     leave
     ret
 .bad:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "_reset_caches() requires a class"
-    call raise_exception
+    RAISE exc_TypeError_type, "_reset_caches() requires a class"
 END_FUNC abc_reset_caches_func
 
 ; ============================================================================
 ; Module construction
 ; ============================================================================
-%macro ABC_ADD_FUNC 2
-    lea rdi, [rel %1]
-    lea rsi, [rel %2]
-    call builtin_func_new
-    push rax
-    lea rdi, [rel %2]
-    call str_from_cstr_heap
-    push rax
-    mov rdi, r12
-    mov rsi, rax
-    mov rdx, [rsp + 8]
-    call dict_set
-    pop rdi
-    call obj_decref
-    pop rdi
-    call obj_decref
-%endmacro
 
 ABC_FRAME equ 8
 global abc_module_create
@@ -937,14 +902,14 @@ DEF_FUNC abc_module_create, ABC_FRAME
     call dict_new
     mov r12, rax
 
-    ABC_ADD_FUNC abc_get_cache_token,      abcm_get_cache_token
-    ABC_ADD_FUNC abc_init_func,            abcm_abc_init
-    ABC_ADD_FUNC abc_register_func,        abcm_abc_register
-    ABC_ADD_FUNC abc_instancecheck_func,   abcm_abc_instancecheck
-    ABC_ADD_FUNC abc_subclasscheck_func,   abcm_abc_subclasscheck
-    ABC_ADD_FUNC abc_get_dump_func,        abcm_get_dump
-    ABC_ADD_FUNC abc_reset_registry_func,  abcm_reset_registry
-    ABC_ADD_FUNC abc_reset_caches_func,    abcm_reset_caches
+    MODULE_ADD_FUNC abc_get_cache_token,      abcm_get_cache_token
+    MODULE_ADD_FUNC abc_init_func,            abcm_abc_init
+    MODULE_ADD_FUNC abc_register_func,        abcm_abc_register
+    MODULE_ADD_FUNC abc_instancecheck_func,   abcm_abc_instancecheck
+    MODULE_ADD_FUNC abc_subclasscheck_func,   abcm_abc_subclasscheck
+    MODULE_ADD_FUNC abc_get_dump_func,        abcm_get_dump
+    MODULE_ADD_FUNC abc_reset_registry_func,  abcm_reset_registry
+    MODULE_ADD_FUNC abc_reset_caches_func,    abcm_reset_caches
 
     lea rdi, [rel abcm_name]
     call str_from_cstr_heap

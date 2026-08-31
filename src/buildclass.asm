@@ -114,9 +114,7 @@ DEF_FUNC type_method_new
     ret
 
 .tmn_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "type.__new__() takes at least 3 arguments"
-    call raise_exception
+    RAISE exc_TypeError_type, "type.__new__() takes at least 3 arguments"
 END_FUNC type_method_new
 
 
@@ -1112,9 +1110,7 @@ DEF_FUNC_LOCAL bc_call_kw, BCK_FRAME
     leave
     ret
 .too_many:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "too many class keyword arguments"
-    call raise_exception
+    RAISE exc_TypeError_type, "too many class keyword arguments"
 END_FUNC bc_call_kw
 
 ;; ============================================================================
@@ -1667,9 +1663,7 @@ BCL_OKWV  equ 72
 
 
 .build_class_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "__build_class__ requires 2+ arguments"
-    call raise_exception
+    RAISE exc_TypeError_type, "__build_class__ requires 2+ arguments"
 
 .bc_prepare_failed:
     ; __prepare__ raised.  Release the fallback namespace and the bases and
@@ -1699,14 +1693,10 @@ BCL_OKWV  equ 72
     jmp eval_exception_unwind
 
 .build_class_base_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "bases must be types"
-    call raise_exception
+    RAISE exc_TypeError_type, "bases must be types"
 
 .build_class_bool_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "type 'bool' is not an acceptable base type"
-    call raise_exception
+    RAISE exc_TypeError_type, "type 'bool' is not an acceptable base type"
 END_FUNC builtin___build_class__
 section .rodata
 bc_prepare_name: db "__prepare__", 0

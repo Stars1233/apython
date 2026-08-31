@@ -270,9 +270,7 @@ DEF_FUNC eval_frame
     ; CPython refuses the call before the frame exists, so its traceback ends
     ; at the caller.  This frame is already up; keep it out of the report.
     mov byte [rel tb_suppress_frame], 1
-    lea rdi, [rel exc_RecursionError_type]
-    CSTRING rsi, "maximum recursion depth exceeded"
-    call raise_exception
+    RAISE exc_RecursionError_type, "maximum recursion depth exceeded"
 
 .no_throw:
     ; Fall through to eval_dispatch
@@ -986,10 +984,8 @@ DEF_FUNC_BARE op_raise_varargs
     test rax, rax
     jnz .do_reraise
     ; No current exception - raise RuntimeError
-    lea rdi, [rel exc_RuntimeError_type]
     extern exc_RuntimeError_type
-    CSTRING rsi, "No active exception to re-raise"
-    call raise_exception
+    RAISE exc_RuntimeError_type, "No active exception to re-raise"
     ; does not return here
 
 .do_reraise:
@@ -1078,9 +1074,7 @@ DEF_FUNC_BARE op_raise_varargs
     ; DECREF the bad value (pointer guaranteed here) and raise TypeError
     call obj_decref
 .raise_bad_no_decref:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "exceptions must derive from BaseException"
-    call raise_exception
+    RAISE exc_TypeError_type, "exceptions must derive from BaseException"
 
 .raise_from:
     ; TOS = cause, TOS1 = exception

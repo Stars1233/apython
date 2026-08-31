@@ -257,9 +257,7 @@ DEF_FUNC_BARE op_binary_subscr
     jmp .subscr_done
 
 .subscr_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "object is not subscriptable"
-    call raise_exception
+    RAISE exc_TypeError_type, "object is not subscriptable"
 
 .subscr_done:
     ; rax = result payload, rdx = result tag
@@ -396,9 +394,7 @@ DEF_FUNC_BARE op_store_subscr
     jmp .store_done
 
 .store_type_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "object does not support item assignment"
-    call raise_exception
+    RAISE exc_TypeError_type, "object does not support item assignment"
 
 .store_done:
     mov rdi, [rsp + SSUB_VAL]
@@ -740,9 +736,7 @@ DEF_FUNC_BARE op_unpack_sequence
 
 .unpack_type_error:
     ; Unknown type
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "cannot unpack non-sequence"
-    call raise_exception
+    RAISE exc_TypeError_type, "cannot unpack non-sequence"
 
 .unpack_tuple:
     ; Validate count matches size
@@ -1029,9 +1023,7 @@ DEF_FUNC_BARE op_get_iter
     jmp .have_iter_result
 
 .not_iterable:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "object is not iterable"
-    call raise_exception
+    RAISE exc_TypeError_type, "object is not iterable"
 END_FUNC op_get_iter
 
 ;; ============================================================================
@@ -1338,9 +1330,7 @@ DEF_FUNC op_list_extend, 32
     DISPATCH
 
 .extend_type_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "list.extend() argument must be iterable"
-    call raise_exception
+    RAISE exc_TypeError_type, "list.extend() argument must be iterable"
 END_FUNC op_list_extend
 
 ;; ============================================================================
@@ -1819,9 +1809,7 @@ DEF_FUNC_BARE op_contains_op
     ; Fall through to type error
 
 .contains_type_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "argument of type is not iterable"
-    call raise_exception
+    RAISE exc_TypeError_type, "argument of type is not iterable"
 END_FUNC op_contains_op
 
 ;; ============================================================================
@@ -1979,9 +1967,7 @@ DEF_FUNC op_binary_slice, BSLC_FRAME
     jmp .bslc_have_result
 
 .bslc_not_subscriptable:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "object is not subscriptable"
-    call raise_exception
+    RAISE exc_TypeError_type, "object is not subscriptable"
 END_FUNC op_binary_slice
 
 ;; ============================================================================
@@ -2071,9 +2057,7 @@ DEF_FUNC op_store_slice, SSLC_FRAME
     jmp .sslc_stored
 
 .sslc_no_ass:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "object does not support slice assignment"
-    call raise_exception
+    RAISE exc_TypeError_type, "object does not support slice assignment"
 END_FUNC op_store_slice
 
 ;; ============================================================================
@@ -2190,9 +2174,7 @@ DEF_FUNC op_dict_update
     DISPATCH
 
 .du_type_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "dict.update() argument must be a dict"
-    call raise_exception
+    RAISE exc_TypeError_type, "dict.update() argument must be a dict"
 END_FUNC op_dict_update
 
 ;; ============================================================================
@@ -2279,14 +2261,10 @@ DEF_FUNC op_dict_merge
 
 .dm_dup_error:
     pop rbx                    ; balance push from before dict_get
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "got multiple values for keyword argument"
-    call raise_exception
+    RAISE exc_TypeError_type, "got multiple values for keyword argument"
 
 .dm_type_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "dict.update() argument must be a dict"
-    call raise_exception
+    RAISE exc_TypeError_type, "dict.update() argument must be a dict"
 END_FUNC op_dict_merge
 
 ;; ============================================================================
@@ -2526,14 +2504,10 @@ DEF_FUNC op_unpack_ex
     jmp .ue_list
 
 .ue_not_enough:
-    lea rdi, [rel exc_ValueError_type]
-    CSTRING rsi, "not enough values to unpack"
-    call raise_exception
+    RAISE exc_ValueError_type, "not enough values to unpack"
 
 .ue_type_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "cannot unpack non-sequence"
-    call raise_exception
+    RAISE exc_TypeError_type, "cannot unpack non-sequence"
 
 ; Helper: get item at index rsi from iterable rdi (returns borrowed ref: rax=payload, rdx=tag)
 .ue_getitem:
@@ -2786,9 +2760,7 @@ DEF_FUNC op_set_update
     DISPATCH
 
 .su_type_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "object is not iterable"
-    call raise_exception
+    RAISE exc_TypeError_type, "object is not iterable"
 END_FUNC op_set_update
 
 ;; ============================================================================

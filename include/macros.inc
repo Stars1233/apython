@@ -160,6 +160,44 @@
     lea %1, [rel %%str]
 %endmacro
 
+; Raise an exception with a literal message.  436 sites hand-rolled this triple.
+; raise_exception does not return, so nothing follows it.
+;
+;   RAISE exc_TypeError_type, "descriptive error message"
+;
+; The macro declares no externs of its own: eval.asm *defines* raise_exception
+; and exception.asm defines the exception types, so an extern here would
+; collide with the definition.  Declare them per file, as before.
+%macro RAISE 2                  ; %1 = exception type symbol, %2 = message
+    lea rdi, [rel %1]
+    CSTRING rsi, %2
+    call raise_exception
+%endmacro
+
+; Build a builtin function and store it in a module dict under its own name.
+; abcmod, weakrefmod and sre_module each carried a byte-identical private copy
+; of this (ABC_ADD_FUNC, WR_ADD_FUNC, SRE_ADD_FUNC).  r12 holds the dict.
+;
+;   MODULE_ADD_FUNC impl_symbol, name_cstr_symbol
+;
+%macro MODULE_ADD_FUNC 2        ; %1 = implementation, %2 = NUL-terminated name
+    lea rdi, [rel %1]
+    lea rsi, [rel %2]
+    call builtin_func_new
+    push rax
+    lea rdi, [rel %2]
+    call str_from_cstr_heap
+    push rax
+    mov rdi, r12
+    mov rsi, rax
+    mov rdx, [rsp + 8]
+    call dict_set
+    pop rdi
+    call obj_decref
+    pop rdi
+    call obj_decref
+%endmacro
+
 ; Load co_names payload pointer (&tuple.ob_item[0]) into a register
 %macro LOAD_CO_NAMES 1          ; %1 = dest reg
     mov %1, [rel eval_co_names]
@@ -295,6 +333,20 @@ TAG_IO_WAIT  equ 8           ; payload = fd | (direction << 32) — async I/O se
 ; Fat return of None: (rax = none_singleton, edx = TAG_PTR).  Clobbers rax.
 %macro RET_NONE 0
     lea rax, [rel none_singleton]
+    inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
+%endmacro
+
+; Fat return of a constant bool.  110 sites open-coded one of these three
+; three-line sequences; RET_NONE already existed, its bool siblings did not.
+%macro RET_TRUE 0
+    lea rax, [rel bool_true]
+    inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
+%endmacro
+
+%macro RET_FALSE 0
+    lea rax, [rel bool_false]
     inc qword [rax + PyObject.ob_refcnt]
     mov edx, TAG_PTR
 %endmacro

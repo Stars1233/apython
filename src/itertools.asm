@@ -198,9 +198,7 @@ DEF_FUNC get_iterator
     ; DECREF the bad iterator, raise TypeError
     mov rdi, rbx
     call obj_decref
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "iter() returned non-iterator"
-    call raise_exception
+    RAISE exc_TypeError_type, "iter() returned non-iterator"
 
 .try_getitem:
     ; rdi = original object. Check if it has __getitem__ on heaptype.
@@ -224,9 +222,7 @@ DEF_FUNC get_iterator
     ret
 
 .no_iter:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "object is not iterable"
-    call raise_exception
+    RAISE exc_TypeError_type, "object is not iterable"
 
 .iter_exc_pending:
     ; Exception was raised by __iter__. Propagate it via eval_exception_unwind.
@@ -456,15 +452,11 @@ DEF_FUNC builtin_enumerate, EN_FRAME
 
 .enum_type_error:
     mov qword [rel kw_names_pending], 0
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "'%s' object cannot be interpreted as an integer"
-    call raise_exception
+    RAISE exc_TypeError_type, "'%s' object cannot be interpreted as an integer"
 
 .enum_error:
     mov qword [rel kw_names_pending], 0
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "enumerate() requires 1 or 2 arguments"
-    call raise_exception
+    RAISE exc_TypeError_type, "enumerate() requires 1 or 2 arguments"
 END_FUNC builtin_enumerate
 
 ;; enumerate_iternext(self) -> PyObject* (2-tuple) or NULL
@@ -944,9 +936,7 @@ DEF_FUNC builtin_map
     ret
 
 .map_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "map() requires at least 2 arguments"
-    call raise_exception
+    RAISE exc_TypeError_type, "map() requires at least 2 arguments"
 END_FUNC builtin_map
 
 ;; map_iternext(self) -> PyObject* or NULL
@@ -1162,9 +1152,7 @@ DEF_FUNC builtin_filter
     ret
 
 .filter_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "filter() requires exactly 2 arguments"
-    call raise_exception
+    RAISE exc_TypeError_type, "filter() requires exactly 2 arguments"
 END_FUNC builtin_filter
 
 ;; filter_iternext(self) -> PyObject* or NULL
@@ -1469,9 +1457,7 @@ section .text
     ret
 
 .rev_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "reversed() takes exactly 1 argument"
-    call raise_exception
+    RAISE exc_TypeError_type, "reversed() takes exactly 1 argument"
 
 .rev_type_error:
     mov rsi, r12
@@ -1674,9 +1660,7 @@ DEF_FUNC builtin_sorted, SO_FRAME
     ret
 
 .sorted_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "sorted() requires exactly 1 argument"
-    call raise_exception
+    RAISE exc_TypeError_type, "sorted() requires exactly 1 argument"
 .sorted_propagate:
     mov rdi, r12
     call obj_decref             ; the partially built list

@@ -219,9 +219,7 @@ DEF_FUNC slot_nb_bool
     ret
 .not_bool:
     add rsp, 16
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "__bool__ should return bool"
-    call raise_exception
+    RAISE exc_TypeError_type, "__bool__ should return bool"
 .failed:
     call slot_reraise
 END_FUNC slot_nb_bool
@@ -317,9 +315,7 @@ DEF_FUNC slot_length
     ret
 .negative:
     extern exc_ValueError_type
-    lea rdi, [rel exc_ValueError_type]
-    CSTRING rsi, "__len__() should return >= 0"
-    call raise_exception
+    RAISE exc_ValueError_type, "__len__() should return >= 0"
 .failed:
     call slot_reraise
 END_FUNC slot_length
@@ -414,9 +410,7 @@ DEF_FUNC_LOCAL slot_reraise
 .no_exc:
     extern raise_exception
     extern exc_RuntimeError_type
-    lea rdi, [rel exc_RuntimeError_type]
-    CSTRING rsi, "slot wrapper failed without an exception"
-    call raise_exception
+    RAISE exc_RuntimeError_type, "slot wrapper failed without an exception"
 END_FUNC slot_reraise
 
 ;; ============================================================================

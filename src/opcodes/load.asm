@@ -1059,9 +1059,7 @@ DEF_FUNC_BARE op_load_deref
 
 .deref_error:
     extern exc_UnboundLocalError_type
-    lea rdi, [rel exc_UnboundLocalError_type]
-    CSTRING rsi, "cannot access variable before assignment"
-    call raise_exception
+    RAISE exc_UnboundLocalError_type, "cannot access variable before assignment"
 END_FUNC op_load_deref
 
 ;; ============================================================================
@@ -1080,9 +1078,7 @@ DEF_FUNC_BARE op_load_fast_check
 
 .lfc_error:
     extern exc_UnboundLocalError_type
-    lea rdi, [rel exc_UnboundLocalError_type]
-    CSTRING rsi, "cannot access local variable before assignment"
-    call raise_exception
+    RAISE exc_UnboundLocalError_type, "cannot access local variable before assignment"
 END_FUNC op_load_fast_check
 
 ;; ============================================================================
@@ -1196,9 +1192,7 @@ DEF_FUNC op_load_super_attr, LSA_FRAME
     call obj_decref
     mov rdi, [rbp - LSA_SELF]
     call obj_decref
-    lea rdi, [rel exc_AttributeError_type]
-    CSTRING rsi, "super: attribute not found"
-    call raise_exception
+    RAISE exc_AttributeError_type, "super: attribute not found"
 
 .lsa_found:
     ; rax = attribute value, rdx = tag (from dict_get)
@@ -2019,9 +2013,7 @@ DEF_FUNC op_store_attr, SA_FRAME
     jmp eval_exception_unwind
 
 .sa_no_setattr:
-    lea rdi, [rel exc_AttributeError_type]
-    CSTRING rsi, "cannot set attribute"
-    call raise_exception
+    RAISE exc_AttributeError_type, "cannot set attribute"
 END_FUNC op_store_attr
 
 ;; ============================================================================
@@ -2091,9 +2083,7 @@ DEF_FUNC_BARE op_delete_name
 .dn_ok:
     DISPATCH
 .dn_error:
-    lea rdi, [rel exc_NameError_type]
-    CSTRING rsi, "name not defined"
-    call raise_exception
+    RAISE exc_NameError_type, "name not defined"
 END_FUNC op_delete_name
 
 ;; ============================================================================
@@ -2109,9 +2099,7 @@ DEF_FUNC_BARE op_delete_global
     jnz .dg_error
     DISPATCH
 .dg_error:
-    lea rdi, [rel exc_NameError_type]
-    CSTRING rsi, "name not defined"
-    call raise_exception
+    RAISE exc_NameError_type, "name not defined"
 END_FUNC op_delete_global
 
 ;; ============================================================================
@@ -2157,9 +2145,7 @@ DEF_FUNC op_delete_attr, DA_FRAME
     mov rdi, [rbp - DA_OBJ]
     call obj_decref
 .da_error:
-    lea rdi, [rel exc_AttributeError_type]
-    CSTRING rsi, "cannot delete attribute"
-    call raise_exception
+    RAISE exc_AttributeError_type, "cannot delete attribute"
 END_FUNC op_delete_attr
 
 ;; ============================================================================
@@ -2207,9 +2193,7 @@ DEF_FUNC op_delete_subscr, DS_FRAME
     DISPATCH
 
 .ds_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "object does not support item deletion"
-    call raise_exception
+    RAISE exc_TypeError_type, "object does not support item deletion"
 END_FUNC op_delete_subscr
 
 ;; ============================================================================

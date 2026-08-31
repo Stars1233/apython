@@ -40,9 +40,7 @@ section .text
 %macro REPR_ENSURE_EXC 0
     cmp qword [rel current_exception], 0
     jne %%have_exc
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "object has no repr"
-    call raise_exception
+    RAISE exc_TypeError_type, "object has no repr"
 %%have_exc:
 %endmacro
 
@@ -80,9 +78,7 @@ repr_push:
     extern raise_exception
 extern exc_TypeError_type
 extern current_exception
-    lea rdi, [rel exc_RecursionError_type]
-    CSTRING rsi, "maximum recursion depth exceeded while getting the repr of an object"
-    call raise_exception
+    RAISE exc_RecursionError_type, "maximum recursion depth exceeded while getting the repr of an object"
 
 ; Pop from repr_stack
 repr_pop:

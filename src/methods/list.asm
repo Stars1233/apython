@@ -61,9 +61,7 @@ DEF_FUNC list_method_append
     V_PACK rsi, rdx         ; list_append takes a Value
     call list_append
 
-    lea rax, [rel none_singleton]
-    inc qword [rax + PyObject.ob_refcnt]
-    mov edx, TAG_PTR
+    RET_NONE
     leave
     V_PACK rax, rdx             ; builtins return one Value
     ret
@@ -143,9 +141,7 @@ DEF_FUNC list_method_pop
     ret
 
 .pop_error:
-    lea rdi, [rel exc_IndexError_type]
-    CSTRING rsi, "pop index out of range"
-    call raise_exception
+    RAISE exc_IndexError_type, "pop index out of range"
 END_FUNC list_method_pop
 
 ;; ============================================================================
@@ -226,9 +222,7 @@ DEF_FUNC list_method_insert
     mov [rax + r12 * 8], r13
     inc qword [rbx + PyListObject.ob_size]
 
-    lea rax, [rel none_singleton]
-    inc qword [rax + PyObject.ob_refcnt]
-    mov edx, TAG_PTR
+    RET_NONE
     pop r14
     pop r13
     pop r12
@@ -268,9 +262,7 @@ DEF_FUNC list_method_reverse
     jmp .rev_loop
 
 .rev_done:
-    lea rax, [rel none_singleton]
-    inc qword [rax + PyObject.ob_refcnt]
-    mov edx, TAG_PTR
+    RET_NONE
     pop rbx
     leave
     V_PACK rax, rdx             ; builtins return one Value
@@ -860,10 +852,8 @@ DEF_FUNC list_method_sort, LS_FRAME
 .mcte_already_restored:
     ; Now raise TypeError
     extern exc_TypeError_type
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "'<' not supported between instances"
     extern raise_exception
-    call raise_exception
+    RAISE exc_TypeError_type, "'<' not supported between instances"
     ; raise_exception does not return
 .merge_bool_result:
     ; eax = 0 (false) or 1 (true)
@@ -1105,9 +1095,7 @@ DEF_FUNC list_method_sort, LS_FRAME
 
 .sort_trivial_done:
     ; n < 2, no sort needed, return None
-    lea rax, [rel none_singleton]
-    inc qword [rax + PyObject.ob_refcnt]
-    mov edx, TAG_PTR
+    RET_NONE
     pop r15
     pop r14
     pop r13
@@ -1166,9 +1154,7 @@ DEF_FUNC list_method_sort, LS_FRAME
     mov rax, [rel current_exception]
     test rax, rax
     jnz .sort_error_return
-    lea rax, [rel none_singleton]
-    inc qword [rax + PyObject.ob_refcnt]
-    mov edx, TAG_PTR
+    RET_NONE
     pop r15
     pop r14
     pop r13
@@ -1284,9 +1270,7 @@ DEF_FUNC list_method_sort, LS_FRAME
     pop r9
     pop rcx
     ; Raise ValueError
-    lea rdi, [rel exc_ValueError_type]
-    CSTRING rsi, "list modified during sort"
-    call raise_exception
+    RAISE exc_ValueError_type, "list modified during sort"
     ; raise_exception does not return
 
 .sort_error_return:
@@ -1318,9 +1302,7 @@ DEF_FUNC list_method_sort, LS_FRAME
     V_PACK rax, rdx             ; builtins return one Value
     ret
 .ls_too_many:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "sort() takes no positional arguments"
-    call raise_exception
+    RAISE exc_TypeError_type, "sort() takes no positional arguments"
 END_FUNC list_method_sort
 
 ;; ============================================================================
@@ -1439,9 +1421,7 @@ DEF_FUNC list_method_index, LI_FRAME
     jmp eval_exception_unwind
 
 .index_not_found:
-    lea rdi, [rel exc_ValueError_type]
-    CSTRING rsi, "x not in list"
-    call raise_exception
+    RAISE exc_ValueError_type, "x not in list"
 END_FUNC list_method_index
 
 ;; ============================================================================
@@ -1651,9 +1631,7 @@ DEF_FUNC list_dunder_delitem
     mov rdi, rax
     call list_ass_subscript
     extern none_singleton
-    lea rax, [rel none_singleton]
-    inc qword [rax + PyObject.ob_refcnt]
-    mov edx, TAG_PTR
+    RET_NONE
     leave
     V_PACK rax, rdx             ; builtins return one Value
     ret
@@ -1768,9 +1746,7 @@ DEF_FUNC container_dunder_new
     ret
 
 .cdn_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "__new__() takes a class argument"
-    call raise_exception
+    RAISE exc_TypeError_type, "__new__() takes a class argument"
 END_FUNC container_dunder_new
 
 DEF_FUNC list_dunder_init
@@ -1812,18 +1788,14 @@ DEF_FUNC list_dunder_init
     call list_method_extend
 
 .ldi_done:
-    lea rax, [rel none_singleton]
-    inc qword [rax + PyObject.ob_refcnt]
-    mov edx, TAG_PTR
+    RET_NONE
     pop r12
     pop rbx
     leave
     V_PACK rax, rdx             ; builtins return one Value
     ret
 .ldi_no_keywords:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "list() takes no keyword arguments"
-    call raise_exception
+    RAISE exc_TypeError_type, "list() takes no keyword arguments"
 END_FUNC list_dunder_init
 
 ;; ============================================================================
@@ -1858,9 +1830,7 @@ DEF_FUNC list_method_clear
 .clear_done:
     mov qword [rbx + PyListObject.ob_size], 0
 
-    lea rax, [rel none_singleton]
-    inc qword [rax + PyObject.ob_refcnt]
-    mov edx, TAG_PTR
+    RET_NONE
     pop r13
     pop r12
     pop rbx
@@ -1980,9 +1950,7 @@ DEF_FUNC list_method_extend, LE_FRAME
     call obj_decref
 
 .extend_done:
-    lea rax, [rel none_singleton]
-    inc qword [rax + PyObject.ob_refcnt]
-    mov edx, TAG_PTR
+    RET_NONE
     pop r13
     pop r12
     pop rbx
@@ -1991,9 +1959,7 @@ DEF_FUNC list_method_extend, LE_FRAME
     ret
 
 .extend_type_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "list.extend() argument must be iterable"
-    call raise_exception
+    RAISE exc_TypeError_type, "list.extend() argument must be iterable"
 END_FUNC list_method_extend
 
 ;; ============================================================================
@@ -2067,9 +2033,7 @@ DEF_FUNC list_method_remove
     DECREF_V rdi, rsi
 
     ; Return None
-    lea rax, [rel none_singleton]
-    inc qword [rax + PyObject.ob_refcnt]
-    mov edx, TAG_PTR
+    RET_NONE
     pop r15
     pop r14
     pop r13
@@ -2080,9 +2044,7 @@ DEF_FUNC list_method_remove
     ret
 
 .lremove_not_found:
-    lea rdi, [rel exc_ValueError_type]
-    CSTRING rsi, "list.remove(x): x not in list"
-    call raise_exception
+    RAISE exc_ValueError_type, "list.remove(x): x not in list"
 END_FUNC list_method_remove
 
 ;; ============================================================================
@@ -2216,9 +2178,7 @@ DEF_FUNC tuple_method_index, 16
     jmp eval_exception_unwind
 
 .tindex_not_found:
-    lea rdi, [rel exc_ValueError_type]
-    CSTRING rsi, "tuple.index(x): x not in tuple"
-    call raise_exception
+    RAISE exc_ValueError_type, "tuple.index(x): x not in tuple"
 END_FUNC tuple_method_index
 
 ;; ============================================================================

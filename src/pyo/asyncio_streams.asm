@@ -156,9 +156,7 @@ DEF_FUNC stream_reader_getattr
     pop rbx
     mov dword [rbx + AsyncStreamReader.fd], -1
 .srga_close_none:
-    lea rax, [rel none_singleton]
-    inc qword [rax + PyObject.ob_refcnt]
-    mov edx, TAG_PTR
+    RET_NONE
     pop r12
     pop rbx
     leave
@@ -417,9 +415,7 @@ DEF_FUNC stream_writer_getattr
     mov dword [rbx + AsyncStreamWriter.fd], -1
     mov dword [rbx + AsyncStreamWriter.closed], 1
 .swga_close_none:
-    lea rax, [rel none_singleton]
-    inc qword [rax + PyObject.ob_refcnt]
-    mov edx, TAG_PTR
+    RET_NONE
     pop r12
     pop rbx
     leave
@@ -493,14 +489,10 @@ DEF_FUNC stream_writer_write_impl
     ret
 
 .swwi_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "write() requires exactly 1 argument"
-    call raise_exception
+    RAISE exc_TypeError_type, "write() requires exactly 1 argument"
 
 .swwi_type_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "write() argument must be a string"
-    call raise_exception
+    RAISE exc_TypeError_type, "write() argument must be a string"
 
 .swwi_write_error:
     ; Write failed — return 0
@@ -704,9 +696,7 @@ DEF_FUNC_BARE accept_awaitable_iternext
     ret
 
 .aai_error:
-    lea rdi, [rel exc_OSError_type]
-    CSTRING rsi, "start_server() accept failed"
-    call raise_exception
+    RAISE exc_OSError_type, "start_server() accept failed"
 END_FUNC accept_awaitable_iternext
 
 DEF_FUNC_BARE accept_awaitable_dealloc
@@ -795,19 +785,13 @@ DEF_FUNC asyncio_open_connection_func, OC_FRAME
     ret
 
 .oc_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "open_connection() requires 2 arguments (host, port)"
-    call raise_exception
+    RAISE exc_TypeError_type, "open_connection() requires 2 arguments (host, port)"
 
 .oc_port_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "open_connection() port must be an integer"
-    call raise_exception
+    RAISE exc_TypeError_type, "open_connection() port must be an integer"
 
 .oc_socket_error:
-    lea rdi, [rel exc_OSError_type]
-    CSTRING rsi, "open_connection() socket creation failed"
-    call raise_exception
+    RAISE exc_OSError_type, "open_connection() socket creation failed"
 END_FUNC asyncio_open_connection_func
 
 ;; ============================================================================
@@ -903,27 +887,19 @@ DEF_FUNC asyncio_start_server_func, SS_FRAME
     ret
 
 .ss_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "start_server() requires 3 arguments (callback, host, port)"
-    call raise_exception
+    RAISE exc_TypeError_type, "start_server() requires 3 arguments (callback, host, port)"
 
 .ss_port_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "start_server() port must be an integer"
-    call raise_exception
+    RAISE exc_TypeError_type, "start_server() port must be an integer"
 
 .ss_socket_error:
-    lea rdi, [rel exc_OSError_type]
-    CSTRING rsi, "start_server() socket creation failed"
-    call raise_exception
+    RAISE exc_OSError_type, "start_server() socket creation failed"
 
 .ss_bind_cleanup:
     add rsp, 16
     mov edi, ebx
     call sys_close
-    lea rdi, [rel exc_OSError_type]
-    CSTRING rsi, "start_server() bind/listen failed"
-    call raise_exception
+    RAISE exc_OSError_type, "start_server() bind/listen failed"
 
 END_FUNC asyncio_start_server_func
 

@@ -353,9 +353,7 @@ DEF_FUNC ref_deref
     V_PACK rax, rdx
     ret
 .dead:
-    lea rax, [rel none_singleton]
-    inc qword [rax + PyObject.ob_refcnt]
-    mov edx, TAG_PTR
+    RET_NONE
     leave
     V_PACK rax, rdx
     ret
@@ -436,9 +434,7 @@ DEF_FUNC_LOCAL ref_hash
     leave
     ret
 .dead:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "weak object has gone away"
-    call raise_exception
+    RAISE exc_TypeError_type, "weak object has gone away"
 END_FUNC ref_hash
 
 ; Two live references compare as their referents do; a dead one only ever
@@ -536,13 +532,9 @@ DEF_FUNC ref_construct
     ret
 .not_referenceable:
     pop rbx
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "cannot create weak reference to this object"
-    call raise_exception
+    RAISE exc_TypeError_type, "cannot create weak reference to this object"
 .bad:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "ref expected at least 1 argument"
-    call raise_exception
+    RAISE exc_TypeError_type, "ref expected at least 1 argument"
 END_FUNC ref_construct
 
 ; ----------------------------------------------------------------------------
@@ -555,9 +547,7 @@ DEF_FUNC_LOCAL proxy_referent
     leave
     ret
 .dead:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "weakly-referenced object no longer exists"
-    call raise_exception
+    RAISE exc_TypeError_type, "weakly-referenced object no longer exists"
 END_FUNC proxy_referent
 
 DEF_FUNC proxy_getattr
@@ -615,9 +605,7 @@ DEF_FUNC proxy_setattr
     leave
     ret
 .no_setattr:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "proxy object does not support attribute assignment"
-    call raise_exception
+    RAISE exc_TypeError_type, "proxy object does not support attribute assignment"
 END_FUNC proxy_setattr
 
 DEF_FUNC proxy_repr
@@ -647,9 +635,7 @@ DEF_FUNC proxy_call
     leave
     ret
 .not_callable:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "proxy object is not callable"
-    call raise_exception
+    RAISE exc_TypeError_type, "proxy object is not callable"
 END_FUNC proxy_call
 
 ; ----------------------------------------------------------------------------
@@ -697,9 +683,7 @@ DEF_FUNC wr_proxy_func
 .bad_pop:
     pop rbx
 .bad:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "cannot create weak proxy to this object"
-    call raise_exception
+    RAISE exc_TypeError_type, "cannot create weak proxy to this object"
 END_FUNC wr_proxy_func
 
 DEF_FUNC wr_getweakrefcount_func
@@ -804,9 +788,7 @@ DEF_FUNC wr_remove_dead_func
 .none_pop:
     pop rbx
 .none:
-    lea rax, [rel none_singleton]
-    inc qword [rax + PyObject.ob_refcnt]
-    mov edx, TAG_PTR
+    RET_NONE
     leave
     V_PACK rax, rdx
     ret
@@ -815,23 +797,6 @@ END_FUNC wr_remove_dead_func
 ; ============================================================================
 ; Module construction
 ; ============================================================================
-%macro WR_ADD_FUNC 2
-    lea rdi, [rel %1]
-    lea rsi, [rel %2]
-    call builtin_func_new
-    push rax
-    lea rdi, [rel %2]
-    call str_from_cstr_heap
-    push rax
-    mov rdi, r12
-    mov rsi, rax
-    mov rdx, [rsp + 8]
-    call dict_set
-    pop rdi
-    call obj_decref
-    pop rdi
-    call obj_decref
-%endmacro
 
 %macro WR_ADD_TYPE 2
     lea rdi, [rel %2]
@@ -854,10 +819,10 @@ DEF_FUNC weakref_module_create, WRM_FRAME
     call dict_new
     mov r12, rax
 
-    WR_ADD_FUNC wr_proxy_func,           wrm_proxy
-    WR_ADD_FUNC wr_getweakrefcount_func, wrm_getweakrefcount
-    WR_ADD_FUNC wr_getweakrefs_func,     wrm_getweakrefs
-    WR_ADD_FUNC wr_remove_dead_func,     wrm_remove_dead
+    MODULE_ADD_FUNC wr_proxy_func,           wrm_proxy
+    MODULE_ADD_FUNC wr_getweakrefcount_func, wrm_getweakrefcount
+    MODULE_ADD_FUNC wr_getweakrefs_func,     wrm_getweakrefs
+    MODULE_ADD_FUNC wr_remove_dead_func,     wrm_remove_dead
 
     WR_ADD_TYPE weakref_type,       wrm_ref
     WR_ADD_TYPE weakref_type,       wrm_ReferenceType

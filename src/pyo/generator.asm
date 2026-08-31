@@ -1007,10 +1007,8 @@ DEF_FUNC gen_close, GC_FRAME
 
 .gc_ignored_exit:
     ; It yielded instead of finishing, which Python reports.
-    lea rdi, [rel exc_RuntimeError_type]
     extern exc_RuntimeError_type
-    CSTRING rsi, "generator ignored GeneratorExit"
-    call raise_exception
+    RAISE exc_RuntimeError_type, "generator ignored GeneratorExit"
 
 .gc_propagate:
     pop rbx
@@ -1361,9 +1359,7 @@ DEF_FUNC _gen_send_impl
     ret
 
 .gsi_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "send() takes exactly one argument"
-    call raise_exception
+    RAISE exc_TypeError_type, "send() takes exactly one argument"
 END_FUNC _gen_send_impl
 
 ;; _gen_close_impl(args, nargs) — gen.close()
@@ -1423,9 +1419,7 @@ DEF_FUNC _gen_throw_impl
     jmp eval_exception_unwind
 
 .gti_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "throw() takes exactly one argument"
-    call raise_exception
+    RAISE exc_TypeError_type, "throw() takes exactly one argument"
 END_FUNC _gen_throw_impl
 
 ;; Lazy-init helpers for gen method builtins

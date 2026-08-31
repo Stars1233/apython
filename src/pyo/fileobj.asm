@@ -161,14 +161,10 @@ DEF_FUNC fileobj_write
 .write_error:
     extern raise_exception
     extern exc_TypeError_type
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "write() takes exactly 1 argument"
-    call raise_exception
+    RAISE exc_TypeError_type, "write() takes exactly 1 argument"
 
 .write_type_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "write() argument must be str"
-    call raise_exception
+    RAISE exc_TypeError_type, "write() argument must be str"
 END_FUNC fileobj_write
 
 ; ============================================================================
@@ -176,9 +172,7 @@ END_FUNC fileobj_write
 ; No-op for unbuffered I/O
 ; ============================================================================
 DEF_FUNC fileobj_flush
-    lea rax, [rel none_singleton]
-    inc qword [rax + PyObject.ob_refcnt]
-    mov edx, TAG_PTR            ; rdx was whatever the caller left; V_PACK
+    RET_NONE
     leave                       ; then read it as an int tag and biased the
     V_PACK rax, rdx             ; singleton pointer into a large integer
     ret
@@ -212,16 +206,12 @@ DEF_FUNC fileobj_isatty, IAT_FRAME
     call sys_ioctl
     test rax, rax
     jns .is_tty
-    lea rax, [rel bool_false]
-    inc qword [rax + PyObject.ob_refcnt]
-    mov edx, TAG_PTR            ; rdx was whatever the caller left; V_PACK
+    RET_FALSE
     leave                       ; then read it as an int tag and biased the
     V_PACK rax, rdx             ; singleton pointer into a large integer
     ret
 .is_tty:
-    lea rax, [rel bool_true]
-    inc qword [rax + PyObject.ob_refcnt]
-    mov edx, TAG_PTR            ; rdx was whatever the caller left; V_PACK
+    RET_TRUE
     leave                       ; then read it as an int tag and biased the
     V_PACK rax, rdx             ; singleton pointer into a large integer
     ret
@@ -236,16 +226,12 @@ DEF_FUNC fileobj_writable
     ; Check if mode contains 'w'
     cmp byte [rdi + PyStrObject.data], 'w'
     je .yes
-    lea rax, [rel bool_false]
-    inc qword [rax + PyObject.ob_refcnt]
-    mov edx, TAG_PTR            ; rdx was whatever the caller left; V_PACK
+    RET_FALSE
     leave                       ; then read it as an int tag and biased the
     V_PACK rax, rdx             ; singleton pointer into a large integer
     ret
 .yes:
-    lea rax, [rel bool_true]
-    inc qword [rax + PyObject.ob_refcnt]
-    mov edx, TAG_PTR            ; rdx was whatever the caller left; V_PACK
+    RET_TRUE
     leave                       ; then read it as an int tag and biased the
     V_PACK rax, rdx             ; singleton pointer into a large integer
     ret
@@ -259,16 +245,12 @@ DEF_FUNC fileobj_readable
     mov rdi, [rax + PyFileObject.file_mode]
     cmp byte [rdi + PyStrObject.data], 'r'
     je .yes
-    lea rax, [rel bool_false]
-    inc qword [rax + PyObject.ob_refcnt]
-    mov edx, TAG_PTR            ; rdx was whatever the caller left; V_PACK
+    RET_FALSE
     leave                       ; then read it as an int tag and biased the
     V_PACK rax, rdx             ; singleton pointer into a large integer
     ret
 .yes:
-    lea rax, [rel bool_true]
-    inc qword [rax + PyObject.ob_refcnt]
-    mov edx, TAG_PTR            ; rdx was whatever the caller left; V_PACK
+    RET_TRUE
     leave                       ; then read it as an int tag and biased the
     V_PACK rax, rdx             ; singleton pointer into a large integer
     ret
@@ -278,9 +260,7 @@ END_FUNC fileobj_readable
 ; fileobj_seekable(PyObject **args, int64_t nargs) -> PyObject*
 ; ============================================================================
 DEF_FUNC fileobj_seekable
-    lea rax, [rel bool_false]
-    inc qword [rax + PyObject.ob_refcnt]
-    mov edx, TAG_PTR            ; rdx was whatever the caller left; V_PACK
+    RET_FALSE
     leave                       ; then read it as an int tag and biased the
     V_PACK rax, rdx             ; singleton pointer into a large integer
     ret
@@ -308,9 +288,7 @@ DEF_FUNC fileobj_exit
     call obj_decref
     add rsp, 16
     extern bool_false
-    lea rax, [rel bool_false]
-    inc qword [rax + PyObject.ob_refcnt]
-    mov edx, TAG_PTR
+    RET_FALSE
     leave
     V_PACK rax, rdx
     ret
@@ -322,9 +300,7 @@ DEF_FUNC fileobj_close_method
     mov rax, [rdi]              ; self
     mov rdi, [rax + PyFileObject.file_fd]
     call sys_close
-    lea rax, [rel none_singleton]
-    inc qword [rax + PyObject.ob_refcnt]
-    mov edx, TAG_PTR            ; rdx was whatever the caller left; V_PACK
+    RET_NONE
     leave                       ; then read it as an int tag and biased the
     V_PACK rax, rdx             ; singleton pointer into a large integer
     ret
@@ -712,9 +688,7 @@ DEF_FUNC fileobj_getattr
     ret
 
 .ret_closed:
-    lea rax, [rel bool_false]
-    inc qword [rax + PyObject.ob_refcnt]
-    mov edx, TAG_PTR
+    RET_FALSE
     pop r12
     pop rbx
     leave
@@ -722,9 +696,7 @@ DEF_FUNC fileobj_getattr
     ret
 
 .ret_newlines:
-    lea rax, [rel none_singleton]
-    inc qword [rax + PyObject.ob_refcnt]
-    mov edx, TAG_PTR
+    RET_NONE
     pop r12
     pop rbx
     leave
@@ -732,9 +704,7 @@ DEF_FUNC fileobj_getattr
     ret
 
 .ret_line_buffering:
-    lea rax, [rel bool_false]
-    inc qword [rax + PyObject.ob_refcnt]
-    mov edx, TAG_PTR
+    RET_FALSE
     pop r12
     pop rbx
     leave

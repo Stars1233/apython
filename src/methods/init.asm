@@ -193,11 +193,12 @@ extern tuple_method_index
 section .text
 
 ;; ============================================================================
-;; HELPER: add_method_to_dict(dict, name_cstr, func_ptr)
+;; HELPER: dict_add_builtin_func(dict, name_cstr, func_ptr)
 ;; rdi=dict, rsi=name_cstr, rdx=func_ptr
 ;; Creates a builtin func wrapper and stores it in the dict.
 ;; ============================================================================
-DEF_FUNC_LOCAL add_method_to_dict
+global dict_add_builtin_func
+DEF_FUNC dict_add_builtin_func
     push rbx
     push r12
     push r13
@@ -236,12 +237,12 @@ DEF_FUNC_LOCAL add_method_to_dict
     pop rbx
     leave
     ret
-END_FUNC add_method_to_dict
+END_FUNC dict_add_builtin_func
 
 ;; ============================================================================
 ;; HELPER: add_method_to_dict_checked(dict, name_cstr, func_ptr, min_args, max_args)
 ;; rdi=dict, rsi=name_cstr, rdx=func_ptr, rcx=min_args, r8=max_args
-;; Like add_method_to_dict but sets arg count bounds.
+;; Like dict_add_builtin_func but sets arg count bounds.
 ;; ============================================================================
 extern builtin_func_new_checked
 DEF_FUNC_LOCAL add_method_to_dict_checked
@@ -396,11 +397,11 @@ DEF_FUNC methods_init
     mov rdi, rbx
     lea rsi, [rel mn___str__]
     lea rdx, [rel str_dunder_str]
-    call add_method_to_dict
+    call dict_add_builtin_func
     mov rdi, rbx
     lea rsi, [rel mn___repr__]
     lea rdx, [rel str_dunder_repr]
-    call add_method_to_dict
+    call dict_add_builtin_func
 
     ; int.__new__ / str.__new__: enum builds each member with
     ; `member_type.__new__(cls, *args)`, and decides which base is the data
@@ -412,232 +413,232 @@ DEF_FUNC methods_init
     mov rdi, rbx
     lea rsi, [rel mn_upper]
     lea rdx, [rel str_method_upper]
-    call add_method_to_dict
+    call dict_add_builtin_func
 
     mov rdi, rbx
     lea rsi, [rel mn_lower]
     lea rdx, [rel str_method_lower]
-    call add_method_to_dict
+    call dict_add_builtin_func
 
     mov rdi, rbx
     lea rsi, [rel mn_strip]
     lea rdx, [rel str_method_strip]
-    call add_method_to_dict
+    call dict_add_builtin_func
 
     mov rdi, rbx
     lea rsi, [rel mn_startswith]
     lea rdx, [rel str_method_startswith]
-    call add_method_to_dict
+    call dict_add_builtin_func
 
     mov rdi, rbx
     lea rsi, [rel mn_endswith]
     lea rdx, [rel str_method_endswith]
-    call add_method_to_dict
+    call dict_add_builtin_func
 
     mov rdi, rbx
     lea rsi, [rel mn_find]
     lea rdx, [rel str_method_find]
-    call add_method_to_dict
+    call dict_add_builtin_func
 
     mov rdi, rbx
     lea rsi, [rel mn_replace]
     lea rdx, [rel str_method_replace]
-    call add_method_to_dict
+    call dict_add_builtin_func
 
     mov rdi, rbx
     lea rsi, [rel mn_join]
     lea rdx, [rel str_method_join]
-    call add_method_to_dict
+    call dict_add_builtin_func
 
     mov rdi, rbx
     lea rsi, [rel mn_split]
     lea rdx, [rel str_method_split]
-    call add_method_to_dict
+    call dict_add_builtin_func
 
     mov rdi, rbx
     lea rsi, [rel mn_format]
     lea rdx, [rel str_method_format]
-    call add_method_to_dict
+    call dict_add_builtin_func
 
     mov rdi, rbx
     lea rsi, [rel mn_lstrip]
     lea rdx, [rel str_method_lstrip]
-    call add_method_to_dict
+    call dict_add_builtin_func
 
     mov rdi, rbx
     lea rsi, [rel mn_rstrip]
     lea rdx, [rel str_method_rstrip]
-    call add_method_to_dict
+    call dict_add_builtin_func
 
     mov rdi, rbx
     lea rsi, [rel mn_count]
     lea rdx, [rel str_method_count]
-    call add_method_to_dict
+    call dict_add_builtin_func
 
     mov rdi, rbx
     lea rsi, [rel mn_index]
     lea rdx, [rel str_method_index]
-    call add_method_to_dict
+    call dict_add_builtin_func
 
     mov rdi, rbx
     lea rsi, [rel mn_rfind]
     lea rdx, [rel str_method_rfind]
-    call add_method_to_dict
+    call dict_add_builtin_func
 
     mov rdi, rbx
     lea rsi, [rel mn_isdigit]
     lea rdx, [rel str_method_isdigit]
-    call add_method_to_dict
+    call dict_add_builtin_func
 
     mov rdi, rbx
     lea rsi, [rel mn_isalpha]
     lea rdx, [rel str_method_isalpha]
-    call add_method_to_dict
+    call dict_add_builtin_func
 
     mov rdi, rbx
     lea rsi, [rel mn_isidentifier]
     lea rdx, [rel str_method_isidentifier]
-    call add_method_to_dict
+    call dict_add_builtin_func
 
     mov rdi, rbx
     lea rsi, [rel mn_isprintable]
     lea rdx, [rel str_method_isprintable]
-    call add_method_to_dict
+    call dict_add_builtin_func
 
     mov rdi, rbx
     lea rsi, [rel mn_isascii]
     lea rdx, [rel str_method_isascii]
-    call add_method_to_dict
+    call dict_add_builtin_func
 
     mov rdi, rbx
     lea rsi, [rel mn_isdecimal]
     lea rdx, [rel str_method_isdecimal]
-    call add_method_to_dict
+    call dict_add_builtin_func
 
     mov rdi, rbx
     lea rsi, [rel mn_isnumeric]
     lea rdx, [rel str_method_isdecimal]
-    call add_method_to_dict
+    call dict_add_builtin_func
 
     mov rdi, rbx
     lea rsi, [rel mn_removeprefix]
     lea rdx, [rel str_method_removeprefix]
-    call add_method_to_dict
+    call dict_add_builtin_func
 
     mov rdi, rbx
     lea rsi, [rel mn_removesuffix]
     lea rdx, [rel str_method_removesuffix]
-    call add_method_to_dict
+    call dict_add_builtin_func
 
     mov rdi, rbx
     lea rsi, [rel mn_encode]
     lea rdx, [rel str_method_encode]
-    call add_method_to_dict
+    call dict_add_builtin_func
 
     mov rdi, rbx
     lea rsi, [rel mn_isalnum]
     lea rdx, [rel str_method_isalnum]
-    call add_method_to_dict
+    call dict_add_builtin_func
 
     mov rdi, rbx
     lea rsi, [rel mn_isspace]
     lea rdx, [rel str_method_isspace]
-    call add_method_to_dict
+    call dict_add_builtin_func
 
     mov rdi, rbx
     lea rsi, [rel mn_isupper]
     lea rdx, [rel str_method_isupper]
-    call add_method_to_dict
+    call dict_add_builtin_func
 
     mov rdi, rbx
     lea rsi, [rel mn_islower]
     lea rdx, [rel str_method_islower]
-    call add_method_to_dict
+    call dict_add_builtin_func
 
     mov rdi, rbx
     lea rsi, [rel mn_title]
     lea rdx, [rel str_method_title]
-    call add_method_to_dict
+    call dict_add_builtin_func
 
     mov rdi, rbx
     lea rsi, [rel mn_capitalize]
     lea rdx, [rel str_method_capitalize]
-    call add_method_to_dict
+    call dict_add_builtin_func
 
     mov rdi, rbx
     lea rsi, [rel mn_swapcase]
     lea rdx, [rel str_method_swapcase]
-    call add_method_to_dict
+    call dict_add_builtin_func
 
     mov rdi, rbx
     lea rsi, [rel mn_casefold]
     lea rdx, [rel str_method_casefold]
-    call add_method_to_dict
+    call dict_add_builtin_func
 
     mov rdi, rbx
     lea rsi, [rel mn_center]
     lea rdx, [rel str_method_center]
-    call add_method_to_dict
+    call dict_add_builtin_func
 
     mov rdi, rbx
     lea rsi, [rel mn_ljust]
     lea rdx, [rel str_method_ljust]
-    call add_method_to_dict
+    call dict_add_builtin_func
 
     mov rdi, rbx
     lea rsi, [rel mn_rjust]
     lea rdx, [rel str_method_rjust]
-    call add_method_to_dict
+    call dict_add_builtin_func
 
     mov rdi, rbx
     lea rsi, [rel mn_zfill]
     lea rdx, [rel str_method_zfill]
-    call add_method_to_dict
+    call dict_add_builtin_func
 
     mov rdi, rbx
     lea rsi, [rel mn_rindex]
     lea rdx, [rel str_method_rindex]
-    call add_method_to_dict
+    call dict_add_builtin_func
 
     mov rdi, rbx
     lea rsi, [rel mn_istitle]
     lea rdx, [rel str_method_istitle]
-    call add_method_to_dict
+    call dict_add_builtin_func
 
     mov rdi, rbx
     lea rsi, [rel mn_partition]
     lea rdx, [rel str_method_partition]
-    call add_method_to_dict
+    call dict_add_builtin_func
 
     mov rdi, rbx
     lea rsi, [rel mn_rpartition]
     lea rdx, [rel str_method_rpartition]
-    call add_method_to_dict
+    call dict_add_builtin_func
 
     mov rdi, rbx
     lea rsi, [rel mn_rsplit]
     lea rdx, [rel str_method_rsplit]
-    call add_method_to_dict
+    call dict_add_builtin_func
 
     mov rdi, rbx
     lea rsi, [rel mn_splitlines]
     lea rdx, [rel str_method_splitlines]
-    call add_method_to_dict
+    call dict_add_builtin_func
 
     mov rdi, rbx
     lea rsi, [rel mn_expandtabs]
     lea rdx, [rel str_method_expandtabs]
-    call add_method_to_dict
+    call dict_add_builtin_func
 
     mov rdi, rbx
     lea rsi, [rel mn_translate]
     lea rdx, [rel str_method_translate]
-    call add_method_to_dict
+    call dict_add_builtin_func
 
     mov rdi, rbx
     lea rsi, [rel mn_format_map]
     lea rdx, [rel str_method_format_map]
-    call add_method_to_dict
+    call dict_add_builtin_func
 
     ; Add maketrans as staticmethod
     lea rdi, [rel str_staticmethod_maketrans]
@@ -676,11 +677,11 @@ DEF_FUNC methods_init
     mov rdi, rbx
     lea rsi, [rel mn___len__]
     lea rdx, [rel str_dunder_len]
-    call add_method_to_dict
+    call dict_add_builtin_func
     mov rdi, rbx
     lea rsi, [rel mn___iter__]
     lea rdx, [rel str_dunder_iter]
-    call add_method_to_dict
+    call dict_add_builtin_func
 
     lea rax, [rel str_type]
     mov [rax + PyTypeObject.tp_dict], rbx
@@ -721,7 +722,7 @@ DEF_FUNC methods_init
     mov rdi, rbx
     lea rsi, [rel mn_sort]
     lea rdx, [rel list_method_sort]
-    call add_method_to_dict
+    call dict_add_builtin_func
 
     mov rdi, rbx
     lea rsi, [rel mn_index]
@@ -768,7 +769,7 @@ DEF_FUNC methods_init
     mov rdi, rbx
     lea rsi, [rel mn___reversed__]
     lea rdx, [rel list_method_reversed]
-    call add_method_to_dict
+    call dict_add_builtin_func
 
     ;; list dunder methods
     mov rdi, rbx
@@ -833,7 +834,7 @@ DEF_FUNC methods_init
     mov rdi, rbx
     lea rsi, [rel mn___iter__]
     lea rdx, [rel list_dunder_iter]
-    call add_method_to_dict
+    call dict_add_builtin_func
 
     lea rax, [rel list_type]
     mov [rax + PyTypeObject.tp_dict], rbx
@@ -845,37 +846,37 @@ DEF_FUNC methods_init
     mov rdi, rbx
     lea rsi, [rel mn_get]
     lea rdx, [rel dict_method_get]
-    call add_method_to_dict
+    call dict_add_builtin_func
 
     mov rdi, rbx
     lea rsi, [rel mn_keys]
     lea rdx, [rel dict_method_keys]
-    call add_method_to_dict
+    call dict_add_builtin_func
 
     mov rdi, rbx
     lea rsi, [rel mn_values]
     lea rdx, [rel dict_method_values]
-    call add_method_to_dict
+    call dict_add_builtin_func
 
     mov rdi, rbx
     lea rsi, [rel mn_items]
     lea rdx, [rel dict_method_items]
-    call add_method_to_dict
+    call dict_add_builtin_func
 
     mov rdi, rbx
     lea rsi, [rel mn_pop]
     lea rdx, [rel dict_method_pop]
-    call add_method_to_dict
+    call dict_add_builtin_func
 
     mov rdi, rbx
     lea rsi, [rel mn_clear]
     lea rdx, [rel dict_method_clear]
-    call add_method_to_dict
+    call dict_add_builtin_func
 
     mov rdi, rbx
     lea rsi, [rel mn_update]
     lea rdx, [rel dict_method_update]
-    call add_method_to_dict
+    call dict_add_builtin_func
 
     ; dict() has no __init__ either; update() is the same operation.
     mov rdi, rbx
@@ -888,23 +889,23 @@ DEF_FUNC methods_init
     mov rdi, rbx
     lea rsi, [rel mn_setdefault]
     lea rdx, [rel dict_method_setdefault]
-    call add_method_to_dict
+    call dict_add_builtin_func
 
     mov rdi, rbx
     lea rsi, [rel mn_copy]
     lea rdx, [rel dict_method_copy]
-    call add_method_to_dict
+    call dict_add_builtin_func
 
     mov rdi, rbx
     lea rsi, [rel mn_popitem]
     lea rdx, [rel dict_method_popitem]
-    call add_method_to_dict
+    call dict_add_builtin_func
 
     extern dict_reversed
     mov rdi, rbx
     lea rsi, [rel mn___reversed__]
     lea rdx, [rel dict_reversed]
-    call add_method_to_dict
+    call dict_add_builtin_func
 
     ; Add fromkeys as classmethod
     lea rdi, [rel dict_classmethod_fromkeys]
@@ -944,22 +945,22 @@ DEF_FUNC methods_init
     mov rdi, rbx
     lea rsi, [rel mn___contains__]
     lea rdx, [rel generic_method_contains]
-    call add_method_to_dict
+    call dict_add_builtin_func
 
     mov rdi, rbx
     lea rsi, [rel mn___setitem__]
     lea rdx, [rel dict_dunder_setitem]
-    call add_method_to_dict
+    call dict_add_builtin_func
 
     mov rdi, rbx
     lea rsi, [rel mn___delitem__]
     lea rdx, [rel dict_dunder_delitem]
-    call add_method_to_dict
+    call dict_add_builtin_func
 
     mov rdi, rbx
     lea rsi, [rel mn___getitem__]
     lea rdx, [rel dict_dunder_getitem]
-    call add_method_to_dict
+    call dict_add_builtin_func
 
     mov rdi, rbx
     call add_class_getitem
@@ -970,11 +971,11 @@ DEF_FUNC methods_init
     mov rdi, rbx
     lea rsi, [rel mn___len__]
     lea rdx, [rel dict_dunder_len]
-    call add_method_to_dict
+    call dict_add_builtin_func
     mov rdi, rbx
     lea rsi, [rel mn___iter__]
     lea rdx, [rel dict_dunder_iter]
-    call add_method_to_dict
+    call dict_add_builtin_func
 
     lea rax, [rel dict_type]
     mov [rax + PyTypeObject.tp_dict], rbx
@@ -1054,7 +1055,7 @@ DEF_FUNC methods_init
     mov rdi, rbx
     lea rsi, [rel mn___iter__]
     lea rdx, [rel tuple_dunder_iter]
-    call add_method_to_dict
+    call dict_add_builtin_func
 
     lea rax, [rel tuple_type]
     mov [rax + PyTypeObject.tp_dict], rbx
@@ -1066,72 +1067,72 @@ DEF_FUNC methods_init
     mov rdi, rbx
     lea rsi, [rel mn_add]
     lea rdx, [rel set_method_add]
-    call add_method_to_dict
+    call dict_add_builtin_func
 
     mov rdi, rbx
     lea rsi, [rel mn_remove]
     lea rdx, [rel set_method_remove]
-    call add_method_to_dict
+    call dict_add_builtin_func
 
     mov rdi, rbx
     lea rsi, [rel mn_discard]
     lea rdx, [rel set_method_discard]
-    call add_method_to_dict
+    call dict_add_builtin_func
 
     mov rdi, rbx
     lea rsi, [rel mn_pop]
     lea rdx, [rel set_method_pop]
-    call add_method_to_dict
+    call dict_add_builtin_func
 
     mov rdi, rbx
     lea rsi, [rel mn_clear]
     lea rdx, [rel set_method_clear]
-    call add_method_to_dict
+    call dict_add_builtin_func
 
     mov rdi, rbx
     lea rsi, [rel mn_copy]
     lea rdx, [rel set_method_copy]
-    call add_method_to_dict
+    call dict_add_builtin_func
 
     mov rdi, rbx
     lea rsi, [rel mn_union]
     lea rdx, [rel set_method_union]
-    call add_method_to_dict
+    call dict_add_builtin_func
 
     mov rdi, rbx
     lea rsi, [rel mn_intersection]
     lea rdx, [rel set_method_intersection]
-    call add_method_to_dict
+    call dict_add_builtin_func
 
     mov rdi, rbx
     lea rsi, [rel mn_difference]
     lea rdx, [rel set_method_difference]
-    call add_method_to_dict
+    call dict_add_builtin_func
 
     mov rdi, rbx
     lea rsi, [rel mn_symmetric_difference]
     lea rdx, [rel set_method_symmetric_difference]
-    call add_method_to_dict
+    call dict_add_builtin_func
 
     mov rdi, rbx
     lea rsi, [rel mn_issubset]
     lea rdx, [rel set_method_issubset]
-    call add_method_to_dict
+    call dict_add_builtin_func
 
     mov rdi, rbx
     lea rsi, [rel mn_issuperset]
     lea rdx, [rel set_method_issuperset]
-    call add_method_to_dict
+    call dict_add_builtin_func
 
     mov rdi, rbx
     lea rsi, [rel mn_isdisjoint]
     lea rdx, [rel set_method_isdisjoint]
-    call add_method_to_dict
+    call dict_add_builtin_func
 
     mov rdi, rbx
     lea rsi, [rel mn_update]
     lea rdx, [rel set_method_update]
-    call add_method_to_dict
+    call dict_add_builtin_func
 
     ; set() has no __init__, so a subclass had nothing to fill it from.
     ; update() already takes (self, iterable) and returns None.
@@ -1152,7 +1153,7 @@ DEF_FUNC methods_init
     mov rdi, rbx
     lea rsi, [rel mn___contains__]
     lea rdx, [rel generic_method_contains]
-    call add_method_to_dict
+    call dict_add_builtin_func
 
     ; Store in set_type.tp_dict, and in frozenset's: the two share every
     ; method that does not mutate, and frozenset had no dict at all.
@@ -1161,11 +1162,11 @@ DEF_FUNC methods_init
     mov rdi, rbx
     lea rsi, [rel mn___len__]
     lea rdx, [rel set_dunder_len]
-    call add_method_to_dict
+    call dict_add_builtin_func
     mov rdi, rbx
     lea rsi, [rel mn___iter__]
     lea rdx, [rel set_dunder_iter]
-    call add_method_to_dict
+    call dict_add_builtin_func
 
     lea rax, [rel set_type]
     mov [rax + PyTypeObject.tp_dict], rbx
@@ -1182,7 +1183,7 @@ DEF_FUNC methods_init
     mov rdi, rbx
     lea rsi, [rel mn___hash__]
     lea rdx, [rel generic_method_hash]
-    call add_method_to_dict
+    call dict_add_builtin_func
     mov rdi, rbx
     call add_class_getitem
     extern weakref_type
@@ -1234,17 +1235,17 @@ DEF_FUNC methods_init
     mov rdi, rbx
     lea rsi, [rel mn___init__]
     lea rdx, [rel object_method_init]
-    call add_method_to_dict
+    call dict_add_builtin_func
 
     mov rdi, rbx
     lea rsi, [rel mn___str__]
     lea rdx, [rel object_method_str]
-    call add_method_to_dict
+    call dict_add_builtin_func
 
     mov rdi, rbx
     lea rsi, [rel mn___repr__]
     lea rdx, [rel object_method_repr]
-    call add_method_to_dict
+    call dict_add_builtin_func
 
     ; The rest of what object supplies by name.  types.py and enum both ask
     ; whether a class overrode one of these, which means asking object for its
@@ -1252,7 +1253,7 @@ DEF_FUNC methods_init
     mov rdi, rbx
     lea rsi, [rel mn___format__]
     lea rdx, [rel object_method_format]
-    call add_method_to_dict
+    call dict_add_builtin_func
 
     ; __doc__ is an attribute, not a method, and object supplies it so that
     ; anything without a docstring answers None rather than raising.  CPython
@@ -1272,7 +1273,7 @@ DEF_FUNC methods_init
     mov rdi, rbx
     lea rsi, [rel mn___sizeof__]
     lea rdx, [rel object_method_sizeof]
-    call add_method_to_dict
+    call dict_add_builtin_func
 
     ; A classmethod: `super().__init_subclass__()` is how every real one ends.
     lea rdi, [rel object_method_init_subclass]
@@ -1302,28 +1303,28 @@ DEF_FUNC methods_init
     mov rdi, rbx
     lea rsi, [rel mn___dir__]
     lea rdx, [rel object_method_dir]
-    call add_method_to_dict
+    call dict_add_builtin_func
 
     mov rdi, rbx
     lea rsi, [rel mn___reduce__]
     lea rdx, [rel object_method_reduce]
-    call add_method_to_dict
+    call dict_add_builtin_func
 
     mov rdi, rbx
     lea rsi, [rel mn___reduce_ex__]
     lea rdx, [rel object_method_reduce]
-    call add_method_to_dict
+    call dict_add_builtin_func
 
     ; The comparisons, which every class inherits and the stdlib binds by
     ; name: `__ne__ = MutableMapping.__ne__` reaches object's.
     mov rdi, rbx
     lea rsi, [rel mn___eq__]
     lea rdx, [rel object_method_eq]
-    call add_method_to_dict
+    call dict_add_builtin_func
     mov rdi, rbx
     lea rsi, [rel mn___ne__]
     lea rdx, [rel object_method_ne]
-    call add_method_to_dict
+    call dict_add_builtin_func
     ; Not the ordering four: a builtin subclass looks __lt__ up in its MRO
     ; and would find object's NotImplemented before reaching the base type's
     ; own comparison, so `sorted([L([2]), L([1])])` on a list subclass would
@@ -1332,7 +1333,7 @@ DEF_FUNC methods_init
     mov rdi, rbx
     lea rsi, [rel mn___hash__]
     lea rdx, [rel object_method_hash]
-    call add_method_to_dict
+    call dict_add_builtin_func
 
     ; Store in object_type.tp_dict
     lea rax, [rel object_type]
@@ -1427,7 +1428,7 @@ DEF_FUNC methods_init
     lea rsi, [rel mn___get__]
     extern func_dunder_get
     lea rdx, [rel func_dunder_get]
-    call add_method_to_dict
+    call dict_add_builtin_func
 
     extern func_type
     lea rax, [rel func_type]
@@ -1440,7 +1441,7 @@ DEF_FUNC methods_init
     lea rsi, [rel mn___get__]
     extern staticmethod_dunder_get
     lea rdx, [rel staticmethod_dunder_get]
-    call add_method_to_dict
+    call dict_add_builtin_func
     lea rax, [rel staticmethod_type]
     mov [rax + PyTypeObject.tp_dict], rbx
 
@@ -1450,7 +1451,7 @@ DEF_FUNC methods_init
     lea rsi, [rel mn___get__]
     extern classmethod_dunder_get
     lea rdx, [rel classmethod_dunder_get]
-    call add_method_to_dict
+    call dict_add_builtin_func
     lea rax, [rel classmethod_type]
     mov [rax + PyTypeObject.tp_dict], rbx
 
@@ -1461,17 +1462,17 @@ DEF_FUNC methods_init
     lea rsi, [rel mn___get__]
     extern property_dunder_get
     lea rdx, [rel property_dunder_get]
-    call add_method_to_dict
+    call dict_add_builtin_func
     mov rdi, rbx
     lea rsi, [rel mn___set__]
     extern property_dunder_set
     lea rdx, [rel property_dunder_set]
-    call add_method_to_dict
+    call dict_add_builtin_func
     mov rdi, rbx
     lea rsi, [rel mn___delete__]
     extern property_dunder_delete
     lea rdx, [rel property_dunder_delete]
-    call add_method_to_dict
+    call dict_add_builtin_func
     extern property_type
     lea rax, [rel property_type]
     mov [rax + PyTypeObject.tp_dict], rbx
@@ -1483,7 +1484,7 @@ DEF_FUNC methods_init
     mov rdi, rbx
     lea rsi, [rel mn___repr__]
     lea rdx, [rel int_dunder_repr]
-    call add_method_to_dict
+    call dict_add_builtin_func
 
     ; int.__new__ / str.__new__: enum builds each member with
     ; `member_type.__new__(cls, *args)`, and decides which base is the data
@@ -1495,22 +1496,22 @@ DEF_FUNC methods_init
     mov rdi, rbx
     lea rsi, [rel mn_bit_length]
     lea rdx, [rel int_method_bit_length]
-    call add_method_to_dict
+    call dict_add_builtin_func
 
     mov rdi, rbx
     lea rsi, [rel mn_bit_count]
     lea rdx, [rel int_method_bit_count]
-    call add_method_to_dict
+    call dict_add_builtin_func
 
     mov rdi, rbx
     lea rsi, [rel mn_conjugate]
     lea rdx, [rel int_method_conjugate]
-    call add_method_to_dict
+    call dict_add_builtin_func
 
     mov rdi, rbx
     lea rsi, [rel mn_to_bytes]
     lea rdx, [rel int_method_to_bytes]
-    call add_method_to_dict
+    call dict_add_builtin_func
 
 
     ; Add from_bytes as classmethod
@@ -1560,27 +1561,27 @@ DEF_FUNC methods_init
     mov rdi, rbx
     lea rsi, [rel mn___repr__]
     lea rdx, [rel float_dunder_repr]
-    call add_method_to_dict
+    call dict_add_builtin_func
 
     mov rdi, rbx
     lea rsi, [rel mn_is_integer]
     lea rdx, [rel float_method_is_integer]
-    call add_method_to_dict
+    call dict_add_builtin_func
 
     mov rdi, rbx
     lea rsi, [rel mn_conjugate]
     lea rdx, [rel float_method_conjugate]
-    call add_method_to_dict
+    call dict_add_builtin_func
 
     mov rdi, rbx
     lea rsi, [rel mn_as_integer_ratio]
     lea rdx, [rel float_method_as_integer_ratio]
-    call add_method_to_dict
+    call dict_add_builtin_func
 
     mov rdi, rbx
     lea rsi, [rel mn_hex]
     lea rdx, [rel float_method_hex]
-    call add_method_to_dict
+    call dict_add_builtin_func
 
 
     ; Add fromhex as classmethod
@@ -1625,51 +1626,51 @@ DEF_FUNC methods_init
     mov rdi, rbx
     lea rsi, [rel mn___str__]
     lea rdx, [rel bytes_dunder_str]
-    call add_method_to_dict
+    call dict_add_builtin_func
     mov rdi, rbx
     lea rsi, [rel mn___repr__]
     lea rdx, [rel bytes_dunder_repr]
-    call add_method_to_dict
+    call dict_add_builtin_func
 
     mov rdi, rbx
     lea rsi, [rel mn_hex]
     lea rdx, [rel bytes_method_hex]
-    call add_method_to_dict
+    call dict_add_builtin_func
 
     mov rdi, rbx
     lea rsi, [rel mn_startswith]
     lea rdx, [rel bytes_method_startswith]
-    call add_method_to_dict
+    call dict_add_builtin_func
 
     mov rdi, rbx
     lea rsi, [rel mn_endswith]
     lea rdx, [rel bytes_method_endswith]
-    call add_method_to_dict
+    call dict_add_builtin_func
 
     mov rdi, rbx
     lea rsi, [rel mn_count]
     lea rdx, [rel bytes_method_count]
-    call add_method_to_dict
+    call dict_add_builtin_func
 
     mov rdi, rbx
     lea rsi, [rel mn_find]
     lea rdx, [rel bytes_method_find]
-    call add_method_to_dict
+    call dict_add_builtin_func
 
     mov rdi, rbx
     lea rsi, [rel mn_replace]
     lea rdx, [rel bytes_method_replace]
-    call add_method_to_dict
+    call dict_add_builtin_func
 
     mov rdi, rbx
     lea rsi, [rel mn_split]
     lea rdx, [rel bytes_method_split]
-    call add_method_to_dict
+    call dict_add_builtin_func
 
     mov rdi, rbx
     lea rsi, [rel mn_join]
     lea rdx, [rel bytes_method_join]
-    call add_method_to_dict
+    call dict_add_builtin_func
 
     ; Store in bytes_type.tp_dict
 
@@ -1677,11 +1678,11 @@ DEF_FUNC methods_init
     mov rdi, rbx
     lea rsi, [rel mn___len__]
     lea rdx, [rel bytes_dunder_len]
-    call add_method_to_dict
+    call dict_add_builtin_func
     mov rdi, rbx
     lea rsi, [rel mn___iter__]
     lea rdx, [rel bytes_dunder_iter]
-    call add_method_to_dict
+    call dict_add_builtin_func
 
     lea rax, [rel bytes_type]
     mov [rax + PyTypeObject.tp_dict], rbx

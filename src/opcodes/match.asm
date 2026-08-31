@@ -290,9 +290,7 @@ extern obj_decref
     VPOP rdi
     DECREF_V rdi, rsi
     mov [rel eval_saved_r13], r13  ; update — popped and DECREF'd
-    lea rdi, [rel exc_RuntimeError_type]
-    CSTRING rsi, "generator raised StopIteration"
-    call raise_exception
+    RAISE exc_RuntimeError_type, "generator raised StopIteration"
 .ci1_si_reraise:
     ; Not StopIteration — pop from TOS, set as current_exception, re-raise
     VPOP_VAL rax, rsi              ; exception (ref transferred from stack)
@@ -342,9 +340,7 @@ extern obj_decref
     DISPATCH
 
 .ci1_pos_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "bad operand type for unary +"
-    call raise_exception
+    RAISE exc_TypeError_type, "bad operand type for unary +"
 
 .ci1_list_to_tuple:
     ; Convert list to tuple
@@ -401,9 +397,7 @@ extern obj_decref
     DISPATCH
 
 .ci1_l2t_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "list expected"
-    call raise_exception
+    RAISE exc_TypeError_type, "list expected"
 END_FUNC op_call_intrinsic_1
 
 ;; ============================================================================
@@ -452,9 +446,7 @@ DEF_FUNC_BARE op_get_len
 .gl_error:
     pop rdi
 .gl_error_nopop:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "object has no len()"
-    call raise_exception
+    RAISE exc_TypeError_type, "object has no len()"
 END_FUNC op_get_len
 
 ;; ============================================================================
@@ -516,9 +508,7 @@ DEF_FUNC_BARE op_load_locals
     VPUSH_PTR rax
     DISPATCH
 .ll_error:
-    lea rdi, [rel exc_RuntimeError_type]
-    CSTRING rsi, "no locals dict"
-    call raise_exception
+    RAISE exc_RuntimeError_type, "no locals dict"
 END_FUNC op_load_locals
 
 ;; ============================================================================
@@ -571,9 +561,7 @@ DEF_FUNC_BARE op_load_from_dict_or_globals
 
     ; Not found
     extern exc_NameError_type
-    lea rdi, [rel exc_NameError_type]
-    CSTRING rsi, "name not found"
-    call raise_exception
+    RAISE exc_NameError_type, "name not found"
 
 .lfdg_found:
     ; INCREF result (borrowed ref) before DECREF dict
@@ -593,9 +581,7 @@ DEF_FUNC_BARE op_load_from_dict_or_globals
     ; Not a dict on TOS
     pop rdi
     pop rsi
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "dict expected"
-    call raise_exception
+    RAISE exc_TypeError_type, "dict expected"
 
 .lfdg_found_no_pop:
     ; dict already DECREFed in builtins path
@@ -663,9 +649,7 @@ DEF_FUNC op_load_from_dict_or_deref, LFDOD_FRAME
     DISPATCH
 
 .lfdod_error:
-    lea rdi, [rel exc_NameError_type]
-    CSTRING rsi, "free variable referenced before assignment"
-    call raise_exception
+    RAISE exc_NameError_type, "free variable referenced before assignment"
 END_FUNC op_load_from_dict_or_deref
 
 ;; ============================================================================

@@ -240,10 +240,8 @@ DEF_FUNC_LOCAL sp_arg_i64
     jmp .sai_out
 .sai_type_error:
     extern exc_TypeError_type
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "an integer is required"
     extern raise_exception
-    call raise_exception
+    RAISE exc_TypeError_type, "an integer is required"
 .sai_small:
     mov rax, rdi
 .sai_out:
@@ -309,9 +307,7 @@ DEF_FUNC sre_pattern_match_method
     ret
 
 .match_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "match() requires a string argument"
-    call raise_exception
+    RAISE exc_TypeError_type, "match() requires a string argument"
 END_FUNC sre_pattern_match_method
 
 ; ============================================================================
@@ -360,9 +356,7 @@ DEF_FUNC sre_pattern_search_method
     ret
 
 .search_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "search() requires a string argument"
-    call raise_exception
+    RAISE exc_TypeError_type, "search() requires a string argument"
 END_FUNC sre_pattern_search_method
 
 ; ============================================================================
@@ -411,9 +405,7 @@ DEF_FUNC sre_pattern_fullmatch_method
     ret
 
 .fm_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "fullmatch() requires a string argument"
-    call raise_exception
+    RAISE exc_TypeError_type, "fullmatch() requires a string argument"
 END_FUNC sre_pattern_fullmatch_method
 
 ; ============================================================================
@@ -749,9 +741,7 @@ DEF_FUNC sre_pattern_findall_method, FA_FRAME
     ret
 
 .fa_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "findall() requires a string argument"
-    call raise_exception
+    RAISE exc_TypeError_type, "findall() requires a string argument"
 END_FUNC sre_pattern_findall_method
 
 ; ============================================================================
@@ -1039,9 +1029,7 @@ DEF_FUNC sre_pattern_sub_method, SUB_FRAME
     ret
 
 .sub_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "sub() requires repl and string arguments"
-    call raise_exception
+    RAISE exc_TypeError_type, "sub() requires repl and string arguments"
 END_FUNC sre_pattern_sub_method
 
 ; ============================================================================
@@ -1324,9 +1312,7 @@ DEF_FUNC sre_pattern_subn_method, SN_FRAME
     ret
 
 .subn_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "subn() requires repl and string arguments"
-    call raise_exception
+    RAISE exc_TypeError_type, "subn() requires repl and string arguments"
 END_FUNC sre_pattern_subn_method
 
 ; ============================================================================
@@ -1534,9 +1520,7 @@ DEF_FUNC sre_pattern_split_method, SP_FRAME
     ret
 
 .split_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "split() requires a string argument"
-    call raise_exception
+    RAISE exc_TypeError_type, "split() requires a string argument"
 END_FUNC sre_pattern_split_method
 
 ; ============================================================================
@@ -1983,9 +1967,7 @@ DEF_FUNC sre_pattern_finditer_method
     ret
 
 .fi_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "finditer() requires a string argument"
-    call raise_exception
+    RAISE exc_TypeError_type, "finditer() requires a string argument"
 END_FUNC sre_pattern_finditer_method
 
 ; ============================================================================

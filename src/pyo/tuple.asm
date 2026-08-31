@@ -143,9 +143,7 @@ DEF_FUNC_BARE tuple_getitem
     INCREF_V rax, rdx
     ret
 .index_error:
-    lea rdi, [rel exc_IndexError_type]
-    CSTRING rsi, "tuple index out of range"
-    call raise_exception
+    RAISE exc_IndexError_type, "tuple index out of range"
 END_FUNC tuple_getitem
 
 ; tuple_subscript(PyTupleObject *tuple, PyObject *key) -> PyObject*
@@ -187,9 +185,7 @@ DEF_FUNC tuple_subscript
     ret
 
 .ts_type_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "tuple indices must be integers or slices"
-    call raise_exception
+    RAISE exc_TypeError_type, "tuple indices must be integers or slices"
 END_FUNC tuple_subscript
 
 ; tuple_len(PyTupleObject *tuple) -> int64_t
@@ -601,9 +597,7 @@ DEF_FUNC tuple_concat
     V_PACK rax, rdx             ; return one Value
     ret
 .tc_type_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "can only concatenate tuple (not other) to tuple"
-    call raise_exception
+    RAISE exc_TypeError_type, "can only concatenate tuple (not other) to tuple"
 END_FUNC tuple_concat
 
 ;; ============================================================================
@@ -715,9 +709,7 @@ DEF_FUNC tuple_repeat
     V_PACK rax, rdx             ; return one Value
     ret
 .trep_overflow:
-    lea rdi, [rel exc_OverflowError_type]
-    CSTRING rsi, "too many items for tuple repetition"
-    call raise_exception
+    RAISE exc_OverflowError_type, "too many items for tuple repetition"
 END_FUNC tuple_repeat
 
 ;; ============================================================================
@@ -745,9 +737,7 @@ DEF_FUNC tuple_richcompare
     ret
 .trc_too_deep:
     C_RECURSION_LEAVE
-    lea rdi, [rel exc_RecursionError_type]
-    CSTRING rsi, "maximum recursion depth exceeded in comparison"
-    call raise_exception
+    RAISE exc_RecursionError_type, "maximum recursion depth exceeded in comparison"
 END_FUNC tuple_richcompare
 
 DEF_FUNC_LOCAL tuple_richcompare_inner, TRC_FRAME
@@ -1244,9 +1234,7 @@ DEF_FUNC tuple_type_call, TTC_FRAME
 
 .ttc_error:
     extern exc_TypeError_type
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "tuple expected at most 1 argument"
-    call raise_exception
+    RAISE exc_TypeError_type, "tuple expected at most 1 argument"
 END_FUNC tuple_type_call
 
 section .data

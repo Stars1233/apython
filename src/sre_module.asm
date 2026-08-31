@@ -194,9 +194,7 @@ DEF_FUNC sre_compile_func, SC_FRAME
     ret
 
 .compile_error_args:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "_sre.compile() requires 6 arguments"
-    call raise_exception
+    RAISE exc_TypeError_type, "_sre.compile() requires 6 arguments"
 END_FUNC sre_compile_func
 
 ; ============================================================================
@@ -228,9 +226,7 @@ DEF_FUNC sre_ascii_iscased_func
     V_PACK rax, rdx             ; builtins return one Value
     ret
 .aic_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "ascii_iscased() takes 1 argument"
-    call raise_exception
+    RAISE exc_TypeError_type, "ascii_iscased() takes 1 argument"
 END_FUNC sre_ascii_iscased_func
 
 ; ============================================================================
@@ -251,9 +247,7 @@ DEF_FUNC sre_ascii_tolower_func
     V_PACK rax, rdx             ; builtins return one Value
     ret
 .atl_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "ascii_tolower() takes 1 argument"
-    call raise_exception
+    RAISE exc_TypeError_type, "ascii_tolower() takes 1 argument"
 END_FUNC sre_ascii_tolower_func
 
 ; ============================================================================
@@ -300,9 +294,7 @@ DEF_FUNC sre_unicode_iscased_func
     V_PACK rax, rdx             ; builtins return one Value
     ret
 .uic_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "unicode_iscased() takes 1 argument"
-    call raise_exception
+    RAISE exc_TypeError_type, "unicode_iscased() takes 1 argument"
 END_FUNC sre_unicode_iscased_func
 
 ; ============================================================================
@@ -333,9 +325,7 @@ DEF_FUNC sre_unicode_tolower_func
     V_PACK rax, rdx             ; builtins return one Value
     ret
 .utl_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "unicode_tolower() takes 1 argument"
-    call raise_exception
+    RAISE exc_TypeError_type, "unicode_tolower() takes 1 argument"
 END_FUNC sre_unicode_tolower_func
 
 ; ============================================================================
@@ -388,9 +378,7 @@ DEF_FUNC sre_getlower_func
     V_PACK rax, rdx             ; builtins return one Value
     ret
 .gl_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "getlower() takes 2 arguments"
-    call raise_exception
+    RAISE exc_TypeError_type, "getlower() takes 2 arguments"
 END_FUNC sre_getlower_func
 
 ; ============================================================================
@@ -410,9 +398,7 @@ DEF_FUNC sre_template_func
     V_PACK rax, rdx             ; builtins return one Value
     ret
 .tmpl_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "template() requires 2 arguments"
-    call raise_exception
+    RAISE exc_TypeError_type, "template() requires 2 arguments"
 END_FUNC sre_template_func
 
 ; ============================================================================
@@ -434,23 +420,6 @@ END_FUNC sre_getcodesize_func
 
 ; SRE_ADD_FUNC func_impl, name_cstr
 ; Add a builtin function to the module dict
-%macro SRE_ADD_FUNC 2
-    lea rdi, [rel %1]
-    lea rsi, [rel %2]
-    call builtin_func_new
-    push rax
-    lea rdi, [rel %2]
-    call str_from_cstr_heap
-    push rax
-    mov rdi, r12
-    mov rsi, rax
-    mov rdx, [rsp + 8]
-    call dict_set
-    pop rdi
-    call obj_decref
-    pop rdi
-    call obj_decref
-%endmacro
 
 ; SRE_ADD_INT name_cstr, value
 ; Add a SmallInt constant to the module dict
@@ -503,14 +472,14 @@ DEF_FUNC sre_module_create, SMC_FRAME
     mov r12, rax               ; r12 = module dict
 
     ; Functions
-    SRE_ADD_FUNC sre_compile_func,        sm_compile_name
-    SRE_ADD_FUNC sre_ascii_iscased_func,  sm_ascii_iscased
-    SRE_ADD_FUNC sre_ascii_tolower_func,  sm_ascii_tolower
-    SRE_ADD_FUNC sre_unicode_iscased_func, sm_unicode_iscased
-    SRE_ADD_FUNC sre_unicode_tolower_func, sm_unicode_tolower
-    SRE_ADD_FUNC sre_getlower_func,       sm_getlower
-    SRE_ADD_FUNC sre_getcodesize_func,    sm_getcodesize
-    SRE_ADD_FUNC sre_template_func,       sm_template
+    MODULE_ADD_FUNC sre_compile_func,        sm_compile_name
+    MODULE_ADD_FUNC sre_ascii_iscased_func,  sm_ascii_iscased
+    MODULE_ADD_FUNC sre_ascii_tolower_func,  sm_ascii_tolower
+    MODULE_ADD_FUNC sre_unicode_iscased_func, sm_unicode_iscased
+    MODULE_ADD_FUNC sre_unicode_tolower_func, sm_unicode_tolower
+    MODULE_ADD_FUNC sre_getlower_func,       sm_getlower
+    MODULE_ADD_FUNC sre_getcodesize_func,    sm_getcodesize
+    MODULE_ADD_FUNC sre_template_func,       sm_template
 
     ; Integer constants
     SRE_ADD_INT sm_MAGIC,     SRE_MAGIC

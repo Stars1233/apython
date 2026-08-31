@@ -135,9 +135,7 @@ DEF_FUNC_BARE bytes_getitem
 
 .index_error:
     push rdi
-    lea rdi, [rel exc_IndexError_type]
-    CSTRING rsi, "index out of range"
-    call raise_exception
+    RAISE exc_IndexError_type, "index out of range"
 END_FUNC bytes_getitem
 
 ;; ============================================================================
@@ -285,9 +283,7 @@ DEF_FUNC bytes_subscript
     ret
 
 .bs_type_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "byte indices must be integers or slices"
-    call raise_exception
+    RAISE exc_TypeError_type, "byte indices must be integers or slices"
 END_FUNC bytes_subscript
 
 ;; ============================================================================
@@ -386,14 +382,10 @@ DEF_FUNC bytes_contains
     ret
 
 .bc_type_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "a bytes-like object is required"
-    call raise_exception
+    RAISE exc_TypeError_type, "a bytes-like object is required"
 
 .bc_range_error:
-    lea rdi, [rel exc_ValueError_type]
-    CSTRING rsi, "byte must be in range(0, 256)"
-    call raise_exception
+    RAISE exc_ValueError_type, "byte must be in range(0, 256)"
 END_FUNC bytes_contains
 
 ;; ============================================================================
@@ -775,15 +767,11 @@ DEF_FUNC _bytes_decode_impl, BD_FRAME
     CSTRING rdi, `decode() argument 'encoding' must be str, not \x01`
     call raise_type_error_with_name
 .bd_too_many:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "decode() takes at most 2 arguments"
-    call raise_exception
+    RAISE exc_TypeError_type, "decode() takes at most 2 arguments"
 
 .bd_not_decodable:
     extern exc_UnicodeDecodeError_type
-    lea rdi, [rel exc_UnicodeDecodeError_type]
-    CSTRING rsi, "byte not in range for this encoding"
-    call raise_exception
+    RAISE exc_UnicodeDecodeError_type, "byte not in range for this encoding"
 END_FUNC _bytes_decode_impl
 
 ;; ============================================================================
@@ -959,16 +947,12 @@ DEF_FUNC bytes_compare
     jmp .bytes_ret_false
 
 .bytes_ret_true:
-    lea rax, [rel bool_true]
-    inc qword [rax + PyObject.ob_refcnt]
-    mov edx, TAG_PTR
+    RET_TRUE
     pop rbx
     leave
     ret
 .bytes_ret_false:
-    lea rax, [rel bool_false]
-    inc qword [rax + PyObject.ob_refcnt]
-    mov edx, TAG_PTR
+    RET_FALSE
     pop rbx
     leave
     ret
@@ -1253,10 +1237,8 @@ DEF_FUNC bytes_repeat
     ret
 
 .brep_overflow:
-    lea rdi, [rel exc_OverflowError_type]
     extern exc_OverflowError_type
-    CSTRING rsi, "repeated bytes are too long"
-    call raise_exception
+    RAISE exc_OverflowError_type, "repeated bytes are too long"
 END_FUNC bytes_repeat
 
 ;; ============================================================================
@@ -1556,21 +1538,13 @@ DEF_FUNC byteslike_source, BLS_FRAME
     call raise_exception
 
 .bls_negative:
-    lea rdi, [rel exc_ValueError_type]
-    CSTRING rsi, "negative count"
-    call raise_exception
+    RAISE exc_ValueError_type, "negative count"
 .bls_need_encoding:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "string argument without an encoding"
-    call raise_exception
+    RAISE exc_TypeError_type, "string argument without an encoding"
 .bls_too_many:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "encoding and errors arguments are not supported"
-    call raise_exception
+    RAISE exc_TypeError_type, "encoding and errors arguments are not supported"
 .bls_bad_type:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "cannot convert this object to bytes"
-    call raise_exception
+    RAISE exc_TypeError_type, "cannot convert this object to bytes"
 END_FUNC byteslike_source
 
 BTC_TYPE  equ 8
@@ -2034,9 +2008,7 @@ DEF_FUNC memoryview_type_call, MV_FRAME
     jmp .mv_error
 
 .mv_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "memoryview: a bytes-like object is required"
-    call raise_exception
+    RAISE exc_TypeError_type, "memoryview: a bytes-like object is required"
 END_FUNC memoryview_type_call
 
 
@@ -2157,19 +2129,13 @@ DEF_FUNC memoryview_subscript, MS_FRAME
     jmp .ms_check_bounds
 
 .ms_index_error:
-    lea rdi, [rel exc_IndexError_type]
-    CSTRING rsi, "index out of range"
-    call raise_exception
+    RAISE exc_IndexError_type, "index out of range"
 
 .ms_step_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "memoryview: unsupported step"
-    call raise_exception
+    RAISE exc_TypeError_type, "memoryview: unsupported step"
 
 .ms_type_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "memoryview: invalid slice key"
-    call raise_exception
+    RAISE exc_TypeError_type, "memoryview: invalid slice key"
 END_FUNC memoryview_subscript
 
 ;; ============================================================================

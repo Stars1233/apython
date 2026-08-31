@@ -312,9 +312,7 @@ DEF_FUNC op_call, CL_FRAME
     jmp eval_exception_unwind
 
 .not_callable:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "object is not callable"
-    call raise_exception
+    RAISE exc_TypeError_type, "object is not callable"
     ; does not return
 END_FUNC op_call
 
@@ -669,9 +667,7 @@ DEF_FUNC op_call_function_ex
     jmp .cfex_cleanup_shared
 
 .cfex_args_not_iterable:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "argument after * must be an iterable"
-    call raise_exception
+    RAISE exc_TypeError_type, "argument after * must be an iterable"
 
 .cfex_cleanup:
     ; Clear kw_names_pending (safety)
@@ -723,9 +719,7 @@ DEF_FUNC op_call_function_ex
     jmp eval_exception_unwind
 
 .cfex_not_callable:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "object is not callable"
-    call raise_exception
+    RAISE exc_TypeError_type, "object is not callable"
 END_FUNC op_call_function_ex
 
 ;; ============================================================================
@@ -901,22 +895,16 @@ DEF_FUNC op_before_with
 .bw_no_exit:
     ; CPython reports a missing __enter__/__exit__ as a protocol TypeError,
     ; not as a bare AttributeError on the dunder name.
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "object does not support the context manager protocol"
-    call raise_exception
+    RAISE exc_TypeError_type, "object does not support the context manager protocol"
 
 .bw_no_enter_decref_name:
     mov rdi, r12
     call obj_decref
 .bw_no_enter:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "object does not support the context manager protocol"
-    call raise_exception
+    RAISE exc_TypeError_type, "object does not support the context manager protocol"
 
 .bw_not_a_manager:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "object does not support the context manager protocol"
-    call raise_exception
+    RAISE exc_TypeError_type, "object does not support the context manager protocol"
 END_FUNC op_before_with
 
 section .rodata
@@ -1000,7 +988,5 @@ DEF_FUNC op_with_except_start, WES_FRAME
     DISPATCH
 
 .wes_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "__exit__ is not callable"
-    call raise_exception
+    RAISE exc_TypeError_type, "__exit__ is not callable"
 END_FUNC op_with_except_start

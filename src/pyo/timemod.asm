@@ -50,9 +50,7 @@ DEF_FUNC time_process_time_func, 16
     ret
 
 .pt_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "process_time() takes no arguments"
-    call raise_exception
+    RAISE exc_TypeError_type, "process_time() takes no arguments"
 END_FUNC time_process_time_func
 
 ; ============================================================================
@@ -80,9 +78,7 @@ DEF_FUNC time_monotonic_func, 16
     ret
 
 .mono_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "monotonic() takes no arguments"
-    call raise_exception
+    RAISE exc_TypeError_type, "monotonic() takes no arguments"
 END_FUNC time_monotonic_func
 
 ; ============================================================================

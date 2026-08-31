@@ -429,9 +429,7 @@ DEF_FUNC func_call
     mov rdi, r12
     call frame_free
     pop rsi
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "function missing required argument"
-    call raise_exception
+    RAISE exc_TypeError_type, "function missing required argument"
 .args_valid:
     ; === Phase 7: Call eval_frame ===
     mov rdi, r12
@@ -589,9 +587,7 @@ DEF_FUNC func_bind_kwargs
 
 .kw_unexpected:
     ; Raise TypeError for unexpected keyword argument
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "got an unexpected keyword argument"
-    call raise_exception
+    RAISE exc_TypeError_type, "got an unexpected keyword argument"
 
 .kw_next:
     inc qword [rsp+16]

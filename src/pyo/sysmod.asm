@@ -653,21 +653,15 @@ DEF_FUNC sys_setrecursionlimit_func
     cmp rax, 1
     jl .srl_value_error
     mov [rel recursion_limit], rax
-    lea rax, [rel none_singleton]
-    inc qword [rax + PyObject.ob_refcnt]
-    mov edx, TAG_PTR
+    RET_NONE
     leave
     V_PACK rax, rdx
     ret
 .srl_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "setrecursionlimit() argument must be an int"
-    call raise_exception
+    RAISE exc_TypeError_type, "setrecursionlimit() argument must be an int"
 .srl_value_error:
     extern exc_ValueError_type
-    lea rdi, [rel exc_ValueError_type]
-    CSTRING rsi, "recursion limit must be greater or equal than 1"
-    call raise_exception
+    RAISE exc_ValueError_type, "recursion limit must be greater or equal than 1"
 END_FUNC sys_setrecursionlimit_func
 
 ; ============================================================================
@@ -726,9 +720,7 @@ DEF_FUNC sys_get_int_max_str_digits_func
     ret
 .get_imsd_error:
     extern exc_TypeError_type
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "get_int_max_str_digits() takes no arguments"
-    call raise_exception
+    RAISE exc_TypeError_type, "get_int_max_str_digits() takes no arguments"
 END_FUNC sys_get_int_max_str_digits_func
 
 ; ============================================================================
@@ -751,23 +743,17 @@ DEF_FUNC sys_set_int_max_str_digits_func
 
 .set_imsd_ok:
     mov [rel sys_int_max_str_digits], rax
-    lea rax, [rel none_singleton]
-    inc qword [rax + PyObject.ob_refcnt]
-    mov edx, TAG_PTR
+    RET_NONE
     leave
     V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .set_imsd_value_error:
     extern exc_ValueError_type
-    lea rdi, [rel exc_ValueError_type]
-    CSTRING rsi, "set_int_max_str_digits: value must be 0 or >= 640"
-    call raise_exception
+    RAISE exc_ValueError_type, "set_int_max_str_digits: value must be 0 or >= 640"
 
 .set_imsd_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "set_int_max_str_digits() takes exactly 1 argument"
-    call raise_exception
+    RAISE exc_TypeError_type, "set_int_max_str_digits() takes exactly 1 argument"
 END_FUNC sys_set_int_max_str_digits_func
 
 ; ============================================================================
@@ -894,9 +880,7 @@ DEF_FUNC sys_intern_func
     CSTRING rdi, `intern() argument must be str, not \x01`
     call raise_type_error_with_name
 .si_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "sys.intern() takes exactly one argument"
-    call raise_exception
+    RAISE exc_TypeError_type, "sys.intern() takes exactly one argument"
 END_FUNC sys_intern_func
 
 section .rodata

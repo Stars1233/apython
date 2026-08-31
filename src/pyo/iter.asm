@@ -397,10 +397,8 @@ DEF_FUNC range_obj_sq_item
     ret
 
 .index_error:
-    lea rdi, [rel exc_IndexError_type]
-    CSTRING rsi, "range object index out of range"
     extern raise_exception
-    call raise_exception
+    RAISE exc_IndexError_type, "range object index out of range"
 END_FUNC range_obj_sq_item
 
 ;; ============================================================================
