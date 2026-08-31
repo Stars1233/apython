@@ -1101,9 +1101,9 @@ DEF_FUNC exc_type_call, ETC_FRAME
     ret
 END_FUNC exc_type_call
 
-; ============================================================================
-; Traceback support
-; ============================================================================
+;; ============================================================================
+;; Traceback support
+;; ============================================================================
 
 ; traceback_new() -> PyTracebackObject*
 ; Allocates a new traceback with tb_next=NULL, tb_lineno=0.
@@ -1223,9 +1223,9 @@ DEF_FUNC traceback_getattr
     ret
 END_FUNC traceback_getattr
 
-; ============================================================================
-; Data section - Exception type objects and name strings
-; ============================================================================
+;; ============================================================================
+;; Data section - Exception type objects and name strings
+;; ============================================================================
 section .data
 
 ; Exception type name strings

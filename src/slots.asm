@@ -468,10 +468,10 @@ DEF_FUNC slot_tp_iternext
 END_FUNC slot_tp_iternext
 
 
-;; ----------------------------------------------------------------------------
+;; ============================================================================
 ;; slot_is_object_default(rdi = the value a dunder lookup returned) -> eax 0/1
 ;; True when it is one of the implementations object itself supplies.
-;; ----------------------------------------------------------------------------
+;; ============================================================================
 DEF_FUNC_LOCAL slot_is_object_default
     V_TEST_PTR rdi, rax
     ja .no

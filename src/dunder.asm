@@ -31,26 +31,26 @@ extern obj_incref
 extern exc_TypeError_type
 extern raise_exception
 
-; ---------------------------------------------------------------------------
-; dunder_name_obj(rdi = const char *literal) -> rax = PyStrObject*, borrowed
-;
-; dunder_lookup used to build a fresh PyStrObject from its C string on every
-; call and free it again: ap_strlen, ap_malloc, ap_memcpy, a code-point scan to
-; set ob_length, a full string hash (the object being new, ob_hash was always
-; cold), and ap_free.  That sat behind 27 direct call sites and 131 DUNDER_*
-; macro uses -- every __add__, __iter__, __next__, __len__, __getitem__ and
-; __enter__ fallback in the interpreter.
-;
-; The names are compile-time literals in .rodata, so the pointer is stable per
-; call site and comparing pointers is enough to recognise one.  A miss interns
-; the string once and keeps it forever; the interned object then caches its own
-; ob_hash, so the dict probes stop rehashing too.  Two call sites that spell
-; the same name in different literals simply get two entries, and dict lookup
-; matches them by value regardless.
-;
-; The table never evicts.  Distinct dunder literals number a few dozen against
-; 256 slots, so the probe terminates.
-; ---------------------------------------------------------------------------
+;; ============================================================================
+;; dunder_name_obj(rdi = const char *literal) -> rax = PyStrObject*, borrowed
+;;
+;; dunder_lookup used to build a fresh PyStrObject from its C string on every
+;; call and free it again: ap_strlen, ap_malloc, ap_memcpy, a code-point scan to
+;; set ob_length, a full string hash (the object being new, ob_hash was always
+;; cold), and ap_free.  That sat behind 27 direct call sites and 131 DUNDER_*
+;; macro uses -- every __add__, __iter__, __next__, __len__, __getitem__ and
+;; __enter__ fallback in the interpreter.
+;;
+;; The names are compile-time literals in .rodata, so the pointer is stable per
+;; call site and comparing pointers is enough to recognise one.  A miss interns
+;; the string once and keeps it forever; the interned object then caches its own
+;; ob_hash, so the dict probes stop rehashing too.  Two call sites that spell
+;; the same name in different literals simply get two entries, and dict lookup
+;; matches them by value regardless.
+;;
+;; The table never evicts.  Distinct dunder literals number a few dozen against
+;; 256 slots, so the probe terminates.
+;; ============================================================================
 DUNDER_CACHE_SLOTS equ 256
 
 DEF_FUNC dunder_name_obj
@@ -101,13 +101,13 @@ dunder_cache_vals: resq DUNDER_CACHE_SLOTS
 
 section .text
 
-; ---------------------------------------------------------------------------
-; dunder_lookup(PyTypeObject *type, const char *name) -> rax = Value
-;
-; Walk type->tp_base chain, looking up name in each type's tp_dict.
-; rdi = type object, rsi = C string name
-; Returns: borrowed reference to function, or NULL if not found.
-; ---------------------------------------------------------------------------
+;; ============================================================================
+;; dunder_lookup(PyTypeObject *type, const char *name) -> rax = Value
+;;
+;; Walk type->tp_base chain, looking up name in each type's tp_dict.
+;; rdi = type object, rsi = C string name
+;; Returns: borrowed reference to function, or NULL if not found.
+;; ============================================================================
 DEF_FUNC dunder_lookup
     push rbx
     push r12
@@ -163,13 +163,13 @@ DEF_FUNC dunder_lookup
     ret
 END_FUNC dunder_lookup
 
-; ---------------------------------------------------------------------------
-; dunder_call_1(PyObject *self, const char *name) -> (rax=payload, rdx=tag)
-;
-; Look up dunder on self's type, call with self as only arg.
-; rdi = self (heap ptr), rsi = dunder name C string
-; Returns: result fat value (rax=payload, rdx=tag), or (0, TAG_NULL) if not found.
-; ---------------------------------------------------------------------------
+;; ============================================================================
+;; dunder_call_1(PyObject *self, const char *name) -> (rax=payload, rdx=tag)
+;;
+;; Look up dunder on self's type, call with self as only arg.
+;; rdi = self (heap ptr), rsi = dunder name C string
+;; Returns: result fat value (rax=payload, rdx=tag), or (0, TAG_NULL) if not found.
+;; ============================================================================
 DEF_FUNC dunder_call_1
     push rbx
     push r12
@@ -233,14 +233,14 @@ DEF_FUNC dunder_call_1
     ret
 END_FUNC dunder_call_1
 
-; ---------------------------------------------------------------------------
-; dunder_call_2(PyObject *self, PyObject *other, const char *name, int other_tag)
-;   -> (rax=payload, rdx=tag)
-;
-; Look up dunder on self's type, call with (self, other).
-; rdi = self (heap ptr), rsi = other payload, rdx = dunder name, ecx = other_tag
-; Returns: result fat value (rax=payload, rdx=tag), or (0, TAG_NULL) if not found.
-; ---------------------------------------------------------------------------
+;; ============================================================================
+;; dunder_call_2(PyObject *self, PyObject *other, const char *name, int other_tag)
+;;   -> (rax=payload, rdx=tag)
+;;
+;; Look up dunder on self's type, call with (self, other).
+;; rdi = self (heap ptr), rsi = other payload, rdx = dunder name, ecx = other_tag
+;; Returns: result fat value (rax=payload, rdx=tag), or (0, TAG_NULL) if not found.
+;; ============================================================================
 DEF_FUNC dunder_call_2
     push rbx
     push r12
@@ -308,16 +308,16 @@ DEF_FUNC dunder_call_2
     ret
 END_FUNC dunder_call_2
 
-; ---------------------------------------------------------------------------
-; dunder_call_3(PyObject *self, PyObject *arg1, PyObject *arg2, const char *name,
-;               int arg2_tag)
-;   -> (rax=payload, rdx=tag)
-;
-; Look up dunder on self's type, call with (self, arg1, arg2).
-; rdi = self (heap), rsi = arg1 (heap), rdx = arg2, rcx = dunder name,
-; r8d = arg2 tag (use TAG_PTR if arg2 is always a heap ptr).
-; Returns: result fat value (rax=payload, rdx=tag), or (0, TAG_NULL) if not found.
-; ---------------------------------------------------------------------------
+;; ============================================================================
+;; dunder_call_3(PyObject *self, PyObject *arg1, PyObject *arg2, const char *name,
+;;               int arg2_tag)
+;;   -> (rax=payload, rdx=tag)
+;;
+;; Look up dunder on self's type, call with (self, arg1, arg2).
+;; rdi = self (heap), rsi = arg1 (heap), rdx = arg2, rcx = dunder name,
+;; r8d = arg2 tag (use TAG_PTR if arg2 is always a heap ptr).
+;; Returns: result fat value (rax=payload, rdx=tag), or (0, TAG_NULL) if not found.
+;; ============================================================================
 DEF_FUNC dunder_call_3
     push rbx
     push r12

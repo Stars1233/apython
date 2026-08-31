@@ -32,10 +32,10 @@ extern builtin_func_new
 extern fatal_error
 extern raise_exception
 
-; ============================================================================
-; sys_module_init(int argc, char **argv) -> void
-; Initialize the sys module and register it in sys.modules
-; ============================================================================
+;; ============================================================================
+;; sys_module_init(int argc, char **argv) -> void
+;; Initialize the sys module and register it in sys.modules
+;; ============================================================================
 SMI_ARGC  equ 8
 SMI_ARGV  equ 16
 SMI_TMP   equ 24            ; whichever object is being installed just now
@@ -628,11 +628,11 @@ DEF_FUNC sys_module_init, 32
     ret
 END_FUNC sys_module_init
 
-; ============================================================================
-; sys.getrecursionlimit() / sys.setrecursionlimit(n)
-; The interpreter has had a recursion counter since the bare SIGSEGV was
-; replaced with a RecursionError; these expose the limit it checks.
-; ============================================================================
+;; ============================================================================
+;; sys.getrecursionlimit() / sys.setrecursionlimit(n)
+;; The interpreter has had a recursion counter since the bare SIGSEGV was
+;; replaced with a RecursionError; these expose the limit it checks.
+;; ============================================================================
 DEF_FUNC sys_getrecursionlimit_func
     mov rax, [rel recursion_limit]
     extern recursion_limit
@@ -671,10 +671,10 @@ DEF_FUNC sys_setrecursionlimit_func
     RAISE exc_ValueError_type, "recursion limit must be greater or equal than 1"
 END_FUNC sys_setrecursionlimit_func
 
-; ============================================================================
-; sys_exit_func(PyObject **args, int64_t nargs) -> PyObject*
-; sys.exit([code]) — exit the process
-; ============================================================================
+;; ============================================================================
+;; sys_exit_func(PyObject **args, int64_t nargs) -> PyObject*
+;; sys.exit([code]) — exit the process
+;; ============================================================================
 DEF_FUNC sys_exit_func
     ; sys.exit raises SystemExit; it does not call the exit syscall.  Calling
     ; it directly skipped every `finally` block and context-manager __exit__
@@ -701,10 +701,10 @@ DEF_FUNC sys_exit_func
     ud2
 END_FUNC sys_exit_func
 
-; ============================================================================
-; sys_getdefaultencoding_func(PyObject **args, int64_t nargs) -> rax = Value
-; Returns "utf-8"
-; ============================================================================
+;; ============================================================================
+;; sys_getdefaultencoding_func(PyObject **args, int64_t nargs) -> rax = Value
+;; Returns "utf-8"
+;; ============================================================================
 DEF_FUNC sys_getdefaultencoding_func
     lea rdi, [rel sm_utf8]
     call str_from_cstr_heap
@@ -713,10 +713,10 @@ DEF_FUNC sys_getdefaultencoding_func
     ret
 END_FUNC sys_getdefaultencoding_func
 
-; ============================================================================
-; sys_get_int_max_str_digits_func(PyObject **args, int64_t nargs) -> rax = Value
-; Returns the current int max str digits limit
-; ============================================================================
+;; ============================================================================
+;; sys_get_int_max_str_digits_func(PyObject **args, int64_t nargs) -> rax = Value
+;; Returns the current int max str digits limit
+;; ============================================================================
 DEF_FUNC sys_get_int_max_str_digits_func
     cmp rsi, 0
     jne .get_imsd_error
@@ -730,10 +730,10 @@ DEF_FUNC sys_get_int_max_str_digits_func
     RAISE exc_TypeError_type, "get_int_max_str_digits() takes no arguments"
 END_FUNC sys_get_int_max_str_digits_func
 
-; ============================================================================
-; sys_set_int_max_str_digits_func(PyObject **args, int64_t nargs) -> rax = Value
-; Sets the int max str digits limit. 0 = unlimited, otherwise >= 640
-; ============================================================================
+;; ============================================================================
+;; sys_set_int_max_str_digits_func(PyObject **args, int64_t nargs) -> rax = Value
+;; Sets the int max str digits limit. 0 = unlimited, otherwise >= 640
+;; ============================================================================
 DEF_FUNC sys_set_int_max_str_digits_func
     cmp rsi, 1
     jne .set_imsd_error
@@ -763,10 +763,10 @@ DEF_FUNC sys_set_int_max_str_digits_func
     RAISE exc_TypeError_type, "set_int_max_str_digits() takes exactly 1 argument"
 END_FUNC sys_set_int_max_str_digits_func
 
-; ============================================================================
-; sys_path_add_script_dir(const char *pyc_path)
-; Extract directory from the .pyc path and prepend to sys.path[0]
-; ============================================================================
+;; ============================================================================
+;; sys_path_add_script_dir(const char *pyc_path)
+;; Extract directory from the .pyc path and prepend to sys.path[0]
+;; ============================================================================
 DEF_FUNC sys_path_add_script_dir
     push rbx
     push r12
@@ -829,9 +829,9 @@ DEF_FUNC sys_path_add_script_dir
     ret
 END_FUNC sys_path_add_script_dir
 
-; ============================================================================
-; Data
-; ============================================================================
+;; ============================================================================
+;; Data
+;; ============================================================================
 
 ;; ============================================================================
 ;; sys.intern(string) -> string

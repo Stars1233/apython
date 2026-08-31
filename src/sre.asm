@@ -23,10 +23,10 @@ extern obj_incref
 extern raise_exception
 extern exc_RuntimeError_type
 
-; ============================================================================
-; sre_getchar(SRE_State* state, i64 index) -> u32 codepoint
-; Get character at given index. ASCII fast path or codepoint_buf lookup.
-; ============================================================================
+;; ============================================================================
+;; sre_getchar(SRE_State* state, i64 index) -> u32 codepoint
+;; Get character at given index. ASCII fast path or codepoint_buf lookup.
+;; ============================================================================
 DEF_FUNC_BARE sre_getchar
     ; rdi = state, rsi = index
     mov rax, [rdi + SRE_State.codepoint_buf]
@@ -42,11 +42,11 @@ DEF_FUNC_BARE sre_getchar
     ret
 END_FUNC sre_getchar
 
-; ============================================================================
-; sre_category(u32 category_code, u32 ch) -> 0/1
-; Check if character matches a category.
-; rdi = category code, esi = character codepoint
-; ============================================================================
+;; ============================================================================
+;; sre_category(u32 category_code, u32 ch) -> 0/1
+;; Check if character matches a category.
+;; rdi = category code, esi = character codepoint
+;; ============================================================================
 DEF_FUNC sre_category
     cmp edi, SRE_CATEGORY_UNI_NOT_LINEBREAK
     ja .cat_false
@@ -377,11 +377,11 @@ DEF_FUNC sre_category
     ret
 END_FUNC sre_category
 
-; ============================================================================
-; sre_charset(u32* set, u32 ch) -> 0/1
-; Check if ch is in a character set (IN opcode's set data).
-; Set format: sequence of (opcode, args...) terminated by SRE_OP_FAILURE.
-; ============================================================================
+;; ============================================================================
+;; sre_charset(u32* set, u32 ch) -> 0/1
+;; Check if ch is in a character set (IN opcode's set data).
+;; Set format: sequence of (opcode, args...) terminated by SRE_OP_FAILURE.
+;; ============================================================================
 SM_FRAME  equ 16            ; + 2 pushes = 32
 
 DEF_FUNC sre_charset, SM_FRAME
@@ -534,10 +534,10 @@ DEF_FUNC sre_charset, SM_FRAME
     ret
 END_FUNC sre_charset
 
-; ============================================================================
-; sre_at(SRE_State* state, i64 pos, u32 at_code) -> 0/1
-; Check position assertion (^, $, \b, etc.)
-; ============================================================================
+;; ============================================================================
+;; sre_at(SRE_State* state, i64 pos, u32 at_code) -> 0/1
+;; Check position assertion (^, $, \b, etc.)
+;; ============================================================================
 DEF_FUNC sre_at
     ; rdi = state, rsi = pos, edx = at_code
     mov r8, rdi                ; r8 = state
@@ -756,9 +756,9 @@ DEF_FUNC sre_at
     ret
 END_FUNC sre_at
 
-; ============================================================================
-; sre_ascii_tolower(u32 ch) -> u32
-; ============================================================================
+;; ============================================================================
+;; sre_ascii_tolower(u32 ch) -> u32
+;; ============================================================================
 DEF_FUNC_BARE sre_ascii_tolower
     mov eax, edi
     cmp eax, 'A'
@@ -770,10 +770,10 @@ DEF_FUNC_BARE sre_ascii_tolower
     ret
 END_FUNC sre_ascii_tolower
 
-; ============================================================================
-; sre_unicode_tolower(u32 ch) -> u32
-; Basic Unicode case folding (ASCII + common Latin)
-; ============================================================================
+;; ============================================================================
+;; sre_unicode_tolower(u32 ch) -> u32
+;; Basic Unicode case folding (ASCII + common Latin)
+;; ============================================================================
 DEF_FUNC_BARE sre_unicode_tolower
     mov eax, edi
     ; ASCII A-Z -> a-z (+32)
@@ -882,12 +882,12 @@ DEF_FUNC_BARE sre_unicode_tolower
     ret
 END_FUNC sre_unicode_tolower
 
-; ============================================================================
-; sre_uni_isword(u32 codepoint) -> 0/1
-; Check if codepoint is a Unicode word character (letter, digit, underscore,
-; combining mark). Covers major scripts without full Unicode tables.
-; edi = codepoint (already checked not ASCII by caller)
-; ============================================================================
+;; ============================================================================
+;; sre_uni_isword(u32 codepoint) -> 0/1
+;; Check if codepoint is a Unicode word character (letter, digit, underscore,
+;; combining mark). Covers major scripts without full Unicode tables.
+;; edi = codepoint (already checked not ASCII by caller)
+;; ============================================================================
 DEF_FUNC_BARE sre_uni_isword
     ; Underscore already handled by caller
     ; Latin Extended (letters): 0x00c0-0x00ff (excluding 0xd7 and 0xf7)
@@ -1035,11 +1035,11 @@ DEF_FUNC_BARE sre_uni_isword
     ret
 END_FUNC sre_uni_isword
 
-; ============================================================================
-; sre_state_init(SRE_State* state, SRE_PatternObject* pattern,
-;                PyStrObject* string, i64 pos, i64 endpos)
-; Initialize match state for a string.
-; ============================================================================
+;; ============================================================================
+;; sre_state_init(SRE_State* state, SRE_PatternObject* pattern,
+;;                PyStrObject* string, i64 pos, i64 endpos)
+;; Initialize match state for a string.
+;; ============================================================================
 SSI_ENDPOS   equ 8       ; endpos (ASCII path); reused as state ptr (Unicode path)
 SSI_BYTELEN  equ 16      ; byte length (Unicode path only)
 SSI_UENDPOS  equ 24      ; endpos saved before clobber (Unicode path only)
@@ -1267,10 +1267,10 @@ DEF_FUNC sre_state_init, SSI_FRAME
     ret
 END_FUNC sre_state_init
 
-; ============================================================================
-; sre_state_fini(SRE_State* state)
-; Clean up match state.
-; ============================================================================
+;; ============================================================================
+;; sre_state_fini(SRE_State* state)
+;; Clean up match state.
+;; ============================================================================
 DEF_FUNC sre_state_fini
     push rbx
     mov rbx, rdi
@@ -1294,10 +1294,10 @@ DEF_FUNC sre_state_fini
     ret
 END_FUNC sre_state_fini
 
-; ============================================================================
-; sre_state_set_mark(SRE_State* state, i64 mark_id, i64 pos)
-; Set a mark (group boundary) in the state.
-; ============================================================================
+;; ============================================================================
+;; sre_state_set_mark(SRE_State* state, i64 mark_id, i64 pos)
+;; Set a mark (group boundary) in the state.
+;; ============================================================================
 DEF_FUNC sre_state_set_mark
     ; rdi = state, rsi = mark_id, rdx = pos
     push rbx
@@ -1353,9 +1353,9 @@ DEF_FUNC sre_state_set_mark
     ret
 END_FUNC sre_state_set_mark
 
-; ============================================================================
-; sre_state_get_mark(SRE_State* state, i64 mark_id) -> i64 pos (-1 if unset)
-; ============================================================================
+;; ============================================================================
+;; sre_state_get_mark(SRE_State* state, i64 mark_id) -> i64 pos (-1 if unset)
+;; ============================================================================
 DEF_FUNC_BARE sre_state_get_mark
     ; rdi = state, rsi = mark_id
     cmp rsi, [rdi + SRE_State.marks_size]
@@ -1368,10 +1368,10 @@ DEF_FUNC_BARE sre_state_get_mark
     ret
 END_FUNC sre_state_get_mark
 
-; ============================================================================
-; sre_string_len(SRE_State* state) -> i64
-; Get string length in characters.
-; ============================================================================
+;; ============================================================================
+;; sre_string_len(SRE_State* state) -> i64
+;; Get string length in characters.
+;; ============================================================================
 DEF_FUNC_BARE sre_string_len
     mov rax, [rdi + SRE_State.codepoint_buf]
     test rax, rax
@@ -1385,12 +1385,12 @@ DEF_FUNC_BARE sre_string_len
     ret
 END_FUNC sre_string_len
 
-; ============================================================================
-; sre_match(SRE_State* state, u32* pattern) -> 0/1
-; Core recursive match engine.
-;
-; Frame layout constants
-; ============================================================================
+;; ============================================================================
+;; sre_match(SRE_State* state, u32* pattern) -> 0/1
+;; Core recursive match engine.
+;;
+;; Frame layout constants
+;; ============================================================================
 SM_STATE     equ 8
 SM_PATTERN   equ 16
 SM_MFRAME    equ 96
@@ -2841,10 +2841,10 @@ DEF_FUNC sre_match, SM_MFRAME
     ret
 END_FUNC sre_match
 
-; ============================================================================
-; sre_save_marks(SRE_State* state) -> void*
-; Save marks snapshot for backtracking. Returns malloc'd buffer.
-; ============================================================================
+;; ============================================================================
+;; sre_save_marks(SRE_State* state) -> void*
+;; Save marks snapshot for backtracking. Returns malloc'd buffer.
+;; ============================================================================
 DEF_FUNC sre_save_marks
     push rbx
     mov rbx, rdi               ; state
@@ -2889,10 +2889,10 @@ DEF_FUNC sre_save_marks
     ret
 END_FUNC sre_save_marks
 
-; ============================================================================
-; sre_restore_marks(void* saved, SRE_State* state)
-; Restore marks from snapshot.
-; ============================================================================
+;; ============================================================================
+;; sre_restore_marks(void* saved, SRE_State* state)
+;; Restore marks from snapshot.
+;; ============================================================================
 DEF_FUNC sre_restore_marks
     push rbx
     push r12
@@ -2939,10 +2939,10 @@ DEF_FUNC sre_restore_marks
     ret
 END_FUNC sre_restore_marks
 
-; ============================================================================
-; sre_search(SRE_State* state) -> 0/1
-; Linear scan: try sre_match at each position from pos to endpos.
-; ============================================================================
+;; ============================================================================
+;; sre_search(SRE_State* state) -> 0/1
+;; Linear scan: try sre_match at each position from pos to endpos.
+;; ============================================================================
 DEF_FUNC sre_search, 32
     push rbx
     push r12
@@ -2997,15 +2997,15 @@ DEF_FUNC sre_search, 32
 END_FUNC sre_search
 
 
-; ============================================================================
-; sre_utf8_codepoint_to_byte(char* str, i64 byte_len, i64 target_cp_idx,
-;                             i64 start_byte, i64 start_cp_idx) -> i64 byte_offset
-; Walk UTF-8 bytes from (start_byte, start_cp_idx) until codepoint count
-; reaches target_cp_idx. Returns the byte offset.
-; rdi = string start, rsi = total byte length, rdx = target codepoint index,
-; rcx = starting byte offset, r8 = starting codepoint index
-; Returns: rax = byte offset at target codepoint
-; ============================================================================
+;; ============================================================================
+;; sre_utf8_codepoint_to_byte(char* str, i64 byte_len, i64 target_cp_idx,
+;;                             i64 start_byte, i64 start_cp_idx) -> i64 byte_offset
+;; Walk UTF-8 bytes from (start_byte, start_cp_idx) until codepoint count
+;; reaches target_cp_idx. Returns the byte offset.
+;; rdi = string start, rsi = total byte length, rdx = target codepoint index,
+;; rcx = starting byte offset, r8 = starting codepoint index
+;; Returns: rax = byte offset at target codepoint
+;; ============================================================================
 DEF_FUNC_BARE sre_utf8_codepoint_to_byte
     mov rax, rcx               ; byte offset
     mov r9, r8                 ; codepoint count

@@ -27,17 +27,17 @@ extern type_type
 extern obj_dealloc
 
 
-; ----------------------------------------------------------------------------
-; str_cp_width(rdi = bytes, rsi = byte length, rdx = offset) -> rax = width
-;
-; How many bytes the code point starting at `offset` occupies.  Every walk
-; over a string has to agree on this or the two index spaces drift apart: a
-; lead byte whose continuation bytes are missing, or a stray continuation byte
-; with no lead, is one code point of one byte, so a string that is not valid
-; UTF-8 has exactly as many code points as it has bytes and behaves the way it
-; did before there were two lengths at all.  bytes.decode() does not validate,
-; so such a string is reachable.
-; ----------------------------------------------------------------------------
+;; ============================================================================
+;; str_cp_width(rdi = bytes, rsi = byte length, rdx = offset) -> rax = width
+;;
+;; How many bytes the code point starting at `offset` occupies.  Every walk
+;; over a string has to agree on this or the two index spaces drift apart: a
+;; lead byte whose continuation bytes are missing, or a stray continuation byte
+;; with no lead, is one code point of one byte, so a string that is not valid
+;; UTF-8 has exactly as many code points as it has bytes and behaves the way it
+;; did before there were two lengths at all.  bytes.decode() does not validate,
+;; so such a string is reachable.
+;; ============================================================================
 DEF_FUNC_BARE str_cp_width
     movzx ecx, byte [rdi + rdx]
     cmp cl, 0x80
@@ -84,19 +84,19 @@ DEF_FUNC_BARE str_cp_width
     ret
 END_FUNC str_cp_width
 
-; ----------------------------------------------------------------------------
-; str_count_codepoints(rdi = bytes, rsi = byte length) -> rax = code points
-;
-; Runs on every string creation -- str_new_heap and str_from_cstr_heap both
-; call str_set_length -- so every slice, concat, repr and format pays it.  The
-; walk below issues a call per code point; for ASCII, which is nearly all of
-; them, the answer is just the byte count.  Establish that first, eight bytes
-; at a time, and only fall into the walk when a byte >= 0x80 turns up.
-;
-; str_byte_to_cp and str_cp_offset already had this short-circuit
-; (`cmp ob_size, ob_length`); it was never applied to the function that
-; *establishes* ob_length, which is the one that cannot assume it.
-; ----------------------------------------------------------------------------
+;; ============================================================================
+;; str_count_codepoints(rdi = bytes, rsi = byte length) -> rax = code points
+;;
+;; Runs on every string creation -- str_new_heap and str_from_cstr_heap both
+;; call str_set_length -- so every slice, concat, repr and format pays it.  The
+;; walk below issues a call per code point; for ASCII, which is nearly all of
+;; them, the answer is just the byte count.  Establish that first, eight bytes
+;; at a time, and only fall into the walk when a byte >= 0x80 turns up.
+;;
+;; str_byte_to_cp and str_cp_offset already had this short-circuit
+;; (`cmp ob_size, ob_length`); it was never applied to the function that
+;; *establishes* ob_length, which is the one that cannot assume it.
+;; ============================================================================
 DEF_FUNC str_count_codepoints
     push rbx
     push r12
@@ -157,9 +157,9 @@ DEF_FUNC str_count_codepoints
     ret
 END_FUNC str_count_codepoints
 
-; ----------------------------------------------------------------------------
-; str_set_length(rdi = PyStrObject*) -- fill ob_length from the bytes.
-; ----------------------------------------------------------------------------
+;; ============================================================================
+;; str_set_length(rdi = PyStrObject*) -- fill ob_length from the bytes.
+;; ============================================================================
 DEF_FUNC str_set_length
     push rbx
     mov rbx, rdi
@@ -174,11 +174,11 @@ DEF_FUNC str_set_length
 END_FUNC str_set_length
 
 
-; ----------------------------------------------------------------------------
-; str_byte_to_cp(rdi = PyStrObject*, rsi = byte offset) -> rax = code point index
-; The inverse of str_cp_offset, for the methods that search in bytes and have
-; to report a position in code points.
-; ----------------------------------------------------------------------------
+;; ============================================================================
+;; str_byte_to_cp(rdi = PyStrObject*, rsi = byte offset) -> rax = code point index
+;; The inverse of str_cp_offset, for the methods that search in bytes and have
+;; to report a position in code points.
+;; ============================================================================
 DEF_FUNC str_byte_to_cp
     mov rax, [rdi + PyStrObject.ob_size]
     cmp rax, [rdi + PyStrObject.ob_length]
@@ -222,10 +222,10 @@ DEF_FUNC str_byte_to_cp
     ret
 END_FUNC str_byte_to_cp
 
-; ----------------------------------------------------------------------------
-; str_cp_offset(rdi = PyStrObject*, rsi = code point index) -> rax = byte offset
-; The index is not bounds-checked; an index at or past the end gives ob_size.
-; ----------------------------------------------------------------------------
+;; ============================================================================
+;; str_cp_offset(rdi = PyStrObject*, rsi = code point index) -> rax = byte offset
+;; The index is not bounds-checked; an index at or past the end gives ob_size.
+;; ============================================================================
 DEF_FUNC str_cp_offset
     mov rax, [rdi + PyStrObject.ob_size]
     cmp rax, [rdi + PyStrObject.ob_length]
@@ -385,13 +385,13 @@ END_FUNC str_search_window
 
 
 
-; ----------------------------------------------------------------------------
-; codec_id(rdi = encoding str, or 0 for the default) -> eax
-;   0 = utf-8, 1 = ascii, 2 = latin-1.  Raises LookupError for anything else.
-;
-; The three codecs the interpreter can do itself.  Everything else goes
-; through the codecs module, which is Python and cannot be reached from here.
-; ----------------------------------------------------------------------------
+;; ============================================================================
+;; codec_id(rdi = encoding str, or 0 for the default) -> eax
+;;   0 = utf-8, 1 = ascii, 2 = latin-1.  Raises LookupError for anything else.
+;;
+;; The three codecs the interpreter can do itself.  Everything else goes
+;; through the codecs module, which is Python and cannot be reached from here.
+;; ============================================================================
 CI_BUF   equ 48
 CI_FRAME equ 64             ; + 1 push = 72, not 16-aligned
 DEF_FUNC codec_id, CI_FRAME

@@ -26,11 +26,11 @@ extern type_type
 extern exc_TypeError_type
 extern raise_exception
 
-; ---------------------------------------------------------------------------
-; func_new(PyCodeObject *code, PyObject *globals) -> PyFuncObject*
-; Allocate and initialize a new function object.
-; rdi = code object, rsi = globals dict
-; ---------------------------------------------------------------------------
+;; ============================================================================
+;; func_new(PyCodeObject *code, PyObject *globals) -> PyFuncObject*
+;; Allocate and initialize a new function object.
+;; rdi = code object, rsi = globals dict
+;; ============================================================================
 DEF_FUNC func_new
     push rbx
     push r12
@@ -83,22 +83,22 @@ DEF_FUNC func_new
     ret
 END_FUNC func_new
 
-; ---------------------------------------------------------------------------
-; func_call(PyFuncObject *callable, PyObject **args_ptr, int nargs) -> PyObject*
-; tp_call implementation for function objects.
-; rdi = function object, rsi = pointer to args array, edx = nargs
-;
-; r12 still holds the CALLER's frame pointer (callee-saved, set by eval loop,
-; preserved through op_call).
-;
-; Full argument binding following CPython initialize_locals:
-;   1. Create **kwargs dict if CO_VARKEYWORDS
-;   2. Copy positional args
-;   3. Handle *args (CO_VARARGS)
-;   4. Match keyword args (from kw_names_pending)
-;   5. Apply positional defaults (func_defaults)
-;   6. Apply kw-only defaults (func_kwdefaults)
-; ---------------------------------------------------------------------------
+;; ============================================================================
+;; func_call(PyFuncObject *callable, PyObject **args_ptr, int nargs) -> PyObject*
+;; tp_call implementation for function objects.
+;; rdi = function object, rsi = pointer to args array, edx = nargs
+;;
+;; r12 still holds the CALLER's frame pointer (callee-saved, set by eval loop,
+;; preserved through op_call).
+;;
+;; Full argument binding following CPython initialize_locals:
+;;   1. Create **kwargs dict if CO_VARKEYWORDS
+;;   2. Copy positional args
+;;   3. Handle *args (CO_VARARGS)
+;;   4. Match keyword args (from kw_names_pending)
+;;   5. Apply positional defaults (func_defaults)
+;;   6. Apply kw-only defaults (func_kwdefaults)
+;; ============================================================================
 extern kw_names_pending
 extern dict_new
 extern dict_set
@@ -457,16 +457,16 @@ DEF_FUNC func_call
     ret
 END_FUNC func_call
 
-; ---------------------------------------------------------------------------
-; func_bind_kwargs - Bind keyword arguments to frame locals
-;
-; rdi = function object
-; rsi = frame
-; rdx = args_ptr
-; ecx = positional_count
-; r8  = kw_names tuple (NOT NULL)
-; r9  = kwargs_dict (or NULL if no CO_VARKEYWORDS)
-; ---------------------------------------------------------------------------
+;; ============================================================================
+;; func_bind_kwargs - Bind keyword arguments to frame locals
+;;
+;; rdi = function object
+;; rsi = frame
+;; rdx = args_ptr
+;; ecx = positional_count
+;; r8  = kw_names tuple (NOT NULL)
+;; r9  = kwargs_dict (or NULL if no CO_VARKEYWORDS)
+;; ============================================================================
 DEF_FUNC func_bind_kwargs
     push rbx
     push r12
@@ -602,11 +602,11 @@ DEF_FUNC func_bind_kwargs
     ret
 END_FUNC func_bind_kwargs
 
-; ---------------------------------------------------------------------------
-; func_dealloc(PyFuncObject *self)
-; Releases references to internal objects and frees the function.
-; rdi = function object
-; ---------------------------------------------------------------------------
+;; ============================================================================
+;; func_dealloc(PyFuncObject *self)
+;; Releases references to internal objects and frees the function.
+;; rdi = function object
+;; ============================================================================
 DEF_FUNC func_dealloc
     push rbx
     push r12                ; alignment padding (3 pushes = RSP aligned)
@@ -663,12 +663,12 @@ DEF_FUNC func_dealloc
     ret
 END_FUNC func_dealloc
 
-; ---------------------------------------------------------------------------
-; func_setattr(PyFuncObject *self, PyObject *name, PyObject *value)
-; Set an arbitrary attribute on a function object.
-; Lazily creates func_dict on first use.
-; rdi = function, rsi = name, rdx = value
-; ---------------------------------------------------------------------------
+;; ============================================================================
+;; func_setattr(PyFuncObject *self, PyObject *name, PyObject *value)
+;; Set an arbitrary attribute on a function object.
+;; Lazily creates func_dict on first use.
+;; rdi = function, rsi = name, rdx = value
+;; ============================================================================
 DEF_FUNC func_setattr
     push rbx
     push r12
@@ -734,11 +734,11 @@ DEF_FUNC func_setattr
     ret
 END_FUNC func_setattr
 
-; ---------------------------------------------------------------------------
-; func_getattr(PyFuncObject *self, PyObject *name) -> PyObject* or NULL
-; Get an attribute from a function. Checks func_dict for arbitrary attrs.
-; rdi = function, rsi = name
-; ---------------------------------------------------------------------------
+;; ============================================================================
+;; func_getattr(PyFuncObject *self, PyObject *name) -> PyObject* or NULL
+;; Get an attribute from a function. Checks func_dict for arbitrary attrs.
+;; rdi = function, rsi = name
+;; ============================================================================
 extern ap_strcmp
 extern str_type
 extern str_from_cstr_heap
@@ -1012,24 +1012,24 @@ DEF_FUNC func_getattr
     ret
 END_FUNC func_getattr
 
-; ---------------------------------------------------------------------------
-; func_repr(PyFuncObject *self) -> PyStrObject*
-; Returns the string "<function>"
-; rdi = function object
-; ---------------------------------------------------------------------------
+;; ============================================================================
+;; func_repr(PyFuncObject *self) -> PyStrObject*
+;; Returns the string "<function>"
+;; rdi = function object
+;; ============================================================================
 DEF_FUNC_BARE func_repr
     lea rdi, [rel func_repr_str]
     jmp str_from_cstr
 END_FUNC func_repr
 
-; ---------------------------------------------------------------------------
-; raise_too_many_positional(PyFuncObject *func, int nargs_given)
-; Raise TypeError with CPython-format message:
-;   "qualname() takes N positional arguments but M were given"
-;   or "qualname() takes from N to M positional arguments but K were given"
-; rdi = func, esi = nargs_given
-; Does not return.
-; ---------------------------------------------------------------------------
+;; ============================================================================
+;; raise_too_many_positional(PyFuncObject *func, int nargs_given)
+;; Raise TypeError with CPython-format message:
+;;   "qualname() takes N positional arguments but M were given"
+;;   or "qualname() takes from N to M positional arguments but K were given"
+;; rdi = func, esi = nargs_given
+;; Does not return.
+;; ============================================================================
 RTMP_BUF  equ 256
 RTMP_FRAME equ RTMP_BUF + 24
 DEF_FUNC raise_too_many_positional, RTMP_FRAME
@@ -1214,9 +1214,9 @@ rtmp_was_given:    db " was given", 0
 
 section .text
 
-; ---------------------------------------------------------------------------
-; Data section
-; ---------------------------------------------------------------------------
+;; ============================================================================
+;; Data section
+;; ============================================================================
 section .data
 
 func_name_str:  db "function", 0

@@ -21,10 +21,10 @@ extern exc_TypeError_type
 CLOCK_MONOTONIC          equ 1
 CLOCK_PROCESS_CPUTIME_ID equ 2
 
-; ============================================================================
-; time_process_time_func(PyObject **args, int64_t nargs) -> rax = Value
-; Returns process CPU time as a float (seconds)
-; ============================================================================
+;; ============================================================================
+;; time_process_time_func(PyObject **args, int64_t nargs) -> rax = Value
+;; Returns process CPU time as a float (seconds)
+;; ============================================================================
 ; A struct timespec, filled by clock_gettime: tv_sec then tv_nsec.
 TS_SEC    equ 16
 TS_NSEC   equ 8
@@ -56,10 +56,10 @@ DEF_FUNC time_process_time_func, 16
     RAISE exc_TypeError_type, "process_time() takes no arguments"
 END_FUNC time_process_time_func
 
-; ============================================================================
-; time_monotonic_func(PyObject **args, int64_t nargs) -> rax = Value
-; Returns monotonic clock as a float (seconds)
-; ============================================================================
+;; ============================================================================
+;; time_monotonic_func(PyObject **args, int64_t nargs) -> rax = Value
+;; Returns monotonic clock as a float (seconds)
+;; ============================================================================
 DEF_FUNC time_monotonic_func, 16
     cmp rsi, 0
     jne .mono_error
@@ -84,10 +84,10 @@ DEF_FUNC time_monotonic_func, 16
     RAISE exc_TypeError_type, "monotonic() takes no arguments"
 END_FUNC time_monotonic_func
 
-; ============================================================================
-; time_module_create() -> PyObject*
-; Creates and returns the time module
-; ============================================================================
+;; ============================================================================
+;; time_module_create() -> PyObject*
+;; Creates and returns the time module
+;; ============================================================================
 DEF_FUNC time_module_create
     push rbx
     push r12
@@ -150,9 +150,9 @@ DEF_FUNC time_module_create
     ret
 END_FUNC time_module_create
 
-; ============================================================================
-; Data
-; ============================================================================
+;; ============================================================================
+;; Data
+;; ============================================================================
 section .rodata
 align 8
 tm_1e9: dq 0x41cdcd6500000000     ; 1e9 as IEEE 754 double

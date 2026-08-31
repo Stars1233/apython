@@ -493,9 +493,9 @@ none_singleton:
     dq 0x7fffffffffffffff   ; ob_refcnt (max value, never reaches zero)
     dq none_type            ; ob_type
 
-; ============================================================================
-; NotImplementedType and NotImplemented singleton
-; ============================================================================
+;; ============================================================================
+;; NotImplementedType and NotImplemented singleton
+;; ============================================================================
 
 section .text
 ; notimpl_repr(PyObject *self) -> PyObject*
@@ -547,9 +547,9 @@ notimpl_singleton:
     dq 0x7fffffffffffffff   ; ob_refcnt (max value, never reaches zero)
     dq notimpl_type         ; ob_type
 
-; ============================================================================
-; EllipsisType and Ellipsis singleton
-; ============================================================================
+;; ============================================================================
+;; EllipsisType and Ellipsis singleton
+;; ============================================================================
 
 section .text
 ; ellipsis_repr(PyObject *self) -> PyObject*

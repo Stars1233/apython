@@ -15,14 +15,14 @@ extern obj_dealloc
 extern opcode_table
 extern opcode_dispatch_table
 
-; ============================================================================
-; op_import_name - Opcode 108: IMPORT_NAME
-;
-; Stack in: [level, fromlist] (TOS = fromlist, TOS1 = level)
-; Stack out: [module]
-;
-; ecx = arg = index into co_names for module name
-; ============================================================================
+;; ============================================================================
+;; op_import_name - Opcode 108: IMPORT_NAME
+;;
+;; Stack in: [level, fromlist] (TOS = fromlist, TOS1 = level)
+;; Stack out: [module]
+;;
+;; ecx = arg = index into co_names for module name
+;; ============================================================================
 DEF_FUNC_BARE op_import_name
     ; Get module name from co_names[ecx] (payload array: 8-byte stride)
     shl ecx, 3
@@ -128,17 +128,17 @@ DEF_FUNC_BARE op_import_name
     jmp eval_exception_unwind
 END_FUNC op_import_name
 
-; ============================================================================
-; op_import_from - Opcode 109: IMPORT_FROM
-;
-; Stack in: [module] (TOS = module, NOT popped)
-; Stack out: [module, attr]
-;
-; ecx = arg = index into co_names for attribute name
-;
-; If attr not found on module, tries importing <pkg_name>.<attr_name>
-; as a submodule (CPython submodule fallback).
-; ============================================================================
+;; ============================================================================
+;; op_import_from - Opcode 109: IMPORT_FROM
+;;
+;; Stack in: [module] (TOS = module, NOT popped)
+;; Stack out: [module, attr]
+;;
+;; ecx = arg = index into co_names for attribute name
+;;
+;; If attr not found on module, tries importing <pkg_name>.<attr_name>
+;; as a submodule (CPython submodule fallback).
+;; ============================================================================
 extern dict_get
 extern str_from_cstr_heap
 extern str_concat

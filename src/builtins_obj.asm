@@ -49,9 +49,9 @@ extern type_type
 extern user_type_metatype
 extern dict_new
 
-; ============================================================================
-; 1. builtin_abs(args, nargs) - abs(x)
-; ============================================================================
+;; ============================================================================
+;; 1. builtin_abs(args, nargs) - abs(x)
+;; ============================================================================
 
 ; --- moved to a sibling file by the split ---
 
@@ -63,9 +63,9 @@ DEF_FUNC_BARE str_type_call
     jmp builtin_str_fn
 END_FUNC str_type_call
 
-; ============================================================================
-; 3. builtin_str_fn(args, nargs) - str(x)
-; ============================================================================
+;; ============================================================================
+;; 3. builtin_str_fn(args, nargs) - str(x)
+;; ============================================================================
 DEF_FUNC builtin_str_fn
 
     test rsi, rsi
@@ -89,9 +89,9 @@ DEF_FUNC builtin_str_fn
     RAISE exc_TypeError_type, "str() takes at most 1 argument"
 END_FUNC builtin_str_fn
 
-; ============================================================================
-; 7. builtin_id(args, nargs) - id(x)
-; ============================================================================
+;; ============================================================================
+;; 7. builtin_id(args, nargs) - id(x)
+;; ============================================================================
 DEF_FUNC builtin_id
 
     cmp rsi, 1
@@ -117,9 +117,9 @@ DEF_FUNC builtin_id
     RAISE exc_TypeError_type, "id() takes exactly one argument"
 END_FUNC builtin_id
 
-; ============================================================================
-; 8. builtin_hash_fn(args, nargs) - hash(x)
-; ============================================================================
+;; ============================================================================
+;; 8. builtin_hash_fn(args, nargs) - hash(x)
+;; ============================================================================
 DEF_FUNC builtin_hash_fn
     push rbx
     sub rsp, 8
@@ -198,9 +198,9 @@ DEF_FUNC builtin_hash_fn
     RAISE exc_TypeError_type, "hash() takes exactly one argument"
 END_FUNC builtin_hash_fn
 
-; ============================================================================
-; 9. builtin_callable(args, nargs) - callable(x)
-; ============================================================================
+;; ============================================================================
+;; 9. builtin_callable(args, nargs) - callable(x)
+;; ============================================================================
 DEF_FUNC builtin_callable
 
     cmp rsi, 1
@@ -274,9 +274,9 @@ DEF_FUNC builtin_callable
     RAISE exc_TypeError_type, "callable() takes exactly one argument"
 END_FUNC builtin_callable
 
-; ============================================================================
-; 10. builtin_iter_fn(args, nargs) - iter(x)
-; ============================================================================
+;; ============================================================================
+;; 10. builtin_iter_fn(args, nargs) - iter(x)
+;; ============================================================================
 DEF_FUNC builtin_iter_fn
 
     cmp rsi, 1
@@ -297,9 +297,9 @@ DEF_FUNC builtin_iter_fn
     RAISE exc_TypeError_type, "iter() takes exactly one argument"
 END_FUNC builtin_iter_fn
 
-; ============================================================================
-; 11. builtin_next_fn(args, nargs) - next(x)
-; ============================================================================
+;; ============================================================================
+;; 11. builtin_next_fn(args, nargs) - next(x)
+;; ============================================================================
 DEF_FUNC builtin_next_fn
     push rbx
 
@@ -439,9 +439,9 @@ DEF_FUNC builtin_next_fn
     RAISE exc_TypeError_type, "next() takes exactly one argument"
 END_FUNC builtin_next_fn
 
-; ============================================================================
-; 12. builtin_any(args, nargs) - any(iterable)
-; ============================================================================
+;; ============================================================================
+;; 12. builtin_any(args, nargs) - any(iterable)
+;; ============================================================================
 DEF_FUNC builtin_any
     push rbx
     push r12
@@ -520,9 +520,9 @@ DEF_FUNC builtin_any
     RAISE exc_TypeError_type, "any() takes exactly one argument"
 END_FUNC builtin_any
 
-; ============================================================================
-; 13. builtin_all(args, nargs) - all(iterable)
-; ============================================================================
+;; ============================================================================
+;; 13. builtin_all(args, nargs) - all(iterable)
+;; ============================================================================
 DEF_FUNC builtin_all
     push rbx
     push r12
@@ -600,9 +600,9 @@ DEF_FUNC builtin_all
     RAISE exc_TypeError_type, "all() takes exactly one argument"
 END_FUNC builtin_all
 
-; ============================================================================
-; 14. builtin_sum(args, nargs) - sum(iterable[, start])
-; ============================================================================
+;; ============================================================================
+;; 14. builtin_sum(args, nargs) - sum(iterable[, start])
+;; ============================================================================
 DEF_FUNC builtin_sum
     push rbx
     push r12
@@ -724,9 +724,9 @@ DEF_FUNC builtin_sum
     RAISE exc_TypeError_type, "sum expected 1-2 arguments"
 END_FUNC builtin_sum
 
-; ============================================================================
-; 15-16. builtin_min / builtin_max
-; ============================================================================
+;; ============================================================================
+;; 15-16. builtin_min / builtin_max
+;; ============================================================================
 ; Shared implementation: minmax_impl(args, nargs, cmp_op)
 ;   rdi = args, rsi = nargs, edx = cmp_op (PY_LT=0 for min, PY_GT=4 for max)
 ; Returns (rax=payload, rdx=tag)
@@ -1024,9 +1024,9 @@ DEF_FUNC_LOCAL minmax_impl, MM_FRAME
     RAISE exc_TypeError_type, "min()/max() expected at least 1 argument"
 END_FUNC minmax_impl
 
-; ============================================================================
-; 17. builtin_getattr(args, nargs) - getattr(obj, name[, default])
-; ============================================================================
+;; ============================================================================
+;; 17. builtin_getattr(args, nargs) - getattr(obj, name[, default])
+;; ============================================================================
 GA_EXC    equ 8              ; current_exception before the lookup
 DEF_FUNC builtin_getattr, 24
     push rbx
@@ -1108,9 +1108,9 @@ DEF_FUNC builtin_getattr, 24
     RAISE exc_TypeError_type, "getattr expected 2 or 3 arguments"
 END_FUNC builtin_getattr
 
-; ============================================================================
-; 18. builtin_hasattr(args, nargs) - hasattr(obj, name)
-; ============================================================================
+;; ============================================================================
+;; 18. builtin_hasattr(args, nargs) - hasattr(obj, name)
+;; ============================================================================
 HA_EXC    equ 8              ; current_exception before the lookup
 DEF_FUNC builtin_hasattr, 24
     push rbx
@@ -1168,9 +1168,9 @@ DEF_FUNC builtin_hasattr, 24
     RAISE exc_TypeError_type, "hasattr expected 2 arguments"
 END_FUNC builtin_hasattr
 
-; ============================================================================
-; 19. builtin_setattr(args, nargs) - setattr(obj, name, value)
-; ============================================================================
+;; ============================================================================
+;; 19. builtin_setattr(args, nargs) - setattr(obj, name, value)
+;; ============================================================================
 DEF_FUNC builtin_setattr
     mov rbp, rsp
     push rbx
@@ -1217,10 +1217,10 @@ DEF_FUNC builtin_setattr
     RAISE exc_TypeError_type, "setattr() takes exactly 3 arguments"
 END_FUNC builtin_setattr
 
-; ============================================================================
-; builtin_globals(args, nargs) - globals()
-; Returns the globals dict of the current frame.
-; ============================================================================
+;; ============================================================================
+;; builtin_globals(args, nargs) - globals()
+;; Returns the globals dict of the current frame.
+;; ============================================================================
 DEF_FUNC builtin_globals
     cmp rsi, 0
     jne .globals_error
@@ -1238,13 +1238,13 @@ DEF_FUNC builtin_globals
     RAISE exc_TypeError_type, "globals() takes no arguments"
 END_FUNC builtin_globals
 
-; ============================================================================
-; builtin_locals(args, nargs) - locals()
-; Returns the locals dict if available, otherwise globals.
-; In module scope, locals() == globals().
-; In class body, returns the class dict.
-; In function scope, returns globals as approximation.
-; ============================================================================
+;; ============================================================================
+;; builtin_locals(args, nargs) - locals()
+;; Returns the locals dict if available, otherwise globals.
+;; In module scope, locals() == globals().
+;; In class body, returns the class dict.
+;; In function scope, returns globals as approximation.
+;; ============================================================================
 DEF_FUNC builtin_locals
     cmp rsi, 0
     jne .locals_error
@@ -1289,10 +1289,10 @@ DEF_FUNC builtin_locals
     RAISE exc_TypeError_type, "locals() takes no arguments"
 END_FUNC builtin_locals
 
-; ============================================================================
-; builtin_dir(args, nargs) - dir(obj)
-; Returns list of attribute names from obj's type (and base chain) dicts.
-; ============================================================================
+;; ============================================================================
+;; builtin_dir(args, nargs) - dir(obj)
+;; Returns list of attribute names from obj's type (and base chain) dicts.
+;; ============================================================================
 DIR_LIST    equ 8       ; result list
 DIR_OBJ     equ 16      ; the object
 DIR_ORIGIN  equ 24      ; the type whose MRO is being listed
@@ -1412,11 +1412,11 @@ fmt_dunder_name: db "__format__", 0
 
 section .text
 
-; ============================================================================
-; builtin_input_fn(args, nargs) - input([prompt])
-; 0 args: read line from stdin
-; 1 arg: print prompt, then read line
-; ============================================================================
+;; ============================================================================
+;; builtin_input_fn(args, nargs) - input([prompt])
+;; 0 args: read line from stdin
+;; 1 arg: print prompt, then read line
+;; ============================================================================
 extern sys_write
 extern sys_read
 
@@ -1483,11 +1483,11 @@ DEF_FUNC builtin_input_fn, INP_FRAME
     RAISE exc_TypeError_type, "input() prompt must be a string"
 END_FUNC builtin_input_fn
 
-; ============================================================================
-; builtin_open_fn(args, nargs) - open(filename[, mode])
-; 1 arg: open for reading ('r')
-; 2 args: open with specified mode
-; ============================================================================
+;; ============================================================================
+;; builtin_open_fn(args, nargs) - open(filename[, mode])
+;; 1 arg: open for reading ('r')
+;; 2 args: open with specified mode
+;; ============================================================================
 extern sys_open
 extern file_type
 
@@ -1634,10 +1634,10 @@ DEF_FUNC builtin_open_fn, OPN_FRAME
     RAISE exc_TypeError_type, "open() arguments must be strings"
 END_FUNC builtin_open_fn
 
-; ============================================================================
-; builtin_ascii_fn(args, nargs) - ascii(obj)
-; Like repr() but escapes non-ASCII characters to \xNN / \uNNNN / \UNNNNNNNN
-; ============================================================================
+;; ============================================================================
+;; builtin_ascii_fn(args, nargs) - ascii(obj)
+;; Like repr() but escapes non-ASCII characters to \xNN / \uNNNN / \UNNNNNNNN
+;; ============================================================================
 global builtin_ascii_fn
 AA_REPR   equ 8
 AA_FRAME  equ 16            ; + 0 pushes = 16
@@ -1764,10 +1764,10 @@ DEF_FUNC builtin_ascii_fn, AA_FRAME
     RAISE exc_TypeError_type, "ascii() takes exactly one argument"
 END_FUNC builtin_ascii_fn
 
-; ============================================================================
-; builtin_format_fn(args, nargs) - format(value[, format_spec])
-; Calls value.__format__(format_spec) or str(value) if no __format__
-; ============================================================================
+;; ============================================================================
+;; builtin_format_fn(args, nargs) - format(value[, format_spec])
+;; Calls value.__format__(format_spec) or str(value) if no __format__
+;; ============================================================================
 global builtin_format_fn
 FMT_OBJ     equ 8
 FMT_SPEC    equ 24
@@ -1879,11 +1879,11 @@ DEF_FUNC builtin_format_fn, FMT_FRAME
     RAISE exc_TypeError_type, "format() takes 1 or 2 arguments"
 END_FUNC builtin_format_fn
 
-; ============================================================================
-; builtin_vars_fn(args, nargs) - vars([obj])
-; 0 args: returns frame locals dict (same as locals())
-; 1 arg: returns obj.__dict__
-; ============================================================================
+;; ============================================================================
+;; builtin_vars_fn(args, nargs) - vars([obj])
+;; 0 args: returns frame locals dict (same as locals())
+;; 1 arg: returns obj.__dict__
+;; ============================================================================
 extern eval_saved_r12
 global builtin_vars_fn
 VR_FRAME equ 8              ; + 0 pushes = 8, not 16-aligned
@@ -1939,10 +1939,10 @@ DEF_FUNC builtin_vars_fn, VR_FRAME
     RAISE exc_TypeError_type, "vars() takes at most 1 argument"
 END_FUNC builtin_vars_fn
 
-; ============================================================================
-; builtin_delattr_fn(args, nargs) - delattr(obj, name)
-; Calls tp_setattr(obj, name, NULL) to delete
-; ============================================================================
+;; ============================================================================
+;; builtin_delattr_fn(args, nargs) - delattr(obj, name)
+;; Calls tp_setattr(obj, name, NULL) to delete
+;; ============================================================================
 global builtin_delattr_fn
 DA2_OBJ   equ 8
 DA2_NAME  equ 16
@@ -1994,10 +1994,10 @@ DEF_FUNC builtin_delattr_fn, DA2_FRAME
     RAISE exc_TypeError_type, "delattr() takes exactly 2 arguments"
 END_FUNC builtin_delattr_fn
 
-; ============================================================================
-; builtin_aiter_fn(args, nargs) - aiter(async_iterable)
-; Calls tp_iter on the async iterable
-; ============================================================================
+;; ============================================================================
+;; builtin_aiter_fn(args, nargs) - aiter(async_iterable)
+;; Calls tp_iter on the async iterable
+;; ============================================================================
 DEF_FUNC builtin_aiter_fn
 
     cmp rsi, 1
@@ -2029,10 +2029,10 @@ DEF_FUNC builtin_aiter_fn
     RAISE exc_TypeError_type, "aiter() takes exactly 1 argument"
 END_FUNC builtin_aiter_fn
 
-; ============================================================================
-; builtin_anext_fn(args, nargs) - anext(async_iterator[, default])
-; Calls tp_iternext; on StopAsyncIteration returns default
-; ============================================================================
+;; ============================================================================
+;; builtin_anext_fn(args, nargs) - anext(async_iterator[, default])
+;; Calls tp_iternext; on StopAsyncIteration returns default
+;; ============================================================================
 extern current_exception
 global builtin_anext_fn
 AN_ITER    equ 8
@@ -2111,11 +2111,11 @@ DEF_FUNC builtin_anext_fn, AN_FRAME
     RAISE exc_TypeError_type, "anext() takes 1 or 2 arguments"
 END_FUNC builtin_anext_fn
 
-; ============================================================================
-; builtin_import_fn(args, nargs) - __import__(name, ...)
-; Wraps import_module(name_str, fromlist=NULL, level=0)
-; Only uses first arg (name), ignores globals/locals/fromlist/level for now
-; ============================================================================
+;; ============================================================================
+;; builtin_import_fn(args, nargs) - __import__(name, ...)
+;; Wraps import_module(name_str, fromlist=NULL, level=0)
+;; Only uses first arg (name), ignores globals/locals/fromlist/level for now
+;; ============================================================================
 extern import_module
 DEF_FUNC builtin_import_fn
 
@@ -2153,9 +2153,9 @@ DEF_FUNC builtin_import_fn
     RAISE exc_TypeError_type, "__import__() requires at least 1 argument"
 END_FUNC builtin_import_fn
 
-; ============================================================================
-; builtin_breakpoint(args, nargs) - breakpoint() stub (no-op)
-; ============================================================================
+;; ============================================================================
+;; builtin_breakpoint(args, nargs) - breakpoint() stub (no-op)
+;; ============================================================================
 DEF_FUNC_BARE builtin_breakpoint
     ; No-op: return None
     xor eax, eax

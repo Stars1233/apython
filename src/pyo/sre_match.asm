@@ -28,11 +28,11 @@ extern sre_utf8_codepoint_to_byte
 extern method_new
 extern sre_strcmp
 
-; ============================================================================
-; sre_match_new(SRE_State* state, SRE_PatternObject* pattern,
-;               PyStrObject* string) -> SRE_MatchObject*
-; Create a match object from a successful match state.
-; ============================================================================
+;; ============================================================================
+;; sre_match_new(SRE_State* state, SRE_PatternObject* pattern,
+;;               PyStrObject* string) -> SRE_MatchObject*
+;; Create a match object from a successful match state.
+;; ============================================================================
 MN_STATE    equ 8
 MN_PAT      equ 16
 MN_STR      equ 24
@@ -205,9 +205,9 @@ DEF_FUNC sre_match_new, MN_FRAME
     ret
 END_FUNC sre_match_new
 
-; ============================================================================
-; sre_match_dealloc(PyObject* self)
-; ============================================================================
+;; ============================================================================
+;; sre_match_dealloc(PyObject* self)
+;; ============================================================================
 DEF_FUNC sre_match_dealloc
     push rbx
     mov rbx, rdi
@@ -238,9 +238,9 @@ DEF_FUNC sre_match_dealloc
     ret
 END_FUNC sre_match_dealloc
 
-; ============================================================================
-; sre_match_repr(PyObject* self) -> PyObject*
-; ============================================================================
+;; ============================================================================
+;; sre_match_repr(PyObject* self) -> PyObject*
+;; ============================================================================
 DEF_FUNC sre_match_repr
     CSTRING rdi, "<re.Match object>"
     call str_from_cstr_heap
@@ -248,20 +248,20 @@ DEF_FUNC sre_match_repr
     ret
 END_FUNC sre_match_repr
 
-; ============================================================================
-; sre_match_bool(PyObject* self) -> i64 (0 or 1)
-; Match objects are always truthy.
-; ============================================================================
+;; ============================================================================
+;; sre_match_bool(PyObject* self) -> i64 (0 or 1)
+;; Match objects are always truthy.
+;; ============================================================================
 DEF_FUNC_BARE sre_match_bool
     mov rax, 1
     ret
 END_FUNC sre_match_bool
 
-; ============================================================================
-; Helper: get substring for a group index
-; sre_match_get_group_str(SRE_MatchObject* self, i64 group_idx) -> (rax, edx)
-; Returns string for the group, or (0, TAG_NONE) if unmatched.
-; ============================================================================
+;; ============================================================================
+;; Helper: get substring for a group index
+;; sre_match_get_group_str(SRE_MatchObject* self, i64 group_idx) -> (rax, edx)
+;; Returns string for the group, or (0, TAG_NONE) if unmatched.
+;; ============================================================================
 DEF_FUNC sre_match_get_group_str
     push rbx
     push r12
@@ -367,11 +367,11 @@ DEF_FUNC sre_match_get_group_str
     RAISE exc_IndexError_type, "no such group"
 END_FUNC sre_match_get_group_str
 
-; ============================================================================
-; sre_match_resolve_group_idx(rdi=self, rsi=payload, edx=tag) -> rsi=int_idx
-; Resolve a group argument: SmallInt passes through, string does dict lookup.
-; On error (no such group), raises IndexError.
-; ============================================================================
+;; ============================================================================
+;; sre_match_resolve_group_idx(rdi=self, rsi=payload, edx=tag) -> rsi=int_idx
+;; Resolve a group argument: SmallInt passes through, string does dict lookup.
+;; On error (no such group), raises IndexError.
+;; ============================================================================
 DEF_FUNC sre_match_resolve_group_idx
     ; SmallInt → return as-is
     cmp edx, TAG_SMALLINT
@@ -410,13 +410,13 @@ DEF_FUNC sre_match_resolve_group_idx
     RAISE exc_IndexError_type, "no such group"
 END_FUNC sre_match_resolve_group_idx
 
-; ============================================================================
-; sre_match_group_method(self, args, nargs)
-; group(*args) — return one or more subgroups of the match.
-; group() or group(0) returns entire match.
-; group(n) returns nth group.
-; group(a, b, ...) returns tuple.
-; ============================================================================
+;; ============================================================================
+;; sre_match_group_method(self, args, nargs)
+;; group(*args) — return one or more subgroups of the match.
+;; group() or group(0) returns entire match.
+;; group(n) returns nth group.
+;; group(a, b, ...) returns tuple.
+;; ============================================================================
 DEF_FUNC sre_match_group_method
     ; rdi = args (fat array), rsi = nargs
     push rbx
@@ -507,10 +507,10 @@ DEF_FUNC sre_match_group_method
     ret
 END_FUNC sre_match_group_method
 
-; ============================================================================
-; sre_match_groups_method(self, args, nargs)
-; groups(default=None) — return all groups as a tuple.
-; ============================================================================
+;; ============================================================================
+;; sre_match_groups_method(self, args, nargs)
+;; groups(default=None) — return all groups as a tuple.
+;; ============================================================================
 GS_DEFAULT     equ 8
 GS_DEFAULT_TAG equ 16
 GS_FRAME       equ 16       ; + 5 pushes = 56, not 16-aligned
@@ -611,10 +611,10 @@ DEF_FUNC sre_match_groups_method, GS_FRAME
     ret
 END_FUNC sre_match_groups_method
 
-; ============================================================================
-; sre_match_start_method(self, args, nargs)
-; start(group=0)
-; ============================================================================
+;; ============================================================================
+;; sre_match_start_method(self, args, nargs)
+;; start(group=0)
+;; ============================================================================
 DEF_FUNC sre_match_start_method
     ; rdi = args (fat array), rsi = nargs
     push rbx
@@ -655,10 +655,10 @@ DEF_FUNC sre_match_start_method
     RAISE exc_IndexError_type, "no such group"
 END_FUNC sre_match_start_method
 
-; ============================================================================
-; sre_match_end_method(self, args, nargs)
-; end(group=0)
-; ============================================================================
+;; ============================================================================
+;; sre_match_end_method(self, args, nargs)
+;; end(group=0)
+;; ============================================================================
 DEF_FUNC sre_match_end_method
     ; rdi = args (fat array), rsi = nargs
     push rbx
@@ -698,10 +698,10 @@ DEF_FUNC sre_match_end_method
     RAISE exc_IndexError_type, "no such group"
 END_FUNC sre_match_end_method
 
-; ============================================================================
-; sre_match_span_method(self, args, nargs)
-; span(group=0) -> (start, end) tuple
-; ============================================================================
+;; ============================================================================
+;; sre_match_span_method(self, args, nargs)
+;; span(group=0) -> (start, end) tuple
+;; ============================================================================
 DEF_FUNC sre_match_span_method
     ; rdi = args (fat array), rsi = nargs
     push rbx
@@ -761,10 +761,10 @@ DEF_FUNC sre_match_span_method
     RAISE exc_IndexError_type, "no such group"
 END_FUNC sre_match_span_method
 
-; ============================================================================
-; sre_match_groupdict_method(self, args, nargs)
-; groupdict(default=None) -> dict of named groups
-; ============================================================================
+;; ============================================================================
+;; sre_match_groupdict_method(self, args, nargs)
+;; groupdict(default=None) -> dict of named groups
+;; ============================================================================
 GD_SELF        equ 8
 GD_RESULT      equ 16
 GD_ENTRIES     equ 24
@@ -878,11 +878,11 @@ DEF_FUNC sre_match_groupdict_method, GD_FRAME
     ret
 END_FUNC sre_match_groupdict_method
 
-; ============================================================================
-; sre_match_expand_method(self, args, nargs)
-; expand(template) — stub: returns template as-is.
-; Real expansion handled by re._expand() in pure Python.
-; ============================================================================
+;; ============================================================================
+;; sre_match_expand_method(self, args, nargs)
+;; expand(template) — stub: returns template as-is.
+;; Real expansion handled by re._expand() in pure Python.
+;; ============================================================================
 DEF_FUNC sre_match_expand_method
     ; rdi = args (fat array), rsi = nargs
     ; args[1] = template
@@ -894,11 +894,11 @@ DEF_FUNC sre_match_expand_method
     ret
 END_FUNC sre_match_expand_method
 
-; ============================================================================
-; sre_match_copy_method(self, args, nargs)
-; __copy__ / __deepcopy__ — match objects are effectively immutable.
-; Returns self (INCREF'd).
-; ============================================================================
+;; ============================================================================
+;; sre_match_copy_method(self, args, nargs)
+;; __copy__ / __deepcopy__ — match objects are effectively immutable.
+;; Returns self (INCREF'd).
+;; ============================================================================
 DEF_FUNC sre_match_copy_method
     ; rdi = args (fat array), rsi = nargs
     mov rax, [rdi]             ; self payload
@@ -909,10 +909,10 @@ DEF_FUNC sre_match_copy_method
     ret
 END_FUNC sre_match_copy_method
 
-; ============================================================================
-; sre_match_subscript(self, key, key_tag) -> (rax, edx)
-; __getitem__ for match[group] indexing.
-; ============================================================================
+;; ============================================================================
+;; sre_match_subscript(self, key, key_tag) -> (rax, edx)
+;; __getitem__ for match[group] indexing.
+;; ============================================================================
 DEF_FUNC sre_match_subscript
     V_UNPACK rsi, rdx           ; key Value -> (payload, tag)
     ; rdi = self, rsi = key payload, rdx = key tag
@@ -965,9 +965,9 @@ DEF_FUNC sre_match_subscript
     RAISE exc_TypeError_type, "group index must be int or string"
 END_FUNC sre_match_subscript
 
-; ============================================================================
-; sre_match_getattr(PyObject* self, PyObject* name) -> rax = Value
-; ============================================================================
+;; ============================================================================
+;; sre_match_getattr(PyObject* self, PyObject* name) -> rax = Value
+;; ============================================================================
 DEF_FUNC sre_match_getattr
     push rbx
     push r12
@@ -1280,9 +1280,9 @@ END_FUNC sre_match_getattr
 
 ; sre_strcmp is now shared from sre_pattern.asm (extern sre_strcmp)
 
-; ============================================================================
-; Type definition
-; ============================================================================
+;; ============================================================================
+;; Type definition
+;; ============================================================================
 section .data
 align 8
 

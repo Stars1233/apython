@@ -334,6 +334,27 @@ def check_frame_offsets(files):
                             "name it with an equ constant"))
     return bad
 
+def check_separators(files):
+    """The heavy separator is `;; ` plus 76 `=`, exactly 79 columns.
+
+    A single-semicolon rule reads as an ordinary inline comment, which makes it
+    harder to see where one function's documentation ends and the next begins.
+    The lighter `;; ---` divider some files use to label a section is a
+    different thing and is left alone.
+    """
+    RULE = ';; ' + '=' * 76
+    bad = []
+    for path in files:
+        for n, line in enumerate(open(path), 1):
+            ln = line.rstrip('\n')
+            if re.match(r'^; [-=]{20,}\s*$', ln):
+                bad.append((path, n, "separator rule with a single `;`",
+                            "use `;;`, and `=` for the heavy form"))
+            elif re.match(r'^;; ={20,}\s*$', ln) and ln != RULE:
+                bad.append((path, n, "heavy separator is %d columns" % len(ln),
+                            "`;; ` and 76 `=`, 79 columns"))
+    return bad
+
 def check_markers(files):
     """Every function opens with DEF_FUNC* and closes with a matching END_FUNC.
 
@@ -419,6 +440,7 @@ def main():
                 + check_rel(everything) + check_markers(everything)
                 + check_exports(everything)
                 + check_frame_offsets(everything)
+                + check_separators(everything)
                 + check_text(everything) + check_guards(headers)
                 + check_alignment(scoped) + check_tailjumps(scoped)
                 + check_callee_saved(scoped) + check_saved_writes(scoped))

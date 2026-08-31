@@ -15,9 +15,9 @@ extern obj_dealloc
 extern obj_incref
 extern frame_free
 
-; ============================================================================
-; GC data (BSS + DATA)
-; ============================================================================
+;; ============================================================================
+;; GC data (BSS + DATA)
+;; ============================================================================
 section .data
 
 ; Generation 0 sentinel (young objects)
@@ -67,10 +67,10 @@ GEN_ENTRY_SIZE equ 32   ; 4 qwords per generation entry
 section .text
 
 
-; ============================================================================
-; gc_list_append(rdi=node, rsi=list_sentinel)
-; Insert node at the tail of list (before sentinel)
-; ============================================================================
+;; ============================================================================
+;; gc_list_append(rdi=node, rsi=list_sentinel)
+;; Insert node at the tail of list (before sentinel)
+;; ============================================================================
 DEF_FUNC_BARE gc_list_append
     ; node->gc_next = sentinel
     mov [rdi + PyGC_Head.gc_next], rsi
@@ -85,10 +85,10 @@ DEF_FUNC_BARE gc_list_append
     ret
 END_FUNC gc_list_append
 
-; ============================================================================
-; gc_list_remove(rdi=node)
-; Remove node from its doubly-linked list
-; ============================================================================
+;; ============================================================================
+;; gc_list_remove(rdi=node)
+;; Remove node from its doubly-linked list
+;; ============================================================================
 DEF_FUNC_BARE gc_list_remove
     mov rax, [rdi + PyGC_Head.gc_prev]
     and rax, GC_PREV_MASK          ; clear state bits
@@ -104,10 +104,10 @@ DEF_FUNC_BARE gc_list_remove
 END_FUNC gc_list_remove
 
 
-; ============================================================================
-; gc_list_merge(rdi=from_sentinel, rsi=to_sentinel)
-; Move all nodes from 'from' list to end of 'to' list. Empties 'from'.
-; ============================================================================
+;; ============================================================================
+;; gc_list_merge(rdi=from_sentinel, rsi=to_sentinel)
+;; Move all nodes from 'from' list to end of 'to' list. Empties 'from'.
+;; ============================================================================
 DEF_FUNC gc_list_merge
     push rbx
 
@@ -144,10 +144,10 @@ DEF_FUNC gc_list_merge
     ret
 END_FUNC gc_list_merge
 
-; ============================================================================
-; gc_alloc(rdi=size, rsi=type) -> PyObject*
-; Allocate a GC-tracked object. Prepends PyGC_Head, returns obj pointer.
-; ============================================================================
+;; ============================================================================
+;; gc_alloc(rdi=size, rsi=type) -> PyObject*
+;; Allocate a GC-tracked object. Prepends PyGC_Head, returns obj pointer.
+;; ============================================================================
 DEF_FUNC gc_alloc
     push rbx
     push r12
@@ -178,10 +178,10 @@ DEF_FUNC gc_alloc
     ret
 END_FUNC gc_alloc
 
-; ============================================================================
-; gc_track(rdi=obj)
-; Add object to gen0 tracking list. May trigger collection.
-; ============================================================================
+;; ============================================================================
+;; gc_track(rdi=obj)
+;; Add object to gen0 tracking list. May trigger collection.
+;; ============================================================================
 DEF_FUNC gc_track
     push rbx
     mov rbx, rdi               ; save obj
@@ -226,10 +226,10 @@ DEF_FUNC gc_track
     ret
 END_FUNC gc_track
 
-; ============================================================================
-; gc_untrack(rdi=obj)
-; Remove object from GC tracking list.
-; ============================================================================
+;; ============================================================================
+;; gc_untrack(rdi=obj)
+;; Remove object from GC tracking list.
+;; ============================================================================
 DEF_FUNC gc_untrack
     ; gc = obj - GC_HEAD_SIZE
     lea rdi, [rdi - GC_HEAD_SIZE]
@@ -260,12 +260,12 @@ DEF_FUNC gc_untrack
     ret
 END_FUNC gc_untrack
 
-; ============================================================================
-; gc_dealloc(rdi=obj)
-; Untrack and free a potentially GC-tracked object.
-; If TYPE_FLAG_HAVE_GC is set: untrack + free at obj - GC_HEAD_SIZE
-; Otherwise: plain ap_free(obj) (for objects allocated without GC head)
-; ============================================================================
+;; ============================================================================
+;; gc_dealloc(rdi=obj)
+;; Untrack and free a potentially GC-tracked object.
+;; If TYPE_FLAG_HAVE_GC is set: untrack + free at obj - GC_HEAD_SIZE
+;; Otherwise: plain ap_free(obj) (for objects allocated without GC head)
+;; ============================================================================
 DEF_FUNC gc_dealloc
     push rbx
     mov rbx, rdi
@@ -303,10 +303,10 @@ DEF_FUNC gc_dealloc
     ret
 END_FUNC gc_dealloc
 
-; ============================================================================
-; gc_collect_gen(edi=generation)
-; Core cycle collection algorithm.
-; ============================================================================
+;; ============================================================================
+;; gc_collect_gen(edi=generation)
+;; Core cycle collection algorithm.
+;; ============================================================================
 ; Local frame layout
 GCG_GEN     equ 8
 GCG_YOUNG   equ 24    ; 16-byte PyGC_Head sentinel on stack (next+prev)
@@ -591,10 +591,10 @@ DEF_FUNC gc_collect_gen, GCG_FRAME
 END_FUNC gc_collect_gen
 
 
-; ============================================================================
-; gc_visit_decref(rdi=obj)
-; Visit callback for Phase 2: decrement gc_refs of visited object
-; ============================================================================
+;; ============================================================================
+;; gc_visit_decref(rdi=obj)
+;; Visit callback for Phase 2: decrement gc_refs of visited object
+;; ============================================================================
 DEF_FUNC_BARE gc_visit_decref
     ; Check if this object's type has HAVE_GC flag (non-GC objects have no GC head)
     mov rax, [rdi + PyObject.ob_type]
@@ -624,10 +624,10 @@ DEF_FUNC_BARE gc_visit_decref
     ret
 END_FUNC gc_visit_decref
 
-; ============================================================================
-; gc_visit_reachable(rdi=obj)
-; Visit callback for Phase 4: if obj is in unreachable set, move to reachable
-; ============================================================================
+;; ============================================================================
+;; gc_visit_reachable(rdi=obj)
+;; Visit callback for Phase 4: if obj is in unreachable set, move to reachable
+;; ============================================================================
 DEF_FUNC gc_visit_reachable
     push rbx
 

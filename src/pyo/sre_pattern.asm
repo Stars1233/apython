@@ -41,13 +41,13 @@ extern sre_utf8_codepoint_to_byte
 ; SRE match object
 extern sre_match_new
 
-; ============================================================================
-; Forward declarations
-; ============================================================================
+;; ============================================================================
+;; Forward declarations
+;; ============================================================================
 
-; ============================================================================
-; sre_pattern_dealloc(PyObject* self)
-; ============================================================================
+;; ============================================================================
+;; sre_pattern_dealloc(PyObject* self)
+;; ============================================================================
 DEF_FUNC sre_pattern_dealloc
     push rbx
     mov rbx, rdi
@@ -89,9 +89,9 @@ DEF_FUNC sre_pattern_dealloc
     ret
 END_FUNC sre_pattern_dealloc
 
-; ============================================================================
-; sre_pattern_repr(PyObject* self) -> PyObject*
-; ============================================================================
+;; ============================================================================
+;; sre_pattern_repr(PyObject* self) -> PyObject*
+;; ============================================================================
 DEF_FUNC sre_pattern_repr
     CSTRING rdi, "re.compile(...)"
     call str_from_cstr_heap
@@ -99,11 +99,11 @@ DEF_FUNC sre_pattern_repr
     ret
 END_FUNC sre_pattern_repr
 
-; ============================================================================
-; Helper: run match/search/fullmatch and return MatchObject or None
-; rdi = pattern obj, rsi = string, rdx = pos, rcx = endpos,
-; r8 = mode (0=match, 1=search, 2=fullmatch)
-; ============================================================================
+;; ============================================================================
+;; Helper: run match/search/fullmatch and return MatchObject or None
+;; rdi = pattern obj, rsi = string, rdx = pos, rcx = endpos,
+;; r8 = mode (0=match, 1=search, 2=fullmatch)
+;; ============================================================================
 PM_PAT      equ 8
 PM_STR      equ 16
 PM_POS      equ 24
@@ -197,10 +197,10 @@ DEF_FUNC sre_pattern_do_match, PM_FRAME
     ret
 END_FUNC sre_pattern_do_match
 
-; ============================================================================
-; sre_pattern_match_method(self, args, nargs)
-; Pattern.match(string, pos=0, endpos=sys.maxsize)
-; ============================================================================
+;; ============================================================================
+;; sre_pattern_match_method(self, args, nargs)
+;; Pattern.match(string, pos=0, endpos=sys.maxsize)
+;; ============================================================================
 ;; ============================================================================
 ;; sp_arg_i64(rdi: argument Value) -> rax: int64
 ;;
@@ -310,9 +310,9 @@ DEF_FUNC sre_pattern_match_method
     RAISE exc_TypeError_type, "match() requires a string argument"
 END_FUNC sre_pattern_match_method
 
-; ============================================================================
-; sre_pattern_search_method(self, args, nargs)
-; ============================================================================
+;; ============================================================================
+;; sre_pattern_search_method(self, args, nargs)
+;; ============================================================================
 DEF_FUNC sre_pattern_search_method
     ; rdi = args (fat array), rsi = nargs
     push rbx
@@ -359,9 +359,9 @@ DEF_FUNC sre_pattern_search_method
     RAISE exc_TypeError_type, "search() requires a string argument"
 END_FUNC sre_pattern_search_method
 
-; ============================================================================
-; sre_pattern_fullmatch_method(self, args, nargs)
-; ============================================================================
+;; ============================================================================
+;; sre_pattern_fullmatch_method(self, args, nargs)
+;; ============================================================================
 DEF_FUNC sre_pattern_fullmatch_method
     ; rdi = args (fat array), rsi = nargs
     push rbx
@@ -408,12 +408,12 @@ DEF_FUNC sre_pattern_fullmatch_method
     RAISE exc_TypeError_type, "fullmatch() requires a string argument"
 END_FUNC sre_pattern_fullmatch_method
 
-; ============================================================================
-; sre_substr_from_state(rdi=state, rsi=start_idx, rdx=end_idx)
-; -> (rax=payload, edx=tag)
-; Extracts substring handling both ASCII and codepoint modes.
-; Returns (0, TAG_NONE) if start or end is -1.
-; ============================================================================
+;; ============================================================================
+;; sre_substr_from_state(rdi=state, rsi=start_idx, rdx=end_idx)
+;; -> (rax=payload, edx=tag)
+;; Extracts substring handling both ASCII and codepoint modes.
+;; Returns (0, TAG_NONE) if start or end is -1.
+;; ============================================================================
 DEF_FUNC sre_substr_from_state
     ; Check for unmatched group
     cmp rsi, -1
@@ -496,13 +496,13 @@ DEF_FUNC sre_substr_from_state
     ret
 END_FUNC sre_substr_from_state
 
-; ============================================================================
-; sre_pattern_findall_method(self, args, nargs)
-; Returns list of all non-overlapping matches.
-; If pattern has no groups: list of matched strings.
-; If 1 group: list of group(1) strings.
-; If >1 groups: list of tuples.
-; ============================================================================
+;; ============================================================================
+;; sre_pattern_findall_method(self, args, nargs)
+;; Returns list of all non-overlapping matches.
+;; If pattern has no groups: list of matched strings.
+;; If 1 group: list of group(1) strings.
+;; If >1 groups: list of tuples.
+;; ============================================================================
 FA_PAT      equ 8
 FA_STR      equ 16
 FA_LIST     equ 24
@@ -743,10 +743,10 @@ DEF_FUNC sre_pattern_findall_method, FA_FRAME
     RAISE exc_TypeError_type, "findall() requires a string argument"
 END_FUNC sre_pattern_findall_method
 
-; ============================================================================
-; sre_pattern_sub_method(self, args, nargs)
-; Pattern.sub(repl, string, count=0)
-; ============================================================================
+;; ============================================================================
+;; sre_pattern_sub_method(self, args, nargs)
+;; Pattern.sub(repl, string, count=0)
+;; ============================================================================
 SUB_PAT      equ 8
 SUB_REPL     equ 16
 SUB_STR      equ 24
@@ -1031,11 +1031,11 @@ DEF_FUNC sre_pattern_sub_method, SUB_FRAME
     RAISE exc_TypeError_type, "sub() requires repl and string arguments"
 END_FUNC sre_pattern_sub_method
 
-; ============================================================================
-; sre_pattern_subn_method(self, args, nargs)
-; Like sub but returns (result, count) tuple.
-; Duplicated sub loop with count tracking.
-; ============================================================================
+;; ============================================================================
+;; sre_pattern_subn_method(self, args, nargs)
+;; Like sub but returns (result, count) tuple.
+;; Duplicated sub loop with count tracking.
+;; ============================================================================
 SN_PAT      equ 8
 SN_REPL     equ 16
 SN_STR      equ 24
@@ -1314,10 +1314,10 @@ DEF_FUNC sre_pattern_subn_method, SN_FRAME
     RAISE exc_TypeError_type, "subn() requires repl and string arguments"
 END_FUNC sre_pattern_subn_method
 
-; ============================================================================
-; sre_pattern_split_method(self, args, nargs)
-; Pattern.split(string, maxsplit=0)
-; ============================================================================
+;; ============================================================================
+;; sre_pattern_split_method(self, args, nargs)
+;; Pattern.split(string, maxsplit=0)
+;; ============================================================================
 SP_PAT      equ 8
 SP_STR      equ 16
 SP_MAX      equ 24
@@ -1522,9 +1522,9 @@ DEF_FUNC sre_pattern_split_method, SP_FRAME
     RAISE exc_TypeError_type, "split() requires a string argument"
 END_FUNC sre_pattern_split_method
 
-; ============================================================================
-; sre_pattern_getattr(PyObject* self, PyObject* name) -> rax = Value
-; ============================================================================
+;; ============================================================================
+;; sre_pattern_getattr(PyObject* self, PyObject* name) -> rax = Value
+;; ============================================================================
 DEF_FUNC sre_pattern_getattr
     push rbx
     push r12
@@ -1753,9 +1753,9 @@ DEF_FUNC sre_pattern_getattr
     ret
 END_FUNC sre_pattern_getattr
 
-; ============================================================================
-; Helper: strcmp for attribute lookup
-; ============================================================================
+;; ============================================================================
+;; Helper: strcmp for attribute lookup
+;; ============================================================================
 DEF_FUNC sre_strcmp
     ; rdi = str1, rsi = str2
 .cmp_loop:
@@ -1778,11 +1778,11 @@ DEF_FUNC sre_strcmp
     ret
 END_FUNC sre_strcmp
 
-; ============================================================================
-; sre_pattern_copy_method(self, args, nargs)
-; __copy__ / __deepcopy__ — patterns are effectively immutable.
-; Returns self (INCREF'd).
-; ============================================================================
+;; ============================================================================
+;; sre_pattern_copy_method(self, args, nargs)
+;; __copy__ / __deepcopy__ — patterns are effectively immutable.
+;; Returns self (INCREF'd).
+;; ============================================================================
 DEF_FUNC sre_pattern_copy_method
     mov rax, [rdi]             ; self payload
     inc qword [rax + PyObject.ob_refcnt]
@@ -1792,10 +1792,10 @@ DEF_FUNC sre_pattern_copy_method
     ret
 END_FUNC sre_pattern_copy_method
 
-; ============================================================================
-; sre_pattern_hash(PyObject* self) -> i64
-; hash(pattern_str) XOR flags XOR (groups << 16)
-; ============================================================================
+;; ============================================================================
+;; sre_pattern_hash(PyObject* self) -> i64
+;; hash(pattern_str) XOR flags XOR (groups << 16)
+;; ============================================================================
 extern str_hash
 
 DEF_FUNC sre_pattern_hash
@@ -1822,11 +1822,11 @@ DEF_FUNC sre_pattern_hash
     ret
 END_FUNC sre_pattern_hash
 
-; ============================================================================
-; sre_pattern_richcompare(rdi=left, rsi=right, edx=op, rcx=left_tag, r8=right_tag)
-;   -> (rax=payload, edx=tag)
-; Supports PY_EQ and PY_NE only. Compares type, flags, groups, pattern string.
-; ============================================================================
+;; ============================================================================
+;; sre_pattern_richcompare(rdi=left, rsi=right, edx=op, rcx=left_tag, r8=right_tag)
+;;   -> (rax=payload, edx=tag)
+;; Supports PY_EQ and PY_NE only. Compares type, flags, groups, pattern string.
+;; ============================================================================
 extern str_compare
 
 DEF_FUNC sre_pattern_richcompare
@@ -1909,11 +1909,11 @@ DEF_FUNC sre_pattern_richcompare
     ret
 END_FUNC sre_pattern_richcompare
 
-; ============================================================================
-; sre_pattern_finditer_method(self, args, nargs)
-; Pattern.finditer(string, pos=0, endpos=sys.maxsize)
-; Returns an SRE_Scanner iterator.
-; ============================================================================
+;; ============================================================================
+;; sre_pattern_finditer_method(self, args, nargs)
+;; Pattern.finditer(string, pos=0, endpos=sys.maxsize)
+;; Returns an SRE_Scanner iterator.
+;; ============================================================================
 DEF_FUNC sre_pattern_finditer_method
     ; rdi = args (fat array), rsi = nargs
     push rbx
@@ -1968,14 +1968,14 @@ DEF_FUNC sre_pattern_finditer_method
     RAISE exc_TypeError_type, "finditer() requires a string argument"
 END_FUNC sre_pattern_finditer_method
 
-; ============================================================================
-; SRE_Scanner implementation
-; ============================================================================
+;; ============================================================================
+;; SRE_Scanner implementation
+;; ============================================================================
 
-; ============================================================================
-; sre_scanner_new(rdi=pattern, rsi=string, rdx=pos, rcx=endpos) -> rax
-; Allocates and initializes an SRE_ScannerObject.
-; ============================================================================
+;; ============================================================================
+;; sre_scanner_new(rdi=pattern, rsi=string, rdx=pos, rcx=endpos) -> rax
+;; Allocates and initializes an SRE_ScannerObject.
+;; ============================================================================
 DEF_FUNC sre_scanner_new
     push rbx
     push r12
@@ -2016,9 +2016,9 @@ DEF_FUNC sre_scanner_new
     ret
 END_FUNC sre_scanner_new
 
-; ============================================================================
-; sre_scanner_dealloc(rdi=self)
-; ============================================================================
+;; ============================================================================
+;; sre_scanner_dealloc(rdi=self)
+;; ============================================================================
 DEF_FUNC sre_scanner_dealloc
     push rbx
     mov rbx, rdi
@@ -2037,19 +2037,19 @@ DEF_FUNC sre_scanner_dealloc
     ret
 END_FUNC sre_scanner_dealloc
 
-; ============================================================================
-; sre_scanner_iter_self(rdi=self) -> rax (no edx, tp_iter convention)
-; ============================================================================
+;; ============================================================================
+;; sre_scanner_iter_self(rdi=self) -> rax (no edx, tp_iter convention)
+;; ============================================================================
 DEF_FUNC_BARE sre_scanner_iter_self
     inc qword [rdi + PyObject.ob_refcnt]
     mov rax, rdi
     ret
 END_FUNC sre_scanner_iter_self
 
-; ============================================================================
-; sre_scanner_iternext(rdi=self) -> (rax, edx) fat value
-; Returns next match via sre_search, or NULL on exhaustion.
-; ============================================================================
+;; ============================================================================
+;; sre_scanner_iternext(rdi=self) -> (rax, edx) fat value
+;; Returns next match via sre_search, or NULL on exhaustion.
+;; ============================================================================
 SI_SELF    equ 8
 SI_STATE   equ 8 + SRE_State_size
 SI_FRAME   equ 8 + SRE_State_size
@@ -2136,10 +2136,10 @@ DEF_FUNC sre_scanner_iternext, SI_FRAME
     ret
 END_FUNC sre_scanner_iternext
 
-; ============================================================================
-; sre_scanner_search_method(self, args, nargs)
-; scanner.search() — same as iternext but returns None instead of NULL
-; ============================================================================
+;; ============================================================================
+;; sre_scanner_search_method(self, args, nargs)
+;; scanner.search() — same as iternext but returns None instead of NULL
+;; ============================================================================
 DEF_FUNC sre_scanner_search_method
     mov rdi, [rdi]             ; self = args[0] payload
     call sre_scanner_iternext
@@ -2154,10 +2154,10 @@ DEF_FUNC sre_scanner_search_method
     ret
 END_FUNC sre_scanner_search_method
 
-; ============================================================================
-; sre_scanner_match_method(self, args, nargs)
-; scanner.match() — anchored match at current pos, returns match or None
-; ============================================================================
+;; ============================================================================
+;; sre_scanner_match_method(self, args, nargs)
+;; scanner.match() — anchored match at current pos, returns match or None
+;; ============================================================================
 SM2_SELF   equ 8
 SM2_STATE  equ 8 + SRE_State_size
 SM2_FRAME  equ 8 + SRE_State_size
@@ -2250,9 +2250,9 @@ DEF_FUNC sre_scanner_match_method, SM2_FRAME
     ret
 END_FUNC sre_scanner_match_method
 
-; ============================================================================
-; sre_scanner_getattr(rdi=self, rsi=name) -> (rax, edx)
-; ============================================================================
+;; ============================================================================
+;; sre_scanner_getattr(rdi=self, rsi=name) -> (rax, edx)
+;; ============================================================================
 DEF_FUNC sre_scanner_getattr
     push rbx
     push r12
@@ -2325,9 +2325,9 @@ DEF_FUNC sre_scanner_getattr
     ret
 END_FUNC sre_scanner_getattr
 
-; ============================================================================
-; Type definitions
-; ============================================================================
+;; ============================================================================
+;; Type definitions
+;; ============================================================================
 section .data
 align 8
 

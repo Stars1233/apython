@@ -27,6 +27,7 @@ These run over **every** hand-written `.asm` in the tree:
 | Every `.inc` has a guard named for the file, echoed on the `%endif` | `check_guards` | error |
 | A `global X` has a definition of `X` in the same file | `check_exports` | error |
 | No raw `[rbp +- N]`; frame slots carry named `equ` constants | `check_frame_offsets` | error |
+| Heavy separators are `;;` and 76 `=`, 79 columns | `check_separators` | error |
 
 These are scoped to `compiler/*.asm` plus `src/main.asm`:
 

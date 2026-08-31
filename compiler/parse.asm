@@ -60,10 +60,10 @@ extern none_singleton
 
 extern exc_SyntaxError_type
 
-;; ---------------------------------------------------------------------------
+;; ============================================================================
 ;; Binding powers, in steps of two so that a right-associative operator is
 ;; simply "recurse at lbp - 1" and there is still room between levels.
-;; ---------------------------------------------------------------------------
+;; ============================================================================
 ; The binding powers live in compiler.inc: pattern.asm needs them too.
 
 ; PRule.flags
@@ -3247,7 +3247,7 @@ END_FUNC in_walrus
 
 section .rodata
 
-;; ---------------------------------------------------------------------------
+;; ============================================================================
 ;; prule_table - the expression grammar, one row per token kind.
 ;;
 ;; GENERATED.  Edit ROWS in compiler/gen_prule.py and re-run it.
@@ -3262,7 +3262,7 @@ section .rodata
 ;; A comma is deliberately absent.  Tuples are built by the callers that
 ;; actually permit them, because a comma in this table would silently swallow
 ;; call arguments, subscripts and assignment targets.
-;; ---------------------------------------------------------------------------
+;; ============================================================================
 align 8
 prule_table:
     dq 0           , 0           

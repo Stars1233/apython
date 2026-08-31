@@ -252,10 +252,8 @@ gives a current one, and a number written here is wrong by the next commit.
   aligned SSE.  This is the debt that keeps `check_alignment` scoped to
   `compiler/` plus `src/main.asm` instead of running tree-wide.
 
-- **Separator lines using a single `;` where STYLE.md asks for `;;`**, and
-  functions with no separator or docblock at all.  Heaviest in
-  `src/pyo/sre_pattern.asm`, `src/builtins_obj.asm` and `src/sre.asm`.
-
-- **Docblocks with no `->` signature line.**  Most separated functions have
-  none; the signature is the only part of a function's contract that nothing
-  checks, so its absence is a real gap rather than a cosmetic one.
+- **Functions with no separator or docblock at all**, and, among those that
+  have one, docblocks with no `->` signature line.  The signature is the only
+  part of a function's contract that nothing checks, so its absence is a real
+  gap rather than a cosmetic one.  This is the one item here a script cannot
+  finish: writing a signature means reading what the function actually returns.

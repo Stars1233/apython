@@ -2131,9 +2131,9 @@ section .text
 ;; file is the only place that knows which of its fields are owned.
 ;; ============================================================================
 
-; ============================================================================
-; TRAVERSE AND CLEAR FUNCTIONS
-; ============================================================================
+;; ============================================================================
+;; TRAVERSE AND CLEAR FUNCTIONS
+;; ============================================================================
 ; Convention: tp_traverse(rdi=obj, r14=visit_callback)
 ;             tp_clear(rdi=obj)
 ; The VISIT_* macros use r14 as the callback.

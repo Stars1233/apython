@@ -3024,11 +3024,11 @@ END_FUNC ps_decorated
 
 section .rodata
 
-;; ---------------------------------------------------------------------------
+;; ============================================================================
 ;; stmt_table - leading token -> statement parser.  A zero entry means the
 ;; statement does not begin with a keyword, and falls through to the
 ;; expression-or-assignment parser.
-;; ---------------------------------------------------------------------------
+;; ============================================================================
 align 8
 stmt_table:
     dq 0            ;  0 TOK_ENDMARKER

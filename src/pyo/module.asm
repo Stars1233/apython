@@ -24,11 +24,11 @@ extern type_type
 extern none_singleton
 extern ap_strcmp
 
-; ============================================================================
-; module_new(PyObject *name_str, PyObject *dict) -> PyModuleObject*
-; Create a new module with given name and dict
-; If dict is NULL, creates a new empty dict
-; ============================================================================
+;; ============================================================================
+;; module_new(PyObject *name_str, PyObject *dict) -> PyModuleObject*
+;; Create a new module with given name and dict
+;; If dict is NULL, creates a new empty dict
+;; ============================================================================
 DEF_FUNC module_new
     push rbx
     push r12
@@ -75,9 +75,9 @@ DEF_FUNC module_new
     ret
 END_FUNC module_new
 
-; ============================================================================
-; module_dealloc(PyObject *self)
-; ============================================================================
+;; ============================================================================
+;; module_dealloc(PyObject *self)
+;; ============================================================================
 DEF_FUNC_LOCAL module_dealloc
     push rbx
     mov rbx, rdi
@@ -102,10 +102,10 @@ DEF_FUNC_LOCAL module_dealloc
     ret
 END_FUNC module_dealloc
 
-; ============================================================================
-; module_getattr(PyObject *self, PyObject *name_str) -> rax = Value
-; Look up attribute in module's dict
-; ============================================================================
+;; ============================================================================
+;; module_getattr(PyObject *self, PyObject *name_str) -> rax = Value
+;; Look up attribute in module's dict
+;; ============================================================================
 DEF_FUNC module_getattr
     push rbx
     push r12
@@ -157,10 +157,10 @@ DEF_FUNC module_getattr
     ret
 END_FUNC module_getattr
 
-; ============================================================================
-; module_setattr(PyObject *self, PyObject *name_str, PyObject *value) -> int
-; Set attribute in module's dict
-; ============================================================================
+;; ============================================================================
+;; module_setattr(PyObject *self, PyObject *name_str, PyObject *value) -> int
+;; Set attribute in module's dict
+;; ============================================================================
 DEF_FUNC module_setattr
     ; dict_set(mod_dict, name, value, value_tag, key_tag)
     mov rax, rdi                ; self
@@ -172,11 +172,11 @@ DEF_FUNC module_setattr
     ret
 END_FUNC module_setattr
 
-; ============================================================================
-; module_repr(PyObject *self) -> PyObject*
-; Returns "<module 'name'>"
-; Simplified: just returns the name
-; ============================================================================
+;; ============================================================================
+;; module_repr(PyObject *self) -> PyObject*
+;; Returns "<module 'name'>"
+;; Simplified: just returns the name
+;; ============================================================================
 DEF_FUNC module_repr
     mov rax, [rdi + PyModuleObject.mod_name]
     test rax, rax
@@ -191,9 +191,9 @@ DEF_FUNC module_repr
     ret
 END_FUNC module_repr
 
-; ============================================================================
-; Data
-; ============================================================================
+;; ============================================================================
+;; Data
+;; ============================================================================
 section .rodata
 module_repr_str: db "<module>", 0
 module_type_name: db "module", 0

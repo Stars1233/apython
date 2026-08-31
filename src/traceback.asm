@@ -1,29 +1,29 @@
-; ============================================================================
-; traceback.asm -- the code object's side tables, and traceback rendering
-;
-; Both compressed tables CPython hangs off a code object are decoded here:
-; co_linetable, for the line a traceback names, and co_exceptiontable, for
-; the handler the unwinder jumps to.  They are different encodings of the
-; same idea -- a varint stream indexed by instruction offset -- and the two
-; varint readers below are siblings.
-;
-; Python 3.12 stores locations in co_linetable using the PEP 626 format: each
-; entry begins with a byte 0x80 | (code << 3) | (length - 1), where `length`
-; is how many code units the entry covers and `code` selects what follows.
-; Only the line delta matters here; the column fields are decoded far enough
-; to be skipped.
-;
-;   code 0-9   short form, one trailing byte, line delta 0
-;   code 10-12 one-line form, two trailing bytes, line delta = code - 10
-;   code 13    no columns, one signed varint line delta
-;   code 14    long form, signed varint line delta then three varints
-;   code 15    no location at all
-;
-; The renderer walks the chain a raise builds -- newest entry at the head, so
-; tb_next order is outermost first, "most recent call last" -- and prints what
-; CPython's default excepthook prints, including the __cause__ / __context__
-; preamble.
-; ============================================================================
+;; ============================================================================
+;; traceback.asm -- the code object's side tables, and traceback rendering
+;;
+;; Both compressed tables CPython hangs off a code object are decoded here:
+;; co_linetable, for the line a traceback names, and co_exceptiontable, for
+;; the handler the unwinder jumps to.  They are different encodings of the
+;; same idea -- a varint stream indexed by instruction offset -- and the two
+;; varint readers below are siblings.
+;;
+;; Python 3.12 stores locations in co_linetable using the PEP 626 format: each
+;; entry begins with a byte 0x80 | (code << 3) | (length - 1), where `length`
+;; is how many code units the entry covers and `code` selects what follows.
+;; Only the line delta matters here; the column fields are decoded far enough
+;; to be skipped.
+;;
+;;   code 0-9   short form, one trailing byte, line delta 0
+;;   code 10-12 one-line form, two trailing bytes, line delta = code - 10
+;;   code 13    no columns, one signed varint line delta
+;;   code 14    long form, signed varint line delta then three varints
+;;   code 15    no location at all
+;;
+;; The renderer walks the chain a raise builds -- newest entry at the head, so
+;; tb_next order is outermost first, "most recent call last" -- and prints what
+;; CPython's default excepthook prints, including the __cause__ / __context__
+;; preamble.
+;; ============================================================================
 
 %include "object.inc"
 %include "macros.inc"
@@ -48,10 +48,10 @@ TB_PATH  equ 4096
 
 section .text
 
-; ----------------------------------------------------------------------------
-; tb_read_varint -- reads a PEP 626 varint from [r8], advancing r8.
-; Result in ecx.  rax, rdx, rsi, r9, r10 are preserved; r11 is clobbered.
-; ----------------------------------------------------------------------------
+;; ============================================================================
+;; tb_read_varint -- reads a PEP 626 varint from [r8], advancing r8.
+;; Result in ecx.  rax, rdx, rsi, r9, r10 are preserved; r11 is clobbered.
+;; ============================================================================
 DEF_FUNC_BARE tb_read_varint
     push rax
     push rdx
@@ -88,10 +88,10 @@ DEF_FUNC_BARE tb_read_svarint
     ret
 END_FUNC tb_read_svarint
 
-; ----------------------------------------------------------------------------
-; code_addr2line(rdi = PyCodeObject*, rsi = instruction offset in code units)
-;   -> eax = line number, or 0 when the table does not cover the offset
-; ----------------------------------------------------------------------------
+;; ============================================================================
+;; code_addr2line(rdi = PyCodeObject*, rsi = instruction offset in code units)
+;;   -> eax = line number, or 0 when the table does not cover the offset
+;; ============================================================================
 DEF_FUNC_BARE code_addr2line
     mov r8, [rdi + PyCodeObject.co_linetable]
     test r8, r8
@@ -163,10 +163,10 @@ DEF_FUNC_BARE code_addr2line
     ret
 END_FUNC code_addr2line
 
-; ----------------------------------------------------------------------------
-; traceback_here(rdi = exception, rsi = code object, rdx = lasti in code units)
-; Prepends a frame to the exception's traceback, as PyTraceBack_Here does.
-; ----------------------------------------------------------------------------
+;; ============================================================================
+;; traceback_here(rdi = exception, rsi = code object, rdx = lasti in code units)
+;; Prepends a frame to the exception's traceback, as PyTraceBack_Here does.
+;; ============================================================================
 TH_EXC   equ 8
 TH_CODE  equ 16
 TH_LASTI equ 24
@@ -209,9 +209,9 @@ DEF_FUNC traceback_here, TH_FRAME
     ret
 END_FUNC traceback_here
 
-; ----------------------------------------------------------------------------
-; tb_write(rdi = buf, rsi = len) -- stderr
-; ----------------------------------------------------------------------------
+;; ============================================================================
+;; tb_write(rdi = buf, rsi = len) -- stderr
+;; ============================================================================
 DEF_FUNC_BARE tb_write
     mov rdx, rsi
     mov rsi, rdi
@@ -290,13 +290,13 @@ DEF_FUNC tb_write_dec, TD_FRAME
     ret
 END_FUNC tb_write_dec
 
-; ----------------------------------------------------------------------------
-; tb_write_source(rdi = filename str, rsi = line number)
-; Prints the source line stripped and indented four spaces.  A file that
-; cannot be opened simply produces nothing, which is what CPython does.
-; The file is scanned in chunks, so a large source costs no extra memory and
-; the frame stays small enough to use while unwinding.
-; ----------------------------------------------------------------------------
+;; ============================================================================
+;; tb_write_source(rdi = filename str, rsi = line number)
+;; Prints the source line stripped and indented four spaces.  A file that
+;; cannot be opened simply produces nothing, which is what CPython does.
+;; The file is scanned in chunks, so a large source costs no extra memory and
+;; the frame stays small enough to use while unwinding.
+;; ============================================================================
 TS_FD    equ 8
 TS_TGT   equ 16
 TS_CUR   equ 24
@@ -475,10 +475,10 @@ DEF_FUNC tb_print_repeated
     ret
 END_FUNC tb_print_repeated
 
-; ----------------------------------------------------------------------------
-; traceback_print(rdi = exception)
-; Prints the CPython-shaped report for an uncaught exception, on stderr.
-; ----------------------------------------------------------------------------
+;; ============================================================================
+;; traceback_print(rdi = exception)
+;; Prints the CPython-shaped report for an uncaught exception, on stderr.
+;; ============================================================================
 TP_EXC   equ 8
 TP_TB    equ 16
 TP_TMP   equ 24

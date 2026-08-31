@@ -58,9 +58,9 @@ extern tuple_new
 
 section .text
 
-; ============================================================================
-; Exception-related opcode handlers (inline in eval.asm for access to globals)
-; ============================================================================
+;; ============================================================================
+;; Exception-related opcode handlers (inline in eval.asm for access to globals)
+;; ============================================================================
 
 ; op_push_exc_info (35) - Push exception info for try/except
 ; TOS has the exception. Save current exception state, install new one.

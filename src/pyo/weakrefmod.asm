@@ -51,9 +51,9 @@ extern v_int_bias
 
 section .text
 
-; ----------------------------------------------------------------------------
-; weakref_table_get() -> rax = the side table, creating it on first use
-; ----------------------------------------------------------------------------
+;; ============================================================================
+;; weakref_table_get() -> rax = the side table, creating it on first use
+;; ============================================================================
 DEF_FUNC_LOCAL weakref_table_get
     mov rax, [rel weakref_table]
     test rax, rax
@@ -65,9 +65,9 @@ DEF_FUNC_LOCAL weakref_table_get
     ret
 END_FUNC weakref_table_get
 
-; ----------------------------------------------------------------------------
-; weakref_chain(rdi = referent) -> rax = the list of references, or 0
-; ----------------------------------------------------------------------------
+;; ============================================================================
+;; weakref_chain(rdi = referent) -> rax = the list of references, or 0
+;; ============================================================================
 DEF_FUNC_LOCAL weakref_chain
     push rbx
     mov rbx, rdi
@@ -88,13 +88,13 @@ DEF_FUNC_LOCAL weakref_chain
     ret
 END_FUNC weakref_chain
 
-; ----------------------------------------------------------------------------
-; weakref_clear_for(rdi = object about to be freed)
-;
-; Called from obj_dealloc, and only when the table is non-empty.  Every
-; reference to the object is emptied before any callback runs, so a callback
-; that looks at the reference sees a dead one, as CPython guarantees.
-; ----------------------------------------------------------------------------
+;; ============================================================================
+;; weakref_clear_for(rdi = object about to be freed)
+;;
+;; Called from obj_dealloc, and only when the table is non-empty.  Every
+;; reference to the object is emptied before any callback runs, so a callback
+;; that looks at the reference sees a dead one, as CPython guarantees.
+;; ============================================================================
 WC_OBJ   equ 8
 WC_LIST  equ 16
 WC_IDX   equ 24
@@ -203,9 +203,9 @@ DEF_FUNC weakref_clear_for, WC_FRAME
     ret
 END_FUNC weakref_clear_for
 
-; ----------------------------------------------------------------------------
-; weakref_make(rdi = type, rsi = referent, rdx = callback or 0) -> rax = ref
-; ----------------------------------------------------------------------------
+;; ============================================================================
+;; weakref_make(rdi = type, rsi = referent, rdx = callback or 0) -> rax = ref
+;; ============================================================================
 WM_TYPE  equ 8
 WM_OBJ   equ 16
 WM_CB    equ 24
@@ -317,9 +317,9 @@ DEF_FUNC_LOCAL weakref_make, WM_FRAME
     ret
 END_FUNC weakref_make
 
-; ----------------------------------------------------------------------------
-; ref_dealloc / ref_call / ref_repr / ref_hash / ref_richcompare
-; ----------------------------------------------------------------------------
+;; ============================================================================
+;; ref_dealloc / ref_call / ref_repr / ref_hash / ref_richcompare
+;; ============================================================================
 DEF_FUNC_LOCAL ref_dealloc
     push rbx
     mov rbx, rdi
@@ -496,9 +496,9 @@ DEF_FUNC_LOCAL ref_richcompare, RC_FRAME
     ret
 END_FUNC ref_richcompare
 
-; ----------------------------------------------------------------------------
-; ref(object[, callback]) -- tp_new for ReferenceType and its subclasses
-; ----------------------------------------------------------------------------
+;; ============================================================================
+;; ref(object[, callback]) -- tp_new for ReferenceType and its subclasses
+;; ============================================================================
 DEF_FUNC ref_construct
     ; rdi = type, rsi = args, rdx = nargs
     cmp rdx, 1
@@ -536,9 +536,9 @@ DEF_FUNC ref_construct
     RAISE exc_TypeError_type, "ref expected at least 1 argument"
 END_FUNC ref_construct
 
-; ----------------------------------------------------------------------------
-; proxy objects: the same structure, forwarding attribute access
-; ----------------------------------------------------------------------------
+;; ============================================================================
+;; proxy objects: the same structure, forwarding attribute access
+;; ============================================================================
 DEF_FUNC_LOCAL proxy_referent
     mov rax, [rdi + PyWeakRefObject.wr_object]
     test rax, rax
@@ -637,9 +637,9 @@ DEF_FUNC proxy_call
     RAISE exc_TypeError_type, "proxy object is not callable"
 END_FUNC proxy_call
 
-; ----------------------------------------------------------------------------
-; Module functions
-; ----------------------------------------------------------------------------
+;; ============================================================================
+;; Module functions
+;; ============================================================================
 DEF_FUNC wr_proxy_func
     ; proxy(object[, callback])
     cmp rsi, 1
@@ -793,9 +793,9 @@ DEF_FUNC wr_remove_dead_func
     ret
 END_FUNC wr_remove_dead_func
 
-; ============================================================================
-; Module construction
-; ============================================================================
+;; ============================================================================
+;; Module construction
+;; ============================================================================
 
 %macro WR_ADD_TYPE 2
     lea rdi, [rel %2]

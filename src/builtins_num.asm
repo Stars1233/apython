@@ -47,9 +47,9 @@ extern dunder_lookup
 extern kw_names_pending
 extern ap_strcmp
 
-; ============================================================================
-; 1. builtin_abs(args, nargs) - abs(x)
-; ============================================================================
+;; ============================================================================
+;; 1. builtin_abs(args, nargs) - abs(x)
+;; ============================================================================
 
 ; --- moved to a sibling file by the split ---
 
@@ -202,9 +202,9 @@ DEF_FUNC builtin_abs
     RAISE exc_TypeError_type, "abs() takes exactly one argument"
 END_FUNC builtin_abs
 
-; ============================================================================
-; builtin_divmod(args, nargs) - divmod(a, b) -> (a // b, a % b)
-; ============================================================================
+;; ============================================================================
+;; builtin_divmod(args, nargs) - divmod(a, b) -> (a // b, a % b)
+;; ============================================================================
 DEF_FUNC builtin_divmod
     push rbx
     push r12
@@ -379,9 +379,9 @@ DEF_FUNC_BARE float_type_call
     jmp builtin_float
 END_FUNC float_type_call
 
-; ============================================================================
-; 2. builtin_int_fn(args, nargs) - int(x) or int(x, base)
-; ============================================================================
+;; ============================================================================
+;; 2. builtin_int_fn(args, nargs) - int(x) or int(x, base)
+;; ============================================================================
 ; Frame layout:
 BI_ARGS   equ 8
 BI_NARGS  equ 16
@@ -1263,9 +1263,9 @@ DEF_FUNC builtin_int_fn, BI_FRAME
 
 END_FUNC builtin_int_fn
 
-; ============================================================================
-; 4. builtin_ord(args, nargs) - ord(c)
-; ============================================================================
+;; ============================================================================
+;; 4. builtin_ord(args, nargs) - ord(c)
+;; ============================================================================
 DEF_FUNC builtin_ord
 
     cmp rsi, 1
@@ -1359,9 +1359,9 @@ DEF_FUNC builtin_ord
     RAISE exc_TypeError_type, "ord() takes exactly one argument"
 END_FUNC builtin_ord
 
-; ============================================================================
-; 5. builtin_chr(args, nargs) - chr(n)
-; ============================================================================
+;; ============================================================================
+;; 5. builtin_chr(args, nargs) - chr(n)
+;; ============================================================================
 BC_BUF    equ 16            ; up to four UTF-8 bytes, then a NUL
 DEF_FUNC builtin_chr, 16
 
@@ -1472,9 +1472,9 @@ DEF_FUNC builtin_chr, 16
     RAISE exc_TypeError_type, "chr() takes exactly one argument"
 END_FUNC builtin_chr
 
-; ============================================================================
-; 6. builtin_hex(args, nargs) - hex(n)
-; ============================================================================
+;; ============================================================================
+;; 6. builtin_hex(args, nargs) - hex(n)
+;; ============================================================================
 HEXB_VAL   equ 8
 HEXB_STR   equ 16
 HEXB_OUT   equ 24
@@ -1568,11 +1568,11 @@ END_FUNC builtin_hex
 ; literal and raised ValueError for anything else.  It is now a real
 ; evaluator in compiler/evalexec.asm, backed by the source compiler.
 
-; ============================================================================
-; builtin_round_fn(args, nargs) - round(number[, ndigits])
-; 1 arg: round to nearest int (banker's rounding)
-; 2 args: round to ndigits decimal places
-; ============================================================================
+;; ============================================================================
+;; builtin_round_fn(args, nargs) - round(number[, ndigits])
+;; 1 arg: round to nearest int (banker's rounding)
+;; 2 args: round to ndigits decimal places
+;; ============================================================================
 
 global builtin_round_fn
 RND_NDIGITS equ 16      ; historical: referenced as [rbp - RND_NDIGITS]
@@ -1770,11 +1770,11 @@ DEF_FUNC builtin_round_fn, RND_FRAME
     RAISE exc_TypeError_type, "type cannot be rounded"
 END_FUNC builtin_round_fn
 
-; ============================================================================
-; builtin_pow_fn(args, nargs) - pow(base, exp[, mod])
-; 2 args: base ** exp
-; 3 args: pow(base, exp, mod) — modular exponentiation
-; ============================================================================
+;; ============================================================================
+;; builtin_pow_fn(args, nargs) - pow(base, exp[, mod])
+;; 2 args: base ** exp
+;; 3 args: pow(base, exp, mod) — modular exponentiation
+;; ============================================================================
 global builtin_pow_fn
 POW_BASE equ 8
 POW_BTAG equ 16
@@ -2108,10 +2108,10 @@ DEF_FUNC builtin_pow_fn, POW_FRAME
     RAISE exc_TypeError_type, "pow() arguments must be numeric"
 END_FUNC builtin_pow_fn
 
-; ============================================================================
-; builtin_bin(args, nargs) - bin(x)
-; Returns binary string representation: '0b...' or '-0b...'
-; ============================================================================
+;; ============================================================================
+;; builtin_bin(args, nargs) - bin(x)
+;; Returns binary string representation: '0b...' or '-0b...'
+;; ============================================================================
 global builtin_bin
 BINB_VAL   equ 8
 BINB_STR   equ 16
@@ -2202,10 +2202,10 @@ DEF_FUNC builtin_bin, BINB_FRAME
     RAISE exc_TypeError_type, "bin() takes exactly one argument"
 END_FUNC builtin_bin
 
-; ============================================================================
-; builtin_oct(args, nargs) - oct(x)
-; Returns octal string representation: '0o...' or '-0o...'
-; ============================================================================
+;; ============================================================================
+;; builtin_oct(args, nargs) - oct(x)
+;; Returns octal string representation: '0o...' or '-0o...'
+;; ============================================================================
 global builtin_oct
 OCTB_VAL   equ 8
 OCTB_STR   equ 16

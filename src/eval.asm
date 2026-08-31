@@ -341,11 +341,11 @@ DEF_FUNC_BARE eval_return
     ret
 END_FUNC eval_return
 
-; ---------------------------------------------------------------------------
-; trace_print_opcode - Print opcode name and arg to stderr
-; Called from eval_dispatch when tracing is enabled.
-; edi = opcode number, esi = arg value
-; ---------------------------------------------------------------------------
+;; ============================================================================
+;; trace_print_opcode - Print opcode name and arg to stderr
+;; Called from eval_dispatch when tracing is enabled.
+;; edi = opcode number, esi = arg value
+;; ============================================================================
 TP_OPCODE equ 8
 TP_ARG    equ 16
 TP_NAME   equ 24
@@ -418,9 +418,9 @@ DEF_FUNC trace_print_opcode, TP_FRAME
     ret
 END_FUNC trace_print_opcode
 
-; ============================================================================
-; Exception unwind mechanism
-; ============================================================================
+;; ============================================================================
+;; Exception unwind mechanism
+;; ============================================================================
 
 ; eval_exception_unwind - Called when an exception is raised
 ; The exception object must already be stored in [current_exception].
@@ -846,13 +846,13 @@ op_interpreter_exit:
     mov edi, 1
     call sys_exit
 
-; ---------------------------------------------------------------------------
-; op_extended_arg - Extend the arg of the NEXT instruction
-;
-; Shifts current arg left 8 bits, combines with next instruction's arg,
-; then dispatches next instruction with the combined arg.
-; Can chain: multiple EXTENDED_ARGs shift 8 more bits each time.
-; ---------------------------------------------------------------------------
+;; ============================================================================
+;; op_extended_arg - Extend the arg of the NEXT instruction
+;;
+;; Shifts current arg left 8 bits, combines with next instruction's arg,
+;; then dispatches next instruction with the combined arg.
+;; Can chain: multiple EXTENDED_ARGs shift 8 more bits each time.
+;; ============================================================================
 op_extended_arg:
     shl ecx, 8                 ; shift current arg left 8
     movzx eax, byte [rbx]     ; next opcode
@@ -862,9 +862,9 @@ op_extended_arg:
     mov rdx, [rel opcode_dispatch_table]
     jmp [rdx + rax*8]         ; dispatch with combined arg in ecx
 
-; ---------------------------------------------------------------------------
-; op_load_assertion_error - Push AssertionError type
-; ---------------------------------------------------------------------------
+;; ============================================================================
+;; op_load_assertion_error - Push AssertionError type
+;; ============================================================================
 extern exc_AssertionError_type
 op_load_assertion_error:
     lea rax, [rel exc_AssertionError_type]
@@ -872,9 +872,9 @@ op_load_assertion_error:
     VPUSH_PTR rax
     DISPATCH
 
-; ---------------------------------------------------------------------------
-; Opcode dispatch table (256 entries, section .data for potential patching)
-; ---------------------------------------------------------------------------
+;; ============================================================================
+;; Opcode dispatch table (256 entries, section .data for potential patching)
+;; ============================================================================
 section .data
 align 8
 
@@ -1149,9 +1149,9 @@ opcode_table:
     dq op_unimplemented      ; 254
     dq op_unimplemented      ; 255
 
-; ============================================================================
-; Global exception state (BSS)
-; ============================================================================
+;; ============================================================================
+;; Global exception state (BSS)
+;; ============================================================================
 section .bss
 global current_exception
 current_exception: resq 1    ; PyExceptionObject* or NULL
@@ -1188,9 +1188,9 @@ build_class_pending: resq 1  ; type object from builtin___build_class__ during c
 global throw_pending
 throw_pending: resb 1           ; nonzero = gen_throw set current_exception before resume
 
-; ============================================================================
-; Read-only data for traceback printing
-; ============================================================================
+;; ============================================================================
+;; Read-only data for traceback printing
+;; ============================================================================
 section .rodata
 tb_header: db "Traceback (most recent call last):", 10
 tb_header_len equ $ - tb_header
@@ -1204,15 +1204,15 @@ tb_line_prefix_len equ $ - tb_line_prefix
 tb_colon: db ": "
 tb_newline: db 10
 
-; ============================================================================
-; Trace output helper strings
-; ============================================================================
+;; ============================================================================
+;; Trace output helper strings
+;; ============================================================================
 trace_prefix: db "  "
 trace_space: db " "
 
-; ============================================================================
-; Opcode name strings
-; ============================================================================
+;; ============================================================================
+;; Opcode name strings
+;; ============================================================================
 opn_unknown: db "???", 0
 opn_CACHE: db "CACHE", 0
 opn_POP_TOP: db "POP_TOP", 0
@@ -1333,9 +1333,9 @@ opn_BINARY_OP_SUBTRACT_INT: db "BINARY_OP_SUBTRACT_INT", 0
 opn_FOR_ITER_LIST: db "FOR_ITER_LIST", 0
 opn_FOR_ITER_RANGE: db "FOR_ITER_RANGE", 0
 
-; ============================================================================
-; Opcode name lookup table (256 entries, in .data for relocations)
-; ============================================================================
+;; ============================================================================
+;; Opcode name lookup table (256 entries, in .data for relocations)
+;; ============================================================================
 section .data
 align 8
 global opcode_names
