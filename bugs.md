@@ -167,3 +167,72 @@ than against CPython, because CPython cannot serve as an oracle for them:
 
 Both are self-asserting.  Any *new* recorded-oracle test needs the same
 justification, or it risks blessing a divergence instead of catching it.
+
+## Style debt
+
+Everything here assembles and runs.  These are places the tree does not follow
+STYLE.md, listed so the gap is a known quantity rather than a surprise to
+whoever copies a neighbouring file.
+
+- **756 raw numeric frame offsets across 46 files.**  STYLE.md requires named
+  `equ` constants; `[rbp-8]` and `[rsp+32]` survive from before that rule.  The
+  concentration is `src/opcodes_build.asm` (151), `src/marshal.asm` (85),
+  `src/repr.asm` (64), `src/methods.asm` (60) and `src/pyo/float.asm` (57).
+  A hand-picked offset silently overlaps the slot above it the first time a
+  struct in the same frame grows, which is the failure this rule exists to
+  prevent.
+
+- **Five files enter functions with a bare `label:` and close with
+  `END_FUNC`**, so the symbol gets no ELF size and GDB cannot find its
+  boundaries: `src/pyo/asyncmod.asm` (6), `src/pyo/iter.asm` (4),
+  `src/pyo/bytes.asm`, `src/pyo/set.asm`, `src/pyo/slice.asm`.  Converting them
+  to `DEF_FUNC_BARE` is mechanical.
+
+- **124 redundant `global X` immediately above `DEF_FUNC X`.**  Harmless —
+  `DEF_FUNC` already emits the `global` with a size expression — but the bare
+  `global` is what the previous item's files use *instead*, so the two read
+  alike and only one is correct.
+
+- **`compiler/lint.py` covers 27 of the ~60 `.asm` files** (`compiler/*.asm`
+  plus `src/main.asm`).  Its six checks — 4-byte field reads, rsp alignment,
+  tail jumps, section, callee-saved pushes and writes — are convention-only
+  everywhere else.  Extending it over `src/` means paying down the alignment
+  debt first, which is why the scan list is what it is (`lint.py:239-242`).
+  NASM itself is run with no warning flags, so nothing else catches any of it.
+
+- **Nine macros have no call sites**: `XDECREF`, `EXTERN_C` (`include/macros.inc`),
+  `V_IS_PTR`, `V_HIGH16`, `V_NONE`, `V_TRUE`, `V_FALSE` (`include/value.inc`),
+  `GC_FROM_OBJ`, `OBJ_FROM_GC` (`include/gc.inc`).  They read as available API
+  and are untested; either use or delete.
+
+- **Two macro comments describe behaviour the macro does not have.**
+  `include/macros.inc:130` says `DISPATCH` "falls back to centralized
+  `eval_dispatch` when tracing is enabled" — it does not test `trace_opcodes` at
+  all, so `DISPATCH`-terminated handlers are silently untraced, and only the
+  handlers that jump to the real `eval_dispatch` show up.  `macros.inc:107` says
+  `DECREF_REG` "doesn't push/pop if arg is rdi"; it never push/pops and always
+  clobbers `rdi`.
+
+- **Twelve headers in `src/pyo/` name a file that no longer exists.**  Line 1 of
+  `dict.asm` says `dict_obj.asm`; likewise `bool`, `bytes`, `class`, `code`,
+  `func`, `int`, `iter`, `list`, `none`, `str` and `tuple`.  `src/lib/memops.asm`
+  says `memory.asm`.  A one-line fix each, but the header is the first thing
+  read.
+
+- **The `CACHE_*` constants in `include/opcodes.inc` have no references.**  Every
+  handler hardcodes `add rbx, 2*N` with a `; skip N CACHE entries` comment
+  instead, so the count is duplicated at each site and nothing checks it against
+  the header.  Either use the constants or delete them; a wrong count resumes
+  execution mid-instruction.
+
+- **Some docblocks describe a thin return where the function returns a fat
+  pair.**  `src/builtins.asm:652` documents
+  `builtin_len(PyObject **args, int64_t nargs) -> PyObject*`, but the function
+  returns `(rax = payload, edx = tag)`.  The signature line is the only
+  machine-unchecked part of a function's contract, so a wrong one is worse than
+  none.
+
+- **`INCREF` has a vestigial `%%skip:` label** that nothing branches to
+  (`include/macros.inc:92`), left from when the macro guarded against SmallInts.
+  It now increments unconditionally, so the label suggests a check that is not
+  there.
