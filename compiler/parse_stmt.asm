@@ -36,6 +36,7 @@ extern par_expr
 extern par_finish_list
 extern par_kind
 extern par_peek
+extern par_peek_next
 extern par_syntax_error
 extern par_looks_like_match
 extern par_soft_keyword_is
@@ -2905,8 +2906,20 @@ DEF_FUNC_LOCAL ps_decorated, PDC_FRAME
     je .have_target
     cmp eax, TOK_CLASS
     je .have_target
+    ; `async def` is decoratable and `async for` / `async with` are not, so the
+    ; one token of lookahead decides it here rather than after the statement is
+    ; parsed -- the error then points at the `async`, not at the end of a loop.
+    ; @wraps over an async def is how contextlib.py and a hundred other Lib/
+    ; sites are written, and this rejected every one of them.
+    cmp eax, TOK_ASYNC
+    jne .bad_target
     mov rdi, rbx
-    CSTRING rsi, "expected 'def' or 'class' after a decorator"
+    call par_peek_next
+    cmp eax, TOK_DEF
+    je .have_target
+.bad_target:
+    mov rdi, rbx
+    CSTRING rsi, "expected 'def', 'class' or 'async def' after a decorator"
     call par_syntax_error
     jmp .fail
 .have_target:

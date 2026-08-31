@@ -42,6 +42,7 @@ test_compile_class_body_cell
 test_compile_class_closure
 test_compile_class
 test_compile_comp_if
+test_compile_decorated_async
 test_compile_docstring
 test_compile_error_dropped
 test_compile_except_star
