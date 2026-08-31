@@ -607,74 +607,8 @@ END_FUNC object_method_hash
 ;; does in CPython, where it is a slot wrapper bound to dict.
 ;; ============================================================================
 extern dict_subscript
-DEF_FUNC_BARE dict_dunder_getitem
-    ; The same guards its two siblings carry.  builtin_func_call validates
-    ; neither the count nor the type for these -- add_method_to_dict registers
-    ; them with no min or max -- so dict.__getitem__(5, "a") handed the
-    ; immediate 5 to dict_get as a pointer and dereferenced it, and
-    ; d.__getitem__() read args[1] off the end of the argument array.
-    cmp rsi, 2
-    jne .ddg_error
-    mov rax, [rdi]              ; self
-    V_TEST_PTR rax, rcx
-    ja .ddg_error
-    test rax, rax
-    jz .ddg_error
-    mov rcx, [rax + PyObject.ob_type]
-    REQUIRE_DICT_TYPE rcx, rdx, .ddg_error
-    mov rsi, [rdi + 8]          ; the key Value
-    mov rdi, rax
-    jmp dict_subscript
-.ddg_error:
-    RAISE exc_TypeError_type, "descriptor '__getitem__' requires a 'dict' object"
-END_FUNC dict_dunder_getitem
 
-DEF_FUNC dict_dunder_setitem
-    cmp rsi, 3
-    jne .dds_error
-    mov rax, [rdi]
-    V_TEST_PTR rax, rcx
-    ja .dds_error
-    test rax, rax
-    jz .dds_error
-    mov rcx, [rax + PyObject.ob_type]
-    REQUIRE_DICT_TYPE rcx, rdx, .dds_error
-    mov rsi, [rdi + 8]
-    mov rdx, [rdi + 16]
-    mov rdi, rax
-    call dict_set
-    lea rax, [rel none_singleton]
-    INCREF rax
-    mov edx, TAG_PTR
-    leave
-    V_PACK rax, rdx
-    ret
-.dds_error:
-    RAISE exc_TypeError_type, "object does not support item assignment"
-END_FUNC dict_dunder_setitem
 
-DEF_FUNC dict_dunder_delitem
-    cmp rsi, 2
-    jne .ddd_error
-    mov rax, [rdi]
-    V_TEST_PTR rax, rcx
-    ja .ddd_error
-    test rax, rax
-    jz .ddd_error
-    mov rcx, [rax + PyObject.ob_type]
-    REQUIRE_DICT_TYPE rcx, rdx, .ddd_error
-    mov rsi, [rdi + 8]
-    mov rdi, rax
-    call dict_del
-    lea rax, [rel none_singleton]
-    INCREF rax
-    mov edx, TAG_PTR
-    leave
-    V_PACK rax, rdx
-    ret
-.ddd_error:
-    RAISE exc_TypeError_type, "object does not support item deletion"
-END_FUNC dict_dunder_delitem
 
 
 

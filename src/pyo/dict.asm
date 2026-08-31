@@ -22,8 +22,6 @@ extern raise_exception
 extern obj_incref
 extern type_type
 extern tuple_type
-extern dict_traverse
-extern dict_clear_gc
 
 ; Initial capacity (must be power of 2)
 ; DICT_INIT_CAP now lives in object.inc, shared with the subclass path
@@ -1769,3 +1767,116 @@ dict_items_view_type:
     dq 0                        ; tp_traverse
     dq 0                        ; tp_clear
     dq 0 ; tp_dictoffset
+
+section .text
+
+;; ============================================================================
+;; GC traverse and clear.  These lived in gc.asm, which left the collector
+;; holding the reference graph of every type in the system; a type's own
+;; file is the only place that knows which of its fields are owned.
+;; ============================================================================
+
+; ---- dict_traverse / dict_clear ----
+
+DEF_FUNC dict_traverse
+    push rbx
+    push r12
+    push r13
+
+    mov rbx, rdi
+    mov r12, [rbx + PyDictObject.entries]
+    mov r13, [rbx + PyDictObject.capacity]
+    test r13, r13
+    jz .done
+.loop:
+    dec r13
+    ; Check for empty/tombstone
+    ENTRY_CLASSIFY r12, .next, .next
+
+    ; Visit key
+    mov rdi, [r12 + DictEntry.key]
+
+    VISIT_V rdi, rsi
+    ; Visit value
+    mov rdi, [r12 + DictEntry.value]
+
+    VISIT_V rdi, rsi
+
+.next:
+    add r12, DICT_ENTRY_SIZE
+    test r13, r13
+    jnz .loop
+.done:
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC dict_traverse
+
+DEF_FUNC dict_clear_gc
+    push rbx
+    push r12
+    push r13
+
+    mov rbx, rdi
+    mov r12, [rbx + PyDictObject.entries]
+    mov r13, [rbx + PyDictObject.capacity]
+
+    test r13, r13
+    jz .done
+.loop:
+    dec r13
+    ENTRY_CLASSIFY r12, .next, .next
+
+    ; DECREF key
+    push r12
+    push r13
+    mov rdi, [r12 + DictEntry.key]
+    V_UNPACK rdi, rsi
+    DECREF_VAL rdi, rsi
+    pop r13
+    pop r12
+
+    ; DECREF value
+    push r12
+    push r13
+    mov rdi, [r12 + DictEntry.value]
+    V_UNPACK rdi, rsi
+    DECREF_VAL rdi, rsi
+    pop r13
+    pop r12
+
+    ; Clear entry.  It has to become a *tombstone*, not just a zeroed key:
+    ; ENTRY_CLASSIFY reads key==0 with any hash other than -1 as "empty",
+    ; which ends a probe early, so a surviving key further along the chain
+    ; becomes unreachable.
+    mov qword [r12 + DictEntry.key], 0
+    mov qword [r12 + DictEntry.value], 0
+    mov qword [r12 + DictEntry.hash], ENTRY_TOMBSTONE_HASH
+
+.next:
+    add r12, DICT_ENTRY_SIZE
+    test r13, r13
+    jnz .loop
+.done:
+    ; Keep the header coherent with the table we just emptied: the sparse
+    ; index array has to forget the entries too.
+    mov rdi, [rbx + PyDictObject.dk_indices]
+    test rdi, rdi
+    jz .no_indices
+    mov rcx, [rbx + PyDictObject.capacity]
+    mov rax, DICT_IX_EMPTY
+    rep stosq
+.no_indices:
+    mov qword [rbx + PyDictObject.ob_size], 0
+    mov qword [rbx + PyDictObject.dk_nentries], 0
+    mov qword [rbx + PyDictObject.dk_tombstones], 0
+    inc qword [rbx + PyDictObject.dk_version]
+
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC dict_clear_gc

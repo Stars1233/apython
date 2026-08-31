@@ -38,8 +38,6 @@ extern str_new_heap
 extern obj_repr
 extern obj_str
 extern raise_exception
-extern exc_traverse
-extern exc_clear_gc
 extern tuple_new
 extern tuple_type
 extern ap_strcmp
@@ -1499,3 +1497,75 @@ exception_type_table:
     dq exc_CancelledError_type       ; EXC_CANCELLED_ERROR = 26
     dq exc_StopAsyncIteration_type   ; EXC_STOP_ASYNC_ITERATION = 27
     dq exc_TimeoutError_type         ; EXC_TIMEOUT_ERROR = 28
+
+section .text
+
+;; ============================================================================
+;; GC traverse and clear.  These lived in gc.asm, which left the collector
+;; holding the reference graph of every type in the system; a type's own
+;; file is the only place that knows which of its fields are owned.
+;; ============================================================================
+
+; ---- exc_traverse / exc_clear ----
+DEF_FUNC exc_traverse
+    push rbx
+    mov rbx, rdi
+
+    ; Visit exc_value (fat)
+    mov rdi, [rbx + PyExceptionObject.exc_value]
+    VISIT_V rdi, rsi
+
+    ; Visit heap ptrs
+    mov rdi, [rbx + PyExceptionObject.exc_tb]
+    VISIT_PTR rdi
+    mov rdi, [rbx + PyExceptionObject.exc_context]
+    VISIT_PTR rdi
+    mov rdi, [rbx + PyExceptionObject.exc_cause]
+    VISIT_PTR rdi
+    mov rdi, [rbx + PyExceptionObject.exc_args]
+    VISIT_PTR rdi
+
+    pop rbx
+    leave
+    ret
+END_FUNC exc_traverse
+
+DEF_FUNC exc_clear_gc
+    push rbx
+    mov rbx, rdi
+
+    ; DECREF_VAL exc_value
+    mov rdi, [rbx + PyExceptionObject.exc_value]
+    mov qword [rbx + PyExceptionObject.exc_value], 0
+    DECREF_V rdi, rsi
+
+    ; XDECREF + NULL heap ptrs
+    mov rdi, [rbx + PyExceptionObject.exc_tb]
+    mov qword [rbx + PyExceptionObject.exc_tb], 0
+    test rdi, rdi
+    jz .no_tb
+    call obj_decref
+.no_tb:
+    mov rdi, [rbx + PyExceptionObject.exc_context]
+    mov qword [rbx + PyExceptionObject.exc_context], 0
+    test rdi, rdi
+    jz .no_ctx
+    call obj_decref
+.no_ctx:
+    mov rdi, [rbx + PyExceptionObject.exc_cause]
+    mov qword [rbx + PyExceptionObject.exc_cause], 0
+    test rdi, rdi
+    jz .no_cause
+    call obj_decref
+.no_cause:
+    mov rdi, [rbx + PyExceptionObject.exc_args]
+    mov qword [rbx + PyExceptionObject.exc_args], 0
+    test rdi, rdi
+    jz .no_args
+    call obj_decref
+.no_args:
+
+    pop rbx
+    leave
+    ret
+END_FUNC exc_clear_gc

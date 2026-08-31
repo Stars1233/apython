@@ -19,8 +19,6 @@ extern obj_richcompare_bool
 extern ap_memset
 extern fatal_error
 extern type_type
-extern set_traverse
-extern set_clear_gc
 
 ; Set entry layout constants
 SET_ENTRY_HASH    equ 0
@@ -1247,3 +1245,87 @@ set_iter_type:
     dq 0                        ; tp_traverse
     dq 0                        ; tp_clear
     dq 0 ; tp_dictoffset
+
+section .text
+
+;; ============================================================================
+;; GC traverse and clear.  These lived in gc.asm, which left the collector
+;; holding the reference graph of every type in the system; a type's own
+;; file is the only place that knows which of its fields are owned.
+;; ============================================================================
+
+; ---- set_traverse / set_clear ----
+; Set entries are 24 bytes (hash+key+key_tag_qword), distinct from DictEntry (32 bytes).
+SET_ENTRY_SIZE_GC    equ 16
+SET_ENTRY_KEY_GC     equ 8
+
+DEF_FUNC set_traverse
+    push rbx
+    push r12
+    push r13
+
+    mov rbx, rdi
+    mov r12, [rbx + PyDictObject.entries]   ; set reuses PyDictObject layout for header
+    mov r13, [rbx + PyDictObject.capacity]
+    test r13, r13
+    jz .st_done
+.st_loop:
+    dec r13
+    ; Check for empty (key_tag == 0) or tombstone (key_tag == 0xdead)
+    SET_ENTRY_CLASSIFY r12, .st_next, .st_next
+
+    ; Visit key
+    mov rdi, [r12 + SET_ENTRY_KEY_GC]
+    VISIT_V rdi, rsi
+
+.st_next:
+    add r12, SET_ENTRY_SIZE_GC
+    test r13, r13
+    jnz .st_loop
+.st_done:
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC set_traverse
+
+DEF_FUNC set_clear_gc
+    push rbx
+    push r12
+    push r13
+
+    mov rbx, rdi
+    mov r12, [rbx + PyDictObject.entries]
+    mov r13, [rbx + PyDictObject.capacity]
+
+    test r13, r13
+    jz .sc_done
+.sc_loop:
+    dec r13
+    SET_ENTRY_CLASSIFY r12, .sc_next, .sc_next
+
+    ; DECREF key
+    push r12
+    push r13
+    mov rdi, [r12 + SET_ENTRY_KEY_GC]
+    DECREF_V rdi, rsi
+    pop r13
+    pop r12
+
+    ; Clear entry
+    mov qword [r12 + SET_ENTRY_KEY_GC], 0
+
+.sc_next:
+    add r12, SET_ENTRY_SIZE_GC
+    test r13, r13
+    jnz .sc_loop
+.sc_done:
+    mov qword [rbx + PyDictObject.ob_size], 0
+
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC set_clear_gc

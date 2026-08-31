@@ -16,12 +16,6 @@ extern obj_incref
 extern obj_decref
 extern obj_dealloc
 extern type_type
-extern staticmethod_traverse
-extern staticmethod_clear
-extern property_traverse
-extern property_clear
-extern classmethod_traverse
-extern classmethod_clear
 extern raise_exception
 extern exc_TypeError_type
 extern exc_AttributeError_type
@@ -1952,3 +1946,95 @@ align 8
 mpg_readonly_names:
     dq mpg_n_setitem, mpg_n_delitem, mpg_n_clear, mpg_n_pop
     dq mpg_n_popitem, mpg_n_setdefault, mpg_n_update, 0
+
+section .text
+
+;; ============================================================================
+;; GC traverse and clear.  These lived in gc.asm, which left the collector
+;; holding the reference graph of every type in the system; a type's own
+;; file is the only place that knows which of its fields are owned.
+;; ============================================================================
+
+; ---- staticmethod_traverse / classmethod_traverse / property_traverse ----
+DEF_FUNC staticmethod_traverse
+    mov rdi, [rdi + PyStaticMethodObject.sm_callable]
+    VISIT_PTR rdi
+    leave
+    ret
+END_FUNC staticmethod_traverse
+
+DEF_FUNC staticmethod_clear
+    push rbx
+    mov rbx, rdi
+    mov rdi, [rbx + PyStaticMethodObject.sm_callable]
+    mov qword [rbx + PyStaticMethodObject.sm_callable], 0
+    test rdi, rdi
+    jz .done
+    call obj_decref
+.done:
+    pop rbx
+    leave
+    ret
+END_FUNC staticmethod_clear
+
+DEF_FUNC classmethod_traverse
+    mov rdi, [rdi + PyClassMethodObject.cm_callable]
+    VISIT_PTR rdi
+    leave
+    ret
+END_FUNC classmethod_traverse
+
+DEF_FUNC classmethod_clear
+    push rbx
+    mov rbx, rdi
+    mov rdi, [rbx + PyClassMethodObject.cm_callable]
+    mov qword [rbx + PyClassMethodObject.cm_callable], 0
+    test rdi, rdi
+    jz .done
+    call obj_decref
+.done:
+    pop rbx
+    leave
+    ret
+END_FUNC classmethod_clear
+
+DEF_FUNC property_traverse
+    push rbx
+    mov rbx, rdi
+    mov rdi, [rbx + PyPropertyObject.prop_get]
+    VISIT_PTR rdi
+    mov rdi, [rbx + PyPropertyObject.prop_set]
+    VISIT_PTR rdi
+    mov rdi, [rbx + PyPropertyObject.prop_del]
+    VISIT_PTR rdi
+    pop rbx
+    leave
+    ret
+END_FUNC property_traverse
+
+DEF_FUNC property_clear
+    push rbx
+    mov rbx, rdi
+
+    mov rdi, [rbx + PyPropertyObject.prop_get]
+    mov qword [rbx + PyPropertyObject.prop_get], 0
+    test rdi, rdi
+    jz .no_get
+    call obj_decref
+.no_get:
+    mov rdi, [rbx + PyPropertyObject.prop_set]
+    mov qword [rbx + PyPropertyObject.prop_set], 0
+    test rdi, rdi
+    jz .no_set
+    call obj_decref
+.no_set:
+    mov rdi, [rbx + PyPropertyObject.prop_del]
+    mov qword [rbx + PyPropertyObject.prop_del], 0
+    test rdi, rdi
+    jz .no_del
+    call obj_decref
+.no_del:
+    pop rbx
+    leave
+    ret
+END_FUNC property_clear

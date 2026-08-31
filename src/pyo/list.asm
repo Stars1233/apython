@@ -24,8 +24,6 @@ extern obj_incref
 extern slice_type
 extern slice_indices
 extern type_type
-extern list_traverse
-extern list_clear
 extern int_type
 extern eval_exception_unwind
 extern obj_richcompare_bool
@@ -2124,3 +2122,80 @@ list_type:
     dq list_traverse                        ; tp_traverse
     dq list_clear                        ; tp_clear
     dq 0       ; tp_dictoffset
+
+section .text
+
+;; ============================================================================
+;; GC traverse and clear.  These lived in gc.asm, which left the collector
+;; holding the reference graph of every type in the system; a type's own
+;; file is the only place that knows which of its fields are owned.
+;; ============================================================================
+
+; ============================================================================
+; TRAVERSE AND CLEAR FUNCTIONS
+; ============================================================================
+; Convention: tp_traverse(rdi=obj, r14=visit_callback)
+;             tp_clear(rdi=obj)
+; The VISIT_* macros use r14 as the callback.
+
+; ---- list_traverse / list_clear ----
+DEF_FUNC list_traverse
+    push rbx
+    push r12
+    push r13
+    push r15
+
+    mov rbx, rdi                       ; obj
+    mov r12, [rbx + PyListObject.ob_item]       ; payloads
+    mov r13, [rbx + PyListObject.ob_size]
+    test r13, r13
+    jz .done
+
+.loop:
+    dec r13
+    mov rdi, [r12]
+    VISIT_V rdi, rsi
+    add r12, 8
+    test r13, r13
+    jnz .loop
+.done:
+    pop r15
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC list_traverse
+
+DEF_FUNC list_clear
+    push rbx
+    push r12
+    push r13
+    push r15
+
+    mov rbx, rdi
+    mov r12, [rbx + PyListObject.ob_item]       ; payloads
+    mov r13, [rbx + PyListObject.ob_size]
+    mov qword [rbx + PyListObject.ob_size], 0
+
+    test r13, r13
+    jz .done
+.loop:
+    dec r13
+    mov rdi, [r12]
+    push r12
+    push r12
+    DECREF_V rdi, rsi
+    pop r12
+    pop r12
+    add r12, 8
+    test r13, r13
+    jnz .loop
+.done:
+    pop r15
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC list_clear

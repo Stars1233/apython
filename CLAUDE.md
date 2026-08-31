@@ -171,11 +171,11 @@ No hand-written file exceeds 100k bytes; only generated asm may.
   f-strings, generators), `match` (the MATCH_* family and the intrinsics),
   `async`, `import`
 - `src/methods/*.asm` — Builtin type methods, one file per type: `str`,
-  `str_pred`, `str_parts`, `list`, `dict`, `set`, `num`, `bytes`, `object`
-  (object's own dunders plus the `DEF_DUNDER_*` generators), and `init`, which
-  registers them all into each type's `tp_dict`.  These share basenames with
-  `src/pyo/` on purpose: `methods/dict.asm` is dict's methods, `pyo/dict.asm`
-  is dict itself
+  `str_pred`, `str_parts`, `list`, `tuple`, `dict`, `set`, `num`, `bytes`,
+  `object` (object's own dunders plus the `DEF_DUNDER_*` generators), and
+  `init`, which registers them all into each type's `tp_dict`.  These share
+  basenames with `src/pyo/` on purpose: `methods/dict.asm` is dict's methods,
+  `pyo/dict.asm` is dict itself
 - `src/pyo/*.asm` — Type implementations (int, str, list, dict, tuple, func,
   class, iter, singleton, bytes, code)
 - `src/marshal.asm` — .pyc marshal deserializer, and the .pyc file reader
@@ -187,8 +187,8 @@ No hand-written file exceeds 100k bytes; only generated asm may.
 - `src/dunder.asm` — dunder lookup and the `dunder_call_*` helpers, the
   fallback path when a heaptype has no slot
 - `src/repr.asm` — the container reprs and the recursion stack they share
-- `src/gc.asm` — the generational collector, and the `tp_traverse`/`tp_clear`
-  callbacks for every type that has them
+- `src/gc.asm` — the generational collector.  Each type's `tp_traverse` and
+  `tp_clear` live with the type, in `src/pyo/*.asm`
 - `src/sre.asm` / `src/sre_module.asm` — the regex engine and its module
   wrapper; the pattern and match objects live in `src/pyo/`
 - `src/valtest.asm` — `--selftest-value`

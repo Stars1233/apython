@@ -23,8 +23,6 @@ extern frame_new
 extern frame_free
 extern tuple_new
 extern type_type
-extern func_traverse
-extern func_clear
 extern exc_TypeError_type
 extern raise_exception
 
@@ -1281,8 +1279,6 @@ extern obj_incref
 extern obj_dealloc
 extern str_from_cstr
 extern type_type
-extern cell_traverse
-extern cell_clear
 
 ;; ============================================================================
 ;; cell_new(rdi = contents Value) -> PyCellObject*
@@ -1380,3 +1376,97 @@ cell_type:
     dq cell_traverse                        ; tp_traverse
     dq cell_clear                        ; tp_clear
     dq 0       ; tp_dictoffset
+
+section .text
+
+;; ============================================================================
+;; GC traverse and clear.  These lived in gc.asm, which left the collector
+;; holding the reference graph of every type in the system; a type's own
+;; file is the only place that knows which of its fields are owned.
+;; ============================================================================
+
+; ---- func_traverse / func_clear ----
+DEF_FUNC func_traverse
+    push rbx
+    mov rbx, rdi
+
+    mov rdi, [rbx + PyFuncObject.func_code]
+    VISIT_PTR rdi
+    mov rdi, [rbx + PyFuncObject.func_globals]
+    VISIT_PTR rdi
+    mov rdi, [rbx + PyFuncObject.func_name]
+    VISIT_PTR rdi
+    mov rdi, [rbx + PyFuncObject.func_defaults]
+    VISIT_PTR rdi
+    mov rdi, [rbx + PyFuncObject.func_closure]
+    VISIT_PTR rdi
+    mov rdi, [rbx + PyFuncObject.func_kwdefaults]
+    VISIT_PTR rdi
+    mov rdi, [rbx + PyFuncObject.func_dict]
+    VISIT_PTR rdi
+
+    pop rbx
+    leave
+    ret
+END_FUNC func_traverse
+
+DEF_FUNC func_clear
+    push rbx
+    mov rbx, rdi
+
+    ; NULL out closure, defaults, kwdefaults, func_dict — XDECREF each
+    mov rdi, [rbx + PyFuncObject.func_closure]
+    mov qword [rbx + PyFuncObject.func_closure], 0
+    test rdi, rdi
+    jz .no_clos
+    call obj_decref
+.no_clos:
+    mov rdi, [rbx + PyFuncObject.func_defaults]
+    mov qword [rbx + PyFuncObject.func_defaults], 0
+    test rdi, rdi
+    jz .no_defs
+    call obj_decref
+.no_defs:
+    mov rdi, [rbx + PyFuncObject.func_kwdefaults]
+    mov qword [rbx + PyFuncObject.func_kwdefaults], 0
+    test rdi, rdi
+    jz .no_kwd
+    call obj_decref
+.no_kwd:
+    mov rdi, [rbx + PyFuncObject.func_dict]
+    mov qword [rbx + PyFuncObject.func_dict], 0
+    test rdi, rdi
+    jz .no_fdict
+    call obj_decref
+.no_fdict:
+
+    pop rbx
+    leave
+    ret
+END_FUNC func_clear
+
+; ---- cell_traverse / cell_clear ----
+DEF_FUNC cell_traverse
+    push rbx
+    mov rbx, rdi
+
+    mov rdi, [rbx + PyCellObject.ob_ref]
+    VISIT_V rdi, rsi
+
+    pop rbx
+    leave
+    ret
+END_FUNC cell_traverse
+
+DEF_FUNC cell_clear
+    push rbx
+    mov rbx, rdi
+
+    mov rdi, [rbx + PyCellObject.ob_ref]
+    mov qword [rbx + PyCellObject.ob_ref], 0
+    DECREF_V rdi, rsi
+
+    pop rbx
+    leave
+    ret
+END_FUNC cell_clear

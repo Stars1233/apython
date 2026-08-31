@@ -21,8 +21,6 @@ extern dict_new
 extern dict_get
 extern dict_set
 extern type_type
-extern module_traverse
-extern module_clear_gc
 extern none_singleton
 extern ap_strcmp
 
@@ -510,3 +508,41 @@ namespace_type:
     dq 0                            ; tp_traverse
     dq 0                            ; tp_clear
     dq 0                            ; tp_dictoffset
+
+section .text
+
+;; ============================================================================
+;; GC traverse and clear.  These lived in gc.asm, which left the collector
+;; holding the reference graph of every type in the system; a type's own
+;; file is the only place that knows which of its fields are owned.
+;; ============================================================================
+
+; ---- module_traverse / module_clear ----
+DEF_FUNC module_traverse
+    push rbx
+    mov rbx, rdi
+
+    mov rdi, [rbx + PyModuleObject.mod_dict]
+    VISIT_PTR rdi
+    mov rdi, [rbx + PyModuleObject.mod_name]
+    VISIT_PTR rdi
+
+    pop rbx
+    leave
+    ret
+END_FUNC module_traverse
+
+DEF_FUNC module_clear_gc
+    push rbx
+    mov rbx, rdi
+
+    mov rdi, [rbx + PyModuleObject.mod_dict]
+    mov qword [rbx + PyModuleObject.mod_dict], 0
+    test rdi, rdi
+    jz .done
+    call obj_decref
+.done:
+    pop rbx
+    leave
+    ret
+END_FUNC module_clear_gc

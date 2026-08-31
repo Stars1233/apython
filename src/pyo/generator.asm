@@ -20,8 +20,6 @@ extern none_singleton
 extern str_from_cstr
 extern obj_dealloc
 extern type_type
-extern gen_traverse
-extern gen_clear
 extern ap_strcmp
 extern raise_exception
 extern raise_exception_obj
@@ -1616,3 +1614,82 @@ async_gen_asend_type:
     dq 0                        ; tp_traverse
     dq 0                        ; tp_clear
     dq 0 ; tp_dictoffset
+
+section .text
+
+;; ============================================================================
+;; GC traverse and clear.  These lived in gc.asm, which left the collector
+;; holding the reference graph of every type in the system; a type's own
+;; file is the only place that knows which of its fields are owned.
+;; ============================================================================
+
+; ---- gen_traverse / gen_clear ----
+DEF_FUNC gen_traverse
+    push rbx
+    push r12
+    push r13
+
+    mov rbx, rdi
+
+    ; Visit code
+    mov rdi, [rbx + PyGenObject.gi_code]
+    VISIT_PTR rdi
+
+    ; Visit name
+    mov rdi, [rbx + PyGenObject.gi_name]
+    VISIT_PTR rdi
+
+    ; Visit return value (fat)
+    mov rdi, [rbx + PyGenObject.gi_return_value]
+
+    VISIT_V rdi, rsi
+
+    ; Traverse frame localsplus if frame exists
+    mov r12, [rbx + PyGenObject.gi_frame]
+    test r12, r12
+    jz .done
+
+    ; Get nlocalsplus from code object
+    mov rax, [rbx + PyGenObject.gi_code]
+    mov r13d, [rax + PyCodeObject.co_nlocalsplus]
+    test r13d, r13d
+    jz .done
+
+    lea r12, [r12 + PyFrame.localsplus]  ; start of the Value array
+.frame_loop:
+    dec r13d
+    mov rdi, [r12 + r13*8]
+    VISIT_V rdi, rsi
+    test r13d, r13d
+    jnz .frame_loop
+
+.done:
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC gen_traverse
+
+DEF_FUNC gen_clear
+    push rbx
+    mov rbx, rdi
+
+    ; Clear return value
+    mov rdi, [rbx + PyGenObject.gi_return_value]
+    V_UNPACK rdi, rsi
+    mov qword [rbx + PyGenObject.gi_return_value], 0
+    XDECREF_VAL rdi, rsi
+
+    ; Free frame if held (frame_free DECREFs localsplus)
+    mov rdi, [rbx + PyGenObject.gi_frame]
+    mov qword [rbx + PyGenObject.gi_frame], 0
+    test rdi, rdi
+    jz .done
+    call frame_free
+
+.done:
+    pop rbx
+    leave
+    ret
+END_FUNC gen_clear

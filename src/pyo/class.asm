@@ -36,10 +36,6 @@ extern sys_write
 extern current_exception
 extern dict_type
 extern tuple_type
-extern method_traverse
-extern method_clear
-extern instance_traverse
-extern instance_clear
 extern int_type
 extern str_type
 extern staticmethod_type
@@ -2727,3 +2723,124 @@ method_type:
     dq method_traverse                        ; tp_traverse
     dq method_clear                        ; tp_clear
     dq 0         ; tp_dictoffset
+
+section .text
+
+;; ============================================================================
+;; GC traverse and clear.  These lived in gc.asm, which left the collector
+;; holding the reference graph of every type in the system; a type's own
+;; file is the only place that knows which of its fields are owned.
+;; ============================================================================
+
+; ---- method_traverse / method_clear ----
+DEF_FUNC method_traverse
+    push rbx
+    mov rbx, rdi
+
+    mov rdi, [rbx + PyMethodObject.im_func]
+    VISIT_PTR rdi
+    mov rdi, [rbx + PyMethodObject.im_self]
+    VISIT_V rdi, rsi            ; a Value: an immediate self is not an address
+
+    pop rbx
+    leave
+    ret
+END_FUNC method_traverse
+
+DEF_FUNC method_clear
+    push rbx
+    mov rbx, rdi
+
+    mov rdi, [rbx + PyMethodObject.im_func]
+    mov qword [rbx + PyMethodObject.im_func], 0
+    test rdi, rdi
+    jz .no_func
+    call obj_decref
+.no_func:
+    mov rdi, [rbx + PyMethodObject.im_self]
+    mov qword [rbx + PyMethodObject.im_self], 0
+    XDECREF_V rdi, rsi
+.no_self:
+
+    pop rbx
+    leave
+    ret
+END_FUNC method_clear
+
+; ---- instance_traverse / instance_clear ----
+DEF_FUNC instance_traverse
+    push rbx
+    push r12
+    push r13
+
+    mov rbx, rdi
+
+    ; Visit the instance dict, wherever this family keeps it
+    LOAD_INST_DICT rdi, rbx, .no_inst_dict
+    VISIT_PTR rdi
+.no_inst_dict:
+
+    ; Visit __slots__ values (one Value each, after the instance header).
+    ; The header ends at tp_dictoffset plus the dict word, or at
+    ; PyInstanceObject_size when the family keeps no dict.
+    mov rax, [rbx + PyObject.ob_type]
+    mov rcx, [rax + PyTypeObject.tp_dictoffset]
+    test rcx, rcx
+    jz .it_no_dict_hdr
+    cmp rcx, TP_DICT_AT_TAIL
+    je .it_no_dict_hdr          ; the dict is past the data, not in the header
+    add rcx, 8
+    jmp .it_have_hdr
+.it_no_dict_hdr:
+    ; No dict word: a str subclass, whose header is the base's, not
+    ; PyInstanceObject's.  Using 24 there found a phantom slot at +24 --
+    ; PyStrObject.ob_hash -- and XDECREF'd the hash as if it were a pointer.
+    mov rcx, [rax + PyTypeObject.tp_base]
+    test rcx, rcx
+    jz .it_no_dict_hdr_default
+    mov rcx, [rcx + PyTypeObject.tp_basicsize]
+    test rcx, rcx
+    jnz .it_have_hdr
+.it_no_dict_hdr_default:
+    mov rcx, PyInstanceObject_size
+.it_have_hdr:
+    mov rax, [rax + PyTypeObject.tp_basicsize]
+    sub rax, rcx
+    jle .done
+    shr rax, 3                  ; nslots
+    mov r13, rax
+    lea r12, [rbx + rcx]
+
+.slot_loop:
+    mov rdi, [r12]
+    VISIT_V rdi, rsi
+    add r12, 8
+    dec r13
+    jnz .slot_loop
+
+.done:
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC instance_traverse
+
+DEF_FUNC instance_clear
+    push rbx
+    mov rbx, rdi
+
+    ; XDECREF + NULL the instance dict, wherever this family keeps it
+    LOAD_INST_DICT rdi, rbx, .done
+    test rdi, rdi
+    jz .done
+    xor eax, eax
+    STORE_INST_DICT rbx, rax, rcx, .ic_decref
+.ic_decref:
+    call obj_decref
+
+.done:
+    pop rbx
+    leave
+    ret
+END_FUNC instance_clear

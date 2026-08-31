@@ -24,8 +24,6 @@ extern slice_indices
 extern ap_memcpy
 extern type_type
 extern gc_untrack
-extern tuple_traverse
-extern tuple_clear
 extern obj_is_true
 extern float_compare
 extern int_type
@@ -1302,3 +1300,72 @@ tuple_type:
     dq tuple_traverse                        ; tp_traverse
     dq tuple_clear                        ; tp_clear
     dq 0        ; tp_dictoffset
+
+section .text
+
+;; ============================================================================
+;; GC traverse and clear.  These lived in gc.asm, which left the collector
+;; holding the reference graph of every type in the system; a type's own
+;; file is the only place that knows which of its fields are owned.
+;; ============================================================================
+
+; ---- tuple_traverse / tuple_clear ----
+DEF_FUNC tuple_traverse
+    push rbx
+    push r12
+    push r13
+    push r15
+
+    mov rbx, rdi
+    mov r13, [rbx + PyTupleObject.ob_size]
+    mov r12, [rbx + PyTupleObject.ob_item]       ; payloads
+    test r13, r13
+    jz .done
+.loop:
+    dec r13
+    mov rdi, [r12]
+    VISIT_V rdi, rsi
+    add r12, 8
+    test r13, r13
+    jnz .loop
+.done:
+    pop r15
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC tuple_traverse
+
+DEF_FUNC tuple_clear
+    push rbx
+    push r12
+    push r13
+    push r15
+
+    mov rbx, rdi
+    mov r13, [rbx + PyTupleObject.ob_size]
+    mov r12, [rbx + PyTupleObject.ob_item]       ; payloads
+    mov qword [rbx + PyTupleObject.ob_size], 0
+
+    test r13, r13
+    jz .done
+.loop:
+    dec r13
+    mov rdi, [r12]
+    push r12
+    push r12
+    DECREF_V rdi, rsi
+    pop r12
+    pop r12
+    add r12, 8
+    test r13, r13
+    jnz .loop
+.done:
+    pop r15
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC tuple_clear

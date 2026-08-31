@@ -25,8 +25,6 @@ extern bool_type
 extern exc_ValueError_type
 extern int_type
 extern type_type
-extern slice_traverse
-extern slice_clear_gc
 extern raise_exception
 extern exc_TypeError_type
 extern ap_strcmp
@@ -509,3 +507,49 @@ slice_type:
     dq slice_traverse                        ; tp_traverse
     dq slice_clear_gc                        ; tp_clear
     dq 0           ; tp_dictoffset
+
+section .text
+
+;; ============================================================================
+;; GC traverse and clear.  These lived in gc.asm, which left the collector
+;; holding the reference graph of every type in the system; a type's own
+;; file is the only place that knows which of its fields are owned.
+;; ============================================================================
+
+; ---- slice_traverse / slice_clear ----
+DEF_FUNC slice_traverse
+    push rbx
+    mov rbx, rdi
+
+    mov rdi, [rbx + PySliceObject.start]
+    VISIT_V rdi, rsi
+    mov rdi, [rbx + PySliceObject.stop]
+    VISIT_V rdi, rsi
+    mov rdi, [rbx + PySliceObject.step]
+    VISIT_V rdi, rsi
+
+    pop rbx
+    leave
+    ret
+END_FUNC slice_traverse
+
+DEF_FUNC slice_clear_gc
+    push rbx
+    mov rbx, rdi
+
+    mov rdi, [rbx + PySliceObject.start]
+    mov qword [rbx + PySliceObject.start], 0
+    DECREF_V rdi, rsi
+
+    mov rdi, [rbx + PySliceObject.stop]
+    mov qword [rbx + PySliceObject.stop], 0
+    DECREF_V rdi, rsi
+
+    mov rdi, [rbx + PySliceObject.step]
+    mov qword [rbx + PySliceObject.step], 0
+    DECREF_V rdi, rsi
+
+    pop rbx
+    leave
+    ret
+END_FUNC slice_clear_gc
