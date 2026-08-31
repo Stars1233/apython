@@ -605,6 +605,10 @@ DEF_FUNC op_load_attr, LA_FRAME
     DECREF_VAL rdi, rsi         ; a payload, not necessarily a pointer
 
     RESTORE_FAT_RESULT
+    ; As above: a user __get__ that raised returns NULL, and pushing it lost
+    ; the exception.
+    test edx, edx
+    jz .la_propagate
     cmp qword [rbp - LA_FLAG], 0
     jne .la_descr_get_flag1
     VPUSH_VAL rax, rdx
@@ -869,6 +873,12 @@ DEF_FUNC op_load_attr, LA_FRAME
     DECREF_VAL rdi, rsi         ; a payload, not necessarily a pointer
 
     RESTORE_FAT_RESULT
+    ; A getter that raised hands back NULL.  Pushing that and dispatching on
+    ; left a (0,0) pair on the value stack where the frame expected a value:
+    ; the exception escaped its own try block, and a getter that touched self
+    ; segfaulted.
+    test edx, edx
+    jz .la_propagate
     ; Push result (property_descr_get already returns owned ref)
     cmp qword [rbp - LA_FLAG], 0
     jne .la_prop_flag1
@@ -956,6 +966,13 @@ DEF_FUNC op_load_attr, LA_FRAME
     mov rax, [rbp - LA_CLASS]  ; class
     VPUSH_PTR rax
     jmp .la_done
+
+.la_propagate:
+    ; The exception is already pending; hand it to the frame's own handler.
+    extern eval_exception_unwind
+    leave
+    mov [rel eval_saved_r13], r13
+    jmp eval_exception_unwind
 
 .la_done:
     add rbx, 18            ; skip 9 CACHE entries
