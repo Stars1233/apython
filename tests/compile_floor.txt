@@ -45,12 +45,14 @@ test_compile_expr
 test_compile_flow
 test_compile_fstring
 test_compile_func
+test_compile_import_star
 test_compile_match
 test_compile_operators
 test_compile_pep695
 test_compile_precedence
 test_compile_scope_unbound
 test_compile_subscript_except
+test_compile_ternary_or
 test_compile_try
 test_container_dunders
 test_control_flow
@@ -79,6 +81,7 @@ test_exception_context
 test_exceptions
 test_exception_str_repr
 test_except_star
+test_exec_builtins_value
 test_extended_slice
 test_float_fromhex
 test_float_methods
@@ -100,6 +103,7 @@ test_generators
 test_gen_return2
 test_gen_return
 test_getattr_descriptors
+test_getattr_immediate
 test_immediate_operands
 test_import_errors
 test_import_from
@@ -143,6 +147,7 @@ test_none
 test_numeric_hash
 test_object_doc
 test_object_dunder_inherit
+test_object_eq_recursion
 test_oop
 test_open
 test_operand_types
@@ -150,6 +155,7 @@ test_percent_format
 test_phase4
 test_phase6
 test_pow
+test_prepare_raises
 test_print_file
 test_property_callables
 test_property

@@ -423,7 +423,10 @@ DEF_FUNC op_load_attr, LA_FRAME
     ; fall through
 
 .la_resolve_tag_type:
-    ; r8 = type object for the non-pointer value
+    ; r8 = type object for the non-pointer value.  Record it before anything
+    ; else: an immediate has no ob_type, so this is the only thing the
+    ; descriptor branches below can use as "the type of the object".
+    mov [rbp - LA_TAGTYPE], r8
     ; First try tp_getattr
     mov rax, [r8 + PyTypeObject.tp_getattr]
     test rax, rax
@@ -598,7 +601,8 @@ DEF_FUNC op_load_attr, LA_FRAME
     call obj_decref
     ; DECREF obj
     mov rdi, [rbp - LA_OBJ]
-    call obj_decref
+    mov rsi, [rbp - LA_OBJ_TAG]
+    DECREF_VAL rdi, rsi         ; a payload, not necessarily a pointer
 
     RESTORE_FAT_RESULT
     cmp qword [rbp - LA_FLAG], 0
@@ -644,7 +648,8 @@ DEF_FUNC op_load_attr, LA_FRAME
     call obj_decref
     ; DECREF obj (method_new INCREFed it)
     mov rdi, [rbp - LA_OBJ]
-    call obj_decref
+    mov rsi, [rbp - LA_OBJ_TAG]
+    DECREF_VAL rdi, rsi         ; a payload, not necessarily a pointer
     jmp .la_done
 
 .la_nonptr_type_attr:
@@ -766,7 +771,8 @@ DEF_FUNC op_load_attr, LA_FRAME
     ; Unwrap: push im_func (deeper), im_self (TOS).
     ; DECREF obj (not used — method has its own self ref).
     mov rdi, [rbp - LA_OBJ]
-    call obj_decref
+    mov rsi, [rbp - LA_OBJ_TAG]
+    DECREF_VAL rdi, rsi         ; a payload, not necessarily a pointer
 
     mov rax, [rbp - LA_ATTR]    ; bound method
     ; INCREF im_func and im_self (we're creating new refs on the value stack)
@@ -793,7 +799,8 @@ DEF_FUNC op_load_attr, LA_FRAME
 .la_not_method:
     ; Non-function attr with flag=1: push NULL then attr
     mov rdi, [rbp - LA_OBJ]
-    call obj_decref        ; DECREF obj
+    mov rsi, [rbp - LA_OBJ_TAG]
+    DECREF_VAL rdi, rsi         ; a payload, not necessarily a pointer
     xor eax, eax
     VPUSH_NULL              ; push NULL
     mov rax, [rbp - LA_ATTR]
@@ -817,7 +824,8 @@ DEF_FUNC op_load_attr, LA_FRAME
 
     ; DECREF obj (not binding it as self)
     mov rdi, [rbp - LA_OBJ]
-    call obj_decref
+    mov rsi, [rbp - LA_OBJ_TAG]
+    DECREF_VAL rdi, rsi         ; a payload, not necessarily a pointer
 
     cmp qword [rbp - LA_FLAG], 0
     jne .la_sm_flag1
@@ -837,8 +845,15 @@ DEF_FUNC op_load_attr, LA_FRAME
 
 .la_handle_property:
     ; Property descriptor: always intercept and call fget(obj)
-    ; (property objects found via instance_getattr still need descriptor invocation)
-
+    ; (property objects found via instance_getattr still need descriptor
+    ; invocation).
+    ;
+    ; CPython does *not* run the getter when the property was found in the
+    ; class's own MRO rather than on its metatype -- `C.prop` is the property
+    ; object -- but which of the two it was is decided inside type_getattr,
+    ; which has no channel to say so.  Deciding it here instead, from whether
+    ; the object is a class, gets `Enum.__members__` wrong: that property
+    ; lives on the *metatype* and must run.
     ; Call property_descr_get(property, obj)
     mov rdi, [rbp - LA_ATTR]   ; property descriptor
     mov rsi, [rbp - LA_OBJ]    ; obj
@@ -850,7 +865,8 @@ DEF_FUNC op_load_attr, LA_FRAME
     call obj_decref
     ; DECREF obj
     mov rdi, [rbp - LA_OBJ]
-    call obj_decref
+    mov rsi, [rbp - LA_OBJ_TAG]
+    DECREF_VAL rdi, rsi         ; a payload, not necessarily a pointer
 
     RESTORE_FAT_RESULT
     ; Push result (property_descr_get already returns owned ref)
@@ -884,10 +900,20 @@ DEF_FUNC op_load_attr, LA_FRAME
     ; "obj is a type" is a flag on its metatype, not a comparison against the
     ; two we ship: a class built by a metaclass of its own is still a class,
     ; and asking the narrow question bound the metaclass instead.
-    mov rdi, [rbp - LA_OBJ]    ; obj
+    ; An immediate int or float has no ob_type to read: `(5).from_bytes`
+    ; reaches a classmethod through one.
+    mov rdi, [rbp - LA_OBJ]    ; obj, as a payload -- the tag is separate
+    cmp qword [rbp - LA_OBJ_TAG], TAG_PTR
+    jne .la_cm_of_type
+    test rdi, rdi
+    jz .la_cm_of_type
     mov rax, [rdi + PyObject.ob_type]
     test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_METATYPE
     jnz .la_cm_obj_is_type
+    jmp .la_cm_have_ob_type
+.la_cm_of_type:
+    mov rax, [rbp - LA_TAGTYPE]
+.la_cm_have_ob_type:
 
     ; obj is an instance -> class = ob_type
     mov [rbp - LA_CLASS], rax  ; save class
@@ -903,7 +929,8 @@ DEF_FUNC op_load_attr, LA_FRAME
 .la_cm_have_class:
     ; DECREF obj
     mov rdi, [rbp - LA_OBJ]
-    call obj_decref
+    mov rsi, [rbp - LA_OBJ_TAG]
+    DECREF_VAL rdi, rsi         ; a payload, not necessarily a pointer
 
     cmp qword [rbp - LA_FLAG], 0
     jne .la_cm_flag1
@@ -1540,13 +1567,20 @@ DEF_FUNC obj_getattr_opt, GA_FRAME
 
 .ga_class:
     ; Bound to the class: to the object itself when that is already a type,
-    ; and to its type otherwise.
+    ; and to its type otherwise.  An immediate int or float has no ob_type to
+    ; read, and reaching for one dereferenced the number -- getattr(5,
+    ; "from_bytes") is an ordinary thing to write.
     mov rax, [rbp - GA_ATTR]
     mov rbx, [rax + PyClassMethodObject.cm_callable]
     mov rdi, [rbp - GA_OBJ]
+    V_TEST_PTR rdi, rcx
+    ja .ga_class_of_type
+    test rdi, rdi
+    jz .ga_class_of_type
     mov rcx, [rdi + PyObject.ob_type]
     test qword [rcx + PyTypeObject.tp_flags], TYPE_FLAG_METATYPE
     jnz .ga_class_self
+.ga_class_of_type:
     mov rdi, [rbp - GA_TYPE]
 .ga_class_self:
     mov [rbp - GA_CLASS], rdi
@@ -1562,6 +1596,8 @@ DEF_FUNC obj_getattr_opt, GA_FRAME
     ret
 
 .ga_property:
+    ; See .la_handle_property in op_load_attr: whether the getter should run
+    ; depends on which MRO the property came from, not on what the object is.
     mov rdi, [rbp - GA_ATTR]
     mov rsi, [rbp - GA_OBJ]
     call property_descr_get
@@ -1586,9 +1622,6 @@ DEF_FUNC obj_getattr_opt, GA_FRAME
     je .ga_done
     cmp qword [rbp - GA_ATTRTAG], TAG_PTR
     jne .ga_done
-    mov rdi, [rbp - GA_OBJ]
-    V_TEST_PTR rdi, rax
-    ja .ga_done                         ; an immediate cannot be a self
     mov rax, [rbp - GA_ATTR]
     mov rcx, [rax + PyObject.ob_type]
     cmp qword [rcx + PyTypeObject.tp_call], 0

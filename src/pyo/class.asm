@@ -2186,12 +2186,14 @@ DEF_FUNC method_new
     mov [rax + PyMethodObject.im_func], rbx
     mov [rax + PyMethodObject.im_self], r12
 
-    ; INCREF func and self
+    ; INCREF func and self.  im_self is a Value, not necessarily a pointer:
+    ; binding a builtin method to an immediate int is what `getattr(5,
+    ; "bit_length")` asks for, and an unguarded incref would treat the encoded
+    ; number as an address.
     push rax
     mov rdi, rbx
     call obj_incref
-    mov rdi, r12
-    call obj_incref
+    INCREF_V r12, rax
 
     ; Track in GC
     mov rdi, [rsp]
@@ -2282,7 +2284,7 @@ DEF_FUNC_LOCAL method_dealloc
     mov rdi, [rbx + PyMethodObject.im_func]
     call obj_decref
     mov rdi, [rbx + PyMethodObject.im_self]
-    call obj_decref
+    XDECREF_V rdi, rsi
     mov rdi, rbx
     call gc_dealloc
 
@@ -2391,6 +2393,7 @@ DEF_FUNC method_repr, MR_FRAME
     mov rdi, [rax + PyMethodObject.im_self]
     test rdi, rdi
     jz .mr_close
+    ; obj_repr takes a Value, which is what im_self holds.
     mov [rbp - MR_LEN], r12
     extern obj_repr
     call obj_repr

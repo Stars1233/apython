@@ -1112,7 +1112,7 @@ DEF_FUNC method_traverse
     mov rdi, [rbx + PyMethodObject.im_func]
     VISIT_PTR rdi
     mov rdi, [rbx + PyMethodObject.im_self]
-    VISIT_PTR rdi
+    VISIT_V rdi, rsi            ; a Value: an immediate self is not an address
 
     pop rbx
     leave
@@ -1131,9 +1131,7 @@ DEF_FUNC method_clear
 .no_func:
     mov rdi, [rbx + PyMethodObject.im_self]
     mov qword [rbx + PyMethodObject.im_self], 0
-    test rdi, rdi
-    jz .no_self
-    call obj_decref
+    XDECREF_V rdi, rsi
 .no_self:
 
     pop rbx

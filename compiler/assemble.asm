@@ -24,6 +24,7 @@
 
 extern ap_free
 extern ap_malloc
+extern ap_memcpy
 extern buf_free
 extern buf_init
 extern buf_push_u8
@@ -476,7 +477,46 @@ AS_WORK  equ 32          ; worklist of packed (index, depth)
 AS_MAX   equ 40
 AS_I     equ 48
 AS_D     equ 56
-AS_FRAME equ 56          ; + 5 pushes = 96
+AS_CAP   equ 64          ; worklist capacity, in entries
+AS_ENTRY equ 72          ; the entry being pushed, across a grow
+AS_FRAME equ 88          ; + 5 pushes = 128
+;; asm_work_grow(rdi = old, rsi = count, rdx = old capacity)
+;;   -> rax = the new buffer (0 on failure), rdx = the new capacity
+DEF_FUNC_LOCAL asm_work_grow, 40          ; + 3 pushes = 64
+    push rbx
+    push r12
+    push r13
+    mov rbx, rdi
+    mov r12, rsi
+    lea r13, [rdx*2]
+    lea rdi, [r13*8]
+    call ap_malloc
+    test rax, rax
+    jz .awg_failed
+    mov [rbp - 8], rax
+    mov rdi, rax
+    mov rsi, rbx
+    lea rdx, [r12*8]
+    call ap_memcpy
+    mov rdi, rbx
+    call ap_free
+    mov rax, [rbp - 8]
+    mov rdx, r13
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+.awg_failed:
+    xor eax, eax
+    xor edx, edx
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC asm_work_grow
+
 DEF_FUNC asm_stackdepth, AS_FRAME
     push rbx
     push r12
@@ -503,8 +543,14 @@ DEF_FUNC asm_stackdepth, AS_FRAME
 
     ; The worklist holds (index << 32) | depth; depths here are small and
     ; non-negative, so one qword carries both.
-    lea rdi, [r14*8]
-    add rdi, 512                        ; room for handler targets as well
+    ; An instruction is re-pushed whenever a *larger* depth reaches it, so the
+    ; height is not bounded by the instruction count: this starts at one entry
+    ; per instruction plus room for the handler targets, and grows.  Writing
+    ; past it was silent memory corruption, and any depth-modelling mistake --
+    ; a missing POP_TOP inside a loop, say -- was enough to reach it.
+    lea rax, [r14 + 64]
+    mov [rbp - AS_CAP], rax
+    lea rdi, [rax*8]
     call ap_malloc
     mov [rbp - AS_WORK], rax
     mov r13, rax
@@ -572,6 +618,20 @@ DEF_FUNC asm_stackdepth, AS_FRAME
     mov ecx, [rdx + rcx*4]
     shl rcx, 32
     or rcx, rax
+    cmp r12, [rbp - AS_CAP]
+    jb .as_push
+    mov [rbp - AS_ENTRY], rcx
+    mov rdi, r13
+    mov rsi, r12
+    mov rdx, [rbp - AS_CAP]
+    call asm_work_grow
+    test rax, rax
+    jz .as_grow_failed
+    mov r13, rax
+    mov [rbp - AS_WORK], rax
+    mov [rbp - AS_CAP], rdx
+    mov rcx, [rbp - AS_ENTRY]
+.as_push:
     mov [r13 + r12*8], rcx
     inc r12
 
@@ -635,6 +695,14 @@ DEF_FUNC asm_stackdepth, AS_FRAME
     call ap_free
     mov rax, [rbp - AS_MAX]
     add rax, COMP_STACK_SLACK
+    jmp .ret
+
+.as_grow_failed:
+    ; Out of memory growing the worklist.  Report it the way an underflow is
+    ; reported: -1, which the caller turns into a compiler error.
+    mov rdi, [rbp - AS_DEPTH]
+    call ap_free
+    mov rax, -1
     jmp .ret
 
 .underflow:

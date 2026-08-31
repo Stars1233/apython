@@ -2601,7 +2601,8 @@ BPN_FN    equ 40
 BPN_ARGS  equ 64
 BPN_KWN   equ 80
 BPN_KWV   equ 88
-BPN_FRAME equ 88          ; + 1 push = 96
+BPN_EXC   equ 96          ; current_exception before the call
+BPN_FRAME equ 104         ; + 1 push = 112
 DEF_FUNC_LOCAL bc_prepare_namespace, BPN_FRAME
     push rbx
     mov [rbp - BPN_META], rdi
@@ -2636,6 +2637,7 @@ DEF_FUNC_LOCAL bc_prepare_namespace, BPN_FRAME
     call tuple_new
 .have_bases:
     mov [rbp - BPN_ARGS + 8], rax
+    DUNDER_EXC_SAVE [rbp - BPN_EXC]
     mov rdi, [rbp - BPN_FN]
     lea rsi, [rbp - BPN_ARGS]
     mov edx, 2
@@ -2646,7 +2648,14 @@ DEF_FUNC_LOCAL bc_prepare_namespace, BPN_FRAME
     mov rdi, [rbp - BPN_FN]
     call obj_decref
     test rbx, rbx
-    jz .none
+    jnz .have_ns
+    ; A NULL means either "there is no usable __prepare__" or "it ran and
+    ; raised", and they are not the same: treating the second as the first
+    ; built the class anyway and left the exception to surface somewhere
+    ; unrelated.  -1 says the caller must propagate.
+    DUNDER_RAISED [rbp - BPN_EXC], .failed
+    jmp .none
+.have_ns:
 
     ; Only a real object can be a namespace; anything else keeps the fallback.
     V_TEST_PTR rbx, rcx
@@ -2659,6 +2668,11 @@ DEF_FUNC_LOCAL bc_prepare_namespace, BPN_FRAME
     ret
 .none:
     xor eax, eax
+    pop rbx
+    leave
+    ret
+.failed:
+    mov rax, -1
     pop rbx
     leave
     ret
@@ -2860,6 +2874,8 @@ BCL_OKWV  equ 72
     mov r8, [rbp - BCL_OKWN]
     mov r9, [rbp - BCL_OKWV]
     call bc_prepare_namespace
+    cmp rax, -1
+    je .bc_prepare_failed       ; __prepare__ raised; it is already pending
     test rax, rax
     jz .bc_ns_ready
     mov r15, rax
@@ -2978,6 +2994,18 @@ BCL_OKWV  equ 72
     lea rdi, [rel exc_TypeError_type]
     CSTRING rsi, "__build_class__ requires 2+ arguments"
     call raise_exception
+
+.bc_prepare_failed:
+    ; __prepare__ raised.  Release the fallback namespace and the bases and
+    ; let its exception keep unwinding, rather than building the class with
+    ; an exception already pending.
+    mov rdi, r15
+    call obj_decref
+    mov rdi, [rbp - BCL_BASES]
+    test rdi, rdi
+    jz .bc_body_raised_go
+    call obj_decref
+    jmp .bc_body_raised_go
 
 .bc_body_raised:
     ; Release the frame and the namespace, then let the body's exception

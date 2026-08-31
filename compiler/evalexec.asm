@@ -176,9 +176,12 @@ DEF_FUNC ev_inject_builtins, 16 ; + 2 pushes = 32
     mov rax, rbx
 
     ; The frame's builtins slot has to be a dict; anything else falls back to
-    ; the interpreter's own.
+    ; the interpreter's own.  It holds whatever the caller put there, which
+    ; may be an immediate -- reading ob_type off one dereferences the number.
     test rax, rax
     jz .fallback
+    V_TEST_PTR rax, rdx
+    ja .fallback
     mov rdx, [rax + PyObject.ob_type]
     lea rcx, [rel dict_type]
     cmp rdx, rcx

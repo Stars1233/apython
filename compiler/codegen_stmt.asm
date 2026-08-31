@@ -1273,6 +1273,15 @@ DEF_FUNC_LOCAL cg_s_importfrom, CIF_FRAME
     mov edx, INTRINSIC_IMPORT_STAR
     mov rcx, [rbp - CIF_LINE]
     call cg_emit
+    ; The intrinsic is net zero -- it consumes the module and pushes None --
+    ; so the module has to be popped.  Without this every `from m import *`
+    ; grew the stack by one, and inside a loop the depth worklist grew
+    ; without bound.
+    mov rdi, r12
+    mov esi, OP_POP_TOP
+    xor edx, edx
+    mov rcx, [rbp - CIF_LINE]
+    call cg_emit
     mov eax, 1
     jmp .ret
 

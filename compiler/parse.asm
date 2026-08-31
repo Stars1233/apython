@@ -604,8 +604,13 @@ DEF_FUNC_LOCAL in_ternary, IT_FRAME
 
     mov rdi, rbx
     call par_advance                    ; consume `if`
+    ; The condition is a `disjunction`, so `or` belongs to it -- and BP_OR is
+    ; one too high for that, because the driver continues only while
+    ; lbp > min_bp.  BP_TERNARY takes `or` and still leaves TOK_IF, whose lbp
+    ; *is* BP_TERNARY, so a nested ternary does not get swallowed.  Same shape
+    ; as par_comprehension's.
     mov rdi, rbx
-    mov esi, BP_OR
+    mov esi, BP_TERNARY
     call par_expr
     test rax, rax
     jz .fail

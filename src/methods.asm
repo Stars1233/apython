@@ -8329,6 +8329,15 @@ DEF_FUNC object_method_eq
     mov rax, [rax + PyTypeObject.tp_richcompare]
     test rax, rax
     jz .ome_identity
+    ; ...but not when that slot is the generic dispatcher.  It looks __eq__ up
+    ; by name, walks to object's, and arrives back here -- unbounded recursion
+    ; for any class defining a comparison other than __eq__ (a class that
+    ; defines __eq__ never reaches this method at all).  __ne__ takes the same
+    ; route through here, so both == and != segfaulted.
+    extern slot_tp_richcompare
+    lea rcx, [rel slot_tp_richcompare]
+    cmp rax, rcx
+    je .ome_identity
     mov rsi, rbx
     mov edx, CMP_EQ
     call rax
