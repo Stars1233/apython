@@ -72,6 +72,7 @@ END_FUNC val_from_i64
 ;; As val_from_i64, but preserves every register except rax so the V_PACK_I64
 ;; macro can call it from anywhere without knowing what is live.
 ;; ============================================================================
+VFI_PUSHED equ 64           ; rbp less the eight caller-saved pushes
 DEF_FUNC val_from_i64_p
     push rcx
     push rdx
@@ -83,7 +84,7 @@ DEF_FUNC val_from_i64_p
     push r11
     and rsp, -16                ; the callee may reach ap_malloc
     call val_from_i64           ; rdi already holds the value
-    lea rsp, [rbp - 64]         ; undo the alignment; 8 pushes below rbp
+    lea rsp, [rbp - VFI_PUSHED] ; undo the alignment, back to the eight pushes
     pop r11
     pop r10
     pop r9

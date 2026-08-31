@@ -193,7 +193,7 @@ DEF_FUNC op_call, CL_FRAME
     ; where args_including_self starts at the callable's slot on the value stack
     ; The callable is at [r13 - (nargs+1)*8], and args start at [r13 - nargs*8]
     ; We already have self in the callable's slot... actually this is tricky.
-    ; Let's use a simpler approach: save dunder_func in [rbp-16], store original
+    ; Save dunder_func in the frame, and keep the original
     ; callable as first arg by shifting the args pointer back by 1
     mov [rbp - CL_CALLABLE], rcx         ; replace callable with __call__ func
     ; args_ptr should now include the original callable as self

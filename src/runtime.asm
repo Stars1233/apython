@@ -555,14 +555,15 @@ END_FUNC fatal_error
 
 ; error_unimplemented_opcode(int opcode)
 ; Reports unimplemented bytecode opcode and exits
+EUO_END   equ 1              ; one past the digits: holds the newline
 DEF_FUNC error_unimplemented_opcode, 32             ; space for decimal digits
 
     mov eax, edi            ; opcode value
 
     ; Convert opcode int to decimal string on stack
-    lea rdi, [rbp - 1]     ; write digits right-to-left
+    lea rdi, [rbp - EUO_END]     ; write digits right-to-left
     mov byte [rdi], 10      ; trailing newline
-    lea rcx, [rbp - 1]     ; rcx = end (points at newline)
+    lea rcx, [rbp - EUO_END]     ; rcx = end (points at newline)
     mov r8d, 10
 
 .digit_loop:

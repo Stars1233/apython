@@ -52,11 +52,12 @@ END_FUNC dis_puts
 ;; dis_num(int64_t v, int width)
 ;; Right-aligned decimal, so the columns line up with CPython's dis output.
 ;; ============================================================================
+DN_END   equ 8           ; one past the digits; they are written backwards
 DN_FRAME equ 40          ; + 1 push = 48
 DEF_FUNC dis_num, DN_FRAME
     push rbx
     mov rbx, rsi                        ; width
-    lea rsi, [rbp - 8]
+    lea rsi, [rbp - DN_END]
     mov byte [rsi], ' '
     mov rax, rdi
     mov ecx, 10
@@ -82,7 +83,7 @@ DEF_FUNC dis_num, DN_FRAME
     ; then never read -- .padloop compared against a hard-coded 12 -- so every
     ; column came out the same width whatever was requested, and nothing lined
     ; up beside `python3 -m dis`, which is the only reason this tool exists.
-    lea rdx, [rbp - 8]
+    lea rdx, [rbp - DN_END]
     sub rdx, rsi                        ; digits, sign included
 .padloop:
     cmp rdx, rbx
@@ -92,7 +93,7 @@ DEF_FUNC dis_num, DN_FRAME
     inc rdx
     jmp .padloop
 .emit:
-    lea rdx, [rbp - 7]
+    lea rdx, [rbp - DN_END + 1]
     sub rdx, rsi                        ; add the trailing space back
     mov edi, 1
     call sys_write

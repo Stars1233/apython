@@ -44,7 +44,7 @@ FS2_P     equ 32
 FS2_END   equ 40
 FS2_LINE  equ 48
 FS2_RAW   equ 56
-FS2_BUF   equ 96          ; a Buf at [rbp - 96]
+FS2_BUF   equ 96          ; a Buf lives here
 FS2_FRAME equ 136         ; + 3 pushes = 160
 
 section .text

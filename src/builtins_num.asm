@@ -1362,6 +1362,7 @@ END_FUNC builtin_ord
 ; ============================================================================
 ; 5. builtin_chr(args, nargs) - chr(n)
 ; ============================================================================
+BC_BUF    equ 16            ; up to four UTF-8 bytes, then a NUL
 DEF_FUNC builtin_chr, 16
 
     cmp rsi, 1
@@ -1383,9 +1384,9 @@ DEF_FUNC builtin_chr, 16
 
     ; str_new, not str_from_cstr: chr(0) is a one-character string holding a
     ; NUL, and measuring it with strlen made it empty.
-    mov byte [rbp - 16], al
-    mov byte [rbp - 15], 0
-    lea rdi, [rbp - 16]
+    mov byte [rbp - BC_BUF], al
+    mov byte [rbp - BC_BUF + 1], 0
+    lea rdi, [rbp - BC_BUF]
     mov esi, 1
     call str_new
     leave
@@ -1400,13 +1401,13 @@ DEF_FUNC builtin_chr, 16
     mov rcx, rax
     shr rcx, 6
     or cl, 0xc0
-    mov byte [rbp - 16], cl
+    mov byte [rbp - BC_BUF], cl
     mov rcx, rax
     and cl, 0x3f
     or cl, 0x80
-    mov byte [rbp - 15], cl
-    mov byte [rbp - 14], 0
-    lea rdi, [rbp - 16]
+    mov byte [rbp - BC_BUF + 1], cl
+    mov byte [rbp - BC_BUF + 2], 0
+    lea rdi, [rbp - BC_BUF]
     call str_from_cstr
     leave
     V_PACK rax, rdx             ; builtins return one Value
@@ -1420,18 +1421,18 @@ DEF_FUNC builtin_chr, 16
     mov rcx, rax
     shr rcx, 12
     or cl, 0xe0
-    mov byte [rbp - 16], cl
+    mov byte [rbp - BC_BUF], cl
     mov rcx, rax
     shr rcx, 6
     and cl, 0x3f
     or cl, 0x80
-    mov byte [rbp - 15], cl
+    mov byte [rbp - BC_BUF + 1], cl
     mov rcx, rax
     and cl, 0x3f
     or cl, 0x80
-    mov byte [rbp - 14], cl
-    mov byte [rbp - 13], 0
-    lea rdi, [rbp - 16]
+    mov byte [rbp - BC_BUF + 2], cl
+    mov byte [rbp - BC_BUF + 3], 0
+    lea rdi, [rbp - BC_BUF]
     call str_from_cstr
     leave
     V_PACK rax, rdx             ; builtins return one Value
@@ -1442,23 +1443,23 @@ DEF_FUNC builtin_chr, 16
     mov rcx, rax
     shr rcx, 18
     or cl, 0xf0
-    mov byte [rbp - 16], cl
+    mov byte [rbp - BC_BUF], cl
     mov rcx, rax
     shr rcx, 12
     and cl, 0x3f
     or cl, 0x80
-    mov byte [rbp - 15], cl
+    mov byte [rbp - BC_BUF + 1], cl
     mov rcx, rax
     shr rcx, 6
     and cl, 0x3f
     or cl, 0x80
-    mov byte [rbp - 14], cl
+    mov byte [rbp - BC_BUF + 2], cl
     mov rcx, rax
     and cl, 0x3f
     or cl, 0x80
-    mov byte [rbp - 13], cl
-    mov byte [rbp - 12], 0
-    lea rdi, [rbp - 16]
+    mov byte [rbp - BC_BUF + 3], cl
+    mov byte [rbp - BC_BUF + 4], 0
+    lea rdi, [rbp - BC_BUF]
     call str_from_cstr
     leave
     V_PACK rax, rdx             ; builtins return one Value

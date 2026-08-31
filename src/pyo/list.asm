@@ -1159,14 +1159,14 @@ DEF_FUNC list_getslice
 
 .lgs_have_len:
     ; rax = slicelength
-    push rax                   ; save slicelength [rbp-56]
+    push rax                   ; save slicelength
     mov rdi, rax
     test rdi, rdi
     jnz .lgs_alloc
     mov rdi, 4                 ; min capacity
 .lgs_alloc:
     call list_new
-    push rax                   ; save new list [rbp-64]
+    push rax                   ; save the new list
 
     ; Fill items: for i = 0..slicelength-1, idx = start + i*step
     ; Set new list size to slicelength (capacity already >= slicelength)

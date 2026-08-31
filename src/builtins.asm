@@ -1209,6 +1209,8 @@ END_FUNC builtin_bool
 ;; ============================================================================
 global builtin_float
 BF_FRAME equ 32
+BF_START  equ 8              ; the string strtod was handed
+BF_ENDPTR equ 16            ; where strtod stopped
 DEF_FUNC builtin_float, BF_FRAME
 
     cmp rsi, 0
@@ -1288,17 +1290,17 @@ DEF_FUNC builtin_float, BF_FRAME
 .float_from_str:
     ; rdi = PyStrObject*. Parse string → double via strtod.
     lea rdi, [rdi + PyStrObject.data]   ; rdi = null-terminated string data
-    mov [rbp - 8], rdi                  ; save start ptr
+    mov [rbp - BF_START], rdi                  ; save start ptr
 
     ; Call strtod(str, &endptr)
     extern strtod
-    lea rsi, [rbp - 16]                ; &endptr at [rbp-16]
+    lea rsi, [rbp - BF_ENDPTR]                ; &endptr at [rbp - BF_ENDPTR]
     call strtod wrt ..plt
-    ; xmm0 = parsed value, [rbp-16] = endptr
+    ; xmm0 = parsed value, [rbp - BF_ENDPTR] = endptr
 
     ; Check endptr > start (parsed something)
-    mov rax, [rbp - 16]                ; endptr
-    cmp rax, [rbp - 8]                 ; compare with start
+    mov rax, [rbp - BF_ENDPTR]                ; endptr
+    cmp rax, [rbp - BF_START]                 ; compare with start
     je .float_str_error                ; nothing parsed → error
 
     ; Skip trailing whitespace after parsed portion

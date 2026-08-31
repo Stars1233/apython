@@ -1474,7 +1474,7 @@ END_FUNC par_string_body
 ;; ============================================================================
 PS2_LINE  equ 16
 PS2_BYTES equ 24
-PS2_BUF   equ 64         ; a Buf at [rbp - 64]
+PS2_BUF   equ 64         ; a Buf lives here
 PS2_FRAME equ 72         ; + 1 push = 80
 DEF_FUNC_LOCAL pf_string, PS2_FRAME
     push rbx

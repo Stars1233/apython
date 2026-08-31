@@ -1237,8 +1237,8 @@ END_FUNC instance_str
 ;; Returns: new instance
 ;; ============================================================================
 ; Local frame offsets for .normal_type_call (rbp-relative, after 5 pushes + sub rsp, 24)
-TC_NEW_FUNC equ 48              ; [rbp - 48]: saved __new__ func pointer
-TC_NEW_TAG  equ 56              ; [rbp - 56]: saved __new__ result tag
+TC_NEW_FUNC equ 48              ; saved __new__ func pointer
+TC_NEW_TAG  equ 56              ; saved __new__ result tag
 ; The keywords this call was made with.  __new__ consumes kw_names_pending, so
 ; __init__ has to be handed it again -- otherwise `M(name, bases, ns, **kwds)`
 ; reaches __init__ with the keyword values as extra positional arguments, and

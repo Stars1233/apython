@@ -121,7 +121,7 @@ FR_EXP   equ 136
 
 FR_VALUE equ 8              ; the double being rendered
 FR_PREC  equ 16             ; precision counter (low 4 bytes)
-FR_BUF   equ 64             ; 48-byte render buffer, [rbp-64] .. [rbp-17]
+FR_BUF   equ 64             ; 48-byte render buffer
                             ; (the frame is built by hand below: `and rsp,-16`
                             ; then `sub rsp,160`, for libc's aligned SSE)
 DEF_FUNC float_repr
@@ -130,7 +130,7 @@ DEF_FUNC float_repr
     ; Stack layout:
     ;   [rbp - FR_VALUE]   = original double value (8 bytes)
     ;   [rbp - FR_PREC]  = precision counter (8 bytes, only low 4 used)
-    ;   [rbp - FR_BUF]  = buffer (48 bytes: [rbp - FR_BUF] to [rbp-17])
+    ;   [rbp - FR_BUF]  = the 48-byte render buffer
 
     movq xmm0, rdi
     movsd [rbp - FR_VALUE], xmm0       ; save original value

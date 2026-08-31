@@ -36,6 +36,9 @@ extern raise_exception
 ; sys_module_init(int argc, char **argv) -> void
 ; Initialize the sys module and register it in sys.modules
 ; ============================================================================
+SMI_ARGC  equ 8
+SMI_ARGV  equ 16
+SMI_TMP   equ 24            ; whichever object is being installed just now
 DEF_FUNC sys_module_init, 32
     push rbx
     push r12
@@ -43,8 +46,8 @@ DEF_FUNC sys_module_init, 32
     push r14
     push r15
 
-    mov [rbp - 8], rdi          ; argc
-    mov [rbp - 16], rsi         ; argv
+    mov [rbp - SMI_ARGC], rdi          ; argc
+    mov [rbp - SMI_ARGV], rsi         ; argv
 
     ; Initialize int_max_str_digits to 4300 (CPython default)
     mov qword [rel sys_int_max_str_digits], 4300
@@ -109,8 +112,8 @@ DEF_FUNC sys_module_init, 32
     ; sys.argv[1] for its first argument was getting its own path.  main has
     ; already shifted argv past a -t if there was one, so index 1 is the script
     ; either way.
-    mov rcx, [rbp - 8]         ; argc
-    mov rdx, [rbp - 16]        ; argv
+    mov rcx, [rbp - SMI_ARGC]         ; argc
+    mov rdx, [rbp - SMI_ARGV]        ; argv
     mov ebx, 1                 ; i = 1: skip the interpreter
 .argv_loop:
     cmp rbx, rcx
@@ -400,12 +403,12 @@ DEF_FUNC sys_module_init, 32
     extern namespace_new
     extern namespace_set
     call namespace_new
-    mov [rbp - 24], rax
+    mov [rbp - SMI_TMP], rax
 
     lea rdi, [rel sm_apython_name]
     call str_from_cstr_heap
     push rax
-    mov rdi, [rbp - 24]
+    mov rdi, [rbp - SMI_TMP]
     lea rsi, [rel sm_name]
     mov rdx, rax
     call namespace_set
@@ -415,7 +418,7 @@ DEF_FUNC sys_module_init, 32
     lea rdi, [rel sm_cache_tag_val]
     call str_from_cstr_heap
     push rax
-    mov rdi, [rbp - 24]
+    mov rdi, [rbp - SMI_TMP]
     lea rsi, [rel sm_cache_tag]
     mov rdx, rax
     call namespace_set
@@ -438,7 +441,7 @@ DEF_FUNC sys_module_init, 32
     pop rax
     test edx, edx
     jz .no_impl_version
-    mov rdi, [rbp - 24]
+    mov rdi, [rbp - SMI_TMP]
     lea rsi, [rel sm_version]
     mov rdx, rax
     call namespace_set
@@ -449,27 +452,27 @@ DEF_FUNC sys_module_init, 32
     push rax
     mov rdi, r15
     mov rsi, rax
-    mov rdx, [rbp - 24]
+    mov rdx, [rbp - SMI_TMP]
     call dict_set
     pop rdi
     call obj_decref
-    mov rdi, [rbp - 24]
+    mov rdi, [rbp - SMI_TMP]
     call obj_decref
 
     ; --- sys.warnoptions (empty; nothing parses -W yet) ---
     xor edi, edi
     call list_new
-    mov [rbp - 24], rax
+    mov [rbp - SMI_TMP], rax
     lea rdi, [rel sm_warnoptions]
     call str_from_cstr_heap
     push rax
     mov rdi, r15
     mov rsi, rax
-    mov rdx, [rbp - 24]
+    mov rdx, [rbp - SMI_TMP]
     call dict_set
     pop rdi
     call obj_decref
-    mov rdi, [rbp - 24]
+    mov rdi, [rbp - SMI_TMP]
     call obj_decref
 
     ; --- sys.builtin_module_names ---
@@ -478,7 +481,7 @@ DEF_FUNC sys_module_init, 32
     ; use it to tell a built-in apart from a shadowing file.
     mov edi, SM_BUILTIN_COUNT
     call tuple_new
-    mov [rbp - 24], rax
+    mov [rbp - SMI_TMP], rax
     xor r13d, r13d
 .sm_bmn_loop:
     cmp r13, SM_BUILTIN_COUNT
@@ -486,7 +489,7 @@ DEF_FUNC sys_module_init, 32
     lea rax, [rel sm_builtin_names]
     mov rdi, [rax + r13*8]
     call str_from_cstr_heap
-    mov rcx, [rbp - 24]
+    mov rcx, [rbp - SMI_TMP]
     mov rcx, [rcx + PyTupleObject.ob_item]
     mov [rcx + r13*8], rax
     inc r13
@@ -497,11 +500,11 @@ DEF_FUNC sys_module_init, 32
     push rax
     mov rdi, r15
     mov rsi, rax
-    mov rdx, [rbp - 24]
+    mov rdx, [rbp - SMI_TMP]
     call dict_set
     pop rdi
     call obj_decref
-    mov rdi, [rbp - 24]
+    mov rdi, [rbp - SMI_TMP]
     call obj_decref
 
     ; --- sys.byteorder ---

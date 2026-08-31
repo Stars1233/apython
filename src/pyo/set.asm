@@ -1042,10 +1042,13 @@ extern set_method_symmetric_difference
 SNB_FRAME equ 32
 
 ;; set_nb_or(left, right, ltag, rtag) -> new set (union)
+; The two operands, laid out as the args array the method form expects.
+SNB_LEFT  equ 32
+SNB_RIGHT equ 24
 DEF_FUNC set_nb_or, SNB_FRAME
-    mov [rbp - 32], rdi         ; args[0] = left
-    mov [rbp - 24], rsi         ; args[1] = right
-    lea rdi, [rbp - 32]
+    mov [rbp - SNB_LEFT], rdi         ; args[0] = left
+    mov [rbp - SNB_RIGHT], rsi         ; args[1] = right
+    lea rdi, [rbp - SNB_LEFT]
     mov esi, 2
     call set_method_union
     leave
@@ -1054,9 +1057,9 @@ END_FUNC set_nb_or
 
 ;; set_nb_and(left, right, ltag, rtag) -> new set (intersection)
 DEF_FUNC set_nb_and, SNB_FRAME
-    mov [rbp - 32], rdi         ; args[0] = left
-    mov [rbp - 24], rsi         ; args[1] = right
-    lea rdi, [rbp - 32]
+    mov [rbp - SNB_LEFT], rdi         ; args[0] = left
+    mov [rbp - SNB_RIGHT], rsi         ; args[1] = right
+    lea rdi, [rbp - SNB_LEFT]
     mov esi, 2
     call set_method_intersection
     leave
@@ -1065,9 +1068,9 @@ END_FUNC set_nb_and
 
 ;; set_nb_sub(left, right, ltag, rtag) -> new set (difference)
 DEF_FUNC set_nb_sub, SNB_FRAME
-    mov [rbp - 32], rdi         ; args[0] = left
-    mov [rbp - 24], rsi         ; args[1] = right
-    lea rdi, [rbp - 32]
+    mov [rbp - SNB_LEFT], rdi         ; args[0] = left
+    mov [rbp - SNB_RIGHT], rsi         ; args[1] = right
+    lea rdi, [rbp - SNB_LEFT]
     mov esi, 2
     call set_method_difference
     leave
@@ -1076,9 +1079,9 @@ END_FUNC set_nb_sub
 
 ;; set_nb_xor(left, right, ltag, rtag) -> new set (symmetric_difference)
 DEF_FUNC set_nb_xor, SNB_FRAME
-    mov [rbp - 32], rdi         ; args[0] = left
-    mov [rbp - 24], rsi         ; args[1] = right
-    lea rdi, [rbp - 32]
+    mov [rbp - SNB_LEFT], rdi         ; args[0] = left
+    mov [rbp - SNB_RIGHT], rsi         ; args[1] = right
+    lea rdi, [rbp - SNB_LEFT]
     mov esi, 2
     call set_method_symmetric_difference
     leave

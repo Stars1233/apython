@@ -349,6 +349,7 @@ END_FUNC eval_return
 TP_OPCODE equ 8
 TP_ARG    equ 16
 TP_NAME   equ 24
+TP_NL     equ 25            ; the digits are written backwards from here
 TP_FRAME  equ 48
 
 DEF_FUNC trace_print_opcode, TP_FRAME
@@ -388,7 +389,7 @@ DEF_FUNC trace_print_opcode, TP_FRAME
 
     ; Convert arg to decimal string + newline in frame buffer
     mov eax, dword [rbp - TP_ARG]
-    lea rdi, [rbp - 25]           ; newline position
+    lea rdi, [rbp - TP_NL]        ; newline position
     mov byte [rdi], 10
 
     test eax, eax
@@ -407,7 +408,7 @@ DEF_FUNC trace_print_opcode, TP_FRAME
     test eax, eax
     jnz .div_loop
 .write_num:
-    lea rdx, [rbp - 24]           ; one past newline
+    lea rdx, [rbp - TP_NL + 1]    ; one past the newline
     sub rdx, rdi
     mov rsi, rdi
     mov edi, 2

@@ -94,13 +94,14 @@ DEF_FUNC_BARE op_call_intrinsic_1
 ;; INTRINSIC_IMPORT_STAR (arg=2): import * from module
 ;; TOS = module object. Copy module's exported names into frame.locals.
 ;; If module has __all__, use that list. Otherwise copy all non-underscore names.
-IS_MOD      equ 16      ; [rbp-16] module ptr
-IS_MODDICT  equ 24      ; [rbp-24] module's __dict__
-IS_LOCALS   equ 32      ; [rbp-32] frame's locals dict
-IS_IDX      equ 40      ; [rbp-40] loop index
-IS_LIMIT    equ 48      ; [rbp-48] capacity or count
-IS_ITEMS    equ 56      ; [rbp-56] items payload ptr (__all__ path)
-IS_ITEM_TAGS equ 64     ; [rbp-64] items tag ptr (__all__ path)
+IS_SAVED_RBX equ 8      ; the eval-loop bytecode IP, pushed on entry
+IS_MOD      equ 16      ; module ptr
+IS_MODDICT  equ 24      ; module's __dict__
+IS_LOCALS   equ 32      ; frame's locals dict
+IS_IDX      equ 40      ; loop index
+IS_LIMIT    equ 48      ; capacity or count
+IS_ITEMS    equ 56      ; items payload ptr (__all__ path)
+IS_ITEM_TAGS equ 64     ; items tag ptr (__all__ path)
 IS_FRAME    equ 64      ; sub rsp, 64 (after push rbp + push rbx = 72 total)
 extern dict_get
 extern dict_set
@@ -116,7 +117,7 @@ extern obj_decref
     ; Set up stack frame
     push rbp
     mov rbp, rsp
-    push rbx                          ; [rbp-8] = saved eval-loop bytecode IP
+    push rbx                          ; [rbp - IS_SAVED_RBX] = saved eval-loop bytecode IP
     sub rsp, IS_FRAME
     mov [rbp - IS_MOD], rdi           ; save module ptr
 
@@ -260,7 +261,7 @@ extern obj_decref
     call obj_decref
 
     ; Restore and return
-    mov rbx, [rbp - 8]                ; restore eval-loop bytecode IP
+    mov rbx, [rbp - IS_SAVED_RBX]                ; restore eval-loop bytecode IP
     leave                             ; mov rsp, rbp; pop rbp
     VPUSH_NONE
     DISPATCH

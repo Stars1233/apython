@@ -345,13 +345,15 @@ END_FUNC tuple_hash
 ;; tuple_getslice(PyTupleObject *tuple, PySliceObject *slice) -> PyTupleObject*
 ;; Creates a new tuple from a slice of the original. Fat 16-byte slots.
 ;; ============================================================================
+TGS_NEW   equ 48            ; the tuple being built
+TGS_LEN   equ 56            ; its length
 DEF_FUNC tuple_getslice
     push rbx
     push r12
     push r13
     push r14
     push r15
-    sub rsp, 16                ; [rbp-56]=slicelength, [rbp-48]=newtuple, align
+    sub rsp, 16                ; [rbp - TGS_LEN]=slicelength, [rbp - TGS_NEW]=newtuple, align
 
     mov rbx, rdi               ; tuple
     mov r12, rsi               ; slice
@@ -393,10 +395,10 @@ DEF_FUNC tuple_getslice
     xor eax, eax
 
 .tgs_have_len:
-    mov [rbp-56], rax          ; slicelength
+    mov [rbp - TGS_LEN], rax          ; slicelength
     mov rdi, rax
     call tuple_new
-    mov [rbp-48], rax          ; new tuple
+    mov [rbp - TGS_NEW], rax          ; new tuple
 
     ; Fill items (payload + tag arrays)
     ; Fast path: step == 1 → contiguous memcpy + bulk INCREF
@@ -408,17 +410,17 @@ DEF_FUNC tuple_getslice
     mov rax, r13
     shl rax, 3
     add rsi, rax              ; src payloads + start*8
-    mov rdi, [rbp-48]
+    mov rdi, [rbp - TGS_NEW]
     mov rdi, [rdi + PyTupleObject.ob_item]  ; dst payloads
-    mov rdx, [rbp-56]         ; slicelength
+    mov rdx, [rbp - TGS_LEN]         ; slicelength
     shl rdx, 3
     call ap_memcpy
 
     ; Bulk INCREF all copied elements
-    mov rcx, [rbp-56]         ; slicelength
+    mov rcx, [rbp - TGS_LEN]         ; slicelength
     test rcx, rcx
     jz .tgs_done
-    mov rdi, [rbp-48]
+    mov rdi, [rbp - TGS_NEW]
     mov rdi, [rdi + PyTupleObject.ob_item]
     xor edx, edx
 .tgs_incref_loop:
@@ -432,7 +434,7 @@ DEF_FUNC tuple_getslice
 .tgs_loop_start:
     xor ecx, ecx
 .tgs_loop:
-    cmp rcx, [rbp-56]
+    cmp rcx, [rbp - TGS_LEN]
     jge .tgs_done
     ; src_idx = start + i * step
     mov rax, rcx
@@ -442,7 +444,7 @@ DEF_FUNC tuple_getslice
     mov rdx, [rbx + PyTupleObject.ob_item]
     mov rdx, [rdx + rax * 8]
     ; Store in new tuple
-    mov rsi, [rbp-48]
+    mov rsi, [rbp - TGS_NEW]
     mov r9, [rsi + PyTupleObject.ob_item]
     mov [r9 + rcx * 8], rdx
     push rcx
@@ -452,7 +454,7 @@ DEF_FUNC tuple_getslice
     jmp .tgs_loop
 
 .tgs_done:
-    mov rax, [rbp-48]
+    mov rax, [rbp - TGS_NEW]
 
     add rsp, 16
     pop r15

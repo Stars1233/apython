@@ -25,21 +25,24 @@ CLOCK_PROCESS_CPUTIME_ID equ 2
 ; time_process_time_func(PyObject **args, int64_t nargs) -> rax = Value
 ; Returns process CPU time as a float (seconds)
 ; ============================================================================
+; A struct timespec, filled by clock_gettime: tv_sec then tv_nsec.
+TS_SEC    equ 16
+TS_NSEC   equ 8
 DEF_FUNC time_process_time_func, 16
     cmp rsi, 0
     jne .pt_error
 
     ; clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &timespec)
-    ; timespec is at [rbp-16]: tv_sec at [rbp-16], tv_nsec at [rbp-8]
+    ; timespec is at [rbp - TS_SEC]: tv_sec at [rbp - TS_SEC], tv_nsec at [rbp - TS_NSEC]
     mov eax, 228            ; __NR_clock_gettime
     mov edi, CLOCK_PROCESS_CPUTIME_ID
-    lea rsi, [rbp - 16]
+    lea rsi, [rbp - TS_SEC]
     syscall
 
     ; Convert to float: seconds + nanoseconds/1e9
-    ; tv_sec at [rbp-16], tv_nsec at [rbp-8]
-    cvtsi2sd xmm0, qword [rbp - 16]    ; seconds
-    cvtsi2sd xmm1, qword [rbp - 8]     ; nanoseconds
+    ; tv_sec at [rbp - TS_SEC], tv_nsec at [rbp - TS_NSEC]
+    cvtsi2sd xmm0, qword [rbp - TS_SEC]    ; seconds
+    cvtsi2sd xmm1, qword [rbp - TS_NSEC]     ; nanoseconds
     movsd xmm2, [rel tm_1e9]
     divsd xmm1, xmm2
     addsd xmm0, xmm1
@@ -63,11 +66,11 @@ DEF_FUNC time_monotonic_func, 16
 
     mov eax, 228            ; __NR_clock_gettime
     mov edi, CLOCK_MONOTONIC
-    lea rsi, [rbp - 16]
+    lea rsi, [rbp - TS_SEC]
     syscall
 
-    cvtsi2sd xmm0, qword [rbp - 16]
-    cvtsi2sd xmm1, qword [rbp - 8]
+    cvtsi2sd xmm0, qword [rbp - TS_SEC]
+    cvtsi2sd xmm1, qword [rbp - TS_NSEC]
     movsd xmm2, [rel tm_1e9]
     divsd xmm1, xmm2
     addsd xmm0, xmm1

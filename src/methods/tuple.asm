@@ -97,14 +97,16 @@ END_FUNC tuple_dunder_rmul
 ;; tuple_method_index(args, nargs) -> SmallInt index
 ;; args[0]=self (tuple), args[1]=value, optional args[2]=start, args[3]=stop
 ;; ============================================================================
+TMI_ARGS  equ 8
+TMI_NARGS equ 16
 DEF_FUNC tuple_method_index, 16
     push rbx
     push r12
     push r13
     push r14
 
-    mov [rbp - 8], rdi      ; save args
-    mov [rbp - 16], rsi     ; save nargs
+    mov [rbp - TMI_ARGS], rdi      ; save args
+    mov [rbp - TMI_NARGS], rsi     ; save nargs
     mov rbx, [rdi]          ; self (tuple)
     mov r12, [rdi + 8]      ; the value to find, as a Value
     mov r13, [rbx + PyTupleObject.ob_size]  ; default stop = size
@@ -112,9 +114,9 @@ DEF_FUNC tuple_method_index, 16
     xor ecx, ecx            ; default start = 0
 
     ; Check for optional start arg (nargs >= 3)
-    cmp qword [rbp - 16], 3
+    cmp qword [rbp - TMI_NARGS], 3
     jl .ti_have_bounds
-    mov rax, [rbp - 8]
+    mov rax, [rbp - TMI_ARGS]
     push rcx
     mov rdi, [rax + 16]      ; args[2] payload
     V_UNPACK rdi, rdx       ; args[2]
@@ -131,9 +133,9 @@ DEF_FUNC tuple_method_index, 16
 .ti_start_pos:
 
     ; Check for optional stop arg (nargs >= 4)
-    cmp qword [rbp - 16], 4
+    cmp qword [rbp - TMI_NARGS], 4
     jl .ti_have_bounds
-    mov rax, [rbp - 8]
+    mov rax, [rbp - TMI_ARGS]
     push rcx
     mov rdi, [rax + 24]      ; args[3] payload
     V_UNPACK rdi, rdx       ; args[3]

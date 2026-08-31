@@ -476,6 +476,7 @@ AS_ENTRY equ 72          ; the entry being pushed, across a grow
 AS_FRAME equ 88          ; + 5 pushes = 128
 ;; asm_work_grow(rdi = old, rsi = count, rdx = old capacity)
 ;;   -> rax = the new buffer (0 on failure), rdx = the new capacity
+AWG_BUF   equ 8              ; the reallocated work buffer, across the call
 DEF_FUNC_LOCAL asm_work_grow, 40          ; + 3 pushes = 64
     push rbx
     push r12
@@ -487,14 +488,14 @@ DEF_FUNC_LOCAL asm_work_grow, 40          ; + 3 pushes = 64
     call ap_malloc
     test rax, rax
     jz .awg_failed
-    mov [rbp - 8], rax
+    mov [rbp - AWG_BUF], rax
     mov rdi, rax
     mov rsi, rbx
     lea rdx, [r12*8]
     call ap_memcpy
     mov rdi, rbx
     call ap_free
-    mov rax, [rbp - 8]
+    mov rax, [rbp - AWG_BUF]
     mov rdx, r13
     pop r13
     pop r12

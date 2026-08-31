@@ -875,7 +875,7 @@ END_FUNC par_bound_name
 ;; par_dotted_name(Comp *c) -> rax = obj index of the joined name, 0 on error
 ;; `a.b.c` becomes the single string "a.b.c", which is what IMPORT_NAME wants.
 ;; ============================================================================
-PDN_BUF   equ 48         ; a Buf at [rbp - 48]
+PDN_BUF   equ 48         ; a Buf lives here
 PDN_FRAME equ 56         ; + 3 pushes = 80
 DEF_FUNC par_dotted_name, PDN_FRAME
     push rbx

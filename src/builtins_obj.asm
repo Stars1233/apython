@@ -1027,6 +1027,7 @@ END_FUNC minmax_impl
 ; ============================================================================
 ; 17. builtin_getattr(args, nargs) - getattr(obj, name[, default])
 ; ============================================================================
+GA_EXC    equ 8              ; current_exception before the lookup
 DEF_FUNC builtin_getattr, 24
     push rbx
     push r12
@@ -1041,7 +1042,7 @@ DEF_FUNC builtin_getattr, 24
     ; One lookup, with the descriptor protocol run over it -- the same answer
     ; `obj.name` gives.  Doing it by hand here is what made getattr() hand back
     ; the property object instead of calling it.
-    DUNDER_EXC_SAVE [rbp - 8]
+    DUNDER_EXC_SAVE [rbp - GA_EXC]
     mov rdi, [rbx]                 ; args[0], as a Value
     mov rsi, [rbx + 8]             ; args[1], the name
     call obj_getattr_opt
@@ -1057,7 +1058,7 @@ DEF_FUNC builtin_getattr, 24
     ; or an AttributeError, would bury the real exception.  current_exception
     ; is also whatever is being HANDLED, so it has to be compared against the
     ; snapshot rather than tested for emptiness.
-    DUNDER_RAISED [rbp - 8], .getattr_check_type
+    DUNDER_RAISED [rbp - GA_EXC], .getattr_check_type
 .getattr_absent:
     cmp r12, 3
     jne .getattr_raise
@@ -1110,6 +1111,7 @@ END_FUNC builtin_getattr
 ; ============================================================================
 ; 18. builtin_hasattr(args, nargs) - hasattr(obj, name)
 ; ============================================================================
+HA_EXC    equ 8              ; current_exception before the lookup
 DEF_FUNC builtin_hasattr, 24
     push rbx
     mov rbx, rdi
@@ -1119,7 +1121,7 @@ DEF_FUNC builtin_hasattr, 24
     ; The same lookup getattr() does, so the two cannot disagree about what
     ; exists.  A getter that raises propagates rather than reading as absent,
     ; which is what CPython does for anything but an AttributeError.
-    DUNDER_EXC_SAVE [rbp - 8]
+    DUNDER_EXC_SAVE [rbp - HA_EXC]
     mov rdi, [rbx]
     mov rsi, [rbx + 8]
     call obj_getattr_opt
@@ -1134,7 +1136,7 @@ DEF_FUNC builtin_hasattr, 24
     ret
 .hasattr_missing:
     ; hasattr swallows a missing attribute, not a getter that blew up.
-    DUNDER_RAISED [rbp - 8], .hasattr_check_type
+    DUNDER_RAISED [rbp - HA_EXC], .hasattr_check_type
 .hasattr_false:
     lea rax, [rel bool_false]
     INCREF rax

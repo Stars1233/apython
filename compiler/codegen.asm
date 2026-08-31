@@ -340,20 +340,22 @@ END_FUNC cg_emit_jump_back
 ;; cg_loop_pop(CompUnit *u)
 ;; cg_loop_top(CompUnit *u) -> rax = LoopFrame*, or 0 outside any loop
 ;; ============================================================================
+CLP_CONT  equ 8              ; continue target, across buf_reserve
+CLP_NPOP  equ 16             ; pops needed to leave the loop
 DEF_FUNC cg_loop_push, 16
     push rbx
     push r12
     mov rbx, rdi
     mov r12, rsi
-    mov [rbp - 8], rdx
-    mov [rbp - 16], rcx
+    mov [rbp - CLP_CONT], rdx
+    mov [rbp - CLP_NPOP], rcx
     lea rdi, [rbx + CompUnit.loops]
     mov esi, 1
     call buf_reserve
     mov [rax + LoopFrame.brk], r12d
-    mov rdx, [rbp - 8]
+    mov rdx, [rbp - CLP_CONT]
     mov [rax + LoopFrame.cont], edx
-    mov rdx, [rbp - 16]
+    mov rdx, [rbp - CLP_NPOP]
     mov [rax + LoopFrame.npop], edx
     mov edx, [rbx + CompUnit.finallys + Buf.len]
     mov [rax + LoopFrame.fdepth], edx
@@ -386,17 +388,18 @@ END_FUNC cg_loop_top
 ;; cg_pop_handler(CompUnit *u)
 ;; Everything emitted between the two is covered by this handler.
 ;; ============================================================================
+CPH_HANDLER equ 8            ; handler target, across buf_reserve
 DEF_FUNC cg_push_handler, 16
     push rbx
     push r12
     mov rbx, rdi
     mov r12, rsi
-    mov [rbp - 8], rdx
+    mov [rbp - CPH_HANDLER], rdx
     lea rdi, [rbx + CompUnit.handlers]
     mov esi, 1
     call buf_reserve
     mov [rax + Handler.target], r12d
-    mov rdx, [rbp - 8]
+    mov rdx, [rbp - CPH_HANDLER]
     mov [rax + Handler.lasti], edx
     mov dword [rax + Handler.depth], -1
     mov edx, [rbx + CompUnit.cur_handler]

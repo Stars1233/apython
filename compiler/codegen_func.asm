@@ -920,6 +920,7 @@ END_FUNC cg_compile_body
 ;; func_call reads all four to place arguments, so a wrong count here is an
 ;; argument landing in the wrong slot rather than an error.
 ;; ============================================================================
+CSA_ARGS  equ 8              ; the arguments node, across the ast_at calls
 DEF_FUNC cg_set_arg_counts, 16
     push rbx
     push r12
@@ -930,7 +931,7 @@ DEF_FUNC cg_set_arg_counts, 16
     mov dword [r12 + CompUnit.kwonly], 0
     test rdx, rdx
     jz .done
-    mov [rbp - 8], rdx
+    mov [rbp - CSA_ARGS], rdx
     mov rdi, rbx
     mov rsi, rdx
     call ast_at
@@ -940,7 +941,7 @@ DEF_FUNC cg_set_arg_counts, 16
     or dword [r12 + CompUnit.flags], CO_VARARGS
 .no_vararg:
     mov rdi, rbx
-    mov rsi, [rbp - 8]
+    mov rsi, [rbp - CSA_ARGS]
     call ast_at
     mov ecx, [rax + AstNode.c]
     test ecx, ecx
@@ -948,7 +949,7 @@ DEF_FUNC cg_set_arg_counts, 16
     or dword [r12 + CompUnit.flags], CO_VARKEYWORDS
 .no_varkw:
     mov rdi, rbx
-    mov rsi, [rbp - 8]
+    mov rsi, [rbp - CSA_ARGS]
     call ast_at
     mov esi, [rax + AstNode.a]          ; the AST_EXTRA counts node
     mov rdi, rbx

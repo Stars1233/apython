@@ -26,6 +26,7 @@ These run over **every** hand-written `.asm` in the tree:
 | No tabs; `DEF_FUNC`/`END_FUNC` at column 0 | `check_text` | error |
 | Every `.inc` has a guard named for the file, echoed on the `%endif` | `check_guards` | error |
 | A `global X` has a definition of `X` in the same file | `check_exports` | error |
+| No raw `[rbp +- N]`; frame slots carry named `equ` constants | `check_frame_offsets` | error |
 
 These are scoped to `compiler/*.asm` plus `src/main.asm`:
 
@@ -286,9 +287,8 @@ Derive an offset that sits below a struct rather than hand-picking it —
 `CS_UNIT equ 48 + CompUnit_size` — or the struct silently overlaps the scalar
 slots above it the first time it grows.
 
-Older files in `src/` still use raw offsets; they are legacy, not a pattern to
-copy.  Do not add more, and prefer converting a function you are already
-editing.
+There are none left in the tree, and `check_frame_offsets` keeps it that way.
+`rsp`-relative scratch is exempt and is not checked.
 
 ## Struct Field Access
 

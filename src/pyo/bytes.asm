@@ -409,6 +409,7 @@ DEF_FUNC bytearray_repr
     ret
 END_FUNC bytearray_repr
 
+BRI_BUF   equ 1024          ; render buffer, on the stack
 DEF_FUNC_LOCAL bytes_repr_impl, 1024
     push rbx
     push r12
@@ -445,7 +446,7 @@ DEF_FUNC_LOCAL bytes_repr_impl, 1024
 .br_scan_done_squote:
 
     ; Build repr in local buffer
-    lea r13, [rbp - 1024]      ; buffer on stack
+    lea r13, [rbp - BRI_BUF]      ; buffer on stack
 
     xor ecx, ecx               ; output pos
     test r14d, r14d

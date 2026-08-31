@@ -946,7 +946,7 @@ END_FUNC str_method_replace
 ;; args[0]=self (separator), args[1]=list
 ;; self.join(iterable)
 ;; Regs: rbx=self(sep), r12=list, r13=count, r14=sep_len
-;; Stack: [rbp-48]=total_len, [rbp-56]=buf_ptr, [rbp-64]=write_pos
+;; Stack: the SJ_* slots below
 ;; ============================================================================
 extern tuple_type_call
 

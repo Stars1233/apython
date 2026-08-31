@@ -314,6 +314,26 @@ def check_exports(files):
                         "define it, or drop the export"))
     return bad
 
+def check_frame_offsets(files):
+    """A raw `[rbp - 8]` where a named frame constant belongs.
+
+    A hand-picked offset silently overlaps the slot above it the first time a
+    struct in the same frame grows, and the symptom is one field reading as
+    garbage.  `rsp`-relative scratch is conventionally written raw and is not
+    checked; it is `rbp` frames that must be named.
+    """
+    bad = []
+    lit = re.compile(r'"[^"]*"|\'[^\']*\'|`[^`]*`')
+    pat = re.compile(r'\[\s*rbp\s*[-+]\s*\d+\s*\]')
+    for path in files:
+        for n, line in enumerate(open(path), 1):
+            code = lit.sub('', line).split(';')[0]
+            m = pat.search(code)
+            if m:
+                bad.append((path, n, "raw frame offset %s" % m.group(0),
+                            "name it with an equ constant"))
+    return bad
+
 def check_markers(files):
     """Every function opens with DEF_FUNC* and closes with a matching END_FUNC.
 
@@ -398,6 +418,7 @@ def main():
     problems = (check_field_widths(everything, fields) + check_section(everything)
                 + check_rel(everything) + check_markers(everything)
                 + check_exports(everything)
+                + check_frame_offsets(everything)
                 + check_text(everything) + check_guards(headers)
                 + check_alignment(scoped) + check_tailjumps(scoped)
                 + check_callee_saved(scoped) + check_saved_writes(scoped))

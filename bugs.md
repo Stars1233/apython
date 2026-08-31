@@ -241,15 +241,6 @@ STYLE.md, listed so the gap is a known quantity rather than a surprise to
 whoever copies a neighbouring file.  Counts are deliberately absent -- grep
 gives a current one, and a number written here is wrong by the next commit.
 
-- **Raw `[rbp +- N]` frame offsets** where STYLE.md requires named `equ`
-  constants; they survive from before the rule.  `src/builtins_num.asm` and
-  `src/pyo/sysmod.asm` hold the most of what is left, and the rest is spread
-  thin.  The `[rsp +- N]` form is a different thing and is explicitly allowed,
-  so count only the `rbp` ones.
-  A hand-picked offset silently overlaps the slot above it the first time a
-  struct in the same frame grows, which is the failure this rule exists to
-  prevent.
-
 - **`XX_FRAME equ` constants with no alignment arithmetic in a trailing
   comment**, which STYLE.md asks for because it is how a reader checks the
   `(N + 8*pushes) % 16 == 0` rule without recounting the pushes.  Roughly half

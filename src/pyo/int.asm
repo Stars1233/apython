@@ -976,6 +976,9 @@ END_FUNC int_base_str
 ;; int_repr(PyObject *self) -> PyStrObject*
 ;; String representation. SmallInt uses snprintf, GMP uses gmpz_get_str.
 ;; ============================================================================
+IR_SAVED  equ 16            ; rbp less the two callee-saved pushes
+IR_BUF    equ 32            ; 24-byte digit buffer, written backwards
+IR_FRAME  equ 32
 DEF_FUNC_BARE int_repr
     cmp edx, TAG_SMALLINT
     je .smallint
@@ -1030,7 +1033,7 @@ DEF_FUNC_BARE int_repr
     call ap_free               ; free C buffer
     mov rax, rbx               ; return str object
     mov edx, TAG_PTR
-    lea rsp, [rbp - 16]   ; restore RSP to before alignment (rbp-16 = after push rbx, push r12)
+    lea rsp, [rbp - IR_SAVED] ; undo the alignment, back to the two pushes
     pop r12
     pop rbx
     pop rbp
@@ -1040,12 +1043,12 @@ DEF_FUNC_BARE int_repr
     ; Direct SmallInt repr: manual int-to-string, no GMP allocation
     push rbp
     mov rbp, rsp
-    sub rsp, 32                ; 24 bytes buffer + alignment
+    sub rsp, IR_FRAME          ; 24 bytes buffer + alignment
     mov rax, rdi
 
     ; Convert int64 to decimal string in stack buffer
     ; Write digits backwards from buf[23], then reverse
-    lea rdi, [rbp - 32]       ; rdi = buffer start
+    lea rdi, [rbp - IR_BUF]   ; rdi = buffer start
     xor ecx, ecx              ; ecx = 0 (negative flag)
     test rax, rax
     jns .si_positive
@@ -1053,7 +1056,7 @@ DEF_FUNC_BARE int_repr
     mov ecx, 1                ; mark negative
 .si_positive:
     ; rax = absolute value, ecx = negative flag
-    lea rsi, [rbp - 9]        ; rsi = write position (end of buffer area)
+    lea rsi, [rbp - IR_BUF + 23]  ; rsi = write position, one past the last byte
     mov byte [rsi], 0          ; null terminator
     dec rsi
 

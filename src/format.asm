@@ -552,7 +552,6 @@ DEF_FUNC_LOCAL format_int_body, FIB_FRAME
     push r14
     push r15
     mov r15, rbp                        ; our frame
-    mov rbx, [rbp + 8]                  ; unused; keeps the layout obvious
 
     ; The caller's frame holds the spec.  rbp of format_apply_spec is the
     ; saved rbp at [rbp].
