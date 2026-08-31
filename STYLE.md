@@ -52,7 +52,6 @@ Order within every `.asm` file:
 
 %include "macros.inc"
 %include "object.inc"
-%include "types.inc"
 
 extern ap_malloc
 extern str_from_cstr
@@ -531,9 +530,9 @@ so `cmp qword [rel current_exception], 0` cannot mean "did that call raise?".
 
 ## Macro Hazards
 
-- **`macros.inc` only includes `value.inc`.**  `INCREF`/`DECREF` need
-  `object.inc`, `REQUIRE_*` need `types.inc`, `FRAME_PUSH_*` need `frame.inc`.
-  Omit one and the field offsets silently resolve to 0.
+- **`macros.inc` only includes `value.inc`.**  Anything touching a struct --
+  `INCREF`/`DECREF`, `REQUIRE_*`, `FRAME_PUSH_*` -- needs `object.inc` too.
+  Omit it and the field offsets silently resolve to 0.
 - **Singletons are not declared for you.**  A file using `VPUSH_NONE`,
   `RET_NONE`, `LOAD_NONE`, `IS_NONE` or `VPUSH_BOOL` must `extern
   none_singleton` / `bool_true` / `bool_false` itself.

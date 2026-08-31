@@ -17,6 +17,7 @@ make check        # full test suite: compile .py→.pyc, diff python3 vs ./apyth
 make check-cpython # CPython stdlib unit tests (harder, more thorough)
 make check-stdlib # how much of a CPython 3.12 Lib/ imports; a ratchet
 make check-source # the whole corpus compiled by OUR compiler; a ratchet
+make regen        # regenerate the machine-written asm (needs CPython 3.12)
 make check-cpython-source  # the CPython corpus, compiled by OUR compiler
 ```
 
@@ -134,21 +135,38 @@ and at the boundaries between converted and unconverted code.
 
 ## Source Layout
 
+No hand-written file exceeds 100k bytes; only generated asm may.
+
 - `src/eval.asm` — Bytecode dispatch loop (256-entry jump table)
-- `src/opcodes_*.asm` — Opcode handlers by category (load, store, stack, call, build, misc, async, import)
-- `src/pyo/*.asm` — Type implementations (int, str, list, dict, tuple, func, class, iter, bool, none, bytes, code)
-- `src/marshal.asm` — .pyc marshal format deserializer
-- `src/pyc.asm` — .pyc file reader (magic validation, header parsing)
-- `src/builtins.asm` — Built-in functions (print, len, range, type, isinstance, etc.) and `type_from_parts`
+- `src/opcodes_*.asm` — Opcode handlers by category: `load` (loads, stores and
+  the stack shuffles), `call`, `build`, `arith` (BINARY_OP/COMPARE_OP/unary and
+  the specialized int/float superinstructions), `flow` (returns, jumps,
+  f-strings, generators), `match` (the MATCH_* family and the intrinsics),
+  `async`, `import`
+- `src/methods_*.asm` — Builtin type methods, one file per type: `str`,
+  `str_pred`, `str_parts`, `list`, `dict`, `set`, `num`, `bytes`, `object`
+  (object's own dunders plus the `DEF_DUNDER_*` generators), and `init`, which
+  registers them all into each type's `tp_dict`
+- `src/pyo/*.asm` — Type implementations (int, str, list, dict, tuple, func,
+  class, iter, singleton, bytes, code)
+- `src/marshal.asm` — .pyc marshal deserializer, and the .pyc file reader
+- `src/builtins.asm` — `PyBuiltinObject`, the core builtins, and `builtins_init`
+- `src/builtins_num.asm` / `src/builtins_obj.asm` — the numeric builtins, and the
+  object/iteration/IO builtins
+- `src/buildclass.asm` — `type.__new__`, `type_from_parts`, `__build_class__`
 - `src/slots.asm` — Installs slot wrappers on a heaptype from the dunders it defines
 - `src/mro.asm` — C3 linearization, `type_mro_next`, `type_is_subtype`
 - `src/format.asm` — The format-spec mini-language (`format()`, f-strings, `%`)
-- `src/traceback.asm` — PEP 626 line-table decoding and traceback rendering
+- `src/traceback.asm` — Both code-object side tables: PEP 626 line table and
+  `co_exceptiontable`, plus traceback rendering
 - `src/frame.asm` — Frame alloc/dealloc
 - `src/object.asm` — Base PyObject ops (alloc, refcount, dealloc, `obj_richcompare_bool`)
-- `src/lib/` — Syscall wrappers, string/memory ops (replace libc)
+- `src/runtime.asm` — The freestanding layer: syscalls, allocation, PLT-free
+  memory and string ops, and `fatal_error`
 - `compiler/` — The Python **source** compiler (see below)
-- `include/` — Struct definitions (.inc): object, types, frame, opcodes, macros, marshal, builtins, errcodes
+- `include/` — `object.inc` (every struct and id enum), `macros.inc`,
+  `value.inc`, `opcodes.inc`, and the two private ABIs `sre.inc` and
+  `eventloop.inc`
 
 ## Source Compiler (`compiler/`)
 
@@ -163,20 +181,16 @@ f-strings, async, comprehensions, PEP 695 type parameters.
 | `tables.asm` | **generated** — char classes, keywords, operators, opcode metadata |
 | `gen_tables.py` | regenerates `tables.asm` from CPython 3.12's `opcode`/`dis` |
 | `gen_prule.py` | regenerates the expression grammar table inside `parse.asm` |
-| `arena.asm` | growable `Buf` and bump `Arena` (the tree has neither otherwise) |
 | `lex.asm` | tokenizer: indentation, operators, names, numbers, strings |
-| `ast.asm` | 32-byte nodes in a `Buf`, addressed by u32 index |
+| `ast.asm` | 32-byte nodes in a `Buf`, addressed by u32 index, and the growable `Buf` / bump `Arena` they live in |
 | `parse.asm` | Pratt expression parser + `prule_table`, the precedence grammar |
 | `parse_stmt.asm` | statements, and the soft keywords `match` and `type` |
 | `pattern.asm` | `match` patterns |
 | `fstring.asm` | f-string fields, lexed as spans of the same source |
 | `symtab.asm` | scopes, local/cell/free classification, name mangling |
-| `codegen.asm` | AST kind → emitter jump table; `_stmt`/`_func`/`_try`/`_comp`/`_async`/`_match`/`_egroup` for the rest |
+| `codegen.asm` | AST kind → emitter jump table; `_stmt`/`_func`/`_try`/`_comp`/`_match` for the rest.  `_try` also holds `except*`, `with` and `await`: they are one unwinder |
 | `assemble.asm` | EXTENDED_ARG fixpoint, stack depth, exception table, line table |
-| `compile.asm` | pipeline driver and lifetime |
-| `evalexec.asm` | the `compile()`, `exec()` and `eval()` builtins |
-| `srcfile.asm` | `code_from_path`: `./apython foo.py` and import from source |
-| `comperr.asm` | error recording |
+| `compile.asm` | pipeline driver and lifetime; the `code_from_path` and `compile()`/`exec()`/`eval()` entry points; and `comp_error`, the record side of the error protocol |
 | `unicodename.asm` | **generated** -- the names `\N{...}` resolves |
 | `gen_unicodename.py` | regenerates `unicodename.asm` from `unicodedata` |
 | `uniname.asm` | the search over it, plus the algorithmic CJK family |
@@ -196,10 +210,9 @@ Because every emission routes through it, a forgotten CACHE is not a mistake an
 emitter can make. Its numbers are CPython's, taken from the running
 interpreter's own modules rather than transcribed.
 
-Regenerate with `python3 compiler/gen_tables.py > compiler/tables.asm`,
-`python3 compiler/gen_prule.py`, and
-`python3 compiler/gen_unicodename.py > compiler/unicodename.asm`; all three
-outputs are committed, so building never needs Python.
+Regenerate all three with `make regen`.  The outputs are committed, so building
+never needs Python -- and `gen_tables.py` refuses to run on anything but CPython
+3.12, so they must not become build steps.  `make clean` leaves them alone.
 
 **Gates:** `make check-source` and `make check-cpython-source` (both corpora
 compiled by this compiler and diffed against `python3` — where nearly every bug
@@ -244,8 +257,8 @@ These cost real time; the shapes recur.
 
 Defined in `include/*.inc`. All objects start with `PyObject` (ob_refcnt +0, ob_type +8).
 
-- **PyTypeObject** (types.inc): tp_call +64, tp_getattr +72, tp_setattr +80, tp_as_number +128, tp_as_sequence +136, tp_as_mapping +144, tp_base +152, tp_mro +168, tp_bases +184, tp_dictoffset +208
-- **PyFrame** (frame.inc): code +8, globals +16, locals +32, stack_ptr +48, stack_base +56, localsplus +80 (variable-size Value[])
+- **PyTypeObject** (object.inc): tp_call +64, tp_getattr +72, tp_setattr +80, tp_as_number +128, tp_as_sequence +136, tp_as_mapping +144, tp_base +152, tp_mro +168, tp_bases +184, tp_dictoffset +208
+- **PyFrame** (object.inc): code +8, globals +16, locals +32, stack_ptr +48, stack_base +56, localsplus +80 (variable-size Value[])
 - **PyIntObject** (object.inc): mpz +16 (only initialised on overflow), ival +32, compact +40 (1 = the ival is live)
 - **DictEntry** (object.inc, 24 bytes): hash +0, key +8, value +16 — occupied ⇔ `key != 0`; empty ⇔ `key == 0 && hash == 0`; tombstone ⇔ `key == 0 && hash == -1`
 - **PyCodeObject** (object.inc): co_consts, co_names, co_firstlineno +112, co_linetable +120, co_code starts at +128

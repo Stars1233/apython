@@ -174,10 +174,10 @@ Everything here assembles and runs.  These are places the tree does not follow
 STYLE.md, listed so the gap is a known quantity rather than a surprise to
 whoever copies a neighbouring file.
 
-- **756 raw numeric frame offsets across 46 files.**  STYLE.md requires named
+- **756 raw numeric frame offsets across 53 files.**  STYLE.md requires named
   `equ` constants; `[rbp-8]` and `[rsp+32]` survive from before that rule.  The
   concentration is `src/opcodes_build.asm` (151), `src/marshal.asm` (85),
-  `src/repr.asm` (64), `src/methods.asm` (60) and `src/pyo/float.asm` (57).
+  `src/repr.asm` (64) and `src/pyo/float.asm` (57).
   A hand-picked offset silently overlaps the slot above it the first time a
   struct in the same frame grows, which is the failure this rule exists to
   prevent.
@@ -193,7 +193,7 @@ whoever copies a neighbouring file.
   `global` is what the previous item's files use *instead*, so the two read
   alike and only one is correct.
 
-- **`compiler/lint.py` covers 27 of the ~60 `.asm` files** (`compiler/*.asm`
+- **`compiler/lint.py` covers 21 of the ~90 `.asm` files** (`compiler/*.asm`
   plus `src/main.asm`).  Its six checks — 4-byte field reads, rsp alignment,
   tail jumps, section, callee-saved pushes and writes — are convention-only
   everywhere else.  Extending it over `src/` means paying down the alignment
@@ -202,7 +202,7 @@ whoever copies a neighbouring file.
 
 - **Nine macros have no call sites**: `XDECREF`, `EXTERN_C` (`include/macros.inc`),
   `V_IS_PTR`, `V_HIGH16`, `V_NONE`, `V_TRUE`, `V_FALSE` (`include/value.inc`),
-  `GC_FROM_OBJ`, `OBJ_FROM_GC` (`include/gc.inc`).  They read as available API
+  `GC_FROM_OBJ`, `OBJ_FROM_GC` (`include/object.inc`).  They read as available API
   and are untested; either use or delete.
 
 - **Two macro comments describe behaviour the macro does not have.**
@@ -213,11 +213,10 @@ whoever copies a neighbouring file.
   `DECREF_REG` "doesn't push/pop if arg is rdi"; it never push/pops and always
   clobbers `rdi`.
 
-- **Twelve headers in `src/pyo/` name a file that no longer exists.**  Line 1 of
-  `dict.asm` says `dict_obj.asm`; likewise `bool`, `bytes`, `class`, `code`,
-  `func`, `int`, `iter`, `list`, `none`, `str` and `tuple`.  `src/lib/memops.asm`
-  says `memory.asm`.  A one-line fix each, but the header is the first thing
-  read.
+- **Nine headers in `src/pyo/` name a file that no longer exists.**  Line 1 of
+  `dict.asm` says `dict_obj.asm`; likewise `bytes`, `class`, `code`, `int`,
+  `iter`, `list`, `str` and `tuple`.  A one-line fix each, but the header is
+  the first thing read.
 
 - **The `CACHE_*` constants in `include/opcodes.inc` have no references.**  Every
   handler hardcodes `add rbx, 2*N` with a `; skip N CACHE entries` comment

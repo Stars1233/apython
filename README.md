@@ -221,69 +221,70 @@ All tests are Valgrind-clean.
 src/
   main.asm              Entry point, --version
   eval.asm              Bytecode dispatch loop (256-entry jump table)
-  opcodes_load.asm      Load opcodes
-  opcodes_store.asm     Store opcodes
-  opcodes_stack.asm     Stack manipulation opcodes
+  opcodes_load.asm      Loads, stores, and the stack shuffles
   opcodes_call.asm      Call/function opcodes
   opcodes_build.asm     Container build opcodes
-  opcodes_misc.asm      Comparison, control flow, format, pattern matching
+  opcodes_arith.asm     Binary/unary ops, comparisons, superinstructions
+  opcodes_flow.asm      Returns, jumps, f-strings, generators
+  opcodes_match.asm     Pattern matching and the intrinsics
   opcodes_async.asm     Async/await opcodes
   opcodes_import.asm    Import opcodes
-  builtins.asm          Built-in functions, type registry, type_from_parts
-  builtins_extra.asm    Additional builtins (itertools constructors, etc.)
+  builtins.asm          Builtin function object, core builtins, the registry
+  builtins_num.asm      Numeric builtins (int, abs, round, pow, hex/bin/oct)
+  builtins_obj.asm      Object/iteration/IO builtins (getattr, iter, open, ...)
+  buildclass.asm        type.__new__, type_from_parts, __build_class__
   slots.asm             Slot wrappers installed from a heaptype's dunders
   mro.asm               C3 linearization and MRO walking
   format.asm            The format-spec mini-language
-  traceback.asm         PEP 626 line table and traceback rendering
-  marshal.asm           .pyc marshal deserializer
-  pyc.asm               .pyc file reader
+  traceback.asm         The code object's side tables (line + exception),
+                        and traceback rendering
+  marshal.asm           .pyc marshal deserializer and file reader
   frame.asm             Frame allocation/deallocation
   object.asm            Base PyObject operations, type_type, rich comparison
-  memory.asm            Memory management
-  error.asm             fatal_error: unrecoverable failures, straight to stderr
-  except.asm            co_exceptiontable parser (handler lookup)
+  runtime.asm           Syscalls, allocation, PLT-free mem/str ops, fatal_error
   gc.asm                3-generation cycle-collecting garbage collector
   import.asm            Module import system
   dunder.asm            Dunder method dispatch (__add__, __eq__, etc.)
   repr.asm              repr/str formatting
   val.asm               NaN-boxed Value encoding and helpers
   valtest.asm           --selftest-value: encode/decode boundary checks
-  methods.asm           Built-in type methods (str/list/dict/set/tuple/int)
+  methods_*.asm         Built-in type methods, one file per type, plus
+                        methods_init.asm which registers them all
   sre.asm               SRE regex bytecode engine
   sre_module.asm        _sre module interface
   itertools.asm         itertools module
-  pyo/                  33 type implementation files
-    int.asm float.asm str.asm bytes.asm bytearray.asm memview.asm
-    list.asm dict.asm tuple.asm set.asm bool.asm none.asm slice.asm
-    func.asm class.asm code.asm module.asm cell.asm
+  pyo/                  31 type implementation files
+    int.asm float.asm str.asm bytes.asm
+    list.asm dict.asm tuple.asm set.asm singleton.asm slice.asm
+    func.asm class.asm code.asm module.asm
     iter.asm generator.asm exception.asm exc_group.asm fileobj.asm
     descriptors.asm sre_match.asm sre_pattern.asm
     sysmod.asm asyncmod.asm timemod.asm abcmod.asm weakrefmod.asm
-    namespace.asm
     eventloop.asm eventloop_poll.asm eventloop_iouring.asm
     asyncio_streams.asm
-  lib/                  Syscall wrappers, string/memory ops
-    syscall.asm memops.asm string.asm
 compiler/               The Python source compiler
   lex.asm               Tokenizer: 256-entry char class, indent stack, f-strings
   parse.asm             Pratt expression parser, one table row per token
   parse_stmt.asm        Statements, and the soft keywords `match` and `type`
   pattern.asm           `match` patterns
   fstring.asm           f-string fields, lexed as spans of the same source
-  ast.asm arena.asm     32-byte nodes in a growable buffer; a scratch child stack
+  ast.asm               32-byte nodes in the growable buffer and bump arena
+                        they live in
   symtab.asm            Scopes, local/cell/free classification, name mangling
-  codegen.asm           Expressions; codegen_stmt/_func/_try/_comp/_async/
-                        _match/_egroup for the rest
+  codegen.asm           Expressions; codegen_stmt/_func/_try/_comp/_match for
+                        the rest.  _try also holds except*, with and await
   assemble.asm          EXTENDED_ARG fixpoint, stack depth, exception table,
                         PEP 626 line table
-  compile.asm           The driver, and the only place errors become exceptions
-  evalexec.asm          compile(), exec(), eval()
-  srcfile.asm           `./apython foo.py` and import from source
+  compile.asm           The driver, both entry points -- `./apython foo.py` and
+                        compile()/exec()/eval() -- and the error protocol
   dis.asm comptest.asm  --dis and --selftest-compile
   lint.py               Static checks over compiler/*.asm, run by make check
   gen_tables.py         Generates tables.asm from CPython's own opcode module
   gen_prule.py          Generates the expression grammar table in parse.asm
-include/                Struct definitions, macros, constants (.inc files)
+  gen_unicodename.py    Generates unicodename.asm from unicodedata
+                        (all three outputs are committed; `make regen`)
+include/                object.inc (every struct), macros.inc, value.inc,
+                        opcodes.inc, and the sre/eventloop private ABIs
 lib/                    Pure Python support modules
   abc.py contextlib.py copy.py functools.py io.py itertools.py
   operator.py pickle.py string.py warnings.py __future__.py
