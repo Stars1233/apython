@@ -79,6 +79,40 @@ DEF_FUNC main, 8
     ret
 .not_version:
 
+    ; Check for -h / --help / -?  CPython accepts all three, writes the help to
+    ; stdout and exits 0, so we do the same.  The options listed are ours: a
+    ; help screen naming flags this interpreter does not implement would be
+    ; worse than no help screen at all.
+    mov rdi, [r15 + 8]          ; rdi = argv[1]
+    lea rsi, [rel help_flag]
+    call ap_strcmp
+    test eax, eax
+    je .do_help
+    mov rdi, [r15 + 8]
+    lea rsi, [rel help_short_flag]
+    call ap_strcmp
+    test eax, eax
+    je .do_help
+    mov rdi, [r15 + 8]
+    lea rsi, [rel help_q_flag]
+    call ap_strcmp
+    test eax, eax
+    jne .not_help
+.do_help:
+    mov edi, 1                  ; stdout
+    lea rsi, [rel help_msg]
+    mov edx, help_msg_len
+    call sys_write
+    xor eax, eax
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+.not_help:
+
     ; Check for --selftest-value flag (NaN-box encoding self-test)
     mov rdi, [r15 + 8]          ; rdi = argv[1]
     lea rsi, [rel selftest_flag]
@@ -425,7 +459,7 @@ DEF_FUNC main, 8
     ret
 
 .usage:
-    CSTRING rdi, "Usage: apython [--version] [-t] <file.pyc>"
+    CSTRING rdi, "usage: apython [option] ... <file>; try `apython --help'"
     call fatal_error
 
 .load_failed:
@@ -456,6 +490,24 @@ DEF_FUNC main, 8
 END_FUNC main
 
 section .rodata
+help_flag: db "--help", 0
+help_short_flag: db "-h", 0
+help_q_flag: db "-?", 0
+help_msg:
+    db "usage: apython [option] ... [file]", 10
+    db "Options:", 10
+    db "-h     : print this help message and exit (also -? or --help)", 10
+    db "-t     : print each opcode as it is executed", 10
+    db "--version : print the apython version number and exit", 10
+    db "--dis [-x] <source> : print the bytecode compiled from <source>;", 10
+    db "         -x compiles in exec mode rather than eval mode", 10
+    db "--selftest-value : run the Value encoding self-test and exit", 10
+    db "--selftest-compile : run the source compiler self-test and exit", 10
+    db 10
+    db "Arguments:", 10
+    db "file   : a .py file to compile and run, or a .pyc file to run directly", 10
+help_msg_len equ $ - help_msg
+
 selftest_flag: db "--selftest-value", 0
 selftest_compile_flag: db "--selftest-compile", 0
 dis_flag: db "--dis", 0
