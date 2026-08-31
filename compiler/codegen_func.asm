@@ -633,7 +633,7 @@ DEF_FUNC cg_docstring, CDS_FRAME
     mov rdi, rbx
     mov rsi, rdx
     call ast_at
-    movzx ecx, word [rax + AstNode.nchild]
+    mov ecx, [rax + AstNode.nchild]     ; a dword field
     test ecx, ecx
     jz .cds_none
     mov rsi, rax
@@ -839,6 +839,19 @@ DEF_FUNC cg_compile_body, CB_FRAME
     call cg_docstring
     test eax, eax
     jz .fail
+    ; ...and __annotations__ before anything annotates into it.
+    mov rdi, rbx
+    mov rsi, r13
+    extern cg_has_annotation_body
+    call cg_has_annotation_body
+    test eax, eax
+    jz .body_start
+    mov rdi, r12
+    mov esi, OP_SETUP_ANNOTATIONS
+    xor edx, edx
+    xor ecx, ecx
+    call cg_emit
+    or byte [rax + Instr.flags], IF_NOLINE
 .body_start:
 
     ; --- body ---

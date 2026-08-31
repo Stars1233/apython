@@ -21,6 +21,7 @@ extern ast_commit
 extern ast_make
 extern ast_mark
 extern ast_obj
+extern ast_obj_at
 extern ast_push
 extern ast_set_ctx
 extern comp_error
@@ -912,9 +913,11 @@ DEF_FUNC par_name_obj, 8
     jne .bad
     mov rdi, rbx
     call par_peek
-    mov rdi, [rax + Token.start]
-    mov esi, [rax + Token.len]
-    call comp_intern
+    mov rdi, rbx
+    mov rsi, [rax + Token.start]
+    mov edx, [rax + Token.len]
+    extern comp_intern_name
+    call comp_intern_name
     test rax, rax
     jz .fail
     mov rdi, rbx
@@ -2405,8 +2408,12 @@ PT2_HMARK equ 56
 PT2_TYPE  equ 64
 PT2_NAME  equ 72
 PT2_BODY  equ 80
+PT2_SAVET equ 88          ; token index, for the parenthesised with-items try
+PT2_SAVEP equ 96          ; pending-stack height
+PT2_SAVEE equ 104         ; whether an error was already recorded
+PT2_PAREN equ 112         ; 1 while inside a parenthesised item list
 PT2_STAR  equ 88
-PT2_FRAME equ 104         ; + 1 push = 112
+PT2_FRAME equ 152         ; + 1 push = 112
 DEF_FUNC_LOCAL ps_try, PT2_FRAME
     push rbx
     mov rbx, rdi
@@ -2602,12 +2609,44 @@ DEF_FUNC_LOCAL ps_with, PT2_FRAME
     mov rdi, rbx
     call ast_mark
     mov [rbp - PT2_MARK], rax
+    mov qword [rbp - PT2_PAREN], 0
+
+    ; A `(` here may open a parenthesised item list -- `with (a as x, b):` --
+    ; or an ordinary parenthesised expression, and only trying it tells them
+    ; apart.  CPython's PEG parser backtracks here too; the state to restore
+    ; is the token index, the pending-node height and the recorded error.
+    mov rdi, rbx
+    call par_kind
+    cmp eax, TOK_LPAR
+    jne .item_loop
+    mov eax, [rbx + Comp.tok_idx]
+    mov [rbp - PT2_SAVET], rax
+    mov rax, [rbx + Comp.pending + Buf.len]
+    mov [rbp - PT2_SAVEP], rax
+    mov eax, [rbx + Comp.err + CompErr.set]
+    mov [rbp - PT2_SAVEE], rax
+    mov qword [rbp - PT2_PAREN], 1
+    mov rdi, rbx
+    call par_advance                    ; `(`
+    jmp .item_loop
+
+.restore_plain:
+    ; Not an item list after all: put everything back and parse the `(` as
+    ; the start of an ordinary expression.
+    mov rax, [rbp - PT2_SAVET]
+    mov [rbx + Comp.tok_idx], eax
+    mov rax, [rbp - PT2_SAVEP]
+    mov [rbx + Comp.pending + Buf.len], rax
+    mov rax, [rbp - PT2_SAVEE]
+    mov [rbx + Comp.err + CompErr.set], eax
+    mov qword [rbp - PT2_PAREN], 0
+
 .item_loop:
     mov rdi, rbx
     mov esi, BP_NONE
     call par_expr
     test rax, rax
-    jz .fail
+    jz .item_failed
     mov [rbp - PT2_TYPE], rax
     mov qword [rbp - PT2_NAME], 0
     mov rdi, rbx
@@ -2642,10 +2681,33 @@ DEF_FUNC_LOCAL ps_with, PT2_FRAME
     mov rdi, rbx
     call par_kind
     cmp eax, TOK_COMMA
-    jne .with_body
+    jne .items_end
     mov rdi, rbx
     call par_advance
-    jmp .item_loop
+    ; A trailing comma before the `)` ends the list.
+    cmp qword [rbp - PT2_PAREN], 0
+    je .item_loop
+    mov rdi, rbx
+    call par_kind
+    cmp eax, TOK_RPAR
+    jne .item_loop
+
+.items_end:
+    cmp qword [rbp - PT2_PAREN], 0
+    je .with_body
+    ; The list has to close and be followed by the suite's colon; anything
+    ; else means this was a parenthesised expression all along.
+    mov rdi, rbx
+    call par_kind
+    cmp eax, TOK_RPAR
+    jne .restore_plain
+    mov rdi, rbx
+    call par_advance
+    mov rdi, rbx
+    call par_kind
+    cmp eax, TOK_COLON
+    jne .restore_plain
+    mov qword [rbp - PT2_PAREN], 0
 
 .with_body:
     mov rdi, rbx
@@ -2671,6 +2733,12 @@ DEF_FUNC_LOCAL ps_with, PT2_FRAME
     pop rbx
     leave
     ret
+.item_failed:
+    ; Inside the parenthesised attempt a failure is not fatal -- it just means
+    ; the `(` opened an expression.
+    cmp qword [rbp - PT2_PAREN], 0
+    jne .restore_plain
+    jmp .fail
 .bad_target:
     mov rdi, rbx
     CSTRING rsi, "cannot assign to that with-target"
@@ -2692,7 +2760,8 @@ PC_NAME   equ 16
 PC_BASES  equ 24
 PC_MARK   equ 32
 PC_NODE   equ 40
-PC_FRAME  equ 40          ; + 1 push = 48
+PC_PRIV   equ 48          ; Comp.private, saved across the body
+PC_FRAME  equ 56          ; + 1 push = 64
 DEF_FUNC_LOCAL ps_class, PC_FRAME
     push rbx
     mov rbx, rdi
@@ -2731,8 +2800,24 @@ DEF_FUNC_LOCAL ps_class, PC_FRAME
     mov rdi, rbx
     call ast_mark
     mov [rbp - PC_MARK], rax
+
+    ; Private names inside the body mangle against this class.  The bases and
+    ; keywords above are evaluated in the enclosing scope and do not.  A
+    ; nested class replaces the name for its own body, which is why this is
+    ; saved and restored rather than set once.
+    mov rax, [rbx + Comp.private]
+    mov [rbp - PC_PRIV], rax
+    mov rdi, rbx
+    mov rsi, [rbp - PC_NAME]
+    call ast_obj_at
+    mov [rbx + Comp.private], rax
+
     mov rdi, rbx
     call par_suite_into
+    push rax
+    mov rax, [rbp - PC_PRIV]
+    mov [rbx + Comp.private], rax
+    pop rax
     test eax, eax
     jz .fail
 

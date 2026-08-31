@@ -471,6 +471,8 @@ struc Comp
     .cur_unit:  resq 1              ; the CompUnit being emitted into
     .cur_scope: resd 1
     .pad1:      resd 1
+    .private:   resq 1              ; the enclosing class's name, for private
+                                    ; name mangling; 0 outside a class body
     .err:       resb CompErr_size
     .lex:       resb Lexer_size
 endstruc

@@ -20,6 +20,8 @@
 extern ast_at
 extern ast_child
 extern ast_obj_at
+extern sym_at
+extern comp_intern_cstr
 extern cg_children
 extern cg_const
 extern cg_emit
@@ -723,10 +725,187 @@ DEF_FUNC_LOCAL cg_s_augassign, CST_FRAME
     ret
 END_FUNC cg_s_augassign
 
+;; ============================================================================
+;; cg_has_annotation(Comp *c, uint32_t node) -> rax = 1 if the block contains
+;; an annotated assignment
+;;
+;; SETUP_ANNOTATIONS goes at the top of a module or class body that has one
+;; anywhere in it, including inside an `if` or a loop -- but not inside a
+;; nested def or class, which get their own.
+;; ============================================================================
+HA_I     equ 8
+HA_N     equ 16
+HA_C     equ 24
+HA_FRAME equ 48           ; + 2 pushes = 64
+;; The body form skips the kind test on the node itself: a class body is the
+;; classdef's own child list, and the node would otherwise stop the walk dead.
+global cg_has_annotation_body
+DEF_FUNC cg_has_annotation_body, HA_FRAME
+    push rbx
+    push r12
+    mov rbx, rdi
+    mov r12, rsi
+    test r12, r12
+    jz .hb_no
+    mov rdi, rbx
+    mov rsi, r12
+    call ast_at
+    mov ecx, [rax + AstNode.nchild]
+    mov [rbp - HA_N], rcx
+    mov qword [rbp - HA_I], 0
+.hb_loop:
+    mov rax, [rbp - HA_I]
+    cmp rax, [rbp - HA_N]
+    jae .hb_no
+    mov rdi, rbx
+    mov rsi, r12
+    call ast_at
+    mov rsi, rax
+    mov rdx, [rbp - HA_I]
+    mov rdi, rbx
+    call ast_child
+    mov rsi, rax
+    mov rdi, rbx
+    call cg_has_annotation
+    test eax, eax
+    jnz .hb_yes
+    inc qword [rbp - HA_I]
+    jmp .hb_loop
+.hb_yes:
+    mov eax, 1
+    pop r12
+    pop rbx
+    leave
+    ret
+.hb_no:
+    xor eax, eax
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC cg_has_annotation_body
+
+DEF_FUNC cg_has_annotation, HA_FRAME
+    push rbx
+    push r12
+    mov rbx, rdi
+    mov r12, rsi
+    test r12, r12
+    jz .ha_no
+    mov rdi, rbx
+    mov rsi, r12
+    call ast_at
+    movzx ecx, byte [rax + AstNode.kind]
+    cmp ecx, AST_ANNASSIGN
+    je .ha_yes
+    cmp ecx, AST_FUNCTIONDEF
+    je .ha_no
+    cmp ecx, AST_CLASSDEF
+    je .ha_no
+    cmp ecx, AST_LAMBDA
+    je .ha_no
+
+    ; Only the compound statements have nested blocks in a/b/c.  Following
+    ; a/b/c for every kind walks an *object* index as a node index -- the two
+    ; arenas overlap -- and lands anywhere at all.
+    cmp ecx, AST_IF
+    je .ha_fields
+    cmp ecx, AST_WHILE
+    je .ha_fields
+    cmp ecx, AST_FOR
+    je .ha_fields
+    cmp ecx, AST_TRY
+    je .ha_fields
+    cmp ecx, AST_WITH
+    je .ha_fields
+    cmp ecx, AST_MATCH
+    je .ha_fields
+    cmp ecx, AST_CASE
+    je .ha_fields
+    cmp ecx, AST_HANDLER
+    je .ha_children_only
+    cmp ecx, AST_BLOCK
+    je .ha_children_only
+    cmp ecx, AST_MODULE
+    je .ha_children_only
+    cmp ecx, AST_DECORATED
+    je .ha_no
+    jmp .ha_children_only
+
+.ha_fields:
+    mov ecx, [rax + AstNode.a]
+    mov [rbp - HA_I], rcx
+    mov ecx, [rax + AstNode.b]
+    mov [rbp - HA_N], rcx
+    mov ecx, [rax + AstNode.c]
+    mov [rbp - HA_C], rcx
+
+    mov rdi, rbx
+    mov rsi, [rbp - HA_I]
+    call cg_has_annotation
+    test eax, eax
+    jnz .ha_yes
+    mov rdi, rbx
+    mov rsi, [rbp - HA_N]
+    call cg_has_annotation
+    test eax, eax
+    jnz .ha_yes
+    mov rdi, rbx
+    mov rsi, [rbp - HA_C]
+    call cg_has_annotation
+    test eax, eax
+    jnz .ha_yes
+
+.ha_children_only:
+
+    mov rdi, rbx
+    mov rsi, r12
+    call ast_at
+    mov ecx, [rax + AstNode.nchild]
+    mov [rbp - HA_N], rcx
+    mov qword [rbp - HA_I], 0
+.ha_loop:
+    mov rax, [rbp - HA_I]
+    cmp rax, [rbp - HA_N]
+    jae .ha_no
+    mov rdi, rbx
+    mov rsi, r12
+    call ast_at
+    mov rsi, rax
+    mov rdx, [rbp - HA_I]
+    mov rdi, rbx
+    call ast_child
+    mov rsi, rax
+    mov rdi, rbx
+    call cg_has_annotation
+    test eax, eax
+    jnz .ha_yes
+    inc qword [rbp - HA_I]
+    jmp .ha_loop
+.ha_yes:
+    mov eax, 1
+    pop r12
+    pop rbx
+    leave
+    ret
+.ha_no:
+    xor eax, eax
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC cg_has_annotation
+
 ;; cg_s_annassign - `x: T` and `x: T = v`
-;; The annotation is evaluated for its side effects and discarded: apython has
-;; no module __annotations__ yet, and evaluating it is what makes a bad
-;; annotation raise where CPython raises.
+;;
+;; At module and class scope the annotation is evaluated and recorded in
+;; __annotations__, which is what makes `x: Undefined` a NameError and what
+;; dataclasses reads.  Inside a function it is not evaluated at all, as
+;; CPython does.  Nothing was evaluated anywhere, so a bad annotation was
+;; silently accepted and __annotations__ never existed.
+;;
+;;     <annotation>; LOAD_NAME __annotations__; LOAD_CONST 'x'; STORE_SUBSCR
+;; ============================================================================
 DEF_FUNC_LOCAL cg_s_annassign, CST_FRAME
     push rbx
     push r12
@@ -760,6 +939,82 @@ DEF_FUNC_LOCAL cg_s_annassign, CST_FRAME
     test eax, eax
     jz .fail
 .no_value:
+
+    ; Only a module or class body evaluates the annotation.
+    mov rdi, rbx
+    mov esi, [r12 + CompUnit.scope]     ; a dword field
+    call sym_at
+    cmp dword [rax + Scope.kind], SCOPE_FUNCTION
+    je .ann_done
+
+    mov rdi, rbx
+    mov rsi, r13
+    call ast_at
+    mov edx, [rax + AstNode.b]          ; the annotation expression
+    test edx, edx
+    jz .ann_done
+    mov rdi, rbx
+    mov rsi, r12
+    call cg_expr
+    test eax, eax
+    jz .fail
+
+    ; A simple name is recorded; anything else is evaluated and dropped.
+    mov rdi, rbx
+    mov rsi, r13
+    call ast_at
+    mov edx, [rax + AstNode.a]
+    mov rdi, rbx
+    mov rsi, rdx
+    push rdx
+    call ast_at
+    pop rdx
+    movzx ecx, byte [rax + AstNode.kind]
+    cmp ecx, AST_NAME
+    jne .ann_discard
+
+    mov esi, [rax + AstNode.a]
+    mov rdi, rbx
+    call ast_obj_at
+    mov rdi, r12
+    mov rsi, rax
+    call cg_const
+    mov [rbp - CST_I], rax
+
+    mov rdi, rbx
+    lea rsi, [rel cg_annotations_dunder]
+    call comp_intern_cstr
+    test rax, rax
+    jz .fail
+    mov rdi, r12
+    mov rsi, rax
+    call cg_name
+    mov rdx, rax
+    mov rdi, r12
+    mov esi, OP_LOAD_NAME
+    mov rcx, [rbp - CST_LINE]
+    call cg_emit
+
+    mov rdi, r12
+    mov esi, OP_LOAD_CONST
+    mov rdx, [rbp - CST_I]
+    mov rcx, [rbp - CST_LINE]
+    call cg_emit
+    mov rdi, r12
+    mov esi, OP_STORE_SUBSCR
+    xor edx, edx
+    mov rcx, [rbp - CST_LINE]
+    call cg_emit
+    jmp .ann_done
+
+.ann_discard:
+    mov rdi, r12
+    mov esi, OP_POP_TOP
+    xor edx, edx
+    mov rcx, [rbp - CST_LINE]
+    call cg_emit
+
+.ann_done:
     mov eax, 1
 .fail:
     pop r13
@@ -832,7 +1087,42 @@ DEF_FUNC cg_delete_target, CST_FRAME
     je .attribute
     cmp eax, AST_SUBSCRIPT
     je .subscript
+    cmp eax, AST_TUPLE
+    je .sequence
+    cmp eax, AST_LIST
+    je .sequence
     jmp .bad
+
+.sequence:
+    ; `del (a, b)` and `del [a, b]` delete each element: the parentheses are
+    ; grouping, not a target of their own.  (rax holds the kind by now, not
+    ; the node.)
+    mov rdi, rbx
+    mov rsi, r13
+    call ast_at
+    mov ecx, [rax + AstNode.nchild]
+    mov [rbp - CST_N], rcx
+    mov qword [rbp - CST_I], 0
+.seq_loop:
+    mov rax, [rbp - CST_I]
+    cmp rax, [rbp - CST_N]
+    jae .ok
+    mov rdi, rbx
+    mov rsi, r13
+    call ast_at
+    mov rsi, rax
+    mov rdx, [rbp - CST_I]
+    mov rdi, rbx
+    call ast_child
+    mov rdx, rax
+    mov rdi, rbx
+    mov rsi, r12
+    call cg_delete_target
+    test eax, eax
+    jz .fail
+    inc qword [rbp - CST_I]
+    jmp .seq_loop
+
 .name:
     mov rdi, rbx
     mov rsi, r13
@@ -2291,5 +2581,8 @@ cg_stmt_table:
 
 cg_star_name: db "*", 0
 
+
+section .rodata
+cg_annotations_dunder: db "__annotations__", 0
 
 ASM_INIT

@@ -308,7 +308,8 @@ SV_I     equ 32
 SV_N     equ 40
 SV_NPTR  equ 48
 SV_KIND  equ 56
-SV_FRAME equ 56          ; + 3 pushes = 80
+SV_NAME  equ 64          ; the walrus target, across the scope walk
+SV_FRAME equ 72          ; + 3 pushes = 96
 DEF_FUNC sym_visit, SV_FRAME
     push rbx
     push r12
@@ -352,6 +353,8 @@ DEF_FUNC sym_visit, SV_FRAME
     je .arg
     cmp eax, AST_HANDLER
     je .handler
+    cmp eax, AST_NAMEDEXPR
+    je .namedexpr
     cmp eax, AST_PAT_CAPTURE
     je .pat_capture
     cmp eax, AST_PAT_AS
@@ -489,6 +492,85 @@ DEF_FUNC sym_visit, SV_FRAME
 ;; A pattern's names are bindings, not uses: `case x` stores into x.  They live
 ;; in .a or .b as OBJECT indices, so the generic walk must not follow them --
 ;; the two index spaces collide, and following one lands on an unrelated node.
+;; PEP 572: a walrus inside a comprehension binds in the scope the
+;; comprehension appears in, not in the comprehension itself.  Ours are
+;; compiled as nested functions, so the target has to become a cell of the
+;; enclosing function -- or a global at module level -- and be declared in
+;; every comprehension scope in between.  Without that, `[y := i for i in r]`
+;; left y visible only inside the comprehension.
+.namedexpr:
+    mov rax, [rbp - SV_NPTR]
+    mov edx, [rax + AstNode.b]          ; the value first
+    call .visit_field
+    test eax, eax
+    jz .fail
+
+    ; Find the nearest enclosing scope that is not a comprehension.
+    mov [rbp - SV_N], r12               ; the scope the target belongs to
+.ne_climb:
+    mov rdi, rbx
+    mov rsi, [rbp - SV_N]
+    call sym_at
+    cmp dword [rax + Scope.kind], SCOPE_COMP
+    jne .ne_found
+    mov ecx, [rax + Scope.parent]
+    test ecx, ecx
+    jz .ne_found
+    mov [rbp - SV_N], rcx
+    jmp .ne_climb
+.ne_found:
+    mov rdi, rbx
+    mov rsi, [rbp - SV_N]
+    call sym_at
+    xor r13d, r13d
+    cmp dword [rax + Scope.kind], SCOPE_FUNCTION
+    je .ne_have_kind
+    mov r13d, 1                         ; module or class: a global
+.ne_have_kind:
+    mov [rbp - SV_I], r13
+
+    ; The name itself.
+    mov rax, [rbp - SV_NPTR]
+    mov esi, [rax + AstNode.a]
+    mov rdi, rbx
+    call ast_at
+    mov esi, [rax + AstNode.a]
+    mov rdi, rbx
+    call ast_obj_at
+    mov [rbp - SV_NAME], rax
+
+    ; Bind it where it belongs.
+    mov rdi, rbx
+    mov rsi, [rbp - SV_N]
+    mov rdx, [rbp - SV_NAME]
+    mov ecx, DEF_LOCAL
+    call sym_add
+
+    ; ...and declare it in each comprehension between here and there.
+    mov r13, r12
+.ne_decl:
+    cmp r13, [rbp - SV_N]
+    je .ok
+    mov ecx, DEF_NONLOCAL
+    cmp qword [rbp - SV_I], 0
+    je .ne_decl_kind
+    mov ecx, DEF_GLOBAL
+.ne_decl_kind:
+    push rcx
+    mov rdi, rbx
+    mov rsi, r13
+    mov rdx, [rbp - SV_NAME]
+    pop rcx
+    call sym_add
+    mov rdi, rbx
+    mov rsi, r13
+    call sym_at
+    mov ecx, [rax + Scope.parent]
+    test ecx, ecx
+    jz .ok
+    mov r13, rcx
+    jmp .ne_decl
+
 .pat_capture:
     mov rax, [rbp - SV_NPTR]
     mov ecx, [rax + AstNode.a]

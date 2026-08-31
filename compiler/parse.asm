@@ -304,15 +304,37 @@ DEF_FUNC par_number, PN_FRAME
     lea rax, [rbp - PN_SMALL]
     mov [rbp - PN_BUF], rax
 .have_buf:
-    mov rdi, [rbp - PN_BUF]
-    mov rsi, [rbp - PN_TOK]
-    mov edx, [rsi + Token.len]          ; a dword field: a 64-bit read would pick up Token.col
-    mov rsi, [rsi + Token.start]
-    call ap_memcpy
+    ; Copy the digits, dropping the underscores PEP 515 allows between them.
+    ; They reached int_from_cstr_base and strtod verbatim, and both stop at
+    ; the first one -- so `1_000` was 1 and `1_000.5` was rejected outright.
+    ; Two in a row, or one at either end, is a syntax error, as in CPython.
     mov rax, [rbp - PN_TOK]
+    mov rsi, [rax + Token.start]
     mov ecx, [rax + Token.len]
-    mov rdx, [rbp - PN_BUF]
-    mov byte [rdx + rcx], 0
+    add rcx, rsi                        ; one past the text
+    mov rdi, [rbp - PN_BUF]
+    mov r8d, 1                          ; an underscore may not lead
+.copy_digit:
+    cmp rsi, rcx
+    jae .copy_done
+    movzx eax, byte [rsi]
+    cmp al, '_'
+    jne .copy_keep
+    test r8d, r8d
+    jnz .bad                            ; leading, or doubled
+    mov r8d, 1
+    inc rsi
+    jmp .copy_digit
+.copy_keep:
+    mov [rdi], al
+    inc rdi
+    inc rsi
+    xor r8d, r8d
+    jmp .copy_digit
+.copy_done:
+    test r8d, r8d
+    jnz .bad                            ; trailing underscore, or empty
+    mov byte [rdi], 0
 
     mov rax, [rbp - PN_TOK]
     movzx eax, word [rax + Token.flags]
@@ -931,9 +953,11 @@ DEF_FUNC_LOCAL pf_name, PFM_FRAME
     mov ecx, [rax + Token.lineno]
     mov [rbp - PFM_LINE], rcx
 
-    mov rdi, [rax + Token.start]
-    mov esi, [rax + Token.len]
-    call comp_intern                    ; -> an owned PyStrObject*
+    mov rdi, rbx
+    mov rsi, [rax + Token.start]
+    mov edx, [rax + Token.len]
+    extern comp_intern_name
+    call comp_intern_name               ; -> an owned PyStrObject*, mangled
     test rax, rax
     jz .fail
     mov rdi, rbx
@@ -1048,6 +1072,198 @@ DEF_FUNC_BARE par_hexval
 END_FUNC par_hexval
 
 ;; ============================================================================
+;; par_escape_one(Comp *c, Buf *out, const char *p, const char *end, int bytes)
+;;   -> rax = the position just past the escape, or 0 on error
+;;
+;; `p` points at the character AFTER the backslash.  Factored out of
+;; par_string_body so that the literal parts of an f-string get the same
+;; escapes: they had a private decoder that knew only \n, \t and \r, so
+;; f"\x41" printed "x41" while "\x41" printed "A".
+;; ============================================================================
+PSE_COMP  equ 8
+PSE_OUT   equ 16
+PSE_P     equ 24
+PSE_END   equ 32
+PSE_BYTES equ 40
+PSE_ACC   equ 48
+PSE_FRAME equ 72          ; + 3 pushes = 96
+DEF_FUNC par_escape_one, PSE_FRAME
+    push rbx
+    push r12
+    push r13
+    mov rbx, rdi
+    mov [rbp - PSE_COMP], rdi
+    mov [rbp - PSE_OUT], rsi
+    mov [rbp - PSE_P], rdx
+    mov [rbp - PSE_END], rcx
+    mov [rbp - PSE_BYTES], r8
+
+    mov r12, [rbp - PSE_P]
+    cmp r12, [rbp - PSE_END]
+    jae .pe_bad
+    movzx eax, byte [r12]
+    inc qword [rbp - PSE_P]
+
+    cmp al, 10                          ; a backslash-newline vanishes
+    je .pe_done
+    cmp al, 'n'
+    je .e_nl
+    cmp al, 't'
+    je .e_tab
+    cmp al, 'r'
+    je .e_cr
+    cmp al, 92
+    je .e_literal
+    cmp al, 39
+    je .e_literal
+    cmp al, 34
+    je .e_literal
+    cmp al, '0'
+    jb .e_unknown
+    cmp al, '7'
+    jbe .e_octal
+    cmp al, 'a'
+    je .e_bell
+    cmp al, 'b'
+    je .e_bs
+    cmp al, 'f'
+    je .e_ff
+    cmp al, 'v'
+    je .e_vt
+    cmp al, 'x'
+    je .e_hex2
+    cmp al, 'u'
+    je .e_hex4
+    cmp al, 'U'
+    je .e_hex8
+.e_unknown:
+    ; An unrecognised escape keeps the backslash, as Python does (with a
+    ; SyntaxWarning it does not raise on).
+    push rax
+    mov rdi, [rbp - PSE_OUT]
+    mov esi, 92
+    call buf_push_u8
+    pop rax
+.e_literal:
+    mov rdi, [rbp - PSE_OUT]
+    mov esi, eax
+    call buf_push_u8
+    jmp .pe_done
+.e_nl:   mov eax, 10
+         jmp .e_literal
+.e_tab:  mov eax, 9
+         jmp .e_literal
+.e_cr:   mov eax, 13
+         jmp .e_literal
+.e_bell: mov eax, 7
+         jmp .e_literal
+.e_bs:   mov eax, 8
+         jmp .e_literal
+.e_ff:   mov eax, 12
+         jmp .e_literal
+.e_vt:   mov eax, 11
+         jmp .e_literal
+
+.e_octal:
+    ; Up to three octal digits, counting the one already consumed.
+    sub eax, '0'
+    mov [rbp - PSE_ACC], rax
+    mov ecx, 2
+.oct_loop:
+    mov r12, [rbp - PSE_P]
+    cmp r12, [rbp - PSE_END]
+    jae .oct_done
+    movzx eax, byte [r12]
+    cmp al, '0'
+    jb .oct_done
+    cmp al, '7'
+    ja .oct_done
+    sub eax, '0'
+    mov rdx, [rbp - PSE_ACC]
+    shl rdx, 3
+    or rdx, rax
+    mov [rbp - PSE_ACC], rdx
+    inc qword [rbp - PSE_P]
+    dec ecx
+    jnz .oct_loop
+.oct_done:
+    mov rdi, [rbp - PSE_OUT]
+    mov rsi, [rbp - PSE_ACC]
+    cmp qword [rbp - PSE_BYTES], 0
+    jne .raw_byte
+    call par_utf8_emit
+    jmp .pe_done
+.raw_byte:
+    and esi, 0xff
+    call buf_push_u8
+    jmp .pe_done
+
+.e_hex2:
+    mov r13d, 2
+    jmp .hex_common
+.e_hex4:
+    mov r13d, 4
+    jmp .hex_common
+.e_hex8:
+    mov r13d, 8
+.hex_common:
+    ; \u and \U have no meaning in a bytes literal; only \x does.
+    cmp r13d, 2
+    je .hex_go
+    cmp qword [rbp - PSE_BYTES], 0
+    jne .pe_bad
+.hex_go:
+    mov qword [rbp - PSE_ACC], 0
+.hex_loop:
+    test r13d, r13d
+    jz .hex_done
+    mov r12, [rbp - PSE_P]
+    cmp r12, [rbp - PSE_END]
+    jae .pe_bad
+    movzx edi, byte [r12]
+    call par_hexval
+    cmp eax, -1
+    je .pe_bad
+    mov rdx, [rbp - PSE_ACC]
+    shl rdx, 4
+    or rdx, rax
+    mov [rbp - PSE_ACC], rdx
+    inc qword [rbp - PSE_P]
+    dec r13d
+    jmp .hex_loop
+.hex_done:
+    mov rsi, [rbp - PSE_ACC]
+    cmp qword [rbp - PSE_BYTES], 0
+    jne .hex_byte
+    mov rdi, [rbp - PSE_OUT]
+    call par_utf8_emit
+    jmp .pe_done
+.hex_byte:
+    mov rdi, [rbp - PSE_OUT]
+    and esi, 0xff
+    call buf_push_u8
+    jmp .pe_done
+
+.pe_done:
+    mov rax, [rbp - PSE_P]
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+.pe_bad:
+    mov rdi, rbx
+    CSTRING rsi, "invalid escape sequence in string literal"
+    call par_syntax_error
+    xor eax, eax
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC par_escape_one
+
+;; ============================================================================
 ;; par_string_body(Comp *c, Token *t, Buf *out) -> rax = 1 ok, 0 error
 ;;
 ;; Decodes one string token into `out`.  The token still carries its prefix and
@@ -1142,151 +1358,17 @@ DEF_FUNC par_string_body, PB_FRAME
     jmp .loop
 
 .real_escape:
-    inc qword [rbp - PB_P]
-    mov r12, [rbp - PB_P]
-    cmp r12, [rbp - PB_END]
-    jae .bad_escape
-    movzx eax, byte [r12]
-    inc qword [rbp - PB_P]
-
-    cmp al, 10                          ; a backslash-newline vanishes
-    je .loop
-    cmp al, 'n'
-    je .e_nl
-    cmp al, 't'
-    je .e_tab
-    cmp al, 'r'
-    je .e_cr
-    cmp al, 92
-    je .e_literal
-    cmp al, 39
-    je .e_literal
-    cmp al, 34
-    je .e_literal
-    cmp al, '0'
-    jb .e_unknown
-    cmp al, '7'
-    jbe .e_octal
-    cmp al, 'a'
-    je .e_bell
-    cmp al, 'b'
-    je .e_bs
-    cmp al, 'f'
-    je .e_ff
-    cmp al, 'v'
-    je .e_vt
-    cmp al, 'x'
-    je .e_hex2
-    cmp al, 'u'
-    je .e_hex4
-    cmp al, 'U'
-    je .e_hex8
-.e_unknown:
-    ; An unrecognised escape keeps the backslash, as Python does (with a
-    ; SyntaxWarning it does not raise on).
-    push rax
-    mov rdi, [rbp - PB_OUT]
-    mov esi, 92
-    call buf_push_u8
-    pop rax
-.e_literal:
-    mov rdi, [rbp - PB_OUT]
-    mov esi, eax
-    call buf_push_u8
-    jmp .loop
-.e_nl:   mov eax, 10
-         jmp .e_literal
-.e_tab:  mov eax, 9
-         jmp .e_literal
-.e_cr:   mov eax, 13
-         jmp .e_literal
-.e_bell: mov eax, 7
-         jmp .e_literal
-.e_bs:   mov eax, 8
-         jmp .e_literal
-.e_ff:   mov eax, 12
-         jmp .e_literal
-.e_vt:   mov eax, 11
-         jmp .e_literal
-
-.e_octal:
-    ; Up to three octal digits, counting the one already consumed.
-    sub eax, '0'
-    mov [rbp - PB_ACC], rax
-    mov ecx, 2
-.oct_loop:
-    mov r12, [rbp - PB_P]
-    cmp r12, [rbp - PB_END]
-    jae .oct_done
-    movzx eax, byte [r12]
-    cmp al, '0'
-    jb .oct_done
-    cmp al, '7'
-    ja .oct_done
-    sub eax, '0'
-    mov rdx, [rbp - PB_ACC]
-    shl rdx, 3
-    or rdx, rax
-    mov [rbp - PB_ACC], rdx
-    inc qword [rbp - PB_P]
-    dec ecx
-    jnz .oct_loop
-.oct_done:
-    mov rdi, [rbp - PB_OUT]
-    mov rsi, [rbp - PB_ACC]
-    cmp qword [rbp - PB_BYTES], 0
-    jne .raw_byte
-    call par_utf8_emit
-    jmp .loop
-.raw_byte:
-    and esi, 0xff
-    call buf_push_u8
-    jmp .loop
-
-.e_hex2:
-    mov r13d, 2
-    jmp .hex_common
-.e_hex4:
-    mov r13d, 4
-    jmp .hex_common
-.e_hex8:
-    mov r13d, 8
-.hex_common:
-    ; \u and \U have no meaning in a bytes literal; only \x does.
-    cmp r13d, 2
-    je .hex_go
-    cmp qword [rbp - PB_BYTES], 0
-    jne .bad_escape
-.hex_go:
-    mov qword [rbp - PB_ACC], 0
-.hex_loop:
-    test r13d, r13d
-    jz .hex_done
-    mov r12, [rbp - PB_P]
-    cmp r12, [rbp - PB_END]
-    jae .bad_escape
-    movzx edi, byte [r12]
-    call par_hexval
-    cmp eax, -1
-    je .bad_escape
-    mov rdx, [rbp - PB_ACC]
-    shl rdx, 4
-    or rdx, rax
-    mov [rbp - PB_ACC], rdx
-    inc qword [rbp - PB_P]
-    dec r13d
-    jmp .hex_loop
-.hex_done:
-    mov rsi, [rbp - PB_ACC]
-    cmp qword [rbp - PB_BYTES], 0
-    jne .hex_byte
-    mov rdi, [rbp - PB_OUT]
-    call par_utf8_emit
-    jmp .loop
-.hex_byte:
-    mov rdi, [rbp - PB_OUT]
-    and esi, 0xff
-    call buf_push_u8
+    ; The escape decoder is shared with the literal parts of f-strings.
+    mov rdi, rbx
+    mov rsi, [rbp - PB_OUT]
+    mov rdx, [rbp - PB_P]
+    inc rdx                             ; past the backslash
+    mov rcx, [rbp - PB_END]
+    mov r8, [rbp - PB_BYTES]
+    call par_escape_one
+    test rax, rax
+    jz .failed
+    mov [rbp - PB_P], rax
     jmp .loop
 
 .ok:
@@ -1296,10 +1378,7 @@ DEF_FUNC par_string_body, PB_FRAME
     pop rbx
     leave
     ret
-.bad_escape:
-    mov rdi, rbx
-    CSTRING rsi, "invalid escape sequence in string literal"
-    call par_syntax_error
+.failed:
     xor eax, eax
     pop r13
     pop r12
@@ -2131,9 +2210,10 @@ DEF_FUNC_LOCAL in_attr, IA_FRAME
     jne .need_name
     mov rdi, rbx
     call par_peek
-    mov rdi, [rax + Token.start]
-    mov esi, [rax + Token.len]
-    call comp_intern
+    mov rdi, rbx
+    mov rsi, [rax + Token.start]
+    mov edx, [rax + Token.len]
+    call comp_intern_name               ; an attribute name mangles too
     test rax, rax
     jz .fail
     mov rdi, rbx

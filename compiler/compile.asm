@@ -23,6 +23,7 @@ extern ap_memcpy
 extern ap_memset
 extern buf_free
 extern buf_init
+extern buf_push_u8
 extern buf_reserve
 extern comp_error
 extern exc_SyntaxError_type
@@ -494,6 +495,21 @@ DEF_FUNC compile_source, CS_FRAME
     cmp qword [rbp - CS_MODE], CMODE_EVAL
     je .gen_eval
 
+    ; A module that annotates anything needs __annotations__ to exist first.
+    mov rdi, rbx
+    mov rsi, [rbp - CS_ROOT]
+    extern cg_has_annotation
+    call cg_has_annotation
+    test eax, eax
+    jz .no_annotations
+    mov rdi, r12
+    mov esi, OP_SETUP_ANNOTATIONS
+    xor edx, edx
+    xor ecx, ecx
+    call cg_emit
+    or byte [rax + Instr.flags], IF_NOLINE
+.no_annotations:
+
     ; A leading string literal is the module's __doc__, not a statement whose
     ; value is thrown away.
     mov rdi, rbx
@@ -641,6 +657,112 @@ DEF_FUNC comp_intern_cstr, 16
     leave
     ret
 END_FUNC comp_intern_cstr
+
+;; ============================================================================
+;; comp_intern_name(Comp *c, const char *s, int64_t len)
+;;   -> rax = owned PyStrObject*, the identifier after private-name mangling
+;;
+;; An identifier of the form __spam written inside `class C` is _C__spam --
+;; which is what keeps a base's private attribute from colliding with a
+;; subclass's.  Nothing mangled at all here, so `self.__x` in A and in B named
+;; the same slot.  CPython's rule: two leading underscores, not two trailing
+;; ones, and a class name with its own leading underscores stripped off.
+;; ============================================================================
+CIN_COMP  equ 8
+CIN_P     equ 16
+CIN_LEN   equ 24
+CIN_BUF   equ 56
+CIN_FRAME equ 56          ; + 2 pushes = 72 -> padded below
+DEF_FUNC comp_intern_name, 72
+    push rbx
+    push r12
+    mov [rbp - CIN_COMP], rdi
+    mov [rbp - CIN_P], rsi
+    mov [rbp - CIN_LEN], rdx
+
+    mov rax, [rdi + Comp.private]
+    test rax, rax
+    jz .plain
+    cmp rdx, 2
+    jl .plain
+    cmp byte [rsi], '_'
+    jne .plain
+    cmp byte [rsi + 1], '_'
+    jne .plain
+    ; ...but not one that also ends in two underscores.
+    cmp rdx, 4
+    jl .mangle_ok
+    mov rcx, rdx
+    cmp byte [rsi + rcx - 1], '_'
+    jne .mangle_ok
+    cmp byte [rsi + rcx - 2], '_'
+    je .plain
+.mangle_ok:
+    ; Strip the class name's own leading underscores; an all-underscore class
+    ; name mangles nothing.
+    mov rbx, [rdi + Comp.private]
+    lea rbx, [rbx + PyStrObject.data]
+    mov rax, [rdi + Comp.private]
+    mov r12, [rax + PyStrObject.ob_size]
+.strip:
+    test r12, r12
+    jz .plain
+    cmp byte [rbx], '_'
+    jne .stripped
+    inc rbx
+    dec r12
+    jmp .strip
+.stripped:
+
+    lea rdi, [rbp - CIN_BUF]
+    mov esi, 1
+    call buf_init
+    lea rdi, [rbp - CIN_BUF]
+    mov esi, '_'
+    call buf_push_u8
+.copy_cls:
+    test r12, r12
+    jz .copy_name
+    lea rdi, [rbp - CIN_BUF]
+    movzx esi, byte [rbx]
+    call buf_push_u8
+    inc rbx
+    dec r12
+    jmp .copy_cls
+.copy_name:
+    mov rbx, [rbp - CIN_P]
+    mov r12, [rbp - CIN_LEN]
+.copy_name_loop:
+    test r12, r12
+    jz .copy_done
+    lea rdi, [rbp - CIN_BUF]
+    movzx esi, byte [rbx]
+    call buf_push_u8
+    inc rbx
+    dec r12
+    jmp .copy_name_loop
+.copy_done:
+    mov rdi, [rbp - CIN_BUF + Buf.data]
+    mov rsi, [rbp - CIN_BUF + Buf.len]
+    call comp_intern
+    push rax
+    lea rdi, [rbp - CIN_BUF]
+    call buf_free
+    pop rax
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.plain:
+    mov rdi, [rbp - CIN_P]
+    mov rsi, [rbp - CIN_LEN]
+    call comp_intern
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC comp_intern_name
 
 ;; ============================================================================
 ;; comp_intern_keep(Comp *c, const char *s, int64_t len)

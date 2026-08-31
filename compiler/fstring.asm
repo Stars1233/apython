@@ -136,32 +136,20 @@ DEF_FUNC par_fstring_pieces, FS2_FRAME
 .escape:
     cmp qword [rbp - FS2_RAW], 0
     jne .raw_backslash
-    ; The literal parts of an f-string take the ordinary escapes.
-    inc qword [rbp - FS2_P]
-    mov r12, [rbp - FS2_P]
-    cmp r12, [rbp - FS2_END]
-    jae .bad
-    movzx eax, byte [r12]
-    inc qword [rbp - FS2_P]
-    cmp al, 'n'
-    jne .esc_t
-    mov eax, 10
-    jmp .esc_emit
-.esc_t:
-    cmp al, 't'
-    jne .esc_r
-    mov eax, 9
-    jmp .esc_emit
-.esc_r:
-    cmp al, 'r'
-    jne .esc_lit
-    mov eax, 13
-    jmp .esc_emit
-.esc_lit:
-.esc_emit:
-    lea rdi, [rbp - FS2_BUF]
-    mov esi, eax
-    call buf_push_u8
+    ; The literal parts of an f-string take the ordinary escapes -- all of
+    ; them.  A private decoder here knew only \n, \t and \r, so f"\x41"
+    ; came out as "x41" while "\x41" came out as "A".
+    mov rdi, rbx
+    lea rsi, [rbp - FS2_BUF]
+    mov rdx, [rbp - FS2_P]
+    inc rdx                             ; past the backslash
+    mov rcx, [rbp - FS2_END]
+    xor r8d, r8d                        ; an f-string is never bytes
+    extern par_escape_one
+    call par_escape_one
+    test rax, rax
+    jz .bad
+    mov [rbp - FS2_P], rax
     jmp .scan
 .raw_backslash:
     lea rdi, [rbp - FS2_BUF]
@@ -301,7 +289,8 @@ FF_SEND  equ 88
 FF_EXPR  equ 96
 FF_SAVE  equ 104
 FF_DEBUG equ 112
-FF_FRAME equ 120          ; + 3 pushes = 144
+FF_WSEND equ 120         ; end of the run of spaces after a `=`
+FF_FRAME equ 136          ; + 3 pushes = 144
 DEF_FUNC par_fstring_field, FF_FRAME
     push rbx
     push r12
@@ -384,7 +373,12 @@ DEF_FUNC par_fstring_field, FF_FRAME
     jae .advance
     cmp byte [rax], '='
     je .advance
+    ; After a `=` the expression's end is already recorded; overwriting it
+    ; here made `f"{x = !s}"` print "x = =5".
+    cmp qword [rbp - FF_DEBUG], 0
+    jne .conv_keep_end
     mov [rbp - FF_EEND], r12
+.conv_keep_end:
     inc r12
     cmp r12, r13
     jae .unterminated
@@ -435,6 +429,23 @@ DEF_FUNC par_fstring_field, FF_FRAME
     mov qword [rbp - FF_DEBUG], 1
     mov [rbp - FF_EEND], r12
     inc r12
+    ; The spaces on either side of the `=` are part of the literal text
+    ; CPython emits, so `f"{x = }"` is "x = 5".  Refusing to look past one
+    ; made the space a conversion character and reported an invalid one.
+    mov [rbp - FF_WSEND], r12
+.debug_ws:
+    cmp r12, r13
+    jae .unterminated
+    movzx eax, byte [r12]
+    cmp al, ' '
+    je .debug_ws_step
+    cmp al, 9
+    jne .debug_ws_done
+.debug_ws_step:
+    inc r12
+    jmp .debug_ws
+.debug_ws_done:
+    mov [rbp - FF_WSEND], r12
     cmp r12, r13
     jae .unterminated
     movzx eax, byte [r12]
@@ -516,6 +527,7 @@ DEF_FUNC par_fstring_field, FF_FRAME
     mov rsi, [rbp - FF_ESTART]
     mov rdx, [rbp - FF_EEND]
     mov rcx, [rbp - FF_LINE]
+    mov r8, [rbp - FF_WSEND]
     call par_fstring_debug_text
     test rax, rax
     jz .fail
@@ -692,15 +704,17 @@ FD_COMP  equ 8
 FD_START equ 16
 FD_END   equ 24
 FD_LINE  equ 32
-FD_BUF   equ 72
-FD_FRAME equ 72           ; + 2 pushes = 88 -> see below
-DEF_FUNC par_fstring_debug_text, 80
+FD_WSEND equ 40           ; end of the spaces after the `=`
+FD_BUF   equ 88           ; a Buf lives here, so it comes last
+FD_FRAME equ 88           ; + 2 pushes = 104 -> padded to 96 below
+DEF_FUNC par_fstring_debug_text, 96
     push rbx
     push r12
     mov rbx, rdi
     mov [rbp - FD_START], rsi
     mov [rbp - FD_END], rdx
     mov [rbp - FD_LINE], rcx
+    mov [rbp - FD_WSEND], r8
     lea rdi, [rbp - FD_BUF]
     mov esi, 1
     call buf_init
@@ -717,6 +731,18 @@ DEF_FUNC par_fstring_debug_text, 80
     lea rdi, [rbp - FD_BUF]
     mov esi, '='
     call buf_push_u8
+    ; ...and the spaces that followed it.
+    mov r12, [rbp - FD_END]
+    inc r12
+.copy_ws:
+    cmp r12, [rbp - FD_WSEND]
+    jae .ws_done
+    movzx esi, byte [r12]
+    lea rdi, [rbp - FD_BUF]
+    call buf_push_u8
+    inc r12
+    jmp .copy_ws
+.ws_done:
     mov rdi, [rbp - FD_BUF + Buf.data]
     mov rsi, [rbp - FD_BUF + Buf.len]
     call comp_intern
