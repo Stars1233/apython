@@ -6,7 +6,7 @@ VERSION_PATCH = 0
 VERSION = $(VERSION_MAJOR).$(VERSION_MINOR).$(VERSION_PATCH)
 
 NASM = nasm
-NASMFLAGS = -f elf64 -I include/ -g -F dwarf \
+NASMFLAGS = -f elf64 -I include/ -I compiler/ -g -F dwarf \
     -DVERSION_MAJOR=$(VERSION_MAJOR) -DVERSION_MINOR=$(VERSION_MINOR) \
     -DVERSION_PATCH=$(VERSION_PATCH) -DVERSION_STR=\"$(VERSION)\"
 # INT_STRESS=N boxes every |int| >= N as a heap PyIntObject, so the normal
@@ -29,17 +29,20 @@ TARGET = apython
 SRCS = $(wildcard src/*.asm)
 PYO_SRCS = $(wildcard src/pyo/*.asm)
 LIB_SRCS = $(wildcard src/lib/*.asm)
-OBJS = $(SRCS:src/%.asm=build/%.o) $(PYO_SRCS:src/pyo/%.asm=build/%.o) $(LIB_SRCS:src/lib/%.asm=build/%.o)
+# The Python source compiler is its own subsystem, peer to src/.
+COMPILER_SRCS = $(wildcard compiler/*.asm)
+OBJS = $(SRCS:src/%.asm=build/%.o) $(PYO_SRCS:src/pyo/%.asm=build/%.o) \
+       $(LIB_SRCS:src/lib/%.asm=build/%.o) $(COMPILER_SRCS:compiler/%.asm=build/%.o)
 
 # Every object depends on every header: nasm has no depfile support here, and
 # a stale build after editing a struct layout in include/*.inc is a silent,
 # very confusing failure.
-HEADERS = $(wildcard include/*.inc)
+HEADERS = $(wildcard include/*.inc) $(wildcard compiler/*.inc)
 
 # Python compiler for tests
 PYTHON = python3
 
-.PHONY: all clean check gen-cpython-tests check-cpython check-stdlib lib-pyc
+.PHONY: all clean check gen-cpython-tests check-cpython check-cpython-source check-stdlib check-source lib-pyc
 
 all: $(TARGET) lib-pyc
 
@@ -62,6 +65,9 @@ build/%.o: src/pyo/%.asm $(HEADERS) | build
 build/%.o: src/lib/%.asm $(HEADERS) | build
 	$(NASM) $(NASMFLAGS) -o $@ $<
 
+build/%.o: compiler/%.asm $(HEADERS) | build
+	$(NASM) $(NASMFLAGS) -o $@ $<
+
 build:
 	mkdir -p build
 
@@ -72,6 +78,12 @@ clean:
 # Test target: compile .py to .pyc, run both python3 and apython, diff
 check: $(TARGET) lib-pyc
 	@bash tests/run_tests.sh
+
+# Run the whole test corpus through our own compiler rather than CPython's:
+# apython is handed the .py and compiles it itself.  Ratchets against
+# tests/compile_floor.txt.
+check-source: $(TARGET) lib-pyc
+	@bash tests/source_probe.sh
 
 # How much of CPython 3.12's own Lib/ can we import?  Ratchets against
 # tests/stdlib_floor.txt.  Needs a CPython source checkout; set CPYTHON_LIB
@@ -84,246 +96,43 @@ tests/__pycache__/%.cpython-312.pyc: tests/%.py
 	$(PYTHON) -m py_compile $<
 
 # CPython test suite targets
+# The CPython-derived test corpus.  One list, used by both the compile step
+# and the run step -- and, later, by the run-from-source variant.
+CPYTHON_TESTS = \
+	test_int test_float test_bool test_str_ops \
+	test_str_methods test_sort test_enumerate test_keywordonlyarg \
+	test_augassign test_list test_tuple test_dict \
+	test_set test_isinstance test_decorators test_scope \
+	test_generators test_unary test_pow test_contains \
+	test_exception_variations test_genexps test_listcomps test_raise \
+	test_class test_compare test_with test_opcodes \
+	test_baseexception test_extcall test_iter test_lambda \
+	test_property test_string test_bytes test_builtin \
+	test_types test_closures test_dict_extra test_tuple_extra \
+	test_set_extra test_list_extra test_controlflow test_math_basic \
+	test_global_nonlocal test_unpacking test_inheritance test_del \
+	test_assert test_assignment test_exceptions_extra test_generators_extra \
+	test_format test_slice_ops test_numeric test_comprehensions \
+	test_decorators_extra test_walrus test_match test_datastructures \
+	test_exceptions_builtin test_functions test_range_extra test_conditional
+
 gen-cpython-tests: lib-pyc
-	@echo "Compiling tests/cpython/test_int.py..."
-	@$(PYTHON) -m py_compile tests/cpython/test_int.py
-	@echo "Compiling tests/cpython/test_float.py..."
-	@$(PYTHON) -m py_compile tests/cpython/test_float.py
-	@echo "Compiling tests/cpython/test_bool.py..."
-	@$(PYTHON) -m py_compile tests/cpython/test_bool.py
-	@echo "Compiling tests/cpython/test_str_ops.py..."
-	@$(PYTHON) -m py_compile tests/cpython/test_str_ops.py
-	@echo "Compiling tests/cpython/test_str_methods.py..."
-	@$(PYTHON) -m py_compile tests/cpython/test_str_methods.py
-	@echo "Compiling tests/cpython/test_sort.py..."
-	@$(PYTHON) -m py_compile tests/cpython/test_sort.py
-	@echo "Compiling tests/cpython/test_enumerate.py..."
-	@$(PYTHON) -m py_compile tests/cpython/test_enumerate.py
-	@echo "Compiling tests/cpython/test_keywordonlyarg.py..."
-	@$(PYTHON) -m py_compile tests/cpython/test_keywordonlyarg.py
-	@echo "Compiling tests/cpython/test_augassign.py..."
-	@$(PYTHON) -m py_compile tests/cpython/test_augassign.py
-	@echo "Compiling tests/cpython/test_list.py..."
-	@$(PYTHON) -m py_compile tests/cpython/test_list.py
-	@echo "Compiling tests/cpython/test_tuple.py..."
-	@$(PYTHON) -m py_compile tests/cpython/test_tuple.py
-	@echo "Compiling tests/cpython/test_dict.py..."
-	@$(PYTHON) -m py_compile tests/cpython/test_dict.py
-	@echo "Compiling tests/cpython/test_set.py..."
-	@$(PYTHON) -m py_compile tests/cpython/test_set.py
-	@echo "Compiling tests/cpython/test_isinstance.py..."
-	@$(PYTHON) -m py_compile tests/cpython/test_isinstance.py
-	@echo "Compiling tests/cpython/test_decorators.py..."
-	@$(PYTHON) -m py_compile tests/cpython/test_decorators.py
-	@echo "Compiling tests/cpython/test_scope.py..."
-	@$(PYTHON) -m py_compile tests/cpython/test_scope.py
-	@echo "Compiling tests/cpython/test_generators.py..."
-	@$(PYTHON) -m py_compile tests/cpython/test_generators.py
-	@echo "Compiling tests/cpython/test_unary.py..."
-	@$(PYTHON) -m py_compile tests/cpython/test_unary.py
-	@echo "Compiling tests/cpython/test_pow.py..."
-	@$(PYTHON) -m py_compile tests/cpython/test_pow.py
-	@echo "Compiling tests/cpython/test_contains.py..."
-	@$(PYTHON) -m py_compile tests/cpython/test_contains.py
-	@echo "Compiling tests/cpython/test_exception_variations.py..."
-	@$(PYTHON) -m py_compile tests/cpython/test_exception_variations.py
-	@echo "Compiling tests/cpython/test_genexps.py..."
-	@$(PYTHON) -m py_compile tests/cpython/test_genexps.py
-	@echo "Compiling tests/cpython/test_listcomps.py..."
-	@$(PYTHON) -m py_compile tests/cpython/test_listcomps.py
-	@echo "Compiling tests/cpython/test_raise.py..."
-	@$(PYTHON) -m py_compile tests/cpython/test_raise.py
-	@echo "Compiling tests/cpython/test_class.py..."
-	@$(PYTHON) -m py_compile tests/cpython/test_class.py
-	@echo "Compiling tests/cpython/test_compare.py..."
-	@$(PYTHON) -m py_compile tests/cpython/test_compare.py
-	@echo "Compiling tests/cpython/test_with.py..."
-	@$(PYTHON) -m py_compile tests/cpython/test_with.py
-	@echo "Compiling tests/cpython/test_opcodes.py..."
-	@$(PYTHON) -m py_compile tests/cpython/test_opcodes.py
-	@echo "Compiling tests/cpython/test_baseexception.py..."
-	@$(PYTHON) -m py_compile tests/cpython/test_baseexception.py
-	@echo "Compiling tests/cpython/test_extcall.py..."
-	@$(PYTHON) -m py_compile tests/cpython/test_extcall.py
-	@echo "Compiling tests/cpython/test_iter.py..."
-	@$(PYTHON) -m py_compile tests/cpython/test_iter.py
-	@echo "Compiling tests/cpython/test_lambda.py..."
-	@$(PYTHON) -m py_compile tests/cpython/test_lambda.py
-	@echo "Compiling tests/cpython/test_property.py..."
-	@$(PYTHON) -m py_compile tests/cpython/test_property.py
-	@echo "Compiling tests/cpython/test_string.py..."
-	@$(PYTHON) -m py_compile tests/cpython/test_string.py
-	@echo "Compiling tests/cpython/test_bytes.py..."
-	@$(PYTHON) -m py_compile tests/cpython/test_bytes.py
-	@echo "Compiling tests/cpython/test_builtin.py..."
-	@$(PYTHON) -m py_compile tests/cpython/test_builtin.py
-	@echo "Compiling tests/cpython/test_types.py..."
-	@$(PYTHON) -m py_compile tests/cpython/test_types.py
-	@echo "Compiling tests/cpython/test_closures.py..."
-	@$(PYTHON) -m py_compile tests/cpython/test_closures.py
-	@echo "Compiling tests/cpython/test_dict_extra.py..."
-	@$(PYTHON) -m py_compile tests/cpython/test_dict_extra.py
-	@echo "Compiling tests/cpython/test_tuple_extra.py..."
-	@$(PYTHON) -m py_compile tests/cpython/test_tuple_extra.py
-	@echo "Compiling tests/cpython/test_set_extra.py..."
-	@$(PYTHON) -m py_compile tests/cpython/test_set_extra.py
-	@echo "Compiling tests/cpython/test_list_extra.py..."
-	@$(PYTHON) -m py_compile tests/cpython/test_list_extra.py
-	@echo "Compiling tests/cpython/test_controlflow.py..."
-	@$(PYTHON) -m py_compile tests/cpython/test_controlflow.py
-	@echo "Compiling tests/cpython/test_math_basic.py..."
-	@$(PYTHON) -m py_compile tests/cpython/test_math_basic.py
-	@echo "Compiling tests/cpython/test_global_nonlocal.py..."
-	@$(PYTHON) -m py_compile tests/cpython/test_global_nonlocal.py
-	@echo "Compiling tests/cpython/test_unpacking.py..."
-	@$(PYTHON) -m py_compile tests/cpython/test_unpacking.py
-	@echo "Compiling tests/cpython/test_inheritance.py..."
-	@$(PYTHON) -m py_compile tests/cpython/test_inheritance.py
-	@$(PYTHON) -m py_compile tests/cpython/test_del.py
-	@$(PYTHON) -m py_compile tests/cpython/test_assert.py
-	@$(PYTHON) -m py_compile tests/cpython/test_assignment.py
-	@$(PYTHON) -m py_compile tests/cpython/test_exceptions_extra.py
-	@$(PYTHON) -m py_compile tests/cpython/test_generators_extra.py
-	@$(PYTHON) -m py_compile tests/cpython/test_format.py
-	@$(PYTHON) -m py_compile tests/cpython/test_slice_ops.py
-	@$(PYTHON) -m py_compile tests/cpython/test_numeric.py
-	@$(PYTHON) -m py_compile tests/cpython/test_comprehensions.py
-	@$(PYTHON) -m py_compile tests/cpython/test_decorators_extra.py
-	@$(PYTHON) -m py_compile tests/cpython/test_walrus.py
-	@$(PYTHON) -m py_compile tests/cpython/test_match.py
-	@$(PYTHON) -m py_compile tests/cpython/test_datastructures.py
-	@$(PYTHON) -m py_compile tests/cpython/test_exceptions_builtin.py
-	@$(PYTHON) -m py_compile tests/cpython/test_functions.py
-	@$(PYTHON) -m py_compile tests/cpython/test_range_extra.py
-	@$(PYTHON) -m py_compile tests/cpython/test_conditional.py
+	@for t in $(CPYTHON_TESTS); do \
+	    echo "Compiling tests/cpython/$$t.py..."; \
+	    $(PYTHON) -m py_compile tests/cpython/$$t.py || exit 1; \
+	done
 	@echo "Done."
 
+# The same corpus, compiled by OUR compiler rather than CPython's: apython is
+# handed the .py.  Ratchets against tests/cpython_source_floor.txt.  It is a
+# harder corpus than tests/ -- it is CPython's own, written to be adversarial --
+# and most of the compiler's later bugs were found here.
+check-cpython-source: $(TARGET) lib-pyc
+	@bash tests/cpython_source_probe.sh
+
 check-cpython: $(TARGET) gen-cpython-tests
-	@echo "Running CPython test_int.py..."
-	@./apython tests/cpython/__pycache__/test_int.cpython-312.pyc
-	@echo "Running CPython test_float.py..."
-	@./apython tests/cpython/__pycache__/test_float.cpython-312.pyc
-	@echo "Running CPython test_bool.py..."
-	@./apython tests/cpython/__pycache__/test_bool.cpython-312.pyc
-	@echo "Running CPython test_str_ops.py..."
-	@./apython tests/cpython/__pycache__/test_str_ops.cpython-312.pyc
-	@echo "Running CPython test_str_methods.py..."
-	@./apython tests/cpython/__pycache__/test_str_methods.cpython-312.pyc
-	@echo "Running CPython test_sort.py..."
-	@./apython tests/cpython/__pycache__/test_sort.cpython-312.pyc
-	@echo "Running CPython test_enumerate.py..."
-	@./apython tests/cpython/__pycache__/test_enumerate.cpython-312.pyc
-	@echo "Running CPython test_keywordonlyarg.py..."
-	@./apython tests/cpython/__pycache__/test_keywordonlyarg.cpython-312.pyc
-	@echo "Running CPython test_augassign.py..."
-	@./apython tests/cpython/__pycache__/test_augassign.cpython-312.pyc
-	@echo "Running CPython test_list.py..."
-	@./apython tests/cpython/__pycache__/test_list.cpython-312.pyc
-	@echo "Running CPython test_tuple.py..."
-	@./apython tests/cpython/__pycache__/test_tuple.cpython-312.pyc
-	@echo "Running CPython test_dict.py..."
-	@./apython tests/cpython/__pycache__/test_dict.cpython-312.pyc
-	@echo "Running CPython test_set.py..."
-	@./apython tests/cpython/__pycache__/test_set.cpython-312.pyc
-	@echo "Running CPython test_isinstance.py..."
-	@./apython tests/cpython/__pycache__/test_isinstance.cpython-312.pyc
-	@echo "Running CPython test_decorators.py..."
-	@./apython tests/cpython/__pycache__/test_decorators.cpython-312.pyc
-	@echo "Running CPython test_scope.py..."
-	@./apython tests/cpython/__pycache__/test_scope.cpython-312.pyc
-	@echo "Running CPython test_generators.py..."
-	@./apython tests/cpython/__pycache__/test_generators.cpython-312.pyc
-	@echo "Running CPython test_unary.py..."
-	@./apython tests/cpython/__pycache__/test_unary.cpython-312.pyc
-	@echo "Running CPython test_pow.py..."
-	@./apython tests/cpython/__pycache__/test_pow.cpython-312.pyc
-	@echo "Running CPython test_contains.py..."
-	@./apython tests/cpython/__pycache__/test_contains.cpython-312.pyc
-	@echo "Running CPython test_exception_variations.py..."
-	@./apython tests/cpython/__pycache__/test_exception_variations.cpython-312.pyc
-	@echo "Running CPython test_genexps.py..."
-	@./apython tests/cpython/__pycache__/test_genexps.cpython-312.pyc
-	@echo "Running CPython test_listcomps.py..."
-	@./apython tests/cpython/__pycache__/test_listcomps.cpython-312.pyc
-	@echo "Running CPython test_raise.py..."
-	@./apython tests/cpython/__pycache__/test_raise.cpython-312.pyc
-	@echo "Running CPython test_class.py..."
-	@./apython tests/cpython/__pycache__/test_class.cpython-312.pyc
-	@echo "Running CPython test_compare.py..."
-	@./apython tests/cpython/__pycache__/test_compare.cpython-312.pyc
-	@echo "Running CPython test_with.py..."
-	@./apython tests/cpython/__pycache__/test_with.cpython-312.pyc
-	@echo "Running CPython test_opcodes.py..."
-	@./apython tests/cpython/__pycache__/test_opcodes.cpython-312.pyc
-	@echo "Running CPython test_baseexception.py..."
-	@./apython tests/cpython/__pycache__/test_baseexception.cpython-312.pyc
-	@echo "Running CPython test_extcall.py..."
-	@./apython tests/cpython/__pycache__/test_extcall.cpython-312.pyc
-	@echo "Running CPython test_iter.py..."
-	@./apython tests/cpython/__pycache__/test_iter.cpython-312.pyc
-	@echo "Running CPython test_lambda.py..."
-	@./apython tests/cpython/__pycache__/test_lambda.cpython-312.pyc
-	@echo "Running CPython test_property.py..."
-	@./apython tests/cpython/__pycache__/test_property.cpython-312.pyc
-	@echo "Running CPython test_string.py..."
-	@./apython tests/cpython/__pycache__/test_string.cpython-312.pyc
-	@echo "Running CPython test_bytes.py..."
-	@./apython tests/cpython/__pycache__/test_bytes.cpython-312.pyc
-	@echo "Running CPython test_builtin.py..."
-	@./apython tests/cpython/__pycache__/test_builtin.cpython-312.pyc
-	@echo "Running CPython test_types.py..."
-	@./apython tests/cpython/__pycache__/test_types.cpython-312.pyc
-	@echo "Running CPython test_closures.py..."
-	@./apython tests/cpython/__pycache__/test_closures.cpython-312.pyc
-	@echo "Running CPython test_dict_extra.py..."
-	@./apython tests/cpython/__pycache__/test_dict_extra.cpython-312.pyc
-	@echo "Running CPython test_tuple_extra.py..."
-	@./apython tests/cpython/__pycache__/test_tuple_extra.cpython-312.pyc
-	@echo "Running CPython test_set_extra.py..."
-	@./apython tests/cpython/__pycache__/test_set_extra.cpython-312.pyc
-	@echo "Running CPython test_list_extra.py..."
-	@./apython tests/cpython/__pycache__/test_list_extra.cpython-312.pyc
-	@echo "Running CPython test_controlflow.py..."
-	@./apython tests/cpython/__pycache__/test_controlflow.cpython-312.pyc
-	@echo "Running CPython test_math_basic.py..."
-	@./apython tests/cpython/__pycache__/test_math_basic.cpython-312.pyc
-	@echo "Running CPython test_global_nonlocal.py..."
-	@./apython tests/cpython/__pycache__/test_global_nonlocal.cpython-312.pyc
-	@echo "Running CPython test_unpacking.py..."
-	@./apython tests/cpython/__pycache__/test_unpacking.cpython-312.pyc
-	@echo "Running CPython test_inheritance.py..."
-	@./apython tests/cpython/__pycache__/test_inheritance.cpython-312.pyc
-	@echo "Running CPython test_del.py..."
-	@./apython tests/cpython/__pycache__/test_del.cpython-312.pyc
-	@echo "Running CPython test_assert.py..."
-	@./apython tests/cpython/__pycache__/test_assert.cpython-312.pyc
-	@echo "Running CPython test_assignment.py..."
-	@./apython tests/cpython/__pycache__/test_assignment.cpython-312.pyc
-	@echo "Running CPython test_exceptions_extra.py..."
-	@./apython tests/cpython/__pycache__/test_exceptions_extra.cpython-312.pyc
-	@echo "Running CPython test_generators_extra.py..."
-	@./apython tests/cpython/__pycache__/test_generators_extra.cpython-312.pyc
-	@echo "Running CPython test_format.py..."
-	@./apython tests/cpython/__pycache__/test_format.cpython-312.pyc
-	@echo "Running CPython test_slice_ops.py..."
-	@./apython tests/cpython/__pycache__/test_slice_ops.cpython-312.pyc
-	@echo "Running CPython test_numeric.py..."
-	@./apython tests/cpython/__pycache__/test_numeric.cpython-312.pyc
-	@echo "Running CPython test_comprehensions.py..."
-	@./apython tests/cpython/__pycache__/test_comprehensions.cpython-312.pyc
-	@echo "Running CPython test_decorators_extra.py..."
-	@./apython tests/cpython/__pycache__/test_decorators_extra.cpython-312.pyc
-	@echo "Running CPython test_walrus.py..."
-	@./apython tests/cpython/__pycache__/test_walrus.cpython-312.pyc
-	@echo "Running CPython test_match.py..."
-	@./apython tests/cpython/__pycache__/test_match.cpython-312.pyc
-	@echo "Running CPython test_datastructures.py..."
-	@./apython tests/cpython/__pycache__/test_datastructures.cpython-312.pyc
-	@echo "Running CPython test_exceptions_builtin.py..."
-	@./apython tests/cpython/__pycache__/test_exceptions_builtin.cpython-312.pyc
-	@echo "Running CPython test_functions.py..."
-	@./apython tests/cpython/__pycache__/test_functions.cpython-312.pyc
-	@echo "Running CPython test_range_extra.py..."
-	@./apython tests/cpython/__pycache__/test_range_extra.cpython-312.pyc
-	@echo "Running CPython test_conditional.py..."
-	@./apython tests/cpython/__pycache__/test_conditional.cpython-312.pyc
+	@for t in $(CPYTHON_TESTS); do \
+	    echo "Running CPython $$t.py..."; \
+	    ./apython tests/cpython/__pycache__/$$t.cpython-312.pyc || exit 1; \
+	done
+	@echo "All CPython tests passed."

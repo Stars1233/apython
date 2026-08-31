@@ -259,6 +259,8 @@ DEF_FUNC slot_tp_richcompare
     mov rdi, rbx
     mov rsi, r12
     V_UNPACK rsi, rcx
+    extern dunder_call_3
+    extern obj_dealloc
     extern dunder_call_2
     call dunder_call_2
     V_UNPACK rax, rdx
@@ -323,6 +325,82 @@ DEF_FUNC slot_length
 .failed:
     call slot_reraise
 END_FUNC slot_length
+
+;; ============================================================================
+;; slot_mp_subscript(rdi = self, rsi = key Value) -> Value
+;; slot_mp_ass_subscript(rdi = self, rsi = key Value, rdx = value Value)
+;;
+;; type_from_parts hands a builtin subclass its base's method table by pointer,
+;; so a dict subclass that defines __setitem__ inherits dict's slot and the
+;; Python method is never reached: `d["a"] = 1` went straight into dict's
+;; storage.  Installing these wrappers is what makes the override take effect
+;; -- collections.OrderedDict and enum's _EnumDict are both built on it.
+;;
+;; A NULL value Value means deletion, which is __delitem__, the same convention
+;; dict_ass_subscript uses.
+;; ============================================================================
+DEF_FUNC slot_mp_subscript
+    mov rdx, rsi
+    V_UNPACK rdx, rcx
+    mov rsi, rdx
+    lea rdx, [rel sl_getitem_name]
+    call dunder_call_2
+    V_UNPACK rax, rdx
+    test edx, edx
+    jz .failed
+    leave
+    V_PACK rax, rdx
+    ret
+.failed:
+    call slot_reraise           ; does not return
+END_FUNC slot_mp_subscript
+
+SAS_SELF  equ 8
+SAS_KEY   equ 16
+SAS_FRAME equ 24            ; + 1 push = 32
+DEF_FUNC slot_mp_ass_subscript, SAS_FRAME
+    push rbx
+    mov [rbp - SAS_SELF], rdi
+    mov [rbp - SAS_KEY], rsi
+    mov rbx, rdx
+    test rbx, rbx
+    jz .delete
+
+    ; __setitem__(self, key, value)
+    mov rsi, [rbp - SAS_KEY]
+    mov rdx, rbx
+    lea rcx, [rel sl_setitem_name]
+    mov r8d, TAG_PTR                    ; dunder_call_3 packs arg2 with this
+    V_UNPACK rdx, r8
+    call dunder_call_3
+    V_UNPACK rax, rdx
+    test edx, edx
+    jz .failed
+    mov rdi, rax
+    DECREF_V rdi, rsi                   ; __setitem__ returns None
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+
+.delete:
+    mov rdi, [rbp - SAS_SELF]
+    mov rsi, [rbp - SAS_KEY]
+    V_UNPACK rsi, rcx
+    lea rdx, [rel sl_delitem_name]
+    call dunder_call_2
+    V_UNPACK rax, rdx
+    test edx, edx
+    jz .failed
+    mov rdi, rax
+    DECREF_V rdi, rsi
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+.failed:
+    call slot_reraise           ; does not return
+END_FUNC slot_mp_ass_subscript
 
 ;; ============================================================================
 ;; slot_reraise - resume unwinding with the exception the dunder left pending.
@@ -535,6 +613,9 @@ sl_lt_name:     db "__lt__", 0
 sl_le_name:     db "__le__", 0
 sl_gt_name:     db "__gt__", 0
 sl_ge_name:     db "__ge__", 0
+sl_getitem_name: db "__getitem__", 0
+sl_setitem_name: db "__setitem__", 0
+sl_delitem_name: db "__delitem__", 0
 
 align 8
 slot_table:
@@ -550,6 +631,11 @@ slot_table:
     dq sl_int_name,    SLOT_NUMBER,   PyNumberMethods.nb_int,      slot_nb_int
     dq sl_float_name,  SLOT_NUMBER,   PyNumberMethods.nb_float,    slot_nb_float
     dq sl_len_name,    SLOT_MAPPING,  PyMappingMethods.mp_length,  slot_length
+    dq sl_getitem_name, SLOT_MAPPING, PyMappingMethods.mp_subscript, slot_mp_subscript
+    ; Either one installs the single assignment wrapper, which reads a NULL
+    ; value as a deletion the way dict_ass_subscript does.
+    dq sl_setitem_name, SLOT_MAPPING, PyMappingMethods.mp_ass_subscript, slot_mp_ass_subscript
+    dq sl_delitem_name, SLOT_MAPPING, PyMappingMethods.mp_ass_subscript, slot_mp_ass_subscript
     dq sl_len_name,    SLOT_SEQUENCE, PySequenceMethods.sq_length, slot_length
     ; Any one of the six installs the single richcompare wrapper, which
     ; dispatches on the op it is handed.

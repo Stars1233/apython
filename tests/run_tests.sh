@@ -31,6 +31,35 @@ else
     ERRORS="$ERRORS value-selftest"
 fi
 
+# Static checks over compiler/*.asm: 64-bit reads of 4-byte struct fields, and
+# calls made with a misaligned rsp.  Both assemble cleanly and fail at runtime
+# far from the cause, so they are checked here rather than discovered.
+printf "%-40s " "compiler lint"
+if $PYTHON compiler/lint.py > /tmp/apython_lint.out 2>&1; then
+    printf "${GREEN}PASS${NC}\n"
+    PASS=$((PASS + 1))
+else
+    printf "${RED}FAIL${NC}\n"
+    cat /tmp/apython_lint.out
+    FAIL=$((FAIL + 1))
+    ERRORS="$ERRORS compiler-lint"
+fi
+
+# Source-compiler self-test: checks the compiler's encoders directly, against
+# the decoders the interpreter will actually use.  Runs before any Python-level
+# test, because an encoding bug produces symptoms that look nothing like their
+# cause.
+printf "%-40s " "compiler selftest"
+if $APYTHON --selftest-compile > /tmp/apython_comptest.out 2>&1; then
+    printf "${GREEN}PASS${NC}\n"
+    PASS=$((PASS + 1))
+else
+    printf "${RED}FAIL${NC}\n"
+    cat /tmp/apython_comptest.out
+    FAIL=$((FAIL + 1))
+    ERRORS="$ERRORS compile-selftest"
+fi
+
 # Pre-compile all non-test .py files (helper modules)
 for helper_py in "$TESTDIR"/*.py; do
     case "$(basename "$helper_py")" in
@@ -63,6 +92,11 @@ for test_py in "$TESTDIR"/test_*.py; do
     else
         expected=$($PYTHON "$test_py" 2>&1) || true
     fi
+
+    # tests/srcpkg exists to be imported from source.  Producing the expected
+    # output above ran CPython over it, which left a __pycache__ behind -- and
+    # with one there apython reads the .pyc and the test proves nothing.
+    rm -rf "$TESTDIR"/srcpkg/__pycache__ "$TESTDIR"/srcpkg/*/__pycache__
 
     # Run with apython
     actual=$($APYTHON "$pyc_file" 2>&1) || true

@@ -113,6 +113,7 @@ END_FUNC dict_alloc_tables
 ;; Constructor: dict() or dict(mapping)
 ;; ============================================================================
 extern kw_names_pending
+extern dict_method_update
 extern ap_strcmp
 
 global dict_type_call
@@ -187,61 +188,24 @@ DEF_FUNC dict_type_call
     jmp .dtc_add_kwargs
 
 .dtc_try_iterable:
-    ; Not a dict — try iterating as sequence of (key, value) pairs
-    mov rdi, [rbx]             ; args[0]
-    V_TEST_PTR rdi, rsi
-    ja .dtc_error
-    ; Get iterator
-    push rdi
-    mov rax, [rdi + PyObject.ob_type]
-    mov rax, [rax + PyTypeObject.tp_iter]
-    test rax, rax
-    jz .dtc_error_pop
-    call rax
-    test rax, rax
-    jz .dtc_error_pop
-    add rsp, 8                 ; discard saved iterable
-    mov r13, rax               ; r13 = iterator
-
-    ; Create new dict
+    ; Not a dict.  "A mapping, or an iterable of pairs" is exactly what
+    ; dict.update means, so it is decided in one place: build an empty dict and
+    ; update it.  Doing it again here is how the constructor came to accept
+    ; pairs and reject a mappingproxy while update accepted both.
     call dict_new
-    mov r15, rax               ; r15 = new dict
-
-    ; Iterate pairs
-.dtc_iter_loop:
-    mov rdi, r13
-    mov rax, [rdi + PyObject.ob_type]
-    mov rax, [rax + PyTypeObject.tp_iternext]
-    call rax
-    V_UNPACK rax, rdx           ; tp_iternext returns a Value
-    test edx, edx
-    jz .dtc_iter_done          ; exhausted
-
-    ; rax = item, edx = tag — must be a tuple of length 2
-    cmp edx, TAG_PTR
-    jne .dtc_iter_type_error
-    mov rcx, [rax + PyObject.ob_type]
-    lea r8, [rel tuple_type]
-    cmp rcx, r8
-    jne .dtc_iter_type_error
-    cmp qword [rax + PyTupleObject.ob_size], 2
-    jne .dtc_iter_type_error
-
-    ; Extract key and value from tuple
-    push rax                   ; save tuple for DECREF
-    mov rcx, [rax + PyTupleObject.ob_item]
-    mov rdi, r15               ; dict
-    mov rsi, [rcx]             ; key Value
-    mov rdx, [rcx + 8]        ; value Value
-    call dict_set
-    pop rdi                    ; tuple
-    call obj_decref
-    jmp .dtc_iter_loop
-
-.dtc_iter_done:
-    ; DECREF iterator
-    mov rdi, r13
-    call obj_decref
+    mov r15, rax
+    sub rsp, 24
+    mov [rsp], r15
+    mov rax, [rbx]                      ; args[0]
+    mov [rsp + 8], rax
+    mov rdi, rsp
+    mov esi, 2
+    call dict_method_update             ; kw_names_pending is already cleared
+    add rsp, 24
+    test rax, rax
+    jz .dtc_error                       ; update left its exception pending
+    mov rdi, rax
+    DECREF_V rdi, rsi                   ; the None it returns
     jmp .dtc_add_kwargs
 
 .dtc_iter_type_error:

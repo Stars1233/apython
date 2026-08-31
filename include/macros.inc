@@ -456,7 +456,14 @@ TAG_IO_WAIT  equ 8           ; payload = fd | (direction << 32) — async I/O se
     mov %1, [%1 + PyTypeObject.tp_dictoffset]
     test %1, %1
     jz %3
+    cmp %1, TP_DICT_AT_TAIL
+    je %%tail
     mov %1, [%2 + %1]
+    jmp %%done
+%%tail:
+    INST_DICT_TAIL %1, %2
+    mov %1, [%1]
+%%done:
 %endmacro
 
 ; STORE_INST_DICT inst, value, scratch, none_label
@@ -465,7 +472,39 @@ TAG_IO_WAIT  equ 8           ; payload = fd | (direction << 32) — async I/O se
     mov %3, [%3 + PyTypeObject.tp_dictoffset]
     test %3, %3
     jz %4
+    cmp %3, TP_DICT_AT_TAIL
+    je %%tail
     mov [%1 + %3], %2
+    jmp %%done
+%%tail:
+    INST_DICT_TAIL %3, %1
+    mov [%3], %2
+%%done:
+%endmacro
+
+; A str keeps its characters inline, so there is no fixed offset past the
+; header for a __dict__ -- which is why a str subclass had none, and why
+; setting any attribute on one raised.  The pointer goes at the tail instead,
+; past the data and the eight NUL bytes str_new_heap pads with, and
+; tp_dictoffset carries this sentinel to say so.  CPython does the same thing
+; with a negative offset.
+TP_DICT_AT_TAIL equ -1
+
+; INST_DICT_TAIL dest, inst -- address of the tail dict pointer.
+; str and bytes both keep eight spare bytes past their data (the NUL a str is
+; padded with, the terminator bytes_type_call writes), so the dict sits one
+; word beyond that in both.  Only where the data starts differs.
+%macro INST_DICT_TAIL 2
+    mov %1, [%2 + PyObject.ob_type]
+    test qword [%1 + PyTypeObject.tp_flags], TYPE_FLAG_STR_SUBCLASS
+    jz %%bytes_tail
+    mov %1, [%2 + PyStrObject.ob_size]
+    lea %1, [%2 + %1 + PyStrObject.data + 8]
+    jmp %%tail_done
+%%bytes_tail:
+    mov %1, [%2 + PyBytesObject.ob_size]
+    lea %1, [%2 + %1 + PyBytesObject.data + 8]
+%%tail_done:
 %endmacro
 
 ; A dunder call returns NULL for two different reasons: the type does not

@@ -4,7 +4,7 @@ A Python 3.12 bytecode interpreter in x86-64 NASM assembly, exploring the fastes
 
 ## What is this?
 
-apython reads `.pyc` files and executes Python 3.12 bytecode directly — no CPython, no JIT, no interpreter overhead layers. The entire interpreter is **~86,000 lines of x86-64 assembly**, from the eval loop to the type system to the garbage collector to async I/O. It implements 27+ types, 126 opcode handlers, generators, async/await, multiple inheritance with a C3 MRO, metaclasses, abstract base classes, weak references, pattern matching, real tracebacks, a regex engine, cycle-collecting GC, and a pure-assembly asyncio event loop.  Strings hold UTF-8 and count themselves in code points.
+apython compiles and executes Python 3.12 directly — no CPython, no JIT, no interpreter overhead layers.  It reads `.py` source through a compiler written in the same assembly, and `.pyc` bytecode through a marshal reader. The entire interpreter is **~86,000 lines of x86-64 assembly**, from the eval loop to the type system to the garbage collector to async I/O. It implements a complete Python 3.12 compiler — tokenizer, Pratt parser, symbol table, code generator and assembler — plus 27+ types, 126 opcode handlers, generators, async/await, multiple inheritance with a C3 MRO, metaclasses, abstract base classes, weak references, pattern matching, real tracebacks, a regex engine, cycle-collecting GC, and a pure-assembly asyncio event loop.  Strings hold UTF-8 and count themselves in code points.
 
 ## Key design choices
 
@@ -15,6 +15,7 @@ apython reads `.pyc` files and executes Python 3.12 bytecode directly — no CPy
 - **GMP for arbitrary precision** — big integers via libgmp when values exceed int64_t range
 - **Reference counting + cycle-collecting GC** — deterministic memory management with a 3-generation collector for cycles
 - **Full async/await with io_uring** — high-speed async I/O via Linux io_uring (with epoll fallback), zero-copy TCP streams
+- **A Python compiler in the same assembly** — `compile()`, `exec()`, `eval()`, `./apython foo.py` and `import` from source, all from a table-driven front end: a 256-entry character class, a Pratt table with one row per token, and one opcode-metadata table that drives cache padding, instruction sizing and stack depth together
 - **DWARF debug symbols** — full GDB support with frame-pointer unwinding, function boundaries, and source-level stepping
 
 ## Quick start
@@ -26,8 +27,15 @@ make                # build ./apython
 ./apython --version # show version
 
 # run a Python script
+./apython script.py
+
+# or hand it bytecode CPython produced
 python3 -m py_compile script.py
 ./apython __pycache__/script.cpython-312.pyc
+
+# see what the compiler emits, beside `python3 -m dis`
+./apython --dis '1 + 2 * 3'
+./apython --dis -x 'def f(x): return x + 1'
 ```
 
 ## Implemented features
@@ -94,10 +102,13 @@ SystemExit, RecursionError, UnicodeDecodeError / UnicodeEncodeError, the
 Warning family, and BaseExceptionGroup / ExceptionGroup — which derives from
 both BaseExceptionGroup and Exception, so `except Exception` catches it.
 Missing: `IOError` / `EnvironmentError` (the OSError aliases),
-`FileExistsError`, `IndentationError`, `TabError`, `UnicodeTranslateError`.
+`FileExistsError`, `UnicodeTranslateError`.
 
 ### Language features
 
+- Compiling Python source: `compile()`, `exec()`, `eval()`, `./apython foo.py`,
+  and `import` of a `.py` when no `.pyc` is there
+- The walrus operator, PEP 695 type parameters, `from __future__ import ...`
 - Classes with inheritance, `__init__`, `__repr__`, `__str__`, `__slots__`, MRO
 - Generators and `yield` / `yield from`
 - `async def`, `await`, `async for`, `async with`
@@ -132,16 +143,16 @@ Missing: `IOError` / `EnvironmentError` (the OSError aliases),
 | _abc | The ABC accelerator abc.py is built on: get_cache_token, _abc_init, _abc_register, _abc_instancecheck, _abc_subclasscheck, _get_dump, _reset_registry, _reset_caches |
 | _weakref | Real weak references: ref (subclassable, with callbacks), proxy, getweakrefcount, getweakrefs, _remove_dead_weakref |
 | asyncio | Event loop with io_uring backend, coroutine runner, TCP streams (open_connection, start_server), sleep, gather |
-| _sre | SRE regex engine — compile, and the pattern methods match, fullmatch, search, findall, finditer, sub, subn, split.  The `re` wrapper module is not shipped, so CPython's own `re` is what an `import re` finds, and that needs a real `eval()` by way of `collections.namedtuple` |
+| _sre | SRE regex engine — compile, and the pattern methods match, fullmatch, search, findall, finditer, sub, subn, split.  The `re` wrapper module is not shipped, so CPython's own `re` is what an `import re` finds |
 | time | monotonic, process_time.  `time.time` and `time.sleep` are not implemented; `asyncio.sleep` is |
 | itertools | chain, cycle, islice, count, repeat, product, starmap, accumulate.  zip_longest, permutations, combinations, takewhile, dropwhile, filterfalse, groupby, tee and pairwise are not implemented |
 | unittest | Pure Python test framework (TestCase, assertions, test runner) |
 | warnings | warn, simplefilter |
 
 Pure-Python modules shipped in `lib/` and importable as they are: `abc` (CPython's
-own, on the native `_abc`), `_codecs`, `_thread`, `collections`, `contextlib`,
-`copy`, `functools`, `io`, `itertools`, `operator`, `pickle`, `string`,
-`unittest`, `warnings`.  Most of that tree comes from CPython and is covered by
+own, on the native `_abc`), `__future__`, `_codecs`, `_thread`, `collections`,
+`contextlib`, `copy`, `functools`, `io`, `itertools`, `operator`, `pickle`,
+`string`, `unittest`, `warnings`.  Most of that tree comes from CPython and is covered by
 the Python Software Foundation License (`lib/LICENSE.python`) in addition to
 this repository's MIT license; `lib/README.md` says which files are which.  They are found relative to the interpreter binary and
 sit at the end of `sys.path`, so a real stdlib named by `PYTHONPATH` wins:
@@ -179,12 +190,23 @@ results in all.
 enforced — a failure in any of them fails the target.
 
 ```bash
-make check                  # test files, diffed against python3
-make check-cpython          # 64 CPython stdlib test files
-make check-stdlib           # how much of a CPython Lib/ imports (a ratchet)
-./apython --selftest-value  # Value encode/decode boundaries
+make check                   # test files, diffed against python3
+make check-cpython           # 64 CPython stdlib test files
+make check-source            # the same test files, compiled by OUR compiler
+make check-cpython-source    # the CPython corpus, compiled by OUR compiler
+make check-stdlib            # how much of a CPython Lib/ imports (a ratchet)
+./apython --selftest-value   # Value encode/decode boundaries
+./apython --selftest-compile # the compiler's own encoders
 make INT_STRESS=1 && bash tests/run_tests.sh   # every |n| >= 8 boxed on the heap
 ```
+
+The two `-source` targets hand apython the `.py` instead of the `.pyc`, so its
+own compiler produces the bytecode, and diff the result against `python3`.
+Every file in both corpora is a differential test of the compiler for free.
+They found most of the compiler's bugs — including several that need a whole
+file rather than a snippet to appear at all — and they reach interpreter paths
+a `.pyc` cannot, because CPython's constant folder settles `3 * "ab"` and
+`True & False` before either becomes an opcode.
 
 `INT_STRESS=1` forces every integer of magnitude 8 or more onto the heap, so
 the ordinary suite exercises the heap-int paths that immediates normally
@@ -242,10 +264,29 @@ src/
     asyncio_streams.asm
   lib/                  Syscall wrappers, string/memory ops
     syscall.asm memops.asm string.asm
+compiler/               The Python source compiler
+  lex.asm               Tokenizer: 256-entry char class, indent stack, f-strings
+  parse.asm             Pratt expression parser, one table row per token
+  parse_stmt.asm        Statements, and the soft keywords `match` and `type`
+  pattern.asm           `match` patterns
+  fstring.asm           f-string fields, lexed as spans of the same source
+  ast.asm arena.asm     32-byte nodes in a growable buffer; a scratch child stack
+  symtab.asm            Scopes, local/cell/free classification, name mangling
+  codegen.asm           Expressions; codegen_stmt/_func/_try/_comp/_async/
+                        _match/_egroup for the rest
+  assemble.asm          EXTENDED_ARG fixpoint, stack depth, exception table,
+                        PEP 626 line table
+  compile.asm           The driver, and the only place errors become exceptions
+  evalexec.asm          compile(), exec(), eval()
+  srcfile.asm           `./apython foo.py` and import from source
+  dis.asm comptest.asm  --dis and --selftest-compile
+  lint.py               Static checks over compiler/*.asm, run by make check
+  gen_tables.py         Generates tables.asm from CPython's own opcode module
+  gen_prule.py          Generates the expression grammar table in parse.asm
 include/                Struct definitions, macros, constants (.inc files)
 lib/                    Pure Python support modules
   abc.py contextlib.py copy.py functools.py io.py itertools.py
-  operator.py pickle.py string.py warnings.py
+  operator.py pickle.py string.py warnings.py __future__.py
   collections/          namedtuple, defaultdict, Counter, OrderedDict
   unittest/             Test framework (case.py, runner.py, mock.py)
   test/                 CPython test support infrastructure

@@ -2630,6 +2630,61 @@ DEF_FUNC_BARE int_invert
     ret
 END_FUNC int_invert
 
+
+;; ============================================================================
+;; int_shrink(PyIntObject *v) -> rax = Value
+;;
+;; A heap integer whose value fits the immediate range must not stay on the
+;; heap.  There is no small-int cache here: an integer in +-2^50 IS its Value,
+;; so `x is 1` compares words, and a boxed 1 is not the 1 every other operation
+;; produces.  The operators that always compute through GMP -- shift and power
+;; -- hand their result through this on the way out.
+;; ============================================================================
+DEF_FUNC int_shrink
+    push rbx
+    mov rbx, rdi
+    cmp qword [rbx + PyIntObject.compact], 0
+    jne .from_compact
+    lea rdi, [rbx + PyIntObject.mpz]
+    call __gmpz_fits_slong_p wrt ..plt
+    test eax, eax
+    jz .keep
+    lea rdi, [rbx + PyIntObject.mpz]
+    call __gmpz_get_si wrt ..plt
+    jmp .have
+.from_compact:
+    mov rax, [rbx + PyIntObject.ival]
+.have:
+    ; |v| < the immediate limit.  The stress build lowers that limit to force
+    ; the heap paths, and this has to move with it or the two disagree about
+    ; which integers are immediates.
+%ifdef INT_STRESS_BOX
+    mov rdx, INT_STRESS_BOX
+%else
+    mov rdx, 1 << V_INT_SHIFT
+%endif
+    mov rcx, rax
+    mov r8, rax
+    sar r8, 63
+    xor rcx, r8
+    sub rcx, r8
+    cmp rcx, rdx
+    jae .keep
+    push rax
+    mov rdi, rbx
+    call int_dealloc
+    pop rax
+    V_PACK_I64 rax, rcx
+    pop rbx
+    leave
+    ret
+.keep:
+    mov rax, rbx
+    pop rbx
+    leave
+    ret
+END_FUNC int_shrink
+
 ;; ============================================================================
 ;; Left shift: int_lshift(PyObject *a, PyObject *b) -> PyObject*
 ;; ============================================================================
@@ -2716,6 +2771,8 @@ DEF_FUNC int_lshift
     call int_dealloc
     pop rax
 .lsh_done:
+    mov rdi, rax
+    call int_shrink
     mov edx, TAG_PTR
     pop r14
     pop r13
@@ -2827,6 +2884,8 @@ DEF_FUNC int_rshift
     mov rdx, r13
     call __gmpz_fdiv_q_2exp wrt ..plt
     pop rax
+    mov rdi, rax
+    call int_shrink
     mov edx, TAG_PTR
     pop r14
     pop r13
@@ -2932,6 +2991,8 @@ DEF_FUNC int_power
     call int_dealloc
     pop rax
 .pow_done:
+    mov rdi, rax
+    call int_shrink
     mov edx, TAG_PTR
     pop r14
     pop r13

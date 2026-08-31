@@ -29,6 +29,8 @@ extern str_from_cstr_heap
 extern dict_get
 extern obj_decref
 extern obj_incref
+extern exc_TypeError_type
+extern raise_exception
 
 ; ---------------------------------------------------------------------------
 ; dunder_lookup(PyTypeObject *type, const char *name) -> PyObject*
@@ -328,6 +330,104 @@ DEF_FUNC dunder_call_3
     ret
 END_FUNC dunder_call_3
 
+
+;; ============================================================================
+;; obj_call_n(Value callable, Value *args, uint64_t nargs) -> Value, or 0
+;;
+;; Call anything callable: a function, a builtin, a type, or an instance of a
+;; class that defines __call__.  Going through tp_call alone misses the last of
+;; those -- a user class carries __call__ in its dict, and only op_call knew to
+;; look there -- so a property whose getter was an operator.itemgetter reported
+;; "unreadable attribute" rather than calling it.
+;;
+;; Returns 0 with a TypeError pending when the object is not callable.  nargs
+;; is bounded because the self-prepended copy lives in this frame; every
+;; descriptor use passes one or two.
+;; ============================================================================
+OCN_MAX equ 8
+
+OCN_FN    equ 8
+OCN_ARGS  equ 16
+OCN_NARGS equ 24
+OCN_BUF   equ 32 + (OCN_MAX + 1) * 8
+OCN_FRAME equ ((OCN_BUF + 15) / 16) * 16 + 8    ; + 3 pushes = 16-aligned
+DEF_FUNC obj_call_n, OCN_FRAME
+    push rbx
+    push r12
+    push r13
+    mov rbx, rdi
+    mov r12, rsi
+    mov r13, rdx
+
+    V_TEST_PTR rbx, rax
+    ja .not_callable
+    test rbx, rbx
+    jz .not_callable
+
+    mov rax, [rbx + PyObject.ob_type]
+    mov rcx, [rax + PyTypeObject.tp_call]
+    test rcx, rcx
+    jz .try_dunder
+
+    mov rdi, rbx
+    mov rsi, r12
+    mov rdx, r13
+    call rcx
+    jmp .ret
+
+.try_dunder:
+    ; A heaptype instance whose class defines __call__: dispatch to that with
+    ; the object itself as the first argument.
+    test dword [rax + PyTypeObject.tp_flags], TYPE_FLAG_HEAPTYPE
+    jz .not_callable
+    mov rdi, rax
+    lea rsi, [rel dunder_call]
+    call dunder_lookup
+    V_UNPACK rax, rdx
+    test edx, edx
+    jz .not_callable
+    test edx, TAG_RC_BIT
+    jz .not_callable
+    mov [rbp - OCN_FN], rax
+
+    cmp r13, OCN_MAX
+    ja .not_callable
+
+    ; args' = [self, args...]
+    lea rdi, [rbp - OCN_BUF]
+    mov [rdi], rbx
+    xor ecx, ecx
+.copy:
+    cmp rcx, r13
+    jae .copied
+    mov rax, [r12 + rcx*8]
+    mov [rdi + rcx*8 + 8], rax
+    inc rcx
+    jmp .copy
+.copied:
+    mov rax, [rbp - OCN_FN]
+    mov rcx, [rax + PyObject.ob_type]
+    mov rcx, [rcx + PyTypeObject.tp_call]
+    test rcx, rcx
+    jz .not_callable
+    mov rdi, rax
+    lea rsi, [rbp - OCN_BUF]
+    lea rdx, [r13 + 1]
+    call rcx
+    jmp .ret
+
+.not_callable:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "object is not callable"
+    call raise_exception
+.ret:
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC obj_call_n
+
 section .data
 ; Pre-defined dunder name strings (C strings for convenience)
 global dunder_eq
@@ -365,6 +465,7 @@ global dunder_contains
 global dunder_len
 global dunder_bool
 global dunder_call
+global obj_call_n
 global dunder_hash
 global dunder_iadd
 global dunder_isub

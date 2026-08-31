@@ -331,3 +331,101 @@ pool_count_3: dd 0
               dd 0
 
 section .text
+
+;; ============================================================================
+;; frame_fast_to_locals(PyFrame *f) -> PyDictObject*, owned, or NULL
+;;
+;; A function frame keeps its locals in the localsplus array, not in a mapping,
+;; so PyFrame.locals is NULL for one -- and everything that wants a mapping
+;; substituted globals instead.  locals() therefore returned the module dict,
+;; and eval("lv + 1") inside a function raised NameError for a name that was
+;; sitting in a slot two words away.
+;;
+;; This is CPython's PyFrame_FastToLocalsWithError: walk co_localsplusnames
+;; against the slots, unwrapping the cells, and skip anything unbound.  It is a
+;; snapshot -- writing to it does not write back, which is also what CPython
+;; does outside a tracing hook.
+;; ============================================================================
+FTL_FRAME_P equ 8
+FTL_DICT    equ 16
+FTL_NAMES   equ 24
+FTL_I       equ 32
+FTL_N       equ 40
+FTL_SIZE    equ 48        ; + 1 push = 56... padded below
+FTL_FRAME   equ 56        ; + 1 push = 64
+global frame_fast_to_locals
+extern dict_new
+extern dict_set
+extern cell_type
+DEF_FUNC frame_fast_to_locals, FTL_FRAME
+    push rbx
+    mov rbx, rdi
+    mov [rbp - FTL_FRAME_P], rdi
+
+    call dict_new
+    test rax, rax
+    jz .ftl_fail
+    mov [rbp - FTL_DICT], rax
+
+    mov rax, [rbx + PyFrame.code]
+    test rax, rax
+    jz .ftl_done
+    mov rax, [rax + PyCodeObject.co_localsplusnames]
+    test rax, rax
+    jz .ftl_done
+    mov [rbp - FTL_NAMES], rax
+    mov rcx, [rax + PyTupleObject.ob_size]
+    mov [rbp - FTL_N], rcx
+    ; The frame's own count is the authority on how many slots exist.
+    mov ecx, [rbx + PyFrame.nlocalsplus]
+    cmp rcx, [rbp - FTL_N]
+    jae .ftl_have_n
+    mov [rbp - FTL_N], rcx
+.ftl_have_n:
+    mov qword [rbp - FTL_I], 0
+
+.ftl_loop:
+    mov rax, [rbp - FTL_I]
+    cmp rax, [rbp - FTL_N]
+    jae .ftl_done
+
+    lea rdx, [rbx + PyFrame.localsplus]     ; an inline array, not a pointer
+    mov rdx, [rdx + rax*8]
+    test rdx, rdx
+    jz .ftl_next                        ; the slot was never bound
+
+    ; A cell or free slot holds the cell, not the value.
+    V_TEST_PTR rdx, rcx
+    ja .ftl_have_value
+    mov rcx, [rdx + PyObject.ob_type]
+    lea r8, [rel cell_type]
+    cmp rcx, r8
+    jne .ftl_have_value
+    mov rdx, [rdx + PyCellObject.ob_ref]
+    test rdx, rdx
+    jz .ftl_next                        ; an empty cell is an unbound name
+
+.ftl_have_value:
+    mov rax, [rbp - FTL_NAMES]
+    mov rax, [rax + PyTupleObject.ob_item]
+    mov rcx, [rbp - FTL_I]
+    mov rsi, [rax + rcx*8]              ; the name, as a Value
+    test rsi, rsi
+    jz .ftl_next
+    mov rdi, [rbp - FTL_DICT]
+    call dict_set
+.ftl_next:
+    inc qword [rbp - FTL_I]
+    jmp .ftl_loop
+
+.ftl_done:
+    mov rax, [rbp - FTL_DICT]
+    pop rbx
+    leave
+    ret
+.ftl_fail:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+END_FUNC frame_fast_to_locals

@@ -24,6 +24,7 @@ extern opcode_table
 extern obj_dealloc
 extern obj_decref
 extern dict_set
+extern dict_type
 extern fatal_error
 extern raise_exception
 extern eval_exception_unwind
@@ -101,6 +102,16 @@ DEF_FUNC_BARE op_store_name
     jnz .have_dict
     mov rdi, [r12 + PyFrame.globals]
 .have_dict:
+    ; A class body prepared by a metaclass executes in whatever mapping
+    ; __prepare__ returned, and that mapping's __setitem__ is the whole point
+    ; of preparing one -- enum's _EnumDict records every member there.  Writing
+    ; straight into dict storage skips it, so anything but an exact dict goes
+    ; through mp_ass_subscript.
+    mov rax, [rdi + PyObject.ob_type]
+    lea rcx, [rel dict_type]
+    cmp rax, rcx
+    jne .mapping_set
+
     ; dict_set(dict, key, value, value_tag, key_tag)
     ; rdi = dict (already set)
     mov rsi, r8                ; rsi = name (key)
@@ -113,6 +124,40 @@ DEF_FUNC_BARE op_store_name
     pop r10
     pop r9
     ; DECREF value to release the stack's reference (dict_set INCREFed it)
+    DECREF_VAL r9, r10
+    DISPATCH
+
+.mapping_set:
+    mov rax, [rax + PyTypeObject.tp_as_mapping]
+    test rax, rax
+    jz .have_dict_plain
+    mov rax, [rax + PyMappingMethods.mp_ass_subscript]
+    test rax, rax
+    jz .have_dict_plain
+    mov rsi, r8                ; key
+    mov rdx, r9
+    mov rcx, r10
+    V_PACK rdx, rcx            ; value Value
+    push r9
+    push r10
+    call rax
+    pop r10
+    pop r9
+    DECREF_VAL r9, r10
+    DISPATCH
+
+.have_dict_plain:
+    ; No mapping protocol at all: fall back to writing the dict directly, which
+    ; is what it was before and is right for anything dict-shaped.
+    mov rsi, r8
+    mov rdx, r9
+    mov rcx, r10
+    V_PACK rdx, rcx
+    push r9
+    push r10
+    call dict_set
+    pop r10
+    pop r9
     DECREF_VAL r9, r10
     DISPATCH
 END_FUNC op_store_name

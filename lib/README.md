@@ -15,7 +15,7 @@ repository (`../LICENSE`).
 | Origin | Files |
 |---|---|
 | CPython, unmodified | `abc.py` |
-| CPython, modified for apython | `collections/`, `contextlib.py`, `copy.py`, `functools.py`, `io.py`, `operator.py`, `pickle.py`, `string.py`, `unittest/`, `warnings.py`, `test/` |
+| CPython, modified for apython | `__future__.py`, `collections/`, `contextlib.py`, `copy.py`, `functools.py`, `io.py`, `operator.py`, `pickle.py`, `string.py`, `unittest/`, `warnings.py`, `test/` |
 | Written for apython | `_codecs.py`, `_thread.py`, `itertools.py` |
 
 The three apython files stand in for CPython C extension modules of the same

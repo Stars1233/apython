@@ -1,5 +1,6 @@
 ; bool_obj.asm - Bool type, True/False singletons
 
+%include "value.inc"
 %include "macros.inc"
 %include "object.inc"
 %include "types.inc"
@@ -87,26 +88,54 @@ END_FUNC bool_from_int
 ;; Calling convention: rdi=left_payload, edx=left_tag, rsi=right_payload, ecx=right_tag
 ;; ============================================================================
 
-; bool_and(rdi=left, rsi=right, edx=left_tag, ecx=right_tag)
-DEF_FUNC_BARE bool_and
-    ; True and False are PyIntObject-shaped singletons, so int_and handles them
-    ; directly and already returns a bool when both operands are bools.
-    jmp int_and
-END_FUNC bool_and
+;; bool_and / bool_or / bool_xor (Value left, Value right) -> Value
+;;
+;; `True & False` is False, not 0.  The three bitwise operators are the only
+;; ones bool narrows: everything else (+, -, *, <<) widens to int, which is why
+;; bool's other slots are int's unchanged.
+;;
+;; int_and and friends unwrap the singletons to SmallInts and hand back a
+;; SmallInt, so the narrowing has to happen here, and only when BOTH operands
+;; were bools -- `True & 1` is 1, an int.
+;;
+;; CPython never compiles `True & False` as a runtime operation (its folder
+;; settles it), so nothing running from a .pyc had reached this.
 
-; bool_or(rdi=left, rsi=right, edx=left_tag, ecx=right_tag)
-DEF_FUNC_BARE bool_or
-    ; True and False are PyIntObject-shaped singletons, so int_or handles them
-    ; directly and already returns a bool when both operands are bools.
-    jmp int_or
-END_FUNC bool_or
+; %1 = the int_* implementation to delegate to
+%macro BOOL_BITWISE 2
+DEF_FUNC %1
+    push rbx
+    xor ebx, ebx
+    lea rax, [rel bool_true]
+    lea rcx, [rel bool_false]
+    cmp rdi, rax
+    je %%left_bool
+    cmp rdi, rcx
+    jne %%go
+%%left_bool:
+    cmp rsi, rax
+    je %%both
+    cmp rsi, rcx
+    jne %%go
+%%both:
+    mov ebx, 1
+%%go:
+    call %2
+    test ebx, ebx
+    jz %%done
+    V_TO_I64 rax
+    mov edi, eax
+    call bool_from_int          ; a pointer is its own Value
+%%done:
+    pop rbx
+    leave
+    ret
+END_FUNC %1
+%endmacro
 
-; bool_xor(rdi=left, rsi=right, edx=left_tag, ecx=right_tag)
-DEF_FUNC_BARE bool_xor
-    ; True and False are PyIntObject-shaped singletons, so int_xor handles them
-    ; directly and already returns a bool when both operands are bools.
-    jmp int_xor
-END_FUNC bool_xor
+BOOL_BITWISE bool_and, int_and
+BOOL_BITWISE bool_or,  int_or
+BOOL_BITWISE bool_xor, int_xor
 
 ;; ============================================================================
 ;; Bool unary: +True -> 1 (int), abs(True) -> 1 (int)

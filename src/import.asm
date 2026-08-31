@@ -39,6 +39,8 @@ extern eval_frame
 extern frame_new
 extern frame_free
 extern pyc_read_file
+extern code_from_path
+extern path_is_source
 extern sys_open
 extern sys_close
 
@@ -81,7 +83,10 @@ IF_MREFS    equ 64           ; saved marshal_refs
 IF_MRCNT    equ 72           ; saved marshal_ref_count
 IF_MRCAP    equ 80           ; saved marshal_ref_cap
 IF_EXC      equ 88           ; current_exception on entry (see .import_error)
-IF_FRAME    equ 96
+IF_POS      equ 96           ; byte position while walking a dotted name
+IF_PARENT   equ 104          ; the module the next component hangs off
+IF_LEAF     equ 112          ; the module the walk has reached
+IF_FRAME    equ 128
 
 ; --- import_find_and_load frame layout ---
 ; path_component buffer lives on stack below frame locals
@@ -565,93 +570,99 @@ DEF_FUNC import_module, IF_FRAME
     jmp .done
 
 .has_dots:
-    ; Dotted name: import each component
-    ; e.g. "os.path" -> import "os", then import "os.path"
-    ; Return: if fromlist empty -> top-level; if fromlist non-empty -> leaf
+    ; Dotted name: import each prefix in turn, `a`, then `a.b`, then `a.b.c`,
+    ; binding each as an attribute of the one before.  Importing only the
+    ; first component and then the whole name skipped the intermediate
+    ; packages entirely, so anything three deep -- `import a.b.c` -- reported
+    ; ModuleNotFoundError, and the submodule was hung off the *top* package
+    ; rather than its own parent.
+    mov qword [rbp - IF_POS], 0
+    mov qword [rbp - IF_PARENT], 0
+    mov qword [rbp - IF_LEAF], 0
+    mov qword [rbp - IF_TOPMOD], 0
 
-    ; Import first component (up to first dot)
-    ; Find first dot position
-    xor ecx, ecx
-.find_first_dot:
-    cmp byte [rbx + rcx], '.'
-    je .got_first_dot
+.walk_component:
+    ; The prefix ends at the next dot, or at the end of the name.
+    mov rcx, [rbp - IF_POS]
+.walk_scan:
     cmp rcx, r14
-    jge .got_first_dot
+    jae .walk_have_end
+    cmp byte [rbx + rcx], '.'
+    je .walk_have_end
     inc rcx
-    jmp .find_first_dot
-.got_first_dot:
-
-    ; Create substring for first component
+    jmp .walk_scan
+.walk_have_end:
+    push rcx                    ; where this component ends
     mov rdi, rbx
     mov rsi, rcx
-    call str_new_heap
-    push rax                    ; save first component name
+    call str_new_heap           ; the prefix, "a" then "a.b" then "a.b.c"
+    test rax, rax
+    jz .walk_oom
+    push rax
 
-    ; Check sys.modules for first component
     mov rdi, [rel sys_modules_dict]
     mov rsi, rax
     call dict_get
-    V_UNPACK rax, rdx           ; dict_get returns a Value
+    V_UNPACK rax, rdx
     test edx, edx
-    jnz .have_first_component
-
-    ; Load first component
-    mov rdi, [rsp]              ; first component name
+    jnz .walk_have_module
+    mov rdi, [rsp]
     call import_find_and_load
     test rax, rax
-    jz .dotted_error
+    jz .walk_load_failed
 
-.have_first_component:
-    mov r12, rax                ; r12 = top-level module
-    inc qword [r12 + PyObject.ob_refcnt]
-    mov [rbp - IF_TOPMOD], r12
+.walk_have_module:
+    mov r13, rax                ; this prefix's module, borrowed
+    pop rdi                     ; the prefix string
+    call obj_decref
+    pop rcx                     ; where the component ended
 
-    ; DECREF first component name
+    ; Bind it on its parent under the bare component name.
+    mov rax, [rbp - IF_PARENT]
+    test rax, rax
+    jz .walk_no_parent
+    push rcx
+    push r13
+    mov rdi, [rbp - IF_POS]
+    lea rdi, [rbx + rdi]        ; the bare component
+    mov rsi, rcx
+    sub rsi, [rbp - IF_POS]
+    call str_new_heap
+    test rax, rax
+    jz .walk_no_parent_pop
+    push rax
+    mov rax, [rbp - IF_PARENT]
+    mov rdi, [rax + PyModuleObject.mod_dict]
+    test rdi, rdi
+    jz .walk_drop_key
+    mov rsi, [rsp]
+    mov rdx, [rsp + 8]          ; this prefix's module
+    call dict_set
+.walk_drop_key:
     pop rdi
     call obj_decref
+.walk_no_parent_pop:
+    pop r13
+    pop rcx
+.walk_no_parent:
 
-    ; Now try to import the full dotted name
-    mov rdi, [rel sys_modules_dict]
-    mov rsi, [rbp - IF_NAME]
-    call dict_get
-    V_UNPACK rax, rdx           ; dict_get returns a Value
-    test edx, edx
-    jnz .have_full_dotted
+    mov [rbp - IF_PARENT], r13
+    mov [rbp - IF_LEAF], r13
+    cmp qword [rbp - IF_TOPMOD], 0
+    jne .walk_have_top
+    mov [rbp - IF_TOPMOD], r13
+.walk_have_top:
 
-    ; Need to load intermediate + full path
-    mov rdi, [rbp - IF_NAME]
-    call import_find_and_load
-    test rax, rax
-    jz .dotted_load_error
+    cmp rcx, r14
+    jae .walk_done
+    lea rcx, [rcx + 1]          ; step past the dot
+    mov [rbp - IF_POS], rcx
+    jmp .walk_component
 
-.have_full_dotted:
-    mov r13, rax                ; r13 = leaf module
-
-    ; Set submodule as attr on parent (CPython behavior)
-    ; Extract leaf name from full dotted name (after last dot)
-    mov rcx, r14                ; name length
-.find_leaf_dot:
-    dec rcx
-    js .skip_set_parent
-    cmp byte [rbx + rcx], '.'
-    jne .find_leaf_dot
-    ; leaf name starts at rbx + rcx + 1
-    lea rdi, [rbx + rcx + 1]
-    mov rsi, r14
-    sub rsi, rcx
-    dec rsi                     ; leaf name length
-    call str_new_heap                ; rax = leaf name str
-    push rax                    ; save leaf name str
-    ; Set on parent's mod_dict
-    mov rdi, [r12 + PyModuleObject.mod_dict]
-    test rdi, rdi
-    jz .no_parent_dict
-    mov rsi, rax                ; key = leaf name
-    mov rdx, r13                ; value = leaf module
-    call dict_set
-.no_parent_dict:
-    pop rdi
-    call obj_decref             ; DECREF leaf name str
+.walk_done:
+    mov r12, [rbp - IF_TOPMOD]
+    inc qword [r12 + PyObject.ob_refcnt]
+    mov r13, [rbp - IF_LEAF]
 
 .skip_set_parent:
     ; Decide what to return based on fromlist
@@ -685,18 +696,64 @@ DEF_FUNC import_module, IF_FRAME
     ; r12 already INCREF'd above
     jmp .done
 
-.dotted_error:
-    pop rdi                     ; clean up first component name
+.walk_load_failed:
+    pop rdi                     ; the prefix string
     call obj_decref
+    pop rcx                     ; where the component ended
     jmp .import_error
 
-.dotted_load_error:
-    mov rdi, r12
-    call obj_decref
+.walk_oom:
+    pop rcx
     jmp .import_error
 
 .found_cached:
-    ; Found in sys.modules, INCREF and return
+    ; Found in sys.modules.  With an empty fromlist a dotted import still
+    ; evaluates to the *top* package -- `import a.b` binds `a` -- so a cache
+    ; hit on the full name has to hand back the first component instead, or
+    ; the IMPORT_FROM walk that follows is applied to the wrong module.
+    mov rdx, [rbp - IF_FROMLIST]
+    test rdx, rdx
+    jz .cached_want_top
+    lea rcx, [rel none_singleton]
+    cmp rdx, rcx
+    je .cached_want_top
+    cmp qword [rdx + PyTupleObject.ob_size], 0
+    jne .cached_as_is
+.cached_want_top:
+    ; Only when the name is dotted; otherwise it already is the top.
+    xor ecx, ecx
+.cached_find_dot:
+    cmp rcx, r14
+    jae .cached_as_is
+    cmp byte [rbx + rcx], '.'
+    je .cached_dotted
+    inc rcx
+    jmp .cached_find_dot
+.cached_dotted:
+    push rax
+    mov rdi, rbx
+    mov rsi, rcx
+    call str_new_heap
+    test rax, rax
+    jz .cached_pop_as_is
+    push rax
+    mov rdi, [rel sys_modules_dict]
+    mov rsi, rax
+    call dict_get
+    V_UNPACK rax, rdx
+    mov rcx, rax
+    pop rdi
+    push rcx
+    call obj_decref             ; the prefix string
+    pop rcx
+    pop rax
+    test rcx, rcx
+    jz .cached_as_is            ; not cached after all; the full one will do
+    mov rax, rcx
+    jmp .cached_as_is
+.cached_pop_as_is:
+    pop rax
+.cached_as_is:
     inc qword [rax + PyObject.ob_refcnt]
     jmp .done
 
@@ -1129,6 +1186,64 @@ DEF_FUNC import_search_dirs, SD_FRAME
     test rax, rax
     jns .sd_found_module
 
+    ; --- Pattern 4: <dir>/<leaf>/__init__.py (a package, from source) ---
+    ; The source patterns come last, so a .pyc that is already there still
+    ; wins and nothing an existing user has changes behaviour.
+    mov r13, [rbx + PyStrObject.ob_size]
+    test r13, r13
+    jz .sd_p4_no_slash
+    inc r13
+.sd_p4_no_slash:
+    mov rdi, r12
+    add rdi, r13
+    mov rsi, [rbp - SD_LEAF]
+    mov rdx, [rbp - SD_LEAFLEN]
+    call ap_memcpy
+    add r13, [rbp - SD_LEAFLEN]
+
+    mov rdi, r12
+    add rdi, r13
+    lea rsi, [rel im_pkg_py_suffix]
+    mov rdx, im_pkg_py_suffix_len
+    call ap_memcpy
+    add r13, im_pkg_py_suffix_len
+    mov byte [r12 + r13], 0
+
+    mov rdi, r12
+    xor esi, esi
+    xor edx, edx
+    call sys_open
+    test rax, rax
+    jns .sd_found_package
+
+    ; --- Pattern 5: <dir>/<leaf>.py (a module, from source) ---
+    mov r13, [rbx + PyStrObject.ob_size]
+    test r13, r13
+    jz .sd_p5_no_slash
+    inc r13
+.sd_p5_no_slash:
+    mov rdi, r12
+    add rdi, r13
+    mov rsi, [rbp - SD_LEAF]
+    mov rdx, [rbp - SD_LEAFLEN]
+    call ap_memcpy
+    add r13, [rbp - SD_LEAFLEN]
+
+    mov rdi, r12
+    add rdi, r13
+    lea rsi, [rel im_py_suffix]
+    mov rdx, im_py_suffix_len
+    call ap_memcpy
+    add r13, im_py_suffix_len
+    mov byte [r12 + r13], 0
+
+    mov rdi, r12
+    xor esi, esi
+    xor edx, edx
+    call sys_open
+    test rax, rax
+    jns .sd_found_module
+
 .sd_next:
     inc qword [rbp - SD_IDX]
     jmp .sd_loop
@@ -1350,6 +1465,62 @@ DEF_FUNC import_search_syspath, SS_FRAME
     test rax, rax
     jns .ss_found_module
 
+    ; --- Pattern 4: <dir>/<full>/__init__.py (a package, from source) ---
+    mov r13, [rbx + PyStrObject.ob_size]
+    test r13, r13
+    jz .ss_p4_no_slash
+    inc r13
+.ss_p4_no_slash:
+    mov rdi, r12
+    add rdi, r13
+    mov rsi, [rbp - SS_FULL]
+    mov rdx, r15                ; the dotted component's length, from pattern 1
+    call ap_memcpy
+    add r13, r15
+
+    mov rdi, r12
+    add rdi, r13
+    lea rsi, [rel im_pkg_py_suffix]
+    mov rdx, im_pkg_py_suffix_len
+    call ap_memcpy
+    add r13, im_pkg_py_suffix_len
+    mov byte [r12 + r13], 0
+
+    mov rdi, r12
+    xor esi, esi
+    xor edx, edx
+    call sys_open
+    test rax, rax
+    jns .ss_found_package
+
+    ; --- Pattern 5: <dir>/<leaf>.py (a module, from source) ---
+    mov r13, [rbx + PyStrObject.ob_size]
+    test r13, r13
+    jz .ss_p5_no_slash
+    inc r13
+.ss_p5_no_slash:
+    mov rdi, r12
+    add rdi, r13
+    mov rsi, [rbp - SS_LEAF]
+    mov rdx, [rbp - SS_LEAFLEN]
+    call ap_memcpy
+    add r13, [rbp - SS_LEAFLEN]
+
+    mov rdi, r12
+    add rdi, r13
+    lea rsi, [rel im_py_suffix]
+    mov rdx, im_py_suffix_len
+    call ap_memcpy
+    add r13, im_py_suffix_len
+    mov byte [r12 + r13], 0
+
+    mov rdi, r12
+    xor esi, esi
+    xor edx, edx
+    call sys_open
+    test rax, rax
+    jns .ss_found_module
+
 .ss_next:
     inc qword [rbp - SS_IDX]
     jmp .ss_loop
@@ -1424,9 +1595,9 @@ DEF_FUNC import_load_module, IF_FRAME
     mov qword [rel marshal_ref_count], 0
     mov qword [rel marshal_ref_cap], 0
 
-    ; Read .pyc file -> code object
+    ; Read the file -> code object; a .py is compiled on the spot.
     mov rdi, r12
-    call pyc_read_file
+    call code_from_path
     test rax, rax
     jz .load_failed
     mov r14, rax                ; r14 = code object
@@ -1520,27 +1691,35 @@ DEF_FUNC import_load_module, IF_FRAME
     pop rdi
     call obj_decref
 
-    ; Compute package directory from path
-    ; path = ".../pkg/__pycache__/__init__.cpython-312.pyc"
-    ; We want ".../pkg"
+    ; Compute package directory from path.  A cached package is
+    ; ".../pkg/__pycache__/__init__.cpython-312.pyc" -- two components to
+    ; strip -- while a source package is ".../pkg/__init__.py", which is one.
+    ; Either way we want ".../pkg".
+    mov rdi, r12
+    call path_is_source
+    push rax
     mov rdi, r12
     call ap_strlen
+    pop r8
     mov rcx, rax
-    ; Walk backwards past two slashes to get to pkg dir
     dec rcx
 .find_slash1:
     dec rcx
     js .use_dot_path
     cmp byte [r12 + rcx], '/'
     jne .find_slash1
-    ; Found first slash (before __init__.cpython...)
+    ; Found the slash before __init__.*; for a source package that is already
+    ; the package directory.
+    test r8, r8
+    jnz .have_pkg_dir
     dec rcx
 .find_slash2:
     dec rcx
     js .use_dot_path
     cmp byte [r12 + rcx], '/'
     jne .find_slash2
-    ; Found second slash (before __pycache__)
+    ; Found the second slash, the one before __pycache__.
+.have_pkg_dir:
     ; pkg dir = path[0..rcx]
     mov rdi, r12
     mov rsi, rcx
@@ -1796,6 +1975,12 @@ im_pycache_prefix_len  equ $ - im_pycache_prefix - 1
 
 im_pyc_suffix:         db ".cpython-312.pyc", 0
 im_pyc_suffix_len      equ $ - im_pyc_suffix - 1
+
+im_pkg_py_suffix:      db "/__init__.py", 0
+im_pkg_py_suffix_len   equ $ - im_pkg_py_suffix - 1
+
+im_py_suffix:          db ".py", 0
+im_py_suffix_len       equ $ - im_py_suffix - 1
 
 section .bss
 import_path_buf_ptr: resq 1    ; malloc'd path buffer (lazy-allocated)

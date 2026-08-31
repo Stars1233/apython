@@ -34,8 +34,10 @@ extern obj_repr
 extern obj_is_true
 extern obj_incref
 extern obj_decref
+extern type_is_subtype
 extern dict_get
 extern raise_exception
+extern obj_getattr_opt
 extern exc_new
 extern current_exception
 extern eval_exception_unwind
@@ -2650,12 +2652,9 @@ END_FUNC minmax_impl
 ; ============================================================================
 ; 17. builtin_getattr(args, nargs) - getattr(obj, name[, default])
 ; ============================================================================
-DEF_FUNC builtin_getattr
+DEF_FUNC builtin_getattr, 24
     push rbx
     push r12
-    push r13
-    push r14
-
     mov rbx, rdi
     mov r12, rsi
 
@@ -2664,111 +2663,66 @@ DEF_FUNC builtin_getattr
     cmp r12, 3
     ja .getattr_error
 
-    mov r13, [rbx]                 ; args[0] payload (obj)
-    mov r14, [rbx + 8]            ; args[1] payload (name, 16-byte stride)
-
-    V_TEST_PTR_M [rbx], r11      ; args[0] a pointer?
-    ja .getattr_try_type_dict
-
-    mov rax, [r13 + PyObject.ob_type]
-    mov rcx, [rax + PyTypeObject.tp_getattr]
-    test rcx, rcx
-    jz .getattr_try_type_dict
-
-    mov rdi, r13
-    mov rsi, r14
-    call rcx
-    V_UNPACK rax, rdx           ; tp_getattr returns a Value
-    test edx, edx              ; check tag, not payload (SmallInt(0) has payload=0)
-    jnz .getattr_found
-
-    jmp .getattr_try_type_dict
-
-.getattr_try_type_dict:
-    V_TEST_INT_M [rbx], r11      ; args[0] an int immediate?
-    jae .getattr_smallint_type
-    V_TEST_F64_M [rbx], r11      ; args[0] a float?
-    jbe .getattr_float_type
-    V_TEST_PTR_M [rbx], r11      ; args[0] a pointer?
-    ja .getattr_not_found
-    mov rax, [r13 + PyObject.ob_type]
-    jmp .getattr_check_dict
-
-.getattr_smallint_type:
-    lea rax, [rel int_type]
-    jmp .getattr_check_dict
-.getattr_float_type:
-    lea rax, [rel float_type]
-    jmp .getattr_check_dict
-.getattr_bool_type:
-    lea rax, [rel bool_type]
-    jmp .getattr_check_dict
-.getattr_none_type:
-    lea rax, [rel none_type]
-
-.getattr_check_dict:
-    mov rcx, [rax + PyTypeObject.tp_dict]
-    test rcx, rcx
-    jz .getattr_not_found
-
-    mov rdi, rcx
-    mov rsi, r14
-    call dict_get
-    V_UNPACK rax, rdx           ; dict_get returns a Value
-    test edx, edx
-    jz .getattr_not_found
-
-    INCREF_VAL rax, rdx
-    pop r14
-    pop r13
-    pop r12
-    pop rbx
-    leave
-    V_PACK rax, rdx             ; builtins return one Value
-    ret
-
-.getattr_found:
-    ; Result from tp_getattr could be any type
-    ; rdx = tag already set by callee
-    pop r14
-    pop r13
-    pop r12
-    pop rbx
-    leave
-    V_PACK rax, rdx             ; builtins return one Value
-    ret
-
-.getattr_not_found:
-    ; The attributes every object has, same tail LOAD_ATTR uses.
-    mov rdi, [rbx]              ; args[0] as a Value
-    mov rsi, r14                ; name str
-    extern obj_generic_attr
-    call obj_generic_attr
+    ; One lookup, with the descriptor protocol run over it -- the same answer
+    ; `obj.name` gives.  Doing it by hand here is what made getattr() hand back
+    ; the property object instead of calling it.
+    DUNDER_EXC_SAVE [rbp - 8]
+    mov rdi, [rbx]                 ; args[0], as a Value
+    mov rsi, [rbx + 8]             ; args[1], the name
+    call obj_getattr_opt
     test rax, rax
-    jz .getattr_really_missing
-    mov edx, TAG_PTR
-    pop r14
-    pop r13
+    jz .getattr_missing
     pop r12
     pop rbx
     leave
-    V_PACK rax, rdx
     ret
 
-.getattr_really_missing:
+.getattr_missing:
+    ; A getter that raised is not a missing attribute: returning the default,
+    ; or an AttributeError, would bury the real exception.  current_exception
+    ; is also whatever is being HANDLED, so it has to be compared against the
+    ; snapshot rather than tested for emptiness.
+    DUNDER_RAISED [rbp - 8], .getattr_check_type
+.getattr_absent:
     cmp r12, 3
     jne .getattr_raise
-
-    mov rax, [rbx + 16]           ; args[2] payload (default, 16-byte stride)
-    V_UNPACK rax, rdx       ; args[2]
-    INCREF_VAL rax, rdx
-.getattr_ret_default_si:
-    pop r14
-    pop r13
+    mov rax, [rbx + 16]            ; args[2], the default
+    INCREF_V rax, rdx
     pop r12
     pop rbx
     leave
-    V_PACK rax, rdx             ; builtins return one Value
+    ret
+
+.getattr_check_type:
+    ; Something was raised.  Only an AttributeError means "absent" -- that is
+    ; the exception the __getattr__ and descriptor protocols use to say so, and
+    ; the only one CPython swallows here.  Anything else is a real failure and
+    ; returning the default would bury it.
+    mov rax, [rel current_exception]
+    test rax, rax
+    jz .getattr_absent
+    mov rdi, [rax + PyObject.ob_type]
+    lea rsi, [rel exc_AttributeError_type]
+    call type_is_subtype           ; a subclass of AttributeError counts too
+    test eax, eax
+    jz .getattr_propagate
+    ; With no default to fall back on, CPython re-raises what was raised --
+    ; __getattr__'s own message, not a manufactured one -- so leave it pending.
+    cmp r12, 3
+    jne .getattr_propagate
+    ; Clear it before releasing, so a dealloc that re-enters cannot see a
+    ; pointer that is about to go away.
+    mov rdi, [rel current_exception]
+    mov qword [rel current_exception], 0
+    call obj_decref
+    jmp .getattr_absent
+
+.getattr_propagate:
+    xor eax, eax                   ; NULL with the exception pending: op_call unwinds
+    xor edx, edx
+    pop r12
+    pop rbx
+    leave
     ret
 
 .getattr_raise:
@@ -2785,129 +2739,61 @@ END_FUNC builtin_getattr
 ; ============================================================================
 ; 18. builtin_hasattr(args, nargs) - hasattr(obj, name)
 ; ============================================================================
-DEF_FUNC builtin_hasattr
-    mov rbp, rsp
+DEF_FUNC builtin_hasattr, 24
     push rbx
-    push r12
-    push r13
-    sub rsp, 8
-
+    mov rbx, rdi
     cmp rsi, 2
     jne .hasattr_error
 
-    mov rbx, rdi                   ; save args ptr
-
-    mov r12, [rbx]                 ; args[0] payload (obj)
-    mov r13, [rbx + 8]            ; args[1] payload (name, 16-byte stride)
-
-    V_TEST_PTR_M [rbx], r11      ; args[0] a pointer?
-    ja .hasattr_try_type_dict
-
-    mov rax, [r12 + PyObject.ob_type]
-    mov rcx, [rax + PyTypeObject.tp_getattr]
-    test rcx, rcx
-    jz .hasattr_try_type_dict
-
-    mov rdi, r12
-    mov rsi, r13
-    call rcx
-    V_UNPACK rax, rdx           ; tp_getattr returns a Value
-    test edx, edx              ; check tag, not payload (SmallInt(0) has payload=0)
-    jz .hasattr_try_type_dict
-
-    ; Found via tp_getattr - DECREF result, return True
-    mov rdi, rax
-    DECREF_VAL rdi, rdx            ; use tag from tp_getattr return
-    lea rax, [rel bool_true]
-    inc qword [rax + PyObject.ob_refcnt]
-    mov edx, TAG_PTR
-    add rsp, 8
-    pop r13
-    pop r12
-    pop rbx
-    leave
-    V_PACK rax, rdx             ; builtins return one Value
-    ret
-
-.hasattr_try_type_dict:
-    V_TEST_INT_M [rbx], r11      ; args[0] an int immediate?
-    jae .hasattr_smallint_type
-    V_TEST_F64_M [rbx], r11      ; args[0] a float?
-    jbe .hasattr_float_type
-    V_TEST_PTR_M [rbx], r11      ; args[0] a pointer?
-    ja .hasattr_not_found
-    mov rax, [r12 + PyObject.ob_type]
-    jmp .hasattr_check_dict
-
-.hasattr_smallint_type:
-    lea rax, [rel int_type]
-    jmp .hasattr_check_dict
-.hasattr_float_type:
-    lea rax, [rel float_type]
-    jmp .hasattr_check_dict
-.hasattr_bool_type:
-    lea rax, [rel bool_type]
-    jmp .hasattr_check_dict
-.hasattr_none_type:
-    lea rax, [rel none_type]
-
-.hasattr_check_dict:
-    mov rcx, [rax + PyTypeObject.tp_dict]
-    test rcx, rcx
-    jz .hasattr_not_found
-
-    mov rdi, rcx
-    mov rsi, r13
-    call dict_get
-    V_UNPACK rax, rdx           ; dict_get returns a Value
-    test edx, edx
-    jz .hasattr_not_found
-
-    lea rax, [rel bool_true]
-    inc qword [rax + PyObject.ob_refcnt]
-    mov edx, TAG_PTR
-    add rsp, 8
-    pop r13
-    pop r12
-    pop rbx
-    leave
-    V_PACK rax, rdx             ; builtins return one Value
-    ret
-
-.hasattr_not_found:
+    ; The same lookup getattr() does, so the two cannot disagree about what
+    ; exists.  A getter that raises propagates rather than reading as absent,
+    ; which is what CPython does for anything but an AttributeError.
+    DUNDER_EXC_SAVE [rbp - 8]
     mov rdi, [rbx]
-    mov rsi, r13
-    call obj_generic_attr
+    mov rsi, [rbx + 8]
+    call obj_getattr_opt
     test rax, rax
-    jz .hasattr_definitely_not
+    jz .hasattr_missing
     mov rdi, rax
-    call obj_decref
+    DECREF_V rdi, rsi
     lea rax, [rel bool_true]
-    inc qword [rax + PyObject.ob_refcnt]
-    mov edx, TAG_PTR
-    add rsp, 8
-    pop r13
-    pop r12
+    INCREF rax
     pop rbx
     leave
-    V_PACK rax, rdx
     ret
-
-.hasattr_definitely_not:
+.hasattr_missing:
+    ; hasattr swallows a missing attribute, not a getter that blew up.
+    DUNDER_RAISED [rbp - 8], .hasattr_check_type
+.hasattr_false:
     lea rax, [rel bool_false]
-    inc qword [rax + PyObject.ob_refcnt]
-    mov edx, TAG_PTR
-    add rsp, 8
-    pop r13
-    pop r12
+    INCREF rax
     pop rbx
     leave
-    V_PACK rax, rdx             ; builtins return one Value
     ret
+.hasattr_check_type:
+    ; As getattr: only an AttributeError reads as absent.
+    mov rax, [rel current_exception]
+    test rax, rax
+    jz .hasattr_false
+    mov rdi, [rax + PyObject.ob_type]
+    lea rsi, [rel exc_AttributeError_type]
+    call type_is_subtype
+    test eax, eax
+    jz .hasattr_propagate
+    mov rdi, [rel current_exception]
+    mov qword [rel current_exception], 0
+    call obj_decref
+    jmp .hasattr_false
 
+.hasattr_propagate:
+    xor eax, eax
+    xor edx, edx
+    pop rbx
+    leave
+    ret
 .hasattr_error:
     lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "hasattr() takes exactly 2 arguments"
+    CSTRING rsi, "hasattr expected 2 arguments"
     call raise_exception
 END_FUNC builtin_hasattr
 
@@ -3013,12 +2899,25 @@ DEF_FUNC builtin_locals
     ret
 
 .locals_use_globals:
-    ; No locals dict - return globals (module scope)
+    ; No locals mapping means a function frame, whose locals live in the
+    ; localsplus array.  Returning globals there was simply the wrong answer:
+    ; locals() inside a function listed the module's names, not its own.
+    mov rdi, rax
+    extern frame_fast_to_locals
+    call frame_fast_to_locals
+    test rax, rax
+    jz .locals_no_frame
+    mov edx, TAG_PTR
+    leave
+    V_PACK rax, rdx             ; builtins return one Value
+    ret
+.locals_no_frame:
+    mov rax, [rel eval_saved_r12]
     mov rax, [rax + PyFrame.globals]
     INCREF rax
     mov edx, TAG_PTR
     leave
-    V_PACK rax, rdx             ; builtins return one Value
+    V_PACK rax, rdx
     ret
 
 .locals_error:
@@ -3148,53 +3047,10 @@ DEF_FUNC builtin_dir, DIR_FRAME
     call raise_exception
 END_FUNC builtin_dir
 
-; ============================================================================
-; builtin_eval_fn(args, nargs) - restricted literal evaluator
-; Only evaluates integer literals (for test_int.py compatibility)
-; ============================================================================
-global builtin_eval_fn
-DEF_FUNC builtin_eval_fn
-    cmp rsi, 1
-    jne .evl_error
+; builtin_eval_fn used to live here: a stub that parsed a single integer
+; literal and raised ValueError for anything else.  It is now a real
+; evaluator in compiler/evalexec.asm, backed by the source compiler.
 
-    ; Get the string argument
-    V_TEST_INT_M [rdi], r11      ; args[0] an int immediate?
-    jae .evl_type_error
-    mov rdi, [rdi]                     ; args[0] payload
-    mov rax, [rdi + PyObject.ob_type]
-    lea rcx, [rel str_type]
-    cmp rax, rcx
-    jne .evl_type_error
-
-    ; Try parsing as integer literal with base 0 (auto-detect)
-    lea rdi, [rdi + PyStrObject.data]
-    xor esi, esi                ; base 0 = auto-detect
-    call int_from_cstr_base
-    test edx, edx            ; check tag (not payload — SmallInt 0 is valid)
-    jnz .evl_done
-
-    ; Parse failed — raise SyntaxError
-    lea rdi, [rel exc_ValueError_type]
-    CSTRING rsi, "invalid syntax"
-    call raise_exception
-
-.evl_done:
-    ; Classify: SmallInt (bit63) or heap ptr
-    ; rdx = tag already set by callee
-    leave
-    V_PACK rax, rdx             ; builtins return one Value
-    ret
-
-.evl_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "eval() takes exactly 1 argument"
-    call raise_exception
-
-.evl_type_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "eval() arg 1 must be a string"
-    call raise_exception
-END_FUNC builtin_eval_fn
 
 ; ============================================================================
 ; builtin_round_fn(args, nargs) - round(number[, ndigits])

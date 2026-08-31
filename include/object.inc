@@ -240,6 +240,39 @@ struc PyCodeObject
     .co_code:                   ; +128: bytecode (variable)
 endstruc
 
+; The compiler self-modifies nothing, but the *interpreter* does: op_load_global
+; writes eight bytes of inline cache at [rbx+2..rbx+7] and op_compare_op reads
+; byte [rbx+2].  Either can run on the last instruction of a code object, so the
+; bytecode allocation carries a zeroed tail so those reads and writes stay
+; inside it.  co_code_len still records the true length.
+CODE_TAIL_PAD equ 8
+
+; Arguments to code_new().  There are too many fields for the SysV register set,
+; so they arrive in one struct.  code_new STEALS every object reference in here;
+; build into a zeroed CodeSpec on the stack and call code_spec_clear() to
+; release the lot on any error path.
+struc CodeSpec
+    .code_bytes:      resq 1  ; +0:  const uint8_t* (borrowed; copied inline)
+    .code_len:        resq 1  ; +8:  length in bytes
+    .consts:          resq 1  ; +16: PyTupleObject*        (stolen)
+    .names:           resq 1  ; +24: PyTupleObject*        (stolen)
+    .localsplusnames: resq 1  ; +32: PyTupleObject*        (stolen)
+    .localspluskinds: resq 1  ; +40: PyBytesObject* or 0   (stolen)
+    .filename:        resq 1  ; +48: PyStrObject*          (stolen)
+    .name:            resq 1  ; +56: PyStrObject*          (stolen)
+    .qualname:        resq 1  ; +64: PyStrObject*          (stolen)
+    .exceptiontable:  resq 1  ; +72: PyBytesObject* or 0   (stolen)
+    .linetable:       resq 1  ; +80: PyBytesObject* or 0   (stolen)
+    .argcount:        resd 1  ; +88
+    .posonlyargcount: resd 1  ; +92
+    .kwonlyargcount:  resd 1  ; +96
+    .nlocals:         resd 1  ; +100: len(varnames) -- the true count, not nlocalsplus
+    .stacksize:       resd 1  ; +104
+    .flags:           resd 1  ; +108
+    .firstlineno:     resd 1  ; +112
+    .pad0:            resd 1  ; +116
+endstruc
+
 ; Module object
 struc PyModuleObject
     .ob_refcnt:   resq 1  ; +0
@@ -544,6 +577,16 @@ endstruc
 ; SEND/tp_iternext on this object resumes the async gen.
 ; Layout must keep gi_return_value at +48, gi_return_tag at +56
 ; because op_send reads these offsets from the receiver on exhaustion.
+;; The box CALL_INTRINSIC_1 INTRINSIC_ASYNC_GEN_WRAP puts around a value an
+;; async generator yields.  An async generator's frame yields for two different
+;; reasons -- an item for its consumer, and an `await` passing through to the
+;; event loop -- and this box is the only thing that tells them apart.
+struc AsyncGenWrapped
+    .ob_refcnt:     resq 1  ; +0
+    .ob_type:       resq 1  ; +8
+    .agw_value:     resq 1  ; +16: the wrapped Value, owned
+endstruc
+
 struc AsyncGenASend
     .ob_refcnt:     resq 1  ; +0
     .ob_type:       resq 1  ; +8

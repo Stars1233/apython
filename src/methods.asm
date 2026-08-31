@@ -37,6 +37,8 @@ extern tuple_new
 extern tuple_type
 extern dict_new
 extern dict_get
+extern obj_getattr_opt
+extern obj_call_n
 extern dict_set
 extern dict_del
 extern dict_type
@@ -6476,14 +6478,16 @@ DEF_FUNC container_dunder_new
     call raise_exception
 END_FUNC container_dunder_new
 
-;; add_new_staticmethod(rdi = type dict) -- register container_dunder_new as
-;; the type's __new__, wrapped so it is not bound to the instance.
+;; add_new_staticmethod(rdi = type dict, rsi = function) -- register `function`
+;; as the type's __new__, wrapped so it is not bound to the instance.
 extern staticmethod_construct
 extern staticmethod_type
 DEF_FUNC_LOCAL add_new_staticmethod
     push rbx
     push r12
+    push r13
     mov rbx, rdi
+    mov r13, rsi                ; the function to register
 
     ; Build the plain builtin-function object first.
     sub rsp, 16
@@ -6491,7 +6495,7 @@ DEF_FUNC_LOCAL add_new_staticmethod
     call str_from_cstr_heap
     mov r12, rax                ; the name, ours
 
-    lea rdi, [rel container_dunder_new]     ; func ptr
+    mov rdi, r13                            ; func ptr
     lea rsi, [rel mn___new__]               ; name
     mov edx, 1                              ; min args (cls)
     mov rcx, -1                             ; no maximum
@@ -6517,6 +6521,7 @@ DEF_FUNC_LOCAL add_new_staticmethod
     call obj_decref
     add rsp, 16
 
+    pop r13
     pop r12
     pop rbx
     leave
@@ -7020,7 +7025,8 @@ DU_TMP    equ 40        ; materialised sequence, owned, or 0
 DU_PAIRV  equ 48        ; scratch Value, so &it can be passed as an args array
 DU_PAIR   equ 56        ; materialised pair, owned, or 0
 DU_KWNAMES equ 64       ; the consumed kw_names_pending tuple, borrowed
-DU_FRAME  equ 80
+DU_OTHER  equ 72        ; the positional argument, borrowed
+DU_FRAME  equ 96
 
 DEF_FUNC dict_method_update, DU_FRAME
     push rbx
@@ -7088,6 +7094,127 @@ DEF_FUNC dict_method_update, DU_FRAME
 
     ; ---- other is an iterable of (key, value) pairs -----------------------
 .du_from_pairs:
+    ; A mapping is anything with a keys() method -- that one test is how
+    ; CPython tells the two shapes apart -- and it is read through keys() and
+    ; indexing rather than as a sequence of pairs.  Without this, updating from
+    ; a type's __dict__, which is a mappingproxy, reported that its elements
+    ; were not two long.  enum builds its classes that way.
+    mov [rbp - DU_OTHER], r12
+    V_TEST_PTR r12, rax
+    ja .du_as_pairs
+    test r12, r12
+    jz .du_as_pairs
+    lea rdi, [rel du_keys_name]
+    call str_from_cstr_heap
+    test rax, rax
+    jz .du_as_pairs
+    mov r13, rax
+    mov rdi, [rbp - DU_OTHER]
+    mov rsi, r13
+    call obj_getattr_opt
+    mov [rbp - DU_PAIR], rax            ; the bound keys(), owned, or 0
+    mov rdi, r13
+    call obj_decref
+    cmp qword [rbp - DU_PAIR], 0
+    je .du_as_pairs
+
+    xor esi, esi
+    mov rdi, [rbp - DU_PAIR]
+    mov edx, 0
+    call obj_call_n
+    mov r14, rax
+    mov rdi, [rbp - DU_PAIR]
+    mov qword [rbp - DU_PAIR], 0
+    call obj_decref
+    test r14, r14
+    jz .du_propagate                    ; keys() raised; it is already pending
+
+    ; Materialise the key sequence, so any iterable of keys is accepted.
+    mov [rbp - DU_PAIRV], r14
+    lea rsi, [rbp - DU_PAIRV]
+    lea rdi, [rel tuple_type]
+    mov edx, 1
+    call tuple_type_call
+    mov [rbp - DU_TMP], rax
+    mov rdi, r14
+    call obj_decref
+    mov r12, [rbp - DU_TMP]
+    test r12, r12
+    jz .du_propagate                    ; keys() was not iterable
+    mov r13, [r12 + PyTupleObject.ob_size]
+    xor r14d, r14d
+.du_key_loop:
+    cmp r14, r13
+    jge .du_keys_done
+    mov rax, [r12 + PyTupleObject.ob_item]
+    mov rsi, [rax + r14 * 8]            ; the key Value
+    mov rdi, [rbp - DU_OTHER]
+    mov rax, [rdi + PyObject.ob_type]
+    mov rax, [rax + PyTypeObject.tp_as_mapping]
+    test rax, rax
+    jz .du_not_mapping
+    mov rax, [rax + PyMappingMethods.mp_subscript]
+    test rax, rax
+    jz .du_not_mapping
+    call rax                            ; other[key] -> Value
+    test rax, rax
+    jz .du_propagate                    ; the lookup raised
+    mov [rbp - DU_PAIRV], rax
+    mov rdx, rax
+    mov rax, [r12 + PyTupleObject.ob_item]
+    mov rsi, [rax + r14 * 8]            ; the key again
+    mov rdi, [rbp - DU_SELF]
+    call dict_set
+    mov rdi, [rbp - DU_PAIRV]
+    DECREF_V rdi, rsi
+    inc r14
+    jmp .du_key_loop
+.du_not_mapping:
+    ; raise_exception does not return -- it jumps into the unwinder -- so
+    ; anything this frame owns has to go first.
+    call .du_release
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "object is not subscriptable"
+    call raise_exception
+
+.du_propagate:
+    ; Something we called raised, and the exception is already pending.
+    ; Falling through to the success tail returned None and left it to surface
+    ; at whatever ran next, with the dict half updated.
+    call .du_release
+    RET_NULL
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
+; Local: drop the owned temporaries, whichever of them are live.
+.du_release:
+    mov rdi, [rbp - DU_TMP]
+    test rdi, rdi
+    jz .du_rel_pair
+    mov qword [rbp - DU_TMP], 0
+    call obj_decref
+.du_rel_pair:
+    mov rdi, [rbp - DU_PAIR]
+    test rdi, rdi
+    jz .du_rel_done
+    mov qword [rbp - DU_PAIR], 0
+    call obj_decref
+.du_rel_done:
+    ret
+
+.du_keys_done:
+    mov rdi, [rbp - DU_TMP]
+    mov qword [rbp - DU_TMP], 0
+    call obj_decref
+    mov rbx, [rbp - DU_SELF]
+    jmp .du_kwargs
+
+.du_as_pairs:
+    mov r12, [rbp - DU_OTHER]
     mov rdi, [rbp - DU_ARGS]
     lea rsi, [rdi + 8]
     lea rdi, [rel tuple_type]
@@ -7095,6 +7222,10 @@ DEF_FUNC dict_method_update, DU_FRAME
     call tuple_type_call            ; raises for a non-iterable
     mov [rbp - DU_TMP], rax
     mov r12, rax
+    ; ...but an iterable whose __next__ raises returns NULL rather than
+    ; raising from here, and reading ob_size off that dereferences 0.
+    test rax, rax
+    jz .du_propagate
     mov r13, [r12 + PyTupleObject.ob_size]
     xor r14d, r14d
 .du_pair_loop:
@@ -7109,6 +7240,8 @@ DEF_FUNC dict_method_update, DU_FRAME
     mov edx, 1
     call tuple_type_call
     mov [rbp - DU_PAIR], rax
+    test rax, rax
+    jz .du_propagate
     cmp qword [rax + PyTupleObject.ob_size], 2
     jne .du_bad_pair
     mov rcx, [rax + PyTupleObject.ob_item]
@@ -7161,6 +7294,7 @@ DEF_FUNC dict_method_update, DU_FRAME
     ret
 
 .du_bad_pair:
+    call .du_release
     lea rdi, [rel exc_ValueError_type]
     CSTRING rsi, "dictionary update sequence element has length != 2"
     call raise_exception
@@ -7352,6 +7486,165 @@ END_FUNC add_class_getitem
 ;; `type(object.__init__)` and `type(object().__str__)`, so these have to be
 ;; reachable before it can import -- and `super().__init__()` in a class that
 ;; derives straight from object needs the first one anyway.
+
+
+;; ============================================================================
+;; scalar_dunder_new(args, nargs) -> Value   -- int.__new__ / str.__new__
+;;
+;; `int.__new__(cls, v)` builds an instance of cls carrying v, WITHOUT going
+;; back through cls.__new__.  That distinction is the whole reason it has to
+;; exist: enum makes each member with `member_type.__new__(cls, *args)` where
+;; cls is the enum class, whose own __new__ is what is calling this.
+;;
+;; It also has to be findable: enum decides which base is the "data type" by
+;; asking whether __new__ or __init__ is in that base's __dict__, and int and
+;; str had neither.
+;; ============================================================================
+extern int_sub_new
+extern str_sub_new
+DEF_FUNC scalar_dunder_new
+    push rbx
+    push r12
+    test rsi, rsi
+    jz .sdn_bad
+    mov rbx, [rdi]                      ; cls
+    lea r12, [rdi + 8]                  ; the rest of the arguments
+    dec rsi
+    V_TEST_PTR rbx, rax
+    ja .sdn_bad
+
+    mov rax, [rbx + PyTypeObject.tp_flags]
+    lea rcx, [rel int_type]
+    cmp rbx, rcx
+    je .sdn_int
+    test rax, TYPE_FLAG_INT_SUBCLASS
+    jnz .sdn_int
+    lea rcx, [rel str_type]
+    cmp rbx, rcx
+    je .sdn_str
+    test rax, TYPE_FLAG_STR_SUBCLASS
+    jnz .sdn_str
+    jmp .sdn_bad
+
+.sdn_int:
+    mov rdi, rbx
+    mov rdx, rsi
+    mov rsi, r12
+    call int_sub_new
+    pop r12
+    pop rbx
+    leave
+    V_PACK rax, rdx
+    ret
+
+.sdn_str:
+    mov rdi, rbx
+    mov rdx, rsi
+    mov rsi, r12
+    call str_sub_new
+    mov edx, TAG_PTR
+    pop r12
+    pop rbx
+    leave
+    V_PACK rax, rdx
+    ret
+
+.sdn_bad:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "__new__() argument 1 must be a subclass of int or str"
+    call raise_exception
+END_FUNC scalar_dunder_new
+
+;; ============================================================================
+;; object.__format__(self, format_spec)
+;;
+;; An empty spec is str(self); anything else is an error, because object has no
+;; formatting of its own to apply.  enum reaches for this by name when it
+;; decides whether a mixin overrode it.
+;; ============================================================================
+DEF_FUNC object_method_format
+    cmp rsi, 2
+    jne .omf_bad
+    mov rax, [rdi + 8]                  ; the format spec
+    V_TEST_PTR rax, rcx
+    ja .omf_bad_spec
+    test rax, rax
+    jz .omf_bad_spec
+    mov rcx, [rax + PyObject.ob_type]
+    lea rdx, [rel str_type]
+    cmp rcx, rdx
+    jne .omf_bad_spec
+    cmp qword [rax + PyStrObject.ob_size], 0
+    jne .omf_unsupported
+    mov rdi, [rdi]
+    call obj_str
+    leave
+    ret
+.omf_bad:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "__format__() takes exactly one argument"
+    call raise_exception
+.omf_bad_spec:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "__format__() argument must be str"
+    call raise_exception
+.omf_unsupported:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "unsupported format string passed to object.__format__"
+    call raise_exception
+END_FUNC object_method_format
+
+;; ============================================================================
+;; object.__sizeof__(self) -> the type's tp_basicsize
+;; ============================================================================
+DEF_FUNC object_method_sizeof
+    mov rax, [rdi]
+    V_TEST_PTR rax, rcx
+    ja .oso_zero
+    test rax, rax
+    jz .oso_zero
+    mov rax, [rax + PyObject.ob_type]
+    mov rdi, [rax + PyTypeObject.tp_basicsize]
+    call int_from_i64
+    leave
+    V_PACK rax, rdx
+    ret
+.oso_zero:
+    xor edi, edi
+    call int_from_i64
+    leave
+    V_PACK rax, rdx
+    ret
+END_FUNC object_method_sizeof
+
+;; ============================================================================
+;; object.__dir__(self) -> the names its type and instance dict carry
+;; Defers to the dir() builtin, which already walks both.
+;; ============================================================================
+DEF_FUNC object_method_dir
+    extern builtin_dir
+    mov esi, 1
+    call builtin_dir
+    leave
+    ret
+END_FUNC object_method_dir
+
+;; ============================================================================
+;; object.__reduce_ex__(self, protocol) / object.__reduce__(self)
+;;
+;; These exist so that code which asks whether a class overrode them -- enum
+;; does, to decide whether a mixin supplied its own -- finds something to
+;; compare against.  Calling one raises: the copyreg machinery CPython builds
+;; the default reduction on is not implemented here, and returning a wrong
+;; reduction would corrupt a pickle rather than refuse to make one.
+;; ============================================================================
+DEF_FUNC object_method_reduce
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "cannot pickle this object: object.__reduce_ex__ is not implemented"
+    call raise_exception
+END_FUNC object_method_reduce
+
+
 ;; ============================================================================
 extern str_from_cstr
 DEF_FUNC object_method_init
@@ -7444,6 +7737,154 @@ DEF_FUNC object_method_repr, OMR_FRAME
     CSTRING rsi, "__repr__() takes exactly one argument"
     call raise_exception
 END_FUNC object_method_repr
+
+;; ============================================================================
+;; object.__init_subclass__(cls) -> None
+;; A no-op hook every class inherits, so that a real one can end with
+;; `super().__init_subclass__()` -- which is how they are written.  Keywords
+;; are an error here: whoever declared them should have consumed them.
+;; ============================================================================
+DEF_FUNC object_method_init_subclass
+    cmp rsi, 2
+    jge .omis_bad
+    lea rax, [rel none_singleton]
+    INCREF rax
+    mov edx, TAG_PTR
+    leave
+    V_PACK rax, rdx
+    ret
+.omis_bad:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "__init_subclass__() takes no keyword arguments"
+    call raise_exception
+END_FUNC object_method_init_subclass
+
+
+;; ============================================================================
+;; A builtin's own __str__ and __repr__, reachable by name.
+;;
+;; They were not: `str.__str__` resolved through the MRO to object's, and enum
+;; asks precisely that question -- "if member_type.__str__ is object.__str__,
+;; use its __repr__ instead" -- so every StrEnum member printed as
+;; <Names object>.  The thunk calls the *defining* type's slot, not the
+;; argument's, which is what keeps it right on a subclass and out of the
+;; recursion a re-dispatch would cause.  An immediate int or float has no
+;; ob_type to read a slot from, so it goes through obj_repr, which knows them.
+;; ============================================================================
+%macro DEF_DUNDER_STRREPR 2     ; %1 = type prefix, %2 = tp_str or tp_repr
+DEF_FUNC %1_dunder_%2
+    test rsi, rsi
+    jz %%bad
+    mov rdi, [rdi]
+    V_TEST_PTR rdi, rax
+    ja %%immediate
+    test rdi, rdi
+    jz %%immediate
+    lea rax, [rel %1_type]
+    mov rax, [rax + PyTypeObject.tp_%2]
+    test rax, rax
+    jz %%immediate
+    ; int_repr reads edx as the argument's tag, and this one is a pointer.
+    mov edx, TAG_PTR
+    call rax
+    leave
+    ret
+%%immediate:
+    call obj_repr
+    leave
+    ret
+%%bad:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "expected exactly one argument"
+    call raise_exception
+END_FUNC %1_dunder_%2
+%endmacro
+
+;; A builtin container's __len__ and __iter__, reachable by name.  They were
+;; slots and nothing else, so `cache.__len__` -- how functools' lru_cache reads
+;; its size without paying for the len() call -- raised AttributeError.  Like
+;; the str/repr thunks these read the *defining* type's slot, so a subclass
+;; inherits the base's behaviour rather than re-dispatching into itself.
+%macro DEF_DUNDER_LEN 1
+DEF_FUNC %1_dunder_len
+    test rsi, rsi
+    jz %%bad
+    mov rdi, [rdi]
+    lea rax, [rel %1_type]
+    mov rcx, [rax + PyTypeObject.tp_as_mapping]
+    test rcx, rcx
+    jz %%seq
+    mov rcx, [rcx + PyMappingMethods.mp_length]
+    test rcx, rcx
+    jnz %%have
+%%seq:
+    mov rcx, [rax + PyTypeObject.tp_as_sequence]
+    test rcx, rcx
+    jz %%bad
+    mov rcx, [rcx + PySequenceMethods.sq_length]
+    test rcx, rcx
+    jz %%bad
+%%have:
+    call rcx
+    mov edx, TAG_SMALLINT
+    leave
+    V_PACK rax, rdx
+    ret
+%%bad:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "object has no len()"
+    call raise_exception
+END_FUNC %1_dunder_len
+%endmacro
+
+%macro DEF_DUNDER_ITER 1
+DEF_FUNC %1_dunder_iter
+    test rsi, rsi
+    jz %%bad
+    mov rdi, [rdi]
+    lea rax, [rel %1_type]
+    mov rax, [rax + PyTypeObject.tp_iter]
+    test rax, rax
+    jz %%bad
+    call rax
+    test rax, rax
+    jz %%failed
+    mov edx, TAG_PTR
+    leave
+    V_PACK rax, rdx
+    ret
+%%failed:
+    xor eax, eax
+    xor edx, edx
+    leave
+    V_PACK rax, rdx
+    ret
+%%bad:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "object is not iterable"
+    call raise_exception
+END_FUNC %1_dunder_iter
+%endmacro
+
+; list and tuple already have hand-written ones.
+DEF_DUNDER_LEN dict
+DEF_DUNDER_LEN str
+DEF_DUNDER_LEN set
+DEF_DUNDER_LEN bytes
+DEF_DUNDER_ITER dict
+DEF_DUNDER_ITER list
+DEF_DUNDER_ITER tuple
+DEF_DUNDER_ITER str
+DEF_DUNDER_ITER set
+DEF_DUNDER_ITER bytes
+
+DEF_DUNDER_STRREPR str, str
+DEF_DUNDER_STRREPR str, repr
+DEF_DUNDER_STRREPR bytes, str
+DEF_DUNDER_STRREPR bytes, repr
+DEF_DUNDER_STRREPR int, repr
+DEF_DUNDER_STRREPR float, repr
+
 
 ;; ============================================================================
 ;; dict_classmethod_fromkeys(args, nargs) -> new dict
@@ -7930,18 +8371,65 @@ END_FUNC tuple_method_count
 ;; are self-contained for the same reason -- identity for __eq__, the type's
 ;; own EQ slot for __ne__, the address for __hash__.
 
+;; Like __ne__, this defers to the type's own comparison before falling back to
+;; identity.  It is reached only when nothing in the MRO defines __eq__ by name,
+;; which for a builtin means its answer lives in tp_richcompare -- so comparing
+;; addresses here made `a.__eq__(b)` return NotImplemented for two equal tuples.
+;; CPython's constant folding shares one empty tuple, which hid it from every
+;; test that spelled the operands out.
 DEF_FUNC object_method_eq
     cmp rsi, 2
     jne .ome_error
-    mov rax, [rdi]
-    cmp rax, [rdi + 8]
-    je .ome_true
-    lea rax, [rel notimpl_singleton]
-    inc qword [rax + PyObject.ob_refcnt]
-    mov edx, TAG_PTR
+    push rbx
+    mov rbx, [rdi + 8]          ; other
+    mov rdi, [rdi]              ; self
+    V_TEST_PTR rdi, rax
+    ja .ome_identity
+    test rdi, rdi
+    jz .ome_identity
+    mov rax, [rdi + PyObject.ob_type]
+    mov rax, [rax + PyTypeObject.tp_richcompare]
+    test rax, rax
+    jz .ome_identity
+    ; ...but not when that slot is the generic dispatcher.  It looks __eq__ up
+    ; by name, walks to object's, and arrives back here -- unbounded recursion
+    ; for any class defining a comparison other than __eq__ (a class that
+    ; defines __eq__ never reaches this method at all).  __ne__ takes the same
+    ; route through here, so both == and != segfaulted.
+    extern slot_tp_richcompare
+    lea rcx, [rel slot_tp_richcompare]
+    cmp rax, rcx
+    je .ome_identity
+    mov rsi, rbx
+    mov edx, CMP_EQ
+    call rax
+    V_UNPACK rax, rdx
+    test edx, edx
+    jz .ome_notimpl
+    pop rbx
     leave
     V_PACK rax, rdx
     ret
+.ome_notimpl:
+    lea rax, [rel notimpl_singleton]
+    inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
+    pop rbx
+    leave
+    V_PACK rax, rdx
+    ret
+.ome_identity:
+    cmp rdi, rbx
+    je .ome_true_pop
+    lea rax, [rel notimpl_singleton]
+    inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
+    pop rbx
+    leave
+    V_PACK rax, rdx
+    ret
+.ome_true_pop:
+    pop rbx
 .ome_true:
     lea rax, [rel bool_true]
     inc qword [rax + PyObject.ob_refcnt]
@@ -8085,6 +8573,93 @@ DEF_FUNC generic_method_getitem
     CSTRING rsi, "object is not subscriptable"
     call raise_exception
 END_FUNC generic_method_getitem
+
+
+;; ============================================================================
+;; dict.__getitem__ / __setitem__ / __delitem__
+;;
+;; These call dict's own implementation rather than dispatching through the
+;; instance's mp_ass_subscript.  A dict subclass that overrides __setitem__ has
+;; a wrapper in that slot, so a virtual dispatch here turns
+;; `super().__setitem__(k, v)` -- the ordinary way to write such an override --
+;; into unbounded recursion.  `dict.__setitem__` means dict's, exactly as it
+;; does in CPython, where it is a slot wrapper bound to dict.
+;; ============================================================================
+extern dict_subscript
+DEF_FUNC_BARE dict_dunder_getitem
+    ; The same guards its two siblings carry.  builtin_func_call validates
+    ; neither the count nor the type for these -- add_method_to_dict registers
+    ; them with no min or max -- so dict.__getitem__(5, "a") handed the
+    ; immediate 5 to dict_get as a pointer and dereferenced it, and
+    ; d.__getitem__() read args[1] off the end of the argument array.
+    cmp rsi, 2
+    jne .ddg_error
+    mov rax, [rdi]              ; self
+    V_TEST_PTR rax, rcx
+    ja .ddg_error
+    test rax, rax
+    jz .ddg_error
+    mov rcx, [rax + PyObject.ob_type]
+    REQUIRE_DICT_TYPE rcx, rdx, .ddg_error
+    mov rsi, [rdi + 8]          ; the key Value
+    mov rdi, rax
+    jmp dict_subscript
+.ddg_error:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "descriptor '__getitem__' requires a 'dict' object"
+    call raise_exception
+END_FUNC dict_dunder_getitem
+
+DEF_FUNC dict_dunder_setitem
+    cmp rsi, 3
+    jne .dds_error
+    mov rax, [rdi]
+    V_TEST_PTR rax, rcx
+    ja .dds_error
+    test rax, rax
+    jz .dds_error
+    mov rcx, [rax + PyObject.ob_type]
+    REQUIRE_DICT_TYPE rcx, rdx, .dds_error
+    mov rsi, [rdi + 8]
+    mov rdx, [rdi + 16]
+    mov rdi, rax
+    call dict_set
+    lea rax, [rel none_singleton]
+    INCREF rax
+    mov edx, TAG_PTR
+    leave
+    V_PACK rax, rdx
+    ret
+.dds_error:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "object does not support item assignment"
+    call raise_exception
+END_FUNC dict_dunder_setitem
+
+DEF_FUNC dict_dunder_delitem
+    cmp rsi, 2
+    jne .ddd_error
+    mov rax, [rdi]
+    V_TEST_PTR rax, rcx
+    ja .ddd_error
+    test rax, rax
+    jz .ddd_error
+    mov rcx, [rax + PyObject.ob_type]
+    REQUIRE_DICT_TYPE rcx, rdx, .ddd_error
+    mov rsi, [rdi + 8]
+    mov rdi, rax
+    call dict_del
+    lea rax, [rel none_singleton]
+    INCREF rax
+    mov edx, TAG_PTR
+    leave
+    V_PACK rax, rdx
+    ret
+.ddd_error:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "object does not support item deletion"
+    call raise_exception
+END_FUNC dict_dunder_delitem
 
 ;; generic_method_setitem(args, nargs): args[0]=self, args[1]=key, args[2]=value
 DEF_FUNC generic_method_setitem
@@ -9430,17 +10005,57 @@ END_FUNC int_method_to_bytes
 extern classmethod_type
 
 IFB_BYTES equ 8
-IFB_FRAME equ 16
+IFB_CLS   equ 16
+IFB_VAL   equ 24
+IFB_OWNED equ 32
+IFB_NARGS equ 40
+IFB_ARGS  equ 48
+IFB_FRAME equ 64          ; + 2 pushes = 80
 
 DEF_FUNC int_classmethod_from_bytes, IFB_FRAME
     push rbx
     push r12
 
-    ; args[1] = bytes object
-    mov rax, [rdi + 8]            ; payload
+    cmp rsi, 2
+    jl .ifb_error
+    mov [rbp - IFB_ARGS], rdi       ; the conversion below clobbers rdi
+    mov rax, [rdi]
+    mov [rbp - IFB_CLS], rax        ; cls, for a subclass result
+    mov qword [rbp - IFB_OWNED], 0
+
+    ; args[1] is any iterable of ints, not only a bytes: ipaddress passes a
+    ; map object.  Anything that is not already a bytes goes through bytes()
+    ; first, which is where CPython's own conversion lives too.
+    mov rax, [rdi + 8]
+    V_TEST_PTR rax, rcx
+    ja .ifb_convert
+    test rax, rax
+    jz .ifb_convert
+    mov rcx, [rax + PyObject.ob_type]
+    lea rdx, [rel bytes_type]
+    cmp rcx, rdx
+    je .ifb_have_bytes
+.ifb_convert:
+    mov [rbp - IFB_VAL], rax
+    mov [rbp - IFB_NARGS], rsi      ; a push here would misalign the call
+    lea rdi, [rel bytes_type]
+    lea rsi, [rbp - IFB_VAL]
+    mov edx, 1
+    extern obj_call_n
+    call obj_call_n
+    mov rsi, [rbp - IFB_NARGS]
+    test rax, rax
+    jz .ifb_failed
+    mov [rbp - IFB_OWNED], rax
+.ifb_have_bytes:
     mov [rbp - IFB_BYTES], rax
 
-    ; args[2] = byteorder
+    ; args[2] = byteorder.  It has defaulted to 'big' since 3.11, and reading
+    ; it unconditionally walked off the end of the argument array -- which is
+    ; how ipaddress calls it.
+    cmp rsi, 3
+    jl .ifb_big
+    mov rdi, [rbp - IFB_ARGS]
     mov rcx, [rdi + 16]            ; payload
     V_UNPACK rcx, rdx       ; args[2]
     cmp edx, TAG_PTR
@@ -9498,12 +10113,55 @@ DEF_FUNC int_classmethod_from_bytes, IFB_FRAME
     jmp .ifb_little_loop
 
 .ifb_return:
+    mov rdi, [rbp - IFB_OWNED]
+    test rdi, rdi
+    jz .ifb_no_owned
+    mov qword [rbp - IFB_OWNED], 0
+    call obj_decref
+.ifb_no_owned:
+    ; A classmethod builds an instance of the class it was reached through:
+    ; `I.from_bytes(b)` is an I, not an int.
+    mov rax, [rbp - IFB_CLS]
+    V_TEST_PTR rax, rcx
+    ja .ifb_plain
+    test rax, rax
+    jz .ifb_plain
+    lea rcx, [rel int_type]
+    cmp rax, rcx
+    je .ifb_plain
+    mov rcx, [rax + PyTypeObject.tp_flags]
+    test rcx, TYPE_FLAG_INT_SUBCLASS
+    jz .ifb_plain
+    mov rax, r12
+    V_PACK_I64 rax, rcx
+    mov [rbp - IFB_VAL], rax
+    mov rdi, [rbp - IFB_CLS]
+    lea rsi, [rbp - IFB_VAL]
+    mov edx, 1
+    extern int_sub_new
+    call int_sub_new
+    pop r12
+    pop rbx
+    leave
+    V_PACK rax, rdx
+    ret
+
+.ifb_plain:
     mov rax, r12
     RET_TAG_SMALLINT
     pop r12
     pop rbx
     leave
     V_PACK rax, rdx             ; builtins return one Value
+    ret
+
+.ifb_failed:
+    xor eax, eax
+    xor edx, edx
+    pop r12
+    pop rbx
+    leave
+    V_PACK rax, rdx
     ret
 
 .ifb_error:
@@ -11161,6 +11819,23 @@ DEF_FUNC methods_init
     call dict_new
     mov rbx, rax            ; rbx = str method dict
 
+    ; str's own __str__ and __repr__, by name.  See DEF_DUNDER_STRREPR.
+    mov rdi, rbx
+    lea rsi, [rel mn___str__]
+    lea rdx, [rel str_dunder_str]
+    call add_method_to_dict
+    mov rdi, rbx
+    lea rsi, [rel mn___repr__]
+    lea rdx, [rel str_dunder_repr]
+    call add_method_to_dict
+
+    ; int.__new__ / str.__new__: enum builds each member with
+    ; `member_type.__new__(cls, *args)`, and decides which base is the data
+    ; type by asking whether __new__ is in its __dict__.
+    mov rdi, rbx
+    lea rsi, [rel scalar_dunder_new]
+    call add_new_staticmethod
+
     mov rdi, rbx
     lea rsi, [rel mn_upper]
     lea rdx, [rel str_method_upper]
@@ -11423,6 +12098,17 @@ DEF_FUNC methods_init
     call obj_decref
 
     ; Store dict in str_type.tp_dict
+
+    ; the slots, reachable by name: the stdlib reaches for them directly.
+    mov rdi, rbx
+    lea rsi, [rel mn___len__]
+    lea rdx, [rel str_dunder_len]
+    call add_method_to_dict
+    mov rdi, rbx
+    lea rsi, [rel mn___iter__]
+    lea rdx, [rel str_dunder_iter]
+    call add_method_to_dict
+
     lea rax, [rel str_type]
     mov [rax + PyTypeObject.tp_dict], rbx
     ; INCREF the dict (type holds ref; dict_new gave us refcnt=1, which we keep)
@@ -11562,12 +12248,20 @@ DEF_FUNC methods_init
     call add_method_to_dict_checked
 
     mov rdi, rbx
+    lea rsi, [rel container_dunder_new]
     call add_new_staticmethod
 
     mov rdi, rbx
     call add_class_getitem
 
     ; Store in list_type.tp_dict
+
+    ; the slots, reachable by name: the stdlib reaches for them directly.
+    mov rdi, rbx
+    lea rsi, [rel mn___iter__]
+    lea rdx, [rel list_dunder_iter]
+    call add_method_to_dict
+
     lea rax, [rel list_type]
     mov [rax + PyTypeObject.tp_dict], rbx
 
@@ -11671,6 +12365,7 @@ DEF_FUNC methods_init
     call obj_decref
 
     mov rdi, rbx
+    lea rsi, [rel container_dunder_new]
     call add_new_staticmethod
 
     mov rdi, rbx
@@ -11680,18 +12375,34 @@ DEF_FUNC methods_init
 
     mov rdi, rbx
     lea rsi, [rel mn___setitem__]
-    lea rdx, [rel generic_method_setitem]
+    lea rdx, [rel dict_dunder_setitem]
     call add_method_to_dict
 
     mov rdi, rbx
     lea rsi, [rel mn___delitem__]
-    lea rdx, [rel generic_method_delitem]
+    lea rdx, [rel dict_dunder_delitem]
+    call add_method_to_dict
+
+    mov rdi, rbx
+    lea rsi, [rel mn___getitem__]
+    lea rdx, [rel dict_dunder_getitem]
     call add_method_to_dict
 
     mov rdi, rbx
     call add_class_getitem
 
     ; Store in dict_type.tp_dict
+
+    ; the slots, reachable by name: the stdlib reaches for them directly.
+    mov rdi, rbx
+    lea rsi, [rel mn___len__]
+    lea rdx, [rel dict_dunder_len]
+    call add_method_to_dict
+    mov rdi, rbx
+    lea rsi, [rel mn___iter__]
+    lea rdx, [rel dict_dunder_iter]
+    call add_method_to_dict
+
     lea rax, [rel dict_type]
     mov [rax + PyTypeObject.tp_dict], rbx
 
@@ -11758,12 +12469,20 @@ DEF_FUNC methods_init
     call add_method_to_dict_checked
 
     mov rdi, rbx
+    lea rsi, [rel container_dunder_new]
     call add_new_staticmethod
 
     mov rdi, rbx
     call add_class_getitem
 
     ; Store in tuple_type.tp_dict
+
+    ; the slots, reachable by name: the stdlib reaches for them directly.
+    mov rdi, rbx
+    lea rsi, [rel mn___iter__]
+    lea rdx, [rel tuple_dunder_iter]
+    call add_method_to_dict
+
     lea rax, [rel tuple_type]
     mov [rax + PyTypeObject.tp_dict], rbx
 
@@ -11851,6 +12570,7 @@ DEF_FUNC methods_init
     call add_method_to_dict_checked
 
     mov rdi, rbx
+    lea rsi, [rel container_dunder_new]
     call add_new_staticmethod
 
     mov rdi, rbx
@@ -11863,6 +12583,17 @@ DEF_FUNC methods_init
 
     ; Store in set_type.tp_dict, and in frozenset's: the two share every
     ; method that does not mutate, and frozenset had no dict at all.
+
+    ; frozenset shares this dict, and set's slots, so one pair covers both.
+    mov rdi, rbx
+    lea rsi, [rel mn___len__]
+    lea rdx, [rel set_dunder_len]
+    call add_method_to_dict
+    mov rdi, rbx
+    lea rsi, [rel mn___iter__]
+    lea rdx, [rel set_dunder_iter]
+    call add_method_to_dict
+
     lea rax, [rel set_type]
     mov [rax + PyTypeObject.tp_dict], rbx
     lea rax, [rel frozenset_type]
@@ -11940,6 +12671,74 @@ DEF_FUNC methods_init
     mov rdi, rbx
     lea rsi, [rel mn___repr__]
     lea rdx, [rel object_method_repr]
+    call add_method_to_dict
+
+    ; The rest of what object supplies by name.  types.py and enum both ask
+    ; whether a class overrode one of these, which means asking object for its
+    ; own first.
+    mov rdi, rbx
+    lea rsi, [rel mn___format__]
+    lea rdx, [rel object_method_format]
+    call add_method_to_dict
+
+    ; __doc__ is an attribute, not a method, and object supplies it so that
+    ; anything without a docstring answers None rather than raising.  CPython
+    ; hands back the type's own docstring; what matters to the code that asks
+    ; -- types.DynamicClassAttribute's `doc or fget.__doc__`, with no getter --
+    ; is that the lookup succeeds at all.
+    lea rdi, [rel mn___doc__]
+    call str_from_cstr_heap
+    push rax
+    mov rdi, rbx
+    mov rsi, rax
+    lea rdx, [rel none_singleton]
+    call dict_set
+    pop rdi
+    call obj_decref
+
+    mov rdi, rbx
+    lea rsi, [rel mn___sizeof__]
+    lea rdx, [rel object_method_sizeof]
+    call add_method_to_dict
+
+    ; A classmethod: `super().__init_subclass__()` is how every real one ends.
+    lea rdi, [rel object_method_init_subclass]
+    lea rsi, [rel mn___init_subclass__]
+    call builtin_func_new
+    push rax
+    mov edi, PyClassMethodObject_size
+    lea rsi, [rel classmethod_type]
+    call gc_alloc
+    pop rcx
+    mov [rax + PyClassMethodObject.cm_callable], rcx
+    mov r12, rax
+    mov rdi, rax
+    call gc_track
+    lea rdi, [rel mn___init_subclass__]
+    call str_from_cstr_heap
+    push rax
+    mov rdi, rbx
+    mov rsi, rax
+    mov rdx, r12
+    call dict_set
+    pop rdi
+    call obj_decref
+    mov rdi, r12
+    call obj_decref
+
+    mov rdi, rbx
+    lea rsi, [rel mn___dir__]
+    lea rdx, [rel object_method_dir]
+    call add_method_to_dict
+
+    mov rdi, rbx
+    lea rsi, [rel mn___reduce__]
+    lea rdx, [rel object_method_reduce]
+    call add_method_to_dict
+
+    mov rdi, rbx
+    lea rsi, [rel mn___reduce_ex__]
+    lea rdx, [rel object_method_reduce]
     call add_method_to_dict
 
     ; The comparisons, which every class inherits and the stdlib binds by
@@ -12048,13 +12847,77 @@ DEF_FUNC methods_init
     pop rdi
     call obj_decref
 
+    ; A function is a descriptor.  enum asks hasattr(value, '__get__') to tell
+    ; a method in a class body from an enum member, so the binding LOAD_ATTR
+    ; does natively has to be reachable by name as well.
+    mov rdi, rbx
+    lea rsi, [rel mn___get__]
+    extern func_dunder_get
+    lea rdx, [rel func_dunder_get]
+    call add_method_to_dict
+
     extern func_type
     lea rax, [rel func_type]
+    mov [rax + PyTypeObject.tp_dict], rbx
+
+    ;; --- staticmethod and classmethod: descriptors for the same reason ---
+    call dict_new
+    mov rbx, rax
+    mov rdi, rbx
+    lea rsi, [rel mn___get__]
+    extern staticmethod_dunder_get
+    lea rdx, [rel staticmethod_dunder_get]
+    call add_method_to_dict
+    lea rax, [rel staticmethod_type]
+    mov [rax + PyTypeObject.tp_dict], rbx
+
+    call dict_new
+    mov rbx, rax
+    mov rdi, rbx
+    lea rsi, [rel mn___get__]
+    extern classmethod_dunder_get
+    lea rdx, [rel classmethod_dunder_get]
+    call add_method_to_dict
+    lea rax, [rel classmethod_type]
+    mov [rax + PyTypeObject.tp_dict], rbx
+
+    ;; --- property: the same three, by name ---
+    call dict_new
+    mov rbx, rax
+    mov rdi, rbx
+    lea rsi, [rel mn___get__]
+    extern property_dunder_get
+    lea rdx, [rel property_dunder_get]
+    call add_method_to_dict
+    mov rdi, rbx
+    lea rsi, [rel mn___set__]
+    extern property_dunder_set
+    lea rdx, [rel property_dunder_set]
+    call add_method_to_dict
+    mov rdi, rbx
+    lea rsi, [rel mn___delete__]
+    extern property_dunder_delete
+    lea rdx, [rel property_dunder_delete]
+    call add_method_to_dict
+    extern property_type
+    lea rax, [rel property_type]
     mov [rax + PyTypeObject.tp_dict], rbx
 
     ;; --- int_type methods ---
     call dict_new
     mov rbx, rax
+
+    mov rdi, rbx
+    lea rsi, [rel mn___repr__]
+    lea rdx, [rel int_dunder_repr]
+    call add_method_to_dict
+
+    ; int.__new__ / str.__new__: enum builds each member with
+    ; `member_type.__new__(cls, *args)`, and decides which base is the data
+    ; type by asking whether __new__ is in its __dict__.
+    mov rdi, rbx
+    lea rsi, [rel scalar_dunder_new]
+    call add_new_staticmethod
 
     mov rdi, rbx
     lea rsi, [rel mn_bit_length]
@@ -12121,6 +12984,11 @@ DEF_FUNC methods_init
     mov rbx, rax
 
     mov rdi, rbx
+    lea rsi, [rel mn___repr__]
+    lea rdx, [rel float_dunder_repr]
+    call add_method_to_dict
+
+    mov rdi, rbx
     lea rsi, [rel mn_is_integer]
     lea rdx, [rel float_method_is_integer]
     call add_method_to_dict
@@ -12180,6 +13048,15 @@ DEF_FUNC methods_init
     mov rbx, rax
 
     mov rdi, rbx
+    lea rsi, [rel mn___str__]
+    lea rdx, [rel bytes_dunder_str]
+    call add_method_to_dict
+    mov rdi, rbx
+    lea rsi, [rel mn___repr__]
+    lea rdx, [rel bytes_dunder_repr]
+    call add_method_to_dict
+
+    mov rdi, rbx
     lea rsi, [rel mn_hex]
     lea rdx, [rel bytes_method_hex]
     call add_method_to_dict
@@ -12220,6 +13097,17 @@ DEF_FUNC methods_init
     call add_method_to_dict
 
     ; Store in bytes_type.tp_dict
+
+    ; the slots, reachable by name: the stdlib reaches for them directly.
+    mov rdi, rbx
+    lea rsi, [rel mn___len__]
+    lea rdx, [rel bytes_dunder_len]
+    call add_method_to_dict
+    mov rdi, rbx
+    lea rsi, [rel mn___iter__]
+    lea rdx, [rel bytes_dunder_iter]
+    call add_method_to_dict
+
     lea rax, [rel bytes_type]
     mov [rax + PyTypeObject.tp_dict], rbx
 
@@ -12292,6 +13180,9 @@ mn_isspace:     db "isspace", 0
 mn_isupper:     db "isupper", 0
 mn_islower:     db "islower", 0
 mn___new__:     db "__new__", 0
+mn___get__:     db "__get__", 0
+mn___set__:     db "__set__", 0
+mn___delete__:  db "__delete__", 0
 mn_title:       db "title", 0
 mn_capitalize:  db "capitalize", 0
 mn_swapcase:    db "swapcase", 0
@@ -12332,6 +13223,15 @@ mn_decode:      db "decode", 0
 ; dict method names (continued)
 mn_fromkeys:    db "fromkeys", 0
 mn___reversed__: db "__reversed__", 0
+du_keys_name:   db "keys", 0
+mn___format__:  db "__format__", 0
+mn___sizeof__:  db "__sizeof__", 0
+mn___doc__:     db "__doc__", 0
+mn___init_subclass__: db "__init_subclass__", 0
+mn___iter__:    db "__iter__", 0
+mn___dir__:     db "__dir__", 0
+mn___reduce__:  db "__reduce__", 0
+mn___reduce_ex__: db "__reduce_ex__", 0
 mn___getitem__: db "__getitem__", 0
 mn___setitem__: db "__setitem__", 0
 mn___delitem__: db "__delitem__", 0

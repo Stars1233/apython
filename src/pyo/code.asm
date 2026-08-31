@@ -6,6 +6,9 @@
 
 extern none_singleton
 extern ap_free
+extern ap_malloc
+extern ap_memcpy
+extern ap_memset
 extern ap_strcmp
 extern obj_decref
 extern obj_dealloc
@@ -13,6 +16,155 @@ extern obj_incref
 extern str_from_cstr
 extern type_type
 ; code objects are not GC-tracked (allocated by marshal via ap_malloc)
+
+; --- code_new frame layout ---
+CN_SPEC  equ 8
+CN_CODE  equ 16
+CN_FRAME equ 16
+
+;; ============================================================================
+;; code_new(CodeSpec *spec) -> PyCodeObject*
+;;
+;; The runtime code-object constructor, used by the source compiler.  Mirrors
+;; mdo_code (src/marshal.asm:850) field for field; the two are the only places
+;; that build a PyCodeObject, and they must stay in step.
+;;
+;; Every object reference in the spec is STOLEN.  On the error path the caller
+;; calls code_spec_clear(spec) instead, which releases exactly the same set.
+;;
+;; Two things the layout forces, both of which are silent if got wrong:
+;;   - The bytecode lives INLINE at +128.  eval_frame does
+;;     `lea rbx, [rax + PyCodeObject.co_code]`, so it cannot be a separate
+;;     bytes object.  It must also be writable heap: the interpreter rewrites
+;;     opcodes in place to specialize them (opcodes_build.asm:970 turns
+;;     FOR_ITER into FOR_ITER_RANGE), so no two code objects may share it.
+;;   - CODE_TAIL_PAD zero bytes follow it.  op_load_global writes eight bytes
+;;     of inline cache at [rbx+2..rbx+7] and op_compare_op reads byte [rbx+2];
+;;     either can sit on the last instruction of the object.
+;; ============================================================================
+DEF_FUNC code_new, CN_FRAME
+    push rbx
+    push r12
+
+    mov [rbp - CN_SPEC], rdi
+    mov rbx, rdi                            ; rbx = spec
+
+    ; ap_malloc(sizeof(header) + code_len + CODE_TAIL_PAD)
+    mov rdi, [rbx + CodeSpec.code_len]
+    add rdi, PyCodeObject.co_code + CODE_TAIL_PAD
+    call ap_malloc                          ; fatal on OOM, never returns NULL
+    mov r12, rax
+    mov [rbp - CN_CODE], rax
+
+    ; --- object header ---
+    mov qword [r12 + PyObject.ob_refcnt], 1
+    lea rax, [rel code_type]
+    mov [r12 + PyObject.ob_type], rax
+
+    ; --- scalar fields ---
+    mov eax, [rbx + CodeSpec.argcount]
+    mov [r12 + PyCodeObject.co_argcount], eax
+    mov eax, [rbx + CodeSpec.kwonlyargcount]
+    mov [r12 + PyCodeObject.co_kwonlyargcount], eax
+    mov eax, [rbx + CodeSpec.posonlyargcount]
+    mov [r12 + PyCodeObject.co_posonlyargcount], eax
+    mov eax, [rbx + CodeSpec.stacksize]
+    mov [r12 + PyCodeObject.co_stacksize], eax
+    mov eax, [rbx + CodeSpec.flags]
+    mov [r12 + PyCodeObject.co_flags], eax
+    mov eax, [rbx + CodeSpec.firstlineno]
+    mov [r12 + PyCodeObject.co_firstlineno], eax
+    mov dword [r12 + PyCodeObject.co_pad0], 0
+
+    ; co_nlocals is the true len(varnames) from the spec.  (marshal stores
+    ; nlocalsplus there instead; nothing but code_getattr reads the field, so
+    ; the two disagree harmlessly and this one matches CPython.)
+    mov eax, [rbx + CodeSpec.nlocals]
+    mov [r12 + PyCodeObject.co_nlocals], eax
+
+    ; co_nlocalsplus is derived from the tuple, exactly as marshal derives it
+    xor eax, eax
+    mov rdx, [rbx + CodeSpec.localsplusnames]
+    test rdx, rdx
+    jz .no_lpnames
+    mov eax, [rdx + PyVarObject.ob_size]
+.no_lpnames:
+    mov [r12 + PyCodeObject.co_nlocalsplus], eax
+
+    ; --- object fields: references are stolen, so no INCREF ---
+    mov rax, [rbx + CodeSpec.consts]
+    mov [r12 + PyCodeObject.co_consts], rax
+    mov rax, [rbx + CodeSpec.names]
+    mov [r12 + PyCodeObject.co_names], rax
+    mov rax, [rbx + CodeSpec.localsplusnames]
+    mov [r12 + PyCodeObject.co_localsplusnames], rax
+    mov rax, [rbx + CodeSpec.localspluskinds]
+    mov [r12 + PyCodeObject.co_localspluskinds], rax
+    mov rax, [rbx + CodeSpec.filename]
+    mov [r12 + PyCodeObject.co_filename], rax
+    mov rax, [rbx + CodeSpec.name]
+    mov [r12 + PyCodeObject.co_name], rax
+    mov rax, [rbx + CodeSpec.qualname]
+    mov [r12 + PyCodeObject.co_qualname], rax
+    mov rax, [rbx + CodeSpec.exceptiontable]
+    mov [r12 + PyCodeObject.co_exceptiontable], rax
+    mov rax, [rbx + CodeSpec.linetable]
+    mov [r12 + PyCodeObject.co_linetable], rax
+
+    ; --- bytecode, copied inline, then the zeroed tail ---
+    mov rax, [rbx + CodeSpec.code_len]
+    mov [r12 + PyCodeObject.co_code_len], eax
+
+    lea rdi, [r12 + PyCodeObject.co_code]
+    mov rsi, [rbx + CodeSpec.code_bytes]
+    mov rdx, [rbx + CodeSpec.code_len]
+    test rdx, rdx
+    jz .no_code
+    call ap_memcpy
+.no_code:
+    lea rdi, [r12 + PyCodeObject.co_code]
+    add rdi, [rbx + CodeSpec.code_len]
+    xor esi, esi
+    mov edx, CODE_TAIL_PAD
+    call ap_memset
+
+    mov rax, r12
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC code_new
+
+;; ============================================================================
+;; code_spec_clear(CodeSpec *spec)
+;; Release every object reference the spec holds and zero the slots.  This is
+;; the single error path for a half-built spec: because code_new steals exactly
+;; this set, "call code_new" and "call code_spec_clear" are the only two ways a
+;; spec can be disposed of, and neither can double-free the other's references.
+;; ============================================================================
+DEF_FUNC code_spec_clear
+    push rbx
+    push r12
+    mov rbx, rdi
+    lea r12, [rbx + CodeSpec.consts]        ; first object slot
+.loop:
+    lea rax, [rbx + CodeSpec.linetable]
+    cmp r12, rax
+    ja .done
+    mov rdi, [r12]
+    test rdi, rdi
+    jz .next
+    mov qword [r12], 0
+    call obj_decref
+.next:
+    add r12, 8
+    jmp .loop
+.done:
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC code_spec_clear
 
 ; code_dealloc(PyObject *self)
 ; Free code object and decref contained objects

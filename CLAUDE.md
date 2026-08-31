@@ -4,7 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-Python 3.12 bytecode interpreter in x86-64 NASM assembly. Reads `.pyc` files and executes bytecode directly.
+Python 3.12 implementation in x86-64 NASM assembly: a bytecode interpreter, and
+a compiler for the source language written in the same assembly.  Reads `.py`
+through `compiler/`, or `.pyc` through the marshal reader.
 
 ## Build & Test
 
@@ -14,6 +16,13 @@ make clean        # remove build/ and apython
 make check        # full test suite: compile .py→.pyc, diff python3 vs ./apython output
 make check-cpython # CPython stdlib unit tests (harder, more thorough)
 make check-stdlib # how much of a CPython 3.12 Lib/ imports; a ratchet
+make check-source # the whole corpus compiled by OUR compiler; a ratchet
+make check-cpython-source  # the CPython corpus, compiled by OUR compiler
+```
+
+```bash
+./apython --selftest-compile   # source-compiler invariants and tokenizer
+python3 compiler/lint.py       # static checks over compiler/*.asm
 ```
 
 **Always run BOTH `make check` AND `make check-cpython` to verify changes.**
@@ -23,9 +32,25 @@ its `Lib/` (default `~/tmp/repo/cpython/Lib`).  It compares against
 `tests/stdlib_floor.txt` and fails when a module that used to import stops, or
 when a new one crashes.  Raise the floor with
 `bash tests/stdlib_probe.sh --record` in the commit that earns it.
-`make check` runs 149 test files (168 results: the async tests run against the
+`make check` runs 250 test files (275 results: the async tests run against the
 default, poll and io_uring backends); `make check-cpython` runs all 64 files
 under `tests/cpython/`, none of them tolerated as failing.
+
+`make check-source` and `make check-cpython-source` hand apython the `.py`
+instead of the `.pyc`, so our own compiler produces the bytecode, and diff the
+result against `python3`.  They are the only things that exercise the compiler
+on a large body of ordinary code -- most of its bugs were found there rather
+than by a test written for them, including several that need a whole file
+rather than a snippet to appear at all.  They also reach interpreter paths a
+`.pyc` cannot, because CPython's constant folder settles `3 * "ab"`,
+`True & False` and `-7 // 2` before any of them becomes an opcode.
+
+`check-cpython-source` is the harder of the two: that corpus is CPython's own
+and written to be adversarial; all 64 of its files now run identically through
+our compiler.  Each ratchets against a floor file
+(`tests/compile_floor.txt`, `tests/cpython_source_floor.txt`); raise one with
+`bash tests/source_probe.sh --record` or
+`bash tests/cpython_source_probe.sh --record` in the commit that earns it.
 
 Two more gates worth running when touching the value representation:
 
@@ -122,7 +147,98 @@ and at the boundaries between converted and unconverted code.
 - `src/frame.asm` — Frame alloc/dealloc
 - `src/object.asm` — Base PyObject ops (alloc, refcount, dealloc, `obj_richcompare_bool`)
 - `src/lib/` — Syscall wrappers, string/memory ops (replace libc)
+- `compiler/` — The Python **source** compiler (see below)
 - `include/` — Struct definitions (.inc): object, types, frame, opcodes, macros, marshal, builtins, errcodes
+
+## Source Compiler (`compiler/`)
+
+Turns Python 3.12 source into a `PyCodeObject` this interpreter runs.  Reached
+through `compile()`, `exec()`, `eval()`, `./apython foo.py`, and `import` of a
+`.py` when no `.pyc` is there.  The whole language: `match`, `except*`,
+f-strings, async, comprehensions, PEP 695 type parameters.
+
+| file | role |
+|------|------|
+| `compiler.inc` | token kinds, AST kinds, binding powers, `Buf`/`Comp`/`CompUnit`/`Instr` |
+| `tables.asm` | **generated** — char classes, keywords, operators, opcode metadata |
+| `gen_tables.py` | regenerates `tables.asm` from CPython 3.12's `opcode`/`dis` |
+| `gen_prule.py` | regenerates the expression grammar table inside `parse.asm` |
+| `arena.asm` | growable `Buf` and bump `Arena` (the tree has neither otherwise) |
+| `lex.asm` | tokenizer: indentation, operators, names, numbers, strings |
+| `ast.asm` | 32-byte nodes in a `Buf`, addressed by u32 index |
+| `parse.asm` | Pratt expression parser + `prule_table`, the precedence grammar |
+| `parse_stmt.asm` | statements, and the soft keywords `match` and `type` |
+| `pattern.asm` | `match` patterns |
+| `fstring.asm` | f-string fields, lexed as spans of the same source |
+| `symtab.asm` | scopes, local/cell/free classification, name mangling |
+| `codegen.asm` | AST kind → emitter jump table; `_stmt`/`_func`/`_try`/`_comp`/`_async`/`_match`/`_egroup` for the rest |
+| `assemble.asm` | EXTENDED_ARG fixpoint, stack depth, exception table, line table |
+| `compile.asm` | pipeline driver and lifetime |
+| `evalexec.asm` | the `compile()`, `exec()` and `eval()` builtins |
+| `srcfile.asm` | `code_from_path`: `./apython foo.py` and import from source |
+| `comperr.asm` | error recording |
+| `unicodename.asm` | **generated** -- the names `\N{...}` resolves |
+| `gen_unicodename.py` | regenerates `unicodename.asm` from `unicodedata` |
+| `uniname.asm` | the search over it, plus the algorithmic CJK family |
+| `dis.asm` | `--dis`, for diffing against `python3 -m dis` |
+| `comptest.asm` | `--selftest-compile` |
+| `lint.py` | static checks, run by `make check` |
+
+**Never call `raise_exception` from `compiler/`.** It tail-jumps into
+`eval_exception_unwind`, which calls `fatal_error` when there is no live
+interpreter frame — and `./apython foo.py` compiles before any frame exists.
+Record the error with `comp_error()` and return 0/NULL; the driver turns it
+into a pending exception after every buffer is freed.
+
+`op_meta` in `tables.asm` is the keystone: one row per opcode drives CACHE
+padding, instruction sizing, stack-depth accounting and successor computation.
+Because every emission routes through it, a forgotten CACHE is not a mistake an
+emitter can make. Its numbers are CPython's, taken from the running
+interpreter's own modules rather than transcribed.
+
+Regenerate with `python3 compiler/gen_tables.py > compiler/tables.asm`,
+`python3 compiler/gen_prule.py`, and
+`python3 compiler/gen_unicodename.py > compiler/unicodename.asm`; all three
+outputs are committed, so building never needs Python.
+
+**Gates:** `make check-source` and `make check-cpython-source` (both corpora
+compiled by this compiler and diffed against `python3` — where nearly every bug
+below was found), `./apython --selftest-compile`, `python3 compiler/lint.py`,
+and the `tests/test_compile_*.py` files.  All but the two `-source` targets run
+inside `make check`.
+
+### Compiler bug patterns
+
+These cost real time; the shapes recur.
+
+- **A binding power that is equal where it should be one below.** The Pratt
+  driver continues while `lbp > min_bp`, so an operand parsed AT an operator's
+  own power stops before it.  A ternary's else branch at `BP_TERNARY` nests
+  left, a lambda body at `BP_TERNARY` loses its own `if`.  Both produce wrong
+  answers, not errors.
+- **Two index spaces that collide.** Object indices and node indices come from
+  different arenas and overlap freely.  `sym_visit`'s generic walk follows a
+  node's `a`/`b`/`c`, and any kind whose fields are *object* indices has to be
+  on the exclusion list — `AST_HANDLER` was not, so `except E as e` visited
+  whatever node sat at e's object index.  Nothing smaller than a whole file
+  brings the two into range.
+- **A stack effect read from the interpreter rather than from CPython.**
+  `MATCH_KEYS` consumes neither the subject nor the keys tuple; a depth taken
+  from what the handler *looks* like it does is silently one out, and the
+  damage surfaces somewhere else.
+- **A jump to a label that was never bound.** It held -1, which the resolver
+  read as an unsigned offset past the end of the stream.  `asm_check_labels`
+  now rejects it; before that it was a jump off the end.
+- **A return value clobbered by the epilogue.** `cg_class_value` restored the
+  enclosing scope through `eax` on its way out, so every failure was reported
+  as a success and the caller emitted code for something that was never built.
+- **A function emitted while a data section is current.** NASM allows it and it
+  links; the fault arrives when the CPU refuses to execute the page, as a
+  SIGSEGV on the function's own `push rbp`.  `lint.py` checks for it.
+- **A callee-saved register used without saving it.** `main` keeps argc and
+  argv in r14 and r15 across the compile, so a scratch r14 in an emitter hands
+  back a different argv and the crash lands in `sys.argv` construction.
+  `lint.py` checks both directions.
 
 ## Key Structs
 
@@ -191,6 +307,29 @@ Opcodes have trailing CACHE words that must be skipped. Key counts (each = 2 byt
 - **`current_exception` is also the exception *being handled*.** It stays set for the length of an `except` block, so `cmp qword [rel current_exception], 0` cannot mean "did that call raise?". Snapshot it before the call and compare (`DUNDER_EXC_SAVE` / `DUNDER_RAISED`), or a loop inside a handler re-raises what the handler caught.
 - **Following `tp_base` to resolve an attribute or answer a subclass question.** With multiple inheritance the answer lives on the MRO: use `MRO_NEXT walker, origin` (or `type_is_subtype`), keeping the type the search *started from* as the origin. A static type has no `tp_mro`, and for it `MRO_NEXT` still yields `tp_base`, so single-inheritance code reads the same.
 - **Writing through an inherited method table.** `type_from_parts` gives a builtin subclass its base's `tp_as_number` / `tp_as_sequence` / `tp_as_mapping` *pointer*. Writing a slot through it patches the builtin's own static table for the whole process; `slot_ensure_table` copies first. The same shape applies to anything else inherited by pointer.
+- **A 64-bit read of a 4-byte struct field.** `mov rdx, [rsi + Token.len]`
+  assembles fine and silently ORs in the next field as the high half; here it
+  produced a multi-gigabyte `ap_memcpy`. Use the 32-bit form (`mov edx`), which
+  zero-extends. `compiler/lint.py` checks this.
+- **A call made with `rsp` misaligned.** After `DEF_FUNC`'s `push rbp`, a
+  `sub rsp, N` and P register pushes, the SysV ABI wants `(N + 8*P) % 16 == 0`.
+  Much of `src/` predates this and violates it harmlessly, but the compiler
+  calls `strtod`, and glibc's float paths do use aligned SSE. `compiler/lint.py`
+  checks it; pad the frame rather than the push list.
+- **A frame slot overlapping a struct in the same frame.** A hand-picked
+  `equ` for a large struct silently overlaps the scalar slots above it the
+  first time the struct grows, and the symptom is one field reading as garbage.
+  Derive the offset instead: `CS_UNIT equ 48 + CompUnit_size`.
+- **Following a node's `a`/`b`/`c` without asking what kind it is.** The node and object arenas overlap freely, so a generic walk that visits a field holding an *object* index lands on an unrelated node. `sym_visit` keeps an exclusion list; `cg_has_annotation` recurses only into the compound statements whose fields really are blocks. A `for/else` is the other half of the same trap: it hides its else block in `clist` with `nchild` at 0, where no child-list walk reaches it.
+- **Leaving a block early must emit its cleanup outside that block's own region.** The exception table is built from a per-instruction handler stamp, so the `__exit__` a `return` emits carries whatever stamp is current — the with's own, unless the unwinder sets it to the enclosing one first. Each entry on the block stack records that enclosing handler for exactly this. A `return` also leaves every enclosing *loop*, whose iterator is on the stack under the return value.
+- **A borrowed pointer in `CompUnit.names` or `.consts`.** Both hold borrowed references; the object arena owns them. A string interned at the call site and released leaves a dangling pointer whose symptom is a wild jump inside `dict_lookup` at run time, and a code object never handed to the arena is simply never freed. `comp_intern_cstr` and `comp_intern_keep` are the way in.
+- **A variable-size builtin whose subclass gets a fixed-offset `__dict__`.** str and bytes keep their data inline, so a dict at the base's `tp_basicsize` lands *inside* it. They get `TP_DICT_AT_TAIL`; bytearray and memoryview, which can move or borrow their storage, get none at all — but still need `tp_basicsize` set, or the dealloc slot walk reads a negative count.
+- **Asking "is this object a class?" by comparing metatypes.** `ob_type is user_type_metatype` is false for a class built by a metaclass of its own, so a classmethod reached through such a class bound the *metaclass*. Test `TYPE_FLAG_METATYPE` on the object's type instead; it is set on `type`, on the two metatypes we ship, and on any class deriving from `type`.
+- **An empty `bases` tuple is not the same as no bases.** `type(n, (), d)` substituted `object`; the metaclass paths did not, and those classes got an MRO of just `[C]` — not even instances of `object`. Invisible until a merge needs the `object` that anchors the end.
+- **A builtin's behaviour that lives only in a slot.** The stdlib asks questions by name: `hasattr(f, '__get__')` decides whether something is a descriptor, `member_type.__str__ is object.__str__` decides whether a type defines its own `str()`. A slot with no matching entry in `tp_dict` answers those wrong. When adding one, the thunk must call the *defining* type's slot, not the argument's, or a subclass re-dispatches into itself.
+- **A constructor in `tp_call` rather than `tp_new`.** `tp_call` on a type is what makes that type's *instances* callable; the constructor goes in `tp_new`, which `type_call` consults. `mappingproxy` had neither, so calling it fell through to the ordinary class-construction path and left its fields holding whatever was there.
+- **Reading a key's tag out of `edx` in an `mp_subscript`.** `BINARY_SUBSCR` builds the key Value with `V_PACK`, which *clobbers* the register the tag was in — the value left behind happens to equal `TAG_SMALLINT` for positive ints and not for negative ones. Classify from the Value itself with `V_TEST_PTR`.
+- **A constant that is a Value, not a pointer.** `ast_obj_at` hands back whatever the object arena holds, and `class C: 42` puts an immediate int there. Reading `ob_type` off one dereferences the number.
 - **A removed load whose guard stayed.** The `(payload, tag)` conversion deleted many `key_tag` loads; where the `test`/`jz` that used them was left in place it now reads a stale register — `from mod import *` and `dict.popitem()` both failed this way, silently. When deleting a load, delete its test.
 
 ## Adding a New Test

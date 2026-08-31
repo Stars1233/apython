@@ -24,11 +24,13 @@ extern ap_strcmp
 extern type_repr
 extern fatal_error
 extern raise_exception
+extern attr_error_pending
 extern exc_AttributeError_type
 extern exc_TypeError_type
 extern func_type
 extern type_type
 extern tuple_type_call
+extern kw_names_pending
 extern ap_memcpy
 extern eval_exception_unwind
 extern none_singleton
@@ -67,6 +69,76 @@ extern frame_free
 ;; l.append() on a fresh subclass instance reported "list modified during
 ;; sort".
 ;; ============================================================================
+
+;; ============================================================================
+;; int_sub_new(rdi = type, rsi = args, rdx = nargs) -> (rax, rdx) value pair
+;;
+;; An int, or an instance of an int subclass carrying one.  It is what
+;; `int(...)` does for such a type, reachable as a function so that
+;; `int.__new__(cls, v)` can build the instance WITHOUT going back through
+;; cls.__new__ -- which is how enum makes its members, and would otherwise
+;; recurse forever.
+;; ============================================================================
+ISN_TYPE  equ 8
+ISN_VAL   equ 16
+ISN_TAG   equ 24
+ISN_FRAME equ 32          ; + 2 pushes = 48
+global int_sub_new
+DEF_FUNC int_sub_new, ISN_FRAME
+    push rbx
+    push r12
+    mov [rbp - ISN_TYPE], rdi
+    mov rdi, rsi
+    mov rsi, rdx
+    extern builtin_int_fn
+    call builtin_int_fn
+    test edx, edx
+    jz .isn_fail
+    mov [rbp - ISN_VAL], rax
+    mov [rbp - ISN_TAG], rdx
+
+    ; int itself takes the bare value; a subclass wraps it.
+    mov rbx, [rbp - ISN_TYPE]
+    lea rcx, [rel int_type]
+    cmp rbx, rcx
+    je .isn_bare
+
+    mov edi, PyIntSubclassObject_size
+    mov rsi, rbx
+    call gc_alloc
+    mov r12, rax
+    mov qword [r12 + PyIntSubclassObject.inst_dict], 0
+    mov rax, [rbp - ISN_VAL]
+    mov rdx, [rbp - ISN_TAG]
+    V_PACK rax, rdx
+    mov [r12 + PyIntSubclassObject.int_value], rax   ; the reference transfers
+    mov rdi, rbx
+    INCREF rdi
+    mov rdi, r12
+    call gc_track
+    mov rax, r12
+    mov edx, TAG_PTR
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.isn_bare:
+    mov rax, [rbp - ISN_VAL]
+    mov rdx, [rbp - ISN_TAG]
+    pop r12
+    pop rbx
+    leave
+    ret
+.isn_fail:
+    xor eax, eax
+    xor edx, edx
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC int_sub_new
+
 ;; ============================================================================
 ;; str_sub_new(rdi = subclass type, rsi = args, rdx = nargs) -> instance
 ;;
@@ -76,8 +148,9 @@ extern frame_free
 ;; str's own constructor would.  Without this the instance was an empty
 ;; string of the right type, so CustomStr("100") was "".
 ;;
-;; These instances carry no __dict__: tp_dictoffset is 0 for the family,
-;; because there is no fixed offset past inline data to put one at.
+;; The instance carries a __dict__ at its tail, past the data and its padding,
+;; because there is no fixed offset past inline data to put one at.  The extra
+;; word is allocated here and tp_dictoffset says TP_DICT_AT_TAIL.
 ;; ============================================================================
 SSN_TYPE  equ 8
 SSN_SRC   equ 16
@@ -111,8 +184,8 @@ DEF_FUNC str_sub_new, SSN_FRAME
 
 .ssn_have_src:
     ; header + length + 8, matching str_new_heap's padding for the 8-byte
-    ; comparisons ap_strcmp does
-    lea rdi, [r12 + PyStrObject.data + 8]
+    ; comparisons ap_strcmp does, + 8 more for the tail __dict__ pointer
+    lea rdi, [r12 + PyStrObject.data + 16]
     mov rsi, [rbp - SSN_TYPE]
     extern gc_alloc
     call gc_alloc                   ; sets ob_refcnt and ob_type
@@ -120,6 +193,7 @@ DEF_FUNC str_sub_new, SSN_FRAME
     mov qword [rax + PyStrObject.ob_hash], -1
     mov [rax + PyStrObject.ob_length], r12   ; corrected after the copy
     mov qword [rax + PyStrObject.data + r12], 0
+    mov qword [rax + PyStrObject.data + r12 + 8], 0     ; the tail __dict__
 
     test rbx, rbx
     jz .ssn_no_copy
@@ -136,6 +210,25 @@ DEF_FUNC str_sub_new, SSN_FRAME
     pop rax
 
 .ssn_no_copy:
+    ; The tail __dict__, unless __slots__ suppresses it.  It is created here
+    ; rather than lazily so that every consumer of LOAD_INST_DICT can keep
+    ; reading a NULL as "this family has no dict at all".  SSN_SRC is dead by
+    ; now -- the copy path decref'd it.
+    mov [rbp - SSN_SRC], rax
+    mov rdi, [rbp - SSN_TYPE]
+    mov rcx, [rdi + PyTypeObject.tp_flags]
+    test rcx, TYPE_FLAG_HAS_SLOTS
+    jnz .ssn_no_tail_dict
+    cmp qword [rdi + PyTypeObject.tp_dictoffset], TP_DICT_AT_TAIL
+    jne .ssn_no_tail_dict
+    extern dict_new
+    call dict_new
+    mov rdx, [rbp - SSN_SRC]
+    INST_DICT_TAIL rcx, rdx
+    mov [rcx], rax
+.ssn_no_tail_dict:
+    mov rax, [rbp - SSN_SRC]
+
     ; gc_alloc does not INCREF the type it stamps into ob_type.
     push rax
     mov rdi, [rbp - SSN_TYPE]
@@ -315,6 +408,8 @@ DEF_FUNC instance_new
 
     cmp qword [rbx + PyTypeObject.tp_dictoffset], 0
     je .in_no_dict              ; this family's instances carry no dict
+    cmp qword [rbx + PyTypeObject.tp_dictoffset], TP_DICT_AT_TAIL
+    je .in_no_dict              ; a tail dict belongs to str_sub_new, not here
     call dict_new
     STORE_INST_DICT r12, rax, rcx, .in_no_dict
 
@@ -348,6 +443,7 @@ DEF_FUNC instance_getattr, IG_FRAME
     push rbx
     push r12
     push r13
+    mov qword [rel attr_error_pending], 0
 
     mov rbx, rdi                ; rbx = self (instance)
     mov r12, rsi                ; r12 = name
@@ -528,12 +624,85 @@ DEF_FUNC instance_getattr, IG_FRAME
     ret
 
 .getattr_raised:
-    ; Returning NULL here would have LOAD_ATTR report a plain AttributeError,
-    ; discarding whatever __getattr__ actually raised.
+    ; An AttributeError from __getattr__ is the protocol saying "absent", and
+    ; getattr(o, n, default) and hasattr() have to be able to see that and
+    ; answer.  Unwinding from here skips their native frames entirely, so they
+    ; never got the chance.  Hand back NULL with the exception still pending
+    ; and a flag saying so; raise_no_attribute propagates it rather than
+    ; replacing it, so `o.missing` still reports what __getattr__ raised.
+    ;
+    ; Anything else is a genuine failure in the middle of a lookup and keeps
+    ; unwinding, which is what it did before.
+    mov rax, [rel current_exception]
+    test rax, rax
+    jz .getattr_unwind
+    push rax
+    mov rdi, [rax + PyObject.ob_type]
+    lea rsi, [rel exc_AttributeError_type]
+    extern type_is_subtype
+    call type_is_subtype
+    pop rcx
+    test eax, eax
+    jz .getattr_unwind
+    mov qword [rel attr_error_pending], 1
+    RET_NULL
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+.getattr_unwind:
     leave
     jmp eval_exception_unwind
 
 .really_not_found:
+    ; A builtin base may answer through its own tp_getattr rather than a
+    ; tp_dict entry -- bytes.decode and str.encode live there -- and a
+    ; subclass inherits those.  Only the *base's* slot: this type's own is
+    ; instance_getattr, which is where we already are.
+    mov rdi, [rbx + PyObject.ob_type]
+    mov rsi, PyTypeObject.tp_getattr
+    call base_slot
+    test rax, rax
+    jz .no_base_getattr
+    lea rcx, [rel instance_getattr]
+    cmp rax, rcx
+    je .no_base_getattr
+    mov rdi, rbx
+    mov rsi, [rbp - IG_NAME]
+    call rax
+    V_UNPACK rax, rdx
+    test edx, edx
+    jz .no_base_getattr
+    ; It hands back an *unbound* builtin -- its own instances reach it through
+    ; LOAD_ATTR's method form -- so bind it here, where the caller is about to
+    ; be told the answer came from a heaptype and needs no self.
+    cmp edx, TAG_PTR
+    jne .base_getattr_done
+    mov rcx, [rax + PyObject.ob_type]
+    extern builtin_func_type
+    lea rdx, [rel builtin_func_type]
+    cmp rcx, rdx
+    jne .base_getattr_ptr
+    mov rdi, rax
+    mov rsi, rbx
+    push rax
+    call method_new
+    mov r13, rax
+    pop rdi
+    call obj_decref
+    mov rax, r13
+.base_getattr_ptr:
+    mov edx, TAG_PTR
+.base_getattr_done:
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    V_PACK rax, rdx
+    ret
+
+.no_base_getattr:
     RET_NULL
     pop r13
     pop r12
@@ -795,6 +964,8 @@ DEF_FUNC instance_dealloc, ID_FRAME
     mov rcx, [rax + PyTypeObject.tp_dictoffset]
     test rcx, rcx
     jz .id_no_dict_hdr
+    cmp rcx, TP_DICT_AT_TAIL
+    je .id_no_dict_hdr          ; the dict is past the data, not in the header
     add rcx, 8
     jmp .id_have_hdr
 .id_no_dict_hdr:
@@ -1027,10 +1198,24 @@ DEF_FUNC instance_str, IS_FRAME
 
 .is_no_dunder:
 
-    ; No __str__.  Prefer the underlying builtin's tp_str, then __repr__.
+    ; No __str__.  Prefer the underlying builtin's tp_str -- but only when it
+    ; is really its own, which means different from its tp_repr.  Most builtins
+    ; do what object does and let str() fall through to repr(): CPython says
+    ; `int.__str__ is object.__str__`, and so does list's.  Taking the base's
+    ; tp_str unconditionally meant an int subclass that defined __repr__ still
+    ; printed as the number.
+    push r12
     mov rdi, [rbx + PyObject.ob_type]
     mov rsi, PyTypeObject.tp_str
     call base_slot
+    mov r12, rax
+    mov rdi, [rbx + PyObject.ob_type]
+    mov rsi, PyTypeObject.tp_repr
+    call base_slot
+    cmp rax, r12
+    mov rax, r12
+    pop r12
+    je .is_generic              ; the base defers to its own repr; so do we
     test rax, rax
     jz .is_generic
     lea rcx, [rel instance_str]
@@ -1074,6 +1259,87 @@ END_FUNC instance_str
 ; Local frame offsets for .normal_type_call (rbp-relative, after 5 pushes + sub rsp, 24)
 TC_NEW_FUNC equ 48              ; [rbp - 48]: saved __new__ func pointer
 TC_NEW_TAG  equ 56              ; [rbp - 56]: saved __new__ result tag
+; The keywords this call was made with.  __new__ consumes kw_names_pending, so
+; __init__ has to be handed it again -- otherwise `M(name, bases, ns, **kwds)`
+; reaches __init__ with the keyword values as extra positional arguments, and
+; that is how a metaclass with class keywords fails.
+TC_KWNAMES  equ 64
+
+;; ============================================================================
+;; tc_winner_metatype(rdi = args) -> rax = the metatype to delegate to, or 0
+;;
+;; args[1] is the bases tuple.  A base whose metatype is `type` -- or the
+;; user_type_metatype that stands in for it here -- contributes nothing; of the
+;; rest the most derived wins, which is CPython's rule minus the conflict
+;; diagnosis.  0 means an ordinary type() call.
+;; ============================================================================
+TWM_ARGS  equ 8
+TWM_WIN   equ 16
+TWM_I     equ 24
+TWM_N     equ 32
+TWM_ITEM  equ 40
+TWM_FRAME equ 40          ; + 1 push = 64
+DEF_FUNC_LOCAL tc_winner_metatype, TWM_FRAME
+    push rbx
+    mov [rbp - TWM_ARGS], rdi
+    mov qword [rbp - TWM_WIN], 0
+
+    mov rbx, [rdi + 8]                  ; the bases tuple
+    V_TEST_PTR rbx, rax
+    ja .twm_done
+    test rbx, rbx
+    jz .twm_done
+    mov rax, [rbx + PyObject.ob_type]
+    lea rcx, [rel tuple_type]
+    cmp rax, rcx
+    jne .twm_done
+
+    mov rax, [rbx + PyTupleObject.ob_size]
+    mov [rbp - TWM_N], rax
+    mov qword [rbp - TWM_I], 0
+.twm_scan:
+    mov rax, [rbp - TWM_I]
+    cmp rax, [rbp - TWM_N]
+    jae .twm_done
+    mov rcx, [rbx + PyTupleObject.ob_item]
+    mov rcx, [rcx + rax*8]
+    V_TEST_PTR rcx, rdx
+    ja .twm_next
+    test rcx, rcx
+    jz .twm_next
+    mov rcx, [rcx + PyObject.ob_type]
+    lea rdx, [rel type_type]
+    cmp rcx, rdx
+    je .twm_next
+    lea rdx, [rel user_type_metatype]
+    cmp rcx, rdx
+    je .twm_next
+    mov [rbp - TWM_ITEM], rcx
+    mov rdx, [rbp - TWM_WIN]
+    test rdx, rdx
+    jz .twm_take
+    cmp rdx, rcx
+    je .twm_next
+    ; Keep whichever is the subclass of the other; a genuine conflict just
+    ; leaves the one already found.
+    mov rdi, rcx
+    mov rsi, rdx
+    extern type_is_subtype
+    call type_is_subtype
+    mov rcx, [rbp - TWM_ITEM]
+    test eax, eax
+    jz .twm_next
+.twm_take:
+    mov [rbp - TWM_WIN], rcx
+.twm_next:
+    inc qword [rbp - TWM_I]
+    jmp .twm_scan
+.twm_done:
+    mov rax, [rbp - TWM_WIN]
+    pop rbx
+    leave
+    ret
+END_FUNC tc_winner_metatype
 
 DEF_FUNC type_call
     ; Special case: type(x) with 1 arg when calling type itself
@@ -1082,7 +1348,7 @@ DEF_FUNC type_call
     cmp rdi, rax
     jne .not_type_self
     cmp edx, 3
-    je .type_three_arg
+    jge .type_three_arg         ; the extra arguments are class keywords
     cmp edx, 1
     jne .not_type_self
     ; type(x) → return type of x
@@ -1120,6 +1386,25 @@ DEF_FUNC type_call
     V_PACK rax, rdx             ; tp_call returns one Value
     ret
 .type_three_arg:
+    ; The class a three-argument type() builds belongs to the most derived of
+    ; its bases' metatypes, not to `type`.  Going straight to type_from_parts
+    ; ignored that and the class keywords with it, so
+    ; `type(name, (SomeEnum,), ns, boundary=KEEP)` -- which is how enum's
+    ; _simple_enum decorator builds a class -- never ran EnumType at all.
+    push rsi
+    push rdx
+    mov rdi, rsi
+    call tc_winner_metatype
+    pop rdx
+    pop rsi
+    test rax, rax
+    jz .tta_plain
+    mov rdi, rax
+    call type_call              ; the metatype's own tp_call, keywords and all
+    leave
+    ret
+
+.tta_plain:
     ; type(name, bases, namespace) builds a class, exactly as a class
     ; statement does.  Falling through to .normal_type_call instead treated
     ; type_type as an ordinary class: it allocated a PyInstanceObject-sized
@@ -1228,7 +1513,9 @@ DEF_FUNC type_call
     push r13
     push r14
     push r15
-    sub rsp, 24                 ; 16 bytes local + 8 align (5 pushes + rbp = 48, +24 = 72 -> rsp 16-aligned)
+    sub rsp, 40                 ; locals + align (5 pushes + rbp = 48, +40 = 88)
+    mov rax, [rel kw_names_pending]
+    mov [rbp - TC_KWNAMES], rax
     mov qword [rbp - TC_NEW_TAG], TAG_PTR  ; default return tag
 
     mov rbx, rdi                ; rbx = type
@@ -1273,10 +1560,11 @@ DEF_FUNC type_call
     test eax, eax
     jnz .exc_subclass_call
 
-    ; Check if this type is an int subclass
-    mov rax, [rbx + PyTypeObject.tp_flags]
-    test rax, TYPE_FLAG_INT_SUBCLASS
-    jnz .int_subclass_call
+    ; An int subclass used to short-circuit here, before anything looked for a
+    ; __new__ of its own -- so a class that defines one never had it called,
+    ; and its extra arguments reached int()'s two-argument form instead:
+    ; `NIC(7, "SEVEN")` came back as "int() second arg must be an integer".
+    ; The shortcut now waits at .new_not_found, beside the str one.
 
     ; === Look up __new__ in MRO (stop at object_type) ===
     lea rdi, [rel new_name_cstr]
@@ -1311,14 +1599,53 @@ DEF_FUNC type_call
     ; DECREF name string
     mov rdi, r15
     call obj_decref
+    ; An int subclass carries its value inline, so it cannot come from
+    ; instance_new either.
+    mov rax, [rbx + PyTypeObject.tp_flags]
+    test rax, TYPE_FLAG_INT_SUBCLASS
+    jz .nnf_check_str
+    mov rdi, rbx
+    mov rsi, r12
+    mov rdx, r13
+    call int_sub_new
+    test edx, edx
+    jz .int_sub_error
+    mov r14, rax
+    jmp .lookup_init
+.nnf_check_str:
     ; A str subclass is variable-size, so it cannot come from instance_new.
     mov rax, [rbx + PyTypeObject.tp_flags]
     test rax, TYPE_FLAG_STR_SUBCLASS
-    jz .tc_plain_new
+    jz .nnf_check_base_new
     mov rdi, rbx
     mov rsi, r12
     mov rdx, r13
     call str_sub_new
+    mov r14, rax
+    jmp .lookup_init
+
+.nnf_check_base_new:
+    ; A builtin base with a constructor of its own -- bytes, bytearray,
+    ; memoryview -- builds the instance, and __init__ still runs on it
+    ; afterwards.  Inheriting the base's tp_new outright skipped __init__.
+    mov rdi, rbx
+    mov rsi, PyTypeObject.tp_new
+    call base_slot
+    test rax, rax
+    jz .tc_plain_new
+    lea rcx, [rel type_call]
+    cmp rax, rcx
+    je .tc_plain_new
+    lea rcx, [rel object_type_call]
+    cmp rax, rcx
+    je .tc_plain_new
+    mov rdi, rbx
+    mov rsi, r12
+    mov rdx, r13
+    call rax
+    V_UNPACK rax, rdx
+    test edx, edx
+    jz .int_sub_error
     mov r14, rax
     jmp .lookup_init
 
@@ -1489,12 +1816,30 @@ DEF_FUNC type_call
     mov rax, [rax + PyTypeObject.tp_call]
     test rax, rax
     jz .init_not_callable
+    mov r11, rax                        ; tp_call, kept across the check below
 
-    ; Call tp_call(__init_func, args_with_instance, nargs+1)
+    ; Call tp_call(__init_func, args_with_instance, nargs+1), with the same
+    ; keywords the class was called with: __new__ has consumed them by now.
+    ;
+    ; The keywords the class was called with: __new__ has consumed
+    ; kw_names_pending by now, and without handing them back a metaclass's
+    ; __init__ sees the keyword VALUES as extra positional arguments.
+    ;
+    ; Only a Python-level __init__ gets them, and a builtin one is left exactly
+    ; as it was -- not even cleared.  `L(sequence=())` reaches list's
+    ; constructor as its __init__ and is rejected by it, which is where that
+    ; TypeError comes from.
+    mov rax, [rbx + PyObject.ob_type]
+    lea rdx, [rel func_type]
+    cmp rax, rdx
+    jne .init_no_kw
+    mov rcx, [rbp - TC_KWNAMES]
+    mov [rel kw_names_pending], rcx     ; func_call clears it again
+.init_no_kw:
     mov rdi, rbx                ; callable = __init__ func
     mov rsi, r15                ; args ptr
     lea rdx, [r13 + 1]          ; nargs + 1
-    call rax
+    call r11
     V_UNPACK rax, rdx           ; tp_call returns a Value
 
     ; DECREF __init__'s return value (should be None — TAG_NONE, not a pointer)
@@ -1511,7 +1856,7 @@ DEF_FUNC type_call
     mov rax, r14
     mov rdx, [rbp - TC_NEW_TAG]
 
-    add rsp, 24                 ; undo alignment
+    add rsp, 40                 ; undo the locals; must match the sub above
     pop r15
     pop r14
     pop r13
@@ -1579,7 +1924,7 @@ DEF_FUNC type_call
 .exc_sub_no_init:
     mov rax, r14
     mov edx, TAG_PTR
-    add rsp, 24                 ; undo alignment
+    add rsp, 40                 ; undo the locals; must match the sub above
     pop r15
     pop r14
     pop r13
@@ -1590,56 +1935,15 @@ DEF_FUNC type_call
     ret
 
 .int_subclass_call:
-    ; Int subclass: get int value via builtin_int_fn, then wrap in subclass instance
     ; rbx = type, r12 = args, r13 = nargs
-    extern builtin_int_fn
-    mov rdi, r12                ; args
-    mov rsi, r13                ; nargs
-    call builtin_int_fn
-    ; rax = int result (SmallInt or GMP pointer), edx = tag
-    test edx, edx
-    jz .int_sub_error           ; exception from builtin_int_fn
-    mov r14, rax                ; r14 = int value
-    mov r15d, edx               ; r15d = int value tag
-
-    ; If type is exactly int_type, return bare int (not a subclass)
-    lea rcx, [rel int_type]
-    cmp rbx, rcx
-    je .int_sub_return_bare
-
-    ; Allocate PyIntSubclassObject (gc_alloc since heaptypes have HAVE_GC)
-    push r14                     ; save int_value across malloc
-    push r15                     ; save the wrapped value's tag across malloc
-    mov edi, PyIntSubclassObject_size
-    mov rsi, rbx                 ; type = heaptype
-    call gc_alloc
-    pop r15
-    pop r14
-    mov qword [rax + PyIntSubclassObject.inst_dict], 0
-    V_PACK r14, r15
-    mov [rax + PyIntSubclassObject.int_value], r14
-    ; INCREF the type (subclass object holds a reference)
-    push rax
     mov rdi, rbx
-    INCREF rdi
-    pop rax
-    ; int_value ownership: builtin_int_fn returns a new reference,
-    ; we transfer it directly into the subclass object (no INCREF needed).
-    ; Track in GC
-    push rax
-    mov rdi, rax
-    call gc_track
-    pop rax
-    jmp .int_sub_done
-
-.int_sub_return_bare:
-    mov rax, r14
-    mov edx, r15d               ; restore saved tag from builtin_int_fn
-    jmp .int_sub_epilogue
-.int_sub_done:
-    mov edx, TAG_PTR            ; subclass instance is always a heap ptr
+    mov rsi, r12
+    mov rdx, r13
+    call int_sub_new
+    test edx, edx
+    jz .int_sub_error
 .int_sub_epilogue:
-    add rsp, 24                 ; undo alignment
+    add rsp, 40                 ; undo the locals; must match the sub above
     pop r15
     pop r14
     pop r13
@@ -1982,12 +2286,14 @@ DEF_FUNC method_new
     mov [rax + PyMethodObject.im_func], rbx
     mov [rax + PyMethodObject.im_self], r12
 
-    ; INCREF func and self
+    ; INCREF func and self.  im_self is a Value, not necessarily a pointer:
+    ; binding a builtin method to an immediate int is what `getattr(5,
+    ; "bit_length")` asks for, and an unguarded incref would treat the encoded
+    ; number as an address.
     push rax
     mov rdi, rbx
     call obj_incref
-    mov rdi, r12
-    call obj_incref
+    INCREF_V r12, rax
 
     ; Track in GC
     mov rdi, [rsp]
@@ -2078,7 +2384,7 @@ DEF_FUNC_LOCAL method_dealloc
     mov rdi, [rbx + PyMethodObject.im_func]
     call obj_decref
     mov rdi, [rbx + PyMethodObject.im_self]
-    call obj_decref
+    XDECREF_V rdi, rsi
     mov rdi, rbx
     call gc_dealloc
 
@@ -2187,6 +2493,7 @@ DEF_FUNC method_repr, MR_FRAME
     mov rdi, [rax + PyMethodObject.im_self]
     test rdi, rdi
     jz .mr_close
+    ; obj_repr takes a Value, which is what im_self holds.
     mov [rbp - MR_LEN], r12
     extern obj_repr
     call obj_repr
@@ -2369,7 +2676,7 @@ user_type_metatype:
     dq type_type                ; tp_base — metatype inherits from type
     dq 0                        ; tp_dict
     dq 0                        ; tp_mro
-    dq TYPE_FLAG_HAVE_GC         ; tp_flags (heaptypes are gc_alloc'd)
+    dq TYPE_FLAG_HAVE_GC | TYPE_FLAG_METATYPE  ; tp_flags (heaptypes are gc_alloc'd)
     dq 0                        ; tp_bases
     dq 0                        ; tp_traverse
     dq 0                        ; tp_clear

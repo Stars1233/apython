@@ -55,12 +55,13 @@ one-line fix.
   was registered against a subclass of ABC rather than against ABC itself.
   Direct registration and real inheritance both work.
 
-- **`eval()` and `exec()` do not compile source.**  `eval` parses an integer
-  literal and nothing else; there is no Python compiler here, only a .pyc
-  reader.  `collections.namedtuple` builds its `__new__` with
-  `eval("lambda ...")`, so it and everything that uses it -- functools, enum,
-  re, inspect, typing, dataclasses, textwrap -- stop there.  33 of the 196
-  stdlib modules fail on exactly this.
+- **The source compiler has no classes, comprehensions or generators yet.**
+  `compiler/` handles expressions, statements, control flow, functions,
+  lambdas and closures, and `eval()`, `exec()` and `compile()` all run through
+  it -- including `collections.namedtuple`'s
+  `eval("lambda _cls, ...: _tuple_new(...)")`, which used to be the wall.
+  What is still missing above that: `class`, `try`/`except`/`finally`, `with`,
+  comprehensions, generators, `async`, f-strings and `match`.
 
 - **No platform module, so `os` cannot import.**  `os.py` looks for `posix`
   and raises "no os specific module found" without it.  That is the single

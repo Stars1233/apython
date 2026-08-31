@@ -30,6 +30,9 @@ extern sys_open
 extern sys_read
 extern sys_close
 extern obj_str
+extern exc_is_syntax
+extern str_type
+extern tuple_type
 extern obj_decref
 extern str_type
 extern traceback_type
@@ -647,6 +650,12 @@ DEF_FUNC tb_print_one, TP_FRAME
     call tb_print_repeated
 
 .tp_body:
+    ; A syntax error shows where it happened before it says what it was, the
+    ; way CPython does: the file and line, the source of that line, and a caret
+    ; under the column.  Its args carry (msg, (filename, lineno, offset, text)).
+    mov rdi, [rbp - TP_EXC]
+    call tb_syntax_header
+
     ; "TypeName: str(exc)", with the colon omitted when str(exc) is empty.
     mov rdi, [rbp - TP_EXC]
     mov rax, [rdi + PyObject.ob_type]
@@ -687,6 +696,196 @@ DEF_FUNC tb_print_one, TP_FRAME
     leave
     ret
 END_FUNC tb_print_one
+
+;; ============================================================================
+;; tb_syntax_header(PyObject *exc)
+;; The File/line/source/caret block a syntax error is printed with.  Does
+;; nothing for anything else, or for a syntax error with no location.
+;; ============================================================================
+SH_EXC   equ 8
+SH_INNER equ 16
+SH_TEXT  equ 24
+SH_COL   equ 32
+SH_I     equ 40
+SH_LEN   equ 48           ; bytes of source text actually written
+SH_HASCOL equ 56          ; whether args[1][2] gave us a usable column
+SH_FRAME equ 72           ; + 1 push = 80
+DEF_FUNC tb_syntax_header, SH_FRAME
+    push rbx
+    mov rbx, rdi
+    call exc_is_syntax
+    test eax, eax
+    jz .done
+
+    ; args is whatever the raise supplied, so every step has to be checked:
+    ; `raise SyntaxError("m", (1, 2, 3, 4))` is legal Python and would
+    ; otherwise print the integer 1 as if it were a filename string.
+    mov rax, [rbx + PyExceptionObject.exc_args]
+    V_TEST_PTR rax, rcx
+    ja .done
+    test rax, rax
+    jz .done
+    mov rcx, [rax + PyObject.ob_type]
+    lea rdx, [rel tuple_type]
+    cmp rcx, rdx
+    jne .done
+    cmp qword [rax + PyTupleObject.ob_size], 2
+    jl .done
+    mov rax, [rax + PyTupleObject.ob_item]
+    mov rax, [rax + 8]
+    V_TEST_PTR rax, rcx
+    ja .done
+    test rax, rax
+    jz .done
+    mov rcx, [rax + PyObject.ob_type]
+    lea rdx, [rel tuple_type]
+    cmp rcx, rdx
+    jne .done
+    cmp qword [rax + PyTupleObject.ob_size], 4
+    jl .done
+    mov [rbp - SH_INNER], rax
+    mov rax, [rax + PyTupleObject.ob_item]
+
+    ; The filename must be a str and the line number an int.
+    mov rcx, [rax]
+    V_TEST_PTR rcx, rdx
+    ja .done
+    test rcx, rcx
+    jz .done
+    mov rdx, [rcx + PyObject.ob_type]
+    lea rcx, [rel str_type]
+    cmp rdx, rcx
+    jne .done
+    mov rcx, [rax + 8]
+    V_IS_INT rcx, rdx
+    jb .done
+
+    push rax
+    CSTRING rdi, `  File "`
+    call tb_write_cstr
+    pop rax
+    push rax
+    mov rdi, [rax]
+    call tb_write_str
+    pop rax
+    push rax
+    CSTRING rdi, `", line `
+    call tb_write_cstr
+    pop rax
+    push rax
+    mov rdi, [rax + 8]
+    V_TO_I64 rdi
+    call tb_write_dec
+    pop rax
+    push rax
+    CSTRING rdi, `\n`
+    call tb_write_cstr
+    pop rax
+
+    ; The source line, indented four spaces and stripped of leading blanks the
+    ; way CPython prints it, then a caret under the offending column.
+    mov rcx, [rax + 24]
+    mov [rbp - SH_TEXT], rcx
+    ; The offset is checked like the line number is.  It is legally None --
+    ; that is what CPython puts there when the column is unknown -- and None is
+    ; a heap pointer, so subtracting the int bias from it gave about 2^50 and
+    ; the caret loop below wrote that many spaces, one write() each.
+    mov rcx, [rax + 16]
+    mov qword [rbp - SH_HASCOL], 1
+    V_IS_INT rcx, rdx
+    jae .have_col
+    ; No usable column: CPython prints the source line and no caret at all.
+    mov qword [rbp - SH_HASCOL], 0
+    xor ecx, ecx
+    jmp .stash_col
+.have_col:
+    V_TO_I64 rcx
+.stash_col:
+    mov [rbp - SH_COL], rcx
+    mov rax, [rbp - SH_TEXT]
+    V_TEST_PTR rax, rcx
+    ja .done
+    test rax, rax
+    jz .done
+    mov rcx, [rax + PyObject.ob_type]
+    lea rdx, [rel str_type]
+    cmp rcx, rdx
+    jne .done
+
+    ; Skip the leading whitespace, and take the caret's column with it.
+    xor ecx, ecx
+.skip:
+    cmp rcx, [rax + PyStrObject.ob_size]
+    jae .have_skip
+    mov dl, [rax + PyStrObject.data + rcx]
+    cmp dl, ' '
+    je .skip_next
+    cmp dl, 9
+    jne .have_skip
+.skip_next:
+    inc rcx
+    jmp .skip
+.have_skip:
+    mov [rbp - SH_I], rcx
+
+    push rax
+    CSTRING rdi, "    "
+    call tb_write_cstr
+    pop rax
+    mov rdi, rax
+    add rdi, PyStrObject.data
+    add rdi, [rbp - SH_I]
+    mov rsi, [rax + PyStrObject.ob_size]
+    sub rsi, [rbp - SH_I]
+    mov qword [rbp - SH_LEN], 0
+    ; Trim the trailing newline; the caret line supplies its own.
+    cmp rsi, 0
+    jle .no_text
+    cmp byte [rdi + rsi - 1], 10
+    jne .write_text
+    dec rsi
+.write_text:
+    mov [rbp - SH_LEN], rsi
+    call tb_write
+    CSTRING rdi, `\n`
+    call tb_write_cstr
+.no_text:
+
+    ; The caret, under the column.  The offset is one-based and the leading
+    ; whitespace has already been dropped, so both come off it.
+    cmp qword [rbp - SH_HASCOL], 0
+    je .done
+    CSTRING rdi, "    "
+    call tb_write_cstr
+    mov rcx, [rbp - SH_COL]
+    dec rcx
+    sub rcx, [rbp - SH_I]
+    jns .pad
+    xor ecx, ecx
+.pad:
+    ; A caret past the end of the line is not a caret.  args[1][2] is whatever
+    ; the raiser put there -- a Python program may raise SyntaxError with any
+    ; offset it likes -- and the loop below writes one space per column.
+    cmp rcx, [rbp - SH_LEN]
+    jbe .pad_ok
+    mov rcx, [rbp - SH_LEN]
+.pad_ok:
+    mov [rbp - SH_I], rcx
+.pad_loop:
+    cmp qword [rbp - SH_I], 0
+    jle .caret
+    CSTRING rdi, " "
+    call tb_write_cstr
+    dec qword [rbp - SH_I]
+    jmp .pad_loop
+.caret:
+    CSTRING rdi, `^\n`
+    call tb_write_cstr
+.done:
+    pop rbx
+    leave
+    ret
+END_FUNC tb_syntax_header
 
 section .bss
 tb_seen:   resq TB_SEEN_MAX

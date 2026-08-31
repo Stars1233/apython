@@ -28,6 +28,7 @@ extern raise_exception
 extern exc_TypeError_type
 extern exc_AttributeError_type
 extern ap_strcmp
+extern obj_call_n
 extern method_new
 extern builtin_func_new
 
@@ -575,20 +576,17 @@ DEF_FUNC property_descr_get
     test rax, rax
     jz .pdg_no_getter
 
-    ; Call fget(obj): fget.tp_call(fget, &obj, 1)
+    ; fget(obj), through the general call path.  Reaching for tp_call directly
+    ; missed a getter that is an instance of a class defining __call__ -- an
+    ; operator.itemgetter, say, which is exactly what collections.namedtuple
+    ; builds its fields from -- and reported it as an unreadable attribute.
+    SPUSH_PTR r12               ; args[0] = obj
     mov rdi, rax
-    mov rax, [rdi + PyObject.ob_type]
-    mov rax, [rax + PyTypeObject.tp_call]
-    test rax, rax
-    jz .pdg_no_getter
-
-    ; Build fat args on stack
-    SPUSH_PTR r12              ; args[0] = obj
-    mov rsi, rsp                ; args ptr
-    mov edx, 1                  ; nargs = 1
-    call rax
-    V_UNPACK rax, rdx           ; tp_call returns a Value
-    add rsp, 16                 ; pop fat args
+    mov rsi, rsp
+    mov edx, 1
+    call obj_call_n
+    add rsp, 16
+    V_UNPACK rax, rdx           ; the pair the callers of this expect
 
     pop r12
     pop rbx
@@ -720,6 +718,45 @@ extern dict_get
 extern str_new_heap
 extern obj_repr
 extern obj_incref
+;; ============================================================================
+;; mappingproxy_construct(PyObject *type, PyObject **args, int64_t nargs)
+;; tp_new for mappingproxy_type: MappingProxyType(mapping).
+;;
+;; The type existed only to be *named* by types.py, so it had no constructor at
+;; all -- and calling it fell through to the ordinary class-construction path,
+;; which allocated a proxy-sized block and left mp_mapping holding whatever was
+;; there.  enum's `__members__` is a MappingProxyType(...) call.  It goes in
+;; tp_new, not tp_call: tp_call on a type is what makes that type's *instances*
+;; callable.
+;; ============================================================================
+DEF_FUNC mappingproxy_construct
+    cmp rdx, 1
+    jne .mpc_error
+    mov rdi, [rsi]                  ; the mapping
+    V_TEST_PTR rdi, rax
+    ja .mpc_error
+    test rdi, rdi
+    jz .mpc_error
+    mov rax, [rdi + PyObject.ob_type]
+    lea rcx, [rel dict_type]
+    cmp rax, rcx
+    je .mpc_wrap
+    ; A proxy of a proxy wraps the same dict, as CPython's does.
+    lea rcx, [rel mappingproxy_type]
+    cmp rax, rcx
+    jne .mpc_error
+    mov rdi, [rdi + PyMappingProxyObject.mp_mapping]
+.mpc_wrap:
+    call mappingproxy_new
+    mov edx, TAG_PTR            ; a constructor returns the (payload, tag) pair
+    leave
+    ret
+.mpc_error:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "mappingproxy() argument must be a mapping, not a sequence"
+    call raise_exception
+END_FUNC mappingproxy_construct
+
 global mappingproxy_new
 DEF_FUNC mappingproxy_new
     push rbx
@@ -1425,8 +1462,237 @@ END_FUNC union_repr
 section .data
 
 sm_name_str: db "staticmethod", 0
+descr_func_name: db "__func__", 0
+align 8
 cm_name_str: db "classmethod", 0
 prop_name_str: db "property", 0
+
+;; ============================================================================
+section .text
+
+;; ============================================================================
+;; descr_func_attr(wrapper, PyStrObject *name) -> Value
+;;
+;; __func__, the wrapped function.  It is the only way to reach the function
+;; through the wrapper, and collections.namedtuple needs it: after building
+;; _make as a classmethod it does `_make.__func__.__doc__ = ...`.
+;;
+;; One function serves both wrappers -- sm_callable and cm_callable are the
+;; same slot -- so both type tables point straight at it.
+;; ============================================================================
+DEF_FUNC descr_func_attr
+    push rbx
+    mov rbx, rdi
+    lea rdi, [rsi + PyStrObject.data]
+    lea rsi, [rel descr_func_name]
+    call ap_strcmp
+    test eax, eax
+    jne .none
+    mov rax, [rbx + PyClassMethodObject.cm_callable]
+    test rax, rax
+    jz .none
+    INCREF rax
+    mov edx, TAG_PTR
+    V_PACK rax, rdx
+    pop rbx
+    leave
+    ret
+.none:
+    xor eax, eax
+    xor edx, edx
+    pop rbx
+    leave
+    ret
+END_FUNC descr_func_attr
+
+;; ============================================================================
+;; func_dunder_get(args, nargs) -> Value
+;; staticmethod_dunder_get(args, nargs) -> Value
+;; classmethod_dunder_get(args, nargs) -> Value
+;;
+;; The binding LOAD_ATTR performs natively, exposed as `__get__` so that a
+;; function answers hasattr(f, '__get__') the way CPython's does.  enum tells a
+;; member from a method in a class body by exactly that question, so without
+;; these every helper defined inside an Enum body became an enum member --
+;; `Flag._member_names_` came out as ['_get_value'].
+;;
+;; args[0] is the descriptor, args[1] the instance (None through the class),
+;; args[2] the owner type when given.
+;; ============================================================================
+extern none_singleton
+global func_dunder_get
+DEF_FUNC func_dunder_get
+    mov rax, [rdi]                      ; the function itself
+    cmp rsi, 2
+    jl .fdg_plain
+    mov rdx, [rdi + 8]                  ; the instance
+    lea rcx, [rel none_singleton]
+    cmp rdx, rcx
+    je .fdg_plain                       ; unbound access through the class
+    test rdx, rdx
+    jz .fdg_plain
+    mov rdi, rax
+    mov rsi, rdx
+    call method_new
+    leave
+    ret
+.fdg_plain:
+    INCREF rax
+    leave
+    ret
+END_FUNC func_dunder_get
+
+global staticmethod_dunder_get
+DEF_FUNC staticmethod_dunder_get
+    mov rax, [rdi]
+    mov rax, [rax + PyStaticMethodObject.sm_callable]
+    test rax, rax
+    jz .smg_none
+    INCREF rax
+    leave
+    ret
+.smg_none:
+    lea rax, [rel none_singleton]
+    INCREF rax
+    leave
+    ret
+END_FUNC staticmethod_dunder_get
+
+global classmethod_dunder_get
+DEF_FUNC classmethod_dunder_get
+    push rbx
+    mov rbx, [rdi]
+    mov rbx, [rbx + PyClassMethodObject.cm_callable]
+    test rbx, rbx
+    jz .cmg_none
+
+    ; The owner type, or the instance's type when only an instance is given.
+    xor edx, edx
+    cmp rsi, 3
+    jl .cmg_from_inst
+    mov rdx, [rdi + 16]
+    lea rcx, [rel none_singleton]
+    cmp rdx, rcx
+    jne .cmg_have_owner
+    xor edx, edx
+.cmg_from_inst:
+    cmp rsi, 2
+    jl .cmg_plain
+    mov rdx, [rdi + 8]
+    lea rcx, [rel none_singleton]
+    cmp rdx, rcx
+    je .cmg_plain
+    test rdx, rdx
+    jz .cmg_plain
+    mov rdx, [rdx + PyObject.ob_type]
+.cmg_have_owner:
+    test rdx, rdx
+    jz .cmg_plain
+    mov rdi, rbx
+    mov rsi, rdx
+    call method_new
+    pop rbx
+    leave
+    ret
+.cmg_plain:
+    mov rax, rbx
+    INCREF rax
+    pop rbx
+    leave
+    ret
+.cmg_none:
+    lea rax, [rel none_singleton]
+    INCREF rax
+    pop rbx
+    leave
+    ret
+END_FUNC classmethod_dunder_get
+
+;; ============================================================================
+;; property_dunder_get / _set / _delete(args, nargs) -> Value
+;;
+;; The descriptor protocol LOAD_ATTR and STORE_ATTR run natively, exposed by
+;; name for the same reason the function ones are: `hasattr(p, '__get__')`.
+;; ============================================================================
+global property_dunder_get
+DEF_FUNC property_dunder_get
+    mov rax, [rdi]
+    cmp rsi, 2
+    jl .pdg2_self
+    mov rdx, [rdi + 8]
+    lea rcx, [rel none_singleton]
+    cmp rdx, rcx
+    je .pdg2_self                       ; reached through the class
+    test rdx, rdx
+    jz .pdg2_self
+    mov rdi, rax
+    mov rsi, rdx
+    call property_descr_get
+    V_PACK rax, rdx
+    leave
+    ret
+.pdg2_self:
+    INCREF rax
+    leave
+    ret
+END_FUNC property_dunder_get
+
+global property_dunder_set
+DEF_FUNC property_dunder_set
+    cmp rsi, 3
+    jl .pds2_bad
+    mov rax, [rdi]
+    mov rdx, [rdi + 16]                 ; the value, already a Value
+    mov rsi, [rdi + 8]                  ; the instance
+    mov rdi, rax
+    call property_descr_set
+    lea rax, [rel none_singleton]
+    INCREF rax
+    leave
+    ret
+.pds2_bad:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "__set__() takes exactly 2 arguments"
+    call raise_exception
+END_FUNC property_dunder_set
+
+global property_dunder_delete
+DEF_FUNC property_dunder_delete
+    push rbx
+    cmp rsi, 2
+    jl .pdd_no_deleter
+    mov rbx, [rdi]
+    mov rax, [rbx + PyPropertyObject.prop_del]
+    test rax, rax
+    jz .pdd_no_deleter
+    mov rdx, [rdi + 8]
+    SPUSH_PTR rdx                       ; args[0] = the instance
+    mov rdi, rax
+    mov rsi, rsp
+    mov edx, 1
+    call obj_call_n
+    add rsp, 16
+    test rax, rax
+    jz .pdd_failed
+    V_UNPACK rax, rdx
+    DECREF_VAL rax, edx
+    lea rax, [rel none_singleton]
+    INCREF rax
+    pop rbx
+    leave
+    ret
+.pdd_failed:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+.pdd_no_deleter:
+    lea rdi, [rel exc_AttributeError_type]
+    CSTRING rsi, "can't delete attribute"
+    call raise_exception
+END_FUNC property_dunder_delete
+
+section .data
 
 ; staticmethod_type - type descriptor for staticmethod wrapper
 align 8
@@ -1441,7 +1707,7 @@ staticmethod_type:
     dq 0                        ; tp_str
     dq 0                        ; tp_hash
     dq 0                ; tp_call  (instances are not callable)
-    dq 0                        ; tp_getattr
+    dq descr_func_attr          ; tp_getattr
     dq 0                        ; tp_setattr
     dq 0                        ; tp_richcompare
     dq 0                        ; tp_iter
@@ -1473,7 +1739,7 @@ classmethod_type:
     dq 0                        ; tp_str
     dq 0                        ; tp_hash
     dq 0                ; tp_call  (instances are not callable)
-    dq 0                        ; tp_getattr
+    dq descr_func_attr          ; tp_getattr
     dq 0                        ; tp_setattr
     dq 0                        ; tp_richcompare
     dq 0                        ; tp_iter
@@ -1686,7 +1952,7 @@ mappingproxy_type:
     dq mappingproxy_iter            ; tp_iter
     dq 0                            ; tp_iternext
     dq 0                            ; tp_init
-    dq 0                            ; tp_new
+    dq mappingproxy_construct       ; tp_new
     dq 0                            ; tp_as_number
     dq mappingproxy_seq_methods     ; tp_as_sequence
     dq mappingproxy_map_methods     ; tp_as_mapping

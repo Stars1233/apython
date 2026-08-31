@@ -6,10 +6,14 @@
 %include "types.inc"
 %include "errcodes.inc"
 %include "frame.inc"
+%include "compiler.inc"
 
 extern bool_init
 extern ap_strcmp
 extern value_selftest_main
+extern compile_selftest_main
+extern dis_main
+extern dis_mode
 extern builtins_init
 extern methods_init
 extern import_init
@@ -21,6 +25,7 @@ extern frame_free
 extern frame_pool_drain
 extern eval_frame
 extern pyc_read_file
+extern code_from_path
 extern fatal_error
 extern obj_decref
 extern str_from_cstr_heap
@@ -31,7 +36,11 @@ extern sys_module_obj
 extern sys_write
 
 ; main(int argc, char **argv) -> int
-DEF_FUNC main
+; The 8 pads the five pushes to a 16-aligned rsp.  main holds argc and argv in
+; r14/r15 across the whole compile, so a source file with a float literal
+; reaches glibc's strtod from here -- and that is one of the few call paths out
+; of this codebase that actually uses aligned SSE.
+DEF_FUNC main, 8
     push rbx
     push r12
     push r13
@@ -87,6 +96,55 @@ DEF_FUNC main
     ret
 .not_selftest:
 
+    ; Check for --selftest-compile flag (source compiler self-test)
+    mov rdi, [r15 + 8]          ; rdi = argv[1]
+    lea rsi, [rel selftest_compile_flag]
+    call ap_strcmp
+    test eax, eax
+    jne .not_selftest_compile
+    call bool_init
+    call compile_selftest_main
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+.not_selftest_compile:
+
+    ; Check for --dis: compile argv[2] as an expression and print its bytecode.
+    ; Fidelity is semantic rather than byte-for-byte, so putting this beside
+    ; `python3 -m dis` is the quickest way to localise a codegen bug.
+    mov rdi, [r15 + 8]
+    lea rsi, [rel dis_flag]
+    call ap_strcmp
+    test eax, eax
+    jne .not_dis
+    cmp r14, 3                  ; argc
+    jl .usage
+    call bool_init
+    ; `--dis -x <source>` disassembles in exec mode rather than eval mode.
+    mov rdi, [r15 + 16]         ; argv[2]
+    cmp byte [rdi], '-'
+    jne .dis_go
+    cmp byte [rdi + 1], 'x'
+    jne .dis_go
+    cmp r14, 4
+    jl .usage
+    mov qword [rel dis_mode], CMODE_EXEC
+    mov rdi, [r15 + 24]
+.dis_go:
+    call dis_main
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+.not_dis:
+
     ; Check for -t flag (opcode tracing)
     mov rax, [r15 + 8]         ; rax = argv[1]
     cmp byte [rax], '-'
@@ -109,9 +167,10 @@ DEF_FUNC main
     ; Initialize subsystems
     call bool_init
 
-    ; Load .pyc file -> code object
+    ; Load the file -> code object.  A .py is compiled here; anything else is
+    ; read as marshalled bytecode.
     mov rdi, rbx
-    call pyc_read_file
+    call code_from_path
     test rax, rax
     jz .load_failed
     mov r12, rax                ; r12 = code object
@@ -370,12 +429,36 @@ DEF_FUNC main
     call fatal_error
 
 .load_failed:
-    CSTRING rdi, "Error: failed to load .pyc file"
+    ; A source file that failed to compile has a real SyntaxError pending, with
+    ; a line number in it; saying "failed to load" instead would throw that
+    ; away.  Nothing has run yet, so there is no traceback to print.
+    mov rdi, [rel current_exception]
+    test rdi, rdi
+    jz .load_failed_plain
+    call traceback_print
+    mov rdi, [rel current_exception]
+    call obj_decref
+    mov qword [rel current_exception], 0
+    ; .exit_cleanup DECREFs the globals dict and the code object, and at this
+    ; point neither exists -- nothing has been loaded yet.  Return straight out
+    ; with the status instead.
+    mov eax, 1
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+.load_failed_plain:
+    CSTRING rdi, "Error: failed to load file"
     call fatal_error
 END_FUNC main
 
 section .rodata
 selftest_flag: db "--selftest-value", 0
+selftest_compile_flag: db "--selftest-compile", 0
+dis_flag: db "--dis", 0
 version_msg: db "apython ", VERSION_STR, 10
 version_msg_len equ $ - version_msg
 __name__cstr: db "__name__", 0

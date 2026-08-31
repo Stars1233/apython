@@ -27,6 +27,7 @@ extern eval_return
 extern obj_dealloc
 extern obj_is_true
 extern fatal_error
+extern async_gen_wrap_value
 extern none_singleton
 extern bool_true
 extern bool_false
@@ -231,11 +232,10 @@ DEF_FUNC_BARE op_binary_op
 .binop_check_right_float:
     cmp qword [rsp + BO_RTAG], TAG_FLOAT
     jne .no_float_coerce
-    ; Right is float — check if this is remainder op (str % float should NOT coerce)
-    cmp r9d, 6                  ; NB_REMAINDER
-    je .no_float_coerce
-    cmp r9d, 19                 ; NB_INPLACE_REMAINDER
-    je .no_float_coerce
+    ; `"fmt" % 1.5` must reach str_mod rather than float division, and it does:
+    ; the binop_is_number test below says no for a str.  Excluding NB_REMAINDER
+    ; outright said no for an int as well, so `n % 2.0` went to int's
+    ; nb_remainder with a float on the right and dereferenced it as a PyInt.
     mov rdi, [rsp + BO_LEFT]
     mov rsi, [rsp + BO_LTAG]
     call binop_is_number
@@ -2423,9 +2423,13 @@ extern obj_decref
     DISPATCH
 
 .ci1_async_gen_wrap:
-    ; INTRINSIC_ASYNC_GEN_WRAP: wrap yielded value for async generators
-    ; In our implementation, this is a no-op — value passes through unchanged.
-    ; The async generator protocol is handled by async_gen_iternext.
+    ; INTRINSIC_ASYNC_GEN_WRAP: box the value an async generator is about to
+    ; yield, so ags_iternext can tell it from an `await` passing through the
+    ; same YIELD_VALUE.  Without the box every awaited value is delivered to
+    ; the consumer as though it were an item.
+    VPOP rdi
+    call async_gen_wrap_value
+    VPUSH_PTR rax
     DISPATCH
 
 .ci1_stopiter_error:
@@ -2836,15 +2840,22 @@ DEF_FUNC_BARE op_match_mapping
     V_TEST_PTR rdi, rax
     ja .mm_false                   ; an immediate is not a mapping
     mov rax, [rdi + PyObject.ob_type]
-    ; Check if it's a dict or has tp_as_mapping with mp_subscript
     lea rcx, [rel dict_type]
     cmp rax, rcx
     je .mm_true
-    mov rax, [rax + PyTypeObject.tp_as_mapping]
-    test rax, rax
-    jz .mm_false
-    mov rax, [rax + PyMappingMethods.mp_subscript]
-    test rax, rax
+
+    ; Having mp_subscript is not enough: a list has one, so a list answered
+    ; yes here and MATCH_KEYS then looked keys up in it and crashed.  CPython
+    ; asks a type flag only real mappings carry; the nearest thing available is
+    ; dict and its subclasses, so anything else that is subscriptable is
+    ; rejected -- the same shape as MATCH_SEQUENCE excluding dict on its side.
+    push rdi
+    mov rdi, rax
+    lea rsi, [rel dict_type]
+    extern type_is_subtype
+    call type_is_subtype
+    pop rdi
+    test eax, eax
     jz .mm_false
 .mm_true:
     lea rax, [rel bool_true]
