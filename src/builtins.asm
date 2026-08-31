@@ -1690,6 +1690,18 @@ END_FUNC type_apply_set_name
 ;; The frame is built by hand, not by DEF_FUNC's size argument, so that the
 ;; body's [rbp - TFP_BASE] slot keeps meaning what it meant inside __build_class__.
 ;; ============================================================================
+; The class keywords `class C(B, tag="t")` carries.  __init_subclass__ is
+; called from inside type_from_parts, which never saw them -- so a base that
+; declares `def __init_subclass__(cls, **kw)` was handed an empty kw.  Set
+; around the call and cleared by it, the same convention kw_names_pending uses.
+section .data
+align 8
+global class_kwnames_pending
+class_kwnames_pending: dq 0
+global class_kwvalues_pending
+class_kwvalues_pending: dq 0
+
+section .text
 global type_from_parts
 DEF_FUNC type_from_parts
     push rbx
@@ -1697,13 +1709,15 @@ DEF_FUNC type_from_parts
     push r13
     push r14
     push r15
-    sub rsp, 24
+    sub rsp, 40             ; the epilogue's `add rsp` must match this
 
 TFP_BASE  equ 48            ; the layout base: the widest of the bases
 TFP_BASES equ 56            ; the bases tuple, or NULL
+TFP_EXC   equ 64            ; current_exception, to tell a raise from a miss
     mov r14, rdi                ; class name str
     mov r15, rdx                ; namespace dict, becomes tp_dict
     mov [rbp - TFP_BASES], rsi
+    DUNDER_EXC_SAVE [rbp - TFP_EXC]
 
     ; The layout base is the widest base, not simply the first: `class
     ; C(Mixin, list)` has to be laid out as a list.  Ties go to the earlier
@@ -1779,6 +1793,24 @@ TFP_BASES equ 56            ; the bases tuple, or NULL
     test rcx, TYPE_FLAG_INT_SUBCLASS
     jnz .bc_layout_done             ; int subclasses wrap rather than embed
 
+    ; bytes keeps its data inline exactly as str does, so its subclasses get
+    ; the same tail dict.  Putting one at the base's basicsize instead landed
+    ; it *inside* the data: `B(bytes)` with an attribute corrupted itself.
+    lea rcx, [rel bytes_type]
+    cmp rax, rcx
+    je .bc_layout_no_dict
+    ; bytearray and memoryview are resizable or borrow their storage, so a
+    ; tail would move or not be theirs; they get no dict rather than a
+    ; corrupting one.
+    extern bytearray_type
+    lea rcx, [rel bytearray_type]
+    cmp rax, rcx
+    je .bc_layout_none
+    extern memoryview_type
+    lea rcx, [rel memoryview_type]
+    cmp rax, rcx
+    je .bc_layout_none
+
     ; A builtin base with a fixed-size header: the dict goes just past it.
     mov rcx, [rax + PyTypeObject.tp_basicsize]
     test rcx, rcx
@@ -1790,6 +1822,14 @@ TFP_BASES equ 56            ; the bases tuple, or NULL
 
 .bc_layout_inherit:
     mov [r12 + PyTypeObject.tp_dictoffset], rcx
+    mov rcx, [rax + PyTypeObject.tp_basicsize]
+    mov [r12 + PyTypeObject.tp_basicsize], rcx
+    jmp .bc_layout_done
+
+.bc_layout_none:
+    ; The base's own header, and no dict at all: tp_basicsize still has to be
+    ; the base's, or the dealloc slot walk reads a negative count.
+    mov qword [r12 + PyTypeObject.tp_dictoffset], 0
     mov rcx, [rax + PyTypeObject.tp_basicsize]
     mov [r12 + PyTypeObject.tp_basicsize], rcx
     jmp .bc_layout_done
@@ -2208,11 +2248,24 @@ TFP_BASES equ 56            ; the bases tuple, or NULL
     jmp .bc_no_set_base
 
 .bc_check_builtin_sub:
-    ; Inherit the base's constructor (tp_new) for bytearray, memoryview and
-    ; bytes subclasses.
+    ; Inherit the base's constructor (tp_new) where that is the whole story.
     mov rax, [rbp - TFP_BASE]              ; base class
     test rax, rax
     jz .bc_no_set_base
+
+    ; ...but not for bytes, bytearray or memoryview: inheriting tp_new sends
+    ; type_call straight to the base constructor and returns, so a subclass
+    ; __init__ never ran.  They go through .normal_type_call, which asks the
+    ; base to build the instance and then runs __init__ on it.
+    lea rcx, [rel bytes_type]
+    cmp rax, rcx
+    je .bc_container_sub
+    lea rcx, [rel bytearray_type]
+    cmp rax, rcx
+    je .bc_container_sub
+    lea rcx, [rel memoryview_type]
+    cmp rax, rcx
+    je .bc_container_sub
 
     ; Not for the container families.  Inheriting tp_new sends type_call
     ; straight to the base constructor, which returns a plain list (or
@@ -2289,25 +2342,38 @@ TFP_BASES equ 56            ; the bases tuple, or NULL
     test edx, edx
     jz .bc_no_init_subclass
 
-    ; Call __init_subclass__(new_class)
-    ; rax = the dunder function (borrowed ref)
+    ; object's own is a classmethod wrapper; unwrap it, since the class it
+    ; would bind is already going in as args[0].
     mov rcx, [rax + PyObject.ob_type]
-    mov rcx, [rcx + PyTypeObject.tp_call]
-    test rcx, rcx
+    lea rdx, [rel classmethod_type]
+    cmp rcx, rdx
+    jne .bc_is_have_callable
+    mov rax, [rax + PyClassMethodObject.cm_callable]
+    test rax, rax
     jz .bc_no_init_subclass
+.bc_is_have_callable:
 
+    ; Call __init_subclass__(new_class, **class_keywords).  The keywords are
+    ; the whole point of the hook -- `class C(B, tag="t")` -- and they arrive
+    ; through the pending pair, because the class statement knows them and
+    ; this function does not.
     SPUSH_PTR r12              ; args[0] = new class
-    mov rdi, rax               ; callable = __init_subclass__ func
+    mov rdi, rax               ; callable
     mov rsi, rsp               ; args
-    mov edx, 1                 ; nargs = 1
-    call rcx
-    V_UNPACK rax, rdx           ; tp_call returns a Value
+    mov edx, 1                 ; nargs
+    mov rcx, [rel class_kwnames_pending]
+    mov r8, [rel class_kwvalues_pending]
+    call bc_call_kw
     add rsp, 16                ; pop fat args
-    ; DECREF result if non-NULL
-    test edx, edx               ; the tag, not the payload: a hit may be int 0
-    jz .bc_no_init_subclass
+    test rax, rax
+    jz .bc_init_subclass_failed
     mov rdi, rax
     call obj_decref
+    jmp .bc_no_init_subclass
+
+.bc_init_subclass_failed:
+    ; It ran and raised; the exception is pending and the class is not built.
+    DUNDER_RAISED [rbp - TFP_EXC], .tfp_set_name_failed
 
 .bc_no_init_subclass:
 
@@ -2349,7 +2415,7 @@ TFP_BASES equ 56            ; the bases tuple, or NULL
     mov qword [rel build_class_pending], 0
     mov rax, r12
 
-    add rsp, 24
+    add rsp, 40                 ; must match the sub in the prologue
     pop r15
     pop r14
     pop r13
@@ -2365,7 +2431,7 @@ TFP_BASES equ 56            ; the bases tuple, or NULL
     mov rdi, r12
     call obj_decref
     xor eax, eax
-    add rsp, 24
+    add rsp, 40                 ; must match the sub in the prologue
     pop r15
     pop r14
     pop r13
@@ -2961,11 +3027,19 @@ BCL_OKWV  equ 72
 
 .bc_no_metaclass:
     ; Build the heaptype from (name, bases, namespace); the three-argument
-    ; type() reaches the same code.
+    ; type() reaches the same code.  The class keywords go through the pending
+    ; pair: type_from_parts calls __init_subclass__ and has no other way to
+    ; know them.
+    mov rax, [rbp - BCL_OKWN]
+    mov [rel class_kwnames_pending], rax
+    mov rax, [rbp - BCL_OKWV]
+    mov [rel class_kwvalues_pending], rax
     mov rdi, r14
     mov rsi, [rbp - BCL_BASES]
     mov rdx, r15
     call type_from_parts
+    mov qword [rel class_kwnames_pending], 0
+    mov qword [rel class_kwvalues_pending], 0
     push rax
     mov rdi, [rbp - BCL_BASES]
     test rdi, rdi

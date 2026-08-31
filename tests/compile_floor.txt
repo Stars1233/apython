@@ -25,6 +25,7 @@ test_builtin_subclass
 test_bytes_bytearray_repr
 test_bytes_methods
 test_bytes
+test_bytes_subclass_dict
 test_call_ex
 test_classes
 test_classmethod_metaclass
@@ -121,6 +122,7 @@ test_import_from
 test_import_module
 test_import_sys
 test_inheritance
+test_init_subclass_kwargs
 test_instance_layout
 test_int_bases_and_float_spec
 test_int_bytes
@@ -216,6 +218,7 @@ test_str_predicates
 test_str_subclass_dict
 test_subclass_item_slots
 test_super_descriptors
+test_syntax_error_args
 test_syntax_error_location
 test_sys_exit
 test_traceback

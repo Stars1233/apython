@@ -22,6 +22,7 @@
 extern ast_at
 extern ast_child
 extern ast_obj_at
+extern ast_obj
 extern asm_assemble
 extern cg_body
 extern cg_const
@@ -302,6 +303,10 @@ DEF_FUNC cg_function, CF_FRAME
     mov [rbp - CF_CODE], rax
     test rax, rax
     jz .fail
+    ; CompUnit.consts holds a BORROWED pointer; the arena owns this reference.
+    mov rdi, rbx
+    mov rsi, rax
+    call ast_obj
 
     ; The finished code object becomes a constant of the enclosing unit.
     mov rdi, [rbp - CF_PARENT]
@@ -1283,6 +1288,9 @@ DEF_FUNC cg_class_value, CC4_FRAME
     mov [rbp - CC4_CODE], rax
     test rax, rax
     jz .fail
+    mov rdi, rbx
+    mov rsi, rax
+    call ast_obj
 
     ; A class body needs a closure like any other nested block.  Its methods'
     ; free variables resolve past the class scope to the enclosing function,

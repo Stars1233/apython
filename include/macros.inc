@@ -491,9 +491,20 @@ TAG_IO_WAIT  equ 8           ; payload = fd | (direction << 32) — async I/O se
 TP_DICT_AT_TAIL equ -1
 
 ; INST_DICT_TAIL dest, inst -- address of the tail dict pointer.
+; str and bytes both keep eight spare bytes past their data (the NUL a str is
+; padded with, the terminator bytes_type_call writes), so the dict sits one
+; word beyond that in both.  Only where the data starts differs.
 %macro INST_DICT_TAIL 2
+    mov %1, [%2 + PyObject.ob_type]
+    test qword [%1 + PyTypeObject.tp_flags], TYPE_FLAG_STR_SUBCLASS
+    jz %%bytes_tail
     mov %1, [%2 + PyStrObject.ob_size]
     lea %1, [%2 + %1 + PyStrObject.data + 8]
+    jmp %%tail_done
+%%bytes_tail:
+    mov %1, [%2 + PyBytesObject.ob_size]
+    lea %1, [%2 + %1 + PyBytesObject.data + 8]
+%%tail_done:
 %endmacro
 
 ; A dunder call returns NULL for two different reasons: the type does not

@@ -1523,8 +1523,13 @@ DEF_FUNC bytes_type_call, BTC_FRAME
 
     mov rcx, rdx
     mov rdx, [rbp - BTC_TYPE]
-    test qword [rdx + PyTypeObject.tp_flags], TYPE_FLAG_HAVE_GC
     lea rdi, [rcx + PyBytesObject.data + 8]
+    ; A subclass carrying a __dict__ at its tail needs one more word for it.
+    cmp qword [rdx + PyTypeObject.tp_dictoffset], TP_DICT_AT_TAIL
+    jne .btc_no_tail
+    add rdi, 8
+.btc_no_tail:
+    test qword [rdx + PyTypeObject.tp_flags], TYPE_FLAG_HAVE_GC
     jz .btc_plain_alloc
     mov rsi, rdx
     call gc_alloc
@@ -1550,6 +1555,11 @@ DEF_FUNC bytes_type_call, BTC_FRAME
 .btc_no_copy:
     mov rcx, [rbp - BTC_LEN]
     mov qword [rbx + PyBytesObject.data + rcx], 0
+    mov rdx, [rbp - BTC_TYPE]
+    cmp qword [rdx + PyTypeObject.tp_dictoffset], TP_DICT_AT_TAIL
+    jne .btc_no_tail_zero
+    mov qword [rbx + PyBytesObject.data + rcx + 8], 0    ; the tail __dict__
+.btc_no_tail_zero:
     mov rdi, [rbp - BTC_BUF]
     test rdi, rdi
     jz .btc_no_free

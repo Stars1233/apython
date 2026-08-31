@@ -24,6 +24,7 @@ extern ast_at
 extern ast_child
 extern ast_obj_at
 extern cg_const
+extern ast_obj
 extern cg_emit
 extern cg_emit_jump
 extern cg_emit_jump_back
@@ -107,6 +108,12 @@ DEF_FUNC cg_e_comprehension, CM2_FRAME
     mov [rbp - CM2_CODE], rax
     test rax, rax
     jz .fail
+    ; CompUnit.consts holds a BORROWED pointer, so the arena has to own this
+    ; reference -- otherwise nothing ever releases it and every comprehension
+    ; leaks its code object.
+    mov rdi, rbx
+    mov rsi, rax
+    call ast_obj
 
     ; Back in the enclosing scope for the iterable and the call.
     mov eax, [r12 + CompUnit.scope]

@@ -47,6 +47,7 @@ extern buf_push_u8
 extern bytes_from_data
 extern str_new_heap
 extern comp_intern
+extern ap_strlen
 extern par_for_target
 extern par_fstring_pieces
 extern par_params
@@ -342,6 +343,39 @@ DEF_FUNC par_number, PN_FRAME
     jnz .imaginary
     test eax, TF_NUM_FLOAT
     jnz .float
+
+    ; int_from_cstr_base raises for a decimal literal past the digit limit,
+    ; and raise_exception must never be reached from the compiler: it tail-
+    ; jumps into eval_exception_unwind, which calls fatal_error when there is
+    ; no interpreter frame.  A 5000-digit literal in a file made ./apython
+    ; exit silently.  CPython reports it as a SyntaxError here too.
+    mov rdi, [rbp - PN_BUF]
+    call ap_strlen
+    extern sys_int_max_str_digits
+    mov rcx, [rel sys_int_max_str_digits]
+    test rcx, rcx
+    jz .len_ok
+    cmp rax, rcx
+    jle .len_ok
+    ; A base prefix exempts it: only decimal conversion is quadratic.
+    mov rdi, [rbp - PN_BUF]
+    cmp byte [rdi], '0'
+    jne .too_many_digits
+    movzx eax, byte [rdi + 1]
+    or eax, 0x20
+    cmp al, 'x'
+    je .len_ok
+    cmp al, 'o'
+    je .len_ok
+    cmp al, 'b'
+    je .len_ok
+.too_many_digits:
+    mov rdi, rbx
+    CSTRING rsi, "Exceeds the limit for integer string conversion"
+    call par_syntax_error
+    xor eax, eax
+    jmp .cleanup
+.len_ok:
 
     mov rdi, [rbp - PN_BUF]
     xor esi, esi                        ; base 0: detect the prefix

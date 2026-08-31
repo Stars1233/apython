@@ -628,6 +628,53 @@ DEF_FUNC instance_getattr, IG_FRAME
     jmp eval_exception_unwind
 
 .really_not_found:
+    ; A builtin base may answer through its own tp_getattr rather than a
+    ; tp_dict entry -- bytes.decode and str.encode live there -- and a
+    ; subclass inherits those.  Only the *base's* slot: this type's own is
+    ; instance_getattr, which is where we already are.
+    mov rdi, [rbx + PyObject.ob_type]
+    mov rsi, PyTypeObject.tp_getattr
+    call base_slot
+    test rax, rax
+    jz .no_base_getattr
+    lea rcx, [rel instance_getattr]
+    cmp rax, rcx
+    je .no_base_getattr
+    mov rdi, rbx
+    mov rsi, [rbp - IG_NAME]
+    call rax
+    V_UNPACK rax, rdx
+    test edx, edx
+    jz .no_base_getattr
+    ; It hands back an *unbound* builtin -- its own instances reach it through
+    ; LOAD_ATTR's method form -- so bind it here, where the caller is about to
+    ; be told the answer came from a heaptype and needs no self.
+    cmp edx, TAG_PTR
+    jne .base_getattr_done
+    mov rcx, [rax + PyObject.ob_type]
+    extern builtin_func_type
+    lea rdx, [rel builtin_func_type]
+    cmp rcx, rdx
+    jne .base_getattr_ptr
+    mov rdi, rax
+    mov rsi, rbx
+    push rax
+    call method_new
+    mov r13, rax
+    pop rdi
+    call obj_decref
+    mov rax, r13
+.base_getattr_ptr:
+    mov edx, TAG_PTR
+.base_getattr_done:
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    V_PACK rax, rdx
+    ret
+
+.no_base_getattr:
     RET_NULL
     pop r13
     pop r12
@@ -1541,11 +1588,36 @@ DEF_FUNC type_call
     ; A str subclass is variable-size, so it cannot come from instance_new.
     mov rax, [rbx + PyTypeObject.tp_flags]
     test rax, TYPE_FLAG_STR_SUBCLASS
-    jz .tc_plain_new
+    jz .nnf_check_base_new
     mov rdi, rbx
     mov rsi, r12
     mov rdx, r13
     call str_sub_new
+    mov r14, rax
+    jmp .lookup_init
+
+.nnf_check_base_new:
+    ; A builtin base with a constructor of its own -- bytes, bytearray,
+    ; memoryview -- builds the instance, and __init__ still runs on it
+    ; afterwards.  Inheriting the base's tp_new outright skipped __init__.
+    mov rdi, rbx
+    mov rsi, PyTypeObject.tp_new
+    call base_slot
+    test rax, rax
+    jz .tc_plain_new
+    lea rcx, [rel type_call]
+    cmp rax, rcx
+    je .tc_plain_new
+    lea rcx, [rel object_type_call]
+    cmp rax, rcx
+    je .tc_plain_new
+    mov rdi, rbx
+    mov rsi, r12
+    mov rdx, r13
+    call rax
+    V_UNPACK rax, rdx
+    test edx, edx
+    jz .int_sub_error
     mov r14, rax
     jmp .lookup_init
 

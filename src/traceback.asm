@@ -32,6 +32,7 @@ extern sys_close
 extern obj_str
 extern exc_is_syntax
 extern str_type
+extern tuple_type
 extern obj_decref
 extern str_type
 extern traceback_type
@@ -714,11 +715,48 @@ DEF_FUNC tb_syntax_header, SH_FRAME
     test eax, eax
     jz .done
 
+    ; args is whatever the raise supplied, so every step has to be checked:
+    ; `raise SyntaxError("m", (1, 2, 3, 4))` is legal Python and would
+    ; otherwise print the integer 1 as if it were a filename string.
     mov rax, [rbx + PyExceptionObject.exc_args]
+    V_TEST_PTR rax, rcx
+    ja .done
+    test rax, rax
+    jz .done
+    mov rcx, [rax + PyObject.ob_type]
+    lea rdx, [rel tuple_type]
+    cmp rcx, rdx
+    jne .done
+    cmp qword [rax + PyTupleObject.ob_size], 2
+    jl .done
     mov rax, [rax + PyTupleObject.ob_item]
     mov rax, [rax + 8]
+    V_TEST_PTR rax, rcx
+    ja .done
+    test rax, rax
+    jz .done
+    mov rcx, [rax + PyObject.ob_type]
+    lea rdx, [rel tuple_type]
+    cmp rcx, rdx
+    jne .done
+    cmp qword [rax + PyTupleObject.ob_size], 4
+    jl .done
     mov [rbp - SH_INNER], rax
     mov rax, [rax + PyTupleObject.ob_item]
+
+    ; The filename must be a str and the line number an int.
+    mov rcx, [rax]
+    V_TEST_PTR rcx, rdx
+    ja .done
+    test rcx, rcx
+    jz .done
+    mov rdx, [rcx + PyObject.ob_type]
+    lea rcx, [rel str_type]
+    cmp rdx, rcx
+    jne .done
+    mov rcx, [rax + 8]
+    V_IS_INT rcx, rdx
+    jb .done
 
     push rax
     CSTRING rdi, `  File "`

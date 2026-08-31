@@ -977,9 +977,11 @@ sys_module_obj: resq 1
 global sys_stdout_obj
 sys_stdout_obj: resq 1
 
-global sys_int_max_str_digits
-sys_int_max_str_digits: resq 1
-
 section .data
 align 8
+; Not in .bss: the source compiler consults this to reject an over-long
+; decimal literal, and ./apython foo.py compiles before sysmodule_init runs.
+global sys_int_max_str_digits
+sys_int_max_str_digits: dq 4300
+
 sys_intern_table: dq 0

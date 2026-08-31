@@ -7699,6 +7699,28 @@ DEF_FUNC object_method_repr, OMR_FRAME
 END_FUNC object_method_repr
 
 ;; ============================================================================
+;; object.__init_subclass__(cls) -> None
+;; A no-op hook every class inherits, so that a real one can end with
+;; `super().__init_subclass__()` -- which is how they are written.  Keywords
+;; are an error here: whoever declared them should have consumed them.
+;; ============================================================================
+DEF_FUNC object_method_init_subclass
+    cmp rsi, 2
+    jge .omis_bad
+    lea rax, [rel none_singleton]
+    INCREF rax
+    mov edx, TAG_PTR
+    leave
+    V_PACK rax, rdx
+    ret
+.omis_bad:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "__init_subclass__() takes no keyword arguments"
+    call raise_exception
+END_FUNC object_method_init_subclass
+
+
+;; ============================================================================
 ;; A builtin's own __str__ and __repr__, reachable by name.
 ;;
 ;; They were not: `str.__str__` resolved through the MRO to object's, and enum
@@ -12622,6 +12644,31 @@ DEF_FUNC methods_init
     lea rdx, [rel object_method_sizeof]
     call add_method_to_dict
 
+    ; A classmethod: `super().__init_subclass__()` is how every real one ends.
+    lea rdi, [rel object_method_init_subclass]
+    lea rsi, [rel mn___init_subclass__]
+    call builtin_func_new
+    push rax
+    mov edi, PyClassMethodObject_size
+    lea rsi, [rel classmethod_type]
+    call gc_alloc
+    pop rcx
+    mov [rax + PyClassMethodObject.cm_callable], rcx
+    mov r12, rax
+    mov rdi, rax
+    call gc_track
+    lea rdi, [rel mn___init_subclass__]
+    call str_from_cstr_heap
+    push rax
+    mov rdi, rbx
+    mov rsi, rax
+    mov rdx, r12
+    call dict_set
+    pop rdi
+    call obj_decref
+    mov rdi, r12
+    call obj_decref
+
     mov rdi, rbx
     lea rsi, [rel mn___dir__]
     lea rdx, [rel object_method_dir]
@@ -13123,6 +13170,7 @@ du_keys_name:   db "keys", 0
 mn___format__:  db "__format__", 0
 mn___sizeof__:  db "__sizeof__", 0
 mn___doc__:     db "__doc__", 0
+mn___init_subclass__: db "__init_subclass__", 0
 mn___iter__:    db "__iter__", 0
 mn___dir__:     db "__dir__", 0
 mn___reduce__:  db "__reduce__", 0
