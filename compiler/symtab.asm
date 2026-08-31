@@ -1352,14 +1352,27 @@ END_FUNC sym_dict_key_at
 
 ;; ============================================================================
 ;; sym_binds(Comp *c, uint32_t scope, PyStrObject *name) -> rax = 1 or 0
-;; Does this block bind the name itself?
+;; Does this block bind the name in a way a nested block could capture?
+;;
+;; A `global` or `nonlocal` declaration says no, even though the assignment
+;; that follows it still stamps DEF_LOCAL on the name -- sym_visit adds that
+;; for every store target without looking at the declarations.  `global x;
+;; x = 1` writes the module dict, so there is no cell here to close over, and
+;; answering yes made the nested block a closure over a slot nobody had
+;; allocated: "free variable has no cell in the enclosing scope".  CPython's
+;; analyze_name puts a DEF_GLOBAL name in `global` and a DEF_NONLOCAL one in
+;; `free`, never in `local` -- and `local` is the only thing that feeds the
+;; `bound` set the children are told they may capture.
 ;; ============================================================================
 DEF_FUNC sym_binds, 16
     call sym_get
-    and eax, DEF_LOCAL | DEF_PARAM | DEF_IMPORT
-    test eax, eax
+    mov ecx, eax                        ; the raw flags
+    xor eax, eax
+    test ecx, DEF_GLOBAL | DEF_NONLOCAL
+    jnz .done
+    test ecx, DEF_LOCAL | DEF_PARAM | DEF_IMPORT
     setnz al
-    movzx eax, al
+.done:
     leave
     ret
 END_FUNC sym_binds
@@ -1397,7 +1410,7 @@ DEF_FUNC sym_enclosing_binds, SEB_FRAME
     mov rsi, r12
     call sym_is_function_like
     test eax, eax
-    jnz .check_binds
+    jnz .function_block
     ; A class block provides nothing to nested blocks -- with one exception.
     ; `__class__` is visible to them, which is what makes zero-argument super()
     ; and an explicit __class__ reference work inside a method.
@@ -1411,6 +1424,24 @@ DEF_FUNC sym_enclosing_binds, SEB_FRAME
     call sym_str_eq
     test eax, eax
     jz .loop
+    jmp .check_binds
+
+.function_block:
+    ; A `global x` here ends the walk.  CPython's analyze_name discards the
+    ; name from the `bound` set it hands its children, so a binding further out
+    ; is invisible from inside this function: in
+    ; `def f(): x=1; def g(): global x; def h(): return x`, h reads the
+    ; module's x and f gets no cell at all.  A class block is deliberately not
+    ; treated this way -- analyze_block copies `bound` for the children before
+    ; it looks at the class body's own declarations -- and never reaches here
+    ; except for __class__.
+    mov rdi, rbx
+    mov rsi, r12
+    mov rdx, [rbp - SEB_NAME]
+    call sym_get
+    test eax, DEF_GLOBAL
+    jnz .none
+
 .check_binds:
 
     mov rdi, rbx
@@ -1639,6 +1670,17 @@ DEF_FUNC sym_promote_cells, SPC_FRAME
     call sym_is_function_like
     test eax, eax
     jz .next_name
+    ; An explicit `global` is the end of the line: the name is not ours to pass
+    ; on, and making it free compiles `global x; x = 1` to a STORE_DEREF into
+    ; an enclosing function's cell.  sym_enclosing_binds already stops at a
+    ; block that declares the name global, so no child should reach here with
+    ; it free; this is the belt to that suspenders.
+    mov rdi, rbx
+    mov rsi, r12
+    mov rdx, [rbp - SPC_NAME]
+    call sym_get
+    test eax, DEF_GLOBAL
+    jnz .next_name
 .travels:
     mov rdi, rbx
     mov rsi, r12
