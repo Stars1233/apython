@@ -1296,7 +1296,6 @@ global bytes_type_call
 BLS_ARGS  equ 8
 BLS_RANGEMSG equ 16
 BLS_BADITEM equ 56
-BLS_LEN   equ 24
 BLS_BUF   equ 32
 BLS_LIST  equ 40
 BLS_FRAME equ 64

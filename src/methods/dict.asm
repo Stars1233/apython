@@ -8,7 +8,6 @@
 %include "object.inc"
 %include "opcodes.inc"
 
-
 ; External functions
 extern ap_memset
 extern obj_decref
@@ -158,7 +157,6 @@ END_FUNC dict_method_items
 ;; args[0]=self, args[1]=key, optionally args[2]=default
 ;; ============================================================================
 DEF_FUNC dict_method_pop
-dict_method_pop_v2 equ dict_method_pop
     push rbx
     push r12
     push r13
@@ -730,7 +728,6 @@ DEF_FUNC dict_method_copy
     V_PACK rax, rdx             ; builtins return one Value
     ret
 END_FUNC dict_method_copy
-
 
 ;; ============================================================================
 ;; dict_classmethod_fromkeys(args, nargs) -> new dict

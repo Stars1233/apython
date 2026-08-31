@@ -29,7 +29,6 @@
 %include "compiler.inc"
 
 ; --- Named frame-layout constants ---
-AM_COMP  equ 8
 AM_KIND  equ 16
 AM_SUB   equ 24
 AM_LINE  equ 32
@@ -235,8 +234,6 @@ END_FUNC ast_obj_at
 ;; Only the container kinds recurse: `[a, b] = t` and `(a, b) = t` both unpack,
 ;; while `f(x) = 1` does not, because a call has no store form.
 ;; ============================================================================
-SC_COMP  equ 8
-SC_NODE  equ 16
 SC_CTX   equ 24
 SC_I     equ 32
 SC_N     equ 40

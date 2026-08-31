@@ -906,7 +906,6 @@ DEF_FUNC sys_intern_func
 END_FUNC sys_intern_func
 
 section .rodata
-sys_exit_nl: db 10
 
 sm_sys:          db "sys", 0
 sm_modules:      db "modules", 0

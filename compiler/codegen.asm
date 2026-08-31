@@ -42,13 +42,7 @@ extern tuple_new
 extern exc_SyntaxError_type
 
 ; --- Named frame-layout constants ---
-CE_COMP  equ 8
-CE_UNIT  equ 16
-CE_NODE  equ 24
 CE_NPTR  equ 32
-CE_I     equ 40
-CE_N     equ 48
-CE_TMP   equ 56
 CE_FRAME equ 56          ; + 3 pushes = 80
 
 section .text
@@ -56,7 +50,6 @@ section .text
 ;; ============================================================================
 ;; cg_unit_init(CompUnit *u, PyStrObject *filename, PyStrObject *name)
 ;; ============================================================================
-CU_UNIT  equ 8
 CU_FILE  equ 16
 CU_NAME  equ 24
 CU_FRAME equ 24          ; + 1 push = 32
@@ -144,7 +137,6 @@ END_FUNC cg_unit_free
 ;; ============================================================================
 ;; cg_emit(CompUnit *u, int opcode, uint32_t oparg, int lineno) -> Instr*
 ;; ============================================================================
-CM_UNIT  equ 8
 CM_OP    equ 16
 CM_ARG   equ 24
 CM_LINE  equ 32
@@ -218,7 +210,6 @@ END_FUNC cg_const
 ;; interned into a fresh object at each occurrence, and without this co_names
 ;; would grow one entry per mention.
 ;; ============================================================================
-CN_UNIT  equ 8
 CN_STR   equ 16
 CN_I     equ 24
 CN_FRAME equ 24          ; + 3 pushes = 48
@@ -307,8 +298,6 @@ END_FUNC cg_label_bind
 ;; Records the label id in the oparg; the assembler turns it into a delta once
 ;; every instruction's size is known.
 ;; ============================================================================
-CJ_UNIT  equ 8
-CJ_OP    equ 16
 CJ_FRAME equ 24          ; + 1 push = 32
 DEF_FUNC cg_emit_jump, CJ_FRAME
     push rbx
@@ -451,9 +440,6 @@ END_FUNC cg_pop_handler
 ;; duplicated rather than stored and reloaded -- `if (n := f()) > 5` must call
 ;; f once.
 ;; ============================================================================
-CNE_COMP  equ 8
-CNE_UNIT  equ 16
-CNE_NODE  equ 24
 CNE_LINE  equ 32
 CNE_FRAME equ 40          ; + 3 pushes = 64
 DEF_FUNC_LOCAL cg_e_namedexpr, CNE_FRAME
@@ -511,7 +497,6 @@ END_FUNC cg_e_namedexpr
 ;; (op_compare_op does `shr ecx, 4`), but CPython's exact values are emitted so
 ;; that disassembling our output against CPython's stays a clean diff.
 ;; ============================================================================
-CC_UNIT  equ 8
 CC_OP    equ 16
 CC_LINE  equ 24
 CC_FRAME equ 24          ; + 1 push = 32
@@ -1210,9 +1195,6 @@ END_FUNC cg_e_compare
 ;; cg_children(Comp *c, CompUnit *u, uint32_t node) -> rax = 1 ok, 0 error
 ;; Emit every child of a node in order, each leaving one value on the stack.
 ;; ============================================================================
-CH_COMP  equ 8
-CH_UNIT  equ 16
-CH_NODE  equ 24
 CH_I     equ 32
 CH_N     equ 40
 CH_FRAME equ 40          ; + 3 pushes = 64
@@ -1319,7 +1301,6 @@ END_FUNC cg_has_star
 ;; ============================================================================
 CS_COMP  equ 8
 CS_UNIT  equ 16
-CS_NODE  equ 24
 CS_I     equ 32
 CS_N     equ 40
 CS_LINE  equ 48
@@ -1490,9 +1471,6 @@ END_FUNC cg_e_seq
 ;; with one BUILD_MAP and merged in, which is what keeps {**a, 1: 2} to two
 ;; DICT_UPDATEs rather than one per key.
 ;; ============================================================================
-CD_COMP  equ 8
-CD_UNIT  equ 16
-CD_NODE  equ 24
 CD_I     equ 32
 CD_N     equ 40
 CD_LINE  equ 48
@@ -1767,9 +1745,6 @@ END_FUNC cg_e_subscript
 ;; An omitted bound is None, which is what makes x[:n] and x[None:n] the same
 ;; thing to the sequence protocol.
 ;; ============================================================================
-CSL_COMP  equ 8
-CSL_UNIT  equ 16
-CSL_NODE  equ 24
 CSL_LINE  equ 32
 CSL_N     equ 40
 CSL_FRAME equ 40          ; + 3 pushes = 64
@@ -1869,16 +1844,12 @@ END_FUNC cg_e_slice
 ;; `**k`; then CALL_FUNCTION_EX.  A fixed-count CALL cannot absorb an iterable
 ;; whose length is unknown until run time.
 ;; ============================================================================
-CC2_COMP  equ 8
-CC2_UNIT  equ 16
-CC2_NODE  equ 24
 CC2_I     equ 32
 CC2_N     equ 40
 CC2_LINE  equ 48
 CC2_NPOS  equ 56
 CC2_NKW   equ 64
 CC2_CHILD equ 72
-CC2_MARK  equ 80
 CC2_EX    equ 88
 CC2_FRAME equ 104         ; + 3 pushes = 128
 DEF_FUNC_LOCAL cg_e_call, CC2_FRAME
@@ -2496,8 +2467,6 @@ END_FUNC cg_call_has_keyword
 ;; tuple takes its own reference to each name, so it survives independently of
 ;; the compilation that produced it.
 ;; ============================================================================
-KT_COMP  equ 8
-KT_NODE  equ 16
 KT_TUP   equ 24
 KT_I     equ 32
 KT_N     equ 40
@@ -2605,9 +2574,6 @@ END_FUNC cg_kwnames_tuple
 ;; it reuses this rather than a near-copy; a keyword there is `metaclass=M`,
 ;; which __build_class__ takes like any other.
 ;; ============================================================================
-CA_COMP  equ 8
-CA_UNIT  equ 16
-CA_NODE  equ 24
 CA_I     equ 32
 CA_N     equ 40
 CA_LINE  equ 48
@@ -2765,6 +2731,5 @@ cg_expr_table:
     dq cg_e_comprehension                ; 29 AST_GENEXP
     dq 0                ; 30 AST_COMPREHENSION
     times (AST_COUNT - 31) dq 0
-
 
 ASM_INIT

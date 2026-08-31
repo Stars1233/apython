@@ -384,8 +384,6 @@ END_FUNC sre_category
 ; Check if ch is in a character set (IN opcode's set data).
 ; Set format: sequence of (opcode, args...) terminated by SRE_OP_FAILURE.
 ; ============================================================================
-SM_CH     equ 8
-SM_SET    equ 16
 SM_FRAME  equ 16
 
 DEF_FUNC sre_charset, SM_FRAME
@@ -1397,13 +1395,6 @@ END_FUNC sre_string_len
 ; ============================================================================
 SM_STATE     equ 8
 SM_PATTERN   equ 16
-SM_SAVE_POS  equ 24
-SM_SAVE_MARKS equ 32        ; ptr to saved marks snapshot
-SM_SAVE_MARKS_SZ equ 40
-SM_SAVE_LASTMARK equ 48
-SM_SAVE_LASTINDEX equ 56
-SM_RPT_CTX   equ 64          ; repeat context (on stack)
-SM_RPT_END   equ 96          ; end of repeat context (32 bytes)
 SM_MFRAME    equ 96
 
 DEF_FUNC sre_match, SM_MFRAME

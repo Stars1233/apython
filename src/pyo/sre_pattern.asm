@@ -1342,7 +1342,6 @@ END_FUNC sre_pattern_subn_method
 SP_PAT      equ 8
 SP_STR      equ 16
 SP_MAX      equ 24
-SP_LIST     equ 32
 SP_NSPLIT   equ 40
 SP_LASTEND  equ 48
 SP_STATE    equ 48 + SRE_State_size  ; state base at BOTTOM of frame

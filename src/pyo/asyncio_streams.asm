@@ -1094,10 +1094,8 @@ END_FUNC _stream_strcmp
 section .rodata
 srn_read:       db "read", 0
 srn_readline:   db "readline", 0
-srn_close:      db "close", 0
 swn_write:      db "write", 0
 swn_drain:      db "drain", 0
-swn_close:      db "close", 0
 
 stream_reader_name: db "StreamReader", 0
 stream_writer_name: db "StreamWriter", 0

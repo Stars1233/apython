@@ -706,7 +706,6 @@ END_FUNC tb_print_one
 ;; The File/line/source/caret block a syntax error is printed with.  Does
 ;; nothing for anything else, or for a syntax error with no location.
 ;; ============================================================================
-SH_EXC   equ 8
 SH_INNER equ 16
 SH_TEXT  equ 24
 SH_COL   equ 32

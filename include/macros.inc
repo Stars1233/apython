@@ -113,18 +113,6 @@
     %%skip:
 %endmacro
 
-%macro XDECREF 1
-    test %1, %1
-    jz %%skip
-    dec qword [%1 + PyObject.ob_refcnt]
-    jnz %%skip
-    push rdi
-    mov rdi, %1
-    call obj_dealloc
-    pop rdi
-    %%skip:
-%endmacro
-
 ; Opcode dispatch - inline decode + jump (direct threading)
 ; Each DISPATCH site gets its own BTB entry for better branch prediction.
 ; Falls back to centralized eval_dispatch when tracing is enabled.
@@ -136,11 +124,6 @@
     add rbx, 2                     ; advance past instruction word
     lea rdx, [rel opcode_table]
     jmp [rdx + rax*8]             ; dispatch to handler
-%endmacro
-
-; Declare extern libc function
-%macro EXTERN_C 1
-    extern %1
 %endmacro
 
 ; Align stack to 16 bytes before call (System V ABI requirement)
@@ -177,7 +160,6 @@
     mov %1, [rel eval_co_names]
 %endmacro
 
-
 ; ==========================================================================
 ; LEGACY (payload, tag) SUPPORT — being retired
 ; ==========================================================================
@@ -196,9 +178,7 @@
 ; False are the immortal heap singletons and travel as TAG_PTR.
 TAG_NULL     equ 0           ; null/empty slot
 TAG_SMALLINT equ 1           ; payload = int64_t (full 64-bit range)
-TAG_I64      equ TAG_SMALLINT
 TAG_FLOAT    equ 2           ; payload = double bits (IEEE 754)
-TAG_F64      equ TAG_FLOAT
 TAG_RC_BIT   equ 0x80        ; bit 7: refcounted flag
 TAG_PTR      equ (5 | TAG_RC_BIT)    ; heap PyObject*, refcounted
 TAG_SLEEP    equ 7           ; payload = delay_ns (uint64) — async sleep sentinel
@@ -594,7 +574,6 @@ TP_DICT_AT_TAIL equ -1
 
 ; Mark stack as non-executable and reset to .text section
 ASM_INIT
-
 
 ; MRO_NEXT walker, origin -- advance `walker` to the next entry of `origin`'s
 ; method resolution order, or 0 at the end.  For a type with no tp_mro (every

@@ -70,7 +70,6 @@ DEF_FUNC builtin_abs
     V_TEST_F64_M [rdi], r11      ; args[0] a float?
     jbe .abs_inline_float
 
-
     V_TEST_PTR_M [rdi], r11      ; args[0] a pointer?
     ja .abs_type_error
 
@@ -431,7 +430,6 @@ DEF_FUNC builtin_int_fn, BI_FRAME
 
     V_TEST_F64_M [rdi], r11      ; args[0] a float?
     jbe .int_from_inline_float
-
 
     ; Must be TAG_PTR to dereference
     V_TEST_PTR_M [rdi], r11      ; args[0] a pointer?
@@ -1523,8 +1521,6 @@ END_FUNC builtin_chr
 ; ============================================================================
 ; 6. builtin_hex(args, nargs) - hex(n)
 ; ============================================================================
-PFX_STR   equ 8
-PFX_FRAME equ 16
 HEXB_VAL   equ 8
 HEXB_STR   equ 16
 HEXB_OUT   equ 24
@@ -1619,7 +1615,6 @@ END_FUNC builtin_hex
 ; builtin_eval_fn used to live here: a stub that parsed a single integer
 ; literal and raised ValueError for anything else.  It is now a real
 ; evaluator in compiler/evalexec.asm, backed by the source compiler.
-
 
 ; ============================================================================
 ; builtin_round_fn(args, nargs) - round(number[, ndigits])
@@ -2178,7 +2173,6 @@ END_FUNC builtin_pow_fn
 ; Returns binary string representation: '0b...' or '-0b...'
 ; ============================================================================
 global builtin_bin
-BIN_PFX_STR equ 8
 BINB_VAL   equ 8
 BINB_STR   equ 16
 BINB_OUT   equ 24
@@ -2275,7 +2269,6 @@ END_FUNC builtin_bin
 ; Returns octal string representation: '0o...' or '-0o...'
 ; ============================================================================
 global builtin_oct
-OCT_PFX_STR equ 8
 OCTB_VAL   equ 8
 OCTB_STR   equ 16
 OCTB_OUT   equ 24

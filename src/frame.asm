@@ -350,7 +350,6 @@ FTL_DICT    equ 16
 FTL_NAMES   equ 24
 FTL_I       equ 32
 FTL_N       equ 40
-FTL_SIZE    equ 48        ; + 1 push = 56... padded below
 FTL_FRAME   equ 56        ; + 1 push = 64
 global frame_fast_to_locals
 extern dict_new

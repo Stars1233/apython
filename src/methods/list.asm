@@ -8,7 +8,6 @@
 %include "object.inc"
 %include "opcodes.inc"
 
-
 ; External functions
 extern ap_malloc
 extern ap_free
@@ -1336,7 +1335,6 @@ END_FUNC list_method_sort
 ;; ============================================================================
 LI_LIST   equ 8
 LI_VPAY   equ 16   ; value payload
-LI_VTAG   equ 24   ; value tag
 LI_IDX    equ 32
 LI_SIZE   equ 40
 LI_ARGS   equ 48   ; save args pointer

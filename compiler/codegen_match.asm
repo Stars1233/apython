@@ -63,9 +63,6 @@ section .text
 ;; ============================================================================
 ;; cg_s_match(Comp *c, CompUnit *u, uint32_t node) -> 1 ok, 0 error
 ;; ============================================================================
-SM_COMP  equ 8
-SM_UNIT  equ 16
-SM_NODE  equ 24
 SM_LINE  equ 32
 SM_I     equ 40
 SM_N     equ 48
@@ -214,9 +211,6 @@ END_FUNC cg_s_match
 ;; Consumes the value on top of the stack; falls through on a match, jumps to
 ;; `fail` on a mismatch.  See the contract at the top of the file.
 ;; ============================================================================
-CP3_COMP  equ 8
-CP3_UNIT  equ 16
-CP3_NODE  equ 24
 CP3_FAIL  equ 32
 CP3_LINE  equ 40
 CP3_KIND  equ 48
@@ -437,9 +431,6 @@ END_FUNC cg_pattern
 ;; `p1 | p2 | ...`.  Every alternative but the last matches against a copy, so
 ;; a failure still leaves the subject for the next one; the last consumes it.
 ;; ============================================================================
-PR_COMP  equ 8
-PR_UNIT  equ 16
-PR_NODE  equ 24
 PR_FAIL  equ 32
 PR_LINE  equ 40
 PR_I     equ 48
@@ -552,7 +543,6 @@ END_FUNC cg_pat_or
 ;; n jumps to labels[n-1-k], because that is how many of its siblings are still
 ;; on the stack when it gives up.
 ;; ============================================================================
-LD_UNIT  equ 8
 LD_LABS  equ 16
 LD_N     equ 24
 LD_FAIL  equ 32
@@ -616,8 +606,6 @@ PAT_MAX_ITEMS equ 64
 ;; two failures still have the subject to drop -- that is ladder depth 1.
 ;; ============================================================================
 PS2_COMP  equ 8
-PS2_UNIT  equ 16
-PS2_NODE  equ 24
 PS2_FAIL  equ 32
 PS2_LINE  equ 40
 PS2_I     equ 48
@@ -822,9 +810,6 @@ END_FUNC cg_pat_sequence
 ;; sub-patterns come first in that tuple and the keyword ones follow, which is
 ;; the order the parser already put them in.
 ;; ============================================================================
-PK2_COMP  equ 8
-PK2_UNIT  equ 16
-PK2_NODE  equ 24
 PK2_FAIL  equ 32
 PK2_LINE  equ 40
 PK2_I     equ 48
@@ -1001,9 +986,6 @@ END_FUNC cg_pat_class
 ;;                uint64_t n) -> rax = 1 + the const index, or 0 on error
 ;; The tuple of keyword names MATCH_CLASS reads, built at compile time.
 ;; ============================================================================
-KN_COMP  equ 8
-KN_UNIT  equ 16
-KN_NODE  equ 24
 KN_NPOS  equ 32
 KN_N     equ 40
 KN_TUPLE equ 48
@@ -1092,9 +1074,6 @@ END_FUNC cg_pat_kwnames
 ;; same place through a run of SWAPs that keeps everything on the stack; going
 ;; through a plain copy is shorter and does the same thing.
 ;; ============================================================================
-PM2_COMP  equ 8
-PM2_UNIT  equ 16
-PM2_NODE  equ 24
 PM2_FAIL  equ 32
 PM2_LINE  equ 40
 PM2_I     equ 48
@@ -1324,9 +1303,6 @@ END_FUNC cg_pat_mapping
 ;;     for each key: COPY 1; LOAD_CONST k; DELETE_SUBSCR
 ;;     STORE rest
 ;; ============================================================================
-PT3_COMP  equ 8
-PT3_UNIT  equ 16
-PT3_NODE  equ 24
 PT3_LINE  equ 32
 PT3_I     equ 40
 PT3_N     equ 48
@@ -1425,9 +1401,6 @@ END_FUNC cg_pat_rest
 ;; literals or dotted names -- but only literals can be folded into a tuple
 ;; here, which is why a non-literal key is rejected rather than emitted.
 ;; ============================================================================
-PY2_COMP  equ 8
-PY2_UNIT  equ 16
-PY2_NODE  equ 24
 PY2_TUPLE equ 32
 PY2_I     equ 40
 PY2_N     equ 48

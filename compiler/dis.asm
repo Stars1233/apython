@@ -26,10 +26,8 @@ extern op_meta
 extern sys_write
 
 ; --- Named frame-layout constants ---
-DS_CODE  equ 8
 DS_OFF   equ 16
 DS_ARG   equ 24
-DS_NUM   equ 56          ; a 32-byte scratch buffer at [rbp - 56]
 DS_FRAME equ 56          ; + 5 pushes = 96
 
 section .text
@@ -190,7 +188,6 @@ DEF_FUNC code_disassemble, DS_FRAME
     ret
 END_FUNC code_disassemble
 
-
 ;; ============================================================================
 ;; dis_main(const char *expr) -> rax = exit status
 ;; Compiles one expression and prints its bytecode.
@@ -247,7 +244,6 @@ section .text
 ;; A table that reads back wrong here is the fastest signal that the encoder
 ;; and the decoder disagree.
 ;; ============================================================================
-DX_CODE  equ 8
 DX_POS   equ 16
 DX_LEN   equ 24
 DX_DATA  equ 32
@@ -351,7 +347,6 @@ section .text
 ;; method or a comprehension is invisible from the module's own bytecode, so
 ;; the recursion is the point.
 ;; ============================================================================
-DA_CODE  equ 8
 DA_I     equ 16
 DA_FRAME equ 32           ; + 2 pushes = 40
 DEF_FUNC code_dump_all, DA_FRAME

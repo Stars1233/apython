@@ -329,7 +329,6 @@ DEF_FUNC dunder_call_3
     ret
 END_FUNC dunder_call_3
 
-
 ;; ============================================================================
 ;; obj_call_n(Value callable, Value *args, uint64_t nargs) -> Value, or 0
 ;;
@@ -346,8 +345,6 @@ END_FUNC dunder_call_3
 OCN_MAX equ 8
 
 OCN_FN    equ 8
-OCN_ARGS  equ 16
-OCN_NARGS equ 24
 OCN_BUF   equ 32 + (OCN_MAX + 1) * 8
 OCN_FRAME equ ((OCN_BUF + 15) / 16) * 16 + 8    ; + 3 pushes = 16-aligned
 DEF_FUNC obj_call_n, OCN_FRAME
@@ -518,17 +515,14 @@ dunder_or:       db "__or__", 0
 dunder_xor:      db "__xor__", 0
 dunder_lshift:   db "__lshift__", 0
 dunder_rshift:   db "__rshift__", 0
-dunder_neg:      db "__neg__", 0
 dunder_iter:     db "__iter__", 0
 dunder_next:     db "__next__", 0
 dunder_getitem:  db "__getitem__", 0
 dunder_setitem:  db "__setitem__", 0
-dunder_delitem:  db "__delitem__", 0
 dunder_contains: db "__contains__", 0
 dunder_len:      db "__len__", 0
 dunder_bool:     db "__bool__", 0
 dunder_call:     db "__call__", 0
-dunder_hash:     db "__hash__", 0
 dunder_iadd:     db "__iadd__", 0
 dunder_isub:     db "__isub__", 0
 dunder_imul:     db "__imul__", 0
@@ -553,7 +547,6 @@ dunder_str:      db "__str__", 0
 dunder_matmul:   db "__matmul__", 0
 dunder_get:      db "__get__", 0
 dunder_set:      db "__set__", 0
-dunder_delete:   db "__delete__", 0
 dunder_del:      db "__del__", 0
 
 ; Compare op -> dunder name lookup table

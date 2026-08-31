@@ -6,7 +6,6 @@
 %include "macros.inc"
 %include "object.inc"
 
-
 extern ap_malloc
 extern gc_alloc
 extern gc_track
@@ -957,7 +956,6 @@ END_FUNC builtin_map
 ;; Supports multiple iterables: calls func(next(it1), next(it2), ...)
 ;; IMPORTANT: Do not clobber r12 before calling tp_call, because func_call
 ;; reads r12 expecting the eval loop's current frame pointer.
-MI_SELF    equ 8
 MI_ARGS    equ 16     ; pointer to the Value args array on the stack
 MI_ASIZE   equ 24     ; bytes reserved for it
 MI_FRAME   equ 32

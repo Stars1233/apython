@@ -24,7 +24,6 @@
 extern uniname_blob
 extern uniname_blob_end
 extern uniname_cp
-extern uniname_count
 extern uniname_cjk_ranges
 extern uniname_cjk_ranges_end
 

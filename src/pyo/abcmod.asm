@@ -156,7 +156,6 @@ DEF_FUNC abc_get_cache_token
     ret
 END_FUNC abc_get_cache_token
 
-
 ; ----------------------------------------------------------------------------
 ; abc_getattr(rdi = object Value, rsi = name str) -> rax = Value, or 0
 ; Whatever tp_getattr the object's type offers, else its type's tp_dict.
@@ -248,7 +247,6 @@ CA_CLS   equ 8
 CA_SET   equ 16
 CA_IDX   equ 24
 CA_DICT  equ 32
-CA_BASE  equ 40
 CA_KEY   equ 48
 CA_FRAME equ 64
 DEF_FUNC_LOCAL abc_compute_abstracts, CA_FRAME

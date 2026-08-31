@@ -500,7 +500,6 @@ END_FUNC seq_repeat_check_count
 ; raise_no_attribute(rdi = object Value, rsi = attribute-name str, edx = 1 for
 ; a set, 0 for a get) -- raises the AttributeError CPython raises.  Does not
 ; return.
-RNA_OBJ  equ 8
 RNA_NAME equ 16
 RNA_FRAME equ 16
 extern str_type

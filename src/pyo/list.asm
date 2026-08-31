@@ -1632,7 +1632,6 @@ END_FUNC list_inplace_concat
 ;; nb_imul / sq_inplace_repeat: repeat left list in-place by right integer
 ;; Returns (left, TAG_PTR) — same object.
 ;; ============================================================================
-LIR_SELF    equ 8
 LIR_OLDSIZE equ 16
 LIR_FRAME   equ 16
 DEF_FUNC list_inplace_repeat, LIR_FRAME

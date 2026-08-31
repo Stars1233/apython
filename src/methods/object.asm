@@ -14,7 +14,6 @@
 %include "object.inc"
 %include "opcodes.inc"
 
-
 ; External functions
 extern obj_decref
 extern obj_repr
@@ -59,7 +58,6 @@ section .text
 ;; `type(object.__init__)` and `type(object().__str__)`, so these have to be
 ;; reachable before it can import -- and `super().__init__()` in a class that
 ;; derives straight from object needs the first one anyway.
-
 
 ;; ============================================================================
 ;; scalar_dunder_new(args, nargs) -> Value   -- int.__new__ / str.__new__
@@ -217,7 +215,6 @@ DEF_FUNC object_method_reduce
     call raise_exception
 END_FUNC object_method_reduce
 
-
 ;; ============================================================================
 extern str_from_cstr
 DEF_FUNC object_method_init
@@ -331,7 +328,6 @@ DEF_FUNC object_method_init_subclass
     CSTRING rsi, "__init_subclass__() takes no keyword arguments"
     call raise_exception
 END_FUNC object_method_init_subclass
-
 
 ;; ============================================================================
 ;; A builtin's own __str__ and __repr__, reachable by name.
@@ -458,12 +454,9 @@ DEF_DUNDER_STRREPR bytes, repr
 DEF_DUNDER_STRREPR int, repr
 DEF_DUNDER_STRREPR float, repr
 
-
 ;; ############################################################################
 ;;                         SET METHODS
 ;; ############################################################################
-
-
 
 ;; ============================================================================
 ;; Slot-backed dunder methods
@@ -474,8 +467,6 @@ DEF_DUNDER_STRREPR float, repr
 ;; definition time -- raised AttributeError.  One implementation per slot,
 ;; dispatching through whatever the receiver's type provides.
 ;; ============================================================================
-
-
 
 ;; object.__eq__ / __ne__ / __hash__ and the ordering four.
 ;;
@@ -625,15 +616,6 @@ DEF_FUNC object_method_ne
     call raise_exception
 END_FUNC object_method_ne
 
-DEF_FUNC object_method_notimpl
-    lea rax, [rel notimpl_singleton]
-    inc qword [rax + PyObject.ob_refcnt]
-    mov edx, TAG_PTR
-    leave
-    V_PACK rax, rdx
-    ret
-END_FUNC object_method_notimpl
-
 ;; The address, which is what obj_hash falls back to when a type has no
 ;; tp_hash -- reached directly so that a heaptype's slot cannot bounce back.
 DEF_FUNC object_method_hash
@@ -648,7 +630,6 @@ DEF_FUNC object_method_hash
     CSTRING rsi, "__hash__() takes no arguments"
     call raise_exception
 END_FUNC object_method_hash
-
 
 ;; generic_method_getitem(args, nargs): args[0]=self, args[1]=key
 DEF_FUNC generic_method_getitem
@@ -687,7 +668,6 @@ DEF_FUNC generic_method_getitem
     CSTRING rsi, "object is not subscriptable"
     call raise_exception
 END_FUNC generic_method_getitem
-
 
 ;; ============================================================================
 ;; dict.__getitem__ / __setitem__ / __delitem__

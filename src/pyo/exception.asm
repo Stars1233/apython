@@ -55,7 +55,6 @@ extern exc_ExceptionGroup_type
 ; msg_str is INCREFed. type is stored but not INCREFed (types are immortal).
 ; rdx = msg_tag (TAG_PTR for heap objs, TAG_SMALLINT for ints, 0 for NULL).
 EN_EXC equ 8
-EN_MSG equ 16
 EN_FRAME equ 16
 DEF_FUNC exc_new, EN_FRAME
     push rbx

@@ -782,8 +782,6 @@ END_FUNC gen_send
 ;; On yield: return yielded value. On exhaustion: return NULL.
 ;; rdi = generator, rsi = exc_type (PyTypeObject*)
 ;; ============================================================================
-GT_GEN   equ 8
-GT_EXC   equ 16
 GT_SAVED_EXC equ 24    ; the caller's pending exception, put aside
 GT_FRAME equ 32
 DEF_FUNC gen_throw, GT_FRAME

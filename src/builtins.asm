@@ -280,7 +280,6 @@ PR_SEP_TAG   equ 16    ; sep tag
 PR_END       equ 24    ; end string ptr (0 = default "\n")
 PR_END_TAG   equ 32    ; end tag
 PR_FILE_FD   equ 40    ; file descriptor (1 = stdout)
-PR_BUF       equ 48    ; start of 4096 byte buffer
 PR_FRAME     equ 4144  ; total frame size (48 + 4096)
 
 extern kw_names_pending
@@ -1500,7 +1499,6 @@ END_FUNC add_builtin
 ;; ============================================================================
 ABS_DICT equ 8
 ABS_KEY  equ 16
-ABS_VAL  equ 24
 ABS_FRAME equ 24
 DEF_FUNC_LOCAL add_builtin_str, ABS_FRAME
     push rbx

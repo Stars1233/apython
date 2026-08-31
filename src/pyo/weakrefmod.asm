@@ -363,7 +363,6 @@ DEF_FUNC ref_deref
 END_FUNC ref_deref
 
 RR_SELF  equ 8
-RR_LEN   equ 16
 RR_BUF   equ 1040
 RR_FRAME equ 1056
 DEF_FUNC_LOCAL ref_repr, RR_FRAME

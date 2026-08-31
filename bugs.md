@@ -136,6 +136,18 @@ than lying — but they are ordinary Python that does not work:
 
 ## Robustness
 
+- **Iterators are not GC-tracked, so a cycle through one leaks.**
+  `list_iter_type`, `tuple_iter_type`, `dict_iter_type` and the dict views have
+  `tp_flags` 0 with no `tp_traverse`/`tp_clear`, and their objects come from
+  `ap_malloc` rather than `gc_alloc`.  An iterator holds a strong reference to
+  the container it walks, so `a = []; a.append(iter(a))` is a cycle the
+  collector cannot see.  `src/gc.asm` used to carry eight traverse/clear
+  callbacks for exactly these types; none was ever installed in a slot, so they
+  were deleted rather than left looking like working code.  Wiring them up
+  means switching those four types to `gc_alloc` + `gc_track` and setting
+  `TYPE_FLAG_HAVE_GC`.
+
+
 - **Recursive deallocation overflows the stack**: `a=[]`, then 300k times
   `a=[a]`, then `del a`.  Needs a trashcan mechanism.
 
@@ -192,11 +204,6 @@ whoever copies a neighbouring file.
   debt first, which is why the scan list is what it is (`lint.py:239-242`).
   NASM itself is run with no warning flags, so nothing else catches any of it.
 
-- **Nine macros have no call sites**: `XDECREF`, `EXTERN_C` (`include/macros.inc`),
-  `V_IS_PTR`, `V_HIGH16`, `V_NONE`, `V_TRUE`, `V_FALSE` (`include/value.inc`),
-  `GC_FROM_OBJ`, `OBJ_FROM_GC` (`include/object.inc`).  They read as available API
-  and are untested; either use or delete.
-
 - **Two macro comments describe behaviour the macro does not have.**
   `include/macros.inc:130` says `DISPATCH` "falls back to centralized
   `eval_dispatch` when tracing is enabled" — it does not test `trace_opcodes` at
@@ -209,12 +216,6 @@ whoever copies a neighbouring file.
   `dict.asm` says `dict_obj.asm`; likewise `bytes`, `class`, `code`, `int`,
   `iter`, `list`, `str` and `tuple`.  A one-line fix each, but the header is
   the first thing read.
-
-- **The `CACHE_*` constants in `include/opcodes.inc` have no references.**  Every
-  handler hardcodes `add rbx, 2*N` with a `; skip N CACHE entries` comment
-  instead, so the count is duplicated at each site and nothing checks it against
-  the header.  Either use the constants or delete them; a wrong count resumes
-  execution mid-instruction.
 
 - **Some docblocks describe a thin return where the function returns a fat
   pair.**  `src/builtins.asm:652` documents

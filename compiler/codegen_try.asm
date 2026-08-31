@@ -64,9 +64,6 @@ CG_FINEND_MARK equ 0x7ffffffc
 CG_POPVAL_MARK equ 0x7ffffffb
 
 ; --- Named frame-layout constants ---
-CT2_COMP  equ 8
-CT2_UNIT  equ 16
-CT2_NODE  equ 24
 CT2_LINE  equ 32
 CT2_END   equ 40
 CT2_EXC   equ 48
@@ -146,8 +143,6 @@ END_FUNC cg_finally_push_here
 ;; __exit__ functions.  It is, for `return expr`, and the call has to reach past
 ;; it -- hence the SWAP.
 ;; ============================================================================
-UF_COMP  equ 8
-UF_UNIT  equ 16
 UF_DOWN  equ 24
 UF_I     equ 32
 UF_VAL   equ 40
@@ -687,7 +682,6 @@ END_FUNC cg_s_try
 ;; The three instructions every protected handler falls back to: restore the
 ;; previous exception state and re-raise.
 ;; ============================================================================
-XC_UNIT  equ 8
 XC_LABEL equ 16
 XC_LINE  equ 24
 XC_FRAME equ 32           ; + 2 pushes = 48
@@ -835,9 +829,6 @@ END_FUNC cg_except_clauses
 ;; does not let the name outlive the handler -- and the deletion has to happen
 ;; on the exceptional path too, which is the inner region here.
 ;; ============================================================================
-OE_COMP  equ 8
-OE_UNIT  equ 16
-OE_NODE  equ 24
 OE_END   equ 32
 OE_NEXT  equ 40
 OE_LINE  equ 48
@@ -1010,8 +1001,6 @@ END_FUNC cg_one_except
 ;; cg_clear_exc_name(Comp *c, CompUnit *u, uint32_t nameobj, int line)
 ;; `e = None; del e`, which is what Python does at the end of an except clause.
 ;; ============================================================================
-CE2_COMP  equ 8
-CE2_UNIT  equ 16
 CE2_NAME  equ 24
 CE2_LINE  equ 32
 CE2_FRAME equ 40          ; + 3 pushes = 64
@@ -1080,16 +1069,9 @@ END_FUNC cg_clear_exc_name
 ;; the first occupies the self slot, which is why CALL's oparg is 2 for three
 ;; operands.  Multiple items nest, innermost last.
 ;; ============================================================================
-CW_COMP  equ 8
-CW_UNIT  equ 16
-CW_NODE  equ 24
 CW_LINE  equ 32
 CW_I     equ 40
 CW_N     equ 48
-CW_ITEM  equ 56
-CW_EXC   equ 64
-CW_CLEAN equ 72
-CW_SUPP  equ 80
 CW_FRAME equ 88           ; + 3 pushes = 112
 DEF_FUNC cg_s_with, CW_FRAME
     push rbx
@@ -1125,8 +1107,6 @@ END_FUNC cg_s_with
 ;; inside it.  Recursion is the natural shape here: `with a, b:` is exactly
 ;; `with a: with b:`.
 ;; ============================================================================
-WI_COMP  equ 8
-WI_NODE  equ 16
 WI_I     equ 24
 WI_UNIT  equ 32
 WI_LINE  equ 40
@@ -1410,7 +1390,6 @@ END_FUNC cg_with_item
 ;; async manager's __aexit__ returns an awaitable, so the result is driven to
 ;; completion before it is discarded.
 ;; ============================================================================
-CX_UNIT  equ 8
 CX_LINE  equ 16
 CX_I     equ 24
 CX_ASYNC equ 32
@@ -1486,9 +1465,6 @@ extern exc_SyntaxError_type
 global cg_except_star_clauses
 
 ; --- cg_except_star_clauses ---
-ES_COMP  equ 8
-ES_UNIT  equ 16
-ES_NODE  equ 24
 ES_END   equ 32
 ES_LINE  equ 40
 ES_H     equ 48
@@ -1669,9 +1645,6 @@ END_FUNC cg_except_star_clauses
 ;; One `except*` clause.  Entered with the unmatched remainder on top; leaves
 ;; the new remainder there, matched or not.
 ;; ============================================================================
-OS_COMP  equ 8
-OS_UNIT  equ 16
-OS_NODE  equ 24
 OS_LINE  equ 40
 OS_NAME  equ 48
 OS_NEXT  equ 56
@@ -1910,7 +1883,6 @@ section .text
 ;; the jump removed.  Nothing reaches it by fallthrough, because
 ;; JUMP_BACKWARD_NO_INTERRUPT does not fall through.
 ;; ============================================================================
-SL_UNIT   equ 8
 SL_LINE   equ 16
 SL_RESUME equ 24
 SL_TOP    equ 32
@@ -1997,7 +1969,6 @@ END_FUNC cg_send_loop
 ;; which only affects the message in the TypeError it raises: 0 for a plain
 ;; `await`, 1 for __aenter__, 2 for __aexit__.
 ;; ============================================================================
-AV_UNIT  equ 8
 AV_LINE  equ 16
 AV_FRAME equ 24           ; + 1 push = 32
 DEF_FUNC cg_await_value, AV_FRAME
@@ -2033,8 +2004,6 @@ END_FUNC cg_await_value
 ;; ============================================================================
 ;; cg_e_await(Comp *c, CompUnit *u, uint32_t node) -> 1 ok, 0 error
 ;; ============================================================================
-EA_COMP  equ 8
-EA_UNIT  equ 16
 EA_LINE  equ 24
 EA_FRAME equ 40           ; + 3 pushes = 64
 DEF_FUNC cg_e_await, EA_FRAME
@@ -2087,9 +2056,6 @@ END_FUNC cg_e_await
 ;; iterator with it, and re-raises anything else.  The region deliberately ends
 ;; before the target store, so an exception from the body is the caller's.
 ;; ============================================================================
-AF_COMP  equ 8
-AF_UNIT  equ 16
-AF_NODE  equ 24
 AF_LINE  equ 32
 AF_TOP   equ 40
 AF_EXC   equ 48

@@ -833,8 +833,6 @@ END_FUNC tuple_clear
 ; ---- dict_traverse / dict_clear ----
 extern ap_memset
 
-DICT_TOMBSTONE_GC equ 0xFF
-
 DEF_FUNC dict_traverse
     push rbx
     push r12
@@ -1528,90 +1526,6 @@ DEF_FUNC slice_clear_gc
 END_FUNC slice_clear_gc
 
 ; ---- Iterator traverse functions (visit the underlying container ref) ----
-DEF_FUNC list_iter_traverse
-    mov rdi, [rdi + PyListIterObject.it_seq]
-    VISIT_PTR rdi
-    leave
-    ret
-END_FUNC list_iter_traverse
-
-DEF_FUNC list_iter_clear
-    push rbx
-    mov rbx, rdi
-    mov rdi, [rbx + PyListIterObject.it_seq]
-    mov qword [rbx + PyListIterObject.it_seq], 0
-    test rdi, rdi
-    jz .done
-    call obj_decref
-.done:
-    pop rbx
-    leave
-    ret
-END_FUNC list_iter_clear
-
-DEF_FUNC tuple_iter_traverse
-    mov rdi, [rdi + PyTupleIterObject.it_seq]
-    VISIT_PTR rdi
-    leave
-    ret
-END_FUNC tuple_iter_traverse
-
-DEF_FUNC tuple_iter_clear
-    push rbx
-    mov rbx, rdi
-    mov rdi, [rbx + PyTupleIterObject.it_seq]
-    mov qword [rbx + PyTupleIterObject.it_seq], 0
-    test rdi, rdi
-    jz .done
-    call obj_decref
-.done:
-    pop rbx
-    leave
-    ret
-END_FUNC tuple_iter_clear
-
-DEF_FUNC dict_iter_traverse
-    mov rdi, [rdi + PyDictIterObject.it_dict]
-    VISIT_PTR rdi
-    leave
-    ret
-END_FUNC dict_iter_traverse
-
-DEF_FUNC dict_iter_clear
-    push rbx
-    mov rbx, rdi
-    mov rdi, [rbx + PyDictIterObject.it_dict]
-    mov qword [rbx + PyDictIterObject.it_dict], 0
-    test rdi, rdi
-    jz .done
-    call obj_decref
-.done:
-    pop rbx
-    leave
-    ret
-END_FUNC dict_iter_clear
-
-DEF_FUNC dict_view_traverse
-    mov rdi, [rdi + PyDictViewObject.dv_dict]
-    VISIT_PTR rdi
-    leave
-    ret
-END_FUNC dict_view_traverse
-
-DEF_FUNC dict_view_clear
-    push rbx
-    mov rbx, rdi
-    mov rdi, [rbx + PyDictViewObject.dv_dict]
-    mov qword [rbx + PyDictViewObject.dv_dict], 0
-    test rdi, rdi
-    jz .done
-    call obj_decref
-.done:
-    pop rbx
-    leave
-    ret
-END_FUNC dict_view_clear
-
 ; ---- task_traverse / task_clear ----
 DEF_FUNC task_traverse
     push rbx

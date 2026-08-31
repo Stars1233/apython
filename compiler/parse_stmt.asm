@@ -49,7 +49,6 @@ BP_NONE equ 0
 BP_COMPARE equ 12
 
 ; --- Named frame-layout constants ---
-PM_COMP  equ 8
 PM_MARK  equ 16
 PM_LINE  equ 24
 PM_FRAME equ 24          ; + 1 push = 32
@@ -224,7 +223,6 @@ END_FUNC par_statement
 ;; An expression, an assignment, an augmented assignment or an annotated one --
 ;; decided by what follows the first expression rather than by lookahead.
 ;; ============================================================================
-PE2_COMP  equ 8
 PE2_FIRST equ 16
 PE2_LINE  equ 24
 PE2_MARK  equ 32
@@ -438,7 +436,6 @@ END_FUNC par_expr_stmt
 ;; An expression, or a bare comma-separated tuple: `a, b` and `x = 1, 2` both
 ;; need one, and neither has brackets to delimit it.
 ;; ============================================================================
-PX2_COMP  equ 8
 PX2_FIRST equ 16
 PX2_LINE  equ 24
 PX2_MARK  equ 32
@@ -555,7 +552,6 @@ END_FUNC par_augop
 ;; returns a node, or 0 with an error recorded.
 ;; ============================================================================
 
-PK_COMP  equ 8
 PK_LINE  equ 16
 PK_A     equ 24
 PK_B     equ 32
@@ -840,7 +836,6 @@ END_FUNC ps_raise
 ;; place that can do it.  By the time the symbol table runs, the class the
 ;; mangling depends on is gone.
 ;; ============================================================================
-PBN_COMP  equ 8
 PBN_FRAME equ 24          ; + 1 push = 32
 DEF_FUNC_LOCAL par_bound_name, PBN_FRAME
     push rbx
@@ -881,7 +876,6 @@ END_FUNC par_bound_name
 ;; par_dotted_name(Comp *c) -> rax = obj index of the joined name, 0 on error
 ;; `a.b.c` becomes the single string "a.b.c", which is what IMPORT_NAME wants.
 ;; ============================================================================
-PDN_SELF  equ 8
 PDN_BUF   equ 48         ; a Buf at [rbp - 48]
 PDN_FRAME equ 56         ; + 3 pushes = 80
 DEF_FUNC par_dotted_name, PDN_FRAME
@@ -1268,7 +1262,6 @@ END_FUNC ps_from
 ;; block node exists so an empty `else` and a missing one stay distinguishable:
 ;; node 0 means there was no clause at all.
 ;; ============================================================================
-PSU_COMP  equ 8
 PSU_MARK  equ 16
 PSU_LINE  equ 24
 PSU_FRAME equ 24          ; + 1 push = 32
@@ -1419,7 +1412,6 @@ END_FUNC par_statement_any
 ;; which is what makes an arbitrarily long chain need no special handling in
 ;; either the parser or the code generator.
 ;; ============================================================================
-PIF_COMP  equ 8
 PIF_LINE  equ 16
 PIF_TEST  equ 24
 PIF_BODY  equ 32
@@ -1581,9 +1573,6 @@ END_FUNC ps_while
 ;; assignment target is -- `for a, b in pairs` unpacks for the same reason
 ;; `a, b = pair` does.
 ;; ============================================================================
-PFO_TGT   equ 64
-PFO_ITER  equ 72
-PFO_FRAME equ 80          ; + 1 push = 88 -- see below
 DEF_FUNC_LOCAL ps_for, PIF_FRAME
     push rbx
     mov rbx, rdi
@@ -1662,7 +1651,6 @@ END_FUNC ps_for
 ;; par_for_target(Comp *c) -> node, marked for storing
 ;; Stops at `in`, which par_expr would otherwise take as a comparison.
 ;; ============================================================================
-PFT_COMP  equ 8
 PFT_FIRST equ 16
 PFT_LINE  equ 24
 PFT_MARK  equ 32
@@ -1756,7 +1744,6 @@ END_FUNC par_for_target
 ;;   .c      the **kwargs parameter, or 0
 ;;   .clist  positional parameters, then keyword-only ones
 ;; ============================================================================
-PP_COMP   equ 8
 PP_CLOSE  equ 16
 PP_LINE   equ 24
 PP_MARK   equ 32
@@ -1928,7 +1915,6 @@ END_FUNC par_params
 ;; par_one_param(Comp *c) -> rax = an AST_ARG node, 0 on error
 ;;   .a = the name, .b = its annotation node, .c = its default expression
 ;; ============================================================================
-POP_COMP  equ 8
 POP_LINE  equ 16
 POP_NAME  equ 24
 POP_ANN   equ 32
@@ -2024,7 +2010,6 @@ END_FUNC par_param_here
 ;; ps_def - `def name(params) [-> ann]: body`
 ;;   .a = the name, .b = the AST_ARGUMENTS node, .clist = the body statements
 ;; ============================================================================
-PDF_COMP  equ 8
 PDF_LINE  equ 16
 PDF_NAME  equ 24
 PDF_ARGS  equ 32
@@ -2188,7 +2173,6 @@ DEF_FUNC par_suite_into, 8
     leave
     ret
 END_FUNC par_suite_into
-
 
 ;; ============================================================================
 ;; ps_async(Comp *c) -> node   -- `async def`, `async for`, `async with`

@@ -494,7 +494,6 @@ END_FUNC sre_getcodesize_func
 ; sre_module_create() -> PyObject*
 ; Creates and returns the _sre module with all functions and constants.
 ; ============================================================================
-SMC_DICT    equ 8
 SMC_FRAME   equ 8
 
 DEF_FUNC sre_module_create, SMC_FRAME

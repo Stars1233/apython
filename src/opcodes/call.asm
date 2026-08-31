@@ -70,7 +70,6 @@ BW_ENTER   equ 48
 
 ; op_with_except_start locals (DEF_FUNC op_with_except_start, WES_FRAME)
 WES_FUNC   equ 8
-WES_SELF   equ 16
 WES_VAL    equ 24
 WES_RESULT equ 32
 WES_RETTAG equ 40

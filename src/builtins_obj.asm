@@ -1848,7 +1848,6 @@ END_FUNC builtin_ascii_fn
 ; ============================================================================
 global builtin_format_fn
 FMT_OBJ     equ 8
-FMT_OBJ_TAG equ 16
 FMT_SPEC    equ 24
 FMT_FRAME   equ 32
 DEF_FUNC builtin_format_fn, FMT_FRAME

@@ -90,8 +90,6 @@ IF_FRAME    equ 128
 FL_NAME     equ 8            ; name_str (PyObject*)
 FL_LEAF     equ 16           ; leaf name cstr ptr
 FL_LEAFLEN  equ 24           ; leaf name length
-FL_PATHBUF  equ 32           ; path component buffer ptr (on stack)
-FL_PATHLEN  equ 40           ; path component length
 FL_FRAME    equ 48
 FL_STKSZ    equ 4096         ; stack buffer for path component
 
@@ -223,10 +221,8 @@ DEF_FUNC import_resolve_relative, IRR_FRAME
     call raise_exception
 END_FUNC import_resolve_relative
 
-
 ; ----------------------------------------------------------------------------
 IAR_SUFFIX equ 8
-IAR_LEN    equ 16
 IAR_BUF    equ 4128            ; 4096 bytes of path, [rbp-4128, rbp-32)
 IAR_FRAME  equ 4144
 DEF_FUNC_LOCAL import_add_exe_relative_path, IAR_FRAME
@@ -527,7 +523,6 @@ DEF_FUNC import_module, IF_FRAME
     mov [rbp - IF_FROMLIST], rsi    ; fromlist
     mov [rbp - IF_LEVEL], rdx       ; level
     DUNDER_EXC_SAVE [rbp - IF_EXC]  ; see .import_error
-
 
     ; Get name as C string for comparisons
     mov rdi, [rbp - IF_NAME]

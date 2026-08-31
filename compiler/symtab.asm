@@ -44,11 +44,9 @@ extern obj_dealloc
 extern exc_SyntaxError_type
 
 ; --- Named frame-layout constants ---
-SN_COMP  equ 8
 SN_PARENT equ 16
 SN_KIND  equ 24
 SN_NODE  equ 32
-SN_IDX   equ 40
 SN_FRAME equ 40          ; + 3 pushes = 64
 
 section .text
@@ -300,9 +298,6 @@ END_FUNC sym_add
 ;; needs its children visited, and the handful that bind something -- targets,
 ;; parameters, imports, def, lambda -- are picked out by kind here.
 ;; ============================================================================
-SV_COMP  equ 8
-SV_SCOPE equ 16
-SV_NODE  equ 24
 SV_I     equ 32
 SV_N     equ 40
 SV_NPTR  equ 48
@@ -955,16 +950,12 @@ DEF_FUNC sym_visit, SV_FRAME
     ret
 END_FUNC sym_visit
 
-
 ;; ============================================================================
 ;; sym_visit_defaults(Comp *c, uint32_t scope, uint32_t fn) -> 1 ok, 0 error
 ;; Default values and annotations are evaluated in the ENCLOSING scope, at the
 ;; point the function is defined -- which is why `def f(x=n)` captures n's value
 ;; then rather than at call time.
 ;; ============================================================================
-SD_COMP  equ 8
-SD_SCOPE equ 16
-SD_FN    equ 24
 SD_I     equ 32
 SD_N     equ 40
 SD_ARGS  equ 48
@@ -1035,7 +1026,6 @@ END_FUNC sym_visit_defaults
 ;; body.  The scope index is stored back on the AST node so codegen can find it
 ;; without repeating the walk.
 ;; ============================================================================
-SE_COMP  equ 8
 SE_PARENT equ 16
 SE_FN    equ 24
 SE_KIND  equ 32
@@ -1246,11 +1236,8 @@ END_FUNC sym_is_function_like
 ;; binding in the same block, a binding wins over an enclosing one, and only a
 ;; name with no local answer at all looks outward.
 ;; ============================================================================
-SAN_COMP  equ 8
-SAN_SCOPE equ 16
 SAN_I     equ 24
 SAN_N     equ 32
-SAN_KEYS  equ 40
 SAN_FLAGS equ 48
 SAN_NAME  equ 56
 SAN_FRAME equ 56          ; + 3 pushes = 80
@@ -1338,7 +1325,6 @@ DEF_FUNC sym_analyze, SAN_FRAME
     ret
 END_FUNC sym_analyze
 
-
 ;; ============================================================================
 ;; sym_dict_key_at(PyDictObject *d, uint64_t i) -> rax = key Value, or 0
 ;; The i'th slot of the dense entry array; 0 for a hole.
@@ -1386,7 +1372,6 @@ END_FUNC sym_binds
 ;; in the class, which is why `class C: x = 1` does not put x in scope for
 ;; `def m(self): return x`.
 ;; ============================================================================
-SEB_COMP  equ 8
 SEB_NAME  equ 16
 SEB_CUR   equ 24
 SEB_FRAME equ 32          ; + 2 pushes = 40
@@ -1472,7 +1457,6 @@ END_FUNC sym_enclosing_binds
 ;; block, a binding beats an enclosing one, and only a name with no local
 ;; answer at all looks outward.
 ;; ============================================================================
-SCL_COMP  equ 8
 SCL_SCOPE equ 16
 SCL_NAME  equ 24
 SCL_FLAGS equ 32
@@ -1572,8 +1556,6 @@ END_FUNC sym_classify
 ;; location.  This is the only place LOCAL turns into CELL, and it runs after
 ;; the children are analyzed for exactly that reason.
 ;; ============================================================================
-SPC_COMP  equ 8
-SPC_SCOPE equ 16
 SPC_CI    equ 24
 SPC_CN    equ 32
 SPC_NI    equ 40
@@ -1790,7 +1772,6 @@ END_FUNC sym_promote_cells
 ;; ============================================================================
 ;; sym_build(Comp *c, uint32_t root, int mode) -> rax = the module scope, 0 on error
 ;; ============================================================================
-SB_COMP  equ 8
 SB_MODE  equ 16
 SB_SCOPE equ 24
 SB_I     equ 32
@@ -1911,7 +1892,6 @@ DEF_FUNC sym_flags_of, 16
     ret
 END_FUNC sym_flags_of
 
-
 ;; ============================================================================
 ;; sym_finalize(Comp *c, uint32_t scope, uint32_t argsnode) -> rax = 1
 ;;
@@ -1927,12 +1907,9 @@ END_FUNC sym_flags_of
 ;; A parameter that is also a cell keeps its parameter slot and is boxed in
 ;; place by MAKE_CELL, rather than being moved.
 ;; ============================================================================
-SF_COMP  equ 8
-SF_SCOPE equ 16
 SF_ARGS  equ 24
 SF_I     equ 32
 SF_N     equ 40
-SF_SYMS  equ 48
 SF_NAME  equ 56
 SF_FRAME equ 56           ; + 3 pushes = 80
 DEF_FUNC sym_finalize, SF_FRAME
@@ -2218,9 +2195,6 @@ END_FUNC sym_is_class_name
 ;; Append the parameter names to the scope's varnames, in the order
 ;; co_varnames requires: positional, keyword-only, *args, **kwargs.
 ;; ============================================================================
-SPI_COMP  equ 8
-SPI_ARGS  equ 16
-SPI_SCOPE equ 24
 SPI_I     equ 32
 SPI_N     equ 40
 SPI_FRAME equ 40          ; + 3 pushes = 64
@@ -2342,14 +2316,11 @@ DEF_FUNC sym_lp_index, 8
     ret
 END_FUNC sym_lp_index
 
-
 ;; ============================================================================
 ;; sym_note_super(Comp *c, uint32_t scope) -> rax = 1
 ;; If this block mentions `super` or `__class__` and sits directly inside a
 ;; class body, record a use of `__class__` here and a binding of it there.
 ;; ============================================================================
-SNS_COMP  equ 8
-SNS_SCOPE equ 16
 SNS_PARENT equ 24
 SNS_NAME  equ 32
 SNS_FRAME equ 48          ; + 2 pushes = 64
@@ -2427,7 +2398,6 @@ END_FUNC sym_note_super
 ;; The comprehension's own scope: one parameter named `.0` for the outermost
 ;; iterable, then the targets, conditions and element.
 ;; ============================================================================
-SEC_COMP  equ 8
 SEC_PARENT equ 16
 SEC_NODE  equ 24
 SEC_SCOPE equ 32
@@ -2588,9 +2558,6 @@ END_FUNC sym_enter_comp
 ;; sym_visit_children(Comp *c, AstNode *n, uint32_t scope) -> 1 ok, 0 error
 ;; Visit a node's child list only.
 ;; ============================================================================
-SVC_COMP  equ 8
-SVC_NODE  equ 16
-SVC_SCOPE equ 24
 SVC_I     equ 32
 SVC_N     equ 40
 SVC_CLIST equ 48
@@ -2634,6 +2601,5 @@ sym_dot_zero: db ".0", 0
 
 sym_super_name: db "super", 0
 sym_class_name: db "__class__", 0
-
 
 ASM_INIT

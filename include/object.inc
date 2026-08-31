@@ -18,8 +18,6 @@ struc PyVarObject
     .ob_size:   resq 1    ; +16: number of items
 endstruc
 
-VAR_HEADER_SIZE equ PyVarObject_size  ; 24
-
 ; Integer object (GMP-backed)
 ; CPython's integer hash modulus (PyHASH_MODULUS = 2^61 - 1 on 64-bit).
 ; sign(v) * (|v| mod PYHASH_MODULUS); see int_hash_i64 in src/pyo/int.asm.
@@ -113,7 +111,6 @@ struc PyListObject
     .allocated: resq 1    ; +24: capacity
     .ob_item:   resq 1    ; +32: ptr to payload (u64[]) array
 endstruc
-
 
 ; Weak reference (src/pyo/weakrefmod.asm).  The referent is borrowed and is
 ; zeroed when it dies; the side table in that file owns the reference objects.
@@ -599,7 +596,6 @@ struc AsyncGenASend
 endstruc
 
 ; Sentinel values
-NULL_OBJ equ 0
 
 ;; ============================================================================
 ;; Type objects: PyTypeObject and the three method tables
@@ -788,7 +784,6 @@ EXC_EXCEPTION_GROUP        equ 25
 EXC_CANCELLED_ERROR        equ 26
 EXC_STOP_ASYNC_ITERATION   equ 27
 EXC_TIMEOUT_ERROR          equ 28
-EXC_COUNT                  equ 29  ; total
 
 ; Exception object
 struc PyExceptionObject
@@ -830,13 +825,6 @@ struc PyTracebackObject
 endstruc
 
 ; Fatal error codes (non-Python, internal)
-ERR_OUT_OF_MEMORY     equ 1
-ERR_INVALID_PYC       equ 2
-ERR_MARSHAL_ERROR     equ 3
-ERR_INTERNAL          equ 4
-ERR_UNIMPLEMENTED_OP  equ 5
-ERR_STACK_OVERFLOW    equ 6
-ERR_STACK_UNDERFLOW   equ 7
 
 ;; ============================================================================
 ;; Builtin function ids and PyBuiltinObject
@@ -844,54 +832,6 @@ ERR_STACK_UNDERFLOW   equ 7
 ;; ============================================================================
 
 ; Builtin function identifiers
-BUILTIN_PRINT       equ 0
-BUILTIN_LEN         equ 1
-BUILTIN_RANGE       equ 2
-BUILTIN_TYPE        equ 3
-BUILTIN_ISINSTANCE  equ 4
-BUILTIN_ID          equ 5
-BUILTIN_INT         equ 6
-BUILTIN_STR         equ 7
-BUILTIN_BOOL        equ 8
-BUILTIN_LIST        equ 9
-BUILTIN_DICT        equ 10
-BUILTIN_TUPLE       equ 11
-BUILTIN_SET         equ 12
-BUILTIN_FLOAT       equ 13
-BUILTIN_INPUT       equ 14
-BUILTIN_ABS         equ 15
-BUILTIN_MIN         equ 16
-BUILTIN_MAX         equ 17
-BUILTIN_SUM         equ 18
-BUILTIN_SORTED      equ 19
-BUILTIN_REVERSED    equ 20
-BUILTIN_ENUMERATE   equ 21
-BUILTIN_ZIP         equ 22
-BUILTIN_MAP         equ 23
-BUILTIN_FILTER      equ 24
-BUILTIN_HASATTR     equ 25
-BUILTIN_GETATTR     equ 26
-BUILTIN_SETATTR     equ 27
-BUILTIN_REPR        equ 28
-BUILTIN_HASH        equ 29
-BUILTIN_CALLABLE    equ 30
-BUILTIN_ITER        equ 31
-BUILTIN_NEXT        equ 32
-BUILTIN_SUPER       equ 33
-BUILTIN_ORD         equ 34
-BUILTIN_CHR         equ 35
-BUILTIN_HEX         equ 36
-BUILTIN_OCT         equ 37
-BUILTIN_BIN         equ 38
-BUILTIN_ROUND       equ 39
-BUILTIN_DIVMOD      equ 40
-BUILTIN_POW         equ 41
-BUILTIN_FORMAT      equ 42
-BUILTIN_VARS        equ 43
-BUILTIN_DIR         equ 44
-BUILTIN_OBJECT      equ 45
-BUILTIN_ISSUBCLASS  equ 46
-BUILTIN_COUNT       equ 47  ; total number of builtins
 
 ; Builtin C function object
 struc PyBuiltinObject
@@ -911,7 +851,6 @@ endstruc
 
 ; Cycle-collecting GC, CPython 3.12 compatible
 
-
 ; PyGC_Head — prepended BEFORE PyObject in GC-tracked allocations
 ; User code gets pointer at alloc_ptr + GC_HEAD_SIZE
 struc PyGC_Head
@@ -923,22 +862,8 @@ GC_HEAD_SIZE equ PyGC_Head_size   ; 16
 
 ; GC state bits stored in low 2 bits of gc_prev
 GC_PREV_MASK_COLLECTING equ 1     ; object is in unreachable set
-GC_PREV_MASK_REACHABLE  equ 2     ; object is reachable (moved from unreachable)
-GC_PREV_MASK_FINALIZED  equ 3     ; object has been finalized
 GC_PREV_SHIFT           equ 2     ; gc_refs stored in bits 2+
 GC_PREV_MASK            equ ~3    ; mask to extract prev pointer (clear low 2 bits)
-
-; Macros to convert between object pointer and GC head
-; GC_FROM_OBJ: obj_ptr -> gc_head_ptr
-%macro GC_FROM_OBJ 2              ; %1 = dest reg, %2 = obj reg
-    lea %1, [%2 - GC_HEAD_SIZE]
-%endmacro
-
-; OBJ_FROM_GC: gc_head_ptr -> obj_ptr
-%macro OBJ_FROM_GC 2              ; %1 = dest reg, %2 = gc reg
-    lea %1, [%2 + GC_HEAD_SIZE]
-%endmacro
-
 
 ; VISIT_V — call visit callback on a NaN-boxed Value if it holds a pointer
 ; r14 must be loaded with the visit callback function pointer before use

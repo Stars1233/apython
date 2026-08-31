@@ -51,9 +51,6 @@ extern none_singleton
 extern exc_SyntaxError_type
 
 ; --- Named frame-layout constants ---
-CM2_COMP  equ 8
-CM2_UNIT  equ 16
-CM2_NODE  equ 24
 CM2_LINE  equ 32
 CM2_SCOPE equ 40
 CM2_CODE  equ 48
@@ -232,9 +229,6 @@ END_FUNC cg_e_comprehension
 ;; The accumulator sits beneath every loop's iterator, so the LIST_APPEND oparg
 ;; counts back past them -- one per enclosing clause.
 ;; ============================================================================
-CB2_COMP  equ 8
-CB2_UNIT  equ 16
-CB2_NODE  equ 24
 CB2_LINE  equ 32
 CB2_SCOPE equ 40
 CB2_KIND  equ 48
@@ -432,9 +426,6 @@ END_FUNC cg_comp_body
 ;; One `for` clause, with the remaining ones -- and finally the element --
 ;; nested inside it.
 ;; ============================================================================
-CC5_COMP  equ 8
-CC5_UNIT  equ 16
-CC5_NODE  equ 24
 CC5_I     equ 32
 CC5_LINE  equ 40
 CC5_TOP   equ 48
@@ -667,9 +658,6 @@ END_FUNC cg_comp_clause
 ;;   -> 1 ok, 0 error
 ;; The element, accumulated into the container `depth` iterators below.
 ;; ============================================================================
-CE4_COMP  equ 8
-CE4_UNIT  equ 16
-CE4_NODE  equ 24
 CE4_DEPTH equ 32
 CE4_LINE  equ 40
 CE4_KIND  equ 48
@@ -793,8 +781,6 @@ END_FUNC cg_comp_element
 ;; makes `x = yield v` receive from send().  A statement-level yield discards
 ;; it through the POP_TOP an expression statement already emits.
 ;; ============================================================================
-CY_COMP  equ 8
-CY_UNIT  equ 16
 CY_NODE  equ 24
 CY_LINE  equ 32
 CY_FRAME equ 40           ; + 3 pushes = 64
@@ -961,9 +947,6 @@ END_FUNC cg_e_yieldfrom
 ;; cg_e_joinedstr(Comp *c, CompUnit *u, uint32_t node) -> 1 ok, 0 error
 ;; Each piece in order, then one BUILD_STRING over all of them.
 ;; ============================================================================
-CJ2_COMP  equ 8
-CJ2_UNIT  equ 16
-CJ2_NODE  equ 24
 CJ2_LINE  equ 32
 CJ2_I     equ 40
 CJ2_N     equ 48
@@ -1080,6 +1063,5 @@ cm_setcomp:  db "<setcomp>", 0
 cm_dictcomp: db "<dictcomp>", 0
 cm_genexpr:  db "<genexpr>", 0
 cm_dot_zero: db ".0", 0
-
 
 ASM_INIT

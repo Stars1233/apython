@@ -58,8 +58,6 @@ extern stream_writer_type
 ;; asyncio_run(args, nargs) — asyncio.run(coro)
 ;; Main event loop entry point.
 ;; ============================================================================
-AR_CORO  equ 8
-AR_TASK  equ 16
 AR_FRAME equ 16
 DEF_FUNC asyncio_run_func, AR_FRAME
     push rbx

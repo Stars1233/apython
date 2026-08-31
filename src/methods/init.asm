@@ -12,7 +12,6 @@
 %include "object.inc"
 %include "opcodes.inc"
 
-
 ; External functions
 extern gc_alloc
 extern gc_track
@@ -379,7 +378,6 @@ DEF_FUNC_LOCAL add_class_getitem
     leave
     ret
 END_FUNC add_class_getitem
-
 
 ;; ############################################################################
 ;;                       METHODS_INIT
@@ -1784,20 +1782,14 @@ mn_to_bytes:    db "to_bytes", 0
 mn_from_bytes:  db "from_bytes", 0
 mn_bit_length:  db "bit_length", 0
 mn_bit_count:   db "bit_count", 0
-mn___index__:   db "__index__", 0
 mn_conjugate:   db "conjugate", 0
-mn___abs__:     db "__abs__", 0
-mn___int__:     db "__int__", 0
-mn___float__:   db "__float__", 0
 ; float method names
 mn_is_integer:  db "is_integer", 0
 mn_as_integer_ratio: db "as_integer_ratio", 0
-mn___trunc__:   db "__trunc__", 0
 ; float method names (continued)
 mn_fromhex:     db "fromhex", 0
 ; bytes method names
 mn_hex:         db "hex", 0
-mn_decode:      db "decode", 0
 ; dict method names (continued)
 mn_fromkeys:    db "fromkeys", 0
 mn___reversed__: db "__reversed__", 0
@@ -1816,10 +1808,6 @@ mn___contains__: db "__contains__", 0
 mn___len__:     db "__len__", 0
 mn___eq__: db "__eq__", 0
 mn___ne__: db "__ne__", 0
-mn___lt__: db "__lt__", 0
-mn___le__: db "__le__", 0
-mn___gt__: db "__gt__", 0
-mn___ge__: db "__ge__", 0
 mn___hash__:    db "__hash__", 0
 mn___add__:     db "__add__", 0
 mn___mul__:     db "__mul__", 0

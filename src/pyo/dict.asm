@@ -330,7 +330,6 @@ END_FUNC dict_keys_equal
 ;; dict_get(rdi=dict, rsi=key Value) -> rax = value Value, or 0 when absent
 ;; Linear probing lookup
 ;; ============================================================================
-DG_KTAG equ 8
 DEF_FUNC dict_get, 8
     push rbx
     push r12
@@ -450,7 +449,6 @@ END_FUNC dict_lookup
 ;; dict_get_index(rdi=dict, rsi=key, edx=key_tag) -> int64
 ;; Like dict_get but returns the slot index (for IC caching), -1 if not found.
 ;; ============================================================================
-GI_KTAG equ 8
 DEF_FUNC dict_get_index, 8
     ; The index into the *dense* array, which the LOAD_GLOBAL inline cache
     ; caches.  A dense index never moves except on a resize, and the cache is
@@ -470,8 +468,6 @@ END_FUNC dict_get_index
 ;; Tombstone reuse: if no match found but a tombstone was seen, returns it
 ;; instead of the empty slot, so inserts reclaim deleted entries.
 ;; ============================================================================
-FS_KTAG     equ 8
-FS_TOMBPTR  equ 16
 
 ;; ============================================================================
 ;; dict_resize(PyDictObject *dict)
@@ -566,7 +562,6 @@ END_FUNC dict_resize
 ;; dict_set(rdi=dict, rsi=key Value, rdx=value Value)
 ;; Insert or update a key-value pair.
 ;; ============================================================================
-DS_VTAG equ 8
 DS_KTAG equ 16
 DS_DICT  equ 8
 DS_KEY   equ 16
@@ -1081,7 +1076,6 @@ DEF_FUNC dict_view_iter
     ret
 END_FUNC dict_view_iter
 
-
 ;; ============================================================================
 ;; dict_keys_view_contains(rdi=view, rsi=key, rdx=key_tag) -> int (0 or 1)
 ;; sq_contains for dict_keys view: delegates to dict_contains on underlying dict.
@@ -1230,7 +1224,6 @@ DEF_FUNC dict_nb_ior, DIO_FRAME
     V_PACK rax, rdx             ; return one Value
     ret
 END_FUNC dict_nb_ior
-
 
 ;; ============================================================================
 ;; dict_richcompare(left, right, op, left_tag, right_tag) -> (payload, tag)
@@ -1414,7 +1407,6 @@ DEF_FUNC dict_richcompare, DRC_FRAME
     leave
     ret
 END_FUNC dict_richcompare
-
 
 ;; ============================================================================
 ;; dict_reversed(args, nargs) -> PyDictIterObject* (reverse key iterator)

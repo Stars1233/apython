@@ -64,7 +64,6 @@ extern par_advance
 extern str_from_cstr_heap
 
 ; --- Named frame-layout constants ---
-CI_COMP  equ 8
 CI_SRC   equ 16
 CI_LEN   equ 24
 CI_FILE  equ 32
@@ -686,7 +685,6 @@ CIN_COMP  equ 8
 CIN_P     equ 16
 CIN_LEN   equ 24
 CIN_BUF   equ 56
-CIN_FRAME equ 56          ; + 2 pushes = 72 -> padded below
 DEF_FUNC comp_intern_name, 80
     push rbx
     push r12
@@ -875,7 +873,6 @@ section .text
 ;; restored around it: an f-string's field is lexed in the middle of a file
 ;; whose own indent stack and paren depth must survive.
 ;; ============================================================================
-CLS_COMP  equ 8
 CLS_START equ 16
 CLS_END   equ 24
 CLS_LINE  equ 32
@@ -926,11 +923,8 @@ END_FUNC comp_lex_span
 ;; Replace the exception's args with (msg, (filename, lineno, offset, text)).
 ;; Best-effort: on any allocation failure the bare message is left alone.
 ;; ============================================================================
-AL_COMP  equ 8
-AL_EXC   equ 16
 AL_INNER equ 24
 AL_OUTER equ 32
-AL_TEXT  equ 40
 AL_FRAME equ 56           ; + 3 pushes = 80
 DEF_FUNC comp_attach_location, AL_FRAME
     push rbx
@@ -1046,9 +1040,7 @@ END_FUNC comp_attach_location
 ;; comp_line_text(Comp *c, int lineno) -> PyStrObject*, or 0
 ;; The source of one line, newline included, as CPython's SyntaxError.text is.
 ;; ============================================================================
-LT_COMP  equ 8
 LT_LINE  equ 16
-LT_POS   equ 24
 LT_START equ 32
 LT_FRAME equ 40           ; + 1 push = 48
 DEF_FUNC comp_line_text, LT_FRAME
@@ -1190,7 +1182,6 @@ END_FUNC path_is_source
 ;; src_read_file(const char *path, int64_t *out_len) -> rax = buffer, or 0
 ;; The whole file in one ap_malloc'd block, NUL-terminated.  The caller frees.
 ;; ============================================================================
-SR_PATH  equ 8
 SR_OUT   equ 16
 SR_FD    equ 24
 SR_SIZE  equ 32
@@ -1285,7 +1276,6 @@ END_FUNC src_read_file
 ;; compile leaves its exception pending, exactly as pyc_read_file's callers
 ;; already expect.
 ;; ============================================================================
-CP_PATH  equ 8
 CP_SRC   equ 16
 CP_LEN   equ 24
 CP_FILE  equ 32

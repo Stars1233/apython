@@ -55,7 +55,6 @@ DEF_FUNC_BARE float_to_f64
     cmp esi, TAG_SMALLINT
     je .from_smallint
 
-
     ; TAG_PTR: check for GMP int or bool singleton
     test rdi, rdi
     jz .ret_zero
@@ -1063,7 +1062,6 @@ fmt_e: db "%.*e", 0
 fmt_E: db "%.*E", 0
 
 align 8
-sign_mask:   dq 0x8000000000000000
 pos_inf:     dq 0x7FF0000000000000
 neg_inf:     dq 0xFFF0000000000000
 const_one_f:  dq 0x3FF0000000000000   ; 1.0 in IEEE 754

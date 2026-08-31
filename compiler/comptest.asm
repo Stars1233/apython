@@ -35,7 +35,6 @@ extern lex_run
 ; --- Named frame-layout constants ---
 CT_BUF   equ 32            ; a Buf, 32 bytes
 CT_ARENA equ 64            ; an Arena, 32 bytes
-CT_I     equ 72
 CT_P0    equ 80
 CT_P1    equ 88
 ; Frame sizes are chosen so that (frame + 8*pushes) is a multiple of 16, which
@@ -260,7 +259,6 @@ DEF_FUNC_LOCAL ct_group2_arena, CT2_FRAME
     ret
 END_FUNC ct_group2_arena
 
-
 ;; ============================================================================
 ;; ct_group3_lex() -> rax = 0 on success, else the failing case index + 1
 ;;
@@ -436,12 +434,6 @@ DEF_FUNC compile_selftest_main, 8
 END_FUNC compile_selftest_main
 
 section .rodata
-
-;; --- lexer cases: { source, expected token kinds } -------------------------
-; NL is written as a real newline byte so the sources read as Python.
-%macro LEXSRC 1
-    %%s: db %1, 0
-%endmacro
 
 align 8
 lex_cases:

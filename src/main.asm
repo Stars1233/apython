@@ -515,5 +515,4 @@ __name__cstr: db "__name__", 0
 __main__cstr: db "__main__", 0
 __package__cstr: db "__package__", 0
 __builtins__cstr: db "__builtins__", 0
-colon_space: db ": "
 newline_char: db 10
