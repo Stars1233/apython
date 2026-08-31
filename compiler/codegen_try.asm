@@ -38,6 +38,10 @@ extern buf_push_ptr
 extern none_singleton
 extern cg_const
 
+extern ap_free
+extern ap_malloc
+extern ap_memcpy
+
 extern exc_SyntaxError_type
 
 ; The finally stack holds AST node indices; this sentinel stands for "a with
@@ -124,7 +128,11 @@ UF_SAVE  equ 64           ; cur_handler on entry, restored on the way out
 UF_J     equ 72           ; loops still to leave
 UF_POPL  equ 80           ; whether loop iterators come off too
 UF_NPOP  equ 88
-UF_FRAME equ 104          ; + 3 pushes = 128
+UF_KEEP  equ 96           ; the slice of the block stack a finally body may
+UF_NSAVE equ 104          ; overwrite, and its size in bytes
+UF_BLK   equ 112          ; the finally block's node, across the save
+UF_RES   equ 120          ; cg_block's result, across the restore
+UF_FRAME equ 136          ; + 3 pushes = 160
 DEF_FUNC cg_unwind_finallys, UF_FRAME
     push rbx
     push r12
@@ -293,21 +301,56 @@ DEF_FUNC cg_unwind_finallys, UF_FRAME
     ; While emitting the finally body, it is no longer one of the blocks a
     ; nested return has to unwind -- otherwise a `return` inside a `finally`
     ; would emit that same body again, forever.
+    ;
+    ; Everything from this index up is a block the caller has NOT left, and the
+    ; body about to be emitted can open blocks of its own.  buf_push_ptr writes
+    ; at data[len], so those land at exactly these indices and overwrite them;
+    ; putting the length back afterwards does not put the entries back.  The
+    ; next unwind then read a with-mark where a finally node had been and
+    ; called the return value as if it were __exit__.  CPython keeps its one
+    ; fblock on the C stack and recurses, so the entries above it are safe by
+    ; construction; this is a loop, so it keeps the whole slice itself.
+    mov [rbp - UF_BLK], rdx
     mov rax, [r12 + CompUnit.finallys + Buf.len]
     mov r13, rax
+    sub rax, [rbp - UF_I]
+    shl rax, 3                          ; entries are 8 bytes, and never zero
+    mov [rbp - UF_NSAVE], rax           ; of them: UF_I was decremented off len
+    mov rdi, rax
+    call ap_malloc                      ; fatal on OOM, so no failure path
+    mov [rbp - UF_KEEP], rax
+    mov rdi, rax
+    mov rsi, [r12 + CompUnit.finallys + Buf.data]
+    mov rax, [rbp - UF_I]
+    lea rsi, [rsi + rax*8]
+    mov rdx, [rbp - UF_NSAVE]
+    call ap_memcpy
+
     mov rax, [rbp - UF_I]
     mov [r12 + CompUnit.finallys + Buf.len], rax
-    push rdx
     mov rdi, rbx
     mov rsi, r12
-    pop rdx
+    mov rdx, [rbp - UF_BLK]
     call cg_block
-    push rax
+    mov [rbp - UF_RES], rax
+
     mov [r12 + CompUnit.finallys + Buf.len], r13
-    pop rax
-    test eax, eax
-    jz .fail
-    jmp .loop
+    ; Re-read Buf.data: the body's own blocks can have grown the array, and the
+    ; pointer captured before cg_block would be the freed one.
+    mov rdi, [r12 + CompUnit.finallys + Buf.data]
+    mov rax, [rbp - UF_I]
+    lea rdi, [rdi + rax*8]
+    mov rsi, [rbp - UF_KEEP]
+    mov rdx, [rbp - UF_NSAVE]
+    call ap_memcpy
+    mov rdi, [rbp - UF_KEEP]
+    call ap_free
+
+    ; .fail returns whatever rax holds, and ap_free left it undefined.
+    cmp qword [rbp - UF_RES], 0
+    jne .loop
+    xor eax, eax
+    jmp .fail
 .done:
     mov eax, 1
 .fail:
