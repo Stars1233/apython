@@ -32,6 +32,76 @@ extern exc_TypeError_type
 extern raise_exception
 
 ; ---------------------------------------------------------------------------
+; dunder_name_obj(rdi = const char *literal) -> rax = PyStrObject*, borrowed
+;
+; dunder_lookup used to build a fresh PyStrObject from its C string on every
+; call and free it again: ap_strlen, ap_malloc, ap_memcpy, a code-point scan to
+; set ob_length, a full string hash (the object being new, ob_hash was always
+; cold), and ap_free.  That sat behind 27 direct call sites and 131 DUNDER_*
+; macro uses -- every __add__, __iter__, __next__, __len__, __getitem__ and
+; __enter__ fallback in the interpreter.
+;
+; The names are compile-time literals in .rodata, so the pointer is stable per
+; call site and comparing pointers is enough to recognise one.  A miss interns
+; the string once and keeps it forever; the interned object then caches its own
+; ob_hash, so the dict probes stop rehashing too.  Two call sites that spell
+; the same name in different literals simply get two entries, and dict lookup
+; matches them by value regardless.
+;
+; The table never evicts.  Distinct dunder literals number a few dozen against
+; 256 slots, so the probe terminates.
+; ---------------------------------------------------------------------------
+DUNDER_CACHE_SLOTS equ 256
+
+DEF_FUNC dunder_name_obj
+    push rbx
+    push r12                    ; 2 pushes + frame 0 = 16
+    mov rbx, rdi
+    mov rax, rdi
+    shr rax, 4                  ; literals are not 16-byte aligned; spread them
+    and rax, DUNDER_CACHE_SLOTS - 1
+    mov r12, rax
+
+.probe:
+    lea rcx, [rel dunder_cache_keys]
+    mov rdx, [rcx + r12*8]
+    test rdx, rdx
+    jz .miss
+    cmp rdx, rbx
+    je .hit
+    inc r12
+    and r12, DUNDER_CACHE_SLOTS - 1
+    jmp .probe
+
+.hit:
+    lea rcx, [rel dunder_cache_vals]
+    mov rax, [rcx + r12*8]
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.miss:
+    mov rdi, rbx
+    call str_from_cstr_heap     ; kept for the life of the process
+    lea rcx, [rel dunder_cache_keys]
+    mov [rcx + r12*8], rbx
+    lea rcx, [rel dunder_cache_vals]
+    mov [rcx + r12*8], rax
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC dunder_name_obj
+
+section .bss
+align 8
+dunder_cache_keys: resq DUNDER_CACHE_SLOTS
+dunder_cache_vals: resq DUNDER_CACHE_SLOTS
+
+section .text
+
+; ---------------------------------------------------------------------------
 ; dunder_lookup(PyTypeObject *type, const char *name) -> PyObject*
 ;
 ; Walk type->tp_base chain, looking up name in each type's tp_dict.
@@ -48,9 +118,9 @@ DEF_FUNC dunder_lookup
     mov r14, rdi            ; r14 = origin of the walk
     mov r12, rsi            ; r12 = name C string
 
-    ; Create PyStrObject from C string for dict lookup (heap — dict key, DECREFed)
+    ; The interned name for this literal; borrowed, so no DECREF on the way out.
     mov rdi, r12
-    call str_from_cstr_heap
+    call dunder_name_obj
     mov r13, rax            ; r13 = name string object
 
 .walk:
@@ -73,13 +143,6 @@ DEF_FUNC dunder_lookup
     jmp .walk
 
 .found:
-    push rdx                ; save result tag
-    push rax                ; save result payload
-    mov rdi, r13
-    call obj_decref         ; DECREF name string
-    pop rax                 ; restore payload
-    pop rdx                 ; restore tag
-
     pop r14
     pop r13
     pop r12
@@ -89,8 +152,6 @@ DEF_FUNC dunder_lookup
     ret
 
 .not_found:
-    mov rdi, r13
-    call obj_decref         ; DECREF name string
     RET_NULL                ; rax=0, edx=TAG_NULL(0)
 
     pop r14

@@ -191,6 +191,17 @@ than lying — but they are ordinary Python that does not work:
   for one.
 
 
+- **`s += x` in a loop is O(n^2)**: `str_concat` always allocates, and
+  `src/opcodes/arith.asm` routes `NB_INPLACE_ADD` to the same `sq_concat`, so
+  each step copies the whole accumulated string.  CPython's ceval resizes in
+  place when the left operand's refcount is 1.  Measured, though, the two are
+  level -- 40k appends of ten bytes take 1.19s here against 1.20s under
+  CPython 3.12 -- because that optimization does not fire for the ordinary
+  module-level accumulator either.  Doing it would make apython faster than
+  CPython on this shape rather than close a gap, and it needs the eval loop to
+  give up its stack reference before the concat, so it is recorded rather than
+  done.
+
 - **Recursive deallocation overflows the stack**: `a=[]`, then 300k times
   `a=[a]`, then `del a`.  Needs a trashcan mechanism.
 

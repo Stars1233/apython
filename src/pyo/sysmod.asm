@@ -104,10 +104,14 @@ DEF_FUNC sys_module_init, 32
     call list_new
     mov r13, rax                ; r13 = sys.argv list
 
-    ; Populate sys.argv from process argv
+    ; Populate sys.argv from process argv, starting at the *script*.  CPython's
+    ; sys.argv[0] is the script, not the interpreter, so a script reading
+    ; sys.argv[1] for its first argument was getting its own path.  main has
+    ; already shifted argv past a -t if there was one, so index 1 is the script
+    ; either way.
     mov rcx, [rbp - 8]         ; argc
     mov rdx, [rbp - 16]        ; argv
-    xor ebx, ebx               ; i = 0
+    mov ebx, 1                 ; i = 1: skip the interpreter
 .argv_loop:
     cmp rbx, rcx
     jge .argv_done

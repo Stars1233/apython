@@ -87,6 +87,16 @@ END_FUNC str_cp_width
 
 ; ----------------------------------------------------------------------------
 ; str_count_codepoints(rdi = bytes, rsi = byte length) -> rax = code points
+;
+; Runs on every string creation -- str_new_heap and str_from_cstr_heap both
+; call str_set_length -- so every slice, concat, repr and format pays it.  The
+; walk below issues a call per code point; for ASCII, which is nearly all of
+; them, the answer is just the byte count.  Establish that first, eight bytes
+; at a time, and only fall into the walk when a byte >= 0x80 turns up.
+;
+; str_byte_to_cp and str_cp_offset already had this short-circuit
+; (`cmp ob_size, ob_length`); it was never applied to the function that
+; *establishes* ob_length, which is the one that cannot assume it.
 ; ----------------------------------------------------------------------------
 global str_count_codepoints
 DEF_FUNC str_count_codepoints
@@ -94,6 +104,37 @@ DEF_FUNC str_count_codepoints
     push r12
     push r13
     push r14
+
+    ; --- ASCII probe: no high bit anywhere means one code point per byte ---
+    mov rax, rdi
+    mov rcx, rsi
+    mov rdx, 0x8080808080808080
+.ascii_word:
+    cmp rcx, 8
+    jb .ascii_tail
+    test rdx, [rax]
+    jnz .walk_setup
+    add rax, 8
+    sub rcx, 8
+    jmp .ascii_word
+.ascii_tail:
+    test rcx, rcx
+    jz .all_ascii
+    test byte [rax], 0x80
+    jnz .walk_setup
+    inc rax
+    dec rcx
+    jmp .ascii_tail
+.all_ascii:
+    mov rax, rsi                    ; one code point per byte
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.walk_setup:
     mov rbx, rdi
     mov r12, rsi
     xor r13d, r13d                  ; byte cursor
