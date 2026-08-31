@@ -1,5 +1,16 @@
-; func_obj.asm - Function object type for apython
+; func.asm - Functions, closures, and the cells they close over
+;
+; A cell is not a user-visible type; it exists only because a function
+; needs somewhere to put a free variable, so it lives with the code that
+; builds closures.
 ; Implements PyFuncObject: creation, calling, deallocation, and type descriptor
+
+%include "macros.inc"
+%include "object.inc"
+%include "opcodes.inc"
+
+%include "object.inc"
+
 
 %include "macros.inc"
 %include "object.inc"
@@ -1267,4 +1278,157 @@ func_type:
     dq 0                    ; tp_bases
     dq func_traverse                        ; tp_traverse
     dq func_clear                        ; tp_clear
+    dq 0       ; tp_dictoffset
+
+;; ============================================================================
+;; (was src/pyo/cell.asm)
+;; ============================================================================
+
+section .text
+
+extern ap_malloc
+extern gc_alloc
+extern gc_track
+extern gc_dealloc
+extern ap_free
+extern obj_incref
+extern obj_dealloc
+extern str_from_cstr
+extern type_type
+extern cell_traverse
+extern cell_clear
+
+;; ============================================================================
+;; cell_new(rdi = contents Value) -> PyCellObject*
+;; Create a new cell holding the Value (0 for an empty cell), INCREFing it.
+;; ============================================================================
+DEF_FUNC cell_new
+    push rbx
+    push r12
+    mov rbx, rdi               ; contents Value
+
+    mov edi, PyCellObject_size
+    lea rsi, [rel cell_type]
+    call gc_alloc
+    ; rax = new cell (ob_refcnt=1, ob_type set)
+    INCREF_V rbx, r12
+    mov [rax + PyCellObject.ob_ref], rbx
+
+    ; Track in GC
+    push rax
+    mov rdi, rax
+    call gc_track
+    pop rax
+
+.done:
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC cell_new
+
+;; ============================================================================
+;; cell_get(PyCellObject *cell) -> PyObject*
+;; Returns the contained object (may be NULL). Does NOT INCREF.
+;; ============================================================================
+DEF_FUNC_BARE cell_get
+    mov rax, [rdi + PyCellObject.ob_ref]
+    V_UNPACK rax, rdx
+    ret
+END_FUNC cell_get
+
+;; ============================================================================
+;; cell_set(PyCellObject *cell, PyObject *obj)
+;; Sets the contained object, DECREFs old, INCREFs new.
+;; ============================================================================
+DEF_FUNC cell_set
+    push rbx
+    push r12
+    push r13
+
+    mov rbx, rdi               ; cell
+    mov r12, rsi               ; new payload
+    mov r13, rdx               ; new tag
+
+    ; INCREF the new value while its tag is still around, then pack it
+    INCREF_VAL r12, r13
+    V_PACK r12, r13
+
+    ; Release the old one
+    mov rdi, [rbx + PyCellObject.ob_ref]
+    DECREF_V rdi, rsi
+
+    mov [rbx + PyCellObject.ob_ref], r12
+
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC cell_set
+
+;; ============================================================================
+;; cell_dealloc(PyCellObject *self)
+;; ============================================================================
+DEF_FUNC cell_dealloc
+    push rbx
+    mov rbx, rdi
+
+    mov rdi, [rbx + PyCellObject.ob_ref]
+    DECREF_V rdi, rsi
+
+.free:
+    mov rdi, rbx
+    call gc_dealloc
+
+    pop rbx
+    leave
+    ret
+END_FUNC cell_dealloc
+
+;; ============================================================================
+;; cell_repr(PyCellObject *self) -> PyStrObject*
+;; ============================================================================
+DEF_FUNC_BARE cell_repr
+    lea rdi, [rel cell_repr_str]
+    jmp str_from_cstr
+END_FUNC cell_repr
+
+;; ============================================================================
+;; Data
+;; ============================================================================
+section .data
+
+cell_name_str: db "cell", 0
+cell_repr_str: db "<cell>", 0
+
+align 8
+global cell_type
+cell_type:
+    dq 1                      ; ob_refcnt (immortal)
+    dq type_type              ; ob_type
+    dq cell_name_str          ; tp_name
+    dq PyCellObject_size      ; tp_basicsize
+    dq cell_dealloc           ; tp_dealloc
+    dq cell_repr              ; tp_repr
+    dq cell_repr              ; tp_str
+    dq 0                      ; tp_hash
+    dq 0                      ; tp_call
+    dq 0                      ; tp_getattr
+    dq 0                      ; tp_setattr
+    dq 0                      ; tp_richcompare
+    dq 0                      ; tp_iter
+    dq 0                      ; tp_iternext
+    dq 0                      ; tp_init
+    dq 0                      ; tp_new
+    dq 0                      ; tp_as_number
+    dq 0                      ; tp_as_sequence
+    dq 0                      ; tp_as_mapping
+    dq 0                      ; tp_base
+    dq 0                      ; tp_dict
+    dq 0                      ; tp_mro
+    dq TYPE_FLAG_HAVE_GC                      ; tp_flags
+    dq 0                      ; tp_bases
+    dq cell_traverse                        ; tp_traverse
+    dq cell_clear                        ; tp_clear
     dq 0       ; tp_dictoffset
