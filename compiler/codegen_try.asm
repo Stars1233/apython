@@ -1,12 +1,13 @@
-; codegen_try.asm - try / except / finally and with
+; codegen_try.asm - try, except, except*, finally, with, and await
 ;
-; The shapes follow CPython's, because they are the shapes apython's unwinder
-; already runs from every .pyc it reads.
+; One file because they are one unwinder.  `except*` is an arm of cg_s_try;
+; `async with` is cg_s_with calling the await/send loop; and leaving any of
+; these blocks early has to emit its cleanup under the *enclosing* handler's
+; stamp, which is why the block stack records it.
 ;
-; A `finally` body is emitted more than once on purpose: once on the normal
-; path, once on the exceptional one, and once more before every return, break
-; or continue that leaves the block.  That duplication is what makes a finally
-; clause work without a dedicated opcode, and it is what CPython does too.
+; CG_ESTAR_MARK is written by the except* codegen and compared by the try
+; codegen.  It used to be declared once in each of two files; the two copies
+; drifting apart would have been a silent except* miscompile.
 
 %include "macros.inc"
 %include "object.inc"
@@ -27,8 +28,6 @@ extern cg_label_new
 extern cg_nameop
 extern cg_pop_handler
 extern cg_push_handler
-extern cg_except_star_clauses
-extern cg_await_value
 extern cg_store
 extern comp_error
 
@@ -1064,7 +1063,6 @@ DEF_FUNC cg_clear_exc_name, CE2_FRAME
     ret
 END_FUNC cg_clear_exc_name
 
-
 ;; ============================================================================
 ;; cg_s_with - `with a as x, b: body`
 ;;
@@ -1463,5 +1461,772 @@ DEF_FUNC cg_call_exit_none, CX_FRAME
     ret
 END_FUNC cg_call_exit_none
 
+;; ============================================================================
+;; (was compiler/codegen_egroup.asm)
+;; ============================================================================
+
+section .text
+
+extern ast_at
+extern ast_child
+extern ast_obj_at
+extern cg_block
+extern cg_emit
+extern cg_emit_jump
+extern cg_label_bind
+extern cg_label_new
+extern cg_nameop
+extern cg_pop_handler
+extern cg_push_handler
+extern cg_body
+extern cg_expr
+extern comp_error
+extern exc_SyntaxError_type
+
+global cg_except_star_clauses
+
+; --- cg_except_star_clauses ---
+ES_COMP  equ 8
+ES_UNIT  equ 16
+ES_NODE  equ 24
+ES_END   equ 32
+ES_LINE  equ 40
+ES_H     equ 48
+ES_I     equ 56
+ES_N     equ 64
+ES_CLEAN equ 72
+ES_RERA  equ 80
+ES_FRAME equ 88           ; + 3 pushes = 112
+
+section .text
+
+;; ============================================================================
+;; cg_except_star_clauses(Comp *c, CompUnit *u, uint32_t try, uint64_t end)
+;;   -> 1 ok, 0 error
+;; ============================================================================
+DEF_FUNC cg_except_star_clauses, ES_FRAME
+    push rbx
+    push r12
+    push r13
+    mov rbx, rdi
+    mov r12, rsi
+    mov r13, rdx
+    mov [rbp - ES_END], rcx
+
+    mov rdi, rbx
+    mov rsi, r13
+    call ast_at
+    mov ecx, [rax + AstNode.lineno]
+    mov [rbp - ES_LINE], rcx
+    mov ecx, [rax + AstNode.a]          ; the block of clauses
+    mov [rbp - ES_H], rcx
+    test ecx, ecx
+    jz .ok
+
+    mov rdi, r12
+    call cg_label_new
+    mov [rbp - ES_CLEAN], rax
+    mov rdi, r12
+    mov rsi, rax
+    mov edx, 1                          ; lasti
+    call cg_push_handler
+
+    mov rdi, r12
+    mov esi, OP_PUSH_EXC_INFO
+    xor edx, edx
+    mov rcx, [rbp - ES_LINE]
+    call cg_emit
+    mov rdi, r12
+    mov esi, OP_BUILD_LIST
+    xor edx, edx
+    mov rcx, [rbp - ES_LINE]
+    call cg_emit
+    ; The group itself stays beneath everything, because PREP_RERAISE_STAR
+    ; needs it at the end to rebuild what is left.
+    mov rdi, r12
+    mov esi, OP_COPY
+    mov edx, 2
+    mov rcx, [rbp - ES_LINE]
+    call cg_emit
+
+    mov rdi, rbx
+    mov rsi, [rbp - ES_H]
+    call ast_at
+    mov ecx, [rax + AstNode.nchild]
+    mov [rbp - ES_N], rcx
+    mov qword [rbp - ES_I], 0
+.clause_loop:
+    mov rax, [rbp - ES_I]
+    cmp rax, [rbp - ES_N]
+    jae .finish
+    mov rdi, rbx
+    mov rsi, [rbp - ES_H]
+    call ast_at
+    mov rsi, rax
+    mov rdx, [rbp - ES_I]
+    mov rdi, rbx
+    call ast_child
+    mov rdi, rbx
+    mov rsi, r12
+    mov rdx, rax
+    call cg_one_star_except
+    test eax, eax
+    jz .fail
+    inc qword [rbp - ES_I]
+    jmp .clause_loop
+
+.finish:
+    ; Whatever no clause claimed joins the list of what the bodies raised, and
+    ; the intrinsic decides between the two ways out.
+    mov rdi, r12
+    mov esi, OP_LIST_APPEND
+    mov edx, 1
+    mov rcx, [rbp - ES_LINE]
+    call cg_emit
+    mov rdi, r12
+    mov esi, OP_CALL_INTRINSIC_2
+    mov edx, INTRINSIC_PREP_RERAISE_STAR
+    mov rcx, [rbp - ES_LINE]
+    call cg_emit
+    mov rdi, r12
+    mov esi, OP_COPY
+    mov edx, 1
+    mov rcx, [rbp - ES_LINE]
+    call cg_emit
+    mov rdi, r12
+    call cg_label_new
+    mov [rbp - ES_RERA], rax
+    mov rdi, r12
+    mov esi, OP_POP_JUMP_IF_NOT_NONE
+    mov rdx, rax
+    mov rcx, [rbp - ES_LINE]
+    call cg_emit_jump
+
+    ; Nothing left: drop the None and restore the previous exception state.
+    mov rdi, r12
+    mov esi, OP_POP_TOP
+    xor edx, edx
+    mov rcx, [rbp - ES_LINE]
+    call cg_emit
+
+    ; The protected region ends here, before either exit's POP_EXCEPT.  Leaving
+    ; it open over them means the RERAISE below is caught by its own cleanup
+    ; block, which pops an exception state that is already gone.
+    mov rdi, r12
+    call cg_pop_handler
+
+    mov rdi, r12
+    mov esi, OP_POP_EXCEPT
+    xor edx, edx
+    mov rcx, [rbp - ES_LINE]
+    call cg_emit
+    mov rdi, r12
+    mov esi, OP_JUMP_FORWARD
+    mov rdx, [rbp - ES_END]
+    mov rcx, [rbp - ES_LINE]
+    call cg_emit_jump
+
+    ; Something is left: it goes out in place of the original group.
+    mov rdi, r12
+    mov rsi, [rbp - ES_RERA]
+    call cg_label_bind
+    mov rdi, r12
+    mov esi, OP_SWAP
+    mov edx, 2
+    mov rcx, [rbp - ES_LINE]
+    call cg_emit
+    mov rdi, r12
+    mov esi, OP_POP_EXCEPT
+    xor edx, edx
+    mov rcx, [rbp - ES_LINE]
+    call cg_emit
+    mov rdi, r12
+    mov esi, OP_RERAISE
+    xor edx, edx
+    mov rcx, [rbp - ES_LINE]
+    call cg_emit
+
+    mov rdi, rbx
+    mov rsi, r12
+    mov rdx, [rbp - ES_CLEAN]
+    mov rcx, [rbp - ES_LINE]
+    call cg_exc_cleanup
+.ok:
+    mov eax, 1
+    jmp .ret
+.fail:
+    xor eax, eax
+.ret:
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC cg_except_star_clauses
+
+;; ============================================================================
+;; cg_one_star_except(Comp *c, CompUnit *u, uint32_t handler) -> 1 ok, 0 error
+;; One `except*` clause.  Entered with the unmatched remainder on top; leaves
+;; the new remainder there, matched or not.
+;; ============================================================================
+OS_COMP  equ 8
+OS_UNIT  equ 16
+OS_NODE  equ 24
+OS_LINE  equ 40
+OS_NAME  equ 48
+OS_NEXT  equ 56
+OS_AFTER equ 64
+OS_RAISE equ 72
+OS_FRAME equ 88           ; + 3 pushes = 112
+DEF_FUNC_LOCAL cg_one_star_except, OS_FRAME
+    push rbx
+    push r12
+    push r13
+    mov rbx, rdi
+    mov r12, rsi
+    mov r13, rdx
+
+    mov rdi, rbx
+    mov rsi, r13
+    call ast_at
+    mov ecx, [rax + AstNode.lineno]
+    mov [rbp - OS_LINE], rcx
+    mov ecx, [rax + AstNode.b]
+    mov [rbp - OS_NAME], rcx
+    mov ecx, [rax + AstNode.a]          ; the type -- required for except*
+    test ecx, ecx
+    jz .bare
+
+    mov edx, ecx
+    mov rdi, rbx
+    mov rsi, r12
+    call cg_expr
+    test eax, eax
+    jz .fail
+    mov rdi, r12
+    mov esi, OP_CHECK_EG_MATCH
+    xor edx, edx
+    mov rcx, [rbp - OS_LINE]
+    call cg_emit
+
+    mov rdi, r12
+    call cg_label_new
+    mov [rbp - OS_NEXT], rax
+    mov rdi, r12
+    call cg_label_new
+    mov [rbp - OS_AFTER], rax
+
+    mov rdi, r12
+    mov esi, OP_COPY
+    mov edx, 1
+    mov rcx, [rbp - OS_LINE]
+    call cg_emit
+    mov rdi, r12
+    mov esi, OP_POP_JUMP_IF_NONE
+    mov rdx, [rbp - OS_NEXT]
+    mov rcx, [rbp - OS_LINE]
+    call cg_emit_jump
+
+    ; Bind the subgroup, or drop it.
+    cmp qword [rbp - OS_NAME], 0
+    je .discard
+    mov rsi, [rbp - OS_NAME]
+    mov rdi, rbx
+    call ast_obj_at
+    mov rdx, rax
+    mov rdi, rbx
+    mov rsi, r12
+    mov ecx, CTX_STORE
+    xor r8d, r8d
+    call cg_nameop
+    test eax, eax
+    jz .fail
+    jmp .body
+.discard:
+    mov rdi, r12
+    mov esi, OP_POP_TOP
+    xor edx, edx
+    mov rcx, [rbp - OS_LINE]
+    call cg_emit
+
+.body:
+    ; A body that raises does not stop the chain: what it raised joins the
+    ; list, and the next clause still sees the remainder.  The region opens
+    ; here, with the remainder on top, which is the depth it unwinds to.
+    mov rdi, r12
+    call cg_label_new
+    mov [rbp - OS_RAISE], rax
+    mov rdi, r12
+    mov rsi, rax
+    mov edx, 1                          ; lasti
+    call cg_push_handler
+
+    mov rdi, r12
+    mov esi, CG_ESTAR_MARK
+    call cg_finally_push
+    mov rdi, rbx
+    mov rsi, r12
+    mov rdx, r13
+    call cg_body
+    push rax
+    mov rdi, r12
+    call cg_finally_pop
+    pop rax
+    test eax, eax
+    jz .fail
+    mov rdi, r12
+    call cg_pop_handler
+
+    mov rdi, rbx
+    mov rsi, r12
+    mov rdx, [rbp - OS_NAME]
+    mov rcx, [rbp - OS_LINE]
+    call cg_clear_star_name
+    test eax, eax
+    jz .fail
+    mov rdi, r12
+    mov esi, OP_JUMP_FORWARD
+    mov rdx, [rbp - OS_AFTER]
+    mov rcx, [rbp - OS_LINE]
+    call cg_emit_jump
+
+    mov rdi, r12
+    mov rsi, [rbp - OS_RAISE]
+    call cg_label_bind
+    mov rdi, rbx
+    mov rsi, r12
+    mov rdx, [rbp - OS_NAME]
+    mov rcx, [rbp - OS_LINE]
+    call cg_clear_star_name
+    test eax, eax
+    jz .fail
+    mov rdi, r12
+    mov esi, OP_LIST_APPEND
+    mov edx, 3
+    mov rcx, [rbp - OS_LINE]
+    call cg_emit
+    mov rdi, r12
+    mov esi, OP_POP_TOP                 ; the offset the unwinder pushed
+    xor edx, edx
+    mov rcx, [rbp - OS_LINE]
+    call cg_emit
+    mov rdi, r12
+    mov esi, OP_JUMP_FORWARD
+    mov rdx, [rbp - OS_AFTER]
+    mov rcx, [rbp - OS_LINE]
+    call cg_emit_jump
+
+    ; No match: drop the None CHECK_EG_MATCH left.
+    mov rdi, r12
+    mov rsi, [rbp - OS_NEXT]
+    call cg_label_bind
+    mov rdi, r12
+    mov esi, OP_POP_TOP
+    xor edx, edx
+    mov rcx, [rbp - OS_LINE]
+    call cg_emit
+
+    mov rdi, r12
+    mov rsi, [rbp - OS_AFTER]
+    call cg_label_bind
+    mov eax, 1
+    jmp .ret
+
+.bare:
+    mov rdi, rbx
+    lea rsi, [rel exc_SyntaxError_type]
+    CSTRING rdx, "except* must name an exception type"
+    mov rax, r13
+    xor ecx, ecx
+    xor r8d, r8d
+    call comp_error
+.fail:
+    xor eax, eax
+.ret:
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC cg_one_star_except
+
+;; ============================================================================
+;; cg_clear_star_name(Comp *c, CompUnit *u, uint32_t nameobj, int line)
+;; The name unbinding, skipped when the clause did not bind one.
+;; ============================================================================
+DEF_FUNC_BARE cg_clear_star_name
+    test edx, edx
+    jnz cg_clear_exc_name
+    mov eax, 1
+    ret
+END_FUNC cg_clear_star_name
+
+;; ============================================================================
+;; (was compiler/codegen_async.asm)
+;; ============================================================================
+
+section .text
+
+extern ast_at
+extern ast_child
+extern cg_block
+extern cg_const
+extern cg_emit
+extern cg_emit_jump
+extern cg_emit_jump_back
+extern cg_expr
+extern cg_label_bind
+extern cg_label_new
+extern cg_loop_pop
+extern cg_loop_push
+extern cg_pop_handler
+extern cg_push_handler
+extern cg_store
+extern none_singleton
+
+global cg_send_loop
+global cg_e_await
+global cg_s_asyncfor
+global cg_await_value
+
+section .text
+
+;; ============================================================================
+;; cg_send_loop(CompUnit *u, uint64_t line, uint64_t resume_arg) -> 1 ok, 0 err
+;;
+;; Stack in:  ... receiver, sent_value       (the value is normally None)
+;; Stack out: ... result
+;;
+;;   top:   SEND end
+;;          [handler -> throw, covering the YIELD_VALUE only]
+;;          YIELD_VALUE
+;;          RESUME resume_arg
+;;          JUMP_BACKWARD_NO_INTERRUPT top
+;;   throw: CLEANUP_THROW
+;;   end:   END_SEND
+;;
+;; CPython puts the CLEANUP_THROW out of line and jumps back to `end`; putting
+;; it immediately above `end` and letting it fall through is the same code with
+;; the jump removed.  Nothing reaches it by fallthrough, because
+;; JUMP_BACKWARD_NO_INTERRUPT does not fall through.
+;; ============================================================================
+SL_UNIT   equ 8
+SL_LINE   equ 16
+SL_RESUME equ 24
+SL_TOP    equ 32
+SL_END    equ 40
+SL_THROW  equ 48
+SL_FRAME  equ 56          ; + 1 push = 64
+DEF_FUNC cg_send_loop, SL_FRAME
+    push rbx
+    mov rbx, rdi
+    mov [rbp - SL_LINE], rsi
+    mov [rbp - SL_RESUME], rdx
+
+    mov rdi, rbx
+    call cg_label_new
+    mov [rbp - SL_TOP], rax
+    mov rdi, rbx
+    call cg_label_new
+    mov [rbp - SL_END], rax
+    mov rdi, rbx
+    call cg_label_new
+    mov [rbp - SL_THROW], rax
+
+    mov rdi, rbx
+    mov rsi, [rbp - SL_TOP]
+    call cg_label_bind
+    mov rdi, rbx
+    mov esi, OP_SEND
+    mov rdx, [rbp - SL_END]
+    mov rcx, [rbp - SL_LINE]
+    call cg_emit_jump
+
+    ; The region opens here, with the receiver and the sent value on the stack;
+    ; that is the depth CLEANUP_THROW expects to find beneath the exception.
+    mov rdi, rbx
+    mov rsi, [rbp - SL_THROW]
+    xor edx, edx                        ; no lasti
+    call cg_push_handler
+    mov rdi, rbx
+    mov esi, OP_YIELD_VALUE
+    xor edx, edx
+    mov rcx, [rbp - SL_LINE]
+    call cg_emit
+    mov rdi, rbx
+    call cg_pop_handler
+
+    mov rdi, rbx
+    mov esi, OP_RESUME
+    mov rdx, [rbp - SL_RESUME]
+    xor ecx, ecx
+    call cg_emit
+    or byte [rax + Instr.flags], IF_NOLINE
+    mov rdi, rbx
+    mov esi, OP_JUMP_BACKWARD_NO_INTERRUPT
+    mov rdx, [rbp - SL_TOP]
+    mov rcx, [rbp - SL_LINE]
+    call cg_emit_jump_back
+
+    mov rdi, rbx
+    mov rsi, [rbp - SL_THROW]
+    call cg_label_bind
+    mov rdi, rbx
+    mov esi, OP_CLEANUP_THROW
+    xor edx, edx
+    mov rcx, [rbp - SL_LINE]
+    call cg_emit
+
+    mov rdi, rbx
+    mov rsi, [rbp - SL_END]
+    call cg_label_bind
+    mov rdi, rbx
+    mov esi, OP_END_SEND
+    xor edx, edx
+    mov rcx, [rbp - SL_LINE]
+    call cg_emit
+    mov eax, 1
+    pop rbx
+    leave
+    ret
+END_FUNC cg_send_loop
+
+;; ============================================================================
+;; cg_await_value(CompUnit *u, uint64_t line, uint64_t which) -> 1 ok, 0 err
+;; Await whatever is on top of the stack.  `which` is GET_AWAITABLE's oparg,
+;; which only affects the message in the TypeError it raises: 0 for a plain
+;; `await`, 1 for __aenter__, 2 for __aexit__.
+;; ============================================================================
+AV_UNIT  equ 8
+AV_LINE  equ 16
+AV_FRAME equ 24           ; + 1 push = 32
+DEF_FUNC cg_await_value, AV_FRAME
+    push rbx
+    mov rbx, rdi
+    mov [rbp - AV_LINE], rsi
+
+    mov rdi, rbx
+    mov esi, OP_GET_AWAITABLE
+    ; rdx already holds `which`
+    mov rcx, [rbp - AV_LINE]
+    call cg_emit
+
+    lea rsi, [rel none_singleton]
+    INCREF rsi
+    mov rdi, rbx
+    call cg_const
+    mov rdx, rax
+    mov rdi, rbx
+    mov esi, OP_LOAD_CONST
+    mov rcx, [rbp - AV_LINE]
+    call cg_emit
+
+    mov rdi, rbx
+    mov rsi, [rbp - AV_LINE]
+    mov edx, 3
+    call cg_send_loop
+    pop rbx
+    leave
+    ret
+END_FUNC cg_await_value
+
+;; ============================================================================
+;; cg_e_await(Comp *c, CompUnit *u, uint32_t node) -> 1 ok, 0 error
+;; ============================================================================
+EA_COMP  equ 8
+EA_UNIT  equ 16
+EA_LINE  equ 24
+EA_FRAME equ 40           ; + 3 pushes = 64
+DEF_FUNC cg_e_await, EA_FRAME
+    push rbx
+    push r12
+    push r13
+    mov rbx, rdi
+    mov r12, rsi
+    mov r13, rdx
+
+    mov rdi, rbx
+    mov rsi, r13
+    call ast_at
+    mov ecx, [rax + AstNode.lineno]
+    mov [rbp - EA_LINE], rcx
+    mov edx, [rax + AstNode.a]
+    mov rdi, rbx
+    mov rsi, r12
+    call cg_expr
+    test eax, eax
+    jz .fail
+
+    mov rdi, r12
+    mov rsi, [rbp - EA_LINE]
+    xor edx, edx
+    call cg_await_value
+.fail:
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC cg_e_await
+
+;; ============================================================================
+;; cg_s_asyncfor(Comp *c, CompUnit *u, uint32_t node) -> 1 ok, 0 error
+;;
+;;         <iter>; GET_AITER
+;;   top:  [handler -> exc, depth = just the iterator]
+;;         GET_ANEXT; LOAD_CONST None; <send loop>
+;;         [pop]
+;;         <store target>; <body>; JUMP_BACKWARD top
+;;   exc:  END_ASYNC_FOR
+;;         <else>
+;;   end:
+;;
+;; The protected region is what makes the loop terminate: __anext__ raises
+;; StopAsyncIteration rather than returning a sentinel, so the exit edge is an
+;; exception edge.  END_ASYNC_FOR swallows exactly that exception, drops the
+;; iterator with it, and re-raises anything else.  The region deliberately ends
+;; before the target store, so an exception from the body is the caller's.
+;; ============================================================================
+AF_COMP  equ 8
+AF_UNIT  equ 16
+AF_NODE  equ 24
+AF_LINE  equ 32
+AF_TOP   equ 40
+AF_EXC   equ 48
+AF_END   equ 56
+AF_FRAME equ 72           ; + 3 pushes = 96
+DEF_FUNC cg_s_asyncfor, AF_FRAME
+    push rbx
+    push r12
+    push r13
+    mov rbx, rdi
+    mov r12, rsi
+    mov r13, rdx
+
+    mov rdi, rbx
+    mov rsi, r13
+    call ast_at
+    mov ecx, [rax + AstNode.lineno]
+    mov [rbp - AF_LINE], rcx
+
+    mov edx, [rax + AstNode.b]          ; the iterable
+    mov rdi, rbx
+    mov rsi, r12
+    call cg_expr
+    test eax, eax
+    jz .fail
+    mov rdi, r12
+    mov esi, OP_GET_AITER
+    xor edx, edx
+    mov rcx, [rbp - AF_LINE]
+    call cg_emit
+
+    mov rdi, r12
+    call cg_label_new
+    mov [rbp - AF_TOP], rax
+    mov rdi, r12
+    call cg_label_new
+    mov [rbp - AF_EXC], rax
+    mov rdi, r12
+    call cg_label_new
+    mov [rbp - AF_END], rax
+
+    mov rdi, r12
+    mov rsi, [rbp - AF_TOP]
+    call cg_label_bind
+    mov rdi, r12
+    mov rsi, [rbp - AF_EXC]
+    xor edx, edx                        ; no lasti
+    call cg_push_handler
+
+    mov rdi, r12
+    mov esi, OP_GET_ANEXT
+    xor edx, edx
+    mov rcx, [rbp - AF_LINE]
+    call cg_emit
+    lea rsi, [rel none_singleton]
+    INCREF rsi
+    mov rdi, r12
+    call cg_const
+    mov rdx, rax
+    mov rdi, r12
+    mov esi, OP_LOAD_CONST
+    mov rcx, [rbp - AF_LINE]
+    call cg_emit
+    mov rdi, r12
+    mov rsi, [rbp - AF_LINE]
+    mov edx, 3
+    call cg_send_loop
+    test eax, eax
+    jz .fail
+    mov rdi, r12
+    call cg_pop_handler
+
+    mov rdi, rbx
+    mov rsi, r13
+    call ast_at
+    mov edx, [rax + AstNode.a]          ; the loop target
+    mov rdi, rbx
+    mov rsi, r12
+    call cg_store
+    test eax, eax
+    jz .fail
+
+    mov rdi, r12
+    mov rsi, [rbp - AF_END]             ; break
+    mov rdx, [rbp - AF_TOP]             ; continue
+    mov ecx, 1                          ; break must drop the iterator
+    call cg_loop_push
+
+    mov rdi, rbx
+    mov rsi, r13
+    call ast_at
+    mov edx, [rax + AstNode.c]          ; the body
+    mov rdi, rbx
+    mov rsi, r12
+    call cg_block
+    push rax
+    mov rdi, r12
+    call cg_loop_pop
+    pop rax
+    test eax, eax
+    jz .fail
+
+    mov rdi, r12
+    mov esi, OP_JUMP_BACKWARD
+    mov rdx, [rbp - AF_TOP]
+    mov rcx, [rbp - AF_LINE]
+    call cg_emit_jump_back
+
+    mov rdi, r12
+    mov rsi, [rbp - AF_EXC]
+    call cg_label_bind
+    mov rdi, r12
+    mov esi, OP_END_ASYNC_FOR
+    xor edx, edx
+    mov rcx, [rbp - AF_LINE]
+    call cg_emit
+
+    mov rdi, rbx
+    mov rsi, r13
+    call ast_at
+    mov edx, [rax + AstNode.clist]      ; the else block
+    mov rdi, rbx
+    mov rsi, r12
+    call cg_block
+    test eax, eax
+    jz .fail
+
+    mov rdi, r12
+    mov rsi, [rbp - AF_END]
+    call cg_label_bind
+    mov eax, 1
+.fail:
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC cg_s_asyncfor
 
 ASM_INIT
