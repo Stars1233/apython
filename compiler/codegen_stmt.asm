@@ -736,9 +736,14 @@ END_FUNC cg_s_augassign
 HA_I     equ 8
 HA_N     equ 16
 HA_C     equ 24
+HA_K     equ 32           ; the node's kind, for the AST_FOR fix-up
 HA_FRAME equ 48           ; + 2 pushes = 64
 ;; The body form skips the kind test on the node itself: a class body is the
 ;; classdef's own child list, and the node would otherwise stop the walk dead.
+;; The caller must therefore pass a node whose clist really IS a statement list
+;; -- a classdef or a module.  Handed an AST_GLOBAL it would walk that node's
+;; object indices as node indices, which is the trap cg_has_annotation below
+;; refuses by allow-list.
 global cg_has_annotation_body
 DEF_FUNC cg_has_annotation_body, HA_FRAME
     push rbx
@@ -796,6 +801,7 @@ DEF_FUNC cg_has_annotation, HA_FRAME
     mov rsi, r12
     call ast_at
     movzx ecx, byte [rax + AstNode.kind]
+    mov [rbp - HA_K], rcx
     cmp ecx, AST_ANNASSIGN
     je .ha_yes
     cmp ecx, AST_FUNCTIONDEF
@@ -830,7 +836,14 @@ DEF_FUNC cg_has_annotation, HA_FRAME
     je .ha_children_only
     cmp ecx, AST_DECORATED
     je .ha_no
-    jmp .ha_children_only
+    ; Everything else: an allow-list, not a default-recurse.  A child list is
+    ; only a list of NODES for the kinds above.  AST_GLOBAL and AST_NONLOCAL
+    ; hold object indices there, and the two arenas overlap freely, so walking
+    ; one as a node reads whatever sits at that index -- `global a` at module
+    ; level recursed about a hundred thousand deep and segfaulted the compiler.
+    ; AST_COMPARE is the same trap one size smaller: its child list interleaves
+    ; raw CMPOP_* codes with node indices.
+    jmp .ha_no
 
 .ha_fields:
     mov ecx, [rax + AstNode.a]
@@ -852,6 +865,21 @@ DEF_FUNC cg_has_annotation, HA_FRAME
     jnz .ha_yes
     mov rdi, rbx
     mov rsi, [rbp - HA_C]
+    call cg_has_annotation
+    test eax, eax
+    jnz .ha_yes
+
+    ; AST_FOR keeps its else block in clist with nchild at 0 -- a is the
+    ; target, b the iterable and c the body -- so the child walk below never
+    ; reaches it, and `for i in []: pass / else: x: int = 1` never emitted
+    ; SETUP_ANNOTATIONS.  sym_visit has the same fix-up for the same reason.
+    cmp qword [rbp - HA_K], AST_FOR
+    jne .ha_children_only
+    mov rdi, rbx
+    mov rsi, r12
+    call ast_at
+    mov esi, [rax + AstNode.clist]
+    mov rdi, rbx
     call cg_has_annotation
     test eax, eax
     jnz .ha_yes

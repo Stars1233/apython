@@ -33,6 +33,7 @@ test_closures
 test_codec_args
 test_codecs
 test_comparisons
+test_compile_annotation_scan
 test_compile_annotations
 test_compile_async
 test_compile_augassign

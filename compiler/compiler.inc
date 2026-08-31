@@ -217,7 +217,8 @@ AST_AUGASSIGN   equ 44   ; a=target b=value subkind=NB_*
 AST_ANNASSIGN   equ 45   ; a=target b=annotation c=value
 AST_IF          equ 46   ; a=test, clist=body, b=orelse block node
 AST_WHILE       equ 47   ; a=test, clist=body, b=orelse
-AST_FOR         equ 48   ; a=target b=iter, clist=body, c=orelse, subkind=is_async
+AST_FOR         equ 48   ; a=target b=iter c=body, clist=orelse block index
+                         ; (nchild stays 0), subkind=is_async
 AST_BLOCK       equ 49   ; clist=statements  (an else/elif tail)
 AST_PASS        equ 50
 AST_BREAK       equ 51
