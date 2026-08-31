@@ -98,3 +98,20 @@ class ___:
 
 
 print(sorted(___().__dict__))
+
+
+# A `global` or `nonlocal` declaration is mangled like every other identifier.
+# `global __v` inside a method of C is a declaration about _C__v; interning it
+# raw bound a different name from the one every use of it resolved to.
+ns = {}
+exec("class C:\n    def m(self):\n        global __v\n        __v = 7\n"
+     "        return __v\nout = C().m()\n", ns)
+print(ns["out"], "__v" in ns, "_C__v" in ns)
+
+# nonlocal is mangled the same way, and the two halves have to agree: the
+# declaration and the assignment both become _E__w inside class E's method.
+ns = {}
+exec("def outer():\n    __w = 1\n    class E:\n        def m(self):\n"
+     "            return 'ok'\n    def inner():\n        nonlocal __w\n"
+     "        __w = 2\n    inner()\n    return __w\nout = outer()\n", ns)
+print(ns["out"])

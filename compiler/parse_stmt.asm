@@ -678,9 +678,14 @@ DEF_FUNC_LOCAL ps_scope, PK2_FRAME
     jne .need_name
     mov rdi, rbx
     call par_peek
-    mov rdi, [rax + Token.start]
-    mov esi, [rax + Token.len]
-    call comp_intern
+    mov rsi, [rax + Token.start]
+    mov edx, [rax + Token.len]
+    ; Mangled, like every other identifier.  CPython mangles the DECLARATION
+    ; too -- `global __v` inside a method of C is a declaration about _C__v --
+    ; and interning it raw here bound a different name from the one every use
+    ; of it resolved to, silently.
+    mov rdi, rbx
+    call comp_intern_name
     test rax, rax
     jz .fail
     mov rdi, rbx
