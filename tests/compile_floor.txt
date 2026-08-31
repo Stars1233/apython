@@ -47,6 +47,7 @@ test_compile_decorated_async
 test_compile_docstring
 test_compile_error_dropped
 test_compile_except_star
+test_compile_exec_locals
 test_compile_exec
 test_compile_expr2
 test_compile_expr

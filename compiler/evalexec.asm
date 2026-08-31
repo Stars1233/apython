@@ -18,6 +18,7 @@
 %include "compiler.inc"
 
 extern builtins_dict_global
+extern type_is_subtype
 extern compile_source
 extern current_exception
 extern dict_get
@@ -46,7 +47,14 @@ EV_CODE  equ 24
 EV_GLOB  equ 32
 EV_LOC   equ 40
 EV_BLT   equ 48
-EV_FRAME equ 56          ; + 3 pushes = 80
+EV_OWNLOC equ 56         ; a locals dict we materialised, ours to release
+EV_FRAME equ 72          ; + 3 pushes = 96
+
+section .bss
+; Set by ev_resolve_ns when it had to build the locals mapping itself; the
+; caller takes it from here and releases it.  Read immediately after the call,
+; so a nested eval cannot race it.
+ev_locals_owned: resq 1
 
 section .text
 
@@ -67,6 +75,7 @@ NS_LOC   equ 32
 NS_FRAME equ 40          ; + 1 push = 48
 DEF_FUNC ev_resolve_ns, NS_FRAME
     push rbx
+    mov qword [rel ev_locals_owned], 0
     mov [rbp - NS_ARGS], rdi
     mov [rbp - NS_NARGS], rsi
     mov qword [rbp - NS_GLOB], 0
@@ -104,7 +113,23 @@ DEF_FUNC ev_resolve_ns, NS_FRAME
     mov rdx, [rax + PyFrame.locals]
     test rdx, rdx
     jnz .use_frame_locals
-    mov rdx, [rax + PyFrame.globals]
+    ; A function frame keeps its locals in the localsplus array rather than in
+    ; a mapping, and substituting globals here is why eval("lv + 1") inside a
+    ; function raised NameError for a name two words away, and why
+    ; exec("out = ...") wrote to the module.  Materialise them instead.  The
+    ; dict is ours; ev_locals_owned hands it to the caller to release.
+    push rax
+    mov rdi, rax
+    extern frame_fast_to_locals
+    call frame_fast_to_locals
+    pop rcx
+    test rax, rax
+    jz .ftl_failed
+    mov [rel ev_locals_owned], rax
+    mov rdx, rax
+    jmp .use_frame_locals
+.ftl_failed:
+    mov rdx, [rcx + PyFrame.globals]
 .use_frame_locals:
     mov [rbp - NS_LOC], rdx
     jmp .have_globals
@@ -121,10 +146,13 @@ DEF_FUNC ev_resolve_ns, NS_FRAME
     mov rax, [rbp - NS_GLOB]
     test rax, rax
     jz .no_frame
-    mov rdx, [rax + PyObject.ob_type]
-    lea rcx, [rel dict_type]
-    cmp rdx, rcx
-    jne .globals_not_dict
+    ; PyDict_Check accepts a subclass, and an exact-type test rejected one --
+    ; `exec(src, MyDict())` is ordinary Python.
+    mov rdi, [rax + PyObject.ob_type]
+    lea rsi, [rel dict_type]
+    call type_is_subtype
+    test eax, eax
+    jz .globals_not_dict
 
     mov rax, [rbp - NS_GLOB]
     mov rdx, [rbp - NS_LOC]
@@ -241,6 +269,8 @@ DEF_FUNC builtin_eval_fn, EV_FRAME
     call ev_resolve_ns
     mov [rbp - EV_GLOB], rax
     mov [rbp - EV_LOC], rdx
+    mov rcx, [rel ev_locals_owned]
+    mov [rbp - EV_OWNLOC], rcx
 
     mov rdi, rax
     call ev_inject_builtins
@@ -307,6 +337,13 @@ DEF_FUNC builtin_eval_fn, EV_FRAME
     mov rbx, rax
     mov rdi, [rbp - EV_CODE]
     call obj_decref
+    ; The locals mapping, if we built it rather than being handed one.
+    mov rdi, [rbp - EV_OWNLOC]
+    test rdi, rdi
+    jz .ev_own_run
+    mov qword [rbp - EV_OWNLOC], 0
+    call obj_decref
+.ev_own_run:
     mov rax, rbx
     pop r13
     pop r12
@@ -317,6 +354,13 @@ DEF_FUNC builtin_eval_fn, EV_FRAME
 .propagate:
     ; compile_source has already made the exception pending; a NULL Value is
     ; how a builtin reports that, and op_call unwinds from there.
+    ; The locals mapping, if we built it rather than being handed one.
+    mov rdi, [rbp - EV_OWNLOC]
+    test rdi, rdi
+    jz .ev_own_prop_0
+    mov qword [rbp - EV_OWNLOC], 0
+    call obj_decref
+.ev_own_prop_0:
     RET_NULL
     pop r13
     pop r12
@@ -472,6 +516,8 @@ DEF_FUNC builtin_exec_fn, EV_FRAME
     call ev_resolve_ns
     mov [rbp - EV_GLOB], rax
     mov [rbp - EV_LOC], rdx
+    mov rcx, [rel ev_locals_owned]
+    mov [rbp - EV_OWNLOC], rcx
 
     mov rdi, rax
     call ev_inject_builtins
@@ -518,6 +564,13 @@ DEF_FUNC builtin_exec_fn, EV_FRAME
     mov rbx, rax
     mov rdi, [rbp - EV_CODE]
     call obj_decref
+    ; The locals mapping, if we built it rather than being handed one.
+    mov rdi, [rbp - EV_OWNLOC]
+    test rdi, rdi
+    jz .ev_own_run
+    mov qword [rbp - EV_OWNLOC], 0
+    call obj_decref
+.ev_own_run:
     ; A NULL result means the body raised; propagate it rather than returning
     ; None over the top of a live exception.
     test rbx, rbx
@@ -531,6 +584,13 @@ DEF_FUNC builtin_exec_fn, EV_FRAME
     ret
 
 .propagate:
+    ; The locals mapping, if we built it rather than being handed one.
+    mov rdi, [rbp - EV_OWNLOC]
+    test rdi, rdi
+    jz .ev_own_prop_2
+    mov qword [rbp - EV_OWNLOC], 0
+    call obj_decref
+.ev_own_prop_2:
     RET_NULL
     pop r13
     pop r12

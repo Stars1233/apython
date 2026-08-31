@@ -2899,12 +2899,25 @@ DEF_FUNC builtin_locals
     ret
 
 .locals_use_globals:
-    ; No locals dict - return globals (module scope)
+    ; No locals mapping means a function frame, whose locals live in the
+    ; localsplus array.  Returning globals there was simply the wrong answer:
+    ; locals() inside a function listed the module's names, not its own.
+    mov rdi, rax
+    extern frame_fast_to_locals
+    call frame_fast_to_locals
+    test rax, rax
+    jz .locals_no_frame
+    mov edx, TAG_PTR
+    leave
+    V_PACK rax, rdx             ; builtins return one Value
+    ret
+.locals_no_frame:
+    mov rax, [rel eval_saved_r12]
     mov rax, [rax + PyFrame.globals]
     INCREF rax
     mov edx, TAG_PTR
     leave
-    V_PACK rax, rdx             ; builtins return one Value
+    V_PACK rax, rdx
     ret
 
 .locals_error:
