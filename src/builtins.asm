@@ -3019,7 +3019,18 @@ BCL_OKWV  equ 72
     push rax
     mov rdi, [rbp - BCL_BASES]
     test rdi, rdi
+    jz .bc_meta_bases_done
+    call obj_decref
+.bc_meta_bases_done:
+    ; The metaclass took its own reference to the namespace -- type.__new__
+    ; increfs before type_from_parts adopts it -- so ours is not the class's.
+    ; Only the no-metaclass path below transfers it; here it was dropped on
+    ; the floor, one dict per class built through a metaclass, which is every
+    ; enum and every ABC.
+    mov rdi, r15
+    test rdi, rdi
     jz .bc_meta_done
+    xor r15d, r15d
     call obj_decref
 .bc_meta_done:
     pop rax

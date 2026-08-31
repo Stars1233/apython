@@ -35,6 +35,7 @@
 %include "compiler.inc"
 
 extern ast_at
+extern comp_keep
 extern ast_child
 extern ast_obj_at
 extern cg_block
@@ -1447,6 +1448,14 @@ DEF_FUNC_LOCAL cg_pat_keys, PY2_FRAME
     mov [rbp - PY2_N], rcx
     mov rdi, rcx
     call tuple_new
+    test rax, rax
+    jz .fail
+    ; Arena-owned from here.  cg_const stores a borrowed reference, so the
+    ; success path leaked it -- and .not_literal and .fail abandoned it
+    ; without freeing it at all.
+    mov rdi, rbx
+    mov rsi, rax
+    call comp_keep
     test rax, rax
     jz .fail
     mov [rbp - PY2_TUPLE], rax

@@ -24,6 +24,7 @@ extern sym_at
 extern comp_intern_cstr
 extern cg_children
 extern cg_const
+extern comp_keep
 extern cg_emit
 extern cg_emit_jump
 extern cg_emit_jump_back
@@ -1748,6 +1749,11 @@ DEF_FUNC_LOCAL cg_s_importfrom, CIF_FRAME
     call cg_fromlist_tuple
     test rax, rax
     jz .fail
+    ; The tuple is owned and cg_const stores a borrowed reference, so hand it
+    ; to the arena: comp_free releases it however the compilation ended.
+    mov rdi, rbx
+    mov rsi, rax
+    call comp_keep
     mov rdi, r12
     mov rsi, rax
     call cg_const
@@ -1765,6 +1771,11 @@ DEF_FUNC_LOCAL cg_s_importfrom, CIF_FRAME
     call cg_fromlist_star
     test rax, rax
     jz .fail
+    ; The tuple is owned and cg_const stores a borrowed reference, so hand it
+    ; to the arena: comp_free releases it however the compilation ended.
+    mov rdi, rbx
+    mov rsi, rax
+    call comp_keep
     mov rdi, r12
     mov rsi, rax
     call cg_const

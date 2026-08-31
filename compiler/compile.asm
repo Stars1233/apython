@@ -617,8 +617,10 @@ END_FUNC cs_unit_setup
 DEF_FUNC cs_return_none, 8
     push rbx
     mov rbx, rdi
+    ; No INCREF: cg_const stores a borrowed reference and
+    ; asm_tuple_from_values takes co_consts' own, so incrementing here just
+    ; leaked one per module compiled.  None outlives everything regardless.
     lea rsi, [rel none_singleton]
-    INCREF rsi
     mov rdi, rbx
     call cg_const
     mov rdx, rax
@@ -773,6 +775,31 @@ DEF_FUNC comp_intern_name, 80
     leave
     ret
 END_FUNC comp_intern_name
+
+;; ============================================================================
+;; comp_keep(Comp *c, Value v) -> rax = the same value, now arena-owned
+;;
+;; CompUnit.consts holds BORROWED references and asm_tuple_from_values takes
+;; its own when it builds co_consts, so an owned object built for one constant
+;; and handed to cg_const is simply leaked.  Handing it to the object arena
+;; first is what gives it an owner -- comp_free releases the arena however the
+;; compilation ended, which also covers the error paths that used to abandon
+;; it.  Takes ownership of v.
+;; ============================================================================
+global comp_keep
+DEF_FUNC comp_keep, 16
+    push rbx
+    push r12
+    mov rbx, rdi
+    call ast_obj                        ; rsi already holds the value
+    mov rdi, rbx
+    mov rsi, rax
+    call ast_obj_at
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC comp_keep
 
 ;; ============================================================================
 ;; comp_intern_keep(Comp *c, const char *s, int64_t len)

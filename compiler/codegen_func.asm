@@ -20,6 +20,7 @@
 %include "compiler.inc"
 
 extern ast_at
+extern comp_keep
 extern ast_child
 extern ast_obj_at
 extern ast_obj
@@ -1594,9 +1595,16 @@ DEF_FUNC cg_class_prologue, CQ_FRAME
     mov rcx, [rbp - CQ_LINE]
     call cg_emit
 
-    mov rdi, r12
+    ; The caller owns CQ_NAME and releases it, and cg_const stores a borrowed
+    ; reference, so co_consts needs an owner of its own: the arena, which
+    ; comp_free releases.  The bare INCREF that used to stand here gave it a
+    ; reference and nobody to drop it.
+    mov rdi, rbx
     mov rsi, [rbp - CQ_NAME]
     INCREF rsi
+    call comp_keep
+    mov rdi, r12
+    mov rsi, rax
     call cg_const
     mov rdx, rax
     mov rdi, r12

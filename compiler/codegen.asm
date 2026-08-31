@@ -16,6 +16,7 @@
 %include "compiler.inc"
 
 extern ast_at
+extern comp_keep
 extern ast_child
 extern ast_obj_at
 extern buf_free
@@ -2060,6 +2061,11 @@ DEF_FUNC_LOCAL cg_e_call, CC2_FRAME
     call cg_kwnames_tuple
     test eax, eax
     jz .fail
+    ; The tuple is owned and cg_const stores a borrowed reference, so hand it
+    ; to the arena: comp_free releases it however the compilation ended.
+    mov rdi, rbx
+    mov rsi, rax
+    call comp_keep
     mov rdi, r12
     mov rsi, rax
     call cg_const
@@ -2678,6 +2684,11 @@ DEF_FUNC cg_call_args_only, CA_FRAME
     call cg_kwnames_tuple
     test rax, rax
     jz .fail
+    ; The tuple is owned and cg_const stores a borrowed reference, so hand it
+    ; to the arena: comp_free releases it however the compilation ended.
+    mov rdi, rbx
+    mov rsi, rax
+    call comp_keep
     mov rdi, r12
     mov rsi, rax
     call cg_const
