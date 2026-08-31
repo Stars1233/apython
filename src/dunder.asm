@@ -510,18 +510,15 @@ global dunder_or
 global dunder_xor
 global dunder_lshift
 global dunder_rshift
-global dunder_neg
 global dunder_iter
 global dunder_next
 global dunder_getitem
 global dunder_setitem
-global dunder_delitem
 global dunder_contains
 global dunder_len
 global dunder_bool
 global dunder_call
 global obj_call_n
-global dunder_hash
 global dunder_iadd
 global dunder_isub
 global dunder_imul
@@ -546,7 +543,6 @@ global dunder_str
 global dunder_matmul
 global dunder_get
 global dunder_set
-global dunder_delete
 global dunder_del
 
 dunder_eq:       db "__eq__", 0

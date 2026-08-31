@@ -292,6 +292,28 @@ def check_rel(files):
                             "write [rel %s]" % sym))
     return bad
 
+def check_exports(files):
+    """A `global X` with no definition of X in the same file.
+
+    NASM does not complain: it emits nothing at all for the symbol, so the
+    export silently does not exist and every reader is told a name is available
+    that is not.  These arise when a data label is deleted and its `global` is
+    left behind -- four dunder-name strings in src/dunder.asm went that way.
+    """
+    bad = []
+    for path in files:
+        src = open(path).read()
+        exported = re.findall(r'^\s*global\s+(\w+)\s*$', src, re.M)
+        if not exported:
+            continue
+        defined = set(re.findall(r'^(\w+):', src, re.M))
+        defined |= set(re.findall(r'^DEF_FUNC(?:_BARE|_LOCAL)?\s+(\w+)', src, re.M))
+        defined |= set(re.findall(r'^(\w+)\s+equ\s', src, re.M))
+        for g in sorted(set(exported) - defined):
+            bad.append((path, 0, "global %s, but %s is never defined here" % (g, g),
+                        "define it, or drop the export"))
+    return bad
+
 def check_markers(files):
     """Every function opens with DEF_FUNC* and closes with a matching END_FUNC.
 
@@ -375,6 +397,7 @@ def main():
 
     problems = (check_field_widths(everything, fields) + check_section(everything)
                 + check_rel(everything) + check_markers(everything)
+                + check_exports(everything)
                 + check_text(everything) + check_guards(headers)
                 + check_alignment(scoped) + check_tailjumps(scoped)
                 + check_callee_saved(scoped) + check_saved_writes(scoped))

@@ -25,6 +25,7 @@ Six checks run over **every** hand-written `.asm` in the tree:
 | Every `END_FUNC` has a matching `DEF_FUNC*`, and vice versa | `check_markers` | error |
 | No tabs; `DEF_FUNC`/`END_FUNC` at column 0 | `check_text` | error |
 | Every `.inc` has a guard named for the file, echoed on the `%endif` | `check_guards` | error |
+| A `global X` has a definition of `X` in the same file | `check_exports` | error |
 
 Four more are scoped to `compiler/*.asm` plus `src/main.asm`:
 
