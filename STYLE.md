@@ -430,7 +430,7 @@ the overflow path, so it clobbers caller-saved registers too.
 
 ## Value Macros
 
-The Value encoding is described in CLAUDE.md and `docs/valuebox.md`; these are
+The Value encoding is described in CLAUDE.md and `valuebox.md`; these are
 the macros that implement it, all in `include/value.inc`.
 
 **Classify** — each takes the value and a scratch register, which must differ:
