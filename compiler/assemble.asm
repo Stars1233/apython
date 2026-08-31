@@ -543,11 +543,12 @@ DEF_FUNC asm_stackdepth, AS_FRAME
 
     ; The worklist holds (index << 32) | depth; depths here are small and
     ; non-negative, so one qword carries both.
-    ; An instruction is re-pushed whenever a *larger* depth reaches it, so the
-    ; height is not bounded by the instruction count: this starts at one entry
-    ; per instruction plus room for the handler targets, and grows.  Writing
-    ; past it was silent memory corruption, and any depth-modelling mistake --
-    ; a missing POP_TOP inside a loop, say -- was enough to reach it.
+    ; An instruction is visited once now -- a second, different depth is an
+    ; error rather than a re-walk -- but an unvisited target can still be
+    ; pushed once per incoming edge, so the height is not bounded by the
+    ; instruction count.  This starts at one entry per instruction plus room
+    ; for the handler targets, and grows.  Writing past it was silent memory
+    ; corruption.
     lea rax, [r14 + 64]
     mov [rbp - AS_CAP], rax
     lea rdi, [rax*8]
@@ -578,11 +579,17 @@ DEF_FUNC asm_stackdepth, AS_FRAME
     mov eax, [r15 + rcx*4]
     cmp eax, -1
     je .fresh
-    ; Already visited.  Two different depths at one instruction means the
-    ; emitters disagree; take the larger so co_stacksize stays an upper bound.
+    ; Already visited.  The depth an instruction runs at is a property of the
+    ; instruction, not of the path that reached it, so two different depths at
+    ; one join mean the emitters disagree about what is on the stack -- a
+    ; codegen bug.  Taking the larger kept co_stacksize an upper bound and let
+    ; the bug through: a `return` inside a `finally` left the exception state
+    ; on the stack, the enclosing loop's back edge rejoined one word higher
+    ; every time, and the only symptom was this pass walking the body forever.
     mov rdx, [rbp - AS_D]
     cmp eax, edx
-    jae .work                           ; the recorded depth already covers it
+    jne .conflict
+    jmp .work                           ; the same depth: nothing new to learn
 .fresh:
     mov rdx, [rbp - AS_D]
     mov [r15 + rcx*4], edx
@@ -609,6 +616,11 @@ DEF_FUNC asm_stackdepth, AS_FRAME
     mov edx, 1
     call asm_effect
     add rax, [rbp - AS_D]               ; depth on the taken edge
+    ; The fallthrough edge guards this too.  Without it a negative depth
+    ; survives the shl/or below as every high bit of the packed word set, and
+    ; .walk reads an index past the end and silently drops the successor --
+    ; co_stacksize then comes from an incomplete graph.
+    js .underflow
     ; Push (target index, that depth).
     mov rdx, [rbx + CompUnit.instrs + Buf.data]
     mov rcx, [rbp - AS_I]
@@ -712,6 +724,15 @@ DEF_FUNC asm_stackdepth, AS_FRAME
     mov rdi, [rbp - AS_DEPTH]
     call ap_free
     mov rax, -1
+    jmp .ret
+
+.conflict:
+    ; Two depths at one instruction: reported rather than papered over.
+    mov rdi, [rbp - AS_WORK]
+    call ap_free
+    mov rdi, [rbp - AS_DEPTH]
+    call ap_free
+    mov rax, -2
     jmp .ret
 
 .empty:
@@ -1096,6 +1117,8 @@ DEF_FUNC asm_assemble, AA_FRAME
     call asm_stackdepth
     cmp rax, -1
     je .bad_depth
+    cmp rax, -2
+    je .bad_join
     mov [r12 + CompUnit.stacksize], eax
 
     ; --- pass 3: line table ---
@@ -1226,6 +1249,19 @@ DEF_FUNC asm_assemble, AA_FRAME
     lea rsi, [rel exc_SyntaxError_type]
     CSTRING rdx, "internal error: stack underflow in generated code"
     xor ecx, ecx
+    xor r8d, r8d
+    call comp_error
+    jmp .fail
+
+.bad_join:
+    ; Two paths reach one instruction at different depths.  The line is the
+    ; code object's first, not the instruction's: comp_error takes no
+    ; formatting, and naming the function beats claiming a statement this pass
+    ; cannot identify.
+    mov rdi, rbx
+    lea rsi, [rel exc_SyntaxError_type]
+    CSTRING rdx, "internal error: two stack depths at one instruction"
+    mov ecx, [r12 + CompUnit.firstline]
     xor r8d, r8d
     call comp_error
     jmp .fail
