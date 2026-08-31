@@ -707,7 +707,9 @@ SH_INNER equ 16
 SH_TEXT  equ 24
 SH_COL   equ 32
 SH_I     equ 40
-SH_FRAME equ 40           ; + 1 push = 48
+SH_LEN   equ 48           ; bytes of source text actually written
+SH_HASCOL equ 56          ; whether args[1][2] gave us a usable column
+SH_FRAME equ 72           ; + 1 push = 80
 DEF_FUNC tb_syntax_header, SH_FRAME
     push rbx
     mov rbx, rdi
@@ -784,8 +786,21 @@ DEF_FUNC tb_syntax_header, SH_FRAME
     ; way CPython prints it, then a caret under the offending column.
     mov rcx, [rax + 24]
     mov [rbp - SH_TEXT], rcx
+    ; The offset is checked like the line number is.  It is legally None --
+    ; that is what CPython puts there when the column is unknown -- and None is
+    ; a heap pointer, so subtracting the int bias from it gave about 2^50 and
+    ; the caret loop below wrote that many spaces, one write() each.
     mov rcx, [rax + 16]
+    mov qword [rbp - SH_HASCOL], 1
+    V_IS_INT rcx, rdx
+    jae .have_col
+    ; No usable column: CPython prints the source line and no caret at all.
+    mov qword [rbp - SH_HASCOL], 0
+    xor ecx, ecx
+    jmp .stash_col
+.have_col:
     V_TO_I64 rcx
+.stash_col:
     mov [rbp - SH_COL], rcx
     mov rax, [rbp - SH_TEXT]
     V_TEST_PTR rax, rcx
@@ -822,6 +837,7 @@ DEF_FUNC tb_syntax_header, SH_FRAME
     add rdi, [rbp - SH_I]
     mov rsi, [rax + PyStrObject.ob_size]
     sub rsi, [rbp - SH_I]
+    mov qword [rbp - SH_LEN], 0
     ; Trim the trailing newline; the caret line supplies its own.
     cmp rsi, 0
     jle .no_text
@@ -829,6 +845,7 @@ DEF_FUNC tb_syntax_header, SH_FRAME
     jne .write_text
     dec rsi
 .write_text:
+    mov [rbp - SH_LEN], rsi
     call tb_write
     CSTRING rdi, `\n`
     call tb_write_cstr
@@ -836,6 +853,8 @@ DEF_FUNC tb_syntax_header, SH_FRAME
 
     ; The caret, under the column.  The offset is one-based and the leading
     ; whitespace has already been dropped, so both come off it.
+    cmp qword [rbp - SH_HASCOL], 0
+    je .done
     CSTRING rdi, "    "
     call tb_write_cstr
     mov rcx, [rbp - SH_COL]
@@ -844,6 +863,13 @@ DEF_FUNC tb_syntax_header, SH_FRAME
     jns .pad
     xor ecx, ecx
 .pad:
+    ; A caret past the end of the line is not a caret.  args[1][2] is whatever
+    ; the raiser put there -- a Python program may raise SyntaxError with any
+    ; offset it likes -- and the loop below writes one space per column.
+    cmp rcx, [rbp - SH_LEN]
+    jbe .pad_ok
+    mov rcx, [rbp - SH_LEN]
+.pad_ok:
     mov [rbp - SH_I], rcx
 .pad_loop:
     cmp qword [rbp - SH_I], 0

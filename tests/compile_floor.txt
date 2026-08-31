@@ -233,6 +233,7 @@ test_subclass_item_slots
 test_super_descriptors
 test_syntax_error_args
 test_syntax_error_location
+test_syntax_error_offset
 test_sys_exit
 test_traceback
 test_tuples
