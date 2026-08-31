@@ -23,7 +23,6 @@
 
 %include "macros.inc"
 %include "object.inc"
-%include "types.inc"
 
 extern str_new_heap
 extern ap_malloc

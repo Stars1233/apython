@@ -10,8 +10,6 @@
 
 %include "macros.inc"
 %include "object.inc"
-%include "types.inc"
-%include "gc.inc"
 
 extern int_promote_mpz
 extern ap_malloc

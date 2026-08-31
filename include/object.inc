@@ -601,4 +601,363 @@ endstruc
 ; Sentinel values
 NULL_OBJ equ 0
 
+;; ============================================================================
+;; Type objects: PyTypeObject and the three method tables
+;; (was include/types.inc)
+;; ============================================================================
+
+; Type object layout
+struc PyTypeObject
+    .ob_refcnt:      resq 1  ; +0
+    .ob_type:        resq 1  ; +8  (metatype, usually &type_type)
+    .tp_name:        resq 1  ; +16  ptr to C string
+    .tp_basicsize:   resq 1  ; +24
+    .tp_dealloc:     resq 1  ; +32  function ptr
+    .tp_repr:        resq 1  ; +40  function ptr
+    .tp_str:         resq 1  ; +48  function ptr (defaults to tp_repr if NULL)
+    .tp_hash:        resq 1  ; +56  function ptr
+    .tp_call:        resq 1  ; +64  function ptr
+    .tp_getattr:     resq 1  ; +72  function ptr
+    .tp_setattr:     resq 1  ; +80  function ptr
+    .tp_richcompare: resq 1  ; +88  function ptr
+    .tp_iter:        resq 1  ; +96  function ptr
+    .tp_iternext:    resq 1  ; +104 function ptr
+    .tp_init:        resq 1  ; +112 function ptr
+    .tp_new:         resq 1  ; +120 function ptr
+    .tp_as_number:   resq 1  ; +128 ptr to number methods or NULL
+    .tp_as_sequence: resq 1  ; +136 ptr to sequence methods or NULL
+    .tp_as_mapping:  resq 1  ; +144 ptr to mapping methods or NULL
+    .tp_base:        resq 1  ; +152 ptr to base type
+    .tp_dict:        resq 1  ; +160 ptr to type's __dict__
+    .tp_mro:         resq 1  ; +168 ptr to MRO tuple
+    .tp_flags:       resq 1  ; +176
+    .tp_bases:       resq 1  ; +184 ptr to bases tuple
+    .tp_traverse:    resq 1  ; +192 GC traverse function ptr
+    .tp_clear:       resq 1  ; +200 GC clear function ptr
+    ; Byte offset of the instance __dict__ within an instance, or 0 for a
+    ; type whose instances have none.  Only ever read for a heaptype, which
+    ; is gc_alloc'd and zero-filled, so a static table that predates this
+    ; field cannot be misread.
+    .tp_dictoffset:  resq 1  ; +208
+endstruc
+
+TYPE_OBJECT_SIZE equ PyTypeObject_size
+
+; Number methods structure
+struc PyNumberMethods
+    .nb_add:           resq 1  ; +0
+    .nb_subtract:      resq 1  ; +8
+    .nb_multiply:      resq 1  ; +16
+    .nb_remainder:     resq 1  ; +24
+    .nb_divmod:        resq 1  ; +32
+    .nb_power:         resq 1  ; +40
+    .nb_negative:      resq 1  ; +48
+    .nb_positive:      resq 1  ; +56
+    .nb_absolute:      resq 1  ; +64
+    .nb_bool:          resq 1  ; +72
+    .nb_invert:        resq 1  ; +80
+    .nb_lshift:        resq 1  ; +88
+    .nb_rshift:        resq 1  ; +96
+    .nb_and:           resq 1  ; +104
+    .nb_xor:           resq 1  ; +112
+    .nb_or:            resq 1  ; +120
+    .nb_int:           resq 1  ; +128
+    .nb_float:         resq 1  ; +136
+    .nb_floor_divide:  resq 1  ; +144
+    .nb_true_divide:   resq 1  ; +152
+    .nb_index:         resq 1  ; +160
+    ; Inplace slots (used by NB_INPLACE_* opcodes)
+    .nb_iadd:          resq 1  ; +168
+    .nb_isub:          resq 1  ; +176
+    .nb_imul:          resq 1  ; +184
+    .nb_irem:          resq 1  ; +192
+    .nb_ipow:          resq 1  ; +200
+    .nb_ilshift:       resq 1  ; +208
+    .nb_irshift:       resq 1  ; +216
+    .nb_iand:          resq 1  ; +224
+    .nb_ixor:          resq 1  ; +232
+    .nb_ior:           resq 1  ; +240
+    .nb_ifloor_divide: resq 1  ; +248
+    .nb_itrue_divide:  resq 1  ; +256
+    ; The @ operator.  These were missing entirely, and binary_op_offsets
+    ; mapped NB_MATRIX_MULTIPLY to offset 0 -- which is nb_add -- so 3 @ 4
+    ; silently returned 7.
+    .nb_matmul:        resq 1  ; +264
+    .nb_imatmul:       resq 1  ; +272
+endstruc
+
+; Sequence methods structure
+struc PySequenceMethods
+    .sq_length:        resq 1  ; +0
+    .sq_concat:        resq 1  ; +8
+    .sq_repeat:        resq 1  ; +16
+    .sq_item:          resq 1  ; +24
+    .sq_ass_item:      resq 1  ; +32
+    .sq_contains:      resq 1  ; +40
+    .sq_inplace_concat: resq 1 ; +48
+    .sq_inplace_repeat: resq 1 ; +56
+endstruc
+
+; Mapping methods structure
+struc PyMappingMethods
+    .mp_length:        resq 1  ; +0
+    .mp_subscript:     resq 1  ; +8
+    .mp_ass_subscript: resq 1  ; +16
+endstruc
+
+; Type flags
+TYPE_FLAG_HEAPTYPE     equ 0x0001
+TYPE_FLAG_BASETYPE     equ 0x0002
+TYPE_FLAG_HAVE_GC      equ 0x0004
+TYPE_FLAG_INT_SUBCLASS equ 0x0100
+TYPE_FLAG_STR_SUBCLASS equ 0x0200
+TYPE_FLAG_LIST_SUBCLASS equ 0x0400
+TYPE_FLAG_TUPLE_SUBCLASS equ 0x0800
+TYPE_FLAG_DICT_SUBCLASS equ 0x1000
+TYPE_FLAG_SET_SUBCLASS equ 0x4000   ; 0x2000 is TYPE_FLAG_HAS_SLOTS
+TYPE_FLAG_HAS_SLOTS     equ 0x2000
+; Instances of this type are classes.  "Is this object a class?" used to be
+; asked as `ob_type is user_type_metatype`, which is false for a class built by
+; a metaclass of its own -- so a classmethod reached through such a class bound
+; the metaclass instead of the class.
+TYPE_FLAG_METATYPE      equ 0x8000
+
+; Comparison opcodes (used by tp_richcompare)
+PY_LT equ 0
+PY_LE equ 1
+PY_EQ equ 2
+PY_NE equ 3
+PY_GT equ 4
+PY_GE equ 5
+
+;; ============================================================================
+;; PyFrame
+;; (was include/frame.inc)
+;; ============================================================================
+
+; Execution frame layout
+struc PyFrame
+    .prev_frame:    resq 1  ; +0:  ptr to previous frame
+    .code:          resq 1  ; +8:  ptr to code object
+    .globals:       resq 1  ; +16: ptr to globals dict
+    .builtins:      resq 1  ; +24: ptr to builtins dict
+    .locals:        resq 1  ; +32: ptr to locals dict (or NULL for fast locals)
+    .instr_ptr:     resq 1  ; +40: saved bytecode pointer
+    .stack_ptr:     resq 1  ; +48: saved value stack pointer
+    .stack_base:    resq 1  ; +56: ptr to bottom of the value stack
+    .return_offset: resd 1  ; +64: return offset
+    .nlocalsplus:   resd 1  ; +68: number of locals + cells + frees
+    .func_obj:      resq 1  ; +72: ptr to function object (for closures)
+    .localsplus:            ; +80: Value array (variable size)
+endstruc
+
+FRAME_HEADER_SIZE equ PyFrame.localsplus
+
+;; ============================================================================
+;; Exceptions, tracebacks, and the fatal error codes
+;; (was include/errcodes.inc)
+;; ============================================================================
+
+; Exception type IDs
+EXC_BASE_EXCEPTION     equ 0
+EXC_EXCEPTION          equ 1
+EXC_TYPE_ERROR         equ 2
+EXC_VALUE_ERROR        equ 3
+EXC_KEY_ERROR          equ 4
+EXC_INDEX_ERROR        equ 5
+EXC_ATTRIBUTE_ERROR    equ 6
+EXC_NAME_ERROR         equ 7
+EXC_RUNTIME_ERROR      equ 8
+EXC_STOP_ITERATION     equ 9
+EXC_ZERO_DIVISION      equ 10
+EXC_IMPORT_ERROR       equ 11
+EXC_NOT_IMPLEMENTED    equ 12
+EXC_FILE_NOT_FOUND     equ 13
+EXC_OVERFLOW_ERROR     equ 14
+EXC_ASSERTION_ERROR    equ 15
+EXC_KEYBOARD_INTERRUPT equ 16
+EXC_MEMORY_ERROR       equ 17
+EXC_RECURSION_ERROR    equ 18
+EXC_SYSTEM_EXIT        equ 19
+EXC_OS_ERROR           equ 20
+EXC_LOOKUP_ERROR       equ 21
+EXC_ARITHMETIC_ERROR   equ 22
+EXC_UNICODE_ERROR          equ 23
+EXC_BASE_EXCEPTION_GROUP   equ 24
+EXC_EXCEPTION_GROUP        equ 25
+EXC_CANCELLED_ERROR        equ 26
+EXC_STOP_ASYNC_ITERATION   equ 27
+EXC_TIMEOUT_ERROR          equ 28
+EXC_COUNT                  equ 29  ; total
+
+; Exception object
+struc PyExceptionObject
+    .ob_refcnt:     resq 1  ; +0
+    .ob_type:       resq 1  ; +8
+    .exc_type:      resq 1  ; +16: ptr to exception type object
+    .exc_value:     resq 1  ; +24: value, as a Value
+    .exc_tb:        resq 1  ; +32: ptr to traceback or NULL
+    .exc_context:   resq 1  ; +40: ptr to __context__ or NULL
+    .exc_cause:     resq 1  ; +48: ptr to __cause__ or NULL
+    .exc_args:      resq 1  ; +56: ptr to args tuple or NULL
+    .exc_dict:      resq 1  ; +64: ptr to instance dict or NULL (for custom attrs)
+    .exc_suppress:  resq 1  ; +72: __suppress_context__ (set by `raise .. from`)
+endstruc
+
+; Exception group object (extends PyExceptionObject with eg_exceptions)
+struc PyExceptionGroupObject
+    .ob_refcnt:     resq 1  ; +0
+    .ob_type:       resq 1  ; +8
+    .exc_type:      resq 1  ; +16
+    .exc_value:     resq 1  ; +24 (message, as a Value)
+    .exc_tb:        resq 1  ; +32
+    .exc_context:   resq 1  ; +40
+    .exc_cause:     resq 1  ; +48
+    .exc_args:      resq 1  ; +56
+    .exc_dict:      resq 1  ; +64: ptr to instance dict or NULL
+    .exc_suppress:  resq 1  ; +72: __suppress_context__
+    .eg_exceptions: resq 1  ; +72: tuple of sub-exceptions
+endstruc
+
+; Traceback object
+struc PyTracebackObject
+    .ob_refcnt: resq 1  ; +0
+    .ob_type:   resq 1  ; +8
+    .tb_next:   resq 1  ; +16: ptr to next traceback or NULL
+    .tb_lineno: resq 1  ; +24: line number (i64), 0 when unknown
+    .tb_code:   resq 1  ; +32: owned ref to the PyCodeObject, or NULL
+    .tb_lasti:  resq 1  ; +40: instruction offset in code units
+endstruc
+
+; Fatal error codes (non-Python, internal)
+ERR_OUT_OF_MEMORY     equ 1
+ERR_INVALID_PYC       equ 2
+ERR_MARSHAL_ERROR     equ 3
+ERR_INTERNAL          equ 4
+ERR_UNIMPLEMENTED_OP  equ 5
+ERR_STACK_OVERFLOW    equ 6
+ERR_STACK_UNDERFLOW   equ 7
+
+;; ============================================================================
+;; Builtin function ids and PyBuiltinObject
+;; (was include/builtins.inc)
+;; ============================================================================
+
+; Builtin function identifiers
+BUILTIN_PRINT       equ 0
+BUILTIN_LEN         equ 1
+BUILTIN_RANGE       equ 2
+BUILTIN_TYPE        equ 3
+BUILTIN_ISINSTANCE  equ 4
+BUILTIN_ID          equ 5
+BUILTIN_INT         equ 6
+BUILTIN_STR         equ 7
+BUILTIN_BOOL        equ 8
+BUILTIN_LIST        equ 9
+BUILTIN_DICT        equ 10
+BUILTIN_TUPLE       equ 11
+BUILTIN_SET         equ 12
+BUILTIN_FLOAT       equ 13
+BUILTIN_INPUT       equ 14
+BUILTIN_ABS         equ 15
+BUILTIN_MIN         equ 16
+BUILTIN_MAX         equ 17
+BUILTIN_SUM         equ 18
+BUILTIN_SORTED      equ 19
+BUILTIN_REVERSED    equ 20
+BUILTIN_ENUMERATE   equ 21
+BUILTIN_ZIP         equ 22
+BUILTIN_MAP         equ 23
+BUILTIN_FILTER      equ 24
+BUILTIN_HASATTR     equ 25
+BUILTIN_GETATTR     equ 26
+BUILTIN_SETATTR     equ 27
+BUILTIN_REPR        equ 28
+BUILTIN_HASH        equ 29
+BUILTIN_CALLABLE    equ 30
+BUILTIN_ITER        equ 31
+BUILTIN_NEXT        equ 32
+BUILTIN_SUPER       equ 33
+BUILTIN_ORD         equ 34
+BUILTIN_CHR         equ 35
+BUILTIN_HEX         equ 36
+BUILTIN_OCT         equ 37
+BUILTIN_BIN         equ 38
+BUILTIN_ROUND       equ 39
+BUILTIN_DIVMOD      equ 40
+BUILTIN_POW         equ 41
+BUILTIN_FORMAT      equ 42
+BUILTIN_VARS        equ 43
+BUILTIN_DIR         equ 44
+BUILTIN_OBJECT      equ 45
+BUILTIN_ISSUBCLASS  equ 46
+BUILTIN_COUNT       equ 47  ; total number of builtins
+
+; Builtin C function object
+struc PyBuiltinObject
+    .ob_refcnt:   resq 1  ; +0
+    .ob_type:     resq 1  ; +8
+    .func_id:     resq 1  ; +16: builtin function ID
+    .func_name:   resq 1  ; +24: ptr to name string
+    .func_ptr:    resq 1  ; +32: ptr to C implementation
+    .min_args:    resq 1  ; +40: minimum nargs (including self), 0 = no check
+    .max_args:    resq 1  ; +48: maximum nargs, -1 = no max check
+endstruc
+
+;; ============================================================================
+;; The GC header, and the traverse helpers
+;; (was include/gc.inc)
+;; ============================================================================
+
+; Cycle-collecting GC, CPython 3.12 compatible
+
+
+; PyGC_Head — prepended BEFORE PyObject in GC-tracked allocations
+; User code gets pointer at alloc_ptr + GC_HEAD_SIZE
+struc PyGC_Head
+    .gc_next: resq 1       ; +0: doubly-linked list next (ptr to PyGC_Head)
+    .gc_prev: resq 1       ; +8: prev ptr; low 2 bits = state flags during collection
+endstruc
+
+GC_HEAD_SIZE equ PyGC_Head_size   ; 16
+
+; GC state bits stored in low 2 bits of gc_prev
+GC_PREV_MASK_COLLECTING equ 1     ; object is in unreachable set
+GC_PREV_MASK_REACHABLE  equ 2     ; object is reachable (moved from unreachable)
+GC_PREV_MASK_FINALIZED  equ 3     ; object has been finalized
+GC_PREV_SHIFT           equ 2     ; gc_refs stored in bits 2+
+GC_PREV_MASK            equ ~3    ; mask to extract prev pointer (clear low 2 bits)
+
+; Macros to convert between object pointer and GC head
+; GC_FROM_OBJ: obj_ptr -> gc_head_ptr
+%macro GC_FROM_OBJ 2              ; %1 = dest reg, %2 = obj reg
+    lea %1, [%2 - GC_HEAD_SIZE]
+%endmacro
+
+; OBJ_FROM_GC: gc_head_ptr -> obj_ptr
+%macro OBJ_FROM_GC 2              ; %1 = dest reg, %2 = gc reg
+    lea %1, [%2 + GC_HEAD_SIZE]
+%endmacro
+
+
+; VISIT_V — call visit callback on a NaN-boxed Value if it holds a pointer
+; r14 must be loaded with the visit callback function pointer before use
+%macro VISIT_V 2                  ; %1 = Value reg, %2 = scratch (clobbered)
+    lea %2, [%1 - 1]
+    cmp %2, [rel v_ptr_max_m1]
+    ja %%skip                     ; immediate or NULL — not a reference
+    mov rdi, %1
+    call r14                      ; visit callback(obj)
+%%skip:
+%endmacro
+
+; VISIT_PTR — call visit callback on a plain heap pointer (NULL-safe)
+%macro VISIT_PTR 1                ; %1 = ptr_reg
+    test %1, %1
+    jz %%skip
+    mov rdi, %1
+    call r14
+%%skip:
+%endmacro
+
 %endif ; OBJECT_INC

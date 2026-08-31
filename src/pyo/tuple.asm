@@ -3,7 +3,6 @@
 
 %include "macros.inc"
 %include "object.inc"
-%include "types.inc"
 
 extern bool_true
 extern bool_false

@@ -6,8 +6,6 @@
 
 %include "macros.inc"
 %include "object.inc"
-%include "types.inc"
-%include "builtins.inc"
 
 extern ap_malloc
 extern gc_alloc

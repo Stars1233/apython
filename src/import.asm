@@ -3,8 +3,6 @@
 
 %include "macros.inc"
 %include "object.inc"
-%include "types.inc"
-%include "frame.inc"
 %include "marshal.inc"
 
 extern ap_malloc

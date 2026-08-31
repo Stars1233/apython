@@ -3,9 +3,6 @@
 
 %include "macros.inc"
 %include "object.inc"
-%include "types.inc"
-%include "frame.inc"
-%include "builtins.inc"
 
 extern dict_new
 extern dunder_call_3

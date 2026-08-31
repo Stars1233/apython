@@ -17,10 +17,7 @@
 
 %include "macros.inc"
 %include "object.inc"
-%include "types.inc"
 %include "opcodes.inc"
-%include "frame.inc"
-%include "errcodes.inc"
 
 section .text
 

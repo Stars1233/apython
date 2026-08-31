@@ -11,8 +11,6 @@
 
 %include "macros.inc"
 %include "object.inc"
-%include "types.inc"
-%include "errcodes.inc"
 %include "opcodes.inc"
 %include "value.inc"
 %include "compiler.inc"

@@ -8,7 +8,6 @@
 
 %include "macros.inc"
 %include "object.inc"
-%include "frame.inc"
 
 extern ap_malloc
 extern ap_free

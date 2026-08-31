@@ -8,7 +8,6 @@
 
 %include "macros.inc"
 %include "object.inc"
-%include "types.inc"
 
 extern int_promote_mpz
 extern str_from_cstr

@@ -24,7 +24,6 @@
 
 %include "macros.inc"
 %include "object.inc"
-%include "types.inc"
 %include "value.inc"
 
 extern dict_new

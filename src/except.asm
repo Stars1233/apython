@@ -21,7 +21,6 @@
 
 %include "macros.inc"
 %include "object.inc"
-%include "errcodes.inc"
 
 
 ; exc_table_find_handler(PyCodeObject *code, int bytecode_offset_halfwords)

@@ -13,7 +13,6 @@
 
 %include "macros.inc"
 %include "object.inc"
-%include "types.inc"
 %include "sre.inc"
 
 extern ap_malloc

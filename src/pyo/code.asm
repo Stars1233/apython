@@ -2,7 +2,6 @@
 
 %include "macros.inc"
 %include "object.inc"
-%include "types.inc"
 
 extern none_singleton
 extern ap_free

@@ -11,7 +11,6 @@
 
 %include "macros.inc"
 %include "object.inc"
-%include "types.inc"
 
 extern ap_malloc
 extern ap_free

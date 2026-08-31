@@ -3,7 +3,6 @@
 
 %include "macros.inc"
 %include "object.inc"
-%include "types.inc"
 
 extern obj_richcompare_bool
 extern eval_exception_unwind

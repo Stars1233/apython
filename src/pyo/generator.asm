@@ -4,9 +4,6 @@
 
 %include "macros.inc"
 %include "object.inc"
-%include "types.inc"
-%include "frame.inc"
-%include "errcodes.inc"
 
 extern bool_true
 extern bool_false

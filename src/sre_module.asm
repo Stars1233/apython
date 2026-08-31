@@ -4,8 +4,6 @@
 %include "macros.inc"
 extern val_to_i64
 %include "object.inc"
-%include "types.inc"
-%include "builtins.inc"
 %include "sre.inc"
 
 extern bool_true

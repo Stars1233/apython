@@ -10,9 +10,6 @@
 
 %include "macros.inc"
 %include "object.inc"
-%include "types.inc"
-%include "builtins.inc"
-%include "errcodes.inc"
 %include "eventloop.inc"
 
 extern ap_malloc

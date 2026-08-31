@@ -22,8 +22,6 @@
 
 %include "macros.inc"
 %include "object.inc"
-%include "types.inc"
-%include "builtins.inc"
 
 ; Where a slot lives: directly in PyTypeObject, or in one of the three
 ; method tables it points at.  A table is allocated for a type only when it

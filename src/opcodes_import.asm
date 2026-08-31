@@ -2,8 +2,6 @@
 
 %include "macros.inc"
 %include "object.inc"
-%include "types.inc"
-%include "frame.inc"
 
 extern eval_dispatch
 extern eval_saved_rbx

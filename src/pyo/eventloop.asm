@@ -14,8 +14,6 @@
 
 %include "macros.inc"
 %include "object.inc"
-%include "types.inc"
-%include "errcodes.inc"
 %include "eventloop.inc"
 
 extern bool_true

@@ -12,9 +12,7 @@
 ;   - prep_reraise_star(orig, excs_list) -> PyObject*
 
 %include "macros.inc"
-%include "errcodes.inc"
 %include "object.inc"
-%include "types.inc"
 
 extern ap_free
 extern object_type

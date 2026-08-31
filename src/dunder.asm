@@ -6,7 +6,6 @@
 
 %include "macros.inc"
 %include "object.inc"
-%include "types.inc"
 
 extern kw_names_pending
 

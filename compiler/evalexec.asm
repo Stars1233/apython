@@ -11,10 +11,7 @@
 
 %include "macros.inc"
 %include "object.inc"
-%include "types.inc"
 %include "value.inc"
-%include "builtins.inc"
-%include "frame.inc"
 %include "compiler.inc"
 
 extern builtins_dict_global

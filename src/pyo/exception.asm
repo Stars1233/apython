@@ -18,8 +18,6 @@
 
 %include "macros.inc"
 %include "object.inc"
-%include "types.inc"
-%include "errcodes.inc"
 
 extern ap_malloc
 extern gc_alloc

@@ -4,8 +4,6 @@
 
 %include "macros.inc"
 %include "object.inc"
-%include "types.inc"
-%include "builtins.inc"
 %include "sre.inc"
 
 extern ap_malloc

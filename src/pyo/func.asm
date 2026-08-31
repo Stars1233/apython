@@ -3,8 +3,6 @@
 
 %include "macros.inc"
 %include "object.inc"
-%include "types.inc"
-%include "frame.inc"
 %include "opcodes.inc"
 
 extern none_singleton

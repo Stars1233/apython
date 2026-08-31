@@ -3,9 +3,6 @@
 
 %include "macros.inc"
 %include "object.inc"
-%include "types.inc"
-%include "errcodes.inc"
-%include "frame.inc"
 %include "compiler.inc"
 
 extern bool_init

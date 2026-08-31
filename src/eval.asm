@@ -4,10 +4,7 @@
 
 %include "macros.inc"
 %include "object.inc"
-%include "frame.inc"
 %include "opcodes.inc"
-%include "types.inc"
-%include "errcodes.inc"
 
 ; External opcode handlers (defined in opcodes_*.asm files)
 extern op_pop_top

@@ -241,8 +241,7 @@ def main():
     # glibc's strtod misaligned on any source file with a float literal.  The
     # rest of src/ predates the alignment rule and would drown the signal.
     files = sorted(glob.glob('compiler/*.asm')) + ['src/main.asm']
-    fields = dword_fields(['compiler/compiler.inc', 'include/object.inc',
-                           'include/frame.inc', 'include/types.inc'])
+    fields = dword_fields(['compiler/compiler.inc', 'include/object.inc'])
     problems = (check_field_widths(files, fields) + check_alignment(files)
                 + check_tailjumps(files) + check_section(files)
                 + check_callee_saved(files) + check_saved_writes(files))

@@ -3,7 +3,6 @@
 %include "value.inc"
 %include "macros.inc"
 %include "object.inc"
-%include "types.inc"
 
 extern str_from_cstr
 extern __gmpz_init

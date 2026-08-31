@@ -7,10 +7,6 @@
 
 %include "macros.inc"
 %include "object.inc"
-%include "types.inc"
-%include "gc.inc"
-%include "errcodes.inc"
-%include "frame.inc"
 
 extern ap_malloc
 extern ap_free

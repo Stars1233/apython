@@ -20,8 +20,6 @@
 ; ============================================================================
 
 %include "include/object.inc"
-%include "include/types.inc"
-%include "include/errcodes.inc"
 %include "include/macros.inc"
 %include "include/value.inc"
 
