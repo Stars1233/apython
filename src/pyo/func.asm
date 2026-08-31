@@ -9,13 +9,6 @@
 %include "object.inc"
 %include "opcodes.inc"
 
-%include "object.inc"
-
-
-%include "macros.inc"
-%include "object.inc"
-%include "opcodes.inc"
-
 extern none_singleton
 extern ap_malloc
 extern gc_alloc
@@ -35,7 +28,6 @@ extern func_traverse
 extern func_clear
 extern exc_TypeError_type
 extern raise_exception
-
 
 ; ---------------------------------------------------------------------------
 ; func_new(PyCodeObject *code, PyObject *globals) -> PyFuncObject*

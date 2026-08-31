@@ -4,13 +4,6 @@
 %include "macros.inc"
 %include "object.inc"
 
-
-
-%include "macros.inc"
-%include "object.inc"
-
-
-
 ;; ============================================================================
 ;; The marshal type codes and .pyc header constants
 ;; (was include/marshal.inc)
@@ -1196,7 +1189,6 @@ mdo_set_common:
     add rsp, 8                 ; pop flag
     xor r12d, r12d             ; clear FLAG_REF -- we handled it ourselves
     jmp mfinish
-
 
 ;--------------------------------------------------------------------------
 ; BSS section: marshal global state

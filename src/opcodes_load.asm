@@ -16,11 +16,6 @@
 %include "object.inc"
 %include "opcodes.inc"
 
-
-%include "macros.inc"
-%include "object.inc"
-%include "opcodes.inc"
-
 section .text
 
 extern eval_dispatch

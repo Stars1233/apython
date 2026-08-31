@@ -29,14 +29,6 @@
 %include "macros.inc"
 %include "value.inc"
 
-%include "object.inc"
-
-
-
-%include "object.inc"
-%include "macros.inc"
-%include "value.inc"
-
 extern sys_write
 extern sys_open
 extern sys_read

@@ -7,10 +7,6 @@
 %include "macros.inc"
 %include "object.inc"
 
-
-%include "macros.inc"
-%include "object.inc"
-
 extern ap_malloc
 extern gc_alloc
 extern gc_track

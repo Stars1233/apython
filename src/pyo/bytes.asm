@@ -4,10 +4,6 @@
 %include "macros.inc"
 %include "object.inc"
 
-
-%include "macros.inc"
-%include "object.inc"
-
 extern ap_malloc
 extern ap_free
 extern gc_alloc
@@ -1749,7 +1745,6 @@ DEF_FUNC_BARE bytearray_len
     mov rax, [rdi + PyByteArrayObject.ob_size]
     ret
 END_FUNC bytearray_len
-
 
 ;; ============================================================================
 ;; bytearray_tp_iter / bytearray_iter_next

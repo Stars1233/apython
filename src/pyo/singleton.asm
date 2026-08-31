@@ -8,11 +8,6 @@
 %include "macros.inc"
 %include "object.inc"
 
-
-%include "value.inc"
-%include "macros.inc"
-%include "object.inc"
-
 extern str_from_cstr
 extern __gmpz_init
 extern __gmpz_set_si

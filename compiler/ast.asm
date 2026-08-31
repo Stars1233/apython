@@ -28,10 +28,6 @@
 %include "object.inc"
 %include "compiler.inc"
 
-%include "macros.inc"
-%include "object.inc"
-%include "compiler.inc"
-
 ; --- Named frame-layout constants ---
 AM_COMP  equ 8
 AM_KIND  equ 16
