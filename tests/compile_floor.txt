@@ -88,6 +88,7 @@ test_del
 test_descr_func_attr
 test_descriptors
 test_dict_bugs
+test_dict_dunder_args
 test_dict_fromkeys
 test_dict_int_keys
 test_dict_ior

@@ -8547,10 +8547,27 @@ END_FUNC generic_method_getitem
 ;; ============================================================================
 extern dict_subscript
 DEF_FUNC_BARE dict_dunder_getitem
+    ; The same guards its two siblings carry.  builtin_func_call validates
+    ; neither the count nor the type for these -- add_method_to_dict registers
+    ; them with no min or max -- so dict.__getitem__(5, "a") handed the
+    ; immediate 5 to dict_get as a pointer and dereferenced it, and
+    ; d.__getitem__() read args[1] off the end of the argument array.
+    cmp rsi, 2
+    jne .ddg_error
     mov rax, [rdi]              ; self
+    V_TEST_PTR rax, rcx
+    ja .ddg_error
+    test rax, rax
+    jz .ddg_error
+    mov rcx, [rax + PyObject.ob_type]
+    REQUIRE_DICT_TYPE rcx, rdx, .ddg_error
     mov rsi, [rdi + 8]          ; the key Value
     mov rdi, rax
     jmp dict_subscript
+.ddg_error:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "descriptor '__getitem__' requires a 'dict' object"
+    call raise_exception
 END_FUNC dict_dunder_getitem
 
 DEF_FUNC dict_dunder_setitem
