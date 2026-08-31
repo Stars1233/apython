@@ -47,6 +47,20 @@ OBJS = $(SRCS:src/%.asm=build/%.o) $(PYO_SRCS:src/pyo/%.asm=build/pyo/%.o) \
 # very confusing failure.
 HEADERS = $(wildcard include/*.inc) $(wildcard compiler/*.inc)
 
+# ...and on the flags they were assembled with.  Without this, `make
+# INT_STRESS=1` after an ordinary `make` finds every object up to date and
+# relinks the *unstressed* binary -- so the stress run documented in CLAUDE.md
+# silently proves nothing.
+#
+# The stamp is written while the makefile is being *parsed*, not by a rule: a
+# rule's recipe runs after make has already stat'd the prerequisite graph, so
+# the objects would not see the new mtime until the following invocation.  It
+# is rewritten only when the flag string actually changes, so an unchanged
+# setting does not force a rebuild.
+FLAGSTAMP = build/.flags
+$(shell mkdir -p build; printf '%s\n' '$(NASMFLAGS)' | cmp -s - $(FLAGSTAMP) \
+    || printf '%s\n' '$(NASMFLAGS)' > $(FLAGSTAMP))
+
 # Python compiler for tests
 PYTHON = python3
 
@@ -76,23 +90,23 @@ $(TARGET): $(OBJS)
 lib-pyc:
 	@find lib -name '*.py' -exec $(PYTHON) -m py_compile {} \; 2>/dev/null || true
 
-build/%.o: src/%.asm $(HEADERS)
+build/%.o: src/%.asm $(HEADERS) $(FLAGSTAMP)
 	@mkdir -p $(@D)
 	$(NASM) $(NASMFLAGS) -o $@ $<
 
-build/pyo/%.o: src/pyo/%.asm $(HEADERS)
+build/pyo/%.o: src/pyo/%.asm $(HEADERS) $(FLAGSTAMP)
 	@mkdir -p $(@D)
 	$(NASM) $(NASMFLAGS) -o $@ $<
 
-build/methods/%.o: src/methods/%.asm $(HEADERS)
+build/methods/%.o: src/methods/%.asm $(HEADERS) $(FLAGSTAMP)
 	@mkdir -p $(@D)
 	$(NASM) $(NASMFLAGS) -o $@ $<
 
-build/opcodes/%.o: src/opcodes/%.asm $(HEADERS)
+build/opcodes/%.o: src/opcodes/%.asm $(HEADERS) $(FLAGSTAMP)
 	@mkdir -p $(@D)
 	$(NASM) $(NASMFLAGS) -o $@ $<
 
-build/compiler/%.o: compiler/%.asm $(HEADERS)
+build/compiler/%.o: compiler/%.asm $(HEADERS) $(FLAGSTAMP)
 	@mkdir -p $(@D)
 	$(NASM) $(NASMFLAGS) -o $@ $<
 

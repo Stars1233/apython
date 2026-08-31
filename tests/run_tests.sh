@@ -7,10 +7,17 @@ set -e
 APYTHON=./apython
 PYTHON=python3
 TESTDIR=tests
+TIMEOUT=60          # no test should take anywhere near this; a hang must not
+                    # wedge the run until CI's own job limit kills it
 PASS=0
 FAIL=0
 SKIP=0
 ERRORS=""
+
+# Private scratch, so two concurrent runs cannot clobber each other's output
+# and a leftover file owned by someone else cannot make a selftest "fail".
+WORK=$(mktemp -d)
+trap 'rm -rf "$WORK"' EXIT
 
 # Colors
 RED='\033[0;31m'
@@ -21,12 +28,12 @@ NC='\033[0m'
 # Value encoding self-test: verifies the NaN-box boundaries directly, before
 # any Python-level test can be misled by a mis-encoded value.
 printf "%-40s " "value encoding selftest"
-if $APYTHON --selftest-value > /tmp/apython_selftest.out 2>&1; then
+if $APYTHON --selftest-value > "$WORK/selftest.out" 2>&1; then
     printf "${GREEN}PASS${NC}\n"
     PASS=$((PASS + 1))
 else
     printf "${RED}FAIL${NC}\n"
-    cat /tmp/apython_selftest.out
+    cat "$WORK/selftest.out"
     FAIL=$((FAIL + 1))
     ERRORS="$ERRORS value-selftest"
 fi
@@ -35,12 +42,12 @@ fi
 # calls made with a misaligned rsp.  Both assemble cleanly and fail at runtime
 # far from the cause, so they are checked here rather than discovered.
 printf "%-40s " "compiler lint"
-if $PYTHON compiler/lint.py > /tmp/apython_lint.out 2>&1; then
+if $PYTHON compiler/lint.py > "$WORK/lint.out" 2>&1; then
     printf "${GREEN}PASS${NC}\n"
     PASS=$((PASS + 1))
 else
     printf "${RED}FAIL${NC}\n"
-    cat /tmp/apython_lint.out
+    cat "$WORK/lint.out"
     FAIL=$((FAIL + 1))
     ERRORS="$ERRORS compiler-lint"
 fi
@@ -50,12 +57,12 @@ fi
 # test, because an encoding bug produces symptoms that look nothing like their
 # cause.
 printf "%-40s " "compiler selftest"
-if $APYTHON --selftest-compile > /tmp/apython_comptest.out 2>&1; then
+if $APYTHON --selftest-compile > "$WORK/comptest.out" 2>&1; then
     printf "${GREEN}PASS${NC}\n"
     PASS=$((PASS + 1))
 else
     printf "${RED}FAIL${NC}\n"
-    cat /tmp/apython_comptest.out
+    cat "$WORK/comptest.out"
     FAIL=$((FAIL + 1))
     ERRORS="$ERRORS compile-selftest"
 fi
@@ -71,8 +78,10 @@ done
 for test_py in "$TESTDIR"/test_*.py; do
     test_name=$(basename "$test_py" .py)
 
-    # Compile to .pyc
-    $PYTHON -m py_compile "$test_py" 2>/dev/null
+    # Compile to .pyc.  Guarded: under `set -e` an unguarded failure here
+    # aborts the whole run mid-loop, before the summary, which makes the SKIP
+    # branch just below unreachable and the symptom a run that simply stops.
+    $PYTHON -m py_compile "$test_py" 2>/dev/null || true
     pyc_file="$TESTDIR/__pycache__/${test_name}.cpython-312.pyc"
 
     if [ ! -f "$pyc_file" ]; then
@@ -90,7 +99,7 @@ for test_py in "$TESTDIR"/test_*.py; do
     if [ -f "$expected_file" ]; then
         expected=$(cat "$expected_file")
     else
-        expected=$($PYTHON "$test_py" 2>&1) || true
+        expected=$(timeout $TIMEOUT $PYTHON "$test_py" 2>&1) || true
     fi
 
     # tests/srcpkg exists to be imported from source.  Producing the expected
@@ -99,7 +108,7 @@ for test_py in "$TESTDIR"/test_*.py; do
     rm -rf "$TESTDIR"/srcpkg/__pycache__ "$TESTDIR"/srcpkg/*/__pycache__
 
     # Run with apython
-    actual=$($APYTHON "$pyc_file" 2>&1) || true
+    actual=$(timeout $TIMEOUT $APYTHON "$pyc_file" 2>&1) || true
 
     # Compare
     if [ "$expected" = "$actual" ]; then
@@ -114,7 +123,7 @@ for test_py in "$TESTDIR"/test_*.py; do
     # Dual-backend testing for async tests
     if [[ "$test_name" == test_async_* ]]; then
         # Test with poll backend
-        actual_poll=$(APYTHON_IO_BACKEND=poll $APYTHON "$pyc_file" 2>&1) || true
+        actual_poll=$(APYTHON_IO_BACKEND=poll timeout $TIMEOUT $APYTHON "$pyc_file" 2>&1) || true
         if [ "$expected" != "$actual_poll" ]; then
             echo -e "${RED}FAIL${NC} $test_name (poll backend)"
             FAIL=$((FAIL + 1))
@@ -125,7 +134,7 @@ for test_py in "$TESTDIR"/test_*.py; do
         fi
         # Test with iouring backend (Linux only)
         if [ "$(uname)" = "Linux" ]; then
-            actual_uring=$(APYTHON_IO_BACKEND=iouring $APYTHON "$pyc_file" 2>&1) || true
+            actual_uring=$(APYTHON_IO_BACKEND=iouring timeout $TIMEOUT $APYTHON "$pyc_file" 2>&1) || true
             if [ "$expected" != "$actual_uring" ]; then
                 echo -e "${YELLOW}SKIP${NC} $test_name (iouring — may need newer kernel)"
                 SKIP=$((SKIP + 1))

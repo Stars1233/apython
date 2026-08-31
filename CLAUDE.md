@@ -38,17 +38,37 @@ default, poll and io_uring backends); `make check-cpython` runs all 64 files
 under `tests/cpython/`, none of them tolerated as failing.
 
 `make check-source` and `make check-cpython-source` hand apython the `.py`
-instead of the `.pyc`, so our own compiler produces the bytecode, and diff the
-result against `python3`.  They are the only things that exercise the compiler
-on a large body of ordinary code -- most of its bugs were found there rather
-than by a test written for them, including several that need a whole file
-rather than a snippet to appear at all.  They also reach interpreter paths a
-`.pyc` cannot, because CPython's constant folder settles `3 * "ab"`,
-`True & False` and `-7 // 2` before any of them becomes an opcode.
+instead of the `.pyc`, so our own compiler produces the bytecode.  They are the
+only things that exercise the compiler on a large body of ordinary code -- most
+of its bugs were found there rather than by a test written for them, including
+several that need a whole file rather than a snippet to appear at all.  They
+also reach interpreter paths a `.pyc` cannot, because CPython's constant folder
+settles `3 * "ab"`, `True & False` and `-7 // 2` before any of them becomes an
+opcode.
+
+They use different oracles, because their corpora differ.  `check-source` diffs
+against `python3`: those tests print, and CPython is the reference.
+`check-cpython-source` diffs against **the same file run from its `.pyc`** --
+same interpreter, same `lib/unittest.py`, and the only difference is which
+compiler produced the bytecode.  It cannot use `python3`: this corpus drives our
+own `unittest`, whose progress output differs by design, and two of its files
+import `test.seq_tests` / `test.test_grammar`, which ship in `lib/` and which a
+system CPython cannot find.
+
+Neither gate compares bytecode.  Two compilers may fold and order differently
+and both be right, so that would measure style rather than correctness;
+comparing the *behaviour* of the programs they produce is immune to it, except
+in a narrow band where a compiler's choices are legitimately observable --
+identity of constants one side folds (`"ab" * 3 is "ababab"` is True from
+CPython's `.pyc`, False from ours, and neither is wrong), code-object
+introspection, traceback text, and compile-time error wording.  Triage a newly
+differing file against that band before calling it a regression; the script
+header lists it in full.
 
 `check-cpython-source` is the harder of the two: that corpus is CPython's own
-and written to be adversarial; all 64 of its files now run identically through
-our compiler.  Each ratchets against a floor file
+and written to be adversarial.  All 64 of its files match -- a claim that, until
+2026-08-31, had never actually been tested, because the probe only checked the
+exit status.  Each ratchets against a floor file
 (`tests/compile_floor.txt`, `tests/cpython_source_floor.txt`); raise one with
 `bash tests/source_probe.sh --record` or
 `bash tests/cpython_source_probe.sh --record` in the commit that earns it.
@@ -64,6 +84,13 @@ make INT_STRESS=1 && bash tests/run_tests.sh
 ordinary suite exercises the heap-int paths that ±2^50 immediates normally
 hide.  It is not expected to pass `check-cpython` (CPython's own test_int
 asserts things like `10 is 10`).
+
+Until 2026-08-31 this command did nothing: the flag reached `NASMFLAGS` but no
+object depended on it, so after an ordinary `make` it relinked the *unstressed*
+binary and the run proved nothing.  Objects now depend on `build/.flags`.  Its
+first real run found three failures, all one bug -- the item arm of
+`bytes()`/`bytearray()` over an iterable tested `V_IS_INT` and so accepted an
+int *immediate* only.
 
 **Single test:**
 ```bash

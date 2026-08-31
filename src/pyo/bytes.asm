@@ -1293,6 +1293,85 @@ global bytes_type_call
 ;;
 ;; The buffer is over-allocated by 8 so bytes objects can zero-terminate.
 ;; ============================================================================
+
+;; ============================================================================
+;; bls_item_byte(rdi = item Value) -> eax = the byte 0..255,
+;;                                    -1 not an integer,
+;;                                    -2 an integer outside range(0, 256)
+;;
+;; One item of the iterable handed to bytes() or bytearray().  It used to test
+;; V_IS_INT and nothing else, so only an int *immediate* was accepted: every
+;; heap PyIntObject -- which under INT_STRESS is every int at all, and
+;; otherwise any value past 2^50 -- was reported as "'int' object cannot be
+;; interpreted as an integer".  Nothing caught it because `make INT_STRESS=1`
+;; silently relinked the unstressed binary.
+;;
+;; __index__ is honoured because CPython honours it here: bytes([C()]) is b'A'
+;; when C.__index__ returns 65.  A value too wide for int64 is out of range
+;; rather than a type error, matching bytes([2**100]) -> ValueError.
+;; ============================================================================
+BIB_ITEM  equ 8
+BIB_FRAME equ 16            ; + 0 pushes = 16
+DEF_FUNC_LOCAL bls_item_byte, BIB_FRAME
+    mov [rbp - BIB_ITEM], rdi
+    V_IS_INT rdi, rdx
+    jae .bib_immediate
+
+    V_TEST_PTR rdi, rdx
+    ja .bib_not_int
+    mov rax, [rdi + PyObject.ob_type]
+    REQUIRE_INT_TYPE rax, rcx, .bib_try_index
+
+    mov edx, TAG_PTR
+    call int_fits_i64
+    test eax, eax
+    jz .bib_range               ; wider than int64 is certainly not a byte
+    mov rdi, [rbp - BIB_ITEM]
+    mov edx, TAG_PTR
+    call int_to_i64
+    jmp .bib_check
+
+.bib_immediate:
+    V_TO_I64 rdi
+    mov rax, rdi
+    jmp .bib_check
+
+    ; Not an int, but __index__ makes an object usable wherever one is wanted.
+    ; obj_as_index raises on anything else, so the protocol is checked first
+    ; and a bare object falls out as a type error with the buffer still owned
+    ; by the caller.
+.bib_try_index:
+    mov rax, [rdi + PyObject.ob_type]
+    mov rax, [rax + PyTypeObject.tp_as_number]
+    test rax, rax
+    jz .bib_not_int
+    cmp qword [rax + PyNumberMethods.nb_index], 0
+    je .bib_not_int
+    mov edx, TAG_PTR
+    call obj_as_index
+
+.bib_check:
+    cmp rax, 0
+    jl .bib_range
+    cmp rax, 255
+    jg .bib_range
+    leave
+    ret
+
+.bib_not_int:
+    mov eax, -1
+    leave
+    ret
+
+.bib_range:
+    mov eax, -2
+    leave
+    ret
+END_FUNC bls_item_byte
+
+;; ============================================================================
+;; (continued) bytes_load_source
+;; ============================================================================
 BLS_ARGS  equ 8
 BLS_RANGEMSG equ 16
 BLS_BADITEM equ 56
@@ -1427,16 +1506,24 @@ DEF_FUNC byteslike_source, BLS_FRAME
     cmp rcx, rbx
     jge .bls_iter_done
     mov rdi, [rax + rcx*8]
-    V_IS_INT rdi, rdx
-    jb .bls_iter_bad
-    V_TO_I64 rdi
-    cmp rdi, 0
-    jl .bls_iter_range
-    cmp rdi, 255
-    jg .bls_iter_range
-    mov [r12 + rcx], dil
+    push rax                    ; bls_item_byte clobbers the caller-saved regs
+    push rcx                    ; two pushes, so rsp stays 16-byte aligned
+    call bls_item_byte
+    mov edx, eax                ; the result, before `pop rax` overwrites it
+    pop rcx
+    pop rax
+    test edx, edx
+    js .bls_iter_reject
+    mov [r12 + rcx], dl
     inc rcx
     jmp .bls_iter_loop
+
+.bls_iter_reject:
+    ; -1 = not an integer at all, -2 = an integer outside range(0, 256).
+    mov rdi, [rax + rcx*8]      ; the offending item, for the message
+    cmp edx, -2
+    je .bls_iter_range
+    jmp .bls_iter_bad
 .bls_iter_done:
     mov qword [r12 + rbx], 0
     mov rdi, [rbp - BLS_LIST]
