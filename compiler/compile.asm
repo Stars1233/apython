@@ -943,8 +943,15 @@ DEF_FUNC comp_attach_location, AL_FRAME
     mov ecx, [rbx + Comp.err + CompErr.lineno]
     V_PACK_I64 rcx, rdx
     mov [rsi + 8], rcx
-    ; CPython's offset is one-based; the column recorded here is not.
-    mov ecx, [rbx + Comp.err + CompErr.col]
+    ; CPython's offset is one-based; the column recorded here is not -- and it
+    ; is a signed int32, so it has to be sign-extended.  Zero-extending a
+    ; negative one made the offset 4294967285, and the caret loop that renders
+    ; it writes one space per column.
+    movsxd rcx, dword [rbx + Comp.err + CompErr.col]
+    test rcx, rcx
+    jns .col_ok
+    xor ecx, ecx
+.col_ok:
     inc rcx
     V_PACK_I64 rcx, rdx
     mov [rsi + 16], rcx

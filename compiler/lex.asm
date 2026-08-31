@@ -47,7 +47,9 @@ LR_COMP  equ 8
 LR_TOKST equ 16          ; start of the token being scanned
 LR_KIND  equ 24          ; its token kind
 LR_FLAGS equ 32          ; its TF_* flags
-LR_FRAME equ 40          ; + 5 pushes = 80
+LR_STRNL equ 40          ; lines a string literal spanned, not applied yet
+LR_STRLS equ 48          ; where the last of those lines starts
+LR_FRAME equ 56          ; + 5 pushes = 96
 
 section .text
 
@@ -833,14 +835,23 @@ DEF_FUNC lex_run, LR_FRAME
 .string_scan:
     ; r15 is the start of the whole token (prefix included), r12 points at the
     ; opening quote, and LR_FLAGS holds the prefix bits.
+    ;
+    ; A triple-quoted literal spans lines, but the token belongs to the line it
+    ; STARTED on: lex_emit stamps Token.lineno from the counter and computes
+    ; Token.col as start - line_start, which goes NEGATIVE once line_start has
+    ; moved past the token.  As a u32 that is about 4.29e9, and the traceback's
+    ; caret pads to it one space at a time.  So .sub_string counts the lines
+    ; here and they are applied below, after the token is stamped.
+    mov qword [rbp - LR_STRNL], 0
     call .sub_string                    ; advances r12 past the closing quote
     test eax, eax
     jnz .string_ok
+    mov r8, r15
+    sub r8, [r14 + Lexer.line_start]    ; the column, before rdx is claimed
     mov rdi, rbx
     lea rsi, [rel exc_SyntaxError_type]
     CSTRING rdx, "unterminated string literal"
     mov ecx, [r14 + Lexer.lineno]
-    xor r8d, r8d
     call comp_error
     jmp .fail
 .string_ok:
@@ -851,6 +862,13 @@ DEF_FUNC lex_run, LR_FRAME
     sub rcx, r15
     mov r8, [rbp - LR_FLAGS]
     call lex_emit
+    ; Only now do the lines the literal spanned move the counter.
+    mov rax, [rbp - LR_STRNL]
+    test rax, rax
+    jz .scan
+    add [r14 + Lexer.lineno], eax
+    mov rax, [rbp - LR_STRLS]
+    mov [r14 + Lexer.line_start], rax
     jmp .scan
 
 ;; --- operators and delimiters ---------------------------------------------
@@ -1007,9 +1025,9 @@ DEF_FUNC lex_run, LR_FRAME
     jae .ss_unterminated
     cmp byte [r12], 10
     jne .ss_escape_done
-    inc dword [r14 + Lexer.lineno]
+    inc qword [rbp - LR_STRNL]
     lea rax, [r12 + 1]
-    mov [r14 + Lexer.line_start], rax
+    mov [rbp - LR_STRLS], rax
 .ss_escape_done:
     inc r12
     jmp .ss_loop
@@ -1018,9 +1036,9 @@ DEF_FUNC lex_run, LR_FRAME
     ; Only a triple-quoted literal may span lines.
     cmp r11d, 3
     jne .ss_unterminated
-    inc dword [r14 + Lexer.lineno]
+    inc qword [rbp - LR_STRNL]
     inc r12
-    mov [r14 + Lexer.line_start], r12
+    mov [rbp - LR_STRLS], r12
     jmp .ss_loop
 
 .ss_maybe_close:
