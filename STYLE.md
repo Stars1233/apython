@@ -15,19 +15,37 @@ NASM is invoked with **no warning flags** (`-f elf64 -I include/ -I compiler/
 frame, or a clobbered callee-saved register.  `compiler/lint.py` is the only
 net, and it runs inside `make check`.
 
+Six checks run over **every** hand-written `.asm` in the tree:
+
 | Rule | Check | Severity |
 |------|-------|----------|
 | A `resd 1` field is read into a **32-bit** register | `check_field_widths` | error |
+| No `DEF_FUNC*` while a data section is current | `check_section` | error |
+| Every global reference is `[rel sym]`, never a bare `[sym]` | `check_rel` | error |
+| Every `END_FUNC` has a matching `DEF_FUNC*`, and vice versa | `check_markers` | error |
+| No tabs; `DEF_FUNC`/`END_FUNC` at column 0 | `check_text` | error |
+| Every `.inc` has a guard named for the file, echoed on the `%endif` | `check_guards` | error |
+
+Four more are scoped to `compiler/*.asm` plus `src/main.asm`:
+
+| Rule | Check | Severity |
+|------|-------|----------|
 | `(frame + 8*pushes) % 16 == 0` in any function containing a `call` | `check_alignment` | error |
 | A tail `jmp` to another global function comes only from `DEF_FUNC_BARE` | `check_tailjumps` | error |
-| No `DEF_FUNC*` while a data section is current | `check_section` | error |
 | Every `ret` pops an exact mirror of the entry pushes | `check_callee_saved` | error |
 | `rbx`, `r12`-`r15` are never written without being pushed first | `check_saved_writes` | error |
 
-**Scope:** lint reads `compiler/*.asm` and `src/main.asm` — under half the
-`.asm` files.  Everywhere else in `src/` these six rules are convention only, and older
-files predate them.  Write new code to the rules regardless; the lint boundary is
-a limit on detection, not on what is correct.
+**Why the split.**  The tree-wide six had zero violations when they were turned
+on, so they cost nothing and now cannot regress.  The scoped four do not: 315
+functions in `src/` violate the alignment rule harmlessly, 174 confuse
+`check_callee_saved`'s walker, and 34 of the 39 tail-jumps are to
+`eval_exception_unwind`, which never returns — those are allowlisted in
+`NORETURN`, and the ~5 that remain are real.  Paying that down is what would
+let the other four widen.  Everywhere the checks do not reach, the rules are
+convention; write new code to them regardless.
+
+A tail `jmp` to a function that never returns is not a tail call and is
+exempt — add such a target to `NORETURN` in `lint.py`.
 
 Lint's reach depends on structure, so the layout rules below are load-bearing:
 `DEF_FUNC` and `END_FUNC` must sit flush at column 0, and a function missing its

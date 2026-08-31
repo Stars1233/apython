@@ -212,23 +212,20 @@ whoever copies a neighbouring file.
   struct in the same frame grows, which is the failure this rule exists to
   prevent.
 
-- **Five files enter functions with a bare `label:` and close with
-  `END_FUNC`**, so the symbol gets no ELF size and GDB cannot find its
-  boundaries: `src/pyo/asyncmod.asm` (6), `src/pyo/iter.asm` (4),
-  `src/pyo/bytes.asm`, `src/pyo/set.asm`, `src/pyo/slice.asm`.  Converting them
-  to `DEF_FUNC_BARE` is mechanical.
-
 - **124 redundant `global X` immediately above `DEF_FUNC X`.**  Harmless —
   `DEF_FUNC` already emits the `global` with a size expression — but the bare
   `global` is what the previous item's files use *instead*, so the two read
   alike and only one is correct.
 
-- **`compiler/lint.py` covers 21 of the ~90 `.asm` files** (`compiler/*.asm`
-  plus `src/main.asm`).  Its six checks — 4-byte field reads, rsp alignment,
-  tail jumps, section, callee-saved pushes and writes — are convention-only
-  everywhere else.  Extending it over `src/` means paying down the alignment
-  debt first, which is why the scan list is what it is (`lint.py:239-242`).
-  NASM itself is run with no warning flags, so nothing else catches any of it.
+- **Four of `compiler/lint.py`'s ten checks still cover only 21 of the ~92
+  `.asm` files** (`compiler/*.asm` plus `src/main.asm`).  The other six now run
+  tree-wide, because the tree had zero violations of them; these four cannot
+  follow until the debt behind them is paid: 315 functions in `src/` violate
+  the rsp-alignment rule (harmlessly, but the check cannot tell), 174 defeat
+  `check_callee_saved`'s walker, and 58 writes to `rbx`/`r12`-`r15` in
+  `src/opcodes/` are the eval-loop registers by design and need a
+  per-directory exemption.  NASM itself is run with no warning flags, so
+  nothing else catches any of it.
 
 - **Two macro comments describe behaviour the macro does not have.**
   `include/macros.inc:130` says `DISPATCH` "falls back to centralized

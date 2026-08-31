@@ -1737,8 +1737,7 @@ DEF_FUNC sre_pattern_getattr
     ret
 
 .ga_flags:
-    mov rax, [rbx + SRE_PatternObject.flags]
-    movsx rax, eax
+    mov eax, [rbx + SRE_PatternObject.flags]     ; resd 1: 32-bit, zero-extends
     RET_TAG_SMALLINT
     pop r12
     pop rbx

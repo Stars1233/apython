@@ -197,7 +197,7 @@ END_FUNC asyncio_sleep_func
 
 ;; ============================================================================
 ;; sleep_awaitable_iter_self — tp_iter for SleepAwaitable (return self)
-sleep_awaitable_iter_self:
+DEF_FUNC_BARE sleep_awaitable_iter_self
     inc qword [rdi + PyObject.ob_refcnt]
     mov rax, rdi
     ret
@@ -206,7 +206,7 @@ END_FUNC sleep_awaitable_iter_self
 ;; sleep_awaitable_iternext — tp_iternext for SleepAwaitable
 ;; First call: yield (delay_ns, TAG_SLEEP). Second call: return NULL (done).
 ;; ============================================================================
-sleep_awaitable_iternext:
+DEF_FUNC_BARE sleep_awaitable_iternext
     ; rdi = SleepAwaitable*
     cmp dword [rdi + SleepAwaitable.yielded], 0
     jne .sai_done
@@ -226,7 +226,7 @@ END_FUNC sleep_awaitable_iternext
 ;; ============================================================================
 ;; sleep_awaitable_dealloc
 ;; ============================================================================
-sleep_awaitable_dealloc:
+DEF_FUNC_BARE sleep_awaitable_dealloc
     ; Simple object with no refs to DECREF
     jmp ap_free                ; tail call
 END_FUNC sleep_awaitable_dealloc
@@ -324,7 +324,7 @@ END_FUNC asyncio_wait_for_func
 ;; ============================================================================
 ;; wait_for_awaitable_iter_self — tp_iter for WaitForAwaitable (return self)
 ;; ============================================================================
-wait_for_awaitable_iter_self:
+DEF_FUNC_BARE wait_for_awaitable_iter_self
     inc qword [rdi + PyObject.ob_refcnt]
     mov rax, rdi
     ret
@@ -336,7 +336,7 @@ END_FUNC wait_for_awaitable_iter_self
 ;; State 1: resumed — check inner task, return result or raise TimeoutError.
 ;; State 2+: exhausted.
 ;; ============================================================================
-wait_for_awaitable_iternext:
+DEF_FUNC_BARE wait_for_awaitable_iternext
     ; rdi = WaitForAwaitable*
     mov eax, [rdi + WaitForAwaitable.state]
 
@@ -409,7 +409,7 @@ END_FUNC wait_for_awaitable_iternext
 ;; ============================================================================
 ;; wait_for_awaitable_dealloc — tp_dealloc for WaitForAwaitable
 ;; ============================================================================
-wait_for_awaitable_dealloc:
+DEF_FUNC_BARE wait_for_awaitable_dealloc
     push rdi                   ; save self
     ; DECREF inner_task
     mov rdi, [rdi + WaitForAwaitable.inner_task]

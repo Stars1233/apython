@@ -152,7 +152,7 @@ END_FUNC slice_repr
 ;; pyobj_to_i64(PyObject *obj) -> int64 in rax
 ;; Converts SmallInt or GMP int to int64. For None, returns special sentinel.
 ;; ============================================================================
-pyobj_to_i64:
+DEF_FUNC_BARE pyobj_to_i64
     ; rdi = payload, esi = tag
     cmp esi, TAG_SMALLINT
     je .smallint

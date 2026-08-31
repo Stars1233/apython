@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
-"""Static checks over compiler/*.asm for two bug classes that are invisible
-at assembly time and expensive to find at runtime.
+"""Static checks over the assembly, for bug classes that are invisible at
+assembly time and expensive to find at runtime.
 
-Both of these actually bit during development, which is why they are checked:
+Six checks run over every hand-written .asm in the tree; four are scoped to
+compiler/ plus src/main.asm, because the rest of src/ predates the alignment
+rule and would drown the signal.  See STYLE.md for which is which.
+
+The two that started it both bit during development:
 
   1. Reading a 4-byte struct field with a 64-bit `mov`.  NASM assembles it
      happily; it silently picks up the next field as the high half.  A
@@ -13,6 +17,11 @@ Both of these actually bit during development, which is why they are checked:
      glibc's floating-point paths (strtod, which the number scanner uses) do
      use aligned SSE stores.  After DEF_FUNC's `push rbp`, `sub rsp, N` and P
      register pushes, alignment holds when (N + 8*P) is a multiple of 16.
+
+The tree-wide six are there on the opposite grounds: the tree already had zero
+violations of each, so turning them on cost nothing and keeps it that way.  The
+exception was the 4-byte field check, which found one real 8-byte read of
+SRE_PatternObject.flags the moment include/sre.inc was added to its field list.
 
 Run standalone, or as part of `make check`.
 """
@@ -51,6 +60,10 @@ def check_tailjumps(files):
     `DEF_FUNC f / ... / jmp g / END_FUNC` returns through g's `leave; ret`,
     which pops the wrong thing and lands on a corrupted stack.  Tail-jumps are
     fine, but only from DEF_FUNC_BARE.
+
+    A jump to a function that never returns is not a tail call and does not
+    have this problem: nothing comes back through the caller's frame, because
+    nothing comes back at all.  Those targets are listed in NORETURN.
     """
     bad = []
     for path in files:
@@ -60,6 +73,8 @@ def check_tailjumps(files):
             name, body = m.group(2), m.group(3)
             for jm in re.finditer(r'^\s*jmp\s+([a-z_][a-z0-9_]*)\s*(?:;.*)?$', body, re.M):
                 target = jm.group(1)
+                if target in NORETURN:
+                    continue
                 # A jump to a global function, not a local label or a register.
                 if re.search(r'^(DEF_FUNC(_BARE|_LOCAL)?)\s+%s\b' % re.escape(target),
                              "\n".join(open(p).read() for p in files), re.M) \
@@ -69,6 +84,18 @@ def check_tailjumps(files):
                                 "%s tail-jumps to %s but pushed rbp" % (name, target),
                                 "use DEF_FUNC_BARE for a tail-jump"))
     return bad
+
+# Functions that never return to their caller.  Jumping to one of these is an
+# unwind or an abort, not a tail call, so the caller's frame is irrelevant --
+# eval_exception_unwind alone accounts for 34 of the 39 jumps in src/.
+NORETURN = frozenset((
+    'eval_exception_unwind',
+    'raise_exception',
+    'raise_exception_obj',
+    'raise_type_error_with_name',
+    'raise_no_attribute',
+    'fatal_error',
+))
 
 def check_section(files):
     """A function defined while a data section is current lands in that section.
@@ -234,24 +261,131 @@ def check_alignment(files):
                             "make the frame %d bytes" % (n + (16 - (n + 8 * p) % 16))))
     return bad
 
+REGS = frozenset(
+    'rax rbx rcx rdx rsi rdi rbp rsp r8 r9 r10 r11 r12 r13 r14 r15 '
+    'eax ebx ecx edx esi edi ebp esp r8d r9d r10d r11d r12d r13d r14d r15d '
+    'ax bx cx dx si di al bl cl dl sil dil r8b r9b r10b r11b r12b r13b r14b r15b'
+    .split())
+
+def check_rel(files):
+    """Every reference to a global symbol must be rip-relative.
+
+    There is no `default rel`, so a bare `[symbol]` assembles as an absolute
+    32-bit displacement.  It happens to link under -no-pie and is still wrong.
+    The tree has thousands of `[rel ...]` and no absolute references; this
+    keeps it that way.
+    """
+    bad = []
+    pat = re.compile(r'\[\s*([a-zA-Z_][a-zA-Z0-9_.]*)\s*\]')
+    # A usage string may well contain "[option]"; strings are not operands.
+    lit = re.compile(r'"[^"]*"|\'[^\']*\'|`[^`]*`')
+    for path in files:
+        for n, line in enumerate(open(path), 1):
+            code = lit.sub('', line).split(';')[0]
+            if 'rel ' in code or code.lstrip().startswith('%'):
+                continue
+            for m in pat.finditer(code):
+                sym = m.group(1)
+                if sym in REGS or '.' in sym or sym.isdigit():
+                    continue
+                bad.append((path, n, "bare [%s] is an absolute reference" % sym,
+                            "write [rel %s]" % sym))
+    return bad
+
+def check_markers(files):
+    """Every function opens with DEF_FUNC* and closes with a matching END_FUNC.
+
+    A `global f` plus a bare `f:` assembles and runs, but emits no ELF size, so
+    GDB cannot find the function's boundaries -- and it blinds four of the
+    checks here to the rest of the file, because they scan between the two
+    markers.  Comparing the two symbol sets catches both halves of that.
+    """
+    bad = []
+    for path in files:
+        src = open(path).read()
+        opened = re.findall(r'^DEF_FUNC(?:_BARE|_LOCAL)?\s+(\w+)', src, re.M)
+        closed = re.findall(r'^END_FUNC\s+(\w+)', src, re.M)
+        for name in sorted(set(closed) - set(opened)):
+            bad.append((path, 0, "END_FUNC %s with no DEF_FUNC" % name,
+                        "open it with DEF_FUNC_BARE, not `global` + a bare label"))
+        for name in sorted(set(opened) - set(closed)):
+            bad.append((path, 0, "DEF_FUNC %s with no END_FUNC" % name,
+                        "add END_FUNC %s" % name))
+    return bad
+
+def check_text(files):
+    """Two formatting rules that are free to keep and awkward to restore.
+
+    Tabs make the column-32 comment convention unreproducible, and an indented
+    DEF_FUNC/END_FUNC hides the function from every regex here.
+    """
+    bad = []
+    for path in files:
+        for n, line in enumerate(open(path), 1):
+            if '\t' in line:
+                bad.append((path, n, "tab character", "use spaces"))
+            if re.match(r'\s+(DEF_FUNC|END_FUNC)\b', line):
+                bad.append((path, n, "indented function marker",
+                            "DEF_FUNC and END_FUNC sit at column 0"))
+    return bad
+
+def check_guards(paths):
+    """Each .inc has an include guard named for the file, echoed on the %endif.
+
+    Without one a second include redefines every struc, and NASM's error names
+    the field rather than the file.
+    """
+    bad = []
+    for path in paths:
+        src = open(path).read()
+        want = os.path.basename(path).replace('.', '_').upper()
+        if not re.search(r'^%ifndef\s+' + want + r'\s*$', src, re.M):
+            bad.append((path, 0, "no include guard named " + want,
+                        "%ifndef {0} / %define {0}".format(want)))
+        elif not re.search(r'^%endif\s*;\s*' + want + r'\s*$', src, re.M):
+            bad.append((path, 0, "%endif does not echo " + want,
+                        "write `%endif ; " + want + "`"))
+    return bad
+
+def all_asm():
+    """Every hand-written .asm in the tree."""
+    return sorted(glob.glob('src/*.asm') + glob.glob('src/*/*.asm')
+                  + glob.glob('compiler/*.asm'))
+
 def main():
     os.chdir(ROOT)
-    # compiler/ plus the one file in src/ that reaches the compiler: main holds
-    # argc and argv across compile_source, and DEF_FUNC main + 5 pushes enters
-    # glibc's strtod misaligned on any source file with a float literal.  The
-    # rest of src/ predates the alignment rule and would drown the signal.
-    files = sorted(glob.glob('compiler/*.asm')) + ['src/main.asm']
-    fields = dword_fields(['compiler/compiler.inc', 'include/object.inc'])
-    problems = (check_field_widths(files, fields) + check_alignment(files)
-                + check_tailjumps(files) + check_section(files)
-                + check_callee_saved(files) + check_saved_writes(files))
+    # Four of the six checks are scoped to compiler/ plus src/main.asm: main
+    # holds argc and argv across compile_source, and DEF_FUNC main + 5 pushes
+    # enters glibc's strtod misaligned on any source file with a float literal.
+    # The rest of src/ predates the alignment rule -- 315 functions violate it
+    # harmlessly -- and would drown the signal.  See STYLE.md.
+    scoped = sorted(glob.glob('compiler/*.asm')) + ['src/main.asm']
+
+    # The other two are clean across the whole tree, so they run over the whole
+    # tree: there is no debt to pay down first, and the only cost of scoping
+    # them narrowly was that they missed things.
+    everything = all_asm()
+
+    # Every header that declares a struct, not just the two the compiler uses.
+    # sre.inc and eventloop.inc were missing, which is why the 8-byte read of
+    # SRE_PatternObject.flags in sre_pattern.asm went unseen.
+    fields = dword_fields(['compiler/compiler.inc'] + sorted(glob.glob('include/*.inc')))
+
+    headers = sorted(glob.glob('include/*.inc')) + ['compiler/compiler.inc']
+
+    problems = (check_field_widths(everything, fields) + check_section(everything)
+                + check_rel(everything) + check_markers(everything)
+                + check_text(everything) + check_guards(headers)
+                + check_alignment(scoped) + check_tailjumps(scoped)
+                + check_callee_saved(scoped) + check_saved_writes(scoped))
     for path, n, what, detail in problems:
         where = "%s:%d" % (path, n) if n else path
         print("%s: %s\n    %s" % (where, what, detail))
     if problems:
         print("\n%d problem(s)" % len(problems))
         return 1
-    print("compiler lint: ok (%d files, %d dword fields checked)" % (len(files), len(fields)))
+    print("lint: ok (%d files tree-wide, %d scoped, %d headers, %d dword fields)"
+          % (len(everything), len(scoped), len(headers), len(fields)))
     return 0
 
 if __name__ == '__main__':

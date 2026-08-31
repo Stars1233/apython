@@ -106,8 +106,7 @@ END_FUNC list_iter_dealloc
 ;; list_iter_self(PyObject *self) -> PyObject*
 ;; tp_iter for iterators: return self with INCREF
 ;; ============================================================================
-global iter_self
-iter_self:
+DEF_FUNC_BARE iter_self
     inc qword [rdi + PyObject.ob_refcnt]
     mov rax, rdi
     ret
@@ -273,7 +272,7 @@ END_FUNC range_iter_next
 ;; ============================================================================
 ;; range_iter_dealloc(PyObject *self)
 ;; ============================================================================
-range_iter_dealloc:
+DEF_FUNC_BARE range_iter_dealloc
     jmp ap_free                ; no references to DECREF, just free
 END_FUNC range_iter_dealloc
 
@@ -281,7 +280,7 @@ END_FUNC range_iter_dealloc
 ;; range_iter_self(PyObject *self) -> PyObject*
 ;; Range iterator returns itself
 ;; ============================================================================
-range_iter_self:
+DEF_FUNC_BARE range_iter_self
     inc qword [rdi + PyObject.ob_refcnt]
     mov rax, rdi
     ret
@@ -318,7 +317,7 @@ END_FUNC range_obj_tp_iter
 ;; ============================================================================
 ;; range_obj_dealloc(PyObject *self)
 ;; ============================================================================
-range_obj_dealloc:
+DEF_FUNC_BARE range_obj_dealloc
     jmp ap_free                ; no references to DECREF, just free
 END_FUNC range_obj_dealloc
 

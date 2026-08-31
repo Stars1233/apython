@@ -941,7 +941,7 @@ END_FUNC set_iter_dealloc
 ;; ============================================================================
 ;; set_iter_self(PyObject *self) -> self with INCREF
 ;; ============================================================================
-set_iter_self:
+DEF_FUNC_BARE set_iter_self
     inc qword [rdi + PyObject.ob_refcnt]
     mov rax, rdi
     ret

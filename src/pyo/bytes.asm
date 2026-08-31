@@ -891,7 +891,7 @@ END_FUNC bytes_iter_dealloc
 ;; ============================================================================
 ;; iter_self - tp_iter for iterators: return self with INCREF
 ;; ============================================================================
-bytes_iter_self:
+DEF_FUNC_BARE bytes_iter_self
     inc qword [rdi + PyObject.ob_refcnt]
     mov rax, rdi
     ret
