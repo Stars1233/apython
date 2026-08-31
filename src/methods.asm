@@ -7127,7 +7127,7 @@ DEF_FUNC dict_method_update, DU_FRAME
     mov qword [rbp - DU_PAIR], 0
     call obj_decref
     test r14, r14
-    jz .du_kwargs                       ; keys() raised; it is already pending
+    jz .du_propagate                    ; keys() raised; it is already pending
 
     ; Materialise the key sequence, so any iterable of keys is accepted.
     mov [rbp - DU_PAIRV], r14
@@ -7140,7 +7140,7 @@ DEF_FUNC dict_method_update, DU_FRAME
     call obj_decref
     mov r12, [rbp - DU_TMP]
     test r12, r12
-    jz .du_kwargs                       ; keys() was not iterable
+    jz .du_propagate                    ; keys() was not iterable
     mov r13, [r12 + PyTupleObject.ob_size]
     xor r14d, r14d
 .du_key_loop:
@@ -7158,7 +7158,7 @@ DEF_FUNC dict_method_update, DU_FRAME
     jz .du_not_mapping
     call rax                            ; other[key] -> Value
     test rax, rax
-    jz .du_keys_done                    ; the lookup raised
+    jz .du_propagate                    ; the lookup raised
     mov [rbp - DU_PAIRV], rax
     mov rdx, rax
     mov rax, [r12 + PyTupleObject.ob_item]
@@ -7170,9 +7170,42 @@ DEF_FUNC dict_method_update, DU_FRAME
     inc r14
     jmp .du_key_loop
 .du_not_mapping:
+    ; raise_exception does not return -- it jumps into the unwinder -- so
+    ; anything this frame owns has to go first.
+    call .du_release
     lea rdi, [rel exc_TypeError_type]
     CSTRING rsi, "object is not subscriptable"
     call raise_exception
+
+.du_propagate:
+    ; Something we called raised, and the exception is already pending.
+    ; Falling through to the success tail returned None and left it to surface
+    ; at whatever ran next, with the dict half updated.
+    call .du_release
+    RET_NULL
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
+; Local: drop the owned temporaries, whichever of them are live.
+.du_release:
+    mov rdi, [rbp - DU_TMP]
+    test rdi, rdi
+    jz .du_rel_pair
+    mov qword [rbp - DU_TMP], 0
+    call obj_decref
+.du_rel_pair:
+    mov rdi, [rbp - DU_PAIR]
+    test rdi, rdi
+    jz .du_rel_done
+    mov qword [rbp - DU_PAIR], 0
+    call obj_decref
+.du_rel_done:
+    ret
+
 .du_keys_done:
     mov rdi, [rbp - DU_TMP]
     mov qword [rbp - DU_TMP], 0
@@ -7189,6 +7222,10 @@ DEF_FUNC dict_method_update, DU_FRAME
     call tuple_type_call            ; raises for a non-iterable
     mov [rbp - DU_TMP], rax
     mov r12, rax
+    ; ...but an iterable whose __next__ raises returns NULL rather than
+    ; raising from here, and reading ob_size off that dereferences 0.
+    test rax, rax
+    jz .du_propagate
     mov r13, [r12 + PyTupleObject.ob_size]
     xor r14d, r14d
 .du_pair_loop:
@@ -7203,6 +7240,8 @@ DEF_FUNC dict_method_update, DU_FRAME
     mov edx, 1
     call tuple_type_call
     mov [rbp - DU_PAIR], rax
+    test rax, rax
+    jz .du_propagate
     cmp qword [rax + PyTupleObject.ob_size], 2
     jne .du_bad_pair
     mov rcx, [rax + PyTupleObject.ob_item]
@@ -7255,6 +7294,7 @@ DEF_FUNC dict_method_update, DU_FRAME
     ret
 
 .du_bad_pair:
+    call .du_release
     lea rdi, [rel exc_ValueError_type]
     CSTRING rsi, "dictionary update sequence element has length != 2"
     call raise_exception

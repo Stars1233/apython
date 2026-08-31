@@ -97,6 +97,7 @@ test_dict_ops
 test_dict_order
 test_dicts
 test_dict_update_mapping
+test_dict_update_raises
 test_dict_views
 test_dunder_protocols
 test_dunders
