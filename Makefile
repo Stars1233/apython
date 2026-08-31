@@ -31,8 +31,14 @@ PYO_SRCS = $(wildcard src/pyo/*.asm)
 LIB_SRCS = $(wildcard src/lib/*.asm)
 # The Python source compiler is its own subsystem, peer to src/.
 COMPILER_SRCS = $(wildcard compiler/*.asm)
-OBJS = $(SRCS:src/%.asm=build/%.o) $(PYO_SRCS:src/pyo/%.asm=build/%.o) \
-       $(LIB_SRCS:src/lib/%.asm=build/%.o) $(COMPILER_SRCS:compiler/%.asm=build/%.o)
+# Objects mirror the source tree.  A flat build/ would put every basename in
+# one namespace across the four source directories, and a collision there is
+# silent: make picks the first pattern rule whose prerequisite exists, the
+# other file is never assembled, and the only symptom is a pile of undefined
+# references at link time naming nothing useful.
+OBJS = $(SRCS:src/%.asm=build/%.o) $(PYO_SRCS:src/pyo/%.asm=build/pyo/%.o) \
+       $(LIB_SRCS:src/lib/%.asm=build/lib/%.o) \
+       $(COMPILER_SRCS:compiler/%.asm=build/compiler/%.o)
 
 # Every object depends on every header: nasm has no depfile support here, and
 # a stale build after editing a struct layout in include/*.inc is a silent,
@@ -42,9 +48,19 @@ HEADERS = $(wildcard include/*.inc) $(wildcard compiler/*.inc)
 # Python compiler for tests
 PYTHON = python3
 
-.PHONY: all clean check gen-cpython-tests check-cpython check-cpython-source check-stdlib check-source lib-pyc
+.PHONY: all clean regen check gen-cpython-tests check-cpython check-cpython-source check-stdlib check-source lib-pyc
 
 all: $(TARGET) lib-pyc
+
+# Regenerate the machine-written assembly.  Deliberately phony and deliberately
+# not a prerequisite of anything: the outputs are committed so that building
+# apython never needs Python, and gen_tables.py refuses to run on anything but
+# CPython 3.12, so a real file rule would break the build for everyone else the
+# moment a fresh clone's mtimes came out in the wrong order.
+regen:
+	$(PYTHON) compiler/gen_tables.py > compiler/tables.asm
+	$(PYTHON) compiler/gen_prule.py
+	$(PYTHON) compiler/gen_unicodename.py > compiler/unicodename.asm
 
 $(TARGET): $(OBJS)
 	$(CC) -o $@ $^ $(LDFLAGS)
@@ -59,21 +75,23 @@ lib-pyc:
 build/%.o: src/%.asm $(HEADERS) | build
 	$(NASM) $(NASMFLAGS) -o $@ $<
 
-build/%.o: src/pyo/%.asm $(HEADERS) | build
+build/pyo/%.o: src/pyo/%.asm $(HEADERS) | build
 	$(NASM) $(NASMFLAGS) -o $@ $<
 
-build/%.o: src/lib/%.asm $(HEADERS) | build
+build/lib/%.o: src/lib/%.asm $(HEADERS) | build
 	$(NASM) $(NASMFLAGS) -o $@ $<
 
-build/%.o: compiler/%.asm $(HEADERS) | build
+build/compiler/%.o: compiler/%.asm $(HEADERS) | build
 	$(NASM) $(NASMFLAGS) -o $@ $<
 
 build:
-	mkdir -p build
+	mkdir -p build build/pyo build/lib build/compiler
 
+# The generated compiler/tables.asm and compiler/unicodename.asm are checked-in
+# sources, not build products -- see `regen` below.  clean must never touch them.
 clean:
-	rm -rf build $(TARGET) tests/__pycache__
-	find lib -name '__pycache__' -type d -exec rm -rf {} + 2>/dev/null || true
+	rm -rf build $(TARGET)
+	find lib tests compiler -name '__pycache__' -type d -exec rm -rf {} + 2>/dev/null || true
 
 # Test target: compile .py to .pyc, run both python3 and apython, diff
 check: $(TARGET) lib-pyc
@@ -90,10 +108,6 @@ check-source: $(TARGET) lib-pyc
 # to point at its Lib/ directory.  Skips cleanly when it is absent.
 check-stdlib: $(TARGET)
 	@bash tests/stdlib_probe.sh
-
-# Compile a single .py to .pyc
-tests/__pycache__/%.cpython-312.pyc: tests/%.py
-	$(PYTHON) -m py_compile $<
 
 # CPython test suite targets
 # The CPython-derived test corpus.  One list, used by both the compile step
