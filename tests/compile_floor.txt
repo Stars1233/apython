@@ -37,6 +37,7 @@ test_compile_annotations
 test_compile_async
 test_compile_augassign
 test_compile_call_ex
+test_compile_class_body_cell
 test_compile_class_closure
 test_compile_class
 test_compile_comp_if

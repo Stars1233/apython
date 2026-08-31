@@ -1631,10 +1631,20 @@ DEF_FUNC sym_promote_cells, SPC_FRAME
     mov rsi, [rbp - SPC_CHILD]
     mov rdx, rax
     call sym_get
+    mov ecx, eax                        ; the child's raw flags
     shr eax, SCOPE_SHIFT
     and eax, 7
     cmp eax, SYM_FREE
-    jne .next_name
+    je .free_in_child
+    ; A class body that binds a name some block inside it captured keeps that
+    ; name LOCAL -- its own stores must stay STORE_NAME -- and records the
+    ; capture in DEF_FREE_CLASS instead.  It is still free as far as WE are
+    ; concerned: the cell it needs is ours to make.  CPython gets this without
+    ; a special case, because analyze_block merges a child's free set into its
+    ; own and hands that up regardless of how its symbols resolved.
+    test ecx, DEF_FREE_CLASS
+    jz .next_name
+.free_in_child:
 
     ; Then it must be a cell here, if we are the block that binds it.
     mov rdi, rbx
@@ -1645,7 +1655,7 @@ DEF_FUNC sym_promote_cells, SPC_FRAME
     shr eax, SCOPE_SHIFT
     and eax, 7
     cmp eax, SYM_LOCAL
-    je .make_cell
+    je .bound_here
     cmp eax, SYM_CELL
     je .next_name
     cmp eax, SYM_FREE
@@ -1664,7 +1674,7 @@ DEF_FUNC sym_promote_cells, SPC_FRAME
     mov rsi, r12
     call sym_at
     cmp dword [rax + Scope.kind], SCOPE_CLASS
-    je .travels
+    je .class_travels
     mov rdi, rbx
     mov rsi, r12
     call sym_is_function_like
@@ -1681,6 +1691,21 @@ DEF_FUNC sym_promote_cells, SPC_FRAME
     call sym_get
     test eax, DEF_GLOBAL
     jnz .next_name
+    jmp .travels
+
+.class_travels:
+    ; A class body that declares the name global still has to carry it: the
+    ; declaration governs the class body's own stores, not a method's read.
+    ; `def f(): x = 1` / `class C: global x; x = 9; def m(self): return x`
+    ; compiles the 9 to STORE_GLOBAL and still gives C a free x for m's
+    ; closure.  CPython's update_symbols sets DEF_FREE_CLASS for a class-block
+    ; name that is DEF_BOUND *or* DEF_GLOBAL.
+    mov rdi, rbx
+    mov rsi, r12
+    mov rdx, [rbp - SPC_NAME]
+    call sym_get
+    test eax, DEF_GLOBAL
+    jnz .class_free
 .travels:
     mov rdi, rbx
     mov rsi, r12
@@ -1696,7 +1721,50 @@ DEF_FUNC sym_promote_cells, SPC_FRAME
     and ecx, ~SCOPE_MASK
     or ecx, SYM_FREE << SCOPE_SHIFT
     jmp .store_scope
+.bound_here:
+    ; A function-like block boxes the name: the two frames have to share one
+    ; storage location, and a fast slot cannot be shared.
+    ;
+    ; A class body must not.  Its names live in the mapping __build_class__
+    ; hands it, and `name = "H"` has to reach the class dict as STORE_NAME.
+    ; Promoting it here compiled that store to STORE_DEREF, so H.name did not
+    ; exist and the method read the class body's value rather than the
+    ; enclosing function's.  CPython runs analyze_cells for a FunctionBlock
+    ; only; a ClassBlock runs drop_class_free instead.
+    mov rdi, rbx
+    mov rsi, r12
+    call sym_at
+    cmp dword [rax + Scope.kind], SCOPE_CLASS
+    jne .make_cell
+    ; ...with one exception, and it is drop_class_free's own: __class__ comes
+    ; OUT of the free set and gets a real cell, which is what
+    ; LOAD_CLOSURE __class__ / COPY 1 / STORE_NAME __classcell__ hands to
+    ; __build_class__ and what zero-argument super() reads back.
+    mov rdi, rbx
+    mov rsi, [rbp - SPC_NAME]
+    call sym_is_class_name
+    test eax, eax
+    jnz .make_cell
+
+.class_free:
+    ; Keep the scope, add the flag.  sym_finalize reads it and lists the name
+    ; among the free variables anyway -- that trailing slot is the one the
+    ; LOAD_CLOSURE inside the class body will name.
+    mov rdi, rbx
+    mov rsi, r12
+    mov rdx, [rbp - SPC_NAME]
+    call sym_get
+    mov ecx, eax
+    or ecx, DEF_FREE_CLASS
+    jmp .store_scope
+
 .make_cell:
+    ; ecx has not survived the calls above; re-read rather than rely on it.
+    mov rdi, rbx
+    mov rsi, r12
+    mov rdx, [rbp - SPC_NAME]
+    call sym_get
+    mov ecx, eax
     and ecx, ~SCOPE_MASK
     or ecx, SYM_CELL << SCOPE_SHIFT
 .store_scope:
@@ -1909,9 +1977,22 @@ DEF_FUNC sym_finalize, SF_FRAME
     mov rdx, rax
     call sym_scope_of
     cmp eax, SYM_LOCAL
-    je .add_local
+    je .maybe_local
     cmp eax, SYM_CELL
     jne .local_next
+    jmp .add_local
+.maybe_local:
+    ; A class-body local that a nested block captured belongs among the free
+    ; variables instead, and in exactly ONE localsplus slot: COPY_FREE_VARS
+    ; fills the last nfree slots, and the LOAD_CLOSURE emitted inside the class
+    ; body names that slot.  Listing it here as well would leave sym_lp_index
+    ; an earlier, permanently empty slot to find first.
+    mov rdi, rbx
+    mov rsi, r12
+    mov rdx, [rbp - SF_NAME]
+    call sym_flags_of
+    test eax, DEF_FREE_CLASS
+    jnz .local_next
 .add_local:
     mov rdi, rbx
     mov rsi, r12
@@ -1944,6 +2025,16 @@ DEF_FUNC sym_finalize, SF_FRAME
     je .add_cell
     cmp eax, SYM_FREE
     je .add_free
+    ; A class-body name the blocks inside it captured: LOCAL (or explicitly
+    ; global) for the code generator, free for the layout.  CPython's
+    ; dictbytype(symbols, FREE, DEF_FREE_CLASS, ncells) lands the same name in
+    ; co_freevars the same way.
+    mov rdi, rbx
+    mov rsi, r12
+    mov rdx, [rbp - SF_NAME]
+    call sym_flags_of
+    test eax, DEF_FREE_CLASS
+    jnz .add_free
     jmp .cell_next
 .add_cell:
     mov rdi, rbx
@@ -2095,6 +2186,32 @@ DEF_FUNC sym_str_eq, 8
     leave
     ret
 END_FUNC sym_str_eq
+
+;; ============================================================================
+;; sym_is_class_name(Comp *c, PyStrObject *name) -> rax = 1 if it is __class__
+;;
+;; The one name a class body may hold in a cell.  An interning failure answers
+;; no, which is the same direction sym_enclosing_binds takes for it.
+;; ============================================================================
+DEF_FUNC sym_is_class_name, 8
+    push rbx
+    mov rbx, rsi
+    lea rsi, [rel sym_class_name]
+    call comp_intern_cstr
+    test rax, rax
+    jz .no
+    mov rdi, rax
+    mov rsi, rbx
+    call sym_str_eq
+    pop rbx
+    leave
+    ret
+.no:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+END_FUNC sym_is_class_name
 
 ;; ============================================================================
 ;; sym_params_into(Comp *c, uint32_t argsnode) -> rax = 1 ok

@@ -591,6 +591,16 @@ DEF_USE      equ 0x020
 ; unbound has to be read with LOAD_FAST_CHECK, or reading it after the delete
 ; returns whatever was in the slot instead of raising.
 DEF_UNBOUND  equ 0x040
+; The name is bound -- or declared global -- in a CLASS body and is free in a
+; block nested inside it.  The class body keeps its own resolved scope: `x = 1`
+; there is still STORE_NAME into the class dict, and `global x; x = 1` is still
+; STORE_GLOBAL.  But the name must ALSO appear among the block's free
+; variables, because the MAKE_FUNCTION for the nested block is built inside the
+; class body and its closure tuple is LOAD_CLOSURE'd from a slot there.
+; CPython spells this DEF_FREE_CLASS: update_symbols sets it, and compile.c's
+; dictbytype(symbols, FREE, DEF_FREE_CLASS, ncells) is what lands the name in
+; co_freevars without disturbing its scope.
+DEF_FREE_CLASS equ 0x080
 
 ; The resolved answer, stored in bits 12..14.
 SCOPE_SHIFT      equ 12
