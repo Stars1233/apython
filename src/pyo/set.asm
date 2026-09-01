@@ -4,6 +4,7 @@
 %include "macros.inc"
 %include "object.inc"
 
+extern get_iterator_opt
 extern ap_malloc
 extern gc_alloc
 extern gc_track
@@ -761,12 +762,13 @@ DEF_FUNC set_type_call, STC_FRAME
     mov rbx, rax            ; rbx = new set
 
     ; Get iterator: tp_iter(iterable)
+    ; get_iterator_opt, not tp_iter: an object with __getitem__ and no
+    ; __iter__ is iterable, and reading the slot rejects it.
     mov rdi, r12
-    mov rax, [rdi + PyObject.ob_type]
-    mov rax, [rax + PyTypeObject.tp_iter]
+    mov esi, TAG_PTR
+    call get_iterator_opt
     test rax, rax
     jz .stc_not_iterable_decref_set
-    call rax
     mov r12, rax            ; r12 = iterator
 
 .stc_iter_loop:
@@ -964,12 +966,13 @@ DEF_FUNC frozenset_type_call, FTC_FRAME
     mov rbx, rax
 
     ; Get iterator
+    ; get_iterator_opt, not tp_iter: an object with __getitem__ and no
+    ; __iter__ is iterable, and reading the slot rejects it.
     mov rdi, r12
-    mov rax, [rdi + PyObject.ob_type]
-    mov rax, [rax + PyTypeObject.tp_iter]
+    mov esi, TAG_PTR
+    call get_iterator_opt
     test rax, rax
     jz .ftc_not_iterable_decref
-    call rax
     mov r12, rax
 
 .ftc_iter_loop:

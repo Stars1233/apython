@@ -215,6 +215,7 @@ test_repr
 test_review_regressions
 test_richcompare_bool
 test_round
+test_sequence_iteration
 test_set_fatval
 test_set_methods
 test_set_name

@@ -9,6 +9,7 @@
 %include "object.inc"
 
 ; External symbols used
+extern get_iterator_opt
 extern int_from_i64
 extern int_add
 extern ap_malloc
@@ -455,11 +456,10 @@ DEF_FUNC builtin_any
     V_TEST_PTR_M [rdi], r11      ; args[0] a pointer?
     ja .any_type_error
     mov rdi, [rdi]
-    mov rax, [rdi + PyObject.ob_type]
-    mov rcx, [rax + PyTypeObject.tp_iter]
-    test rcx, rcx
+    mov esi, TAG_PTR
+    call get_iterator_opt       ; not tp_iter: the legacy __getitem__ protocol
+    test rax, rax               ; counts as iterable too
     jz .any_type_error
-    call rcx
     V_UNPACK rax, rdx           ; tp_call returns a Value
     mov rbx, rax
 
@@ -536,11 +536,10 @@ DEF_FUNC builtin_all
     V_TEST_PTR_M [rdi], r11      ; args[0] a pointer?
     ja .all_type_error
     mov rdi, [rdi]
-    mov rax, [rdi + PyObject.ob_type]
-    mov rcx, [rax + PyTypeObject.tp_iter]
-    test rcx, rcx
+    mov esi, TAG_PTR
+    call get_iterator_opt       ; not tp_iter: the legacy __getitem__ protocol
+    test rax, rax               ; counts as iterable too
     jz .all_type_error
-    call rcx
     mov rbx, rax
 
     mov rax, [rbx + PyObject.ob_type]
@@ -661,17 +660,15 @@ DEF_FUNC builtin_sum, SM_FRAME
     je .sum_no_bytearray
 
 .sum_iter:
+    ; get_iterator_opt, not a tp_iter read: an object with __getitem__ and no
+    ; __iter__ is iterable everywhere else here, and this rejected it.
     mov rdi, [rbx]              ; args[0], the iterable
-    call value_type
+    V_TEST_PTR rdi, rax
+    ja .sum_not_iterable        ; an immediate is never iterable
+    mov esi, TAG_PTR
+    call get_iterator_opt
     test rax, rax
     jz .sum_not_iterable
-    mov rax, [rax + PyTypeObject.tp_iter]
-    test rax, rax
-    jz .sum_not_iterable
-    mov rdi, [rbx]
-    call rax
-    test rax, rax
-    jz .sum_fail_no_iter        ; tp_iter raised
     mov rbx, rax                ; rbx = the iterator, owned
     mov rax, [rbx + PyObject.ob_type]
     mov r12, [rax + PyTypeObject.tp_iternext]
@@ -854,16 +851,12 @@ DEF_FUNC_LOCAL minmax_impl, MM_FRAME
 .mm_iter_path:
     mov rbx, rdi                ; args, kept for the error message
     mov rdi, [rdi]              ; args[0], the iterable
-    call value_type
+    V_TEST_PTR rdi, rax
+    ja .mm_not_iterable         ; an immediate is never iterable
+    mov esi, TAG_PTR
+    call get_iterator_opt       ; see the note in builtin_sum
     test rax, rax
     jz .mm_not_iterable
-    mov rax, [rax + PyTypeObject.tp_iter]
-    test rax, rax
-    jz .mm_not_iterable
-    mov rdi, [rbx]
-    call rax
-    test rax, rax
-    jz .mm_fail                 ; tp_iter raised
     mov [rbp - MM_ITER], rax
     mov rcx, [rax + PyObject.ob_type]
     mov rcx, [rcx + PyTypeObject.tp_iternext]

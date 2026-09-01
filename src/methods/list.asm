@@ -9,6 +9,7 @@
 %include "opcodes.inc"
 
 ; External functions
+extern get_iterator_opt
 extern ap_malloc
 extern ap_free
 extern ap_realloc
@@ -1853,15 +1854,13 @@ DEF_FUNC list_method_extend, LE_FRAME
     jmp .extend_tuple_loop
 
 .extend_generic:
-    ; Get tp_iter from iterable type
+    ; get_iterator_opt, not a tp_iter read: an object with __getitem__
+    ; and no __iter__ is iterable, and the slot read rejected it.
     test r13d, TAG_RC_BIT
-    jz .extend_type_error       ; non-pointer has no tp_iter
-    mov rax, [r12 + PyObject.ob_type]
-    mov rax, [rax + PyTypeObject.tp_iter]
-    test rax, rax
-    jz .extend_type_error
+    jz .extend_type_error       ; a non-pointer is never iterable
     mov rdi, r12
-    call rax                    ; tp_iter(iterable) → iterator
+    mov esi, TAG_PTR
+    call get_iterator_opt
     test rax, rax
     jz .extend_type_error
     mov [rbp - LE_ITER], rax

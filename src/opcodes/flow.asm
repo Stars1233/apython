@@ -19,6 +19,7 @@
 
 section .text
 
+extern get_iterator_opt
 extern eval_dispatch
 extern eval_saved_r13
 extern eval_co_consts
@@ -899,12 +900,12 @@ DEF_FUNC_BARE op_get_yield_from_iter
     push r8                    ; save tag (deeper)
     push rdi                   ; save payload
 
-    mov rax, [rdi + PyObject.ob_type]
-    mov rax, [rax + PyTypeObject.tp_iter]
+    ; get_iterator_opt, not a tp_iter read: an object with __getitem__ and no
+    ; __iter__ is iterable, and `yield from` rejected it.
+    mov esi, TAG_PTR
+    call get_iterator_opt
     test rax, rax
     jz .gyfi_error
-
-    call rax                   ; tp_iter(iterable) -> iterator
     push rax                   ; save iterator
 
     ; DECREF original iterable (tag-aware)

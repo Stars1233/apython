@@ -114,13 +114,38 @@ DEF_FUNC call_iternext
 END_FUNC call_iternext
 
 ;; ============================================================================
-;; Helper: get_iterator(obj) -> iterator
-;; Calls tp_iter on obj, returns iterator. Raises TypeError if no tp_iter.
-;; Falls back to __getitem__ sequence protocol for heaptypes.
-;; Validates returned iterator has tp_iternext or __next__.
+;; get_iterator(rdi = obj payload, esi = obj tag) -> rax = iterator, owned
+;;   Raises TypeError when the object is not iterable.
+;; get_iterator_opt(same) -> rax = iterator, or 0 with NO exception set
+;;
+;; Both consult tp_iter, then __iter__ on a heaptype, then the legacy
+;; __getitem__ sequence protocol -- an object with __getitem__ and no
+;; __iter__ is iterable, and iter() synthesises a counter that stops at
+;; IndexError.  An __iter__ that RAISES propagates from either.
+;;
+;; The _opt form exists because every caller that iterates a user-supplied
+;; argument has its own message: "set() argument is not iterable",
+;; "list.extend() argument must be iterable", "can only assign an iterable".
+;; Seven of them used to read tp_iter off the type themselves and so rejected
+;; the legacy protocol outright -- which is what made CPython's re parser fail
+;; on every non-capturing group, since its SubPattern has __getitem__ and
+;; __len__ and no __iter__.
+;;
 ;; Clobbers caller-saved regs.
 ;; ============================================================================
 DEF_FUNC get_iterator
+    push rbx
+    call get_iterator_opt
+    test rax, rax
+    jz .gi_not_iterable
+    pop rbx
+    leave
+    ret
+.gi_not_iterable:
+    RAISE exc_TypeError_type, "object is not iterable"
+END_FUNC get_iterator
+
+DEF_FUNC get_iterator_opt
     push rbx
     ; rdi = obj payload, esi = obj tag
 
@@ -222,7 +247,11 @@ DEF_FUNC get_iterator
     ret
 
 .no_iter:
-    RAISE exc_TypeError_type, "object is not iterable"
+    ; Not iterable.  No exception: the caller names the argument.
+    xor eax, eax
+    pop rbx
+    leave
+    ret
 
 .iter_exc_pending:
     ; Exception was raised by __iter__. Propagate it via eval_exception_unwind.
@@ -232,7 +261,7 @@ DEF_FUNC get_iterator
     pop rbx
     leave
     jmp eval_exception_unwind
-END_FUNC get_iterator
+END_FUNC get_iterator_opt
 
 ;; ============================================================================
 ;; ENUMERATE

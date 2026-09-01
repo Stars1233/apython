@@ -14,6 +14,7 @@
 
 section .text
 
+extern get_iterator_opt
 extern eval_dispatch
 extern eval_saved_r13
 extern eval_co_consts
@@ -1292,14 +1293,12 @@ DEF_FUNC op_list_extend, 32
     jmp .extend_done          ; or we fall into .extend_generic and re-append
 
 .extend_generic:
-    ; Generic iterable: tp_iter + tp_iternext loop
-    mov rsi, [rbp - LE_ITERABLE]         ; iterable
-    mov rax, [rsi + PyObject.ob_type]
-    mov rax, [rax + PyTypeObject.tp_iter]
-    test rax, rax
-    jz .extend_type_error
-    mov rdi, rsi
-    call rax                   ; tp_iter(iterable) → iterator
+    ; get_iterator_opt, not a tp_iter read: an object with __getitem__
+    ; and no __iter__ is iterable, and the slot read rejected it.
+    ; This is what `f(*seq)`, `[*seq]` and `(*seq,)` compile to.
+    mov rdi, [rbp - LE_ITERABLE]         ; iterable
+    mov esi, TAG_PTR
+    call get_iterator_opt
     test rax, rax
     jz .extend_type_error
     mov [rbp - LE_CURSOR], rax          ; save iterator (reusing locals slot)
@@ -2470,12 +2469,8 @@ DEF_FUNC op_unpack_ex
     ; [rbp - UEX_IPAY] = iterable payload, [rbp - UEX_ITAG] = iterable tag
     ; ebx = count_before, r14 = count_after (must preserve)
     mov rdi, [rbp - UEX_IPAY]
-    mov rax, [rdi + PyObject.ob_type]
-    mov rax, [rax + PyTypeObject.tp_iter]
-    test rax, rax
-    jz .ue_type_error
-    mov rdi, [rbp - UEX_IPAY]
-    call rax                   ; tp_iter(iterable) → iterator
+    mov esi, TAG_PTR
+    call get_iterator_opt       ; see the note in .extend_generic
     test rax, rax
     jz .ue_type_error
     push rax                   ; [rsp] = iterator
@@ -2704,13 +2699,13 @@ DEF_FUNC op_set_update
     cmp rax, rdx
     je .su_from_set
 
-    ; Generic approach: get iterator via tp_iter, then loop tp_iternext
+    ; Generic: get_iterator_opt, which also accepts the legacy __getitem__
+    ; protocol.  `{*seq}` compiles to this.
     mov rdi, rsi
-    mov rax, [rdi + PyObject.ob_type]
-    mov rax, [rax + PyTypeObject.tp_iter]
+    mov esi, TAG_PTR
+    call get_iterator_opt
     test rax, rax
     jz .su_type_error
-    call rax
     mov [rbp - SU_CAP], rax          ; save iterator
 
 .su_iter_loop:
