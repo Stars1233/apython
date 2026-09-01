@@ -643,162 +643,296 @@ DEF_FUNC str_method_splitlines, SL_FRAME
 END_FUNC str_method_splitlines
 
 ;; ============================================================================
-;; str_method_translate(args, nargs) -> new string
-;; args[0]=self, args[1]=table (dict mapping ordinals to ordinals/strings/None)
+;; str_method_translate(args, nargs) -> a new string
+;; args[0] = self, args[1] = the table
+;;
+;; The table is anything subscriptable, not only a dict.  This used to hand
+;; whatever it was given straight to dict_get, with no type check: a list read
+;; its fields as a dict's and the interpreter segfaulted on
+;; `"abc".translate([None] * 200)`.  That is not a contrived call --
+;; re.escape() is `pattern.translate(_special_chars_map)`, and fnmatch builds
+;; every pattern through it.
+;;
+;; CPython's rule, which this now follows: look the ordinal up; a LookupError
+;; means leave the character alone -- that is what a short list and a str
+;; table both give -- None deletes it, an int is an ordinal and a str is
+;; substituted whole.  A table with no subscript at all is a TypeError.
+;;
+;; A dict still goes through dict_get, which is the common case and cannot
+;; raise; everything else goes through mp_subscript.
 ;; ============================================================================
-DEF_FUNC str_method_translate
+TRN_SELF  equ 8
+TRN_TAB   equ 16
+TRN_LIST  equ 24            ; the pieces, joined at the end
+TRN_SUB   equ 32            ; the table's mp_subscript, or 0 when it is a dict
+TRN_I     equ 40            ; the index into self
+TRN_N     equ 48            ; self's length in bytes
+TRN_EXC   equ 56            ; current_exception, to tell a raise from a miss
+TRN_CH    equ 64            ; one character, built on the stack
+TRN_LEN   equ 72            ; a bounded table's length, or -1
+TRN_FRAME equ 80            ; + 2 pushes = 96, 16-byte aligned
+
+extern bytearray_type
+extern bytes_type
+extern list_type
+extern tuple_type
+extern type_is_subtype
+extern dict_type
+extern current_exception
+extern obj_dealloc
+extern raise_type_error_with_name
+
+DEF_FUNC str_method_translate, TRN_FRAME
     push rbx
     push r12
-    push r13
-    push r14
 
-    mov rbx, [rdi]           ; self
-    mov r12, [rbx + PyStrObject.ob_size]
-    mov r14, [rdi + 8]      ; table (dict)
+    cmp rsi, 2
+    jl .trn_argerr
+    mov rax, [rdi]
+    mov [rbp - TRN_SELF], rax
+    mov rcx, [rax + PyStrObject.ob_size]
+    mov [rbp - TRN_N], rcx
+    mov rax, [rdi + 8]
+    mov [rbp - TRN_TAB], rax
 
-    ; Build result: for each char, look up ord(char) in table
+    ; Resolve how to look a key up, once, before the loop.
+    ;
+    ; A raise from inside a subscript cannot be caught here: raise_exception
+    ; tail-jumps into eval_exception_unwind, which resumes the eval loop from
+    ; saved globals rather than returning through the C stack, so a `call` to
+    ; a slot that raises never comes back.  That rules out CPython's "try the
+    ; lookup and treat LookupError as a miss".
+    ;
+    ; So the bound is checked BEFORE the call instead, which needs no catching
+    ; and gives the same answer for every table that has one: a list, tuple,
+    ; str, bytes or bytearray shorter than the ordinal simply leaves the
+    ; character alone.  A dict has a length too, but it is an entry count and
+    ; not an index bound, so a dict keeps its own path -- dict_get reports a
+    ; miss with a NULL and never raises.
+    mov qword [rbp - TRN_SUB], 0
+    mov qword [rbp - TRN_LEN], -1   ; -1 = no bound to check
+    V_TEST_PTR rax, rcx
+    ja .trn_not_subscriptable       ; an immediate has no subscript
+    mov rcx, [rax + PyObject.ob_type]
+    lea rdx, [rel dict_type]
+    cmp rcx, rdx
+    je .trn_have_lookup             ; a dict: TRN_SUB stays 0
+    test qword [rcx + PyTypeObject.tp_flags], TYPE_FLAG_DICT_SUBCLASS
+    jnz .trn_have_lookup
+
+    mov rdx, [rcx + PyTypeObject.tp_as_mapping]
+    test rdx, rdx
+    jz .trn_not_subscriptable
+    mov rdx, [rdx + PyMappingMethods.mp_subscript]
+    test rdx, rdx
+    jz .trn_not_subscriptable
+    mov [rbp - TRN_SUB], rdx
+
+    ; A builtin sequence: take its length as the bound.  Only these, by name:
+    ; a user class with both __len__ and __getitem__ gets an sq_length too,
+    ; and for a mapping its length is not an index bound either.
+    lea rdx, [rel list_type]
+    cmp rcx, rdx
+    je .trn_bounded
+    lea rdx, [rel tuple_type]
+    cmp rcx, rdx
+    je .trn_bounded
+    lea rdx, [rel str_type]
+    cmp rcx, rdx
+    je .trn_bounded
+    lea rdx, [rel bytes_type]
+    cmp rcx, rdx
+    je .trn_bounded
+    lea rdx, [rel bytearray_type]
+    cmp rcx, rdx
+    je .trn_bounded
+    test qword [rcx + PyTypeObject.tp_flags], \
+              TYPE_FLAG_LIST_SUBCLASS | TYPE_FLAG_TUPLE_SUBCLASS | \
+              TYPE_FLAG_STR_SUBCLASS
+    jz .trn_have_lookup
+.trn_bounded:
+    mov rdx, [rcx + PyTypeObject.tp_as_sequence]
+    test rdx, rdx
+    jz .trn_have_lookup
+    mov rdx, [rdx + PySequenceMethods.sq_length]
+    test rdx, rdx
+    jz .trn_have_lookup
+    mov rdi, rax
+    call rdx
+    mov [rbp - TRN_LEN], rax
+
+.trn_have_lookup:
     xor edi, edi
     call list_new
-    mov r13, rax             ; result list (of chars/strings)
+    test rax, rax
+    jz .trn_fail
+    mov [rbp - TRN_LIST], rax
+    mov qword [rbp - TRN_I], 0
+    DUNDER_EXC_SAVE [rbp - TRN_EXC]
 
-    xor ecx, ecx
-.tr_loop:
-    cmp rcx, r12
-    jge .tr_join
+.trn_loop:
+    mov rcx, [rbp - TRN_I]
+    cmp rcx, [rbp - TRN_N]
+    jge .trn_join
+    mov rax, [rbp - TRN_SELF]
+    movzx ebx, byte [rax + PyStrObject.data + rcx]  ; rbx = this character
 
-    ; Get ordinal of current char
-    movzx eax, byte [rbx + PyStrObject.data + rcx]
-    push rcx
+    ; The key is the ordinal, as an int Value.
+    mov rdi, rbx
+    V_PACK_I64 rdi, rcx
+    mov rsi, rdi
+    mov rdi, [rbp - TRN_TAB]
+    mov rcx, [rbp - TRN_SUB]
+    test rcx, rcx
+    jnz .trn_call_sub
+    call dict_get                   ; a miss is a NULL Value, never a raise
+    test rax, rax
+    jz .trn_keep
+    ; dict_get hands back a BORROWED reference where mp_subscript hands back
+    ; an owned one.  Taking one here makes the two paths the same below --
+    ; without it the release after list_append frees the table's own value,
+    ; and the next lookup of it reads freed memory.  The version before this
+    ; one had the same bug and only a dict path to hit it with.
+    INCREF_V rax, rcx
+    jmp .trn_have_value
 
-    ; Look up in table: dict_get(table, ord_key)
-    ; Create SmallInt key
-    movzx edi, al
-    call int_from_i64
-    ; rax = SmallInt payload, edx = TAG_SMALLINT
-    push rax
-    push rdx
-    mov rdi, r14
-    mov rsi, rax
-    mov edx, edx
-    V_PACK rsi, rdx           ; dict_get/del take a key Value
-    call dict_get
-    V_UNPACK rax, rdx           ; dict_get returns a Value
-    pop r8                   ; original key tag
-    pop r9                   ; original key payload
-    test edx, edx
-    jz .tr_not_found
+.trn_call_sub:
+    ; Past the end of a bounded table: a miss, without asking.
+    mov rdx, [rbp - TRN_LEN]
+    cmp rdx, 0
+    jl .trn_do_sub
+    cmp rbx, rdx
+    jge .trn_keep
+.trn_do_sub:
+    call rcx
+    test rax, rax
+    jz .trn_keep                    ; a NULL with nothing pending is a miss
+    jmp .trn_have_value
 
-    ; Found: check what the value is
-    ; If None: skip char (delete)
-    lea rcx, [rel none_singleton]
-    cmp rax, rcx
-    je .tr_delete
+.trn_have_value:
+    ; rax = the mapped value, owned.  None deletes, an int is an ordinal, a
+    ; str is substituted whole.
+    mov r12, rax
+    IS_NONE rax, rcx
+    je .trn_drop
+    V_IS_INT rax, rcx
+    jae .trn_ordinal
+    V_TEST_PTR rax, rcx
+    ja .trn_bad_value
+    mov rcx, [rax + PyObject.ob_type]
+    lea rdx, [rel str_type]
+    cmp rcx, rdx
+    je .trn_append_r12
+    test qword [rcx + PyTypeObject.tp_flags], TYPE_FLAG_STR_SUBCLASS
+    jz .trn_bad_value
 
-    ; If SmallInt: character ordinal
-    cmp edx, TAG_SMALLINT
-    je .tr_ord
-
-    ; Else: it's a string, append it
-    push rax
-    mov rdi, r13
-    mov rsi, rax
-    V_PACK rsi, rdx         ; list_append takes a Value
+.trn_append_r12:
+    mov rdi, [rbp - TRN_LIST]
+    mov rsi, r12
     call list_append
-    pop rdi
-    call obj_decref
-    pop rcx
-    inc rcx
-    jmp .tr_loop
+    mov rdi, r12
+    DECREF_V rdi, rcx
+    jmp .trn_next
 
-.tr_ord:
-    ; Convert ordinal to 1-char string
-    push rax
-    sub rsp, 8
-    mov [rsp], al
-    mov byte [rsp + 1], 0
-    mov rdi, rsp
-    mov rsi, 1
+.trn_ordinal:
+    ; An ordinal: render it as one character.  Only Latin-1 fits a byte, which
+    ; is what the rest of this function handles; a wider one would need the
+    ; UTF-8 encoder, and CPython allows it.  Recorded in bugs.md.
+    V_TO_I64 rax
+    cmp rax, 0
+    jl .trn_bad_value
+    cmp rax, 0x7f
+    jg .trn_bad_value
+    mov [rbp - TRN_CH], al
+    mov byte [rbp - TRN_CH + 1], 0
+    lea rdi, [rbp - TRN_CH]
+    mov esi, 1
     call str_new_heap
-    add rsp, 8
-    push rax
-    mov rdi, r13
+    mov rbx, rax
+    mov rdi, [rbp - TRN_LIST]
     mov rsi, rax
-    V_PACK rsi, rdx         ; list_append takes a Value
     call list_append
-    pop rdi
+    mov rdi, rbx
     call obj_decref
-    pop rax                  ; discard saved ordinal
-    pop rcx
-    inc rcx
-    jmp .tr_loop
+    mov rdi, r12
+    DECREF_V rdi, rcx
+    jmp .trn_next
 
-.tr_not_found:
-    ; Not in table: keep original char
-    movzx eax, byte [rbx + PyStrObject.data + rcx]  ; rcx is on stack
-    ; Wait, rcx was pushed. Let me get it from stack.
-    mov rcx, [rsp]           ; peek at saved rcx
-    movzx eax, byte [rbx + PyStrObject.data + rcx]
-    sub rsp, 8
-    mov [rsp], al
-    mov byte [rsp + 1], 0
-    mov rdi, rsp
-    mov rsi, 1
+.trn_drop:
+    mov rdi, r12
+    DECREF_V rdi, rcx
+    jmp .trn_next
+
+.trn_keep:
+    ; Not in the table: the original character survives.
+    mov [rbp - TRN_CH], bl
+    mov byte [rbp - TRN_CH + 1], 0
+    lea rdi, [rbp - TRN_CH]
+    mov esi, 1
     call str_new_heap
-    add rsp, 8
-    push rax
-    mov rdi, r13
+    mov rbx, rax
+    mov rdi, [rbp - TRN_LIST]
     mov rsi, rax
-    V_PACK rsi, rdx         ; list_append takes a Value
     call list_append
-    pop rdi
+    mov rdi, rbx
     call obj_decref
-    pop rcx
-    inc rcx
-    jmp .tr_loop
 
-.tr_delete:
-    ; Skip this character (mapped to None)
-    pop rcx
-    inc rcx
-    jmp .tr_loop
+.trn_next:
+    inc qword [rbp - TRN_I]
+    jmp .trn_loop
 
-.tr_join:
-    ; Join all pieces: "".join(result_list)
+.trn_join:
     CSTRING rdi, ""
     xor esi, esi
     call str_new_heap
-    push rax                 ; empty sep
-
-    ; Build args for join: [sep, list]
+    mov rbx, rax
     sub rsp, 16
-    mov rax, [rsp + 16]     ; sep
-    mov [rsp], rax
-    mov [rsp + 8], r13
+    mov [rsp], rbx
+    mov rax, [rbp - TRN_LIST]
+    mov [rsp + 8], rax
     mov rdi, rsp
-    mov rsi, 2
+    mov esi, 2
     call str_method_join
-    V_UNPACK rax, rdx           ; str_method_join returns a Value
     add rsp, 16
-    push rax
-    push rdx
-
-    ; Cleanup: DECREF sep and list
-    mov rdi, [rsp + 16]     ; sep
+    mov r12, rax
+    mov rdi, rbx
     call obj_decref
-    mov rdi, r13
+    mov rdi, [rbp - TRN_LIST]
     call obj_decref
-
-    pop rdx
-    pop rax
-    add rsp, 8              ; sep ptr
-
-    pop r14
-    pop r13
+    mov rax, r12
+    mov edx, TAG_PTR
     pop r12
     pop rbx
     leave
-    V_PACK rax, rdx             ; builtins return one Value
     ret
+
+.trn_bad_value:
+    mov rdi, r12
+    DECREF_V rdi, rcx
+    mov rdi, [rbp - TRN_LIST]
+    call obj_decref
+    RAISE exc_TypeError_type, "character mapping must return integer, None or str"
+
+.trn_fail:
+    mov rdi, [rbp - TRN_LIST]
+    test rdi, rdi
+    jz .trn_fail_out
+    call obj_decref
+.trn_fail_out:
+    xor eax, eax
+    xor edx, edx
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.trn_not_subscriptable:
+    mov rsi, [rbp - TRN_TAB]
+    CSTRING rdi, `'\x01' object is not subscriptable`
+    call raise_type_error_with_name
+
+.trn_argerr:
+    RAISE exc_TypeError_type, "translate() takes exactly one argument"
 END_FUNC str_method_translate
 
 ;; ============================================================================
@@ -809,7 +943,9 @@ END_FUNC str_method_translate
 ;; ============================================================================
 SMT_FROM  equ 8
 SMT_TO    equ 16
-SMT_FRAME equ 24            ; + 3 pushes = 48
+SMT_NARGS equ 24
+SMT_ARGS  equ 32
+SMT_FRAME equ 40            ; + 3 pushes = 64, 16-byte aligned
 
 DEF_FUNC str_staticmethod_maketrans, SMT_FRAME
     push rbx
@@ -817,7 +953,11 @@ DEF_FUNC str_staticmethod_maketrans, SMT_FRAME
     push r13
 
     cmp rsi, 2
-    jne .smt_error
+    jl .smt_error
+    cmp rsi, 3
+    jg .smt_error
+    mov [rbp - SMT_NARGS], rsi
+    mov [rbp - SMT_ARGS], rdi
 
     ; Get from and to strings
     mov rcx, [rdi]                 ; args[0] payload (from str)
@@ -870,6 +1010,30 @@ DEF_FUNC str_staticmethod_maketrans, SMT_FRAME
     jmp .smt_loop
 
 .smt_done:
+    ; The third argument, when there is one: every character in it maps to
+    ; None, which str.translate reads as "delete".  os.path and shlex both
+    ; build their tables this way.
+    cmp qword [rbp - SMT_NARGS], 3
+    jne .smt_finish
+    mov rax, [rbp - SMT_ARGS]
+    mov rax, [rax + 16]
+    mov [rbp - SMT_TO], rax
+    mov r12, [rax + PyStrObject.ob_size]
+    xor r13d, r13d
+.smt_del_loop:
+    cmp r13, r12
+    jge .smt_finish
+    mov rcx, [rbp - SMT_TO]
+    movzx esi, byte [rcx + PyStrObject.data + r13]
+    V_PACK_I64 rsi, r8
+    mov rdi, rbx
+    LOAD_NONE rdx
+    call dict_set
+    mov rdi, rdx
+    inc r13
+    jmp .smt_del_loop
+
+.smt_finish:
     mov rax, rbx
     mov edx, TAG_PTR
     pop r13
@@ -880,7 +1044,7 @@ DEF_FUNC str_staticmethod_maketrans, SMT_FRAME
     ret
 
 .smt_error:
-    RAISE exc_TypeError_type, "maketrans requires 2 string arguments"
+    RAISE exc_TypeError_type, "maketrans requires 2 or 3 string arguments"
 
 .smt_len_error:
     RAISE exc_ValueError_type, "maketrans arguments must have equal length"

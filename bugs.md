@@ -171,6 +171,26 @@ one-line fix.
   int -- the trap CLAUDE.md records as "the thunk must call the *defining*
   type's slot, not the argument's".
 
+- **CPython's `re` module crashes our regex engine.**  `_sre` is exercised
+  only by hand-written code arrays -- `_sre.compile(...)` with the program
+  spelled out -- and nothing had ever fed it what CPython's own
+  `sre_compile` emits.  Now that `os` and `fnmatch` import, that path is
+  reachable and it fails two ways: `re.compile(r"(?s:.*\.txt)\Z").match(s)`
+  segfaults in `sre_getchar`, and `[abc]` or `a|b` raise "object does not
+  support item assignment" while compiling.  `re.compile` itself succeeds;
+  it is the match, and the character-class and branch opcodes, that do not.
+  There is no `lib/re.py`, so `re` is CPython's or nothing.
+
+- **`str.translate` cannot take a miss signalled by an exception.**  A table
+  with a length -- dict, list, tuple, str, bytes -- is exact, because the
+  bound is checked before the lookup.  A mapping object whose `__getitem__`
+  raises `LookupError` to mean "not in the table" propagates instead, where
+  CPython carries on.  Catching it is not possible: `raise_exception`
+  tail-jumps into `eval_exception_unwind`, which resumes the eval loop from
+  saved globals rather than returning through the C stack, so a `call` to a
+  slot that raises never comes back.  The same limit applies anywhere C code
+  here would want to catch an exception.
+
 - **`sys.getfilesystemencoding()` always answers `'utf-8'`.**  PEP 540's
   locale handling does not exist, and neither does the `surrogateescape`
   error handler -- `str.encode` and `bytes.decode` accept `errors=` and

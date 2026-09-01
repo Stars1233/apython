@@ -250,6 +250,7 @@ test_str_mod_subclass
 test_str_predicates
 test_str_search
 test_str_subclass_dict
+test_str_translate
 test_structseq
 test_subclass_item_slots
 test_sum_protocol
