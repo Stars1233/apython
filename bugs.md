@@ -164,6 +164,12 @@ one-line fix.
   int -- the trap CLAUDE.md records as "the thunk must call the *defining*
   type's slot, not the argument's".
 
+- **`sys.getfilesystemencoding()` always answers `'utf-8'`.**  PEP 540's
+  locale handling does not exist, and neither does the `surrogateescape`
+  error handler -- `str.encode` and `bytes.decode` accept `errors=` and
+  ignore it.  So a filename or environment value that is not valid UTF-8
+  does not survive a decode/encode round trip, where CPython preserves it.
+
 - **`real` and `imag` are readable on an instance but not on the type.**
   `(5).real`, `(1.5).real` and `(1+2j).real` all work, through a `tp_getattr`
   chain; `int.real` and `complex.real` are AttributeErrors where CPython hands

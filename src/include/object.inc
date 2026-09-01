@@ -718,6 +718,16 @@ struc PyMappingMethods
     .mp_ass_subscript: resq 1  ; +16
 endstruc
 
+; One row of builtin_module_table (src/modtable.asm): a module compiled into
+; the interpreter.  Both sys.modules and sys.builtin_module_names are built
+; from it, so the two cannot drift apart again.
+struc BuiltinModule
+    .name:      resq 1      ; +0: NUL-terminated C string
+    .create_fn: resq 1      ; +8: PyObject *(*)(void), or 0 when import_init
+endstruc                    ;     wires that module some other way
+
+BUILTIN_MODULE_COUNT equ 8
+
 ; Type flags
 TYPE_FLAG_HEAPTYPE     equ 0x0001
 TYPE_FLAG_BASETYPE     equ 0x0002

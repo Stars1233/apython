@@ -479,18 +479,25 @@ DEF_FUNC sys_module_init, 32
     ; The modules that are compiled in rather than found on sys.path.  os.py
     ; reads it to decide which platform module to import, and several others
     ; use it to tell a built-in apart from a shadowing file.
-    mov edi, SM_BUILTIN_COUNT
+    ; Built from builtin_module_table, the same rows import_init registers
+    ; from.  It used to be a hand-written array here, and it had never grown
+    ; `asyncio` or `errno` -- so a module sitting in sys.modules was absent
+    ; from the list os.py gates its platform import on.
+    extern builtin_module_table
+    mov edi, BUILTIN_MODULE_COUNT
     call tuple_new
     mov [rbp - SMI_TMP], rax
     xor r13d, r13d
 .sm_bmn_loop:
-    cmp r13, SM_BUILTIN_COUNT
+    cmp r13, BUILTIN_MODULE_COUNT
     jge .sm_bmn_done
-    lea rax, [rel sm_builtin_names]
-    mov rdi, [rax + r13*8]
+    lea rax, [rel builtin_module_table]
+    mov rcx, r13
+    shl rcx, 4                              ; BuiltinModule_size
+    mov rdi, [rax + rcx + BuiltinModule.name]
     call str_from_cstr_heap
     mov rcx, [rbp - SMI_TMP]
-    mov rcx, [rcx + PyTupleObject.ob_item]
+    mov rcx, [rcx + PyTupleObject.ob_item]  ; reload: the allocation moves it
     mov [rcx + r13*8], rax
     inc r13
     jmp .sm_bmn_loop
@@ -538,6 +545,27 @@ DEF_FUNC sys_module_init, 32
     call builtin_func_new
     push rax
     lea rdi, [rel sm_getdefaultencoding]
+    call str_from_cstr_heap
+    push rax
+    mov rdi, r15
+    mov rsi, rax
+    mov rdx, [rsp + 8]
+    call dict_set
+    pop rdi
+    call obj_decref
+    pop rdi
+    call obj_decref
+
+    ; --- sys.getfilesystemencoding function ---
+    ; os._createenviron decodes posix.environ with it.  It answers 'utf-8'
+    ; unconditionally: PEP 540's locale handling does not exist here, and
+    ; neither does the surrogateescape error handler that would make a
+    ; non-UTF-8 filename survive the round trip -- bugs.md records the gap.
+    lea rdi, [rel sys_getfsencoding_func]
+    lea rsi, [rel sm_getfsencoding]
+    call builtin_func_new
+    push rax
+    lea rdi, [rel sm_getfsencoding]
     call str_from_cstr_heap
     push rax
     mov rdi, r15
@@ -839,6 +867,16 @@ END_FUNC sys_path_add_script_dir
 ;; A real intern table, so `sys.intern(a) is sys.intern(b)` for equal strings.
 ;; functools and enum both intern names and then compare them with `is`.
 ;; ============================================================================
+;; sys.getfilesystemencoding() -> 'utf-8'
+DEF_FUNC sys_getfsencoding_func
+    lea rdi, [rel sm_utf8]
+    call str_from_cstr_heap
+    leave
+    mov edx, TAG_PTR
+    V_PACK rax, rdx
+    ret
+END_FUNC sys_getfsencoding_func
+
 DEF_FUNC sys_intern_func
     cmp rsi, 1
     jne .si_error               ; exactly one argument, as CPython requires
@@ -924,17 +962,7 @@ sm_cache_tag:    db "cache_tag", 0
 sm_cache_tag_val: db "cpython-312", 0
 sm_warnoptions:  db "warnoptions", 0
 sm_builtin_module_names: db "builtin_module_names", 0
-sm_bmn_abc:      db "_abc", 0
-sm_bmn_weakref:  db "_weakref", 0
-sm_bmn_sre:      db "_sre", 0
-sm_bmn_builtins: db "builtins", 0
-sm_bmn_sys:      db "sys", 0
-sm_bmn_time:     db "time", 0
-align 8
-sm_builtin_names:
-    dq sm_bmn_abc, sm_bmn_weakref, sm_bmn_sre, sm_bmn_builtins, sm_bmn_sys
-    dq sm_bmn_time
-SM_BUILTIN_COUNT equ 6
+sm_getfsencoding: db "getfilesystemencoding", 0
 sm_intern:       db "intern", 0
 sm_byteorder:    db "byteorder", 0
 sm_little:       db "little", 0
