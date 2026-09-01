@@ -37,6 +37,7 @@ test_classmethod_metaclass
 test_closures
 test_codec_args
 test_codecs
+test_codecs_registry
 test_comparisons
 test_compile_annotation_scan
 test_compile_annotations

@@ -39,18 +39,51 @@ def unregister(search_function):
     _cache.clear()
 
 
+_bootstrapped = False
+
+
+def _bootstrap():
+    """Register encodings.search_function, as CPython's registry init does.
+
+    In CPython this happens in C, inside the first lookup: the interpreter
+    imports the `encodings` package and registers its search function ahead of
+    anything the program registers itself.  Doing it lazily is what keeps the
+    circle from closing -- `encodings` imports `codecs`, which imports this
+    module.  Without it `_search_functions` stayed empty and every lookup
+    raised LookupError, including the utf-8 one that TextIOWrapper starts from.
+    """
+    global _bootstrapped
+    if _bootstrapped:
+        return
+    _bootstrapped = True
+    try:
+        import encodings
+    except ImportError:
+        # encodings is CPython's own Python package, not something apython
+        # ships; without it the registry holds only what a program registers.
+        return
+    _search_functions.insert(0, encodings.search_function)
+
+
 def lookup(encoding):
     if not isinstance(encoding, str):
-        raise TypeError("lookup() argument must be str")
+        raise TypeError("lookup() argument must be str, not "
+                        + type(encoding).__name__)
     name = _normalize(encoding)
     entry = _cache.get(name)
     if entry is not None:
         return entry
+    _bootstrap()
     for search in _search_functions:
         entry = search(name)
-        if entry is not None:
-            _cache[name] = entry
-            return entry
+        if entry is None:
+            continue
+        # CodecInfo is a 4-tuple subclass, and CPython checks the shape here
+        # rather than letting a bad search function poison the cache.
+        if not isinstance(entry, tuple) or len(entry) != 4:
+            raise TypeError("codec search functions must return 4-tuples")
+        _cache[name] = entry
+        return entry
     raise LookupError("unknown encoding: " + encoding)
 
 
@@ -122,6 +155,30 @@ del _n, _h
 
 
 # --- the stateless codecs -------------------------------------------------
+#
+# In CPython every function below is a C builtin, and a C builtin assigned to a
+# class attribute does not bind: `_buffer_decode = codecs.utf_8_decode` in
+# encodings/utf_8.py, and `encode = codecs.utf_8_encode` in its StreamWriter,
+# stay plain callables that never see a self.  A Python `def` is a descriptor
+# and binds, so those attributes turned into methods and every call arrived
+# with one argument too many.  A plain callable object is not a descriptor, so
+# wrapping restores the C behaviour exactly where it matters.
+
+class _Builtin:
+    """A callable that is not a descriptor, the way a C function is."""
+
+    __slots__ = ("_fn", "__name__")
+
+    def __init__(self, fn):
+        self._fn = fn
+        self.__name__ = fn.__name__
+
+    def __call__(self, *args, **kw):
+        return self._fn(*args, **kw)
+
+    def __repr__(self):
+        return "<built-in function %s>" % self.__name__
+
 
 def _as_bytes(data):
     if isinstance(data, bytes):
@@ -135,9 +192,38 @@ def utf_8_encode(s, errors=None):
     return (s.encode(), len(s))
 
 
-def utf_8_decode(data, errors=None, final=False):
+def _utf_8_decode(data, errors=None, final=False):
     b = _as_bytes(data)
+    if not final:
+        # An incremental decoder is handed arbitrary chunks, so the tail may
+        # be half of a character.  Hold back an incomplete sequence and report
+        # how much was actually consumed; the caller keeps the rest and
+        # prepends it to the next chunk.
+        n = len(b)
+        i = n - 1
+        limit = n - 4
+        while i >= 0 and i > limit:
+            c = b[i]
+            if c < 0x80:
+                break               # a complete one-byte character
+            if c >= 0xC0:
+                # The start of a sequence.  Its length is written in the
+                # leading bits; if the chunk is shorter than that, hold it.
+                if c >= 0xF0:
+                    need = 4
+                elif c >= 0xE0:
+                    need = 3
+                else:
+                    need = 2
+                if n - i < need:
+                    b = b[:i]
+                break
+            i -= 1                  # a continuation byte: keep walking back
     return (b.decode(), len(b))
+
+
+utf_8_decode = _Builtin(_utf_8_decode)
+utf_8_encode = _Builtin(utf_8_encode)
 
 
 def ascii_encode(s, errors=None):
@@ -294,6 +380,22 @@ def escape_decode(data, errors=None):
     return (bytes(out), n)
 
 
+unicode_escape_encode = escape_encode
+unicode_escape_decode = escape_decode
+raw_unicode_escape_encode = escape_encode
+raw_unicode_escape_decode = escape_decode
+
+# Every codec function encodings/*.py may assign to a class attribute has to
+# be non-binding, not just utf-8's: ascii.py, latin_1.py and every
+# charmap-based module do `encode = codecs.<name>_encode` in their StreamWriter
+# and `decode = codecs.<name>_decode` in their StreamReader.
+for _n in ("ascii_encode", "ascii_decode", "latin_1_encode", "latin_1_decode",
+           "charmap_decode", "charmap_encode", "escape_encode", "escape_decode"):
+    globals()[_n] = _Builtin(globals()[_n])
+del _n
+
+iso8859_1_encode = latin_1_encode
+iso8859_1_decode = latin_1_decode
 unicode_escape_encode = escape_encode
 unicode_escape_decode = escape_decode
 raw_unicode_escape_encode = escape_encode
