@@ -81,6 +81,7 @@ test_compile_try
 test_compile_unwind
 test_compile_walrus_comp
 test_compile_with_as_unpack
+test_complex_constructor
 test_complex_format
 test_complex_literals
 test_complex

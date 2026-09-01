@@ -1211,6 +1211,7 @@ global builtin_float
 BF_FRAME equ 32             ; + 0 pushes = 32
 BF_START  equ 8              ; the string strtod was handed
 BF_ENDPTR equ 16            ; where strtod stopped
+BF_OBJ    equ 24            ; the str object itself, for the error message
 DEF_FUNC builtin_float, BF_FRAME
 
     cmp rsi, 0
@@ -1289,6 +1290,7 @@ DEF_FUNC builtin_float, BF_FRAME
 
 .float_from_str:
     ; rdi = PyStrObject*. Parse string → double via strtod.
+    mov [rbp - BF_OBJ], rdi
     lea rdi, [rdi + PyStrObject.data]   ; rdi = null-terminated string data
     mov [rbp - BF_START], rdi                  ; save start ptr
 
@@ -1328,7 +1330,12 @@ DEF_FUNC builtin_float, BF_FRAME
     ret
 
 .float_str_error:
-    RAISE exc_ValueError_type, "could not convert string to float"
+    ; CPython names the string it could not convert, and int() here already
+    ; does; float's message had lost it.
+    mov rsi, [rbp - BF_OBJ]
+    CSTRING rdi, "could not convert string to float: "
+    extern raise_value_error_with_repr
+    call raise_value_error_with_repr
 
 .float_no_args:
     ; float() -> 0.0

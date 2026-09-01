@@ -2412,7 +2412,153 @@ BCX_A     equ 16              ; first argument's parts
 BCX_B     equ 32              ; second argument's parts
 BCX_ARGS  equ 40
 BCX_NARGS equ 48
-BCX_FRAME equ 48              ; + 0 pushes = 48
+BCX_RA    equ 56              ; bcx_coerce's verdict for each argument: the
+BCX_RB    equ 64              ; COERCED value's shape decides, not the given one
+BCX_FRAME equ 64              ; + 0 pushes = 64
+;; ============================================================================
+;; bcx_coerce(rdi = Value, rsi = &double[2], edx = may call __complex__)
+;;   -> eax = 0 not a number, 1 a real number, 2 a complex one
+;;
+;; complex_to_parts, then the conversion protocols CPython's constructor
+;; consults and its arithmetic does not: __complex__, then __float__, then
+;; __index__.  They belong here rather than in complex_to_parts because
+;; `1j + obj` must go on returning NotImplemented for an object with only a
+;; __float__; only complex() itself coerces.
+;;
+;; __complex__ is offered for the first argument alone -- CPython calls
+;; try_complex_special_method on r and never on i, so complex(1, C()) is a
+;; TypeError even though complex(C(), 1) is not.
+;;
+;; Telling 1 from 2 is what the caller needs to finish the two-argument case:
+;; it is the coerced value's shape that decides, not the argument's, so
+;; complex(C(), 1) where C.__complex__ gives 3+4j is (3+5j).
+;;
+;; A __complex__ returning something other than a complex raises here rather
+;; than answering 0: that is a different error, and CPython reports it as one.
+;; ============================================================================
+BCC_OUT   equ 8
+BCC_SELF  equ 16
+BCC_EXC   equ 24
+BCC_DUN   equ 32            ; whether __complex__ may be tried
+BCC_FRAME equ 32            ; + 0 pushes = 32
+
+extern dunder_call_1
+extern obj_dealloc
+extern complex_type
+extern raise_type_error_with_name
+extern eval_exception_unwind
+
+DEF_FUNC_LOCAL bcx_coerce, BCC_FRAME
+    mov [rbp - BCC_OUT], rsi
+    mov [rbp - BCC_SELF], rdi
+    mov [rbp - BCC_DUN], rdx
+    ; Is it complex-valued?  A subclass counts, as PyComplex_Check does.
+    xor r8d, r8d
+    V_TEST_PTR rdi, rax
+    ja .bcc_classified
+    mov rax, [rdi + PyObject.ob_type]
+    lea rcx, [rel complex_type]
+    cmp rax, rcx
+    je .bcc_is_complex
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_COMPLEX_SUBCLASS
+    jz .bcc_classified
+.bcc_is_complex:
+    mov r8d, 1
+.bcc_classified:
+    mov [rbp - BCC_EXC], r8     ; parked; DUNDER_EXC_SAVE comes later
+    call complex_to_parts
+    test eax, eax
+    jz .bcc_protocols
+    mov rax, [rbp - BCC_EXC]
+    add eax, 1                  ; 1 for a real number, 2 for a complex one
+    jmp .bcc_done
+
+.bcc_protocols:
+    ; Only a heaptype can carry these; a builtin that had one would already
+    ; have been recognised above.
+    mov rdi, [rbp - BCC_SELF]
+    V_TEST_PTR rdi, rax
+    ja .bcc_no
+    mov rax, [rdi + PyObject.ob_type]
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_HEAPTYPE
+    jz .bcc_no
+
+    DUNDER_EXC_SAVE [rbp - BCC_EXC]
+    cmp qword [rbp - BCC_DUN], 0
+    je .bcc_try_float
+
+    ; --- __complex__ ---
+    CSTRING rsi, "__complex__"
+    call dunder_call_1
+    test edx, edx
+    jz .bcc_try_float           ; absent, or it raised
+    ; The result must be a complex.  Take its parts and release it: an exact
+    ; complex or a subclass both answer, as CPython accepts both.
+    mov [rbp - BCC_SELF], rax
+    V_TEST_PTR rax, rcx
+    ja .bcc_bad_complex
+    mov rcx, [rax + PyObject.ob_type]
+    lea rdx, [rel complex_type]
+    cmp rcx, rdx
+    je .bcc_complex_ok
+    test qword [rcx + PyTypeObject.tp_flags], TYPE_FLAG_COMPLEX_SUBCLASS
+    jz .bcc_bad_complex
+.bcc_complex_ok:
+    mov rdi, rax
+    mov rsi, [rbp - BCC_OUT]
+    call complex_to_parts
+    mov rdi, [rbp - BCC_SELF]
+    DECREF_V rdi, rdx
+    mov eax, 2                  ; complex-valued, whatever the argument was
+    jmp .bcc_done
+
+.bcc_bad_complex:
+    mov rsi, [rbp - BCC_SELF]
+    CSTRING rdi, `__complex__ returned non-complex (type \x01)`
+    call raise_type_error_with_name
+
+.bcc_try_float:
+    DUNDER_RAISED [rbp - BCC_EXC], .bcc_raised
+    ; --- __float__, then __index__: both through their slots, which is where
+    ; slots.asm puts a heaptype's, and both give a real part with a +0.0
+    ; imaginary one.
+    mov rdi, [rbp - BCC_SELF]
+    mov rax, [rdi + PyObject.ob_type]
+    mov rcx, [rax + PyTypeObject.tp_as_number]
+    test rcx, rcx
+    jz .bcc_no
+    mov rax, [rcx + PyNumberMethods.nb_float]
+    test rax, rax
+    jnz .bcc_call_conv
+    mov rax, [rcx + PyNumberMethods.nb_index]
+    test rax, rax
+    jz .bcc_no
+.bcc_call_conv:
+    call rax                    ; rdi is still self; returns a Value
+    test rax, rax
+    jz .bcc_raised
+    mov [rbp - BCC_SELF], rax
+    mov rdi, rax
+    mov rsi, [rbp - BCC_OUT]
+    call complex_to_parts       ; a float or an int: 1 on success, 0 otherwise
+    mov [rbp - BCC_EXC], rax    ; the verdict, across the release
+    mov rdi, [rbp - BCC_SELF]
+    DECREF_V rdi, rdx
+    mov rax, [rbp - BCC_EXC]
+    jmp .bcc_done
+
+.bcc_raised:
+    ; A protocol method raised.  Report that, not "not a number".
+    leave
+    jmp eval_exception_unwind
+
+.bcc_no:
+    xor eax, eax
+.bcc_done:
+    leave
+    ret
+END_FUNC bcx_coerce
+
 DEF_FUNC builtin_complex, BCX_FRAME
     mov [rbp - BCX_ARGS], rdi
     mov [rbp - BCX_NARGS], rsi
@@ -2421,10 +2567,40 @@ DEF_FUNC builtin_complex, BCX_FRAME
     cmp rsi, 2
     ja .bcx_argcount
 
+    ; --- a string argument, which is a parse rather than a conversion ---
+    mov rdi, [rbp - BCX_ARGS]
+    mov rdi, [rdi]
+    V_TEST_PTR rdi, rax
+    ja .bcx_first_not_str
+    mov rax, [rdi + PyObject.ob_type]
+    lea rcx, [rel str_type]
+    cmp rax, rcx
+    je .bcx_from_string
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_STR_SUBCLASS
+    jnz .bcx_from_string
+.bcx_first_not_str:
+    ; The second argument may not be one either, and that is a distinct
+    ; message from "must be a number".
+    cmp qword [rbp - BCX_NARGS], 2
+    jne .bcx_first
+    mov rdi, [rbp - BCX_ARGS]
+    mov rdi, [rdi + 8]
+    V_TEST_PTR rdi, rax
+    ja .bcx_first
+    mov rax, [rdi + PyObject.ob_type]
+    lea rcx, [rel str_type]
+    cmp rax, rcx
+    je .bcx_second_is_str
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_STR_SUBCLASS
+    jnz .bcx_second_is_str
+
+.bcx_first:
     mov rdi, [rbp - BCX_ARGS]
     mov rdi, [rdi]
     lea rsi, [rbp - BCX_A]
-    call complex_to_parts
+    mov edx, 1                  ; __complex__ is offered to this one only
+    call bcx_coerce
+    mov [rbp - BCX_RA], rax
     test eax, eax
     jz .bcx_bad_type
 
@@ -2457,9 +2633,11 @@ DEF_FUNC builtin_complex, BCX_FRAME
     mov rdi, [rbp - BCX_ARGS]
     mov rdi, [rdi + 8]
     lea rsi, [rbp - BCX_B]
-    call complex_to_parts
+    xor edx, edx                ; ...and never to the second
+    call bcx_coerce
+    mov [rbp - BCX_RB], rax
     test eax, eax
-    jz .bcx_bad_type
+    jz .bcx_bad_second
 
     ; CPython subtracts the second argument's imaginary part only when that
     ; argument really is a complex, and *assigns* the imaginary part rather
@@ -2467,21 +2645,15 @@ DEF_FUNC builtin_complex, BCX_FRAME
     ; invisible except on a signed zero, where it is the whole answer:
     ; complex(0, -0.0) is -0j, and 0.0 + -0.0 is +0.0.
     movsd xmm0, [rbp - BCX_A]           ; real = ar
-    mov rdi, [rbp - BCX_ARGS]
-    mov rdi, [rdi + 8]
-    call bcx_is_complex
-    test eax, eax
-    jz .bcx_two_imag
+    cmp qword [rbp - BCX_RB], 2
+    jne .bcx_two_imag
     movsd xmm1, [rbp - BCX_B + 8]
     subsd xmm0, xmm1                    ; real -= bi
 .bcx_two_imag:
-    movsd [rbp - BCX_A], xmm0           ; park the real part across the call
-    mov rdi, [rbp - BCX_ARGS]
-    mov rdi, [rdi]
-    call bcx_is_complex
+    movsd [rbp - BCX_A], xmm0
     movsd xmm1, [rbp - BCX_B]           ; br
-    test eax, eax
-    jz .bcx_two_build                   ; imag = br
+    cmp qword [rbp - BCX_RA], 2
+    jne .bcx_two_build                  ; imag = br
     addsd xmm1, [rbp - BCX_A + 8]       ; imag = ai + br
 .bcx_two_build:
     movsd xmm0, [rbp - BCX_A]
@@ -2496,26 +2668,38 @@ DEF_FUNC builtin_complex, BCX_FRAME
     leave
     ret
 
+.bcx_from_string:
+    ; complex("1+2j").  Reached only when there is one argument -- a string
+    ; with a second is its own error, below.
+    cmp qword [rbp - BCX_NARGS], 2
+    je .bcx_str_and_second
+    mov rdi, [rbp - BCX_ARGS]
+    mov rdi, [rdi]
+    lea rsi, [rbp - BCX_A]
+    extern complex_parse_string
+    call complex_parse_string    ; raises rather than returning on a bad parse
+    jmp .bcx_one_build
+
 .bcx_bad_type:
-    RAISE exc_TypeError_type, "complex() argument must be a number"
+    mov rdi, [rbp - BCX_ARGS]
+    mov rsi, [rdi]
+    CSTRING rdi, `complex() first argument must be a string or a number, not '\x01'`
+    call raise_type_error_with_name
+
+.bcx_bad_second:
+    mov rdi, [rbp - BCX_ARGS]
+    mov rsi, [rdi + 8]
+    CSTRING rdi, `complex() second argument must be a number, not '\x01'`
+    call raise_type_error_with_name
+
+.bcx_str_and_second:
+    RAISE exc_TypeError_type, "complex() can't take second arg if first is a string"
+
+.bcx_second_is_str:
+    RAISE exc_TypeError_type, "complex() second arg can't be a string"
+
 .bcx_argcount:
     RAISE exc_TypeError_type, "complex() takes at most 2 arguments"
 END_FUNC builtin_complex
 
-;; ============================================================================
-;; bcx_is_complex(rdi = Value) -> eax = 1 when it is an exact complex.
-;; ============================================================================
-DEF_FUNC_BARE bcx_is_complex
-    V_TEST_PTR rdi, rax
-    ja .bic_no
-    mov rax, [rdi + PyObject.ob_type]
-    lea rcx, [rel complex_type]
-    cmp rax, rcx
-    jne .bic_no
-    mov eax, 1
-    ret
-.bic_no:
-    xor eax, eax
-    ret
-END_FUNC bcx_is_complex
 

@@ -164,6 +164,26 @@ one-line fix.
   int -- the trap CLAUDE.md records as "the thunk must call the *defining*
   type's slot, not the argument's".
 
+- **`real` and `imag` are readable on an instance but not on the type.**
+  `(5).real`, `(1.5).real` and `(1+2j).real` all work, through a `tp_getattr`
+  chain; `int.real` and `complex.real` are AttributeErrors where CPython hands
+  back a member descriptor.  `getset_descr` is a stub whose accessors are NULL
+  and which nothing in the tree ever invokes, so this needs that plumbing
+  built first.  `complex.conjugate` has the same shape -- it resolves to the
+  bare builtin rather than to a method descriptor.
+
+- **`float()` of a large int rounds differently from CPython.**
+  `float(10**30)` is `9.999999999999999e+29` here and `1e+30` there.
+  `float_to_f64` converts a GMP-backed int with `__gmpz_get_d`, which
+  truncates toward zero; CPython's `PyLong_AsDouble` rounds to nearest even.
+  Every `complex()` and comparison of such a value inherits it.
+
+- **`complex()` of a string does not accept Unicode spaces or Unicode digits.**
+  CPython runs `_PyUnicode_TransformDecimalAndSpaceToASCII` first, so
+  `complex("\u30001+2j")` parses there; here any byte past ASCII is a
+  malformed string.  ASCII whitespace, brackets, underscores, `inf` and `nan`
+  all behave as CPython's do.
+
 - **`object.__lt__`, `__le__`, `__gt__` and `__ge__` are missing.**  They
   exist in CPython and always return NotImplemented.  Adding them here would
   shadow a builtin base's own comparison, because a heaptype's slot is

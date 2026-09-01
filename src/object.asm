@@ -435,6 +435,67 @@ DEF_FUNC raise_type_error_with_name
     ud2
 END_FUNC raise_type_error_with_name
 
+; raise_value_error_with_repr(rdi = prefix C string, rsi = the object Value)
+;   -> never returns
+;
+; ValueError("<prefix><repr(obj)>"), which CPython writes as "%s: %R".  int's
+; own copy of this is inline and stays there, because its prefix carries the
+; base; float's message had simply lost the value it could not convert, and
+; complex's underscore rule needs the same shape.
+RVR_PREFIX equ 8
+RVR_OBJ    equ 16
+RVR_REPR   equ 24
+RVR_FULL   equ 32
+RVR_FRAME  equ 32           ; + 0 pushes = 32
+
+extern str_from_cstr_heap
+extern str_concat
+extern exc_new
+extern exc_ValueError_type
+extern raise_exception_obj
+
+DEF_FUNC raise_value_error_with_repr, RVR_FRAME
+    mov [rbp - RVR_OBJ], rsi
+    call str_from_cstr_heap         ; rdi still holds the prefix
+    mov [rbp - RVR_PREFIX], rax
+
+    mov rdi, [rbp - RVR_OBJ]
+    call obj_repr
+    test rax, rax
+    jnz .rvr_have_repr
+    ; repr itself raised.  Let that exception stand rather than replacing it
+    ; with one about a message we could not build.
+    mov rdi, [rbp - RVR_PREFIX]
+    call obj_decref
+    leave
+    jmp eval_exception_unwind
+
+.rvr_have_repr:
+    mov [rbp - RVR_REPR], rax
+    mov rdi, [rbp - RVR_PREFIX]
+    mov rsi, rax
+    mov ecx, TAG_PTR
+    call str_concat
+    mov [rbp - RVR_FULL], rax
+
+    mov rdi, [rbp - RVR_PREFIX]
+    call obj_decref
+    mov rdi, [rbp - RVR_REPR]
+    call obj_decref
+
+    lea rdi, [rel exc_ValueError_type]
+    mov rsi, [rbp - RVR_FULL]
+    mov edx, TAG_PTR
+    call exc_new
+    mov [rbp - RVR_PREFIX], rax     ; the exception; that slot is free now
+    mov rdi, [rbp - RVR_FULL]
+    call obj_decref                 ; exc_new took its own reference
+
+    mov rdi, [rbp - RVR_PREFIX]
+    leave
+    jmp raise_exception_obj         ; chains and unwinds; takes the reference
+END_FUNC raise_value_error_with_repr
+
 section .bss
 ; Set by instance_getattr when __getattr__ raised an AttributeError and it
 ; handed the exception back rather than unwinding.  Cleared on entry to every

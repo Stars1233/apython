@@ -168,6 +168,386 @@ DEF_FUNC complex_to_parts, CTP_FRAME
 END_FUNC complex_to_parts
 
 ;; ============================================================================
+;; complex_parse_string(rdi = PyStrObject *, rsi = &double[2]) -> eax = 1
+;;
+;; complex("1+2j").  Never implemented: builtin_complex handed a str to
+;; complex_to_parts, which classifies and does not parse, so every string was
+;; "complex() argument must be a number".
+;;
+;; CPython's grammar, from complex_from_string_inner:
+;;
+;;      <float> | <float>j | <float><signed-float>j
+;;
+;; plus three forms kept for compatibility -- <float><sign>j, <sign>j and a
+;; bare j -- all optionally wrapped in one bracket pair and surrounded by
+;; whitespace.  No whitespace *inside*: "1 + 2j" is an error, and falls out of
+;; the length check at the end rather than needing a rule of its own.
+;;
+;; Underscores follow PEP 515 and are stripped first, exactly as CPython does
+;; through _Py_string_to_number_with_underscores -- and a violation there is a
+;; different message from a malformed number, which is why the two are
+;; separate raises below.
+;;
+;; strtod is glibc's and accepts two things CPython's PyOS_string_to_double
+;; does not: a hex float and a nan payload.  Both are refused before the call,
+;; by reporting that nothing was consumed -- which is how the grammar above
+;; already says "this is not a <float>".
+;;
+;; Does not return on a parse error.  Nothing it holds is owned except the
+;; underscore buffer, which it frees first.
+;; ============================================================================
+CPS_OBJ   equ 8             ; the PyStrObject, for the underscore message
+CPS_OUT   equ 16            ; &double[2]
+CPS_BUF   equ 24            ; the underscore-stripped copy, or 0
+CPS_S     equ 32            ; the cursor
+CPS_START equ 40            ; where it began
+CPS_LEN   equ 48            ; the length the cursor must end at
+CPS_X     equ 56            ; the real part
+CPS_Y     equ 64            ; the imaginary part
+CPS_END   equ 72            ; strtod's endptr
+CPS_BRK   equ 80            ; whether a '(' was consumed
+CPS_FRAME equ 80            ; + 0 pushes = 80, 16-byte aligned
+
+extern ap_malloc
+extern ap_free
+extern strtod
+extern raise_value_error_with_repr
+extern exc_ValueError_type
+
+DEF_FUNC complex_parse_string, CPS_FRAME
+    mov [rbp - CPS_OBJ], rdi
+    mov [rbp - CPS_OUT], rsi
+    mov qword [rbp - CPS_BUF], 0
+    mov qword [rbp - CPS_BRK], 0
+    pxor xmm0, xmm0
+    movsd [rbp - CPS_X], xmm0
+    movsd [rbp - CPS_Y], xmm0
+
+    mov rcx, [rdi + PyStrObject.ob_size]     ; the length in bytes
+    lea rsi, [rdi + PyStrObject.data]
+    mov [rbp - CPS_START], rsi
+    mov [rbp - CPS_LEN], rcx
+
+    ; Any byte past ASCII, and any underscore.  CPython maps Unicode spaces
+    ; and Unicode decimal digits to ASCII before parsing; this does not, and
+    ; refuses them instead -- recorded in bugs.md.
+    xor edx, edx                ; saw an underscore
+    xor r8, r8
+.cps_scan:
+    cmp r8, rcx
+    jge .cps_scanned
+    movzx eax, byte [rsi + r8]
+    test al, 0x80
+    jnz .cps_malformed
+    cmp al, '_'
+    jne .cps_scan_next
+    mov edx, 1
+.cps_scan_next:
+    inc r8
+    jmp .cps_scan
+.cps_scanned:
+    test edx, edx
+    jz .cps_ready
+
+    ; --- PEP 515: an underscore only between two digits ---
+    lea rdi, [rcx + 1]
+    call ap_malloc
+    mov [rbp - CPS_BUF], rax
+    mov [rbp - CPS_START], rax
+    mov rsi, [rbp - CPS_OBJ]
+    lea rsi, [rsi + PyStrObject.data]
+    mov rcx, [rbp - CPS_LEN]
+    mov rdi, rax                ; the write cursor
+    xor r8, r8                  ; the read index
+    xor r9d, r9d                ; the previous byte
+.cps_us:
+    cmp r8, rcx
+    jge .cps_us_done
+    movzx eax, byte [rsi + r8]
+    test al, al
+    jz .cps_us_embedded_nul
+    cmp al, '_'
+    je .cps_us_sep
+    ; A digit must follow an underscore.
+    cmp r9d, '_'
+    jne .cps_us_keep
+    cmp al, '0'
+    jb .cps_underscore_error
+    cmp al, '9'
+    ja .cps_underscore_error
+.cps_us_keep:
+    mov [rdi], al
+    inc rdi
+    jmp .cps_us_next
+.cps_us_sep:
+    ; ...and a digit must precede one.
+    cmp r9d, '0'
+    jb .cps_underscore_error
+    cmp r9d, '9'
+    ja .cps_underscore_error
+.cps_us_next:
+    mov r9d, eax
+    inc r8
+    jmp .cps_us
+.cps_us_done:
+    cmp r9d, '_'
+    je .cps_underscore_error    ; nor at the end
+    mov byte [rdi], 0
+    sub rdi, [rbp - CPS_START]
+    mov [rbp - CPS_LEN], rdi    ; the length the cursor must now reach
+
+.cps_ready:
+    mov rax, [rbp - CPS_START]
+    mov [rbp - CPS_S], rax
+
+    ; --- leading whitespace, then one optional bracket ---
+    mov rdi, [rbp - CPS_S]
+    call cps_skip_space
+    mov [rbp - CPS_S], rax
+    cmp byte [rax], '('
+    jne .cps_body
+    inc rax
+    mov [rbp - CPS_S], rax
+    mov qword [rbp - CPS_BRK], 1
+    mov rdi, rax
+    call cps_skip_space
+    mov [rbp - CPS_S], rax
+
+.cps_body:
+    ; z = <float> at the cursor, if there is one.
+    mov rdi, [rbp - CPS_S]
+    lea rsi, [rbp - CPS_END]
+    call cps_strtod             ; xmm0 = z
+    mov rax, [rbp - CPS_END]
+    cmp rax, [rbp - CPS_S]
+    je .cps_no_leading_float
+
+    ; Every form that starts with a <float> lands here.
+    mov [rbp - CPS_S], rax
+    movsd [rbp - CPS_X], xmm0   ; park z; which part it is is decided below
+    movzx ecx, byte [rax]
+    cmp cl, '+'
+    je .cps_signed_tail
+    cmp cl, '-'
+    je .cps_signed_tail
+    cmp cl, 'j'
+    je .cps_imag_only
+    cmp cl, 'J'
+    je .cps_imag_only
+    ; <float>: z was the real part, which is where it already is.
+    jmp .cps_tail
+
+.cps_imag_only:
+    ; <float>j
+    inc rax
+    mov [rbp - CPS_S], rax
+    movsd xmm0, [rbp - CPS_X]
+    movsd [rbp - CPS_Y], xmm0
+    pxor xmm0, xmm0
+    movsd [rbp - CPS_X], xmm0
+    jmp .cps_tail
+
+.cps_signed_tail:
+    ; <float><signed-float>j, or <float><sign>j
+    mov rdi, [rbp - CPS_S]
+    lea rsi, [rbp - CPS_END]
+    call cps_strtod
+    mov rax, [rbp - CPS_END]
+    cmp rax, [rbp - CPS_S]
+    je .cps_bare_sign
+    movsd [rbp - CPS_Y], xmm0
+    mov [rbp - CPS_S], rax
+    jmp .cps_want_j
+.cps_bare_sign:
+    ; <float><sign>j: the sign alone stands for 1.0 or -1.0.
+    mov rax, [rbp - CPS_S]
+    movzx ecx, byte [rax]
+    inc rax
+    mov [rbp - CPS_S], rax
+    movsd xmm0, [rel cps_one]
+    cmp cl, '-'
+    jne .cps_bare_sign_store
+    movsd xmm1, [rel cps_neg_one]
+    movsd xmm0, xmm1
+.cps_bare_sign_store:
+    movsd [rbp - CPS_Y], xmm0
+
+.cps_want_j:
+    mov rax, [rbp - CPS_S]
+    movzx ecx, byte [rax]
+    cmp cl, 'j'
+    je .cps_eat_j
+    cmp cl, 'J'
+    jne .cps_malformed
+.cps_eat_j:
+    inc rax
+    mov [rbp - CPS_S], rax
+    jmp .cps_tail
+
+.cps_no_leading_float:
+    ; Not a <float>: only <sign>j and a bare j are left.
+    mov rax, [rbp - CPS_S]
+    movzx ecx, byte [rax]
+    movsd xmm0, [rel cps_one]
+    cmp cl, '+'
+    je .cps_sign_j
+    cmp cl, '-'
+    jne .cps_bare_j
+    movsd xmm0, [rel cps_neg_one]
+.cps_sign_j:
+    inc rax
+    mov [rbp - CPS_S], rax
+.cps_bare_j:
+    movsd [rbp - CPS_Y], xmm0
+    jmp .cps_want_j
+
+.cps_tail:
+    ; trailing whitespace, the closing bracket, more whitespace
+    mov rdi, [rbp - CPS_S]
+    call cps_skip_space
+    mov [rbp - CPS_S], rax
+    cmp qword [rbp - CPS_BRK], 0
+    je .cps_at_end
+    mov rax, [rbp - CPS_S]
+    cmp byte [rax], ')'
+    jne .cps_malformed
+    inc rax
+    mov rdi, rax
+    call cps_skip_space
+    mov [rbp - CPS_S], rax
+
+.cps_at_end:
+    ; The cursor has to be at the end of the string, not merely at a NUL:
+    ; that is what rejects "1 + 2j", "1+2j)" and an embedded NUL alike.
+    mov rax, [rbp - CPS_S]
+    sub rax, [rbp - CPS_START]
+    cmp rax, [rbp - CPS_LEN]
+    jne .cps_malformed
+
+    mov rdi, [rbp - CPS_BUF]
+    test rdi, rdi
+    jz .cps_no_buf
+    call ap_free
+.cps_no_buf:
+    mov rax, [rbp - CPS_OUT]
+    movsd xmm0, [rbp - CPS_X]
+    movsd xmm1, [rbp - CPS_Y]
+    movsd [rax], xmm0
+    movsd [rax + 8], xmm1
+    mov eax, 1
+    leave
+    ret
+
+.cps_us_embedded_nul:
+    ; CPython's underscore pass rejects an embedded NUL outright; without an
+    ; underscore the length check at the end catches it instead.
+    jmp .cps_underscore_error
+
+.cps_malformed:
+    mov rdi, [rbp - CPS_BUF]
+    test rdi, rdi
+    jz .cps_malformed_raise
+    call ap_free
+.cps_malformed_raise:
+    RAISE exc_ValueError_type, "complex() arg is a malformed string"
+
+.cps_underscore_error:
+    mov rdi, [rbp - CPS_BUF]
+    test rdi, rdi
+    jz .cps_underscore_raise
+    call ap_free
+.cps_underscore_raise:
+    mov rsi, [rbp - CPS_OBJ]
+    CSTRING rdi, "could not convert string to complex: "
+    call raise_value_error_with_repr
+END_FUNC complex_parse_string
+
+;; cps_skip_space(rdi = s) -> rax = s advanced past ASCII whitespace.
+;; The set is Py_ISSPACE's: space, \t, \n, \v, \f, \r.
+DEF_FUNC_BARE cps_skip_space
+    mov rax, rdi
+.css_loop:
+    movzx ecx, byte [rax]
+    cmp cl, ' '
+    je .css_next
+    cmp cl, 9                   ; \t
+    jb .css_done
+    cmp cl, 13                  ; \r ... and \n, \v, \f between
+    ja .css_done
+.css_next:
+    inc rax
+    jmp .css_loop
+.css_done:
+    ret
+END_FUNC cps_skip_space
+
+;; cps_strtod(rdi = s, rsi = &endptr) -> xmm0 = the value
+;;
+;; strtod, minus the two things glibc accepts and CPython does not: a hex
+;; float ("0x10" is a malformed complex, not 16) and a nan payload.  Both are
+;; refused by reporting that nothing was consumed, which is already how the
+;; grammar says "not a <float>".
+DEF_FUNC_LOCAL cps_strtod
+    push rbx
+    push r12
+    mov rbx, rdi
+    mov r12, rsi
+    mov rax, rdi
+    movzx ecx, byte [rax]
+    cmp cl, '+'
+    je .cst_signed
+    cmp cl, '-'
+    jne .cst_unsigned
+.cst_signed:
+    inc rax
+.cst_unsigned:
+    cmp byte [rax], '0'
+    jne .cst_check_nan
+    movzx ecx, byte [rax + 1]
+    or cl, 0x20
+    cmp cl, 'x'
+    je .cst_reject
+.cst_check_nan:
+    movzx ecx, byte [rax]
+    or cl, 0x20
+    cmp cl, 'n'
+    jne .cst_call
+    movzx ecx, byte [rax + 1]
+    or cl, 0x20
+    cmp cl, 'a'
+    jne .cst_call
+    movzx ecx, byte [rax + 2]
+    or cl, 0x20
+    cmp cl, 'n'
+    jne .cst_call
+    cmp byte [rax + 3], '('
+    je .cst_reject
+
+.cst_call:
+    mov rdi, rbx
+    mov rsi, r12
+    call strtod wrt ..plt
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.cst_reject:
+    mov [r12], rbx              ; nothing consumed
+    pxor xmm0, xmm0
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC cps_strtod
+
+section .rodata
+align 8
+cps_one:     dq 0x3FF0000000000000      ;  1.0
+cps_neg_one: dq 0xBFF0000000000000      ; -1.0
+section .text
+
+;; ============================================================================
 ;; The binary slots.  Each takes (rdi = left Value, rsi = right Value) and
 ;; returns one Value, or a NULL Value when either operand is not a number.
 ;; ============================================================================
@@ -750,7 +1130,17 @@ DEF_FUNC complex_repr, CR_FRAME
     mov rax, [rbp - CR_SELF]
     mov rax, [rax + PyComplexObject.cval_imag]
     bt rax, 63
-    jc .cr_imag_signed          ; float_repr will emit the '-' itself
+    jnc .cr_imag_plus
+    ; A negative NaN keeps its sign bit but float_repr prints it unsigned, so
+    ; delegating the '-' loses the separator entirely and (nan-nanj) rendered
+    ; as (nannanj).  CPython formats the part with Py_DTSF_SIGN, which gives
+    ; a NaN '+' whatever its sign.  Only reachable through complex("nan-nanj"):
+    ; a float immediate cannot hold a negative NaN, since V_FROM_F64
+    ; canonicalises one, but a complex stores raw doubles.
+    movq xmm0, rax
+    ucomisd xmm0, xmm0
+    jnp .cr_imag_signed         ; ordered: a real negative, sign and all
+.cr_imag_plus:
     mov byte [rbx], '+'
     inc rbx
 .cr_imag_signed:
