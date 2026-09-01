@@ -245,6 +245,31 @@ DEF_FUNC builtin_divmod
     V_PACK rdi, rdx
     V_PACK rsi, rcx
     call rax
+    ; A slot may decline: this branch taught int_floordiv and int_mod to
+    ; answer NULL for a non-int operand, and op_binary_op to fall back on the
+    ; other operand's slot.  divmod() is the other direct caller and was not
+    ; taught, so the NULL went into the result tuple and `divmod(7, 2.0)`
+    ; produced an object with no repr instead of (3.0, 1.0).
+    test rax, rax
+    jnz .divmod_have_quot
+    mov rdi, r12
+    mov edx, r14d
+    call value_number_methods   ; the RIGHT operand's, as the reflected op
+    test rax, rax
+    jz .divmod_type_error
+    mov rax, [rax + PyNumberMethods.nb_floor_divide]
+    test rax, rax
+    jz .divmod_type_error
+    mov rdi, rbx
+    mov edx, r13d
+    mov rsi, r12
+    mov ecx, r14d
+    V_PACK rdi, rdx
+    V_PACK rsi, rcx
+    call rax
+    test rax, rax
+    jz .divmod_type_error
+.divmod_have_quot:
     V_UNPACK rax, rdx           ; int_floordiv returns a Value
     mov r15, rax                ; r15 = quotient payload
     push rdx                   ; save quotient tag (stack slot)
@@ -266,6 +291,26 @@ DEF_FUNC builtin_divmod
     V_PACK rdi, rdx
     V_PACK rsi, rcx
     call rax
+    test rax, rax
+    jnz .divmod_have_rem
+    mov rdi, r12
+    mov edx, r14d
+    call value_number_methods
+    test rax, rax
+    jz .divmod_pop_type_error
+    mov rax, [rax + PyNumberMethods.nb_remainder]
+    test rax, rax
+    jz .divmod_pop_type_error
+    mov rdi, rbx
+    mov edx, r13d
+    mov rsi, r12
+    mov ecx, r14d
+    V_PACK rdi, rdx
+    V_PACK rsi, rcx
+    call rax
+    test rax, rax
+    jz .divmod_pop_type_error
+.divmod_have_rem:
     V_UNPACK rax, rdx           ; int_mod returns a Value
     mov r12, rax                ; r12 = remainder payload
     mov r13, rdx                ; r13 = remainder tag
@@ -294,8 +339,19 @@ DEF_FUNC builtin_divmod
 .divmod_error:
     RAISE exc_TypeError_type, "divmod expected 2 arguments"
 
+.divmod_pop_type_error:
+    add rsp, 8                  ; the quotient tag pushed above
 .divmod_type_error:
-    RAISE exc_TypeError_type, "unsupported operand type(s) for divmod()"
+    ; Name both operands, as CPython does: with two of them, "unsupported"
+    ; alone does not say which.
+    mov rdi, rbx
+    mov edx, r13d
+    V_PACK rdi, rdx
+    mov rsi, r12
+    mov ecx, r14d
+    V_PACK rsi, rcx
+    CSTRING rdx, "unsupported operand type(s) for divmod()"
+    call raise_binop_type_error
 END_FUNC builtin_divmod
 
 ; tp_call wrappers: shift (type, args, nargs) → (args, nargs)
@@ -2467,6 +2523,7 @@ extern dunder_call_1
 extern obj_dealloc
 extern complex_type
 extern raise_type_error_with_name
+extern raise_binop_type_error
 extern eval_exception_unwind
 
 DEF_FUNC_LOCAL bcx_coerce, BCC_FRAME

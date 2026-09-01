@@ -389,6 +389,17 @@ END_FUNC value_type
 ; Composes the message into a static buffer and raises TypeError.  Does not
 ; return.
 RTN_BUFSZ equ 160
+
+section .rodata
+rbt_open:    db ": '", 0
+rbt_and:     db "' and '", 0
+rbt_close:   db "'", 0
+rbt_unknown: db "object", 0
+
+section .bss
+rbt_buf: resb 192
+
+section .text
 DEF_FUNC raise_type_error_with_name
     push rbx
     push r12
@@ -447,6 +458,83 @@ rtn_compose:
     call raise_exception
     ud2
 END_FUNC raise_type_error_with_typename
+
+; raise_binop_type_error(rdi = left Value, rsi = right Value,
+;                        rdx = prefix C string) -> never returns
+; "<prefix>: 'int' and 'complex'", which is how CPython words every binary
+; operator's TypeError.  With two operands the bare prefix does not say which
+; one was wrong.
+RBT_LEFT  equ 8
+RBT_RIGHT equ 16
+RBT_FRAME equ 32            ; + 1 push = 40, not 16-aligned
+
+DEF_FUNC raise_binop_type_error, RBT_FRAME
+    push rbx
+    mov [rbp - RBT_LEFT], rdi
+    mov [rbp - RBT_RIGHT], rsi
+    mov rbx, rdx
+
+    lea rdi, [rel rbt_buf]
+    mov rsi, rbx
+    call rbt_copy
+    mov rdi, rax
+    lea rsi, [rel rbt_open]
+    call rbt_copy
+    mov rdi, rax
+    mov rsi, [rbp - RBT_LEFT]
+    call rbt_typename
+    mov rdi, rax
+    lea rsi, [rel rbt_and]
+    call rbt_copy
+    mov rdi, rax
+    mov rsi, [rbp - RBT_RIGHT]
+    call rbt_typename
+    mov rdi, rax
+    lea rsi, [rel rbt_close]
+    call rbt_copy
+
+    lea rdi, [rel exc_TypeError_type]
+    lea rsi, [rel rbt_buf]
+    call raise_exception
+    ud2
+END_FUNC raise_binop_type_error
+
+DEF_FUNC_LOCAL rbt_copy         ; (rdi = dest, rsi = src) -> rax = the NUL
+    xor ecx, ecx
+.rbtc_loop:
+    cmp rcx, 80
+    jge .rbtc_done
+    mov al, [rsi + rcx]
+    test al, al
+    jz .rbtc_done
+    mov [rdi + rcx], al
+    inc rcx
+    jmp .rbtc_loop
+.rbtc_done:
+    lea rax, [rdi + rcx]
+    mov byte [rax], 0
+    leave
+    ret
+END_FUNC rbt_copy
+
+DEF_FUNC_LOCAL rbt_typename     ; (rdi = dest, rsi = a Value) -> rax = the NUL
+    push rbx
+    mov rbx, rdi
+    mov rdi, rsi
+    call value_type
+    test rax, rax
+    jz .rbtt_unknown
+    mov rsi, [rax + PyTypeObject.tp_name]
+    jmp .rbtt_have
+.rbtt_unknown:
+    lea rsi, [rel rbt_unknown]
+.rbtt_have:
+    mov rdi, rbx
+    call rbt_copy
+    pop rbx
+    leave
+    ret
+END_FUNC rbt_typename
 
 ; raise_value_error_with_repr(rdi = prefix C string, rsi = the object Value)
 ;   -> never returns
@@ -1173,6 +1261,12 @@ DEF_FUNC_BARE obj_is_true
     test rax, rax
     jz .check_seq_len
     mov rdi, rbx
+    ; nb_bool still takes (payload, tag): int_bool hands the pair straight to
+    ; int_unwrap, and without the tag it read whatever the caller had left in
+    ; edx.  When that happened to be TAG_SMALLINT it tested the POINTER,
+    ; which is never zero -- so bool() of a heap-boxed 0 was True, while
+    ; `not x` and `if x:` were right, because they go elsewhere.
+    mov edx, TAG_PTR
     call rax
     pop rbx
     pop rbp

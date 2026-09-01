@@ -672,13 +672,298 @@ END_FUNC bytes_getattr
 ;; turns each byte into a code point, which is where the byte string and the
 ;; text stop being the same thing.
 ;; ============================================================================
-BD_SELF  equ 8
-BD_OUT   equ 16
-BD_POS   equ 24
-BD_FRAME equ 32             ; + 2 pushes = 48
+BD_SELF   equ 8
+BD_OUT    equ 16
+BD_POS    equ 24
+BD_ERRORS equ 32            ; the errors= argument, a Value
+BD_WHY    equ 40            ; which of the three malformations
+BD_ERRID  equ 48            ; 1 = ignore, 2 = replace
+BD_READ   equ 56            ; the read cursor, while rebuilding
+BD_SPAN   equ 64            ; how many bytes the bad subpart covers
+BD_FRAME  equ 80            ; + 2 pushes = 96, 16-aligned
+;; ============================================================================
+;; bytes_utf8_check(rdi = data, rsi = length) -> rax = the index of the first
+;;   byte that is not part of a well-formed sequence, or -1; edx = why
+;;
+;; 0 = invalid start byte, 1 = invalid continuation byte, 2 = unexpected end
+;; of data -- CPython's three reasons, in its words -- and r8 = how many bytes
+;; the offending subpart spans, which is 1 for everything except a sequence
+;; cut short by the end of the input.  CPython reports that one as a RANGE and
+;; replaces the whole of it with a single U+FFFD.  The ranges are UTF-8's
+;; and not "anything with the high bit set": overlong forms, surrogates and
+;; anything past U+10FFFF are rejected too, which is what makes `strict` mean
+;; something.
+;; ============================================================================
+;; ============================================================================
+;; bytes_raise_decode_error(rdi = the bytes, rsi = position, rdx = reason)
+;;
+;; "'utf-8' codec can't decode byte 0xff in position 3: invalid start byte" --
+;; CPython's wording, built here because str() of a UnicodeDecodeError does
+;; not render its fields (bugs.md).  Without the text the exception says
+;; nothing about which byte or where.
+;; ============================================================================
+BRD_POS   equ 8
+BRD_SPAN  equ 16
+BRD_FRAME equ 32            ; + 1 push = 40, not 16-aligned
+
+DEF_FUNC bytes_raise_decode_error, BRD_FRAME
+    push rbx
+    mov [rbp - BRD_POS], rsi
+    mov [rbp - BRD_SPAN], rcx
+    mov rbx, rdx                ; the reason
+    cmp rcx, 1
+    jg .brd_range               ; a truncated sequence is reported as a range
+
+    ; The offending byte, as two lowercase hex digits.
+    movzx eax, byte [rdi + PyBytesObject.data + rsi]
+    mov rcx, rax
+    shr rcx, 4
+    and eax, 0x0f
+    lea rdx, [rel bd_hexdigits]
+    movzx ecx, byte [rdx + rcx]     ; the high digit
+    movzx eax, byte [rdx + rax]     ; the low one
+    push rcx
+    push rax
+    lea rdi, [rel bd_msgbuf]
+    lea rsi, [rel bd_msg_head]
+    call bd_copy
+    pop rdx                         ; low
+    pop rcx                         ; high
+    mov [rax], cl
+    mov [rax + 1], dl
+    add rax, 2
+    mov byte [rax], 0
+    mov rdi, rax
+    lea rsi, [rel bd_msg_inpos]
+    call bd_copy
+    mov rdi, rax
+    mov rsi, [rbp - BRD_POS]
+    call bd_append_i64
+    mov rdi, rax
+    lea rsi, [rel bd_msg_colon]
+    call bd_copy
+    mov rdi, rax
+    lea rsi, [rel bd_reason_start]
+    cmp rbx, 1
+    jne .brd_check_end
+    lea rsi, [rel bd_reason_cont]
+    jmp .brd_go
+.brd_check_end:
+    cmp rbx, 2
+    jne .brd_go
+    lea rsi, [rel bd_reason_end]
+.brd_go:
+    call bd_copy
+    lea rdi, [rel exc_UnicodeDecodeError_type]
+    lea rsi, [rel bd_msgbuf]
+    call raise_exception
+    ud2
+
+.brd_range:
+    ; "can't decode bytes in position 0-1", which is what CPython says when
+    ; the input ends in the middle of a sequence.
+    lea rdi, [rel bd_msgbuf]
+    lea rsi, [rel bd_msg_bytes]
+    call bd_copy
+    mov rdi, rax
+    mov rsi, [rbp - BRD_POS]
+    call bd_append_i64
+    mov rdi, rax
+    lea rsi, [rel bd_msg_dash]
+    call bd_copy
+    mov rdi, rax
+    mov rsi, [rbp - BRD_POS]
+    add rsi, [rbp - BRD_SPAN]
+    dec rsi
+    call bd_append_i64
+    mov rdi, rax
+    lea rsi, [rel bd_msg_colon]
+    call bd_copy
+    mov rdi, rax
+    lea rsi, [rel bd_reason_end]
+    call bd_copy
+    lea rdi, [rel exc_UnicodeDecodeError_type]
+    lea rsi, [rel bd_msgbuf]
+    call raise_exception
+    ud2
+END_FUNC bytes_raise_decode_error
+
+DEF_FUNC_LOCAL bd_copy          ; (rdi = dest, rsi = src) -> rax = the NUL
+    xor ecx, ecx
+.bdc_loop:
+    cmp rcx, 100
+    jge .bdc_done
+    mov al, [rsi + rcx]
+    test al, al
+    jz .bdc_done
+    mov [rdi + rcx], al
+    inc rcx
+    jmp .bdc_loop
+.bdc_done:
+    lea rax, [rdi + rcx]
+    mov byte [rax], 0
+    leave
+    ret
+END_FUNC bd_copy
+
+DEF_FUNC_LOCAL bd_append_i64    ; (rdi = dest, rsi = n) -> rax = the NUL
+    mov rax, rsi
+    lea r8, [rel bd_numbuf + 24]
+    mov byte [r8], 0
+    mov r9, 10
+.bda_loop:
+    xor edx, edx
+    div r9
+    dec r8
+    add dl, '0'
+    mov [r8], dl
+    test rax, rax
+    jnz .bda_loop
+    mov rsi, r8
+    call bd_copy
+    leave
+    ret
+END_FUNC bd_append_i64
+
+DEF_FUNC_BARE bytes_utf8_check
+    xor rcx, rcx                ; index
+.buc_loop:
+    cmp rcx, rsi
+    jge .buc_valid
+    movzx eax, byte [rdi + rcx]
+    cmp al, 0x80
+    jb .buc_one                 ; ASCII
+    cmp al, 0xc2
+    jb .buc_bad_start           ; a continuation byte, or an overlong C0/C1
+    cmp al, 0xe0
+    jb .buc_two
+    cmp al, 0xf0
+    jb .buc_three
+    cmp al, 0xf5
+    jb .buc_four
+.buc_bad_start:
+    jmp .buc_bad_start_out
+
+.buc_one:
+    inc rcx
+    jmp .buc_loop
+
+.buc_two:
+    lea r8, [rcx + 1]
+    cmp r8, rsi
+    jge .buc_short
+    movzx r9d, byte [rdi + r8]
+    cmp r9d, 0x80
+    jb .buc_bad_cont
+    cmp r9d, 0xbf
+    ja .buc_bad_cont
+    add rcx, 2
+    jmp .buc_loop
+
+.buc_three:
+    ; The second byte's range narrows for E0 (overlong) and ED (surrogates).
+    mov r10d, 0x80
+    mov r11d, 0xbf
+    cmp al, 0xe0
+    jne .buc_three_ed
+    mov r10d, 0xa0
+    jmp .buc_three_go
+.buc_three_ed:
+    cmp al, 0xed
+    jne .buc_three_go
+    mov r11d, 0x9f
+.buc_three_go:
+    lea r8, [rcx + 1]
+    cmp r8, rsi
+    jge .buc_short
+    movzx r9d, byte [rdi + r8]
+    cmp r9d, r10d
+    jb .buc_bad_cont
+    cmp r9d, r11d
+    ja .buc_bad_cont
+    lea r8, [rcx + 2]
+    cmp r8, rsi
+    jge .buc_short
+    movzx r9d, byte [rdi + r8]
+    cmp r9d, 0x80
+    jb .buc_bad_cont
+    cmp r9d, 0xbf
+    ja .buc_bad_cont
+    add rcx, 3
+    jmp .buc_loop
+
+.buc_four:
+    ; F0 is overlong below U+10000; F4 runs past U+10FFFF above 0x8F.
+    mov r10d, 0x80
+    mov r11d, 0xbf
+    cmp al, 0xf0
+    jne .buc_four_f4
+    mov r10d, 0x90
+    jmp .buc_four_go
+.buc_four_f4:
+    cmp al, 0xf4
+    jne .buc_four_go
+    mov r11d, 0x8f
+.buc_four_go:
+    lea r8, [rcx + 1]
+    cmp r8, rsi
+    jge .buc_short
+    movzx r9d, byte [rdi + r8]
+    cmp r9d, r10d
+    jb .buc_bad_cont
+    cmp r9d, r11d
+    ja .buc_bad_cont
+    lea r8, [rcx + 2]
+    cmp r8, rsi
+    jge .buc_short
+    movzx r9d, byte [rdi + r8]
+    cmp r9d, 0x80
+    jb .buc_bad_cont
+    cmp r9d, 0xbf
+    ja .buc_bad_cont
+    lea r8, [rcx + 3]
+    cmp r8, rsi
+    jge .buc_short
+    movzx r9d, byte [rdi + r8]
+    cmp r9d, 0x80
+    jb .buc_bad_cont
+    cmp r9d, 0xbf
+    ja .buc_bad_cont
+    add rcx, 4
+    jmp .buc_loop
+
+.buc_bad_start_out:
+    mov rax, rcx
+    xor edx, edx
+    mov r8d, 1
+    ret
+.buc_bad_cont:
+    mov rax, rcx
+    mov edx, 1
+    mov r8d, 1
+    ret
+.buc_short:
+    mov rax, rcx
+    mov edx, 2
+    mov r8, rsi
+    sub r8, rcx                 ; everything that is there of the sequence
+    ret
+.buc_valid:
+    mov rax, -1
+    xor edx, edx
+    mov r8d, 1
+    ret
+END_FUNC bytes_utf8_check
+
 DEF_FUNC _bytes_decode_impl, BD_FRAME
     push rbx
     push r12
+    mov qword [rbp - BD_ERRORS], 0
+    cmp rsi, 3
+    jl .bd_no_errors
+    mov rax, [rdi + 16]
+    mov [rbp - BD_ERRORS], rax
+.bd_no_errors:
     mov rbx, [rdi]
     mov [rbp - BD_SELF], rbx
     mov r12, [rbx + PyBytesObject.ob_size]
@@ -716,6 +1001,29 @@ DEF_FUNC _bytes_decode_impl, BD_FRAME
     je .bd_latin1
 
 .bd_utf8:
+    ; Validate before building.  str_new copied the bytes through untouched,
+    ; so an invalid sequence became an invalid str: errors="strict" never
+    ; raised, and every text file opened here accepted corrupt input in
+    ; silence, which is the dangerous half of ignoring the handler.
+    mov rbx, [rbp - BD_SELF]
+    lea rdi, [rbx + PyBytesObject.data]
+    mov rsi, r12
+    call bytes_utf8_check
+    cmp rax, -1
+    je .bd_utf8_ok
+    mov [rbp - BD_POS], rax
+    mov [rbp - BD_WHY], rdx
+    mov [rbp - BD_SPAN], r8
+    mov rdi, [rbp - BD_ERRORS]
+    call codec_error_id         ; 0 strict, 1 ignore, 2 replace, -1 unknown
+    cmp eax, -1
+    je .bd_bad_errors
+    test eax, eax
+    jz .bd_utf8_strict
+    mov [rbp - BD_ERRID], rax
+    jmp .bd_utf8_fixup
+
+.bd_utf8_ok:
     mov rbx, [rbp - BD_SELF]
     lea rdi, [rbx + PyBytesObject.data]
     mov rsi, r12
@@ -725,6 +1033,116 @@ DEF_FUNC _bytes_decode_impl, BD_FRAME
     leave
     V_PACK rax, rdx
     ret
+
+.bd_utf8_strict:
+    mov rdi, [rbp - BD_SELF]
+    mov rsi, [rbp - BD_POS]
+    mov rdx, [rbp - BD_WHY]
+    mov rcx, [rbp - BD_SPAN]
+    call bytes_raise_decode_error
+    ud2
+
+.bd_utf8_fixup:
+    ; ignore drops each offending byte, replace puts U+FFFD where it was, so
+    ; the result can be three times as long as the input.
+    lea rdi, [r12 + r12*2]
+    add rdi, PyStrObject.data + 8
+    call ap_malloc
+    test rax, rax
+    jz .bd_nomem
+    mov [rbp - BD_OUT], rax
+    mov qword [rax + PyObject.ob_refcnt], 1
+    lea rcx, [rel str_type]
+    mov [rax + PyObject.ob_type], rcx
+    mov qword [rax + PyStrObject.ob_hash], -1
+    mov qword [rbp - BD_POS], 0     ; write cursor
+    mov qword [rbp - BD_READ], 0    ; read cursor
+
+.bd_fix_loop:
+    mov rbx, [rbp - BD_SELF]
+    lea rdi, [rbx + PyBytesObject.data]
+    add rdi, [rbp - BD_READ]
+    mov rsi, r12
+    sub rsi, [rbp - BD_READ]
+    jle .bd_fix_finish
+    call bytes_utf8_check
+    cmp rax, -1
+    je .bd_fix_tail
+    mov [rbp - BD_SPAN], r8
+
+    ; The good run up to the bad byte, then the substitution.
+    mov [rbp - BD_WHY], rax         ; the run length, reusing the slot
+    mov rdi, [rbp - BD_OUT]
+    add rdi, PyStrObject.data
+    add rdi, [rbp - BD_POS]
+    mov rbx, [rbp - BD_SELF]
+    lea rsi, [rbx + PyBytesObject.data]
+    add rsi, [rbp - BD_READ]
+    mov rdx, rax
+    call ap_memcpy
+    mov rax, [rbp - BD_WHY]
+    add [rbp - BD_POS], rax
+    add [rbp - BD_READ], rax
+    mov rax, [rbp - BD_SPAN]
+    add [rbp - BD_READ], rax        ; step over the whole offending subpart
+    cmp qword [rbp - BD_ERRID], 2
+    jne .bd_fix_loop
+    mov rdx, [rbp - BD_OUT]
+    mov r8, [rbp - BD_POS]
+    mov byte [rdx + PyStrObject.data + r8], 0xef
+    mov byte [rdx + PyStrObject.data + r8 + 1], 0xbf
+    mov byte [rdx + PyStrObject.data + r8 + 2], 0xbd
+    add qword [rbp - BD_POS], 3
+    jmp .bd_fix_loop
+
+.bd_fix_tail:
+    ; Everything from the cursor on is well formed.
+    mov rdi, [rbp - BD_OUT]
+    add rdi, PyStrObject.data
+    add rdi, [rbp - BD_POS]
+    mov rbx, [rbp - BD_SELF]
+    lea rsi, [rbx + PyBytesObject.data]
+    add rsi, [rbp - BD_READ]
+    mov rdx, r12
+    sub rdx, [rbp - BD_READ]
+    mov [rbp - BD_WHY], rdx
+    call ap_memcpy
+    mov rax, [rbp - BD_WHY]
+    add [rbp - BD_POS], rax
+
+.bd_fix_finish:
+    mov rax, [rbp - BD_OUT]
+    mov rcx, [rbp - BD_POS]
+    mov [rax + PyStrObject.ob_size], rcx
+    mov qword [rax + PyStrObject.data + rcx], 0
+    mov rdi, rax
+    call str_set_length
+    mov rax, [rbp - BD_OUT]
+    mov edx, TAG_PTR
+    pop r12
+    pop rbx
+    leave
+    V_PACK rax, rdx
+    ret
+
+.bd_nomem:
+    RAISE exc_MemoryError_type, "out of memory"
+.bd_bad_errors:
+    ; The name is the useful half: "unknown error handler name" leaves the
+    ; caller to guess which of their arguments was wrong.
+    lea rdi, [rel bd_msgbuf]
+    lea rsi, [rel bd_msg_handler]
+    call bd_copy
+    mov rdi, rax
+    mov rsi, [rbp - BD_ERRORS]
+    lea rsi, [rsi + PyStrObject.data]
+    call bd_copy
+    mov byte [rax], 0x27        ; the closing quote
+    mov byte [rax + 1], 0
+    lea rdi, [rel exc_LookupError_type]
+    lea rsi, [rel bd_msgbuf]
+    call raise_exception
+    ud2
 
 .bd_ascii:
     xor ecx, ecx
@@ -1548,6 +1966,9 @@ DEF_FUNC byteslike_source, BLS_FRAME
     cmp rax, rcx
     je .bls_count_obj
     extern str_type
+extern codec_error_id
+extern exc_LookupError_type
+extern str_set_length
     lea rcx, [rel str_type]
     cmp rax, rcx
     je .bls_need_encoding
@@ -1917,6 +2338,23 @@ bytes_iter_type:
     dq 0                        ; tp_traverse
     dq 0                        ; tp_clear
     dq 0 ; tp_dictoffset
+
+section .rodata
+
+bd_hexdigits:     db "0123456789abcdef"
+bd_msg_head:      db "'utf-8' codec can't decode byte 0x", 0
+bd_msg_inpos:     db " in position ", 0
+bd_msg_colon:     db ": ", 0
+bd_msg_bytes:     db "'utf-8' codec can't decode bytes in position ", 0
+bd_msg_dash:      db "-", 0
+bd_msg_handler:   db "unknown error handler name '", 0
+bd_reason_start:  db "invalid start byte", 0
+bd_reason_cont:   db "invalid continuation byte", 0
+bd_reason_end:    db "unexpected end of data", 0
+
+section .bss
+bd_msgbuf: resb 192
+bd_numbuf: resb 32
 
 section .rodata
 bytes_range_msg: db "bytes must be in range(0, 256)", 0

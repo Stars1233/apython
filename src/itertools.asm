@@ -169,16 +169,23 @@ DEF_FUNC get_iterator_opt
     extern dunder_iter
     lea rsi, [rel dunder_iter]
     extern dunder_call_1
+    ; Snapshot rather than test for non-NULL: inside an except block
+    ; current_exception is the exception BEING HANDLED, so a plain test said
+    ; "__iter__ raised" for every object that simply has no __iter__ -- and
+    ; the legacy __getitem__ fallback below was never reached there.
+    DUNDER_EXC_SAVE r10
+    push r10
+    sub rsp, 8
     call dunder_call_1
+    add rsp, 8
+    pop r10
     V_UNPACK rax, rdx           ; returns a Value
     test edx, edx
     jnz .validate_iter
 
-    ; __iter__ returned NULL — check if exception pending (vs not found)
+    ; __iter__ returned NULL: did it raise, or is there no __iter__ at all?
     extern current_exception
-    mov rax, [rel current_exception]
-    test rax, rax
-    jnz .iter_exc_pending         ; exception raised by __iter__, propagate
+    DUNDER_RAISED r10, .iter_exc_pending
 
     ; __iter__ not found — try __getitem__ sequence protocol
     mov rdi, rbx
@@ -1780,9 +1787,19 @@ END_FUNC seq_iter_new
 
 ;; seq_iter_iternext(self) -> (rax=payload, edx=tag) or NULL
 ;; Calls self.it_obj.__getitem__(self.it_index); catches IndexError as exhaustion.
-DEF_FUNC_LOCAL seq_iter_iternext
+SI_EXC   equ 8
+SI_FRAME equ 16             ; + 1 push = 24, not 16-aligned
+
+DEF_FUNC_LOCAL seq_iter_iternext, SI_FRAME
     push rbx
     mov rbx, rdi                   ; self
+
+    ; Snapshot first.  current_exception is also the exception BEING HANDLED,
+    ; so inside an `except` block this saw one on the very first item, decided
+    ; it was not an IndexError, and reported exhaustion: sorted(seq) answered
+    ; [] for an object with __getitem__ and no __iter__.  And when the handled
+    ; exception WAS an IndexError, the clear below threw it away.
+    DUNDER_EXC_SAVE [rbp - SI_EXC]
 
     ; Call __getitem__(it_obj, it_index)
     mov rdi, [rbx + IT_FIELD1]     ; obj
@@ -1804,7 +1821,11 @@ DEF_FUNC_LOCAL seq_iter_iternext
     ret
 
 .si_check_exc:
-    ; Check if exception is IndexError or StopIteration
+    ; Only an exception THIS call raised counts; anything that was already
+    ; pending belongs to whoever is handling it.
+    DUNDER_RAISED [rbp - SI_EXC], .si_raised
+    jmp .si_exhausted
+.si_raised:
     mov rax, [rel current_exception]
     test rax, rax
     jz .si_exhausted               ; no exception, clean exhaustion
@@ -1820,9 +1841,20 @@ DEF_FUNC_LOCAL seq_iter_iternext
     jmp .si_exhausted
 
 .si_clear_exc:
-    mov rdi, rax
+    ; Put back what was being handled when this call started, with a
+    ; reference of its own: installing the IndexError released the global's
+    ; old one, so storing the bare pointer back would leave the global
+    ; holding a reference nobody owns.
+    push rax
+    mov rdi, [rbp - SI_EXC]
+    test rdi, rdi
+    jz .si_no_restore
+    call obj_incref
+.si_no_restore:
+    mov rcx, [rbp - SI_EXC]
+    mov [rel current_exception], rcx
+    pop rdi
     call obj_decref
-    mov qword [rel current_exception], 0
 .si_exhausted:
     RET_NULL
     pop rbx

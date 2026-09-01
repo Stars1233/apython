@@ -1084,13 +1084,16 @@ END_FUNC tuple_richcompare_inner
 ;; ============================================================================
 TTC_LIST    equ 8       ; temp list
 TTC_ITER    equ 16      ; iterator
-TTC_FRAME   equ 24          ; + 4 pushes = 56, not 16-aligned
+TTC_EXC     equ 24      ; current_exception on entry, to tell "raised" from
+                        ; "already being handled"
+TTC_FRAME   equ 32          ; + 4 pushes = 64, 16-aligned
 
 DEF_FUNC tuple_type_call, TTC_FRAME
     push rbx
     push r12
     push r13
     push r14
+    DUNDER_EXC_SAVE [rbp - TTC_EXC]
 
     mov r12, rsi            ; args
     mov r13, rdx            ; nargs
@@ -1147,11 +1150,11 @@ DEF_FUNC tuple_type_call, TTC_FRAME
     mov rdi, [rbp - TTC_ITER]
     call obj_decref
 
-    ; Check for pending exception
+    ; Did iternext raise, or was something already being handled?  Inside an
+    ; `except` block current_exception is the exception being handled, so a
+    ; bare test made tuple(x) there re-raise it.
     extern current_exception
-    mov rax, [rel current_exception]
-    test rax, rax
-    jnz .ttc_exc_cleanup
+    DUNDER_RAISED [rbp - TTC_EXC], .ttc_exc_cleanup
 
     ; Convert list to tuple
     mov rcx, [rbx + PyListObject.ob_size]

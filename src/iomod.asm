@@ -55,6 +55,7 @@ IO_DEFAULT_BUFFER_SIZE equ 8192
 ; raising so the caller can tell it apart from EOF.
 EAGAIN equ 11
 EISDIR equ 21
+EINVAL equ 22
 S_IFMT  equ 0o170000
 S_IFDIR equ 0o040000
 
@@ -1494,6 +1495,7 @@ END_FUNC fileio_tell_fn
 ;; ============================================================================
 FT_SELF   equ 8
 FT_SIZE   equ 16
+FT_GIVEN  equ 24            ; whether a size was passed at all
 FT_FRAME  equ 32            ; + 0 pushes = 32
 
 DEF_FUNC fileio_truncate_fn, FT_FRAME
@@ -1502,6 +1504,7 @@ DEF_FUNC fileio_truncate_fn, FT_FRAME
     mov rax, [rdi]
     mov [rbp - FT_SELF], rax
     mov qword [rbp - FT_SIZE], -1
+    mov qword [rbp - FT_GIVEN], 0   ; -1 is a real size, not "not given"
     cmp rsi, 2
     jl .ftr_have_size
     mov rcx, [rdi + 8]
@@ -1512,13 +1515,21 @@ DEF_FUNC fileio_truncate_fn, FT_FRAME
     V_UNPACK rdi, rdx
     call obj_as_index
     mov [rbp - FT_SIZE], rax
+    mov qword [rbp - FT_GIVEN], 1
 .ftr_have_size:
     mov rdi, [rbp - FT_SELF]
     call fileio_check
     test qword [rdi + PyFileIOObject.fio_flags], FIO_WRITABLE
     jz .ftr_not_writable
+    ; A caller-supplied negative size is an error, not the sentinel: sharing
+    ; -1 between them meant f.truncate(-1) silently truncated at the current
+    ; position where CPython raises EINVAL and leaves the file alone.
+    cmp qword [rbp - FT_GIVEN], 0
+    je .ftr_no_size
     cmp qword [rbp - FT_SIZE], 0
-    jge .ftr_do
+    jl .ftr_negative
+    jmp .ftr_do
+.ftr_no_size:
     ; None: truncate at the current position.
     mov rdi, [rbp - FT_SELF]
     mov rdi, [rdi + PyFileIOObject.fio_fd]
@@ -1543,6 +1554,11 @@ DEF_FUNC fileio_truncate_fn, FT_FRAME
 .ftr_failed:
     neg rax
     mov rdi, rax
+    xor esi, esi
+    call raise_oserror
+    ud2
+.ftr_negative:
+    mov edi, EINVAL
     xor esi, esi
     call raise_oserror
     ud2

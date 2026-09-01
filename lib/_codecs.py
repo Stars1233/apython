@@ -189,7 +189,7 @@ def _as_bytes(data):
 
 
 def utf_8_encode(s, errors=None):
-    return (s.encode(), len(s))
+    return (s.encode("utf-8", errors or "strict"), len(s))
 
 
 def _utf_8_decode(data, errors=None, final=False):
@@ -219,7 +219,7 @@ def _utf_8_decode(data, errors=None, final=False):
                     b = b[:i]
                 break
             i -= 1                  # a continuation byte: keep walking back
-    return (b.decode(), len(b))
+    return (b.decode("utf-8", errors or "strict"), len(b))
 
 
 utf_8_decode = _Builtin(_utf_8_decode)

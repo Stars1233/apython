@@ -1855,12 +1855,15 @@ END_FUNC list_inplace_repeat
 ; Frame layout
 LTC_LIST    equ 8       ; new list object
 LTC_ITER    equ 16      ; iterator object
-LTC_FRAME   equ 24          ; + 3 pushes = 48
+LTC_EXC     equ 24      ; current_exception on entry, to tell "raised" from
+                        ; "already being handled"
+LTC_FRAME   equ 32          ; + 3 pushes = 56, not 16-aligned
 
 DEF_FUNC list_type_call, LTC_FRAME
     push rbx
     push r12
     push r13
+    DUNDER_EXC_SAVE [rbp - LTC_EXC]
 
     mov r12, rsi            ; args
     mov r13, rdx            ; nargs
@@ -1920,11 +1923,12 @@ DEF_FUNC list_type_call, LTC_FRAME
     mov rdi, [rbp - LTC_ITER]
     call obj_decref
 
-    ; Check for pending exception from iternext (e.g. zip strict ValueError)
+    ; Did iternext raise (a zip strict ValueError, say), or was something
+    ; already being handled?  A bare test against 0 cannot tell: inside an
+    ; `except` block current_exception is the exception being handled, so
+    ; list(x) there re-raised it.
     extern current_exception
-    mov rax, [rel current_exception]
-    test rax, rax
-    jnz .ltc_exc_cleanup
+    DUNDER_RAISED [rbp - LTC_EXC], .ltc_exc_cleanup
 
     mov rax, rbx            ; return the list
     mov edx, TAG_PTR
