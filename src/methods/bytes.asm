@@ -10,6 +10,17 @@
 
 
 ; External functions
+extern int_is_integer
+extern obj_as_index
+extern bytearray_data
+extern bytearray_new
+extern bytearray_tp_iter
+extern bytearray_subscript
+extern bytearray_ass_subscript
+extern bytearray_contains
+extern exc_MemoryError_type
+extern none_singleton
+extern _bytes_decode_impl
 extern ap_malloc
 extern ap_free
 extern ap_realloc
@@ -33,6 +44,46 @@ extern bool_true
 ; --- moved to a sibling file by the split ---
 
 section .text
+
+;; ============================================================================
+;; BYTES_NEEDLE sub_slot, scratch_slot
+;;
+;; find(), count() and index() take an INT as well as a bytes-like -- CPython's
+;; do, and `charmap.find(1, q)` in the regex compiler is exactly that call.
+;; Reading an int as a PyBytesObject header is a wild dereference, and it
+;; segfaulted.
+;;
+;; Rather than give every reader a second path, a one-byte bytes header is
+;; built in the caller's frame and the sub slot pointed at it: ob_size = 1 and
+;; one data byte, which is all the bodies below read.  It lives exactly as
+;; long as the frame, so nothing owns or releases it.
+;; ============================================================================
+%macro BYTES_NEEDLE 2           ; %1 = the sub slot, %2 = the scratch slot
+    ; int_is_integer, not a pointer test: True, every int under INT_STRESS=1,
+    ; and every int subclass instance all arrive as pointers, and a tag test
+    ; sends them down the bytes-like path to be read as an object header.
+    mov rdi, [rbp - %1]
+    V_UNPACK rdi, rdx
+    call int_is_integer
+    test eax, eax
+    jz %%done                   ; a bytes-like: leave it alone
+    mov rdi, [rbp - %1]
+    V_UNPACK rdi, rdx
+    call obj_as_index
+    cmp rax, 0
+    jl %%range
+    cmp rax, 255
+    jle %%in_range
+%%range:
+    RAISE exc_ValueError_type, "byte must be in range(0, 256)"
+%%in_range:
+    lea rcx, [rbp - %2]
+    mov qword [rcx + PyBytesObject.ob_size], 1
+    mov [rcx + PyBytesObject.data], al
+    mov [rbp - %1], rcx
+%%done:
+%endmacro
+
 
 ;; ############################################################################
 ;;                       BYTES METHODS
@@ -234,7 +285,8 @@ END_FUNC bytes_method_endswith
 ;; ============================================================================
 BC_SELF   equ 8
 BC_SUB    equ 16
-BC_FRAME  equ 24            ; + 0 pushes = 24, not 16-aligned
+BC_ONE    equ 56            ; a one-byte bytes header, for an int needle
+BC_FRAME  equ 64            ; + 0 pushes = 64
 
 DEF_FUNC bytes_method_count, BC_FRAME
     cmp rsi, 2
@@ -244,7 +296,10 @@ DEF_FUNC bytes_method_count, BC_FRAME
     mov rcx, [rdi + 8]         ; sub
     mov [rbp - BC_SELF], rax
     mov [rbp - BC_SUB], rcx
+    BYTES_NEEDLE BC_SUB, BC_ONE
 
+    mov rax, [rbp - BC_SELF]
+    mov rcx, [rbp - BC_SUB]
     mov r8, [rax + PyBytesObject.ob_size]   ; self_len
     mov r9, [rcx + PyBytesObject.ob_size]   ; sub_len
 
@@ -317,6 +372,7 @@ DEF_FUNC bytes_method_count, BC_FRAME
     RAISE exc_TypeError_type, "count() takes exactly one argument"
 END_FUNC bytes_method_count
 
+
 ;; ============================================================================
 ;; bytes_method_find(args, nargs) -> SmallInt
 ;; args[0]=self (bytes), args[1]=sub (bytes)
@@ -324,30 +380,82 @@ END_FUNC bytes_method_count
 ;; ============================================================================
 BF_SELF   equ 8
 BF_SUB    equ 16
-BF_FRAME  equ 24            ; + 0 pushes = 24, not 16-aligned
+BF_ARGS   equ 24
+BF_NARGS  equ 32
+BF_ONE    equ 72            ; a one-byte bytes header, for an int needle
+BF_FRAME  equ 80            ; + 0 pushes = 80
 
 DEF_FUNC bytes_method_find, BF_FRAME
     cmp rsi, 2
-    jne .bf_error
+    jl .bf_error
+    cmp rsi, 4
+    jg .bf_error
 
     mov rax, [rdi]              ; self
     mov rcx, [rdi + 8]         ; sub
     mov [rbp - BF_SELF], rax
     mov [rbp - BF_SUB], rcx
+    mov [rbp - BF_ARGS], rdi
+    mov [rbp - BF_NARGS], rsi
+    BYTES_NEEDLE BF_SUB, BF_ONE
 
-    mov r8, [rax + PyBytesObject.ob_size]   ; self_len
+    ; find(sub[, start[, end]]).  CPython's takes both, and the regex
+    ; compiler's `charmap.find(1, q)` walks a 256-byte map with the start
+    ; argument -- without it the loop never advances.
+    mov rax, [rbp - BF_SELF]
+    mov r8, [rax + PyBytesObject.ob_size]
+    xor r11d, r11d              ; start = 0
+    cmp qword [rbp - BF_NARGS], 3
+    jl .bf_have_range
+    mov rdi, [rbp - BF_ARGS]
+    mov rdi, [rdi + 16]
+    V_UNPACK rdi, rdx
+    call obj_as_index
+    mov r11, rax
+    mov r8, [rbp - BF_SELF]
+    mov r8, [r8 + PyBytesObject.ob_size]
+    test r11, r11
+    jns .bf_start_ok
+    add r11, r8                 ; a negative start counts from the end
+    jns .bf_start_ok
+    xor r11d, r11d
+.bf_start_ok:
+    cmp qword [rbp - BF_NARGS], 4
+    jl .bf_have_range
+    push r11
+    mov rdi, [rbp - BF_ARGS]
+    mov rdi, [rdi + 24]
+    V_UNPACK rdi, rdx
+    call obj_as_index
+    pop r11
+    mov rcx, [rbp - BF_SELF]
+    mov rcx, [rcx + PyBytesObject.ob_size]
+    test rax, rax
+    jns .bf_end_ok
+    add rax, rcx
+    jns .bf_end_ok
+    xor eax, eax
+.bf_end_ok:
+    cmp rax, rcx
+    jbe .bf_end_clamped
+    mov rax, rcx
+.bf_end_clamped:
+    mov r8, rax                 ; the scan stops here
+
+.bf_have_range:
+    mov rcx, [rbp - BF_SUB]
     mov r9, [rcx + PyBytesObject.ob_size]   ; sub_len
 
-    ; If sub_len == 0: return 0
+    ; An empty needle is found at the start position.
     test r9, r9
-    jz .bf_found_zero
+    jz .bf_found_at_start
 
-    ; If sub_len > self_len: return -1
-    cmp r9, r8
+    cmp r11, r8
     ja .bf_not_found
-
-    ; Scan
-    xor r11d, r11d              ; offset = 0
+    mov rax, r8
+    sub rax, r11
+    cmp r9, rax
+    ja .bf_not_found
 
 .bf_loop:
     mov rax, r8
@@ -394,8 +502,15 @@ DEF_FUNC bytes_method_find, BF_FRAME
     V_PACK rax, rdx             ; builtins return one Value
     ret
 
+.bf_found_at_start:
+    mov rax, r11
+    RET_TAG_SMALLINT
+    leave
+    V_PACK rax, rdx
+    ret
+
 .bf_error:
-    RAISE exc_TypeError_type, "find() takes exactly one argument"
+    RAISE exc_TypeError_type, "find() takes at most 3 arguments"
 END_FUNC bytes_method_find
 
 ;; ============================================================================
@@ -953,3 +1068,331 @@ END_FUNC bytes_method_join
 
 section .rodata
 empty_str_cstr: db 0
+
+section .text
+
+;; ============================================================================
+;; bytearray's share of bytes' read-only methods.
+;;
+;; bytes keeps its data inline and bytearray keeps it out of line, so the
+;; bytes bodies cannot read a bytearray directly.  Rather than thread a
+;; (pointer, length) pair through sixty-odd read sites in two files -- churn
+;; on the hot, well-tested type for the benefit of the scratch one -- each
+;; wrapper builds a temporary bytes, runs the bytes body on it and releases
+;; it.  A bytearray is a scratch buffer by definition; the copy is cheap
+;; against the risk of that refactor, and it is the sort of thing to revisit
+;; only if bytearray ever becomes hot.
+;;
+;; Some of these answer with a bytes-like where CPython answers with a
+;; bytearray, so the result is converted back where it should be.
+;; ============================================================================
+BSC_ARGS  equ 8
+BSC_NARGS equ 16
+BSC_TMP   equ 24            ; the temporary bytes standing in for self
+BSC_COPY  equ 32            ; the argument array with args[0] replaced
+BSC_RES   equ 40
+BSC_FRAME equ 64            ; + 1 push = 72... see the DEF_FUNC below
+
+;; bytearray_shared_call(rdi = args, rsi = nargs, rdx = the bytes body,
+;;                       ecx = 0 raw / 1 wrap a bytes-like / 2 wrap a list)
+;;   -> the body's Value
+DEF_FUNC bytearray_shared_call, 72
+    push rbx
+    mov [rbp - BSC_ARGS], rdi
+    mov [rbp - BSC_NARGS], rsi
+    mov [rbp - BSC_RES], rdx
+    mov rbx, rcx                ; the wrap mode
+
+    test rsi, rsi
+    jz .bsc_bad
+    mov rdi, [rdi]              ; self
+    mov r8, [rdi + PyByteArrayObject.ob_size]
+    push r8
+    call bytearray_data
+    pop r8
+    mov rdi, rax
+    mov rsi, r8
+    call bytes_from_data
+    test rax, rax
+    jz .bsc_oom
+    mov [rbp - BSC_TMP], rax
+
+    ; Copy the arguments, with args[0] swapped for the temporary.  Eight
+    ; slots is more than any of these methods takes.
+    mov rcx, [rbp - BSC_NARGS]
+    cmp rcx, 8
+    ja .bsc_bad_free
+    sub rsp, 64
+    mov [rbp - BSC_COPY], rsp
+    mov rax, [rbp - BSC_TMP]
+    mov [rsp], rax
+    mov rsi, [rbp - BSC_ARGS]
+    mov edx, 1
+.bsc_copy_loop:
+    cmp rdx, rcx
+    jge .bsc_copied
+    mov rax, [rsi + rdx*8]
+    mov [rsp + rdx*8], rax
+    inc rdx
+    jmp .bsc_copy_loop
+.bsc_copied:
+    mov rdi, rsp
+    mov rsi, [rbp - BSC_NARGS]
+    call qword [rbp - BSC_RES]
+    add rsp, 64
+    mov [rbp - BSC_RES], rax
+
+    mov rdi, [rbp - BSC_TMP]
+    call obj_decref
+
+    mov rax, [rbp - BSC_RES]
+    test rax, rax
+    jz .bsc_out                 ; it raised, or answered NULL
+    cmp rbx, 1
+    je .bsc_wrap_one
+    cmp rbx, 2
+    je .bsc_wrap_list
+.bsc_out:
+    pop rbx
+    leave
+    ret
+
+.bsc_wrap_one:
+    ; A bytes result becomes a bytearray, as CPython's does -- and the bytes
+    ; the body made is released, which it was not.
+    mov [rbp - BSC_RES], rax
+    mov rdi, rax
+    call bytearray_from_bytes
+    mov [rbp - BSC_TMP], rax
+    mov rdi, [rbp - BSC_RES]
+    call obj_decref
+    mov rax, [rbp - BSC_TMP]
+    pop rbx
+    leave
+    ret
+
+.bsc_wrap_list:
+    ; Every element of the list, likewise.
+    mov [rbp - BSC_RES], rax
+    mov rcx, [rax + PyListObject.ob_size]
+    xor esi, esi
+.bsc_wrap_loop:
+    cmp rsi, rcx
+    jge .bsc_wrapped
+    mov rax, [rbp - BSC_RES]
+    mov rax, [rax + PyListObject.ob_item]
+    mov rdi, [rax + rsi*8]
+    push rsi
+    push rcx
+    call bytearray_from_bytes
+    pop rcx
+    pop rsi
+    test rax, rax
+    jz .bsc_wrapped
+    mov rdx, [rbp - BSC_RES]
+    mov rdx, [rdx + PyListObject.ob_item]
+    push rax
+    push rsi
+    mov rdi, [rdx + rsi*8]
+    call obj_decref             ; the bytes the body made
+    pop rsi
+    pop rax
+    mov rdx, [rbp - BSC_RES]
+    mov rdx, [rdx + PyListObject.ob_item]
+    mov [rdx + rsi*8], rax
+    mov rcx, [rbp - BSC_RES]
+    mov rcx, [rcx + PyListObject.ob_size]
+    inc rsi
+    jmp .bsc_wrap_loop
+.bsc_wrapped:
+    mov rax, [rbp - BSC_RES]
+    pop rbx
+    leave
+    ret
+
+.bsc_bad_free:
+    mov rdi, [rbp - BSC_TMP]
+    call obj_decref
+.bsc_bad:
+    RAISE exc_TypeError_type, "descriptor requires a bytearray object"
+.bsc_oom:
+    RAISE exc_MemoryError_type, "out of memory"
+END_FUNC bytearray_shared_call
+
+;; bytearray_from_bytes(rdi = a bytes, borrowed) -> rax = a new bytearray
+DEF_FUNC bytearray_from_bytes
+    push rbx
+    mov rbx, rdi
+    V_TEST_PTR rdi, rax
+    ja .bfb_passthrough
+    mov rax, [rdi + PyObject.ob_type]
+    lea rcx, [rel bytes_type]
+    cmp rax, rcx
+    jne .bfb_passthrough        ; not a bytes: hand it back untouched
+    mov rsi, [rbx + PyBytesObject.ob_size]
+    lea rdi, [rbx + PyBytesObject.data]
+    call bytearray_new
+    pop rbx
+    leave
+    ret
+.bfb_passthrough:
+    mov rax, rbx
+    pop rbx
+    leave
+    ret
+END_FUNC bytearray_from_bytes
+
+DEF_FUNC ba_shared_hex
+    lea rdx, [rel bytes_method_hex]
+    mov ecx, 0
+    leave
+    jmp bytearray_shared_call
+END_FUNC ba_shared_hex
+
+DEF_FUNC ba_shared_startswith
+    lea rdx, [rel bytes_method_startswith]
+    mov ecx, 0
+    leave
+    jmp bytearray_shared_call
+END_FUNC ba_shared_startswith
+
+DEF_FUNC ba_shared_endswith
+    lea rdx, [rel bytes_method_endswith]
+    mov ecx, 0
+    leave
+    jmp bytearray_shared_call
+END_FUNC ba_shared_endswith
+
+DEF_FUNC ba_shared_count
+    lea rdx, [rel bytes_method_count]
+    mov ecx, 0
+    leave
+    jmp bytearray_shared_call
+END_FUNC ba_shared_count
+
+DEF_FUNC ba_shared_find
+    lea rdx, [rel bytes_method_find]
+    mov ecx, 0
+    leave
+    jmp bytearray_shared_call
+END_FUNC ba_shared_find
+
+DEF_FUNC ba_shared_decode
+    lea rdx, [rel _bytes_decode_impl]
+    mov ecx, 0
+    leave
+    jmp bytearray_shared_call
+END_FUNC ba_shared_decode
+
+DEF_FUNC ba_shared_replace
+    lea rdx, [rel bytes_method_replace]
+    mov ecx, 1
+    leave
+    jmp bytearray_shared_call
+END_FUNC ba_shared_replace
+
+DEF_FUNC ba_shared_split
+    lea rdx, [rel bytes_method_split]
+    mov ecx, 2
+    leave
+    jmp bytearray_shared_call
+END_FUNC ba_shared_split
+
+DEF_FUNC ba_shared_join
+    lea rdx, [rel bytes_method_join]
+    mov ecx, 1
+    leave
+    jmp bytearray_shared_call
+END_FUNC ba_shared_join
+
+;; The slots, reachable by name.  __setitem__ and __delitem__ especially:
+;; CPython's own code calls them directly, and `del b[i]` compiles to
+;; DELETE_SUBSCR but `b.__delitem__(i)` does not.
+DEF_FUNC bytearray_dunder_len
+    test rsi, rsi
+    jz .badl_bad
+    mov rdi, [rdi]
+    mov rax, [rdi + PyByteArrayObject.ob_size]
+    V_PACK_I64 rax, rcx
+    mov edx, TAG_PTR
+    leave
+    ret
+.badl_bad:
+    RAISE exc_TypeError_type, "expected exactly one argument"
+END_FUNC bytearray_dunder_len
+
+DEF_FUNC bytearray_dunder_iter
+    test rsi, rsi
+    jz .badi_bad
+    mov rdi, [rdi]
+    call bytearray_tp_iter
+    mov edx, TAG_PTR
+    leave
+    ret
+.badi_bad:
+    RAISE exc_TypeError_type, "expected exactly one argument"
+END_FUNC bytearray_dunder_iter
+
+DEF_FUNC bytearray_dunder_getitem
+    cmp rsi, 2
+    jne .badg_bad
+    mov rsi, [rdi + 8]
+    mov rdi, [rdi]
+    call bytearray_subscript
+    mov edx, TAG_PTR
+    leave
+    ret
+.badg_bad:
+    RAISE exc_TypeError_type, "expected exactly one argument"
+END_FUNC bytearray_dunder_getitem
+
+DEF_FUNC bytearray_dunder_setitem
+    cmp rsi, 3
+    jne .bads_bad
+    mov rdx, [rdi + 16]
+    mov rsi, [rdi + 8]
+    mov rdi, [rdi]
+    call bytearray_ass_subscript
+    LOAD_NONE rax
+    mov edx, TAG_PTR
+    leave
+    ret
+.bads_bad:
+    RAISE exc_TypeError_type, "expected exactly two arguments"
+END_FUNC bytearray_dunder_setitem
+
+DEF_FUNC bytearray_dunder_delitem
+    cmp rsi, 2
+    jne .badd_bad
+    mov rsi, [rdi + 8]
+    mov rdi, [rdi]
+    xor edx, edx                ; a NULL value Value means delete
+    call bytearray_ass_subscript
+    LOAD_NONE rax
+    mov edx, TAG_PTR
+    leave
+    ret
+.badd_bad:
+    RAISE exc_TypeError_type, "expected exactly one argument"
+END_FUNC bytearray_dunder_delitem
+
+DEF_FUNC bytearray_dunder_contains
+    cmp rsi, 2
+    jne .badc_bad
+    mov rsi, [rdi + 8]
+    mov rdi, [rdi]
+    call bytearray_contains
+    test eax, eax
+    jz .badc_false
+    lea rax, [rel bool_true]
+    jmp .badc_out
+.badc_false:
+    lea rax, [rel bool_false]
+.badc_out:
+    inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
+    leave
+    ret
+.badc_bad:
+    RAISE exc_TypeError_type, "expected exactly one argument"
+END_FUNC bytearray_dunder_contains

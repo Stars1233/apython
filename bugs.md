@@ -171,6 +171,21 @@ one-line fix.
   int -- the trap CLAUDE.md records as "the thunk must call the *defining*
   type's slot, not the argument's".
 
+- **`bytes` and `bytearray` are missing most of the string-like methods.**
+  Both have `find`, `count`, `startswith`, `endswith`, `split`, `join`,
+  `replace`, `hex` and `decode`; neither has `rfind`, `index`, `rindex`,
+  `rsplit`, `splitlines`, `strip`/`lstrip`/`rstrip`, `partition`/
+  `rpartition`, `upper`/`lower`/`title`/`swapcase`/`capitalize`,
+  `center`/`ljust`/`rjust`, `zfill`, `expandtabs`, `translate`, or the
+  `is*` predicates.  `bytearray(str, encoding)` is not accepted either.
+
+- **bytearray's read-only methods copy.**  bytes keeps its data inline and
+  bytearray keeps it out of line, so the shared method bodies cannot read a
+  bytearray directly; each wrapper builds a temporary bytes, runs the bytes
+  body and releases it.  Correct, and cheap for a scratch buffer, but it is
+  an allocation per call -- worth threading a (pointer, length) pair through
+  the bodies if bytearray ever becomes hot.
+
 - **CPython's `re` module crashes our regex engine.**  `_sre` is exercised
   only by hand-written code arrays -- `_sre.compile(...)` with the program
   spelled out -- and nothing had ever fed it what CPython's own

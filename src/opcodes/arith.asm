@@ -241,6 +241,8 @@ DEF_FUNC_BARE op_binary_op
     V_PACK rsi, rcx
     call rax
     V_UNPACK rax, rdx           ; sq_repeat returns a Value
+    test edx, edx               ; NotImplemented, as above
+    jz .binop_try_dunder
     jmp .binop_have_result
 
 .binop_not_int_left:
@@ -283,6 +285,8 @@ DEF_FUNC_BARE op_binary_op
     V_PACK rsi, rcx
     call rax
     V_UNPACK rax, rdx           ; sq_repeat returns a Value
+    test edx, edx               ; NotImplemented, as above
+    jz .binop_try_dunder
     jmp .binop_have_result
 .binop_left_seq_done:
     mov rax, [rdi + PyObject.ob_type]
@@ -445,6 +449,12 @@ DEF_FUNC_BARE op_binary_op
     V_PACK rsi, rcx
     call rax
     V_UNPACK rax, rdx           ; sq_concat returns a Value
+    ; A NULL Value is NotImplemented here too, exactly as it is for the nb_
+    ; slots.  Untested, a declining sq_concat or sq_repeat pushed NULL onto
+    ; the value stack -- which is what `bytearray(b"ab") + [1, 2]` did the
+    ; moment bytearray's sq_concat learned to refuse a non-bytes-like.
+    test edx, edx
+    jz .binop_try_dunder
     jmp .binop_have_result
 
 .binop_seq_repeat_left:
@@ -458,6 +468,8 @@ DEF_FUNC_BARE op_binary_op
     V_PACK rsi, rcx
     call rax
     V_UNPACK rax, rdx           ; sq_repeat returns a Value
+    test edx, edx               ; NotImplemented, as above
+    jz .binop_try_dunder
     jmp .binop_have_result
 
 .binop_try_right_slot:

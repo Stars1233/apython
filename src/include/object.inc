@@ -102,12 +102,22 @@ struc PyBytesObject
     .data:                 ; +24: raw bytes (variable)
 endstruc
 
-; ByteArray object — same layout as bytes (variable-size inline data)
+; ByteArray object.  Unlike bytes, the data is OUT OF LINE: a bytearray is
+; mutable and grows, and inline data at a fixed offset in the object body
+; cannot -- which is why it used to have no append, no extend and no slice
+; assignment at all.  ob_bytes is its own allocation, doubling as it fills, so
+; appending n bytes costs O(n) copies in total.  The compiler's Buf is the
+; same shape.
+;
+; The buffer is always NUL-terminated one byte past ob_size, so the data
+; pointer can be handed to anything that wants a C string; ob_cap counts the
+; usable bytes and excludes that terminator.
 struc PyByteArrayObject
     .ob_refcnt: resq 1    ; +0
     .ob_type:   resq 1    ; +8
     .ob_size:   resq 1    ; +16: length in bytes
-    .data:                 ; +24: raw bytes (variable)
+    .ob_cap:    resq 1    ; +24: usable bytes at ob_bytes, excluding the NUL
+    .ob_bytes:  resq 1    ; +32: the buffer
 endstruc
 
 ; MemoryView object — reference to a slice of a bytes-like object

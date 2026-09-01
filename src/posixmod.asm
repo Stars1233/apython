@@ -999,9 +999,16 @@ DEF_FUNC posix_write, 16
     lea rcx, [rel bytearray_type]
     cmp rax, rcx
     jne .pwr_badbuf
+    ; A bytearray keeps its data out of line, so it cannot be read through
+    ; the bytes offsets -- which is what this did while the two layouts
+    ; happened to match.
+    mov rdx, [rdi + PyByteArrayObject.ob_size]
+    mov rsi, [rdi + PyByteArrayObject.ob_bytes]
+    jmp .pwr_have_buf
 .pwr_bytes:
     mov rdx, [rdi + PyBytesObject.ob_size]
     lea rsi, [rdi + PyBytesObject.data]
+.pwr_have_buf:
     pop rdi
     pop rdi
     call sys_write

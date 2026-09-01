@@ -4,6 +4,13 @@
 %include "macros.inc"
 %include "object.inc"
 
+extern int_is_integer
+extern type_is_subtype
+extern hash_not_implemented
+extern ap_memcmp
+extern ap_memmove
+extern exc_MemoryError_type
+extern ap_realloc
 extern ap_malloc
 extern ap_free
 extern gc_alloc
@@ -395,16 +402,26 @@ END_FUNC bytes_contains
 ;; bytes and bytearray have identical layouts -- ob_size at +16, data at +24 --
 ;; so one implementation serves both; only the wrapper text differs.
 global bytearray_repr
+;; bytes and bytearray no longer share a layout -- a bytearray's data is out
+;; of line -- so each hands the renderer its own (pointer, length) pair.
 DEF_FUNC bytes_repr
-    xor esi, esi               ; 0 = b'...'
+    mov rsi, [rdi + PyBytesObject.ob_size]
+    lea rdi, [rdi + PyBytesObject.data]
+    xor edx, edx               ; 0 = b'...'
     call bytes_repr_impl
     leave
     ret
 END_FUNC bytes_repr
 
 DEF_FUNC bytearray_repr
-    mov esi, 1                 ; 1 = bytearray(b'...')
+    push rbx
+    mov rbx, rdi
+    call bytearray_data
+    mov rdi, rax
+    mov rsi, [rbx + PyByteArrayObject.ob_size]
+    mov edx, 1                 ; 1 = bytearray(b'...')
     call bytes_repr_impl
+    pop rbx
     leave
     ret
 END_FUNC bytearray_repr
@@ -417,9 +434,9 @@ DEF_FUNC_LOCAL bytes_repr_impl, 1024
     push r14
     push r15
 
-    mov rbx, rdi               ; bytes obj
-    mov r12, [rbx + PyBytesObject.ob_size]  ; length
-    mov r14d, esi              ; wrap flag, preserved across the loop
+    mov rbx, rdi               ; the data pointer
+    mov r12, rsi               ; length
+    mov r14d, edx              ; wrap flag, preserved across the loop
 
     ; Pick the delimiter the way CPython does: a single quote normally, but a
     ; double quote when the data contains ' and no ", so the quote inside
@@ -430,7 +447,7 @@ DEF_FUNC_LOCAL bytes_repr_impl, 1024
 .br_scan:
     cmp rdx, r12
     jge .br_scan_done
-    movzx ecx, byte [rbx + PyBytesObject.data + rdx]
+    movzx ecx, byte [rbx + rdx]
     cmp ecx, 0x22              ; a double quote rules the switch out
     je .br_scan_done_squote
     cmp ecx, 0x27
@@ -475,7 +492,7 @@ DEF_FUNC_LOCAL bytes_repr_impl, 1024
     cmp ecx, 1000
     jge .br_close              ; safety limit
 
-    movzx eax, byte [rbx + PyBytesObject.data + rdx]
+    movzx eax, byte [rbx + rdx]
 
     ; Printable ASCII (32-126, excluding backslash and quote)?
     cmp eax, 32
@@ -876,6 +893,79 @@ END_FUNC bytes_iter_self
 ;; ============================================================================
 extern bool_true
 extern bool_false
+
+;; ============================================================================
+;; bytes_like_ptr_len(rdi = a pointer) -> rax = data, r10 = length, ecx = 1
+;;   ecx = 0 when it is neither bytes nor bytearray.
+;;
+;; The two keep their data in different places -- bytes inline, bytearray out
+;; of line -- so anything that reads both goes through here.
+;; ============================================================================
+DEF_FUNC bytes_like_ptr_len
+    push rbx
+    ; A Value, which may be an int or a float immediate -- sq_concat and
+    ; tp_richcompare are both called with whatever the other operand was.
+    V_TEST_PTR rdi, rax
+    ja .bpl_no
+    test rdi, rdi
+    jz .bpl_no
+    mov rbx, rdi
+    mov rax, [rdi + PyObject.ob_type]
+    lea rcx, [rel bytes_type]
+    cmp rax, rcx
+    je .bpl_bytes
+    lea rcx, [rel bytearray_type]
+    cmp rax, rcx
+    je .bpl_bytearray
+    lea rcx, [rel memoryview_type]
+    cmp rax, rcx
+    je .bpl_memoryview
+
+    ; A subclass counts.  There is no family flag for either, so the answer
+    ; comes from the MRO -- and without this `B(bytes)(b"xy") == b"xy"` was
+    ; False, because the comparison declined and identity took over.
+    mov rdi, rax
+    lea rsi, [rel bytes_type]
+    call type_is_subtype
+    test eax, eax
+    jnz .bpl_bytes_sub
+    mov rdi, [rbx + PyObject.ob_type]
+    lea rsi, [rel bytearray_type]
+    call type_is_subtype
+    test eax, eax
+    jz .bpl_no
+    mov rdi, rbx
+    jmp .bpl_bytearray_have
+
+.bpl_bytes_sub:
+    mov rdi, rbx
+.bpl_bytes:
+    mov r10, [rdi + PyBytesObject.ob_size]
+    lea rax, [rdi + PyBytesObject.data]
+    jmp .bpl_yes
+.bpl_bytearray:
+.bpl_bytearray_have:
+    mov r10, [rdi + PyByteArrayObject.ob_size]
+    mov rax, [rdi + PyByteArrayObject.ob_bytes]
+    test rax, rax
+    jnz .bpl_yes
+    lea rax, [rel bytearray_empty_data]
+    jmp .bpl_yes
+.bpl_memoryview:
+    mov r10, [rdi + PyMemoryViewObject.mv_len]
+    mov rax, [rdi + PyMemoryViewObject.mv_buf]
+.bpl_yes:
+    mov ecx, 1
+    pop rbx
+    leave
+    ret
+.bpl_no:
+    xor ecx, ecx
+    pop rbx
+    leave
+    ret
+END_FUNC bytes_like_ptr_len
+
 DEF_FUNC bytes_compare
     V_UNPACK rdi, rcx           ; left  Value -> (payload, tag)
     V_UNPACK rsi, r8            ; right Value -> (payload, tag)
@@ -883,26 +973,41 @@ DEF_FUNC bytes_compare
     push rbx
     mov ebx, edx              ; save op in ebx
 
-    ; Check if b is also bytes
+    ; Either side may be bytes OR bytearray -- `b"ab" == bytearray(b"ab")` is
+    ; True in CPython, and this function is now both types' tp_richcompare.
+    ; The two layouts differ, so each side is reduced to a (pointer, length)
+    ; pair before the walk.
     cmp r8d, TAG_PTR          ; b may be an int or float immediate, whose
     jne .bytes_cmp_not_impl   ; payload is not an address
-    lea rax, [rel bytes_type]
-    cmp [rsi + PyObject.ob_type], rax
-    jne .bytes_cmp_not_impl
+    push rsi
+    push rdi
+    mov rdi, rsi
+    call bytes_like_ptr_len
+    pop rdi
+    pop rsi
+    test ecx, ecx
+    jz .bytes_cmp_not_impl
+    mov r9, rax               ; b's data
+    mov rdx, r10              ; len(b)
+    push rdx
+    push r9
+    call bytes_like_ptr_len   ; rdi is still a
+    pop r9
+    pop rdx
+    test ecx, ecx
+    jz .bytes_cmp_not_impl
+    mov r8, rax               ; a's data
+    mov rcx, r10              ; len(a)
 
     ; Lexicographic three-way compare, as CPython does: walk the common
     ; prefix, and if that matches, the shorter operand sorts first.  Only
     ; == and != were implemented before, so every ordering comparison
     ; between two bytes fell through to NotImplemented.
-    mov rcx, [rdi + PyBytesObject.ob_size]   ; rcx = len(a)
-    mov rdx, [rsi + PyBytesObject.ob_size]   ; rdx = len(b)
     mov r11, rcx
     cmp r11, rdx
     jle .bytes_have_min
     mov r11, rdx
 .bytes_have_min:                             ; r11 = min(len(a), len(b))
-    lea r8, [rdi + PyBytesObject.data]
-    lea r9, [rsi + PyBytesObject.data]
     xor eax, eax
 .bytes_cmp_loop:
     cmp rax, r11
@@ -1142,6 +1247,7 @@ DEF_FUNC bytes_concat
     push rbx
     push r12
     push r13
+    push r14
     mov rbx, rdi
     mov r12, rsi
 
@@ -1153,12 +1259,29 @@ DEF_FUNC bytes_concat
     lea rcx, [rel bytes_type]
     cmp rax, rcx
     jne .bc_type_error
+    ; The right operand may be any bytes-like: `b"ab" + bytearray(b"cd")` is
+    ; b'abcd' in CPython -- bytes, from the left operand -- and requiring an
+    ; exact bytes on the right refused it.  r14 carries the right side's
+    ; length and r12 becomes its DATA pointer, so the copies below read one
+    ; layout whichever type arrived.
     mov rax, [r12 + PyObject.ob_type]
     cmp rax, rcx
+    jne .bc_right_bytearray
+    mov r14, [r12 + PyBytesObject.ob_size]
+    lea r12, [r12 + PyBytesObject.data]
+    jmp .bc_right_done
+.bc_right_bytearray:
+    lea rcx, [rel bytearray_type]
+    cmp rax, rcx
     jne .bc_type_error
+    mov r14, [r12 + PyByteArrayObject.ob_size]
+    mov rdi, r12
+    call bytearray_data
+    mov r12, rax
+.bc_right_done:
 
     mov r13, [rbx + PyBytesObject.ob_size]
-    add r13, [r12 + PyBytesObject.ob_size]
+    add r13, r14
     lea rdi, [r13 + PyBytesObject.data + 8]
     call ap_malloc
     mov qword [rax + PyObject.ob_refcnt], 1
@@ -1174,12 +1297,13 @@ DEF_FUNC bytes_concat
     mov rax, [rsp]
     mov rdi, [rbx + PyBytesObject.ob_size]
     lea rdi, [rax + PyBytesObject.data + rdi]
-    lea rsi, [r12 + PyBytesObject.data]
-    mov rdx, [r12 + PyBytesObject.ob_size]
+    mov rsi, r12
+    mov rdx, r14
     call ap_memcpy
     pop rax
     mov qword [rax + PyBytesObject.data + r13], 0
     mov edx, TAG_PTR
+    pop r14
     pop r13
     pop r12
     pop rbx
@@ -1187,6 +1311,8 @@ DEF_FUNC bytes_concat
     ret
 
 .bc_type_error:
+    ; raise_type_error_with_name does not return, so the pushes above are
+    ; abandoned with the rest of the C stack; nothing to restore.
     mov rsi, r12
     CSTRING rdi, `can't concat \x01 to bytes`
     extern raise_type_error_with_name
@@ -1455,7 +1581,8 @@ DEF_FUNC byteslike_source, BLS_FRAME
 
 .bls_copy_bytearray:
     mov rbx, [rdi + PyByteArrayObject.ob_size]
-    lea r12, [rdi + PyByteArrayObject.data]
+    call bytearray_data
+    mov r12, rax
 
 .bls_copy:
     test rbx, rbx
@@ -1821,10 +1948,10 @@ DEF_FUNC bytearray_type_call, BA_FRAME
     mov [rbp - BA_BUF], rax
     mov [rbp - BA_LEN], rdx
 
-    mov rcx, rdx
+    ; The object is a fixed size now; the bytes live in their own allocation.
     mov rdx, [rbp - BA_TYPE]
+    mov edi, PyByteArrayObject_size
     test qword [rdx + PyTypeObject.tp_flags], TYPE_FLAG_HAVE_GC
-    lea rdi, [rcx + PyByteArrayObject.data]
     jz .ba_plain_alloc
     mov rsi, rdx
     call gc_alloc
@@ -1836,14 +1963,21 @@ DEF_FUNC bytearray_type_call, BA_FRAME
     mov [rax + PyByteArrayObject.ob_type], rdx
 .ba_alloc_done:
     mov rbx, rax
-    mov rcx, [rbp - BA_LEN]
-    mov [rbx + PyByteArrayObject.ob_size], rcx
+    mov qword [rbx + PyByteArrayObject.ob_size], 0
+    mov qword [rbx + PyByteArrayObject.ob_cap], 0
+    mov qword [rbx + PyByteArrayObject.ob_bytes], 0
     mov rdx, [rbp - BA_TYPE]
     inc qword [rdx + PyObject.ob_refcnt]
 
+    mov rdi, rbx
+    mov rsi, [rbp - BA_LEN]
+    call bytearray_resize       ; allocates and NUL-terminates
+    test eax, eax
+    jz .ba_oom
+    mov rcx, [rbp - BA_LEN]
     test rcx, rcx
     jz .ba_no_copy
-    lea rdi, [rbx + PyByteArrayObject.data]
+    mov rdi, [rbx + PyByteArrayObject.ob_bytes]
     mov rsi, [rbp - BA_BUF]
     mov rdx, rcx
     call ap_memcpy
@@ -1865,12 +1999,1305 @@ DEF_FUNC bytearray_type_call, BA_FRAME
     pop rbx
     leave
     ret
+
+.ba_oom:
+    RAISE exc_MemoryError_type, "out of memory"
 END_FUNC bytearray_type_call
+
+;; ============================================================================
+;; bytearray_resize(rdi = self, rsi = the new length) -> eax = 1 on success
+;;
+;; Grows the buffer to hold at least the new length, doubling so that n
+;; appends cost O(n) copies in total, and never shrinks the allocation --
+;; only ob_size moves down.  One byte past ob_size is always a NUL, so the
+;; data pointer can be handed to anything expecting a C string.
+;;
+;; The bytes between the old and new length are NOT initialised; the caller
+;; fills them.  bytearray(n) zeroes them itself.
+;; ============================================================================
+BRS_SELF  equ 8
+BRS_NEW   equ 16
+BRS_CAP   equ 24
+BRS_FRAME equ 32            ; + 0 pushes = 32
+
+DEF_FUNC bytearray_resize, BRS_FRAME
+    mov [rbp - BRS_SELF], rdi
+    mov [rbp - BRS_NEW], rsi
+    mov rcx, [rdi + PyByteArrayObject.ob_cap]
+    ; A fresh object has no buffer at all, and the NUL below has to go
+    ; somewhere -- so allocate even when the requested length is 0.
+    cmp qword [rdi + PyByteArrayObject.ob_bytes], 0
+    je .brs_grow
+    cmp rsi, rcx
+    jbe .brs_fits
+.brs_grow:
+
+    ; Grow: at least double, and at least the requested size, with a floor
+    ; so that a handful of appends does not reallocate every time.
+    lea rax, [rcx + rcx]
+    cmp rax, rsi
+    jae .brs_have_cap
+    mov rax, rsi
+.brs_have_cap:
+    cmp rax, 16
+    jae .brs_cap_ok
+    mov eax, 16
+.brs_cap_ok:
+    mov [rbp - BRS_CAP], rax
+    mov rdi, [rdi + PyByteArrayObject.ob_bytes]
+    lea rsi, [rax + 1]          ; + 1 for the NUL
+    call ap_realloc             ; ap_realloc(NULL, n) is malloc(n)
+    test rax, rax
+    jz .brs_fail
+    mov rdi, [rbp - BRS_SELF]
+    mov [rdi + PyByteArrayObject.ob_bytes], rax
+    mov rcx, [rbp - BRS_CAP]
+    mov [rdi + PyByteArrayObject.ob_cap], rcx
+
+.brs_fits:
+    mov rdi, [rbp - BRS_SELF]
+    mov rsi, [rbp - BRS_NEW]
+    mov [rdi + PyByteArrayObject.ob_size], rsi
+    mov rax, [rdi + PyByteArrayObject.ob_bytes]
+    mov byte [rax + rsi], 0
+    mov eax, 1
+    leave
+    ret
+
+.brs_fail:
+    xor eax, eax
+    leave
+    ret
+END_FUNC bytearray_resize
+
+;; ============================================================================
+;; bytearray_data(rdi = self) -> rax = the buffer, never NULL
+;;
+;; An empty bytearray built by something other than the constructor could
+;; have a NULL ob_bytes; every reader would then dereference it.  This hands
+;; back a pointer to a static NUL instead.
+;; ============================================================================
+DEF_FUNC_BARE bytearray_data
+    mov rax, [rdi + PyByteArrayObject.ob_bytes]
+    test rax, rax
+    jnz .bad_have
+    lea rax, [rel bytearray_empty_data]
+.bad_have:
+    ret
+END_FUNC bytearray_data
+
+;; ============================================================================
+;; bytearray_index_arg(rdi = Value) -> rax = 0..255, or it raises
+;;
+;; The value side of `b[i] = v` and of append(): CPython takes any object with
+;; __index__ and refuses anything outside a byte.
+;; ============================================================================
+DEF_FUNC bytearray_index_arg
+    V_UNPACK rdi, rdx           ; obj_as_index takes the pair, not the Value
+    call obj_as_index
+    cmp rax, 0
+    jl .bia_range
+    cmp rax, 255
+    jg .bia_range
+    leave
+    ret
+.bia_range:
+    RAISE exc_ValueError_type, "byte must be in range(0, 256)"
+END_FUNC bytearray_index_arg
+
+;; ============================================================================
+;; bytearray_new(rdi = data or NULL, rsi = length) -> rax = a new bytearray
+;;
+;; The one place a bytearray is built from a byte range.  Everything that
+;; returns a new bytearray -- a slice, copy(), the concatenations -- goes
+;; through it rather than repeating the allocate-resize-copy triple.
+;; ============================================================================
+BAN_SRC   equ 8
+BAN_LEN   equ 16
+BAN_OBJ   equ 24
+BAN_FRAME equ 32            ; + 0 pushes = 32
+
+DEF_FUNC bytearray_new, BAN_FRAME
+    mov [rbp - BAN_SRC], rdi
+    mov [rbp - BAN_LEN], rsi
+    mov edi, PyByteArrayObject_size
+    call ap_malloc
+    test rax, rax
+    jz .ban_fail
+    mov [rbp - BAN_OBJ], rax
+    mov qword [rax + PyByteArrayObject.ob_refcnt], 1
+    lea rcx, [rel bytearray_type]
+    mov [rax + PyByteArrayObject.ob_type], rcx
+    mov qword [rax + PyByteArrayObject.ob_size], 0
+    mov qword [rax + PyByteArrayObject.ob_cap], 0
+    mov qword [rax + PyByteArrayObject.ob_bytes], 0
+    inc qword [rcx + PyObject.ob_refcnt]
+
+    mov rdi, rax
+    mov rsi, [rbp - BAN_LEN]
+    call bytearray_resize
+    test eax, eax
+    jz .ban_fail_free
+
+    mov rdx, [rbp - BAN_LEN]
+    test rdx, rdx
+    jz .ban_done
+    mov rsi, [rbp - BAN_SRC]
+    test rsi, rsi
+    jz .ban_done                ; no source: the caller fills it
+    mov rax, [rbp - BAN_OBJ]
+    mov rdi, [rax + PyByteArrayObject.ob_bytes]
+    call ap_memcpy
+.ban_done:
+    mov rax, [rbp - BAN_OBJ]
+    leave
+    ret
+.ban_fail_free:
+    mov rdi, [rbp - BAN_OBJ]
+    call ap_free
+.ban_fail:
+    xor eax, eax
+    leave
+    ret
+END_FUNC bytearray_new
+
+;; ============================================================================
+;; bytearray_subscript(rdi = self, rsi = key Value) -> rax = Value
+;;
+;; An int gives the byte as an int; a slice gives a new BYTEARRAY, as CPython
+;; does -- bytes gives bytes and bytearray gives bytearray.
+;; ============================================================================
+BSU_SELF  equ 8
+BSU_KEY   equ 16
+BSU_START equ 24
+BSU_STEP  equ 32
+BSU_LEN   equ 40
+BSU_OUT   equ 48
+BSU_KEYTAG equ 56
+BSU_FRAME equ 64            ; + 0 pushes = 64
+
+DEF_FUNC bytearray_subscript, BSU_FRAME
+    mov [rbp - BSU_SELF], rdi
+    ; The key arrives as a Value; obj_as_index and the slice test both want
+    ; the (payload, tag) pair, as bytes_subscript unpacks it too.
+    V_UNPACK rsi, rdx
+    mov [rbp - BSU_KEY], rsi
+    mov [rbp - BSU_KEYTAG], rdx
+
+    cmp edx, TAG_PTR
+    jne .bsu_int                ; an immediate: an int index
+    mov rax, [rsi + PyObject.ob_type]
+    lea rcx, [rel slice_type]
+    cmp rax, rcx
+    je .bsu_slice
+
+.bsu_int:
+    mov rdi, [rbp - BSU_KEY]
+    mov rdx, [rbp - BSU_KEYTAG]
+    call obj_as_index
+    mov rcx, [rbp - BSU_SELF]
+    mov rdx, [rcx + PyByteArrayObject.ob_size]
+    test rax, rax
+    jns .bsu_have_index
+    add rax, rdx                ; a negative index counts from the end
+.bsu_have_index:
+    cmp rax, 0
+    jl .bsu_range
+    cmp rax, rdx
+    jge .bsu_range
+    push rax
+    mov rdi, rcx
+    call bytearray_data
+    pop rcx
+    movzx eax, byte [rax + rcx]
+    V_PACK_I64 rax, rcx
+    leave
+    ret
+
+.bsu_slice:
+    mov rdi, [rbp - BSU_KEY]
+    mov rcx, [rbp - BSU_SELF]
+    mov rsi, [rcx + PyByteArrayObject.ob_size]
+    call slice_indices          ; rax = start, rdx = stop, rcx = step
+    mov [rbp - BSU_START], rax
+    mov [rbp - BSU_STEP], rcx
+    ; The element count, which slice_length computes for any step.
+    mov rdi, rax
+    mov rsi, rdx
+    call slice_length           ; rdi = start, rsi = stop, rcx = step
+    mov [rbp - BSU_LEN], rax
+
+    xor edi, edi                ; no source: filled below
+    mov rsi, rax
+    call bytearray_new
+    test rax, rax
+    jz .bsu_fail
+    mov [rbp - BSU_OUT], rax
+
+    mov rdi, [rbp - BSU_SELF]
+    call bytearray_data
+    mov rsi, rax                ; the source bytes
+    mov rdx, [rbp - BSU_OUT]
+    mov rdx, [rdx + PyByteArrayObject.ob_bytes]
+    mov r8, [rbp - BSU_START]
+    mov r9, [rbp - BSU_STEP]
+    xor ecx, ecx
+.bsu_copy:
+    cmp rcx, [rbp - BSU_LEN]
+    jge .bsu_copied
+    movzx eax, byte [rsi + r8]
+    mov [rdx + rcx], al
+    add r8, r9
+    inc rcx
+    jmp .bsu_copy
+.bsu_copied:
+    mov rax, [rbp - BSU_OUT]
+    leave
+    ret
+
+.bsu_fail:
+    xor eax, eax
+    leave
+    ret
+.bsu_range:
+    RAISE exc_IndexError_type, "bytearray index out of range"
+END_FUNC bytearray_subscript
+
+;; ============================================================================
+;; slice_length(rdi = start, rsi = stop, rcx = step) -> rax = element count
+;;
+;; The count slice_indices does not return.  Shared by every bytearray slice
+;; operation, each of which needs it before it can size a buffer.
+;; ============================================================================
+DEF_FUNC_BARE slice_length
+    test rcx, rcx
+    js .sln_negative
+    mov rax, rsi
+    sub rax, rdi                ; stop - start
+    jle .sln_zero
+    ; ceil(span / step)
+    add rax, rcx
+    dec rax
+    xor edx, edx
+    div rcx
+    ret
+.sln_negative:
+    mov rax, rdi
+    sub rax, rsi                ; start - stop
+    jle .sln_zero
+    mov r8, rcx
+    neg r8
+    add rax, r8
+    dec rax
+    xor edx, edx
+    div r8
+    ret
+.sln_zero:
+    xor eax, eax
+    ret
+END_FUNC slice_length
+
+;; ============================================================================
+;; bytearray_ass_subscript(rdi = self, rsi = key Value, rdx = value Value)
+;;   -> rax = 0 on success
+;;
+;; b[i] = v, b[i:j] = v, b[i:j:k] = v, and all three deletions -- a NULL value
+;; Value means del, which is how mp_ass_subscript spells it everywhere.
+;;
+;; The simple-slice case is the one CPython's regex compiler needs
+;; (`data[0:0] = ...`), and it is the only one that changes the length: the
+;; tail is moved and the buffer grown or the size dropped.
+;; ============================================================================
+BAS_SELF  equ 8
+BAS_KEY   equ 16
+BAS_KTAG  equ 24
+BAS_VAL   equ 32
+BAS_SRC   equ 40            ; the replacement bytes
+BAS_SLEN  equ 48            ; and how many
+BAS_START equ 56
+BAS_STOP  equ 64
+BAS_STEP  equ 72
+BAS_N     equ 80            ; the slice's element count
+BAS_TMP   equ 88            ; a copy, when source and target are the same object
+BAS_FRAME equ 96            ; + 1 push = 104... padded to 112 below
+
+DEF_FUNC bytearray_ass_subscript, 104
+    push rbx
+    mov [rbp - BAS_SELF], rdi
+    mov [rbp - BAS_VAL], rdx
+    mov qword [rbp - BAS_TMP], 0
+    V_UNPACK rsi, rcx
+    mov [rbp - BAS_KEY], rsi
+    mov [rbp - BAS_KTAG], rcx
+
+    cmp ecx, TAG_PTR
+    jne .bas_int
+    mov rax, [rsi + PyObject.ob_type]
+    lea rcx, [rel slice_type]
+    cmp rax, rcx
+    je .bas_slice
+
+;; --- b[i] = v, and del b[i] ------------------------------------------------
+.bas_int:
+    mov rdi, [rbp - BAS_KEY]
+    mov rdx, [rbp - BAS_KTAG]
+    call obj_as_index
+    mov rbx, rax
+    mov rcx, [rbp - BAS_SELF]
+    mov rdx, [rcx + PyByteArrayObject.ob_size]
+    test rbx, rbx
+    jns .bas_int_bounds
+    add rbx, rdx
+.bas_int_bounds:
+    cmp rbx, 0
+    jl .bas_range
+    cmp rbx, rdx
+    jge .bas_range
+
+    cmp qword [rbp - BAS_VAL], 0
+    je .bas_del_one
+
+    mov rdi, [rbp - BAS_VAL]
+    call bytearray_index_arg    ; 0..255, or it raises
+    mov rcx, rax
+    mov rdi, [rbp - BAS_SELF]
+    push rcx
+    call bytearray_data
+    pop rcx
+    mov [rax + rbx], cl
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+
+.bas_del_one:
+    ; Close the gap, then drop the length by one.
+    mov rdi, [rbp - BAS_SELF]
+    call bytearray_data
+    mov rcx, [rbp - BAS_SELF]
+    mov rdx, [rcx + PyByteArrayObject.ob_size]
+    lea rdi, [rax + rbx]
+    lea rsi, [rdi + 1]
+    sub rdx, rbx
+    dec rdx
+    call ap_memmove
+    mov rdi, [rbp - BAS_SELF]
+    mov rsi, [rdi + PyByteArrayObject.ob_size]
+    dec rsi
+    call bytearray_resize
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+
+;; --- the slice forms -------------------------------------------------------
+.bas_slice:
+    mov rdi, [rbp - BAS_KEY]
+    mov rcx, [rbp - BAS_SELF]
+    mov rsi, [rcx + PyByteArrayObject.ob_size]
+    call slice_indices
+    mov [rbp - BAS_START], rax
+    mov [rbp - BAS_STOP], rdx
+    mov [rbp - BAS_STEP], rcx
+    mov rdi, rax
+    mov rsi, rdx
+    call slice_length
+    mov [rbp - BAS_N], rax
+
+    ; The replacement, as a byte range.  A deletion has none.
+    mov qword [rbp - BAS_SRC], 0
+    mov qword [rbp - BAS_SLEN], 0
+    cmp qword [rbp - BAS_VAL], 0
+    je .bas_have_src
+
+    ; Assigning a bytearray to a slice of ITSELF would read the buffer while
+    ; moving it, so take a copy first.
+    mov rdi, [rbp - BAS_VAL]
+    cmp rdi, [rbp - BAS_SELF]
+    jne .bas_src_from_value
+    call bytearray_data
+    mov rdi, rax
+    mov rcx, [rbp - BAS_SELF]
+    mov rsi, [rcx + PyByteArrayObject.ob_size]
+    call bytearray_new
+    test rax, rax
+    jz .bas_fail
+    mov [rbp - BAS_TMP], rax
+    mov rdi, rax
+
+.bas_src_from_value:
+    ; byteslike_source normalises bytes, bytearray, memoryview and any
+    ; iterable of ints into a buffer it owns.
+    mov [rbp - BAS_VAL], rdi
+    lea rdi, [rbp - BAS_VAL]
+    mov esi, 1
+    lea rdx, [rel bytearray_range_msg]
+    call byteslike_source
+    mov [rbp - BAS_SRC], rax
+    mov [rbp - BAS_SLEN], rdx
+
+.bas_have_src:
+    cmp qword [rbp - BAS_STEP], 1
+    jne .bas_extended
+
+;; --- b[i:j] = v: the only form that changes the length ---------------------
+    mov r8, [rbp - BAS_STOP]
+    mov r9, [rbp - BAS_START]
+    cmp r8, r9
+    jge .bas_span_ok
+    mov r8, r9                  ; an empty span, as slice_indices allows
+.bas_span_ok:
+    sub r8, r9                  ; r8 = how many bytes go away
+    mov rcx, [rbp - BAS_SLEN]   ; rcx = how many arrive
+    mov rdi, [rbp - BAS_SELF]
+    mov rdx, [rdi + PyByteArrayObject.ob_size]
+    mov rbx, rdx
+    sub rbx, r8
+    sub rbx, r9                 ; rbx = the length of the tail after the span
+    add rdx, rcx
+    sub rdx, r8                 ; rdx = the new length
+
+    ; Grow first when the buffer has to be bigger, so the tail is moved into
+    ; space that exists.
+    cmp rdx, [rdi + PyByteArrayObject.ob_size]
+    jbe .bas_no_grow
+    mov rsi, rdx
+    push rdx
+    push rcx
+    call bytearray_resize
+    pop rcx
+    pop rdx
+    test eax, eax
+    jz .bas_fail
+.bas_no_grow:
+    ; Move the tail to where it belongs.
+    mov rdi, [rbp - BAS_SELF]
+    push rdx
+    push rcx
+    call bytearray_data
+    pop rcx
+    pop rdx
+    mov rsi, rax
+    mov r9, [rbp - BAS_START]
+    lea rdi, [rax + r9]
+    add rdi, rcx                ; the tail's new home
+    lea rsi, [rax + r9]
+    add rsi, r8                 ; where it is now
+    push rdx
+    push rcx
+    mov rdx, rbx
+    call ap_memmove
+    pop rcx
+    pop rdx
+
+    ; Then drop the replacement in.
+    test rcx, rcx
+    jz .bas_no_fill
+    mov rdi, [rbp - BAS_SELF]
+    push rdx
+    push rcx
+    call bytearray_data
+    pop rcx
+    pop rdx
+    mov r9, [rbp - BAS_START]
+    lea rdi, [rax + r9]
+    mov rsi, [rbp - BAS_SRC]
+    push rdx
+    mov rdx, rcx
+    call ap_memcpy
+    pop rdx
+.bas_no_fill:
+    mov rdi, [rbp - BAS_SELF]
+    mov rsi, rdx
+    call bytearray_resize
+    jmp .bas_done
+
+;; --- b[i:j:k] = v, which must match the slice length exactly ---------------
+.bas_extended:
+    cmp qword [rbp - BAS_VAL], 0
+    je .bas_ext_delete
+    mov rax, [rbp - BAS_SLEN]
+    cmp rax, [rbp - BAS_N]
+    jne .bas_ext_mismatch
+    mov rdi, [rbp - BAS_SELF]
+    call bytearray_data
+    mov rdx, [rbp - BAS_SRC]
+    mov r8, [rbp - BAS_START]
+    mov r9, [rbp - BAS_STEP]
+    xor ecx, ecx
+.bas_ext_loop:
+    cmp rcx, [rbp - BAS_N]
+    jge .bas_done
+    movzx esi, byte [rdx + rcx]
+    mov [rax + r8], sil
+    add r8, r9
+    inc rcx
+    jmp .bas_ext_loop
+
+.bas_ext_delete:
+    ; Walk forward, copying the bytes that survive down over the gaps.
+    mov rdi, [rbp - BAS_SELF]
+    call bytearray_data
+    mov rcx, [rbp - BAS_SELF]
+    mov r10, [rcx + PyByteArrayObject.ob_size]
+    mov r8, [rbp - BAS_START]
+    mov r9, [rbp - BAS_STEP]
+    xor ecx, ecx                ; how many deleted so far
+    xor rsi, rsi                ; the read cursor
+    xor rdi, rdi                ; the write cursor
+.bas_extdel_loop:
+    cmp rsi, r10
+    jge .bas_extdel_done
+    ; Is this index one of the slice's?
+    cmp rcx, [rbp - BAS_N]
+    jge .bas_extdel_keep
+    cmp rsi, r8
+    jne .bas_extdel_keep
+    add r8, r9
+    inc rcx
+    inc rsi
+    jmp .bas_extdel_loop
+.bas_extdel_keep:
+    movzx edx, byte [rax + rsi]
+    mov [rax + rdi], dl
+    inc rdi
+    inc rsi
+    jmp .bas_extdel_loop
+.bas_extdel_done:
+    mov rsi, rdi
+    mov rdi, [rbp - BAS_SELF]
+    call bytearray_resize
+
+.bas_done:
+    mov rdi, [rbp - BAS_SRC]
+    test rdi, rdi
+    jz .bas_no_src_free
+    call ap_free
+.bas_no_src_free:
+    mov rdi, [rbp - BAS_TMP]
+    test rdi, rdi
+    jz .bas_ok
+    call obj_decref
+.bas_ok:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+
+.bas_fail:
+    mov rdi, [rbp - BAS_SRC]
+    test rdi, rdi
+    jz .bas_fail_out
+    call ap_free
+.bas_fail_out:
+    mov eax, -1
+    pop rbx
+    leave
+    ret
+
+.bas_range:
+    RAISE exc_IndexError_type, "bytearray index out of range"
+
+.bas_ext_mismatch:
+    ; RAISE abandons the C stack, so the buffer byteslike_source owns has to
+    ; go first -- .bas_done below never runs from here.
+    mov rdi, [rbp - BAS_SRC]
+    test rdi, rdi
+    jz .bas_mismatch_raise
+    call ap_free
+.bas_mismatch_raise:
+    mov rdi, [rbp - BAS_TMP]
+    test rdi, rdi
+    jz .bas_mismatch_raise2
+    call obj_decref
+.bas_mismatch_raise2:
+    RAISE exc_ValueError_type, "attempt to assign bytes of wrong size to extended slice"
+END_FUNC bytearray_ass_subscript
+
+;; ============================================================================
+;; bytearray_contains(rdi = self, rsi = needle Value) -> eax = 0/1
+;;
+;; An int looks for that byte; a bytes-like looks for the subsequence -- the
+;; same two meanings `in` has for bytes.
+;; ============================================================================
+BCT_SELF  equ 8
+BCT_VAL   equ 16
+BCT_SRC   equ 24
+BCT_SLEN  equ 32
+BCT_FRAME equ 32            ; + 2 pushes = 48
+
+DEF_FUNC bytearray_contains, BCT_FRAME
+    push rbx
+    push r12
+    mov [rbp - BCT_SELF], rdi
+    mov [rbp - BCT_VAL], rsi
+
+    ; An int looks for the byte -- and "an int" is int_is_integer's answer,
+    ; not a tag test: under INT_STRESS=1 every int is a heap object, and a
+    ; pointer test sent them all down the bytes-like path.
+    mov rdi, rsi
+    V_UNPACK rdi, rdx
+    call int_is_integer
+    test eax, eax
+    jz .bct_object
+    mov rdi, [rbp - BCT_VAL]
+    V_UNPACK rdi, rdx
+    call obj_as_index
+    mov rdi, rax
+    cmp rdi, 0
+    jl .bct_range
+    cmp rdi, 255
+    jg .bct_range
+    mov rbx, rdi
+    mov rdi, [rbp - BCT_SELF]
+    mov r12, [rdi + PyByteArrayObject.ob_size]
+    call bytearray_data
+    xor ecx, ecx
+.bct_byte_loop:
+    cmp rcx, r12
+    jge .bct_no
+    movzx edx, byte [rax + rcx]
+    cmp rdx, rbx
+    je .bct_yes
+    inc rcx
+    jmp .bct_byte_loop
+
+.bct_object:
+    ; A bytes-like: look for the subsequence.
+    lea rdi, [rbp - BCT_VAL]
+    mov esi, 1
+    lea rdx, [rel bytearray_range_msg]
+    call byteslike_source
+    mov [rbp - BCT_SRC], rax
+    mov [rbp - BCT_SLEN], rdx
+
+    mov rdi, [rbp - BCT_SELF]
+    mov r12, [rdi + PyByteArrayObject.ob_size]
+    call bytearray_data
+    mov rbx, rax
+    mov r8, [rbp - BCT_SLEN]
+    test r8, r8
+    jz .bct_yes_free            ; the empty subsequence is in everything
+    cmp r8, r12
+    ja .bct_no_free
+    xor ecx, ecx
+.bct_scan:
+    mov rax, r12
+    sub rax, rcx
+    cmp rax, r8
+    jl .bct_no_free
+    lea rdi, [rbx + rcx]
+    mov rsi, [rbp - BCT_SRC]
+    mov rdx, r8
+    push rcx
+    push r8
+    call ap_memcmp
+    pop r8
+    pop rcx
+    test eax, eax
+    jz .bct_yes_free
+    inc rcx
+    jmp .bct_scan
+
+.bct_yes_free:
+    mov rdi, [rbp - BCT_SRC]
+    test rdi, rdi
+    jz .bct_yes
+    call ap_free
+.bct_yes:
+    mov eax, 1
+    pop r12
+    pop rbx
+    leave
+    ret
+.bct_no_free:
+    mov rdi, [rbp - BCT_SRC]
+    test rdi, rdi
+    jz .bct_no
+    call ap_free
+.bct_no:
+    xor eax, eax
+    pop r12
+    pop rbx
+    leave
+    ret
+.bct_range:
+    RAISE exc_ValueError_type, "byte must be in range(0, 256)"
+.bct_type_error:
+    RAISE exc_TypeError_type, "a bytes-like object is required"
+END_FUNC bytearray_contains
+
+;; ============================================================================
+;; The mutators.  Each takes (rdi = args Value[], rsi = nargs) with args[0] as
+;; self, which is the method calling convention everywhere here.
+;;
+;; They share one shape: work out the new length, resize, then move bytes.
+;; bytearray_resize never shrinks the allocation, so removing and re-adding
+;; does not thrash.
+;; ============================================================================
+BAM_SELF  equ 8
+BAM_ARG   equ 16
+BAM_SRC   equ 24
+BAM_SLEN  equ 32
+BAM_OLD   equ 40
+BAM_IDX   equ 48
+BAM_FRAME equ 48            ; + 0 pushes = 48
+
+;; bytearray.append(b)
+DEF_FUNC bytearray_method_append, BAM_FRAME
+    cmp rsi, 2
+    jne .bap_argerr
+    mov rax, [rdi]
+    mov [rbp - BAM_SELF], rax
+    mov rdi, [rdi + 8]
+    call bytearray_index_arg
+    mov [rbp - BAM_ARG], rax
+    mov rdi, [rbp - BAM_SELF]
+    mov rsi, [rdi + PyByteArrayObject.ob_size]
+    mov [rbp - BAM_OLD], rsi
+    inc rsi
+    call bytearray_resize
+    test eax, eax
+    jz .bap_oom
+    mov rdi, [rbp - BAM_SELF]
+    call bytearray_data
+    mov rcx, [rbp - BAM_OLD]
+    mov rdx, [rbp - BAM_ARG]
+    mov [rax + rcx], dl
+    LOAD_NONE rax
+    mov edx, TAG_PTR
+    leave
+    ret
+.bap_oom:
+    RAISE exc_MemoryError_type, "out of memory"
+.bap_argerr:
+    RAISE exc_TypeError_type, "append() takes exactly one argument"
+END_FUNC bytearray_method_append
+
+;; bytearray.extend(iterable) -- and the body sq_inplace_concat shares.
+;;
+;; bytearray_extend_from(rdi = self, rsi = a Value) -> eax = 1 on success
+DEF_FUNC bytearray_extend_from, BAM_FRAME
+    mov [rbp - BAM_SELF], rdi
+    mov [rbp - BAM_ARG], rsi
+    ; byteslike_source takes an args array, so hand it the one slot.
+    lea rdi, [rbp - BAM_ARG]
+    mov esi, 1
+    lea rdx, [rel bytearray_range_msg]
+    call byteslike_source
+    mov [rbp - BAM_SRC], rax
+    mov [rbp - BAM_SLEN], rdx
+
+    mov rdi, [rbp - BAM_SELF]
+    mov rsi, [rdi + PyByteArrayObject.ob_size]
+    mov [rbp - BAM_OLD], rsi
+    add rsi, rdx
+    call bytearray_resize
+    test eax, eax
+    jz .bef_fail
+
+    mov rcx, [rbp - BAM_SLEN]
+    test rcx, rcx
+    jz .bef_done
+    mov rdi, [rbp - BAM_SELF]
+    call bytearray_data
+    mov rdi, rax
+    add rdi, [rbp - BAM_OLD]
+    mov rsi, [rbp - BAM_SRC]
+    mov rdx, [rbp - BAM_SLEN]
+    call ap_memcpy
+.bef_done:
+    mov rdi, [rbp - BAM_SRC]
+    test rdi, rdi
+    jz .bef_ok
+    call ap_free
+.bef_ok:
+    mov eax, 1
+    leave
+    ret
+.bef_fail:
+    mov rdi, [rbp - BAM_SRC]
+    test rdi, rdi
+    jz .bef_fail_out
+    call ap_free
+.bef_fail_out:
+    xor eax, eax
+    leave
+    ret
+END_FUNC bytearray_extend_from
+
+DEF_FUNC bytearray_method_extend, BAM_FRAME
+    cmp rsi, 2
+    jne .bex_argerr
+    mov rsi, [rdi + 8]
+    mov rdi, [rdi]
+    call bytearray_extend_from
+    test eax, eax
+    jz .bex_oom
+    LOAD_NONE rax
+    mov edx, TAG_PTR
+    leave
+    ret
+.bex_oom:
+    RAISE exc_MemoryError_type, "out of memory"
+.bex_argerr:
+    RAISE exc_TypeError_type, "extend() takes exactly one argument"
+END_FUNC bytearray_method_extend
+
+;; bytearray.insert(i, b)
+DEF_FUNC bytearray_method_insert, BAM_FRAME
+    cmp rsi, 3
+    jne .bin_argerr
+    mov rax, [rdi]
+    mov [rbp - BAM_SELF], rax
+    mov [rbp - BAM_ARG], rdi
+    mov rdi, [rdi + 8]
+    V_UNPACK rdi, rdx
+    call obj_as_index
+    mov [rbp - BAM_IDX], rax
+    mov rdi, [rbp - BAM_ARG]
+    mov rdi, [rdi + 16]
+    call bytearray_index_arg
+    mov [rbp - BAM_ARG], rax
+
+    ; Clamp, as list.insert does: any index past either end lands at that end.
+    mov rdi, [rbp - BAM_SELF]
+    mov rdx, [rdi + PyByteArrayObject.ob_size]
+    mov rcx, [rbp - BAM_IDX]
+    test rcx, rcx
+    jns .bin_positive
+    add rcx, rdx
+    jns .bin_positive
+    xor ecx, ecx
+.bin_positive:
+    cmp rcx, rdx
+    jle .bin_have_idx
+    mov rcx, rdx
+.bin_have_idx:
+    mov [rbp - BAM_IDX], rcx
+    mov [rbp - BAM_OLD], rdx
+    lea rsi, [rdx + 1]
+    call bytearray_resize
+    test eax, eax
+    jz .bin_oom
+
+    mov rdi, [rbp - BAM_SELF]
+    call bytearray_data
+    mov rcx, [rbp - BAM_IDX]
+    lea rdi, [rax + rcx + 1]
+    lea rsi, [rax + rcx]
+    mov rdx, [rbp - BAM_OLD]
+    sub rdx, rcx
+    call ap_memmove
+    mov rdi, [rbp - BAM_SELF]
+    call bytearray_data
+    mov rcx, [rbp - BAM_IDX]
+    mov rdx, [rbp - BAM_ARG]
+    mov [rax + rcx], dl
+    LOAD_NONE rax
+    mov edx, TAG_PTR
+    leave
+    ret
+.bin_oom:
+    RAISE exc_MemoryError_type, "out of memory"
+.bin_argerr:
+    RAISE exc_TypeError_type, "insert() takes exactly 2 arguments"
+END_FUNC bytearray_method_insert
+
+;; bytearray.pop([i]) -> the byte removed
+DEF_FUNC bytearray_method_pop, BAM_FRAME
+    cmp rsi, 1
+    jl .bpo_argerr
+    cmp rsi, 2
+    jg .bpo_argerr
+    mov rax, [rdi]
+    mov [rbp - BAM_SELF], rax
+    mov rdx, [rax + PyByteArrayObject.ob_size]
+    test rdx, rdx
+    jz .bpo_empty
+    mov rcx, rdx
+    dec rcx                     ; the default is the last byte
+    cmp rsi, 2
+    jne .bpo_have_idx
+    push rdx
+    mov rdi, [rdi + 8]
+    V_UNPACK rdi, rdx
+    call obj_as_index
+    pop rdx
+    mov rcx, rax
+    test rcx, rcx
+    jns .bpo_have_idx
+    add rcx, rdx
+.bpo_have_idx:
+    cmp rcx, 0
+    jl .bpo_range
+    cmp rcx, rdx
+    jge .bpo_range
+    mov [rbp - BAM_IDX], rcx
+    mov [rbp - BAM_OLD], rdx
+
+    mov rdi, [rbp - BAM_SELF]
+    call bytearray_data
+    mov rcx, [rbp - BAM_IDX]
+    movzx edx, byte [rax + rcx]
+    mov [rbp - BAM_ARG], rdx    ; the answer, before the move
+    lea rdi, [rax + rcx]
+    lea rsi, [rdi + 1]
+    mov rdx, [rbp - BAM_OLD]
+    sub rdx, rcx
+    dec rdx
+    call ap_memmove
+    mov rdi, [rbp - BAM_SELF]
+    mov rsi, [rbp - BAM_OLD]
+    dec rsi
+    call bytearray_resize
+    mov rax, [rbp - BAM_ARG]
+    V_PACK_I64 rax, rcx
+    mov edx, TAG_PTR
+    leave
+    ret
+.bpo_empty:
+    RAISE exc_IndexError_type, "pop from empty bytearray"
+.bpo_range:
+    RAISE exc_IndexError_type, "pop index out of range"
+.bpo_argerr:
+    RAISE exc_TypeError_type, "pop() takes at most 1 argument"
+END_FUNC bytearray_method_pop
+
+;; bytearray.remove(b) -- the first occurrence, or ValueError
+DEF_FUNC bytearray_method_remove, BAM_FRAME
+    cmp rsi, 2
+    jne .brm_argerr
+    mov rax, [rdi]
+    mov [rbp - BAM_SELF], rax
+    mov rdi, [rdi + 8]
+    call bytearray_index_arg
+    mov [rbp - BAM_ARG], rax
+
+    mov rdi, [rbp - BAM_SELF]
+    mov rdx, [rdi + PyByteArrayObject.ob_size]
+    mov [rbp - BAM_OLD], rdx
+    call bytearray_data
+    mov rcx, [rbp - BAM_ARG]
+    xor esi, esi
+.brm_scan:
+    cmp rsi, [rbp - BAM_OLD]
+    jge .brm_missing
+    movzx edx, byte [rax + rsi]
+    cmp rdx, rcx
+    je .brm_found
+    inc rsi
+    jmp .brm_scan
+.brm_found:
+    lea rdi, [rax + rsi]
+    push rsi
+    lea rsi, [rdi + 1]
+    mov rdx, [rbp - BAM_OLD]
+    pop rcx
+    sub rdx, rcx
+    dec rdx
+    call ap_memmove
+    mov rdi, [rbp - BAM_SELF]
+    mov rsi, [rbp - BAM_OLD]
+    dec rsi
+    call bytearray_resize
+    LOAD_NONE rax
+    mov edx, TAG_PTR
+    leave
+    ret
+.brm_missing:
+    RAISE exc_ValueError_type, "value not found in bytearray"
+.brm_argerr:
+    RAISE exc_TypeError_type, "remove() takes exactly one argument"
+END_FUNC bytearray_method_remove
+
+;; bytearray.clear()
+DEF_FUNC bytearray_method_clear, BAM_FRAME
+    mov rdi, [rdi]
+    xor esi, esi
+    call bytearray_resize
+    LOAD_NONE rax
+    mov edx, TAG_PTR
+    leave
+    ret
+END_FUNC bytearray_method_clear
+
+;; bytearray.reverse()
+DEF_FUNC bytearray_method_reverse, BAM_FRAME
+    mov rdi, [rdi]
+    mov rsi, [rdi + PyByteArrayObject.ob_size]
+    call bytearray_data
+    xor ecx, ecx
+    mov rdx, rsi
+    dec rdx
+.brv_loop:
+    cmp rcx, rdx
+    jge .brv_done
+    movzx esi, byte [rax + rcx]
+    movzx edi, byte [rax + rdx]
+    mov [rax + rcx], dil
+    mov [rax + rdx], sil
+    inc rcx
+    dec rdx
+    jmp .brv_loop
+.brv_done:
+    LOAD_NONE rax
+    mov edx, TAG_PTR
+    leave
+    ret
+END_FUNC bytearray_method_reverse
+
+;; bytearray.copy() -> a new bytearray
+DEF_FUNC bytearray_method_copy, BAM_FRAME
+    mov rdi, [rdi]
+    mov [rbp - BAM_SELF], rdi
+    mov rsi, [rdi + PyByteArrayObject.ob_size]
+    mov [rbp - BAM_SLEN], rsi
+    call bytearray_data
+    mov rdi, rax
+    mov rsi, [rbp - BAM_SLEN]
+    call bytearray_new
+    mov edx, TAG_PTR
+    leave
+    ret
+END_FUNC bytearray_method_copy
+
+;; ============================================================================
+;; The operators: +, *, += and *=.
+;;
+;; sq_concat and sq_repeat build a new bytearray; the inplace pair mutate and
+;; hand back the same object, which is what makes `b += x` in a loop O(n).
+;; ============================================================================
+BAO_SELF  equ 8
+BAO_ARG   equ 16
+BAO_SRC   equ 24
+BAO_SLEN  equ 32
+BAO_OUT   equ 40
+BAO_OWNED equ 48
+BAO_FRAME equ 64            ; + 0 pushes = 64
+
+DEF_FUNC bytearray_concat, BAO_FRAME
+    mov [rbp - BAO_SELF], rdi
+    mov [rbp - BAO_ARG], rsi
+    ; A bytes-like only.  byteslike_source is the CONSTRUCTOR's rule and takes
+    ; any iterable of ints, so using it here made `bytearray(b"ab") + [1, 2]`
+    ; succeed where CPython raises.  extend() keeps the looser rule.
+    mov rdi, rsi
+    call bytes_like_ptr_len
+    test ecx, ecx
+    jz .bco_not_impl
+    mov [rbp - BAO_SRC], rax
+    mov [rbp - BAO_SLEN], r10
+    mov qword [rbp - BAO_OWNED], 0
+
+    mov rdi, [rbp - BAO_SELF]
+    mov rsi, [rdi + PyByteArrayObject.ob_size]
+    add rsi, [rbp - BAO_SLEN]
+    xor edi, edi
+    call bytearray_new
+    test rax, rax
+    jz .bco_fail
+    mov [rbp - BAO_OUT], rax
+
+    mov rdi, [rbp - BAO_SELF]
+    mov r8, [rdi + PyByteArrayObject.ob_size]
+    push r8
+    call bytearray_data
+    pop r8
+    mov rsi, rax
+    mov rax, [rbp - BAO_OUT]
+    mov rdi, [rax + PyByteArrayObject.ob_bytes]
+    mov rdx, r8
+    push r8
+    push r8
+    call ap_memcpy
+    pop r8
+    pop r8
+    mov rax, [rbp - BAO_OUT]
+    mov rdi, [rax + PyByteArrayObject.ob_bytes]
+    add rdi, r8
+    mov rsi, [rbp - BAO_SRC]
+    mov rdx, [rbp - BAO_SLEN]
+    call ap_memcpy
+.bco_done:
+    mov rax, [rbp - BAO_OUT]
+    mov edx, TAG_PTR
+    leave
+    ret
+.bco_not_impl:
+    ; A NULL Value is NotImplemented, so the protocol tries the other side.
+.bco_fail:
+    xor eax, eax
+    xor edx, edx
+    leave
+    ret
+END_FUNC bytearray_concat
+
+DEF_FUNC bytearray_repeat, BAO_FRAME
+    mov [rbp - BAO_SELF], rdi
+    ; sq_repeat is handed two VALUES, not a count -- op_binary_op packs both
+    ; operands before the call, as bytes_repeat's own V_UNPACK shows.
+    mov rdi, rsi
+    V_UNPACK rdi, rdx
+    call obj_as_index
+    mov rsi, rax
+    mov rdi, [rbp - BAO_SELF]
+    mov rdx, [rdi + PyByteArrayObject.ob_size]
+    mov [rbp - BAO_SLEN], rdx
+    mov rax, rsi
+    test rax, rax
+    jns .brp_count_ok
+    xor eax, eax
+.brp_count_ok:
+    mov [rbp - BAO_ARG], rax
+    imul rax, rdx
+    mov rsi, rax
+    xor edi, edi
+    call bytearray_new
+    test rax, rax
+    jz .brp_fail
+    mov [rbp - BAO_OUT], rax
+
+    mov rdi, [rbp - BAO_SELF]
+    call bytearray_data
+    mov r9, rax                 ; the source
+    mov rax, [rbp - BAO_OUT]
+    mov r10, [rax + PyByteArrayObject.ob_bytes]
+    xor ecx, ecx
+.brp_loop:
+    cmp rcx, [rbp - BAO_ARG]
+    jge .brp_done
+    mov rax, rcx
+    imul rax, [rbp - BAO_SLEN]
+    lea rdi, [r10 + rax]
+    mov rsi, r9
+    mov rdx, [rbp - BAO_SLEN]
+    push rcx
+    push r9
+    push r10
+    push r10
+    call ap_memcpy
+    pop r10
+    pop r10
+    pop r9
+    pop rcx
+    inc rcx
+    jmp .brp_loop
+.brp_done:
+    mov rax, [rbp - BAO_OUT]
+    mov edx, TAG_PTR
+    leave
+    ret
+.brp_fail:
+    xor eax, eax
+    xor edx, edx
+    leave
+    ret
+END_FUNC bytearray_repeat
+
+DEF_FUNC bytearray_inplace_concat, BAO_FRAME
+    mov [rbp - BAO_SELF], rdi
+    ; As sq_concat: a bytes-like only.
+    mov [rbp - BAO_ARG], rsi
+    mov rdi, rsi
+    call bytes_like_ptr_len
+    test ecx, ecx
+    jz .bic2_not_impl
+    mov rdi, [rbp - BAO_SELF]
+    mov rsi, [rbp - BAO_ARG]
+    call bytearray_extend_from
+    test eax, eax
+    jz .bic2_fail
+    mov rax, [rbp - BAO_SELF]
+    inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
+    leave
+    ret
+.bic2_not_impl:
+.bic2_fail:
+    xor eax, eax
+    xor edx, edx
+    leave
+    ret
+END_FUNC bytearray_inplace_concat
+
+DEF_FUNC bytearray_inplace_repeat, BAO_FRAME
+    mov [rbp - BAO_SELF], rdi
+    mov rdi, rsi                ; a Value, as in bytearray_repeat
+    V_UNPACK rdi, rdx
+    call obj_as_index
+    mov rsi, rax
+    mov [rbp - BAO_ARG], rsi
+    mov rdi, [rbp - BAO_SELF]
+    mov rdx, [rdi + PyByteArrayObject.ob_size]
+    mov [rbp - BAO_SLEN], rdx
+    test rsi, rsi
+    jg .bir_grow
+    ; Zero or negative empties it, as it does for a list.
+    mov rdi, [rbp - BAO_SELF]
+    xor esi, esi
+    call bytearray_resize
+    jmp .bir_done
+.bir_grow:
+    mov rax, rsi
+    imul rax, rdx
+    mov rdi, [rbp - BAO_SELF]
+    mov rsi, rax
+    call bytearray_resize
+    test eax, eax
+    jz .bir_fail
+    mov rdi, [rbp - BAO_SELF]
+    call bytearray_data
+    mov r10, rax
+    mov ecx, 1                  ; copy 0 is already in place
+.bir_loop:
+    cmp rcx, [rbp - BAO_ARG]
+    jge .bir_done
+    mov rax, rcx
+    imul rax, [rbp - BAO_SLEN]
+    lea rdi, [r10 + rax]
+    mov rsi, r10
+    mov rdx, [rbp - BAO_SLEN]
+    push rcx
+    push r10
+    call ap_memcpy
+    pop r10
+    pop rcx
+    inc rcx
+    jmp .bir_loop
+.bir_done:
+    mov rax, [rbp - BAO_SELF]
+    inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
+    leave
+    ret
+.bir_fail:
+    xor eax, eax
+    xor edx, edx
+    leave
+    ret
+END_FUNC bytearray_inplace_repeat
+
+
+
 
 ;; ============================================================================
 ;; bytearray_dealloc(obj)
 ;; ============================================================================
-DEF_FUNC_BARE bytearray_dealloc
+;; The buffer is a separate allocation now, so freeing the object is not
+;; enough.  ob_bytes is NULL for an object whose constructor failed part way.
+DEF_FUNC bytearray_dealloc
+    push rbx
+    mov rbx, rdi
+    mov rdi, [rbx + PyByteArrayObject.ob_bytes]
+    test rdi, rdi
+    jz .bad_no_buf
+    call ap_free
+    mov qword [rbx + PyByteArrayObject.ob_bytes], 0
+.bad_no_buf:
+    mov rdi, rbx
+    pop rbx
+    leave
     jmp ap_free
 END_FUNC bytearray_dealloc
 
@@ -1910,7 +3337,8 @@ DEF_FUNC_BARE bytearray_iter_next
     mov rcx, [rdi + PyBytesIterObject.it_index]
     cmp rcx, [rax + PyByteArrayObject.ob_size]
     jge .exhausted
-    movzx eax, byte [rax + PyByteArrayObject.data + rcx]
+    mov rax, [rax + PyByteArrayObject.ob_bytes]
+    movzx eax, byte [rax + rcx]
     add rax, [rel v_int_bias]
     inc qword [rdi + PyBytesIterObject.it_index]
     ret
@@ -1950,15 +3378,22 @@ align 8
 ba_name_str:  db "bytearray", 0
 
 align 8
+align 8
+bytearray_mapping_methods:
+    dq bytearray_len            ; mp_length       +0
+    dq bytearray_subscript      ; mp_subscript    +8
+    dq bytearray_ass_subscript  ; mp_ass_subscript +16
+
+align 8
 bytearray_seq_methods:
     dq bytearray_len       ; +0: sq_length
-    dq 0                   ; +8: sq_concat
-    dq 0                   ; +16: sq_repeat
-    dq 0                   ; +24: sq_item
-    dq 0                   ; +32: sq_ass_item
-    dq 0                   ; +40: sq_contains
-    dq 0                   ; +48: sq_inplace_concat
-    dq 0                   ; +56: sq_inplace_repeat
+    dq bytearray_concat    ; +8: sq_concat
+    dq bytearray_repeat    ; +16: sq_repeat
+    dq 0                   ; +24: sq_item (mp_subscript covers it)
+    dq 0                   ; +32: sq_ass_item (mp_ass_subscript covers it)
+    dq bytearray_contains  ; +40: sq_contains
+    dq bytearray_inplace_concat ; +48
+    dq bytearray_inplace_repeat ; +56
 
 align 8
 global bytearray_type
@@ -1966,22 +3401,25 @@ bytearray_type:
     dq 1                            ; ob_refcnt
     dq type_type                    ; ob_type
     dq ba_name_str                  ; tp_name
-    dq PyByteArrayObject.data       ; tp_basicsize
+    dq PyByteArrayObject_size       ; tp_basicsize (the data is out of line)
     dq bytearray_dealloc            ; tp_dealloc
     dq bytearray_repr               ; tp_repr
     dq bytearray_repr               ; tp_str
-    dq 0                            ; tp_hash
+    ; Mutable, therefore unhashable.  A 0 here is not the same thing: obj_hash
+    ; falls through to the object's ADDRESS, so `{bytearray(b"ab"): 1}` was
+    ; accepted and the key could never be found again.
+    dq hash_not_implemented         ; tp_hash
     dq 0                            ; tp_call (set by add_builtin_type)
     dq 0                            ; tp_getattr
     dq 0                            ; tp_setattr
-    dq 0                            ; tp_richcompare
+    dq bytes_compare                ; tp_richcompare (shared with bytes)
     dq bytearray_tp_iter            ; tp_iter
     dq 0                            ; tp_iternext
     dq 0                            ; tp_init
     dq 0                            ; tp_new
     dq 0                            ; tp_as_number
     dq bytearray_seq_methods        ; tp_as_sequence
-    dq 0                            ; tp_as_mapping
+    dq bytearray_mapping_methods    ; tp_as_mapping
     dq 0                            ; tp_base
     dq 0                            ; tp_dict
     dq 0                            ; tp_mro
@@ -1990,6 +3428,11 @@ bytearray_type:
     dq 0                        ; tp_traverse
     dq 0                        ; tp_clear
     dq 0 ; tp_dictoffset
+
+; What bytearray_data hands back when ob_bytes is NULL, so no reader has to
+; test for it.
+align 8
+bytearray_empty_data: db 0
 
 align 8
 ba_iter_name_str: db "bytearray_iterator", 0

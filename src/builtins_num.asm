@@ -425,7 +425,9 @@ BI_NARGS  equ 16
 BI_OBJ    equ 24       ; original string/bytes obj for error messages
 BI_BASE   equ 32       ; base value for error messages
 BI_ORIGIN equ 40       ; the argument's type, for the bytes-family MRO walk
-BI_FRAME  equ 48            ; + 1 push = 56, not 16-aligned
+BI_LEN    equ 48       ; the source length: bytes and bytearray keep it in
+                       ; different fields, so the shared tail cannot re-read it
+BI_FRAME  equ 56            ; + 1 push = 64, 16-byte aligned
 
 DEF_FUNC builtin_int_fn, BI_FRAME
     push rbx
@@ -624,7 +626,7 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     pop rcx
     push rax
     mov rdi, rax
-    lea rsi, [rbx + PyByteArrayObject.data]
+    mov rsi, [rbx + PyByteArrayObject.ob_bytes]
     mov rdx, rcx
     call ap_memcpy
     pop rdi
@@ -1127,7 +1129,7 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     je .int_base_from_bytes
     lea rdx, [rel bytearray_type]
     cmp rcx, rdx
-    je .int_base_from_bytes            ; same layout as bytes
+    je .int_base_from_bytearray
     MRO_NEXT rcx, [rbp - BI_ORIGIN]
     test rcx, rcx
     jnz .int_base_check_bytes_chain
@@ -1147,25 +1149,42 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     jz .int_base_parse_error
     jmp .int_ret
 
+.int_base_from_bytearray:
+    ; A bytearray keeps its data OUT OF LINE, so it cannot be read through
+    ; the bytes offsets -- which is what this did while the two layouts
+    ; happened to match.  rsi and rcx are set here, then the shared body
+    ; below copies from them.
+    mov rcx, [rbx + PyByteArrayObject.ob_size]
+    mov rsi, [rbx + PyByteArrayObject.ob_bytes]
+    test rsi, rsi
+    jnz .int_base_bytes_have
+    lea rsi, [rel int_base_empty]
+    jmp .int_base_bytes_have
+
 .int_base_from_bytes:
     ; Parse bytes with given base — make null-terminated copy
     mov rcx, [rbx + PyBytesObject.ob_size]
+    lea rsi, [rbx + PyBytesObject.data]
+
+.int_base_bytes_have:
+    mov [rbp - BI_LEN], rcx
+    push rsi
     lea rdi, [rcx + 8]
     push rcx
     call ap_malloc
     pop rcx
+    pop rsi
     push rax
     mov rdi, rax
-    lea rsi, [rbx + PyBytesObject.data]
     mov rdx, rcx
     call ap_memcpy
     pop rdi
     push rdi
-    mov rcx, [rbx + PyBytesObject.ob_size]
+    mov rcx, [rbp - BI_LEN]
     mov qword [rdi + rcx], 0
     ; Check for embedded NUL
     call strlen wrt ..plt
-    cmp rax, [rbx + PyBytesObject.ob_size]
+    cmp rax, [rbp - BI_LEN]
     jne .int_base_bytes_nul_error
     mov rdi, [rsp]                 ; buffer
     mov rsi, [rbp - BI_NARGS]      ; base
@@ -2344,6 +2363,8 @@ END_FUNC builtin_oct
 ; const_one is read by round() and pow(); it lived in a .rodata block shared
 ; with format()'s name string, which is now in builtins_obj.asm.
 section .rodata
+int_base_empty: db 0
+
 align 8
 const_one: dq 0x3ff0000000000000   ; 1.0 in IEEE 754
 
