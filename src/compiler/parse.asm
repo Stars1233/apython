@@ -30,6 +30,7 @@
 %include "opcodes.inc"
 %include "compiler.inc"
 
+extern complex_from_doubles
 extern ast_at
 extern ast_commit
 extern ast_make
@@ -394,11 +395,32 @@ DEF_FUNC par_number, PN_FRAME
     jmp .done
 
 .imaginary:
-    mov rdi, rbx
-    CSTRING rsi, "complex literals are not supported"
-    call par_syntax_error
-    xor eax, eax
-    jmp .cleanup
+    ; The lexer counts the 'j' in Token.len (lex.asm's .num_imag advances past
+    ; it after setting the flag), so it was copied along with the digits and
+    ; strtod must not see it.  rdi still points at the NUL that .copy_done
+    ; wrote, so the suffix is the byte before.
+    mov al, [rdi - 1]
+    or al, 0x20
+    cmp al, 'j'
+    jne .bad
+    mov byte [rdi - 1], 0
+    mov rdi, [rbp - PN_BUF]
+    lea rsi, [rbp - PN_END]
+    call strtod wrt ..plt
+    mov rax, [rbp - PN_END]
+    cmp byte [rax], 0                   ; strtod must have consumed all of it
+    jne .bad
+    ; strtod leaves the magnitude in xmm0, and complex_from_doubles wants
+    ; xmm0 = real, xmm1 = imag.  An imaginary literal's real part is +0.0, so
+    ; the two have to be moved in this order -- swapping them yields (2+0j)
+    ; for 2j, which reprs differently and is immediately visible.
+    movapd xmm1, xmm0
+    xorpd xmm0, xmm0
+    call complex_from_doubles
+    ; A pointer is its own Value.  par_number returns an owned reference and
+    ; pf_number hands it to ast_obj, which takes ownership; comp_free releases
+    ; the arena with DECREF_V however the compilation ends.  No V_PACK.
+    jmp .done
 
 .bad:
     mov rdi, rbx

@@ -63,6 +63,22 @@ struc PyFloatObject
     .value:     resq 1    ; +16: double value
 endstruc
 
+; Complex object.
+;
+; Unlike float -- which is a NaN-boxed immediate, leaving PyFloatObject above
+; all but vestigial -- a complex is a real heap object.  A pointer is its own
+; Value, so the box is untouched and --selftest-value has nothing to say about
+; it.  It holds two raw doubles and no references, so it is invisible to the
+; collector: no tp_traverse, no tp_clear, no TYPE_FLAG_HAVE_GC, and ap_malloc
+; rather than gc_alloc (gc_alloc hands back raw + GC_HEAD_SIZE, which
+; obj_dealloc's plain-free path would hand to ap_free unshifted).
+struc PyComplexObject
+    .ob_refcnt: resq 1    ; +0
+    .ob_type:   resq 1    ; +8
+    .cval_real: resq 1    ; +16: double
+    .cval_imag: resq 1    ; +24: double
+endstruc
+
 ; String object
 ; A str stores UTF-8 and carries both lengths: ob_size is what the bytes
 ; occupy, ob_length is how many code points that is.  Python counts in code

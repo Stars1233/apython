@@ -392,6 +392,12 @@ DEF_FUNC float_format_spec, FS_FRAME
     movzx eax, byte [rbp - FS_TYPE]  ; type char
     cmp al, 'f'
     je .ffs_use_f
+    ; 'F' is 'f' with INF and NAN spelled in capitals.  It used to fall through
+    ; to the %g default, so format(1.5, "F") was "1.5" where CPython gives
+    ; "1.500000".  The capitalisation of a non-finite result is still missing;
+    ; bugs.md records it.
+    cmp al, 'F'
+    je .ffs_use_f
     cmp al, 'e'
     je .ffs_use_e
     cmp al, 'E'

@@ -15,6 +15,7 @@
 %include "opcodes.inc"
 
 ; External functions
+extern complex_type
 extern obj_decref
 extern obj_repr
 extern obj_str
@@ -425,6 +426,7 @@ DEF_DUNDER_STRREPR bytes, str
 DEF_DUNDER_STRREPR bytes, repr
 DEF_DUNDER_STRREPR int, repr
 DEF_DUNDER_STRREPR float, repr
+DEF_DUNDER_STRREPR complex, repr
 
 ;; ############################################################################
 ;;                         SET METHODS

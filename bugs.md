@@ -9,6 +9,23 @@ one-line fix.
 
 ## Correctness
 
+- **`format(x, "F")` does not capitalise a non-finite float.**  `'F'` now
+  formats like `'f'`, but CPython spells the result of `format(float('inf'),
+  'F')` as `INF`; here it is `inf`.  The same for `NAN`, and for the halves of
+  a complex.
+
+- **PEP 604 unions are not flattened.**  `int | str | float` builds
+  `((int | str), float)` rather than a flat three-member union, so
+  `__args__` is nested and `(int|str|float) == (float|str|int)` is False where
+  CPython says True.  The repr is flat, which hides it.  Two-member unions
+  compare correctly.
+
+- **`~x` on an int subclass prefers the subclass's `__invert__` over
+  `int.__invert__`.**  For `class I(int, M)` where `M` defines `__invert__`,
+  CPython resolves `int.__invert__` first (it comes earlier in the MRO) and
+  answers `-4` for `~I(3)`; here `M`'s wins.  The same shape applies to the
+  other unary dunders.
+
 - **`slice` objects cannot be ordered.**  CPython compares them as the tuple
   `(start, stop, step)`, so `slice(1) < slice(2)` is True; here it is a
   TypeError.  Equality works.
@@ -118,8 +135,7 @@ one-line fix.
 
 - **Missing C modules**, in rough order of how many stdlib modules each
   blocks: `_io`, `math`, `_codecs`, `_struct`, `_socket`, `binascii`, `_imp`,
-  `_string`, `errno`, then a long tail of one apiece.  `complex` does not exist
-  as a type either, which stops `copyreg` and `copy`.
+  `_string`, `errno`, then a long tail of one apiece.
 
 - **Weak references keep no per-object slot.**  The links live in a side
   table keyed by the referent's address rather than in the object, so

@@ -11,6 +11,7 @@ ok _collections_abc
 ok colorsys
 ok _compat_pickle
 ok concurrent
+ok copyreg
 ok email
 ok encodings
 ok enum
@@ -24,12 +25,14 @@ ok idlelib
 ok ipaddress
 ok keyword
 ok nturl2path
+ok numbers
 ok opcode
 ok operator
 ok __phello__
 ok _py_abc
 ok pydoc_data
 ok quopri
+ok re
 ok reprlib
 ok _sitebuiltins
 ok stat

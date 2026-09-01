@@ -89,16 +89,34 @@ DEF_FUNC_LOCAL slot_ensure_table
     test rax, rax
     jz .fresh
 
-    ; The table may be the *base's*: __build_class__ inherits the protocol
+    ; The table may be an *ancestor's*: __build_class__ inherits the protocol
     ; slots of a builtin base by copying the pointer.  Writing a wrapper
     ; through it patched the builtin's own static table, so one `class
     ; MyInt(int)` with a __neg__ gave every int in the process that __neg__.
-    mov rcx, [rbx + PyTypeObject.tp_base]
+    ;
+    ; The question has to be asked of the whole MRO, not just tp_base.  With
+    ; multiple inheritance the table comes from whichever base supplied the
+    ; layout, which need not be tp_base: `class IntFlag(int, ReprEnum, Flag)`
+    ; inherits int's PyNumberMethods while its tp_base is elsewhere, so a
+    ; tp_base-only test found no sharing and installed Flag's __invert__ into
+    ; int's own static table.  Every plain `~n` in the process then went to
+    ; slot_nb_invert, which dereferences its operand -- and an int immediate
+    ; is not a pointer.  Importing enum and defining any IntFlag was enough.
+    mov r12, rax                    ; the candidate table
+    mov rcx, rbx                    ; MRO walker, starting at this type
+.share_scan:
+    MRO_NEXT rcx, rbx               ; clobbers rax; r12 holds the table
     test rcx, rcx
-    jz .have
-    cmp rax, [rcx + r13]
-    jne .have                       ; already this type's own copy
-    mov r12, rax                    ; the shared table
+    jz .not_shared                  ; nothing above shares it: already ours
+    cmp r12, [rcx + r13]
+    jne .share_scan
+    jmp .copy_shared
+
+.not_shared:
+    mov rax, r12                    ; type_mro_next returned 0 into rax
+    jmp .have
+
+.copy_shared:                       ; shared with an ancestor: copy first
     mov rdi, r14
     call .alloc_zeroed
     push rax

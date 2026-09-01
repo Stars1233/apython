@@ -1,0 +1,1056 @@
+; complex.asm - Complex type (a pair of IEEE 754 doubles)
+;
+; PyComplexObject layout:
+;   +0  ob_refcnt (8 bytes)
+;   +8  ob_type   (8 bytes)
+;   +16 cval_real (8 bytes: double)
+;   +24 cval_imag (8 bytes: double)
+;   Total: 32 bytes
+;
+; The invariant every slot here keeps: a complex holds two raw doubles and no
+; references, and every binary slot promotes an int, bool or float operand and
+; declines everything else with a NULL Value.  Declining is what lets
+; op_binary_op reach this type at all -- `1 + 2j` works because int_add refuses
+; the pair and binary_op1 asks complex_add next.
+;
+; Register discipline worth stating once: SysV has no callee-saved xmm
+; register, so every double here lives in a named frame slot across any call.
+; That is why complex_to_parts writes through a caller-supplied pointer rather
+; than returning a pair in xmm0/xmm1 -- a binop needs four doubles alive across
+; two calls, and returning them in registers would only move the spill.
+
+%include "macros.inc"
+%include "object.inc"
+
+extern ap_malloc
+extern obj_incref
+extern obj_decref
+extern float_repr
+extern float_hash
+extern float_to_f64
+extern int_type
+extern bool_type
+extern float_type
+extern str_from_cstr
+extern ap_strcmp
+extern ap_memcpy
+extern raise_exception
+extern exc_ZeroDivisionError_type
+extern exc_OverflowError_type
+extern bool_true
+extern bool_false
+extern type_type
+extern hypot
+extern pow
+extern atan2
+extern exp
+extern log
+extern cos
+extern sin
+
+section .text
+
+;; ============================================================================
+;; complex_from_doubles(xmm0 = real, xmm1 = imag) -> rax = PyComplexObject*
+;;
+;; The one allocator.  It must never raise and must depend on nothing but
+;; ap_malloc and the static type object: the source compiler calls it for a
+;; `2j` literal, which happens before builtins_init has run -- and under --dis
+;; and --selftest-compile, which run only bool_init.  A raise from here would
+;; reach eval_exception_unwind with no live frame and become a fatal_error.
+;; ============================================================================
+CFD_RE    equ 8
+CFD_IM    equ 16
+CFD_FRAME equ 16            ; + 0 pushes = 16
+DEF_FUNC complex_from_doubles, CFD_FRAME
+    movsd [rbp - CFD_RE], xmm0
+    movsd [rbp - CFD_IM], xmm1
+    mov edi, PyComplexObject_size
+    call ap_malloc
+    mov qword [rax + PyObject.ob_refcnt], 1
+    lea rcx, [rel complex_type]
+    mov [rax + PyObject.ob_type], rcx
+    movsd xmm0, [rbp - CFD_RE]
+    movsd xmm1, [rbp - CFD_IM]
+    movsd [rax + PyComplexObject.cval_real], xmm0
+    movsd [rax + PyComplexObject.cval_imag], xmm1
+    ; Set the legacy tag as well.  A pointer is its own Value, so rax alone is
+    ; the answer for a caller that wants a Value -- but the builtin-call path
+    ; reads edx as a tag, and leaving whatever ap_malloc happened to put there
+    ; made this correct only by luck.
+    mov edx, TAG_PTR
+    leave
+    ret
+END_FUNC complex_from_doubles
+
+;; ============================================================================
+;; complex_to_parts(rdi = Value, rsi = &double[2]) -> eax = 1 on success
+;;
+;; Accepts complex, float, int, bool and int subclasses; writes [rsi] = real
+;; and [rsi+8] = imag.  eax = 0 for anything else, which every caller turns
+;; into a NULL Value.
+;;
+;; Classify first, convert second.  float_to_f64 answers 0.0 for a type it does
+;; not recognise, so a fall-through would quietly make `2j + None` equal 2j.
+;; ============================================================================
+CTP_OUT   equ 8
+CTP_FRAME equ 16            ; + 0 pushes = 16
+DEF_FUNC complex_to_parts, CTP_FRAME
+    mov [rbp - CTP_OUT], rsi
+    V_TEST_PTR rdi, rax
+    ja .ctp_immediate
+
+    mov rax, [rdi + PyObject.ob_type]
+    lea rcx, [rel complex_type]
+    cmp rax, rcx
+    je .ctp_complex
+    lea rcx, [rel int_type]
+    cmp rax, rcx
+    je .ctp_heap_number
+    lea rcx, [rel bool_type]
+    cmp rax, rcx
+    je .ctp_heap_number
+    lea rcx, [rel float_type]
+    cmp rax, rcx
+    je .ctp_heap_number
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_INT_SUBCLASS
+    jnz .ctp_heap_number
+    jmp .ctp_no
+
+.ctp_complex:
+    movsd xmm0, [rdi + PyComplexObject.cval_real]
+    movsd xmm1, [rdi + PyComplexObject.cval_imag]
+    mov rax, [rbp - CTP_OUT]
+    movsd [rax], xmm0
+    movsd [rax + 8], xmm1
+    mov eax, 1
+    leave
+    ret
+
+.ctp_heap_number:
+    ; A heap int, a bool or a heap float.  float_to_f64 knows all three, and
+    ; for a GMP-backed int it is the only correct route (__gmpz_get_d).
+    mov esi, TAG_PTR
+    jmp .ctp_real
+
+.ctp_immediate:
+    V_IS_INT rdi, rax
+    jae .ctp_int_immediate
+    V_IS_FLOAT rdi, rax
+    ja .ctp_no                  ; neither an int nor a float immediate
+    V_TO_F64 rdi
+    mov esi, TAG_FLOAT
+    jmp .ctp_real
+.ctp_int_immediate:
+    V_TO_I64 rdi
+    mov esi, TAG_SMALLINT
+
+.ctp_real:
+    ; A real operand: the imaginary part is +0.0.
+    call float_to_f64           ; xmm0 = the value as a double
+    mov rax, [rbp - CTP_OUT]
+    movsd [rax], xmm0
+    xorpd xmm1, xmm1
+    movsd [rax + 8], xmm1
+    mov eax, 1
+    leave
+    ret
+
+.ctp_no:
+    xor eax, eax
+    leave
+    ret
+END_FUNC complex_to_parts
+
+;; ============================================================================
+;; The binary slots.  Each takes (rdi = left Value, rsi = right Value) and
+;; returns one Value, or a NULL Value when either operand is not a number.
+;; ============================================================================
+CB_A     equ 16              ; a.real at [rbp-16], a.imag at [rbp-8]
+CB_B     equ 32              ; b.real at [rbp-32], b.imag at [rbp-24]
+CB_RSAVE equ 40              ; the right operand across the first conversion
+CB_FRAME equ 48              ; + 0 pushes = 48
+
+; Fill CB_A and CB_B from the two operand Values, or return a NULL Value.
+%macro COMPLEX_BINOP_SETUP 0
+    mov [rbp - CB_RSAVE], rsi
+    lea rsi, [rbp - CB_A]
+    call complex_to_parts
+    test eax, eax
+    jz %%decline
+    mov rdi, [rbp - CB_RSAVE]
+    lea rsi, [rbp - CB_B]
+    call complex_to_parts
+    test eax, eax
+    jnz %%ok
+%%decline:
+    xor eax, eax                ; NULL Value = NotImplemented
+    leave
+    ret
+%%ok:
+%endmacro
+
+DEF_FUNC complex_add, CB_FRAME
+    COMPLEX_BINOP_SETUP
+    movsd xmm0, [rbp - CB_A]
+    addsd xmm0, [rbp - CB_B]
+    movsd xmm1, [rbp - CB_A + 8]
+    addsd xmm1, [rbp - CB_B + 8]
+    call complex_from_doubles
+    leave
+    ret
+END_FUNC complex_add
+
+DEF_FUNC complex_sub, CB_FRAME
+    COMPLEX_BINOP_SETUP
+    movsd xmm0, [rbp - CB_A]
+    subsd xmm0, [rbp - CB_B]
+    movsd xmm1, [rbp - CB_A + 8]
+    subsd xmm1, [rbp - CB_B + 8]
+    call complex_from_doubles
+    leave
+    ret
+END_FUNC complex_sub
+
+;; _Py_c_prod: (ar*br - ai*bi, ar*bi + ai*br).  The full form is used even when
+;; one side was promoted from a real, because CPython does: that is why
+;; complex(inf,0) * 2 is (inf+nanj) and not (inf+0j).
+DEF_FUNC complex_mul, CB_FRAME
+    COMPLEX_BINOP_SETUP
+    movsd xmm0, [rbp - CB_A]        ; ar
+    movsd xmm1, [rbp - CB_A + 8]    ; ai
+    movsd xmm2, [rbp - CB_B]        ; br
+    movsd xmm3, [rbp - CB_B + 8]    ; bi
+    movapd xmm4, xmm0
+    mulsd xmm4, xmm2                ; ar*br
+    movapd xmm5, xmm1
+    mulsd xmm5, xmm3                ; ai*bi
+    subsd xmm4, xmm5                ; real
+    mulsd xmm0, xmm3                ; ar*bi
+    mulsd xmm1, xmm2                ; ai*br
+    addsd xmm0, xmm1                ; imag
+    movapd xmm1, xmm0
+    movapd xmm0, xmm4
+    call complex_from_doubles
+    leave
+    ret
+END_FUNC complex_mul
+
+;; _Py_c_quot, Smith's algorithm verbatim.  Not the (a*conj(b))/|b|^2 form: the
+;; last bits of (1+2j)/(3-4j) differ between the two, and this is the one
+;; CPython computes.
+DEF_FUNC complex_truediv, CB_FRAME
+    COMPLEX_BINOP_SETUP
+    movsd xmm2, [rbp - CB_B]        ; br
+    movsd xmm3, [rbp - CB_B + 8]    ; bi
+    movapd xmm6, xmm2
+    andpd xmm6, [rel cx_absmask]    ; |br|
+    movapd xmm7, xmm3
+    andpd xmm7, [rel cx_absmask]    ; |bi|
+    ucomisd xmm6, xmm7
+    jp .ctd_nan                     ; unordered: a NaN in the denominator
+    jb .ctd_bi_bigger
+
+    ; |br| >= |bi|.  Both zero is the only way to reach a zero denominator
+    ; here, which is what makes this the division-by-zero test.
+    xorpd xmm5, xmm5
+    ucomisd xmm6, xmm5
+    je .ctd_zero
+    movapd xmm4, xmm3
+    divsd xmm4, xmm2                ; ratio = bi/br
+    movapd xmm5, xmm3
+    mulsd xmm5, xmm4
+    addsd xmm5, xmm2                ; denom = br + bi*ratio
+    movsd xmm0, [rbp - CB_A]        ; ar
+    movsd xmm1, [rbp - CB_A + 8]    ; ai
+    movapd xmm6, xmm1
+    mulsd xmm6, xmm4
+    addsd xmm6, xmm0
+    divsd xmm6, xmm5                ; (ar + ai*ratio)/denom
+    movapd xmm7, xmm0
+    mulsd xmm7, xmm4
+    movapd xmm0, xmm1
+    subsd xmm0, xmm7
+    divsd xmm0, xmm5                ; (ai - ar*ratio)/denom
+    movapd xmm1, xmm0
+    movapd xmm0, xmm6
+    call complex_from_doubles
+    leave
+    ret
+
+.ctd_bi_bigger:
+    movapd xmm4, xmm2
+    divsd xmm4, xmm3                ; ratio = br/bi
+    movapd xmm5, xmm2
+    mulsd xmm5, xmm4
+    addsd xmm5, xmm3                ; denom = br*ratio + bi
+    movsd xmm0, [rbp - CB_A]        ; ar
+    movsd xmm1, [rbp - CB_A + 8]    ; ai
+    movapd xmm6, xmm0
+    mulsd xmm6, xmm4
+    addsd xmm6, xmm1
+    divsd xmm6, xmm5                ; (ar*ratio + ai)/denom
+    movapd xmm7, xmm1
+    mulsd xmm7, xmm4
+    subsd xmm7, xmm0
+    divsd xmm7, xmm5                ; (ai*ratio - ar)/denom
+    movapd xmm0, xmm6
+    movapd xmm1, xmm7
+    call complex_from_doubles
+    leave
+    ret
+
+.ctd_nan:
+    movsd xmm0, [rel cx_nan]
+    movapd xmm1, xmm0
+    call complex_from_doubles
+    leave
+    ret
+
+.ctd_zero:
+    RAISE exc_ZeroDivisionError_type, "complex division by zero"
+END_FUNC complex_truediv
+
+DEF_FUNC complex_neg, CB_FRAME
+    lea rsi, [rbp - CB_A]
+    call complex_to_parts
+    test eax, eax
+    jz .cn_decline
+    movsd xmm0, [rbp - CB_A]
+    movsd xmm1, [rbp - CB_A + 8]
+    xorpd xmm0, [rel cx_signmask]
+    xorpd xmm1, [rel cx_signmask]
+    call complex_from_doubles
+    leave
+    ret
+.cn_decline:
+    xor eax, eax
+    leave
+    ret
+END_FUNC complex_neg
+
+DEF_FUNC complex_pos, CB_FRAME
+    ; +z on an exact complex is z itself.
+    V_TEST_PTR rdi, rax
+    ja .cp_decline
+    mov rax, [rdi + PyObject.ob_type]
+    lea rcx, [rel complex_type]
+    cmp rax, rcx
+    jne .cp_decline
+    push rdi
+    call obj_incref
+    pop rax
+    leave
+    ret
+.cp_decline:
+    xor eax, eax
+    leave
+    ret
+END_FUNC complex_pos
+
+;; bool(z) is False only when both parts are zero.  -0.0 is falsy, so this
+;; compares against zero rather than testing the sign bit.
+;;
+;; nb_bool answers with eax = 0/1, not a bool object -- see float_bool.
+DEF_FUNC complex_bool, CB_FRAME
+    lea rsi, [rbp - CB_A]
+    call complex_to_parts
+    test eax, eax
+    jz .cbl_false               ; not a complex: cannot happen through the slot
+    xorpd xmm2, xmm2
+    movsd xmm0, [rbp - CB_A]
+    ucomisd xmm0, xmm2
+    jp .cbl_true                ; a NaN part is truthy
+    jne .cbl_true
+    movsd xmm1, [rbp - CB_A + 8]
+    ucomisd xmm1, xmm2
+    jp .cbl_true
+    jne .cbl_true
+.cbl_false:
+    xor eax, eax
+    leave
+    ret
+.cbl_true:
+    mov eax, 1
+    leave
+    ret
+END_FUNC complex_bool
+
+;; ============================================================================
+;; complex_abs(rdi = Value) -> float Value
+;;
+;; _Py_c_abs: an infinite part wins over a NaN one (C99), and a finite pair
+;; whose hypot overflows is an OverflowError rather than an inf.
+;; ============================================================================
+CA_RE    equ 16              ; real at [rbp-16], imag at [rbp-8]
+CA_FRAME equ 32              ; + 0 pushes = 32
+DEF_FUNC complex_abs, CA_FRAME
+    lea rsi, [rbp - CA_RE]
+    call complex_to_parts
+    test eax, eax
+    jz .cab_decline
+
+    movsd xmm0, [rbp - CA_RE]
+    andpd xmm0, [rel cx_absmask]
+    ucomisd xmm0, [rel cx_inf]
+    je .cab_ret_xmm0            ; |inf + anything j| is inf, NaN included
+    movsd xmm0, [rbp - CA_RE + 8]
+    andpd xmm0, [rel cx_absmask]
+    ucomisd xmm0, [rel cx_inf]
+    je .cab_ret_xmm0
+
+    movsd xmm0, [rbp - CA_RE]
+    movsd xmm1, [rbp - CA_RE + 8]
+    and rsp, -16                ; glibc's float paths use aligned SSE
+    call hypot wrt ..plt
+    movapd xmm1, xmm0
+    andpd xmm1, [rel cx_absmask]
+    ucomisd xmm1, [rel cx_inf]
+    je .cab_overflow            ; finite inputs, infinite result
+.cab_ret_xmm0:
+    movq rax, xmm0
+    V_FROM_F64 rax, rcx
+    leave
+    ret
+.cab_overflow:
+    RAISE exc_OverflowError_type, "absolute value too large"
+.cab_decline:
+    xor eax, eax
+    leave
+    ret
+END_FUNC complex_abs
+
+;; ============================================================================
+;; complex_pow(rdi = left Value, rsi = right Value) -> Value
+;;
+;; CPython takes a repeated-squaring path when the exponent is real, integral
+;; and within +-100, and the general exp/log form otherwise.  The boundary is
+;; exact: 100 and -100 use the integer path, 101 and -101 do not.
+;; ============================================================================
+CPW_A     equ 16             ; base:     real at [rbp-16], imag at [rbp-8]
+CPW_B     equ 32             ; exponent: real at [rbp-32], imag at [rbp-24]
+CPW_RR    equ 48             ; running result
+CPW_RI    equ 40
+CPW_PR    equ 64             ; running power of the base
+CPW_PI    equ 56
+CPW_N     equ 72             ; the integer exponent
+CPW_RSAVE equ 80
+CPW_FRAME equ 80             ; + 0 pushes = 80, 16-aligned for libc
+DEF_FUNC complex_pow, CPW_FRAME
+    mov [rbp - CPW_RSAVE], rsi
+    lea rsi, [rbp - CPW_A]
+    call complex_to_parts
+    test eax, eax
+    jz .cpw_decline
+    mov rdi, [rbp - CPW_RSAVE]
+    lea rsi, [rbp - CPW_B]
+    call complex_to_parts
+    test eax, eax
+    jz .cpw_decline
+
+    ; An integral, real exponent within +-100 takes the exact path.
+    xorpd xmm2, xmm2
+    movsd xmm1, [rbp - CPW_B + 8]
+    ucomisd xmm1, xmm2
+    jp .cpw_general
+    jne .cpw_general
+    movsd xmm0, [rbp - CPW_B]
+    cvttsd2si rax, xmm0
+    cvtsi2sd xmm3, rax
+    ucomisd xmm3, xmm0
+    jp .cpw_general
+    jne .cpw_general            ; not integral
+    cmp rax, 100
+    jg .cpw_general
+    cmp rax, -100
+    jl .cpw_general
+    mov [rbp - CPW_N], rax
+
+    ; r = 1+0j, p = base
+    movsd xmm0, [rel cx_one]
+    movsd [rbp - CPW_RR], xmm0
+    xorpd xmm0, xmm0
+    movsd [rbp - CPW_RI], xmm0
+    movsd xmm0, [rbp - CPW_A]
+    movsd [rbp - CPW_PR], xmm0
+    movsd xmm0, [rbp - CPW_A + 8]
+    movsd [rbp - CPW_PI], xmm0
+
+    mov rax, [rbp - CPW_N]
+    test rax, rax
+    jns .cpw_squaring
+    neg rax
+.cpw_squaring:
+    ; while (n) { if (n & 1) r *= p;  p *= p;  n >>= 1; }
+    test rax, rax
+    jz .cpw_squaring_done
+    test rax, 1
+    jz .cpw_square_only
+    ; r = r * p
+    push rax
+    movsd xmm0, [rbp - CPW_RR]
+    movsd xmm1, [rbp - CPW_RI]
+    movsd xmm2, [rbp - CPW_PR]
+    movsd xmm3, [rbp - CPW_PI]
+    call complex_cmul_raw
+    movsd [rbp - CPW_RR], xmm0
+    movsd [rbp - CPW_RI], xmm1
+    pop rax
+.cpw_square_only:
+    push rax
+    movsd xmm0, [rbp - CPW_PR]
+    movsd xmm1, [rbp - CPW_PI]
+    movapd xmm2, xmm0
+    movapd xmm3, xmm1
+    call complex_cmul_raw
+    movsd [rbp - CPW_PR], xmm0
+    movsd [rbp - CPW_PI], xmm1
+    pop rax
+    shr rax, 1
+    jmp .cpw_squaring
+
+.cpw_squaring_done:
+    cmp qword [rbp - CPW_N], 0
+    jge .cpw_finish
+    ; A negative exponent divides 1+0j by the result.
+    xorpd xmm2, xmm2
+    movsd xmm0, [rbp - CPW_RR]
+    ucomisd xmm0, xmm2
+    jp .cpw_neg_div
+    jne .cpw_neg_div
+    movsd xmm1, [rbp - CPW_RI]
+    ucomisd xmm1, xmm2
+    jp .cpw_neg_div
+    je .cpw_zero_neg_power
+.cpw_neg_div:
+    movsd xmm0, [rel cx_one]
+    xorpd xmm1, xmm1
+    movsd xmm2, [rbp - CPW_RR]
+    movsd xmm3, [rbp - CPW_RI]
+    call complex_cdiv_raw
+    movsd [rbp - CPW_RR], xmm0
+    movsd [rbp - CPW_RI], xmm1
+
+.cpw_finish:
+    ; A non-finite result from finite inputs is an overflow, on both paths.
+    movsd xmm0, [rbp - CPW_RR]
+    andpd xmm0, [rel cx_absmask]
+    ucomisd xmm0, [rel cx_inf]
+    je .cpw_overflow
+    movsd xmm0, [rbp - CPW_RI]
+    andpd xmm0, [rel cx_absmask]
+    ucomisd xmm0, [rel cx_inf]
+    je .cpw_overflow
+    movsd xmm0, [rbp - CPW_RR]
+    movsd xmm1, [rbp - CPW_RI]
+    call complex_from_doubles
+    leave
+    ret
+
+.cpw_general:
+    ; b == 0+0j  ->  1+0j
+    xorpd xmm2, xmm2
+    movsd xmm0, [rbp - CPW_B]
+    ucomisd xmm0, xmm2
+    jp .cpw_general_body
+    jne .cpw_general_body
+    movsd xmm1, [rbp - CPW_B + 8]
+    ucomisd xmm1, xmm2
+    jp .cpw_general_body
+    jne .cpw_general_body
+    movsd xmm0, [rel cx_one]
+    xorpd xmm1, xmm1
+    call complex_from_doubles
+    leave
+    ret
+
+.cpw_general_body:
+    ; a == 0+0j: the result is 0, unless the exponent is complex or negative.
+    xorpd xmm2, xmm2
+    movsd xmm0, [rbp - CPW_A]
+    ucomisd xmm0, xmm2
+    jp .cpw_general_math
+    jne .cpw_general_math
+    movsd xmm1, [rbp - CPW_A + 8]
+    ucomisd xmm1, xmm2
+    jp .cpw_general_math
+    jne .cpw_general_math
+    movsd xmm1, [rbp - CPW_B + 8]
+    ucomisd xmm1, xmm2
+    jp .cpw_zero_neg_power
+    jne .cpw_zero_neg_power
+    movsd xmm0, [rbp - CPW_B]
+    ucomisd xmm0, xmm2
+    jb .cpw_zero_neg_power
+    xorpd xmm0, xmm0
+    xorpd xmm1, xmm1
+    call complex_from_doubles
+    leave
+    ret
+
+.cpw_general_math:
+    ; vabs = hypot(ar,ai);  len = pow(vabs,br);  at = atan2(ai,ar)
+    ; phase = at*br;  if bi: len /= exp(at*bi), phase += bi*log(vabs)
+    and rsp, -16
+    movsd xmm0, [rbp - CPW_A]
+    movsd xmm1, [rbp - CPW_A + 8]
+    call hypot wrt ..plt
+    movsd [rbp - CPW_PR], xmm0          ; vabs
+    movsd xmm1, [rbp - CPW_B]
+    call pow wrt ..plt
+    movsd [rbp - CPW_RR], xmm0          ; len
+    movsd xmm0, [rbp - CPW_A + 8]
+    movsd xmm1, [rbp - CPW_A]
+    call atan2 wrt ..plt
+    movsd [rbp - CPW_PI], xmm0          ; at
+    mulsd xmm0, [rbp - CPW_B]
+    movsd [rbp - CPW_RI], xmm0          ; phase
+
+    xorpd xmm2, xmm2
+    movsd xmm1, [rbp - CPW_B + 8]
+    ucomisd xmm1, xmm2
+    jp .cpw_have_polar
+    je .cpw_have_polar
+    movsd xmm0, [rbp - CPW_PI]
+    mulsd xmm0, [rbp - CPW_B + 8]
+    call exp wrt ..plt
+    movsd xmm1, [rbp - CPW_RR]
+    divsd xmm1, xmm0
+    movsd [rbp - CPW_RR], xmm1
+    movsd xmm0, [rbp - CPW_PR]
+    call log wrt ..plt
+    mulsd xmm0, [rbp - CPW_B + 8]
+    addsd xmm0, [rbp - CPW_RI]
+    movsd [rbp - CPW_RI], xmm0
+
+.cpw_have_polar:
+    movsd xmm0, [rbp - CPW_RI]
+    call cos wrt ..plt
+    mulsd xmm0, [rbp - CPW_RR]
+    movsd [rbp - CPW_N], xmm0           ; the real part, reusing the slot
+    movsd xmm0, [rbp - CPW_RI]
+    call sin wrt ..plt
+    mulsd xmm0, [rbp - CPW_RR]
+    movsd [rbp - CPW_RI], xmm0
+    movsd xmm0, [rbp - CPW_N]
+    movsd [rbp - CPW_RR], xmm0
+    jmp .cpw_finish
+
+.cpw_zero_neg_power:
+    RAISE exc_ZeroDivisionError_type, "0.0 to a negative or complex power"
+.cpw_overflow:
+    RAISE exc_OverflowError_type, "complex exponentiation"
+.cpw_decline:
+    xor eax, eax
+    leave
+    ret
+END_FUNC complex_pow
+
+;; ============================================================================
+;; complex_cmul_raw(xmm0,xmm1 = a) (xmm2,xmm3 = b) -> xmm0,xmm1 = a*b
+;; complex_cdiv_raw(xmm0,xmm1 = a) (xmm2,xmm3 = b) -> xmm0,xmm1 = a/b
+;;
+;; Raw double arithmetic, no allocation and no error channel, for use inside
+;; complex_pow's loop.  cdiv_raw's caller has already excluded a zero divisor.
+;; ============================================================================
+DEF_FUNC_BARE complex_cmul_raw
+    movapd xmm4, xmm0
+    mulsd xmm4, xmm2                ; ar*br
+    movapd xmm5, xmm1
+    mulsd xmm5, xmm3                ; ai*bi
+    subsd xmm4, xmm5
+    mulsd xmm0, xmm3                ; ar*bi
+    mulsd xmm1, xmm2                ; ai*br
+    addsd xmm0, xmm1
+    movapd xmm1, xmm0
+    movapd xmm0, xmm4
+    ret
+END_FUNC complex_cmul_raw
+
+DEF_FUNC_BARE complex_cdiv_raw
+    movapd xmm6, xmm2
+    andpd xmm6, [rel cx_absmask]
+    movapd xmm7, xmm3
+    andpd xmm7, [rel cx_absmask]
+    ucomisd xmm6, xmm7
+    jb .cdr_bi_bigger
+    movapd xmm4, xmm3
+    divsd xmm4, xmm2                ; ratio = bi/br
+    movapd xmm5, xmm3
+    mulsd xmm5, xmm4
+    addsd xmm5, xmm2                ; denom
+    movapd xmm6, xmm1
+    mulsd xmm6, xmm4
+    addsd xmm6, xmm0
+    divsd xmm6, xmm5
+    movapd xmm7, xmm0
+    mulsd xmm7, xmm4
+    movapd xmm0, xmm1
+    subsd xmm0, xmm7
+    divsd xmm0, xmm5
+    movapd xmm1, xmm0
+    movapd xmm0, xmm6
+    ret
+.cdr_bi_bigger:
+    movapd xmm4, xmm2
+    divsd xmm4, xmm3                ; ratio = br/bi
+    movapd xmm5, xmm2
+    mulsd xmm5, xmm4
+    addsd xmm5, xmm3
+    movapd xmm6, xmm0
+    mulsd xmm6, xmm4
+    addsd xmm6, xmm1
+    divsd xmm6, xmm5
+    movapd xmm7, xmm1
+    mulsd xmm7, xmm4
+    subsd xmm7, xmm0
+    divsd xmm7, xmm5
+    movapd xmm0, xmm6
+    movapd xmm1, xmm7
+    ret
+END_FUNC complex_cdiv_raw
+
+;; ============================================================================
+;; complex_repr(rdi = PyComplexObject*) -> rax = PyStrObject*, edx = TAG_PTR
+;;
+;; CPython's rule: a real part of exactly +0.0 is not printed and the result is
+;; bare (`2j`); anything else is parenthesised with an explicit sign on the
+;; imaginary part (`(1+2j)`, `(-0+2j)`).  So a NEGATIVE zero real part does
+;; print -- which is why the test below is on the raw bits and not a compare.
+;;
+;; Both parts render through float_repr, whole.  It is the most delicate
+;; function in float.asm -- a shortest-round-trip loop plus a second pass to
+;; choose notation -- and reusing it entire is what guarantees the parts of a
+;; complex print byte-identically to the equivalent floats.
+;; ============================================================================
+CR_SELF  equ 8
+CR_BUF   equ 128            ; 112 bytes: two 24-byte reprs plus "(", "+", "j)"
+CR_FRAME equ 128            ; + 1 push = 136, not 16-aligned
+DEF_FUNC complex_repr, CR_FRAME
+    push rbx
+    mov [rbp - CR_SELF], rdi
+    lea rbx, [rbp - CR_BUF]     ; rbx = write cursor
+
+    mov rax, [rbp - CR_SELF]
+    mov rax, [rax + PyComplexObject.cval_real]
+    test rax, rax               ; +0.0 is the only double whose bits are all
+    jz .cr_imag_only            ; zero, so this is "== 0 and not signbit"
+
+    mov byte [rbx], '('
+    inc rbx
+    mov rax, [rbp - CR_SELF]
+    mov rdi, [rax + PyComplexObject.cval_real]
+    call .cr_append             ; the real part
+    ; The imaginary part always carries an explicit sign.
+    mov rax, [rbp - CR_SELF]
+    mov rax, [rax + PyComplexObject.cval_imag]
+    bt rax, 63
+    jc .cr_imag_signed          ; float_repr will emit the '-' itself
+    mov byte [rbx], '+'
+    inc rbx
+.cr_imag_signed:
+    mov rax, [rbp - CR_SELF]
+    mov rdi, [rax + PyComplexObject.cval_imag]
+    call .cr_append
+    mov word [rbx], ')' * 256 + 'j'
+    add rbx, 2
+    jmp .cr_done
+
+.cr_imag_only:
+    mov rax, [rbp - CR_SELF]
+    mov rdi, [rax + PyComplexObject.cval_imag]
+    call .cr_append
+    mov byte [rbx], 'j'
+    inc rbx
+
+.cr_done:
+    mov byte [rbx], 0
+    lea rdi, [rbp - CR_BUF]
+    call str_from_cstr
+    pop rbx
+    leave
+    ret
+
+.cr_append:
+    ; A tail call into the helper below, with the cursor in rbx.
+    mov rsi, rdi
+    mov rdi, rbx
+    call complex_repr_append
+    mov rbx, rax
+    ret
+END_FUNC complex_repr
+
+;; ============================================================================
+;; complex_repr_append(rdi = cursor, rsi = raw double bits) -> rax = new cursor
+;; Renders one part with float_repr and copies its bytes to the cursor.
+;; ============================================================================
+CRA_CUR   equ 8
+CRA_STR   equ 16
+CRA_LEN   equ 24
+CRA_FRAME equ 32            ; + 0 pushes = 32
+DEF_FUNC_LOCAL complex_repr_append, CRA_FRAME
+    mov [rbp - CRA_CUR], rdi
+    mov rdi, rsi
+    call float_repr             ; rax = PyStrObject*
+    mov [rbp - CRA_STR], rax
+    mov rdx, [rax + PyStrObject.ob_size]
+    mov [rbp - CRA_LEN], rdx
+    mov rdi, [rbp - CRA_CUR]
+    lea rsi, [rax + PyStrObject.data]
+    call ap_memcpy
+    mov rdi, [rbp - CRA_STR]
+    call obj_decref
+    mov rax, [rbp - CRA_CUR]
+    add rax, [rbp - CRA_LEN]
+
+    ; float_repr appends ".0" to an integral float, because repr(3.0) is
+    ; "3.0".  A complex part is rendered without that -- CPython formats the
+    ; two halves with Py_DTSF_ADD_DOT_0 clear, which is why repr(complex(3))
+    ; is "(3+0j)" and not "(3.0+0.0j)".  Undoing it here is exact: float_repr
+    ; only ever adds those two characters when the digits carry no '.', 'e',
+    ; 'n' or 'i' of their own, so a trailing ".0" is always the one it added.
+    cmp qword [rbp - CRA_LEN], 2
+    jb .cra_done
+    cmp word [rax - 2], '0' * 256 + '.'
+    jne .cra_done
+    sub rax, 2
+.cra_done:
+    leave
+    ret
+END_FUNC complex_repr_append
+
+;; ============================================================================
+;; complex_hash(rdi = PyComplexObject*) -> rax = hash
+;;
+;; CPython's complex_hash is plain 64-bit wrapping arithmetic:
+;;   combined = hash(real) + _PyHASH_IMAG * hash(imag), with _PyHASH_IMAG =
+;;   1000003, then -1 -> -2.
+;; The 2^61-1 reduction people remember belongs to _Py_HashDouble, which
+;; float_hash already implements exactly.  hash(complex(2,0)) == hash(2) falls
+;; out of hash(0.0) being 0.
+;;
+;; Divergence worth knowing: CPython hashes a NaN by object identity, so
+;; hash(complex(nan,0)) differs per object there.  float_hash returns 0 for a
+;; NaN here (a pre-existing choice), so ours is stable -- no test may print it.
+;; ============================================================================
+CH_IMAG  equ 8
+CH_FRAME equ 16             ; + 1 push = 24, not 16-aligned
+DEF_FUNC complex_hash, CH_FRAME
+    push rbx
+    mov rax, [rdi + PyComplexObject.cval_imag]
+    mov [rbp - CH_IMAG], rax
+    mov rdi, [rdi + PyComplexObject.cval_real]
+    call float_hash
+    mov rbx, rax
+    mov rdi, [rbp - CH_IMAG]
+    call float_hash
+    mov rcx, 1000003
+    imul rax, rcx
+    add rax, rbx
+    cmp rax, -1
+    jne .chs_done
+    mov rax, -2
+.chs_done:
+    pop rbx
+    leave
+    ret
+END_FUNC complex_hash
+
+;; ============================================================================
+;; complex_compare(rdi = left Value, rsi = right Value, edx = op) -> Value
+;;
+;; Equality only.  Ordering returns a NULL Value; both sides then decline and
+;; op_compare_op raises, which is what CPython does for complex.
+;; ============================================================================
+CC_A     equ 16
+CC_B     equ 32
+CC_OP    equ 40
+CC_RSAVE equ 48
+CC_FRAME equ 48             ; + 0 pushes = 48
+DEF_FUNC complex_compare, CC_FRAME
+    cmp edx, PY_EQ
+    je .cc_ok
+    cmp edx, PY_NE
+    jne .cc_decline
+.cc_ok:
+    mov [rbp - CC_OP], edx
+    mov [rbp - CC_RSAVE], rsi
+    lea rsi, [rbp - CC_A]
+    call complex_to_parts
+    test eax, eax
+    jz .cc_decline
+    mov rdi, [rbp - CC_RSAVE]
+    lea rsi, [rbp - CC_B]
+    call complex_to_parts
+    test eax, eax
+    jz .cc_decline
+
+    movsd xmm0, [rbp - CC_A]
+    ucomisd xmm0, [rbp - CC_B]
+    jp .cc_false                ; a NaN part is never equal
+    jne .cc_false
+    movsd xmm0, [rbp - CC_A + 8]
+    ucomisd xmm0, [rbp - CC_B + 8]
+    jp .cc_false
+    jne .cc_false
+.cc_true:
+    cmp dword [rbp - CC_OP], PY_EQ
+    je .cc_ret_true
+    jmp .cc_ret_false
+.cc_false:
+    cmp dword [rbp - CC_OP], PY_EQ
+    je .cc_ret_false
+.cc_ret_true:
+    lea rax, [rel bool_true]
+    leave
+    ret
+.cc_ret_false:
+    lea rax, [rel bool_false]
+    leave
+    ret
+.cc_decline:
+    xor eax, eax                ; NULL Value = NotImplemented
+    leave
+    ret
+END_FUNC complex_compare
+
+;; ============================================================================
+;; complex_getattr(rdi = self, rsi = name str) -> rax = Value, or NULL
+;;
+;; .real and .imag.  Not a getset descriptor: getset_descr_new is a stub with a
+;; NULL accessor, created once so types.py can name the type, and nothing in
+;; the tree ever reads gs_get.  bool_getattr does exactly this for the same two
+;; names.  Returning NULL rather than raising lets op_load_attr fall through to
+;; the MRO's tp_dicts, which is how conjugate() coexists with this chain.
+;; ============================================================================
+CG_SELF  equ 8
+CG_NAME  equ 16             ; the attribute name's char data, across the calls
+CG_FRAME equ 16             ; + 0 pushes = 16
+DEF_FUNC complex_getattr, CG_FRAME
+    mov [rbp - CG_SELF], rdi
+    lea rax, [rsi + PyStrObject.data]
+    mov [rbp - CG_NAME], rax
+
+    mov rdi, rax
+    lea rsi, [rel cx_name_real]
+    call ap_strcmp
+    test eax, eax
+    jz .cg_real
+
+    mov rdi, [rbp - CG_NAME]
+    lea rsi, [rel cx_name_imag]
+    call ap_strcmp
+    test eax, eax
+    jz .cg_imag
+
+    xor eax, eax                ; not ours: op_load_attr walks tp_dict next
+    leave
+    ret
+
+.cg_real:
+    mov rax, [rbp - CG_SELF]
+    mov rax, [rax + PyComplexObject.cval_real]
+    V_FROM_F64 rax, rcx
+    leave
+    ret
+.cg_imag:
+    mov rax, [rbp - CG_SELF]
+    mov rax, [rax + PyComplexObject.cval_imag]
+    V_FROM_F64 rax, rcx
+    leave
+    ret
+END_FUNC complex_getattr
+
+section .rodata
+cx_name_real: db "real", 0
+cx_name_imag: db "imag", 0
+complex_name_str: db "complex", 0
+
+align 16
+cx_absmask:  dq 0x7FFFFFFFFFFFFFFF, 0x7FFFFFFFFFFFFFFF
+align 16
+cx_signmask: dq 0x8000000000000000, 0x8000000000000000
+align 8
+cx_inf:      dq 0x7FF0000000000000
+cx_nan:      dq 0x7FF8000000000000
+cx_one:      dq 1.0
+
+;; ============================================================================
+;; The number-methods table.  Written out one slot per line rather than with
+;; `times N dq 0` runs: which slot is which has to be readable, and a silent
+;; misalignment here mis-dispatches an operator.
+;;
+;; nb_floor_divide, nb_remainder and nb_divmod stay 0 on purpose -- `z // 2`,
+;; `z % 2` and `divmod(z, 2)` are TypeErrors in 3.12.  So do nb_int, nb_float
+;; and nb_index: int(z) and float(z) raise.
+;; ============================================================================
+section .data
+align 8
+global complex_number_methods
+complex_number_methods:
+    dq complex_add            ; nb_add          +0
+    dq complex_sub            ; nb_subtract     +8
+    dq complex_mul            ; nb_multiply     +16
+    dq 0                      ; nb_remainder    +24
+    dq 0                      ; nb_divmod       +32
+    dq complex_pow            ; nb_power        +40
+    dq complex_neg            ; nb_negative     +48
+    dq complex_pos            ; nb_positive     +56
+    dq complex_abs            ; nb_absolute     +64
+    dq complex_bool           ; nb_bool         +72
+    dq 0                      ; nb_invert       +80
+    dq 0                      ; nb_lshift       +88
+    dq 0                      ; nb_rshift       +96
+    dq 0                      ; nb_and          +104
+    dq 0                      ; nb_or           +112
+    dq 0                      ; nb_xor          +120
+    dq 0                      ; nb_int          +128
+    dq 0                      ; nb_float        +136
+    dq 0                      ; nb_floor_divide +144
+    dq complex_truediv        ; nb_true_divide  +152
+    dq 0                      ; nb_index        +160
+    dq 0                      ; nb_inplace_add
+    dq 0                      ; nb_inplace_subtract
+    dq 0                      ; nb_inplace_multiply
+    dq 0                      ; nb_inplace_remainder
+    dq 0                      ; nb_inplace_power
+    dq 0                      ; nb_inplace_lshift
+    dq 0                      ; nb_inplace_rshift
+    dq 0                      ; nb_inplace_and
+    dq 0                      ; nb_inplace_or
+    dq 0                      ; nb_inplace_xor
+    dq 0                      ; nb_inplace_floor_divide
+    dq 0                      ; nb_inplace_true_divide
+    dq 0                      ; nb_matrix_multiply
+    dq 0                      ; nb_inplace_matrix_multiply
+
+align 8
+global complex_type
+complex_type:
+    dq 1                      ; ob_refcnt (immortal)
+    dq type_type              ; ob_type
+    dq complex_name_str       ; tp_name
+    dq PyComplexObject_size   ; tp_basicsize
+    dq 0                      ; tp_dealloc (no owned children; obj_dealloc frees)
+    dq complex_repr           ; tp_repr
+    dq complex_repr           ; tp_str
+    dq complex_hash           ; tp_hash
+    dq 0                      ; tp_call
+    dq complex_getattr        ; tp_getattr
+    dq 0                      ; tp_setattr
+    dq complex_compare        ; tp_richcompare
+    dq 0                      ; tp_iter
+    dq 0                      ; tp_iternext
+    dq 0                      ; tp_init
+    dq 0                      ; tp_new (installed by add_builtin_type)
+    dq complex_number_methods ; tp_as_number
+    dq 0                      ; tp_as_sequence
+    dq 0                      ; tp_as_mapping
+    dq 0                      ; tp_base
+    dq 0                      ; tp_dict (installed by methods_init)
+    dq 0                      ; tp_mro
+    dq 0                      ; tp_flags (no HAVE_GC: it owns nothing)
+    dq 0                      ; tp_bases
+    dq 0                      ; tp_traverse
+    dq 0                      ; tp_clear
+    dq 0                      ; tp_dictoffset

@@ -1069,3 +1069,66 @@ DEF_FUNC float_classmethod_fromhex, FFH_FRAME
 .ffh_parse_error:
     RAISE exc_ValueError_type, "invalid hexadecimal floating-point string"
 END_FUNC float_classmethod_fromhex
+
+;; ============================================================================
+;; complex_method_conjugate(args, nargs) -> complex with the imaginary part
+;; negated.
+;; ============================================================================
+DEF_FUNC complex_method_conjugate
+    mov rdi, [rdi]              ; args[0] = self
+    movsd xmm0, [rdi + PyComplexObject.cval_real]
+    movsd xmm1, [rdi + PyComplexObject.cval_imag]
+    xorpd xmm1, [rel cx_meth_signmask]
+    extern complex_from_doubles
+    call complex_from_doubles
+    leave
+    ret
+END_FUNC complex_method_conjugate
+
+;; ============================================================================
+;; complex_method_complex(args, nargs) -> self.  complex.__complex__().
+;; ============================================================================
+DEF_FUNC complex_method_complex
+    mov rdi, [rdi]
+    push rdi
+    extern obj_incref
+    call obj_incref
+    pop rax
+    mov edx, TAG_PTR
+    leave
+    ret
+END_FUNC complex_method_complex
+
+;; ============================================================================
+;; complex_method_getnewargs(args, nargs) -> (real, imag)
+;; copyreg pickles a complex as `complex, (c.real, c.imag)`; pickle protocol 2
+;; asks for this by name.
+;; ============================================================================
+CMG_SELF  equ 8
+CMG_TUP   equ 16
+CMG_FRAME equ 16            ; + 0 pushes = 16
+DEF_FUNC complex_method_getnewargs, CMG_FRAME
+    mov rdi, [rdi]
+    mov [rbp - CMG_SELF], rdi
+    mov edi, 2
+    extern tuple_new
+    call tuple_new
+    mov [rbp - CMG_TUP], rax
+    mov rcx, [rbp - CMG_SELF]
+    mov rdx, [rax + PyTupleObject.ob_item]
+    mov rax, [rcx + PyComplexObject.cval_real]
+    V_FROM_F64 rax, rsi
+    mov [rdx], rax
+    mov rax, [rcx + PyComplexObject.cval_imag]
+    V_FROM_F64 rax, rsi
+    mov [rdx + 8], rax
+    mov rax, [rbp - CMG_TUP]
+    mov edx, TAG_PTR
+    leave
+    ret
+END_FUNC complex_method_getnewargs
+
+section .rodata
+align 16
+cx_meth_signmask: dq 0x8000000000000000, 0x8000000000000000
+section .text

@@ -81,6 +81,11 @@ extern dict_method_values
 extern float_classmethod_fromhex
 extern float_method_as_integer_ratio
 extern float_method_conjugate
+extern complex_type
+extern complex_dunder_repr
+extern complex_method_conjugate
+extern complex_method_complex
+extern complex_method_getnewargs
 extern float_method_hex
 extern float_method_is_integer
 extern generic_method_contains
@@ -1553,6 +1558,40 @@ DEF_FUNC methods_init
     lea rax, [rel int_type]
     mov [rax + PyTypeObject.tp_dict], rbx
 
+    ;; --- complex_type methods ---
+    ;
+    ; __repr__ goes through DEF_DUNDER_STRREPR, which calls the DEFINING
+    ; type's slot rather than the argument's; the naive form recurses on a
+    ; subclass (bugs.md).  There is deliberately no __str__: CPython's complex
+    ; has no tp_str of its own, so `complex.__str__ is object.__str__` is True
+    ; there, and leaving it out reproduces that while tp_str = complex_repr
+    ; still keeps print(2j) fast.
+    call dict_new
+    mov rbx, rax
+
+    mov rdi, rbx
+    lea rsi, [rel mn___repr__]
+    lea rdx, [rel complex_dunder_repr]
+    call dict_add_builtin_func
+
+    mov rdi, rbx
+    lea rsi, [rel mn_conjugate]
+    lea rdx, [rel complex_method_conjugate]
+    call dict_add_builtin_func
+
+    mov rdi, rbx
+    lea rsi, [rel mn___complex__]
+    lea rdx, [rel complex_method_complex]
+    call dict_add_builtin_func
+
+    mov rdi, rbx
+    lea rsi, [rel mn___getnewargs__]
+    lea rdx, [rel complex_method_getnewargs]
+    call dict_add_builtin_func
+
+    lea rax, [rel complex_type]
+    mov [rax + PyTypeObject.tp_dict], rbx
+
     ;; --- float_type methods ---
     call dict_new
     mov rbx, rax
@@ -1782,6 +1821,8 @@ mn_from_bytes:  db "from_bytes", 0
 mn_bit_length:  db "bit_length", 0
 mn_bit_count:   db "bit_count", 0
 mn_conjugate:   db "conjugate", 0
+mn___getnewargs__: db "__getnewargs__", 0
+mn___complex__: db "__complex__", 0
 ; float method names
 mn_is_integer:  db "is_integer", 0
 mn_as_integer_ratio: db "as_integer_ratio", 0

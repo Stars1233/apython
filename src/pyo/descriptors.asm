@@ -1787,11 +1787,11 @@ union_type:
     dq generic_alias_dealloc        ; tp_dealloc
     dq union_repr                   ; tp_repr
     dq union_repr                   ; tp_str
-    dq 0                            ; tp_hash
+    dq union_hash                   ; tp_hash
     dq 0                            ; tp_call
     dq 0                            ; tp_getattr
     dq 0                            ; tp_setattr
-    dq 0                            ; tp_richcompare
+    dq union_richcompare            ; tp_richcompare
     dq 0                            ; tp_iter
     dq 0                            ; tp_iternext
     dq 0                            ; tp_init
@@ -1808,6 +1808,207 @@ union_type:
     dq 0                            ; tp_clear
     dq 0                            ; tp_dictoffset
 
+
+section .text
+
+;; ============================================================================
+;; union_hash(rdi = PyGenericAliasObject*) -> rax = hash
+;; union_richcompare(rdi = left, rsi = right, edx = op) -> Value
+;;
+;; `hash(int | str)` used to raise: builtin_hash_fn raises when tp_hash is 0,
+;; and copyreg.py hashes `type(int | str)` two lines after the complex one, so
+;; the whole module -- and everything that imports it -- stopped there.
+;;
+;; CPython hashes a union as `hash(frozenset(args))` and compares them as
+;; frozensets.  frozenset_type.tp_hash is 0 here, so instead the args are
+;; combined with XOR, which induces exactly the same equivalence: order does
+;; not matter and a repeat is absorbed, so `int | str` and `str | int` hash
+;; alike.  The values differ from CPython's; nothing observes them, and the
+;; language only requires that equal objects hash equal.
+;; ============================================================================
+UH_FRAME equ 16             ; + 2 pushes = 32
+DEF_FUNC union_hash, UH_FRAME
+    push rbx
+    push r12
+    mov rax, [rdi + PyGenericAliasObject.ga_args]
+    test rax, rax
+    jz .uh_empty
+    mov r12, [rax + PyTupleObject.ob_size]
+    mov rbx, [rax + PyTupleObject.ob_item]
+    xor eax, eax
+    test r12, r12
+    jz .uh_done
+    push rax
+    xor ecx, ecx
+.uh_loop:
+    push rcx
+    mov rdi, [rbx + rcx*8]
+    extern obj_hash
+    call obj_hash
+    pop rcx
+    pop rdx
+    xor rdx, rax
+    push rdx
+    inc rcx
+    cmp rcx, r12
+    jb .uh_loop
+    pop rax
+.uh_done:
+    ; A light avalanche, so that two unions differing only in one member do
+    ; not collide merely because XOR preserves low bits.
+    mov rdx, rax
+    shr rdx, 32
+    imul rdx, rdx, 1000003
+    xor rax, rdx
+    cmp rax, -1
+    jne .uh_ret
+    mov rax, -2
+.uh_ret:
+    pop r12
+    pop rbx
+    leave
+    ret
+.uh_empty:
+    xor eax, eax
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC union_hash
+
+URC_LEFT  equ 8
+URC_RIGHT equ 16
+URC_OP    equ 24
+URC_FRAME equ 32             ; + 2 pushes = 48
+DEF_FUNC union_richcompare, URC_FRAME
+    push rbx
+    push r12
+    cmp edx, PY_EQ
+    je .ur_ok
+    cmp edx, PY_NE
+    jne .ur_decline
+.ur_ok:
+    mov [rbp - URC_OP], edx
+    ; Both sides must be unions; anything else declines so the protocol can
+    ; try the other operand.
+    V_TEST_PTR rdi, rax
+    ja .ur_decline
+    V_TEST_PTR rsi, rax
+    ja .ur_decline
+    mov rax, [rdi + PyObject.ob_type]
+    lea rcx, [rel union_type]
+    cmp rax, rcx
+    jne .ur_decline
+    mov rax, [rsi + PyObject.ob_type]
+    cmp rax, rcx
+    jne .ur_decline
+    mov [rbp - URC_LEFT], rdi
+    mov [rbp - URC_RIGHT], rsi
+
+    ; Set equality: every member of each side is present in the other.
+    mov rdi, [rbp - URC_LEFT]
+    mov rsi, [rbp - URC_RIGHT]
+    call union_args_subset
+    test eax, eax
+    jz .ur_false
+    mov rdi, [rbp - URC_RIGHT]
+    mov rsi, [rbp - URC_LEFT]
+    call union_args_subset
+    test eax, eax
+    jz .ur_false
+.ur_true:
+    cmp dword [rbp - URC_OP], PY_EQ
+    je .ur_ret_true
+    jmp .ur_ret_false
+.ur_false:
+    cmp dword [rbp - URC_OP], PY_EQ
+    je .ur_ret_false
+.ur_ret_true:
+    extern bool_true
+    lea rax, [rel bool_true]
+    pop r12
+    pop rbx
+    leave
+    ret
+.ur_ret_false:
+    extern bool_false
+    lea rax, [rel bool_false]
+    pop r12
+    pop rbx
+    leave
+    ret
+.ur_decline:
+    xor eax, eax                    ; NULL Value = NotImplemented
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC union_richcompare
+
+;; ============================================================================
+;; union_args_subset(rdi = a, rsi = b) -> eax = 1 when every member of a's
+;; args tuple is also in b's.  Members are compared with
+;; obj_richcompare_bool, not by pointer: union_operand_ok admits None and
+;; nested unions as well as types.
+;; ============================================================================
+UAS_BITEMS equ 8
+UAS_BSIZE  equ 16
+UAS_AITEMS equ 24
+UAS_ASIZE  equ 32
+UAS_I      equ 40
+UAS_FRAME  equ 48           ; + 0 pushes = 48
+DEF_FUNC_LOCAL union_args_subset, UAS_FRAME
+    mov rax, [rdi + PyGenericAliasObject.ga_args]
+    test rax, rax
+    jz .uas_yes
+    mov rcx, [rax + PyTupleObject.ob_size]
+    mov [rbp - UAS_ASIZE], rcx
+    mov rcx, [rax + PyTupleObject.ob_item]
+    mov [rbp - UAS_AITEMS], rcx
+    mov rax, [rsi + PyGenericAliasObject.ga_args]
+    test rax, rax
+    jz .uas_no
+    mov rcx, [rax + PyTupleObject.ob_size]
+    mov [rbp - UAS_BSIZE], rcx
+    mov rcx, [rax + PyTupleObject.ob_item]
+    mov [rbp - UAS_BITEMS], rcx
+    mov qword [rbp - UAS_I], 0
+.uas_outer:
+    mov rax, [rbp - UAS_I]
+    cmp rax, [rbp - UAS_ASIZE]
+    jae .uas_yes
+    xor ecx, ecx
+.uas_inner:
+    cmp rcx, [rbp - UAS_BSIZE]
+    jae .uas_no
+    push rcx
+    mov rax, [rbp - UAS_AITEMS]
+    mov r8, [rbp - UAS_I]
+    mov rdi, [rax + r8*8]
+    mov rax, [rbp - UAS_BITEMS]
+    mov rsi, [rax + rcx*8]
+    mov edx, PY_EQ
+    extern obj_richcompare_bool
+    call obj_richcompare_bool
+    pop rcx
+    cmp eax, 1
+    je .uas_found
+    inc rcx
+    jmp .uas_inner
+.uas_found:
+    inc qword [rbp - UAS_I]
+    jmp .uas_outer
+.uas_yes:
+    mov eax, 1
+    leave
+    ret
+.uas_no:
+    xor eax, eax
+    leave
+    ret
+END_FUNC union_args_subset
+
+section .data
 align 8
 union_number_methods:
     times 15 dq 0

@@ -1497,6 +1497,14 @@ DEF_FUNC builtins_init
     call add_builtin_type
 
     mov rdi, rbx
+    lea rsi, [rel bi_name_complex]
+    extern complex_type
+    extern complex_type_call
+    lea rdx, [rel complex_type]
+    lea rcx, [rel complex_type_call]
+    call add_builtin_type
+
+    mov rdi, rbx
     lea rsi, [rel bi_name_bool]
     lea rdx, [rel bool_type]
     lea rcx, [rel bool_type_call]
@@ -2308,6 +2316,7 @@ bi_name_isinstance:   db "isinstance", 0
 bi_name_issubclass:   db "issubclass", 0
 bi_name_repr:         db "repr", 0
 bi_name_float:        db "float", 0
+bi_name_complex:      db "complex", 0
 bi_name_bool:         db "bool", 0
 bi_name_object:       db "object", 0
 bi_name_build_class:  db "__build_class__", 0

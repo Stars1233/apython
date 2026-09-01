@@ -7,6 +7,11 @@
 %include "macros.inc"
 %include "object.inc"
 
+extern complex_to_parts
+extern obj_incref
+extern complex_from_doubles
+extern complex_type
+
 ; External symbols used
 extern int_to_i64
 extern obj_as_index
@@ -2301,3 +2306,145 @@ END_FUNC builtin_oct
 section .rodata
 align 8
 const_one: dq 0x3ff0000000000000   ; 1.0 in IEEE 754
+
+section .text
+
+;; ============================================================================
+;; complex_type_call(rdi = type, rsi = args, rdx = nargs) -> Value
+;; The tp_new thunk.  Keywords are not accepted yet -- CPython takes real= and
+;; imag= -- so a pending kw_names is rejected rather than ignored, and cleared
+;; on the way out the way int_type_call and bool_type_call do.
+;; ============================================================================
+DEF_FUNC_BARE complex_type_call
+    cmp qword [rel kw_names_pending], 0
+    jne .ctc_kwargs
+    mov rdi, rsi
+    mov rsi, rdx
+    jmp builtin_complex
+.ctc_kwargs:
+    mov qword [rel kw_names_pending], 0
+    RAISE exc_TypeError_type, "complex() takes no keyword arguments"
+END_FUNC complex_type_call
+
+;; ============================================================================
+;; builtin_complex(rdi = args, rsi = nargs) -> Value
+;;
+;;   complex()            0j
+;;   complex(z)           z itself when it is already an exact complex
+;;   complex(x)           (float(x)+0j) for an int, bool or float
+;;   complex(a, b)        real = ar - bi, imag = ai + br
+;;
+;; That last formula is the whole of the two-argument case, and it is not
+;; (a, b): complex(1j, 1) is 2j and complex(1, 1j) is 0j.
+;; ============================================================================
+BCX_A     equ 16              ; first argument's parts
+BCX_B     equ 32              ; second argument's parts
+BCX_ARGS  equ 40
+BCX_NARGS equ 48
+BCX_FRAME equ 48              ; + 0 pushes = 48
+DEF_FUNC builtin_complex, BCX_FRAME
+    mov [rbp - BCX_ARGS], rdi
+    mov [rbp - BCX_NARGS], rsi
+    cmp rsi, 0
+    je .bcx_zero
+    cmp rsi, 2
+    ja .bcx_argcount
+
+    mov rdi, [rbp - BCX_ARGS]
+    mov rdi, [rdi]
+    lea rsi, [rbp - BCX_A]
+    call complex_to_parts
+    test eax, eax
+    jz .bcx_bad_type
+
+    cmp qword [rbp - BCX_NARGS], 1
+    jne .bcx_two
+
+    ; complex(z) hands back an exact complex unchanged, as CPython does.
+    mov rdi, [rbp - BCX_ARGS]
+    mov rdi, [rdi]
+    V_TEST_PTR rdi, rax
+    ja .bcx_one_build
+    mov rax, [rdi + PyObject.ob_type]
+    lea rcx, [rel complex_type]
+    cmp rax, rcx
+    jne .bcx_one_build
+    push rdi
+    call obj_incref
+    pop rax
+    mov edx, TAG_PTR
+    leave
+    ret
+.bcx_one_build:
+    movsd xmm0, [rbp - BCX_A]
+    movsd xmm1, [rbp - BCX_A + 8]
+    call complex_from_doubles
+    leave
+    ret
+
+.bcx_two:
+    mov rdi, [rbp - BCX_ARGS]
+    mov rdi, [rdi + 8]
+    lea rsi, [rbp - BCX_B]
+    call complex_to_parts
+    test eax, eax
+    jz .bcx_bad_type
+
+    ; CPython subtracts the second argument's imaginary part only when that
+    ; argument really is a complex, and *assigns* the imaginary part rather
+    ; than adding to it unless the FIRST argument was one.  The difference is
+    ; invisible except on a signed zero, where it is the whole answer:
+    ; complex(0, -0.0) is -0j, and 0.0 + -0.0 is +0.0.
+    movsd xmm0, [rbp - BCX_A]           ; real = ar
+    mov rdi, [rbp - BCX_ARGS]
+    mov rdi, [rdi + 8]
+    call bcx_is_complex
+    test eax, eax
+    jz .bcx_two_imag
+    movsd xmm1, [rbp - BCX_B + 8]
+    subsd xmm0, xmm1                    ; real -= bi
+.bcx_two_imag:
+    movsd [rbp - BCX_A], xmm0           ; park the real part across the call
+    mov rdi, [rbp - BCX_ARGS]
+    mov rdi, [rdi]
+    call bcx_is_complex
+    movsd xmm1, [rbp - BCX_B]           ; br
+    test eax, eax
+    jz .bcx_two_build                   ; imag = br
+    addsd xmm1, [rbp - BCX_A + 8]       ; imag = ai + br
+.bcx_two_build:
+    movsd xmm0, [rbp - BCX_A]
+    call complex_from_doubles
+    leave
+    ret
+
+.bcx_zero:
+    xorpd xmm0, xmm0
+    xorpd xmm1, xmm1
+    call complex_from_doubles
+    leave
+    ret
+
+.bcx_bad_type:
+    RAISE exc_TypeError_type, "complex() argument must be a number"
+.bcx_argcount:
+    RAISE exc_TypeError_type, "complex() takes at most 2 arguments"
+END_FUNC builtin_complex
+
+;; ============================================================================
+;; bcx_is_complex(rdi = Value) -> eax = 1 when it is an exact complex.
+;; ============================================================================
+DEF_FUNC_BARE bcx_is_complex
+    V_TEST_PTR rdi, rax
+    ja .bic_no
+    mov rax, [rdi + PyObject.ob_type]
+    lea rcx, [rel complex_type]
+    cmp rax, rcx
+    jne .bic_no
+    mov eax, 1
+    ret
+.bic_no:
+    xor eax, eax
+    ret
+END_FUNC bcx_is_complex
+
