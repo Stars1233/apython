@@ -1392,6 +1392,9 @@ section .data
 ;; Maps NB_* argument (0-25) to the byte offset within PyNumberMethods
 ;; where the corresponding method function pointer resides.
 align 8
+; Also read by obj_binary_op (src/object.asm), which is the same protocol made
+; callable from a builtin.
+global binary_op_offsets
 binary_op_offsets:
     ; Symbolic, not literal: these are byte offsets into PyNumberMethods, and
     ; a reorder of that struc used to mis-dispatch every binary operator in

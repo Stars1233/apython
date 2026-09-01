@@ -174,6 +174,16 @@
     call raise_exception
 %endmacro
 
+; The same, but it comes back: set_exception records the exception and returns,
+; leaving the unwind to the interpreter frame.  For a helper that holds owned
+; references at the point it fails -- RAISE would abandon the C stack and leak
+; every one of them.  The caller must return its documented error value.
+%macro SET_EXC 2                ; %1 = exception type symbol, %2 = message
+    lea rdi, [rel %1]
+    CSTRING rsi, %2
+    call set_exception
+%endmacro
+
 ; Build a builtin function and store it in a module dict under its own name.
 ; abcmod, weakrefmod and sre_module each carried a byte-identical private copy
 ; of this (ABC_ADD_FUNC, WR_ADD_FUNC, SRE_ADD_FUNC).  r12 holds the dict.

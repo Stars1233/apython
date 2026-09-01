@@ -739,7 +739,19 @@ DEF_FUNC obj_richcompare_bool, ORB_FRAME
     je .orb_false
     cmp edx, PY_NE
     je .orb_true
-    RAISE exc_TypeError_type, "unorderable types"
+    ; Name the operator the caller actually asked for.  A flat "unorderable
+    ; types" here read differently from the identical failure raised by
+    ; COMPARE_OP and by list.sort, and min()/max() go through this one.
+    lea rax, [rel orb_unorderable_msgs]
+    movsxd rdx, edx
+    mov rsi, [rax + rdx*8]
+    lea rdi, [rel exc_TypeError_type]
+    ; set_exception, not raise_exception: this function holds a reference to
+    ; both operands, and an unwind from here abandons the C stack and leaks
+    ; them.  -1 is what the contract above already promises.
+    extern set_exception
+    call set_exception
+    jmp .orb_error
 
 .orb_have_result:
     mov [rbp - ORB_RES], rax    ; the result Value, owned
@@ -773,7 +785,199 @@ DEF_FUNC obj_richcompare_bool, ORB_FRAME
     ret
 END_FUNC obj_richcompare_bool
 
+; obj_binary_op(rdi = left Value, rsi = right Value, edx = op index, 0..12)
+;   -> rax = result Value, or 0 with an exception pending
+;
+; CPython's PyNumber_Add and its siblings, made callable.  The whole protocol
+; lived inside op_binary_op, which pops from r13 and leaves through DISPATCH,
+; so no builtin could reach it: sum() hardcoded int_add/float_add and
+; min()/max() hardcoded a type ladder.  Both then read a declining slot's NULL
+; Value as the answer, and a NULL on the value stack surfaces as a failure in
+; whatever runs next -- sum([1j, 2j]) reported "build_string expects str".
+;
+; The order is binary_op1's: the left type's slot, the right type's same slot,
+; then the sequence fallback, then the dunder pair on a heaptype, then
+; TypeError.  Only the non-inplace half, 0..12; nothing that reduces a
+; sequence needs the other one.
+OBO_LEFT  equ 8
+OBO_RIGHT equ 16
+OBO_OP    equ 24
+OBO_OFF   equ 32
+OBO_EXC   equ 40
+OBO_FRAME equ 48            ; + 0 pushes = 48
+
+extern binary_op_offsets
+extern binop_dunder_table
+extern binop_rdunder_table
+extern dunder_call_2
+
+DEF_FUNC obj_binary_op, OBO_FRAME
+    mov [rbp - OBO_LEFT], rdi
+    mov [rbp - OBO_RIGHT], rsi
+    movsxd rdx, edx
+    mov [rbp - OBO_OP], rdx
+    lea rax, [rel binary_op_offsets]
+    mov rax, [rax + rdx*8]
+    mov [rbp - OBO_OFF], rax    ; the nb_* offset both slot tries use
+
+    ; Hold a strong reference to both operands for the duration, as
+    ; obj_richcompare_bool does and for the same reason: a slot or a dunder
+    ; runs arbitrary Python, and the caller's operands are usually borrowed
+    ; slots in an array that call can reach.
+    INCREF_V rdi, rax
+    INCREF_V rsi, rax
+
+    DUNDER_EXC_SAVE [rbp - OBO_EXC]
+
+    ; --- the left type's slot ---
+    mov rdi, [rbp - OBO_LEFT]
+    call value_type
+    test rax, rax
+    jz .obo_right_slot
+    mov rax, [rax + PyTypeObject.tp_as_number]
+    test rax, rax
+    jz .obo_right_slot
+    mov rcx, [rbp - OBO_OFF]
+    mov rax, [rax + rcx]
+    test rax, rax
+    jz .obo_right_slot
+    mov rdi, [rbp - OBO_LEFT]
+    mov rsi, [rbp - OBO_RIGHT]
+    call rax
+    test rax, rax
+    jnz .obo_done               ; a non-NULL Value is the answer
+    DUNDER_RAISED [rbp - OBO_EXC], .obo_error
+
+.obo_right_slot:
+    ; The left slot declined.  The right type gets the same slot with the
+    ; operands still in their original order -- the only route by which a
+    ; numeric type the left side has never heard of can answer.
+    mov rdi, [rbp - OBO_RIGHT]
+    call value_type
+    test rax, rax
+    jz .obo_seq
+    mov rax, [rax + PyTypeObject.tp_as_number]
+    test rax, rax
+    jz .obo_seq
+    mov rcx, [rbp - OBO_OFF]
+    mov rax, [rax + rcx]
+    test rax, rax
+    jz .obo_seq
+    mov rdi, [rbp - OBO_LEFT]
+    mov rsi, [rbp - OBO_RIGHT]
+    call rax
+    test rax, rax
+    jnz .obo_done
+    DUNDER_RAISED [rbp - OBO_EXC], .obo_error
+
+.obo_seq:
+    ; sq_concat for +, sq_repeat for *, off the left operand -- what makes
+    ; sum(list_of_lists, []) work.
+    mov rcx, [rbp - OBO_OP]
+    cmp rcx, 0                  ; NB_ADD
+    je .obo_seq_have_op
+    cmp rcx, 5                  ; NB_MULTIPLY
+    jne .obo_dunder
+.obo_seq_have_op:
+    mov rdi, [rbp - OBO_LEFT]
+    call value_type
+    test rax, rax
+    jz .obo_dunder
+    mov rax, [rax + PyTypeObject.tp_as_sequence]
+    test rax, rax
+    jz .obo_dunder
+    mov rcx, [rbp - OBO_OP]
+    test rcx, rcx
+    jnz .obo_seq_repeat
+    mov rax, [rax + PySequenceMethods.sq_concat]
+    jmp .obo_seq_call
+.obo_seq_repeat:
+    mov rax, [rax + PySequenceMethods.sq_repeat]
+.obo_seq_call:
+    test rax, rax
+    jz .obo_dunder
+    mov rdi, [rbp - OBO_LEFT]
+    mov rsi, [rbp - OBO_RIGHT]
+    call rax
+    test rax, rax
+    jnz .obo_done
+    DUNDER_RAISED [rbp - OBO_EXC], .obo_error
+
+.obo_dunder:
+    ; __add__ on the left, then __radd__ on the right.  A heaptype's binary
+    ; dunders have no nb_* slot of their own -- slots.asm installs only the
+    ; unary ones -- so this arm, not the two above, is what serves a user
+    ; class.  The tag argument is TAG_PTR because V_PACK leaves a Value
+    ; alone under it, which is what the operands already are.
+    mov rdi, [rbp - OBO_LEFT]
+    V_TEST_PTR rdi, rax
+    ja .obo_rdunder          ; an immediate has no dunders
+    mov rax, [rdi + PyObject.ob_type]
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_HEAPTYPE
+    jz .obo_rdunder
+    mov rcx, [rbp - OBO_OP]
+    lea rdx, [rel binop_dunder_table]
+    mov rdx, [rdx + rcx*8]
+    test rdx, rdx
+    jz .obo_rdunder
+    mov rsi, [rbp - OBO_RIGHT]
+    mov ecx, TAG_PTR
+    call dunder_call_2
+    test rax, rax
+    jnz .obo_done
+    DUNDER_RAISED [rbp - OBO_EXC], .obo_error
+
+.obo_rdunder:
+    mov rdi, [rbp - OBO_RIGHT]
+    V_TEST_PTR rdi, rax
+    ja .obo_unsupported          ; an immediate has no dunders
+    mov rax, [rdi + PyObject.ob_type]
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_HEAPTYPE
+    jz .obo_unsupported
+    mov rcx, [rbp - OBO_OP]
+    lea rdx, [rel binop_rdunder_table]
+    mov rdx, [rdx + rcx*8]
+    test rdx, rdx
+    jz .obo_unsupported
+    mov rsi, [rbp - OBO_LEFT]   ; reflected: the right operand is self
+    mov ecx, TAG_PTR
+    call dunder_call_2
+    test rax, rax
+    jnz .obo_done
+    DUNDER_RAISED [rbp - OBO_EXC], .obo_error
+
+.obo_unsupported:
+    ; SET_EXC, not RAISE: .obo_done below still has to release both operands,
+    ; and an unwind from here would never reach it.
+    SET_EXC exc_TypeError_type, "unsupported operand type(s)"
+    jmp .obo_error
+
+.obo_error:
+    xor eax, eax
+
+.obo_done:
+    mov [rbp - OBO_OP], rax     ; the op is finished with; reuse the slot
+    mov rdi, [rbp - OBO_LEFT]
+    DECREF_V rdi, rdx
+    mov rdi, [rbp - OBO_RIGHT]
+    DECREF_V rdi, rdx
+    mov rax, [rbp - OBO_OP]
+    leave
+    ret
+END_FUNC obj_binary_op
+
 section .rodata
+align 8
+orb_unorderable_msgs:
+    dq orb_msg_lt, orb_msg_le, orb_msg_eq, orb_msg_eq, orb_msg_gt, orb_msg_ge
+orb_msg_lt: db "'<' not supported between instances", 0
+orb_msg_le: db "'<=' not supported between instances", 0
+orb_msg_gt: db "'>' not supported between instances", 0
+orb_msg_ge: db "'>=' not supported between instances", 0
+; == and != never reach the raise -- both fall back to identity above -- but
+; the table is indexed by the op, so the two slots have to hold something.
+orb_msg_eq: db "unorderable types", 0
+
 align 4
 orb_swap_table:
     dd PY_GT                    ; PY_LT reversed

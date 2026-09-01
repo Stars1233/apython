@@ -603,122 +603,154 @@ END_FUNC builtin_all
 ;; ============================================================================
 ;; 14. builtin_sum(args, nargs) - sum(iterable[, start])
 ;; ============================================================================
-DEF_FUNC builtin_sum
+;; Every addition goes through obj_binary_op, the whole numeric protocol.
+;; This used to pick between int_add and float_add on the two operands' tags
+;; and never test the result, so anything neither of those slots accepted --
+;; complex, Decimal, any class with __add__ -- left a NULL Value as the
+;; accumulator.  NULL is not an error the loop noticed; it was added to,
+;; DECREFed, and finally returned, and the failure surfaced wherever the
+;; caller next touched it.
+SM_ACC   equ 8              ; the accumulator Value, owned
+SM_ITEM  equ 16             ; the item just pulled from the iterator, owned
+SM_NEW   equ 24             ; the sum, held across the two DECREFs below
+SM_EXC   equ 32
+SM_FRAME equ 32             ; + 2 pushes = 48, 16-byte aligned
+
+extern value_type
+extern raise_type_error_with_name
+extern obj_binary_op
+extern bytes_type
+extern bytearray_type
+
+DEF_FUNC builtin_sum, SM_FRAME
     push rbx
     push r12
-    push r13
-    push r14
-    push r15
-    sub rsp, 8
 
-    mov rbx, rdi
-    mov r14, rsi
-
-    cmp r14, 1
+    cmp rsi, 1
     jb .sum_error
-    cmp r14, 2
+    cmp rsi, 2
     ja .sum_error
 
-    cmp r14, 2
-    je .sum_has_start
+    mov rbx, rdi                ; args
+    cmp rsi, 2
+    je .sum_start
+
     xor eax, eax
-    mov r13, rax
-    mov qword [rsp], TAG_SMALLINT      ; accum_tag = SmallInt (0)
-    jmp .sum_get_iter
+    V_PACK_I64 rax, rcx         ; the default start is the int 0
+    mov [rbp - SM_ACC], rax
+    jmp .sum_iter
 
-.sum_has_start:
-    mov r13, [rbx + 8]            ; args[1] payload (start value, 16-byte stride)
-    V_UNPACK r13, rax       ; args[1]
-    mov [rsp], eax                 ; accum_tag
-    cmp eax, TAG_PTR
-    jne .sum_get_iter
-    inc qword [r13 + PyObject.ob_refcnt]
+.sum_start:
+    mov rax, [rbx + 8]          ; args[1]
+    mov [rbp - SM_ACC], rax
+    INCREF_V rax, rcx
+    ; CPython refuses a str, bytes or bytearray start and names the better
+    ; tool.  Summing them works, but builds one temporary per element.
+    V_TEST_PTR rax, rcx
+    ja .sum_iter                ; an immediate is fine
+    mov rcx, [rax + PyObject.ob_type]
+    lea rdx, [rel str_type]
+    cmp rcx, rdx
+    je .sum_no_str
+    lea rdx, [rel bytes_type]
+    cmp rcx, rdx
+    je .sum_no_bytes
+    lea rdx, [rel bytearray_type]
+    cmp rcx, rdx
+    je .sum_no_bytearray
 
-.sum_get_iter:
-    V_TEST_PTR_M [rbx], r11      ; args[0] a pointer?
-    ja .sum_type_error
-    mov rdi, [rbx]                     ; args[0] payload (iterable)
-    mov rax, [rdi + PyObject.ob_type]
-    mov rcx, [rax + PyTypeObject.tp_iter]
-    test rcx, rcx
-    jz .sum_type_error
-    call rcx
-    mov rbx, rax
-
+.sum_iter:
+    mov rdi, [rbx]              ; args[0], the iterable
+    call value_type
+    test rax, rax
+    jz .sum_not_iterable
+    mov rax, [rax + PyTypeObject.tp_iter]
+    test rax, rax
+    jz .sum_not_iterable
+    mov rdi, [rbx]
+    call rax
+    test rax, rax
+    jz .sum_fail_no_iter        ; tp_iter raised
+    mov rbx, rax                ; rbx = the iterator, owned
     mov rax, [rbx + PyObject.ob_type]
     mov r12, [rax + PyTypeObject.tp_iternext]
+    test r12, r12
+    jz .sum_not_iterable_have
+
+    DUNDER_EXC_SAVE [rbp - SM_EXC]
 
 .sum_loop:
     mov rdi, rbx
     call r12
-    V_UNPACK rax, rdx           ; tp_iternext returns a Value
-    test edx, edx
-    jz .sum_done
+    test rax, rax
+    jz .sum_stop                ; exhausted -- or it raised
+    mov [rbp - SM_ITEM], rax
 
-    mov r14, rax                   ; item payload
-    mov r15d, edx                  ; item tag
-
-    mov rdi, r13                   ; accum payload
-    mov rsi, r14                   ; item payload
-    mov edx, [rsp]                 ; accum tag (left_tag)
-    mov ecx, r15d                  ; item tag (right_tag)
-    ; Use float_add if either operand is float, else int_add
-    cmp edx, TAG_FLOAT
-    je .sum_float_add
-    cmp ecx, TAG_FLOAT
-    je .sum_float_add
-    V_PACK rdi, rdx
-    V_PACK rsi, rcx
-    call int_add
-    V_UNPACK rax, rdx           ; int_add returns a Value
-    jmp .sum_have_result
-.sum_float_add:
-    extern float_add
-    V_PACK rdi, rdx
-    V_PACK rsi, rcx
-    call float_add
-    V_UNPACK rax, rdx           ; float_add returns a Value
-.sum_have_result:
-    ; rax = new accum payload, edx = new accum tag
-
-    ; Save new accum before DECREFs
-    push rax
-    push rdx
-
-    ; DECREF old accumulator (tag at [rsp+16] = original [rsp])
-    mov rdi, r13
-    mov esi, [rsp + 16]
-    DECREF_VAL rdi, rsi
-
-    ; DECREF item
-    mov rdi, r14
-    mov esi, r15d
-    DECREF_VAL rdi, rsi
-
-    ; Restore new accum
-    pop rdx                        ; new accum tag
-    pop r13                        ; new accum payload
-    mov [rsp], edx                 ; update accum_tag slot
-
+    mov rdi, [rbp - SM_ACC]
+    mov rsi, rax
+    xor edx, edx                ; NB_ADD
+    call obj_binary_op
+    ; Park the result before either DECREF: obj_dealloc clobbers every
+    ; caller-saved register, this one included.
+    mov [rbp - SM_NEW], rax
+    mov rdi, [rbp - SM_ITEM]
+    DECREF_V rdi, rdx
+    mov rdi, [rbp - SM_ACC]
+    DECREF_V rdi, rdx
+    mov rax, [rbp - SM_NEW]
+    mov [rbp - SM_ACC], rax     ; NULL if it raised; DECREF_V below is NULL-safe
+    test rax, rax
+    jz .sum_fail
     jmp .sum_loop
 
-.sum_done:
+.sum_stop:
+    ; tp_iternext answers NULL both for "exhausted" and for a raise, so the
+    ; two are told apart by the pending exception, not by the return.
+    DUNDER_RAISED [rbp - SM_EXC], .sum_fail
     mov rdi, rbx
     call obj_decref
-    mov rax, r13
-    mov edx, [rsp]                 ; accum_tag
-    add rsp, 8
-    pop r15
-    pop r14
-    pop r13
+    mov rax, [rbp - SM_ACC]
     pop r12
     pop rbx
     leave
-    V_PACK rax, rdx             ; builtins return one Value
     ret
 
-.sum_type_error:
-    RAISE exc_TypeError_type, "argument is not iterable"
+.sum_fail:
+    mov rdi, rbx
+    call obj_decref
+.sum_fail_no_iter:
+    mov rdi, [rbp - SM_ACC]
+    DECREF_V rdi, rdx
+    xor eax, eax
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.sum_not_iterable_have:
+    mov rdi, rbx
+    call obj_decref
+.sum_not_iterable:
+    mov rdi, [rbp - SM_ACC]
+    DECREF_V rdi, rdx
+    mov rsi, [rbx]
+    CSTRING rdi, `'\x01' object is not iterable`
+    call raise_type_error_with_name
+
+.sum_no_str:
+    mov rdi, [rbp - SM_ACC]
+    DECREF_V rdi, rdx
+    RAISE exc_TypeError_type, "sum() can't sum strings [use ''.join(seq) instead]"
+
+.sum_no_bytes:
+    mov rdi, [rbp - SM_ACC]
+    DECREF_V rdi, rdx
+    RAISE exc_TypeError_type, "sum() can't sum bytes [use b''.join(seq) instead]"
+
+.sum_no_bytearray:
+    mov rdi, [rbp - SM_ACC]
+    DECREF_V rdi, rdx
+    RAISE exc_TypeError_type, "sum() can't sum bytearray [use b''.join(seq) instead]"
 
 .sum_error:
     RAISE exc_TypeError_type, "sum expected 1-2 arguments"
@@ -728,21 +760,28 @@ END_FUNC builtin_sum
 ;; 15-16. builtin_min / builtin_max
 ;; ============================================================================
 ; Shared implementation: minmax_impl(args, nargs, cmp_op)
-;   rdi = args, rsi = nargs, edx = cmp_op (PY_LT=0 for min, PY_GT=4 for max)
-; Returns (rax=payload, rdx=tag)
+;   rdi = args (Value[]), rsi = nargs, edx = cmp_op (PY_LT for min, PY_GT for max)
+;   -> rax = the winning Value, or 0 with an exception pending
 ;
-; Stack layout:
-;   [rsp + MM_TAG]     = current best tag (64-bit)
-;   [rsp + MM_CMP_RES] = richcompare result ptr
-;   [rsp + MM_ITER]    = iterator ptr (iter path only)
-;   [rsp + MM_ITERNX]  = tp_iternext fn ptr (iter path only)
-;   [rsp + MM_CMP_OP]  = comparison op (PY_LT or PY_GT)
-MM_TAG     equ 8
-MM_CMP_RES equ 16
-MM_ITER    equ 24
-MM_ITERNX  equ 32
-MM_CMP_OP  equ 40
-MM_FRAME   equ 48           ; + 5 pushes = 88, not 16-aligned
+; Every comparison goes through obj_richcompare_bool.  This used to call
+; tp_richcompare off a hand-rolled type ladder and then test the result
+; against bool_true, which conflated three different answers with "the
+; incumbent keeps": a type the ladder did not recognise, a slot that declined,
+; and a comparison that raised.  max([1j, 2j]) answered 1j where CPython
+; raises TypeError, and a raising __lt__ was swallowed outright -- while
+; sorted() over the same values was correct, because list.sort had already
+; been taught the difference.  It also handed obj_decref the NULL a declining
+; slot returns.
+MM_BEST   equ 8             ; the incumbent Value, owned
+MM_CAND   equ 16            ; the candidate Value; owned on the iterator path
+MM_ITER   equ 24
+MM_ITERNX equ 32
+MM_OP     equ 40
+MM_N      equ 48
+MM_EXC    equ 56
+MM_FRAME  equ 64            ; + 2 pushes = 80, 16-byte aligned
+
+extern obj_richcompare_bool
 
 DEF_FUNC_BARE builtin_min
     xor edx, edx                   ; PY_LT = 0
@@ -757,268 +796,145 @@ END_FUNC builtin_max
 DEF_FUNC_LOCAL minmax_impl, MM_FRAME
     push rbx
     push r12
-    push r13
-    push r14
-    push r15
-
-    mov [rbp - MM_CMP_OP], edx    ; save comparison op
+    mov [rbp - MM_OP], edx
+    ; The failure paths release both of these, so they must be readable from
+    ; the first instruction that can jump to one.
+    mov qword [rbp - MM_BEST], 0
+    mov qword [rbp - MM_CAND], 0
 
     cmp rsi, 1
     jb .mm_error
-
-    ; nargs == 1 → iterate the single argument
-    cmp rsi, 1
     je .mm_iter_path
 
-    ; --- Multi-arg path: min/max(a, b, ...) ---
-    mov rbx, rdi                   ; args array
-    mov r12, rsi                   ; nargs
-    mov r13, 1                     ; index = 1
-
-    mov r14, [rbx]                 ; args[0] = current best
-    V_UNPACK r14, rax
-    mov [rbp - MM_TAG], rax
-    INCREF_VAL r14, rax
+    ; --- min/max(a, b, ...) ---
+    mov rbx, rdi                ; args
+    mov [rbp - MM_N], rsi
+    mov rax, [rbx]              ; args[0] starts as the incumbent
+    mov [rbp - MM_BEST], rax
+    INCREF_V rax, rcx
+    mov r12, 1
 
 .mm_loop:
-    cmp r13, r12
+    cmp r12, [rbp - MM_N]
     jge .mm_done
-
-    mov rax, r13
-    shl rax, 3
-    mov r15, [rbx + rax]          ; candidate Value
-    V_UNPACK r15, rcx
-
-    ; SmallInt fast path: both SmallInt?
-    cmp qword [rbp - MM_TAG], TAG_SMALLINT
-    jne .mm_slow
-    cmp rcx, TAG_SMALLINT
-    jne .mm_slow
-    ; For min (PY_LT=0): update if candidate < best
-    ; For max (PY_GT=4): update if candidate > best
-    cmp dword [rbp - MM_CMP_OP], 0
-    jne .mm_si_max
-    cmp r15, r14
-    jge .mm_no_update
-    mov r14, r15
-    jmp .mm_no_update
-.mm_si_max:
-    cmp r15, r14
-    jle .mm_no_update
-    mov r14, r15
-    jmp .mm_no_update
-
-.mm_slow:
-    ; Resolve candidate type for richcompare
-    mov r8, rcx                    ; save candidate tag
-    test rcx, rcx
-    js .mm_cand_ss
-    cmp rcx, TAG_PTR
-    jne .mm_try_float
-    mov rdi, r15
-    mov rax, [rdi + PyObject.ob_type]
-    jmp .mm_have_type
-.mm_cand_ss:
-    lea rax, [rel str_type]
-    jmp .mm_have_type
-.mm_try_float:
-    cmp rcx, TAG_FLOAT
-    jne .mm_no_update
-    lea rax, [rel float_type]
-.mm_have_type:
-    mov rcx, [rax + PyTypeObject.tp_richcompare]
-    test rcx, rcx
-    jz .mm_no_update
-
-    ; tp_richcompare(candidate, best, cmp_op, cand_tag, best_tag)
-    mov rdi, r15
-    mov rsi, r14
-    mov edx, [rbp - MM_CMP_OP]
-    mov rax, rcx                   ; fn ptr
-    mov rcx, r8                    ; left_tag = candidate tag
-    mov r8, [rbp - MM_TAG]         ; right_tag = best tag
-    V_PACK rdi, rcx             ; left  -> Value
-    V_PACK rsi, r8              ; right -> Value
-    call rax
-
-    lea rcx, [rel bool_true]
-    cmp rax, rcx
-    mov [rbp - MM_CMP_RES], rax
-    jne .mm_slow_no_upd
-
-    ; Update best: DECREF old, set new = candidate
-    mov rdi, r14
-    mov rsi, [rbp - MM_TAG]
-    DECREF_VAL rdi, rsi
-    mov r14, r15
-    mov rax, r13
-    shl rax, 3
-    mov rax, [rbx + rax]
-    V_UNPACK rax, rcx
-    mov [rbp - MM_TAG], rcx
-    INCREF_VAL r14, rcx
-
-    mov rdi, [rbp - MM_CMP_RES]
-    call obj_decref
-    jmp .mm_no_update
-
-.mm_slow_no_upd:
-    mov rdi, [rbp - MM_CMP_RES]
-    call obj_decref
-
-.mm_no_update:
-    inc r13
+    mov rdi, [rbx + r12*8]      ; the candidate
+    mov rsi, [rbp - MM_BEST]
+    mov edx, [rbp - MM_OP]
+    call obj_richcompare_bool
+    cmp eax, 0
+    jl .mm_fail                 ; the comparison raised
+    je .mm_next                 ; the incumbent keeps
+    mov rax, [rbx + r12*8]
+    INCREF_V rax, rcx           ; before the release, in case they are one object
+    mov rdi, [rbp - MM_BEST]
+    mov [rbp - MM_BEST], rax
+    DECREF_V rdi, rdx
+.mm_next:
+    inc r12
     jmp .mm_loop
 
 .mm_done:
-    mov rax, r14
-    mov rdx, [rbp - MM_TAG]
-    pop r15
-    pop r14
-    pop r13
+    mov rax, [rbp - MM_BEST]
     pop r12
     pop rbx
     leave
-    V_PACK rax, rdx             ; builtins return one Value
     ret
 
-    ; --- Iterator path: min/max(iterable) ---
+.mm_fail:
+    mov rdi, [rbp - MM_BEST]
+    DECREF_V rdi, rdx
+    xor eax, eax
+    pop r12
+    pop rbx
+    leave
+    ret
+
+    ; --- min/max(iterable) ---
 .mm_iter_path:
-    ; Get iterator from args[0]
-    V_TEST_PTR_M [rdi], r11      ; args[0] a pointer?
-    ja .mm_iter_type_error
-    mov rdi, [rdi]                     ; iterable
-    mov rax, [rdi + PyObject.ob_type]
-    mov rcx, [rax + PyTypeObject.tp_iter]
-    test rcx, rcx
-    jz .mm_iter_type_error
-    call rcx
+    mov rbx, rdi                ; args, kept for the error message
+    mov rdi, [rdi]              ; args[0], the iterable
+    call value_type
     test rax, rax
-    jz .mm_iter_type_error
+    jz .mm_not_iterable
+    mov rax, [rax + PyTypeObject.tp_iter]
+    test rax, rax
+    jz .mm_not_iterable
+    mov rdi, [rbx]
+    call rax
+    test rax, rax
+    jz .mm_fail                 ; tp_iter raised
     mov [rbp - MM_ITER], rax
-    mov rbx, [rax + PyObject.ob_type]
-    mov rbx, [rbx + PyTypeObject.tp_iternext]
-    mov [rbp - MM_ITERNX], rbx
+    mov rcx, [rax + PyObject.ob_type]
+    mov rcx, [rcx + PyTypeObject.tp_iternext]
+    test rcx, rcx
+    jz .mm_iter_no_next
+    mov [rbp - MM_ITERNX], rcx
 
-    ; Get first element → initial best
+    DUNDER_EXC_SAVE [rbp - MM_EXC]
+
     mov rdi, [rbp - MM_ITER]
-    call rbx
-    V_UNPACK rax, rdx           ; tp_iternext returns a Value
-    test edx, edx
+    call qword [rbp - MM_ITERNX]
+    test rax, rax
     jz .mm_iter_empty
-
-    mov r14, rax                       ; best payload
-    mov [rbp - MM_TAG], rdx            ; best tag
-    INCREF_VAL r14, rdx
-    DECREF_VAL rax, rdx                ; DECREF iternext result
+    mov [rbp - MM_BEST], rax    ; owned, as tp_iternext hands it over
 
 .mm_iter_loop:
     mov rdi, [rbp - MM_ITER]
     call qword [rbp - MM_ITERNX]
-    V_UNPACK rax, rdx           ; tp_iternext returns a Value
-    test edx, edx
-    jz .mm_iter_done
-
-    mov r15, rax                       ; candidate payload
-    mov r12, rdx                       ; candidate tag
-
-    ; SmallInt fast path
-    cmp qword [rbp - MM_TAG], TAG_SMALLINT
-    jne .mm_iter_slow
-    cmp r12, TAG_SMALLINT
-    jne .mm_iter_slow
-    cmp dword [rbp - MM_CMP_OP], 0
-    jne .mm_iter_si_max
-    cmp r15, r14
-    jge .mm_iter_no_update
-    mov r14, r15
-    jmp .mm_iter_no_update
-.mm_iter_si_max:
-    cmp r15, r14
-    jle .mm_iter_no_update
-    mov r14, r15
-    jmp .mm_iter_no_update
-
-.mm_iter_slow:
-    ; Resolve candidate type for richcompare
-    mov rcx, r12
-    test rcx, rcx
-    js .mm_iter_cand_ss
-    cmp rcx, TAG_PTR
-    jne .mm_iter_try_float
-    mov rdi, r15
-    mov rax, [rdi + PyObject.ob_type]
-    jmp .mm_iter_have_type
-.mm_iter_cand_ss:
-    lea rax, [rel str_type]
-    jmp .mm_iter_have_type
-.mm_iter_try_float:
-    cmp rcx, TAG_FLOAT
-    jne .mm_iter_no_update
-    lea rax, [rel float_type]
-.mm_iter_have_type:
-    mov rax, [rax + PyTypeObject.tp_richcompare]
     test rax, rax
-    jz .mm_iter_no_update
-
-    ; tp_richcompare(candidate, best, cmp_op, cand_tag, best_tag)
-    mov rdi, r15
-    mov rsi, r14
-    mov edx, [rbp - MM_CMP_OP]
-    mov rcx, r12
-    mov r8, [rbp - MM_TAG]
-    V_PACK rdi, rcx             ; left  -> Value
-    V_PACK rsi, r8              ; right -> Value
-    call rax
-    V_UNPACK rax, rdx           ; tp_richcompare returns a Value
-
-    lea rcx, [rel bool_true]
-    cmp rax, rcx
-    mov [rbp - MM_CMP_RES], rax
-    jne .mm_iter_slow_no_upd
-
-    ; Update best
-    mov rdi, r14
-    mov rsi, [rbp - MM_TAG]
-    DECREF_VAL rdi, rsi
-    mov r14, r15
-    mov [rbp - MM_TAG], r12
-    INCREF_VAL r14, r12
-
-    mov rdi, [rbp - MM_CMP_RES]
-    call obj_decref
-    jmp .mm_iter_no_update
-
-.mm_iter_slow_no_upd:
-    mov rdi, [rbp - MM_CMP_RES]
-    call obj_decref
-
-.mm_iter_no_update:
-    ; DECREF candidate
-    DECREF_VAL r15, r12
+    jz .mm_iter_stop
+    mov [rbp - MM_CAND], rax
+    mov rdi, rax
+    mov rsi, [rbp - MM_BEST]
+    mov edx, [rbp - MM_OP]
+    call obj_richcompare_bool
+    cmp eax, 0
+    jl .mm_iter_fail
+    je .mm_iter_next
+    ; The candidate wins: hand its reference to BEST rather than adjusting
+    ; two counts, and blank CAND so the release below is a no-op.
+    mov rdi, [rbp - MM_BEST]
+    mov rax, [rbp - MM_CAND]
+    mov [rbp - MM_BEST], rax
+    mov qword [rbp - MM_CAND], 0
+    DECREF_V rdi, rdx
+.mm_iter_next:
+    mov rdi, [rbp - MM_CAND]
+    DECREF_V rdi, rdx
+    mov qword [rbp - MM_CAND], 0
     jmp .mm_iter_loop
 
-.mm_iter_done:
+.mm_iter_stop:
+    ; tp_iternext answers NULL for "exhausted" and for a raise alike.
+    DUNDER_RAISED [rbp - MM_EXC], .mm_iter_fail
     mov rdi, [rbp - MM_ITER]
     call obj_decref
-    mov rax, r14
-    mov rdx, [rbp - MM_TAG]
-    pop r15
-    pop r14
-    pop r13
+    mov rax, [rbp - MM_BEST]
     pop r12
     pop rbx
     leave
-    V_PACK rax, rdx             ; builtins return one Value
     ret
 
+.mm_iter_fail:
+    mov rdi, [rbp - MM_ITER]
+    call obj_decref
+    mov rdi, [rbp - MM_CAND]
+    DECREF_V rdi, rdx
+    jmp .mm_fail
+
 .mm_iter_empty:
+    DUNDER_RAISED [rbp - MM_EXC], .mm_iter_fail
     mov rdi, [rbp - MM_ITER]
     call obj_decref
     RAISE exc_ValueError_type, "min()/max() arg is an empty sequence"
 
-.mm_iter_type_error:
-    RAISE exc_TypeError_type, "argument is not iterable"
+.mm_iter_no_next:
+    mov rdi, [rbp - MM_ITER]
+    call obj_decref
+.mm_not_iterable:
+    mov rsi, [rbx]
+    CSTRING rdi, `'\x01' object is not iterable`
+    call raise_type_error_with_name
 
 .mm_error:
     RAISE exc_TypeError_type, "min()/max() expected at least 1 argument"

@@ -245,6 +245,7 @@ test_str_predicates
 test_str_search
 test_str_subclass_dict
 test_subclass_item_slots
+test_sum_protocol
 test_super_descriptors
 test_syntax_error_args
 test_syntax_error_location

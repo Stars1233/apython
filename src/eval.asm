@@ -636,6 +636,32 @@ END_FUNC eval_exception_unwind
 ; raise_exception(PyTypeObject *type, const char *msg_cstr)
 ; Create an exception from a C string and begin unwinding.
 ; Callable from opcode handlers - uses eval loop registers.
+; set_exception(rdi = exception type, rsi = message C string)
+;
+; raise_exception's first half, without the unwind.  raise_exception tail-jumps
+; into eval_exception_unwind, which abandons the C stack -- so a helper that
+; holds an owned reference cannot raise and still release it, and every one
+; that tried leaked.  A helper whose contract already says "0 (or -1) with an
+; exception pending" uses this instead and returns normally, leaving the
+; unwinding to the interpreter frame that called it.
+DEF_FUNC set_exception
+    call exc_from_cstr
+
+    push rax
+    mov rsi, [rel current_exception]
+    test rsi, rsi
+    jz .se_no_prev
+    mov rdi, rax
+    call exc_set_context
+    mov rdi, [rel current_exception]
+    call obj_decref
+.se_no_prev:
+    pop rax
+    mov [rel current_exception], rax
+    leave
+    ret
+END_FUNC set_exception
+
 DEF_FUNC raise_exception
 
     ; Create exception: exc_from_cstr(type, msg)
