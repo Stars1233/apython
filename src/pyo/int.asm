@@ -3031,7 +3031,17 @@ DEF_FUNC int_getattr, IG_FRAME
     jz .ig_self_out
     mov edx, TAG_PTR
     call int_unwrap             ; rdi/edx = the plain int it wraps
-    V_PACK rdi, rdx             ; owns whatever it may have had to allocate
+    cmp edx, TAG_PTR
+    jne .ig_wrapped_immediate
+    ; A pointer here is BORROWED from the wrapper, and V_PACK does nothing to
+    ; it: handing it back without a reference of its own underflows the
+    ; refcount, which shows up as a crash at teardown rather than at the read.
+    mov rax, rdi
+    INCREF_V rax, rcx
+    leave
+    ret
+.ig_wrapped_immediate:
+    V_PACK rdi, rdx             ; an immediate, or a box V_PACK now owns
     mov rax, rdi
     leave
     ret
