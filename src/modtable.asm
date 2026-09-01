@@ -29,6 +29,7 @@ extern abc_module_create
 extern weakref_module_create
 extern errno_module_create
 extern posix_module_create
+extern io_module_create
 
 section .rodata
 
@@ -41,6 +42,7 @@ bm_n_abc:      db "_abc", 0
 bm_n_errno:    db "errno", 0
 bm_n_weakref:  db "_weakref", 0
 bm_n_posix:    db "posix", 0
+bm_n_io:       db "_io", 0
 
 align 8
 global builtin_module_table
@@ -49,6 +51,7 @@ global builtin_module_table
 ; rows that would -- sys and builtins -- are wired before the loop runs.
 builtin_module_table:
     dq bm_n_abc,      abc_module_create
+    dq bm_n_io,       io_module_create
     dq bm_n_sre,      sre_module_create
     dq bm_n_weakref,  weakref_module_create
     dq bm_n_asyncio,  asyncio_module_create

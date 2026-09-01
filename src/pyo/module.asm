@@ -64,6 +64,22 @@ DEF_FUNC module_new
     mov [rax + PyModuleObject.mod_name], rbx
     mov [rax + PyModuleObject.mod_dict], r12
 
+    ; __name__ lives in the dict, not only in mod_name: module_getattr looks
+    ; nowhere else, so every builtin module answered AttributeError for it --
+    ; and reading a module's own __name__ is ordinary code, not introspection.
+    ; CPython's module init writes it into the dict for the same reason.
+    push rax
+    lea rdi, [rel mod_name_key]
+    call str_from_cstr_heap
+    push rax
+    mov rdi, r12
+    mov rsi, rax
+    mov rdx, rbx
+    call dict_set
+    pop rdi
+    call obj_decref
+    pop rax
+
     push rax
     mov rdi, rax
     call gc_track
@@ -195,6 +211,8 @@ END_FUNC module_repr
 ;; Data
 ;; ============================================================================
 section .rodata
+
+mod_name_key: db "__name__", 0
 module_repr_str: db "<module>", 0
 module_type_name: db "module", 0
 ma_dunder_dict: db "__dict__", 0
