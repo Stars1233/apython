@@ -1,0 +1,1966 @@
+; posixmod.asm - the `posix` module
+;
+; The platform module os.py imports.  It gates on
+; `if 'posix' in sys.builtin_module_names`, so the name has to be in
+; builtin_module_table (src/modtable.asm) as well as in sys.modules; without
+; that, os.py raises "no os specific module found" whatever else exists here.
+;
+; The surface is the one measured to make every stdlib module that currently
+; fails on the missing platform module import: the file and directory calls
+; os.py and os.path reach for, `environ`, `error`, `stat_result`, the O_*/S_*
+; constants, and the wait/status family subprocess needs.
+;
+; Every syscall wrapper returns the kernel's own value -- the result, or
+; -errno.  POSIX_CHECK turns the second into an OSError of the right subclass
+; with the right filename, which is what makes `except FileNotFoundError`
+; work rather than a bare OSError.
+;
+; Refcount discipline, which is where the bugs are:
+;   - str_from_cstr_heap, str_new_heap and int_from_i64 return a FAT PAIR;
+;     bytes_new, tuple_new, list_new and dict_new return a RAW POINTER;
+;     list_append, dict_set and dict_get take VALUES.
+;   - Anything out of V_PACK is released with DECREF_V, never obj_decref:
+;     V_PACK boxes an int outside +-2^50 and hands back an owned reference,
+;     while an immediate owns nothing.  Every st_size and st_mtime_ns hits
+;     that under INT_STRESS=1.
+;   - MODULE_ADD_FUNC requires the module dict in r12.
+
+%include "macros.inc"
+%include "object.inc"
+
+ASM_INIT
+
+extern ap_malloc
+extern ap_free
+extern ap_memcpy
+extern ap_strlen
+extern obj_decref
+extern obj_dealloc
+extern obj_incref
+extern raise_exception
+extern raise_oserror
+extern raise_type_error_with_name
+extern exc_TypeError_type
+extern exc_ValueError_type
+extern exc_OSError_type
+extern str_from_cstr_heap
+extern str_new_heap
+extern str_type
+extern bytes_from_data
+extern bytes_type
+extern bytearray_type
+extern int_from_i64
+extern val_to_i64
+extern int_is_integer
+extern list_new
+extern list_append
+extern dict_new
+extern dict_set
+extern tuple_new
+extern module_new
+extern builtin_func_new
+extern none_singleton
+extern bool_true
+extern bool_false
+extern type_type
+extern structseq_new
+extern structseq_set
+extern structseq_init_type
+extern structseq_repr
+extern structseq_getattr
+extern structseq_dealloc
+extern dunder_call_1
+extern value_type
+extern strerror
+
+extern sys_stat
+extern sys_lstat
+extern sys_fstat
+extern sys_open
+extern sys_close
+extern sys_read
+extern sys_write
+extern sys_lseek
+extern sys_dup
+extern sys_getpid
+extern sys_getcwd
+extern sys_mkdir
+extern sys_rmdir
+extern sys_unlink
+extern sys_rename
+extern sys_readlink
+extern sys_chmod
+extern sys_access
+extern sys_umask
+extern sys_pipe2
+extern sys_getdents64
+extern sys_getrandom
+extern sys_wait4
+
+extern environ
+
+section .text
+
+;; ============================================================================
+;; POSIX_CHECK reg, filename_value
+;;
+;; The kernel returns -errno in [-4095, -1] and the result otherwise.  As an
+;; unsigned compare that is "at or above -4095", which is the standard test
+;; and needs no sign handling.
+;; ============================================================================
+%macro POSIX_CHECK 2            ; %1 = the result register, %2 = filename Value
+    cmp %1, -4095
+    jb %%ok
+    mov rdi, %1
+    neg rdi
+    mov rsi, %2
+    call raise_oserror          ; does not return
+%%ok:
+%endmacro
+
+;; ============================================================================
+;; posix_path_arg(rdi = Value) -> rax = const char *, rdx = the str/bytes whose
+;;   storage it points into (borrowed if rcx = 0, owned if rcx = 1)
+;;
+;; str, bytes, and anything with __fspath__.  Every PyStrObject and
+;; PyBytesObject here is NUL-terminated, so the pointer is the caller's path
+;; with no copy.
+;;
+;; An embedded NUL is refused: the syscall would silently see a shorter path,
+;; and CPython raises ValueError for exactly this.
+;;
+;; Returns rax = 0 with an exception pending on a bad type.
+;; ============================================================================
+PPA_VAL   equ 8
+PPA_OWNED equ 16
+PPA_PTR   equ 24
+PPA_FRAME equ 32            ; + 0 pushes = 32
+
+DEF_FUNC posix_path_arg, PPA_FRAME
+    mov [rbp - PPA_VAL], rdi
+    mov qword [rbp - PPA_OWNED], 0
+
+.ppa_classify:
+    mov rdi, [rbp - PPA_VAL]
+    V_TEST_PTR rdi, rax
+    ja .ppa_bad                 ; an immediate is never a path
+    mov rax, [rdi + PyObject.ob_type]
+    lea rcx, [rel str_type]
+    cmp rax, rcx
+    je .ppa_str
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_STR_SUBCLASS
+    jnz .ppa_str
+    lea rcx, [rel bytes_type]
+    cmp rax, rcx
+    je .ppa_bytes
+
+    ; os.PathLike: one __fspath__ call, whose result must itself be a str or
+    ; bytes.  Looping would let a __fspath__ returning another PathLike go
+    ; round for ever; CPython allows exactly one step too.
+    cmp qword [rbp - PPA_OWNED], 0
+    jne .ppa_bad                ; already followed one
+    CSTRING rsi, "__fspath__"
+    call dunder_call_1
+    test edx, edx
+    jz .ppa_bad
+    mov [rbp - PPA_VAL], rax
+    mov qword [rbp - PPA_OWNED], 1
+    jmp .ppa_classify
+
+.ppa_str:
+    mov rcx, [rdi + PyStrObject.ob_size]
+    lea rax, [rdi + PyStrObject.data]
+    jmp .ppa_checked
+.ppa_bytes:
+    mov rcx, [rdi + PyBytesObject.ob_size]
+    lea rax, [rdi + PyBytesObject.data]
+
+.ppa_checked:
+    ; The declared length and the C length must agree, or there is a NUL in
+    ; the middle and the syscall would act on a prefix.
+    mov [rbp - PPA_PTR], rax
+    push rcx
+    push rax                            ; twice, to keep rsp 16-byte aligned
+    mov rdi, rax
+    call ap_strlen
+    pop rcx
+    pop rcx                             ; the declared length
+    cmp rax, rcx
+    jne .ppa_embedded_nul
+    mov rax, [rbp - PPA_PTR]
+    mov rdx, [rbp - PPA_OWNED]
+    leave
+    ret
+
+.ppa_embedded_nul:
+    RAISE exc_ValueError_type, "embedded null byte"
+
+.ppa_bad:
+    mov rsi, [rbp - PPA_VAL]
+    CSTRING rdi, `path should be string, bytes, or os.PathLike, not \x01`
+    call raise_type_error_with_name
+END_FUNC posix_path_arg
+
+;; ============================================================================
+;; posix_stat_result(rdi = struct stat *) -> rax = a stat_result, or 0
+;;
+;; The ten sequence fields in CPython's order, then the six named-only ones.
+;; st_mode, st_uid and st_gid are 32-bit fields: read as 64 bits each would
+;; OR in its neighbour.
+;;
+;; The times are the whole seconds as ints, not floats.  CPython gives
+;; st_atime and friends as floats and keeps the exact value in the _ns
+;; fields; os.path.getmtime and the stdlib comparisons work either way, and
+;; an int cannot lose precision the way a float does past 2^53.
+;; ============================================================================
+PSR_BUF   equ 8
+PSR_OBJ   equ 16
+PSR_FRAME equ 32            ; + 1 push = 40... see below
+
+%macro STAT_FIELD_I 2           ; %1 = field index, %2 = the i64 to store
+    mov rdi, %2
+    call int_from_i64
+    V_PACK rax, rdx
+    mov rdx, rax
+    mov rdi, [rbp - PSR_OBJ]
+    mov esi, %1
+    call structseq_set          ; takes over the reference
+%endmacro
+
+DEF_FUNC posix_stat_result, 40
+    push rbx
+    mov [rbp - PSR_BUF], rdi
+
+    lea rdi, [rel stat_result_type]
+    call structseq_new
+    test rax, rax
+    jz .psr_out
+    mov [rbp - PSR_OBJ], rax
+    mov rbx, [rbp - PSR_BUF]
+
+    mov eax, [rbx + StatBuf.st_mode]        ; 32-bit, zero-extended
+    STAT_FIELD_I 0, rax
+    mov rbx, [rbp - PSR_BUF]
+    STAT_FIELD_I 1, [rbx + StatBuf.st_ino]
+    mov rbx, [rbp - PSR_BUF]
+    STAT_FIELD_I 2, [rbx + StatBuf.st_dev]
+    mov rbx, [rbp - PSR_BUF]
+    STAT_FIELD_I 3, [rbx + StatBuf.st_nlink]
+    mov rbx, [rbp - PSR_BUF]
+    mov eax, [rbx + StatBuf.st_uid]
+    STAT_FIELD_I 4, rax
+    mov rbx, [rbp - PSR_BUF]
+    mov eax, [rbx + StatBuf.st_gid]
+    STAT_FIELD_I 5, rax
+    mov rbx, [rbp - PSR_BUF]
+    STAT_FIELD_I 6, [rbx + StatBuf.st_size]
+    mov rbx, [rbp - PSR_BUF]
+    STAT_FIELD_I 7, [rbx + StatBuf.st_atime]
+    mov rbx, [rbp - PSR_BUF]
+    STAT_FIELD_I 8, [rbx + StatBuf.st_mtime]
+    mov rbx, [rbp - PSR_BUF]
+    STAT_FIELD_I 9, [rbx + StatBuf.st_ctime]
+
+    ; The named-only tail.
+    mov rbx, [rbp - PSR_BUF]
+    STAT_FIELD_I 10, [rbx + StatBuf.st_atime_ns]
+    mov rbx, [rbp - PSR_BUF]
+    STAT_FIELD_I 11, [rbx + StatBuf.st_mtime_ns]
+    mov rbx, [rbp - PSR_BUF]
+    STAT_FIELD_I 12, [rbx + StatBuf.st_ctime_ns]
+    mov rbx, [rbp - PSR_BUF]
+    STAT_FIELD_I 13, [rbx + StatBuf.st_blksize]
+    mov rbx, [rbp - PSR_BUF]
+    STAT_FIELD_I 14, [rbx + StatBuf.st_blocks]
+    mov rbx, [rbp - PSR_BUF]
+    STAT_FIELD_I 15, [rbx + StatBuf.st_rdev]
+
+    mov rax, [rbp - PSR_OBJ]
+.psr_out:
+    pop rbx
+    leave
+    ret
+END_FUNC posix_stat_result
+
+;; ============================================================================
+;; posix.stat(path) / posix.lstat(path) / posix.fstat(fd)
+;; ============================================================================
+PST_PATH  equ 8
+PST_BUF   equ 16 + StatBuf_size
+PST_FRAME equ 16 + StatBuf_size      ; derived, not hand-picked: a struct in a
+                                     ; frame outgrows a guessed offset silently
+
+DEF_FUNC posix_stat, PST_FRAME
+    test rsi, rsi
+    jz .pst_argerr
+    mov rdi, [rdi]
+    mov [rbp - PST_PATH], rdi
+    ; os.stat(fd) is os.fstat(fd): CPython's stat takes an open file
+    ; descriptor wherever it takes a path, and os.path.exists relies on it.
+    ; int_is_integer wants the (payload, tag) pair, and it is the only test
+    ; that says yes to a heap int and a bool as well as to an immediate.
+    mov edx, TAG_PTR
+    V_TEST_PTR rdi, rax
+    jbe .pst_have_tag
+    mov edx, TAG_SMALLINT
+    V_IS_INT rdi, rax
+    jae .pst_have_tag
+    mov edx, TAG_FLOAT
+.pst_have_tag:
+    call int_is_integer
+    test eax, eax
+    jnz .pst_fd
+    mov rdi, [rbp - PST_PATH]
+    call posix_path_arg
+    test rax, rax
+    jz .pst_fail
+    lea rsi, [rbp - PST_BUF]
+    mov rdi, rax
+    call sys_stat
+    POSIX_CHECK rax, [rbp - PST_PATH]
+    lea rdi, [rbp - PST_BUF]
+    call posix_stat_result
+    leave
+    ret
+.pst_fd:
+    mov rdi, [rbp - PST_PATH]
+    call val_to_i64
+    lea rsi, [rbp - PST_BUF]
+    mov rdi, rax
+    call sys_fstat
+    POSIX_CHECK rax, 0
+    lea rdi, [rbp - PST_BUF]
+    call posix_stat_result
+    leave
+    ret
+.pst_fail:
+    xor eax, eax
+    leave
+    ret
+.pst_argerr:
+    RAISE exc_TypeError_type, "stat() takes at least 1 argument"
+END_FUNC posix_stat
+
+DEF_FUNC posix_lstat, PST_FRAME
+    test rsi, rsi
+    jz .plst_argerr
+    mov rdi, [rdi]
+    mov [rbp - PST_PATH], rdi
+    call posix_path_arg
+    test rax, rax
+    jz .plst_fail
+    lea rsi, [rbp - PST_BUF]
+    mov rdi, rax
+    call sys_lstat
+    POSIX_CHECK rax, [rbp - PST_PATH]
+    lea rdi, [rbp - PST_BUF]
+    call posix_stat_result
+    leave
+    ret
+.plst_fail:
+    xor eax, eax
+    leave
+    ret
+.plst_argerr:
+    RAISE exc_TypeError_type, "lstat() takes at least 1 argument"
+END_FUNC posix_lstat
+
+DEF_FUNC posix_fstat, PST_FRAME
+    test rsi, rsi
+    jz .pfst_argerr
+    mov rdi, [rdi]
+    call val_to_i64
+    lea rsi, [rbp - PST_BUF]
+    mov rdi, rax
+    call sys_fstat
+    POSIX_CHECK rax, 0
+    lea rdi, [rbp - PST_BUF]
+    call posix_stat_result
+    leave
+    ret
+.pfst_argerr:
+    RAISE exc_TypeError_type, "fstat() takes exactly 1 argument"
+END_FUNC posix_fstat
+
+;; ============================================================================
+;; posix.listdir(path='.') -> list[str]
+;;
+;; getdents64 over a buffer of linux_dirent64 records, refilled until it
+;; returns 0.  d_reclen is the stride and it is a TWO-byte field: a 64-bit
+;; read ORs in d_type and five bytes of the name, and the resulting stride
+;; walks off the end.  `movzx eax, word` is the whole of the fix.
+;;
+;; "." and ".." are filtered, as every listdir does.
+;; ============================================================================
+PLD_BUFSZ equ 32768
+
+PLD_PATH  equ 8
+PLD_FD    equ 16
+PLD_LIST  equ 24
+PLD_BUF   equ 32
+PLD_N     equ 40            ; bytes getdents64 wrote this round
+PLD_OFF   equ 48            ; the cursor into the buffer
+PLD_FRAME equ 48            ; + 2 pushes = 64, 16-byte aligned
+
+DEF_FUNC posix_listdir, PLD_FRAME
+    push rbx
+    push r12
+    mov qword [rbp - PLD_BUF], 0
+    mov qword [rbp - PLD_LIST], 0
+    mov qword [rbp - PLD_FD], -1
+
+    ; The default is ".", as os.listdir()'s is.
+    test rsi, rsi
+    jz .pld_dot
+    mov rdi, [rdi]
+    IS_NONE rdi, rax
+    je .pld_dot
+    mov [rbp - PLD_PATH], rdi
+    call posix_path_arg
+    test rax, rax
+    jz .pld_fail
+    mov rbx, rax
+    jmp .pld_open
+.pld_dot:
+    mov qword [rbp - PLD_PATH], 0
+    CSTRING rbx, "."
+
+.pld_open:
+    mov rdi, rbx
+    mov esi, O_RDONLY | O_DIRECTORY | O_CLOEXEC
+    xor edx, edx
+    call sys_open
+    POSIX_CHECK rax, [rbp - PLD_PATH]
+    mov [rbp - PLD_FD], rax
+
+    mov edi, PLD_BUFSZ
+    call ap_malloc
+    test rax, rax
+    jz .pld_fail
+    mov [rbp - PLD_BUF], rax
+
+    xor edi, edi                    ; the default capacity
+    call list_new
+    test rax, rax
+    jz .pld_fail
+    mov [rbp - PLD_LIST], rax
+
+.pld_refill:
+    mov rdi, [rbp - PLD_FD]
+    mov rsi, [rbp - PLD_BUF]
+    mov edx, PLD_BUFSZ
+    call sys_getdents64
+    POSIX_CHECK rax, [rbp - PLD_PATH]
+    test rax, rax
+    jz .pld_done                    ; 0 = the directory is exhausted
+    mov [rbp - PLD_N], rax
+    mov qword [rbp - PLD_OFF], 0
+
+.pld_record:
+    mov rax, [rbp - PLD_OFF]
+    cmp rax, [rbp - PLD_N]
+    jge .pld_refill
+    mov rbx, [rbp - PLD_BUF]
+    add rbx, rax                    ; rbx = this record
+    ; The stride, read as the 16-bit field it is.
+    movzx r12d, word [rbx + LinuxDirent64.d_reclen]
+
+    lea rdi, [rbx + LinuxDirent64.d_name]
+    ; Skip "." and ".."
+    cmp byte [rdi], '.'
+    jne .pld_keep
+    cmp byte [rdi + 1], 0
+    je .pld_next
+    cmp byte [rdi + 1], '.'
+    jne .pld_keep
+    cmp byte [rdi + 2], 0
+    je .pld_next
+
+.pld_keep:
+    call str_from_cstr_heap
+    test rax, rax
+    jz .pld_fail
+    mov rbx, rax
+    mov rdi, [rbp - PLD_LIST]
+    mov rsi, rbx
+    call list_append
+    mov rdi, rbx
+    call obj_decref                 ; list_append took its own
+
+.pld_next:
+    mov rax, [rbp - PLD_OFF]
+    add rax, r12
+    mov [rbp - PLD_OFF], rax
+    jmp .pld_record
+
+.pld_done:
+    mov rdi, [rbp - PLD_FD]
+    call sys_close
+    mov rdi, [rbp - PLD_BUF]
+    call ap_free
+    mov rax, [rbp - PLD_LIST]
+    mov edx, TAG_PTR
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.pld_fail:
+    mov rdi, [rbp - PLD_FD]
+    cmp rdi, 0
+    jl .pld_fail_buf
+    call sys_close
+.pld_fail_buf:
+    mov rdi, [rbp - PLD_BUF]
+    test rdi, rdi
+    jz .pld_fail_list
+    call ap_free
+.pld_fail_list:
+    mov rdi, [rbp - PLD_LIST]
+    test rdi, rdi
+    jz .pld_fail_out
+    call obj_decref
+.pld_fail_out:
+    xor eax, eax
+    xor edx, edx
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC posix_listdir
+
+;; ============================================================================
+;; posix.getcwd() -> str   /   posix.getcwdb() -> bytes
+;;
+;; The buffer doubles until getcwd stops answering -ERANGE, so a deep path is
+;; not a truncation.
+;; ============================================================================
+PCW_BUF   equ 8
+PCW_SIZE  equ 16
+PCW_FRAME equ 32            ; + 1 push = 40, padded to keep rsp aligned
+
+DEF_FUNC posix_getcwd_impl, 40
+    push rbx
+    mov ebx, edi                ; 0 = str, 1 = bytes
+    mov qword [rbp - PCW_SIZE], 512
+.pcw_try:
+    mov rdi, [rbp - PCW_SIZE]
+    call ap_malloc
+    test rax, rax
+    jz .pcw_oom
+    mov [rbp - PCW_BUF], rax
+    mov rdi, rax
+    mov rsi, [rbp - PCW_SIZE]
+    call sys_getcwd
+    cmp rax, -34                ; -ERANGE: the buffer was too small
+    jne .pcw_have
+    mov rdi, [rbp - PCW_BUF]
+    call ap_free
+    shl qword [rbp - PCW_SIZE], 1
+    cmp qword [rbp - PCW_SIZE], 1 << 20
+    jb .pcw_try
+    mov edi, 36                 ; ENAMETOOLONG
+    xor esi, esi
+    call raise_oserror
+
+.pcw_have:
+    POSIX_CHECK rax, 0
+    ; getcwd returns the length INCLUDING the NUL.
+    dec rax
+    mov rdi, [rbp - PCW_BUF]
+    mov rsi, rax
+    test ebx, ebx
+    jnz .pcw_bytes
+    call str_new_heap
+    jmp .pcw_wrap
+.pcw_bytes:
+    call bytes_from_data
+    mov edx, TAG_PTR
+.pcw_wrap:
+    push rax
+    push rdx
+    mov rdi, [rbp - PCW_BUF]
+    call ap_free
+    pop rdx
+    pop rax
+    pop rbx
+    leave
+    ret
+
+.pcw_oom:
+    RAISE exc_OSError_type, "cannot allocate a path buffer"
+END_FUNC posix_getcwd_impl
+
+DEF_FUNC_BARE posix_getcwd
+    xor edi, edi
+    jmp posix_getcwd_impl
+END_FUNC posix_getcwd
+
+DEF_FUNC_BARE posix_getcwdb
+    mov edi, 1
+    jmp posix_getcwd_impl
+END_FUNC posix_getcwdb
+
+;; ============================================================================
+;; The one-path calls: unlink, rmdir, and the two-path rename.
+;;
+;; Each returns None, and each names the offending path in its OSError -- which
+;; is the whole reason posix_path_arg hands the Value back rather than only
+;; the pointer.
+;; ============================================================================
+P1_PATH   equ 8
+P1_PTR    equ 16
+P1_FRAME  equ 32            ; + 0 pushes = 32
+
+%macro POSIX_ONE_PATH 3         ; %1 = name, %2 = the syscall, %3 = "n args"
+DEF_FUNC %1, P1_FRAME
+    test rsi, rsi
+    jz %%argerr
+    mov rdi, [rdi]
+    mov [rbp - P1_PATH], rdi
+    call posix_path_arg
+    test rax, rax
+    jz %%fail
+    mov rdi, rax
+    call %2
+    POSIX_CHECK rax, [rbp - P1_PATH]
+    LOAD_NONE rax
+    mov edx, TAG_PTR
+    leave
+    ret
+%%fail:
+    xor eax, eax
+    xor edx, edx
+    leave
+    ret
+%%argerr:
+    RAISE exc_TypeError_type, %3
+END_FUNC %1
+%endmacro
+
+POSIX_ONE_PATH posix_unlink, sys_unlink, "unlink() takes exactly 1 argument"
+POSIX_ONE_PATH posix_rmdir,  sys_rmdir,  "rmdir() takes exactly 1 argument"
+
+;; posix.mkdir(path, mode=0o777)
+DEF_FUNC posix_mkdir, P1_FRAME
+    test rsi, rsi
+    jz .pmk_argerr
+    push rbx
+    push r12
+    mov rbx, rdi
+    mov r12, rsi
+    mov rdi, [rbx]
+    mov [rbp - P1_PATH], rdi
+    call posix_path_arg
+    test rax, rax
+    jz .pmk_fail
+    mov [rbp - P1_PTR], rax
+    mov esi, 0o777
+    cmp r12, 2
+    jl .pmk_go
+    mov rdi, [rbx + 8]
+    call val_to_i64
+    mov rsi, rax
+.pmk_go:
+    mov rdi, [rbp - P1_PTR]
+    call sys_mkdir
+    POSIX_CHECK rax, [rbp - P1_PATH]
+    LOAD_NONE rax
+    mov edx, TAG_PTR
+    pop r12
+    pop rbx
+    leave
+    ret
+.pmk_fail:
+    xor eax, eax
+    xor edx, edx
+    pop r12
+    pop rbx
+    leave
+    ret
+.pmk_argerr:
+    RAISE exc_TypeError_type, "mkdir() takes at least 1 argument"
+END_FUNC posix_mkdir
+
+;; posix.chmod(path, mode)
+DEF_FUNC posix_chmod, P1_FRAME
+    cmp rsi, 2
+    jl .pch_argerr
+    push rbx
+    push r12
+    mov rbx, rdi
+    mov rdi, [rbx]
+    mov [rbp - P1_PATH], rdi
+    call posix_path_arg
+    test rax, rax
+    jz .pch_fail
+    mov r12, rax
+    mov rdi, [rbx + 8]
+    call val_to_i64
+    mov rsi, rax
+    mov rdi, r12
+    call sys_chmod
+    POSIX_CHECK rax, [rbp - P1_PATH]
+    LOAD_NONE rax
+    mov edx, TAG_PTR
+    pop r12
+    pop rbx
+    leave
+    ret
+.pch_fail:
+    xor eax, eax
+    xor edx, edx
+    pop r12
+    pop rbx
+    leave
+    ret
+.pch_argerr:
+    RAISE exc_TypeError_type, "chmod() takes at least 2 arguments"
+END_FUNC posix_chmod
+
+;; posix.rename(src, dst) / posix.replace(src, dst)
+;;
+;; rename(2) already replaces the destination, so os.replace and os.rename are
+;; the same call here -- which is what they are on POSIX in CPython too.  The
+;; two paths must BOTH be resolved before either syscall argument is used:
+;; posix_path_arg can run __fspath__, which is arbitrary Python.
+PRN_SRC   equ 8
+PRN_DST   equ 16
+PRN_SPTR  equ 24
+PRN_FRAME equ 32            ; + 1 push = 40
+
+DEF_FUNC posix_rename, 40
+    push rbx
+    cmp rsi, 2
+    jl .prn_argerr
+    mov rbx, rdi
+    mov rdi, [rbx]
+    mov [rbp - PRN_SRC], rdi
+    call posix_path_arg
+    test rax, rax
+    jz .prn_fail
+    mov [rbp - PRN_SPTR], rax
+    mov rdi, [rbx + 8]
+    mov [rbp - PRN_DST], rdi
+    call posix_path_arg
+    test rax, rax
+    jz .prn_fail
+    mov rsi, rax
+    mov rdi, [rbp - PRN_SPTR]
+    call sys_rename
+    POSIX_CHECK rax, [rbp - PRN_SRC]
+    LOAD_NONE rax
+    mov edx, TAG_PTR
+    pop rbx
+    leave
+    ret
+.prn_fail:
+    xor eax, eax
+    xor edx, edx
+    pop rbx
+    leave
+    ret
+.prn_argerr:
+    RAISE exc_TypeError_type, "rename() takes exactly 2 arguments"
+END_FUNC posix_rename
+
+;; posix.readlink(path) -> str
+PRL_PATH  equ 8
+PRL_BUF   equ 16
+PRL_SIZE  equ 24
+PRL_PTR   equ 32
+PRL_FRAME equ 32            ; + 0 pushes = 32
+
+DEF_FUNC posix_readlink, PRL_FRAME
+    test rsi, rsi
+    jz .prl_argerr
+    mov rdi, [rdi]
+    mov [rbp - PRL_PATH], rdi
+    call posix_path_arg
+    test rax, rax
+    jz .prl_fail
+    mov [rbp - PRL_PTR], rax
+    mov qword [rbp - PRL_SIZE], 512
+.prl_try:
+    mov rdi, [rbp - PRL_SIZE]
+    call ap_malloc
+    test rax, rax
+    jz .prl_fail
+    mov [rbp - PRL_BUF], rax
+    mov rdi, [rbp - PRL_PTR]
+    mov rsi, rax
+    mov rdx, [rbp - PRL_SIZE]
+    call sys_readlink
+    ; readlink truncates silently rather than reporting ERANGE, so a result
+    ; that exactly fills the buffer means "there may be more".
+    cmp rax, -4095
+    jae .prl_err
+    cmp rax, [rbp - PRL_SIZE]
+    jl .prl_have
+    mov rdi, [rbp - PRL_BUF]
+    push rax
+    push rax
+    call ap_free
+    pop rax
+    pop rax
+    shl qword [rbp - PRL_SIZE], 1
+    cmp qword [rbp - PRL_SIZE], 1 << 20
+    jb .prl_try
+    mov edi, 36                     ; ENAMETOOLONG
+    mov rsi, [rbp - PRL_PATH]
+    call raise_oserror
+.prl_err:
+    mov rdi, [rbp - PRL_BUF]
+    push rax
+    push rax
+    call ap_free
+    pop rax
+    pop rax
+    POSIX_CHECK rax, [rbp - PRL_PATH]
+.prl_have:
+    mov rdi, [rbp - PRL_BUF]
+    mov rsi, rax
+    call str_new_heap
+    push rax
+    push rdx
+    mov rdi, [rbp - PRL_BUF]
+    call ap_free
+    pop rdx
+    pop rax
+    leave
+    ret
+.prl_fail:
+    xor eax, eax
+    xor edx, edx
+    leave
+    ret
+.prl_argerr:
+    RAISE exc_TypeError_type, "readlink() takes exactly 1 argument"
+END_FUNC posix_readlink
+
+;; ============================================================================
+;; The file-descriptor calls: open, close, read, write, lseek, dup, access.
+;; ============================================================================
+POP_PATH  equ 8
+POP_PTR   equ 16
+POP_FRAME equ 32            ; + 2 pushes = 48
+
+DEF_FUNC posix_open, POP_FRAME
+    cmp rsi, 2
+    jl .pop_argerr
+    push rbx
+    push r12
+    mov rbx, rdi
+    mov r12, rsi
+    mov rdi, [rbx]
+    mov [rbp - POP_PATH], rdi
+    call posix_path_arg
+    test rax, rax
+    jz .pop_fail
+    mov [rbp - POP_PTR], rax
+    mov rdi, [rbx + 8]
+    call val_to_i64
+    mov rsi, rax                    ; flags
+    mov edx, 0o777                  ; the mode, if the flags ask for one
+    cmp r12, 3
+    jl .pop_go
+    push rsi
+    push rsi
+    mov rdi, [rbx + 16]
+    call val_to_i64
+    mov rdx, rax
+    pop rsi
+    pop rsi
+.pop_go:
+    mov rdi, [rbp - POP_PTR]
+    call sys_open
+    POSIX_CHECK rax, [rbp - POP_PATH]
+    mov rdi, rax
+    call int_from_i64
+    V_PACK rax, rdx
+    mov edx, TAG_PTR
+    pop r12
+    pop rbx
+    leave
+    ret
+.pop_fail:
+    xor eax, eax
+    xor edx, edx
+    pop r12
+    pop rbx
+    leave
+    ret
+.pop_argerr:
+    RAISE exc_TypeError_type, "open() takes at least 2 arguments"
+END_FUNC posix_open
+
+DEF_FUNC posix_close, 16
+    test rsi, rsi
+    jz .pcl_argerr
+    mov rdi, [rdi]
+    call val_to_i64
+    mov rdi, rax
+    call sys_close
+    POSIX_CHECK rax, 0
+    LOAD_NONE rax
+    mov edx, TAG_PTR
+    leave
+    ret
+.pcl_argerr:
+    RAISE exc_TypeError_type, "close() takes exactly 1 argument"
+END_FUNC posix_close
+
+;; posix.read(fd, n) -> bytes
+PRD_BUF   equ 8
+PRD_FRAME equ 16            ; + 2 pushes = 32
+
+DEF_FUNC posix_read, PRD_FRAME
+    cmp rsi, 2
+    jl .prd_argerr
+    push rbx
+    push r12
+    mov rbx, rdi
+    mov rdi, [rbx]
+    call val_to_i64
+    mov r12, rax                    ; fd
+    mov rdi, [rbx + 8]
+    call val_to_i64
+    mov rbx, rax                    ; n
+    test rbx, rbx
+    js .prd_negative
+    mov rdi, rbx
+    test rdi, rdi
+    jnz .prd_alloc
+    mov edi, 1                      ; read(fd, buf, 0) still wants a buffer
+.prd_alloc:
+    call ap_malloc
+    test rax, rax
+    jz .prd_fail
+    mov [rbp - PRD_BUF], rax
+    mov rdi, r12
+    mov rsi, rax
+    mov rdx, rbx
+    call sys_read
+    cmp rax, -4095
+    jb .prd_ok
+    push rax
+    push rax
+    mov rdi, [rbp - PRD_BUF]
+    call ap_free
+    pop rax
+    pop rax
+    POSIX_CHECK rax, 0
+.prd_ok:
+    mov rdi, [rbp - PRD_BUF]
+    mov rsi, rax
+    call bytes_from_data
+    push rax
+    push rax
+    mov rdi, [rbp - PRD_BUF]
+    call ap_free
+    pop rax
+    pop rax
+    mov edx, TAG_PTR
+    pop r12
+    pop rbx
+    leave
+    ret
+.prd_negative:
+    RAISE exc_ValueError_type, "negative read count"
+.prd_fail:
+    xor eax, eax
+    xor edx, edx
+    pop r12
+    pop rbx
+    leave
+    ret
+.prd_argerr:
+    RAISE exc_TypeError_type, "read() takes exactly 2 arguments"
+END_FUNC posix_read
+
+;; posix.write(fd, data) -> int
+DEF_FUNC posix_write, 16
+    cmp rsi, 2
+    jl .pwr_argerr
+    push rbx
+    mov rbx, rdi
+    mov rdi, [rbx]
+    call val_to_i64
+    mov rdi, rax                    ; fd... but the buffer comes next
+    push rdi
+    push rdi
+    mov rdi, [rbx + 8]
+    V_TEST_PTR rdi, rax
+    ja .pwr_badbuf
+    mov rax, [rdi + PyObject.ob_type]
+    lea rcx, [rel bytes_type]
+    cmp rax, rcx
+    je .pwr_bytes
+    lea rcx, [rel bytearray_type]
+    cmp rax, rcx
+    jne .pwr_badbuf
+.pwr_bytes:
+    mov rdx, [rdi + PyBytesObject.ob_size]
+    lea rsi, [rdi + PyBytesObject.data]
+    pop rdi
+    pop rdi
+    call sys_write
+    POSIX_CHECK rax, 0
+    mov rdi, rax
+    call int_from_i64
+    V_PACK rax, rdx
+    mov edx, TAG_PTR
+    pop rbx
+    leave
+    ret
+.pwr_badbuf:
+    pop rdi
+    pop rdi
+    RAISE exc_TypeError_type, "a bytes-like object is required"
+.pwr_argerr:
+    RAISE exc_TypeError_type, "write() takes exactly 2 arguments"
+END_FUNC posix_write
+
+;; posix.lseek(fd, pos, whence) -> int
+DEF_FUNC posix_lseek, 16
+    cmp rsi, 3
+    jl .pls_argerr
+    push rbx
+    push r12
+    mov rbx, rdi
+    mov rdi, [rbx]
+    call val_to_i64
+    mov r12, rax
+    mov rdi, [rbx + 8]
+    call val_to_i64
+    push rax
+    push rax
+    mov rdi, [rbx + 16]
+    call val_to_i64
+    mov rdx, rax
+    pop rsi
+    pop rsi
+    mov rdi, r12
+    call sys_lseek
+    POSIX_CHECK rax, 0
+    mov rdi, rax
+    call int_from_i64
+    V_PACK rax, rdx
+    mov edx, TAG_PTR
+    pop r12
+    pop rbx
+    leave
+    ret
+.pls_argerr:
+    RAISE exc_TypeError_type, "lseek() takes exactly 3 arguments"
+END_FUNC posix_lseek
+
+DEF_FUNC posix_dup, 16
+    test rsi, rsi
+    jz .pdp_argerr
+    mov rdi, [rdi]
+    call val_to_i64
+    mov rdi, rax
+    call sys_dup
+    POSIX_CHECK rax, 0
+    mov rdi, rax
+    call int_from_i64
+    V_PACK rax, rdx
+    mov edx, TAG_PTR
+    leave
+    ret
+.pdp_argerr:
+    RAISE exc_TypeError_type, "dup() takes exactly 1 argument"
+END_FUNC posix_dup
+
+;; posix.access(path, mode) -> bool -- and it answers False rather than
+;; raising, which is the one call in the family that swallows its errno.
+DEF_FUNC posix_access, 32
+    cmp rsi, 2
+    jl .pac_argerr
+    push rbx
+    push r12
+    mov rbx, rdi
+    mov rdi, [rbx]
+    call posix_path_arg
+    test rax, rax
+    jz .pac_fail
+    mov r12, rax
+    mov rdi, [rbx + 8]
+    call val_to_i64
+    mov rsi, rax
+    mov rdi, r12
+    call sys_access
+    test rax, rax
+    jnz .pac_false
+    lea rax, [rel bool_true]
+    jmp .pac_out
+.pac_false:
+    lea rax, [rel bool_false]
+.pac_out:
+    inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
+    pop r12
+    pop rbx
+    leave
+    ret
+.pac_fail:
+    xor eax, eax
+    xor edx, edx
+    pop r12
+    pop rbx
+    leave
+    ret
+.pac_argerr:
+    RAISE exc_TypeError_type, "access() takes exactly 2 arguments"
+END_FUNC posix_access
+
+;; posix.pipe() -> (r, w)
+PPI_FDS   equ 8             ; two ints
+PPI_TUP   equ 16
+PPI_FRAME equ 32            ; + 0 pushes = 32
+
+DEF_FUNC posix_pipe, PPI_FRAME
+    lea rdi, [rbp - PPI_FDS]
+    mov esi, O_CLOEXEC
+    call sys_pipe2
+    POSIX_CHECK rax, 0
+    mov edi, 2
+    call tuple_new
+    test rax, rax
+    jz .ppi_fail
+    mov [rbp - PPI_TUP], rax
+    mov edi, [rbp - PPI_FDS]
+    movsxd rdi, edi
+    call int_from_i64
+    V_PACK rax, rdx
+    mov rcx, [rbp - PPI_TUP]
+    mov rcx, [rcx + PyTupleObject.ob_item]      ; reload: the call moved it
+    mov [rcx], rax
+    mov edi, [rbp - PPI_FDS + 4]
+    movsxd rdi, edi
+    call int_from_i64
+    V_PACK rax, rdx
+    mov rcx, [rbp - PPI_TUP]
+    mov rcx, [rcx + PyTupleObject.ob_item]
+    mov [rcx + 8], rax
+    mov rax, [rbp - PPI_TUP]
+    mov edx, TAG_PTR
+    leave
+    ret
+.ppi_fail:
+    xor eax, eax
+    xor edx, edx
+    leave
+    ret
+END_FUNC posix_pipe
+
+;; posix.getpid() -> int
+DEF_FUNC posix_getpid, 16
+    call sys_getpid
+    mov rdi, rax
+    call int_from_i64
+    V_PACK rax, rdx
+    mov edx, TAG_PTR
+    leave
+    ret
+END_FUNC posix_getpid
+
+;; posix.umask(mask) -> int
+DEF_FUNC posix_umask, 16
+    test rsi, rsi
+    jz .pum_argerr
+    mov rdi, [rdi]
+    call val_to_i64
+    mov rdi, rax
+    call sys_umask
+    POSIX_CHECK rax, 0
+    mov rdi, rax
+    call int_from_i64
+    V_PACK rax, rdx
+    mov edx, TAG_PTR
+    leave
+    ret
+.pum_argerr:
+    RAISE exc_TypeError_type, "umask() takes exactly 1 argument"
+END_FUNC posix_umask
+
+;; posix.strerror(errno) -> str
+DEF_FUNC posix_strerror, 16
+    test rsi, rsi
+    jz .pse_argerr
+    mov rdi, [rdi]
+    call val_to_i64
+    mov edi, eax
+    call strerror wrt ..plt
+    mov rdi, rax
+    call str_from_cstr_heap
+    leave
+    ret
+.pse_argerr:
+    RAISE exc_TypeError_type, "strerror() takes exactly 1 argument"
+END_FUNC posix_strerror
+
+;; posix.urandom(n) -> bytes
+PUR_BUF   equ 8
+PUR_N     equ 16
+PUR_FRAME equ 32            ; + 0 pushes = 32
+
+DEF_FUNC posix_urandom, PUR_FRAME
+    test rsi, rsi
+    jz .pur_argerr
+    mov rdi, [rdi]
+    call val_to_i64
+    test rax, rax
+    js .pur_negative
+    mov [rbp - PUR_N], rax
+    mov rdi, rax
+    test rdi, rdi
+    jnz .pur_alloc
+    mov edi, 1
+.pur_alloc:
+    call ap_malloc
+    test rax, rax
+    jz .pur_fail
+    mov [rbp - PUR_BUF], rax
+    ; getrandom can return short; loop until the whole buffer is filled.
+    xor ecx, ecx
+.pur_loop:
+    mov rax, [rbp - PUR_N]
+    cmp rcx, rax
+    jge .pur_wrap
+    push rcx
+    push rcx
+    mov rdi, [rbp - PUR_BUF]
+    add rdi, rcx
+    mov rsi, [rbp - PUR_N]
+    sub rsi, rcx
+    xor edx, edx
+    call sys_getrandom
+    pop rcx
+    pop rcx
+    cmp rax, -4095
+    jb .pur_advance
+    push rax
+    push rax
+    mov rdi, [rbp - PUR_BUF]
+    call ap_free
+    pop rax
+    pop rax
+    POSIX_CHECK rax, 0
+.pur_advance:
+    add rcx, rax
+    jmp .pur_loop
+.pur_wrap:
+    mov rdi, [rbp - PUR_BUF]
+    mov rsi, [rbp - PUR_N]
+    call bytes_from_data
+    push rax
+    push rax
+    mov rdi, [rbp - PUR_BUF]
+    call ap_free
+    pop rax
+    pop rax
+    mov edx, TAG_PTR
+    leave
+    ret
+.pur_negative:
+    RAISE exc_ValueError_type, "negative argument not allowed"
+.pur_fail:
+    xor eax, eax
+    xor edx, edx
+    leave
+    ret
+.pur_argerr:
+    RAISE exc_TypeError_type, "urandom() takes exactly 1 argument"
+END_FUNC posix_urandom
+
+;; posix.fspath(path) -> the path itself, or what __fspath__ gives
+DEF_FUNC posix_fspath, 16
+    test rsi, rsi
+    jz .pfs_argerr
+    mov rdi, [rdi]
+    V_TEST_PTR rdi, rax
+    ja .pfs_bad
+    mov rax, [rdi + PyObject.ob_type]
+    lea rcx, [rel str_type]
+    cmp rax, rcx
+    je .pfs_self
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_STR_SUBCLASS
+    jnz .pfs_self
+    lea rcx, [rel bytes_type]
+    cmp rax, rcx
+    je .pfs_self
+    CSTRING rsi, "__fspath__"
+    call dunder_call_1
+    test edx, edx
+    jz .pfs_bad
+    mov edx, TAG_PTR
+    leave
+    ret
+.pfs_self:
+    mov rax, rdi
+    inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
+    leave
+    ret
+.pfs_bad:
+    mov rsi, rdi
+    CSTRING rdi, `expected str, bytes or os.PathLike object, not \x01`
+    call raise_type_error_with_name
+.pfs_argerr:
+    RAISE exc_TypeError_type, "fspath() takes exactly 1 argument"
+END_FUNC posix_fspath
+
+;; ============================================================================
+;; posix.waitpid(pid, options) -> (pid, status), and the W* status readers.
+;;
+;; The status word's encoding, which subprocess and multiprocessing decode by
+;; hand through these:
+;;   low 7 bits == 0x7f  -> stopped, and (status >> 8) & 0xff is the signal
+;;   low 7 bits == 0     -> exited,  and (status >> 8) & 0xff is the code
+;;   otherwise           -> signalled, and the low 7 bits are the signal
+;;   bit 7 within a signalled status is the core-dump flag
+;; ============================================================================
+PWP_STATUS equ 8
+PWP_TUP    equ 16
+PWP_FRAME  equ 32           ; + 0 pushes = 32
+
+DEF_FUNC posix_waitpid, PWP_FRAME
+    cmp rsi, 2
+    jl .pwp_argerr
+    push rbx
+    mov rbx, rdi
+    mov rdi, [rbx]
+    call val_to_i64
+    push rax
+    push rax
+    mov rdi, [rbx + 8]
+    call val_to_i64
+    mov rdx, rax                    ; options
+    pop rdi
+    pop rdi                         ; pid
+    lea rsi, [rbp - PWP_STATUS]
+    mov qword [rbp - PWP_STATUS], 0
+    xor ecx, ecx                    ; no rusage
+    call sys_wait4
+    POSIX_CHECK rax, 0
+    push rax
+    push rax
+    mov edi, 2
+    call tuple_new
+    pop rdi
+    pop rdi                         ; the pid wait4 reported
+    test rax, rax
+    jz .pwp_fail
+    mov [rbp - PWP_TUP], rax
+    call int_from_i64
+    V_PACK rax, rdx
+    mov rcx, [rbp - PWP_TUP]
+    mov rcx, [rcx + PyTupleObject.ob_item]
+    mov [rcx], rax
+    mov edi, [rbp - PWP_STATUS]
+    movsxd rdi, edi
+    call int_from_i64
+    V_PACK rax, rdx
+    mov rcx, [rbp - PWP_TUP]
+    mov rcx, [rcx + PyTupleObject.ob_item]
+    mov [rcx + 8], rax
+    mov rax, [rbp - PWP_TUP]
+    mov edx, TAG_PTR
+    pop rbx
+    leave
+    ret
+.pwp_fail:
+    xor eax, eax
+    xor edx, edx
+    pop rbx
+    leave
+    ret
+.pwp_argerr:
+    RAISE exc_TypeError_type, "waitpid() takes exactly 2 arguments"
+END_FUNC posix_waitpid
+
+;; The status readers.  Each takes the status word and answers an int or a
+;; bool; every one of them is pure bit arithmetic on it.
+%macro POSIX_WSTATUS 3          ; %1 = name, %2 = the body label, %3 = message
+DEF_FUNC %1, 16
+    test rsi, rsi
+    jz %%argerr
+    mov rdi, [rdi]
+    call val_to_i64
+    jmp %2
+%%argerr:
+    RAISE exc_TypeError_type, %3
+END_FUNC %1
+%endmacro
+
+;; Shared tails.  Each expects the status in rax and leaves through the
+;; caller's frame, so each is entered with `jmp` from a wrapper that has one.
+; Plain labels, not functions: each wrapper reaches them with `jmp` after
+; setting up its own frame, and the `leave` here pops that one.  A prologue
+; would push a second rbp that nothing ever pops.
+pw_ret_int:
+    mov rdi, rax
+    call int_from_i64
+    V_PACK rax, rdx
+    mov edx, TAG_PTR
+    leave
+    ret
+
+pw_ret_bool:
+    test eax, eax
+    jz .prb_false
+    lea rax, [rel bool_true]
+    jmp .prb_out
+.prb_false:
+    lea rax, [rel bool_false]
+.prb_out:
+    inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
+    leave
+    ret
+
+pw_exitstatus:
+    shr rax, 8
+    and rax, 0xff
+    jmp pw_ret_int
+pw_termsig:
+    and rax, 0x7f
+    jmp pw_ret_int
+pw_stopsig:
+    shr rax, 8
+    and rax, 0xff
+    jmp pw_ret_int
+pw_ifexited:
+    and eax, 0x7f
+    test eax, eax
+    setz al
+    movzx eax, al
+    jmp pw_ret_bool
+pw_ifstopped:
+    and eax, 0xff
+    cmp eax, 0x7f
+    sete al
+    movzx eax, al
+    jmp pw_ret_bool
+pw_ifsignaled:
+    ; glibc: ((signed char) (((status) & 0x7f) + 1) >> 1) > 0
+    ;
+    ; The signed-char cast is the whole macro.  0x7f + 1 is 128, which as a
+    ; signed byte is -128 and shifts to -64 -- not greater than zero, which is
+    ; how a STOPPED status (low byte 0x7f) and a CONTINUED one (0xffff) are
+    ; excluded.  Without the cast both answered "signalled".
+    mov ecx, eax
+    and ecx, 0x7f
+    inc ecx
+    movsx ecx, cl
+    sar ecx, 1
+    xor eax, eax
+    test ecx, ecx
+    setg al                     ; signed, not setnz
+    jmp pw_ret_bool
+pw_ifcontinued:
+    cmp eax, 0xffff
+    sete al
+    movzx eax, al
+    jmp pw_ret_bool
+pw_coredump:
+    and eax, 0x80
+    jmp pw_ret_bool
+
+POSIX_WSTATUS posix_wexitstatus, pw_exitstatus, "WEXITSTATUS() takes exactly 1 argument"
+POSIX_WSTATUS posix_wtermsig,    pw_termsig,    "WTERMSIG() takes exactly 1 argument"
+POSIX_WSTATUS posix_wstopsig,    pw_stopsig,    "WSTOPSIG() takes exactly 1 argument"
+POSIX_WSTATUS posix_wifexited,   pw_ifexited,   "WIFEXITED() takes exactly 1 argument"
+POSIX_WSTATUS posix_wifstopped,  pw_ifstopped,  "WIFSTOPPED() takes exactly 1 argument"
+POSIX_WSTATUS posix_wifsignaled, pw_ifsignaled, "WIFSIGNALED() takes exactly 1 argument"
+POSIX_WSTATUS posix_wifcontinued, pw_ifcontinued, "WIFCONTINUED() takes exactly 1 argument"
+POSIX_WSTATUS posix_wcoredump,   pw_coredump,   "WCOREDUMP() takes exactly 1 argument"
+
+;; posix.waitstatus_to_exitcode(status) -> int
+;; Exited: the code.  Signalled: minus the signal.  Anything else: ValueError.
+DEF_FUNC posix_waitstatus_to_exitcode, 16
+    test rsi, rsi
+    jz .pwe_argerr
+    mov rdi, [rdi]
+    call val_to_i64
+    mov ecx, eax
+    and ecx, 0x7f
+    test ecx, ecx
+    jnz .pwe_signalled
+    shr rax, 8
+    and rax, 0xff
+    jmp pw_ret_int
+.pwe_signalled:
+    ; The same signed-char test: a stopped or continued status is neither an
+    ; exit nor a signal, and CPython raises for it.
+    mov ecx, eax
+    and ecx, 0x7f
+    inc ecx
+    movsx ecx, cl
+    sar ecx, 1
+    test ecx, ecx
+    jle .pwe_bad
+    and eax, 0x7f
+    neg rax
+    jmp pw_ret_int
+.pwe_bad:
+    RAISE exc_ValueError_type, "Invalid wait status"
+.pwe_argerr:
+    RAISE exc_TypeError_type, "waitstatus_to_exitcode() takes exactly 1 argument"
+END_FUNC posix_waitstatus_to_exitcode
+
+;; ============================================================================
+;; posix.environ, a dict[bytes, bytes] built from glibc's `environ`.
+;;
+;; os._createenviron decodes it with sys.getfilesystemencoding() and
+;; surrogateescape.  bytes keys are the reason bytes needed a tp_hash first:
+;; without one, obj_hash falls through to the object address and every lookup
+;; in this dict misses.
+;; ============================================================================
+PEN_DICT  equ 8
+PEN_CUR   equ 16
+PEN_KEY   equ 24
+PEN_VAL   equ 32
+PEN_FRAME equ 32            ; + 1 push = 40
+
+DEF_FUNC posix_environ_new, 40
+    push rbx
+    call dict_new
+    test rax, rax
+    jz .pen_out
+    mov [rbp - PEN_DICT], rax
+
+    mov rax, [rel environ]
+    test rax, rax
+    jz .pen_done
+    mov [rbp - PEN_CUR], rax
+
+.pen_loop:
+    mov rax, [rbp - PEN_CUR]
+    mov rbx, [rax]              ; "KEY=VALUE", or NULL at the end
+    test rbx, rbx
+    jz .pen_done
+    add qword [rbp - PEN_CUR], 8
+
+    ; Split at the FIRST '=': a value may contain more of them.
+    mov rcx, rbx
+.pen_scan:
+    movzx eax, byte [rcx]
+    test al, al
+    jz .pen_loop                ; no '=' at all: not an assignment, skip it
+    cmp al, '='
+    je .pen_split
+    inc rcx
+    jmp .pen_scan
+
+.pen_split:
+    mov rdi, rbx
+    mov rsi, rcx
+    sub rsi, rbx                ; the key's length
+    push rcx
+    push rcx
+    call bytes_from_data
+    pop rcx
+    pop rcx
+    test rax, rax
+    jz .pen_done
+    mov [rbp - PEN_KEY], rax
+
+    lea rdi, [rcx + 1]          ; past the '='
+    push rdi
+    push rdi
+    call ap_strlen
+    pop rdi
+    pop rdi
+    mov rsi, rax
+    call bytes_from_data
+    test rax, rax
+    jz .pen_drop_key
+    mov [rbp - PEN_VAL], rax
+
+    mov rdi, [rbp - PEN_DICT]
+    mov rsi, [rbp - PEN_KEY]
+    mov rdx, [rbp - PEN_VAL]
+    call dict_set
+    mov rdi, [rbp - PEN_VAL]
+    call obj_decref             ; dict_set took its own
+.pen_drop_key:
+    mov rdi, [rbp - PEN_KEY]
+    call obj_decref
+    jmp .pen_loop
+
+.pen_done:
+    mov rax, [rbp - PEN_DICT]
+.pen_out:
+    pop rbx
+    leave
+    ret
+END_FUNC posix_environ_new
+
+;; ============================================================================
+;; posix_module_create() -> the module
+;; ============================================================================
+%macro POSIX_ADD_INT 2          ; %1 = name symbol, %2 = the value
+    mov rdi, %2
+    V_PACK_I64 rdi, rcx
+    mov [rbp - PMC_ENT], rdi
+    lea rdi, [rel %1]
+    call str_from_cstr_heap
+    mov [rbp - PMC_KEY], rax
+    mov rdi, r12
+    mov rsi, rax
+    mov rdx, [rbp - PMC_ENT]
+    call dict_set               ; clobbers rdx and rcx, so both were parked
+    mov rax, [rbp - PMC_ENT]
+    DECREF_V rax, rcx           ; not obj_decref: V_PACK may have boxed it
+    mov rdi, [rbp - PMC_KEY]
+    call obj_decref
+%endmacro
+
+%macro POSIX_ADD_OBJ 2          ; %1 = name symbol, %2 = an owned object in rax
+    mov [rbp - PMC_ENT], %2
+    lea rdi, [rel %1]
+    call str_from_cstr_heap
+    mov [rbp - PMC_KEY], rax
+    mov rdi, r12
+    mov rsi, rax
+    mov rdx, [rbp - PMC_ENT]
+    call dict_set
+    mov rdi, [rbp - PMC_ENT]
+    call obj_decref
+    mov rdi, [rbp - PMC_KEY]
+    call obj_decref
+%endmacro
+
+PMC_ENT   equ 8
+PMC_KEY   equ 16
+PMC_MOD   equ 24
+PMC_FRAME equ 32            ; + 1 push = 40
+
+DEF_FUNC posix_module_create, 40
+    push r12
+    call dict_new
+    test rax, rax
+    jz .pmc_fail
+    mov r12, rax                ; MODULE_ADD_FUNC wants the dict here
+
+    MODULE_ADD_FUNC posix_stat, pm_n_stat
+    MODULE_ADD_FUNC posix_lstat, pm_n_lstat
+    MODULE_ADD_FUNC posix_fstat, pm_n_fstat
+    MODULE_ADD_FUNC posix_listdir, pm_n_listdir
+    MODULE_ADD_FUNC posix_getcwd, pm_n_getcwd
+    MODULE_ADD_FUNC posix_getcwdb, pm_n_getcwdb
+    MODULE_ADD_FUNC posix_open, pm_n_open
+    MODULE_ADD_FUNC posix_close, pm_n_close
+    MODULE_ADD_FUNC posix_read, pm_n_read
+    MODULE_ADD_FUNC posix_write, pm_n_write
+    MODULE_ADD_FUNC posix_lseek, pm_n_lseek
+    MODULE_ADD_FUNC posix_dup, pm_n_dup
+    MODULE_ADD_FUNC posix_access, pm_n_access
+    MODULE_ADD_FUNC posix_fspath, pm_n_fspath
+    MODULE_ADD_FUNC posix_unlink, pm_n_unlink
+    MODULE_ADD_FUNC posix_unlink, pm_n_remove      ; os.remove IS unlink
+    MODULE_ADD_FUNC posix_mkdir, pm_n_mkdir
+    MODULE_ADD_FUNC posix_rmdir, pm_n_rmdir
+    MODULE_ADD_FUNC posix_rename, pm_n_rename
+    MODULE_ADD_FUNC posix_rename, pm_n_replace     ; rename(2) already replaces
+    MODULE_ADD_FUNC posix_chmod, pm_n_chmod
+    MODULE_ADD_FUNC posix_readlink, pm_n_readlink
+    MODULE_ADD_FUNC posix_pipe, pm_n_pipe
+    MODULE_ADD_FUNC posix_getpid, pm_n_getpid
+    MODULE_ADD_FUNC posix_umask, pm_n_umask
+    MODULE_ADD_FUNC posix_strerror, pm_n_strerror
+    MODULE_ADD_FUNC posix_urandom, pm_n_urandom
+    MODULE_ADD_FUNC posix_waitpid, pm_n_waitpid
+    MODULE_ADD_FUNC posix_waitstatus_to_exitcode, pm_n_waitstatus
+    MODULE_ADD_FUNC posix_wexitstatus, pm_n_wexitstatus
+    MODULE_ADD_FUNC posix_wtermsig, pm_n_wtermsig
+    MODULE_ADD_FUNC posix_wstopsig, pm_n_wstopsig
+    MODULE_ADD_FUNC posix_wifexited, pm_n_wifexited
+    MODULE_ADD_FUNC posix_wifstopped, pm_n_wifstopped
+    MODULE_ADD_FUNC posix_wifsignaled, pm_n_wifsignaled
+    MODULE_ADD_FUNC posix_wifcontinued, pm_n_wifcontinued
+    MODULE_ADD_FUNC posix_wcoredump, pm_n_wcoredump
+
+    ; --- the constants ---
+    POSIX_ADD_INT pm_n_O_RDONLY,    O_RDONLY
+    POSIX_ADD_INT pm_n_O_WRONLY,    O_WRONLY
+    POSIX_ADD_INT pm_n_O_RDWR,      O_RDWR
+    POSIX_ADD_INT pm_n_O_ACCMODE,   O_ACCMODE
+    POSIX_ADD_INT pm_n_O_CREAT,     O_CREAT
+    POSIX_ADD_INT pm_n_O_EXCL,      O_EXCL
+    POSIX_ADD_INT pm_n_O_NOCTTY,    O_NOCTTY
+    POSIX_ADD_INT pm_n_O_TRUNC,     O_TRUNC
+    POSIX_ADD_INT pm_n_O_APPEND,    O_APPEND
+    POSIX_ADD_INT pm_n_O_NONBLOCK,  O_NONBLOCK
+    POSIX_ADD_INT pm_n_O_DIRECTORY, O_DIRECTORY
+    POSIX_ADD_INT pm_n_O_NOFOLLOW,  O_NOFOLLOW
+    POSIX_ADD_INT pm_n_O_CLOEXEC,   O_CLOEXEC
+    POSIX_ADD_INT pm_n_F_OK,        F_OK
+    POSIX_ADD_INT pm_n_R_OK,        R_OK
+    POSIX_ADD_INT pm_n_W_OK,        W_OK
+    POSIX_ADD_INT pm_n_X_OK,        X_OK
+    POSIX_ADD_INT pm_n_SEEK_SET,    SEEK_SET
+    POSIX_ADD_INT pm_n_SEEK_CUR,    SEEK_CUR
+    POSIX_ADD_INT pm_n_SEEK_END,    SEEK_END
+    POSIX_ADD_INT pm_n_WNOHANG,     WNOHANG
+    POSIX_ADD_INT pm_n_WUNTRACED,   WUNTRACED
+    POSIX_ADD_INT pm_n_WCONTINUED,  WCONTINUED
+
+    ; --- stat_result, and posix.error, which IS OSError ---
+    lea rdi, [rel stat_result_type]
+    call structseq_init_type
+    lea rdi, [rel terminal_size_type]
+    call structseq_init_type
+
+    lea rax, [rel stat_result_type]
+    inc qword [rax + PyObject.ob_refcnt]
+    POSIX_ADD_OBJ pm_n_stat_result, rax
+    lea rax, [rel terminal_size_type]
+    inc qword [rax + PyObject.ob_refcnt]
+    POSIX_ADD_OBJ pm_n_terminal_size, rax
+    lea rax, [rel exc_OSError_type]
+    inc qword [rax + PyObject.ob_refcnt]
+    POSIX_ADD_OBJ pm_n_error, rax
+
+    ; --- environ ---
+    call posix_environ_new
+    test rax, rax
+    jz .pmc_no_environ
+    POSIX_ADD_OBJ pm_n_environ, rax
+.pmc_no_environ:
+
+    ; --- _have_functions, which os.py needs even when empty ---
+    ; os.py:442 uses supports_dir_fd and supports_fd unconditionally, and both
+    ; are defined only inside `if _exists("_have_functions")`.  An empty list
+    ; is the honest answer: no dir_fd= support here.
+    xor edi, edi
+    call list_new
+    test rax, rax
+    jz .pmc_no_have
+    POSIX_ADD_OBJ pm_n_have_functions, rax
+.pmc_no_have:
+
+    ; --- wrap the dict in the module ---
+    lea rdi, [rel pm_n_posix]
+    call str_from_cstr_heap
+    mov [rbp - PMC_KEY], rax
+    mov rdi, rax
+    mov rsi, r12
+    call module_new
+    mov [rbp - PMC_MOD], rax
+    mov rdi, [rbp - PMC_KEY]
+    call obj_decref
+    mov rdi, r12
+    call obj_decref             ; module_new took its own reference to the dict
+    mov rax, [rbp - PMC_MOD]
+    pop r12
+    leave
+    ret
+
+.pmc_fail:
+    xor eax, eax
+    pop r12
+    leave
+    ret
+END_FUNC posix_module_create
+
+;; ============================================================================
+;; The two struct-sequence types.
+;; ============================================================================
+section .rodata
+
+pm_n_posix:      db "posix", 0
+pm_n_stat:       db "stat", 0
+pm_n_lstat:      db "lstat", 0
+pm_n_fstat:      db "fstat", 0
+pm_n_listdir:    db "listdir", 0
+pm_n_getcwd:     db "getcwd", 0
+pm_n_getcwdb:    db "getcwdb", 0
+pm_n_open:       db "open", 0
+pm_n_close:      db "close", 0
+pm_n_read:       db "read", 0
+pm_n_write:      db "write", 0
+pm_n_lseek:      db "lseek", 0
+pm_n_dup:        db "dup", 0
+pm_n_access:     db "access", 0
+pm_n_fspath:     db "fspath", 0
+pm_n_unlink:     db "unlink", 0
+pm_n_remove:     db "remove", 0
+pm_n_mkdir:      db "mkdir", 0
+pm_n_rmdir:      db "rmdir", 0
+pm_n_rename:     db "rename", 0
+pm_n_replace:    db "replace", 0
+pm_n_chmod:      db "chmod", 0
+pm_n_readlink:   db "readlink", 0
+pm_n_pipe:       db "pipe", 0
+pm_n_getpid:     db "getpid", 0
+pm_n_umask:      db "umask", 0
+pm_n_strerror:   db "strerror", 0
+pm_n_urandom:    db "urandom", 0
+pm_n_waitpid:    db "waitpid", 0
+pm_n_waitstatus: db "waitstatus_to_exitcode", 0
+pm_n_wexitstatus: db "WEXITSTATUS", 0
+pm_n_wtermsig:   db "WTERMSIG", 0
+pm_n_wstopsig:   db "WSTOPSIG", 0
+pm_n_wifexited:  db "WIFEXITED", 0
+pm_n_wifstopped: db "WIFSTOPPED", 0
+pm_n_wifsignaled: db "WIFSIGNALED", 0
+pm_n_wifcontinued: db "WIFCONTINUED", 0
+pm_n_wcoredump:  db "WCOREDUMP", 0
+pm_n_environ:    db "environ", 0
+pm_n_error:      db "error", 0
+pm_n_stat_result: db "stat_result", 0
+pm_n_terminal_size: db "terminal_size", 0
+pm_n_have_functions: db "_have_functions", 0
+
+pm_n_O_RDONLY:    db "O_RDONLY", 0
+pm_n_O_WRONLY:    db "O_WRONLY", 0
+pm_n_O_RDWR:      db "O_RDWR", 0
+pm_n_O_ACCMODE:   db "O_ACCMODE", 0
+pm_n_O_CREAT:     db "O_CREAT", 0
+pm_n_O_EXCL:      db "O_EXCL", 0
+pm_n_O_NOCTTY:    db "O_NOCTTY", 0
+pm_n_O_TRUNC:     db "O_TRUNC", 0
+pm_n_O_APPEND:    db "O_APPEND", 0
+pm_n_O_NONBLOCK:  db "O_NONBLOCK", 0
+pm_n_O_DIRECTORY: db "O_DIRECTORY", 0
+pm_n_O_NOFOLLOW:  db "O_NOFOLLOW", 0
+pm_n_O_CLOEXEC:   db "O_CLOEXEC", 0
+pm_n_F_OK:        db "F_OK", 0
+pm_n_R_OK:        db "R_OK", 0
+pm_n_W_OK:        db "W_OK", 0
+pm_n_X_OK:        db "X_OK", 0
+pm_n_SEEK_SET:    db "SEEK_SET", 0
+pm_n_SEEK_CUR:    db "SEEK_CUR", 0
+pm_n_SEEK_END:    db "SEEK_END", 0
+pm_n_WNOHANG:     db "WNOHANG", 0
+pm_n_WUNTRACED:   db "WUNTRACED", 0
+pm_n_WCONTINUED:  db "WCONTINUED", 0
+
+; --- stat_result ---
+sr_name:   db "os.stat_result", 0
+sr_f0:  db "st_mode", 0
+sr_f1:  db "st_ino", 0
+sr_f2:  db "st_dev", 0
+sr_f3:  db "st_nlink", 0
+sr_f4:  db "st_uid", 0
+sr_f5:  db "st_gid", 0
+sr_f6:  db "st_size", 0
+sr_f7:  db "st_atime", 0
+sr_f8:  db "st_mtime", 0
+sr_f9:  db "st_ctime", 0
+sr_f10: db "st_atime_ns", 0
+sr_f11: db "st_mtime_ns", 0
+sr_f12: db "st_ctime_ns", 0
+sr_f13: db "st_blksize", 0
+sr_f14: db "st_blocks", 0
+sr_f15: db "st_rdev", 0
+
+align 8
+sr_fields:
+    dq sr_f0, 0
+    dq sr_f1, 1
+    dq sr_f2, 2
+    dq sr_f3, 3
+    dq sr_f4, 4
+    dq sr_f5, 5
+    dq sr_f6, 6
+    dq sr_f7, 7
+    dq sr_f8, 8
+    dq sr_f9, 9
+    dq sr_f10, 10
+    dq sr_f11, 11
+    dq sr_f12, 12
+    dq sr_f13, 13
+    dq sr_f14, 14
+    dq sr_f15, 15
+
+align 8
+sr_desc:
+    dq 10                   ; n_in_sequence: the ten os.stat() shows
+    dq 16                   ; n_fields: plus six reachable by name only
+    dq sr_fields
+
+; --- terminal_size ---
+ts_name: db "os.terminal_size", 0
+ts_f0:   db "columns", 0
+ts_f1:   db "lines", 0
+
+align 8
+ts_fields:
+    dq ts_f0, 0
+    dq ts_f1, 1
+
+align 8
+ts_desc:
+    dq 2
+    dq 2
+    dq ts_fields
+
+section .data
+align 8
+global stat_result_type
+stat_result_type:
+    dq 1                        ; ob_refcnt (immortal)
+    dq type_type                ; ob_type
+    dq sr_name                  ; tp_name
+    dq PyTupleObject_size + 6*8 ; tp_basicsize: the header plus the named tail
+    dq structseq_dealloc        ; tp_dealloc
+    dq structseq_repr           ; tp_repr
+    dq structseq_repr           ; tp_str
+    dq 0                        ; tp_hash          } copied from tuple_type by
+    dq 0                        ; tp_call          } structseq_init_type
+    dq structseq_getattr        ; tp_getattr
+    dq 0                        ; tp_setattr
+    dq 0                        ; tp_richcompare
+    dq 0                        ; tp_iter
+    dq 0                        ; tp_iternext
+    dq 0                        ; tp_init
+    dq 0                        ; tp_new
+    dq 0                        ; tp_as_number
+    dq 0                        ; tp_as_sequence
+    dq 0                        ; tp_as_mapping
+    dq 0                        ; tp_base
+    dq 0                        ; tp_dict
+    dq 0                        ; tp_mro
+    dq TYPE_FLAG_TUPLE_SUBCLASS ; tp_flags
+    dq 0                        ; tp_bases
+    dq 0                        ; tp_traverse
+    dq 0                        ; tp_clear
+    dq 0                        ; tp_dictoffset
+    dq sr_desc                  ; STRUCTSEQ_DESC
+
+align 8
+global terminal_size_type
+terminal_size_type:
+    dq 1
+    dq type_type
+    dq ts_name
+    dq PyTupleObject_size
+    dq structseq_dealloc
+    dq structseq_repr
+    dq structseq_repr
+    dq 0
+    dq 0
+    dq structseq_getattr
+    dq 0
+    dq 0
+    dq 0
+    dq 0
+    dq 0
+    dq 0
+    dq 0
+    dq 0
+    dq 0
+    dq 0
+    dq 0
+    dq 0
+    dq TYPE_FLAG_TUPLE_SUBCLASS
+    dq 0
+    dq 0
+    dq 0
+    dq 0
+    dq ts_desc

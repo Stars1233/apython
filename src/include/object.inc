@@ -718,6 +718,98 @@ struc PyMappingMethods
     .mp_ass_subscript: resq 1  ; +16
 endstruc
 
+; Linux x86-64 `struct stat`, as the stat/lstat/fstat syscalls fill it.
+; STAT_SIZE and a couple of the offsets were copied privately into
+; src/marshal.asm, src/compiler/compile.asm and inline into
+; src/builtins_obj.asm; posix reads nearly all of them.
+;
+; st_uid and st_gid are 32-bit and st_mode is too -- a 64-bit read of any of
+; the three silently ORs in its neighbour, which is the trap CLAUDE.md names.
+struc StatBuf
+    .st_dev:        resq 1  ; +0
+    .st_ino:        resq 1  ; +8
+    .st_nlink:      resq 1  ; +16
+    .st_mode:       resd 1  ; +24  (32-bit)
+    .st_uid:        resd 1  ; +28  (32-bit)
+    .st_gid:        resd 1  ; +32  (32-bit)
+    .st_pad0:       resd 1  ; +36
+    .st_rdev:       resq 1  ; +40
+    .st_size:       resq 1  ; +48
+    .st_blksize:    resq 1  ; +56
+    .st_blocks:     resq 1  ; +64
+    .st_atime:      resq 1  ; +72
+    .st_atime_ns:   resq 1  ; +80
+    .st_mtime:      resq 1  ; +88
+    .st_mtime_ns:   resq 1  ; +96
+    .st_ctime:      resq 1  ; +104
+    .st_ctime_ns:   resq 1  ; +112
+    .st_unused:     resq 3  ; +120
+endstruc                    ; 144 bytes
+
+; open() flags, as <fcntl.h> has them on Linux.  builtin_open_fn hardcoded
+; 0x241, 0x441 and 0xc1 inline.
+O_RDONLY    equ 0o0
+O_WRONLY    equ 0o1
+O_RDWR      equ 0o2
+O_ACCMODE   equ 0o3
+O_CREAT     equ 0o100
+O_EXCL      equ 0o200
+O_NOCTTY    equ 0o400
+O_TRUNC     equ 0o1000
+O_APPEND    equ 0o2000
+O_NONBLOCK  equ 0o4000
+O_DIRECTORY equ 0o200000
+O_NOFOLLOW  equ 0o400000
+O_CLOEXEC   equ 0o2000000
+
+; access() modes
+F_OK equ 0
+X_OK equ 1
+W_OK equ 2
+R_OK equ 4
+
+; lseek() whence
+SEEK_SET equ 0
+SEEK_CUR equ 1
+SEEK_END equ 2
+
+; st_mode's file-type field, and the mask that selects it.
+S_IFMT   equ 0o170000
+S_IFSOCK equ 0o140000
+S_IFLNK  equ 0o120000
+S_IFREG  equ 0o100000
+S_IFBLK  equ 0o060000
+S_IFDIR  equ 0o040000
+S_IFCHR  equ 0o020000
+S_IFIFO  equ 0o010000
+
+; linux_dirent64, the record getdents64 writes.  d_reclen is the stride to the
+; next record and is TWO bytes: a 64-bit read of it ORs in d_type and five
+; bytes of the name, which is exactly the multi-gigabyte-memcpy bug CLAUDE.md
+; records.  lint.py derives widths from `resd` and so does not catch a `resw`.
+struc LinuxDirent64
+    .d_ino:    resq 1   ; +0
+    .d_off:    resq 1   ; +8
+    .d_reclen: resw 1   ; +16  (16-bit -- the stride)
+    .d_type:   resb 1   ; +18
+    .d_name:            ; +19, NUL-terminated
+endstruc
+
+; d_type values
+DT_UNKNOWN equ 0
+DT_FIFO    equ 1
+DT_CHR     equ 2
+DT_DIR     equ 4
+DT_BLK     equ 6
+DT_REG     equ 8
+DT_LNK     equ 10
+DT_SOCK    equ 12
+
+; waitpid() options, and the encoding of the status word it fills in.
+WNOHANG   equ 1
+WUNTRACED equ 2
+WCONTINUED equ 8
+
 ; A struct sequence: a tuple whose entries are also named (os.stat_result,
 ; sys.version_info).  The descriptor hangs off the end of the type -- one
 ; qword just past PyTypeObject -- so tp_getattr, tp_repr and tp_dealloc can
@@ -744,7 +836,7 @@ struc BuiltinModule
     .create_fn: resq 1      ; +8: PyObject *(*)(void), or 0 when import_init
 endstruc                    ;     wires that module some other way
 
-BUILTIN_MODULE_COUNT equ 8
+BUILTIN_MODULE_COUNT equ 9
 
 ; Type flags
 TYPE_FLAG_HEAPTYPE     equ 0x0001

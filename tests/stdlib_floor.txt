@@ -15,6 +15,7 @@ ok copyreg
 ok email
 ok encodings
 ok enum
+ok fnmatch
 ok functools
 ok __future__
 ok graphlib
@@ -24,11 +25,17 @@ ok http
 ok idlelib
 ok ipaddress
 ok keyword
+ok netrc
+ok ntpath
 ok nturl2path
 ok numbers
 ok opcode
 ok operator
+ok os
+ok _osx_support
 ok __phello__
+ok platform
+ok posixpath
 ok _py_abc
 ok pydoc_data
 ok quopri

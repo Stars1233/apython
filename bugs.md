@@ -131,15 +131,22 @@ one-line fix.
   was registered against a subclass of ABC rather than against ABC itself.
   Direct registration and real inheritance both work.
 
-- **No platform module, so `os` cannot import.**  `os.py` looks for `posix`
-  and raises "no os specific module found" without it.  That is the single
-  largest single blocker in the stdlib -- roughly a quarter of the modules
-  `check-stdlib` probes fail on it.  `make check-stdlib` gives the current
-  figure.
+- **`posix` is a subset, and a deliberate one.**  The file, directory and
+  process calls `os.py` and `os.path` reach for are there, along with
+  `environ`, `stat_result`, `error` and the O_*/W* constants -- enough that
+  CPython's own `os.py` imports and works.  What is not: `scandir` and
+  `DirEntry`, `symlink`, `link`, `chdir`, `chown`, `utime`, `truncate`,
+  `dup2`, `fork`, `execv`, and the whole `*at` family.  `_have_functions` is
+  an empty list, which is the honest answer -- no `dir_fd=` support -- and
+  os.py reads it to build `supports_dir_fd`.
+
+  `stat_result`'s three timestamps are whole-second ints where CPython gives
+  floats; the `_ns` fields carry the exact value in both.
 
 - **Missing C modules**, in rough order of how many stdlib modules each
-  blocks: `_io`, `math`, `_codecs`, `_struct`, `_socket`, `binascii`, `_imp`,
-  `_string`, then a long tail of one apiece.
+  blocks: `_io`, `math`, `_struct`, `_socket`, `_imp`, `_collections`,
+  `_ast`, `binascii`, `_string`, then a long tail of one apiece.
+  `make check-stdlib` gives the current figure.
 
 - **Weak references keep no per-object slot.**  The links live in a side
   table keyed by the referent's address rather than in the object, so

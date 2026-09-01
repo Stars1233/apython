@@ -771,6 +771,26 @@ DEF_FUNC sys_module_init, 32
     pop rdi
     call obj_decref
 
+    ; --- sys.getfilesystemencodeerrors function ---
+    ; os._fscodec reads it next to getfilesystemencoding.  It answers
+    ; 'surrogateescape', which is the name CPython uses -- and which
+    ; str.encode here accepts and ignores; bugs.md records that.
+    lea rdi, [rel sys_getfsencodeerrors_func]
+    lea rsi, [rel sm_getfsencodeerrors]
+    call builtin_func_new
+    push rax
+    lea rdi, [rel sm_getfsencodeerrors]
+    call str_from_cstr_heap
+    push rax
+    mov rdi, r15
+    mov rsi, rax
+    mov rdx, [rsp + 8]
+    call dict_set
+    pop rdi
+    call obj_decref
+    pop rdi
+    call obj_decref
+
     ; --- sys.intern function ---
     lea rdi, [rel sys_intern_func]
     lea rsi, [rel sm_intern]
@@ -1061,6 +1081,16 @@ END_FUNC sys_path_add_script_dir
 ;; A real intern table, so `sys.intern(a) is sys.intern(b)` for equal strings.
 ;; functools and enum both intern names and then compare them with `is`.
 ;; ============================================================================
+;; sys.getfilesystemencodeerrors() -> 'surrogateescape'
+DEF_FUNC sys_getfsencodeerrors_func
+    lea rdi, [rel sm_surrogateescape]
+    call str_from_cstr_heap
+    leave
+    mov edx, TAG_PTR
+    V_PACK rax, rdx
+    ret
+END_FUNC sys_getfsencodeerrors_func
+
 ;; sys.getfilesystemencoding() -> 'utf-8'
 DEF_FUNC sys_getfsencoding_func
     lea rdi, [rel sm_utf8]
@@ -1160,6 +1190,8 @@ sm_cache_tag_val: db "cpython-312", 0
 sm_warnoptions:  db "warnoptions", 0
 sm_builtin_module_names: db "builtin_module_names", 0
 sm_getfsencoding: db "getfilesystemencoding", 0
+sm_getfsencodeerrors: db "getfilesystemencodeerrors", 0
+sm_surrogateescape: db "surrogateescape", 0
 sm_intern:       db "intern", 0
 sm_byteorder:    db "byteorder", 0
 sm_little:       db "little", 0
