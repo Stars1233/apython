@@ -1880,6 +1880,8 @@ DEF_FUNC type_call
     lea rdx, [r13 + 1]          ; nargs + 1
     call r11
     V_UNPACK rax, rdx           ; tp_call returns a Value
+    test edx, edx
+    jz .init_raised             ; NULL, with the exception still pending
 
     ; DECREF __init__'s return value (should be None — TAG_NONE, not a pointer)
     mov rsi, rdx
@@ -1889,6 +1891,23 @@ DEF_FUNC type_call
     lea rax, [r13 + 1]
     shl rax, 4
     add rsp, rax
+    jmp .no_init
+
+.init_raised:
+    ; What __init__ returned was never looked at, so a raise inside it
+    ; produced a "successful" construction: the caller got an object whose
+    ; __init__ had not finished, and the exception surfaced at whatever ran
+    ; next, as a "During handling of the above exception" chain attached to
+    ; code that had nothing to do with it.  io.StringIO(5) is where it turned
+    ; up -- it raises TypeError from __init__ and got back a StringIO.
+    lea rax, [r13 + 1]
+    shl rax, 4
+    add rsp, rax
+    mov rax, r14
+    mov rsi, [rbp - TC_NEW_TAG]
+    DECREF_VAL rax, rsi         ; the half-built instance goes no further
+    xor r14d, r14d
+    mov qword [rbp - TC_NEW_TAG], 0
 
 .no_init:
     ; Return the instance (tag from TC_NEW_TAG; default TAG_PTR, or __new__ result tag)
