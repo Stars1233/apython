@@ -92,6 +92,7 @@ test_complex
 test_container_dunders
 test_contains_fallback
 test_control_flow
+test_crash_regressions
 test_defaults
 test_del_and_gc_state
 test_del_dict

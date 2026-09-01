@@ -220,10 +220,18 @@ DEF_FUNC get_iterator_opt
     ret
 
 .iter_bad:
-    ; DECREF the bad iterator, raise TypeError
+    ; The type is kept across the DECREF and the object is not: naming it
+    ; afterwards would read ob_type out of the block just freed.
+    mov rax, [rbx + PyObject.ob_type]
+    push rax
+    push rax                    ; twice, to keep rsp 16-byte aligned
     mov rdi, rbx
     call obj_decref
-    RAISE exc_TypeError_type, "iter() returned non-iterator"
+    pop rsi
+    pop rsi
+    extern raise_type_error_with_typename
+    CSTRING rdi, `iter() returned non-iterator of type '\x01'`
+    call raise_type_error_with_typename
 
 .try_getitem:
     ; rdi = original object. Check if it has __getitem__ on heaptype.

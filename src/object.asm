@@ -396,6 +396,19 @@ DEF_FUNC raise_type_error_with_name
     mov rdi, rsi
     call value_type
     mov r12, rax                    ; type, or 0
+    jmp rtn_compose
+END_FUNC raise_type_error_with_name
+
+; raise_type_error_with_typename(rdi = the same template, rsi = a type object)
+; For a caller that has released the object it is complaining about and kept
+; only its type -- the object is gone by then, and reading ob_type off freed
+; memory is exactly the bug this message is reporting.
+DEF_FUNC raise_type_error_with_typename
+    push rbx
+    push r12
+    mov rbx, rdi
+    mov r12, rsi
+rtn_compose:
 
     lea rdi, [rel rtn_buf]
     xor ecx, ecx
@@ -433,7 +446,7 @@ DEF_FUNC raise_type_error_with_name
     extern raise_exception
     call raise_exception
     ud2
-END_FUNC raise_type_error_with_name
+END_FUNC raise_type_error_with_typename
 
 ; raise_value_error_with_repr(rdi = prefix C string, rsi = the object Value)
 ;   -> never returns

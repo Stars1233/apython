@@ -400,13 +400,12 @@ TFP_EXC   equ 64            ; current_exception, to tell a raise from a miss
     lea rcx, [rel bytes_type]
     cmp rax, rcx
     je .bc_layout_no_dict
-    ; bytearray and memoryview are resizable or borrow their storage, so a
-    ; tail would move or not be theirs; they get no dict rather than a
-    ; corrupting one.
+    ; memoryview borrows its storage, so a tail dict would not be its to
+    ; write; it gets none rather than a corrupting one.  bytearray used to be
+    ; in the same sentence, back when its data was inline and could move --
+    ; it is a fixed-size header with an out-of-line buffer now, so the dict
+    ; goes past the header like any other builtin's.
     extern bytearray_type
-    lea rcx, [rel bytearray_type]
-    cmp rax, rcx
-    je .bc_layout_none
     extern memoryview_type
     lea rcx, [rel memoryview_type]
     cmp rax, rcx
@@ -764,7 +763,8 @@ TFP_EXC   equ 64            ; current_exception, to tell a raise from a miss
     and r10, TYPE_FLAG_INT_SUBCLASS | TYPE_FLAG_STR_SUBCLASS | \
              TYPE_FLAG_LIST_SUBCLASS | TYPE_FLAG_TUPLE_SUBCLASS | \
              TYPE_FLAG_DICT_SUBCLASS | TYPE_FLAG_SET_SUBCLASS | \
-             TYPE_FLAG_FLOAT_SUBCLASS | TYPE_FLAG_COMPLEX_SUBCLASS
+             TYPE_FLAG_FLOAT_SUBCLASS | TYPE_FLAG_COMPLEX_SUBCLASS | \
+             TYPE_FLAG_BYTEARRAY_SUBCLASS
     or [r12 + PyTypeObject.tp_flags], r10
 
     ; A class deriving from `type` is a metatype: its instances are classes,

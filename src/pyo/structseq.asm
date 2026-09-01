@@ -50,6 +50,7 @@ extern tuple_type
 extern type_type
 extern exc_TypeError_type
 extern raise_exception
+extern get_iterator_opt
 
 section .text
 
@@ -463,9 +464,215 @@ END_FUNC structseq_dealloc
 ;; rather than inherited.  bool_init does the first of these for the same
 ;; reason.  Must run after init_iter_types.
 ;; ============================================================================
+;; ============================================================================
+;; structseq_type_new(rdi = the type, rsi = args, rdx = nargs) -> the instance
+;;
+;; `os.terminal_size((80, 24))` and every other struct sequence's constructor.
+;; Without one, type_call walked to the base and used TUPLE's, which gc_allocs
+;; -- and structseq_dealloc ap_frees, sixteen bytes off the block it was given
+;; and never untracked.  A built-and-dropped terminal_size aborted the process
+;; with "double free or corruption"; shutil.get_terminal_size() makes exactly
+;; that call.
+;; ============================================================================
+SSC_TYPE  equ 8
+SSC_OBJ   equ 16
+SSC_ITER  equ 24
+SSC_I     equ 32
+SSC_N     equ 40
+SSC_FRAME equ 48            ; + 0 pushes = 48
+
+DEF_FUNC structseq_type_new, SSC_FRAME
+    mov [rbp - SSC_TYPE], rdi
+    test rdx, rdx
+    jz .ssc_argerr
+    cmp rdx, 2
+    jg .ssc_argerr
+    mov rax, [rdi + STRUCTSEQ_DESC]
+    mov rax, [rax + StructSeqDesc.n_in_sequence]
+    mov [rbp - SSC_N], rax
+
+    ; The sequence is walked with the ordinary iterator protocol, so a list, a
+    ; tuple and a generator all work -- as they do in CPython.
+    mov rdi, [rsi]
+    V_UNPACK rdi, rsi           ; get_iterator still takes (payload, tag), not
+    call get_iterator_opt       ; a Value; passing only the payload left the
+                                ; tag register holding whatever was in it
+    test rax, rax
+    jz .ssc_not_sequence
+    mov [rbp - SSC_ITER], rax
+
+    mov rdi, [rbp - SSC_TYPE]
+    call structseq_new
+    test rax, rax
+    jz .ssc_fail_iter
+    mov [rbp - SSC_OBJ], rax
+
+    mov qword [rbp - SSC_I], 0
+.ssc_loop:
+    mov rdi, [rbp - SSC_ITER]
+    mov rax, [rdi + PyObject.ob_type]
+    mov rax, [rax + PyTypeObject.tp_iternext]
+    test rax, rax
+    jz .ssc_bad_len
+    call rax
+    V_UNPACK rax, rdx
+    test edx, edx
+    jz .ssc_exhausted           ; NULL means the sequence ended
+
+    mov rcx, [rbp - SSC_I]
+    cmp rcx, [rbp - SSC_N]
+    jge .ssc_too_long
+    V_PACK rax, rdx
+    mov rdx, rax
+    mov rdi, [rbp - SSC_OBJ]
+    mov esi, ecx
+    call structseq_set          ; takes over the reference tp_iternext gave
+    inc qword [rbp - SSC_I]
+    jmp .ssc_loop
+
+.ssc_exhausted:
+    mov rcx, [rbp - SSC_I]
+    cmp rcx, [rbp - SSC_N]
+    jne .ssc_bad_len
+    mov rdi, [rbp - SSC_ITER]
+    call obj_decref
+    mov rax, [rbp - SSC_OBJ]
+    mov edx, TAG_PTR
+    leave
+    ret
+
+.ssc_too_long:
+    ; Keep counting, so the message can say how many were actually there --
+    ; which is the half of it that tells the caller what to change.
+    inc qword [rbp - SSC_I]
+.ssc_drain:
+    mov rdi, [rbp - SSC_ITER]
+    mov rax, [rdi + PyObject.ob_type]
+    mov rax, [rax + PyTypeObject.tp_iternext]
+    test rax, rax
+    jz .ssc_bad_len
+    call rax
+    V_UNPACK rax, rdx
+    test edx, edx
+    jz .ssc_bad_len
+    V_PACK rax, rdx
+    mov rdi, rax
+    DECREF_V rdi, rcx
+    inc qword [rbp - SSC_I]
+    jmp .ssc_drain
+
+.ssc_bad_len:
+    mov rdi, [rbp - SSC_OBJ]
+    call obj_decref
+    mov rdi, [rbp - SSC_ITER]
+    call obj_decref
+    mov rdi, [rbp - SSC_TYPE]
+    mov rsi, [rbp - SSC_N]
+    mov rdx, [rbp - SSC_I]
+    call structseq_raise_length
+    ud2
+.ssc_fail_iter:
+    mov rdi, [rbp - SSC_ITER]
+    call obj_decref
+.ssc_fail:
+    xor eax, eax
+    xor edx, edx
+    leave
+    ret
+.ssc_not_sequence:
+    RAISE exc_TypeError_type, "constructor requires a sequence"
+.ssc_argerr:
+    RAISE exc_TypeError_type, "structseq() missing required argument 'sequence' (pos 1)"
+END_FUNC structseq_type_new
+
+;; structseq_raise_length(rdi = type, rsi = wanted, rdx = given)
+;; "os.terminal_size() takes a 2-sequence (3-sequence given)"
+DEF_FUNC structseq_raise_length
+    push rbx
+    push r12
+    sub rsp, 8
+    mov rbx, rsi
+    mov r12, rdx
+    mov rsi, [rdi + PyTypeObject.tp_name]
+    lea rdi, [rel ssq_msgbuf]
+    mov rdx, 60
+    call ssq_copy
+    mov rdi, rax
+    lea rsi, [rel ssq_takes]
+    mov rdx, 20
+    call ssq_copy
+    mov rdi, rax
+    mov rsi, rbx
+    call ssq_append_i64
+    mov rdi, rax
+    lea rsi, [rel ssq_seq_open]
+    mov rdx, 20
+    call ssq_copy
+    mov rdi, rax
+    mov rsi, r12
+    call ssq_append_i64
+    mov rdi, rax
+    lea rsi, [rel ssq_seq_close]
+    mov rdx, 20
+    call ssq_copy
+    lea rdi, [rel exc_TypeError_type]
+    lea rsi, [rel ssq_msgbuf]
+    call raise_exception
+    ud2
+END_FUNC structseq_raise_length
+
+DEF_FUNC_LOCAL ssq_copy         ; (rdi = dest, rsi = src, rdx = max) -> the NUL
+    xor ecx, ecx
+.sqc_loop:
+    cmp rcx, rdx
+    jge .sqc_done
+    mov al, [rsi + rcx]
+    test al, al
+    jz .sqc_done
+    mov [rdi + rcx], al
+    inc rcx
+    jmp .sqc_loop
+.sqc_done:
+    lea rax, [rdi + rcx]
+    mov byte [rax], 0
+    leave
+    ret
+END_FUNC ssq_copy
+
+DEF_FUNC_LOCAL ssq_append_i64   ; (rdi = dest, rsi = value) -> the NUL
+    mov rax, rsi
+    lea r8, [rel ssq_numbuf + 24]
+    mov byte [r8], 0
+    mov r9, 10
+.sqa_loop:
+    xor edx, edx
+    div r9
+    dec r8
+    add dl, '0'
+    mov [r8], dl
+    test rax, rax
+    jnz .sqa_loop
+.sqa_copy:
+    mov al, [r8]
+    mov [rdi], al
+    test al, al
+    jz .sqa_done
+    inc r8
+    inc rdi
+    jmp .sqa_copy
+.sqa_done:
+    mov rax, rdi
+    leave
+    ret
+END_FUNC ssq_append_i64
+
 DEF_FUNC structseq_init_type
     lea rax, [rel tuple_type]
     mov [rdi + PyTypeObject.tp_base], rax
+    ; tp_new, so that type_call does not fall through to tuple's -- which
+    ; allocates with a GC header this family's dealloc does not expect.
+    lea rcx, [rel structseq_type_new]
+    mov [rdi + PyTypeObject.tp_new], rcx
     mov rcx, [rax + PyTypeObject.tp_iter]
     mov [rdi + PyTypeObject.tp_iter], rcx
     mov rcx, [rax + PyTypeObject.tp_hash]
@@ -485,6 +692,16 @@ END_FUNC structseq_init_type
 ;; mechanism.  It was a bare 5-tuple, so .major was an AttributeError and
 ;; type(sys.version_info).__name__ was 'tuple'.
 ;; ============================================================================
+section .rodata
+
+ssq_takes:     db "() takes a ", 0
+ssq_seq_open:  db "-sequence (", 0
+ssq_seq_close: db "-sequence given)", 0
+
+section .bss
+ssq_msgbuf: resb 192
+ssq_numbuf: resb 32
+
 section .rodata
 
 vi_name:        db "sys.version_info", 0

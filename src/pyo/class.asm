@@ -1048,6 +1048,22 @@ DEF_FUNC instance_dealloc, ID_FRAME
 .no_slots:
     pop r12
 
+    ; A bytearray subclass owns a second allocation -- its bytes -- that the
+    ; slot walk above knows nothing about, and the base's own dealloc never
+    ; runs for a subclass.  Every instance leaked its buffer.
+    mov rax, [rbx + PyObject.ob_type]
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_BYTEARRAY_SUBCLASS
+    jz .id_no_bytes
+    mov rdi, [rbx + PyByteArrayObject.ob_bytes]
+    test rdi, rdi
+    jz .id_no_bytes
+    mov qword [rbx + PyByteArrayObject.ob_bytes], 0
+    mov qword [rbx + PyByteArrayObject.ob_cap], 0
+    mov qword [rbx + PyByteArrayObject.ob_size], 0
+    extern ap_free
+    call ap_free
+.id_no_bytes:
+
     ; Save ob_type before freeing (gc_dealloc reads ob_type, then frees)
     push qword [rbx + PyObject.ob_type]
 

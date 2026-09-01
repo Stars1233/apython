@@ -715,13 +715,32 @@ DEF_FUNC complex_neg, CB_FRAME
 END_FUNC complex_neg
 
 DEF_FUNC complex_pos, CB_FRAME
-    ; +z on an exact complex is z itself.
+    ; +z is z itself -- for a subclass too, which is why this is not an exact
+    ; type test.  Declining left the call site storing a NULL Value on the
+    ; value stack, and a raw NULL then circulated through globals, lists and
+    ; dicts: `x = +C(1, 2)` bound nothing and reading x back was a NameError.
     V_TEST_PTR rdi, rax
     ja .cp_decline
+    test rdi, rdi
+    jz .cp_decline
     mov rax, [rdi + PyObject.ob_type]
     lea rcx, [rel complex_type]
     cmp rax, rcx
-    jne .cp_decline
+    je .cp_have
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_COMPLEX_SUBCLASS
+    jz .cp_decline
+    ; A subclass gets an exact complex back, as CPython's does: +x is a
+    ; numeric operation, not an identity one.
+    lea rsi, [rbp - CB_A]
+    call complex_to_parts
+    test eax, eax
+    jz .cp_decline
+    movsd xmm0, [rbp - CB_A]
+    movsd xmm1, [rbp - CB_A + 8]
+    call complex_from_doubles
+    leave
+    ret
+.cp_have:
     push rdi
     call obj_incref
     pop rax

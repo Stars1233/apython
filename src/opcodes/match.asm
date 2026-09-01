@@ -331,8 +331,10 @@ extern obj_decref
     push rax
     push rax                    ; twice: keep rsp 16-byte aligned
     mov rdi, rax                ; a pointer is its own Value
-    call rcx                    ; nb_positive returns a Value
-    mov [r13 - 8], rax          ; the result replaces TOS
+    call rcx                    ; nb_positive returns a Value, or NULL
+    test rax, rax
+    jz .ci1_pos_declined        ; a slot may decline; storing the NULL put a
+    mov [r13 - 8], rax          ; raw 0 on the value stack for later to find
     pop rdi
     pop rdi                     ; rdi = the operand, still owned
     DECREF_V rdi, rcx
@@ -340,6 +342,9 @@ extern obj_decref
 .ci1_pos_done:
     DISPATCH
 
+.ci1_pos_declined:
+    pop rdi
+    pop rdi
 .ci1_pos_error:
     RAISE exc_TypeError_type, "bad operand type for unary +"
 

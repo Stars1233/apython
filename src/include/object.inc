@@ -933,6 +933,9 @@ TYPE_FLAG_METATYPE      equ 0x8000
 ; The low nibble range is full; these two start the next one.
 TYPE_FLAG_FLOAT_SUBCLASS   equ 0x10000
 TYPE_FLAG_COMPLEX_SUBCLASS equ 0x20000
+; bytearray keeps its bytes in a separate allocation, so a subclass instance
+; owns memory the generic instance_dealloc knows nothing about.
+TYPE_FLAG_BYTEARRAY_SUBCLASS equ 0x40000
 
 ; Comparison opcodes (used by tp_richcompare)
 PY_LT equ 0

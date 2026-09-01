@@ -614,7 +614,8 @@ SM_ACC   equ 8              ; the accumulator Value, owned
 SM_ITEM  equ 16             ; the item just pulled from the iterator, owned
 SM_NEW   equ 24             ; the sum, held across the two DECREFs below
 SM_EXC   equ 32
-SM_FRAME equ 32             ; + 2 pushes = 48, 16-byte aligned
+SM_OBJ   equ 40             ; args[0], for the error message: rbx is reused
+SM_FRAME equ 48             ; + 2 pushes = 64, 16-byte aligned
 
 extern value_type
 extern raise_type_error_with_name
@@ -663,6 +664,8 @@ DEF_FUNC builtin_sum, SM_FRAME
     ; get_iterator_opt, not a tp_iter read: an object with __getitem__ and no
     ; __iter__ is iterable everywhere else here, and this rejected it.
     mov rdi, [rbx]              ; args[0], the iterable
+    mov [rbp - SM_OBJ], rdi     ; parked: rbx becomes the iterator below, and
+                                ; the error message still has to name this
     V_TEST_PTR rdi, rax
     ja .sum_not_iterable        ; an immediate is never iterable
     mov esi, TAG_PTR
@@ -726,12 +729,14 @@ DEF_FUNC builtin_sum, SM_FRAME
     ret
 
 .sum_not_iterable_have:
+    ; The iterator exists but has no tp_iternext.  Releasing it and falling
+    ; through read the freed object as if it were the argument array.
     mov rdi, rbx
     call obj_decref
 .sum_not_iterable:
     mov rdi, [rbp - SM_ACC]
     DECREF_V rdi, rdx
-    mov rsi, [rbx]
+    mov rsi, [rbp - SM_OBJ]
     CSTRING rdi, `'\x01' object is not iterable`
     call raise_type_error_with_name
 
@@ -2040,6 +2045,9 @@ extern dict_get
 extern obj_as_index
 extern exc_NotImplementedError_type
 extern ap_strcmp
+extern tuple_type
+extern tuple_new
+extern list_type
 extern import_module
 
 BIM_ARGS     equ 8
@@ -2047,13 +2055,15 @@ BIM_FROMLIST equ 16
 BIM_LEVEL    equ 24
 BIM_NAME     equ 32
 BIM_NPOS     equ 40
-BIM_FRAME    equ 48         ; + 0 pushes = 48
+BIM_TEMP     equ 48         ; a wrapped fromlist, released before returning
+BIM_FRAME    equ 64         ; + 0 pushes = 64
 
 DEF_FUNC builtin_import_fn, BIM_FRAME
     mov [rbp - BIM_ARGS], rdi
     mov [rbp - BIM_NPOS], rsi
     mov qword [rbp - BIM_FROMLIST], 0
     mov qword [rbp - BIM_LEVEL], 0
+    mov qword [rbp - BIM_TEMP], 0
 
     ; Keyword arguments sit after the positional ones, named in order by
     ; kw_names_pending.  Consume it: a builtin that leaves it set hands its
@@ -2175,13 +2185,47 @@ DEF_FUNC builtin_import_fn, BIM_FRAME
     jnz .imp_level_error
 .imp_level_ok:
 
-    ; None is not a fromlist.
+    ; import_module reads the fromlist as a tuple, so what reaches it has to
+    ; be one.  __import__("sys", None, None, 0) -- a falsy fromlist CPython
+    ; accepts -- faulted on ob_size; None was the only shape rejected here.
+    ; A list is passed through, since that is what `from x import *` compiles
+    ; to and it carries ob_size in the same place; anything else truthy is
+    ; wrapped, so "there is a fromlist" survives without handing over a shape
+    ; that will be dereferenced as one.
     mov rax, [rbp - BIM_FROMLIST]
     test rax, rax
     jz .imp_do
+    V_TEST_PTR rax, rcx
+    ja .imp_no_fromlist         ; an immediate is not a sequence of names
     LOAD_NONE rcx
     cmp rax, rcx
-    jne .imp_do
+    je .imp_no_fromlist
+    mov rcx, [rax + PyObject.ob_type]
+    lea rdx, [rel tuple_type]
+    cmp rcx, rdx
+    je .imp_do
+    lea rdx, [rel list_type]
+    cmp rcx, rdx
+    je .imp_do
+
+    mov rdi, rax
+    call obj_is_true
+    test eax, eax
+    jz .imp_no_fromlist
+    mov edi, 1
+    call tuple_new
+    test rax, rax
+    jz .imp_no_fromlist
+    mov [rbp - BIM_TEMP], rax
+    mov rcx, [rbp - BIM_FROMLIST]
+    mov rdx, [rax + PyTupleObject.ob_item]
+    mov [rdx], rcx
+    mov rax, rcx
+    INCREF_V rax, rcx
+    mov rax, [rbp - BIM_TEMP]
+    mov [rbp - BIM_FROMLIST], rax
+    jmp .imp_do
+.imp_no_fromlist:
     mov qword [rbp - BIM_FROMLIST], 0
 
 .imp_do:
@@ -2206,7 +2250,8 @@ DEF_FUNC builtin_import_fn, BIM_FRAME
     push rax
     mov rdi, rcx
     call obj_is_true
-    test eax, eax
+    mov edx, TAG_PTR            ; obj_is_true clobbers rdx, and the pack below
+    test eax, eax               ; branches on it
     pop rax
     jz .imp_done
 
@@ -2231,6 +2276,16 @@ DEF_FUNC builtin_import_fn, BIM_FRAME
     mov edx, TAG_PTR
 
 .imp_done:
+    cmp qword [rbp - BIM_TEMP], 0
+    je .imp_no_temp
+    push rax
+    push rdx
+    mov rdi, [rbp - BIM_TEMP]
+    mov qword [rbp - BIM_TEMP], 0
+    call obj_decref
+    pop rdx
+    pop rax
+.imp_no_temp:
     leave
     V_PACK rax, rdx             ; builtins return one Value
     ret

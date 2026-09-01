@@ -13,6 +13,7 @@ extern int_is_integer
 extern type_is_subtype
 extern hash_not_implemented
 extern io_buffer_released
+extern io_buffer_acquired
 extern ap_memcmp
 extern ap_memmove
 extern exc_MemoryError_type
@@ -959,8 +960,14 @@ DEF_FUNC bytes_like_ptr_len
     lea rax, [rel bytearray_empty_data]
     jmp .bpl_yes
 .bpl_memoryview:
-    mov r10, [rdi + PyMemoryViewObject.mv_len]
+    ; release() zeroes mv_buf and leaves mv_len alone, so a released view
+    ; would hand back a NULL pointer with the old length -- and every caller
+    ; here reads through it.  It is not bytes-like any more; the callers that
+    ; should raise instead of declining call memoryview_check first.
     mov rax, [rdi + PyMemoryViewObject.mv_buf]
+    cmp rax, MV_RELEASED
+    je .bpl_no
+    mov r10, [rdi + PyMemoryViewObject.mv_len]
 .bpl_yes:
     mov ecx, 1
     pop rbx
@@ -1943,7 +1950,8 @@ global bytearray_type_call
 BA_TYPE  equ 8
 BA_BUF   equ 16
 BA_LEN   equ 24
-BA_FRAME equ 32             ; + 1 push = 40, not 16-aligned
+BA_SIZE  equ 32
+BA_FRAME equ 48             ; + 1 push = 56, not 16-aligned
 DEF_FUNC bytearray_type_call, BA_FRAME
     ; rdi=type, rsi=args, rdx=nargs
     push rbx
@@ -1956,8 +1964,16 @@ DEF_FUNC bytearray_type_call, BA_FRAME
     mov [rbp - BA_LEN], rdx
 
     ; The object is a fixed size now; the bytes live in their own allocation.
+    ; The SIZE comes from the type, not from the struct: a subclass carries a
+    ; dict word and its __slots__ past this layout, and allocating the base's
+    ; size meant the first attribute write landed past the end of the block.
     mov rdx, [rbp - BA_TYPE]
+    mov rdi, [rdx + PyTypeObject.tp_basicsize]
+    cmp rdi, PyByteArrayObject_size
+    jge .ba_size_ok
     mov edi, PyByteArrayObject_size
+.ba_size_ok:
+    mov [rbp - BA_SIZE], rdi
     test qword [rdx + PyTypeObject.tp_flags], TYPE_FLAG_HAVE_GC
     jz .ba_plain_alloc
     mov rsi, rdx
@@ -1973,6 +1989,16 @@ DEF_FUNC bytearray_type_call, BA_FRAME
     mov qword [rbx + PyByteArrayObject.ob_size], 0
     mov qword [rbx + PyByteArrayObject.ob_cap], 0
     mov qword [rbx + PyByteArrayObject.ob_bytes], 0
+    ; Zero whatever the subclass added: a dict slot and any __slots__ values
+    ; are read as Values by instance_dealloc and by the collector.
+    mov rcx, [rbp - BA_SIZE]
+    sub rcx, PyByteArrayObject_size
+    jle .ba_no_tail
+    lea rdi, [rbx + PyByteArrayObject_size]
+    shr rcx, 3
+    xor eax, eax
+    rep stosq
+.ba_no_tail:
     mov rdx, [rbp - BA_TYPE]
     inc qword [rdx + PyObject.ob_refcnt]
 
@@ -3430,7 +3456,7 @@ bytearray_type:
     dq 0                            ; tp_base
     dq 0                            ; tp_dict
     dq 0                            ; tp_mro
-    dq TYPE_FLAG_BASETYPE           ; tp_flags (allow subclassing)
+    dq TYPE_FLAG_BASETYPE | TYPE_FLAG_BYTEARRAY_SUBCLASS           ; tp_flags (allow subclassing)
     dq 0                            ; tp_bases
     dq 0                        ; tp_traverse
     dq 0                        ; tp_clear
@@ -3627,6 +3653,12 @@ DEF_FUNC memoryview_type_call, MV_FRAME
     test rcx, rcx
     jz .mv_view_no_src
     inc qword [rcx + PyObject.ob_refcnt]
+    push rax
+    push rdi
+    mov rdi, rcx
+    call io_buffer_acquired     ; a second view over a BytesIO is a second
+    pop rdi                     ; export, and its release will decrement
+    pop rax
 .mv_view_no_src:
     mov rcx, [rdi + PyMemoryViewObject.mv_buf]
     mov [rax + PyMemoryViewObject.mv_buf], rcx
@@ -4307,6 +4339,10 @@ DEF_FUNC memoryview_subscript, MS_FRAME
     test rcx, rcx
     jz .ms_no_source
     inc qword [rcx + PyObject.ob_refcnt]
+    push rax
+    mov rdi, rcx
+    call io_buffer_acquired
+    pop rax
 .ms_no_source:
     mov edx, TAG_PTR
     leave

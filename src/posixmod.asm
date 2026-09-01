@@ -96,6 +96,7 @@ extern sys_pipe2
 extern sys_getdents64
 extern sys_getrandom
 extern sys_wait4
+extern obj_as_index
 extern obj_is_true
 extern sys_uname
 extern sys_ftruncate
@@ -329,7 +330,7 @@ DEF_FUNC posix_stat, PST_FRAME
     ret
 .pst_fd:
     mov rdi, [rbp - PST_PATH]
-    call val_to_i64
+    call posix_int_arg
     lea rsi, [rbp - PST_BUF]
     mov rdi, rax
     call sys_fstat
@@ -374,7 +375,7 @@ DEF_FUNC posix_fstat, PST_FRAME
     test rsi, rsi
     jz .pfst_argerr
     mov rdi, [rdi]
-    call val_to_i64
+    call posix_int_arg
     lea rsi, [rbp - PST_BUF]
     mov rdi, rax
     call sys_fstat
@@ -664,7 +665,7 @@ DEF_FUNC posix_mkdir, P1_FRAME
     cmp r12, 2
     jl .pmk_go
     mov rdi, [rbx + 8]
-    call val_to_i64
+    call posix_int_arg
     mov rsi, rax
 .pmk_go:
     mov rdi, [rbp - P1_PTR]
@@ -701,7 +702,7 @@ DEF_FUNC posix_chmod, P1_FRAME
     jz .pch_fail
     mov r12, rax
     mov rdi, [rbx + 8]
-    call val_to_i64
+    call posix_int_arg
     mov rsi, rax
     mov rdi, r12
     call sys_chmod
@@ -864,7 +865,7 @@ DEF_FUNC posix_open, POP_FRAME
     jz .pop_fail
     mov [rbp - POP_PTR], rax
     mov rdi, [rbx + 8]
-    call val_to_i64
+    call posix_int_arg
     mov rsi, rax                    ; flags
     mov edx, 0o777                  ; the mode, if the flags ask for one
     cmp r12, 3
@@ -872,7 +873,7 @@ DEF_FUNC posix_open, POP_FRAME
     push rsi
     push rsi
     mov rdi, [rbx + 16]
-    call val_to_i64
+    call posix_int_arg
     mov rdx, rax
     pop rsi
     pop rsi
@@ -899,11 +900,101 @@ DEF_FUNC posix_open, POP_FRAME
     RAISE exc_TypeError_type, "open() takes at least 2 arguments"
 END_FUNC posix_open
 
+;; ============================================================================
+;; posix_int_arg(rdi = a Value) -> rax = the integer it holds, or raises
+;;
+;; val_to_i64 trusts its caller and falls into int_to_i64, which reads
+;; PyIntObject.compact unconditionally.  Every descriptor, mode and flag here
+;; went through it unchecked: posix.access(path, 0.5) dereferenced a double's
+;; raw bits, and posix.close("x") read PyStrObject.ob_length as the number --
+;; 1 for a one-character string -- and closed stdout, silently.
+;; ============================================================================
+DEF_FUNC posix_int_arg
+    push rdi
+    V_UNPACK rdi, rdx
+    call int_is_integer
+    test eax, eax
+    jz .pia_bad
+    pop rdi
+    V_UNPACK rdi, rdx
+    call obj_as_index
+    leave
+    ret
+.pia_bad:
+    pop rdi
+    lea rsi, [rel pm_int_required]
+    mov rdx, rdi
+    lea rdi, [rel exc_TypeError_type]
+    call posix_raise_typename
+    ud2
+END_FUNC posix_int_arg
+
+;; posix_raise_typename(rdi = type, rsi = prefix cstr, rdx = the object)
+;; Builds "<prefix> <typename> ..." the way CPython words it.
+DEF_FUNC posix_raise_typename
+    push rbx
+    push r12
+    sub rsp, 8
+    mov rbx, rdi
+    mov r12, rdx
+    lea rdi, [rel pm_msgbuf]
+    mov byte [rdi], 0x27        ; an apostrophe
+    inc rdi
+    mov rsi, r12
+    V_TEST_PTR rsi, rax
+    ja .prt_immediate
+    test rsi, rsi
+    jz .prt_int
+    mov rsi, [rsi + PyObject.ob_type]
+    mov rsi, [rsi + PyTypeObject.tp_name]
+    jmp .prt_have
+.prt_immediate:
+    ; An immediate is an int or a float, and the message has to say which.
+    V_IS_FLOAT rsi, rax         ; the macro leaves "float" as below-or-equal
+    ja .prt_int
+    lea rsi, [rel pm_name_float]
+    jmp .prt_have
+.prt_int:
+    lea rsi, [rel pm_name_int]
+.prt_have:
+    mov rdx, 40
+    call posix_copy_bounded
+    mov byte [rax], 0x27
+    inc rax
+    mov rdi, rax
+    lea rsi, [rel pm_int_required]
+    mov rdx, 80
+    call posix_copy_bounded
+    mov rdi, rbx
+    lea rsi, [rel pm_msgbuf]
+    call raise_exception
+    ud2
+END_FUNC posix_raise_typename
+
+;; posix_copy_bounded(rdi = dest, rsi = src cstr, rdx = max) -> rax = the NUL
+DEF_FUNC_LOCAL posix_copy_bounded
+    xor ecx, ecx
+.pcb_loop:
+    cmp rcx, rdx
+    jge .pcb_done
+    mov al, [rsi + rcx]
+    test al, al
+    jz .pcb_done
+    mov [rdi + rcx], al
+    inc rcx
+    jmp .pcb_loop
+.pcb_done:
+    lea rax, [rdi + rcx]
+    mov byte [rax], 0
+    leave
+    ret
+END_FUNC posix_copy_bounded
+
 DEF_FUNC posix_close, 16
     test rsi, rsi
     jz .pcl_argerr
     mov rdi, [rdi]
-    call val_to_i64
+    call posix_int_arg
     mov rdi, rax
     call sys_close
     POSIX_CHECK rax, 0
@@ -926,10 +1017,10 @@ DEF_FUNC posix_read, PRD_FRAME
     push r12
     mov rbx, rdi
     mov rdi, [rbx]
-    call val_to_i64
+    call posix_int_arg
     mov r12, rax                    ; fd
     mov rdi, [rbx + 8]
-    call val_to_i64
+    call posix_int_arg
     mov rbx, rax                    ; n
     test rbx, rbx
     js .prd_negative
@@ -990,7 +1081,7 @@ DEF_FUNC posix_write, 16
     push rbx
     mov rbx, rdi
     mov rdi, [rbx]
-    call val_to_i64
+    call posix_int_arg
     mov rdi, rax                    ; fd... but the buffer comes next
     push rdi
     push rdi
@@ -1041,14 +1132,14 @@ DEF_FUNC posix_lseek, 16
     push r12
     mov rbx, rdi
     mov rdi, [rbx]
-    call val_to_i64
+    call posix_int_arg
     mov r12, rax
     mov rdi, [rbx + 8]
-    call val_to_i64
+    call posix_int_arg
     push rax
     push rax
     mov rdi, [rbx + 16]
-    call val_to_i64
+    call posix_int_arg
     mov rdx, rax
     pop rsi
     pop rsi
@@ -1071,7 +1162,7 @@ DEF_FUNC posix_dup, 16
     test rsi, rsi
     jz .pdp_argerr
     mov rdi, [rdi]
-    call val_to_i64
+    call posix_int_arg
     mov rdi, rax
     call sys_dup
     POSIX_CHECK rax, 0
@@ -1099,7 +1190,7 @@ DEF_FUNC posix_access, 32
     jz .pac_fail
     mov r12, rax
     mov rdi, [rbx + 8]
-    call val_to_i64
+    call posix_int_arg
     mov rsi, rax
     mov rdi, r12
     call sys_access
@@ -1183,7 +1274,7 @@ DEF_FUNC posix_umask, 16
     test rsi, rsi
     jz .pum_argerr
     mov rdi, [rdi]
-    call val_to_i64
+    call posix_int_arg
     mov rdi, rax
     call sys_umask
     POSIX_CHECK rax, 0
@@ -1212,7 +1303,7 @@ DEF_FUNC posix_isatty, PIT_FRAME
     test rsi, rsi
     jz .pit_argerr
     mov rdi, [rdi]
-    call val_to_i64
+    call posix_int_arg
     mov rdi, rax
     mov esi, TCGETS
     lea rdx, [rbp - PIT_BUF]
@@ -1241,11 +1332,11 @@ DEF_FUNC posix_ftruncate, 16
     push rbx
     mov rbx, rdi
     mov rdi, [rbx]
-    call val_to_i64
+    call posix_int_arg
     push rax
     push rax
     mov rdi, [rbx + 8]
-    call val_to_i64
+    call posix_int_arg
     mov rsi, rax
     pop rdi
     pop rdi
@@ -1271,7 +1362,7 @@ DEF_FUNC posix_get_inheritable, 16
     test rsi, rsi
     jz .pgi_argerr
     mov rdi, [rdi]
-    call val_to_i64
+    call posix_int_arg
     mov rdi, rax
     mov esi, F_GETFD
     xor edx, edx
@@ -1302,7 +1393,7 @@ DEF_FUNC posix_set_inheritable, PSI_FRAME
     mov rsi, [rdi + 8]
     mov rdi, [rdi]
     mov [rbp - PSI_WANT], rsi
-    call val_to_i64
+    call posix_int_arg
     mov [rbp - PSI_FD], rax
 
     ; Read the current flags, then set or clear FD_CLOEXEC without disturbing
@@ -1412,7 +1503,7 @@ DEF_FUNC posix_strerror, 16
     test rsi, rsi
     jz .pse_argerr
     mov rdi, [rdi]
-    call val_to_i64
+    call posix_int_arg
     mov edi, eax
     call strerror wrt ..plt
     mov rdi, rax
@@ -1432,7 +1523,7 @@ DEF_FUNC posix_urandom, PUR_FRAME
     test rsi, rsi
     jz .pur_argerr
     mov rdi, [rdi]
-    call val_to_i64
+    call posix_int_arg
     test rax, rax
     js .pur_negative
     mov [rbp - PUR_N], rax
@@ -1554,11 +1645,11 @@ DEF_FUNC posix_waitpid, PWP_FRAME
     push rbx
     mov rbx, rdi
     mov rdi, [rbx]
-    call val_to_i64
+    call posix_int_arg
     push rax
     push rax
     mov rdi, [rbx + 8]
-    call val_to_i64
+    call posix_int_arg
     mov rdx, rax                    ; options
     pop rdi
     pop rdi                         ; pid
@@ -1610,7 +1701,7 @@ DEF_FUNC %1, 16
     test rsi, rsi
     jz %%argerr
     mov rdi, [rdi]
-    call val_to_i64
+    call posix_int_arg
     jmp %2
 %%argerr:
     RAISE exc_TypeError_type, %3
@@ -1706,7 +1797,7 @@ DEF_FUNC posix_waitstatus_to_exitcode, 16
     test rsi, rsi
     jz .pwe_argerr
     mov rdi, [rdi]
-    call val_to_i64
+    call posix_int_arg
     mov ecx, eax
     and ecx, 0x7f
     test ecx, ecx
@@ -2030,6 +2121,14 @@ pm_n_chmod:      db "chmod", 0
 pm_n_readlink:   db "readlink", 0
 pm_n_pipe:       db "pipe", 0
 pm_n_getpid:     db "getpid", 0
+pm_int_required: db " object cannot be interpreted as an integer", 0
+
+section .bss
+pm_msgbuf: resb 192
+
+section .rodata
+pm_name_int:     db "int", 0
+pm_name_float:   db "float", 0
 pm_n_umask:      db "umask", 0
 pm_n_isatty:     db "isatty", 0
 pm_n_ftruncate:  db "ftruncate", 0

@@ -2973,12 +2973,31 @@ END_FUNC bytesio_next_fn
 ;; ============================================================================
 
 ;; ============================================================================
-;; io_buffer_released(rdi = the object a memoryview was holding)
+;; io_buffer_acquired / io_buffer_released(rdi = a memoryview's source)
 ;;
-;; Called from memoryview release and dealloc for every view, whatever its
-;; source.  Only a BytesIO counts, and the global is 0 until _io is imported,
-;; so both checks are one compare.
+;; Called wherever a memoryview takes or drops a source, whatever that source
+;; is.  Only a BytesIO counts, and the global is 0 until _io is imported, so
+;; both checks are one compare.
+;;
+;; They have to be symmetric.  Counting only the view getbuffer() returned
+;; meant a slice of it -- which shares the storage and the source -- decremented
+;; a count it never incremented: releasing the original dropped it to zero
+;; while the slice was still pointing into the buffer, and the next write
+;; reallocated underneath it.
 ;; ============================================================================
+DEF_FUNC_BARE io_buffer_acquired
+    test rdi, rdi
+    jz .iba_out
+    mov rax, [rel io_bytesio_type]
+    test rax, rax
+    jz .iba_out
+    cmp [rdi + PyObject.ob_type], rax
+    jne .iba_out
+    inc qword [rdi + PyBytesIOObject.bio_exports]
+.iba_out:
+    ret
+END_FUNC io_buffer_acquired
+
 DEF_FUNC_BARE io_buffer_released
     test rdi, rdi
     jz .ibr_out
