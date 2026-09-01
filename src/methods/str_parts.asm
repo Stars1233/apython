@@ -21,6 +21,8 @@ extern ap_memcpy
 extern ap_memcmp
 extern obj_decref
 extern str_new_heap
+extern obj_as_index
+extern int_is_integer
 extern str_type
 extern list_new
 extern list_append
@@ -660,6 +662,137 @@ END_FUNC str_method_splitlines
 ;;
 ;; A dict still goes through dict_get, which is the common case and cannot
 ;; raise; everything else goes through mp_subscript.
+;; trn_decode_cp(rdi = bytes, rsi = how many are left) -> rax = code point,
+;;   rdx = its length in bytes
+;; A malformed byte is passed through as itself, one byte wide: this is
+;; decoding a str that is already valid, so the fallback is only a guard.
+DEF_FUNC_BARE trn_decode_cp
+    movzx eax, byte [rdi]
+    mov edx, 1
+    cmp al, 0x80
+    jb .tdc_done
+    cmp al, 0xc2
+    jb .tdc_done
+    cmp al, 0xe0
+    jb .tdc_two
+    cmp al, 0xf0
+    jb .tdc_three
+    cmp al, 0xf5
+    jb .tdc_four
+    jmp .tdc_done
+.tdc_two:
+    cmp rsi, 2
+    jl .tdc_done
+    and eax, 0x1f
+    shl eax, 6
+    movzx ecx, byte [rdi + 1]
+    and ecx, 0x3f
+    or eax, ecx
+    mov edx, 2
+    ret
+.tdc_three:
+    cmp rsi, 3
+    jl .tdc_done
+    and eax, 0x0f
+    shl eax, 12
+    movzx ecx, byte [rdi + 1]
+    and ecx, 0x3f
+    shl ecx, 6
+    or eax, ecx
+    movzx ecx, byte [rdi + 2]
+    and ecx, 0x3f
+    or eax, ecx
+    mov edx, 3
+    ret
+.tdc_four:
+    cmp rsi, 4
+    jl .tdc_done
+    and eax, 0x07
+    shl eax, 18
+    movzx ecx, byte [rdi + 1]
+    and ecx, 0x3f
+    shl ecx, 12
+    or eax, ecx
+    movzx ecx, byte [rdi + 2]
+    and ecx, 0x3f
+    shl ecx, 6
+    or eax, ecx
+    movzx ecx, byte [rdi + 3]
+    and ecx, 0x3f
+    or eax, ecx
+    mov edx, 4
+    ret
+.tdc_done:
+    ret
+END_FUNC trn_decode_cp
+
+;; trn_encode_cp(rdi = code point, rsi = a buffer of at least 5 bytes)
+;;   -> rax = how many bytes it wrote, NUL-terminated
+DEF_FUNC_BARE trn_encode_cp
+    cmp rdi, 0x80
+    jb .tec_one
+    cmp rdi, 0x800
+    jb .tec_two
+    cmp rdi, 0x10000
+    jb .tec_three
+    mov rax, rdi
+    shr rax, 18
+    or al, 0xf0
+    mov [rsi], al
+    mov rax, rdi
+    shr rax, 12
+    and al, 0x3f
+    or al, 0x80
+    mov [rsi + 1], al
+    mov rax, rdi
+    shr rax, 6
+    and al, 0x3f
+    or al, 0x80
+    mov [rsi + 2], al
+    mov rax, rdi
+    and al, 0x3f
+    or al, 0x80
+    mov [rsi + 3], al
+    mov byte [rsi + 4], 0
+    mov eax, 4
+    ret
+.tec_one:
+    mov rax, rdi
+    mov [rsi], al
+    mov byte [rsi + 1], 0
+    mov eax, 1
+    ret
+.tec_two:
+    mov rax, rdi
+    shr rax, 6
+    or al, 0xc0
+    mov [rsi], al
+    mov rax, rdi
+    and al, 0x3f
+    or al, 0x80
+    mov [rsi + 1], al
+    mov byte [rsi + 2], 0
+    mov eax, 2
+    ret
+.tec_three:
+    mov rax, rdi
+    shr rax, 12
+    or al, 0xe0
+    mov [rsi], al
+    mov rax, rdi
+    shr rax, 6
+    and al, 0x3f
+    or al, 0x80
+    mov [rsi + 1], al
+    mov rax, rdi
+    and al, 0x3f
+    or al, 0x80
+    mov [rsi + 2], al
+    mov byte [rsi + 3], 0
+    mov eax, 3
+    ret
+END_FUNC trn_encode_cp
+
 ;; ============================================================================
 TRN_SELF  equ 8
 TRN_TAB   equ 16
@@ -668,9 +801,11 @@ TRN_SUB   equ 32            ; the table's mp_subscript, or 0 when it is a dict
 TRN_I     equ 40            ; the index into self
 TRN_N     equ 48            ; self's length in bytes
 TRN_EXC   equ 56            ; current_exception, to tell a raise from a miss
-TRN_CH    equ 64            ; one character, built on the stack
-TRN_LEN   equ 72            ; a bounded table's length, or -1
-TRN_FRAME equ 80            ; + 2 pushes = 96, 16-byte aligned
+TRN_CH    equ 72            ; one character, built on the stack: up to four
+                            ; UTF-8 bytes and a NUL
+TRN_LEN   equ 80            ; a bounded table's length, or -1
+TRN_CHLEN equ 88            ; how many bytes the current character occupies
+TRN_FRAME equ 96            ; + 2 pushes = 112, not 16-aligned
 
 extern bytearray_type
 extern bytes_type
@@ -774,8 +909,18 @@ DEF_FUNC str_method_translate, TRN_FRAME
     mov rcx, [rbp - TRN_I]
     cmp rcx, [rbp - TRN_N]
     jge .trn_join
+    ; A CODE POINT, not a byte.  Reading one byte took the lead byte of a
+    ; UTF-8 sequence as the ordinal, so "é".translate({233: "X"}) mapped
+    ; nothing and translating by the lead byte instead produced a string that
+    ; was not valid UTF-8 at all.
     mov rax, [rbp - TRN_SELF]
-    movzx ebx, byte [rax + PyStrObject.data + rcx]  ; rbx = this character
+    lea rdi, [rax + PyStrObject.data]
+    add rdi, rcx
+    mov rsi, [rbp - TRN_N]
+    sub rsi, rcx
+    call trn_decode_cp          ; rax = the code point, rdx = its byte count
+    mov rbx, rax
+    mov [rbp - TRN_CHLEN], rdx
 
     ; The key is the ordinal, as an int Value.
     mov rdi, rbx
@@ -815,8 +960,15 @@ DEF_FUNC str_method_translate, TRN_FRAME
     mov r12, rax
     IS_NONE rax, rcx
     je .trn_drop
-    V_IS_INT rax, rcx
-    jae .trn_ordinal
+    ; int_is_integer, not V_IS_INT: the mapped value may be a heap int, a bool
+    ; or an int subclass, and an immediate-only test called all three "not an
+    ; integer".  Under INT_STRESS=1 every ordinal above 7 is one of them.
+    mov rdi, rax
+    V_UNPACK rdi, rdx
+    call int_is_integer
+    test eax, eax
+    jnz .trn_ordinal
+    mov rax, r12
     V_TEST_PTR rax, rcx
     ja .trn_bad_value
     mov rcx, [rax + PyObject.ob_type]
@@ -835,18 +987,20 @@ DEF_FUNC str_method_translate, TRN_FRAME
     jmp .trn_next
 
 .trn_ordinal:
-    ; An ordinal: render it as one character.  Only Latin-1 fits a byte, which
-    ; is what the rest of this function handles; a wider one would need the
-    ; UTF-8 encoder, and CPython allows it.  Recorded in bugs.md.
-    V_TO_I64 rax
+    ; An ordinal: render it as one character, in UTF-8.  It used to be
+    ; refused above 0x7f, which CPython allows.
+    mov rdi, r12
+    V_UNPACK rdi, rdx
+    call obj_as_index           ; not V_TO_I64: it may be a heap int
     cmp rax, 0
     jl .trn_bad_value
-    cmp rax, 0x7f
+    cmp rax, 0x10ffff
     jg .trn_bad_value
-    mov [rbp - TRN_CH], al
-    mov byte [rbp - TRN_CH + 1], 0
+    mov rdi, rax
+    lea rsi, [rbp - TRN_CH]
+    call trn_encode_cp          ; rax = how many bytes it wrote
     lea rdi, [rbp - TRN_CH]
-    mov esi, 1
+    mov rsi, rax
     call str_new_heap
     mov rbx, rax
     mov rdi, [rbp - TRN_LIST]
@@ -864,11 +1018,11 @@ DEF_FUNC str_method_translate, TRN_FRAME
     jmp .trn_next
 
 .trn_keep:
-    ; Not in the table: the original character survives.
-    mov [rbp - TRN_CH], bl
-    mov byte [rbp - TRN_CH + 1], 0
-    lea rdi, [rbp - TRN_CH]
-    mov esi, 1
+    ; Not in the table: the original character survives, all of its bytes.
+    mov rax, [rbp - TRN_SELF]
+    lea rdi, [rax + PyStrObject.data]
+    add rdi, [rbp - TRN_I]
+    mov rsi, [rbp - TRN_CHLEN]
     call str_new_heap
     mov rbx, rax
     mov rdi, [rbp - TRN_LIST]
@@ -878,7 +1032,8 @@ DEF_FUNC str_method_translate, TRN_FRAME
     call obj_decref
 
 .trn_next:
-    inc qword [rbp - TRN_I]
+    mov rax, [rbp - TRN_CHLEN]
+    add [rbp - TRN_I], rax      ; past the whole character, not one byte
     jmp .trn_loop
 
 .trn_join:

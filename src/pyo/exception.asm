@@ -599,6 +599,18 @@ DEF_FUNC_LOCAL oserror_append, OSA_FRAME
     cmp rdx, 120
     jle .osa_len_ok
     mov rdx, 120                    ; one field cannot fill the buffer
+    ; Back off to a character boundary: cutting at 120 bytes landed in the
+    ; middle of a UTF-8 sequence and left the message ending in a lone
+    ; continuation byte, which is not a str at all.
+.osa_back_off:
+    test rdx, rdx
+    jz .osa_len_ok
+    movzx ecx, byte [rax + PyStrObject.data + rdx]
+    and ecx, 0xc0
+    cmp ecx, 0x80                   ; a continuation byte: the cut is inside
+    jne .osa_len_ok
+    dec rdx
+    jmp .osa_back_off
 .osa_len_ok:
     mov [rbp - OSA_LEN], rdx
     mov rdi, [rbp - OSA_CUR]

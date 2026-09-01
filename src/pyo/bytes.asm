@@ -4,6 +4,8 @@
 %include "macros.inc"
 %include "object.inc"
 
+extern tuple_type
+extern tuple_new
 extern bytes_method_hex
 extern str_from_cstr_heap
 extern tuple_new
@@ -1531,6 +1533,247 @@ bytes_sequence_methods:
 
 section .text
 
+;; bytes_latin1_to_str(rdi = data, rsi = length) -> a new str, or 0
+;; One code point per byte, which is what makes the round trip through
+;; str_mod exact: bytes_mod re-encodes the result the same way.
+BL1_SRC   equ 8
+BL1_LEN   equ 16
+BL1_OUT   equ 24
+BL1_POS   equ 32
+BL1_FRAME equ 48            ; + 0 pushes = 48
+
+DEF_FUNC_LOCAL bytes_latin1_to_str, BL1_FRAME
+    mov [rbp - BL1_SRC], rdi
+    mov [rbp - BL1_LEN], rsi
+    lea rdi, [rsi + rsi]
+    add rdi, PyStrObject.data + 8
+    call ap_malloc
+    test rax, rax
+    jz .bl1_fail
+    mov [rbp - BL1_OUT], rax
+    mov qword [rax + PyObject.ob_refcnt], 1
+    lea rcx, [rel str_type]
+    mov [rax + PyObject.ob_type], rcx
+    mov qword [rax + PyStrObject.ob_hash], -1
+    mov rcx, [rbp - BL1_LEN]
+    mov [rax + PyStrObject.ob_length], rcx
+    mov qword [rbp - BL1_POS], 0
+    xor ecx, ecx
+.bl1_loop:
+    cmp rcx, [rbp - BL1_LEN]
+    jge .bl1_done
+    mov rdx, [rbp - BL1_SRC]
+    movzx eax, byte [rdx + rcx]
+    mov rdx, [rbp - BL1_OUT]
+    mov r8, [rbp - BL1_POS]
+    test al, 0x80
+    jnz .bl1_two
+    mov [rdx + PyStrObject.data + r8], al
+    inc qword [rbp - BL1_POS]
+    jmp .bl1_next
+.bl1_two:
+    mov r9d, eax
+    shr r9d, 6
+    or r9b, 0xc0
+    mov [rdx + PyStrObject.data + r8], r9b
+    and eax, 0x3f
+    or al, 0x80
+    mov [rdx + PyStrObject.data + r8 + 1], al
+    add qword [rbp - BL1_POS], 2
+.bl1_next:
+    inc rcx
+    jmp .bl1_loop
+.bl1_done:
+    mov rax, [rbp - BL1_OUT]
+    mov rcx, [rbp - BL1_POS]
+    mov [rax + PyStrObject.ob_size], rcx
+    mov qword [rax + PyStrObject.data + rcx], 0
+    leave
+    ret
+.bl1_fail:
+    xor eax, eax
+    leave
+    ret
+END_FUNC bytes_latin1_to_str
+
+;; bytes_mod_is_byteslike(rdi = a Value) -> eax = 1 when %s would insert its
+;; bytes rather than its repr
+DEF_FUNC_BARE bytes_mod_is_byteslike
+    xor eax, eax
+    V_TEST_PTR rdi, rcx
+    ja .bmi_out
+    test rdi, rdi
+    jz .bmi_out
+    mov rcx, [rdi + PyObject.ob_type]
+    lea rdx, [rel bytes_type]
+    cmp rcx, rdx
+    je .bmi_yes
+    lea rdx, [rel bytearray_type]
+    cmp rcx, rdx
+    je .bmi_yes
+    lea rdx, [rel memoryview_type]
+    cmp rcx, rdx
+    jne .bmi_out
+.bmi_yes:
+    mov eax, 1
+.bmi_out:
+    ret
+END_FUNC bytes_mod_is_byteslike
+
+;; ============================================================================
+;; bytes_mod_prepare_args(rdi = the right operand Value) -> a Value to format
+;; bytes_mod_release_args(rdi = what it returned)
+;;
+;; %s on a bytes format means "insert these bytes", not "insert str(x)".
+;; Decoding each bytes-like argument as latin-1 turns it into a str whose code
+;; points are its bytes, and bytes_mod re-encodes the result the same way, so
+;; the round trip is exact.  Anything else is passed through untouched.
+;;
+;; A tuple is rebuilt only if it contains something bytes-like; a lone
+;; argument is converted in place.  Nothing else here allocates, so
+;; release_args frees exactly what prepare_args made.
+;; ============================================================================
+BMP_ARGS  equ 8
+BMP_OUT   equ 16
+BMP_I     equ 24
+BMP_N     equ 32
+BMP_FRAME equ 48            ; + 0 pushes = 48
+
+DEF_FUNC_LOCAL bytes_mod_prepare_args, BMP_FRAME
+    mov [rbp - BMP_ARGS], rdi
+    V_TEST_PTR rdi, rax
+    ja .bmp_asis
+    test rdi, rdi
+    jz .bmp_asis
+    mov rax, [rdi + PyObject.ob_type]
+    lea rcx, [rel tuple_type]
+    cmp rax, rcx
+    je .bmp_tuple
+
+    ; A single argument.
+    call bytes_mod_as_str
+    test rax, rax
+    jnz .bmp_out
+.bmp_asis:
+    mov rax, [rbp - BMP_ARGS]
+    leave
+    ret
+.bmp_out:
+    leave
+    ret
+
+.bmp_tuple:
+    mov rcx, [rdi + PyTupleObject.ob_size]
+    mov [rbp - BMP_N], rcx
+    ; Only rebuild if there is something to convert.  Building a copy
+    ; unconditionally meant that when str_mod raised -- which it does for a
+    ; wrong argument count, and a raise abandons the C stack -- the copy was
+    ; never released.
+    mov rax, [rdi + PyTupleObject.ob_item]
+    xor rdx, rdx
+.bmp_scan:
+    cmp rdx, rcx
+    jge .bmp_asis
+    mov rdi, [rax + rdx*8]
+    push rax
+    push rcx
+    push rdx
+    sub rsp, 8
+    call bytes_mod_is_byteslike
+    add rsp, 8
+    pop rdx
+    pop rcx
+    pop rax
+    test eax, eax
+    jnz .bmp_rebuild
+    inc rdx
+    jmp .bmp_scan
+
+.bmp_rebuild:
+    mov rdi, [rbp - BMP_N]
+    call tuple_new
+    test rax, rax
+    jz .bmp_asis
+    mov [rbp - BMP_OUT], rax
+    mov qword [rbp - BMP_I], 0
+.bmp_loop:
+    mov rcx, [rbp - BMP_I]
+    cmp rcx, [rbp - BMP_N]
+    jge .bmp_tuple_done
+    mov rax, [rbp - BMP_ARGS]
+    mov rax, [rax + PyTupleObject.ob_item]
+    mov rdi, [rax + rcx*8]
+    call bytes_mod_as_str
+    test rax, rax
+    jnz .bmp_store
+    mov rax, [rbp - BMP_ARGS]           ; not bytes-like: keep it, with a
+    mov rax, [rax + PyTupleObject.ob_item]   ; reference of its own
+    mov rcx, [rbp - BMP_I]
+    mov rax, [rax + rcx*8]
+    push rax
+    INCREF_V rax, rcx
+    pop rax
+.bmp_store:
+    mov rcx, [rbp - BMP_OUT]
+    mov rcx, [rcx + PyTupleObject.ob_item]
+    mov rdx, [rbp - BMP_I]
+    mov [rcx + rdx*8], rax
+    inc qword [rbp - BMP_I]
+    jmp .bmp_loop
+.bmp_tuple_done:
+    mov rax, [rbp - BMP_OUT]
+    leave
+    ret
+END_FUNC bytes_mod_prepare_args
+
+;; bytes_mod_as_str(rdi = a Value) -> a new str, or 0 if it is not bytes-like
+DEF_FUNC_LOCAL bytes_mod_as_str
+    V_TEST_PTR rdi, rax
+    ja .bma_no
+    test rdi, rdi
+    jz .bma_no
+    mov rax, [rdi + PyObject.ob_type]
+    lea rcx, [rel bytes_type]
+    cmp rax, rcx
+    je .bma_yes
+    lea rcx, [rel bytearray_type]
+    cmp rax, rcx
+    je .bma_yes
+    lea rcx, [rel memoryview_type]
+    cmp rax, rcx
+    jne .bma_no
+.bma_yes:
+    call bytes_like_ptr_len     ; rax = data, r10 = length
+    test ecx, ecx
+    jz .bma_no
+    mov rdi, rax
+    mov rsi, r10
+    call bytes_latin1_to_str
+    leave
+    ret
+.bma_no:
+    xor eax, eax
+    leave
+    ret
+END_FUNC bytes_mod_as_str
+
+DEF_FUNC_LOCAL bytes_mod_release_args
+    ; Only what prepare_args ALLOCATED: it hands back the caller's own object
+    ; when there was nothing to convert, and releasing that decrefs a tuple
+    ; nobody gave us -- which surfaced as free() complaining, later, about a
+    ; constant.
+    cmp rdi, rsi
+    je .bmr_out
+    V_TEST_PTR rdi, rax
+    ja .bmr_out
+    test rdi, rdi
+    jz .bmr_out
+    call obj_decref
+.bmr_out:
+    leave
+    ret
+END_FUNC bytes_mod_release_args
+
 ;; ============================================================================
 ;; bytes_mod(PyBytesObject *fmt, PyObject *args) -> PyBytesObject*
 ;; nb_remainder: implements b"fmt" % args
@@ -1538,7 +1781,8 @@ section .text
 ;; ============================================================================
 BM_FMT   equ 8
 BM_ARGS  equ 16
-BM_FRAME equ 16             ; + 0 pushes = 16
+BM_ORIG  equ 24             ; the caller's own args, to tell a copy from it
+BM_FRAME equ 32             ; + 2 pushes = 48, 16-aligned
 
 DEF_FUNC bytes_mod, BM_FRAME
     ; The right operand stays a Value.  It used to be V_UNPACK'd here and the
@@ -1565,11 +1809,28 @@ DEF_FUNC bytes_mod, BM_FRAME
     call str_new_heap
     mov rbx, rax               ; rbx = temp str
 
+    ; Any bytes-like argument becomes the str its bytes decode to under
+    ; latin-1, one code point per byte.  The result is re-encoded the same way
+    ; below, so the bytes come through untouched -- where handing the object
+    ; itself to str_mod applied str() to it and `b"%s" % (b"abc",)` produced
+    ; b"b'abc'".
+    mov rdi, [rbp-BM_ARGS]
+    mov [rbp-BM_ORIG], rdi
+    call bytes_mod_prepare_args
+    mov [rbp-BM_ARGS], rax
+
     ; Call str_mod(temp_str, args)
     extern str_mod
     mov rdi, rbx               ; temp str
     mov rsi, [rbp-BM_ARGS]    ; args, a Value -- str_mod is a slot and unpacks
     call str_mod
+    push rax
+    sub rsp, 8
+    mov rdi, [rbp-BM_ARGS]
+    mov rsi, [rbp-BM_ORIG]
+    call bytes_mod_release_args
+    add rsp, 8
+    pop rax
     mov r12, rax               ; r12 = result str Value (a str is a pointer)
 
     ; DECREF temp fmt str
@@ -1581,16 +1842,43 @@ DEF_FUNC bytes_mod, BM_FRAME
     test r12, r12
     jz .bm_failed
 
-    ; Convert result str to bytes
-    mov rdi, [r12 + PyStrObject.ob_size]
+    ; Convert the result str back to bytes, one BYTE per code point -- the
+    ; reverse of the latin-1 decoding the arguments went through.  Copying
+    ; the str's UTF-8 out verbatim turned every byte above 0x7f back into the
+    ; two bytes that encode it, so b"%s" % (b"\xff",) came out as b"\xc3\xbf".
+    mov rdi, [r12 + PyStrObject.ob_length]
     call bytes_new
-    mov rbx, rax               ; rbx = bytes result
-    ; Copy str data into bytes
+    mov rbx, rax
     lea rdi, [rax + PyBytesObject.data]
     lea rsi, [r12 + PyStrObject.data]
     mov rdx, [r12 + PyStrObject.ob_size]
-    extern ap_memcpy
-    call ap_memcpy
+    xor rcx, rcx                ; read cursor
+    xor r8, r8                  ; write cursor
+.bm_latin1_loop:
+    cmp rcx, rdx
+    jge .bm_latin1_done
+    movzx eax, byte [rsi + rcx]
+    test al, 0x80
+    jz .bm_latin1_one
+    ; A two-byte sequence encodes one code point below 0x100 here.
+    and eax, 0x1f
+    shl eax, 6
+    movzx r9d, byte [rsi + rcx + 1]
+    and r9d, 0x3f
+    or eax, r9d
+    add rcx, 2
+    jmp .bm_latin1_store
+.bm_latin1_one:
+    inc rcx
+.bm_latin1_store:
+    mov [rdi + r8], al
+    inc r8
+    jmp .bm_latin1_loop
+.bm_latin1_done:
+    ; bytes_new already sized the block and wrote the terminator, and the
+    ; loop writes exactly the code-point count it was given: adding a NUL
+    ; here put one byte past the end of the allocation.
+    mov [rbx + PyBytesObject.ob_size], r8
 
     ; DECREF result str
     mov rdi, r12
@@ -3013,6 +3301,20 @@ DEF_FUNC bytearray_ass_subscript, 104
     mov r10, [rcx + PyByteArrayObject.ob_size]
     mov r8, [rbp - BAS_START]
     mov r9, [rbp - BAS_STEP]
+    ; The walk below is forward, so a negative step has to be turned into the
+    ; same set of indices counted upward: {start, start+step, ...} with step
+    ; negative is {start+(n-1)*step, ..., start} with it positive.  Without
+    ; this only the first index ever matched, and `del b[::-2]` removed one
+    ; byte instead of three.
+    test r9, r9
+    jns .bas_extdel_ready
+    mov rdx, [rbp - BAS_N]
+    dec rdx
+    jl .bas_extdel_ready        ; an empty slice deletes nothing
+    imul rdx, r9
+    add r8, rdx
+    neg r9
+.bas_extdel_ready:
     xor ecx, ecx                ; how many deleted so far
     xor rsi, rsi                ; the read cursor
     xor rdi, rdi                ; the write cursor
