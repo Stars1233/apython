@@ -12,6 +12,7 @@ extern list_new
 extern int_is_integer
 extern type_is_subtype
 extern hash_not_implemented
+extern io_buffer_released
 extern ap_memcmp
 extern ap_memmove
 extern exc_MemoryError_type
@@ -3442,6 +3443,7 @@ bytearray_empty_data: db 0
 
 ; The one-character format codes a view can carry.  cast() accepts only the
 ; unsigned ones, which is what memoryview_item_value reads.
+global mv_format_B
 mv_format_B: db "B", 0
 mv_format_H: db "H", 0
 mv_format_I: db "I", 0
@@ -3651,6 +3653,9 @@ DEF_FUNC memoryview_dealloc_proper
     mov rdi, [rdi + PyMemoryViewObject.mv_source]
     test rdi, rdi
     jz .mvd_no_source                  ; already released
+    push rdi
+    call io_buffer_released
+    pop rdi
     call obj_decref
 .mvd_no_source:
     pop rdi                            ; restore self
@@ -3921,7 +3926,10 @@ DEF_FUNC memoryview_method_release, MVM_FRAME
     mov qword [rdi + PyMemoryViewObject.mv_source], 0
     test rax, rax
     jz .mvrl_done
-    mov rdi, rax
+    push rax                    ; io_buffer_released returns in rax, so the
+    mov rdi, rax                ; source has to survive the call in a slot
+    call io_buffer_released     ; a BytesIO counts its live views
+    pop rdi
     call obj_decref
 .mvrl_done:
     LOAD_NONE rax

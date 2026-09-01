@@ -526,6 +526,20 @@ FIO_CLOSEFD   equ 0x20
 FIO_SEEK_KNOWN equ 0x40
 FIO_SEEKABLE   equ 0x80
 
+; _io.BytesIO.  Laid out like PyFileIOObject and for the same reason: a
+; heaptype over _BufferedIOBase whose tp_basicsize is patched, so the fields
+; below sit past the instance header the base hands down.
+struc PyBytesIOObject
+    .ob_refcnt:   resq 1  ; +0
+    .ob_type:     resq 1  ; +8
+    .inst_dict:   resq 1  ; +16
+    .bio_buf:     resq 1  ; +24: the storage, or 0 once closed
+    .bio_size:    resq 1  ; +32: bytes written, which is what getvalue returns
+    .bio_cap:     resq 1  ; +40: bytes allocated
+    .bio_pos:     resq 1  ; +48: the read/write cursor
+    .bio_exports: resq 1  ; +56: live getbuffer() views, which block a resize
+endstruc
+
 ; Async task object (for event loop)
 struc AsyncTask
     .ob_refcnt:    resq 1  ; +0
