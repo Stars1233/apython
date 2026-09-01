@@ -550,6 +550,114 @@ DEF_FUNC sys_module_init, 32
     pop rdi
     call obj_decref
 
+    ; --- sys.flags ---
+    extern flags_type
+    lea rdi, [rel flags_type]
+    call structseq_init_type
+    lea rdi, [rel flags_type]
+    call structseq_new
+    mov rbx, rax
+    mov rdi, rbx
+    mov esi, 0
+    mov rdx, 0
+    V_PACK_I64 rdx, rcx
+    call structseq_set
+    mov rdi, rbx
+    mov esi, 1
+    mov rdx, 0
+    V_PACK_I64 rdx, rcx
+    call structseq_set
+    mov rdi, rbx
+    mov esi, 2
+    mov rdx, 0
+    V_PACK_I64 rdx, rcx
+    call structseq_set
+    mov rdi, rbx
+    mov esi, 3
+    mov rdx, 0
+    V_PACK_I64 rdx, rcx
+    call structseq_set
+    mov rdi, rbx
+    mov esi, 4
+    mov rdx, 0
+    V_PACK_I64 rdx, rcx
+    call structseq_set
+    mov rdi, rbx
+    mov esi, 5
+    mov rdx, 0
+    V_PACK_I64 rdx, rcx
+    call structseq_set
+    mov rdi, rbx
+    mov esi, 6
+    mov rdx, 0
+    V_PACK_I64 rdx, rcx
+    call structseq_set
+    mov rdi, rbx
+    mov esi, 7
+    mov rdx, 0
+    V_PACK_I64 rdx, rcx
+    call structseq_set
+    mov rdi, rbx
+    mov esi, 8
+    mov rdx, 0
+    V_PACK_I64 rdx, rcx
+    call structseq_set
+    mov rdi, rbx
+    mov esi, 9
+    mov rdx, 0
+    V_PACK_I64 rdx, rcx
+    call structseq_set
+    mov rdi, rbx
+    mov esi, 10
+    mov rdx, 0
+    V_PACK_I64 rdx, rcx
+    call structseq_set
+    mov rdi, rbx
+    mov esi, 11
+    mov rdx, 0
+    V_PACK_I64 rdx, rcx
+    call structseq_set
+    mov rdi, rbx
+    mov esi, 12
+    mov rdx, 0
+    V_PACK_I64 rdx, rcx
+    call structseq_set
+    mov rdi, rbx
+    mov esi, 13
+    lea rdx, [rel bool_false]
+    inc qword [rdx + PyObject.ob_refcnt]
+    call structseq_set
+    mov rdi, rbx
+    mov esi, 14
+    mov rdx, 0
+    V_PACK_I64 rdx, rcx
+    call structseq_set
+    mov rdi, rbx
+    mov esi, 15
+    mov rdx, 0
+    V_PACK_I64 rdx, rcx
+    call structseq_set
+    mov rdi, rbx
+    mov esi, 16
+    lea rdx, [rel bool_false]
+    inc qword [rdx + PyObject.ob_refcnt]
+    call structseq_set
+    mov rdi, rbx
+    mov esi, 17
+    mov rdx, 4300
+    V_PACK_I64 rdx, rcx
+    call structseq_set
+    lea rdi, [rel sm_flags]
+    call str_from_cstr_heap
+    push rax
+    mov rdi, r15
+    mov rsi, rax
+    mov rdx, rbx
+    call dict_set
+    pop rdi
+    call obj_decref
+    mov rdi, rbx
+    call obj_decref
     ; --- sys.float_info ---
     lea rdi, [rel float_info_type]
     call structseq_init_type
@@ -1165,6 +1273,7 @@ sm_version:      db "version", 0
 sm_version_val:  db "3.12.0 (apython ", VERSION_STR, ")", 0
 sm_version_info: db "version_info", 0
 sm_float_info:   db "float_info", 0
+sm_flags:        db "flags", 0
 sm_int_info:     db "int_info", 0
 sm_hash_info:    db "hash_info", 0
 sm_final:        db "final", 0

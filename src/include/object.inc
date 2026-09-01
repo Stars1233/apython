@@ -124,10 +124,18 @@ endstruc
 struc PyMemoryViewObject
     .ob_refcnt: resq 1    ; +0
     .ob_type:   resq 1    ; +8
-    .mv_source: resq 1    ; +16: ptr to source bytes-like object (strong ref)
-    .mv_buf:    resq 1    ; +24: ptr to start of buffer data
-    .mv_len:    resq 1    ; +32: length of view in bytes
+    .mv_source: resq 1    ; +16: the source object, strong; 0 once released
+    .mv_buf:    resq 1    ; +24: the start of the data; 0 once released
+    .mv_len:    resq 1    ; +32: the view's length in BYTES, not items
+    .mv_itemsize: resq 1  ; +40: bytes per item, 1 unless cast()
+    .mv_format:   resq 1  ; +48: the one-character format, as a C string
+    .mv_readonly: resq 1  ; +56: 1 for a view over bytes
 endstruc
+
+; A released memoryview: mv_buf is 0 and every operation raises.  The source
+; reference is dropped at that moment rather than at dealloc, which is the
+; point of release() -- it lets the buffer's owner resize again.
+MV_RELEASED equ 0
 
 ; List object
 struc PyListObject
@@ -804,6 +812,20 @@ struc LinuxDirent64
     .d_type:   resb 1   ; +18
     .d_name:            ; +19, NUL-terminated
 endstruc
+
+; Linux's `struct utsname`: six fixed 65-byte NUL-terminated fields.  os.uname()
+; exposes the first five; the sixth, domainname, is a GNU extension CPython
+; does not report.
+UTSNAME_FIELD equ 65
+UTSNAME_SIZE  equ 65 * 6
+
+; ioctl request numbers
+TCGETS equ 0x5401
+
+; fcntl commands, for the close-on-exec flag os.set_inheritable moves
+F_GETFD    equ 1
+F_SETFD    equ 2
+FD_CLOEXEC equ 1
 
 ; d_type values
 DT_UNKNOWN equ 0

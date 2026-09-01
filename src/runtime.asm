@@ -59,6 +59,8 @@ SYS_getcwd          equ 79
 SYS_getdents64      equ 217
 SYS_pipe2           equ 293
 SYS_getrandom       equ 318
+SYS_ftruncate       equ 77
+SYS_uname           equ 63
 SYS_access          equ 21
 SYS_umask           equ 95
 SYS_exit_group      equ 231
@@ -232,6 +234,20 @@ DEF_FUNC_BARE sys_getrandom
     syscall
     ret
 END_FUNC sys_getrandom
+
+; sys_ftruncate(int fd, off_t length) -> int
+DEF_FUNC_BARE sys_ftruncate
+    mov rax, SYS_ftruncate
+    syscall
+    ret
+END_FUNC sys_ftruncate
+
+; sys_uname(struct utsname *buf) -> int
+DEF_FUNC_BARE sys_uname
+    mov rax, SYS_uname
+    syscall
+    ret
+END_FUNC sys_uname
 
 ; sys_wait4(pid_t pid, int *status, int options, struct rusage *ru) -> pid_t
 DEF_FUNC_BARE sys_wait4

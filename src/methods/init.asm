@@ -13,6 +13,17 @@
 %include "opcodes.inc"
 
 ; External functions
+extern memoryview_method_tobytes
+extern memoryview_method_tolist
+extern memoryview_method_cast
+extern memoryview_method_release
+extern memoryview_method_enter
+extern memoryview_method_exit
+extern memoryview_method_hex
+extern memoryview_dunder_getitem
+extern memoryview_dunder_setitem
+extern memoryview_dunder_len
+extern memoryview_type
 extern bytearray_method_append
 extern bytearray_method_extend
 extern bytearray_method_insert
@@ -1864,6 +1875,54 @@ DEF_FUNC methods_init
     lea rax, [rel bytearray_type]
     mov [rax + PyTypeObject.tp_dict], rbx
 
+    ;; --- memoryview_type methods ---
+    ;; It had none: tp_getattr was 0 and tp_dict was empty.  _pyio calls
+    ;; tobytes and cast, and wraps every readinto in `with memoryview(b)`.
+    call dict_new
+    mov rbx, rax
+    mov rdi, rbx
+    lea rsi, [rel mn_tobytes]
+    lea rdx, [rel memoryview_method_tobytes]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn_tolist]
+    lea rdx, [rel memoryview_method_tolist]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn_cast]
+    lea rdx, [rel memoryview_method_cast]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn_release]
+    lea rdx, [rel memoryview_method_release]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___enter__]
+    lea rdx, [rel memoryview_method_enter]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___exit__]
+    lea rdx, [rel memoryview_method_exit]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn_hex]
+    lea rdx, [rel memoryview_method_hex]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___getitem__]
+    lea rdx, [rel memoryview_dunder_getitem]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___setitem__]
+    lea rdx, [rel memoryview_dunder_setitem]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___len__]
+    lea rdx, [rel memoryview_dunder_len]
+    call dict_add_builtin_func
+    lea rax, [rel memoryview_type]
+    mov [rax + PyTypeObject.tp_dict], rbx
+
     pop r12
     pop rbx
     leave
@@ -1969,6 +2028,12 @@ mn_as_integer_ratio: db "as_integer_ratio", 0
 mn_fromhex:     db "fromhex", 0
 ; bytes method names
 mn_decode:            db "decode", 0
+mn_tobytes:          db "tobytes", 0
+mn_tolist:           db "tolist", 0
+mn_cast:             db "cast", 0
+mn_release:          db "release", 0
+mn___enter__:        db "__enter__", 0
+mn___exit__:         db "__exit__", 0
 mn_hex:         db "hex", 0
 ; dict method names (continued)
 mn_fromkeys:    db "fromkeys", 0

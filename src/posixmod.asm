@@ -96,6 +96,11 @@ extern sys_pipe2
 extern sys_getdents64
 extern sys_getrandom
 extern sys_wait4
+extern obj_is_true
+extern sys_uname
+extern sys_ftruncate
+extern sys_fcntl
+extern sys_ioctl
 
 extern environ
 
@@ -1192,6 +1197,216 @@ DEF_FUNC posix_umask, 16
     RAISE exc_TypeError_type, "umask() takes exactly 1 argument"
 END_FUNC posix_umask
 
+;; ============================================================================
+;; posix.isatty(fd) -> bool
+;;
+;; Asks the kernel with TCGETS.  Assuming fd <= 2 is a terminal answers True
+;; for a redirected stdout, which is exactly when a program checks.  Errors
+;; are not raised: CPython's isatty answers False for a closed or invalid
+;; descriptor rather than raising.
+;; ============================================================================
+PIT_BUF   equ 80            ; struct termios is 60 bytes
+PIT_FRAME equ 80            ; + 0 pushes = 80
+
+DEF_FUNC posix_isatty, PIT_FRAME
+    test rsi, rsi
+    jz .pit_argerr
+    mov rdi, [rdi]
+    call val_to_i64
+    mov rdi, rax
+    mov esi, TCGETS
+    lea rdx, [rbp - PIT_BUF]
+    call sys_ioctl
+    test rax, rax
+    js .pit_false
+    lea rax, [rel bool_true]
+    jmp .pit_out
+.pit_false:
+    lea rax, [rel bool_false]
+.pit_out:
+    inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
+    leave
+    ret
+.pit_argerr:
+    RAISE exc_TypeError_type, "isatty() takes exactly 1 argument"
+END_FUNC posix_isatty
+
+;; ============================================================================
+;; posix.ftruncate(fd, length)
+;; ============================================================================
+DEF_FUNC posix_ftruncate, 16
+    cmp rsi, 2
+    jl .pft_argerr
+    push rbx
+    mov rbx, rdi
+    mov rdi, [rbx]
+    call val_to_i64
+    push rax
+    push rax
+    mov rdi, [rbx + 8]
+    call val_to_i64
+    mov rsi, rax
+    pop rdi
+    pop rdi
+    call sys_ftruncate
+    POSIX_CHECK rax, 0
+    LOAD_NONE rax
+    mov edx, TAG_PTR
+    pop rbx
+    leave
+    ret
+.pft_argerr:
+    RAISE exc_TypeError_type, "ftruncate() takes exactly 2 arguments"
+END_FUNC posix_ftruncate
+
+;; ============================================================================
+;; posix.get_inheritable(fd) -> bool   /   posix.set_inheritable(fd, bool)
+;;
+;; Inheritance across exec is the INVERSE of the close-on-exec flag, which is
+;; where the negation below comes from.  FileIO's constructor calls
+;; set_inheritable(fd, False) on every descriptor it opens.
+;; ============================================================================
+DEF_FUNC posix_get_inheritable, 16
+    test rsi, rsi
+    jz .pgi_argerr
+    mov rdi, [rdi]
+    call val_to_i64
+    mov rdi, rax
+    mov esi, F_GETFD
+    xor edx, edx
+    call sys_fcntl
+    POSIX_CHECK rax, 0
+    test eax, FD_CLOEXEC
+    jnz .pgi_false              ; close-on-exec set => NOT inheritable
+    lea rax, [rel bool_true]
+    jmp .pgi_out
+.pgi_false:
+    lea rax, [rel bool_false]
+.pgi_out:
+    inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
+    leave
+    ret
+.pgi_argerr:
+    RAISE exc_TypeError_type, "get_inheritable() takes exactly 1 argument"
+END_FUNC posix_get_inheritable
+
+PSI_FD    equ 8
+PSI_WANT  equ 16
+PSI_FRAME equ 32            ; + 0 pushes = 32
+
+DEF_FUNC posix_set_inheritable, PSI_FRAME
+    cmp rsi, 2
+    jl .psi_argerr
+    mov rsi, [rdi + 8]
+    mov rdi, [rdi]
+    mov [rbp - PSI_WANT], rsi
+    call val_to_i64
+    mov [rbp - PSI_FD], rax
+
+    ; Read the current flags, then set or clear FD_CLOEXEC without disturbing
+    ; anything else in the word.
+    mov rdi, rax
+    mov esi, F_GETFD
+    xor edx, edx
+    call sys_fcntl
+    POSIX_CHECK rax, 0
+    mov edx, eax
+    mov rdi, [rbp - PSI_WANT]
+    call obj_is_true
+    test eax, eax
+    jz .psi_clear_inherit
+    and edx, ~FD_CLOEXEC        ; inheritable: clear close-on-exec
+    jmp .psi_apply
+.psi_clear_inherit:
+    or edx, FD_CLOEXEC
+.psi_apply:
+    mov rdi, [rbp - PSI_FD]
+    mov esi, F_SETFD
+    call sys_fcntl
+    POSIX_CHECK rax, 0
+    LOAD_NONE rax
+    mov edx, TAG_PTR
+    leave
+    ret
+.psi_argerr:
+    RAISE exc_TypeError_type, "set_inheritable() takes exactly 2 arguments"
+END_FUNC posix_set_inheritable
+
+;; ============================================================================
+;; posix.device_encoding(fd) -> None
+;;
+;; CPython answers the console's encoding on Windows and None on POSIX unless
+;; the descriptor is a terminal, in which case it reports the locale's.  There
+;; is no locale here, so None -- which is what _pyio then falls back from.
+;; ============================================================================
+DEF_FUNC posix_device_encoding, 16
+    test rsi, rsi
+    jz .pde_argerr
+    LOAD_NONE rax
+    mov edx, TAG_PTR
+    leave
+    ret
+.pde_argerr:
+    RAISE exc_TypeError_type, "device_encoding() takes exactly 1 argument"
+END_FUNC posix_device_encoding
+
+;; ============================================================================
+;; posix.uname() -> uname_result
+;;
+;; Five of struct utsname's six fixed 65-byte fields; the sixth, domainname,
+;; is a GNU extension CPython does not report.  platform.system() reads
+;; sysname, which is why platform reported "linux" from sys.platform instead
+;; of "Linux" without this.
+;; ============================================================================
+PUN_BUF   equ UTSNAME_SIZE + 16
+PUN_OBJ   equ UTSNAME_SIZE + 24
+PUN_FRAME equ UTSNAME_SIZE + 32     ; derived, not guessed: a struct in a
+                                    ; frame outgrows a hand-picked offset
+DEF_FUNC posix_uname, PUN_FRAME
+    push rbx
+    lea rdi, [rbp - PUN_BUF]
+    call sys_uname
+    POSIX_CHECK rax, 0
+
+    lea rdi, [rel uname_result_type]
+    call structseq_init_type
+    lea rdi, [rel uname_result_type]
+    call structseq_new
+    test rax, rax
+    jz .pun_fail
+    mov [rbp - PUN_OBJ], rax
+
+    xor ebx, ebx
+.pun_loop:
+    cmp rbx, 5
+    jge .pun_done
+    mov rax, rbx
+    imul rax, UTSNAME_FIELD
+    lea rdi, [rbp - PUN_BUF]
+    add rdi, rax
+    call str_from_cstr_heap
+    mov rdx, rax
+    mov rdi, [rbp - PUN_OBJ]
+    mov esi, ebx
+    call structseq_set          ; takes over the reference
+    inc rbx
+    jmp .pun_loop
+.pun_done:
+    mov rax, [rbp - PUN_OBJ]
+    mov edx, TAG_PTR
+    pop rbx
+    leave
+    ret
+.pun_fail:
+    xor eax, eax
+    xor edx, edx
+    pop rbx
+    leave
+    ret
+END_FUNC posix_uname
+
 ;; posix.strerror(errno) -> str
 DEF_FUNC posix_strerror, 16
     test rsi, rsi
@@ -1678,6 +1893,12 @@ DEF_FUNC posix_module_create, 40
     MODULE_ADD_FUNC posix_pipe, pm_n_pipe
     MODULE_ADD_FUNC posix_getpid, pm_n_getpid
     MODULE_ADD_FUNC posix_umask, pm_n_umask
+    MODULE_ADD_FUNC posix_isatty, pm_n_isatty
+    MODULE_ADD_FUNC posix_ftruncate, pm_n_ftruncate
+    MODULE_ADD_FUNC posix_get_inheritable, pm_n_get_inheritable
+    MODULE_ADD_FUNC posix_set_inheritable, pm_n_set_inheritable
+    MODULE_ADD_FUNC posix_device_encoding, pm_n_device_encoding
+    MODULE_ADD_FUNC posix_uname, pm_n_uname
     MODULE_ADD_FUNC posix_strerror, pm_n_strerror
     MODULE_ADD_FUNC posix_urandom, pm_n_urandom
     MODULE_ADD_FUNC posix_waitpid, pm_n_waitpid
@@ -1728,6 +1949,11 @@ DEF_FUNC posix_module_create, 40
     lea rax, [rel terminal_size_type]
     inc qword [rax + PyObject.ob_refcnt]
     POSIX_ADD_OBJ pm_n_terminal_size, rax
+    lea rdi, [rel uname_result_type]
+    call structseq_init_type
+    lea rax, [rel uname_result_type]
+    inc qword [rax + PyObject.ob_refcnt]
+    POSIX_ADD_OBJ pm_n_uname_result, rax
     lea rax, [rel exc_OSError_type]
     inc qword [rax + PyObject.ob_refcnt]
     POSIX_ADD_OBJ pm_n_error, rax
@@ -1805,6 +2031,13 @@ pm_n_readlink:   db "readlink", 0
 pm_n_pipe:       db "pipe", 0
 pm_n_getpid:     db "getpid", 0
 pm_n_umask:      db "umask", 0
+pm_n_isatty:     db "isatty", 0
+pm_n_ftruncate:  db "ftruncate", 0
+pm_n_get_inheritable: db "get_inheritable", 0
+pm_n_set_inheritable: db "set_inheritable", 0
+pm_n_device_encoding: db "device_encoding", 0
+pm_n_uname:      db "uname", 0
+pm_n_uname_result: db "uname_result", 0
 pm_n_strerror:   db "strerror", 0
 pm_n_urandom:    db "urandom", 0
 pm_n_waitpid:    db "waitpid", 0
@@ -1891,6 +2124,28 @@ sr_desc:
     dq 16                   ; n_fields: plus six reachable by name only
     dq sr_fields
 
+; --- uname_result ---
+un_name: db "posix.uname_result", 0
+un_f0:   db "sysname", 0
+un_f1:   db "nodename", 0
+un_f2:   db "release", 0
+un_f3:   db "version", 0
+un_f4:   db "machine", 0
+
+align 8
+un_fields:
+    dq un_f0, 0
+    dq un_f1, 1
+    dq un_f2, 2
+    dq un_f3, 3
+    dq un_f4, 4
+
+align 8
+un_desc:
+    dq 5
+    dq 5
+    dq un_fields
+
 ; --- terminal_size ---
 ts_name: db "os.terminal_size", 0
 ts_f0:   db "columns", 0
@@ -1939,6 +2194,38 @@ stat_result_type:
     dq 0                        ; tp_clear
     dq 0                        ; tp_dictoffset
     dq sr_desc                  ; STRUCTSEQ_DESC
+
+align 8
+global uname_result_type
+uname_result_type:
+    dq 1
+    dq type_type
+    dq un_name
+    dq PyTupleObject_size
+    dq structseq_dealloc
+    dq structseq_repr
+    dq structseq_repr
+    dq 0
+    dq 0
+    dq structseq_getattr
+    dq 0
+    dq 0
+    dq 0
+    dq 0
+    dq 0
+    dq 0
+    dq 0
+    dq 0
+    dq 0
+    dq 0
+    dq 0
+    dq 0
+    dq TYPE_FLAG_TUPLE_SUBCLASS
+    dq 0
+    dq 0
+    dq 0
+    dq 0
+    dq un_desc
 
 align 8
 global terminal_size_type

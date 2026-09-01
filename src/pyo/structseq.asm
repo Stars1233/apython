@@ -746,3 +746,94 @@ global float_info_v8
 float_info_v8: dq 0x3CB0000000000000    ; 2.220446049250313e-16
 global hash_info_v5
 hash_info_v5: db "fnv", 0
+
+;; ============================================================================
+;; sys.flags.  _pyio reads sys.flags.utf8_mode and .dev_mode at module level,
+;; so without it the module could not be imported at all.  The values are the
+;; ones that describe this interpreter, not CPython's defaults copied over:
+;; hash_randomization is 0 because str_hash is an unseeded FNV-1a, and
+;; int_max_str_digits matches what sys.get_int_max_str_digits() reports.
+;; ============================================================================
+
+;; sys.flags
+section .rodata
+
+flags_name: db "sys.flags", 0
+flags_f0: db "debug", 0
+flags_f1: db "inspect", 0
+flags_f2: db "interactive", 0
+flags_f3: db "optimize", 0
+flags_f4: db "dont_write_bytecode", 0
+flags_f5: db "no_user_site", 0
+flags_f6: db "no_site", 0
+flags_f7: db "ignore_environment", 0
+flags_f8: db "verbose", 0
+flags_f9: db "bytes_warning", 0
+flags_f10: db "quiet", 0
+flags_f11: db "hash_randomization", 0
+flags_f12: db "isolated", 0
+flags_f13: db "dev_mode", 0
+flags_f14: db "utf8_mode", 0
+flags_f15: db "warn_default_encoding", 0
+flags_f16: db "safe_path", 0
+flags_f17: db "int_max_str_digits", 0
+
+align 8
+flags_fields:
+    dq flags_f0, 0
+    dq flags_f1, 1
+    dq flags_f2, 2
+    dq flags_f3, 3
+    dq flags_f4, 4
+    dq flags_f5, 5
+    dq flags_f6, 6
+    dq flags_f7, 7
+    dq flags_f8, 8
+    dq flags_f9, 9
+    dq flags_f10, 10
+    dq flags_f11, 11
+    dq flags_f12, 12
+    dq flags_f13, 13
+    dq flags_f14, 14
+    dq flags_f15, 15
+    dq flags_f16, 16
+    dq flags_f17, 17
+
+align 8
+flags_desc:
+    dq 18
+    dq 18
+    dq flags_fields
+
+section .data
+align 8
+global flags_type
+flags_type:
+    dq 1                        ; ob_refcnt (immortal)
+    dq type_type                ; ob_type
+    dq flags_name               ; tp_name
+    dq PyTupleObject_size       ; tp_basicsize
+    dq structseq_dealloc        ; tp_dealloc
+    dq structseq_repr           ; tp_repr
+    dq structseq_repr           ; tp_str
+    dq 0                        ; tp_hash          } copied from tuple_type by
+    dq 0                        ; tp_call          } structseq_init_type
+    dq structseq_getattr        ; tp_getattr
+    dq 0                        ; tp_setattr
+    dq 0                        ; tp_richcompare
+    dq 0                        ; tp_iter
+    dq 0                        ; tp_iternext
+    dq 0                        ; tp_init
+    dq 0                        ; tp_new
+    dq 0                        ; tp_as_number
+    dq 0                        ; tp_as_sequence
+    dq 0                        ; tp_as_mapping
+    dq 0                        ; tp_base
+    dq 0                        ; tp_dict
+    dq 0                        ; tp_mro
+    dq TYPE_FLAG_TUPLE_SUBCLASS ; tp_flags
+    dq 0                        ; tp_bases
+    dq 0                        ; tp_traverse
+    dq 0                        ; tp_clear
+    dq 0                        ; tp_dictoffset
+    dq flags_desc               ; STRUCTSEQ_DESC

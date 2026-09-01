@@ -156,6 +156,7 @@ test_int_from_bytes
 test_int_methods
 test_introspection
 test_int_subclass_new
+test_io_prereqs
 test_iterable_arguments
 test_iterator_slots
 test_itertools

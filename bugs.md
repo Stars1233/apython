@@ -295,6 +295,23 @@ one-line fix.
 These are absences rather than wrong answers — the interpreter raises rather
 than lying — but they are ordinary Python that does not work:
 
+- **A memoryview with a step other than 1 is not a view.**  `mv[::2]` and
+  `mv[::-1]` raise NotImplementedError.  CPython answers with a
+  non-contiguous view, which needs a stride the object does not carry -- and
+  a stride would have to be honoured by every reader: `tobytes`, iteration,
+  `bytes()`, comparison, `hex`, `tolist`, and the write path.  Nothing in
+  `_pyio` asks for one, so the field is not there yet.
+
+- **`raise_oserror` leaks its message string.**  Every `OSError` raised from
+  `src/posixmod.asm` -- a `mkdir` on an existing directory, an `rmdir` on a
+  missing one -- leaves the string `str_from_cstr_heap` built for it.  A loop
+  that probes the filesystem with try/except leaks once per attempt.
+
+- **An abandoned generator never releases its frame.**  Taking one value from
+  a generator expression and dropping it leaks the frame and whatever the
+  frame's stack holds, including the iterator it was walking.  CPython closes
+  a generator when it is collected; there is no equivalent here.
+
 - `time.time` and `time.sleep`.  The `time` module has only `monotonic` and
   `process_time`; `asyncio.sleep` exists.
 - `itertools.zip_longest`, `permutations`, `combinations`, `takewhile`,
