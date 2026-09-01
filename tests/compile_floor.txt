@@ -108,6 +108,7 @@ test_dict_views
 test_dunder_protocols
 test_dunders
 test_empty_bases
+test_errno
 test_exc_catchable
 test_exception_context
 test_exceptions
@@ -183,9 +184,11 @@ test_object_doc
 test_object_dunder_inherit
 test_object_eq_recursion
 test_oop
+test_open_errors
 test_open
 test_operand_types
 test_ordering_typeerror
+test_oserror
 test_percent_format
 test_phase4
 test_phase6

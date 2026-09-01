@@ -432,14 +432,24 @@ DEF_FUNC main, 8
     call obj_decref
 .no_sys_module:
 
-    ; DECREF owned objects
+    ; DECREF owned objects.
+    ;
+    ; sys.modules goes first, and before the code object.  Freeing it cascades
+    ; into every module dict -- __main__'s among them, which is the globals
+    ; dict -- and those dicts hold strings that came out of the running code
+    ; object's co_consts and co_names.  Releasing the code object first drove
+    ; some of those to zero, and the module teardown then read freed memory:
+    ; valgrind saw the invalid read in dict_dealloc, and libc's allocator
+    ; noticed it as "unaligned fastbin chunk" once an unrelated change moved
+    ; the heap around.  Something is still short an INCREF on that path
+    ; (bugs.md); dropping the users before the object they borrow from is the
+    ; right order regardless.
+    mov rdi, [rel sys_modules_dict]
+    call obj_decref
+
     mov rdi, r14            ; globals dict
     call obj_decref
     mov rdi, r12            ; code object
-    call obj_decref
-
-    ; DECREF sys.modules (cascades to free all modules and their dicts)
-    mov rdi, [rel sys_modules_dict]
     call obj_decref
 
     ; DECREF builtins dict (after sys.modules cascade reduced its refcount)

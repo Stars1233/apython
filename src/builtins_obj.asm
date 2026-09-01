@@ -1489,10 +1489,47 @@ END_FUNC builtin_input_fn
 ;; 2 args: open with specified mode
 ;; ============================================================================
 extern sys_open
+extern sys_close
 extern file_type
 
 global builtin_open_fn
 OPN_FRAME equ 32            ; + 3 pushes = 56, not 16-aligned
+
+;; ============================================================================
+;; open_reject_dir(rdi = fd, rsi = filename str) -- returns, or raises
+;;
+;; Linux lets open(2) succeed on a directory; it is read(2) that fails with
+;; EISDIR, so open("/tmp") used to hand back a file object that failed later
+;; and elsewhere.  CPython fstats the descriptor and raises IsADirectoryError,
+;; and the mode bits say the same thing here.
+;; ============================================================================
+ORD_FD    equ 8
+ORD_NAME  equ 16
+ORD_STAT  equ 16 + 144      ; struct stat; only st_mode, at byte 24, is read
+ORD_FRAME equ ORD_STAT      ; + 0 pushes = 160
+DEF_FUNC_LOCAL open_reject_dir, ORD_FRAME
+    mov [rbp - ORD_FD], rdi
+    mov [rbp - ORD_NAME], rsi
+    lea rsi, [rbp - ORD_STAT]
+    extern sys_fstat
+    call sys_fstat
+    test rax, rax
+    js .ord_ok                          ; fstat failed: let the read report it
+    mov eax, [rbp - ORD_STAT + 24]      ; st_mode is a 4-byte field
+    and eax, 0o170000                   ; S_IFMT
+    cmp eax, 0o40000                    ; S_IFDIR
+    jne .ord_ok
+    mov rdi, [rbp - ORD_FD]
+    call sys_close
+    mov edi, 21                         ; EISDIR
+    mov rsi, [rbp - ORD_NAME]
+    extern raise_oserror
+    call raise_oserror                  ; does not return
+.ord_ok:
+    leave
+    ret
+END_FUNC open_reject_dir
+
 DEF_FUNC builtin_open_fn, OPN_FRAME
     push rbx
     push r12
@@ -1519,6 +1556,9 @@ DEF_FUNC builtin_open_fn, OPN_FRAME
     mov r12, rax            ; fd
     test rax, rax
     js .opn_file_error
+    mov rdi, r12
+    mov rsi, rbx
+    call open_reject_dir
 
     ; Create default mode string "r" (heap — stored in PyFileObject struct field)
     CSTRING rdi, "r"
@@ -1588,6 +1628,10 @@ DEF_FUNC builtin_open_fn, OPN_FRAME
     test rax, rax
     js .opn_file_error
 
+    mov rdi, r12
+    mov rsi, rbx
+    call open_reject_dir
+
     ; INCREF mode str (we're storing a ref)
     mov rdi, r13
     call obj_incref
@@ -1619,8 +1663,15 @@ DEF_FUNC builtin_open_fn, OPN_FRAME
     ret
 
 .opn_file_error:
-    extern exc_FileNotFoundError_type
-    RAISE exc_FileNotFoundError_type, "No such file or directory"
+    ; sys_open is a bare syscall, so rax is -errno and rbx still holds the
+    ; filename.  Both used to be thrown away and the message hardcoded to "No
+    ; such file or directory" whatever had actually gone wrong -- a directory
+    ; or an unreadable file reported ENOENT.
+    mov rdi, r12
+    neg rdi
+    mov rsi, rbx
+    extern raise_oserror
+    call raise_oserror              ; does not return
 
 .opn_bad_mode:
     RAISE exc_ValueError_type, "invalid mode string"

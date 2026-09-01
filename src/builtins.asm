@@ -1811,6 +1811,46 @@ DEF_FUNC builtins_init
     lea rdx, [rel exc_OSError_type]
     call add_exc_type_builtin
 
+    ; OSError's own constructor: it parses (errno, strerror, filename, ...),
+    ; truncates .args, and remaps to a subclass by errno.  It goes in tp_new,
+    ; which exc_type_call consults, and only on OSError itself -- DEF_EXC_TYPE
+    ; leaves the slot 0 on the subclasses, which is what CPython wants: the
+    ; remapping applies when the type is exactly OSError.
+    extern oserror_new
+    lea rax, [rel exc_OSError_type]
+    lea rcx, [rel oserror_new]
+    mov [rax + PyTypeObject.tp_new], rcx
+
+    mov rdi, rbx
+    lea rsi, [rel bi_name_FileNotFoundError]
+    extern exc_FileNotFoundError_type
+    lea rdx, [rel exc_FileNotFoundError_type]
+    call add_exc_type_builtin
+
+    mov rdi, rbx
+    lea rsi, [rel bi_name_FileExistsError]
+    extern exc_FileExistsError_type
+    lea rdx, [rel exc_FileExistsError_type]
+    call add_exc_type_builtin
+
+    mov rdi, rbx
+    lea rsi, [rel bi_name_UnicodeTranslateError]
+    extern exc_UnicodeTranslateError_type
+    lea rdx, [rel exc_UnicodeTranslateError_type]
+    call add_exc_type_builtin
+
+    mov rdi, rbx
+    lea rsi, [rel bi_name_IOError]
+    extern exc_OSError_type
+    lea rdx, [rel exc_OSError_type]
+    call add_exc_type_builtin
+
+    mov rdi, rbx
+    lea rsi, [rel bi_name_EnvironmentError]
+    extern exc_OSError_type
+    lea rdx, [rel exc_OSError_type]
+    call add_exc_type_builtin
+
     mov rdi, rbx
     lea rsi, [rel bi_name_LookupError]
     lea rdx, [rel exc_LookupError_type]
@@ -2383,6 +2423,11 @@ bi_name_NotImplementedError: db "NotImplementedError", 0
 bi_name_OverflowError:     db "OverflowError", 0
 bi_name_AssertionError:    db "AssertionError", 0
 bi_name_OSError:           db "OSError", 0
+bi_name_FileNotFoundError: db "FileNotFoundError", 0
+bi_name_FileExistsError: db "FileExistsError", 0
+bi_name_UnicodeTranslateError: db "UnicodeTranslateError", 0
+bi_name_IOError: db "IOError", 0
+bi_name_EnvironmentError: db "EnvironmentError", 0
 bi_name_LookupError:       db "LookupError", 0
 bi_name_ArithmeticError:   db "ArithmeticError", 0
 bi_name_RecursionError:    db "RecursionError", 0
