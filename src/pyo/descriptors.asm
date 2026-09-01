@@ -920,10 +920,10 @@ DEF_FUNC generic_alias_new
     push rax
     mov rdi, rbx
     call obj_incref
-    mov rdi, r12
-    test rdi, rdi
-    jz .gan_done
-    call obj_incref
+    ; ga_args is a VALUE, not a pointer: `list[0]` puts an int immediate here
+    ; and obj_incref on one writes through the number.
+    mov rax, r12
+    INCREF_V rax, rcx
 .gan_done:
     pop rax
     pop r12
@@ -940,10 +940,10 @@ DEF_FUNC_LOCAL generic_alias_dealloc
     jz .gad_args
     call obj_decref
 .gad_args:
-    mov rdi, [rbx + PyGenericAliasObject.ga_args]
-    test rdi, rdi
+    mov rax, [rbx + PyGenericAliasObject.ga_args]
+    test rax, rax
     jz .gad_free
-    call obj_decref
+    DECREF_V rax, rcx
 .gad_free:
     mov rdi, rbx
     call ap_free
@@ -1018,6 +1018,8 @@ DEF_FUNC generic_alias_repr, GAR_FRAME
     ; A tuple argument prints comma-joined without its parentheses, and a
     ; type prints as its name: list[int], not list[<class 'int'>].
     extern tuple_type
+    V_TEST_PTR rdi, rax         ; classify before reading ob_type: the
+    ja .gar_one                 ; argument may be a number
     mov rax, [rdi + PyObject.ob_type]
     lea rcx, [rel tuple_type]
     cmp rax, rcx
@@ -1159,15 +1161,70 @@ DEF_FUNC_BARE generic_alias_call
 END_FUNC generic_alias_call
 
 ;; __origin__ / __args__
-DEF_FUNC generic_alias_getattr
+GAG_NAME  equ 8
+GAG_FRAME equ 16            ; + 1 push = 24, not 16-aligned
+
+DEF_FUNC generic_alias_getattr, GAG_FRAME
     push rbx
     mov rbx, rdi
+    mov [rbp - GAG_NAME], rsi
     lea rdi, [rsi + PyStrObject.data]
     CSTRING rsi, "__origin__"
     call ap_strcmp
     test eax, eax
     jz .gag_origin
+
+    ; __args__ is always a tuple, even when the subscript was one thing:
+    ; CPython wraps it, and typing.get_args() and every annotation reader
+    ; expect that.  This used to answer NULL, which reads as "no attribute".
+    mov rdi, [rbp - GAG_NAME]
+    lea rdi, [rdi + PyStrObject.data]
+    CSTRING rsi, "__args__"
+    call ap_strcmp
+    test eax, eax
+    jnz .gag_missing
+
     mov rax, [rbx + PyGenericAliasObject.ga_args]
+    test rax, rax
+    jz .gag_empty_args
+    V_TEST_PTR rax, rcx
+    ja .gag_wrap_args
+    mov rcx, [rax + PyObject.ob_type]
+    lea rdx, [rel tuple_type]
+    cmp rcx, rdx
+    jne .gag_wrap_args
+    mov rdi, rax
+    call obj_incref
+    mov rax, [rbx + PyGenericAliasObject.ga_args]
+    mov edx, TAG_PTR
+    pop rbx
+    leave
+    ret
+.gag_wrap_args:
+    mov edi, 1
+    call tuple_new
+    test rax, rax
+    jz .gag_missing
+    mov rcx, [rbx + PyGenericAliasObject.ga_args]
+    mov rdx, [rax + PyTupleObject.ob_item]
+    mov [rdx], rcx
+    push rax
+    mov rax, rcx
+    INCREF_V rax, rcx
+    pop rax
+    mov edx, TAG_PTR
+    pop rbx
+    leave
+    ret
+.gag_empty_args:
+    xor edi, edi
+    call tuple_new
+    mov edx, TAG_PTR
+    pop rbx
+    leave
+    ret
+
+.gag_missing:
     xor eax, eax
     xor edx, edx
     pop rbx
