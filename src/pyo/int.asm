@@ -2949,6 +2949,101 @@ DEF_FUNC int_true_divide
 END_FUNC int_true_divide
 
 ;; ============================================================================
+;; int_getattr(rdi = self Value, rsi = name str) -> rax = Value, or NULL
+;;
+;; real, imag, numerator and denominator.  numbers.py and fractions.py reach
+;; for all four on a plain int, and every one of them was an AttributeError:
+;; only bool and complex had this chain, so `(5).real` raised while
+;; `True.real` did not.
+;;
+;; Not a getset descriptor -- getset_descr_new is a stub whose accessors are
+;; NULL and which nothing in the tree invokes.  bool_getattr and
+;; complex_getattr do exactly this, for exactly these names.  Returning NULL
+;; rather than raising is what lets bit_length() and __eq__ coexist with it:
+;; op_load_attr falls through to the MRO's tp_dicts.
+;;
+;; The argument is a Value, so all three shapes of int arrive here -- an
+;; immediate, a heap int and a subclass instance -- and .real has to hand
+;; back a plain int for the last of them, as CPython does.
+;; ============================================================================
+IG_SELF   equ 8
+IG_NAME   equ 16
+IG_FRAME  equ 16            ; + 0 pushes = 16
+
+extern ap_strcmp
+DEF_FUNC int_getattr, IG_FRAME
+    mov [rbp - IG_SELF], rdi
+    mov [rbp - IG_NAME], rsi
+
+    lea rdi, [rsi + PyStrObject.data]
+    CSTRING rsi, "real"
+    call ap_strcmp
+    test eax, eax
+    jz .ig_self_value
+
+    mov rdi, [rbp - IG_NAME]
+    lea rdi, [rdi + PyStrObject.data]
+    CSTRING rsi, "numerator"
+    call ap_strcmp
+    test eax, eax
+    jz .ig_self_value
+
+    mov rdi, [rbp - IG_NAME]
+    lea rdi, [rdi + PyStrObject.data]
+    CSTRING rsi, "imag"
+    call ap_strcmp
+    test eax, eax
+    jz .ig_zero
+
+    mov rdi, [rbp - IG_NAME]
+    lea rdi, [rdi + PyStrObject.data]
+    CSTRING rsi, "denominator"
+    call ap_strcmp
+    test eax, eax
+    jz .ig_one
+
+    RET_NULL
+    leave
+    V_PACK rax, rdx
+    ret
+
+.ig_self_value:
+    ; An exact int answers with itself; a subclass answers with its value, so
+    ; that type(I(5).real) is int.
+    mov rdi, [rbp - IG_SELF]
+    V_TEST_PTR rdi, rax
+    ja .ig_self_out             ; an immediate is already a plain int
+    mov rax, [rdi + PyObject.ob_type]
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_INT_SUBCLASS
+    jz .ig_self_out
+    mov edx, TAG_PTR
+    call int_unwrap             ; rdi/edx = the plain int it wraps
+    V_PACK rdi, rdx
+    mov rax, rdi
+    INCREF_V rax, rcx
+    leave
+    ret
+.ig_self_out:
+    mov rax, rdi
+    INCREF_V rax, rcx
+    leave
+    ret
+
+.ig_zero:
+    xor eax, eax
+    V_PACK_I64 rax, rcx
+    leave
+    ret
+
+.ig_one:
+    mov eax, 1
+    V_PACK_I64 rax, rcx
+    leave
+    ret
+END_FUNC int_getattr
+
+
+;; ============================================================================
 ;; Data
 ;; ============================================================================
 section .data
@@ -3011,7 +3106,7 @@ int_type:
     dq int_repr             ; tp_str
     dq int_hash             ; tp_hash
     dq 0                    ; tp_call
-    dq 0                    ; tp_getattr
+    dq int_getattr          ; tp_getattr (.real/.imag/.numerator/.denominator)
     dq 0                    ; tp_setattr
     dq int_compare          ; tp_richcompare
     dq 0                    ; tp_iter

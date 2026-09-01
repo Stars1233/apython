@@ -429,12 +429,18 @@ DEF_FUNC op_load_attr, LA_FRAME
     mov rax, [r8 + PyTypeObject.tp_getattr]
     test rax, rax
     jz .la_resolve_tag_dict
-    ; Call tp_getattr(self_payload, name) — rdi already has payload
+    ; Call tp_getattr(self Value, name).  The VALUE, not the payload: a
+    ; pointer is its own Value, so this is the same argument .la_is_ptr
+    ; passes, and one tp_getattr can then serve both -- int's has to, since
+    ; an int arrives as an immediate, as a heap int and as a subclass
+    ; instance.  Nothing depended on the old convention: no type with a
+    ; tp_getattr had a non-pointer form until int and float got one.
+    mov rdi, [rbp - LA_OBJVAL]
     mov rsi, [rbp - LA_NAME]
     call rax
     V_UNPACK rax, rdx           ; tp_getattr returns a Value
     test edx, edx
-    jz .la_attr_error
+    jz .la_resolve_tag_dict     ; found nothing: the tp_dicts still might
     mov [rbp - LA_ATTR], rax
     mov [rbp - LA_ATTR_TAG], rdx
     jmp .la_got_attr
@@ -1446,8 +1452,25 @@ DEF_FUNC obj_getattr_opt, GA_FRAME
     jz .ga_none
     mov rax, [rdi + PyObject.ob_type]
     mov [rbp - GA_TYPE], rax
+    jmp .ga_try_getattr
 
-    ; tp_getattr resolves the whole thing when a type has one.
+.ga_immediate:
+    ; An int or a float immediate: its type is fixed by the tag.
+    lea rax, [rel float_type]
+    V_IS_INT rdi, rcx
+    jb .ga_have_type
+    lea rax, [rel int_type]
+.ga_have_type:
+    mov [rbp - GA_TYPE], rax
+    ; fall through
+
+.ga_try_getattr:
+    ; tp_getattr resolves the whole thing when a type has one.  The immediate
+    ; path reaches this too, which it did not before: int and float have a
+    ; chain now, for .real and its three neighbours, and skipping it here made
+    ; hasattr(5, "real") answer False while (5).real worked.  op_load_attr and
+    ; this function are pinned to agree by tests/test_getattr_descriptors.py.
+    mov rax, [rbp - GA_TYPE]
     mov rcx, [rax + PyTypeObject.tp_getattr]
     test rcx, rcx
     jz .ga_type_dict
@@ -1460,16 +1483,6 @@ DEF_FUNC obj_getattr_opt, GA_FRAME
     mov [rbp - GA_ATTR], rax
     mov [rbp - GA_ATTRTAG], rdx
     jmp .ga_have_attr
-
-.ga_immediate:
-    ; An int or a float immediate: its type is fixed by the tag.
-    lea rax, [rel float_type]
-    V_IS_INT rdi, rcx
-    jb .ga_have_type
-    lea rax, [rel int_type]
-.ga_have_type:
-    mov [rbp - GA_TYPE], rax
-    jmp .ga_type_dict
 
 .ga_none:
     xor eax, eax

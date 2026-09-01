@@ -180,6 +180,7 @@ test_nanbox_int
 test_new
 test_none_bool_singleton
 test_none
+test_number_real_imag
 test_numeric_hash
 test_object_doc
 test_object_dunder_inherit

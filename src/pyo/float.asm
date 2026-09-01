@@ -1185,6 +1185,63 @@ DEF_FUNC float_compare, FC_FRAME
 END_FUNC float_compare
 
 ;; ============================================================================
+;; float_getattr(rdi = self Value, rsi = name str) -> rax = Value, or NULL
+;;
+;; real and imag, the two numbers.py asks for.  float has no numerator or
+;; denominator -- CPython raises for those -- so the chain is shorter than
+;; int's.  See int_getattr for why this is a strcmp chain and not a
+;; descriptor.
+;; ============================================================================
+FG_SELF   equ 8
+FG_NAME   equ 16
+FG_FRAME  equ 16            ; + 0 pushes = 16
+
+extern ap_strcmp
+DEF_FUNC float_getattr, FG_FRAME
+    mov [rbp - FG_SELF], rdi
+    mov [rbp - FG_NAME], rsi
+
+    lea rdi, [rsi + PyStrObject.data]
+    CSTRING rsi, "real"
+    call ap_strcmp
+    test eax, eax
+    jz .fg_real
+
+    mov rdi, [rbp - FG_NAME]
+    lea rdi, [rdi + PyStrObject.data]
+    CSTRING rsi, "imag"
+    call ap_strcmp
+    test eax, eax
+    jz .fg_imag
+
+    RET_NULL
+    leave
+    V_PACK rax, rdx
+    ret
+
+.fg_real:
+    ; A subclass instance answers with a plain float, as CPython does.
+    mov rax, [rbp - FG_SELF]
+    V_TEST_PTR rax, rcx
+    ja .fg_real_out             ; already a float immediate
+    mov rax, [rax + PyFloatObject.value]
+    V_FROM_F64 rax, rcx
+.fg_real_out:
+    mov edx, TAG_FLOAT
+    leave
+    ret
+
+.fg_imag:
+    xorpd xmm0, xmm0
+    movq rax, xmm0
+    V_FROM_F64 rax, rcx
+    mov edx, TAG_FLOAT
+    leave
+    ret
+END_FUNC float_getattr
+
+
+;; ============================================================================
 ;; Data
 ;; ============================================================================
 section .data
@@ -1258,7 +1315,7 @@ float_type:
     dq float_repr             ; tp_str (same as repr for float)
     dq float_hash             ; tp_hash
     dq 0                      ; tp_call
-    dq 0                      ; tp_getattr
+    dq float_getattr          ; tp_getattr (.real / .imag)
     dq 0                      ; tp_setattr
     dq float_compare          ; tp_richcompare
     dq 0                      ; tp_iter

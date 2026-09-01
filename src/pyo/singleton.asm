@@ -197,7 +197,23 @@ DEF_FUNC bool_getattr
     test eax, eax
     jz .imag
 
-    ; Not real/imag — return NULL (attr not found)
+    ; numerator and denominator, which int carries too: numbers.py and
+    ; fractions.py ask a bool for all four, and bool does not reach
+    ; int_getattr -- op_load_attr walks tp_dicts once this returns NULL, and
+    ; neither name lives in one.
+    lea rdi, [r12 + PyStrObject.data]
+    CSTRING rsi, "numerator"
+    call ap_strcmp
+    test eax, eax
+    jz .real                    ; True.numerator is 1, as True.real is
+
+    lea rdi, [r12 + PyStrObject.data]
+    CSTRING rsi, "denominator"
+    call ap_strcmp
+    test eax, eax
+    jz .denominator
+
+    ; None of the four — return NULL (attr not found)
     RET_NULL
     pop r12
     pop rbx
@@ -242,6 +258,15 @@ DEF_FUNC bool_getattr
 .imag:
     ; True.imag -> 0, False.imag -> 0 (as SmallInt)
     xor eax, eax
+    RET_TAG_SMALLINT
+    pop r12
+    pop rbx
+    leave
+    V_PACK rax, rdx             ; return one Value
+    ret
+
+.denominator:
+    mov eax, 1
     RET_TAG_SMALLINT
     pop r12
     pop rbx
