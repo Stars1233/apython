@@ -26,7 +26,7 @@ V_NAN_LIM   = 0xFFF1_0000_0000_0000   ; raw doubles at or above this are purifie
 V_CANON_NAN = 0x7FF8_0000_0000_0000
 ```
 
-The constants live in `include/value.inc`. x86-64 has no `cmp r64, imm64`, so
+The constants live in `src/include/value.inc`. x86-64 has no `cmp r64, imm64`, so
 each one also has a rip-relative home in `src/val.asm`'s `.rodata` and the
 macros compare against `[rel v_*]`.
 
@@ -105,7 +105,7 @@ back.
 
 ## Macros
 
-All in `include/value.inc`.
+All in `src/include/value.inc`.
 
 | Macro | Purpose |
 |---|---|

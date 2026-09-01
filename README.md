@@ -264,28 +264,28 @@ src/
     sysmod.asm asyncmod.asm timemod.asm abcmod.asm weakrefmod.asm
     eventloop.asm eventloop_poll.asm eventloop_iouring.asm
     asyncio_streams.asm
-compiler/               The Python source compiler
-  lex.asm               Tokenizer: 256-entry char class, indent stack, f-strings
-  parse.asm             Pratt expression parser, one table row per token
-  parse_stmt.asm        Statements, and the soft keywords `match` and `type`
-  pattern.asm           `match` patterns
-  fstring.asm           f-string fields, lexed as spans of the same source
-  ast.asm               32-byte nodes in the growable buffer and bump arena
+  compiler/             The Python source compiler
+    lex.asm             Tokenizer: 256-entry char class, indent stack, f-strings
+    parse.asm           Pratt expression parser, one table row per token
+    parse_stmt.asm      Statements, and the soft keywords `match` and `type`
+    pattern.asm         `match` patterns
+    fstring.asm         f-string fields, lexed as spans of the same source
+    ast.asm             32-byte nodes in the growable buffer and bump arena
                         they live in
-  symtab.asm            Scopes, local/cell/free classification, name mangling
-  codegen.asm           Expressions; codegen_stmt/_func/_try/_comp/_match for
+    symtab.asm          Scopes, local/cell/free classification, name mangling
+    codegen.asm         Expressions; codegen_stmt/_func/_try/_comp/_match for
                         the rest.  _try also holds except*, with and await
-  assemble.asm          EXTENDED_ARG fixpoint, stack depth, exception table,
+    assemble.asm        EXTENDED_ARG fixpoint, stack depth, exception table,
                         PEP 626 line table
-  compile.asm           The driver, both entry points -- `./apython foo.py` and
+    compile.asm         The driver, both entry points -- `./apython foo.py` and
                         compile()/exec()/eval() -- and the error protocol
-  dis.asm comptest.asm  --dis and --selftest-compile
-  lint.py               Static checks over compiler/*.asm, run by make check
-  gen_tables.py         Generates tables.asm from CPython's own opcode module
-  gen_prule.py          Generates the expression grammar table in parse.asm
-  gen_unicodename.py    Generates unicodename.asm from unicodedata
+    dis.asm comptest.asm  --dis and --selftest-compile
+    lint.py             Static checks over the assembly, run by make check
+    gen_tables.py       Generates tables.asm from CPython's own opcode module
+    gen_prule.py        Generates the expression grammar table in parse.asm
+    gen_unicodename.py  Generates unicodename.asm from unicodedata
                         (all three outputs are committed; `make regen`)
-include/                object.inc (every struct), macros.inc, value.inc,
+  include/              object.inc (every struct), macros.inc, value.inc,
                         opcodes.inc, and the sre/eventloop private ABIs
 lib/                    Pure Python support modules
   abc.py contextlib.py copy.py functools.py io.py itertools.py

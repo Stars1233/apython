@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Regenerate the prule_table block inside compiler/parse.asm.
+"""Regenerate the prule_table block inside src/compiler/parse.asm.
 
 The expression grammar lives in the ROWS dict below rather than in hand-written
 assembly, so adding a construct is a one-line edit and the 90 rows stay aligned
 with the token enum.  Rewrites parse.asm in place:
 
-    python3 compiler/gen_prule.py
+    python3 src/compiler/gen_prule.py
 """
 import re, os, sys
 
@@ -106,10 +106,10 @@ ORDER = [
  "TOK_PASS","TOK_RAISE","TOK_RETURN","TOK_TRY","TOK_WHILE","TOK_WITH","TOK_YIELD",
 ]
 
-HEADER = """;; ---------------------------------------------------------------------------
+HEADER = """;; ============================================================================
 ;; prule_table - the expression grammar, one row per token kind.
 ;;
-;; GENERATED.  Edit ROWS in compiler/gen_prule.py and re-run it.
+;; GENERATED.  Edit ROWS in src/compiler/gen_prule.py and re-run it.
 ;;
 ;; Reading a row: `prefix` runs when the token starts an expression, `infix`
 ;; when it follows one.  lbp is how tightly the token binds to what is already
@@ -121,13 +121,12 @@ HEADER = """;; -----------------------------------------------------------------
 ;; A comma is deliberately absent.  Tuples are built by the callers that
 ;; actually permit them, because a comma in this table would silently swallow
 ;; call arguments, subscripts and assignment targets.
-;; ---------------------------------------------------------------------------
+;; ============================================================================
 align 8
 prule_table:"""
 
 def main():
-    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    path = os.path.join(root, 'compiler', 'parse.asm')
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'parse.asm')
     src = open(path).read()
 
     out = [HEADER]
@@ -140,11 +139,16 @@ def main():
         out.append("    dd 0")
     block = "\n".join(out)
 
-    start = src.index(';; ---------------------------------------------------------------------------\n;; prule_table')
+    start = src.index('%s\n;; prule_table' % ('%s' % (';; ' + '=' * 76)))
     end = src.index('\nASM_INIT')
     m = type('M', (), {'start': lambda self: start, 'end': lambda self: end})()
     src = src[:start] + block + "\n" + src[end:]
-    open(path, 'w').write(src)
+    # Write and rename, the way the Makefile does for the other two
+    # generators: a truncate-then-write leaves parse.asm empty if this dies
+    # between the open and the write.
+    tmp = path + '.new'
+    open(tmp, 'w').write(src)
+    os.replace(tmp, path)
     print("prule_table: %d rows" % len(ORDER))
 
 if __name__ == '__main__':

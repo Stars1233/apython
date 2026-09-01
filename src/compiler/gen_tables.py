@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Generate compiler/tables.asm — the compiler's static lookup tables.
+"""Generate src/compiler/tables.asm — the compiler's static lookup tables.
 
 Run from the repository root with a CPython 3.12:
 
-    python3 compiler/gen_tables.py > compiler/tables.asm
+    python3 src/compiler/gen_tables.py > src/compiler/tables.asm
 
 The output is committed, so building apython never needs Python.  Regenerate
 only when the target bytecode version changes.
@@ -68,7 +68,7 @@ assert all(1 <= len(o) <= 3 for o, _ in OPERATORS), "packed compare assumes <= 3
 w("; tables.asm - Static lookup tables for the Python source compiler")
 w(";")
 w("; GENERATED FILE.  Regenerate with:")
-w(";     python3 compiler/gen_tables.py > compiler/tables.asm")
+w(";     python3 src/compiler/gen_tables.py > src/compiler/tables.asm")
 w("; The output is committed so that building apython never needs Python.")
 w(";")
 w("; The opcode metadata is taken from CPython %s's own opcode and dis" % ".".join(map(str, sys.version_info[:3])))

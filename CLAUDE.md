@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Python 3.12 implementation in x86-64 NASM assembly: a bytecode interpreter, and
 a compiler for the source language written in the same assembly.  Reads `.py`
-through `compiler/`, or `.pyc` through the marshal reader.
+through `src/compiler/`, or `.pyc` through the marshal reader.
 
 ## Build & Test
 
@@ -23,7 +23,7 @@ make check-cpython-source  # the CPython corpus, compiled by OUR compiler
 
 ```bash
 ./apython --selftest-compile   # source-compiler invariants and tokenizer
-python3 compiler/lint.py       # static checks over compiler/*.asm
+python3 src/compiler/lint.py   # static checks over the assembly
 ```
 
 **Always run BOTH `make check` AND `make check-cpython` to verify changes.**
@@ -122,7 +122,7 @@ co_names is accessed via the `LOAD_CO_NAMES reg` macro (reads the `eval_co_names
 
 ## Value Representation (NaN boxing)
 
-**One 64-bit word per Python value.** The encoding lives in `include/value.inc`;
+**One 64-bit word per Python value.** The encoding lives in `src/include/value.inc`;
 `src/val.asm` holds the rip-relative constant pool it compares against, and
 `./apython --selftest-value` exercises the boundaries.
 
@@ -151,7 +151,7 @@ Everything stores one word: the value stack (`r13`), `localsplus`, `ob_item` for
 list and tuple, `DictEntry.key`/`.value`, the per-object fields, and the
 `tp_call` argument array.
 
-Classification macros (all in `include/value.inc`): `V_TEST_PTR`, `V_IS_INT`,
+Classification macros (all in `src/include/value.inc`): `V_TEST_PTR`, `V_IS_INT`,
 `V_IS_FLOAT`, and the `_M` variants that take a memory operand.  Conversion:
 `V_FROM_F64` / `V_TO_F64`, `V_PACK_I64` / `V_TO_I64`.  Refcounting: `INCREF_V`,
 `DECREF_V`, `XDECREF_V` — one compare and one branch, NULL-safe.
@@ -207,12 +207,12 @@ No hand-written file exceeds 100k bytes; only generated asm may.
 - `src/object.asm` — Base PyObject ops (alloc, refcount, dealloc, `obj_richcompare_bool`)
 - `src/runtime.asm` — The freestanding layer: syscalls, allocation, PLT-free
   memory and string ops, and `fatal_error`
-- `compiler/` — The Python **source** compiler (see below)
-- `include/` — `object.inc` (every struct and id enum), `macros.inc`,
+- `src/compiler/` — The Python **source** compiler (see below)
+- `src/include/` — `object.inc` (every struct and id enum), `macros.inc`,
   `value.inc`, `opcodes.inc`, and the two private ABIs `sre.inc` and
   `eventloop.inc`
 
-## Source Compiler (`compiler/`)
+## Source Compiler (`src/compiler/`)
 
 Turns Python 3.12 source into a `PyCodeObject` this interpreter runs.  Reached
 through `compile()`, `exec()`, `eval()`, `./apython foo.py`, and `import` of a
@@ -242,7 +242,7 @@ f-strings, async, comprehensions, PEP 695 type parameters.
 | `comptest.asm` | `--selftest-compile` |
 | `lint.py` | static checks, run by `make check` |
 
-**Never call `raise_exception` from `compiler/`.** It tail-jumps into
+**Never call `raise_exception` from `src/compiler/`.** It tail-jumps into
 `eval_exception_unwind`, which calls `fatal_error` when there is no live
 interpreter frame — and `./apython foo.py` compiles before any frame exists.
 Record the error with `comp_error()` and return 0/NULL; the driver turns it
@@ -260,7 +260,7 @@ never needs Python -- and `gen_tables.py` refuses to run on anything but CPython
 
 **Gates:** `make check-source` and `make check-cpython-source` (both corpora
 compiled by this compiler and diffed against `python3` — where nearly every bug
-below was found), `./apython --selftest-compile`, `python3 compiler/lint.py`,
+below was found), `./apython --selftest-compile`, `python3 src/compiler/lint.py`,
 and the `tests/test_compile_*.py` files.  All but the two `-source` targets run
 inside `make check`.
 
@@ -299,7 +299,7 @@ These cost real time; the shapes recur.
 
 ## Key Structs
 
-Defined in `include/*.inc`. All objects start with `PyObject` (ob_refcnt +0, ob_type +8).
+Defined in `src/include/*.inc`. All objects start with `PyObject` (ob_refcnt +0, ob_type +8).
 
 - **PyTypeObject** (object.inc): tp_call +64, tp_getattr +72, tp_setattr +80, tp_as_number +128, tp_as_sequence +136, tp_as_mapping +144, tp_base +152, tp_mro +168, tp_bases +184, tp_dictoffset +208
 - **PyFrame** (object.inc): code +8, globals +16, locals +32, stack_ptr +48, stack_base +56, localsplus +80 (variable-size Value[])
@@ -367,11 +367,11 @@ Opcodes have trailing CACHE words that must be skipped. Key counts (each = 2 byt
 - **A 64-bit read of a 4-byte struct field.** `mov rdx, [rsi + Token.len]`
   assembles fine and silently ORs in the next field as the high half; here it
   produced a multi-gigabyte `ap_memcpy`. Use the 32-bit form (`mov edx`), which
-  zero-extends. `compiler/lint.py` checks this.
+  zero-extends. `src/compiler/lint.py` checks this.
 - **A call made with `rsp` misaligned.** After `DEF_FUNC`'s `push rbp`, a
   `sub rsp, N` and P register pushes, the SysV ABI wants `(N + 8*P) % 16 == 0`.
   Much of `src/` predates this and violates it harmlessly, but the compiler
-  calls `strtod`, and glibc's float paths do use aligned SSE. `compiler/lint.py`
+  calls `strtod`, and glibc's float paths do use aligned SSE. `src/compiler/lint.py`
   checks it; pad the frame rather than the push list.
 - **A frame slot overlapping a struct in the same frame.** A hand-picked
   `equ` for a large struct silently overlaps the scalar slots above it the
@@ -427,7 +427,7 @@ continue
 | `$r14` | co_consts data ptr |
 | `$r15` | co_names data ptr |
 
-**Function definition macros** (include/macros.inc):
+**Function definition macros** (src/include/macros.inc):
 - `DEF_FUNC name` — global function with RBP frame (push rbp + mov rbp,rsp)
 - `DEF_FUNC name, N` — same + allocate N bytes of local space
 - `DEF_FUNC_BARE name` — global function, no prologue (opcode handlers, leaf functions)

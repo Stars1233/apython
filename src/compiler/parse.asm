@@ -3250,7 +3250,7 @@ section .rodata
 ;; ============================================================================
 ;; prule_table - the expression grammar, one row per token kind.
 ;;
-;; GENERATED.  Edit ROWS in compiler/gen_prule.py and re-run it.
+;; GENERATED.  Edit ROWS in src/compiler/gen_prule.py and re-run it.
 ;;
 ;; Reading a row: `prefix` runs when the token starts an expression, `infix`
 ;; when it follows one.  lbp is how tightly the token binds to what is already
