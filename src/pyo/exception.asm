@@ -1554,6 +1554,18 @@ DEF_FUNC raise_oserror, RO_FRAME
     lea rdi, [rel exc_OSError_type]
     lea rsi, [rbp - RO_ARGS]
     call oserror_new                ; rax = the instance
+    ; oserror_new takes references of its own, so the two built here are
+    ; ours to release: without this every OSError raised from posix leaked
+    ; its strerror text and, outside +-2^50, its errno as well.  A loop that
+    ; probes the filesystem with try/except leaked once per attempt.
+    push rax
+    sub rsp, 8
+    mov rdi, [rbp - RO_ARGS + 8]
+    call obj_decref
+    mov rax, [rbp - RO_ARGS]
+    DECREF_V rax, rcx
+    add rsp, 8
+    pop rax
     mov rdi, rax
     extern raise_exception_obj
     call raise_exception_obj        ; does not return

@@ -295,6 +295,17 @@ one-line fix.
 These are absences rather than wrong answers — the interpreter raises rather
 than lying — but they are ordinary Python that does not work:
 
+- **`posix_path_arg` leaks the result of `__fspath__`.**  It hands the
+  caller a flag saying the object is theirs to release, and none of its
+  eleven callers reads it.  Unreachable in practice: only an `os.PathLike`
+  argument takes that path, and nothing that defines `__fspath__` imports
+  here yet.  Releasing it needs a change at each call site, since the raise
+  paths in between abandon the C stack.
+
+- **`posix.listdir` leaks its descriptor and its 32 KiB buffer** when the
+  directory walk fails partway through.  The same shape: `POSIX_CHECK`
+  raises, and a raise does not come back to the cleanup.
+
 - **`str()` of a `UnicodeDecodeError` prints its argument tuple.**  CPython
   renders "'ascii' codec can't decode byte 0xc3 in position 1: ordinal not in
   range(128)" from the exception's fields; here the five arguments come out

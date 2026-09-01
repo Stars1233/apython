@@ -844,6 +844,38 @@ DEF_FUNC fileio_init_fn, FI_FRAME
     mov [rbp - FI_NARGS], rsi
     mov rax, [rdi]
     mov [rbp - FI_SELF], rax
+
+    ; __init__ can be called again on a live object -- CPython's FileIO
+    ; reopens rather than leaking -- so whatever the last one left has to go
+    ; first: the descriptor, the mode string and the name.
+    test qword [rax + PyFileIOObject.fio_flags], FIO_OPEN
+    jz .fi_no_previous
+    mov rcx, [rax + PyFileIOObject.fio_flags]
+    and rcx, ~FIO_OPEN
+    mov [rax + PyFileIOObject.fio_flags], rcx
+    test rcx, FIO_CLOSEFD
+    jz .fi_no_previous
+    mov rdi, [rax + PyFileIOObject.fio_fd]
+    call sys_close
+.fi_no_previous:
+    mov rax, [rbp - FI_SELF]
+    mov rdi, [rax + PyFileIOObject.fio_mode]
+    test rdi, rdi
+    jz .fi_no_old_mode
+    mov qword [rax + PyFileIOObject.fio_mode], 0
+    call obj_decref
+.fi_no_old_mode:
+    mov rax, [rbp - FI_SELF]
+    mov rcx, [rax + PyFileIOObject.fio_name]
+    test rcx, rcx
+    jz .fi_no_old_name
+    mov qword [rax + PyFileIOObject.fio_name], 0
+    push rax
+    mov rax, rcx
+    DECREF_V rax, rcx
+    pop rax
+.fi_no_old_name:
+    mov rdi, [rbp - FI_ARGS]
     mov rax, [rdi + 8]
     mov [rbp - FI_FILE], rax
     mov qword [rbp - FI_MODE], 0
@@ -2315,6 +2347,22 @@ DEF_FUNC bytesio_init_fn, BI_FRAME
     jz .bi_argerr
     mov rax, [rdi]
     mov [rbp - BI_SELF], rax
+
+    ; __init__ can be called again on a live object; the previous buffer is
+    ; this one's to release before it is replaced.  rdi still holds the
+    ; argument array and the code below reads args[1] out of it, so it has to
+    ; survive the call.
+    push rdi
+    sub rsp, 8
+    mov rdi, [rax + PyBytesIOObject.bio_buf]
+    test rdi, rdi
+    jz .bi_no_previous
+    mov qword [rax + PyBytesIOObject.bio_buf], 0
+    call ap_free
+.bi_no_previous:
+    add rsp, 8
+    pop rdi
+    mov rax, [rbp - BI_SELF]
 
     ; A fresh object is all zeroes, so an empty BytesIO still needs a buffer:
     ; bio_buf doubles as the closed flag, and 0 means closed.

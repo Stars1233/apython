@@ -137,6 +137,100 @@ def _make_encoder(encoding, errors):
     return enc.encode
 
 
+# --- what every stream gets, whatever it is made of ------------------------
+#
+# CPython puts these on the C _IOBase, so a FileIO or a BytesIO has them
+# without anyone writing them twice.  _iocore._IOBase is a heaptype, so they
+# can be attached from here -- which keeps the generic code in Python and out
+# of the assembly, and is why open(path, "rb", buffering=0) has a readline at
+# all: it hands back the raw file itself, with no buffered layer above it.
+
+
+def _iobase_readline(self, size=-1):
+    if size is None:
+        size = -1
+    peek = getattr(self, "peek", None)
+    res = bytearray()
+    while size < 0 or len(res) < size:
+        n = 1
+        if peek is not None:
+            readahead = peek(1)
+            if not readahead:
+                break
+            found = readahead.find(b"\n") + 1
+            n = found if found > 0 else len(readahead)
+            if size >= 0:
+                n = min(n, size - len(res))
+        chunk = self.read(n)
+        if not chunk:
+            break
+        res += chunk
+        if res.endswith(b"\n"):
+            break
+    return bytes(res)
+
+
+def _iobase_readlines(self, hint=None):
+    if hint is None or hint <= 0:
+        return list(self)
+    n = 0
+    lines = []
+    for line in self:
+        lines.append(line)
+        n += len(line)
+        if n >= hint:
+            break
+    return lines
+
+
+def _iobase_writelines(self, lines):
+    if self.closed:
+        raise ValueError("I/O operation on closed file.")
+    for line in lines:
+        self.write(line)
+
+
+def _iobase_iter(self):
+    if self.closed:
+        raise ValueError("I/O operation on closed file.")
+    return self
+
+
+def _iobase_next(self):
+    line = self.readline()
+    if not line:
+        raise StopIteration
+    return line
+
+
+def _iobase_fileno(self):
+    raise UnsupportedOperation("fileno")
+
+
+def _iobase_isatty(self):
+    if self.closed:
+        raise ValueError("I/O operation on closed file.")
+    return False
+
+
+def _iobase_flush(self):
+    if self.closed:
+        raise ValueError("I/O operation on closed file.")
+
+
+for _name, _fn in (("readline", _iobase_readline),
+                   ("readlines", _iobase_readlines),
+                   ("writelines", _iobase_writelines),
+                   ("__iter__", _iobase_iter),
+                   ("__next__", _iobase_next),
+                   ("fileno", _iobase_fileno),
+                   ("isatty", _iobase_isatty),
+                   ("flush", _iobase_flush)):
+    if not hasattr(_iocore._IOBase, _name):
+        setattr(_iocore._IOBase, _name, _fn)
+del _name, _fn
+
+
 # --- the abstract layer ---------------------------------------------------
 
 class IOBase(_iocore._IOBase, metaclass=abc.ABCMeta):
@@ -177,7 +271,9 @@ class IOBase(_iocore._IOBase, metaclass=abc.ABCMeta):
     def __del__(self):
         try:
             closed = self.closed
-        except AttributeError:
+        except Exception:
+            # A detached stream raises ValueError here, and a half-built one
+            # AttributeError.  Neither is worth reporting from a finaliser.
             return
         if closed:
             return
@@ -362,13 +458,13 @@ class _BufferedIOMixin(BufferedIOBase):
         self._raw = raw
 
     def seek(self, pos, whence=0):
-        new_position = self.raw.seek(pos, whence)
+        new_position = self._checkDetached().seek(pos, whence)
         if new_position < 0:
             raise OSError("seek() returned an invalid position")
         return new_position
 
     def tell(self):
-        pos = self.raw.tell()
+        pos = self._checkDetached().tell()
         if pos < 0:
             raise OSError("tell() returned an invalid position")
         return pos
@@ -382,9 +478,10 @@ class _BufferedIOMixin(BufferedIOBase):
         return self.raw.truncate(pos)
 
     def flush(self):
+        raw = self._checkDetached()
         if self.closed:
             raise ValueError("flush on closed file")
-        self.raw.flush()
+        raw.flush()
 
     def close(self):
         if self.raw is not None and not self.closed:
@@ -395,15 +492,24 @@ class _BufferedIOMixin(BufferedIOBase):
 
     def detach(self):
         if self.raw is None:
-            raise ValueError("raw stream already detached")
+            raise ValueError("raw stream has been detached")
         self.flush()
         raw = self._raw
         self._raw = None
         return raw
 
+    def _checkDetached(self):
+        # Every forwarder below goes through the raw stream, which detach()
+        # sets to None.  Without this they all raised AttributeError on None;
+        # CPython raises ValueError, and code that catches one and not the
+        # other is looking for the second.
+        if self._raw is None:
+            raise ValueError("raw stream has been detached")
+        return self._raw
+
     @property
     def closed(self):
-        return self.raw.closed
+        return self._checkDetached().closed
 
     @property
     def raw(self):
@@ -411,11 +517,11 @@ class _BufferedIOMixin(BufferedIOBase):
 
     @property
     def name(self):
-        return self.raw.name
+        return self._checkDetached().name
 
     @property
     def mode(self):
-        return self.raw.mode
+        return self._checkDetached().mode
 
     def __repr__(self):
         modname = self.__class__.__module__
@@ -427,19 +533,19 @@ class _BufferedIOMixin(BufferedIOBase):
         return "<%s.%s name=%r>" % (modname, clsname, name)
 
     def fileno(self):
-        return self.raw.fileno()
+        return self._checkDetached().fileno()
 
     def isatty(self):
-        return self.raw.isatty()
+        return self._checkDetached().isatty()
 
     def readable(self):
-        return self.raw.readable()
+        return self._checkDetached().readable()
 
     def writable(self):
-        return self.raw.writable()
+        return self._checkDetached().writable()
 
     def seekable(self):
-        return self.raw.seekable()
+        return self._checkDetached().seekable()
 
     def flush_and_close(self):
         self.close()
@@ -470,6 +576,7 @@ class BufferedReader(_BufferedIOMixin):
         return self._read_unlocked(size)
 
     def _read_unlocked(self, n=None):
+        self._checkDetached()
         nodata_val = b""
         empty_values = (b"", None)
         buf = self._read_buf
@@ -587,6 +694,7 @@ class BufferedWriter(_BufferedIOMixin):
         return True
 
     def write(self, b):
+        self._checkDetached()
         if isinstance(b, str):
             raise TypeError("can't write str to binary stream")
         if self.closed:
@@ -979,13 +1087,18 @@ class TextIOWrapper(TextIOBase):
             finally:
                 self.buffer.close()
 
+    def _checkDetached(self):
+        if self._buffer is None:
+            raise ValueError("underlying buffer has been detached")
+        return self._buffer
+
     @property
     def closed(self):
-        return self.buffer.closed
+        return self._checkDetached().closed
 
     @property
     def name(self):
-        return self.buffer.name
+        return self._checkDetached().name
 
     def fileno(self):
         return self.buffer.fileno()

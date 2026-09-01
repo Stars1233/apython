@@ -1453,8 +1453,10 @@ END_FUNC posix_device_encoding
 ;; ============================================================================
 PUN_BUF   equ UTSNAME_SIZE + 16
 PUN_OBJ   equ UTSNAME_SIZE + 24
-PUN_FRAME equ UTSNAME_SIZE + 32     ; derived, not guessed: a struct in a
-                                    ; frame outgrows a hand-picked offset
+; Rounded up to a multiple of 16 as well as derived: UTSNAME_SIZE is 390, so
+; UTSNAME_SIZE + 32 left rsp two bytes off any alignment at all across the
+; five calls below, and glibc's SSE paths want sixteen.
+PUN_FRAME equ ((UTSNAME_SIZE + 32 + 15) / 16) * 16
 DEF_FUNC posix_uname, PUN_FRAME
     push rbx
     lea rdi, [rbp - PUN_BUF]
