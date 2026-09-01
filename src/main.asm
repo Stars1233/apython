@@ -441,9 +441,10 @@ DEF_FUNC main, 8
     ; some of those to zero, and the module teardown then read freed memory:
     ; valgrind saw the invalid read in dict_dealloc, and libc's allocator
     ; noticed it as "unaligned fastbin chunk" once an unrelated change moved
-    ; the heap around.  Something is still short an INCREF on that path
-    ; (bugs.md); dropping the users before the object they borrow from is the
-    ; right order regardless.
+    ; the heap around.  The missing INCREF behind it was in
+    ; sre_match_groupdict_method and is fixed; this order is kept because
+    ; dropping the users before the object they borrow from is right anyway,
+    ; and it stops the next such bug from being a crash at teardown.
     mov rdi, [rel sys_modules_dict]
     call obj_decref
 

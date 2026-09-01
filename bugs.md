@@ -26,16 +26,6 @@ one-line fix.
   answers `-4` for `~I(3)`; here `M`'s wins.  The same shape applies to the
   other unary dunders.
 
-- **A module dict and the running code object share strings without a full
-  reference count.**  At shutdown, whichever of the two is released first
-  drives some `co_consts` string to zero and the other then reads freed memory;
-  valgrind sees the invalid read in `dict_dealloc`, and libc's allocator
-  noticed it as "unaligned fastbin chunk" once an unrelated change moved the
-  heap.  `main.asm` now tears down `sys.modules` before the globals dict and
-  the code object, which is the right order regardless, but the missing INCREF
-  is still there and is what should actually be fixed.  Reproduce with
-  `valgrind ./apython tests/__pycache__/test_sre2.cpython-312.pyc`.
-
 - **`dir()` on a module does not report the module's contents.**  `dir(errno)`
   and `dir(sys)` return only object's own dunders; the module's `__dict__` is
   not consulted.  `tests/test_errno.py` lists its names literally because of it.
