@@ -2283,11 +2283,16 @@ DEF_FUNC sre_match, SM_MFRAME
     push qword [r15 + SRE_RepeatContext.last_pos]
     mov [r15 + SRE_RepeatContext.last_pos], r13
 
-    ; If count <= max (or max == MAXREPEAT), try body first (greedy)
+    ; If count < max (or max == MAXREPEAT), try the body first (greedy).
+    ; CPython's test is strict, and it has to be: count is the number of
+    ; iterations that would follow this one, so `<=` runs the body once more
+    ; than the pattern asks.  It read correctly while count started at 0 and
+    ; compensated for it; making count start at -1, as sre_lib.h does, left
+    ; this comparison one out and every bounded repeat matching max + 1 times.
     cmp r9d, SRE_MAXREPEAT
     je .mu_try_body_greedy
     cmp rax, r9
-    jbe .mu_try_body_greedy
+    jb .mu_try_body_greedy
 
     ; count > max — try tail only
     pop rax                    ; discard saved last_pos
@@ -2418,10 +2423,12 @@ DEF_FUNC sre_match, SM_MFRAME
     mov rax, [r15 + SRE_RepeatContext.count]
     mov rcx, [r15 + SRE_RepeatContext.pattern]
     mov r9d, [rcx - 4]        ; max
+    ; The mirror of MAX_UNTIL's: sre_lib.h fails when count >= max, so `ja`
+    ; allowed one iteration past the bound here too.
     cmp r9d, SRE_MAXREPEAT
     je .miu_try_body
     cmp rax, r9
-    ja .miu_fail
+    jae .miu_fail
 
 .miu_try_body:
     ; Zero-width check
