@@ -240,6 +240,21 @@ DEF_FUNC eval_frame
     mov qword [rel cfex_merged_pending], 0
     mov qword [rel cfex_kwnames_pending], 0
 
+    ; KW_NAMES is per-call-site state: it names the keywords of the ONE call
+    ; that follows it, and the callee is meant to consume it.  A builtin that
+    ; ignores it leaves it set -- and __import__ runs a whole module body
+    ; before returning, so the first class statement in that module read the
+    ; importer's `fromlist=`/`level=` as its own class keywords and raised
+    ; "__init_subclass__() takes no keyword arguments" from a module with no
+    ; keyword arguments in it anywhere.  Scope it to the frame, as the cfex
+    ; globals above are.  The tuple is borrowed from co_consts, so no
+    ; refcounting.
+    mov rax, [rel kw_names_pending]
+    push rax
+    sub rsp, 8                  ; keep the push list even: the ABI wants rsp
+                                ; 16-aligned at the calls this frame makes
+    mov qword [rel kw_names_pending], 0
+
     ; Set globals for this frame
     mov [rel eval_co_consts], r14
     mov [rel eval_co_names], rcx
@@ -318,6 +333,9 @@ DEF_FUNC_BARE eval_return
     dec qword [rel recursion_depth]
     ; Restore caller's eval globals (reverse of save order)
     ; Use rcx as scratch — rdx holds return tag (fat value protocol)
+    add rsp, 8                  ; the alignment pad pushed with kw_names
+    pop rcx
+    mov [rel kw_names_pending], rcx
     pop rcx
     mov [rel cfex_kwnames_pending], rcx
     pop rcx

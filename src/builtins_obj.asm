@@ -2073,20 +2073,172 @@ DEF_FUNC builtin_anext_fn, AN_FRAME
 END_FUNC builtin_anext_fn
 
 ;; ============================================================================
-;; builtin_import_fn(args, nargs) - __import__(name, ...)
-;; Wraps import_module(name_str, fromlist=NULL, level=0)
-;; Only uses first arg (name), ignores globals/locals/fromlist/level for now
+;; builtin_import_fn(args, nargs) - __import__(name, globals, locals,
+;;                                             fromlist, level)
+;;
+;; fromlist decides WHICH module comes back: empty or None gives the top-level
+;; package, non-empty gives the module actually named.  Ignoring it returned
+;; `encodings` where `encodings.utf_8` was asked for, which is why
+;; encodings.search_function found no getregentry and codecs.lookup("utf-8")
+;; reported an unknown encoding.
+;;
+;; globals and locals are still ignored: they only matter for a relative
+;; import, and level > 0 is rejected below rather than silently mishandled.
 ;; ============================================================================
+extern kw_names_pending
+extern sys_modules_dict
+extern dict_get
+extern obj_as_index
+extern exc_NotImplementedError_type
+extern ap_strcmp
 extern import_module
-DEF_FUNC builtin_import_fn
 
-    cmp rsi, 1
-    jb .imp_nargs_error
+BIM_ARGS     equ 8
+BIM_FROMLIST equ 16
+BIM_LEVEL    equ 24
+BIM_NAME     equ 32
+BIM_NPOS     equ 40
+BIM_FRAME    equ 48         ; + 0 pushes = 48
 
-    ; Get name string
-    mov rdi, [rdi]             ; name payload (must be str)
-    xor esi, esi               ; fromlist = NULL
-    xor edx, edx              ; level = 0
+DEF_FUNC builtin_import_fn, BIM_FRAME
+    mov [rbp - BIM_ARGS], rdi
+    mov [rbp - BIM_NPOS], rsi
+    mov qword [rbp - BIM_FROMLIST], 0
+    mov qword [rbp - BIM_LEVEL], 0
+
+    ; Keyword arguments sit after the positional ones, named in order by
+    ; kw_names_pending.  Consume it: a builtin that leaves it set hands its
+    ; caller's keywords to whatever call runs next -- and this one runs a
+    ; whole module body before it returns.
+    mov rax, [rel kw_names_pending]
+    mov qword [rel kw_names_pending], 0
+    test rax, rax
+    jz .imp_have_pos
+
+    mov rcx, [rax + PyTupleObject.ob_size]
+    sub qword [rbp - BIM_NPOS], rcx     ; the positional count alone
+    xor r9d, r9d
+.imp_kw_loop:
+    cmp r9, rcx
+    jge .imp_have_pos
+    push rcx
+    push rax
+    push r9
+    sub rsp, 8                          ; align for ap_strcmp
+
+    mov r10, [rax + PyTupleObject.ob_item]
+    mov r10, [r10 + r9*8]               ; the keyword's name
+    mov r11, [rbp - BIM_NPOS]
+    add r11, r9
+    mov rdi, [rbp - BIM_ARGS]
+    mov r11, [rdi + r11*8]              ; its value
+
+    push r11
+    lea rdi, [r10 + PyStrObject.data]
+    CSTRING rsi, "fromlist"
+    call ap_strcmp
+    pop r11
+    test eax, eax
+    jz .imp_kw_fromlist
+
+    push r11
+    lea rdi, [r10 + PyStrObject.data]
+    CSTRING rsi, "level"
+    call ap_strcmp
+    pop r11
+    test eax, eax
+    jz .imp_kw_level
+
+    ; globals= and locals= are accepted and ignored, as the positional forms
+    ; are; anything else is a genuine error.
+    push r11
+    lea rdi, [r10 + PyStrObject.data]
+    CSTRING rsi, "globals"
+    call ap_strcmp
+    pop r11
+    test eax, eax
+    jz .imp_kw_next
+    push r11
+    lea rdi, [r10 + PyStrObject.data]
+    CSTRING rsi, "locals"
+    call ap_strcmp
+    pop r11
+    test eax, eax
+    jz .imp_kw_next
+    push r11
+    lea rdi, [r10 + PyStrObject.data]
+    CSTRING rsi, "name"
+    call ap_strcmp
+    pop r11
+    test eax, eax
+    jnz .imp_kw_bad
+    add rsp, 8
+    pop r9
+    pop rax
+    pop rcx
+    mov [rbp - BIM_NAME], r11
+    inc r9
+    jmp .imp_kw_loop
+.imp_kw_fromlist:
+    mov [rbp - BIM_FROMLIST], r11
+    jmp .imp_kw_next
+.imp_kw_level:
+    mov [rbp - BIM_LEVEL], r11
+.imp_kw_next:
+    add rsp, 8
+    pop r9
+    pop rax
+    pop rcx
+    inc r9
+    jmp .imp_kw_loop
+
+.imp_have_pos:
+    ; Positional: name, globals, locals, fromlist, level
+    mov rdi, [rbp - BIM_ARGS]
+    mov rsi, [rbp - BIM_NPOS]
+    test rsi, rsi
+    jz .imp_check_name
+    mov rax, [rdi]
+    mov [rbp - BIM_NAME], rax
+    cmp rsi, 4
+    jl .imp_check_name
+    mov rax, [rdi + 24]
+    mov [rbp - BIM_FROMLIST], rax
+    cmp rsi, 5
+    jl .imp_check_name
+    mov rax, [rdi + 32]
+    mov [rbp - BIM_LEVEL], rax
+
+.imp_check_name:
+    mov rdi, [rbp - BIM_NAME]
+    test rdi, rdi
+    jz .imp_nargs_error
+
+    ; level: only 0 is honoured.  A relative import needs the caller's
+    ; __package__, which this entry point does not consult, so say so rather
+    ; than import the wrong module.
+    mov rdi, [rbp - BIM_LEVEL]
+    test rdi, rdi
+    jz .imp_level_ok
+    V_UNPACK rdi, rdx
+    call obj_as_index
+    test rax, rax
+    jnz .imp_level_error
+.imp_level_ok:
+
+    ; None is not a fromlist.
+    mov rax, [rbp - BIM_FROMLIST]
+    test rax, rax
+    jz .imp_do
+    LOAD_NONE rcx
+    cmp rax, rcx
+    jne .imp_do
+    mov qword [rbp - BIM_FROMLIST], 0
+
+.imp_do:
+    mov rdi, [rbp - BIM_NAME]
+    mov rsi, [rbp - BIM_FROMLIST]
+    xor edx, edx                ; level = 0
     call import_module
     ; import_module never sets rdx, so V_PACK was branching on whatever the
     ; last call left there -- re-encoding the module *pointer* as an int or a
@@ -2094,7 +2246,47 @@ DEF_FUNC builtin_import_fn
     ; otherwise.  A module is a pointer; a pointer is its own Value.
     mov edx, TAG_PTR
     test rax, rax
-    jnz .imp_done
+    jz .imp_failed
+
+    ; With a non-empty fromlist the caller wants the module it named, not the
+    ; package that anchors it.  import_module has already put every level in
+    ; sys.modules, so the leaf is one lookup away.
+    mov rcx, [rbp - BIM_FROMLIST]
+    test rcx, rcx
+    jz .imp_done
+    push rax
+    mov rdi, rcx
+    call obj_is_true
+    test eax, eax
+    pop rax
+    jz .imp_done
+
+    push rax                    ; the package, still owned
+    mov rdi, [rel sys_modules_dict]
+    mov rsi, [rbp - BIM_NAME]
+    V_PACK rsi, rdx
+    call dict_get
+    test rax, rax
+    jz .imp_leaf_missing
+    V_UNPACK rax, rdx
+    INCREF rax                  ; dict_get hands back a borrowed reference
+    mov rdi, rax
+    pop rax                     ; the package
+    push rdi
+    call obj_decref
+    pop rax
+    mov edx, TAG_PTR
+    jmp .imp_done
+.imp_leaf_missing:
+    pop rax                     ; no leaf: the package is the honest answer
+    mov edx, TAG_PTR
+
+.imp_done:
+    leave
+    V_PACK rax, rdx             ; builtins return one Value
+    ret
+
+.imp_failed:
     ; NULL means the module body raised and the exception is still pending.
     extern current_exception
     extern eval_exception_unwind
@@ -2105,11 +2297,15 @@ DEF_FUNC builtin_import_fn
 .imp_propagate:
     leave
     jmp eval_exception_unwind
-.imp_done:
-    leave
-    V_PACK rax, rdx             ; builtins return one Value
-    ret
 
+.imp_kw_bad:
+    add rsp, 8
+    pop r9
+    pop rax
+    pop rcx
+    RAISE exc_TypeError_type, "__import__() got an unexpected keyword argument"
+.imp_level_error:
+    RAISE exc_NotImplementedError_type, "__import__(): relative import is not supported"
 .imp_nargs_error:
     RAISE exc_TypeError_type, "__import__() requires at least 1 argument"
 END_FUNC builtin_import_fn

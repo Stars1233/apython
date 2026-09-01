@@ -145,6 +145,7 @@ test_getattr_raises
 test_immediate_operands
 test_import_errors
 test_import_from
+test_import_kwargs
 test_import_module
 test_import_sys
 test_inheritance
