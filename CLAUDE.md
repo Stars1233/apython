@@ -391,6 +391,21 @@ Opcodes have trailing CACHE words that must be skipped. Key counts (each = 2 byt
 - **A constructor in `tp_call` rather than `tp_new`.** `tp_call` on a type is what makes that type's *instances* callable; the constructor goes in `tp_new`, which `type_call` consults. `mappingproxy` had neither, so calling it fell through to the ordinary class-construction path and left its fields holding whatever was there.
 - **Reading a key's tag out of `edx` in an `mp_subscript`.** `BINARY_SUBSCR` builds the key Value with `V_PACK`, which *clobbers* the register the tag was in — the value left behind happens to equal `TAG_SMALLINT` for positive ints and not for negative ones. Classify from the Value itself with `V_TEST_PTR`.
 - **A constant that is a Value, not a pointer.** `ast_obj_at` hands back whatever the object arena holds, and `class C: 42` puts an immediate int there. Reading `ob_type` off one dereferences the number.
+- **A heaptype whose `tp_basicsize` was patched to make room for C-level
+  fields.**  `instance_dealloc` and `instance_traverse` both walk every word
+  from the dict slot to `tp_basicsize` and treat it as a `__slots__` Value --
+  one DECREF_VALs it, the other hands it to the collector.  A file descriptor
+  of 3 read as a Value is a pointer to address 3.  `_io.FileIO` and
+  `_io.BytesIO` give the type its own `tp_traverse` and `tp_clear`, and their
+  dealloc zeroes the raw fields before delegating.  A subclass of such a type
+  cannot declare `__slots__`: they would land in the same words.
+
+- **A builtin `__next__` that raises StopIteration with `RAISE`.**  `RAISE`
+  tail-jumps into the unwinder, and a builtin has no Python frame of its own
+  to stop at, so the StopIteration unwinds straight past `slot_tp_iternext`
+  and out of the `for` that was calling it.  Use `SET_EXC` and return NULL;
+  the slot wrapper is what turns StopIteration into exhaustion.
+
 - **A removed load whose guard stayed.** The `(payload, tag)` conversion deleted many `key_tag` loads; where the `test`/`jz` that used them was left in place it now reads a stale register — `from mod import *` and `dict.popitem()` both failed this way, silently. When deleting a load, delete its test.
 
 ## Adding a New Test
