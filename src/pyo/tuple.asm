@@ -1154,7 +1154,7 @@ DEF_FUNC tuple_type_call, TTC_FRAME
     ; `except` block current_exception is the exception being handled, so a
     ; bare test made tuple(x) there re-raise it.
     extern current_exception
-    DUNDER_RAISED [rbp - TTC_EXC], .ttc_exc_cleanup
+    EXC_RAISED_SINCE [rbp - TTC_EXC], rax, .ttc_exc_cleanup
 
     ; Convert list to tuple
     mov rcx, [rbx + PyListObject.ob_size]

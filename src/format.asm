@@ -56,7 +56,8 @@ FS_VALUE  equ 80
 FS_BODY   equ 88         ; rendered body, a str object
 FS_SIGNCH equ 96         ; the sign actually emitted, or 0
 FS_SPECLEN equ 104       ; length of the spec as given
-FS_FRAME  equ 112           ; + 5 pushes = 152, not 16-aligned
+FS_OWNED  equ 112        ; a box V_PACK made for a wide int subclass, or 0
+FS_FRAME  equ 120           ; + 5 pushes = 160, 16-aligned
 
 ;; ============================================================================
 ;; format_apply_spec(rdi = value Value, rsi = spec str) -> Value (a str)
@@ -67,6 +68,10 @@ DEF_FUNC format_apply_spec, FS_FRAME
     push r13
     push r14
     push r15
+    ; Zeroed here and not where it is set: every arm reaches the release in
+    ; .fs_body_int, and only the int-subclass arm assigns it, so a frame slot
+    ; left holding whatever was on the stack was handed to obj_decref.
+    mov qword [rbp - FS_OWNED], 0
 
     mov [rbp - FS_VALUE], rdi
     mov qword [rbp - FS_BODY], 0
@@ -252,11 +257,11 @@ DEF_FUNC format_apply_spec, FS_FRAME
     cmp r15, rax
     je .fs_family_done
     extern bool_type
+    mov rdx, [r15 + PyTypeObject.tp_flags]
     lea rax, [rel bool_type]
     cmp r15, rax
     je .fs_bool
 
-    mov rdx, [r15 + PyTypeObject.tp_flags]
     test rdx, TYPE_FLAG_COMPLEX_SUBCLASS
     jz .fs_not_complex_sub
     lea r15, [rel complex_type]     ; complex_to_parts unwraps the value
@@ -280,6 +285,9 @@ DEF_FUNC format_apply_spec, FS_FRAME
 .fs_bool:
     ; bool formats as an int, which is what CPython does: format(True, "d")
     ; is "1".  Its value is a singleton, not an int, so it is unwrapped too.
+    ; tp_flags is loaded BEFORE the jump here, because this falls straight
+    ; into a test of rdx and nothing else on this path writes it -- it held
+    ; whatever the caller had left in it.
     lea r15, [rel int_type]
 .fs_not_float_sub:
     test rdx, TYPE_FLAG_INT_SUBCLASS
@@ -289,8 +297,15 @@ DEF_FUNC format_apply_spec, FS_FRAME
     mov edx, TAG_PTR
     extern int_unwrap
     call int_unwrap
+    ; V_PACK on a SmallInt outside +-2^50 ALLOCATES, and FS_VALUE is a slot
+    ; this function neither owns nor releases: one boxed int leaked per
+    ; format() of such a subclass instance.  Note whether it boxed, and give
+    ; the box back once the body has been rendered.
     V_PACK rdi, rdx
     mov [rbp - FS_VALUE], rdi
+    V_TEST_PTR rdi, rax
+    ja .fs_family_done          ; still an immediate: nothing was allocated
+    mov [rbp - FS_OWNED], rdi
 .fs_family_done:
 
     mov rcx, [rbp - FS_TYPE]
@@ -424,6 +439,15 @@ DEF_FUNC format_apply_spec, FS_FRAME
 .fs_body_int:
     call format_int_body
     mov [rbp - FS_BODY], rax
+    mov rdi, [rbp - FS_OWNED]
+    test rdi, rdi
+    jz .fs_pad
+    mov qword [rbp - FS_OWNED], 0
+    push rax
+    sub rsp, 8
+    call obj_decref             ; the box V_PACK made for a wide subclass
+    add rsp, 8
+    pop rax
     jmp .fs_pad
 
 .fs_body_complex:

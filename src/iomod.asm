@@ -847,7 +847,10 @@ DEF_FUNC fileio_init_fn, FI_FRAME
 
     ; __init__ can be called again on a live object -- CPython's FileIO
     ; reopens rather than leaking -- so whatever the last one left has to go
-    ; first: the descriptor, the mode string and the name.
+    ; first: the descriptor, the mode string and the name.  nargs and the
+    ; argument array are already parked in the frame above; the block below
+    ; calls obj_decref, which clobbers every caller-saved register, so
+    ; nothing may be left live in one.
     test qword [rax + PyFileIOObject.fio_flags], FIO_OPEN
     jz .fi_no_previous
     mov rcx, [rax + PyFileIOObject.fio_flags]
@@ -879,6 +882,8 @@ DEF_FUNC fileio_init_fn, FI_FRAME
     mov rax, [rdi + 8]
     mov [rbp - FI_FILE], rax
     mov qword [rbp - FI_MODE], 0
+    mov rsi, [rbp - FI_NARGS]   ; reload: the releases above went through
+    mov rdi, [rbp - FI_ARGS]    ; obj_decref, which clobbers both
     cmp rsi, 3
     jl .fi_have_mode
     mov rax, [rdi + 16]
@@ -2352,15 +2357,19 @@ DEF_FUNC bytesio_init_fn, BI_FRAME
     ; this one's to release before it is replaced.  rdi still holds the
     ; argument array and the code below reads args[1] out of it, so it has to
     ; survive the call.
+    ; rsi is nargs and rdi the argument array, and BOTH are read below --
+    ; ap_free tail-jumps into glibc, which clobbers every caller-saved
+    ; register.  Saving only rdi left `cmp rsi, 2` deciding on garbage and
+    ; `mov rcx, [rdi + 8]` reading one slot past a one-element array.
     push rdi
-    sub rsp, 8
+    push rsi
     mov rdi, [rax + PyBytesIOObject.bio_buf]
     test rdi, rdi
     jz .bi_no_previous
     mov qword [rax + PyBytesIOObject.bio_buf], 0
     call ap_free
 .bi_no_previous:
-    add rsp, 8
+    pop rsi
     pop rdi
     mov rax, [rbp - BI_SELF]
 

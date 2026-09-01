@@ -188,148 +188,244 @@ DEF_FUNC bytes_method_hex, BH_FRAME
 END_FUNC bytes_method_hex
 
 ;; ============================================================================
-;; bytes_method_startswith(args, nargs) -> Bool
-;; args[0]=self (bytes), args[1]=prefix (bytes)
+;; bytes_affix_match(rdi = one affix Value, rsi = the subject's data,
+;;                   rdx = its length, ecx = 0 for a prefix, 1 for a suffix)
+;;   -> eax = 1 match, 0 no match, -1 the affix is not bytes-like
 ;; ============================================================================
-BSW_SELF equ 8
-BSW_SLEN equ 16
-BSW_FRAME equ 32            ; + 1 push = 40, not 16-aligned
+BAM_DATA  equ 8
+BAM_LEN   equ 16
+BAM_END   equ 24
+BAM_FRAME equ 32            ; + 0 pushes = 32
 
-DEF_FUNC bytes_method_startswith, BSW_FRAME
+DEF_FUNC_LOCAL bytes_affix_match, BAM_FRAME
+    mov [rbp - BAM_DATA], rsi
+    mov [rbp - BAM_LEN], rdx
+    mov [rbp - BAM_END], rcx
+    call bytes_like_ptr_len     ; rax = data, r10 = length, ecx = ok
+    test ecx, ecx
+    jz .bam_bad
+    cmp r10, [rbp - BAM_LEN]
+    ja .bam_no                  ; longer than the subject
+    test r10, r10
+    jz .bam_yes                 ; an empty affix always matches
+    mov rsi, rax
+    mov rdi, [rbp - BAM_DATA]
+    cmp qword [rbp - BAM_END], 0
+    je .bam_have_start
+    add rdi, [rbp - BAM_LEN]    ; a suffix starts len - affixlen in
+    sub rdi, r10
+.bam_have_start:
+    mov rdx, r10
+    call ap_memcmp
+    test eax, eax
+    jnz .bam_no
+.bam_yes:
+    mov eax, 1
+    leave
+    ret
+.bam_no:
+    xor eax, eax
+    leave
+    ret
+.bam_bad:
+    mov eax, -1
+    leave
+    ret
+END_FUNC bytes_affix_match
+
+;; ============================================================================
+;; bytes_method_affix(rdi = args, rsi = nargs, edx = 0 prefix / 1 suffix,
+;;                    rcx = the method's name) -> a bool Value
+;;
+;; startswith and endswith differ only in which end they compare, and both
+;; take EITHER one affix or a tuple of them -- `data.startswith((b'PK',
+;; b'\x1f\x8b'))` is the idiom that matters, and routing the whole argument
+;; through bytes_like_ptr_len turned it into a TypeError.
+;; ============================================================================
+BAF_SELF  equ 8
+BAF_SLEN  equ 16
+BAF_ARG   equ 24
+BAF_END   equ 32
+BAF_NAME  equ 40
+BAF_I     equ 48
+BAF_N     equ 56
+BAF_BAD   equ 64            ; the element the message names, for a tuple
+BAF_FRAME equ 80            ; + 0 pushes = 80
+
+DEF_FUNC_LOCAL bytes_method_affix, BAF_FRAME
     cmp rsi, 2
-    jne .bsw_error
-    push rbx
+    jne .baf_argerr
+    mov [rbp - BAF_END], rdx
+    mov [rbp - BAF_NAME], rcx
+    mov rax, [rdi + 8]
+    mov [rbp - BAF_ARG], rax
 
-    ; Both operands go through bytes_like_ptr_len.  Reading data and ob_size
-    ; off the argument directly was right only for a bytes: a bytearray keeps
-    ; its bytes out of line now, so +24 is its CAPACITY and +32 the pointer,
-    ; and the comparison silently ran against the wrong words.
-    mov rbx, [rdi + 8]          ; the prefix, kept for the error message
+    ; The subject: a bytearray keeps its bytes out of line, so reading data
+    ; and ob_size off it with a bytes layout found the capacity word.
     mov rdi, [rdi]
     call bytes_like_ptr_len
     test ecx, ecx
-    jz .bsw_self_type
-    mov [rbp - BSW_SELF], rax
-    mov [rbp - BSW_SLEN], r10
+    jz .baf_self_type
+    mov [rbp - BAF_SELF], rax
+    mov [rbp - BAF_SLEN], r10
 
-    mov rdi, rbx
-    call bytes_like_ptr_len
-    test ecx, ecx
-    jz .bsw_arg_type
-    mov rcx, rax                ; prefix data
-    mov r9, r10                 ; prefix length
-    mov r8, [rbp - BSW_SLEN]
+    mov rdi, [rbp - BAF_ARG]
+    V_TEST_PTR rdi, rax
+    ja .baf_single
+    test rdi, rdi
+    jz .baf_single
+    mov rax, [rdi + PyObject.ob_type]
+    lea rcx, [rel tuple_type]
+    cmp rax, rcx
+    jne .baf_single
 
-    ; If prefix longer than self: False
-    cmp r9, r8
-    ja .bsw_false
-
-    ; Compare first r9 bytes
-    mov rdi, [rbp - BSW_SELF]
-    mov rsi, rcx
-    mov rdx, r9
-    test rdx, rdx
-    jz .bsw_true                ; empty prefix always matches
-    call ap_memcmp
+    ; A tuple: true if any element matches.
+    mov rax, [rdi + PyTupleObject.ob_size]
+    mov [rbp - BAF_N], rax
+    mov qword [rbp - BAF_I], 0
+.baf_loop:
+    mov rcx, [rbp - BAF_I]
+    cmp rcx, [rbp - BAF_N]
+    jge .baf_false
+    mov rax, [rbp - BAF_ARG]
+    mov rax, [rax + PyTupleObject.ob_item]
+    mov rdi, [rax + rcx*8]
+    mov [rbp - BAF_BAD], rdi    ; the item, in case it is not bytes-like
+    mov rsi, [rbp - BAF_SELF]
+    mov rdx, [rbp - BAF_SLEN]
+    mov rcx, [rbp - BAF_END]
+    call bytes_affix_match
+    cmp eax, 0
+    jl .baf_item_type           ; an ELEMENT of the tuple, worded differently
     test eax, eax
-    jnz .bsw_false
+    jnz .baf_true
+    inc qword [rbp - BAF_I]
+    jmp .baf_loop
 
-.bsw_true:
-    mov eax, 1
-    RET_BOOL_RAX
-    pop rbx
-    leave
-    V_PACK rax, rdx             ; builtins return one Value
-    ret
+.baf_single:
+    mov rdi, [rbp - BAF_ARG]
+    mov [rbp - BAF_BAD], rdi
+    mov rsi, [rbp - BAF_SELF]
+    mov rdx, [rbp - BAF_SLEN]
+    mov rcx, [rbp - BAF_END]
+    call bytes_affix_match
+    cmp eax, 0
+    jl .baf_arg_type
+    test eax, eax
+    jnz .baf_true
 
-.bsw_false:
+.baf_false:
     xor eax, eax
     RET_BOOL_RAX
-    pop rbx
     leave
-    V_PACK rax, rdx             ; builtins return one Value
+    V_PACK rax, rdx
+    ret
+.baf_true:
+    mov eax, 1
+    RET_BOOL_RAX
+    leave
+    V_PACK rax, rdx
     ret
 
-.bsw_self_type:
+.baf_self_type:
+    RAISE exc_TypeError_type, "a bytes-like object is required"
+.baf_item_type:
+    ; CPython words a bad ELEMENT differently from a bad argument: "a
+    ; bytes-like object is required, not 'str'" rather than "first arg must
+    ; be bytes or a tuple of bytes".
+    lea rdi, [rel bj_msgbuf]
+    lea rsi, [rel baf_msg_item]
+    call bj_append_cstr
+    mov rdi, rax
+    mov rsi, [rbp - BAF_BAD]
+    call baf_append_quoted_typename
+    lea rdi, [rel exc_TypeError_type]
+    lea rsi, [rel bj_msgbuf]
+    call raise_exception
+    ud2
+.baf_arg_type:
+    ; CPython names the method and the offending type: "startswith first arg
+    ; must be bytes or a tuple of bytes, not str".
+    lea rdi, [rel bj_msgbuf]
+    mov rsi, [rbp - BAF_NAME]
+    call bj_append_cstr
+    mov rdi, rax
+    lea rsi, [rel baf_msg_first]
+    call bj_append_cstr
+    mov rdi, rax
+    mov rsi, [rbp - BAF_BAD]
+    call baf_append_typename
+    lea rdi, [rel exc_TypeError_type]
+    lea rsi, [rel bj_msgbuf]
+    call raise_exception
+    ud2
+.baf_argerr:
+    lea rdi, [rel bj_msgbuf]
+    mov rsi, [rbp - BAF_NAME]
+    call bj_append_cstr
+    mov rdi, rax
+    lea rsi, [rel baf_msg_args]
+    call bj_append_cstr
+    lea rdi, [rel exc_TypeError_type]
+    lea rsi, [rel bj_msgbuf]
+    call raise_exception
+    ud2
+END_FUNC bytes_method_affix
+
+DEF_FUNC_LOCAL baf_append_quoted_typename   ; (rdi = dest, rsi = a Value)
+    push rbx
+    mov rbx, rdi
+    mov byte [rbx], 0x27        ; an apostrophe
+    lea rdi, [rbx + 1]
+    call baf_append_typename
+    mov byte [rax], 0x27
+    mov byte [rax + 1], 0
+    lea rax, [rax + 1]
     pop rbx
-    RAISE exc_TypeError_type, "startswith() requires a bytes-like object"
-.bsw_arg_type:
-    pop rbx
-    RAISE exc_TypeError_type, "startswith first arg must be bytes or a tuple of bytes, not str"
-.bsw_error:
-    RAISE exc_TypeError_type, "startswith() takes exactly one argument"
+    leave
+    ret
+END_FUNC baf_append_quoted_typename
+
+DEF_FUNC_LOCAL baf_append_typename  ; (rdi = dest, rsi = a Value) -> rax
+    V_TEST_PTR rsi, rax
+    ja .bat2_int
+    test rsi, rsi
+    jz .bat2_int
+    mov rsi, [rsi + PyObject.ob_type]
+    mov rsi, [rsi + PyTypeObject.tp_name]
+    jmp .bat2_have
+.bat2_int:
+    lea rsi, [rel bj_name_int]
+.bat2_have:
+    call bj_append_cstr
+    leave
+    ret
+END_FUNC baf_append_typename
+
+;; ============================================================================
+;; bytes_method_startswith(args, nargs) -> Bool
+;; args[0]=self (bytes), args[1]=prefix (bytes)
+;; ============================================================================
+;; bytes_method_startswith / bytes_method_endswith -- one implementation, two
+;; ends.  Both accept a tuple of affixes, as CPython's do.
+;; ============================================================================
+DEF_FUNC bytes_method_startswith
+    xor edx, edx
+    lea rcx, [rel baf_name_startswith]
+    call bytes_method_affix
+    leave
+    ret
 END_FUNC bytes_method_startswith
 
 ;; ============================================================================
 ;; bytes_method_endswith(args, nargs) -> Bool
 ;; args[0]=self (bytes), args[1]=suffix (bytes)
-;; ============================================================================
-BEW_SELF equ 8
-BEW_SLEN equ 16
-BEW_FRAME equ 32            ; + 1 push = 40, not 16-aligned
-
-DEF_FUNC bytes_method_endswith, BEW_FRAME
-    cmp rsi, 2
-    jne .bew_error
-    push rbx
-
-    mov rbx, [rdi + 8]          ; the suffix
-    mov rdi, [rdi]
-    call bytes_like_ptr_len     ; see startswith: a bytearray's bytes are not
-    test ecx, ecx               ; where a bytes keeps them
-    jz .bew_self_type
-    mov [rbp - BEW_SELF], rax
-    mov [rbp - BEW_SLEN], r10
-
-    mov rdi, rbx
-    call bytes_like_ptr_len
-    test ecx, ecx
-    jz .bew_arg_type
-    mov rcx, rax
-    mov r9, r10
-    mov r8, [rbp - BEW_SLEN]
-
-    ; If suffix longer than self: False
-    cmp r9, r8
-    ja .bew_false
-
-    ; Compare last r9 bytes
-    mov rdx, r8
-    sub rdx, r9                             ; offset = self_len - suffix_len
-    mov rdi, [rbp - BEW_SELF]
-    add rdi, rdx
-    mov rsi, rcx
-    mov rdx, r9
-    test rdx, rdx
-    jz .bew_true                ; empty suffix always matches
-    call ap_memcmp
-    test eax, eax
-    jnz .bew_false
-
-.bew_true:
-    mov eax, 1
-    RET_BOOL_RAX
-    pop rbx
+DEF_FUNC bytes_method_endswith
+    mov edx, 1
+    lea rcx, [rel baf_name_endswith]
+    call bytes_method_affix
     leave
-    V_PACK rax, rdx             ; builtins return one Value
     ret
-
-.bew_false:
-    xor eax, eax
-    RET_BOOL_RAX
-    pop rbx
-    leave
-    V_PACK rax, rdx             ; builtins return one Value
-    ret
-
-.bew_self_type:
-    pop rbx
-    RAISE exc_TypeError_type, "endswith() requires a bytes-like object"
-.bew_arg_type:
-    pop rbx
-    RAISE exc_TypeError_type, "endswith first arg must be bytes or a tuple of bytes, not str"
-.bew_error:
-    RAISE exc_TypeError_type, "endswith() takes exactly one argument"
 END_FUNC bytes_method_endswith
 
 ;; ============================================================================
@@ -617,7 +713,8 @@ BR_BUF    equ 32
 BR_BUFSZ  equ 40
 BR_WPOS   equ 48
 BR_NEWLEN equ 56
-BR_FRAME  equ 64            ; + 5 pushes = 104, not 16-aligned
+BR_FRAME  equ 72            ; + 5 pushes = 112, 16-aligned -- replace reaches
+                            ; glibc through ap_malloc
 
 DEF_FUNC bytes_method_replace, BR_FRAME
     push rbx
@@ -1309,6 +1406,11 @@ bj_msg_item:     db "sequence item ", 0
 bj_msg_expected: db ": expected a bytes-like object, ", 0
 bj_msg_found:    db " found", 0
 bj_name_int:     db "int", 0
+baf_name_startswith: db "startswith", 0
+baf_name_endswith:   db "endswith", 0
+baf_msg_first:   db " first arg must be bytes or a tuple of bytes, not ", 0
+baf_msg_args:    db "() takes exactly one argument", 0
+baf_msg_item:    db "a bytes-like object is required, not ", 0
 
 section .bss
 bj_msgbuf: resb 192

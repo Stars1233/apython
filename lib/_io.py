@@ -568,7 +568,16 @@ class BufferedReader(_BufferedIOMixin):
         self._read_pos = 0
 
     def readable(self):
+        # Not a bare True: after detach() there is no raw stream to be
+        # readable, and CPython raises rather than answering.
+        self._checkDetached()
         return True
+
+    def writable(self):
+        # A reader is never writable, and CPython answers that without
+        # consulting the raw stream -- so it still answers after detach(),
+        # where readable() and seekable() raise.
+        return False
 
     def read(self, size=None):
         if size is not None and size < -1:
@@ -622,6 +631,7 @@ class BufferedReader(_BufferedIOMixin):
         return self._peek_unlocked(size)
 
     def _peek_unlocked(self, n=0):
+        self._checkDetached()
         want = min(n, self.buffer_size)
         have = len(self._read_buf) - self._read_pos
         if have < want or have <= 0:
@@ -633,6 +643,7 @@ class BufferedReader(_BufferedIOMixin):
         return self._read_buf[self._read_pos:]
 
     def read1(self, size=-1):
+        self._checkDetached()
         if size < 0:
             size = self.buffer_size
         if size == 0:
@@ -642,6 +653,7 @@ class BufferedReader(_BufferedIOMixin):
                                        - self._read_pos))
 
     def _readinto(self, buf, read1):
+        self._checkDetached()
         if not isinstance(buf, memoryview):
             buf = memoryview(buf)
         buf = buf.cast("B")
@@ -690,7 +702,11 @@ class BufferedWriter(_BufferedIOMixin):
         self.buffer_size = buffer_size
         self._write_buf = bytearray()
 
+    def readable(self):
+        return False
+
     def writable(self):
+        self._checkDetached()
         return True
 
     def write(self, b):
@@ -1069,10 +1085,10 @@ class TextIOWrapper(TextIOBase):
         return self._seekable
 
     def readable(self):
-        return self.buffer.readable()
+        return self._checkDetached().readable()
 
     def writable(self):
-        return self.buffer.writable()
+        return self._checkDetached().writable()
 
     def flush(self):
         if self.closed:
@@ -1101,10 +1117,10 @@ class TextIOWrapper(TextIOBase):
         return self._checkDetached().name
 
     def fileno(self):
-        return self.buffer.fileno()
+        return self._checkDetached().fileno()
 
     def isatty(self):
-        return self.buffer.isatty()
+        return self._checkDetached().isatty()
 
     def _get_encoder(self):
         if self._encoder is None:

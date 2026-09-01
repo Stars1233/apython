@@ -295,6 +295,36 @@ one-line fix.
 These are absences rather than wrong answers — the interpreter raises rather
 than lying — but they are ordinary Python that does not work:
 
+- **`bytes % args` leaks its temporary when the format is malformed.**  The
+  work is done by handing a decoded copy of the format and the arguments to
+  `str_mod`, and `str_mod` RAISES for a wrong argument count -- a raise
+  abandons the C stack, so neither the copy nor the converted arguments are
+  released.  Putting them somewhere the unwinder frees would be worse: an
+  argument's `__str__` can run Python, and a raise caught inside it would
+  free a buffer `str_mod` is still reading.
+
+- **Every `int` method reads past the end of an `int` subclass instance.**
+  `bit_length`, `bit_count`, `conjugate` and `to_bytes` in
+  `src/methods/num.asm` read `PyIntObject.compact` at +40 of a 32-byte
+  `PyIntSubclassObject` without unwrapping first, so `I(7).bit_length()` is
+  0 and `I(258).to_bytes(2, 'big')` is `b'\x00\x00'`.  Under valgrind it is
+  an invalid read, and the garbage can be a limb pointer handed to GMP.
+
+- **A NaN divisor reads as zero in float division.**  `float_truediv`,
+  `float_floordiv` and `float_mod` compare against 0.0 with `ucomisd` and
+  branch on `je`, which is taken for UNORDERED as well: `1.0 / float("nan")`
+  raises ZeroDivisionError where CPython answers nan.  `complex_pow` has the
+  same shape at its `jb`, so `complex(0,0) ** complex(nan, 0)` raises where
+  CPython answers 0j.
+
+- **`next(obj)` reports StopIteration for any exception a Python `__next__`
+  raises.**  `it.__next__()` and `for x in it` both propagate the real one;
+  only the `next()` builtin swallows it.
+
+- **A `__del__` that raises and catches internally destroys an exception
+  that is already unwinding.**  The finaliser prints "Exception ignored in
+  __del__" and execution then continues as though nothing had been raised.
+
 - **Two `posix` messages name fewer paths than CPython's.**  `rename` reports
   only its source where CPython reports `'src' -> 'dst'`, and the
   "path should be string, bytes, or os.PathLike" TypeError carries no

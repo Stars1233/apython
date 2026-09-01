@@ -577,6 +577,26 @@ TP_DICT_AT_TAIL equ -1
     jne %2
 %endmacro
 
+; The same question asked of a call that may legitimately CLEAR the pending
+; exception rather than raise: call_iternext swallows a StopIteration by
+; zeroing current_exception, so inside an `except` block the global goes from
+; the handled exception to 0 -- a change, but not a raise.  DUNDER_RAISED
+; alone read that as "it raised", and list(it)/tuple(it) inside a handler
+; returned NULL.  An exception was raised only if one is pending NOW and it
+; is not the one that was already being handled.
+%macro EXC_RAISED_SINCE 3       ; %1 = saved slot, %2 = scratch, %3 = label
+    push %2                     ; the scratch is restored on both paths, so a
+    mov %2, [rel current_exception]  ; caller need not find a dead register
+    test %2, %2
+    jz %%no
+    cmp %2, %1
+    je %%no
+    pop %2
+    jmp %3
+%%no:
+    pop %2
+%endmacro
+
 ; The same, for the container families.  Each exact-type test these replace
 ; rejected a subclass: [1] == MyList([1]) was silently False, and
 ; {**MyDict(...)} was a TypeError.

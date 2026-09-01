@@ -993,9 +993,9 @@ DEF_FUNC str_method_translate, TRN_FRAME
     V_UNPACK rdi, rdx
     call obj_as_index           ; not V_TO_I64: it may be a heap int
     cmp rax, 0
-    jl .trn_bad_value
+    jl .trn_range
     cmp rax, 0x10ffff
-    jg .trn_bad_value
+    jg .trn_range
     mov rdi, rax
     lea rsi, [rbp - TRN_CH]
     call trn_encode_cp          ; rax = how many bytes it wrote
@@ -1061,6 +1061,8 @@ DEF_FUNC str_method_translate, TRN_FRAME
     leave
     ret
 
+.trn_range:
+    RAISE exc_ValueError_type, "character mapping must be in range(0x110000)"
 .trn_bad_value:
     mov rdi, r12
     DECREF_V rdi, rcx
@@ -1100,7 +1102,9 @@ SMT_FROM  equ 8
 SMT_TO    equ 16
 SMT_NARGS equ 24
 SMT_ARGS  equ 32
-SMT_FRAME equ 40            ; + 3 pushes = 64, 16-byte aligned
+SMT_KEY   equ 40            ; the code point being mapped
+SMT_TOPOS equ 48            ; the TO cursor, which advances at its own rate
+SMT_FRAME equ 56            ; + 3 pushes = 80, 16-byte aligned
 
 DEF_FUNC str_staticmethod_maketrans, SMT_FRAME
     push rbx
@@ -1121,47 +1125,53 @@ DEF_FUNC str_staticmethod_maketrans, SMT_FRAME
     mov rcx, [rdi + 8]            ; args[1] payload (to str)
     mov [rbp - SMT_TO], rcx
 
-    ; Check equal lengths
+    ; Equal lengths in CODE POINTS, and a table keyed by code point.  Both
+    ; used ob_size, which is a byte count: "áâ" is four bytes and two
+    ; characters, so str.maketrans("ab", "áâ") reported unequal lengths, and
+    ; a pair that did match in bytes built a table keyed on UTF-8 fragments
+    ; that the code-point-based translate could never look up.
     mov rax, [rbp - SMT_FROM]
     mov rcx, [rbp - SMT_TO]
-    mov r12, [rax + PyStrObject.ob_size]
-    cmp r12, [rcx + PyStrObject.ob_size]
+    mov r12, [rax + PyStrObject.ob_length]
+    cmp r12, [rcx + PyStrObject.ob_length]
     jne .smt_len_error
 
     ; Create result dict
     call dict_new
     mov rbx, rax                    ; result dict
 
-    ; For each character position, map ord(from[i]) -> ord(to[i])
-    xor r13d, r13d                  ; index
+    ; For each character, map ord(from[i]) -> ord(to[i])
+    xor r13d, r13d                  ; the FROM byte cursor
+    mov qword [rbp - SMT_TOPOS], 0  ; and the TO one, which advances at its
+                                    ; own rate: the two strings need not use
+                                    ; the same number of bytes per character
 .smt_loop:
-    cmp r13, r12
+    mov rax, [rbp - SMT_FROM]
+    cmp r13, [rax + PyStrObject.ob_size]
     jge .smt_done
 
-    ; Get from char ordinal
-    mov rax, [rbp - SMT_FROM]
-    movzx edi, byte [rax + PyStrObject.data + r13]
-    ; Get to char ordinal
-    mov rax, [rbp - SMT_TO]
-    movzx esi, byte [rax + PyStrObject.data + r13]
+    lea rdi, [rax + PyStrObject.data]
+    add rdi, r13
+    mov rsi, [rax + PyStrObject.ob_size]
+    sub rsi, r13
+    call trn_decode_cp              ; rax = code point, rdx = its byte count
+    mov [rbp - SMT_KEY], rax
+    add r13, rdx
 
-    ; dict_set(dict, key=ord_from, value=ord_to, value_tag=SMALLINT, key_tag=SMALLINT)
-    push r13
-    mov rdi, rbx                    ; dict
-    ; rsi already = to ordinal (value becomes SmallInt)
-    mov rdx, rsi                    ; value = to ordinal
-    movzx esi, byte [rax + PyStrObject.data + r13] ; recalc — but we need from ordinal as key
-    ; Actually: rdi=dict, rsi=key, rdx=value, rcx=value_tag, r8=key_tag
-    mov rcx, [rbp - SMT_FROM]
-    movzx esi, byte [rcx + PyStrObject.data + r13]  ; key = from ordinal
     mov rax, [rbp - SMT_TO]
-    movzx edx, byte [rax + PyStrObject.data + r13]  ; value = to ordinal
-    V_PACK_I64 rdx, rcx      ; dict_set takes Values
-    V_PACK_I64 rsi, r8       ; dict_set takes Values
+    lea rdi, [rax + PyStrObject.data]
+    add rdi, [rbp - SMT_TOPOS]
+    mov rsi, [rax + PyStrObject.ob_size]
+    sub rsi, [rbp - SMT_TOPOS]
+    call trn_decode_cp
+    add [rbp - SMT_TOPOS], rdx
+
+    mov rdx, rax                    ; value = the TO ordinal
+    mov rsi, [rbp - SMT_KEY]        ; key   = the FROM ordinal
+    V_PACK_I64 rdx, rcx             ; dict_set takes Values
+    V_PACK_I64 rsi, r8
+    mov rdi, rbx
     call dict_set
-    pop r13
-
-    inc r13
     jmp .smt_loop
 
 .smt_done:
@@ -1173,19 +1183,22 @@ DEF_FUNC str_staticmethod_maketrans, SMT_FRAME
     mov rax, [rbp - SMT_ARGS]
     mov rax, [rax + 16]
     mov [rbp - SMT_TO], rax
-    mov r12, [rax + PyStrObject.ob_size]
     xor r13d, r13d
 .smt_del_loop:
-    cmp r13, r12
-    jge .smt_finish
     mov rcx, [rbp - SMT_TO]
-    movzx esi, byte [rcx + PyStrObject.data + r13]
+    cmp r13, [rcx + PyStrObject.ob_size]
+    jge .smt_finish
+    lea rdi, [rcx + PyStrObject.data]
+    add rdi, r13
+    mov rsi, [rcx + PyStrObject.ob_size]
+    sub rsi, r13
+    call trn_decode_cp              ; by code point here too
+    add r13, rdx
+    mov rsi, rax
     V_PACK_I64 rsi, r8
     mov rdi, rbx
     LOAD_NONE rdx
     call dict_set
-    mov rdi, rdx
-    inc r13
     jmp .smt_del_loop
 
 .smt_finish:

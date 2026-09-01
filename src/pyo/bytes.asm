@@ -704,6 +704,38 @@ BD_FRAME  equ 80            ; + 2 pushes = 96, 16-aligned
 ;; anything past U+10FFFF are rejected too, which is what makes `strict` mean
 ;; something.
 ;; ============================================================================
+;; bytes_check_errors_type(rdi = the errors= Value) -> returns, or raises
+;; Absent is "strict"; anything present must be a str, None included -- which
+;; is what CPython requires here, unlike open()'s errors=.
+DEF_FUNC bytes_check_errors_type
+    test rdi, rdi
+    jz .bcet_ok                 ; the argument was not passed at all
+    V_TEST_PTR rdi, rax
+    ja .bcet_bad
+    mov rax, [rdi + PyObject.ob_type]
+    lea rcx, [rel str_type]
+    cmp rax, rcx
+    je .bcet_ok
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_STR_SUBCLASS
+    jnz .bcet_ok
+.bcet_bad:
+    ; CPython names the type: "must be str, not None".
+    push rdi
+    lea rdi, [rel bd_msgbuf]
+    lea rsi, [rel bd_msg_errtype]
+    call bd_copy
+    pop rsi
+    mov rdi, rax
+    call bd_append_typename
+    lea rdi, [rel exc_TypeError_type]
+    lea rsi, [rel bd_msgbuf]
+    call raise_exception
+    ud2
+.bcet_ok:
+    leave
+    ret
+END_FUNC bytes_check_errors_type
+
 ;; ============================================================================
 ;; bytes_raise_decode_error(rdi = the bytes, rsi = position, rdx = reason)
 ;;
@@ -722,7 +754,7 @@ DEF_FUNC bytes_raise_decode_error, BRD_FRAME
     mov [rbp - BRD_SPAN], rcx
     mov rbx, rdx                ; the reason
     cmp rcx, 1
-    jg .brd_range               ; a truncated sequence is reported as a range
+    jg .brd_range               ; more than one byte is reported as a range
 
     ; The offending byte, as two lowercase hex digits.
     movzx eax, byte [rdi + PyBytesObject.data + rsi]
@@ -790,13 +822,49 @@ DEF_FUNC bytes_raise_decode_error, BRD_FRAME
     lea rsi, [rel bd_msg_colon]
     call bd_copy
     mov rdi, rax
+    lea rsi, [rel bd_reason_start]
+    cmp rbx, 1
+    jne .brd_range_reason
+    lea rsi, [rel bd_reason_cont]
+    jmp .brd_range_have
+.brd_range_reason:
+    cmp rbx, 2
+    jne .brd_range_have
     lea rsi, [rel bd_reason_end]
+.brd_range_have:
     call bd_copy
     lea rdi, [rel exc_UnicodeDecodeError_type]
     lea rsi, [rel bd_msgbuf]
     call raise_exception
     ud2
 END_FUNC bytes_raise_decode_error
+
+DEF_FUNC_LOCAL bd_append_typename   ; (rdi = dest, rsi = a Value) -> rax
+    V_TEST_PTR rsi, rax
+    ja .bdt_immediate
+    test rsi, rsi
+    jz .bdt_int
+    LOAD_NONE rax
+    cmp rsi, rax
+    je .bdt_none                ; CPython prints "not None", not "not NoneType"
+    mov rsi, [rsi + PyObject.ob_type]
+    mov rsi, [rsi + PyTypeObject.tp_name]
+    jmp .bdt_have
+.bdt_immediate:
+    V_IS_FLOAT rsi, rax
+    ja .bdt_int
+    lea rsi, [rel bd_name_float]
+    jmp .bdt_have
+.bdt_none:
+    lea rsi, [rel bd_name_none]
+    jmp .bdt_have
+.bdt_int:
+    lea rsi, [rel bd_name_int]
+.bdt_have:
+    call bd_copy
+    leave
+    ret
+END_FUNC bd_append_typename
 
 DEF_FUNC_LOCAL bd_copy          ; (rdi = dest, rsi = src) -> rax = the NUL
     xor ecx, ecx
@@ -948,9 +1016,19 @@ DEF_FUNC_BARE bytes_utf8_check
     mov r8d, 1
     ret
 .buc_bad_cont:
+    ; The subpart is the lead byte plus every continuation already accepted,
+    ; which is what CPython reports and replaces with ONE U+FFFD.  Counting
+    ; it as a single byte gave "byte 0xf0 in position 2" where CPython says
+    ; "bytes in position 2-4", and replace emitted three U+FFFD where CPython
+    ; emits one.  r8 is the index of the offending continuation, so the run
+    ; is however far past the lead it had got.
     mov rax, rcx
     mov edx, 1
+    sub r8, rcx
+    cmp r8, 1
+    jge .buc_cont_span
     mov r8d, 1
+.buc_cont_span:
     ret
 .buc_short:
     mov rax, rcx
@@ -1024,6 +1102,12 @@ DEF_FUNC _bytes_decode_impl, BD_FRAME
     mov [rbp - BD_POS], rax
     mov [rbp - BD_WHY], rdx
     mov [rbp - BD_SPAN], r8
+    ; The type first: codec_error_id answers -1 for anything that is not one
+    ; of the three names, including a non-str, and the message builder then
+    ; read PyStrObject.data off it -- an int immediate made that a wild
+    ; address.  CPython raises TypeError for a non-str errors=.
+    mov rdi, [rbp - BD_ERRORS]
+    call bytes_check_errors_type
     mov rdi, [rbp - BD_ERRORS]
     call codec_error_id         ; 0 strict, 1 ignore, 2 replace, -1 unknown
     cmp eax, -1
@@ -1606,6 +1690,31 @@ END_FUNC bytes_latin1_to_str
 
 ;; bytes_mod_is_byteslike(rdi = a Value) -> eax = 1 when %s would insert its
 ;; bytes rather than its repr
+;; bytes_mod_reject_wide(rdi = a Value)
+;; A str argument survives this pipeline only if it is pure ASCII: everything
+;; goes out through a latin-1 re-encode, so a code point above 0x7f would come
+;; back as a single mangled byte.  CPython rejects a str for %s outright
+;; ("%b requires a bytes-like object..."); it accepts one for %r and %a, which
+;; is why only the wide ones are refused here rather than all of them.
+DEF_FUNC bytes_mod_reject_wide
+    V_TEST_PTR rdi, rax
+    ja .bmw_ok
+    test rdi, rdi
+    jz .bmw_ok
+    mov rax, [rdi + PyObject.ob_type]
+    lea rcx, [rel str_type]
+    cmp rax, rcx
+    jne .bmw_ok
+    mov rax, [rdi + PyStrObject.ob_size]
+    cmp rax, [rdi + PyStrObject.ob_length]
+    jne .bmw_wide               ; more bytes than code points: not ASCII
+.bmw_ok:
+    leave
+    ret
+.bmw_wide:
+    RAISE exc_TypeError_type, "%b requires a bytes-like object, or an object that implements __bytes__, not 'str'"
+END_FUNC bytes_mod_reject_wide
+
 DEF_FUNC_BARE bytes_mod_is_byteslike
     xor eax, eax
     V_TEST_PTR rdi, rcx
@@ -1659,6 +1768,8 @@ DEF_FUNC_LOCAL bytes_mod_prepare_args, BMP_FRAME
     je .bmp_tuple
 
     ; A single argument.
+    call bytes_mod_reject_wide
+    mov rdi, [rbp - BMP_ARGS]
     call bytes_mod_as_str
     test rax, rax
     jnz .bmp_out
@@ -1687,6 +1798,11 @@ DEF_FUNC_LOCAL bytes_mod_prepare_args, BMP_FRAME
     push rcx
     push rdx
     sub rsp, 8
+    call bytes_mod_reject_wide
+    mov rax, [rsp + 8 + 16]
+    mov rcx, [rsp + 8 + 8]
+    mov rdx, [rsp + 8]
+    mov rdi, [rax + rdx*8]
     call bytes_mod_is_byteslike
     add rsp, 8
     pop rdx
@@ -1810,11 +1926,18 @@ DEF_FUNC bytes_mod, BM_FRAME
     push r12
 
     mov [rbp-BM_FMT], rdi     ; fmt bytes obj
-    ; Convert bytes to str
+    ; The FORMAT is latin-1 decoded too, exactly as the arguments are below.
+    ; Copying its bytes verbatim into the temp str left the two halves of the
+    ; round trip disagreeing: the arguments went in as one code point per
+    ; byte and the result came back out the same way, but a format byte above
+    ; 0x7f had arrived as part of a multi-byte sequence, so the re-encode
+    ; wrote MORE bytes than the code-point count it had sized the result by.
+    ; b"\xe4\xb8\xad" % () overran the allocation and aborted the process.
     mov rsi, [rdi + PyBytesObject.ob_size]
     lea rdi, [rdi + PyBytesObject.data]
-    extern str_new_heap
-    call str_new_heap
+    call bytes_latin1_to_str
+    test rax, rax
+    jz .bm_failed_fmt
     mov rbx, rax               ; rbx = temp str
 
     ; Any bytes-like argument becomes the str its bytes decode to under
@@ -1898,6 +2021,14 @@ DEF_FUNC bytes_mod, BM_FRAME
     pop rbx
     leave
     V_PACK rax, rdx             ; return one Value
+    ret
+
+.bm_failed_fmt:
+    xor eax, eax
+    xor edx, edx
+    pop r12
+    pop rbx
+    leave
     ret
 
 .bm_failed:
@@ -2644,9 +2775,13 @@ bd_msg_colon:     db ": ", 0
 bd_msg_bytes:     db "'utf-8' codec can't decode bytes in position ", 0
 bd_msg_dash:      db "-", 0
 bd_msg_handler:   db "unknown error handler name '", 0
+bd_msg_errtype:   db "decode() argument 'errors' must be str, not ", 0
 bd_reason_start:  db "invalid start byte", 0
 bd_reason_cont:   db "invalid continuation byte", 0
 bd_reason_end:    db "unexpected end of data", 0
+bd_name_int:      db "int", 0
+bd_name_float:    db "float", 0
+bd_name_none:     db "None", 0
 
 section .bss
 bd_msgbuf: resb 192
@@ -4828,6 +4963,18 @@ DEF_FUNC memoryview_method_cast, MVC_FRAME
     test rcx, rcx
     jz .mvc_no_src
     inc qword [rcx + PyObject.ob_refcnt]
+    ; cast() is the fourth place a view takes a share of another's source, and
+    ; release and dealloc decrement for every view that has one -- so without
+    ; the matching acquire this view's release drove a BytesIO's export count
+    ; below what is outstanding, and the next write reallocated the storage
+    ; underneath it.  lib/_io.py's readinto does `b = b.cast("B")`, so it is
+    ; on the ordinary path, not a corner.
+    push rax
+    push rdi
+    mov rdi, rcx
+    call io_buffer_acquired
+    pop rdi
+    pop rax
 .mvc_no_src:
     mov rcx, [rdi + PyMemoryViewObject.mv_buf]
     mov [rax + PyMemoryViewObject.mv_buf], rcx

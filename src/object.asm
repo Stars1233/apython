@@ -397,7 +397,7 @@ rbt_close:   db "'", 0
 rbt_unknown: db "object", 0
 
 section .bss
-rbt_buf: resb 192
+rbt_buf: resb 320   ; two 80-char type names plus the prefix and separators
 
 section .text
 DEF_FUNC raise_type_error_with_name
@@ -499,6 +499,10 @@ DEF_FUNC raise_binop_type_error, RBT_FRAME
     ud2
 END_FUNC raise_binop_type_error
 
+; The cap and the buffer have to agree: 40 (prefix) + 3 + 80 + 7 + 80 + 1 + a
+; NUL is 212, which overran a 192-byte buffer and wrote into the globals
+; after it -- one of them being attr_error_pending, so an over-long type name
+; in a divmod TypeError made the NEXT attribute error re-raise this one.
 DEF_FUNC_LOCAL rbt_copy         ; (rdi = dest, rsi = src) -> rax = the NUL
     xor ecx, ecx
 .rbtc_loop:

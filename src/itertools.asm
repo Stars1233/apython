@@ -1649,7 +1649,7 @@ DEF_FUNC builtin_sorted, SO_FRAME
     ; against the value saved on entry, not against 0: current_exception is
     ; also the exception *being handled*, so inside an `except` block a bare
     ; test made sorted() re-raise it.
-    DUNDER_RAISED [rbp - SO_EXC], .sorted_propagate
+    EXC_RAISED_SINCE [rbp - SO_EXC], rax, .sorted_propagate
 
     ; Build args for list_method_sort in the fixed frame buffer
     ; args[0] = list (a pointer is its own Value)
@@ -1976,10 +1976,17 @@ END_FUNC builtin_chain
 
 ;; chain_iternext(self) -> (rax=payload, edx=tag) or NULL
 ;; Tries current sub-iterator; on exhaustion advances to next.
-DEF_FUNC_LOCAL chain_iternext
+CHI_EXC   equ 8
+CHI_FRAME equ 16            ; + 1 push = 24, not 16-aligned
+
+DEF_FUNC_LOCAL chain_iternext, CHI_FRAME
     push rbx
 
     mov rbx, rdi            ; self
+    ; The same snapshot the other iterators take: inside an `except` block a
+    ; bare test read the handled exception as "this sub-iterator failed", and
+    ; chain stopped at the first one.
+    DUNDER_EXC_SAVE [rbp - CHI_EXC]
 
 .chain_retry:
     ; Load current index and count
@@ -1998,9 +2005,7 @@ DEF_FUNC_LOCAL chain_iternext
 
     ; call_iternext clears StopIteration automatically.
     ; Check for other exceptions — those must propagate.
-    mov rax, [rel current_exception]
-    test rax, rax
-    jnz .chain_exhausted
+    EXC_RAISED_SINCE [rbp - CHI_EXC], rax, .chain_exhausted
 
     ; Normal exhaustion — advance to next iterator
     inc qword [rbx + CHAIN_IDX]

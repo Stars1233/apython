@@ -1669,6 +1669,12 @@ DEF_FUNC_BARE op_contains_op
     mov rdx, [rax + PyTypeObject.tp_flags]
     test rdx, TYPE_FLAG_HEAPTYPE
     jz .contains_type_error
+    ; The exception that was already pending, if any: current_exception is
+    ; also the exception BEING HANDLED, so a bare test for non-NULL below said
+    ; "__getitem__ raised" for every lookup made inside an `except` block.
+    ; r15 is the handler scratch register the eval loop leaves free, and a
+    ; call preserves it.
+    DUNDER_EXC_SAVE r15
     ; Probe __getitem__ exists by trying index 0
     push qword 0                 ; push index counter (+8 shift)
 
@@ -1684,16 +1690,12 @@ DEF_FUNC_BARE op_contains_op
     jz .contains_gi_null_result
     ; Check for exception (IndexError = stop)
     extern current_exception
-    mov rcx, [rel current_exception]
-    test rcx, rcx
-    jnz .contains_gi_check_exc
+    EXC_RAISED_SINCE r15, rcx, .contains_gi_check_exc
     jmp .contains_gi_got_elem
 
 .contains_gi_null_result:
     ; TAG_NULL: either dunder not found, or exception raised
-    mov rcx, [rel current_exception]
-    test rcx, rcx
-    jnz .contains_gi_check_exc     ; exception → check if IndexError
+    EXC_RAISED_SINCE r15, rcx, .contains_gi_check_exc
     ; First call with index 0: if no exception and TAG_NULL, dunder not found
     cmp qword [rsp], 0
     je .contains_gi_no_dunder

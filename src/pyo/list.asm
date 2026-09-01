@@ -589,7 +589,7 @@ DEF_FUNC list_ass_subscript, LAS_FRAME
     ; two are told apart by the pending exception.  Without this a
     ; __getitem__ that raised was read as the end of the sequence and the
     ; assignment quietly succeeded with a short list.
-    DUNDER_RAISED [rbp - LAS_EXC], .las_gen_raised
+    EXC_RAISED_SINCE [rbp - LAS_EXC], rcx, .las_gen_raised
     pop r12                     ; temp list (becomes new value)
     pop rdi                     ; iterator
     pop rcx                     ; old_len (restore)
@@ -924,7 +924,7 @@ DEF_FUNC list_ass_subscript, LAS_FRAME
     DECREF_V rdi, rsi           ; list_append took its own reference
     jmp .ext_gen_loop
 .ext_gen_done:
-    DUNDER_RAISED [rbp - LAS_EXC], .ext_gen_raised
+    EXC_RAISED_SINCE [rbp - LAS_EXC], rcx, .ext_gen_raised
     pop r12                     ; the temp list becomes the value
     pop rdi                     ; the iterator
     push r12
@@ -1857,7 +1857,8 @@ LTC_LIST    equ 8       ; new list object
 LTC_ITER    equ 16      ; iterator object
 LTC_EXC     equ 24      ; current_exception on entry, to tell "raised" from
                         ; "already being handled"
-LTC_FRAME   equ 32          ; + 3 pushes = 56, not 16-aligned
+LTC_FRAME   equ 40          ; + 3 pushes = 64, 16-aligned -- this frame
+                            ; reaches glibc through ap_malloc
 
 DEF_FUNC list_type_call, LTC_FRAME
     push rbx
@@ -1928,7 +1929,7 @@ DEF_FUNC list_type_call, LTC_FRAME
     ; `except` block current_exception is the exception being handled, so
     ; list(x) there re-raised it.
     extern current_exception
-    DUNDER_RAISED [rbp - LTC_EXC], .ltc_exc_cleanup
+    EXC_RAISED_SINCE [rbp - LTC_EXC], rax, .ltc_exc_cleanup
 
     mov rax, rbx            ; return the list
     mov edx, TAG_PTR

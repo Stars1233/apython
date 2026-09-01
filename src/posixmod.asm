@@ -54,6 +54,8 @@ extern bytearray_type
 extern int_from_i64
 extern val_to_i64
 extern int_is_integer
+extern exc_OverflowError_type
+extern int_fits_i64
 extern list_new
 extern list_append
 extern dict_new
@@ -756,7 +758,8 @@ END_FUNC posix_getcwdb
 P1_PATH   equ 8
 P1_PTR    equ 16
 P1_OWNED  equ 24            ; what posix_path_arg asked us to release
-P1_FRAME  equ 32            ; + 0 pushes = 32
+P1_MODE   equ 32            ; the mode, converted before the path is resolved
+P1_FRAME  equ 48            ; + 0 pushes = 48
 
 %macro POSIX_ONE_PATH 3         ; %1 = name, %2 = the syscall, %3 = "n args"
 DEF_FUNC %1, P1_FRAME
@@ -796,6 +799,17 @@ DEF_FUNC posix_mkdir, P1_FRAME
     push r12
     mov rbx, rdi
     mov r12, rsi
+    ; The mode is converted FIRST: posix_int_arg raises for a bad one, and a
+    ; raise abandons the C stack, so resolving the path before it would
+    ; strand the string __fspath__ built.
+    mov esi, 0o777
+    cmp r12, 2
+    jl .pmk_have_mode
+    mov rdi, [rbx + 8]
+    call posix_int_arg
+    mov rsi, rax
+.pmk_have_mode:
+    mov [rbp - P1_MODE], rsi
     mov rdi, [rbx]
     mov [rbp - P1_PATH], rdi
     call posix_path_arg
@@ -803,12 +817,7 @@ DEF_FUNC posix_mkdir, P1_FRAME
     jz .pmk_fail
     mov [rbp - P1_PTR], rax
     mov [rbp - P1_OWNED], rdx
-    mov esi, 0o777
-    cmp r12, 2
-    jl .pmk_go
-    mov rdi, [rbx + 8]
-    call posix_int_arg
-    mov rsi, rax
+    mov rsi, [rbp - P1_MODE]
 .pmk_go:
     mov rdi, [rbp - P1_PTR]
     call sys_mkdir
@@ -837,6 +846,9 @@ DEF_FUNC posix_chmod, P1_FRAME
     push rbx
     push r12
     mov rbx, rdi
+    mov rdi, [rbx + 8]
+    call posix_int_arg          ; the mode first: see mkdir
+    mov [rbp - P1_MODE], rax
     mov rdi, [rbx]
     mov [rbp - P1_PATH], rdi
     call posix_path_arg
@@ -844,9 +856,7 @@ DEF_FUNC posix_chmod, P1_FRAME
     jz .pch_fail
     mov r12, rax
     mov [rbp - P1_OWNED], rdx
-    mov rdi, [rbx + 8]
-    call posix_int_arg
-    mov rsi, rax
+    mov rsi, [rbp - P1_MODE]
     mov rdi, r12
     call sys_chmod
     POSIX_PATH_CHECK rax, [rbp - P1_PATH], [rbp - P1_OWNED]
@@ -1009,7 +1019,9 @@ END_FUNC posix_readlink
 POP_PATH  equ 8
 POP_PTR   equ 16
 POP_OWNED equ 24            ; what posix_path_arg asked us to release
-POP_FRAME equ 32            ; + 2 pushes = 48
+POP_FLAGS equ 32            ; both converted before the path is resolved
+POP_MODE  equ 40
+POP_FRAME equ 48            ; + 2 pushes = 64
 
 DEF_FUNC posix_open, POP_FRAME
     cmp rsi, 2
@@ -1018,6 +1030,19 @@ DEF_FUNC posix_open, POP_FRAME
     push r12
     mov rbx, rdi
     mov r12, rsi
+    ; The flags and the mode are converted FIRST: posix_int_arg raises for a
+    ; bad one, and a raise abandons the C stack, so resolving the path before
+    ; them would strand the string __fspath__ built.
+    mov rdi, [rbx + 8]
+    call posix_int_arg
+    mov [rbp - POP_FLAGS], rax
+    mov qword [rbp - POP_MODE], 0o777
+    cmp r12, 3
+    jl .pop_have_mode
+    mov rdi, [rbx + 16]
+    call posix_int_arg
+    mov [rbp - POP_MODE], rax
+.pop_have_mode:
     mov rdi, [rbx]
     mov [rbp - POP_PATH], rdi
     call posix_path_arg
@@ -1025,19 +1050,8 @@ DEF_FUNC posix_open, POP_FRAME
     jz .pop_fail
     mov [rbp - POP_PTR], rax
     mov [rbp - POP_OWNED], rdx
-    mov rdi, [rbx + 8]
-    call posix_int_arg
-    mov rsi, rax                    ; flags
-    mov edx, 0o777                  ; the mode, if the flags ask for one
-    cmp r12, 3
-    jl .pop_go
-    push rsi
-    push rsi
-    mov rdi, [rbx + 16]
-    call posix_int_arg
-    mov rdx, rax
-    pop rsi
-    pop rsi
+    mov rsi, [rbp - POP_FLAGS]
+    mov rdx, [rbp - POP_MODE]
 .pop_go:
     mov rdi, [rbp - POP_PTR]
     call sys_open
@@ -1077,10 +1091,27 @@ DEF_FUNC posix_int_arg
     test eax, eax
     jz .pia_bad
     pop rdi
+    push rdi
     V_UNPACK rdi, rdx
     call obj_as_index
+    ; obj_as_index truncates a GMP-backed integer to 64 bits, so a descriptor
+    ; of 2**64 + 3 arrived as 3 and posix.close() closed someone else's file
+    ; -- the same silent wrong-descriptor failure the type check above was
+    ; added to stop, reached with an int instead of a str.
+    pop rdi
+    push rax
+    sub rsp, 8
+    V_UNPACK rdi, rdx
+    call int_fits_i64
+    add rsp, 8
+    test eax, eax
+    jz .pia_range
+    pop rax
     leave
     ret
+.pia_range:
+    pop rax
+    RAISE exc_OverflowError_type, "Python int too large to convert to C int"
 .pia_bad:
     pop rdi
     lea rsi, [rel pm_int_required]
@@ -1363,7 +1394,8 @@ END_FUNC posix_dup
 ;; posix.access(path, mode) -> bool -- and it answers False rather than
 ;; raising, which is the one call in the family that swallows its errno.
 PAC_OWNED equ 8
-PAC_FRAME equ 16            ; + 2 pushes = 32
+PAC_MODE  equ 16
+PAC_FRAME equ 32            ; + 2 pushes = 48
 
 DEF_FUNC posix_access, PAC_FRAME
     cmp rsi, 2
@@ -1372,15 +1404,16 @@ DEF_FUNC posix_access, PAC_FRAME
     push r12
     mov rbx, rdi
     mov qword [rbp - PAC_OWNED], 0
+    mov rdi, [rbx + 8]
+    call posix_int_arg          ; the mode first: see mkdir
+    mov [rbp - PAC_MODE], rax
     mov rdi, [rbx]
     call posix_path_arg
     test rax, rax
     jz .pac_fail
     mov r12, rax
     mov [rbp - PAC_OWNED], rdx
-    mov rdi, [rbx + 8]
-    call posix_int_arg
-    mov rsi, rax
+    mov rsi, [rbp - PAC_MODE]
     mov rdi, r12
     call sys_access
     POSIX_PATH_DONE [rbp - PAC_OWNED]

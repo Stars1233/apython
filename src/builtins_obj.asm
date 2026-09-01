@@ -707,7 +707,7 @@ DEF_FUNC builtin_sum, SM_FRAME
 .sum_stop:
     ; tp_iternext answers NULL both for "exhausted" and for a raise, so the
     ; two are told apart by the pending exception, not by the return.
-    DUNDER_RAISED [rbp - SM_EXC], .sum_fail
+    EXC_RAISED_SINCE [rbp - SM_EXC], rcx, .sum_fail
     mov rdi, rbx
     call obj_decref
     mov rax, [rbp - SM_ACC]
@@ -905,7 +905,7 @@ DEF_FUNC_LOCAL minmax_impl, MM_FRAME
 
 .mm_iter_stop:
     ; tp_iternext answers NULL for "exhausted" and for a raise alike.
-    DUNDER_RAISED [rbp - MM_EXC], .mm_iter_fail
+    EXC_RAISED_SINCE [rbp - MM_EXC], rcx, .mm_iter_fail
     mov rdi, [rbp - MM_ITER]
     call obj_decref
     mov rax, [rbp - MM_BEST]
@@ -922,7 +922,7 @@ DEF_FUNC_LOCAL minmax_impl, MM_FRAME
     jmp .mm_fail
 
 .mm_iter_empty:
-    DUNDER_RAISED [rbp - MM_EXC], .mm_iter_fail
+    EXC_RAISED_SINCE [rbp - MM_EXC], rcx, .mm_iter_fail
     mov rdi, [rbp - MM_ITER]
     call obj_decref
     RAISE exc_ValueError_type, "min()/max() arg is an empty sequence"

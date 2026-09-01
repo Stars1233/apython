@@ -51,6 +51,7 @@ extern type_type
 extern exc_TypeError_type
 extern raise_exception
 extern get_iterator_opt
+extern current_exception
 
 section .text
 
@@ -479,7 +480,9 @@ SSC_OBJ   equ 16
 SSC_ITER  equ 24
 SSC_I     equ 32
 SSC_N     equ 40
-SSC_FRAME equ 48            ; + 0 pushes = 48
+SSC_EXC   equ 48            ; current_exception on entry, to tell a raising
+                            ; __next__ from a clean exhaustion
+SSC_FRAME equ 64            ; + 0 pushes = 64
 
 DEF_FUNC structseq_type_new, SSC_FRAME
     mov [rbp - SSC_TYPE], rdi
@@ -508,6 +511,7 @@ DEF_FUNC structseq_type_new, SSC_FRAME
     mov [rbp - SSC_OBJ], rax
 
     mov qword [rbp - SSC_I], 0
+    DUNDER_EXC_SAVE [rbp - SSC_EXC]
 .ssc_loop:
     mov rdi, [rbp - SSC_ITER]
     mov rax, [rdi + PyObject.ob_type]
@@ -517,11 +521,11 @@ DEF_FUNC structseq_type_new, SSC_FRAME
     call rax
     V_UNPACK rax, rdx
     test edx, edx
-    jz .ssc_exhausted           ; NULL means the sequence ended
+    jz .ssc_iter_end            ; NULL: the sequence ended, or __next__ raised
 
     mov rcx, [rbp - SSC_I]
     cmp rcx, [rbp - SSC_N]
-    jge .ssc_too_long
+    jge .ssc_too_long_item
     V_PACK rax, rdx
     mov rdx, rax
     mov rdi, [rbp - SSC_OBJ]
@@ -529,6 +533,13 @@ DEF_FUNC structseq_type_new, SSC_FRAME
     call structseq_set          ; takes over the reference tp_iternext gave
     inc qword [rbp - SSC_I]
     jmp .ssc_loop
+
+.ssc_iter_end:
+    ; tp_iternext answers NULL for a clean exhaustion AND for a __next__ that
+    ; raised.  Treating both as exhaustion built the object anyway and left
+    ; the exception pending for whatever ran next -- or, when the count was
+    ; short, replaced it with a length error.
+    EXC_RAISED_SINCE [rbp - SSC_EXC], rax, .ssc_propagate
 
 .ssc_exhausted:
     mov rcx, [rbp - SSC_I]
@@ -541,10 +552,19 @@ DEF_FUNC structseq_type_new, SSC_FRAME
     leave
     ret
 
+.ssc_too_long_item:
+    ; The item that tripped the limit is owned and goes no further.
+    V_PACK rax, rdx
+    mov rdi, rax
+    DECREF_V rdi, rcx
 .ssc_too_long:
     ; Keep counting, so the message can say how many were actually there --
-    ; which is the half of it that tells the caller what to change.
+    ; which is the half of it that tells the caller what to change.  A bound
+    ; keeps an endless iterator from spinning here for ever.
     inc qword [rbp - SSC_I]
+    mov rax, [rbp - SSC_I]
+    cmp rax, [rbp - SSC_N]
+    ja .ssc_bad_len             ; one over is enough to report
 .ssc_drain:
     mov rdi, [rbp - SSC_ITER]
     mov rax, [rdi + PyObject.ob_type]
@@ -571,6 +591,16 @@ DEF_FUNC structseq_type_new, SSC_FRAME
     mov rdx, [rbp - SSC_I]
     call structseq_raise_length
     ud2
+.ssc_propagate:
+    mov rdi, [rbp - SSC_OBJ]
+    call obj_decref
+    mov rdi, [rbp - SSC_ITER]
+    call obj_decref
+    xor eax, eax
+    xor edx, edx
+    leave
+    ret
+
 .ssc_fail_iter:
     mov rdi, [rbp - SSC_ITER]
     call obj_decref
