@@ -1367,6 +1367,28 @@ END_FUNC bc_prepare_namespace
 ;; 4. Create a new type object with class_dict as tp_dict
 ;; 5. Return the new type
 ;; ============================================================================
+;; ============================================================================
+;; bc_normalize_metatype(rdi = a metatype) -> rdi, with the interpreter's own
+;; metatypes mapped to type_type
+;;
+;; user_type_metatype and exc_metatype are implementation detail: they exist
+;; so an ordinary class and an exception class can carry different tp_call,
+;; and no metaclass a program writes derives from either.  For the purpose of
+;; "which metaclass is most derived" they are `type`.
+;; ============================================================================
+DEF_FUNC_BARE bc_normalize_metatype
+    lea rax, [rel user_type_metatype]
+    cmp rdi, rax
+    je .bnm_type
+    lea rax, [rel exc_metatype]
+    cmp rdi, rax
+    je .bnm_type
+    ret
+.bnm_type:
+    lea rdi, [rel type_type]
+    ret
+END_FUNC bc_normalize_metatype
+
 DEF_FUNC builtin___build_class__
     push rbx
     push r12
@@ -1478,15 +1500,25 @@ BCL_OKWV  equ 72
     mov r14, [rbx + 8]     ; r14 = class_name (args[1])
 
     ; A metaclass is inherited: `class D(C)` where type(C) is M gives D the
-    ; metatype M as well.  CPython picks the most derived metatype among the
-    ; bases; the winner is the one that is a subtype of every other, and
-    ; starting from `type` makes an ordinary base contribute nothing.
-    cmp qword [rbp - BCL_META], 0
-    jne .bc_metaclass_settled
+    ; metatype M as well.  CPython's rule is a winner among the explicit
+    ; metaclass and every base's type -- the one that is a subclass of all the
+    ; others, and a TypeError when no such one exists.
+    ;
+    ; The three metatypes this interpreter ships stand in for `type` and are
+    ; not in any user metaclass's MRO, so each is normalised to type_type
+    ; before the comparison.  Without that, an ordinary Python base made the
+    ; winner user_type_metatype, no real metaclass was a subclass of it, and
+    ; `class RawIOBase(_io._RawIOBase, IOBase)` in Lib/io.py came out a plain
+    ; type -- so RawIOBase.register(), which is how io tells isinstance() that
+    ; FileIO is a raw stream, did not exist.
+    mov r8, [rbp - BCL_META]                ; the winner so far
+    test r8, r8
+    jnz .bc_meta_have_winner
+    lea r8, [rel type_type]
+.bc_meta_have_winner:
     mov rcx, [rbp - BCL_BASES]
     test rcx, rcx
-    jz .bc_metaclass_settled
-    lea r8, [rel type_type]                 ; r8 = winner so far
+    jz .bc_meta_scan_done
     mov r9, [rcx + PyTupleObject.ob_size]
     mov r10, [rcx + PyTupleObject.ob_item]
     xor r11d, r11d
@@ -1499,25 +1531,54 @@ BCL_OKWV  equ 72
     test rdi, rdi
     jz .bc_meta_scan_next
     mov rdi, [rdi + PyObject.ob_type]       ; the base's metatype
+    call bc_normalize_metatype
     cmp rdi, r8
     je .bc_meta_scan_next
+
+    ; The winner already derives from this one: nothing to do.
     push r8
     push r9
     push r10
     push r11
-    mov rsi, r8
-    call type_is_subtype                    ; is it more derived than the winner?
+    push rdi
+    sub rsp, 8
+    mov rsi, rdi
+    mov rdi, r8
+    call type_is_subtype
+    add rsp, 8
+    pop rdi
     pop r11
     pop r10
     pop r9
     pop r8
     test eax, eax
-    jz .bc_meta_scan_next
-    mov rdi, [r10 + r11*8]
-    mov r8, [rdi + PyObject.ob_type]
+    jnz .bc_meta_scan_next
+
+    ; This one derives from the winner: it becomes the winner.
+    push r8
+    push r9
+    push r10
+    push r11
+    push rdi
+    sub rsp, 8
+    mov rsi, r8
+    call type_is_subtype
+    add rsp, 8
+    pop rdi
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    test eax, eax
+    jz .bc_meta_conflict
+    mov r8, rdi
 .bc_meta_scan_next:
     inc r11
     jmp .bc_meta_scan
+
+.bc_meta_conflict:
+    RAISE exc_TypeError_type, "metaclass conflict: the metaclass of a derived class must be a (non-strict) subclass of the metaclasses of all its bases"
+
 .bc_meta_scan_done:
     ; The three built-in metatypes go through type_from_parts as before --
     ; they have no __new__ of their own to run.
