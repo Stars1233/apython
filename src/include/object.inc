@@ -499,6 +499,33 @@ struc PyFileObject
     .file_mode:   resq 1  ; +32: mode string ('w', 'r')
 endstruc
 
+; _io.FileIO.  The first three fields are PyInstanceObject's, because FileIO
+; is a heaptype built with type_from_parts over _RawIOBase: instance_new
+; allocates tp_basicsize and zero-fills, so the fields below start where the
+; base's layout ends and cost nothing but a patched tp_basicsize.
+struc PyFileIOObject
+    .ob_refcnt:   resq 1  ; +0
+    .ob_type:     resq 1  ; +8
+    .inst_dict:   resq 1  ; +16: the tp_dictoffset _RawIOBase hands down
+    .fio_fd:      resq 1  ; +24: the descriptor, meaningless unless FIO_OPEN
+    .fio_flags:   resq 1  ; +32
+    .fio_name:    resq 1  ; +40: the name as given, a Value -- an adopted
+                          ;      descriptor makes it an int, not a str
+    .fio_blksize: resq 1  ; +48: st_blksize, what readall() grows by
+    .fio_mode:    resq 1  ; +56: the mode string, strong
+endstruc
+
+FIO_OPEN      equ 0x01
+FIO_READABLE  equ 0x02
+FIO_WRITABLE  equ 0x04
+FIO_APPENDING equ 0x08
+FIO_CREATED   equ 0x10
+FIO_CLOSEFD   equ 0x20
+; Whether seekability has been asked yet, and the answer.  One lseek settles
+; it, and a pipe must answer False rather than raising every time.
+FIO_SEEK_KNOWN equ 0x40
+FIO_SEEKABLE   equ 0x80
+
 ; Async task object (for event loop)
 struc AsyncTask
     .ob_refcnt:    resq 1  ; +0

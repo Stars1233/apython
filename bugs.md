@@ -295,6 +295,21 @@ one-line fix.
 These are absences rather than wrong answers — the interpreter raises rather
 than lying — but they are ordinary Python that does not work:
 
+- **A subclass of `_io.FileIO` cannot declare `__slots__`.**  FileIO stores
+  its descriptor and flags past the instance header, in the same words a
+  subclass's slots would land in: both are placed relative to the base's
+  `tp_dictoffset`, which the subclass inherits.  Nothing detects the
+  collision.
+
+- **`dir()` on a module lists object's dunders rather than the module's
+  contents.**  `dir(posix)` answers with fourteen names, none of them
+  posix's; `posix.__dict__` is right, so the information is there.
+
+- **`@abc.abstractmethod` is not enforced.**  A class with an unimplemented
+  abstract method instantiates.  `__abstractmethods__` is consulted by
+  `type_call`, so the missing half is abc's own bookkeeping rather than the
+  interpreter's check.
+
 - **A memoryview with a step other than 1 is not a view.**  `mv[::2]` and
   `mv[::-1]` raise NotImplementedError.  CPython answers with a
   non-contiguous view, which needs a stride the object does not carry -- and
