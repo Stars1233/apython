@@ -295,6 +295,11 @@ one-line fix.
 These are absences rather than wrong answers — the interpreter raises rather
 than lying — but they are ordinary Python that does not work:
 
+- **`str()` of a `UnicodeDecodeError` prints its argument tuple.**  CPython
+  renders "'ascii' codec can't decode byte 0xc3 in position 1: ordinal not in
+  range(128)" from the exception's fields; here the five arguments come out
+  as a tuple repr.  The same applies to `UnicodeEncodeError`.
+
 - **A subclass of `_io.FileIO` cannot declare `__slots__`.**  FileIO stores
   its descriptor and flags past the instance header, in the same words a
   subclass's slots would land in: both are placed relative to the base's

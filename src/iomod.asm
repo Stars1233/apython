@@ -60,7 +60,13 @@ S_IFDIR equ 0o040000
 
 section .rodata
 
-im_name:            db "_io", 0
+; The module the assembly registers is _iocore, not _io.  _io is the whole
+; surface CPython's Lib/io.py imports -- TextIOWrapper, the buffered classes,
+; open -- and half of that is Python; lib/_io.py is where the two halves are
+; put together.  The types still say _io in their __module__ and their repr,
+; because that is where a program finds them and what CPython prints.
+im_name:            db "_iocore", 0
+im_modattr:         db "_io", 0
 im_n_IOBase:        db "_IOBase", 0
 im_n_RawIOBase:     db "_RawIOBase", 0
 im_n_BufferedIOBase: db "_BufferedIOBase", 0
@@ -101,7 +107,7 @@ DEF_FUNC_LOCAL io_new_type, INT_FRAME
     lea rdi, [rel im_n_module]
     call str_from_cstr_heap
     push rax
-    lea rdi, [rel im_name]
+    lea rdi, [rel im_modattr]
     call str_from_cstr_heap
     push rax
     mov rdi, [rbp - INT_NS]
@@ -1581,6 +1587,42 @@ DEF_FUNC fileio_close_fn, FC_FRAME
     RAISE exc_TypeError_type, "close() takes no arguments"
 END_FUNC fileio_close_fn
 
+
+;; flush() on a raw file has nothing to flush -- there is no buffer -- but it
+;; still has to exist and still has to refuse a closed file: every buffered
+;; layer above calls it on the way down.
+DEF_FUNC fileio_flush_fn
+    test rsi, rsi
+    jz .ffl_argerr
+    mov rdi, [rdi]
+    call fileio_check
+    LOAD_NONE rax
+    mov rdi, rax
+    call obj_incref
+    LOAD_NONE rax
+    mov edx, TAG_PTR
+    leave
+    ret
+.ffl_argerr:
+    RAISE exc_TypeError_type, "flush() takes no arguments"
+END_FUNC fileio_flush_fn
+
+DEF_FUNC bytesio_flush_fn
+    test rsi, rsi
+    jz .bfl_argerr
+    mov rdi, [rdi]
+    call bytesio_check
+    LOAD_NONE rax
+    mov rdi, rax
+    call obj_incref
+    LOAD_NONE rax
+    mov edx, TAG_PTR
+    leave
+    ret
+.bfl_argerr:
+    RAISE exc_TypeError_type, "flush() takes no arguments"
+END_FUNC bytesio_flush_fn
+
 DEF_FUNC fileio_fileno_fn
     test rsi, rsi
     jz .ffn_argerr
@@ -1878,6 +1920,62 @@ DEF_FUNC fileio_closed_get_fn
     RAISE exc_TypeError_type, "closed getter takes no arguments"
 END_FUNC fileio_closed_get_fn
 
+
+;; ============================================================================
+;; fileio_traverse / fileio_clear -- and the same pair for BytesIO below.
+;;
+;; The generic instance_traverse walks every word from the dict slot to
+;; tp_basicsize and visits it, because that is where a subclass's __slots__
+;; live.  Patching tp_basicsize put the descriptor and the flags in that
+;; range, and the collector followed a file descriptor of 3 as an object
+;; pointer.  These visit the two things that really are objects and nothing
+;; else, which is also cheaper than the generic walk.
+;; ============================================================================
+DEF_FUNC fileio_traverse
+    push rbx
+    mov rbx, rdi
+    mov rdi, [rbx + PyFileIOObject.inst_dict]
+    VISIT_PTR rdi
+    mov rdi, [rbx + PyFileIOObject.fio_name]
+    V_TEST_PTR rdi, rax         ; the name is a Value: an adopted descriptor
+    ja .fit_no_name             ; leaves an int there, not a pointer
+    VISIT_PTR rdi
+.fit_no_name:
+    mov rdi, [rbx + PyFileIOObject.fio_mode]
+    VISIT_PTR rdi
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+END_FUNC fileio_traverse
+
+DEF_FUNC fileio_clear
+    push rbx
+    mov rbx, rdi
+    mov rdi, [rbx + PyFileIOObject.inst_dict]
+    test rdi, rdi
+    jz .fic_no_dict
+    mov qword [rbx + PyFileIOObject.inst_dict], 0
+    call obj_decref
+.fic_no_dict:
+    mov rax, [rbx + PyFileIOObject.fio_name]
+    test rax, rax
+    jz .fic_no_name
+    mov qword [rbx + PyFileIOObject.fio_name], 0
+    DECREF_V rax, rcx
+.fic_no_name:
+    mov rdi, [rbx + PyFileIOObject.fio_mode]
+    test rdi, rdi
+    jz .fic_done
+    mov qword [rbx + PyFileIOObject.fio_mode], 0
+    call obj_decref
+.fic_done:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+END_FUNC fileio_clear
+
 DEF_FUNC_LOCAL fileio_dealloc
     push rbx
     mov rbx, rdi
@@ -2036,6 +2134,7 @@ DEF_FUNC_LOCAL io_make_fileio, MFI_FRAME
     IO_METHOD im_n_tell,     fileio_tell_fn
     IO_METHOD im_n_truncate, fileio_truncate_fn
     IO_METHOD im_n_close,    fileio_close_fn
+    IO_METHOD im_n_flush,    fileio_flush_fn
     IO_METHOD im_n_fileno,   fileio_fileno_fn
     IO_METHOD im_n_isatty,   fileio_isatty_fn
     IO_METHOD im_n_readable, fileio_readable_fn
@@ -2052,7 +2151,7 @@ DEF_FUNC_LOCAL io_make_fileio, MFI_FRAME
     lea rdi, [rel im_n_module]
     call str_from_cstr_heap
     push rax
-    lea rdi, [rel im_name]
+    lea rdi, [rel im_modattr]
     call str_from_cstr_heap
     push rax
     mov rdi, rbx
@@ -2086,6 +2185,10 @@ DEF_FUNC_LOCAL io_make_fileio, MFI_FRAME
     mov [rel fileio_base_dealloc], rax
     lea rax, [rel fileio_dealloc]
     mov [rbx + PyTypeObject.tp_dealloc], rax
+    lea rax, [rel fileio_traverse]
+    mov [rbx + PyTypeObject.tp_traverse], rax
+    lea rax, [rel fileio_clear]
+    mov [rbx + PyTypeObject.tp_clear], rax
 
     mov rax, rbx
     pop rbx
@@ -2111,6 +2214,7 @@ im_n_read1:      db "read1", 0
 im_n_readline:   db "readline", 0
 im_n_readlines:  db "readlines", 0
 im_n_writelines: db "writelines", 0
+im_n_flush:      db "flush", 0
 im_n_iter:       db "__iter__", 0
 im_n_next:       db "__next__", 0
 
@@ -2890,6 +2994,32 @@ DEF_FUNC_BARE io_buffer_released
     ret
 END_FUNC io_buffer_released
 
+
+;; BytesIO holds no objects at all past the dict -- the buffer is raw memory --
+;; so its traverse is the dict and nothing more.
+DEF_FUNC bytesio_traverse
+    mov rdi, [rdi + PyBytesIOObject.inst_dict]
+    VISIT_PTR rdi
+    xor eax, eax
+    leave
+    ret
+END_FUNC bytesio_traverse
+
+DEF_FUNC bytesio_clear
+    push rbx
+    mov rbx, rdi
+    mov rdi, [rbx + PyBytesIOObject.inst_dict]
+    test rdi, rdi
+    jz .bic_done
+    mov qword [rbx + PyBytesIOObject.inst_dict], 0
+    call obj_decref
+.bic_done:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+END_FUNC bytesio_clear
+
 DEF_FUNC_LOCAL bytesio_dealloc
     push rbx
     mov rbx, rdi
@@ -2937,6 +3067,7 @@ DEF_FUNC_LOCAL io_make_bytesio, MBI_FRAME
     IO_METHOD im_n_truncate,   bytesio_truncate_fn
     IO_METHOD im_n_getvalue,   bytesio_getvalue_fn
     IO_METHOD im_n_getbuffer,  bytesio_getbuffer_fn
+    IO_METHOD im_n_flush,      bytesio_flush_fn
     IO_METHOD im_n_close,      bytesio_close_fn
     IO_METHOD im_n_readable,   bytesio_true_fn
     IO_METHOD im_n_writable,   bytesio_true_fn
@@ -2950,7 +3081,7 @@ DEF_FUNC_LOCAL io_make_bytesio, MBI_FRAME
     lea rdi, [rel im_n_module]
     call str_from_cstr_heap
     push rax
-    lea rdi, [rel im_name]
+    lea rdi, [rel im_modattr]
     call str_from_cstr_heap
     push rax
     mov rdi, rbx
@@ -2981,6 +3112,10 @@ DEF_FUNC_LOCAL io_make_bytesio, MBI_FRAME
     mov [rel bytesio_base_dealloc], rax
     lea rax, [rel bytesio_dealloc]
     mov [rbx + PyTypeObject.tp_dealloc], rax
+    lea rax, [rel bytesio_traverse]
+    mov [rbx + PyTypeObject.tp_traverse], rax
+    lea rax, [rel bytesio_clear]
+    mov [rbx + PyTypeObject.tp_clear], rax
 
     mov rax, rbx
     pop rbx

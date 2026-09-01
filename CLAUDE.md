@@ -183,6 +183,10 @@ No hand-written file exceeds 100k bytes; only generated asm may.
 - `src/marshal.asm` — .pyc marshal deserializer, and the .pyc file reader
 - `src/main.asm` — argument parsing, startup order, and the `-t`/`--dis` modes
 - `src/import.asm` — the import system: finders, `sys.modules`, packages
+- `src/iomod.asm` — the `_iocore` module: the four `_IOBase` types the rest
+  of the I/O stack subclasses, `UnsupportedOperation`, `FileIO` and `BytesIO`.
+  The buffering and text layers are `lib/_io.py`, which assembles both halves
+  under the name `_io`
 - `src/itertools.asm` — the *iterator builtins* (`enumerate`, `zip`, `map`,
   `filter`, `reversed`, `sorted`, `chain`, `get_iterator`), not the `itertools`
   module, which is `lib/itertools.py`

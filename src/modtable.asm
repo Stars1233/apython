@@ -42,7 +42,7 @@ bm_n_abc:      db "_abc", 0
 bm_n_errno:    db "errno", 0
 bm_n_weakref:  db "_weakref", 0
 bm_n_posix:    db "posix", 0
-bm_n_io:       db "_io", 0
+bm_n_io:       db "_iocore", 0
 
 align 8
 global builtin_module_table

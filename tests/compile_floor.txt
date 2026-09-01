@@ -141,9 +141,9 @@ test_gc_generations
 test_gen_adv
 test_generator_close_throw
 test_generators
+test_generic_alias_value
 test_gen_return2
 test_gen_return
-test_generic_alias_value
 test_getattr_descriptors
 test_getattr_immediate
 test_getattr_raises
@@ -165,6 +165,7 @@ test_introspection
 test_int_subclass_new
 test_io_module
 test_io_prereqs
+test_io
 test_iterable_arguments
 test_iterator_slots
 test_itertools

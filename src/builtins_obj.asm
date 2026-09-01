@@ -1440,159 +1440,108 @@ DEF_FUNC_LOCAL open_reject_dir, ORD_FRAME
     ret
 END_FUNC open_reject_dir
 
-DEF_FUNC builtin_open_fn, OPN_FRAME
+;; ============================================================================
+;; builtin_open_fn(args, nargs) -> the stream _pyio.open builds
+;;
+;; open() is _io.open in CPython, and the same thing here: the whole stack --
+;; buffering, text decoding, universal newlines -- lives above FileIO and
+;; there is no reason for the builtin to be a second, worse implementation of
+;; it.  What stood here opened a descriptor and returned an object with no
+;; buffering, no encoding and no seek.
+;;
+;; The lookup is lazy and cached.  It cannot happen at startup: builtins is
+;; built before the import system can run, and _pyio imports abc, posix and
+;; _codecs.
+;;
+;; Keyword arguments pass straight through.  A builtin is handed its keyword
+;; values in the same array, with the names in kw_names_pending, and that is
+;; exactly what the callee expects -- so this must NOT consume the global.
+;; ============================================================================
+section .data
+align 8
+builtin_open_impl: dq 0
+
+section .rodata
+bo_mod_name:  db "_io", 0
+bo_attr_name: db "open", 0
+
+section .text
+
+DEF_FUNC builtin_open_fn
     push rbx
     push r12
     push r13
+    sub rsp, 8                  ; 3 pushes + 8, so rsp is 16-aligned at calls
+    mov rbx, rdi
+    mov r12, rsi
 
-    cmp rsi, 1
-    je .opn_default_mode
-    cmp rsi, 2
-    je .opn_with_mode
-    jmp .opn_error
+    mov r13, [rel builtin_open_impl]
+    test r13, r13
+    jnz .bo_have
 
-.opn_default_mode:
-    ; filename only — default mode 'r'
-    mov rax, [rdi]          ; args[0] = filename
-    V_TEST_PTR rax, rcx
-    ja .opn_type_error
-    mov rbx, rax            ; save filename str
-
-    ; Open read-only: O_RDONLY=0
-    lea rdi, [rax + PyStrObject.data]
-    xor esi, esi            ; flags = O_RDONLY
-    xor edx, edx            ; mode = 0
-    call sys_open
-    mov r12, rax            ; fd
-    test rax, rax
-    js .opn_file_error
-    mov rdi, r12
-    mov rsi, rbx
-    call open_reject_dir
-
-    ; Create default mode string "r" (heap — stored in PyFileObject struct field)
-    CSTRING rdi, "r"
-    call str_from_cstr_heap
-    mov r13, rax            ; mode str
-    jmp .opn_create_fileobj
-
-.opn_with_mode:
-    mov rax, [rdi]          ; args[0] = filename
-    push rdi                ; save args ptr
-    V_TEST_PTR rax, rcx
-    ja .opn_type_error_pop
-    mov rbx, rax            ; save filename str
-    pop rdi                 ; restore args ptr
-
-    mov rax, [rdi + 8]    ; mode str
-    V_UNPACK rax, rcx       ; args[1]
-    cmp rcx, TAG_PTR
-    jne .opn_type_error
-    mov r13, rax            ; save mode str
-
-    ; Parse mode string
-    lea rdi, [rax + PyStrObject.data]
-    movzx eax, byte [rdi]
-
-    cmp al, 'r'
-    je .opn_mode_r
-    cmp al, 'w'
-    je .opn_mode_w
-    cmp al, 'a'
-    je .opn_mode_a
-    cmp al, 'x'
-    je .opn_mode_x
-    jmp .opn_bad_mode
-
-.opn_mode_r:
-    ; Check for 'r+' or 'rb' or just 'r'
-    movzx ecx, byte [rdi + 1]
-    cmp cl, '+'
-    je .opn_rw
-    xor esi, esi            ; O_RDONLY
-    jmp .opn_do_open
-
-.opn_rw:
-    mov esi, 2              ; O_RDWR
-    jmp .opn_do_open
-
-.opn_mode_w:
-    mov esi, 0x241          ; O_WRONLY|O_CREAT|O_TRUNC (1|0x40|0x200)
-    jmp .opn_do_open
-
-.opn_mode_a:
-    mov esi, 0x441          ; O_WRONLY|O_CREAT|O_APPEND (1|0x40|0x400)
-    jmp .opn_do_open
-
-.opn_mode_x:
-    mov esi, 0xc1           ; O_WRONLY|O_CREAT|O_EXCL (1|0x40|0x80)
-    jmp .opn_do_open
-
-.opn_do_open:
-    push rsi                ; save flags
-    lea rdi, [rbx + PyStrObject.data]  ; filename cstr
-    pop rsi                 ; restore flags
-    mov edx, 0644o          ; default file permissions
-    call sys_open
-    mov r12, rax
-    test rax, rax
-    js .opn_file_error
-
-    mov rdi, r12
-    mov rsi, rbx
-    call open_reject_dir
-
-    ; INCREF mode str (we're storing a ref)
-    mov rdi, r13
-    call obj_incref
-
-.opn_create_fileobj:
-    ; Allocate PyFileObject
-    mov edi, PyFileObject_size
-    call ap_malloc
-
-    mov qword [rax + PyObject.ob_refcnt], 1
-    lea rcx, [rel file_type]
-    mov [rax + PyObject.ob_type], rcx
-    mov [rax + PyFileObject.file_fd], r12
-    mov [rax + PyFileObject.file_name], rbx
-    mov [rax + PyFileObject.file_mode], r13
-
-    ; INCREF filename (storing ref)
+    ; The pending keyword names belong to the open() call, not to the import
+    ; that is about to run a module body; park them across it.
+    mov rax, [rel kw_names_pending]
     push rax
-    mov rdi, rbx
-    call obj_incref
-    pop rax
+    mov qword [rel kw_names_pending], 0
 
-    mov edx, TAG_PTR
+    lea rdi, [rel bo_mod_name]
+    call str_from_cstr_heap
+    push rax
+    mov rdi, rax
+    xor esi, esi
+    xor edx, edx
+    call import_module
+    mov r13, rax
+    pop rdi
+    call obj_decref
+    test r13, r13
+    jz .bo_import_failed
+
+    lea rdi, [rel bo_attr_name]
+    call str_from_cstr_heap
+    push rax
+    mov rdi, [r13 + PyModuleObject.mod_dict]
+    mov rsi, rax
+    call dict_get
+    mov r13, rax
+    pop rdi
+    call obj_decref
+    test r13, r13
+    jz .bo_missing
+    mov rdi, r13
+    call obj_incref             ; the cache holds it for the process's life
+    mov [rel builtin_open_impl], r13
+
+    pop rax
+    mov [rel kw_names_pending], rax
+
+.bo_have:
+    mov rax, [r13 + PyObject.ob_type]
+    mov rcx, [rax + PyTypeObject.tp_call]
+    test rcx, rcx
+    jz .bo_missing
+    mov rdi, r13
+    mov rsi, rbx
+    mov rdx, r12
+    call rcx
+    add rsp, 8
     pop r13
     pop r12
     pop rbx
     leave
-    V_PACK rax, rdx             ; builtins return one Value
     ret
 
-.opn_file_error:
-    ; sys_open is a bare syscall, so rax is -errno and rbx still holds the
-    ; filename.  Both used to be thrown away and the message hardcoded to "No
-    ; such file or directory" whatever had actually gone wrong -- a directory
-    ; or an unreadable file reported ENOENT.
-    mov rdi, r12
-    neg rdi
-    mov rsi, rbx
-    extern raise_oserror
-    call raise_oserror              ; does not return
-
-.opn_bad_mode:
-    RAISE exc_ValueError_type, "invalid mode string"
-
-.opn_error:
-    RAISE exc_TypeError_type, "open() takes 1 or 2 arguments"
-
-.opn_type_error_pop:
-    add rsp, 8                 ; discard saved args ptr
-.opn_type_error:
-    RAISE exc_TypeError_type, "open() arguments must be strings"
+.bo_import_failed:
+    add rsp, 8                  ; the parked keyword names
+    cmp qword [rel current_exception], 0
+    jne .bo_propagate
+    RAISE exc_ImportError_type, "open() requires the _io module"
+.bo_propagate:
+    leave
+    jmp eval_exception_unwind
+.bo_missing:
+    RAISE exc_ImportError_type, "_io.open is missing"
 END_FUNC builtin_open_fn
 
 ;; ============================================================================

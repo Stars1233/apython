@@ -10,6 +10,7 @@ ok collections
 ok _collections_abc
 ok colorsys
 ok _compat_pickle
+ok _compression
 ok concurrent
 ok copy
 ok copyreg
@@ -17,6 +18,7 @@ ok difflib
 ok email
 ok encodings
 ok enum
+ok fileinput
 ok fnmatch
 ok functools
 ok __future__
@@ -25,6 +27,7 @@ ok heapq
 ok __hello__
 ok http
 ok idlelib
+ok io
 ok ipaddress
 ok keyword
 ok netrc
@@ -40,6 +43,7 @@ ok platform
 ok posixpath
 ok _py_abc
 ok pydoc_data
+ok _pyio
 ok quopri
 ok re
 ok reprlib
