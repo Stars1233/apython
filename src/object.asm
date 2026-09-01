@@ -4,11 +4,9 @@
 
 %include "macros.inc"
 %include "object.inc"
-%include "types.inc"
 
 extern ap_malloc
 extern ap_free
-extern sys_write
 extern str_from_cstr
 extern dict_get
 extern dict_new
@@ -30,26 +28,6 @@ extern type_getattr
 extern type_setattr
 extern type_call
 
-; obj_alloc(size_t size, PyTypeObject *type) -> PyObject*
-; Allocate a new object with refcount=1 and given type
-DEF_FUNC obj_alloc
-    push rbx
-    push r12
-    mov rbx, rdi            ; size
-    mov r12, rsi            ; type
-
-    mov rdi, rbx
-    call ap_malloc
-
-    ; Initialize header
-    mov qword [rax + PyObject.ob_refcnt], 1
-    mov [rax + PyObject.ob_type], r12
-
-    pop r12
-    pop rbx
-    leave
-    ret
-END_FUNC obj_alloc
 
 ; obj_incref(PyObject *obj)
 ; Increment reference count; NULL-safe.
@@ -125,7 +103,6 @@ END_FUNC obj_dealloc
 ; obj_repr(rdi=value) -> PyObject* (string)
 ; Decodes the Value, then dispatches: int immediate → int_repr, pointer → tp_repr.
 DEF_FUNC obj_repr
-    extern str_repr
     V_UNPACK rdi, rsi
 
     cmp esi, TAG_SMALLINT
@@ -283,7 +260,7 @@ END_FUNC obj_str
 ; Convert a Value to a C index, or raise TypeError.  Callers used to hand
 ; whatever they were given straight to int_to_i64, which reads
 ; PyIntObject.compact unconditionally: a float's payload is raw IEEE bits, so
-; range(1.5) dereferenced 0x3FF8000000000000, and None's fields decoded as a
+; range(1.5) dereferenced 0x3ff8000000000000, and None's fields decoded as a
 ; garbage length, so range(None) hung.
 ;
 ; Takes the same (payload, tag) pair as int_to_i64 so a call site changes by
@@ -335,14 +312,10 @@ DEF_FUNC obj_as_index
     ret
 
 .oai_bad_index:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "__index__ returned non-int"
-    call raise_exception
+    RAISE exc_TypeError_type, "__index__ returned non-int"
 
 .oai_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "object cannot be interpreted as an integer"
-    call raise_exception
+    RAISE exc_TypeError_type, "object cannot be interpreted as an integer"
 END_FUNC obj_as_index
 
 ; value_number_methods(rdi = payload, edx = tag) -> rax = PyNumberMethods*, or 0
@@ -413,7 +386,6 @@ END_FUNC value_type
 ; Composes the message into a static buffer and raises TypeError.  Does not
 ; return.
 RTN_BUFSZ equ 160
-global raise_type_error_with_name
 DEF_FUNC raise_type_error_with_name
     push rbx
     push r12
@@ -473,7 +445,6 @@ section .text
 
 ; seq_repeat_check_count(rsi = count Value) -- raises TypeError unless the
 ; count is an int (or a bool, which is one).  Does not return on failure.
-global seq_repeat_check_count
 DEF_FUNC_BARE seq_repeat_check_count
     V_IS_INT rsi, rax
     jae .src_ok
@@ -501,11 +472,9 @@ END_FUNC seq_repeat_check_count
 ; raise_no_attribute(rdi = object Value, rsi = attribute-name str, edx = 1 for
 ; a set, 0 for a get) -- raises the AttributeError CPython raises.  Does not
 ; return.
-RNA_OBJ  equ 8
 RNA_NAME equ 16
-RNA_FRAME equ 16
+RNA_FRAME equ 16            ; + 2 pushes = 32
 extern str_type
-global raise_no_attribute
 DEF_FUNC raise_no_attribute, RNA_FRAME
     push rbx
     push r12
@@ -602,8 +571,7 @@ END_FUNC raise_no_attribute
 ;; ============================================================================
 OGA_OBJ   equ 8
 OGA_NAME  equ 16
-OGA_FRAME equ 32
-global obj_generic_attr
+OGA_FRAME equ 32            ; + 1 push = 40, not 16-aligned
 DEF_FUNC obj_generic_attr, OGA_FRAME
     push rbx
     mov [rbp - OGA_OBJ], rdi
@@ -695,7 +663,7 @@ ORB_RIGHT equ 16
 ORB_OP    equ 24
 ORB_EXC   equ 32
 ORB_RES   equ 40
-ORB_FRAME equ 48
+ORB_FRAME equ 48            ; + 0 pushes = 48
 
 DEF_FUNC obj_richcompare_bool, ORB_FRAME
     mov [rbp - ORB_LEFT], rdi
@@ -771,9 +739,7 @@ DEF_FUNC obj_richcompare_bool, ORB_FRAME
     je .orb_false
     cmp edx, PY_NE
     je .orb_true
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "unorderable types"
-    call raise_exception
+    RAISE exc_TypeError_type, "unorderable types"
 
 .orb_have_result:
     mov [rbp - ORB_RES], rax    ; the result Value, owned
@@ -821,13 +787,10 @@ section .text
 ; hash_not_implemented() -> never returns
 ; Used as tp_hash for unhashable types (dict, list, set).
 ; Raises TypeError("unhashable type").
-global hash_not_implemented
 DEF_FUNC hash_not_implemented
     extern raise_exception
     extern exc_TypeError_type
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "unhashable type"
-    call raise_exception
+    RAISE exc_TypeError_type, "unhashable type"
 END_FUNC hash_not_implemented
 
 ; obj_hash(rdi=value) -> int64
@@ -1024,9 +987,7 @@ DEF_FUNC_BARE obj_is_true
 .dunder_bool_none_error:
     extern raise_exception
     extern exc_TypeError_type
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "cannot interpret 'NoneType' object as an integer"
-    call raise_exception
+    RAISE exc_TypeError_type, "cannot interpret 'NoneType' object as an integer"
 
 .dunder_bool_type_error:
     ; __bool__ didn't return bool — DECREF result and raise TypeError
@@ -1034,9 +995,7 @@ DEF_FUNC_BARE obj_is_true
     mov rdi, rax
     mov esi, edx
     DECREF_VAL rdi, rsi
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "__bool__ should return bool, returned non-bool"
-    call raise_exception
+    RAISE exc_TypeError_type, "__bool__ should return bool, returned non-bool"
 
 .check_dunder_len:
     ; Try __len__ dunder
@@ -1081,9 +1040,7 @@ DEF_FUNC_BARE obj_is_true
 
 .len_negative_error:
     extern exc_ValueError_type
-    lea rdi, [rel exc_ValueError_type]
-    CSTRING rsi, "__len__() should return >= 0"
-    call raise_exception
+    RAISE exc_ValueError_type, "__len__() should return >= 0"
 
 .false:
     xor eax, eax
@@ -1127,46 +1084,6 @@ DEF_FUNC_BARE obj_is_true
     ret
 END_FUNC obj_is_true
 
-; obj_print(PyObject *obj)
-; Print an object's string representation to stdout followed by newline
-DEF_FUNC obj_print
-    push rbx
-    mov rbx, rdi
-
-    ; Get string representation via obj_str(payload, tag)
-    call obj_str
-    test rax, rax
-    jz .print_null
-
-    mov rbx, rax            ; rbx = str obj (heap)
-
-    ; sys_write(1, str_data, ob_size)
-    mov edi, 1
-    lea rsi, [rbx + PyStrObject.data]
-    mov rdx, [rbx + PyStrObject.ob_size]
-    call sys_write
-
-    ; sys_write(1, "\n", 1)
-    mov edi, 1
-    lea rsi, [rel obj_print_newline]
-    mov edx, 1
-    call sys_write
-
-    pop rbx
-    leave
-    ret
-
-.print_null:
-    ; sys_write(1, "<NULL>\n", 7)
-    mov edi, 1
-    lea rsi, [rel obj_print_null_str]
-    mov edx, 7
-    call sys_write
-
-    pop rbx
-    leave
-    ret
-END_FUNC obj_print
 
 ;; ============================================================================
 ;; type_repr(PyObject *type_obj) -> PyStrObject*
@@ -1175,7 +1092,7 @@ END_FUNC obj_print
 TR_TYPE  equ 8
 TR_LEN   equ 16
 TR_BUF   equ 272            ; 256 bytes, [rbp-272, rbp-16)
-TR_FRAME equ 288
+TR_FRAME equ 288            ; + 2 pushes = 304
 DEF_FUNC type_repr, TR_FRAME
     push rbx
     push r12

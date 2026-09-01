@@ -13,23 +13,20 @@
 
 %include "macros.inc"
 %include "object.inc"
-%include "types.inc"
 %include "sre.inc"
 
 extern ap_malloc
 extern ap_free
 extern ap_realloc
 extern ap_memcpy
-extern ap_memcmp
 extern obj_incref
-extern obj_decref
 extern raise_exception
 extern exc_RuntimeError_type
 
-; ============================================================================
-; sre_getchar(SRE_State* state, i64 index) -> u32 codepoint
-; Get character at given index. ASCII fast path or codepoint_buf lookup.
-; ============================================================================
+;; ============================================================================
+;; sre_getchar(SRE_State* state, i64 index) -> u32 codepoint
+;; Get character at given index. ASCII fast path or codepoint_buf lookup.
+;; ============================================================================
 DEF_FUNC_BARE sre_getchar
     ; rdi = state, rsi = index
     mov rax, [rdi + SRE_State.codepoint_buf]
@@ -45,11 +42,11 @@ DEF_FUNC_BARE sre_getchar
     ret
 END_FUNC sre_getchar
 
-; ============================================================================
-; sre_category(u32 category_code, u32 ch) -> 0/1
-; Check if character matches a category.
-; rdi = category code, esi = character codepoint
-; ============================================================================
+;; ============================================================================
+;; sre_category(u32 category_code, u32 ch) -> 0/1
+;; Check if character matches a category.
+;; rdi = category code, esi = character codepoint
+;; ============================================================================
 DEF_FUNC sre_category
     cmp edi, SRE_CATEGORY_UNI_NOT_LINEBREAK
     ja .cat_false
@@ -96,7 +93,7 @@ DEF_FUNC sre_category
     je .cat_true
     cmp esi, 0x09             ; \t
     jb .cat_false
-    cmp esi, 0x0D             ; \r
+    cmp esi, 0x0d             ; \r
     jbe .cat_true
     jmp .cat_false
 
@@ -105,7 +102,7 @@ DEF_FUNC sre_category
     je .cat_false
     cmp esi, 0x09
     jb .cat_true
-    cmp esi, 0x0D
+    cmp esi, 0x0d
     jbe .cat_false
     jmp .cat_true
 
@@ -145,16 +142,16 @@ DEF_FUNC sre_category
     jmp .cat_true
 
 .cat_linebreak:
-    cmp esi, 0x0A              ; \n
+    cmp esi, 0x0a              ; \n
     je .cat_true
-    cmp esi, 0x0D              ; \r
+    cmp esi, 0x0d              ; \r
     je .cat_true
     jmp .cat_false
 
 .cat_not_linebreak:
-    cmp esi, 0x0A
+    cmp esi, 0x0a
     je .cat_false
-    cmp esi, 0x0D
+    cmp esi, 0x0d
     je .cat_false
     jmp .cat_true
 
@@ -171,24 +168,24 @@ DEF_FUNC sre_category
     cmp esi, 0x0669
     jbe .cat_true
     ; Extended Arabic-Indic digits
-    cmp esi, 0x06F0
+    cmp esi, 0x06f0
     jb .cat_false
-    cmp esi, 0x06F9
+    cmp esi, 0x06f9
     jbe .cat_true
     ; Devanagari digits
     cmp esi, 0x0966
     jb .cat_false
-    cmp esi, 0x096F
+    cmp esi, 0x096f
     jbe .cat_true
     ; Bengali digits
-    cmp esi, 0x09E6
+    cmp esi, 0x09e6
     jb .cat_false
-    cmp esi, 0x09EF
+    cmp esi, 0x09ef
     jbe .cat_true
     ; Fullwidth digits
-    cmp esi, 0xFF10
+    cmp esi, 0xff10
     jb .cat_false
-    cmp esi, 0xFF19
+    cmp esi, 0xff19
     jbe .cat_true
     jmp .cat_false
 
@@ -203,24 +200,24 @@ DEF_FUNC sre_category
     cmp esi, 0x0669
     jbe .cat_false
     ; Extended Arabic-Indic digits
-    cmp esi, 0x06F0
+    cmp esi, 0x06f0
     jb .cat_true
-    cmp esi, 0x06F9
+    cmp esi, 0x06f9
     jbe .cat_false
     ; Devanagari digits
     cmp esi, 0x0966
     jb .cat_true
-    cmp esi, 0x096F
+    cmp esi, 0x096f
     jbe .cat_false
     ; Bengali digits
-    cmp esi, 0x09E6
+    cmp esi, 0x09e6
     jb .cat_true
-    cmp esi, 0x09EF
+    cmp esi, 0x09ef
     jbe .cat_false
     ; Fullwidth digits
-    cmp esi, 0xFF10
+    cmp esi, 0xff10
     jb .cat_true
-    cmp esi, 0xFF19
+    cmp esi, 0xff19
     jbe .cat_false
     jmp .cat_true
 
@@ -229,26 +226,26 @@ DEF_FUNC sre_category
     je .cat_true
     cmp esi, 0x09
     jb .cat_false
-    cmp esi, 0x0D
+    cmp esi, 0x0d
     jbe .cat_true
     ; Unicode whitespace: \u0085, \u00A0, \u2000-\u200A, etc.
     cmp esi, 0x85
     je .cat_true
-    cmp esi, 0xA0
+    cmp esi, 0xa0
     je .cat_true
     cmp esi, 0x1680
     je .cat_true
     cmp esi, 0x2000
     jb .cat_false
-    cmp esi, 0x200A
+    cmp esi, 0x200a
     jbe .cat_true
     cmp esi, 0x2028
     je .cat_true
     cmp esi, 0x2029
     je .cat_true
-    cmp esi, 0x202F
+    cmp esi, 0x202f
     je .cat_true
-    cmp esi, 0x205F
+    cmp esi, 0x205f
     je .cat_true
     cmp esi, 0x3000
     je .cat_true
@@ -260,25 +257,25 @@ DEF_FUNC sre_category
     je .cat_false
     cmp esi, 0x09
     jb .cat_true
-    cmp esi, 0x0D
+    cmp esi, 0x0d
     jbe .cat_false
     cmp esi, 0x85
     je .cat_false
-    cmp esi, 0xA0
+    cmp esi, 0xa0
     je .cat_false
     cmp esi, 0x1680
     je .cat_false
     cmp esi, 0x2000
     jb .cat_true
-    cmp esi, 0x200A
+    cmp esi, 0x200a
     jbe .cat_false
     cmp esi, 0x2028
     je .cat_false
     cmp esi, 0x2029
     je .cat_false
-    cmp esi, 0x202F
+    cmp esi, 0x202f
     je .cat_false
-    cmp esi, 0x205F
+    cmp esi, 0x205f
     je .cat_false
     cmp esi, 0x3000
     je .cat_false
@@ -337,13 +334,13 @@ DEF_FUNC sre_category
     jmp .cat_true
 
 .cat_uni_linebreak:
-    cmp esi, 0x0A
+    cmp esi, 0x0a
     je .cat_true
-    cmp esi, 0x0D
+    cmp esi, 0x0d
     je .cat_true
-    cmp esi, 0x0B              ; \v
+    cmp esi, 0x0b              ; \v
     je .cat_true
-    cmp esi, 0x0C              ; \f
+    cmp esi, 0x0c              ; \f
     je .cat_true
     cmp esi, 0x85              ; NEL
     je .cat_true
@@ -354,13 +351,13 @@ DEF_FUNC sre_category
     jmp .cat_false
 
 .cat_uni_not_linebreak:
-    cmp esi, 0x0A
+    cmp esi, 0x0a
     je .cat_false
-    cmp esi, 0x0D
+    cmp esi, 0x0d
     je .cat_false
-    cmp esi, 0x0B
+    cmp esi, 0x0b
     je .cat_false
-    cmp esi, 0x0C
+    cmp esi, 0x0c
     je .cat_false
     cmp esi, 0x85
     je .cat_false
@@ -380,14 +377,12 @@ DEF_FUNC sre_category
     ret
 END_FUNC sre_category
 
-; ============================================================================
-; sre_charset(u32* set, u32 ch) -> 0/1
-; Check if ch is in a character set (IN opcode's set data).
-; Set format: sequence of (opcode, args...) terminated by SRE_OP_FAILURE.
-; ============================================================================
-SM_CH     equ 8
-SM_SET    equ 16
-SM_FRAME  equ 16
+;; ============================================================================
+;; sre_charset(u32* set, u32 ch) -> 0/1
+;; Check if ch is in a character set (IN opcode's set data).
+;; Set format: sequence of (opcode, args...) terminated by SRE_OP_FAILURE.
+;; ============================================================================
+SM_FRAME  equ 16            ; + 2 pushes = 32
 
 DEF_FUNC sre_charset, SM_FRAME
     push rbx
@@ -509,7 +504,7 @@ DEF_FUNC sre_charset, SM_FRAME
     imul ecx, ecx, 32
     lea rdx, [rbx + rcx]      ; block data
     mov eax, r12d
-    and eax, 0xFF              ; low byte of ch
+    and eax, 0xff              ; low byte of ch
     mov ecx, eax
     shr ecx, 5
     mov eax, [rdx + rcx*4]
@@ -539,10 +534,10 @@ DEF_FUNC sre_charset, SM_FRAME
     ret
 END_FUNC sre_charset
 
-; ============================================================================
-; sre_at(SRE_State* state, i64 pos, u32 at_code) -> 0/1
-; Check position assertion (^, $, \b, etc.)
-; ============================================================================
+;; ============================================================================
+;; sre_at(SRE_State* state, i64 pos, u32 at_code) -> 0/1
+;; Check position assertion (^, $, \b, etc.)
+;; ============================================================================
 DEF_FUNC sre_at
     ; rdi = state, rsi = pos, edx = at_code
     mov r8, rdi                ; r8 = state
@@ -598,7 +593,7 @@ DEF_FUNC sre_at
     lea rsi, [r9 - 1]
     mov rdi, r8
     call sre_getchar
-    cmp eax, 0x0A
+    cmp eax, 0x0a
     je .at_true
     jmp .at_false
 
@@ -623,7 +618,7 @@ DEF_FUNC sre_at
     mov rdi, r8
     mov rsi, r9
     call sre_getchar
-    cmp eax, 0x0A
+    cmp eax, 0x0a
     je .at_true
     jmp .at_false
 
@@ -643,7 +638,7 @@ DEF_FUNC sre_at
     mov rdi, r8
     mov rsi, r9
     call sre_getchar
-    cmp eax, 0x0A
+    cmp eax, 0x0a
     je .at_true
     jmp .at_false
 
@@ -761,9 +756,9 @@ DEF_FUNC sre_at
     ret
 END_FUNC sre_at
 
-; ============================================================================
-; sre_ascii_tolower(u32 ch) -> u32
-; ============================================================================
+;; ============================================================================
+;; sre_ascii_tolower(u32 ch) -> u32
+;; ============================================================================
 DEF_FUNC_BARE sre_ascii_tolower
     mov eax, edi
     cmp eax, 'A'
@@ -775,10 +770,10 @@ DEF_FUNC_BARE sre_ascii_tolower
     ret
 END_FUNC sre_ascii_tolower
 
-; ============================================================================
-; sre_unicode_tolower(u32 ch) -> u32
-; Basic Unicode case folding (ASCII + common Latin)
-; ============================================================================
+;; ============================================================================
+;; sre_unicode_tolower(u32 ch) -> u32
+;; Basic Unicode case folding (ASCII + common Latin)
+;; ============================================================================
 DEF_FUNC_BARE sre_unicode_tolower
     mov eax, edi
     ; ASCII A-Z -> a-z (+32)
@@ -786,19 +781,19 @@ DEF_FUNC_BARE sre_unicode_tolower
     jb .no_lower
     cmp eax, 'Z'
     jbe .add32
-    ; Latin-1 Supplement: 0xC0-0xD6, 0xD8-0xDE -> +32
-    cmp eax, 0xC0
+    ; Latin-1 Supplement: 0xc0-0xd6, 0xd8-0xde -> +32
+    cmp eax, 0xc0
     jb .no_lower
-    cmp eax, 0xD6
+    cmp eax, 0xd6
     jbe .add32
-    cmp eax, 0xD8
+    cmp eax, 0xd8
     jb .no_lower
-    cmp eax, 0xDE
+    cmp eax, 0xde
     jbe .add32
-    ; Latin Extended-A: even codepoints 0x100-0x12E -> +1
+    ; Latin Extended-A: even codepoints 0x100-0x12e -> +1
     cmp eax, 0x100
     jb .no_lower
-    cmp eax, 0x12E
+    cmp eax, 0x12e
     ja .latin_ext_a2
     test eax, 1
     jnz .no_lower              ; already lowercase (odd)
@@ -825,8 +820,8 @@ DEF_FUNC_BARE sre_unicode_tolower
     inc eax
     ret
 .latin_ext_a4:
-    ; 0x14A-0x177: even -> +1
-    cmp eax, 0x14A
+    ; 0x14a-0x177: even -> +1
+    cmp eax, 0x14a
     jb .no_lower
     cmp eax, 0x177
     ja .latin_ext_a5
@@ -835,10 +830,10 @@ DEF_FUNC_BARE sre_unicode_tolower
     inc eax
     ret
 .latin_ext_a5:
-    ; 0x179-0x17E: odd -> +1
+    ; 0x179-0x17e: odd -> +1
     cmp eax, 0x179
     jb .no_lower
-    cmp eax, 0x17E
+    cmp eax, 0x17e
     ja .check_greek
     test eax, 1
     jz .no_lower
@@ -846,27 +841,27 @@ DEF_FUNC_BARE sre_unicode_tolower
     ret
 
 .check_greek:
-    ; Greek uppercase: 0x391-0x3A1 -> +32
+    ; Greek uppercase: 0x391-0x3a1 -> +32
     cmp eax, 0x391
     jb .no_lower
-    cmp eax, 0x3A1
+    cmp eax, 0x3a1
     jbe .add32
-    ; Greek: 0x3A3-0x3A9 -> +32 (skip 0x3A2 which is final sigma)
-    cmp eax, 0x3A3
+    ; Greek: 0x3a3-0x3a9 -> +32 (skip 0x3a2 which is final sigma)
+    cmp eax, 0x3a3
     jb .no_lower
-    cmp eax, 0x3A9
+    cmp eax, 0x3a9
     jbe .add32
 
-    ; Cyrillic uppercase: 0x410-0x42F -> +32 (А-Я -> а-я)
+    ; Cyrillic uppercase: 0x410-0x42f -> +32 (А-Я -> а-я)
     cmp eax, 0x410
     jb .no_lower
-    cmp eax, 0x42F
+    cmp eax, 0x42f
     jbe .add32
-    ; Cyrillic extended: 0x400-0x40F -> +80 (Ѐ-Џ -> ѐ-џ)
+    ; Cyrillic extended: 0x400-0x40f -> +80 (Ѐ-Џ -> ѐ-џ)
     ; (These are before 0x410 numerically but checked after due to frequency)
     cmp eax, 0x400
     jb .no_lower
-    cmp eax, 0x40F
+    cmp eax, 0x40f
     ja .cyrillic_ext
     add eax, 80
     ret
@@ -887,105 +882,105 @@ DEF_FUNC_BARE sre_unicode_tolower
     ret
 END_FUNC sre_unicode_tolower
 
-; ============================================================================
-; sre_uni_isword(u32 codepoint) -> 0/1
-; Check if codepoint is a Unicode word character (letter, digit, underscore,
-; combining mark). Covers major scripts without full Unicode tables.
-; edi = codepoint (already checked not ASCII by caller)
-; ============================================================================
+;; ============================================================================
+;; sre_uni_isword(u32 codepoint) -> 0/1
+;; Check if codepoint is a Unicode word character (letter, digit, underscore,
+;; combining mark). Covers major scripts without full Unicode tables.
+;; edi = codepoint (already checked not ASCII by caller)
+;; ============================================================================
 DEF_FUNC_BARE sre_uni_isword
     ; Underscore already handled by caller
-    ; Latin Extended (letters): 0x00C0-0x00FF (excluding 0xD7 and 0xF7)
-    cmp edi, 0xC0
+    ; Latin Extended (letters): 0x00c0-0x00ff (excluding 0xd7 and 0xf7)
+    cmp edi, 0xc0
     jb .uw_false
-    cmp edi, 0xFF
+    cmp edi, 0xff
     ja .uw_check_latin_ext
-    cmp edi, 0xD7              ; multiplication sign
+    cmp edi, 0xd7              ; multiplication sign
     je .uw_false
-    cmp edi, 0xF7              ; division sign
+    cmp edi, 0xf7              ; division sign
     je .uw_false
     jmp .uw_true
 .uw_check_latin_ext:
-    ; Latin Extended-A: 0x0100-0x017F
+    ; Latin Extended-A: 0x0100-0x017f
     cmp edi, 0x0100
     jb .uw_false
-    cmp edi, 0x017F
+    cmp edi, 0x017f
     jbe .uw_true
-    ; Latin Extended-B: 0x0180-0x024F
-    cmp edi, 0x024F
+    ; Latin Extended-B: 0x0180-0x024f
+    cmp edi, 0x024f
     jbe .uw_true
-    ; Combining Diacritical Marks: 0x0300-0x036F
+    ; Combining Diacritical Marks: 0x0300-0x036f
     cmp edi, 0x0300
     jb .uw_check_ipa
-    cmp edi, 0x036F
+    cmp edi, 0x036f
     jbe .uw_true
 .uw_check_ipa:
-    ; IPA Extensions: 0x0250-0x02AF
+    ; IPA Extensions: 0x0250-0x02af
     cmp edi, 0x0250
     jb .uw_false
-    cmp edi, 0x02AF
+    cmp edi, 0x02af
     jbe .uw_true
-    ; Greek and Coptic: 0x0370-0x03FF
+    ; Greek and Coptic: 0x0370-0x03ff
     cmp edi, 0x0370
     jb .uw_false
-    cmp edi, 0x03FF
+    cmp edi, 0x03ff
     jbe .uw_true
-    ; Cyrillic: 0x0400-0x04FF
+    ; Cyrillic: 0x0400-0x04ff
     cmp edi, 0x0400
     jb .uw_false
-    cmp edi, 0x04FF
+    cmp edi, 0x04ff
     jbe .uw_true
-    ; Cyrillic Supplement: 0x0500-0x052F
-    cmp edi, 0x052F
+    ; Cyrillic Supplement: 0x0500-0x052f
+    cmp edi, 0x052f
     jbe .uw_true
-    ; Armenian: 0x0530-0x058F
-    cmp edi, 0x058F
+    ; Armenian: 0x0530-0x058f
+    cmp edi, 0x058f
     jbe .uw_true
-    ; Hebrew: 0x0590-0x05FF
-    cmp edi, 0x05FF
+    ; Hebrew: 0x0590-0x05ff
+    cmp edi, 0x05ff
     jbe .uw_true
-    ; Arabic: 0x0600-0x06FF
-    cmp edi, 0x06FF
+    ; Arabic: 0x0600-0x06ff
+    cmp edi, 0x06ff
     jbe .uw_true
-    ; Devanagari: 0x0900-0x097F
+    ; Devanagari: 0x0900-0x097f
     cmp edi, 0x0900
     jb .uw_check_thai
-    cmp edi, 0x097F
+    cmp edi, 0x097f
     jbe .uw_true
-    ; Bengali, Gurmukhi, Gujarati, etc.: 0x0980-0x0DFF
-    cmp edi, 0x0DFF
+    ; Bengali, Gurmukhi, Gujarati, etc.: 0x0980-0x0dff
+    cmp edi, 0x0dff
     jbe .uw_true
 .uw_check_thai:
-    ; Thai: 0x0E00-0x0E7F
-    cmp edi, 0x0E00
+    ; Thai: 0x0e00-0x0e7f
+    cmp edi, 0x0e00
     jb .uw_check_georgian
-    cmp edi, 0x0E7F
+    cmp edi, 0x0e7f
     jbe .uw_true
-    ; Lao: 0x0E80-0x0EFF
-    cmp edi, 0x0EFF
+    ; Lao: 0x0e80-0x0eff
+    cmp edi, 0x0eff
     jbe .uw_true
 .uw_check_georgian:
-    ; Georgian: 0x10A0-0x10FF
-    cmp edi, 0x10A0
+    ; Georgian: 0x10a0-0x10ff
+    cmp edi, 0x10a0
     jb .uw_check_hangul
-    cmp edi, 0x10FF
+    cmp edi, 0x10ff
     jbe .uw_true
 .uw_check_hangul:
-    ; Hangul Jamo: 0x1100-0x11FF
+    ; Hangul Jamo: 0x1100-0x11ff
     cmp edi, 0x1100
     jb .uw_check_cjk
-    cmp edi, 0x11FF
+    cmp edi, 0x11ff
     jbe .uw_true
 .uw_check_cjk:
-    ; CJK Unified Ideographs: 0x4E00-0x9FFF
-    cmp edi, 0x4E00
+    ; CJK Unified Ideographs: 0x4e00-0x9fff
+    cmp edi, 0x4e00
     jb .uw_check_digits
-    cmp edi, 0x9FFF
+    cmp edi, 0x9fff
     jbe .uw_true
-    ; Hangul Syllables: 0xAC00-0xD7AF
-    cmp edi, 0xAC00
+    ; Hangul Syllables: 0xac00-0xd7af
+    cmp edi, 0xac00
     jb .uw_check_digits
-    cmp edi, 0xD7AF
+    cmp edi, 0xd7af
     jbe .uw_true
 .uw_check_digits:
     ; Unicode digit ranges beyond ASCII
@@ -995,40 +990,40 @@ DEF_FUNC_BARE sre_uni_isword
     cmp edi, 0x0669
     jbe .uw_true
 .uw_check_digits2:
-    ; Extended Arabic-Indic: 0x06F0-0x06F9
-    cmp edi, 0x06F0
+    ; Extended Arabic-Indic: 0x06f0-0x06f9
+    cmp edi, 0x06f0
     jb .uw_check_digits3
-    cmp edi, 0x06F9
+    cmp edi, 0x06f9
     jbe .uw_true
 .uw_check_digits3:
-    ; Devanagari digits: 0x0966-0x096F
+    ; Devanagari digits: 0x0966-0x096f
     cmp edi, 0x0966
     jb .uw_check_digits4
-    cmp edi, 0x096F
+    cmp edi, 0x096f
     jbe .uw_true
 .uw_check_digits4:
-    ; Thai digits: 0x0E50-0x0E59
-    cmp edi, 0x0E50
+    ; Thai digits: 0x0e50-0x0e59
+    cmp edi, 0x0e50
     jb .uw_check_fullwidth
-    cmp edi, 0x0E59
+    cmp edi, 0x0e59
     jbe .uw_true
 .uw_check_fullwidth:
-    ; Fullwidth digits: 0xFF10-0xFF19, letters: 0xFF21-0xFF3A, 0xFF41-0xFF5A
-    cmp edi, 0xFF10
+    ; Fullwidth digits: 0xff10-0xff19, letters: 0xff21-0xff3a, 0xff41-0xff5a
+    cmp edi, 0xff10
     jb .uw_check_connector
-    cmp edi, 0xFF19
+    cmp edi, 0xff19
     jbe .uw_true
-    cmp edi, 0xFF21
+    cmp edi, 0xff21
     jb .uw_false
-    cmp edi, 0xFF3A
+    cmp edi, 0xff3a
     jbe .uw_true
-    cmp edi, 0xFF41
+    cmp edi, 0xff41
     jb .uw_false
-    cmp edi, 0xFF5A
+    cmp edi, 0xff5a
     jbe .uw_true
 .uw_check_connector:
-    ; Connector punctuation (word chars in Python): 0x203F-0x2040, 0xFE33-0xFE34, 0xFE4D-0xFE4F, 0xFF3F
-    cmp edi, 0x203F
+    ; Connector punctuation (word chars in Python): 0x203f-0x2040, 0xfe33-0xfe34, 0xfe4d-0xfe4f, 0xff3f
+    cmp edi, 0x203f
     je .uw_true
     cmp edi, 0x2040
     je .uw_true
@@ -1040,15 +1035,15 @@ DEF_FUNC_BARE sre_uni_isword
     ret
 END_FUNC sre_uni_isword
 
-; ============================================================================
-; sre_state_init(SRE_State* state, SRE_PatternObject* pattern,
-;                PyStrObject* string, i64 pos, i64 endpos)
-; Initialize match state for a string.
-; ============================================================================
+;; ============================================================================
+;; sre_state_init(SRE_State* state, SRE_PatternObject* pattern,
+;;                PyStrObject* string, i64 pos, i64 endpos)
+;; Initialize match state for a string.
+;; ============================================================================
 SSI_ENDPOS   equ 8       ; endpos (ASCII path); reused as state ptr (Unicode path)
 SSI_BYTELEN  equ 16      ; byte length (Unicode path only)
 SSI_UENDPOS  equ 24      ; endpos saved before clobber (Unicode path only)
-SSI_FRAME    equ 48
+SSI_FRAME    equ 48         ; + 4 pushes = 80
 
 DEF_FUNC sre_state_init, SSI_FRAME
     push rbx
@@ -1172,9 +1167,9 @@ DEF_FUNC sre_state_init, SSI_FRAME
     movzx eax, byte [rdi + rcx]
     cmp al, 0x80
     jb .utf8_1byte
-    cmp al, 0xE0
+    cmp al, 0xe0
     jb .utf8_2byte
-    cmp al, 0xF0
+    cmp al, 0xf0
     jb .utf8_3byte
     jmp .utf8_4byte
 
@@ -1185,10 +1180,10 @@ DEF_FUNC sre_state_init, SSI_FRAME
     jmp .utf8_decode
 
 .utf8_2byte:
-    and eax, 0x1F
+    and eax, 0x1f
     shl eax, 6
     movzx r9d, byte [rdi + rcx + 1]
-    and r9d, 0x3F
+    and r9d, 0x3f
     or eax, r9d
     mov [rdx + r8*4], eax
     add rcx, 2
@@ -1196,14 +1191,14 @@ DEF_FUNC sre_state_init, SSI_FRAME
     jmp .utf8_decode
 
 .utf8_3byte:
-    and eax, 0x0F
+    and eax, 0x0f
     shl eax, 12
     movzx r9d, byte [rdi + rcx + 1]
-    and r9d, 0x3F
+    and r9d, 0x3f
     shl r9d, 6
     or eax, r9d
     movzx r9d, byte [rdi + rcx + 2]
-    and r9d, 0x3F
+    and r9d, 0x3f
     or eax, r9d
     mov [rdx + r8*4], eax
     add rcx, 3
@@ -1214,15 +1209,15 @@ DEF_FUNC sre_state_init, SSI_FRAME
     and eax, 0x07
     shl eax, 18
     movzx r9d, byte [rdi + rcx + 1]
-    and r9d, 0x3F
+    and r9d, 0x3f
     shl r9d, 12
     or eax, r9d
     movzx r9d, byte [rdi + rcx + 2]
-    and r9d, 0x3F
+    and r9d, 0x3f
     shl r9d, 6
     or eax, r9d
     movzx r9d, byte [rdi + rcx + 3]
-    and r9d, 0x3F
+    and r9d, 0x3f
     or eax, r9d
     mov [rdx + r8*4], eax
     add rcx, 4
@@ -1272,10 +1267,10 @@ DEF_FUNC sre_state_init, SSI_FRAME
     ret
 END_FUNC sre_state_init
 
-; ============================================================================
-; sre_state_fini(SRE_State* state)
-; Clean up match state.
-; ============================================================================
+;; ============================================================================
+;; sre_state_fini(SRE_State* state)
+;; Clean up match state.
+;; ============================================================================
 DEF_FUNC sre_state_fini
     push rbx
     mov rbx, rdi
@@ -1299,10 +1294,10 @@ DEF_FUNC sre_state_fini
     ret
 END_FUNC sre_state_fini
 
-; ============================================================================
-; sre_state_set_mark(SRE_State* state, i64 mark_id, i64 pos)
-; Set a mark (group boundary) in the state.
-; ============================================================================
+;; ============================================================================
+;; sre_state_set_mark(SRE_State* state, i64 mark_id, i64 pos)
+;; Set a mark (group boundary) in the state.
+;; ============================================================================
 DEF_FUNC sre_state_set_mark
     ; rdi = state, rsi = mark_id, rdx = pos
     push rbx
@@ -1358,9 +1353,9 @@ DEF_FUNC sre_state_set_mark
     ret
 END_FUNC sre_state_set_mark
 
-; ============================================================================
-; sre_state_get_mark(SRE_State* state, i64 mark_id) -> i64 pos (-1 if unset)
-; ============================================================================
+;; ============================================================================
+;; sre_state_get_mark(SRE_State* state, i64 mark_id) -> i64 pos (-1 if unset)
+;; ============================================================================
 DEF_FUNC_BARE sre_state_get_mark
     ; rdi = state, rsi = mark_id
     cmp rsi, [rdi + SRE_State.marks_size]
@@ -1373,10 +1368,10 @@ DEF_FUNC_BARE sre_state_get_mark
     ret
 END_FUNC sre_state_get_mark
 
-; ============================================================================
-; sre_string_len(SRE_State* state) -> i64
-; Get string length in characters.
-; ============================================================================
+;; ============================================================================
+;; sre_string_len(SRE_State* state) -> i64
+;; Get string length in characters.
+;; ============================================================================
 DEF_FUNC_BARE sre_string_len
     mov rax, [rdi + SRE_State.codepoint_buf]
     test rax, rax
@@ -1390,21 +1385,14 @@ DEF_FUNC_BARE sre_string_len
     ret
 END_FUNC sre_string_len
 
-; ============================================================================
-; sre_match(SRE_State* state, u32* pattern) -> 0/1
-; Core recursive match engine.
-;
-; Frame layout constants
-; ============================================================================
+;; ============================================================================
+;; sre_match(SRE_State* state, u32* pattern) -> 0/1
+;; Core recursive match engine.
+;;
+;; Frame layout constants
+;; ============================================================================
 SM_STATE     equ 8
 SM_PATTERN   equ 16
-SM_SAVE_POS  equ 24
-SM_SAVE_MARKS equ 32        ; ptr to saved marks snapshot
-SM_SAVE_MARKS_SZ equ 40
-SM_SAVE_LASTMARK equ 48
-SM_SAVE_LASTINDEX equ 56
-SM_RPT_CTX   equ 64          ; repeat context (on stack)
-SM_RPT_END   equ 96          ; end of repeat context (32 bytes)
 SM_MFRAME    equ 96
 
 DEF_FUNC sre_match, SM_MFRAME
@@ -1513,7 +1501,7 @@ DEF_FUNC sre_match, SM_MFRAME
     mov rdi, r12
     mov rsi, r13
     call sre_getchar
-    cmp eax, 0x0A              ; '\n'
+    cmp eax, 0x0a              ; '\n'
     je .op_failure
     inc r13
     jmp .dispatch
@@ -2853,10 +2841,10 @@ DEF_FUNC sre_match, SM_MFRAME
     ret
 END_FUNC sre_match
 
-; ============================================================================
-; sre_save_marks(SRE_State* state) -> void*
-; Save marks snapshot for backtracking. Returns malloc'd buffer.
-; ============================================================================
+;; ============================================================================
+;; sre_save_marks(SRE_State* state) -> void*
+;; Save marks snapshot for backtracking. Returns malloc'd buffer.
+;; ============================================================================
 DEF_FUNC sre_save_marks
     push rbx
     mov rbx, rdi               ; state
@@ -2901,10 +2889,10 @@ DEF_FUNC sre_save_marks
     ret
 END_FUNC sre_save_marks
 
-; ============================================================================
-; sre_restore_marks(void* saved, SRE_State* state)
-; Restore marks from snapshot.
-; ============================================================================
+;; ============================================================================
+;; sre_restore_marks(void* saved, SRE_State* state)
+;; Restore marks from snapshot.
+;; ============================================================================
 DEF_FUNC sre_restore_marks
     push rbx
     push r12
@@ -2951,10 +2939,10 @@ DEF_FUNC sre_restore_marks
     ret
 END_FUNC sre_restore_marks
 
-; ============================================================================
-; sre_search(SRE_State* state) -> 0/1
-; Linear scan: try sre_match at each position from pos to endpos.
-; ============================================================================
+;; ============================================================================
+;; sre_search(SRE_State* state) -> 0/1
+;; Linear scan: try sre_match at each position from pos to endpos.
+;; ============================================================================
 DEF_FUNC sre_search, 32
     push rbx
     push r12
@@ -3008,70 +2996,16 @@ DEF_FUNC sre_search, 32
     ret
 END_FUNC sre_search
 
-; ============================================================================
-; sre_count(SRE_State* state, u32* pattern, i64 maxcount) -> i64
-; Count successive matches of a single-char pattern.
-; Used by REPEAT_ONE optimization.
-; ============================================================================
-DEF_FUNC sre_count
-    push rbx
-    push r12
-    push r13
-    push r14
 
-    mov r12, rdi               ; state
-    mov rbx, rsi               ; pattern
-    mov r14, rdx               ; maxcount
-
-    mov r13, [r12 + SRE_State.str_pos]
-    xor ecx, ecx               ; count = 0
-
-    ; Get string length
-    mov rdi, r12
-    call sre_string_len
-    mov r8, rax                ; string length
-
-.count_loop:
-    cmp rcx, r14
-    jge .count_done
-    cmp r13, r8
-    jge .count_done
-
-    ; Try match at pos
-    push rcx
-    push r8
-    mov [r12 + SRE_State.str_pos], r13
-    mov rdi, r12
-    mov rsi, rbx
-    call sre_match
-    pop r8
-    pop rcx
-    test eax, eax
-    jz .count_done
-
-    mov r13, [r12 + SRE_State.str_pos]
-    inc rcx
-    jmp .count_loop
-
-.count_done:
-    mov rax, rcx
-    pop r14
-    pop r13
-    pop r12
-    pop rbx
-    leave
-    ret
-END_FUNC sre_count
-
-; ============================================================================
-; sre_utf8_codepoint_to_byte(char* str, i64 byte_len, i64 target_cp_idx,
-;                             i64 start_byte, i64 start_cp_idx) -> i64 byte_offset
-; Walk UTF-8 bytes from (start_byte, start_cp_idx) until codepoint count
-; reaches target_cp_idx. Returns the byte offset.
-; rdi = string start, rsi = total byte length, rdx = target codepoint index,
-; rcx = starting byte offset, r8 = starting codepoint index
-; Returns: rax = byte offset at target codepoint
-; ============================================================================
+;; ============================================================================
+;; sre_utf8_codepoint_to_byte(char* str, i64 byte_len, i64 target_cp_idx,
+;;                             i64 start_byte, i64 start_cp_idx) -> i64 byte_offset
+;; Walk UTF-8 bytes from (start_byte, start_cp_idx) until codepoint count
+;; reaches target_cp_idx. Returns the byte offset.
+;; rdi = string start, rsi = total byte length, rdx = target codepoint index,
+;; rcx = starting byte offset, r8 = starting codepoint index
+;; Returns: rax = byte offset at target codepoint
+;; ============================================================================
 DEF_FUNC_BARE sre_utf8_codepoint_to_byte
     mov rax, rcx               ; byte offset
     mov r9, r8                 ; codepoint count
@@ -3083,9 +3017,9 @@ DEF_FUNC_BARE sre_utf8_codepoint_to_byte
     movzx r10d, byte [rdi + rax]
     cmp r10b, 0x80
     jb .u8_1
-    cmp r10b, 0xE0
+    cmp r10b, 0xe0
     jb .u8_2
-    cmp r10b, 0xF0
+    cmp r10b, 0xf0
     jb .u8_3
     add rax, 4
     jmp .u8inc

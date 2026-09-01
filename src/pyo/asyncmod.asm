@@ -10,21 +10,15 @@
 
 %include "macros.inc"
 %include "object.inc"
-%include "types.inc"
-%include "builtins.inc"
-%include "errcodes.inc"
 %include "eventloop.inc"
 
 extern ap_malloc
 extern gc_alloc
-extern gc_track
-extern gc_dealloc
 extern ap_free
 extern obj_decref
 extern obj_incref
 extern obj_dealloc
 extern str_from_cstr_heap
-extern float_from_f64
 extern dict_new
 extern dict_set
 extern module_new
@@ -35,19 +29,13 @@ extern raise_exception_obj
 extern exc_TypeError_type
 extern exc_RuntimeError_type
 extern exc_TimeoutError_type
-extern exc_CancelledError_type
-extern exc_new
 extern type_type
-extern coro_type
 extern task_new
-extern task_type
 extern eventloop_init
 extern eventloop_teardown
 extern eventloop_run
 extern eventloop
 extern ready_enqueue
-extern task_add_waiter
-extern str_from_cstr
 extern list_new
 extern list_append
 extern asyncio_open_connection_func
@@ -61,9 +49,7 @@ extern stream_writer_type
 ;; asyncio_run(args, nargs) — asyncio.run(coro)
 ;; Main event loop entry point.
 ;; ============================================================================
-AR_CORO  equ 8
-AR_TASK  equ 16
-AR_FRAME equ 16
+AR_FRAME equ 16             ; + 2 pushes = 32
 DEF_FUNC asyncio_run_func, AR_FRAME
     push rbx
     push r12
@@ -114,19 +100,13 @@ DEF_FUNC asyncio_run_func, AR_FRAME
     ret
 
 .ar_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "asyncio.run() takes exactly 1 argument"
-    call raise_exception
+    RAISE exc_TypeError_type, "asyncio.run() takes exactly 1 argument"
 
 .ar_type_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "asyncio.run() requires a coroutine"
-    call raise_exception
+    RAISE exc_TypeError_type, "asyncio.run() requires a coroutine"
 
 .ar_reentrant:
-    lea rdi, [rel exc_RuntimeError_type]
-    CSTRING rsi, "asyncio.run() cannot be called from a running event loop"
-    call raise_exception
+    RAISE exc_RuntimeError_type, "asyncio.run() cannot be called from a running event loop"
 END_FUNC asyncio_run_func
 
 ;; ============================================================================
@@ -190,19 +170,15 @@ DEF_FUNC asyncio_sleep_func
     ret
 
 .as_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "asyncio.sleep() takes exactly 1 argument"
-    call raise_exception
+    RAISE exc_TypeError_type, "asyncio.sleep() takes exactly 1 argument"
 
 .as_type_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "asyncio.sleep() delay must be a number"
-    call raise_exception
+    RAISE exc_TypeError_type, "asyncio.sleep() delay must be a number"
 END_FUNC asyncio_sleep_func
 
 ;; ============================================================================
 ;; sleep_awaitable_iter_self — tp_iter for SleepAwaitable (return self)
-sleep_awaitable_iter_self:
+DEF_FUNC_BARE sleep_awaitable_iter_self
     inc qword [rdi + PyObject.ob_refcnt]
     mov rax, rdi
     ret
@@ -211,7 +187,7 @@ END_FUNC sleep_awaitable_iter_self
 ;; sleep_awaitable_iternext — tp_iternext for SleepAwaitable
 ;; First call: yield (delay_ns, TAG_SLEEP). Second call: return NULL (done).
 ;; ============================================================================
-sleep_awaitable_iternext:
+DEF_FUNC_BARE sleep_awaitable_iternext
     ; rdi = SleepAwaitable*
     cmp dword [rdi + SleepAwaitable.yielded], 0
     jne .sai_done
@@ -231,7 +207,7 @@ END_FUNC sleep_awaitable_iternext
 ;; ============================================================================
 ;; sleep_awaitable_dealloc
 ;; ============================================================================
-sleep_awaitable_dealloc:
+DEF_FUNC_BARE sleep_awaitable_dealloc
     ; Simple object with no refs to DECREF
     jmp ap_free                ; tail call
 END_FUNC sleep_awaitable_dealloc
@@ -242,7 +218,7 @@ END_FUNC sleep_awaitable_dealloc
 ;; ============================================================================
 WF_INNER equ 8
 WF_DELAY equ 16
-WF_FRAME equ 16
+WF_FRAME equ 16             ; + 1 push = 24, not 16-aligned
 DEF_FUNC asyncio_wait_for_func, WF_FRAME
     push rbx
 
@@ -316,20 +292,16 @@ DEF_FUNC asyncio_wait_for_func, WF_FRAME
     ret
 
 .wf_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "asyncio.wait_for() takes exactly 2 arguments"
-    call raise_exception
+    RAISE exc_TypeError_type, "asyncio.wait_for() takes exactly 2 arguments"
 
 .wf_type_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "asyncio.wait_for() timeout must be a number"
-    call raise_exception
+    RAISE exc_TypeError_type, "asyncio.wait_for() timeout must be a number"
 END_FUNC asyncio_wait_for_func
 
 ;; ============================================================================
 ;; wait_for_awaitable_iter_self — tp_iter for WaitForAwaitable (return self)
 ;; ============================================================================
-wait_for_awaitable_iter_self:
+DEF_FUNC_BARE wait_for_awaitable_iter_self
     inc qword [rdi + PyObject.ob_refcnt]
     mov rax, rdi
     ret
@@ -341,7 +313,7 @@ END_FUNC wait_for_awaitable_iter_self
 ;; State 1: resumed — check inner task, return result or raise TimeoutError.
 ;; State 2+: exhausted.
 ;; ============================================================================
-wait_for_awaitable_iternext:
+DEF_FUNC_BARE wait_for_awaitable_iternext
     ; rdi = WaitForAwaitable*
     mov eax, [rdi + WaitForAwaitable.state]
 
@@ -403,9 +375,7 @@ wait_for_awaitable_iternext:
     mov rax, [rbx + WaitForAwaitable.inner_task]
     mov dword [rax + AsyncTask.cancelling], 1
 
-    lea rdi, [rel exc_TimeoutError_type]
-    CSTRING rsi, "asyncio.wait_for() timed out"
-    call raise_exception
+    RAISE exc_TimeoutError_type, "asyncio.wait_for() timed out"
     RET_NULL
     pop rbx
     ret
@@ -414,7 +384,7 @@ END_FUNC wait_for_awaitable_iternext
 ;; ============================================================================
 ;; wait_for_awaitable_dealloc — tp_dealloc for WaitForAwaitable
 ;; ============================================================================
-wait_for_awaitable_dealloc:
+DEF_FUNC_BARE wait_for_awaitable_dealloc
     push rdi                   ; save self
     ; DECREF inner_task
     mov rdi, [rdi + WaitForAwaitable.inner_task]
@@ -436,7 +406,7 @@ END_FUNC wait_for_awaitable_dealloc
 ;; asyncio_create_task(args, nargs) — asyncio.create_task(coro)
 ;; ============================================================================
 ACT_TASK equ 8
-ACT_FRAME equ 16
+ACT_FRAME equ 16            ; + 0 pushes = 16
 DEF_FUNC asyncio_create_task_func, ACT_FRAME
     cmp rsi, 1
     jne .act_error
@@ -456,9 +426,7 @@ DEF_FUNC asyncio_create_task_func, ACT_FRAME
     ret
 
 .act_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "asyncio.create_task() takes exactly 1 argument"
-    call raise_exception
+    RAISE exc_TypeError_type, "asyncio.create_task() takes exactly 1 argument"
 END_FUNC asyncio_create_task_func
 
 ;; ============================================================================
@@ -537,9 +505,7 @@ DEF_FUNC asyncio_gather_func
     ; DECREF the partially-built list
     mov rdi, r13
     call obj_decref
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "asyncio.gather() arguments must be coroutines"
-    call raise_exception
+    RAISE exc_TypeError_type, "asyncio.gather() arguments must be coroutines"
 END_FUNC asyncio_gather_func
 
 ;; ============================================================================
@@ -561,16 +527,13 @@ DEF_FUNC asyncio_get_running_loop_func
     ret
 
 .grl_error:
-    lea rdi, [rel exc_RuntimeError_type]
-    CSTRING rsi, "no running event loop"
-    call raise_exception
+    RAISE exc_RuntimeError_type, "no running event loop"
 END_FUNC asyncio_get_running_loop_func
 
 ;; ============================================================================
 ;; asyncio_module_create() -> PyObject*
 ;; Creates and returns the asyncio module.
 ;; ============================================================================
-global asyncio_module_create
 DEF_FUNC asyncio_module_create
     push rbx
     push r12
@@ -765,7 +728,7 @@ END_FUNC asyncio_module_create
 ;; ============================================================================
 section .rodata
 align 8
-async_1e9: dq 0x41CDCD6500000000   ; 1e9 as IEEE 754 double
+async_1e9: dq 0x41cdcd6500000000   ; 1e9 as IEEE 754 double
 
 am_asyncio:          db "asyncio", 0
 am_run:              db "run", 0

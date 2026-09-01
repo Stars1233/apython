@@ -24,7 +24,6 @@
 extern uniname_blob
 extern uniname_blob_end
 extern uniname_cp
-extern uniname_count
 extern uniname_cjk_ranges
 extern uniname_cjk_ranges_end
 
@@ -40,7 +39,6 @@ section .text
 UN_NAME  equ 8
 UN_LEN   equ 16
 UN_FRAME equ 24          ; + 3 pushes = 48
-global uniname_lookup
 DEF_FUNC uniname_lookup, UN_FRAME
     push rbx
     push r12
@@ -84,7 +82,7 @@ DEF_FUNC uniname_lookup, UN_FRAME
 .cjk_digit:
     shl r8, 4
     or r8, rax
-    cmp r8, 0x10FFFF
+    cmp r8, 0x10ffff
     ja .miss
     inc rcx
     jmp .cjk_hex

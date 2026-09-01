@@ -1,8 +1,7 @@
-; code_obj.asm - Code object type
+; pyo/code.asm - Code object type
 
 %include "macros.inc"
 %include "object.inc"
-%include "types.inc"
 
 extern none_singleton
 extern ap_free
@@ -20,7 +19,7 @@ extern type_type
 ; --- code_new frame layout ---
 CN_SPEC  equ 8
 CN_CODE  equ 16
-CN_FRAME equ 16
+CN_FRAME equ 16             ; + 2 pushes = 32
 
 ;; ============================================================================
 ;; code_new(CodeSpec *spec) -> PyCodeObject*

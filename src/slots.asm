@@ -22,8 +22,6 @@
 
 %include "macros.inc"
 %include "object.inc"
-%include "types.inc"
-%include "builtins.inc"
 
 ; Where a slot lives: directly in PyTypeObject, or in one of the three
 ; method tables it points at.  A table is allocated for a type only when it
@@ -221,9 +219,7 @@ DEF_FUNC slot_nb_bool
     ret
 .not_bool:
     add rsp, 16
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "__bool__ should return bool"
-    call raise_exception
+    RAISE exc_TypeError_type, "__bool__ should return bool"
 .failed:
     call slot_reraise
 END_FUNC slot_nb_bool
@@ -319,9 +315,7 @@ DEF_FUNC slot_length
     ret
 .negative:
     extern exc_ValueError_type
-    lea rdi, [rel exc_ValueError_type]
-    CSTRING rsi, "__len__() should return >= 0"
-    call raise_exception
+    RAISE exc_ValueError_type, "__len__() should return >= 0"
 .failed:
     call slot_reraise
 END_FUNC slot_length
@@ -416,9 +410,7 @@ DEF_FUNC_LOCAL slot_reraise
 .no_exc:
     extern raise_exception
     extern exc_RuntimeError_type
-    lea rdi, [rel exc_RuntimeError_type]
-    CSTRING rsi, "slot wrapper failed without an exception"
-    call raise_exception
+    RAISE exc_RuntimeError_type, "slot wrapper failed without an exception"
 END_FUNC slot_reraise
 
 ;; ============================================================================
@@ -476,10 +468,10 @@ DEF_FUNC slot_tp_iternext
 END_FUNC slot_tp_iternext
 
 
-;; ----------------------------------------------------------------------------
+;; ============================================================================
 ;; slot_is_object_default(rdi = the value a dunder lookup returned) -> eax 0/1
 ;; True when it is one of the implementations object itself supplies.
-;; ----------------------------------------------------------------------------
+;; ============================================================================
 DEF_FUNC_LOCAL slot_is_object_default
     V_TEST_PTR rdi, rax
     ja .no
@@ -521,9 +513,8 @@ END_FUNC slot_is_object_default
 TIS_TYPE  equ 8
 TIS_ENTRY equ 16
 TIS_FOUND equ 24
-TIS_FRAME equ 32
+TIS_FRAME equ 32            ; + 2 pushes = 48
 
-global type_install_slots
 DEF_FUNC type_install_slots, TIS_FRAME
     push rbx
     push r12

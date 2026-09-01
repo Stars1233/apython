@@ -1,10 +1,12 @@
-; func_obj.asm - Function object type for apython
+; func.asm - Functions, closures, and the cells they close over
+;
+; A cell is not a user-visible type; it exists only because a function
+; needs somewhere to put a free variable, so it lives with the code that
+; builds closures.
 ; Implements PyFuncObject: creation, calling, deallocation, and type descriptor
 
 %include "macros.inc"
 %include "object.inc"
-%include "types.inc"
-%include "frame.inc"
 %include "opcodes.inc"
 
 extern none_singleton
@@ -12,7 +14,6 @@ extern ap_malloc
 extern gc_alloc
 extern gc_track
 extern gc_dealloc
-extern ap_free
 extern obj_decref
 extern obj_incref
 extern obj_dealloc
@@ -22,17 +23,14 @@ extern frame_new
 extern frame_free
 extern tuple_new
 extern type_type
-extern func_traverse
-extern func_clear
 extern exc_TypeError_type
 extern raise_exception
 
-
-; ---------------------------------------------------------------------------
-; func_new(PyCodeObject *code, PyObject *globals) -> PyFuncObject*
-; Allocate and initialize a new function object.
-; rdi = code object, rsi = globals dict
-; ---------------------------------------------------------------------------
+;; ============================================================================
+;; func_new(PyCodeObject *code, PyObject *globals) -> PyFuncObject*
+;; Allocate and initialize a new function object.
+;; rdi = code object, rsi = globals dict
+;; ============================================================================
 DEF_FUNC func_new
     push rbx
     push r12
@@ -85,22 +83,22 @@ DEF_FUNC func_new
     ret
 END_FUNC func_new
 
-; ---------------------------------------------------------------------------
-; func_call(PyFuncObject *callable, PyObject **args_ptr, int nargs) -> PyObject*
-; tp_call implementation for function objects.
-; rdi = function object, rsi = pointer to args array, edx = nargs
-;
-; r12 still holds the CALLER's frame pointer (callee-saved, set by eval loop,
-; preserved through op_call).
-;
-; Full argument binding following CPython initialize_locals:
-;   1. Create **kwargs dict if CO_VARKEYWORDS
-;   2. Copy positional args
-;   3. Handle *args (CO_VARARGS)
-;   4. Match keyword args (from kw_names_pending)
-;   5. Apply positional defaults (func_defaults)
-;   6. Apply kw-only defaults (func_kwdefaults)
-; ---------------------------------------------------------------------------
+;; ============================================================================
+;; func_call(PyFuncObject *callable, PyObject **args_ptr, int nargs) -> PyObject*
+;; tp_call implementation for function objects.
+;; rdi = function object, rsi = pointer to args array, edx = nargs
+;;
+;; r12 still holds the CALLER's frame pointer (callee-saved, set by eval loop,
+;; preserved through op_call).
+;;
+;; Full argument binding following CPython initialize_locals:
+;;   1. Create **kwargs dict if CO_VARKEYWORDS
+;;   2. Copy positional args
+;;   3. Handle *args (CO_VARARGS)
+;;   4. Match keyword args (from kw_names_pending)
+;;   5. Apply positional defaults (func_defaults)
+;;   6. Apply kw-only defaults (func_kwdefaults)
+;; ============================================================================
 extern kw_names_pending
 extern dict_new
 extern dict_set
@@ -429,9 +427,7 @@ DEF_FUNC func_call
     mov rdi, r12
     call frame_free
     pop rsi
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "function missing required argument"
-    call raise_exception
+    RAISE exc_TypeError_type, "function missing required argument"
 .args_valid:
     ; === Phase 7: Call eval_frame ===
     mov rdi, r12
@@ -461,16 +457,16 @@ DEF_FUNC func_call
     ret
 END_FUNC func_call
 
-; ---------------------------------------------------------------------------
-; func_bind_kwargs - Bind keyword arguments to frame locals
-;
-; rdi = function object
-; rsi = frame
-; rdx = args_ptr
-; ecx = positional_count
-; r8  = kw_names tuple (NOT NULL)
-; r9  = kwargs_dict (or NULL if no CO_VARKEYWORDS)
-; ---------------------------------------------------------------------------
+;; ============================================================================
+;; func_bind_kwargs - Bind keyword arguments to frame locals
+;;
+;; rdi = function object
+;; rsi = frame
+;; rdx = args_ptr
+;; ecx = positional_count
+;; r8  = kw_names tuple (NOT NULL)
+;; r9  = kwargs_dict (or NULL if no CO_VARKEYWORDS)
+;; ============================================================================
 DEF_FUNC func_bind_kwargs
     push rbx
     push r12
@@ -589,9 +585,7 @@ DEF_FUNC func_bind_kwargs
 
 .kw_unexpected:
     ; Raise TypeError for unexpected keyword argument
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "got an unexpected keyword argument"
-    call raise_exception
+    RAISE exc_TypeError_type, "got an unexpected keyword argument"
 
 .kw_next:
     inc qword [rsp+16]
@@ -608,11 +602,11 @@ DEF_FUNC func_bind_kwargs
     ret
 END_FUNC func_bind_kwargs
 
-; ---------------------------------------------------------------------------
-; func_dealloc(PyFuncObject *self)
-; Releases references to internal objects and frees the function.
-; rdi = function object
-; ---------------------------------------------------------------------------
+;; ============================================================================
+;; func_dealloc(PyFuncObject *self)
+;; Releases references to internal objects and frees the function.
+;; rdi = function object
+;; ============================================================================
 DEF_FUNC func_dealloc
     push rbx
     push r12                ; alignment padding (3 pushes = RSP aligned)
@@ -669,12 +663,12 @@ DEF_FUNC func_dealloc
     ret
 END_FUNC func_dealloc
 
-; ---------------------------------------------------------------------------
-; func_setattr(PyFuncObject *self, PyObject *name, PyObject *value)
-; Set an arbitrary attribute on a function object.
-; Lazily creates func_dict on first use.
-; rdi = function, rsi = name, rdx = value
-; ---------------------------------------------------------------------------
+;; ============================================================================
+;; func_setattr(PyFuncObject *self, PyObject *name, PyObject *value)
+;; Set an arbitrary attribute on a function object.
+;; Lazily creates func_dict on first use.
+;; rdi = function, rsi = name, rdx = value
+;; ============================================================================
 DEF_FUNC func_setattr
     push rbx
     push r12
@@ -740,11 +734,11 @@ DEF_FUNC func_setattr
     ret
 END_FUNC func_setattr
 
-; ---------------------------------------------------------------------------
-; func_getattr(PyFuncObject *self, PyObject *name) -> PyObject* or NULL
-; Get an attribute from a function. Checks func_dict for arbitrary attrs.
-; rdi = function, rsi = name
-; ---------------------------------------------------------------------------
+;; ============================================================================
+;; func_getattr(PyFuncObject *self, PyObject *name) -> PyObject* or NULL
+;; Get an attribute from a function. Checks func_dict for arbitrary attrs.
+;; rdi = function, rsi = name
+;; ============================================================================
 extern ap_strcmp
 extern str_type
 extern str_from_cstr_heap
@@ -1018,24 +1012,24 @@ DEF_FUNC func_getattr
     ret
 END_FUNC func_getattr
 
-; ---------------------------------------------------------------------------
-; func_repr(PyFuncObject *self) -> PyStrObject*
-; Returns the string "<function>"
-; rdi = function object
-; ---------------------------------------------------------------------------
+;; ============================================================================
+;; func_repr(PyFuncObject *self) -> PyStrObject*
+;; Returns the string "<function>"
+;; rdi = function object
+;; ============================================================================
 DEF_FUNC_BARE func_repr
     lea rdi, [rel func_repr_str]
     jmp str_from_cstr
 END_FUNC func_repr
 
-; ---------------------------------------------------------------------------
-; raise_too_many_positional(PyFuncObject *func, int nargs_given)
-; Raise TypeError with CPython-format message:
-;   "qualname() takes N positional arguments but M were given"
-;   or "qualname() takes from N to M positional arguments but K were given"
-; rdi = func, esi = nargs_given
-; Does not return.
-; ---------------------------------------------------------------------------
+;; ============================================================================
+;; raise_too_many_positional(PyFuncObject *func, int nargs_given)
+;; Raise TypeError with CPython-format message:
+;;   "qualname() takes N positional arguments but M were given"
+;;   or "qualname() takes from N to M positional arguments but K were given"
+;; rdi = func, esi = nargs_given
+;; Does not return.
+;; ============================================================================
 RTMP_BUF  equ 256
 RTMP_FRAME equ RTMP_BUF + 24
 DEF_FUNC raise_too_many_positional, RTMP_FRAME
@@ -1220,9 +1214,9 @@ rtmp_was_given:    db " was given", 0
 
 section .text
 
-; ---------------------------------------------------------------------------
-; Data section
-; ---------------------------------------------------------------------------
+;; ============================================================================
+;; Data section
+;; ============================================================================
 section .data
 
 func_name_str:  db "function", 0
@@ -1270,3 +1264,209 @@ func_type:
     dq func_traverse                        ; tp_traverse
     dq func_clear                        ; tp_clear
     dq 0       ; tp_dictoffset
+
+;; ============================================================================
+;; (was src/pyo/cell.asm)
+;; ============================================================================
+
+section .text
+
+extern ap_malloc
+extern gc_alloc
+extern gc_track
+extern gc_dealloc
+extern obj_incref
+extern obj_dealloc
+extern str_from_cstr
+extern type_type
+
+;; ============================================================================
+;; cell_new(rdi = contents Value) -> PyCellObject*
+;; Create a new cell holding the Value (0 for an empty cell), INCREFing it.
+;; ============================================================================
+DEF_FUNC cell_new
+    push rbx
+    push r12
+    mov rbx, rdi               ; contents Value
+
+    mov edi, PyCellObject_size
+    lea rsi, [rel cell_type]
+    call gc_alloc
+    ; rax = new cell (ob_refcnt=1, ob_type set)
+    INCREF_V rbx, r12
+    mov [rax + PyCellObject.ob_ref], rbx
+
+    ; Track in GC
+    push rax
+    mov rdi, rax
+    call gc_track
+    pop rax
+
+.done:
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC cell_new
+
+
+
+;; ============================================================================
+;; cell_dealloc(PyCellObject *self)
+;; ============================================================================
+DEF_FUNC cell_dealloc
+    push rbx
+    mov rbx, rdi
+
+    mov rdi, [rbx + PyCellObject.ob_ref]
+    DECREF_V rdi, rsi
+
+.free:
+    mov rdi, rbx
+    call gc_dealloc
+
+    pop rbx
+    leave
+    ret
+END_FUNC cell_dealloc
+
+;; ============================================================================
+;; cell_repr(PyCellObject *self) -> PyStrObject*
+;; ============================================================================
+DEF_FUNC_BARE cell_repr
+    lea rdi, [rel cell_repr_str]
+    jmp str_from_cstr
+END_FUNC cell_repr
+
+;; ============================================================================
+;; Data
+;; ============================================================================
+section .data
+
+cell_name_str: db "cell", 0
+cell_repr_str: db "<cell>", 0
+
+align 8
+global cell_type
+cell_type:
+    dq 1                      ; ob_refcnt (immortal)
+    dq type_type              ; ob_type
+    dq cell_name_str          ; tp_name
+    dq PyCellObject_size      ; tp_basicsize
+    dq cell_dealloc           ; tp_dealloc
+    dq cell_repr              ; tp_repr
+    dq cell_repr              ; tp_str
+    dq 0                      ; tp_hash
+    dq 0                      ; tp_call
+    dq 0                      ; tp_getattr
+    dq 0                      ; tp_setattr
+    dq 0                      ; tp_richcompare
+    dq 0                      ; tp_iter
+    dq 0                      ; tp_iternext
+    dq 0                      ; tp_init
+    dq 0                      ; tp_new
+    dq 0                      ; tp_as_number
+    dq 0                      ; tp_as_sequence
+    dq 0                      ; tp_as_mapping
+    dq 0                      ; tp_base
+    dq 0                      ; tp_dict
+    dq 0                      ; tp_mro
+    dq TYPE_FLAG_HAVE_GC                      ; tp_flags
+    dq 0                      ; tp_bases
+    dq cell_traverse                        ; tp_traverse
+    dq cell_clear                        ; tp_clear
+    dq 0       ; tp_dictoffset
+
+section .text
+
+;; ============================================================================
+;; GC traverse and clear.  These lived in gc.asm, which left the collector
+;; holding the reference graph of every type in the system; a type's own
+;; file is the only place that knows which of its fields are owned.
+;; ============================================================================
+
+; ---- func_traverse / func_clear ----
+DEF_FUNC func_traverse
+    push rbx
+    mov rbx, rdi
+
+    mov rdi, [rbx + PyFuncObject.func_code]
+    VISIT_PTR rdi
+    mov rdi, [rbx + PyFuncObject.func_globals]
+    VISIT_PTR rdi
+    mov rdi, [rbx + PyFuncObject.func_name]
+    VISIT_PTR rdi
+    mov rdi, [rbx + PyFuncObject.func_defaults]
+    VISIT_PTR rdi
+    mov rdi, [rbx + PyFuncObject.func_closure]
+    VISIT_PTR rdi
+    mov rdi, [rbx + PyFuncObject.func_kwdefaults]
+    VISIT_PTR rdi
+    mov rdi, [rbx + PyFuncObject.func_dict]
+    VISIT_PTR rdi
+
+    pop rbx
+    leave
+    ret
+END_FUNC func_traverse
+
+DEF_FUNC func_clear
+    push rbx
+    mov rbx, rdi
+
+    ; NULL out closure, defaults, kwdefaults, func_dict — XDECREF each
+    mov rdi, [rbx + PyFuncObject.func_closure]
+    mov qword [rbx + PyFuncObject.func_closure], 0
+    test rdi, rdi
+    jz .no_clos
+    call obj_decref
+.no_clos:
+    mov rdi, [rbx + PyFuncObject.func_defaults]
+    mov qword [rbx + PyFuncObject.func_defaults], 0
+    test rdi, rdi
+    jz .no_defs
+    call obj_decref
+.no_defs:
+    mov rdi, [rbx + PyFuncObject.func_kwdefaults]
+    mov qword [rbx + PyFuncObject.func_kwdefaults], 0
+    test rdi, rdi
+    jz .no_kwd
+    call obj_decref
+.no_kwd:
+    mov rdi, [rbx + PyFuncObject.func_dict]
+    mov qword [rbx + PyFuncObject.func_dict], 0
+    test rdi, rdi
+    jz .no_fdict
+    call obj_decref
+.no_fdict:
+
+    pop rbx
+    leave
+    ret
+END_FUNC func_clear
+
+; ---- cell_traverse / cell_clear ----
+DEF_FUNC cell_traverse
+    push rbx
+    mov rbx, rdi
+
+    mov rdi, [rbx + PyCellObject.ob_ref]
+    VISIT_V rdi, rsi
+
+    pop rbx
+    leave
+    ret
+END_FUNC cell_traverse
+
+DEF_FUNC cell_clear
+    push rbx
+    mov rbx, rdi
+
+    mov rdi, [rbx + PyCellObject.ob_ref]
+    mov qword [rbx + PyCellObject.ob_ref], 0
+    DECREF_V rdi, rsi
+
+    pop rbx
+    leave
+    ret
+END_FUNC cell_clear

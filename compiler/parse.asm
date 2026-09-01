@@ -40,7 +40,6 @@ extern comp_error
 
 extern ap_free
 extern ap_malloc
-extern ap_memcpy
 extern buf_free
 extern buf_init
 extern buf_push_u8
@@ -61,10 +60,10 @@ extern none_singleton
 
 extern exc_SyntaxError_type
 
-;; ---------------------------------------------------------------------------
+;; ============================================================================
 ;; Binding powers, in steps of two so that a right-associative operator is
 ;; simply "recurse at lbp - 1" and there is still room between levels.
-;; ---------------------------------------------------------------------------
+;; ============================================================================
 ; The binding powers live in compiler.inc: pattern.asm needs them too.
 
 ; PRule.flags
@@ -81,7 +80,6 @@ struc PRule
 endstruc                 ; 24
 
 ; --- Named frame-layout constants ---
-PE_COMP  equ 8
 PE_MINBP equ 16
 PE_LEFT  equ 24
 PE_RULE  equ 32
@@ -277,7 +275,6 @@ END_FUNC par_expr
 ;; the whole job from there: int_from_cstr_base with base 0 handles 0x/0o/0b
 ;; and underscores, and strtod handles every float spelling.
 ;; ============================================================================
-PN_COMP  equ 8
 PN_TOK   equ 16
 PN_BUF   equ 24
 PN_HEAP  equ 32
@@ -428,7 +425,6 @@ END_FUNC par_number
 ;; Prefix handlers.  Each consumes its own token and returns a node index.
 
 ;; pf_unary(Comp *c) -> node   -- +x, -x, ~x, not x
-PFU_COMP  equ 8
 PFU_LINE  equ 16
 PFU_OP    equ 24
 PFU_RBP   equ 32
@@ -498,7 +494,6 @@ END_FUNC pf_unary
 ;; ============================================================================
 
 ;; in_binop(Comp *c, node left) -> node
-IB_COMP  equ 8
 IB_LEFT  equ 16
 IB_LINE  equ 24
 IB_OP    equ 32
@@ -547,7 +542,6 @@ END_FUNC in_binop
 ;;
 ;; `a and b and c` becomes one node with three operands rather than a nest of
 ;; two, so codegen emits a single exit label and one jump per operand.
-IO_COMP  equ 8
 IO_LEFT  equ 16
 IO_LINE  equ 24
 IO_OP    equ 32
@@ -643,7 +637,6 @@ END_FUNC in_boolop
 ;; continues only while lbp > min_bp, so an equal power stops -- and the
 ;; expression came out left-nested, which for `"pos" if x > 0 else "zero" if
 ;; x == 0 else "neg"` answers "neg" for a positive x.
-IT_COMP  equ 8
 IT_BODY  equ 16
 IT_LINE  equ 24
 IT_TEST  equ 32
@@ -718,7 +711,6 @@ END_FUNC in_ternary
 ;;
 ;; `not in` and `is not` are two tokens each and are recognised here rather
 ;; than in the lexer, because `not` and `is` are ordinary operators elsewhere.
-IC_COMP  equ 8
 IC_LEFT  equ 16
 IC_LINE  equ 24
 IC_MARK  equ 32
@@ -894,7 +886,6 @@ END_FUNC par_cmpop
 ;; ============================================================================
 
 ;; pf_number(Comp *c) -> node
-PFN_COMP  equ 8
 PFN_LINE  equ 16
 PFN_FRAME equ 24         ; + 1 push = 32
 DEF_FUNC_LOCAL pf_number, PFN_FRAME
@@ -975,7 +966,6 @@ DEF_FUNC_LOCAL pf_const, PFN_FRAME
 END_FUNC pf_const
 
 ;; pf_name(Comp *c) -> node
-PFM_COMP  equ 8
 PFM_LINE  equ 16
 PFM_TOK   equ 24
 PFM_FRAME equ 24         ; + 1 push = 32
@@ -1036,12 +1026,12 @@ DEF_FUNC par_utf8_emit, 16
 
     mov rsi, r12
     shr rsi, 18
-    or esi, 0xF0
+    or esi, 0xf0
     mov rdi, rbx
     call buf_push_u8
     mov rsi, r12
     shr rsi, 12
-    and esi, 0x3F
+    and esi, 0x3f
     or esi, 0x80
     mov rdi, rbx
     call buf_push_u8
@@ -1049,13 +1039,13 @@ DEF_FUNC par_utf8_emit, 16
 .three:
     mov rsi, r12
     shr rsi, 12
-    or esi, 0xE0
+    or esi, 0xe0
     mov rdi, rbx
     call buf_push_u8
 .tail2:
     mov rsi, r12
     shr rsi, 6
-    and esi, 0x3F
+    and esi, 0x3f
     or esi, 0x80
     mov rdi, rbx
     call buf_push_u8
@@ -1063,12 +1053,12 @@ DEF_FUNC par_utf8_emit, 16
 .two:
     mov rsi, r12
     shr rsi, 6
-    or esi, 0xC0
+    or esi, 0xc0
     mov rdi, rbx
     call buf_push_u8
 .tail1:
     mov rsi, r12
-    and esi, 0x3F
+    and esi, 0x3f
     or esi, 0x80
     mov rdi, rbx
     call buf_push_u8
@@ -1355,14 +1345,12 @@ END_FUNC par_escape_one
 ;; for the purposes of finding the end, which is why r"\" is unterminated in
 ;; Python as well.
 ;; ============================================================================
-PB_COMP  equ 8
 PB_TOK   equ 16
 PB_OUT   equ 24
 PB_P     equ 32
 PB_END   equ 40
 PB_RAW   equ 48
 PB_BYTES equ 56
-PB_ACC   equ 64
 PB_FRAME equ 72          ; + 3 pushes = 96
 DEF_FUNC par_string_body, PB_FRAME
     push rbx
@@ -1484,10 +1472,9 @@ END_FUNC par_string_body
 ;; whole run is consumed here, which is why it happens in the prefix handler
 ;; rather than as an infix operator -- there is no operator to speak of.
 ;; ============================================================================
-PS2_COMP  equ 8
 PS2_LINE  equ 16
 PS2_BYTES equ 24
-PS2_BUF   equ 64         ; a Buf at [rbp - 64]
+PS2_BUF   equ 64         ; a Buf lives here
 PS2_FRAME equ 72         ; + 1 push = 80
 DEF_FUNC_LOCAL pf_string, PS2_FRAME
     push rbx
@@ -1643,7 +1630,6 @@ END_FUNC par_run_has_fstring
 ;; par_fstring_piece_any(Comp *c, Token *t, uint64_t mark) -> 1 ok, 0 error
 ;; One literal of a run, whether or not it is an f-string.
 ;; ============================================================================
-PFA_COMP  equ 8
 PFA_TOK   equ 16
 PFA_MARK  equ 24
 PFA_BUF   equ 64
@@ -1732,7 +1718,6 @@ END_FUNC par_fstring_piece_any
 ;;
 ;; Returns the mark to hand to ast_commit; rax = -1 on error.
 ;; ============================================================================
-PL_COMP  equ 8
 PL_CLOSE equ 16
 PL_FLAG  equ 24
 PL_MARK  equ 32
@@ -1791,7 +1776,6 @@ END_FUNC par_exprlist
 ;; par_finish_list(Comp *c, int kind, int line, uint64_t mark) -> node
 ;; Commits the staged children onto a fresh node.
 ;; ============================================================================
-PF_COMP  equ 8
 PF_MARK  equ 16
 PF_NODE  equ 24
 PF_FRAME equ 24          ; + 1 push = 32
@@ -1828,7 +1812,6 @@ END_FUNC par_finish_list
 ;; tuple only when a comma appears.  That is why the trailing-comma flag is
 ;; tracked: (a) is a, and (a,) is a one-tuple.
 ;; ============================================================================
-PG_COMP  equ 8
 PG_LINE  equ 16
 PG_MARK  equ 24
 PG_COMMA equ 32
@@ -2022,7 +2005,6 @@ END_FUNC pf_list
 ;; a bare `**` means a dict too.  An empty {} is a dict, not a set, because
 ;; there is no set literal for the empty set.
 ;; ============================================================================
-PD_COMP  equ 8
 PD_LINE  equ 16
 PD_MARK  equ 24
 PD_ISDICT equ 32
@@ -2221,7 +2203,6 @@ END_FUNC pf_dictset
 ;; Legal only inside a display, a call or a target list; the emitters reject it
 ;; anywhere else, which is what makes `*x + 1` a syntax error.
 ;; ============================================================================
-PST_COMP  equ 8
 PST_LINE  equ 16
 PST_KIND  equ 24
 PST_FRAME equ 24         ; + 1 push = 32
@@ -2270,7 +2251,6 @@ END_FUNC pf_starred
 ;; ============================================================================
 ;; in_attr(Comp *c, node value) -> node   -- value.name
 ;; ============================================================================
-IA_COMP  equ 8
 IA_VAL   equ 16
 IA_LINE  equ 24
 IA_FRAME equ 24          ; + 1 push = 32
@@ -2447,7 +2427,6 @@ END_FUNC par_subscript_item
 ;; separate n-ary subscript node -- the tuple IS the index, which is why
 ;; `d[1,]` and `d[(1,)]` are the same expression.
 ;; ============================================================================
-IS_COMP  equ 8
 IS_VAL   equ 16
 IS_LINE  equ 24
 IS_IDX   equ 32
@@ -2546,7 +2525,6 @@ END_FUNC in_subscript
 ;; AST_DOUBLESTARRED; codegen decides from what it finds whether a plain CALL
 ;; will do or whether the call has to be assembled through CALL_FUNCTION_EX.
 ;; ============================================================================
-ICL_COMP  equ 8
 ICL_FUNC  equ 16
 ICL_LINE  equ 24
 ICL_MARK  equ 32
@@ -2731,7 +2709,6 @@ END_FUNC par_peek_next
 ;; because a comma is not in the table at all: `lambda: a, b` is a tuple
 ;; containing a lambda.
 ;; ============================================================================
-PLM_COMP  equ 8
 PLM_LINE  equ 16
 PLM_ARGS  equ 24
 PLM_NODE  equ 32
@@ -3270,7 +3247,7 @@ END_FUNC in_walrus
 
 section .rodata
 
-;; ---------------------------------------------------------------------------
+;; ============================================================================
 ;; prule_table - the expression grammar, one row per token kind.
 ;;
 ;; GENERATED.  Edit ROWS in compiler/gen_prule.py and re-run it.
@@ -3285,7 +3262,7 @@ section .rodata
 ;; A comma is deliberately absent.  Tuples are built by the callers that
 ;; actually permit them, because a comma in this table would silently swallow
 ;; call arguments, subscripts and assignment targets.
-;; ---------------------------------------------------------------------------
+;; ============================================================================
 align 8
 prule_table:
     dq 0           , 0           

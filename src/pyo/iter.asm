@@ -1,18 +1,13 @@
-; iter_obj.asm - Iterator types and range object
+; pyo/iter.asm - Iterator types and range object
 ; Phase 9: list_iter, tuple_iter, range_iter, range_obj
 
 %include "macros.inc"
 %include "object.inc"
-%include "types.inc"
 
 extern ap_malloc
 extern gc_alloc
-extern gc_track
-extern gc_dealloc
 extern ap_free
 extern obj_decref
-extern str_from_cstr
-extern int_from_i64
 extern fatal_error
 extern list_type
 extern tuple_type
@@ -107,8 +102,7 @@ END_FUNC list_iter_dealloc
 ;; list_iter_self(PyObject *self) -> PyObject*
 ;; tp_iter for iterators: return self with INCREF
 ;; ============================================================================
-global iter_self
-iter_self:
+DEF_FUNC_BARE iter_self
     inc qword [rdi + PyObject.ob_refcnt]
     mov rax, rdi
     ret
@@ -274,7 +268,7 @@ END_FUNC range_iter_next
 ;; ============================================================================
 ;; range_iter_dealloc(PyObject *self)
 ;; ============================================================================
-range_iter_dealloc:
+DEF_FUNC_BARE range_iter_dealloc
     jmp ap_free                ; no references to DECREF, just free
 END_FUNC range_iter_dealloc
 
@@ -282,7 +276,7 @@ END_FUNC range_iter_dealloc
 ;; range_iter_self(PyObject *self) -> PyObject*
 ;; Range iterator returns itself
 ;; ============================================================================
-range_iter_self:
+DEF_FUNC_BARE range_iter_self
     inc qword [rdi + PyObject.ob_refcnt]
     mov rax, rdi
     ret
@@ -319,7 +313,7 @@ END_FUNC range_obj_tp_iter
 ;; ============================================================================
 ;; range_obj_dealloc(PyObject *self)
 ;; ============================================================================
-range_obj_dealloc:
+DEF_FUNC_BARE range_obj_dealloc
     jmp ap_free                ; no references to DECREF, just free
 END_FUNC range_obj_dealloc
 
@@ -403,10 +397,8 @@ DEF_FUNC range_obj_sq_item
     ret
 
 .index_error:
-    lea rdi, [rel exc_IndexError_type]
-    CSTRING rsi, "range object index out of range"
     extern raise_exception
-    call raise_exception
+    RAISE exc_IndexError_type, "range object index out of range"
 END_FUNC range_obj_sq_item
 
 ;; ============================================================================
@@ -555,10 +547,9 @@ END_FUNC range_obj_reversed
 ;; Returns "range(start, stop)" or "range(start, stop, step)" if step != 1
 ;; ============================================================================
 extern str_from_cstr_heap
-extern obj_repr
 ROR_BUF equ 8
 ROR_POS equ 16
-ROR_FRAME equ 16
+ROR_FRAME equ 16            ; + 4 pushes = 48
 DEF_FUNC range_obj_repr, ROR_FRAME
     push rbx
     push r12

@@ -16,14 +16,12 @@
 
 %include "macros.inc"
 %include "object.inc"
-%include "types.inc"
 %include "value.inc"
 %include "opcodes.inc"
 
 extern ap_malloc
 extern ap_free
 extern gc_alloc
-extern gc_track
 extern obj_incref
 extern obj_decref
 extern obj_dealloc
@@ -53,9 +51,9 @@ extern v_int_bias
 
 section .text
 
-; ----------------------------------------------------------------------------
-; weakref_table_get() -> rax = the side table, creating it on first use
-; ----------------------------------------------------------------------------
+;; ============================================================================
+;; weakref_table_get() -> rax = the side table, creating it on first use
+;; ============================================================================
 DEF_FUNC_LOCAL weakref_table_get
     mov rax, [rel weakref_table]
     test rax, rax
@@ -67,9 +65,9 @@ DEF_FUNC_LOCAL weakref_table_get
     ret
 END_FUNC weakref_table_get
 
-; ----------------------------------------------------------------------------
-; weakref_chain(rdi = referent) -> rax = the list of references, or 0
-; ----------------------------------------------------------------------------
+;; ============================================================================
+;; weakref_chain(rdi = referent) -> rax = the list of references, or 0
+;; ============================================================================
 DEF_FUNC_LOCAL weakref_chain
     push rbx
     mov rbx, rdi
@@ -90,19 +88,18 @@ DEF_FUNC_LOCAL weakref_chain
     ret
 END_FUNC weakref_chain
 
-; ----------------------------------------------------------------------------
-; weakref_clear_for(rdi = object about to be freed)
-;
-; Called from obj_dealloc, and only when the table is non-empty.  Every
-; reference to the object is emptied before any callback runs, so a callback
-; that looks at the reference sees a dead one, as CPython guarantees.
-; ----------------------------------------------------------------------------
+;; ============================================================================
+;; weakref_clear_for(rdi = object about to be freed)
+;;
+;; Called from obj_dealloc, and only when the table is non-empty.  Every
+;; reference to the object is emptied before any callback runs, so a callback
+;; that looks at the reference sees a dead one, as CPython guarantees.
+;; ============================================================================
 WC_OBJ   equ 8
 WC_LIST  equ 16
 WC_IDX   equ 24
 WC_EXC   equ 32
-WC_FRAME equ 48
-global weakref_clear_for
+WC_FRAME equ 48             ; + 2 pushes = 64
 DEF_FUNC weakref_clear_for, WC_FRAME
     push rbx
     push r12
@@ -206,14 +203,14 @@ DEF_FUNC weakref_clear_for, WC_FRAME
     ret
 END_FUNC weakref_clear_for
 
-; ----------------------------------------------------------------------------
-; weakref_make(rdi = type, rsi = referent, rdx = callback or 0) -> rax = ref
-; ----------------------------------------------------------------------------
+;; ============================================================================
+;; weakref_make(rdi = type, rsi = referent, rdx = callback or 0) -> rax = ref
+;; ============================================================================
 WM_TYPE  equ 8
 WM_OBJ   equ 16
 WM_CB    equ 24
 WM_REF   equ 32
-WM_FRAME equ 48
+WM_FRAME equ 48             ; + 1 push = 56, not 16-aligned
 DEF_FUNC_LOCAL weakref_make, WM_FRAME
     push rbx
     mov [rbp - WM_TYPE], rdi
@@ -320,9 +317,9 @@ DEF_FUNC_LOCAL weakref_make, WM_FRAME
     ret
 END_FUNC weakref_make
 
-; ----------------------------------------------------------------------------
-; ref_dealloc / ref_call / ref_repr / ref_hash / ref_richcompare
-; ----------------------------------------------------------------------------
+;; ============================================================================
+;; ref_dealloc / ref_call / ref_repr / ref_hash / ref_richcompare
+;; ============================================================================
 DEF_FUNC_LOCAL ref_dealloc
     push rbx
     mov rbx, rdi
@@ -355,18 +352,15 @@ DEF_FUNC ref_deref
     V_PACK rax, rdx
     ret
 .dead:
-    lea rax, [rel none_singleton]
-    inc qword [rax + PyObject.ob_refcnt]
-    mov edx, TAG_PTR
+    RET_NONE
     leave
     V_PACK rax, rdx
     ret
 END_FUNC ref_deref
 
 RR_SELF  equ 8
-RR_LEN   equ 16
 RR_BUF   equ 1040
-RR_FRAME equ 1056
+RR_FRAME equ 1056           ; + 2 pushes = 1072
 DEF_FUNC_LOCAL ref_repr, RR_FRAME
     push rbx
     push r12
@@ -439,9 +433,7 @@ DEF_FUNC_LOCAL ref_hash
     leave
     ret
 .dead:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "weak object has gone away"
-    call raise_exception
+    RAISE exc_TypeError_type, "weak object has gone away"
 END_FUNC ref_hash
 
 ; Two live references compare as their referents do; a dead one only ever
@@ -449,7 +441,7 @@ END_FUNC ref_hash
 RC_SELF  equ 8
 RC_OTHER equ 16
 RC_OP    equ 24
-RC_FRAME equ 32
+RC_FRAME equ 32             ; + 0 pushes = 32
 DEF_FUNC_LOCAL ref_richcompare, RC_FRAME
     mov [rbp - RC_SELF], rdi
     mov [rbp - RC_OTHER], rsi
@@ -504,9 +496,9 @@ DEF_FUNC_LOCAL ref_richcompare, RC_FRAME
     ret
 END_FUNC ref_richcompare
 
-; ----------------------------------------------------------------------------
-; ref(object[, callback]) -- tp_new for ReferenceType and its subclasses
-; ----------------------------------------------------------------------------
+;; ============================================================================
+;; ref(object[, callback]) -- tp_new for ReferenceType and its subclasses
+;; ============================================================================
 DEF_FUNC ref_construct
     ; rdi = type, rsi = args, rdx = nargs
     cmp rdx, 1
@@ -539,18 +531,14 @@ DEF_FUNC ref_construct
     ret
 .not_referenceable:
     pop rbx
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "cannot create weak reference to this object"
-    call raise_exception
+    RAISE exc_TypeError_type, "cannot create weak reference to this object"
 .bad:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "ref expected at least 1 argument"
-    call raise_exception
+    RAISE exc_TypeError_type, "ref expected at least 1 argument"
 END_FUNC ref_construct
 
-; ----------------------------------------------------------------------------
-; proxy objects: the same structure, forwarding attribute access
-; ----------------------------------------------------------------------------
+;; ============================================================================
+;; proxy objects: the same structure, forwarding attribute access
+;; ============================================================================
 DEF_FUNC_LOCAL proxy_referent
     mov rax, [rdi + PyWeakRefObject.wr_object]
     test rax, rax
@@ -558,9 +546,7 @@ DEF_FUNC_LOCAL proxy_referent
     leave
     ret
 .dead:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "weakly-referenced object no longer exists"
-    call raise_exception
+    RAISE exc_TypeError_type, "weakly-referenced object no longer exists"
 END_FUNC proxy_referent
 
 DEF_FUNC proxy_getattr
@@ -618,9 +604,7 @@ DEF_FUNC proxy_setattr
     leave
     ret
 .no_setattr:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "proxy object does not support attribute assignment"
-    call raise_exception
+    RAISE exc_TypeError_type, "proxy object does not support attribute assignment"
 END_FUNC proxy_setattr
 
 DEF_FUNC proxy_repr
@@ -650,14 +634,12 @@ DEF_FUNC proxy_call
     leave
     ret
 .not_callable:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "proxy object is not callable"
-    call raise_exception
+    RAISE exc_TypeError_type, "proxy object is not callable"
 END_FUNC proxy_call
 
-; ----------------------------------------------------------------------------
-; Module functions
-; ----------------------------------------------------------------------------
+;; ============================================================================
+;; Module functions
+;; ============================================================================
 DEF_FUNC wr_proxy_func
     ; proxy(object[, callback])
     cmp rsi, 1
@@ -700,9 +682,7 @@ DEF_FUNC wr_proxy_func
 .bad_pop:
     pop rbx
 .bad:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "cannot create weak proxy to this object"
-    call raise_exception
+    RAISE exc_TypeError_type, "cannot create weak proxy to this object"
 END_FUNC wr_proxy_func
 
 DEF_FUNC wr_getweakrefcount_func
@@ -807,34 +787,15 @@ DEF_FUNC wr_remove_dead_func
 .none_pop:
     pop rbx
 .none:
-    lea rax, [rel none_singleton]
-    inc qword [rax + PyObject.ob_refcnt]
-    mov edx, TAG_PTR
+    RET_NONE
     leave
     V_PACK rax, rdx
     ret
 END_FUNC wr_remove_dead_func
 
-; ============================================================================
-; Module construction
-; ============================================================================
-%macro WR_ADD_FUNC 2
-    lea rdi, [rel %1]
-    lea rsi, [rel %2]
-    call builtin_func_new
-    push rax
-    lea rdi, [rel %2]
-    call str_from_cstr_heap
-    push rax
-    mov rdi, r12
-    mov rsi, rax
-    mov rdx, [rsp + 8]
-    call dict_set
-    pop rdi
-    call obj_decref
-    pop rdi
-    call obj_decref
-%endmacro
+;; ============================================================================
+;; Module construction
+;; ============================================================================
 
 %macro WR_ADD_TYPE 2
     lea rdi, [rel %2]
@@ -848,8 +809,7 @@ END_FUNC wr_remove_dead_func
     call obj_decref
 %endmacro
 
-WRM_FRAME equ 8
-global weakref_module_create
+WRM_FRAME equ 8             ; + 2 pushes = 24, not 16-aligned
 DEF_FUNC weakref_module_create, WRM_FRAME
     push rbx
     push r12
@@ -857,10 +817,10 @@ DEF_FUNC weakref_module_create, WRM_FRAME
     call dict_new
     mov r12, rax
 
-    WR_ADD_FUNC wr_proxy_func,           wrm_proxy
-    WR_ADD_FUNC wr_getweakrefcount_func, wrm_getweakrefcount
-    WR_ADD_FUNC wr_getweakrefs_func,     wrm_getweakrefs
-    WR_ADD_FUNC wr_remove_dead_func,     wrm_remove_dead
+    MODULE_ADD_FUNC wr_proxy_func,           wrm_proxy
+    MODULE_ADD_FUNC wr_getweakrefcount_func, wrm_getweakrefcount
+    MODULE_ADD_FUNC wr_getweakrefs_func,     wrm_getweakrefs
+    MODULE_ADD_FUNC wr_remove_dead_func,     wrm_remove_dead
 
     WR_ADD_TYPE weakref_type,       wrm_ref
     WR_ADD_TYPE weakref_type,       wrm_ReferenceType

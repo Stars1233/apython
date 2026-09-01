@@ -88,10 +88,12 @@
     section .text
 %endmacro
 
-; Reference counting (heap pointers only — callers must not pass SmallInts)
+; Reference counting (heap pointers only — callers must not pass SmallInts).
+; INCREF checks nothing: hand it an immediate int or a NULL and it writes
+; through a non-pointer.  Use INCREF_V for a Value whose kind is not
+; established, or obj_incref, which at least checks for NULL.
 %macro INCREF 1
     inc qword [%1 + PyObject.ob_refcnt]
-    %%skip:
 %endmacro
 
 %macro DECREF 1
@@ -104,7 +106,8 @@
     %%skip:
 %endmacro
 
-; Safe DECREF for register (doesn't push/pop if arg is rdi)
+; DECREF for a register operand.  Always clobbers rdi, and the zero path calls
+; obj_dealloc, so every caller-saved register dies there.
 %macro DECREF_REG 1
     dec qword [%1 + PyObject.ob_refcnt]
     jnz %%skip
@@ -113,39 +116,24 @@
     %%skip:
 %endmacro
 
-%macro XDECREF 1
-    test %1, %1
-    jz %%skip
-    dec qword [%1 + PyObject.ob_refcnt]
-    jnz %%skip
-    push rdi
-    mov rdi, %1
-    call obj_dealloc
-    pop rdi
-    %%skip:
-%endmacro
-
 ; Opcode dispatch - inline decode + jump (direct threading)
 ; Each DISPATCH site gets its own BTB entry for better branch prediction.
-; Falls back to centralized eval_dispatch when tracing is enabled.
+;
+; The jump goes through opcode_dispatch_table, a pointer, rather than straight
+; at opcode_table.  That is what makes `-t` work: tracing swaps the pointer for
+; a table of 256 entries that all reach eval_trace_thunk, which prints and then
+; jumps to the real handler.  The cost is a load where there used to be an lea,
+; and no branch at all -- the previous arrangement tested a flag only inside
+; eval_dispatch, which nothing reaches, so `-t` printed one opcode per frame.
 %macro DISPATCH 0
     mov [rel eval_saved_rbx], rbx  ; save bytecode IP for exception unwind
     mov [rel eval_saved_r13], r13  ; save value stack ptr for exception unwind
     movzx eax, byte [rbx]         ; load opcode
     movzx ecx, byte [rbx+1]      ; load arg into ecx
     add rbx, 2                     ; advance past instruction word
-    lea rdx, [rel opcode_table]
+    mov rdx, [rel opcode_dispatch_table]
     jmp [rdx + rax*8]             ; dispatch to handler
 %endmacro
-
-; Declare extern libc function
-%macro EXTERN_C 1
-    extern %1
-%endmacro
-
-; Align stack to 16 bytes before call (System V ABI requirement)
-; Usage: ALIGN_STACK_CALL func_name
-; Note: most of the time push rbp / mov rbp, rsp handles this
 
 ; Save/restore callee-saved registers used in eval loop
 %macro SAVE_EVAL_REGS 0
@@ -172,11 +160,48 @@
     lea %1, [rel %%str]
 %endmacro
 
+; Raise an exception with a literal message.  436 sites hand-rolled this triple.
+; raise_exception does not return, so nothing follows it.
+;
+;   RAISE exc_TypeError_type, "descriptive error message"
+;
+; The macro declares no externs of its own: eval.asm *defines* raise_exception
+; and exception.asm defines the exception types, so an extern here would
+; collide with the definition.  Declare them per file, as before.
+%macro RAISE 2                  ; %1 = exception type symbol, %2 = message
+    lea rdi, [rel %1]
+    CSTRING rsi, %2
+    call raise_exception
+%endmacro
+
+; Build a builtin function and store it in a module dict under its own name.
+; abcmod, weakrefmod and sre_module each carried a byte-identical private copy
+; of this (ABC_ADD_FUNC, WR_ADD_FUNC, SRE_ADD_FUNC).  r12 holds the dict.
+;
+;   MODULE_ADD_FUNC impl_symbol, name_cstr_symbol
+;
+%macro MODULE_ADD_FUNC 2        ; %1 = implementation, %2 = NUL-terminated name
+    lea rdi, [rel %1]
+    lea rsi, [rel %2]
+    call builtin_func_new
+    push rax
+    lea rdi, [rel %2]
+    call str_from_cstr_heap
+    push rax
+    mov rdi, r12
+    mov rsi, rax
+    mov rdx, [rsp + 8]
+    call dict_set
+    pop rdi
+    call obj_decref
+    pop rdi
+    call obj_decref
+%endmacro
+
 ; Load co_names payload pointer (&tuple.ob_item[0]) into a register
 %macro LOAD_CO_NAMES 1          ; %1 = dest reg
     mov %1, [rel eval_co_names]
 %endmacro
-
 
 ; ==========================================================================
 ; LEGACY (payload, tag) SUPPORT — being retired
@@ -196,9 +221,7 @@
 ; False are the immortal heap singletons and travel as TAG_PTR.
 TAG_NULL     equ 0           ; null/empty slot
 TAG_SMALLINT equ 1           ; payload = int64_t (full 64-bit range)
-TAG_I64      equ TAG_SMALLINT
 TAG_FLOAT    equ 2           ; payload = double bits (IEEE 754)
-TAG_F64      equ TAG_FLOAT
 TAG_RC_BIT   equ 0x80        ; bit 7: refcounted flag
 TAG_PTR      equ (5 | TAG_RC_BIT)    ; heap PyObject*, refcounted
 TAG_SLEEP    equ 7           ; payload = delay_ns (uint64) — async sleep sentinel
@@ -310,6 +333,20 @@ TAG_IO_WAIT  equ 8           ; payload = fd | (direction << 32) — async I/O se
 ; Fat return of None: (rax = none_singleton, edx = TAG_PTR).  Clobbers rax.
 %macro RET_NONE 0
     lea rax, [rel none_singleton]
+    inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
+%endmacro
+
+; Fat return of a constant bool.  110 sites open-coded one of these three
+; three-line sequences; RET_NONE already existed, its bool siblings did not.
+%macro RET_TRUE 0
+    lea rax, [rel bool_true]
+    inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
+%endmacro
+
+%macro RET_FALSE 0
+    lea rax, [rel bool_false]
     inc qword [rax + PyObject.ob_refcnt]
     mov edx, TAG_PTR
 %endmacro
@@ -594,7 +631,6 @@ TP_DICT_AT_TAIL equ -1
 
 ; Mark stack as non-executable and reset to .text section
 ASM_INIT
-
 
 ; MRO_NEXT walker, origin -- advance `walker` to the next entry of `origin`'s
 ; method resolution order, or 0 at the end.  For a type with no tp_mro (every

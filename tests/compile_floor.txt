@@ -232,12 +232,14 @@ test_str_methods_extra
 test_str_methods_fix
 test_str_mod_subclass
 test_str_predicates
+test_str_search
 test_str_subclass_dict
 test_subclass_item_slots
 test_super_descriptors
 test_syntax_error_args
 test_syntax_error_location
 test_syntax_error_offset
+test_sys_argv
 test_sys_exit
 test_traceback
 test_tuples

@@ -10,30 +10,23 @@
 
 %include "macros.inc"
 %include "object.inc"
-%include "types.inc"
-%include "gc.inc"
 
 extern int_promote_mpz
 extern ap_malloc
 extern gc_alloc
 extern gc_track
 extern gc_untrack
-extern gc_dealloc
 extern ap_free
 extern obj_incref
 extern obj_dealloc
-extern obj_decref
 extern str_from_cstr
 extern none_singleton
 extern bool_type
 extern exc_ValueError_type
 extern int_type
 extern type_type
-extern slice_traverse
-extern slice_clear_gc
 extern raise_exception
 extern exc_TypeError_type
-extern exc_AttributeError_type
 extern ap_strcmp
 
 ;; ============================================================================
@@ -154,7 +147,7 @@ END_FUNC slice_repr
 ;; pyobj_to_i64(PyObject *obj) -> int64 in rax
 ;; Converts SmallInt or GMP int to int64. For None, returns special sentinel.
 ;; ============================================================================
-pyobj_to_i64:
+DEF_FUNC_BARE pyobj_to_i64
     ; rdi = payload, esi = tag
     cmp esi, TAG_SMALLINT
     je .smallint
@@ -196,7 +189,7 @@ pyobj_to_i64:
     call __gmpz_cmp_si wrt ..plt
     test eax, eax
     js .gmp_clamp_neg
-    mov rax, 0x7FFFFFFFFFFFFFFE  ; positive: clamp to near-maxsize (not sentinel)
+    mov rax, 0x7ffffffffffffffe  ; positive: clamp to near-maxsize (not sentinel)
     leave
     ret
 .gmp_clamp_neg:
@@ -207,12 +200,10 @@ pyobj_to_i64:
     mov rax, rdi
     ret
 .is_none:
-    mov rax, 0x7FFFFFFFFFFFFFFF  ; sentinel for "not specified"
+    mov rax, 0x7fffffffffffffff  ; sentinel for "not specified"
     ret
 .not_an_index:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "slice indices must be integers or None"
-    call raise_exception
+    RAISE exc_TypeError_type, "slice indices must be integers or None"
 END_FUNC pyobj_to_i64
 
 ;; ============================================================================
@@ -335,9 +326,7 @@ DEF_FUNC slice_indices
     leave
     ret
 .step_is_zero:
-    lea rdi, [rel exc_ValueError_type]
-    CSTRING rsi, "slice step cannot be zero"
-    call raise_exception
+    RAISE exc_ValueError_type, "slice step cannot be zero"
 END_FUNC slice_indices
 
 ;; ============================================================================
@@ -345,7 +334,6 @@ END_FUNC slice_indices
 ;; Returns start, stop, step attributes.
 ;; rdi = self, rsi = name (PyStrObject*)
 ;; ============================================================================
-global slice_getattr
 DEF_FUNC slice_getattr
     push rbx
     push r12
@@ -417,7 +405,6 @@ END_FUNC slice_getattr
 ;; slice(stop), slice(start, stop), slice(start, stop, step)
 ;; rdi = self (slice_type), rsi = args (16-byte fat slots), rdx = nargs
 ;; ============================================================================
-global slice_type_call
 DEF_FUNC slice_type_call
     push rbx
 
@@ -473,9 +460,7 @@ DEF_FUNC slice_type_call
     ret
 
 .stc_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "slice() takes 1 to 3 arguments"
-    call raise_exception
+    RAISE exc_TypeError_type, "slice() takes 1 to 3 arguments"
 END_FUNC slice_type_call
 
 ;; ============================================================================
@@ -522,3 +507,49 @@ slice_type:
     dq slice_traverse                        ; tp_traverse
     dq slice_clear_gc                        ; tp_clear
     dq 0           ; tp_dictoffset
+
+section .text
+
+;; ============================================================================
+;; GC traverse and clear.  These lived in gc.asm, which left the collector
+;; holding the reference graph of every type in the system; a type's own
+;; file is the only place that knows which of its fields are owned.
+;; ============================================================================
+
+; ---- slice_traverse / slice_clear ----
+DEF_FUNC slice_traverse
+    push rbx
+    mov rbx, rdi
+
+    mov rdi, [rbx + PySliceObject.start]
+    VISIT_V rdi, rsi
+    mov rdi, [rbx + PySliceObject.stop]
+    VISIT_V rdi, rsi
+    mov rdi, [rbx + PySliceObject.step]
+    VISIT_V rdi, rsi
+
+    pop rbx
+    leave
+    ret
+END_FUNC slice_traverse
+
+DEF_FUNC slice_clear_gc
+    push rbx
+    mov rbx, rdi
+
+    mov rdi, [rbx + PySliceObject.start]
+    mov qword [rbx + PySliceObject.start], 0
+    DECREF_V rdi, rsi
+
+    mov rdi, [rbx + PySliceObject.stop]
+    mov qword [rbx + PySliceObject.stop], 0
+    DECREF_V rdi, rsi
+
+    mov rdi, [rbx + PySliceObject.step]
+    mov qword [rbx + PySliceObject.step], 0
+    DECREF_V rdi, rsi
+
+    pop rbx
+    leave
+    ret
+END_FUNC slice_clear_gc

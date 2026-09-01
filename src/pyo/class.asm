@@ -1,11 +1,8 @@
-; class_obj.asm - Class instances and bound methods for apython
+; pyo/class.asm - Class instances and bound methods for apython
 ; Phase 10: class instantiation, attribute access, __init__ dispatch
 
 %include "macros.inc"
 %include "object.inc"
-%include "builtins.inc"
-%include "types.inc"
-%include "frame.inc"
 
 extern ap_malloc
 extern gc_alloc
@@ -39,18 +36,12 @@ extern sys_write
 extern current_exception
 extern dict_type
 extern tuple_type
-extern method_traverse
-extern method_clear
-extern instance_traverse
-extern instance_clear
 extern int_type
 extern str_type
 extern staticmethod_type
 extern classmethod_type
 extern property_type
-extern property_descr_get
 extern eval_frame
-extern frame_new
 extern frame_free
 
 ;; ============================================================================
@@ -83,7 +74,6 @@ ISN_TYPE  equ 8
 ISN_VAL   equ 16
 ISN_TAG   equ 24
 ISN_FRAME equ 32          ; + 2 pushes = 48
-global int_sub_new
 DEF_FUNC int_sub_new, ISN_FRAME
     push rbx
     push r12
@@ -154,9 +144,8 @@ END_FUNC int_sub_new
 ;; ============================================================================
 SSN_TYPE  equ 8
 SSN_SRC   equ 16
-SSN_FRAME equ 32
+SSN_FRAME equ 32            ; + 2 pushes = 48
 
-global str_sub_new
 DEF_FUNC str_sub_new, SSN_FRAME
     push rbx
     push r12
@@ -262,9 +251,8 @@ END_FUNC str_sub_new
 ;; ============================================================================
 TSF_INST  equ 8
 TSF_TMP   equ 16
-TSF_FRAME equ 32
+TSF_FRAME equ 32            ; + 3 pushes = 56, not 16-aligned
 
-global tuple_sub_fill
 DEF_FUNC tuple_sub_fill, TSF_FRAME
     push rbx
     push r12
@@ -323,7 +311,6 @@ DEF_FUNC tuple_sub_fill, TSF_FRAME
     ret
 END_FUNC tuple_sub_fill
 
-global builtin_sub_init_base
 DEF_FUNC builtin_sub_init_base
     push rbx
     mov rbx, rdi
@@ -425,7 +412,7 @@ DEF_FUNC instance_new
 END_FUNC instance_new
 
 ;; ============================================================================
-;; instance_getattr(PyInstanceObject *self, PyObject *name) -> PyObject*
+;; instance_getattr(PyInstanceObject *self, PyObject *name) -> rax = Value
 ;; Look up an attribute on an instance.
 ;; 1. Check self->inst_dict — return raw value
 ;; 2. If not found, check type->tp_dict (walk tp_base chain)
@@ -438,7 +425,7 @@ END_FUNC instance_new
 ;; ============================================================================
 IG_NAME   equ 8
 IG_ORIGIN equ 16        ; the type the MRO walk started from
-IG_FRAME  equ 32
+IG_FRAME  equ 32            ; + 3 pushes = 56, not 16-aligned
 DEF_FUNC instance_getattr, IG_FRAME
     push rbx
     push r12
@@ -589,9 +576,7 @@ DEF_FUNC instance_getattr, IG_FRAME
 .slot_not_set:
     ; Slot exists but not initialized — raise AttributeError directly
     ; (must not return NULL or LOAD_ATTR fallback finds descriptor in tp_dict)
-    lea rdi, [rel exc_AttributeError_type]
-    CSTRING rsi, "slot attribute not set"
-    call raise_exception
+    RAISE exc_AttributeError_type, "slot attribute not set"
 
 .not_found:
     ; Ordinary lookup missed.  __getattr__ is Python's hook for exactly that
@@ -817,16 +802,12 @@ DEF_FUNC instance_setattr
     ret
 
 .sa_no_dict_error:
-    lea rdi, [rel exc_AttributeError_type]
-    CSTRING rsi, "object has no attribute"
-    call raise_exception
+    RAISE exc_AttributeError_type, "object has no attribute"
 
 .sa_no_dict_slot:
     ; This type's instances have no dict slot -- a str subclass, or a class
     ; with __slots__ -- so there is nowhere to put the attribute.
-    lea rdi, [rel exc_AttributeError_type]
-    CSTRING rsi, "object has no attribute"
-    call raise_exception
+    RAISE exc_AttributeError_type, "object has no attribute"
 END_FUNC instance_setattr
 
 ;; ============================================================================
@@ -881,7 +862,7 @@ END_FUNC type_setattr
 ;; rdi = instance
 ;; ============================================================================
 ID_EXC   equ 8
-ID_FRAME equ 16
+ID_FRAME equ 16             ; + 1 push = 24, not 16-aligned
 DEF_FUNC instance_dealloc, ID_FRAME
     push rbx
 
@@ -1021,7 +1002,6 @@ END_FUNC instance_dealloc
 ;; Dealloc for heap-type subclasses of builtin types (bytes, bytearray, etc.)
 ;; These don't have inst_dict — just DECREF the type and free.
 ;; ============================================================================
-global builtin_sub_dealloc
 DEF_FUNC builtin_sub_dealloc
     push rbx
     mov rbx, rdi
@@ -1073,7 +1053,7 @@ DEF_FUNC_LOCAL base_slot
 END_FUNC base_slot
 
 IR_EXC   equ 8
-IR_FRAME equ 16
+IR_FRAME equ 16             ; + 1 push = 24, not 16-aligned
 DEF_FUNC instance_repr, IR_FRAME
     push rbx
     mov rbx, rdi
@@ -1159,7 +1139,7 @@ END_FUNC instance_repr
 ;; rdi = instance
 ;; ============================================================================
 IS_EXC   equ 8
-IS_FRAME equ 16
+IS_FRAME equ 16             ; + 1 push = 24, not 16-aligned
 DEF_FUNC instance_str, IS_FRAME
     push rbx
     mov rbx, rdi
@@ -1257,8 +1237,8 @@ END_FUNC instance_str
 ;; Returns: new instance
 ;; ============================================================================
 ; Local frame offsets for .normal_type_call (rbp-relative, after 5 pushes + sub rsp, 24)
-TC_NEW_FUNC equ 48              ; [rbp - 48]: saved __new__ func pointer
-TC_NEW_TAG  equ 56              ; [rbp - 56]: saved __new__ result tag
+TC_NEW_FUNC equ 48              ; saved __new__ func pointer
+TC_NEW_TAG  equ 56              ; saved __new__ result tag
 ; The keywords this call was made with.  __new__ consumes kw_names_pending, so
 ; __init__ has to be handed it again -- otherwise `M(name, bases, ns, **kwds)`
 ; reaches __init__ with the keyword values as extra positional arguments, and
@@ -1457,17 +1437,11 @@ DEF_FUNC type_call
     ret
 
 .type_three_bad_name:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "type() argument 1 must be str"
-    call raise_exception
+    RAISE exc_TypeError_type, "type() argument 1 must be str"
 .type_three_bad_bases:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "type() argument 2 must be a tuple of at most one base"
-    call raise_exception
+    RAISE exc_TypeError_type, "type() argument 2 must be a tuple of at most one base"
 .type_three_bad_ns:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "type() argument 3 must be dict"
-    call raise_exception
+    RAISE exc_TypeError_type, "type() argument 3 must be dict"
 
 .type_bool:
     extern bool_type
@@ -1548,9 +1522,7 @@ DEF_FUNC type_call
     ja .tc_not_abstract
     cmp qword [rax + PyDictObject.ob_size], 0
     je .tc_not_abstract
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "Can't instantiate abstract class with abstract methods"
-    call raise_exception
+    RAISE exc_TypeError_type, "Can't instantiate abstract class with abstract methods"
 .tc_not_abstract:
 
     ; Check if this type inherits from an exception type
@@ -1964,9 +1936,7 @@ DEF_FUNC type_call
     ret
 
 .init_not_callable:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "__init__ is not callable"
-    call raise_exception
+    RAISE exc_TypeError_type, "__init__ is not callable"
     ; does not return
 
 .new_not_callable:
@@ -1974,9 +1944,7 @@ DEF_FUNC type_call
     lea rax, [r13 + 1]
     shl rax, 4
     add rsp, rax
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "__new__ is not callable"
-    call raise_exception
+    RAISE exc_TypeError_type, "__new__ is not callable"
     ; does not return
 END_FUNC type_call
 
@@ -1990,7 +1958,7 @@ END_FUNC type_call
 extern tuple_new
 TGA_ORIGIN equ 8            ; the type the MRO walk started from
 TGA_META   equ 16           ; its metatype, for the second walk
-TGA_FRAME  equ 32
+TGA_FRAME  equ 32           ; + 2 pushes = 48
 DEF_FUNC type_getattr, TGA_FRAME
     push rbx
     push r12
@@ -2307,7 +2275,7 @@ DEF_FUNC method_new
 END_FUNC method_new
 
 ;; ============================================================================
-;; method_call(self_method, args, nargs) -> PyObject*
+;; method_call(self_method, args, nargs) -> rax = Value
 ;; Call a bound method: prepend im_self to args, dispatch to im_func's tp_call.
 ;; rdi = PyMethodObject*, rsi = args, rdx = nargs
 ;; ============================================================================
@@ -2416,7 +2384,7 @@ END_FUNC method_getattr
 MR_SELF  equ 8
 MR_LEN   equ 16
 MR_BUF   equ 1048
-MR_FRAME equ 1056
+MR_FRAME equ 1056           ; + 2 pushes = 1072
 DEF_FUNC method_repr, MR_FRAME
     push rbx
     push r12
@@ -2538,7 +2506,6 @@ END_FUNC method_repr
 ;; object_type_call(args, nargs) -> PyObject*
 ;; object() returns a bare instance of object_type
 ;; ============================================================================
-global object_type_call
 DEF_FUNC_BARE object_type_call
     ; Create a bare instance with object_type (gc_alloc since HAVE_GC)
     push rbp
@@ -2562,7 +2529,6 @@ END_FUNC object_type_call
 ;; Implements object.__new__(cls) — creates a bare instance of cls.
 ;; args[0] = cls (the type to instantiate)
 ;; ============================================================================
-global object_new_fn
 DEF_FUNC object_new_fn
     ; args[0] = cls
     mov rdi, [rdi]              ; cls payload (PyTypeObject*)
@@ -2578,7 +2544,6 @@ END_FUNC object_new_fn
 ;; Deallocator for user-defined heap types (created by __build_class__).
 ;; Frees tp_dict, tp_name string, and the type object itself.
 ;; ============================================================================
-global user_type_dealloc
 DEF_FUNC user_type_dealloc
     push rbx
     mov rbx, rdi                ; rbx = type object
@@ -2758,3 +2723,124 @@ method_type:
     dq method_traverse                        ; tp_traverse
     dq method_clear                        ; tp_clear
     dq 0         ; tp_dictoffset
+
+section .text
+
+;; ============================================================================
+;; GC traverse and clear.  These lived in gc.asm, which left the collector
+;; holding the reference graph of every type in the system; a type's own
+;; file is the only place that knows which of its fields are owned.
+;; ============================================================================
+
+; ---- method_traverse / method_clear ----
+DEF_FUNC method_traverse
+    push rbx
+    mov rbx, rdi
+
+    mov rdi, [rbx + PyMethodObject.im_func]
+    VISIT_PTR rdi
+    mov rdi, [rbx + PyMethodObject.im_self]
+    VISIT_V rdi, rsi            ; a Value: an immediate self is not an address
+
+    pop rbx
+    leave
+    ret
+END_FUNC method_traverse
+
+DEF_FUNC method_clear
+    push rbx
+    mov rbx, rdi
+
+    mov rdi, [rbx + PyMethodObject.im_func]
+    mov qword [rbx + PyMethodObject.im_func], 0
+    test rdi, rdi
+    jz .no_func
+    call obj_decref
+.no_func:
+    mov rdi, [rbx + PyMethodObject.im_self]
+    mov qword [rbx + PyMethodObject.im_self], 0
+    XDECREF_V rdi, rsi
+.no_self:
+
+    pop rbx
+    leave
+    ret
+END_FUNC method_clear
+
+; ---- instance_traverse / instance_clear ----
+DEF_FUNC instance_traverse
+    push rbx
+    push r12
+    push r13
+
+    mov rbx, rdi
+
+    ; Visit the instance dict, wherever this family keeps it
+    LOAD_INST_DICT rdi, rbx, .no_inst_dict
+    VISIT_PTR rdi
+.no_inst_dict:
+
+    ; Visit __slots__ values (one Value each, after the instance header).
+    ; The header ends at tp_dictoffset plus the dict word, or at
+    ; PyInstanceObject_size when the family keeps no dict.
+    mov rax, [rbx + PyObject.ob_type]
+    mov rcx, [rax + PyTypeObject.tp_dictoffset]
+    test rcx, rcx
+    jz .it_no_dict_hdr
+    cmp rcx, TP_DICT_AT_TAIL
+    je .it_no_dict_hdr          ; the dict is past the data, not in the header
+    add rcx, 8
+    jmp .it_have_hdr
+.it_no_dict_hdr:
+    ; No dict word: a str subclass, whose header is the base's, not
+    ; PyInstanceObject's.  Using 24 there found a phantom slot at +24 --
+    ; PyStrObject.ob_hash -- and XDECREF'd the hash as if it were a pointer.
+    mov rcx, [rax + PyTypeObject.tp_base]
+    test rcx, rcx
+    jz .it_no_dict_hdr_default
+    mov rcx, [rcx + PyTypeObject.tp_basicsize]
+    test rcx, rcx
+    jnz .it_have_hdr
+.it_no_dict_hdr_default:
+    mov rcx, PyInstanceObject_size
+.it_have_hdr:
+    mov rax, [rax + PyTypeObject.tp_basicsize]
+    sub rax, rcx
+    jle .done
+    shr rax, 3                  ; nslots
+    mov r13, rax
+    lea r12, [rbx + rcx]
+
+.slot_loop:
+    mov rdi, [r12]
+    VISIT_V rdi, rsi
+    add r12, 8
+    dec r13
+    jnz .slot_loop
+
+.done:
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC instance_traverse
+
+DEF_FUNC instance_clear
+    push rbx
+    mov rbx, rdi
+
+    ; XDECREF + NULL the instance dict, wherever this family keeps it
+    LOAD_INST_DICT rdi, rbx, .done
+    test rdi, rdi
+    jz .done
+    xor eax, eax
+    STORE_INST_DICT rbx, rax, rcx, .ic_decref
+.ic_decref:
+    call obj_decref
+
+.done:
+    pop rbx
+    leave
+    ret
+END_FUNC instance_clear

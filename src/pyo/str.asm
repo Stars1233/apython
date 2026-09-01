@@ -1,9 +1,8 @@
-; str_obj.asm - String type
+; pyo/str.asm - String type
 ; Phase 8: full string operations
 
 %include "macros.inc"
 %include "object.inc"
-%include "types.inc"
 
 extern none_singleton
 extern ap_malloc
@@ -13,7 +12,6 @@ extern ap_memcpy
 extern ap_strcmp
 extern bool_true
 extern bool_false
-extern int_from_i64
 extern int_to_i64
 extern fatal_error
 extern raise_exception
@@ -29,34 +27,33 @@ extern type_type
 extern obj_dealloc
 
 
-; ----------------------------------------------------------------------------
-; str_cp_width(rdi = bytes, rsi = byte length, rdx = offset) -> rax = width
-;
-; How many bytes the code point starting at `offset` occupies.  Every walk
-; over a string has to agree on this or the two index spaces drift apart: a
-; lead byte whose continuation bytes are missing, or a stray continuation byte
-; with no lead, is one code point of one byte, so a string that is not valid
-; UTF-8 has exactly as many code points as it has bytes and behaves the way it
-; did before there were two lengths at all.  bytes.decode() does not validate,
-; so such a string is reachable.
-; ----------------------------------------------------------------------------
-global str_cp_width
+;; ============================================================================
+;; str_cp_width(rdi = bytes, rsi = byte length, rdx = offset) -> rax = width
+;;
+;; How many bytes the code point starting at `offset` occupies.  Every walk
+;; over a string has to agree on this or the two index spaces drift apart: a
+;; lead byte whose continuation bytes are missing, or a stray continuation byte
+;; with no lead, is one code point of one byte, so a string that is not valid
+;; UTF-8 has exactly as many code points as it has bytes and behaves the way it
+;; did before there were two lengths at all.  bytes.decode() does not validate,
+;; so such a string is reachable.
+;; ============================================================================
 DEF_FUNC_BARE str_cp_width
     movzx ecx, byte [rdi + rdx]
     cmp cl, 0x80
     jb .one                         ; ASCII
-    cmp cl, 0xC0
+    cmp cl, 0xc0
     jb .one                         ; a continuation byte with no lead
     mov eax, 2
-    cmp cl, 0xE0
+    cmp cl, 0xe0
     jb .have_width
     mov eax, 3
-    cmp cl, 0xF0
+    cmp cl, 0xf0
     jb .have_width
     mov eax, 4
-    cmp cl, 0xF8
+    cmp cl, 0xf8
     jb .have_width
-    jmp .one                        ; 0xF8..0xFF is not a lead byte
+    jmp .one                        ; 0xf8..0xff is not a lead byte
 
 .have_width:
     ; Truncate at the end of the string, or at the first byte that is not a
@@ -73,7 +70,7 @@ DEF_FUNC_BARE str_cp_width
     jge .done
     lea r10, [rdx + r9]
     movzx ecx, byte [rdi + r10]
-    and cl, 0xC0
+    and cl, 0xc0
     cmp cl, 0x80
     jne .truncate
     inc r9
@@ -87,15 +84,55 @@ DEF_FUNC_BARE str_cp_width
     ret
 END_FUNC str_cp_width
 
-; ----------------------------------------------------------------------------
-; str_count_codepoints(rdi = bytes, rsi = byte length) -> rax = code points
-; ----------------------------------------------------------------------------
-global str_count_codepoints
+;; ============================================================================
+;; str_count_codepoints(rdi = bytes, rsi = byte length) -> rax = code points
+;;
+;; Runs on every string creation -- str_new_heap and str_from_cstr_heap both
+;; call str_set_length -- so every slice, concat, repr and format pays it.  The
+;; walk below issues a call per code point; for ASCII, which is nearly all of
+;; them, the answer is just the byte count.  Establish that first, eight bytes
+;; at a time, and only fall into the walk when a byte >= 0x80 turns up.
+;;
+;; str_byte_to_cp and str_cp_offset already had this short-circuit
+;; (`cmp ob_size, ob_length`); it was never applied to the function that
+;; *establishes* ob_length, which is the one that cannot assume it.
+;; ============================================================================
 DEF_FUNC str_count_codepoints
     push rbx
     push r12
     push r13
     push r14
+
+    ; --- ASCII probe: no high bit anywhere means one code point per byte ---
+    mov rax, rdi
+    mov rcx, rsi
+    mov rdx, 0x8080808080808080
+.ascii_word:
+    cmp rcx, 8
+    jb .ascii_tail
+    test rdx, [rax]
+    jnz .walk_setup
+    add rax, 8
+    sub rcx, 8
+    jmp .ascii_word
+.ascii_tail:
+    test rcx, rcx
+    jz .all_ascii
+    test byte [rax], 0x80
+    jnz .walk_setup
+    inc rax
+    dec rcx
+    jmp .ascii_tail
+.all_ascii:
+    mov rax, rsi                    ; one code point per byte
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.walk_setup:
     mov rbx, rdi
     mov r12, rsi
     xor r13d, r13d                  ; byte cursor
@@ -120,10 +157,9 @@ DEF_FUNC str_count_codepoints
     ret
 END_FUNC str_count_codepoints
 
-; ----------------------------------------------------------------------------
-; str_set_length(rdi = PyStrObject*) -- fill ob_length from the bytes.
-; ----------------------------------------------------------------------------
-global str_set_length
+;; ============================================================================
+;; str_set_length(rdi = PyStrObject*) -- fill ob_length from the bytes.
+;; ============================================================================
 DEF_FUNC str_set_length
     push rbx
     mov rbx, rdi
@@ -138,12 +174,11 @@ DEF_FUNC str_set_length
 END_FUNC str_set_length
 
 
-; ----------------------------------------------------------------------------
-; str_byte_to_cp(rdi = PyStrObject*, rsi = byte offset) -> rax = code point index
-; The inverse of str_cp_offset, for the methods that search in bytes and have
-; to report a position in code points.
-; ----------------------------------------------------------------------------
-global str_byte_to_cp
+;; ============================================================================
+;; str_byte_to_cp(rdi = PyStrObject*, rsi = byte offset) -> rax = code point index
+;; The inverse of str_cp_offset, for the methods that search in bytes and have
+;; to report a position in code points.
+;; ============================================================================
 DEF_FUNC str_byte_to_cp
     mov rax, [rdi + PyStrObject.ob_size]
     cmp rax, [rdi + PyStrObject.ob_length]
@@ -187,11 +222,10 @@ DEF_FUNC str_byte_to_cp
     ret
 END_FUNC str_byte_to_cp
 
-; ----------------------------------------------------------------------------
-; str_cp_offset(rdi = PyStrObject*, rsi = code point index) -> rax = byte offset
-; The index is not bounds-checked; an index at or past the end gives ob_size.
-; ----------------------------------------------------------------------------
-global str_cp_offset
+;; ============================================================================
+;; str_cp_offset(rdi = PyStrObject*, rsi = code point index) -> rax = byte offset
+;; The index is not bounds-checked; an index at or past the end gives ob_size.
+;; ============================================================================
 DEF_FUNC str_cp_offset
     mov rax, [rdi + PyStrObject.ob_size]
     cmp rax, [rdi + PyStrObject.ob_length]
@@ -238,17 +272,128 @@ DEF_FUNC str_cp_offset
     ret
 END_FUNC str_cp_offset
 
+;; ============================================================================
+;; str_search_window(rdi = self, rsi = args, rdx = nargs, rcx = out[3])
+;;   [out +  0] = pointer to the first byte of the window
+;;   [out +  8] = window length in bytes
+;;   [out + 16] = the window's start as a byte offset into self
+;;   -> eax = 1 when the window is usable, 0 when nothing can match in it
+;;
+;; The optional start/end arguments shared by find, rfind, index, rindex and
+;; count, resolved once.  Every one of those methods used to ignore them
+;; outright -- "abcabc".find("b", 3) was 1 -- because each read args[0] and
+;; args[1] and stopped.
+;;
+;; They are *code point* indices and clamp like a slice: negative counts from
+;; the end, end is capped at the length, and a start past the end matches
+;; nothing at all.  The search itself runs over bytes, so both are converted
+;; through str_cp_offset; for ASCII, which is the common case, that is the
+;; identity and costs one compare.
+;; ============================================================================
+SSW_SELF  equ 8
+SSW_ARGS  equ 16
+SSW_NARGS equ 24
+SSW_OUT   equ 32
+SSW_START equ 40
+SSW_END   equ 48
+SSW_FRAME equ 48            ; + 0 pushes = 48
+DEF_FUNC str_search_window, SSW_FRAME
+    mov [rbp - SSW_SELF], rdi
+    mov [rbp - SSW_ARGS], rsi
+    mov [rbp - SSW_NARGS], rdx
+    mov [rbp - SSW_OUT], rcx
 
-; ----------------------------------------------------------------------------
-; codec_id(rdi = encoding str, or 0 for the default) -> eax
-;   0 = utf-8, 1 = ascii, 2 = latin-1.  Raises LookupError for anything else.
-;
-; The three codecs the interpreter can do itself.  Everything else goes
-; through the codecs module, which is Python and cannot be reached from here.
-; ----------------------------------------------------------------------------
+    ; Defaults: the whole string.
+    xor eax, eax
+    mov [rbp - SSW_START], rax
+    mov rax, [rdi + PyStrObject.ob_length]
+    mov [rbp - SSW_END], rax
+
+    cmp qword [rbp - SSW_NARGS], 3
+    jl .ssw_bounds_done
+
+    mov rdi, [rbp - SSW_ARGS]
+    mov rdi, [rdi + 16]             ; args[2] = start
+    IS_NONE rdi, rax
+    je .ssw_start_done              ; None means the default, as in CPython
+    V_UNPACK rdi, rdx
+    call obj_as_index
+    mov rdi, [rbp - SSW_SELF]
+    test rax, rax
+    jns .ssw_start_set
+    add rax, [rdi + PyStrObject.ob_length]
+    jns .ssw_start_set
+    xor eax, eax                    ; still negative: clamp to the start
+.ssw_start_set:
+    mov [rbp - SSW_START], rax
+.ssw_start_done:
+
+    cmp qword [rbp - SSW_NARGS], 4
+    jl .ssw_bounds_done
+    mov rdi, [rbp - SSW_ARGS]
+    mov rdi, [rdi + 24]             ; args[3] = end
+    IS_NONE rdi, rax
+    je .ssw_bounds_done
+    V_UNPACK rdi, rdx
+    call obj_as_index
+    mov rdi, [rbp - SSW_SELF]
+    test rax, rax
+    jns .ssw_end_set
+    add rax, [rdi + PyStrObject.ob_length]
+    jns .ssw_end_set
+    xor eax, eax
+.ssw_end_set:
+    cmp rax, [rdi + PyStrObject.ob_length]
+    jle .ssw_end_store
+    mov rax, [rdi + PyStrObject.ob_length]
+.ssw_end_store:
+    mov [rbp - SSW_END], rax
+
+.ssw_bounds_done:
+    mov rdi, [rbp - SSW_SELF]
+    mov rax, [rbp - SSW_START]
+    cmp rax, [rdi + PyStrObject.ob_length]
+    jg .ssw_nothing                 ; start past the end
+    cmp rax, [rbp - SSW_END]
+    jg .ssw_nothing                 ; start past end: an empty window matches nothing
+
+    mov rsi, rax
+    call str_cp_offset              ; start, in bytes
+    mov [rbp - SSW_START], rax
+    mov rdi, [rbp - SSW_SELF]
+    mov rsi, [rbp - SSW_END]
+    call str_cp_offset              ; end, in bytes
+    mov rsi, [rbp - SSW_START]
+    sub rax, rsi                    ; window length
+
+    mov rcx, [rbp - SSW_OUT]
+    mov rdi, [rbp - SSW_SELF]
+    lea rdx, [rdi + PyStrObject.data]
+    add rdx, rsi
+    mov [rcx], rdx
+    mov [rcx + 8], rax
+    mov [rcx + 16], rsi
+    mov eax, 1
+    leave
+    ret
+
+.ssw_nothing:
+    xor eax, eax
+    leave
+    ret
+END_FUNC str_search_window
+
+
+
+;; ============================================================================
+;; codec_id(rdi = encoding str, or 0 for the default) -> eax
+;;   0 = utf-8, 1 = ascii, 2 = latin-1.  Raises LookupError for anything else.
+;;
+;; The three codecs the interpreter can do itself.  Everything else goes
+;; through the codecs module, which is Python and cannot be reached from here.
+;; ============================================================================
 CI_BUF   equ 48
-CI_FRAME equ 64
-global codec_id
+CI_FRAME equ 64             ; + 1 push = 72, not 16-aligned
 DEF_FUNC codec_id, CI_FRAME
     push rbx
     ; ap_strcmp compares eight bytes at a time, so the buffer has to be zeroed
@@ -354,9 +499,7 @@ DEF_FUNC codec_id, CI_FRAME
     ret
 .ci_unknown:
     extern exc_LookupError_type
-    lea rdi, [rel exc_LookupError_type]
-    CSTRING rsi, "unknown encoding"
-    call raise_exception
+    RAISE exc_LookupError_type, "unknown encoding"
 END_FUNC codec_id
 
 ; str_from_cstr_heap(const char *cstr) -> (rax=PyStrObject*, edx=TAG_PTR)
@@ -477,8 +620,9 @@ DEF_FUNC str_repr
     mov rbx, rdi            ; rbx = self
     mov r12, [rbx + PyStrObject.ob_size]  ; r12 = src length
 
-    ; Allocate worst case: header + 2 quotes + 2*length + 8 (NUL padding)
-    lea rdi, [r12*2 + PyStrObject.data + 10]
+    ; Allocate worst case: header + 2 quotes + 4*length + 8 (NUL padding).
+    ; Four, not two: a control character escapes to \xNN.
+    lea rdi, [r12*4 + PyStrObject.data + 10]
     call ap_malloc
     mov r13, rax             ; r13 = new str
 
@@ -533,10 +677,14 @@ DEF_FUNC str_repr
     je .sr_esc_r
     cmp al, 9                ; tab
     je .sr_esc_t
-    cmp al, 0x5C             ; backslash
+    cmp al, 0x5c             ; backslash
     je .sr_esc_bs
     cmp eax, r14d            ; the delimiter in use
     je .sr_esc_sq
+    cmp al, 0x20             ; the other C0 controls have no letter escape
+    jb .sr_esc_hex
+    cmp al, 0x7f             ; and neither does DEL
+    je .sr_esc_hex
 
     ; Normal character
     mov [rdi], al
@@ -545,37 +693,57 @@ DEF_FUNC str_repr
     jmp .sr_loop
 
 .sr_esc_n:
-    mov byte [rdi], 0x5C     ; backslash
+    mov byte [rdi], 0x5c     ; backslash
     mov byte [rdi + 1], 'n'
     add rdi, 2
     inc rcx
     jmp .sr_loop
 
 .sr_esc_r:
-    mov byte [rdi], 0x5C
+    mov byte [rdi], 0x5c
     mov byte [rdi + 1], 'r'
     add rdi, 2
     inc rcx
     jmp .sr_loop
 
 .sr_esc_t:
-    mov byte [rdi], 0x5C
+    mov byte [rdi], 0x5c
     mov byte [rdi + 1], 't'
     add rdi, 2
     inc rcx
     jmp .sr_loop
 
 .sr_esc_bs:
-    mov byte [rdi], 0x5C
-    mov byte [rdi + 1], 0x5C
+    mov byte [rdi], 0x5c
+    mov byte [rdi + 1], 0x5c
     add rdi, 2
     inc rcx
     jmp .sr_loop
 
 .sr_esc_sq:
-    mov byte [rdi], 0x5C
+    mov byte [rdi], 0x5c
     mov [rdi + 1], r14b      ; the delimiter in use
     add rdi, 2
+    inc rcx
+    jmp .sr_loop
+
+.sr_esc_hex:
+    ; \xNN, for a control character with no letter escape of its own.  These
+    ; used to be copied through raw, so repr("\x00") emitted an actual NUL --
+    ; unreadable, and not something eval() could read back.
+    mov byte [rdi], 0x5c
+    mov byte [rdi + 1], 'x'
+    lea r8, [rel sr_hexdigits]
+    mov edx, eax
+    shr edx, 4
+    and edx, 0x0f
+    movzx edx, byte [r8 + rdx]
+    mov [rdi + 2], dl
+    mov edx, eax
+    and edx, 0x0f
+    movzx edx, byte [r8 + rdx]
+    mov [rdi + 3], dl
+    add rdi, 4
     inc rcx
     jmp .sr_loop
 
@@ -601,6 +769,11 @@ DEF_FUNC str_repr
     leave
     ret
 END_FUNC str_repr
+
+section .rodata
+sr_hexdigits: db "0123456789abcdef"
+
+section .text
 
 ;; ============================================================================
 ;; str_str(PyObject *self) -> PyObject*
@@ -738,13 +911,11 @@ DEF_FUNC str_concat
     ret
 
 .concat_type_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "can only concatenate str (not other type) to str"
-    call raise_exception
+    RAISE exc_TypeError_type, "can only concatenate str (not other type) to str"
 END_FUNC str_concat
 
 ;; ============================================================================
-;; str_repeat(PyObject *str_obj, PyObject *int_obj) -> PyObject*
+;; str_repeat(PyObject *str_obj, PyObject *int_obj) -> rax = Value
 ;; String repetition via nb_multiply
 ;; ============================================================================
 DEF_FUNC str_repeat
@@ -843,9 +1014,7 @@ DEF_FUNC str_repeat
     V_PACK rax, rdx             ; return one Value
     ret
 .srep_overflow:
-    lea rdi, [rel exc_OverflowError_type]
-    CSTRING rsi, "repeated string is too long"
-    call raise_exception
+    RAISE exc_OverflowError_type, "repeated string is too long"
 END_FUNC str_repeat
 
 ;; ============================================================================
@@ -880,7 +1049,7 @@ SM_VALUE   equ 152
 SM_PIECE   equ 160
 SM_OWNVAL  equ 168
 SM_ISMAP   equ 176       ; the right operand is a mapping: %(name)s, no arity check
-SM_FRAME   equ 184
+SM_FRAME   equ 184          ; + 0 pushes = 184, not 16-aligned
 
 DEF_FUNC str_mod, SM_FRAME
     V_UNPACK rdi, rdx           ; left  Value -> (payload, tag)
@@ -1282,7 +1451,7 @@ DEF_FUNC str_mod, SM_FRAME
     test rax, rax
     jz .hex_reverse
     mov rdx, rax
-    and edx, 0xF
+    and edx, 0xf
     cmp dl, 10
     jb .hex_dec_digit
     add dl, ('a' - 10)
@@ -1369,9 +1538,7 @@ DEF_FUNC str_mod, SM_FRAME
     ; Past the end of the argument list.  Substituting None here quietly
     ; formatted a missing argument as "None"; the format string is wrong and
     ; Python says so.
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "not enough arguments for format string"
-    call raise_exception
+    RAISE exc_TypeError_type, "not enough arguments for format string"
 
 ;; .sm_ensure_cap — ensure buffer can hold rdi bytes total
 ;; rdi = required capacity. Preserves r14, r15, rbx, r12. Updates r13.
@@ -1427,20 +1594,14 @@ DEF_FUNC str_mod, SM_FRAME
     leave
     ret
 .sm_too_many:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "not all arguments converted during string formatting"
-    call raise_exception
+    RAISE exc_TypeError_type, "not all arguments converted during string formatting"
 
 .sm_key_unterminated:
-    lea rdi, [rel exc_ValueError_type]
-    CSTRING rsi, "incomplete format key"
-    call raise_exception
+    RAISE exc_ValueError_type, "incomplete format key"
 
 .sm_key_error:
     extern exc_KeyError_type
-    lea rdi, [rel exc_KeyError_type]
-    CSTRING rsi, "format key not found"
-    call raise_exception
+    RAISE exc_KeyError_type, "format key not found"
 ;; Format one directive through format_apply_spec.  On entry SM_POS is the
 ;; index of the conversion character and SM_SPECST the start of the flags;
 ;; on exit SM_POS is just past it.  r13 (buffer), r14 (output position),
@@ -1695,16 +1856,12 @@ DEF_FUNC str_compare
     ret
 
 .ret_true:
-    lea rax, [rel bool_true]
-    inc qword [rax + PyObject.ob_refcnt]
-    mov edx, TAG_PTR
+    RET_TRUE
     pop rbx
     leave
     ret
 .ret_false:
-    lea rax, [rel bool_false]
-    inc qword [rax + PyObject.ob_refcnt]
-    mov edx, TAG_PTR
+    RET_FALSE
     pop rbx
     leave
     ret
@@ -1722,7 +1879,7 @@ DEF_FUNC_BARE str_len
 END_FUNC str_len
 
 ;; ============================================================================
-;; str_getitem(PyObject *self, int64_t index) -> PyObject*
+;; str_getitem(PyObject *self, int64_t index) -> rax = Value
 ;; sq_item: return single-char string at index
 ;; ============================================================================
 DEF_FUNC str_getitem
@@ -1768,13 +1925,11 @@ DEF_FUNC str_getitem
     ret
 
 .index_error:
-    lea rdi, [rel exc_IndexError_type]
-    CSTRING rsi, "string index out of range"
-    call raise_exception
+    RAISE exc_IndexError_type, "string index out of range"
 END_FUNC str_getitem
 
 ;; ============================================================================
-;; str_subscript(PyObject *self, PyObject *key) -> PyObject*
+;; str_subscript(PyObject *self, PyObject *key) -> rax = Value
 ;; mp_subscript: index with int or slice key (for BINARY_SUBSCR)
 ;; ============================================================================
 DEF_FUNC str_subscript
@@ -1820,9 +1975,7 @@ DEF_FUNC str_subscript
     ret
 
 .ss_type_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "string indices must be integers"
-    call raise_exception
+    RAISE exc_TypeError_type, "string indices must be integers"
 END_FUNC str_subscript
 
 ;; ============================================================================
@@ -1838,10 +1991,14 @@ DEF_FUNC str_contains
     mov rax, [rsi + PyObject.ob_type]
     REQUIRE_STR_TYPE rax, rcx, .str_contains_type_error
 
-    extern ap_strstr
+    ; Length-aware: ap_strstr stopped at the first NUL, so "b" in "a\x00b"
+    ; was False.
+    extern ap_memfind
+    mov rcx, [rsi + PyStrObject.ob_size]
+    lea rdx, [rsi + PyStrObject.data]
+    mov rsi, [rdi + PyStrObject.ob_size]
     lea rdi, [rdi + PyStrObject.data]
-    lea rsi, [rsi + PyStrObject.data]
-    call ap_strstr
+    call ap_memfind
     test rax, rax
     setnz al
     movzx eax, al
@@ -1852,9 +2009,7 @@ DEF_FUNC str_contains
 .str_contains_type_error:
     extern exc_TypeError_type
     extern raise_exception
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "'in <string>' requires string as left operand"
-    call raise_exception
+    RAISE exc_TypeError_type, "'in <string>' requires string as left operand"
 END_FUNC str_contains
 
 ;; ============================================================================
@@ -1879,7 +2034,7 @@ SGS_LEN   equ 32
 SGS_OUT   equ 40
 SGS_POS   equ 48
 SGS_I     equ 56
-SGS_FRAME equ 64
+SGS_FRAME equ 64            ; + 2 pushes = 80
 DEF_FUNC str_getslice, SGS_FRAME
     push rbx
     push r12
@@ -2016,7 +2171,6 @@ extern iter_self
 ;; str_tp_iter(PyStrObject *self) -> PyStrIterObject*
 ;; tp_iter for str type: create a new string iterator
 ;; ============================================================================
-global str_tp_iter
 DEF_FUNC str_tp_iter
     push rbx
 
@@ -2042,7 +2196,6 @@ END_FUNC str_tp_iter
 ;; str_iter_next(PyStrIterObject *self) -> PyObject* or NULL
 ;; Return next character as a 1-char string, or NULL if exhausted
 ;; ============================================================================
-global str_iter_next
 DEF_FUNC str_iter_next
     push rbx
 
@@ -2085,7 +2238,6 @@ END_FUNC str_iter_next
 
 ;; str_iter_dealloc(PyObject *self)
 ;; ============================================================================
-global str_iter_dealloc
 DEF_FUNC str_iter_dealloc
     push rbx
     mov rbx, rdi

@@ -6,7 +6,6 @@
 
 %include "macros.inc"
 %include "object.inc"
-%include "types.inc"
 
 extern kw_names_pending
 
@@ -32,13 +31,83 @@ extern obj_incref
 extern exc_TypeError_type
 extern raise_exception
 
-; ---------------------------------------------------------------------------
-; dunder_lookup(PyTypeObject *type, const char *name) -> PyObject*
-;
-; Walk type->tp_base chain, looking up name in each type's tp_dict.
-; rdi = type object, rsi = C string name
-; Returns: borrowed reference to function, or NULL if not found.
-; ---------------------------------------------------------------------------
+;; ============================================================================
+;; dunder_name_obj(rdi = const char *literal) -> rax = PyStrObject*, borrowed
+;;
+;; dunder_lookup used to build a fresh PyStrObject from its C string on every
+;; call and free it again: ap_strlen, ap_malloc, ap_memcpy, a code-point scan to
+;; set ob_length, a full string hash (the object being new, ob_hash was always
+;; cold), and ap_free.  That sat behind 27 direct call sites and 131 DUNDER_*
+;; macro uses -- every __add__, __iter__, __next__, __len__, __getitem__ and
+;; __enter__ fallback in the interpreter.
+;;
+;; The names are compile-time literals in .rodata, so the pointer is stable per
+;; call site and comparing pointers is enough to recognise one.  A miss interns
+;; the string once and keeps it forever; the interned object then caches its own
+;; ob_hash, so the dict probes stop rehashing too.  Two call sites that spell
+;; the same name in different literals simply get two entries, and dict lookup
+;; matches them by value regardless.
+;;
+;; The table never evicts.  Distinct dunder literals number a few dozen against
+;; 256 slots, so the probe terminates.
+;; ============================================================================
+DUNDER_CACHE_SLOTS equ 256
+
+DEF_FUNC dunder_name_obj
+    push rbx
+    push r12                    ; 2 pushes + frame 0 = 16
+    mov rbx, rdi
+    mov rax, rdi
+    shr rax, 4                  ; literals are not 16-byte aligned; spread them
+    and rax, DUNDER_CACHE_SLOTS - 1
+    mov r12, rax
+
+.probe:
+    lea rcx, [rel dunder_cache_keys]
+    mov rdx, [rcx + r12*8]
+    test rdx, rdx
+    jz .miss
+    cmp rdx, rbx
+    je .hit
+    inc r12
+    and r12, DUNDER_CACHE_SLOTS - 1
+    jmp .probe
+
+.hit:
+    lea rcx, [rel dunder_cache_vals]
+    mov rax, [rcx + r12*8]
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.miss:
+    mov rdi, rbx
+    call str_from_cstr_heap     ; kept for the life of the process
+    lea rcx, [rel dunder_cache_keys]
+    mov [rcx + r12*8], rbx
+    lea rcx, [rel dunder_cache_vals]
+    mov [rcx + r12*8], rax
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC dunder_name_obj
+
+section .bss
+align 8
+dunder_cache_keys: resq DUNDER_CACHE_SLOTS
+dunder_cache_vals: resq DUNDER_CACHE_SLOTS
+
+section .text
+
+;; ============================================================================
+;; dunder_lookup(PyTypeObject *type, const char *name) -> rax = Value
+;;
+;; Walk type->tp_base chain, looking up name in each type's tp_dict.
+;; rdi = type object, rsi = C string name
+;; Returns: borrowed reference to function, or NULL if not found.
+;; ============================================================================
 DEF_FUNC dunder_lookup
     push rbx
     push r12
@@ -49,9 +118,9 @@ DEF_FUNC dunder_lookup
     mov r14, rdi            ; r14 = origin of the walk
     mov r12, rsi            ; r12 = name C string
 
-    ; Create PyStrObject from C string for dict lookup (heap — dict key, DECREFed)
+    ; The interned name for this literal; borrowed, so no DECREF on the way out.
     mov rdi, r12
-    call str_from_cstr_heap
+    call dunder_name_obj
     mov r13, rax            ; r13 = name string object
 
 .walk:
@@ -74,13 +143,6 @@ DEF_FUNC dunder_lookup
     jmp .walk
 
 .found:
-    push rdx                ; save result tag
-    push rax                ; save result payload
-    mov rdi, r13
-    call obj_decref         ; DECREF name string
-    pop rax                 ; restore payload
-    pop rdx                 ; restore tag
-
     pop r14
     pop r13
     pop r12
@@ -90,8 +152,6 @@ DEF_FUNC dunder_lookup
     ret
 
 .not_found:
-    mov rdi, r13
-    call obj_decref         ; DECREF name string
     RET_NULL                ; rax=0, edx=TAG_NULL(0)
 
     pop r14
@@ -103,13 +163,13 @@ DEF_FUNC dunder_lookup
     ret
 END_FUNC dunder_lookup
 
-; ---------------------------------------------------------------------------
-; dunder_call_1(PyObject *self, const char *name) -> (rax=payload, rdx=tag)
-;
-; Look up dunder on self's type, call with self as only arg.
-; rdi = self (heap ptr), rsi = dunder name C string
-; Returns: result fat value (rax=payload, rdx=tag), or (0, TAG_NULL) if not found.
-; ---------------------------------------------------------------------------
+;; ============================================================================
+;; dunder_call_1(PyObject *self, const char *name) -> (rax=payload, rdx=tag)
+;;
+;; Look up dunder on self's type, call with self as only arg.
+;; rdi = self (heap ptr), rsi = dunder name C string
+;; Returns: result fat value (rax=payload, rdx=tag), or (0, TAG_NULL) if not found.
+;; ============================================================================
 DEF_FUNC dunder_call_1
     push rbx
     push r12
@@ -173,14 +233,14 @@ DEF_FUNC dunder_call_1
     ret
 END_FUNC dunder_call_1
 
-; ---------------------------------------------------------------------------
-; dunder_call_2(PyObject *self, PyObject *other, const char *name, int other_tag)
-;   -> (rax=payload, rdx=tag)
-;
-; Look up dunder on self's type, call with (self, other).
-; rdi = self (heap ptr), rsi = other payload, rdx = dunder name, ecx = other_tag
-; Returns: result fat value (rax=payload, rdx=tag), or (0, TAG_NULL) if not found.
-; ---------------------------------------------------------------------------
+;; ============================================================================
+;; dunder_call_2(PyObject *self, PyObject *other, const char *name, int other_tag)
+;;   -> (rax=payload, rdx=tag)
+;;
+;; Look up dunder on self's type, call with (self, other).
+;; rdi = self (heap ptr), rsi = other payload, rdx = dunder name, ecx = other_tag
+;; Returns: result fat value (rax=payload, rdx=tag), or (0, TAG_NULL) if not found.
+;; ============================================================================
 DEF_FUNC dunder_call_2
     push rbx
     push r12
@@ -248,16 +308,16 @@ DEF_FUNC dunder_call_2
     ret
 END_FUNC dunder_call_2
 
-; ---------------------------------------------------------------------------
-; dunder_call_3(PyObject *self, PyObject *arg1, PyObject *arg2, const char *name,
-;               int arg2_tag)
-;   -> (rax=payload, rdx=tag)
-;
-; Look up dunder on self's type, call with (self, arg1, arg2).
-; rdi = self (heap), rsi = arg1 (heap), rdx = arg2, rcx = dunder name,
-; r8d = arg2 tag (use TAG_PTR if arg2 is always a heap ptr).
-; Returns: result fat value (rax=payload, rdx=tag), or (0, TAG_NULL) if not found.
-; ---------------------------------------------------------------------------
+;; ============================================================================
+;; dunder_call_3(PyObject *self, PyObject *arg1, PyObject *arg2, const char *name,
+;;               int arg2_tag)
+;;   -> (rax=payload, rdx=tag)
+;;
+;; Look up dunder on self's type, call with (self, arg1, arg2).
+;; rdi = self (heap), rsi = arg1 (heap), rdx = arg2, rcx = dunder name,
+;; r8d = arg2 tag (use TAG_PTR if arg2 is always a heap ptr).
+;; Returns: result fat value (rax=payload, rdx=tag), or (0, TAG_NULL) if not found.
+;; ============================================================================
 DEF_FUNC dunder_call_3
     push rbx
     push r12
@@ -330,7 +390,6 @@ DEF_FUNC dunder_call_3
     ret
 END_FUNC dunder_call_3
 
-
 ;; ============================================================================
 ;; obj_call_n(Value callable, Value *args, uint64_t nargs) -> Value, or 0
 ;;
@@ -347,8 +406,6 @@ END_FUNC dunder_call_3
 OCN_MAX equ 8
 
 OCN_FN    equ 8
-OCN_ARGS  equ 16
-OCN_NARGS equ 24
 OCN_BUF   equ 32 + (OCN_MAX + 1) * 8
 OCN_FRAME equ ((OCN_BUF + 15) / 16) * 16 + 8    ; + 3 pushes = 16-aligned
 DEF_FUNC obj_call_n, OCN_FRAME
@@ -417,9 +474,7 @@ DEF_FUNC obj_call_n, OCN_FRAME
     jmp .ret
 
 .not_callable:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "object is not callable"
-    call raise_exception
+    RAISE exc_TypeError_type, "object is not callable"
 .ret:
     pop r13
     pop r12
@@ -455,18 +510,15 @@ global dunder_or
 global dunder_xor
 global dunder_lshift
 global dunder_rshift
-global dunder_neg
 global dunder_iter
 global dunder_next
 global dunder_getitem
 global dunder_setitem
-global dunder_delitem
 global dunder_contains
 global dunder_len
 global dunder_bool
 global dunder_call
 global obj_call_n
-global dunder_hash
 global dunder_iadd
 global dunder_isub
 global dunder_imul
@@ -491,7 +543,6 @@ global dunder_str
 global dunder_matmul
 global dunder_get
 global dunder_set
-global dunder_delete
 global dunder_del
 
 dunder_eq:       db "__eq__", 0
@@ -519,17 +570,14 @@ dunder_or:       db "__or__", 0
 dunder_xor:      db "__xor__", 0
 dunder_lshift:   db "__lshift__", 0
 dunder_rshift:   db "__rshift__", 0
-dunder_neg:      db "__neg__", 0
 dunder_iter:     db "__iter__", 0
 dunder_next:     db "__next__", 0
 dunder_getitem:  db "__getitem__", 0
 dunder_setitem:  db "__setitem__", 0
-dunder_delitem:  db "__delitem__", 0
 dunder_contains: db "__contains__", 0
 dunder_len:      db "__len__", 0
 dunder_bool:     db "__bool__", 0
 dunder_call:     db "__call__", 0
-dunder_hash:     db "__hash__", 0
 dunder_iadd:     db "__iadd__", 0
 dunder_isub:     db "__isub__", 0
 dunder_imul:     db "__imul__", 0
@@ -554,7 +602,6 @@ dunder_str:      db "__str__", 0
 dunder_matmul:   db "__matmul__", 0
 dunder_get:      db "__get__", 0
 dunder_set:      db "__set__", 0
-dunder_delete:   db "__delete__", 0
 dunder_del:      db "__del__", 0
 
 ; Compare op -> dunder name lookup table

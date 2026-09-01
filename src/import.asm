@@ -3,23 +3,17 @@
 
 %include "macros.inc"
 %include "object.inc"
-%include "types.inc"
-%include "frame.inc"
-%include "marshal.inc"
 
 extern ap_malloc
 extern ap_free
 extern ap_memcpy
 extern ap_strlen
-extern ap_strcmp
-extern ap_memcmp
 extern obj_decref
 extern obj_incref
 extern obj_dealloc
 extern str_from_cstr_heap
 extern str_new_heap
 extern str_type
-extern int_from_i64
 extern none_singleton
 extern dict_new
 extern dict_get
@@ -29,16 +23,13 @@ extern current_exception
 extern eval_exception_unwind
 extern list_new
 extern list_append
-extern tuple_new
 extern type_type
 extern module_new
-extern module_type
 extern fatal_error
 extern raise_exception
 extern eval_frame
 extern frame_new
 extern frame_free
-extern pyc_read_file
 extern code_from_path
 extern path_is_source
 extern sys_open
@@ -55,9 +46,7 @@ extern marshal_ref_cap
 ; sys module globals
 extern sys_modules_dict
 extern sys_path_list
-extern sys_module_obj
 extern sys_module_init
-extern sys_path_add_script_dir
 
 ; builtins
 extern builtins_dict_global
@@ -86,16 +75,14 @@ IF_EXC      equ 88           ; current_exception on entry (see .import_error)
 IF_POS      equ 96           ; byte position while walking a dotted name
 IF_PARENT   equ 104          ; the module the next component hangs off
 IF_LEAF     equ 112          ; the module the walk has reached
-IF_FRAME    equ 128
+IF_FRAME    equ 128         ; + 5 pushes = 168, not 16-aligned
 
 ; --- import_find_and_load frame layout ---
 ; path_component buffer lives on stack below frame locals
 FL_NAME     equ 8            ; name_str (PyObject*)
 FL_LEAF     equ 16           ; leaf name cstr ptr
 FL_LEAFLEN  equ 24           ; leaf name length
-FL_PATHBUF  equ 32           ; path component buffer ptr (on stack)
-FL_PATHLEN  equ 40           ; path component length
-FL_FRAME    equ 48
+FL_FRAME    equ 48          ; + 5 pushes = 88, not 16-aligned
 FL_STKSZ    equ 4096         ; stack buffer for path component
 
 ; Path buffer size
@@ -104,31 +91,31 @@ PATHBUF_SIZE equ 8192
 ; module component: "/__pycache__/__init__.cpython-312.pyc" is 37 bytes.
 IM_PATH_MARGIN equ 64
 
-; ============================================================================
-; import_init(int argc, char **argv)
-; Initialize the import system: sys module + builtins in sys.modules
+;; ============================================================================
+;; import_init(int argc, char **argv)
+;; Initialize the import system: sys module + builtins in sys.modules
 
-; ----------------------------------------------------------------------------
-; import_add_exe_relative_path(rdi = suffix cstr)
-; Appends <directory of the running binary>/<suffix> to sys.path.  Falls back
-; to the plain relative entry when /proc/self/exe cannot be read.
+;; ============================================================================
+;; import_add_exe_relative_path(rdi = suffix cstr)
+;; Appends <directory of the running binary>/<suffix> to sys.path.  Falls back
+;; to the plain relative entry when /proc/self/exe cannot be read.
 
-; ----------------------------------------------------------------------------
-; import_resolve_relative(rdi = name str, rsi = globals dict, rdx = level)
-;   -> rax = the absolute name, a new reference
-;
-; `from . import x` inside a package: level counts how far up from the
-; importing module's package to start.  Level was read off the stack and then
-; ignored, so every relative import in the stdlib looked like an import of the
-; empty name.
-; ----------------------------------------------------------------------------
+;; ============================================================================
+;; import_resolve_relative(rdi = name str, rsi = globals dict, rdx = level)
+;;   -> rax = the absolute name, a new reference
+;;
+;; `from . import x` inside a package: level counts how far up from the
+;; importing module's package to start.  Level was read off the stack and then
+;; ignored, so every relative import in the stdlib looked like an import of the
+;; empty name.
+;; ============================================================================
 IRR_NAME  equ 8
 IRR_LEVEL equ 16
 IRR_PKG   equ 24
 IRR_LEN   equ 32
 IRR_BUF   equ 1064          ; 1024 bytes, [rbp-1064, rbp-40)
 global import_resolve_relative
-IRR_FRAME equ 1072
+IRR_FRAME equ 1072          ; + 2 pushes = 1088
 DEF_FUNC import_resolve_relative, IRR_FRAME
     push rbx
     push r12
@@ -217,21 +204,15 @@ DEF_FUNC import_resolve_relative, IRR_FRAME
     ret
 
 .irr_beyond_top:
-    lea rdi, [rel exc_ImportError_type]
-    CSTRING rsi, "attempted relative import beyond top-level package"
-    call raise_exception
+    RAISE exc_ImportError_type, "attempted relative import beyond top-level package"
 .irr_no_package:
-    lea rdi, [rel exc_ImportError_type]
-    CSTRING rsi, "attempted relative import with no known parent package"
-    call raise_exception
+    RAISE exc_ImportError_type, "attempted relative import with no known parent package"
 END_FUNC import_resolve_relative
 
-
-; ----------------------------------------------------------------------------
+;; ============================================================================
 IAR_SUFFIX equ 8
-IAR_LEN    equ 16
 IAR_BUF    equ 4128            ; 4096 bytes of path, [rbp-4128, rbp-32)
-IAR_FRAME  equ 4144
+IAR_FRAME  equ 4144         ; + 2 pushes = 4160
 DEF_FUNC_LOCAL import_add_exe_relative_path, IAR_FRAME
     push rbx
     push r12
@@ -291,7 +272,7 @@ DEF_FUNC_LOCAL import_add_exe_relative_path, IAR_FRAME
     ret
 END_FUNC import_add_exe_relative_path
 
-; ============================================================================
+;; ============================================================================
 DEF_FUNC import_init
     push rbx
     push r12
@@ -473,10 +454,10 @@ DEF_FUNC import_init
     ret
 END_FUNC import_init
 
-; ============================================================================
-; import_raise_not_found(rdi = module name C string) -- does not return
-; Raises ModuleNotFoundError("No module named 'x'"), matching CPython.
-; ============================================================================
+;; ============================================================================
+;; import_raise_not_found(rdi = module name C string) -- does not return
+;; Raises ModuleNotFoundError("No module named 'x'"), matching CPython.
+;; ============================================================================
 IRNF_BUF equ 256
 DEF_FUNC_LOCAL import_raise_not_found, IRNF_BUF
     mov rsi, rdi                ; the name
@@ -511,14 +492,14 @@ DEF_FUNC_LOCAL import_raise_not_found, IRNF_BUF
     ud2
 END_FUNC import_raise_not_found
 
-; ============================================================================
-; import_module(PyObject *name_str, PyObject *fromlist, int64_t level) -> PyObject*
-; Main import entry point
-; name_str = module name from co_names
-; fromlist = tuple of names or None
-; level = 0 for absolute, >0 for relative
-; Returns: module object (new reference)
-; ============================================================================
+;; ============================================================================
+;; import_module(PyObject *name_str, PyObject *fromlist, int64_t level) -> PyObject*
+;; Main import entry point
+;; name_str = module name from co_names
+;; fromlist = tuple of names or None
+;; level = 0 for absolute, >0 for relative
+;; Returns: module object (new reference)
+;; ============================================================================
 DEF_FUNC import_module, IF_FRAME
     push rbx
     push r12
@@ -530,7 +511,6 @@ DEF_FUNC import_module, IF_FRAME
     mov [rbp - IF_FROMLIST], rsi    ; fromlist
     mov [rbp - IF_LEVEL], rdx       ; level
     DUNDER_EXC_SAVE [rbp - IF_EXC]  ; see .import_error
-
 
     ; Get name as C string for comparisons
     mov rdi, [rbp - IF_NAME]
@@ -789,12 +769,12 @@ DEF_FUNC import_module, IF_FRAME
     ret
 END_FUNC import_module
 
-; ============================================================================
-; import_find_and_load(PyObject *name_str) -> PyObject*
-; Find module on disk and load it.
-; For dotted names (e.g. "unittest.case"), searches parent package's __path__.
-; Returns module object or NULL.
-; ============================================================================
+;; ============================================================================
+;; import_find_and_load(PyObject *name_str) -> PyObject*
+;; Find module on disk and load it.
+;; For dotted names (e.g. "unittest.case"), searches parent package's __path__.
+;; Returns module object or NULL.
+;; ============================================================================
 DEF_FUNC import_find_and_load, FL_FRAME
     push rbx
     push r12
@@ -1001,15 +981,15 @@ DEF_FUNC import_find_and_load, FL_FRAME
     ret
 END_FUNC import_find_and_load
 
-; ============================================================================
-; import_search_dirs(PyListObject *dirs, const char *leaf, int64_t leaf_len) -> int
-; Search a list of directory strings for a module named 'leaf'.
-; Tries: <dir>/<leaf>/__pycache__/__init__.cpython-312.pyc (package)
-;        <dir>/__pycache__/<leaf>.cpython-312.pyc (module)
-;        <dir>/<leaf>.cpython-312.pyc (module, no __pycache__)
-; On success, sets import_path_buf_ptr contents and returns 1 (package) or 2 (module).
-; On failure returns 0.
-; ============================================================================
+;; ============================================================================
+;; import_search_dirs(PyListObject *dirs, const char *leaf, int64_t leaf_len) -> int
+;; Search a list of directory strings for a module named 'leaf'.
+;; Tries: <dir>/<leaf>/__pycache__/__init__.cpython-312.pyc (package)
+;;        <dir>/__pycache__/<leaf>.cpython-312.pyc (module)
+;;        <dir>/<leaf>.cpython-312.pyc (module, no __pycache__)
+;; On success, sets import_path_buf_ptr contents and returns 1 (package) or 2 (module).
+;; On failure returns 0.
+;; ============================================================================
 
 ; Frame layout for import_search_dirs
 SD_DIRS     equ 8             ; dirs list
@@ -1018,7 +998,7 @@ SD_LEAFLEN  equ 24            ; leaf length
 SD_FULLPATH equ 32            ; optional full path component (with slashes)
 SD_IDX      equ 40            ; current search index
 SD_COUNT    equ 48            ; number of dirs
-SD_FRAME    equ 56
+SD_FRAME    equ 56          ; + 5 pushes = 96
 
 DEF_FUNC import_search_dirs, SD_FRAME
     push rbx
@@ -1285,16 +1265,16 @@ DEF_FUNC import_search_dirs, SD_FRAME
     ret
 END_FUNC import_search_dirs
 
-; ============================================================================
-; import_search_syspath(PyListObject *sys_path, const char *leaf, int64_t leaf_len,
-;                       const char *full_component) -> int
-; Searches sys.path for a module. For dotted names, full_component has slashes.
-; Tries patterns:
-;   <dir>/<full_component>/__pycache__/__init__.cpython-312.pyc (package)
-;   <dir>/__pycache__/<leaf>.cpython-312.pyc (module)
-;   <dir>/<leaf>.cpython-312.pyc (module, no __pycache__)
-; Returns 1 (package), 2 (module), or 0 (not found).
-; ============================================================================
+;; ============================================================================
+;; import_search_syspath(PyListObject *sys_path, const char *leaf, int64_t leaf_len,
+;;                       const char *full_component) -> int
+;; Searches sys.path for a module. For dotted names, full_component has slashes.
+;; Tries patterns:
+;;   <dir>/<full_component>/__pycache__/__init__.cpython-312.pyc (package)
+;;   <dir>/__pycache__/<leaf>.cpython-312.pyc (module)
+;;   <dir>/<leaf>.cpython-312.pyc (module, no __pycache__)
+;; Returns 1 (package), 2 (module), or 0 (not found).
+;; ============================================================================
 
 SS_DIRS     equ 8
 SS_LEAF     equ 16
@@ -1302,7 +1282,7 @@ SS_LEAFLEN  equ 24
 SS_FULL     equ 32            ; full path component (dots->slashes)
 SS_IDX      equ 40
 SS_COUNT    equ 48
-SS_FRAME    equ 56
+SS_FRAME    equ 56          ; + 5 pushes = 96
 
 DEF_FUNC import_search_syspath, SS_FRAME
     push rbx
@@ -1560,10 +1540,10 @@ DEF_FUNC import_search_syspath, SS_FRAME
     ret
 END_FUNC import_search_syspath
 
-; ============================================================================
-; import_load_module(PyObject *name_str, const char *path_cstr, int is_package) -> PyObject*
-; Load a .pyc file and execute it as a module
-; ============================================================================
+;; ============================================================================
+;; import_load_module(PyObject *name_str, const char *path_cstr, int is_package) -> PyObject*
+;; Load a .pyc file and execute it as a module
+;; ============================================================================
 DEF_FUNC import_load_module, IF_FRAME
     push rbx
     push r12
@@ -1941,9 +1921,9 @@ DEF_FUNC import_load_module, IF_FRAME
     ret
 END_FUNC import_load_module
 
-; ============================================================================
-; Data
-; ============================================================================
+;; ============================================================================
+;; Data
+;; ============================================================================
 section .rodata
 
 im_no_module_prefix: db "No module named '", 0

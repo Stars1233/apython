@@ -14,7 +14,6 @@
 
 %include "macros.inc"
 %include "object.inc"
-%include "types.inc"
 %include "value.inc"
 %include "opcodes.inc"
 %include "compiler.inc"
@@ -24,7 +23,6 @@ extern ast_make
 extern ast_mark
 extern ast_obj
 extern ast_push
-extern ast_at
 extern buf_free
 extern buf_init
 extern buf_push_u8
@@ -34,26 +32,19 @@ extern comp_lex_span
 
 extern par_expr
 extern par_finish_list
-extern par_kind
 extern par_syntax_error
 
-extern exc_SyntaxError_type
 
 BP_NONE equ 0
 
 ; --- Named frame-layout constants ---
-FS2_COMP  equ 8
 FS2_TOK   equ 16
 FS2_MARK  equ 24
 FS2_P     equ 32
 FS2_END   equ 40
 FS2_LINE  equ 48
 FS2_RAW   equ 56
-FS2_BUF   equ 96          ; a Buf at [rbp - 96]
-FS2_FIELD equ 104
-FS2_CONV  equ 112
-FS2_SPEC  equ 120
-FS2_EXPR  equ 128
+FS2_BUF   equ 96          ; a Buf lives here
 FS2_FRAME equ 136         ; + 3 pushes = 160
 
 section .text
@@ -275,7 +266,6 @@ END_FUNC par_fstring_pieces
 ;; tokenizes the expression's own span and parses it with the ordinary
 ;; expression parser.
 ;; ============================================================================
-FF_COMP  equ 8
 FF_TOK   equ 16
 FF_P     equ 24
 FF_END   equ 32
@@ -601,7 +591,6 @@ END_FUNC par_fstring_field
 ;; A format spec is itself an f-string: `f"{x:{width}}"` is legal.  The pieces
 ;; go onto the pending list the caller opened.
 ;; ============================================================================
-FSP_COMP  equ 8
 FSP_P     equ 16
 FSP_END   equ 24
 FSP_LINE  equ 32
@@ -705,13 +694,11 @@ END_FUNC par_fstring_spec
 ;;   -> rax = an AST_CONST holding "<source>=", or 0
 ;; What `f"{x=}"` prints before the value.
 ;; ============================================================================
-FD_COMP  equ 8
 FD_START equ 16
 FD_END   equ 24
 FD_LINE  equ 32
 FD_WSEND equ 40           ; end of the spaces after the `=`
 FD_BUF   equ 88           ; a Buf lives here, so it comes last
-FD_FRAME equ 88           ; + 2 pushes = 104 -> padded to 96 below
 DEF_FUNC par_fstring_debug_text, 96
     push rbx
     push r12
@@ -780,6 +767,5 @@ DEF_FUNC par_fstring_debug_text, 96
     leave
     ret
 END_FUNC par_fstring_debug_text
-
 
 ASM_INIT

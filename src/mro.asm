@@ -1,29 +1,26 @@
-; ============================================================================
-; mro.asm -- C3 linearization, and walking it
-;
-; A class could only ever have one base: `class C(A, B)` stored A and dropped
-; B, silently, so `C().b()` was an AttributeError and `isinstance(C(), B)` was
-; False.  A heaptype now records every base in tp_bases and the C3
-; linearization of them in tp_mro.
-;
-; Every place that used to follow tp_base to resolve an attribute or answer a
-; subclass question steps with type_mro_next instead: given the type the
-; search started from and where it has got to, it returns the next entry of
-; that type's MRO.  A static type has no tp_mro, and for it the answer is
-; still tp_base -- which is why the single-inheritance paths did not have to
-; change shape.
-; ============================================================================
+;; ============================================================================
+;; mro.asm -- C3 linearization, and walking it
+;;
+;; A class could only ever have one base: `class C(A, B)` stored A and dropped
+;; B, silently, so `C().b()` was an AttributeError and `isinstance(C(), B)` was
+;; False.  A heaptype now records every base in tp_bases and the C3
+;; linearization of them in tp_mro.
+;;
+;; Every place that used to follow tp_base to resolve an attribute or answer a
+;; subclass question steps with type_mro_next instead: given the type the
+;; search started from and where it has got to, it returns the next entry of
+;; that type's MRO.  A static type has no tp_mro, and for it the answer is
+;; still tp_base -- which is why the single-inheritance paths did not have to
+;; change shape.
+;; ============================================================================
 
-%include "include/object.inc"
-%include "include/types.inc"
-%include "include/errcodes.inc"
-%include "include/macros.inc"
-%include "include/value.inc"
+%include "object.inc"
+%include "macros.inc"
+%include "value.inc"
 
 extern ap_malloc
 extern ap_free
 extern tuple_new
-extern obj_decref
 extern obj_dealloc
 extern obj_incref
 extern object_type
@@ -32,13 +29,12 @@ extern exc_TypeError_type
 
 section .text
 
-; ----------------------------------------------------------------------------
-; type_mro_next(rdi = origin type, rsi = current type) -> rax = next or NULL
-;
-; The origin's tp_mro is authoritative when it exists; otherwise the answer is
-; the current type's tp_base, which is what single inheritance always gave.
-; ----------------------------------------------------------------------------
-global type_mro_next
+;; ============================================================================
+;; type_mro_next(rdi = origin type, rsi = current type) -> rax = next or NULL
+;;
+;; The origin's tp_mro is authoritative when it exists; otherwise the answer is
+;; the current type's tp_base, which is what single inheritance always gave.
+;; ============================================================================
 DEF_FUNC_BARE type_mro_next
     test rsi, rsi
     jz .mn_none
@@ -82,7 +78,6 @@ END_FUNC type_mro_next
 ; type_check_is_class(rdi = Value) -> eax 0/1
 ; True when the value is a type object: its metatype is type_type,
 ; user_type_metatype or exc_metatype.
-global type_check_is_class
 DEF_FUNC_BARE type_check_is_class
     V_TEST_PTR rdi, rax
     ja .tc_no
@@ -118,21 +113,20 @@ DEF_FUNC_BARE type_check_is_class
     ret
 END_FUNC type_check_is_class
 
-; ----------------------------------------------------------------------------
-; type_custom_check(rdi = class, rsi = object Value, rdx = dunder name cstr)
-;   -> eax: 1 = yes, 0 = no, -1 = no override, decide the normal way
-;
-; A metaclass may define __instancecheck__ / __subclasscheck__; ABCMeta does,
-; and that is how isinstance() consults a virtual-subclass registry instead of
-; the MRO.  Only a *user* metatype is consulted -- the three builtin metatypes
-; have no such method, and looking one up on every isinstance() would cost a
-; dict probe per call.
-; ----------------------------------------------------------------------------
+;; ============================================================================
+;; type_custom_check(rdi = class, rsi = object Value, rdx = dunder name cstr)
+;;   -> eax: 1 = yes, 0 = no, -1 = no override, decide the normal way
+;;
+;; A metaclass may define __instancecheck__ / __subclasscheck__; ABCMeta does,
+;; and that is how isinstance() consults a virtual-subclass registry instead of
+;; the MRO.  Only a *user* metatype is consulted -- the three builtin metatypes
+;; have no such method, and looking one up on every isinstance() would cost a
+;; dict probe per call.
+;; ============================================================================
 TCI_CLS   equ 8
 TCI_OBJ   equ 16
 TCI_NAME  equ 24
-TCI_FRAME equ 32
-global type_custom_check
+TCI_FRAME equ 32            ; + 1 push = 40, not 16-aligned
 DEF_FUNC type_custom_check, TCI_FRAME
     push rbx
     mov [rbp - TCI_CLS], rdi
@@ -200,10 +194,9 @@ DEF_FUNC type_custom_check, TCI_FRAME
     ret
 END_FUNC type_custom_check
 
-; ----------------------------------------------------------------------------
-; type_is_subtype(rdi = candidate subtype, rsi = type) -> eax 0/1
-; ----------------------------------------------------------------------------
-global type_is_subtype
+;; ============================================================================
+;; type_is_subtype(rdi = candidate subtype, rsi = type) -> eax 0/1
+;; ============================================================================
 DEF_FUNC_BARE type_is_subtype
     test rdi, rdi
     jz .st_no
@@ -227,9 +220,9 @@ DEF_FUNC_BARE type_is_subtype
     ret
 END_FUNC type_is_subtype
 
-; ----------------------------------------------------------------------------
-; type_mro_len(rdi = type) -> rax = number of entries in its linearization
-; ----------------------------------------------------------------------------
+;; ============================================================================
+;; type_mro_len(rdi = type) -> rax = number of entries in its linearization
+;; ============================================================================
 DEF_FUNC_BARE type_mro_len
     test rdi, rdi
     jz .ml_zero
@@ -258,9 +251,9 @@ DEF_FUNC_BARE type_mro_len
     ret
 END_FUNC type_mro_len
 
-; ----------------------------------------------------------------------------
-; type_mro_fill(rdi = type, rsi = dest array) -> rax = count written
-; ----------------------------------------------------------------------------
+;; ============================================================================
+;; type_mro_fill(rdi = type, rsi = dest array) -> rax = count written
+;; ============================================================================
 DEF_FUNC_BARE type_mro_fill
     xor eax, eax
     test rdi, rdi
@@ -299,13 +292,13 @@ DEF_FUNC_BARE type_mro_fill
     ret
 END_FUNC type_mro_fill
 
-; ----------------------------------------------------------------------------
-; mro_compute(rdi = the new type, rsi = bases tuple or NULL)
-;   -> rax = new tuple holding the C3 linearization, one strong reference
-;
-; L[C] = C + merge(L[B1], ..., L[Bn], [B1, ..., Bn]), taking as the next entry
-; the first sequence head that appears in no sequence's tail.
-; ----------------------------------------------------------------------------
+;; ============================================================================
+;; mro_compute(rdi = the new type, rsi = bases tuple or NULL)
+;;   -> rax = new tuple holding the C3 linearization, one strong reference
+;;
+;; L[C] = C + merge(L[B1], ..., L[Bn], [B1, ..., Bn]), taking as the next entry
+;; the first sequence head that appears in no sequence's tail.
+;; ============================================================================
 MC_TYPE  equ 8
 MC_BASES equ 16
 MC_NSEQ  equ 24         ; number of sequences = nbases + 1
@@ -314,12 +307,11 @@ MC_POOL  equ 40         ; concatenated sequence contents
 MC_OUT   equ 48         ; result array
 MC_OUTN  equ 56
 MC_TOTAL equ 64
-MC_FRAME equ 80
+MC_FRAME equ 80             ; + 5 pushes = 120, not 16-aligned
 SEQ_START equ 0
 SEQ_LEN   equ 8
 SEQ_POS   equ 16
 SEQ_SIZE  equ 24
-global mro_compute
 DEF_FUNC mro_compute, MC_FRAME
     push rbx
     push r12
@@ -539,7 +531,5 @@ DEF_FUNC mro_compute, MC_FRAME
     call ap_free
     mov rdi, [rbp - MC_OUT]
     call ap_free
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "Cannot create a consistent method resolution order (MRO) for bases"
-    call raise_exception
+    RAISE exc_TypeError_type, "Cannot create a consistent method resolution order (MRO) for bases"
 END_FUNC mro_compute

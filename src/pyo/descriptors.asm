@@ -6,8 +6,6 @@
 
 %include "macros.inc"
 %include "object.inc"
-%include "types.inc"
-%include "builtins.inc"
 
 extern ap_malloc
 extern gc_alloc
@@ -18,12 +16,6 @@ extern obj_incref
 extern obj_decref
 extern obj_dealloc
 extern type_type
-extern staticmethod_traverse
-extern staticmethod_clear
-extern property_traverse
-extern property_clear
-extern classmethod_traverse
-extern classmethod_clear
 extern raise_exception
 extern exc_TypeError_type
 extern exc_AttributeError_type
@@ -66,9 +58,7 @@ DEF_FUNC staticmethod_construct
     ret
 
 .sm_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "staticmethod expected 1 argument"
-    call raise_exception
+    RAISE exc_TypeError_type, "staticmethod expected 1 argument"
 END_FUNC staticmethod_construct
 
 ;; ============================================================================
@@ -123,9 +113,7 @@ DEF_FUNC classmethod_construct
     ret
 
 .cm_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "classmethod expected 1 argument"
-    call raise_exception
+    RAISE exc_TypeError_type, "classmethod expected 1 argument"
 END_FUNC classmethod_construct
 
 ;; ============================================================================
@@ -223,9 +211,7 @@ DEF_FUNC property_construct
     ret
 
 .pc_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "property expected 1 to 3 arguments"
-    call raise_exception
+    RAISE exc_TypeError_type, "property expected 1 to 3 arguments"
 END_FUNC property_construct
 
 ;; ============================================================================
@@ -260,7 +246,7 @@ DEF_FUNC_LOCAL property_dealloc
 END_FUNC property_dealloc
 
 ;; ============================================================================
-;; property_getattr(PyPropertyObject *self, PyObject *name) -> PyObject*
+;; property_getattr(PyPropertyObject *self, PyObject *name) -> rax = Value
 ;; Handles: "setter", "getter", "deleter", "fget", "fset", "fdel"
 ;; ============================================================================
 DEF_FUNC property_getattr
@@ -471,9 +457,7 @@ DEF_FUNC _prop_setter_impl
     ret
 
 .psi_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "setter expected 1 argument"
-    call raise_exception
+    RAISE exc_TypeError_type, "setter expected 1 argument"
 END_FUNC _prop_setter_impl
 
 ;; ============================================================================
@@ -516,9 +500,7 @@ DEF_FUNC _prop_getter_impl
     ret
 
 .pgi_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "getter expected 1 argument"
-    call raise_exception
+    RAISE exc_TypeError_type, "getter expected 1 argument"
 END_FUNC _prop_getter_impl
 
 ;; ============================================================================
@@ -554,9 +536,7 @@ DEF_FUNC _prop_deleter_impl
     ret
 
 .pdi_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "deleter expected 1 argument"
-    call raise_exception
+    RAISE exc_TypeError_type, "deleter expected 1 argument"
 END_FUNC _prop_deleter_impl
 
 ;; ============================================================================
@@ -564,7 +544,6 @@ END_FUNC _prop_deleter_impl
 ;; Called by LOAD_ATTR when a property is found in the type dict.
 ;; Invokes prop.fget(obj). Returns result (owned ref).
 ;; ============================================================================
-global property_descr_get
 DEF_FUNC property_descr_get
     push rbx
     push r12
@@ -594,9 +573,7 @@ DEF_FUNC property_descr_get
     ret
 
 .pdg_no_getter:
-    lea rdi, [rel exc_AttributeError_type]
-    CSTRING rsi, "unreadable attribute"
-    call raise_exception
+    RAISE exc_AttributeError_type, "unreadable attribute"
 END_FUNC property_descr_get
 
 ;; ============================================================================
@@ -604,7 +581,6 @@ END_FUNC property_descr_get
 ;; Called by STORE_ATTR when a property is found in the type dict.
 ;; Invokes prop.fset(obj, value).
 ;; ============================================================================
-global property_descr_set
 DEF_FUNC property_descr_set
     push rbx
     push r12
@@ -648,9 +624,7 @@ DEF_FUNC property_descr_set
     ret
 
 .pds_no_setter:
-    lea rdi, [rel exc_AttributeError_type]
-    CSTRING rsi, "can't set attribute"
-    call raise_exception
+    RAISE exc_AttributeError_type, "can't set attribute"
 END_FUNC property_descr_set
 
 ;; ============================================================================
@@ -658,7 +632,6 @@ END_FUNC property_descr_set
 ;; Create a member descriptor for a __slots__ slot.
 ;; rdi = byte offset in instance, rsi = slot name (INCREF'd, ownership taken)
 ;; ============================================================================
-global member_descr_new
 DEF_FUNC member_descr_new
     push rbx
     push r12
@@ -682,7 +655,6 @@ DEF_FUNC member_descr_new
 END_FUNC member_descr_new
 
 ;; member_descr_dealloc(PyMemberDescrObject *self)
-global member_descr_dealloc
 DEF_FUNC member_descr_dealloc
     push rbx
     mov rbx, rdi
@@ -752,12 +724,9 @@ DEF_FUNC mappingproxy_construct
     leave
     ret
 .mpc_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "mappingproxy() argument must be a mapping, not a sequence"
-    call raise_exception
+    RAISE exc_TypeError_type, "mappingproxy() argument must be a mapping, not a sequence"
 END_FUNC mappingproxy_construct
 
-global mappingproxy_new
 DEF_FUNC mappingproxy_new
     push rbx
     mov rbx, rdi                    ; the dict
@@ -825,7 +794,7 @@ END_FUNC mappingproxy_repr
 MPG_MAP   equ 8
 MPG_NAME  equ 16
 MPG_PTR   equ 24
-MPG_FRAME equ 32
+MPG_FRAME equ 32            ; + 0 pushes = 32
 DEF_FUNC mappingproxy_getattr, MPG_FRAME
     ; A proxy is read-only, so the methods that would write through it are
     ; refused before the wrapped dict is consulted.  Without this, giving dict
@@ -890,7 +859,6 @@ END_FUNC mappingproxy_getattr
 ;; exposes func.__code__ and the co_* fields, and types.py takes
 ;; GetSetDescriptorType straight off one of them.
 ;; ============================================================================
-global getset_descr_new
 DEF_FUNC getset_descr_new
     push rbx
     push r12
@@ -937,7 +905,6 @@ END_FUNC getset_descr_dealloc
 ;; two-field record: the origin type and the argument.  It is callable, so
 ;; `list[int]()` still builds a list.
 ;; ============================================================================
-global generic_alias_new
 DEF_FUNC generic_alias_new
     push rbx
     push r12
@@ -987,7 +954,6 @@ END_FUNC generic_alias_dealloc
 
 ;; The builtin registered as __class_getitem__ on each container type.
 ;; args[0] = cls, args[1] = the subscript.
-global generic_alias_class_getitem
 DEF_FUNC generic_alias_class_getitem
     cmp rsi, 2
     jl .gacg_bad
@@ -1000,15 +966,13 @@ DEF_FUNC generic_alias_class_getitem
     V_PACK rax, rdx
     ret
 .gacg_bad:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "__class_getitem__() takes exactly one argument"
-    call raise_exception
+    RAISE exc_TypeError_type, "__class_getitem__() takes exactly one argument"
 END_FUNC generic_alias_class_getitem
 
 ;; repr: "list[int]" -- origin name, then the argument's repr.
 GAR_BUF   equ 264
 GAR_SELF  equ 272
-GAR_FRAME equ 288
+GAR_FRAME equ 288           ; + 5 pushes = 328, not 16-aligned
 DEF_FUNC generic_alias_repr, GAR_FRAME
     push rbx
     push r12
@@ -1191,9 +1155,7 @@ DEF_FUNC_BARE generic_alias_call
     jz .gac_bad
     jmp rcx
 .gac_bad:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "generic alias is not callable"
-    call raise_exception
+    RAISE exc_TypeError_type, "generic alias is not callable"
 END_FUNC generic_alias_call
 
 ;; __origin__ / __args__
@@ -1325,7 +1287,6 @@ END_FUNC ga_emit_name
 ;; GenericAlias-shaped record whose args are the operand tuple; the repr is
 ;; the pipe form rather than the bracket form.
 ;; ============================================================================
-global union_type_or
 DEF_FUNC union_type_or
     ; nb_or(left, right) -> UnionType, for type | type
     push rbx
@@ -1409,7 +1370,7 @@ END_FUNC union_operand_ok
 ;; repr: "int | str"
 UR_BUF   equ 264
 UR_SELF  equ 272
-UR_FRAME equ 288
+UR_FRAME equ 288            ; + 5 pushes = 328, not 16-aligned
 DEF_FUNC union_repr, UR_FRAME
     push rbx
     push r12
@@ -1520,7 +1481,6 @@ END_FUNC descr_func_attr
 ;; args[2] the owner type when given.
 ;; ============================================================================
 extern none_singleton
-global func_dunder_get
 DEF_FUNC func_dunder_get
     mov rax, [rdi]                      ; the function itself
     cmp rsi, 2
@@ -1542,7 +1502,6 @@ DEF_FUNC func_dunder_get
     ret
 END_FUNC func_dunder_get
 
-global staticmethod_dunder_get
 DEF_FUNC staticmethod_dunder_get
     mov rax, [rdi]
     mov rax, [rax + PyStaticMethodObject.sm_callable]
@@ -1558,7 +1517,6 @@ DEF_FUNC staticmethod_dunder_get
     ret
 END_FUNC staticmethod_dunder_get
 
-global classmethod_dunder_get
 DEF_FUNC classmethod_dunder_get
     push rbx
     mov rbx, [rdi]
@@ -1614,7 +1572,6 @@ END_FUNC classmethod_dunder_get
 ;; The descriptor protocol LOAD_ATTR and STORE_ATTR run natively, exposed by
 ;; name for the same reason the function ones are: `hasattr(p, '__get__')`.
 ;; ============================================================================
-global property_dunder_get
 DEF_FUNC property_dunder_get
     mov rax, [rdi]
     cmp rsi, 2
@@ -1637,7 +1594,6 @@ DEF_FUNC property_dunder_get
     ret
 END_FUNC property_dunder_get
 
-global property_dunder_set
 DEF_FUNC property_dunder_set
     cmp rsi, 3
     jl .pds2_bad
@@ -1651,12 +1607,9 @@ DEF_FUNC property_dunder_set
     leave
     ret
 .pds2_bad:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "__set__() takes exactly 2 arguments"
-    call raise_exception
+    RAISE exc_TypeError_type, "__set__() takes exactly 2 arguments"
 END_FUNC property_dunder_set
 
-global property_dunder_delete
 DEF_FUNC property_dunder_delete
     push rbx
     cmp rsi, 2
@@ -1687,9 +1640,7 @@ DEF_FUNC property_dunder_delete
     leave
     ret
 .pdd_no_deleter:
-    lea rdi, [rel exc_AttributeError_type]
-    CSTRING rsi, "can't delete attribute"
-    call raise_exception
+    RAISE exc_AttributeError_type, "can't delete attribute"
 END_FUNC property_dunder_delete
 
 section .data
@@ -1995,3 +1946,95 @@ align 8
 mpg_readonly_names:
     dq mpg_n_setitem, mpg_n_delitem, mpg_n_clear, mpg_n_pop
     dq mpg_n_popitem, mpg_n_setdefault, mpg_n_update, 0
+
+section .text
+
+;; ============================================================================
+;; GC traverse and clear.  These lived in gc.asm, which left the collector
+;; holding the reference graph of every type in the system; a type's own
+;; file is the only place that knows which of its fields are owned.
+;; ============================================================================
+
+; ---- staticmethod_traverse / classmethod_traverse / property_traverse ----
+DEF_FUNC staticmethod_traverse
+    mov rdi, [rdi + PyStaticMethodObject.sm_callable]
+    VISIT_PTR rdi
+    leave
+    ret
+END_FUNC staticmethod_traverse
+
+DEF_FUNC staticmethod_clear
+    push rbx
+    mov rbx, rdi
+    mov rdi, [rbx + PyStaticMethodObject.sm_callable]
+    mov qword [rbx + PyStaticMethodObject.sm_callable], 0
+    test rdi, rdi
+    jz .done
+    call obj_decref
+.done:
+    pop rbx
+    leave
+    ret
+END_FUNC staticmethod_clear
+
+DEF_FUNC classmethod_traverse
+    mov rdi, [rdi + PyClassMethodObject.cm_callable]
+    VISIT_PTR rdi
+    leave
+    ret
+END_FUNC classmethod_traverse
+
+DEF_FUNC classmethod_clear
+    push rbx
+    mov rbx, rdi
+    mov rdi, [rbx + PyClassMethodObject.cm_callable]
+    mov qword [rbx + PyClassMethodObject.cm_callable], 0
+    test rdi, rdi
+    jz .done
+    call obj_decref
+.done:
+    pop rbx
+    leave
+    ret
+END_FUNC classmethod_clear
+
+DEF_FUNC property_traverse
+    push rbx
+    mov rbx, rdi
+    mov rdi, [rbx + PyPropertyObject.prop_get]
+    VISIT_PTR rdi
+    mov rdi, [rbx + PyPropertyObject.prop_set]
+    VISIT_PTR rdi
+    mov rdi, [rbx + PyPropertyObject.prop_del]
+    VISIT_PTR rdi
+    pop rbx
+    leave
+    ret
+END_FUNC property_traverse
+
+DEF_FUNC property_clear
+    push rbx
+    mov rbx, rdi
+
+    mov rdi, [rbx + PyPropertyObject.prop_get]
+    mov qword [rbx + PyPropertyObject.prop_get], 0
+    test rdi, rdi
+    jz .no_get
+    call obj_decref
+.no_get:
+    mov rdi, [rbx + PyPropertyObject.prop_set]
+    mov qword [rbx + PyPropertyObject.prop_set], 0
+    test rdi, rdi
+    jz .no_set
+    call obj_decref
+.no_set:
+    mov rdi, [rbx + PyPropertyObject.prop_del]
+    mov qword [rbx + PyPropertyObject.prop_del], 0
+    test rdi, rdi
+    jz .no_del
+    call obj_decref
+.no_del:
+    pop rbx
+    leave
+    ret
+END_FUNC property_clear

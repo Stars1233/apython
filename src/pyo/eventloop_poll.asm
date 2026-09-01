@@ -8,7 +8,6 @@
 %include "eventloop.inc"
 
 extern ap_malloc
-extern ap_free
 extern ready_enqueue
 extern none_singleton
 

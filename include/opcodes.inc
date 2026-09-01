@@ -147,18 +147,6 @@ NB_INPLACE_XOR      equ 25
 
 ; Number of CACHE entries following each opcode
 ; (inline cache slots, each 2 bytes)
-CACHE_BINARY_SUBSCR   equ 1
-CACHE_STORE_SUBSCR    equ 1
-CACHE_UNPACK_SEQUENCE equ 1
-CACHE_FOR_ITER        equ 1
-CACHE_STORE_ATTR      equ 4
-CACHE_LOAD_ATTR       equ 9
-CACHE_COMPARE_OP      equ 1
-CACHE_LOAD_GLOBAL     equ 4
-CACHE_BINARY_OP       equ 1
-CACHE_SEND            equ 1
-CACHE_LOAD_SUPER_ATTR equ 1
-CACHE_CALL            equ 3
 
 ; COMPARE_OP argument encoding in Python 3.12
 ; The argument is (comparison_op << 4) | predicate_mask

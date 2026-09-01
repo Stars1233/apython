@@ -3,21 +3,15 @@
 
 %include "macros.inc"
 %include "object.inc"
-%include "types.inc"
-%include "builtins.inc"
 
 extern ap_malloc
-extern ap_free
 extern ap_strlen
-extern ap_memcpy
 extern obj_decref
 extern obj_incref
 extern obj_dealloc
-extern str_from_cstr
 extern str_from_cstr_heap
 extern str_new
 extern str_type
-extern sys_write
 extern int_type
 extern bool_type
 extern int_from_i64
@@ -33,17 +27,18 @@ extern list_append
 extern tuple_new
 extern type_type
 extern module_new
-extern module_type
 extern fileobj_new
 extern builtin_func_new
-extern sys_exit
 extern fatal_error
 extern raise_exception
 
-; ============================================================================
-; sys_module_init(int argc, char **argv) -> void
-; Initialize the sys module and register it in sys.modules
-; ============================================================================
+;; ============================================================================
+;; sys_module_init(int argc, char **argv) -> void
+;; Initialize the sys module and register it in sys.modules
+;; ============================================================================
+SMI_ARGC  equ 8
+SMI_ARGV  equ 16
+SMI_TMP   equ 24            ; whichever object is being installed just now
 DEF_FUNC sys_module_init, 32
     push rbx
     push r12
@@ -51,8 +46,8 @@ DEF_FUNC sys_module_init, 32
     push r14
     push r15
 
-    mov [rbp - 8], rdi          ; argc
-    mov [rbp - 16], rsi         ; argv
+    mov [rbp - SMI_ARGC], rdi          ; argc
+    mov [rbp - SMI_ARGV], rsi         ; argv
 
     ; Initialize int_max_str_digits to 4300 (CPython default)
     mov qword [rel sys_int_max_str_digits], 4300
@@ -112,10 +107,14 @@ DEF_FUNC sys_module_init, 32
     call list_new
     mov r13, rax                ; r13 = sys.argv list
 
-    ; Populate sys.argv from process argv
-    mov rcx, [rbp - 8]         ; argc
-    mov rdx, [rbp - 16]        ; argv
-    xor ebx, ebx               ; i = 0
+    ; Populate sys.argv from process argv, starting at the *script*.  CPython's
+    ; sys.argv[0] is the script, not the interpreter, so a script reading
+    ; sys.argv[1] for its first argument was getting its own path.  main has
+    ; already shifted argv past a -t if there was one, so index 1 is the script
+    ; either way.
+    mov rcx, [rbp - SMI_ARGC]         ; argc
+    mov rdx, [rbp - SMI_ARGV]        ; argv
+    mov ebx, 1                 ; i = 1: skip the interpreter
 .argv_loop:
     cmp rbx, rcx
     jge .argv_done
@@ -152,7 +151,7 @@ DEF_FUNC sys_module_init, 32
     call obj_decref
 
     ; --- sys.maxsize ---
-    mov rdi, 0x7FFFFFFFFFFFFFFF
+    mov rdi, 0x7fffffffffffffff
     call int_from_i64
     push rdx                   ; save value tag
     push rax                   ; save value payload
@@ -404,12 +403,12 @@ DEF_FUNC sys_module_init, 32
     extern namespace_new
     extern namespace_set
     call namespace_new
-    mov [rbp - 24], rax
+    mov [rbp - SMI_TMP], rax
 
     lea rdi, [rel sm_apython_name]
     call str_from_cstr_heap
     push rax
-    mov rdi, [rbp - 24]
+    mov rdi, [rbp - SMI_TMP]
     lea rsi, [rel sm_name]
     mov rdx, rax
     call namespace_set
@@ -419,7 +418,7 @@ DEF_FUNC sys_module_init, 32
     lea rdi, [rel sm_cache_tag_val]
     call str_from_cstr_heap
     push rax
-    mov rdi, [rbp - 24]
+    mov rdi, [rbp - SMI_TMP]
     lea rsi, [rel sm_cache_tag]
     mov rdx, rax
     call namespace_set
@@ -442,7 +441,7 @@ DEF_FUNC sys_module_init, 32
     pop rax
     test edx, edx
     jz .no_impl_version
-    mov rdi, [rbp - 24]
+    mov rdi, [rbp - SMI_TMP]
     lea rsi, [rel sm_version]
     mov rdx, rax
     call namespace_set
@@ -453,27 +452,27 @@ DEF_FUNC sys_module_init, 32
     push rax
     mov rdi, r15
     mov rsi, rax
-    mov rdx, [rbp - 24]
+    mov rdx, [rbp - SMI_TMP]
     call dict_set
     pop rdi
     call obj_decref
-    mov rdi, [rbp - 24]
+    mov rdi, [rbp - SMI_TMP]
     call obj_decref
 
     ; --- sys.warnoptions (empty; nothing parses -W yet) ---
     xor edi, edi
     call list_new
-    mov [rbp - 24], rax
+    mov [rbp - SMI_TMP], rax
     lea rdi, [rel sm_warnoptions]
     call str_from_cstr_heap
     push rax
     mov rdi, r15
     mov rsi, rax
-    mov rdx, [rbp - 24]
+    mov rdx, [rbp - SMI_TMP]
     call dict_set
     pop rdi
     call obj_decref
-    mov rdi, [rbp - 24]
+    mov rdi, [rbp - SMI_TMP]
     call obj_decref
 
     ; --- sys.builtin_module_names ---
@@ -482,7 +481,7 @@ DEF_FUNC sys_module_init, 32
     ; use it to tell a built-in apart from a shadowing file.
     mov edi, SM_BUILTIN_COUNT
     call tuple_new
-    mov [rbp - 24], rax
+    mov [rbp - SMI_TMP], rax
     xor r13d, r13d
 .sm_bmn_loop:
     cmp r13, SM_BUILTIN_COUNT
@@ -490,7 +489,7 @@ DEF_FUNC sys_module_init, 32
     lea rax, [rel sm_builtin_names]
     mov rdi, [rax + r13*8]
     call str_from_cstr_heap
-    mov rcx, [rbp - 24]
+    mov rcx, [rbp - SMI_TMP]
     mov rcx, [rcx + PyTupleObject.ob_item]
     mov [rcx + r13*8], rax
     inc r13
@@ -501,11 +500,11 @@ DEF_FUNC sys_module_init, 32
     push rax
     mov rdi, r15
     mov rsi, rax
-    mov rdx, [rbp - 24]
+    mov rdx, [rbp - SMI_TMP]
     call dict_set
     pop rdi
     call obj_decref
-    mov rdi, [rbp - 24]
+    mov rdi, [rbp - SMI_TMP]
     call obj_decref
 
     ; --- sys.byteorder ---
@@ -629,11 +628,11 @@ DEF_FUNC sys_module_init, 32
     ret
 END_FUNC sys_module_init
 
-; ============================================================================
-; sys.getrecursionlimit() / sys.setrecursionlimit(n)
-; The interpreter has had a recursion counter since the bare SIGSEGV was
-; replaced with a RecursionError; these expose the limit it checks.
-; ============================================================================
+;; ============================================================================
+;; sys.getrecursionlimit() / sys.setrecursionlimit(n)
+;; The interpreter has had a recursion counter since the bare SIGSEGV was
+;; replaced with a RecursionError; these expose the limit it checks.
+;; ============================================================================
 DEF_FUNC sys_getrecursionlimit_func
     mov rax, [rel recursion_limit]
     extern recursion_limit
@@ -661,27 +660,21 @@ DEF_FUNC sys_setrecursionlimit_func
     cmp rax, 1
     jl .srl_value_error
     mov [rel recursion_limit], rax
-    lea rax, [rel none_singleton]
-    inc qword [rax + PyObject.ob_refcnt]
-    mov edx, TAG_PTR
+    RET_NONE
     leave
     V_PACK rax, rdx
     ret
 .srl_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "setrecursionlimit() argument must be an int"
-    call raise_exception
+    RAISE exc_TypeError_type, "setrecursionlimit() argument must be an int"
 .srl_value_error:
     extern exc_ValueError_type
-    lea rdi, [rel exc_ValueError_type]
-    CSTRING rsi, "recursion limit must be greater or equal than 1"
-    call raise_exception
+    RAISE exc_ValueError_type, "recursion limit must be greater or equal than 1"
 END_FUNC sys_setrecursionlimit_func
 
-; ============================================================================
-; sys_exit_func(PyObject **args, int64_t nargs) -> PyObject*
-; sys.exit([code]) — exit the process
-; ============================================================================
+;; ============================================================================
+;; sys_exit_func(PyObject **args, int64_t nargs) -> PyObject*
+;; sys.exit([code]) — exit the process
+;; ============================================================================
 DEF_FUNC sys_exit_func
     ; sys.exit raises SystemExit; it does not call the exit syscall.  Calling
     ; it directly skipped every `finally` block and context-manager __exit__
@@ -708,10 +701,10 @@ DEF_FUNC sys_exit_func
     ud2
 END_FUNC sys_exit_func
 
-; ============================================================================
-; sys_getdefaultencoding_func(PyObject **args, int64_t nargs) -> PyObject*
-; Returns "utf-8"
-; ============================================================================
+;; ============================================================================
+;; sys_getdefaultencoding_func(PyObject **args, int64_t nargs) -> rax = Value
+;; Returns "utf-8"
+;; ============================================================================
 DEF_FUNC sys_getdefaultencoding_func
     lea rdi, [rel sm_utf8]
     call str_from_cstr_heap
@@ -720,10 +713,10 @@ DEF_FUNC sys_getdefaultencoding_func
     ret
 END_FUNC sys_getdefaultencoding_func
 
-; ============================================================================
-; sys_get_int_max_str_digits_func(PyObject **args, int64_t nargs) -> PyObject*
-; Returns the current int max str digits limit
-; ============================================================================
+;; ============================================================================
+;; sys_get_int_max_str_digits_func(PyObject **args, int64_t nargs) -> rax = Value
+;; Returns the current int max str digits limit
+;; ============================================================================
 DEF_FUNC sys_get_int_max_str_digits_func
     cmp rsi, 0
     jne .get_imsd_error
@@ -734,15 +727,13 @@ DEF_FUNC sys_get_int_max_str_digits_func
     ret
 .get_imsd_error:
     extern exc_TypeError_type
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "get_int_max_str_digits() takes no arguments"
-    call raise_exception
+    RAISE exc_TypeError_type, "get_int_max_str_digits() takes no arguments"
 END_FUNC sys_get_int_max_str_digits_func
 
-; ============================================================================
-; sys_set_int_max_str_digits_func(PyObject **args, int64_t nargs) -> PyObject*
-; Sets the int max str digits limit. 0 = unlimited, otherwise >= 640
-; ============================================================================
+;; ============================================================================
+;; sys_set_int_max_str_digits_func(PyObject **args, int64_t nargs) -> rax = Value
+;; Sets the int max str digits limit. 0 = unlimited, otherwise >= 640
+;; ============================================================================
 DEF_FUNC sys_set_int_max_str_digits_func
     cmp rsi, 1
     jne .set_imsd_error
@@ -759,29 +750,23 @@ DEF_FUNC sys_set_int_max_str_digits_func
 
 .set_imsd_ok:
     mov [rel sys_int_max_str_digits], rax
-    lea rax, [rel none_singleton]
-    inc qword [rax + PyObject.ob_refcnt]
-    mov edx, TAG_PTR
+    RET_NONE
     leave
     V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .set_imsd_value_error:
     extern exc_ValueError_type
-    lea rdi, [rel exc_ValueError_type]
-    CSTRING rsi, "set_int_max_str_digits: value must be 0 or >= 640"
-    call raise_exception
+    RAISE exc_ValueError_type, "set_int_max_str_digits: value must be 0 or >= 640"
 
 .set_imsd_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "set_int_max_str_digits() takes exactly 1 argument"
-    call raise_exception
+    RAISE exc_TypeError_type, "set_int_max_str_digits() takes exactly 1 argument"
 END_FUNC sys_set_int_max_str_digits_func
 
-; ============================================================================
-; sys_path_add_script_dir(const char *pyc_path)
-; Extract directory from the .pyc path and prepend to sys.path[0]
-; ============================================================================
+;; ============================================================================
+;; sys_path_add_script_dir(const char *pyc_path)
+;; Extract directory from the .pyc path and prepend to sys.path[0]
+;; ============================================================================
 DEF_FUNC sys_path_add_script_dir
     push rbx
     push r12
@@ -844,9 +829,9 @@ DEF_FUNC sys_path_add_script_dir
     ret
 END_FUNC sys_path_add_script_dir
 
-; ============================================================================
-; Data
-; ============================================================================
+;; ============================================================================
+;; Data
+;; ============================================================================
 
 ;; ============================================================================
 ;; sys.intern(string) -> string
@@ -902,13 +887,10 @@ DEF_FUNC sys_intern_func
     CSTRING rdi, `intern() argument must be str, not \x01`
     call raise_type_error_with_name
 .si_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "sys.intern() takes exactly one argument"
-    call raise_exception
+    RAISE exc_TypeError_type, "sys.intern() takes exactly one argument"
 END_FUNC sys_intern_func
 
 section .rodata
-sys_exit_nl: db 10
 
 sm_sys:          db "sys", 0
 sm_modules:      db "modules", 0

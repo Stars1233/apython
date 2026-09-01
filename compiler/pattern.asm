@@ -19,14 +19,10 @@
 %include "compiler.inc"
 
 extern ast_at
-extern ast_child
 extern ast_make
 extern ast_mark
-extern ast_obj
 extern ast_push
-extern comp_intern
 extern comp_error
-extern exc_SyntaxError_type
 extern par_advance
 extern par_expect
 extern par_expr
@@ -35,7 +31,6 @@ extern par_kind
 extern par_peek
 extern par_suite_into
 extern par_syntax_error
-extern par_statement_any
 extern ap_memcmp
 extern par_name_obj
 extern par_exprlist_stmt
@@ -453,8 +448,6 @@ END_FUNC par_patterns
 PO_LINE  equ 8
 PO_MARK  equ 16
 PO_FIRST equ 24
-PO_NODE  equ 32
-PO_N     equ 40
 PO_FRAME equ 40           ; + 1 push = 48
 DEF_FUNC_LOCAL par_or_pattern, PO_FRAME
     push rbx
@@ -544,8 +537,6 @@ END_FUNC par_or_pattern
 ;; sequence, a mapping, or a class pattern.
 ;; ============================================================================
 CP_LINE  equ 8
-CP_NODE  equ 16
-CP_OBJ   equ 24
 CP_FRAME equ 24           ; + 1 push = 32
 DEF_FUNC_LOCAL par_closed_pattern, CP_FRAME
     push rbx
@@ -1185,7 +1176,6 @@ END_FUNC pat_drop_to
 ;; ============================================================================
 PV_LINE  equ 8
 PV_NODE  equ 16
-PV_NAME  equ 24
 PV_FRAME equ 24           ; + 1 push = 32
 DEF_FUNC_LOCAL par_pattern_value_expr, PV_FRAME
     push rbx

@@ -1,4 +1,4 @@
-; int_obj.asm - Integer type (fat value TAG_SMALLINT + GMP arbitrary precision)
+; pyo/int.asm - Integer type (fat value TAG_SMALLINT + GMP arbitrary precision)
 ;
 ; Fat value TAG_SMALLINT: tag=1, payload=raw signed i64, full 64-bit range
 ; No heap allocation or refcounting needed for inline integers.
@@ -11,7 +11,6 @@
 
 %include "macros.inc"
 %include "object.inc"
-%include "types.inc"
 
 extern ap_malloc
 extern ap_free
@@ -20,7 +19,6 @@ extern str_from_cstr_heap
 extern bool_true
 extern bool_false
 extern none_singleton
-extern bool_from_int
 extern type_type
 
 ; GMP functions
@@ -28,8 +26,6 @@ extern bool_type
 extern __gmpz_init
 extern __gmpz_init_set_si
 extern __gmpz_clear
-extern __gmpz_set_si
-extern __gmpz_set
 extern __gmpz_get_si
 extern __gmpz_fits_slong_p
 extern __gmpz_tdiv_ui
@@ -37,8 +33,6 @@ extern __gmpz_get_str
 extern __gmpz_add
 extern __gmpz_sub
 extern __gmpz_mul
-extern __gmpz_tdiv_q
-extern __gmpz_tdiv_r
 extern __gmpz_fdiv_q
 extern __gmpz_fdiv_r
 extern __gmpz_neg
@@ -57,40 +51,10 @@ extern __gmpz_get_d
 
 extern raise_exception
 extern strlen
-extern exc_TypeError_type
 extern exc_ValueError_type
 extern exc_ZeroDivisionError_type
 extern float_from_f64
 
-;; ============================================================================
-;; int_new_from_mpz - internal: alloc int obj, init mpz, copy source
-;; Input:  rdi = ptr to source mpz_t
-;; Output: rax = new PyIntObject*
-;; ============================================================================
-DEF_FUNC_LOCAL int_new_from_mpz
-    push rbx
-    push r12
-    mov rbx, rdi
-    mov edi, PyIntObject_size
-    call ap_malloc
-    mov r12, rax
-    mov qword [r12 + PyObject.ob_refcnt], 1
-    lea rax, [rel int_type]
-    mov [r12 + PyObject.ob_type], rax
-    mov qword [r12 + PyIntObject.compact], 0  ; GMP-backed
-    INT_NEED_MPZ r12
-    lea rdi, [r12 + PyIntObject.mpz]
-    call __gmpz_init wrt ..plt
-    INT_NEED_MPZ r12
-    lea rdi, [r12 + PyIntObject.mpz]
-    mov rsi, rbx
-    call __gmpz_set wrt ..plt
-    mov rax, r12
-    pop r12
-    pop rbx
-    leave
-    ret
-END_FUNC int_new_from_mpz
 
 ;; ============================================================================
 
@@ -133,7 +97,6 @@ END_FUNC int_from_i64
 ;; PRESERVES EVERY REGISTER, so INT_NEED_MPZ can be dropped in front of any
 ;; .mpz access without auditing what is live around it.
 ;; ============================================================================
-global int_promote_mpz
 DEF_FUNC int_promote_mpz
     push rax
     push rcx
@@ -167,7 +130,6 @@ END_FUNC int_promote_mpz
 ;; int_new_compact(int64_t val) -> rax: PyIntObject*
 ;; Heap integer with no GMP init and no limb allocation.
 ;; ============================================================================
-global int_new_compact
 DEF_FUNC int_new_compact
     push rbx
     push r12
@@ -207,55 +169,6 @@ DEF_FUNC_BARE smallint_to_pyint
     jmp int_from_i64_gmp
 END_FUNC smallint_to_pyint
 
-;; ============================================================================
-;; int_from_cstr(const char *str, int base) -> PyIntObject*
-;; Create integer from C string. Returns NULL on parse failure.
-;; ============================================================================
-DEF_FUNC int_from_cstr
-    push rbx
-    push r12
-    push r13
-    and rsp, -16           ; align for GMP calls
-    mov rbx, rdi
-    mov r13d, esi
-    mov edi, PyIntObject_size
-    call ap_malloc
-    mov r12, rax
-    mov qword [r12 + PyObject.ob_refcnt], 1
-    lea rax, [rel int_type]
-    mov [r12 + PyObject.ob_type], rax
-    mov qword [r12 + PyIntObject.compact], 0  ; GMP-backed
-    INT_NEED_MPZ r12
-    lea rdi, [r12 + PyIntObject.mpz]
-    call __gmpz_init wrt ..plt
-    INT_NEED_MPZ r12
-    lea rdi, [r12 + PyIntObject.mpz]
-    mov rsi, rbx
-    mov edx, r13d
-    call __gmpz_set_str wrt ..plt
-    test eax, eax
-    jnz .parse_fail
-    mov rax, r12
-    lea rsp, [rbp - 24]
-    pop r13
-    pop r12
-    pop rbx
-    leave
-    ret
-.parse_fail:
-    INT_NEED_MPZ r12
-    lea rdi, [r12 + PyIntObject.mpz]
-    call __gmpz_clear wrt ..plt
-    mov rdi, r12
-    call ap_free
-    RET_NULL
-    lea rsp, [rbp - 24]
-    pop r13
-    pop r12
-    pop rbx
-    leave
-    ret
-END_FUNC int_from_cstr
 
 ;; ============================================================================
 ;; int_from_cstr_base(char *str, int base) -> PyObject* or NULL
@@ -268,9 +181,8 @@ IB_BASE   equ 16         ; resolved base
 IB_SIGN   equ 24         ; 0 = positive, 1 = negative
 IB_BUF    equ 32         ; cleaned buffer ptr
 IB_OBJ    equ 40         ; allocated PyIntObject ptr
-IB_FRAME  equ 48
+IB_FRAME  equ 48            ; + 0 pushes = 48
 
-global int_from_cstr_base
 DEF_FUNC int_from_cstr_base, IB_FRAME
 
     mov [rbp - IB_SRC], rdi
@@ -293,13 +205,13 @@ DEF_FUNC int_from_cstr_base, IB_FRAME
     cmp al, 11            ; \v
     je .skip_ws_1
     ; Check for UTF-8 multi-byte Unicode whitespace
-    cmp al, 0xC2
+    cmp al, 0xc2
     je .skip_ws_2byte
-    cmp al, 0xE2
+    cmp al, 0xe2
     je .skip_ws_3byte_e2
-    cmp al, 0xE3
+    cmp al, 0xe3
     je .skip_ws_3byte_e3
-    cmp al, 0xE1
+    cmp al, 0xe1
     je .skip_ws_3byte_e1
     jmp .ws_done
 .skip_ws_1:
@@ -307,7 +219,7 @@ DEF_FUNC int_from_cstr_base, IB_FRAME
     jmp .skip_ws
 .skip_ws_2byte:
     ; U+00A0 (NBSP): C2 A0
-    cmp byte [rdi + 1], 0xA0
+    cmp byte [rdi + 1], 0xa0
     jne .ws_done
     add rdi, 2
     jmp .skip_ws
@@ -322,24 +234,24 @@ DEF_FUNC int_from_cstr_base, IB_FRAME
     cmp cl, 0x81
     jne .ws_done
     ; E2 81 xx: check for U+205F (E2 81 9F)
-    cmp byte [rdi + 2], 0x9F
+    cmp byte [rdi + 2], 0x9f
     jne .ws_done
     add rdi, 3
     jmp .skip_ws
 .skip_ws_e2_80:
     movzx ecx, byte [rdi + 2]
-    ; U+2000-U+200A: third byte 0x80-0x8A
+    ; U+2000-U+200A: third byte 0x80-0x8a
     cmp cl, 0x80
     jb .ws_done
-    cmp cl, 0x8A
+    cmp cl, 0x8a
     jbe .skip_ws_3
-    ; U+2028-U+2029: third byte 0xA8-0xA9
-    cmp cl, 0xA8
+    ; U+2028-U+2029: third byte 0xa8-0xa9
+    cmp cl, 0xa8
     je .skip_ws_3
-    cmp cl, 0xA9
+    cmp cl, 0xa9
     je .skip_ws_3
-    ; U+202F: third byte 0xAF
-    cmp cl, 0xAF
+    ; U+202F: third byte 0xaf
+    cmp cl, 0xaf
     je .skip_ws_3
     jmp .ws_done
 .skip_ws_3byte_e3:
@@ -352,7 +264,7 @@ DEF_FUNC int_from_cstr_base, IB_FRAME
     jmp .skip_ws
 .skip_ws_3byte_e1:
     ; U+1680 (OGHAM SPACE): E1 9A 80
-    cmp byte [rdi + 1], 0x9A
+    cmp byte [rdi + 1], 0x9a
     jne .ws_done
     cmp byte [rdi + 2], 0x80
     jne .ws_done
@@ -544,13 +456,13 @@ DEF_FUNC int_from_cstr_base, IB_FRAME
     cmp r8b, 11
     je .copy_trail_ws
     ; Check for UTF-8 Unicode whitespace
-    cmp r8b, 0xC2
+    cmp r8b, 0xc2
     je .copy_trail_utf8_c2
-    cmp r8b, 0xE2
+    cmp r8b, 0xe2
     je .copy_trail_utf8_e2
-    cmp r8b, 0xE3
+    cmp r8b, 0xe3
     je .copy_trail_utf8_e3
-    cmp r8b, 0xE1
+    cmp r8b, 0xe1
     je .copy_trail_utf8_e1
 
     ; Check for underscore
@@ -558,9 +470,9 @@ DEF_FUNC int_from_cstr_base, IB_FRAME
     je .copy_underscore
 
     ; Check for Unicode digit (multi-byte UTF-8)
-    cmp r8b, 0xD9
+    cmp r8b, 0xd9
     je .copy_digit_arabic
-    cmp r8b, 0xE0
+    cmp r8b, 0xe0
     je .copy_digit_3byte
 
     ; Regular digit: copy it
@@ -573,12 +485,12 @@ DEF_FUNC int_from_cstr_base, IB_FRAME
 .copy_digit_arabic:
     ; Arabic-Indic digits U+0660-0669: D9 A0-A9 → '0'-'9'
     movzx r9d, byte [rsi + 1]
-    cmp r9b, 0xA0
+    cmp r9b, 0xa0
     jb .copy_not_ws         ; not a digit, treat as regular byte
-    cmp r9b, 0xA9
+    cmp r9b, 0xa9
     ja .copy_not_ws
-    ; Convert to ASCII: r9b - 0xA0 + '0'
-    sub r9b, 0xA0
+    ; Convert to ASCII: r9b - 0xa0 + '0'
+    sub r9b, 0xa0
     add r9b, '0'
     mov [rdi + rcx], r9b
     inc rcx
@@ -588,15 +500,15 @@ DEF_FUNC int_from_cstr_base, IB_FRAME
 
 .copy_digit_3byte:
     ; Devanagari digits U+0966-096F: E0 A5 A6-AF → '0'-'9'
-    cmp byte [rsi + 1], 0xA5
+    cmp byte [rsi + 1], 0xa5
     jne .copy_not_ws        ; not Devanagari, treat as regular byte
     movzx r9d, byte [rsi + 2]
-    cmp r9b, 0xA6
+    cmp r9b, 0xa6
     jb .copy_not_ws
-    cmp r9b, 0xAF
+    cmp r9b, 0xaf
     ja .copy_not_ws
-    ; Convert to ASCII: r9b - 0xA6 + '0'
-    sub r9b, 0xA6
+    ; Convert to ASCII: r9b - 0xa6 + '0'
+    sub r9b, 0xa6
     add r9b, '0'
     mov [rdi + rcx], r9b
     inc rcx
@@ -617,7 +529,7 @@ DEF_FUNC int_from_cstr_base, IB_FRAME
 
 .copy_trail_utf8_c2:
     ; U+00A0 (NBSP): C2 A0
-    cmp byte [rsi + 1], 0xA0
+    cmp byte [rsi + 1], 0xa0
     jne .copy_not_ws
     add rsi, 2
     jmp .trail_loop
@@ -628,7 +540,7 @@ DEF_FUNC int_from_cstr_base, IB_FRAME
     je .copy_trail_e2_80
     cmp r9b, 0x81
     jne .copy_not_ws
-    cmp byte [rsi + 2], 0x9F
+    cmp byte [rsi + 2], 0x9f
     jne .copy_not_ws
     add rsi, 3
     jmp .trail_loop
@@ -636,13 +548,13 @@ DEF_FUNC int_from_cstr_base, IB_FRAME
     movzx r9d, byte [rsi + 2]
     cmp r9b, 0x80
     jb .copy_not_ws
-    cmp r9b, 0x8A
+    cmp r9b, 0x8a
     jbe .copy_trail_utf8_3
-    cmp r9b, 0xA8
+    cmp r9b, 0xa8
     je .copy_trail_utf8_3
-    cmp r9b, 0xA9
+    cmp r9b, 0xa9
     je .copy_trail_utf8_3
-    cmp r9b, 0xAF
+    cmp r9b, 0xaf
     je .copy_trail_utf8_3
     jmp .copy_not_ws
 .copy_trail_utf8_e3:
@@ -655,7 +567,7 @@ DEF_FUNC int_from_cstr_base, IB_FRAME
     jmp .trail_loop
 .copy_trail_utf8_e1:
     ; U+1680: E1 9A 80
-    cmp byte [rsi + 1], 0x9A
+    cmp byte [rsi + 1], 0x9a
     jne .copy_not_ws
     cmp byte [rsi + 2], 0x80
     jne .copy_not_ws
@@ -692,18 +604,18 @@ DEF_FUNC int_from_cstr_base, IB_FRAME
     cmp r8b, 11
     je .trail_next
     ; Check for UTF-8 Unicode whitespace in trailing
-    cmp r8b, 0xC2
+    cmp r8b, 0xc2
     je .trail_utf8_c2
-    cmp r8b, 0xE2
+    cmp r8b, 0xe2
     je .trail_utf8_e2
-    cmp r8b, 0xE3
+    cmp r8b, 0xe3
     je .trail_utf8_e3
-    cmp r8b, 0xE1
+    cmp r8b, 0xe1
     je .trail_utf8_e1
     ; Non-whitespace after whitespace: error
     jmp .parse_error
 .trail_utf8_c2:
-    cmp byte [rsi + 1], 0xA0
+    cmp byte [rsi + 1], 0xa0
     jne .parse_error
     add rsi, 2
     jmp .trail_loop
@@ -713,7 +625,7 @@ DEF_FUNC int_from_cstr_base, IB_FRAME
     je .trail_e2_80
     cmp r9b, 0x81
     jne .parse_error
-    cmp byte [rsi + 2], 0x9F
+    cmp byte [rsi + 2], 0x9f
     jne .parse_error
     add rsi, 3
     jmp .trail_loop
@@ -721,13 +633,13 @@ DEF_FUNC int_from_cstr_base, IB_FRAME
     movzx r9d, byte [rsi + 2]
     cmp r9b, 0x80
     jb .parse_error
-    cmp r9b, 0x8A
+    cmp r9b, 0x8a
     jbe .trail_utf8_3
-    cmp r9b, 0xA8
+    cmp r9b, 0xa8
     je .trail_utf8_3
-    cmp r9b, 0xA9
+    cmp r9b, 0xa9
     je .trail_utf8_3
-    cmp r9b, 0xAF
+    cmp r9b, 0xaf
     je .trail_utf8_3
     jmp .parse_error
 .trail_utf8_e3:
@@ -738,7 +650,7 @@ DEF_FUNC int_from_cstr_base, IB_FRAME
     add rsi, 3
     jmp .trail_loop
 .trail_utf8_e1:
-    cmp byte [rsi + 1], 0x9A
+    cmp byte [rsi + 1], 0x9a
     jne .parse_error
     cmp byte [rsi + 2], 0x80
     jne .parse_error
@@ -876,9 +788,7 @@ DEF_FUNC int_from_cstr_base, IB_FRAME
     call ap_free
     extern raise_exception
     extern exc_ValueError_type
-    lea rdi, [rel exc_ValueError_type]
-    CSTRING rsi, "Exceeds the limit for integer string conversion"
-    call raise_exception
+    RAISE exc_ValueError_type, "Exceeds the limit for integer string conversion"
 
 .parse_error:
     ; Free cleaned buffer if allocated
@@ -951,8 +861,7 @@ END_FUNC int_to_i64
 IBS_BASE  equ 8
 IBS_UPPER equ 16
 IBS_RSP   equ 24
-IBS_FRAME equ 32
-global int_base_str
+IBS_FRAME equ 32            ; + 2 pushes = 48
 DEF_FUNC int_base_str, IBS_FRAME
     push rbx
     push r12
@@ -1067,6 +976,9 @@ END_FUNC int_base_str
 ;; int_repr(PyObject *self) -> PyStrObject*
 ;; String representation. SmallInt uses snprintf, GMP uses gmpz_get_str.
 ;; ============================================================================
+IR_SAVED  equ 16            ; rbp less the two callee-saved pushes
+IR_BUF    equ 32            ; 24-byte digit buffer, written backwards
+IR_FRAME  equ 32            ; the frame is built by hand
 DEF_FUNC_BARE int_repr
     cmp edx, TAG_SMALLINT
     je .smallint
@@ -1121,7 +1033,7 @@ DEF_FUNC_BARE int_repr
     call ap_free               ; free C buffer
     mov rax, rbx               ; return str object
     mov edx, TAG_PTR
-    lea rsp, [rbp - 16]   ; restore RSP to before alignment (rbp-16 = after push rbx, push r12)
+    lea rsp, [rbp - IR_SAVED] ; undo the alignment, back to the two pushes
     pop r12
     pop rbx
     pop rbp
@@ -1131,12 +1043,12 @@ DEF_FUNC_BARE int_repr
     ; Direct SmallInt repr: manual int-to-string, no GMP allocation
     push rbp
     mov rbp, rsp
-    sub rsp, 32                ; 24 bytes buffer + alignment
+    sub rsp, IR_FRAME          ; 24 bytes buffer + alignment
     mov rax, rdi
 
     ; Convert int64 to decimal string in stack buffer
     ; Write digits backwards from buf[23], then reverse
-    lea rdi, [rbp - 32]       ; rdi = buffer start
+    lea rdi, [rbp - IR_BUF]   ; rdi = buffer start
     xor ecx, ecx              ; ecx = 0 (negative flag)
     test rax, rax
     jns .si_positive
@@ -1144,7 +1056,7 @@ DEF_FUNC_BARE int_repr
     mov ecx, 1                ; mark negative
 .si_positive:
     ; rax = absolute value, ecx = negative flag
-    lea rsi, [rbp - 9]        ; rsi = write position (end of buffer area)
+    lea rsi, [rbp - IR_BUF + 23]  ; rsi = write position, one past the last byte
     mov byte [rsi], 0          ; null terminator
     dec rsi
 
@@ -1172,9 +1084,7 @@ DEF_FUNC_BARE int_repr
     ret
 
 .repr_limit_exceeded:
-    lea rdi, [rel exc_ValueError_type]
-    CSTRING rsi, "Exceeds the limit for integer string conversion"
-    call raise_exception
+    RAISE exc_ValueError_type, "Exceeds the limit for integer string conversion"
 END_FUNC int_repr
 
 ;; ============================================================================
@@ -1187,7 +1097,6 @@ END_FUNC int_repr
 ;; Shared by int_hash, obj_hash and builtin_hash so that all three agree; a
 ;; disagreement silently corrupts dict and set lookups.
 ;; ============================================================================
-global int_hash_i64
 DEF_FUNC_BARE int_hash_i64
     mov rcx, rdi
     sar rcx, 63                 ; rcx = sign mask (0 or -1)
@@ -1282,7 +1191,7 @@ DEF_FUNC_BARE int_bool
 END_FUNC int_bool
 
 ;; ============================================================================
-;; int_add(PyObject *a, PyObject *b) -> PyObject*
+;; int_add(PyObject *a, PyObject *b) -> rax = Value
 ;; SmallInt x SmallInt fast path with overflow check.
 ;; ============================================================================
 DEF_FUNC_BARE int_add
@@ -1391,7 +1300,7 @@ DEF_FUNC_BARE int_add
 END_FUNC int_add
 
 ;; ============================================================================
-;; int_sub(PyObject *a, PyObject *b) -> PyObject*
+;; int_sub(PyObject *a, PyObject *b) -> rax = Value
 ;; ============================================================================
 DEF_FUNC_BARE int_sub
     V_UNPACK rdi, rdx           ; left  Value -> (payload, tag)
@@ -1491,7 +1400,7 @@ DEF_FUNC_BARE int_sub
 END_FUNC int_sub
 
 ;; ============================================================================
-;; int_mul(PyObject *a, PyObject *b) -> PyObject*
+;; int_mul(PyObject *a, PyObject *b) -> rax = Value
 ;; SmallInt x SmallInt: use imul with overflow detection
 ;; ============================================================================
 DEF_FUNC_BARE int_mul
@@ -1596,7 +1505,7 @@ DEF_FUNC_BARE int_mul
 END_FUNC int_mul
 
 ;; ============================================================================
-;; int_floordiv(PyObject *a, PyObject *b) -> PyObject*
+;; int_floordiv(PyObject *a, PyObject *b) -> rax = Value
 ;; ============================================================================
 DEF_FUNC_BARE int_floordiv
     V_UNPACK rdi, rdx           ; left  Value -> (payload, tag)
@@ -1644,9 +1553,7 @@ DEF_FUNC_BARE int_floordiv
 .zdiv_error:
     push rbp
     mov rbp, rsp
-    lea rdi, [rel exc_ZeroDivisionError_type]
-    CSTRING rsi, "integer division or modulo by zero"
-    call raise_exception
+    RAISE exc_ZeroDivisionError_type, "integer division or modulo by zero"
 
 .gmp_path:
     push rbp
@@ -1732,13 +1639,11 @@ DEF_FUNC_BARE int_floordiv
     mov rdi, r12
     call int_dealloc
 .gmp_zdiv_nb:
-    lea rdi, [rel exc_ZeroDivisionError_type]
-    CSTRING rsi, "integer division or modulo by zero"
-    call raise_exception
+    RAISE exc_ZeroDivisionError_type, "integer division or modulo by zero"
 END_FUNC int_floordiv
 
 ;; ============================================================================
-;; int_mod(PyObject *a, PyObject *b) -> PyObject*
+;; int_mod(PyObject *a, PyObject *b) -> rax = Value
 ;; ============================================================================
 DEF_FUNC_BARE int_mod
     V_UNPACK rdi, rdx           ; left  Value -> (payload, tag)
@@ -1786,9 +1691,7 @@ DEF_FUNC_BARE int_mod
 .mod_zdiv_error:
     push rbp
     mov rbp, rsp
-    lea rdi, [rel exc_ZeroDivisionError_type]
-    CSTRING rsi, "integer division or modulo by zero"
-    call raise_exception
+    RAISE exc_ZeroDivisionError_type, "integer division or modulo by zero"
 
 .gmp_path:
     push rbp
@@ -1873,9 +1776,7 @@ DEF_FUNC_BARE int_mod
     mov rdi, r12
     call int_dealloc
 .gmp_mod_zdiv_nb:
-    lea rdi, [rel exc_ZeroDivisionError_type]
-    CSTRING rsi, "integer division or modulo by zero"
-    call raise_exception
+    RAISE exc_ZeroDivisionError_type, "integer division or modulo by zero"
 END_FUNC int_mod
 
 ;; ============================================================================
@@ -1894,7 +1795,7 @@ DEF_FUNC_BARE int_pos
 END_FUNC int_pos
 
 ;; ============================================================================
-;; int_neg(PyObject *a) -> PyObject*
+;; int_neg(PyObject *a) -> rax = Value
 ;; ============================================================================
 DEF_FUNC_BARE int_neg
     V_UNPACK rdi, rdx           ; operand Value -> (payload, tag)
@@ -1972,7 +1873,6 @@ END_FUNC int_neg
 ;; subclasses.  Builtins that used to test `tag == TAG_SMALLINT` need this
 ;; instead, or they reject every integer that lives on the heap.
 ;; ============================================================================
-global int_is_integer
 DEF_FUNC_BARE int_is_integer
     cmp edx, TAG_SMALLINT
     je .iii_yes
@@ -1998,7 +1898,6 @@ DEF_FUNC_BARE int_is_integer
     ret
 END_FUNC int_is_integer
 
-global int_unwrap
 DEF_FUNC_BARE int_unwrap
     ; rdi = payload, edx = tag -> rdi = unwrapped payload, edx = unwrapped tag
     ;
@@ -2241,9 +2140,7 @@ DEF_FUNC int_compare
     ret
 
 .ret_true:
-    lea rax, [rel bool_true]
-    inc qword [rax + PyObject.ob_refcnt]
-    mov edx, TAG_PTR
+    RET_TRUE
     pop r14
     pop r13
     pop r12
@@ -2251,9 +2148,7 @@ DEF_FUNC int_compare
     leave
     ret
 .ret_false:
-    lea rax, [rel bool_false]
-    inc qword [rax + PyObject.ob_refcnt]
-    mov edx, TAG_PTR
+    RET_FALSE
     pop r14
     pop r13
     pop r12
@@ -2286,7 +2181,7 @@ DEF_FUNC_BARE int_dealloc
 END_FUNC int_dealloc
 
 ;; ============================================================================
-;; Bitwise AND: int_and(PyObject *a, PyObject *b) -> PyObject*
+;; Bitwise AND: int_and(PyObject *a, PyObject *b) -> rax = Value
 ;; ============================================================================
 DEF_FUNC_BARE int_and
     V_UNPACK rdi, rdx           ; left  Value -> (payload, tag)
@@ -2385,7 +2280,7 @@ DEF_FUNC_BARE int_and
 END_FUNC int_and
 
 ;; ============================================================================
-;; Bitwise OR: int_or(PyObject *a, PyObject *b) -> PyObject*
+;; Bitwise OR: int_or(PyObject *a, PyObject *b) -> rax = Value
 ;; ============================================================================
 DEF_FUNC_BARE int_or
     V_UNPACK rdi, rdx           ; left  Value -> (payload, tag)
@@ -2484,7 +2379,7 @@ DEF_FUNC_BARE int_or
 END_FUNC int_or
 
 ;; ============================================================================
-;; Bitwise XOR: int_xor(PyObject *a, PyObject *b) -> PyObject*
+;; Bitwise XOR: int_xor(PyObject *a, PyObject *b) -> rax = Value
 ;; ============================================================================
 DEF_FUNC_BARE int_xor
     V_UNPACK rdi, rdx           ; left  Value -> (payload, tag)
@@ -2584,7 +2479,7 @@ DEF_FUNC_BARE int_xor
 END_FUNC int_xor
 
 ;; ============================================================================
-;; Bitwise NOT: int_invert(PyObject *a, PyObject *b_unused) -> PyObject*
+;; Bitwise NOT: int_invert(PyObject *a, PyObject *b_unused) -> rax = Value
 ;; ~x = -(x+1)
 ;; ============================================================================
 DEF_FUNC_BARE int_invert
@@ -2686,7 +2581,7 @@ DEF_FUNC int_shrink
 END_FUNC int_shrink
 
 ;; ============================================================================
-;; Left shift: int_lshift(PyObject *a, PyObject *b) -> PyObject*
+;; Left shift: int_lshift(PyObject *a, PyObject *b) -> rax = Value
 ;; ============================================================================
 DEF_FUNC int_lshift
     V_UNPACK rdi, rdx           ; left  Value -> (payload, tag)
@@ -2783,13 +2678,11 @@ DEF_FUNC int_lshift
     ret
 
 .neg_shift:
-    lea rdi, [rel exc_ValueError_type]
-    CSTRING rsi, "negative shift count"
-    call raise_exception
+    RAISE exc_ValueError_type, "negative shift count"
 END_FUNC int_lshift
 
 ;; ============================================================================
-;; Right shift: int_rshift(PyObject *a, PyObject *b) -> PyObject*
+;; Right shift: int_rshift(PyObject *a, PyObject *b) -> rax = Value
 ;; ============================================================================
 DEF_FUNC int_rshift
     V_UNPACK rdi, rdx           ; left  Value -> (payload, tag)
@@ -2896,13 +2789,11 @@ DEF_FUNC int_rshift
     ret
 
 .neg_shift:
-    lea rdi, [rel exc_ValueError_type]
-    CSTRING rsi, "negative shift count"
-    call raise_exception
+    RAISE exc_ValueError_type, "negative shift count"
 END_FUNC int_rshift
 
 ;; ============================================================================
-;; Power: int_power(PyObject *a, PyObject *b) -> PyObject*
+;; Power: int_power(PyObject *a, PyObject *b) -> rax = Value
 ;; For small positive exponents, use GMP mpz_pow_ui
 ;; ============================================================================
 DEF_FUNC int_power
@@ -3044,7 +2935,7 @@ DEF_FUNC int_power
 END_FUNC int_power
 
 ;; ============================================================================
-;; True divide: int_true_divide(PyObject *a, PyObject *b) -> PyObject* (float)
+;; True divide: int_true_divide(PyObject *a, PyObject *b) -> rax = Value (float)
 ;; int / int always returns float in Python
 ;; ============================================================================
 DEF_FUNC int_true_divide
@@ -3103,9 +2994,7 @@ DEF_FUNC int_true_divide
     ret
 
 .td_divzero:
-    lea rdi, [rel exc_ZeroDivisionError_type]
-    CSTRING rsi, "division by zero"
-    call raise_exception
+    RAISE exc_ZeroDivisionError_type, "division by zero"
 END_FUNC int_true_divide
 
 ;; ============================================================================
@@ -3114,7 +3003,7 @@ END_FUNC int_true_divide
 section .data
 
 align 8
-one_double: dq 0x3FF0000000000000  ; 1.0
+one_double: dq 0x3ff0000000000000  ; 1.0
 
 int_name_str: db "int", 0
 

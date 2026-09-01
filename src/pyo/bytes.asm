@@ -1,9 +1,8 @@
-; bytes_obj.asm - Bytes type implementation
+; pyo/bytes.asm - Bytes type implementation
 ; Immutable sequence of raw bytes with inline storage
 
 %include "macros.inc"
 %include "object.inc"
-%include "types.inc"
 
 extern ap_malloc
 extern ap_free
@@ -28,7 +27,6 @@ extern slice_type
 extern slice_indices
 extern ap_strcmp
 extern builtin_func_new
-extern method_new
 
 section .text
 
@@ -114,7 +112,7 @@ DEF_FUNC_BARE bytes_len
 END_FUNC bytes_len
 
 ;; ============================================================================
-;; bytes_getitem(PyBytesObject *self, int64_t index) -> PyObject* (SmallInt 0-255)
+;; bytes_getitem(PyBytesObject *self, int64_t index) -> rax = Value (SmallInt 0-255)
 ;; sq_item: return byte at index as integer
 ;; ============================================================================
 DEF_FUNC_BARE bytes_getitem
@@ -137,13 +135,11 @@ DEF_FUNC_BARE bytes_getitem
 
 .index_error:
     push rdi
-    lea rdi, [rel exc_IndexError_type]
-    CSTRING rsi, "index out of range"
-    call raise_exception
+    RAISE exc_IndexError_type, "index out of range"
 END_FUNC bytes_getitem
 
 ;; ============================================================================
-;; bytes_subscript(PyBytesObject *self, PyObject *key) -> PyObject*
+;; bytes_subscript(PyBytesObject *self, PyObject *key) -> rax = Value
 ;; mp_subscript: handles both int and slice keys
 ;; ============================================================================
 DEF_FUNC bytes_subscript
@@ -287,9 +283,7 @@ DEF_FUNC bytes_subscript
     ret
 
 .bs_type_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "byte indices must be integers or slices"
-    call raise_exception
+    RAISE exc_TypeError_type, "byte indices must be integers or slices"
 END_FUNC bytes_subscript
 
 ;; ============================================================================
@@ -388,14 +382,10 @@ DEF_FUNC bytes_contains
     ret
 
 .bc_type_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "a bytes-like object is required"
-    call raise_exception
+    RAISE exc_TypeError_type, "a bytes-like object is required"
 
 .bc_range_error:
-    lea rdi, [rel exc_ValueError_type]
-    CSTRING rsi, "byte must be in range(0, 256)"
-    call raise_exception
+    RAISE exc_ValueError_type, "byte must be in range(0, 256)"
 END_FUNC bytes_contains
 
 ;; ============================================================================
@@ -419,6 +409,7 @@ DEF_FUNC bytearray_repr
     ret
 END_FUNC bytearray_repr
 
+BRI_BUF   equ 1024          ; render buffer, on the stack
 DEF_FUNC_LOCAL bytes_repr_impl, 1024
     push rbx
     push r12
@@ -455,7 +446,7 @@ DEF_FUNC_LOCAL bytes_repr_impl, 1024
 .br_scan_done_squote:
 
     ; Build repr in local buffer
-    lea r13, [rbp - 1024]      ; buffer on stack
+    lea r13, [rbp - BRI_BUF]      ; buffer on stack
 
     xor ecx, ecx               ; output pos
     test r14d, r14d
@@ -498,7 +489,7 @@ DEF_FUNC_LOCAL bytes_repr_impl, 1024
     cmp eax, 0x27              ; where its bytes_repr does not
     je .br_escape_squote
 .br_not_squote:
-    cmp eax, 0x5C              ; backslash
+    cmp eax, 0x5c              ; backslash
     je .br_escape_bs
 
     ; Printable: emit directly
@@ -508,22 +499,22 @@ DEF_FUNC_LOCAL bytes_repr_impl, 1024
     jmp .br_loop
 
 .br_escape_squote:
-    mov byte [r13 + rcx], 0x5C     ; backslash
+    mov byte [r13 + rcx], 0x5c     ; backslash
     mov byte [r13 + rcx + 1], 0x27
     add ecx, 2
     inc edx
     jmp .br_loop
 
 .br_escape_quote:
-    mov byte [r13 + rcx], 0x5C     ; backslash
+    mov byte [r13 + rcx], 0x5c     ; backslash
     mov [r13 + rcx + 1], r15b      ; the delimiter in use
     add ecx, 2
     inc edx
     jmp .br_loop
 
 .br_escape_bs:
-    mov byte [r13 + rcx], 0x5C
-    mov byte [r13 + rcx + 1], 0x5C
+    mov byte [r13 + rcx], 0x5c
+    mov byte [r13 + rcx + 1], 0x5c
     add ecx, 2
     inc edx
     jmp .br_loop
@@ -531,9 +522,9 @@ DEF_FUNC_LOCAL bytes_repr_impl, 1024
 .br_hex:
     ; Non-printable: emit \xHH
     ; Common escapes first
-    cmp eax, 0x0A
+    cmp eax, 0x0a
     je .br_escape_n
-    cmp eax, 0x0D
+    cmp eax, 0x0d
     je .br_escape_r
     cmp eax, 0x09
     je .br_escape_t
@@ -541,7 +532,7 @@ DEF_FUNC_LOCAL bytes_repr_impl, 1024
     je .br_escape_0
 
     ; General \xHH
-    mov byte [r13 + rcx], 0x5C     ; backslash
+    mov byte [r13 + rcx], 0x5c     ; backslash
     mov byte [r13 + rcx + 1], 'x'
     push rdx
     ; High nibble
@@ -551,7 +542,7 @@ DEF_FUNC_LOCAL bytes_repr_impl, 1024
     movzx edx, byte [rsi + rdx]
     mov [r13 + rcx + 2], dl
     ; Low nibble
-    and eax, 0x0F
+    and eax, 0x0f
     movzx eax, byte [rsi + rax]
     mov [r13 + rcx + 3], al
     pop rdx
@@ -560,25 +551,25 @@ DEF_FUNC_LOCAL bytes_repr_impl, 1024
     jmp .br_loop
 
 .br_escape_n:
-    mov byte [r13 + rcx], 0x5C
+    mov byte [r13 + rcx], 0x5c
     mov byte [r13 + rcx + 1], 'n'
     add ecx, 2
     inc edx
     jmp .br_loop
 .br_escape_r:
-    mov byte [r13 + rcx], 0x5C
+    mov byte [r13 + rcx], 0x5c
     mov byte [r13 + rcx + 1], 'r'
     add ecx, 2
     inc edx
     jmp .br_loop
 .br_escape_t:
-    mov byte [r13 + rcx], 0x5C
+    mov byte [r13 + rcx], 0x5c
     mov byte [r13 + rcx + 1], 't'
     add ecx, 2
     inc edx
     jmp .br_loop
 .br_escape_0:
-    mov byte [r13 + rcx], 0x5C
+    mov byte [r13 + rcx], 0x5c
     mov byte [r13 + rcx + 1], 'x'
     mov byte [r13 + rcx + 2], '0'
     mov byte [r13 + rcx + 3], '0'
@@ -609,24 +600,9 @@ DEF_FUNC_LOCAL bytes_repr_impl, 1024
     ret
 END_FUNC bytes_repr_impl
 
-;; ============================================================================
-;; bytes_decode(PyBytesObject *self) -> PyStrObject*
-;; Decode bytes as UTF-8 string
-;; ============================================================================
-DEF_FUNC bytes_decode
-    ; Simply create a string from the bytes data
-    ; Assumes UTF-8 encoding
-    lea rdi, [rdi + PyBytesObject.data]
-    mov rsi, [rdi - PyBytesObject.data + PyBytesObject.ob_size]
-    ; rdi = data ptr, rsi = length
-    ; str_new(data, length)
-    call str_new
-    leave
-    ret
-END_FUNC bytes_decode
 
 ;; ============================================================================
-;; bytes_getattr(PyBytesObject *self, PyObject *name) -> PyObject*
+;; bytes_getattr(PyBytesObject *self, PyObject *name) -> rax = Value
 ;; Attribute lookup for bytes: handles decode, hex, etc.
 ;; ============================================================================
 DEF_FUNC bytes_getattr
@@ -674,7 +650,7 @@ END_FUNC bytes_getattr
 BD_SELF  equ 8
 BD_OUT   equ 16
 BD_POS   equ 24
-BD_FRAME equ 32
+BD_FRAME equ 32             ; + 2 pushes = 48
 DEF_FUNC _bytes_decode_impl, BD_FRAME
     push rbx
     push r12
@@ -765,9 +741,9 @@ DEF_FUNC _bytes_decode_impl, BD_FRAME
 .bd_l1_two:
     mov r9d, eax
     shr r9d, 6
-    or r9b, 0xC0
+    or r9b, 0xc0
     mov [rdx + PyStrObject.data + r8], r9b
-    and eax, 0x3F
+    and eax, 0x3f
     or al, 0x80
     mov [rdx + PyStrObject.data + r8 + 1], al
     add qword [rbp - BD_POS], 2
@@ -792,15 +768,11 @@ DEF_FUNC _bytes_decode_impl, BD_FRAME
     CSTRING rdi, `decode() argument 'encoding' must be str, not \x01`
     call raise_type_error_with_name
 .bd_too_many:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "decode() takes at most 2 arguments"
-    call raise_exception
+    RAISE exc_TypeError_type, "decode() takes at most 2 arguments"
 
 .bd_not_decodable:
     extern exc_UnicodeDecodeError_type
-    lea rdi, [rel exc_UnicodeDecodeError_type]
-    CSTRING rsi, "byte not in range for this encoding"
-    call raise_exception
+    RAISE exc_UnicodeDecodeError_type, "byte not in range for this encoding"
 END_FUNC _bytes_decode_impl
 
 ;; ============================================================================
@@ -892,7 +864,7 @@ END_FUNC bytes_iter_dealloc
 ;; ============================================================================
 ;; iter_self - tp_iter for iterators: return self with INCREF
 ;; ============================================================================
-bytes_iter_self:
+DEF_FUNC_BARE bytes_iter_self
     inc qword [rdi + PyObject.ob_refcnt]
     mov rax, rdi
     ret
@@ -976,16 +948,12 @@ DEF_FUNC bytes_compare
     jmp .bytes_ret_false
 
 .bytes_ret_true:
-    lea rax, [rel bool_true]
-    inc qword [rax + PyObject.ob_refcnt]
-    mov edx, TAG_PTR
+    RET_TRUE
     pop rbx
     leave
     ret
 .bytes_ret_false:
-    lea rax, [rel bool_false]
-    inc qword [rax + PyObject.ob_refcnt]
-    mov edx, TAG_PTR
+    RET_FALSE
     pop rbx
     leave
     ret
@@ -1033,7 +1001,7 @@ section .text
 ;; ============================================================================
 BM_FMT   equ 8
 BM_ARGS  equ 16
-BM_FRAME equ 16
+BM_FRAME equ 16             ; + 0 pushes = 16
 
 DEF_FUNC bytes_mod, BM_FRAME
     V_UNPACK rdi, rdx           ; left  Value -> (payload, tag)
@@ -1063,7 +1031,6 @@ DEF_FUNC bytes_mod, BM_FRAME
 
     ; Convert result str to bytes
     mov rdi, [r12 + PyStrObject.ob_size]
-    extern bytes_new
     call bytes_new
     mov rbx, rax               ; rbx = bytes result
     ; Copy str data into bytes
@@ -1271,10 +1238,8 @@ DEF_FUNC bytes_repeat
     ret
 
 .brep_overflow:
-    lea rdi, [rel exc_OverflowError_type]
     extern exc_OverflowError_type
-    CSTRING rsi, "repeated bytes are too long"
-    call raise_exception
+    RAISE exc_OverflowError_type, "repeated bytes are too long"
 END_FUNC bytes_repeat
 
 ;; ============================================================================
@@ -1295,14 +1260,91 @@ global bytes_type_call
 ;;
 ;; The buffer is over-allocated by 8 so bytes objects can zero-terminate.
 ;; ============================================================================
+
+;; ============================================================================
+;; bls_item_byte(rdi = item Value) -> eax = the byte 0..255,
+;;                                    -1 not an integer,
+;;                                    -2 an integer outside range(0, 256)
+;;
+;; One item of the iterable handed to bytes() or bytearray().  It used to test
+;; V_IS_INT and nothing else, so only an int *immediate* was accepted: every
+;; heap PyIntObject -- which under INT_STRESS is every int at all, and
+;; otherwise any value past 2^50 -- was reported as "'int' object cannot be
+;; interpreted as an integer".  Nothing caught it because `make INT_STRESS=1`
+;; silently relinked the unstressed binary.
+;;
+;; __index__ is honoured because CPython honours it here: bytes([C()]) is b'A'
+;; when C.__index__ returns 65.  A value too wide for int64 is out of range
+;; rather than a type error, matching bytes([2**100]) -> ValueError.
+;; ============================================================================
+BIB_ITEM  equ 8
+BIB_FRAME equ 16            ; + 0 pushes = 16
+DEF_FUNC_LOCAL bls_item_byte, BIB_FRAME
+    mov [rbp - BIB_ITEM], rdi
+    V_IS_INT rdi, rdx
+    jae .bib_immediate
+
+    V_TEST_PTR rdi, rdx
+    ja .bib_not_int
+    mov rax, [rdi + PyObject.ob_type]
+    REQUIRE_INT_TYPE rax, rcx, .bib_try_index
+
+    mov edx, TAG_PTR
+    call int_fits_i64
+    test eax, eax
+    jz .bib_range               ; wider than int64 is certainly not a byte
+    mov rdi, [rbp - BIB_ITEM]
+    mov edx, TAG_PTR
+    call int_to_i64
+    jmp .bib_check
+
+.bib_immediate:
+    V_TO_I64 rdi
+    mov rax, rdi
+    jmp .bib_check
+
+    ; Not an int, but __index__ makes an object usable wherever one is wanted.
+    ; obj_as_index raises on anything else, so the protocol is checked first
+    ; and a bare object falls out as a type error with the buffer still owned
+    ; by the caller.
+.bib_try_index:
+    mov rax, [rdi + PyObject.ob_type]
+    mov rax, [rax + PyTypeObject.tp_as_number]
+    test rax, rax
+    jz .bib_not_int
+    cmp qword [rax + PyNumberMethods.nb_index], 0
+    je .bib_not_int
+    mov edx, TAG_PTR
+    call obj_as_index
+
+.bib_check:
+    cmp rax, 0
+    jl .bib_range
+    cmp rax, 255
+    jg .bib_range
+    leave
+    ret
+
+.bib_not_int:
+    mov eax, -1
+    leave
+    ret
+
+.bib_range:
+    mov eax, -2
+    leave
+    ret
+END_FUNC bls_item_byte
+
+;; ============================================================================
+;; (continued) bytes_load_source
+;; ============================================================================
 BLS_ARGS  equ 8
 BLS_RANGEMSG equ 16
 BLS_BADITEM equ 56
-BLS_LEN   equ 24
 BLS_BUF   equ 32
 BLS_LIST  equ 40
-BLS_FRAME equ 64
-global byteslike_source
+BLS_FRAME equ 64            ; + 2 pushes = 80
 DEF_FUNC byteslike_source, BLS_FRAME
     push rbx
     push r12
@@ -1327,7 +1369,6 @@ DEF_FUNC byteslike_source, BLS_FRAME
     lea rcx, [rel bytes_type]
     cmp rax, rcx
     je .bls_copy_bytes
-    extern bytearray_type
     lea rcx, [rel bytearray_type]
     cmp rax, rcx
     je .bls_copy_bytearray
@@ -1431,16 +1472,24 @@ DEF_FUNC byteslike_source, BLS_FRAME
     cmp rcx, rbx
     jge .bls_iter_done
     mov rdi, [rax + rcx*8]
-    V_IS_INT rdi, rdx
-    jb .bls_iter_bad
-    V_TO_I64 rdi
-    cmp rdi, 0
-    jl .bls_iter_range
-    cmp rdi, 255
-    jg .bls_iter_range
-    mov [r12 + rcx], dil
+    push rax                    ; bls_item_byte clobbers the caller-saved regs
+    push rcx                    ; two pushes, so rsp stays 16-byte aligned
+    call bls_item_byte
+    mov edx, eax                ; the result, before `pop rax` overwrites it
+    pop rcx
+    pop rax
+    test edx, edx
+    js .bls_iter_reject
+    mov [r12 + rcx], dl
     inc rcx
     jmp .bls_iter_loop
+
+.bls_iter_reject:
+    ; -1 = not an integer at all, -2 = an integer outside range(0, 256).
+    mov rdi, [rax + rcx*8]      ; the offending item, for the message
+    cmp edx, -2
+    je .bls_iter_range
+    jmp .bls_iter_bad
 .bls_iter_done:
     mov qword [r12 + rbx], 0
     mov rdi, [rbp - BLS_LIST]
@@ -1489,27 +1538,19 @@ DEF_FUNC byteslike_source, BLS_FRAME
     call raise_exception
 
 .bls_negative:
-    lea rdi, [rel exc_ValueError_type]
-    CSTRING rsi, "negative count"
-    call raise_exception
+    RAISE exc_ValueError_type, "negative count"
 .bls_need_encoding:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "string argument without an encoding"
-    call raise_exception
+    RAISE exc_TypeError_type, "string argument without an encoding"
 .bls_too_many:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "encoding and errors arguments are not supported"
-    call raise_exception
+    RAISE exc_TypeError_type, "encoding and errors arguments are not supported"
 .bls_bad_type:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "cannot convert this object to bytes"
-    call raise_exception
+    RAISE exc_TypeError_type, "cannot convert this object to bytes"
 END_FUNC byteslike_source
 
 BTC_TYPE  equ 8
 BTC_BUF   equ 16
 BTC_LEN   equ 24
-BTC_FRAME equ 32
+BTC_FRAME equ 32            ; + 1 push = 40, not 16-aligned
 DEF_FUNC bytes_type_call, BTC_FRAME
     ; rdi=type, rsi=args, rdx=nargs
     push rbx
@@ -1648,3 +1689,515 @@ section .rodata
 bytes_range_msg: db "bytes must be in range(0, 256)", 0
 global bytearray_range_msg
 bytearray_range_msg: db "byte must be in range(0, 256)", 0
+
+;; ============================================================================
+;; (was src/pyo/bytearray.asm)
+;; ============================================================================
+
+section .text
+
+extern ap_malloc
+extern ap_free
+extern ap_memcpy
+extern gc_alloc
+extern gc_track
+extern type_type
+extern raise_exception
+extern exc_TypeError_type
+extern obj_decref
+extern v_int_bias
+
+section .text
+
+;; ============================================================================
+;; bytearray_type_call(type, args, nargs) -> PyByteArrayObject*
+;; Constructor: bytearray(bytes_obj)
+;; ============================================================================
+global bytearray_type_call
+BA_TYPE  equ 8
+BA_BUF   equ 16
+BA_LEN   equ 24
+BA_FRAME equ 32             ; + 1 push = 40, not 16-aligned
+DEF_FUNC bytearray_type_call, BA_FRAME
+    ; rdi=type, rsi=args, rdx=nargs
+    push rbx
+    mov [rbp - BA_TYPE], rdi           ; save type
+    mov rdi, rsi
+    mov rsi, rdx
+    lea rdx, [rel bytearray_range_msg]
+    call byteslike_source
+    mov [rbp - BA_BUF], rax
+    mov [rbp - BA_LEN], rdx
+
+    mov rcx, rdx
+    mov rdx, [rbp - BA_TYPE]
+    test qword [rdx + PyTypeObject.tp_flags], TYPE_FLAG_HAVE_GC
+    lea rdi, [rcx + PyByteArrayObject.data]
+    jz .ba_plain_alloc
+    mov rsi, rdx
+    call gc_alloc
+    jmp .ba_alloc_done
+.ba_plain_alloc:
+    call ap_malloc
+    mov qword [rax + PyByteArrayObject.ob_refcnt], 1
+    mov rdx, [rbp - BA_TYPE]
+    mov [rax + PyByteArrayObject.ob_type], rdx
+.ba_alloc_done:
+    mov rbx, rax
+    mov rcx, [rbp - BA_LEN]
+    mov [rbx + PyByteArrayObject.ob_size], rcx
+    mov rdx, [rbp - BA_TYPE]
+    inc qword [rdx + PyObject.ob_refcnt]
+
+    test rcx, rcx
+    jz .ba_no_copy
+    lea rdi, [rbx + PyByteArrayObject.data]
+    mov rsi, [rbp - BA_BUF]
+    mov rdx, rcx
+    call ap_memcpy
+.ba_no_copy:
+    mov rdi, [rbp - BA_BUF]
+    test rdi, rdi
+    jz .ba_no_free
+    call ap_free
+.ba_no_free:
+
+    mov rdx, [rbp - BA_TYPE]
+    test qword [rdx + PyTypeObject.tp_flags], TYPE_FLAG_HAVE_GC
+    jz .ba_no_track
+    mov rdi, rbx
+    call gc_track
+.ba_no_track:
+    mov rax, rbx
+    mov edx, TAG_PTR
+    pop rbx
+    leave
+    ret
+END_FUNC bytearray_type_call
+
+;; ============================================================================
+;; bytearray_dealloc(obj)
+;; ============================================================================
+DEF_FUNC_BARE bytearray_dealloc
+    jmp ap_free
+END_FUNC bytearray_dealloc
+
+;; ============================================================================
+;; bytearray_len(obj) -> int64
+;; ============================================================================
+DEF_FUNC_BARE bytearray_len
+    mov rax, [rdi + PyByteArrayObject.ob_size]
+    ret
+END_FUNC bytearray_len
+
+;; ============================================================================
+;; bytearray_tp_iter / bytearray_iter_next
+;; A bytearray was not iterable at all, so `for b in ba` and every stdlib
+;; census that does type(iter(bytearray())) stopped here.  Same shape as the
+;; bytes iterator; the index is checked against the current length each time,
+;; so a bytearray that shrinks under the iterator just ends early.
+;; ============================================================================
+DEF_FUNC bytearray_tp_iter
+    push rbx
+    mov rbx, rdi
+    mov edi, PyBytesIterObject_size
+    call ap_malloc
+    mov qword [rax + PyObject.ob_refcnt], 1
+    lea rcx, [rel bytearray_iter_type]
+    mov [rax + PyObject.ob_type], rcx
+    mov [rax + PyBytesIterObject.it_seq], rbx
+    mov qword [rax + PyBytesIterObject.it_index], 0
+    inc qword [rbx + PyObject.ob_refcnt]
+    pop rbx
+    leave
+    ret
+END_FUNC bytearray_tp_iter
+
+DEF_FUNC_BARE bytearray_iter_next
+    mov rax, [rdi + PyBytesIterObject.it_seq]
+    mov rcx, [rdi + PyBytesIterObject.it_index]
+    cmp rcx, [rax + PyByteArrayObject.ob_size]
+    jge .exhausted
+    movzx eax, byte [rax + PyByteArrayObject.data + rcx]
+    add rax, [rel v_int_bias]
+    inc qword [rdi + PyBytesIterObject.it_index]
+    ret
+.exhausted:
+    xor eax, eax
+    ret
+END_FUNC bytearray_iter_next
+
+DEF_FUNC bytearray_iter_self
+    inc qword [rdi + PyObject.ob_refcnt]
+    mov rax, rdi
+    leave
+    ret
+END_FUNC bytearray_iter_self
+
+DEF_FUNC bytearray_iter_dealloc
+    push rbx
+    mov rbx, rdi
+    mov rdi, [rbx + PyBytesIterObject.it_seq]
+    test rdi, rdi
+    jz .free
+    call obj_decref
+.free:
+    mov rdi, rbx
+    call ap_free
+    pop rbx
+    leave
+    ret
+END_FUNC bytearray_iter_dealloc
+
+;; ============================================================================
+;; Type object
+;; ============================================================================
+section .data
+
+align 8
+ba_name_str:  db "bytearray", 0
+
+align 8
+bytearray_seq_methods:
+    dq bytearray_len       ; +0: sq_length
+    dq 0                   ; +8: sq_concat
+    dq 0                   ; +16: sq_repeat
+    dq 0                   ; +24: sq_item
+    dq 0                   ; +32: sq_ass_item
+    dq 0                   ; +40: sq_contains
+    dq 0                   ; +48: sq_inplace_concat
+    dq 0                   ; +56: sq_inplace_repeat
+
+align 8
+global bytearray_type
+bytearray_type:
+    dq 1                            ; ob_refcnt
+    dq type_type                    ; ob_type
+    dq ba_name_str                  ; tp_name
+    dq PyByteArrayObject.data       ; tp_basicsize
+    dq bytearray_dealloc            ; tp_dealloc
+    dq bytearray_repr               ; tp_repr
+    dq bytearray_repr               ; tp_str
+    dq 0                            ; tp_hash
+    dq 0                            ; tp_call (set by add_builtin_type)
+    dq 0                            ; tp_getattr
+    dq 0                            ; tp_setattr
+    dq 0                            ; tp_richcompare
+    dq bytearray_tp_iter            ; tp_iter
+    dq 0                            ; tp_iternext
+    dq 0                            ; tp_init
+    dq 0                            ; tp_new
+    dq 0                            ; tp_as_number
+    dq bytearray_seq_methods        ; tp_as_sequence
+    dq 0                            ; tp_as_mapping
+    dq 0                            ; tp_base
+    dq 0                            ; tp_dict
+    dq 0                            ; tp_mro
+    dq TYPE_FLAG_BASETYPE           ; tp_flags (allow subclassing)
+    dq 0                            ; tp_bases
+    dq 0                        ; tp_traverse
+    dq 0                        ; tp_clear
+    dq 0 ; tp_dictoffset
+
+align 8
+ba_iter_name_str: db "bytearray_iterator", 0
+
+align 8
+global bytearray_iter_type
+bytearray_iter_type:
+    dq 1                            ; ob_refcnt
+    dq type_type                    ; ob_type
+    dq ba_iter_name_str             ; tp_name
+    dq PyBytesIterObject_size       ; tp_basicsize
+    dq bytearray_iter_dealloc       ; tp_dealloc
+    dq 0                            ; tp_repr
+    dq 0                            ; tp_str
+    dq 0                            ; tp_hash
+    dq 0                            ; tp_call
+    dq 0                            ; tp_getattr
+    dq 0                            ; tp_setattr
+    dq 0                            ; tp_richcompare
+    dq bytearray_iter_self          ; tp_iter
+    dq bytearray_iter_next          ; tp_iternext
+    dq 0                            ; tp_init
+    dq 0                            ; tp_new
+    dq 0                            ; tp_as_number
+    dq 0                            ; tp_as_sequence
+    dq 0                            ; tp_as_mapping
+    dq 0                            ; tp_base
+    dq 0                            ; tp_dict
+    dq 0                            ; tp_mro
+    dq 0                            ; tp_flags
+    dq 0                            ; tp_bases
+    dq 0                            ; tp_traverse
+    dq 0                            ; tp_clear
+    dq 0                            ; tp_dictoffset
+
+;; ============================================================================
+;; (was src/pyo/memview.asm)
+;; ============================================================================
+
+section .text
+
+extern ap_malloc
+extern ap_free
+extern ap_memcpy
+extern type_type
+extern obj_incref
+extern obj_decref
+extern raise_exception
+extern exc_TypeError_type
+extern int_type
+extern bool_type
+extern exc_IndexError_type
+extern int_to_i64
+extern slice_type
+extern slice_indices
+
+section .text
+
+;; ============================================================================
+;; memoryview_type_call(type, args, nargs) -> PyMemoryViewObject*
+;; Constructor: memoryview(bytes_obj)
+;; ============================================================================
+global memoryview_type_call
+MV_FRAME equ 8              ; + 0 pushes = 8, not 16-aligned
+DEF_FUNC memoryview_type_call, MV_FRAME
+    ; rdi=type, rsi=args, rdx=nargs
+    cmp rdx, 1
+    jne .mv_error
+    mov rdi, [rsi]                     ; arg0 payload
+    ; Must be a bytes-like object (reject all non-pointer tags)
+    V_TEST_PTR_M [rsi], r11      ; args[0] a pointer?
+    ja .mv_error
+    mov rax, [rdi + PyObject.ob_type]
+    lea rcx, [rel bytes_type]
+    cmp rax, rcx
+    jne .mv_check_bytearray
+
+.mv_from_bytes:
+    ; rdi = bytes obj
+    push rdi
+    mov edi, PyMemoryViewObject_size
+    call ap_malloc
+    pop rdi                            ; source bytes
+
+    ; Init header
+    mov qword [rax + PyMemoryViewObject.ob_refcnt], 1
+    lea rcx, [rel memoryview_type]
+    mov [rax + PyMemoryViewObject.ob_type], rcx
+    mov [rax + PyMemoryViewObject.mv_source], rdi
+    push rax                           ; save result
+    push rdi                           ; save for INCREF
+    INCREF rdi
+    pop rdi
+    pop rax
+    ; Set buffer pointer and length
+    mov rcx, [rdi + PyBytesObject.ob_size]
+    mov [rax + PyMemoryViewObject.mv_len], rcx
+    lea rcx, [rdi + PyBytesObject.data]
+    mov [rax + PyMemoryViewObject.mv_buf], rcx
+    mov edx, TAG_PTR
+    leave
+    ret
+
+.mv_check_bytearray:
+    lea rcx, [rel bytearray_type]
+    cmp rax, rcx
+    je .mv_from_bytes                  ; same layout as bytes
+    jmp .mv_error
+
+.mv_error:
+    RAISE exc_TypeError_type, "memoryview: a bytes-like object is required"
+END_FUNC memoryview_type_call
+
+
+;; Proper dealloc:
+DEF_FUNC memoryview_dealloc_proper
+    push rdi                           ; save self
+    mov rdi, [rdi + PyMemoryViewObject.mv_source]
+    call obj_decref
+    pop rdi                            ; restore self
+    call ap_free
+    leave
+    ret
+END_FUNC memoryview_dealloc_proper
+
+;; ============================================================================
+;; memoryview_subscript(obj, key) -> PyMemoryViewObject* (slice)
+;; ============================================================================
+MS_OBJ   equ 8
+MS_KEY   equ 16
+MS_FRAME equ 16             ; + 0 pushes = 16
+DEF_FUNC memoryview_subscript, MS_FRAME
+    V_UNPACK rsi, rdx           ; key Value -> (payload, tag)
+    mov [rbp - MS_OBJ], rdi
+    mov [rbp - MS_KEY], rsi
+
+    ; Check if key is a SmallInt (edx = key tag from caller)
+    cmp edx, TAG_SMALLINT
+    je .ms_int_index                   ; SmallInt index
+    cmp edx, TAG_PTR            ; a float key is neither: classify
+    jne .ms_type_error          ; fully before dereferencing, or raw
+                                ; f64 bits get used as an address
+    mov rax, [rsi + PyObject.ob_type]
+    lea rcx, [rel slice_type]
+    cmp rax, rcx
+    jne .ms_int_index_heap
+
+    ; Slice: call slice_indices(slice, length) -> rax=start, rdx=stop, rcx=step
+    mov rdi, rsi                       ; slice obj
+    mov rsi, [rbp - MS_OBJ]
+    mov rsi, [rsi + PyMemoryViewObject.mv_len]  ; length
+    call slice_indices
+    ; rax=start, rdx=stop, rcx=step
+
+    ; Only support step=1 for now
+    cmp rcx, 1
+    jne .ms_step_error
+
+    mov r8, rax                        ; start
+    sub rdx, rax
+    mov r9, rdx                        ; slicelength = stop - start
+
+    ; Create new memoryview pointing to slice of source
+    push r8                            ; save start
+    push r9                            ; save slicelength
+    mov edi, PyMemoryViewObject_size
+    call ap_malloc
+    pop r9                             ; slicelength
+    pop r8                             ; start
+
+    ; Init the new memoryview
+    mov qword [rax + PyMemoryViewObject.ob_refcnt], 1
+    lea rcx, [rel memoryview_type]
+    mov [rax + PyMemoryViewObject.ob_type], rcx
+
+    ; Share the same source object
+    mov rdi, [rbp - MS_OBJ]
+    mov rcx, [rdi + PyMemoryViewObject.mv_source]
+    mov [rax + PyMemoryViewObject.mv_source], rcx
+
+    ; Buffer = original buffer + start
+    mov rdx, [rdi + PyMemoryViewObject.mv_buf]
+    add rdx, r8
+    mov [rax + PyMemoryViewObject.mv_buf], rdx
+
+    ; Length = slicelength
+    mov [rax + PyMemoryViewObject.mv_len], r9
+
+    ; INCREF source
+    push rax
+    mov rdi, rcx
+    INCREF rdi
+    pop rax
+
+    mov edx, TAG_PTR
+    leave
+    V_PACK rax, rdx             ; return one Value
+    ret
+
+.ms_int_index:
+    ; SmallInt index — return single byte as SmallInt
+    mov rdi, [rbp - MS_OBJ]
+    ; Handle negative index
+    mov rcx, [rdi + PyMemoryViewObject.mv_len]
+    test rsi, rsi
+    jns .ms_check_bounds
+    add rsi, rcx
+.ms_check_bounds:
+    cmp rsi, 0
+    jl .ms_index_error
+    cmp rsi, rcx
+    jge .ms_index_error
+    mov rdx, [rdi + PyMemoryViewObject.mv_buf]
+    movzx eax, byte [rdx + rsi]
+    RET_TAG_SMALLINT
+    leave
+    V_PACK rax, rdx             ; return one Value
+    ret
+
+.ms_int_index_heap:
+    ; Heap int index — convert to i64
+    mov rax, [rsi + PyObject.ob_type]   ; int_to_i64 reads PyIntObject.compact
+    REQUIRE_INT_TYPE rax, rcx, .ms_type_error   ; unconditionally
+    push rdi
+    mov rdi, rsi
+    call int_to_i64
+    mov rsi, rax
+    pop rdi
+    jmp .ms_check_bounds
+
+.ms_index_error:
+    RAISE exc_IndexError_type, "index out of range"
+
+.ms_step_error:
+    RAISE exc_TypeError_type, "memoryview: unsupported step"
+
+.ms_type_error:
+    RAISE exc_TypeError_type, "memoryview: invalid slice key"
+END_FUNC memoryview_subscript
+
+;; ============================================================================
+;; memoryview_len(obj) -> int64
+;; ============================================================================
+DEF_FUNC_BARE memoryview_len
+    mov rax, [rdi + PyMemoryViewObject.mv_len]
+    ret
+END_FUNC memoryview_len
+
+;; ============================================================================
+;; Type object
+;; ============================================================================
+section .data
+
+align 8
+mv_name_str:  db "memoryview", 0
+
+align 8
+memoryview_seq_methods:
+    dq memoryview_len       ; +0: sq_length
+    dq 0                    ; +8: sq_concat
+    dq 0                    ; +16: sq_repeat
+    dq 0                    ; +24: sq_item
+    dq 0                    ; +32: sq_ass_item
+    dq 0                    ; +40: sq_contains
+    dq 0                    ; +48: sq_inplace_concat
+    dq 0                    ; +56: sq_inplace_repeat
+
+align 8
+memoryview_mapping_methods:
+    dq memoryview_len       ; +0: mp_length
+    dq memoryview_subscript ; +8: mp_subscript
+    dq 0                    ; +16: mp_ass_subscript
+
+align 8
+global memoryview_type
+memoryview_type:
+    dq 1                             ; ob_refcnt
+    dq type_type                     ; ob_type
+    dq mv_name_str                   ; tp_name
+    dq PyMemoryViewObject_size       ; tp_basicsize
+    dq memoryview_dealloc_proper     ; tp_dealloc
+    dq 0                             ; tp_repr
+    dq 0                             ; tp_str
+    dq 0                             ; tp_hash
+    dq 0                             ; tp_call (set by add_builtin_type)
+    dq 0                             ; tp_getattr
+    dq 0                             ; tp_setattr
+    dq 0                             ; tp_richcompare
+    dq 0                             ; tp_iter
+    dq 0                             ; tp_iternext
+    dq 0                             ; tp_init
+    dq 0                             ; tp_new
+    dq 0                             ; tp_as_number
+    dq memoryview_seq_methods        ; tp_as_sequence
+    dq memoryview_mapping_methods    ; tp_as_mapping
+    dq 0                             ; tp_base
+    dq 0                             ; tp_dict
+    dq 0                             ; tp_mro
+    dq 0                             ; tp_flags
+    dq 0                             ; tp_bases
+    dq 0                        ; tp_traverse
+    dq 0                        ; tp_clear
+    dq 0 ; tp_dictoffset

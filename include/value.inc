@@ -83,12 +83,6 @@ extern val_from_i64_p
 ; documented conditional jump.  Neither register may be the other.
 ; ==========================================================================
 
-; ZF=1 (jz) if v is a pointer or NULL.
-%macro V_IS_PTR 2               ; %1 = value, %2 = scratch (clobbered)
-    mov %2, %1
-    shr %2, 48
-%endmacro
-
 ; CF=0 (jae) if v is an int immediate.
 %macro V_IS_INT 2               ; %1 = value, %2 = scratch (clobbered)
     mov %2, %1
@@ -147,12 +141,6 @@ extern val_from_i64_p
 %%iow:
     mov %1, TAG_IO_WAIT
 %%done:
-%endmacro
-
-; Load high16 of a value into a scratch register (for a multi-way switch).
-%macro V_HIGH16 2               ; %1 = dest, %2 = value
-    mov %1, %2
-    shr %1, 48
 %endmacro
 
 ; ==========================================================================
@@ -311,20 +299,6 @@ extern val_from_i64_p
     and %1, [rel v_mask48]
     mov %2, TAG_IO_WAIT
 %%done:
-%endmacro
-
-; Immortal singletons.  The including file must declare the extern itself
-; (none.asm / bool.asm define these symbols and must not also extern them).
-%macro V_NONE 1                 ; %1 = dest
-    lea %1, [rel none_singleton]
-%endmacro
-
-%macro V_TRUE 1                 ; %1 = dest
-    lea %1, [rel bool_true]
-%endmacro
-
-%macro V_FALSE 1                ; %1 = dest
-    lea %1, [rel bool_false]
 %endmacro
 
 ; ==========================================================================

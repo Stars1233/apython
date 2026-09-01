@@ -8,18 +8,15 @@
 
 %include "macros.inc"
 %include "object.inc"
-%include "types.inc"
 
 extern int_promote_mpz
 extern str_from_cstr
-extern str_from_data
 extern bool_true
 extern bool_false
 extern none_singleton
 extern int_from_i64
 extern int_type
 extern raise_exception
-extern exc_TypeError_type
 extern exc_ZeroDivisionError_type
 extern exc_ValueError_type
 extern obj_incref
@@ -55,7 +52,6 @@ DEF_FUNC_BARE float_to_f64
 
     cmp esi, TAG_SMALLINT
     je .from_smallint
-
 
     ; TAG_PTR: check for GMP int or bool singleton
     test rdi, rdi
@@ -123,16 +119,21 @@ FR_BUF   equ 64          ; 48 bytes, [rbp-64, rbp-16)
 FR_EBUF  equ 128         ; 48 bytes, [rbp-128, rbp-80)
 FR_EXP   equ 136
 
+FR_VALUE equ 8              ; the double being rendered
+FR_PREC  equ 16             ; precision counter (low 4 bytes)
+FR_BUF   equ 64             ; 48-byte render buffer
+                            ; (the frame is built by hand below: `and rsp,-16`
+                            ; then `sub rsp,160`, for libc's aligned SSE)
 DEF_FUNC float_repr
     and rsp, -16              ; ensure 16-byte alignment for libc calls
     sub rsp, 160
     ; Stack layout:
-    ;   [rbp-8]   = original double value (8 bytes)
-    ;   [rbp-16]  = precision counter (8 bytes, only low 4 used)
-    ;   [rbp-64]  = buffer (48 bytes: [rbp-64] to [rbp-17])
+    ;   [rbp - FR_VALUE]   = original double value (8 bytes)
+    ;   [rbp - FR_PREC]  = precision counter (8 bytes, only low 4 used)
+    ;   [rbp - FR_BUF]  = the 48-byte render buffer
 
     movq xmm0, rdi
-    movsd [rbp-8], xmm0       ; save original value
+    movsd [rbp - FR_VALUE], xmm0       ; save original value
 
     ; Check for NaN
     ucomisd xmm0, xmm0
@@ -148,7 +149,7 @@ DEF_FUNC float_repr
 
     ; General case: find shortest representation
     ; Try precision 1..17 with snprintf "%.*g"
-    mov qword [rbp-16], 1     ; prec = 1
+    mov qword [rbp - FR_PREC], 1     ; prec = 1
 
 .repr_loop:
     lea rdi, [rbp - FR_BUF]   ; buf
@@ -164,12 +165,12 @@ DEF_FUNC float_repr
     xor esi, esi              ; endptr = NULL
     call strtod wrt ..plt
     ; xmm0 = reparsed value
-    movsd xmm1, [rbp-8]      ; original
+    movsd xmm1, [rbp - FR_VALUE]      ; original
     ucomisd xmm0, xmm1
     je .repr_found             ; match! use this precision
 
-    inc qword [rbp-16]
-    cmp qword [rbp-16], 17
+    inc qword [rbp - FR_PREC]
+    cmp qword [rbp - FR_PREC], 17
     jle .repr_loop
 
 .repr_found:
@@ -268,7 +269,7 @@ DEF_FUNC float_repr
 
 .fr_notation_done:
     ; Check if buf needs ".0" appended (no '.', no 'e', no 'E')
-    lea rdi, [rbp-64]
+    lea rdi, [rbp - FR_BUF]
     xor ecx, ecx
 .scan_dot:
     mov al, [rdi + rcx]
@@ -292,7 +293,7 @@ DEF_FUNC float_repr
     mov byte [rdi + rcx + 1], '0'
     mov byte [rdi + rcx + 2], 0
 .has_dot:
-    lea rdi, [rbp-64]
+    lea rdi, [rbp - FR_BUF]
     call str_from_cstr
     leave
     ret
@@ -320,25 +321,31 @@ END_FUNC float_repr
 ;; float_format_spec(rdi = raw double bits, rsi = spec data ptr, edx = spec length) -> PyStrObject*
 ;; Format float using a format spec string like ".2f", ".4e", etc.
 ;; ============================================================================
-global float_format_spec
-DEF_FUNC float_format_spec, 80
+FS_VALUE   equ 8            ; the double being formatted
+FS_SPEC    equ 16           ; spec data pointer
+FS_SPECLEN equ 20           ; spec length (4 bytes)
+FS_PREC    equ 24           ; precision (4 bytes)
+FS_TYPE    equ 25           ; the type character
+FS_BUF     equ 76           ; 48-byte render buffer
+FS_FRAME   equ 80           ; + 0 pushes = 80
+DEF_FUNC float_format_spec, FS_FRAME
     and rsp, -16              ; ensure alignment
 
     movq xmm0, rdi
-    movsd [rbp-8], xmm0      ; save value
+    movsd [rbp - FS_VALUE], xmm0      ; save value
 
     ; Parse spec: look for optional '.', digits, then type char (f/e/g)
     ; Simple parser: find precision and type
-    mov [rbp-16], rsi         ; spec data
-    mov [rbp-20], edx         ; spec len
+    mov [rbp - FS_SPEC], rsi         ; spec data
+    mov [rbp - FS_SPECLEN], edx         ; spec len
 
     ; Default: precision=6, type='f'
-    mov dword [rbp-24], 6     ; precision
-    mov byte [rbp-25], 'g'    ; type
+    mov dword [rbp - FS_PREC], 6     ; precision
+    mov byte [rbp - FS_TYPE], 'g'    ; type
 
     ; Scan spec
     xor ecx, ecx              ; pos
-    mov rsi, [rbp-16]
+    mov rsi, [rbp - FS_SPEC]
 
     ; Skip fill/align/sign/width for now — just look for '.' and type
 .ffs_scan:
@@ -373,16 +380,16 @@ DEF_FUNC float_format_spec, 80
     cmp ecx, edx
     jge .ffs_store_prec
     movzx edi, byte [rsi + rcx]
-    mov [rbp-25], dil         ; type char
+    mov [rbp - FS_TYPE], dil         ; type char
 .ffs_store_prec:
-    mov [rbp-24], eax
+    mov [rbp - FS_PREC], eax
 
 .ffs_have_spec:
     ; Format using snprintf with appropriate format string
-    lea rdi, [rbp-76]         ; buffer (48 bytes)
+    lea rdi, [rbp - FS_BUF]         ; buffer (48 bytes)
     mov esi, 48               ; bufsz
 
-    movzx eax, byte [rbp-25]  ; type char
+    movzx eax, byte [rbp - FS_TYPE]  ; type char
     cmp al, 'f'
     je .ffs_use_f
     cmp al, 'e'
@@ -402,12 +409,12 @@ DEF_FUNC float_format_spec, 80
     lea rdx, [rel fmt_E]
 
 .ffs_do_snprintf:
-    mov ecx, [rbp-24]         ; precision
-    movsd xmm0, [rbp-8]      ; value
+    mov ecx, [rbp - FS_PREC]         ; precision
+    movsd xmm0, [rbp - FS_VALUE]      ; value
     mov eax, 1                ; 1 xmm register
     call snprintf wrt ..plt
 
-    lea rdi, [rbp-76]
+    lea rdi, [rbp - FS_BUF]
     call str_from_cstr
     leave
     ret
@@ -425,7 +432,7 @@ END_FUNC float_format_spec
 ;; and an equal float landed in different dict slots.
 FH_EXP   equ 8
 FH_M     equ 16
-FH_FRAME equ 32
+FH_FRAME equ 32             ; + 3 pushes = 56, not 16-aligned
 DEF_FUNC float_hash, FH_FRAME
     push rbx
     push r12
@@ -566,7 +573,7 @@ section .rodata
 align 16
 fh_sign_mask: dq 0x8000000000000000, 0
 align 8
-fh_two28:     dq 0x41B0000000000000      ; 2.0**28
+fh_two28:     dq 0x41b0000000000000      ; 2.0**28
 section .text
 
 ;; ============================================================================
@@ -594,69 +601,74 @@ END_FUNC float_bool
 ;; Convert both to double, perform operation, return new float.
 ;; ============================================================================
 
-; Helper macro: convert both args to doubles
-; Uses rbp frame with [rbp-8] = left double, [rbp-16] = right double
+; Helper macro: convert both args to doubles.  Every float binop shares this
+; frame, so it is named once here rather than per function.
+FB_LEFT   equ 8             ; left operand, as a double
+FB_RIGHT  equ 16            ; right operand, as a double
+FB_RSAVE  equ 24            ; the right operand across the first conversion
+FB_RTAG   equ 32            ; and its tag
+FB_FRAME  equ 32            ; + 0 pushes = 32
 %macro FLOAT_BINOP_SETUP 0
     ; rdi=left, rsi=right, edx=left_tag, ecx=right_tag
-    mov [rbp-24], rsi          ; save right operand
-    mov dword [rbp-32], ecx    ; save right_tag
+    mov [rbp - FB_RSAVE], rsi          ; save right operand
+    mov dword [rbp - FB_RTAG], ecx    ; save right_tag
     mov esi, edx               ; esi = left_tag for float_to_f64
     call float_to_f64          ; rdi = left → xmm0
-    movsd [rbp-8], xmm0
-    mov rdi, [rbp-24]
-    mov esi, dword [rbp-32]    ; esi = right_tag
+    movsd [rbp - FB_LEFT], xmm0
+    mov rdi, [rbp - FB_RSAVE]
+    mov esi, dword [rbp - FB_RTAG]    ; esi = right_tag
     call float_to_f64          ; xmm0 = right as double
-    movsd [rbp-16], xmm0
+    movsd [rbp - FB_RIGHT], xmm0
 %endmacro
 
-DEF_FUNC float_add, 32
+DEF_FUNC float_add, FB_FRAME
     V_UNPACK rdi, rdx           ; left  Value -> (payload, tag)
     V_UNPACK rsi, rcx           ; right Value -> (payload, tag)
     FLOAT_BINOP_SETUP
-    movsd xmm0, [rbp-8]
-    addsd xmm0, [rbp-16]
+    movsd xmm0, [rbp - FB_LEFT]
+    addsd xmm0, [rbp - FB_RIGHT]
     call float_from_f64
     leave
     V_PACK rax, rdx             ; return one Value
     ret
 END_FUNC float_add
 
-DEF_FUNC float_sub, 32
+DEF_FUNC float_sub, FB_FRAME
     V_UNPACK rdi, rdx           ; left  Value -> (payload, tag)
     V_UNPACK rsi, rcx           ; right Value -> (payload, tag)
     FLOAT_BINOP_SETUP
-    movsd xmm0, [rbp-8]
-    subsd xmm0, [rbp-16]
+    movsd xmm0, [rbp - FB_LEFT]
+    subsd xmm0, [rbp - FB_RIGHT]
     call float_from_f64
     leave
     V_PACK rax, rdx             ; return one Value
     ret
 END_FUNC float_sub
 
-DEF_FUNC float_mul, 32
+DEF_FUNC float_mul, FB_FRAME
     V_UNPACK rdi, rdx           ; left  Value -> (payload, tag)
     V_UNPACK rsi, rcx           ; right Value -> (payload, tag)
     FLOAT_BINOP_SETUP
-    movsd xmm0, [rbp-8]
-    mulsd xmm0, [rbp-16]
+    movsd xmm0, [rbp - FB_LEFT]
+    mulsd xmm0, [rbp - FB_RIGHT]
     call float_from_f64
     leave
     V_PACK rax, rdx             ; return one Value
     ret
 END_FUNC float_mul
 
-DEF_FUNC float_truediv, 32
+DEF_FUNC float_truediv, FB_FRAME
     V_UNPACK rdi, rdx           ; left  Value -> (payload, tag)
     V_UNPACK rsi, rcx           ; right Value -> (payload, tag)
     FLOAT_BINOP_SETUP
 
     ; Check for division by zero
-    movsd xmm1, [rbp-16]
+    movsd xmm1, [rbp - FB_RIGHT]
     xorpd xmm2, xmm2
     ucomisd xmm1, xmm2
     je .div_zero
 
-    movsd xmm0, [rbp-8]
+    movsd xmm0, [rbp - FB_LEFT]
     divsd xmm0, xmm1
     call float_from_f64
     leave
@@ -664,23 +676,21 @@ DEF_FUNC float_truediv, 32
     ret
 
 .div_zero:
-    lea rdi, [rel exc_ZeroDivisionError_type]
-    CSTRING rsi, "float division by zero"
-    call raise_exception
+    RAISE exc_ZeroDivisionError_type, "float division by zero"
 END_FUNC float_truediv
 
-DEF_FUNC float_floordiv, 32
+DEF_FUNC float_floordiv, FB_FRAME
     V_UNPACK rdi, rdx           ; left  Value -> (payload, tag)
     V_UNPACK rsi, rcx           ; right Value -> (payload, tag)
     FLOAT_BINOP_SETUP
 
     ; Check for division by zero
-    movsd xmm1, [rbp-16]
+    movsd xmm1, [rbp - FB_RIGHT]
     xorpd xmm2, xmm2
     ucomisd xmm1, xmm2
     je .floordiv_zero
 
-    movsd xmm0, [rbp-8]
+    movsd xmm0, [rbp - FB_LEFT]
     divsd xmm0, xmm1
     ; Floor: round toward negative infinity
     roundsd xmm0, xmm0, 1     ; 1 = floor
@@ -690,25 +700,23 @@ DEF_FUNC float_floordiv, 32
     ret
 
 .floordiv_zero:
-    lea rdi, [rel exc_ZeroDivisionError_type]
-    CSTRING rsi, "float floor division by zero"
-    call raise_exception
+    RAISE exc_ZeroDivisionError_type, "float floor division by zero"
 END_FUNC float_floordiv
 
-DEF_FUNC float_mod, 32
+DEF_FUNC float_mod, FB_FRAME
     V_UNPACK rdi, rdx           ; left  Value -> (payload, tag)
     V_UNPACK rsi, rcx           ; right Value -> (payload, tag)
     FLOAT_BINOP_SETUP
 
     ; Check for division by zero
-    movsd xmm1, [rbp-16]
+    movsd xmm1, [rbp - FB_RIGHT]
     xorpd xmm2, xmm2
     ucomisd xmm1, xmm2
     je .mod_zero
 
     ; a % b = a - floor(a/b) * b
-    movsd xmm0, [rbp-8]       ; a
-    movsd xmm1, [rbp-16]      ; b
+    movsd xmm0, [rbp - FB_LEFT]       ; a
+    movsd xmm1, [rbp - FB_RIGHT]      ; b
     movapd xmm2, xmm0         ; save a
     divsd xmm0, xmm1          ; a/b
     roundsd xmm0, xmm0, 1     ; floor(a/b)
@@ -721,9 +729,7 @@ DEF_FUNC float_mod, 32
     ret
 
 .mod_zero:
-    lea rdi, [rel exc_ZeroDivisionError_type]
-    CSTRING rsi, "float modulo"
-    call raise_exception
+    RAISE exc_ZeroDivisionError_type, "float modulo"
 END_FUNC float_mod
 
 DEF_FUNC_BARE float_neg
@@ -752,14 +758,14 @@ END_FUNC float_pos
 ;; Both args are converted to double. Uses x87 fyl2x/f2xm1/fscale for
 ;; non-integer exponents, repeated squaring for integer exponents.
 ;; ============================================================================
-DEF_FUNC float_pow, 32
+DEF_FUNC float_pow, FB_FRAME
     V_UNPACK rdi, rdx           ; left  Value -> (payload, tag)
     V_UNPACK rsi, rcx           ; right Value -> (payload, tag)
     FLOAT_BINOP_SETUP
-    ; [rbp-8] = left double, [rbp-16] = right double
+    ; [rbp - FB_LEFT] = left double, [rbp - FB_RIGHT] = right double
 
-    movsd xmm0, [rbp-8]        ; base
-    movsd xmm1, [rbp-16]       ; exp
+    movsd xmm0, [rbp - FB_LEFT]        ; base
+    movsd xmm1, [rbp - FB_RIGHT]       ; exp
 
     ; Fast path: exp == 0.5 → sqrtsd (~12 cycles vs ~100+ for general)
     movsd xmm2, [rel const_half_f]
@@ -895,9 +901,7 @@ DEF_FUNC float_int
     ret
 
 .not_finite:
-    lea rdi, [rel exc_ValueError_type]
-    CSTRING rsi, "cannot convert float NaN or infinity to integer"
-    call raise_exception
+    RAISE exc_ValueError_type, "cannot convert float NaN or infinity to integer"
 END_FUNC float_int
 
 ;; ============================================================================
@@ -905,7 +909,13 @@ END_FUNC float_int
 ;; op: PY_LT=0, PY_LE=1, PY_EQ=2, PY_NE=3, PY_GT=4, PY_GE=5
 ;; Handles mixed int/float comparisons.
 ;; ============================================================================
-DEF_FUNC float_compare, 40
+FC_LEFT  equ 8              ; left operand, as a double
+FC_RIGHT equ 16             ; right operand, as a double
+FC_OP    equ 24             ; the comparison opcode (4 bytes)
+FC_RTAG  equ 28             ; right operand's tag (4 bytes)
+FC_RSAVE equ 40             ; the right operand across the first conversion
+FC_FRAME equ 40             ; + 0 pushes = 40
+DEF_FUNC float_compare, FC_FRAME
     V_UNPACK rdi, rcx           ; left  Value -> (payload, tag)
     V_UNPACK rsi, r8            ; right Value -> (payload, tag)
     ; rdi=left, rsi=right, edx=op, ecx=left_tag, r8d=right_tag
@@ -957,22 +967,22 @@ DEF_FUNC float_compare, 40
     jnz .fc_right_ok
     jmp .fc_not_impl
 .fc_right_ok:
-    mov [rbp-24], edx          ; save op (4 bytes)
+    mov [rbp - FC_OP], edx          ; save op (4 bytes)
 
     ; Convert both to doubles
-    mov [rbp-40], rsi          ; save right (8 bytes)
-    mov dword [rbp-28], r8d    ; save right_tag (4 bytes, no overlap)
+    mov [rbp - FC_RSAVE], rsi          ; save right (8 bytes)
+    mov dword [rbp - FC_RTAG], r8d    ; save right_tag (4 bytes, no overlap)
     mov esi, ecx               ; left_tag for float_to_f64
     call float_to_f64          ; left → xmm0
-    movsd [rbp-8], xmm0
-    mov rdi, [rbp-40]
-    mov esi, dword [rbp-28]    ; right_tag
+    movsd [rbp - FC_LEFT], xmm0
+    mov rdi, [rbp - FC_RSAVE]
+    mov esi, dword [rbp - FC_RTAG]    ; right_tag
     call float_to_f64          ; right → xmm0
-    movsd [rbp-16], xmm0
+    movsd [rbp - FC_RIGHT], xmm0
 
     ; Compare
-    movsd xmm0, [rbp-8]
-    ucomisd xmm0, [rbp-16]
+    movsd xmm0, [rbp - FC_LEFT]
+    ucomisd xmm0, [rbp - FC_RIGHT]
 
     ; Handle NaN: unordered (PF set) → everything False except NE
     jp .unordered
@@ -986,7 +996,7 @@ DEF_FUNC float_compare, 40
     mov r8d, 1
 
 .float_cmp_dispatch:
-    mov ecx, [rbp-24]          ; op
+    mov ecx, [rbp - FC_OP]          ; op
     cmp ecx, PY_LT
     je .do_lt
     cmp ecx, PY_LE
@@ -1025,7 +1035,7 @@ DEF_FUNC float_compare, 40
 
 .unordered:
     ; NaN comparisons: only NE returns True
-    cmp dword [rbp-24], PY_NE
+    cmp dword [rbp - FC_OP], PY_NE
     je .ret_true
     jmp .ret_false
 
@@ -1036,15 +1046,11 @@ DEF_FUNC float_compare, 40
     ret
 
 .ret_true:
-    lea rax, [rel bool_true]
-    inc qword [rax + PyObject.ob_refcnt]
-    mov edx, TAG_PTR
+    RET_TRUE
     leave
     ret
 .ret_false:
-    lea rax, [rel bool_false]
-    inc qword [rax + PyObject.ob_refcnt]
-    mov edx, TAG_PTR
+    RET_FALSE
     leave
     ret
 END_FUNC float_compare
@@ -1064,11 +1070,10 @@ fmt_e: db "%.*e", 0
 fmt_E: db "%.*E", 0
 
 align 8
-sign_mask:   dq 0x8000000000000000
-pos_inf:     dq 0x7FF0000000000000
-neg_inf:     dq 0xFFF0000000000000
-const_one_f:  dq 0x3FF0000000000000   ; 1.0 in IEEE 754
-const_half_f: dq 0x3FE0000000000000   ; 0.5
+pos_inf:     dq 0x7ff0000000000000
+neg_inf:     dq 0xfff0000000000000
+const_one_f:  dq 0x3ff0000000000000   ; 1.0 in IEEE 754
+const_half_f: dq 0x3fe0000000000000   ; 0.5
 const_two_f:  dq 0x4000000000000000   ; 2.0
 
 align 8

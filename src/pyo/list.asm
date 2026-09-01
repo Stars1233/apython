@@ -1,9 +1,8 @@
-; list_obj.asm - List type implementation
+; pyo/list.asm - List type implementation
 ; Phase 9: dynamic array with amortized O(1) append
 
 %include "macros.inc"
 %include "object.inc"
-%include "types.inc"
 
 extern ap_malloc
 extern gc_alloc
@@ -15,9 +14,6 @@ extern ap_memmove
 extern ap_memcpy
 extern obj_decref
 extern obj_dealloc
-extern str_from_cstr
-extern str_new
-extern obj_repr
 extern fatal_error
 extern raise_exception
 extern exc_IndexError_type
@@ -28,8 +24,6 @@ extern obj_incref
 extern slice_type
 extern slice_indices
 extern type_type
-extern list_traverse
-extern list_clear
 extern int_type
 extern eval_exception_unwind
 extern obj_richcompare_bool
@@ -39,11 +33,7 @@ extern c_recursion_depth
 extern exc_RecursionError_type
 extern int_fits_i64
 extern str_type
-extern float_type
 extern bool_type
-extern none_type
-extern float_compare
-extern obj_is_true
 extern list_sorting_error
 
 ;; ============================================================================
@@ -110,7 +100,6 @@ END_FUNC list_new
 ;; list_copy(PyListObject *src) -> PyListObject* (shallow copy)
 ;; Creates a new list with same items, INCREFs each.
 ;; ============================================================================
-global list_copy
 DEF_FUNC list_copy
     push rbx
     push r12
@@ -208,7 +197,7 @@ DEF_FUNC list_append
 END_FUNC list_append
 
 ;; ============================================================================
-;; list_getitem(PyListObject *list, int64_t index) -> PyObject*
+;; list_getitem(PyListObject *list, int64_t index) -> rax = Value
 ;; sq_item: return item at index with bounds check and negative index support
 ;; ============================================================================
 DEF_FUNC list_getitem
@@ -240,9 +229,7 @@ DEF_FUNC list_getitem
     ret
 
 .index_error:
-    lea rdi, [rel exc_IndexError_type]
-    CSTRING rsi, "list index out of range"
-    call raise_exception
+    RAISE exc_IndexError_type, "list index out of range"
 END_FUNC list_getitem
 
 ;; ============================================================================
@@ -294,13 +281,11 @@ DEF_FUNC list_setitem
     ret
 
 .index_error:
-    lea rdi, [rel exc_IndexError_type]
-    CSTRING rsi, "list assignment index out of range"
-    call raise_exception
+    RAISE exc_IndexError_type, "list assignment index out of range"
 END_FUNC list_setitem
 
 ;; ============================================================================
-;; list_subscript(PyListObject *list, PyObject *key) -> PyObject*
+;; list_subscript(PyListObject *list, PyObject *key) -> rax = Value
 ;; mp_subscript: index with int or slice key (for BINARY_SUBSCR)
 ;; ============================================================================
 DEF_FUNC list_subscript
@@ -357,9 +342,7 @@ DEF_FUNC list_subscript
     ret
 
 .ls_type_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "list indices must be integers or slices"
-    call raise_exception
+    RAISE exc_TypeError_type, "list indices must be integers or slices"
 END_FUNC list_subscript
 
 ;; ============================================================================
@@ -369,7 +352,7 @@ END_FUNC list_subscript
 ;; ============================================================================
 LAS_VTAG  equ 8
 LAS_TEMP  equ 16       ; temp list from generic iterable (NULL if not used)
-LAS_FRAME equ 16
+LAS_FRAME equ 16            ; + 2 pushes = 32
 DEF_FUNC list_ass_subscript, LAS_FRAME
     push rbx
     push r12
@@ -477,9 +460,7 @@ DEF_FUNC list_ass_subscript, LAS_FRAME
     ret
 
 .lid_index_error:
-    lea rdi, [rel exc_IndexError_type]
-    CSTRING rsi, "list assignment index out of range"
-    call raise_exception
+    RAISE exc_IndexError_type, "list assignment index out of range"
 
 .las_slice:
     ; Slice assignment: a[start:stop] = value
@@ -794,9 +775,7 @@ DEF_FUNC list_ass_subscript, LAS_FRAME
     pop r15
     pop r14
     pop r13
-    lea rdi, [rel exc_ValueError_type]
-    CSTRING rsi, "slice step cannot be zero"
-    call raise_exception
+    RAISE exc_ValueError_type, "slice step cannot be zero"
 
 ;; Extended slice assignment: a[start:stop:step] = iterable (step != 0, step != 1)
 ;; Registers on entry: rbx=list, r12=value, r13=start, r14=stop, r15=step
@@ -980,14 +959,10 @@ DEF_FUNC list_ass_subscript, LAS_FRAME
     pop r15
     pop r14
     pop r13
-    lea rdi, [rel exc_ValueError_type]
-    CSTRING rsi, "attempt to assign sequence of wrong size to extended slice"
-    call raise_exception
+    RAISE exc_ValueError_type, "attempt to assign sequence of wrong size to extended slice"
 
 .las_key_type_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "list indices must be integers or slices"
-    call raise_exception
+    RAISE exc_TypeError_type, "list indices must be integers or slices"
 
 .las_type_error:
     extern exc_TypeError_type
@@ -995,9 +970,7 @@ DEF_FUNC list_ass_subscript, LAS_FRAME
     pop r15
     pop r14
     pop r13
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "can only assign an iterable"
-    call raise_exception
+    RAISE exc_TypeError_type, "can only assign an iterable"
 END_FUNC list_ass_subscript
 
 ;; ============================================================================
@@ -1016,7 +989,7 @@ LC_LIST    equ 8
 LC_VALUE   equ 16    ; the value being searched for, as a Value
 LC_IDX     equ 32
 LC_SIZE    equ 40
-LC_FRAME   equ 48
+LC_FRAME   equ 48           ; + 0 pushes = 48
 DEF_FUNC list_contains, LC_FRAME
     mov [rbp - LC_LIST], rdi   ; list
     mov [rbp - LC_VALUE], rsi  ; the value Value
@@ -1186,14 +1159,14 @@ DEF_FUNC list_getslice
 
 .lgs_have_len:
     ; rax = slicelength
-    push rax                   ; save slicelength [rbp-56]
+    push rax                   ; save slicelength
     mov rdi, rax
     test rdi, rdi
     jnz .lgs_alloc
     mov rdi, 4                 ; min capacity
 .lgs_alloc:
     call list_new
-    push rax                   ; save new list [rbp-64]
+    push rax                   ; save the new list
 
     ; Fill items: for i = 0..slicelength-1, idx = start + i*step
     ; Set new list size to slicelength (capacity already >= slicelength)
@@ -1394,9 +1367,7 @@ DEF_FUNC list_concat
     V_PACK rax, rdx             ; return one Value
     ret
 .lc_type_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "can only concatenate list (not other) to list"
-    call raise_exception
+    RAISE exc_TypeError_type, "can only concatenate list (not other) to list"
 END_FUNC list_concat
 
 ;; ============================================================================
@@ -1499,9 +1470,7 @@ DEF_FUNC list_repeat
 
 .rep_overflow:
     extern exc_OverflowError_type
-    lea rdi, [rel exc_OverflowError_type]
-    CSTRING rsi, "too many items for list repetition"
-    call raise_exception
+    RAISE exc_OverflowError_type, "too many items for list repetition"
 END_FUNC list_repeat
 
 ;; ============================================================================
@@ -1511,7 +1480,7 @@ END_FUNC list_repeat
 ;; ============================================================================
 LIC_SELF   equ 8
 LIC_ITER   equ 16
-LIC_FRAME  equ 16
+LIC_FRAME  equ 16           ; + 0 pushes = 16
 DEF_FUNC list_inplace_concat, LIC_FRAME
     V_UNPACK rdi, rdx           ; left  Value -> (payload, tag)
     V_UNPACK rsi, rcx           ; right Value -> (payload, tag)
@@ -1623,9 +1592,7 @@ DEF_FUNC list_inplace_concat, LIC_FRAME
     ret
 
 .lic_type_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "can only concatenate list (not other) to list"
-    call raise_exception
+    RAISE exc_TypeError_type, "can only concatenate list (not other) to list"
 END_FUNC list_inplace_concat
 
 ;; ============================================================================
@@ -1633,9 +1600,8 @@ END_FUNC list_inplace_concat
 ;; nb_imul / sq_inplace_repeat: repeat left list in-place by right integer
 ;; Returns (left, TAG_PTR) — same object.
 ;; ============================================================================
-LIR_SELF    equ 8
 LIR_OLDSIZE equ 16
-LIR_FRAME   equ 16
+LIR_FRAME   equ 16          ; + 0 pushes = 16
 DEF_FUNC list_inplace_repeat, LIR_FRAME
     V_UNPACK rdi, rdx           ; left  Value -> (payload, tag)
     V_UNPACK rsi, rcx           ; right Value -> (payload, tag)
@@ -1756,9 +1722,7 @@ DEF_FUNC list_inplace_repeat, LIR_FRAME
     ret
 .lir_overflow:
     extern exc_OverflowError_type
-    lea rdi, [rel exc_OverflowError_type]
-    CSTRING rsi, "too many items for list repetition"
-    call raise_exception
+    RAISE exc_OverflowError_type, "too many items for list repetition"
 END_FUNC list_inplace_repeat
 
 ;; ============================================================================
@@ -1768,7 +1732,7 @@ END_FUNC list_inplace_repeat
 ; Frame layout
 LTC_LIST    equ 8       ; new list object
 LTC_ITER    equ 16      ; iterator object
-LTC_FRAME   equ 24
+LTC_FRAME   equ 24          ; + 3 pushes = 48
 
 DEF_FUNC list_type_call, LTC_FRAME
     push rbx
@@ -1870,21 +1834,15 @@ DEF_FUNC list_type_call, LTC_FRAME
 
 .ltc_not_iterable:
     extern exc_TypeError_type
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "list() argument must be an iterable"
-    call raise_exception
+    RAISE exc_TypeError_type, "list() argument must be an iterable"
 
 .ltc_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "list expected at most 1 argument"
-    call raise_exception
+    RAISE exc_TypeError_type, "list expected at most 1 argument"
 
 .ltc_kwarg_error:
     ; Clear kw_names_pending to avoid stale state
     mov qword [rel kw_names_pending], 0
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "list() takes no keyword arguments"
-    call raise_exception
+    RAISE exc_TypeError_type, "list() takes no keyword arguments"
 END_FUNC list_type_call
 
 ;; ============================================================================
@@ -1963,7 +1921,6 @@ section .text
 ; b=[]; b.append(b); a==b -- recursed until the machine stack ran out; the
 ; identity fast path inside only catches a==a.  The body is wrapped so its
 ; several exits need not each be touched.
-global list_richcompare
 DEF_FUNC list_richcompare
     C_RECURSION_ENTER .lrc_too_deep
     call list_richcompare_inner
@@ -1972,16 +1929,14 @@ DEF_FUNC list_richcompare
     ret
 .lrc_too_deep:
     C_RECURSION_LEAVE
-    lea rdi, [rel exc_RecursionError_type]
-    CSTRING rsi, "maximum recursion depth exceeded in comparison"
-    call raise_exception
+    RAISE exc_RecursionError_type, "maximum recursion depth exceeded in comparison"
 END_FUNC list_richcompare
 
 LRC_LEFT     equ 8
 LRC_RIGHT    equ 16
 LRC_OP       equ 24
 LRC_IDX      equ 32
-LRC_FRAME    equ 48
+LRC_FRAME    equ 48         ; + 0 pushes = 48
 
 ;; CPython's list_richcompare, followed exactly.  The old version precomputed
 ;; min(len) once and, on finding an unequal element, returned that element's
@@ -2167,3 +2122,80 @@ list_type:
     dq list_traverse                        ; tp_traverse
     dq list_clear                        ; tp_clear
     dq 0       ; tp_dictoffset
+
+section .text
+
+;; ============================================================================
+;; GC traverse and clear.  These lived in gc.asm, which left the collector
+;; holding the reference graph of every type in the system; a type's own
+;; file is the only place that knows which of its fields are owned.
+;; ============================================================================
+
+;; ============================================================================
+;; TRAVERSE AND CLEAR FUNCTIONS
+;; ============================================================================
+; Convention: tp_traverse(rdi=obj, r14=visit_callback)
+;             tp_clear(rdi=obj)
+; The VISIT_* macros use r14 as the callback.
+
+; ---- list_traverse / list_clear ----
+DEF_FUNC list_traverse
+    push rbx
+    push r12
+    push r13
+    push r15
+
+    mov rbx, rdi                       ; obj
+    mov r12, [rbx + PyListObject.ob_item]       ; payloads
+    mov r13, [rbx + PyListObject.ob_size]
+    test r13, r13
+    jz .done
+
+.loop:
+    dec r13
+    mov rdi, [r12]
+    VISIT_V rdi, rsi
+    add r12, 8
+    test r13, r13
+    jnz .loop
+.done:
+    pop r15
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC list_traverse
+
+DEF_FUNC list_clear
+    push rbx
+    push r12
+    push r13
+    push r15
+
+    mov rbx, rdi
+    mov r12, [rbx + PyListObject.ob_item]       ; payloads
+    mov r13, [rbx + PyListObject.ob_size]
+    mov qword [rbx + PyListObject.ob_size], 0
+
+    test r13, r13
+    jz .done
+.loop:
+    dec r13
+    mov rdi, [r12]
+    push r12
+    push r12
+    DECREF_V rdi, rsi
+    pop r12
+    pop r12
+    add r12, 8
+    test r13, r13
+    jnz .loop
+.done:
+    pop r15
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC list_clear

@@ -12,18 +12,13 @@
 
 %include "macros.inc"
 %include "object.inc"
-%include "types.inc"
-%include "builtins.inc"
-%include "errcodes.inc"
 %include "eventloop.inc"
 
 extern ap_malloc
 extern ap_free
 extern obj_incref
-extern obj_decref
 extern obj_dealloc
 extern str_from_cstr
-extern str_from_cstr_heap
 extern str_new_heap
 extern int_from_i64
 extern none_singleton
@@ -36,7 +31,6 @@ extern tuple_new
 extern raise_exception
 extern exc_TypeError_type
 extern exc_OSError_type
-extern exc_ValueError_type
 extern sys_socket
 extern sys_connect
 extern sys_bind
@@ -47,8 +41,6 @@ extern sys_close
 extern sys_read
 extern sys_write
 extern sys_fcntl
-extern sys_recvfrom
-extern sys_sendto
 
 ; Socket constants
 AF_INET     equ 2
@@ -66,7 +58,6 @@ STREAM_BUFSIZE equ 8192
 ;; ============================================================================
 
 ;; stream_reader_new(int fd) -> AsyncStreamReader*
-global stream_reader_new
 DEF_FUNC stream_reader_new
     push rbx
     mov ebx, edi               ; save fd
@@ -100,118 +91,9 @@ END_FUNC stream_reader_dealloc
 ;; stream_reader_read(args, nargs) — builtin for reader.read(n)
 ;; args[0] = nbytes (int)
 ;; Returns a ReadAwaitable
-SR_FRAME equ 8
-DEF_FUNC stream_reader_read, SR_FRAME
-    push rbx
-    push r12
-
-    ; self is bound via method_new, so args[0] = self, args[1] = n
-    ; But builtin_func_call strips self for us... Actually method_call prepends self.
-    ; method_call: (self, args, nargs) → prepends self to args
-    ; Actually: builtin methods via method_new get self in first arg slot
-    ; With method_call: args[0] = n, self is prepended → args shifted
-    ; Let's handle: self = args[0], n = args[1] for method calls
-    ; Actually, method_call gives (args, nargs) where args[0] = self, args[1..] = user args
-
-    cmp rsi, 1
-    jb .srr_default
-    ; nargs >= 1: self is implicit via method
-
-    ; Get self (the reader object — from method binding)
-    ; Actually with builtin_func_call: (self, args, nargs) -> strips self, passes (args, nargs)
-    ; So args[0] = n (the user arg)
-    cmp rsi, 1
-    je .srr_got_n
-    ; nargs=0: use default buffer size
-.srr_default:
-    mov ebx, STREAM_BUFSIZE
-    jmp .srr_create
-
-.srr_got_n:
-    ; args[0] = n
-    mov rax, [rdi]             ; args[0]
-    V_UNPACK rax, rdx
-    cmp edx, TAG_SMALLINT
-    jne .srr_type_error
-    mov ebx, eax               ; nbytes
-    jmp .srr_create
-
-.srr_type_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "read() argument must be an integer"
-    call raise_exception
-
-.srr_create:
-    ; We need the fd from self — but self isn't passed to us directly
-    ; by builtin_func_call. We need to use method_call pattern where
-    ; self is prepended. Let me re-check the method binding approach.
-    ; When getattr returns a bound method (method_new), method_call
-    ; prepends self as args[0]. So nargs includes self.
-    ; Re-read: builtin_func_call strips self, passes remaining args.
-    ; Hmm, actually builtin_func_call: (self, args, nargs) where self
-    ; is the bound object. It transforms: rdi=args, rsi=nargs (dropping self).
-    ; So we DON'T get self in args[]. We need a different approach.
-    ;
-    ; Look at fileobj pattern: it uses method_new which creates a bound method.
-    ; method_call: prepends im_self to args, then calls im_func's tp_call.
-    ; builtin_func_call's tp_call signature: (self, args, nargs)
-    ; But builtin_func_call does: rdi=args+16, rsi=nargs-1 — it STRIPS self.
-    ;
-    ; So for a method (method_new(func, reader)):
-    ; - method_call prepends reader → args = [reader, n], nargs = 2
-    ; - builtin_func_call strips reader → rdi=&args[1]=&n, rsi=1
-    ; - BUT: we lost access to self!
-    ;
-    ; The fileobj pattern uses a DIFFERENT approach: the builtin accesses
-    ; self via the method object on the stack. Let me re-check.
-    ; Actually in fileobj, the write builtin expects self in args:
-    ;   args[0] = data (the stripped args after builtin_func_call)
-    ; And the fd comes from... the method binding?
-    ;
-    ; Looking again at fileobj_write: it reads args[0] as the data to write.
-    ; The fd comes from the SELF which is NOT passed after stripping.
-    ; Hmm, let me re-read builtin_func_call more carefully.
-
-    ; OK, I need to understand the actual calling convention.
-    ; Let's just use the pattern where args[0] = self (reader), args[1] = n
-    ; because method_call prepends self. If builtin_func_call strips it,
-    ; we need to look one slot before args[0] to find self.
-    ; That's how fileobj does it:
-    ;   mov rdi, [rdi - 16]  ; self = args[-1] (the stripped self)
-    ; Actually no. Let me just check.
-    jmp .srr_create2
-
-.srr_create2:
-    ; For now: create ReadAwaitable with fd from the reader
-    ; We need fd. Since builtin_func_call doesn't give us self,
-    ; let's store fd in a closure-like way. Actually, method_call
-    ; in this runtime: self is args[0], user args start at args[1].
-    ; builtin_func_call does NOT strip self — it passes (args, nargs)
-    ; directly to func_ptr. Let me verify by reading the code.
-    ;
-    ; Given the complexity, let's use a simpler approach:
-    ; stream_reader_getattr returns bound methods where the builtin
-    ; closure captures the fd. But we can't do closures in asm easily.
-    ;
-    ; Simplest approach: DON'T use builtin_func_call. Instead, implement
-    ; tp_call on the StreamReader type itself. When called with args,
-    ; the method name is looked up via getattr, which returns an awaitable.
-    ;
-    ; Actually, the simplest approach for the asyncio module is:
-    ; reader.read(n) → getattr returns a ReadAwaitable directly.
-    ; That avoids bound methods entirely.
-
-    ; Let's abort this approach and implement it via getattr returning awaitables.
-    RET_NULL
-    pop r12
-    pop rbx
-    leave
-    ret
-END_FUNC stream_reader_read
 
 ;; stream_reader_getattr(self, name) -> fat value
 ;; Dispatches: "read" -> returns ReadAwaitable, "close" -> close fd
-global stream_reader_getattr
 DEF_FUNC stream_reader_getattr
     push rbx
     push r12
@@ -272,9 +154,7 @@ DEF_FUNC stream_reader_getattr
     pop rbx
     mov dword [rbx + AsyncStreamReader.fd], -1
 .srga_close_none:
-    lea rax, [rel none_singleton]
-    inc qword [rax + PyObject.ob_refcnt]
-    mov edx, TAG_PTR
+    RET_NONE
     pop r12
     pop rbx
     leave
@@ -448,7 +328,6 @@ END_FUNC read_awaitable_dealloc
 ;; ============================================================================
 
 ;; stream_writer_new(int fd) -> AsyncStreamWriter*
-global stream_writer_new
 DEF_FUNC stream_writer_new
     push rbx
     mov ebx, edi               ; save fd
@@ -474,7 +353,6 @@ DEF_FUNC_BARE stream_writer_dealloc
 END_FUNC stream_writer_dealloc
 
 ;; stream_writer_getattr(self, name) -> fat value
-global stream_writer_getattr
 DEF_FUNC stream_writer_getattr
     push rbx
     push r12
@@ -533,9 +411,7 @@ DEF_FUNC stream_writer_getattr
     mov dword [rbx + AsyncStreamWriter.fd], -1
     mov dword [rbx + AsyncStreamWriter.closed], 1
 .swga_close_none:
-    lea rax, [rel none_singleton]
-    inc qword [rax + PyObject.ob_refcnt]
-    mov edx, TAG_PTR
+    RET_NONE
     pop r12
     pop rbx
     leave
@@ -609,14 +485,10 @@ DEF_FUNC stream_writer_write_impl
     ret
 
 .swwi_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "write() requires exactly 1 argument"
-    call raise_exception
+    RAISE exc_TypeError_type, "write() requires exactly 1 argument"
 
 .swwi_type_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "write() argument must be a string"
-    call raise_exception
+    RAISE exc_TypeError_type, "write() argument must be a string"
 
 .swwi_write_error:
     ; Write failed — return 0
@@ -820,9 +692,7 @@ DEF_FUNC_BARE accept_awaitable_iternext
     ret
 
 .aai_error:
-    lea rdi, [rel exc_OSError_type]
-    CSTRING rsi, "start_server() accept failed"
-    call raise_exception
+    RAISE exc_OSError_type, "start_server() accept failed"
 END_FUNC accept_awaitable_iternext
 
 DEF_FUNC_BARE accept_awaitable_dealloc
@@ -841,8 +711,7 @@ END_FUNC accept_awaitable_dealloc
 ;; asyncio.open_connection(host, port) — create TCP connection
 ;; Returns a ConnectAwaitable
 ;; ============================================================================
-OC_FRAME equ 32
-global asyncio_open_connection_func
+OC_FRAME equ 32             ; + 3 pushes = 56, not 16-aligned
 DEF_FUNC asyncio_open_connection_func, OC_FRAME
     push rbx
     push r12
@@ -876,7 +745,7 @@ DEF_FUNC asyncio_open_connection_func, OC_FRAME
     xchg al, ah                ; swap bytes for 16-bit
     mov [rsp + 2], ax          ; sin_port (network byte order)
     ; sin_addr = INADDR_ANY = 0 for now (connect to localhost = 127.0.0.1)
-    mov dword [rsp + 4], 0x0100007F  ; 127.0.0.1 in network byte order
+    mov dword [rsp + 4], 0x0100007f  ; 127.0.0.1 in network byte order
     mov qword [rsp + 8], 0    ; sin_zero
 
     ; Set non-blocking
@@ -911,19 +780,13 @@ DEF_FUNC asyncio_open_connection_func, OC_FRAME
     ret
 
 .oc_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "open_connection() requires 2 arguments (host, port)"
-    call raise_exception
+    RAISE exc_TypeError_type, "open_connection() requires 2 arguments (host, port)"
 
 .oc_port_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "open_connection() port must be an integer"
-    call raise_exception
+    RAISE exc_TypeError_type, "open_connection() port must be an integer"
 
 .oc_socket_error:
-    lea rdi, [rel exc_OSError_type]
-    CSTRING rsi, "open_connection() socket creation failed"
-    call raise_exception
+    RAISE exc_OSError_type, "open_connection() socket creation failed"
 END_FUNC asyncio_open_connection_func
 
 ;; ============================================================================
@@ -932,8 +795,7 @@ END_FUNC asyncio_open_connection_func
 ;; first accepted connection. A full implementation would accept in a loop.
 ;; Returns a ConnectAwaitable that resolves to (reader, writer) on accept.
 ;; ============================================================================
-SS_FRAME equ 48
-global asyncio_start_server_func
+SS_FRAME equ 48             ; + 3 pushes = 72, not 16-aligned
 DEF_FUNC asyncio_start_server_func, SS_FRAME
     push rbx
     push r12
@@ -1019,27 +881,19 @@ DEF_FUNC asyncio_start_server_func, SS_FRAME
     ret
 
 .ss_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "start_server() requires 3 arguments (callback, host, port)"
-    call raise_exception
+    RAISE exc_TypeError_type, "start_server() requires 3 arguments (callback, host, port)"
 
 .ss_port_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "start_server() port must be an integer"
-    call raise_exception
+    RAISE exc_TypeError_type, "start_server() port must be an integer"
 
 .ss_socket_error:
-    lea rdi, [rel exc_OSError_type]
-    CSTRING rsi, "start_server() socket creation failed"
-    call raise_exception
+    RAISE exc_OSError_type, "start_server() socket creation failed"
 
 .ss_bind_cleanup:
     add rsp, 16
     mov edi, ebx
     call sys_close
-    lea rdi, [rel exc_OSError_type]
-    CSTRING rsi, "start_server() bind/listen failed"
-    call raise_exception
+    RAISE exc_OSError_type, "start_server() bind/listen failed"
 
 END_FUNC asyncio_start_server_func
 
@@ -1097,10 +951,8 @@ END_FUNC _stream_strcmp
 section .rodata
 srn_read:       db "read", 0
 srn_readline:   db "readline", 0
-srn_close:      db "close", 0
 swn_write:      db "write", 0
 swn_drain:      db "drain", 0
-swn_close:      db "close", 0
 
 stream_reader_name: db "StreamReader", 0
 stream_writer_name: db "StreamWriter", 0

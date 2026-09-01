@@ -24,7 +24,6 @@
 
 %include "macros.inc"
 %include "object.inc"
-%include "types.inc"
 %include "value.inc"
 
 extern dict_new
@@ -56,12 +55,12 @@ extern type_type
 
 section .text
 
-; ----------------------------------------------------------------------------
-; abc_state_get(rdi = cls, rsi = name cstr) -> rax = Value, or 0 if absent
-; Reads the class's own tp_dict.  Borrowed; the caller does not own it.
-; ----------------------------------------------------------------------------
+;; ============================================================================
+;; abc_state_get(rdi = cls, rsi = name cstr) -> rax = Value, or 0 if absent
+;; Reads the class's own tp_dict.  Borrowed; the caller does not own it.
+;; ============================================================================
 AG_CLS   equ 8
-AG_FRAME equ 16
+AG_FRAME equ 16             ; + 1 push = 24, not 16-aligned
 DEF_FUNC_LOCAL abc_state_get, AG_FRAME
     push rbx
     mov [rbp - AG_CLS], rdi
@@ -90,13 +89,13 @@ DEF_FUNC_LOCAL abc_state_get, AG_FRAME
     ret
 END_FUNC abc_state_get
 
-; ----------------------------------------------------------------------------
-; abc_state_set(rdi = cls, rsi = name cstr, rdx = value Value)
-; Stores into the class's own tp_dict, creating it if the type has none.
-; ----------------------------------------------------------------------------
+;; ============================================================================
+;; abc_state_set(rdi = cls, rsi = name cstr, rdx = value Value)
+;; Stores into the class's own tp_dict, creating it if the type has none.
+;; ============================================================================
 AS_CLS   equ 8
 AS_VAL   equ 16
-AS_FRAME equ 16
+AS_FRAME equ 16             ; + 1 push = 24, not 16-aligned
 DEF_FUNC_LOCAL abc_state_set, AS_FRAME
     push rbx
     mov [rbp - AS_CLS], rdi
@@ -123,12 +122,12 @@ DEF_FUNC_LOCAL abc_state_set, AS_FRAME
     ret
 END_FUNC abc_state_set
 
-; ----------------------------------------------------------------------------
-; abc_fresh_set(rdi = cls, rsi = name cstr) -> rax = the new set (borrowed)
-; ----------------------------------------------------------------------------
+;; ============================================================================
+;; abc_fresh_set(rdi = cls, rsi = name cstr) -> rax = the new set (borrowed)
+;; ============================================================================
 AF_CLS   equ 8
 AF_NAME  equ 16
-AF_FRAME equ 16
+AF_FRAME equ 16             ; + 1 push = 24, not 16-aligned
 DEF_FUNC_LOCAL abc_fresh_set, AF_FRAME
     push rbx
     mov [rbp - AF_CLS], rdi
@@ -147,9 +146,9 @@ DEF_FUNC_LOCAL abc_fresh_set, AF_FRAME
     ret
 END_FUNC abc_fresh_set
 
-; ----------------------------------------------------------------------------
-; get_cache_token() -> int
-; ----------------------------------------------------------------------------
+;; ============================================================================
+;; get_cache_token() -> int
+;; ============================================================================
 DEF_FUNC abc_get_cache_token
     mov rax, [rel abc_invalidation_counter]
     V_PACK_I64 rax, rcx
@@ -157,14 +156,13 @@ DEF_FUNC abc_get_cache_token
     ret
 END_FUNC abc_get_cache_token
 
-
-; ----------------------------------------------------------------------------
-; abc_getattr(rdi = object Value, rsi = name str) -> rax = Value, or 0
-; Whatever tp_getattr the object's type offers, else its type's tp_dict.
-; ----------------------------------------------------------------------------
+;; ============================================================================
+;; abc_getattr(rdi = object Value, rsi = name str) -> rax = Value, or 0
+;; Whatever tp_getattr the object's type offers, else its type's tp_dict.
+;; ============================================================================
 AGA_OBJ  equ 8
 AGA_NAME equ 16
-AGA_FRAME equ 32
+AGA_FRAME equ 32            ; + 0 pushes = 32
 DEF_FUNC_LOCAL abc_getattr, AGA_FRAME
     V_TEST_PTR rdi, rax
     ja .aga_none
@@ -202,9 +200,9 @@ DEF_FUNC_LOCAL abc_getattr, AGA_FRAME
     ret
 END_FUNC abc_getattr
 
-; ----------------------------------------------------------------------------
-; abc_is_abstract(rdi = value Value) -> eax 0/1
-; ----------------------------------------------------------------------------
+;; ============================================================================
+;; abc_is_abstract(rdi = value Value) -> eax 0/1
+;; ============================================================================
 DEF_FUNC_LOCAL abc_is_abstract, 16
     push rbx
     CSTRING rsi, "__isabstractmethod__"
@@ -237,21 +235,20 @@ DEF_FUNC_LOCAL abc_is_abstract, 16
     ret
 END_FUNC abc_is_abstract
 
-; ----------------------------------------------------------------------------
-; abc_compute_abstracts(rdi = cls)
-;
-; __abstractmethods__ is what makes an abstract class refuse to be
-; instantiated, and CPython computes it here rather than in abc.py: the names
-; in the class body that are marked abstract, plus any the bases left abstract
-; and this class did not override.
-; ----------------------------------------------------------------------------
+;; ============================================================================
+;; abc_compute_abstracts(rdi = cls)
+;;
+;; __abstractmethods__ is what makes an abstract class refuse to be
+;; instantiated, and CPython computes it here rather than in abc.py: the names
+;; in the class body that are marked abstract, plus any the bases left abstract
+;; and this class did not override.
+;; ============================================================================
 CA_CLS   equ 8
 CA_SET   equ 16
 CA_IDX   equ 24
 CA_DICT  equ 32
-CA_BASE  equ 40
 CA_KEY   equ 48
-CA_FRAME equ 64
+CA_FRAME equ 64             ; + 2 pushes = 80
 DEF_FUNC_LOCAL abc_compute_abstracts, CA_FRAME
     push rbx
     push r12
@@ -359,11 +356,11 @@ DEF_FUNC_LOCAL abc_compute_abstracts, CA_FRAME
     ret
 END_FUNC abc_compute_abstracts
 
-; ----------------------------------------------------------------------------
-; _abc_init(cls) -> None
-; ----------------------------------------------------------------------------
+;; ============================================================================
+;; _abc_init(cls) -> None
+;; ============================================================================
 AI_CLS   equ 8
-AI_FRAME equ 16
+AI_FRAME equ 16             ; + 0 pushes = 16
 DEF_FUNC abc_init_func, AI_FRAME
     cmp rsi, 1
     jl .bad
@@ -397,16 +394,14 @@ DEF_FUNC abc_init_func, AI_FRAME
     leave
     ret
 .bad:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "_abc_init() requires a class"
-    call raise_exception
+    RAISE exc_TypeError_type, "_abc_init() requires a class"
 END_FUNC abc_init_func
 
-; ----------------------------------------------------------------------------
-; abc_call_issubclass(rdi = sub, rsi = parent) -> eax 0/1, -1 on error
-; The builtin, so a registered class that is itself an ABC gets its own
-; __subclasscheck__ consulted.
-; ----------------------------------------------------------------------------
+;; ============================================================================
+;; abc_call_issubclass(rdi = sub, rsi = parent) -> eax 0/1, -1 on error
+;; The builtin, so a registered class that is itself an ABC gets its own
+;; __subclasscheck__ consulted.
+;; ============================================================================
 DEF_FUNC_LOCAL abc_call_issubclass, 16
     push rbx
     sub rsp, 16
@@ -436,10 +431,10 @@ DEF_FUNC_LOCAL abc_call_issubclass, 16
     ret
 END_FUNC abc_call_issubclass
 
-; ----------------------------------------------------------------------------
-; abc_subclasscheck(rdi = cls, rsi = subclass) -> eax 1 yes / 0 no / -1 error
-; Modules/_abc.c, _abc__abc_subclasscheck_impl.
-; ----------------------------------------------------------------------------
+;; ============================================================================
+;; abc_subclasscheck(rdi = cls, rsi = subclass) -> eax 1 yes / 0 no / -1 error
+;; Modules/_abc.c, _abc__abc_subclasscheck_impl.
+;; ============================================================================
 SC_CLS    equ 8
 SC_SUB    equ 16
 SC_CACHE  equ 24
@@ -447,7 +442,7 @@ SC_NEG    equ 32
 SC_HOOK   equ 40
 SC_IDX    equ 48
 SC_REG    equ 56
-SC_FRAME  equ 64
+SC_FRAME  equ 64            ; + 2 pushes = 80
 DEF_FUNC abc_subclasscheck, SC_FRAME
     push rbx
     push r12
@@ -664,9 +659,9 @@ DEF_FUNC abc_subclasscheck, SC_FRAME
     ret
 END_FUNC abc_subclasscheck
 
-; ----------------------------------------------------------------------------
-; _abc_subclasscheck(cls, subclass) -> bool
-; ----------------------------------------------------------------------------
+;; ============================================================================
+;; _abc_subclasscheck(cls, subclass) -> bool
+;; ============================================================================
 DEF_FUNC abc_subclasscheck_func
     cmp rsi, 2
     jl .bad
@@ -696,21 +691,19 @@ DEF_FUNC abc_subclasscheck_func
     leave
     ret
 .bad:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "_abc_subclasscheck() takes 2 arguments"
-    call raise_exception
+    RAISE exc_TypeError_type, "_abc_subclasscheck() takes 2 arguments"
 END_FUNC abc_subclasscheck_func
 
-; ----------------------------------------------------------------------------
-; _abc_instancecheck(cls, instance) -> bool
-;
-; CPython consults instance.__class__ as well as type(instance), so that an
-; object which lies about its class is believed.  Nothing here can lie yet,
-; so the two are the same object and one check does.
-; ----------------------------------------------------------------------------
+;; ============================================================================
+;; _abc_instancecheck(cls, instance) -> bool
+;;
+;; CPython consults instance.__class__ as well as type(instance), so that an
+;; object which lies about its class is believed.  Nothing here can lie yet,
+;; so the two are the same object and one check does.
+;; ============================================================================
 IC_CLS   equ 8
 IC_SUB   equ 16
-IC_FRAME equ 16
+IC_FRAME equ 16             ; + 0 pushes = 16
 DEF_FUNC abc_instancecheck_func, IC_FRAME
     cmp rsi, 2
     jl .bad
@@ -754,17 +747,15 @@ DEF_FUNC abc_instancecheck_func, IC_FRAME
     leave
     ret
 .bad:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "_abc_instancecheck() takes 2 arguments"
-    call raise_exception
+    RAISE exc_TypeError_type, "_abc_instancecheck() takes 2 arguments"
 END_FUNC abc_instancecheck_func
 
-; ----------------------------------------------------------------------------
-; _abc_register(cls, subclass) -> subclass
-; ----------------------------------------------------------------------------
+;; ============================================================================
+;; _abc_register(cls, subclass) -> subclass
+;; ============================================================================
 RG_CLS   equ 8
 RG_SUB   equ 16
-RG_FRAME equ 16
+RG_FRAME equ 16             ; + 0 pushes = 16
 DEF_FUNC abc_register_func, RG_FRAME
     cmp rsi, 2
     jl .bad
@@ -809,25 +800,19 @@ DEF_FUNC abc_register_func, RG_FRAME
     leave
     ret
 .not_a_class:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "Can only register classes"
-    call raise_exception
+    RAISE exc_TypeError_type, "Can only register classes"
 .cycle:
-    lea rdi, [rel exc_RuntimeError_type]
-    CSTRING rsi, "Refusing to create an inheritance cycle"
-    call raise_exception
+    RAISE exc_RuntimeError_type, "Refusing to create an inheritance cycle"
 .bad:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "_abc_register() takes 2 arguments"
-    call raise_exception
+    RAISE exc_TypeError_type, "_abc_register() takes 2 arguments"
 END_FUNC abc_register_func
 
-; ----------------------------------------------------------------------------
-; _get_dump(cls) -> (registry, cache, negative_cache, negative_cache_version)
-; ----------------------------------------------------------------------------
+;; ============================================================================
+;; _get_dump(cls) -> (registry, cache, negative_cache, negative_cache_version)
+;; ============================================================================
 GD_CLS   equ 8
 GD_TUP   equ 16
-GD_FRAME equ 16
+GD_FRAME equ 16             ; + 0 pushes = 16
 DEF_FUNC abc_get_dump_func, GD_FRAME
     cmp rsi, 1
     jl .bad
@@ -860,14 +845,12 @@ DEF_FUNC abc_get_dump_func, GD_FRAME
     leave
     ret
 .bad:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "_get_dump() requires a class"
-    call raise_exception
+    RAISE exc_TypeError_type, "_get_dump() requires a class"
 END_FUNC abc_get_dump_func
 
-; ----------------------------------------------------------------------------
-; _reset_registry(cls) -> None
-; ----------------------------------------------------------------------------
+;; ============================================================================
+;; _reset_registry(cls) -> None
+;; ============================================================================
 DEF_FUNC abc_reset_registry_func
     cmp rsi, 1
     jl .bad
@@ -879,16 +862,14 @@ DEF_FUNC abc_reset_registry_func
     leave
     ret
 .bad:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "_reset_registry() requires a class"
-    call raise_exception
+    RAISE exc_TypeError_type, "_reset_registry() requires a class"
 END_FUNC abc_reset_registry_func
 
-; ----------------------------------------------------------------------------
-; _reset_caches(cls) -> None
-; ----------------------------------------------------------------------------
+;; ============================================================================
+;; _reset_caches(cls) -> None
+;; ============================================================================
 RC_CLS   equ 8
-RC_FRAME equ 16
+RC_FRAME equ 16             ; + 0 pushes = 16
 DEF_FUNC abc_reset_caches_func, RC_FRAME
     cmp rsi, 1
     jl .bad
@@ -905,34 +886,14 @@ DEF_FUNC abc_reset_caches_func, RC_FRAME
     leave
     ret
 .bad:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "_reset_caches() requires a class"
-    call raise_exception
+    RAISE exc_TypeError_type, "_reset_caches() requires a class"
 END_FUNC abc_reset_caches_func
 
-; ============================================================================
-; Module construction
-; ============================================================================
-%macro ABC_ADD_FUNC 2
-    lea rdi, [rel %1]
-    lea rsi, [rel %2]
-    call builtin_func_new
-    push rax
-    lea rdi, [rel %2]
-    call str_from_cstr_heap
-    push rax
-    mov rdi, r12
-    mov rsi, rax
-    mov rdx, [rsp + 8]
-    call dict_set
-    pop rdi
-    call obj_decref
-    pop rdi
-    call obj_decref
-%endmacro
+;; ============================================================================
+;; Module construction
+;; ============================================================================
 
-ABC_FRAME equ 8
-global abc_module_create
+ABC_FRAME equ 8             ; + 2 pushes = 24, not 16-aligned
 DEF_FUNC abc_module_create, ABC_FRAME
     push rbx
     push r12
@@ -940,14 +901,14 @@ DEF_FUNC abc_module_create, ABC_FRAME
     call dict_new
     mov r12, rax
 
-    ABC_ADD_FUNC abc_get_cache_token,      abcm_get_cache_token
-    ABC_ADD_FUNC abc_init_func,            abcm_abc_init
-    ABC_ADD_FUNC abc_register_func,        abcm_abc_register
-    ABC_ADD_FUNC abc_instancecheck_func,   abcm_abc_instancecheck
-    ABC_ADD_FUNC abc_subclasscheck_func,   abcm_abc_subclasscheck
-    ABC_ADD_FUNC abc_get_dump_func,        abcm_get_dump
-    ABC_ADD_FUNC abc_reset_registry_func,  abcm_reset_registry
-    ABC_ADD_FUNC abc_reset_caches_func,    abcm_reset_caches
+    MODULE_ADD_FUNC abc_get_cache_token,      abcm_get_cache_token
+    MODULE_ADD_FUNC abc_init_func,            abcm_abc_init
+    MODULE_ADD_FUNC abc_register_func,        abcm_abc_register
+    MODULE_ADD_FUNC abc_instancecheck_func,   abcm_abc_instancecheck
+    MODULE_ADD_FUNC abc_subclasscheck_func,   abcm_abc_subclasscheck
+    MODULE_ADD_FUNC abc_get_dump_func,        abcm_get_dump
+    MODULE_ADD_FUNC abc_reset_registry_func,  abcm_reset_registry
+    MODULE_ADD_FUNC abc_reset_caches_func,    abcm_reset_caches
 
     lea rdi, [rel abcm_name]
     call str_from_cstr_heap

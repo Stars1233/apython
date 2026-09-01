@@ -12,16 +12,12 @@
 ;   - prep_reraise_star(orig, excs_list) -> PyObject*
 
 %include "macros.inc"
-%include "errcodes.inc"
 %include "object.inc"
-%include "types.inc"
 
 extern ap_free
 extern object_type
 extern ap_malloc
 extern gc_alloc
-extern gc_track
-extern gc_dealloc
 extern ap_strcmp
 extern exc_BaseException_type
 extern exc_Exception_type
@@ -40,11 +36,8 @@ extern obj_decref
 extern obj_dealloc
 extern obj_incref
 extern raise_exception
-extern str_from_cstr
 extern tuple_new
 extern tuple_type
-extern type_getattr
-extern type_repr
 extern type_type
 
 ;; ============================================================================
@@ -54,7 +47,7 @@ extern type_type
 ;; msg_str and exc_tuple are INCREFed. type is immortal.
 ;; ============================================================================
 EGN_EG    equ 8
-EGN_FRAME equ 8
+EGN_FRAME equ 8             ; + 3 pushes = 32
 DEF_FUNC eg_new, EGN_FRAME
     push rbx
     push r12
@@ -140,7 +133,7 @@ END_FUNC eg_new
 EGC_TYPE  equ 8
 EGC_ARGS  equ 16
 EGC_NARGS equ 24
-EGC_FRAME equ 24
+EGC_FRAME equ 24            ; + 3 pushes = 48
 DEF_FUNC eg_type_call, EGC_FRAME
     push rbx
     push r12
@@ -232,19 +225,13 @@ DEF_FUNC eg_type_call, EGC_FRAME
     ret
 
 .bad_nargs:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "ExceptionGroup requires exactly 2 arguments"
-    call raise_exception
+    RAISE exc_TypeError_type, "ExceptionGroup requires exactly 2 arguments"
 
 .bad_excs:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "second argument must be a sequence of exceptions"
-    call raise_exception
+    RAISE exc_TypeError_type, "second argument must be a sequence of exceptions"
 
 .empty_excs:
-    lea rdi, [rel exc_ValueError_type]
-    CSTRING rsi, "second argument (exceptions) must be a non-empty sequence"
-    call raise_exception
+    RAISE exc_ValueError_type, "second argument (exceptions) must be a non-empty sequence"
 
 .empty_excs_decref:
     ; DECREF exc_tuple before raising
@@ -252,9 +239,7 @@ DEF_FUNC eg_type_call, EGC_FRAME
     mov rdi, r12
     call obj_decref
     pop r12
-    lea rdi, [rel exc_ValueError_type]
-    CSTRING rsi, "second argument (exceptions) must be a non-empty sequence"
-    call raise_exception
+    RAISE exc_ValueError_type, "second argument (exceptions) must be a non-empty sequence"
 
 END_FUNC eg_type_call
 
@@ -323,7 +308,7 @@ DEF_FUNC_BARE eg_str
 END_FUNC eg_str
 
 ;; ============================================================================
-;; eg_getattr(PyExceptionGroupObject *eg, PyStrObject *name) -> PyObject* or NULL
+;; eg_getattr(PyExceptionGroupObject *eg, PyStrObject *name) -> rax = Value or NULL
 ;; Handle: message, exceptions, args, __context__, __cause__, __traceback__
 ;; ============================================================================
 DEF_FUNC eg_getattr
@@ -404,7 +389,7 @@ EGS_MLIST    equ 24
 EGS_RLIST    equ 32
 EGS_IDX      equ 40
 EGS_COUNT    equ 48
-EGS_FRAME    equ 48
+EGS_FRAME    equ 48         ; + 3 pushes = 72, not 16-aligned
 DEF_FUNC eg_split, EGS_FRAME
     push rbx
     push r12
@@ -623,8 +608,7 @@ PRS_ORIG  equ 8
 PRS_LIST  equ 16
 PRS_FIRST equ 24
 PRS_FLAT  equ 32
-PRS_FRAME equ 32
-global prep_reraise_star
+PRS_FRAME equ 32            ; + 2 pushes = 48
 DEF_FUNC prep_reraise_star, PRS_FRAME
     push rbx
     push r12

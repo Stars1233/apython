@@ -151,8 +151,6 @@ TOKEN_SHIFT equ 5
 ;; Character classes.  One 256-byte table drives every scanning decision in
 ;; the lexer.
 ;; ===========================================================================
-CC_SPACE   equ 0x01   ; space, tab, formfeed, vertical tab -- not newline
-CC_NEWLINE equ 0x02   ; \n \r
 CC_DIGIT   equ 0x04
 CC_IDSTART equ 0x08   ; A-Za-z_ and 0x80..0xFF (permissive UTF-8 lead byte)
 CC_IDCONT  equ 0x10   ; IDSTART or DIGIT
@@ -390,7 +388,6 @@ endstruc
 ; Compilation modes, matching CPython's start symbols.
 CMODE_EXEC   equ 0
 CMODE_EVAL   equ 1
-CMODE_SINGLE equ 2
 
 ; The parser's own recursion guard.  apython's recursion_depth counts Python
 ; frames only, so deeply nested parentheses would otherwise blow the machine
@@ -423,7 +420,6 @@ BP_UNARY    equ 26
 BP_POWER    equ 28
 BP_AWAIT    equ 30
 BP_POSTFIX  equ 32
-
 
 ;; ===========================================================================
 ;; Lexer state.  One pass over the source fills comp.tokens; the parser then
@@ -617,9 +613,6 @@ SYM_CELL            equ 5
 ; Scope.flags
 SCF_GENERATOR equ 0x01
 SCF_COROUTINE equ 0x02
-SCF_VARARGS   equ 0x04
-SCF_VARKW     equ 0x08
-SCF_NESTED    equ 0x10
 
 struc Scope
     .parent:    resd 1          ; scope index, 0 = none

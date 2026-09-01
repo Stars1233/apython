@@ -8,11 +8,9 @@
 
 %include "macros.inc"
 %include "object.inc"
-%include "frame.inc"
 
 extern ap_malloc
 extern ap_free
-extern obj_decref
 extern obj_dealloc
 
 ; Pool constants
@@ -21,6 +19,13 @@ POOL_CLASS_1  equ 512
 POOL_CLASS_2  equ 1024
 POOL_CLASS_3  equ 2048
 POOL_MAX_FREE equ 16      ; max frames per freelist
+
+; A pool record is (head, count), selected as a unit with `lea rcx, [rel
+; pool_free_N]` and then indexed.  The count was reached as a bare [rcx + 8],
+; which made pool_count_N decoration: inserting a field between the two would
+; have silently moved which dword holds the cap.
+POOL_HEAD   equ 0
+POOL_COUNT  equ 8
 
 ;; ============================================================================
 ;; frame_pool_get(size) -> ptr
@@ -58,14 +63,14 @@ DEF_FUNC frame_pool_get
 
 .fp_try_pool:
     ; rcx = &pool_free_N, edi = class size
-    mov rax, [rcx]             ; head of freelist
+    mov rax, [rcx + POOL_HEAD]      ; head of freelist
     test rax, rax
     jz .fp_malloc              ; empty freelist
     ; Pop from freelist: head = head->next
     mov rdx, [rax]             ; next pointer (stored at offset 0)
-    mov [rcx], rdx
+    mov [rcx + POOL_HEAD], rdx
     ; Decrement count
-    lea rdx, [rcx + 8]        ; &pool_count_N (count is 8 bytes after freelist head)
+    lea rdx, [rcx + POOL_COUNT]     ; &pool_count_N
     dec dword [rdx]
     ; rax = recycled frame
     leave
@@ -109,13 +114,13 @@ DEF_FUNC frame_pool_put
 
 .fpp_try_push:
     ; rcx = &pool_free_N
-    lea rdx, [rcx + 8]        ; &pool_count_N
+    lea rdx, [rcx + POOL_COUNT]     ; &pool_count_N
     cmp dword [rdx], POOL_MAX_FREE
     jge .fpp_full
     ; Push to freelist: frame->next = head; head = frame
-    mov rax, [rcx]             ; old head
-    mov [rdi], rax             ; frame->next = old head
-    mov [rcx], rdi             ; head = frame
+    mov rax, [rcx + POOL_HEAD]      ; old head
+    mov [rdi], rax                  ; frame->next = old head
+    mov [rcx + POOL_HEAD], rdi      ; head = frame
     inc dword [rdx]            ; count++
     leave
     ret
@@ -244,7 +249,6 @@ END_FUNC frame_free
 ;; frame_pool_drain()
 ;; Free all entries in all pool freelists. Called at exit.
 ;; ============================================================================
-global frame_pool_drain
 DEF_FUNC frame_pool_drain
     push rbx
     push r12        ; alignment
@@ -351,7 +355,6 @@ FTL_DICT    equ 16
 FTL_NAMES   equ 24
 FTL_I       equ 32
 FTL_N       equ 40
-FTL_SIZE    equ 48        ; + 1 push = 56... padded below
 FTL_FRAME   equ 56        ; + 1 push = 64
 global frame_fast_to_locals
 extern dict_new

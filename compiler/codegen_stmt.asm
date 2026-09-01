@@ -12,7 +12,6 @@
 
 %include "macros.inc"
 %include "object.inc"
-%include "types.inc"
 %include "value.inc"
 %include "opcodes.inc"
 %include "compiler.inc"
@@ -22,7 +21,6 @@ extern ast_child
 extern ast_obj_at
 extern sym_at
 extern comp_intern_cstr
-extern cg_children
 extern cg_const
 extern comp_keep
 extern cg_emit
@@ -35,7 +33,6 @@ extern cg_expr
 extern cg_label_bind
 extern cg_label_new
 extern cg_name
-extern ast_obj
 extern cg_nameop
 extern cg_unwind_finallys
 extern cg_s_asyncfor
@@ -49,18 +46,13 @@ extern cg_s_return
 extern comp_error
 
 extern comp_empty_string
-extern comp_intern
 extern none_singleton
-extern obj_decref
 extern str_from_cstr_heap
 extern tuple_new
 
 extern exc_SyntaxError_type
 
 ; --- Named frame-layout constants ---
-CST_COMP  equ 8
-CST_UNIT  equ 16
-CST_NODE  equ 24
 CST_LINE  equ 32
 CST_I     equ 40
 CST_N     equ 48
@@ -179,9 +171,6 @@ END_FUNC cg_body
 ;; UNPACK_SEQUENCE into an UNPACK_EX whose oparg carries the counts on each
 ;; side of the star.
 ;; ============================================================================
-CSV_COMP  equ 8
-CSV_UNIT  equ 16
-CSV_NODE  equ 24
 CSV_LINE  equ 32
 CSV_I     equ 40
 CSV_N     equ 48
@@ -745,7 +734,6 @@ HA_FRAME equ 48           ; + 2 pushes = 64
 ;; -- a classdef or a module.  Handed an AST_GLOBAL it would walk that node's
 ;; object indices as node indices, which is the trap cg_has_annotation below
 ;; refuses by allow-list.
-global cg_has_annotation_body
 DEF_FUNC cg_has_annotation_body, HA_FRAME
     push rbx
     push r12
@@ -1384,7 +1372,6 @@ DEF_FUNC_LOCAL cg_s_raise, CST_FRAME
     ret
 END_FUNC cg_s_raise
 
-
 ;; ============================================================================
 ;; cg_load_const_int(CompUnit *u, int64_t v, int line)
 ;; A small integer constant, for the import level and similar fixed operands.
@@ -1445,9 +1432,6 @@ END_FUNC cg_load_none
 ;; `a`, not `a.b` -- because the submodule is reached through the attribute.
 ;; With an `as` it binds the final module, which needs an IMPORT_FROM walk.
 ;; ============================================================================
-CIM_COMP  equ 8
-CIM_UNIT  equ 16
-CIM_NODE  equ 24
 CIM_LINE  equ 32
 CIM_I     equ 40
 CIM_N     equ 48
@@ -1685,7 +1669,6 @@ DEF_FUNC cg_name_component, CNC_FRAME
     ret
 END_FUNC cg_name_component
 
-
 ;; ============================================================================
 ;; cg_s_importfrom - `from a import b as c` and `from . import x`
 ;;
@@ -1698,14 +1681,10 @@ END_FUNC cg_name_component
 ;; `from m import *` is CALL_INTRINSIC_1 INTRINSIC_IMPORT_STAR instead, which
 ;; consumes the module rather than leaving it.
 ;; ============================================================================
-CIF_COMP  equ 8
-CIF_UNIT  equ 16
-CIF_NODE  equ 24
 CIF_LINE  equ 32
 CIF_I     equ 40
 CIF_N     equ 48
 CIF_ALIAS equ 56
-CIF_TUP   equ 64
 CIF_FRAME equ 72          ; + 3 pushes = 96
 DEF_FUNC_LOCAL cg_s_importfrom, CIF_FRAME
     push rbx
@@ -1914,13 +1893,10 @@ DEF_FUNC_LOCAL cg_s_importfrom, CIF_FRAME
     ret
 END_FUNC cg_s_importfrom
 
-
 ;; ============================================================================
 ;; cg_fromlist_tuple(Comp *c, uint32_t node) -> rax = an owned tuple, or 0
 ;; The names a `from ... import ...` asks for, as one constant.
 ;; ============================================================================
-FT_COMP  equ 8
-FT_NODE  equ 16
 FT_TUP   equ 24
 FT_I     equ 32
 FT_N     equ 40
@@ -2575,7 +2551,6 @@ cg_stmt_table:
     dq 0                ; 79 
 
 cg_star_name: db "*", 0
-
 
 section .rodata
 cg_annotations_dunder: db "__annotations__", 0

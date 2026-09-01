@@ -1,9 +1,8 @@
-; tuple_obj.asm - Tuple type implementation
+; pyo/tuple.asm - Tuple type implementation
 ; Fat tuples: each element is 16 bytes (payload + tag) inline
 
 %include "macros.inc"
 %include "object.inc"
-%include "types.inc"
 
 extern bool_true
 extern bool_false
@@ -14,7 +13,6 @@ extern gc_dealloc
 extern ap_free
 extern obj_decref
 extern obj_dealloc
-extern str_from_cstr
 extern obj_hash
 extern int_to_i64
 extern fatal_error
@@ -26,8 +24,6 @@ extern slice_indices
 extern ap_memcpy
 extern type_type
 extern gc_untrack
-extern tuple_traverse
-extern tuple_clear
 extern obj_is_true
 extern float_compare
 extern int_type
@@ -68,11 +64,11 @@ DEF_FUNC tuple_new
 .try_pool_3:
     lea rcx, [rel tuple_pool_3_head]
 .try_pool:
-    mov rax, [rcx]              ; head
+    mov rax, [rcx + TUPLE_POOL_HEAD]  ; head
     test rax, rax
     jz .alloc_fresh
     mov rdx, [rax + PyObject.ob_refcnt]  ; next link
-    mov [rcx], rdx
+    mov [rcx + TUPLE_POOL_HEAD], rdx
     dec dword [rcx + 8]         ; count--
     mov qword [rax + PyObject.ob_refcnt], 1
     mov rbx, rax
@@ -145,12 +141,10 @@ DEF_FUNC_BARE tuple_getitem
     INCREF_V rax, rdx
     ret
 .index_error:
-    lea rdi, [rel exc_IndexError_type]
-    CSTRING rsi, "tuple index out of range"
-    call raise_exception
+    RAISE exc_IndexError_type, "tuple index out of range"
 END_FUNC tuple_getitem
 
-; tuple_subscript(PyTupleObject *tuple, PyObject *key) -> PyObject*
+; tuple_subscript(PyTupleObject *tuple, PyObject *key) -> rax = Value
 ; mp_subscript: index with int or slice key (for BINARY_SUBSCR)
 ; Returns (rax=payload, edx=tag) fat value
 DEF_FUNC tuple_subscript
@@ -189,9 +183,7 @@ DEF_FUNC tuple_subscript
     ret
 
 .ts_type_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "tuple indices must be integers or slices"
-    call raise_exception
+    RAISE exc_TypeError_type, "tuple indices must be integers or slices"
 END_FUNC tuple_subscript
 
 ; tuple_len(PyTupleObject *tuple) -> int64_t
@@ -204,6 +196,11 @@ END_FUNC tuple_len
 ; tuple_dealloc(PyObject *self)
 ; DECREF_VAL each fat item, then free self or return to pool
 TUPLE_POOL_MAX equ 16
+
+; Same (head, count) record shape as the frame pools, and the same reason to
+; name the offset rather than write [rcx + 8].
+TUPLE_POOL_HEAD  equ 0
+TUPLE_POOL_COUNT equ 8
 
 DEF_FUNC tuple_dealloc
     push rbx
@@ -241,7 +238,7 @@ DEF_FUNC tuple_dealloc
 .pool_3:
     lea rcx, [rel tuple_pool_3_head]
 .try_push:
-    cmp dword [rcx + 8], TUPLE_POOL_MAX
+    cmp dword [rcx + TUPLE_POOL_COUNT], TUPLE_POOL_MAX
     jge .free_self
     ; Untrack from GC before pooling
     push rcx              ; save pool head ptr (caller-saved, clobbered by gc_untrack)
@@ -249,9 +246,9 @@ DEF_FUNC tuple_dealloc
     call gc_untrack
     pop rcx               ; restore pool head ptr
     ; Push to pool: reuse ob_refcnt as next-pointer
-    mov rdx, [rcx]
+    mov rdx, [rcx + TUPLE_POOL_HEAD]
     mov [rbx + PyObject.ob_refcnt], rdx
-    mov [rcx], rbx
+    mov [rcx + TUPLE_POOL_HEAD], rbx
     inc dword [rcx + 8]         ; count++
     pop r13
     pop r12
@@ -348,13 +345,15 @@ END_FUNC tuple_hash
 ;; tuple_getslice(PyTupleObject *tuple, PySliceObject *slice) -> PyTupleObject*
 ;; Creates a new tuple from a slice of the original. Fat 16-byte slots.
 ;; ============================================================================
+TGS_NEW   equ 48            ; the tuple being built
+TGS_LEN   equ 56            ; its length
 DEF_FUNC tuple_getslice
     push rbx
     push r12
     push r13
     push r14
     push r15
-    sub rsp, 16                ; [rbp-56]=slicelength, [rbp-48]=newtuple, align
+    sub rsp, 16                ; [rbp - TGS_LEN]=slicelength, [rbp - TGS_NEW]=newtuple, align
 
     mov rbx, rdi               ; tuple
     mov r12, rsi               ; slice
@@ -396,10 +395,10 @@ DEF_FUNC tuple_getslice
     xor eax, eax
 
 .tgs_have_len:
-    mov [rbp-56], rax          ; slicelength
+    mov [rbp - TGS_LEN], rax          ; slicelength
     mov rdi, rax
     call tuple_new
-    mov [rbp-48], rax          ; new tuple
+    mov [rbp - TGS_NEW], rax          ; new tuple
 
     ; Fill items (payload + tag arrays)
     ; Fast path: step == 1 → contiguous memcpy + bulk INCREF
@@ -411,17 +410,17 @@ DEF_FUNC tuple_getslice
     mov rax, r13
     shl rax, 3
     add rsi, rax              ; src payloads + start*8
-    mov rdi, [rbp-48]
+    mov rdi, [rbp - TGS_NEW]
     mov rdi, [rdi + PyTupleObject.ob_item]  ; dst payloads
-    mov rdx, [rbp-56]         ; slicelength
+    mov rdx, [rbp - TGS_LEN]         ; slicelength
     shl rdx, 3
     call ap_memcpy
 
     ; Bulk INCREF all copied elements
-    mov rcx, [rbp-56]         ; slicelength
+    mov rcx, [rbp - TGS_LEN]         ; slicelength
     test rcx, rcx
     jz .tgs_done
-    mov rdi, [rbp-48]
+    mov rdi, [rbp - TGS_NEW]
     mov rdi, [rdi + PyTupleObject.ob_item]
     xor edx, edx
 .tgs_incref_loop:
@@ -435,7 +434,7 @@ DEF_FUNC tuple_getslice
 .tgs_loop_start:
     xor ecx, ecx
 .tgs_loop:
-    cmp rcx, [rbp-56]
+    cmp rcx, [rbp - TGS_LEN]
     jge .tgs_done
     ; src_idx = start + i * step
     mov rax, rcx
@@ -445,7 +444,7 @@ DEF_FUNC tuple_getslice
     mov rdx, [rbx + PyTupleObject.ob_item]
     mov rdx, [rdx + rax * 8]
     ; Store in new tuple
-    mov rsi, [rbp-48]
+    mov rsi, [rbp - TGS_NEW]
     mov r9, [rsi + PyTupleObject.ob_item]
     mov [r9 + rcx * 8], rdx
     push rcx
@@ -455,7 +454,7 @@ DEF_FUNC tuple_getslice
     jmp .tgs_loop
 
 .tgs_done:
-    mov rax, [rbp-48]
+    mov rax, [rbp - TGS_NEW]
 
     add rsp, 16
     pop r15
@@ -473,7 +472,7 @@ END_FUNC tuple_getslice
 ;; Linear scan with identity then __eq__.
 ;; ============================================================================
 TCN_IDX   equ 8
-TCN_FRAME equ 16
+TCN_FRAME equ 16            ; + 3 pushes = 40, not 16-aligned
 DEF_FUNC tuple_contains, TCN_FRAME
     push rbx
     push r12
@@ -598,9 +597,7 @@ DEF_FUNC tuple_concat
     V_PACK rax, rdx             ; return one Value
     ret
 .tc_type_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "can only concatenate tuple (not other) to tuple"
-    call raise_exception
+    RAISE exc_TypeError_type, "can only concatenate tuple (not other) to tuple"
 END_FUNC tuple_concat
 
 ;; ============================================================================
@@ -712,9 +709,7 @@ DEF_FUNC tuple_repeat
     V_PACK rax, rdx             ; return one Value
     ret
 .trep_overflow:
-    lea rdi, [rel exc_OverflowError_type]
-    CSTRING rsi, "too many items for tuple repetition"
-    call raise_exception
+    RAISE exc_OverflowError_type, "too many items for tuple repetition"
 END_FUNC tuple_repeat
 
 ;; ============================================================================
@@ -727,13 +722,12 @@ TRC_RIGHT    equ 16
 TRC_OP       equ 24
 TRC_IDX      equ 32
 TRC_MINLEN   equ 40
-TRC_FRAME    equ 40
+TRC_FRAME    equ 40         ; + 0 pushes = 40, not 16-aligned
 
 ; Comparing two structures that reach each other -- a=[]; a.append(a);
 ; b=[]; b.append(b); a==b -- recursed until the machine stack ran out; the
 ; identity fast path inside only catches a==a.  The body is wrapped so its
 ; several exits need not each be touched.
-global tuple_richcompare
 DEF_FUNC tuple_richcompare
     C_RECURSION_ENTER .trc_too_deep
     call tuple_richcompare_inner
@@ -742,9 +736,7 @@ DEF_FUNC tuple_richcompare
     ret
 .trc_too_deep:
     C_RECURSION_LEAVE
-    lea rdi, [rel exc_RecursionError_type]
-    CSTRING rsi, "maximum recursion depth exceeded in comparison"
-    call raise_exception
+    RAISE exc_RecursionError_type, "maximum recursion depth exceeded in comparison"
 END_FUNC tuple_richcompare
 
 DEF_FUNC_LOCAL tuple_richcompare_inner, TRC_FRAME
@@ -1091,9 +1083,8 @@ END_FUNC tuple_richcompare_inner
 ;; ============================================================================
 TTC_LIST    equ 8       ; temp list
 TTC_ITER    equ 16      ; iterator
-TTC_FRAME   equ 24
+TTC_FRAME   equ 24          ; + 4 pushes = 56, not 16-aligned
 
-global tuple_type_call
 DEF_FUNC tuple_type_call, TTC_FRAME
     push rbx
     push r12
@@ -1241,9 +1232,7 @@ DEF_FUNC tuple_type_call, TTC_FRAME
 
 .ttc_error:
     extern exc_TypeError_type
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "tuple expected at most 1 argument"
-    call raise_exception
+    RAISE exc_TypeError_type, "tuple expected at most 1 argument"
 END_FUNC tuple_type_call
 
 section .data
@@ -1313,3 +1302,72 @@ tuple_type:
     dq tuple_traverse                        ; tp_traverse
     dq tuple_clear                        ; tp_clear
     dq 0        ; tp_dictoffset
+
+section .text
+
+;; ============================================================================
+;; GC traverse and clear.  These lived in gc.asm, which left the collector
+;; holding the reference graph of every type in the system; a type's own
+;; file is the only place that knows which of its fields are owned.
+;; ============================================================================
+
+; ---- tuple_traverse / tuple_clear ----
+DEF_FUNC tuple_traverse
+    push rbx
+    push r12
+    push r13
+    push r15
+
+    mov rbx, rdi
+    mov r13, [rbx + PyTupleObject.ob_size]
+    mov r12, [rbx + PyTupleObject.ob_item]       ; payloads
+    test r13, r13
+    jz .done
+.loop:
+    dec r13
+    mov rdi, [r12]
+    VISIT_V rdi, rsi
+    add r12, 8
+    test r13, r13
+    jnz .loop
+.done:
+    pop r15
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC tuple_traverse
+
+DEF_FUNC tuple_clear
+    push rbx
+    push r12
+    push r13
+    push r15
+
+    mov rbx, rdi
+    mov r13, [rbx + PyTupleObject.ob_size]
+    mov r12, [rbx + PyTupleObject.ob_item]       ; payloads
+    mov qword [rbx + PyTupleObject.ob_size], 0
+
+    test r13, r13
+    jz .done
+.loop:
+    dec r13
+    mov rdi, [r12]
+    push r12
+    push r12
+    DECREF_V rdi, rsi
+    pop r12
+    pop r12
+    add r12, 8
+    test r13, r13
+    jnz .loop
+.done:
+    pop r15
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC tuple_clear

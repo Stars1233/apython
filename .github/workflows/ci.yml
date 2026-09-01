@@ -28,3 +28,13 @@ jobs:
 
       - name: CPython compatibility tests
         run: make check-cpython
+
+      # The two gates that hand apython the .py instead of the .pyc, so our own
+      # compiler produces the bytecode.  They are where most of the compiler's
+      # bugs were found, and each ratchets against a recorded floor -- which
+      # until now was only ever enforced when someone remembered to run it.
+      - name: Source compiler, test corpus
+        run: make check-source
+
+      - name: Source compiler, CPython corpus
+        run: make check-cpython-source

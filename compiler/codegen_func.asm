@@ -14,7 +14,6 @@
 
 %include "macros.inc"
 %include "object.inc"
-%include "types.inc"
 %include "value.inc"
 %include "opcodes.inc"
 %include "compiler.inc"
@@ -34,7 +33,6 @@ extern cg_unit_free
 extern cg_unit_init
 extern comp_error
 extern cg_unwind_finallys
-extern comp_intern
 extern comp_intern_cstr
 extern obj_decref
 extern str_from_cstr_heap
@@ -51,16 +49,13 @@ extern sym_scope_of
 extern exc_SyntaxError_type
 
 ; --- Named frame-layout constants ---
-CF_COMP   equ 8
 CF_PARENT equ 16
 CF_NODE   equ 24
 CF_SCOPE  equ 32
 CF_LINE   equ 40
 CF_ARGS   equ 48
 CF_CODE   equ 56
-CF_NAME   equ 64
 CF_I      equ 72
-CF_N      equ 80
 CF_FLAGS  equ 88
 CF_UNIT   equ 96 + CompUnit_size
 CF_FRAME  equ ((CF_UNIT + 15) / 16) * 16 + 8      ; + 3 pushes = 16-aligned
@@ -81,8 +76,6 @@ section .text
 ;; blocks are not function-like, so a local there is still LOAD_NAME -- it
 ;; lives in the frame's locals mapping, which is the dict exec(src, d) passes.
 ;; ============================================================================
-CN2_COMP  equ 8
-CN2_UNIT  equ 16
 CN2_NAME  equ 24
 CN2_CTX   equ 32
 CN2_NULL  equ 40
@@ -349,7 +342,6 @@ END_FUNC cg_function
 ;; name to value.  Both are built in the DEFINING scope, which is why
 ;; `def f(x=n)` captures n as it is now rather than at call time.
 ;; ============================================================================
-CD2_COMP  equ 8
 CD2_UNIT  equ 16
 CD2_ARGS  equ 24
 CD2_I     equ 32
@@ -514,8 +506,6 @@ END_FUNC cg_defaults
 ;; where the name is a cell -- while the order is the child's, because
 ;; COPY_FREE_VARS drops them into the child's last nfree slots positionally.
 ;; ============================================================================
-CC3_COMP  equ 8
-CC3_UNIT  equ 16
 CC3_SCOPE equ 24
 CC3_LINE  equ 32
 CC3_I     equ 40
@@ -589,7 +579,6 @@ DEF_FUNC cg_closure_tuple, CC3_FRAME
     ret
 END_FUNC cg_closure_tuple
 
-
 ;; ============================================================================
 ;; cg_compile_body(Comp *c, CompUnit *u, uint32_t node, int is_lambda)
 ;;   -> rax = PyCodeObject*, or 0
@@ -605,14 +594,11 @@ END_FUNC cg_closure_tuple
 ;; COPY_FREE_VARS writes into the last n slots and derives that from
 ;; nlocalsplus, which is why the layout puts free variables last.
 ;; ============================================================================
-CB_COMP   equ 8
 CB_UNIT   equ 16
-CB_NODE   equ 24
 CB_LAMBDA equ 32
 CB_SCOPE  equ 40
 CB_LINE   equ 48
 CB_I      equ 56
-CB_N      equ 64
 CB_NAME   equ 72
 CB_ARGS   equ 80
 CB_FRAME  equ 88          ; + 3 pushes = 112
@@ -626,11 +612,9 @@ CB_FRAME  equ 88          ; + 3 pushes = 112
 ;; Anything else as the first statement, including an expression that merely
 ;; begins with a string, leaves __doc__ alone.
 ;; ============================================================================
-CDS_COMP  equ 8
 CDS_UNIT  equ 16
 CDS_LINE  equ 24
 CDS_FRAME equ 40          ; + 1 push = 56
-global cg_docstring
 DEF_FUNC cg_docstring, CDS_FRAME
     push rbx
     mov rbx, rdi
@@ -936,6 +920,7 @@ END_FUNC cg_compile_body
 ;; func_call reads all four to place arguments, so a wrong count here is an
 ;; argument landing in the wrong slot rather than an error.
 ;; ============================================================================
+CSA_ARGS  equ 8              ; the arguments node, across the ast_at calls
 DEF_FUNC cg_set_arg_counts, 16
     push rbx
     push r12
@@ -946,7 +931,7 @@ DEF_FUNC cg_set_arg_counts, 16
     mov dword [r12 + CompUnit.kwonly], 0
     test rdx, rdx
     jz .done
-    mov [rbp - 8], rdx
+    mov [rbp - CSA_ARGS], rdx
     mov rdi, rbx
     mov rsi, rdx
     call ast_at
@@ -956,7 +941,7 @@ DEF_FUNC cg_set_arg_counts, 16
     or dword [r12 + CompUnit.flags], CO_VARARGS
 .no_vararg:
     mov rdi, rbx
-    mov rsi, [rbp - 8]
+    mov rsi, [rbp - CSA_ARGS]
     call ast_at
     mov ecx, [rax + AstNode.c]
     test ecx, ecx
@@ -964,7 +949,7 @@ DEF_FUNC cg_set_arg_counts, 16
     or dword [r12 + CompUnit.flags], CO_VARKEYWORDS
 .no_varkw:
     mov rdi, rbx
-    mov rsi, [rbp - 8]
+    mov rsi, [rbp - CSA_ARGS]
     call ast_at
     mov esi, [rax + AstNode.a]          ; the AST_EXTRA counts node
     mov rdi, rbx
@@ -986,8 +971,6 @@ END_FUNC cg_set_arg_counts
 ;; ============================================================================
 ;; cg_cell_prologue(Comp *c, CompUnit *u, uint32_t scope) -> rax = 1 ok
 ;; ============================================================================
-CP2_COMP  equ 8
-CP2_UNIT  equ 16
 CP2_SCOPE equ 24
 CP2_I     equ 32
 CP2_N     equ 40
@@ -1081,9 +1064,6 @@ END_FUNC cg_return_none
 ;; ============================================================================
 ;; cg_s_functiondef / cg_s_lambda_expr / cg_s_return
 ;; ============================================================================
-CSF_COMP  equ 8
-CSF_UNIT  equ 16
-CSF_NODE  equ 24
 CSF_LINE  equ 32
 CSF_FRAME equ 40          ; + 3 pushes = 64
 DEF_FUNC cg_s_functiondef, CSF_FRAME
@@ -1230,9 +1210,6 @@ END_FUNC cg_s_return
 ;; mapping as its locals; that is why the body compiles to a code object with
 ;; co_flags 0 and LOAD_NAME semantics rather than fast locals.
 ;; ============================================================================
-CC4_COMP  equ 8
-CC4_UNIT  equ 16
-CC4_NODE  equ 24
 CC4_LINE  equ 32
 CC4_SCOPE equ 40
 CC4_CODE  equ 48
@@ -1416,9 +1393,6 @@ END_FUNC cg_s_classdef
 ;; The decorators are evaluated top to bottom and applied bottom to top, so the
 ;; callables are pushed in source order and the calls come out reversed.
 ;; ============================================================================
-CD3_COMP  equ 8
-CD3_UNIT  equ 16
-CD3_NODE  equ 24
 CD3_LINE  equ 32
 CD3_I     equ 40
 CD3_N     equ 48
@@ -1553,8 +1527,6 @@ END_FUNC cg_s_decorated
 ;;     LOAD_NAME __name__ ; STORE_NAME __module__
 ;;     LOAD_CONST 'C'     ; STORE_NAME __qualname__
 ;; ============================================================================
-CQ_COMP  equ 8
-CQ_UNIT  equ 16
 CQ_NAME  equ 24
 CQ_LINE  equ 32
 CQ_FRAME equ 40           ; + 3 pushes = 64
@@ -1648,8 +1620,6 @@ END_FUNC cg_class_prologue
 ;; and fills the cell with the finished class, which is what a method's
 ;; __class__ free variable then reads.
 ;; ============================================================================
-CE3_COMP  equ 8
-CE3_UNIT  equ 16
 CE3_SCOPE equ 24
 CE3_LINE  equ 32
 CE3_FRAME equ 40          ; + 3 pushes = 64
@@ -1735,6 +1705,5 @@ cg_qualname_dunder: db "__qualname__", 0
 cg_doc_dunder:      db "__doc__", 0
 
 cg_lambda_name: db "<lambda>", 0
-
 
 ASM_INIT

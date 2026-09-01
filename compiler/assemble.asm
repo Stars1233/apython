@@ -17,7 +17,6 @@
 
 %include "macros.inc"
 %include "object.inc"
-%include "types.inc"
 %include "value.inc"
 %include "opcodes.inc"
 %include "compiler.inc"
@@ -34,16 +33,13 @@ extern code_new
 extern code_spec_clear
 extern comp_error
 extern sym_at
-extern obj_decref
 extern tuple_new
 extern op_meta
 
 extern exc_SyntaxError_type
 
 ; --- Named frame-layout constants ---
-AR_UNIT  equ 8
 AR_N     equ 16
-AR_I     equ 24
 AR_OFF   equ 32
 AR_CHG   equ 40
 AR_FRAME equ 40          ; + 5 pushes = 80
@@ -254,7 +250,6 @@ END_FUNC asm_resolve
 ;; asm_jump_delta(CompUnit *u, uint64_t i, uint64_t total) -> rax = the oparg
 ;; Same arithmetic as the fixpoint, used once more by the writer.
 ;; ============================================================================
-AJ_UNIT  equ 8
 AJ_I     equ 16
 AJ_TOT   equ 24
 AJ_BASE  equ 32
@@ -444,7 +439,7 @@ DEF_FUNC asm_effect, 16         ; a frame, because .variable now calls out
     cmp edx, -128                       ; SE_VAR
     je .variable
     ; movsxd, not mov: a stack effect is signed, and zero-extending -1 into rax
-    ; gives 0x00000000FFFFFFFF.  Added to a depth that then gets packed with a
+    ; gives 0x00000000ffffffff.  Added to a depth that then gets packed with a
     ; jump target in one qword, it sets bit 32 and corrupts the target.
     movsxd rax, edx
     leave
@@ -470,7 +465,6 @@ END_FUNC asm_effect
 ;; under-estimate corrupts the pool's free list and crashes somewhere else
 ;; entirely.  COMP_STACK_SLACK buys margin against exactly that.
 ;; ============================================================================
-AS_UNIT  equ 8
 AS_N     equ 16
 AS_DEPTH equ 24          ; int32 depths[]
 AS_WORK  equ 32          ; worklist of packed (index, depth)
@@ -482,6 +476,7 @@ AS_ENTRY equ 72          ; the entry being pushed, across a grow
 AS_FRAME equ 88          ; + 5 pushes = 128
 ;; asm_work_grow(rdi = old, rsi = count, rdx = old capacity)
 ;;   -> rax = the new buffer (0 on failure), rdx = the new capacity
+AWG_BUF   equ 8              ; the reallocated work buffer, across the call
 DEF_FUNC_LOCAL asm_work_grow, 40          ; + 3 pushes = 64
     push rbx
     push r12
@@ -493,14 +488,14 @@ DEF_FUNC_LOCAL asm_work_grow, 40          ; + 3 pushes = 64
     call ap_malloc
     test rax, rax
     jz .awg_failed
-    mov [rbp - 8], rax
+    mov [rbp - AWG_BUF], rax
     mov rdi, rax
     mov rsi, rbx
     lea rdx, [r12*8]
     call ap_memcpy
     mov rdi, rbx
     call ap_free
-    mov rax, [rbp - 8]
+    mov rax, [rbp - AWG_BUF]
     mov rdx, r13
     pop r13
     pop r12
@@ -747,7 +742,6 @@ DEF_FUNC asm_stackdepth, AS_FRAME
     ret
 END_FUNC asm_stackdepth
 
-
 ;; ============================================================================
 ;; asm_loc_varint(Buf *b, uint32_t v) / asm_loc_svarint(Buf *b, int32_t d)
 ;;
@@ -811,7 +805,6 @@ END_FUNC asm_loc_svarint
 ;; The entries must also tile the stream exactly, prefixes and caches included,
 ;; because the decoder walks by length and never resynchronises.
 ;; ============================================================================
-AL_UNIT  equ 8
 AL_OUT   equ 16
 AL_I     equ 24
 AL_N     equ 32
@@ -928,7 +921,6 @@ END_FUNC asm_linetable
 ;; (op_load_global writes eight bytes at [rbx+2]), and a nonzero slot would be
 ;; read as a live cache entry on the very first execution.
 ;; ============================================================================
-AW_UNIT  equ 8
 AW_TOT   equ 16
 AW_OUT   equ 24
 AW_I     equ 32
@@ -1022,16 +1014,13 @@ DEF_FUNC asm_write, AW_FRAME
     ret
 END_FUNC asm_write
 
-
 ;; ============================================================================
 ;; asm_tuple_from_values(Buf *b) -> rax = PyTupleObject*, or 0
 ;; Builds a tuple from an array of Values, taking a reference to each.  The
 ;; unit's const and name arrays hold borrowed references -- comp.objs owns the
 ;; literals -- so the tuple must take its own.
 ;; ============================================================================
-AT_BUF   equ 8
 AT_TUP   equ 16
-AT_I     equ 24
 AT_FRAME equ 32          ; + 2 pushes = 48
 DEF_FUNC asm_tuple_from_values, AT_FRAME
     push rbx
@@ -1070,8 +1059,6 @@ END_FUNC asm_tuple_from_values
 ;; lot on success, and code_spec_clear releases exactly the same set on any
 ;; failure, so no path here has to unwind by hand.
 ;; ============================================================================
-AA_COMP  equ 8
-AA_UNIT  equ 16
 AA_TOTAL equ 24
 AA_CODE  equ 32
 AA_LTBUF equ 32 + Buf_size          ; a Buf lives here
@@ -1279,7 +1266,6 @@ DEF_FUNC asm_assemble, AA_FRAME
     ret
 END_FUNC asm_assemble
 
-
 ;; ============================================================================
 ;; asm_localsplus_tuple(Comp *c, CompUnit *u) -> rax = tuple, or 0
 ;; ============================================================================
@@ -1367,7 +1353,6 @@ DEF_FUNC asm_kinds_bytes, 16
     ret
 END_FUNC asm_kinds_bytes
 
-
 ;; ============================================================================
 ;; asm_exc_varint(Buf *out, uint32_t v, int msb)
 ;;
@@ -1381,8 +1366,6 @@ END_FUNC asm_kinds_bytes
 ;; CPython's benefit rather than apython's -- but a decoder that does check it
 ;; would reject a table without it.
 ;; ============================================================================
-EV2_OUT   equ 8
-EV2_V     equ 16
 EV2_MSB   equ 24
 EV2_FRAME equ 32          ; + 2 pushes = 40
 DEF_FUNC asm_exc_varint, EV2_FRAME
@@ -1448,7 +1431,6 @@ END_FUNC asm_exc_varint
 ;; linearly and returns the FIRST entry containing the offset, so an overlap
 ;; would silently select the wrong handler.
 ;; ============================================================================
-AX_UNIT  equ 8
 AX_OUT   equ 16
 AX_TOTAL equ 24
 AX_I     equ 32
@@ -1578,7 +1560,6 @@ DEF_FUNC asm_exctab, AX_FRAME
     ret
 END_FUNC asm_exctab
 
-
 ;; ============================================================================
 ;; asm_region_depth(CompUnit *u, uint64_t h, int32_t *depths)
 ;;   -> rax = the depth where the region was opened, or -1 if unreached
@@ -1603,7 +1584,7 @@ DEF_FUNC_BARE asm_region_depth
     cmp r8, [rdi + CompUnit.instrs + Buf.len]
     jae .none
     ; movsxd, not mov: the sentinel is -1 as a signed 32-bit value, and a
-    ; zero-extending load turns it into 0x00000000FFFFFFFF, which no longer
+    ; zero-extending load turns it into 0x00000000ffffffff, which no longer
     ; compares equal to -1.  The handler then took a garbage depth and the
     ; depth worklist churned on it forever.
     movsxd rax, dword [rdx + r8*4]
@@ -1622,7 +1603,6 @@ END_FUNC asm_region_depth
 ;; asm_seed_handlers(CompUnit *u, int32_t *depths, uint64_t *maxdepth)
 ;;   -> rax = 1 if any handler's depth was newly determined
 ;; ============================================================================
-SH_UNIT  equ 8
 SH_DEPTH equ 16
 SH_MAX   equ 24
 SH_I     equ 32
@@ -1675,9 +1655,7 @@ END_FUNC asm_seed_handlers
 ;; asm_push_handler_targets(CompUnit *u, int32_t *depths, uint64_t *work)
 ;;   -> rax = how many entries were pushed
 ;; ============================================================================
-PT_UNIT  equ 8
 PT_DEPTH equ 16
-PT_WORK  equ 24
 PT_I     equ 32
 PT_N     equ 40
 PT_CNT   equ 48
@@ -1735,7 +1713,6 @@ DEF_FUNC asm_push_handler_targets, PT_FRAME
     ret
 END_FUNC asm_push_handler_targets
 
-
 ;; ============================================================================
 ;; asm_debug_handlers(CompUnit *u)
 ;; Prints the handler table when APYTHON_DUMP_HANDLERS is set.  The exception
@@ -1746,7 +1723,6 @@ END_FUNC asm_push_handler_targets
 extern getenv
 extern dis_num
 extern dis_puts
-DH_UNIT  equ 8
 DH_I     equ 16
 DH_FRAME equ 32           ; + 2 pushes = 40
 DEF_FUNC asm_debug_handlers, DH_FRAME
@@ -1802,7 +1778,6 @@ dh_env: db "APYTHON_DUMP_HANDLERS", 0
 ;; ============================================================================
 ;; asm_check_labels(CompUnit *u) -> rax = 1 if every jump target is bound
 ;; ============================================================================
-CL_UNIT  equ 8
 CL_I     equ 16
 CL_N     equ 24
 CL_FRAME equ 24           ; + 1 push = 32

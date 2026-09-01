@@ -2,3 +2,17 @@ build/
 apython
 __pycache__/
 *.pyc
+
+# Half-written generator output; `make regen` moves these into place
+*.asm.new
+
+# Stray objects from assembling by hand outside build/
+*.o
+# Crash dumps -- this is an interpreter under active debugging
+core
+core.*
+vgcore.*
+# Patch and editor debris
+*.orig
+*.rej
+*~

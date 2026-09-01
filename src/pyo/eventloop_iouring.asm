@@ -14,7 +14,6 @@ extern sys_munmap
 extern sys_close
 extern ready_enqueue
 extern ap_malloc
-extern ap_free
 extern none_singleton
 
 ; mmap constants
@@ -28,19 +27,12 @@ MAP_POPULATE   equ 0x8000
 SQOFF_HEAD         equ 0
 SQOFF_TAIL         equ 4
 SQOFF_RING_MASK    equ 8
-SQOFF_RING_ENTRIES equ 12
-SQOFF_FLAGS        equ 16
-SQOFF_DROPPED      equ 20
 SQOFF_ARRAY        equ 24
-SQOFF_RESV1        equ 28
-SQOFF_RESV2        equ 32
 
 ; io_cqring_offsets fields (within IoUringParams + 80, 40 bytes)
 CQOFF_HEAD         equ 0
 CQOFF_TAIL         equ 4
 CQOFF_RING_MASK    equ 8
-CQOFF_RING_ENTRIES equ 12
-CQOFF_OVERFLOW     equ 16
 CQOFF_CQES         equ 20
 
 URING_RING_ENTRIES equ 256
@@ -304,7 +296,6 @@ END_FUNC uring_get_sqe
 ;; ============================================================================
 section .bss
 align 8
-uring_ts_buf: resq 2          ; timespec for timeout SQE
 
 section .text
 DEF_FUNC uring_submit_timeout

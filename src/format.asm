@@ -23,21 +23,17 @@
 
 %include "macros.inc"
 %include "object.inc"
-%include "types.inc"
 
 extern str_new_heap
 extern ap_malloc
-extern str_from_cstr_heap
 extern obj_str
 extern obj_as_index
 extern int_fits_i64
-extern int_to_i64
 extern float_format_spec
 extern ap_memcpy
 extern obj_decref
 extern raise_exception
 extern exc_ValueError_type
-extern exc_TypeError_type
 extern str_type
 extern int_type
 extern bool_type
@@ -60,12 +56,11 @@ FS_VALUE  equ 80
 FS_BODY   equ 88         ; rendered body, a str object
 FS_SIGNCH equ 96         ; the sign actually emitted, or 0
 FS_SPECLEN equ 104       ; length of the spec as given
-FS_FRAME  equ 112
+FS_FRAME  equ 112           ; + 5 pushes = 152, not 16-aligned
 
 ;; ============================================================================
 ;; format_apply_spec(rdi = value Value, rsi = spec str) -> Value (a str)
 ;; ============================================================================
-global format_apply_spec
 DEF_FUNC format_apply_spec, FS_FRAME
     push rbx
     push r12
@@ -261,9 +256,7 @@ DEF_FUNC format_apply_spec, FS_FRAME
     ; A numeric type letter on a non-number: format("abc", "f") converted the
     ; string through float_to_f64 and printed 0.000000.
     extern exc_ValueError_type
-    lea rdi, [rel exc_ValueError_type]
-    CSTRING rsi, "Unknown format code for object of type 'str'"
-    call raise_exception
+    RAISE exc_ValueError_type, "Unknown format code for object of type 'str'"
     ud2
 
 .fs_unsupported:
@@ -501,9 +494,7 @@ DEF_FUNC format_apply_spec, FS_FRAME
     ret
 
 .fs_bad_spec:
-    lea rdi, [rel exc_ValueError_type]
-    CSTRING rsi, "Invalid format specifier"
-    call raise_exception
+    RAISE exc_ValueError_type, "Invalid format specifier"
 
 ;; rdi = destination, rsi = count.  Writes the fill character.
 .fs_fill_run:
@@ -552,7 +543,7 @@ FIB_LEN   equ 144
 FIB_NEG   equ 152
 FIB_HEAP  equ 160        ; heap digit buffer to free, or 0 (wide values)
 FIB_OUTSZ equ 168        ; bytes reserved for the assembled output
-FIB_FRAME equ 192
+FIB_FRAME equ 192           ; + 5 pushes = 232, not 16-aligned
 
 DEF_FUNC_LOCAL format_int_body, FIB_FRAME
     push rbx
@@ -561,7 +552,6 @@ DEF_FUNC_LOCAL format_int_body, FIB_FRAME
     push r14
     push r15
     mov r15, rbp                        ; our frame
-    mov rbx, [rbp + 8]                  ; unused; keeps the layout obvious
 
     ; The caller's frame holds the spec.  rbp of format_apply_spec is the
     ; saved rbp at [rbp].
@@ -848,9 +838,7 @@ DEF_FUNC_LOCAL format_int_body, FIB_FRAME
 
 .fib_wide_error:
     extern exc_OverflowError_type
-    lea rdi, [rel exc_OverflowError_type]
-    CSTRING rsi, "%c arg not in range(0x110000)"
-    call raise_exception
+    RAISE exc_OverflowError_type, "%c arg not in range(0x110000)"
     ud2
 END_FUNC format_int_body
 
@@ -862,7 +850,7 @@ END_FUNC format_int_body
 ;; the caller.
 ;; ============================================================================
 FFB_SPEC  equ 8          ; the synthesised ".<prec><type>" spec
-FFB_FRAME equ 48
+FFB_FRAME equ 48            ; + 2 pushes = 64
 
 DEF_FUNC_LOCAL format_float_body, FFB_FRAME
     push rbx

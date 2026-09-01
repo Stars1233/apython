@@ -4,11 +4,11 @@ A Python 3.12 bytecode interpreter in x86-64 NASM assembly, exploring the fastes
 
 ## What is this?
 
-apython compiles and executes Python 3.12 directly — no CPython, no JIT, no interpreter overhead layers.  It reads `.py` source through a compiler written in the same assembly, and `.pyc` bytecode through a marshal reader. The entire interpreter is **~86,000 lines of x86-64 assembly**, from the eval loop to the type system to the garbage collector to async I/O. It implements a complete Python 3.12 compiler — tokenizer, Pratt parser, symbol table, code generator and assembler — plus 27+ types, 126 opcode handlers, generators, async/await, multiple inheritance with a C3 MRO, metaclasses, abstract base classes, weak references, pattern matching, real tracebacks, a regex engine, cycle-collecting GC, and a pure-assembly asyncio event loop.  Strings hold UTF-8 and count themselves in code points.
+apython compiles and executes Python 3.12 directly — no CPython, no JIT, no interpreter overhead layers.  It reads `.py` source through a compiler written in the same assembly, and `.pyc` bytecode through a marshal reader. The entire interpreter is **~86,000 lines of x86-64 assembly**, from the eval loop to the type system to the garbage collector to async I/O. It implements a complete Python 3.12 compiler — tokenizer, Pratt parser, symbol table, code generator and assembler — plus the full type and opcode set, generators, async/await, multiple inheritance with a C3 MRO, metaclasses, abstract base classes, weak references, pattern matching, real tracebacks, a regex engine, cycle-collecting GC, and a pure-assembly asyncio event loop.  Strings hold UTF-8 and count themselves in code points.
 
 ## Key design choices
 
-- **~86K lines of focused x86-64 NASM assembly** — no C runtime
+- **Written entirely in x86-64 NASM assembly** — no C runtime
 - **NaN-boxed 64-bit values** — one machine word per Python value. Pointers are stored raw (so a dereference costs nothing), floats are offset-encoded into the NaN space, and integers in ±2^50 are immediates — no heap allocation and no refcounting for any of them
 - **Raw Linux syscalls** — no libc dependency for I/O; buffered writes via direct `syscall`
 - **256-entry jump table dispatch** — x86-BTB-friendly single indirect jump per opcode
@@ -40,7 +40,7 @@ python3 -m py_compile script.py
 
 ## Implemented features
 
-### Types (27+)
+### Types
 
 | Category | Types |
 |----------|-------|
@@ -51,7 +51,7 @@ python3 -m py_compile script.py
 | Callables | function, method, builtin_function, code, staticmethod, classmethod, property |
 | Runtime | type, object, module, cell, exception, traceback, file |
 
-### Opcodes (126 handlers)
+### Opcodes
 
 | Category | Opcodes |
 |----------|---------|
@@ -79,7 +79,7 @@ bytecode on first execution — `BINARY_OP_ADD_INT`, `COMPARE_OP_INT_JUMP_TRUE`,
 each guarded so an operand of the wrong shape falls back to the general
 handler.
 
-### Builtins (51 functions + 18 types + 64 exceptions)
+### Builtins
 
 **Functions:**
 print, len, repr, abs, round, pow, divmod, sum, min, max, any, all,
@@ -160,7 +160,7 @@ these stand in for CPython's C modules, not for its Python ones.
 
 ### How much of CPython's standard library imports
 
-`make check-stdlib` imports all 196 modules of a CPython 3.12 `Lib/` in a
+`make check-stdlib` imports every module of a CPython 3.12 `Lib/` in a
 fresh process each and compares the result against `tests/stdlib_floor.txt`,
 which records the set that works.  It is a ratchet: a module that imported and
 no longer does fails the target.  Point `$CPYTHON_LIB` at a source checkout;
@@ -174,7 +174,7 @@ the target skips cleanly when there is not one.
 
 ## Test suite
 
-**161 test files** covering arithmetic, strings, lists, dicts, tuples, sets,
+The suite covers arithmetic, strings, lists, dicts, tuples, sets,
 booleans, None, bytes, floats, comparisons, control flow, functions,
 recursion, for-loops, while-loops, range, classes, inheritance, multiple
 inheritance, generators, async/await, closures, decorators, comprehensions,
@@ -183,15 +183,15 @@ f-strings, exceptions, tracebacks, pattern matching, slicing,
 metaclasses, abstract base classes, weak references, Unicode, the codecs, the
 cycle collector across generations, the NaN-boxed value encoding, and more.
 Each is run against CPython 3.12 and the outputs diffed, so CPython is the
-oracle; the async tests run three times, once per I/O backend, for 180
-results in all.
+oracle; the async tests run three times, once per I/O backend, so there are
+more results than files.
 
-**64 CPython standard-library test files** under `tests/cpython/`, all
+**CPython's own standard-library test files** under `tests/cpython/`, all
 enforced — a failure in any of them fails the target.
 
 ```bash
 make check                   # test files, diffed against python3
-make check-cpython           # 64 CPython stdlib test files
+make check-cpython           # the CPython stdlib test corpus
 make check-source            # the same test files, compiled by OUR compiler
 make check-cpython-source    # the CPython corpus, compiled by OUR compiler
 make check-stdlib            # how much of a CPython Lib/ imports (a ratchet)
@@ -221,77 +221,80 @@ All tests are Valgrind-clean.
 src/
   main.asm              Entry point, --version
   eval.asm              Bytecode dispatch loop (256-entry jump table)
-  opcodes_load.asm      Load opcodes
-  opcodes_store.asm     Store opcodes
-  opcodes_stack.asm     Stack manipulation opcodes
-  opcodes_call.asm      Call/function opcodes
-  opcodes_build.asm     Container build opcodes
-  opcodes_misc.asm      Comparison, control flow, format, pattern matching
-  opcodes_async.asm     Async/await opcodes
-  opcodes_import.asm    Import opcodes
-  builtins.asm          Built-in functions, type registry, type_from_parts
-  builtins_extra.asm    Additional builtins (itertools constructors, etc.)
+  builtins.asm          Builtin function object, core builtins, the registry
+  builtins_num.asm      Numeric builtins (int, abs, round, pow, hex/bin/oct)
+  builtins_obj.asm      Object/iteration/IO builtins (getattr, iter, open, ...)
+  buildclass.asm        type.__new__, type_from_parts, __build_class__
   slots.asm             Slot wrappers installed from a heaptype's dunders
   mro.asm               C3 linearization and MRO walking
   format.asm            The format-spec mini-language
-  traceback.asm         PEP 626 line table and traceback rendering
-  marshal.asm           .pyc marshal deserializer
-  pyc.asm               .pyc file reader
+  traceback.asm         The code object's side tables (line + exception),
+                        and traceback rendering
+  marshal.asm           .pyc marshal deserializer and file reader
   frame.asm             Frame allocation/deallocation
   object.asm            Base PyObject operations, type_type, rich comparison
-  memory.asm            Memory management
-  error.asm             fatal_error: unrecoverable failures, straight to stderr
-  except.asm            co_exceptiontable parser (handler lookup)
+  runtime.asm           Syscalls, allocation, PLT-free mem/str ops, fatal_error
   gc.asm                3-generation cycle-collecting garbage collector
   import.asm            Module import system
   dunder.asm            Dunder method dispatch (__add__, __eq__, etc.)
   repr.asm              repr/str formatting
   val.asm               NaN-boxed Value encoding and helpers
   valtest.asm           --selftest-value: encode/decode boundary checks
-  methods.asm           Built-in type methods (str/list/dict/set/tuple/int)
   sre.asm               SRE regex bytecode engine
   sre_module.asm        _sre module interface
   itertools.asm         itertools module
-  pyo/                  33 type implementation files
-    int.asm float.asm str.asm bytes.asm bytearray.asm memview.asm
-    list.asm dict.asm tuple.asm set.asm bool.asm none.asm slice.asm
-    func.asm class.asm code.asm module.asm cell.asm
+  opcodes/              Opcode handlers, one file per category
+    load.asm            Loads, stores, and the stack shuffles
+    call.asm build.asm  Calls; container construction
+    arith.asm           Binary/unary ops, comparisons, superinstructions
+    flow.asm            Returns, jumps, f-strings, generators
+    match.asm           Pattern matching and the intrinsics
+    async.asm import.asm
+  methods/              Builtin type methods, one file per type
+    str.asm str_pred.asm str_parts.asm
+    list.asm dict.asm set.asm num.asm bytes.asm
+    object.asm          object's own dunders, and the DEF_DUNDER_* generators
+    init.asm            registers them all into each type's tp_dict
+  pyo/                  type implementations
+    int.asm float.asm str.asm bytes.asm
+    list.asm dict.asm tuple.asm set.asm singleton.asm slice.asm
+    func.asm class.asm code.asm module.asm
     iter.asm generator.asm exception.asm exc_group.asm fileobj.asm
     descriptors.asm sre_match.asm sre_pattern.asm
     sysmod.asm asyncmod.asm timemod.asm abcmod.asm weakrefmod.asm
-    namespace.asm
     eventloop.asm eventloop_poll.asm eventloop_iouring.asm
     asyncio_streams.asm
-  lib/                  Syscall wrappers, string/memory ops
-    syscall.asm memops.asm string.asm
 compiler/               The Python source compiler
   lex.asm               Tokenizer: 256-entry char class, indent stack, f-strings
   parse.asm             Pratt expression parser, one table row per token
   parse_stmt.asm        Statements, and the soft keywords `match` and `type`
   pattern.asm           `match` patterns
   fstring.asm           f-string fields, lexed as spans of the same source
-  ast.asm arena.asm     32-byte nodes in a growable buffer; a scratch child stack
+  ast.asm               32-byte nodes in the growable buffer and bump arena
+                        they live in
   symtab.asm            Scopes, local/cell/free classification, name mangling
-  codegen.asm           Expressions; codegen_stmt/_func/_try/_comp/_async/
-                        _match/_egroup for the rest
+  codegen.asm           Expressions; codegen_stmt/_func/_try/_comp/_match for
+                        the rest.  _try also holds except*, with and await
   assemble.asm          EXTENDED_ARG fixpoint, stack depth, exception table,
                         PEP 626 line table
-  compile.asm           The driver, and the only place errors become exceptions
-  evalexec.asm          compile(), exec(), eval()
-  srcfile.asm           `./apython foo.py` and import from source
+  compile.asm           The driver, both entry points -- `./apython foo.py` and
+                        compile()/exec()/eval() -- and the error protocol
   dis.asm comptest.asm  --dis and --selftest-compile
   lint.py               Static checks over compiler/*.asm, run by make check
   gen_tables.py         Generates tables.asm from CPython's own opcode module
   gen_prule.py          Generates the expression grammar table in parse.asm
-include/                Struct definitions, macros, constants (.inc files)
+  gen_unicodename.py    Generates unicodename.asm from unicodedata
+                        (all three outputs are committed; `make regen`)
+include/                object.inc (every struct), macros.inc, value.inc,
+                        opcodes.inc, and the sre/eventloop private ABIs
 lib/                    Pure Python support modules
   abc.py contextlib.py copy.py functools.py io.py itertools.py
   operator.py pickle.py string.py warnings.py __future__.py
   collections/          namedtuple, defaultdict, Counter, OrderedDict
   unittest/             Test framework (case.py, runner.py, mock.py)
   test/                 CPython test support infrastructure
-tests/                  161 test files
-  cpython/              64 CPython standard-library test files
+tests/                  the test suite
+  cpython/              CPython standard-library test files
   expected/             recorded transcripts for the two tests CPython cannot serve as an oracle for
 ```
 
@@ -308,8 +311,8 @@ tests/                  161 test files
 | Target | Description |
 |--------|-------------|
 | `make` | Build `./apython` |
-| `make check` | Run the 149-file test suite |
-| `make check-cpython` | Run the 64 CPython stdlib test files |
+| `make check` | Run the test suite |
+| `make check-cpython` | Run the CPython stdlib test corpus |
 | `make INT_STRESS=1` | Build with every integer of magnitude ≥ 8 heap-boxed |
 | `make clean` | Remove build artifacts |
 

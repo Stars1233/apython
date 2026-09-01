@@ -3,23 +3,53 @@
 
 %include "macros.inc"
 %include "object.inc"
-%include "types.inc"
-%include "marshal.inc"
 
+;; ============================================================================
+;; The marshal type codes and .pyc header constants
+;; (was include/marshal.inc)
+;; ============================================================================
 
+; Marshal type codes (from CPython Python/marshal.c)
+MARSHAL_TYPE_NULL             equ 0x30  ; '0'
+MARSHAL_TYPE_NONE             equ 0x4e  ; 'N'
+MARSHAL_TYPE_FALSE            equ 0x46  ; 'F'
+MARSHAL_TYPE_TRUE             equ 0x54  ; 'T'
+MARSHAL_TYPE_STOPITER         equ 0x53  ; 'S'
+MARSHAL_TYPE_ELLIPSIS         equ 0x2e  ; '.'
+MARSHAL_TYPE_INT              equ 0x69  ; 'i'
+MARSHAL_TYPE_INT64            equ 0x49  ; 'I'
+MARSHAL_TYPE_BINARY_FLOAT     equ 0x67  ; 'g'
+MARSHAL_TYPE_LONG             equ 0x6c  ; 'l'
+MARSHAL_TYPE_STRING           equ 0x73  ; 's'
+MARSHAL_TYPE_INTERNED         equ 0x74  ; 't'
+MARSHAL_TYPE_REF              equ 0x72  ; 'r'
+MARSHAL_TYPE_TUPLE            equ 0x28  ; '('
+MARSHAL_TYPE_CODE             equ 0x63  ; 'c'
+MARSHAL_TYPE_UNICODE          equ 0x75  ; 'u'
+MARSHAL_TYPE_SET              equ 0x3c  ; '<'
+MARSHAL_TYPE_FROZENSET        equ 0x3e  ; '>'
+MARSHAL_TYPE_ASCII            equ 0x61  ; 'a'
+MARSHAL_TYPE_ASCII_INTERNED   equ 0x41  ; 'A'
+MARSHAL_TYPE_SMALL_TUPLE      equ 0x29  ; ')'
+MARSHAL_TYPE_SHORT_ASCII      equ 0x7a  ; 'z'
+MARSHAL_TYPE_SHORT_ASCII_INTERNED equ 0x5a ; 'Z'
+
+; Flag to indicate object should be added to reference list
+MARSHAL_FLAG_REF              equ 0x80
+
+; .pyc file header
+PYC_MAGIC_3_12    equ 0x0a0d0dcb  ; 3531 in little-endian with \r\n
+PYC_HEADER_SIZE   equ 16          ; magic(4) + flags(4) + timestamp/size(8)
 extern int_promote_mpz
 extern none_singleton
 extern bool_true
 extern bool_false
 extern int_from_i64
 extern str_new_heap
-extern str_from_cstr
 extern tuple_new
 extern bytes_from_data
 extern ap_malloc
 extern gc_alloc
-extern gc_track
-extern gc_dealloc
 extern ap_free
 extern obj_dealloc
 extern ap_realloc
@@ -221,7 +251,7 @@ DEF_FUNC marshal_cleanup_refs
 END_FUNC marshal_cleanup_refs
 
 ;--------------------------------------------------------------------------
-; marshal_read_object() -> PyObject*
+; marshal_read_object() -> rax = Value
 ; Main marshal deserialization dispatcher.
 ;
 ; Register convention within this function and its handlers:
@@ -1152,7 +1182,6 @@ mdo_set_common:
     xor r12d, r12d             ; clear FLAG_REF -- we handled it ourselves
     jmp mfinish
 
-
 ;--------------------------------------------------------------------------
 ; BSS section: marshal global state
 ;--------------------------------------------------------------------------
@@ -1178,3 +1207,156 @@ section .rodata
 marshal_err_eof:     db "marshal: unexpected end of data", 0
 marshal_err_unknown: db "marshal: unknown type code", 0
 marshal_err_ref_oob: db "marshal: reference index out of bounds", 0
+
+;; ============================================================================
+;; (was src/pyc.asm)
+;; ============================================================================
+
+section .text
+
+extern sys_open
+extern sys_close
+extern sys_fstat
+extern sys_read
+extern ap_malloc
+extern ap_free
+extern fatal_error
+; Global marshal state (defined in marshal.asm)
+; struct stat offsets (x86-64 Linux)
+STAT_SIZE       equ 144         ; sizeof(struct stat)
+STAT_ST_SIZE    equ 48          ; offset of st_size
+
+; open flags
+O_RDONLY        equ 0
+
+; pyc_read_file(const char *filename) -> PyObject*
+; Opens a .pyc file, reads it into memory, validates the header,
+; and returns the code object via marshal_read_object.
+DEF_FUNC pyc_read_file
+    push rbx
+    push r12
+    push r13
+    sub rsp, STAT_SIZE + 8      ; stat buf + alignment
+
+    mov rbx, rdi            ; rbx = filename
+
+    ; sys_open(filename, O_RDONLY, 0)
+    mov esi, O_RDONLY
+    xor edx, edx
+    call sys_open
+    test rax, rax
+    js pyc_open_failed      ; negative = error
+    mov r12, rax             ; r12 = fd
+
+    ; sys_fstat(fd, &stat_buf) to get file size
+    mov rdi, r12
+    lea rsi, [rbp - STAT_SIZE - 24]  ; stat buf on stack (after 3 pushes = 24 bytes)
+    call sys_fstat
+    test rax, rax
+    js pyc_stat_failed
+
+    ; Read st_size from stat struct
+    mov r13, [rbp - STAT_SIZE - 24 + STAT_ST_SIZE]  ; r13 = file size
+
+    ; Validate minimum size
+    cmp r13, PYC_HEADER_SIZE
+    jl pyc_too_small
+
+    ; ap_malloc(file_size)
+    mov rdi, r13
+    call ap_malloc
+    mov rbx, rax             ; rbx = buffer
+
+    ; Read entire file: sys_read loop for partial reads
+    xor r8d, r8d            ; r8 = total bytes read
+.read_loop:
+    mov rdi, r12            ; fd
+    lea rsi, [rbx + r8]    ; buf + offset
+    mov rdx, r13
+    sub rdx, r8             ; remaining bytes
+    call sys_read
+    test rax, rax
+    jle pyc_read_failed     ; 0 = EOF too early, negative = error
+    add r8, rax
+    cmp r8, r13
+    jl .read_loop
+
+    ; sys_close(fd)
+    mov rdi, r12
+    call sys_close
+
+    ; Validate magic number (first 4 bytes)
+    mov eax, [rbx]
+    cmp eax, PYC_MAGIC_3_12
+    jne pyc_bad_magic
+
+    ; Set up marshal read state
+    mov [rel marshal_buf], rbx
+    mov qword [rel marshal_pos], PYC_HEADER_SIZE  ; skip 16-byte header
+    mov [rel marshal_len], r13
+
+    ; Initialize marshal reference list
+    call marshal_init_refs
+
+    ; Call marshal_read_object to read the code object
+    call marshal_read_object
+    mov r12, rax             ; r12 = code object
+
+    ; Release refs array ownership (DECREF all entries)
+    extern marshal_cleanup_refs
+    call marshal_cleanup_refs
+
+    ; Free the file buffer
+    mov rdi, rbx
+    call ap_free
+
+    ; Return the code object
+    mov rax, r12
+    add rsp, STAT_SIZE + 8
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC pyc_read_file
+
+pyc_open_failed:
+    lea rdi, [rel pyc_err_open]
+    call fatal_error
+
+pyc_stat_failed:
+    ; Close fd before error
+    mov rdi, r12
+    call sys_close
+    lea rdi, [rel pyc_err_stat]
+    call fatal_error
+
+pyc_too_small:
+    ; Close fd before error
+    mov rdi, r12
+    call sys_close
+    lea rdi, [rel pyc_err_small]
+    call fatal_error
+
+pyc_read_failed:
+    ; Buffer allocated, file open - close and free before error
+    mov rdi, r12
+    call sys_close
+    mov rdi, rbx
+    call ap_free
+    lea rdi, [rel pyc_err_read]
+    call fatal_error
+
+pyc_bad_magic:
+    ; Buffer allocated, file closed
+    mov rdi, rbx
+    call ap_free
+    lea rdi, [rel pyc_err_magic]
+    call fatal_error
+
+section .rodata
+pyc_err_open:  db "pyc: cannot open file", 0
+pyc_err_stat:  db "pyc: cannot stat file", 0
+pyc_err_small: db "pyc: file too small for header", 0
+pyc_err_read:  db "pyc: failed to read file", 0
+pyc_err_magic: db "pyc: invalid magic number (expected Python 3.12)", 0

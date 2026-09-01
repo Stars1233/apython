@@ -7,10 +7,6 @@
 
 %include "macros.inc"
 %include "object.inc"
-%include "types.inc"
-%include "gc.inc"
-%include "errcodes.inc"
-%include "frame.inc"
 
 extern ap_malloc
 extern ap_free
@@ -19,9 +15,9 @@ extern obj_dealloc
 extern obj_incref
 extern frame_free
 
-; ============================================================================
-; GC data (BSS + DATA)
-; ============================================================================
+;; ============================================================================
+;; GC data (BSS + DATA)
+;; ============================================================================
 section .data
 
 ; Generation 0 sentinel (young objects)
@@ -70,20 +66,11 @@ GEN_ENTRY_SIZE equ 32   ; 4 qwords per generation entry
 
 section .text
 
-; ============================================================================
-; gc_list_init(rdi=sentinel)
-; Initialize a doubly-linked list sentinel to point to itself
-; ============================================================================
-DEF_FUNC_BARE gc_list_init
-    mov [rdi + PyGC_Head.gc_next], rdi
-    mov [rdi + PyGC_Head.gc_prev], rdi
-    ret
-END_FUNC gc_list_init
 
-; ============================================================================
-; gc_list_append(rdi=node, rsi=list_sentinel)
-; Insert node at the tail of list (before sentinel)
-; ============================================================================
+;; ============================================================================
+;; gc_list_append(rdi=node, rsi=list_sentinel)
+;; Insert node at the tail of list (before sentinel)
+;; ============================================================================
 DEF_FUNC_BARE gc_list_append
     ; node->gc_next = sentinel
     mov [rdi + PyGC_Head.gc_next], rsi
@@ -98,10 +85,10 @@ DEF_FUNC_BARE gc_list_append
     ret
 END_FUNC gc_list_append
 
-; ============================================================================
-; gc_list_remove(rdi=node)
-; Remove node from its doubly-linked list
-; ============================================================================
+;; ============================================================================
+;; gc_list_remove(rdi=node)
+;; Remove node from its doubly-linked list
+;; ============================================================================
 DEF_FUNC_BARE gc_list_remove
     mov rax, [rdi + PyGC_Head.gc_prev]
     and rax, GC_PREV_MASK          ; clear state bits
@@ -116,21 +103,11 @@ DEF_FUNC_BARE gc_list_remove
     ret
 END_FUNC gc_list_remove
 
-; ============================================================================
-; gc_list_is_empty(rdi=sentinel) -> eax (1=empty, 0=not)
-; ============================================================================
-DEF_FUNC_BARE gc_list_is_empty
-    mov rax, [rdi + PyGC_Head.gc_next]
-    cmp rax, rdi
-    sete al
-    movzx eax, al
-    ret
-END_FUNC gc_list_is_empty
 
-; ============================================================================
-; gc_list_merge(rdi=from_sentinel, rsi=to_sentinel)
-; Move all nodes from 'from' list to end of 'to' list. Empties 'from'.
-; ============================================================================
+;; ============================================================================
+;; gc_list_merge(rdi=from_sentinel, rsi=to_sentinel)
+;; Move all nodes from 'from' list to end of 'to' list. Empties 'from'.
+;; ============================================================================
 DEF_FUNC gc_list_merge
     push rbx
 
@@ -167,10 +144,10 @@ DEF_FUNC gc_list_merge
     ret
 END_FUNC gc_list_merge
 
-; ============================================================================
-; gc_alloc(rdi=size, rsi=type) -> PyObject*
-; Allocate a GC-tracked object. Prepends PyGC_Head, returns obj pointer.
-; ============================================================================
+;; ============================================================================
+;; gc_alloc(rdi=size, rsi=type) -> PyObject*
+;; Allocate a GC-tracked object. Prepends PyGC_Head, returns obj pointer.
+;; ============================================================================
 DEF_FUNC gc_alloc
     push rbx
     push r12
@@ -201,10 +178,10 @@ DEF_FUNC gc_alloc
     ret
 END_FUNC gc_alloc
 
-; ============================================================================
-; gc_track(rdi=obj)
-; Add object to gen0 tracking list. May trigger collection.
-; ============================================================================
+;; ============================================================================
+;; gc_track(rdi=obj)
+;; Add object to gen0 tracking list. May trigger collection.
+;; ============================================================================
 DEF_FUNC gc_track
     push rbx
     mov rbx, rdi               ; save obj
@@ -249,10 +226,10 @@ DEF_FUNC gc_track
     ret
 END_FUNC gc_track
 
-; ============================================================================
-; gc_untrack(rdi=obj)
-; Remove object from GC tracking list.
-; ============================================================================
+;; ============================================================================
+;; gc_untrack(rdi=obj)
+;; Remove object from GC tracking list.
+;; ============================================================================
 DEF_FUNC gc_untrack
     ; gc = obj - GC_HEAD_SIZE
     lea rdi, [rdi - GC_HEAD_SIZE]
@@ -283,12 +260,12 @@ DEF_FUNC gc_untrack
     ret
 END_FUNC gc_untrack
 
-; ============================================================================
-; gc_dealloc(rdi=obj)
-; Untrack and free a potentially GC-tracked object.
-; If TYPE_FLAG_HAVE_GC is set: untrack + free at obj - GC_HEAD_SIZE
-; Otherwise: plain ap_free(obj) (for objects allocated without GC head)
-; ============================================================================
+;; ============================================================================
+;; gc_dealloc(rdi=obj)
+;; Untrack and free a potentially GC-tracked object.
+;; If TYPE_FLAG_HAVE_GC is set: untrack + free at obj - GC_HEAD_SIZE
+;; Otherwise: plain ap_free(obj) (for objects allocated without GC head)
+;; ============================================================================
 DEF_FUNC gc_dealloc
     push rbx
     mov rbx, rdi
@@ -326,15 +303,15 @@ DEF_FUNC gc_dealloc
     ret
 END_FUNC gc_dealloc
 
-; ============================================================================
-; gc_collect_gen(edi=generation)
-; Core cycle collection algorithm.
-; ============================================================================
+;; ============================================================================
+;; gc_collect_gen(edi=generation)
+;; Core cycle collection algorithm.
+;; ============================================================================
 ; Local frame layout
 GCG_GEN     equ 8
 GCG_YOUNG   equ 24    ; 16-byte PyGC_Head sentinel on stack (next+prev)
 GCG_UNREACH equ 40    ; 16-byte PyGC_Head sentinel on stack
-GCG_FRAME   equ 48
+GCG_FRAME   equ 48          ; + 5 pushes = 88, not 16-aligned
 
 DEF_FUNC gc_collect_gen, GCG_FRAME
     push rbx
@@ -613,21 +590,11 @@ DEF_FUNC gc_collect_gen, GCG_FRAME
     ret
 END_FUNC gc_collect_gen
 
-; ============================================================================
-; gc_collect()
-; Collect all generations. Called from Python gc.collect() and exit cleanup.
-; ============================================================================
-DEF_FUNC gc_collect
-    mov edi, 2                 ; collect all 3 generations
-    call gc_collect_gen
-    leave
-    ret
-END_FUNC gc_collect
 
-; ============================================================================
-; gc_visit_decref(rdi=obj)
-; Visit callback for Phase 2: decrement gc_refs of visited object
-; ============================================================================
+;; ============================================================================
+;; gc_visit_decref(rdi=obj)
+;; Visit callback for Phase 2: decrement gc_refs of visited object
+;; ============================================================================
 DEF_FUNC_BARE gc_visit_decref
     ; Check if this object's type has HAVE_GC flag (non-GC objects have no GC head)
     mov rax, [rdi + PyObject.ob_type]
@@ -657,10 +624,10 @@ DEF_FUNC_BARE gc_visit_decref
     ret
 END_FUNC gc_visit_decref
 
-; ============================================================================
-; gc_visit_reachable(rdi=obj)
-; Visit callback for Phase 4: if obj is in unreachable set, move to reachable
-; ============================================================================
+;; ============================================================================
+;; gc_visit_reachable(rdi=obj)
+;; Visit callback for Phase 4: if obj is in unreachable set, move to reachable
+;; ============================================================================
 DEF_FUNC gc_visit_reachable
     push rbx
 
@@ -704,1037 +671,37 @@ gc_reachable_sentinel: dq 0    ; set by gc_collect_gen before phase 4
 
 section .text
 
-; ============================================================================
-; TRAVERSE AND CLEAR FUNCTIONS
-; ============================================================================
-; Convention: tp_traverse(rdi=obj, r14=visit_callback)
-;             tp_clear(rdi=obj)
-; The VISIT_* macros use r14 as the callback.
-
-; ---- list_traverse / list_clear ----
-DEF_FUNC list_traverse
-    push rbx
-    push r12
-    push r13
-    push r15
-
-    mov rbx, rdi                       ; obj
-    mov r12, [rbx + PyListObject.ob_item]       ; payloads
-    mov r13, [rbx + PyListObject.ob_size]
-    test r13, r13
-    jz .done
-
-.loop:
-    dec r13
-    mov rdi, [r12]
-    VISIT_V rdi, rsi
-    add r12, 8
-    test r13, r13
-    jnz .loop
-.done:
-    pop r15
-    pop r13
-    pop r12
-    pop rbx
-    leave
-    ret
-END_FUNC list_traverse
-
-DEF_FUNC list_clear
-    push rbx
-    push r12
-    push r13
-    push r15
-
-    mov rbx, rdi
-    mov r12, [rbx + PyListObject.ob_item]       ; payloads
-    mov r13, [rbx + PyListObject.ob_size]
-    mov qword [rbx + PyListObject.ob_size], 0
-
-    test r13, r13
-    jz .done
-.loop:
-    dec r13
-    mov rdi, [r12]
-    push r12
-    push r12
-    DECREF_V rdi, rsi
-    pop r12
-    pop r12
-    add r12, 8
-    test r13, r13
-    jnz .loop
-.done:
-    pop r15
-    pop r13
-    pop r12
-    pop rbx
-    leave
-    ret
-END_FUNC list_clear
-
-; ---- tuple_traverse / tuple_clear ----
-DEF_FUNC tuple_traverse
-    push rbx
-    push r12
-    push r13
-    push r15
-
-    mov rbx, rdi
-    mov r13, [rbx + PyTupleObject.ob_size]
-    mov r12, [rbx + PyTupleObject.ob_item]       ; payloads
-    test r13, r13
-    jz .done
-.loop:
-    dec r13
-    mov rdi, [r12]
-    VISIT_V rdi, rsi
-    add r12, 8
-    test r13, r13
-    jnz .loop
-.done:
-    pop r15
-    pop r13
-    pop r12
-    pop rbx
-    leave
-    ret
-END_FUNC tuple_traverse
-
-DEF_FUNC tuple_clear
-    push rbx
-    push r12
-    push r13
-    push r15
-
-    mov rbx, rdi
-    mov r13, [rbx + PyTupleObject.ob_size]
-    mov r12, [rbx + PyTupleObject.ob_item]       ; payloads
-    mov qword [rbx + PyTupleObject.ob_size], 0
-
-    test r13, r13
-    jz .done
-.loop:
-    dec r13
-    mov rdi, [r12]
-    push r12
-    push r12
-    DECREF_V rdi, rsi
-    pop r12
-    pop r12
-    add r12, 8
-    test r13, r13
-    jnz .loop
-.done:
-    pop r15
-    pop r13
-    pop r12
-    pop rbx
-    leave
-    ret
-END_FUNC tuple_clear
-
-; ---- dict_traverse / dict_clear ----
-extern ap_memset
-
-DICT_TOMBSTONE_GC equ 0xFF
-
-DEF_FUNC dict_traverse
-    push rbx
-    push r12
-    push r13
-
-    mov rbx, rdi
-    mov r12, [rbx + PyDictObject.entries]
-    mov r13, [rbx + PyDictObject.capacity]
-    test r13, r13
-    jz .done
-.loop:
-    dec r13
-    ; Check for empty/tombstone
-    ENTRY_CLASSIFY r12, .next, .next
-
-    ; Visit key
-    mov rdi, [r12 + DictEntry.key]
-
-    VISIT_V rdi, rsi
-    ; Visit value
-    mov rdi, [r12 + DictEntry.value]
-
-    VISIT_V rdi, rsi
-
-.next:
-    add r12, DICT_ENTRY_SIZE
-    test r13, r13
-    jnz .loop
-.done:
-    pop r13
-    pop r12
-    pop rbx
-    leave
-    ret
-END_FUNC dict_traverse
-
-DEF_FUNC dict_clear_gc
-    push rbx
-    push r12
-    push r13
-
-    mov rbx, rdi
-    mov r12, [rbx + PyDictObject.entries]
-    mov r13, [rbx + PyDictObject.capacity]
-
-    test r13, r13
-    jz .done
-.loop:
-    dec r13
-    ENTRY_CLASSIFY r12, .next, .next
-
-    ; DECREF key
-    push r12
-    push r13
-    mov rdi, [r12 + DictEntry.key]
-    V_UNPACK rdi, rsi
-    DECREF_VAL rdi, rsi
-    pop r13
-    pop r12
-
-    ; DECREF value
-    push r12
-    push r13
-    mov rdi, [r12 + DictEntry.value]
-    V_UNPACK rdi, rsi
-    DECREF_VAL rdi, rsi
-    pop r13
-    pop r12
-
-    ; Clear entry.  It has to become a *tombstone*, not just a zeroed key:
-    ; ENTRY_CLASSIFY reads key==0 with any hash other than -1 as "empty",
-    ; which ends a probe early, so a surviving key further along the chain
-    ; becomes unreachable.
-    mov qword [r12 + DictEntry.key], 0
-    mov qword [r12 + DictEntry.value], 0
-    mov qword [r12 + DictEntry.hash], ENTRY_TOMBSTONE_HASH
-
-.next:
-    add r12, DICT_ENTRY_SIZE
-    test r13, r13
-    jnz .loop
-.done:
-    ; Keep the header coherent with the table we just emptied: the sparse
-    ; index array has to forget the entries too.
-    mov rdi, [rbx + PyDictObject.dk_indices]
-    test rdi, rdi
-    jz .no_indices
-    mov rcx, [rbx + PyDictObject.capacity]
-    mov rax, DICT_IX_EMPTY
-    rep stosq
-.no_indices:
-    mov qword [rbx + PyDictObject.ob_size], 0
-    mov qword [rbx + PyDictObject.dk_nentries], 0
-    mov qword [rbx + PyDictObject.dk_tombstones], 0
-    inc qword [rbx + PyDictObject.dk_version]
-
-    pop r13
-    pop r12
-    pop rbx
-    leave
-    ret
-END_FUNC dict_clear_gc
-
-; ---- set_traverse / set_clear ----
-; Set entries are 24 bytes (hash+key+key_tag_qword), distinct from DictEntry (32 bytes).
-SET_ENTRY_SIZE_GC    equ 16
-SET_ENTRY_KEY_GC     equ 8
-
-DEF_FUNC set_traverse
-    push rbx
-    push r12
-    push r13
-
-    mov rbx, rdi
-    mov r12, [rbx + PyDictObject.entries]   ; set reuses PyDictObject layout for header
-    mov r13, [rbx + PyDictObject.capacity]
-    test r13, r13
-    jz .st_done
-.st_loop:
-    dec r13
-    ; Check for empty (key_tag == 0) or tombstone (key_tag == 0xDEAD)
-    SET_ENTRY_CLASSIFY r12, .st_next, .st_next
-
-    ; Visit key
-    mov rdi, [r12 + SET_ENTRY_KEY_GC]
-    VISIT_V rdi, rsi
-
-.st_next:
-    add r12, SET_ENTRY_SIZE_GC
-    test r13, r13
-    jnz .st_loop
-.st_done:
-    pop r13
-    pop r12
-    pop rbx
-    leave
-    ret
-END_FUNC set_traverse
-
-DEF_FUNC set_clear_gc
-    push rbx
-    push r12
-    push r13
-
-    mov rbx, rdi
-    mov r12, [rbx + PyDictObject.entries]
-    mov r13, [rbx + PyDictObject.capacity]
-
-    test r13, r13
-    jz .sc_done
-.sc_loop:
-    dec r13
-    SET_ENTRY_CLASSIFY r12, .sc_next, .sc_next
-
-    ; DECREF key
-    push r12
-    push r13
-    mov rdi, [r12 + SET_ENTRY_KEY_GC]
-    DECREF_V rdi, rsi
-    pop r13
-    pop r12
-
-    ; Clear entry
-    mov qword [r12 + SET_ENTRY_KEY_GC], 0
-
-.sc_next:
-    add r12, SET_ENTRY_SIZE_GC
-    test r13, r13
-    jnz .sc_loop
-.sc_done:
-    mov qword [rbx + PyDictObject.ob_size], 0
-
-    pop r13
-    pop r12
-    pop rbx
-    leave
-    ret
-END_FUNC set_clear_gc
-
-; ---- func_traverse / func_clear ----
-DEF_FUNC func_traverse
-    push rbx
-    mov rbx, rdi
-
-    mov rdi, [rbx + PyFuncObject.func_code]
-    VISIT_PTR rdi
-    mov rdi, [rbx + PyFuncObject.func_globals]
-    VISIT_PTR rdi
-    mov rdi, [rbx + PyFuncObject.func_name]
-    VISIT_PTR rdi
-    mov rdi, [rbx + PyFuncObject.func_defaults]
-    VISIT_PTR rdi
-    mov rdi, [rbx + PyFuncObject.func_closure]
-    VISIT_PTR rdi
-    mov rdi, [rbx + PyFuncObject.func_kwdefaults]
-    VISIT_PTR rdi
-    mov rdi, [rbx + PyFuncObject.func_dict]
-    VISIT_PTR rdi
-
-    pop rbx
-    leave
-    ret
-END_FUNC func_traverse
-
-DEF_FUNC func_clear
-    push rbx
-    mov rbx, rdi
-
-    ; NULL out closure, defaults, kwdefaults, func_dict — XDECREF each
-    mov rdi, [rbx + PyFuncObject.func_closure]
-    mov qword [rbx + PyFuncObject.func_closure], 0
-    test rdi, rdi
-    jz .no_clos
-    call obj_decref
-.no_clos:
-    mov rdi, [rbx + PyFuncObject.func_defaults]
-    mov qword [rbx + PyFuncObject.func_defaults], 0
-    test rdi, rdi
-    jz .no_defs
-    call obj_decref
-.no_defs:
-    mov rdi, [rbx + PyFuncObject.func_kwdefaults]
-    mov qword [rbx + PyFuncObject.func_kwdefaults], 0
-    test rdi, rdi
-    jz .no_kwd
-    call obj_decref
-.no_kwd:
-    mov rdi, [rbx + PyFuncObject.func_dict]
-    mov qword [rbx + PyFuncObject.func_dict], 0
-    test rdi, rdi
-    jz .no_fdict
-    call obj_decref
-.no_fdict:
-
-    pop rbx
-    leave
-    ret
-END_FUNC func_clear
-
-; ---- cell_traverse / cell_clear ----
-DEF_FUNC cell_traverse
-    push rbx
-    mov rbx, rdi
-
-    mov rdi, [rbx + PyCellObject.ob_ref]
-    VISIT_V rdi, rsi
-
-    pop rbx
-    leave
-    ret
-END_FUNC cell_traverse
-
-DEF_FUNC cell_clear
-    push rbx
-    mov rbx, rdi
-
-    mov rdi, [rbx + PyCellObject.ob_ref]
-    mov qword [rbx + PyCellObject.ob_ref], 0
-    DECREF_V rdi, rsi
-
-    pop rbx
-    leave
-    ret
-END_FUNC cell_clear
-
-; ---- method_traverse / method_clear ----
-DEF_FUNC method_traverse
-    push rbx
-    mov rbx, rdi
-
-    mov rdi, [rbx + PyMethodObject.im_func]
-    VISIT_PTR rdi
-    mov rdi, [rbx + PyMethodObject.im_self]
-    VISIT_V rdi, rsi            ; a Value: an immediate self is not an address
-
-    pop rbx
-    leave
-    ret
-END_FUNC method_traverse
-
-DEF_FUNC method_clear
-    push rbx
-    mov rbx, rdi
-
-    mov rdi, [rbx + PyMethodObject.im_func]
-    mov qword [rbx + PyMethodObject.im_func], 0
-    test rdi, rdi
-    jz .no_func
-    call obj_decref
-.no_func:
-    mov rdi, [rbx + PyMethodObject.im_self]
-    mov qword [rbx + PyMethodObject.im_self], 0
-    XDECREF_V rdi, rsi
-.no_self:
-
-    pop rbx
-    leave
-    ret
-END_FUNC method_clear
-
-; ---- gen_traverse / gen_clear ----
-DEF_FUNC gen_traverse
-    push rbx
-    push r12
-    push r13
-
-    mov rbx, rdi
-
-    ; Visit code
-    mov rdi, [rbx + PyGenObject.gi_code]
-    VISIT_PTR rdi
-
-    ; Visit name
-    mov rdi, [rbx + PyGenObject.gi_name]
-    VISIT_PTR rdi
-
-    ; Visit return value (fat)
-    mov rdi, [rbx + PyGenObject.gi_return_value]
-
-    VISIT_V rdi, rsi
-
-    ; Traverse frame localsplus if frame exists
-    mov r12, [rbx + PyGenObject.gi_frame]
-    test r12, r12
-    jz .done
-
-    ; Get nlocalsplus from code object
-    mov rax, [rbx + PyGenObject.gi_code]
-    mov r13d, [rax + PyCodeObject.co_nlocalsplus]
-    test r13d, r13d
-    jz .done
-
-    lea r12, [r12 + PyFrame.localsplus]  ; start of the Value array
-.frame_loop:
-    dec r13d
-    mov rdi, [r12 + r13*8]
-    VISIT_V rdi, rsi
-    test r13d, r13d
-    jnz .frame_loop
-
-.done:
-    pop r13
-    pop r12
-    pop rbx
-    leave
-    ret
-END_FUNC gen_traverse
-
-DEF_FUNC gen_clear
-    push rbx
-    mov rbx, rdi
-
-    ; Clear return value
-    mov rdi, [rbx + PyGenObject.gi_return_value]
-    V_UNPACK rdi, rsi
-    mov qword [rbx + PyGenObject.gi_return_value], 0
-    XDECREF_VAL rdi, rsi
-
-    ; Free frame if held (frame_free DECREFs localsplus)
-    mov rdi, [rbx + PyGenObject.gi_frame]
-    mov qword [rbx + PyGenObject.gi_frame], 0
-    test rdi, rdi
-    jz .done
-    call frame_free
-
-.done:
-    pop rbx
-    leave
-    ret
-END_FUNC gen_clear
-
-; ---- instance_traverse / instance_clear ----
-DEF_FUNC instance_traverse
-    push rbx
-    push r12
-    push r13
-
-    mov rbx, rdi
-
-    ; Visit the instance dict, wherever this family keeps it
-    LOAD_INST_DICT rdi, rbx, .no_inst_dict
-    VISIT_PTR rdi
-.no_inst_dict:
-
-    ; Visit __slots__ values (one Value each, after the instance header).
-    ; The header ends at tp_dictoffset plus the dict word, or at
-    ; PyInstanceObject_size when the family keeps no dict.
-    mov rax, [rbx + PyObject.ob_type]
-    mov rcx, [rax + PyTypeObject.tp_dictoffset]
-    test rcx, rcx
-    jz .it_no_dict_hdr
-    cmp rcx, TP_DICT_AT_TAIL
-    je .it_no_dict_hdr          ; the dict is past the data, not in the header
-    add rcx, 8
-    jmp .it_have_hdr
-.it_no_dict_hdr:
-    ; No dict word: a str subclass, whose header is the base's, not
-    ; PyInstanceObject's.  Using 24 there found a phantom slot at +24 --
-    ; PyStrObject.ob_hash -- and XDECREF'd the hash as if it were a pointer.
-    mov rcx, [rax + PyTypeObject.tp_base]
-    test rcx, rcx
-    jz .it_no_dict_hdr_default
-    mov rcx, [rcx + PyTypeObject.tp_basicsize]
-    test rcx, rcx
-    jnz .it_have_hdr
-.it_no_dict_hdr_default:
-    mov rcx, PyInstanceObject_size
-.it_have_hdr:
-    mov rax, [rax + PyTypeObject.tp_basicsize]
-    sub rax, rcx
-    jle .done
-    shr rax, 3                  ; nslots
-    mov r13, rax
-    lea r12, [rbx + rcx]
-
-.slot_loop:
-    mov rdi, [r12]
-    VISIT_V rdi, rsi
-    add r12, 8
-    dec r13
-    jnz .slot_loop
-
-.done:
-    pop r13
-    pop r12
-    pop rbx
-    leave
-    ret
-END_FUNC instance_traverse
-
-DEF_FUNC instance_clear
-    push rbx
-    mov rbx, rdi
-
-    ; XDECREF + NULL the instance dict, wherever this family keeps it
-    LOAD_INST_DICT rdi, rbx, .done
-    test rdi, rdi
-    jz .done
-    xor eax, eax
-    STORE_INST_DICT rbx, rax, rcx, .ic_decref
-.ic_decref:
-    call obj_decref
-
-.done:
-    pop rbx
-    leave
-    ret
-END_FUNC instance_clear
-
-; ---- exc_traverse / exc_clear ----
-DEF_FUNC exc_traverse
-    push rbx
-    mov rbx, rdi
-
-    ; Visit exc_value (fat)
-    mov rdi, [rbx + PyExceptionObject.exc_value]
-    VISIT_V rdi, rsi
-
-    ; Visit heap ptrs
-    mov rdi, [rbx + PyExceptionObject.exc_tb]
-    VISIT_PTR rdi
-    mov rdi, [rbx + PyExceptionObject.exc_context]
-    VISIT_PTR rdi
-    mov rdi, [rbx + PyExceptionObject.exc_cause]
-    VISIT_PTR rdi
-    mov rdi, [rbx + PyExceptionObject.exc_args]
-    VISIT_PTR rdi
-
-    pop rbx
-    leave
-    ret
-END_FUNC exc_traverse
-
-DEF_FUNC exc_clear_gc
-    push rbx
-    mov rbx, rdi
-
-    ; DECREF_VAL exc_value
-    mov rdi, [rbx + PyExceptionObject.exc_value]
-    mov qword [rbx + PyExceptionObject.exc_value], 0
-    DECREF_V rdi, rsi
-
-    ; XDECREF + NULL heap ptrs
-    mov rdi, [rbx + PyExceptionObject.exc_tb]
-    mov qword [rbx + PyExceptionObject.exc_tb], 0
-    test rdi, rdi
-    jz .no_tb
-    call obj_decref
-.no_tb:
-    mov rdi, [rbx + PyExceptionObject.exc_context]
-    mov qword [rbx + PyExceptionObject.exc_context], 0
-    test rdi, rdi
-    jz .no_ctx
-    call obj_decref
-.no_ctx:
-    mov rdi, [rbx + PyExceptionObject.exc_cause]
-    mov qword [rbx + PyExceptionObject.exc_cause], 0
-    test rdi, rdi
-    jz .no_cause
-    call obj_decref
-.no_cause:
-    mov rdi, [rbx + PyExceptionObject.exc_args]
-    mov qword [rbx + PyExceptionObject.exc_args], 0
-    test rdi, rdi
-    jz .no_args
-    call obj_decref
-.no_args:
-
-    pop rbx
-    leave
-    ret
-END_FUNC exc_clear_gc
-
-; ---- module_traverse / module_clear ----
-DEF_FUNC module_traverse
-    push rbx
-    mov rbx, rdi
-
-    mov rdi, [rbx + PyModuleObject.mod_dict]
-    VISIT_PTR rdi
-    mov rdi, [rbx + PyModuleObject.mod_name]
-    VISIT_PTR rdi
-
-    pop rbx
-    leave
-    ret
-END_FUNC module_traverse
-
-DEF_FUNC module_clear_gc
-    push rbx
-    mov rbx, rdi
-
-    mov rdi, [rbx + PyModuleObject.mod_dict]
-    mov qword [rbx + PyModuleObject.mod_dict], 0
-    test rdi, rdi
-    jz .done
-    call obj_decref
-.done:
-    pop rbx
-    leave
-    ret
-END_FUNC module_clear_gc
-
-; ---- code_traverse (no clear — code objects don't form cycles) ----
-DEF_FUNC code_traverse
-    push rbx
-    mov rbx, rdi
-
-    mov rdi, [rbx + PyCodeObject.co_consts]
-    VISIT_PTR rdi
-    mov rdi, [rbx + PyCodeObject.co_names]
-    VISIT_PTR rdi
-    mov rdi, [rbx + PyCodeObject.co_localsplusnames]
-    VISIT_PTR rdi
-    mov rdi, [rbx + PyCodeObject.co_localspluskinds]
-    VISIT_PTR rdi
-    mov rdi, [rbx + PyCodeObject.co_filename]
-    VISIT_PTR rdi
-    mov rdi, [rbx + PyCodeObject.co_name]
-    VISIT_PTR rdi
-    mov rdi, [rbx + PyCodeObject.co_qualname]
-    VISIT_PTR rdi
-    mov rdi, [rbx + PyCodeObject.co_exceptiontable]
-    VISIT_PTR rdi
-
-    pop rbx
-    leave
-    ret
-END_FUNC code_traverse
-
-; ---- staticmethod_traverse / classmethod_traverse / property_traverse ----
-DEF_FUNC staticmethod_traverse
-    mov rdi, [rdi + PyStaticMethodObject.sm_callable]
-    VISIT_PTR rdi
-    leave
-    ret
-END_FUNC staticmethod_traverse
-
-DEF_FUNC staticmethod_clear
-    push rbx
-    mov rbx, rdi
-    mov rdi, [rbx + PyStaticMethodObject.sm_callable]
-    mov qword [rbx + PyStaticMethodObject.sm_callable], 0
-    test rdi, rdi
-    jz .done
-    call obj_decref
-.done:
-    pop rbx
-    leave
-    ret
-END_FUNC staticmethod_clear
-
-DEF_FUNC classmethod_traverse
-    mov rdi, [rdi + PyClassMethodObject.cm_callable]
-    VISIT_PTR rdi
-    leave
-    ret
-END_FUNC classmethod_traverse
-
-DEF_FUNC classmethod_clear
-    push rbx
-    mov rbx, rdi
-    mov rdi, [rbx + PyClassMethodObject.cm_callable]
-    mov qword [rbx + PyClassMethodObject.cm_callable], 0
-    test rdi, rdi
-    jz .done
-    call obj_decref
-.done:
-    pop rbx
-    leave
-    ret
-END_FUNC classmethod_clear
-
-DEF_FUNC property_traverse
-    push rbx
-    mov rbx, rdi
-    mov rdi, [rbx + PyPropertyObject.prop_get]
-    VISIT_PTR rdi
-    mov rdi, [rbx + PyPropertyObject.prop_set]
-    VISIT_PTR rdi
-    mov rdi, [rbx + PyPropertyObject.prop_del]
-    VISIT_PTR rdi
-    pop rbx
-    leave
-    ret
-END_FUNC property_traverse
-
-DEF_FUNC property_clear
-    push rbx
-    mov rbx, rdi
-
-    mov rdi, [rbx + PyPropertyObject.prop_get]
-    mov qword [rbx + PyPropertyObject.prop_get], 0
-    test rdi, rdi
-    jz .no_get
-    call obj_decref
-.no_get:
-    mov rdi, [rbx + PyPropertyObject.prop_set]
-    mov qword [rbx + PyPropertyObject.prop_set], 0
-    test rdi, rdi
-    jz .no_set
-    call obj_decref
-.no_set:
-    mov rdi, [rbx + PyPropertyObject.prop_del]
-    mov qword [rbx + PyPropertyObject.prop_del], 0
-    test rdi, rdi
-    jz .no_del
-    call obj_decref
-.no_del:
-    pop rbx
-    leave
-    ret
-END_FUNC property_clear
-
-; ---- slice_traverse / slice_clear ----
-DEF_FUNC slice_traverse
-    push rbx
-    mov rbx, rdi
-
-    mov rdi, [rbx + PySliceObject.start]
-    VISIT_V rdi, rsi
-    mov rdi, [rbx + PySliceObject.stop]
-    VISIT_V rdi, rsi
-    mov rdi, [rbx + PySliceObject.step]
-    VISIT_V rdi, rsi
-
-    pop rbx
-    leave
-    ret
-END_FUNC slice_traverse
-
-DEF_FUNC slice_clear_gc
-    push rbx
-    mov rbx, rdi
-
-    mov rdi, [rbx + PySliceObject.start]
-    mov qword [rbx + PySliceObject.start], 0
-    DECREF_V rdi, rsi
-
-    mov rdi, [rbx + PySliceObject.stop]
-    mov qword [rbx + PySliceObject.stop], 0
-    DECREF_V rdi, rsi
-
-    mov rdi, [rbx + PySliceObject.step]
-    mov qword [rbx + PySliceObject.step], 0
-    DECREF_V rdi, rsi
-
-    pop rbx
-    leave
-    ret
-END_FUNC slice_clear_gc
-
-; ---- Iterator traverse functions (visit the underlying container ref) ----
-DEF_FUNC list_iter_traverse
-    mov rdi, [rdi + PyListIterObject.it_seq]
-    VISIT_PTR rdi
-    leave
-    ret
-END_FUNC list_iter_traverse
-
-DEF_FUNC list_iter_clear
-    push rbx
-    mov rbx, rdi
-    mov rdi, [rbx + PyListIterObject.it_seq]
-    mov qword [rbx + PyListIterObject.it_seq], 0
-    test rdi, rdi
-    jz .done
-    call obj_decref
-.done:
-    pop rbx
-    leave
-    ret
-END_FUNC list_iter_clear
-
-DEF_FUNC tuple_iter_traverse
-    mov rdi, [rdi + PyTupleIterObject.it_seq]
-    VISIT_PTR rdi
-    leave
-    ret
-END_FUNC tuple_iter_traverse
-
-DEF_FUNC tuple_iter_clear
-    push rbx
-    mov rbx, rdi
-    mov rdi, [rbx + PyTupleIterObject.it_seq]
-    mov qword [rbx + PyTupleIterObject.it_seq], 0
-    test rdi, rdi
-    jz .done
-    call obj_decref
-.done:
-    pop rbx
-    leave
-    ret
-END_FUNC tuple_iter_clear
-
-DEF_FUNC dict_iter_traverse
-    mov rdi, [rdi + PyDictIterObject.it_dict]
-    VISIT_PTR rdi
-    leave
-    ret
-END_FUNC dict_iter_traverse
-
-DEF_FUNC dict_iter_clear
-    push rbx
-    mov rbx, rdi
-    mov rdi, [rbx + PyDictIterObject.it_dict]
-    mov qword [rbx + PyDictIterObject.it_dict], 0
-    test rdi, rdi
-    jz .done
-    call obj_decref
-.done:
-    pop rbx
-    leave
-    ret
-END_FUNC dict_iter_clear
-
-DEF_FUNC dict_view_traverse
-    mov rdi, [rdi + PyDictViewObject.dv_dict]
-    VISIT_PTR rdi
-    leave
-    ret
-END_FUNC dict_view_traverse
-
-DEF_FUNC dict_view_clear
-    push rbx
-    mov rbx, rdi
-    mov rdi, [rbx + PyDictViewObject.dv_dict]
-    mov qword [rbx + PyDictViewObject.dv_dict], 0
-    test rdi, rdi
-    jz .done
-    call obj_decref
-.done:
-    pop rbx
-    leave
-    ret
-END_FUNC dict_view_clear
-
-; ---- task_traverse / task_clear ----
-DEF_FUNC task_traverse
-    push rbx
-    push r12
-    push r13
-
-    mov rbx, rdi
-
-    ; Visit coro
-    mov rdi, [rbx + AsyncTask.coro]
-    VISIT_PTR rdi
-
-    ; Visit result (fat)
-    mov rdi, [rbx + AsyncTask.result]
-
-    VISIT_V rdi, rsi
-
-    ; Visit send_value (fat)
-    mov rdi, [rbx + AsyncTask.send_value]
-
-    VISIT_V rdi, rsi
-
-    ; Visit exception
-    mov rdi, [rbx + AsyncTask.exception]
-    VISIT_PTR rdi
-
-    ; Visit waiters array
-    mov r12, [rbx + AsyncTask.waiters]
-    test r12, r12
-    jz .done
-    mov r13d, [rbx + AsyncTask.n_waiters]
-    test r13d, r13d
-    jz .done
-.waiter_loop:
-    dec r13d
-    mov rdi, [r12]
-    VISIT_PTR rdi
-    add r12, 8
-    test r13d, r13d
-    jnz .waiter_loop
-
-.done:
-    pop r13
-    pop r12
-    pop rbx
-    leave
-    ret
-END_FUNC task_traverse
-
-DEF_FUNC task_clear
-    push rbx
-    mov rbx, rdi
-
-    ; XDECREF coro
-    mov rdi, [rbx + AsyncTask.coro]
-    mov qword [rbx + AsyncTask.coro], 0
-    test rdi, rdi
-    jz .no_coro
-    call obj_decref
-.no_coro:
-
-    ; DECREF_VAL result
-    mov rdi, [rbx + AsyncTask.result]
-    V_UNPACK rdi, rsi
-    mov qword [rbx + AsyncTask.result], 0
-    DECREF_VAL rdi, rsi
-
-    ; DECREF_VAL send_value
-    mov rdi, [rbx + AsyncTask.send_value]
-    V_UNPACK rdi, rsi
-    mov qword [rbx + AsyncTask.send_value], 0
-    DECREF_VAL rdi, rsi
-
-    pop rbx
-    leave
-    ret
-END_FUNC task_clear
-
-; ---- wait_for_traverse / wait_for_clear ----
-DEF_FUNC wait_for_traverse
-    push rbx
-    mov rbx, rdi
-
-    mov rdi, [rbx + WaitForAwaitable.inner_task]
-    VISIT_PTR rdi
-    mov rdi, [rbx + WaitForAwaitable.outer_task]
-    VISIT_PTR rdi
-    mov rdi, [rbx + WaitForAwaitable.gi_return_value]
-
-    VISIT_V rdi, rsi
-
-    pop rbx
-    leave
-    ret
-END_FUNC wait_for_traverse
-
-DEF_FUNC wait_for_clear
-    push rbx
-    mov rbx, rdi
-
-    mov rdi, [rbx + WaitForAwaitable.inner_task]
-    mov qword [rbx + WaitForAwaitable.inner_task], 0
-    test rdi, rdi
-    jz .no_inner
-    call obj_decref
-.no_inner:
-    mov rdi, [rbx + WaitForAwaitable.outer_task]
-    mov qword [rbx + WaitForAwaitable.outer_task], 0
-    test rdi, rdi
-    jz .no_outer
-    call obj_decref
-.no_outer:
-
-    mov rdi, [rbx + WaitForAwaitable.gi_return_value]
-    V_UNPACK rdi, rsi
-    mov qword [rbx + WaitForAwaitable.gi_return_value], 0
-    DECREF_VAL rdi, rsi
-
-    pop rbx
-    leave
-    ret
-END_FUNC wait_for_clear
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

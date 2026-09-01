@@ -4,8 +4,6 @@
 %include "macros.inc"
 extern val_to_i64
 %include "object.inc"
-%include "types.inc"
-%include "builtins.inc"
 %include "sre.inc"
 
 extern bool_true
@@ -16,34 +14,31 @@ extern obj_decref
 extern obj_incref
 extern obj_dealloc
 extern str_from_cstr_heap
-extern int_from_i64
 extern dict_new
 extern dict_set
-extern dict_get
 extern module_new
 extern builtin_func_new
 extern none_singleton
 extern raise_exception
 extern exc_TypeError_type
-extern exc_ValueError_type
 extern list_type
 extern tuple_type
 
 ; From sre_pattern.asm
 extern sre_pattern_type
 
-; ============================================================================
-; sre_compile_func(PyObject **args, int64_t nargs) -> (rax, edx)
-; _sre.compile(pattern, flags, code, groups, groupindex, indexgroup)
-;
-; args is a fat value array (16-byte stride):
-;   args[0] = pattern (str)
-;   args[1] = flags (int)
-;   args[2] = code (list of ints)
-;   args[3] = groups (int)
-;   args[4] = groupindex (dict)
-;   args[5] = indexgroup (tuple)
-; ============================================================================
+;; ============================================================================
+;; sre_compile_func(PyObject **args, int64_t nargs) -> (rax, edx)
+;; _sre.compile(pattern, flags, code, groups, groupindex, indexgroup)
+;;
+;; args is a fat value array (16-byte stride):
+;;   args[0] = pattern (str)
+;;   args[1] = flags (int)
+;;   args[2] = code (list of ints)
+;;   args[3] = groups (int)
+;;   args[4] = groupindex (dict)
+;;   args[5] = indexgroup (tuple)
+;; ============================================================================
 SC_ARGS     equ 8
 SC_NARGS    equ 16
 SC_PATTERN  equ 24
@@ -54,7 +49,7 @@ SC_GINDEX   equ 56
 SC_IGROUP   equ 64
 SC_CODEBUF  equ 72
 SC_CODELEN  equ 80
-SC_FRAME    equ 88
+SC_FRAME    equ 88          ; + 5 pushes = 128
 
 DEF_FUNC sre_compile_func, SC_FRAME
     push rbx
@@ -199,14 +194,12 @@ DEF_FUNC sre_compile_func, SC_FRAME
     ret
 
 .compile_error_args:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "_sre.compile() requires 6 arguments"
-    call raise_exception
+    RAISE exc_TypeError_type, "_sre.compile() requires 6 arguments"
 END_FUNC sre_compile_func
 
-; ============================================================================
-; sre_ascii_iscased_func(PyObject **args, int64_t nargs) -> (rax, edx)
-; ============================================================================
+;; ============================================================================
+;; sre_ascii_iscased_func(PyObject **args, int64_t nargs) -> (rax, edx)
+;; ============================================================================
 DEF_FUNC sre_ascii_iscased_func
     cmp rsi, 1
     jne .aic_error
@@ -233,14 +226,12 @@ DEF_FUNC sre_ascii_iscased_func
     V_PACK rax, rdx             ; builtins return one Value
     ret
 .aic_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "ascii_iscased() takes 1 argument"
-    call raise_exception
+    RAISE exc_TypeError_type, "ascii_iscased() takes 1 argument"
 END_FUNC sre_ascii_iscased_func
 
-; ============================================================================
-; sre_ascii_tolower_func(PyObject **args, int64_t nargs) -> (rax, edx)
-; ============================================================================
+;; ============================================================================
+;; sre_ascii_tolower_func(PyObject **args, int64_t nargs) -> (rax, edx)
+;; ============================================================================
 DEF_FUNC sre_ascii_tolower_func
     cmp rsi, 1
     jne .atl_error
@@ -256,14 +247,12 @@ DEF_FUNC sre_ascii_tolower_func
     V_PACK rax, rdx             ; builtins return one Value
     ret
 .atl_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "ascii_tolower() takes 1 argument"
-    call raise_exception
+    RAISE exc_TypeError_type, "ascii_tolower() takes 1 argument"
 END_FUNC sre_ascii_tolower_func
 
-; ============================================================================
-; sre_unicode_iscased_func(PyObject **args, int64_t nargs) -> (rax, edx)
-; ============================================================================
+;; ============================================================================
+;; sre_unicode_iscased_func(PyObject **args, int64_t nargs) -> (rax, edx)
+;; ============================================================================
 DEF_FUNC sre_unicode_iscased_func
     cmp rsi, 1
     jne .uic_error
@@ -279,9 +268,9 @@ DEF_FUNC sre_unicode_iscased_func
     jbe .uic_true
 .uic_check_ext:
     ; Extended Latin
-    cmp eax, 0xC0
+    cmp eax, 0xc0
     jb .uic_false
-    cmp eax, 0xFF
+    cmp eax, 0xff
     jbe .uic_true
     ; Basic check for common Unicode ranges
     cmp eax, 0x100
@@ -305,14 +294,12 @@ DEF_FUNC sre_unicode_iscased_func
     V_PACK rax, rdx             ; builtins return one Value
     ret
 .uic_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "unicode_iscased() takes 1 argument"
-    call raise_exception
+    RAISE exc_TypeError_type, "unicode_iscased() takes 1 argument"
 END_FUNC sre_unicode_iscased_func
 
-; ============================================================================
-; sre_unicode_tolower_func(PyObject **args, int64_t nargs) -> (rax, edx)
-; ============================================================================
+;; ============================================================================
+;; sre_unicode_tolower_func(PyObject **args, int64_t nargs) -> (rax, edx)
+;; ============================================================================
 DEF_FUNC sre_unicode_tolower_func
     cmp rsi, 1
     jne .utl_error
@@ -321,13 +308,13 @@ DEF_FUNC sre_unicode_tolower_func
     jb .utl_done
     cmp eax, 'Z'
     jbe .utl_lower
-    cmp eax, 0xC0
+    cmp eax, 0xc0
     jb .utl_done
-    cmp eax, 0xD6
+    cmp eax, 0xd6
     jbe .utl_lower
-    cmp eax, 0xD8
+    cmp eax, 0xd8
     jb .utl_done
-    cmp eax, 0xDE
+    cmp eax, 0xde
     jbe .utl_lower
     jmp .utl_done
 .utl_lower:
@@ -338,15 +325,13 @@ DEF_FUNC sre_unicode_tolower_func
     V_PACK rax, rdx             ; builtins return one Value
     ret
 .utl_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "unicode_tolower() takes 1 argument"
-    call raise_exception
+    RAISE exc_TypeError_type, "unicode_tolower() takes 1 argument"
 END_FUNC sre_unicode_tolower_func
 
-; ============================================================================
-; sre_getlower_func(PyObject **args, int64_t nargs) -> (rax, edx)
-; _sre.getlower(char, flags) — same as tolower with flag check
-; ============================================================================
+;; ============================================================================
+;; sre_getlower_func(PyObject **args, int64_t nargs) -> (rax, edx)
+;; _sre.getlower(char, flags) — same as tolower with flag check
+;; ============================================================================
 DEF_FUNC sre_getlower_func
     cmp rsi, 2
     jne .gl_error
@@ -370,13 +355,13 @@ DEF_FUNC sre_getlower_func
     add eax, 32
     jmp .gl_done
 .gl_check_ext:
-    cmp eax, 0xC0
+    cmp eax, 0xc0
     jb .gl_done
-    cmp eax, 0xD6
+    cmp eax, 0xd6
     jbe .gl_do_lower
-    cmp eax, 0xD8
+    cmp eax, 0xd8
     jb .gl_done
-    cmp eax, 0xDE
+    cmp eax, 0xde
     ja .gl_done
 .gl_do_lower:
     add eax, 32
@@ -393,17 +378,15 @@ DEF_FUNC sre_getlower_func
     V_PACK rax, rdx             ; builtins return one Value
     ret
 .gl_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "getlower() takes 2 arguments"
-    call raise_exception
+    RAISE exc_TypeError_type, "getlower() takes 2 arguments"
 END_FUNC sre_getlower_func
 
-; ============================================================================
-; sre_template_func(PyObject **args, int64_t nargs) -> (rax, edx)
-; _sre.template(pattern, template) -> template (passthrough stub)
-; CPython uses this for optimized sub replacement expansion.
-; We return the template list/string as-is; re module handles expansion.
-; ============================================================================
+;; ============================================================================
+;; sre_template_func(PyObject **args, int64_t nargs) -> (rax, edx)
+;; _sre.template(pattern, template) -> template (passthrough stub)
+;; CPython uses this for optimized sub replacement expansion.
+;; We return the template list/string as-is; re module handles expansion.
+;; ============================================================================
 DEF_FUNC sre_template_func
     cmp rsi, 2
     jb .tmpl_error
@@ -415,15 +398,13 @@ DEF_FUNC sre_template_func
     V_PACK rax, rdx             ; builtins return one Value
     ret
 .tmpl_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "template() requires 2 arguments"
-    call raise_exception
+    RAISE exc_TypeError_type, "template() requires 2 arguments"
 END_FUNC sre_template_func
 
-; ============================================================================
-; sre_getcodesize_func(PyObject **args, int64_t nargs) -> (rax, edx)
-; _sre.getcodesize() -> 4
-; ============================================================================
+;; ============================================================================
+;; sre_getcodesize_func(PyObject **args, int64_t nargs) -> (rax, edx)
+;; _sre.getcodesize() -> 4
+;; ============================================================================
 DEF_FUNC sre_getcodesize_func
     mov eax, SRE_CODESIZE
     RET_TAG_SMALLINT
@@ -432,30 +413,13 @@ DEF_FUNC sre_getcodesize_func
     ret
 END_FUNC sre_getcodesize_func
 
-; ============================================================================
-; Helper macros for adding entries to module dict
-; r12 = dict, preserved across calls
-; ============================================================================
+;; ============================================================================
+;; Helper macros for adding entries to module dict
+;; r12 = dict, preserved across calls
+;; ============================================================================
 
 ; SRE_ADD_FUNC func_impl, name_cstr
 ; Add a builtin function to the module dict
-%macro SRE_ADD_FUNC 2
-    lea rdi, [rel %1]
-    lea rsi, [rel %2]
-    call builtin_func_new
-    push rax
-    lea rdi, [rel %2]
-    call str_from_cstr_heap
-    push rax
-    mov rdi, r12
-    mov rsi, rax
-    mov rdx, [rsp + 8]
-    call dict_set
-    pop rdi
-    call obj_decref
-    pop rdi
-    call obj_decref
-%endmacro
 
 ; SRE_ADD_INT name_cstr, value
 ; Add a SmallInt constant to the module dict
@@ -492,12 +456,11 @@ END_FUNC sre_getcodesize_func
     call obj_decref
 %endmacro
 
-; ============================================================================
-; sre_module_create() -> PyObject*
-; Creates and returns the _sre module with all functions and constants.
-; ============================================================================
-SMC_DICT    equ 8
-SMC_FRAME   equ 8
+;; ============================================================================
+;; sre_module_create() -> PyObject*
+;; Creates and returns the _sre module with all functions and constants.
+;; ============================================================================
+SMC_FRAME   equ 8           ; + 3 pushes = 32
 
 DEF_FUNC sre_module_create, SMC_FRAME
     push rbx
@@ -509,14 +472,14 @@ DEF_FUNC sre_module_create, SMC_FRAME
     mov r12, rax               ; r12 = module dict
 
     ; Functions
-    SRE_ADD_FUNC sre_compile_func,        sm_compile_name
-    SRE_ADD_FUNC sre_ascii_iscased_func,  sm_ascii_iscased
-    SRE_ADD_FUNC sre_ascii_tolower_func,  sm_ascii_tolower
-    SRE_ADD_FUNC sre_unicode_iscased_func, sm_unicode_iscased
-    SRE_ADD_FUNC sre_unicode_tolower_func, sm_unicode_tolower
-    SRE_ADD_FUNC sre_getlower_func,       sm_getlower
-    SRE_ADD_FUNC sre_getcodesize_func,    sm_getcodesize
-    SRE_ADD_FUNC sre_template_func,       sm_template
+    MODULE_ADD_FUNC sre_compile_func,        sm_compile_name
+    MODULE_ADD_FUNC sre_ascii_iscased_func,  sm_ascii_iscased
+    MODULE_ADD_FUNC sre_ascii_tolower_func,  sm_ascii_tolower
+    MODULE_ADD_FUNC sre_unicode_iscased_func, sm_unicode_iscased
+    MODULE_ADD_FUNC sre_unicode_tolower_func, sm_unicode_tolower
+    MODULE_ADD_FUNC sre_getlower_func,       sm_getlower
+    MODULE_ADD_FUNC sre_getcodesize_func,    sm_getcodesize
+    MODULE_ADD_FUNC sre_template_func,       sm_template
 
     ; Integer constants
     SRE_ADD_INT sm_MAGIC,     SRE_MAGIC
@@ -549,9 +512,9 @@ DEF_FUNC sre_module_create, SMC_FRAME
     ret
 END_FUNC sre_module_create
 
-; ============================================================================
-; Data
-; ============================================================================
+;; ============================================================================
+;; Data
+;; ============================================================================
 section .rodata
 
 sm_sre_name:        db "_sre", 0

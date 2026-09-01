@@ -14,16 +14,12 @@
 
 %include "macros.inc"
 %include "object.inc"
-%include "types.inc"
-%include "errcodes.inc"
 %include "eventloop.inc"
 
 extern bool_true
 extern bool_false
 extern ap_malloc
 extern gc_alloc
-extern gc_track
-extern gc_dealloc
 extern ap_free
 extern obj_incref
 extern obj_decref
@@ -37,13 +33,10 @@ extern ap_strcmp
 extern raise_exception
 extern raise_exception_obj
 extern exc_new
-extern exc_TypeError_type
 extern exc_RuntimeError_type
 extern exc_CancelledError_type
-extern exc_StopIteration_type
 extern current_exception
 extern eval_exception_unwind
-extern coro_type
 extern builtin_func_new
 extern getenv
 
@@ -244,7 +237,7 @@ END_FUNC ready_dequeue
 ;; Resume the task's coroutine via gen_send. Dispatch on result tag.
 ;; ============================================================================
 TS_TASK  equ 8
-TS_FRAME equ 8
+TS_FRAME equ 8              ; + 2 pushes = 24, not 16-aligned
 DEF_FUNC task_step, TS_FRAME
     push rbx
     push r12
@@ -612,7 +605,7 @@ END_FUNC task_add_waiter
 ;; Returns when root_task completes.
 ;; ============================================================================
 ER_ROOT equ 8
-ER_FRAME equ 8
+ER_FRAME equ 8              ; + 2 pushes = 24, not 16-aligned
 DEF_FUNC eventloop_run, ER_FRAME
     push rbx
     push r12
@@ -831,9 +824,7 @@ DEF_FUNC _task_result_impl
     ret
 
 .tr_not_done:
-    lea rdi, [rel exc_RuntimeError_type]
-    CSTRING rsi, "Result is not ready"
-    call raise_exception
+    RAISE exc_RuntimeError_type, "Result is not ready"
 
 .tr_exception:
     mov rdi, rcx

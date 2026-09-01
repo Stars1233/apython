@@ -25,6 +25,12 @@ one-line fix.
   from a builtin method.  The `errors` argument is accepted and ignored --
   every failure is strict.
 
+- **`format(x, "")` is not `str(x)` for a float.**  `format(1.0, "")` gives
+  `"1"` where CPython gives `"1.0"`: an empty spec falls into the general
+  formatter with type `g` and precision 6, rather than short-circuiting to
+  `repr`.  `f"{1.0}"` and `str(1.0)` are both right; only the explicit
+  `format()` with an empty spec is not.
+
 - **`str.format` does not accept attribute or index access in a field.**
   `"{0.attr}"` and `"{0[key]}"` are not resolved; a field is a position, a
   name, or empty.  A nested spec, `"{:{}}"`, is likewise not substituted.
@@ -55,28 +61,39 @@ one-line fix.
   was registered against a subclass of ABC rather than against ABC itself.
   Direct registration and real inheritance both work.
 
-- **The source compiler has no classes, comprehensions or generators yet.**
-  `compiler/` handles expressions, statements, control flow, functions,
-  lambdas and closures, and `eval()`, `exec()` and `compile()` all run through
-  it -- including `collections.namedtuple`'s
-  `eval("lambda _cls, ...: _tuple_new(...)")`, which used to be the wall.
-  What is still missing above that: `class`, `try`/`except`/`finally`, `with`,
-  comprehensions, generators, `async`, f-strings and `match`.
-
 - **No platform module, so `os` cannot import.**  `os.py` looks for `posix`
   and raises "no os specific module found" without it.  That is the single
-  largest blocker in the stdlib: 47 of the 196 modules fail on it.
+  largest single blocker in the stdlib -- roughly a quarter of the modules
+  `check-stdlib` probes fail on it.  `make check-stdlib` gives the current
+  figure.
 
-- **Missing C modules, by how many stdlib modules each blocks:** `_io` (10),
-  `math` (9), `_codecs` (6), `_struct` (5), `_socket` (5), `binascii` (4),
-  `_imp` (3), `_string` (2), `errno` (2), and one each for a long tail.
-  `complex` does not exist as a type either, which stops `copyreg` and `copy`.
+- **Missing C modules**, in rough order of how many stdlib modules each
+  blocks: `_io`, `math`, `_codecs`, `_struct`, `_socket`, `binascii`, `_imp`,
+  `_string`, `errno`, then a long tail of one apiece.  `complex` does not exist
+  as a type either, which stops `copyreg` and `copy`.
 
 - **Weak references keep no per-object slot.**  The links live in a side
   table keyed by the referent's address rather than in the object, so
   `tp_weaklistoffset` does not exist and `__weakref__` is not an attribute.
   Everything observable through `_weakref` works; a C extension expecting the
   slot would not.
+
+- **`int` and `float` have no `__abs__`, `__int__`, `__float__`, `__index__` or
+  `__trunc__`.**  `abs(-5)` works, `(-5).__abs__()` is an AttributeError, and
+  the stdlib asks by name -- `operator.index` goes through `__index__`, and a
+  class delegating to `int.__int__` finds nothing.  `src/methods/num.asm`
+  carried implementations of these, written but never registered and never
+  converted to the one-Value return convention; they also truncated a big int
+  through `self_to_i64`, so they have been deleted.
+
+  Registering the *builtins* under those names instead does not work, which is
+  the reason this is still open: `builtin_abs` and `builtin_int_fn` resolve a
+  non-exact operand through the numeric protocol, which for a subclass finds
+  the very dunder being registered.  `int(M(0))` where `class M(int)` then
+  recurses until the stack goes.  They need implementations that read the
+  value out of the `PyIntObject` directly, the way `int()` does for an exact
+  int -- the trap CLAUDE.md records as "the thunk must call the *defining*
+  type's slot, not the argument's".
 
 - **`object.__lt__`, `__le__`, `__gt__` and `__ge__` are missing.**  They
   exist in CPython and always return NotImplemented.  Adding them here would
@@ -139,10 +156,59 @@ than lying — but they are ordinary Python that does not work:
   without a shipped `re.py` an `import re` finds CPython's, which needs
   `enum` and `types`.
 - `collections.deque`.
-- Six builtin exceptions: `IOError` / `EnvironmentError`, `FileExistsError`,
-  `IndentationError`, `TabError`, `UnicodeTranslateError`.
+- Four builtin exceptions: `IOError` / `EnvironmentError`, `FileExistsError`,
+  `UnicodeTranslateError`.
 
 ## Robustness
+
+- **Iterators are not GC-tracked, so a cycle through one leaks.**
+  `list_iter_type`, `tuple_iter_type`, `dict_iter_type` and the dict views have
+  `tp_flags` 0 with no `tp_traverse`/`tp_clear`, and their objects come from
+  `ap_malloc` rather than `gc_alloc`.  An iterator holds a strong reference to
+  the container it walks, so `a = []; a.append(iter(a))` is a cycle the
+  collector cannot see.  `src/gc.asm` used to carry eight traverse/clear
+  callbacks for exactly these types; none was ever installed in a slot, so they
+  were deleted rather than left looking like working code.  Wiring them up
+  means switching those four types to `gc_alloc` + `gc_track` and setting
+  `TYPE_FLAG_HAVE_GC`.
+
+- **Code objects, asyncio `Task`s and `wait_for` wrappers are not GC-tracked
+  either**, for the same reason and with the same history: `code_traverse`,
+  `task_traverse`/`task_clear` and `wait_for_traverse`/`wait_for_clear` were
+  written, never installed in a slot, and have now been deleted alongside the
+  iterator ones.  A `Task` holds its coroutine, which holds a frame, whose
+  locals can hold the task -- an ordinary cycle that never collects.
+
+  Tracking `Task` needs one thing fixed first: the ready queue links tasks
+  through `AsyncTask.next` **without taking a reference**
+  (`ready_enqueue`, `src/pyo/eventloop.asm`).  Today nothing can free a queued
+  task out from under the queue, because the collector cannot see tasks at all;
+  make them visible and a cyclic task sitting in the queue becomes collectable,
+  leaving a dangling `next` pointer.  Either the queue takes a reference or the
+  collector treats it as a root.  The mechanical part is small -- `gc_alloc` +
+  `gc_track` in `task_new`, `gc_dealloc` instead of `ap_free` in
+  `task_dealloc`, `TYPE_FLAG_HAVE_GC` and the two slots -- and
+  `task_clear` also has to start clearing `exception` and the waiters array,
+  which the deleted version did not.
+
+- **There is no full collection and no `gc` module.**  `gc_collect` was a thin
+  wrapper on `gc_collect_gen` whose comment named two callers --
+  `gc.collect()` and exit cleanup -- neither of which exists; it has been
+  deleted with the rest.  Only the automatic generational collections run, so
+  `tests/test_gc_generations.py` has to provoke them with churn rather than ask
+  for one.
+
+
+- **`s += x` in a loop is O(n^2)**: `str_concat` always allocates, and
+  `src/opcodes/arith.asm` routes `NB_INPLACE_ADD` to the same `sq_concat`, so
+  each step copies the whole accumulated string.  CPython's ceval resizes in
+  place when the left operand's refcount is 1.  Measured, though, the two are
+  level: repeated appends cost the same here as under CPython 3.12, because
+  that optimization does not fire for the ordinary module-level accumulator
+  either.  Doing it would make apython faster than
+  CPython on this shape rather than close a gap, and it needs the eval loop to
+  give up its stack reference before the concat, so it is recorded rather than
+  done.
 
 - **Recursive deallocation overflows the stack**: `a=[]`, then 300k times
   `a=[a]`, then `del a`.  Needs a trashcan mechanism.
@@ -167,3 +233,27 @@ than against CPython, because CPython cannot serve as an oracle for them:
 
 Both are self-asserting.  Any *new* recorded-oracle test needs the same
 justification, or it risks blessing a divergence instead of catching it.
+
+## Style debt
+
+Everything here assembles and runs.  These are places the tree does not follow
+STYLE.md, listed so the gap is a known quantity rather than a surprise to
+whoever copies a neighbouring file.  Counts are deliberately absent -- grep
+gives a current one, and a number written here is wrong by the next commit.
+
+- **Frames whose `rsp` is not 16-byte aligned at a `call`.**  Every
+  `XX_FRAME equ` now carries the arithmetic in a trailing comment, and writing
+  those out is what made the scale visible: a good many say
+  `not 16-aligned`, and `compiler/lint.py`'s `check_alignment` flags several
+  times that number again in functions whose frame size is a literal rather
+  than a named constant.  Mostly harmless -- the SysV requirement bites at a
+  `call` into libc, and most of these never reach one -- but `builtin_int_fn`,
+  `builtin_round_fn` and `builtin_pow_fn` all reach GMP, whose float paths use
+  aligned SSE.  This is the debt that keeps `check_alignment` scoped to
+  `compiler/` plus `src/main.asm` instead of running tree-wide.
+
+- **Functions with no separator or docblock at all**, and, among those that
+  have one, docblocks with no `->` signature line.  The signature is the only
+  part of a function's contract that nothing checks, so its absence is a real
+  gap rather than a cosmetic one.  This is the one item here a script cannot
+  finish: writing a signature means reading what the function actually returns.

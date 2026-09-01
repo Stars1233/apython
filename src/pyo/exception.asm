@@ -18,8 +18,6 @@
 
 %include "macros.inc"
 %include "object.inc"
-%include "types.inc"
-%include "errcodes.inc"
 
 extern ap_malloc
 extern gc_alloc
@@ -40,8 +38,6 @@ extern str_new_heap
 extern obj_repr
 extern obj_str
 extern raise_exception
-extern exc_traverse
-extern exc_clear_gc
 extern tuple_new
 extern tuple_type
 extern ap_strcmp
@@ -57,8 +53,7 @@ extern exc_ExceptionGroup_type
 ; msg_str is INCREFed. type is stored but not INCREFed (types are immortal).
 ; rdx = msg_tag (TAG_PTR for heap objs, TAG_SMALLINT for ints, 0 for NULL).
 EN_EXC equ 8
-EN_MSG equ 16
-EN_FRAME equ 16
+EN_FRAME equ 16             ; + 3 pushes = 40, not 16-aligned
 DEF_FUNC exc_new, EN_FRAME
     push rbx
     push r12
@@ -137,7 +132,7 @@ END_FUNC exc_is_exception
 ; scanned for `new` so a re-raise cannot make it point at itself.
 ESC_NEW equ 8
 ESC_OLD equ 16
-ESC_FRAME equ 16
+ESC_FRAME equ 16            ; + 0 pushes = 16
 DEF_FUNC exc_set_context, ESC_FRAME
     cmp rdi, rsi
     je .esc_done
@@ -295,7 +290,7 @@ END_FUNC exc_dealloc
 ER_EXC   equ 8
 ER_POS   equ 16
 ER_BUF   equ 528         ; 512 bytes, [rbp-528, rbp-16)
-ER_FRAME equ 544
+ER_FRAME equ 544            ; + 3 pushes = 568, not 16-aligned
 DEF_FUNC exc_repr, ER_FRAME
     push rbx
     push r12
@@ -444,7 +439,7 @@ END_FUNC exc_syntax_str
 ; exc_str(PyExceptionObject *exc) -> PyObject* (string)
 ; Returns the message string, or type name if no message.
 ES_EXC   equ 8
-ES_FRAME equ 16
+ES_FRAME equ 16             ; + 1 push = 24, not 16-aligned
 DEF_FUNC exc_str, ES_FRAME
     push rbx
     mov rbx, rdi
@@ -530,7 +525,6 @@ END_FUNC exc_str
 
 ; exc_getattr(PyExceptionObject *exc, PyStrObject *name) -> PyObject* or NULL
 ; Handle attribute access on exception objects: args, __context__, __cause__, etc.
-global exc_getattr
 DEF_FUNC exc_getattr
     push rbx
     push r12
@@ -869,7 +863,6 @@ END_FUNC exc_getattr
 ; exc_setattr(PyExceptionObject *exc, PyStrObject *name, PyObject *value, int value_tag)
 ; Store a custom attribute on an exception object using exc_dict.
 ; rdi = exc, rsi = name, rdx = value, ecx = value_tag
-global exc_setattr
 DEF_FUNC exc_setattr
     push rbx
     mov rbx, rdi            ; exc
@@ -936,9 +929,7 @@ DEF_FUNC_BARE exc_isinstance
     mov rdi, [rdi + PyExceptionObject.ob_type]
     jmp type_is_subtype
 .not_a_class:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "catching classes that do not inherit from BaseException is not allowed"
-    call raise_exception
+    RAISE exc_TypeError_type, "catching classes that do not inherit from BaseException is not allowed"
 .not_match:
     xor eax, eax
     ret
@@ -982,7 +973,6 @@ END_FUNC exc_isinstance
 ; type_is_exc_subclass(PyTypeObject *type) -> int (0/1)
 ; Walk tp_base chain checking for a type with tp_dealloc == exc_dealloc.
 ; Detects user-defined exception classes (e.g., class MyError(Exception): pass)
-global type_is_exc_subclass
 DEF_FUNC_BARE type_is_exc_subclass
     lea rdx, [rel exc_dealloc]
     lea rcx, [rel eg_dealloc]
@@ -1011,15 +1001,8 @@ DEF_FUNC_BARE type_is_exc_subclass
     ret
 END_FUNC type_is_exc_subclass
 
-; exc_type_from_id(int exc_id) -> PyTypeObject*
-; Look up exception type from EXC_* constant.
-DEF_FUNC_BARE exc_type_from_id
-    lea rax, [rel exception_type_table]
-    mov rax, [rax + rdi*8]
-    ret
-END_FUNC exc_type_from_id
 
-; exc_type_call(PyTypeObject *type, PyObject **args, int64_t nargs) -> PyObject*
+; exc_type_call(PyTypeObject *type, PyObject **args, int64_t nargs) -> rax = Value
 ; tp_call for exception metatype. Creates an exception instance.
 ; rdi = exception type (the class being called, e.g. ValueError)
 ; rsi = args array
@@ -1027,7 +1010,7 @@ END_FUNC exc_type_from_id
 ETC_EXC   equ 8
 ETC_ARGS  equ 16
 ETC_NARGS equ 24
-ETC_FRAME equ 24
+ETC_FRAME equ 24            ; + 2 pushes = 40, not 16-aligned
 DEF_FUNC exc_type_call, ETC_FRAME
     push rbx
     push r12
@@ -1118,13 +1101,12 @@ DEF_FUNC exc_type_call, ETC_FRAME
     ret
 END_FUNC exc_type_call
 
-; ============================================================================
-; Traceback support
-; ============================================================================
+;; ============================================================================
+;; Traceback support
+;; ============================================================================
 
 ; traceback_new() -> PyTracebackObject*
 ; Allocates a new traceback with tb_next=NULL, tb_lineno=0.
-global traceback_new
 DEF_FUNC traceback_new
     mov edi, PyTracebackObject_size
     call ap_malloc
@@ -1141,7 +1123,6 @@ END_FUNC traceback_new
 
 ; traceback_dealloc(PyTracebackObject *tb)
 ; XDECREF tb_next, free self.
-global traceback_dealloc
 DEF_FUNC traceback_dealloc
     push rbx
     push r12
@@ -1174,7 +1155,6 @@ END_FUNC traceback_dealloc
 
 ; traceback_getattr(PyTracebackObject *tb, PyStrObject *name) -> (rax, edx)
 ; Handles tb_lineno, tb_next, tb_frame attributes.
-global traceback_getattr
 DEF_FUNC traceback_getattr
     push rbx
     push r12
@@ -1243,9 +1223,9 @@ DEF_FUNC traceback_getattr
     ret
 END_FUNC traceback_getattr
 
-; ============================================================================
-; Data section - Exception type objects and name strings
-; ============================================================================
+;; ============================================================================
+;; Data section - Exception type objects and name strings
+;; ============================================================================
 section .data
 
 ; Exception type name strings
@@ -1517,3 +1497,75 @@ exception_type_table:
     dq exc_CancelledError_type       ; EXC_CANCELLED_ERROR = 26
     dq exc_StopAsyncIteration_type   ; EXC_STOP_ASYNC_ITERATION = 27
     dq exc_TimeoutError_type         ; EXC_TIMEOUT_ERROR = 28
+
+section .text
+
+;; ============================================================================
+;; GC traverse and clear.  These lived in gc.asm, which left the collector
+;; holding the reference graph of every type in the system; a type's own
+;; file is the only place that knows which of its fields are owned.
+;; ============================================================================
+
+; ---- exc_traverse / exc_clear ----
+DEF_FUNC exc_traverse
+    push rbx
+    mov rbx, rdi
+
+    ; Visit exc_value (fat)
+    mov rdi, [rbx + PyExceptionObject.exc_value]
+    VISIT_V rdi, rsi
+
+    ; Visit heap ptrs
+    mov rdi, [rbx + PyExceptionObject.exc_tb]
+    VISIT_PTR rdi
+    mov rdi, [rbx + PyExceptionObject.exc_context]
+    VISIT_PTR rdi
+    mov rdi, [rbx + PyExceptionObject.exc_cause]
+    VISIT_PTR rdi
+    mov rdi, [rbx + PyExceptionObject.exc_args]
+    VISIT_PTR rdi
+
+    pop rbx
+    leave
+    ret
+END_FUNC exc_traverse
+
+DEF_FUNC exc_clear_gc
+    push rbx
+    mov rbx, rdi
+
+    ; DECREF_VAL exc_value
+    mov rdi, [rbx + PyExceptionObject.exc_value]
+    mov qword [rbx + PyExceptionObject.exc_value], 0
+    DECREF_V rdi, rsi
+
+    ; XDECREF + NULL heap ptrs
+    mov rdi, [rbx + PyExceptionObject.exc_tb]
+    mov qword [rbx + PyExceptionObject.exc_tb], 0
+    test rdi, rdi
+    jz .no_tb
+    call obj_decref
+.no_tb:
+    mov rdi, [rbx + PyExceptionObject.exc_context]
+    mov qword [rbx + PyExceptionObject.exc_context], 0
+    test rdi, rdi
+    jz .no_ctx
+    call obj_decref
+.no_ctx:
+    mov rdi, [rbx + PyExceptionObject.exc_cause]
+    mov qword [rbx + PyExceptionObject.exc_cause], 0
+    test rdi, rdi
+    jz .no_cause
+    call obj_decref
+.no_cause:
+    mov rdi, [rbx + PyExceptionObject.exc_args]
+    mov qword [rbx + PyExceptionObject.exc_args], 0
+    test rdi, rdi
+    jz .no_args
+    call obj_decref
+.no_args:
+
+    pop rbx
+    leave
+    ret
+END_FUNC exc_clear_gc

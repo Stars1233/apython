@@ -5,13 +5,9 @@
 
 %include "macros.inc"
 %include "object.inc"
-%include "types.inc"
-
 
 extern ap_malloc
 extern gc_alloc
-extern gc_track
-extern gc_dealloc
 extern ap_free
 extern obj_incref
 extern obj_decref
@@ -27,7 +23,6 @@ extern current_exception
 extern tuple_new
 extern list_new
 extern list_append
-extern int_from_i64
 extern int_to_i64
 extern list_method_sort
 extern type_type
@@ -203,9 +198,7 @@ DEF_FUNC get_iterator
     ; DECREF the bad iterator, raise TypeError
     mov rdi, rbx
     call obj_decref
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "iter() returned non-iterator"
-    call raise_exception
+    RAISE exc_TypeError_type, "iter() returned non-iterator"
 
 .try_getitem:
     ; rdi = original object. Check if it has __getitem__ on heaptype.
@@ -229,9 +222,7 @@ DEF_FUNC get_iterator
     ret
 
 .no_iter:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "object is not iterable"
-    call raise_exception
+    RAISE exc_TypeError_type, "object is not iterable"
 
 .iter_exc_pending:
     ; Exception was raised by __iter__. Propagate it via eval_exception_unwind.
@@ -256,7 +247,7 @@ EN_NPOS    equ 16
 EN_START   equ 24
 EN_ITER    equ 32     ; local: iterable pointer
 EN_ITERTAG equ 40     ; local: iterable tag
-EN_FRAME   equ 48
+EN_FRAME   equ 48           ; + 3 pushes = 72, not 16-aligned
 DEF_FUNC builtin_enumerate, EN_FRAME
     push rbx
     push r12
@@ -461,15 +452,11 @@ DEF_FUNC builtin_enumerate, EN_FRAME
 
 .enum_type_error:
     mov qword [rel kw_names_pending], 0
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "'%s' object cannot be interpreted as an integer"
-    call raise_exception
+    RAISE exc_TypeError_type, "'%s' object cannot be interpreted as an integer"
 
 .enum_error:
     mov qword [rel kw_names_pending], 0
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "enumerate() requires 1 or 2 arguments"
-    call raise_exception
+    RAISE exc_TypeError_type, "enumerate() requires 1 or 2 arguments"
 END_FUNC builtin_enumerate
 
 ;; enumerate_iternext(self) -> PyObject* (2-tuple) or NULL
@@ -545,7 +532,7 @@ ZP_ARGS    equ 8
 ZP_NARGS   equ 16
 ZP_NPOS    equ 24
 ZP_STRICT  equ 32
-ZP_FRAME   equ 32
+ZP_FRAME   equ 32           ; + 4 pushes = 64
 DEF_FUNC builtin_zip, ZP_FRAME
     push rbx
     push r12
@@ -949,19 +936,16 @@ DEF_FUNC builtin_map
     ret
 
 .map_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "map() requires at least 2 arguments"
-    call raise_exception
+    RAISE exc_TypeError_type, "map() requires at least 2 arguments"
 END_FUNC builtin_map
 
-;; map_iternext(self) -> PyObject* or NULL
+;; map_iternext(self) -> rax = Value or NULL
 ;; Supports multiple iterables: calls func(next(it1), next(it2), ...)
 ;; IMPORTANT: Do not clobber r12 before calling tp_call, because func_call
 ;; reads r12 expecting the eval loop's current frame pointer.
-MI_SELF    equ 8
 MI_ARGS    equ 16     ; pointer to the Value args array on the stack
 MI_ASIZE   equ 24     ; bytes reserved for it
-MI_FRAME   equ 32
+MI_FRAME   equ 32           ; + 4 pushes = 64
 DEF_FUNC_LOCAL map_iternext, MI_FRAME
     push rbx
     push r13
@@ -1168,12 +1152,10 @@ DEF_FUNC builtin_filter
     ret
 
 .filter_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "filter() requires exactly 2 arguments"
-    call raise_exception
+    RAISE exc_TypeError_type, "filter() requires exactly 2 arguments"
 END_FUNC builtin_filter
 
-;; filter_iternext(self) -> PyObject* or NULL
+;; filter_iternext(self) -> rax = Value or NULL
 ;; IMPORTANT: Do not clobber r12 before calling tp_call, because func_call
 ;; reads r12 expecting the eval loop's current frame pointer.
 DEF_FUNC_LOCAL filter_iternext
@@ -1475,9 +1457,7 @@ section .text
     ret
 
 .rev_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "reversed() takes exactly 1 argument"
-    call raise_exception
+    RAISE exc_TypeError_type, "reversed() takes exactly 1 argument"
 
 .rev_type_error:
     mov rsi, r12
@@ -1486,7 +1466,7 @@ section .text
     call raise_type_error_with_name
 END_FUNC builtin_reversed
 
-;; reversed_iternext(self) -> PyObject* or NULL
+;; reversed_iternext(self) -> rax = Value or NULL
 DEF_FUNC_LOCAL reversed_iternext
     push rbx
 
@@ -1571,7 +1551,7 @@ SO_ARGS       equ 8
 SO_NARGS      equ 16
 SO_SORT_BUF   equ 72     ; END of sort args buffer (grows down from here)
 SO_EXC        equ 80     ; the exception pending before iteration began
-SO_FRAME      equ 96
+SO_FRAME      equ 96        ; + 0 pushes = 96
 DEF_FUNC builtin_sorted, SO_FRAME
     DUNDER_EXC_SAVE [rbp - SO_EXC]
     push rbx
@@ -1680,9 +1660,7 @@ DEF_FUNC builtin_sorted, SO_FRAME
     ret
 
 .sorted_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "sorted() requires exactly 1 argument"
-    call raise_exception
+    RAISE exc_TypeError_type, "sorted() requires exactly 1 argument"
 .sorted_propagate:
     mov rdi, r12
     call obj_decref             ; the partially built list
@@ -1694,7 +1672,6 @@ END_FUNC builtin_sorted
 ;; ============================================================================
 ;; Type call wrappers: tp_call(callable, args, nargs) -> builtin_*(args, nargs)
 ;; ============================================================================
-global enumerate_type_call
 DEF_FUNC_BARE enumerate_type_call
     mov rdi, rsi
     mov rsi, rdx
@@ -1707,7 +1684,6 @@ END_FUNC enumerate_type_call
 ; needs a type to test against.  The object types already existed; these
 ; wrappers are what let the name be bound to the type instead of the
 ; constructor function.
-global range_type_call
 DEF_FUNC_BARE range_type_call
     mov rdi, rsi
     mov rsi, rdx
@@ -1715,28 +1691,24 @@ DEF_FUNC_BARE range_type_call
     jmp builtin_range
 END_FUNC range_type_call
 
-global zip_type_call
 DEF_FUNC_BARE zip_type_call
     mov rdi, rsi
     mov rsi, rdx
     jmp builtin_zip
 END_FUNC zip_type_call
 
-global map_type_call
 DEF_FUNC_BARE map_type_call
     mov rdi, rsi
     mov rsi, rdx
     jmp builtin_map
 END_FUNC map_type_call
 
-global filter_type_call
 DEF_FUNC_BARE filter_type_call
     mov rdi, rsi
     mov rsi, rdx
     jmp builtin_filter
 END_FUNC filter_type_call
 
-global reversed_type_call
 DEF_FUNC_BARE reversed_type_call
     mov rdi, rsi
     mov rsi, rdx

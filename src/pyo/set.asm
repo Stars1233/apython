@@ -3,7 +3,6 @@
 
 %include "macros.inc"
 %include "object.inc"
-%include "types.inc"
 
 extern ap_malloc
 extern gc_alloc
@@ -17,18 +16,13 @@ extern obj_incref
 extern str_type
 extern eval_exception_unwind
 extern obj_richcompare_bool
-extern ap_strcmp
 extern ap_memset
 extern fatal_error
-extern str_from_cstr
 extern type_type
-extern set_traverse
-extern set_clear_gc
 
 ; Set entry layout constants
 SET_ENTRY_HASH    equ 0
 SET_ENTRY_KEY     equ 8
-SET_ENTRY_SIZE    equ 16
 
 ; Initial capacity (must be power of 2)
 SET_INIT_CAP equ 8
@@ -406,7 +400,7 @@ END_FUNC set_contains
 SRC_SELF  equ 8
 SRC_OTHER equ 16
 SRC_OP    equ 24
-SRC_FRAME equ 24
+SRC_FRAME equ 24            ; + 0 pushes = 24, not 16-aligned
 DEF_FUNC set_richcompare, SRC_FRAME
     V_UNPACK rdi, rcx           ; left  Value -> (payload, tag)
     V_UNPACK rsi, r8            ; right Value -> (payload, tag)
@@ -745,7 +739,7 @@ END_FUNC set_dealloc
 extern raise_exception
 extern exc_TypeError_type
 
-STC_FRAME equ 8
+STC_FRAME equ 8             ; + 2 pushes = 24, not 16-aligned
 DEF_FUNC set_type_call, STC_FRAME
     push rbx
     push r12
@@ -826,14 +820,10 @@ DEF_FUNC set_type_call, STC_FRAME
     call obj_decref
 
 .stc_not_iterable:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "set() argument is not iterable"
-    call raise_exception
+    RAISE exc_TypeError_type, "set() argument is not iterable"
 
 .stc_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "set() takes at most 1 argument"
-    call raise_exception
+    RAISE exc_TypeError_type, "set() takes at most 1 argument"
 END_FUNC set_type_call
 
 ; set_repr is in src/repr.asm
@@ -942,7 +932,7 @@ END_FUNC set_iter_dealloc
 ;; ============================================================================
 ;; set_iter_self(PyObject *self) -> self with INCREF
 ;; ============================================================================
-set_iter_self:
+DEF_FUNC_BARE set_iter_self
     inc qword [rdi + PyObject.ob_refcnt]
     mov rax, rdi
     ret
@@ -954,7 +944,7 @@ END_FUNC set_iter_self
 ;; rdi = self (frozenset_type), rsi = args (16-byte fat slots), rdx = nargs
 ;; ============================================================================
 global frozenset_type_call
-FTC_FRAME equ 8
+FTC_FRAME equ 8             ; + 2 pushes = 24, not 16-aligned
 DEF_FUNC frozenset_type_call, FTC_FRAME
     push rbx
     push r12
@@ -1032,13 +1022,9 @@ DEF_FUNC frozenset_type_call, FTC_FRAME
     mov rdi, rbx
     call obj_decref
 .ftc_not_iterable:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "frozenset() argument is not iterable"
-    call raise_exception
+    RAISE exc_TypeError_type, "frozenset() argument is not iterable"
 .ftc_error:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "frozenset() takes at most 1 argument"
-    call raise_exception
+    RAISE exc_TypeError_type, "frozenset() takes at most 1 argument"
 END_FUNC frozenset_type_call
 
 
@@ -1053,13 +1039,16 @@ extern set_method_intersection
 extern set_method_difference
 extern set_method_symmetric_difference
 
-SNB_FRAME equ 32
+SNB_FRAME equ 32            ; + 0 pushes = 32
 
 ;; set_nb_or(left, right, ltag, rtag) -> new set (union)
+; The two operands, laid out as the args array the method form expects.
+SNB_LEFT  equ 32
+SNB_RIGHT equ 24
 DEF_FUNC set_nb_or, SNB_FRAME
-    mov [rbp - 32], rdi         ; args[0] = left
-    mov [rbp - 24], rsi         ; args[1] = right
-    lea rdi, [rbp - 32]
+    mov [rbp - SNB_LEFT], rdi         ; args[0] = left
+    mov [rbp - SNB_RIGHT], rsi         ; args[1] = right
+    lea rdi, [rbp - SNB_LEFT]
     mov esi, 2
     call set_method_union
     leave
@@ -1068,9 +1057,9 @@ END_FUNC set_nb_or
 
 ;; set_nb_and(left, right, ltag, rtag) -> new set (intersection)
 DEF_FUNC set_nb_and, SNB_FRAME
-    mov [rbp - 32], rdi         ; args[0] = left
-    mov [rbp - 24], rsi         ; args[1] = right
-    lea rdi, [rbp - 32]
+    mov [rbp - SNB_LEFT], rdi         ; args[0] = left
+    mov [rbp - SNB_RIGHT], rsi         ; args[1] = right
+    lea rdi, [rbp - SNB_LEFT]
     mov esi, 2
     call set_method_intersection
     leave
@@ -1079,9 +1068,9 @@ END_FUNC set_nb_and
 
 ;; set_nb_sub(left, right, ltag, rtag) -> new set (difference)
 DEF_FUNC set_nb_sub, SNB_FRAME
-    mov [rbp - 32], rdi         ; args[0] = left
-    mov [rbp - 24], rsi         ; args[1] = right
-    lea rdi, [rbp - 32]
+    mov [rbp - SNB_LEFT], rdi         ; args[0] = left
+    mov [rbp - SNB_RIGHT], rsi         ; args[1] = right
+    lea rdi, [rbp - SNB_LEFT]
     mov esi, 2
     call set_method_difference
     leave
@@ -1090,9 +1079,9 @@ END_FUNC set_nb_sub
 
 ;; set_nb_xor(left, right, ltag, rtag) -> new set (symmetric_difference)
 DEF_FUNC set_nb_xor, SNB_FRAME
-    mov [rbp - 32], rdi         ; args[0] = left
-    mov [rbp - 24], rsi         ; args[1] = right
-    lea rdi, [rbp - 32]
+    mov [rbp - SNB_LEFT], rdi         ; args[0] = left
+    mov [rbp - SNB_RIGHT], rsi         ; args[1] = right
+    lea rdi, [rbp - SNB_LEFT]
     mov esi, 2
     call set_method_symmetric_difference
     leave
@@ -1259,3 +1248,87 @@ set_iter_type:
     dq 0                        ; tp_traverse
     dq 0                        ; tp_clear
     dq 0 ; tp_dictoffset
+
+section .text
+
+;; ============================================================================
+;; GC traverse and clear.  These lived in gc.asm, which left the collector
+;; holding the reference graph of every type in the system; a type's own
+;; file is the only place that knows which of its fields are owned.
+;; ============================================================================
+
+; ---- set_traverse / set_clear ----
+; Set entries are 24 bytes (hash+key+key_tag_qword), distinct from DictEntry (32 bytes).
+SET_ENTRY_SIZE_GC    equ 16
+SET_ENTRY_KEY_GC     equ 8
+
+DEF_FUNC set_traverse
+    push rbx
+    push r12
+    push r13
+
+    mov rbx, rdi
+    mov r12, [rbx + PyDictObject.entries]   ; set reuses PyDictObject layout for header
+    mov r13, [rbx + PyDictObject.capacity]
+    test r13, r13
+    jz .st_done
+.st_loop:
+    dec r13
+    ; Check for empty (key_tag == 0) or tombstone (key_tag == 0xdead)
+    SET_ENTRY_CLASSIFY r12, .st_next, .st_next
+
+    ; Visit key
+    mov rdi, [r12 + SET_ENTRY_KEY_GC]
+    VISIT_V rdi, rsi
+
+.st_next:
+    add r12, SET_ENTRY_SIZE_GC
+    test r13, r13
+    jnz .st_loop
+.st_done:
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC set_traverse
+
+DEF_FUNC set_clear_gc
+    push rbx
+    push r12
+    push r13
+
+    mov rbx, rdi
+    mov r12, [rbx + PyDictObject.entries]
+    mov r13, [rbx + PyDictObject.capacity]
+
+    test r13, r13
+    jz .sc_done
+.sc_loop:
+    dec r13
+    SET_ENTRY_CLASSIFY r12, .sc_next, .sc_next
+
+    ; DECREF key
+    push r12
+    push r13
+    mov rdi, [r12 + SET_ENTRY_KEY_GC]
+    DECREF_V rdi, rsi
+    pop r13
+    pop r12
+
+    ; Clear entry
+    mov qword [r12 + SET_ENTRY_KEY_GC], 0
+
+.sc_next:
+    add r12, SET_ENTRY_SIZE_GC
+    test r13, r13
+    jnz .sc_loop
+.sc_done:
+    mov qword [rbx + PyDictObject.ob_size], 0
+
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC set_clear_gc

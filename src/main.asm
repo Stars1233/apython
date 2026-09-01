@@ -3,9 +3,6 @@
 
 %include "macros.inc"
 %include "object.inc"
-%include "types.inc"
-%include "errcodes.inc"
-%include "frame.inc"
 %include "compiler.inc"
 
 extern bool_init
@@ -24,7 +21,6 @@ extern frame_new
 extern frame_free
 extern frame_pool_drain
 extern eval_frame
-extern pyc_read_file
 extern code_from_path
 extern fatal_error
 extern obj_decref
@@ -57,10 +53,10 @@ DEF_FUNC main, 8
 
     ; Check for --version flag
     mov rax, [r15 + 8]          ; rax = argv[1]
-    cmp word [rax], 0x2D2D      ; "--" little-endian
+    cmp word [rax], 0x2d2d      ; "--" little-endian
     jne .not_version
     mov rcx, [rax + 2]          ; load 8 bytes: "version\0"
-    mov rdx, 0x006E6F6973726576 ; "version\0" little-endian
+    mov rdx, 0x006e6f6973726576 ; "version\0" little-endian
     cmp rcx, rdx
     jne .not_version
 
@@ -78,6 +74,40 @@ DEF_FUNC main, 8
     leave
     ret
 .not_version:
+
+    ; Check for -h / --help / -?  CPython accepts all three, writes the help to
+    ; stdout and exits 0, so we do the same.  The options listed are ours: a
+    ; help screen naming flags this interpreter does not implement would be
+    ; worse than no help screen at all.
+    mov rdi, [r15 + 8]          ; rdi = argv[1]
+    lea rsi, [rel help_flag]
+    call ap_strcmp
+    test eax, eax
+    je .do_help
+    mov rdi, [r15 + 8]
+    lea rsi, [rel help_short_flag]
+    call ap_strcmp
+    test eax, eax
+    je .do_help
+    mov rdi, [r15 + 8]
+    lea rsi, [rel help_q_flag]
+    call ap_strcmp
+    test eax, eax
+    jne .not_help
+.do_help:
+    mov edi, 1                  ; stdout
+    lea rsi, [rel help_msg]
+    mov edx, help_msg_len
+    call sys_write
+    xor eax, eax
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+.not_help:
 
     ; Check for --selftest-value flag (NaN-box encoding self-test)
     mov rdi, [r15 + 8]          ; rdi = argv[1]
@@ -153,8 +183,12 @@ DEF_FUNC main, 8
     jne .no_trace_flag
     cmp byte [rax + 2], 0
     jne .no_trace_flag
-    extern trace_opcodes
-    mov byte [rel trace_opcodes], 1
+    ; Point dispatch at the tracing table.  Setting a flag was not enough:
+    ; every handler dispatches inline and only eval_dispatch tested it.
+    extern opcode_dispatch_table
+    extern opcode_trace_table
+    lea rax, [rel opcode_trace_table]
+    mov [rel opcode_dispatch_table], rax
     add r15, 8                  ; skip -t in argv
     dec r14d                    ; adjust argc
     cmp r14d, 2
@@ -355,13 +389,13 @@ DEF_FUNC main, 8
     extern int_to_i64
     call int_to_i64
     mov ebx, eax
-    and ebx, 0xFF
+    and ebx, 0xff
     jmp .se_finish
 
 .se_int:
     V_TO_I64 rax
     mov ebx, eax
-    and ebx, 0xFF
+    and ebx, 0xff
     jmp .se_finish
 
 .se_one:
@@ -425,7 +459,7 @@ DEF_FUNC main, 8
     ret
 
 .usage:
-    CSTRING rdi, "Usage: apython [--version] [-t] <file.pyc>"
+    CSTRING rdi, "usage: apython [option] ... <file>; try `apython --help'"
     call fatal_error
 
 .load_failed:
@@ -456,6 +490,25 @@ DEF_FUNC main, 8
 END_FUNC main
 
 section .rodata
+help_flag: db "--help", 0
+help_short_flag: db "-h", 0
+help_q_flag: db "-?", 0
+help_msg:
+    db "usage: apython [option] ... [file]", 10
+    db "Options:", 10
+    db "-h     : print this help message and exit (also -? or --help)", 10
+    db "-t     : trace opcodes (partial: DISPATCH-terminated handlers are", 10
+    db "         not traced -- see bugs.md)", 10
+    db "--version : print the apython version number and exit", 10
+    db "--dis [-x] <source> : print the bytecode compiled from <source>;", 10
+    db "         -x compiles in exec mode rather than eval mode", 10
+    db "--selftest-value : run the Value encoding self-test and exit", 10
+    db "--selftest-compile : run the source compiler self-test and exit", 10
+    db 10
+    db "Arguments:", 10
+    db "file   : a .py file to compile and run, or a .pyc file to run directly", 10
+help_msg_len equ $ - help_msg
+
 selftest_flag: db "--selftest-value", 0
 selftest_compile_flag: db "--selftest-compile", 0
 dis_flag: db "--dis", 0
@@ -465,5 +518,4 @@ __name__cstr: db "__name__", 0
 __main__cstr: db "__main__", 0
 __package__cstr: db "__package__", 0
 __builtins__cstr: db "__builtins__", 0
-colon_space: db ": "
 newline_char: db 10

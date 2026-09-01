@@ -44,7 +44,6 @@ extern exc_SyntaxError_type
 ; The scan cursor stays in r12 throughout lex_run; everything that has to
 ; survive a call goes in a frame slot rather than a caller-saved register.
 LR_COMP  equ 8
-LR_TOKST equ 16          ; start of the token being scanned
 LR_KIND  equ 24          ; its token kind
 LR_FLAGS equ 32          ; its TF_* flags
 LR_STRNL equ 40          ; lines a string literal spanned, not applied yet
@@ -666,7 +665,6 @@ DEF_FUNC lex_run, LR_FRAME
     call comp_error
     jmp .fail
 
-
 ;; --- identifiers, keywords, and prefixed string literals -------------------
 .ident:
     mov r15, r12                        ; r15 = start of the identifier
@@ -962,7 +960,6 @@ DEF_FUNC lex_run, LR_FRAME
     call lex_emit
     mov eax, 1
     jmp .ret
-
 
 ;; --- local subroutines -----------------------------------------------------
 ; These run inside lex_run's register world: r12 is the cursor, r13 the end,

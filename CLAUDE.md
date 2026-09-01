@@ -17,6 +17,7 @@ make check        # full test suite: compile .py→.pyc, diff python3 vs ./apyth
 make check-cpython # CPython stdlib unit tests (harder, more thorough)
 make check-stdlib # how much of a CPython 3.12 Lib/ imports; a ratchet
 make check-source # the whole corpus compiled by OUR compiler; a ratchet
+make regen        # regenerate the machine-written asm (needs CPython 3.12)
 make check-cpython-source  # the CPython corpus, compiled by OUR compiler
 ```
 
@@ -32,22 +33,43 @@ its `Lib/` (default `~/tmp/repo/cpython/Lib`).  It compares against
 `tests/stdlib_floor.txt` and fails when a module that used to import stops, or
 when a new one crashes.  Raise the floor with
 `bash tests/stdlib_probe.sh --record` in the commit that earns it.
-`make check` runs 250 test files (275 results: the async tests run against the
-default, poll and io_uring backends); `make check-cpython` runs all 64 files
-under `tests/cpython/`, none of them tolerated as failing.
+`make check` runs every `tests/test_*.py`, and reports more results than there
+are files because the async tests run against the default, poll and io_uring
+backends; `make check-cpython` runs everything under `tests/cpython/`, none of
+it tolerated as failing.
 
 `make check-source` and `make check-cpython-source` hand apython the `.py`
-instead of the `.pyc`, so our own compiler produces the bytecode, and diff the
-result against `python3`.  They are the only things that exercise the compiler
-on a large body of ordinary code -- most of its bugs were found there rather
-than by a test written for them, including several that need a whole file
-rather than a snippet to appear at all.  They also reach interpreter paths a
-`.pyc` cannot, because CPython's constant folder settles `3 * "ab"`,
-`True & False` and `-7 // 2` before any of them becomes an opcode.
+instead of the `.pyc`, so our own compiler produces the bytecode.  They are the
+only things that exercise the compiler on a large body of ordinary code -- most
+of its bugs were found there rather than by a test written for them, including
+several that need a whole file rather than a snippet to appear at all.  They
+also reach interpreter paths a `.pyc` cannot, because CPython's constant folder
+settles `3 * "ab"`, `True & False` and `-7 // 2` before any of them becomes an
+opcode.
+
+They use different oracles, because their corpora differ.  `check-source` diffs
+against `python3`: those tests print, and CPython is the reference.
+`check-cpython-source` diffs against **the same file run from its `.pyc`** --
+same interpreter, same `lib/unittest.py`, and the only difference is which
+compiler produced the bytecode.  It cannot use `python3`: this corpus drives our
+own `unittest`, whose progress output differs by design, and two of its files
+import `test.seq_tests` / `test.test_grammar`, which ship in `lib/` and which a
+system CPython cannot find.
+
+Neither gate compares bytecode.  Two compilers may fold and order differently
+and both be right, so that would measure style rather than correctness;
+comparing the *behaviour* of the programs they produce is immune to it, except
+in a narrow band where a compiler's choices are legitimately observable --
+identity of constants one side folds (`"ab" * 3 is "ababab"` is True from
+CPython's `.pyc`, False from ours, and neither is wrong), code-object
+introspection, traceback text, and compile-time error wording.  Triage a newly
+differing file against that band before calling it a regression; the script
+header lists it in full.
 
 `check-cpython-source` is the harder of the two: that corpus is CPython's own
-and written to be adversarial; all 64 of its files now run identically through
-our compiler.  Each ratchets against a floor file
+and written to be adversarial.  Every file in it matches -- a claim that, until
+2026-08-31, had never actually been tested, because the probe only checked the
+exit status.  Each ratchets against a floor file
 (`tests/compile_floor.txt`, `tests/cpython_source_floor.txt`); raise one with
 `bash tests/source_probe.sh --record` or
 `bash tests/cpython_source_probe.sh --record` in the commit that earns it.
@@ -63,6 +85,13 @@ make INT_STRESS=1 && bash tests/run_tests.sh
 ordinary suite exercises the heap-int paths that ±2^50 immediates normally
 hide.  It is not expected to pass `check-cpython` (CPython's own test_int
 asserts things like `10 is 10`).
+
+Until 2026-08-31 this command did nothing: the flag reached `NASMFLAGS` but no
+object depended on it, so after an ordinary `make` it relinked the *unstressed*
+binary and the run proved nothing.  Objects now depend on `build/.flags`.  Its
+first real run found a bug immediately -- the item arm of
+`bytes()`/`bytearray()` over an iterable tested `V_IS_INT` and so accepted an
+int *immediate* only.
 
 **Single test:**
 ```bash
@@ -134,21 +163,54 @@ and at the boundaries between converted and unconverted code.
 
 ## Source Layout
 
-- `src/eval.asm` — Bytecode dispatch loop (256-entry jump table)
-- `src/opcodes_*.asm` — Opcode handlers by category (load, store, stack, call, build, misc, async, import)
-- `src/pyo/*.asm` — Type implementations (int, str, list, dict, tuple, func, class, iter, bool, none, bytes, code)
-- `src/marshal.asm` — .pyc marshal format deserializer
-- `src/pyc.asm` — .pyc file reader (magic validation, header parsing)
-- `src/builtins.asm` — Built-in functions (print, len, range, type, isinstance, etc.) and `type_from_parts`
+No hand-written file exceeds 100k bytes; only generated asm may.
+
+- `src/eval.asm` — Bytecode dispatch loop (256-entry jump table), the
+  exception unwinder, and `raise_exception`
+- `src/opcodes/*.asm` — Opcode handlers by category: `load` (loads, stores and
+  the stack shuffles), `call`, `build`, `arith` (BINARY_OP/COMPARE_OP/unary and
+  the specialized int/float superinstructions), `flow` (returns, jumps,
+  f-strings, generators), `match` (the MATCH_* family and the intrinsics),
+  `async`, `import`
+- `src/methods/*.asm` — Builtin type methods, one file per type: `str`,
+  `str_pred`, `str_parts`, `list`, `tuple`, `dict`, `set`, `num`, `bytes`,
+  `object` (object's own dunders plus the `DEF_DUNDER_*` generators), and
+  `init`, which registers them all into each type's `tp_dict`.  These share
+  basenames with `src/pyo/` on purpose: `methods/dict.asm` is dict's methods,
+  `pyo/dict.asm` is dict itself
+- `src/pyo/*.asm` — Type implementations (int, str, list, dict, tuple, func,
+  class, iter, singleton, bytes, code)
+- `src/marshal.asm` — .pyc marshal deserializer, and the .pyc file reader
+- `src/main.asm` — argument parsing, startup order, and the `-t`/`--dis` modes
+- `src/import.asm` — the import system: finders, `sys.modules`, packages
+- `src/itertools.asm` — the *iterator builtins* (`enumerate`, `zip`, `map`,
+  `filter`, `reversed`, `sorted`, `chain`, `get_iterator`), not the `itertools`
+  module, which is `lib/itertools.py`
+- `src/dunder.asm` — dunder lookup and the `dunder_call_*` helpers, the
+  fallback path when a heaptype has no slot
+- `src/repr.asm` — the container reprs and the recursion stack they share
+- `src/gc.asm` — the generational collector.  Each type's `tp_traverse` and
+  `tp_clear` live with the type, in `src/pyo/*.asm`
+- `src/sre.asm` / `src/sre_module.asm` — the regex engine and its module
+  wrapper; the pattern and match objects live in `src/pyo/`
+- `src/valtest.asm` — `--selftest-value`
+- `src/builtins.asm` — `PyBuiltinObject`, the core builtins, and `builtins_init`
+- `src/builtins_num.asm` / `src/builtins_obj.asm` — the numeric builtins, and the
+  object/iteration/IO builtins
+- `src/buildclass.asm` — `type.__new__`, `type_from_parts`, `__build_class__`
 - `src/slots.asm` — Installs slot wrappers on a heaptype from the dunders it defines
 - `src/mro.asm` — C3 linearization, `type_mro_next`, `type_is_subtype`
 - `src/format.asm` — The format-spec mini-language (`format()`, f-strings, `%`)
-- `src/traceback.asm` — PEP 626 line-table decoding and traceback rendering
+- `src/traceback.asm` — Both code-object side tables: PEP 626 line table and
+  `co_exceptiontable`, plus traceback rendering
 - `src/frame.asm` — Frame alloc/dealloc
 - `src/object.asm` — Base PyObject ops (alloc, refcount, dealloc, `obj_richcompare_bool`)
-- `src/lib/` — Syscall wrappers, string/memory ops (replace libc)
+- `src/runtime.asm` — The freestanding layer: syscalls, allocation, PLT-free
+  memory and string ops, and `fatal_error`
 - `compiler/` — The Python **source** compiler (see below)
-- `include/` — Struct definitions (.inc): object, types, frame, opcodes, macros, marshal, builtins, errcodes
+- `include/` — `object.inc` (every struct and id enum), `macros.inc`,
+  `value.inc`, `opcodes.inc`, and the two private ABIs `sre.inc` and
+  `eventloop.inc`
 
 ## Source Compiler (`compiler/`)
 
@@ -163,20 +225,16 @@ f-strings, async, comprehensions, PEP 695 type parameters.
 | `tables.asm` | **generated** — char classes, keywords, operators, opcode metadata |
 | `gen_tables.py` | regenerates `tables.asm` from CPython 3.12's `opcode`/`dis` |
 | `gen_prule.py` | regenerates the expression grammar table inside `parse.asm` |
-| `arena.asm` | growable `Buf` and bump `Arena` (the tree has neither otherwise) |
 | `lex.asm` | tokenizer: indentation, operators, names, numbers, strings |
-| `ast.asm` | 32-byte nodes in a `Buf`, addressed by u32 index |
+| `ast.asm` | 32-byte nodes in a `Buf`, addressed by u32 index, and the growable `Buf` / bump `Arena` they live in |
 | `parse.asm` | Pratt expression parser + `prule_table`, the precedence grammar |
 | `parse_stmt.asm` | statements, and the soft keywords `match` and `type` |
 | `pattern.asm` | `match` patterns |
 | `fstring.asm` | f-string fields, lexed as spans of the same source |
 | `symtab.asm` | scopes, local/cell/free classification, name mangling |
-| `codegen.asm` | AST kind → emitter jump table; `_stmt`/`_func`/`_try`/`_comp`/`_async`/`_match`/`_egroup` for the rest |
+| `codegen.asm` | AST kind → emitter jump table; `_stmt`/`_func`/`_try`/`_comp`/`_match` for the rest.  `_try` also holds `except*`, `with` and `await`: they are one unwinder |
 | `assemble.asm` | EXTENDED_ARG fixpoint, stack depth, exception table, line table |
-| `compile.asm` | pipeline driver and lifetime |
-| `evalexec.asm` | the `compile()`, `exec()` and `eval()` builtins |
-| `srcfile.asm` | `code_from_path`: `./apython foo.py` and import from source |
-| `comperr.asm` | error recording |
+| `compile.asm` | pipeline driver and lifetime; the `code_from_path` and `compile()`/`exec()`/`eval()` entry points; and `comp_error`, the record side of the error protocol |
 | `unicodename.asm` | **generated** -- the names `\N{...}` resolves |
 | `gen_unicodename.py` | regenerates `unicodename.asm` from `unicodedata` |
 | `uniname.asm` | the search over it, plus the algorithmic CJK family |
@@ -196,10 +254,9 @@ Because every emission routes through it, a forgotten CACHE is not a mistake an
 emitter can make. Its numbers are CPython's, taken from the running
 interpreter's own modules rather than transcribed.
 
-Regenerate with `python3 compiler/gen_tables.py > compiler/tables.asm`,
-`python3 compiler/gen_prule.py`, and
-`python3 compiler/gen_unicodename.py > compiler/unicodename.asm`; all three
-outputs are committed, so building never needs Python.
+Regenerate all three with `make regen`.  The outputs are committed, so building
+never needs Python -- and `gen_tables.py` refuses to run on anything but CPython
+3.12, so they must not become build steps.  `make clean` leaves them alone.
 
 **Gates:** `make check-source` and `make check-cpython-source` (both corpora
 compiled by this compiler and diffed against `python3` — where nearly every bug
@@ -244,8 +301,8 @@ These cost real time; the shapes recur.
 
 Defined in `include/*.inc`. All objects start with `PyObject` (ob_refcnt +0, ob_type +8).
 
-- **PyTypeObject** (types.inc): tp_call +64, tp_getattr +72, tp_setattr +80, tp_as_number +128, tp_as_sequence +136, tp_as_mapping +144, tp_base +152, tp_mro +168, tp_bases +184, tp_dictoffset +208
-- **PyFrame** (frame.inc): code +8, globals +16, locals +32, stack_ptr +48, stack_base +56, localsplus +80 (variable-size Value[])
+- **PyTypeObject** (object.inc): tp_call +64, tp_getattr +72, tp_setattr +80, tp_as_number +128, tp_as_sequence +136, tp_as_mapping +144, tp_base +152, tp_mro +168, tp_bases +184, tp_dictoffset +208
+- **PyFrame** (object.inc): code +8, globals +16, locals +32, stack_ptr +48, stack_base +56, localsplus +80 (variable-size Value[])
 - **PyIntObject** (object.inc): mpz +16 (only initialised on overflow), ival +32, compact +40 (1 = the ival is live)
 - **DictEntry** (object.inc, 24 bytes): hash +0, key +8, value +16 — occupied ⇔ `key != 0`; empty ⇔ `key == 0 && hash == 0`; tombstone ⇔ `key == 0 && hash == -1`
 - **PyCodeObject** (object.inc): co_consts, co_names, co_firstlineno +112, co_linetable +120, co_code starts at +128

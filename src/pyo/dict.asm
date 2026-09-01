@@ -1,9 +1,8 @@
-; dict_obj.asm - Dict type implementation
-; Phase 4: open-addressing hash table with linear probing
+; pyo/dict.asm - Dict type implementation
+; Open-addressing hash table with linear probing
 
 %include "macros.inc"
 %include "object.inc"
-%include "types.inc"
 
 extern obj_richcompare_bool
 extern eval_exception_unwind
@@ -18,17 +17,11 @@ extern obj_hash
 extern obj_decref
 extern obj_dealloc
 extern str_type
-extern ap_strcmp
-extern ap_memset
 extern fatal_error
 extern raise_exception
-extern exc_KeyError_type
 extern obj_incref
-extern str_from_cstr
 extern type_type
 extern tuple_type
-extern dict_traverse
-extern dict_clear_gc
 
 ; Initial capacity (must be power of 2)
 ; DICT_INIT_CAP now lives in object.inc, shared with the subclass path
@@ -72,7 +65,6 @@ END_FUNC dict_new
 ;; Allocates the dense entry array (zeroed, so the unused tail reads as empty)
 ;; and the sparse index array (all DICT_IX_EMPTY).  Sets .capacity.
 ;; ============================================================================
-global dict_alloc_tables
 DEF_FUNC dict_alloc_tables
     push rbx
     push r12
@@ -114,9 +106,7 @@ END_FUNC dict_alloc_tables
 ;; ============================================================================
 extern kw_names_pending
 extern dict_method_update
-extern ap_strcmp
 
-global dict_type_call
 DEF_FUNC dict_type_call
     push rbx
     push r12
@@ -299,9 +289,7 @@ DEF_FUNC dict_type_call
 
 .dtc_error:
     extern exc_TypeError_type
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "dict() argument must be a mapping or iterable"
-    call raise_exception
+    RAISE exc_TypeError_type, "dict() argument must be a mapping or iterable"
 END_FUNC dict_type_call
 
 ;; ============================================================================
@@ -331,7 +319,6 @@ END_FUNC dict_keys_equal
 ;; dict_get(rdi=dict, rsi=key Value) -> rax = value Value, or 0 when absent
 ;; Linear probing lookup
 ;; ============================================================================
-DG_KTAG equ 8
 DEF_FUNC dict_get, 8
     push rbx
     push r12
@@ -366,8 +353,7 @@ DL_HASH  equ 24
 DL_MASK  equ 32
 DL_SLOT  equ 40
 DL_FREE  equ 48
-DL_FRAME equ 64
-global dict_lookup
+DL_FRAME equ 64             ; + 3 pushes = 88, not 16-aligned
 DEF_FUNC dict_lookup, DL_FRAME
     push rbx
     push r12
@@ -451,7 +437,6 @@ END_FUNC dict_lookup
 ;; dict_get_index(rdi=dict, rsi=key, edx=key_tag) -> int64
 ;; Like dict_get but returns the slot index (for IC caching), -1 if not found.
 ;; ============================================================================
-GI_KTAG equ 8
 DEF_FUNC dict_get_index, 8
     ; The index into the *dense* array, which the LOAD_GLOBAL inline cache
     ; caches.  A dense index never moves except on a resize, and the cache is
@@ -471,8 +456,6 @@ END_FUNC dict_get_index
 ;; Tombstone reuse: if no match found but a tombstone was seen, returns it
 ;; instead of the empty slot, so inserts reclaim deleted entries.
 ;; ============================================================================
-FS_KTAG     equ 8
-FS_TOMBPTR  equ 16
 
 ;; ============================================================================
 ;; dict_resize(PyDictObject *dict)
@@ -481,7 +464,7 @@ FS_TOMBPTR  equ 16
 DR_DICT  equ 8
 DR_OLDE  equ 16
 DR_OLDN  equ 24
-DR_FRAME equ 32
+DR_FRAME equ 32             ; + 3 pushes = 56, not 16-aligned
 DEF_FUNC dict_resize, DR_FRAME
     push rbx
     push r12
@@ -567,12 +550,10 @@ END_FUNC dict_resize
 ;; dict_set(rdi=dict, rsi=key Value, rdx=value Value)
 ;; Insert or update a key-value pair.
 ;; ============================================================================
-DS_VTAG equ 8
-DS_KTAG equ 16
 DS_DICT  equ 8
 DS_KEY   equ 16
 DS_VAL   equ 24
-DS_FRAME equ 32
+DS_FRAME equ 32             ; + 3 pushes = 56, not 16-aligned
 DEF_FUNC dict_set, DS_FRAME
     push rbx
     push r12
@@ -755,7 +736,7 @@ END_FUNC dict_ass_subscript
 ;; ============================================================================
 DD_DICT  equ 8
 DD_KEYV  equ 16
-DD_FRAME equ 32
+DD_FRAME equ 32             ; + 2 pushes = 48
 DEF_FUNC dict_del, DD_FRAME
     push rbx
     push r12
@@ -927,9 +908,7 @@ DEF_FUNC_BARE dict_iter_next
     ret
 
 .di_mutation_error:
-    lea rdi, [rel exc_RuntimeError_type]
-    CSTRING rsi, "dictionary changed size during iteration"
-    call raise_exception
+    RAISE exc_RuntimeError_type, "dictionary changed size during iteration"
 END_FUNC dict_iter_next
 
 ;; ============================================================================
@@ -986,7 +965,6 @@ END_FUNC dict_contains
 ;; dict_view_new(rdi=dict, rsi=kind, rdx=type_ptr) -> PyDictViewObject*
 ;; Create a new dict view. kind: 0=keys, 1=values, 2=items
 ;; ============================================================================
-global dict_view_new
 DEF_FUNC dict_view_new
     push rbx
     push r12
@@ -1049,7 +1027,6 @@ END_FUNC dict_view_len
 ;; dict_view_iter(rdi=view) -> PyDictIterObject*
 ;; Create an iterator for this view, using the view's kind.
 ;; ============================================================================
-global dict_view_iter
 DEF_FUNC dict_view_iter
     push rbx
     push r12
@@ -1082,7 +1059,6 @@ DEF_FUNC dict_view_iter
     ret
 END_FUNC dict_view_iter
 
-
 ;; ============================================================================
 ;; dict_keys_view_contains(rdi=view, rsi=key, rdx=key_tag) -> int (0 or 1)
 ;; sq_contains for dict_keys view: delegates to dict_contains on underlying dict.
@@ -1100,7 +1076,7 @@ END_FUNC dict_keys_view_contains
 DNO_LEFT  equ 8
 DNO_RIGHT equ 16
 DNO_NEW   equ 24
-DNO_FRAME equ 32
+DNO_FRAME equ 32            ; + 0 pushes = 32
 
 DEF_FUNC dict_nb_or, DNO_FRAME
     V_UNPACK rdi, rdx           ; left  Value -> (payload, tag)
@@ -1186,7 +1162,7 @@ END_FUNC dict_nb_or
 ;; ============================================================================
 DIO_LEFT  equ 8
 DIO_RIGHT equ 16
-DIO_FRAME equ 24
+DIO_FRAME equ 24            ; + 0 pushes = 24, not 16-aligned
 
 DEF_FUNC dict_nb_ior, DIO_FRAME
     V_UNPACK rdi, rdx           ; left  Value -> (payload, tag)
@@ -1232,7 +1208,6 @@ DEF_FUNC dict_nb_ior, DIO_FRAME
     ret
 END_FUNC dict_nb_ior
 
-
 ;; ============================================================================
 ;; dict_richcompare(left, right, op, left_tag, right_tag) -> (payload, tag)
 ;; rdi=left, rsi=right, edx=op, rcx=left_tag, r8=right_tag
@@ -1245,7 +1220,7 @@ DRC_RIGHT equ 16
 DRC_OP    equ 24
 DRC_LVAL  equ 32
 DRC_LTAG  equ 40
-DRC_FRAME equ 48
+DRC_FRAME equ 48            ; + 0 pushes = 48
 
 DEF_FUNC dict_richcompare, DRC_FRAME
     V_UNPACK rdi, rcx           ; left  Value -> (payload, tag)
@@ -1416,7 +1391,6 @@ DEF_FUNC dict_richcompare, DRC_FRAME
     ret
 END_FUNC dict_richcompare
 
-
 ;; ============================================================================
 ;; dict_reversed(args, nargs) -> PyDictIterObject* (reverse key iterator)
 ;; Called as dict.__reversed__(self).
@@ -1500,9 +1474,7 @@ DEF_FUNC_BARE dict_rev_iter_next
     ret
 
 .dri_mutation_error:
-    lea rdi, [rel exc_RuntimeError_type]
-    CSTRING rsi, "dictionary changed size during iteration"
-    call raise_exception
+    RAISE exc_RuntimeError_type, "dictionary changed size during iteration"
 END_FUNC dict_rev_iter_next
 
 ;; ============================================================================
@@ -1795,3 +1767,116 @@ dict_items_view_type:
     dq 0                        ; tp_traverse
     dq 0                        ; tp_clear
     dq 0 ; tp_dictoffset
+
+section .text
+
+;; ============================================================================
+;; GC traverse and clear.  These lived in gc.asm, which left the collector
+;; holding the reference graph of every type in the system; a type's own
+;; file is the only place that knows which of its fields are owned.
+;; ============================================================================
+
+; ---- dict_traverse / dict_clear ----
+
+DEF_FUNC dict_traverse
+    push rbx
+    push r12
+    push r13
+
+    mov rbx, rdi
+    mov r12, [rbx + PyDictObject.entries]
+    mov r13, [rbx + PyDictObject.capacity]
+    test r13, r13
+    jz .done
+.loop:
+    dec r13
+    ; Check for empty/tombstone
+    ENTRY_CLASSIFY r12, .next, .next
+
+    ; Visit key
+    mov rdi, [r12 + DictEntry.key]
+
+    VISIT_V rdi, rsi
+    ; Visit value
+    mov rdi, [r12 + DictEntry.value]
+
+    VISIT_V rdi, rsi
+
+.next:
+    add r12, DICT_ENTRY_SIZE
+    test r13, r13
+    jnz .loop
+.done:
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC dict_traverse
+
+DEF_FUNC dict_clear_gc
+    push rbx
+    push r12
+    push r13
+
+    mov rbx, rdi
+    mov r12, [rbx + PyDictObject.entries]
+    mov r13, [rbx + PyDictObject.capacity]
+
+    test r13, r13
+    jz .done
+.loop:
+    dec r13
+    ENTRY_CLASSIFY r12, .next, .next
+
+    ; DECREF key
+    push r12
+    push r13
+    mov rdi, [r12 + DictEntry.key]
+    V_UNPACK rdi, rsi
+    DECREF_VAL rdi, rsi
+    pop r13
+    pop r12
+
+    ; DECREF value
+    push r12
+    push r13
+    mov rdi, [r12 + DictEntry.value]
+    V_UNPACK rdi, rsi
+    DECREF_VAL rdi, rsi
+    pop r13
+    pop r12
+
+    ; Clear entry.  It has to become a *tombstone*, not just a zeroed key:
+    ; ENTRY_CLASSIFY reads key==0 with any hash other than -1 as "empty",
+    ; which ends a probe early, so a surviving key further along the chain
+    ; becomes unreachable.
+    mov qword [r12 + DictEntry.key], 0
+    mov qword [r12 + DictEntry.value], 0
+    mov qword [r12 + DictEntry.hash], ENTRY_TOMBSTONE_HASH
+
+.next:
+    add r12, DICT_ENTRY_SIZE
+    test r13, r13
+    jnz .loop
+.done:
+    ; Keep the header coherent with the table we just emptied: the sparse
+    ; index array has to forget the entries too.
+    mov rdi, [rbx + PyDictObject.dk_indices]
+    test rdi, rdi
+    jz .no_indices
+    mov rcx, [rbx + PyDictObject.capacity]
+    mov rax, DICT_IX_EMPTY
+    rep stosq
+.no_indices:
+    mov qword [rbx + PyDictObject.ob_size], 0
+    mov qword [rbx + PyDictObject.dk_nentries], 0
+    mov qword [rbx + PyDictObject.dk_tombstones], 0
+    inc qword [rbx + PyDictObject.dk_version]
+
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC dict_clear_gc
