@@ -1490,6 +1490,7 @@ DEF_FUNC_BARE op_contains_op
     mov rdi, rax
     mov rsi, rdx
     extern obj_is_true
+    extern obj_richcompare_bool
     V_PACK rdi, rsi
     call obj_is_true
     mov ecx, eax              ; save truthiness
@@ -1564,63 +1565,55 @@ DEF_FUNC_BARE op_contains_op
     je .contains_iter_found_decref
 
 .contains_iter_try_eq:
-    ; Both SmallInt → direct value compare
+    ; obj_richcompare_bool answers for every combination of representations
+    ; and propagates a raising __eq__.  What stood here open-coded the
+    ; comparison instead, and handled exactly two shapes: both SmallInt, or a
+    ; TAG_PTR element.  A SmallInt element against a heap-int value fell
+    ; through to identity and answered False -- so `98 in memoryview(b"abc..")`
+    ; was False while `98 in list(mv)` was True, and every int outside the
+    ; immediate range disagreed with itself depending on which side it sat on.
     push rax                     ; save elem payload
     push rdx                     ; save elem tag
-    mov r8d, edx                ; elem tag
-    mov ecx, [rsp + 16 + 8 + CN_LTAG]  ; value tag
-    cmp r8d, TAG_SMALLINT
-    jne .contains_iter_slow_eq
-    cmp ecx, TAG_SMALLINT
-    jne .contains_iter_slow_eq
-    ; Both SmallInt
-    cmp rax, [rsp + 16 + 8 + CN_LEFT]
-    pop rdx
-    pop rax
-    je .contains_iter_found_decref_elem
-    jmp .contains_iter_loop
-
-.contains_iter_slow_eq:
-    ; Use tp_richcompare for equality
-    ; rdi = elem (already on stack[+8]), rsi = value, edx = PY_EQ, rcx = elem_tag, r8 = value_tag
-    mov rdi, [rsp + 8]            ; elem payload
-    mov rsi, [rsp + 16 + 8 + CN_LEFT]  ; value payload
-    mov edx, 2                     ; PY_EQ
-    mov ecx, [rsp]                 ; elem tag
-    mov r8d, [rsp + 16 + 8 + CN_LTAG] ; value tag
-    ; Resolve element type
-    cmp ecx, TAG_PTR
-    jne .contains_iter_skip_eq     ; for non-PTR non-SmallInt, skip (identity only)
-    mov rax, [rdi + PyObject.ob_type]
-    mov rax, [rax + PyTypeObject.tp_richcompare]
-    test rax, rax
-    jz .contains_iter_skip_eq
-    V_PACK rdi, rcx             ; left  -> Value
-    V_PACK rsi, r8              ; right -> Value
-    call rax                        ; tp_richcompare(left, right, PY_EQ, left_tag, right_tag)
-    V_UNPACK rax, rdx           ; tp_richcompare returns a Value
-    ; Result: (rax=payload, edx=tag). Check if True
-    push rax
-    push rdx
     mov rdi, rax
     mov rsi, rdx
-    extern obj_is_true
-    V_PACK rdi, rsi
-    call obj_is_true
-    mov r8d, eax
-    pop rsi                         ; result tag
-    pop rdi                         ; result payload
-    DECREF_VAL rdi, rsi
-    pop rdx                         ; elem tag
-    pop rax                         ; elem payload
-    test r8d, r8d
+    V_PACK rdi, rsi              ; element -> Value
+    mov rsi, [rsp + 16 + 8 + CN_LEFT]
+    mov rcx, [rsp + 16 + 8 + CN_LTAG]
+    push rdi
+    sub rsp, 8                   ; keep rsp 16-aligned across the call
+    V_PACK rsi, rcx              ; the searched value -> Value
+    mov rdi, [rsp + 8]
+    mov edx, 2                   ; PY_EQ, set last: V_PACK can box, and the
+                                 ; call that boxes clobbers rdx
+    call obj_richcompare_bool
+    add rsp, 16
+    cmp eax, 0
+    jl .contains_iter_eq_raised
+    test eax, eax
+    pop rdx                      ; elem tag
+    pop rax                      ; elem payload
     jnz .contains_iter_found_decref_elem
     jmp .contains_iter_loop
 
-.contains_iter_skip_eq:
+.contains_iter_eq_raised:
+    ; __eq__ raised.  Drop the element and the iterator and let the pending
+    ; exception through rather than answering False.
     pop rdx
     pop rax
-    jmp .contains_iter_loop
+    mov rdi, rax
+    mov rsi, rdx
+    DECREF_VAL rdi, rsi
+    pop rdi                      ; iterator
+    call obj_decref
+    ; The two operands stay untouched.  They came off the value stack, and the
+    ; unwinder walks that stack and releases what is on it -- releasing them
+    ; here as the non-raising exits do would be one decref too many, and for
+    ; `x in iter(...)`, where the container IS the iterator, freed the object
+    ; the unwinder then read.  rsp needs no repair either: the unwinder
+    ; restores it from eval_base_rsp, which is how every RAISE in this file
+    ; leaves the machine stack.
+    extern eval_exception_unwind
+    jmp eval_exception_unwind
 
 .contains_iter_found_decref_elem:
     ; DECREF element if needed

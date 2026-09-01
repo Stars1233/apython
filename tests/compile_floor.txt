@@ -88,6 +88,7 @@ test_complex_format
 test_complex_literals
 test_complex
 test_container_dunders
+test_contains_fallback
 test_control_flow
 test_defaults
 test_del_and_gc_state
