@@ -595,6 +595,48 @@ END_FUNC float_bool
 ;; float_dealloc removed — floats are inline (TAG_FLOAT), no heap allocation
 
 ;; ============================================================================
+;; float_binop_accepts(rdi = payload, esi = tag) -> eax = 1 when this operand
+;; is one float arithmetic can consume: a float or an int in any of its shapes.
+;;
+;; The single definition of what float arithmetic accepts.  It used to be
+;; written out twice inside float_compare and a third time, differently, as
+;; binop_is_number in src/opcodes/arith.asm; the point of naming it is that a
+;; fourth copy cannot now drift from the others.
+;; ============================================================================
+DEF_FUNC_BARE float_binop_accepts
+    cmp esi, TAG_FLOAT
+    je .fba_yes
+    cmp esi, TAG_SMALLINT
+    je .fba_yes
+    cmp esi, TAG_PTR
+    jne .fba_no
+    test rdi, rdi
+    jz .fba_no
+    mov rax, [rdi + PyObject.ob_type]
+    lea rcx, [rel int_type]
+    cmp rax, rcx
+    je .fba_yes
+    lea rcx, [rel float_type]
+    cmp rax, rcx
+    je .fba_yes
+    ; A bool is an int, and float_to_f64 already handles one; only the
+    ; whitelist was missing it, so True < 2.5 raised and 1.0 == True was
+    ; False -- which also put True and 1.0 in different dict slots.
+    lea rcx, [rel bool_type]
+    cmp rax, rcx
+    je .fba_yes
+    mov rax, [rax + PyTypeObject.tp_flags]
+    test rax, TYPE_FLAG_INT_SUBCLASS
+    jnz .fba_yes
+.fba_no:
+    xor eax, eax
+    ret
+.fba_yes:
+    mov eax, 1
+    ret
+END_FUNC float_binop_accepts
+
+;; ============================================================================
 ;; Binary arithmetic: float_add, float_sub, float_mul, float_truediv,
 ;;                    float_floordiv, float_mod, float_neg
 ;; All take (PyObject *a, PyObject *b) -> PyObject*
@@ -607,12 +649,38 @@ FB_LEFT   equ 8             ; left operand, as a double
 FB_RIGHT  equ 16            ; right operand, as a double
 FB_RSAVE  equ 24            ; the right operand across the first conversion
 FB_RTAG   equ 32            ; and its tag
-FB_FRAME  equ 32            ; + 0 pushes = 32
+FB_LSAVE  equ 40            ; the left operand across the acceptance checks
+FB_LTAG   equ 48            ; and its tag
+FB_FRAME  equ 48            ; + 0 pushes = 48
 %macro FLOAT_BINOP_SETUP 0
     ; rdi=left, rsi=right, edx=left_tag, ecx=right_tag
-    mov [rbp - FB_RSAVE], rsi          ; save right operand
-    mov dword [rbp - FB_RTAG], ecx    ; save right_tag
-    mov esi, edx               ; esi = left_tag for float_to_f64
+    ;
+    ; Both operands are classified BEFORE either is converted.  float_to_f64
+    ; answers 0.0 for anything it does not recognise (.ret_zero below), so a
+    ; slot that converted first read a foreign object's bytes as a double and
+    ; returned a number: `a = "s"; a %= 1.5` was 0.0 rather than a TypeError.
+    ; Declining with a NULL Value hands the pair back to the protocol, which
+    ; then tries the other operand and finally raises.
+    mov [rbp - FB_RSAVE], rsi
+    mov dword [rbp - FB_RTAG], ecx
+    mov [rbp - FB_LSAVE], rdi
+    mov dword [rbp - FB_LTAG], edx
+    mov esi, edx                       ; esi = left_tag
+    call float_binop_accepts
+    test eax, eax
+    jz %%decline
+    mov rdi, [rbp - FB_RSAVE]
+    mov esi, dword [rbp - FB_RTAG]
+    call float_binop_accepts
+    test eax, eax
+    jnz %%accepted
+%%decline:
+    xor eax, eax                       ; NULL Value = NotImplemented
+    leave
+    ret
+%%accepted:
+    mov rdi, [rbp - FB_LSAVE]
+    mov esi, dword [rbp - FB_LTAG]
     call float_to_f64          ; rdi = left → xmm0
     movsd [rbp - FB_LEFT], xmm0
     mov rdi, [rbp - FB_RSAVE]
@@ -913,61 +981,41 @@ FC_LEFT  equ 8              ; left operand, as a double
 FC_RIGHT equ 16             ; right operand, as a double
 FC_OP    equ 24             ; the comparison opcode (4 bytes)
 FC_RTAG  equ 28             ; right operand's tag (4 bytes)
+FC_LTAG  equ 32             ; left operand's tag (4 bytes; 33..36 unused)
 FC_RSAVE equ 40             ; the right operand across the first conversion
-FC_FRAME equ 40             ; + 0 pushes = 40
+FC_LSAVE equ 48             ; and the left, across the two acceptance checks
+FC_FRAME equ 48             ; + 0 pushes = 48
 DEF_FUNC float_compare, FC_FRAME
     V_UNPACK rdi, rcx           ; left  Value -> (payload, tag)
     V_UNPACK rsi, r8            ; right Value -> (payload, tag)
     ; rdi=left, rsi=right, edx=op, ecx=left_tag, r8d=right_tag
-    ; Validate both operands are numeric (float, int, or bool)
-    ; Left tag
-    cmp ecx, TAG_FLOAT
-    je .fc_left_ok
-    cmp ecx, TAG_SMALLINT
-    je .fc_left_ok
-    cmp ecx, TAG_PTR
-    jne .fc_not_impl
-    mov rax, [rdi + PyObject.ob_type]
-    lea r9, [rel int_type]
-    cmp rax, r9
-    je .fc_left_ok
-    lea r9, [rel float_type]
-    cmp rax, r9
-    je .fc_left_ok
-    ; A bool is an int, and float_to_f64 already handles one; only this
-    ; whitelist was missing it, so True < 2.5 raised and 1.0 == True was
-    ; False -- which also put True and 1.0 in different dict slots.
-    lea r9, [rel bool_type]
-    cmp rax, r9
-    je .fc_left_ok
-    mov rax, [rax + PyTypeObject.tp_flags]
-    test rax, TYPE_FLAG_INT_SUBCLASS
-    jnz .fc_left_ok
-    jmp .fc_not_impl
-.fc_left_ok:
-    ; Right tag
-    cmp r8d, TAG_FLOAT
-    je .fc_right_ok
-    cmp r8d, TAG_SMALLINT
-    je .fc_right_ok
-    cmp r8d, TAG_PTR
-    jne .fc_not_impl
-    mov rax, [rsi + PyObject.ob_type]
-    lea r9, [rel int_type]
-    cmp rax, r9
-    je .fc_right_ok
-    lea r9, [rel float_type]
-    cmp rax, r9
-    je .fc_right_ok
-    lea r9, [rel bool_type]
-    cmp rax, r9
-    je .fc_right_ok
-    mov rax, [rax + PyTypeObject.tp_flags]
-    test rax, TYPE_FLAG_INT_SUBCLASS
-    jnz .fc_right_ok
-    jmp .fc_not_impl
+    ;
+    ; Both operands must be numeric.  The whitelist lives in
+    ; float_binop_accepts, which the arithmetic slots share; comparison used to
+    ; carry its own two copies of it.
+    ; Everything the code below still needs goes to the frame first: the calls
+    ; clobber every caller-saved register, and ecx (the left tag) and r8d (the
+    ; right tag) are both read again after this block.
+    mov [rbp - FC_OP], edx
+    mov [rbp - FC_LSAVE], rdi
+    mov [rbp - FC_RSAVE], rsi
+    mov [rbp - FC_LTAG], ecx
+    mov [rbp - FC_RTAG], r8d
+    mov esi, ecx                    ; esi = left_tag
+    call float_binop_accepts
+    test eax, eax
+    jz .fc_not_impl
+    mov rdi, [rbp - FC_RSAVE]
+    mov esi, [rbp - FC_RTAG]
+    call float_binop_accepts
+    test eax, eax
+    jz .fc_not_impl
+    mov rdi, [rbp - FC_LSAVE]
+    mov rsi, [rbp - FC_RSAVE]
+    mov edx, [rbp - FC_OP]
+    mov ecx, [rbp - FC_LTAG]
+    mov r8d, [rbp - FC_RTAG]
 .fc_right_ok:
-    mov [rbp - FC_OP], edx          ; save op (4 bytes)
 
     ; Convert both to doubles
     mov [rbp - FC_RSAVE], rsi          ; save right (8 bytes)

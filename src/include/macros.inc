@@ -597,6 +597,56 @@ TP_DICT_AT_TAIL equ -1
 %%dict_like:
 %endmacro
 
+; Decline -- with a NULL Value, this tree's NotImplemented -- unless the LEFT
+; operand of a binary nb_* slot is a pointer whose type is %1, or a subclass of
+; it when %2 names a TYPE_FLAG_*_SUBCLASS bit (pass 0 for none).  %3 is 1 when
+; the enclosing function has an rbp frame and must `leave` on the way out.
+;
+; Must be placed at the very top of the slot, before any push: the decline path
+; unwinds nothing.
+;
+; Sequence operations live in nb_add / nb_multiply here, where CPython keeps
+; them in sq_concat / sq_repeat and leaves the nb_* slots NULL.  Since
+; op_binary_op now offers a declined pair to the RIGHT operand's slot as well
+; -- CPython's binary_op1 -- `1 + "a"` reaches str_concat with an int on the
+; left.  Assuming the left operand is the slot's own type stopped being safe at
+; that moment.
+%macro BINOP_REQUIRE_LEFT 3
+    V_TEST_PTR rdi, rax         ; ja == not a pointer, so not %1 either
+    ja %%decline
+    mov rax, [rdi + PyObject.ob_type]
+    lea rcx, [rel %1]
+    cmp rax, rcx
+    je %%ok
+%if %2
+    test qword [rax + PyTypeObject.tp_flags], %2
+    jnz %%ok
+%endif
+%%decline:
+    xor eax, eax
+%if %3
+    leave
+%endif
+    ret
+%%ok:
+%endmacro
+
+; Require that a type object is set, frozenset, or a subclass of either; jump
+; away if not.  set was the one family with no such macro, which is why its
+; nb_* slots handed whatever they were given straight to set_method_union --
+; `{1,2} | 5` read address 5 as a set table.
+%macro REQUIRE_SET_TYPE 3
+    lea %2, [rel set_type]
+    cmp %1, %2
+    je %%set_like
+    lea %2, [rel frozenset_type]
+    cmp %1, %2
+    je %%set_like
+    test qword [%1 + PyTypeObject.tp_flags], TYPE_FLAG_SET_SUBCLASS
+    jz %3
+%%set_like:
+%endmacro
+
 ; Require that a type object is str or a str subclass; jump away if not.
 ; The exact-type test these replace rejected a str subclass everywhere it
 ; appeared -- "a" + MyStr("b") was a TypeError, and "a" == MyStr("a") was

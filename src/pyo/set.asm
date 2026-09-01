@@ -1045,7 +1045,33 @@ SNB_FRAME equ 32            ; + 0 pushes = 32
 ; The two operands, laid out as the args array the method form expects.
 SNB_LEFT  equ 32
 SNB_RIGHT equ 24
+
+; Both operands of a set operator must be sets.  The method forms are laxer on
+; purpose -- set.union(iterable) takes any iterable -- but the OPERATORS are
+; not: CPython raises TypeError for `{1,2} | [1]`, and these slots used to hand
+; the right operand to set_method_union, which reads it as a PyDictObject.
+; `{1,2} | 5` was an arbitrary read through address 5.
+;
+; Declining with a NULL Value rather than raising is what lets the protocol try
+; the other operand and then a user class's __ror__.
+%macro SET_NB_REQUIRE_BOTH 0
+    V_TEST_PTR rdi, rax         ; ja == not a pointer, so not a set either
+    ja %%bad
+    V_TEST_PTR rsi, rax
+    ja %%bad
+    mov rax, [rdi + PyObject.ob_type]
+    REQUIRE_SET_TYPE rax, rcx, %%bad
+    mov rax, [rsi + PyObject.ob_type]
+    REQUIRE_SET_TYPE rax, rcx, %%bad
+    jmp %%ok
+%%bad:
+    xor eax, eax                ; NULL Value = NotImplemented
+    leave
+    ret
+%%ok:
+%endmacro
 DEF_FUNC set_nb_or, SNB_FRAME
+    SET_NB_REQUIRE_BOTH
     mov [rbp - SNB_LEFT], rdi         ; args[0] = left
     mov [rbp - SNB_RIGHT], rsi         ; args[1] = right
     lea rdi, [rbp - SNB_LEFT]
@@ -1057,6 +1083,7 @@ END_FUNC set_nb_or
 
 ;; set_nb_and(left, right, ltag, rtag) -> new set (intersection)
 DEF_FUNC set_nb_and, SNB_FRAME
+    SET_NB_REQUIRE_BOTH
     mov [rbp - SNB_LEFT], rdi         ; args[0] = left
     mov [rbp - SNB_RIGHT], rsi         ; args[1] = right
     lea rdi, [rbp - SNB_LEFT]
@@ -1068,6 +1095,7 @@ END_FUNC set_nb_and
 
 ;; set_nb_sub(left, right, ltag, rtag) -> new set (difference)
 DEF_FUNC set_nb_sub, SNB_FRAME
+    SET_NB_REQUIRE_BOTH
     mov [rbp - SNB_LEFT], rdi         ; args[0] = left
     mov [rbp - SNB_RIGHT], rsi         ; args[1] = right
     lea rdi, [rbp - SNB_LEFT]
@@ -1079,6 +1107,7 @@ END_FUNC set_nb_sub
 
 ;; set_nb_xor(left, right, ltag, rtag) -> new set (symmetric_difference)
 DEF_FUNC set_nb_xor, SNB_FRAME
+    SET_NB_REQUIRE_BOTH
     mov [rbp - SNB_LEFT], rdi         ; args[0] = left
     mov [rbp - SNB_RIGHT], rsi         ; args[1] = right
     lea rdi, [rbp - SNB_LEFT]

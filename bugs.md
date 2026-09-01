@@ -9,6 +9,51 @@ one-line fix.
 
 ## Correctness
 
+- **`bytearray` has no arithmetic at all.**  `bytearray_type.tp_as_number` is 0
+  and `bytearray_seq_methods` has neither `sq_concat` nor `sq_repeat`, so
+  `bytearray(b"a") + bytearray(b"b")`, `bytearray(b"a") * 2` and
+  `bytearray(b"%d") % 5` are all TypeErrors.  `tests/test_binop_matrix.py`
+  skips those cells rather than blessing them.
+
+- **The set operators build their result with `set_new` whatever the left
+  operand was**, so `frozenset({1}) | frozenset({2})` is a `set`, not a
+  `frozenset`.  The same for `&`, `-`, `^` and their inplace forms.  The
+  contents are right; only the type is wrong.
+
+- **`%`-formatting takes only a tuple or a mapping on the right.**  CPython
+  also accepts a single arbitrary object, so `"ab" % [1, 2]` is `'ab'` there
+  and a TypeError here.
+
+- **`bytes` `%`-formatting converts through `str_mod`**, so its conversions are
+  str's rather than bytes': `b"%s" % b"x"` is `b"b'x'"` where CPython gives
+  `b'x'`, `b"%d" % "x"` answers `b'x'` where CPython raises, `b"%c" % 65` is a
+  TypeError, and a `bytes`-keyed mapping (`b"%(a)d" % {b"a": 1}`) raises
+  KeyError.  The segfault this path used to carry is fixed; the conversion
+  table is still str's.
+
+- **`dict.__ior__` takes only a dict.**  CPython's takes any iterable of
+  key/value pairs.
+
+- **PEP 604 unions are thin.**  `None | int` is a TypeError rather than
+  `None | int`, and `int | int` is not collapsed to `int`.
+
+- **The binary-operator TypeError names neither the operator nor the operand
+  types.**  Ours is the fixed string `unsupported operand type(s)`; CPython
+  says `unsupported operand type(s) for +: 'int' and 'str'`, and has two more
+  wordings besides (`can only concatenate str ...`, `can't multiply sequence by
+  non-int of type ...`).  Matching them needs a formatted-raise helper, which
+  `raise_exception` has no equivalent of.  Until then **no test may compare
+  `str(e)` for one of these** -- `type(e).__name__` is the contract, and
+  `tests/test_binop_matrix.py` says so where the next person will read it.
+
+- **`binary_op1`'s subclass rule is not implemented.**  CPython tries the right
+  operand's slot *first* when its type is a proper subclass of the left's and
+  overrides the slot.  It cannot fire here: the only builtin static subclass
+  relationship is `bool` ⊂ `int`, and `bool_number_methods` holds the very same
+  function pointers as `int_number_methods`, which CPython's own
+  `if (slotw == slotv)` collapses to nothing.  Revisit if a builtin static type
+  is ever given a slot function that differs from its base's.
+
 - **Case conversion is ASCII-only.**  `"é".upper()` is `"é"`, not `"É"`;
   `upper`, `lower`, `title`, `capitalize` and `swapcase` all leave a
   non-ASCII byte as it is.  Needs Unicode case tables.

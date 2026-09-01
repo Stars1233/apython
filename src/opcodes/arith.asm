@@ -20,6 +20,7 @@
 
 section .text
 
+extern int_is_integer
 extern eval_dispatch
 extern obj_is_true
 extern bool_true
@@ -187,12 +188,28 @@ DEF_FUNC_BARE op_binary_op
     jmp .use_float_methods
 
 .no_float_coerce:
-    ; For NB_ADD (0/13) and NB_MULTIPLY (5/18): if left is int/SmallInt
-    ; and right has sq_concat/sq_repeat, use sequence method instead.
-    ; This handles: 3 * "ab", 3 * [1,2], etc.
-    cmp qword [rsp + BO_LTAG], TAG_SMALLINT
-    jne .binop_not_smallint_left
-    ; Left is SmallInt — check if right has sequence methods
+    ; For NB_MULTIPLY (5/18): an integer on one side and a sequence on the
+    ; other means sq_repeat -- 3 * "ab", 3 * [1,2].
+    ;
+    ; "Integer" is int_is_integer, not `tag == TAG_SMALLINT`.  True and False
+    ; are heap singletons, every int is a heap object under INT_STRESS=1, and
+    ; an int subclass instance is a pointer as well; all three arrive as
+    ; TAG_PTR.  Gating on the tag sent them past this arm into int_mul, where
+    ; INT_NEED_MPZ wrote an mpz_t over the sequence's own header -- and
+    ; `True * [1,2]` is ordinary Python, not a type error.
+    ;
+    ; r15 is the handler scratch register (CLAUDE.md's register table); r9d
+    ; holds the op index and does not survive a call.
+    mov r15d, r9d
+    mov rdi, [rsp + BO_LEFT]
+    mov rdx, [rsp + BO_LTAG]
+    call int_is_integer
+    mov r9d, r15d
+    mov rdi, [rsp + BO_LEFT]
+    mov rsi, [rsp + BO_RIGHT]
+    test eax, eax
+    jz .binop_not_int_left
+    ; Left is an integer — check if right has sequence methods
     cmp r9d, 5              ; NB_MULTIPLY
     je .binop_try_right_seq
     cmp r9d, 18             ; NB_INPLACE_MULTIPLY
@@ -223,8 +240,7 @@ DEF_FUNC_BARE op_binary_op
     V_UNPACK rax, rdx           ; sq_repeat returns a Value
     jmp .binop_have_result
 
-.binop_not_smallint_left:
-    ; TAG_BOOL: route to int (int_unwrap handles TAG_BOOL)
+.binop_not_int_left:
     ; Non-pointer guard: TAG_NONE, TAG_FLOAT can't be dereferenced
     test qword [rsp + BO_LTAG], TAG_RC_BIT
     jz .binop_no_method
@@ -234,8 +250,16 @@ DEF_FUNC_BARE op_binary_op
     je .binop_try_left_seq
     jmp .binop_left_seq_done
 .binop_try_left_seq:
-    cmp qword [rsp + BO_RTAG], TAG_SMALLINT
-    jne .binop_left_seq_done
+    ; Same reasoning as the arm above: the count may be a bool or a heap int.
+    mov r15d, r9d
+    mov rdi, [rsp + BO_RIGHT]
+    mov rdx, [rsp + BO_RTAG]
+    call int_is_integer
+    mov r9d, r15d
+    mov rdi, [rsp + BO_LEFT]
+    mov rsi, [rsp + BO_RIGHT]
+    test eax, eax
+    jz .binop_left_seq_done
     mov rax, [rdi + PyObject.ob_type]
     mov rax, [rax + PyTypeObject.tp_as_sequence]
     test rax, rax
@@ -321,37 +345,17 @@ DEF_FUNC_BARE op_binary_op
 .binop_fallback_have_methods:
     test rax, rax
     jz .binop_try_dunder
+    mov r8, rdx                ; the effective slot offset, for the right-slot try
     mov rax, [rax + rdx]
     test rax, rax
     jz .binop_try_dunder
 
 .binop_have_method:
-
-    ; Guard: if left is SmallInt/Bool and right is a heaptype (not int subclass),
-    ; the int nb_* methods can't handle it. Skip to dunder dispatch.
-    cmp qword [rsp + BO_LTAG], TAG_SMALLINT
-    je .binop_guard_int_left
-    jmp .binop_compat_ok
-
-.binop_guard_int_left:
-    ; Left is int/bool. Check if right is an incompatible heaptype.
-    test qword [rsp + BO_RTAG], TAG_RC_BIT
-    jz .binop_compat_ok          ; right not a heap pointer → compatible
-    ; Right is a heap pointer (TAG_PTR)
-    push rax                     ; save method ptr
-    mov r10, [rsp + 8 + BO_RIGHT]
-    mov r10, [r10 + PyObject.ob_type]
-    test qword [r10 + PyTypeObject.tp_flags], TYPE_FLAG_HEAPTYPE
-    jz .binop_guard_ok           ; not heaptype → could be GMP int, proceed
-    test qword [r10 + PyTypeObject.tp_flags], TYPE_FLAG_INT_SUBCLASS
-    jnz .binop_guard_ok          ; int subclass → int methods handle it
-    ; Heaptype non-int-subclass → skip to dunders
-    pop rax
-    jmp .binop_try_dunder
-.binop_guard_ok:
-    pop rax
-
-.binop_compat_ok:
+    ; There is deliberately no guard here on what the right operand is.  There
+    ; used to be one, and it tested TYPE_FLAG_HEAPTYPE -- which no builtin
+    ; static type carries, so str, list, dict, tuple, bytes, None, range and
+    ; slice all walked straight into int's slots.  Deciding whether a slot can
+    ; handle a pair is the slot's own job now; each declines with a NULL Value.
 
 .binop_do_call:
     ; Call the method: rdi = left Value, rsi = right Value
@@ -359,8 +363,21 @@ DEF_FUNC_BARE op_binary_op
     mov rcx, [rsp + BO_RTAG]
     V_PACK rdi, rdx
     V_PACK rsi, rcx
+    ; r8 (slot offset) and r9 (op index) are caller-saved and both are needed
+    ; after the call now that it can decline.  Two pushes also keep rsp's
+    ; 16-byte alignment across the call.
+    push r9
+    push r8
     call rax
+    pop r8
+    pop r9
     V_UNPACK rax, rdx           ; the nb_ slot returns a Value
+    ; A NULL Value is NotImplemented: the slot does not handle this pair, so
+    ; the protocol carries on rather than pushing NULL as the answer.  Without
+    ; this test a slot cannot decline, which is why the int slots used to
+    ; dereference whatever they were handed instead of refusing it.
+    test edx, edx
+    jz .binop_try_right_slot
 
 .binop_have_result:
     ; rax = result payload, rdx = result tag
@@ -423,6 +440,58 @@ DEF_FUNC_BARE op_binary_op
     V_PACK rsi, rcx
     call rax
     V_UNPACK rax, rdx           ; sq_repeat returns a Value
+    jmp .binop_have_result
+
+.binop_try_right_slot:
+    ; The second half of CPython's binary_op1: the LEFT type's slot declined,
+    ; so the RIGHT type gets its turn at the same slot, with the operands still
+    ; in their original order.
+    ;
+    ; This is what lets a type serve an operand the other side has never heard
+    ; of, and it is the only route by which a numeric type added later can
+    ; answer `1 + <that type>` -- int's slot declines, and the new type's slot
+    ; is asked next.  Without it a builtin static type on the right can never
+    ; be reached at all: the dunder arm below requires TYPE_FLAG_HEAPTYPE.
+    ;
+    ; CPython also skips this when both types resolve to the same slot
+    ; function.  Not worth a compare here: the only builtins that share one are
+    ; int and bool, whose slot declines a second time just as cheaply.
+    mov rsi, [rsp + BO_RIGHT]
+    mov rcx, [rsp + BO_RTAG]
+    cmp rcx, TAG_SMALLINT
+    je .brs_int_type
+    cmp rcx, TAG_FLOAT
+    je .brs_float_type
+    test rcx, TAG_RC_BIT
+    jz .binop_try_dunder        ; not a pointer: no type to ask
+    mov rax, [rsi + PyObject.ob_type]
+    jmp .brs_have_type
+.brs_int_type:
+    lea rax, [rel int_type]
+    jmp .brs_have_type
+.brs_float_type:
+    lea rax, [rel float_type]
+.brs_have_type:
+    mov rax, [rax + PyTypeObject.tp_as_number]
+    test rax, rax
+    jz .binop_try_dunder
+    mov rax, [rax + r8]         ; r8 = the effective nb_* slot offset
+    test rax, rax
+    jz .binop_try_dunder
+    mov rdi, [rsp + BO_LEFT]
+    mov rsi, [rsp + BO_RIGHT]
+    mov rdx, [rsp + BO_LTAG]
+    mov rcx, [rsp + BO_RTAG]
+    V_PACK rdi, rdx
+    V_PACK rsi, rcx
+    push r9
+    push r8
+    call rax
+    pop r8
+    pop r9
+    V_UNPACK rax, rdx
+    test edx, edx
+    jz .binop_try_dunder        ; both sides declined
     jmp .binop_have_result
 
 .binop_try_dunder:

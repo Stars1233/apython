@@ -15,6 +15,7 @@ test_async_run
 test_async_tasks
 test_async_wait_for
 test_async_with
+test_binop_matrix
 test_bitwise
 test_bool_arith
 test_bool
@@ -25,6 +26,7 @@ test_builtins
 test_builtin_subclass
 test_bytes_bytearray_repr
 test_bytes_methods
+test_bytes_percent
 test_bytes
 test_bytes_subclass_dict
 test_call_ex

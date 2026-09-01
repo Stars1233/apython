@@ -1004,13 +1004,23 @@ BM_ARGS  equ 16
 BM_FRAME equ 16             ; + 0 pushes = 16
 
 DEF_FUNC bytes_mod, BM_FRAME
-    V_UNPACK rdi, rdx           ; left  Value -> (payload, tag)
-    V_UNPACK rsi, rcx           ; right Value -> (payload, tag)
+    ; The right operand stays a Value.  It used to be V_UNPACK'd here and the
+    ; raw payload handed to str_mod -- which is itself an nb_remainder slot and
+    ; unpacks its arguments again.  For `b"%d" % 5` the bare 5 has a zero
+    ; high16, so the second unpack read it as a pointer and dereferenced
+    ; address 0x5.  A heap int survived by luck, a pointer being its own Value,
+    ; which is why tests/cpython/test_int.py:843 never caught it.
+    mov [rbp-BM_ARGS], rsi      ; args, still a Value
+    V_TEST_PTR rdi, rax         ; ja == not a pointer, so not bytes either
+    ja .bm_decline
+    mov rax, [rdi + PyObject.ob_type]
+    lea rcx, [rel bytes_type]
+    cmp rax, rcx
+    jne .bm_decline
     push rbx
     push r12
 
     mov [rbp-BM_FMT], rdi     ; fmt bytes obj
-    mov [rbp-BM_ARGS], rsi    ; args
     ; Convert bytes to str
     mov rsi, [rdi + PyBytesObject.ob_size]
     lea rdi, [rdi + PyBytesObject.data]
@@ -1021,13 +1031,18 @@ DEF_FUNC bytes_mod, BM_FRAME
     ; Call str_mod(temp_str, args)
     extern str_mod
     mov rdi, rbx               ; temp str
-    mov rsi, [rbp-BM_ARGS]    ; args
+    mov rsi, [rbp-BM_ARGS]    ; args, a Value -- str_mod is a slot and unpacks
     call str_mod
-    mov r12, rax               ; r12 = result str
+    mov r12, rax               ; r12 = result str Value (a str is a pointer)
 
     ; DECREF temp fmt str
     mov rdi, rbx
     DECREF_REG rdi
+
+    ; str_mod raises rather than declining, but a NULL here would be read as a
+    ; PyStrObject below, so refuse it rather than trusting the callee.
+    test r12, r12
+    jz .bm_failed
 
     ; Convert result str to bytes
     mov rdi, [r12 + PyStrObject.ob_size]
@@ -1050,6 +1065,20 @@ DEF_FUNC bytes_mod, BM_FRAME
     pop rbx
     leave
     V_PACK rax, rdx             ; return one Value
+    ret
+
+.bm_failed:
+    ; str_mod left an exception pending; propagate the NULL Value.
+    xor eax, eax
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.bm_decline:
+    ; Reached before the pushes, so there is no mirror to unwind.
+    xor eax, eax                ; NULL Value = NotImplemented
+    leave
     ret
 END_FUNC bytes_mod
 
@@ -1109,6 +1138,7 @@ section .text
 ;; raised TypeError; only the constant-folded form worked.
 ;; ============================================================================
 DEF_FUNC bytes_concat
+    BINOP_REQUIRE_LEFT bytes_type, 0, 1
     push rbx
     push r12
     push r13
@@ -1167,6 +1197,7 @@ END_FUNC bytes_concat
 ;; bytes_repeat(bytes Value, count Value) -> Value
 ;; ============================================================================
 DEF_FUNC bytes_repeat
+    BINOP_REQUIRE_LEFT bytes_type, 0, 1
     push rbx
     push r12
     push r13

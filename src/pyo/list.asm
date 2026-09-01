@@ -4,6 +4,7 @@
 %include "macros.inc"
 %include "object.inc"
 
+extern int_is_integer
 extern ap_malloc
 extern gc_alloc
 extern gc_track
@@ -1296,6 +1297,7 @@ END_FUNC list_getslice
 ;; Concatenate two lists: [1,2] + [3,4] -> [1,2,3,4]
 ;; ============================================================================
 DEF_FUNC list_concat
+    BINOP_REQUIRE_LEFT list_type, TYPE_FLAG_LIST_SUBCLASS, 1
     V_UNPACK rdi, rdx           ; left  Value -> (payload, tag)
     V_UNPACK rsi, rcx           ; right Value -> (payload, tag)
     push rbx
@@ -1375,6 +1377,7 @@ END_FUNC list_concat
 ;; Repeat a list: [1,2] * 3 -> [1,2,1,2,1,2]
 ;; ============================================================================
 DEF_FUNC list_repeat
+    BINOP_REQUIRE_LEFT list_type, TYPE_FLAG_LIST_SUBCLASS, 1
     V_UNPACK rdi, rdx           ; left  Value -> (payload, tag)
     V_UNPACK rsi, rcx           ; right Value -> (payload, tag)
     push rbx
@@ -1603,6 +1606,17 @@ END_FUNC list_inplace_concat
 LIR_OLDSIZE equ 16
 LIR_FRAME   equ 16          ; + 0 pushes = 16
 DEF_FUNC list_inplace_repeat, LIR_FRAME
+    ; The count must be an integer.  int_to_i64 below reads its argument as a
+    ; PyIntObject, so `a = [1]; a *= "x"` used to read a PyStrObject's header
+    ; as an int and repeat the list that many times.  Checked before the
+    ; pushes, so the decline is a bare leave/ret.
+    push rdi                    ; save the left Value (int_is_integer is a leaf,
+    mov rdi, rsi                ; so the odd rsp across the call is harmless)
+    V_UNPACK rdi, rdx           ; right Value -> (payload, tag)
+    call int_is_integer
+    pop rdi
+    test eax, eax
+    jz .lir_decline
     V_UNPACK rdi, rdx           ; left  Value -> (payload, tag)
     V_UNPACK rsi, rcx           ; right Value -> (payload, tag)
     push rbx
@@ -1723,6 +1737,11 @@ DEF_FUNC list_inplace_repeat, LIR_FRAME
 .lir_overflow:
     extern exc_OverflowError_type
     RAISE exc_OverflowError_type, "too many items for list repetition"
+.lir_decline:
+    ; Reached before the pushes, so there is no mirror to unwind.
+    xor eax, eax                ; NULL Value = NotImplemented
+    leave
+    ret
 END_FUNC list_inplace_repeat
 
 ;; ============================================================================

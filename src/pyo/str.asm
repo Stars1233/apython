@@ -848,6 +848,7 @@ END_FUNC str_hash
 ;; Binary op handler passes right_tag in ecx. Direct callers must set ecx=TAG_PTR.
 ;; ============================================================================
 DEF_FUNC str_concat
+    BINOP_REQUIRE_LEFT str_type, TYPE_FLAG_STR_SUBCLASS, 1
     V_UNPACK rdi, rdx           ; left  Value -> (payload, tag)
     V_UNPACK rsi, rcx           ; right Value -> (payload, tag)
     ; Check right tag first — non-TAG_PTR means not a heap string
@@ -919,6 +920,7 @@ END_FUNC str_concat
 ;; String repetition via nb_multiply
 ;; ============================================================================
 DEF_FUNC str_repeat
+    BINOP_REQUIRE_LEFT str_type, TYPE_FLAG_STR_SUBCLASS, 1
     V_UNPACK rdi, rdx           ; left  Value -> (payload, tag)
     V_UNPACK rsi, rcx           ; right Value -> (payload, tag)
     push rbx
@@ -1052,6 +1054,7 @@ SM_ISMAP   equ 176       ; the right operand is a mapping: %(name)s, no arity ch
 SM_FRAME   equ 184          ; + 0 pushes = 184, not 16-aligned
 
 DEF_FUNC str_mod, SM_FRAME
+    BINOP_REQUIRE_LEFT str_type, TYPE_FLAG_STR_SUBCLASS, 1
     V_UNPACK rdi, rdx           ; left  Value -> (payload, tag)
     V_UNPACK rsi, rcx           ; right Value -> (payload, tag)
     ; Stack layout:
