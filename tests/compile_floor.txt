@@ -214,6 +214,7 @@ test_percent_format
 test_phase4
 test_phase6
 test_posix_files
+test_posix_pathlike
 test_posix
 test_pow
 test_prepare_raises

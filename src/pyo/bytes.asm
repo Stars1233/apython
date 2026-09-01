@@ -57,8 +57,14 @@ DEF_FUNC bytes_new
 
     mov r12, rdi                ; r12 = size
 
-    ; Allocate: header (PyBytesObject.data = 24) + size
-    lea rdi, [r12 + PyBytesObject.data]
+    ; Allocate: header + size + a NUL.  The terminator is not decoration: a
+    ; bytes reaches the kernel as a path, and posix_path_arg compares
+    ; ap_strlen against ob_size to refuse an embedded one.  Without it that
+    ; comparison read past the end of the object and the answer depended on
+    ; whatever byte the allocator happened to leave there -- so
+    ; posix.stat(b"/some/path") raised "embedded null byte" or not, by luck.
+    ; CPython terminates its bytes for the same reason.
+    lea rdi, [r12 + PyBytesObject.data + 1]
     call ap_malloc
     mov rbx, rax                ; rbx = new bytes obj
 
@@ -67,6 +73,7 @@ DEF_FUNC bytes_new
     lea rax, [rel bytes_type]
     mov [rbx + PyObject.ob_type], rax
     mov [rbx + PyBytesObject.ob_size], r12
+    mov byte [rbx + PyBytesObject.data + r12], 0
 
     mov rax, rbx
     pop r12
@@ -87,8 +94,8 @@ DEF_FUNC bytes_from_data
     mov r12, rdi                ; r12 = source data ptr
     mov r13, rsi                ; r13 = size
 
-    ; Allocate: header + size
-    lea rdi, [r13 + PyBytesObject.data]
+    ; Allocate: header + size + a NUL -- see bytes_new for why.
+    lea rdi, [r13 + PyBytesObject.data + 1]
     call ap_malloc
     mov rbx, rax                ; rbx = new bytes obj
 
@@ -97,6 +104,7 @@ DEF_FUNC bytes_from_data
     lea rax, [rel bytes_type]
     mov [rbx + PyObject.ob_type], rax
     mov [rbx + PyBytesObject.ob_size], r13
+    mov byte [rbx + PyBytesObject.data + r13], 0
 
     ; Copy data in
     lea rdi, [rbx + PyBytesObject.data]

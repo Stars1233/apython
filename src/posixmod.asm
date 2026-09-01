@@ -39,7 +39,9 @@ extern obj_dealloc
 extern obj_incref
 extern raise_exception
 extern raise_oserror
+extern raise_oserror_owned
 extern raise_type_error_with_name
+extern current_exception
 extern exc_TypeError_type
 extern exc_ValueError_type
 extern exc_OSError_type
@@ -125,26 +127,74 @@ section .text
 %endmacro
 
 ;; ============================================================================
-;; posix_path_arg(rdi = Value) -> rax = const char *, rdx = the str/bytes whose
-;;   storage it points into (borrowed if rcx = 0, owned if rcx = 1)
+;; posix_path_arg(rdi = Value) -> rax = const char *, rdx = an object the
+;;   caller must release, or 0
 ;;
 ;; str, bytes, and anything with __fspath__.  Every PyStrObject and
-;; PyBytesObject here is NUL-terminated, so the pointer is the caller's path
-;; with no copy.
+;; PyBytesObject here is NUL-terminated, so for those two the pointer is the
+;; caller's own path with no copy and rdx comes back 0.
+;;
+;; __fspath__ is the case that allocates: its result is a new str or bytes,
+;; the returned pointer is into it, and it stays alive exactly as long as the
+;; caller holds it.  rdx is that object.  Every caller used to ignore it --
+;; the contract said "owned" in a flag nobody read -- so every PathLike
+;; argument leaked its resolved path.
+;;
+;; POSIX_PATH_DONE is the release, and it belongs immediately after the
+;; syscall and BEFORE the POSIX_CHECK: by then the kernel has copied the path
+;; out, and the check reports the caller's own argument rather than this.
+;; Putting it after the check would not run at all, since a raise abandons the
+;; C stack.
 ;;
 ;; An embedded NUL is refused: the syscall would silently see a shorter path,
 ;; and CPython raises ValueError for exactly this.
 ;;
 ;; Returns rax = 0 with an exception pending on a bad type.
 ;; ============================================================================
+%macro POSIX_PATH_DONE 1        ; %1 = a frame slot holding what rdx returned
+    push rax
+    push rdx
+    mov rdi, %1
+    test rdi, rdi
+    jz %%none
+    mov qword %1, 0
+    call obj_decref
+%%none:
+    pop rdx
+    pop rax
+%endmacro
+
+;; The pair of them, in the order they have to happen: the errno check names
+;; the RESOLVED path, so the release cannot come first -- CPython reports
+;; "No such file or directory: '/tmp/x'", not the PathLike object that
+;; produced it.  raise_oserror_owned builds the exception, releases the
+;; resolved path, and only then raises.
+%macro POSIX_PATH_CHECK 3       ; %1 = result, %2 = the original Value,
+                                ; %3 = the slot holding the resolved path
+    cmp %1, -4095
+    jb %%ok
+    mov rdi, %1
+    neg rdi
+    mov rsi, %2
+    mov rdx, %3
+    call raise_oserror_owned    ; does not return
+%%ok:
+    POSIX_PATH_DONE %3
+%endmacro
+
 PPA_VAL   equ 8
 PPA_OWNED equ 16
 PPA_PTR   equ 24
-PPA_FRAME equ 32            ; + 0 pushes = 32
+PPA_EXC   equ 32            ; current_exception before __fspath__ ran
+PPA_ORIG  equ 40            ; the argument as given, for the message
+PPA_FRAME equ 48            ; + 0 pushes = 48
 
 DEF_FUNC posix_path_arg, PPA_FRAME
     mov [rbp - PPA_VAL], rdi
+    mov [rbp - PPA_ORIG], rdi   ; kept: the message names the class whose
+                                ; __fspath__ answered wrongly, not the answer
     mov qword [rbp - PPA_OWNED], 0
+    mov qword [rbp - PPA_EXC], 0
 
 .ppa_classify:
     mov rdi, [rbp - PPA_VAL]
@@ -166,11 +216,26 @@ DEF_FUNC posix_path_arg, PPA_FRAME
     cmp qword [rbp - PPA_OWNED], 0
     jne .ppa_bad                ; already followed one
     CSTRING rsi, "__fspath__"
+    DUNDER_EXC_SAVE [rbp - PPA_EXC]
     call dunder_call_1
     test edx, edx
-    jz .ppa_bad
+    jnz .ppa_got_fspath
+    ; NULL means either "no __fspath__" or "__fspath__ raised", and reporting
+    ; the second as a bad path type buries the real exception.
+    DUNDER_RAISED [rbp - PPA_EXC], .ppa_propagate
+    jmp .ppa_bad
+.ppa_got_fspath:
     mov [rbp - PPA_VAL], rax
-    mov qword [rbp - PPA_OWNED], 1
+    ; Only a POINTER is recorded as owned.  __fspath__ can return anything --
+    ; `def __fspath__(self): return 5` is a TypeError, but the release runs
+    ; before the message is built, and obj_decref on an int immediate writes
+    ; through the number.
+    V_TEST_PTR rax, rcx
+    ja .ppa_classify
+    test rax, rax
+    jz .ppa_classify
+    mov [rbp - PPA_OWNED], rax  ; the object itself, so the raise paths and
+                                ; the caller release the same thing
     jmp .ppa_classify
 
 .ppa_str:
@@ -194,15 +259,57 @@ DEF_FUNC posix_path_arg, PPA_FRAME
     cmp rax, rcx
     jne .ppa_embedded_nul
     mov rax, [rbp - PPA_PTR]
-    mov rdx, [rbp - PPA_OWNED]
+    mov rdx, [rbp - PPA_OWNED]  ; the __fspath__ result, now the caller's
     leave
     ret
 
+.ppa_propagate:
+    extern eval_exception_unwind
+    POSIX_PATH_DONE [rbp - PPA_OWNED]
+    leave
+    jmp eval_exception_unwind
+
 .ppa_embedded_nul:
+    ; Both raise paths below still hold the __fspath__ result, and a raise
+    ; abandons the C stack: release it here or nobody will.
+    POSIX_PATH_DONE [rbp - PPA_OWNED]
     RAISE exc_ValueError_type, "embedded null byte"
 
 .ppa_bad:
+    ; Two different failures share this label: the argument was never a path,
+    ; or its __fspath__ handed back something that is not one.  CPython words
+    ; them differently, and the second names the class.
+    mov rax, [rbp - PPA_ORIG]
+    cmp rax, [rbp - PPA_VAL]
+    je .ppa_bad_plain
+
+    lea rdi, [rel pm_msgbuf]
+    lea rsi, [rel pm_msg_expected]
+    mov rdx, 40
+    call posix_copy_bounded
+    mov rdi, rax
+    mov rsi, [rbp - PPA_ORIG]
+    call posix_typename_of
+    mov rdi, rax
+    lea rsi, [rel pm_msg_fspath]
+    mov rdx, 60
+    call posix_copy_bounded
+    mov rdi, rax
     mov rsi, [rbp - PPA_VAL]
+    call posix_typename_of
+    POSIX_PATH_DONE [rbp - PPA_OWNED]
+    lea rdi, [rel exc_TypeError_type]
+    lea rsi, [rel pm_msgbuf]
+    call raise_exception
+    ud2
+
+.ppa_bad_plain:
+    mov rsi, [rbp - PPA_VAL]
+    push rsi
+    sub rsp, 8
+    POSIX_PATH_DONE [rbp - PPA_OWNED]
+    add rsp, 8
+    pop rsi
     CSTRING rdi, `path should be string, bytes, or os.PathLike, not \x01`
     call raise_type_error_with_name
 END_FUNC posix_path_arg
@@ -292,8 +399,9 @@ END_FUNC posix_stat_result
 ;; posix.stat(path) / posix.lstat(path) / posix.fstat(fd)
 ;; ============================================================================
 PST_PATH  equ 8
-PST_BUF   equ 16 + StatBuf_size
-PST_FRAME equ 16 + StatBuf_size      ; derived, not hand-picked: a struct in a
+PST_OWNED equ 16                     ; what posix_path_arg asked us to release
+PST_BUF   equ 32 + StatBuf_size
+PST_FRAME equ 32 + StatBuf_size      ; derived, not hand-picked: a struct in a
                                      ; frame outgrows a guessed offset silently
 
 DEF_FUNC posix_stat, PST_FRAME
@@ -320,10 +428,11 @@ DEF_FUNC posix_stat, PST_FRAME
     call posix_path_arg
     test rax, rax
     jz .pst_fail
+    mov [rbp - PST_OWNED], rdx
     lea rsi, [rbp - PST_BUF]
     mov rdi, rax
     call sys_stat
-    POSIX_CHECK rax, [rbp - PST_PATH]
+    POSIX_PATH_CHECK rax, [rbp - PST_PATH], [rbp - PST_OWNED]
     lea rdi, [rbp - PST_BUF]
     call posix_stat_result
     leave
@@ -355,10 +464,11 @@ DEF_FUNC posix_lstat, PST_FRAME
     call posix_path_arg
     test rax, rax
     jz .plst_fail
+    mov [rbp - PST_OWNED], rdx
     lea rsi, [rbp - PST_BUF]
     mov rdi, rax
     call sys_lstat
-    POSIX_CHECK rax, [rbp - PST_PATH]
+    POSIX_PATH_CHECK rax, [rbp - PST_PATH], [rbp - PST_OWNED]
     lea rdi, [rbp - PST_BUF]
     call posix_stat_result
     leave
@@ -406,7 +516,10 @@ PLD_LIST  equ 24
 PLD_BUF   equ 32
 PLD_N     equ 40            ; bytes getdents64 wrote this round
 PLD_OFF   equ 48            ; the cursor into the buffer
-PLD_FRAME equ 48            ; + 2 pushes = 64, 16-byte aligned
+PLD_OWNED equ 56            ; what posix_path_arg asked us to release
+PLD_ERR   equ 64            ; the errno of a failed getdents64, held across
+                            ; the cleanup that has to happen before it raises
+PLD_FRAME equ 64            ; + 2 pushes = 80, 16-byte aligned
 
 DEF_FUNC posix_listdir, PLD_FRAME
     push rbx
@@ -414,6 +527,7 @@ DEF_FUNC posix_listdir, PLD_FRAME
     mov qword [rbp - PLD_BUF], 0
     mov qword [rbp - PLD_LIST], 0
     mov qword [rbp - PLD_FD], -1
+    mov qword [rbp - PLD_OWNED], 0
 
     ; The default is ".", as os.listdir()'s is.
     test rsi, rsi
@@ -426,6 +540,7 @@ DEF_FUNC posix_listdir, PLD_FRAME
     test rax, rax
     jz .pld_fail
     mov rbx, rax
+    mov [rbp - PLD_OWNED], rdx
     jmp .pld_open
 .pld_dot:
     mov qword [rbp - PLD_PATH], 0
@@ -436,7 +551,7 @@ DEF_FUNC posix_listdir, PLD_FRAME
     mov esi, O_RDONLY | O_DIRECTORY | O_CLOEXEC
     xor edx, edx
     call sys_open
-    POSIX_CHECK rax, [rbp - PLD_PATH]
+    POSIX_PATH_CHECK rax, [rbp - PLD_PATH], [rbp - PLD_OWNED]
     mov [rbp - PLD_FD], rax
 
     mov edi, PLD_BUFSZ
@@ -456,7 +571,30 @@ DEF_FUNC posix_listdir, PLD_FRAME
     mov rsi, [rbp - PLD_BUF]
     mov edx, PLD_BUFSZ
     call sys_getdents64
-    POSIX_CHECK rax, [rbp - PLD_PATH]
+    ; Not POSIX_CHECK: by here the descriptor is open, the 32 KiB buffer is
+    ; allocated and the list is half built, and a raise abandons the C stack
+    ; without running any of the cleanup below.  Close and free FIRST, then
+    ; raise with the errno kept aside.
+    cmp rax, -4095
+    jb .pld_read_ok
+    neg rax
+    mov [rbp - PLD_ERR], rax
+    mov rdi, [rbp - PLD_FD]
+    call sys_close
+    mov qword [rbp - PLD_FD], -1
+    mov rdi, [rbp - PLD_BUF]
+    call ap_free
+    mov qword [rbp - PLD_BUF], 0
+    mov rdi, [rbp - PLD_LIST]
+    test rdi, rdi
+    jz .pld_read_raise
+    mov qword [rbp - PLD_LIST], 0
+    call obj_decref
+.pld_read_raise:
+    mov rdi, [rbp - PLD_ERR]
+    mov rsi, [rbp - PLD_PATH]
+    call raise_oserror              ; does not return
+.pld_read_ok:
     test rax, rax
     jz .pld_done                    ; 0 = the directory is exhausted
     mov [rbp - PLD_N], rax
@@ -512,6 +650,7 @@ DEF_FUNC posix_listdir, PLD_FRAME
     ret
 
 .pld_fail:
+    POSIX_PATH_DONE [rbp - PLD_OWNED]
     mov rdi, [rbp - PLD_FD]
     cmp rdi, 0
     jl .pld_fail_buf
@@ -616,6 +755,7 @@ END_FUNC posix_getcwdb
 ;; ============================================================================
 P1_PATH   equ 8
 P1_PTR    equ 16
+P1_OWNED  equ 24            ; what posix_path_arg asked us to release
 P1_FRAME  equ 32            ; + 0 pushes = 32
 
 %macro POSIX_ONE_PATH 3         ; %1 = name, %2 = the syscall, %3 = "n args"
@@ -627,9 +767,10 @@ DEF_FUNC %1, P1_FRAME
     call posix_path_arg
     test rax, rax
     jz %%fail
+    mov [rbp - P1_OWNED], rdx
     mov rdi, rax
     call %2
-    POSIX_CHECK rax, [rbp - P1_PATH]
+    POSIX_PATH_CHECK rax, [rbp - P1_PATH], [rbp - P1_OWNED]
     LOAD_NONE rax
     mov edx, TAG_PTR
     leave
@@ -661,6 +802,7 @@ DEF_FUNC posix_mkdir, P1_FRAME
     test rax, rax
     jz .pmk_fail
     mov [rbp - P1_PTR], rax
+    mov [rbp - P1_OWNED], rdx
     mov esi, 0o777
     cmp r12, 2
     jl .pmk_go
@@ -670,7 +812,7 @@ DEF_FUNC posix_mkdir, P1_FRAME
 .pmk_go:
     mov rdi, [rbp - P1_PTR]
     call sys_mkdir
-    POSIX_CHECK rax, [rbp - P1_PATH]
+    POSIX_PATH_CHECK rax, [rbp - P1_PATH], [rbp - P1_OWNED]
     LOAD_NONE rax
     mov edx, TAG_PTR
     pop r12
@@ -701,12 +843,13 @@ DEF_FUNC posix_chmod, P1_FRAME
     test rax, rax
     jz .pch_fail
     mov r12, rax
+    mov [rbp - P1_OWNED], rdx
     mov rdi, [rbx + 8]
     call posix_int_arg
     mov rsi, rax
     mov rdi, r12
     call sys_chmod
-    POSIX_CHECK rax, [rbp - P1_PATH]
+    POSIX_PATH_CHECK rax, [rbp - P1_PATH], [rbp - P1_OWNED]
     LOAD_NONE rax
     mov edx, TAG_PTR
     pop r12
@@ -733,34 +876,44 @@ END_FUNC posix_chmod
 PRN_SRC   equ 8
 PRN_DST   equ 16
 PRN_SPTR  equ 24
-PRN_FRAME equ 32            ; + 1 push = 40
+PRN_SOWN  equ 32            ; what each posix_path_arg asked us to release
+PRN_DOWN  equ 40
+PRN_FRAME equ 48            ; + 1 push = 56, not 16-aligned
 
-DEF_FUNC posix_rename, 40
+DEF_FUNC posix_rename, PRN_FRAME
     push rbx
     cmp rsi, 2
     jl .prn_argerr
     mov rbx, rdi
     mov rdi, [rbx]
     mov [rbp - PRN_SRC], rdi
+    mov qword [rbp - PRN_SOWN], 0
+    mov qword [rbp - PRN_DOWN], 0
     call posix_path_arg
     test rax, rax
     jz .prn_fail
     mov [rbp - PRN_SPTR], rax
+    mov [rbp - PRN_SOWN], rdx
     mov rdi, [rbx + 8]
     mov [rbp - PRN_DST], rdi
     call posix_path_arg
     test rax, rax
     jz .prn_fail
+    mov [rbp - PRN_DOWN], rdx
     mov rsi, rax
     mov rdi, [rbp - PRN_SPTR]
     call sys_rename
-    POSIX_CHECK rax, [rbp - PRN_SRC]
+    POSIX_PATH_DONE [rbp - PRN_DOWN]
+    POSIX_PATH_CHECK rax, [rbp - PRN_SRC], [rbp - PRN_SOWN]
     LOAD_NONE rax
     mov edx, TAG_PTR
     pop rbx
     leave
     ret
 .prn_fail:
+    ; The second path may have failed after the first was resolved.
+    POSIX_PATH_DONE [rbp - PRN_DOWN]
+    POSIX_PATH_DONE [rbp - PRN_SOWN]
     xor eax, eax
     xor edx, edx
     pop rbx
@@ -775,17 +928,20 @@ PRL_PATH  equ 8
 PRL_BUF   equ 16
 PRL_SIZE  equ 24
 PRL_PTR   equ 32
-PRL_FRAME equ 32            ; + 0 pushes = 32
+PRL_OWNED equ 40            ; what posix_path_arg asked us to release
+PRL_FRAME equ 48            ; + 0 pushes = 48
 
 DEF_FUNC posix_readlink, PRL_FRAME
     test rsi, rsi
     jz .prl_argerr
     mov rdi, [rdi]
+    mov qword [rbp - PRL_OWNED], 0
     mov [rbp - PRL_PATH], rdi
     call posix_path_arg
     test rax, rax
     jz .prl_fail
     mov [rbp - PRL_PTR], rax
+    mov [rbp - PRL_OWNED], rdx
     mov qword [rbp - PRL_SIZE], 512
 .prl_try:
     mov rdi, [rbp - PRL_SIZE]
@@ -812,6 +968,7 @@ DEF_FUNC posix_readlink, PRL_FRAME
     shl qword [rbp - PRL_SIZE], 1
     cmp qword [rbp - PRL_SIZE], 1 << 20
     jb .prl_try
+    POSIX_PATH_DONE [rbp - PRL_OWNED]
     mov edi, 36                     ; ENAMETOOLONG
     mov rsi, [rbp - PRL_PATH]
     call raise_oserror
@@ -822,8 +979,9 @@ DEF_FUNC posix_readlink, PRL_FRAME
     call ap_free
     pop rax
     pop rax
-    POSIX_CHECK rax, [rbp - PRL_PATH]
+    POSIX_PATH_CHECK rax, [rbp - PRL_PATH], [rbp - PRL_OWNED]
 .prl_have:
+    POSIX_PATH_DONE [rbp - PRL_OWNED]
     mov rdi, [rbp - PRL_BUF]
     mov rsi, rax
     call str_new_heap
@@ -836,6 +994,7 @@ DEF_FUNC posix_readlink, PRL_FRAME
     leave
     ret
 .prl_fail:
+    POSIX_PATH_DONE [rbp - PRL_OWNED]
     xor eax, eax
     xor edx, edx
     leave
@@ -849,6 +1008,7 @@ END_FUNC posix_readlink
 ;; ============================================================================
 POP_PATH  equ 8
 POP_PTR   equ 16
+POP_OWNED equ 24            ; what posix_path_arg asked us to release
 POP_FRAME equ 32            ; + 2 pushes = 48
 
 DEF_FUNC posix_open, POP_FRAME
@@ -864,6 +1024,7 @@ DEF_FUNC posix_open, POP_FRAME
     test rax, rax
     jz .pop_fail
     mov [rbp - POP_PTR], rax
+    mov [rbp - POP_OWNED], rdx
     mov rdi, [rbx + 8]
     call posix_int_arg
     mov rsi, rax                    ; flags
@@ -880,7 +1041,7 @@ DEF_FUNC posix_open, POP_FRAME
 .pop_go:
     mov rdi, [rbp - POP_PTR]
     call sys_open
-    POSIX_CHECK rax, [rbp - POP_PATH]
+    POSIX_PATH_CHECK rax, [rbp - POP_PATH], [rbp - POP_OWNED]
     mov rdi, rax
     call int_from_i64
     V_PACK rax, rdx
@@ -972,6 +1133,29 @@ DEF_FUNC posix_raise_typename
 END_FUNC posix_raise_typename
 
 ;; posix_copy_bounded(rdi = dest, rsi = src cstr, rdx = max) -> rax = the NUL
+;; posix_typename_of(rdi = dest, rsi = a Value) -> rax = the NUL after the name
+DEF_FUNC_LOCAL posix_typename_of
+    V_TEST_PTR rsi, rax
+    ja .pto_immediate
+    test rsi, rsi
+    jz .pto_int
+    mov rsi, [rsi + PyObject.ob_type]
+    mov rsi, [rsi + PyTypeObject.tp_name]
+    jmp .pto_have
+.pto_immediate:
+    V_IS_FLOAT rsi, rax
+    ja .pto_int
+    lea rsi, [rel pm_name_float]
+    jmp .pto_have
+.pto_int:
+    lea rsi, [rel pm_name_int]
+.pto_have:
+    mov rdx, 40
+    call posix_copy_bounded
+    leave
+    ret
+END_FUNC posix_typename_of
+
 DEF_FUNC_LOCAL posix_copy_bounded
     xor ecx, ecx
 .pcb_loop:
@@ -1178,22 +1362,28 @@ END_FUNC posix_dup
 
 ;; posix.access(path, mode) -> bool -- and it answers False rather than
 ;; raising, which is the one call in the family that swallows its errno.
-DEF_FUNC posix_access, 32
+PAC_OWNED equ 8
+PAC_FRAME equ 16            ; + 2 pushes = 32
+
+DEF_FUNC posix_access, PAC_FRAME
     cmp rsi, 2
     jl .pac_argerr
     push rbx
     push r12
     mov rbx, rdi
+    mov qword [rbp - PAC_OWNED], 0
     mov rdi, [rbx]
     call posix_path_arg
     test rax, rax
     jz .pac_fail
     mov r12, rax
+    mov [rbp - PAC_OWNED], rdx
     mov rdi, [rbx + 8]
     call posix_int_arg
     mov rsi, rax
     mov rdi, r12
     call sys_access
+    POSIX_PATH_DONE [rbp - PAC_OWNED]
     test rax, rax
     jnz .pac_false
     lea rax, [rel bool_true]
@@ -1208,6 +1398,7 @@ DEF_FUNC posix_access, 32
     leave
     ret
 .pac_fail:
+    POSIX_PATH_DONE [rbp - PAC_OWNED]
     xor eax, eax
     xor edx, edx
     pop r12
@@ -2131,6 +2322,8 @@ pm_msgbuf: resb 192
 section .rodata
 pm_name_int:     db "int", 0
 pm_name_float:   db "float", 0
+pm_msg_expected: db "expected ", 0
+pm_msg_fspath:   db ".__fspath__() to return str or bytes, not ", 0
 pm_n_umask:      db "umask", 0
 pm_n_isatty:     db "isatty", 0
 pm_n_ftruncate:  db "ftruncate", 0

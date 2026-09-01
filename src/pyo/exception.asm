@@ -1533,7 +1533,52 @@ END_FUNC oserror_new
 ;; ============================================================================
 RO_ARGS  equ 24             ; three Values
 RO_FRAME equ 32             ; + 0 pushes = 32
+;; raise_oserror_owned(rdi = errno, rsi = the caller's path Value,
+;;                     rdx = a resolved path the caller owns, or 0)
+;;
+;; The same raise, naming the resolved path when there is one and releasing
+;; it afterwards.  posix resolves os.PathLike arguments into a new string, and
+;; the message has to name that rather than the object that produced it --
+;; which means it cannot be released before the exception is built.
+ROO_OWNED equ 8
+ROO_FRAME equ 16            ; + 0 pushes = 16
+
+DEF_FUNC raise_oserror_owned, ROO_FRAME
+    mov [rbp - ROO_OWNED], rdx
+    test rdx, rdx
+    jz .roo_plain
+    mov rsi, rdx                ; name the resolved path, not the PathLike
+.roo_plain:
+    ; raise_oserror does not return, so the release has to happen inside the
+    ; build: hand it the pieces and let it call back here.  Simplest is to
+    ; do the build here too.
+    call raise_oserror_build    ; rax = the exception, and it took its own
+                                ; reference to the filename
+    push rax
+    sub rsp, 8
+    mov rdi, [rbp - ROO_OWNED]
+    test rdi, rdi
+    jz .roo_no_owned
+    call obj_decref
+.roo_no_owned:
+    add rsp, 8
+    pop rdi
+    call raise_exception_obj    ; does not return
+END_FUNC raise_oserror_owned
+
 DEF_FUNC raise_oserror, RO_FRAME
+    call raise_oserror_build
+    mov rdi, rax
+    extern raise_exception_obj
+    call raise_exception_obj        ; does not return
+END_FUNC raise_oserror
+
+;; raise_oserror_build(rdi = errno, rsi = filename or 0) -> rax = the exception
+;;
+;; The half of raise_oserror that can return, so a caller with cleanup of its
+;; own can do it between building and raising: a raise abandons the C stack,
+;; and posix has a resolved path to release that the message names.
+DEF_FUNC raise_oserror_build, RO_FRAME
     mov [rbp - RO_ARGS + 16], rsi   ; args[2] = filename, or NULL for now
     push rdi
     call int_from_i64
@@ -1566,10 +1611,9 @@ DEF_FUNC raise_oserror, RO_FRAME
     DECREF_V rax, rcx
     add rsp, 8
     pop rax
-    mov rdi, rax
-    extern raise_exception_obj
-    call raise_exception_obj        ; does not return
-END_FUNC raise_oserror
+    leave
+    ret
+END_FUNC raise_oserror_build
 
 
 
