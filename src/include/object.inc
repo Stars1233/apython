@@ -718,6 +718,24 @@ struc PyMappingMethods
     .mp_ass_subscript: resq 1  ; +16
 endstruc
 
+; A struct sequence: a tuple whose entries are also named (os.stat_result,
+; sys.version_info).  The descriptor hangs off the end of the type -- one
+; qword just past PyTypeObject -- so tp_getattr, tp_repr and tp_dealloc can
+; each find their own from the instance's type instead of needing a thunk.
+struc StructSeqField
+    .name:  resq 1          ; +0: NUL-terminated C string
+    .index: resq 1          ; +8: below n_in_sequence => ob_item[index];
+endstruc                    ;     at or above it => the (index - n) tail slot
+
+struc StructSeqDesc
+    .n_in_sequence: resq 1  ; +0: the tuple's length, NOT the field count
+    .n_fields:      resq 1  ; +8: including the named-only tail
+    .fields:        resq 1  ; +16: -> StructSeqField[n_fields]
+endstruc
+
+; The descriptor's offset within a struct-sequence type object.
+STRUCTSEQ_DESC equ PyTypeObject_size
+
 ; One row of builtin_module_table (src/modtable.asm): a module compiled into
 ; the interpreter.  Both sys.modules and sys.builtin_module_names are built
 ; from it, so the two cannot drift apart again.

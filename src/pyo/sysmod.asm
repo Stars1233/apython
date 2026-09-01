@@ -201,33 +201,54 @@ DEF_FUNC sys_module_init, 32
     pop rdi
     call obj_decref
 
-    ; --- sys.version_info (tuple) ---
-    mov rdi, 5
-    call tuple_new
-    mov rbx, rax                ; rbx = version_info tuple
-    mov r8, [rbx + PyTupleObject.ob_item]       ; payloads
+    ; --- sys.version_info (a struct sequence) ---
+    ; It was a bare tuple, so type(sys.version_info).__name__ was 'tuple' and
+    ; sys.version_info.major was an AttributeError.  platform.py and several
+    ; stdlib modules read the names.
+    extern version_info_type
+    extern float_info_type
+    extern int_info_type
+    extern hash_info_type
+    extern float_info_v0
+    extern float_info_v3
+    extern float_info_v8
+    extern hash_info_v5
+    extern structseq_new
+    extern structseq_set
+    extern structseq_init_type
+    lea rdi, [rel version_info_type]
+    call structseq_init_type
+    lea rdi, [rel version_info_type]
+    call structseq_new
+    mov rbx, rax                ; rbx = the version_info object
+
     ; (3, 12, 0, 'final', 0)
-    ; slot 0: 3
-    mov rdi, 3
-    V_PACK_I64 rdi, rcx
-    mov [r8], rdi
-    ; slot 1: 12
-    mov rdi, 12
-    V_PACK_I64 rdi, rcx
-    mov [r8 + 8], rdi
-    ; slot 2: 0
-    xor edi, edi
-    V_PACK_I64 rdi, rcx
-    mov [r8 + 16], rdi
-    ; slot 3: 'final' (string, TAG_PTR)
+    mov rdi, rbx
+    xor esi, esi
+    mov rdx, 3
+    V_PACK_I64 rdx, rcx
+    call structseq_set
+    mov rdi, rbx
+    mov esi, 1
+    mov rdx, 12
+    V_PACK_I64 rdx, rcx
+    call structseq_set
+    mov rdi, rbx
+    mov esi, 2
+    xor edx, edx
+    V_PACK_I64 rdx, rcx
+    call structseq_set
     lea rdi, [rel sm_final]
     call str_from_cstr_heap
-    mov r8, [rbx + PyTupleObject.ob_item]       ; reload payloads (clobbered)
-    mov [r8 + 24], rax
-    ; slot 4: 0
-    xor edi, edi
-    V_PACK_I64 rdi, rcx
-    mov [r8 + 32], rdi
+    mov rdx, rax                ; structseq_set takes over the reference
+    mov rdi, rbx
+    mov esi, 3
+    call structseq_set
+    mov rdi, rbx
+    mov esi, 4
+    xor edx, edx
+    V_PACK_I64 rdx, rcx
+    call structseq_set
 
     lea rdi, [rel sm_version_info]
     call str_from_cstr_heap
@@ -238,7 +259,6 @@ DEF_FUNC sys_module_init, 32
     call dict_set
     pop rdi
     call obj_decref
-    ; DECREF tuple
     mov rdi, rbx
     call obj_decref
 
@@ -530,14 +550,188 @@ DEF_FUNC sys_module_init, 32
     pop rdi
     call obj_decref
 
-    ; --- sys.int_info (simple stub: bits_per_digit=30, sizeof_digit=4) ---
-    ; Skip for now — not critical for basic imports
+    ; --- sys.float_info ---
+    lea rdi, [rel float_info_type]
+    call structseq_init_type
+    lea rdi, [rel float_info_type]
+    call structseq_new
+    mov rbx, rax
+    mov rdi, rbx
+    mov esi, 0
+    mov rdx, [rel float_info_v0]
+    V_FROM_F64 rdx, rcx
+    call structseq_set
+    mov rdi, rbx
+    mov esi, 1
+    mov rdx, 1024
+    V_PACK_I64 rdx, rcx
+    call structseq_set
+    mov rdi, rbx
+    mov esi, 2
+    mov rdx, 308
+    V_PACK_I64 rdx, rcx
+    call structseq_set
+    mov rdi, rbx
+    mov esi, 3
+    mov rdx, [rel float_info_v3]
+    V_FROM_F64 rdx, rcx
+    call structseq_set
+    mov rdi, rbx
+    mov esi, 4
+    mov rdx, -1021
+    V_PACK_I64 rdx, rcx
+    call structseq_set
+    mov rdi, rbx
+    mov esi, 5
+    mov rdx, -307
+    V_PACK_I64 rdx, rcx
+    call structseq_set
+    mov rdi, rbx
+    mov esi, 6
+    mov rdx, 15
+    V_PACK_I64 rdx, rcx
+    call structseq_set
+    mov rdi, rbx
+    mov esi, 7
+    mov rdx, 53
+    V_PACK_I64 rdx, rcx
+    call structseq_set
+    mov rdi, rbx
+    mov esi, 8
+    mov rdx, [rel float_info_v8]
+    V_FROM_F64 rdx, rcx
+    call structseq_set
+    mov rdi, rbx
+    mov esi, 9
+    mov rdx, 2
+    V_PACK_I64 rdx, rcx
+    call structseq_set
+    mov rdi, rbx
+    mov esi, 10
+    mov rdx, 1
+    V_PACK_I64 rdx, rcx
+    call structseq_set
+    lea rdi, [rel sm_float_info]
+    call str_from_cstr_heap
+    push rax
+    mov rdi, r15
+    mov rsi, rax
+    mov rdx, rbx
+    call dict_set
+    pop rdi
+    call obj_decref
+    mov rdi, rbx
+    call obj_decref
 
-    ; --- sys.float_info (stub) ---
-    ; Skip for now
+    ; --- sys.int_info ---
+    ; GMP-backed ints have no fixed digit size; these are CPython's
+    ; numbers, which is what the modules reading them expect.
+    lea rdi, [rel int_info_type]
+    call structseq_init_type
+    lea rdi, [rel int_info_type]
+    call structseq_new
+    mov rbx, rax
+    mov rdi, rbx
+    mov esi, 0
+    mov rdx, 30
+    V_PACK_I64 rdx, rcx
+    call structseq_set
+    mov rdi, rbx
+    mov esi, 1
+    mov rdx, 4
+    V_PACK_I64 rdx, rcx
+    call structseq_set
+    mov rdi, rbx
+    mov esi, 2
+    mov rdx, 4300
+    V_PACK_I64 rdx, rcx
+    call structseq_set
+    mov rdi, rbx
+    mov esi, 3
+    mov rdx, 640
+    V_PACK_I64 rdx, rcx
+    call structseq_set
+    lea rdi, [rel sm_int_info]
+    call str_from_cstr_heap
+    push rax
+    mov rdi, r15
+    mov rsi, rax
+    mov rdx, rbx
+    call dict_set
+    pop rdi
+    call obj_decref
+    mov rdi, rbx
+    call obj_decref
 
-    ; --- sys.hash_info (stub) ---
-    ; Skip for now
+    ; --- sys.hash_info ---
+    ; modulus and imag are ours for real -- int_hash_i64 uses 2^61-1
+    ; and complex_hash 1000003.  algorithm says 'fnv' because
+    ; str_hash is FNV-1a, not siphash; seed_bits and cutoff are 0
+    ; because there is no hash randomisation to describe.
+    lea rdi, [rel hash_info_type]
+    call structseq_init_type
+    lea rdi, [rel hash_info_type]
+    call structseq_new
+    mov rbx, rax
+    mov rdi, rbx
+    mov esi, 0
+    mov rdx, 64
+    V_PACK_I64 rdx, rcx
+    call structseq_set
+    mov rdi, rbx
+    mov esi, 1
+    mov rdx, 2305843009213693951
+    V_PACK_I64 rdx, rcx
+    call structseq_set
+    mov rdi, rbx
+    mov esi, 2
+    mov rdx, 314159
+    V_PACK_I64 rdx, rcx
+    call structseq_set
+    mov rdi, rbx
+    mov esi, 3
+    mov rdx, 0
+    V_PACK_I64 rdx, rcx
+    call structseq_set
+    mov rdi, rbx
+    mov esi, 4
+    mov rdx, 1000003
+    V_PACK_I64 rdx, rcx
+    call structseq_set
+    mov rdi, rbx
+    mov esi, 5
+    lea rdi, [rel hash_info_v5]
+    call str_from_cstr_heap
+    mov rdx, rax
+    mov rdi, rbx
+    mov esi, 5
+    call structseq_set
+    mov rdi, rbx
+    mov esi, 6
+    mov rdx, 64
+    V_PACK_I64 rdx, rcx
+    call structseq_set
+    mov rdi, rbx
+    mov esi, 7
+    mov rdx, 0
+    V_PACK_I64 rdx, rcx
+    call structseq_set
+    mov rdi, rbx
+    mov esi, 8
+    mov rdx, 0
+    V_PACK_I64 rdx, rcx
+    call structseq_set
+    lea rdi, [rel sm_hash_info]
+    call str_from_cstr_heap
+    push rax
+    mov rdi, r15
+    mov rsi, rax
+    mov rdx, rbx
+    call dict_set
+    pop rdi
+    call obj_decref
+    mov rdi, rbx
+    call obj_decref
 
     ; --- sys.getdefaultencoding function ---
     lea rdi, [rel sys_getdefaultencoding_func]
@@ -940,6 +1134,9 @@ sm_linux:        db "linux", 0
 sm_version:      db "version", 0
 sm_version_val:  db "3.12.0 (apython ", VERSION_STR, ")", 0
 sm_version_info: db "version_info", 0
+sm_float_info:   db "float_info", 0
+sm_int_info:     db "int_info", 0
+sm_hash_info:    db "hash_info", 0
 sm_final:        db "final", 0
 sm_executable:   db "executable", 0
 sm_prefix:       db "prefix", 0
