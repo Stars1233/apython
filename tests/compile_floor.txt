@@ -212,6 +212,7 @@ test_range_slice
 test_recursion_and_repr
 test_recursion
 test_relative_import
+test_re_opcodes
 test_repr
 test_review_regressions
 test_richcompare_bool

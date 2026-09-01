@@ -186,15 +186,25 @@ one-line fix.
   an allocation per call -- worth threading a (pointer, length) pair through
   the bodies if bytearray ever becomes hot.
 
-- **CPython's `re` module crashes our regex engine.**  `_sre` is exercised
-  only by hand-written code arrays -- `_sre.compile(...)` with the program
-  spelled out -- and nothing had ever fed it what CPython's own
-  `sre_compile` emits.  Now that `os` and `fnmatch` import, that path is
-  reachable and it fails two ways: `re.compile(r"(?s:.*\.txt)\Z").match(s)`
-  segfaults in `sre_getchar`, and `[abc]` or `a|b` raise "object does not
-  support item assignment" while compiling.  `re.compile` itself succeeds;
-  it is the match, and the character-class and branch opcodes, that do not.
-  There is no `lib/re.py`, so `re` is CPython's or nothing.
+- **The regex engine differs from CPython in 41 of 816 checked answers.**
+  `make check-re` runs `tests/re_differential.py` under both interpreters
+  and ratchets against `tests/re_floor.txt`; it needs `$CPYTHON_LIB`,
+  because `re` is a Python module and so comes from a real stdlib.  What is
+  left, from that diff:
+
+  - An unmatched group reads as `''` with span `(0, 0)` where CPython gives
+    `None` and `(-1, -1)`.  `lastindex` is off by one and `lastgroup` is
+    always `None`.
+  - `findall` and `split` return the whole match where a pattern has exactly
+    one group; CPython returns the group.  Both also mishandle a zero-width
+    match when advancing.
+  - `Match.expand()` and `re.sub`'s `\1` group references are not
+    implemented -- the template comes back unchanged.
+  - A nested unbounded repeat (`(a*)*b`) recurses until the limit.
+  - `()` fails to compile, and `[a-zA-Z0-9_]+` needs `bytes.translate`,
+    which does not exist.
+  - `bytes` patterns and subjects are unsupported: `sre_state_init` always
+    treats the subject as a `PyStrObject` and hardcodes `is_bytes = 0`.
 
 - **`str.translate` cannot take a miss signalled by an exception.**  A table
   with a length -- dict, list, tuple, str, bytes -- is exact, because the

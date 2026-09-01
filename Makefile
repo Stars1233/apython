@@ -63,7 +63,7 @@ $(shell mkdir -p build; printf '%s\n' '$(NASMFLAGS)' | cmp -s - $(FLAGSTAMP) \
 # Python compiler for tests
 PYTHON = python3
 
-.PHONY: all clean regen check gen-cpython-tests check-cpython check-cpython-source check-stdlib check-source lib-pyc
+.PHONY: all clean regen check gen-cpython-tests check-cpython check-cpython-source check-stdlib check-re check-source lib-pyc
 
 all: $(TARGET) lib-pyc
 
@@ -116,6 +116,11 @@ check-source: $(TARGET) lib-pyc
 # to point at its Lib/ directory.  Skips cleanly when it is absent.
 check-stdlib: $(TARGET)
 	@bash tests/stdlib_probe.sh
+
+# The regex engine, diffed against CPython over a few hundred patterns.  Not
+# in `make check`: `re` is a Python module, so it comes from $CPYTHON_LIB.
+check-re: $(TARGET)
+	@bash tests/re_probe.sh
 
 # CPython test suite targets
 # The CPython-derived test corpus.  One list, used by both the compile step
