@@ -11,7 +11,9 @@ ok _collections_abc
 ok colorsys
 ok _compat_pickle
 ok concurrent
+ok copy
 ok copyreg
+ok difflib
 ok email
 ok encodings
 ok enum
