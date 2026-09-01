@@ -134,7 +134,9 @@ DEF_FUNC obj_repr
     ret
 
 .float_tag:
-    ; rdi = raw double bits — pass directly to float_repr
+    ; rdi = raw double bits.  float_repr reads edx to tell these from a
+    ; float subclass instance, which reaches it as a pointer.
+    mov edx, TAG_FLOAT
     call float_repr
     leave
     ret
@@ -212,8 +214,9 @@ DEF_FUNC obj_str
     ret
 
 .float_tag:
-    ; rbx = raw double bits — pass directly to float_repr
+    ; rbx = raw double bits; see the note in obj_repr.
     mov rdi, rbx
+    mov edx, TAG_FLOAT
     call float_repr
     pop r12
     pop rbx
@@ -1036,6 +1039,7 @@ DEF_FUNC obj_hash
 .float_hash:
     ; Inline float: call float_hash for PEP-correct integer-float matching
     extern float_hash
+    mov edx, TAG_FLOAT
     call float_hash
     leave
     ret

@@ -734,6 +734,12 @@ TYPE_FLAG_HAS_SLOTS     equ 0x2000
 ; a metaclass of its own -- so a classmethod reached through such a class bound
 ; the metaclass instead of the class.
 TYPE_FLAG_METATYPE      equ 0x8000
+; float and complex keep their value inline, exactly as int and str do, so a
+; subclass cannot come from instance_new either -- it has to be built by the
+; base's own constructor, and every conversion helper has to recognise it.
+; The low nibble range is full; these two start the next one.
+TYPE_FLAG_FLOAT_SUBCLASS   equ 0x10000
+TYPE_FLAG_COMPLEX_SUBCLASS equ 0x20000
 
 ; Comparison opcodes (used by tp_richcompare)
 PY_LT equ 0

@@ -1575,6 +1575,10 @@ DEF_FUNC methods_init
     call dict_add_builtin_func
 
     mov rdi, rbx
+    lea rsi, [rel scalar_dunder_new]
+    call add_new_staticmethod
+
+    mov rdi, rbx
     lea rsi, [rel mn_conjugate]
     lea rdx, [rel complex_method_conjugate]
     call dict_add_builtin_func
@@ -1600,6 +1604,13 @@ DEF_FUNC methods_init
     lea rsi, [rel mn___repr__]
     lea rdx, [rel float_dunder_repr]
     call dict_add_builtin_func
+
+    ; float.__new__, for the same reason int and str carry one: a subclass
+    ; that overrides __new__ reaches the base's through super(), and enum
+    ; looks the name up in __dict__ to pick its data type.
+    mov rdi, rbx
+    lea rsi, [rel scalar_dunder_new]
+    call add_new_staticmethod
 
     mov rdi, rbx
     lea rsi, [rel mn_is_integer]

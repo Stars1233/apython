@@ -378,10 +378,42 @@ DEF_FUNC_BARE bool_type_call
     RAISE exc_TypeError_type, "bool() takes no keyword arguments"
 END_FUNC bool_type_call
 
-DEF_FUNC_BARE float_type_call
+;; float_type_call(rdi = type, rsi = args, rdx = nargs) -> a fat pair
+;;
+;; The type argument used to be discarded, so `class F(float)` produced a
+;; plain float: the subclass name was lost and its __init__ never ran.  int
+;; and str were right because their family flag routes type_call elsewhere;
+;; float and complex had neither the flag nor a constructor that read rdi.
+FTC_TYPE  equ 8
+FTC_BITS  equ 16
+FTC_FRAME equ 16            ; + 0 pushes = 16
+extern builtin_sub_alloc
+
+DEF_FUNC float_type_call, FTC_FRAME
+    mov [rbp - FTC_TYPE], rdi
     mov rdi, rsi
     mov rsi, rdx
-    jmp builtin_float
+    call builtin_float          ; rax = raw double bits, edx = TAG_FLOAT
+    lea rcx, [rel float_type]
+    cmp [rbp - FTC_TYPE], rcx
+    je .ftc_out                 ; float() itself: the immediate is the answer
+    test edx, edx
+    jz .ftc_out                 ; it raised
+
+    ; A subclass instance carries the double where float_to_f64 reads it,
+    ; at the base's own offset.  Returning a pointer here is what lets
+    ; type_call's two callers agree: .not_type_self packs the fat pair and
+    ; .nnf_check_base_new unpacks it as a Value, and only a pointer means
+    ; the same thing to both.
+    mov [rbp - FTC_BITS], rax
+    mov rdi, [rbp - FTC_TYPE]
+    call builtin_sub_alloc
+    mov rcx, [rbp - FTC_BITS]
+    mov [rax + PyFloatObject.value], rcx
+    mov edx, TAG_PTR
+.ftc_out:
+    leave
+    ret
 END_FUNC float_type_call
 
 ;; ============================================================================
@@ -441,6 +473,10 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     lea rcx, [rel float_type]
     cmp rax, rcx
     je .int_from_float
+    ; A float subclass keeps its double inline; .int_from_float reads it
+    ; through float_int, which unwraps one.
+    test rdx, TYPE_FLAG_FLOAT_SUBCLASS
+    jnz .int_from_float
 
     lea rcx, [rel str_type]
     cmp rax, rcx
@@ -506,7 +542,11 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     jmp .int_ret
 
 .int_from_float:
-    mov rdi, rbx
+    ; A float subclass instance: the double is inline, at the base's offset.
+    ; Exact float never arrives here -- a float is an immediate, so no pointer
+    ; ever has float_type -- which is why this arm read the pointer as bits
+    ; unnoticed until float had a subclass.
+    mov rdi, [rbx + PyFloatObject.value]
     call float_int
     jmp .int_ret
 
@@ -2315,12 +2355,43 @@ section .text
 ;; imag= -- so a pending kw_names is rejected rather than ignored, and cleared
 ;; on the way out the way int_type_call and bool_type_call do.
 ;; ============================================================================
-DEF_FUNC_BARE complex_type_call
+CTC_TYPE  equ 8
+CTC_VAL   equ 16
+CTC_FRAME equ 16            ; + 0 pushes = 16
+
+DEF_FUNC complex_type_call, CTC_FRAME
     cmp qword [rel kw_names_pending], 0
     jne .ctc_kwargs
+    mov [rbp - CTC_TYPE], rdi
     mov rdi, rsi
     mov rsi, rdx
-    jmp builtin_complex
+    call builtin_complex        ; rax = a complex pointer, edx = TAG_PTR
+    lea rcx, [rel complex_type]
+    cmp [rbp - CTC_TYPE], rcx
+    je .ctc_out                 ; complex() itself
+    test edx, edx
+    jz .ctc_out                 ; it raised
+
+    ; Re-home the two doubles into an instance of the subclass, then drop the
+    ; exact complex builtin_complex built.  Copying is cheaper than teaching
+    ; builtin_complex a type argument it would have to thread through six
+    ; return paths.
+    mov [rbp - CTC_VAL], rax
+    mov rdi, [rbp - CTC_TYPE]
+    call builtin_sub_alloc
+    mov rcx, [rbp - CTC_VAL]
+    movsd xmm0, [rcx + PyComplexObject.cval_real]
+    movsd xmm1, [rcx + PyComplexObject.cval_imag]
+    movsd [rax + PyComplexObject.cval_real], xmm0
+    movsd [rax + PyComplexObject.cval_imag], xmm1
+    mov [rbp - CTC_TYPE], rax
+    mov rdi, [rbp - CTC_VAL]
+    call obj_decref
+    mov rax, [rbp - CTC_TYPE]
+    mov edx, TAG_PTR
+.ctc_out:
+    leave
+    ret
 .ctc_kwargs:
     mov qword [rel kw_names_pending], 0
     RAISE exc_TypeError_type, "complex() takes no keyword arguments"

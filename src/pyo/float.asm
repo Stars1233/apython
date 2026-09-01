@@ -67,6 +67,10 @@ DEF_FUNC_BARE float_to_f64
     ; An int subclass wraps its value; unwrap and retry, or 1.0 == MyInt(1)
     ; came out False.
     mov rcx, [rax + PyTypeObject.tp_flags]
+    ; A float subclass stores its double inline at the same offset the base
+    ; would, which is the whole reason it cannot come from instance_new.
+    test rcx, TYPE_FLAG_FLOAT_SUBCLASS
+    jnz .from_float_sub
     test rcx, TYPE_FLAG_INT_SUBCLASS
     jz .ret_zero
     mov edx, esi
@@ -89,6 +93,10 @@ DEF_FUNC_BARE float_to_f64
 
 .from_float:
     movq xmm0, rdi
+    ret
+
+.from_float_sub:
+    movsd xmm0, [rdi + PyFloatObject.value]
     ret
 
 .from_smallint:
@@ -125,6 +133,13 @@ FR_BUF   equ 64             ; 48-byte render buffer
                             ; (the frame is built by hand below: `and rsp,-16`
                             ; then `sub rsp,160`, for libc's aligned SSE)
 DEF_FUNC float_repr
+    ; A float subclass arrives as a pointer with its double inline, and only
+    ; the tag can say so: a subnormal's bit pattern is a small integer, which
+    ; is exactly what a pointer looks like.  Every caller supplies edx.
+    cmp edx, TAG_PTR
+    jne .fr_have_bits
+    mov rdi, [rdi + PyFloatObject.value]
+.fr_have_bits:
     and rsp, -16              ; ensure 16-byte alignment for libc calls
     sub rsp, 160
     ; Stack layout:
@@ -443,6 +458,12 @@ DEF_FUNC float_hash, FH_FRAME
     push rbx
     push r12
     push r13
+    ; As float_repr: a subclass instance is a pointer, and the tag is the only
+    ; thing that distinguishes it from the bits of a subnormal.
+    cmp edx, TAG_PTR
+    jne .fh_have_bits
+    mov rdi, [rdi + PyFloatObject.value]
+.fh_have_bits:
     movq xmm0, rdi
 
     ; Check NaN (unordered with itself)
@@ -586,6 +607,15 @@ section .text
 ;; float_bool(rdi = raw double bits) -> int (0 or 1) in eax
 ;; ============================================================================
 DEF_FUNC_BARE float_bool
+    ; A subclass instance arrives as a pointer; nb_bool takes a Value, so an
+    ; immediate arrives boxed rather than as raw bits.
+    V_TEST_PTR rdi, rax
+    ja .fbool_immediate
+    mov rdi, [rdi + PyFloatObject.value]
+    jmp .fbool_have_bits
+.fbool_immediate:
+    V_TO_F64 rdi
+.fbool_have_bits:
     movq xmm0, rdi
     xorpd xmm1, xmm1         ; xmm1 = 0.0
     ucomisd xmm0, xmm1
@@ -633,6 +663,9 @@ DEF_FUNC_BARE float_binop_accepts
     je .fba_yes
     mov rax, [rax + PyTypeObject.tp_flags]
     test rax, TYPE_FLAG_INT_SUBCLASS
+    jnz .fba_yes
+    ; A float subclass keeps its double where float_to_f64 can read it.
+    test rax, TYPE_FLAG_FLOAT_SUBCLASS
     jnz .fba_yes
 .fba_no:
     xor eax, eax
@@ -806,14 +839,48 @@ DEF_FUNC float_mod, FB_FRAME
     RAISE exc_ZeroDivisionError_type, "float modulo"
 END_FUNC float_mod
 
+;; ============================================================================
+;; float_neg / float_pos / float_abs (rdi = operand Value) -> a float Value
+;;
+;; Only a float subclass instance reaches these.  op_unary_negative flips an
+;; immediate's sign bit itself and never consults the slot for one, and until
+;; float had a subclass nothing else could arrive -- which is why these used
+;; to return a fat pair into a caller that reads a Value, harmlessly, because
+;; they were unreachable.  CPython gives -F(x) and abs(F(x)) a plain float
+;; rather than an F, which is what returning an immediate does here.
+;; ============================================================================
 DEF_FUNC_BARE float_neg
-    ; rdi = raw double bits (payload), edx = tag
-    ; Negate: flip sign bit (bit 63)
+    V_TEST_PTR rdi, rax
+    ja .fneg_immediate
+    mov rdi, [rdi + PyFloatObject.value]
     btc rdi, 63
     mov rax, rdi
+    V_FROM_F64 rax, rdx
+    mov edx, TAG_FLOAT
+    ret
+.fneg_immediate:
+    V_TO_F64 rdi
+    btc rdi, 63
+    mov rax, rdi
+    V_FROM_F64 rax, rdx
     mov edx, TAG_FLOAT
     ret
 END_FUNC float_neg
+
+DEF_FUNC_BARE float_abs
+    V_TEST_PTR rdi, rax
+    ja .fabs_immediate
+    mov rdi, [rdi + PyFloatObject.value]
+    jmp .fabs_have_bits
+.fabs_immediate:
+    V_TO_F64 rdi
+.fabs_have_bits:
+    btr rdi, 63                 ; clear the sign; abs(-0.0) is 0.0
+    mov rax, rdi
+    V_FROM_F64 rax, rdx
+    mov edx, TAG_FLOAT
+    ret
+END_FUNC float_abs
 
 ;; ============================================================================
 ;; float_pos(rdi = left, rsi = right, edx = left_tag, ecx = right_tag)
@@ -821,7 +888,15 @@ END_FUNC float_neg
 ;; Note: called via nb_positive slot — only left operand matters.
 ;; ============================================================================
 DEF_FUNC_BARE float_pos
+    V_TEST_PTR rdi, rax
+    ja .fpos_immediate
+    mov rdi, [rdi + PyFloatObject.value]
     mov rax, rdi
+    V_FROM_F64 rax, rdx
+    mov edx, TAG_FLOAT
+    ret
+.fpos_immediate:
+    mov rax, rdi                ; already a float Value
     mov edx, TAG_FLOAT
     ret
 END_FUNC float_pos
@@ -1141,7 +1216,7 @@ float_number_methods:
     dq float_pow              ; nb_power        +40
     dq float_neg              ; nb_negative     +48
     dq float_pos              ; nb_positive     +56
-    dq 0                      ; nb_absolute     +64
+    dq float_abs              ; nb_absolute     +64
     dq float_bool             ; nb_bool         +72
     dq 0                      ; nb_invert       +80
     dq 0                      ; nb_lshift       +88
@@ -1196,7 +1271,8 @@ float_type:
     dq 0                      ; tp_base
     dq 0                      ; tp_dict
     dq 0                      ; tp_mro
-    dq 0                      ; tp_flags
+    dq TYPE_FLAG_FLOAT_SUBCLASS ; tp_flags -- the family bit type_from_parts
+                                ; hands down, so a subclass is recognisable
     dq 0                      ; tp_bases
     dq 0                        ; tp_traverse
     dq 0                        ; tp_clear

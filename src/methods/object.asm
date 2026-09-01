@@ -92,6 +92,18 @@ DEF_FUNC scalar_dunder_new
     je .sdn_str
     test rax, TYPE_FLAG_STR_SUBCLASS
     jnz .sdn_str
+    extern float_type
+    lea rcx, [rel float_type]
+    cmp rbx, rcx
+    je .sdn_float
+    test rax, TYPE_FLAG_FLOAT_SUBCLASS
+    jnz .sdn_float
+    extern complex_type
+    lea rcx, [rel complex_type]
+    cmp rbx, rcx
+    je .sdn_complex
+    test rax, TYPE_FLAG_COMPLEX_SUBCLASS
+    jnz .sdn_complex
     jmp .sdn_bad
 
 .sdn_int:
@@ -111,6 +123,33 @@ DEF_FUNC scalar_dunder_new
     mov rsi, r12
     call str_sub_new
     mov edx, TAG_PTR
+    pop r12
+    pop rbx
+    leave
+    V_PACK rax, rdx
+    ret
+
+;; float and complex have constructors that already read the type they are
+;; handed, so the subclass arm is the same call as the base one.  Both return
+;; a fat pair, which the V_PACK below is exactly right for.
+.sdn_float:
+    extern float_type_call
+    mov rdi, rbx
+    mov rdx, rsi
+    mov rsi, r12
+    call float_type_call
+    pop r12
+    pop rbx
+    leave
+    V_PACK rax, rdx
+    ret
+
+.sdn_complex:
+    extern complex_type_call
+    mov rdi, rbx
+    mov rdx, rsi
+    mov rsi, r12
+    call complex_type_call
     pop r12
     pop rbx
     leave

@@ -309,7 +309,11 @@ TFP_EXC   equ 64            ; current_exception, to tell a raise from a miss
     ; The layout base is the widest base, not simply the first: `class
     ; C(Mixin, list)` has to be laid out as a list.  Ties go to the earlier
     ; base, which is what CPython's solid-base rule gives for the ordinary
-    ; single-inheritance case.
+    ; single-inheritance case -- except that a plain heaptype is only as wide
+    ; as it is because it carries a __dict__, which is not a layout the way a
+    ; builtin's inline value is.  float is 24 bytes and so is an ordinary
+    ; heaptype, so `class MF(Mixin, float)` picked Mixin and the double had
+    ; nowhere to live.  On a tie the static base wins.
     xor eax, eax                ; best base
     test rsi, rsi
     jz .tfp_base_done
@@ -325,7 +329,17 @@ TFP_EXC   equ 64            ; current_exception, to tell a raise from a miss
     jz .tfp_base_next
     mov rdx, [r11 + PyTypeObject.tp_basicsize]
     cmp rdx, r10
-    jbe .tfp_base_next
+    ja .tfp_base_take
+    jb .tfp_base_next
+    ; Equal widths: take this one only if the incumbent is a heaptype and
+    ; this is not.
+    test rax, rax
+    jz .tfp_base_next
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_HEAPTYPE
+    jz .tfp_base_next           ; the incumbent is already a builtin
+    test qword [r11 + PyTypeObject.tp_flags], TYPE_FLAG_HEAPTYPE
+    jnz .tfp_base_next
+.tfp_base_take:
     mov r10, rdx
     mov rax, r11
 .tfp_base_next:
@@ -749,7 +763,8 @@ TFP_EXC   equ 64            ; current_exception, to tell a raise from a miss
 .bc_flags_done:
     and r10, TYPE_FLAG_INT_SUBCLASS | TYPE_FLAG_STR_SUBCLASS | \
              TYPE_FLAG_LIST_SUBCLASS | TYPE_FLAG_TUPLE_SUBCLASS | \
-             TYPE_FLAG_DICT_SUBCLASS | TYPE_FLAG_SET_SUBCLASS
+             TYPE_FLAG_DICT_SUBCLASS | TYPE_FLAG_SET_SUBCLASS | \
+             TYPE_FLAG_FLOAT_SUBCLASS | TYPE_FLAG_COMPLEX_SUBCLASS
     or [r12 + PyTypeObject.tp_flags], r10
 
     ; A class deriving from `type` is a metatype: its instances are classes,
@@ -851,6 +866,19 @@ TFP_EXC   equ 64            ; current_exception, to tell a raise from a miss
     cmp rax, rcx
     je .bc_container_sub
     lea rcx, [rel memoryview_type]
+    cmp rax, rcx
+    je .bc_container_sub
+    ; ...nor for float and complex, for the same reason.  Inheriting the
+    ; thunk sent type_call straight to it, and it built and returned a plain
+    ; float or complex: the subclass name was lost and its __init__ never
+    ; ran.  Both constructors now read the type they are handed, so the
+    ; base_slot route in type_call gives them the subclass.
+    extern float_type
+    lea rcx, [rel float_type]
+    cmp rax, rcx
+    je .bc_container_sub
+    extern complex_type
+    lea rcx, [rel complex_type]
     cmp rax, rcx
     je .bc_container_sub
 

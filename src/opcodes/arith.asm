@@ -91,6 +91,9 @@ DEF_FUNC_BARE binop_is_number
     mov rax, [rax + PyTypeObject.tp_flags]
     test rax, TYPE_FLAG_INT_SUBCLASS
     jnz .bn_yes
+    ; A float subclass keeps its double inline, where float_to_f64 reads it.
+    test rax, TYPE_FLAG_FLOAT_SUBCLASS
+    jnz .bn_yes
 .bn_no:
     xor eax, eax
     ret

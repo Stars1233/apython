@@ -158,6 +158,7 @@ DEF_FUNC builtin_hash_fn
     extern float_hash
     mov rdi, rbx
     V_TO_F64 rdi
+    mov edx, TAG_FLOAT          ; raw bits, not a float subclass instance
     call float_hash
     mov rdi, rax
     call int_from_i64

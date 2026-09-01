@@ -116,6 +116,7 @@ test_exception_str_repr
 test_except_star
 test_exec_builtins_value
 test_extended_slice
+test_float_complex_subclass
 test_float_fromhex
 test_float_methods
 test_float

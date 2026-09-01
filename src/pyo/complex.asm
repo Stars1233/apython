@@ -104,6 +104,10 @@ DEF_FUNC complex_to_parts, CTP_FRAME
     lea rcx, [rel complex_type]
     cmp rax, rcx
     je .ctp_complex
+    ; A complex subclass keeps its two doubles at the base's own offsets, so
+    ; the exact-complex arm reads it unchanged.
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_COMPLEX_SUBCLASS
+    jnz .ctp_complex
     lea rcx, [rel int_type]
     cmp rax, rcx
     je .ctp_heap_number
@@ -113,7 +117,8 @@ DEF_FUNC complex_to_parts, CTP_FRAME
     lea rcx, [rel float_type]
     cmp rax, rcx
     je .ctp_heap_number
-    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_INT_SUBCLASS
+    test qword [rax + PyTypeObject.tp_flags], \
+              TYPE_FLAG_INT_SUBCLASS | TYPE_FLAG_FLOAT_SUBCLASS
     jnz .ctp_heap_number
     jmp .ctp_no
 
@@ -791,6 +796,7 @@ CRA_FRAME equ 32            ; + 0 pushes = 32
 DEF_FUNC_LOCAL complex_repr_append, CRA_FRAME
     mov [rbp - CRA_CUR], rdi
     mov rdi, rsi
+    mov edx, TAG_FLOAT          ; a raw part, not a float subclass instance
     call float_repr             ; rax = PyStrObject*
     mov [rbp - CRA_STR], rax
     mov rdx, [rax + PyStrObject.ob_size]
@@ -840,9 +846,11 @@ DEF_FUNC complex_hash, CH_FRAME
     mov rax, [rdi + PyComplexObject.cval_imag]
     mov [rbp - CH_IMAG], rax
     mov rdi, [rdi + PyComplexObject.cval_real]
+    mov edx, TAG_FLOAT          ; raw parts, not float subclass instances
     call float_hash
     mov rbx, rax
     mov rdi, [rbp - CH_IMAG]
+    mov edx, TAG_FLOAT
     call float_hash
     mov rcx, 1000003
     imul rax, rcx
@@ -1049,7 +1057,8 @@ complex_type:
     dq 0                      ; tp_base
     dq 0                      ; tp_dict (installed by methods_init)
     dq 0                      ; tp_mro
-    dq 0                      ; tp_flags (no HAVE_GC: it owns nothing)
+    dq TYPE_FLAG_COMPLEX_SUBCLASS ; tp_flags -- the family bit, and no
+                                  ; HAVE_GC: a complex owns nothing
     dq 0                      ; tp_bases
     dq 0                      ; tp_traverse
     dq 0                      ; tp_clear

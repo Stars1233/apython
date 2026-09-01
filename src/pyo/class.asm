@@ -361,6 +361,73 @@ DEF_FUNC builtin_sub_init_base
     ret
 END_FUNC builtin_sub_init_base
 
+;; ============================================================================
+;; builtin_sub_alloc(rdi = type) -> rax = a zeroed instance
+;;
+;; The allocation half of a builtin constructor that has to honour the type it
+;; was handed.  float and complex keep their value inline, exactly as int and
+;; str do, so a subclass of either cannot come from instance_new -- the base's
+;; own constructor builds it, and this is the only part that differs between
+;; the base and a subclass.
+;;
+;; A heaptype always carries TYPE_FLAG_HAVE_GC, so it has to come from
+;; gc_alloc and be tracked.  complex itself does not: it owns nothing, and
+;; gc_alloc hands back raw + GC_HEAD_SIZE, which obj_dealloc's plain-free path
+;; would give ap_free unshifted.  Both branches are here so a caller cannot
+;; pick the wrong one.
+;;
+;; Everything past the header is zeroed, the tail __dict__ slot included: a
+;; subclass instance is reachable before its __init__ has run, and the
+;; collector reads tp_dictoffset on the way past.
+;; ============================================================================
+BSA_TYPE  equ 8
+BSA_SAVE  equ 16
+BSA_FRAME equ 16            ; + 0 pushes = 16
+
+DEF_FUNC builtin_sub_alloc, BSA_FRAME
+    mov [rbp - BSA_TYPE], rdi
+    mov rsi, [rdi + PyTypeObject.tp_basicsize]
+    test qword [rdi + PyTypeObject.tp_flags], TYPE_FLAG_HAVE_GC
+    jz .bsa_plain
+    mov rdi, rsi
+    mov rsi, [rbp - BSA_TYPE]
+    call gc_alloc               ; sets ob_refcnt and ob_type itself
+    jmp .bsa_zero
+.bsa_plain:
+    mov rdi, rsi
+    call ap_malloc
+    mov qword [rax + PyObject.ob_refcnt], 1
+    mov rcx, [rbp - BSA_TYPE]
+    mov [rax + PyObject.ob_type], rcx
+
+.bsa_zero:
+    mov rcx, [rbp - BSA_TYPE]
+    mov rcx, [rcx + PyTypeObject.tp_basicsize]
+    lea rdx, [rax + PyObject_size]
+    sub rcx, PyObject_size
+.bsa_zero_loop:
+    cmp rcx, 8
+    jb .bsa_zeroed
+    mov qword [rdx], 0
+    add rdx, 8
+    sub rcx, 8
+    jmp .bsa_zero_loop
+
+.bsa_zeroed:
+    ; The instance holds a reference to its type, as every instance does.
+    mov rcx, [rbp - BSA_TYPE]
+    inc qword [rcx + PyObject.ob_refcnt]
+    test qword [rcx + PyTypeObject.tp_flags], TYPE_FLAG_HAVE_GC
+    jz .bsa_done
+    mov [rbp - BSA_SAVE], rax
+    mov rdi, rax
+    call gc_track               ; may collect, which is why the body is zeroed
+    mov rax, [rbp - BSA_SAVE]
+.bsa_done:
+    leave
+    ret
+END_FUNC builtin_sub_alloc
+
 DEF_FUNC instance_new
     push rbx
     push r12
