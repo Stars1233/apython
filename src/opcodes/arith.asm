@@ -241,7 +241,12 @@ DEF_FUNC_BARE op_binary_op
     jmp .binop_have_result
 
 .binop_not_int_left:
-    ; Non-pointer guard: TAG_NONE, TAG_FLOAT can't be dereferenced
+    ; A float immediate has no ob_type to read but does have slots, and
+    ; .binop_left_type names float_type for exactly that.  Anything else that
+    ; is not a pointer has neither.
+    cmp qword [rsp + BO_LTAG], TAG_FLOAT
+    je .binop_left_type
+    ; Non-pointer guard: TAG_NONE and the sentinels can't be dereferenced
     test qword [rsp + BO_LTAG], TAG_RC_BIT
     jz .binop_no_method
     ; Check if left has sq_repeat and right is int (e.g. tuple*3, list*3)
@@ -284,14 +289,24 @@ DEF_FUNC_BARE op_binary_op
     ; SmallInt check: use saved left tag
     cmp qword [rsp + BO_LTAG], TAG_SMALLINT
     je .binop_smallint_type
-    ; TAG_BOOL: route to int (int_unwrap handles TAG_BOOL)
-    ; Non-pointer guard: TAG_NONE, TAG_FLOAT can't be dereferenced
+    ; A float immediate has no ob_type to read, so name float_type here.  It
+    ; used to reach its slots only through the coercion arm above, which fires
+    ; only when the OTHER operand is a number too -- so `1.5 * <any other
+    ; type>` never resolved a type at all and went straight to TypeError.
+    ; Invisible while every such pair really was a TypeError; not once a type
+    ; exists that float should hand the pair on to.
+    cmp qword [rsp + BO_LTAG], TAG_FLOAT
+    je .binop_float_type
+    ; Non-pointer guard: TAG_NONE and the sentinels can't be dereferenced
     test qword [rsp + BO_LTAG], TAG_RC_BIT
     jz .binop_no_method
     mov rax, [rdi + PyObject.ob_type]
     jmp .binop_have_type
 .binop_smallint_type:
     lea rax, [rel int_type]
+    jmp .binop_have_type
+.binop_float_type:
+    lea rax, [rel float_type]
     jmp .binop_have_type
 .binop_have_type:
     push rax                   ; save type ptr for sq fallback
@@ -843,20 +858,49 @@ section .text
     push r8                    ; save right tag
     push rsi                   ; save right
 
-    ; Float coercion: if either operand is TAG_FLOAT, use float_compare
+    ; Float coercion: use float_compare when one operand is a float AND the
+    ; other is something it accepts.  Short-circuiting on the tag alone sent
+    ; float-versus-anything to float_compare, which declines; the retry then
+    ; asked the float side again rather than the OTHER operand's
+    ; tp_richcompare, so a type that knows how to compare itself to a float
+    ; never got the question and the answer came from the identity fallback.
     cmp r9d, TAG_FLOAT
-    je .cmp_use_float
+    je .cmp_probe_right
     cmp r8d, TAG_FLOAT
-    je .cmp_use_float
+    jne .cmp_no_float
+    mov rdi, [rsp + BO_LEFT]
+    mov esi, [rsp + BO_LTAG]
+    jmp .cmp_probe
+.cmp_probe_right:
+    mov rdi, [rsp + BO_RIGHT]
+    mov esi, [rsp + BO_RTAG]
+.cmp_probe:
+    extern float_binop_accepts
+    mov r15d, ecx               ; r15 is the handler scratch; ecx holds the op
+    call float_binop_accepts
+    mov ecx, r15d
+    mov rdi, [rsp + BO_LEFT]
+    mov rsi, [rsp + BO_RIGHT]
+    mov r9d, [rsp + BO_LTAG]
+    mov r8d, [rsp + BO_RTAG]
+    test eax, eax
+    jnz .cmp_use_float
 
 .cmp_no_float:
     ; Get type's tp_richcompare
     cmp r9d, TAG_SMALLINT
     je .cmp_smallint_type
+    ; A float immediate has no ob_type; name float_type for it, the same way
+    ; .binop_left_type does for arithmetic.
+    cmp r9d, TAG_FLOAT
+    je .cmp_float_type
     mov rax, [rdi + PyObject.ob_type]
     jmp .cmp_have_type
 .cmp_smallint_type:
     lea rax, [rel int_type]
+    jmp .cmp_have_type
+.cmp_float_type:
+    lea rax, [rel float_type]
     jmp .cmp_have_type
 .cmp_bool_type:
     lea rax, [rel bool_type]
@@ -1132,14 +1176,17 @@ section .text
     cmp ecx, PY_NE
     je .cmp_id_eq_ne
 
-    ; Ordering comparison with unsupported types → raise TypeError
-    ; DECREF both operands first
-    mov rdi, [rsp + BO_LEFT]
-    mov rsi, [rsp + BO_LTAG]
-    DECREF_VAL rdi, rsi
-    mov rdi, [rsp + BO_RIGHT]
-    mov rsi, [rsp + BO_RTAG]
-    DECREF_VAL rdi, rsi
+    ; Ordering comparison with unsupported types → raise TypeError.
+    ;
+    ; The operands are deliberately NOT DECREFed here.  eval_exception_unwind
+    ; releases the frame's value stack, and it unwinds from above the slots
+    ; these operands were VPOPped out of -- so DECREFing them first freed them
+    ; and the unwinder then decremented the refcount field of memory malloc had
+    ; already put on its tcache free list, overwriting the list's forward
+    ; pointer.  The symptom was "malloc(): unaligned tcache chunk detected" in
+    ; whatever allocated next, arbitrarily far away: `object() < object()`,
+    ; `range(1) < range(2)` and `int < str` all corrupted the heap.
+    ; op_binary_op's .binop_no_method has always left this to the unwinder too.
     add rsp, BO_SIZE
     extern raise_exception
     RAISE exc_TypeError_type, "'<' not supported between instances"

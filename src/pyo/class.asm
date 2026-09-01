@@ -2514,6 +2514,19 @@ DEF_FUNC_BARE object_type_call
     lea rsi, [rel object_type]
     call gc_alloc
     mov qword [rax + PyInstanceObject.inst_dict], 0
+
+    ; gc_alloc does not INCREF the type it stamps into ob_type, and
+    ; instance_dealloc DECREFs it -- so without this the reference count of
+    ; object_type itself went down by one for every object() that died.  It
+    ; starts at 1, so the FIRST such instance took it to zero and handed
+    ; &object_type, a .data address, to ap_free: the heap was corrupted from
+    ; then on, and the crash landed in whatever allocated next.
+    ; instance_new and slots_new both INCREF here for the same reason.
+    push rax
+    lea rdi, [rel object_type]
+    call obj_incref
+    pop rax
+
     ; Track in GC
     push rax
     mov rdi, rax

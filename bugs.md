@@ -9,6 +9,10 @@ one-line fix.
 
 ## Correctness
 
+- **`slice` objects cannot be ordered.**  CPython compares them as the tuple
+  `(start, stop, step)`, so `slice(1) < slice(2)` is True; here it is a
+  TypeError.  Equality works.
+
 - **`bytearray` has no arithmetic at all.**  `bytearray_type.tp_as_number` is 0
   and `bytearray_seq_methods` has neither `sq_concat` nor `sq_repeat`, so
   `bytearray(b"a") + bytearray(b"b")`, `bytearray(b"a") * 2` and
