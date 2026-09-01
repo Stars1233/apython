@@ -161,6 +161,40 @@ DEF_FUNC scalar_dunder_new
 END_FUNC scalar_dunder_new
 
 ;; ============================================================================
+;; ============================================================================
+;; builtin_method_format(self, format_spec) -- __format__ for the four types
+;; the spec mini-language knows how to render itself.
+;;
+;; CPython gives int, float, str and complex a __format__ of their own, and a
+;; subclass inherits it.  Without one, `class F(float)` inherited OBJECT's,
+;; which refuses any non-empty spec: format(F(2.5), ".2f") was "unsupported
+;; format string passed to object.__format__".
+;; ============================================================================
+extern format_apply_spec
+
+DEF_FUNC builtin_method_format
+    cmp rsi, 2
+    jne .bmf_bad
+    mov rax, [rdi + 8]                  ; the format spec
+    V_TEST_PTR rax, rcx
+    ja .bmf_bad_spec
+    test rax, rax
+    jz .bmf_bad_spec
+    mov rcx, [rax + PyObject.ob_type]
+    lea rdx, [rel str_type]
+    cmp rcx, rdx
+    jne .bmf_bad_spec
+    mov rsi, rax
+    mov rdi, [rdi]
+    call format_apply_spec
+    leave
+    ret
+.bmf_bad:
+    RAISE exc_TypeError_type, "__format__() takes exactly one argument"
+.bmf_bad_spec:
+    RAISE exc_TypeError_type, "__format__() argument must be str"
+END_FUNC builtin_method_format
+
 ;; object.__format__(self, format_spec)
 ;;
 ;; An empty spec is str(self); anything else is an error, because object has no

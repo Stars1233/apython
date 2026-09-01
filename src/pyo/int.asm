@@ -3013,14 +3013,26 @@ DEF_FUNC int_getattr, IG_FRAME
     mov rdi, [rbp - IG_SELF]
     V_TEST_PTR rdi, rax
     ja .ig_self_out             ; an immediate is already a plain int
+    ; Compare the TYPE, not the family flag: int_type carries
+    ; TYPE_FLAG_INT_SUBCLASS itself, so that a subclass inherits it, and an
+    ; exact heap int took the unwrapping path below.  int_unwrap reduced it
+    ; to a SmallInt payload and V_PACK boxed it again -- a fresh object, so
+    ; `v.real is v` was False for any v outside +-2^50, and the extra
+    ; reference on top of that leaked one int per read.
     mov rax, [rdi + PyObject.ob_type]
+    lea rcx, [rel int_type]
+    cmp rax, rcx
+    je .ig_self_out
+    extern bool_type
+    lea rcx, [rel bool_type]
+    cmp rax, rcx
+    je .ig_self_out
     test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_INT_SUBCLASS
     jz .ig_self_out
     mov edx, TAG_PTR
     call int_unwrap             ; rdi/edx = the plain int it wraps
-    V_PACK rdi, rdx
+    V_PACK rdi, rdx             ; owns whatever it may have had to allocate
     mov rax, rdi
-    INCREF_V rax, rcx
     leave
     ret
 .ig_self_out:

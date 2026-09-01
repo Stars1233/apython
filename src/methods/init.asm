@@ -41,6 +41,7 @@ extern ba_shared_replace
 extern ba_shared_split
 extern ba_shared_join
 extern ba_shared_decode
+extern builtin_method_format
 extern bytearray_dunder_len
 extern bytearray_dunder_iter
 extern bytearray_dunder_setitem
@@ -720,6 +721,11 @@ DEF_FUNC methods_init
     mov rdi, rbx
     lea rsi, [rel mn___iter__]
     lea rdx, [rel str_dunder_iter]
+    call dict_add_builtin_func
+
+    mov rdi, rbx
+    lea rsi, [rel mn___format__]
+    lea rdx, [rel builtin_method_format]
     call dict_add_builtin_func
 
     lea rax, [rel str_type]
@@ -1590,6 +1596,11 @@ DEF_FUNC methods_init
     call obj_decref
 
     ; Store in int_type.tp_dict
+    mov rdi, rbx
+    lea rsi, [rel mn___format__]
+    lea rdx, [rel builtin_method_format]
+    call dict_add_builtin_func
+
     lea rax, [rel int_type]
     mov [rax + PyTypeObject.tp_dict], rbx
 
@@ -1626,6 +1637,11 @@ DEF_FUNC methods_init
     mov rdi, rbx
     lea rsi, [rel mn___getnewargs__]
     lea rdx, [rel complex_method_getnewargs]
+    call dict_add_builtin_func
+
+    mov rdi, rbx
+    lea rsi, [rel mn___format__]
+    lea rdx, [rel builtin_method_format]
     call dict_add_builtin_func
 
     lea rax, [rel complex_type]
@@ -1698,6 +1714,11 @@ DEF_FUNC methods_init
     call obj_decref
     pop rdi
     call obj_decref
+
+    mov rdi, rbx
+    lea rsi, [rel mn___format__]
+    lea rdx, [rel builtin_method_format]
+    call dict_add_builtin_func
 
     ; Store in float_type.tp_dict
     lea rax, [rel float_type]

@@ -227,6 +227,72 @@ DEF_FUNC format_apply_spec, FS_FRAME
     call value_type
     mov r15, rax                        ; the value's type
 
+    ; A subclass formats as its base does: every arm below compares r15
+    ; against an exact type, so format(F(2.5), ".2f") for `class F(float)`
+    ; found no arm and fell out as "unsupported format string passed to
+    ; object.__format__".  The family flags say which base to answer as.
+    ; The family flags live on the BASE types too, so that a subclass
+    ; inherits them: float_type itself carries TYPE_FLAG_FLOAT_SUBCLASS.
+    ; Anything keyed off the flag alone therefore fires for the exact type as
+    ; well, and unwrapping an immediate as if it were an instance reads a
+    ; NaN-boxed double as an address.  Ask whether it IS one of the four
+    ; first, and only then whether it derives from one.
+    test r15, r15
+    jz .fs_family_done
+    lea rax, [rel complex_type]
+    cmp r15, rax
+    je .fs_family_done
+    lea rax, [rel float_type]
+    cmp r15, rax
+    je .fs_family_done
+    lea rax, [rel int_type]
+    cmp r15, rax
+    je .fs_family_done
+    lea rax, [rel str_type]
+    cmp r15, rax
+    je .fs_family_done
+    extern bool_type
+    lea rax, [rel bool_type]
+    cmp r15, rax
+    je .fs_bool
+
+    mov rdx, [r15 + PyTypeObject.tp_flags]
+    test rdx, TYPE_FLAG_COMPLEX_SUBCLASS
+    jz .fs_not_complex_sub
+    lea r15, [rel complex_type]     ; complex_to_parts unwraps the value
+    jmp .fs_family_done
+.fs_not_complex_sub:
+    test rdx, TYPE_FLAG_FLOAT_SUBCLASS
+    jz .fs_not_float_sub
+    lea r15, [rel float_type]
+    ; The double lives inline in the instance, and the float arm below wants
+    ; an immediate.
+    mov rdi, [rbp - FS_VALUE]
+    mov rax, [rdi + PyFloatObject.value]
+    V_FROM_F64 rax, rcx
+    mov [rbp - FS_VALUE], rax
+    jmp .fs_family_done
+.fs_not_int_sub:
+    test rdx, TYPE_FLAG_STR_SUBCLASS
+    jz .fs_family_done
+    lea r15, [rel str_type]         ; a str subclass has str's layout
+    jmp .fs_family_done
+.fs_bool:
+    ; bool formats as an int, which is what CPython does: format(True, "d")
+    ; is "1".  Its value is a singleton, not an int, so it is unwrapped too.
+    lea r15, [rel int_type]
+.fs_not_float_sub:
+    test rdx, TYPE_FLAG_INT_SUBCLASS
+    jz .fs_not_int_sub
+    lea r15, [rel int_type]
+    mov rdi, [rbp - FS_VALUE]
+    mov edx, TAG_PTR
+    extern int_unwrap
+    call int_unwrap
+    V_PACK rdi, rdx
+    mov [rbp - FS_VALUE], rdi
+.fs_family_done:
+
     mov rcx, [rbp - FS_TYPE]
     ; complex is asked first: format(1+2j, 's') is a ValueError in CPython, so
     ; it must not reach the 's' short-circuit below.

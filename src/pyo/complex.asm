@@ -797,11 +797,15 @@ DEF_FUNC complex_abs, CA_FRAME
     movsd xmm0, [rbp - CA_RE]
     andpd xmm0, [rel cx_absmask]
     ucomisd xmm0, [rel cx_inf]
-    je .cab_ret_xmm0            ; |inf + anything j| is inf, NaN included
+    jp .cab_try_imag            ; ucomisd sets ZF for UNORDERED as well as
+    je .cab_ret_xmm0            ; equal, so a NaN part took the `inf` arm and
+.cab_try_imag:                  ; abs(complex(nan, inf)) answered nan
     movsd xmm0, [rbp - CA_RE + 8]
     andpd xmm0, [rel cx_absmask]
     ucomisd xmm0, [rel cx_inf]
+    jp .cab_hypot
     je .cab_ret_xmm0
+.cab_hypot:
 
     movsd xmm0, [rbp - CA_RE]
     movsd xmm1, [rbp - CA_RE + 8]
@@ -810,6 +814,7 @@ DEF_FUNC complex_abs, CA_FRAME
     movapd xmm1, xmm0
     andpd xmm1, [rel cx_absmask]
     ucomisd xmm1, [rel cx_inf]
+    jp .cab_ret_xmm0            ; a NaN result is a NaN, not an overflow
     je .cab_overflow            ; finite inputs, infinite result
 .cab_ret_xmm0:
     movq rax, xmm0
@@ -937,14 +942,20 @@ DEF_FUNC complex_pow, CPW_FRAME
 
 .cpw_finish:
     ; A non-finite result from finite inputs is an overflow, on both paths.
+    ; jp before je at both: ucomisd sets ZF for UNORDERED too, so a NaN part
+    ; read as infinity and complex(nan, 0) ** 3 raised OverflowError.
     movsd xmm0, [rbp - CPW_RR]
     andpd xmm0, [rel cx_absmask]
     ucomisd xmm0, [rel cx_inf]
+    jp .cpw_check_imag
     je .cpw_overflow
+.cpw_check_imag:
     movsd xmm0, [rbp - CPW_RI]
     andpd xmm0, [rel cx_absmask]
     ucomisd xmm0, [rel cx_inf]
+    jp .cpw_no_overflow
     je .cpw_overflow
+.cpw_no_overflow:
     movsd xmm0, [rbp - CPW_RR]
     movsd xmm1, [rbp - CPW_RI]
     call complex_from_doubles

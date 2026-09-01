@@ -10,6 +10,7 @@
 
 
 ; External functions
+extern float_type
 extern ap_malloc
 extern ap_free
 extern ap_strcmp
@@ -457,8 +458,9 @@ END_FUNC int_classmethod_from_bytes
 ;; ============================================================================
 
 DEF_FUNC float_method_is_integer
-    mov rax, [rdi]              ; args[0] = self
-    V_TO_F64 rax                ; raw double bits
+    mov rdi, [rdi]              ; args[0] = self
+    call float_self_bits        ; a subclass instance is a pointer, not an
+                                ; immediate: see float_self_bits
     movq xmm0, rax
 
     ; Check for inf/nan — not integer
@@ -492,9 +494,43 @@ END_FUNC float_method_is_integer
 ;; ============================================================================
 ;; float_method_conjugate(args, nargs) -> Float (return self)
 ;; ============================================================================
+;; ============================================================================
+;; float_self_bits(rdi = the self Value) -> rax = the raw double bits
+;;
+;; V_TO_F64 alone is right only for a float IMMEDIATE.  A float subclass
+;; instance is a pointer, and subtracting the NaN-box offset from an address
+;; produced a number whose bits happen to be a NaN -- which is why F(2.5).hex()
+;; answered '-nan' rather than raising anything.
+;; ============================================================================
+DEF_FUNC_BARE float_self_bits
+    V_IS_FLOAT rdi, rax
+    ja .fsb_not_immediate
+    mov rax, rdi
+    V_TO_F64 rax
+    ret
+.fsb_not_immediate:
+    V_TEST_PTR rdi, rax
+    ja .fsb_zero                ; an int immediate: 0.0 is as good as anything
+    test rdi, rdi
+    jz .fsb_zero
+    mov rax, [rdi + PyObject.ob_type]
+    lea rcx, [rel float_type]
+    cmp rax, rcx
+    je .fsb_inline
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_FLOAT_SUBCLASS
+    jz .fsb_zero
+.fsb_inline:
+    mov rax, [rdi + PyFloatObject.value]
+    ret
+.fsb_zero:
+    xor eax, eax
+    ret
+END_FUNC float_self_bits
+
 DEF_FUNC_BARE float_method_conjugate
-    mov rax, [rdi]              ; args[0] = self
-    V_TO_F64 rax                ; raw double bits
+    mov rdi, [rdi]              ; args[0] = self
+    call float_self_bits        ; a subclass instance is a pointer, not an
+                                ; immediate: see float_self_bits
     mov edx, TAG_FLOAT
     V_PACK rax, rdx             ; builtins return one Value
     ret
@@ -514,8 +550,9 @@ FIR_FRAME equ 8             ; + 1 push = 16
 DEF_FUNC float_method_as_integer_ratio, FIR_FRAME
     push rbx
 
-    mov rax, [rdi]              ; args[0] = self
-    V_TO_F64 rax                ; raw double bits
+    mov rdi, [rdi]              ; args[0] = self
+    call float_self_bits        ; a subclass instance is a pointer, not an
+                                ; immediate: see float_self_bits
 
     ; Check for inf/nan
     mov rcx, rax
@@ -663,8 +700,9 @@ DEF_FUNC float_method_hex, FH_FRAME
     push rbx
     push r12
 
-    mov rax, [rdi]              ; args[0] = self
-    V_TO_F64 rax                ; raw double bits
+    mov rdi, [rdi]              ; args[0] = self
+    call float_self_bits        ; a subclass instance is a pointer, not an
+                                ; immediate: see float_self_bits
     mov rbx, rax                ; save bits
 
     ; Allocate temp buffer (64 bytes is enough for any hex float)
