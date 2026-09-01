@@ -1651,6 +1651,67 @@ DEF_FUNC bytes_type_call, BTC_FRAME
     ret
 END_FUNC bytes_type_call
 
+;; ============================================================================
+;; bytes_hash(rdi = PyBytesObject *) -> rax = the hash
+;;
+;; bytes had no tp_hash at all, so obj_hash fell through to its address: two
+;; equal bytes objects hashed differently, and every dict and set holding
+;; them was silently wrong.  A small dict hid it, because dict_lookup probes
+;; and compares keys -- but 200 distinct byte strings gave 0 lookups found
+;; and a set of 400.  posix.environ is a dict[bytes, bytes], which is how
+;; this surfaced.
+;;
+;; FNV-1a, as str_hash computes it, and equal to str_hash's answer for the
+;; same bytes.  That is legal -- unequal objects may share a hash, and
+;; bytes_compare keeps them apart -- and it is what makes this a transcription
+;; rather than a second algorithm to keep in step.
+;;
+;; No cache: PyBytesObject has no ob_hash field, and adding one means every
+;; constructor has to initialise it or a new object reads a stale value.
+;; Nothing hashes bytes in a hot loop.
+;; ============================================================================
+DEF_FUNC bytes_hash
+    mov rcx, [rdi + PyBytesObject.ob_size]
+    lea rsi, [rdi + PyBytesObject.data]
+    mov rax, 0xcbf29ce484222325     ; FNV offset basis
+    mov rdx, 0x100000001b3          ; FNV prime
+.bh_loop4:
+    cmp rcx, 4
+    jb .bh_tail
+    movzx r8d, byte [rsi]
+    xor rax, r8
+    imul rax, rdx
+    movzx r8d, byte [rsi+1]
+    xor rax, r8
+    imul rax, rdx
+    movzx r8d, byte [rsi+2]
+    xor rax, r8
+    imul rax, rdx
+    movzx r8d, byte [rsi+3]
+    xor rax, r8
+    imul rax, rdx
+    add rsi, 4
+    sub rcx, 4
+    jmp .bh_loop4
+.bh_tail:
+    test rcx, rcx
+    jz .bh_done
+    movzx r8d, byte [rsi]
+    xor rax, r8
+    imul rax, rdx
+    inc rsi
+    dec rcx
+    jmp .bh_tail
+.bh_done:
+    ; -1 is the "no hash yet" marker everywhere it is stored.
+    cmp rax, -1
+    jne .bh_out
+    mov rax, -2
+.bh_out:
+    leave
+    ret
+END_FUNC bytes_hash
+
 section .data
 
 ; bytes type object
@@ -1664,7 +1725,7 @@ bytes_type:
     dq bytes_dealloc        ; tp_dealloc
     dq bytes_repr           ; tp_repr
     dq bytes_repr           ; tp_str
-    dq 0                    ; tp_hash
+    dq bytes_hash           ; tp_hash
     dq 0                    ; tp_call
     dq bytes_getattr        ; tp_getattr
     dq 0                    ; tp_setattr

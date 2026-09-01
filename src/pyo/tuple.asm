@@ -742,13 +742,14 @@ END_FUNC tuple_richcompare
 DEF_FUNC_LOCAL tuple_richcompare_inner, TRC_FRAME
     V_UNPACK rdi, rcx           ; left  Value -> (payload, tag)
     V_UNPACK rsi, r8            ; right Value -> (payload, tag)
-    ; Verify right is TAG_PTR and a tuple
+    ; Verify right is TAG_PTR and a tuple.  A subclass counts: this asked for
+    ; the exact type, so T([1,2]) == T([1,2]) was False and sorted() over a
+    ; mixed list raised -- both sides declined and the protocol ran out.  It
+    ; is the one comparison in the family that was not using the macro.
     cmp r8d, TAG_PTR
     jne .trc_not_impl
     mov rax, [rsi + PyObject.ob_type]
-    lea r9, [rel tuple_type]
-    cmp rax, r9
-    jne .trc_not_impl
+    REQUIRE_TUPLE_TYPE rax, r9, .trc_not_impl
 
     mov [rbp - TRC_LEFT], rdi
     mov [rbp - TRC_RIGHT], rsi

@@ -25,6 +25,7 @@ test_builtins_extra
 test_builtins
 test_builtin_subclass
 test_bytes_bytearray_repr
+test_bytes_hash_tuple_cmp
 test_bytes_methods
 test_bytes_percent
 test_bytes
