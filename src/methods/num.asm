@@ -319,7 +319,63 @@ ITB_ORDER  equ 48       ; 1 = big-endian, -1 = little
 ITB_SIGNED equ 56
 ITB_COUNT  equ 64       ; mpz_export's countp
 ITB_OUT    equ 72       ; the bytes object being filled
-ITB_FRAME  equ 80           ; + 2 pushes = 96, 16-aligned
+ITB_KWNAME equ 88       ; the keyword being matched, and the value given for it
+ITB_KWVAL  equ 96
+ITB_FRAME  equ 96           ; + 2 pushes = 112, 16-aligned
+
+;; ============================================================================
+;; itb_order_from_str -- "big"/"little" as the +-1 mpz_export wants
+;;
+;; Shared by to_bytes and from_bytes, which both take byteorder positionally
+;; or by keyword.  The type check is part of the job: the callers used to
+;; accept any pointer and then read PyStrObject.data out of it.
+;;
+;; rdi = the byteorder argument, as a Value
+;; -> rax = 1 (big), -1 (little), 0 for a str that is neither (ValueError),
+;;    or 2 for something that is not a str at all (TypeError).  CPython tells
+;;    those last two apart and so must we.
+;; ============================================================================
+OFS_SELF equ 8
+OFS_FRAME equ 16
+
+DEF_FUNC_LOCAL itb_order_from_str, OFS_FRAME
+    extern str_type
+    V_TEST_PTR rdi, rcx
+    ja .ofs_not_str
+    test rdi, rdi
+    jz .ofs_not_str
+    mov rcx, [rdi + PyObject.ob_type]
+    lea rdx, [rel str_type]
+    cmp rcx, rdx
+    jne .ofs_not_str
+    mov [rbp - OFS_SELF], rdi
+    lea rdi, [rdi + PyStrObject.data]
+    CSTRING rsi, "big"
+    call ap_strcmp
+    test eax, eax
+    jz .ofs_big
+    mov rdi, [rbp - OFS_SELF]
+    lea rdi, [rdi + PyStrObject.data]
+    CSTRING rsi, "little"
+    call ap_strcmp
+    test eax, eax
+    jnz .ofs_bad
+    mov rax, -1
+    leave
+    ret
+.ofs_big:
+    mov eax, 1
+    leave
+    ret
+.ofs_bad:
+    xor eax, eax
+    leave
+    ret
+.ofs_not_str:
+    mov eax, 2
+    leave
+    ret
+END_FUNC itb_order_from_str
 
 DEF_FUNC int_method_to_bytes, ITB_FRAME
     push rbx
@@ -332,8 +388,11 @@ DEF_FUNC int_method_to_bytes, ITB_FRAME
     mov qword [rbp - ITB_LEN], 1    ; CPython's defaults since 3.11
     mov qword [rbp - ITB_ORDER], 1  ; "big"
 
-    ; signed= is the only keyword taken here; length and byteorder are
-    ; positional.  The keyword values sit in the trailing argument slots.
+    ; length, byteorder and signed may all arrive by keyword -- CPython's
+    ; signature is to_bytes(length=1, byteorder='big', *, signed=False), and
+    ; pickle calls it with byteorder= spelled out.  Taking only signed= here
+    ; made every such call a TypeError.  The keyword values sit in the
+    ; trailing argument slots.
     mov rax, [rel kw_names_pending]
     test rax, rax
     jz .itb_positional
@@ -346,36 +405,85 @@ DEF_FUNC int_method_to_bytes, ITB_FRAME
     jge .itb_kw_done
     mov r10, [rax + PyTupleObject.ob_item]
     mov r10, [r10 + r9*8]                       ; the keyword's name
+    mov [rbp - ITB_KWNAME], r10
+    mov r11, r8
+    add r11, r9
+    mov r11, [rbx + r11*8]                      ; the value given for it
+    mov [rbp - ITB_KWVAL], r11
     push rax
     push rcx
     push r8
     push r9
+
     lea rdi, [r10 + PyStrObject.data]
     CSTRING rsi, "signed"
     call ap_strcmp
-    mov r11d, eax
-    pop r9
-    pop r8
-    pop rcx
-    pop rax
-    test r11d, r11d
-    jnz .itb_kw_error
-    mov r11, r8
-    add r11, r9
-    push rax
-    push rcx
-    push r8
-    push r9
-    mov rdi, [rbx + r11*8]                      ; the value passed for signed=
+    test eax, eax
+    jnz .itb_kw_not_signed
+    mov rdi, [rbp - ITB_KWVAL]
     extern obj_is_true
     call obj_is_true
     mov [rbp - ITB_SIGNED], rax
+    jmp .itb_kw_next
+
+.itb_kw_not_signed:
+    mov r10, [rbp - ITB_KWNAME]
+    lea rdi, [r10 + PyStrObject.data]
+    CSTRING rsi, "length"
+    call ap_strcmp
+    test eax, eax
+    jnz .itb_kw_not_length
+    mov rdi, [rbp - ITB_KWVAL]
+    V_UNPACK rdi, rdx
+    extern obj_as_index
+    call obj_as_index
+    mov [rbp - ITB_LEN], rax
+    jmp .itb_kw_next
+
+.itb_kw_not_length:
+    mov r10, [rbp - ITB_KWNAME]
+    lea rdi, [r10 + PyStrObject.data]
+    CSTRING rsi, "byteorder"
+    call ap_strcmp
+    test eax, eax
+    jnz .itb_kw_unknown
+    mov rdi, [rbp - ITB_KWVAL]
+    call itb_order_from_str
+    test rax, rax
+    jz .itb_kw_bad_order
+    cmp rax, 2
+    je .itb_kw_bad_type
+    mov [rbp - ITB_ORDER], rax
+
+.itb_kw_next:
     pop r9
     pop r8
     pop rcx
     pop rax
     inc r9
     jmp .itb_kw_loop
+
+.itb_kw_unknown:
+    pop r9
+    pop r8
+    pop rcx
+    pop rax
+    jmp .itb_kw_error
+
+.itb_kw_bad_order:
+    pop r9
+    pop r8
+    pop rcx
+    pop rax
+    jmp .itb_order_error
+
+.itb_kw_bad_type:
+    pop r9
+    pop r8
+    pop rcx
+    pop rax
+    jmp .itb_error
+
 .itb_kw_done:
     mov r12, r8                                 ; only the positionals remain
     mov qword [rel kw_names_pending], 0
@@ -398,25 +506,13 @@ DEF_FUNC int_method_to_bytes, ITB_FRAME
 
     cmp r12, 3
     jl .itb_have_args
-    mov rcx, [rbx + 16]                         ; args[2] = byteorder
-    V_UNPACK rcx, rdx
-    cmp edx, TAG_PTR
-    jne .itb_error
-    push rcx
-    lea rdi, [rcx + PyStrObject.data]
-    CSTRING rsi, "big"
-    call ap_strcmp
-    pop rcx
-    test eax, eax
-    jz .itb_order_done
-    push rcx
-    lea rdi, [rcx + PyStrObject.data]
-    CSTRING rsi, "little"
-    call ap_strcmp
-    pop rcx
-    test eax, eax
-    jnz .itb_order_error
-    mov qword [rbp - ITB_ORDER], -1
+    mov rdi, [rbx + 16]                         ; args[2] = byteorder
+    call itb_order_from_str
+    test rax, rax
+    jz .itb_order_error
+    cmp rax, 2
+    je .itb_error
+    mov [rbp - ITB_ORDER], rax
 .itb_order_done:
 
 
@@ -615,7 +711,10 @@ IFB_ARGS   equ 48
 IFB_ORDER  equ 56       ; 1 = big-endian, -1 = little
 IFB_SIGNED equ 64
 IFB_M      equ 80       ; mpz_t: the magnitude read out of the bytes
-IFB_FRAME  equ 96           ; + 2 pushes = 112, 16-aligned
+IFB_KWNAME equ 104      ; the keyword being matched, and the value given for it
+IFB_KWVAL  equ 112
+IFB_BYTESKW equ 120     ; a bytes= keyword overrides args[1]
+IFB_FRAME  equ 128          ; + 2 pushes = 144, 16-aligned
 
 DEF_FUNC int_classmethod_from_bytes, IFB_FRAME
     push rbx
@@ -629,9 +728,13 @@ DEF_FUNC int_classmethod_from_bytes, IFB_FRAME
     mov qword [rbp - IFB_OWNED], 0
     mov qword [rbp - IFB_ORDER], 1  ; 'big' since 3.11
     mov qword [rbp - IFB_SIGNED], 0
+    mov qword [rbp - IFB_BYTESKW], 0
 
-    ; signed= is the one keyword taken here; its value sits in the trailing
-    ; argument slot.
+    ; bytes, byteorder and signed may all arrive by keyword -- CPython's
+    ; signature is from_bytes(bytes, byteorder='big', *, signed=False), and
+    ; pickle spells byteorder= out.  Taking only signed= here made every such
+    ; call a TypeError.  The keyword values sit in the trailing argument
+    ; slots.
     mov rax, [rel kw_names_pending]
     test rax, rax
     jz .ifb_no_kw
@@ -644,48 +747,103 @@ DEF_FUNC int_classmethod_from_bytes, IFB_FRAME
     jge .ifb_kw_done
     mov r10, [rax + PyTupleObject.ob_item]
     mov r10, [r10 + r9*8]
-    push rax
-    push rcx
-    push r8
-    push r9
-    lea rdi, [r10 + PyStrObject.data]
-    CSTRING rsi, "signed"
-    call ap_strcmp
-    mov r11d, eax
-    pop r9
-    pop r8
-    pop rcx
-    pop rax
-    test r11d, r11d
-    jnz .ifb_kw_error
+    mov [rbp - IFB_KWNAME], r10
     mov r11, r8
     add r11, r9
     push rax
+    mov rax, [rbp - IFB_ARGS]
+    mov r11, [rax + r11*8]          ; the value given for it
+    pop rax
+    mov [rbp - IFB_KWVAL], r11
+    push rax
     push rcx
     push r8
     push r9
-    mov rdi, [rbp - IFB_ARGS]
-    mov rdi, [rdi + r11*8]
+
+    lea rdi, [r10 + PyStrObject.data]
+    CSTRING rsi, "signed"
+    call ap_strcmp
+    test eax, eax
+    jnz .ifb_kw_not_signed
+    mov rdi, [rbp - IFB_KWVAL]
     call obj_is_true
     mov [rbp - IFB_SIGNED], rax
+    jmp .ifb_kw_next
+
+.ifb_kw_not_signed:
+    mov r10, [rbp - IFB_KWNAME]
+    lea rdi, [r10 + PyStrObject.data]
+    CSTRING rsi, "byteorder"
+    call ap_strcmp
+    test eax, eax
+    jnz .ifb_kw_not_order
+    mov rdi, [rbp - IFB_KWVAL]
+    call itb_order_from_str
+    test rax, rax
+    jz .ifb_kw_bad_order
+    cmp rax, 2
+    je .ifb_kw_bad_type
+    mov [rbp - IFB_ORDER], rax
+    jmp .ifb_kw_next
+
+.ifb_kw_not_order:
+    mov r10, [rbp - IFB_KWNAME]
+    lea rdi, [r10 + PyStrObject.data]
+    CSTRING rsi, "bytes"
+    call ap_strcmp
+    test eax, eax
+    jnz .ifb_kw_unknown
+    mov r10, [rbp - IFB_KWVAL]
+    mov [rbp - IFB_BYTESKW], r10
+
+.ifb_kw_next:
     pop r9
     pop r8
     pop rcx
     pop rax
     inc r9
     jmp .ifb_kw_loop
+
+.ifb_kw_unknown:
+    pop r9
+    pop r8
+    pop rcx
+    pop rax
+    jmp .ifb_kw_error
+
+.ifb_kw_bad_order:
+    pop r9
+    pop r8
+    pop rcx
+    pop rax
+    jmp .ifb_order_error
+
+.ifb_kw_bad_type:
+    pop r9
+    pop r8
+    pop rcx
+    pop rax
+    jmp .ifb_error
+
 .ifb_kw_done:
     mov rsi, r8                     ; only the positionals remain
     mov qword [rel kw_names_pending], 0
     cmp rsi, 2
-    jl .ifb_error
+    jge .ifb_no_kw
+    cmp qword [rbp - IFB_BYTESKW], 0
+    je .ifb_error                   ; the value itself has to come from
+                                    ; somewhere: bytes= or args[1]
 .ifb_no_kw:
 
     ; args[1] is any iterable of ints, not only a bytes: ipaddress passes a
     ; map object.  Anything that is not already a bytes goes through bytes()
     ; first, which is where CPython's own conversion lives too.
+    mov rax, [rbp - IFB_BYTESKW]
+    test rax, rax
+    jnz .ifb_have_value
     mov rdi, [rbp - IFB_ARGS]
     mov rax, [rdi + 8]
+.ifb_have_value:
     V_TEST_PTR rax, rcx
     ja .ifb_convert
     test rax, rax
@@ -715,25 +873,15 @@ DEF_FUNC int_classmethod_from_bytes, IFB_FRAME
     cmp rsi, 3
     jl .ifb_have_order
     mov rdi, [rbp - IFB_ARGS]
-    mov rcx, [rdi + 16]            ; payload
-    V_UNPACK rcx, rdx       ; args[2]
-    cmp edx, TAG_PTR
-    jne .ifb_error
-    push rcx
-    lea rdi, [rcx + PyStrObject.data]
-    CSTRING rsi, "big"
-    call ap_strcmp
-    pop rcx
-    test eax, eax
-    jz .ifb_have_order
-    push rcx
-    lea rdi, [rcx + PyStrObject.data]
-    CSTRING rsi, "little"
-    call ap_strcmp
-    pop rcx
-    test eax, eax
-    jnz .ifb_order_error
-    mov qword [rbp - IFB_ORDER], -1
+    mov rdi, [rdi + 16]            ; args[2] = byteorder
+    mov [rbp - IFB_NARGS], rsi
+    call itb_order_from_str
+    mov rsi, [rbp - IFB_NARGS]
+    test rax, rax
+    jz .ifb_order_error
+    cmp rax, 2
+    je .ifb_error
+    mov [rbp - IFB_ORDER], rax
 
 .ifb_have_order:
     ; The magnitude, at full width.  This used to accumulate into one 64-bit

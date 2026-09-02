@@ -132,6 +132,7 @@ test_dict_update_raises
 test_dict_views
 test_dir
 test_dunder_protocols
+test_dunder_receiver
 test_dunders
 test_empty_bases
 test_errno
