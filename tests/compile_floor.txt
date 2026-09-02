@@ -131,6 +131,7 @@ test_fileio
 test_float_complex_subclass
 test_float_fromhex
 test_float_methods
+test_float_nan_ops
 test_float
 test_float_repr
 test_fmtspec

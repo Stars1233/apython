@@ -619,11 +619,13 @@ DEF_FUNC_BARE float_bool
     movq xmm0, rdi
     xorpd xmm1, xmm1         ; xmm1 = 0.0
     ucomisd xmm0, xmm1
-    je .is_zero
+    jp .fbool_true           ; UNORDERED sets ZF too: bool(nan) is True, and
+    je .is_zero              ; the je alone made it False for a float subclass
+.fbool_true:
     mov eax, 1
     ret
 .is_zero:
-    ; Also check for -0.0 (which is also falsy)
+    ; -0.0 compares equal to 0.0, so it lands here too, which is right.
     xor eax, eax
     ret
 END_FUNC float_bool
@@ -769,11 +771,15 @@ DEF_FUNC float_truediv, FB_FRAME
     V_UNPACK rsi, rcx           ; right Value -> (payload, tag)
     FLOAT_BINOP_SETUP
 
-    ; Check for division by zero
+    ; Check for division by zero.  ucomisd sets ZF for UNORDERED too, so the
+    ; je alone read a NaN divisor as a zero one and 1.0 / float("nan") raised
+    ; instead of answering nan.
     movsd xmm1, [rbp - FB_RIGHT]
     xorpd xmm2, xmm2
     ucomisd xmm1, xmm2
+    jp .div_nonzero
     je .div_zero
+.div_nonzero:
 
     movsd xmm0, [rbp - FB_LEFT]
     divsd xmm0, xmm1
@@ -791,11 +797,13 @@ DEF_FUNC float_floordiv, FB_FRAME
     V_UNPACK rsi, rcx           ; right Value -> (payload, tag)
     FLOAT_BINOP_SETUP
 
-    ; Check for division by zero
+    ; Check for division by zero; jp first, as in float_truediv.
     movsd xmm1, [rbp - FB_RIGHT]
     xorpd xmm2, xmm2
     ucomisd xmm1, xmm2
+    jp .floordiv_nonzero
     je .floordiv_zero
+.floordiv_nonzero:
 
     movsd xmm0, [rbp - FB_LEFT]
     divsd xmm0, xmm1
@@ -815,11 +823,13 @@ DEF_FUNC float_mod, FB_FRAME
     V_UNPACK rsi, rcx           ; right Value -> (payload, tag)
     FLOAT_BINOP_SETUP
 
-    ; Check for division by zero
+    ; Check for division by zero; jp first, as in float_truediv.
     movsd xmm1, [rbp - FB_RIGHT]
     xorpd xmm2, xmm2
     ucomisd xmm1, xmm2
+    jp .mod_nonzero
     je .mod_zero
+.mod_nonzero:
 
     ; a % b = a - floor(a/b) * b
     movsd xmm0, [rbp - FB_LEFT]       ; a

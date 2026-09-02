@@ -325,13 +325,6 @@ than lying — but they are ordinary Python that does not work:
   0 and `I(258).to_bytes(2, 'big')` is `b'\x00\x00'`.  Under valgrind it is
   an invalid read, and the garbage can be a limb pointer handed to GMP.
 
-- **A NaN divisor reads as zero in float division.**  `float_truediv`,
-  `float_floordiv` and `float_mod` compare against 0.0 with `ucomisd` and
-  branch on `je`, which is taken for UNORDERED as well: `1.0 / float("nan")`
-  raises ZeroDivisionError where CPython answers nan.  `complex_pow` has the
-  same shape at its `jb`, so `complex(0,0) ** complex(nan, 0)` raises where
-  CPython answers 0j.
-
 - **`next(obj)` reports StopIteration for any exception a Python `__next__`
   raises.**  `it.__next__()` and `for x in it` both propagate the real one;
   only the `next()` builtin swallows it.

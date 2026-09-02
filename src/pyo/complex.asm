@@ -996,7 +996,9 @@ DEF_FUNC complex_pow, CPW_FRAME
     jne .cpw_zero_neg_power
     movsd xmm0, [rbp - CPW_B]
     ucomisd xmm0, xmm2
-    jb .cpw_zero_neg_power
+    jp .cpw_zero_result      ; UNORDERED sets CF too, so the jb alone sent a
+    jb .cpw_zero_neg_power   ; NaN exponent to the raise; C's nan < 0 is false
+.cpw_zero_result:
     xorpd xmm0, xmm0
     xorpd xmm1, xmm1
     call complex_from_doubles
