@@ -98,3 +98,31 @@ for n in (1, 10, 100):
     subject = "b" * n
     m = rx.match(subject)
     print("no 'a', len %-4d %s" % (n, m.span() if m else None))
+
+
+print()
+print("--- BIGCHARSET, whose operand is a map and then the bitmaps ---")
+# [a-z] under IGNORECASE folds in the Kelvin sign and the long s, so the set
+# reaches past U+00FF and the compiler emits BIGCHARSET rather than a plain
+# 256-bit CHARSET.  Its operand is <count> <256-byte map> <count * 32-byte
+# bitmaps>, and the map comes FIRST -- the engine had the two the other way
+# round, so it indexed a bitmap with the code point's high byte and then bit-
+# tested a slice of the map.  The map is almost all 2s, so the "bitmap" was
+# 0x02020202 and exactly the code points congruent to 1 mod 8 matched: a, i,
+# q and y, and no other letter.  Nothing in this file reached BIGCHARSET, and
+# nothing else could: only a charset wider than a byte compiles to one.
+BIGCHARSET_CODE = [14, 4, 0, 1, 4294967295, 24, 97, 1, 4294967295, 39, 92, 10, 3, 33685760, 33686018, 33686018, 33686018, 33686018, 33686018, 33686018, 33686018, 33686018, 33686018, 33686018, 33686018, 33686018, 33686018, 33686018, 33686018, 33686018, 33686018, 33686018, 33686018, 33686018, 33686018, 33686018, 33686018, 33686018, 33686018, 33686018, 33686018, 33686018, 33686018, 33686018, 33686018, 33686018, 33686018, 33686018, 33686018, 33686018, 33686018, 33686018, 33686018, 33686018, 33686018, 33686018, 33686018, 33686018, 33686018, 33686018, 33686018, 33686018, 33686018, 33686018, 33686018, 33686018, 33686018, 33686018, 33686018, 33686018, 33686018, 33686018, 33686018, 33686018, 33686018, 33686018, 33686018, 0, 0, 0, 134217726, 0, 0, 0, 0, 0, 131072, 0, 2147483648, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1]
+BIGCHARSET_ONE = [14, 4, 0, 1, 1, 39, 92, 10, 3, 33685760, 33686018, 33686018, 33686018, 33686018, 33686018, 33686018, 33686018, 33686018, 33686018, 33686018, 33686018, 33686018, 33686018, 33686018, 33686018, 33686018, 33686018, 33686018, 33686018, 33686018, 33686018, 33686018, 33686018, 33686018, 33686018, 33686018, 33686018, 33686018, 33686018, 33686018, 33686018, 33686018, 33686018, 33686018, 33686018, 33686018, 33686018, 33686018, 33686018, 33686018, 33686018, 33686018, 33686018, 33686018, 33686018, 33686018, 33686018, 33686018, 33686018, 33686018, 33686018, 33686018, 33686018, 33686018, 33686018, 33686018, 33686018, 33686018, 33686018, 33686018, 33686018, 33686018, 33686018, 0, 0, 0, 134217726, 0, 0, 0, 0, 0, 131072, 0, 2147483648, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]
+
+# 2 is re.IGNORECASE; this file drives _sre directly and never imports re.
+rx = _sre.compile("[a-z]", 2, BIGCHARSET_ONE, 0, {}, (None,))
+missed = [c for c in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+          if rx.match(c) is None]
+print("single, letters that do not match:", repr("".join(missed)))
+extra = [c for c in "0123456789 _-@[]{}" if rx.match(c) is not None]
+print("single, non-letters that do match:", repr("".join(extra)))
+
+rxp = _sre.compile("[a-z]+", 2, BIGCHARSET_CODE, 0, {}, (None,))
+for s in ("abc", "ABC", "AbC", "xyz", "a", "abc123", "1abc", ""):
+    m = rxp.match(s)
+    print("[a-z]+ %-8r %s" % (s, m.span() if m else None))

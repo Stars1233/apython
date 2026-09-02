@@ -485,29 +485,28 @@ DEF_FUNC sre_charset, SM_FRAME
     jmp .cs_loop
 
 .cs_bigcharset:
-    ; BIGCHARSET: u32 count, then count * 256 bytes of block data
-    ; then 256 u8 block-index entries
-    ; For simplicity, handle the common case
+    ; BIGCHARSET <count> <256-byte block map> <count * 32-byte bitmaps>
+    ;
+    ; The map comes FIRST.  _optimize_charset builds the operand as
+    ; `[block] + mapping + data`, and this read the two the other way round:
+    ; the block number came out of the middle of a bitmap and the bitmap out
+    ; of the middle of the map.  For [a-z] under IGNORECASE the map is almost
+    ; all 2s, so the "bitmap" it landed on was 0x02020202 and exactly the code
+    ; points congruent to 1 mod 8 matched -- a, i, q, y and nothing else.
     mov eax, [rbx]             ; number of blocks
     add rbx, 4
-    ; block_index is at rbx + eax*32
-    ; For ch: block = block_index[ch >> 8], then check bitmap
     mov ecx, r12d
-    shr ecx, 8                 ; high byte
+    shr ecx, 8                 ; the code point's high byte
     cmp ecx, 256
-    jae .cs_big_skip
-    lea rdx, [rbx]            ; blocks start
-    imul rax, rax, 32         ; total block bytes (eax blocks * 32 bytes each)
-    add rax, rdx              ; rax = blocks_start + total_block_bytes
-    movzx ecx, byte [rax + rcx]  ; block_index[ch>>8]
-    ; Now get bit from block[block_index]: 256-bit bitmap
-    imul ecx, ecx, 32
-    lea rdx, [rbx + rcx]      ; block data
+    jae .cs_big_skip           ; above U+FFFF, which the map does not reach
+    movzx ecx, byte [rbx + rcx]     ; map[ch >> 8] = which bitmap
+    imul ecx, ecx, 32               ; each is 256 bits
+    lea rdx, [rbx + 256]            ; the bitmaps follow the map
+    add rdx, rcx
     mov eax, r12d
-    and eax, 0xff              ; low byte of ch
-    mov ecx, eax
-    shr ecx, 5
-    mov eax, [rdx + rcx*4]
+    and eax, 0xff
+    shr eax, 5
+    mov eax, [rdx + rax*4]
     mov ecx, r12d
     and ecx, 31
     bt eax, ecx

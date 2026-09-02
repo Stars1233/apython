@@ -1,4 +1,3 @@
 '(a*)*b'                 'aaa'          match=None search=None groups=None findall=[]
-'[a-z]+'                 'ABC'          match=(0, 3) search=(0, 3) groups=TypeError findall=['ABC']
 expand : aa-bb-c
 sub  '(a)(b)'   '\\2\\1' 'abab'       'baba'
