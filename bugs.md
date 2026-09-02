@@ -9,11 +9,6 @@ one-line fix.
 
 ## Correctness
 
-- **`format(x, "F")` does not capitalise a non-finite float.**  `'F'` now
-  formats like `'f'`, but CPython spells the result of `format(float('inf'),
-  'F')` as `INF`; here it is `inf`.  The same for `NAN`, and for the halves of
-  a complex.
-
 - **`~x` on an int subclass prefers the subclass's `__invert__` over
   `int.__invert__`.**  For `class I(int, M)` where `M` defines `__invert__`,
   CPython resolves `int.__invert__` first (it comes earlier in the MRO) and
@@ -75,12 +70,6 @@ one-line fix.
   the registry; reaching it from the interpreter would mean calling Python
   from a builtin method.  The `errors` argument is accepted and ignored --
   every failure is strict.
-
-- **`format(x, "")` is not `str(x)` for a float.**  `format(1.0, "")` gives
-  `"1"` where CPython gives `"1.0"`: an empty spec falls into the general
-  formatter with type `g` and precision 6, rather than short-circuiting to
-  `repr`.  `f"{1.0}"` and `str(1.0)` are both right; only the explicit
-  `format()` with an empty spec is not.
 
 - **`str.format` does not accept attribute or index access in a field.**
   `"{0.attr}"` and `"{0[key]}"` are not resolved; a field is a position, a

@@ -404,27 +404,37 @@ DEF_FUNC float_format_spec, FS_FRAME
     lea rdi, [rbp - FS_BUF]         ; buffer (48 bytes)
     mov esi, 48               ; bufsz
 
+    ; Each of the six letters has its own conversion.  The uppercase ones are
+    ; not cosmetic: C99's %F and %G spell a non-finite result INF and NAN,
+    ; which is the whole difference CPython draws between 'f' and 'F'.  'F'
+    ; used to share fmt_f, so format(float('inf'), 'F') was "inf"; 'G' had no
+    ; case at all and fell to the %g default, so format(1e20, 'G') was
+    ; "1e+20".  'E' was right by accident of already having fmt_E.
     movzx eax, byte [rbp - FS_TYPE]  ; type char
     cmp al, 'f'
     je .ffs_use_f
-    ; 'F' is 'f' with INF and NAN spelled in capitals.  It used to fall through
-    ; to the %g default, so format(1.5, "F") was "1.5" where CPython gives
-    ; "1.500000".  The capitalisation of a non-finite result is still missing;
-    ; bugs.md records it.
     cmp al, 'F'
-    je .ffs_use_f
+    je .ffs_use_F
     cmp al, 'e'
     je .ffs_use_e
     cmp al, 'E'
     je .ffs_use_E
+    cmp al, 'G'
+    je .ffs_use_G
     ; Default: use %.*g
     lea rdx, [rel fmt_g]
     jmp .ffs_do_snprintf
 .ffs_use_f:
     lea rdx, [rel fmt_f]
     jmp .ffs_do_snprintf
+.ffs_use_F:
+    lea rdx, [rel fmt_F]
+    jmp .ffs_do_snprintf
 .ffs_use_e:
     lea rdx, [rel fmt_e]
+    jmp .ffs_do_snprintf
+.ffs_use_G:
+    lea rdx, [rel fmt_G]
     jmp .ffs_do_snprintf
 .ffs_use_E:
     lea rdx, [rel fmt_E]
@@ -1302,6 +1312,8 @@ fmt_g: db "%.*g", 0
 fmt_f: db "%.*f", 0
 fmt_e: db "%.*e", 0
 fmt_E: db "%.*E", 0
+fmt_F: db "%.*F", 0
+fmt_G: db "%.*G", 0
 
 align 8
 fi_two63:     dq 0x43e0000000000000   ; 2.0**63

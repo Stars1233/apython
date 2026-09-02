@@ -990,6 +990,7 @@ END_FUNC format_int_body
 ;; the caller.
 ;; ============================================================================
 FFB_SPEC  equ 8          ; the synthesised ".<prec><type>" spec
+FFB_ADDDOT equ 16        ; 1 when an empty type needs its ".0" put back
 FFB_FRAME equ 48            ; + 2 pushes = 64
 
 DEF_FUNC_LOCAL format_float_body, FFB_FRAME
@@ -1010,6 +1011,28 @@ DEF_FUNC_LOCAL format_float_body, FFB_FRAME
     movq rdi, xmm0                      ; raw double bits
 
 .ffb_have_double:
+    ; An empty type letter is repr, not %g.  format_float_body used to write a
+    ; one-byte spec "r" on the strength of a comment claiming
+    ; float_format_spec had a repr default; it has none, so the letter was
+    ; ignored and the defaults %.6g rendered format(1.0, "") as "1".
+    ;
+    ; CPython's rule: with no precision an empty type is exactly repr(x); with
+    ; one it is 'g' but with at least one digit after the point, so
+    ; format(1.0, ".3") is "1.0" rather than "1".
+    mov qword [rbp - FFB_ADDDOT], 0
+    mov rax, [r12 - FS_TYPE]
+    test rax, rax
+    jnz .ffb_build_spec
+    mov rax, [r12 - FS_PREC]
+    cmp rax, 0
+    jge .ffb_empty_with_prec
+    extern float_repr
+    call float_repr             ; rdi = the raw bits, still
+    jmp .ffb_have_string
+.ffb_empty_with_prec:
+    mov qword [rbp - FFB_ADDDOT], 1
+
+.ffb_build_spec:
     ; Build ".<precision><type>" in a small buffer.
     lea rbx, [rbp - FFB_SPEC]
     xor ecx, ecx
@@ -1083,7 +1106,7 @@ DEF_FUNC_LOCAL format_float_body, FFB_FRAME
     mov rax, [r12 - FS_TYPE]
     test rax, rax
     jnz .ffb_have_type
-    mov rax, 'r'                        ; float_format_spec's repr default
+    mov rax, 'g'                        ; an empty type, with a precision
 .ffb_have_type:
     mov [rbx + rcx], al
     inc rcx
@@ -1093,6 +1116,60 @@ DEF_FUNC_LOCAL format_float_body, FFB_FRAME
     call float_format_spec
     V_UNPACK rax, rdx
 
+    cmp qword [rbp - FFB_ADDDOT], 0
+    je .ffb_have_string
+
+    ; Put the ".0" back when %g dropped it.  A point, an exponent, or the
+    ; letters of inf and nan all mean there is nothing to put back.
+    mov rbx, rax
+    mov rcx, [rbx + PyStrObject.ob_size]
+    xor esi, esi
+.ffb_dot_scan:
+    cmp rsi, rcx
+    jge .ffb_dot_append
+    movzx eax, byte [rbx + PyStrObject.data + rsi]
+    cmp al, '.'
+    je .ffb_dot_none
+    cmp al, 'e'
+    je .ffb_dot_none
+    cmp al, 'E'
+    je .ffb_dot_none
+    cmp al, 'n'                         ; nan
+    je .ffb_dot_none
+    cmp al, 'i'                         ; inf
+    je .ffb_dot_none
+    inc rsi
+    jmp .ffb_dot_scan
+.ffb_dot_none:
+    mov rax, rbx
+    jmp .ffb_have_string
+.ffb_dot_append:
+    lea rdi, [rcx + PyStrObject.data + 9]
+    call ap_malloc
+    mov qword [rax + PyObject.ob_refcnt], 1
+    lea rdx, [rel str_type]
+    mov [rax + PyObject.ob_type], rdx
+    mov qword [rax + PyStrObject.ob_hash], -1
+    mov rcx, [rbx + PyStrObject.ob_size]
+    lea rdx, [rcx + 2]
+    mov [rax + PyStrObject.ob_size], rdx
+    mov [rax + PyStrObject.ob_length], rdx
+    push rax
+    lea rdi, [rax + PyStrObject.data]
+    lea rsi, [rbx + PyStrObject.data]
+    mov rdx, rcx
+    call ap_memcpy
+    pop rax
+    mov rcx, [rbx + PyStrObject.ob_size]
+    mov byte [rax + PyStrObject.data + rcx], '.'
+    mov byte [rax + PyStrObject.data + rcx + 1], '0'
+    mov byte [rax + PyStrObject.data + rcx + 2], 0
+    push rax
+    mov rdi, rbx
+    call obj_decref
+    pop rax
+
+.ffb_have_string:
     ; A leading '-' is what '=' alignment keeps in front of the padding.
     mov qword [r12 - FS_SIGNCH], 0
     cmp qword [rax + PyStrObject.ob_size], 0
