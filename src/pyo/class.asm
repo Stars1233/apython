@@ -18,6 +18,7 @@ extern dict_set
 extern str_from_cstr
 extern str_from_cstr_heap
 extern ap_strcmp
+extern rbt_append_cstr
 extern type_repr
 extern fatal_error
 extern raise_exception
@@ -1596,6 +1597,153 @@ DEF_FUNC_LOCAL tc_winner_metatype, TWM_FRAME
     ret
 END_FUNC tc_winner_metatype
 
+
+;; ============================================================================
+;; type_abstract_error(rdi = the type, rsi = its __abstractmethods__ set)
+;;
+;; "Can't instantiate abstract class Shape without an implementation for
+;;  abstract methods 'area', 'perimeter'" -- CPython's wording, with the
+;; names sorted and the noun agreeing with how many there are.  It used to
+;; say only "Can't instantiate abstract class with abstract methods", which
+;; names neither the class nor what is missing, and those are the two things
+;; the reader needs.
+;;
+;; Does not return.
+;; ============================================================================
+TAE_NAMES equ 12 * 8        ; the sorted keys, up to TAE_MAX of them
+TAE_COUNT equ TAE_NAMES + 8
+TAE_BUF   equ TAE_COUNT + 8 + 1024
+TAE_FRAME equ TAE_BUF       ; + 3 pushes = TAE_BUF + 24
+TAE_MAX   equ 12
+
+DEF_FUNC_LOCAL type_abstract_error, TAE_FRAME
+    push rbx
+    push r12
+    push r13
+    mov rbx, rdi                ; the type
+    mov r12, rsi                ; the set
+
+    ; --- collect the keys, up to TAE_MAX of them ---
+    xor r13d, r13d              ; how many collected
+    mov rcx, [r12 + PyDictObject.entries]
+    xor r8d, r8d                ; the slot index
+.tae_scan:
+    cmp r8, [r12 + PyDictObject.capacity]
+    jge .tae_sort
+    cmp r13, TAE_MAX
+    jge .tae_sort
+    mov rax, r8
+    shl rax, 4                  ; SET_ENTRY_SIZE
+    mov rdx, [rcx + rax + SET_ENTRY_KEY]
+    test rdx, rdx
+    jz .tae_scan_next
+    mov rax, r13
+    shl rax, 3
+    lea r9, [rbp - TAE_NAMES]
+    mov [r9 + rax], rdx
+    inc r13
+.tae_scan_next:
+    inc r8
+    jmp .tae_scan
+
+    ; --- insertion sort, by the bytes of the names ---
+.tae_sort:
+    mov [rbp - TAE_COUNT], r13
+    cmp r13, 2
+    jl .tae_build
+    mov r8, 1                   ; i
+.tae_sort_outer:
+    cmp r8, r13
+    jge .tae_build
+    mov r9, r8                  ; j
+.tae_sort_inner:
+    test r9, r9
+    jz .tae_sort_next
+    lea rcx, [rbp - TAE_NAMES]
+    mov rax, r9
+    shl rax, 3
+    mov rdi, [rcx + rax]
+    mov rsi, [rcx + rax - 8]
+    add rdi, PyStrObject.data
+    add rsi, PyStrObject.data
+    push r8
+    push r9
+    call ap_strcmp
+    pop r9
+    pop r8
+    test eax, eax
+    jge .tae_sort_next
+    lea rcx, [rbp - TAE_NAMES]
+    mov rax, r9
+    shl rax, 3
+    mov rdi, [rcx + rax]
+    mov rsi, [rcx + rax - 8]
+    mov [rcx + rax], rsi
+    mov [rcx + rax - 8], rdi
+    dec r9
+    jmp .tae_sort_inner
+.tae_sort_next:
+    inc r8
+    jmp .tae_sort_outer
+
+    ; --- build the message ---
+.tae_build:
+    lea rdi, [rbp - TAE_BUF]
+    lea rsi, [rel tae_prefix]
+    call rbt_append_cstr
+    mov rdi, rax
+    mov rsi, [rbx + PyTypeObject.tp_name]
+    call rbt_append_cstr
+    mov rdi, rax
+    mov r13, [rbp - TAE_COUNT]
+    test r13, r13
+    jz .tae_raise               ; nothing to name: keep the short form
+    cmp r13, 1
+    je .tae_singular
+    lea rsi, [rel tae_plural]
+    jmp .tae_middle
+.tae_singular:
+    lea rsi, [rel tae_singular_s]
+.tae_middle:
+    call rbt_append_cstr
+    mov rdi, rax
+
+    xor r12d, r12d              ; the index
+.tae_names_loop:
+    cmp r12, r13
+    jge .tae_raise
+    test r12, r12
+    jz .tae_no_comma
+    lea rsi, [rel tae_comma]
+    call rbt_append_cstr
+    mov rdi, rax
+.tae_no_comma:
+    lea rsi, [rel tae_quote]
+    call rbt_append_cstr
+    mov rdi, rax
+    lea rcx, [rbp - TAE_NAMES]
+    mov rax, r12
+    shl rax, 3
+    mov rsi, [rcx + rax]
+    add rsi, PyStrObject.data
+    push r12
+    push r13
+    call rbt_append_cstr
+    pop r13
+    pop r12
+    mov rdi, rax
+    lea rsi, [rel tae_quote]
+    call rbt_append_cstr
+    mov rdi, rax
+    inc r12
+    jmp .tae_names_loop
+
+.tae_raise:
+    lea rdi, [rel exc_TypeError_type]
+    lea rsi, [rbp - TAE_BUF]
+    call raise_exception        ; does not return
+END_FUNC type_abstract_error
+
 DEF_FUNC type_call
     ; Special case: type(x) with 1 arg when calling type itself
     ; Returns x.__class__ (the type of x)
@@ -1797,7 +1945,9 @@ DEF_FUNC type_call
     ja .tc_not_abstract
     cmp qword [rax + PyDictObject.ob_size], 0
     je .tc_not_abstract
-    RAISE exc_TypeError_type, "Can't instantiate abstract class with abstract methods"
+    mov rdi, rbx
+    mov rsi, rax
+    call type_abstract_error    ; does not return
 .tc_not_abstract:
 
     ; Check if this type inherits from an exception type
@@ -2912,6 +3062,11 @@ section .data
 instance_repr_cstr: db "<instance>", 0
 init_name_cstr:     db "__init__", 0
 tc_abstract_name: db "__abstractmethods__", 0
+tae_prefix:     db "Can't instantiate abstract class ", 0
+tae_singular_s: db " without an implementation for abstract method ", 0
+tae_plural:     db " without an implementation for abstract methods ", 0
+tae_comma:      db ", ", 0
+tae_quote:      db "'", 0
 new_name_cstr:      db "__new__", 0
 tga_name_str:       db "__name__", 0
 method_name_str:    db "method", 0

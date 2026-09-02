@@ -228,11 +228,6 @@ than lying — but they are ordinary Python that does not work:
   `tp_dictoffset`, which the subclass inherits.  Nothing detects the
   collision.
 
-- **The abstract-method TypeError does not name the methods.**  CPython says
-  "Can't instantiate abstract class Abs without an implementation for abstract
-  method 'f'"; here it is "Can't instantiate abstract class with abstract
-  methods".  The enforcement itself works.
-
 - **A memoryview with a step other than 1 is not a view.**  `mv[::2]` and
   `mv[::-1]` raise NotImplementedError.  CPython answers with a
   non-contiguous view, which needs a stride the object does not carry -- and

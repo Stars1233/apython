@@ -593,6 +593,7 @@ END_FUNC raise_binop_type_error_ex
 ; in a divmod TypeError made the NEXT attribute error re-raise this one.
 ;; rbt_append_cstr(rdi = dest, rsi = src cstr) -> rax = the NUL it wrote.
 ;; Bounded at 80 bytes per field; the callers' buffers are sized for that.
+global rbt_append_cstr
 DEF_FUNC rbt_append_cstr
     xor ecx, ecx
 .rbtc_loop:
