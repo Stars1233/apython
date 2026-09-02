@@ -210,6 +210,7 @@ test_next_propagates
 test_none_bool_singleton
 test_none
 test_number_real_imag
+test_numeric_dunders
 test_numeric_hash
 test_numeric_subclasses
 test_object_doc

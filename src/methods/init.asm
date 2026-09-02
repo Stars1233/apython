@@ -1645,6 +1645,56 @@ DEF_FUNC methods_init
     pop rdi
     call obj_decref
 
+    ;; The unary operators, by name.  Without these an MRO lookup for
+    ;; __invert__ on `class I(int, M)` could not find int's before M's, since
+    ;; int had nothing in its dict to find, and type_install_slots wrote M's
+    ;; wrapper over the nb_invert the class had already inherited.
+    mov rdi, rbx
+    lea rsi, [rel mn___neg__]
+    extern int_dunder_neg
+    lea rdx, [rel int_dunder_neg]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___pos__]
+    extern int_dunder_pos
+    lea rdx, [rel int_dunder_pos]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___abs__]
+    extern int_dunder_abs
+    lea rdx, [rel int_dunder_abs]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___invert__]
+    extern int_dunder_invert
+    lea rdx, [rel int_dunder_invert]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___int__]
+    extern int_dunder_int
+    lea rdx, [rel int_dunder_int]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___float__]
+    extern int_dunder_float
+    lea rdx, [rel int_dunder_float]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___index__]
+    extern int_dunder_index
+    lea rdx, [rel int_dunder_index]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___trunc__]
+    extern int_dunder_trunc
+    lea rdx, [rel int_dunder_trunc]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___bool__]
+    extern int_dunder_bool
+    lea rdx, [rel int_dunder_bool]
+    call dict_add_builtin_func
+
     ;; real, imag, numerator and denominator, as getset descriptors.  int's
     ;; tp_getattr answers an instance read before this dict is consulted;
     ;; these are what make `int.real` an attribute of the type, and what put
@@ -1809,6 +1859,42 @@ DEF_FUNC methods_init
     mov rdi, rbx
     lea rsi, [rel mn___format__]
     lea rdx, [rel builtin_method_format]
+    call dict_add_builtin_func
+
+    mov rdi, rbx
+    lea rsi, [rel mn___neg__]
+    extern float_dunder_neg
+    lea rdx, [rel float_dunder_neg]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___pos__]
+    extern float_dunder_pos
+    lea rdx, [rel float_dunder_pos]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___abs__]
+    extern float_dunder_abs
+    lea rdx, [rel float_dunder_abs]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___int__]
+    extern float_dunder_int
+    lea rdx, [rel float_dunder_int]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___float__]
+    extern float_dunder_float
+    lea rdx, [rel float_dunder_float]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___trunc__]
+    extern float_dunder_trunc
+    lea rdx, [rel float_dunder_trunc]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___bool__]
+    extern float_dunder_bool
+    lea rdx, [rel float_dunder_bool]
     call dict_add_builtin_func
 
     ; real and imag; float has no numerator or denominator, as CPython has not
@@ -2188,6 +2274,15 @@ mn___setitem__: db "__setitem__", 0
 mn___delitem__: db "__delitem__", 0
 mn___contains__: db "__contains__", 0
 mn___len__:     db "__len__", 0
+mn___neg__:     db "__neg__", 0
+mn___pos__:     db "__pos__", 0
+mn___abs__:     db "__abs__", 0
+mn___invert__:  db "__invert__", 0
+mn___int__:     db "__int__", 0
+mn___float__:   db "__float__", 0
+mn___index__:   db "__index__", 0
+mn___trunc__:   db "__trunc__", 0
+mn___bool__:    db "__bool__", 0
 gs_real:        db "real", 0
 gs_imag:        db "imag", 0
 gs_numerator:   db "numerator", 0

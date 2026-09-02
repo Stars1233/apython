@@ -9,12 +9,6 @@ one-line fix.
 
 ## Correctness
 
-- **`~x` on an int subclass prefers the subclass's `__invert__` over
-  `int.__invert__`.**  For `class I(int, M)` where `M` defines `__invert__`,
-  CPython resolves `int.__invert__` first (it comes earlier in the MRO) and
-  answers `-4` for `~I(3)`; here `M`'s wins.  The same shape applies to the
-  other unary dunders.
-
 - **`bytearray` has no `%`.**  `+`, `*`, `+=` and `*=` all work now, through
   `bytearray_seq_methods`; `bytearray(b"%d") % 5` is still a TypeError, since
   `bytearray_type.tp_as_number` is 0 and nothing supplies `nb_remainder`.
@@ -111,22 +105,12 @@ one-line fix.
   Everything observable through `_weakref` works; a C extension expecting the
   slot would not.
 
-- **`int` and `float` have no `__abs__`, `__int__`, `__float__`, `__index__` or
-  `__trunc__`.**  `abs(-5)` works, `(-5).__abs__()` is an AttributeError, and
-  the stdlib asks by name -- `operator.index` goes through `__index__`, and a
-  class delegating to `int.__int__` finds nothing.  `src/methods/num.asm`
-  carried implementations of these, written but never registered and never
-  converted to the one-Value return convention; they also truncated a big int
-  through `self_to_i64`, so they have been deleted.
-
-  Registering the *builtins* under those names instead does not work, which is
-  the reason this is still open: `builtin_abs` and `builtin_int_fn` resolve a
-  non-exact operand through the numeric protocol, which for a subclass finds
-  the very dunder being registered.  `int(M(0))` where `class M(int)` then
-  recurses until the stack goes.  They need implementations that read the
-  value out of the `PyIntObject` directly, the way `int()` does for an exact
-  int -- the trap CLAUDE.md records as "the thunk must call the *defining*
-  type's slot, not the argument's".
+- **The binary operator dunders are still not reachable by name.**  The unary
+  ones are: `int` and `float` register `__neg__`, `__pos__`, `__abs__`,
+  `__invert__`, `__int__`, `__float__`, `__index__`, `__trunc__` and
+  `__bool__`.  `int.__add__` and the rest of the binary family, reflected and
+  in-place, are still absent -- `dir(int)` is short by about forty names, and
+  a class delegating to `int.__add__` finds nothing.
 
 - **`bytes` and `bytearray` are missing most of the string-like methods.**
   Both have `find`, `count`, `startswith`, `endswith`, `split`, `join`,

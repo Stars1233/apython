@@ -1045,11 +1045,22 @@ DEF_FUNC float_pow, FB_FRAME
 END_FUNC float_pow
 
 ;; ============================================================================
-;; float_int(rdi = raw double bits) -> SmallInt or GMP int
+;; float_int(rdi = self Value) -> SmallInt or GMP int
 ;; Convert float to int by truncation.
+;;
+;; A Value, as every other nb_ slot takes: an immediate, or a subclass
+;; instance whose double sits inline at the base's offset.  It used to take
+;; raw double bits, which every caller had to know and which made it the one
+;; slot a generic thunk could not call.
 ;; ============================================================================
 DEF_FUNC float_int
-
+    V_TEST_PTR rdi, rax
+    ja .fi_immediate
+    mov rdi, [rdi + PyFloatObject.value]
+    jmp .fi_have_bits
+.fi_immediate:
+    V_TO_F64 rdi
+.fi_have_bits:
     movq xmm0, rdi
 
     ; Check for NaN/inf.  CPython words and TYPES these differently: a NaN is
@@ -1080,6 +1091,7 @@ DEF_FUNC float_int
     cvttsd2si rdi, xmm0
     call int_from_i64
     leave
+    V_PACK rax, rdx             ; one Value out, as the slot's callers expect
     ret
 
 .fi_big:
@@ -1102,6 +1114,7 @@ DEF_FUNC float_int
     add rsp, 24
     pop rbx
     leave
+    V_PACK rax, rdx             ; a pointer is its own Value; symmetry with above
     ret
 
 .not_a_number:
@@ -1367,7 +1380,7 @@ float_number_methods:
     dq 0                      ; nb_xor          +112
     dq 0                      ; nb_or           +120
     dq float_int              ; nb_int          +128
-    dq 0                      ; nb_float        +136
+    dq float_get_real       ; nb_float        +136 (a float is its own float)
     dq float_floordiv         ; nb_floor_divide +144
     dq float_truediv          ; nb_true_divide  +152
     dq 0                      ; nb_index        +160

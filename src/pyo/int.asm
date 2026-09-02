@@ -3060,12 +3060,10 @@ DEF_FUNC int_get_real
     lea rcx, [rel int_type]
     cmp rax, rcx
     je .ig_self_out
-    extern bool_type
-    lea rcx, [rel bool_type]
-    cmp rax, rcx
-    je .ig_self_out
-    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_INT_SUBCLASS
-    jz .ig_self_out
+    ; Anything else -- a bool, an int subclass instance -- unwraps to the
+    ; plain int it holds.  True.__abs__() and True.__index__() are 1 in
+    ; CPython, not True; True.real goes through bool_getattr and never gets
+    ; here.  int_unwrap leaves a non-int alone, so the fallthrough is safe.
     mov edx, TAG_PTR
     call int_unwrap             ; rdi/edx = the plain int it wraps
     cmp edx, TAG_PTR
@@ -3109,6 +3107,68 @@ DEF_FUNC int_get_denominator
     ret
 END_FUNC int_get_denominator
 
+;; ============================================================================
+;; int_abs(rdi = operand Value) -> rax = Value
+;;
+;; nb_absolute, which int did not have: abs() reached int through
+;; builtin_abs's own inline path, so the slot -- and `(-5).__abs__()` with it
+;; -- was simply absent.
+;; ============================================================================
+DEF_FUNC int_abs
+    push rbx
+    mov rbx, rdi                ; the operand, as it arrived
+    V_UNPACK rdi, rdx
+    call int_unwrap
+    cmp edx, TAG_SMALLINT
+    je .iabs_small
+    cmp qword [rdi + PyIntObject.compact], 0
+    jne .iabs_compact
+    lea rdi, [rdi + PyIntObject.mpz]
+    xor esi, esi
+    extern __gmpz_cmp_si
+    call __gmpz_cmp_si wrt ..plt
+    test eax, eax
+    js .iabs_negate
+    jmp .iabs_same
+.iabs_compact:
+    mov rax, [rdi + PyIntObject.ival]
+    test rax, rax
+    js .iabs_negate
+    jmp .iabs_same
+.iabs_small:
+    test rdi, rdi
+    js .iabs_negate
+.iabs_same:
+    ; The unwrapped value, not the operand: abs() of a bool or of an int
+    ; subclass instance is a plain int, as CPython has it.
+    mov rdi, rbx
+    call int_get_real
+    pop rbx
+    leave
+    ret
+.iabs_negate:
+    mov rdi, rbx
+    call int_neg
+    pop rbx
+    leave
+    ret
+END_FUNC int_abs
+
+;; ============================================================================
+;; int_float(rdi = operand Value) -> rax = a float Value
+;; nb_float: what float(n) and n.__float__() both want.
+;; ============================================================================
+DEF_FUNC int_float
+    V_UNPACK rdi, rsi
+    extern float_to_f64
+    call float_to_f64
+    movq rax, xmm0
+    V_FROM_F64 rax, rdx
+    mov edx, TAG_FLOAT
+    leave
+    ret
+END_FUNC int_float
+
 
 ;; ============================================================================
 ;; Data
@@ -3133,7 +3193,7 @@ int_number_methods:
     dq int_power            ; nb_power        +40
     dq int_neg              ; nb_negative     +48
     dq int_pos              ; nb_positive     +56
-    dq 0                    ; nb_absolute     +64
+    dq int_abs              ; nb_absolute     +64
     dq int_bool             ; nb_bool         +72
     dq int_invert           ; nb_invert       +80
     dq int_lshift           ; nb_lshift       +88
@@ -3141,11 +3201,11 @@ int_number_methods:
     dq int_and              ; nb_and          +104
     dq int_xor              ; nb_xor          +112
     dq int_or               ; nb_or           +120
-    dq 0                    ; nb_int          +128
-    dq 0                    ; nb_float        +136
+    dq int_get_real         ; nb_int          +128 (an int is its own int)
+    dq int_float            ; nb_float        +136
     dq int_floordiv         ; nb_floor_divide +144
     dq int_true_divide      ; nb_true_divide  +152
-    dq 0                    ; nb_index        +160
+    dq int_get_real         ; nb_index        +160 (an int is its own index)
     dq 0                        ; nb_iadd         +168
     dq 0                        ; nb_isub         +176
     dq 0                        ; nb_imul         +184

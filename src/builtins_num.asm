@@ -596,17 +596,16 @@ DEF_FUNC builtin_int_fn, BI_FRAME
 .int_from_inline_float:
     ; A float immediate — delegate to float_int for the NaN/inf checks
     mov rdi, rbx
-    V_TO_F64 rdi
     call float_int
+    V_UNPACK rax, rdx           ; .int_ret hands back the pair, not the Value
     jmp .int_ret
 
 .int_from_float:
-    ; A float subclass instance: the double is inline, at the base's offset.
-    ; Exact float never arrives here -- a float is an immediate, so no pointer
-    ; ever has float_type -- which is why this arm read the pointer as bits
-    ; unnoticed until float had a subclass.
-    mov rdi, [rbx + PyFloatObject.value]
+    ; A float subclass instance.  float_int unboxes one itself now, so the
+    ; Value goes straight in; this arm used to read the double out by hand.
+    mov rdi, rbx
     call float_int
+    V_UNPACK rax, rdx
     jmp .int_ret
 
 .int_from_str:

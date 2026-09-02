@@ -496,6 +496,108 @@ DEF_DUNDER_ITER str
 DEF_DUNDER_ITER set
 DEF_DUNDER_ITER bytes
 
+
+;; A builtin number's unary dunders, reachable by name.  int and float had
+;; none at all: `(-5).__abs__()` was an AttributeError, and -- worse -- an MRO
+;; name lookup could not prefer int's operator over a later base's, because
+;; int had nothing in its dict to find.  `class I(int, M)` with an M defining
+;; __invert__ therefore installed M's, where CPython answers int's.
+;;
+;; Like the str/repr thunks these call the *defining* type's slot rather than
+;; the argument's, which is what keeps a subclass out of its own recursion.
+%macro DEF_DUNDER_UNARY 3       ; %1 = type prefix, %2 = suffix, %3 = nb_ field
+DEF_FUNC %1_dunder_%2
+    cmp rsi, 1
+    jne %%bad
+    mov rdi, [rdi]              ; args[0] = self, a Value
+    lea rax, [rel %1_type]
+    mov rax, [rax + PyTypeObject.tp_as_number]
+    test rax, rax
+    jz %%bad
+    mov rax, [rax + PyNumberMethods.%3]
+    test rax, rax
+    jz %%bad
+    call rax
+    leave
+    ret
+%%bad:
+    RAISE exc_TypeError_type, "expected exactly one argument"
+END_FUNC %1_dunder_%2
+%endmacro
+
+;; __bool__ is the odd one: nb_bool answers 0 or 1 in eax, not a Value.
+%macro DEF_DUNDER_BOOL 1
+DEF_FUNC %1_dunder_bool
+    cmp rsi, 1
+    jne %%bad
+    mov rdi, [rdi]
+    lea rax, [rel %1_type]
+    mov rax, [rax + PyTypeObject.tp_as_number]
+    test rax, rax
+    jz %%bad
+    mov rax, [rax + PyNumberMethods.nb_bool]
+    test rax, rax
+    jz %%bad
+    call rax
+    test eax, eax
+    jz %%false
+    extern bool_true
+    lea rax, [rel bool_true]
+    INCREF rax
+    leave
+    ret
+%%false:
+    extern bool_false
+    lea rax, [rel bool_false]
+    INCREF rax
+    leave
+    ret
+%%bad:
+    RAISE exc_TypeError_type, "expected exactly one argument"
+END_FUNC %1_dunder_bool
+%endmacro
+
+DEF_DUNDER_UNARY int, neg, nb_negative
+DEF_DUNDER_UNARY int, pos, nb_positive
+DEF_DUNDER_UNARY int, abs, nb_absolute
+DEF_DUNDER_UNARY int, invert, nb_invert
+DEF_DUNDER_UNARY int, int, nb_int
+DEF_DUNDER_UNARY int, float, nb_float
+DEF_DUNDER_UNARY int, index, nb_index
+DEF_DUNDER_UNARY int, trunc, nb_int
+
+DEF_DUNDER_UNARY float, neg, nb_negative
+DEF_DUNDER_UNARY float, pos, nb_positive
+DEF_DUNDER_UNARY float, abs, nb_absolute
+DEF_DUNDER_UNARY float, int, nb_int
+DEF_DUNDER_UNARY float, float, nb_float
+DEF_DUNDER_UNARY float, trunc, nb_int
+DEF_DUNDER_BOOL float
+
+;; int's nb_bool takes the (payload, tag) pair rather than a Value -- it hands
+;; the pair straight to int_unwrap -- so it cannot go through the macro.
+DEF_FUNC int_dunder_bool
+    cmp rsi, 1
+    jne .idb_bad
+    mov rdi, [rdi]
+    V_UNPACK rdi, rdx
+    extern int_bool
+    call int_bool
+    test eax, eax
+    jz .idb_false
+    lea rax, [rel bool_true]
+    INCREF rax
+    leave
+    ret
+.idb_false:
+    lea rax, [rel bool_false]
+    INCREF rax
+    leave
+    ret
+.idb_bad:
+    RAISE exc_TypeError_type, "expected exactly one argument"
+END_FUNC int_dunder_bool
+
 DEF_DUNDER_STRREPR str, str
 DEF_DUNDER_STRREPR str, repr
 DEF_DUNDER_STRREPR bytes, str
