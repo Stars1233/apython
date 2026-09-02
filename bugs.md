@@ -26,10 +26,6 @@ one-line fix.
   answers `-4` for `~I(3)`; here `M`'s wins.  The same shape applies to the
   other unary dunders.
 
-- **`dir()` on a module does not report the module's contents.**  `dir(errno)`
-  and `dir(sys)` return only object's own dunders; the module's `__dict__` is
-  not consulted.  `tests/test_errno.py` lists its names literally because of it.
-
 - **`slice` objects cannot be ordered.**  CPython compares them as the tuple
   `(start, stop, step)`, so `slice(1) < slice(2)` is True; here it is a
   TypeError.  Equality works.
@@ -238,6 +234,10 @@ one-line fix.
   built first.  `complex.conjugate` has the same shape -- it resolves to the
   bare builtin rather than to a method descriptor.
 
+  `dir()` is the other end of the same gap: an attribute that exists only in a
+  `tp_getattr` chain has nothing in any `tp_dict` for the walk to find, so
+  `__class__` is missing from `dir(obj)` where CPython lists it.
+
 - **`float()` of a large int rounds differently from CPython.**
   `float(10**30)` is `9.999999999999999e+29` here and `1e+30` there.
   `float_to_f64` converts a GMP-backed int with `__gmpz_get_d`, which
@@ -326,12 +326,6 @@ than lying — but they are ordinary Python that does not work:
   helper to build the two numbers with -- the one that exists is file-local to
   `src/opcodes/build.asm`.  The exception type and the condition are right.
 
-- **`dir()` does not consult `__dir__`.**  It walks the MRO's `tp_dict`s and
-  nothing else, so a class defining `__dir__` has it ignored -- including a
-  `__dir__` that raises, whose exception is discarded along with its answer.
-  The module entry under Correctness is the same gap seen from the other end:
-  the object is never asked what it contains.
-
 - **`bytes % args` leaks its temporary when the format is malformed.**  The
   work is done by handing a decoded copy of the format and the arguments to
   `str_mod`, and `str_mod` RAISES for a wrong argument count -- a raise
@@ -378,10 +372,6 @@ than lying — but they are ordinary Python that does not work:
   subclass's slots would land in: both are placed relative to the base's
   `tp_dictoffset`, which the subclass inherits.  Nothing detects the
   collision.
-
-- **`dir()` on a module lists object's dunders rather than the module's
-  contents.**  `dir(posix)` answers with fourteen names, none of them
-  posix's; `posix.__dict__` is right, so the information is there.
 
 - **`@abc.abstractmethod` is not enforced.**  A class with an unimplemented
   abstract method instantiates.  `__abstractmethods__` is consulted by

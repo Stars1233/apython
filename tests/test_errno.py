@@ -5,40 +5,24 @@
 # makes that safe: run_tests.sh diffs our stdout against the system CPython's,
 # so a mistyped number cannot survive a test run.
 #
-# The names are listed literally rather than discovered with dir(): dir() on a
-# module does not report the module's own contents here (bugs.md).
+# The names come from dir(), which also makes this file a test of dir() on a
+# module: the set has to match CPython's exactly, name for name, or the very
+# first line differs.  It used to be a literal list, because dir() on a module
+# answered with object's dunders instead of the module's own contents.
 
 import errno
 
-NAMES = [
-    "E2BIG", "EACCES", "EADDRINUSE", "EADDRNOTAVAIL", "EADV",
-    "EAFNOSUPPORT", "EAGAIN", "EALREADY", "EBADE", "EBADF", "EBADFD",
-    "EBADMSG", "EBADR", "EBADRQC", "EBADSLT", "EBFONT", "EBUSY",
-    "ECANCELED", "ECHILD", "ECHRNG", "ECOMM", "ECONNABORTED",
-    "ECONNREFUSED", "ECONNRESET", "EDEADLK", "EDEADLOCK", "EDESTADDRREQ",
-    "EDOM", "EDOTDOT", "EDQUOT", "EEXIST", "EFAULT", "EFBIG", "EHOSTDOWN",
-    "EHOSTUNREACH", "EIDRM", "EILSEQ", "EINPROGRESS", "EINTR", "EINVAL",
-    "EIO", "EISCONN", "EISDIR", "EISNAM", "EKEYEXPIRED", "EKEYREJECTED",
-    "EKEYREVOKED", "EL2HLT", "EL2NSYNC", "EL3HLT", "EL3RST", "ELIBACC",
-    "ELIBBAD", "ELIBEXEC", "ELIBMAX", "ELIBSCN", "ELNRNG", "ELOOP",
-    "EMEDIUMTYPE", "EMFILE", "EMLINK", "EMSGSIZE", "EMULTIHOP",
-    "ENAMETOOLONG", "ENAVAIL", "ENETDOWN", "ENETRESET", "ENETUNREACH",
-    "ENFILE", "ENOANO", "ENOBUFS", "ENOCSI", "ENODATA", "ENODEV", "ENOENT",
-    "ENOEXEC", "ENOKEY", "ENOLCK", "ENOLINK", "ENOMEDIUM", "ENOMEM",
-    "ENOMSG", "ENONET", "ENOPKG", "ENOPROTOOPT", "ENOSPC", "ENOSR",
-    "ENOSTR", "ENOSYS", "ENOTBLK", "ENOTCONN", "ENOTDIR", "ENOTEMPTY",
-    "ENOTNAM", "ENOTRECOVERABLE", "ENOTSOCK", "ENOTSUP", "ENOTTY",
-    "ENOTUNIQ", "ENXIO", "EOPNOTSUPP", "EOVERFLOW", "EOWNERDEAD", "EPERM",
-    "EPFNOSUPPORT", "EPIPE", "EPROTO", "EPROTONOSUPPORT", "EPROTOTYPE",
-    "ERANGE", "EREMCHG", "EREMOTE", "EREMOTEIO", "ERESTART", "ERFKILL",
-    "EROFS", "ESHUTDOWN", "ESOCKTNOSUPPORT", "ESPIPE", "ESRCH", "ESRMNT",
-    "ESTALE", "ESTRPIPE", "ETIME", "ETIMEDOUT", "ETOOMANYREFS", "ETXTBSY",
-    "EUCLEAN", "EUNATCH", "EUSERS", "EWOULDBLOCK", "EXDEV", "EXFULL",
-]
+# Underscored names are skipped: our modules carry no __doc__, __loader__,
+# __package__ or __spec__, and those four are the whole difference.
+NAMES = [n for n in sorted(dir(errno)) if not n.startswith("_")]
 
 print("names:", len(NAMES))
 for n in NAMES:
-    print(n, getattr(errno, n))
+    v = getattr(errno, n)
+    # errorcode is one of those names, and it is a dict whose insertion order
+    # differs between the two interpreters; its contents are printed sorted
+    # just below, so only its type belongs here.
+    print(n, v if isinstance(v, int) else type(v).__name__)
 
 print("errorcode:", len(errno.errorcode))
 for k in sorted(errno.errorcode):

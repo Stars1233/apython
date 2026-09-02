@@ -252,12 +252,15 @@ END_FUNC object_method_sizeof
 
 ;; ============================================================================
 ;; object.__dir__(self) -> the names its type and instance dict carry
-;; Defers to the dir() builtin, which already walks both.
+;;
+;; The default walk, and only that: dir() is what asks for __dir__ in the
+;; first place, so calling it back from here made the pair circular and left
+;; neither of them asking the object anything.
 ;; ============================================================================
 DEF_FUNC object_method_dir
-    extern builtin_dir
-    mov esi, 1
-    call builtin_dir
+    extern dir_default
+    mov rdi, [rdi]              ; args[0] = self, a Value
+    call dir_default
     leave
     ret
 END_FUNC object_method_dir

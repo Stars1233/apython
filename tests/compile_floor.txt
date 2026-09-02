@@ -115,6 +115,7 @@ test_dicts
 test_dict_update_mapping
 test_dict_update_raises
 test_dict_views
+test_dir
 test_dunder_protocols
 test_dunders
 test_empty_bases
@@ -175,6 +176,7 @@ test_iterable_arguments
 test_iterator_slots
 test_itertools
 test_kwargs
+test_list_extend_iterable
 test_list_extend_star
 test_list_fixes
 test_list_insert_pop
