@@ -909,10 +909,14 @@ DEF_FUNC sre_match_expand_method, EX_FRAME
 
     V_TEST_PTR rax, rcx
     ja .ex_type
+    test rax, rax
+    jz .ex_type                 ; V_TEST_PTR lets a NULL Value through
+    ; A str SUBCLASS is a str.  An exact-type compare here refused
+    ; m.expand(S(template)) for `class S(str)`, where CPython expands it and
+    ; hands back a plain str -- and a template is exactly the sort of thing a
+    ; program keeps in a str subclass of its own.
     mov rcx, [rax + PyObject.ob_type]
-    lea rdx, [rel str_type]
-    cmp rcx, rdx
-    jne .ex_type
+    REQUIRE_STR_TYPE rcx, rdx, .ex_type
 
     mov rdi, rax
     mov rax, [rbp - EX_SELF]
