@@ -698,20 +698,55 @@ END_FUNC abc_subclasscheck_func
 ;; _abc_instancecheck(cls, instance) -> bool
 ;;
 ;; CPython consults instance.__class__ as well as type(instance), so that an
-;; object which lies about its class is believed.  Nothing here can lie yet,
-;; so the two are the same object and one check does.
+;; object which lies about its class is believed -- which is most of what a
+;; mock is for.  This used to check only the type, on the grounds that
+;; nothing here could lie; a property named __class__ has been able to for a
+;; while, and isinstance() of such an object answered by what it really was.
+;;
+;; The declared class is asked first, as CPython asks it, and the real type
+;; only if the two differ and the first said no.
 ;; ============================================================================
 IC_CLS   equ 8
 IC_SUB   equ 16
-IC_FRAME equ 16             ; + 0 pushes = 16
+IC_INST  equ 24
+IC_DECL  equ 32             ; instance.__class__, when it is a class and differs
+IC_FRAME equ 32             ; + 0 pushes = 32, 16-aligned
 DEF_FUNC abc_instancecheck_func, IC_FRAME
     cmp rsi, 2
     jl .bad
     mov rax, [rdi]
     mov [rbp - IC_CLS], rax
-    mov rdi, [rdi + 8]
+    mov rax, [rdi + 8]
+    mov [rbp - IC_INST], rax
+    mov rdi, rax
     call value_type
     mov [rbp - IC_SUB], rax
+    mov qword [rbp - IC_DECL], 0
+
+    ; instance.__class__, if it is a class and is not simply the type again.
+    lea rdi, [rel ic_class_attr]
+    extern dunder_name_obj
+    call dunder_name_obj        ; borrowed, interned by literal
+    mov rsi, rax
+    mov rdi, [rbp - IC_INST]
+    extern obj_getattr_opt
+    call obj_getattr_opt
+    test rax, rax
+    jz .ic_no_declared
+    push rax
+    mov rdi, rax
+    call type_check_is_class
+    pop rdi
+    test eax, eax
+    jz .ic_drop_declared
+    cmp rdi, [rbp - IC_SUB]
+    je .ic_drop_declared        ; the same answer, so one check does
+    mov [rbp - IC_DECL], rdi
+    jmp .ic_have_declared
+.ic_drop_declared:
+    call obj_decref
+.ic_no_declared:
+.ic_have_declared:
 
     mov rdi, [rbp - IC_CLS]
     CSTRING rsi, "_abc_cache"
@@ -725,6 +760,18 @@ DEF_FUNC abc_instancecheck_func, IC_FRAME
     jnz .true
 
 .full:
+    ; The declared class first, when there is one to ask.
+    cmp qword [rbp - IC_DECL], 0
+    je .ic_check_type
+    mov rdi, [rbp - IC_CLS]
+    mov rsi, [rbp - IC_DECL]
+    call abc_subclasscheck
+    cmp eax, -1
+    je .propagate
+    test eax, eax
+    jnz .true
+
+.ic_check_type:
     mov rdi, [rbp - IC_CLS]
     mov rsi, [rbp - IC_SUB]
     call abc_subclasscheck
@@ -733,18 +780,29 @@ DEF_FUNC abc_instancecheck_func, IC_FRAME
     test eax, eax
     jz .false
 .true:
+    call .ic_release_declared
     lea rax, [rel bool_true]
     inc qword [rax + PyObject.ob_refcnt]
     leave
     ret
 .false:
+    call .ic_release_declared
     lea rax, [rel bool_false]
     inc qword [rax + PyObject.ob_refcnt]
     leave
     ret
 .propagate:
+    call .ic_release_declared
     xor eax, eax
     leave
+    ret
+.ic_release_declared:
+    mov rdi, [rbp - IC_DECL]
+    test rdi, rdi
+    jz .ic_nothing
+    mov qword [rbp - IC_DECL], 0
+    jmp obj_decref
+.ic_nothing:
     ret
 .bad:
     RAISE exc_TypeError_type, "_abc_instancecheck() takes 2 arguments"
@@ -939,6 +997,7 @@ abcm_get_cache_token:      db "get_cache_token", 0
 abcm_abc_init:             db "_abc_init", 0
 abcm_abc_register:         db "_abc_register", 0
 abcm_abc_instancecheck:    db "_abc_instancecheck", 0
+ic_class_attr:             db "__class__", 0
 abcm_abc_subclasscheck:    db "_abc_subclasscheck", 0
 abcm_get_dump:             db "_get_dump", 0
 abcm_reset_registry:       db "_reset_registry", 0

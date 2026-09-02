@@ -147,11 +147,6 @@ one-line fix.
   `start_new_thread`.  Everything in the stdlib that only takes a lock works;
   anything that expects a second thread does not.
 
-- **`_abc_instancecheck` does not honour a spoofed `__class__`.**  CPython
-  checks both `instance.__class__` and `type(instance)`; this checks only the
-  type, so an object that lies about its class -- a mock, mostly -- is judged
-  by what it really is.
-
 - **A `__slots__` instance still carries a dict WORD it can never use.**  The
   suppression works now, but `tp_dictoffset` is left pointing at a word that
   is always NULL: eight bytes per instance, and the reason every reader has to

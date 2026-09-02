@@ -845,7 +845,63 @@ END_FUNC builtin_range
 ;; Walks the full tp_base chain for inheritance.
 ;; ============================================================================
 ISI_OBJ   equ 8         ; the object as a Value, for __instancecheck__
+ISI_DECL  equ 16        ; obj.__class__, when it is a class and differs
 ISI_FRAME equ 16            ; + 2 pushes = 32
+
+;; ============================================================================
+;; obj_declared_class(rdi = the object as a Value) -> rax = its __class__ when
+;;   that is a class and is NOT simply type(obj), else 0.  A NEW reference.
+;;
+;; CPython asks an object what class it says it belongs to, not only what
+;; class it is: an object with a __class__ of its own -- a mock, mostly -- is
+;; judged by the answer.  isinstance() consults both, and so does
+;; _abc_instancecheck.
+;;
+;; Returns 0 for anything that is not a heap object, has no __class__, or
+;; whose __class__ is the type it already has.
+;; ============================================================================
+extern obj_getattr_opt
+extern dunder_name_obj
+ODC_OBJ   equ 8
+ODC_TYPE  equ 16
+ODC_FRAME equ 16            ; + 0 pushes = 16, 16-aligned
+DEF_FUNC obj_declared_class, ODC_FRAME
+    mov [rbp - ODC_OBJ], rdi
+    V_TEST_PTR rdi, rax
+    ja .odc_none
+    test rdi, rdi
+    jz .odc_none
+
+    mov rax, [rdi + PyObject.ob_type]
+    mov [rbp - ODC_TYPE], rax   ; the real type
+
+    lea rdi, [rel isi_class_attr]
+    call dunder_name_obj        ; borrowed, interned by literal
+    mov rsi, rax
+    mov rdi, [rbp - ODC_OBJ]
+    call obj_getattr_opt
+    test rax, rax
+    jz .odc_none
+
+    push rax
+    mov rdi, rax
+    call type_check_is_class
+    pop rdi
+    test eax, eax
+    jz .odc_drop
+    cmp rdi, [rbp - ODC_TYPE]
+    je .odc_drop                ; the same answer, so it adds nothing
+    mov rax, rdi
+    leave
+    ret
+.odc_drop:
+    call obj_decref
+.odc_none:
+    xor eax, eax
+    leave
+    ret
+END_FUNC obj_declared_class
+
 DEF_FUNC builtin_isinstance, ISI_FRAME
     push rbx
     push r12
@@ -889,6 +945,20 @@ DEF_FUNC builtin_isinstance, ISI_FRAME
     lea rdx, [rel bool_type]
 
 .isinstance_got_type:
+    ; What the object SAYS its class is, asked once and used wherever the real
+    ; type does not answer.  0 unless it is a class and differs.
+    push rcx
+    push rdx
+    push r9
+    push r9                     ; keep rsp 16-byte aligned across the call
+    mov rdi, [rbp - ISI_OBJ]
+    call obj_declared_class
+    mov [rbp - ISI_DECL], rax
+    pop r9
+    pop r9
+    pop rdx
+    pop rcx
+
     ; rdx = obj's type, rcx = type_to_check (may be tuple)
     ; Second arg must be TAG_PTR (type or tuple)
     cmp r9d, TAG_PTR
@@ -930,7 +1000,19 @@ DEF_FUNC builtin_isinstance, ISI_FRAME
     ; The MRO, not the tp_base chain: a class with several bases is an
     ; instance of all of them.
     extern type_is_subtype
+    push rcx                    ; the target class: type_is_subtype clobbers it
+    push rcx
     mov rdi, rdx
+    mov rsi, rcx
+    call type_is_subtype
+    pop rcx
+    pop rcx
+    test eax, eax
+    jnz .isinstance_true
+    ; ...and then what the object says it is.
+    mov rdi, [rbp - ISI_DECL]
+    test rdi, rdi
+    jz .isinstance_false
     mov rsi, rcx
     call type_is_subtype
     test eax, eax
@@ -961,6 +1043,16 @@ DEF_FUNC builtin_isinstance, ISI_FRAME
     mov r8, [rsp + 16]
     mov rdi, r12               ; obj's type
     mov rsi, [rsi + r8*8]      ; type from tuple
+    push rsi
+    push rsi
+    call type_is_subtype
+    pop rsi
+    pop rsi
+    test eax, eax
+    jnz .isinstance_tuple_verdict
+    mov rdi, [rbp - ISI_DECL]  ; ...and then what the object says it is
+    test rdi, rdi
+    jz .isinstance_tuple_verdict
     call type_is_subtype
 .isinstance_tuple_verdict:
     pop rsi
@@ -977,6 +1069,7 @@ DEF_FUNC builtin_isinstance, ISI_FRAME
     jmp .isinstance_true
 
 .isinstance_false:
+    call .isi_release_declared
     lea rax, [rel bool_false]
     inc qword [rax + PyObject.ob_refcnt]
     pop r12
@@ -987,6 +1080,7 @@ DEF_FUNC builtin_isinstance, ISI_FRAME
     ret
 
 .isinstance_true:
+    call .isi_release_declared
     lea rax, [rel bool_true]
     inc qword [rax + PyObject.ob_refcnt]
     pop r12
@@ -994,6 +1088,15 @@ DEF_FUNC builtin_isinstance, ISI_FRAME
     mov edx, TAG_PTR
     leave
     V_PACK rax, rdx             ; builtins return one Value
+    ret
+
+.isi_release_declared:
+    mov rdi, [rbp - ISI_DECL]
+    test rdi, rdi
+    jz .isi_nothing
+    mov qword [rbp - ISI_DECL], 0
+    jmp obj_decref
+.isi_nothing:
     ret
 
 .isinstance_type_error:
@@ -2395,6 +2498,7 @@ bi_name_zip:          db "zip", 0
 bi_name_map:          db "map", 0
 bi_name_filter:       db "filter", 0
 bi_name_reversed:     db "reversed", 0
+isi_class_attr:  db "__class__", 0
 bi_name_sorted:       db "sorted", 0
 bi_name_chain:        db "chain", 0
 bi_name_divmod:       db "divmod", 0
