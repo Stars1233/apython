@@ -14,6 +14,21 @@ one-line fix.
   becomes `bytearray(b'bd')` -- where here it is a length mismatch.  A list
   raises for the same assignment in both, so only bytearray differs.
 
+- **An `int` subclass cannot override an operator dunder.**  `class D(int)`
+  with an `__add__` of its own still adds as an int: `D(3) + 4` is 7, not
+  whatever the method returns.  The class gets int's `nb_add` by inheritance
+  and `type_install_slots` does not replace it.  The same holds for the other
+  builtin bases with numeric slots.
+
+- **`frozenset` shares `set`'s `tp_dict`**, so `frozenset().add` exists and
+  every other mutator with it.  They raise on use, because the bodies check
+  the type, but `hasattr(f, "add")` is True where CPython says False -- and
+  that is what `collections.abc` registration and duck-typing ask.
+
+- **`(-7.5) ** 2.5` is `nan` where CPython answers a complex.**  A negative
+  base with a fractional exponent has no real result, and CPython's `float`
+  power promotes to `complex` rather than answering NaN.
+
 - **`binary_op1`'s subclass rule is not implemented.**  CPython tries the right
   operand's slot *first* when its type is a proper subclass of the left's and
   overrides the slot.  It cannot fire here: the only builtin static subclass
@@ -81,9 +96,13 @@ one-line fix.
 - **The binary operator dunders are still not reachable by name.**  The unary
   ones are: `int` and `float` register `__neg__`, `__pos__`, `__abs__`,
   `__invert__`, `__int__`, `__float__`, `__index__`, `__trunc__` and
-  `__bool__`.  `int.__add__` and the rest of the binary family, reflected and
-  in-place, are still absent -- `dir(int)` is short by about forty names, and
-  a class delegating to `int.__add__` finds nothing.
+  `__bool__`, and the binary family forward and reflected.  What is left of
+  `dir(int)` and `dir(float)`: the in-place forms, `as_integer_ratio`,
+  `is_integer`, `__round__`, `__ceil__`, `__floor__`, `__getnewargs__`, and
+  the five `object` itself is missing -- `__delattr__`, `__setattr__`,
+  `__getattribute__`, `__getstate__` and `__subclasshook__`, which every type
+  inherits and so is short of.  The container types are also short of their
+  operators: `list.__add__`, `dict.__or__`, `set.__and__` and the rest.
 
 - **`collections.deque` is list-backed, and two itertools functions
   materialise.**  CPython's deque is a block-linked list, so `appendleft` and

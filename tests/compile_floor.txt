@@ -16,6 +16,7 @@ test_async_run
 test_async_tasks
 test_async_wait_for
 test_async_with
+test_binary_dunders
 test_binop_matrix
 test_binop_right_slot
 test_bitwise

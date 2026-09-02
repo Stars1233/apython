@@ -1746,6 +1746,138 @@ DEF_FUNC methods_init
     lea rdx, [rel int_dunder_bool]
     call dict_add_builtin_func
 
+    ;; and the binary family, forward and reflected.
+    mov rdi, rbx
+    lea rsi, [rel mn___add__]
+    extern int_dunder_add
+    lea rdx, [rel int_dunder_add]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___sub__]
+    extern int_dunder_sub
+    lea rdx, [rel int_dunder_sub]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___mul__]
+    extern int_dunder_mul
+    lea rdx, [rel int_dunder_mul]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___mod__]
+    extern int_dunder_mod
+    lea rdx, [rel int_dunder_mod]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___divmod__]
+    extern int_dunder_divmod
+    lea rdx, [rel int_dunder_divmod]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___pow__]
+    extern int_dunder_pow
+    lea rdx, [rel int_dunder_pow]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___lshift__]
+    extern int_dunder_lshift
+    lea rdx, [rel int_dunder_lshift]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___rshift__]
+    extern int_dunder_rshift
+    lea rdx, [rel int_dunder_rshift]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___and__]
+    extern int_dunder_and
+    lea rdx, [rel int_dunder_and]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___xor__]
+    extern int_dunder_xor
+    lea rdx, [rel int_dunder_xor]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___or__]
+    extern int_dunder_or
+    lea rdx, [rel int_dunder_or]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___floordiv__]
+    extern int_dunder_floordiv
+    lea rdx, [rel int_dunder_floordiv]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___truediv__]
+    extern int_dunder_truediv
+    lea rdx, [rel int_dunder_truediv]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___radd__]
+    extern int_dunder_radd
+    lea rdx, [rel int_dunder_radd]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___rsub__]
+    extern int_dunder_rsub
+    lea rdx, [rel int_dunder_rsub]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___rmul__]
+    extern int_dunder_rmul
+    lea rdx, [rel int_dunder_rmul]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___rmod__]
+    extern int_dunder_rmod
+    lea rdx, [rel int_dunder_rmod]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___rdivmod__]
+    extern int_dunder_rdivmod
+    lea rdx, [rel int_dunder_rdivmod]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___rpow__]
+    extern int_dunder_rpow
+    lea rdx, [rel int_dunder_rpow]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___rlshift__]
+    extern int_dunder_rlshift
+    lea rdx, [rel int_dunder_rlshift]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___rrshift__]
+    extern int_dunder_rrshift
+    lea rdx, [rel int_dunder_rrshift]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___rand__]
+    extern int_dunder_rand
+    lea rdx, [rel int_dunder_rand]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___rxor__]
+    extern int_dunder_rxor
+    lea rdx, [rel int_dunder_rxor]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___ror__]
+    extern int_dunder_ror
+    lea rdx, [rel int_dunder_ror]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___rfloordiv__]
+    extern int_dunder_rfloordiv
+    lea rdx, [rel int_dunder_rfloordiv]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___rtruediv__]
+    extern int_dunder_rtruediv
+    lea rdx, [rel int_dunder_rtruediv]
+    call dict_add_builtin_func
+
     ;; real, imag, numerator and denominator, as getset descriptors.  int's
     ;; tp_getattr answers an instance read before this dict is consulted;
     ;; these are what make `int.real` an attribute of the type, and what put
@@ -1936,6 +2068,88 @@ DEF_FUNC methods_init
     lea rsi, [rel mn___float__]
     extern float_dunder_float
     lea rdx, [rel float_dunder_float]
+    call dict_add_builtin_func
+
+    ;; the binary family, forward and reflected.
+    mov rdi, rbx
+    lea rsi, [rel mn___add__]
+    extern float_dunder_add
+    lea rdx, [rel float_dunder_add]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___sub__]
+    extern float_dunder_sub
+    lea rdx, [rel float_dunder_sub]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___mul__]
+    extern float_dunder_mul
+    lea rdx, [rel float_dunder_mul]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___mod__]
+    extern float_dunder_mod
+    lea rdx, [rel float_dunder_mod]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___divmod__]
+    extern float_dunder_divmod
+    lea rdx, [rel float_dunder_divmod]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___pow__]
+    extern float_dunder_pow
+    lea rdx, [rel float_dunder_pow]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___floordiv__]
+    extern float_dunder_floordiv
+    lea rdx, [rel float_dunder_floordiv]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___truediv__]
+    extern float_dunder_truediv
+    lea rdx, [rel float_dunder_truediv]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___radd__]
+    extern float_dunder_radd
+    lea rdx, [rel float_dunder_radd]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___rsub__]
+    extern float_dunder_rsub
+    lea rdx, [rel float_dunder_rsub]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___rmul__]
+    extern float_dunder_rmul
+    lea rdx, [rel float_dunder_rmul]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___rmod__]
+    extern float_dunder_rmod
+    lea rdx, [rel float_dunder_rmod]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___rdivmod__]
+    extern float_dunder_rdivmod
+    lea rdx, [rel float_dunder_rdivmod]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___rpow__]
+    extern float_dunder_rpow
+    lea rdx, [rel float_dunder_rpow]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___rfloordiv__]
+    extern float_dunder_rfloordiv
+    lea rdx, [rel float_dunder_rfloordiv]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___rtruediv__]
+    extern float_dunder_rtruediv
+    lea rdx, [rel float_dunder_rtruediv]
     call dict_add_builtin_func
     mov rdi, rbx
     lea rsi, [rel mn___trunc__]
@@ -2658,6 +2872,29 @@ mn___eq__: db "__eq__", 0
 mn___ne__: db "__ne__", 0
 mn___hash__:    db "__hash__", 0
 mn___add__:     db "__add__", 0
+mn___radd__: db "__radd__", 0
+mn___sub__: db "__sub__", 0
+mn___rsub__: db "__rsub__", 0
+mn___mod__: db "__mod__", 0
+mn___rmod__: db "__rmod__", 0
+mn___divmod__: db "__divmod__", 0
+mn___rdivmod__: db "__rdivmod__", 0
+mn___pow__: db "__pow__", 0
+mn___rpow__: db "__rpow__", 0
+mn___lshift__: db "__lshift__", 0
+mn___rlshift__: db "__rlshift__", 0
+mn___rshift__: db "__rshift__", 0
+mn___rrshift__: db "__rrshift__", 0
+mn___and__: db "__and__", 0
+mn___rand__: db "__rand__", 0
+mn___xor__: db "__xor__", 0
+mn___rxor__: db "__rxor__", 0
+mn___or__: db "__or__", 0
+mn___ror__: db "__ror__", 0
+mn___floordiv__: db "__floordiv__", 0
+mn___rfloordiv__: db "__rfloordiv__", 0
+mn___truediv__: db "__truediv__", 0
+mn___rtruediv__: db "__rtruediv__", 0
 mn___mul__:     db "__mul__", 0
 mn___rmul__:    db "__rmul__", 0
 mn___iadd__:    db "__iadd__", 0

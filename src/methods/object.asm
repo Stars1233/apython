@@ -15,6 +15,8 @@
 %include "opcodes.inc"
 
 ; External functions
+extern current_exception
+extern int_is_integer
 extern complex_type
 extern obj_decref
 extern obj_repr
@@ -525,6 +527,182 @@ DEF_FUNC %1_dunder_%2
 END_FUNC %1_dunder_%2
 %endmacro
 
+;; ============================================================================
+;; DEF_DUNDER_BINARY prefix, suffix, nb_field, reflected
+;;
+;; The binary operator dunders, by name.  int.__add__ did not exist at all --
+;; dir(int) was short by about forty names -- so a class delegating to it found
+;; nothing, and the stdlib's habit of asking `hasattr(x, "__add__")` answered
+;; no for the type it is truest of.
+;;
+;; The slot is the *defining* type's, as in DEF_DUNDER_UNARY: reading it off
+;; the argument would send a subclass back into its own wrapper.  A reflected
+;; form swaps the operands and calls the same slot, which is what nb_ slots
+;; expect -- they take both operands and answer NotImplemented when the pair
+;; is not theirs, so `int.__radd__(1, "x")` comes out right without a second
+;; table.
+;; ============================================================================
+;; dunder_operand_is_int / _is_real -- what each type's binary dunders accept.
+;; The SLOTS here coerce: int_add adds an int to a float quite happily, which
+;; is what makes 1 + 2.5 work without a reflected step.  A dunder called by
+;; name must not: CPython's int.__add__(1, 2.5) is NotImplemented, and code
+;; that dispatches on that answer -- the numeric tower in fractions and
+;; decimal does -- reads a computed 3.5 as "int handled it".
+global dunder_operand_is_int
+DEF_FUNC_BARE dunder_operand_is_int
+    V_UNPACK rdi, rdx
+    jmp int_is_integer
+END_FUNC dunder_operand_is_int
+
+global dunder_operand_is_real
+DEF_FUNC dunder_operand_is_real
+    push rbx
+    mov rbx, rdi
+    V_IS_FLOAT rdi, rax
+    jb .doir_yes
+    V_TEST_PTR rdi, rax
+    ja .doir_int
+    test rdi, rdi
+    jz .doir_int
+    mov rax, [rdi + PyObject.ob_type]
+    lea rcx, [rel float_type]
+    cmp rax, rcx
+    je .doir_yes
+    mov rdi, rax
+    lea rsi, [rel float_type]
+    extern type_is_subtype
+    call type_is_subtype
+    test eax, eax
+    jnz .doir_yes
+.doir_int:
+    mov rdi, rbx
+    V_UNPACK rdi, rdx
+    call int_is_integer
+    pop rbx
+    leave
+    ret
+.doir_yes:
+    mov eax, 1
+    pop rbx
+    leave
+    ret
+END_FUNC dunder_operand_is_real
+
+; The one frame slot these need: the exception pending before the slot ran.
+DB_EXC   equ 8
+DB_FRAME equ 16
+
+%macro DEF_DUNDER_BINARY 5      ; %1 prefix, %2 suffix, %3 nb_ field, %4 reflected, %5 operand check
+DEF_FUNC %1_dunder_%2, DB_FRAME
+    cmp rsi, 2
+    jne %%bad
+%if %4
+    mov rsi, [rdi]              ; self is the right operand
+    mov rdi, [rdi + 8]
+%else
+    mov rsi, [rdi + 8]
+    mov rdi, [rdi]
+%endif
+
+    ; The operand that is not self has to be one this type's dunder accepts.
+    push rdi
+    push rsi                    ; [rsp] = right, [rsp + 8] = left
+%if %4
+    mov rdi, [rsp + 8]
+%else
+    mov rdi, [rsp]
+%endif
+    extern %5
+    call %5
+    pop rsi
+    pop rdi
+    test eax, eax
+    jz %%notimpl
+
+    lea rax, [rel %1_type]
+    mov rax, [rax + PyTypeObject.tp_as_number]
+    test rax, rax
+    jz %%bad
+    mov rax, [rax + PyNumberMethods.%3]
+    test rax, rax
+    jz %%bad
+    DUNDER_EXC_SAVE [rbp - DB_EXC]
+    call rax
+    test rax, rax
+    jnz %%out
+
+    ; A slot declines a pair it does not want by answering NULL, and the
+    ; operator machinery turns that into its TypeError.  A dunder called by
+    ; name has to answer NotImplemented instead, so its caller can try the
+    ; reflected form -- int.__add__(1, "x") is NotImplemented, not an error.
+    EXC_RAISED_SINCE [rbp - DB_EXC], rcx, %%out
+%%notimpl:
+    extern notimpl_singleton
+    lea rax, [rel notimpl_singleton]
+    INCREF rax
+%%out:
+    leave
+    ret
+%%bad:
+    RAISE exc_TypeError_type, "expected exactly one argument"
+END_FUNC %1_dunder_%2
+%endmacro
+
+;; ============================================================================
+;; DEF_DUNDER_DIVMOD prefix, suffix, reflected
+;;
+;; divmod has no nb_ slot filled on either numeric type -- the builtin drives
+;; nb_floor_divide and nb_remainder itself -- so its dunder goes through the
+;; builtin rather than through a slot.  The one thing that has to be kept is
+;; the dunder's own answer for an operand it does not want: NotImplemented,
+;; not a TypeError, so the caller can try the reflected form.
+;; ============================================================================
+%macro DEF_DUNDER_DIVMOD 4      ; %1 prefix, %2 suffix, %3 reflected, %4 operand check
+DEF_FUNC %1_dunder_%2, 16
+    cmp rsi, 2
+    jne %%bad
+    sub rsp, 16
+%if %3
+    mov rax, [rdi + 8]
+    mov [rsp], rax
+    mov rax, [rdi]
+    mov [rsp + 8], rax
+%else
+    mov rax, [rdi]
+    mov [rsp], rax
+    mov rax, [rdi + 8]
+    mov [rsp + 8], rax
+%endif
+    ; The operand that is not self has to be one this type accepts, as for
+    ; the other binary dunders.  The reflected form already put self SECOND.
+%if %3
+    mov rdi, [rsp]
+%else
+    mov rdi, [rsp + 8]
+%endif
+    extern %4
+    call %4
+    test eax, eax
+    jz %%notimpl
+    mov rdi, rsp
+    mov esi, 2
+    extern builtin_divmod
+    call builtin_divmod
+    add rsp, 16
+    leave
+    ret
+%%notimpl:
+    add rsp, 16
+    extern notimpl_singleton
+    lea rax, [rel notimpl_singleton]
+    INCREF rax
+    leave
+    ret
+%%bad:
+    RAISE exc_TypeError_type, "expected exactly one argument"
+END_FUNC %1_dunder_%2
+%endmacro
+
 ;; __bool__ is the odd one: nb_bool answers 0 or 1 in eax, not a Value.
 %macro DEF_DUNDER_BOOL 1
 DEF_FUNC %1_dunder_bool
@@ -573,6 +751,52 @@ DEF_DUNDER_UNARY float, int, nb_int
 DEF_DUNDER_UNARY float, float, nb_float
 DEF_DUNDER_UNARY float, trunc, nb_int
 DEF_DUNDER_BOOL float
+
+;; int's binary family, forward and reflected.
+DEF_DUNDER_BINARY int, add, nb_add, 0, dunder_operand_is_int
+DEF_DUNDER_BINARY int, sub, nb_subtract, 0, dunder_operand_is_int
+DEF_DUNDER_BINARY int, mul, nb_multiply, 0, dunder_operand_is_int
+DEF_DUNDER_BINARY int, mod, nb_remainder, 0, dunder_operand_is_int
+DEF_DUNDER_DIVMOD int, divmod, 0, dunder_operand_is_int
+DEF_DUNDER_BINARY int, pow, nb_power, 0, dunder_operand_is_int
+DEF_DUNDER_BINARY int, lshift, nb_lshift, 0, dunder_operand_is_int
+DEF_DUNDER_BINARY int, rshift, nb_rshift, 0, dunder_operand_is_int
+DEF_DUNDER_BINARY int, and, nb_and, 0, dunder_operand_is_int
+DEF_DUNDER_BINARY int, xor, nb_xor, 0, dunder_operand_is_int
+DEF_DUNDER_BINARY int, or, nb_or, 0, dunder_operand_is_int
+DEF_DUNDER_BINARY int, floordiv, nb_floor_divide, 0, dunder_operand_is_int
+DEF_DUNDER_BINARY int, truediv, nb_true_divide, 0, dunder_operand_is_int
+DEF_DUNDER_BINARY int, radd, nb_add, 1, dunder_operand_is_int
+DEF_DUNDER_BINARY int, rsub, nb_subtract, 1, dunder_operand_is_int
+DEF_DUNDER_BINARY int, rmul, nb_multiply, 1, dunder_operand_is_int
+DEF_DUNDER_BINARY int, rmod, nb_remainder, 1, dunder_operand_is_int
+DEF_DUNDER_DIVMOD int, rdivmod, 1, dunder_operand_is_int
+DEF_DUNDER_BINARY int, rpow, nb_power, 1, dunder_operand_is_int
+DEF_DUNDER_BINARY int, rlshift, nb_lshift, 1, dunder_operand_is_int
+DEF_DUNDER_BINARY int, rrshift, nb_rshift, 1, dunder_operand_is_int
+DEF_DUNDER_BINARY int, rand, nb_and, 1, dunder_operand_is_int
+DEF_DUNDER_BINARY int, rxor, nb_xor, 1, dunder_operand_is_int
+DEF_DUNDER_BINARY int, ror, nb_or, 1, dunder_operand_is_int
+DEF_DUNDER_BINARY int, rfloordiv, nb_floor_divide, 1, dunder_operand_is_int
+DEF_DUNDER_BINARY int, rtruediv, nb_true_divide, 1, dunder_operand_is_int
+
+;; float's, which is the same list without the bitwise operators.
+DEF_DUNDER_BINARY float, add, nb_add, 0, dunder_operand_is_real
+DEF_DUNDER_BINARY float, sub, nb_subtract, 0, dunder_operand_is_real
+DEF_DUNDER_BINARY float, mul, nb_multiply, 0, dunder_operand_is_real
+DEF_DUNDER_BINARY float, mod, nb_remainder, 0, dunder_operand_is_real
+DEF_DUNDER_DIVMOD float, divmod, 0, dunder_operand_is_real
+DEF_DUNDER_BINARY float, pow, nb_power, 0, dunder_operand_is_real
+DEF_DUNDER_BINARY float, floordiv, nb_floor_divide, 0, dunder_operand_is_real
+DEF_DUNDER_BINARY float, truediv, nb_true_divide, 0, dunder_operand_is_real
+DEF_DUNDER_BINARY float, radd, nb_add, 1, dunder_operand_is_real
+DEF_DUNDER_BINARY float, rsub, nb_subtract, 1, dunder_operand_is_real
+DEF_DUNDER_BINARY float, rmul, nb_multiply, 1, dunder_operand_is_real
+DEF_DUNDER_BINARY float, rmod, nb_remainder, 1, dunder_operand_is_real
+DEF_DUNDER_DIVMOD float, rdivmod, 1, dunder_operand_is_real
+DEF_DUNDER_BINARY float, rpow, nb_power, 1, dunder_operand_is_real
+DEF_DUNDER_BINARY float, rfloordiv, nb_floor_divide, 1, dunder_operand_is_real
+DEF_DUNDER_BINARY float, rtruediv, nb_true_divide, 1, dunder_operand_is_real
 
 ;; int's nb_bool takes the (payload, tag) pair rather than a Value -- it hands
 ;; the pair straight to int_unwrap -- so it cannot go through the macro.
