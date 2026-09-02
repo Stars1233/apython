@@ -121,6 +121,7 @@ test_dunder_protocols
 test_dunders
 test_empty_bases
 test_errno
+test_error_messages
 test_exc_catchable
 test_exception_context
 test_exceptions

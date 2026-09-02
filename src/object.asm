@@ -466,44 +466,59 @@ END_FUNC raise_type_error_with_typename
 ; one was wrong.
 RBT_LEFT  equ 8
 RBT_RIGHT equ 16
-RBT_FRAME equ 32            ; + 1 push = 40, not 16-aligned
+RBT_OPEN  equ 24
+RBT_FRAME equ 40            ; + 1 push = 48, 16-aligned
 
-DEF_FUNC raise_binop_type_error, RBT_FRAME
+DEF_FUNC_BARE raise_binop_type_error
+    lea rcx, [rel rbt_open]     ; the default opener, ": '"
+    jmp raise_binop_type_error_ex
+END_FUNC raise_binop_type_error
+
+; raise_binop_type_error_ex(rdi = left Value, rsi = right Value,
+;                           rdx = prefix C string, rcx = opener C string)
+;   -> never returns
+; The opener is what sits between the prefix and the first type name.  A
+; binary operator wants ": '", and COMPARE_OP wants " of '", because CPython
+; words that one "'<' not supported between instances of 'int' and 'str'".
+DEF_FUNC raise_binop_type_error_ex, RBT_FRAME
     push rbx
     mov [rbp - RBT_LEFT], rdi
     mov [rbp - RBT_RIGHT], rsi
     mov rbx, rdx
+    mov [rbp - RBT_OPEN], rcx
 
     lea rdi, [rel rbt_buf]
     mov rsi, rbx
-    call rbt_copy
+    call rbt_append_cstr
     mov rdi, rax
-    lea rsi, [rel rbt_open]
-    call rbt_copy
+    mov rsi, [rbp - RBT_OPEN]
+    call rbt_append_cstr
     mov rdi, rax
     mov rsi, [rbp - RBT_LEFT]
     call rbt_typename
     mov rdi, rax
     lea rsi, [rel rbt_and]
-    call rbt_copy
+    call rbt_append_cstr
     mov rdi, rax
     mov rsi, [rbp - RBT_RIGHT]
     call rbt_typename
     mov rdi, rax
     lea rsi, [rel rbt_close]
-    call rbt_copy
+    call rbt_append_cstr
 
     lea rdi, [rel exc_TypeError_type]
     lea rsi, [rel rbt_buf]
     call raise_exception
     ud2
-END_FUNC raise_binop_type_error
+END_FUNC raise_binop_type_error_ex
 
 ; The cap and the buffer have to agree: 40 (prefix) + 3 + 80 + 7 + 80 + 1 + a
 ; NUL is 212, which overran a 192-byte buffer and wrote into the globals
 ; after it -- one of them being attr_error_pending, so an over-long type name
 ; in a divmod TypeError made the NEXT attribute error re-raise this one.
-DEF_FUNC_LOCAL rbt_copy         ; (rdi = dest, rsi = src) -> rax = the NUL
+;; rbt_append_cstr(rdi = dest, rsi = src cstr) -> rax = the NUL it wrote.
+;; Bounded at 80 bytes per field; the callers' buffers are sized for that.
+DEF_FUNC rbt_append_cstr
     xor ecx, ecx
 .rbtc_loop:
     cmp rcx, 80
@@ -519,7 +534,7 @@ DEF_FUNC_LOCAL rbt_copy         ; (rdi = dest, rsi = src) -> rax = the NUL
     mov byte [rax], 0
     leave
     ret
-END_FUNC rbt_copy
+END_FUNC rbt_append_cstr
 
 DEF_FUNC_LOCAL rbt_typename     ; (rdi = dest, rsi = a Value) -> rax = the NUL
     push rbx
@@ -534,11 +549,66 @@ DEF_FUNC_LOCAL rbt_typename     ; (rdi = dest, rsi = a Value) -> rax = the NUL
     lea rsi, [rel rbt_unknown]
 .rbtt_have:
     mov rdi, rbx
-    call rbt_copy
+    call rbt_append_cstr
     pop rbx
     leave
     ret
 END_FUNC rbt_typename
+
+;; ============================================================================
+;; msg_append_i64(rdi = dest, rsi = the number) -> rax = the NUL it wrote
+;;
+;; The one thing a message could not carry.  Six file-local near-duplicates of
+;; this exist -- in build.asm, bytes.asm twice, iomod.asm, structseq.asm and
+;; func.asm -- and none of them is reachable from another file, which is why
+;; "attempt to assign sequence of wrong size to extended slice" does not name
+;; either size.  Signed, unlike most of those.
+;; ============================================================================
+DEF_FUNC msg_append_i64
+    push rbx
+    push r12
+    mov rbx, rdi                ; dest
+    mov rax, rsi
+
+    sub rsp, 40
+    lea rcx, [rsp + 32]
+    mov byte [rcx], 0
+    xor r12d, r12d              ; negative?
+    test rax, rax
+    jns .mai_digits
+    mov r12d, 1
+    neg rax
+.mai_digits:
+    test rax, rax
+    jnz .mai_loop
+    dec rcx
+    mov byte [rcx], '0'
+    jmp .mai_emit
+.mai_loop:
+    test rax, rax
+    jz .mai_emit
+    xor edx, edx
+    mov r8, 10
+    div r8
+    add dl, '0'
+    dec rcx
+    mov [rcx], dl
+    jmp .mai_loop
+.mai_emit:
+    test r12d, r12d
+    jz .mai_copy
+    dec rcx
+    mov byte [rcx], '-'
+.mai_copy:
+    mov rdi, rbx
+    mov rsi, rcx
+    call rbt_append_cstr
+    add rsp, 40
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC msg_append_i64
 
 ; raise_value_error_with_repr(rdi = prefix C string, rsi = the object Value)
 ;   -> never returns

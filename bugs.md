@@ -28,15 +28,6 @@ one-line fix.
 - **`dict.__ior__` takes only a dict.**  CPython's takes any iterable of
   key/value pairs.
 
-- **The binary-operator TypeError names neither the operator nor the operand
-  types.**  Ours is the fixed string `unsupported operand type(s)`; CPython
-  says `unsupported operand type(s) for +: 'int' and 'str'`, and has two more
-  wordings besides (`can only concatenate str ...`, `can't multiply sequence by
-  non-int of type ...`).  Matching them needs a formatted-raise helper, which
-  `raise_exception` has no equivalent of.  Until then **no test may compare
-  `str(e)` for one of these** -- `type(e).__name__` is the contract, and
-  `tests/test_binop_matrix.py` says so where the next person will read it.
-
 - **`binary_op1`'s subclass rule is not implemented.**  CPython tries the right
   operand's slot *first* when its type is a proper subclass of the left's and
   overrides the slot.  It cannot fire here: the only builtin static subclass

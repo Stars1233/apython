@@ -993,7 +993,13 @@ DEF_FUNC str_concat
     ret
 
 .concat_type_error:
-    RAISE exc_TypeError_type, "can only concatenate str (not other type) to str"
+    mov rdi, rsi
+    mov rsi, rcx
+    VALUE_FOR_TYPE rdi, rsi
+    mov rsi, rdi
+    CSTRING rdi, `can only concatenate str (not "\x01") to str`
+    extern raise_type_error_with_name
+    call raise_type_error_with_name
 END_FUNC str_concat
 
 ;; ============================================================================

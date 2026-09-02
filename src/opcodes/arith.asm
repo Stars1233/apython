@@ -740,9 +740,83 @@ DEF_FUNC_BARE op_binary_op
     jmp .binop_have_result
 
 .binop_no_method:
-    ; No method found — raise TypeError
-    extern raise_exception
-    RAISE exc_TypeError_type, "unsupported operand type(s)"
+    ; A sequence multiplied by something that is not an index gets CPython's
+    ; own wording, which names only the offending count: "can't multiply
+    ; sequence by non-int of type 'float'".
+    cmp r9d, 5                  ; NB_MULTIPLY
+    je .bnm_mul
+    cmp r9d, 18                 ; NB_INPLACE_MULTIPLY
+    jne .bnm_generic
+.bnm_mul:
+    mov rdi, [rsp + BO_RIGHT]
+    mov rcx, [rsp + BO_RTAG]
+    cmp rcx, TAG_PTR
+    jne .bnm_mul_try_left
+    mov rax, [rdi + PyObject.ob_type]
+    mov rax, [rax + PyTypeObject.tp_as_sequence]
+    test rax, rax
+    jz .bnm_mul_try_left
+    cmp qword [rax + PySequenceMethods.sq_repeat], 0
+    je .bnm_mul_try_left
+    mov rdi, [rsp + BO_LEFT]    ; the right is the sequence, so the left is
+    mov rdx, [rsp + BO_LTAG]    ; the count that is not an index
+    VALUE_FOR_TYPE rdi, rdx
+    jmp .bnm_mul_msg
+.bnm_mul_try_left:
+    mov rdi, [rsp + BO_LEFT]
+    mov rcx, [rsp + BO_LTAG]
+    cmp rcx, TAG_PTR
+    jne .bnm_generic
+    mov rax, [rdi + PyObject.ob_type]
+    mov rax, [rax + PyTypeObject.tp_as_sequence]
+    test rax, rax
+    jz .bnm_generic
+    cmp qword [rax + PySequenceMethods.sq_repeat], 0
+    je .bnm_generic
+    mov rdi, [rsp + BO_RIGHT]
+    mov rdx, [rsp + BO_RTAG]
+    VALUE_FOR_TYPE rdi, rdx
+.bnm_mul_msg:
+    mov rsi, rdi
+    CSTRING rdi, `can't multiply sequence by non-int of type '\x01'`
+    extern raise_type_error_with_name
+    call raise_type_error_with_name
+    ud2
+
+.bnm_generic:
+    ; "unsupported operand type(s) for +: 'int' and 'str'", which is how
+    ; CPython words it.  The prefix and the operator go into a stack buffer,
+    ; and raise_binop_type_error_ex appends the two type names -- the helper
+    ; has been there all along with a single caller in divmod.
+    mov r10d, r9d
+    cmp r10d, 26
+    jb .bnm_have_op
+    xor r10d, r10d
+.bnm_have_op:
+    lea rax, [rel binary_op_symbols]
+    mov r10, [rax + r10*8]      ; the operator, as it is written
+    sub rsp, 64
+    mov rdi, rsp
+    lea rsi, [rel binop_msg_prefix]
+    extern rbt_append_cstr
+    call rbt_append_cstr
+    mov rdi, rax
+    mov rsi, r10
+    call rbt_append_cstr
+    ; The message needs a Value of each operand's TYPE, and the frame holds
+    ; payloads.  Packing a large int here would box it, and the raise below
+    ; abandons the stack that would have freed it -- zero has the same type
+    ; and allocates nothing.
+    mov rdi, [rsp + 64 + BO_LEFT]
+    mov rdx, [rsp + 64 + BO_LTAG]
+    VALUE_FOR_TYPE rdi, rdx
+    mov rsi, [rsp + 64 + BO_RIGHT]
+    mov rcx, [rsp + 64 + BO_RTAG]
+    VALUE_FOR_TYPE rsi, rcx
+    mov rdx, rsp
+    extern raise_binop_type_error
+    call raise_binop_type_error
+    ud2
 
 .binop_try_smallint_add:
     ; Check both TAG_SMALLINT
@@ -1303,9 +1377,43 @@ section .text
     ; whatever allocated next, arbitrarily far away: `object() < object()`,
     ; `range(1) < range(2)` and `int < str` all corrupted the heap.
     ; op_binary_op's .binop_no_method has always left this to the unwinder too.
+    ; "'<' not supported between instances of 'int' and 'str'", which is how
+    ; CPython words it.  The operands have to be read BEFORE the frame goes,
+    ; and they are payloads, so each becomes a Value of the same type.
+    mov r10d, ecx
+    cmp r10d, 6
+    jb .cmp_have_op
+    xor r10d, r10d
+.cmp_have_op:
+    lea rax, [rel compare_op_symbols]
+    mov r10, [rax + r10*8]
+    mov rdi, [rsp + BO_LEFT]
+    mov rdx, [rsp + BO_LTAG]
+    VALUE_FOR_TYPE rdi, rdx
+    mov rsi, [rsp + BO_RIGHT]
+    mov rdx, [rsp + BO_RTAG]
+    VALUE_FOR_TYPE rsi, rdx
     add rsp, BO_SIZE
-    extern raise_exception
-    RAISE exc_TypeError_type, "'<' not supported between instances"
+    sub rsp, 64
+    mov [rsp + 48], rdi
+    mov [rsp + 56], rsi
+    mov rdi, rsp
+    lea rsi, [rel cmp_msg_quote]
+    extern rbt_append_cstr
+    call rbt_append_cstr
+    mov rdi, rax
+    mov rsi, r10
+    call rbt_append_cstr
+    mov rdi, rax
+    lea rsi, [rel cmp_msg_tail]
+    call rbt_append_cstr
+    mov rdi, [rsp + 48]
+    mov rsi, [rsp + 56]
+    mov rdx, rsp
+    lea rcx, [rel cmp_msg_open]
+    extern raise_binop_type_error_ex
+    call raise_binop_type_error_ex
+    ud2
     DISPATCH
 
 .cmp_id_eq_ne:
@@ -1542,6 +1650,64 @@ binary_op_offsets:
     dq PyNumberMethods.nb_isub           ; NB_INPLACE_SUBTRACT (23)
     dq PyNumberMethods.nb_itrue_divide   ; NB_INPLACE_TRUE_DIVIDE (24)
     dq PyNumberMethods.nb_ixor           ; NB_INPLACE_XOR (25)
+
+; The same 26 rows again, as the operator writes.  CPython's TypeError names
+; the operator -- "unsupported operand type(s) for +: 'int' and 'str'" -- and
+; ours was the bare prefix, because nothing anywhere mapped an op index to its
+; symbol.
+; The six comparison operators, indexed by PY_LT..PY_GE.
+global compare_op_symbols
+compare_op_symbols:
+    dq cops_lt, cops_le, cops_eq, cops_ne, cops_gt, cops_ge
+
+global binary_op_symbols
+binary_op_symbols:
+    dq bops_add, bops_and, bops_floordiv, bops_lshift, bops_matmul
+    dq bops_mul, bops_mod, bops_or, bops_pow, bops_rshift
+    dq bops_sub, bops_truediv, bops_xor
+    dq bops_iadd, bops_iand, bops_ifloordiv, bops_ilshift, bops_imatmul
+    dq bops_imul, bops_imod, bops_ior, bops_ipow, bops_irshift
+    dq bops_isub, bops_itruediv, bops_ixor
+
+section .rodata
+cops_lt:        db "<", 0
+cops_le:        db "<=", 0
+cops_eq:        db "==", 0
+cops_ne:        db "!=", 0
+cops_gt:        db ">", 0
+cops_ge:        db ">=", 0
+bops_add:       db "+", 0
+bops_and:       db "&", 0
+bops_floordiv:  db "//", 0
+bops_lshift:    db "<<", 0
+bops_matmul:    db "@", 0
+bops_mul:       db "*", 0
+bops_mod:       db "%", 0
+bops_or:        db "|", 0
+bops_pow:       db "** or pow()", 0
+bops_rshift:    db ">>", 0
+bops_sub:       db "-", 0
+bops_truediv:   db "/", 0
+bops_xor:       db "^", 0
+bops_iadd:      db "+=", 0
+bops_iand:      db "&=", 0
+bops_ifloordiv: db "//=", 0
+bops_ilshift:   db "<<=", 0
+bops_imatmul:   db "@=", 0
+bops_imul:      db "*=", 0
+bops_imod:      db "%=", 0
+bops_ior:       db "|=", 0
+bops_ipow:      db "**=", 0
+bops_irshift:   db ">>=", 0
+bops_isub:      db "-=", 0
+bops_itruediv:  db "/=", 0
+bops_ixor:      db "^=", 0
+bops_unknown:   db "?", 0
+cmp_msg_quote:  db "'", 0
+cmp_msg_tail:   db "' not supported between instances", 0
+binop_msg_prefix: db "unsupported operand type(s) for ", 0
+cmp_msg_open:     db " of '", 0
+section .data
 
 section .text
 

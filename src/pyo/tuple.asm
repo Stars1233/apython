@@ -547,7 +547,7 @@ DEF_FUNC tuple_concat
     cmp ecx, TAG_PTR
     jne .tc_type_error
     mov rax, [r12 + PyObject.ob_type]
-    REQUIRE_TUPLE_TYPE rax, rcx, .tc_type_error
+    REQUIRE_TUPLE_TYPE rax, rcx, .tc_type_error_ptr
 
     mov r13, [rbx + PyTupleObject.ob_size]   ; r13 = len(a)
     mov r14, [r12 + PyTupleObject.ob_size]   ; r14 = len(b)
@@ -596,8 +596,19 @@ DEF_FUNC tuple_concat
     leave
     V_PACK rax, rdx             ; return one Value
     ret
+.tc_type_error_ptr:
+    mov ecx, TAG_PTR            ; REQUIRE_TUPLE_TYPE used rcx as its scratch
 .tc_type_error:
-    RAISE exc_TypeError_type, "can only concatenate tuple (not other) to tuple"
+    ; The right operand's payload survives in r12; its tag does not always --
+    ; REQUIRE_*_TYPE uses rcx as scratch -- so the pointer case is recovered
+    ; from the payload itself, which is its own Value.
+    mov rdi, r12
+    mov rsi, rcx
+    VALUE_FOR_TYPE rdi, rsi
+    mov rsi, rdi
+    CSTRING rdi, `can only concatenate tuple (not "\x01") to tuple`
+    extern raise_type_error_with_name
+    call raise_type_error_with_name
 END_FUNC tuple_concat
 
 ;; ============================================================================

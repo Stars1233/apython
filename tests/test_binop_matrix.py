@@ -10,11 +10,13 @@
 # dumped core.  Nothing in the suite covered the quadrant, because
 # tests/test_operand_types.py only ever puts the sequence on the left.
 #
-# Only names and small exact values are printed.  Our TypeError text is the
-# fixed string "unsupported operand type(s)" where CPython names the operator
-# and both types, so str(e) can never be compared here; the exception's
-# identity can.  A float result prints as its type alone unless it is integral,
-# because agreeing on repr digits is a different subsystem's job.
+# Only names and small exact values are printed.  The TypeError text now
+# matches CPython's -- operator and both operand types -- but this file still
+# compares the exception's identity rather than its str(): a matrix cell has
+# to stay short enough to locate in a diff.  tests/test_error_messages.py is
+# where the wording is checked.  A float result prints as its type alone
+# unless it is integral, because agreeing on repr digits is a different
+# subsystem's job.
 
 
 def show(v):

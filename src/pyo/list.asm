@@ -1429,7 +1429,7 @@ DEF_FUNC list_concat
     cmp ecx, TAG_PTR
     jne .lc_type_error
     mov rax, [r12 + PyObject.ob_type]
-    REQUIRE_LIST_TYPE rax, rcx, .lc_type_error
+    REQUIRE_LIST_TYPE rax, rcx, .lc_type_error_ptr
 
     ; Get sizes
     mov r13, [rbx + PyListObject.ob_size]   ; r13 = len(a)
@@ -1483,8 +1483,19 @@ DEF_FUNC list_concat
     leave
     V_PACK rax, rdx             ; return one Value
     ret
+.lc_type_error_ptr:
+    mov ecx, TAG_PTR            ; REQUIRE_LIST_TYPE used rcx as its scratch
 .lc_type_error:
-    RAISE exc_TypeError_type, "can only concatenate list (not other) to list"
+    ; The right operand's payload survives in r12; its tag does not always --
+    ; REQUIRE_*_TYPE uses rcx as scratch -- so the pointer case is recovered
+    ; from the payload itself, which is its own Value.
+    mov rdi, r12
+    mov rsi, rcx
+    VALUE_FOR_TYPE rdi, rsi
+    mov rsi, rdi
+    CSTRING rdi, `can only concatenate list (not "\x01") to list`
+    extern raise_type_error_with_name
+    call raise_type_error_with_name
 END_FUNC list_concat
 
 ;; ============================================================================
@@ -1733,7 +1744,16 @@ DEF_FUNC list_inplace_concat, LIC_FRAME
     jmp eval_exception_unwind
 
 .lic_type_error:
-    RAISE exc_TypeError_type, "can only concatenate list (not other) to list"
+    ; The right operand's payload survives in r12; its tag does not always --
+    ; REQUIRE_*_TYPE uses rcx as scratch -- so the pointer case is recovered
+    ; from the payload itself, which is its own Value.
+    mov rdi, r12
+    mov rsi, r13
+    VALUE_FOR_TYPE rdi, rsi
+    mov rsi, rdi
+    CSTRING rdi, `can only concatenate list (not "\x01") to list`
+    extern raise_type_error_with_name
+    call raise_type_error_with_name
 END_FUNC list_inplace_concat
 
 ;; ============================================================================
