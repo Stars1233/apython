@@ -516,6 +516,8 @@ global dunder_xor
 global dunder_lshift
 global dunder_rshift
 global dunder_iter
+global dunder_aiter
+global dunder_anext
 global dunder_next
 global dunder_getitem
 global dunder_setitem
@@ -577,6 +579,8 @@ dunder_lshift:   db "__lshift__", 0
 dunder_rshift:   db "__rshift__", 0
 dunder_iter:     db "__iter__", 0
 dunder_next:     db "__next__", 0
+dunder_aiter:    db "__aiter__", 0
+dunder_anext:    db "__anext__", 0
 dunder_getitem:  db "__getitem__", 0
 dunder_setitem:  db "__setitem__", 0
 dunder_contains: db "__contains__", 0

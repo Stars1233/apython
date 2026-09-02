@@ -203,22 +203,6 @@ than lying — but they are ordinary Python that does not work:
   it just cannot be created from inside the interpreter, which is why the
   regression test for `follow_symlinks` has to make do with a regular file.
 
-- **`async for` accepts only an async generator.**  A class implementing the
-  asynchronous iterator protocol itself -- `__aiter__` returning self and an
-  `async def __anext__` raising `StopAsyncIteration` -- is refused with
-  `TypeError: 'async for' requires an object with __aiter__ method`, though it
-  defines exactly that.  `asyncio` streams and every hand-written async
-  iterator are shaped this way.
-
-  Looking the two dunders up by name in `op_get_aiter` and `op_get_anext` is
-  most of it, and now that SEND propagates a raise it no longer spins -- the
-  `StopAsyncIteration` from `__anext__` reaches `END_ASYNC_FOR` and ends the
-  loop.  What stops it is the entry below: an exception escaping `__anext__`
-  segfaults, because the unwinder reaches a finaliser with
-  `current_exception` pointing at an object whose refcount is already zero.
-  The by-name lookup was written and reverted for that reason; it is a
-  half-hour's work once the refcount question is answered.
-
 - **The unwinder can carry an exception nothing owns.**  `raise_exception_obj`
   takes over its caller's reference rather than adding one, so
   `current_exception` holds exactly one reference -- and somewhere between a
