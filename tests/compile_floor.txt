@@ -138,6 +138,7 @@ test_for_loops
 test_format_map
 test_format
 test_format_spec
+test_frozenset
 test_fstrings
 test_func_dunder_get
 test_functions

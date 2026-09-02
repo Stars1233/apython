@@ -35,11 +35,6 @@ one-line fix.
   `bytearray_type.tp_as_number` is 0 and nothing supplies `nb_remainder`.
   `tests/test_binop_matrix.py` skips that cell rather than blessing it.
 
-- **The set operators build their result with `set_new` whatever the left
-  operand was**, so `frozenset({1}) | frozenset({2})` is a `set`, not a
-  `frozenset`.  The same for `&`, `-`, `^` and their inplace forms.  The
-  contents are right; only the type is wrong.
-
 - **`%`-formatting takes only a tuple or a mapping on the right.**  CPython
   also accepts a single arbitrary object, so `"ab" % [1, 2]` is `'ab'` there
   and a TypeError here.

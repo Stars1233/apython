@@ -151,7 +151,7 @@ INPLACE = [
 # (operator, left type, right type) cells where apython and CPython disagree for
 # a reason that is a missing *feature* rather than an unsafe one.  Every one of
 # these raises TypeError or returns the wrong container type; none of them reads
-# or writes memory it should not.  All four groups are in bugs.md.
+# or writes memory it should not.  Each group is in bugs.md.
 #
 # The set was derived from the triage after the safety fixes landed, not guessed
 # at up front -- a skip set written in advance is how one grows to cover real
@@ -172,26 +172,19 @@ for _op in ("%", "%="):
     for _b in ("dict", "list", "range"):
         SKIP.add((_op, "bytearray", _b))
 
-# 2. The set operators build their result with set_new even when the left
-#    operand is a frozenset, so `frozenset() | frozenset()` is a set.
-for _op in ("|", "|=", "&", "&=", "-", "-=", "^", "^="):
-    for _b in ("set", "frozenset"):
-        SKIP.add((_op, "frozenset", _b))
-
-# 3. str/bytes %-formatting accepts only a tuple or a mapping on the right;
+# 2. str/bytes %-formatting accepts only a tuple or a mapping on the right;
 #    CPython also takes a single arbitrary object.
 for _op in ("%", "%="):
     for _a, _b in (("str", "bytes"), ("str", "bytearray"), ("str", "list"),
                    ("str", "range"), ("bytes", "list"), ("bytes", "range")):
         SKIP.add((_op, _a, _b))
 
-# 4. PEP 604 unions: `None | int` is unsupported, and `int | int` is not
-#    collapsed to int.  Phase 2 revisits UnionType for its hash.
+# PEP 604 unions: `int | int` is not collapsed to int.  `None | int` builds a
+# union now that the dispatcher asks the right operand's slot.
 for _op in ("|", "|="):
-    SKIP.add((_op, "NoneType", "type"))
     SKIP.add((_op, "type", "type"))
 
-# 5. dict.__ior__ takes any iterable of key/value pairs in CPython; ours takes
+# 3. dict.__ior__ takes any iterable of key/value pairs in CPython; ours takes
 #    a dict, so a str right operand is a TypeError rather than a ValueError.
 SKIP.add(("|=", "dict", "str"))
 
