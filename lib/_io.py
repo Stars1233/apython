@@ -1231,6 +1231,7 @@ class TextIOWrapper(TextIOBase):
             start_flags = dec_flags
             bytes_fed = 0
             chars_decoded = 0
+            need_eof = 0
             for i in range(len(next_input)):
                 bytes_fed += 1
                 chars_decoded += len(decoder.decode(next_input[i:i + 1]))
@@ -1244,11 +1245,17 @@ class TextIOWrapper(TextIOBase):
                 if chars_decoded >= chars_to_skip:
                     break
             else:
+                # The snapshot ran out before enough characters came back, so
+                # replaying this cookie needs the decoder told about EOF.
+                # need_eof was never set and never passed, so _unpack_cookie
+                # read it as False and seek(tell()) mis-decoded a pending
+                # '\r' at the end of the buffer.
                 chars_decoded += len(decoder.decode(b"", final=True))
+                need_eof = 1
                 if chars_decoded < chars_to_skip:
                     raise OSError("can't reconstruct logical file position")
             return self._pack_cookie(start_pos, start_flags,
-                                     bytes_fed, chars_to_skip)
+                                     bytes_fed, chars_to_skip, need_eof)
         finally:
             decoder.setstate(saved_state)
 

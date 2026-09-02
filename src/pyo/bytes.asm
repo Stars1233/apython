@@ -2125,7 +2125,7 @@ section .text
 ;; raised TypeError; only the constant-folded form worked.
 ;; ============================================================================
 DEF_FUNC bytes_concat
-    BINOP_REQUIRE_LEFT bytes_type, 0, 1
+    BINOP_REQUIRE_LEFT bytes_type, TYPE_FLAG_BYTES_SUBCLASS, 1
     push rbx
     push r12
     push r13
@@ -2140,7 +2140,12 @@ DEF_FUNC bytes_concat
     mov rax, [rbx + PyObject.ob_type]
     lea rcx, [rel bytes_type]
     cmp rax, rcx
-    jne .bc_type_error
+    je .bc_left_ok
+    ; A subclass instance has bytes' layout, which is all the copies below
+    ; need; BINOP_REQUIRE_LEFT above already let it through.
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_BYTES_SUBCLASS
+    jz .bc_type_error
+.bc_left_ok:
     ; The right operand may be any bytes-like: `b"ab" + bytearray(b"cd")` is
     ; b'abcd' in CPython -- bytes, from the left operand -- and requiring an
     ; exact bytes on the right refused it.  r14 carries the right side's
@@ -2148,14 +2153,21 @@ DEF_FUNC bytes_concat
     ; layout whichever type arrived.
     mov rax, [r12 + PyObject.ob_type]
     cmp rax, rcx
-    jne .bc_right_bytearray
+    je .bc_right_bytes
+    ; A bytes subclass on the right has bytes' layout too.
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_BYTES_SUBCLASS
+    jz .bc_right_bytearray
+.bc_right_bytes:
     mov r14, [r12 + PyBytesObject.ob_size]
     lea r12, [r12 + PyBytesObject.data]
     jmp .bc_right_done
 .bc_right_bytearray:
     lea rcx, [rel bytearray_type]
     cmp rax, rcx
-    jne .bc_type_error
+    je .bc_right_ba
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_BYTEARRAY_SUBCLASS
+    jz .bc_type_error
+.bc_right_ba:
     mov r14, [r12 + PyByteArrayObject.ob_size]
     mov rdi, r12
     call bytearray_data
@@ -2205,7 +2217,7 @@ END_FUNC bytes_concat
 ;; bytes_repeat(bytes Value, count Value) -> Value
 ;; ============================================================================
 DEF_FUNC bytes_repeat
-    BINOP_REQUIRE_LEFT bytes_type, 0, 1
+    BINOP_REQUIRE_LEFT bytes_type, TYPE_FLAG_BYTES_SUBCLASS, 1
     push rbx
     push r12
     push r13
@@ -2756,7 +2768,9 @@ bytes_type:
     dq 0                    ; tp_base
     dq 0                    ; tp_dict
     dq 0                    ; tp_mro
-    dq TYPE_FLAG_BASETYPE   ; tp_flags
+    dq TYPE_FLAG_BASETYPE | TYPE_FLAG_BYTES_SUBCLASS   ; tp_flags -- the
+                            ; subclass bit is carried by the base too, as
+                            ; bytearray's is, so type_from_parts inherits it
     dq 0                    ; tp_bases
     dq 0                        ; tp_traverse
     dq 0                        ; tp_clear

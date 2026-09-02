@@ -936,6 +936,11 @@ TYPE_FLAG_COMPLEX_SUBCLASS equ 0x20000
 ; bytearray keeps its bytes in a separate allocation, so a subclass instance
 ; owns memory the generic instance_dealloc knows nothing about.
 TYPE_FLAG_BYTEARRAY_SUBCLASS equ 0x40000
+; bytes keeps its data inline as str does, so a subclass instance is a pointer
+; whose ob_type is not bytes_type.  Without a flag for it BINOP_REQUIRE_LEFT
+; was given a literal 0 at bytes' two arithmetic slots, and every `+` and `*`
+; on a bytes subclass declined into a TypeError.
+TYPE_FLAG_BYTES_SUBCLASS equ 0x80000
 
 ; Comparison opcodes (used by tp_richcompare)
 PY_LT equ 0

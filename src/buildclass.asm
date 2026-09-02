@@ -764,7 +764,7 @@ TFP_EXC   equ 64            ; current_exception, to tell a raise from a miss
              TYPE_FLAG_LIST_SUBCLASS | TYPE_FLAG_TUPLE_SUBCLASS | \
              TYPE_FLAG_DICT_SUBCLASS | TYPE_FLAG_SET_SUBCLASS | \
              TYPE_FLAG_FLOAT_SUBCLASS | TYPE_FLAG_COMPLEX_SUBCLASS | \
-             TYPE_FLAG_BYTEARRAY_SUBCLASS
+             TYPE_FLAG_BYTEARRAY_SUBCLASS | TYPE_FLAG_BYTES_SUBCLASS
     or [r12 + PyTypeObject.tp_flags], r10
 
     ; A class deriving from `type` is a metatype: its instances are classes,

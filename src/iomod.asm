@@ -1053,6 +1053,20 @@ DEF_FUNC fileio_init_fn, FI_FRAME
     mov rax, [rbp - FI_FLAGS]
     mov [rdi + PyFileIOObject.fio_flags], rax
 
+    ; FIO_APPENDING was set by fileio_mode_flags and then read by nothing at
+    ; all.  O_APPEND positions the WRITES, not the offset, so without an
+    ; explicit seek open(p, "a").tell() was 0 where CPython's is the file's
+    ; size, and open(p, "a+").read() returned the whole file instead of ''.
+    ; CPython's fileio_init does exactly this lseek for exactly this reason.
+    test rax, FIO_APPENDING
+    jz .fi_not_appending
+    mov rdi, [rbp - FI_SELF]
+    mov rdi, [rdi + PyFileIOObject.fio_fd]
+    xor esi, esi
+    mov edx, SEEK_END
+    call sys_lseek              ; a pipe answers ESPIPE; nothing to do then
+.fi_not_appending:
+
     ; closefd=False.  It only ever turns the bit off, and only an adopted
     ; descriptor gets here with it false -- the path case raised above.
     cmp qword [rbp - FI_CLOSEFD], 0

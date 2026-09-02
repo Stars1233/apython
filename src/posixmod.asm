@@ -102,6 +102,8 @@ extern sys_getrandom
 extern sys_wait4
 extern obj_as_index
 extern obj_is_true
+extern kw_names_pending
+extern ap_strcmp
 extern sys_uname
 extern sys_ftruncate
 extern sys_fcntl
@@ -332,6 +334,23 @@ PSR_BUF   equ 8
 PSR_OBJ   equ 16
 PSR_FRAME equ 32            ; + 1 push = 40... see below
 
+; A whole-nanosecond timestamp: seconds * 1e9 + the nanosecond remainder.
+; The three _ns fields published tv_nsec alone, so st_mtime_ns was a number
+; below 1e9 -- bugs.md said they carried the exact value, and they did not.
+%macro STAT_FIELD_NS 3          ; %1 = field index, %2 = tv_sec, %3 = tv_nsec
+    mov rax, %2
+    mov rcx, 1000000000
+    imul rax, rcx
+    add rax, %3
+    mov rdi, rax
+    call int_from_i64
+    V_PACK rax, rdx
+    mov rdx, rax
+    mov rdi, [rbp - PSR_OBJ]
+    mov esi, %1
+    call structseq_set          ; takes over the reference
+%endmacro
+
 %macro STAT_FIELD_I 2           ; %1 = field index, %2 = the i64 to store
     mov rdi, %2
     call int_from_i64
@@ -378,11 +397,11 @@ DEF_FUNC posix_stat_result, 40
 
     ; The named-only tail.
     mov rbx, [rbp - PSR_BUF]
-    STAT_FIELD_I 10, [rbx + StatBuf.st_atime_ns]
+    STAT_FIELD_NS 10, [rbx + StatBuf.st_atime], [rbx + StatBuf.st_atime_ns]
     mov rbx, [rbp - PSR_BUF]
-    STAT_FIELD_I 11, [rbx + StatBuf.st_mtime_ns]
+    STAT_FIELD_NS 11, [rbx + StatBuf.st_mtime], [rbx + StatBuf.st_mtime_ns]
     mov rbx, [rbp - PSR_BUF]
-    STAT_FIELD_I 12, [rbx + StatBuf.st_ctime_ns]
+    STAT_FIELD_NS 12, [rbx + StatBuf.st_ctime], [rbx + StatBuf.st_ctime_ns]
     mov rbx, [rbp - PSR_BUF]
     STAT_FIELD_I 13, [rbx + StatBuf.st_blksize]
     mov rbx, [rbp - PSR_BUF]
@@ -402,6 +421,7 @@ END_FUNC posix_stat_result
 ;; ============================================================================
 PST_PATH  equ 8
 PST_OWNED equ 16                     ; what posix_path_arg asked us to release
+PST_NPOS  equ 24                     ; positional count, past the keywords
 PST_BUF   equ 32 + StatBuf_size
 PST_FRAME equ 32 + StatBuf_size      ; derived, not hand-picked: a struct in a
                                      ; frame outgrows a guessed offset silently
@@ -409,6 +429,61 @@ PST_FRAME equ 32 + StatBuf_size      ; derived, not hand-picked: a struct in a
 DEF_FUNC posix_stat, PST_FRAME
     test rsi, rsi
     jz .pst_argerr
+    ; follow_symlinks=False makes this lstat.  The keyword was accepted and
+    ; dropped -- nothing here read kw_names_pending -- so os.stat followed the
+    ; link either way, and os.path.islink() could not tell.
+    mov rax, [rel kw_names_pending]
+    test rax, rax
+    jz .pst_no_kw
+    mov qword [rel kw_names_pending], 0
+    mov rcx, [rax + PyTupleObject.ob_size]
+    mov rdx, rsi
+    sub rdx, rcx
+    mov [rbp - PST_NPOS], rdx   ; the frame, not rdx: ap_strcmp clobbers it
+    mov r9, [rax + PyTupleObject.ob_item]
+    xor r8d, r8d
+.pst_kw_loop:
+    cmp r8, rcx
+    jge .pst_no_kw
+    push rcx
+    push r8
+    push r9
+    push rdi
+    mov r10, [r9 + r8*8]
+    lea rdi, [r10 + PyStrObject.data]
+    CSTRING rsi, "follow_symlinks"
+    call ap_strcmp
+    mov r11d, eax
+    pop rdi
+    pop r9
+    pop r8
+    pop rcx
+    test r11d, r11d
+    jnz .pst_kw_next
+    push rcx
+    push r8
+    push r9
+    push rdi
+    mov r10, [rbp - PST_NPOS]
+    add r10, r8
+    mov rdi, [rdi + r10*8]
+    call obj_is_true
+    mov r11d, eax
+    pop rdi
+    pop r9
+    pop r8
+    pop rcx
+    test r11d, r11d
+    jnz .pst_kw_next
+    ; A real tail call: posix_lstat builds its own frame, so this one has to
+    ; be gone before the jump or its rsp is never restored.
+    mov rsi, 1                  ; nargs for lstat, which takes no keywords
+    leave
+    jmp posix_lstat
+.pst_kw_next:
+    inc r8
+    jmp .pst_kw_loop
+.pst_no_kw:
     mov rdi, [rdi]
     mov [rbp - PST_PATH], rdi
     ; os.stat(fd) is os.fstat(fd): CPython's stat takes an open file

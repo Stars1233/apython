@@ -900,7 +900,8 @@ END_FUNC bytes_method_replace
 ;; nargs==1: split by whitespace; nargs==2: split by separator bytes
 ;; ============================================================================
 BSP_SEPLEN equ 8
-BSP_FRAME  equ 8            ; + 5 pushes = 48, 16-aligned
+BSP_MAX    equ 16           ; splits left, or negative for "no limit"
+BSP_FRAME  equ 24           ; + 5 pushes = 64, 16-aligned
 
 DEF_FUNC bytes_method_split, BSP_FRAME
     push rbx
@@ -923,8 +924,32 @@ DEF_FUNC bytes_method_split, BSP_FRAME
     mov rbx, rax                ; self data
     mov r12, r10                ; self_len
 
+    ; maxsplit, argument three.  It was never read: `cmp r14, 2 / jl` chose
+    ; between whitespace and separator mode and nothing else looked at nargs,
+    ; so b'a,b,,c'.split(b',', 1) answered four pieces.  A negative value, and
+    ; the default, mean no limit.
+    mov qword [rbp - BSP_MAX], -1
+    cmp r14, 3
+    jl .bsp_have_max
+    push rdi
+    sub rsp, 8
+    mov rdi, [rdi + 16]         ; args[2]
+    V_UNPACK rdi, rdx
+    extern obj_as_index
+    call obj_as_index
+    add rsp, 8
+    pop rdi
+    mov [rbp - BSP_MAX], rax
+.bsp_have_max:
+
     cmp r14, 2
     jl .bsp_no_sep
+    ; sep=None asks for whitespace mode, which bytes_like_ptr_len below would
+    ; refuse: b'a b'.split(None, 1) was a TypeError.
+    mov rax, [rdi + 8]
+    LOAD_NONE rcx
+    cmp rax, rcx
+    je .bsp_no_sep
 
     ; Separator mode
     push r12
@@ -967,6 +992,10 @@ DEF_FUNC bytes_method_split, BSP_FRAME
 
 .bsp_ws_word:
     mov r15, rcx                ; word start
+    cmp qword [rbp - BSP_MAX], 0
+    jne .bsp_ws_wordscan
+    mov rcx, r12                ; no splits left: the rest is the last piece,
+    jmp .bsp_ws_wordend         ; internal whitespace and all
 .bsp_ws_wordscan:
     inc rcx
     cmp rcx, r12
@@ -996,6 +1025,9 @@ DEF_FUNC bytes_method_split, BSP_FRAME
     pop rdi
     call obj_decref
     pop rcx
+    cmp qword [rbp - BSP_MAX], 0
+    jl .bsp_ws_scan             ; negative: no limit, never counts down
+    dec qword [rbp - BSP_MAX]
     jmp .bsp_ws_scan
 
 .bsp_ws_done:
@@ -1025,6 +1057,8 @@ DEF_FUNC bytes_method_split, BSP_FRAME
     xor r11d, r11d              ; segment start = 0
 
 .bsp_sep_scan:
+    cmp qword [rbp - BSP_MAX], 0
+    je .bsp_sep_tail            ; no splits left: the rest is one piece
     ; Check if enough bytes remain for separator
     mov rax, r12
     sub rax, rcx
@@ -1064,6 +1098,9 @@ DEF_FUNC bytes_method_split, BSP_FRAME
     ; Advance past separator
     add rcx, r14
     mov r11, rcx               ; new segment start
+    cmp qword [rbp - BSP_MAX], 0
+    jl .bsp_sep_scan           ; negative: no limit, never counts down
+    dec qword [rbp - BSP_MAX]
     jmp .bsp_sep_scan
 
 .bsp_sep_nomatch:

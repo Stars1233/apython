@@ -38,6 +38,7 @@
 
 ASM_INIT
 
+extern none_singleton
 extern ap_malloc
 extern ap_free
 extern ap_strcmp
@@ -218,6 +219,13 @@ DEF_FUNC structseq_getattr, SSG_FRAME
     sub rdx, rcx
     lea rax, [rdi + PyTupleObject_size]
     mov rax, [rax + rdx*8]
+    ; A named-only field the constructor never filled holds a zero Value, and
+    ; zero is also what .ssg_missing answers for "no such attribute" -- so the
+    ; field read as absent rather than unset.  The name IS on the descriptor;
+    ; CPython answers None for one that was not supplied.
+    test rax, rax
+    jnz .ssg_out
+    LOAD_NONE rax
 .ssg_out:
     INCREF_V rax, rcx
     pop rbx

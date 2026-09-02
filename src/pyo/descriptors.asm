@@ -2076,6 +2076,136 @@ align 8
 ga_name_str: db "types.GenericAlias", 0
 
 align 8
+section .text
+
+;; ============================================================================
+;; generic_alias_hash(rdi = self) -> rax = hash
+;; generic_alias_richcompare(rdi = left, rsi = right, edx = op) -> Value
+;;
+;; union_type got both of these and generic_alias_type did not, so
+;; `{list[int]: 1}[list[int]]` was a KeyError: two aliases spelt the same way
+;; hashed by identity and compared by it.  Unlike a union, an alias is ordered
+;; -- list[int, str] is not list[str, int] -- so this is a plain combine over
+;; (origin, args) rather than union's set equality.
+;; ============================================================================
+GAH_FRAME equ 16            ; + 2 pushes = 32
+
+DEF_FUNC generic_alias_hash, GAH_FRAME
+    push rbx
+    push r12
+    mov rbx, rdi
+    mov rdi, [rbx + PyGenericAliasObject.ga_origin]
+    test rdi, rdi
+    jz .gah_no_origin
+    call obj_hash
+    jmp .gah_have_origin
+.gah_no_origin:
+    xor eax, eax
+.gah_have_origin:
+    mov r12, rax
+    mov rdi, [rbx + PyGenericAliasObject.ga_args]
+    test rdi, rdi
+    jz .gah_done
+    call obj_hash
+    imul r12, r12, 1000003
+    xor r12, rax
+.gah_done:
+    mov rax, r12
+    cmp rax, -1
+    jne .gah_ret
+    mov rax, -2
+.gah_ret:
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC generic_alias_hash
+
+GRC_LEFT  equ 8
+GRC_RIGHT equ 16
+GRC_OP    equ 24
+GRC_FRAME equ 32            ; + 0 pushes = 32
+
+DEF_FUNC generic_alias_richcompare, GRC_FRAME
+    cmp edx, PY_EQ
+    je .grc_ok
+    cmp edx, PY_NE
+    jne .grc_decline
+.grc_ok:
+    mov [rbp - GRC_OP], edx
+    ; Both sides must be aliases; anything else declines so the protocol can
+    ; try the other operand.
+    V_TEST_PTR rdi, rax
+    ja .grc_decline
+    V_TEST_PTR rsi, rax
+    ja .grc_decline
+    mov rax, [rdi + PyObject.ob_type]
+    lea rcx, [rel generic_alias_type]
+    cmp rax, rcx
+    jne .grc_decline
+    mov rax, [rsi + PyObject.ob_type]
+    cmp rax, rcx
+    jne .grc_decline
+    mov [rbp - GRC_LEFT], rdi
+    mov [rbp - GRC_RIGHT], rsi
+
+    mov rdi, [rdi + PyGenericAliasObject.ga_origin]
+    mov rsi, [rsi + PyGenericAliasObject.ga_origin]
+    mov edx, PY_EQ
+    extern obj_richcompare_bool
+    call obj_richcompare_bool
+    cmp eax, 0
+    jl .grc_raised
+    test eax, eax
+    jz .grc_false
+
+    mov rdi, [rbp - GRC_LEFT]
+    mov rdi, [rdi + PyGenericAliasObject.ga_args]
+    mov rsi, [rbp - GRC_RIGHT]
+    mov rsi, [rsi + PyGenericAliasObject.ga_args]
+    mov edx, PY_EQ
+    call obj_richcompare_bool
+    cmp eax, 0
+    jl .grc_raised
+    test eax, eax
+    jz .grc_false
+
+    mov eax, 1
+    jmp .grc_answer
+.grc_false:
+    xor eax, eax
+.grc_answer:
+    cmp dword [rbp - GRC_OP], PY_NE
+    jne .grc_emit
+    xor eax, 1
+.grc_emit:
+    test eax, eax
+    jz .grc_emit_false
+    lea rax, [rel bool_true]
+    jmp .grc_emit_done
+.grc_emit_false:
+    lea rax, [rel bool_false]
+.grc_emit_done:
+    inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
+    leave
+    V_PACK rax, rdx
+    ret
+.grc_decline:
+    xor eax, eax                ; a NULL Value: NotImplemented
+    xor edx, edx
+    leave
+    ret
+.grc_raised:
+    xor eax, eax
+    xor edx, edx
+    leave
+    ret
+END_FUNC generic_alias_richcompare
+
+section .data
+
+align 8
 global generic_alias_type
 generic_alias_type:
     dq 1                            ; ob_refcnt (immortal)
@@ -2085,11 +2215,11 @@ generic_alias_type:
     dq generic_alias_dealloc        ; tp_dealloc
     dq generic_alias_repr           ; tp_repr
     dq generic_alias_repr           ; tp_str
-    dq 0                            ; tp_hash
+    dq generic_alias_hash           ; tp_hash
     dq generic_alias_call           ; tp_call
     dq generic_alias_getattr        ; tp_getattr
     dq 0                            ; tp_setattr
-    dq 0                            ; tp_richcompare
+    dq generic_alias_richcompare    ; tp_richcompare
     dq 0                            ; tp_iter
     dq 0                            ; tp_iternext
     dq 0                            ; tp_init

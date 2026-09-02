@@ -295,6 +295,16 @@ one-line fix.
 These are absences rather than wrong answers — the interpreter raises rather
 than lying — but they are ordinary Python that does not work:
 
+- **`bytes.rsplit` and `bytearray.rsplit` do not exist.**  `split` takes its
+  `maxsplit` now, but the right-hand form was never added, so
+  `b'a,b,c'.rsplit(b',', 1)` is an AttributeError.  `str.rsplit` is there.
+
+- **`posix.symlink` and `posix.readlink` do not exist.**  `os.stat` honours
+  `follow_symlinks=False` and `posix.lstat` works, so links can be inspected;
+  they just cannot be created or read from inside the interpreter, which is
+  also why the regression test for `follow_symlinks` has to make do with a
+  regular file.
+
 - **`async for` accepts only an async generator.**  A class implementing the
   asynchronous iterator protocol itself -- `__aiter__` returning self and an
   `async def __anext__` raising `StopAsyncIteration` -- is refused with

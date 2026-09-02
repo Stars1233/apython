@@ -781,3 +781,118 @@ check("int(1e18)", lambda: int(1e18))
 check("int(2.5)", lambda: int(2.5))
 check("int(-2.5)", lambda: int(-2.5))
 check("int(float('inf'))", lambda: int(float("inf")))
+
+
+# ---------------------------------------------------------------------------
+# Behaviour CPython has and this did not: a keyword accepted and dropped, a
+# slot left at zero, a flag set and never read.
+# ---------------------------------------------------------------------------
+
+class BytesSub(bytes):
+    pass
+
+
+check("bytes subclass +", lambda: BytesSub(b"ab") + b"cd")
+check("bytes subclass, on the right", lambda: b"cd" + BytesSub(b"ab"))
+check("bytes subclass *", lambda: BytesSub(b"ab") * 2)
+check("bytes subclass, result type", lambda: type(BytesSub(b"ab") + b"cd").__name__)
+check("bytes + bytearray", lambda: b"ab" + bytearray(b"cd"))
+check("plain bytes +", lambda: b"ab" + b"cd")
+
+# generic_alias had tp_hash and tp_richcompare at 0 where union got both.
+check("alias as a dict key", lambda: {list[int]: 1}[list[int]])
+check("alias equality", lambda: (list[int] == list[int], list[int] == list[str]))
+check("alias is ordered", lambda: list[int, str] == list[str, int])
+check("alias vs a non-alias", lambda: (list[int] == 5, 5 == list[int]))
+check("alias hash is stable", lambda: hash(list[int]) == hash(list[int]))
+check("union as a dict key", lambda: {int | str: 1}[int | str])
+
+# min/max never read kw_names_pending, so key= and default= were compared as
+# ordinary positional operands.
+check("min with key", lambda: min([1, -3, 2], key=abs))
+check("max with key", lambda: max([1, -3, 2], key=abs))
+check("min of args with key", lambda: min(1, -5, 3, key=abs))
+check("min with default", lambda: min([], default="none"))
+check("max with default", lambda: max([], default="none"))
+check("min with key and default", lambda: min([], key=abs, default=-1))
+check("min, key=None", lambda: min([3, 1, 2], key=None))
+check("min plain", lambda: min([3, 1, 2]))
+check("max of args", lambda: max(1, 5, 3))
+check("min of empty", lambda: min([]))
+check("max of empty", lambda: max([]))
+check("default with args", lambda: min(1, 2, default=0))
+check("min, raising key", lambda: min([1, 2], key=key_raises))
+check("max, raising key", lambda: max([1, 2], key=key_raises))
+check("min, key not callable", lambda: min([1, 2], key=5))
+
+# bytes.split accepted maxsplit and ignored it, and sep=None was a TypeError.
+check("bytes split, maxsplit", lambda: b"a,b,,c".split(b",", 1))
+check("bytes split, no limit", lambda: b"a,b,,c".split(b","))
+check("bytes split, maxsplit 0", lambda: b"a,b".split(b",", 0))
+check("bytes split, maxsplit past", lambda: b"a,b,c".split(b",", 5))
+check("bytes split, whitespace", lambda: b"a b  c".split())
+check("bytes split, ws maxsplit", lambda: b"a b  c".split(None, 1))
+check("bytearray split, maxsplit", lambda: bytearray(b"a,b,c").split(b",", 1))
+check("str split, maxsplit", lambda: "a,b,,c".split(",", 1))
+
+# A structseq's named-only tail stored a zero Value, which is also what
+# "no such attribute" answers with.
+check("structseq named tail", lambda: posix.terminal_size((80, 24)).columns)
+check("structseq repr", lambda: repr(posix.terminal_size((80, 24))))
+
+# stat: the _ns fields published tv_nsec alone, and follow_symlinks was
+# accepted and dropped.  bugs.md records that symlinks cannot be created from
+# here, so this checks the keyword on a regular file.
+_ST = posix.stat("/etc/hostname")
+
+check("st_mtime_ns is whole", lambda: _ST.st_mtime_ns // 10 ** 9 == int(_ST.st_mtime))
+check("st_atime_ns is whole", lambda: _ST.st_atime_ns // 10 ** 9 == int(_ST.st_atime))
+check("st_ctime_ns is whole", lambda: _ST.st_ctime_ns // 10 ** 9 == int(_ST.st_ctime))
+check("st_mtime_ns is not tv_nsec", lambda: _ST.st_mtime_ns > 10 ** 18)
+check("follow_symlinks=False",
+      lambda: posix.stat("/etc/hostname", follow_symlinks=False).st_size == _ST.st_size)
+check("follow_symlinks=True",
+      lambda: posix.stat("/etc/hostname", follow_symlinks=True).st_size == _ST.st_size)
+
+
+# FIO_APPENDING was set and never read: O_APPEND positions the writes, not
+# the offset, so an explicit seek to the end is what makes tell() right.
+_APP = "/tmp/apython_review_append"
+
+
+def append_positions():
+    with open(_APP, "w") as f:
+        f.write("hello world")
+    with open(_APP, "a") as f:
+        at_open = f.tell()
+    with open(_APP, "a+") as f:
+        read_at_open = f.read()
+        f.write("!")
+    with open(_APP) as f:
+        final = f.read()
+    posix.unlink(_APP)
+    return (at_open, read_at_open, final)
+
+
+check("append mode positions", append_positions)
+
+
+# _pack_cookie was called with four positional arguments, so need_eof was
+# never set and seek(tell()) mis-decoded a pending carriage return.
+_CR = "/tmp/apython_review_cr"
+
+
+def seek_to_tell():
+    with open(_CR, "wb") as f:
+        f.write(b"line1\r\nline2\rline3")
+    with open(_CR, newline=None) as f:
+        f.read(6)
+        pos = f.tell()
+        rest = f.read()
+        f.seek(pos)
+        again = f.read()
+    posix.unlink(_CR)
+    return (rest, again == rest)
+
+
+check("seek(tell()) over a CR", seek_to_tell)

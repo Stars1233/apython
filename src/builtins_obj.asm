@@ -846,7 +846,13 @@ MM_ITERNX equ 32
 MM_OP     equ 40
 MM_N      equ 48
 MM_EXC    equ 56
-MM_FRAME  equ 64            ; + 2 pushes = 80, 16-byte aligned
+MM_KEY    equ 64            ; the key= callable, or 0
+MM_HASDEF equ 72            ; 1 when default= was given
+MM_DEFAULT equ 80           ; its Value, borrowed from the argument array
+MM_BESTKEY equ 88           ; key(best), owned; == MM_BEST when there is no key
+MM_CANDKEY equ 96           ; key(candidate), owned
+MM_NPOS   equ 104           ; positional count, once the keywords are split off
+MM_FRAME  equ 112           ; + 2 pushes = 128, 16-byte aligned
 
 extern obj_richcompare_bool
 
@@ -860,6 +866,38 @@ DEF_FUNC_BARE builtin_max
     jmp minmax_impl
 END_FUNC builtin_max
 
+;; mm_key_of(rdi = a Value) -> rax = key(it), owned, or 0 with an exception
+;; pending.  With no key= it is the value itself, INCREF'd, so both loops hold
+;; an owned key either way and release it the same.  Reads minmax_impl's frame
+;; through rbp, so it lives only inside it.
+DEF_FUNC_LOCAL mm_key_of
+    push rbx
+    mov rbx, [rbp]                  ; minmax_impl's rbp
+    mov rax, [rbx - MM_KEY]
+    test rax, rax
+    jnz .mko_call
+    mov rax, rdi
+    INCREF_V rax, rcx
+    pop rbx
+    leave
+    ret
+.mko_call:
+    ; minmax_impl checked that this is a pointer with a tp_call before it
+    ; allocated anything, so the slot is here.
+    sub rsp, 16                     ; one Value; 16 keeps rsp aligned
+    mov [rsp], rdi
+    mov rdi, rax
+    mov rax, [rdi + PyObject.ob_type]
+    mov rax, [rax + PyTypeObject.tp_call]
+    mov rsi, rsp
+    mov edx, 1
+    call rax
+    add rsp, 16
+    pop rbx
+    leave
+    ret
+END_FUNC mm_key_of
+
 DEF_FUNC_LOCAL minmax_impl, MM_FRAME
     push rbx
     push r12
@@ -868,10 +906,99 @@ DEF_FUNC_LOCAL minmax_impl, MM_FRAME
     ; the first instruction that can jump to one.
     mov qword [rbp - MM_BEST], 0
     mov qword [rbp - MM_CAND], 0
+    mov qword [rbp - MM_BESTKEY], 0
+    mov qword [rbp - MM_CANDKEY], 0
+    mov qword [rbp - MM_KEY], 0
+    mov qword [rbp - MM_HASDEF], 0
+    mov qword [rbp - MM_DEFAULT], 0
+    mov [rbp - MM_NPOS], rsi
 
+    ; key= and default=.  Nothing here read kw_names_pending, so both arrived
+    ; as extra POSITIONAL operands and were compared as values:
+    ; min([1,-3,2], key=abs) compared the function object against the list.
+    mov rax, [rel kw_names_pending]
+    test rax, rax
+    jz .mm_no_kw
+    mov qword [rel kw_names_pending], 0
+    mov rcx, [rax + PyTupleObject.ob_size]
+    mov rdx, [rbp - MM_NPOS]
+    sub rdx, rcx
+    mov [rbp - MM_NPOS], rdx
+    mov r9, [rax + PyTupleObject.ob_item]
+    xor r8d, r8d
+.mm_kw_loop:
+    cmp r8, rcx
+    jge .mm_no_kw
+    push rcx
+    push r8
+    push r9
+    push rdi
+    mov r10, [r9 + r8*8]
+    lea rdi, [r10 + PyStrObject.data]
+    CSTRING rsi, "key"
+    call ap_strcmp
+    mov r11d, eax
+    pop rdi
+    pop r9
+    pop r8
+    pop rcx
+    mov r10, [rbp - MM_NPOS]
+    add r10, r8
+    mov r10, [rdi + r10*8]      ; the keyword's value
+    test r11d, r11d
+    jnz .mm_kw_try_default
+    LOAD_NONE rax               ; key=None means no key, as CPython has it
+    cmp r10, rax
+    je .mm_kw_next
+    mov [rbp - MM_KEY], r10
+    jmp .mm_kw_next
+.mm_kw_try_default:
+    push rcx
+    push r8
+    push r9
+    push rdi
+    mov r10, [r9 + r8*8]
+    lea rdi, [r10 + PyStrObject.data]
+    CSTRING rsi, "default"
+    call ap_strcmp
+    mov r11d, eax
+    pop rdi
+    pop r9
+    pop r8
+    pop rcx
+    test r11d, r11d
+    jnz .mm_kw_next
+    mov r10, [rbp - MM_NPOS]
+    add r10, r8
+    mov r10, [rdi + r10*8]
+    mov [rbp - MM_DEFAULT], r10
+    mov qword [rbp - MM_HASDEF], 1
+.mm_kw_next:
+    inc r8
+    jmp .mm_kw_loop
+.mm_no_kw:
+
+    ; The key is checked here, before anything is allocated: mm_key_of raises
+    ; through raise_type_error_with_name, which abandons the C stack, and by
+    ; the time it is first called the iterator is already live -- min([1,2],
+    ; key=5) leaked it.
+    mov rax, [rbp - MM_KEY]
+    test rax, rax
+    jz .mm_key_ok
+    V_TEST_PTR rax, rcx
+    ja .mm_key_bad
+    mov rcx, [rax + PyObject.ob_type]
+    cmp qword [rcx + PyTypeObject.tp_call], 0
+    je .mm_key_bad
+.mm_key_ok:
+
+    mov rsi, [rbp - MM_NPOS]
     cmp rsi, 1
     jb .mm_error
     je .mm_iter_path
+    ; default= is only meaningful for the single-iterable form.
+    cmp qword [rbp - MM_HASDEF], 0
+    jne .mm_default_with_args
 
     ; --- min/max(a, b, ...) ---
     mov rbx, rdi                ; args
@@ -879,13 +1006,23 @@ DEF_FUNC_LOCAL minmax_impl, MM_FRAME
     mov rax, [rbx]              ; args[0] starts as the incumbent
     mov [rbp - MM_BEST], rax
     INCREF_V rax, rcx
+    mov rdi, rax
+    call mm_key_of
+    test rax, rax
+    jz .mm_fail
+    mov [rbp - MM_BESTKEY], rax
     mov r12, 1
 
 .mm_loop:
     cmp r12, [rbp - MM_N]
     jge .mm_done
     mov rdi, [rbx + r12*8]      ; the candidate
-    mov rsi, [rbp - MM_BEST]
+    call mm_key_of
+    test rax, rax
+    jz .mm_fail
+    mov [rbp - MM_CANDKEY], rax
+    mov rdi, rax
+    mov rsi, [rbp - MM_BESTKEY]
     mov edx, [rbp - MM_OP]
     call obj_richcompare_bool
     cmp eax, 0
@@ -896,11 +1033,21 @@ DEF_FUNC_LOCAL minmax_impl, MM_FRAME
     mov rdi, [rbp - MM_BEST]
     mov [rbp - MM_BEST], rax
     DECREF_V rdi, rdx
+    mov rdi, [rbp - MM_BESTKEY]
+    mov rax, [rbp - MM_CANDKEY]
+    mov [rbp - MM_BESTKEY], rax
+    mov qword [rbp - MM_CANDKEY], 0
+    DECREF_V rdi, rdx
 .mm_next:
+    mov rdi, [rbp - MM_CANDKEY]
+    DECREF_V rdi, rdx
+    mov qword [rbp - MM_CANDKEY], 0
     inc r12
     jmp .mm_loop
 
 .mm_done:
+    mov rdi, [rbp - MM_BESTKEY]
+    DECREF_V rdi, rdx
     mov rax, [rbp - MM_BEST]
     pop r12
     pop rbx
@@ -910,11 +1057,28 @@ DEF_FUNC_LOCAL minmax_impl, MM_FRAME
 .mm_fail:
     mov rdi, [rbp - MM_BEST]
     DECREF_V rdi, rdx
+    mov rdi, [rbp - MM_BESTKEY]
+    DECREF_V rdi, rdx
+    mov rdi, [rbp - MM_CANDKEY]
+    DECREF_V rdi, rdx
     xor eax, eax
     pop r12
     pop rbx
     leave
     ret
+
+.mm_key_bad:
+    mov rsi, [rbp - MM_KEY]
+    CSTRING rdi, `'\x01' object is not callable`
+    extern raise_type_error_with_name
+    call raise_type_error_with_name
+
+.mm_default_with_args:
+    cmp dword [rbp - MM_OP], PY_GT
+    je .mm_default_max
+    RAISE exc_TypeError_type, "Cannot specify a default for min() with multiple positional arguments"
+.mm_default_max:
+    RAISE exc_TypeError_type, "Cannot specify a default for max() with multiple positional arguments"
 
     ; --- min/max(iterable) ---
 .mm_iter_path:
@@ -940,6 +1104,11 @@ DEF_FUNC_LOCAL minmax_impl, MM_FRAME
     test rax, rax
     jz .mm_iter_empty
     mov [rbp - MM_BEST], rax    ; owned, as tp_iternext hands it over
+    mov rdi, rax
+    call mm_key_of
+    test rax, rax
+    jz .mm_iter_fail
+    mov [rbp - MM_BESTKEY], rax
 
 .mm_iter_loop:
     mov rdi, [rbp - MM_ITER]
@@ -948,7 +1117,12 @@ DEF_FUNC_LOCAL minmax_impl, MM_FRAME
     jz .mm_iter_stop
     mov [rbp - MM_CAND], rax
     mov rdi, rax
-    mov rsi, [rbp - MM_BEST]
+    call mm_key_of
+    test rax, rax
+    jz .mm_iter_fail
+    mov [rbp - MM_CANDKEY], rax
+    mov rdi, rax
+    mov rsi, [rbp - MM_BESTKEY]
     mov edx, [rbp - MM_OP]
     call obj_richcompare_bool
     cmp eax, 0
@@ -961,10 +1135,18 @@ DEF_FUNC_LOCAL minmax_impl, MM_FRAME
     mov [rbp - MM_BEST], rax
     mov qword [rbp - MM_CAND], 0
     DECREF_V rdi, rdx
+    mov rdi, [rbp - MM_BESTKEY]
+    mov rax, [rbp - MM_CANDKEY]
+    mov [rbp - MM_BESTKEY], rax
+    mov qword [rbp - MM_CANDKEY], 0
+    DECREF_V rdi, rdx
 .mm_iter_next:
     mov rdi, [rbp - MM_CAND]
     DECREF_V rdi, rdx
     mov qword [rbp - MM_CAND], 0
+    mov rdi, [rbp - MM_CANDKEY]
+    DECREF_V rdi, rdx
+    mov qword [rbp - MM_CANDKEY], 0
     jmp .mm_iter_loop
 
 .mm_iter_stop:
@@ -972,6 +1154,8 @@ DEF_FUNC_LOCAL minmax_impl, MM_FRAME
     EXC_RAISED_SINCE [rbp - MM_EXC], rcx, .mm_iter_fail
     mov rdi, [rbp - MM_ITER]
     call obj_decref
+    mov rdi, [rbp - MM_BESTKEY]
+    DECREF_V rdi, rdx
     mov rax, [rbp - MM_BEST]
     pop r12
     pop rbx
@@ -981,6 +1165,12 @@ DEF_FUNC_LOCAL minmax_impl, MM_FRAME
 .mm_iter_fail:
     mov rdi, [rbp - MM_ITER]
     call obj_decref
+    mov rdi, [rbp - MM_BESTKEY]
+    DECREF_V rdi, rdx
+    mov qword [rbp - MM_BESTKEY], 0
+    mov rdi, [rbp - MM_CANDKEY]
+    DECREF_V rdi, rdx
+    mov qword [rbp - MM_CANDKEY], 0
     mov rdi, [rbp - MM_CAND]
     DECREF_V rdi, rdx
     jmp .mm_fail
@@ -989,7 +1179,22 @@ DEF_FUNC_LOCAL minmax_impl, MM_FRAME
     EXC_RAISED_SINCE [rbp - MM_EXC], rcx, .mm_iter_fail
     mov rdi, [rbp - MM_ITER]
     call obj_decref
-    RAISE exc_ValueError_type, "min()/max() arg is an empty sequence"
+    ; default= is what an empty iterable answers with, when it was given.
+    cmp qword [rbp - MM_HASDEF], 0
+    je .mm_iter_really_empty
+    mov rax, [rbp - MM_DEFAULT]
+    INCREF_V rax, rcx
+    pop r12
+    pop rbx
+    leave
+    ret
+.mm_iter_really_empty:
+    ; CPython names the builtin, and MM_OP is what tells them apart.
+    cmp dword [rbp - MM_OP], PY_GT
+    je .mm_iter_empty_max
+    RAISE exc_ValueError_type, "min() iterable argument is empty"
+.mm_iter_empty_max:
+    RAISE exc_ValueError_type, "max() iterable argument is empty"
 
 .mm_iter_no_next:
     mov rdi, [rbp - MM_ITER]
