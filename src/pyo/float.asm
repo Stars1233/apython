@@ -384,8 +384,12 @@ FS_SPEC    equ 16           ; spec data pointer
 FS_SPECLEN equ 20           ; spec length (4 bytes)
 FS_PREC    equ 24           ; precision (4 bytes)
 FS_TYPE    equ 25           ; the type character
-FS_BUF     equ 76           ; 48-byte render buffer
-FS_FRAME   equ 80           ; + 0 pushes = 80
+FS_BUF     equ 76           ; 48-byte render buffer, for the ordinary case
+FS_BUFSZ   equ 48
+FS_FMT     equ 88           ; the snprintf format, across the retry
+FS_HEAP    equ 96           ; a bigger buffer, when 48 bytes will not do
+FS_HEAPN   equ 104
+FS_FRAME   equ 112          ; + 0 pushes = 112
 DEF_FUNC float_format_spec, FS_FRAME
     and rsp, -16              ; ensure alignment
 
@@ -444,8 +448,6 @@ DEF_FUNC float_format_spec, FS_FRAME
 
 .ffs_have_spec:
     ; Format using snprintf with appropriate format string
-    lea rdi, [rbp - FS_BUF]         ; buffer (48 bytes)
-    mov esi, 48               ; bufsz
 
     ; Each of the six letters has its own conversion.  The uppercase ones are
     ; not cosmetic: C99's %F and %G spell a non-finite result INF and NAN,
@@ -483,13 +485,50 @@ DEF_FUNC float_format_spec, FS_FRAME
     lea rdx, [rel fmt_E]
 
 .ffs_do_snprintf:
+    mov [rbp - FS_FMT], rdx
+    lea rdi, [rbp - FS_BUF]         ; the 48-byte stack buffer
+    mov esi, FS_BUFSZ
     mov ecx, [rbp - FS_PREC]         ; precision
     movsd xmm0, [rbp - FS_VALUE]      ; value
     mov eax, 1                ; 1 xmm register
     call snprintf wrt ..plt
 
+    ; snprintf reports what it WOULD have written, and the buffer is 48
+    ; bytes: format(1e300, '.2f') needs 305 and used to come back truncated
+    ; at 46 digits, with the fractional part it was asked for missing
+    ; entirely, and format(1e16, '.30f') was one zero short.  Anything that
+    ; does not fit is rendered again into a heap buffer of the size snprintf
+    ; just named.  The stack path is untouched, which is every ordinary
+    ; magnitude and every repr.
+    cmp eax, FS_BUFSZ
+    jae .ffs_needs_heap
+
     lea rdi, [rbp - FS_BUF]
     call str_from_cstr
+    leave
+    ret
+
+.ffs_needs_heap:
+    inc eax                     ; room for the NUL
+    mov [rbp - FS_HEAPN], eax
+    mov edi, eax
+    extern ap_malloc
+    call ap_malloc
+    mov [rbp - FS_HEAP], rax
+    mov rdi, rax
+    mov esi, [rbp - FS_HEAPN]
+    mov rdx, [rbp - FS_FMT]
+    mov ecx, [rbp - FS_PREC]
+    movsd xmm0, [rbp - FS_VALUE]
+    mov eax, 1
+    call snprintf wrt ..plt
+    mov rdi, [rbp - FS_HEAP]
+    call str_from_cstr
+    mov [rbp - FS_VALUE], rax   ; the string, across the free
+    mov rdi, [rbp - FS_HEAP]
+    extern ap_free
+    call ap_free
+    mov rax, [rbp - FS_VALUE]
     leave
     ret
 END_FUNC float_format_spec
