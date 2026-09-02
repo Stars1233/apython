@@ -92,10 +92,6 @@ one-line fix.
   general limit stands, and is why the `bytes %` leak below cannot be fixed
   by catching.
 
-- **`latin-1` encoding honours no error handler.**  `str.encode` and
-  `bytes.decode` both act on `errors=` for `ascii` and `utf-8` now;
-  `"a\u1234b".encode("latin-1", "ignore")` still raises.
-
 - **`sys.getfilesystemencoding()` always answers `'utf-8'`.**  PEP 540's
   locale handling does not exist, and neither does the `surrogateescape`
   error handler, so a filename or environment value that is not valid UTF-8
@@ -221,8 +217,9 @@ than lying — but they are ordinary Python that does not work:
 - **`bytes.decode`'s ascii arm raises a fixed message.**  `str()` of a
   Unicode error renders its five fields now, so an exception raised from
   `lib/_codecs.py` reads as CPython's does.  The asm sites still pre-render a
-  one-argument exception instead: the utf-8 arm builds CPython's wording by
-  hand, and the ascii arm says only "byte not in range for this encoding".
+  one-argument exception instead.  The utf-8 *decode* arm and both *encode*
+  arms build CPython's wording by hand, character, position, range and all;
+  the ascii decode arm still says only "byte not in range for this encoding".
   Raising a real five-argument exception from asm needs a way to call an
   exception type with five arguments, which `exc_new` does not offer.
 
