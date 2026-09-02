@@ -40,6 +40,7 @@ struc SlotEntry
 endstruc
 
 extern dunder_lookup
+extern dunder_lookup_owner
 extern dunder_call_1
 extern dunder_iter
 extern dunder_next
@@ -486,40 +487,6 @@ DEF_FUNC slot_tp_iternext
 END_FUNC slot_tp_iternext
 
 
-;; ============================================================================
-;; slot_is_object_default(rdi = the value a dunder lookup returned) -> eax 0/1
-;; True when it is one of the implementations object itself supplies.
-;; ============================================================================
-DEF_FUNC_LOCAL slot_is_object_default
-    V_TEST_PTR rdi, rax
-    ja .no
-    test rdi, rdi
-    jz .no
-    mov rax, [rdi + PyObject.ob_type]
-    extern builtin_func_type
-    lea rcx, [rel builtin_func_type]
-    cmp rax, rcx
-    jne .no
-    mov rax, [rdi + PyBuiltinObject.func_ptr]
-    lea rcx, [rel object_default_impls]
-    xor edx, edx
-.scan:
-    mov rsi, [rcx + rdx*8]
-    test rsi, rsi
-    jz .no
-    cmp rax, rsi
-    je .yes
-    inc rdx
-    jmp .scan
-.yes:
-    mov eax, 1
-    leave
-    ret
-.no:
-    xor eax, eax
-    leave
-    ret
-END_FUNC slot_is_object_default
 
 ;; ============================================================================
 ;; type_install_slots(rdi = heaptype)
@@ -531,7 +498,8 @@ END_FUNC slot_is_object_default
 TIS_TYPE  equ 8
 TIS_ENTRY equ 16
 TIS_FOUND equ 24
-TIS_FRAME equ 32            ; + 2 pushes = 48
+TIS_OWNER equ 32            ; the MRO entry whose tp_dict answered
+TIS_FRAME equ 48            ; + 2 pushes = 64
 
 DEF_FUNC type_install_slots, TIS_FRAME
     push rbx
@@ -548,12 +516,32 @@ DEF_FUNC type_install_slots, TIS_FRAME
     mov [rbp - TIS_ENTRY], rbx
     mov rdi, [rbp - TIS_TYPE]
     mov rsi, rax
-    call dunder_lookup          ; walks the MRO; returns a Value
+    lea rdx, [rbp - TIS_OWNER]
+    call dunder_lookup_owner    ; walks the MRO; returns a Value
     V_UNPACK rax, rdx
     mov rbx, [rbp - TIS_ENTRY]
     test edx, edx
     jz .skip                    ; the class does not define this dunder
     mov [rbp - TIS_FOUND], rax
+
+    ; A dunder a BUILTIN base supplies is not a definition this class made,
+    ; and a generic wrapper must not be installed over it.  type_from_parts
+    ; has already given the subclass that base's real slot by pointer, so
+    ; leaving the slot alone is not merely safe -- it is the same thing
+    ; CPython does when update_one_slot recognises an inherited wrapper
+    ; descriptor and installs the base's own C function, one indirection
+    ; earlier.
+    ;
+    ; Without this, `class E(int): pass` finds int's own __add__ in the MRO
+    ; and would get a wrapper over it -- and int.__add__ refuses a float, so
+    ; E(1) + 2.5 would answer NotImplemented both ways round and raise, where
+    ; int's nb_add coerces and CPython answers 3.5.
+    ;
+    ; TYPE_FLAG_HEAPTYPE is set on every class type_from_parts builds and on
+    ; nothing static, so the test is one flag on the type that answered.
+    mov rcx, [rbp - TIS_OWNER]
+    test qword [rcx + PyTypeObject.tp_flags], TYPE_FLAG_HEAPTYPE
+    jz .skip
     ; A dunder explicitly set to None disables the protocol in Python, so
     ; leave the slot empty rather than installing a wrapper that would call
     ; None.
@@ -567,11 +555,6 @@ DEF_FUNC type_install_slots, TIS_FRAME
     ; base type's C-level slot: installing a wrapper here would make
     ; `T((1,)) == (1,)` on a tuple subclass go through object's identity test
     ; instead of tuple's comparison.
-    mov rdi, rax
-    call slot_is_object_default
-    mov rbx, [rbp - TIS_ENTRY]
-    test eax, eax
-    jnz .skip
     mov rax, [rbp - TIS_FOUND]
 
     mov rcx, [rbp - TIS_TYPE]
@@ -656,24 +639,3 @@ slot_table:
     dq sl_ge_name,     SLOT_DIRECT,   PyTypeObject.tp_richcompare, slot_tp_richcompare
     dq 0, 0, 0, 0
 
-section .data
-align 8
-extern object_method_eq
-extern object_method_ne
-extern object_method_hash
-extern object_method_str
-extern object_method_repr
-extern object_method_init
-extern object_method_lt
-extern object_method_le
-extern object_method_gt
-extern object_method_ge
-object_default_impls:
-    dq object_method_eq, object_method_ne, object_method_hash
-    dq object_method_str, object_method_repr, object_method_init
-    ; The four orderings answer NotImplemented and nothing else.  They are
-    ; here for the same reason __eq__ is: a builtin subclass finds them in the
-    ; MRO before its base's own comparison, and installing a wrapper for one
-    ; would make a list subclass sort by identity.
-    dq object_method_lt, object_method_le, object_method_gt, object_method_ge
-    dq 0

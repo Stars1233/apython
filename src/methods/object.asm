@@ -866,10 +866,10 @@ DEF_DUNDER_STRREPR complex, repr
 ;; and so that dir(object) is complete.  They were left out here because a
 ;; builtin subclass looks __lt__ up in its MRO and would find object's
 ;; NotImplemented before reaching the base type's own comparison -- which is
-;; exactly what slot_is_object_default and object_default_impls already solve
-;; for __eq__, __ne__ and __hash__.  Adding these four to that table is what
-;; makes them safe: type_install_slots skips a dunder that is one of object's
-;; own, so `sorted([L([2]), L([1])])` on a list subclass still sorts by
+;; exactly the problem type_install_slots' owner test solves: the dunder was
+;; supplied by a type that is not a heaptype, so no wrapper is installed over
+;; it and the subclass keeps its base's real slot.  That is what makes these
+;; four safe -- `sorted([L([2]), L([1])])` on a list subclass still sorts by
 ;; contents.
 ;; ============================================================================
 %macro DEF_OBJECT_ORDERING 1

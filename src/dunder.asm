@@ -108,12 +108,34 @@ section .text
 ;; rdi = type object, rsi = C string name
 ;; Returns: borrowed reference to function, or NULL if not found.
 ;; ============================================================================
-DEF_FUNC dunder_lookup
+DLO_OWNER equ 8
+DLO_FRAME equ 16            ; + 4 pushes = 48, 16-aligned
+global dunder_lookup_owner
+DEF_FUNC_BARE dunder_lookup
+    xor edx, edx                ; no owner wanted
+    jmp dunder_lookup_owner
+END_FUNC dunder_lookup
+
+;; ============================================================================
+;; dunder_lookup_owner(PyTypeObject *type, const char *name,
+;;                     PyTypeObject **owner_out) -> rax = Value
+;;
+;; The same walk, reporting WHERE it stopped.  The caller that needs this is
+;; type_install_slots: a dunder a builtin base supplies is not a definition
+;; the subclass made, and installing a generic wrapper over it is wrong --
+;; type_from_parts has already handed the subclass the base's real slot by
+;; pointer.  Which type's tp_dict answered is the only way to tell the two
+;; apart, and the value alone cannot say.
+;;
+;; rdx may be 0, which is what dunder_lookup passes.
+;; ============================================================================
+DEF_FUNC dunder_lookup_owner, DLO_FRAME
     push rbx
     push r12
     push r13
     push r14                ; holds the origin type
 
+    mov [rbp - DLO_OWNER], rdx
     mov rbx, rdi            ; rbx = type (walks the MRO)
     mov r14, rdi            ; r14 = origin of the walk
     mov r12, rsi            ; r12 = name C string
@@ -143,6 +165,11 @@ DEF_FUNC dunder_lookup
     jmp .walk
 
 .found:
+    mov rcx, [rbp - DLO_OWNER]
+    test rcx, rcx
+    jz .found_no_owner
+    mov [rcx], rbx          ; the MRO entry whose tp_dict answered
+.found_no_owner:
     pop r14
     pop r13
     pop r12
@@ -161,7 +188,7 @@ DEF_FUNC dunder_lookup
     leave
     V_PACK rax, rdx             ; return one Value
     ret
-END_FUNC dunder_lookup
+END_FUNC dunder_lookup_owner
 
 ;; ============================================================================
 ;; dunder_call_1(PyObject *self, const char *name) -> (rax=payload, rdx=tag)

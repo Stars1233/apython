@@ -1505,9 +1505,10 @@ DEF_FUNC methods_init
     call dict_add_builtin_func
 
     ; The ordering four, which answer NotImplemented.  They are safe for the
-    ; same reason __eq__ is: slot_is_object_default knows their function
-    ; pointers, so type_install_slots skips them and a builtin subclass keeps
-    ; its base's comparison rather than object's.
+    ; same reason __eq__ is: type_install_slots installs no wrapper over a
+    ; dunder that came from a type which is not a heaptype, and object is
+    ; not, so a builtin subclass keeps its base's comparison rather than
+    ; object's.
     mov rdi, rbx
     lea rsi, [rel mn___lt__]
     extern object_method_lt
