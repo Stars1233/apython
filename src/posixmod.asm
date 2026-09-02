@@ -52,6 +52,7 @@ extern bytes_from_data
 extern bytes_type
 extern bytearray_type
 extern int_from_i64
+extern float_from_f64
 extern val_to_i64
 extern int_is_integer
 extern exc_OverflowError_type
@@ -325,10 +326,12 @@ END_FUNC posix_path_arg
 ;; st_mode, st_uid and st_gid are 32-bit fields: read as 64 bits each would
 ;; OR in its neighbour.
 ;;
-;; The times are the whole seconds as ints, not floats.  CPython gives
-;; st_atime and friends as floats and keeps the exact value in the _ns
-;; fields; os.path.getmtime and the stdlib comparisons work either way, and
-;; an int cannot lose precision the way a float does past 2^53.
+;; The times come in three forms, as CPython's do: st_atime and friends are
+;; FLOATS carrying the fractional seconds, the _ns fields carry the exact
+;; whole nanoseconds, and the sequence entries 7..9 are the whole seconds as
+;; ints.  os.path.getmtime hands its answer straight to arithmetic that
+;; expects a float, and shutil.copystat and tarfile compare mtimes to
+;; sub-second precision.
 ;; ============================================================================
 PSR_BUF   equ 8
 PSR_OBJ   equ 16
@@ -344,6 +347,23 @@ PSR_FRAME equ 32            ; + 1 push = 40... see below
     add rax, %3
     mov rdi, rax
     call int_from_i64
+    V_PACK rax, rdx
+    mov rdx, rax
+    mov rdi, [rbp - PSR_OBJ]
+    mov esi, %1
+    call structseq_set          ; takes over the reference
+%endmacro
+
+; A timestamp as a float: seconds + nanoseconds/1e9, which is what CPython
+; publishes for st_atime, st_mtime and st_ctime.  They were whole-second ints
+; here, so anything comparing two mtimes within the same second saw them as
+; equal.
+%macro STAT_FIELD_F 3           ; %1 = field index, %2 = tv_sec, %3 = tv_nsec
+    cvtsi2sd xmm0, qword %2
+    cvtsi2sd xmm1, qword %3
+    divsd xmm1, [rel psr_1e9]
+    addsd xmm0, xmm1
+    call float_from_f64
     V_PACK rax, rdx
     mov rdx, rax
     mov rdi, [rbp - PSR_OBJ]
@@ -388,6 +408,8 @@ DEF_FUNC posix_stat_result, 40
     STAT_FIELD_I 5, rax
     mov rbx, [rbp - PSR_BUF]
     STAT_FIELD_I 6, [rbx + StatBuf.st_size]
+    ; The sequence keeps the whole seconds; the names point at the floats
+    ; below.  CPython does the same, and os.stat(p)[8] is an int there too.
     mov rbx, [rbp - PSR_BUF]
     STAT_FIELD_I 7, [rbx + StatBuf.st_atime]
     mov rbx, [rbp - PSR_BUF]
@@ -408,6 +430,14 @@ DEF_FUNC posix_stat_result, 40
     STAT_FIELD_I 14, [rbx + StatBuf.st_blocks]
     mov rbx, [rbp - PSR_BUF]
     STAT_FIELD_I 15, [rbx + StatBuf.st_rdev]
+
+    ; The float timestamps, which st_atime, st_mtime and st_ctime name.
+    mov rbx, [rbp - PSR_BUF]
+    STAT_FIELD_F 16, [rbx + StatBuf.st_atime], [rbx + StatBuf.st_atime_ns]
+    mov rbx, [rbp - PSR_BUF]
+    STAT_FIELD_F 17, [rbx + StatBuf.st_mtime], [rbx + StatBuf.st_mtime_ns]
+    mov rbx, [rbp - PSR_BUF]
+    STAT_FIELD_F 18, [rbx + StatBuf.st_ctime], [rbx + StatBuf.st_ctime_ns]
 
     mov rax, [rbp - PSR_OBJ]
 .psr_out:
@@ -2578,7 +2608,21 @@ sr_f14: db "st_blocks", 0
 sr_f15: db "st_rdev", 0
 
 align 8
+; The three timestamps have TWO storages, as CPython's do: slots 7..9 hold the
+; whole seconds and are what the SEQUENCE shows, and slots 16..18 hold the
+; float with the fractional part and are what the NAMES resolve to.
+; os.stat(p)[8] is an int and os.stat(p).st_mtime is a float, and in CPython
+; too they are different objects for the same field.
+;
+; That is why st_atime, st_mtime and st_ctime appear twice, and why the float
+; rows come FIRST: structseq_getattr matches by name and takes the first row
+; it finds, while structseq_repr matches by index and finds whichever row
+; carries the index it is printing.  So a name resolves to the float and the
+; repr prints the whole second, which is what CPython shows.
 sr_fields:
+    dq sr_f7, 16
+    dq sr_f8, 17
+    dq sr_f9, 18
     dq sr_f0, 0
     dq sr_f1, 1
     dq sr_f2, 2
@@ -2599,7 +2643,7 @@ sr_fields:
 align 8
 sr_desc:
     dq 10                   ; n_in_sequence: the ten os.stat() shows
-    dq 16                   ; n_fields: plus six reachable by name only
+    dq 19                   ; n_fields: plus nine reachable by name only
     dq sr_fields
 
 ; --- uname_result ---
@@ -2647,7 +2691,13 @@ stat_result_type:
     dq 1                        ; ob_refcnt (immortal)
     dq type_type                ; ob_type
     dq sr_name                  ; tp_name
-    dq PyTupleObject_size + 6*8 ; tp_basicsize: the header plus the named tail
+    ; tp_basicsize: the header plus the named-only tail.  Nine now, not six:
+    ; the three timestamps have a second storage for their float form, so
+    ; os.stat(p)[8] can stay the int CPython puts there.  This has to move
+    ; with sr_desc's n_fields, or the last fields are written past the end --
+    ; which shows up as a neighbouring field reading as the wrong type, and
+    ; then as a double free.
+    dq PyTupleObject_size + 9*8 ; tp_basicsize
     dq structseq_dealloc        ; tp_dealloc
     dq structseq_repr           ; tp_repr
     dq structseq_repr           ; tp_str
@@ -2736,3 +2786,7 @@ terminal_size_type:
     dq 0
     dq 0
     dq ts_desc
+
+section .rodata
+align 8
+psr_1e9: dq 0x41cdcd6500000000     ; 1e9 as IEEE 754 double

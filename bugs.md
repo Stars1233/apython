@@ -47,9 +47,6 @@ one-line fix.
   an empty list, which is the honest answer -- no `dir_fd=` support -- and
   os.py reads it to build `supports_dir_fd`.
 
-  `stat_result`'s three timestamps are whole-second ints where CPython gives
-  floats; the `_ns` fields carry the exact value in both.
-
 - **Missing C modules**, in rough order of how many stdlib modules each
   blocks: `_struct`, `_socket`, `_random`, `_contextvars`, `_tokenize`,
   `_ast`, `_imp`, `binascii`, `_string`, then a long tail of one apiece.
