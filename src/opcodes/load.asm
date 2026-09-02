@@ -214,9 +214,13 @@ DEF_FUNC_BARE op_load_global_module
     movzx eax, word [rbx + 2]  ; CACHE[1] = index
     imul rax, rax, DICT_ENTRY_SIZE
     add rdi, rax               ; rdi = entry ptr
-    test edx, edx
-    jz .lgm_deopt              ; TAG_NULL = deleted entry
+    ; A deleted entry has a NULL value.  This tested edx BEFORE anything had
+    ; loaded it -- a register the dispatcher leaves undefined -- so the guard
+    ; answered at random: usually not taken, and taken for no reason when it
+    ; happened to be zero.
     mov rax, [rdi + DictEntry.value]
+    test rax, rax
+    jz .lgm_deopt
     V_UNPACK rax, rdx
 
     ; Guards passed — now push NULL if needed
@@ -230,10 +234,12 @@ DEF_FUNC_BARE op_load_global_module
     DISPATCH
 
 .lgm_deopt:
-    ; Deopt: rewrite back to LOAD_GLOBAL (116), re-execute cleanly
+    ; Deopt into the generic handler with the argument ecx already
+    ; holds.  Rewinding rbx by two and re-dispatching would drop a
+    ; preceding EXTENDED_ARG, and both of these carry one as soon as
+    ; a module has enough names: the arg is (name index << 1 | flag).
     mov byte [rbx - 2], 116
-    sub rbx, 2
-    DISPATCH
+    jmp op_load_global
 END_FUNC op_load_global_module
 
 ;; ============================================================================
@@ -260,9 +266,13 @@ DEF_FUNC_BARE op_load_global_builtin
     movzx eax, word [rbx + 2]  ; CACHE[1] = index
     imul rax, rax, DICT_ENTRY_SIZE
     add rdi, rax               ; rdi = entry ptr
-    test edx, edx
-    jz .lgb_deopt              ; TAG_NULL = deleted entry
+    ; A deleted entry has a NULL value.  This tested edx BEFORE anything had
+    ; loaded it -- a register the dispatcher leaves undefined -- so the guard
+    ; answered at random: usually not taken, and taken for no reason when it
+    ; happened to be zero.
     mov rax, [rdi + DictEntry.value]
+    test rax, rax
+    jz .lgb_deopt
     V_UNPACK rax, rdx
 
     ; Guards passed — now push NULL if needed
@@ -276,9 +286,12 @@ DEF_FUNC_BARE op_load_global_builtin
     DISPATCH
 
 .lgb_deopt:
+    ; Deopt into the generic handler with the argument ecx already
+    ; holds.  Rewinding rbx by two and re-dispatching would drop a
+    ; preceding EXTENDED_ARG, and both of these carry one as soon as
+    ; a module has enough names: the arg is (name index << 1 | flag).
     mov byte [rbx - 2], 116
-    sub rbx, 2
-    DISPATCH
+    jmp op_load_global
 END_FUNC op_load_global_builtin
 
 ;; ============================================================================
@@ -1072,10 +1085,12 @@ DEF_FUNC_BARE op_load_attr_method
     DISPATCH
 
 .lam_deopt:
-    ; Deopt: rewrite to LOAD_ATTR (106), re-execute
+    ; Deopt into the generic handler with the argument ecx already
+    ; holds.  Rewinding rbx by two and re-dispatching would drop a
+    ; preceding EXTENDED_ARG, and both of these carry one as soon as
+    ; a module has enough names: the arg is (name index << 1 | flag).
     mov byte [rbx - 2], 106
-    sub rbx, 2
-    DISPATCH
+    jmp op_load_attr
 END_FUNC op_load_attr_method
 
 ;; ============================================================================

@@ -104,6 +104,7 @@ test_del_and_gc_state
 test_del_dict
 test_delete
 test_del
+test_deopt_extended_arg
 test_deque
 test_descr_func_attr
 test_descriptors

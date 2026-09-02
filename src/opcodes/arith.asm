@@ -1769,9 +1769,14 @@ DEF_FUNC_BARE op_binary_op_add_int
     VPUSH_VAL rdi, r9
     VPUSH_VAL rsi, r8
 .add_int_deopt:
-    ; Rewrite opcode back to BINARY_OP (122)
+    ; Rewrite opcode back to BINARY_OP (122) and re-execute.
+    ;
+    ; Rewinding rbx is only safe because BINARY_OP and COMPARE_OP arguments are
+    ; small -- an operator index, and a comparison plus its mask -- so neither
+    ; is ever preceded by EXTENDED_ARG.  The deopts that carry a real offset or
+    ; a name index cannot do this; see .fir_deopt in opcodes/build.asm.
     mov byte [rbx - 2], 122
-    sub rbx, 2                 ; back up to re-execute as BINARY_OP
+    sub rbx, 2
     DISPATCH
 END_FUNC op_binary_op_add_int
 

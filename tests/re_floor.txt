@@ -1,16 +1,4 @@
-'()'                     'aa'           match=(0, 0) search=(0, 0) groups='' findall=['', '', '']
 '(a*)*b'                 'aaa'          match=None search=None groups=None findall=[]
-'()'                     'abab'         match=(0, 0) search=(0, 0) groups='' findall=['', '', '', '', '']
-'()'                     'abc'          match=(0, 0) search=(0, 0) groups='' findall=['', '', '', '']
 '[a-z]+'                 'ABC'          match=(0, 3) search=(0, 3) groups=TypeError findall=['ABC']
-'()'                     'b'            match=(0, 0) search=(0, 0) groups='' findall=['', '']
-'()'                     'cd'           match=(0, 0) search=(0, 0) groups='' findall=['', '', '']
 expand : aa-bb-c
-'()'                     ''             match=(0, 0) search=(0, 0) groups='' findall=['']
 sub  '(a)(b)'   '\\2\\1' 'abab'       'baba'
-'(?s:)\\Z'               'abc'          match=None search=(3, 3) groups=None findall=['']
-'(?s:)\\Z'               'a'            match=None search=(1, 1) groups=None findall=['']
-'(?s:)\\Z'               'f.txt'        match=None search=(5, 5) groups=None findall=['']
-'(?s:)\\Z'               ''             match=(0, 0) search=(0, 0) groups=TypeError findall=['']
-'()'                     'x'            match=(0, 0) search=(0, 0) groups='' findall=['', '']
-'()'                     'xyz'          match=(0, 0) search=(0, 0) groups='' findall=['', '', '', '']

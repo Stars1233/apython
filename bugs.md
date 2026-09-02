@@ -118,7 +118,7 @@ one-line fix.
   an allocation per call -- worth threading a (pointer, length) pair through
   the bodies if bytearray ever becomes hot.
 
-- **The regex engine differs from CPython in 16 of 816 checked answers.**
+- **The regex engine differs from CPython in 4 of 816 checked answers.**
   `make check-re` runs `tests/re_differential.py` under both interpreters
   and ratchets against `tests/re_floor.txt`; it needs `$CPYTHON_LIB`,
   because `re` is a Python module and so comes from a real stdlib.  What is
@@ -127,10 +127,7 @@ one-line fix.
   - `Match.expand()` and `re.sub`'s `\1` group references are not
     implemented -- the template comes back unchanged.
   - A nested unbounded repeat (`(a*)*b`) recurses until the limit.
-  - `()` fails to compile, with a bare `KeyError()` out of
-    `re._compiler._compile`.  It is an interpreter bug rather than an engine
-    one: `_sre.compile` is handed a finished opcode array, so everything
-    before it is CPython's own Python running here.
+  - `[a-z]+` under `IGNORECASE` matches one character rather than the run.
   - `bytes` patterns and subjects are unsupported: `sre_state_init` always
     treats the subject as a `PyStrObject` and hardcodes `is_bytes = 0`.
 

@@ -2941,10 +2941,16 @@ DEF_FUNC_BARE op_for_iter_range
     DISPATCH
 
 .fir_deopt:
-    ; Type mismatch: rewrite to FOR_ITER (93) and re-execute
+    ; Type mismatch: rewrite to FOR_ITER (93) and run the generic handler.
+    ;
+    ; NOT by rewinding rbx and re-dispatching.  A FOR_ITER whose jump offset
+    ; is over 255 is preceded by EXTENDED_ARG, and rewinding two bytes lands
+    ; on the FOR_ITER alone: the prefix is gone, so the re-execution takes the
+    ; low byte of the offset as the whole of it and, on exhaustion, jumps into
+    ; the middle of its own loop body.  ecx already holds the full argument,
+    ; so entering the generic handler directly is both correct and cheaper.
     mov byte [rbx - 2], 93
-    sub rbx, 2
-    DISPATCH
+    jmp op_for_iter
 END_FUNC op_for_iter_range
 
 ;; ============================================================================
@@ -3006,9 +3012,9 @@ DEF_FUNC_BARE op_for_iter_list
     DISPATCH
 
 .fil_deopt:
-    pop rcx                        ; restore jump offset (for re-execute)
-    ; Type mismatch: rewrite to FOR_ITER (93) and re-execute
+    pop rcx                        ; restore the full jump offset
+    ; Rewrite to FOR_ITER (93) and enter the generic handler with it -- see
+    ; .fir_deopt above for why rewinding rbx instead would be wrong.
     mov byte [rbx - 2], 93
-    sub rbx, 2
-    DISPATCH
+    jmp op_for_iter
 END_FUNC op_for_iter_list
