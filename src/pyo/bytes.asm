@@ -2078,6 +2078,70 @@ DEF_FUNC bytes_mod, BM_FRAME
     ret
 END_FUNC bytes_mod
 
+;; ============================================================================
+;; bytearray_mod(rdi = self Value, rsi = args Value) -> a bytearray Value
+;;
+;; bytearray_type.tp_as_number was 0 and nothing supplied nb_remainder, so
+;; `bytearray(b"%d") % 5` was a TypeError where CPython answers
+;; bytearray(b'5').  The work is bytes_mod's: a temporary bytes of the same
+;; bytes, the shared body, and the result re-wrapped -- which is how
+;; bytearray_repr already borrows bytes_repr_impl.
+;; ============================================================================
+BMOD_ARGS  equ 8
+BMOD_TMP   equ 16
+BMOD_FRAME equ 32            ; + 1 push = 40, not 16-aligned
+
+DEF_FUNC bytearray_mod, BMOD_FRAME
+    push rbx
+    mov [rbp - BMOD_ARGS], rsi
+    V_TEST_PTR rdi, rax
+    ja .bam_decline
+    mov rax, [rdi + PyObject.ob_type]
+    lea rcx, [rel bytearray_type]
+    cmp rax, rcx
+    jne .bam_decline
+
+    push rdi
+    call bytearray_data         ; rax = the payload, rdx = the length
+    pop rdi
+    mov rsi, [rdi + PyByteArrayObject.ob_size]
+    mov rdi, rax
+    call bytes_from_data
+    mov [rbp - BMOD_TMP], rax
+
+    mov rdi, rax
+    mov rsi, [rbp - BMOD_ARGS]
+    call bytes_mod
+    mov rbx, rax
+
+    mov rdi, [rbp - BMOD_TMP]
+    call obj_decref
+    test rbx, rbx
+    jz .bam_out                 ; declined or raised; hand it on as it is
+
+    ; bytearray_new copies a (pointer, length) range, which is what the
+    ; result bytes is.  bytearray_from_bytes lives in methods/bytes.asm and
+    ; would be a circular dependency from here.
+    lea rdi, [rbx + PyBytesObject.data]
+    mov rsi, [rbx + PyBytesObject.ob_size]
+    call bytearray_new
+    push rax
+    mov rdi, rbx
+    call obj_decref
+    pop rbx
+.bam_out:
+    mov rax, rbx
+    pop rbx
+    leave
+    ret
+
+.bam_decline:
+    xor eax, eax                ; NULL Value = NotImplemented
+    pop rbx
+    leave
+    ret
+END_FUNC bytearray_mod
+
 section .data
 
 ; bytes number methods (for % formatting)
@@ -4561,6 +4625,16 @@ bytearray_seq_methods:
     dq bytearray_inplace_repeat ; +56
 
 align 8
+; bytearray's only numeric slot: `%`.  Everything else it does through
+; tp_as_sequence.
+bytearray_number_methods:
+    dq 0                        ; nb_add          +0
+    dq 0                        ; nb_subtract     +8
+    dq 0                        ; nb_multiply     +16
+    dq bytearray_mod            ; nb_remainder    +24
+    times 32 dq 0               ; through nb_imatmul
+
+align 8
 global bytearray_type
 bytearray_type:
     dq 1                            ; ob_refcnt
@@ -4582,7 +4656,7 @@ bytearray_type:
     dq 0                            ; tp_iternext
     dq 0                            ; tp_init
     dq 0                            ; tp_new
-    dq 0                            ; tp_as_number
+    dq bytearray_number_methods     ; tp_as_number (just nb_remainder)
     dq bytearray_seq_methods        ; tp_as_sequence
     dq bytearray_mapping_methods    ; tp_as_mapping
     dq 0                            ; tp_base

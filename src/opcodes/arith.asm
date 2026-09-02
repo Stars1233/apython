@@ -345,6 +345,35 @@ DEF_FUNC_BARE op_binary_op
     pop rax                    ; restore type ptr
     jmp .binop_try_seq_fallback
 .binop_have_number:
+    ; A type can have a tp_as_number and still not have THIS slot, and then
+    ; the sequence protocol may still answer: bytearray's only numeric slot is
+    ; nb_remainder, and `ba += b"x"` is sq_inplace_concat.  Giving bytearray a
+    ; tp_as_number for % broke every one of its concatenations until this.
+    ;
+    ; Narrowly: only for + and * and their inplace forms, and only when the
+    ; type really has a tp_as_sequence.  complex has neither an nb_iadd nor a
+    ; sequence protocol, and its `z += 1.5` must still reach the inplace
+    ; remap below rather than being sent off to a fallback with nothing in it.
+    mov rcx, [rax + r8]
+    test rcx, rcx
+    jnz .binop_number_ok
+    cmp qword [rsp], 0
+    je .binop_number_ok
+    mov rcx, [rsp]
+    cmp qword [rcx + PyTypeObject.tp_as_sequence], 0
+    je .binop_number_ok
+    cmp r9d, 0                  ; NB_ADD
+    je .binop_seq_from_stack
+    cmp r9d, 5                  ; NB_MULTIPLY
+    je .binop_seq_from_stack
+    cmp r9d, 13                 ; NB_INPLACE_ADD
+    je .binop_seq_from_stack
+    cmp r9d, 18                 ; NB_INPLACE_MULTIPLY
+    jne .binop_number_ok
+.binop_seq_from_stack:
+    pop rax                    ; the type, for the sequence fallback
+    jmp .binop_try_seq_fallback
+.binop_number_ok:
     add rsp, 8                 ; discard saved type ptr
     jmp .binop_call_method
 

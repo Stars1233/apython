@@ -160,8 +160,8 @@ INPLACE = [
 # bugs.
 SKIP = set()
 
-# 1. bytearray has no sq_concat, no sq_repeat and no tp_as_number, so every
-#    bytearray arithmetic cell raises here and yields a value in CPython.
+# bytearray has no sq_concat and no sq_repeat, so those cells raise here and
+# yield a value in CPython.  Its % works now.
 for _op in ("+", "+="):                                     # sq_concat
     for _a, _b in (("bytearray", "bytearray"), ("bytearray", "bytes"),
                    ("bytes", "bytearray")):
@@ -170,21 +170,6 @@ for _op in ("*", "*="):                                     # sq_repeat
     for _a, _b in (("bytearray", "int"), ("int", "bytearray"),
                    ("bytearray", "bool"), ("bool", "bytearray")):
         SKIP.add((_op, _a, _b))
-for _op in ("%", "%="):
-    for _b in ("dict", "list", "range"):
-        SKIP.add((_op, "bytearray", _b))
-
-# 2. str/bytes %-formatting accepts only a tuple or a mapping on the right;
-#    CPython also takes a single arbitrary object.
-for _op in ("%", "%="):
-    for _a, _b in (("str", "bytes"), ("str", "bytearray"), ("str", "list"),
-                   ("str", "range"), ("bytes", "list"), ("bytes", "range")):
-        SKIP.add((_op, _a, _b))
-
-
-# 3. dict.__ior__ takes any iterable of key/value pairs in CPython; ours takes
-#    a dict, so a str right operand is a TypeError rather than a ValueError.
-SKIP.add(("|=", "dict", "str"))
 
 for name, fn in BINOPS + INPLACE:
     for lname, mk_a in TYPES:

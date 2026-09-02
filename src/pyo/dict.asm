@@ -1178,21 +1178,24 @@ END_FUNC dict_nb_or
 ;; ============================================================================
 DIO_LEFT  equ 8
 DIO_RIGHT equ 16
-DIO_FRAME equ 24            ; + 0 pushes = 24, not 16-aligned
+DIO_ARGS  equ 32       ; args[0] at rbp-32, args[1] at rbp-24: an args array
+                       ; grows upward, so its first slot is the deeper one
+DIO_FRAME equ 32            ; + 0 pushes = 32, 16-aligned
 
 DEF_FUNC dict_nb_ior, DIO_FRAME
-    ; Both operands must be dicts.  CPython's `|=` also accepts any iterable of
-    ; key/value pairs; this slot read whatever it was given as a PyDictObject,
-    ; so `d |= 5` was an arbitrary dereference.  Declining is safe and gives the
-    ; right exception type; the iterable-of-pairs form is a gap, in bugs.md.
+    ; The LEFT operand must be a dict; the right can be anything dict.update
+    ; takes -- a mapping, something with keys(), or an iterable of pairs --
+    ; which is CPython's rule for `|=` and not for `|`.  This slot read
+    ; whatever it was given as a PyDictObject, so `d |= 5` was an arbitrary
+    ; dereference, and declining was the safe half of the answer.
     V_TEST_PTR rdi, rax         ; ja == not a pointer, so not a dict either
     ja .nb_ior_decline
     V_TEST_PTR rsi, rax
-    ja .nb_ior_decline
+    ja .nb_ior_other
     mov rax, [rdi + PyObject.ob_type]
     REQUIRE_DICT_TYPE rax, rcx, .nb_ior_decline
     mov rax, [rsi + PyObject.ob_type]
-    REQUIRE_DICT_TYPE rax, rcx, .nb_ior_decline
+    REQUIRE_DICT_TYPE rax, rcx, .nb_ior_other
     V_UNPACK rdi, rdx           ; left  Value -> (payload, tag)
     V_UNPACK rsi, rcx           ; right Value -> (payload, tag)
     mov [rbp - DIO_LEFT], rdi       ; left dict
@@ -1234,6 +1237,36 @@ DEF_FUNC dict_nb_ior, DIO_FRAME
     leave
     V_PACK rax, rdx             ; return one Value
     ret
+.nb_ior_other:
+    ; Anything else goes through dict.update, which already accepts a mapping,
+    ; the keys() protocol, or an iterable of key/value pairs -- and raises the
+    ; right thing for what is none of those.  The left operand still has to be
+    ; a dict.
+    mov rax, [rdi + PyObject.ob_type]
+    REQUIRE_DICT_TYPE rax, rcx, .nb_ior_decline
+    mov [rbp - DIO_LEFT], rdi
+    mov [rbp - DIO_ARGS], rdi
+    mov [rbp - DIO_ARGS + 8], rsi
+    lea rdi, [rbp - DIO_ARGS]
+    mov esi, 2
+    extern dict_method_update
+    call dict_method_update
+    test rax, rax
+    jz .nb_ior_failed           ; update raised; hand the failure on
+    DECREF_V rax, rcx           ; update answers None
+    mov rax, [rbp - DIO_LEFT]
+    INCREF rax
+    mov edx, TAG_PTR
+    leave
+    V_PACK rax, rdx
+    ret
+
+.nb_ior_failed:
+    xor eax, eax
+    xor edx, edx
+    leave
+    ret
+
 .nb_ior_decline:
     xor eax, eax                ; NULL Value = NotImplemented
     leave

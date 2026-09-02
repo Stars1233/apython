@@ -14,24 +14,17 @@ one-line fix.
   becomes `bytearray(b'bd')` -- where here it is a length mismatch.  A list
   raises for the same assignment in both, so only bytearray differs.
 
-- **`bytearray` has no `%`.**  `+`, `*`, `+=` and `*=` all work now, through
-  `bytearray_seq_methods`; `bytearray(b"%d") % 5` is still a TypeError, since
-  `bytearray_type.tp_as_number` is 0 and nothing supplies `nb_remainder`.
-  `tests/test_binop_matrix.py` skips that cell rather than blessing it.
-
-- **`%`-formatting takes only a tuple or a mapping on the right.**  CPython
-  also accepts a single arbitrary object, so `"ab" % [1, 2]` is `'ab'` there
-  and a TypeError here.
+- **The `%` conversion table does not type-check its argument.**  `"%d" % "x"`
+  answers `'x'` where CPython raises "%d format: a real number is required,
+  not str", and every numeric conversion is equally lax.
 
 - **`bytes` `%`-formatting converts through `str_mod`**, so its conversions are
-  str's rather than bytes'.  `b"%s" % b"x"` is right now, but `b"%d" % "x"`
-  answers `b'x'` where CPython raises, `b"%s" % "x"` answers `b'x'` where
-  CPython raises, `b"%r" % b"x"` is `b"'x'"` rather than `b"b'x'"`, `%c` and
-  `%a` are TypeErrors, and a `bytes`-keyed mapping (`b"%(a)d" % {b"a": 1}`)
-  raises KeyError.
-
-- **`dict.__ior__` takes only a dict.**  CPython's takes any iterable of
-  key/value pairs.
+  str's rather than bytes'.  `b"%s" % b"x"` is right now, but `b"%s" % "x"`
+  answers `b'x'` where CPython raises, `b"%r" % b"x"` is `b"'x'"` rather than
+  `b"b'x'"`, `%c` and `%a` are TypeErrors, and a `bytes`-keyed mapping
+  (`b"%(a)d" % {b"a": 1}`) raises KeyError -- the format is decoded to str, so
+  the key it looks up is a str.  `bytearray` inherits all of it, sharing the
+  body.
 
 - **`binary_op1`'s subclass rule is not implemented.**  CPython tries the right
   operand's slot *first* when its type is a proper subclass of the left's and

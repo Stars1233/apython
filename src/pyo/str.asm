@@ -1252,9 +1252,28 @@ DEF_FUNC str_mod, SM_FRAME
     cmp ecx, TAG_PTR
     jne .sm_not_tuple           ; non-heap → single value (SmallInt/Float/Bool/None)
     ; A mapping is addressed by key, so it has no argument count to check.
+    ; CPython's test is PyMapping_Check -- anything with an mp_subscript --
+    ; and not just a dict, which is why `"ab" % [1, 2]` is 'ab' there and was
+    ; a TypeError here.  A tuple is excluded below (it is the argument list),
+    ; and a str is excluded here (it is a single value).
     push rsi
     mov rax, [rsi + PyObject.ob_type]
-    REQUIRE_DICT_TYPE rax, rcx, .sm_not_map
+    REQUIRE_STR_TYPE rax, rcx, .sm_map_check
+    jmp .sm_not_map
+.sm_map_check:
+    ; A tuple has an mp_subscript too, and it is the argument list rather than
+    ; a mapping -- treating one as a mapping skipped the arity check, so
+    ; `"%s" % ("a", "b")` quietly formatted the first and dropped the second.
+    mov rax, [rsi + PyObject.ob_type]
+    REQUIRE_TUPLE_TYPE rax, rcx, .sm_map_not_tuple
+    jmp .sm_not_map
+.sm_map_not_tuple:
+    mov rax, [rsi + PyObject.ob_type]
+    mov rax, [rax + PyTypeObject.tp_as_mapping]
+    test rax, rax
+    jz .sm_not_map
+    cmp qword [rax + PyMappingMethods.mp_subscript], 0
+    je .sm_not_map
     mov qword [rbp-SM_ISMAP], 1
 .sm_not_map:
     pop rsi
@@ -1344,8 +1363,7 @@ DEF_FUNC str_mod, SM_FRAME
     push rax                        ; the key, ours to release
     mov rdi, [rbp-SM_ARGS]
     mov rsi, rax
-    extern dict_get
-    call dict_get
+    call str_mod_subscript
     mov r9, rax
     pop rdi
     push r9
@@ -1690,7 +1708,14 @@ DEF_FUNC str_mod, SM_FRAME
 .sm_arg_positional:
     cmp qword [rbp-SM_ISTUPLE], 1
     je .sm_arg_tuple
-    ; Single value
+    ; Single value.  A mapping counts as one too -- "%s" % {"a": 1} formats
+    ; the dict -- but only once: a second unkeyed conversion has nothing left,
+    ; which is what CPython reports as "not enough arguments".
+    cmp qword [rbp-SM_ISMAP], 1
+    jne .sm_arg_single
+    test r15, r15
+    jnz .sm_arg_none
+.sm_arg_single:
     mov rax, [rbp-SM_ARGS]
     mov rdx, [rbp-SM_ATAG]
     inc r15
@@ -1942,6 +1967,48 @@ DEF_FUNC str_mod, SM_FRAME
     ret
 
 END_FUNC str_mod
+
+;; ============================================================================
+;; str_mod_subscript(rdi = the mapping, rsi = the key str) -> rax = Value, or 0
+;;
+;; `"%(a)s" % m` for any m with an mp_subscript, not only a dict -- the same
+;; widening the operand classification got.  A dict keeps the direct lookup:
+;; dict_get answers 0 for a miss where dict's own mp_subscript raises KeyError,
+;; and str_mod's caller wants the former.
+;;
+;; The reference this hands back is borrowed for a dict and owned for anything
+;; else, and str_mod treats it as borrowed throughout -- so a mapping of one's
+;; own leaks one reference per key.  Releasing it here is not possible: the
+;; value is read long after, and a raise anywhere between abandons the stack.
+;; ============================================================================
+DEF_FUNC_LOCAL str_mod_subscript
+    mov rax, [rdi + PyObject.ob_type]
+    extern dict_type
+    lea rcx, [rel dict_type]
+    cmp rax, rcx
+    je .sms_dict
+    REQUIRE_DICT_TYPE rax, rcx, .sms_generic
+.sms_dict:
+    extern dict_get
+    call dict_get
+    leave
+    ret
+.sms_generic:
+    mov rax, [rdi + PyObject.ob_type]
+    mov rax, [rax + PyTypeObject.tp_as_mapping]
+    test rax, rax
+    jz .sms_none
+    mov rax, [rax + PyMappingMethods.mp_subscript]
+    test rax, rax
+    jz .sms_none
+    call rax
+    leave
+    ret
+.sms_none:
+    xor eax, eax
+    leave
+    ret
+END_FUNC str_mod_subscript
 
 ;; ============================================================================
 ;; str_compare(left, right, op, left_tag, right_tag) -> (rax,edx) fat bool

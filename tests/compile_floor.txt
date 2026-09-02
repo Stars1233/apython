@@ -224,6 +224,7 @@ test_open
 test_operand_types
 test_ordering_typeerror
 test_oserror
+test_percent_and_ior
 test_percent_format
 test_phase4
 test_phase6
