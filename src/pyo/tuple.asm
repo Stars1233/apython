@@ -1106,9 +1106,33 @@ DEF_FUNC tuple_type_call, TTC_FRAME
     cmp r13, 1
     jne .ttc_error
 
-    ; If arg is already a tuple, return a copy (or just INCREF)
-    ; For now: always iterate
+    ; tuple(t) is t.  A tuple is immutable, so CPython hands an exact one
+    ; straight back rather than copying it.  Both halves have to be exact: a
+    ; subclass constructor must build its own object, and a tuple subclass
+    ; instance must not escape from tuple() as itself.  rdi still holds the
+    ; type -- nothing above has touched it.
+    lea rax, [rel tuple_type]
+    cmp rdi, rax
+    jne .ttc_build
+    mov rcx, [r12]              ; args[0]
+    V_TEST_PTR rcx, rdx
+    ja .ttc_build
+    test rcx, rcx
+    jz .ttc_build
+    cmp [rcx + PyObject.ob_type], rax
+    jne .ttc_build
+    INCREF rcx
+    mov rax, rcx
+    mov edx, TAG_PTR
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    V_PACK rax, rdx
+    ret
 
+.ttc_build:
     ; Create empty list, iterate into it, convert to tuple
     xor edi, edi
     extern list_new

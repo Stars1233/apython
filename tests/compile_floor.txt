@@ -285,6 +285,7 @@ test_syntax_error_offset
 test_sys_argv
 test_sys_exit
 test_traceback
+test_tuple_identity
 test_tuples
 test_type_constructors
 test_type_metatype

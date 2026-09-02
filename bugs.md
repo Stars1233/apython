@@ -94,9 +94,6 @@ one-line fix.
   `"{0.attr}"` and `"{0[key]}"` are not resolved; a field is a position, a
   name, or empty.  A nested spec, `"{:{}}"`, is likewise not substituted.
 
-- **`tuple(t) is t` is False.**  CPython returns the argument unchanged when
-  it is already an exact tuple.
-
 - **`func.__name__ = "x"` is silently ignored.**  Functions have no settable
   attributes.
 
