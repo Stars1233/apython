@@ -86,8 +86,10 @@ one-line fix.
   floats; the `_ns` fields carry the exact value in both.
 
 - **Missing C modules**, in rough order of how many stdlib modules each
-  blocks: `_io`, `math`, `_struct`, `_socket`, `_imp`, `_collections`,
-  `_ast`, `binascii`, `_string`, then a long tail of one apiece.
+  blocks: `math`, `_struct`, `_socket`, `_imp`, `_collections`, `_ast`,
+  `binascii`, `_string`, then a long tail of one apiece.  (`_io` is not among
+  them: `src/iomod.asm` supplies `_iocore` and `lib/_io.py` assembles both
+  halves under the name `_io`.)
   `make check-stdlib` gives the current figure.
 
 - **Weak references keep no per-object slot.**  The links live in a side
@@ -144,15 +146,13 @@ one-line fix.
   - `bytes` patterns and subjects are unsupported: `sre_state_init` always
     treats the subject as a `PyStrObject` and hardcodes `is_bytes = 0`.
 
-- **`str.translate` cannot take a miss signalled by an exception.**  A table
-  with a length -- dict, list, tuple, str, bytes -- is exact, because the
-  bound is checked before the lookup.  A mapping object whose `__getitem__`
-  raises `LookupError` to mean "not in the table" propagates instead, where
-  CPython carries on.  Catching it is not possible: `raise_exception`
+- **C code here cannot catch a Python exception.**  `raise_exception`
   tail-jumps into `eval_exception_unwind`, which resumes the eval loop from
   saved globals rather than returning through the C stack, so a `call` to a
-  slot that raises never comes back.  The same limit applies anywhere C code
-  here would want to catch an exception.
+  slot that raises never comes back.  `str.translate` gets around it by
+  reaching a heaptype table through `dunder_call_2`, which does return; the
+  general limit stands, and is why the `bytes %` leak below cannot be fixed
+  by catching.
 
 - **`latin-1` encoding honours no error handler.**  `str.encode` and
   `bytes.decode` both act on `errors=` for `ascii` and `utf-8` now;
@@ -203,9 +203,10 @@ one-line fix.
   those finalizers never run.  `tests/test_del_and_gc_state.py` records this
   divergence in its recorded transcript deliberately -- see the note there.
 
-- **Repetition too large to allocate reports OverflowError where CPython says
-  MemoryError.**  `ap_malloc` exits fatally rather than returning NULL, so
-  the two cases cannot be told apart.
+- **`str` and `tuple` repetition too large to allocate reports OverflowError
+  where CPython says MemoryError.**  `ap_malloc` exits fatally rather than
+  returning NULL, so the two cases cannot be told apart; `list` and `bytes`
+  answer MemoryError already, so only those two types differ.
 
 - **The container repr cycle stack is 64 deep**; CPython's limit is far
   higher, so a legitimately deep nesting reports RecursionError.
@@ -223,11 +224,10 @@ one-line fix.
 These are absences rather than wrong answers — the interpreter raises rather
 than lying — but they are ordinary Python that does not work:
 
-- **`posix.symlink` and `posix.readlink` do not exist.**  `os.stat` honours
-  `follow_symlinks=False` and `posix.lstat` works, so links can be inspected;
-  they just cannot be created or read from inside the interpreter, which is
-  also why the regression test for `follow_symlinks` has to make do with a
-  regular file.
+- **`posix.symlink` does not exist.**  `readlink`, `lstat` and `stat`'s
+  `follow_symlinks=False` are all there, so a link can be inspected and read;
+  it just cannot be created from inside the interpreter, which is why the
+  regression test for `follow_symlinks` has to make do with a regular file.
 
 - **`async for` accepts only an async generator.**  A class implementing the
   asynchronous iterator protocol itself -- `__aiter__` returning self and an

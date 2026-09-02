@@ -235,11 +235,16 @@ END_FUNC dunder_call_1
 
 ;; ============================================================================
 ;; dunder_call_2(PyObject *self, PyObject *other, const char *name, int other_tag)
-;;   -> (rax=payload, rdx=tag)
+;;   -> rax = the result Value, or a NULL one when there is no such dunder
 ;;
 ;; Look up dunder on self's type, call with (self, other).
 ;; rdi = self (heap ptr), rsi = other payload, rdx = dunder name, ecx = other_tag
-;; Returns: result fat value (rax=payload, rdx=tag), or (0, TAG_NULL) if not found.
+;;
+;; One Value out, packed -- not the (payload, tag) pair this said for a long
+;; time after it stopped being true.  str.translate believed the comment and
+;; packed the answer a second time, which is a no-op for a pointer and shifts
+;; an int by V_INT_BIAS: a mapping that answered an ordinal reported
+;; "character mapping must be in range(0x110000)".
 ;; ============================================================================
 DEF_FUNC dunder_call_2
     push rbx
