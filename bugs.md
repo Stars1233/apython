@@ -237,10 +237,6 @@ than lying — but they are ordinary Python that does not work:
   argument's `__str__` can run Python, and a raise caught inside it would
   free a buffer `str_mod` is still reading.
 
-- **A `__del__` that raises and catches internally destroys an exception
-  that is already unwinding.**  The finaliser prints "Exception ignored in
-  __del__" and execution then continues as though nothing had been raised.
-
 - **Two `posix` messages name fewer paths than CPython's.**  `rename` reports
   only its source where CPython reports `'src' -> 'dst'`, and the
   "path should be string, bytes, or os.PathLike" TypeError carries no

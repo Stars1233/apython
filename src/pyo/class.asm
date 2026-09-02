@@ -973,7 +973,7 @@ END_FUNC type_setattr
 ;; rdi = instance
 ;; ============================================================================
 ID_EXC   equ 8
-ID_FRAME equ 16             ; + 1 push = 24, not 16-aligned
+ID_FRAME equ 24             ; + 1 push = 32
 DEF_FUNC instance_dealloc, ID_FRAME
     push rbx
 
@@ -991,7 +991,15 @@ DEF_FUNC instance_dealloc, ID_FRAME
     ; Call __del__(self) — dunder_call_1 handles lookup + call
     extern dunder_del
     extern dunder_call_1
+    ; Snapshot what was pending, and hold a reference to it: if __del__ raises,
+    ; installing its exception releases the global's reference to this one, and
+    ; the saved pointer would be dangling by the time it is put back.
     DUNDER_EXC_SAVE [rbp - ID_EXC]
+    mov rdi, [rbp - ID_EXC]
+    test rdi, rdi
+    jz .del_nothing_pending
+    call obj_incref
+.del_nothing_pending:
     mov rdi, rbx
     lea rsi, [rel dunder_del]
     call dunder_call_1
@@ -1002,12 +1010,41 @@ DEF_FUNC instance_dealloc, ID_FRAME
     DECREF_VAL rax, rdx
 .del_no_result:
 
-    ; A __del__ that raises must not leave the exception pending: the object
-    ; is being freed, there is no caller to hand it to, and leaving it set
-    ; means the *next* raise silently discards it -- or, if this dealloc came
-    ; from the unwinder dropping the value stack, that the handler receives
-    ; the wrong exception object.  CPython reports it and clears it.
-    DUNDER_RAISED [rbp - ID_EXC], .del_raised
+    ; A __del__ that raises must not leave the exception pending: the object is
+    ; being freed, there is no caller to hand it to, and leaving it set means
+    ; the *next* raise silently discards it -- or, if this dealloc came from
+    ; the unwinder dropping the value stack, that the handler receives the
+    ; wrong exception object.  CPython reports it and puts back what was there.
+    ;
+    ; "Did it raise?" is EXC_RAISED_SINCE's three-way question and not a bare
+    ; inequality.  current_exception is also the exception being HANDLED, and a
+    ; __del__ that raises and catches internally leaves the global at 0: a
+    ; change, but not a raise.  DUNDER_RAISED read that as one, and this arm
+    ; then zeroed the global -- destroying the exception the interpreter was
+    ; carrying, so that a __del__ running during an unwind made the enclosing
+    ; except block never run.
+    EXC_RAISED_SINCE [rbp - ID_EXC], rax, .del_report
+
+.del_restore:
+    ; Whatever __del__ left behind, the pending exception goes back to what it
+    ; was.  The reference taken above is what the global gets; anything else
+    ; sitting there is released.
+    mov rax, [rbp - ID_EXC]
+    cmp [rel current_exception], rax
+    je .del_drop_saved
+    mov rdi, [rel current_exception]
+    mov [rel current_exception], rax    ; the saved reference moves in here
+    test rdi, rdi
+    jz .del_cleared
+    call obj_decref
+    jmp .del_cleared
+.del_drop_saved:
+    ; Unchanged, so the global still owns its own; drop the extra one.
+    mov rdi, rax
+    test rdi, rdi
+    jz .del_cleared
+    call obj_decref
+
 .del_cleared:
 
     ; Restore refcount (undo the bump)
@@ -1015,18 +1052,13 @@ DEF_FUNC instance_dealloc, ID_FRAME
 
     jmp .no_del
 
-.del_raised:
-    ; Report on stderr and clear, so nothing downstream inherits it.
+.del_report:
+    ; A genuinely new exception: say so on stderr, then put back the old one.
     mov edi, 2
     lea rsi, [rel id_del_ignored_msg]
     mov edx, id_del_ignored_len
     call sys_write
-    mov rdi, [rel current_exception]
-    mov qword [rel current_exception], 0
-    test rdi, rdi
-    jz .del_cleared
-    call obj_decref
-    jmp .del_cleared
+    jmp .del_restore
 
 .no_del:
     ; XDECREF the instance dict; a type may have no dict slot at all.
