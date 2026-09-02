@@ -1990,6 +1990,47 @@ DEF_FUNC methods_init
     call dict_add_builtin_func
 
     mov rdi, rbx
+    lea rsi, [rel mn_rfind]
+    extern bytes_method_rfind
+    lea rdx, [rel bytes_method_rfind]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn_index]
+    extern bytes_method_index
+    lea rdx, [rel bytes_method_index]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn_rindex]
+    extern bytes_method_rindex
+    lea rdx, [rel bytes_method_rindex]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn_strip]
+    extern bytes_method_strip
+    lea rdx, [rel bytes_method_strip]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn_lstrip]
+    extern bytes_method_lstrip
+    lea rdx, [rel bytes_method_lstrip]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn_rstrip]
+    extern bytes_method_rstrip
+    lea rdx, [rel bytes_method_rstrip]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn_partition]
+    extern bytes_method_partition
+    lea rdx, [rel bytes_method_partition]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn_rpartition]
+    extern bytes_method_rpartition
+    lea rdx, [rel bytes_method_rpartition]
+    call dict_add_builtin_func
+
+    mov rdi, rbx
     lea rsi, [rel mn_join]
     lea rdx, [rel bytes_method_join]
     call dict_add_builtin_func
@@ -2082,6 +2123,46 @@ DEF_FUNC methods_init
     lea rsi, [rel mn_rsplit]
     extern ba_shared_rsplit
     lea rdx, [rel ba_shared_rsplit]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn_rfind]
+    extern ba_shared_rfind
+    lea rdx, [rel ba_shared_rfind]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn_index]
+    extern ba_shared_index
+    lea rdx, [rel ba_shared_index]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn_rindex]
+    extern ba_shared_rindex
+    lea rdx, [rel ba_shared_rindex]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn_strip]
+    extern ba_shared_strip
+    lea rdx, [rel ba_shared_strip]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn_lstrip]
+    extern ba_shared_lstrip
+    lea rdx, [rel ba_shared_lstrip]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn_rstrip]
+    extern ba_shared_rstrip
+    lea rdx, [rel ba_shared_rstrip]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn_partition]
+    extern ba_shared_partition
+    lea rdx, [rel ba_shared_partition]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn_rpartition]
+    extern ba_shared_rpartition
+    lea rdx, [rel ba_shared_rpartition]
     call dict_add_builtin_func
     mov rdi, rbx
     lea rsi, [rel mn_join]

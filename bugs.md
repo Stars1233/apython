@@ -98,11 +98,11 @@ one-line fix.
   in-place, are still absent -- `dir(int)` is short by about forty names, and
   a class delegating to `int.__add__` finds nothing.
 
-- **`bytes` and `bytearray` are missing most of the string-like methods.**
-  Both have `find`, `count`, `startswith`, `endswith`, `split`, `join`,
-  `replace`, `rsplit`, `hex` and `decode`; neither has `rfind`, `index`,
-  `rindex`, `splitlines`, `strip`/`lstrip`/`rstrip`, `partition`/
-  `rpartition`, `upper`/`lower`/`title`/`swapcase`/`capitalize`,
+- **`bytes` and `bytearray` are missing some of the string-like methods.**
+  Both have `find`, `rfind`, `index`, `rindex`, `count`, `startswith`,
+  `endswith`, `split`, `rsplit`, `strip`/`lstrip`/`rstrip`,
+  `partition`/`rpartition`, `join`, `replace`, `hex` and `decode`; neither has
+  `splitlines`, `upper`/`lower`/`title`/`swapcase`/`capitalize`,
   `center`/`ljust`/`rjust`, `zfill`, `expandtabs`, `translate`, or the
   `is*` predicates.  `bytearray(str, encoding)` is not accepted either.
 

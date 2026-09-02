@@ -48,3 +48,44 @@ print(b', '.join([b'a', b'b', b'c']))       # b'a, b, c'
 print(b''.join([b'a', b'b']))                # b'ab'
 print(b'-'.join([b'hello']))                 # b'hello'
 print(b' '.join([]))                         # b''
+
+
+# --- rfind, index, rindex, the strip family, partition and rpartition --------
+#
+# bytes had find and nothing else of the search family, and none of the strip
+# or partition ones.  find, rfind, index and rindex are one body now: the two
+# directions differ only in where the scan starts, and index and rindex differ
+# from the first two only in answering a miss with a ValueError.  bytearray
+# reaches all of them through the shared-call trampoline, so the two stay one
+# implementation.
+
+def t(label, fn):
+    try:
+        print(label, "=>", repr(fn()))
+    except BaseException as e:
+        print(label, "=> RAISE", type(e).__name__)
+
+d = b"abcabc"
+for n in (b"a", b"c", b"abc", b"z", b"", b"bc"):
+    print(n, d.find(n), d.rfind(n), d.index(n) if n in d else "-", d.rindex(n) if n in d else "-")
+t("index missing", lambda: d.index(b"z"))
+t("rindex missing", lambda: d.rindex(b"z"))
+print(d.find(b"a", 1), d.rfind(b"a", 0, 3), d.index(b"a", 1), d.rindex(b"a", 0, 4))
+print(d.find(97), d.rfind(97), d.index(99), d.rindex(99))
+b = bytearray(b"abcabc")
+print(b.rfind(b"a"), b.index(b"b"), b.rindex(b"c"), b.find(b"z"))
+print(b"".rfind(b""), b"".find(b""), b"ab".rfind(b""), b"ab".find(b""))
+
+for d in (b"  ab  ", b"\t\nab\r\n", b"ab", b"", b"   ", b"xxabxx"):
+    print(d, d.strip(), d.lstrip(), d.rstrip())
+for d, c in ((b"xxabxx", b"x"), (b"abcba", b"ab"), (b"abc", b"z"), (b"aaa", b"a")):
+    print(d, c, d.strip(c), d.lstrip(c), d.rstrip(c))
+print(b"  ab  ".strip(None), b"ab".strip(b""))
+for d, sep in ((b"a,b,c", b","), (b"abc", b","), (b",abc", b","), (b"abc,", b","),
+               (b"a,b", b"a,b"), (b"aXXbXXc", b"XX")):
+    print(d, sep, d.partition(sep), d.rpartition(sep))
+t("empty sep", lambda: b"abc".partition(b""))
+b = bytearray(b"  ab  ")
+print(b.strip(), b.lstrip(), b.rstrip(), type(b.strip()).__name__)
+ba = bytearray(b"a,b")
+print(ba.partition(b","), [type(x).__name__ for x in ba.partition(b",")])
