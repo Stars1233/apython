@@ -678,9 +678,18 @@ DEF_FUNC int_method_to_bytes, ITB_FRAME
     ret
 
 .itb_overflow:
+    ; RAISE does not return, so an mpz_t initialised above it is never
+    ; cleared: a loop probing widths leaked GMP memory linearly.  Both are
+    ; live here; only ITB_V is at the negative check.
+    lea rdi, [rbp - ITB_T]
+    call __gmpz_clear wrt ..plt
+    lea rdi, [rbp - ITB_V]
+    call __gmpz_clear wrt ..plt
     RAISE exc_OverflowError_type, "int too big to convert"
 
 .itb_negative_error:
+    lea rdi, [rbp - ITB_V]
+    call __gmpz_clear wrt ..plt
     RAISE exc_OverflowError_type, "can't convert negative int to unsigned"
 
 .itb_length_error:

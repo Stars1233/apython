@@ -422,7 +422,13 @@ DEF_FUNC str_case_map, SC_FRAME
 .sc_w_pick_lower_kept:
     mov r12d, UC_LOWER
 .sc_w_pick_title_done:
-    and r13d, UF_ALPHA
+    ; CPython's word boundary is the CASED property, not alphabetic:
+    ; previous_is_cased = _PyUnicode_IsCased(c).  The two differ for every
+    ; alphabetic-but-uncased character -- all of Lo, so Hebrew, Arabic, CJK,
+    ; Thai, Devanagari -- and for every cased-but-not-alphabetic one, the
+    ; Roman numerals and the circled letters among them.  "\u05d0a".title()
+    ; is '\u05d0A' in CPython.
+    and r13d, UF_CASED
     mov [rbp - SC_PREV], r13
     jmp .sc_w_have_pick
 
