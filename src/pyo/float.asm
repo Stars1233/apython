@@ -18,6 +18,7 @@ extern int_from_i64
 extern int_type
 extern raise_exception
 extern exc_ZeroDivisionError_type
+extern exc_OverflowError_type
 extern exc_ValueError_type
 extern obj_incref
 
@@ -651,6 +652,8 @@ END_FUNC float_hash
 section .rodata
 align 16
 fh_sign_mask: dq 0x8000000000000000, 0
+align 16
+frn_absmask:  dq 0x7fffffffffffffff, 0x7fffffffffffffff
 align 8
 fh_two28:     dq 0x41b0000000000000      ; 2.0**28
 section .text
@@ -1085,6 +1088,250 @@ DEF_FUNC float_pow, FB_FRAME
     V_PACK rax, rdx             ; return one Value
     ret
 END_FUNC float_pow
+
+;; ============================================================================
+;; float_round_ndigits(xmm0 = x, edi = ndigits) -> xmm0 = the rounded double
+;;
+;; round(x, n) for a finite double.  CPython rounds the DECIMAL
+;; representation, not the scaled binary value: double_round hands the value
+;; to _Py_dg_dtoa in mode 3 and reads the digits back with _Py_dg_strtod.
+;; Scaling by 10**n and rounding the product is a different function --
+;; round(2.675, 2) is 2.68 that way and 2.67 CPython's -- and it is also
+;; where every one of round()'s wrong answers came from: 10**n overflowed
+;; int64 at n >= 19, x * 10**n overflowed to infinity for a large x, and
+;; cvtsd2si answered the integer indefinite value for both.
+;;
+;; glibc's snprintf and strtod are the same pair of correctly-rounded
+;; conversions dtoa/strtod are, and float_repr already leans on exactly that
+;; to find the shortest round-tripping repr.  So: ask for the value at k
+;; significant digits and read it back.
+;;
+;;   k = (decimal exponent of x) + ndigits + 1
+;;
+;; k >= 17 means the request is finer than a double can hold and x is its own
+;; answer.  k <= 0 means the rounding position is at or left of the leading
+;; digit, so the answer is zero or a single power of ten.
+;;
+;; Frame: aligned for libc's SSE, as float_repr's is.
+;; ============================================================================
+FRN_X     equ 8               ; the original double
+FRN_ND    equ 16              ; ndigits
+FRN_BUF   equ 64              ; 40-byte render buffer, [rbp-64, rbp-24)
+FRN_FRAME equ 64              ; + 0 pushes = 64
+global float_round_ndigits
+DEF_FUNC float_round_ndigits, FRN_FRAME
+    and rsp, -16
+    sub rsp, 96
+    movsd [rbp - FRN_X], xmm0
+    mov [rbp - FRN_ND], edi
+
+    ; A NaN or an infinity is its own answer, and so is a zero -- which also
+    ; keeps its sign, where a round trip through cvtsd2si lost it.
+    ucomisd xmm0, xmm0
+    jp .frn_identity
+    movsd xmm1, [rel pos_inf]
+    ucomisd xmm0, xmm1
+    je .frn_identity
+    movsd xmm1, [rel neg_inf]
+    ucomisd xmm0, xmm1
+    je .frn_identity
+    xorpd xmm1, xmm1
+    ucomisd xmm0, xmm1
+    jp .frn_not_zero
+    jne .frn_not_zero
+    jmp .frn_identity           ; +-0.0, sign intact
+.frn_not_zero:
+
+    ; CPython's NDIGITS_MAX / NDIGITS_MIN: past either bound the answer is
+    ; settled without looking at the digits.
+    cmp dword [rbp - FRN_ND], 323
+    jg .frn_identity
+    cmp dword [rbp - FRN_ND], -308
+    jl .frn_zero
+
+    ; The decimal exponent, read out of a "%.17e" rendering.  It has to be 17
+    ; and not 1: a short precision ROUNDS, and 9.995 at one digit is
+    ; "1.0e+01", an exponent one too high -- which made round(9.995, 1)
+    ; answer 9.99 where CPython says 10.0, and round(99.5, -3) answer 1000.0
+    ; where CPython says 0.0.  Seventeen digits is enough that no double can
+    ; round up across a decade: one that close to a power of ten IS that
+    ; power of ten.
+    lea rdi, [rbp - FRN_BUF]
+    mov esi, 40
+    lea rdx, [rel fmt_e]
+    mov ecx, 17
+    movsd xmm0, [rbp - FRN_X]
+    mov eax, 1
+    call snprintf wrt ..plt
+
+    lea rsi, [rbp - FRN_BUF]
+    call float_parse_exp10       ; -> eax = the decimal exponent
+    add eax, [rbp - FRN_ND]
+    inc eax                      ; eax = k, the significant digits to keep
+
+    cmp eax, 17
+    jge .frn_identity            ; finer than a double: x is its own answer
+    test eax, eax
+    jle .frn_underflow           ; at or left of the leading digit
+
+    ; k significant digits is "%.*e" with k-1 after the point.  glibc rounds
+    ; half-even on the exact value, which is what dtoa mode 3 does.
+    dec eax
+    mov r8d, eax
+    lea rdi, [rbp - FRN_BUF]
+    mov esi, 40
+    lea rdx, [rel fmt_e]
+    mov ecx, r8d
+    movsd xmm0, [rbp - FRN_X]
+    mov eax, 1
+    call snprintf wrt ..plt
+
+    lea rdi, [rbp - FRN_BUF]
+    xor esi, esi
+    call strtod wrt ..plt
+    ; A finite x whose rounded value is not finite: round(DBL_MAX, -308) is
+    ; 2e308.  CPython raises rather than answering an infinity it was not
+    ; given.
+    movsd xmm1, [rel pos_inf]
+    andpd xmm1, [rel frn_absmask]
+    movapd xmm2, xmm0
+    andpd xmm2, [rel frn_absmask]
+    ucomisd xmm2, xmm1
+    je .frn_overflow
+    leave
+    ret
+
+.frn_overflow:
+    RAISE exc_OverflowError_type, "rounded value too large to represent"
+
+.frn_underflow:
+    ; k <= 0.  Everything rounds to a signed zero except the one case where
+    ; the leading digit is 5 or more AND k is exactly 0: then the value is at
+    ; least half of 10**-ndigits and rounds up to it.  A leading 5 with
+    ; nothing behind it is a tie, and half-even sends a tie to the even side,
+    ; which here is the zero.
+    test eax, eax
+    jnz .frn_zero
+    lea rdi, [rbp - FRN_BUF]
+    mov esi, 40
+    lea rdx, [rel fmt_e]
+    mov ecx, 17
+    movsd xmm0, [rbp - FRN_X]
+    mov eax, 1
+    call snprintf wrt ..plt
+
+    lea rsi, [rbp - FRN_BUF]
+    xor ecx, ecx
+    movzx eax, byte [rsi]
+    cmp al, '-'
+    jne .frn_uf_lead
+    inc rsi
+.frn_uf_lead:
+    movzx eax, byte [rsi]        ; the leading digit
+    cmp al, '5'
+    jl .frn_zero
+    jg .frn_round_up
+    ; Exactly 5 so far: a tie only if every digit behind it is a zero.
+    add rsi, 2                   ; skip "5."
+.frn_uf_scan:
+    movzx eax, byte [rsi]
+    cmp al, 'e'
+    je .frn_zero                 ; ran out of digits: a true tie
+    test al, al
+    jz .frn_zero
+    cmp al, '0'
+    jne .frn_round_up
+    inc rsi
+    jmp .frn_uf_scan
+
+.frn_round_up:
+    ; The answer is 10**-ndigits with x's sign.  Build it through strtod so
+    ; the exponent is exact for every reachable ndigits.
+    lea rdi, [rbp - FRN_BUF]
+    mov esi, 40
+    lea rdx, [rel fmt_pow10]
+    mov ecx, [rbp - FRN_ND]
+    neg ecx
+    xor eax, eax
+    call snprintf wrt ..plt
+    lea rdi, [rbp - FRN_BUF]
+    xor esi, esi
+    call strtod wrt ..plt
+    jmp .frn_apply_sign
+
+.frn_zero:
+    xorpd xmm0, xmm0
+.frn_apply_sign:
+    ; copysign(result, x)
+    movsd xmm1, [rbp - FRN_X]
+    movsd xmm2, [rel fh_sign_mask]
+    andpd xmm1, xmm2
+    andnpd xmm2, xmm0
+    orpd xmm2, xmm1
+    movapd xmm0, xmm2
+    leave
+    ret
+
+.frn_identity:
+    movsd xmm0, [rbp - FRN_X]
+    leave
+    ret
+END_FUNC float_round_ndigits
+
+;; ============================================================================
+;; float_parse_exp10(rsi = "d.dde[+-]ddd") -> eax = the signed exponent
+;;
+;; The exponent field of a %e rendering.  Its own function because both arms
+;; of float_round_ndigits want it and neither can spare the registers.
+;; ============================================================================
+DEF_FUNC_LOCAL float_parse_exp10
+    xor ecx, ecx
+.fpe_find:
+    movzx eax, byte [rsi + rcx]
+    test al, al
+    jz .fpe_none
+    cmp al, 'e'
+    je .fpe_found
+    inc rcx
+    jmp .fpe_find
+.fpe_found:
+    inc rcx
+    xor r8d, r8d                ; negative?
+    movzx eax, byte [rsi + rcx]
+    cmp al, '-'
+    jne .fpe_check_plus
+    mov r8d, 1
+    inc rcx
+    jmp .fpe_digits
+.fpe_check_plus:
+    cmp al, '+'
+    jne .fpe_digits
+    inc rcx
+.fpe_digits:
+    xor eax, eax
+.fpe_loop:
+    movzx edx, byte [rsi + rcx]
+    test dl, dl
+    jz .fpe_end
+    sub edx, '0'
+    cmp edx, 9
+    ja .fpe_end
+    imul eax, eax, 10
+    add eax, edx
+    inc rcx
+    jmp .fpe_loop
+.fpe_end:
+    test r8d, r8d
+    jz .fpe_out
+    neg eax
+.fpe_out:
+    leave
+    ret
+.fpe_none:
+    xor eax, eax
+    leave
+    ret
+END_FUNC float_parse_exp10
 
 ;; ============================================================================
 ;; float_int(rdi = self Value) -> SmallInt or GMP int
@@ -1539,6 +1786,7 @@ str_neg_inf: db "-inf", 0
 fmt_g: db "%.*g", 0
 fmt_f: db "%.*f", 0
 fmt_e: db "%.*e", 0
+fmt_pow10: db "1e%d", 0
 fmt_E: db "%.*E", 0
 fmt_F: db "%.*F", 0
 fmt_G: db "%.*G", 0

@@ -1722,15 +1722,46 @@ END_FUNC builtin_hex
 
 ;; ============================================================================
 ;; builtin_round_fn(args, nargs) - round(number[, ndigits])
-;; 1 arg: round to nearest int (banker's rounding)
-;; 2 args: round to ndigits decimal places
+;;
+;; Every arm of this used to round with cvtsd2si, which answers the integer
+;; INDEFINITE value -- 0x8000000000000000 -- for anything outside int64 and
+;; reports nothing about it.  round(1e300), round(inf) and round(nan) were
+;; all -9223372036854775808.  float_int had already learned this lesson for
+;; int(); round() had not, and the two-argument arm had three more of its
+;; own: 10**ndigits was an int64 that wrapped at ndigits >= 19 and looped 400
+;; times for round(x, 400), x * 10**n overflowed to infinity for a large x,
+;; and the cvtsd2si/cvtsi2sd round trip lost the sign of -0.0.
+;;
+;; The float work is float_round_ndigits (src/pyo/float.asm), which rounds
+;; the decimal representation the way CPython's double_round does rather than
+;; the scaled binary value.  The int work is GMP's, so round(10**30, -5) is
+;; an answer rather than "type cannot be rounded".
 ;; ============================================================================
 
+extern float_round_ndigits
+extern int_fits_i64
+extern int_shrink
+extern __gmpz_init
+extern __gmpz_set_si
+extern __gmpz_ui_pow_ui
+extern __gmpz_tdiv_qr
+extern __gmpz_mul
+extern __gmpz_add
+extern __gmpz_sub
+extern __gmpz_cmp
+extern __gmpz_cmpabs
+extern __gmpz_mul_2exp
+extern __gmpz_cmp_si
+extern __gmpz_set
+extern __gmpz_clear
+extern __gmpz_tdiv_q_ui
+
 global builtin_round_fn
-RND_NDIGITS equ 16      ; historical: referenced as [rbp - RND_NDIGITS]
-RND_XPAY    equ 24
-RND_XTAG    equ 32
-RND_FRAME   equ 48          ; + 1 push = 56, not 16-aligned
+RND_X      equ 8              ; x payload
+RND_XTAG   equ 16             ; x tag
+RND_ND     equ 24             ; ndigits as int64
+RND_SAVE   equ 32             ; scratch across a call
+RND_FRAME  equ 48             ; + 1 push = 56, not 16-aligned
 DEF_FUNC builtin_round_fn, RND_FRAME
     push rbx
 
@@ -1741,74 +1772,68 @@ DEF_FUNC builtin_round_fn, RND_FRAME
     jmp .rnd_error
 
 .rnd_one_arg:
-    ; round(x) — return int.  Normalize first: int_unwrap flattens bool,
-    ; compact heap ints and int subclasses to (value, TAG_SMALLINT).
+    ; round(x) -> int.  int_unwrap flattens bool, compact heap ints and int
+    ; subclasses to (value, TAG_SMALLINT); a genuinely large int stays a
+    ; pointer and is returned as itself.
     extern int_unwrap
-    mov rdi, [rdi]            ; args[0]
+    mov rdi, [rdi]              ; args[0]
     V_UNPACK rdi, rdx
     call int_unwrap
-    mov rax, rdi            ; payload
-    mov ecx, edx            ; tag
+    mov [rbp - RND_X], rdi
+    mov [rbp - RND_XTAG], rdx
 
-    cmp ecx, TAG_SMALLINT
-    je .rnd_int_ret          ; int → return as-is
+    cmp edx, TAG_SMALLINT
+    je .rnd_int_identity
 
-    ; Extract double from TAG_FLOAT or TAG_PTR (PyFloatObject)
-    cmp ecx, TAG_FLOAT
-    je .rnd_one_raw_float
-    cmp ecx, TAG_PTR
-    jne .rnd_type_error
-    ; Check if it's a PyFloatObject
-    lea rcx, [rel float_type]
-    cmp [rax + PyObject.ob_type], rcx
-    je .rnd_one_float_obj
-    ; A float SUBCLASS keeps its double inline at the same offset, and the
-    ; exact-pointer test refused it: round(F(2.5)) was a TypeError.
-    mov rcx, [rax + PyObject.ob_type]
-    test qword [rcx + PyTypeObject.tp_flags], TYPE_FLAG_FLOAT_SUBCLASS
-    jz .rnd_one_check_int_obj
-.rnd_one_float_obj:
-    movsd xmm0, [rax + PyFloatObject.value]
-    jmp .rnd_one_do_round
-.rnd_one_check_int_obj:
-    ; Check if it's a PyIntObject (heap int)
-    lea rcx, [rel int_type]
-    cmp [rax + PyObject.ob_type], rcx
+    mov rdi, [rbp - RND_X]
+    mov esi, [rbp - RND_XTAG]
+    call round_self_double      ; -> xmm0, eax = 1 when it was a float
+    test eax, eax
+    jz .rnd_one_not_float
+
+    ; Round to nearest, ties to even -- what cvtsd2si was providing -- and
+    ; hand the result to float_int, which knows about NaN, the infinities and
+    ; the values that need GMP.
+    roundsd xmm0, xmm0, 0
+    movq rdi, xmm0
+    V_FROM_F64 rdi, rax
+    extern float_int
+    call float_int
+    pop rbx
+    leave
+    ret
+
+.rnd_one_not_float:
+    ; A heap int is its own answer.  It used to go through int_to_i64, which
+    ; truncates: round(10**30) came back as garbage.
+    mov rdi, [rbp - RND_X]
+    cmp qword [rbp - RND_XTAG], TAG_PTR
     jne .rnd_one_dunder
-    ; It's a heap int — convert to i64 and return as SmallInt.
-    ; int_to_i64 dispatches on edx, so the tag must be supplied.
-    mov rdi, rax
+    lea rax, [rel int_type]
+    cmp [rdi + PyObject.ob_type], rax
+    jne .rnd_one_dunder
+    INCREF rdi
+    mov rax, rdi
     mov edx, TAG_PTR
-    call int_to_i64
-    RET_TAG_SMALLINT
     pop rbx
     leave
-    V_PACK rax, rdx             ; builtins return one Value
-    ret
-.rnd_one_raw_float:
-    movq xmm0, rax
-
-.rnd_one_do_round:
-    ; Float: banker's rounding (x86 default rounding mode = round-to-nearest-even)
-    cvtsd2si rax, xmm0     ; round-to-nearest-even
-    RET_TAG_SMALLINT
-    pop rbx
-    leave
-    V_PACK rax, rdx             ; builtins return one Value
+    V_PACK rax, rdx
     ret
 
-.rnd_int_ret:
-    RET_TAG_SMALLINT
+.rnd_int_identity:
+    mov rax, [rbp - RND_X]
+    mov edx, TAG_SMALLINT
     pop rbx
     leave
-    V_PACK rax, rdx             ; builtins return one Value
+    V_PACK rax, rdx
     ret
 
 .rnd_one_dunder:
     ; Anything else is asked for __round__, which is how round() works on a
-    ; Decimal, a Fraction or any class that defines it.  Nothing consulted it
-    ; at all, so every one of them was "type cannot be rounded".
-    mov rdi, rax
+    ; Decimal, a Fraction or any class that defines it.
+    mov rdi, [rbp - RND_X]
+    mov edx, [rbp - RND_XTAG]
+    V_PACK rdi, rdx
     CSTRING rsi, "__round__"
     extern dunder_call_1
     call dunder_call_1
@@ -1816,128 +1841,158 @@ DEF_FUNC builtin_round_fn, RND_FRAME
     jz .rnd_type_error          ; no __round__, or it raised
     pop rbx
     leave
-    V_PACK rax, rdx             ; builtins return one Value
+    V_PACK rax, rdx
     ret
 
 .rnd_two_arg:
-    ; round(x, ndigits) — normalize both operands (see .rnd_one_arg)
     extern int_unwrap
-    mov r9, rdi                 ; args array
-    mov rdi, [r9]            ; args[0]
+    mov rbx, rdi                ; args array
+    mov rdi, [rbx]
     V_UNPACK rdi, rdx
     call int_unwrap
-    mov [rbp - RND_XPAY], rdi
+    mov [rbp - RND_X], rdi
     mov [rbp - RND_XTAG], rdx
-    mov rdi, [r9 + 8]
-    V_UNPACK rdi, rdx       ; args[1]
+
+    mov rdi, [rbx + 8]
+    V_UNPACK rdi, rdx           ; args[1]
     call int_unwrap
-    mov rbx, rdi                ; ndigits payload
-    mov r8d, edx                ; ndigits tag
-    mov rax, [rbp - RND_XPAY]   ; x payload
-    mov ecx, [rbp - RND_XTAG]   ; x tag
+    mov rbx, rdi
+    mov r8d, edx
 
-    ; ndigits must be int
+    ; ndigits has to be an int, and one that fits: CPython clamps a huge one
+    ; to the same "past every bound" answer the small ones reach.
     cmp r8d, TAG_SMALLINT
+    je .rnd_nd_small
+    cmp r8d, TAG_PTR
     jne .rnd_type_error
+    lea rax, [rel int_type]
+    cmp [rbx + PyObject.ob_type], rax
+    jne .rnd_type_error
+    mov rdi, rbx
+    mov edx, TAG_PTR
+    call int_fits_i64
+    test eax, eax
+    jz .rnd_nd_huge
+    mov rdi, rbx
+    mov edx, TAG_PTR
+    call int_to_i64
+    mov [rbp - RND_ND], rax
+    jmp .rnd_have_nd
+.rnd_nd_huge:
+    ; Larger than an int64 either way.  Its sign is all that is left of it.
+    INT_NEED_MPZ rbx
+    lea rdi, [rbx + PyIntObject.mpz]
+    xor esi, esi
+    call __gmpz_cmp_si wrt ..plt
+    test eax, eax
+    js .rnd_nd_min
+    mov qword [rbp - RND_ND], 1000
+    jmp .rnd_have_nd
+.rnd_nd_min:
+    mov qword [rbp - RND_ND], -1000
+    jmp .rnd_have_nd
+.rnd_nd_small:
+    mov [rbp - RND_ND], rbx
 
-    ; Check x type — extract double
-    cmp ecx, TAG_SMALLINT
+.rnd_have_nd:
+    cmp qword [rbp - RND_XTAG], TAG_SMALLINT
     je .rnd_two_int
-    cmp ecx, TAG_FLOAT
-    je .rnd_two_raw_float
-    cmp ecx, TAG_PTR
-    jne .rnd_type_error
-    ; Check if PyFloatObject, or a subclass -- the double is inline for both.
-    lea rcx, [rel float_type]
-    cmp [rax + PyObject.ob_type], rcx
-    je .rnd_two_float_obj
-    mov rcx, [rax + PyObject.ob_type]
-    test qword [rcx + PyTypeObject.tp_flags], TYPE_FLAG_FLOAT_SUBCLASS
-    jz .rnd_type_error
-.rnd_two_float_obj:
-    movsd xmm0, [rax + PyFloatObject.value]
-    jmp .rnd_two_got_float
-.rnd_two_raw_float:
-    movq xmm0, rax          ; xmm0 = x (double)
-.rnd_two_got_float:
 
-    ; round(float, ndigits): multiply by 10^ndigits, round, divide
-    mov [rbp - RND_NDIGITS], rbx  ; save ndigits
+    mov rdi, [rbp - RND_X]
+    mov esi, [rbp - RND_XTAG]
+    call round_self_double
+    test eax, eax
+    jz .rnd_two_not_float
 
-    ; Compute 10^ndigits (ndigits in rbx as int64)
-    mov rax, 1               ; multiplier = 1
-    test rbx, rbx
-    jz .rnd_two_no_scale
-    js .rnd_two_neg_scale
-    mov rcx, rbx
-.rnd_pow10_loop:
-    imul rax, 10
-    dec rcx
-    jnz .rnd_pow10_loop
-
-.rnd_two_no_scale:
-    ; xmm0 = x, rax = 10^ndigits
-    cvtsi2sd xmm1, rax      ; xmm1 = 10^ndigits
-    mulsd xmm0, xmm1        ; x * 10^n
-    cvtsd2si rax, xmm0      ; banker's round
-    cvtsi2sd xmm0, rax      ; back to double
-    divsd xmm0, xmm1        ; / 10^n
+    ; float_round_ndigits takes the count in edi, saturated to a range where
+    ; it is the sign that decides.
+    mov rax, [rbp - RND_ND]
+    cmp rax, 2000
+    jle .rnd_nd_lo
+    mov eax, 2000
+.rnd_nd_lo:
+    cmp rax, -2000
+    jge .rnd_nd_ok
+    mov eax, -2000
+.rnd_nd_ok:
+    mov edi, eax
+    call float_round_ndigits
     movq rax, xmm0
-    mov edx, TAG_FLOAT
+    V_FROM_F64 rax, rdx
     pop rbx
     leave
-    V_PACK rax, rdx             ; builtins return one Value
     ret
 
-.rnd_two_neg_scale:
-    ; Negative ndigits for float: e.g., round(1234.5, -2) = 1200.0
-    neg rbx
-    mov rax, 1
-    mov rcx, rbx
-.rnd_pow10n_loop:
-    imul rax, 10
-    dec rcx
-    jnz .rnd_pow10n_loop
-
-    cvtsi2sd xmm1, rax      ; xmm1 = 10^|ndigits|
-    divsd xmm0, xmm1        ; x / 10^n
-    cvtsd2si rax, xmm0      ; banker's round
-    cvtsi2sd xmm0, rax
-    mulsd xmm0, xmm1        ; * 10^n
-    movq rax, xmm0
-    mov edx, TAG_FLOAT
+.rnd_two_not_float:
+    mov rdi, [rbp - RND_X]
+    cmp qword [rbp - RND_XTAG], TAG_PTR
+    jne .rnd_two_dunder
+    lea rax, [rel int_type]
+    cmp [rdi + PyObject.ob_type], rax
+    je .rnd_two_bigint
+.rnd_two_dunder:
+    ; round(x, n) on anything else is __round__ with two arguments.  It used
+    ; to be a flat TypeError, so round(Decimal(1), 2) could not work.
+    mov rdi, [rbp - RND_X]
+    cmp qword [rbp - RND_XTAG], TAG_PTR
+    jne .rnd_type_error         ; an immediate has no __round__ of its own
+    mov rsi, [rbp - RND_ND]     ; dunder_call_2 takes the (payload, tag) pair
+    CSTRING rdx, "__round__"
+    mov ecx, TAG_SMALLINT
+    extern dunder_call_2
+    call dunder_call_2
+    V_UNPACK rax, rdx
+    test edx, edx
+    jz .rnd_type_error
     pop rbx
     leave
-    V_PACK rax, rdx             ; builtins return one Value
+    V_PACK rax, rdx
     ret
 
 .rnd_two_int:
-    ; round(int, ndigits) — ndigits >= 0: return int as-is
-    ; ndigits < 0: round to nearest 10^|ndigits|
-    test rbx, rbx
-    jns .rnd_int_ret         ; ndigits >= 0, int stays the same
-
-    ; Negative ndigits: round(1234, -2) = 1200
-    neg rbx
-    ; Compute 10^|ndigits|
-    mov rcx, 1
-.rnd_int_pow10:
-    imul rcx, 10
-    dec rbx
-    jnz .rnd_int_pow10
-
-    ; rax = x, rcx = divisor
-    ; rounded = (x + divisor/2) / divisor * divisor (away from zero simple)
-    ; Python uses banker's: convert to float, round, convert back
-    cvtsi2sd xmm0, rax
-    cvtsi2sd xmm1, rcx
-    divsd xmm0, xmm1
-    cvtsd2si rax, xmm0      ; banker's round
-    imul rax, rcx
-    RET_TAG_SMALLINT
+    ; round(int, n).  A non-negative n leaves it alone; a negative one rounds
+    ; to the nearest multiple of 10**|n|, ties to even.  It used to do that
+    ; through a double, which is wrong the moment the int does not fit one.
+    mov rax, [rbp - RND_ND]
+    test rax, rax
+    jns .rnd_int_identity
+    mov rdi, [rbp - RND_X]
+    extern smallint_to_pyint
+    call smallint_to_pyint
+    mov [rbp - RND_SAVE], rax
+    mov rdi, rax
+    mov rsi, [rbp - RND_ND]
+    call int_round_to_power10
+    mov rbx, rax
+    mov rdi, [rbp - RND_SAVE]
+    extern int_dealloc
+    call int_dealloc
+    mov rax, rbx
+    mov edx, TAG_PTR
     pop rbx
     leave
-    V_PACK rax, rdx             ; builtins return one Value
+    V_PACK rax, rdx
+    ret
+
+.rnd_two_bigint:
+    mov rdi, [rbp - RND_X]
+    mov rax, [rbp - RND_ND]
+    test rax, rax
+    jns .rnd_bigint_identity
+    mov rsi, rax
+    call int_round_to_power10
+    mov edx, TAG_PTR
+    pop rbx
+    leave
+    V_PACK rax, rdx
+    ret
+.rnd_bigint_identity:
+    INCREF rdi
+    mov rax, rdi
+    mov edx, TAG_PTR
+    pop rbx
+    leave
+    V_PACK rax, rdx
     ret
 
 .rnd_error:
@@ -1946,6 +2001,182 @@ DEF_FUNC builtin_round_fn, RND_FRAME
 .rnd_type_error:
     RAISE exc_TypeError_type, "type cannot be rounded"
 END_FUNC builtin_round_fn
+
+;; ============================================================================
+;; round_self_double(rdi = payload, esi = tag)
+;;   -> xmm0 = the double, eax = 1 when it is one; eax = 0 otherwise
+;;
+;; A float arrives three ways -- as an immediate, as a PyFloatObject, and as a
+;; subclass instance with the double inline at the base's offset -- and both
+;; arms of round() have to know all three.
+;; ============================================================================
+DEF_FUNC_LOCAL round_self_double
+    mov rax, rdi
+    mov edx, esi
+    cmp edx, TAG_FLOAT
+    je .rsd_raw
+    cmp edx, TAG_PTR
+    jne .rsd_no
+    lea rcx, [rel float_type]
+    cmp [rax + PyObject.ob_type], rcx
+    je .rsd_obj
+    mov rcx, [rax + PyObject.ob_type]
+    test qword [rcx + PyTypeObject.tp_flags], TYPE_FLAG_FLOAT_SUBCLASS
+    jz .rsd_no
+.rsd_obj:
+    movsd xmm0, [rax + PyFloatObject.value]
+    mov eax, 1
+    leave
+    ret
+.rsd_raw:
+    movq xmm0, rax
+    mov eax, 1
+    leave
+    ret
+.rsd_no:
+    xor eax, eax
+    leave
+    ret
+END_FUNC round_self_double
+
+;; ============================================================================
+;; int_round_to_power10(rdi = a GMP-backed PyIntObject*, rsi = ndigits < 0)
+;;   -> rax = a new int, rounded to the nearest multiple of 10**|ndigits|
+;;
+;; Ties to even, as Python's round() is throughout.  In GMP because the whole
+;; point is the ints a double cannot hold: round(10**30, -5) used to be
+;; "type cannot be rounded", and round(1234, -2) went through a double.
+;; ============================================================================
+IRP_SELF  equ 8
+IRP_ND    equ 16
+IRP_POW   equ 32              ; mpz_t, 16 bytes
+IRP_Q     equ 48
+IRP_R     equ 64
+IRP_T     equ 80
+IRP_FRAME equ 96              ; + 1 push + 8 pad = 112, 16-aligned
+DEF_FUNC_LOCAL int_round_to_power10, IRP_FRAME
+    push rbx
+    sub rsp, 8
+    mov [rbp - IRP_SELF], rdi
+    neg rsi
+    mov [rbp - IRP_ND], rsi     ; |ndigits|
+
+    ; 10**|ndigits|.  An exponent past what any reachable int has digits for
+    ; still works: the quotient is simply 0 or +-1.
+    lea rdi, [rbp - IRP_POW]
+    call __gmpz_init wrt ..plt
+    lea rdi, [rbp - IRP_Q]
+    call __gmpz_init wrt ..plt
+    lea rdi, [rbp - IRP_R]
+    call __gmpz_init wrt ..plt
+    lea rdi, [rbp - IRP_T]
+    call __gmpz_init wrt ..plt
+
+    mov rax, [rbp - IRP_ND]
+    cmp rax, 100000
+    jle .irp_pow_ok
+    mov qword [rbp - IRP_ND], 100000    ; far past any int we can hold
+.irp_pow_ok:
+    lea rdi, [rbp - IRP_POW]
+    mov esi, 10
+    mov rdx, [rbp - IRP_ND]
+    call __gmpz_ui_pow_ui wrt ..plt
+
+    ; q, r = trunc-divide.  GMP's remainder carries the dividend's sign,
+    ; which is what makes the half comparison below sign-agnostic.
+    mov rdi, [rbp - IRP_SELF]
+    INT_NEED_MPZ rdi
+    lea rdi, [rbp - IRP_Q]
+    lea rsi, [rbp - IRP_R]
+    mov rdx, [rbp - IRP_SELF]
+    add rdx, PyIntObject.mpz
+    lea rcx, [rbp - IRP_POW]
+    call __gmpz_tdiv_qr wrt ..plt
+
+    ; 2*|r| against 10**|n|
+    lea rdi, [rbp - IRP_T]
+    lea rsi, [rbp - IRP_R]
+    mov edx, 1
+    call __gmpz_mul_2exp wrt ..plt
+    lea rdi, [rbp - IRP_T]
+    lea rsi, [rbp - IRP_POW]
+    call __gmpz_cmpabs wrt ..plt
+    test eax, eax
+    js .irp_done                ; below half: the quotient stands
+    jz .irp_tie
+
+    ; Above half: step the quotient away from zero.
+.irp_step:
+    lea rdi, [rbp - IRP_R]
+    xor esi, esi
+    call __gmpz_cmp_si wrt ..plt
+    test eax, eax
+    js .irp_step_down
+    lea rdi, [rbp - IRP_T]
+    mov esi, 1
+    call __gmpz_set_si wrt ..plt
+    jmp .irp_step_add
+.irp_step_down:
+    lea rdi, [rbp - IRP_T]
+    mov rsi, -1                 ; a 64-bit signed long: `mov esi, -1` would
+                                ; zero-extend to 4294967295
+    call __gmpz_set_si wrt ..plt
+.irp_step_add:
+    lea rdi, [rbp - IRP_Q]
+    lea rsi, [rbp - IRP_Q]
+    lea rdx, [rbp - IRP_T]
+    call __gmpz_add wrt ..plt
+    jmp .irp_done
+
+.irp_tie:
+    ; Exactly half: to the even quotient.  q is even when q - 2*(q/2) is 0.
+    lea rdi, [rbp - IRP_T]
+    lea rsi, [rbp - IRP_Q]
+    mov edx, 2
+    call __gmpz_tdiv_q_ui wrt ..plt
+    test eax, eax               ; the remainder of q / 2
+    jz .irp_done                ; q already even
+    jmp .irp_step
+
+.irp_done:
+    ; result = q * 10**|n|
+    lea rdi, [rbp - IRP_Q]
+    lea rsi, [rbp - IRP_Q]
+    lea rdx, [rbp - IRP_POW]
+    call __gmpz_mul wrt ..plt
+
+    mov edi, PyIntObject_size
+    extern ap_malloc
+    call ap_malloc
+    mov rbx, rax
+    mov qword [rbx + PyObject.ob_refcnt], 1
+    lea rcx, [rel int_type]
+    mov [rbx + PyObject.ob_type], rcx
+    mov qword [rbx + PyIntObject.compact], 0
+    INT_NEED_MPZ rbx
+    lea rdi, [rbx + PyIntObject.mpz]
+    call __gmpz_init wrt ..plt
+    lea rdi, [rbx + PyIntObject.mpz]
+    lea rsi, [rbp - IRP_Q]
+    extern __gmpz_set
+    call __gmpz_set wrt ..plt
+
+    lea rdi, [rbp - IRP_POW]
+    call __gmpz_clear wrt ..plt
+    lea rdi, [rbp - IRP_Q]
+    call __gmpz_clear wrt ..plt
+    lea rdi, [rbp - IRP_R]
+    call __gmpz_clear wrt ..plt
+    lea rdi, [rbp - IRP_T]
+    call __gmpz_clear wrt ..plt
+
+    mov rdi, rbx
+    call int_shrink
+    add rsp, 8
+    pop rbx
+    leave
+    ret
+END_FUNC int_round_to_power10
 
 ;; ============================================================================
 ;; builtin_pow_fn(args, nargs) - pow(base, exp[, mod])
