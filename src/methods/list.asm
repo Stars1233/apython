@@ -1596,7 +1596,7 @@ extern tuple_repeat
 
 
 DEF_FUNC_BARE list_dunder_getitem
-    REQUIRE_SELF_BARE list_type
+    REQUIRE_SELF_BARE list_type, "__getitem__"
     mov rax, [rdi]          ; self
     mov rsi, [rdi + 8]     ; key payload
     mov rdi, rax
@@ -1608,7 +1608,7 @@ END_FUNC list_dunder_getitem
 ;; ============================================================================
 extern list_ass_subscript
 DEF_FUNC list_dunder_setitem
-    REQUIRE_SELF list_type
+    REQUIRE_SELF list_type, "__setitem__"
     mov rax, [rdi]          ; self
     mov rsi, [rdi + 8]      ; args[1] = key   (already a Value)
     mov rdx, [rdi + 16]     ; args[2] = value (already a Value)
@@ -1624,7 +1624,7 @@ END_FUNC list_dunder_setitem
 ;; list.__delitem__(self, key) → calls list_ass_subscript with NULL value
 ;; ============================================================================
 DEF_FUNC list_dunder_delitem
-    REQUIRE_SELF list_type
+    REQUIRE_SELF list_type, "__delitem__"
     mov rax, [rdi]          ; self
     mov rsi, [rdi + 8]     ; key payload
     xor edx, edx            ; a NULL value Value means "delete"
@@ -1642,7 +1642,7 @@ END_FUNC list_dunder_delitem
 ;; ============================================================================
 extern list_contains
 DEF_FUNC list_dunder_contains
-    REQUIRE_SELF list_type
+    REQUIRE_SELF list_type, "__contains__"
     mov rax, [rdi]          ; self
     mov rsi, [rdi + 8]     ; item payload
     mov rdi, rax
@@ -1668,7 +1668,7 @@ END_FUNC list_dunder_contains
 ;; list.__len__(self) → returns SmallInt length
 ;; ============================================================================
 DEF_FUNC list_dunder_len
-    REQUIRE_SELF list_type
+    REQUIRE_SELF list_type, "__len__"
     mov rax, [rdi]          ; self
     mov rax, [rax + PyListObject.ob_size]
     mov rdi, rax
@@ -1683,7 +1683,7 @@ END_FUNC list_dunder_len
 ;; ============================================================================
 extern list_inplace_concat
 DEF_FUNC_BARE list_dunder_iadd
-    REQUIRE_SELF_BARE list_type
+    REQUIRE_SELF_BARE list_type, "__iadd__"
     mov rax, [rdi]          ; self
     mov rsi, [rdi + 8]     ; other payload
     V_UNPACK rsi, rcx       ; args[1]

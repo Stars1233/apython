@@ -160,6 +160,16 @@ one-line fix.
   those finalizers never run.  `tests/test_del_and_gc_state.py` records this
   divergence in its recorded transcript deliberately -- see the note there.
 
+- **The default `repr` names the type but not the address.**  CPython answers
+  `<set_iterator object at 0x7f...>`; a type with no `tp_repr` answers
+  `<set_iterator>` here, and a plain class instance answers `<instance>`
+  rather than `<__main__.C object at 0x...>`.  Nothing in the tree formats a
+  pointer, and deliberately: an address cannot match CPython's, and every
+  test is a diff against it.  What was wrong and is fixed is the NULL --
+  `obj_repr` used to answer a NULL Value with no exception set, so `print()`
+  silently skipped the argument and `repr(iter({1}))` handed its own caller a
+  missing argument.
+
 - **Traceback rendering has no caret line.**  CPython underlines the failing
   expression (`^^^^^^^^`, and `~~^~~` for binary operators and subscripts)
   using the column fields of the location table and, for the anchor forms, a
@@ -256,11 +266,21 @@ than lying — but they are ordinary Python that does not work:
   needs a `tp_repr` and a `tp_dict` carrying `__get__`/`__set__`, which is
   CLAUDE.md's "a builtin's behaviour that lives only in a slot".
 
-- **`set.__and__(frozenset(...), ...)` is accepted** where CPython raises,
-  because set and frozenset are registered from one shared table and the
-  receiver check has to admit both.  CPython gives frozenset its own
-  descriptors.  We are the more permissive of the two; nothing depends on the
-  refusal.
+- **`set.__contains__(frozenset(...), x)` is accepted** where CPython raises.
+  The eight operators, `__len__` and `__iter__` are each type's own now, and
+  refuse the sibling; `__contains__` is still the shared
+  `generic_method_contains`.  CPython's refusal there carries the
+  *wrapper*-descriptor wording -- "descriptor '__contains__' for 'set'
+  objects doesn't apply to a 'frozenset' object" -- rather than the method
+  descriptor's "requires ... but received", and this tree does not draw that
+  distinction yet.  Matching the refusal without the wording would trade one
+  divergence for another.
+
+- **A descriptor's arity is checked before its receiver.**  CPython asks
+  which object it was handed first, so `int.__neg__(2.5, 1)` is "descriptor
+  '__neg__' requires a 'int' object"; here the argument count is rejected
+  first and the message is "expected exactly one argument".  Only the order
+  and the wording differ -- both raise TypeError.
 
 - **asyncio `Task`s and `wait_for` wrappers are not GC-tracked.**  A `Task`
   holds its coroutine, which holds a frame, whose locals can hold the task --

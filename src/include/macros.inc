@@ -160,6 +160,20 @@
     lea %1, [rel %%str]
 %endmacro
 
+; CSTRING_DUNDER reg, suffix -- the address of "__<suffix>__".
+;
+; A dunder generator knows its own suffix as a bare token, and NASM does not
+; expand one inside a string literal.  %defstr turns the token into a string
+; first, which is the only way to build the name the descriptor is registered
+; under from the name the macro was invoked with.
+%macro CSTRING_DUNDER 2
+    %defstr CSTRING_DUNDER_STR %2
+    section .rodata
+    %%str: db "__", CSTRING_DUNDER_STR, "__", 0
+    section .text
+    lea %1, [rel %%str]
+%endmacro
+
 ; REQUIRE_SELF / REQUIRE_SELF_BARE type_label
 ;
 ; A dunder registered by name is called with whatever the caller passed, and
@@ -174,25 +188,38 @@
 ;
 ; Two spellings only because of the stack: inside DEF_FUNC the frame has
 ; already realigned rsp, and inside DEF_FUNC_BARE it has not.
-%macro REQUIRE_SELF 1
+; An optional second argument names the descriptor, so the TypeError reads
+; as CPython's "descriptor '__and__' requires a 'set' object"; without one
+; the two type names carry the message alone.
+%macro REQUIRE_SELF 1-2 0
     push rdi
     push rsi                    ; rsi is the argument COUNT here, not a value
     mov rdi, [rdi]
     lea rsi, [rel %1]
     xor edx, edx
+%ifnum %2
+    xor ecx, ecx
+%else
+    CSTRING rcx, %2
+%endif
     extern dunder_require_self
     call dunder_require_self
     pop rsi
     pop rdi
 %endmacro
 
-%macro REQUIRE_SELF_BARE 1
+%macro REQUIRE_SELF_BARE 1-2 0
     push rdi
     push rsi
     sub rsp, 8
     mov rdi, [rdi]
     lea rsi, [rel %1]
     xor edx, edx
+%ifnum %2
+    xor ecx, ecx
+%else
+    CSTRING rcx, %2
+%endif
     extern dunder_require_self
     call dunder_require_self
     add rsp, 8

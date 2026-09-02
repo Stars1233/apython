@@ -160,6 +160,7 @@ test_format_float_spec
 test_format_map
 test_format
 test_format_spec
+test_frozenset_descriptors
 test_frozenset
 test_fstrings
 test_func_attrs

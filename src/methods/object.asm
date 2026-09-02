@@ -399,12 +399,14 @@ END_FUNC object_method_init_subclass
 ;; recursion a re-dispatch would cause.  An immediate int or float has no
 ;; ob_type to read a slot from, so it goes through obj_repr, which knows them.
 ;; ============================================================================
-%macro DEF_DUNDER_STRREPR 2     ; %1 = type prefix, %2 = tp_str or tp_repr
+%macro DEF_DUNDER_STRREPR 3     ; %1 = type prefix, %2 = tp_str or tp_repr, %3 = the dunder's own name
 DEF_FUNC %1_dunder_%2
     test rsi, rsi
     jz %%bad
     mov rdi, [rdi]
     lea rsi, [rel %1_type]
+    xor edx, edx
+    CSTRING rcx, %3             ; %2 is the slot name, not the dunder's
     extern dunder_require_self
     call dunder_require_self
     mov rdi, rax
@@ -446,6 +448,8 @@ DEF_FUNC %1_dunder_len
 %else
     lea rdx, [rel %2]
 %endif
+    CSTRING rcx, "__len__"
+
     extern dunder_require_self
     call dunder_require_self
     mov rdi, rax
@@ -485,6 +489,8 @@ DEF_FUNC %1_dunder_iter
 %else
     lea rdx, [rel %2]
 %endif
+    CSTRING rcx, "__iter__"
+
     extern dunder_require_self
     call dunder_require_self
     mov rdi, rax
@@ -513,13 +519,15 @@ END_FUNC %1_dunder_iter
 ; list and tuple already have hand-written ones.
 DEF_DUNDER_LEN dict
 DEF_DUNDER_LEN str
-DEF_DUNDER_LEN set, frozenset_type
+DEF_DUNDER_LEN set
+DEF_DUNDER_LEN frozenset
 DEF_DUNDER_LEN bytes
 DEF_DUNDER_ITER dict
 DEF_DUNDER_ITER list
 DEF_DUNDER_ITER tuple
 DEF_DUNDER_ITER str
-DEF_DUNDER_ITER set, frozenset_type
+DEF_DUNDER_ITER set
+DEF_DUNDER_ITER frozenset
 DEF_DUNDER_ITER bytes
 
 
@@ -537,6 +545,8 @@ DEF_FUNC %1_dunder_%2
     jne %%bad
     mov rdi, [rdi]              ; args[0] = self, a Value
     lea rsi, [rel %1_type]
+    xor edx, edx
+    CSTRING_DUNDER rcx, %2
     extern dunder_require_self
     call dunder_require_self
     mov rdi, rax
@@ -583,6 +593,8 @@ DEF_FUNC %1_dunder_%2, DB_FRAME
     mov rdi, [rdi]
     mov [rbp - DB_RHS], rsi
     lea rsi, [rel %1_type]
+    xor edx, edx
+    CSTRING_DUNDER rcx, %2
     extern dunder_require_self
     call dunder_require_self
     mov rdi, rax
@@ -612,6 +624,8 @@ DEF_FUNC %1_dunder_%2, DB_FRAME
     mov rdi, [rdi]
     mov [rbp - DB_RHS], rsi
     lea rsi, [rel %1_type]
+    xor edx, edx
+    CSTRING_DUNDER rcx, %2
     extern dunder_require_self
     call dunder_require_self
     mov rdi, rax
@@ -772,6 +786,7 @@ DEF_FUNC %1_dunder_%2, DB_FRAME
 %else
     lea rdx, [rel %6]
 %endif
+    CSTRING_DUNDER rcx, %2
     extern dunder_require_self
     call dunder_require_self
     mov rsi, rax
@@ -784,6 +799,7 @@ DEF_FUNC %1_dunder_%2, DB_FRAME
 %else
     lea rdx, [rel %6]
 %endif
+    CSTRING_DUNDER rcx, %2
     extern dunder_require_self
     call dunder_require_self
     mov rdi, rax
@@ -866,6 +882,8 @@ DEF_FUNC %1_dunder_%2, 16
     mov rdi, [rsp]
 %endif
     lea rsi, [rel %1_type]
+    xor edx, edx
+    CSTRING_DUNDER rcx, %2
     extern dunder_require_self
     call dunder_require_self
 
@@ -906,6 +924,8 @@ DEF_FUNC %1_dunder_bool
     jne %%bad
     mov rdi, [rdi]
     lea rsi, [rel %1_type]
+    xor edx, edx
+    CSTRING rcx, "__bool__"
     extern dunder_require_self
     call dunder_require_self
     mov rdi, rax
@@ -1123,19 +1143,35 @@ DEF_DUNDER_BINARY dict, or,  nb_or, 0, dunder_operand_any
 DEF_DUNDER_BINARY dict, ror, nb_or, 1, dunder_operand_any
 DEF_SEQ_DUNDER    dict, ior, dict_nb_ior
 
-DEF_DUNDER_BINARY set, sub,  nb_subtract, 0, dunder_operand_any, frozenset_type
-DEF_DUNDER_BINARY set, rsub, nb_subtract, 1, dunder_operand_any, frozenset_type
-DEF_DUNDER_BINARY set, and,  nb_and,      0, dunder_operand_any, frozenset_type
-DEF_DUNDER_BINARY set, rand, nb_and,      1, dunder_operand_any, frozenset_type
-DEF_DUNDER_BINARY set, xor,  nb_xor,      0, dunder_operand_any, frozenset_type
-DEF_DUNDER_BINARY set, rxor, nb_xor,      1, dunder_operand_any, frozenset_type
-DEF_DUNDER_BINARY set, or,   nb_or,       0, dunder_operand_any, frozenset_type
-DEF_DUNDER_BINARY set, ror,  nb_or,       1, dunder_operand_any, frozenset_type
+;; The set operators.  These used to be registered from one shared table into
+;; both types' dicts, so each had to name frozenset_type as a second
+;; acceptable receiver -- and set.__and__(frozenset(...), ...) was accepted
+;; where CPython raises.  CPython gives frozenset its own eight descriptors;
+;; so do we, and each side now names only itself.  The bodies are identical
+;; apart from the receiver check: frozenset_type carries set_number_methods,
+;; so both reach the same slots.
+DEF_DUNDER_BINARY set, sub,  nb_subtract, 0, dunder_operand_any
+DEF_DUNDER_BINARY set, rsub, nb_subtract, 1, dunder_operand_any
+DEF_DUNDER_BINARY set, and,  nb_and,      0, dunder_operand_any
+DEF_DUNDER_BINARY set, rand, nb_and,      1, dunder_operand_any
+DEF_DUNDER_BINARY set, xor,  nb_xor,      0, dunder_operand_any
+DEF_DUNDER_BINARY set, rxor, nb_xor,      1, dunder_operand_any
+DEF_DUNDER_BINARY set, or,   nb_or,       0, dunder_operand_any
+DEF_DUNDER_BINARY set, ror,  nb_or,       1, dunder_operand_any
+
+DEF_DUNDER_BINARY frozenset, sub,  nb_subtract, 0, dunder_operand_any
+DEF_DUNDER_BINARY frozenset, rsub, nb_subtract, 1, dunder_operand_any
+DEF_DUNDER_BINARY frozenset, and,  nb_and,      0, dunder_operand_any
+DEF_DUNDER_BINARY frozenset, rand, nb_and,      1, dunder_operand_any
+DEF_DUNDER_BINARY frozenset, xor,  nb_xor,      0, dunder_operand_any
+DEF_DUNDER_BINARY frozenset, rxor, nb_xor,      1, dunder_operand_any
+DEF_DUNDER_BINARY frozenset, or,   nb_or,       0, dunder_operand_any
+DEF_DUNDER_BINARY frozenset, ror,  nb_or,       1, dunder_operand_any
 
 ;; int's nb_bool takes the (payload, tag) pair rather than a Value -- it hands
 ;; the pair straight to int_unwrap -- so it cannot go through the macro.
 DEF_FUNC int_dunder_bool
-    REQUIRE_SELF int_type
+    REQUIRE_SELF int_type, "__bool__"
     cmp rsi, 1
     jne .idb_bad
     mov rdi, [rdi]
@@ -1157,13 +1193,13 @@ DEF_FUNC int_dunder_bool
     RAISE exc_TypeError_type, "expected exactly one argument"
 END_FUNC int_dunder_bool
 
-DEF_DUNDER_STRREPR str, str
-DEF_DUNDER_STRREPR str, repr
-DEF_DUNDER_STRREPR bytes, str
-DEF_DUNDER_STRREPR bytes, repr
-DEF_DUNDER_STRREPR int, repr
-DEF_DUNDER_STRREPR float, repr
-DEF_DUNDER_STRREPR complex, repr
+DEF_DUNDER_STRREPR str, str, "__str__"
+DEF_DUNDER_STRREPR str, repr, "__repr__"
+DEF_DUNDER_STRREPR bytes, str, "__str__"
+DEF_DUNDER_STRREPR bytes, repr, "__repr__"
+DEF_DUNDER_STRREPR int, repr, "__repr__"
+DEF_DUNDER_STRREPR float, repr, "__repr__"
+DEF_DUNDER_STRREPR complex, repr, "__repr__"
 
 ;; ############################################################################
 ;;                         SET METHODS

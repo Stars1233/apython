@@ -1091,7 +1091,7 @@ END_FUNC set_method_isdisjoint
 ;; ============================================================================
 global frozenset_dunder_hash
 DEF_FUNC frozenset_dunder_hash
-    REQUIRE_SELF frozenset_type
+    REQUIRE_SELF frozenset_type, "__hash__"
     cmp rsi, 1
     jne .fdh_error
     mov rdi, [rdi]

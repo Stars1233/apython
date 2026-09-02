@@ -2342,7 +2342,7 @@ END_FUNC ba_shared_join
 ;; CPython's own code calls them directly, and `del b[i]` compiles to
 ;; DELETE_SUBSCR but `b.__delitem__(i)` does not.
 DEF_FUNC bytearray_dunder_len
-    REQUIRE_SELF bytearray_type
+    REQUIRE_SELF bytearray_type, "__len__"
     test rsi, rsi
     jz .badl_bad
     mov rdi, [rdi]
@@ -2356,7 +2356,7 @@ DEF_FUNC bytearray_dunder_len
 END_FUNC bytearray_dunder_len
 
 DEF_FUNC bytearray_dunder_iter
-    REQUIRE_SELF bytearray_type
+    REQUIRE_SELF bytearray_type, "__iter__"
     test rsi, rsi
     jz .badi_bad
     mov rdi, [rdi]
@@ -2369,7 +2369,7 @@ DEF_FUNC bytearray_dunder_iter
 END_FUNC bytearray_dunder_iter
 
 DEF_FUNC bytearray_dunder_getitem
-    REQUIRE_SELF bytearray_type
+    REQUIRE_SELF bytearray_type, "__getitem__"
     cmp rsi, 2
     jne .badg_bad
     mov rsi, [rdi + 8]
@@ -2383,7 +2383,7 @@ DEF_FUNC bytearray_dunder_getitem
 END_FUNC bytearray_dunder_getitem
 
 DEF_FUNC bytearray_dunder_setitem
-    REQUIRE_SELF bytearray_type
+    REQUIRE_SELF bytearray_type, "__setitem__"
     cmp rsi, 3
     jne .bads_bad
     mov rdx, [rdi + 16]
@@ -2399,7 +2399,7 @@ DEF_FUNC bytearray_dunder_setitem
 END_FUNC bytearray_dunder_setitem
 
 DEF_FUNC bytearray_dunder_delitem
-    REQUIRE_SELF bytearray_type
+    REQUIRE_SELF bytearray_type, "__delitem__"
     cmp rsi, 2
     jne .badd_bad
     mov rsi, [rdi + 8]
@@ -2415,7 +2415,7 @@ DEF_FUNC bytearray_dunder_delitem
 END_FUNC bytearray_dunder_delitem
 
 DEF_FUNC bytearray_dunder_contains
-    REQUIRE_SELF bytearray_type
+    REQUIRE_SELF bytearray_type, "__contains__"
     cmp rsi, 2
     jne .badc_bad
     mov rsi, [rdi + 8]

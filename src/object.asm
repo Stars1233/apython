@@ -233,14 +233,64 @@ DEF_FUNC obj_repr
     leave
     ret
 
-.null_obj:
 .no_repr:
+    ; A type with no tp_repr used to answer a NULL Value and set no
+    ; exception, and every caller had to guess what that meant: print()
+    ; skipped the argument, and repr(iter({1})) handed ITS caller a missing
+    ; argument -- or, one frame further on, a segfault.
+    ;
+    ; CPython's default is "<set_iterator object at 0x...>".  The address is
+    ; the one part this tree deliberately does not print -- nothing here
+    ; formats a pointer, because it cannot match CPython's and every test is
+    ; a diff against it -- so the name alone, in the same shape as the
+    ; <function> and <module> placeholders beside it.
+    mov rax, [rdi + PyObject.ob_type]
+    test rax, rax
+    jz .null_obj
+    mov rdi, rax
+    call obj_default_repr
+    mov edx, TAG_PTR
+    leave
+    ret
+
+.null_obj:
     ; Return a NULL *Value*, not just a zero payload: callers test the tag,
     ; and leaving edx stale made print() dereference the NULL.
     RET_NULL
     leave
     ret
 END_FUNC obj_repr
+
+; obj_default_repr(rdi = a PyTypeObject*) -> rax = PyStrObject* "<name>"
+;
+; The repr a type with no tp_repr gets.  Its own function because instance
+; and module reprs want the same shape, and because rbt_buf is shared with
+; the TypeError composer -- neither can be live across the other.
+global obj_default_repr
+DEF_FUNC obj_default_repr
+    push rbx
+    sub rsp, 8                  ; realign: 1 push + 8 = 16
+    mov rbx, rdi
+    lea rdi, [rel rbt_buf]
+    lea rsi, [rel odr_open]
+    call rbt_append_cstr
+    mov rdi, rax
+    mov rsi, [rbx + PyTypeObject.tp_name]
+    test rsi, rsi
+    jnz .odr_have_name
+    lea rsi, [rel rbt_unknown]
+.odr_have_name:
+    call rbt_append_cstr
+    mov rdi, rax
+    lea rsi, [rel odr_close]
+    call rbt_append_cstr
+    lea rdi, [rel rbt_buf]
+    call str_from_cstr
+    add rsp, 8
+    pop rbx
+    leave
+    ret
+END_FUNC obj_default_repr
 
 ; obj_str(rdi=value) -> PyObject* (string)
 ; Decodes the Value, then dispatches: int immediate → int_repr, pointer → tp_str
@@ -469,7 +519,11 @@ rbt_open:    db ": '", 0
 rbt_and:     db "' and '", 0
 rbt_close:   db "'", 0
 rbt_unknown: db "object", 0
-drs_prefix:  db "descriptor requires a '", 0
+odr_open:    db "<", 0
+odr_close:   db ">", 0
+drs_prefix:  db "descriptor ", 0
+drs_after_name: db "' ", 0
+drs_requires: db "requires a '", 0
 drs_middle:  db "' object but received a '", 0
 mah_digits:  db "0123456789abcdef", 0
 
@@ -537,7 +591,8 @@ rtn_compose:
 END_FUNC raise_type_error_with_typename
 
 ; dunder_require_self(rdi = self Value, rsi = the type whose method this is,
-;                     rdx = a second acceptable type, or 0)
+;                     rdx = a second acceptable type, or 0,
+;                     rcx = the descriptor's own name, or 0)
 ;   -> rax = the self Value, unchanged; does not return if the type is wrong
 ;
 ; A dunder reached BY NAME is handed whatever the caller passed, and the slot
@@ -548,8 +603,9 @@ END_FUNC raise_type_error_with_typename
 ; one has to ask this first.
 ;
 ; CPython words it "descriptor '__neg__' requires a 'int' object but received
-; a 'float'".  Threading the descriptor's own name through every generator
-; buys one clause, so the two type names carry the message instead.
+; a 'float'".  The generators know their own suffix, so they pass it and the
+; message reads as CPython's; a caller with nothing to say passes 0 and gets
+; the two type names alone.
 ;
 ; A subclass is accepted: int.__neg__(D(2)) for class D(int) is how a
 ; subclass reaches the base's operator, and is the reason this is
@@ -557,17 +613,21 @@ END_FUNC raise_type_error_with_typename
 ;
 ; The second type is for the pairs that genuinely share one function.  set
 ; and frozenset are registered from one table -- they are siblings, neither a
-; subtype of the other -- so set_dunder_len has to answer for both.
+; subtype of the other -- so set_dunder_len has to answer for both.  The
+; eight set operators used to need it too, and no longer do: each type
+; carries its own bodies now.
 DRS_SELF  equ 8
 DRS_TYPE  equ 16
 DRS_ALT   equ 24
-DRS_FRAME equ 32
+DRS_NAME  equ 32
+DRS_FRAME equ 48            ; + 0 pushes = 48
 
 global dunder_require_self
 DEF_FUNC dunder_require_self, DRS_FRAME
     mov [rbp - DRS_SELF], rdi
     mov [rbp - DRS_TYPE], rsi
     mov [rbp - DRS_ALT], rdx
+    mov [rbp - DRS_NAME], rcx
     call value_type
     test rax, rax
     jz .drs_bad
@@ -594,6 +654,22 @@ DEF_FUNC dunder_require_self, DRS_FRAME
 .drs_bad:
     lea rdi, [rel rbt_buf]
     lea rsi, [rel drs_prefix]
+    call rbt_append_cstr
+    mov rdi, rax
+    mov rsi, [rbp - DRS_NAME]
+    test rsi, rsi
+    jz .drs_no_name
+    lea rsi, [rel rbt_close]        ; the opening quote
+    call rbt_append_cstr
+    mov rdi, rax
+    mov rsi, [rbp - DRS_NAME]
+    call rbt_append_cstr
+    mov rdi, rax
+    lea rsi, [rel drs_after_name]
+    call rbt_append_cstr
+    mov rdi, rax
+.drs_no_name:
+    lea rsi, [rel drs_requires]
     call rbt_append_cstr
     mov rdi, rax
     mov rsi, [rbp - DRS_TYPE]

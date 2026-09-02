@@ -6040,7 +6040,7 @@ END_FUNC memoryview_len
 ;; tp_dict answers hasattr() and getattr() wrong, and _pyio reaches
 ;; __setitem__ through the abstract base classes rather than the syntax.
 DEF_FUNC memoryview_dunder_getitem
-    REQUIRE_SELF memoryview_type
+    REQUIRE_SELF memoryview_type, "__getitem__"
     cmp rsi, 2
     jne .mdg_bad
     mov rsi, [rdi + 8]
@@ -6053,7 +6053,7 @@ DEF_FUNC memoryview_dunder_getitem
 END_FUNC memoryview_dunder_getitem
 
 DEF_FUNC memoryview_dunder_setitem
-    REQUIRE_SELF memoryview_type
+    REQUIRE_SELF memoryview_type, "__setitem__"
     cmp rsi, 3
     jne .mds_bad
     mov rdx, [rdi + 16]
@@ -6069,7 +6069,7 @@ DEF_FUNC memoryview_dunder_setitem
 END_FUNC memoryview_dunder_setitem
 
 DEF_FUNC memoryview_dunder_len
-    REQUIRE_SELF memoryview_type
+    REQUIRE_SELF memoryview_type, "__len__"
     test rsi, rsi
     jz .mdl_bad
     mov rdi, [rdi]

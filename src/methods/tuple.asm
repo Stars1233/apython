@@ -37,7 +37,7 @@ extern tuple_subscript
 section .text
 
 DEF_FUNC_BARE tuple_dunder_getitem
-    REQUIRE_SELF_BARE tuple_type
+    REQUIRE_SELF_BARE tuple_type, "__getitem__"
     mov rax, [rdi]          ; self
     mov rsi, [rdi + 8]      ; the key Value
     mov rdi, rax
@@ -45,7 +45,7 @@ DEF_FUNC_BARE tuple_dunder_getitem
 END_FUNC tuple_dunder_getitem
 
 DEF_FUNC tuple_dunder_contains
-    REQUIRE_SELF tuple_type
+    REQUIRE_SELF tuple_type, "__contains__"
     mov rax, [rdi]          ; self
     mov rsi, [rdi + 8]      ; the item Value
     mov rdi, rax
@@ -65,7 +65,7 @@ DEF_FUNC tuple_dunder_contains
 END_FUNC tuple_dunder_contains
 
 DEF_FUNC tuple_dunder_len
-    REQUIRE_SELF tuple_type
+    REQUIRE_SELF tuple_type, "__len__"
     mov rax, [rdi]          ; self
     mov rdi, [rax + PyTupleObject.ob_size]
     call int_from_i64
@@ -75,7 +75,7 @@ DEF_FUNC tuple_dunder_len
 END_FUNC tuple_dunder_len
 
 DEF_FUNC_BARE tuple_dunder_add
-    REQUIRE_SELF_BARE tuple_type
+    REQUIRE_SELF_BARE tuple_type, "__add__"
     mov rax, [rdi]
     mov rsi, [rdi + 8]
     mov rdi, rax
@@ -83,7 +83,7 @@ DEF_FUNC_BARE tuple_dunder_add
 END_FUNC tuple_dunder_add
 
 DEF_FUNC_BARE tuple_dunder_mul
-    REQUIRE_SELF_BARE tuple_type
+    REQUIRE_SELF_BARE tuple_type, "__mul__"
     mov rax, [rdi]
     mov rsi, [rdi + 8]
     mov rdi, rax
@@ -93,7 +93,7 @@ END_FUNC tuple_dunder_mul
 ;; __rmul__ has the operands the other way round, and tuple_repeat wants the
 ;; sequence first.
 DEF_FUNC_BARE tuple_dunder_rmul
-    REQUIRE_SELF_BARE tuple_type
+    REQUIRE_SELF_BARE tuple_type, "__rmul__"
     mov rax, [rdi]
     mov rsi, [rdi + 8]
     mov rdi, rax

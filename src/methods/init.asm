@@ -116,6 +116,16 @@ extern set_dunder_rsub
 extern set_dunder_rand
 extern set_dunder_rxor
 extern set_dunder_ror
+extern frozenset_dunder_len
+extern frozenset_dunder_iter
+extern frozenset_dunder_sub
+extern frozenset_dunder_and
+extern frozenset_dunder_xor
+extern frozenset_dunder_or
+extern frozenset_dunder_rsub
+extern frozenset_dunder_rand
+extern frozenset_dunder_rxor
+extern frozenset_dunder_ror
 extern object_method_setattr
 extern object_method_delattr
 extern object_method_getattribute
@@ -633,16 +643,6 @@ DEF_FUNC_LOCAL set_add_shared_methods, SASM_FRAME
     lea rdx, [rel generic_method_contains]
     call dict_add_builtin_func
 
-    mov rdi, [rbp - SASM_DICT]
-    lea rsi, [rel mn___len__]
-    lea rdx, [rel set_dunder_len]
-    call dict_add_builtin_func
-
-    mov rdi, [rbp - SASM_DICT]
-    lea rsi, [rel mn___iter__]
-    lea rdx, [rel set_dunder_iter]
-    call dict_add_builtin_func
-
     ; __new__ allocates an empty instance of args[0], so it serves both.
     mov rdi, [rbp - SASM_DICT]
     lea rsi, [rel container_dunder_new]
@@ -651,46 +651,49 @@ DEF_FUNC_LOCAL set_add_shared_methods, SASM_FRAME
     mov rdi, [rbp - SASM_DICT]
     call add_class_getitem
 
-    ; The set operators, by name.  Both types hold the same slots, so both
-    ; get the same eight -- and CPython's frozenset really does carry the
-    ; reflected four as well: hasattr(frozenset, '__rsub__') is True there,
-    ; and frozenset({2}).__rsub__({1}) is frozenset({1}).
-    mov rdi, [rbp - SASM_DICT]
-    lea rsi, [rel mn___sub__]
-    lea rdx, [rel set_dunder_sub]
-    call dict_add_builtin_func
-    mov rdi, [rbp - SASM_DICT]
-    lea rsi, [rel mn___and__]
-    lea rdx, [rel set_dunder_and]
-    call dict_add_builtin_func
-    mov rdi, [rbp - SASM_DICT]
-    lea rsi, [rel mn___xor__]
-    lea rdx, [rel set_dunder_xor]
-    call dict_add_builtin_func
-    mov rdi, [rbp - SASM_DICT]
-    lea rsi, [rel mn___or__]
-    lea rdx, [rel set_dunder_or]
-    call dict_add_builtin_func
-    mov rdi, [rbp - SASM_DICT]
-    lea rsi, [rel mn___rsub__]
-    lea rdx, [rel set_dunder_rsub]
-    call dict_add_builtin_func
-    mov rdi, [rbp - SASM_DICT]
-    lea rsi, [rel mn___rand__]
-    lea rdx, [rel set_dunder_rand]
-    call dict_add_builtin_func
-    mov rdi, [rbp - SASM_DICT]
-    lea rsi, [rel mn___rxor__]
-    lea rdx, [rel set_dunder_rxor]
-    call dict_add_builtin_func
-    mov rdi, [rbp - SASM_DICT]
-    lea rsi, [rel mn___ror__]
-    lea rdx, [rel set_dunder_ror]
-    call dict_add_builtin_func
-
+    ; The eight operator dunders, __len__ and __iter__ are NOT here.  They
+    ; used to be, and a shared body has to admit both receivers -- which made
+    ; set.__and__(frozenset(...), ...) and set.__len__(frozenset()) legal
+    ; where CPython raises.  Each type registers its own now; see
+    ; set_add_operator_methods.  __contains__ stays shared: it is
+    ; generic_method_contains, and CPython's refusal there carries the
+    ; wrapper-descriptor wording, which is a distinction this tree does not
+    ; draw yet.
     leave
     ret
 END_FUNC set_add_shared_methods
+
+;; ============================================================================
+;; set_add_operator_methods(rdi = a dict, rsi = the ten function pointers)
+;; The eight set operators plus __len__ and __iter__, registered into one
+;; type's dict from that type's own bodies.  CPython's frozenset really does carry the reflected four as
+;; well: hasattr(frozenset, '__rsub__') is True there, and
+;; frozenset({2}).__rsub__({1}) is frozenset({1}).
+;; ============================================================================
+SAOM_DICT equ 8
+SAOM_FNS  equ 16
+SAOM_IDX  equ 24
+SAOM_FRAME equ 32           ; + 0 pushes = 32
+DEF_FUNC_LOCAL set_add_operator_methods, SAOM_FRAME
+    mov [rbp - SAOM_DICT], rdi
+    mov [rbp - SAOM_FNS], rsi
+    mov qword [rbp - SAOM_IDX], 0
+.saom_loop:
+    mov rax, [rbp - SAOM_IDX]
+    cmp rax, 10
+    jge .saom_done
+    mov rdi, [rbp - SAOM_DICT]
+    lea rsi, [rel set_operator_names]
+    mov rsi, [rsi + rax*8]
+    mov rdx, [rbp - SAOM_FNS]
+    mov rdx, [rdx + rax*8]
+    call dict_add_builtin_func
+    inc qword [rbp - SAOM_IDX]
+    jmp .saom_loop
+.saom_done:
+    leave
+    ret
+END_FUNC set_add_operator_methods
 
 DEF_FUNC methods_init
     push rbx
@@ -1455,11 +1458,15 @@ DEF_FUNC methods_init
     mov rdi, rbx
     call set_add_shared_methods
 
-    ; The reflected four are registered with the forward four, in the block
-    ; both types share.  __iand__ and __ior__ are deliberately absent -- set
-    ; has no nb_inplace_* slots here, so `s &= t` degrades to the binary
-    ; form, and a by-name __iand__ that did not mutate in place would be a
-    ; wrong answer rather than a missing name.
+    mov rdi, rbx
+    lea rsi, [rel set_operator_fns]
+    call set_add_operator_methods
+
+    ; The reflected four are registered with the forward four.  __iand__ and
+    ; __ior__ are deliberately absent -- set has no nb_inplace_* slots here,
+    ; so `s &= t` degrades to the binary form, and a by-name __iand__ that
+    ; did not mutate in place would be a wrong answer rather than a missing
+    ; name.
 
     lea rax, [rel set_type]
     mov [rax + PyTypeObject.tp_dict], rbx
@@ -1479,6 +1486,12 @@ DEF_FUNC methods_init
 
     mov rdi, rbx
     call set_add_shared_methods
+
+    ; frozenset's own eight, so its descriptors refuse a set the way
+    ; CPython's do.
+    mov rdi, rbx
+    lea rsi, [rel frozenset_operator_fns]
+    call set_add_operator_methods
 
     ; frozenset.__hash__ names frozenset's OWN hash.  With no entry here the
     ; lookup walked the MRO to object's, which answers the address -- so
@@ -3225,3 +3238,43 @@ mn___code__:    db "__code__", 0
 mn___class_getitem__: db "__class_getitem__", 0
 mn___globals__: db "__globals__", 0
 mn___repr__:    db "__repr__", 0
+
+;; The set method names set_add_operator_methods walks, in order, and one
+;; function table per type.  Data rather than forty open-coded registrations
+;; twice over.
+align 8
+set_operator_names:
+    dq mn___len__
+    dq mn___iter__
+    dq mn___sub__
+    dq mn___and__
+    dq mn___xor__
+    dq mn___or__
+    dq mn___rsub__
+    dq mn___rand__
+    dq mn___rxor__
+    dq mn___ror__
+
+set_operator_fns:
+    dq set_dunder_len
+    dq set_dunder_iter
+    dq set_dunder_sub
+    dq set_dunder_and
+    dq set_dunder_xor
+    dq set_dunder_or
+    dq set_dunder_rsub
+    dq set_dunder_rand
+    dq set_dunder_rxor
+    dq set_dunder_ror
+
+frozenset_operator_fns:
+    dq frozenset_dunder_len
+    dq frozenset_dunder_iter
+    dq frozenset_dunder_sub
+    dq frozenset_dunder_and
+    dq frozenset_dunder_xor
+    dq frozenset_dunder_or
+    dq frozenset_dunder_rsub
+    dq frozenset_dunder_rand
+    dq frozenset_dunder_rxor
+    dq frozenset_dunder_ror
