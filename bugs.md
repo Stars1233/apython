@@ -215,11 +215,21 @@ one-line fix.
   slot that raises never comes back.  The same limit applies anywhere C code
   here would want to catch an exception.
 
+- **`str.encode` honours no error handler, and `bytes.decode` only honours
+  one for utf-8.**  `bytes.decode` reads `errors=` through `codec_error_id`
+  and acts on it in the utf-8 fixup loop, but its `ascii` arm jumps straight
+  to `.bd_not_decodable` on the first high byte; `str.encode` parks the
+  argument in `SE_ERRS` and never passes it to `codec_error_id` at all.  So
+  `b"a\xffb".decode("ascii", "ignore")` and `"a\u1234b".encode("ascii",
+  "ignore")` both raise where CPython answers `'ab'` and `b'ab'`, and an
+  unknown handler name is not reported as a LookupError on those paths
+  because it is never looked up.
+
 - **`sys.getfilesystemencoding()` always answers `'utf-8'`.**  PEP 540's
   locale handling does not exist, and neither does the `surrogateescape`
-  error handler -- `str.encode` and `bytes.decode` accept `errors=` and
-  ignore it.  So a filename or environment value that is not valid UTF-8
+  error handler, so a filename or environment value that is not valid UTF-8
   does not survive a decode/encode round trip, where CPython preserves it.
+  The entry above is the other half of why.
 
 - **`real` and `imag` are readable on an instance but not on the type.**
   `(5).real`, `(1.5).real` and `(1+2j).real` all work, through a `tp_getattr`

@@ -411,7 +411,15 @@ DEF_FUNC codec_error_id, CEI_FRAME
     mov rax, [rdi + PyObject.ob_type]
     lea rcx, [rel str_type]
     cmp rax, rcx
-    jne .cei_unknown
+    je .cei_is_str
+    ; A subclass has str's layout and str's data, and bytes_check_errors_type
+    ; -- which validates this same argument one call earlier -- already
+    ; accepts one.  Refusing it here made the two disagree:
+    ; b"...".decode("utf-8", MyStr("ignore")) got past the type check and then
+    ; came back as "unknown error handler name 'ignore'".
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_STR_SUBCLASS
+    jz .cei_unknown
+.cei_is_str:
     mov rcx, [rdi + PyStrObject.ob_size]
     cmp rcx, 24
     ja .cei_unknown

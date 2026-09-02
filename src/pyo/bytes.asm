@@ -1054,6 +1054,16 @@ DEF_FUNC _bytes_decode_impl, BD_FRAME
     mov rax, [rdi + 16]
     mov [rbp - BD_ERRORS], rax
 .bd_no_errors:
+    ; Checked here rather than on the error path.  It used to be validated
+    ; only once a malformation had been found, so a clean decode never looked
+    ; at it and b"ab".decode("utf-8", 5) answered 'ab' where CPython raises.
+    push rdi
+    sub rsp, 8
+    mov rdi, [rbp - BD_ERRORS]
+    call bytes_check_errors_type
+    add rsp, 8
+    pop rdi
+
     mov rbx, [rdi]
     mov [rbp - BD_SELF], rbx
     mov r12, [rbx + PyBytesObject.ob_size]
@@ -1104,12 +1114,9 @@ DEF_FUNC _bytes_decode_impl, BD_FRAME
     mov [rbp - BD_POS], rax
     mov [rbp - BD_WHY], rdx
     mov [rbp - BD_SPAN], r8
-    ; The type first: codec_error_id answers -1 for anything that is not one
-    ; of the three names, including a non-str, and the message builder then
-    ; read PyStrObject.data off it -- an int immediate made that a wild
-    ; address.  CPython raises TypeError for a non-str errors=.
-    mov rdi, [rbp - BD_ERRORS]
-    call bytes_check_errors_type
+    ; The type was checked in the prologue: codec_error_id answers -1 for
+    ; anything that is not one of the three names, including a non-str, and
+    ; the message builder then read PyStrObject.data off it.
     mov rdi, [rbp - BD_ERRORS]
     call codec_error_id         ; 0 strict, 1 ignore, 2 replace, -1 unknown
     cmp eax, -1

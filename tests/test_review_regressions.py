@@ -1067,3 +1067,20 @@ def tuple_subclass_lifetime():
 check("tuple subclass lifetime", tuple_subclass_lifetime)
 check("empty tuple subclass", lambda: (len(TupleSub()), TupleSub()))
 check("tuple subclass contents", lambda: tuple(TupleSub((1, 2, 3))))
+
+
+# A str subclass as errors=: bytes_check_errors_type accepts one and then
+# codec_error_id, one call later, refused it -- so the argument passed the
+# type check and came back as "unknown error handler name".  bugs.md records
+# that the ascii codec consults no handler at all, which is why these are all
+# utf-8.
+class ErrStr(str):
+    pass
+
+
+check("decode, subclass 'ignore'", lambda: b"a\xffb".decode("utf-8", ErrStr("ignore")))
+check("decode, subclass 'replace'", lambda: b"a\xffb".decode("utf-8", ErrStr("replace")))
+check("decode, subclass 'strict'", lambda: b"a\xffb".decode("utf-8", ErrStr("strict")))
+check("decode, plain 'ignore'", lambda: b"a\xffb".decode("utf-8", "ignore"))
+check("decode, subclass unknown", lambda: b"a\xffb".decode("utf-8", ErrStr("bogus")))
+check("decode, errors= not a str", lambda: b"ab".decode("utf-8", 5))
