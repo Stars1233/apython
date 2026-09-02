@@ -136,8 +136,8 @@ one-line fix.
 
 - **`bytes` and `bytearray` are missing most of the string-like methods.**
   Both have `find`, `count`, `startswith`, `endswith`, `split`, `join`,
-  `replace`, `hex` and `decode`; neither has `rfind`, `index`, `rindex`,
-  `rsplit`, `splitlines`, `strip`/`lstrip`/`rstrip`, `partition`/
+  `replace`, `rsplit`, `hex` and `decode`; neither has `rfind`, `index`,
+  `rindex`, `splitlines`, `strip`/`lstrip`/`rstrip`, `partition`/
   `rpartition`, `upper`/`lower`/`title`/`swapcase`/`capitalize`,
   `center`/`ljust`/`rjust`, `zfill`, `expandtabs`, `translate`, or the
   `is*` predicates.  `bytearray(str, encoding)` is not accepted either.
@@ -271,10 +271,6 @@ one-line fix.
 
 These are absences rather than wrong answers — the interpreter raises rather
 than lying — but they are ordinary Python that does not work:
-
-- **`bytes.rsplit` and `bytearray.rsplit` do not exist.**  `split` takes its
-  `maxsplit` now, but the right-hand form was never added, so
-  `b'a,b,c'.rsplit(b',', 1)` is an AttributeError.  `str.rsplit` is there.
 
 - **`posix.symlink` and `posix.readlink` do not exist.**  `os.stat` honours
   `follow_symlinks=False` and `posix.lstat` works, so links can be inspected;

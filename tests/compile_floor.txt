@@ -33,6 +33,7 @@ test_bytesio
 test_bytes_methods
 test_bytes_percent
 test_bytes
+test_bytes_rsplit
 test_bytes_str_text
 test_bytes_subclass_dict
 test_call_ex

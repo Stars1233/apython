@@ -1773,6 +1773,12 @@ DEF_FUNC methods_init
     call dict_add_builtin_func
 
     mov rdi, rbx
+    lea rsi, [rel mn_rsplit]
+    extern bytes_method_rsplit
+    lea rdx, [rel bytes_method_rsplit]
+    call dict_add_builtin_func
+
+    mov rdi, rbx
     lea rsi, [rel mn_join]
     lea rdx, [rel bytes_method_join]
     call dict_add_builtin_func
@@ -1860,6 +1866,11 @@ DEF_FUNC methods_init
     mov rdi, rbx
     lea rsi, [rel mn_split]
     lea rdx, [rel ba_shared_split]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn_rsplit]
+    extern ba_shared_rsplit
+    lea rdx, [rel ba_shared_rsplit]
     call dict_add_builtin_func
     mov rdi, rbx
     lea rsi, [rel mn_join]

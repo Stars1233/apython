@@ -896,19 +896,25 @@ DEF_FUNC bytes_method_replace, BR_FRAME
 END_FUNC bytes_method_replace
 
 ;; ============================================================================
-;; bytes_method_split(args, nargs) -> list of bytes
+;; bytes_split_impl(rdi = args, rsi = nargs, edx = from_right) -> list of bytes
 ;; nargs==1: split by whitespace; nargs==2: split by separator bytes
+;;
+;; One implementation for split and rsplit, the shape str_split_impl already
+;; has.  The two differ only in which end maxsplit counts from, so the
+;; right-hand arms scan backwards and insert each piece at the front.
 ;; ============================================================================
 BSP_SEPLEN equ 8
 BSP_MAX    equ 16           ; splits left, or negative for "no limit"
-BSP_FRAME  equ 24           ; + 5 pushes = 64, 16-aligned
+BSP_RIGHT  equ 24           ; 1 for rsplit
+BSP_FRAME  equ 40           ; + 5 pushes = 80, 16-aligned
 
-DEF_FUNC bytes_method_split, BSP_FRAME
+DEF_FUNC bytes_split_impl, BSP_FRAME
     push rbx
     push r12
     push r13
     push r14
     push r15
+    mov [rbp - BSP_RIGHT], rdx
 
     ; rbx and r15 hold DATA POINTERS, not objects: a bytearray keeps its bytes
     ; out of line, so reading them through a bytes layout found the header.
@@ -970,6 +976,9 @@ DEF_FUNC bytes_method_split, BSP_FRAME
     mov rdi, 8
     call list_new
     mov r13, rax                ; result list
+
+    cmp qword [rbp - BSP_RIGHT], 0
+    jne .bsp_wsr_loop
 
     xor ecx, ecx
 .bsp_ws_scan:
@@ -1052,6 +1061,9 @@ DEF_FUNC bytes_method_split, BSP_FRAME
     test r14, r14
     jz .bsp_empty_sep
 
+    cmp qword [rbp - BSP_RIGHT], 0
+    jne .bsp_sepr_scan_init
+
     ; r11 = segment start, rcx = scan position
     xor ecx, ecx
     xor r11d, r11d              ; segment start = 0
@@ -1132,12 +1144,170 @@ DEF_FUNC bytes_method_split, BSP_FRAME
     V_PACK rax, rdx             ; builtins return one Value
     ret
 
+.bsp_sepr_scan_init:
+    mov r11, r12                ; segment end, exclusive
+
+.bsp_sepr_scan:
+    cmp qword [rbp - BSP_MAX], 0
+    je .bsp_sepr_head           ; no splits left: the head is one piece
+    mov rcx, r11
+    sub rcx, r14                ; the last position a separator could start at
+    js .bsp_sepr_head
+
+.bsp_sepr_probe:
+    cmp rcx, 0
+    jl .bsp_sepr_head
+    push rcx
+    push r11
+    mov rdi, rbx
+    add rdi, rcx
+    mov rsi, r15
+    mov rdx, r14
+    call ap_memcmp
+    pop r11
+    pop rcx
+    test eax, eax
+    jz .bsp_sepr_found
+    dec rcx
+    jmp .bsp_sepr_probe
+
+.bsp_sepr_found:
+    ; the piece after this separator: [rcx + sep_len, r11)
+    push rcx
+    push r11
+    mov rdi, rbx
+    add rdi, rcx
+    add rdi, r14
+    mov rsi, r11
+    sub rsi, rcx
+    sub rsi, r14
+    call .bsp_emit_front
+    pop r11
+    pop rcx
+    mov r11, rcx                ; the next piece ends where this one started
+    cmp qword [rbp - BSP_MAX], 0
+    jl .bsp_sepr_scan           ; negative: no limit, never counts down
+    dec qword [rbp - BSP_MAX]
+    jmp .bsp_sepr_scan
+
+.bsp_sepr_head:
+    mov rdi, rbx
+    mov rsi, r11
+    call .bsp_emit_front
+    jmp .bsp_split_done
+
+.bsp_wsr_loop:
+    ; rsplit() with no separator: the same pieces, but maxsplit counts from
+    ; the right, so collect from the right and insert at the front.
+    ; r12 is the length here and doubles as the scan position.
+    test r12, r12
+    jle .bsp_split_done
+    movzx eax, byte [rbx + r12 - 1]
+    call .bsp_is_space
+    test eax, eax
+    jz .bsp_wsr_piece
+    dec r12
+    jmp .bsp_wsr_loop
+
+.bsp_wsr_piece:
+    cmp qword [rbp - BSP_MAX], 0
+    jne .bsp_wsr_scan
+    ; No splits left: everything to the left is the first piece, internal
+    ; whitespace and all -- b' a b '.rsplit(None, 1) is [b' a', b'b'].
+    xor r15d, r15d
+    jmp .bsp_wsr_emit
+
+.bsp_wsr_scan:
+    mov r15, r12                ; word start, scanning left
+.bsp_wsr_find:
+    test r15, r15
+    jle .bsp_wsr_emit
+    movzx eax, byte [rbx + r15 - 1]
+    call .bsp_is_space
+    test eax, eax
+    jnz .bsp_wsr_emit
+    dec r15
+    jmp .bsp_wsr_find
+
+.bsp_wsr_emit:
+    mov rdi, rbx
+    add rdi, r15
+    mov rsi, r12
+    sub rsi, r15
+    call .bsp_emit_front
+    mov r12, r15
+    cmp qword [rbp - BSP_MAX], 0
+    jl .bsp_wsr_loop            ; negative: no limit, never counts down
+    dec qword [rbp - BSP_MAX]
+    jmp .bsp_wsr_loop
+
+.bsp_split_done:
+    mov rax, r13
+    mov edx, TAG_PTR
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    V_PACK rax, rdx             ; builtins return one Value
+    ret
+
+;; .bsp_is_space(al = a byte) -> eax = 1 when it is one of the four bytes the
+;; forward scan treats as whitespace.
+.bsp_is_space:
+    cmp al, ' '
+    je .bsp_is_space_yes
+    cmp al, 9
+    je .bsp_is_space_yes
+    cmp al, 10
+    je .bsp_is_space_yes
+    cmp al, 13
+    je .bsp_is_space_yes
+    xor eax, eax
+    ret
+.bsp_is_space_yes:
+    mov eax, 1
+    ret
+
+;; .bsp_emit_front(rdi = data, rsi = length) -- build a bytes and put it at
+;; the front of the list in r13, through list.insert's own args interface.
+.bsp_emit_front:
+    call bytes_from_data
+    sub rsp, 32
+    mov [rsp], r13                  ; args[0] = the list
+    mov rcx, [rel v_int_bias]       ; the Value for 0
+    mov [rsp + 8], rcx
+    mov [rsp + 16], rax
+    push rax
+    lea rdi, [rsp + 8]
+    mov rsi, 3
+    extern list_method_insert
+    call list_method_insert
+    pop rdi
+    add rsp, 32
+    call obj_decref
+    ret
+
 .bsp_empty_sep:
     RAISE exc_ValueError_type, "empty separator"
 
 .bsp_type:
     RAISE exc_TypeError_type, "a bytes-like object is required"
+END_FUNC bytes_split_impl
+
+;; ============================================================================
+;; bytes_method_split(args, nargs) / bytes_method_rsplit(args, nargs)
+;; ============================================================================
+DEF_FUNC_BARE bytes_method_split
+    xor edx, edx                ; scan from the left
+    jmp bytes_split_impl
 END_FUNC bytes_method_split
+
+DEF_FUNC_BARE bytes_method_rsplit
+    mov edx, 1                  ; scan from the right
+    jmp bytes_split_impl
+END_FUNC bytes_method_rsplit
 
 ;; ============================================================================
 ;; bytes_method_join(args, nargs) -> new bytes
@@ -1684,6 +1854,13 @@ DEF_FUNC ba_shared_split
     leave
     jmp bytearray_shared_call
 END_FUNC ba_shared_split
+
+DEF_FUNC ba_shared_rsplit
+    lea rdx, [rel bytes_method_rsplit]
+    mov ecx, 2
+    leave
+    jmp bytearray_shared_call
+END_FUNC ba_shared_rsplit
 
 DEF_FUNC ba_shared_join
     lea rdx, [rel bytes_method_join]
