@@ -68,14 +68,12 @@ one-line fix.
   `__eq__ = dict.__eq__` in a mixin gets object's.
 
 - **A few names are still short of CPython's `dir()`.**  `int` and `float`
-  are missing the in-place forms, `as_integer_ratio`, `is_integer`,
-  `__round__`, `__ceil__`, `__floor__` and `__getnewargs__`; `set` is missing
-  `__iand__` and `__ior__`, deliberately -- it has no `nb_inplace_*` slots, so
-  `s &= t` degrades to the binary form, and a by-name `__iand__` that did not
-  mutate in place would be a wrong answer rather than a missing name.
-  `object.__getstate__` answers `self.__dict__ or None` but not CPython's
-  `(None, {...})` pair form for a `__slots__` class, which here has no
-  instance dict to build it from.
+  are missing the in-place forms; `set` is missing `__iand__` and `__ior__`,
+  deliberately -- it has no `nb_inplace_*` slots, so `s &= t` degrades to the
+  binary form, and a by-name `__iand__` that did not mutate in place would be
+  a wrong answer rather than a missing name.  `object.__getstate__` answers
+  `self.__dict__ or None` but not CPython's `(None, {...})` pair form for a
+  `__slots__` class, which here has no instance dict to build it from.
 
 - **`collections.deque` is list-backed, and two itertools functions
   materialise.**  CPython's deque is a block-linked list, so `appendleft` and

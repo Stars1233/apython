@@ -1910,6 +1910,43 @@ DEF_FUNC methods_init
     lea rdx, [rel int_method_bit_length]
     call dict_add_builtin_func
 
+    ; The names dir(int) was short of.  __round__ IS builtin_round_fn: a
+    ; method's (args, nargs) is the shape round()'s own arguments arrive in.
+    mov rdi, rbx
+    lea rsi, [rel mn_is_integer]
+    extern int_method_is_integer
+    lea rdx, [rel int_method_is_integer]
+    call dict_add_builtin_func
+
+    mov rdi, rbx
+    lea rsi, [rel mn_as_integer_ratio]
+    extern int_method_as_integer_ratio
+    lea rdx, [rel int_method_as_integer_ratio]
+    call dict_add_builtin_func
+
+    mov rdi, rbx
+    lea rsi, [rel mn___round__]
+    extern int_method_round
+    lea rdx, [rel int_method_round]
+    call dict_add_builtin_func
+
+    mov rdi, rbx
+    lea rsi, [rel mn___floor__]
+    extern int_method_identity
+    lea rdx, [rel int_method_identity]
+    call dict_add_builtin_func
+
+    mov rdi, rbx
+    lea rsi, [rel mn___ceil__]
+    lea rdx, [rel int_method_identity]
+    call dict_add_builtin_func
+
+    mov rdi, rbx
+    lea rsi, [rel mn___getnewargs__]
+    extern int_method_getnewargs
+    lea rdx, [rel int_method_getnewargs]
+    call dict_add_builtin_func
+
     mov rdi, rbx
     lea rsi, [rel mn_bit_count]
     lea rdx, [rel int_method_bit_count]
@@ -2256,6 +2293,32 @@ DEF_FUNC methods_init
     mov rdi, rbx
     lea rsi, [rel mn_is_integer]
     lea rdx, [rel float_method_is_integer]
+    call dict_add_builtin_func
+
+    ; float's four.  __floor__ and __ceil__ do exactly what MATH_ROUNDER's
+    ; native arm does, because adding them newly routes a float SUBCLASS
+    ; instance through the dunder: that arm reaches only an immediate.
+    mov rdi, rbx
+    lea rsi, [rel mn___round__]
+    lea rdx, [rel int_method_round]
+    call dict_add_builtin_func
+
+    mov rdi, rbx
+    lea rsi, [rel mn___floor__]
+    extern float_method_floor
+    lea rdx, [rel float_method_floor]
+    call dict_add_builtin_func
+
+    mov rdi, rbx
+    lea rsi, [rel mn___ceil__]
+    extern float_method_ceil
+    lea rdx, [rel float_method_ceil]
+    call dict_add_builtin_func
+
+    mov rdi, rbx
+    lea rsi, [rel mn___getnewargs__]
+    extern float_method_getnewargs
+    lea rdx, [rel float_method_getnewargs]
     call dict_add_builtin_func
 
     mov rdi, rbx
@@ -3145,6 +3208,9 @@ mn_from_bytes:  db "from_bytes", 0
 mn_bit_length:  db "bit_length", 0
 mn_bit_count:   db "bit_count", 0
 mn_conjugate:   db "conjugate", 0
+mn___round__:  db "__round__", 0
+mn___floor__:  db "__floor__", 0
+mn___ceil__:   db "__ceil__", 0
 mn___getnewargs__: db "__getnewargs__", 0
 mn___complex__: db "__complex__", 0
 ; float method names
