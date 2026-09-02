@@ -838,6 +838,26 @@ DEF_FUNC instance_setattr
     cmp [r9 + PyObject.ob_type], rcx
     je .sa_member
 
+    ; A property is a data descriptor too, and this is the only road a DELETE
+    ; takes: op_store_attr has a property fast path of its own, op_delete_attr
+    ; has none and comes straight here.  So `del obj.prop` never reached the
+    ; deleter -- it fell through to the instance dict and did nothing.
+    lea rcx, [rel property_type]
+    cmp [r9 + PyObject.ob_type], rcx
+    jne .sa_check_getset
+    mov rdi, r9
+    mov rsi, rbx
+    mov rdx, r13                ; the value Value; 0 means delete
+    extern property_descr_set
+    call property_descr_set
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.sa_check_getset:
     ; A getset descriptor is a data descriptor: it takes precedence over the
     ; instance dict, so `I(5).real = 9` is the AttributeError CPython raises
     ; rather than a shadowing instance attribute.
@@ -2402,11 +2422,37 @@ END_FUNC type_call
 extern tuple_new
 TGA_ORIGIN equ 8            ; the type the MRO walk started from
 TGA_META   equ 16           ; its metatype, for the second walk
+TGA_FROMMETA equ 24         ; where to report which walk answered, or 0
 TGA_FRAME  equ 32           ; + 2 pushes = 48
-DEF_FUNC type_getattr, TGA_FRAME
+DEF_FUNC_BARE type_getattr
+    xor edx, edx                ; no caller wants to know where it came from
+    jmp type_getattr_meta
+END_FUNC type_getattr
+
+;; ============================================================================
+;; type_getattr_meta(rdi = type, rsi = name, rdx = &from_metatype) -> Value
+;;
+;; The same lookup, reporting WHICH of the two MROs answered: the class's own,
+;; or its metatype's.  It writes 1 through rdx for the metatype and 0 for the
+;; class, and rdx may be 0.
+;;
+;; The caller that needs this is the descriptor protocol.  CPython does not
+;; run a property's getter when the property was found in the class's own MRO
+;; -- `C.prop` IS the property object, which is how `C.prop.__doc__ = ...` can
+;; be written at all -- but it does run one found on the METATYPE, which is
+;; what makes Enum.__members__ work.  Deciding that from "is the object a
+;; class" gets the second case wrong, and until now this function had no way
+;; to say which it was.
+;; ============================================================================
+DEF_FUNC type_getattr_meta, TGA_FRAME
     push rbx
     push r12
 
+    mov [rbp - TGA_FROMMETA], rdx
+    test rdx, rdx
+    jz .tga_no_out
+    mov qword [rdx], 0
+.tga_no_out:
     mov rbx, rsi                ; rbx = name
     mov r12, rdi                ; r12 = type (walks)
     mov [rbp - TGA_ORIGIN], rdi
@@ -2606,13 +2652,19 @@ DEF_FUNC type_getattr, TGA_FRAME
     ret
 
 .tga_not_found:
-    ; Then the metatype's own MRO.  A metaclass's methods are attributes of
-    ; the classes it makes, bound to the class the way an ordinary class's
-    ; methods bind to its instances -- `ByteString.register` is ABCMeta's,
-    ; two links up the metatype chain.  Only a user metaclass is walked: the
-    ; three builtin metatypes hold entries meant for `type` itself, and
-    ; offering those on every class would shadow what a class inherits from
-    ; object.
+    ; Then the metatype's own MRO.  Anything found from here on came from the
+    ; metatype, which the caller may need to know.
+    mov rax, [rbp - TGA_FROMMETA]
+    test rax, rax
+    jz .tga_meta_no_out
+    mov qword [rax], 1
+.tga_meta_no_out:
+    ; A metaclass's methods are attributes of the classes it makes, bound to
+    ; the class the way an ordinary class's methods bind to its instances --
+    ; `ByteString.register` is ABCMeta's, two links up the metatype chain.
+    ; Only a user metaclass is walked: the three builtin metatypes hold
+    ; entries meant for `type` itself, and offering those on every class would
+    ; shadow what a class inherits from object.
     mov r12, [rbp - TGA_ORIGIN]
     mov r12, [r12 + PyObject.ob_type]
     test r12, r12
@@ -2677,7 +2729,7 @@ DEF_FUNC type_getattr, TGA_FRAME
     leave
     V_PACK rax, rdx             ; return one Value
     ret
-END_FUNC type_getattr
+END_FUNC type_getattr_meta
 
 ;; ============================================================================
 ;; method_new(func, self) -> PyMethodObject*

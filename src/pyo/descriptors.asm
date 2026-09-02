@@ -151,7 +151,7 @@ DEF_FUNC property_construct
 
     cmp r12, 1
     jb .pc_error
-    cmp r12, 3
+    cmp r12, 4
     ja .pc_error
 
     ; Extract args
@@ -162,7 +162,14 @@ DEF_FUNC property_construct
     mov r14, [rbx + 8]         ; fset = args[1]
 
 .pc_alloc:
-    ; Save fdel
+    ; doc and fdel, pushed because rbx is about to become the new property
+    ; and the argument array would be lost with it.
+    push qword 0                ; doc default = NULL
+    cmp r12, 4
+    jb .pc_have_doc
+    mov rax, [rbx + 24]
+    mov [rsp], rax              ; doc = args[3]
+.pc_have_doc:
     push qword 0                ; fdel default = NULL
     cmp r12, 3
     jb .pc_do_alloc
@@ -178,6 +185,8 @@ DEF_FUNC property_construct
     mov [rbx + PyPropertyObject.prop_set], r14
     pop rax                     ; fdel
     mov [rbx + PyPropertyObject.prop_del], rax
+    pop rax                     ; doc
+    mov [rbx + PyPropertyObject.prop_doc], rax
 
     ; INCREF fget
     mov rdi, r13
@@ -196,6 +205,33 @@ DEF_FUNC property_construct
     jz .pc_no_fdel
     call obj_incref
 .pc_no_fdel:
+
+    ; __doc__: the explicit one if given, else fget's own -- which is what
+    ; CPython copies, so that help() on a property says something.
+    mov rdi, [rbx + PyPropertyObject.prop_doc]
+    test rdi, rdi
+    jz .pc_doc_from_fget
+    call obj_incref
+    jmp .pc_doc_done
+
+.pc_doc_from_fget:
+    mov rdi, r13
+    test rdi, rdi
+    jz .pc_doc_done
+    V_TEST_PTR rdi, rax
+    ja .pc_doc_done
+    lea rdi, [rel pc_doc_name]
+    extern dunder_name_obj
+    call dunder_name_obj
+    mov rsi, rax
+    mov rdi, r13
+    extern obj_getattr_opt
+    call obj_getattr_opt
+    test rax, rax
+    jz .pc_doc_done
+    ; obj_getattr_opt hands back a new reference; the property keeps it.
+    mov [rbx + PyPropertyObject.prop_doc], rax
+.pc_doc_done:
 
     mov rdi, rbx
     call gc_track
@@ -236,6 +272,11 @@ DEF_FUNC_LOCAL property_dealloc
     jz .pd_no_del
     call obj_decref
 .pd_no_del:
+    mov rdi, [rbx + PyPropertyObject.prop_doc]
+    test rdi, rdi
+    jz .pd_no_doc
+    DECREF_V rdi, rcx
+.pd_no_doc:
 
     mov rdi, rbx
     call gc_dealloc
@@ -279,6 +320,13 @@ DEF_FUNC property_getattr
     call ap_strcmp
     test eax, eax
     jz .pga_deleter
+
+    ; Check "__doc__"
+    lea rdi, [r12 + PyStrObject.data]
+    CSTRING rsi, "__doc__"
+    call ap_strcmp
+    test eax, eax
+    jz .pga_doc
 
     ; Check "fget"
     lea rdi, [r12 + PyStrObject.data]
@@ -349,6 +397,13 @@ DEF_FUNC property_getattr
 
 .pga_fdel:
     mov rax, [rbx + PyPropertyObject.prop_del]
+    test rax, rax
+    jnz .pga_incref_ret
+    lea rax, [rel none_singleton]
+    jmp .pga_incref_ret
+
+.pga_doc:
+    mov rax, [rbx + PyPropertyObject.prop_doc]
     test rax, rax
     jnz .pga_incref_ret
     lea rax, [rel none_singleton]
@@ -591,6 +646,12 @@ DEF_FUNC property_descr_set
     mov r12, rsi                ; obj
     mov r13, rdx                ; value Value
 
+    ; A NULL value is `del obj.attr`, and that is the DELETER's business.
+    ; Without this arm it reached fset with a NULL Value, so `del d.v` ran the
+    ; setter with nothing and the deleter never ran at all.
+    test r13, r13
+    jz .pds_delete
+
     mov rax, [rbx + PyPropertyObject.prop_set]
     test rax, rax
     jz .pds_no_setter
@@ -623,6 +684,27 @@ DEF_FUNC property_descr_set
     leave
     ret
 
+.pds_delete:
+    mov rax, [rbx + PyPropertyObject.prop_del]
+    test rax, rax
+    jz .pds_no_deleter
+    mov rdi, rax
+    mov rax, [rdi + PyObject.ob_type]
+    mov rax, [rax + PyTypeObject.tp_call]
+    test rax, rax
+    jz .pds_no_deleter
+    sub rsp, 16
+    mov [rsp], r12              ; args[0] = obj
+    mov rsi, rsp
+    mov edx, 1
+    call rax
+    V_UNPACK rax, rdx
+    add rsp, 16
+    DECREF_VAL rax, edx
+    jmp .pds_done
+
+.pds_no_deleter:
+    RAISE exc_AttributeError_type, "can't delete attribute"
 .pds_no_setter:
     RAISE exc_AttributeError_type, "can't set attribute"
 END_FUNC property_descr_set
@@ -1904,6 +1986,60 @@ DEF_FUNC property_dunder_delete
     RAISE exc_AttributeError_type, "can't delete attribute"
 END_FUNC property_dunder_delete
 
+section .text
+
+;; ============================================================================
+;; property_setattr(rdi = self, rsi = name, rdx = value Value)
+;;
+;; Only __doc__ is writable, which is the one CPython allows -- fget, fset and
+;; fdel are read-only there too.  dis.py opens with
+;; `_Instruction.opname.__doc__ = "Human readable name for operation"`, and
+;; with no tp_setattr at all that was "AttributeError: cannot set attribute",
+;; which took dis, modulefinder, pathlib, zipapp and mimetypes with it.
+;; ============================================================================
+PSA_SELF  equ 8
+PSA_VAL   equ 16
+PSA_FRAME equ 16            ; + 1 push = 24, not 16-aligned
+DEF_FUNC_LOCAL property_setattr, PSA_FRAME
+    push rbx
+    mov rbx, rdi
+    mov [rbp - PSA_VAL], rdx
+
+    lea rdi, [rsi + PyStrObject.data]
+    CSTRING rsi, "__doc__"
+    call ap_strcmp
+    test eax, eax
+    jnz .psa_readonly
+
+    mov rdi, [rbp - PSA_VAL]
+    test rdi, rdi
+    jz .psa_delete
+    INCREF_V rdi, rax
+    mov rax, [rbx + PyPropertyObject.prop_doc]
+    mov rcx, [rbp - PSA_VAL]
+    mov [rbx + PyPropertyObject.prop_doc], rcx
+    test rax, rax
+    jz .psa_ok
+    mov rdi, rax
+    DECREF_V rdi, rcx
+.psa_ok:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+
+.psa_delete:
+    mov rdi, [rbx + PyPropertyObject.prop_doc]
+    mov qword [rbx + PyPropertyObject.prop_doc], 0
+    test rdi, rdi
+    jz .psa_ok
+    DECREF_V rdi, rcx
+    jmp .psa_ok
+
+.psa_readonly:
+    RAISE exc_AttributeError_type, "readonly attribute"
+END_FUNC property_setattr
+
 section .data
 
 ; staticmethod_type - type descriptor for staticmethod wrapper
@@ -1984,7 +2120,7 @@ property_type:
     dq 0                        ; tp_hash
     dq 0                ; tp_call  (instances are not callable)
     dq property_getattr         ; tp_getattr (.setter/.getter/.deleter)
-    dq 0                        ; tp_setattr
+    dq property_setattr         ; tp_setattr (__doc__, and nothing else)
     dq 0                        ; tp_richcompare
     dq 0                        ; tp_iter
     dq 0                        ; tp_iternext
@@ -2605,6 +2741,8 @@ DEF_FUNC property_traverse
     VISIT_PTR rdi
     mov rdi, [rbx + PyPropertyObject.prop_del]
     VISIT_PTR rdi
+    mov rax, [rbx + PyPropertyObject.prop_doc]
+    VISIT_V rax, rcx
     pop rbx
     leave
     ret
@@ -2632,7 +2770,16 @@ DEF_FUNC property_clear
     jz .no_del
     call obj_decref
 .no_del:
+    mov rdi, [rbx + PyPropertyObject.prop_doc]
+    mov qword [rbx + PyPropertyObject.prop_doc], 0
+    test rdi, rdi
+    jz .no_doc
+    DECREF_V rdi, rcx
+.no_doc:
     pop rbx
     leave
     ret
 END_FUNC property_clear
+
+section .rodata
+pc_doc_name: db "__doc__", 0

@@ -478,6 +478,10 @@ struc PyPropertyObject
     .prop_get:    resq 1  ; +16: fget function or NULL
     .prop_set:    resq 1  ; +24: fset function or NULL
     .prop_del:    resq 1  ; +32: fdel function or NULL
+    .prop_doc:    resq 1  ; +40: __doc__, a str or NULL.  It is a real field
+                          ;      because it is WRITTEN: dis.py opens with
+                          ;      `_Instruction.opname.__doc__ = "..."`, and a
+                          ;      read-only __doc__ made that an AttributeError.
 endstruc
 
 ; Generator object

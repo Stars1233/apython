@@ -61,7 +61,9 @@ LA_OBJ_TAG   equ 64
 LA_OBJVAL    equ 72   ; the object as a Value, for the generic tail
 LA_WALK      equ 80   ; the MRO cursor while searching the type dicts
 LA_TAGTYPE   equ 88   ; the type an immediate resolved to, the walk's origin
-LA_FRAME     equ 96         ; + 0 pushes = 96
+LA_OWNMRO    equ 96   ; the attribute came from the CLASS's own MRO
+LA_FROMMETA  equ 104  ; type_getattr_meta's out-parameter
+LA_FRAME     equ 112        ; + 0 pushes = 112
 
 ; op_load_super_attr frame layout (DEF_FUNC op_load_super_attr, LSA_FRAME)
 LSA_SELF     equ 8
@@ -506,12 +508,32 @@ DEF_FUNC op_load_attr, LA_FRAME
     ; Call tp_getattr(obj, name)
     ; tp_getattr handles all descriptor/binding logic (staticmethod, classmethod,
     ; property, method binding). Result is fully resolved.
+    mov qword [rbp - LA_OWNMRO], 0
     mov rdi, [rbp - LA_OBJ]
     mov rsi, [rbp - LA_NAME]
+    ; type_getattr can say WHICH MRO answered -- the class's own or its
+    ; metatype's -- and the property arm below needs to know.
+    extern type_getattr
+    extern type_getattr_meta
+    lea rdx, [rel type_getattr]
+    cmp rax, rdx
+    jne .la_call_getattr
+    mov qword [rbp - LA_FROMMETA], 0
+    lea rdx, [rbp - LA_FROMMETA]
+    call type_getattr_meta
+    V_UNPACK rax, rdx
+    test edx, edx
+    jz .la_try_dict
+    cmp qword [rbp - LA_FROMMETA], 0
+    jne .la_getattr_done
+    mov qword [rbp - LA_OWNMRO], 1
+    jmp .la_getattr_done
+.la_call_getattr:
     call rax
     V_UNPACK rax, rdx           ; tp_getattr returns a Value
     test edx, edx
     jz .la_try_dict             ; tp_getattr returned NULL — fallback to tp_dict
+.la_getattr_done:
     mov [rbp - LA_ATTR], rax
     mov [rbp - LA_ATTR_TAG], rdx   ; save tag from tp_getattr
     ; LA_FROM_TYPE stays 0 — tp_getattr already handled binding
@@ -910,16 +932,29 @@ DEF_FUNC op_load_attr, LA_FRAME
     jmp .la_done
 
 .la_handle_property:
-    ; Property descriptor: always intercept and call fget(obj)
-    ; (property objects found via instance_getattr still need descriptor
-    ; invocation).
-    ;
-    ; CPython does *not* run the getter when the property was found in the
-    ; class's own MRO rather than on its metatype -- `C.prop` is the property
-    ; object -- but which of the two it was is decided inside type_getattr,
-    ; which has no channel to say so.  Deciding it here instead, from whether
-    ; the object is a class, gets `Enum.__members__` wrong: that property
-    ; lives on the *metatype* and must run.
+    ; A property found in the CLASS's own MRO is the property itself --
+    ; `C.prop` is what `C.prop.__doc__ = ...` is written on, and dis.py opens
+    ; with exactly that -- while one found on the METATYPE runs, which is what
+    ; makes Enum.__members__ work.  type_getattr_meta reports which; deciding
+    ; it here from "is the object a class" gets the second case wrong, which
+    ; is why it went undone for so long.
+    cmp qword [rbp - LA_OWNMRO], 0
+    je .la_property_run
+    mov rdi, [rbp - LA_OBJ]
+    mov rsi, [rbp - LA_OBJ_TAG]
+    DECREF_VAL rdi, rsi
+    mov rax, [rbp - LA_ATTR]
+    mov edx, TAG_PTR
+    cmp qword [rbp - LA_FLAG], 0
+    jne .la_prop_self_flag1
+    VPUSH_VAL rax, rdx
+    jmp .la_done
+.la_prop_self_flag1:
+    VPUSH_NULL
+    VPUSH_VAL rax, rdx
+    jmp .la_done
+
+.la_property_run:
     ; Call property_descr_get(property, obj)
     mov rdi, [rbp - LA_ATTR]   ; property descriptor
     mov rsi, [rbp - LA_OBJ]    ; obj
@@ -1498,12 +1533,15 @@ GA_TYPE     equ 56
 GA_SAVE     equ 64
 GA_SAVETAG  equ 72
 GA_WALK     equ 80          ; the MRO cursor
-GA_FRAME    equ 88          ; + 1 push = 96
+GA_OWNMRO   equ 88          ; the attribute came from the CLASS's own MRO
+GA_FROMMETA equ 96          ; type_getattr_meta's out-parameter
+GA_FRAME    equ 104         ; + 1 push = 112
 DEF_FUNC obj_getattr_opt, GA_FRAME
     push rbx
     mov [rbp - GA_OBJ], rdi
     mov [rbp - GA_NAME], rsi
     mov qword [rbp - GA_FROMTYPE], 0
+    mov qword [rbp - GA_OWNMRO], 0
 
     ; The type to look in, and whether the object is a real pointer.
     V_TEST_PTR rdi, rax
@@ -1534,12 +1572,34 @@ DEF_FUNC obj_getattr_opt, GA_FRAME
     mov rcx, [rax + PyTypeObject.tp_getattr]
     test rcx, rcx
     jz .ga_type_dict
+    mov qword [rbp - GA_OWNMRO], 0
     mov rdi, [rbp - GA_OBJ]
     mov rsi, [rbp - GA_NAME]
+    ; type_getattr can say WHICH MRO answered -- the class's own or its
+    ; metatype's -- and the descriptor protocol below needs to know: a
+    ; property found on the class is the property, one found on the metatype
+    ; runs.  Nothing else has anything to report.
+    extern type_getattr
+    extern type_getattr_meta
+    lea rdx, [rel type_getattr]
+    cmp rcx, rdx
+    jne .ga_call_getattr
+    mov qword [rbp - GA_FROMMETA], 0
+    lea rdx, [rbp - GA_FROMMETA]
+    call type_getattr_meta
+    V_UNPACK rax, rdx
+    test edx, edx
+    jz .ga_type_dict
+    cmp qword [rbp - GA_FROMMETA], 0
+    jne .ga_getattr_done
+    mov qword [rbp - GA_OWNMRO], 1
+    jmp .ga_getattr_done
+.ga_call_getattr:
     call rcx
     V_UNPACK rax, rdx
     test edx, edx
     jz .ga_type_dict
+.ga_getattr_done:
     mov [rbp - GA_ATTR], rax
     mov [rbp - GA_ATTRTAG], rdx
     jmp .ga_have_attr
@@ -1697,8 +1757,20 @@ DEF_FUNC obj_getattr_opt, GA_FRAME
     ret
 
 .ga_property:
-    ; See .la_handle_property in op_load_attr: whether the getter should run
-    ; depends on which MRO the property came from, not on what the object is.
+    ; A property found in the CLASS's own MRO is the property itself --
+    ; `C.prop` is what you write `C.prop.__doc__ = ...` on -- while one found
+    ; on the METATYPE runs, which is what makes Enum.__members__ work.  Which
+    ; it was is type_getattr_meta's answer; deciding it from "is the object a
+    ; class" gets the second case wrong.
+    cmp qword [rbp - GA_OWNMRO], 0
+    je .ga_property_run
+    mov rax, [rbp - GA_ATTR]
+    mov edx, TAG_PTR
+    pop rbx
+    leave
+    V_PACK rax, rdx
+    ret
+.ga_property_run:
     mov rdi, [rbp - GA_ATTR]
     mov rsi, [rbp - GA_OBJ]
     call property_descr_get

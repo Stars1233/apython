@@ -260,6 +260,7 @@ test_pow
 test_prepare_raises
 test_print_file
 test_property_callables
+test_property_doc
 test_property
 test_property_raises
 test_raise_cause

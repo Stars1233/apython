@@ -21,6 +21,7 @@ ok copy
 ok copyreg
 ok datetime
 ok difflib
+ok dis
 ok email
 ok encodings
 ok enum
@@ -43,6 +44,7 @@ ok ipaddress
 ok keyword
 ok locale
 ok _markupbase
+ok mimetypes
 ok netrc
 ok ntpath
 ok nturl2path
