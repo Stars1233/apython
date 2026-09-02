@@ -14,14 +14,6 @@ one-line fix.
   becomes `bytearray(b'bd')` -- where here it is a length mismatch.  A list
   raises for the same assignment in both, so only bytearray differs.
 
-- **`bytes` `%`-formatting converts through `str_mod`**, so its conversions are
-  str's rather than bytes'.  `b"%s" % b"x"` is right now, but `b"%s" % "x"`
-  answers `b'x'` where CPython raises, `b"%r" % b"x"` is `b"'x'"` rather than
-  `b"b'x'"`, `%c` and `%a` are TypeErrors, and a `bytes`-keyed mapping
-  (`b"%(a)d" % {b"a": 1}`) raises KeyError -- the format is decoded to str, so
-  the key it looks up is a str.  `bytearray` inherits all of it, sharing the
-  body.
-
 - **`binary_op1`'s subclass rule is not implemented.**  CPython tries the right
   operand's slot *first* when its type is a proper subclass of the left's and
   overrides the slot.  It cannot fire here: the only builtin static subclass

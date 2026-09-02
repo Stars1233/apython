@@ -1804,6 +1804,7 @@ DEF_FUNC bytes_mod_reject_wide
     call raise_type_error_with_name
 END_FUNC bytes_mod_reject_wide
 
+global bytes_mod_is_byteslike
 DEF_FUNC_BARE bytes_mod_is_byteslike
     xor eax, eax
     V_TEST_PTR rdi, rcx
@@ -1939,8 +1940,62 @@ DEF_FUNC_LOCAL bytes_mod_prepare_args, BMP_FRAME
     ret
 END_FUNC bytes_mod_prepare_args
 
+;; ============================================================================
+;; bytes_latin1_from_str(rdi = a str whose code points are all below 256)
+;;   -> rax = a new bytes, one byte per code point
+;;
+;; The inverse of bytes_latin1_to_str.  str_mod_impl needs it for a %(name)s
+;; key in a BYTES format: the format was decoded to a str to be scanned, so the
+;; key comes out as a str, and the mapping is keyed by bytes.
+;; ============================================================================
+global bytes_latin1_from_str
+DEF_FUNC bytes_latin1_from_str
+    push rbx
+    push r12
+    mov r12, rdi
+    mov rdi, [r12 + PyStrObject.ob_length]
+    call bytes_new
+    test rax, rax
+    jz .blf_out
+    mov rbx, rax
+    lea rdi, [rax + PyBytesObject.data]
+    lea rsi, [r12 + PyStrObject.data]
+    mov rdx, [r12 + PyStrObject.ob_size]
+    xor rcx, rcx
+    xor r8, r8
+.blf_loop:
+    cmp rcx, rdx
+    jge .blf_done
+    movzx eax, byte [rsi + rcx]
+    test al, 0x80
+    jz .blf_one
+    and eax, 0x1f
+    shl eax, 6
+    movzx r9d, byte [rsi + rcx + 1]
+    and r9d, 0x3f
+    or eax, r9d
+    add rcx, 2
+    jmp .blf_store
+.blf_one:
+    inc rcx
+.blf_store:
+    mov [rdi + r8], al
+    inc r8
+    jmp .blf_loop
+.blf_done:
+    mov [rbx + PyBytesObject.ob_size], r8
+    mov rax, rbx
+.blf_out:
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC bytes_latin1_from_str
+
 ;; bytes_mod_as_str(rdi = a Value) -> a new str, or 0 if it is not bytes-like
-DEF_FUNC_LOCAL bytes_mod_as_str
+;; str_mod_impl calls it for %s and %b, which is where the conversion is known.
+global bytes_mod_as_str
+DEF_FUNC bytes_mod_as_str
     V_TEST_PTR rdi, rax
     ja .bma_no
     test rdi, rdi
@@ -2032,10 +2087,10 @@ DEF_FUNC bytes_mod, BM_FRAME
     ; below, so the bytes come through untouched -- where handing the object
     ; itself to str_mod applied str() to it and `b"%s" % (b"abc",)` produced
     ; b"b'abc'".
-    mov rdi, [rbp-BM_ARGS]
-    mov [rbp-BM_ORIG], rdi
-    call bytes_mod_prepare_args
-    mov [rbp-BM_ARGS], rax
+    ; The arguments are NOT pre-converted any more.  Doing it here could not
+    ; tell %s from %r from %c -- the conversion is not known until str_mod_impl
+    ; reads it -- so b"%r" % (b"x",) answered b"'x'" where CPython gives
+    ; b"b'x'", and b"%s" % 5 answered b"5" where it is a TypeError.
 
     mov rdi, [rbp-BM_FMT]
     mov rsi, [rdi + PyBytesObject.ob_size]
@@ -2049,14 +2104,9 @@ DEF_FUNC bytes_mod, BM_FRAME
     extern str_mod
     mov rdi, rbx               ; temp str
     mov rsi, [rbp-BM_ARGS]    ; args, a Value -- str_mod is a slot and unpacks
-    call str_mod
-    push rax
-    sub rsp, 8
-    mov rdi, [rbp-BM_ARGS]
-    mov rsi, [rbp-BM_ORIG]
-    call bytes_mod_release_args
-    add rsp, 8
-    pop rax
+    mov edx, 1                 ; and this one is a BYTES format
+    extern str_mod_impl
+    call str_mod_impl
     mov r12, rax               ; r12 = result str Value (a str is a pointer)
 
     ; DECREF temp fmt str
