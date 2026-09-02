@@ -250,17 +250,29 @@ than lying — but they are ordinary Python that does not work:
   an ordinary cycle that never collects.  Code objects were in the same state
   and are tracked now.
 
-  Tracking `Task` needs one thing fixed first: the ready queue links tasks
-  through `AsyncTask.next` **without taking a reference**
-  (`ready_enqueue`, `src/pyo/eventloop.asm`).  Today nothing can free a queued
-  task out from under the queue, because the collector cannot see tasks at all;
-  make them visible and a cyclic task sitting in the queue becomes collectable,
-  leaving a dangling `next` pointer.  Either the queue takes a reference or the
-  collector treats it as a root.  The mechanical part is small -- `gc_alloc` +
-  `gc_track` in `task_new`, `gc_dealloc` instead of `ap_free` in
-  `task_dealloc`, `TYPE_FLAG_HAVE_GC` and the two slots -- and
-  `task_clear` also has to start clearing `exception` and the waiters array,
-  which the deleted version did not.
+  The mechanical part is small -- `gc_alloc` + `gc_track` in `task_new`,
+  `gc_dealloc` in `task_dealloc`, `TYPE_FLAG_HAVE_GC` and a traverse/clear
+  pair.  It was tried, and it is not enough: the tree holds a live `Task`
+  through **four** raw pointers, and the moment tasks become collectable each
+  of them can be left dangling.  The ready queue (`ready_enqueue`) and
+  `EventLoop.root_task` are dealt with -- the queue owns what it holds now,
+  and the root is released when the loop finishes -- and two are not:
+
+  - `TimerEntry.task` in the poll backend's min-heap
+    (`src/pyo/eventloop_poll.asm`), and the io_uring SQE's `user_data`
+    (`src/pyo/eventloop_iouring.asm`);
+  - `AsyncTask.waiters[]`, appended raw by `task_add_waiter` and dropped en
+    masse when the task completes.
+
+  Each needs to take a reference, or the collector needs to treat it as a
+  root.  Without that, a `Task` collected while it is sleeping or being
+  awaited corrupts the heap: `asyncio.run()` after a collected task cycle
+  segfaults inside an unrelated allocation.
+
+- **Awaiting a `Task` that raised does not re-raise it in the awaiting
+  coroutine.**  The exception is reported at exit instead, so
+  `try: await t / except ValueError:` does not catch what `t` raised.  This
+  is independent of the tracking above and reproduces without it.
 
 - **`gc` has no `get_objects` and no debug flags.**  The module answers about
   the collector -- `collect`, `enable`/`disable`/`isenabled`, the counts, the

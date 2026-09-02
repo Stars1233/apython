@@ -111,6 +111,7 @@ END_FUNC eventloop_teardown
 ;; task_new(PyGenObject *coro) -> AsyncTask*
 ;; Allocate and initialize a new async task.
 ;; ============================================================================
+
 DEF_FUNC task_new
     push rbx
 
@@ -131,9 +132,12 @@ DEF_FUNC task_new
 
     mov qword [rax + AsyncTask.result], 0
     mov qword [rax + AsyncTask.exception], 0
-    ; send_value starts as None
+    ; send_value starts as None, and is OWNED from here on: task_step stores
+    ; into it with an INCREF, and task_dealloc releases it.  Storing the
+    ; singleton without taking a reference made that release one too many.
     lea rcx, [rel none_singleton]
     mov [rax + AsyncTask.send_value], rcx
+    inc qword [rcx + PyObject.ob_refcnt]
     mov dword [rax + AsyncTask.done], 0
     mov dword [rax + AsyncTask.cancelling], 0
     mov dword [rax + AsyncTask.n_waiters], 0
@@ -179,6 +183,14 @@ DEF_FUNC task_dealloc
     call ap_free
 .td_no_waiters:
 
+    ; send_value is a Value the task owns: task_step stores None into it with
+    ; an INCREF, and nothing released it.  A plain leak, one per task.
+    mov rdi, [rbx + AsyncTask.send_value]
+    test rdi, rdi
+    jz .td_no_send
+    DECREF_V rdi, rcx
+.td_no_send:
+
     ; Free self
     mov rdi, rbx
     call ap_free
@@ -193,6 +205,12 @@ END_FUNC task_dealloc
 ;; O(1) append to ready queue tail.
 ;; ============================================================================
 DEF_FUNC_BARE ready_enqueue
+    ; The queue OWNS what it holds.  It used to link tasks through .next with
+    ; no reference at all, which was safe only because the collector could not
+    ; see tasks: make them visible and a cyclic task sitting in the queue
+    ; becomes collectable, and the queue is left following a freed pointer.
+    ; One reference here, released by the drain loop after task_step.
+    inc qword [rdi + PyObject.ob_refcnt]
     mov qword [rdi + AsyncTask.next], 0
     mov rax, [rel eventloop + EventLoop.ready_tail]
     test rax, rax
@@ -626,7 +644,12 @@ DEF_FUNC eventloop_run, ER_FRAME
     jz .er_wait
 
     mov rdi, rax
+    push rax
+    push rax                    ; twice, to keep rsp 16-byte aligned
     call task_step
+    pop rdi
+    pop rdi
+    call obj_decref             ; the queue's reference
     jmp .er_drain
 
 .er_wait:
@@ -646,6 +669,12 @@ DEF_FUNC eventloop_run, ER_FRAME
     mov rax, [rbx + AsyncTask.result]
     V_UNPACK rax, rdx
     INCREF_VAL rax, rdx
+
+    ; And let go of the root task.  It is a RAW pointer, kept across the whole
+    ; run for the done check, and leaving it behind was harmless only while
+    ; tasks could not be collected: once they can, the next asyncio.run()
+    ; starts by reading a task that a collection has since freed.
+    mov qword [rel eventloop + EventLoop.root_task], 0
 
     pop r12
     pop rbx
