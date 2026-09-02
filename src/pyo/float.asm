@@ -968,126 +968,254 @@ END_FUNC float_pos
 
 ;; ============================================================================
 ;; float_pow(rdi = left, rsi = right, edx = left_tag, ecx = right_tag)
-;; Compute left ** right, returning TAG_FLOAT result.
-;; Both args are converted to double. Uses x87 fyl2x/f2xm1/fscale for
-;; non-integer exponents, repeated squaring for integer exponents.
+;;
+;; CPython's float_pow, followed clause by clause, because the answers this
+;; has to give are almost all special cases and none of them fall out of a
+;; general formula.  What used to be here was x**y = 2**(y*log2(x)) on the
+;; x87, plus fast paths for 0.5 and 2.0 and repeated squaring for an integral
+;; exponent, and it got every one of the IEEE corners wrong:
+;;
+;;   0.0 ** -1        inf, where CPython raises ZeroDivisionError
+;;   (-7.5) ** 2.5    nan -- fyl2x's invalid-operation result, handed back
+;;                    unexamined -- where CPython promotes to complex
+;;   (-1.0) ** inf    nan, where the answer is 1.0
+;;   1.0 ** nan       nan, where the answer is 1.0
+;;   0.0 ** inf       nan, where the answer is 0.0
+;;   2 ** -1074       0.0, because 1/base**1074 overflows on the way
+;;   2.0 ** 10000     inf, where CPython raises OverflowError
+;;
+;; libm's pow is the one that is specified for all of them (C99 Annex F), so
+;; the guards below are only the cases CPython settles before calling it.
 ;; ============================================================================
+FP_LEFT   equ 8             ; iv
+FP_RIGHT  equ 16            ; iw
+FP_NEG    equ 24            ; negate the result?
+FP_FRAME  equ 32            ; + 0 pushes = 32
 DEF_FUNC float_pow, FB_FRAME
     V_UNPACK rdi, rdx           ; left  Value -> (payload, tag)
     V_UNPACK rsi, rcx           ; right Value -> (payload, tag)
     FLOAT_BINOP_SETUP
-    ; [rbp - FB_LEFT] = left double, [rbp - FB_RIGHT] = right double
+    ; [rbp - FB_LEFT] = iv, [rbp - FB_RIGHT] = iw.  FB_FRAME is 48 and the
+    ; three slots below reuse the ones the setup has finished with.
 
-    movsd xmm0, [rbp - FB_LEFT]        ; base
-    movsd xmm1, [rbp - FB_RIGHT]       ; exp
+    movsd xmm0, [rbp - FB_LEFT]
+    movsd xmm1, [rbp - FB_RIGHT]
+    mov qword [rbp - FB_RSAVE], 0       ; negate_result
 
-    ; Fast path: exp == 0.5 → sqrtsd (~12 cycles vs ~100+ for general)
-    movsd xmm2, [rel const_half_f]
+    ; v ** 0 is 1.0, even 0.0 ** 0.0 and nan ** 0.0.
+    xorpd xmm2, xmm2
     ucomisd xmm1, xmm2
-    jne .not_sqrt
-    jp .not_sqrt
-    ; base >= 0 check (negative base → general path for complex/error)
-    xorpd xmm3, xmm3
-    ucomisd xmm0, xmm3
-    jb .fpow_general
-    sqrtsd xmm0, xmm0
-    call float_from_f64
-    leave
-    V_PACK rax, rdx             ; return one Value
-    ret
-.not_sqrt:
-    ; Fast path: exp == 2.0 → mulsd
-    movsd xmm2, [rel const_two_f]
+    jp .fpow_iw_not_zero
+    jne .fpow_iw_not_zero
+    jmp .fpow_one
+.fpow_iw_not_zero:
+
+    ; nan ** w is nan (w == 0 is already gone).
+    ucomisd xmm0, xmm0
+    jp .fpow_return_iv
+
+    ; v ** nan is nan, unless v is 1.0.
+    ucomisd xmm1, xmm1
+    jnp .fpow_iw_not_nan
+    movsd xmm2, [rel const_one_f]
+    ucomisd xmm0, xmm2
+    je .fpow_one
+    jmp .fpow_return_iw
+.fpow_iw_not_nan:
+
+    ; v ** +-inf: 0.0 when |v| < 1, 1.0 when |v| == 1, inf when |v| > 1 --
+    ; and the other way round for -inf.
+    movapd xmm3, xmm1
+    andpd xmm3, [rel frn_absmask]
+    movsd xmm2, [rel pos_inf]
+    ucomisd xmm3, xmm2
+    jne .fpow_iw_finite
+    movapd xmm3, xmm0
+    andpd xmm3, [rel frn_absmask]       ; |v|
+    movsd xmm2, [rel const_one_f]
+    ucomisd xmm3, xmm2
+    je .fpow_one                        ; |v| == 1
+    ja .fpow_v_gt_one
+    ; |v| < 1: inf for a negative exponent, 0.0 for a positive one
+    xorpd xmm2, xmm2
     ucomisd xmm1, xmm2
-    jne .check_int_exp
-    jp .check_int_exp
-    mulsd xmm0, xmm0
-    call float_from_f64
-    leave
-    V_PACK rax, rdx             ; return one Value
-    ret
-
-.check_int_exp:
-    ; Check if exponent is an integer
-    cvtsd2si rcx, xmm1
-    cvtsi2sd xmm2, rcx
+    ja .fpow_zero
+    jmp .fpow_inf
+.fpow_v_gt_one:
+    xorpd xmm2, xmm2
     ucomisd xmm1, xmm2
-    jne .fpow_general           ; non-integer exp
-    jp .fpow_general            ; NaN exp
+    ja .fpow_inf
+    jmp .fpow_zero
+.fpow_iw_finite:
 
-    ; Integer exponent: repeated squaring
-    test rcx, rcx
-    js .fpow_neg
+    ; (+-inf) ** w: inf for a positive w, 0.0 for a negative one, and the
+    ; sign is v's when w is an odd integer.
+    movapd xmm3, xmm0
+    andpd xmm3, [rel frn_absmask]
+    movsd xmm2, [rel pos_inf]
+    ucomisd xmm3, xmm2
+    jne .fpow_iv_finite
+    movsd xmm0, [rbp - FB_RIGHT]
+    call float_is_odd_integer          ; -> eax
+    mov r8d, eax
+    xorpd xmm2, xmm2
+    movsd xmm1, [rbp - FB_RIGHT]
+    ucomisd xmm1, xmm2
+    jbe .fpow_inf_negexp
+    test r8d, r8d
+    jz .fpow_inf
+    movsd xmm0, [rbp - FB_LEFT]        ; keeps v's sign
+    jmp .fpow_out
+.fpow_inf_negexp:
+    test r8d, r8d
+    jz .fpow_zero
+    ; copysign(0.0, v)
+    xorpd xmm0, xmm0
+    movsd xmm1, [rbp - FB_LEFT]
+    andpd xmm1, [rel fh_sign_mask]
+    orpd xmm0, xmm1
+    jmp .fpow_out
+.fpow_iv_finite:
 
-    ; Non-negative integer exponent
-    mov rax, rcx                ; exponent
-    movsd xmm2, [rel const_one_f] ; result = 1.0
-.fpow_sq:
-    test rax, rax
-    jz .fpow_sq_done
-    test rax, 1
-    jz .fpow_sq_even
-    mulsd xmm2, xmm0
-.fpow_sq_even:
-    mulsd xmm0, xmm0
-    shr rax, 1
-    jmp .fpow_sq
-.fpow_sq_done:
-    movapd xmm0, xmm2
-    call float_from_f64
+    ; 0.0 ** w: an error for a negative w, and otherwise 0.0 with v's sign
+    ; when w is an odd integer.
+    xorpd xmm2, xmm2
+    movsd xmm0, [rbp - FB_LEFT]
+    ucomisd xmm0, xmm2
+    jp .fpow_iv_not_zero
+    jne .fpow_iv_not_zero
+    movsd xmm1, [rbp - FB_RIGHT]
+    ucomisd xmm1, xmm2
+    jb .fpow_zero_div
+    movsd xmm0, [rbp - FB_RIGHT]
+    call float_is_odd_integer
+    test eax, eax
+    jz .fpow_zero
+    movsd xmm0, [rbp - FB_LEFT]
+    jmp .fpow_out
+.fpow_iv_not_zero:
+
+    ; A negative base with a non-integral exponent has no real answer, and
+    ; CPython's float_pow hands the pair to complex's nb_power rather than
+    ; returning the invalid-operation nan.
+    xorpd xmm2, xmm2
+    ucomisd xmm0, xmm2
+    jae .fpow_iv_positive
+    movsd xmm0, [rbp - FB_RIGHT]
+    roundsd xmm1, xmm0, 1               ; floor(iw)
+    ucomisd xmm0, xmm1
+    je .fpow_iw_integral
+    ; Fractional: complex_pow, which already answers correctly for these.
+    mov rdi, [rbp - FB_LEFT]
+    V_FROM_F64 rdi, rax
+    mov rsi, [rbp - FB_RIGHT]
+    V_FROM_F64 rsi, rax
+    extern complex_pow
     leave
-    V_PACK rax, rdx             ; return one Value
-    ret
+    jmp complex_pow
+.fpow_iw_integral:
+    ; |v| ** w, negated afterwards when w is odd.
+    movsd xmm0, [rbp - FB_RIGHT]
+    call float_is_odd_integer
+    mov [rbp - FB_RSAVE], rax
+    movsd xmm0, [rbp - FB_LEFT]
+    xorpd xmm1, xmm1
+    subsd xmm1, xmm0
+    movsd [rbp - FB_LEFT], xmm1         ; iv = -iv
+    movapd xmm0, xmm1
+.fpow_iv_positive:
 
-.fpow_neg:
-    neg rcx
-    mov rax, rcx
-    movsd xmm2, [rel const_one_f] ; result = 1.0
-.fpow_neg_sq:
-    test rax, rax
-    jz .fpow_neg_done
-    test rax, 1
-    jz .fpow_neg_even
-    mulsd xmm2, xmm0
-.fpow_neg_even:
-    mulsd xmm0, xmm0
-    shr rax, 1
-    jmp .fpow_neg_sq
-.fpow_neg_done:
+    ; 1.0 ** w is 1.0 for every w, including the infinities and nan -- and
+    ; (-1) ** a large integer arrives here as well, with negate_result set.
+    movsd xmm2, [rel const_one_f]
+    ucomisd xmm0, xmm2
+    jne .fpow_call_libm
     movsd xmm0, [rel const_one_f]
-    divsd xmm0, xmm2
+    jmp .fpow_apply_negate
+
+.fpow_call_libm:
+    ; iv is finite and positive and not 1.0; iw is finite and not 0.0.
+    movsd xmm0, [rbp - FB_LEFT]
+    movsd xmm1, [rbp - FB_RIGHT]
+    extern pow
+    call pow wrt ..plt
+.fpow_apply_negate:
+    cmp qword [rbp - FB_RSAVE], 0
+    je .fpow_check_range
+    xorpd xmm1, xmm1
+    subsd xmm1, xmm0
+    movapd xmm0, xmm1
+.fpow_check_range:
+    ; Both operands were finite, so an infinite result is an overflow.
+    ; CPython reports it through errno as OverflowError.
+    movapd xmm3, xmm0
+    andpd xmm3, [rel frn_absmask]
+    movsd xmm2, [rel pos_inf]
+    ucomisd xmm3, xmm2
+    je .fpow_overflow
+.fpow_out:
+    movq rdi, xmm0
     call float_from_f64
     leave
     V_PACK rax, rdx             ; return one Value
     ret
 
-.fpow_general:
-    ; Non-integer exponent: x^y = 2^(y * log2(x))
-    ; xmm0 = base, xmm1 = exp
-    sub rsp, 16
-    movsd [rsp], xmm1          ; exp on stack
-    fld qword [rsp]             ; st(0) = exp
-    movsd [rsp], xmm0          ; base on stack
-    fld qword [rsp]             ; st(0) = base, st(1) = exp
-    fyl2x                       ; st(0) = exp * log2(base)
-    ; Compute 2^st(0): split into int + frac
-    fld st0                     ; dup
-    frndint                     ; st(0) = int part
-    fsub st1, st0               ; st(1) = frac part
-    fxch st1                    ; st(0) = frac, st(1) = int
-    f2xm1                       ; st(0) = 2^frac - 1
-    fld1
-    faddp st1, st0              ; st(0) = 2^frac
-    fscale                      ; st(0) = 2^frac * 2^int = result
-    fstp st1                    ; pop int part
-    fstp qword [rsp]            ; store result
-    movsd xmm0, [rsp]
-    add rsp, 16
-    call float_from_f64
-    leave
-    V_PACK rax, rdx             ; return one Value
-    ret
+.fpow_one:
+    movsd xmm0, [rel const_one_f]
+    jmp .fpow_out
+.fpow_zero:
+    xorpd xmm0, xmm0
+    jmp .fpow_out
+.fpow_inf:
+    movsd xmm0, [rel pos_inf]
+    jmp .fpow_out
+.fpow_return_iv:
+    movsd xmm0, [rbp - FB_LEFT]
+    jmp .fpow_out
+.fpow_return_iw:
+    movsd xmm0, [rbp - FB_RIGHT]
+    jmp .fpow_out
+
+.fpow_zero_div:
+    RAISE exc_ZeroDivisionError_type, "0.0 cannot be raised to a negative power"
+
+.fpow_overflow:
+    ; CPython builds this one from errno, so its args are the pair
+    ; (34, 'Numerical result out of range') and str() renders the tuple.
+    RAISE exc_OverflowError_type, "(34, 'Numerical result out of range')"
 END_FUNC float_pow
+
+;; ============================================================================
+;; float_is_odd_integer(xmm0 = x) -> eax = 1 when x is an odd integer
+;;
+;; CPython's DOUBLE_IS_ODD_INTEGER.  A double at or above 2**53 has no odd
+;; values left, so fmod against 2.0 settles it without overflowing anything.
+;; ============================================================================
+DEF_FUNC_LOCAL float_is_odd_integer
+    ; floor(x) == x, and fmod(x, 2.0) is +-1
+    roundsd xmm1, xmm0, 1
+    ucomisd xmm0, xmm1
+    jp .fio_no
+    jne .fio_no
+    movapd xmm1, xmm0
+    andpd xmm1, [rel frn_absmask]
+    movsd xmm2, [rel fio_two53]
+    ucomisd xmm1, xmm2
+    jae .fio_no                 ; every double this large is even
+    cvttsd2si rax, xmm0
+    and eax, 1
+    leave
+    ret
+.fio_no:
+    xor eax, eax
+    leave
+    ret
+END_FUNC float_is_odd_integer
+
+section .rodata
+align 8
+fio_two53: dq 0x4340000000000000      ; 2.0**53
+section .text
 
 ;; ============================================================================
 ;; float_round_ndigits(xmm0 = x, edi = ndigits) -> xmm0 = the rounded double

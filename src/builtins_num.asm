@@ -259,6 +259,27 @@ DEF_FUNC builtin_divmod
     ret
 
 .divmod_no_slot:
+    ; A zero float divisor is diagnosed here rather than left to the two
+    ; slots below.  divmod(1.0, 0.0) is "float divmod()" in CPython, and
+    ; reaching it through nb_floor_divide reported the floor division's own
+    ; message instead.
+    mov rdi, r12
+    mov esi, r14d
+    call divmod_is_zero
+    test eax, eax
+    jz .divmod_no_float_zero
+    mov rdi, rbx
+    mov esi, r13d
+    call divmod_is_float
+    test eax, eax
+    jnz .divmod_float_zero
+    mov rdi, r12
+    mov esi, r14d
+    call divmod_is_float
+    test eax, eax
+    jnz .divmod_float_zero
+.divmod_no_float_zero:
+
     ; Dispatch through the left operand's numeric protocol, the way the //
     ; and % operators do.  This used to call int_floordiv unconditionally,
     ; so divmod(1.5, 1.5) handed raw f64 bits to integer code.
@@ -385,7 +406,79 @@ DEF_FUNC builtin_divmod
     V_PACK rsi, rcx
     CSTRING rdx, "unsupported operand type(s) for divmod()"
     call raise_binop_type_error
+.divmod_float_zero:
+    extern exc_ZeroDivisionError_type
+    RAISE exc_ZeroDivisionError_type, "float divmod()"
 END_FUNC builtin_divmod
+
+;; ============================================================================
+;; divmod_is_float(rdi = payload, esi = tag) -> eax = 1 for a float or a
+;; float subclass instance
+;; divmod_is_zero(rdi = payload, esi = tag)  -> eax = 1 for a zero int or float
+;;
+;; divmod(1.5, 0) is "float divmod()" in CPython even though the divisor is an
+;; int, so the two questions are asked separately: is the divisor zero, and is
+;; either operand a float.
+;; ============================================================================
+DEF_FUNC_LOCAL divmod_is_float
+    cmp esi, TAG_FLOAT
+    je .dif_yes
+    cmp esi, TAG_PTR
+    jne .dif_no
+    lea rax, [rel float_type]
+    cmp [rdi + PyObject.ob_type], rax
+    je .dif_yes
+    mov rax, [rdi + PyObject.ob_type]
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_FLOAT_SUBCLASS
+    jz .dif_no
+.dif_yes:
+    mov eax, 1
+    leave
+    ret
+.dif_no:
+    xor eax, eax
+    leave
+    ret
+END_FUNC divmod_is_float
+
+DEF_FUNC_LOCAL divmod_is_zero
+    cmp esi, TAG_SMALLINT
+    je .diz_int
+    cmp esi, TAG_FLOAT
+    je .diz_raw
+    cmp esi, TAG_PTR
+    jne .diz_no
+    lea rax, [rel float_type]
+    cmp [rdi + PyObject.ob_type], rax
+    je .diz_obj
+    mov rax, [rdi + PyObject.ob_type]
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_FLOAT_SUBCLASS
+    jnz .diz_obj
+    jmp .diz_no                 ; a heap int is never zero: it would be compact
+.diz_obj:
+    movsd xmm0, [rdi + PyFloatObject.value]
+    jmp .diz_test
+.diz_raw:
+    movq xmm0, rdi
+.diz_test:
+    xorpd xmm1, xmm1
+    ucomisd xmm0, xmm1
+    jp .diz_no
+    jne .diz_no
+    mov eax, 1
+    leave
+    ret
+.diz_int:
+    test rdi, rdi
+    jnz .diz_no
+    mov eax, 1
+    leave
+    ret
+.diz_no:
+    xor eax, eax
+    leave
+    ret
+END_FUNC divmod_is_zero
 
 ; tp_call wrappers: shift (type, args, nargs) → (args, nargs)
 global int_type_call
@@ -1753,6 +1846,9 @@ extern __gmpz_cmpabs
 extern __gmpz_mul_2exp
 extern __gmpz_cmp_si
 extern __gmpz_set
+extern __gmpz_powm
+extern __gmpz_invert
+extern __gmpz_neg
 extern __gmpz_clear
 extern __gmpz_tdiv_q_ui
 
@@ -2188,7 +2284,13 @@ POW_BASE equ 8
 POW_BTAG equ 16
 POW_EXP  equ 24
 POW_ETAG equ 32
-POW_FRAME equ 48            ; + 3 pushes = 72, not 16-aligned
+POW_MOD  equ 40
+POW_MTAG equ 48
+POW_MB   equ 80             ; four mpz_t, 16 bytes each
+POW_MEXP equ 96
+POW_MMOD equ 112
+POW_MRES equ 128
+POW_FRAME equ 136           ; + 3 pushes = 8 + 136 + 24 = 168, 16-aligned
 DEF_FUNC builtin_pow_fn, POW_FRAME
     push rbx
     push r12
@@ -2288,114 +2390,151 @@ DEF_FUNC builtin_pow_fn, POW_FRAME
 ; implementation of `**` rather than two that disagreed about what a float is.
 
 .pow_three:
-    ; pow(base, exp, mod) — modular exponentiation.
-    ; Normalize the operands first: int_unwrap flattens bool, compact heap
-    ; ints and int subclasses to (value, TAG_SMALLINT).  Genuinely huge
-    ; GMP-backed ints stay TAG_PTR and are rejected below, as before.
+    ; pow(base, exp, mod) -- modular exponentiation, in GMP.
+    ;
+    ; It used to be an int64 square-and-multiply, so every operand had to be
+    ; an immediate: pow(2, 10**20, 7) and pow(10**30, 3, 10**7) were both
+    ; "pow() arguments must be numeric".  It also rejected a negative
+    ; exponent outright, where CPython since 3.8 answers the modular
+    ; INVERSE, and it tested the exponent's sign before the modulus, so
+    ; pow(2, -1, 0) named the wrong argument.
     extern int_unwrap
     mov r13, rdi                ; args array
-    mov rdi, [r13]              ; args[0]
+    mov rdi, [r13]
     V_UNPACK rdi, rdx
     call int_unwrap
     mov [rbp - POW_BASE], rdi
     mov [rbp - POW_BTAG], rdx
     mov rdi, [r13 + 8]
-    V_UNPACK rdi, rdx       ; args[1]
+    V_UNPACK rdi, rdx
     call int_unwrap
     mov [rbp - POW_EXP], rdi
     mov [rbp - POW_ETAG], rdx
     mov rdi, [r13 + 16]
-    V_UNPACK rdi, rdx       ; args[2]
+    V_UNPACK rdi, rdx
     call int_unwrap
-    mov r12, rdi                ; mod
-    mov r9d, edx                ; mod tag
-    mov rax, [rbp - POW_BASE]   ; base
-    mov ecx, [rbp - POW_BTAG]   ; base tag
-    mov rbx, [rbp - POW_EXP]    ; exp
-    mov r8d, [rbp - POW_ETAG]   ; exp tag
+    mov [rbp - POW_MOD], rdi
+    mov [rbp - POW_MTAG], rdx
 
-    ; All must now be plain int64
-    cmp ecx, TAG_SMALLINT
-    jne .pow_type_error
-    cmp r8d, TAG_SMALLINT
-    jne .pow_type_error
-    cmp r9d, TAG_SMALLINT
-    jne .pow_type_error
+    ; A base that is not an int is asked for its own three-argument __pow__,
+    ; which is how pow(x, y, z) works on a class that defines one.  Nothing
+    ; consulted it, so every such call was "pow() arguments must be numeric".
+    mov rdi, [rbp - POW_BASE]
+    mov esi, [rbp - POW_BTAG]
+    call pow_is_int_operand
+    test eax, eax
+    jz .pow_three_dunder
 
-    ; exp must be >= 0
-    test rbx, rbx
-    js .pow_neg_mod_exp
-    ; mod must be != 0
-    test r12, r12
+    ; With an int base, all three have to be ints, and CPython words that
+    ; refusal specifically.
+    mov rdi, [rbp - POW_EXP]
+    mov esi, [rbp - POW_ETAG]
+    call pow_is_int_operand
+    test eax, eax
+    jz .pow_not_all_ints
+    mov rdi, [rbp - POW_MOD]
+    mov esi, [rbp - POW_MTAG]
+    call pow_is_int_operand
+    test eax, eax
+    jz .pow_not_all_ints
+
+    ; Into GMP.  The modulus is checked FIRST: pow(2, -1, 0) is about the
+    ; third argument, not the second.
+    lea rdi, [rbp - POW_MB]
+    call __gmpz_init wrt ..plt
+    lea rdi, [rbp - POW_MEXP]
+    call __gmpz_init wrt ..plt
+    lea rdi, [rbp - POW_MMOD]
+    call __gmpz_init wrt ..plt
+    lea rdi, [rbp - POW_MRES]
+    call __gmpz_init wrt ..plt
+
+    lea rdi, [rbp - POW_MB]
+    mov rsi, [rbp - POW_BASE]
+    mov edx, [rbp - POW_BTAG]
+    call pow_load_mpz
+    lea rdi, [rbp - POW_MEXP]
+    mov rsi, [rbp - POW_EXP]
+    mov edx, [rbp - POW_ETAG]
+    call pow_load_mpz
+    lea rdi, [rbp - POW_MMOD]
+    mov rsi, [rbp - POW_MOD]
+    mov edx, [rbp - POW_MTAG]
+    call pow_load_mpz
+
+    lea rdi, [rbp - POW_MMOD]
+    xor esi, esi
+    call __gmpz_cmp_si wrt ..plt
+    test eax, eax
     jz .pow_zero_mod
 
-    ; Modular exponentiation: result = base^exp mod mod
-    mov r13, rbx            ; exp
-    ; rax = base, r12 = mod
-    ; Reduce base mod first
-    cqo
-    idiv r12                ; rax=quot, rdx=rem
-    mov rax, rdx            ; base = base % mod
-    ; Adjust remainder to match Python semantics (sign of mod)
-    test rax, rax
-    jz .pow_mod_pos
-    mov rdx, rax
-    xor rdx, r12
-    jns .pow_mod_pos         ; same sign → OK
-    add rax, r12             ; different signs → adjust
-.pow_mod_pos:
-    mov rcx, 1              ; result = 1
-.pow_mod_loop:
-    test r13, r13
-    jz .pow_mod_done
-    test r13, 1
-    jz .pow_mod_even
-    imul rcx, rax           ; result *= base
-    ; result %= mod
-    push rax
-    mov rax, rcx
-    cqo
-    idiv r12
-    mov rcx, rdx
-    test rcx, rcx
-    jz .pow_mod_pos2
-    mov rdx, rcx
-    xor rdx, r12
-    jns .pow_mod_pos2
-    add rcx, r12
-.pow_mod_pos2:
-    pop rax
-.pow_mod_even:
-    imul rax, rax           ; base *= base
-    ; base %= mod
-    push rcx
-    cqo
-    idiv r12
-    mov rax, rdx
-    test rax, rax
-    jz .pow_mod_pos3
-    mov rdx, rax
-    xor rdx, r12
-    jns .pow_mod_pos3
-    add rax, r12
-.pow_mod_pos3:
-    pop rcx
-    shr r13, 1
-    jmp .pow_mod_loop
-.pow_mod_done:
-    ; Apply final result % mod (needed for exp=0 case: pow(x,0,mod) = 1 % mod)
-    mov rax, rcx
-    cqo
-    idiv r12
-    mov rax, rdx
-    test rax, rax
-    jz .pow_mod_final
-    mov rdx, rax
-    xor rdx, r12
-    jns .pow_mod_final
-    add rax, r12
-.pow_mod_final:
-    RET_TAG_SMALLINT
+    lea rdi, [rbp - POW_MEXP]
+    xor esi, esi
+    call __gmpz_cmp_si wrt ..plt
+    test eax, eax
+    js .pow_mod_inverse
+
+    lea rdi, [rbp - POW_MRES]
+    lea rsi, [rbp - POW_MB]
+    lea rdx, [rbp - POW_MEXP]
+    lea rcx, [rbp - POW_MMOD]
+    call __gmpz_powm wrt ..plt
+    jmp .pow_mod_sign
+
+.pow_mod_inverse:
+    ; A negative exponent: invert the base, then raise the inverse to |exp|.
+    lea rdi, [rbp - POW_MRES]
+    lea rsi, [rbp - POW_MB]
+    lea rdx, [rbp - POW_MMOD]
+    call __gmpz_invert wrt ..plt
+    test eax, eax
+    jz .pow_not_invertible
+    lea rdi, [rbp - POW_MEXP]
+    lea rsi, [rbp - POW_MEXP]
+    call __gmpz_neg wrt ..plt
+    lea rdi, [rbp - POW_MRES]
+    lea rsi, [rbp - POW_MRES]
+    lea rdx, [rbp - POW_MEXP]
+    lea rcx, [rbp - POW_MMOD]
+    call __gmpz_powm wrt ..plt
+
+.pow_mod_sign:
+    ; GMP's powm answers in [0, |mod|); Python's result carries the sign of
+    ; the modulus, so a negative modulus needs the representative shifted
+    ; down by |mod| unless the result is already zero.
+    lea rdi, [rbp - POW_MMOD]
+    xor esi, esi
+    call __gmpz_cmp_si wrt ..plt
+    test eax, eax
+    jns .pow_mod_build
+    lea rdi, [rbp - POW_MRES]
+    xor esi, esi
+    call __gmpz_cmp_si wrt ..plt
+    test eax, eax
+    jz .pow_mod_build
+    lea rdi, [rbp - POW_MRES]
+    lea rsi, [rbp - POW_MRES]
+    lea rdx, [rbp - POW_MMOD]
+    call __gmpz_add wrt ..plt
+
+.pow_mod_build:
+    mov edi, PyIntObject_size
+    call ap_malloc
+    mov rbx, rax
+    mov qword [rbx + PyObject.ob_refcnt], 1
+    lea rcx, [rel int_type]
+    mov [rbx + PyObject.ob_type], rcx
+    mov qword [rbx + PyIntObject.compact], 0
+    INT_NEED_MPZ rbx
+    lea rdi, [rbx + PyIntObject.mpz]
+    call __gmpz_init wrt ..plt
+    lea rdi, [rbx + PyIntObject.mpz]
+    lea rsi, [rbp - POW_MRES]
+    call __gmpz_set wrt ..plt
+    call pow_clear_mpz
+    mov rdi, rbx
+    call int_shrink
+    mov edx, TAG_PTR
     pop r13
     pop r12
     pop rbx
@@ -2403,10 +2542,70 @@ DEF_FUNC builtin_pow_fn, POW_FRAME
     V_PACK rax, rdx             ; builtins return one Value
     ret
 
-.pow_neg_mod_exp:
-    RAISE exc_ValueError_type, "pow() 2nd argument cannot be negative when 3rd argument specified"
+.pow_three_dunder:
+    ; __pow__(self, exp, mod).  No nb_ slot can carry a third operand, so the
+    ; name is looked up and called directly.
+    mov rdi, [rbp - POW_BASE]
+    cmp dword [rbp - POW_BTAG], TAG_PTR
+    jne .pow_not_all_ints
+    mov rdi, [rdi + PyObject.ob_type]
+    CSTRING rsi, "__pow__"
+    extern dunder_lookup
+    call dunder_lookup
+    V_UNPACK rax, rdx
+    test edx, edx
+    jz .pow_not_all_ints
+    test edx, TAG_RC_BIT
+    jz .pow_not_all_ints
+    mov r12, rax                ; the function
+
+    mov rax, [r12 + PyObject.ob_type]
+    mov rax, [rax + PyTypeObject.tp_call]
+    test rax, rax
+    jz .pow_not_all_ints
+
+    sub rsp, 32                 ; 3 Values, padded to keep rsp 16-aligned
+    mov rdi, [rbp - POW_BASE]
+    mov esi, [rbp - POW_BTAG]
+    V_PACK rdi, rsi
+    mov [rsp], rdi
+    mov rdi, [rbp - POW_EXP]
+    mov esi, [rbp - POW_ETAG]
+    V_PACK rdi, rsi
+    mov [rsp + 8], rdi
+    mov rdi, [rbp - POW_MOD]
+    mov esi, [rbp - POW_MTAG]
+    V_PACK rdi, rsi
+    mov [rsp + 16], rdi
+    mov rdi, r12
+    mov rsi, rsp
+    mov edx, 3
+    call rax
+    add rsp, 32
+    V_UNPACK rax, rdx
+    test edx, edx
+    jz .pow_propagate
+    ; NotImplemented from a by-name call means the type declined the pair.
+    extern notimpl_singleton
+    lea rcx, [rel notimpl_singleton]
+    cmp rax, rcx
+    je .pow_not_all_ints
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    V_PACK rax, rdx             ; builtins return one Value
+    ret
+
+.pow_not_all_ints:
+    RAISE exc_TypeError_type, "pow() 3rd argument not allowed unless all arguments are integers"
+
+.pow_not_invertible:
+    call pow_clear_mpz
+    RAISE exc_ValueError_type, "base is not invertible for the given modulus"
 
 .pow_zero_mod:
+    call pow_clear_mpz
     RAISE exc_ValueError_type, "pow() 3rd argument cannot be 0"
 
 .pow_error:
@@ -2415,6 +2614,86 @@ DEF_FUNC builtin_pow_fn, POW_FRAME
 .pow_type_error:
     RAISE exc_TypeError_type, "pow() arguments must be numeric"
 END_FUNC builtin_pow_fn
+
+;; ============================================================================
+;; pow_is_int_operand(rdi = payload, esi = tag) -> eax = 1 when it is an int
+;;
+;; int_unwrap has already flattened bool, a compact heap int and an int
+;; subclass to TAG_SMALLINT; what is left as a pointer is either a GMP-backed
+;; int or something that is not an int at all, so the type has to be read.
+;; ============================================================================
+DEF_FUNC_LOCAL pow_is_int_operand
+    cmp esi, TAG_SMALLINT
+    je .poi_yes
+    cmp esi, TAG_PTR
+    jne .poi_no
+    lea rax, [rel int_type]
+    cmp [rdi + PyObject.ob_type], rax
+    jne .poi_no
+.poi_yes:
+    mov eax, 1
+    leave
+    ret
+.poi_no:
+    xor eax, eax
+    leave
+    ret
+END_FUNC pow_is_int_operand
+
+;; ============================================================================
+;; pow_load_mpz(rdi = an initialised mpz_t, rsi = payload, edx = tag)
+;; Sets the mpz from an int in either representation.
+;; ============================================================================
+DEF_FUNC_LOCAL pow_load_mpz
+    cmp edx, TAG_SMALLINT
+    je .plm_small
+    mov rax, rsi
+    lea rcx, [rel int_type]
+    cmp [rax + PyObject.ob_type], rcx
+    jne .plm_bad
+    push rdi
+    sub rsp, 8
+    INT_NEED_MPZ rax
+    add rsp, 8
+    pop rdi
+    mov rax, rsi
+    add rax, PyIntObject.mpz
+    mov rsi, rax
+    call __gmpz_set wrt ..plt
+    leave
+    ret
+.plm_small:
+    call __gmpz_set_si wrt ..plt
+    leave
+    ret
+.plm_bad:
+    RAISE exc_TypeError_type, "pow() arguments must be numeric"
+END_FUNC pow_load_mpz
+
+;; ============================================================================
+;; pow_clear_mpz() -- releases the four mpz_t in builtin_pow_fn's frame.
+;;
+;; Reads its CALLER's frame through the saved rbp, because DEF_FUNC gives it
+;; one of its own.  Four calls in a row otherwise, at every exit and at both
+;; raises.
+;; ============================================================================
+DEF_FUNC_LOCAL pow_clear_mpz
+    push rbx
+    sub rsp, 8
+    mov rbx, [rbp]              ; the caller's rbp
+    lea rdi, [rbx - POW_MB]
+    call __gmpz_clear wrt ..plt
+    lea rdi, [rbx - POW_MEXP]
+    call __gmpz_clear wrt ..plt
+    lea rdi, [rbx - POW_MMOD]
+    call __gmpz_clear wrt ..plt
+    lea rdi, [rbx - POW_MRES]
+    call __gmpz_clear wrt ..plt
+    add rsp, 8
+    pop rbx
+    leave
+    ret
+END_FUNC pow_clear_mpz
 
 ;; ============================================================================
 ;; builtin_bin(args, nargs) - bin(x)

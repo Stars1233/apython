@@ -9,10 +9,6 @@ one-line fix.
 
 ## Correctness
 
-- **`(-7.5) ** 2.5` is `nan` where CPython answers a complex.**  A negative
-  base with a fractional exponent has no real result, and CPython's `float`
-  power promotes to `complex` rather than answering NaN.
-
 - **`binary_op1`'s subclass-priority rule is not implemented.**  CPython tries
   the right operand's slot *first* when its type is a proper subclass of the
   left's and overrides the slot.  The other half of that rule -- skipping the
