@@ -388,10 +388,12 @@ DEF_FUNC int_method_to_bytes, ITB_FRAME
 
     cmp r12, 2
     jl .itb_have_args
-    mov rax, [rbx + 8]                          ; args[1] = length
-    V_UNPACK rax, rdx
-    cmp edx, TAG_SMALLINT
-    jne .itb_error
+    ; obj_as_index, not a TAG_SMALLINT test: a length of 9 is a heap int under
+    ; INT_STRESS=1, and every int is a pointer to something there.
+    mov rdi, [rbx + 8]                          ; args[1] = length
+    V_UNPACK rdi, rdx
+    extern obj_as_index
+    call obj_as_index
     mov [rbp - ITB_LEN], rax
 
     cmp r12, 3
