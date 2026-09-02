@@ -104,14 +104,56 @@ DEF_FUNC_BARE float_to_f64
     cvtsi2sd xmm0, rax
     ret
 
+FTF_RBX equ 8               ; where .from_gmp_int's push of rbx lands
+
 .from_gmp_int:
+    ; mpz_get_d TRUNCATES toward zero, and CPython's PyLong_AsDouble rounds to
+    ; nearest even: float(10**30) was 9.999999999999999e+29 rather than 1e+30,
+    ; and every complex() and comparison of such a value inherited it.
+    ;
+    ; The decimal string and strtod get it right -- strtod is required to
+    ; round to nearest even -- and this path already pays for GMP, so the
+    ; conversion costs nothing that matters.
     push rbp
     mov rbp, rsp
-    and rsp, -16              ; ensure 16-byte alignment for GMP call
+    push rbx
+    sub rsp, 8
+    and rsp, -16
+    mov rax, rdi
+    mov edx, TAG_PTR
+    V_PACK rax, rdx
+    mov rdi, rax
+    mov esi, 10
+    xor edx, edx
+    extern int_base_str
+    call int_base_str
+    test rax, rax
+    jz .ftf_gmp_fallback
+    mov rbx, rax
+    mov rdi, rax
+    xor esi, esi
+    extern strtod
+    call strtod wrt ..plt
+    movq rax, xmm0
+    push rax
+    mov rdi, rbx
+    extern ap_free
+    call ap_free
+    pop rax
+    movq xmm0, rax
+    lea rsp, [rbp - FTF_RBX]    ; rbx sits just below the saved rbp
+    pop rbx
+    leave
+    ret
+
+.ftf_gmp_fallback:
+    ; No string to convert: fall back on the truncating primitive rather than
+    ; answering nothing.
     INT_NEED_MPZ rdi
     lea rdi, [rdi + PyIntObject.mpz]
     call __gmpz_get_d wrt ..plt
-    ; result in xmm0
+    lea rsp, [rbp - FTF_RBX]
+    pop rbx
     leave
     ret
 END_FUNC float_to_f64
@@ -1168,7 +1210,48 @@ DEF_FUNC float_compare, FC_FRAME
     mov ecx, [rbp - FC_LTAG]
     mov r8d, [rbp - FC_RTAG]
 .fc_right_ok:
+    ; An int too large for a double to hold exactly cannot be compared through
+    ; one: the conversion rounds, and `10**30 == 1e30` would answer True where
+    ; CPython compares the two exactly and says False.  float_to_f64 rounds to
+    ; nearest now rather than truncating, which makes that visible; before, the
+    ; truncation happened to fall the other way.
+    mov rdi, [rbp - FC_LSAVE]
+    mov esi, [rbp - FC_LTAG]
+    call fc_wide_int
+    test eax, eax
+    jnz .fc_exact_left
+    mov rdi, [rbp - FC_RSAVE]
+    mov esi, [rbp - FC_RTAG]
+    call fc_wide_int
+    test eax, eax
+    jnz .fc_exact_right
+    mov rdi, [rbp - FC_LSAVE]
+    mov rsi, [rbp - FC_RSAVE]
+    mov ecx, [rbp - FC_LTAG]
+    mov r8d, [rbp - FC_RTAG]
+    jmp .fc_by_double
 
+.fc_exact_left:
+    ; The wide int is on the left; the other side becomes the double.
+    mov rdi, [rbp - FC_RSAVE]
+    mov esi, [rbp - FC_RTAG]
+    call float_to_f64
+    mov rdi, [rbp - FC_LSAVE]
+    call fc_int_vs_double
+    mov r8d, eax
+    jmp .float_cmp_dispatch
+
+.fc_exact_right:
+    mov rdi, [rbp - FC_LSAVE]
+    mov esi, [rbp - FC_LTAG]
+    call float_to_f64
+    mov rdi, [rbp - FC_RSAVE]
+    call fc_int_vs_double
+    neg eax                     ; the comparison was made the other way round
+    mov r8d, eax
+    jmp .float_cmp_dispatch
+
+.fc_by_double:
     ; Convert both to doubles
     mov [rbp - FC_RSAVE], rsi          ; save right (8 bytes)
     mov dword [rbp - FC_RTAG], r8d    ; save right_tag (4 bytes, no overlap)
@@ -1254,6 +1337,115 @@ DEF_FUNC float_compare, FC_FRAME
     leave
     ret
 END_FUNC float_compare
+
+;; ============================================================================
+;; fc_wide_int(rdi = payload, esi = tag) -> eax = 1 when this is an integer a
+;; double cannot hold exactly, so the comparison has to be made in GMP.
+;; ============================================================================
+DEF_FUNC_LOCAL fc_wide_int
+    cmp esi, TAG_PTR
+    jne .fcw_no                 ; an immediate int is inside +-2^50
+    test rdi, rdi
+    jz .fcw_no
+    mov rax, [rdi + PyObject.ob_type]
+    lea rcx, [rel int_type]
+    cmp rax, rcx
+    je .fcw_int
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_INT_SUBCLASS
+    jz .fcw_no
+.fcw_int:
+    cmp qword [rdi + PyIntObject.compact], 0
+    je .fcw_yes                 ; GMP-backed: always wider than a double
+    mov rax, [rdi + PyIntObject.ival]
+    mov rcx, rax
+    sar rcx, 63
+    xor rax, rcx
+    sub rax, rcx                ; |ival|
+    mov rcx, 1 << 53
+    cmp rax, rcx
+    jae .fcw_yes
+.fcw_no:
+    xor eax, eax
+    leave
+    ret
+.fcw_yes:
+    mov eax, 1
+    leave
+    ret
+END_FUNC fc_wide_int
+
+;; ============================================================================
+;; fc_int_vs_double(rdi = the int (a heap int), xmm0 = the double)
+;;   -> eax = -1, 0 or 1 for int < d, int == d, int > d
+;;
+;; Exactly, in GMP: the double's integer part is set into an mpz -- mpz_set_d
+;; truncates toward zero, which is what is wanted -- and the fraction breaks
+;; a tie.  A NaN or an infinity never reaches here; float_compare's ucomisd
+;; arm handles those.
+;; ============================================================================
+FIV_D     equ 8
+FIV_TMP   equ 32            ; an mpz_t
+FIV_FRAME equ 48            ; + 1 push = 56, not 16-aligned
+DEF_FUNC_LOCAL fc_int_vs_double, FIV_FRAME
+    push rbx
+    movsd [rbp - FIV_D], xmm0
+    mov rbx, rdi
+
+    ; An infinity compares by sign alone; NaN never gets here.
+    movsd xmm1, [rel pos_inf]
+    ucomisd xmm0, xmm1
+    je .fiv_minus                ; every finite int is below +inf
+    movsd xmm1, [rel neg_inf]
+    ucomisd xmm0, xmm1
+    je .fiv_plus
+
+    lea rdi, [rbp - FIV_TMP]
+    extern __gmpz_init
+    call __gmpz_init wrt ..plt
+    lea rdi, [rbp - FIV_TMP]
+    movsd xmm0, [rbp - FIV_D]
+    extern __gmpz_set_d
+    call __gmpz_set_d wrt ..plt  ; truncates toward zero
+
+    INT_NEED_MPZ rbx
+    lea rdi, [rbx + PyIntObject.mpz]
+    lea rsi, [rbp - FIV_TMP]
+    extern __gmpz_cmp
+    call __gmpz_cmp wrt ..plt
+    mov r8d, eax
+    push r8
+    lea rdi, [rbp - FIV_TMP]
+    extern __gmpz_clear
+    call __gmpz_clear wrt ..plt
+    pop r8
+    test r8d, r8d
+    jl .fiv_minus
+    jg .fiv_plus
+
+    ; Equal against the truncated part: the fraction decides.
+    movsd xmm0, [rbp - FIV_D]
+    roundsd xmm1, xmm0, 3        ; 3 = truncate toward zero
+    ucomisd xmm0, xmm1
+    je .fiv_zero
+    ja .fiv_minus                ; d has a positive fraction: the int is below
+    jmp .fiv_plus
+
+.fiv_minus:
+    mov eax, -1
+    pop rbx
+    leave
+    ret
+.fiv_plus:
+    mov eax, 1
+    pop rbx
+    leave
+    ret
+.fiv_zero:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+END_FUNC fc_int_vs_double
 
 ;; ============================================================================
 ;; float_getattr(rdi = self Value, rsi = name str) -> rax = Value, or NULL

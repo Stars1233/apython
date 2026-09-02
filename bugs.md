@@ -167,12 +167,6 @@ one-line fix.
   where CPython says `<method 'bit_length' of 'int' objects>`.  They are
   callable unbound either way.
 
-- **`float()` of a large int rounds differently from CPython.**
-  `float(10**30)` is `9.999999999999999e+29` here and `1e+30` there.
-  `float_to_f64` converts a GMP-backed int with `__gmpz_get_d`, which
-  truncates toward zero; CPython's `PyLong_AsDouble` rounds to nearest even.
-  Every `complex()` and comparison of such a value inherits it.
-
 - **`complex()` of a string does not accept Unicode spaces or Unicode digits.**
   CPython runs `_PyUnicode_TransformDecimalAndSpaceToASCII` first, so
   `complex("\u30001+2j")` parses there; here any byte past ASCII is a
