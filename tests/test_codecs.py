@@ -38,3 +38,39 @@ try:
     s.encode("no-such-codec-here")
 except LookupError:
     print("LookupError")
+
+# --- The errors= handler, on the ascii paths ---------------------------------
+#
+# bytes.decode read errors= through codec_error_id and acted on it in the utf-8
+# fixup loop, but its ascii arm jumped straight to the raise; str.encode parked
+# the argument in a frame slot and never passed it anywhere at all.  So
+# b"a\xffb".decode("ascii", "ignore") and "a\u1234b".encode("ascii", "ignore")
+# both raised where CPython answers 'ab' and b'ab', and an unknown handler name
+# was never reported as a LookupError on either path.
+
+for errors in ("strict", "ignore", "replace"):
+    for data in (b"a\xffb", b"abc", b"\xff", b"", b"\xff\xfe"):
+        try:
+            print(errors, data, repr(data.decode("ascii", errors)))
+        except UnicodeDecodeError:
+            print(errors, data, "UnicodeDecodeError")
+    for text in ("a\u1234b", "abc", "\xe9", "", "\U0001F600x"):
+        try:
+            print(errors, repr(text), repr(text.encode("ascii", errors)))
+        except UnicodeEncodeError:
+            print(errors, repr(text), "UnicodeEncodeError")
+
+# The handler is looked up only when something fails, which is also when
+# CPython reports an unknown name.
+print(repr("ab".encode("ascii", "bogus")), repr(b"ab".decode("ascii", "bogus")))
+for label, fn in (("encode", lambda: "a\u1234b".encode("ascii", "bogus")),
+                  ("decode", lambda: b"a\xffb".decode("ascii", "bogus"))):
+    try:
+        fn()
+        print(label, "=> no error")
+    except LookupError:
+        print(label, "=> LookupError")
+
+# utf-8 and latin-1 are unchanged.
+print(repr(b"a\xffb".decode("utf-8", "ignore")), repr(b"a\xffb".decode("utf-8", "replace")))
+print(repr("a\u00e9b".encode("latin-1")), repr("a\u1234b".encode("utf-8")))

@@ -1254,9 +1254,76 @@ DEF_FUNC _bytes_decode_impl, BD_FRAME
     jge .bd_utf8
     movzx eax, byte [rbx + PyBytesObject.data + rcx]
     test al, 0x80
-    jnz .bd_not_decodable
+    jnz .bd_ascii_bad
     inc rcx
     jmp .bd_ascii_scan
+
+.bd_ascii_bad:
+    ; The handler, looked up only now that something has actually failed.
+    ; This arm jumped straight to the raise, so `b"a\xffb".decode("ascii",
+    ; "ignore")` raised where CPython answers 'ab' -- and an unknown handler
+    ; name was never reported as a LookupError on this path either.
+    mov rdi, [rbp - BD_ERRORS]
+    call codec_error_id         ; 0 strict, 1 ignore, 2 replace, -1 unknown
+    cmp eax, -1
+    je .bd_bad_errors
+    test eax, eax
+    jz .bd_not_decodable
+    mov [rbp - BD_ERRID], rax
+
+    ; replace writes U+FFFD, three bytes, for each byte dropped -- so the
+    ; result can be three times as long as the input.
+    lea rdi, [r12 + r12*2]
+    add rdi, PyStrObject.data + 8
+    call ap_malloc
+    test rax, rax
+    jz .bd_nomem
+    mov [rbp - BD_OUT], rax
+    mov qword [rax + PyObject.ob_refcnt], 1
+    lea rcx, [rel str_type]
+    mov [rax + PyObject.ob_type], rcx
+    mov qword [rax + PyStrObject.ob_hash], -1
+    mov qword [rbp - BD_POS], 0
+    mov rbx, [rbp - BD_SELF]
+    xor ecx, ecx
+.bd_af_loop:
+    cmp rcx, r12
+    jge .bd_af_done
+    movzx eax, byte [rbx + PyBytesObject.data + rcx]
+    test al, 0x80
+    jnz .bd_af_bad
+    mov rdx, [rbp - BD_OUT]
+    mov r8, [rbp - BD_POS]
+    mov [rdx + PyStrObject.data + r8], al
+    inc qword [rbp - BD_POS]
+    inc rcx
+    jmp .bd_af_loop
+.bd_af_bad:
+    inc rcx
+    cmp qword [rbp - BD_ERRID], 2
+    jne .bd_af_loop             ; ignore
+    mov rdx, [rbp - BD_OUT]
+    mov r8, [rbp - BD_POS]
+    mov byte [rdx + PyStrObject.data + r8], 0xef
+    mov byte [rdx + PyStrObject.data + r8 + 1], 0xbf
+    mov byte [rdx + PyStrObject.data + r8 + 2], 0xbd
+    add qword [rbp - BD_POS], 3
+    jmp .bd_af_loop
+.bd_af_done:
+    mov rax, [rbp - BD_OUT]
+    mov rcx, [rbp - BD_POS]
+    mov [rax + PyStrObject.ob_size], rcx
+    mov qword [rax + PyStrObject.data + rcx], 0
+    mov rdi, rax
+    extern str_set_length
+    call str_set_length
+    mov rax, [rbp - BD_OUT]
+    mov edx, TAG_PTR
+    pop r12
+    pop rbx
+    leave
+    V_PACK rax, rdx
+    ret
 
 .bd_latin1:
     ; Each byte is one code point, so a byte at or above 0x80 becomes two

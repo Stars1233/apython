@@ -41,8 +41,7 @@ one-line fix.
 - **`str.encode` and `bytes.decode` know only utf-8, ascii and latin-1.**
   Any other name is a LookupError, where CPython would find the codec through
   the registry; reaching it from the interpreter would mean calling Python
-  from a builtin method.  The `errors` argument is accepted and ignored --
-  every failure is strict.
+  from a builtin method.
 
 - **`__qualname__` and `__doc__` set on a function land in its `__dict__`.**
   CPython keeps both on the function object, so `f.__dict__` stays empty until
@@ -150,15 +149,9 @@ one-line fix.
   slot that raises never comes back.  The same limit applies anywhere C code
   here would want to catch an exception.
 
-- **`str.encode` honours no error handler, and `bytes.decode` only honours
-  one for utf-8.**  `bytes.decode` reads `errors=` through `codec_error_id`
-  and acts on it in the utf-8 fixup loop, but its `ascii` arm jumps straight
-  to `.bd_not_decodable` on the first high byte; `str.encode` parks the
-  argument in `SE_ERRS` and never passes it to `codec_error_id` at all.  So
-  `b"a\xffb".decode("ascii", "ignore")` and `"a\u1234b".encode("ascii",
-  "ignore")` both raise where CPython answers `'ab'` and `b'ab'`, and an
-  unknown handler name is not reported as a LookupError on those paths
-  because it is never looked up.
+- **`latin-1` encoding honours no error handler.**  `str.encode` and
+  `bytes.decode` both act on `errors=` for `ascii` and `utf-8` now;
+  `"a\u1234b".encode("latin-1", "ignore")` still raises.
 
 - **`sys.getfilesystemencoding()` always answers `'utf-8'`.**  PEP 540's
   locale handling does not exist, and neither does the `surrogateescape`
