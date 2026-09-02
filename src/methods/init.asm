@@ -280,6 +280,56 @@ DEF_FUNC dict_add_builtin_func
 END_FUNC dict_add_builtin_func
 
 ;; ============================================================================
+;; HELPER: dict_add_getset(rdi = dict, rsi = name_cstr, rdx = getter,
+;;                         rcx = setter or 0)
+;;
+;; A named pair of C accessors in a type's dict -- CPython's PyGetSetDef.  This
+;; is what makes `int.real` answer a descriptor instead of raising, and what
+;; puts real/imag/numerator/denominator into dir().  The instance read still
+;; goes through each type's tp_getattr, which is faster and gets there first;
+;; both call the same getter.
+;; ============================================================================
+DEF_FUNC dict_add_getset
+    push rbx
+    push r12
+    push r13
+    push r14
+
+    mov rbx, rdi                ; dict
+    mov r12, rsi                ; name_cstr
+    mov r13, rdx                ; getter
+    mov r14, rcx                ; setter
+
+    mov rdi, r12
+    call str_from_cstr_heap
+    push rax                    ; the key, and the descriptor's own name
+
+    mov rdi, r13
+    mov rsi, r14
+    mov rdx, rax
+    extern getset_descr_new
+    call getset_descr_new
+    push rax
+
+    mov rdi, rbx
+    mov rsi, [rsp + 8]          ; key
+    mov rdx, rax                ; the descriptor
+    call dict_set
+
+    pop rdi
+    call obj_decref             ; dict_set took its own reference
+    pop rdi
+    call obj_decref             ; and getset_descr_new took one on the name
+
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC dict_add_getset
+
+;; ============================================================================
 ;; HELPER: add_method_to_dict_checked(dict, name_cstr, func_ptr, min_args, max_args)
 ;; rdi=dict, rsi=name_cstr, rdx=func_ptr, rcx=min_args, r8=max_args
 ;; Like dict_add_builtin_func but sets arg count bounds.
@@ -1595,6 +1645,34 @@ DEF_FUNC methods_init
     pop rdi
     call obj_decref
 
+    ;; real, imag, numerator and denominator, as getset descriptors.  int's
+    ;; tp_getattr answers an instance read before this dict is consulted;
+    ;; these are what make `int.real` an attribute of the type, and what put
+    ;; the four names in dir().
+    mov rdi, rbx
+    lea rsi, [rel gs_real]
+    extern int_get_real
+    lea rdx, [rel int_get_real]
+    xor ecx, ecx
+    call dict_add_getset
+    mov rdi, rbx
+    lea rsi, [rel gs_numerator]
+    lea rdx, [rel int_get_real]
+    xor ecx, ecx
+    call dict_add_getset
+    mov rdi, rbx
+    lea rsi, [rel gs_imag]
+    extern int_get_imag
+    lea rdx, [rel int_get_imag]
+    xor ecx, ecx
+    call dict_add_getset
+    mov rdi, rbx
+    lea rsi, [rel gs_denominator]
+    extern int_get_denominator
+    lea rdx, [rel int_get_denominator]
+    xor ecx, ecx
+    call dict_add_getset
+
     ; Store in int_type.tp_dict
     mov rdi, rbx
     lea rsi, [rel mn___format__]
@@ -1643,6 +1721,19 @@ DEF_FUNC methods_init
     lea rsi, [rel mn___format__]
     lea rdx, [rel builtin_method_format]
     call dict_add_builtin_func
+
+    mov rdi, rbx
+    lea rsi, [rel gs_real]
+    extern complex_get_real
+    lea rdx, [rel complex_get_real]
+    xor ecx, ecx
+    call dict_add_getset
+    mov rdi, rbx
+    lea rsi, [rel gs_imag]
+    extern complex_get_imag
+    lea rdx, [rel complex_get_imag]
+    xor ecx, ecx
+    call dict_add_getset
 
     lea rax, [rel complex_type]
     mov [rax + PyTypeObject.tp_dict], rbx
@@ -1719,6 +1810,20 @@ DEF_FUNC methods_init
     lea rsi, [rel mn___format__]
     lea rdx, [rel builtin_method_format]
     call dict_add_builtin_func
+
+    ; real and imag; float has no numerator or denominator, as CPython has not
+    mov rdi, rbx
+    lea rsi, [rel gs_real]
+    extern float_get_real
+    lea rdx, [rel float_get_real]
+    xor ecx, ecx
+    call dict_add_getset
+    mov rdi, rbx
+    lea rsi, [rel gs_imag]
+    extern float_get_imag
+    lea rdx, [rel float_get_imag]
+    xor ecx, ecx
+    call dict_add_getset
 
     ; Store in float_type.tp_dict
     lea rax, [rel float_type]
@@ -2083,6 +2188,10 @@ mn___setitem__: db "__setitem__", 0
 mn___delitem__: db "__delitem__", 0
 mn___contains__: db "__contains__", 0
 mn___len__:     db "__len__", 0
+gs_real:        db "real", 0
+gs_imag:        db "imag", 0
+gs_numerator:   db "numerator", 0
+gs_denominator: db "denominator", 0
 mn___eq__: db "__eq__", 0
 mn___ne__: db "__ne__", 0
 mn___hash__:    db "__hash__", 0

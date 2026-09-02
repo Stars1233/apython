@@ -1575,6 +1575,26 @@ DEF_FUNC dir_default, DD_FRAME
     jmp .dd_walk_chain
 
 .dd_done:
+    ; __class__ is an attribute of every object and lives in no tp_dict here:
+    ; obj_generic_attr answers it, after the walk above has missed.  CPython
+    ; keeps it as a getset in object's dict, which is where its dir() finds
+    ; it -- doing the same needs the metatype data-descriptor precedence that
+    ; type_getattr does not have, so the name is added here instead.
+    lea rdi, [rel dd_class_name]
+    call str_from_cstr
+    mov r12, rax
+    mov rdi, rbx
+    mov rsi, r12
+    call list_contains
+    test eax, eax
+    jnz .dd_class_present
+    mov rdi, rbx
+    mov rsi, r12
+    call list_append
+.dd_class_present:
+    mov rdi, r12
+    call obj_decref
+
     mov rax, rbx
     mov edx, TAG_PTR
     pop r13
@@ -1744,6 +1764,7 @@ END_FUNC builtin_dir
 
 section .rodata
 dunder_dir_name: db "__dir__", 0
+dd_class_name: db "__class__", 0
 
 section .text
 

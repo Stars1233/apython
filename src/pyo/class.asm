@@ -571,6 +571,14 @@ DEF_FUNC instance_getattr, IG_FRAME
     cmp rcx, rdx
     je .found_slot
 
+    ; A getset descriptor calls its getter.  int, float and complex register
+    ; real/imag/numerator/denominator this way, and a subclass instance
+    ; reaches them here rather than through the base's tp_getattr.
+    extern getset_descr_type
+    lea rdx, [rel getset_descr_type]
+    cmp rcx, rdx
+    je .found_getset
+
     ; Check for staticmethod/classmethod/property → return raw descriptor
     ; LOAD_ATTR handles unwrapping with the correct push convention
     lea rdx, [rel staticmethod_type]
@@ -620,6 +628,21 @@ DEF_FUNC instance_getattr, IG_FRAME
     test rax, rax
     jz .slot_not_set            ; 0 = slot not set → AttributeError
     INCREF_V rax, rdx
+    V_UNPACK rax, rdx
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    V_PACK rax, rdx             ; return one Value
+    ret
+
+.found_getset:
+    ; getset_descr_get answers a Value, or never returns when the attribute
+    ; has no getter at all.
+    mov rdi, r13
+    mov rsi, rbx
+    extern getset_descr_get
+    call getset_descr_get
     V_UNPACK rax, rdx
     pop r13
     pop r12
@@ -808,7 +831,28 @@ DEF_FUNC instance_setattr
     extern member_descr_type
     lea rcx, [rel member_descr_type]
     cmp [r9 + PyObject.ob_type], rcx
+    je .sa_member
+
+    ; A getset descriptor is a data descriptor: it takes precedence over the
+    ; instance dict, so `I(5).real = 9` is the AttributeError CPython raises
+    ; rather than a shadowing instance attribute.
+    extern getset_descr_type
+    lea rcx, [rel getset_descr_type]
+    cmp [r9 + PyObject.ob_type], rcx
     jne .sa_no_slot
+    mov rdi, r9
+    mov rsi, rbx
+    mov rdx, r13
+    extern getset_descr_set
+    call getset_descr_set
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.sa_member:
 
     ; Member descriptor! Write value to slot offset
     mov rcx, [r9 + PyMemberDescrObject.md_offset]

@@ -581,6 +581,11 @@ DEF_FUNC op_load_attr, LA_FRAME
     cmp rcx, rdx
     je .la_handle_property
 
+    extern getset_descr_type
+    lea rdx, [rel getset_descr_type]
+    cmp rcx, rdx
+    je .la_handle_getset
+
     ; General descriptor protocol: check for __get__ on attr's type
     ; Only check if attr's type is a heaptype (user-defined descriptor)
     mov rdx, [rcx + PyTypeObject.tp_flags]
@@ -630,6 +635,39 @@ DEF_FUNC op_load_attr, LA_FRAME
     xor ecx, ecx
     VPUSH_NULL
     VPUSH_VAL rax, rdx
+    jmp .la_done
+
+.la_handle_getset:
+    ; A getset descriptor found on the object's TYPE reads through its getter.
+    ; Reached any other way it is itself the answer -- `int.real` comes back
+    ; out of int's own dict through type_getattr, which is exactly what
+    ; CPython's __get__(None, type) hands back.
+    cmp qword [rbp - LA_FROM_TYPE], 0
+    je .la_check_flag
+    mov rdi, [rbp - LA_ATTR]
+    mov rsi, [rbp - LA_OBJVAL]
+    extern getset_descr_get
+    call getset_descr_get       ; -> a Value
+    push rax
+    push rax                    ; twice: rsp stays 16-byte aligned
+    mov rdi, [rbp - LA_ATTR]
+    call obj_decref             ; the descriptor, INCREF'd by the dict walk
+    mov rdi, [rbp - LA_OBJ]
+    mov rsi, [rbp - LA_OBJ_TAG]
+    DECREF_VAL rdi, rsi
+    pop rax
+    pop rax
+    cmp qword [rbp - LA_FLAG], 0
+    jne .la_getset_flag1
+    VPUSH rax
+    jmp .la_done
+.la_getset_flag1:
+    push rax
+    push rax
+    VPUSH_NULL
+    pop rax
+    pop rax
+    VPUSH rax
     jmp .la_done
 
 .la_check_flag:
@@ -1559,6 +1597,10 @@ DEF_FUNC obj_getattr_opt, GA_FRAME
     cmp rcx, rdx
     je .ga_property
 
+    lea rdx, [rel getset_descr_type]
+    cmp rcx, rdx
+    je .ga_getset
+
     ; A user-defined descriptor: a heaptype whose own type defines __get__.
     test dword [rcx + PyTypeObject.tp_flags], TYPE_FLAG_HEAPTYPE
     jz .ga_plain
@@ -1574,6 +1616,22 @@ DEF_FUNC obj_getattr_opt, GA_FRAME
     lea rcx, [rel dunder_get]
     mov r8d, TAG_PTR
     call dunder_call_3
+    mov [rbp - GA_SAVE], rax
+    mov rdi, [rbp - GA_ATTR]
+    call obj_decref
+    mov rax, [rbp - GA_SAVE]
+    pop rbx
+    leave
+    ret
+
+.ga_getset:
+    ; As in op_load_attr: through the type it is a read, out of the type's own
+    ; dict it is the descriptor itself.
+    cmp qword [rbp - GA_FROMTYPE], 0
+    je .ga_plain
+    mov rdi, [rbp - GA_ATTR]
+    mov rsi, [rbp - GA_OBJ]
+    call getset_descr_get
     mov [rbp - GA_SAVE], rax
     mov rdi, [rbp - GA_ATTR]
     call obj_decref

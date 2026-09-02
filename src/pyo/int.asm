@@ -3021,9 +3021,33 @@ DEF_FUNC int_getattr, IG_FRAME
     ret
 
 .ig_self_value:
-    ; An exact int answers with itself; a subclass answers with its value, so
-    ; that type(I(5).real) is int.
     mov rdi, [rbp - IG_SELF]
+    call int_get_real
+    leave
+    ret
+
+.ig_zero:
+    mov rdi, [rbp - IG_SELF]
+    call int_get_imag
+    leave
+    ret
+
+.ig_one:
+    mov rdi, [rbp - IG_SELF]
+    call int_get_denominator
+    leave
+    ret
+END_FUNC int_getattr
+
+;; ============================================================================
+;; int_get_real(rdi = self Value) -> rax = Value
+;;
+;; The getter behind int.real and int.numerator, reached both from the
+;; tp_getattr chain above and from the getset descriptor in int_type.tp_dict.
+;; An exact int answers with itself; a subclass answers with its value, so
+;; that type(I(5).real) is int.
+;; ============================================================================
+DEF_FUNC int_get_real
     V_TEST_PTR rdi, rax
     ja .ig_self_out             ; an immediate is already a plain int
     ; Compare the TYPE, not the family flag: int_type carries
@@ -3063,19 +3087,27 @@ DEF_FUNC int_getattr, IG_FRAME
     INCREF_V rax, rcx
     leave
     ret
+END_FUNC int_get_real
 
-.ig_zero:
+;; ============================================================================
+;; int_get_imag(rdi = self Value) -> rax = Value.  Always 0.
+;; ============================================================================
+DEF_FUNC int_get_imag
     xor eax, eax
     V_PACK_I64 rax, rcx
     leave
     ret
+END_FUNC int_get_imag
 
-.ig_one:
+;; ============================================================================
+;; int_get_denominator(rdi = self Value) -> rax = Value.  Always 1.
+;; ============================================================================
+DEF_FUNC int_get_denominator
     mov eax, 1
     V_PACK_I64 rax, rcx
     leave
     ret
-END_FUNC int_getattr
+END_FUNC int_get_denominator
 
 
 ;; ============================================================================

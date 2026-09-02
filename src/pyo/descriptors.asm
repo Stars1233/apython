@@ -874,12 +874,64 @@ DEF_FUNC getset_descr_new
     mov [rax + PyGetSetDescrObject.gs_get], rbx
     mov [rax + PyGetSetDescrObject.gs_set], r12
     mov [rax + PyGetSetDescrObject.gs_name], r13
+    ; gs_name is owned -- getset_descr_dealloc decrefs it -- and was stored
+    ; without a reference of its own.  Harmless while the one instance ever
+    ; built was immortal; not once every numeric type registers several.
+    push rax
+    mov rdi, r13
+    call obj_incref
+    pop rax
     pop r13
     pop r12
     pop rbx
     leave
     ret
 END_FUNC getset_descr_new
+
+;; ============================================================================
+;; getset_descr_get(rdi = the descriptor, rsi = self Value) -> rax = Value
+;;
+;; Calls the C getter.  Until now nothing anywhere read gs_get: the type was a
+;; stub built once so types.py could name GetSetDescriptorType, and .real and
+;; .imag were four separate tp_getattr strcmp chains instead -- which answered
+;; an instance and left `int.real` an AttributeError, because a chain is not a
+;; thing a type's dict can hold.
+;;
+;; A NULL getter is a set-only attribute, which CPython reports as an
+;; AttributeError naming it.
+;; ============================================================================
+DEF_FUNC getset_descr_get
+    mov rax, [rdi + PyGetSetDescrObject.gs_get]
+    test rax, rax
+    jz .gdg_unreadable
+    mov rdi, rsi
+    call rax
+    leave
+    ret
+.gdg_unreadable:
+    RAISE exc_AttributeError_type, "attribute is not readable"
+END_FUNC getset_descr_get
+
+;; ============================================================================
+;; getset_descr_set(rdi = the descriptor, rsi = self Value, rdx = value Value)
+;;   -> eax = 0, or never returns
+;;
+;; A NULL setter is a read-only attribute.  Every getset the tree registers
+;; today has one, which is what makes `(5).real = 1` an AttributeError rather
+;; than a silent instance attribute on a subclass.
+;; ============================================================================
+DEF_FUNC getset_descr_set
+    mov rax, [rdi + PyGetSetDescrObject.gs_set]
+    test rax, rax
+    jz .gds_readonly
+    mov rdi, rsi
+    mov rsi, rdx
+    call rax
+    leave
+    ret
+.gds_readonly:
+    RAISE exc_AttributeError_type, "readonly attribute"
+END_FUNC getset_descr_set
 
 DEF_FUNC_LOCAL getset_descr_dealloc
     push rbx

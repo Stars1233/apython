@@ -1278,25 +1278,48 @@ DEF_FUNC float_getattr, FG_FRAME
     ret
 
 .fg_real:
-    ; A subclass instance answers with a plain float, as CPython does.
-    mov rax, [rbp - FG_SELF]
-    V_TEST_PTR rax, rcx
-    ja .fg_real_out             ; already a float immediate
-    mov rax, [rax + PyFloatObject.value]
-    V_FROM_F64 rax, rcx
-.fg_real_out:
-    mov edx, TAG_FLOAT
+    mov rdi, [rbp - FG_SELF]
+    call float_get_real
     leave
     ret
 
 .fg_imag:
+    mov rdi, [rbp - FG_SELF]
+    call float_get_imag
+    leave
+    ret
+END_FUNC float_getattr
+
+;; ============================================================================
+;; float_get_real(rdi = self Value) -> rax = Value
+;;
+;; Behind float.real, reached from the chain above and from the getset
+;; descriptor in float_type.tp_dict.  A subclass instance answers with a
+;; plain float, as CPython does.
+;; ============================================================================
+DEF_FUNC float_get_real
+    mov rax, rdi
+    V_TEST_PTR rax, rcx
+    ja .fgr_out                 ; already a float immediate
+    mov rax, [rax + PyFloatObject.value]
+    V_FROM_F64 rax, rcx
+.fgr_out:
+    mov edx, TAG_FLOAT
+    leave
+    ret
+END_FUNC float_get_real
+
+;; ============================================================================
+;; float_get_imag(rdi = self Value) -> rax = Value.  Always 0.0.
+;; ============================================================================
+DEF_FUNC float_get_imag
     xorpd xmm0, xmm0
     movq rax, xmm0
     V_FROM_F64 rax, rcx
     mov edx, TAG_FLOAT
     leave
     ret
-END_FUNC float_getattr
+END_FUNC float_get_imag
 
 
 ;; ============================================================================

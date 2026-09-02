@@ -29,12 +29,9 @@ o.own = 3
 d = dir(o)
 print(d == sorted(d))
 print("b" in d, "bm" in d, "c" in d, "cm" in d, "own" in d)
-print("__init__" in d)
+print("__init__" in d, "__class__" in d)
 print(d.count("b"), d.count("__init__"))     # each name once, not once per base
-# CPython also lists __class__ here, from a getset descriptor in object's
-# dict.  Ours answers __class__ from a tp_getattr chain with nothing in any
-# tp_dict to find, so dir() cannot see it -- the getset_descr gap bugs.md
-# records, seen from this end.
+print(d.count("__class__"))                  # once, however it got there
 
 # A class lists its MRO but not any instance's attributes.
 dc = dir(C)

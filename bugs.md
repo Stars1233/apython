@@ -189,17 +189,12 @@ one-line fix.
   does not survive a decode/encode round trip, where CPython preserves it.
   The entry above is the other half of why.
 
-- **`real` and `imag` are readable on an instance but not on the type.**
-  `(5).real`, `(1.5).real` and `(1+2j).real` all work, through a `tp_getattr`
-  chain; `int.real` and `complex.real` are AttributeErrors where CPython hands
-  back a member descriptor.  `getset_descr` is a stub whose accessors are NULL
-  and which nothing in the tree ever invokes, so this needs that plumbing
-  built first.  `complex.conjugate` has the same shape -- it resolves to the
-  bare builtin rather than to a method descriptor.
-
-  `dir()` is the other end of the same gap: an attribute that exists only in a
-  `tp_getattr` chain has nothing in any `tp_dict` for the walk to find, so
-  `__class__` is missing from `dir(obj)` where CPython lists it.
+- **`complex.conjugate` resolves to the bare builtin rather than to a method
+  descriptor.**  `real` and `imag` are getset descriptors now, on `int`,
+  `float`, `complex` and `bool`; the *methods* a builtin type registers are
+  still plain `PyBuiltinObject`s, so `int.bit_length` reprs as `bit_length`
+  where CPython says `<method 'bit_length' of 'int' objects>`.  They are
+  callable unbound either way.
 
 - **`float()` of a large int rounds differently from CPython.**
   `float(10**30)` is `9.999999999999999e+29` here and `1e+30` there.
