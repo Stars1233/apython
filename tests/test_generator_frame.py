@@ -1,0 +1,145 @@
+# A suspended generator's frame owns everything on its VALUE STACK as well as
+# in its locals -- the iterator a `for` is walking above all -- and both
+# frame_free and gen_traverse walked the locals and stopped there.  So an
+# abandoned generator released its locals and leaked the rest, and a cycle
+# through one was invisible to the collector.
+
+import gc
+
+
+def cycle(make):
+    gc.collect()
+    make()
+    return gc.collect() > 0
+
+
+print("=== a generator suspended inside a for, in a cycle ===")
+
+class Marker:
+    pass
+
+
+def walking(seq):
+    for x in seq:
+        yield x
+    yield "end"
+
+
+def through_locals():
+    m = Marker()
+    g = walking([m])
+    next(g)
+    m.g = g
+
+
+print("locals", cycle(through_locals))
+
+
+def through_the_stack():
+    a = []
+    def g():
+        for x in a:
+            yield x
+        yield None
+    it = g()
+    next(it)
+    a.append(it)
+
+
+print("stack", cycle(through_the_stack))
+
+
+def nested_for():
+    a = [[1, 2], [3]]
+    def g():
+        for row in a:
+            for x in row:
+                yield x
+    it = g()
+    next(it)
+    a.append(it)
+
+
+print("nested", cycle(nested_for))
+
+print("=== and one that was never started ===")
+
+def never_started():
+    a = []
+    def g():
+        for x in a:
+            yield x
+    a.append(g())
+
+
+print("unstarted", cycle(never_started))
+
+print("=== one run to exhaustion is not walked twice ===")
+
+def exhausted():
+    a = [1, 2]
+    def g():
+        for x in a:
+            yield x
+    it = g()
+    for _ in it:
+        pass
+    a.append(it)
+
+
+print("exhausted", cycle(exhausted))
+
+print("=== generators still work ===")
+
+def counter(n):
+    total = 0
+    for i in range(n):
+        total += i
+        yield total
+
+print(list(counter(5)))
+g = counter(3)
+print(next(g), next(g), next(g))
+try:
+    next(g)
+except StopIteration:
+    print("StopIteration")
+
+def with_send():
+    got = []
+    while True:
+        v = yield len(got)
+        if v is None:
+            break
+        got.append(v)
+    return got
+
+g = with_send()
+print(next(g), g.send("a"), g.send("b"))
+
+def delegating():
+    yield from counter(3)
+    yield "after"
+
+print(list(delegating()))
+
+print("=== the values on the stack are released ===")
+freed = []
+
+class Loud:
+    def __init__(self, n):
+        self.n = n
+    def __del__(self):
+        freed.append(self.n)
+
+def drop_suspended():
+    def g():
+        for x in [Loud(1), Loud(2)]:
+            yield x
+    it = g()
+    next(it)
+
+drop_suspended()
+gc.collect()
+print(sorted(freed))
+print("done")

@@ -1653,7 +1653,7 @@ DEF_FUNC gen_traverse
     mov rax, [rbx + PyGenObject.gi_code]
     mov r13d, [rax + PyCodeObject.co_nlocalsplus]
     test r13d, r13d
-    jz .done
+    jz .visit_stack
 
     lea r12, [r12 + PyFrame.localsplus]  ; start of the Value array
 .frame_loop:
@@ -1662,6 +1662,29 @@ DEF_FUNC gen_traverse
     VISIT_V rdi, rsi
     test r13d, r13d
     jnz .frame_loop
+
+.visit_stack:
+    ; And the frame's VALUE STACK, which this stopped short of: a suspended
+    ; generator's live values are exactly there -- the iterator a `for` was
+    ; walking above all -- so a cycle through one was invisible to the
+    ; collector.  Only a suspended frame has a meaningful stack_ptr; see
+    ; frame_free for why instr_ptr is the test.
+    mov r12, [rbx + PyGenObject.gi_frame]
+    test r12, r12
+    jz .done
+    cmp qword [r12 + PyFrame.instr_ptr], 0
+    je .done
+    mov r13, [r12 + PyFrame.stack_ptr]
+    test r13, r13
+    jz .done
+    mov r12, [r12 + PyFrame.stack_base]
+.stack_visit_loop:
+    cmp r13, r12
+    jbe .done
+    sub r13, 8
+    mov rdi, [r13]
+    VISIT_V rdi, rsi
+    jmp .stack_visit_loop
 
 .done:
     pop r13

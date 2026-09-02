@@ -162,6 +162,7 @@ test_gc_generations
 test_gc_module
 test_gen_adv
 test_generator_close_throw
+test_generator_frame
 test_generators
 test_generic_alias_value
 test_gen_return2

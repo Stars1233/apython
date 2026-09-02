@@ -281,10 +281,13 @@ than lying — but they are ordinary Python that does not work:
   missing one -- leaves the string `str_from_cstr_heap` built for it.  A loop
   that probes the filesystem with try/except leaks once per attempt.
 
-- **An abandoned generator never releases its frame.**  Taking one value from
-  a generator expression and dropping it leaks the frame and whatever the
-  frame's stack holds, including the iterator it was walking.  CPython closes
-  a generator when it is collected; there is no equivalent here.
+- **A dropped generator's `finally` never runs.**  `gen_close` exists and is
+  correct, but nothing calls it from `gen_dealloc`, so a generator suspended
+  inside a `try`/`finally` and then abandoned never reaches the `finally`.
+  CPython closes a generator when it is collected.  Doing it here means
+  running Python inside a dealloc, which is where the exception-ownership
+  question above bites: the finaliser is already the one place that has to
+  guard against `current_exception` holding an object nothing owns.
 
 - The `re` wrapper module.  The `_sre` engine underneath is complete, but
   without a shipped `re.py` an `import re` finds CPython's, which needs
