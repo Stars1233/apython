@@ -6,12 +6,14 @@ ok abc
 ok asyncio
 ok bisect
 ok codecs
+ok codeop
 ok collections
 ok _collections_abc
 ok colorsys
 ok _compat_pickle
 ok _compression
 ok concurrent
+ok configparser
 ok copy
 ok copyreg
 ok difflib
@@ -51,6 +53,7 @@ ok _pyio
 ok quopri
 ok re
 ok reprlib
+ok shutil
 ok _sitebuiltins
 ok stat
 ok textwrap
@@ -58,6 +61,7 @@ ok token
 ok turtledemo
 ok types
 ok urllib
+ok warnings
 ok weakref
 ok _weakrefset
 ok wsgiref

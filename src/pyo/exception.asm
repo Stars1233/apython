@@ -2116,7 +2116,14 @@ exc_metatype:
     dq 0                    ; tp_as_number
     dq 0                    ; tp_as_sequence
     dq 0                    ; tp_as_mapping
-    dq 0                    ; tp_base
+    ; tp_base — `type`, because this IS a metatype and a metatype is a kind of
+    ; type.  With 0 here, type_is_subtype's walk (which for a static type is
+    ; the tp_base chain) stopped at exc_metatype itself, so every builtin
+    ; exception class answered False to isinstance(cls, type) -- and CPython's
+    ; warnings.py opens by asserting exactly that, which is why importing it,
+    ; and pathlib, tempfile, shutil, random, argparse and tarfile behind it,
+    ; failed.  user_type_metatype has said type_type here all along.
+    dq type_type            ; tp_base
     dq 0                    ; tp_dict
     dq 0                    ; tp_mro
     dq TYPE_FLAG_METATYPE   ; tp_flags (no HAVE_GC — exc types are static, not gc_alloc'd)

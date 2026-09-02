@@ -132,6 +132,7 @@ test_errno
 test_error_messages
 test_exc_catchable
 test_exception_context
+test_exception_metatype
 test_exceptions
 test_exception_str_repr
 test_except_star
