@@ -19,6 +19,8 @@ extern raise_exception
 extern exc_TypeError_type
 extern exc_KeyError_type
 extern set_type
+extern frozenset_hash
+extern int_from_i64
 extern tuple_type_call
 extern obj_dealloc
 
@@ -1072,3 +1074,71 @@ DEF_FUNC set_method_isdisjoint
 .smdj_error:
     RAISE exc_TypeError_type, "isdisjoint() takes exactly one argument"
 END_FUNC set_method_isdisjoint
+
+;; ============================================================================
+;; frozenset.__hash__(self) -> int
+;;
+;; frozenset's OWN hash, not the argument's.  With no __hash__ in
+;; frozenset's tp_dict the lookup walked the MRO to object's, which answers
+;; the address -- so frozenset.__hash__(f) and hash(f) disagreed on the one
+;; type that exists to be a dict key.
+;;
+;; It cannot go through obj_hash the way generic_method_hash does: that reads
+;; tp_hash, and a frozenset subclass defining __hash__ of its own has
+;; slot_tp_hash there, so the unbound frozenset.__hash__ would re-enter the
+;; subclass's method instead of naming the type it was reached through.
+;; ============================================================================
+global frozenset_dunder_hash
+DEF_FUNC frozenset_dunder_hash
+    cmp rsi, 1
+    jne .fdh_error
+    mov rdi, [rdi]
+    mov edx, TAG_PTR            ; tp_hash forwards edx to int_unwrap
+    call frozenset_hash
+    ; A hash does not fit an int immediate -- it is a full 64 bits, and
+    ; adding v_int_bias to one lands in the float range.  int_from_i64 boxes
+    ; it when it has to, which is what builtin_hash_fn does.
+    mov rdi, rax
+    call int_from_i64
+    leave
+    V_PACK rax, rdx
+    ret
+.fdh_error:
+    RAISE exc_TypeError_type, "__hash__() takes no arguments"
+END_FUNC frozenset_dunder_hash
+
+;; ============================================================================
+;; set_sub_fill(rdi = the new instance, rsi = the args after cls, rdx = count)
+;;
+;; Fills a frozenset subclass from its constructor argument.  frozenset is
+;; immutable, so -- exactly like tuple, which container_dunder_new already
+;; special-cases for this reason -- its contents have to arrive through
+;; __new__.  It has no __init__ of its own, as CPython's has none; a SET
+;; subclass does, and fills there, which is why only the frozen side needs
+;; this.
+;; ============================================================================
+SSF_ARGS  equ 16            ; a two-slot argument array for set_method_update
+SSF_FRAME equ 32            ; + 0 pushes = 32, 16-aligned
+global set_sub_fill
+DEF_FUNC set_sub_fill, SSF_FRAME
+    test rdx, rdx
+    jz .ssf_done                ; frozenset() -- nothing to fill from
+
+    mov [rbp - SSF_ARGS], rdi
+    mov rax, [rsi]
+    mov [rbp - SSF_ARGS + 8], rax
+    lea rdi, [rbp - SSF_ARGS]
+    mov esi, 2
+    call set_method_update      ; returns None, which is ours to release
+    V_UNPACK rax, rdx
+    test edx, edx
+    jz .ssf_done
+    cmp edx, TAG_PTR
+    jne .ssf_done
+    mov rdi, rax
+    call obj_decref
+
+.ssf_done:
+    leave
+    ret
+END_FUNC set_sub_fill

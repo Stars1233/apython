@@ -73,3 +73,66 @@ class S(set): pass
 print(type(F([1]).copy()).__name__, type(S([1]).copy()).__name__)
 print(type(F([1]) | F([2])).__name__, type(S([1]) | S([2])).__name__)
 print(type(F([1]).union([2])).__name__, type(S([1]).union([2])).__name__)
+
+
+# --- frozenset stops sharing set's dict -------------------------------------
+#
+# The two used to share one dict object, stored into both types, so frozenset
+# carried add, remove, discard, pop, clear and update as well.  Those bodies
+# do not inspect self, so they did not raise -- they WORKED:
+# frozenset({1}).add(2) mutated the frozenset in place.  A frozenset is the
+# one type that exists to be a dict key, and mutating one after it had been
+# used as a key left the dict able to find neither the old key nor the new.
+#
+# It also had no __hash__ of its own, so frozenset.__hash__ resolved up the
+# MRO to object's, which answers the address.
+
+print()
+print("--- the mutators are gone ---")
+f = frozenset({1, 2})
+for name in ("add", "remove", "discard", "pop", "clear", "update"):
+    print(name, hasattr(f, name))
+
+d = {f: "value"}
+try:
+    f.add(3)
+    print("MUTATED to", sorted(f))
+except AttributeError:
+    print("add raises AttributeError")
+print("key still found:", d[frozenset({1, 2})])
+print("unchanged:", sorted(f))
+
+print("--- the readers are all still there ---")
+for name in ("copy", "union", "intersection", "difference",
+             "symmetric_difference", "issubset", "issuperset", "isdisjoint",
+             "__contains__", "__len__", "__iter__", "__hash__", "__new__",
+             "__class_getitem__"):
+    print(name, hasattr(frozenset, name))
+
+print("--- set keeps its own, and still mutates ---")
+s = {1}
+s.add(2)
+s.update([3])
+s.discard(1)
+print(sorted(s), [n for n in ("add", "remove", "discard", "pop", "clear",
+                              "update") if not hasattr(set(), n)])
+
+print("--- __hash__ names frozenset's own ---")
+print("agrees with hash():", frozenset.__hash__(f) == hash(f))
+print("empty agrees:", frozenset.__hash__(frozenset()) == hash(frozenset()))
+print("order-insensitive:", hash(frozenset([1, 2])) == hash(frozenset([2, 1])))
+
+print("--- a subclass is filled by __new__, since there is no __init__ ---")
+class F(frozenset):
+    pass
+class G(frozenset):
+    def __new__(cls, it):
+        return super().__new__(cls, it)
+print(sorted(F([1, 2])), len(F([1, 2])), type(F([1, 2])).__name__)
+print(sorted(F()), sorted(F("ab")), sorted(F(F([3]))))
+print(sorted(G([4, 5])))
+print("hashes as itself:", hash(F([1, 2])) == hash(frozenset([1, 2])))
+print("usable as a key:", {F([1, 2]): "v"}[frozenset([1, 2])])
+class Sub(set):
+    pass
+print("set subclass still fills:", sorted(Sub([7, 8])))

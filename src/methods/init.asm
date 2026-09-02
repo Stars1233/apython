@@ -81,6 +81,7 @@ extern frozenset_type
 extern int_dunder_repr
 extern list_dunder_iter
 extern set_dunder_iter
+extern frozenset_dunder_hash
 extern set_dunder_len
 extern str_dunder_iter
 extern str_dunder_len
@@ -531,6 +532,90 @@ END_FUNC add_class_getitem
 ;; methods_init()
 ;; Populate tp_dict for str_type, list_type, dict_type
 ;; ============================================================================
+;; ============================================================================
+;; set_add_shared_methods(rdi = a dict)
+;;
+;; The methods set and frozenset genuinely share: the ones that only read.
+;;
+;; The two used to share the whole dict -- one object stored into both types
+;; -- which handed frozenset every mutator as well.  None of those bodies
+;; inspects self, so they did not raise; they WORKED.  frozenset({1}).add(2)
+;; mutated the frozenset in place, and a frozenset is the one type that
+;; exists to be a dict key, so mutating one after it had been used as a key
+;; left the dict unable to find either the old key or the new.
+;; ============================================================================
+SASM_DICT  equ 8
+SASM_FRAME equ 16           ; + 0 pushes = 16, 16-aligned
+DEF_FUNC_LOCAL set_add_shared_methods, SASM_FRAME
+    mov [rbp - SASM_DICT], rdi
+
+    mov rdi, [rbp - SASM_DICT]
+    lea rsi, [rel mn_copy]
+    lea rdx, [rel set_method_copy]
+    call dict_add_builtin_func
+
+    mov rdi, [rbp - SASM_DICT]
+    lea rsi, [rel mn_union]
+    lea rdx, [rel set_method_union]
+    call dict_add_builtin_func
+
+    mov rdi, [rbp - SASM_DICT]
+    lea rsi, [rel mn_intersection]
+    lea rdx, [rel set_method_intersection]
+    call dict_add_builtin_func
+
+    mov rdi, [rbp - SASM_DICT]
+    lea rsi, [rel mn_difference]
+    lea rdx, [rel set_method_difference]
+    call dict_add_builtin_func
+
+    mov rdi, [rbp - SASM_DICT]
+    lea rsi, [rel mn_symmetric_difference]
+    lea rdx, [rel set_method_symmetric_difference]
+    call dict_add_builtin_func
+
+    mov rdi, [rbp - SASM_DICT]
+    lea rsi, [rel mn_issubset]
+    lea rdx, [rel set_method_issubset]
+    call dict_add_builtin_func
+
+    mov rdi, [rbp - SASM_DICT]
+    lea rsi, [rel mn_issuperset]
+    lea rdx, [rel set_method_issuperset]
+    call dict_add_builtin_func
+
+    mov rdi, [rbp - SASM_DICT]
+    lea rsi, [rel mn_isdisjoint]
+    lea rdx, [rel set_method_isdisjoint]
+    call dict_add_builtin_func
+
+    mov rdi, [rbp - SASM_DICT]
+    lea rsi, [rel mn___contains__]
+    lea rdx, [rel generic_method_contains]
+    call dict_add_builtin_func
+
+    mov rdi, [rbp - SASM_DICT]
+    lea rsi, [rel mn___len__]
+    lea rdx, [rel set_dunder_len]
+    call dict_add_builtin_func
+
+    mov rdi, [rbp - SASM_DICT]
+    lea rsi, [rel mn___iter__]
+    lea rdx, [rel set_dunder_iter]
+    call dict_add_builtin_func
+
+    ; __new__ allocates an empty instance of args[0], so it serves both.
+    mov rdi, [rbp - SASM_DICT]
+    lea rsi, [rel container_dunder_new]
+    call add_new_staticmethod
+
+    mov rdi, [rbp - SASM_DICT]
+    call add_class_getitem
+
+    leave
+    ret
+END_FUNC set_add_shared_methods
+
 DEF_FUNC methods_init
     push rbx
     push r12
@@ -1216,46 +1301,6 @@ DEF_FUNC methods_init
     call dict_add_builtin_func
 
     mov rdi, rbx
-    lea rsi, [rel mn_copy]
-    lea rdx, [rel set_method_copy]
-    call dict_add_builtin_func
-
-    mov rdi, rbx
-    lea rsi, [rel mn_union]
-    lea rdx, [rel set_method_union]
-    call dict_add_builtin_func
-
-    mov rdi, rbx
-    lea rsi, [rel mn_intersection]
-    lea rdx, [rel set_method_intersection]
-    call dict_add_builtin_func
-
-    mov rdi, rbx
-    lea rsi, [rel mn_difference]
-    lea rdx, [rel set_method_difference]
-    call dict_add_builtin_func
-
-    mov rdi, rbx
-    lea rsi, [rel mn_symmetric_difference]
-    lea rdx, [rel set_method_symmetric_difference]
-    call dict_add_builtin_func
-
-    mov rdi, rbx
-    lea rsi, [rel mn_issubset]
-    lea rdx, [rel set_method_issubset]
-    call dict_add_builtin_func
-
-    mov rdi, rbx
-    lea rsi, [rel mn_issuperset]
-    lea rdx, [rel set_method_issuperset]
-    call dict_add_builtin_func
-
-    mov rdi, rbx
-    lea rsi, [rel mn_isdisjoint]
-    lea rdx, [rel set_method_isdisjoint]
-    call dict_add_builtin_func
-
-    mov rdi, rbx
     lea rsi, [rel mn_update]
     lea rdx, [rel set_method_update]
     call dict_add_builtin_func
@@ -1270,36 +1315,39 @@ DEF_FUNC methods_init
     call add_method_to_dict_checked
 
     mov rdi, rbx
-    lea rsi, [rel container_dunder_new]
-    call add_new_staticmethod
-
-    mov rdi, rbx
-    call add_class_getitem
-
-    mov rdi, rbx
-    lea rsi, [rel mn___contains__]
-    lea rdx, [rel generic_method_contains]
-    call dict_add_builtin_func
-
-    ; Store in set_type.tp_dict, and in frozenset's: the two share every
-    ; method that does not mutate, and frozenset had no dict at all.
-
-    ; frozenset shares this dict, and set's slots, so one pair covers both.
-    mov rdi, rbx
-    lea rsi, [rel mn___len__]
-    lea rdx, [rel set_dunder_len]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___iter__]
-    lea rdx, [rel set_dunder_iter]
-    call dict_add_builtin_func
+    call set_add_shared_methods
 
     lea rax, [rel set_type]
     mov [rax + PyTypeObject.tp_dict], rbx
+
+    ;; --- frozenset methods ---
+    ; Its own dict, holding only what reads.  It used to be set's dict, the
+    ; same object stored into both types, so frozenset carried add, remove,
+    ; discard, pop, clear and update -- and those bodies do not inspect self,
+    ; so they did not raise, they worked.  frozenset({1}).add(2) mutated the
+    ; frozenset.
+    ;
+    ; It has no __init__ either: CPython's has none, and a subclass is filled
+    ; by frozenset_type_call through type_call's tp_new path before __init__
+    ; is ever looked up.
+    call dict_new
+    mov rbx, rax
+
+    mov rdi, rbx
+    call set_add_shared_methods
+
+    ; frozenset.__hash__ names frozenset's OWN hash.  With no entry here the
+    ; lookup walked the MRO to object's, which answers the address -- so
+    ; frozenset.__hash__(f) and hash(f) disagreed on the one type that exists
+    ; to be a dict key.  It cannot go through obj_hash either: that reads
+    ; tp_hash, and a subclass defining __hash__ would re-enter itself.
+    mov rdi, rbx
+    lea rsi, [rel mn___hash__]
+    lea rdx, [rel frozenset_dunder_hash]
+    call dict_add_builtin_func
+
     lea rax, [rel frozenset_type]
     mov [rax + PyTypeObject.tp_dict], rbx
-    mov rdi, rbx
-    call obj_incref
 
     ;; --- weakref methods ---
     ; weakref.py binds ref.__hash__ and ref.__eq__ into its subclasses at

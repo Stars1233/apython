@@ -164,6 +164,7 @@ END_FUNC set_coerce_operand
 ;; frozenset_hash, over the per-entry hashes the table already stores: XOR
 ;; makes it order-insensitive, which is what set equality requires of it.
 ;; ============================================================================
+global frozenset_hash
 DEF_FUNC frozenset_hash
     push rbx
     push r12

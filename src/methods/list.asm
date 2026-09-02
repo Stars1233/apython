@@ -1700,6 +1700,9 @@ END_FUNC list_dunder_iadd
 extern instance_new
 extern builtin_sub_init_base
 extern tuple_sub_fill
+extern set_sub_fill
+extern frozenset_type
+extern type_is_subtype
 DEF_FUNC container_dunder_new
     push rbx
     push r12
@@ -1725,12 +1728,34 @@ DEF_FUNC container_dunder_new
     ; __init__.
     mov rcx, [rbx + PyTypeObject.tp_flags]
     test rcx, TYPE_FLAG_TUPLE_SUBCLASS
-    jz .cdn_done
+    jz .cdn_check_frozen
     push rax
     mov rdi, rax
     lea rsi, [r12 + 8]          ; the arguments after cls
     lea rdx, [r13 - 1]
     call tuple_sub_fill
+    pop rax
+    jmp .cdn_done
+
+.cdn_check_frozen:
+    ; frozenset is immutable for the same reason and has to arrive the same
+    ; way: it has no __init__, as CPython's has none.  A SET subclass does,
+    ; and fills there, so only the frozen side is served here -- the subclass
+    ; flag is on both types and the MRO is what tells them apart.
+    mov rcx, [rbx + PyTypeObject.tp_flags]
+    test rcx, TYPE_FLAG_SET_SUBCLASS
+    jz .cdn_done
+    push rax
+    mov rdi, rbx
+    lea rsi, [rel frozenset_type]
+    call type_is_subtype
+    test eax, eax
+    jz .cdn_not_frozen
+    mov rdi, [rsp]
+    lea rsi, [r12 + 8]          ; the arguments after cls
+    lea rdx, [r13 - 1]
+    call set_sub_fill
+.cdn_not_frozen:
     pop rax
 
 .cdn_done:

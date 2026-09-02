@@ -15,11 +15,6 @@ one-line fix.
   and `type_install_slots` does not replace it.  The same holds for the other
   builtin bases with numeric slots.
 
-- **`frozenset` shares `set`'s `tp_dict`**, so `frozenset().add` exists and
-  every other mutator with it.  They raise on use, because the bodies check
-  the type, but `hasattr(f, "add")` is True where CPython says False -- and
-  that is what `collections.abc` registration and duck-typing ask.
-
 - **`(-7.5) ** 2.5` is `nan` where CPython answers a complex.**  A negative
   base with a fractional exponent has no real result, and CPython's `float`
   power promotes to `complex` rather than answering NaN.
