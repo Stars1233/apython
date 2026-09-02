@@ -3817,6 +3817,13 @@ DEF_FUNC bytearray_ass_subscript, 104
     cmp qword [rbp - BAS_VAL], 0
     je .bas_ext_delete
     mov rax, [rbp - BAS_SLEN]
+    ; An EMPTY right-hand side is the one length that does not have to match:
+    ; b[::2] = b'' removes those positions, exactly as del b[::2] does, and
+    ; bytearray(b'abcd') becomes bytearray(b'bd').  This is bytearray's alone
+    ; -- a list raises for L[::2] = [] in CPython too -- and it read as a
+    ; length mismatch here because only a NULL value counted as a delete.
+    test rax, rax
+    jz .bas_ext_delete
     cmp rax, [rbp - BAS_N]
     jne .bas_ext_mismatch
     mov rdi, [rbp - BAS_SELF]

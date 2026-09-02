@@ -9,11 +9,6 @@ one-line fix.
 
 ## Correctness
 
-- **An empty right-hand side does not delete an extended bytearray slice.**
-  `b[::2] = b''` empties those positions in CPython -- `bytearray(b'abcd')`
-  becomes `bytearray(b'bd')` -- where here it is a length mismatch.  A list
-  raises for the same assignment in both, so only bytearray differs.
-
 - **An `int` subclass cannot override an operator dunder.**  `class D(int)`
   with an `__add__` of its own still adds as an int: `D(3) + 4` is 7, not
   whatever the method returns.  The class gets int's `nb_add` by inheritance
