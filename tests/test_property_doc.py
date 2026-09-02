@@ -167,3 +167,24 @@ for what, fn in [("assign", lambda: setattr(r, "v", 5)),
         print(what, "NO ERROR")
     except KeyError as e:
         print(what, "raised", e)
+
+# --- the metatype walk borrowed rdx, which holds the value's TAG, as scratch
+# for a type compare.  The incref that followed read a type's address as the
+# tag, did nothing, and the metatype's tp_dict was left holding a property
+# its caller then released.  Reading it twice is enough.
+class PropMeta(type):
+    @property
+    def answer(cls):
+        return 42
+
+    @property
+    def named(cls):
+        return cls.__name__
+
+
+class Owned(metaclass=PropMeta):
+    pass
+
+
+for _ in range(5):
+    print(Owned.answer, Owned.named)

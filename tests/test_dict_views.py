@@ -106,3 +106,24 @@ print(repr(kv), len(kv))
 
 # In a container, and as a dict value.
 print([d.keys()], {"v": d.values()})
+
+# dict_iter_next hands back an OWNED reference and list_append takes its own,
+# so collecting a view's elements for its repr leaked one per element -- for
+# an items view a freshly built tuple, so a loop grew without bound: 7.4MB
+# live after 500 reprs of a 200-entry dict, against 151KB now.
+big = {i: (i, i) for i in range(60)}
+for _ in range(120):
+    text = repr(big.items()) + repr(big.keys()) + repr(big.values())
+print(len(text) > 0, text[:11])
+
+# A view can reach itself, and the repr had no cycle guard, so it recursed to
+# the depth limit.  It shares the stack list and tuple use; the marker is a
+# bare ellipsis, because the enclosing level supplies the name.
+d = {}
+d["k"] = d.values()
+print(d.values())
+print(d.items())
+e = {}
+e["x"] = e.keys()
+print(e.keys())
+print({1: 2}.keys(), {1: 2}.values(), {1: 2}.items())

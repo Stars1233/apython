@@ -79,3 +79,36 @@ try:
     type.__subclasses__(42)
 except TypeError:
     print("non-type => TypeError")
+
+# A metatype's builtin functions bind like any other method.  type's
+# __subclasses__ is one, and the metatype walk is the ONLY road to it for a
+# class whose metatype is a metaclass of its own -- every ABC and every Enum,
+# which is every class the stdlib calls it on.  Unbound, it answered
+# "__subclasses__() takes no arguments".
+from abc import ABC
+
+
+class AbcBase(ABC):
+    pass
+
+
+class AbcChild(AbcBase):
+    pass
+
+
+print(sorted(c.__name__ for c in AbcBase.__subclasses__()))
+
+
+class OwnMeta(type):
+    pass
+
+
+class MetaBase(metaclass=OwnMeta):
+    pass
+
+
+class MetaChild(MetaBase):
+    pass
+
+
+print(sorted(c.__name__ for c in MetaBase.__subclasses__()))

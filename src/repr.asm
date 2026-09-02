@@ -55,6 +55,10 @@ extern recursion_limit
 
 ; Check if ptr is in repr_stack. Returns 1 in eax if found, 0 if not.
 ; Does NOT clobber rdi.
+;
+; These three are global because the container reprs are not all in this
+; file: dict's views live with dict, and a view can reach itself.
+global repr_check_active
 repr_check_active:
     mov rcx, [rel repr_depth]
     test rcx, rcx
@@ -76,6 +80,7 @@ repr_check_active:
 ; Push ptr onto repr_stack.  Grows it as needed; RecursionError only at the
 ; interpreter's own recursion limit.  Preserves rdi, which the caller still
 ; needs.
+global repr_push
 repr_push:
     mov rax, [rel repr_depth]
     cmp rax, [rel recursion_limit]
@@ -116,6 +121,7 @@ extern current_exception
     RAISE exc_RecursionError_type, "maximum recursion depth exceeded while getting the repr of an object"
 
 ; Pop from repr_stack
+global repr_pop
 repr_pop:
     dec qword [rel repr_depth]
     ret

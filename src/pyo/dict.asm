@@ -1098,6 +1098,18 @@ DEF_FUNC dict_view_repr, DVR_FRAME
     push r12
     mov [rbp - DVR_VIEW], rdi
 
+    ; The same cycle stack list and tuple use.  A view can reach itself --
+    ; d['k'] = d.values() -- and without this the repr recursed until the
+    ; depth limit where CPython prints dict_values([...]).
+    extern repr_check_active
+    extern repr_push
+    extern repr_pop
+    call repr_check_active
+    test eax, eax
+    jnz .dvr_recursive
+    mov rdi, [rbp - DVR_VIEW]
+    call repr_push
+
     xor edi, edi
     extern list_new
     call list_new
@@ -1122,6 +1134,12 @@ DEF_FUNC dict_view_repr, DVR_FRAME
     call list_append
     pop rdx
     pop rax
+    ; dict_iter_next hands back an OWNED reference and list_append takes its
+    ; own, so without this every element leaked -- and for an items view the
+    ; leaked object is a freshly built tuple, so a loop grew without bound.
+    mov rdi, rax
+    mov rsi, rdx
+    DECREF_VAL rdi, rsi
     jmp .dvr_loop
 .dvr_done:
     mov rdi, r12
@@ -1133,10 +1151,15 @@ DEF_FUNC dict_view_repr, DVR_FRAME
     mov [rbp - DVR_TEXT], rax
     mov rdi, rbx
     call obj_decref
+    ; After the nested reprs, not before them: they are what the guard is
+    ; for, and they all happen inside that obj_repr.
+    mov rdi, [rbp - DVR_VIEW]
+    call repr_pop
     mov rax, [rbp - DVR_TEXT]
     test rax, rax
     jz .dvr_failed
 
+.dvr_wrap:
     ; "<name>(" + that + ")"
     mov rdi, [rbp - DVR_VIEW]
     mov rdi, [rdi + PyObject.ob_type]
@@ -1197,6 +1220,20 @@ DEF_FUNC dict_view_repr, DVR_FRAME
 .dvr_failed:
     xor eax, eax
     xor edx, edx
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.dvr_recursive:
+    ; A bare ellipsis, NOT the name wrapper: CPython's dictview_repr returns
+    ; "..." on its own here, and the enclosing level supplies the name.  It
+    ; is what makes d['k'] = d.values() print
+    ; dict_values([dict_values([...])]) rather than one level deeper.
+    CSTRING rdi, "..."
+    extern str_from_cstr_heap
+    call str_from_cstr_heap
+    mov edx, TAG_PTR
     pop r12
     pop rbx
     leave

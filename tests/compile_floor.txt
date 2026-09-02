@@ -305,6 +305,7 @@ test_sre2
 test_sre_groupdict_refcount
 test_sre
 test_stdlib_glue
+test_str_case
 test_strfmt
 test_str_format
 test_strings2
