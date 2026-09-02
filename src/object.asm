@@ -1033,14 +1033,20 @@ DEF_FUNC obj_generic_attr, OGA_FRAME
 
 .oga_dict:
     ; Only an object with a real instance dict has one.  tp_dictoffset is 0
-    ; for every static type and for the layouts that cannot host a dict
-    ; (str subclasses, __slots__ classes) -- those correctly have no
-    ; __dict__, as in CPython.
+    ; for every static type and for the layouts that cannot host a dict.
     mov rdi, [rbp - OGA_OBJ]
     V_TEST_PTR rdi, rax
     ja .oga_none
     test rdi, rdi
     jz .oga_none
+    ; A __slots__ class has none, whatever its tp_dictoffset says.  Its dict
+    ; word is still in the layout, but nothing may put a dict there -- and
+    ; this arm CREATED one on first read, which is how `__slots__` classes
+    ; came to accept arbitrary attributes: asking for o.__dict__ gave them the
+    ; dict they were supposed not to have.
+    mov rax, [rdi + PyObject.ob_type]
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_HAS_SLOTS
+    jnz .oga_none
     LOAD_INST_DICT rbx, rdi, .oga_none
     test rbx, rbx
     jnz .oga_dict_have

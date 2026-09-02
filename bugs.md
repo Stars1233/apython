@@ -167,11 +167,12 @@ one-line fix.
   type, so an object that lies about its class -- a mock, mostly -- is judged
   by what it really is.
 
-- **`__slots__` does not suppress the instance `__dict__`.**  A class with
-  `__slots__ = ()` still takes arbitrary attributes here; CPython gives it no
-  `__dict__` at all.  The slots themselves work -- they are member
-  descriptors at fixed offsets -- so what is missing is the suppression, not
-  the storage.
+- **A `__slots__` instance still carries a dict WORD it can never use.**  The
+  suppression works now, but `tp_dictoffset` is left pointing at a word that
+  is always NULL: eight bytes per instance, and the reason every reader has to
+  ask about `TYPE_FLAG_HAS_SLOTS` as well as about `tp_dictoffset`.  Zeroing
+  the offset means moving the slots down by one word and teaching the dealloc
+  and traverse walks where the header now ends.
 
 - **A heaptype's layout base is the widest of its bases, not CPython's solid
   base.**  `class C(A, B)` where A and B are unrelated builtin subclasses of

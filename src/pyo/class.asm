@@ -665,8 +665,12 @@ DEF_FUNC instance_getattr, IG_FRAME
 
 .slot_not_set:
     ; Slot exists but not initialized — raise AttributeError directly
-    ; (must not return NULL or LOAD_ATTR fallback finds descriptor in tp_dict)
-    RAISE exc_AttributeError_type, "slot attribute not set"
+    ; (must not return NULL or LOAD_ATTR fallback finds descriptor in tp_dict).
+    ; CPython names the type and the attribute here as it does everywhere else.
+    mov rdi, rbx
+    mov rsi, [rbp - IG_NAME]
+    extern raise_no_attribute
+    call raise_no_attribute
 
 .not_found:
     ; Ordinary lookup missed.  __getattr__ is Python's hook for exactly that
@@ -913,12 +917,15 @@ DEF_FUNC instance_setattr
     ret
 
 .sa_no_dict_error:
-    RAISE exc_AttributeError_type, "object has no attribute"
-
 .sa_no_dict_slot:
     ; This type's instances have no dict slot -- a str subclass, or a class
-    ; with __slots__ -- so there is nowhere to put the attribute.
-    RAISE exc_AttributeError_type, "object has no attribute"
+    ; with __slots__ -- so there is nowhere to put the attribute.  The message
+    ; names both the type and the attribute, as every other one here does; a
+    ; bare "object has no attribute" said neither.
+    mov rdi, rbx
+    mov rsi, r12
+    extern raise_no_attribute
+    call raise_no_attribute
 END_FUNC instance_setattr
 
 ;; ============================================================================

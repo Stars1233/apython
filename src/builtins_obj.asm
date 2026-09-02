@@ -2296,6 +2296,11 @@ DEF_FUNC builtin_vars_fn, VR_FRAME
     test ecx, TYPE_FLAG_HEAPTYPE
     jz .vars_no_dict
 
+    ; A __slots__ class has no __dict__, so vars() has nothing to answer with:
+    ; CPython's TypeError, rather than the empty dict the arm below invents.
+    test rcx, TYPE_FLAG_HAS_SLOTS
+    jnz .vars_no_dict
+
     ; User instance: get inst_dict
     mov rax, [rdi + PyInstanceObject.inst_dict]
     test rax, rax
