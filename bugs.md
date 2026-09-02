@@ -237,6 +237,14 @@ than lying — but they are ordinary Python that does not work:
   defines exactly that.  `asyncio` streams and every hand-written async
   iterator are shaped this way.
 
+  Looking the two dunders up by name in `op_get_aiter` and `op_get_anext` is
+  not enough, and was tried: `__anext__` answers a coroutine, and the loop
+  then spins forever handing the body `None`.  Our `async for` lowering leans
+  on `GET_ANEXT` itself raising `StopAsyncIteration` when `tp_iternext`
+  answers NULL, rather than on `END_ASYNC_FOR` catching it out of the awaited
+  result -- so the awaitable half of the protocol has no path through the
+  loop.  Fixing this means changing the lowering, not the two handlers.
+
 - **`bytes % args` leaks its temporary when the format is malformed.**  The
   work is done by handing a decoded copy of the format and the arguments to
   `str_mod`, and `str_mod` RAISES for a wrong argument count -- a raise
