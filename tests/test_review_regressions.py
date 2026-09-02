@@ -1046,3 +1046,24 @@ def inplace_is_in_place():
 
 
 check("bytearray += is in place", inplace_is_in_place)
+
+
+# tuple joins the three containers above: tuple_sub_fill gives a subclass
+# instance its own item array and INCREFs into it, and instance_dealloc
+# released neither.
+class TupleSub(tuple):
+    pass
+
+
+def tuple_subclass_lifetime():
+    out = []
+    for _ in range(20):
+        t = TupleSub((Tracked(), Tracked(), "abc"))
+        out.append(len(t))
+    del t
+    return (out[0], Tracked.live)
+
+
+check("tuple subclass lifetime", tuple_subclass_lifetime)
+check("empty tuple subclass", lambda: (len(TupleSub()), TupleSub()))
+check("tuple subclass contents", lambda: tuple(TupleSub((1, 2, 3))))

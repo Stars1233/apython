@@ -1080,6 +1080,43 @@ DEF_FUNC instance_dealloc, ID_FRAME
     jnz .id_list_storage
     test rcx, TYPE_FLAG_SET_SUBCLASS
     jnz .id_set_storage
+    test rcx, TYPE_FLAG_TUPLE_SUBCLASS
+    jnz .id_tuple_storage
+    jmp .id_no_storage
+
+.id_tuple_storage:
+    ; tuple_sub_fill gives a subclass instance its own ob_item array and
+    ; INCREFs every element into it.  tuple has no tp_clear to borrow, so the
+    ; walk is written out.  Only when ob_size is positive: tuple_sub_fill
+    ; allocates nothing for an empty one and leaves ob_item unwritten, so
+    ; there is nothing there to read, let alone free.
+    ;
+    ; r12 and r13 belong to the caller here -- instance_dealloc saves only
+    ; rbx -- so they are pushed around the loop rather than simply used.
+    mov rax, [rbx + PyTupleObject.ob_size]
+    test rax, rax
+    jle .id_no_storage
+    push r12
+    push r13
+    mov r12, rax
+    xor r13d, r13d
+.id_tuple_loop:
+    cmp r13, r12
+    jge .id_tuple_free
+    mov rax, [rbx + PyTupleObject.ob_item]
+    mov rdi, [rax + r13*8]
+    XDECREF_V rdi, rsi
+    inc r13
+    jmp .id_tuple_loop
+.id_tuple_free:
+    mov qword [rbx + PyTupleObject.ob_size], 0
+    mov rdi, [rbx + PyTupleObject.ob_item]
+    mov qword [rbx + PyTupleObject.ob_item], 0
+    pop r13
+    pop r12
+    test rdi, rdi
+    jz .id_no_storage
+    call ap_free
     jmp .id_no_storage
 
 .id_dict_storage:
