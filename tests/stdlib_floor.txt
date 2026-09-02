@@ -3,6 +3,7 @@
 # A module listed here must keep importing; crashes must not rise.
 crash_ceiling 0
 ok abc
+ok argparse
 ok asyncio
 ok bisect
 ok codecs
@@ -25,6 +26,8 @@ ok fileinput
 ok fnmatch
 ok functools
 ok __future__
+ok getopt
+ok gettext
 ok graphlib
 ok heapq
 ok __hello__
@@ -42,6 +45,7 @@ ok nturl2path
 ok numbers
 ok opcode
 ok operator
+ok optparse
 ok os
 ok _osx_support
 ok __phello__
@@ -57,6 +61,7 @@ ok shutil
 ok _sitebuiltins
 ok stat
 ok textwrap
+ok timeit
 ok token
 ok turtledemo
 ok types

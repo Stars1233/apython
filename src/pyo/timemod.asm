@@ -86,6 +86,38 @@ DEF_FUNC time_monotonic_func, 16
 END_FUNC time_monotonic_func
 
 ;; ============================================================================
+;; time_perf_counter_func(PyObject **args, int64_t nargs) -> rax = Value
+;; The highest-resolution clock, in seconds, with an undefined origin -- so
+;; only differences mean anything.  On Linux that is CLOCK_MONOTONIC, the same
+;; source monotonic() reads; CPython keeps them separate because on other
+;; platforms they are not, and because timeit and every benchmark in the
+;; stdlib ask for this name rather than that one.
+;; ============================================================================
+DEF_FUNC time_perf_counter_func, 16
+    cmp rsi, 0
+    jne .perf_error
+
+    mov eax, 228            ; __NR_clock_gettime
+    mov edi, CLOCK_MONOTONIC
+    lea rsi, [rbp - TS_SEC]
+    syscall
+
+    cvtsi2sd xmm0, qword [rbp - TS_SEC]
+    cvtsi2sd xmm1, qword [rbp - TS_NSEC]
+    movsd xmm2, [rel tm_1e9]
+    divsd xmm1, xmm2
+    addsd xmm0, xmm1
+
+    call float_from_f64
+    leave
+    V_PACK rax, rdx             ; builtins return one Value
+    ret
+
+.perf_error:
+    RAISE exc_TypeError_type, "perf_counter() takes no arguments"
+END_FUNC time_perf_counter_func
+
+;; ============================================================================
 ;; time_time_func(PyObject **args, int64_t nargs) -> rax = Value
 ;; Seconds since the epoch, as a float.  The wall clock, where monotonic is
 ;; the one that cannot go backwards.
@@ -291,6 +323,23 @@ DEF_FUNC time_module_create
     pop rdi
     call obj_decref
 
+    ; Add perf_counter function
+    lea rdi, [rel time_perf_counter_func]
+    lea rsi, [rel tm_perf_counter]
+    call builtin_func_new
+    push rax
+    lea rdi, [rel tm_perf_counter]
+    call str_from_cstr_heap
+    push rax
+    mov rdi, r12
+    mov rsi, rax
+    mov rdx, [rsp + 8]
+    call dict_set
+    pop rdi
+    call obj_decref
+    pop rdi
+    call obj_decref
+
     ; Create module object
     lea rdi, [rel tm_time]
     call str_from_cstr_heap
@@ -329,3 +378,4 @@ tm_process_time: db "process_time", 0
 tm_time_name: db "time", 0
 tm_sleep: db "sleep", 0
 tm_monotonic:    db "monotonic", 0
+tm_perf_counter: db "perf_counter", 0
