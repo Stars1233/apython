@@ -1303,7 +1303,8 @@ SM_VALUE   equ 152
 SM_PIECE   equ 160
 SM_OWNVAL  equ 168
 SM_ISMAP   equ 176       ; the right operand is a mapping: %(name)s, no arity check
-SM_FRAME   equ 184          ; + 0 pushes = 184, not 16-aligned
+SM_SPECCH  equ 184       ; the conversion as format() spells it: i and u are d
+SM_FRAME   equ 192          ; + 0 pushes = 192
 
 DEF_FUNC str_mod, SM_FRAME
     BINOP_REQUIRE_LEFT str_type, TYPE_FLAG_STR_SUBCLASS, 1
@@ -1545,6 +1546,22 @@ DEF_FUNC str_mod, SM_FRAME
     cmp al, 'g'
     je .sm_use_spec
     cmp al, 'G'
+    je .sm_use_spec
+    ; d, i and u too, so that one place checks the argument against the
+    ; conversion.  The direct path below could not: it formatted whatever it
+    ; was handed, which is how "%d" % "x" came to answer 'x'.
+    cmp al, 'd'
+    je .sm_use_spec
+    cmp al, 'i'
+    je .sm_use_spec
+    cmp al, 'u'
+    je .sm_use_spec
+    ; %a and %c had no handler at all: the dispatcher's unknown-conversion arm
+    ; printed them literally and consumed no argument, so "%c" % (65,) came
+    ; back as "%c" and then complained that an argument was left over.
+    cmp al, 'a'
+    je .sm_use_spec
+    cmp al, 'c'
     je .sm_use_spec
     jmp .sm_dispatch_plain
 .sm_use_spec:
@@ -1891,6 +1908,27 @@ DEF_FUNC str_mod, SM_FRAME
     mov r8, [rbp-SM_POS]
     movzx r9d, byte [rbx + r8]      ; the conversion character
     mov [rbp-SM_CONV], r9
+    ; %i and %u are %d's spellings; format() knows only the one.  SM_CONV
+    ; keeps the original, because the error messages name it.
+    mov [rbp-SM_SPECCH], r9
+    cmp r9b, 'i'
+    je .sm_sc_as_d
+    cmp r9b, 'u'
+    je .sm_sc_as_d
+    cmp r9b, 'r'
+    je .sm_sc_as_s
+    cmp r9b, 'a'
+    je .sm_sc_as_s
+    cmp r9b, 'c'
+    je .sm_sc_as_s
+    jmp .sm_sc_conv_kept
+.sm_sc_as_d:
+    mov qword [rbp-SM_SPECCH], 'd'
+    jmp .sm_sc_conv_kept
+.sm_sc_as_s:
+    ; %r, %a and %c each build a string first; what is left is a str spec.
+    mov qword [rbp-SM_SPECCH], 's'
+.sm_sc_conv_kept:
     inc r8
     mov [rbp-SM_POS], r8
 
@@ -1988,6 +2026,7 @@ DEF_FUNC str_mod, SM_FRAME
     jne .sm_sc_store_type
     mov cl, 's'                     ; repr is applied to the value below
 .sm_sc_store_type:
+    mov rcx, [rbp-SM_SPECCH]
     mov [rdi + r10], cl
     inc r10
 
@@ -1998,10 +2037,25 @@ DEF_FUNC str_mod, SM_FRAME
 
     call .sm_get_arg
     V_PACK rax, rdx
+    ; The argument has to suit the conversion, and may need converting to it:
+    ; %d takes a float and truncates, %f takes an int and widens, and both
+    ; take anything offering __index__ or __float__.
+    mov rdi, rax
+    mov rsi, [rbp-SM_CONV]
+    extern fmt_percent_coerce
+    call fmt_percent_coerce
     mov [rbp-SM_VALUE], rax
+    mov [rbp-SM_OWNVAL], rdx
     mov rcx, [rbp-SM_CONV]
     cmp cl, 'r'
-    jne .sm_sc_have_value
+    je .sm_sc_repr
+    cmp cl, 'a'
+    je .sm_sc_ascii
+    cmp cl, 'c'
+    je .sm_sc_char
+    jmp .sm_sc_have_value_owned
+
+.sm_sc_repr:
     mov rdi, rax
     call obj_repr
     V_UNPACK rax, rdx
@@ -2009,8 +2063,58 @@ DEF_FUNC str_mod, SM_FRAME
     mov [rbp-SM_VALUE], rax
     mov qword [rbp-SM_OWNVAL], 1
     jmp .sm_sc_format
-.sm_sc_have_value:
-    mov qword [rbp-SM_OWNVAL], 0
+
+.sm_sc_ascii:
+    sub rsp, 16
+    mov [rsp], rax
+    mov rdi, rsp
+    mov esi, 1
+    extern builtin_ascii_fn
+    call builtin_ascii_fn
+    add rsp, 16
+    mov [rbp-SM_VALUE], rax
+    mov qword [rbp-SM_OWNVAL], 1
+    jmp .sm_sc_format
+
+.sm_sc_char:
+    ; An integer becomes the character it numbers; a one-character string is
+    ; already the answer.  Anything else, including a longer string, is not.
+    mov rdi, rax
+    V_TEST_PTR rdi, rcx
+    ja .sm_sc_char_int
+    mov rcx, [rdi + PyObject.ob_type]
+    lea rdx, [rel str_type]
+    cmp rcx, rdx
+    jne .sm_sc_char_int
+    cmp qword [rdi + PyStrObject.ob_length], 1
+    jne .sm_sc_char_bad
+    INCREF rdi
+    mov [rbp-SM_VALUE], rdi
+    mov qword [rbp-SM_OWNVAL], 1
+    jmp .sm_sc_format
+.sm_sc_char_int:
+    mov rdi, [rbp-SM_VALUE]
+    V_UNPACK rdi, rdx
+    extern int_is_integer
+    call int_is_integer
+    test eax, eax
+    jz .sm_sc_char_bad
+    sub rsp, 16
+    mov rax, [rbp-SM_VALUE]
+    mov [rsp], rax
+    mov rdi, rsp
+    mov esi, 1
+    extern builtin_chr
+    call builtin_chr
+    add rsp, 16
+    V_PACK rax, rdx
+    mov [rbp-SM_VALUE], rax
+    mov qword [rbp-SM_OWNVAL], 1
+    jmp .sm_sc_format
+.sm_sc_char_bad:
+    RAISE exc_TypeError_type, "%c requires int or char"
+
+.sm_sc_have_value_owned:
 
 .sm_sc_format:
     mov rdi, [rbp-SM_VALUE]
@@ -2024,8 +2128,11 @@ DEF_FUNC str_mod, SM_FRAME
     call obj_decref
     cmp qword [rbp-SM_OWNVAL], 0
     je .sm_sc_no_own
+    ; DECREF_V and not obj_decref: what the argument check hands back may be
+    ; an int or a float IMMEDIATE -- "%d" % 3.9 truncates to one -- and
+    ; obj_decref would dereference it as a pointer.
     mov rdi, [rbp-SM_VALUE]
-    call obj_decref
+    DECREF_V rdi, rsi
 .sm_sc_no_own:
 
     ; Append the piece to the caller's buffer, advancing its position.

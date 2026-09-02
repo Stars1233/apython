@@ -14,10 +14,6 @@ one-line fix.
   becomes `bytearray(b'bd')` -- where here it is a length mismatch.  A list
   raises for the same assignment in both, so only bytearray differs.
 
-- **The `%` conversion table does not type-check its argument.**  `"%d" % "x"`
-  answers `'x'` where CPython raises "%d format: a real number is required,
-  not str", and every numeric conversion is equally lax.
-
 - **`bytes` `%`-formatting converts through `str_mod`**, so its conversions are
   str's rather than bytes'.  `b"%s" % b"x"` is right now, but `b"%s" % "x"`
   answers `b'x'` where CPython raises, `b"%r" % b"x"` is `b"'x'"` rather than
