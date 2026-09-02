@@ -180,7 +180,12 @@ struc SRE_State
     .codepoint_len: resq 1  ; +120: number of codepoints
     .original_pos:  resq 1  ; +128: original pos arg (for match.pos)
     .match_depth:   resd 1  ; +136: current recursion depth
-    .pad_state:     resd 1  ; +140: alignment padding
+    ; Set by the scanning methods after an empty match, and consulted at
+    ; SUCCESS: CPython 3.7 replaced "step one character past an empty match"
+    ; with "search the same position again, forbidding another empty match
+    ; there", which is what lets '.*?' find 'a' where it had just found ''.
+    .must_advance:  resd 1  ; +140: forbid an empty match at search_origin
+    .search_origin: resq 1  ; +144: where the current search began
 endstruc
 
 ; Recursion depth limit (matches CPython's default)
@@ -208,6 +213,9 @@ struc SRE_ScannerObject
     .string:      resq 1  ; +24  PyStrObject* (INCREF'd)
     .pos:         resq 1  ; +32  current search position (i64)
     .endpos:      resq 1  ; +40  end position (i64)
+    ; The scanner builds a fresh SRE_State per call, so the "the last match
+    ; was empty" flag has to live here rather than in the state.
+    .must_advance: resq 1 ; +48  forbid an empty match at pos
 endstruc
 
 ; Initial marks array size (number of i64 slots)

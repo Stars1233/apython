@@ -1442,8 +1442,18 @@ END_FUNC sre_string_len
 ;;
 ;; Frame layout constants
 ;; ============================================================================
+;; sre_match(rdi = state, rsi = pattern, edx = toplevel)
+;;
+;; toplevel says whether a SUCCESS reached from here is the whole pattern's.
+;; It is not: a repeat's body, a lookaround's body and an atomic group's body
+;; are each compiled as their own sub-pattern ending in SUCCESS, so the checks
+;; that belong to the overall match -- fullmatch's "and it reaches the end",
+;; and must_advance -- have to skip them.  Without it re.fullmatch('a*', 'aa')
+;; was None: the body's SUCCESS at position 1 was tested against the end of
+;; the string and failed, so the repeat could never take a step.
 SM_STATE     equ 8
 SM_PATTERN   equ 16
+SM_TOPLEVEL  equ 24
 SM_MFRAME    equ 96
 
 DEF_FUNC sre_match, SM_MFRAME
@@ -1455,6 +1465,7 @@ DEF_FUNC sre_match, SM_MFRAME
 
     mov [rbp - SM_STATE], rdi
     mov [rbp - SM_PATTERN], rsi
+    mov [rbp - SM_TOPLEVEL], edx
     mov r12, rdi               ; r12 = state
     mov rbx, rsi               ; rbx = pc (pattern pointer)
     mov r13, [rdi + SRE_State.str_pos]  ; r13 = current pos
@@ -1530,13 +1541,29 @@ DEF_FUNC sre_match, SM_MFRAME
     jmp .return
 
 .op_success:
+    ; Only the pattern's own SUCCESS answers to these; a body's does not.
+    cmp dword [rbp - SM_TOPLEVEL], 0
+    jz .op_success_ok
+
     ; Check fullmatch: if match_all, pos must == string_len
     cmp dword [r12 + SRE_State.match_all], 0
-    jz .op_success_ok
+    jz .os_must_advance
     mov rdi, r12
     call sre_string_len
     cmp r13, rax
     jne .op_failure
+
+.os_must_advance:
+    ; The scanning methods set must_advance after an empty match and search
+    ; the same position again.  An empty match AT that position is what they
+    ; already have, so it is refused here -- which makes the engine keep
+    ; backtracking, and is how '.*?' answers 'a' the second time round rather
+    ; than '' for ever.
+    cmp dword [r12 + SRE_State.must_advance], 0
+    jz .op_success_ok
+    cmp r13, [r12 + SRE_State.search_origin]
+    je .op_failure
+
 .op_success_ok:
     ; Save final position in state
     mov [r12 + SRE_State.str_pos], r13
@@ -1856,6 +1883,7 @@ DEF_FUNC sre_match, SM_MFRAME
     mov [r12 + SRE_State.str_pos], r13
     mov rdi, r12
     lea rsi, [r14 + 4]        ; pattern after offset
+    mov edx, 1                 ; toplevel: this SUCCESS ends the pattern
     call sre_match
 
     test eax, eax
@@ -2079,6 +2107,7 @@ DEF_FUNC sre_match, SM_MFRAME
     push r14
     mov rdi, r12
     mov rsi, rbx               ; body pattern
+    xor edx, edx               ; a sub-pattern: its SUCCESS is not the match
     call sre_match
     pop r14
     pop rcx
@@ -2107,6 +2136,7 @@ DEF_FUNC sre_match, SM_MFRAME
     push r14
     mov rdi, r12
     mov rsi, rbx               ; body pattern
+    xor edx, edx               ; a sub-pattern: its SUCCESS is not the match
     call sre_match
     pop r14
     pop rcx
@@ -2145,6 +2175,7 @@ DEF_FUNC sre_match, SM_MFRAME
     push rcx                   ; twice: rsp must stay 16-byte aligned
     mov rdi, r12
     mov rsi, r14               ; tail pattern
+    mov edx, 1                 ; toplevel: this SUCCESS ends the pattern
     call sre_match
     pop rcx
     pop rcx
@@ -2198,6 +2229,7 @@ DEF_FUNC sre_match, SM_MFRAME
     push rcx
     mov rdi, r12
     mov rsi, rbx
+    xor edx, edx               ; a sub-pattern: its SUCCESS is not the match
     call sre_match
     pop rcx
     pop r14
@@ -2226,6 +2258,7 @@ DEF_FUNC sre_match, SM_MFRAME
     push r14
     mov rdi, r12
     mov rsi, r14
+    mov edx, 1                 ; toplevel: this SUCCESS ends the pattern
     call sre_match
     pop r14
     pop r9
@@ -2246,6 +2279,7 @@ DEF_FUNC sre_match, SM_MFRAME
     push r14
     mov rdi, r12
     mov rsi, rbx               ; body pattern
+    xor edx, edx               ; a sub-pattern: its SUCCESS is not the match
     call sre_match
     pop r14
     pop r9
@@ -2365,6 +2399,7 @@ DEF_FUNC sre_match, SM_MFRAME
     mov [r12 + SRE_State.str_pos], r13
     mov rdi, r12
     mov rsi, [r15 + SRE_RepeatContext.pattern]
+    xor edx, edx               ; a sub-pattern: its SUCCESS is not the match
     call sre_match
     test eax, eax
     jnz .mu_body_success
@@ -2395,6 +2430,7 @@ DEF_FUNC sre_match, SM_MFRAME
     mov [r12 + SRE_State.str_pos], r13
     mov rdi, r12
     mov rsi, [r15 + SRE_RepeatContext.pattern]
+    xor edx, edx               ; a sub-pattern: its SUCCESS is not the match
     call sre_match
     test eax, eax
     jz .mu_body_required_fail
@@ -2416,6 +2452,7 @@ DEF_FUNC sre_match, SM_MFRAME
     mov [r12 + SRE_State.str_pos], r13
     mov rdi, r12
     mov rsi, rbx               ; tail = code after MAX_UNTIL
+    mov edx, 1                 ; toplevel: this SUCCESS ends the pattern
     call sre_match
     test eax, eax
     jnz .mu_tail_success
@@ -2461,6 +2498,7 @@ DEF_FUNC sre_match, SM_MFRAME
     mov [r12 + SRE_State.str_pos], r13
     mov rdi, r12
     mov rsi, rbx
+    mov edx, 1                 ; toplevel: this SUCCESS ends the pattern
     call sre_match
     test eax, eax
     jnz .miu_tail_success
@@ -2490,6 +2528,7 @@ DEF_FUNC sre_match, SM_MFRAME
     mov [r12 + SRE_State.str_pos], r13
     mov rdi, r12
     mov rsi, [r15 + SRE_RepeatContext.pattern]
+    xor edx, edx               ; a sub-pattern: its SUCCESS is not the match
     call sre_match
     test eax, eax
     jnz .miu_body_ok
@@ -2539,6 +2578,7 @@ DEF_FUNC sre_match, SM_MFRAME
     mov [r12 + SRE_State.str_pos], r13
     mov rdi, r12
     mov rsi, rbx               ; assert body pattern
+    xor edx, edx               ; a sub-pattern: its SUCCESS is not the match
     call sre_match
     pop rbx
     pop r13
@@ -2569,6 +2609,7 @@ DEF_FUNC sre_match, SM_MFRAME
     mov [r12 + SRE_State.str_pos], r13
     mov rdi, r12
     mov rsi, rbx
+    xor edx, edx               ; a sub-pattern: its SUCCESS is not the match
     call sre_match
     pop rbx
     pop r13
@@ -2589,6 +2630,7 @@ DEF_FUNC sre_match, SM_MFRAME
     mov [r12 + SRE_State.str_pos], r13
     mov rdi, r12
     mov rsi, rbx               ; body pattern
+    xor edx, edx               ; a sub-pattern: its SUCCESS is not the match
     call sre_match
     pop r14                    ; saved pos (discard on success, restore on failure)
     test eax, eax
@@ -2625,6 +2667,7 @@ DEF_FUNC sre_match, SM_MFRAME
     push rcx
     mov rdi, r12
     mov rsi, rbx
+    xor edx, edx               ; a sub-pattern: its SUCCESS is not the match
     call sre_match
     pop rcx
     pop r14
@@ -2654,6 +2697,7 @@ DEF_FUNC sre_match, SM_MFRAME
     push rcx
     mov rdi, r12
     mov rsi, rbx
+    xor edx, edx               ; a sub-pattern: its SUCCESS is not the match
     call sre_match
     pop rcx
     pop r14
@@ -2701,6 +2745,7 @@ DEF_FUNC sre_match, SM_MFRAME
     push rcx
     mov rdi, r12
     mov rsi, rbx
+    xor edx, edx               ; a sub-pattern: its SUCCESS is not the match
     call sre_match
     pop rcx
     pop r14
@@ -2730,6 +2775,7 @@ DEF_FUNC sre_match, SM_MFRAME
     push rcx
     mov rdi, r12
     mov rsi, rbx
+    xor edx, edx               ; a sub-pattern: its SUCCESS is not the match
     call sre_match
     pop rcx
     pop r14
@@ -3057,6 +3103,7 @@ DEF_FUNC sre_search, 32
 
     mov r12, rdi               ; state
     mov r13, [rdi + SRE_State.str_pos]  ; starting pos
+    mov [r12 + SRE_State.search_origin], r13
 
     ; Get string length
     mov rdi, r12
@@ -3077,6 +3124,7 @@ DEF_FUNC sre_search, 32
     mov rdi, r12
     mov rsi, [r12 + SRE_State.pattern]
     mov rsi, [rsi + SRE_PatternObject.code]
+    mov edx, 1                 ; toplevel: this SUCCESS ends the pattern
     call sre_match
     test eax, eax
     jnz .search_found

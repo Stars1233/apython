@@ -118,18 +118,12 @@ one-line fix.
   an allocation per call -- worth threading a (pointer, length) pair through
   the bodies if bytearray ever becomes hot.
 
-- **The regex engine differs from CPython in 23 of 816 checked answers.**
+- **The regex engine differs from CPython in 16 of 816 checked answers.**
   `make check-re` runs `tests/re_differential.py` under both interpreters
   and ratchets against `tests/re_floor.txt`; it needs `$CPYTHON_LIB`,
   because `re` is a Python module and so comes from a real stdlib.  What is
   left, from that diff:
 
-  - `findall`, `sub`, `subn`, `split` and `finditer` mishandle a zero-width
-    match when advancing: they step one character past it, which is CPython's
-    pre-3.7 rule, rather than re-searching the same position under a flag that
-    forbids a second empty match there.  `re.findall('.*?', 'aab')` is
-    `['', '', '', '']` where CPython gives `['', 'a', '', 'a', '', 'b', '']`.
-    `split` separately drops the leading empty piece.
   - `Match.expand()` and `re.sub`'s `\1` group references are not
     implemented -- the template comes back unchanged.
   - A nested unbounded repeat (`(a*)*b`) recurses until the limit.

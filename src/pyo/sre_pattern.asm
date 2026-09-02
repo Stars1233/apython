@@ -148,8 +148,11 @@ DEF_FUNC sre_pattern_do_match, PM_FRAME
 
     ; match/fullmatch: try at pos only
     lea rdi, [rbp - PM_STATE]
+    mov rax, [rdi + SRE_State.str_pos]
+    mov [rdi + SRE_State.search_origin], rax
     mov rsi, [rbp - PM_PAT]
     mov rsi, [rsi + SRE_PatternObject.code]
+    mov edx, 1                 ; this SUCCESS is the pattern's own
     call sre_match
     jmp .check_result
 
@@ -739,13 +742,20 @@ DEF_FUNC sre_pattern_findall_method, FA_FRAME
     jmp .fa_advance
 
 .fa_advance:
-    ; Advance position past the match
+    ; Advance position past the match.
+    ;
+    ; An empty match does NOT step past itself.  CPython stopped doing that in
+    ; 3.7: it searches the same position again with must_advance set, which
+    ; forbids a second empty match there and so makes the engine keep
+    ; backtracking.  Stepping instead threw away everything it would have
+    ; found -- findall('.*?', 'aab') was ['', '', '', ''] rather than
+    ; ['', 'a', '', 'a', '', 'b', ''].
     lea rdi, [rbp - FA_STATE]
     mov rax, [rdi + SRE_State.str_start]
+    mov dword [rdi + SRE_State.must_advance], 0
     cmp rcx, rax
     jne .fa_advance_ok
-    ; Zero-width match: advance by 1 to avoid infinite loop
-    inc rcx
+    mov dword [rdi + SRE_State.must_advance], 1
 .fa_advance_ok:
     lea rdi, [rbp - FA_STATE]
     mov [rdi + SRE_State.str_pos], rcx
@@ -1001,10 +1011,13 @@ DEF_FUNC sre_pattern_sub_method, SUB_FRAME
     mov [rbp - SUB_LASTEND], r13
     inc qword [rbp - SUB_NSUBS]
 
-    ; Advance past match
+    ; Advance past match -- an empty one stays put under must_advance; see
+    ; .fa_advance in findall for why.
+    lea rdi, [rbp - SUB_STATE]
+    mov dword [rdi + SRE_State.must_advance], 0
     cmp r13, r12
     jne .sub_advance_ok
-    inc r13                    ; zero-width match
+    mov dword [rdi + SRE_State.must_advance], 1
 .sub_advance_ok:
     lea rdi, [rbp - SUB_STATE]
     mov [rdi + SRE_State.str_pos], r13
@@ -1265,9 +1278,11 @@ DEF_FUNC sre_pattern_subn_method, SN_FRAME
     mov [rbp - SN_LASTEND], r13
     inc qword [rbp - SN_NSUBS]
 
+    lea rdi, [rbp - SN_STATE]
+    mov dword [rdi + SRE_State.must_advance], 0
     cmp r13, r12
     jne .subn_advance_ok
-    inc r13
+    mov dword [rdi + SRE_State.must_advance], 1
 .subn_advance_ok:
     lea rdi, [rbp - SN_STATE]
     mov [rdi + SRE_State.str_pos], r13
@@ -1423,12 +1438,10 @@ DEF_FUNC sre_pattern_split_method, SP_FRAME
     mov r12, [rdi + SRE_State.str_start]
     mov r13, [rdi + SRE_State.str_pos]
 
-    ; Skip zero-width matches at start
-    cmp r13, r12
-    jne .split_nonzero
-    cmp r12, [rbp - SP_LASTEND]
-    je .split_advance_skip
-.split_nonzero:
+    ; An empty match at the position the last one ended used to be skipped
+    ; outright, which dropped re.split('x*', 'abc')'s leading ''.  must_advance
+    ; is what keeps that from looping now, so the skip is not needed and was
+    ; only ever wrong.
 
     ; Append text before match using sre_substr_from_state
     lea rdi, [rbp - SP_STATE]
@@ -1496,9 +1509,11 @@ DEF_FUNC sre_pattern_split_method, SP_FRAME
 
 .split_advance_skip:
     ; Advance
+    lea rdi, [rbp - SP_STATE]
+    mov dword [rdi + SRE_State.must_advance], 0
     cmp r13, r12
     jne .split_adv_ok
-    inc r13
+    mov dword [rdi + SRE_State.must_advance], 1
 .split_adv_ok:
     lea rdi, [rbp - SP_STATE]
     mov [rdi + SRE_State.str_pos], r13
@@ -2033,6 +2048,7 @@ DEF_FUNC sre_scanner_new
 
     mov [rbx + SRE_ScannerObject.pos], r14
     mov [rbx + SRE_ScannerObject.endpos], r15
+    mov qword [rbx + SRE_ScannerObject.must_advance], 0
 
     mov rax, rbx
 
@@ -2107,6 +2123,9 @@ DEF_FUNC sre_scanner_iternext, SI_FRAME
     ; Reset state marks
     lea rdi, [rbp - SI_STATE]
     call sre_state_reset_marks
+    mov rbx, [rbp - SI_SELF]
+    mov rax, [rbx + SRE_ScannerObject.must_advance]
+    mov [rdi + SRE_State.must_advance], eax
 
     ; Search
     lea rdi, [rbp - SI_STATE]
@@ -2131,12 +2150,15 @@ DEF_FUNC sre_scanner_iternext, SI_FRAME
     lea rdi, [rbp - SI_STATE]
     call sre_state_fini
 
-    ; Advance scanner position: max(match_end, match_start + 1)
+    ; Advance the scanner.  An empty match stays put with must_advance set --
+    ; see .fa_advance in findall.  The flag lives on the scanner because each
+    ; call builds its own state.
     mov rbx, [rbp - SI_SELF]
     mov rax, r13               ; match_end
+    mov qword [rbx + SRE_ScannerObject.must_advance], 0
     cmp rax, r12
     jne .si_advance_ok
-    lea rax, [r12 + 1]        ; zero-width guard
+    mov qword [rbx + SRE_ScannerObject.must_advance], 1
 .si_advance_ok:
     mov [rbx + SRE_ScannerObject.pos], rax
 
@@ -2212,12 +2234,18 @@ DEF_FUNC sre_scanner_match_method, SM2_FRAME
     ; Reset marks
     lea rdi, [rbp - SM2_STATE]
     call sre_state_reset_marks
+    mov rbx, [rbp - SM2_SELF]
+    mov rax, [rbx + SRE_ScannerObject.must_advance]
+    mov [rdi + SRE_State.must_advance], eax
 
     ; Anchored match (not search)
     lea rdi, [rbp - SM2_STATE]
+    mov rax, [rdi + SRE_State.str_pos]
+    mov [rdi + SRE_State.search_origin], rax
     mov rbx, [rbp - SM2_SELF]
     mov rsi, [rbx + SRE_ScannerObject.pattern]
     mov rsi, [rsi + SRE_PatternObject.code]
+    mov edx, 1
     call sre_match
     test eax, eax
     jz .sm2_no_match
@@ -2241,9 +2269,10 @@ DEF_FUNC sre_scanner_match_method, SM2_FRAME
     ; Advance scanner pos
     mov rbx, [rbp - SM2_SELF]
     mov rax, r13
+    mov qword [rbx + SRE_ScannerObject.must_advance], 0
     cmp rax, r12
     jne .sm2_adv_ok
-    lea rax, [r12 + 1]
+    mov qword [rbx + SRE_ScannerObject.must_advance], 1
 .sm2_adv_ok:
     mov [rbx + SRE_ScannerObject.pos], rax
 
