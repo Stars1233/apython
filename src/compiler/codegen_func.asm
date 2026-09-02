@@ -697,6 +697,69 @@ DEF_FUNC cg_docstring, CDS_FRAME
     ret
 END_FUNC cg_docstring
 
+;; ============================================================================
+;; cg_seed_doc_const(Comp *c, CompUnit *u, uint32_t body) -> rax = 1 ok, 0 error
+;;
+;; Put the docstring, or None, at co_consts[0].  Called before anything else
+;; emits a constant, so cg_const appends it at index zero -- which is the slot
+;; func_doc reads.
+;; ============================================================================
+CSD_UNIT  equ 16
+CSD_FRAME equ 40          ; + 1 push = 48, 16-aligned
+DEF_FUNC cg_seed_doc_const, CSD_FRAME
+    push rbx
+    mov rbx, rdi
+    mov [rbp - CSD_UNIT], rsi
+
+    mov rdi, rbx
+    mov rsi, rdx
+    call ast_at
+    mov ecx, [rax + AstNode.nchild]
+    test ecx, ecx
+    jz .csd_none
+    mov rsi, rax
+    xor edx, edx
+    mov rdi, rbx
+    call ast_child
+    mov rdi, rbx
+    mov rsi, rax
+    call ast_at
+    movzx ecx, byte [rax + AstNode.kind]
+    cmp ecx, AST_EXPR_STMT
+    jne .csd_none
+    mov edx, [rax + AstNode.a]
+    mov rdi, rbx
+    mov rsi, rdx
+    call ast_at
+    movzx ecx, byte [rax + AstNode.kind]
+    cmp ecx, AST_CONST
+    jne .csd_none
+    mov esi, [rax + AstNode.a]
+    mov rdi, rbx
+    call ast_obj_at
+    test rax, rax
+    jz .csd_none
+    V_TEST_PTR rax, rcx
+    ja .csd_none
+    mov rcx, [rax + PyObject.ob_type]
+    lea rdx, [rel str_type]
+    cmp rcx, rdx
+    jne .csd_none
+    mov rsi, rax
+    jmp .csd_emit
+
+.csd_none:
+    extern none_singleton
+    lea rsi, [rel none_singleton]
+.csd_emit:
+    mov rdi, [rbp - CSD_UNIT]
+    call cg_const
+    mov eax, 1
+    pop rbx
+    leave
+    ret
+END_FUNC cg_seed_doc_const
+
 DEF_FUNC cg_compile_body, CB_FRAME
     push rbx
     push r12
@@ -811,6 +874,23 @@ DEF_FUNC cg_compile_body, CB_FRAME
     xor ecx, ecx
     call cg_emit
     or byte [rax + Instr.flags], IF_NOLINE
+
+    ; A function reserves co_consts[0] for its docstring, or None when it has
+    ; none.  CPython's compiler does, and func_doc reads that slot -- so a
+    ; function whose first constant happened to be a string reported it as
+    ; __doc__: `def f(): x = "s"; return x` answered 's', and so did
+    ; `lambda: "s"`.  A lambda has no docstring, so it always seeds None; a
+    ; class stores __doc__ by name below rather than out of the tuple, and
+    ; wants no reserved slot at all.
+    cmp qword [rbp - CB_LAMBDA], 2
+    je .no_doc_slot
+    mov rdi, rbx
+    mov rsi, r12
+    mov rdx, r13
+    call cg_seed_doc_const
+    test eax, eax
+    jz .fail
+.no_doc_slot:
 
     ; A class body opens by recording where it came from, which is what makes
     ; C.__module__ and C.__qualname__ exist.

@@ -686,6 +686,16 @@ DEF_FUNC func_setattr
     test eax, eax
     jz .set_kwdefaults
 
+    ; __name__ has a field of its own, and CPython keeps it there rather than
+    ; in __dict__.  Storing it in func_dict like any other attribute was what
+    ; made `f.__name__ = "x"` read back as the old name: func_getattr answered
+    ; from the field without ever looking.
+    lea rdi, [rel fn_attr_name]
+    lea rsi, [r12 + PyStrObject.data]
+    call ap_strcmp
+    test eax, eax
+    jz .set_name
+
     ; Check if func_dict exists
     mov rdi, [rbx + PyFuncObject.func_dict]
     test rdi, rdi
@@ -708,6 +718,31 @@ DEF_FUNC func_setattr
     pop rbx
     leave
     ret
+
+.set_name:
+    ; It must be a str; CPython raises for anything else.
+    mov rdi, r13
+    V_TEST_PTR rdi, rax
+    ja .set_name_type_error
+    mov rax, [rdi + PyObject.ob_type]
+    REQUIRE_STR_TYPE rax, rcx, .set_name_type_error
+    mov rdi, [rbx + PyFuncObject.func_name]
+    mov rax, r13
+    INCREF rax
+    mov [rbx + PyFuncObject.func_name], rax
+    test rdi, rdi
+    jz .set_name_done
+    call obj_decref
+.set_name_done:
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.set_name_type_error:
+    RAISE exc_TypeError_type, "__name__ must be set to a string object"
 
 .set_kwdefaults:
     ; XDECREF old kwdefaults
@@ -839,6 +874,13 @@ DEF_FUNC func_getattr
     ret
 
 .return_name:
+    ; An assignment wins, as it does for __doc__: `f.__name__ = "x"` is stored
+    ; in func_dict like any other attribute, and reading func_name past it made
+    ; the assignment look like a no-op.  functools.wraps writes both this and
+    ; __qualname__ that way.
+    call .fg_from_dict
+    test rax, rax
+    jnz .return_ptr_attr
     mov rax, [rbx + PyFuncObject.func_name]
     INCREF rax
     mov edx, TAG_PTR
@@ -849,6 +891,9 @@ DEF_FUNC func_getattr
     ret
 
 .return_qualname:
+    call .fg_from_dict
+    test rax, rax
+    jnz .return_ptr_attr
     ; Get co_qualname from the code object
     mov rax, [rbx + PyFuncObject.func_code]
     mov rax, [rax + PyCodeObject.co_qualname]
@@ -902,6 +947,22 @@ DEF_FUNC func_getattr
     pop rbx
     leave
     V_PACK rax, rdx
+    ret
+
+;; .fg_from_dict -> rax = the attribute out of func_dict, borrowed, or 0.
+;; rbx = the function, r12 = the name.
+.fg_from_dict:
+    mov rdi, [rbx + PyFuncObject.func_dict]
+    test rdi, rdi
+    jz .fgfd_none
+    mov rsi, r12
+    call dict_get
+    V_UNPACK rax, rdx
+    test edx, edx
+    jz .fgfd_none
+    ret
+.fgfd_none:
+    xor eax, eax
     ret
 
 .return_doc:

@@ -145,6 +145,7 @@ test_format
 test_format_spec
 test_frozenset
 test_fstrings
+test_func_attrs
 test_func_dunder_get
 test_functions
 test_future_import

@@ -44,8 +44,14 @@ one-line fix.
   from a builtin method.  The `errors` argument is accepted and ignored --
   every failure is strict.
 
-- **`func.__name__ = "x"` is silently ignored.**  Functions have no settable
-  attributes.
+- **`__qualname__` and `__doc__` set on a function land in its `__dict__`.**
+  CPython keeps both on the function object, so `f.__dict__` stays empty until
+  something else is assigned.  `__name__` has a field of its own here and
+  behaves as CPython's does; the other two do not.
+
+- **A module without a docstring has no `__doc__`.**  CPython binds
+  `__doc__ = None`; here the name is simply absent, so reading it is a
+  NameError.
 
 - **`bytearray` is not reversible.**  `b[0]`, `b[1:]` and `b[::-1]` all work
   now; `reversed(bytearray(...))` is still a TypeError, because the type has
