@@ -15,6 +15,7 @@ ok _compat_pickle
 ok _compression
 ok concurrent
 ok configparser
+ok contextlib
 ok copy
 ok copyreg
 ok difflib
@@ -27,6 +28,7 @@ ok fnmatch
 ok functools
 ok __future__
 ok getopt
+ok getpass
 ok gettext
 ok graphlib
 ok heapq
@@ -57,6 +59,7 @@ ok _pyio
 ok quopri
 ok re
 ok reprlib
+ok shlex
 ok shutil
 ok _sitebuiltins
 ok stat
