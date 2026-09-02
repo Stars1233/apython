@@ -328,6 +328,13 @@ gives a current one, and a number written here is wrong by the next commit.
   aligned SSE.  This is the debt that keeps `check_alignment` scoped to
   `src/compiler/` plus `src/main.asm` instead of running tree-wide.
 
+- **`src/pyo/bytes.asm` is 178k, against CLAUDE.md's 100k limit for a
+  hand-written file.**  It holds both bytes and bytearray, and the natural
+  seam is exactly that -- bytearray's own methods and its resizable storage
+  are the half that grew.  `src/methods/init.asm` is the next one up at 90k,
+  and its 320 registration sites are four open-coded instructions apiece;
+  one row each would take it to about 45k.
+
 - **Functions with no separator or docblock at all**, and, among those that
   have one, docblocks with no `->` signature line.  The signature is the only
   part of a function's contract that nothing checks, so its absence is a real
