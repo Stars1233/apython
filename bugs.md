@@ -15,10 +15,6 @@ one-line fix.
   answers `-4` for `~I(3)`; here `M`'s wins.  The same shape applies to the
   other unary dunders.
 
-- **`slice` objects cannot be ordered.**  CPython compares them as the tuple
-  `(start, stop, step)`, so `slice(1) < slice(2)` is True; here it is a
-  TypeError.  Equality works.
-
 - **`bytearray` has no `%`.**  `+`, `*`, `+=` and `*=` all work now, through
   `bytearray_seq_methods`; `bytearray(b"%d") % 5` is still a TypeError, since
   `bytearray_type.tp_as_number` is 0 and nothing supplies `nb_remainder`.

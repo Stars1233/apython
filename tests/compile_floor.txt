@@ -249,6 +249,7 @@ test_sets
 test_size_and_recursion_limits
 test_slice_and_star_args
 test_slice_assign
+test_slice_compare
 test_slicing
 test_slots
 test_smallint_identity

@@ -19,6 +19,7 @@ extern gc_untrack
 extern ap_free
 extern obj_incref
 extern obj_dealloc
+extern obj_decref
 extern str_from_cstr
 extern none_singleton
 extern bool_type
@@ -136,11 +137,171 @@ DEF_FUNC slice_dealloc
 END_FUNC slice_dealloc
 
 ;; ============================================================================
+;; slice_richcompare(rdi = left Value, rsi = right Value, edx = op) -> Value
+;;
+;; CPython compares two slices as the tuple (start, stop, step), so
+;; slice(1) < slice(2) is True.  slice_type.tp_richcompare was 0, which sent
+;; every comparison to op_compare_op's identity path: ordering was a
+;; TypeError, and equality was identity, so slice(1,2,3) == slice(1,2,3) was
+;; False as well -- bugs.md recorded that half as working.
+;;
+;; A NULL Value declines, the way every other tp_richcompare here does.
+;; ============================================================================
+SLC_T1    equ 8
+SLC_T2    equ 16
+SLC_OP    equ 24
+SLC_FRAME equ 40            ; + 1 push = 48, 16-aligned
+
+DEF_FUNC slice_richcompare, SLC_FRAME
+    push rbx
+    mov [rbp - SLC_OP], rdx
+
+    ; Both operands must be slices; anything else declines, so the protocol
+    ; can try the other side and then report the pair.
+    V_TEST_PTR rdi, rax
+    ja .slc_decline
+    V_TEST_PTR rsi, rax
+    ja .slc_decline
+    test rdi, rdi
+    jz .slc_decline
+    test rsi, rsi
+    jz .slc_decline
+    lea rcx, [rel slice_type]
+    cmp [rdi + PyObject.ob_type], rcx
+    jne .slc_decline
+    cmp [rsi + PyObject.ob_type], rcx
+    jne .slc_decline
+
+    mov rbx, rsi
+    call .slc_make_tuple            ; rdi = the left slice
+    mov [rbp - SLC_T1], rax
+    mov rdi, rbx
+    call .slc_make_tuple
+    mov [rbp - SLC_T2], rax
+
+    mov rdi, [rbp - SLC_T1]
+    mov rsi, [rbp - SLC_T2]
+    mov rdx, [rbp - SLC_OP]
+    extern tuple_richcompare
+    call tuple_richcompare
+    mov rbx, rax
+    mov rdi, [rbp - SLC_T1]
+    call obj_decref
+    mov rdi, [rbp - SLC_T2]
+    call obj_decref
+    mov rax, rbx
+    pop rbx
+    leave
+    ret
+
+.slc_decline:
+    xor eax, eax                    ; a NULL Value = NotImplemented
+    pop rbx
+    leave
+    ret
+
+;; .slc_make_tuple(rdi = a slice) -> rax = a new (start, stop, step) tuple
+.slc_make_tuple:
+    push rdi
+    mov edi, 3
+    extern tuple_new
+    call tuple_new
+    pop rdi
+    mov rcx, [rax + PyTupleObject.ob_item]
+    mov rdx, [rdi + PySliceObject.start]
+    mov [rcx], rdx
+    INCREF_V rdx, rsi
+    mov rdx, [rdi + PySliceObject.stop]
+    mov [rcx + 8], rdx
+    INCREF_V rdx, rsi
+    mov rdx, [rdi + PySliceObject.step]
+    mov [rcx + 16], rdx
+    INCREF_V rdx, rsi
+    ret
+END_FUNC slice_richcompare
+
+;; ============================================================================
+;; slice_hash(rdi = self, edx = tag) -> rax = the hash
+;;
+;; A slice has been hashable since 3.12, and hashes as its (start, stop, step)
+;; tuple does -- which is also what it compares as, so equal slices hash equal.
+;; ============================================================================
+DEF_FUNC slice_hash
+    call slice_richcompare.slc_make_tuple
+    push rax
+    mov rdi, rax
+    extern obj_hash
+    call obj_hash
+    pop rdi
+    push rax
+    call obj_decref
+    pop rax
+    leave
+    ret
+END_FUNC slice_hash
+
+;; ============================================================================
 ;; slice_repr(PySliceObject *self) -> PyStrObject*
 ;; ============================================================================
-DEF_FUNC_BARE slice_repr
+DEF_FUNC slice_repr
+    push rbx
+    push r12
+    push r13
+
+    ; CPython prints all three fields, always: slice(1) is slice(None, 1,
+    ; None).  This answered the fixed string "slice(...)", so no slice ever
+    ; printed its own contents.  The tuple that tp_richcompare and tp_hash
+    ; already build is exactly the text wanted -- repr((None, 1, None)) is
+    ; "(None, 1, None)" -- so the repr is the word and that tuple.
+    call slice_richcompare.slc_make_tuple
+    mov rbx, rax
+    mov rdi, rbx
+    extern obj_repr
+    call obj_repr
+    V_UNPACK rax, rdx
+    test rax, rax
+    jz .sr_fail
+    mov r12, rax                    ; "(start, stop, step)"
+
     lea rdi, [rel slice_repr_str]
-    jmp str_from_cstr
+    call str_from_cstr
+    mov r13, rax                    ; "slice"
+
+    mov rdi, r13
+    mov rsi, r12
+    extern str_concat
+    call str_concat
+    V_UNPACK rax, rdx
+
+    push rax
+    mov rdi, r13
+    call obj_decref
+    mov rdi, r12
+    call obj_decref
+    mov rdi, rbx
+    call obj_decref
+    pop rax
+
+    ; obj_str hands its caller (rax, rdx), and builtin_print reads that tag to
+    ; decide whether there is anything to print.  The decrefs above are calls,
+    ; so the tag has to be set after them, not before.
+    mov edx, TAG_PTR
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.sr_fail:
+    mov rdi, rbx
+    call obj_decref
+    xor eax, eax
+    xor edx, edx
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
 END_FUNC slice_repr
 
 ;; ============================================================================
@@ -469,7 +630,7 @@ END_FUNC slice_type_call
 section .data
 
 slice_name_str: db "slice", 0
-slice_repr_str: db "slice(...)", 0
+slice_repr_str: db "slice", 0
 
 ; Slice object pool (freelist)
 align 8
@@ -487,11 +648,11 @@ slice_type:
     dq slice_dealloc          ; tp_dealloc
     dq slice_repr             ; tp_repr
     dq slice_repr             ; tp_str
-    dq 0                      ; tp_hash
+    dq slice_hash             ; tp_hash
     dq 0                ; tp_call  (instances are not callable)
     dq slice_getattr          ; tp_getattr
     dq 0                      ; tp_setattr
-    dq 0                      ; tp_richcompare
+    dq slice_richcompare      ; tp_richcompare
     dq 0                      ; tp_iter
     dq 0                      ; tp_iternext
     dq 0                      ; tp_init
