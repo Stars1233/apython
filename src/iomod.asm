@@ -842,6 +842,18 @@ FI_CLOSEFD equ 72           ; the closefd argument, defaulting to 1
 FI_STAT   equ 80 + StatBuf_size
 FI_FRAME  equ FI_STAT       ; 224, + 0 pushes, 16-aligned
 
+; Every error exit below owns the mode string -- allocated for the default, or
+; INCREF'd from the argument -- and RAISE and raise_exception both abandon the
+; C stack.  Two of them leaked it: a bad mode letter, and a failed open.
+%macro FI_DROP_MODE 0
+    mov rdi, [rbp - FI_MODE]
+    test rdi, rdi
+    jz %%no_mode
+    mov qword [rbp - FI_MODE], 0
+    call obj_decref
+%%no_mode:
+%endmacro
+
 DEF_FUNC fileio_init_fn, FI_FRAME
     cmp rsi, 2
     jl .fi_argerr
@@ -1115,28 +1127,28 @@ DEF_FUNC fileio_init_fn, FI_FRAME
     ud2
 
 .fi_closefd_path:
-    ; The mode string is ours by here -- either allocated for the default or
-    ; INCREF'd from the argument -- and RAISE abandons the C stack.
-    mov rdi, [rbp - FI_MODE]
-    test rdi, rdi
-    jz .fi_closefd_path_raise
-    mov qword [rbp - FI_MODE], 0
-    call obj_decref
-.fi_closefd_path_raise:
+    FI_DROP_MODE
     RAISE exc_ValueError_type, "Cannot use closefd=False with file name"
 
 .fi_open_failed:
     neg rax
+    push rax
+    sub rsp, 8
+    FI_DROP_MODE
+    add rsp, 8
+    pop rax
     mov rdi, rax
     mov rsi, [rbp - FI_FILE]
     call raise_oserror
     ud2
 .fi_mode_bad:
+    FI_DROP_MODE
     lea rdi, [rel exc_ValueError_type]
     lea rsi, [rel io_msg_onemode]
     call raise_exception
     ud2
 .fi_mode_letter:
+    FI_DROP_MODE
     lea rdi, [rel io_badmode_msg]
     lea rsi, [rel io_msg_badmode]
     mov rdx, 40
@@ -1149,8 +1161,10 @@ DEF_FUNC fileio_init_fn, FI_FRAME
     call raise_exception
     ud2
 .fi_fd_bad:
+    FI_DROP_MODE
     RAISE exc_ValueError_type, "negative file descriptor"
 .fi_file_type:
+    FI_DROP_MODE
     lea rdi, [rel exc_TypeError_type]
     lea rsi, [rel io_msg_filetype]
     mov rdx, [rbp - FI_FILE]
