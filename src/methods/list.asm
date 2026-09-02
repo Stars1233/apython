@@ -1950,6 +1950,7 @@ DEF_FUNC list_method_extend, LE_FRAME
     ; which: L.extend(G()) for a raising __getitem__ appended a short run and
     ; answered None.
     EXC_RAISED_SINCE [rbp - LE_EXC], rcx, .extend_iter_raised
+    jmp .extend_done            ; nothing pending: an ordinary exhaustion
 
 .extend_iter_raised:
     xor eax, eax                ; a NULL Value, with the exception pending
