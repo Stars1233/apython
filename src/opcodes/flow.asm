@@ -65,7 +65,8 @@ SND_RECV   equ 24
 SND_RESULT equ 32
 SND_STAG   equ 40    ; sent_value tag
 SND_RTAG   equ 48    ; result tag
-SND_FRAME  equ 48           ; + 0 pushes = 48
+SND_EXC    equ 56    ; what was pending before the send, to tell a raise apart
+SND_FRAME  equ 64           ; + 0 pushes = 64
 
 ;; Stack layout constants for op_match_keys (DEF_FUNC, 32 bytes).
 
@@ -780,6 +781,7 @@ DEF_FUNC op_send, SND_FRAME
 
 .send_gen_send:
     ; gen_send(receiver, value, value_tag)
+    DUNDER_EXC_SAVE [rbp - SND_EXC]
     mov rdi, [rbp - SND_RECV]
     mov rsi, [rbp - SND_SENT]
     movzx edx, byte [rbp - SND_STAG]
@@ -790,6 +792,7 @@ DEF_FUNC op_send, SND_FRAME
 
 .send_use_iternext:
     ; tp_iternext(receiver)
+    DUNDER_EXC_SAVE [rbp - SND_EXC]
     mov rdi, [rbp - SND_RECV]
     mov rax, [rdi + PyObject.ob_type]
     mov rax, [rax + PyTypeObject.tp_iternext]
@@ -821,6 +824,15 @@ DEF_FUNC op_send, SND_FRAME
     DISPATCH
 
 .send_exhausted:
+    ; A NULL is not always exhaustion.  A coroutine that RAISES also answers
+    ; NULL, with its exception pending -- and this arm pushed the return value
+    ; it never set and jumped past the loop, so the exception sat in the global
+    ; until something else tripped over it.  Every error inside an awaited
+    ; coroutine was lost that way: `await boom()` inside a try/except never
+    ; reached the handler, and `async for` over a hand-written __anext__ spun
+    ; for ever because the StopAsyncIteration that ends it never arrived.
+    EXC_RAISED_SINCE [rbp - SND_EXC], rax, .send_propagate
+
     ; Receiver exhausted. Push return value (for yield-from protocol).
     ; Gen/coro/task/awaitable/asend all have gi_return_value at offset +48.
     ; Guard: only read if receiver's type has tp_basicsize > 56 (enough for +48 field).
@@ -854,6 +866,15 @@ DEF_FUNC op_send, SND_FRAME
     lea rbx, [rbx + rcx*2]
     leave
     DISPATCH
+
+.send_propagate:
+    ; The receiver raised.  Its exception belongs to this frame's handlers --
+    ; which is what makes END_ASYNC_FOR, and every `try` around an `await`,
+    ; work at all.
+    mov [rel eval_saved_r13], r13
+    leave
+    extern eval_exception_unwind
+    jmp eval_exception_unwind
 
 .send_error:
     ; Unsupported receiver — just push None and continue

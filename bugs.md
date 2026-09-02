@@ -221,12 +221,25 @@ than lying — but they are ordinary Python that does not work:
   iterator are shaped this way.
 
   Looking the two dunders up by name in `op_get_aiter` and `op_get_anext` is
-  not enough, and was tried: `__anext__` answers a coroutine, and the loop
-  then spins forever handing the body `None`.  Our `async for` lowering leans
-  on `GET_ANEXT` itself raising `StopAsyncIteration` when `tp_iternext`
-  answers NULL, rather than on `END_ASYNC_FOR` catching it out of the awaited
-  result -- so the awaitable half of the protocol has no path through the
-  loop.  Fixing this means changing the lowering, not the two handlers.
+  most of it, and now that SEND propagates a raise it no longer spins -- the
+  `StopAsyncIteration` from `__anext__` reaches `END_ASYNC_FOR` and ends the
+  loop.  What stops it is the entry below: an exception escaping `__anext__`
+  segfaults, because the unwinder reaches a finaliser with
+  `current_exception` pointing at an object whose refcount is already zero.
+  The by-name lookup was written and reverted for that reason; it is a
+  half-hour's work once the refcount question is answered.
+
+- **The unwinder can carry an exception nothing owns.**  `raise_exception_obj`
+  takes over its caller's reference rather than adding one, so
+  `current_exception` holds exactly one reference -- and somewhere between a
+  coroutine raising and the awaiting frame's unwind, that reference is
+  dropped: by the time `eval_exception_unwind` releases the value stack,
+  `current_exception` points at an object whose `ob_refcnt` is 0.  Nothing
+  notices, because nothing else takes a reference to it.  `instance_dealloc`
+  did, once it started restoring a live exception around `__del__`, and freed
+  it; it now checks the refcount first and says so, which is a guard and not
+  a fix.  Reproduce with an `async for` over a hand-written `__anext__` that
+  raises.
 
 - **`bytes % args` leaks its temporary when the format is malformed.**  The
   work is done by handing a decoded copy of the format and the arguments to

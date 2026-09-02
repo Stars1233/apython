@@ -973,6 +973,7 @@ END_FUNC type_setattr
 ;; rdi = instance
 ;; ============================================================================
 ID_EXC   equ 8
+ID_OWNED equ 16          ; whether the reference below is ours to drop
 ID_FRAME equ 24             ; + 1 push = 32
 DEF_FUNC instance_dealloc, ID_FRAME
     push rbx
@@ -995,10 +996,18 @@ DEF_FUNC instance_dealloc, ID_FRAME
     ; installing its exception releases the global's reference to this one, and
     ; the saved pointer would be dangling by the time it is put back.
     DUNDER_EXC_SAVE [rbp - ID_EXC]
+    mov qword [rbp - ID_OWNED], 0
     mov rdi, [rbp - ID_EXC]
     test rdi, rdi
     jz .del_nothing_pending
+    ; ...but only when the global's own reference is real.  The unwinder can
+    ; reach here with current_exception pointing at an object whose refcount is
+    ; already zero -- bugs.md carries the case -- and taking and dropping a
+    ; reference on that one frees an exception that is still being carried.
+    cmp qword [rdi + PyObject.ob_refcnt], 0
+    jle .del_nothing_pending
     call obj_incref
+    mov qword [rbp - ID_OWNED], 1
 .del_nothing_pending:
     mov rdi, rbx
     lea rsi, [rel dunder_del]
@@ -1040,6 +1049,8 @@ DEF_FUNC instance_dealloc, ID_FRAME
     jmp .del_cleared
 .del_drop_saved:
     ; Unchanged, so the global still owns its own; drop the extra one.
+    cmp qword [rbp - ID_OWNED], 0
+    je .del_cleared
     mov rdi, rax
     test rdi, rdi
     jz .del_cleared
