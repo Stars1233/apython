@@ -3,14 +3,36 @@
 # frame_free and gen_traverse walked the locals and stopped there.  So an
 # abandoned generator released its locals and leaked the rest, and a cycle
 # through one was invisible to the collector.
+#
+# What the probe below asks, and why it does not count.  `gc.collect() > 0`
+# was the obvious question and it is not portable: the return value is a
+# number of unreachable objects, and CPython builds disagree about it -- this
+# file passed against 3.12.3 and failed against the 3.12 CI installs, on the
+# three cases below, with apython answering the same thing in both places.
+# CLAUDE.md already records that the collector's counts are not comparable.
+#
+# So each case takes a weak reference and asks two questions instead, which
+# together say what "a cycle the collector can see" actually means:
+#
+#   alive after make() returned   -- refcounting alone did NOT free it, so
+#                                    there is a cycle
+#   dead after gc.collect()       -- and the collector could see it
+#
+# Both are facts about the object, not about the collector's bookkeeping, and
+# an exhausted generator -- which forms no cycle at all, because its frame is
+# already gone -- still answers False on the first, which is the distinction
+# the count was being used for.
 
 import gc
+import _weakref
 
 
 def cycle(make):
     gc.collect()
-    make()
-    return gc.collect() > 0
+    ref = make()
+    cyclic = ref() is not None
+    gc.collect()
+    return cyclic and ref() is None
 
 
 print("=== a generator suspended inside a for, in a cycle ===")
@@ -30,6 +52,7 @@ def through_locals():
     g = walking([m])
     next(g)
     m.g = g
+    return _weakref.ref(m)
 
 
 print("locals", cycle(through_locals))
@@ -44,6 +67,7 @@ def through_the_stack():
     it = g()
     next(it)
     a.append(it)
+    return _weakref.ref(it)
 
 
 print("stack", cycle(through_the_stack))
@@ -58,6 +82,7 @@ def nested_for():
     it = g()
     next(it)
     a.append(it)
+    return _weakref.ref(it)
 
 
 print("nested", cycle(nested_for))
@@ -69,7 +94,9 @@ def never_started():
     def g():
         for x in a:
             yield x
-    a.append(g())
+    it = g()
+    a.append(it)
+    return _weakref.ref(it)
 
 
 print("unstarted", cycle(never_started))
@@ -85,6 +112,7 @@ def exhausted():
     for _ in it:
         pass
     a.append(it)
+    return _weakref.ref(it)
 
 
 print("exhausted", cycle(exhausted))
