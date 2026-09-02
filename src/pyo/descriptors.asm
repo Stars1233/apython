@@ -1047,6 +1047,7 @@ DEF_FUNC getset_descr_new
     mov [rax + PyGetSetDescrObject.gs_get], rbx
     mov [rax + PyGetSetDescrObject.gs_set], r12
     mov [rax + PyGetSetDescrObject.gs_name], r13
+    mov qword [rax + PyGetSetDescrObject.gs_owner], 0
     ; gs_name is owned -- getset_descr_dealloc decrefs it -- and was stored
     ; without a reference of its own.  Harmless while the one instance ever
     ; built was immortal; not once every numeric type registers several.
@@ -1060,6 +1061,167 @@ DEF_FUNC getset_descr_new
     leave
     ret
 END_FUNC getset_descr_new
+
+;; ============================================================================
+;; getset_descr_repr(rdi = the descriptor) -> PyStrObject*
+;;
+;; "<attribute 'real' of 'int' objects>", as CPython words it.  tp_repr was 0,
+;; so obj_repr fell to its no-repr arm and repr(int.real) was the empty
+;; string -- and the stdlib reads a descriptor's repr to classify it.
+;; ============================================================================
+global getset_descr_repr
+extern rbt_append_cstr
+extern str_from_cstr
+DEF_FUNC getset_descr_repr
+    mov rsi, rdi
+    lea rdi, [rel gdr_open]
+    call getset_descr_compose
+    mov rdi, rax                ; the NUL the composer left
+    lea rsi, [rel gdr_close]
+    call rbt_append_cstr
+    lea rdi, [rel gdr_buf]
+    call str_from_cstr
+    leave
+    ret
+END_FUNC getset_descr_repr
+
+;; ============================================================================
+;; getset_descr_dunder_get(args, nargs) -- descriptor.__get__(obj[, type])
+;; getset_descr_dunder_set(args, nargs) -- descriptor.__set__(obj, value)
+;;
+;; The stdlib decides what a descriptor IS by asking for these by name:
+;; inspect.isdatadescriptor, and the enum and dataclasses classifiers, walk a
+;; __dict__ and test hasattr(v, '__get__').  With no tp_dict on the type, the
+;; answer was False for every getset in the tree.
+;; ============================================================================
+global getset_descr_dunder_get
+DEF_FUNC getset_descr_dunder_get
+    cmp rsi, 2
+    jl .gdg_bad
+    cmp rsi, 3
+    jg .gdg_bad
+    mov rax, [rdi]              ; args[0] = the descriptor
+    mov rsi, [rdi + 8]          ; args[1] = the instance
+    ; descr.__get__(None, cls) answers the descriptor itself, as CPython's does
+    IS_NONE rsi, rcx
+    je .gdg_self
+    mov rdi, rax
+    call getset_descr_get
+    leave
+    ret
+.gdg_self:
+    INCREF rax
+    mov edx, TAG_PTR
+    leave
+    V_PACK rax, rdx
+    ret
+.gdg_bad:
+    RAISE exc_TypeError_type, "expected 1 or 2 arguments"
+END_FUNC getset_descr_dunder_get
+
+global getset_descr_dunder_set
+DEF_FUNC getset_descr_dunder_set
+    cmp rsi, 3
+    jne .gds_bad
+    mov rax, [rdi]
+    mov rsi, [rdi + 8]
+    mov rdx, [rdi + 16]
+    mov rdi, rax
+    call getset_descr_set
+    extern none_singleton
+    lea rax, [rel none_singleton]
+    INCREF rax
+    mov edx, TAG_PTR
+    leave
+    V_PACK rax, rdx
+    ret
+.gds_bad:
+    RAISE exc_TypeError_type, "expected 2 arguments"
+END_FUNC getset_descr_dunder_set
+
+;; getset_descr_dunder_delete(args, nargs) -- descriptor.__delete__(obj)
+;; A getset is a DATA descriptor whether or not it has a setter, so all three
+;; names exist; a read-only one raises when either is called.
+global getset_descr_dunder_delete
+DEF_FUNC getset_descr_dunder_delete
+    cmp rsi, 2
+    jne .gdd_bad
+    mov rax, [rdi]
+    mov rsi, [rdi + 8]
+    xor edx, edx                ; a NULL Value: delete rather than assign
+    mov rdi, rax
+    call getset_descr_set
+    lea rax, [rel none_singleton]
+    INCREF rax
+    mov edx, TAG_PTR
+    leave
+    V_PACK rax, rdx
+    ret
+.gdd_bad:
+    RAISE exc_TypeError_type, "expected 1 argument"
+END_FUNC getset_descr_dunder_delete
+
+;; ============================================================================
+;; getset_descr_compose(rdi = a leading C string, rsi = the descriptor)
+;;   -> rax = the address of the NUL in gdr_buf, which holds
+;;      "<lead>'name' of 'T' objects" -- a caller appends its own ending
+;;
+;; The middle the repr and the not-writable message share.
+;; ============================================================================
+DEF_FUNC_LOCAL getset_descr_compose
+    push rbx
+    push r12
+    mov rbx, rsi
+    mov r12, rdi
+    lea rdi, [rel gdr_buf]
+    mov rsi, r12
+    call rbt_append_cstr
+    mov rdi, rax
+    mov rsi, [rbx + PyGetSetDescrObject.gs_name]
+    test rsi, rsi
+    jz .gdc_no_name
+    add rsi, PyStrObject.data
+    jmp .gdc_have_name
+.gdc_no_name:
+    lea rsi, [rel gdr_unknown]
+.gdc_have_name:
+    call rbt_append_cstr
+    mov rdi, rax
+    lea rsi, [rel gdr_of]
+    call rbt_append_cstr
+    mov rdi, rax
+    mov rsi, [rbx + PyGetSetDescrObject.gs_owner]
+    test rsi, rsi
+    jz .gdc_no_owner
+    mov rsi, [rsi + PyTypeObject.tp_name]
+    jmp .gdc_have_owner
+.gdc_no_owner:
+    lea rsi, [rel gdr_unknown]
+.gdc_have_owner:
+    call rbt_append_cstr
+    mov rdi, rax
+    lea rsi, [rel gdr_tail]
+    call rbt_append_cstr        ; rax = the NUL, where a caller appends more
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC getset_descr_compose
+
+section .rodata
+gds_ro_open: db "attribute '", 0
+gds_ro_tail: db " is not writable", 0
+gdr_tail:    db "' objects", 0
+section .bss
+gdr_buf: resb 320
+section .text
+
+section .rodata
+gdr_open:    db "<attribute '", 0
+gdr_of:      db "' of '", 0
+gdr_close:   db ">", 0
+gdr_unknown: db "?", 0
+section .text
 
 ;; ============================================================================
 ;; getset_descr_get(rdi = the descriptor, rsi = self Value) -> rax = Value
@@ -1093,7 +1255,10 @@ END_FUNC getset_descr_get
 ;; today has one, which is what makes `(5).real = 1` an AttributeError rather
 ;; than a silent instance attribute on a subclass.
 ;; ============================================================================
-DEF_FUNC getset_descr_set
+GDS_SELF  equ 8
+GDS_FRAME equ 16            ; + 0 pushes = 16
+DEF_FUNC getset_descr_set, GDS_FRAME
+    mov [rbp - GDS_SELF], rdi
     mov rax, [rdi + PyGetSetDescrObject.gs_set]
     test rax, rax
     jz .gds_readonly
@@ -1103,7 +1268,18 @@ DEF_FUNC getset_descr_set
     leave
     ret
 .gds_readonly:
-    RAISE exc_AttributeError_type, "readonly attribute"
+    ; Now that the descriptor carries its name and its owner, it can say
+    ; which attribute -- which is what CPython's message does.
+    lea rdi, [rel gds_ro_open]
+    mov rsi, [rbp - GDS_SELF]
+    call getset_descr_compose
+    mov rdi, rax
+    lea rsi, [rel gds_ro_tail]
+    call rbt_append_cstr
+    lea rdi, [rel exc_AttributeError_type]
+    lea rsi, [rel gdr_buf]
+    call raise_exception
+    ud2
 END_FUNC getset_descr_set
 
 DEF_FUNC_LOCAL getset_descr_dealloc
@@ -2693,8 +2869,8 @@ getset_descr_type:
     dq gsd_name_str                 ; tp_name
     dq PyGetSetDescrObject_size     ; tp_basicsize
     dq getset_descr_dealloc         ; tp_dealloc
-    dq 0                            ; tp_repr
-    dq 0                            ; tp_str
+    dq getset_descr_repr            ; tp_repr
+    dq getset_descr_repr            ; tp_str
     dq 0                            ; tp_hash
     dq 0                            ; tp_call
     dq 0                            ; tp_getattr

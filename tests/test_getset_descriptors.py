@@ -61,3 +61,38 @@ print()
 print((5).bit_length(), (255).to_bytes(1, "big"), (1.5).is_integer())
 print((1 + 2j).conjugate(), (5).conjugate(), i.bit_length())
 print(int.bit_length(7), float.is_integer(2.0))
+
+# A descriptor by NAME, not only by slot.  getset_descr_type had no tp_repr
+# and no tp_dict, so repr(int.real) was the empty string -- obj_repr fell to
+# its no-repr arm -- and hasattr(int.real, '__get__') was False.  That second
+# answer is the one that matters: inspect.isdatadescriptor and the enum and
+# dataclasses classifiers walk a __dict__ and ask exactly it.
+print(repr(int.real), repr(int.imag))
+print(repr(int.numerator), repr(int.denominator))
+print(repr(float.real), repr(float.imag))
+print(str(int.real) == repr(int.real))
+
+# bool inherits int's, and says so.
+print(repr(bool.real))
+
+# A getset is a DATA descriptor: all three names, whether or not it has a
+# setter.  A method descriptor is a non-data one: __get__ and nothing else.
+for label, v in (("int.real", int.real), ("float.imag", float.imag),
+                 ("int.numerator", int.numerator),
+                 ("int.bit_length", int.bit_length), ("str.upper", str.upper),
+                 ("object.__init__", object.__init__)):
+    print(label, hasattr(v, "__get__"), hasattr(v, "__set__"),
+          hasattr(v, "__delete__"))
+
+# __get__ reached by name answers what the attribute read answers, and
+# __get__(None, cls) hands back the descriptor itself.
+print(int.real.__get__(5), float.real.__get__(2.5), int.imag.__get__(5))
+print(int.numerator.__get__(7), int.denominator.__get__(7))
+print(int.real.__get__(None, int) is int.real)
+
+# A read-only getset refuses both writes.
+for f in (lambda: int.real.__set__(5, 1), lambda: int.real.__delete__(5)):
+    try:
+        f()
+    except AttributeError as e:
+        print("AttributeError", e)

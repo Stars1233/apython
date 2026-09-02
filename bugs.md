@@ -59,14 +59,6 @@ one-line fix.
   Everything observable through `_weakref` works; a C extension expecting the
   slot would not.
 
-- **`dict` registers no `__eq__` of its own.**  `dict.__eq__` resolves through
-  the MRO to `object.__eq__`, so `dict.__eq__(d, e)` answers NotImplemented
-  where CPython compares the contents, and `dict.__eq__ is object.__eq__` is
-  True where CPython says False.  `==` itself is right -- it goes through
-  `tp_richcompare` -- so this is the by-name half only, the same shape as the
-  getset and method-descriptor entries below.  The stdlib reaches for it:
-  `__eq__ = dict.__eq__` in a mixin gets object's.
-
 - **A few names are still short of CPython's `dir()`.**  `int` and `float`
   are missing the in-place forms; `set` is missing `__iand__` and `__ior__`,
   deliberately -- it has no `nb_inplace_*` slots, so `s &= t` degrades to the
@@ -119,12 +111,21 @@ one-line fix.
   does not survive a decode/encode round trip, where CPython preserves it.
   The entry above is the other half of why.
 
-- **`complex.conjugate` resolves to the bare builtin rather than to a method
-  descriptor.**  `real` and `imag` are getset descriptors now, on `int`,
-  `float`, `complex` and `bool`; the *methods* a builtin type registers are
-  still plain `PyBuiltinObject`s, so `int.bit_length` reprs as `bit_length`
-  where CPython says `<method 'bit_length' of 'int' objects>`.  They are
-  callable unbound either way.
+- **A classmethod on a builtin type reprs as its bare name.**  Ordinary
+  methods, slot wrappers and getsets all name themselves and their owner now;
+  `int.from_bytes`, `float.fromhex` and `str.maketrans` are wrapped in a
+  classmethod object, which `type_stamp_methods` skips.  CPython's repr for
+  those carries an address -- `<built-in method from_bytes of type object at
+  0xa3cf20>` -- which this tree does not print for anything, so there is
+  nothing to match exactly.
+
+- **`int` and `dict` register no `__eq__` or `__hash__` of their own.**  The
+  names resolve through the MRO to `object`'s, so `int.__eq__ is
+  object.__eq__` is True where CPython says False, `dict.__eq__(d, e)` is
+  NotImplemented where CPython compares the contents, and the reprs say
+  `of 'object' objects` rather than `of 'int' objects`.  `==` itself is right
+  -- it goes through `tp_richcompare` -- so this is the by-name half only.
+  The stdlib reaches for it: `__eq__ = dict.__eq__` in a mixin gets object's.
 
 - **`complex()` of a string does not accept Unicode spaces or Unicode digits.**
   CPython runs `_PyUnicode_TransformDecimalAndSpaceToASCII` first, so
@@ -250,15 +251,6 @@ than lying — but they are ordinary Python that does not work:
   MAX_UNTIL also restores `state->ptr` and the mark stack on the failure
   path, and reaches the tail iteratively rather than one C frame per
   iteration.
-
-- **`getset_descr_type` is not shaped like a descriptor by name.**
-  `repr(int.real)` is the empty string where CPython gives
-  `"<attribute 'real' of 'int' objects>"`, and `hasattr(int.real, '__get__')`
-  is False where CPython says True.  Attribute reads work; what breaks is the
-  stdlib asking by name -- `inspect.isdatadescriptor` and the `enum` and
-  `dataclasses` classifiers walk `__dict__` and ask exactly that.  The type
-  needs a `tp_repr` and a `tp_dict` carrying `__get__`/`__set__`, which is
-  CLAUDE.md's "a builtin's behaviour that lives only in a slot".
 
 - **`set.__contains__(frozenset(...), x)` is accepted** where CPython raises.
   The eight operators, `__len__` and `__iter__` are each type's own now, and

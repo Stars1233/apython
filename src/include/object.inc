@@ -339,6 +339,9 @@ struc PyGetSetDescrObject
     .gs_get:    resq 1  ; +16: C getter(self) -> Value, or 0
     .gs_set:    resq 1  ; +24: C setter(self, value) -> int, or 0
     .gs_name:   resq 1  ; +32: ptr to the name (PyStrObject*, owned)
+    .gs_owner:  resq 1  ; +40: the type it was registered on, or 0 -- for the
+                        ;      repr, which CPython words "<attribute 'real'
+                        ;      of 'int' objects>"; borrowed, types are static
 endstruc
 
 ; types.SimpleNamespace: attributes are the entries of a dict.
@@ -1079,7 +1082,17 @@ struc PyBuiltinObject
     .func_ptr:    resq 1  ; +32: ptr to C implementation
     .min_args:    resq 1  ; +40: minimum nargs (including self), 0 = no check
     .max_args:    resq 1  ; +48: maximum nargs, -1 = no max check
+    ; The two below are what a repr needs and nothing else reads.  CPython
+    ; has three distinct types here -- builtin_function_or_method,
+    ; method_descriptor and wrapper_descriptor -- reprd three ways; this tree
+    ; has one, so the type it belongs to and which kind it is are fields.
+    .func_owner:  resq 1  ; +56: the type whose method this is, or 0
+    .func_kind:   resq 1  ; +64: 0 plain function, 1 method, 2 slot wrapper
 endstruc
+
+BUILTIN_KIND_FUNCTION equ 0
+BUILTIN_KIND_METHOD   equ 1
+BUILTIN_KIND_WRAPPER  equ 2
 
 ;; ============================================================================
 ;; The GC header, and the traverse helpers

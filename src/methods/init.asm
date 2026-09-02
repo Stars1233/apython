@@ -116,6 +116,7 @@ extern set_dunder_rsub
 extern set_dunder_rand
 extern set_dunder_rxor
 extern set_dunder_ror
+extern type_stamp_methods
 extern frozenset_dunder_len
 extern frozenset_dunder_iter
 extern frozenset_dunder_sub
@@ -1005,6 +1006,8 @@ DEF_FUNC methods_init
 
     lea rax, [rel str_type]
     mov [rax + PyTypeObject.tp_dict], rbx
+    mov rdi, rax
+    call type_stamp_methods
     ; INCREF the dict (type holds ref; dict_new gave us refcnt=1, which we keep)
 
     ;; --- list methods (with arg count validation) ---
@@ -1176,6 +1179,8 @@ DEF_FUNC methods_init
 
     lea rax, [rel list_type]
     mov [rax + PyTypeObject.tp_dict], rbx
+    mov rdi, rax
+    call type_stamp_methods
 
     ;; --- dict methods ---
     call dict_new
@@ -1331,6 +1336,8 @@ DEF_FUNC methods_init
 
     lea rax, [rel dict_type]
     mov [rax + PyTypeObject.tp_dict], rbx
+    mov rdi, rax
+    call type_stamp_methods
 
     ;; --- tuple methods ---
     call dict_new
@@ -1411,6 +1418,8 @@ DEF_FUNC methods_init
 
     lea rax, [rel tuple_type]
     mov [rax + PyTypeObject.tp_dict], rbx
+    mov rdi, rax
+    call type_stamp_methods
 
     ;; --- set methods ---
     call dict_new
@@ -1470,6 +1479,8 @@ DEF_FUNC methods_init
 
     lea rax, [rel set_type]
     mov [rax + PyTypeObject.tp_dict], rbx
+    mov rdi, rax
+    call type_stamp_methods
 
     ;; --- frozenset methods ---
     ; Its own dict, holding only what reads.  It used to be set's dict, the
@@ -1505,6 +1516,8 @@ DEF_FUNC methods_init
 
     lea rax, [rel frozenset_type]
     mov [rax + PyTypeObject.tp_dict], rbx
+    mov rdi, rax
+    call type_stamp_methods
 
     ;; --- weakref methods ---
     ; weakref.py binds ref.__hash__ and ref.__eq__ into its subclasses at
@@ -1520,6 +1533,8 @@ DEF_FUNC methods_init
     extern weakref_type
     lea rax, [rel weakref_type]
     mov [rax + PyTypeObject.tp_dict], rbx
+    mov rdi, rax
+    call type_stamp_methods
 
     ;; --- object_type methods (just __new__) ---
     call dict_new
@@ -1735,6 +1750,8 @@ DEF_FUNC methods_init
     ; Store in object_type.tp_dict
     lea rax, [rel object_type]
     mov [rax + PyTypeObject.tp_dict], rbx
+    mov rdi, rax
+    call type_stamp_methods
 
     ;; --- type_type: __new__, so a metaclass can call super().__new__ ---
     extern type_type
@@ -1786,6 +1803,8 @@ DEF_FUNC methods_init
 
     lea rax, [rel type_type]
     mov [rax + PyTypeObject.tp_dict], rbx
+    mov rdi, rax
+    call type_stamp_methods
 
     ;; --- function type: expose its introspection attributes on the type ---
     ;; types.py takes GetSetDescriptorType from `type(FunctionType.__code__)`
@@ -1845,6 +1864,8 @@ DEF_FUNC methods_init
     extern func_type
     lea rax, [rel func_type]
     mov [rax + PyTypeObject.tp_dict], rbx
+    mov rdi, rax
+    call type_stamp_methods
 
     ;; --- staticmethod and classmethod: descriptors for the same reason ---
     call dict_new
@@ -1856,6 +1877,8 @@ DEF_FUNC methods_init
     call dict_add_builtin_func
     lea rax, [rel staticmethod_type]
     mov [rax + PyTypeObject.tp_dict], rbx
+    mov rdi, rax
+    call type_stamp_methods
 
     call dict_new
     mov rbx, rax
@@ -1866,6 +1889,8 @@ DEF_FUNC methods_init
     call dict_add_builtin_func
     lea rax, [rel classmethod_type]
     mov [rax + PyTypeObject.tp_dict], rbx
+    mov rdi, rax
+    call type_stamp_methods
 
     ;; --- property: the same three, by name ---
     call dict_new
@@ -1888,6 +1913,52 @@ DEF_FUNC methods_init
     extern property_type
     lea rax, [rel property_type]
     mov [rax + PyTypeObject.tp_dict], rbx
+    mov rdi, rax
+    call type_stamp_methods
+
+    ;; --- getset_descriptor: a descriptor by NAME, not only by slot ---
+    ; The stdlib decides what a descriptor is by asking hasattr(v, '__get__')
+    ; -- inspect.isdatadescriptor and the enum and dataclasses classifiers all
+    ; walk a __dict__ and test exactly that.  getset_descr_type had no
+    ; tp_dict, so every getset in the tree answered False.
+    call dict_new
+    mov rbx, rax
+    mov rdi, rbx
+    lea rsi, [rel mn___get__]
+    extern getset_descr_dunder_get
+    lea rdx, [rel getset_descr_dunder_get]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___set__]
+    extern getset_descr_dunder_set
+    lea rdx, [rel getset_descr_dunder_set]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___delete__]
+    extern getset_descr_dunder_delete
+    lea rdx, [rel getset_descr_dunder_delete]
+    call dict_add_builtin_func
+    extern getset_descr_type
+    lea rax, [rel getset_descr_type]
+    mov [rax + PyTypeObject.tp_dict], rbx
+    mov rdi, rax
+    call type_stamp_methods
+
+    ;; --- builtin_function_or_method: a NON-data descriptor by name ---
+    ; __get__ and no __set__ is how inspect and the enum and dataclasses
+    ; classifiers tell a method from a getset.
+    call dict_new
+    mov rbx, rax
+    mov rdi, rbx
+    lea rsi, [rel mn___get__]
+    extern builtin_func_dunder_get
+    lea rdx, [rel builtin_func_dunder_get]
+    call dict_add_builtin_func
+    extern builtin_func_type
+    lea rax, [rel builtin_func_type]
+    mov [rax + PyTypeObject.tp_dict], rbx
+    mov rdi, rax
+    call type_stamp_methods
 
     ;; --- int_type methods ---
     call dict_new
@@ -2217,6 +2288,8 @@ DEF_FUNC methods_init
 
     lea rax, [rel int_type]
     mov [rax + PyTypeObject.tp_dict], rbx
+    mov rdi, rax
+    call type_stamp_methods
 
     ;; --- complex_type methods ---
     ;
@@ -2273,6 +2346,8 @@ DEF_FUNC methods_init
 
     lea rax, [rel complex_type]
     mov [rax + PyTypeObject.tp_dict], rbx
+    mov rdi, rax
+    call type_stamp_methods
 
     ;; --- float_type methods ---
     call dict_new
@@ -2508,6 +2583,8 @@ DEF_FUNC methods_init
     ; Store in float_type.tp_dict
     lea rax, [rel float_type]
     mov [rax + PyTypeObject.tp_dict], rbx
+    mov rdi, rax
+    call type_stamp_methods
 
     ;; --- bytes_type methods (extend tp_dict, keep tp_getattr for .decode()) ---
     call dict_new
@@ -2769,6 +2846,8 @@ DEF_FUNC methods_init
 
     lea rax, [rel bytes_type]
     mov [rax + PyTypeObject.tp_dict], rbx
+    mov rdi, rax
+    call type_stamp_methods
 
     ;; --- bytearray_type methods ---
     ;; It had none at all: tp_getattr was 0 and tp_dict was empty, so a
@@ -3063,6 +3142,8 @@ DEF_FUNC methods_init
 
     lea rax, [rel bytearray_type]
     mov [rax + PyTypeObject.tp_dict], rbx
+    mov rdi, rax
+    call type_stamp_methods
 
     ;; --- memoryview_type methods ---
     ;; It had none: tp_getattr was 0 and tp_dict was empty.  _pyio calls
@@ -3111,6 +3192,8 @@ DEF_FUNC methods_init
     call dict_add_builtin_func
     lea rax, [rel memoryview_type]
     mov [rax + PyTypeObject.tp_dict], rbx
+    mov rdi, rax
+    call type_stamp_methods
 
     pop r12
     pop rbx
