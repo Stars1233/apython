@@ -250,6 +250,7 @@ test_oop
 test_open_errors
 test_open
 test_operand_types
+test_ordereddict
 test_ordering_typeerror
 test_oserror
 test_percent_and_ior

@@ -1479,11 +1479,21 @@ DEF_FUNC dict_richcompare, DRC_FRAME
     ; The right operand is dereferenced as a dict below, so it has to be
     ; one: an immediate's payload is not an address, and any other object's
     ; fields are not ob_size/capacity/entries.
+    ;
+    ; A *subclass* is one too, and the test used to be for the exact type --
+    ; so `D(x) == D(x)` for any dict subclass answered NotImplemented on the
+    ; right, fell through to identity, and came out False.  CPython's
+    ; dict_richcompare asks PyDict_Check, which admits a subclass; the same
+    ; question here is the flag, which type_from_parts propagates.
     cmp r8d, TAG_PTR
     jne .drc_not_impl
-    lea rax, [rel dict_type]
-    cmp [rsi + PyObject.ob_type], rax
-    jne .drc_not_impl
+    mov rax, [rsi + PyObject.ob_type]
+    lea rcx, [rel dict_type]
+    cmp rax, rcx
+    je .drc_right_ok
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_DICT_SUBCLASS
+    jz .drc_not_impl
+.drc_right_ok:
 
     ; Only handle EQ (2) and NE (3)
     cmp edx, 2

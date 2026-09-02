@@ -27,22 +27,26 @@ try:
 except IndexError:
     print("empty pop => IndexError")
 
-# The three accelerated names live in _collections, and collections imports
+# The two accelerated names live in _collections, and collections imports
 # them back -- CPython's own arrangement, and not a detail: CPython's
 # collections/__init__.py does `from _collections import deque` in a
 # try/except and exports the name from __all__ either way, so with no
 # _collections module at all `from collections import deque` was an
 # ImportError under a real stdlib rather than a slower deque.  contextlib,
 # shlex and getpass could not be imported for want of it.
+#
+# OrderedDict is deliberately NOT one of them: CPython defines the class in
+# collections/__init__.py and only then tries to override it from
+# _collections, so a name exported here shadows the real one.  See
+# test_ordereddict.py.
 import _collections
 import collections
 
 # Only what is true of CPython's _collections too: it is the C accelerator
-# there, so its contents differ, but these three names are the same objects
+# there, so its contents differ, but these two names are the same objects
 # collections re-exports.
 print("same deque:", collections.deque is _collections.deque)
 print("same defaultdict:", collections.defaultdict is _collections.defaultdict)
-print("same OrderedDict:", collections.OrderedDict is _collections.OrderedDict)
 
 from _collections import deque as direct_deque
 print("direct:", list(direct_deque([1, 2, 3])))

@@ -63,6 +63,14 @@ one-line fix.
   Everything observable through `_weakref` works; a C extension expecting the
   slot would not.
 
+- **`dict` registers no `__eq__` of its own.**  `dict.__eq__` resolves through
+  the MRO to `object.__eq__`, so `dict.__eq__(d, e)` answers NotImplemented
+  where CPython compares the contents, and `dict.__eq__ is object.__eq__` is
+  True where CPython says False.  `==` itself is right -- it goes through
+  `tp_richcompare` -- so this is the by-name half only, the same shape as the
+  getset and method-descriptor entries below.  The stdlib reaches for it:
+  `__eq__ = dict.__eq__` in a mixin gets object's.
+
 - **A few names are still short of CPython's `dir()`.**  `int` and `float`
   are missing the in-place forms, `as_integer_ratio`, `is_integer`,
   `__round__`, `__ceil__`, `__floor__` and `__getnewargs__`; `set` is missing
@@ -238,16 +246,6 @@ than lying — but they are ordinary Python that does not work:
   MAX_UNTIL also restores `state->ptr` and the mark stack on the failure
   path, and reaches the tail iteratively rather than one C frame per
   iteration.
-
-- **`collections.OrderedDict` is `dict`.**  `move_to_end`, `popitem(last=False)`
-  and the order-sensitive `__eq__` are all missing, and `lib/_collections.py`
-  exports the alias, which shadows the complete pure-Python class CPython's
-  own `collections/__init__.py` defines when `$CPYTHON_LIB` is on the path.
-  Not a regression -- `lib/collections/__init__.py` has said `OrderedDict =
-  dict` since long before the `_collections` split -- but the shadowing makes
-  it reachable in more places than before.  `deque` and `defaultdict` have no
-  pure-Python fallback there and must stay; only `OrderedDict` should be
-  withheld.
 
 - **`getset_descr_type` is not shaped like a descriptor by name.**
   `repr(int.real)` is the empty string where CPython gives

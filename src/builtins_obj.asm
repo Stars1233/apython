@@ -2319,8 +2319,13 @@ DEF_FUNC builtin_vars_fn, VR_FRAME
     test rcx, TYPE_FLAG_HAS_SLOTS
     jnz .vars_no_dict
 
-    ; User instance: get inst_dict
-    mov rax, [rdi + PyInstanceObject.inst_dict]
+    ; User instance: get the instance dict.  The offset is the type's, not a
+    ; constant -- a dict, list or str subclass puts its __dict__ past its own
+    ; storage, and reading PyInstanceObject.inst_dict on one of those lands
+    ; inside the base object's header.  For a populated dict subclass that
+    ; word is a live pointer, which this then increfs and returned as a dict:
+    ; vars(D()) after a single d['a'] = 1 was a segfault.
+    LOAD_INST_DICT rax, rdi, .vars_empty_dict
     test rax, rax
     jz .vars_empty_dict
     INCREF rax
