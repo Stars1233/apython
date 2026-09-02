@@ -39,6 +39,7 @@ struc SlotEntry
     .wrapper: resq 1        ; function to install there
 endstruc
 
+extern obj_is_true
 extern dunder_lookup
 extern dunder_lookup_owner
 extern dunder_call_1
@@ -306,6 +307,55 @@ DEF_FUNC slot_tp_richcompare
     ret
 END_FUNC slot_tp_richcompare
 
+
+;; ============================================================================
+;; slot_sq_contains(rdi = self, rsi = the value Value) -> eax = 0 or 1
+;;
+;; `x in obj` for a class that defines __contains__.  The one SEQUENCE slot
+;; with a real dispatcher: unlike sq_concat and sq_repeat, CPython fills this
+;; one in on a subclass, and so must we -- `class L(list)` with a
+;; __contains__ answered list's membership test and never called the method.
+;;
+;; sq_contains has no error channel, only 0 or 1, so a raising __contains__
+;; cannot be reported through the return value: it goes to slot_reraise like
+;; every other wrapper here, and the exception reaches the `in` that asked.
+;; ============================================================================
+SC_EXC   equ 8
+SC_FRAME equ 16             ; + 0 pushes = 16, 16-aligned
+DEF_FUNC slot_sq_contains, SC_FRAME
+    DUNDER_EXC_SAVE [rbp - SC_EXC]
+    V_UNPACK rsi, rcx           ; dunder_call_2 wants (payload, tag)
+    lea rdx, [rel sl_contains_name]
+    call dunder_call_2
+    V_UNPACK rax, rdx
+    test edx, edx
+    jz .sc_failed
+
+    ; Any truthy answer means yes, as CPython has it -- __contains__ may
+    ; return a list, and `1 in NB()` is then False rather than a TypeError.
+    push rax
+    push rdx
+    V_PACK rax, rdx
+    mov rdi, rax
+    call obj_is_true
+    mov ecx, eax
+    pop rdx
+    pop rax
+    push rcx
+    V_PACK rax, rdx
+    mov rdi, rax
+    DECREF_V rdi, rsi
+    pop rcx
+    mov eax, ecx
+    leave
+    ret
+
+.sc_failed:
+    ; Missing, or it raised.  Missing cannot happen -- the wrapper is only
+    ; installed when the class defines the name -- so slot_reraise's no-exception
+    ; arm is the honest answer for it rather than a silent False.
+    call slot_reraise           ; does not return
+END_FUNC slot_sq_contains
 
 ;; ============================================================================
 ;; DEF_BINARY_SLOT wrapper, dunder_name_symbol, nb_field
@@ -702,6 +752,7 @@ sl_iter_name:   db "__iter__", 0
 sl_next_name:   db "__next__", 0
 sl_hash_name:   db "__hash__", 0
 sl_neg_name:    db "__neg__", 0
+sl_contains_name: db "__contains__", 0
 sl_add_name: db "__add__", 0
 sl_sub_name: db "__sub__", 0
 sl_mul_name: db "__mul__", 0
@@ -812,6 +863,11 @@ slot_table:
     dq sl_gt_name,     SLOT_DIRECT,   PyTypeObject.tp_richcompare, slot_tp_richcompare
     dq sl_ge_name,     SLOT_DIRECT,   PyTypeObject.tp_richcompare, slot_tp_richcompare
     
+    ; __contains__ is the one SEQUENCE slot with a real dispatcher in CPython,
+    ; and the only sequence row here for that reason.
+    dq sl_contains_name, SLOT_SEQUENCE, PySequenceMethods.sq_contains, \
+       slot_sq_contains
+
     ; The binary operators.  CPython maps each of these names to a sequence
     ; slot as well, but only the NUMERIC slotdef carries a generic
     ; dispatcher -- sq_concat and sq_repeat exist so list.__add__ is findable

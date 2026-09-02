@@ -311,6 +311,7 @@ test_str_translate_mapping
 test_str_translate
 test_structseq
 test_subclass_binop
+test_subclass_contains
 test_subclass_item_slots
 test_sum_protocol
 test_super_descriptors
