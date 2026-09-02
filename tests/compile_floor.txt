@@ -159,6 +159,7 @@ test_func_dunder_get
 test_functions
 test_future_import
 test_gc_generations
+test_gc_module
 test_gen_adv
 test_generator_close_throw
 test_generators

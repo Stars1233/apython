@@ -322,12 +322,13 @@ than lying — but they are ordinary Python that does not work:
   `task_clear` also has to start clearing `exception` and the waiters array,
   which the deleted version did not.
 
-- **There is no full collection and no `gc` module.**  `gc_collect` was a thin
-  wrapper on `gc_collect_gen` whose comment named two callers --
-  `gc.collect()` and exit cleanup -- neither of which exists; it has been
-  deleted with the rest.  Only the automatic generational collections run, so
-  `tests/test_gc_generations.py` has to provoke them with churn rather than ask
-  for one.
+- **`gc` has no `get_objects` and no debug flags.**  The module answers about
+  the collector -- `collect`, `enable`/`disable`/`isenabled`, the counts, the
+  thresholds, `garbage` and `callbacks` -- but this collector keeps no list of
+  tracked objects it could hand back, and has no debug output to switch on.
+  `gc.collect()` also counts a two-object cycle as one where CPython counts
+  two: clearing the first drops the second by refcount before the sweep
+  reaches it.
 
 
 - **`s += x` in a loop is O(n^2)**: `str_concat` always allocates, and

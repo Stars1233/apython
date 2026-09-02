@@ -910,7 +910,7 @@ struc BuiltinModule
     .create_fn: resq 1      ; +8: PyObject *(*)(void), or 0 when import_init
 endstruc                    ;     wires that module some other way
 
-BUILTIN_MODULE_COUNT equ 10
+BUILTIN_MODULE_COUNT equ 11
 
 ; Type flags
 TYPE_FLAG_HEAPTYPE     equ 0x0001
