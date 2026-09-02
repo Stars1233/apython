@@ -158,3 +158,37 @@ async def test_raising_generators():
     print("normal endings :", await still_ends_normally())
 
 asyncio.run(test_raising_generators())
+
+# An async generator that yields from inside an `except` block leaves
+# current_exception set on purpose -- it never reaches its POP_EXCEPT -- so
+# reading that global as "the body raised" made `async for` re-raise what the
+# generator had already caught.  A raise is a NULL result, not a set global.
+async def caught():
+    try:
+        raise ValueError("handled")
+    except ValueError:
+        yield 1
+        yield 2
+    yield 3
+
+
+async def still_raises():
+    yield 1
+    raise KeyError("real")
+
+
+async def main_caught():
+    out = []
+    async for v in caught():
+        out.append(v)
+    print("caught:", out)
+
+    seen = []
+    try:
+        async for v in still_raises():
+            seen.append(v)
+    except KeyError as e:
+        print("raised after", seen, "->", e)
+
+
+asyncio.run(main_caught())

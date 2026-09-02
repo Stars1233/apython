@@ -357,8 +357,12 @@ DEF_FUNC task_step, TS_FRAME
     test rax, rax
     jnz .ts_await_done_exc
 
-    ; No exception — set send_value to its result, re-enqueue
+    ; No exception — set send_value to its result, re-enqueue.  The waiter's
+    ; send_value is an OWNED reference: task_dealloc releases it, and the
+    ; sibling path below increfs for exactly this reason.  Handing over the
+    ; awaited task's own result borrowed made that release one too many.
     mov rax, [r12 + AsyncTask.result]
+    INCREF_V rax, rdx
     mov [rbx + AsyncTask.send_value], rax
     mov rdi, rbx
     call ready_enqueue
@@ -799,8 +803,11 @@ DEF_FUNC_BARE task_iternext
     test rax, rax
     jnz .ti_done_exc
 
-    ; No exception — copy result for StopIteration protocol
+    ; No exception — copy result for StopIteration protocol.  A copy into an
+    ; owned slot needs its own reference, even from the same task's result:
+    ; both are released.
     mov rax, [rdi + AsyncTask.result]
+    INCREF_V rax, rdx
     mov [rdi + AsyncTask.send_value], rax
     ; Return NULL to signal completion
     RET_NULL

@@ -171,3 +171,47 @@ drop_suspended()
 gc.collect()
 print(sorted(freed))
 print("done")
+
+# gen_traverse walks the frame's value stack, but stack_ptr is written by
+# YIELD_VALUE and by nothing else -- in a RUNNING generator it records the
+# depth of the previous suspension, so the walk visited slots already popped
+# and released.  A running generator's stack needs no visiting: it holds
+# owned references no tp_traverse accounts for, which is what makes the
+# interpreter stack a root.
+def collecting(*a):
+    gc.collect()
+    return sum(a)
+
+
+def deep():
+    x = [[1], (yield 1), [2], [3], [4]]
+    del x
+    gc.collect()
+    yield collecting(10, 20, 30, 40)
+
+
+d = deep()
+print(next(d))
+print(d.send([9, 9]))
+
+# and a cycle held only by a SUSPENDED generator is still reclaimed
+class Node:
+    pass
+
+
+def holds_cycle(box):
+    a = Node()
+    b = Node()
+    a.b = b
+    b.a = a
+    box.append(_weakref.ref(a))
+    yield 1
+    yield a
+
+
+box = []
+it = holds_cycle(box)
+next(it)
+del it
+gc.collect()
+print("suspended cycle reclaimed:", box[0]() is None)

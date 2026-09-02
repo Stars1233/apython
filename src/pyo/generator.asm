@@ -362,10 +362,14 @@ DEF_FUNC ags_iternext
     mov qword [rel current_exception], 0
     call eval_frame
     pop rcx
-    ; Same as gen_send: an exception the async generator body raised is the
-    ; result, and restoring over it ended the iteration silently.
-    cmp qword [rel current_exception], 0
-    jne .agsend_raised
+    ; An exception the async generator body raised is the result, and
+    ; restoring over it ended the iteration silently.  A RAISE is a NULL
+    ; result, though, not a set current_exception: the comment above is
+    ; explicit that a generator suspended inside an except block leaves that
+    ; global set on purpose, and reading it as "the body raised" made an
+    ; `async for` over such a generator re-raise what it had already caught.
+    test rax, rax
+    jz .agsend_raised
     mov [rel current_exception], rcx
     jmp .agsend_settled
 .agsend_raised:
@@ -1825,6 +1829,16 @@ DEF_FUNC gen_traverse
     jz .done
     cmp qword [r12 + PyFrame.instr_ptr], 0
     je .done
+    ; ...and only while it is SUSPENDED.  stack_ptr is written by
+    ; YIELD_VALUE and by nothing else, so in a running generator it records
+    ; the depth of the previous suspension: slots already popped and
+    ; released.  Visiting those subtracts gc_refs for references that no
+    ; longer exist, which can make a live object look unreachable.  A
+    ; running generator's stack needs no visiting anyway -- it holds owned
+    ; references that no tp_traverse accounts for, which is exactly what
+    ; makes the interpreter stack a root.
+    cmp qword [rbx + PyGenObject.gi_running], 0
+    jne .done
     mov r13, [r12 + PyFrame.stack_ptr]
     test r13, r13
     jz .done
