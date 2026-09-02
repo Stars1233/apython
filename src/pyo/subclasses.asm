@@ -1,0 +1,400 @@
+; subclasses.asm - the direct-subclass side table behind type.__subclasses__
+;
+; A class does not carry a list of its subclasses.  Giving it one would mean a
+; new field in PyTypeObject and an edit to every static type table in the
+; tree, so the links live in a side table keyed by the base's address -- the
+; shape _weakref already uses, and for the same reason.  The table is empty
+; until the first class is built, and obj_dealloc's check against it is one
+; compare with a counter.
+;
+; The entries are BORROWED, which is what CPython's weak-referenced
+; tp_subclasses amounts to: a class is recorded when it is created and removed
+; when it is freed, so the list only ever holds live classes.
+;
+; Borrowed is why the entries are NOT in a Python list.  Two things go wrong
+; if they are, and both were seen:
+;
+;   - list_append takes a reference, so every class became immortal;
+;   - and giving it back is not enough, because a list is GC-visible.  The
+;     collector walks it from the table -- which is a root -- reaches the
+;     class and marks it alive.  A borrowed pointer inside a tracked container
+;     reachable from a root is not borrowed as far as the collector is
+;     concerned.
+;   - and a list DEALLOCATES its items, so dropping the list released classes
+;     it never owned.
+;
+; So each base's subclasses live in a SubList: an ap_malloc'd header and a
+; plain array of PyTypeObject*, outside the object system entirely.  The dict
+; holds its address as an int immediate, which owns nothing and is not
+; traversed.
+
+%include "macros.inc"
+%include "object.inc"
+%include "value.inc"
+
+ASM_INIT
+
+extern dict_new
+extern dict_get
+extern dict_set
+extern dict_del
+extern list_new
+extern list_append
+extern obj_decref
+extern ap_malloc
+extern ap_realloc
+extern ap_free
+extern v_int_bias
+extern raise_exception
+extern exc_TypeError_type
+extern type_check_is_class
+
+struc SubList
+    .count:    resq 1
+    .capacity: resq 1
+    .items:    resq 1       ; ap_malloc'd PyTypeObject*[capacity]
+endstruc
+
+SUBLIST_INITIAL equ 4
+
+section .bss
+align 8
+subclass_table:  resq 1      ; base address (an int Value) -> SubList address
+global subclass_live
+subclass_live:   resq 1      ; the table's size, so obj_dealloc can skip with
+                             ; one compare
+
+section .text
+
+;; ============================================================================
+;; sub_table_refresh() -- keep subclass_live equal to the table's size
+;; ============================================================================
+DEF_FUNC_LOCAL sub_table_refresh
+    mov rax, [rel subclass_table]
+    test rax, rax
+    jz .empty
+    mov rax, [rax + PyDictObject.ob_size]
+    mov [rel subclass_live], rax
+    leave
+    ret
+.empty:
+    mov qword [rel subclass_live], 0
+    leave
+    ret
+END_FUNC sub_table_refresh
+
+;; ============================================================================
+;; sub_list_for_type(rdi = a base type) -> rax = its SubList, or 0
+;;
+;; _abc_subclasscheck reads it directly for step 6, which is why it is global.
+;; ============================================================================
+global sub_list_for_type
+DEF_FUNC sub_list_for_type
+    push rbx
+    mov rbx, rdi
+    mov rax, [rel subclass_table]
+    test rax, rax
+    jz .none
+    mov rdi, rax
+    mov rsi, rbx
+    add rsi, [rel v_int_bias]   ; a user address always fits an int immediate
+    call dict_get
+    test rax, rax
+    jz .none
+    sub rax, [rel v_int_bias]   ; the SubList address, stored the same way
+    pop rbx
+    leave
+    ret
+.none:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+END_FUNC sub_list_for_type
+
+;; ============================================================================
+;; sub_list_add(rdi = a base type, rsi = the subclass)
+;;
+;; Records one edge.  The entry is BORROWED -- no INCREF -- which is what
+;; makes __subclasses__ report live classes only, and what the SubList exists
+;; for: see the header.
+;; ============================================================================
+SLA_BASE  equ 8
+SLA_SUB   equ 16
+SLA_LIST  equ 24
+SLA_FRAME equ 32            ; + 0 pushes = 32, 16-aligned
+DEF_FUNC_LOCAL sub_list_add, SLA_FRAME
+    mov [rbp - SLA_BASE], rdi
+    mov [rbp - SLA_SUB], rsi
+
+    call sub_list_for_type
+    test rax, rax
+    jnz .sla_have
+
+    ; First subclass for this base: a SubList, and a table entry pointing at
+    ; it.  The dict value is an int immediate, so the dict owns nothing here
+    ; and the collector has nothing to walk.
+    mov edi, SubList_size
+    call ap_malloc
+    mov [rbp - SLA_LIST], rax
+    mov qword [rax + SubList.count], 0
+    mov qword [rax + SubList.capacity], SUBLIST_INITIAL
+    mov edi, SUBLIST_INITIAL * 8
+    call ap_malloc
+    mov rcx, [rbp - SLA_LIST]
+    mov [rcx + SubList.items], rax
+
+    mov rax, [rel subclass_table]
+    test rax, rax
+    jnz .sla_have_table
+    call dict_new
+    mov [rel subclass_table], rax
+.sla_have_table:
+    mov rdi, [rel subclass_table]
+    mov rsi, [rbp - SLA_BASE]
+    add rsi, [rel v_int_bias]
+    mov rdx, [rbp - SLA_LIST]
+    add rdx, [rel v_int_bias]
+    call dict_set
+    call sub_table_refresh
+    mov rax, [rbp - SLA_LIST]
+
+.sla_have:
+    mov [rbp - SLA_LIST], rax
+    mov rcx, [rax + SubList.count]
+    cmp rcx, [rax + SubList.capacity]
+    jl .sla_store
+    ; A class with thousands of direct subclasses is not a shape worth tuning
+    ; for, so doubling is the whole policy.
+    shl qword [rax + SubList.capacity], 1
+    mov rsi, [rax + SubList.capacity]
+    shl rsi, 3
+    mov rdi, [rax + SubList.items]
+    call ap_realloc
+    mov rcx, [rbp - SLA_LIST]
+    mov [rcx + SubList.items], rax
+.sla_store:
+    mov rax, [rbp - SLA_LIST]
+    mov rcx, [rax + SubList.count]
+    mov rdx, [rax + SubList.items]
+    mov r8, [rbp - SLA_SUB]
+    mov [rdx + rcx*8], r8       ; borrowed, by design
+    inc qword [rax + SubList.count]
+    leave
+    ret
+END_FUNC sub_list_add
+
+;; ============================================================================
+;; subclass_register(rdi = the new type)
+;;
+;; Records it against each of its bases.  Called from type_from_parts once
+;; tp_bases is set, and once at start-up for bool -- the one static subclass
+;; in the tree, which CPython lists in int.__subclasses__().
+;; ============================================================================
+SR_TYPE  equ 8
+SR_BASES equ 16
+SR_IDX   equ 24
+SR_FRAME equ 32             ; + 2 pushes = 48, 16-aligned
+global subclass_register
+DEF_FUNC subclass_register, SR_FRAME
+    push rbx
+    push r12
+    mov [rbp - SR_TYPE], rdi
+
+    mov rax, [rdi + PyTypeObject.tp_bases]
+    test rax, rax
+    jnz .sr_have_bases
+
+    ; A static type has no bases tuple, only tp_base.
+    mov rdi, [rdi + PyTypeObject.tp_base]
+    test rdi, rdi
+    jz .sr_done
+    mov rsi, [rbp - SR_TYPE]
+    call sub_list_add
+    jmp .sr_done
+
+.sr_have_bases:
+    mov [rbp - SR_BASES], rax
+    mov qword [rbp - SR_IDX], 0
+.sr_loop:
+    mov rax, [rbp - SR_BASES]
+    mov rcx, [rbp - SR_IDX]
+    cmp rcx, [rax + PyTupleObject.ob_size]
+    jge .sr_done
+    mov rax, [rax + PyTupleObject.ob_item]
+    mov rbx, [rax + rcx*8]      ; the base, as a Value
+    inc qword [rbp - SR_IDX]
+    V_TEST_PTR rbx, rax
+    ja .sr_loop
+    test rbx, rbx
+    jz .sr_loop
+    mov rdi, rbx
+    mov rsi, [rbp - SR_TYPE]
+    call sub_list_add
+    jmp .sr_loop
+
+.sr_done:
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC subclass_register
+
+;; ============================================================================
+;; subclass_unregister(rdi = a type about to be freed)
+;;
+;; Out of every list it appears in, and its own list freed if it had one.
+;; Called from user_type_dealloc, which is the only thing keeping a freed
+;; class out of __subclasses__().
+;;
+;; It scans the whole table rather than walking the dying class's tp_bases,
+;; which would be the obvious thing and does not work: the bases tuple is
+;; itself garbage in the same collection, and its items are cleared before
+;; this runs -- so the class saw no bases at all, removed itself from
+;; nothing, and left a dangling pointer that the next __subclasses__() call
+;; increfed and then freed a second time.
+;;
+;; The scan is over bases-that-have-subclasses, not over all classes, and it
+;; only runs for a class that is being freed while the table is non-empty.
+;; ============================================================================
+SU_TYPE  equ 8
+SU_IDX   equ 16
+SU_FRAME equ 32             ; + 2 pushes = 48, 16-aligned
+global subclass_unregister
+DEF_FUNC subclass_unregister, SU_FRAME
+    push rbx
+    push r12
+    mov [rbp - SU_TYPE], rdi
+
+    cmp qword [rel subclass_live], 0
+    je .su_done
+    mov rbx, [rel subclass_table]
+    test rbx, rbx
+    jz .su_done
+
+    mov qword [rbp - SU_IDX], 0
+.su_slot:
+    mov rcx, [rbp - SU_IDX]
+    cmp rcx, [rbx + PyDictObject.capacity]
+    jge .su_own
+    mov rax, [rbx + PyDictObject.entries]
+    imul rdx, rcx, DICT_ENTRY_SIZE
+    lea rax, [rax + rdx]
+    inc qword [rbp - SU_IDX]
+    ENTRY_CLASSIFY rax, .su_slot, .su_slot
+
+    mov r12, [rax + DictEntry.value]
+    sub r12, [rel v_int_bias]   ; the SubList address
+    mov rcx, [r12 + SubList.count]
+.su_scan:
+    dec rcx
+    js .su_slot
+    mov rdx, [r12 + SubList.items]
+    mov r8, [rdx + rcx*8]
+    cmp r8, [rbp - SU_TYPE]
+    jne .su_scan
+    ; Shift the tail down over it.  The entries are borrowed, so nothing is
+    ; released.  A class appears once per base, so one pass per list is enough.
+    mov r9, [r12 + SubList.count]
+    dec r9
+.su_shift:
+    cmp rcx, r9
+    jge .su_shrink
+    mov rdx, [r12 + SubList.items]
+    mov r8, [rdx + rcx*8 + 8]
+    mov [rdx + rcx*8], r8
+    inc rcx
+    jmp .su_shift
+.su_shrink:
+    mov [r12 + SubList.count], r9
+    jmp .su_slot
+
+.su_own:
+    ; Its own list, if it had one.  Ask first: dict_del RAISES KeyError on a
+    ; missing key, and this runs inside a dealloc, where a raise abandons the
+    ; C stack in the middle of a collection.  Most classes never have a
+    ; subclass and so never have an entry.
+    mov rdi, [rbp - SU_TYPE]
+    call sub_list_for_type
+    test rax, rax
+    jz .su_done
+    mov r12, rax
+    mov rdi, [rel subclass_table]
+    mov rsi, [rbp - SU_TYPE]
+    add rsi, [rel v_int_bias]
+    call dict_del
+    mov rdi, [r12 + SubList.items]
+    call ap_free
+    mov rdi, r12
+    call ap_free
+    call sub_table_refresh
+
+.su_done:
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC subclass_unregister
+
+;; ============================================================================
+;; type_method_subclasses(args, nargs) -> a new list of the direct subclasses
+;;
+;; type.__subclasses__().  _abc_subclasscheck's step 6 -- "was this registered
+;; against a subclass of the ABC rather than against the ABC itself?" -- has no
+;; way to ask without it, so issubclass(X, A) answered False for an X
+;; registered against a subclass of A.
+;; ============================================================================
+TMS_LIST  equ 8
+TMS_SUBS  equ 16
+TMS_IDX   equ 24
+TMS_FRAME equ 32            ; + 2 pushes = 48, 16-aligned
+global type_method_subclasses
+DEF_FUNC type_method_subclasses, TMS_FRAME
+    push rbx
+    push r12
+    cmp rsi, 1
+    jne .tms_args
+    mov rbx, [rdi]              ; the class
+    mov rdi, rbx
+    call type_check_is_class
+    test eax, eax
+    jz .tms_type
+
+    call list_new
+    mov [rbp - TMS_LIST], rax
+
+    mov rdi, rbx
+    call sub_list_for_type
+    test rax, rax
+    jz .tms_done
+    mov [rbp - TMS_SUBS], rax
+    mov qword [rbp - TMS_IDX], 0
+
+    ; A fresh list, and one that owns its entries: the caller may hold it for
+    ; as long as it likes, and may mutate it without disturbing the table.
+.tms_copy:
+    mov rax, [rbp - TMS_SUBS]
+    mov rcx, [rbp - TMS_IDX]
+    cmp rcx, [rax + SubList.count]
+    jge .tms_done
+    mov rdx, [rax + SubList.items]
+    mov rsi, [rdx + rcx*8]
+    mov rdi, [rbp - TMS_LIST]
+    call list_append
+    inc qword [rbp - TMS_IDX]
+    jmp .tms_copy
+
+.tms_done:
+    mov rax, [rbp - TMS_LIST]
+    mov edx, TAG_PTR
+    pop r12
+    pop rbx
+    leave
+    V_PACK rax, rdx
+    ret
+
+.tms_args:
+    RAISE exc_TypeError_type, "__subclasses__() takes no arguments"
+.tms_type:
+    RAISE exc_TypeError_type, "__subclasses__() requires a type"
+END_FUNC type_method_subclasses

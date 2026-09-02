@@ -54,6 +54,29 @@ DEF_FUNC_BARE obj_decref
     ret
 END_FUNC obj_decref
 
+; The trashcan.
+;
+; obj_decref -> obj_dealloc -> tp_dealloc -> obj_decref is one machine frame
+; per level of a nested structure, and nothing bounded it: a list nested 200k
+; deep walked the stack off its guard page the moment it was dropped, and the
+; only symptom was SIGSEGV.  Past a nesting limit the object is set aside
+; instead, on a chain threaded through its own ob_refcnt -- which is zero by
+; definition here, and read by nothing until the object is picked back up --
+; and the outermost dealloc frees the chain iteratively.
+;
+; This is CPython's Py_TRASHCAN, put in the one place every deallocation
+; already funnels through rather than in each type's tp_dealloc.  The limit is
+; CPython's Py_TRASHCAN_HEADROOM, and it has to be well above 1: the drain
+; below runs at nesting 1, so a smaller one would deposit every child of every
+; drained object and make no progress in the ordinary case.
+TRASH_LIMIT equ 50
+
+section .bss
+trash_nesting: resq 1
+trash_later:   resq 1
+
+section .text
+
 ; obj_dealloc(PyObject *obj)
 ; Calls type's tp_dealloc if present, else just frees
 DEF_FUNC_BARE obj_dealloc
@@ -61,7 +84,33 @@ DEF_FUNC_BARE obj_dealloc
     push rbp
     mov rbp, rsp
     push rbx
+    sub rsp, 8                  ; the calls below want a 16-byte rsp
     mov rbx, rdi
+
+    cmp qword [rel trash_nesting], TRASH_LIMIT
+    jl .td_enter
+
+    ; Too deep: set it aside for the outermost dealloc.  It has to leave the
+    ; collector's lists first -- its tp_dealloc has not run, so nothing has
+    ; untracked it, and a collection during the drain would otherwise walk an
+    ; object whose refcount is already zero.  gc_untrack is idempotent, so the
+    ; untrack inside tp_dealloc still runs harmlessly later.
+    mov rax, [rbx + PyObject.ob_type]
+    test rax, rax
+    jz .td_no_gc
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_HAVE_GC
+    jz .td_no_gc
+    extern gc_untrack
+    mov rdi, rbx
+    call gc_untrack
+.td_no_gc:
+    mov rax, [rel trash_later]
+    mov [rbx + PyObject.ob_refcnt], rax
+    mov [rel trash_later], rbx
+    jmp .td_out
+
+.td_enter:
+    inc qword [rel trash_nesting]
 
     ; Weak references to this object have to be emptied, and their callbacks
     ; run, before it is freed.  The links live in a side table rather than in
@@ -73,7 +122,6 @@ DEF_FUNC_BARE obj_dealloc
     extern weakref_clear_for
     mov rdi, rbx
     call weakref_clear_for
-    mov rdi, rbx
 .no_weakrefs:
 
     ; Get type's tp_dealloc
@@ -87,13 +135,39 @@ DEF_FUNC_BARE obj_dealloc
     ; Call tp_dealloc(obj)
     mov rdi, rbx
     call rax
-    pop rbx
-    pop rbp
-    ret
+    jmp .td_leave
 
 .just_free:
     mov rdi, rbx
     call ap_free
+
+.td_leave:
+    dec qword [rel trash_nesting]
+    jnz .td_out
+    cmp qword [rel trash_later], 0
+    je .td_out
+
+    ; The outermost dealloc empties the chain, one object at a time.  The
+    ; nesting stays at 1 for the whole drain, so each object's own children go
+    ; on the chain rather than onto the machine stack once they are deep
+    ; enough -- which is what keeps this loop, and not the stack, bounded.
+.td_drain:
+    inc qword [rel trash_nesting]
+.td_drain_loop:
+    mov rbx, [rel trash_later]
+    test rbx, rbx
+    jz .td_drain_done
+    mov rax, [rbx + PyObject.ob_refcnt]
+    mov [rel trash_later], rax
+    mov qword [rbx + PyObject.ob_refcnt], 0
+    mov rdi, rbx
+    call obj_dealloc
+    jmp .td_drain_loop
+.td_drain_done:
+    dec qword [rel trash_nesting]
+
+.td_out:
+    add rsp, 8
     pop rbx
     pop rbp
 .bail:
@@ -395,6 +469,9 @@ rbt_open:    db ": '", 0
 rbt_and:     db "' and '", 0
 rbt_close:   db "'", 0
 rbt_unknown: db "object", 0
+drs_prefix:  db "descriptor requires a '", 0
+drs_middle:  db "' object but received a '", 0
+mah_digits:  db "0123456789abcdef", 0
 
 section .bss
 rbt_buf: resb 320   ; two 80-char type names plus the prefix and separators
@@ -459,6 +536,84 @@ rtn_compose:
     ud2
 END_FUNC raise_type_error_with_typename
 
+; dunder_require_self(rdi = self Value, rsi = the type whose method this is,
+;                     rdx = a second acceptable type, or 0)
+;   -> rax = the self Value, unchanged; does not return if the type is wrong
+;
+; A dunder reached BY NAME is handed whatever the caller passed, and the slot
+; behind it decodes self without asking: int.__neg__(2.5) gives int's
+; nb_negative a float, str.__getitem__(5, 0) gives str's subscript an
+; integer, and each is a wild pointer rather than an error.  Registering
+; these names is what made the calls reachable at all, so every generator of
+; one has to ask this first.
+;
+; CPython words it "descriptor '__neg__' requires a 'int' object but received
+; a 'float'".  Threading the descriptor's own name through every generator
+; buys one clause, so the two type names carry the message instead.
+;
+; A subclass is accepted: int.__neg__(D(2)) for class D(int) is how a
+; subclass reaches the base's operator, and is the reason this is
+; type_is_subtype rather than a pointer compare.
+;
+; The second type is for the pairs that genuinely share one function.  set
+; and frozenset are registered from one table -- they are siblings, neither a
+; subtype of the other -- so set_dunder_len has to answer for both.
+DRS_SELF  equ 8
+DRS_TYPE  equ 16
+DRS_ALT   equ 24
+DRS_FRAME equ 32
+
+global dunder_require_self
+DEF_FUNC dunder_require_self, DRS_FRAME
+    mov [rbp - DRS_SELF], rdi
+    mov [rbp - DRS_TYPE], rsi
+    mov [rbp - DRS_ALT], rdx
+    call value_type
+    test rax, rax
+    jz .drs_bad
+    mov rdi, rax
+    mov rsi, [rbp - DRS_TYPE]
+    extern type_is_subtype
+    call type_is_subtype
+    test eax, eax
+    jnz .drs_ok
+    mov rdx, [rbp - DRS_ALT]
+    test rdx, rdx
+    jz .drs_bad
+    mov rdi, [rbp - DRS_SELF]
+    call value_type
+    mov rdi, rax
+    mov rsi, [rbp - DRS_ALT]
+    call type_is_subtype
+    test eax, eax
+    jz .drs_bad
+.drs_ok:
+    mov rax, [rbp - DRS_SELF]
+    leave
+    ret
+.drs_bad:
+    lea rdi, [rel rbt_buf]
+    lea rsi, [rel drs_prefix]
+    call rbt_append_cstr
+    mov rdi, rax
+    mov rsi, [rbp - DRS_TYPE]
+    mov rsi, [rsi + PyTypeObject.tp_name]
+    call rbt_append_cstr
+    mov rdi, rax
+    lea rsi, [rel drs_middle]
+    call rbt_append_cstr
+    mov rdi, rax
+    mov rsi, [rbp - DRS_SELF]
+    call rbt_typename
+    mov rdi, rax
+    lea rsi, [rel rbt_close]
+    call rbt_append_cstr
+    lea rdi, [rel exc_TypeError_type]
+    lea rsi, [rel rbt_buf]
+    call raise_exception
+    ud2
+END_FUNC dunder_require_self
+
 ; raise_binop_type_error(rdi = left Value, rsi = right Value,
 ;                        rdx = prefix C string) -> never returns
 ; "<prefix>: 'int' and 'complex'", which is how CPython words every binary
@@ -466,44 +621,60 @@ END_FUNC raise_type_error_with_typename
 ; one was wrong.
 RBT_LEFT  equ 8
 RBT_RIGHT equ 16
-RBT_FRAME equ 32            ; + 1 push = 40, not 16-aligned
+RBT_OPEN  equ 24
+RBT_FRAME equ 40            ; + 1 push = 48, 16-aligned
 
-DEF_FUNC raise_binop_type_error, RBT_FRAME
+DEF_FUNC_BARE raise_binop_type_error
+    lea rcx, [rel rbt_open]     ; the default opener, ": '"
+    jmp raise_binop_type_error_ex
+END_FUNC raise_binop_type_error
+
+; raise_binop_type_error_ex(rdi = left Value, rsi = right Value,
+;                           rdx = prefix C string, rcx = opener C string)
+;   -> never returns
+; The opener is what sits between the prefix and the first type name.  A
+; binary operator wants ": '", and COMPARE_OP wants " of '", because CPython
+; words that one "'<' not supported between instances of 'int' and 'str'".
+DEF_FUNC raise_binop_type_error_ex, RBT_FRAME
     push rbx
     mov [rbp - RBT_LEFT], rdi
     mov [rbp - RBT_RIGHT], rsi
     mov rbx, rdx
+    mov [rbp - RBT_OPEN], rcx
 
     lea rdi, [rel rbt_buf]
     mov rsi, rbx
-    call rbt_copy
+    call rbt_append_cstr
     mov rdi, rax
-    lea rsi, [rel rbt_open]
-    call rbt_copy
+    mov rsi, [rbp - RBT_OPEN]
+    call rbt_append_cstr
     mov rdi, rax
     mov rsi, [rbp - RBT_LEFT]
     call rbt_typename
     mov rdi, rax
     lea rsi, [rel rbt_and]
-    call rbt_copy
+    call rbt_append_cstr
     mov rdi, rax
     mov rsi, [rbp - RBT_RIGHT]
     call rbt_typename
     mov rdi, rax
     lea rsi, [rel rbt_close]
-    call rbt_copy
+    call rbt_append_cstr
 
     lea rdi, [rel exc_TypeError_type]
     lea rsi, [rel rbt_buf]
     call raise_exception
     ud2
-END_FUNC raise_binop_type_error
+END_FUNC raise_binop_type_error_ex
 
 ; The cap and the buffer have to agree: 40 (prefix) + 3 + 80 + 7 + 80 + 1 + a
 ; NUL is 212, which overran a 192-byte buffer and wrote into the globals
 ; after it -- one of them being attr_error_pending, so an over-long type name
 ; in a divmod TypeError made the NEXT attribute error re-raise this one.
-DEF_FUNC_LOCAL rbt_copy         ; (rdi = dest, rsi = src) -> rax = the NUL
+;; rbt_append_cstr(rdi = dest, rsi = src cstr) -> rax = the NUL it wrote.
+;; Bounded at 80 bytes per field; the callers' buffers are sized for that.
+global rbt_append_cstr
+DEF_FUNC rbt_append_cstr
     xor ecx, ecx
 .rbtc_loop:
     cmp rcx, 80
@@ -519,7 +690,7 @@ DEF_FUNC_LOCAL rbt_copy         ; (rdi = dest, rsi = src) -> rax = the NUL
     mov byte [rax], 0
     leave
     ret
-END_FUNC rbt_copy
+END_FUNC rbt_append_cstr
 
 DEF_FUNC_LOCAL rbt_typename     ; (rdi = dest, rsi = a Value) -> rax = the NUL
     push rbx
@@ -534,11 +705,166 @@ DEF_FUNC_LOCAL rbt_typename     ; (rdi = dest, rsi = a Value) -> rax = the NUL
     lea rsi, [rel rbt_unknown]
 .rbtt_have:
     mov rdi, rbx
-    call rbt_copy
+    call rbt_append_cstr
     pop rbx
     leave
     ret
 END_FUNC rbt_typename
+
+;; ============================================================================
+;; msg_append_i64(rdi = dest, rsi = the number) -> rax = the NUL it wrote
+;;
+;; The one thing a message could not carry.  Six file-local near-duplicates of
+;; this exist -- in build.asm, bytes.asm twice, iomod.asm, structseq.asm and
+;; func.asm -- and none of them is reachable from another file, which is why
+;; "attempt to assign sequence of wrong size to extended slice" does not name
+;; either size.  Signed, unlike most of those.
+;; ============================================================================
+DEF_FUNC msg_append_i64
+    push rbx
+    push r12
+    mov rbx, rdi                ; dest
+    mov rax, rsi
+
+    sub rsp, 40
+    lea rcx, [rsp + 32]
+    mov byte [rcx], 0
+    xor r12d, r12d              ; negative?
+    test rax, rax
+    jns .mai_digits
+    mov r12d, 1
+    neg rax
+.mai_digits:
+    test rax, rax
+    jnz .mai_loop
+    dec rcx
+    mov byte [rcx], '0'
+    jmp .mai_emit
+.mai_loop:
+    test rax, rax
+    jz .mai_emit
+    xor edx, edx
+    mov r8, 10
+    div r8
+    add dl, '0'
+    dec rcx
+    mov [rcx], dl
+    jmp .mai_loop
+.mai_emit:
+    test r12d, r12d
+    jz .mai_copy
+    dec rcx
+    mov byte [rcx], '-'
+.mai_copy:
+    mov rdi, rbx
+    mov rsi, rcx
+    call rbt_append_cstr
+    add rsp, 40
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC msg_append_i64
+
+;; ============================================================================
+;; msg_append_hex2(rdi = dest, esi = a byte) -> rax = the NUL it wrote
+;; Two lowercase hex digits, which is how CPython spells the byte in a
+;; UnicodeDecodeError.
+;; ============================================================================
+DEF_FUNC msg_append_hex2
+    movzx esi, sil
+    mov eax, esi
+    shr eax, 4
+    lea rcx, [rel mah_digits]
+    movzx eax, byte [rcx + rax]
+    mov [rdi], al
+    mov eax, esi
+    and eax, 15
+    movzx eax, byte [rcx + rax]
+    mov [rdi + 1], al
+    mov byte [rdi + 2], 0
+    lea rax, [rdi + 2]
+    leave
+    ret
+END_FUNC msg_append_hex2
+
+;; ============================================================================
+;; msg_append_escaped_cp(rdi = dest, rsi = a str, rdx = index in code points)
+;;   -> rax = the NUL it wrote
+;;
+;; One character, quoted and escaped the way CPython writes it in a
+;; UnicodeEncodeError: '\xNN', '\uNNNN' or '\UNNNNNNNN' by magnitude.
+;; ============================================================================
+MAE_DEST equ 8
+MAE_CP   equ 16
+MAE_FRAME equ 32            ; + 1 push = 40, not 16-aligned
+
+DEF_FUNC msg_append_escaped_cp, MAE_FRAME
+    push rbx
+    mov [rbp - MAE_DEST], rdi
+    mov rbx, rdi
+
+    ; The code point at that index.  A str keeps UTF-8, so the byte offset has
+    ; to be found first; an ASCII string is its own index.
+    mov rdi, rsi
+    mov rsi, rdx
+    extern str_cp_at
+    call str_cp_at
+    mov [rbp - MAE_CP], rax
+
+    mov byte [rbx], 39          ; a single quote
+    lea rdi, [rbx + 1]
+    ; Always escaped, printable or not: CPython writes even 'Z' as '\x5a' in
+    ; a UnicodeEncodeError.
+.mae_escape:
+    mov byte [rdi], 92          ; a backslash
+    inc rdi
+    mov rax, [rbp - MAE_CP]
+    cmp rax, 0x100
+    jb .mae_x
+    cmp rax, 0x10000
+    jb .mae_u
+    mov byte [rdi], 'U'
+    inc rdi
+    mov ecx, 8
+    jmp .mae_digits
+.mae_u:
+    mov byte [rdi], 'u'
+    inc rdi
+    mov ecx, 4
+    jmp .mae_digits
+.mae_x:
+    mov byte [rdi], 'x'
+    inc rdi
+    mov ecx, 2
+.mae_digits:
+    ; ecx nibbles, most significant first
+    mov rax, [rbp - MAE_CP]
+    lea r8, [rel mah_digits]
+.mae_digit_loop:
+    dec ecx
+    mov r9, rax
+    mov r10d, ecx
+    shl r10d, 2
+    mov r11, rcx
+    mov ecx, r10d
+    shr r9, cl
+    mov rcx, r11
+    and r9, 15
+    movzx r9d, byte [r8 + r9]
+    mov [rdi], r9b
+    inc rdi
+    test ecx, ecx
+    jnz .mae_digit_loop
+
+.mae_close:
+    mov byte [rdi], 39
+    mov byte [rdi + 1], 0
+    lea rax, [rdi + 1]
+    pop rbx
+    leave
+    ret
+END_FUNC msg_append_escaped_cp
 
 ; raise_value_error_with_repr(rdi = prefix C string, rsi = the object Value)
 ;   -> never returns
@@ -788,14 +1114,20 @@ DEF_FUNC obj_generic_attr, OGA_FRAME
 
 .oga_dict:
     ; Only an object with a real instance dict has one.  tp_dictoffset is 0
-    ; for every static type and for the layouts that cannot host a dict
-    ; (str subclasses, __slots__ classes) -- those correctly have no
-    ; __dict__, as in CPython.
+    ; for every static type and for the layouts that cannot host a dict.
     mov rdi, [rbp - OGA_OBJ]
     V_TEST_PTR rdi, rax
     ja .oga_none
     test rdi, rdi
     jz .oga_none
+    ; A __slots__ class has none, whatever its tp_dictoffset says.  Its dict
+    ; word is still in the layout, but nothing may put a dict there -- and
+    ; this arm CREATED one on first read, which is how `__slots__` classes
+    ; came to accept arbitrary attributes: asking for o.__dict__ gave them the
+    ; dict they were supposed not to have.
+    mov rax, [rdi + PyObject.ob_type]
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_HAS_SLOTS
+    jnz .oga_none
     LOAD_INST_DICT rbx, rdi, .oga_none
     test rbx, rbx
     jnz .oga_dict_have

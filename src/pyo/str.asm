@@ -223,6 +223,87 @@ DEF_FUNC str_byte_to_cp
 END_FUNC str_byte_to_cp
 
 ;; ============================================================================
+;; str_cp_at(rdi = PyStrObject*, rsi = code point index) -> rax = the code
+;; point, or -1 when the index is out of range.
+;;
+;; str_cp_offset gives the byte offset; this decodes the UTF-8 sequence that
+;; starts there.  builtin_ord had the only decoder in the tree and it insists
+;; the character is the whole string.
+;; ============================================================================
+DEF_FUNC str_cp_at
+    push rbx
+    push r12
+    mov rbx, rdi
+    mov r12, rsi
+    cmp r12, [rbx + PyStrObject.ob_length]
+    jae .sca_out_of_range
+    test r12, r12
+    js .sca_out_of_range
+
+    mov rdi, rbx
+    mov rsi, r12
+    call str_cp_offset          ; rax = the byte offset
+    lea rcx, [rbx + PyStrObject.data]
+    add rcx, rax
+
+    movzx eax, byte [rcx]
+    test al, 0x80
+    jz .sca_done                ; ASCII: the byte is the code point
+
+    mov r8d, eax
+    and r8d, 0xf8
+    cmp r8d, 0xf0
+    je .sca_four
+    mov r8d, eax
+    and r8d, 0xf0
+    cmp r8d, 0xe0
+    je .sca_three
+
+    and eax, 0x1f
+    shl eax, 6
+    movzx edx, byte [rcx + 1]
+    and edx, 0x3f
+    or eax, edx
+    jmp .sca_done
+.sca_three:
+    and eax, 0x0f
+    shl eax, 12
+    movzx edx, byte [rcx + 1]
+    and edx, 0x3f
+    shl edx, 6
+    or eax, edx
+    movzx edx, byte [rcx + 2]
+    and edx, 0x3f
+    or eax, edx
+    jmp .sca_done
+.sca_four:
+    and eax, 0x07
+    shl eax, 18
+    movzx edx, byte [rcx + 1]
+    and edx, 0x3f
+    shl edx, 12
+    or eax, edx
+    movzx edx, byte [rcx + 2]
+    and edx, 0x3f
+    shl edx, 6
+    or eax, edx
+    movzx edx, byte [rcx + 3]
+    and edx, 0x3f
+    or eax, edx
+.sca_done:
+    pop r12
+    pop rbx
+    leave
+    ret
+.sca_out_of_range:
+    mov rax, -1
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC str_cp_at
+
+;; ============================================================================
 ;; str_cp_offset(rdi = PyStrObject*, rsi = code point index) -> rax = byte offset
 ;; The index is not bounds-checked; an index at or past the end gives ob_size.
 ;; ============================================================================
@@ -766,11 +847,95 @@ DEF_FUNC str_repr
     jb .sr_esc_hex
     cmp al, 0x7f             ; and neither does DEL
     je .sr_esc_hex
+    cmp al, 0x80
+    jae .sr_wide
 
     ; Normal character
     mov [rdi], al
     inc rdi
     inc rcx
+    jmp .sr_loop
+
+.sr_wide:
+    ; Above ASCII, repr escapes exactly what is not printable -- CPython's
+    ; rule, and the reason a non-breaking space comes back as an escape and an
+    ; accented letter does not.  Every non-ASCII byte used to be copied
+    ; through, so repr() of a string with a soft hyphen or a combining mark in
+    ; it put the character itself in the output, invisibly.
+    push rcx
+    push rsi
+    push rdi
+    push r12                    ; four, so the calls stay 16-byte aligned
+    mov rdi, rsi
+    mov rsi, rcx
+    extern ucase_utf8_get
+    call ucase_utf8_get         ; eax = codepoint, ecx = its width
+    push rax
+    push rcx
+    mov edi, eax
+    extern uflags_of
+    call uflags_of              ; clobbers r8 and r9, hence the stack
+    pop r9                      ; the width
+    pop r8                      ; the codepoint
+    mov r10d, eax
+    pop r12
+    pop rdi
+    pop rsi
+    pop rcx
+    test r10d, 256              ; UF_PRINTABLE
+    jz .sr_esc_wide
+
+    ; Printable: its bytes go straight across.
+    xor eax, eax
+.sr_wide_copy:
+    cmp eax, r9d
+    jge .sr_loop
+    mov r10b, [rsi + rcx]
+    mov [rdi], r10b
+    inc rdi
+    inc rcx
+    inc eax
+    jmp .sr_wide_copy
+
+.sr_esc_wide:
+    ; \xNN below 256, \uXXXX below 65536, \UXXXXXXXX above.
+    lea r11, [rel sr_hexdigits]
+    mov byte [rdi], 0x5c
+    cmp r8d, 0x100
+    jae .sr_esc_u
+    mov byte [rdi + 1], 'x'
+    mov r10d, 2
+    jmp .sr_esc_digits
+.sr_esc_u:
+    cmp r8d, 0x10000
+    jae .sr_esc_bigu
+    mov byte [rdi + 1], 'u'
+    mov r10d, 4
+    jmp .sr_esc_digits
+.sr_esc_bigu:
+    mov byte [rdi + 1], 'U'
+    mov r10d, 8
+.sr_esc_digits:
+    add rdi, 2
+    mov eax, r10d               ; nibbles left, high one first
+.sr_esc_digit:
+    test eax, eax
+    jz .sr_esc_wide_done
+    dec eax
+    push rcx
+    mov ecx, eax
+    shl ecx, 2
+    mov edx, r8d
+    shr edx, cl
+    pop rcx
+    and edx, 0x0f
+    movzx edx, byte [r11 + rdx]
+    mov [rdi], dl
+    inc rdi
+    jmp .sr_esc_digit
+.sr_esc_wide_done:
+    movsxd r9, r9d
+    add rcx, r9
     jmp .sr_loop
 
 .sr_esc_n:
@@ -993,7 +1158,13 @@ DEF_FUNC str_concat
     ret
 
 .concat_type_error:
-    RAISE exc_TypeError_type, "can only concatenate str (not other type) to str"
+    mov rdi, rsi
+    mov rsi, rcx
+    VALUE_FOR_TYPE rdi, rsi
+    mov rsi, rdi
+    CSTRING rdi, `can only concatenate str (not "\x01") to str`
+    extern raise_type_error_with_name
+    call raise_type_error_with_name
 END_FUNC str_concat
 
 ;; ============================================================================
@@ -1132,9 +1303,26 @@ SM_VALUE   equ 152
 SM_PIECE   equ 160
 SM_OWNVAL  equ 168
 SM_ISMAP   equ 176       ; the right operand is a mapping: %(name)s, no arity check
-SM_FRAME   equ 184          ; + 0 pushes = 184, not 16-aligned
+SM_SPECCH  equ 184       ; the conversion as format() spells it: i and u are d
+SM_ISBYTES equ 192       ; formatting a BYTES: %s means bytes, %r means b'x'
+SM_KEYOBJ  equ 200       ; the %(name)s key, for the message when it is missing
+SM_FRAME   equ 208          ; + 0 pushes = 208
 
-DEF_FUNC str_mod, SM_FRAME
+;; str_mod is the nb_remainder slot.  str_mod_impl is what bytes_mod calls, with
+;; the flag that changes what half the conversions mean: %s on a bytes REQUIRES
+;; a bytes-like where str's takes anything, %r has to answer b'x' and not 'x',
+;; %b exists at all, and %c takes a byte.  bytes % used to reach here by
+;; latin-1 decoding the format and every bytes-like argument up front, which
+;; cannot express any of that -- the conversion is only known here, so the
+;; argument is converted here.
+DEF_FUNC_BARE str_mod
+    xor edx, edx
+    jmp str_mod_impl
+END_FUNC str_mod
+
+global str_mod_impl
+DEF_FUNC str_mod_impl, SM_FRAME
+    mov [rbp-SM_ISBYTES], rdx
     BINOP_REQUIRE_LEFT str_type, TYPE_FLAG_STR_SUBCLASS, 1
     V_UNPACK rdi, rdx           ; left  Value -> (payload, tag)
     V_UNPACK rsi, rcx           ; right Value -> (payload, tag)
@@ -1165,9 +1353,40 @@ DEF_FUNC str_mod, SM_FRAME
     cmp ecx, TAG_PTR
     jne .sm_not_tuple           ; non-heap → single value (SmallInt/Float/Bool/None)
     ; A mapping is addressed by key, so it has no argument count to check.
+    ; CPython's test is PyMapping_Check -- anything with an mp_subscript --
+    ; and not just a dict, which is why `"ab" % [1, 2]` is 'ab' there and was
+    ; a TypeError here.  A tuple is excluded below (it is the argument list),
+    ; and a str is excluded here (it is a single value).
     push rsi
     mov rax, [rsi + PyObject.ob_type]
-    REQUIRE_DICT_TYPE rax, rcx, .sm_not_map
+    REQUIRE_STR_TYPE rax, rcx, .sm_map_check
+    jmp .sm_not_map
+.sm_map_check:
+    ; A tuple has an mp_subscript too, and it is the argument list rather than
+    ; a mapping -- treating one as a mapping skipped the arity check, so
+    ; `"%s" % ("a", "b")` quietly formatted the first and dropped the second.
+    mov rax, [rsi + PyObject.ob_type]
+    REQUIRE_TUPLE_TYPE rax, rcx, .sm_map_not_tuple
+    jmp .sm_not_map
+.sm_map_not_tuple:
+    ; In a BYTES format a bytes or bytearray argument is a single value, not a
+    ; mapping, exactly as a str is for a str format.  Both have an
+    ; mp_subscript, so without this b"ab" % b"cd" skipped the arity check and
+    ; answered b'ab' instead of saying the argument was never converted.
+    cmp qword [rbp-SM_ISBYTES], 0
+    je .sm_map_not_bytes
+    mov rdi, rsi
+    extern bytes_mod_is_byteslike
+    call bytes_mod_is_byteslike
+    test eax, eax
+    jnz .sm_not_map
+.sm_map_not_bytes:
+    mov rax, [rsi + PyObject.ob_type]
+    mov rax, [rax + PyTypeObject.tp_as_mapping]
+    test rax, rax
+    jz .sm_not_map
+    cmp qword [rax + PyMappingMethods.mp_subscript], 0
+    je .sm_not_map
     mov qword [rbp-SM_ISMAP], 1
 .sm_not_map:
     pop rsi
@@ -1253,20 +1472,40 @@ DEF_FUNC str_mod, SM_FRAME
     call str_new_heap
     pop r8
     pop rcx
+    ; A BYTES format is keyed by BYTES.  The format was decoded to a str to be
+    ; scanned, so the key comes out of that str and has to go back -- without
+    ; which b"%(a)s" % {b"a": b"x"} looked up "a" in a dict that has b"a".
+    cmp qword [rbp-SM_ISBYTES], 0
+    je .sm_key_have
     push rcx
-    push rax                        ; the key, ours to release
+    push rax
+    mov rdi, rax
+    extern bytes_latin1_from_str
+    call bytes_latin1_from_str
+    pop rdi
+    push rax
+    call obj_decref                 ; the str key
+    pop rax
+    pop rcx
+.sm_key_have:
+    push rcx
+    push rax
+    mov [rbp-SM_KEYOBJ], rax        ; the key, ours to release
     mov rdi, [rbp-SM_ARGS]
     mov rsi, rax
-    extern dict_get
-    call dict_get
+    call str_mod_subscript
     mov r9, rax
     pop rdi
+    pop rcx
+    ; Release the key only once the lookup has answered: the error path names
+    ; it in the exception, and freeing it first left that reading freed memory.
+    test r9, r9
+    jz .sm_key_error
+    push rcx
     push r9
     call obj_decref
     pop r9
     pop rcx
-    test r9, r9
-    jz .sm_key_error
     mov [rbp-SM_KEYVAL], r9
     mov qword [rbp-SM_HASKEY], 1
     inc rcx                         ; step past ')'
@@ -1325,6 +1564,16 @@ DEF_FUNC str_mod, SM_FRAME
     jmp .sm_skip_prec
 
 .sm_dispatch:
+    ; In bytes mode every conversion takes the spec path, so the argument is
+    ; converted in exactly one place.  %% is not a conversion and takes no
+    ; argument, so it stays where it was.
+    cmp qword [rbp-SM_ISBYTES], 0
+    je .sm_dispatch_str
+    movzx eax, byte [rbx + rcx]
+    cmp al, '%'
+    jne .sm_use_spec
+    jmp .sm_dispatch_plain
+.sm_dispatch_str:
     ; A directive carrying flags, width or precision was skipped outright,
     ; so "%5s" % "x" returned "x".  Those go through the format-spec engine;
     ; a bare %s or %d keeps the direct path below.
@@ -1356,6 +1605,22 @@ DEF_FUNC str_mod, SM_FRAME
     cmp al, 'g'
     je .sm_use_spec
     cmp al, 'G'
+    je .sm_use_spec
+    ; d, i and u too, so that one place checks the argument against the
+    ; conversion.  The direct path below could not: it formatted whatever it
+    ; was handed, which is how "%d" % "x" came to answer 'x'.
+    cmp al, 'd'
+    je .sm_use_spec
+    cmp al, 'i'
+    je .sm_use_spec
+    cmp al, 'u'
+    je .sm_use_spec
+    ; %a and %c had no handler at all: the dispatcher's unknown-conversion arm
+    ; printed them literally and consumed no argument, so "%c" % (65,) came
+    ; back as "%c" and then complained that an argument was left over.
+    cmp al, 'a'
+    je .sm_use_spec
+    cmp al, 'c'
     je .sm_use_spec
     jmp .sm_dispatch_plain
 .sm_use_spec:
@@ -1603,7 +1868,14 @@ DEF_FUNC str_mod, SM_FRAME
 .sm_arg_positional:
     cmp qword [rbp-SM_ISTUPLE], 1
     je .sm_arg_tuple
-    ; Single value
+    ; Single value.  A mapping counts as one too -- "%s" % {"a": 1} formats
+    ; the dict -- but only once: a second unkeyed conversion has nothing left,
+    ; which is what CPython reports as "not enough arguments".
+    cmp qword [rbp-SM_ISMAP], 1
+    jne .sm_arg_single
+    test r15, r15
+    jnz .sm_arg_none
+.sm_arg_single:
     mov rax, [rbp-SM_ARGS]
     mov rdx, [rbp-SM_ATAG]
     inc r15
@@ -1684,8 +1956,13 @@ DEF_FUNC str_mod, SM_FRAME
     RAISE exc_ValueError_type, "incomplete format key"
 
 .sm_key_error:
-    extern exc_KeyError_type
-    RAISE exc_KeyError_type, "format key not found"
+    ; CPython names the key that was missing, as an ordinary dict lookup does.
+    ; A fixed message said only that one was.  The key object was released
+    ; just above, so this re-reads it -- it is still allocated, and its only
+    ; use here is the message.
+    mov rdi, [rbp-SM_KEYOBJ]
+    extern raise_key_error
+    call raise_key_error
 ;; Format one directive through format_apply_spec.  On entry SM_POS is the
 ;; index of the conversion character and SM_SPECST the start of the flags;
 ;; on exit SM_POS is just past it.  r13 (buffer), r14 (output position),
@@ -1695,6 +1972,33 @@ DEF_FUNC str_mod, SM_FRAME
     mov r8, [rbp-SM_POS]
     movzx r9d, byte [rbx + r8]      ; the conversion character
     mov [rbp-SM_CONV], r9
+    ; %i and %u are %d's spellings; format() knows only the one.  SM_CONV
+    ; keeps the original, because the error messages name it.
+    mov [rbp-SM_SPECCH], r9
+    cmp r9b, 'i'
+    je .sm_sc_as_d
+    cmp r9b, 'u'
+    je .sm_sc_as_d
+    cmp r9b, 'r'
+    je .sm_sc_as_s
+    cmp r9b, 'a'
+    je .sm_sc_as_s
+    cmp r9b, 'c'
+    je .sm_sc_as_s
+    cmp qword [rbp-SM_ISBYTES], 0
+    je .sm_sc_conv_kept
+    cmp r9b, 'b'
+    je .sm_sc_as_s              ; %b is bytes', and only exists there
+    cmp r9b, 's'
+    je .sm_sc_as_s
+    jmp .sm_sc_conv_kept
+.sm_sc_as_d:
+    mov qword [rbp-SM_SPECCH], 'd'
+    jmp .sm_sc_conv_kept
+.sm_sc_as_s:
+    ; %r, %a and %c each build a string first; what is left is a str spec.
+    mov qword [rbp-SM_SPECCH], 's'
+.sm_sc_conv_kept:
     inc r8
     mov [rbp-SM_POS], r8
 
@@ -1792,6 +2096,7 @@ DEF_FUNC str_mod, SM_FRAME
     jne .sm_sc_store_type
     mov cl, 's'                     ; repr is applied to the value below
 .sm_sc_store_type:
+    mov rcx, [rbp-SM_SPECCH]
     mov [rdi + r10], cl
     inc r10
 
@@ -1803,18 +2108,168 @@ DEF_FUNC str_mod, SM_FRAME
     call .sm_get_arg
     V_PACK rax, rdx
     mov [rbp-SM_VALUE], rax
+    mov qword [rbp-SM_OWNVAL], 0
+    ; The three conversions a BYTES format spells differently come first: they
+    ; take the argument as it is, and would not survive the numeric check.
+    mov rcx, [rbp-SM_CONV]
+    cmp qword [rbp-SM_ISBYTES], 0
+    je .sm_sc_coerce
+    cmp cl, 'b'
+    je .sm_sc_bytes_like
+    cmp cl, 's'
+    je .sm_sc_bytes_like
+    cmp cl, 'c'
+    je .sm_sc_bytes_char
+
+.sm_sc_coerce:
+    ; The argument has to suit the conversion, and may need converting to it:
+    ; %d takes a float and truncates, %f takes an int and widens, and both
+    ; take anything offering __index__ or __float__.
+    mov rdi, [rbp-SM_VALUE]
+    mov rsi, [rbp-SM_CONV]
+    extern fmt_percent_coerce
+    call fmt_percent_coerce
+    mov [rbp-SM_VALUE], rax
+    mov [rbp-SM_OWNVAL], rdx
     mov rcx, [rbp-SM_CONV]
     cmp cl, 'r'
-    jne .sm_sc_have_value
-    mov rdi, rax
+    je .sm_sc_repr
+    cmp cl, 'a'
+    je .sm_sc_ascii
+    cmp cl, 'c'
+    je .sm_sc_char
+    jmp .sm_sc_have_value_owned
+
+.sm_sc_repr:
+    mov rdi, [rbp-SM_VALUE]
     call obj_repr
     V_UNPACK rax, rdx
     V_PACK rax, rdx
     mov [rbp-SM_VALUE], rax
     mov qword [rbp-SM_OWNVAL], 1
     jmp .sm_sc_format
-.sm_sc_have_value:
-    mov qword [rbp-SM_OWNVAL], 0
+
+.sm_sc_ascii:
+    sub rsp, 16
+    mov rax, [rbp-SM_VALUE]
+    mov [rsp], rax
+    mov rdi, rsp
+    mov esi, 1
+    extern builtin_ascii_fn
+    call builtin_ascii_fn
+    add rsp, 16
+    mov [rbp-SM_VALUE], rax
+    mov qword [rbp-SM_OWNVAL], 1
+    jmp .sm_sc_format
+
+.sm_sc_char:
+    ; An integer becomes the character it numbers; a one-character string is
+    ; already the answer.  Anything else, including a longer string, is not.
+    mov rdi, [rbp-SM_VALUE]
+    V_TEST_PTR rdi, rcx
+    ja .sm_sc_char_int
+    mov rcx, [rdi + PyObject.ob_type]
+    lea rdx, [rel str_type]
+    cmp rcx, rdx
+    jne .sm_sc_char_int
+    cmp qword [rdi + PyStrObject.ob_length], 1
+    jne .sm_sc_char_bad
+    INCREF rdi
+    mov [rbp-SM_VALUE], rdi
+    mov qword [rbp-SM_OWNVAL], 1
+    jmp .sm_sc_format
+.sm_sc_char_int:
+    mov rdi, [rbp-SM_VALUE]
+    V_UNPACK rdi, rdx
+    extern int_is_integer
+    call int_is_integer
+    test eax, eax
+    jz .sm_sc_char_bad
+    sub rsp, 16
+    mov rax, [rbp-SM_VALUE]
+    mov [rsp], rax
+    mov rdi, rsp
+    mov esi, 1
+    extern builtin_chr
+    call builtin_chr
+    add rsp, 16
+    V_PACK rax, rdx
+    mov [rbp-SM_VALUE], rax
+    mov qword [rbp-SM_OWNVAL], 1
+    jmp .sm_sc_format
+.sm_sc_char_bad:
+    RAISE exc_TypeError_type, "%c requires int or char"
+
+;; %s and %b on a BYTES format: the argument must be bytes-like, and its bytes
+;; go in unchanged.  Decoding it as latin-1 makes a str whose code points are
+;; its bytes; bytes_mod re-encodes the result the same way, so the round trip
+;; is exact.
+.sm_sc_bytes_like:
+    mov rdi, [rbp-SM_VALUE]
+    extern bytes_mod_as_str
+    call bytes_mod_as_str
+    test rax, rax
+    jz .sm_sc_bytes_bad
+    mov [rbp-SM_VALUE], rax
+    mov qword [rbp-SM_OWNVAL], 1
+    jmp .sm_sc_format
+.sm_sc_bytes_bad:
+    mov rsi, [rbp-SM_VALUE]
+    CSTRING rdi, `%b requires a bytes-like object, or an object that implements __bytes__, not '\x01'`
+    extern raise_type_error_with_name
+    call raise_type_error_with_name
+
+;; %c on a BYTES format: an integer in range(256), or a single byte.
+.sm_sc_bytes_char:
+    mov rdi, [rbp-SM_VALUE]
+    V_TEST_PTR rdi, rcx
+    ja .sm_sc_bc_int
+    mov rcx, [rdi + PyObject.ob_type]
+    extern bytes_type
+    lea rdx, [rel bytes_type]
+    cmp rcx, rdx
+    jne .sm_sc_bc_int
+    cmp qword [rdi + PyBytesObject.ob_size], 1
+    jne .sm_sc_bc_bad
+    movzx edi, byte [rdi + PyBytesObject.data]
+    jmp .sm_sc_bc_from_cp
+.sm_sc_bc_int:
+    mov rdi, [rbp-SM_VALUE]
+    V_UNPACK rdi, rdx
+    call int_is_integer
+    test eax, eax
+    jz .sm_sc_bc_bad
+    mov rdi, [rbp-SM_VALUE]
+    V_UNPACK rdi, rdx
+    extern int_to_i64
+    call int_to_i64
+    cmp rax, 0
+    jl .sm_sc_bc_range
+    cmp rax, 255
+    ja .sm_sc_bc_range
+    mov rdi, rax
+.sm_sc_bc_from_cp:
+    ; One code point, which the re-encode turns back into the byte it names.
+    ; It has to go in as UTF-8: a raw 0xff is not a str, and the re-encode
+    ; read it as the lead byte of a sequence -- b"%c" % 255 came out b"\xc0".
+    sub rsp, 32
+    mov eax, edi
+    mov rdi, rsp
+    extern ucase_utf8_put
+    call ucase_utf8_put         ; ecx = bytes written
+    movsxd rsi, ecx
+    mov rdi, rsp
+    call str_new_heap
+    add rsp, 32
+    mov [rbp-SM_VALUE], rax
+    mov qword [rbp-SM_OWNVAL], 1
+    jmp .sm_sc_format
+.sm_sc_bc_bad:
+    RAISE exc_TypeError_type, "%c requires an integer in range(256) or a single byte"
+.sm_sc_bc_range:
+    RAISE exc_OverflowError_type, "%c arg not in range(256)"
+
+.sm_sc_have_value_owned:
 
 .sm_sc_format:
     mov rdi, [rbp-SM_VALUE]
@@ -1828,8 +2283,11 @@ DEF_FUNC str_mod, SM_FRAME
     call obj_decref
     cmp qword [rbp-SM_OWNVAL], 0
     je .sm_sc_no_own
+    ; DECREF_V and not obj_decref: what the argument check hands back may be
+    ; an int or a float IMMEDIATE -- "%d" % 3.9 truncates to one -- and
+    ; obj_decref would dereference it as a pointer.
     mov rdi, [rbp-SM_VALUE]
-    call obj_decref
+    DECREF_V rdi, rsi
 .sm_sc_no_own:
 
     ; Append the piece to the caller's buffer, advancing its position.
@@ -1854,7 +2312,49 @@ DEF_FUNC str_mod, SM_FRAME
     call obj_decref
     ret
 
-END_FUNC str_mod
+END_FUNC str_mod_impl
+
+;; ============================================================================
+;; str_mod_subscript(rdi = the mapping, rsi = the key str) -> rax = Value, or 0
+;;
+;; `"%(a)s" % m` for any m with an mp_subscript, not only a dict -- the same
+;; widening the operand classification got.  A dict keeps the direct lookup:
+;; dict_get answers 0 for a miss where dict's own mp_subscript raises KeyError,
+;; and str_mod's caller wants the former.
+;;
+;; The reference this hands back is borrowed for a dict and owned for anything
+;; else, and str_mod treats it as borrowed throughout -- so a mapping of one's
+;; own leaks one reference per key.  Releasing it here is not possible: the
+;; value is read long after, and a raise anywhere between abandons the stack.
+;; ============================================================================
+DEF_FUNC_LOCAL str_mod_subscript
+    mov rax, [rdi + PyObject.ob_type]
+    extern dict_type
+    lea rcx, [rel dict_type]
+    cmp rax, rcx
+    je .sms_dict
+    REQUIRE_DICT_TYPE rax, rcx, .sms_generic
+.sms_dict:
+    extern dict_get
+    call dict_get
+    leave
+    ret
+.sms_generic:
+    mov rax, [rdi + PyObject.ob_type]
+    mov rax, [rax + PyTypeObject.tp_as_mapping]
+    test rax, rax
+    jz .sms_none
+    mov rax, [rax + PyMappingMethods.mp_subscript]
+    test rax, rax
+    jz .sms_none
+    call rax
+    leave
+    ret
+.sms_none:
+    xor eax, eax
+    leave
+    ret
+END_FUNC str_mod_subscript
 
 ;; ============================================================================
 ;; str_compare(left, right, op, left_tag, right_tag) -> (rax,edx) fat bool

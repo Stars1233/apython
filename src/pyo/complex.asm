@@ -996,7 +996,9 @@ DEF_FUNC complex_pow, CPW_FRAME
     jne .cpw_zero_neg_power
     movsd xmm0, [rbp - CPW_B]
     ucomisd xmm0, xmm2
-    jb .cpw_zero_neg_power
+    jp .cpw_zero_result      ; UNORDERED sets CF too, so the jb alone sent a
+    jb .cpw_zero_neg_power   ; NaN exponent to the raise; C's nan < 0 is false
+.cpw_zero_result:
     xorpd xmm0, xmm0
     xorpd xmm1, xmm1
     call complex_from_doubles
@@ -1376,18 +1378,37 @@ DEF_FUNC complex_getattr, CG_FRAME
     ret
 
 .cg_real:
-    mov rax, [rbp - CG_SELF]
-    mov rax, [rax + PyComplexObject.cval_real]
-    V_FROM_F64 rax, rcx
+    mov rdi, [rbp - CG_SELF]
+    call complex_get_real
     leave
     ret
 .cg_imag:
-    mov rax, [rbp - CG_SELF]
-    mov rax, [rax + PyComplexObject.cval_imag]
-    V_FROM_F64 rax, rcx
+    mov rdi, [rbp - CG_SELF]
+    call complex_get_imag
     leave
     ret
 END_FUNC complex_getattr
+
+;; ============================================================================
+;; complex_get_real(rdi = self) -> rax = Value
+;; complex_get_imag(rdi = self) -> rax = Value
+;;
+;; Behind complex.real and complex.imag, reached from the chain above and from
+;; the getset descriptors in complex_type.tp_dict.
+;; ============================================================================
+DEF_FUNC complex_get_real
+    mov rax, [rdi + PyComplexObject.cval_real]
+    V_FROM_F64 rax, rcx
+    leave
+    ret
+END_FUNC complex_get_real
+
+DEF_FUNC complex_get_imag
+    mov rax, [rdi + PyComplexObject.cval_imag]
+    V_FROM_F64 rax, rcx
+    leave
+    ret
+END_FUNC complex_get_imag
 
 section .rodata
 cx_name_real: db "real", 0

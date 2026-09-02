@@ -987,9 +987,15 @@ mdo_code:
     xor r14d, r14d
 .code_have_len:
 
-    ; Allocate PyCodeObject: fixed header + bytecode
+    ; Allocate PyCodeObject: fixed header + bytecode.
+    ; gc_alloc, matching code_new: a code object is GC-tracked -- co_consts
+    ; can hold another code object, and a function's code closes a cycle
+    ; through its globals -- and code_dealloc frees it with gc_dealloc, which
+    ; would hand free() a pointer sixteen bytes into an ap_malloc'd block.
     lea rdi, [r14 + PyCodeObject.co_code]
-    call ap_malloc
+    lea rsi, [rel code_type]
+    extern gc_alloc
+    call gc_alloc
     mov r13, rax               ; r13 = code object
 
     ; Fill base header
@@ -1072,6 +1078,12 @@ mdo_code:
     mov rdx, r14
     call ap_memcpy
 .code_no_bytecode:
+
+    ; Every field is written, so it is safe to track: gc_track can trigger a
+    ; collection, and code_traverse would otherwise walk uninitialised words.
+    mov rdi, r13
+    extern gc_track
+    call gc_track
 
     ; DECREF the co_code bytes object (its data was copied inline).
     ; Safe because marshal_add_ref now INCREFs, so refs array holds its own ref.

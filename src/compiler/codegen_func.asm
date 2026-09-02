@@ -697,6 +697,69 @@ DEF_FUNC cg_docstring, CDS_FRAME
     ret
 END_FUNC cg_docstring
 
+;; ============================================================================
+;; cg_seed_doc_const(Comp *c, CompUnit *u, uint32_t body) -> rax = 1 ok, 0 error
+;;
+;; Put the docstring, or None, at co_consts[0].  Called before anything else
+;; emits a constant, so cg_const appends it at index zero -- which is the slot
+;; func_doc reads.
+;; ============================================================================
+CSD_UNIT  equ 16
+CSD_FRAME equ 40          ; + 1 push = 48, 16-aligned
+DEF_FUNC cg_seed_doc_const, CSD_FRAME
+    push rbx
+    mov rbx, rdi
+    mov [rbp - CSD_UNIT], rsi
+
+    mov rdi, rbx
+    mov rsi, rdx
+    call ast_at
+    mov ecx, [rax + AstNode.nchild]
+    test ecx, ecx
+    jz .csd_none
+    mov rsi, rax
+    xor edx, edx
+    mov rdi, rbx
+    call ast_child
+    mov rdi, rbx
+    mov rsi, rax
+    call ast_at
+    movzx ecx, byte [rax + AstNode.kind]
+    cmp ecx, AST_EXPR_STMT
+    jne .csd_none
+    mov edx, [rax + AstNode.a]
+    mov rdi, rbx
+    mov rsi, rdx
+    call ast_at
+    movzx ecx, byte [rax + AstNode.kind]
+    cmp ecx, AST_CONST
+    jne .csd_none
+    mov esi, [rax + AstNode.a]
+    mov rdi, rbx
+    call ast_obj_at
+    test rax, rax
+    jz .csd_none
+    V_TEST_PTR rax, rcx
+    ja .csd_none
+    mov rcx, [rax + PyObject.ob_type]
+    lea rdx, [rel str_type]
+    cmp rcx, rdx
+    jne .csd_none
+    mov rsi, rax
+    jmp .csd_emit
+
+.csd_none:
+    extern none_singleton
+    lea rsi, [rel none_singleton]
+.csd_emit:
+    mov rdi, [rbp - CSD_UNIT]
+    call cg_const
+    mov eax, 1
+    pop rbx
+    leave
+    ret
+END_FUNC cg_seed_doc_const
+
 DEF_FUNC cg_compile_body, CB_FRAME
     push rbx
     push r12
@@ -741,6 +804,14 @@ DEF_FUNC cg_compile_body, CB_FRAME
     mov rax, [rbp - CB_SCOPE]
     mov [r12 + CompUnit.scope], eax
     mov [r12 + CompUnit.comp], rbx
+
+    ; The qualified name, which needs the ENCLOSING unit and so has to be
+    ; built here rather than in cg_unit_init.
+    mov rdi, rbx
+    mov rsi, r12
+    mov edx, [rbp - CB_SCOPE]
+    extern cg_set_qualname
+    call cg_set_qualname
     mov rax, [rbp - CB_LINE]
     mov [r12 + CompUnit.firstline], eax
     mov [r12 + CompUnit.curline], eax
@@ -811,6 +882,23 @@ DEF_FUNC cg_compile_body, CB_FRAME
     xor ecx, ecx
     call cg_emit
     or byte [rax + Instr.flags], IF_NOLINE
+
+    ; A function reserves co_consts[0] for its docstring, or None when it has
+    ; none.  CPython's compiler does, and func_doc reads that slot -- so a
+    ; function whose first constant happened to be a string reported it as
+    ; __doc__: `def f(): x = "s"; return x` answered 's', and so did
+    ; `lambda: "s"`.  A lambda has no docstring, so it always seeds None; a
+    ; class stores __doc__ by name below rather than out of the tuple, and
+    ; wants no reserved slot at all.
+    cmp qword [rbp - CB_LAMBDA], 2
+    je .no_doc_slot
+    mov rdi, rbx
+    mov rsi, r12
+    mov rdx, r13
+    call cg_seed_doc_const
+    test eax, eax
+    jz .fail
+.no_doc_slot:
 
     ; A class body opens by recording where it came from, which is what makes
     ; C.__module__ and C.__qualname__ exist.
@@ -1571,12 +1659,22 @@ DEF_FUNC cg_class_prologue, CQ_FRAME
     ; reference, so co_consts needs an owner of its own: the arena, which
     ; comp_free releases.  The bare INCREF that used to stand here gave it a
     ; reference and nobody to drop it.
+    ; The QUALIFIED name, not the bare one: a class's __qualname__ comes from
+    ; this store, not from its code object, so `class B` inside `class A`
+    ; reported "B" where CPython reports "A.B".  cg_set_qualname has already
+    ; put the qualified form on the class body's unit, and it is arena-owned,
+    ; so it needs no keeping of its own; the bare name is the fallback for a
+    ; class directly inside the module, where the two are the same anyway.
+    mov rsi, [r12 + CompUnit.qualname]
+    test rsi, rsi
+    jnz .cq_have_qual
     mov rdi, rbx
     mov rsi, [rbp - CQ_NAME]
     INCREF rsi
     call comp_keep
-    mov rdi, r12
     mov rsi, rax
+.cq_have_qual:
+    mov rdi, r12
     call cg_const
     mov rdx, rax
     mov rdi, r12

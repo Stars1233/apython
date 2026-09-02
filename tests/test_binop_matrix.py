@@ -10,11 +10,13 @@
 # dumped core.  Nothing in the suite covered the quadrant, because
 # tests/test_operand_types.py only ever puts the sequence on the left.
 #
-# Only names and small exact values are printed.  Our TypeError text is the
-# fixed string "unsupported operand type(s)" where CPython names the operator
-# and both types, so str(e) can never be compared here; the exception's
-# identity can.  A float result prints as its type alone unless it is integral,
-# because agreeing on repr digits is a different subsystem's job.
+# Only names and small exact values are printed.  The TypeError text now
+# matches CPython's -- operator and both operand types -- but this file still
+# compares the exception's identity rather than its str(): a matrix cell has
+# to stay short enough to locate in a diff.  tests/test_error_messages.py is
+# where the wording is checked.  A float result prints as its type alone
+# unless it is integral, because agreeing on repr digits is a different
+# subsystem's job.
 
 
 def show(v):
@@ -151,15 +153,15 @@ INPLACE = [
 # (operator, left type, right type) cells where apython and CPython disagree for
 # a reason that is a missing *feature* rather than an unsafe one.  Every one of
 # these raises TypeError or returns the wrong container type; none of them reads
-# or writes memory it should not.  All four groups are in bugs.md.
+# or writes memory it should not.  Each group is in bugs.md.
 #
 # The set was derived from the triage after the safety fixes landed, not guessed
 # at up front -- a skip set written in advance is how one grows to cover real
 # bugs.
 SKIP = set()
 
-# 1. bytearray has no sq_concat, no sq_repeat and no tp_as_number, so every
-#    bytearray arithmetic cell raises here and yields a value in CPython.
+# bytearray has no sq_concat and no sq_repeat, so those cells raise here and
+# yield a value in CPython.  Its % works now.
 for _op in ("+", "+="):                                     # sq_concat
     for _a, _b in (("bytearray", "bytearray"), ("bytearray", "bytes"),
                    ("bytes", "bytearray")):
@@ -168,32 +170,6 @@ for _op in ("*", "*="):                                     # sq_repeat
     for _a, _b in (("bytearray", "int"), ("int", "bytearray"),
                    ("bytearray", "bool"), ("bool", "bytearray")):
         SKIP.add((_op, _a, _b))
-for _op in ("%", "%="):
-    for _b in ("dict", "list", "range"):
-        SKIP.add((_op, "bytearray", _b))
-
-# 2. The set operators build their result with set_new even when the left
-#    operand is a frozenset, so `frozenset() | frozenset()` is a set.
-for _op in ("|", "|=", "&", "&=", "-", "-=", "^", "^="):
-    for _b in ("set", "frozenset"):
-        SKIP.add((_op, "frozenset", _b))
-
-# 3. str/bytes %-formatting accepts only a tuple or a mapping on the right;
-#    CPython also takes a single arbitrary object.
-for _op in ("%", "%="):
-    for _a, _b in (("str", "bytes"), ("str", "bytearray"), ("str", "list"),
-                   ("str", "range"), ("bytes", "list"), ("bytes", "range")):
-        SKIP.add((_op, _a, _b))
-
-# 4. PEP 604 unions: `None | int` is unsupported, and `int | int` is not
-#    collapsed to int.  Phase 2 revisits UnionType for its hash.
-for _op in ("|", "|="):
-    SKIP.add((_op, "NoneType", "type"))
-    SKIP.add((_op, "type", "type"))
-
-# 5. dict.__ior__ takes any iterable of key/value pairs in CPython; ours takes
-#    a dict, so a str right operand is a TypeError rather than a ValueError.
-SKIP.add(("|=", "dict", "str"))
 
 for name, fn in BINOPS + INPLACE:
     for lname, mk_a in TYPES:

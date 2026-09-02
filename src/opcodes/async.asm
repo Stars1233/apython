@@ -36,6 +36,10 @@ extern none_singleton
 extern str_from_cstr_heap
 extern dict_get
 extern method_new
+extern async_gen_type
+extern dunder_call_1
+extern dunder_aiter
+extern dunder_anext
 extern current_exception
 extern eval_exception_unwind
 extern eval_saved_r13
@@ -112,8 +116,16 @@ END_FUNC op_get_awaitable
 ;; ============================================================================
 ;; op_get_aiter - GET_AITER (50)
 ;;
-;; Pop TOS, call __aiter__ (tp_iter), push result.
-;; The result should be an async iterator.
+;; Pop TOS, call __aiter__, push the async iterator it returns.
+;;
+;; __aiter__ is looked up BY NAME first, and only then as tp_iter.  A class
+;; that implements the asynchronous iterator protocol itself -- __aiter__
+;; returning self, and an `async def __anext__` -- has neither tp_iter nor
+;; tp_iternext, because slot_table has no row for either name, so reading the
+;; slot alone refused the very objects that define the protocol: every
+;; hand-written async iterator, and every asyncio stream.  The slot stays as
+;; the fallback because that is what the builtin async generator has, and it
+;; keeps no __aiter__ in its tp_dict.
 ;; ============================================================================
 DEF_FUNC_BARE op_get_aiter
     ; Pop TOS = async iterable
@@ -123,8 +135,30 @@ DEF_FUNC_BARE op_get_aiter
     cmp esi, TAG_PTR
     jne .gai_error
 
-    ; Get __aiter__ from type — for async generators, tp_iter returns self
+    ; --- by name ---
+    ; r15 is the eval loop's scratch and is callee-saved, so it carries the
+    ; snapshot across the call.  A NULL result is "no such dunder" or "it
+    ; raised", and those are not the same answer.
+    push rdi
+    DUNDER_EXC_SAVE r15
+    lea rsi, [rel dunder_aiter]
+    call dunder_call_1
+    pop rdi
+    test edx, edx
+    jnz .gai_by_name
+    EXC_RAISED_SINCE r15, rcx, .gai_propagate
+
+    ; --- the slot, for the builtin async generator only ---
+    ; Its tp_iter returns self and it keeps no __aiter__ in its tp_dict, so it
+    ; needs this road.  Nothing else may take it: tp_iter is the SYNC
+    ; protocol, and accepting it here made `async for x in [1, 2]` hand a
+    ; list_iterator to the send loop, which then tried to await an int and
+    ; span forever.  CPython answers a TypeError, and reads a slot of its own
+    ; -- am_aiter -- that a list simply does not have.
     mov rax, [rdi + PyObject.ob_type]
+    lea rcx, [rel async_gen_type]
+    cmp rax, rcx
+    jne .gai_error_noattr
     mov rax, [rax + PyTypeObject.tp_iter]
     test rax, rax
     jz .gai_error_noattr
@@ -149,16 +183,53 @@ DEF_FUNC_BARE op_get_aiter
 
     DISPATCH
 
-.gai_error:
-    ; Non-TAG_PTR value: DECREF via tag-aware macro
-    DECREF_VAL rdi, rsi
-    jmp .gai_raise
-.gai_error_noattr:
-    ; TAG_PTR but no tp_iter: DECREF the pointer
+.gai_by_name:
+    ; __aiter__ answered.  Its result is a new reference; the popped iterable
+    ; is still ours to release.
+    push rax
+    push rdx
+    call obj_decref             ; rdi is still the iterable
+    pop rdx
+    pop rax
+    VPUSH_VAL rax, rdx
+    DISPATCH
+
+.gai_propagate:
+    ; __aiter__ ran and raised.  The iterable is ours and the unwinder will
+    ; not release it, so drop it before leaving.
     call obj_decref
-.gai_raise:
+    mov [rel eval_saved_r13], r13
+    jmp eval_exception_unwind
+
+.gai_error:
+    ; Not a pointer at all, so there is no type to read and nothing to
+    ; release; V_PACK it back into a Value for the message.
+    V_PACK rdi, rsi
+    mov rsi, rdi
+    jmp .gai_raise
+
+.gai_error_noattr:
+    ; The message names this object's type, and raise_type_error_with_name
+    ; does not return -- so the reference cannot simply be dropped here first,
+    ; which freed the object and left the message reading a dangling type
+    ; pointer.  Hand it back to the value stack instead: the unwinder releases
+    ; everything above the handler's depth, so it is freed exactly once and
+    ; not before the message is composed.
+    mov rsi, rdi
+    VPUSH_PTR rdi
+    mov [rel eval_saved_r13], r13
+    jmp .gai_raise
+
 .gai_iter_error:
-    RAISE exc_TypeError_type, "'async for' requires an object with __aiter__ method"
+    ; Only the async generator reaches the slot, and its gen_iter_self cannot
+    ; answer NULL -- so this is a guard, not a path.  It says nothing about a
+    ; type because the object it would have named is already released.
+    RAISE exc_TypeError_type, "'async for' got a NULL async iterator"
+
+.gai_raise:
+    CSTRING rdi, `'async for' requires an object with __aiter__ method, got \x01`
+    extern raise_type_error_with_name
+    call raise_type_error_with_name
 END_FUNC op_get_aiter
 
 ;; ============================================================================
@@ -175,8 +246,31 @@ DEF_FUNC_BARE op_get_anext
     V_TEST_PTR rdi, rax
     ja .gan_error
 
-    ; Call tp_iternext on the async iterator
+    ; A NULL from either road below means one of two things, and they are not
+    ; the same: the iterator is exhausted, or it RAISED.  Snapshot the pending
+    ; exception so the two can be told apart.  r15 is the eval loop's scratch
+    ; register and is callee-saved, so it survives both calls.
+    DUNDER_EXC_SAVE r15
+
+    ; --- by name ---
+    ; __anext__ first, for the same reason GET_AITER looks up __aiter__ that
+    ; way: a class implementing the protocol itself has no tp_iternext, so
+    ; reading the slot alone refused it.  What comes back is an AWAITABLE --
+    ; normally the coroutine an `async def __anext__` returns -- and raising
+    ; StopAsyncIteration is that coroutine's business, not this handler's.
+    push rdi
+    lea rsi, [rel dunder_anext]
+    call dunder_call_1
+    pop rdi
+    test edx, edx
+    jnz .gan_by_name
+    EXC_RAISED_SINCE r15, rcx, .gan_propagate
+
+    ; --- the slot, again for the builtin async generator only ---
     mov rax, [rdi + PyObject.ob_type]
+    lea rcx, [rel async_gen_type]
+    cmp rax, rcx
+    jne .gan_error
     mov rax, [rax + PyTypeObject.tp_iternext]
     test rax, rax
     jz .gan_error
@@ -185,14 +279,28 @@ DEF_FUNC_BARE op_get_anext
     ; rax = result payload, edx = tag
     V_UNPACK rax, rdx           ; tp_iternext returns a Value
     test edx, edx
-    jz .gan_stop               ; NULL = exhausted
+    jz .gan_null
 
     ; Push result (the awaitable from __anext__)
     VPUSH_VAL rax, rdx
     DISPATCH
 
+.gan_by_name:
+    ; The aiter was peeked, not popped, so the stack still owns it; the
+    ; awaitable is a new reference and goes on top.
+    VPUSH_VAL rax, rdx
+    DISPATCH
+
+.gan_null:
+    ; Exhausted, or raised.  Manufacturing a StopAsyncIteration for both is
+    ; what made `async for x in ag()` over a generator that raises end the
+    ; loop cleanly and DISCARD the exception -- not caught, not reported, the
+    ; program simply carried on past a `raise`.  A real exception is already
+    ; pending and already owns its reference: leave it alone and unwind.
+    EXC_RAISED_SINCE r15, rcx, .gan_propagate
 .gan_stop:
-    ; Raise StopAsyncIteration
+    ; Genuinely exhausted.  Raise StopAsyncIteration, which END_ASYNC_FOR
+    ; reads as the end of the loop.
     lea rdi, [rel exc_StopAsyncIteration_type]
     xor esi, esi
     xor edx, edx
@@ -200,8 +308,16 @@ DEF_FUNC_BARE op_get_anext
     mov rdi, rax
     call raise_exception_obj
 
+.gan_propagate:
+    ; The stack is as DISPATCH published it -- nothing was popped -- so
+    ; eval_saved_r13 needs no correction here.
+    jmp eval_exception_unwind
+
 .gan_error:
-    RAISE exc_TypeError_type, "'async for' requires an object with __anext__ method"
+    ; The aiter is still on the stack, so it is safe to name.
+    mov rsi, rdi
+    CSTRING rdi, `'async for' received an object from __aiter__ that does not implement __anext__: \x01`
+    call raise_type_error_with_name
 END_FUNC op_get_anext
 
 ;; ============================================================================
@@ -372,11 +488,24 @@ DEF_FUNC_BARE op_end_async_for
     jnz .eaf_stop
 
 .eaf_reraise:
-    ; Not StopAsyncIteration — re-raise original exception
+    ; Not StopAsyncIteration — re-raise the original exception.
     VPOP_VAL rdi, rsi          ; exc payload+tag
-    ; The exception is already a pointer; store as current_exception
-    ; and re-raise via eval_exception_unwind (which handles unwind).
-    ; raise_exception_obj INCREFs + XDECREFs old current_exception for us.
+    ; DISPATCH published eval_saved_r13 at the depth this handler was ENTERED
+    ; with, and eval_exception_unwind restores r13 from it -- so the pop above
+    ; has to be published too, or the unwinder brings the exception's slot
+    ; back to life while current_exception also points at it.  Its release
+    ; loop then drops the only reference and the global is left dangling: an
+    ; async for over a generator that raises lost the exception outright,
+    ; neither caught nor reported, and the program carried on.
+    ;
+    ; Every other pop-then-raise handler in the tree already does this --
+    ; RAISE_VARARGS, RERAISE, SEND's propagate arm, the two intrinsics.  This
+    ; was the one that did not.  (CLEANUP_THROW below reaches the same place
+    ; from the other side, by peeking and taking a second reference.)
+    mov [rel eval_saved_r13], r13
+    ; raise_exception_obj TAKES the reference VPOP_VAL just transferred off
+    ; the stack -- it does not add one.  The comment that used to sit here
+    ; said the opposite.
     call raise_exception_obj
 
 .eaf_stop:

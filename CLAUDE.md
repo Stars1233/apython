@@ -241,6 +241,8 @@ f-strings, async, comprehensions, PEP 695 type parameters.
 | `compile.asm` | pipeline driver and lifetime; the `code_from_path` and `compile()`/`exec()`/`eval()` entry points; and `comp_error`, the record side of the error protocol |
 | `unicodename.asm` | **generated** -- the names `\N{...}` resolves |
 | `gen_unicodename.py` | regenerates `unicodename.asm` from `unicodedata` |
+| `unicodecase.asm` | **generated** -- the case mappings and the character flags |
+| `gen_unicodecase.py` | regenerates `unicodecase.asm` from CPython's own `str` methods |
 | `uniname.asm` | the search over it, plus the algorithmic CJK family |
 | `dis.asm` | `--dis`, for diffing against `python3 -m dis` |
 | `comptest.asm` | `--selftest-compile` |
@@ -258,7 +260,7 @@ Because every emission routes through it, a forgotten CACHE is not a mistake an
 emitter can make. Its numbers are CPython's, taken from the running
 interpreter's own modules rather than transcribed.
 
-Regenerate all three with `make regen`.  The outputs are committed, so building
+Regenerate all four with `make regen`.  The outputs are committed, so building
 never needs Python -- and `gen_tables.py` refuses to run on anything but CPython
 3.12, so they must not become build steps.  `make clean` leaves them alone.
 

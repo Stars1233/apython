@@ -32,6 +32,9 @@ extern bool_true
 extern bool_false
 ; SRE engine functions
 extern sre_match
+extern sre_template_parse
+extern sre_template_expand
+extern sre_state_reset_marks
 extern sre_search
 extern sre_state_init
 extern sre_state_fini
@@ -147,8 +150,11 @@ DEF_FUNC sre_pattern_do_match, PM_FRAME
 
     ; match/fullmatch: try at pos only
     lea rdi, [rbp - PM_STATE]
+    mov rax, [rdi + SRE_State.str_pos]
+    mov [rdi + SRE_State.search_origin], rax
     mov rsi, [rbp - PM_PAT]
     mov rsi, [rsi + SRE_PatternObject.code]
+    mov edx, 1                 ; this SUCCESS is the pattern's own
     call sre_match
     jmp .check_result
 
@@ -409,6 +415,35 @@ DEF_FUNC sre_pattern_fullmatch_method
 END_FUNC sre_pattern_fullmatch_method
 
 ;; ============================================================================
+;; sre_substr_from_state_empty(rdi=state, rsi=start_idx, rdx=end_idx)
+;; -> (rax=payload, edx=tag)
+;;
+;; The same, except that an unmatched group is the empty string rather than
+;; None.  CPython has both -- state_getslice's `empty` argument -- and which
+;; one a caller wants is not a detail: findall gives '' for a group that did
+;; not match, split gives None, and they read the same marks to do it.
+;; ============================================================================
+DEF_FUNC sre_substr_from_state_empty
+    cmp rsi, -1
+    je .sse_empty
+    cmp rdx, -1
+    je .sse_empty
+    call sre_substr_from_state
+    leave
+    ret
+.sse_empty:
+    lea rdi, [rel sse_nothing]
+    xor esi, esi
+    call str_new_heap
+    mov edx, TAG_PTR
+    leave
+    ret
+section .rodata
+sse_nothing: db 0
+section .text
+END_FUNC sre_substr_from_state_empty
+
+;; ============================================================================
 ;; sre_substr_from_state(rdi=state, rsi=start_idx, rdx=end_idx)
 ;; -> (rax=payload, edx=tag)
 ;; Extracts substring handling both ASCII and codepoint modes.
@@ -570,10 +605,7 @@ DEF_FUNC sre_pattern_findall_method, FA_FRAME
 .fa_loop:
     ; Reset marks
     lea rdi, [rbp - FA_STATE]
-    mov qword [rdi + SRE_State.marks_size], 0
-    mov qword [rdi + SRE_State.lastmark], -1
-    mov qword [rdi + SRE_State.lastindex], -1
-    mov qword [rdi + SRE_State.repeat_ctx], 0
+    call sre_state_reset_marks
 
     ; Search
     lea rdi, [rbp - FA_STATE]
@@ -612,16 +644,25 @@ DEF_FUNC sre_pattern_findall_method, FA_FRAME
     jmp .fa_advance
 
 .fa_one_group:
-    ; Append group(1) string
-    ; State marks[0:1] = group 1 in CPython convention
+    ; Append group(1) string.
+    ; State marks[0:1] = group 1 in CPython convention.
+    ;
+    ; A group that did not match is the empty string, not the whole match:
+    ; this used to fall through to .fa_no_groups when marks_size said the
+    ; group was never set, so re.findall('(a)?b', 'b') answered ['b'] where
+    ; CPython answers [''].  The marks now carry -1 for a hole, so the only
+    ; thing to guard is the array's own length.
     lea rdi, [rbp - FA_STATE]
     mov rax, [rdi + SRE_State.marks]
-    cmp qword [rdi + SRE_State.marks_size], 2
-    jb .fa_no_groups           ; fallback to whole match
+    mov rsi, -1
+    mov rdx, -1
+    cmp qword [rdi + SRE_State.marks_count], 2
+    jb .fa_og_have
     mov rsi, [rax]            ; mark[0] = group 1 start
     mov rdx, [rax + 8]       ; mark[1] = group 1 end
+.fa_og_have:
     lea rdi, [rbp - FA_STATE]
-    call sre_substr_from_state
+    call sre_substr_from_state_empty
     ; rax = payload, edx = tag (str or None)
     mov rdi, r14
     mov rsi, rax
@@ -660,18 +701,20 @@ DEF_FUNC sre_pattern_findall_method, FA_FRAME
     shl r8, 1                  ; r8 = 2 * (group - 1)
     ; Check marks_size > 2*(group-1)+1
     lea r9, [r8 + 2]
-    cmp r9, [rdi + SRE_State.marks_size]
-    ja .fa_mg_none
+    cmp r9, [rdi + SRE_State.marks_count]
+    ja .fa_mg_unset
 
     mov rsi, [rax + r8*8]     ; start
     mov rdx, [rax + r8*8 + 8] ; end
+    jmp .fa_mg_call
+.fa_mg_unset:
+    ; Past the end of the array: never marked, same as a -1 hole in it.
+    mov rsi, -1
+    mov rdx, -1
+.fa_mg_call:
     lea rdi, [rbp - FA_STATE]
-    call sre_substr_from_state
+    call sre_substr_from_state_empty
     jmp .fa_mg_set
-
-.fa_mg_none:
-    xor eax, eax
-    RET_NONE
 
 .fa_mg_set:
     ; Set tuple[group-1] = (rax, edx)
@@ -701,13 +744,20 @@ DEF_FUNC sre_pattern_findall_method, FA_FRAME
     jmp .fa_advance
 
 .fa_advance:
-    ; Advance position past the match
+    ; Advance position past the match.
+    ;
+    ; An empty match does NOT step past itself.  CPython stopped doing that in
+    ; 3.7: it searches the same position again with must_advance set, which
+    ; forbids a second empty match there and so makes the engine keep
+    ; backtracking.  Stepping instead threw away everything it would have
+    ; found -- findall('.*?', 'aab') was ['', '', '', ''] rather than
+    ; ['', 'a', '', 'a', '', 'b', ''].
     lea rdi, [rbp - FA_STATE]
     mov rax, [rdi + SRE_State.str_start]
+    mov dword [rdi + SRE_State.must_advance], 0
     cmp rcx, rax
     jne .fa_advance_ok
-    ; Zero-width match: advance by 1 to avoid infinite loop
-    inc rcx
+    mov dword [rdi + SRE_State.must_advance], 1
 .fa_advance_ok:
     lea rdi, [rbp - FA_STATE]
     mov [rdi + SRE_State.str_pos], rcx
@@ -756,8 +806,13 @@ SUB_NSUBS    equ 48
 SUB_LASTEND  equ 56
 SUB_CALLABLE equ 64
 SUB_REPL_TAG equ 72
-SUB_STATE    equ 72 + SRE_State_size
-SUB_FRAME    equ 72 + SRE_State_size
+; The parsed replacement template, and the single literal it collapses to
+; when it names no group.  Both sit above the state struct, which starts at
+; SUB_STATE and grows downward from there.
+SUB_TMPL     equ 80
+SUB_LITERAL  equ 88
+SUB_STATE    equ 88 + SRE_State_size
+SUB_FRAME    equ 88 + SRE_State_size
 
 DEF_FUNC sre_pattern_sub_method, SUB_FRAME
     ; rdi = args (fat array), rsi = nargs
@@ -830,6 +885,66 @@ DEF_FUNC sre_pattern_sub_method, SUB_FRAME
     call str_from_cstr_heap
     mov [rbp - SUB_RESULT], rax
 
+    ; A string replacement is a template, not a literal: \1, \g<name> and the
+    ; escapes all mean something.  It is parsed once here, as CPython's
+    ; _compile_template is, rather than per match.  A template that names no
+    ; group collapses to a single literal, and that keeps the old fast path --
+    ; no match object is built for it.
+    mov qword [rbp - SUB_TMPL], 0
+    mov qword [rbp - SUB_LITERAL], 0
+    cmp qword [rbp - SUB_CALLABLE], 0
+    jnz .sub_have_template
+    mov rax, [rbp - SUB_REPL]
+    ; A replacement that is neither callable nor a str is CPython's
+    ; TypeError.  Falling through instead left SUB_TMPL and SUB_LITERAL at 0
+    ; and .sub_expand_repl dereferenced the NULL -- and the exact type
+    ; compare sent a str SUBCLASS down that same road, where the sibling
+    ; Match.expand went out of its way to accept one.
+    ; The slot holds a PAYLOAD, not a Value -- the tag is beside it -- so an
+    ; int immediate of 5 looks exactly like the address 5 to V_TEST_PTR.
+    cmp qword [rbp - SUB_REPL_TAG], TAG_PTR
+    jne .sub_repl_type
+    test rax, rax
+    jz .sub_repl_type
+    mov rcx, [rax + PyObject.ob_type]
+    REQUIRE_STR_TYPE rcx, rdx, .sub_repl_type
+
+    mov rdi, rax
+    mov rsi, [rbp - SUB_PAT]
+    call sre_template_parse
+    mov [rbp - SUB_TMPL], rax
+    mov rcx, [rax + PyListObject.ob_size]
+    cmp rcx, 1
+    ja .sub_have_template       ; it names at least one group
+    jb .sub_empty_template
+    mov rdx, [rax + PyListObject.ob_item]
+    mov rdx, [rdx]
+    V_TEST_PTR rdx, rcx
+    ja .sub_have_template
+    mov rcx, [rdx + PyObject.ob_type]
+    lea rax, [rel str_type]
+    cmp rcx, rax
+    jne .sub_have_template
+    mov [rbp - SUB_LITERAL], rdx
+    mov rdi, rdx
+    call obj_incref
+    jmp .sub_have_template
+.sub_empty_template:
+    CSTRING rdi, ""
+    call str_from_cstr_heap
+    mov [rbp - SUB_LITERAL], rax
+    jmp .sub_have_template
+
+.sub_repl_type:
+    mov rsi, [rbp - SUB_REPL]
+    mov rdx, [rbp - SUB_REPL_TAG]
+    V_PACK rsi, rdx
+    CSTRING rdi, `expected str instance, \x01 found`
+    extern raise_type_error_with_name
+    call raise_type_error_with_name
+
+.sub_have_template:
+
     ; Init state
     lea rdi, [rbp - SUB_STATE]
     mov rsi, [rbp - SUB_PAT]
@@ -848,10 +963,7 @@ DEF_FUNC sre_pattern_sub_method, SUB_FRAME
 
 .sub_search:
     lea rdi, [rbp - SUB_STATE]
-    mov qword [rdi + SRE_State.marks_size], 0
-    mov qword [rdi + SRE_State.lastmark], -1
-    mov qword [rdi + SRE_State.lastindex], -1
-    mov qword [rdi + SRE_State.repeat_ctx], 0
+    call sre_state_reset_marks
     call sre_search
     test eax, eax
     jz .sub_finish
@@ -889,11 +1001,49 @@ DEF_FUNC sre_pattern_sub_method, SUB_FRAME
     cmp qword [rbp - SUB_CALLABLE], 0
     jnz .sub_callable_repl
 
-    ; String replacement: concat repl directly
+    ; String replacement.  A pure literal goes straight in; anything naming a
+    ; group needs a match object to read the groups from.
+    cmp qword [rbp - SUB_LITERAL], 0
+    jz .sub_expand_repl
     mov rdi, [rbp - SUB_RESULT]
-    mov rsi, [rbp - SUB_REPL]
+    mov rsi, [rbp - SUB_LITERAL]
     mov ecx, TAG_PTR
     call str_concat
+    jmp .sub_repl_concated
+
+.sub_expand_repl:
+    push r12
+    push r13
+    lea rdi, [rbp - SUB_STATE]
+    mov rsi, [rbp - SUB_PAT]
+    mov rdx, [rbp - SUB_STR]
+    call sre_match_new
+    push rax
+    push rax                   ; a pair, so the calls stay 16-byte aligned
+    mov rdi, [rbp - SUB_TMPL]
+    mov rsi, rax
+    call sre_template_expand
+    pop rdi
+    pop rdi                    ; the match object
+    push rax
+    push rax                   ; the expansion, ours
+    call obj_decref
+    pop rsi
+    pop rsi
+    push rsi
+    push rsi
+    mov rdi, [rbp - SUB_RESULT]
+    mov ecx, TAG_PTR
+    call str_concat
+    pop rdi
+    pop rdi                    ; the expansion again
+    push rax
+    push rax                   ; the concatenation
+    call obj_decref
+    pop rax
+    pop rax
+    pop r13
+    pop r12
 
 .sub_repl_concated:
     push rax
@@ -966,10 +1116,13 @@ DEF_FUNC sre_pattern_sub_method, SUB_FRAME
     mov [rbp - SUB_LASTEND], r13
     inc qword [rbp - SUB_NSUBS]
 
-    ; Advance past match
+    ; Advance past match -- an empty one stays put under must_advance; see
+    ; .fa_advance in findall for why.
+    lea rdi, [rbp - SUB_STATE]
+    mov dword [rdi + SRE_State.must_advance], 0
     cmp r13, r12
     jne .sub_advance_ok
-    inc r13                    ; zero-width match
+    mov dword [rdi + SRE_State.must_advance], 1
 .sub_advance_ok:
     lea rdi, [rbp - SUB_STATE]
     mov [rdi + SRE_State.str_pos], r13
@@ -986,6 +1139,17 @@ DEF_FUNC sre_pattern_sub_method, SUB_FRAME
     jmp .sub_loop
 
 .sub_finish:
+    mov rdi, [rbp - SUB_TMPL]
+    test rdi, rdi
+    jz .sub_tmpl_freed
+    mov qword [rbp - SUB_TMPL], 0
+    call obj_decref
+    mov rdi, [rbp - SUB_LITERAL]
+    test rdi, rdi
+    jz .sub_tmpl_freed
+    mov qword [rbp - SUB_LITERAL], 0
+    call obj_decref
+.sub_tmpl_freed:
     ; Append remaining text after last match (Unicode-safe)
     lea rdi, [rbp - SUB_STATE]
     call sre_string_len
@@ -1045,8 +1209,10 @@ SN_NSUBS    equ 48
 SN_LASTEND  equ 56
 SN_CALLABLE equ 64
 SN_REPL_TAG equ 72
-SN_STATE    equ 72 + SRE_State_size
-SN_FRAME    equ 72 + SRE_State_size
+SN_TMPL     equ 80
+SN_LITERAL  equ 88
+SN_STATE    equ 88 + SRE_State_size
+SN_FRAME    equ 88 + SRE_State_size
 
 DEF_FUNC sre_pattern_subn_method, SN_FRAME
     push rbx
@@ -1111,6 +1277,63 @@ DEF_FUNC sre_pattern_subn_method, SN_FRAME
     call str_from_cstr_heap
     mov [rbp - SN_RESULT], rax
 
+    ; A string replacement is a template, not a literal: \1, \g<name> and the
+    ; escapes all mean something.  It is parsed once here, as CPython's
+    ; _compile_template is, rather than per match.  A template that names no
+    ; group collapses to a single literal, and that keeps the old fast path --
+    ; no match object is built for it.
+    mov qword [rbp - SN_TMPL], 0
+    mov qword [rbp - SN_LITERAL], 0
+    cmp qword [rbp - SN_CALLABLE], 0
+    jnz .subn_have_template
+    mov rax, [rbp - SN_REPL]
+    ; As in sub: neither callable nor a str is a TypeError, and a str
+    ; subclass is a str.  Falling through left the template and the literal
+    ; both NULL for the expander to dereference.
+    ; The slot holds a PAYLOAD, not a Value -- the tag is beside it -- so an
+    ; int immediate of 5 looks exactly like the address 5 to V_TEST_PTR.
+    cmp qword [rbp - SN_REPL_TAG], TAG_PTR
+    jne .subn_repl_type
+    test rax, rax
+    jz .subn_repl_type
+    mov rcx, [rax + PyObject.ob_type]
+    REQUIRE_STR_TYPE rcx, rdx, .subn_repl_type
+
+    mov rdi, rax
+    mov rsi, [rbp - SN_PAT]
+    call sre_template_parse
+    mov [rbp - SN_TMPL], rax
+    mov rcx, [rax + PyListObject.ob_size]
+    cmp rcx, 1
+    ja .subn_have_template       ; it names at least one group
+    jb .subn_empty_template
+    mov rdx, [rax + PyListObject.ob_item]
+    mov rdx, [rdx]
+    V_TEST_PTR rdx, rcx
+    ja .subn_have_template
+    mov rcx, [rdx + PyObject.ob_type]
+    lea rax, [rel str_type]
+    cmp rcx, rax
+    jne .subn_have_template
+    mov [rbp - SN_LITERAL], rdx
+    mov rdi, rdx
+    call obj_incref
+    jmp .subn_have_template
+.subn_empty_template:
+    CSTRING rdi, ""
+    call str_from_cstr_heap
+    mov [rbp - SN_LITERAL], rax
+    jmp .subn_have_template
+
+.subn_repl_type:
+    mov rsi, [rbp - SN_REPL]
+    mov rdx, [rbp - SN_REPL_TAG]
+    V_PACK rsi, rdx
+    CSTRING rdi, `expected str instance, \x01 found`
+    call raise_type_error_with_name
+
+.subn_have_template:
+
     lea rdi, [rbp - SN_STATE]
     mov rsi, [rbp - SN_PAT]
     mov rdx, [rbp - SN_STR]
@@ -1127,10 +1350,7 @@ DEF_FUNC sre_pattern_subn_method, SN_FRAME
 
 .subn_search:
     lea rdi, [rbp - SN_STATE]
-    mov qword [rdi + SRE_State.marks_size], 0
-    mov qword [rdi + SRE_State.lastmark], -1
-    mov qword [rdi + SRE_State.lastindex], -1
-    mov qword [rdi + SRE_State.repeat_ctx], 0
+    call sre_state_reset_marks
     call sre_search
     test eax, eax
     jz .subn_finish
@@ -1164,11 +1384,49 @@ DEF_FUNC sre_pattern_subn_method, SN_FRAME
     cmp qword [rbp - SN_CALLABLE], 0
     jnz .subn_callable_repl
 
-    ; String replacement: concat repl directly
+    ; String replacement.  A pure literal goes straight in; anything naming a
+    ; group needs a match object to read the groups from.
+    cmp qword [rbp - SN_LITERAL], 0
+    jz .subn_expand_repl
     mov rdi, [rbp - SN_RESULT]
-    mov rsi, [rbp - SN_REPL]
+    mov rsi, [rbp - SN_LITERAL]
     mov ecx, TAG_PTR
     call str_concat
+    jmp .subn_repl_concated
+
+.subn_expand_repl:
+    push r12
+    push r13
+    lea rdi, [rbp - SN_STATE]
+    mov rsi, [rbp - SN_PAT]
+    mov rdx, [rbp - SN_STR]
+    call sre_match_new
+    push rax
+    push rax                   ; a pair, so the calls stay 16-byte aligned
+    mov rdi, [rbp - SN_TMPL]
+    mov rsi, rax
+    call sre_template_expand
+    pop rdi
+    pop rdi                    ; the match object
+    push rax
+    push rax                   ; the expansion, ours
+    call obj_decref
+    pop rsi
+    pop rsi
+    push rsi
+    push rsi
+    mov rdi, [rbp - SN_RESULT]
+    mov ecx, TAG_PTR
+    call str_concat
+    pop rdi
+    pop rdi                    ; the expansion again
+    push rax
+    push rax                   ; the concatenation
+    call obj_decref
+    pop rax
+    pop rax
+    pop r13
+    pop r12
 
 .subn_repl_concated:
     push rax
@@ -1233,9 +1491,11 @@ DEF_FUNC sre_pattern_subn_method, SN_FRAME
     mov [rbp - SN_LASTEND], r13
     inc qword [rbp - SN_NSUBS]
 
+    lea rdi, [rbp - SN_STATE]
+    mov dword [rdi + SRE_State.must_advance], 0
     cmp r13, r12
     jne .subn_advance_ok
-    inc r13
+    mov dword [rdi + SRE_State.must_advance], 1
 .subn_advance_ok:
     lea rdi, [rbp - SN_STATE]
     mov [rdi + SRE_State.str_pos], r13
@@ -1251,6 +1511,17 @@ DEF_FUNC sre_pattern_subn_method, SN_FRAME
     jmp .subn_loop
 
 .subn_finish:
+    mov rdi, [rbp - SN_TMPL]
+    test rdi, rdi
+    jz .subn_tmpl_freed
+    mov qword [rbp - SN_TMPL], 0
+    call obj_decref
+    mov rdi, [rbp - SN_LITERAL]
+    test rdi, rdi
+    jz .subn_tmpl_freed
+    mov qword [rbp - SN_LITERAL], 0
+    call obj_decref
+.subn_tmpl_freed:
     lea rdi, [rbp - SN_STATE]
     call sre_string_len
     mov rcx, rax
@@ -1382,10 +1653,7 @@ DEF_FUNC sre_pattern_split_method, SP_FRAME
 
 .split_search:
     lea rdi, [rbp - SP_STATE]
-    mov qword [rdi + SRE_State.marks_size], 0
-    mov qword [rdi + SRE_State.lastmark], -1
-    mov qword [rdi + SRE_State.lastindex], -1
-    mov qword [rdi + SRE_State.repeat_ctx], 0
+    call sre_state_reset_marks
     call sre_search
     test eax, eax
     jz .split_finish
@@ -1394,12 +1662,10 @@ DEF_FUNC sre_pattern_split_method, SP_FRAME
     mov r12, [rdi + SRE_State.str_start]
     mov r13, [rdi + SRE_State.str_pos]
 
-    ; Skip zero-width matches at start
-    cmp r13, r12
-    jne .split_nonzero
-    cmp r12, [rbp - SP_LASTEND]
-    je .split_advance_skip
-.split_nonzero:
+    ; An empty match at the position the last one ended used to be skipped
+    ; outright, which dropped re.split('x*', 'abc')'s leading ''.  must_advance
+    ; is what keeps that from looping now, so the skip is not needed and was
+    ; only ever wrong.
 
     ; Append text before match using sre_substr_from_state
     lea rdi, [rbp - SP_STATE]
@@ -1467,9 +1733,11 @@ DEF_FUNC sre_pattern_split_method, SP_FRAME
 
 .split_advance_skip:
     ; Advance
+    lea rdi, [rbp - SP_STATE]
+    mov dword [rdi + SRE_State.must_advance], 0
     cmp r13, r12
     jne .split_adv_ok
-    inc r13
+    mov dword [rdi + SRE_State.must_advance], 1
 .split_adv_ok:
     lea rdi, [rbp - SP_STATE]
     mov [rdi + SRE_State.str_pos], r13
@@ -2004,6 +2272,7 @@ DEF_FUNC sre_scanner_new
 
     mov [rbx + SRE_ScannerObject.pos], r14
     mov [rbx + SRE_ScannerObject.endpos], r15
+    mov qword [rbx + SRE_ScannerObject.must_advance], 0
 
     mov rax, rbx
 
@@ -2077,10 +2346,10 @@ DEF_FUNC sre_scanner_iternext, SI_FRAME
 
     ; Reset state marks
     lea rdi, [rbp - SI_STATE]
-    mov qword [rdi + SRE_State.marks_size], 0
-    mov qword [rdi + SRE_State.lastmark], -1
-    mov qword [rdi + SRE_State.lastindex], -1
-    mov qword [rdi + SRE_State.repeat_ctx], 0
+    call sre_state_reset_marks
+    mov rbx, [rbp - SI_SELF]
+    mov rax, [rbx + SRE_ScannerObject.must_advance]
+    mov [rdi + SRE_State.must_advance], eax
 
     ; Search
     lea rdi, [rbp - SI_STATE]
@@ -2105,12 +2374,15 @@ DEF_FUNC sre_scanner_iternext, SI_FRAME
     lea rdi, [rbp - SI_STATE]
     call sre_state_fini
 
-    ; Advance scanner position: max(match_end, match_start + 1)
+    ; Advance the scanner.  An empty match stays put with must_advance set --
+    ; see .fa_advance in findall.  The flag lives on the scanner because each
+    ; call builds its own state.
     mov rbx, [rbp - SI_SELF]
     mov rax, r13               ; match_end
+    mov qword [rbx + SRE_ScannerObject.must_advance], 0
     cmp rax, r12
     jne .si_advance_ok
-    lea rax, [r12 + 1]        ; zero-width guard
+    mov qword [rbx + SRE_ScannerObject.must_advance], 1
 .si_advance_ok:
     mov [rbx + SRE_ScannerObject.pos], rax
 
@@ -2185,16 +2457,19 @@ DEF_FUNC sre_scanner_match_method, SM2_FRAME
 
     ; Reset marks
     lea rdi, [rbp - SM2_STATE]
-    mov qword [rdi + SRE_State.marks_size], 0
-    mov qword [rdi + SRE_State.lastmark], -1
-    mov qword [rdi + SRE_State.lastindex], -1
-    mov qword [rdi + SRE_State.repeat_ctx], 0
+    call sre_state_reset_marks
+    mov rbx, [rbp - SM2_SELF]
+    mov rax, [rbx + SRE_ScannerObject.must_advance]
+    mov [rdi + SRE_State.must_advance], eax
 
     ; Anchored match (not search)
     lea rdi, [rbp - SM2_STATE]
+    mov rax, [rdi + SRE_State.str_pos]
+    mov [rdi + SRE_State.search_origin], rax
     mov rbx, [rbp - SM2_SELF]
     mov rsi, [rbx + SRE_ScannerObject.pattern]
     mov rsi, [rsi + SRE_PatternObject.code]
+    mov edx, 1
     call sre_match
     test eax, eax
     jz .sm2_no_match
@@ -2218,9 +2493,10 @@ DEF_FUNC sre_scanner_match_method, SM2_FRAME
     ; Advance scanner pos
     mov rbx, [rbp - SM2_SELF]
     mov rax, r13
+    mov qword [rbx + SRE_ScannerObject.must_advance], 0
     cmp rax, r12
     jne .sm2_adv_ok
-    lea rax, [r12 + 1]
+    mov qword [rbx + SRE_ScannerObject.must_advance], 1
 .sm2_adv_ok:
     mov [rbx + SRE_ScannerObject.pos], rax
 

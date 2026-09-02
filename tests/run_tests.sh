@@ -25,6 +25,13 @@ GREEN='\033[0;32m'
 YELLOW='\033[0;33m'
 NC='\033[0m'
 
+# The oracle names itself.  Almost every test here is a diff against whatever
+# `python3` happens to be, so when one disagrees the first question is which
+# CPython answered -- and a run that does not say cannot be compared against
+# another machine's.  test_generator_frame was green here and red on CI for
+# exactly that reason.
+echo "oracle: $($PYTHON -VV 2>&1 | head -1)"
+
 # Value encoding self-test: verifies the NaN-box boundaries directly, before
 # any Python-level test can be misled by a mis-encoded value.
 printf "%-40s " "value encoding selftest"

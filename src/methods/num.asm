@@ -14,7 +14,9 @@ extern float_type
 extern ap_malloc
 extern ap_free
 extern ap_strcmp
+extern kw_names_pending
 extern obj_decref
+extern obj_dealloc
 extern str_new_heap
 extern tuple_new
 extern obj_call_n
@@ -79,6 +81,64 @@ DEF_FUNC int_method_self_to_i64
     extern raise_type_error_with_name
     call raise_type_error_with_name
 END_FUNC int_method_self_to_i64
+
+;; ============================================================================
+;; num_self_to_mpz(rdi = args, rsi = a 16-byte mpz_t the caller owns)
+;;
+;; Initialises *rsi with self's exact value, whatever shape it is in: an
+;; immediate, a bool, a compact heap int, a GMP-backed one, or an int subclass
+;; wrapping any of those.  The caller must __gmpz_clear it.
+;;
+;; The methods below used to reach for int_method_self_to_i64 instead, which
+;; truncates: (2**70).bit_count() was 2 and (2**70+3).to_bytes(16,'big') was
+;; sixteen bytes of which only the low eight were the number.
+;; ============================================================================
+DEF_FUNC num_self_to_mpz
+    push rbx
+    mov rbx, rsi                ; the destination mpz_t
+
+    mov rdi, [rdi]              ; args[0] = self, a Value
+    V_UNPACK rdi, rdx
+    extern int_unwrap
+    call int_unwrap
+    cmp edx, TAG_SMALLINT
+    je .nsm_from_si
+    test edx, TAG_RC_BIT
+    jz .nsm_bad
+    test rdi, rdi
+    jz .nsm_bad
+    mov rax, [rdi + PyObject.ob_type]
+    lea rcx, [rel int_type]
+    cmp rax, rcx
+    jne .nsm_bad
+    cmp qword [rdi + PyIntObject.compact], 0
+    je .nsm_from_mpz
+    mov rdi, [rdi + PyIntObject.ival]
+.nsm_from_si:
+    mov rsi, rdi
+    mov rdi, rbx
+    extern __gmpz_init_set_si
+    call __gmpz_init_set_si wrt ..plt
+    pop rbx
+    leave
+    ret
+
+.nsm_from_mpz:
+    lea rsi, [rdi + PyIntObject.mpz]
+    mov rdi, rbx
+    extern __gmpz_init_set
+    call __gmpz_init_set wrt ..plt
+    pop rbx
+    leave
+    ret
+
+.nsm_bad:
+    V_PACK rdi, rdx
+    mov rsi, rdi
+    CSTRING rdi, `descriptor for 'int' objects doesn't apply to a '\x01' object`
+    extern raise_type_error_with_name
+    call raise_type_error_with_name
+END_FUNC num_self_to_mpz
 
 ;; ============================================================================
 ;; int_method_bit_length(args, nargs) -> SmallInt
@@ -176,17 +236,35 @@ END_FUNC int_method_bit_length
 ;; int_method_bit_count(args, nargs) -> SmallInt
 ;; Returns number of ones in the binary representation of abs(self).
 ;; ============================================================================
-DEF_FUNC int_method_bit_count
-    call int_method_self_to_i64
+IBC_TMP   equ 16            ; an mpz_t
+IBC_FRAME equ 24            ; + 1 push = 32, 16-aligned
 
-    ; abs(self)
-    mov rcx, rax
-    neg rcx
-    cmovs rcx, rax              ; rcx = abs(self)
+DEF_FUNC int_method_bit_count, IBC_FRAME
+    push rbx
 
-    ; popcnt counts 1 bits
-    popcnt rax, rcx
+    ; The whole value, not its low 64 bits: this used to go through
+    ; int_method_self_to_i64, so (2**70).bit_count() was 2 and
+    ; (2**64-1).bit_count() was 63.
+    lea rsi, [rbp - IBC_TMP]
+    call num_self_to_mpz
+
+    ; mpz_popcount answers ULONG_MAX for a negative operand, and Python counts
+    ; the bits of abs(n), so take the absolute value first.
+    lea rdi, [rbp - IBC_TMP]
+    mov rsi, rdi
+    extern __gmpz_abs
+    call __gmpz_abs wrt ..plt
+    lea rdi, [rbp - IBC_TMP]
+    extern __gmpz_popcount
+    call __gmpz_popcount wrt ..plt
+    mov rbx, rax
+    lea rdi, [rbp - IBC_TMP]
+    extern __gmpz_clear
+    call __gmpz_clear wrt ..plt
+    mov rax, rbx
+
     RET_TAG_SMALLINT
+    pop rbx
     leave
     V_PACK rax, rdx             ; builtins return one Value
     ret
@@ -197,11 +275,33 @@ END_FUNC int_method_bit_count
 ;; int_method_conjugate(args, nargs) -> SmallInt
 ;; ============================================================================
 DEF_FUNC int_method_conjugate
-    call int_method_self_to_i64
-    RET_TAG_SMALLINT
+    ; n.conjugate() is n.  Truncating through int_method_self_to_i64 made
+    ; (2**70+3).conjugate() answer 3, and an int subclass answer a plain int
+    ; -- which is right -- for the wrong reason.
+    mov rdi, [rdi]              ; args[0] = self, a Value
+    V_UNPACK rdi, rdx
+    call int_unwrap
+    cmp edx, TAG_SMALLINT
+    je .icj_done
+    test edx, TAG_RC_BIT
+    jz .icj_bad
+    test rdi, rdi
+    jz .icj_bad
+    mov rax, [rdi + PyObject.ob_type]
+    lea rcx, [rel int_type]
+    cmp rax, rcx
+    jne .icj_bad
+    INCREF rdi
+.icj_done:
+    mov rax, rdi
     leave
     V_PACK rax, rdx             ; builtins return one Value
     ret
+.icj_bad:
+    V_PACK rdi, rdx
+    mov rsi, rdi
+    CSTRING rdi, `descriptor 'conjugate' for 'int' objects doesn't apply to a '\x01' object`
+    call raise_type_error_with_name
 END_FUNC int_method_conjugate
 
 
@@ -212,92 +312,345 @@ END_FUNC int_method_conjugate
 ;; Optional kwarg: signed=False (via kw_names_pending)
 ;; ============================================================================
 
-ITB_SELF  equ 8
-ITB_LEN   equ 16
-ITB_SIGN  equ 24
-ITB_FRAME equ 32            ; + 2 pushes = 48
+ITB_V      equ 16       ; mpz_t: self's exact value
+ITB_T      equ 32       ; mpz_t: the non-negative form that gets exported
+ITB_LEN    equ 40
+ITB_ORDER  equ 48       ; 1 = big-endian, -1 = little
+ITB_SIGNED equ 56
+ITB_COUNT  equ 64       ; mpz_export's countp
+ITB_OUT    equ 72       ; the bytes object being filled
+ITB_KWNAME equ 88       ; the keyword being matched, and the value given for it
+ITB_KWVAL  equ 96
+ITB_FRAME  equ 96           ; + 2 pushes = 112, 16-aligned
+
+;; ============================================================================
+;; itb_order_from_str -- "big"/"little" as the +-1 mpz_export wants
+;;
+;; Shared by to_bytes and from_bytes, which both take byteorder positionally
+;; or by keyword.  The type check is part of the job: the callers used to
+;; accept any pointer and then read PyStrObject.data out of it.
+;;
+;; rdi = the byteorder argument, as a Value
+;; -> rax = 1 (big), -1 (little), 0 for a str that is neither (ValueError),
+;;    or 2 for something that is not a str at all (TypeError).  CPython tells
+;;    those last two apart and so must we.
+;; ============================================================================
+OFS_SELF equ 8
+OFS_FRAME equ 16
+
+DEF_FUNC_LOCAL itb_order_from_str, OFS_FRAME
+    extern str_type
+    V_TEST_PTR rdi, rcx
+    ja .ofs_not_str
+    test rdi, rdi
+    jz .ofs_not_str
+    mov rcx, [rdi + PyObject.ob_type]
+    lea rdx, [rel str_type]
+    cmp rcx, rdx
+    jne .ofs_not_str
+    mov [rbp - OFS_SELF], rdi
+    lea rdi, [rdi + PyStrObject.data]
+    CSTRING rsi, "big"
+    call ap_strcmp
+    test eax, eax
+    jz .ofs_big
+    mov rdi, [rbp - OFS_SELF]
+    lea rdi, [rdi + PyStrObject.data]
+    CSTRING rsi, "little"
+    call ap_strcmp
+    test eax, eax
+    jnz .ofs_bad
+    mov rax, -1
+    leave
+    ret
+.ofs_big:
+    mov eax, 1
+    leave
+    ret
+.ofs_bad:
+    xor eax, eax
+    leave
+    ret
+.ofs_not_str:
+    mov eax, 2
+    leave
+    ret
+END_FUNC itb_order_from_str
 
 DEF_FUNC int_method_to_bytes, ITB_FRAME
     push rbx
     push r12
 
-    mov qword [rbp - ITB_SIGN], 0   ; signed = False
+    mov rbx, rdi                    ; args
+    mov r12, rsi                    ; nargs
 
-    ; Extract self value
-    mov rbx, rdi
-    call int_method_self_to_i64
-    mov [rbp - ITB_SELF], rax       ; self i64
+    mov qword [rbp - ITB_SIGNED], 0
+    mov qword [rbp - ITB_LEN], 1    ; CPython's defaults since 3.11
+    mov qword [rbp - ITB_ORDER], 1  ; "big"
 
-    ; Extract length arg
-    mov r12, [rbx + 8]             ; args[1]
-    V_UNPACK r12, rdx
-    cmp edx, TAG_SMALLINT
-    jne .itb_error
-    mov [rbp - ITB_LEN], r12
-
-    ; Extract byteorder arg
-    mov rcx, [rbx + 16]            ; args[2] payload (str)
-    V_UNPACK rcx, rdx       ; args[2]
-    cmp edx, TAG_PTR
-    jne .itb_error
-
-    ; Check for "big" or "little"
-    ; rcx = byteorder str obj
-    push rcx                        ; save for comparison
-
-    ; Compare with "big"
-    lea rdi, [rcx + PyStrObject.data]
-    CSTRING rsi, "big"
-    call ap_strcmp
-    pop rcx
-    test eax, eax
-    jz .itb_big
-
+    ; length, byteorder and signed may all arrive by keyword -- CPython's
+    ; signature is to_bytes(length=1, byteorder='big', *, signed=False), and
+    ; pickle calls it with byteorder= spelled out.  Taking only signed= here
+    ; made every such call a TypeError.  The keyword values sit in the
+    ; trailing argument slots.
+    mov rax, [rel kw_names_pending]
+    test rax, rax
+    jz .itb_positional
+    mov rcx, [rax + PyTupleObject.ob_size]      ; n_kw
+    mov r8, r12
+    sub r8, rcx                                 ; n_pos
+    xor r9d, r9d
+.itb_kw_loop:
+    cmp r9, rcx
+    jge .itb_kw_done
+    mov r10, [rax + PyTupleObject.ob_item]
+    mov r10, [r10 + r9*8]                       ; the keyword's name
+    mov [rbp - ITB_KWNAME], r10
+    mov r11, r8
+    add r11, r9
+    mov r11, [rbx + r11*8]                      ; the value given for it
+    mov [rbp - ITB_KWVAL], r11
+    push rax
     push rcx
-    lea rdi, [rcx + PyStrObject.data]
-    CSTRING rsi, "little"
-    call ap_strcmp
-    pop rcx
-    test eax, eax
-    jz .itb_little
+    push r8
+    push r9
 
+    lea rdi, [r10 + PyStrObject.data]
+    CSTRING rsi, "signed"
+    call ap_strcmp
+    test eax, eax
+    jnz .itb_kw_not_signed
+    mov rdi, [rbp - ITB_KWVAL]
+    extern obj_is_true
+    call obj_is_true
+    mov [rbp - ITB_SIGNED], rax
+    jmp .itb_kw_next
+
+.itb_kw_not_signed:
+    mov r10, [rbp - ITB_KWNAME]
+    lea rdi, [r10 + PyStrObject.data]
+    CSTRING rsi, "length"
+    call ap_strcmp
+    test eax, eax
+    jnz .itb_kw_not_length
+    mov rdi, [rbp - ITB_KWVAL]
+    V_UNPACK rdi, rdx
+    extern obj_as_index
+    call obj_as_index
+    mov [rbp - ITB_LEN], rax
+    jmp .itb_kw_next
+
+.itb_kw_not_length:
+    mov r10, [rbp - ITB_KWNAME]
+    lea rdi, [r10 + PyStrObject.data]
+    CSTRING rsi, "byteorder"
+    call ap_strcmp
+    test eax, eax
+    jnz .itb_kw_unknown
+    mov rdi, [rbp - ITB_KWVAL]
+    call itb_order_from_str
+    test rax, rax
+    jz .itb_kw_bad_order
+    cmp rax, 2
+    je .itb_kw_bad_type
+    mov [rbp - ITB_ORDER], rax
+
+.itb_kw_next:
+    pop r9
+    pop r8
+    pop rcx
+    pop rax
+    inc r9
+    jmp .itb_kw_loop
+
+.itb_kw_unknown:
+    pop r9
+    pop r8
+    pop rcx
+    pop rax
+    jmp .itb_kw_error
+
+.itb_kw_bad_order:
+    pop r9
+    pop r8
+    pop rcx
+    pop rax
     jmp .itb_order_error
 
-.itb_big:
-    ; Big-endian: MSB first
-    mov rdi, r12                    ; length
-    call bytes_new
-    mov rbx, rax
+.itb_kw_bad_type:
+    pop r9
+    pop r8
+    pop rcx
+    pop rax
+    jmp .itb_error
 
-    ; Fill from end to start
-    mov rax, [rbp - ITB_SELF]
-    mov rcx, r12
-.itb_big_loop:
-    test rcx, rcx
-    jz .itb_return
-    dec rcx
-    mov [rbx + PyBytesObject.data + rcx], al
-    shr rax, 8
-    jmp .itb_big_loop
+.itb_kw_done:
+    mov r12, r8                                 ; only the positionals remain
+    mov qword [rel kw_names_pending], 0
 
-.itb_little:
-    ; Little-endian: LSB first
-    mov rdi, r12
-    call bytes_new
-    mov rbx, rax
+.itb_positional:
+    cmp r12, 1
+    jl .itb_error
+    cmp r12, 3
+    jg .itb_error       ; signed= is keyword-only, as it is in CPython
 
-    mov rax, [rbp - ITB_SELF]
-    xor ecx, ecx
-.itb_little_loop:
-    cmp rcx, r12
-    jge .itb_return
-    mov [rbx + PyBytesObject.data + rcx], al
-    shr rax, 8
+    cmp r12, 2
+    jl .itb_have_args
+    ; obj_as_index, not a TAG_SMALLINT test: a length of 9 is a heap int under
+    ; INT_STRESS=1, and every int is a pointer to something there.
+    mov rdi, [rbx + 8]                          ; args[1] = length
+    V_UNPACK rdi, rdx
+    extern obj_as_index
+    call obj_as_index
+    mov [rbp - ITB_LEN], rax
+
+    cmp r12, 3
+    jl .itb_have_args
+    mov rdi, [rbx + 16]                         ; args[2] = byteorder
+    call itb_order_from_str
+    test rax, rax
+    jz .itb_order_error
+    cmp rax, 2
+    je .itb_error
+    mov [rbp - ITB_ORDER], rax
+.itb_order_done:
+
+
+.itb_have_args:
+    cmp qword [rbp - ITB_LEN], 0
+    jl .itb_length_error
+
+    mov rdi, rbx
+    lea rsi, [rbp - ITB_V]
+    call num_self_to_mpz
+
+    ; Does it fit?  nbits = 8 * length; b = the bit length of abs(self).
+    ;   unsigned: self >= 0 and b <= nbits
+    ;   signed, self >= 0: b <= nbits - 1
+    ;   signed, self <  0: b <= nbits - 1, or b == nbits with abs(self) a
+    ;                      power of two -- that is exactly -2**(nbits-1)
+    ; None of this existed: the value was truncated to 64 bits and shifted out
+    ; a byte at a time, so (-1).to_bytes(1, 'big') answered b'\xff' instead of
+    ; raising, and a value past 2**64 lost its top.
+    lea rdi, [rbp - ITB_V]
+    xor esi, esi
+    extern __gmpz_cmp_si
+    call __gmpz_cmp_si wrt ..plt
+    test eax, eax
+    jz .itb_zero
+    mov r12d, 0
+    jns .itb_have_sign
+    mov r12d, 1                                 ; self is negative
+.itb_have_sign:
+    test r12d, r12d
+    jz .itb_magnitude
+    cmp qword [rbp - ITB_SIGNED], 0
+    je .itb_negative_error
+
+.itb_magnitude:
+    lea rdi, [rbp - ITB_T]
+    lea rsi, [rbp - ITB_V]
+    extern __gmpz_init_set
+    call __gmpz_init_set wrt ..plt
+    lea rdi, [rbp - ITB_T]
+    mov rsi, rdi
+    call __gmpz_abs wrt ..plt
+
+    lea rdi, [rbp - ITB_T]
+    mov esi, 2
+    extern __gmpz_sizeinbase
+    call __gmpz_sizeinbase wrt ..plt
+    mov rbx, rax                                ; b
+
+    mov rcx, [rbp - ITB_LEN]
+    shl rcx, 3                                  ; nbits
+    cmp qword [rbp - ITB_SIGNED], 0
+    je .itb_fit_unsigned
+    dec rcx                                     ; one bit goes to the sign
+    cmp rbx, rcx
+    jle .itb_fits
+    test r12d, r12d
+    jz .itb_overflow
+    ; -2**(nbits-1) is the one negative value that needs the extra bit.
     inc rcx
-    jmp .itb_little_loop
+    cmp rbx, rcx
+    jne .itb_overflow
+    lea rdi, [rbp - ITB_T]
+    call __gmpz_popcount wrt ..plt
+    cmp rax, 1
+    jne .itb_overflow
+    jmp .itb_fits
+.itb_fit_unsigned:
+    cmp rbx, rcx
+    jg .itb_overflow
 
-.itb_return:
-    mov rax, rbx
+.itb_fits:
+    ; A negative value is exported as its two's complement, 2**nbits - abs.
+    test r12d, r12d
+    jz .itb_export
+    sub rsp, 16
+    mov rdi, rsp
+    extern __gmpz_init
+    call __gmpz_init wrt ..plt
+    mov rdi, rsp
+    mov esi, 2
+    mov rdx, [rbp - ITB_LEN]
+    shl rdx, 3
+    extern __gmpz_ui_pow_ui
+    call __gmpz_ui_pow_ui wrt ..plt
+    lea rdi, [rbp - ITB_T]
+    mov rsi, rsp
+    lea rdx, [rbp - ITB_T]
+    extern __gmpz_sub
+    call __gmpz_sub wrt ..plt
+    mov rdi, rsp
+    call __gmpz_clear wrt ..plt
+    add rsp, 16
+
+.itb_export:
+    mov rdi, [rbp - ITB_LEN]
+    call bytes_new
+    mov [rbp - ITB_OUT], rax
+    mov rbx, rax
+    lea rdi, [rbx + PyBytesObject.data]
+    xor esi, esi
+    mov rdx, [rbp - ITB_LEN]
+    extern ap_memset
+    call ap_memset
+
+    ; How many bytes the magnitude occupies, so a big-endian export lands at
+    ; the right offset and the leading zeroes stay zero.
+    lea rdi, [rbp - ITB_T]
+    mov esi, 2
+    call __gmpz_sizeinbase wrt ..plt
+    add rax, 7
+    shr rax, 3                                  ; nbytes
+    mov r12, rax
+
+    lea rdi, [rbx + PyBytesObject.data]
+    cmp qword [rbp - ITB_ORDER], 0
+    jl .itb_export_call                         ; little: LSB first, at offset 0
+    add rdi, [rbp - ITB_LEN]
+    sub rdi, r12                                ; big: right-aligned
+.itb_export_call:
+    lea rsi, [rbp - ITB_COUNT]
+    mov rdx, [rbp - ITB_ORDER]                  ; 1 = MSB first, -1 = LSB first
+    mov ecx, 1                                  ; one byte per "word"
+    xor r8d, r8d                                ; endian, irrelevant at size 1
+    xor r9d, r9d                                ; no nails
+    sub rsp, 16
+    lea rax, [rbp - ITB_T]
+    mov [rsp], rax                              ; the seventh argument
+    extern __gmpz_export
+    call __gmpz_export wrt ..plt
+    add rsp, 16
+
+    lea rdi, [rbp - ITB_T]
+    call __gmpz_clear wrt ..plt
+    lea rdi, [rbp - ITB_V]
+    call __gmpz_clear wrt ..plt
+
+    mov rax, [rbp - ITB_OUT]
     mov edx, TAG_PTR
     pop r12
     pop rbx
@@ -305,11 +658,51 @@ DEF_FUNC int_method_to_bytes, ITB_FRAME
     V_PACK rax, rdx             ; builtins return one Value
     ret
 
+.itb_zero:
+    ; Zero fits in any length, including zero bytes.
+    lea rdi, [rbp - ITB_V]
+    call __gmpz_clear wrt ..plt
+    mov rdi, [rbp - ITB_LEN]
+    call bytes_new
+    mov rbx, rax
+    lea rdi, [rbx + PyBytesObject.data]
+    xor esi, esi
+    mov rdx, [rbp - ITB_LEN]
+    call ap_memset
+    mov rax, rbx
+    mov edx, TAG_PTR
+    pop r12
+    pop rbx
+    leave
+    V_PACK rax, rdx
+    ret
+
+.itb_overflow:
+    ; RAISE does not return, so an mpz_t initialised above it is never
+    ; cleared: a loop probing widths leaked GMP memory linearly.  Both are
+    ; live here; only ITB_V is at the negative check.
+    lea rdi, [rbp - ITB_T]
+    call __gmpz_clear wrt ..plt
+    lea rdi, [rbp - ITB_V]
+    call __gmpz_clear wrt ..plt
+    RAISE exc_OverflowError_type, "int too big to convert"
+
+.itb_negative_error:
+    lea rdi, [rbp - ITB_V]
+    call __gmpz_clear wrt ..plt
+    RAISE exc_OverflowError_type, "can't convert negative int to unsigned"
+
+.itb_length_error:
+    RAISE exc_ValueError_type, "length argument must be non-negative"
+
+.itb_kw_error:
+    RAISE exc_TypeError_type, "to_bytes() got an unexpected keyword argument"
+
 .itb_error:
     RAISE exc_TypeError_type, "to_bytes() requires (length, byteorder) arguments"
 
 .itb_order_error:
-    RAISE exc_ValueError_type, "byteorder must be 'little' or 'big'"
+    RAISE exc_ValueError_type, "byteorder must be either 'little' or 'big'"
 END_FUNC int_method_to_bytes
 
 ;; ============================================================================
@@ -318,13 +711,19 @@ END_FUNC int_method_to_bytes
 ;; This is a classmethod: cls is passed as first arg.
 ;; ============================================================================
 
-IFB_BYTES equ 8
-IFB_CLS   equ 16
-IFB_VAL   equ 24
-IFB_OWNED equ 32
-IFB_NARGS equ 40
-IFB_ARGS  equ 48
-IFB_FRAME equ 64          ; + 2 pushes = 80
+IFB_BYTES  equ 8
+IFB_CLS    equ 16
+IFB_VAL    equ 24
+IFB_OWNED  equ 32
+IFB_NARGS  equ 40
+IFB_ARGS   equ 48
+IFB_ORDER  equ 56       ; 1 = big-endian, -1 = little
+IFB_SIGNED equ 64
+IFB_M      equ 80       ; mpz_t: the magnitude read out of the bytes
+IFB_KWNAME equ 104      ; the keyword being matched, and the value given for it
+IFB_KWVAL  equ 112
+IFB_BYTESKW equ 120     ; a bytes= keyword overrides args[1]
+IFB_FRAME  equ 128          ; + 2 pushes = 144, 16-aligned
 
 DEF_FUNC int_classmethod_from_bytes, IFB_FRAME
     push rbx
@@ -336,11 +735,124 @@ DEF_FUNC int_classmethod_from_bytes, IFB_FRAME
     mov rax, [rdi]
     mov [rbp - IFB_CLS], rax        ; cls, for a subclass result
     mov qword [rbp - IFB_OWNED], 0
+    mov qword [rbp - IFB_ORDER], 1  ; 'big' since 3.11
+    mov qword [rbp - IFB_SIGNED], 0
+    mov qword [rbp - IFB_BYTESKW], 0
+
+    ; bytes, byteorder and signed may all arrive by keyword -- CPython's
+    ; signature is from_bytes(bytes, byteorder='big', *, signed=False), and
+    ; pickle spells byteorder= out.  Taking only signed= here made every such
+    ; call a TypeError.  The keyword values sit in the trailing argument
+    ; slots.
+    mov rax, [rel kw_names_pending]
+    test rax, rax
+    jz .ifb_no_kw
+    mov rcx, [rax + PyTupleObject.ob_size]
+    mov r8, rsi
+    sub r8, rcx                     ; n_pos
+    xor r9d, r9d
+.ifb_kw_loop:
+    cmp r9, rcx
+    jge .ifb_kw_done
+    mov r10, [rax + PyTupleObject.ob_item]
+    mov r10, [r10 + r9*8]
+    mov [rbp - IFB_KWNAME], r10
+    mov r11, r8
+    add r11, r9
+    push rax
+    mov rax, [rbp - IFB_ARGS]
+    mov r11, [rax + r11*8]          ; the value given for it
+    pop rax
+    mov [rbp - IFB_KWVAL], r11
+    push rax
+    push rcx
+    push r8
+    push r9
+
+    lea rdi, [r10 + PyStrObject.data]
+    CSTRING rsi, "signed"
+    call ap_strcmp
+    test eax, eax
+    jnz .ifb_kw_not_signed
+    mov rdi, [rbp - IFB_KWVAL]
+    call obj_is_true
+    mov [rbp - IFB_SIGNED], rax
+    jmp .ifb_kw_next
+
+.ifb_kw_not_signed:
+    mov r10, [rbp - IFB_KWNAME]
+    lea rdi, [r10 + PyStrObject.data]
+    CSTRING rsi, "byteorder"
+    call ap_strcmp
+    test eax, eax
+    jnz .ifb_kw_not_order
+    mov rdi, [rbp - IFB_KWVAL]
+    call itb_order_from_str
+    test rax, rax
+    jz .ifb_kw_bad_order
+    cmp rax, 2
+    je .ifb_kw_bad_type
+    mov [rbp - IFB_ORDER], rax
+    jmp .ifb_kw_next
+
+.ifb_kw_not_order:
+    mov r10, [rbp - IFB_KWNAME]
+    lea rdi, [r10 + PyStrObject.data]
+    CSTRING rsi, "bytes"
+    call ap_strcmp
+    test eax, eax
+    jnz .ifb_kw_unknown
+    mov r10, [rbp - IFB_KWVAL]
+    mov [rbp - IFB_BYTESKW], r10
+
+.ifb_kw_next:
+    pop r9
+    pop r8
+    pop rcx
+    pop rax
+    inc r9
+    jmp .ifb_kw_loop
+
+.ifb_kw_unknown:
+    pop r9
+    pop r8
+    pop rcx
+    pop rax
+    jmp .ifb_kw_error
+
+.ifb_kw_bad_order:
+    pop r9
+    pop r8
+    pop rcx
+    pop rax
+    jmp .ifb_order_error
+
+.ifb_kw_bad_type:
+    pop r9
+    pop r8
+    pop rcx
+    pop rax
+    jmp .ifb_error
+
+.ifb_kw_done:
+    mov rsi, r8                     ; only the positionals remain
+    mov qword [rel kw_names_pending], 0
+    cmp rsi, 2
+    jge .ifb_no_kw
+    cmp qword [rbp - IFB_BYTESKW], 0
+    je .ifb_error                   ; the value itself has to come from
+                                    ; somewhere: bytes= or args[1]
+.ifb_no_kw:
 
     ; args[1] is any iterable of ints, not only a bytes: ipaddress passes a
     ; map object.  Anything that is not already a bytes goes through bytes()
     ; first, which is where CPython's own conversion lives too.
+    mov rax, [rbp - IFB_BYTESKW]
+    test rax, rax
+    jnz .ifb_have_value
+    mov rdi, [rbp - IFB_ARGS]
     mov rax, [rdi + 8]
+.ifb_have_value:
     V_TEST_PTR rax, rcx
     ja .ifb_convert
     test rax, rax
@@ -368,65 +880,99 @@ DEF_FUNC int_classmethod_from_bytes, IFB_FRAME
     ; it unconditionally walked off the end of the argument array -- which is
     ; how ipaddress calls it.
     cmp rsi, 3
-    jl .ifb_big
+    jl .ifb_have_order
     mov rdi, [rbp - IFB_ARGS]
-    mov rcx, [rdi + 16]            ; payload
-    V_UNPACK rcx, rdx       ; args[2]
-    cmp edx, TAG_PTR
-    jne .ifb_error
-    push rcx
+    mov rdi, [rdi + 16]            ; args[2] = byteorder
+    mov [rbp - IFB_NARGS], rsi
+    call itb_order_from_str
+    mov rsi, [rbp - IFB_NARGS]
+    test rax, rax
+    jz .ifb_order_error
+    cmp rax, 2
+    je .ifb_error
+    mov [rbp - IFB_ORDER], rax
 
-    lea rdi, [rcx + PyStrObject.data]
-    CSTRING rsi, "big"
-    call ap_strcmp
-    pop rcx
-    test eax, eax
-    jz .ifb_big
+.ifb_have_order:
+    ; The magnitude, at full width.  This used to accumulate into one 64-bit
+    ; register a byte at a time, so anything past eight bytes silently kept
+    ; only its low end: int.from_bytes((2**70).to_bytes(16,'big'),'big') was
+    ; 0.  signed= was not read at all.
+    lea rdi, [rbp - IFB_M]
+    extern __gmpz_init
+    call __gmpz_init wrt ..plt
 
-    push rcx
-    lea rdi, [rcx + PyStrObject.data]
-    CSTRING rsi, "little"
-    call ap_strcmp
-    pop rcx
-    test eax, eax
-    jz .ifb_little
-
-    jmp .ifb_order_error
-
-.ifb_big:
-    ; Big-endian: MSB first
     mov rax, [rbp - IFB_BYTES]
-    mov rcx, [rax + PyBytesObject.ob_size]
-    lea rsi, [rax + PyBytesObject.data]
-    xor r12, r12                    ; result = 0
-    xor edx, edx                   ; index
-.ifb_big_loop:
-    cmp rdx, rcx
-    jge .ifb_return
-    shl r12, 8
-    movzx eax, byte [rsi + rdx]
-    or r12, rax
-    inc rdx
-    jmp .ifb_big_loop
+    mov r12, [rax + PyBytesObject.ob_size]
+    test r12, r12
+    jz .ifb_build                   ; b'' is 0, in either order
 
-.ifb_little:
-    ; Little-endian: LSB first
+    lea rax, [rax + PyBytesObject.data]
+    sub rsp, 16
+    mov [rsp], rax                  ; the seventh argument
+    lea rdi, [rbp - IFB_M]
+    mov rsi, r12                    ; count
+    mov rdx, [rbp - IFB_ORDER]      ; 1 = MSB first, -1 = LSB first
+    mov ecx, 1                      ; one byte per "word"
+    xor r8d, r8d                    ; endian, irrelevant at size 1
+    xor r9d, r9d                    ; no nails
+    extern __gmpz_import
+    call __gmpz_import wrt ..plt
+    add rsp, 16
+
+    ; A signed value whose top bit is set is that magnitude minus 2**(8*n).
+    cmp qword [rbp - IFB_SIGNED], 0
+    je .ifb_build
     mov rax, [rbp - IFB_BYTES]
-    mov rcx, [rax + PyBytesObject.ob_size]
-    lea rsi, [rax + PyBytesObject.data]
-    xor r12, r12
-    mov rdx, rcx
-    dec rdx
-.ifb_little_loop:
-    test rdx, rdx
-    js .ifb_return
-    shl r12, 8
-    movzx eax, byte [rsi + rdx]
-    or r12, rax
-    dec rdx
-    jmp .ifb_little_loop
+    lea rax, [rax + PyBytesObject.data]
+    cmp qword [rbp - IFB_ORDER], 0
+    jl .ifb_sign_little
+    movzx ecx, byte [rax]           ; big-endian: the first byte
+    jmp .ifb_sign_test
+.ifb_sign_little:
+    movzx ecx, byte [rax + r12 - 1] ; little-endian: the last
+.ifb_sign_test:
+    test cl, 0x80
+    jz .ifb_build
 
-.ifb_return:
+    sub rsp, 16
+    mov rdi, rsp
+    call __gmpz_init wrt ..plt
+    mov rdi, rsp
+    mov esi, 2
+    mov rdx, r12
+    shl rdx, 3                      ; 8 * n bits
+    extern __gmpz_ui_pow_ui
+    call __gmpz_ui_pow_ui wrt ..plt
+    lea rdi, [rbp - IFB_M]
+    mov rsi, rdi
+    mov rdx, rsp
+    extern __gmpz_sub
+    call __gmpz_sub wrt ..plt
+    mov rdi, rsp
+    extern __gmpz_clear
+    call __gmpz_clear wrt ..plt
+    add rsp, 16
+
+.ifb_build:
+    ; Hand the mpz to a heap int and let int_shrink decide whether it belongs
+    ; in the immediate range.
+    xor edi, edi
+    extern int_new_compact
+    call int_new_compact
+    mov rbx, rax
+    extern int_promote_mpz
+    INT_NEED_MPZ rbx
+    lea rdi, [rbx + PyIntObject.mpz]
+    lea rsi, [rbp - IFB_M]
+    extern __gmpz_set
+    call __gmpz_set wrt ..plt
+    lea rdi, [rbp - IFB_M]
+    call __gmpz_clear wrt ..plt
+    mov rdi, rbx
+    extern int_shrink
+    call int_shrink
+    mov [rbp - IFB_VAL], rax        ; the value, as a Value
+
     mov rdi, [rbp - IFB_OWNED]
     test rdi, rdi
     jz .ifb_no_owned
@@ -446,14 +992,17 @@ DEF_FUNC int_classmethod_from_bytes, IFB_FRAME
     mov rcx, [rax + PyTypeObject.tp_flags]
     test rcx, TYPE_FLAG_INT_SUBCLASS
     jz .ifb_plain
-    mov rax, r12
-    V_PACK_I64 rax, rcx
-    mov [rbp - IFB_VAL], rax
     mov rdi, [rbp - IFB_CLS]
     lea rsi, [rbp - IFB_VAL]
     mov edx, 1
     extern int_sub_new
     call int_sub_new
+    push rax
+    push rdx
+    mov rdi, [rbp - IFB_VAL]
+    DECREF_V rdi, rcx               ; int_sub_new took its own reference
+    pop rdx
+    pop rax
     pop r12
     pop rbx
     leave
@@ -461,12 +1010,16 @@ DEF_FUNC int_classmethod_from_bytes, IFB_FRAME
     ret
 
 .ifb_plain:
-    mov rax, r12
-    RET_TAG_SMALLINT
+    mov rax, [rbp - IFB_VAL]
+    mov edx, TAG_PTR
+    V_TEST_PTR rax, rcx
+    jbe .ifb_plain_done
+    xor edx, edx                    ; an immediate: it is its own Value
+    mov rdx, TAG_PTR
+.ifb_plain_done:
     pop r12
     pop rbx
     leave
-    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .ifb_failed:
@@ -478,11 +1031,14 @@ DEF_FUNC int_classmethod_from_bytes, IFB_FRAME
     V_PACK rax, rdx
     ret
 
+.ifb_kw_error:
+    RAISE exc_TypeError_type, "from_bytes() got an unexpected keyword argument"
+
 .ifb_error:
     RAISE exc_TypeError_type, "from_bytes() requires (bytes, byteorder) arguments"
 
 .ifb_order_error:
-    RAISE exc_ValueError_type, "byteorder must be 'little' or 'big'"
+    RAISE exc_ValueError_type, "byteorder must be either 'little' or 'big'"
 END_FUNC int_classmethod_from_bytes
 
 

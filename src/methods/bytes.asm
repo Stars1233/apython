@@ -10,6 +10,7 @@
 
 
 ; External functions
+extern bytearray_type
 extern bytes_like_ptr_len
 extern int_is_integer
 extern obj_as_index
@@ -555,9 +556,22 @@ BF_ONE    equ 72            ; a one-byte bytes header, for an int needle
 ; find() searched for a length instead of a character.
 BF_SLEN   equ BF_ONE + 8
 BF_NLEN   equ BF_ONE + 16
-BF_FRAME  equ BF_ONE + 24   ; + 0 pushes = 96
+BF_RIGHT  equ BF_ONE + 24   ; 1 for rfind and rindex
+BF_MISS   equ BF_ONE + 32   ; 1 to raise instead of answering -1
+BF_FRAME  equ BF_ONE + 40   ; + 0 pushes = 112
 
-DEF_FUNC bytes_method_find, BF_FRAME
+;; ============================================================================
+;; bytes_find_impl(rdi = args, rsi = nargs, edx = from_right, ecx = raise)
+;;   -> the index, or -1
+;;
+;; One body for find, rfind, index and rindex: the two directions differ only
+;; in where the scan starts, and index and rindex differ from the first two
+;; only in answering a miss with a ValueError.  bytes had the first of the
+;; four and neither of the others.
+;; ============================================================================
+DEF_FUNC bytes_find_impl, BF_FRAME
+    mov [rbp - BF_RIGHT], rdx
+    mov [rbp - BF_MISS], rcx
     cmp rsi, 2
     jl .bf_error
     cmp rsi, 4
@@ -630,9 +644,15 @@ DEF_FUNC bytes_method_find, BF_FRAME
 .bf_have_range:
     mov r9, [rbp - BF_NLEN]                 ; sub_len
 
-    ; An empty needle is found at the start position.
+    ; An empty needle is found at the start position -- at the END position
+    ; when the scan runs the other way, which is what rfind answers.
     test r9, r9
-    jz .bf_found_at_start
+    jnz .bf_nonempty
+    cmp qword [rbp - BF_RIGHT], 0
+    je .bf_found_at_start
+    mov r11, r8
+    jmp .bf_found_at_start
+.bf_nonempty:
 
     cmp r11, r8
     ja .bf_not_found
@@ -640,6 +660,37 @@ DEF_FUNC bytes_method_find, BF_FRAME
     sub rax, r11
     cmp r9, rax
     ja .bf_not_found
+
+    cmp qword [rbp - BF_RIGHT], 0
+    je .bf_loop
+
+    ; From the right: start at the last position the needle can begin at and
+    ; walk down to the start.
+    mov r10, r8
+    sub r10, r9                 ; the last candidate
+.bf_rloop:
+    cmp r10, r11
+    jl .bf_not_found
+    mov rdi, [rbp - BF_SELF]
+    add rdi, r10
+    mov rsi, [rbp - BF_SUB]
+    mov rdx, r9
+    push r8
+    push r9
+    push r10
+    push r11
+    call ap_memcmp
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    test eax, eax
+    jz .bf_rfound
+    dec r10
+    jmp .bf_rloop
+.bf_rfound:
+    mov r11, r10
+    jmp .bf_found
 
 .bf_loop:
     mov rax, r8
@@ -679,11 +730,16 @@ DEF_FUNC bytes_method_find, BF_FRAME
     ret
 
 .bf_not_found:
+    cmp qword [rbp - BF_MISS], 0
+    jne .bf_miss_error
     mov rax, -1
     RET_TAG_SMALLINT
     leave
     V_PACK rax, rdx             ; builtins return one Value
     ret
+
+.bf_miss_error:
+    RAISE exc_ValueError_type, "subsection not found"
 
 .bf_found_at_start:
     mov rax, r11
@@ -696,7 +752,364 @@ DEF_FUNC bytes_method_find, BF_FRAME
     RAISE exc_TypeError_type, "a bytes-like object is required"
 .bf_error:
     RAISE exc_TypeError_type, "find() takes at most 3 arguments"
+END_FUNC bytes_find_impl
+
+;; ============================================================================
+;; find / rfind / index / rindex, which differ only in direction and in what a
+;; miss answers.
+;; ============================================================================
+DEF_FUNC_BARE bytes_method_find
+    xor edx, edx
+    xor ecx, ecx
+    jmp bytes_find_impl
 END_FUNC bytes_method_find
+
+DEF_FUNC_BARE bytes_method_rfind
+    mov edx, 1
+    xor ecx, ecx
+    jmp bytes_find_impl
+END_FUNC bytes_method_rfind
+
+DEF_FUNC_BARE bytes_method_index
+    xor edx, edx
+    mov ecx, 1
+    jmp bytes_find_impl
+END_FUNC bytes_method_index
+
+DEF_FUNC_BARE bytes_method_rindex
+    mov edx, 1
+    mov ecx, 1
+    jmp bytes_find_impl
+END_FUNC bytes_method_rindex
+
+;; ============================================================================
+;; bytes_strip_impl(rdi = args, rsi = nargs, edx = mode)
+;;   mode 0 = both ends, 1 = left only, 2 = right only
+;;
+;; strip([chars]): with no argument, ASCII whitespace; with one, every byte in
+;; it, as a set.  bytes had none of the three.
+;; ============================================================================
+BST_SELF  equ 8
+BST_CHARS equ 16
+BST_SLEN  equ 24
+BST_CLEN  equ 32
+BST_MODE  equ 40
+BST_FRAME equ 48            ; + 0 pushes = 48
+
+DEF_FUNC bytes_strip_impl, BST_FRAME
+    mov [rbp - BST_MODE], rdx
+    cmp rsi, 1
+    jl .bst_error
+    cmp rsi, 2
+    jg .bst_error
+
+    mov qword [rbp - BST_CHARS], 0
+    mov qword [rbp - BST_CLEN], 0
+    push rdi
+    push rsi
+    mov rdi, [rdi]
+    call bytes_like_ptr_len
+    pop rsi
+    pop rdi
+    test ecx, ecx
+    jz .bst_type
+    mov [rbp - BST_SELF], rax
+    mov [rbp - BST_SLEN], r10
+
+    cmp rsi, 2
+    jl .bst_have_chars
+    mov rax, [rdi + 8]
+    LOAD_NONE rcx
+    cmp rax, rcx
+    je .bst_have_chars
+    mov rdi, rax
+    call bytes_like_ptr_len
+    test ecx, ecx
+    jz .bst_type
+    mov [rbp - BST_CHARS], rax
+    mov [rbp - BST_CLEN], r10
+
+.bst_have_chars:
+    xor r8d, r8d                        ; start
+    mov r9, [rbp - BST_SLEN]            ; end, exclusive
+
+    cmp qword [rbp - BST_MODE], 2
+    je .bst_right
+.bst_left_loop:
+    cmp r8, r9
+    jge .bst_left_done
+    mov rax, [rbp - BST_SELF]
+    movzx edi, byte [rax + r8]
+    call bst_in_set
+    test eax, eax
+    jz .bst_left_done
+    inc r8
+    jmp .bst_left_loop
+.bst_left_done:
+    cmp qword [rbp - BST_MODE], 1
+    je .bst_build
+
+.bst_right:
+    cmp r9, r8
+    jle .bst_build
+    mov rax, [rbp - BST_SELF]
+    movzx edi, byte [rax + r9 - 1]
+    call bst_in_set
+    test eax, eax
+    jz .bst_build
+    dec r9
+    jmp .bst_right
+
+.bst_build:
+    mov rdi, [rbp - BST_SELF]
+    add rdi, r8
+    mov rsi, r9
+    sub rsi, r8
+    call bytes_from_data
+    mov edx, TAG_PTR
+    leave
+    V_PACK rax, rdx
+    ret
+
+.bst_type:
+    RAISE exc_TypeError_type, "a bytes-like object is required"
+.bst_error:
+    RAISE exc_TypeError_type, "strip() takes at most 1 argument"
+END_FUNC bytes_strip_impl
+
+;; bst_in_set(edi = a byte) -> eax = 1 when it is to be stripped.  Reads the
+;; caller's BST_CHARS/BST_CLEN through rbp, which is why it is not a
+;; standalone function.
+DEF_FUNC_BARE bst_in_set
+    push rcx
+    push rdx
+    mov rcx, [rbp - BST_CHARS]
+    test rcx, rcx
+    jz .bis_space
+    mov rdx, [rbp - BST_CLEN]
+    xor eax, eax
+.bis_scan:
+    cmp rax, rdx
+    jge .bis_no
+    cmp dil, [rcx + rax]
+    je .bis_yes
+    inc rax
+    jmp .bis_scan
+.bis_space:
+    cmp dil, ' '
+    je .bis_yes
+    cmp dil, 9
+    je .bis_yes
+    cmp dil, 10
+    je .bis_yes
+    cmp dil, 11
+    je .bis_yes
+    cmp dil, 12
+    je .bis_yes
+    cmp dil, 13
+    je .bis_yes
+.bis_no:
+    xor eax, eax
+    pop rdx
+    pop rcx
+    ret
+.bis_yes:
+    mov eax, 1
+    pop rdx
+    pop rcx
+    ret
+END_FUNC bst_in_set
+
+DEF_FUNC_BARE bytes_method_strip
+    xor edx, edx
+    jmp bytes_strip_impl
+END_FUNC bytes_method_strip
+
+DEF_FUNC_BARE bytes_method_lstrip
+    mov edx, 1
+    jmp bytes_strip_impl
+END_FUNC bytes_method_lstrip
+
+DEF_FUNC_BARE bytes_method_rstrip
+    mov edx, 2
+    jmp bytes_strip_impl
+END_FUNC bytes_method_rstrip
+
+;; ============================================================================
+;; bytes_partition_impl(rdi = args, rsi = nargs, edx = from_right)
+;;   -> a 3-tuple (head, sep, tail)
+;;
+;; partition and rpartition.  A separator that is not there answers the whole
+;; string and two empties, at whichever end.
+;; ============================================================================
+BPT_SELF  equ 8
+BPT_SEP   equ 16
+BPT_SLEN  equ 24
+BPT_NLEN  equ 32
+BPT_RIGHT equ 40
+BPT_POS   equ 48
+BPT_FRAME equ 56            ; + 1 push = 64, 16-aligned
+
+extern tuple_new
+DEF_FUNC bytes_partition_impl, BPT_FRAME
+    push rbx
+    mov [rbp - BPT_RIGHT], rdx
+    cmp rsi, 2
+    jne .bpt_error
+
+    push rdi
+    mov rdi, [rdi]
+    call bytes_like_ptr_len
+    pop rdi
+    test ecx, ecx
+    jz .bpt_type
+    mov [rbp - BPT_SELF], rax
+    mov [rbp - BPT_SLEN], r10
+    push rdi
+    mov rdi, [rdi + 8]
+    call bytes_like_ptr_len
+    pop rdi
+    test ecx, ecx
+    jz .bpt_type
+    mov [rbp - BPT_SEP], rax
+    mov [rbp - BPT_NLEN], r10
+    test r10, r10
+    jz .bpt_empty_sep
+
+    ; Where the separator sits, from whichever end.
+    mov r8, [rbp - BPT_SLEN]
+    sub r8, [rbp - BPT_NLEN]
+    js .bpt_missing
+    cmp qword [rbp - BPT_RIGHT], 0
+    jne .bpt_rscan
+    xor r9d, r9d
+.bpt_scan:
+    cmp r9, r8
+    jg .bpt_missing
+    mov rdi, [rbp - BPT_SELF]
+    add rdi, r9
+    mov rsi, [rbp - BPT_SEP]
+    mov rdx, [rbp - BPT_NLEN]
+    push r8
+    push r9
+    call ap_memcmp
+    pop r9
+    pop r8
+    test eax, eax
+    jz .bpt_found
+    inc r9
+    jmp .bpt_scan
+
+.bpt_rscan:
+    mov r9, r8
+.bpt_rscan_loop:
+    test r9, r9
+    js .bpt_missing
+    mov rdi, [rbp - BPT_SELF]
+    add rdi, r9
+    mov rsi, [rbp - BPT_SEP]
+    mov rdx, [rbp - BPT_NLEN]
+    push r8
+    push r9
+    call ap_memcmp
+    pop r9
+    pop r8
+    test eax, eax
+    jz .bpt_found
+    dec r9
+    jmp .bpt_rscan_loop
+
+.bpt_found:
+    ; The position goes to the frame first: tuple_new is a call, and r9 is
+    ; caller-saved.
+    mov [rbp - BPT_POS], r9
+    mov edi, 3
+    call tuple_new
+    mov rbx, rax
+    mov rdi, [rbp - BPT_SELF]
+    mov rsi, [rbp - BPT_POS]
+    call bytes_from_data
+    mov rcx, [rbx + PyTupleObject.ob_item]
+    mov [rcx], rax
+    mov rdi, [rbp - BPT_SEP]
+    mov rsi, [rbp - BPT_NLEN]
+    call bytes_from_data
+    mov rcx, [rbx + PyTupleObject.ob_item]
+    mov [rcx + 8], rax
+    mov r9, [rbp - BPT_POS]
+    mov rdi, [rbp - BPT_SELF]
+    add rdi, r9
+    add rdi, [rbp - BPT_NLEN]
+    mov rsi, [rbp - BPT_SLEN]
+    sub rsi, r9
+    sub rsi, [rbp - BPT_NLEN]
+    call bytes_from_data
+    mov rcx, [rbx + PyTupleObject.ob_item]
+    mov [rcx + 16], rax
+    mov rax, rbx
+    mov edx, TAG_PTR
+    pop rbx
+    leave
+    V_PACK rax, rdx
+    ret
+
+.bpt_missing:
+    ; partition puts the whole string first, rpartition puts it last.
+    mov edi, 3
+    call tuple_new
+    mov rbx, rax
+    mov rdi, [rbp - BPT_SELF]
+    mov rsi, [rbp - BPT_SLEN]
+    call bytes_from_data
+    mov rcx, [rbx + PyTupleObject.ob_item]
+    cmp qword [rbp - BPT_RIGHT], 0
+    jne .bpt_missing_right
+    mov [rcx], rax
+    mov r8, 8
+    jmp .bpt_missing_fill
+.bpt_missing_right:
+    mov [rcx + 16], rax
+    xor r8d, r8d
+.bpt_missing_fill:
+    push r8
+    xor edi, edi
+    xor esi, esi
+    call bytes_from_data
+    pop r8
+    mov rcx, [rbx + PyTupleObject.ob_item]
+    mov [rcx + r8], rax
+    push r8
+    xor edi, edi
+    xor esi, esi
+    call bytes_from_data
+    pop r8
+    mov rcx, [rbx + PyTupleObject.ob_item]
+    add r8, 8
+    mov [rcx + r8], rax
+    mov rax, rbx
+    mov edx, TAG_PTR
+    pop rbx
+    leave
+    V_PACK rax, rdx
+    ret
+
+.bpt_empty_sep:
+    RAISE exc_ValueError_type, "empty separator"
+.bpt_type:
+    RAISE exc_TypeError_type, "a bytes-like object is required"
+.bpt_error:
+    RAISE exc_TypeError_type, "partition() takes exactly one argument"
+END_FUNC bytes_partition_impl
+
+DEF_FUNC_BARE bytes_method_partition
+    xor edx, edx
+    jmp bytes_partition_impl
+END_FUNC bytes_method_partition
+
+DEF_FUNC_BARE bytes_method_rpartition
+    mov edx, 1
+    jmp bytes_partition_impl
+END_FUNC bytes_method_rpartition
 
 ;; ============================================================================
 ;; bytes_method_replace(args, nargs) -> new bytes
@@ -896,19 +1309,25 @@ DEF_FUNC bytes_method_replace, BR_FRAME
 END_FUNC bytes_method_replace
 
 ;; ============================================================================
-;; bytes_method_split(args, nargs) -> list of bytes
+;; bytes_split_impl(rdi = args, rsi = nargs, edx = from_right) -> list of bytes
 ;; nargs==1: split by whitespace; nargs==2: split by separator bytes
+;;
+;; One implementation for split and rsplit, the shape str_split_impl already
+;; has.  The two differ only in which end maxsplit counts from, so the
+;; right-hand arms scan backwards and insert each piece at the front.
 ;; ============================================================================
 BSP_SEPLEN equ 8
 BSP_MAX    equ 16           ; splits left, or negative for "no limit"
-BSP_FRAME  equ 24           ; + 5 pushes = 64, 16-aligned
+BSP_RIGHT  equ 24           ; 1 for rsplit
+BSP_FRAME  equ 40           ; + 5 pushes = 80, 16-aligned
 
-DEF_FUNC bytes_method_split, BSP_FRAME
+DEF_FUNC bytes_split_impl, BSP_FRAME
     push rbx
     push r12
     push r13
     push r14
     push r15
+    mov [rbp - BSP_RIGHT], rdx
 
     ; rbx and r15 hold DATA POINTERS, not objects: a bytearray keeps its bytes
     ; out of line, so reading them through a bytes layout found the header.
@@ -970,6 +1389,9 @@ DEF_FUNC bytes_method_split, BSP_FRAME
     mov rdi, 8
     call list_new
     mov r13, rax                ; result list
+
+    cmp qword [rbp - BSP_RIGHT], 0
+    jne .bsp_wsr_loop
 
     xor ecx, ecx
 .bsp_ws_scan:
@@ -1052,6 +1474,9 @@ DEF_FUNC bytes_method_split, BSP_FRAME
     test r14, r14
     jz .bsp_empty_sep
 
+    cmp qword [rbp - BSP_RIGHT], 0
+    jne .bsp_sepr_scan_init
+
     ; r11 = segment start, rcx = scan position
     xor ecx, ecx
     xor r11d, r11d              ; segment start = 0
@@ -1132,12 +1557,170 @@ DEF_FUNC bytes_method_split, BSP_FRAME
     V_PACK rax, rdx             ; builtins return one Value
     ret
 
+.bsp_sepr_scan_init:
+    mov r11, r12                ; segment end, exclusive
+
+.bsp_sepr_scan:
+    cmp qword [rbp - BSP_MAX], 0
+    je .bsp_sepr_head           ; no splits left: the head is one piece
+    mov rcx, r11
+    sub rcx, r14                ; the last position a separator could start at
+    js .bsp_sepr_head
+
+.bsp_sepr_probe:
+    cmp rcx, 0
+    jl .bsp_sepr_head
+    push rcx
+    push r11
+    mov rdi, rbx
+    add rdi, rcx
+    mov rsi, r15
+    mov rdx, r14
+    call ap_memcmp
+    pop r11
+    pop rcx
+    test eax, eax
+    jz .bsp_sepr_found
+    dec rcx
+    jmp .bsp_sepr_probe
+
+.bsp_sepr_found:
+    ; the piece after this separator: [rcx + sep_len, r11)
+    push rcx
+    push r11
+    mov rdi, rbx
+    add rdi, rcx
+    add rdi, r14
+    mov rsi, r11
+    sub rsi, rcx
+    sub rsi, r14
+    call .bsp_emit_front
+    pop r11
+    pop rcx
+    mov r11, rcx                ; the next piece ends where this one started
+    cmp qword [rbp - BSP_MAX], 0
+    jl .bsp_sepr_scan           ; negative: no limit, never counts down
+    dec qword [rbp - BSP_MAX]
+    jmp .bsp_sepr_scan
+
+.bsp_sepr_head:
+    mov rdi, rbx
+    mov rsi, r11
+    call .bsp_emit_front
+    jmp .bsp_split_done
+
+.bsp_wsr_loop:
+    ; rsplit() with no separator: the same pieces, but maxsplit counts from
+    ; the right, so collect from the right and insert at the front.
+    ; r12 is the length here and doubles as the scan position.
+    test r12, r12
+    jle .bsp_split_done
+    movzx eax, byte [rbx + r12 - 1]
+    call .bsp_is_space
+    test eax, eax
+    jz .bsp_wsr_piece
+    dec r12
+    jmp .bsp_wsr_loop
+
+.bsp_wsr_piece:
+    cmp qword [rbp - BSP_MAX], 0
+    jne .bsp_wsr_scan
+    ; No splits left: everything to the left is the first piece, internal
+    ; whitespace and all -- b' a b '.rsplit(None, 1) is [b' a', b'b'].
+    xor r15d, r15d
+    jmp .bsp_wsr_emit
+
+.bsp_wsr_scan:
+    mov r15, r12                ; word start, scanning left
+.bsp_wsr_find:
+    test r15, r15
+    jle .bsp_wsr_emit
+    movzx eax, byte [rbx + r15 - 1]
+    call .bsp_is_space
+    test eax, eax
+    jnz .bsp_wsr_emit
+    dec r15
+    jmp .bsp_wsr_find
+
+.bsp_wsr_emit:
+    mov rdi, rbx
+    add rdi, r15
+    mov rsi, r12
+    sub rsi, r15
+    call .bsp_emit_front
+    mov r12, r15
+    cmp qword [rbp - BSP_MAX], 0
+    jl .bsp_wsr_loop            ; negative: no limit, never counts down
+    dec qword [rbp - BSP_MAX]
+    jmp .bsp_wsr_loop
+
+.bsp_split_done:
+    mov rax, r13
+    mov edx, TAG_PTR
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    V_PACK rax, rdx             ; builtins return one Value
+    ret
+
+;; .bsp_is_space(al = a byte) -> eax = 1 when it is one of the four bytes the
+;; forward scan treats as whitespace.
+.bsp_is_space:
+    cmp al, ' '
+    je .bsp_is_space_yes
+    cmp al, 9
+    je .bsp_is_space_yes
+    cmp al, 10
+    je .bsp_is_space_yes
+    cmp al, 13
+    je .bsp_is_space_yes
+    xor eax, eax
+    ret
+.bsp_is_space_yes:
+    mov eax, 1
+    ret
+
+;; .bsp_emit_front(rdi = data, rsi = length) -- build a bytes and put it at
+;; the front of the list in r13, through list.insert's own args interface.
+.bsp_emit_front:
+    call bytes_from_data
+    sub rsp, 32
+    mov [rsp], r13                  ; args[0] = the list
+    mov rcx, [rel v_int_bias]       ; the Value for 0
+    mov [rsp + 8], rcx
+    mov [rsp + 16], rax
+    push rax
+    lea rdi, [rsp + 8]
+    mov rsi, 3
+    extern list_method_insert
+    call list_method_insert
+    pop rdi
+    add rsp, 32
+    call obj_decref
+    ret
+
 .bsp_empty_sep:
     RAISE exc_ValueError_type, "empty separator"
 
 .bsp_type:
     RAISE exc_TypeError_type, "a bytes-like object is required"
+END_FUNC bytes_split_impl
+
+;; ============================================================================
+;; bytes_method_split(args, nargs) / bytes_method_rsplit(args, nargs)
+;; ============================================================================
+DEF_FUNC_BARE bytes_method_split
+    xor edx, edx                ; scan from the left
+    jmp bytes_split_impl
 END_FUNC bytes_method_split
+
+DEF_FUNC_BARE bytes_method_rsplit
+    mov edx, 1                  ; scan from the right
+    jmp bytes_split_impl
+END_FUNC bytes_method_rsplit
 
 ;; ============================================================================
 ;; bytes_method_join(args, nargs) -> new bytes
@@ -1685,6 +2268,69 @@ DEF_FUNC ba_shared_split
     jmp bytearray_shared_call
 END_FUNC ba_shared_split
 
+DEF_FUNC ba_shared_rsplit
+    lea rdx, [rel bytes_method_rsplit]
+    mov ecx, 2
+    leave
+    jmp bytearray_shared_call
+END_FUNC ba_shared_rsplit
+
+DEF_FUNC ba_shared_rfind
+    lea rdx, [rel bytes_method_rfind]
+    xor ecx, ecx
+    leave
+    jmp bytearray_shared_call
+END_FUNC ba_shared_rfind
+
+DEF_FUNC ba_shared_index
+    lea rdx, [rel bytes_method_index]
+    xor ecx, ecx
+    leave
+    jmp bytearray_shared_call
+END_FUNC ba_shared_index
+
+DEF_FUNC ba_shared_rindex
+    lea rdx, [rel bytes_method_rindex]
+    xor ecx, ecx
+    leave
+    jmp bytearray_shared_call
+END_FUNC ba_shared_rindex
+
+DEF_FUNC ba_shared_strip
+    lea rdx, [rel bytes_method_strip]
+    mov ecx, 1
+    leave
+    jmp bytearray_shared_call
+END_FUNC ba_shared_strip
+
+DEF_FUNC ba_shared_lstrip
+    lea rdx, [rel bytes_method_lstrip]
+    mov ecx, 1
+    leave
+    jmp bytearray_shared_call
+END_FUNC ba_shared_lstrip
+
+DEF_FUNC ba_shared_rstrip
+    lea rdx, [rel bytes_method_rstrip]
+    mov ecx, 1
+    leave
+    jmp bytearray_shared_call
+END_FUNC ba_shared_rstrip
+
+DEF_FUNC ba_shared_partition
+    lea rdx, [rel bytes_method_partition]
+    mov ecx, 2
+    leave
+    jmp bytearray_shared_call
+END_FUNC ba_shared_partition
+
+DEF_FUNC ba_shared_rpartition
+    lea rdx, [rel bytes_method_rpartition]
+    mov ecx, 2
+    leave
+    jmp bytearray_shared_call
+END_FUNC ba_shared_rpartition
+
 DEF_FUNC ba_shared_join
     lea rdx, [rel bytes_method_join]
     mov ecx, 1
@@ -1696,6 +2342,7 @@ END_FUNC ba_shared_join
 ;; CPython's own code calls them directly, and `del b[i]` compiles to
 ;; DELETE_SUBSCR but `b.__delitem__(i)` does not.
 DEF_FUNC bytearray_dunder_len
+    REQUIRE_SELF bytearray_type
     test rsi, rsi
     jz .badl_bad
     mov rdi, [rdi]
@@ -1709,6 +2356,7 @@ DEF_FUNC bytearray_dunder_len
 END_FUNC bytearray_dunder_len
 
 DEF_FUNC bytearray_dunder_iter
+    REQUIRE_SELF bytearray_type
     test rsi, rsi
     jz .badi_bad
     mov rdi, [rdi]
@@ -1721,6 +2369,7 @@ DEF_FUNC bytearray_dunder_iter
 END_FUNC bytearray_dunder_iter
 
 DEF_FUNC bytearray_dunder_getitem
+    REQUIRE_SELF bytearray_type
     cmp rsi, 2
     jne .badg_bad
     mov rsi, [rdi + 8]
@@ -1734,6 +2383,7 @@ DEF_FUNC bytearray_dunder_getitem
 END_FUNC bytearray_dunder_getitem
 
 DEF_FUNC bytearray_dunder_setitem
+    REQUIRE_SELF bytearray_type
     cmp rsi, 3
     jne .bads_bad
     mov rdx, [rdi + 16]
@@ -1749,6 +2399,7 @@ DEF_FUNC bytearray_dunder_setitem
 END_FUNC bytearray_dunder_setitem
 
 DEF_FUNC bytearray_dunder_delitem
+    REQUIRE_SELF bytearray_type
     cmp rsi, 2
     jne .badd_bad
     mov rsi, [rdi + 8]
@@ -1764,6 +2415,7 @@ DEF_FUNC bytearray_dunder_delitem
 END_FUNC bytearray_dunder_delitem
 
 DEF_FUNC bytearray_dunder_contains
+    REQUIRE_SELF bytearray_type
     cmp rsi, 2
     jne .badc_bad
     mov rsi, [rdi + 8]
@@ -1783,3 +2435,188 @@ DEF_FUNC bytearray_dunder_contains
 .badc_bad:
     RAISE exc_TypeError_type, "expected exactly one argument"
 END_FUNC bytearray_dunder_contains
+
+;; ============================================================================
+;; bytearray's share of the string-shaped methods in methods/bytes_str.asm.
+;;
+;; Same shape as the trampolines above: the bytes body runs on a temporary
+;; bytes and the wrap mode says what the answer has to become -- a bytearray
+;; for the ones that build a new buffer, a list of bytearrays for splitlines,
+;; and nothing at all for the predicates, which answer with a bool.
+;; ============================================================================
+
+DEF_FUNC ba_shared_upper
+    extern bytes_method_upper
+    lea rdx, [rel bytes_method_upper]
+    mov ecx, 1
+    leave
+    jmp bytearray_shared_call
+END_FUNC ba_shared_upper
+
+DEF_FUNC ba_shared_lower
+    extern bytes_method_lower
+    lea rdx, [rel bytes_method_lower]
+    mov ecx, 1
+    leave
+    jmp bytearray_shared_call
+END_FUNC ba_shared_lower
+
+DEF_FUNC ba_shared_swapcase
+    extern bytes_method_swapcase
+    lea rdx, [rel bytes_method_swapcase]
+    mov ecx, 1
+    leave
+    jmp bytearray_shared_call
+END_FUNC ba_shared_swapcase
+
+DEF_FUNC ba_shared_capitalize
+    extern bytes_method_capitalize
+    lea rdx, [rel bytes_method_capitalize]
+    mov ecx, 1
+    leave
+    jmp bytearray_shared_call
+END_FUNC ba_shared_capitalize
+
+DEF_FUNC ba_shared_title
+    extern bytes_method_title
+    lea rdx, [rel bytes_method_title]
+    mov ecx, 1
+    leave
+    jmp bytearray_shared_call
+END_FUNC ba_shared_title
+
+DEF_FUNC ba_shared_isalpha
+    extern bytes_method_isalpha
+    lea rdx, [rel bytes_method_isalpha]
+    mov ecx, 0
+    leave
+    jmp bytearray_shared_call
+END_FUNC ba_shared_isalpha
+
+DEF_FUNC ba_shared_isdigit
+    extern bytes_method_isdigit
+    lea rdx, [rel bytes_method_isdigit]
+    mov ecx, 0
+    leave
+    jmp bytearray_shared_call
+END_FUNC ba_shared_isdigit
+
+DEF_FUNC ba_shared_isspace
+    extern bytes_method_isspace
+    lea rdx, [rel bytes_method_isspace]
+    mov ecx, 0
+    leave
+    jmp bytearray_shared_call
+END_FUNC ba_shared_isspace
+
+DEF_FUNC ba_shared_isalnum
+    extern bytes_method_isalnum
+    lea rdx, [rel bytes_method_isalnum]
+    mov ecx, 0
+    leave
+    jmp bytearray_shared_call
+END_FUNC ba_shared_isalnum
+
+DEF_FUNC ba_shared_isascii
+    extern bytes_method_isascii
+    lea rdx, [rel bytes_method_isascii]
+    mov ecx, 0
+    leave
+    jmp bytearray_shared_call
+END_FUNC ba_shared_isascii
+
+DEF_FUNC ba_shared_isupper
+    extern bytes_method_isupper
+    lea rdx, [rel bytes_method_isupper]
+    mov ecx, 0
+    leave
+    jmp bytearray_shared_call
+END_FUNC ba_shared_isupper
+
+DEF_FUNC ba_shared_islower
+    extern bytes_method_islower
+    lea rdx, [rel bytes_method_islower]
+    mov ecx, 0
+    leave
+    jmp bytearray_shared_call
+END_FUNC ba_shared_islower
+
+DEF_FUNC ba_shared_istitle
+    extern bytes_method_istitle
+    lea rdx, [rel bytes_method_istitle]
+    mov ecx, 0
+    leave
+    jmp bytearray_shared_call
+END_FUNC ba_shared_istitle
+
+DEF_FUNC ba_shared_ljust
+    extern bytes_method_ljust
+    lea rdx, [rel bytes_method_ljust]
+    mov ecx, 1
+    leave
+    jmp bytearray_shared_call
+END_FUNC ba_shared_ljust
+
+DEF_FUNC ba_shared_rjust
+    extern bytes_method_rjust
+    lea rdx, [rel bytes_method_rjust]
+    mov ecx, 1
+    leave
+    jmp bytearray_shared_call
+END_FUNC ba_shared_rjust
+
+DEF_FUNC ba_shared_center
+    extern bytes_method_center
+    lea rdx, [rel bytes_method_center]
+    mov ecx, 1
+    leave
+    jmp bytearray_shared_call
+END_FUNC ba_shared_center
+
+DEF_FUNC ba_shared_zfill
+    extern bytes_method_zfill
+    lea rdx, [rel bytes_method_zfill]
+    mov ecx, 1
+    leave
+    jmp bytearray_shared_call
+END_FUNC ba_shared_zfill
+
+DEF_FUNC ba_shared_expandtabs
+    extern bytes_method_expandtabs
+    lea rdx, [rel bytes_method_expandtabs]
+    mov ecx, 1
+    leave
+    jmp bytearray_shared_call
+END_FUNC ba_shared_expandtabs
+
+DEF_FUNC ba_shared_translate
+    extern bytes_method_translate
+    lea rdx, [rel bytes_method_translate]
+    mov ecx, 1
+    leave
+    jmp bytearray_shared_call
+END_FUNC ba_shared_translate
+
+DEF_FUNC ba_shared_splitlines
+    extern bytes_method_splitlines
+    lea rdx, [rel bytes_method_splitlines]
+    mov ecx, 2
+    leave
+    jmp bytearray_shared_call
+END_FUNC ba_shared_splitlines
+
+DEF_FUNC ba_shared_removeprefix
+    extern bytes_method_removeprefix
+    lea rdx, [rel bytes_method_removeprefix]
+    mov ecx, 1
+    leave
+    jmp bytearray_shared_call
+END_FUNC ba_shared_removeprefix
+
+DEF_FUNC ba_shared_removesuffix
+    extern bytes_method_removesuffix
+    lea rdx, [rel bytes_method_removesuffix]
+    mov ecx, 1
+    leave
+    jmp bytearray_shared_call
+END_FUNC ba_shared_removesuffix

@@ -990,6 +990,7 @@ END_FUNC format_int_body
 ;; the caller.
 ;; ============================================================================
 FFB_SPEC  equ 8          ; the synthesised ".<prec><type>" spec
+FFB_ADDDOT equ 16        ; 1 when an empty type needs its ".0" put back
 FFB_FRAME equ 48            ; + 2 pushes = 64
 
 DEF_FUNC_LOCAL format_float_body, FFB_FRAME
@@ -1010,6 +1011,28 @@ DEF_FUNC_LOCAL format_float_body, FFB_FRAME
     movq rdi, xmm0                      ; raw double bits
 
 .ffb_have_double:
+    ; An empty type letter is repr, not %g.  format_float_body used to write a
+    ; one-byte spec "r" on the strength of a comment claiming
+    ; float_format_spec had a repr default; it has none, so the letter was
+    ; ignored and the defaults %.6g rendered format(1.0, "") as "1".
+    ;
+    ; CPython's rule: with no precision an empty type is exactly repr(x); with
+    ; one it is 'g' but with at least one digit after the point, so
+    ; format(1.0, ".3") is "1.0" rather than "1".
+    mov qword [rbp - FFB_ADDDOT], 0
+    mov rax, [r12 - FS_TYPE]
+    test rax, rax
+    jnz .ffb_build_spec
+    mov rax, [r12 - FS_PREC]
+    cmp rax, 0
+    jge .ffb_empty_with_prec
+    extern float_repr
+    call float_repr             ; rdi = the raw bits, still
+    jmp .ffb_have_string
+.ffb_empty_with_prec:
+    mov qword [rbp - FFB_ADDDOT], 1
+
+.ffb_build_spec:
     ; Build ".<precision><type>" in a small buffer.
     lea rbx, [rbp - FFB_SPEC]
     xor ecx, ecx
@@ -1083,7 +1106,7 @@ DEF_FUNC_LOCAL format_float_body, FFB_FRAME
     mov rax, [r12 - FS_TYPE]
     test rax, rax
     jnz .ffb_have_type
-    mov rax, 'r'                        ; float_format_spec's repr default
+    mov rax, 'g'                        ; an empty type, with a precision
 .ffb_have_type:
     mov [rbx + rcx], al
     inc rcx
@@ -1093,6 +1116,60 @@ DEF_FUNC_LOCAL format_float_body, FFB_FRAME
     call float_format_spec
     V_UNPACK rax, rdx
 
+    cmp qword [rbp - FFB_ADDDOT], 0
+    je .ffb_have_string
+
+    ; Put the ".0" back when %g dropped it.  A point, an exponent, or the
+    ; letters of inf and nan all mean there is nothing to put back.
+    mov rbx, rax
+    mov rcx, [rbx + PyStrObject.ob_size]
+    xor esi, esi
+.ffb_dot_scan:
+    cmp rsi, rcx
+    jge .ffb_dot_append
+    movzx eax, byte [rbx + PyStrObject.data + rsi]
+    cmp al, '.'
+    je .ffb_dot_none
+    cmp al, 'e'
+    je .ffb_dot_none
+    cmp al, 'E'
+    je .ffb_dot_none
+    cmp al, 'n'                         ; nan
+    je .ffb_dot_none
+    cmp al, 'i'                         ; inf
+    je .ffb_dot_none
+    inc rsi
+    jmp .ffb_dot_scan
+.ffb_dot_none:
+    mov rax, rbx
+    jmp .ffb_have_string
+.ffb_dot_append:
+    lea rdi, [rcx + PyStrObject.data + 9]
+    call ap_malloc
+    mov qword [rax + PyObject.ob_refcnt], 1
+    lea rdx, [rel str_type]
+    mov [rax + PyObject.ob_type], rdx
+    mov qword [rax + PyStrObject.ob_hash], -1
+    mov rcx, [rbx + PyStrObject.ob_size]
+    lea rdx, [rcx + 2]
+    mov [rax + PyStrObject.ob_size], rdx
+    mov [rax + PyStrObject.ob_length], rdx
+    push rax
+    lea rdi, [rax + PyStrObject.data]
+    lea rsi, [rbx + PyStrObject.data]
+    mov rdx, rcx
+    call ap_memcpy
+    pop rax
+    mov rcx, [rbx + PyStrObject.ob_size]
+    mov byte [rax + PyStrObject.data + rcx], '.'
+    mov byte [rax + PyStrObject.data + rcx + 1], '0'
+    mov byte [rax + PyStrObject.data + rcx + 2], 0
+    push rax
+    mov rdi, rbx
+    call obj_decref
+    pop rax
+
+.ffb_have_string:
     ; A leading '-' is what '=' alignment keeps in front of the padding.
     mov qword [r12 - FS_SIGNCH], 0
     cmp qword [rax + PyStrObject.ob_size], 0
@@ -1338,3 +1415,235 @@ DEF_FUNC_LOCAL format_complex_body, FCB_FRAME
     leave
     ret
 END_FUNC format_complex_body
+
+
+;; ############################################################################
+;;            %-FORMATTING: CHECKING THE ARGUMENT AGAINST THE CONVERSION
+;; ############################################################################
+;;
+;; Every numeric conversion in str_mod used to format whatever it was handed,
+;; so "%d" % "x" answered 'x' and "%i" % [] answered '[]' -- a wrong answer
+;; with nothing to say anything was wrong.  This is the check, and the
+;; coercion that goes with it: %d takes a float and truncates, %f takes an int
+;; and widens, and both take an object that offers __index__ or __float__.
+
+extern int_is_integer
+extern int_from_i64
+extern int_float
+extern float_int
+extern float_type
+extern obj_as_index
+extern dunder_lookup
+extern dunder_call_1
+extern type_is_subtype
+extern raise_type_error_with_name
+
+FPC_VAL   equ 8
+FPC_CONV  equ 16
+FPC_FRAME equ 32            ; + 0 pushes = 32
+
+;; ============================================================================
+;; fmt_percent_coerce(rdi = the argument Value, esi = the conversion character)
+;;   -> rax = a Value the conversion can use, edx = 1 when it is a NEW
+;;      reference the caller must release with DECREF_V
+;; Raises TypeError when the argument cannot be used at all.
+;; ============================================================================
+global fmt_percent_coerce
+DEF_FUNC fmt_percent_coerce, FPC_FRAME
+    mov [rbp - FPC_VAL], rdi
+    mov [rbp - FPC_CONV], rsi
+
+    mov eax, esi
+    cmp al, 'd'
+    je .fpc_int_like
+    cmp al, 'i'
+    je .fpc_int_like
+    cmp al, 'u'
+    je .fpc_int_like
+    cmp al, 'x'
+    je .fpc_int_strict
+    cmp al, 'X'
+    je .fpc_int_strict
+    cmp al, 'o'
+    je .fpc_int_strict
+    cmp al, 'b'
+    je .fpc_int_strict
+    cmp al, 'e'
+    je .fpc_float
+    cmp al, 'E'
+    je .fpc_float
+    cmp al, 'f'
+    je .fpc_float
+    cmp al, 'F'
+    je .fpc_float
+    cmp al, 'g'
+    je .fpc_float
+    cmp al, 'G'
+    je .fpc_float
+
+.fpc_pass:
+    mov rax, [rbp - FPC_VAL]
+    xor edx, edx
+    leave
+    ret
+
+;; %d, %i and %u: an integer, a float truncated toward zero, or __index__.
+.fpc_int_like:
+    call .fpc_arg_is_int
+    test eax, eax
+    jnz .fpc_pass
+    call .fpc_arg_is_float
+    test eax, eax
+    jz .fpc_int_dunder
+    mov rdi, [rbp - FPC_VAL]
+    call float_int
+    mov edx, 1
+    leave
+    ret
+
+;; %x, %X, %o and %b: an integer only.  A float is a TypeError, not a
+;; truncation -- CPython is strict here and lax for %d.
+.fpc_int_strict:
+    call .fpc_arg_is_int
+    test eax, eax
+    jnz .fpc_pass
+
+.fpc_int_dunder:
+    mov rdi, [rbp - FPC_VAL]
+    V_TEST_PTR rdi, rax
+    ja .fpc_int_bad
+    test rdi, rdi
+    jz .fpc_int_bad
+    mov rdi, [rdi + PyObject.ob_type]
+    lea rsi, [rel fpc_name_index]
+    call dunder_lookup
+    test rax, rax
+    jz .fpc_int_bad
+    mov rdi, [rbp - FPC_VAL]
+    V_UNPACK rdi, rdx
+    call obj_as_index
+    mov rdi, rax
+    call int_from_i64
+    V_PACK rax, rdx
+    mov edx, 1
+    leave
+    ret
+
+;; %e, %f, %g and their uppercase forms: a real number, or __float__.
+.fpc_float:
+    call .fpc_arg_is_float
+    test eax, eax
+    jnz .fpc_pass
+    call .fpc_arg_is_int
+    test eax, eax
+    jz .fpc_float_dunder
+    mov rdi, [rbp - FPC_VAL]
+    call int_float
+    mov edx, 1
+    leave
+    ret
+
+.fpc_float_dunder:
+    mov rdi, [rbp - FPC_VAL]
+    V_TEST_PTR rdi, rax
+    ja .fpc_float_bad
+    test rdi, rdi
+    jz .fpc_float_bad
+    mov rdi, [rdi + PyObject.ob_type]
+    lea rsi, [rel fpc_name_float]
+    call dunder_lookup
+    test rax, rax
+    jz .fpc_float_bad
+    mov rdi, [rbp - FPC_VAL]
+    lea rsi, [rel fpc_name_float]
+    call dunder_call_1
+    mov edx, 1
+    leave
+    ret
+
+;; .fpc_arg_is_int -> eax = 1 when the argument is an int, a bool or an int
+;; subclass instance.  Reads the caller's slot, so it is not standalone.
+.fpc_arg_is_int:
+    sub rsp, 8
+    mov rdi, [rbp - FPC_VAL]
+    V_UNPACK rdi, rdx
+    call int_is_integer
+    add rsp, 8
+    ret
+
+;; .fpc_arg_is_float -> eax = 1 for a float immediate, a float, or a subclass.
+.fpc_arg_is_float:
+    sub rsp, 8
+    mov rdi, [rbp - FPC_VAL]
+    V_IS_FLOAT rdi, rax
+    jb .fpc_aif_yes             ; CF=1 is the float immediate
+    V_TEST_PTR rdi, rax
+    ja .fpc_aif_no
+    test rdi, rdi
+    jz .fpc_aif_no
+    mov rax, [rdi + PyObject.ob_type]
+    lea rcx, [rel float_type]
+    cmp rax, rcx
+    je .fpc_aif_yes
+    mov rdi, rax
+    lea rsi, [rel float_type]
+    call type_is_subtype
+    test eax, eax
+    jz .fpc_aif_no
+.fpc_aif_yes:
+    mov eax, 1
+    add rsp, 8
+    ret
+.fpc_aif_no:
+    xor eax, eax
+    add rsp, 8
+    ret
+
+;; The messages carry the conversion character, so they are assembled rather
+;; than picked from a list.  \x01 is raise_type_error_with_name's placeholder
+;; for the argument's type name.
+.fpc_int_bad:
+    lea rsi, [rel fpc_msg_real]
+    cmp qword [rbp - FPC_CONV], 'd'
+    je .fpc_bad_build
+    cmp qword [rbp - FPC_CONV], 'i'
+    je .fpc_bad_build
+    cmp qword [rbp - FPC_CONV], 'u'
+    je .fpc_bad_build
+    lea rsi, [rel fpc_msg_integer]
+.fpc_bad_build:
+    lea rdi, [rel fpc_msgbuf]
+    mov rax, [rbp - FPC_CONV]
+    mov byte [rdi], '%'
+    mov [rdi + 1], al
+    add rdi, 2
+    xor ecx, ecx
+.fpc_bad_copy:
+    mov al, [rsi + rcx]
+    mov [rdi + rcx], al
+    test al, al
+    jz .fpc_bad_raise
+    inc rcx
+    jmp .fpc_bad_copy
+.fpc_bad_raise:
+    lea rdi, [rel fpc_msgbuf]
+    mov rsi, [rbp - FPC_VAL]
+    call raise_type_error_with_name
+
+.fpc_float_bad:
+    lea rdi, [rel fpc_msg_notreal]
+    mov rsi, [rbp - FPC_VAL]
+    call raise_type_error_with_name
+
+section .rodata
+fpc_name_index:  db "__index__", 0
+fpc_name_float:  db "__float__", 0
+fpc_msg_real:    db ` format: a real number is required, not \x01`, 0
+fpc_msg_integer: db ` format: an integer is required, not \x01`, 0
+fpc_msg_notreal: db `must be real number, not \x01`, 0
+
+section .bss
+fpc_msgbuf: resb 96
+
+section .text
+END_FUNC fmt_percent_coerce

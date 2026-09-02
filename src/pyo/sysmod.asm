@@ -39,6 +39,38 @@ extern raise_exception
 SMI_ARGC  equ 8
 SMI_ARGV  equ 16
 SMI_TMP   equ 24            ; whichever object is being installed just now
+;; ============================================================================
+;; sm_add_str(rdi = name cstr, rsi = value cstr, rdx = the module dict)
+;;
+;; One string attribute, interned from two C strings.  Open-coded it is
+;; fifteen lines, and this file does it fifty-odd times; the prefix family is
+;; where that started to hide which names were actually being set.
+;; ============================================================================
+SAS_DICT  equ 8
+SAS_KEY   equ 16
+SAS_FRAME equ 24            ; + 1 push = 32, 16-aligned
+DEF_FUNC_LOCAL sm_add_str, SAS_FRAME
+    push rbx
+    mov [rbp - SAS_DICT], rdx
+    mov rbx, rsi
+    call str_from_cstr_heap             ; the key
+    mov [rbp - SAS_KEY], rax
+    mov rdi, rbx
+    call str_from_cstr_heap             ; the value
+    mov rbx, rax
+    mov rdi, [rbp - SAS_DICT]
+    mov rsi, [rbp - SAS_KEY]
+    mov rdx, rax
+    call dict_set                       ; takes its own reference to both
+    mov rdi, rbx
+    call obj_decref
+    mov rdi, [rbp - SAS_KEY]
+    call obj_decref
+    pop rbx
+    leave
+    ret
+END_FUNC sm_add_str
+
 DEF_FUNC sys_module_init, 32
     push rbx
     push r12
@@ -278,36 +310,38 @@ DEF_FUNC sys_module_init, 32
     pop rdi
     call obj_decref
 
-    ; --- sys.prefix / sys.exec_prefix ---
-    lea rdi, [rel sm_empty]
-    call str_from_cstr_heap
-    push rax
+    ; --- sys.prefix / exec_prefix, and the base_ pair beside them ---
+    ; base_prefix and base_exec_prefix are what a virtualenv leaves pointing
+    ; at the installation it was made from; with no virtualenv all four name
+    ; the same place.  CPython's getopt, gettext and optparse read the base_
+    ; pair unconditionally, so their absence was an AttributeError at import
+    ; rather than anything the program could ask about.
     lea rdi, [rel sm_prefix]
-    call str_from_cstr_heap
-    push rax
-    mov rdi, r15
-    mov rsi, rax
-    mov rdx, [rsp + 8]
-    call dict_set
-    pop rdi
-    call obj_decref
-    pop rdi
-    call obj_decref
-
-    lea rdi, [rel sm_empty]
-    call str_from_cstr_heap
-    push rax
+    lea rsi, [rel sm_empty]
+    mov rdx, r15
+    call sm_add_str
     lea rdi, [rel sm_exec_prefix]
-    call str_from_cstr_heap
-    push rax
-    mov rdi, r15
-    mov rsi, rax
-    mov rdx, [rsp + 8]
-    call dict_set
-    pop rdi
-    call obj_decref
-    pop rdi
-    call obj_decref
+    lea rsi, [rel sm_empty]
+    mov rdx, r15
+    call sm_add_str
+    lea rdi, [rel sm_base_prefix]
+    lea rsi, [rel sm_empty]
+    mov rdx, r15
+    call sm_add_str
+    lea rdi, [rel sm_base_exec_prefix]
+    lea rsi, [rel sm_empty]
+    mov rdx, r15
+    call sm_add_str
+
+    ; --- sys.copyright ---
+    ; site.py reads it to build the `copyright` banner, unconditionally, so
+    ; without it `import site` was an AttributeError.  Ours carries both
+    ; notices: the interpreter is MIT, and the standard library it runs is
+    ; the PSF's.
+    lea rdi, [rel sm_copyright]
+    lea rsi, [rel sm_copyright_text]
+    mov rdx, r15
+    call sm_add_str
 
     ; --- sys.stdout (fd=1) ---
     mov rdi, 1
@@ -504,12 +538,13 @@ DEF_FUNC sys_module_init, 32
     ; `asyncio` or `errno` -- so a module sitting in sys.modules was absent
     ; from the list os.py gates its platform import on.
     extern builtin_module_table
-    mov edi, BUILTIN_MODULE_COUNT
+    extern builtin_module_count
+    mov rdi, [rel builtin_module_count]
     call tuple_new
     mov [rbp - SMI_TMP], rax
     xor r13d, r13d
 .sm_bmn_loop:
-    cmp r13, BUILTIN_MODULE_COUNT
+    cmp r13, [rel builtin_module_count]
     jge .sm_bmn_done
     lea rax, [rel builtin_module_table]
     mov rcx, r13
@@ -1280,6 +1315,16 @@ sm_final:        db "final", 0
 sm_executable:   db "executable", 0
 sm_prefix:       db "prefix", 0
 sm_exec_prefix:  db "exec_prefix", 0
+sm_base_prefix:      db "base_prefix", 0
+sm_base_exec_prefix: db "base_exec_prefix", 0
+sm_copyright:        db "copyright", 0
+sm_copyright_text:
+    db "Copyright (c) 2026 Jeff Garzik.", 10
+    db "All Rights Reserved.", 10
+    db 10
+    db "Portions of the standard library are", 10
+    db "Copyright (c) 2001-2026 Python Software Foundation.", 10
+    db "All Rights Reserved.", 0
 sm_stdout:       db "stdout", 0
 sm_stderr:       db "stderr", 0
 sm_stdin:        db "stdin", 0

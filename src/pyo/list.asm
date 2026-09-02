@@ -356,7 +356,9 @@ END_FUNC list_subscript
 LAS_VTAG  equ 8
 LAS_TEMP  equ 16       ; temp list from generic iterable (NULL if not used)
 LAS_EXC   equ 24       ; current_exception, to tell "exhausted" from "raised"
-LAS_FRAME equ 32            ; + 2 pushes = 48, 16-byte aligned
+LAS_SRCLEN   equ 32    ; the two lengths, for the mismatch message: the
+LAS_SLICELEN equ 40    ; registers holding them do not survive its unwind
+LAS_FRAME equ 48            ; + 2 pushes = 64, 16-byte aligned
 DEF_FUNC list_ass_subscript, LAS_FRAME
     push rbx
     push r12
@@ -957,6 +959,8 @@ DEF_FUNC list_ass_subscript, LAS_FRAME
     mov r12, [r12 + PyTupleObject.ob_item]
 
 .ext_check_len:
+    mov [rbp - LAS_SRCLEN], r8
+    mov [rbp - LAS_SLICELEN], r14
     cmp r8, r14
     jne .ext_len_mismatch
 
@@ -1075,7 +1079,30 @@ DEF_FUNC list_ass_subscript, LAS_FRAME
     mov qword [rbp - LAS_TEMP], 0
     call obj_decref
 .ext_len_mismatch_raise:
-    RAISE exc_ValueError_type, "attempt to assign sequence of wrong size to extended slice"
+    ; "attempt to assign sequence of size 3 to extended slice of size 2".
+    ; The two numbers were known thirty lines up and gone by here; naming them
+    ; also needed an int-to-decimal helper another file could reach, which
+    ; until msg_append_i64 there was not one of.
+    sub rsp, 128
+    mov rdi, rsp
+    lea rsi, [rel las_msg_size]
+    extern rbt_append_cstr
+    call rbt_append_cstr
+    mov rdi, rax
+    mov rsi, [rbp - LAS_SRCLEN]
+    extern msg_append_i64
+    call msg_append_i64
+    mov rdi, rax
+    lea rsi, [rel las_msg_to]
+    call rbt_append_cstr
+    mov rdi, rax
+    mov rsi, [rbp - LAS_SLICELEN]
+    call msg_append_i64
+    lea rdi, [rel exc_ValueError_type]
+    mov rsi, rsp
+    extern raise_exception
+    call raise_exception
+    ud2
 
 .las_key_type_error:
     RAISE exc_TypeError_type, "list indices must be integers or slices"
@@ -1429,7 +1456,7 @@ DEF_FUNC list_concat
     cmp ecx, TAG_PTR
     jne .lc_type_error
     mov rax, [r12 + PyObject.ob_type]
-    REQUIRE_LIST_TYPE rax, rcx, .lc_type_error
+    REQUIRE_LIST_TYPE rax, rcx, .lc_type_error_ptr
 
     ; Get sizes
     mov r13, [rbx + PyListObject.ob_size]   ; r13 = len(a)
@@ -1483,8 +1510,19 @@ DEF_FUNC list_concat
     leave
     V_PACK rax, rdx             ; return one Value
     ret
+.lc_type_error_ptr:
+    mov ecx, TAG_PTR            ; REQUIRE_LIST_TYPE used rcx as its scratch
 .lc_type_error:
-    RAISE exc_TypeError_type, "can only concatenate list (not other) to list"
+    ; The right operand's payload survives in r12; its tag does not always --
+    ; REQUIRE_*_TYPE uses rcx as scratch -- so the pointer case is recovered
+    ; from the payload itself, which is its own Value.
+    mov rdi, r12
+    mov rsi, rcx
+    VALUE_FOR_TYPE rdi, rsi
+    mov rsi, rdi
+    CSTRING rdi, `can only concatenate list (not "\x01") to list`
+    extern raise_type_error_with_name
+    call raise_type_error_with_name
 END_FUNC list_concat
 
 ;; ============================================================================
@@ -1733,7 +1771,16 @@ DEF_FUNC list_inplace_concat, LIC_FRAME
     jmp eval_exception_unwind
 
 .lic_type_error:
-    RAISE exc_TypeError_type, "can only concatenate list (not other) to list"
+    ; The right operand's payload survives in r12; its tag does not always --
+    ; REQUIRE_*_TYPE uses rcx as scratch -- so the pointer case is recovered
+    ; from the payload itself, which is its own Value.
+    mov rdi, r12
+    mov rsi, r13
+    VALUE_FOR_TYPE rdi, rsi
+    mov rsi, rdi
+    CSTRING rdi, `can only concatenate list (not "\x01") to list`
+    extern raise_type_error_with_name
+    call raise_type_error_with_name
 END_FUNC list_inplace_concat
 
 ;; ============================================================================
@@ -2361,3 +2408,7 @@ DEF_FUNC list_clear
     leave
     ret
 END_FUNC list_clear
+
+section .rodata
+las_msg_size: db "attempt to assign sequence of size ", 0
+las_msg_to:   db " to extended slice of size ", 0

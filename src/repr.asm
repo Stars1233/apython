@@ -23,16 +23,25 @@ extern obj_decref
 extern str_from_cstr_heap
 extern str_type
 
-; Recursion detection for container repr
-; Simple fixed-size stack of object pointers currently being repr'd.
+; Recursion detection for container repr: the objects currently being repr'd,
+; so that a container holding itself prints "..." instead of recursing.
+;
+; It used to be a fixed 64 entries, and a 65th was a RecursionError -- so
+; repr(eval("["*70 + "1" + "]"*70)) failed on a structure CPython prints
+; without complaint.  The bound that belongs here is sys.setrecursionlimit's,
+; which is the one the repr's own C recursion is measured against; the array
+; grows to meet it.
 section .data
 align 8
 global repr_depth           ; eval_exception_unwind resets this: a raise from
                             ; inside a nested __repr__ skips repr_pop
 repr_depth: dq 0                  ; current depth (number of entries)
-repr_stack: times 64 dq 0         ; up to 64 nested containers
+repr_stack: dq 0                  ; the entries, on the heap
+repr_stack_cap: dq 0              ; how many it has room for
 
 section .text
+extern ap_realloc
+extern recursion_limit
 
 ; obj_repr returns NULL both for "this type has no repr" and for "the repr
 ; raised".  A container propagating that NULL must have an exception pending,
@@ -46,11 +55,15 @@ section .text
 
 ; Check if ptr is in repr_stack. Returns 1 in eax if found, 0 if not.
 ; Does NOT clobber rdi.
+;
+; These three are global because the container reprs are not all in this
+; file: dict's views live with dict, and a view can reach itself.
+global repr_check_active
 repr_check_active:
     mov rcx, [rel repr_depth]
     test rcx, rcx
     jz .rca_not_found
-    lea rax, [rel repr_stack]
+    mov rax, [rel repr_stack]
 .rca_loop:
     dec rcx
     cmp [rax + rcx*8], rdi
@@ -64,12 +77,39 @@ repr_check_active:
     mov eax, 1
     ret
 
-; Push ptr onto repr_stack. Raises RecursionError if too deep.
+; Push ptr onto repr_stack.  Grows it as needed; RecursionError only at the
+; interpreter's own recursion limit.  Preserves rdi, which the caller still
+; needs.
+global repr_push
 repr_push:
     mov rax, [rel repr_depth]
-    cmp rax, 64
+    cmp rax, [rel recursion_limit]
     jge .rp_overflow
-    lea rcx, [rel repr_stack]
+    cmp rax, [rel repr_stack_cap]
+    jl .rp_have_room
+
+    ; Double it, starting at the 64 the fixed array used to be.
+    push rdi
+    push rsi
+    mov rsi, [rel repr_stack_cap]
+    test rsi, rsi
+    jnz .rp_double
+    mov rsi, 64
+    jmp .rp_sized
+.rp_double:
+    shl rsi, 1
+.rp_sized:
+    mov [rel repr_stack_cap], rsi
+    shl rsi, 3
+    mov rdi, [rel repr_stack]
+    call ap_realloc
+    mov [rel repr_stack], rax
+    pop rsi
+    pop rdi
+    mov rax, [rel repr_depth]
+
+.rp_have_room:
+    mov rcx, [rel repr_stack]
     mov [rcx + rax*8], rdi
     inc qword [rel repr_depth]
     ret
@@ -81,6 +121,7 @@ extern current_exception
     RAISE exc_RecursionError_type, "maximum recursion depth exceeded while getting the repr of an object"
 
 ; Pop from repr_stack
+global repr_pop
 repr_pop:
     dec qword [rel repr_depth]
     ret

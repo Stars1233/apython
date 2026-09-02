@@ -13,10 +13,10 @@
 ;     ones so a registered class can be collected; here a class that is
 ;     registered lives as long as the ABC does.
 ;
-;   * Step 6 of the subclass check -- recursing into cls.__subclasses__() to
-;     find a registration made on a subclass of the ABC -- is missing, because
-;     types do not keep a subclass list.  Direct registrations and real
-;     inheritance are both handled.
+; Step 6 -- recursing into cls.__subclasses__() to find a registration made
+; on a subclass of the ABC -- was missing for a long time, because types kept
+; no subclass list.  They do now, in src/pyo/subclasses.asm, and this reads it
+; directly rather than through the Python-level __subclasses__.
 ;
 ; State lives in the class's own tp_dict, under the names _py_abc uses, and is
 ; read straight out of it rather than through type_getattr: an ABC's subclass
@@ -24,6 +24,12 @@
 
 %include "macros.inc"
 %include "object.inc"
+
+struc SubList
+    .count:    resq 1
+    .capacity: resq 1
+    .items:    resq 1
+endstruc
 %include "value.inc"
 
 extern dict_new
@@ -42,9 +48,12 @@ extern obj_is_true
 extern tuple_new
 extern type_getattr
 extern type_is_subtype
+extern sub_list_for_type
 extern type_check_is_class
 extern value_type
 extern raise_exception
+extern ap_strcmp
+extern rbt_append_cstr
 extern exc_TypeError_type
 extern exc_RuntimeError_type
 extern bool_true
@@ -590,14 +599,14 @@ DEF_FUNC abc_subclasscheck, SC_FRAME
     CSTRING rsi, "_abc_registry"
     call abc_state_get
     test rax, rax
-    jz .cache_no
+    jz .subclasses
     mov [rbp - SC_REG], rax
     mov qword [rbp - SC_IDX], 0
 .reg_loop:
     mov rax, [rbp - SC_REG]
     mov rcx, [rbp - SC_IDX]
     cmp rcx, [rax + PyDictObject.capacity]
-    jge .cache_no
+    jge .subclasses
     mov rdx, [rax + PyDictObject.entries]
     shl rcx, 4                  ; SET_ENTRY_SIZE
     mov rdi, [rdx + rcx + 8]    ; the entry's key Value (hash sits at +0)
@@ -613,6 +622,36 @@ DEF_FUNC abc_subclasscheck, SC_FRAME
     je .error
     test eax, eax
     jz .reg_loop
+    jmp .cache_yes
+
+.subclasses:
+    ; 6. a subclass of one of THIS class's subclasses.  A registration made
+    ; against a subclass of the ABC counts for the ABC too, and this is the
+    ; only step that can find it: without it, `B.register(X)` for a B deriving
+    ; from A left issubclass(X, A) answering False.  It was missing because
+    ; nothing kept a list of subclasses; type.__subclasses__ does now.
+    mov rdi, [rbp - SC_CLS]
+    call sub_list_for_type
+    test rax, rax
+    jz .cache_no
+    mov [rbp - SC_REG], rax     ; the SubList, reusing the registry slot
+    mov qword [rbp - SC_IDX], 0
+.sub_loop:
+    mov rax, [rbp - SC_REG]
+    mov rcx, [rbp - SC_IDX]
+    cmp rcx, [rax + SubList.count]
+    jge .cache_no
+    mov rdx, [rax + SubList.items]
+    mov rsi, [rdx + rcx*8]
+    inc qword [rbp - SC_IDX]
+    cmp rsi, [rbp - SC_CLS]
+    je .sub_loop                ; not itself, or the recursion never ends
+    mov rdi, [rbp - SC_SUB]
+    call abc_call_issubclass
+    cmp eax, -1
+    je .error
+    test eax, eax
+    jz .sub_loop
     jmp .cache_yes
 
 .cache_yes:
@@ -695,23 +734,206 @@ DEF_FUNC abc_subclasscheck_func
 END_FUNC abc_subclasscheck_func
 
 ;; ============================================================================
+;; type_abstract_error(rdi = the type, rsi = its __abstractmethods__ set)
+;;
+;; "Can't instantiate abstract class Shape without an implementation for
+;;  abstract methods 'area', 'perimeter'" -- CPython's wording, with the
+;; names sorted and the noun agreeing with how many there are.  It used to
+;; say only "Can't instantiate abstract class with abstract methods", which
+;; names neither the class nor what is missing, and those are the two things
+;; the reader needs.
+;;
+;; Does not return.
+;; ============================================================================
+TAE_NAMES equ 12 * 8        ; the sorted keys, up to TAE_MAX of them
+TAE_COUNT equ TAE_NAMES + 8
+TAE_BUF   equ TAE_COUNT + 8 + 1024
+TAE_FRAME equ TAE_BUF       ; + 3 pushes = TAE_BUF + 24
+TAE_MAX   equ 12
+
+global type_abstract_error
+DEF_FUNC type_abstract_error, TAE_FRAME
+    push rbx
+    push r12
+    push r13
+    mov rbx, rdi                ; the type
+    mov r12, rsi                ; the set
+
+    ; --- collect the keys, up to TAE_MAX of them ---
+    xor r13d, r13d              ; how many collected
+    mov rcx, [r12 + PyDictObject.entries]
+    xor r8d, r8d                ; the slot index
+.tae_scan:
+    cmp r8, [r12 + PyDictObject.capacity]
+    jge .tae_sort
+    cmp r13, TAE_MAX
+    jge .tae_sort
+    mov rax, r8
+    shl rax, 4                  ; SET_ENTRY_SIZE
+    mov rdx, [rcx + rax + SET_ENTRY_KEY]
+    test rdx, rdx
+    jz .tae_scan_next
+    mov rax, r13
+    shl rax, 3
+    lea r9, [rbp - TAE_NAMES]
+    mov [r9 + rax], rdx
+    inc r13
+.tae_scan_next:
+    inc r8
+    jmp .tae_scan
+
+    ; --- insertion sort, by the bytes of the names ---
+.tae_sort:
+    mov [rbp - TAE_COUNT], r13
+    cmp r13, 2
+    jl .tae_build
+    mov r8, 1                   ; i
+.tae_sort_outer:
+    cmp r8, r13
+    jge .tae_build
+    mov r9, r8                  ; j
+.tae_sort_inner:
+    test r9, r9
+    jz .tae_sort_next
+    lea rcx, [rbp - TAE_NAMES]
+    mov rax, r9
+    shl rax, 3
+    mov rdi, [rcx + rax]
+    mov rsi, [rcx + rax - 8]
+    add rdi, PyStrObject.data
+    add rsi, PyStrObject.data
+    push r8
+    push r9
+    call ap_strcmp
+    pop r9
+    pop r8
+    test eax, eax
+    jge .tae_sort_next
+    lea rcx, [rbp - TAE_NAMES]
+    mov rax, r9
+    shl rax, 3
+    mov rdi, [rcx + rax]
+    mov rsi, [rcx + rax - 8]
+    mov [rcx + rax], rsi
+    mov [rcx + rax - 8], rdi
+    dec r9
+    jmp .tae_sort_inner
+.tae_sort_next:
+    inc r8
+    jmp .tae_sort_outer
+
+    ; --- build the message ---
+.tae_build:
+    lea rdi, [rbp - TAE_BUF]
+    lea rsi, [rel tae_prefix]
+    call rbt_append_cstr
+    mov rdi, rax
+    mov rsi, [rbx + PyTypeObject.tp_name]
+    call rbt_append_cstr
+    mov rdi, rax
+    mov r13, [rbp - TAE_COUNT]
+    test r13, r13
+    jz .tae_raise               ; nothing to name: keep the short form
+    cmp r13, 1
+    je .tae_singular
+    lea rsi, [rel tae_plural]
+    jmp .tae_middle
+.tae_singular:
+    lea rsi, [rel tae_singular_s]
+.tae_middle:
+    call rbt_append_cstr
+    mov rdi, rax
+
+    xor r12d, r12d              ; the index
+.tae_names_loop:
+    cmp r12, r13
+    jge .tae_raise
+    test r12, r12
+    jz .tae_no_comma
+    lea rsi, [rel tae_comma]
+    call rbt_append_cstr
+    mov rdi, rax
+.tae_no_comma:
+    lea rsi, [rel tae_quote]
+    call rbt_append_cstr
+    mov rdi, rax
+    lea rcx, [rbp - TAE_NAMES]
+    mov rax, r12
+    shl rax, 3
+    mov rsi, [rcx + rax]
+    add rsi, PyStrObject.data
+    push r12
+    push r13
+    call rbt_append_cstr
+    pop r13
+    pop r12
+    mov rdi, rax
+    lea rsi, [rel tae_quote]
+    call rbt_append_cstr
+    mov rdi, rax
+    inc r12
+    jmp .tae_names_loop
+
+.tae_raise:
+    lea rdi, [rel exc_TypeError_type]
+    lea rsi, [rbp - TAE_BUF]
+    call raise_exception        ; does not return
+END_FUNC type_abstract_error
+
+
+;; ============================================================================
 ;; _abc_instancecheck(cls, instance) -> bool
 ;;
 ;; CPython consults instance.__class__ as well as type(instance), so that an
-;; object which lies about its class is believed.  Nothing here can lie yet,
-;; so the two are the same object and one check does.
+;; object which lies about its class is believed -- which is most of what a
+;; mock is for.  This used to check only the type, on the grounds that
+;; nothing here could lie; a property named __class__ has been able to for a
+;; while, and isinstance() of such an object answered by what it really was.
+;;
+;; The declared class is asked first, as CPython asks it, and the real type
+;; only if the two differ and the first said no.
 ;; ============================================================================
 IC_CLS   equ 8
 IC_SUB   equ 16
-IC_FRAME equ 16             ; + 0 pushes = 16
+IC_INST  equ 24
+IC_DECL  equ 32             ; instance.__class__, when it is a class and differs
+IC_FRAME equ 32             ; + 0 pushes = 32, 16-aligned
 DEF_FUNC abc_instancecheck_func, IC_FRAME
     cmp rsi, 2
     jl .bad
     mov rax, [rdi]
     mov [rbp - IC_CLS], rax
-    mov rdi, [rdi + 8]
+    mov rax, [rdi + 8]
+    mov [rbp - IC_INST], rax
+    mov rdi, rax
     call value_type
     mov [rbp - IC_SUB], rax
+    mov qword [rbp - IC_DECL], 0
+
+    ; instance.__class__, if it is a class and is not simply the type again.
+    lea rdi, [rel ic_class_attr]
+    extern dunder_name_obj
+    call dunder_name_obj        ; borrowed, interned by literal
+    mov rsi, rax
+    mov rdi, [rbp - IC_INST]
+    extern obj_getattr_opt
+    call obj_getattr_opt
+    test rax, rax
+    jz .ic_no_declared
+    push rax
+    mov rdi, rax
+    call type_check_is_class
+    pop rdi
+    test eax, eax
+    jz .ic_drop_declared
+    cmp rdi, [rbp - IC_SUB]
+    je .ic_drop_declared        ; the same answer, so one check does
+    mov [rbp - IC_DECL], rdi
+    jmp .ic_have_declared
+.ic_drop_declared:
+    call obj_decref
+.ic_no_declared:
+.ic_have_declared:
 
     mov rdi, [rbp - IC_CLS]
     CSTRING rsi, "_abc_cache"
@@ -725,6 +947,18 @@ DEF_FUNC abc_instancecheck_func, IC_FRAME
     jnz .true
 
 .full:
+    ; The declared class first, when there is one to ask.
+    cmp qword [rbp - IC_DECL], 0
+    je .ic_check_type
+    mov rdi, [rbp - IC_CLS]
+    mov rsi, [rbp - IC_DECL]
+    call abc_subclasscheck
+    cmp eax, -1
+    je .propagate
+    test eax, eax
+    jnz .true
+
+.ic_check_type:
     mov rdi, [rbp - IC_CLS]
     mov rsi, [rbp - IC_SUB]
     call abc_subclasscheck
@@ -733,18 +967,29 @@ DEF_FUNC abc_instancecheck_func, IC_FRAME
     test eax, eax
     jz .false
 .true:
+    call .ic_release_declared
     lea rax, [rel bool_true]
     inc qword [rax + PyObject.ob_refcnt]
     leave
     ret
 .false:
+    call .ic_release_declared
     lea rax, [rel bool_false]
     inc qword [rax + PyObject.ob_refcnt]
     leave
     ret
 .propagate:
+    call .ic_release_declared
     xor eax, eax
     leave
+    ret
+.ic_release_declared:
+    mov rdi, [rbp - IC_DECL]
+    test rdi, rdi
+    jz .ic_nothing
+    mov qword [rbp - IC_DECL], 0
+    jmp obj_decref
+.ic_nothing:
     ret
 .bad:
     RAISE exc_TypeError_type, "_abc_instancecheck() takes 2 arguments"
@@ -939,7 +1184,14 @@ abcm_get_cache_token:      db "get_cache_token", 0
 abcm_abc_init:             db "_abc_init", 0
 abcm_abc_register:         db "_abc_register", 0
 abcm_abc_instancecheck:    db "_abc_instancecheck", 0
+ic_class_attr:             db "__class__", 0
 abcm_abc_subclasscheck:    db "_abc_subclasscheck", 0
 abcm_get_dump:             db "_get_dump", 0
 abcm_reset_registry:       db "_reset_registry", 0
 abcm_reset_caches:         db "_reset_caches", 0
+
+tae_prefix:     db "Can't instantiate abstract class ", 0
+tae_singular_s: db " without an implementation for abstract method ", 0
+tae_plural:     db " without an implementation for abstract methods ", 0
+tae_comma:      db ", ", 0
+tae_quote:      db "'", 0

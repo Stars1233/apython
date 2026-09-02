@@ -10,6 +10,8 @@ extern bool_true
 extern bool_false
 extern ap_malloc
 extern gc_alloc
+extern iter_traverse_one
+extern iter_clear_one
 extern gc_track
 extern gc_dealloc
 extern ap_free
@@ -796,12 +798,12 @@ DEF_FUNC dict_tp_iter
 
     mov rbx, rdi               ; save dict
 
+    ; gc_alloc, not ap_malloc: the iterator holds the dict, and a dict holding
+    ; its own iterator or its own view is a cycle only the collector can break.
     mov edi, PyDictIterObject_size
-    call ap_malloc
+    lea rsi, [rel dict_iter_type]
+    call gc_alloc
 
-    mov qword [rax + PyObject.ob_refcnt], 1
-    lea rcx, [rel dict_iter_type]
-    mov [rax + PyObject.ob_type], rcx
     mov [rax + PyDictIterObject.it_dict], rbx
     mov qword [rax + PyDictIterObject.it_index], 0
     mov qword [rax + PyDictIterObject.it_kind], 0  ; 0 = keys
@@ -810,8 +812,15 @@ DEF_FUNC dict_tp_iter
     mov [rax + PyDictIterObject.it_version], rcx
 
     ; INCREF the dict
+    push rax
     mov rdi, rbx
     call obj_incref
+    pop rax
+    push rax
+    mov rdi, rax
+    extern gc_track
+    call gc_track
+    pop rax
 
     pop rbx
     leave
@@ -924,7 +933,8 @@ DEF_FUNC_LOCAL dict_iter_dealloc
 
     ; Free self
     mov rdi, rbx
-    call ap_free
+    extern gc_dealloc
+    call gc_dealloc
 
     pop rbx
     leave
@@ -975,16 +985,21 @@ DEF_FUNC dict_view_new
     mov r13, rdx               ; view type
 
     mov edi, PyDictViewObject_size
-    call ap_malloc
+    mov rsi, r13
+    call gc_alloc
 
-    mov qword [rax + PyObject.ob_refcnt], 1
-    mov [rax + PyObject.ob_type], r13
     mov [rax + PyDictViewObject.dv_dict], rbx
     mov [rax + PyDictViewObject.dv_kind], r12
 
     ; INCREF dict
+    push rax
     mov rdi, rbx
     call obj_incref
+    pop rax
+    push rax
+    mov rdi, rax
+    call gc_track
+    pop rax
 
     pop r13
     pop r12
@@ -1006,7 +1021,7 @@ DEF_FUNC_LOCAL dict_view_dealloc
 
     ; Free self
     mov rdi, rbx
-    call ap_free
+    call gc_dealloc
 
     pop rbx
     leave
@@ -1034,11 +1049,9 @@ DEF_FUNC dict_view_iter
     mov rbx, rdi               ; view
 
     mov edi, PyDictIterObject_size
-    call ap_malloc
+    lea rsi, [rel dict_iter_type]
+    call gc_alloc
 
-    mov qword [rax + PyObject.ob_refcnt], 1
-    lea rcx, [rel dict_iter_type]
-    mov [rax + PyObject.ob_type], rcx
     mov rdi, [rbx + PyDictViewObject.dv_dict]
     mov [rax + PyDictIterObject.it_dict], rdi
     mov qword [rax + PyDictIterObject.it_index], 0
@@ -1052,12 +1065,180 @@ DEF_FUNC dict_view_iter
     push rax                    ; save iterator
     call obj_incref
     pop rax                     ; restore iterator
+    push rax
+    mov rdi, rax
+    call gc_track
+    pop rax
 
     pop r12
     pop rbx
     leave
     ret
 END_FUNC dict_view_iter
+
+;; ============================================================================
+;; dict_view_repr(rdi = the view) -> rax = PyStrObject*, edx = TAG_PTR
+;;
+;; "dict_keys(['a'])", and the same for values and items.  The three view
+;; types had tp_repr 0, and obj_repr answers a NULL Value for that with no
+;; exception -- so print(d.keys()) printed nothing at all.
+;;
+;; The text is the type's own name around the repr of a list of the view's
+;; contents, which is exactly what CPython writes, and lets list_repr do the
+;; work including its recursion guard.
+;; ============================================================================
+DVR_VIEW  equ 8
+DVR_LIST  equ 16
+DVR_TEXT  equ 24
+DVR_FRAME equ 32            ; + 2 pushes = 48, 16-aligned
+
+extern obj_repr
+DEF_FUNC dict_view_repr, DVR_FRAME
+    push rbx
+    push r12
+    mov [rbp - DVR_VIEW], rdi
+
+    ; The same cycle stack list and tuple use.  A view can reach itself --
+    ; d['k'] = d.values() -- and without this the repr recursed until the
+    ; depth limit where CPython prints dict_values([...]).
+    extern repr_check_active
+    extern repr_push
+    extern repr_pop
+    call repr_check_active
+    test eax, eax
+    jnz .dvr_recursive
+    mov rdi, [rbp - DVR_VIEW]
+    call repr_push
+
+    xor edi, edi
+    extern list_new
+    call list_new
+    mov [rbp - DVR_LIST], rax
+    mov rbx, rax
+
+    mov rdi, [rbp - DVR_VIEW]
+    call dict_view_iter
+    mov r12, rax
+.dvr_loop:
+    mov rdi, r12
+    call dict_iter_next
+    V_UNPACK rax, rdx
+    test edx, edx
+    jz .dvr_done
+    push rax
+    push rdx
+    mov rdi, rbx
+    mov rsi, rax
+    V_PACK rsi, rdx
+    extern list_append
+    call list_append
+    pop rdx
+    pop rax
+    ; dict_iter_next hands back an OWNED reference and list_append takes its
+    ; own, so without this every element leaked -- and for an items view the
+    ; leaked object is a freshly built tuple, so a loop grew without bound.
+    mov rdi, rax
+    mov rsi, rdx
+    DECREF_VAL rdi, rsi
+    jmp .dvr_loop
+.dvr_done:
+    mov rdi, r12
+    call obj_decref
+
+    mov rdi, rbx
+    call obj_repr
+    V_UNPACK rax, rdx
+    mov [rbp - DVR_TEXT], rax
+    mov rdi, rbx
+    call obj_decref
+    ; After the nested reprs, not before them: they are what the guard is
+    ; for, and they all happen inside that obj_repr.
+    mov rdi, [rbp - DVR_VIEW]
+    call repr_pop
+    mov rax, [rbp - DVR_TEXT]
+    test rax, rax
+    jz .dvr_failed
+
+.dvr_wrap:
+    ; "<name>(" + that + ")"
+    mov rdi, [rbp - DVR_VIEW]
+    mov rdi, [rdi + PyObject.ob_type]
+    mov rbx, [rdi + PyTypeObject.tp_name]
+    xor ecx, ecx
+.dvr_namelen:
+    cmp byte [rbx + rcx], 0
+    je .dvr_have_namelen
+    inc rcx
+    jmp .dvr_namelen
+.dvr_have_namelen:
+    mov r12, rcx                        ; the name's length
+    mov rax, [rbp - DVR_TEXT]
+    mov rdx, [rax + PyStrObject.ob_size]
+    lea rdi, [r12 + rdx]
+    add rdi, PyStrObject.data + 10      ; two brackets, a NUL and slack
+    extern ap_malloc
+    call ap_malloc
+    mov qword [rax + PyObject.ob_refcnt], 1
+    lea rcx, [rel str_type]
+    mov [rax + PyObject.ob_type], rcx
+    mov qword [rax + PyStrObject.ob_hash], -1
+    push rax
+
+    lea rdi, [rax + PyStrObject.data]
+    mov rsi, rbx
+    mov rdx, r12
+    extern ap_memcpy
+    call ap_memcpy
+    mov rax, [rsp]
+    mov byte [rax + PyStrObject.data + r12], '('
+    lea rdi, [rax + PyStrObject.data + r12 + 1]
+    mov rcx, [rbp - DVR_TEXT]
+    lea rsi, [rcx + PyStrObject.data]
+    mov rdx, [rcx + PyStrObject.ob_size]
+    call ap_memcpy
+    mov rax, [rsp]
+    mov rcx, [rbp - DVR_TEXT]
+    mov rdx, [rcx + PyStrObject.ob_size]
+    lea rcx, [r12 + rdx]
+    mov byte [rax + PyStrObject.data + rcx + 1], ')'
+    mov byte [rax + PyStrObject.data + rcx + 2], 0
+    add rcx, 2
+    mov [rax + PyStrObject.ob_size], rcx
+    mov rdi, rax
+    extern str_set_length
+    call str_set_length
+
+    mov rdi, [rbp - DVR_TEXT]
+    call obj_decref
+    pop rax
+    mov edx, TAG_PTR
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.dvr_failed:
+    xor eax, eax
+    xor edx, edx
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.dvr_recursive:
+    ; A bare ellipsis, NOT the name wrapper: CPython's dictview_repr returns
+    ; "..." on its own here, and the enclosing level supplies the name.  It
+    ; is what makes d['k'] = d.values() print
+    ; dict_values([dict_values([...])]) rather than one level deeper.
+    CSTRING rdi, "..."
+    extern str_from_cstr_heap
+    call str_from_cstr_heap
+    mov edx, TAG_PTR
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC dict_view_repr
 
 ;; ============================================================================
 ;; dict_keys_view_contains(rdi=view, rsi=key, rdx=key_tag) -> int (0 or 1)
@@ -1178,21 +1359,24 @@ END_FUNC dict_nb_or
 ;; ============================================================================
 DIO_LEFT  equ 8
 DIO_RIGHT equ 16
-DIO_FRAME equ 24            ; + 0 pushes = 24, not 16-aligned
+DIO_ARGS  equ 32       ; args[0] at rbp-32, args[1] at rbp-24: an args array
+                       ; grows upward, so its first slot is the deeper one
+DIO_FRAME equ 32            ; + 0 pushes = 32, 16-aligned
 
 DEF_FUNC dict_nb_ior, DIO_FRAME
-    ; Both operands must be dicts.  CPython's `|=` also accepts any iterable of
-    ; key/value pairs; this slot read whatever it was given as a PyDictObject,
-    ; so `d |= 5` was an arbitrary dereference.  Declining is safe and gives the
-    ; right exception type; the iterable-of-pairs form is a gap, in bugs.md.
+    ; The LEFT operand must be a dict; the right can be anything dict.update
+    ; takes -- a mapping, something with keys(), or an iterable of pairs --
+    ; which is CPython's rule for `|=` and not for `|`.  This slot read
+    ; whatever it was given as a PyDictObject, so `d |= 5` was an arbitrary
+    ; dereference, and declining was the safe half of the answer.
     V_TEST_PTR rdi, rax         ; ja == not a pointer, so not a dict either
     ja .nb_ior_decline
     V_TEST_PTR rsi, rax
-    ja .nb_ior_decline
+    ja .nb_ior_other
     mov rax, [rdi + PyObject.ob_type]
     REQUIRE_DICT_TYPE rax, rcx, .nb_ior_decline
     mov rax, [rsi + PyObject.ob_type]
-    REQUIRE_DICT_TYPE rax, rcx, .nb_ior_decline
+    REQUIRE_DICT_TYPE rax, rcx, .nb_ior_other
     V_UNPACK rdi, rdx           ; left  Value -> (payload, tag)
     V_UNPACK rsi, rcx           ; right Value -> (payload, tag)
     mov [rbp - DIO_LEFT], rdi       ; left dict
@@ -1234,6 +1418,36 @@ DEF_FUNC dict_nb_ior, DIO_FRAME
     leave
     V_PACK rax, rdx             ; return one Value
     ret
+.nb_ior_other:
+    ; Anything else goes through dict.update, which already accepts a mapping,
+    ; the keys() protocol, or an iterable of key/value pairs -- and raises the
+    ; right thing for what is none of those.  The left operand still has to be
+    ; a dict.
+    mov rax, [rdi + PyObject.ob_type]
+    REQUIRE_DICT_TYPE rax, rcx, .nb_ior_decline
+    mov [rbp - DIO_LEFT], rdi
+    mov [rbp - DIO_ARGS], rdi
+    mov [rbp - DIO_ARGS + 8], rsi
+    lea rdi, [rbp - DIO_ARGS]
+    mov esi, 2
+    extern dict_method_update
+    call dict_method_update
+    test rax, rax
+    jz .nb_ior_failed           ; update raised; hand the failure on
+    DECREF_V rax, rcx           ; update answers None
+    mov rax, [rbp - DIO_LEFT]
+    INCREF rax
+    mov edx, TAG_PTR
+    leave
+    V_PACK rax, rdx
+    ret
+
+.nb_ior_failed:
+    xor eax, eax
+    xor edx, edx
+    leave
+    ret
+
 .nb_ior_decline:
     xor eax, eax                ; NULL Value = NotImplemented
     leave
@@ -1436,11 +1650,9 @@ DEF_FUNC dict_reversed
     mov rbx, rax               ; rbx = dict
 
     mov edi, PyDictIterObject_size
-    call ap_malloc
+    lea rsi, [rel dict_rev_iter_type]
+    call gc_alloc
 
-    mov qword [rax + PyObject.ob_refcnt], 1
-    lea rcx, [rel dict_rev_iter_type]
-    mov [rax + PyObject.ob_type], rcx
     mov [rax + PyDictIterObject.it_dict], rbx
     ; Set it_index to capacity - 1 (start from end)
     mov rcx, [rbx + PyDictObject.capacity]
@@ -1455,6 +1667,10 @@ DEF_FUNC dict_reversed
     push rax
     mov rdi, rbx
     call obj_incref
+    pop rax
+    push rax
+    mov rdi, rax
+    call gc_track
     pop rax
 
     mov edx, TAG_PTR
@@ -1642,10 +1858,10 @@ dict_iter_type:
     dq 0                        ; tp_base
     dq 0                        ; tp_dict
     dq 0                        ; tp_mro
-    dq 0                        ; tp_flags
+    dq TYPE_FLAG_HAVE_GC                        ; tp_flags
     dq 0                        ; tp_bases
-    dq 0                        ; tp_traverse
-    dq 0                        ; tp_clear
+    dq iter_traverse_one                        ; tp_traverse
+    dq iter_clear_one                        ; tp_clear
     dq 0 ; tp_dictoffset
 
 ; Dict reverse key iterator type
@@ -1674,10 +1890,10 @@ dict_rev_iter_type:
     dq 0                        ; tp_base
     dq 0                        ; tp_dict
     dq 0                        ; tp_mro
-    dq 0                        ; tp_flags
+    dq TYPE_FLAG_HAVE_GC                        ; tp_flags
     dq 0                        ; tp_bases
-    dq 0                        ; tp_traverse
-    dq 0                        ; tp_clear
+    dq iter_traverse_one                        ; tp_traverse
+    dq iter_clear_one                        ; tp_clear
     dq 0 ; tp_dictoffset
 
 ; Dict keys view sequence methods (len + contains)
@@ -1713,8 +1929,8 @@ dict_keys_view_type:
     dq dict_keys_view_name      ; tp_name
     dq PyDictViewObject_size    ; tp_basicsize
     dq dict_view_dealloc        ; tp_dealloc
-    dq 0                        ; tp_repr
-    dq 0                        ; tp_str
+    dq dict_view_repr           ; tp_repr
+    dq dict_view_repr           ; tp_str
     dq 0                        ; tp_hash
     dq 0                        ; tp_call
     dq 0                        ; tp_getattr
@@ -1730,10 +1946,10 @@ dict_keys_view_type:
     dq 0                        ; tp_base
     dq 0                        ; tp_dict
     dq 0                        ; tp_mro
-    dq 0                        ; tp_flags
+    dq TYPE_FLAG_HAVE_GC                        ; tp_flags
     dq 0                        ; tp_bases
-    dq 0                        ; tp_traverse
-    dq 0                        ; tp_clear
+    dq iter_traverse_one                        ; tp_traverse
+    dq iter_clear_one                        ; tp_clear
     dq 0 ; tp_dictoffset
 
 ; Dict values view type
@@ -1745,8 +1961,8 @@ dict_values_view_type:
     dq dict_values_view_name    ; tp_name
     dq PyDictViewObject_size    ; tp_basicsize
     dq dict_view_dealloc        ; tp_dealloc
-    dq 0                        ; tp_repr
-    dq 0                        ; tp_str
+    dq dict_view_repr           ; tp_repr
+    dq dict_view_repr           ; tp_str
     dq 0                        ; tp_hash
     dq 0                        ; tp_call
     dq 0                        ; tp_getattr
@@ -1762,10 +1978,10 @@ dict_values_view_type:
     dq 0                        ; tp_base
     dq 0                        ; tp_dict
     dq 0                        ; tp_mro
-    dq 0                        ; tp_flags
+    dq TYPE_FLAG_HAVE_GC                        ; tp_flags
     dq 0                        ; tp_bases
-    dq 0                        ; tp_traverse
-    dq 0                        ; tp_clear
+    dq iter_traverse_one                        ; tp_traverse
+    dq iter_clear_one                        ; tp_clear
     dq 0 ; tp_dictoffset
 
 ; Dict items view type
@@ -1777,8 +1993,8 @@ dict_items_view_type:
     dq dict_items_view_name     ; tp_name
     dq PyDictViewObject_size    ; tp_basicsize
     dq dict_view_dealloc        ; tp_dealloc
-    dq 0                        ; tp_repr
-    dq 0                        ; tp_str
+    dq dict_view_repr           ; tp_repr
+    dq dict_view_repr           ; tp_str
     dq 0                        ; tp_hash
     dq 0                        ; tp_call
     dq 0                        ; tp_getattr
@@ -1794,10 +2010,10 @@ dict_items_view_type:
     dq 0                        ; tp_base
     dq 0                        ; tp_dict
     dq 0                        ; tp_mro
-    dq 0                        ; tp_flags
+    dq TYPE_FLAG_HAVE_GC                        ; tp_flags
     dq 0                        ; tp_bases
-    dq 0                        ; tp_traverse
-    dq 0                        ; tp_clear
+    dq iter_traverse_one                        ; tp_traverse
+    dq iter_clear_one                        ; tp_clear
     dq 0 ; tp_dictoffset
 
 section .text

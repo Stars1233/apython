@@ -9,126 +9,29 @@ one-line fix.
 
 ## Correctness
 
-- **`format(x, "F")` does not capitalise a non-finite float.**  `'F'` now
-  formats like `'f'`, but CPython spells the result of `format(float('inf'),
-  'F')` as `INF`; here it is `inf`.  The same for `NAN`, and for the halves of
-  a complex.
+- **`(-7.5) ** 2.5` is `nan` where CPython answers a complex.**  A negative
+  base with a fractional exponent has no real result, and CPython's `float`
+  power promotes to `complex` rather than answering NaN.
 
-- **PEP 604 unions are not flattened.**  `int | str | float` builds
-  `((int | str), float)` rather than a flat three-member union, so
-  `__args__` is nested and `(int|str|float) == (float|str|int)` is False where
-  CPython says True.  The repr is flat, which hides it.  Two-member unions
-  compare correctly.
-
-- **`~x` on an int subclass prefers the subclass's `__invert__` over
-  `int.__invert__`.**  For `class I(int, M)` where `M` defines `__invert__`,
-  CPython resolves `int.__invert__` first (it comes earlier in the MRO) and
-  answers `-4` for `~I(3)`; here `M`'s wins.  The same shape applies to the
-  other unary dunders.
-
-- **`dir()` on a module does not report the module's contents.**  `dir(errno)`
-  and `dir(sys)` return only object's own dunders; the module's `__dict__` is
-  not consulted.  `tests/test_errno.py` lists its names literally because of it.
-
-- **`slice` objects cannot be ordered.**  CPython compares them as the tuple
-  `(start, stop, step)`, so `slice(1) < slice(2)` is True; here it is a
-  TypeError.  Equality works.
-
-- **`bytearray` has no `%`.**  `+`, `*`, `+=` and `*=` all work now, through
-  `bytearray_seq_methods`; `bytearray(b"%d") % 5` is still a TypeError, since
-  `bytearray_type.tp_as_number` is 0 and nothing supplies `nb_remainder`.
-  `tests/test_binop_matrix.py` skips that cell rather than blessing it.
-
-- **The set operators build their result with `set_new` whatever the left
-  operand was**, so `frozenset({1}) | frozenset({2})` is a `set`, not a
-  `frozenset`.  The same for `&`, `-`, `^` and their inplace forms.  The
-  contents are right; only the type is wrong.
-
-- **`%`-formatting takes only a tuple or a mapping on the right.**  CPython
-  also accepts a single arbitrary object, so `"ab" % [1, 2]` is `'ab'` there
-  and a TypeError here.
-
-- **`bytes` `%`-formatting converts through `str_mod`**, so its conversions are
-  str's rather than bytes': `b"%s" % b"x"` is `b"b'x'"` where CPython gives
-  `b'x'`, `b"%d" % "x"` answers `b'x'` where CPython raises, `b"%c" % 65` is a
-  TypeError, and a `bytes`-keyed mapping (`b"%(a)d" % {b"a": 1}`) raises
-  KeyError.  The segfault this path used to carry is fixed; the conversion
-  table is still str's.
-
-- **`dict.__ior__` takes only a dict.**  CPython's takes any iterable of
-  key/value pairs.
-
-- **PEP 604 unions are thin.**  `None | int` is a TypeError rather than
-  `None | int`, and `int | int` is not collapsed to `int`.
-
-- **The binary-operator TypeError names neither the operator nor the operand
-  types.**  Ours is the fixed string `unsupported operand type(s)`; CPython
-  says `unsupported operand type(s) for +: 'int' and 'str'`, and has two more
-  wordings besides (`can only concatenate str ...`, `can't multiply sequence by
-  non-int of type ...`).  Matching them needs a formatted-raise helper, which
-  `raise_exception` has no equivalent of.  Until then **no test may compare
-  `str(e)` for one of these** -- `type(e).__name__` is the contract, and
-  `tests/test_binop_matrix.py` says so where the next person will read it.
-
-- **`binary_op1`'s subclass rule is not implemented.**  CPython tries the right
-  operand's slot *first* when its type is a proper subclass of the left's and
-  overrides the slot.  It cannot fire here: the only builtin static subclass
-  relationship is `bool` ⊂ `int`, and `bool_number_methods` holds the very same
-  function pointers as `int_number_methods`, which CPython's own
-  `if (slotw == slotv)` collapses to nothing.  Revisit if a builtin static type
-  is ever given a slot function that differs from its base's.
-
-- **Case conversion is ASCII-only.**  `"é".upper()` is `"é"`, not `"É"`;
-  `upper`, `lower`, `title`, `capitalize` and `swapcase` all leave a
-  non-ASCII byte as it is.  Needs Unicode case tables.
-
-- **`bytes.decode` does not validate UTF-8.**  CPython raises
-  UnicodeDecodeError for a stray continuation byte or a truncated sequence;
-  here the bytes come through as they are.  The resulting string is at least
-  self-consistent -- every walk over it treats such a byte as one code point
-  of one byte, so `len`, indexing, slicing and iteration agree.
+- **`binary_op1`'s subclass-priority rule is not implemented.**  CPython tries
+  the right operand's slot *first* when its type is a proper subclass of the
+  left's and overrides the slot.  The other half of that rule -- skipping the
+  right slot when it resolves to the same function as the left's -- is
+  implemented, and had to be: every heaptype that overrides an operator now
+  holds the same wrapper, so without it the left operand's method ran twice.
+  The priority half remains, and shows as `P() + Q()` calling `P.__add__`
+  where CPython calls `Q.__radd__` first for a Q deriving from P.
 
 - **`str.encode` and `bytes.decode` know only utf-8, ascii and latin-1.**
   Any other name is a LookupError, where CPython would find the codec through
   the registry; reaching it from the interpreter would mean calling Python
-  from a builtin method.  The `errors` argument is accepted and ignored --
-  every failure is strict.
-
-- **`format(x, "")` is not `str(x)` for a float.**  `format(1.0, "")` gives
-  `"1"` where CPython gives `"1.0"`: an empty spec falls into the general
-  formatter with type `g` and precision 6, rather than short-circuiting to
-  `repr`.  `f"{1.0}"` and `str(1.0)` are both right; only the explicit
-  `format()` with an empty spec is not.
-
-- **`str.format` does not accept attribute or index access in a field.**
-  `"{0.attr}"` and `"{0[key]}"` are not resolved; a field is a position, a
-  name, or empty.  A nested spec, `"{:{}}"`, is likewise not substituted.
-
-- **`tuple(t) is t` is False.**  CPython returns the argument unchanged when
-  it is already an exact tuple.
-
-- **`func.__name__ = "x"` is silently ignored.**  Functions have no settable
-  attributes.
-
-- **Dict views have no repr and no contents.**  `repr(d.keys())` is empty
-  where CPython gives `dict_keys(['a'])`; the same for `.values()` and
-  `.items()`.
-
-- **`bytearray` is not subscriptable.**  It has `sq_length` but no `sq_item`
-  and no `tp_as_mapping`, so `b[0]`, `b[1:]` and `reversed(bytearray(...))`
-  raise.  It is iterable, and the constructors take every form CPython's do.
+  from a builtin method.
 
 - **The `_abc` registry and caches hold strong references.**  CPython uses
   weak ones, so a class registered against an ABC can be collected and the
   ABC's caches shrink; here a registered class lives as long as the ABC.
   Registries are process-lifetime and small in practice.  Revisit if
   `_weakref` lands.
-
-- **`_abc_subclasscheck` does not recurse into `cls.__subclasses__()`.**
-  CPython's step 6 finds a registration made on a *subclass* of the ABC;
-  types keep no subclass list here, so `issubclass(X, ABC)` is False when X
-  was registered against a subclass of ABC rather than against ABC itself.
-  Direct registration and real inheritance both work.
 
 - **`posix` is a subset, and a deliberate one.**  The file, directory and
   process calls `os.py` and `os.path` reach for are there, along with
@@ -139,13 +42,20 @@ one-line fix.
   an empty list, which is the honest answer -- no `dir_fd=` support -- and
   os.py reads it to build `supports_dir_fd`.
 
-  `stat_result`'s three timestamps are whole-second ints where CPython gives
-  floats; the `_ns` fields carry the exact value in both.
-
 - **Missing C modules**, in rough order of how many stdlib modules each
-  blocks: `_io`, `math`, `_struct`, `_socket`, `_imp`, `_collections`,
-  `_ast`, `binascii`, `_string`, then a long tail of one apiece.
+  blocks: `_struct`, `_socket`, `_random`, `_contextvars`, `_tokenize`,
+  `_ast`, `_imp`, `binascii`, `_string`, then a long tail of one apiece.
+  (`_io` is not among them: `src/iomod.asm` supplies `_iocore` and
+  `lib/_io.py` assembles both halves under the name `_io`.  Neither are
+  `math` and `_collections`, which are there now.)
   `make check-stdlib` gives the current figure.
+
+  `math` itself is short of `dist`, `prod`, `isclose`, `perm`, `ulp` and
+  `nan`/`inf` parsing corners; and `gamma`, `lgamma`, the n-ary `hypot` and
+  `sumprod` round differently from CPython's, which uses its own Lanczos
+  approximation and double-double arithmetic where these use glibc and a
+  Neumaier sum.  `fsum` is exact: it is Shewchuk's algorithm, as CPython's
+  is.  `tests/test_math.py` says which is which.
 
 - **Weak references keep no per-object slot.**  The links live in a side
   table keyed by the referent's address rather than in the object, so
@@ -153,30 +63,21 @@ one-line fix.
   Everything observable through `_weakref` works; a C extension expecting the
   slot would not.
 
-- **`int` and `float` have no `__abs__`, `__int__`, `__float__`, `__index__` or
-  `__trunc__`.**  `abs(-5)` works, `(-5).__abs__()` is an AttributeError, and
-  the stdlib asks by name -- `operator.index` goes through `__index__`, and a
-  class delegating to `int.__int__` finds nothing.  `src/methods/num.asm`
-  carried implementations of these, written but never registered and never
-  converted to the one-Value return convention; they also truncated a big int
-  through `self_to_i64`, so they have been deleted.
+- **A few names are still short of CPython's `dir()`.**  `int` and `float`
+  are missing the in-place forms, `as_integer_ratio`, `is_integer`,
+  `__round__`, `__ceil__`, `__floor__` and `__getnewargs__`; `set` is missing
+  `__iand__` and `__ior__`, deliberately -- it has no `nb_inplace_*` slots, so
+  `s &= t` degrades to the binary form, and a by-name `__iand__` that did not
+  mutate in place would be a wrong answer rather than a missing name.
+  `object.__getstate__` answers `self.__dict__ or None` but not CPython's
+  `(None, {...})` pair form for a `__slots__` class, which here has no
+  instance dict to build it from.
 
-  Registering the *builtins* under those names instead does not work, which is
-  the reason this is still open: `builtin_abs` and `builtin_int_fn` resolve a
-  non-exact operand through the numeric protocol, which for a subclass finds
-  the very dunder being registered.  `int(M(0))` where `class M(int)` then
-  recurses until the stack goes.  They need implementations that read the
-  value out of the `PyIntObject` directly, the way `int()` does for an exact
-  int -- the trap CLAUDE.md records as "the thunk must call the *defining*
-  type's slot, not the argument's".
-
-- **`bytes` and `bytearray` are missing most of the string-like methods.**
-  Both have `find`, `count`, `startswith`, `endswith`, `split`, `join`,
-  `replace`, `hex` and `decode`; neither has `rfind`, `index`, `rindex`,
-  `rsplit`, `splitlines`, `strip`/`lstrip`/`rstrip`, `partition`/
-  `rpartition`, `upper`/`lower`/`title`/`swapcase`/`capitalize`,
-  `center`/`ljust`/`rjust`, `zfill`, `expandtabs`, `translate`, or the
-  `is*` predicates.  `bytearray(str, encoding)` is not accepted either.
+- **`collections.deque` is list-backed, and two itertools functions
+  materialise.**  CPython's deque is a block-linked list, so `appendleft` and
+  `popleft` are O(1) there and O(n) here; `itertools.groupby` materialises
+  each group rather than sharing the source iterator, and `tee` materialises
+  the source.  Every observable answer matches for a finite iterable.
 
 - **bytearray's read-only methods copy.**  bytes keeps its data inline and
   bytearray keeps it out of line, so the shared method bodies cannot read a
@@ -185,45 +86,30 @@ one-line fix.
   an allocation per call -- worth threading a (pointer, length) pair through
   the bodies if bytearray ever becomes hot.
 
-- **The regex engine differs from CPython in 41 of 816 checked answers.**
+- **The regex engine differs from CPython in 1 of 816 checked answers.**
   `make check-re` runs `tests/re_differential.py` under both interpreters
   and ratchets against `tests/re_floor.txt`; it needs `$CPYTHON_LIB`,
   because `re` is a Python module and so comes from a real stdlib.  What is
   left, from that diff:
 
-  - An unmatched group reads as `''` with span `(0, 0)` where CPython gives
-    `None` and `(-1, -1)`.  `lastindex` is off by one and `lastgroup` is
-    always `None`.
-  - `findall` and `split` return the whole match where a pattern has exactly
-    one group; CPython returns the group.  Both also mishandle a zero-width
-    match when advancing.
-  - `Match.expand()` and `re.sub`'s `\1` group references are not
-    implemented -- the template comes back unchanged.
+  - A malformed replacement template raises `IndexError` or `ValueError`
+    where CPython raises `re.error`.  `re.error` is defined in Python, so
+    constructing one from the engine would mean importing `re` from `_sre`.
   - A nested unbounded repeat (`(a*)*b`) recurses until the limit.
-  - `()` fails to compile, and `[a-zA-Z0-9_]+` needs `bytes.translate`,
-    which does not exist.
   - `bytes` patterns and subjects are unsupported: `sre_state_init` always
     treats the subject as a `PyStrObject` and hardcodes `is_bytes = 0`.
 
-- **`str.translate` cannot take a miss signalled by an exception.**  A table
-  with a length -- dict, list, tuple, str, bytes -- is exact, because the
-  bound is checked before the lookup.  A mapping object whose `__getitem__`
-  raises `LookupError` to mean "not in the table" propagates instead, where
-  CPython carries on.  Catching it is not possible: `raise_exception`
+- **C code here cannot catch a Python exception.**  `raise_exception`
   tail-jumps into `eval_exception_unwind`, which resumes the eval loop from
   saved globals rather than returning through the C stack, so a `call` to a
-  slot that raises never comes back.  The same limit applies anywhere C code
-  here would want to catch an exception.
+  slot that raises never comes back.  `str.translate` gets around it by
+  reaching a heaptype table through `dunder_call_2`, which does return; the
+  general limit stands, and is why the `bytes %` leak below cannot be fixed
+  by catching.
 
-- **`str.encode` honours no error handler, and `bytes.decode` only honours
-  one for utf-8.**  `bytes.decode` reads `errors=` through `codec_error_id`
-  and acts on it in the utf-8 fixup loop, but its `ascii` arm jumps straight
-  to `.bd_not_decodable` on the first high byte; `str.encode` parks the
-  argument in `SE_ERRS` and never passes it to `codec_error_id` at all.  So
-  `b"a\xffb".decode("ascii", "ignore")` and `"a\u1234b".encode("ascii",
-  "ignore")` both raise where CPython answers `'ab'` and `b'ab'`, and an
-  unknown handler name is not reported as a LookupError on those paths
-  because it is never looked up.
+- **`latin-1` encoding honours no error handler.**  `str.encode` and
+  `bytes.decode` both act on `errors=` for `ascii` and `utf-8` now;
+  `"a\u1234b".encode("latin-1", "ignore")` still raises.
 
 - **`sys.getfilesystemencoding()` always answers `'utf-8'`.**  PEP 540's
   locale handling does not exist, and neither does the `surrogateescape`
@@ -231,19 +117,12 @@ one-line fix.
   does not survive a decode/encode round trip, where CPython preserves it.
   The entry above is the other half of why.
 
-- **`real` and `imag` are readable on an instance but not on the type.**
-  `(5).real`, `(1.5).real` and `(1+2j).real` all work, through a `tp_getattr`
-  chain; `int.real` and `complex.real` are AttributeErrors where CPython hands
-  back a member descriptor.  `getset_descr` is a stub whose accessors are NULL
-  and which nothing in the tree ever invokes, so this needs that plumbing
-  built first.  `complex.conjugate` has the same shape -- it resolves to the
-  bare builtin rather than to a method descriptor.
-
-- **`float()` of a large int rounds differently from CPython.**
-  `float(10**30)` is `9.999999999999999e+29` here and `1e+30` there.
-  `float_to_f64` converts a GMP-backed int with `__gmpz_get_d`, which
-  truncates toward zero; CPython's `PyLong_AsDouble` rounds to nearest even.
-  Every `complex()` and comparison of such a value inherits it.
+- **`complex.conjugate` resolves to the bare builtin rather than to a method
+  descriptor.**  `real` and `imag` are getset descriptors now, on `int`,
+  `float`, `complex` and `bool`; the *methods* a builtin type registers are
+  still plain `PyBuiltinObject`s, so `int.bit_length` reprs as `bit_length`
+  where CPython says `<method 'bit_length' of 'int' objects>`.  They are
+  callable unbound either way.
 
 - **`complex()` of a string does not accept Unicode spaces or Unicode digits.**
   CPython runs `_PyUnicode_TransformDecimalAndSpaceToASCII` first, so
@@ -251,28 +130,17 @@ one-line fix.
   malformed string.  ASCII whitespace, brackets, underscores, `inf` and `nan`
   all behave as CPython's do.
 
-- **`object.__lt__`, `__le__`, `__gt__` and `__ge__` are missing.**  They
-  exist in CPython and always return NotImplemented.  Adding them here would
-  shadow a builtin base's own comparison, because a heaptype's slot is
-  installed from whatever the MRO's dunder lookup finds and there are no slot
-  wrappers to tell object's default apart at that point.  `__eq__`, `__ne__`
-  and `__hash__` are present and are skipped explicitly when slots are
-  installed.
-
 - **`_thread` is a single-threaded stand-in.**  `lib/_thread.py` gives
   `get_ident` a constant, makes locks uncontended, and raises from
   `start_new_thread`.  Everything in the stdlib that only takes a lock works;
   anything that expects a second thread does not.
 
-- **`_abc_instancecheck` does not honour a spoofed `__class__`.**  CPython
-  checks both `instance.__class__` and `type(instance)`; this checks only the
-  type, so an object that lies about its class -- a mock, mostly -- is judged
-  by what it really is.
-
-- **A `str` subclass has no instance `__dict__`.**  A str keeps its
-  characters inline, so there is no fixed offset past the header to put one
-  at; CPython uses a negative `tp_dictoffset` scaled by `tp_itemsize`.  These
-  behave like `bytes` and like a `__slots__` class.
+- **A `__slots__` instance still carries a dict WORD it can never use.**  The
+  suppression works now, but `tp_dictoffset` is left pointing at a word that
+  is always NULL: eight bytes per instance, and the reason every reader has to
+  ask about `TYPE_FLAG_HAS_SLOTS` as well as about `tp_dictoffset`.  Zeroing
+  the offset means moving the slots down by one word and teaching the dealloc
+  and traverse walks where the header now ends.
 
 - **A heaptype's layout base is the widest of its bases, not CPython's solid
   base.**  `class C(A, B)` where A and B are unrelated builtin subclasses of
@@ -284,12 +152,11 @@ one-line fix.
   those finalizers never run.  `tests/test_del_and_gc_state.py` records this
   divergence in its recorded transcript deliberately -- see the note there.
 
-- **Repetition too large to allocate reports OverflowError where CPython says
-  MemoryError.**  `ap_malloc` exits fatally rather than returning NULL, so
-  the two cases cannot be told apart.
+- **`str` and `tuple` repetition too large to allocate reports OverflowError
+  where CPython says MemoryError.**  `ap_malloc` exits fatally rather than
+  returning NULL, so the two cases cannot be told apart; `list` and `bytes`
+  answer MemoryError already, so only those two types differ.
 
-- **The container repr cycle stack is 64 deep**; CPython's limit is far
-  higher, so a legitimately deep nesting reports RecursionError.
 
 - **Traceback rendering has no caret line.**  CPython underlines the failing
   expression (`^^^^^^^^`, and `~~^~~` for binary operators and subscripts)
@@ -304,34 +171,22 @@ one-line fix.
 These are absences rather than wrong answers — the interpreter raises rather
 than lying — but they are ordinary Python that does not work:
 
-- **`bytes.rsplit` and `bytearray.rsplit` do not exist.**  `split` takes its
-  `maxsplit` now, but the right-hand form was never added, so
-  `b'a,b,c'.rsplit(b',', 1)` is an AttributeError.  `str.rsplit` is there.
+- **`posix.symlink` does not exist.**  `readlink`, `lstat` and `stat`'s
+  `follow_symlinks=False` are all there, so a link can be inspected and read;
+  it just cannot be created from inside the interpreter, which is why the
+  regression test for `follow_symlinks` has to make do with a regular file.
 
-- **`posix.symlink` and `posix.readlink` do not exist.**  `os.stat` honours
-  `follow_symlinks=False` and `posix.lstat` works, so links can be inspected;
-  they just cannot be created or read from inside the interpreter, which is
-  also why the regression test for `follow_symlinks` has to make do with a
-  regular file.
-
-- **`async for` accepts only an async generator.**  A class implementing the
-  asynchronous iterator protocol itself -- `__aiter__` returning self and an
-  `async def __anext__` raising `StopAsyncIteration` -- is refused with
-  `TypeError: 'async for' requires an object with __aiter__ method`, though it
-  defines exactly that.  `asyncio` streams and every hand-written async
-  iterator are shaped this way.
-
-- **An extended-slice length mismatch does not name the sizes.**  CPython says
-  "attempt to assign sequence of size 3 to extended slice of size 2"; here the
-  message is "of wrong size", because `src/pyo/list.asm` has no int-to-string
-  helper to build the two numbers with -- the one that exists is file-local to
-  `src/opcodes/build.asm`.  The exception type and the condition are right.
-
-- **`dir()` does not consult `__dir__`.**  It walks the MRO's `tp_dict`s and
-  nothing else, so a class defining `__dir__` has it ignored -- including a
-  `__dir__` that raises, whose exception is discarded along with its answer.
-  The module entry under Correctness is the same gap seen from the other end:
-  the object is never asked what it contains.
+- **The unwinder can carry an exception nothing owns.**  `raise_exception_obj`
+  takes over its caller's reference rather than adding one, so
+  `current_exception` holds exactly one reference -- and somewhere between a
+  coroutine raising and the awaiting frame's unwind, that reference is
+  dropped: by the time `eval_exception_unwind` releases the value stack,
+  `current_exception` points at an object whose `ob_refcnt` is 0.  Nothing
+  notices, because nothing else takes a reference to it.  `instance_dealloc`
+  did, once it started restoring a live exception around `__del__`, and freed
+  it; it now checks the refcount first and says so, which is a guard and not
+  a fix.  Reproduce with an `async for` over a hand-written `__anext__` that
+  raises.
 
 - **`bytes % args` leaks its temporary when the format is malformed.**  The
   work is done by handing a decoded copy of the format and the arguments to
@@ -341,53 +196,25 @@ than lying — but they are ordinary Python that does not work:
   argument's `__str__` can run Python, and a raise caught inside it would
   free a buffer `str_mod` is still reading.
 
-- **Every `int` method reads past the end of an `int` subclass instance.**
-  `bit_length`, `bit_count`, `conjugate` and `to_bytes` in
-  `src/methods/num.asm` read `PyIntObject.compact` at +40 of a 32-byte
-  `PyIntSubclassObject` without unwrapping first, so `I(7).bit_length()` is
-  0 and `I(258).to_bytes(2, 'big')` is `b'\x00\x00'`.  Under valgrind it is
-  an invalid read, and the garbage can be a limb pointer handed to GMP.
-
-- **A NaN divisor reads as zero in float division.**  `float_truediv`,
-  `float_floordiv` and `float_mod` compare against 0.0 with `ucomisd` and
-  branch on `je`, which is taken for UNORDERED as well: `1.0 / float("nan")`
-  raises ZeroDivisionError where CPython answers nan.  `complex_pow` has the
-  same shape at its `jb`, so `complex(0,0) ** complex(nan, 0)` raises where
-  CPython answers 0j.
-
-- **`next(obj)` reports StopIteration for any exception a Python `__next__`
-  raises.**  `it.__next__()` and `for x in it` both propagate the real one;
-  only the `next()` builtin swallows it.
-
-- **A `__del__` that raises and catches internally destroys an exception
-  that is already unwinding.**  The finaliser prints "Exception ignored in
-  __del__" and execution then continues as though nothing had been raised.
-
 - **Two `posix` messages name fewer paths than CPython's.**  `rename` reports
   only its source where CPython reports `'src' -> 'dst'`, and the
   "path should be string, bytes, or os.PathLike" TypeError carries no
   function-name prefix and no "or integer" variant for the calls that take a
   descriptor.  The resolved path itself does reach both.
 
-- **`str()` of a `UnicodeDecodeError` prints its argument tuple.**  CPython
-  renders "'ascii' codec can't decode byte 0xc3 in position 1: ordinal not in
-  range(128)" from the exception's fields; here the five arguments come out
-  as a tuple repr.  The same applies to `UnicodeEncodeError`.
+- **`bytes.decode`'s ascii arm raises a fixed message.**  `str()` of a
+  Unicode error renders its five fields now, so an exception raised from
+  `lib/_codecs.py` reads as CPython's does.  The asm sites still pre-render a
+  one-argument exception instead: the utf-8 arm builds CPython's wording by
+  hand, and the ascii arm says only "byte not in range for this encoding".
+  Raising a real five-argument exception from asm needs a way to call an
+  exception type with five arguments, which `exc_new` does not offer.
 
 - **A subclass of `_io.FileIO` cannot declare `__slots__`.**  FileIO stores
   its descriptor and flags past the instance header, in the same words a
   subclass's slots would land in: both are placed relative to the base's
   `tp_dictoffset`, which the subclass inherits.  Nothing detects the
   collision.
-
-- **`dir()` on a module lists object's dunders rather than the module's
-  contents.**  `dir(posix)` answers with fourteen names, none of them
-  posix's; `posix.__dict__` is right, so the information is there.
-
-- **`@abc.abstractmethod` is not enforced.**  A class with an unimplemented
-  abstract method instantiates.  `__abstractmethods__` is consulted by
-  `type_call`, so the missing half is abc's own bookkeeping rather than the
-  interpreter's check.
 
 - **A memoryview with a step other than 1 is not a view.**  `mv[::2]` and
   `mv[::-1]` raise NotImplementedError.  CPython answers with a
@@ -401,60 +228,89 @@ than lying — but they are ordinary Python that does not work:
   missing one -- leaves the string `str_from_cstr_heap` built for it.  A loop
   that probes the filesystem with try/except leaks once per attempt.
 
-- **An abandoned generator never releases its frame.**  Taking one value from
-  a generator expression and dropping it leaks the frame and whatever the
-  frame's stack holds, including the iterator it was walking.  CPython closes
-  a generator when it is collected; there is no equivalent here.
+- **A cleanup that raises is reported in one line.**  A `finally` in a dropped
+  generator, and a `__del__`, both report an exception they cannot propagate;
+  CPython prints the object's repr and a full traceback where these print
+  "Exception ignored in __del__" and "Exception ignored in: generator
+  cleanup".  The behaviour either side of the message is the same.
 
-- `time.time` and `time.sleep`.  The `time` module has only `monotonic` and
-  `process_time`; `asyncio.sleep` exists.
-- `itertools.zip_longest`, `permutations`, `combinations`, `takewhile`,
-  `dropwhile`, `filterfalse`, `groupby`, `tee`, `pairwise`.
 - The `re` wrapper module.  The `_sre` engine underneath is complete, but
   without a shipped `re.py` an `import re` finds CPython's, which needs
   `enum` and `types`.
-- `collections.deque`.
-- Four builtin exceptions: `IOError` / `EnvironmentError`, `FileExistsError`,
-  `UnicodeTranslateError`.
 
 ## Robustness
 
-- **Iterators are not GC-tracked, so a cycle through one leaks.**
-  `list_iter_type`, `tuple_iter_type`, `dict_iter_type` and the dict views have
-  `tp_flags` 0 with no `tp_traverse`/`tp_clear`, and their objects come from
-  `ap_malloc` rather than `gc_alloc`.  An iterator holds a strong reference to
-  the container it walks, so `a = []; a.append(iter(a))` is a cycle the
-  collector cannot see.  `src/gc.asm` used to carry eight traverse/clear
-  callbacks for exactly these types; none was ever installed in a slot, so they
-  were deleted rather than left looking like working code.  Wiring them up
-  means switching those four types to `gc_alloc` + `gc_track` and setting
-  `TYPE_FLAG_HAVE_GC`.
+- **`re.fullmatch(r'([a-z]*)+', 'abc1')` exhausts the regex recursion limit**
+  where CPython answers None.  Seven of the eight patterns in
+  `tests/re_differential.py`'s fullmatch block agree; this is the eighth.
+  The zero-width guard now saves and restores `last_pos` the way CPython's
+  `save_last_ptr` does, which fixed the sibling `(a*)*` against `'aab'`, so
+  what is left is a second bound this engine does not have -- CPython's
+  MAX_UNTIL also restores `state->ptr` and the mark stack on the failure
+  path, and reaches the tail iteratively rather than one C frame per
+  iteration.
 
-- **Code objects, asyncio `Task`s and `wait_for` wrappers are not GC-tracked
-  either**, for the same reason and with the same history: `code_traverse`,
-  `task_traverse`/`task_clear` and `wait_for_traverse`/`wait_for_clear` were
-  written, never installed in a slot, and have now been deleted alongside the
-  iterator ones.  A `Task` holds its coroutine, which holds a frame, whose
-  locals can hold the task -- an ordinary cycle that never collects.
+- **`collections.OrderedDict` is `dict`.**  `move_to_end`, `popitem(last=False)`
+  and the order-sensitive `__eq__` are all missing, and `lib/_collections.py`
+  exports the alias, which shadows the complete pure-Python class CPython's
+  own `collections/__init__.py` defines when `$CPYTHON_LIB` is on the path.
+  Not a regression -- `lib/collections/__init__.py` has said `OrderedDict =
+  dict` since long before the `_collections` split -- but the shadowing makes
+  it reachable in more places than before.  `deque` and `defaultdict` have no
+  pure-Python fallback there and must stay; only `OrderedDict` should be
+  withheld.
 
-  Tracking `Task` needs one thing fixed first: the ready queue links tasks
-  through `AsyncTask.next` **without taking a reference**
-  (`ready_enqueue`, `src/pyo/eventloop.asm`).  Today nothing can free a queued
-  task out from under the queue, because the collector cannot see tasks at all;
-  make them visible and a cyclic task sitting in the queue becomes collectable,
-  leaving a dangling `next` pointer.  Either the queue takes a reference or the
-  collector treats it as a root.  The mechanical part is small -- `gc_alloc` +
-  `gc_track` in `task_new`, `gc_dealloc` instead of `ap_free` in
-  `task_dealloc`, `TYPE_FLAG_HAVE_GC` and the two slots -- and
-  `task_clear` also has to start clearing `exception` and the waiters array,
-  which the deleted version did not.
+- **`getset_descr_type` is not shaped like a descriptor by name.**
+  `repr(int.real)` is the empty string where CPython gives
+  `"<attribute 'real' of 'int' objects>"`, and `hasattr(int.real, '__get__')`
+  is False where CPython says True.  Attribute reads work; what breaks is the
+  stdlib asking by name -- `inspect.isdatadescriptor` and the `enum` and
+  `dataclasses` classifiers walk `__dict__` and ask exactly that.  The type
+  needs a `tp_repr` and a `tp_dict` carrying `__get__`/`__set__`, which is
+  CLAUDE.md's "a builtin's behaviour that lives only in a slot".
 
-- **There is no full collection and no `gc` module.**  `gc_collect` was a thin
-  wrapper on `gc_collect_gen` whose comment named two callers --
-  `gc.collect()` and exit cleanup -- neither of which exists; it has been
-  deleted with the rest.  Only the automatic generational collections run, so
-  `tests/test_gc_generations.py` has to provoke them with churn rather than ask
-  for one.
+- **`set.__and__(frozenset(...), ...)` is accepted** where CPython raises,
+  because set and frozenset are registered from one shared table and the
+  receiver check has to admit both.  CPython gives frozenset its own
+  descriptors.  We are the more permissive of the two; nothing depends on the
+  refusal.
+
+- **asyncio `Task`s and `wait_for` wrappers are not GC-tracked.**  A `Task`
+  holds its coroutine, which holds a frame, whose locals can hold the task --
+  an ordinary cycle that never collects.  Code objects were in the same state
+  and are tracked now.
+
+  The mechanical part is small -- `gc_alloc` + `gc_track` in `task_new`,
+  `gc_dealloc` in `task_dealloc`, `TYPE_FLAG_HAVE_GC` and a traverse/clear
+  pair.  It was tried, and it is not enough: the tree holds a live `Task`
+  through **four** raw pointers, and the moment tasks become collectable each
+  of them can be left dangling.  The ready queue (`ready_enqueue`) and
+  `EventLoop.root_task` are dealt with -- the queue owns what it holds now,
+  and the root is released when the loop finishes -- and two are not:
+
+  - `TimerEntry.task` in the poll backend's min-heap
+    (`src/pyo/eventloop_poll.asm`), and the io_uring SQE's `user_data`
+    (`src/pyo/eventloop_iouring.asm`);
+  - `AsyncTask.waiters[]`, appended raw by `task_add_waiter` and dropped en
+    masse when the task completes.
+
+  Each needs to take a reference, or the collector needs to treat it as a
+  root.  Without that, a `Task` collected while it is sleeping or being
+  awaited corrupts the heap: `asyncio.run()` after a collected task cycle
+  segfaults inside an unrelated allocation.
+
+- **Awaiting a `Task` that raised does not re-raise it in the awaiting
+  coroutine.**  The exception is reported at exit instead, so
+  `try: await t / except ValueError:` does not catch what `t` raised.  This
+  is independent of the tracking above and reproduces without it.
+
+- **`gc` has no `get_objects` and no debug flags.**  The module answers about
+  the collector -- `collect`, `enable`/`disable`/`isenabled`, the counts, the
+  thresholds, `garbage` and `callbacks` -- but this collector keeps no list of
+  tracked objects it could hand back, and has no debug output to switch on.
+  `gc.collect()` also counts a two-object cycle as one where CPython counts
+  two: clearing the first drops the second by refcount before the sweep
+  reaches it.
 
 
 - **`s += x` in a loop is O(n^2)**: `str_concat` always allocates, and
@@ -467,9 +323,6 @@ than lying — but they are ordinary Python that does not work:
   CPython on this shape rather than close a gap, and it needs the eval loop to
   give up its stack reference before the concat, so it is recorded rather than
   done.
-
-- **Recursive deallocation overflows the stack**: `a=[]`, then 300k times
-  `a=[a]`, then `del a`.  Needs a trashcan mechanism.
 
 - **Crafted `.pyc` and `_sre` bytecode are trusted.**  Marshal validates
   offsets but not types, so a `co_consts` slot holding an int is
@@ -509,6 +362,13 @@ gives a current one, and a number written here is wrong by the next commit.
   `builtin_round_fn` and `builtin_pow_fn` all reach GMP, whose float paths use
   aligned SSE.  This is the debt that keeps `check_alignment` scoped to
   `src/compiler/` plus `src/main.asm` instead of running tree-wide.
+
+- **`src/pyo/bytes.asm` is 178k, against CLAUDE.md's 100k limit for a
+  hand-written file.**  It holds both bytes and bytearray, and the natural
+  seam is exactly that -- bytearray's own methods and its resizable storage
+  are the half that grew.  `src/methods/init.asm` is the next one up at 90k,
+  and its 320 registration sites are four open-coded instructions apiece;
+  one row each would take it to about 45k.
 
 - **Functions with no separator or docblock at all**, and, among those that
   have one, docblocks with no `->` signature line.  The signature is the only

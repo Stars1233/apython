@@ -1,61 +1,13 @@
 # collections - High-performance container datatypes (minimal for apython)
+#
+# deque, defaultdict and OrderedDict live in _collections, and are imported
+# back from there.  That is CPython's own arrangement, and the reason for it
+# is that CPython's collections/__init__.py does `from _collections import
+# deque` and exports the name from __all__ whether or not the import
+# succeeded -- so a missing _collections made `from collections import deque`
+# an ImportError under a real stdlib, not merely a slower deque.
 
-# OrderedDict is just dict in modern Python (dict preserves insertion order)
-OrderedDict = dict
-
-
-class defaultdict:
-    """Dict-like that calls a factory function for missing keys."""
-
-    def __init__(self, default_factory=None, *args, **kwargs):
-        self._data = dict(*args, **kwargs)
-        self.default_factory = default_factory
-
-    def __getitem__(self, key):
-        try:
-            return self._data[key]
-        except KeyError:
-            if self.default_factory is None:
-                raise
-            value = self.default_factory()
-            self._data[key] = value
-            return value
-
-    def __setitem__(self, key, value):
-        self._data[key] = value
-
-    def __delitem__(self, key):
-        del self._data[key]
-
-    def __contains__(self, key):
-        return key in self._data
-
-    def __len__(self):
-        return len(self._data)
-
-    def __iter__(self):
-        return iter(self._data)
-
-    def __repr__(self):
-        return "defaultdict(%r, %r)" % (self.default_factory, self._data)
-
-    def get(self, key, default=None):
-        return self._data.get(key, default)
-
-    def keys(self):
-        return self._data.keys()
-
-    def values(self):
-        return self._data.values()
-
-    def items(self):
-        return self._data.items()
-
-    def pop(self, key, *args):
-        return self._data.pop(key, *args)
-
-    def update(self, *args, **kwargs):
-        self._data.update(*args, **kwargs)
+from _collections import deque, defaultdict, OrderedDict
 
 
 class Counter:

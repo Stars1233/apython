@@ -245,6 +245,19 @@ DEF_FUNC main, 8
     pop rdi                     ; key str
     call obj_decref
 
+    ; Set __doc__ = None: a module without a docstring still HAS the name,
+    ; and reading it was a NameError.  The body's own STORE_NAME overwrites
+    ; this when there is a docstring.
+    lea rdi, [rel __doc__cstr]
+    call str_from_cstr_heap
+    push rax
+    mov rdi, [rsp + 8]         ; globals dict
+    mov rsi, rax
+    lea rdx, [rel none_singleton]
+    call dict_set
+    pop rdi
+    call obj_decref
+
     ; Set __package__ = None in globals (top-level module has no package)
     lea rdi, [rel __package__cstr]
     call str_from_cstr_heap
@@ -526,6 +539,7 @@ dis_flag: db "--dis", 0
 version_msg: db "apython ", VERSION_STR, 10
 version_msg_len equ $ - version_msg
 __name__cstr: db "__name__", 0
+__doc__cstr: db "__doc__", 0
 __main__cstr: db "__main__", 0
 __package__cstr: db "__package__", 0
 __builtins__cstr: db "__builtins__", 0

@@ -124,6 +124,45 @@ DEF_FUNC_BARE binop_is_number
     ret
 END_FUNC binop_is_number
 
+
+;; ============================================================================
+;; binop_left_wrapper(rdi = left payload, rsi = left tag, edx = op index 0..25)
+;;   -> rax = the slots.asm binary wrapper the LEFT operand's type holds for
+;;      this op, or 0
+;;
+;; The question the slot alone can no longer answer.  Every heaptype that
+;; overrides an operator now holds the SAME function in its nb_ slot, so
+;; "which function is there" says nothing about which type defined what --
+;; only whether it is one of ours, and for which op.
+;;
+;; Clobbers rax, rcx and rdx only: op_binary_op keeps the slot offset in r8
+;; and the op index in r9 across the call.
+;; ============================================================================
+extern slot_binop_wrappers
+DEF_FUNC_BARE binop_left_wrapper
+    cmp rsi, TAG_PTR
+    jne .blw_no
+    test rdi, rdi
+    jz .blw_no
+    mov rax, [rdi + PyObject.ob_type]
+    mov rax, [rax + PyTypeObject.tp_as_number]
+    test rax, rax
+    jz .blw_no
+    mov ecx, edx
+    lea rdx, [rel binary_op_offsets]
+    mov rdx, [rdx + rcx*8]
+    mov rax, [rax + rdx]        ; the function this type holds for the op
+    test rax, rax
+    jz .blw_no
+    lea rdx, [rel slot_binop_wrappers]
+    cmp rax, [rdx + rcx*8]
+    jne .blw_no
+    ret
+.blw_no:
+    xor eax, eax
+    ret
+END_FUNC binop_left_wrapper
+
 DEF_FUNC_BARE op_binary_op
     ; ecx = NB_* op code
     ; Save the op index before pops (VPOP doesn't clobber ecx)
@@ -177,6 +216,25 @@ DEF_FUNC_BARE op_binary_op
     lea rax, [rel binary_op_offsets]
     mov r8, [rax + rcx*8]      ; r8 = offset into PyNumberMethods
     mov r9d, ecx               ; r9d = save binary op code (survives float check)
+
+    ; A heaptype that overrides this operator carries the slots.asm wrapper
+    ; for it, and for a LEFT operand that wrapper is the whole answer: none of
+    ; the specialisations below may run ahead of it.  `class D(int)` with an
+    ; __add__ took the float-coercion shortcut for D(1) + 2.5 and answered
+    ; 3.5, and `class L(list)` with a __mul__ took sq_repeat for L([1]) * 2
+    ; and repeated the list -- in both cases running int's or list's operator
+    ; over a method the class had written to replace it.
+    mov rdi, [rsp + BO_LEFT]
+    mov rsi, [rsp + BO_LTAG]
+    mov edx, r9d
+    call binop_left_wrapper
+    test rax, rax
+    jz .binop_no_left_wrapper
+    ; .binop_do_call reads the operands out of rdi and rsi, not off the stack.
+    mov rdi, [rsp + BO_LEFT]
+    mov rsi, [rsp + BO_RIGHT]
+    jmp .binop_have_method
+.binop_no_left_wrapper:
 
     ; Float coercion: if either operand is TAG_FLOAT, use float methods
     ; This handles int+float, float+int, float+float
@@ -345,6 +403,35 @@ DEF_FUNC_BARE op_binary_op
     pop rax                    ; restore type ptr
     jmp .binop_try_seq_fallback
 .binop_have_number:
+    ; A type can have a tp_as_number and still not have THIS slot, and then
+    ; the sequence protocol may still answer: bytearray's only numeric slot is
+    ; nb_remainder, and `ba += b"x"` is sq_inplace_concat.  Giving bytearray a
+    ; tp_as_number for % broke every one of its concatenations until this.
+    ;
+    ; Narrowly: only for + and * and their inplace forms, and only when the
+    ; type really has a tp_as_sequence.  complex has neither an nb_iadd nor a
+    ; sequence protocol, and its `z += 1.5` must still reach the inplace
+    ; remap below rather than being sent off to a fallback with nothing in it.
+    mov rcx, [rax + r8]
+    test rcx, rcx
+    jnz .binop_number_ok
+    cmp qword [rsp], 0
+    je .binop_number_ok
+    mov rcx, [rsp]
+    cmp qword [rcx + PyTypeObject.tp_as_sequence], 0
+    je .binop_number_ok
+    cmp r9d, 0                  ; NB_ADD
+    je .binop_seq_from_stack
+    cmp r9d, 5                  ; NB_MULTIPLY
+    je .binop_seq_from_stack
+    cmp r9d, 13                 ; NB_INPLACE_ADD
+    je .binop_seq_from_stack
+    cmp r9d, 18                 ; NB_INPLACE_MULTIPLY
+    jne .binop_number_ok
+.binop_seq_from_stack:
+    pop rax                    ; the type, for the sequence fallback
+    jmp .binop_try_seq_fallback
+.binop_number_ok:
     add rsp, 8                 ; discard saved type ptr
     jmp .binop_call_method
 
@@ -359,7 +446,29 @@ DEF_FUNC_BARE op_binary_op
 
     ; If inplace slot was NULL, fall back to non-inplace slot
     cmp r9d, 13
-    jl .binop_try_dunder        ; not inplace, no fallback
+    jl .binop_try_right_slot    ; not inplace: the left type simply has no
+                                ; such slot, so the right type gets its turn
+
+    ; For a HEAPTYPE that fallback goes through the dunder arm instead of
+    ; through the slots.  The two cases the slot cannot tell apart are "this
+    ; class never defined __iadd__" and "this class set __iadd__ = None to
+    ; block the inherited one" -- the slot is absent either way -- and
+    ; remapping straight to nb_add takes the class's __add__ without ever
+    ; noticing the block.  The dunder arm asks by name and sees the None.
+    ;
+    ; It costs nothing that matters: the arm it goes to does the same
+    ; __i<op>__-then-__op__ sequence, by name, which is where a heaptype's
+    ; answer comes from in the end anyway.
+    cmp qword [rsp + BO_LTAG], TAG_PTR
+    jne .binop_fb_remap
+    mov rcx, [rsp + BO_LEFT]
+    test rcx, rcx
+    jz .binop_fb_remap
+    mov rcx, [rcx + PyObject.ob_type]
+    test qword [rcx + PyTypeObject.tp_flags], TYPE_FLAG_HEAPTYPE
+    jnz .binop_try_dunder
+
+.binop_fb_remap:
     ; Map inplace op to non-inplace offset
     mov ecx, r9d
     sub ecx, 13                 ; inplace → base op
@@ -418,12 +527,12 @@ DEF_FUNC_BARE op_binary_op
 .binop_fallback_have_type:
     mov rax, [rax + PyTypeObject.tp_as_number]
 .binop_fallback_have_methods:
-    test rax, rax
-    jz .binop_try_dunder
     mov r8, rdx                ; the effective slot offset, for the right-slot try
+    test rax, rax
+    jz .binop_try_right_slot
     mov rax, [rax + rdx]
     test rax, rax
-    jz .binop_try_dunder
+    jz .binop_try_right_slot
 
 .binop_have_method:
     ; There is deliberately no guard here on what the right operand is.  There
@@ -476,9 +585,12 @@ DEF_FUNC_BARE op_binary_op
 
 .binop_try_seq_fallback:
     ; rax = type ptr. Check if type has tp_as_sequence for ADD/MUL ops.
+    ; Every exit from here that finds no slot goes to .binop_try_right_slot,
+    ; not to the dunder arm: the left type has nothing to offer this pair, and
+    ; that is exactly the case where CPython asks the right type.
     mov rax, [rax + PyTypeObject.tp_as_sequence]
     test rax, rax
-    jz .binop_try_dunder
+    jz .binop_try_right_slot
     ; NB_ADD (0) or NB_INPLACE_ADD (13) → sq_concat / sq_inplace_concat
     cmp r9d, 0              ; NB_ADD
     je .binop_seq_concat
@@ -489,7 +601,7 @@ DEF_FUNC_BARE op_binary_op
     je .binop_seq_repeat_left
     cmp r9d, 18             ; NB_INPLACE_MULTIPLY
     je .binop_seq_irepeat
-    jmp .binop_try_dunder
+    jmp .binop_try_right_slot
 
 .binop_seq_iconcat:
     ; The comment above said sq_inplace_concat and the code read sq_concat, so
@@ -512,7 +624,7 @@ DEF_FUNC_BARE op_binary_op
 .binop_seq_concat:
     mov rax, [rax + PySequenceMethods.sq_concat]
     test rax, rax
-    jz .binop_try_dunder
+    jz .binop_try_right_slot
 .binop_seq_have_concat:
     ; sq_concat(left, right): rdi=left, rsi=right already set
     mov rdx, [rsp + BO_LTAG]
@@ -532,7 +644,7 @@ DEF_FUNC_BARE op_binary_op
 .binop_seq_repeat_left:
     mov rax, [rax + PySequenceMethods.sq_repeat]
     test rax, rax
-    jz .binop_try_dunder
+    jz .binop_try_right_slot
 .binop_seq_have_repeat:
     ; sq_repeat(left=sequence, right=count)
     mov rdx, [rsp + BO_LTAG]
@@ -546,9 +658,15 @@ DEF_FUNC_BARE op_binary_op
     jmp .binop_have_result
 
 .binop_try_right_slot:
-    ; The second half of CPython's binary_op1: the LEFT type's slot declined,
-    ; so the RIGHT type gets its turn at the same slot, with the operands still
-    ; in their original order.
+    ; The second half of CPython's binary_op1: the LEFT type had no slot, or
+    ; had one and declined, so the RIGHT type gets its turn at the same slot,
+    ; with the operands still in their original order.
+    ;
+    ; The "had no slot" half was missing, and every path that found nothing on
+    ; the left jumped past this to the dunder arm -- which requires
+    ; TYPE_FLAG_HEAPTYPE and therefore refuses every builtin static type.  So
+    ; `None | int` was a TypeError: NoneType's nb_or is 0, type's is
+    ; union_type_or, and nothing ever asked it.
     ;
     ; This is what lets a type serve an operand the other side has never heard
     ; of, and it is the only route by which a numeric type added later can
@@ -559,6 +677,19 @@ DEF_FUNC_BARE op_binary_op
     ; CPython also skips this when both types resolve to the same slot
     ; function.  Not worth a compare here: the only builtins that share one are
     ; int and bool, whose slot declines a second time just as cheaply.
+    ;
+    ; An inplace op asks the right type for its BINARY slot, never its inplace
+    ; one -- that is what CPython's binary_iop1 does when it falls back to
+    ; binary_op1.  An nb_i* slot is written for a left operand of its own type
+    ; and does not check: `range(3) += [1]` reached list_inplace_concat with a
+    ; range as self and dereferenced it as a list.
+    cmp r9d, 13
+    jl .brs_have_offset
+    mov ecx, r9d
+    sub ecx, 13                 ; inplace -> base op
+    lea rax, [rel binary_op_offsets]
+    mov r8, [rax + rcx*8]
+.brs_have_offset:
     mov rsi, [rsp + BO_RIGHT]
     mov rcx, [rsp + BO_RTAG]
     cmp rcx, TAG_SMALLINT
@@ -581,6 +712,38 @@ DEF_FUNC_BARE op_binary_op
     mov rax, [rax + r8]         ; r8 = the effective nb_* slot offset
     test rax, rax
     jz .binop_try_dunder
+
+    ; CPython's binary_op1 drops this half when both types resolve to the same
+    ; slot function.  That used to be unreachable here -- only int and bool
+    ; shared one -- and it stopped being unreachable the moment every heaptype
+    ; overriding an operator started holding the same wrapper.  Calling it
+    ; again would run the LEFT object's __op__ a second time, because the
+    ; wrapper speaks for whichever operand is on the left.
+    ;
+    ; The test is for OUR wrapper on both sides, not merely for two equal
+    ; pointers: two operands of the same builtin type trivially share a slot
+    ; function, and skipping there would be wrong.  It broke `s += t` for two
+    ; plain strs, whose nb_add is str_concat on both sides -- and the left's
+    ; nb_iadd, which is what was actually tried, is absent.
+    push r9
+    push rax
+    mov ecx, r9d
+    cmp ecx, 13
+    jl .brs_have_base
+    sub ecx, 13                 ; the same remap .brs_have_offset made
+.brs_have_base:
+    mov rdi, [rsp + 16 + BO_LEFT]
+    mov rsi, [rsp + 16 + BO_LTAG]
+    mov edx, ecx
+    call binop_left_wrapper
+    test rax, rax
+    jz .brs_not_shared
+    cmp rax, [rsp]
+    je .brs_shared
+.brs_not_shared:
+    pop rax
+    pop r9
+
     mov rdi, [rsp + BO_LEFT]
     mov rsi, [rsp + BO_RIGHT]
     mov rdx, [rsp + BO_LTAG]
@@ -596,6 +759,11 @@ DEF_FUNC_BARE op_binary_op
     test edx, edx
     jz .binop_try_dunder        ; both sides declined
     jmp .binop_have_result
+
+.brs_shared:
+    pop rax
+    pop r9
+    jmp .binop_try_dunder
 
 .binop_try_dunder:
     ; Try dunder method on heaptype objects
@@ -617,6 +785,28 @@ DEF_FUNC_BARE op_binary_op
     test rdx, TYPE_FLAG_HEAPTYPE
     jz .binop_try_right_dunder
 
+    ; The nb_ slot wrapper already called this type's __op__ by name, and it
+    ; declined -- asking again here would run the user's method a SECOND time.
+    ; Invisible while the method is pure, and a real bug the moment it prints,
+    ; counts or mutates anything.
+    ;
+    ; For a binary op that settles the left side entirely.  For an in-place
+    ; one it settles only the in-place probe: the slot asked __iadd__, nobody
+    ; has asked __add__ yet, and the fallback below is the only place that
+    ; will.
+    push r9
+    mov rdi, [rsp + 8 + BO_LEFT]
+    mov rsi, [rsp + 8 + BO_LTAG]
+    mov edx, r9d
+    call binop_left_wrapper
+    pop r9
+    test rax, rax
+    jz .binop_dunder_no_wrapper
+    cmp r9d, 13
+    jl .binop_try_right_dunder  ; binary: the slot has spoken for this side
+    jmp .binop_left_dunder      ; in-place: skip the probe, keep the fallback
+
+.binop_dunder_no_wrapper:
     ; For inplace ops, try inplace dunder first
     cmp r9d, 13
     jl .binop_left_dunder
@@ -717,9 +907,83 @@ DEF_FUNC_BARE op_binary_op
     jmp .binop_have_result
 
 .binop_no_method:
-    ; No method found — raise TypeError
-    extern raise_exception
-    RAISE exc_TypeError_type, "unsupported operand type(s)"
+    ; A sequence multiplied by something that is not an index gets CPython's
+    ; own wording, which names only the offending count: "can't multiply
+    ; sequence by non-int of type 'float'".
+    cmp r9d, 5                  ; NB_MULTIPLY
+    je .bnm_mul
+    cmp r9d, 18                 ; NB_INPLACE_MULTIPLY
+    jne .bnm_generic
+.bnm_mul:
+    mov rdi, [rsp + BO_RIGHT]
+    mov rcx, [rsp + BO_RTAG]
+    cmp rcx, TAG_PTR
+    jne .bnm_mul_try_left
+    mov rax, [rdi + PyObject.ob_type]
+    mov rax, [rax + PyTypeObject.tp_as_sequence]
+    test rax, rax
+    jz .bnm_mul_try_left
+    cmp qword [rax + PySequenceMethods.sq_repeat], 0
+    je .bnm_mul_try_left
+    mov rdi, [rsp + BO_LEFT]    ; the right is the sequence, so the left is
+    mov rdx, [rsp + BO_LTAG]    ; the count that is not an index
+    VALUE_FOR_TYPE rdi, rdx
+    jmp .bnm_mul_msg
+.bnm_mul_try_left:
+    mov rdi, [rsp + BO_LEFT]
+    mov rcx, [rsp + BO_LTAG]
+    cmp rcx, TAG_PTR
+    jne .bnm_generic
+    mov rax, [rdi + PyObject.ob_type]
+    mov rax, [rax + PyTypeObject.tp_as_sequence]
+    test rax, rax
+    jz .bnm_generic
+    cmp qword [rax + PySequenceMethods.sq_repeat], 0
+    je .bnm_generic
+    mov rdi, [rsp + BO_RIGHT]
+    mov rdx, [rsp + BO_RTAG]
+    VALUE_FOR_TYPE rdi, rdx
+.bnm_mul_msg:
+    mov rsi, rdi
+    CSTRING rdi, `can't multiply sequence by non-int of type '\x01'`
+    extern raise_type_error_with_name
+    call raise_type_error_with_name
+    ud2
+
+.bnm_generic:
+    ; "unsupported operand type(s) for +: 'int' and 'str'", which is how
+    ; CPython words it.  The prefix and the operator go into a stack buffer,
+    ; and raise_binop_type_error_ex appends the two type names -- the helper
+    ; has been there all along with a single caller in divmod.
+    mov r10d, r9d
+    cmp r10d, 26
+    jb .bnm_have_op
+    xor r10d, r10d
+.bnm_have_op:
+    lea rax, [rel binary_op_symbols]
+    mov r10, [rax + r10*8]      ; the operator, as it is written
+    sub rsp, 64
+    mov rdi, rsp
+    lea rsi, [rel binop_msg_prefix]
+    extern rbt_append_cstr
+    call rbt_append_cstr
+    mov rdi, rax
+    mov rsi, r10
+    call rbt_append_cstr
+    ; The message needs a Value of each operand's TYPE, and the frame holds
+    ; payloads.  Packing a large int here would box it, and the raise below
+    ; abandons the stack that would have freed it -- zero has the same type
+    ; and allocates nothing.
+    mov rdi, [rsp + 64 + BO_LEFT]
+    mov rdx, [rsp + 64 + BO_LTAG]
+    VALUE_FOR_TYPE rdi, rdx
+    mov rsi, [rsp + 64 + BO_RIGHT]
+    mov rcx, [rsp + 64 + BO_RTAG]
+    VALUE_FOR_TYPE rsi, rcx
+    mov rdx, rsp
+    extern raise_binop_type_error
+    call raise_binop_type_error
+    ud2
 
 .binop_try_smallint_add:
     ; Check both TAG_SMALLINT
@@ -1280,9 +1544,43 @@ section .text
     ; whatever allocated next, arbitrarily far away: `object() < object()`,
     ; `range(1) < range(2)` and `int < str` all corrupted the heap.
     ; op_binary_op's .binop_no_method has always left this to the unwinder too.
+    ; "'<' not supported between instances of 'int' and 'str'", which is how
+    ; CPython words it.  The operands have to be read BEFORE the frame goes,
+    ; and they are payloads, so each becomes a Value of the same type.
+    mov r10d, ecx
+    cmp r10d, 6
+    jb .cmp_have_op
+    xor r10d, r10d
+.cmp_have_op:
+    lea rax, [rel compare_op_symbols]
+    mov r10, [rax + r10*8]
+    mov rdi, [rsp + BO_LEFT]
+    mov rdx, [rsp + BO_LTAG]
+    VALUE_FOR_TYPE rdi, rdx
+    mov rsi, [rsp + BO_RIGHT]
+    mov rdx, [rsp + BO_RTAG]
+    VALUE_FOR_TYPE rsi, rdx
     add rsp, BO_SIZE
-    extern raise_exception
-    RAISE exc_TypeError_type, "'<' not supported between instances"
+    sub rsp, 64
+    mov [rsp + 48], rdi
+    mov [rsp + 56], rsi
+    mov rdi, rsp
+    lea rsi, [rel cmp_msg_quote]
+    extern rbt_append_cstr
+    call rbt_append_cstr
+    mov rdi, rax
+    mov rsi, r10
+    call rbt_append_cstr
+    mov rdi, rax
+    lea rsi, [rel cmp_msg_tail]
+    call rbt_append_cstr
+    mov rdi, [rsp + 48]
+    mov rsi, [rsp + 56]
+    mov rdx, rsp
+    lea rcx, [rel cmp_msg_open]
+    extern raise_binop_type_error_ex
+    call raise_binop_type_error_ex
+    ud2
     DISPATCH
 
 .cmp_id_eq_ne:
@@ -1520,6 +1818,64 @@ binary_op_offsets:
     dq PyNumberMethods.nb_itrue_divide   ; NB_INPLACE_TRUE_DIVIDE (24)
     dq PyNumberMethods.nb_ixor           ; NB_INPLACE_XOR (25)
 
+; The same 26 rows again, as the operator writes.  CPython's TypeError names
+; the operator -- "unsupported operand type(s) for +: 'int' and 'str'" -- and
+; ours was the bare prefix, because nothing anywhere mapped an op index to its
+; symbol.
+; The six comparison operators, indexed by PY_LT..PY_GE.
+global compare_op_symbols
+compare_op_symbols:
+    dq cops_lt, cops_le, cops_eq, cops_ne, cops_gt, cops_ge
+
+global binary_op_symbols
+binary_op_symbols:
+    dq bops_add, bops_and, bops_floordiv, bops_lshift, bops_matmul
+    dq bops_mul, bops_mod, bops_or, bops_pow, bops_rshift
+    dq bops_sub, bops_truediv, bops_xor
+    dq bops_iadd, bops_iand, bops_ifloordiv, bops_ilshift, bops_imatmul
+    dq bops_imul, bops_imod, bops_ior, bops_ipow, bops_irshift
+    dq bops_isub, bops_itruediv, bops_ixor
+
+section .rodata
+cops_lt:        db "<", 0
+cops_le:        db "<=", 0
+cops_eq:        db "==", 0
+cops_ne:        db "!=", 0
+cops_gt:        db ">", 0
+cops_ge:        db ">=", 0
+bops_add:       db "+", 0
+bops_and:       db "&", 0
+bops_floordiv:  db "//", 0
+bops_lshift:    db "<<", 0
+bops_matmul:    db "@", 0
+bops_mul:       db "*", 0
+bops_mod:       db "%", 0
+bops_or:        db "|", 0
+bops_pow:       db "** or pow()", 0
+bops_rshift:    db ">>", 0
+bops_sub:       db "-", 0
+bops_truediv:   db "/", 0
+bops_xor:       db "^", 0
+bops_iadd:      db "+=", 0
+bops_iand:      db "&=", 0
+bops_ifloordiv: db "//=", 0
+bops_ilshift:   db "<<=", 0
+bops_imatmul:   db "@=", 0
+bops_imul:      db "*=", 0
+bops_imod:      db "%=", 0
+bops_ior:       db "|=", 0
+bops_ipow:      db "**=", 0
+bops_irshift:   db ">>=", 0
+bops_isub:      db "-=", 0
+bops_itruediv:  db "/=", 0
+bops_ixor:      db "^=", 0
+bops_unknown:   db "?", 0
+cmp_msg_quote:  db "'", 0
+cmp_msg_tail:   db "' not supported between instances", 0
+binop_msg_prefix: db "unsupported operand type(s) for ", 0
+cmp_msg_open:     db " of '", 0
+section .data
+
 section .text
 
 ;; ============================================================================
@@ -1551,9 +1907,14 @@ DEF_FUNC_BARE op_binary_op_add_int
     VPUSH_VAL rdi, r9
     VPUSH_VAL rsi, r8
 .add_int_deopt:
-    ; Rewrite opcode back to BINARY_OP (122)
+    ; Rewrite opcode back to BINARY_OP (122) and re-execute.
+    ;
+    ; Rewinding rbx is only safe because BINARY_OP and COMPARE_OP arguments are
+    ; small -- an operator index, and a comparison plus its mask -- so neither
+    ; is ever preceded by EXTENDED_ARG.  The deopts that carry a real offset or
+    ; a name index cannot do this; see .fir_deopt in opcodes/build.asm.
     mov byte [rbx - 2], 122
-    sub rbx, 2                 ; back up to re-execute as BINARY_OP
+    sub rbx, 2
     DISPATCH
 END_FUNC op_binary_op_add_int
 

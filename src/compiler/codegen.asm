@@ -48,6 +48,165 @@ CE_FRAME equ 56          ; + 3 pushes = 80
 section .text
 
 ;; ============================================================================
+;; cg_set_qualname(rdi = Comp, rsi = the new CompUnit, edx = its scope index)
+;;
+;; CPython's __qualname__: every enclosing scope's name, outermost first, each
+;; followed by "." if that scope is a class body and ".<locals>." otherwise,
+;; and then this unit's own name.  This compiler set it to the bare name, so a
+;; method compiled from source reported "m" where the same file's .pyc
+;; reported "C.m", and a nested function "i" rather than "o.<locals>.i".
+;; enum, dataclasses and every traceback read it.
+;;
+;; The chain comes from the SCOPE tree, not from a parent unit pointer: units
+;; are not linked to each other, and Comp.cur_unit is not maintained across
+;; the nesting.  The result is handed to the object arena, because
+;; CompUnit.qualname is a borrowed reference like the rest of them.
+;; ============================================================================
+SQ_COMP   equ 8
+SQ_UNIT   equ 16
+SQ_ACC    equ 24
+SQ_DEPTH  equ 32
+SQ_I      equ 40
+SQ_CHAIN  equ 40 + 16 * 8   ; the enclosing scope indices, innermost first
+SQ_FRAME  equ SQ_CHAIN      ; + 0 pushes, 16-aligned
+SQ_MAX    equ 16
+global cg_set_qualname
+DEF_FUNC cg_set_qualname, SQ_FRAME
+    mov [rbp - SQ_COMP], rdi
+    mov [rbp - SQ_UNIT], rsi
+    mov qword [rbp - SQ_DEPTH], 0
+
+    ; Walk out to the module, collecting the scopes in between.
+    mov esi, edx
+.sq_walk:
+    test esi, esi
+    jz .sq_have_chain
+    mov rdi, [rbp - SQ_COMP]
+    extern sym_at
+    call sym_at
+    cmp dword [rax + Scope.kind], SCOPE_MODULE
+    je .sq_have_chain
+    mov esi, [rax + Scope.parent]       ; the NEXT one out
+    test esi, esi
+    jz .sq_have_chain
+    mov rdi, [rbp - SQ_COMP]
+    push rsi
+    call sym_at
+    pop rsi
+    cmp dword [rax + Scope.kind], SCOPE_MODULE
+    je .sq_have_chain
+    mov rcx, [rbp - SQ_DEPTH]
+    cmp rcx, SQ_MAX
+    jge .sq_have_chain                  ; deeper than any qualname anyone reads
+    lea rdx, [rbp - SQ_CHAIN]
+    mov [rdx + rcx*8], rsi
+    inc qword [rbp - SQ_DEPTH]
+    jmp .sq_walk
+
+.sq_have_chain:
+    cmp qword [rbp - SQ_DEPTH], 0
+    je .sq_done                         ; directly inside the module
+
+    ; Build outermost-first: name, separator, name, separator, ... own name.
+    lea rdi, [rel cg_qn_empty]
+    extern str_from_cstr_heap
+    call str_from_cstr_heap
+    mov [rbp - SQ_ACC], rax
+    mov rcx, [rbp - SQ_DEPTH]
+    mov [rbp - SQ_I], rcx
+
+.sq_build:
+    mov rcx, [rbp - SQ_I]
+    test rcx, rcx
+    jz .sq_own_name
+    dec rcx
+    mov [rbp - SQ_I], rcx
+    lea rdx, [rbp - SQ_CHAIN]
+    mov rsi, [rdx + rcx*8]
+    mov rdi, [rbp - SQ_COMP]
+    call sym_at
+    mov rsi, [rax + Scope.name]
+    test rsi, rsi
+    jz .sq_drop                         ; unnamed: give up rather than guess
+    push rax
+    push rax
+    mov rdi, [rbp - SQ_ACC]
+    extern str_concat
+    call str_concat
+    pop rcx
+    pop rcx
+    push rax
+    mov rdi, [rbp - SQ_ACC]
+    extern obj_decref
+    call obj_decref
+    pop rax
+    mov [rbp - SQ_ACC], rax
+    test rax, rax
+    jz .sq_done
+
+    ; The separator this scope contributes.
+    lea rdx, [rbp - SQ_CHAIN]
+    mov rcx, [rbp - SQ_I]
+    mov rsi, [rdx + rcx*8]
+    mov rdi, [rbp - SQ_COMP]
+    call sym_at
+    cmp dword [rax + Scope.kind], SCOPE_CLASS
+    je .sq_dot
+    lea rdi, [rel cg_qn_locals]
+    jmp .sq_sep
+.sq_dot:
+    lea rdi, [rel cg_qn_dot]
+.sq_sep:
+    call str_from_cstr_heap
+    push rax
+    mov rdi, [rbp - SQ_ACC]
+    mov rsi, rax
+    call str_concat
+    mov rcx, rax
+    pop rdi
+    push rcx
+    call obj_decref
+    mov rdi, [rbp - SQ_ACC]
+    call obj_decref
+    pop rax
+    mov [rbp - SQ_ACC], rax
+    test rax, rax
+    jz .sq_done
+    jmp .sq_build
+
+.sq_own_name:
+    mov rdi, [rbp - SQ_ACC]
+    mov rdx, [rbp - SQ_UNIT]
+    mov rsi, [rdx + CompUnit.name]
+    call str_concat
+    push rax
+    mov rdi, [rbp - SQ_ACC]
+    call obj_decref
+    pop rax
+    test rax, rax
+    jz .sq_done
+    mov [rbp - SQ_ACC], rax
+
+    ; The arena owns it; CompUnit.qualname borrows, like every other name.
+    mov rdi, [rbp - SQ_COMP]
+    mov rsi, rax
+    extern comp_keep
+    call comp_keep
+    mov rax, [rbp - SQ_ACC]
+    mov rdx, [rbp - SQ_UNIT]
+    mov [rdx + CompUnit.qualname], rax
+    leave
+    ret
+
+.sq_drop:
+    mov rdi, [rbp - SQ_ACC]
+    call obj_decref
+.sq_done:
+    leave
+    ret
+END_FUNC cg_set_qualname
+
+;; ============================================================================
 ;; cg_unit_init(CompUnit *u, PyStrObject *filename, PyStrObject *name)
 ;; ============================================================================
 CU_FILE  equ 16
@@ -2732,3 +2891,8 @@ cg_expr_table:
     times (AST_COUNT - 31) dq 0
 
 ASM_INIT
+
+section .rodata
+cg_qn_empty:  db "", 0
+cg_qn_dot:    db ".", 0
+cg_qn_locals: db ".<locals>.", 0

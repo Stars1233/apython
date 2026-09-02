@@ -57,8 +57,13 @@ class CommonTest(seq_tests.CommonTest):
         self.assertEqual(repr(a2), "[0, 1, 2, [...], 3]")
 
     def test_repr_deep(self):
+        # CPython nests past its C recursion limit here; this copy used to say
+        # 100, which was chosen when the repr's cycle stack was a fixed 64
+        # entries.  It is the recursion limit now, as it is upstream, so the
+        # depth has to be past that and not past 64.
+        import sys
         a = self.type2test([])
-        for i in range(100):
+        for i in range(sys.getrecursionlimit() + 1):
             a = self.type2test([a])
         self.assertRaises(RecursionError, repr, a)
 

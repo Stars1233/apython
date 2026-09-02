@@ -547,7 +547,7 @@ DEF_FUNC tuple_concat
     cmp ecx, TAG_PTR
     jne .tc_type_error
     mov rax, [r12 + PyObject.ob_type]
-    REQUIRE_TUPLE_TYPE rax, rcx, .tc_type_error
+    REQUIRE_TUPLE_TYPE rax, rcx, .tc_type_error_ptr
 
     mov r13, [rbx + PyTupleObject.ob_size]   ; r13 = len(a)
     mov r14, [r12 + PyTupleObject.ob_size]   ; r14 = len(b)
@@ -596,8 +596,19 @@ DEF_FUNC tuple_concat
     leave
     V_PACK rax, rdx             ; return one Value
     ret
+.tc_type_error_ptr:
+    mov ecx, TAG_PTR            ; REQUIRE_TUPLE_TYPE used rcx as its scratch
 .tc_type_error:
-    RAISE exc_TypeError_type, "can only concatenate tuple (not other) to tuple"
+    ; The right operand's payload survives in r12; its tag does not always --
+    ; REQUIRE_*_TYPE uses rcx as scratch -- so the pointer case is recovered
+    ; from the payload itself, which is its own Value.
+    mov rdi, r12
+    mov rsi, rcx
+    VALUE_FOR_TYPE rdi, rsi
+    mov rsi, rdi
+    CSTRING rdi, `can only concatenate tuple (not "\x01") to tuple`
+    extern raise_type_error_with_name
+    call raise_type_error_with_name
 END_FUNC tuple_concat
 
 ;; ============================================================================
@@ -1106,9 +1117,33 @@ DEF_FUNC tuple_type_call, TTC_FRAME
     cmp r13, 1
     jne .ttc_error
 
-    ; If arg is already a tuple, return a copy (or just INCREF)
-    ; For now: always iterate
+    ; tuple(t) is t.  A tuple is immutable, so CPython hands an exact one
+    ; straight back rather than copying it.  Both halves have to be exact: a
+    ; subclass constructor must build its own object, and a tuple subclass
+    ; instance must not escape from tuple() as itself.  rdi still holds the
+    ; type -- nothing above has touched it.
+    lea rax, [rel tuple_type]
+    cmp rdi, rax
+    jne .ttc_build
+    mov rcx, [r12]              ; args[0]
+    V_TEST_PTR rcx, rdx
+    ja .ttc_build
+    test rcx, rcx
+    jz .ttc_build
+    cmp [rcx + PyObject.ob_type], rax
+    jne .ttc_build
+    INCREF rcx
+    mov rax, rcx
+    mov edx, TAG_PTR
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    V_PACK rax, rdx
+    ret
 
+.ttc_build:
     ; Create empty list, iterate into it, convert to tuple
     xor edi, edi
     extern list_new

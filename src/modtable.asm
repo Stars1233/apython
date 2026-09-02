@@ -30,6 +30,8 @@ extern weakref_module_create
 extern errno_module_create
 extern posix_module_create
 extern io_module_create
+extern gc_module_create
+extern math_module_create
 
 section .rodata
 
@@ -43,6 +45,8 @@ bm_n_errno:    db "errno", 0
 bm_n_weakref:  db "_weakref", 0
 bm_n_posix:    db "posix", 0
 bm_n_io:       db "_iocore", 0
+bm_n_gc:       db "gc", 0
+bm_n_math:     db "math", 0
 
 align 8
 global builtin_module_table
@@ -57,6 +61,19 @@ builtin_module_table:
     dq bm_n_asyncio,  asyncio_module_create
     dq bm_n_builtins, 0                 ; wraps builtins_dict_global
     dq bm_n_errno,    errno_module_create
+    dq bm_n_gc,       gc_module_create
+    dq bm_n_math,     math_module_create
     dq bm_n_posix,    posix_module_create
     dq bm_n_sys,      0                 ; built by sys_module_init
     dq bm_n_time,     time_module_create
+bmt_end:
+
+; The row count, computed rather than declared.  It used to be a hand-kept
+; equ in object.inc, and adding `math` without touching it truncated the
+; table one row short: `time` fell off the end, so `import time` failed and
+; sys.builtin_module_names did not list it.  Nothing to keep in step now.
+align 8
+global builtin_module_count
+builtin_module_count:
+    dq (bmt_end - builtin_module_table) / BuiltinModule_size
+

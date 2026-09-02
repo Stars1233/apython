@@ -18,6 +18,7 @@ extern dict_set
 extern str_from_cstr
 extern str_from_cstr_heap
 extern ap_strcmp
+extern rbt_append_cstr
 extern type_repr
 extern fatal_error
 extern raise_exception
@@ -571,6 +572,14 @@ DEF_FUNC instance_getattr, IG_FRAME
     cmp rcx, rdx
     je .found_slot
 
+    ; A getset descriptor calls its getter.  int, float and complex register
+    ; real/imag/numerator/denominator this way, and a subclass instance
+    ; reaches them here rather than through the base's tp_getattr.
+    extern getset_descr_type
+    lea rdx, [rel getset_descr_type]
+    cmp rcx, rdx
+    je .found_getset
+
     ; Check for staticmethod/classmethod/property → return raw descriptor
     ; LOAD_ATTR handles unwrapping with the correct push convention
     lea rdx, [rel staticmethod_type]
@@ -628,6 +637,21 @@ DEF_FUNC instance_getattr, IG_FRAME
     V_PACK rax, rdx             ; return one Value
     ret
 
+.found_getset:
+    ; getset_descr_get answers a Value, or never returns when the attribute
+    ; has no getter at all.
+    mov rdi, r13
+    mov rsi, rbx
+    extern getset_descr_get
+    call getset_descr_get
+    V_UNPACK rax, rdx
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    V_PACK rax, rdx             ; return one Value
+    ret
+
 .found_type_raw:
     ; Not callable, SmallInt, or descriptor — INCREF and return
     INCREF_VAL r13, r12         ; tag-aware INCREF
@@ -642,8 +666,12 @@ DEF_FUNC instance_getattr, IG_FRAME
 
 .slot_not_set:
     ; Slot exists but not initialized — raise AttributeError directly
-    ; (must not return NULL or LOAD_ATTR fallback finds descriptor in tp_dict)
-    RAISE exc_AttributeError_type, "slot attribute not set"
+    ; (must not return NULL or LOAD_ATTR fallback finds descriptor in tp_dict).
+    ; CPython names the type and the attribute here as it does everywhere else.
+    mov rdi, rbx
+    mov rsi, [rbp - IG_NAME]
+    extern raise_no_attribute
+    call raise_no_attribute
 
 .not_found:
     ; Ordinary lookup missed.  __getattr__ is Python's hook for exactly that
@@ -808,7 +836,48 @@ DEF_FUNC instance_setattr
     extern member_descr_type
     lea rcx, [rel member_descr_type]
     cmp [r9 + PyObject.ob_type], rcx
+    je .sa_member
+
+    ; A property is a data descriptor too, and this is the only road a DELETE
+    ; takes: op_store_attr has a property fast path of its own, op_delete_attr
+    ; has none and comes straight here.  So `del obj.prop` never reached the
+    ; deleter -- it fell through to the instance dict and did nothing.
+    lea rcx, [rel property_type]
+    cmp [r9 + PyObject.ob_type], rcx
+    jne .sa_check_getset
+    mov rdi, r9
+    mov rsi, rbx
+    mov rdx, r13                ; the value Value; 0 means delete
+    extern property_descr_set
+    call property_descr_set
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.sa_check_getset:
+    ; A getset descriptor is a data descriptor: it takes precedence over the
+    ; instance dict, so `I(5).real = 9` is the AttributeError CPython raises
+    ; rather than a shadowing instance attribute.
+    extern getset_descr_type
+    lea rcx, [rel getset_descr_type]
+    cmp [r9 + PyObject.ob_type], rcx
     jne .sa_no_slot
+    mov rdi, r9
+    mov rsi, rbx
+    mov rdx, r13
+    extern getset_descr_set
+    call getset_descr_set
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.sa_member:
 
     ; Member descriptor! Write value to slot offset
     mov rcx, [r9 + PyMemberDescrObject.md_offset]
@@ -869,12 +938,15 @@ DEF_FUNC instance_setattr
     ret
 
 .sa_no_dict_error:
-    RAISE exc_AttributeError_type, "object has no attribute"
-
 .sa_no_dict_slot:
     ; This type's instances have no dict slot -- a str subclass, or a class
-    ; with __slots__ -- so there is nowhere to put the attribute.
-    RAISE exc_AttributeError_type, "object has no attribute"
+    ; with __slots__ -- so there is nowhere to put the attribute.  The message
+    ; names both the type and the attribute, as every other one here does; a
+    ; bare "object has no attribute" said neither.
+    mov rdi, rbx
+    mov rsi, r12
+    extern raise_no_attribute
+    call raise_no_attribute
 END_FUNC instance_setattr
 
 ;; ============================================================================
@@ -929,7 +1001,8 @@ END_FUNC type_setattr
 ;; rdi = instance
 ;; ============================================================================
 ID_EXC   equ 8
-ID_FRAME equ 16             ; + 1 push = 24, not 16-aligned
+ID_OWNED equ 16          ; whether the reference below is ours to drop
+ID_FRAME equ 24             ; + 1 push = 32
 DEF_FUNC instance_dealloc, ID_FRAME
     push rbx
 
@@ -947,7 +1020,23 @@ DEF_FUNC instance_dealloc, ID_FRAME
     ; Call __del__(self) — dunder_call_1 handles lookup + call
     extern dunder_del
     extern dunder_call_1
+    ; Snapshot what was pending, and hold a reference to it: if __del__ raises,
+    ; installing its exception releases the global's reference to this one, and
+    ; the saved pointer would be dangling by the time it is put back.
     DUNDER_EXC_SAVE [rbp - ID_EXC]
+    mov qword [rbp - ID_OWNED], 0
+    mov rdi, [rbp - ID_EXC]
+    test rdi, rdi
+    jz .del_nothing_pending
+    ; ...but only when the global's own reference is real.  The unwinder can
+    ; reach here with current_exception pointing at an object whose refcount is
+    ; already zero -- bugs.md carries the case -- and taking and dropping a
+    ; reference on that one frees an exception that is still being carried.
+    cmp qword [rdi + PyObject.ob_refcnt], 0
+    jle .del_nothing_pending
+    call obj_incref
+    mov qword [rbp - ID_OWNED], 1
+.del_nothing_pending:
     mov rdi, rbx
     lea rsi, [rel dunder_del]
     call dunder_call_1
@@ -958,12 +1047,43 @@ DEF_FUNC instance_dealloc, ID_FRAME
     DECREF_VAL rax, rdx
 .del_no_result:
 
-    ; A __del__ that raises must not leave the exception pending: the object
-    ; is being freed, there is no caller to hand it to, and leaving it set
-    ; means the *next* raise silently discards it -- or, if this dealloc came
-    ; from the unwinder dropping the value stack, that the handler receives
-    ; the wrong exception object.  CPython reports it and clears it.
-    DUNDER_RAISED [rbp - ID_EXC], .del_raised
+    ; A __del__ that raises must not leave the exception pending: the object is
+    ; being freed, there is no caller to hand it to, and leaving it set means
+    ; the *next* raise silently discards it -- or, if this dealloc came from
+    ; the unwinder dropping the value stack, that the handler receives the
+    ; wrong exception object.  CPython reports it and puts back what was there.
+    ;
+    ; "Did it raise?" is EXC_RAISED_SINCE's three-way question and not a bare
+    ; inequality.  current_exception is also the exception being HANDLED, and a
+    ; __del__ that raises and catches internally leaves the global at 0: a
+    ; change, but not a raise.  DUNDER_RAISED read that as one, and this arm
+    ; then zeroed the global -- destroying the exception the interpreter was
+    ; carrying, so that a __del__ running during an unwind made the enclosing
+    ; except block never run.
+    EXC_RAISED_SINCE [rbp - ID_EXC], rax, .del_report
+
+.del_restore:
+    ; Whatever __del__ left behind, the pending exception goes back to what it
+    ; was.  The reference taken above is what the global gets; anything else
+    ; sitting there is released.
+    mov rax, [rbp - ID_EXC]
+    cmp [rel current_exception], rax
+    je .del_drop_saved
+    mov rdi, [rel current_exception]
+    mov [rel current_exception], rax    ; the saved reference moves in here
+    test rdi, rdi
+    jz .del_cleared
+    call obj_decref
+    jmp .del_cleared
+.del_drop_saved:
+    ; Unchanged, so the global still owns its own; drop the extra one.
+    cmp qword [rbp - ID_OWNED], 0
+    je .del_cleared
+    mov rdi, rax
+    test rdi, rdi
+    jz .del_cleared
+    call obj_decref
+
 .del_cleared:
 
     ; Restore refcount (undo the bump)
@@ -971,18 +1091,13 @@ DEF_FUNC instance_dealloc, ID_FRAME
 
     jmp .no_del
 
-.del_raised:
-    ; Report on stderr and clear, so nothing downstream inherits it.
+.del_report:
+    ; A genuinely new exception: say so on stderr, then put back the old one.
     mov edi, 2
     lea rsi, [rel id_del_ignored_msg]
     mov edx, id_del_ignored_len
     call sys_write
-    mov rdi, [rel current_exception]
-    mov qword [rel current_exception], 0
-    test rdi, rdi
-    jz .del_cleared
-    call obj_decref
-    jmp .del_cleared
+    jmp .del_restore
 
 .no_del:
     ; XDECREF the instance dict; a type may have no dict slot at all.
@@ -1502,6 +1617,7 @@ DEF_FUNC_LOCAL tc_winner_metatype, TWM_FRAME
     ret
 END_FUNC tc_winner_metatype
 
+
 DEF_FUNC type_call
     ; Special case: type(x) with 1 arg when calling type itself
     ; Returns x.__class__ (the type of x)
@@ -1703,7 +1819,10 @@ DEF_FUNC type_call
     ja .tc_not_abstract
     cmp qword [rax + PyDictObject.ob_size], 0
     je .tc_not_abstract
-    RAISE exc_TypeError_type, "Can't instantiate abstract class with abstract methods"
+    mov rdi, rbx
+    mov rsi, rax
+    extern type_abstract_error
+    call type_abstract_error    ; does not return
 .tc_not_abstract:
 
     ; Check if this type inherits from an exception type
@@ -2158,11 +2277,37 @@ END_FUNC type_call
 extern tuple_new
 TGA_ORIGIN equ 8            ; the type the MRO walk started from
 TGA_META   equ 16           ; its metatype, for the second walk
+TGA_FROMMETA equ 24         ; where to report which walk answered, or 0
 TGA_FRAME  equ 32           ; + 2 pushes = 48
-DEF_FUNC type_getattr, TGA_FRAME
+DEF_FUNC_BARE type_getattr
+    xor edx, edx                ; no caller wants to know where it came from
+    jmp type_getattr_meta
+END_FUNC type_getattr
+
+;; ============================================================================
+;; type_getattr_meta(rdi = type, rsi = name, rdx = &from_metatype) -> Value
+;;
+;; The same lookup, reporting WHICH of the two MROs answered: the class's own,
+;; or its metatype's.  It writes 1 through rdx for the metatype and 0 for the
+;; class, and rdx may be 0.
+;;
+;; The caller that needs this is the descriptor protocol.  CPython does not
+;; run a property's getter when the property was found in the class's own MRO
+;; -- `C.prop` IS the property object, which is how `C.prop.__doc__ = ...` can
+;; be written at all -- but it does run one found on the METATYPE, which is
+;; what makes Enum.__members__ work.  Deciding that from "is the object a
+;; class" gets the second case wrong, and until now this function had no way
+;; to say which it was.
+;; ============================================================================
+DEF_FUNC type_getattr_meta, TGA_FRAME
     push rbx
     push r12
 
+    mov [rbp - TGA_FROMMETA], rdx
+    test rdx, rdx
+    jz .tga_no_out
+    mov qword [rdx], 0
+.tga_no_out:
     mov rbx, rsi                ; rbx = name
     mov r12, rdi                ; r12 = type (walks)
     mov [rbp - TGA_ORIGIN], rdi
@@ -2362,13 +2507,19 @@ DEF_FUNC type_getattr, TGA_FRAME
     ret
 
 .tga_not_found:
-    ; Then the metatype's own MRO.  A metaclass's methods are attributes of
-    ; the classes it makes, bound to the class the way an ordinary class's
-    ; methods bind to its instances -- `ByteString.register` is ABCMeta's,
-    ; two links up the metatype chain.  Only a user metaclass is walked: the
-    ; three builtin metatypes hold entries meant for `type` itself, and
-    ; offering those on every class would shadow what a class inherits from
-    ; object.
+    ; Then the metatype's own MRO.  Anything found from here on came from the
+    ; metatype, which the caller may need to know.
+    mov rax, [rbp - TGA_FROMMETA]
+    test rax, rax
+    jz .tga_meta_no_out
+    mov qword [rax], 1
+.tga_meta_no_out:
+    ; A metaclass's methods are attributes of the classes it makes, bound to
+    ; the class the way an ordinary class's methods bind to its instances --
+    ; `ByteString.register` is ABCMeta's, two links up the metatype chain.
+    ; Only a user metaclass is walked: the three builtin metatypes hold
+    ; entries meant for `type` itself, and offering those on every class would
+    ; shadow what a class inherits from object.
     mov r12, [rbp - TGA_ORIGIN]
     mov r12, [r12 + PyObject.ob_type]
     test r12, r12
@@ -2404,9 +2555,23 @@ DEF_FUNC type_getattr, TGA_FRAME
     cmp edx, TAG_PTR
     jne .tga_meta_plain
     mov rcx, [rax + PyObject.ob_type]
-    lea rdx, [rel func_type]
-    cmp rcx, rdx
+    ; rdx is the TAG, and .tga_meta_plain increfs with it.  Borrowing it as
+    ; scratch for these compares left it holding a type's ADDRESS, which is
+    ; not TAG_PTR, so INCREF_VAL did nothing and the metatype's tp_dict was
+    ; left holding a property its caller then released -- a use-after-free
+    ; that reproduces as `class Meta(type)` with a property, read twice.
+    lea r8, [rel func_type]
+    cmp rcx, r8
+    je .tga_meta_bind
+    ; A builtin binds too, as it does everywhere else a method is fetched.
+    ; type.__subclasses__ is one, and this walk is the ONLY road to it for a
+    ; class whose metatype is a metaclass of its own -- every ABC and every
+    ; Enum -- so A.__subclasses__() came back unbound and answered
+    ; "takes no arguments".
+    lea r8, [rel builtin_func_type]
+    cmp rcx, r8
     jne .tga_meta_plain
+.tga_meta_bind:
     mov rdi, rax
     mov rsi, [rbp - TGA_ORIGIN]
     call method_new
@@ -2433,7 +2598,7 @@ DEF_FUNC type_getattr, TGA_FRAME
     leave
     V_PACK rax, rdx             ; return one Value
     ret
-END_FUNC type_getattr
+END_FUNC type_getattr_meta
 
 ;; ============================================================================
 ;; method_new(func, self) -> PyMethodObject*
@@ -2757,9 +2922,74 @@ END_FUNC object_new_fn
 ;; Deallocator for user-defined heap types (created by __build_class__).
 ;; Frees tp_dict, tp_name string, and the type object itself.
 ;; ============================================================================
+
+;; ============================================================================
+;; type_traverse / type_clear -- a heap type is a GC object like any other
+;;
+;; user_type_metatype carried TYPE_FLAG_HAVE_GC and a NULL tp_traverse, so
+;; every class was tracked and none was reachable THROUGH: the collector could
+;; see a class but not what it held.  A class always sits in a cycle -- its
+;; own tp_mro tuple contains it -- so with no traverse none of them was ever
+;; collected.  `def f(): class Temp: pass` leaked a class per call, and so did
+;; every decorator, factory and closure that builds one.
+;;
+;; type_clear follows CPython's: the dict's contents and tp_mro, and not
+;; tp_base or tp_bases.  Breaking the MRO is enough to break the cycle, and
+;; the bases are what the type needs to stay coherent while the rest of the
+;; collection runs.
+;; ============================================================================
+global type_traverse
+DEF_FUNC type_traverse
+    push rbx
+    mov rbx, rdi
+    mov rdi, [rbx + PyTypeObject.tp_dict]
+    VISIT_PTR rdi
+    mov rdi, [rbx + PyTypeObject.tp_base]
+    VISIT_PTR rdi
+    mov rdi, [rbx + PyTypeObject.tp_bases]
+    VISIT_PTR rdi
+    mov rdi, [rbx + PyTypeObject.tp_mro]
+    VISIT_PTR rdi
+    pop rbx
+    leave
+    ret
+END_FUNC type_traverse
+
+global type_clear
+DEF_FUNC type_clear
+    push rbx
+    mov rbx, rdi
+    mov rdi, [rbx + PyTypeObject.tp_dict]
+    test rdi, rdi
+    jz .tcl_mro
+    extern dict_clear_gc
+    call dict_clear_gc          ; the contents, not the dict itself
+.tcl_mro:
+    mov rdi, [rbx + PyTypeObject.tp_mro]
+    test rdi, rdi
+    jz .tcl_done
+    mov qword [rbx + PyTypeObject.tp_mro], 0
+    call obj_decref
+.tcl_done:
+    pop rbx
+    leave
+    ret
+END_FUNC type_clear
+
 DEF_FUNC user_type_dealloc
     push rbx
     mov rbx, rdi                ; rbx = type object
+
+    ; Out of every base's subclass list first, while tp_bases is still there
+    ; to say which they are.  The entries are borrowed, so this is the only
+    ; thing that keeps a freed class out of __subclasses__().
+    extern subclass_live
+    cmp qword [rel subclass_live], 0
+    je .utd_no_subclasses
+    extern subclass_unregister
+    mov rdi, rbx
+    call subclass_unregister
+.utd_no_subclasses:
 
     ; DECREF tp_dict if present
     mov rdi, [rbx + PyTypeObject.tp_dict]
@@ -2856,8 +3086,8 @@ user_type_metatype:
     dq 0                        ; tp_mro
     dq TYPE_FLAG_HAVE_GC | TYPE_FLAG_METATYPE  ; tp_flags (heaptypes are gc_alloc'd)
     dq 0                        ; tp_bases
-    dq 0                        ; tp_traverse
-    dq 0                        ; tp_clear
+    dq type_traverse            ; tp_traverse
+    dq type_clear               ; tp_clear
     dq 0 ; tp_dictoffset
 
 ; object_type - base type for all Python objects

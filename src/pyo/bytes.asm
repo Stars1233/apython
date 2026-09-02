@@ -1254,9 +1254,76 @@ DEF_FUNC _bytes_decode_impl, BD_FRAME
     jge .bd_utf8
     movzx eax, byte [rbx + PyBytesObject.data + rcx]
     test al, 0x80
-    jnz .bd_not_decodable
+    jnz .bd_ascii_bad
     inc rcx
     jmp .bd_ascii_scan
+
+.bd_ascii_bad:
+    ; The handler, looked up only now that something has actually failed.
+    ; This arm jumped straight to the raise, so `b"a\xffb".decode("ascii",
+    ; "ignore")` raised where CPython answers 'ab' -- and an unknown handler
+    ; name was never reported as a LookupError on this path either.
+    mov rdi, [rbp - BD_ERRORS]
+    call codec_error_id         ; 0 strict, 1 ignore, 2 replace, -1 unknown
+    cmp eax, -1
+    je .bd_bad_errors
+    test eax, eax
+    jz .bd_not_decodable
+    mov [rbp - BD_ERRID], rax
+
+    ; replace writes U+FFFD, three bytes, for each byte dropped -- so the
+    ; result can be three times as long as the input.
+    lea rdi, [r12 + r12*2]
+    add rdi, PyStrObject.data + 8
+    call ap_malloc
+    test rax, rax
+    jz .bd_nomem
+    mov [rbp - BD_OUT], rax
+    mov qword [rax + PyObject.ob_refcnt], 1
+    lea rcx, [rel str_type]
+    mov [rax + PyObject.ob_type], rcx
+    mov qword [rax + PyStrObject.ob_hash], -1
+    mov qword [rbp - BD_POS], 0
+    mov rbx, [rbp - BD_SELF]
+    xor ecx, ecx
+.bd_af_loop:
+    cmp rcx, r12
+    jge .bd_af_done
+    movzx eax, byte [rbx + PyBytesObject.data + rcx]
+    test al, 0x80
+    jnz .bd_af_bad
+    mov rdx, [rbp - BD_OUT]
+    mov r8, [rbp - BD_POS]
+    mov [rdx + PyStrObject.data + r8], al
+    inc qword [rbp - BD_POS]
+    inc rcx
+    jmp .bd_af_loop
+.bd_af_bad:
+    inc rcx
+    cmp qword [rbp - BD_ERRID], 2
+    jne .bd_af_loop             ; ignore
+    mov rdx, [rbp - BD_OUT]
+    mov r8, [rbp - BD_POS]
+    mov byte [rdx + PyStrObject.data + r8], 0xef
+    mov byte [rdx + PyStrObject.data + r8 + 1], 0xbf
+    mov byte [rdx + PyStrObject.data + r8 + 2], 0xbd
+    add qword [rbp - BD_POS], 3
+    jmp .bd_af_loop
+.bd_af_done:
+    mov rax, [rbp - BD_OUT]
+    mov rcx, [rbp - BD_POS]
+    mov [rax + PyStrObject.ob_size], rcx
+    mov qword [rax + PyStrObject.data + rcx], 0
+    mov rdi, rax
+    extern str_set_length
+    call str_set_length
+    mov rax, [rbp - BD_OUT]
+    mov edx, TAG_PTR
+    pop r12
+    pop rbx
+    leave
+    V_PACK rax, rdx
+    ret
 
 .bd_latin1:
     ; Each byte is one code point, so a byte at or above 0x80 becomes two
@@ -1737,6 +1804,7 @@ DEF_FUNC bytes_mod_reject_wide
     call raise_type_error_with_name
 END_FUNC bytes_mod_reject_wide
 
+global bytes_mod_is_byteslike
 DEF_FUNC_BARE bytes_mod_is_byteslike
     xor eax, eax
     V_TEST_PTR rdi, rcx
@@ -1872,8 +1940,62 @@ DEF_FUNC_LOCAL bytes_mod_prepare_args, BMP_FRAME
     ret
 END_FUNC bytes_mod_prepare_args
 
+;; ============================================================================
+;; bytes_latin1_from_str(rdi = a str whose code points are all below 256)
+;;   -> rax = a new bytes, one byte per code point
+;;
+;; The inverse of bytes_latin1_to_str.  str_mod_impl needs it for a %(name)s
+;; key in a BYTES format: the format was decoded to a str to be scanned, so the
+;; key comes out as a str, and the mapping is keyed by bytes.
+;; ============================================================================
+global bytes_latin1_from_str
+DEF_FUNC bytes_latin1_from_str
+    push rbx
+    push r12
+    mov r12, rdi
+    mov rdi, [r12 + PyStrObject.ob_length]
+    call bytes_new
+    test rax, rax
+    jz .blf_out
+    mov rbx, rax
+    lea rdi, [rax + PyBytesObject.data]
+    lea rsi, [r12 + PyStrObject.data]
+    mov rdx, [r12 + PyStrObject.ob_size]
+    xor rcx, rcx
+    xor r8, r8
+.blf_loop:
+    cmp rcx, rdx
+    jge .blf_done
+    movzx eax, byte [rsi + rcx]
+    test al, 0x80
+    jz .blf_one
+    and eax, 0x1f
+    shl eax, 6
+    movzx r9d, byte [rsi + rcx + 1]
+    and r9d, 0x3f
+    or eax, r9d
+    add rcx, 2
+    jmp .blf_store
+.blf_one:
+    inc rcx
+.blf_store:
+    mov [rdi + r8], al
+    inc r8
+    jmp .blf_loop
+.blf_done:
+    mov [rbx + PyBytesObject.ob_size], r8
+    mov rax, rbx
+.blf_out:
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC bytes_latin1_from_str
+
 ;; bytes_mod_as_str(rdi = a Value) -> a new str, or 0 if it is not bytes-like
-DEF_FUNC_LOCAL bytes_mod_as_str
+;; str_mod_impl calls it for %s and %b, which is where the conversion is known.
+global bytes_mod_as_str
+DEF_FUNC bytes_mod_as_str
     V_TEST_PTR rdi, rax
     ja .bma_no
     test rdi, rdi
@@ -1965,10 +2087,10 @@ DEF_FUNC bytes_mod, BM_FRAME
     ; below, so the bytes come through untouched -- where handing the object
     ; itself to str_mod applied str() to it and `b"%s" % (b"abc",)` produced
     ; b"b'abc'".
-    mov rdi, [rbp-BM_ARGS]
-    mov [rbp-BM_ORIG], rdi
-    call bytes_mod_prepare_args
-    mov [rbp-BM_ARGS], rax
+    ; The arguments are NOT pre-converted any more.  Doing it here could not
+    ; tell %s from %r from %c -- the conversion is not known until str_mod_impl
+    ; reads it -- so b"%r" % (b"x",) answered b"'x'" where CPython gives
+    ; b"b'x'", and b"%s" % 5 answered b"5" where it is a TypeError.
 
     mov rdi, [rbp-BM_FMT]
     mov rsi, [rdi + PyBytesObject.ob_size]
@@ -1982,14 +2104,9 @@ DEF_FUNC bytes_mod, BM_FRAME
     extern str_mod
     mov rdi, rbx               ; temp str
     mov rsi, [rbp-BM_ARGS]    ; args, a Value -- str_mod is a slot and unpacks
-    call str_mod
-    push rax
-    sub rsp, 8
-    mov rdi, [rbp-BM_ARGS]
-    mov rsi, [rbp-BM_ORIG]
-    call bytes_mod_release_args
-    add rsp, 8
-    pop rax
+    mov edx, 1                 ; and this one is a BYTES format
+    extern str_mod_impl
+    call str_mod_impl
     mov r12, rax               ; r12 = result str Value (a str is a pointer)
 
     ; DECREF temp fmt str
@@ -2077,6 +2194,70 @@ DEF_FUNC bytes_mod, BM_FRAME
     leave
     ret
 END_FUNC bytes_mod
+
+;; ============================================================================
+;; bytearray_mod(rdi = self Value, rsi = args Value) -> a bytearray Value
+;;
+;; bytearray_type.tp_as_number was 0 and nothing supplied nb_remainder, so
+;; `bytearray(b"%d") % 5` was a TypeError where CPython answers
+;; bytearray(b'5').  The work is bytes_mod's: a temporary bytes of the same
+;; bytes, the shared body, and the result re-wrapped -- which is how
+;; bytearray_repr already borrows bytes_repr_impl.
+;; ============================================================================
+BMOD_ARGS  equ 8
+BMOD_TMP   equ 16
+BMOD_FRAME equ 32            ; + 1 push = 40, not 16-aligned
+
+DEF_FUNC bytearray_mod, BMOD_FRAME
+    push rbx
+    mov [rbp - BMOD_ARGS], rsi
+    V_TEST_PTR rdi, rax
+    ja .bam_decline
+    mov rax, [rdi + PyObject.ob_type]
+    lea rcx, [rel bytearray_type]
+    cmp rax, rcx
+    jne .bam_decline
+
+    push rdi
+    call bytearray_data         ; rax = the payload, rdx = the length
+    pop rdi
+    mov rsi, [rdi + PyByteArrayObject.ob_size]
+    mov rdi, rax
+    call bytes_from_data
+    mov [rbp - BMOD_TMP], rax
+
+    mov rdi, rax
+    mov rsi, [rbp - BMOD_ARGS]
+    call bytes_mod
+    mov rbx, rax
+
+    mov rdi, [rbp - BMOD_TMP]
+    call obj_decref
+    test rbx, rbx
+    jz .bam_out                 ; declined or raised; hand it on as it is
+
+    ; bytearray_new copies a (pointer, length) range, which is what the
+    ; result bytes is.  bytearray_from_bytes lives in methods/bytes.asm and
+    ; would be a circular dependency from here.
+    lea rdi, [rbx + PyBytesObject.data]
+    mov rsi, [rbx + PyBytesObject.ob_size]
+    call bytearray_new
+    push rax
+    mov rdi, rbx
+    call obj_decref
+    pop rbx
+.bam_out:
+    mov rax, rbx
+    pop rbx
+    leave
+    ret
+
+.bam_decline:
+    xor eax, eax                ; NULL Value = NotImplemented
+    pop rbx
+    leave
+    ret
+END_FUNC bytearray_mod
 
 section .data
 
@@ -2405,21 +2586,27 @@ END_FUNC bls_item_byte
 ;; ============================================================================
 BLS_ARGS  equ 8
 BLS_RANGEMSG equ 16
+BLS_NARGS equ 24
 BLS_BADITEM equ 56
 BLS_BUF   equ 32
 BLS_LIST  equ 40
-BLS_FRAME equ 64            ; + 2 pushes = 80
+BLS_TMP   equ 48
+BLS_ENCMSG equ 64
+BLS_FRAME equ 80            ; + 2 pushes = 96
 DEF_FUNC byteslike_source, BLS_FRAME
     push rbx
     push r12
     mov [rbp - BLS_ARGS], rdi
     mov [rbp - BLS_RANGEMSG], rdx
+    mov [rbp - BLS_ENCMSG], rcx
+    mov [rbp - BLS_NARGS], rsi
     mov qword [rbp - BLS_LIST], 0
     mov qword [rbp - BLS_BUF], 0
     test rsi, rsi
     jz .bls_empty
     cmp rsi, 1
-    jne .bls_too_many
+    jb .bls_empty
+    ja .bls_with_encoding
 
     mov rdi, [rdi]              ; the one argument, as a Value
     V_IS_INT rdi, rax
@@ -2605,8 +2792,80 @@ extern str_set_length
     mov rsi, [rbp - BLS_RANGEMSG]
     call raise_exception
 
+    ; bytes(s, encoding[, errors]) / bytearray(s, encoding[, errors]).  The
+    ; arguments are str.encode's, in str.encode's order, so that is what runs
+    ; them -- one decoder table, not two.
+.bls_with_encoding:
+    cmp rsi, 3
+    ja .bls_too_many
+    ; The encoding argument is checked before the subject, as CPython's is:
+    ; bytes(1, 2) complains about the 2, not about the 1.
+    mov rax, [rdi + 8]
+    V_TEST_PTR rax, rcx
+    ja .bls_enc_bad_encoding
+    test rax, rax
+    jz .bls_enc_bad_encoding
+    mov rcx, [rax + PyObject.ob_type]
+    lea rdx, [rel str_type]
+    cmp rcx, rdx
+    jne .bls_enc_bad_encoding
+    mov rdi, [rdi]
+    V_TEST_PTR rdi, rax
+    ja .bls_enc_no_str
+    test rdi, rdi
+    jz .bls_enc_no_str
+    mov rax, [rdi + PyObject.ob_type]
+    lea rcx, [rel str_type]
+    cmp rax, rcx
+    je .bls_encode
+    mov [rbp - BLS_TMP], rdi
+    mov rdi, rax
+    lea rsi, [rel str_type]
+    extern type_is_subtype
+    call type_is_subtype
+    test eax, eax
+    jz .bls_enc_no_str
+
+.bls_encode:
+    mov rdi, [rbp - BLS_ARGS]
+    mov rsi, [rbp - BLS_NARGS]
+    extern str_method_encode
+    call str_method_encode
+    V_UNPACK rax, rdx
+    test rax, rax
+    jz .bls_bad_type
+    mov [rbp - BLS_LIST], rax   ; the release slot: it wants a decref too
+    mov rbx, [rax + PyBytesObject.ob_size]
+    lea r12, [rax + PyBytesObject.data]
+    lea rdi, [rbx + 8]
+    call ap_malloc
+    mov [rbp - BLS_BUF], rax
+    mov rdi, rax
+    mov rsi, r12
+    mov rdx, rbx
+    call ap_memcpy
+    mov rax, [rbp - BLS_BUF]
+    mov qword [rax + rbx], 0
+    mov rdi, [rbp - BLS_LIST]
+    mov qword [rbp - BLS_LIST], 0
+    call obj_decref
+    mov rax, [rbp - BLS_BUF]
+    mov rdx, rbx
+    pop r12
+    pop rbx
+    leave
+    ret
+
 .bls_negative:
     RAISE exc_ValueError_type, "negative count"
+.bls_enc_no_str:
+    RAISE exc_TypeError_type, "encoding without a string argument"
+.bls_enc_bad_encoding:
+    mov rdi, [rbp - BLS_ARGS]
+    mov rsi, [rdi + 8]
+    mov rdi, [rbp - BLS_ENCMSG]
+    extern raise_type_error_with_name
+    call raise_type_error_with_name
 .bls_need_encoding:
     RAISE exc_TypeError_type, "string argument without an encoding"
 .bls_too_many:
@@ -2626,6 +2885,7 @@ DEF_FUNC bytes_type_call, BTC_FRAME
     mov rdi, rsi
     mov rsi, rdx
     lea rdx, [rel bytes_range_msg]
+    lea rcx, [rel bytes_enc_msg]
     call byteslike_source
     mov [rbp - BTC_BUF], rax
     mov [rbp - BTC_LEN], rdx
@@ -2841,6 +3101,9 @@ section .rodata
 bytes_range_msg: db "bytes must be in range(0, 256)", 0
 global bytearray_range_msg
 bytearray_range_msg: db "byte must be in range(0, 256)", 0
+; The \x01 is raise_type_error_with_name's placeholder for the argument's type.
+bytes_enc_msg: db `bytes() argument 'encoding' must be str, not \x01`, 0
+bytearray_enc_msg: db `bytearray() argument 'encoding' must be str, not \x01`, 0
 
 ;; ============================================================================
 ;; (was src/pyo/bytearray.asm)
@@ -2878,6 +3141,7 @@ DEF_FUNC bytearray_type_call, BA_FRAME
     mov rdi, rsi
     mov rsi, rdx
     lea rdx, [rel bytearray_range_msg]
+    lea rcx, [rel bytearray_enc_msg]
     call byteslike_source
     mov [rbp - BA_BUF], rax
     mov [rbp - BA_LEN], rdx
@@ -3064,6 +3328,32 @@ END_FUNC bytearray_resize
 ;; have a NULL ob_bytes; every reader would then dereference it.  This hands
 ;; back a pointer to a static NUL instead.
 ;; ============================================================================
+;; ============================================================================
+;; bytearray_getitem(rdi = self, rsi = index) -> a Value, the byte as an int
+;; sq_item, the counterpart of bytes_getitem.
+;; ============================================================================
+DEF_FUNC_BARE bytearray_getitem
+    test rsi, rsi
+    jns .bag_positive
+    add rsi, [rdi + PyByteArrayObject.ob_size]
+.bag_positive:
+    cmp rsi, [rdi + PyByteArrayObject.ob_size]
+    jge .bag_index_error
+    cmp rsi, 0
+    jl .bag_index_error
+
+    mov rax, [rdi + PyByteArrayObject.ob_bytes]
+    test rax, rax
+    jz .bag_index_error         ; empty: every index is out of range
+    movzx eax, byte [rax + rsi]
+    RET_TAG_SMALLINT
+    V_PACK rax, rdx
+    ret
+
+.bag_index_error:
+    RAISE exc_IndexError_type, "bytearray index out of range"
+END_FUNC bytearray_getitem
+
 DEF_FUNC_BARE bytearray_data
     mov rax, [rdi + PyByteArrayObject.ob_bytes]
     test rax, rax
@@ -3423,6 +3713,7 @@ DEF_FUNC bytearray_ass_subscript, 104
     lea rdi, [rbp - BAS_VAL]
     mov esi, 1
     lea rdx, [rel bytearray_range_msg]
+    lea rcx, [rel bytearray_enc_msg]
     call byteslike_source
     mov [rbp - BAS_SRC], rax
     mov [rbp - BAS_SLEN], rdx
@@ -3526,6 +3817,13 @@ DEF_FUNC bytearray_ass_subscript, 104
     cmp qword [rbp - BAS_VAL], 0
     je .bas_ext_delete
     mov rax, [rbp - BAS_SLEN]
+    ; An EMPTY right-hand side is the one length that does not have to match:
+    ; b[::2] = b'' removes those positions, exactly as del b[::2] does, and
+    ; bytearray(b'abcd') becomes bytearray(b'bd').  This is bytearray's alone
+    ; -- a list raises for L[::2] = [] in CPython too -- and it read as a
+    ; length mismatch here because only a NULL value counted as a delete.
+    test rax, rax
+    jz .bas_ext_delete
     cmp rax, [rbp - BAS_N]
     jne .bas_ext_mismatch
     mov rdi, [rbp - BAS_SELF]
@@ -3653,7 +3951,27 @@ DEF_FUNC bytearray_ass_subscript, 104
     jz .bas_mismatch_raise2
     call obj_decref
 .bas_mismatch_raise2:
-    RAISE exc_ValueError_type, "attempt to assign bytes of wrong size to extended slice"
+    ; "attempt to assign bytes of size 3 to extended slice of size 2", the two
+    ; numbers being BAS_SLEN and BAS_N, both still in the frame.
+    sub rsp, 128
+    mov rdi, rsp
+    lea rsi, [rel bas_msg_size]
+    extern rbt_append_cstr
+    call rbt_append_cstr
+    mov rdi, rax
+    mov rsi, [rbp - BAS_SLEN]
+    extern msg_append_i64
+    call msg_append_i64
+    mov rdi, rax
+    lea rsi, [rel bas_msg_to]
+    call rbt_append_cstr
+    mov rdi, rax
+    mov rsi, [rbp - BAS_N]
+    call msg_append_i64
+    lea rdi, [rel exc_ValueError_type]
+    mov rsi, rsp
+    call raise_exception
+    ud2
 END_FUNC bytearray_ass_subscript
 
 ;; ============================================================================
@@ -3709,6 +4027,7 @@ DEF_FUNC bytearray_contains, BCT_FRAME
     lea rdi, [rbp - BCT_VAL]
     mov esi, 1
     lea rdx, [rel bytearray_range_msg]
+    lea rcx, [rel bytearray_enc_msg]
     call byteslike_source
     mov [rbp - BCT_SRC], rax
     mov [rbp - BCT_SLEN], rdx
@@ -3832,6 +4151,7 @@ DEF_FUNC bytearray_extend_from, BAM_FRAME
     lea rdi, [rbp - BAM_ARG]
     mov esi, 1
     lea rdx, [rel bytearray_range_msg]
+    lea rcx, [rel bytearray_enc_msg]
     call byteslike_source
     mov [rbp - BAM_SRC], rax
     mov [rbp - BAM_SLEN], rdx
@@ -4534,11 +4854,24 @@ bytearray_seq_methods:
     dq bytearray_len       ; +0: sq_length
     dq bytearray_concat    ; +8: sq_concat
     dq bytearray_repeat    ; +16: sq_repeat
-    dq 0                   ; +24: sq_item (mp_subscript covers it)
+    ; sq_item is what reversed() looks for: it walks a sequence backwards
+    ; through sq_length and sq_item, and declines outright when either is 0.
+    ; mp_subscript covers indexing itself, but not that.
+    dq bytearray_getitem   ; +24: sq_item
     dq 0                   ; +32: sq_ass_item (mp_ass_subscript covers it)
     dq bytearray_contains  ; +40: sq_contains
     dq bytearray_inplace_concat ; +48
     dq bytearray_inplace_repeat ; +56
+
+align 8
+; bytearray's only numeric slot: `%`.  Everything else it does through
+; tp_as_sequence.
+bytearray_number_methods:
+    dq 0                        ; nb_add          +0
+    dq 0                        ; nb_subtract     +8
+    dq 0                        ; nb_multiply     +16
+    dq bytearray_mod            ; nb_remainder    +24
+    times 32 dq 0               ; through nb_imatmul
 
 align 8
 global bytearray_type
@@ -4562,7 +4895,7 @@ bytearray_type:
     dq 0                            ; tp_iternext
     dq 0                            ; tp_init
     dq 0                            ; tp_new
-    dq 0                            ; tp_as_number
+    dq bytearray_number_methods     ; tp_as_number (just nb_remainder)
     dq bytearray_seq_methods        ; tp_as_sequence
     dq bytearray_mapping_methods    ; tp_as_mapping
     dq 0                            ; tp_base
@@ -5707,6 +6040,7 @@ END_FUNC memoryview_len
 ;; tp_dict answers hasattr() and getattr() wrong, and _pyio reaches
 ;; __setitem__ through the abstract base classes rather than the syntax.
 DEF_FUNC memoryview_dunder_getitem
+    REQUIRE_SELF memoryview_type
     cmp rsi, 2
     jne .mdg_bad
     mov rsi, [rdi + 8]
@@ -5719,6 +6053,7 @@ DEF_FUNC memoryview_dunder_getitem
 END_FUNC memoryview_dunder_getitem
 
 DEF_FUNC memoryview_dunder_setitem
+    REQUIRE_SELF memoryview_type
     cmp rsi, 3
     jne .mds_bad
     mov rdx, [rdi + 16]
@@ -5734,6 +6069,7 @@ DEF_FUNC memoryview_dunder_setitem
 END_FUNC memoryview_dunder_setitem
 
 DEF_FUNC memoryview_dunder_len
+    REQUIRE_SELF memoryview_type
     test rsi, rsi
     jz .mdl_bad
     mov rdi, [rdi]
@@ -5804,3 +6140,7 @@ memoryview_type:
     dq 0                        ; tp_traverse
     dq 0                        ; tp_clear
     dq 0 ; tp_dictoffset
+
+section .rodata
+bas_msg_size: db "attempt to assign bytes of size ", 0
+bas_msg_to:   db " to extended slice of size ", 0

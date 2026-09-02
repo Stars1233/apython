@@ -1,1 +1,1 @@
-776
+'(a*)*b'                 'aaa'          match=None search=None groups=None findall=[]

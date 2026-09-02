@@ -34,12 +34,27 @@ SET_INIT_CAP equ 8
 ;; set_new() -> PySetObject* (uses PyDictObject layout)
 ;; Allocate a new empty set with initial capacity 8
 ;; ============================================================================
-DEF_FUNC set_new
+DEF_FUNC_BARE set_new
+    lea rdi, [rel set_type]
+    jmp set_new_of_type
+END_FUNC set_new
+
+;; ============================================================================
+;; set_new_of_type(rdi = set_type or frozenset_type) -> PySetObject*
+;;
+;; The two share every field of the layout and differ only in ob_type, so the
+;; operators can hand the result the type the left operand had.  They used to
+;; call set_new unconditionally, which is why frozenset({1}) | frozenset({2})
+;; was a set.
+;; ============================================================================
+DEF_FUNC set_new_of_type
     push rbx
+    push r12
+    mov r12, rdi                ; the type to build
 
     ; Allocate set header (GC-tracked, reuses PyDictObject layout)
     mov edi, PyDictObject_size
-    lea rsi, [rel set_type]
+    mov rsi, r12
     call gc_alloc
     mov rbx, rax                ; rbx = set (ob_refcnt=1, ob_type set)
 
@@ -63,10 +78,154 @@ DEF_FUNC set_new
     call gc_track
 
     mov rax, rbx
+    pop r12
     pop rbx
     leave
     ret
-END_FUNC set_new
+END_FUNC set_new_of_type
+
+;; ============================================================================
+;; set_result_type(rdi = a set or frozenset) -> rax = the type a derived set
+;; should be built with: set_type or frozenset_type.
+;;
+;; CPython's rule for the operators and for copy(): the result takes the LEFT
+;; operand's kind, and a subclass of either yields the plain base rather than
+;; the subclass -- frozenset({1}).copy() is a frozenset, and F({1}).copy() for
+;; a frozenset subclass F is a frozenset too.
+;; ============================================================================
+DEF_FUNC_BARE set_result_type
+    mov rax, [rdi + PyObject.ob_type]
+    lea rcx, [rel frozenset_type]
+    cmp rax, rcx
+    je .srt_frozen
+    lea rcx, [rel set_type]
+    cmp rax, rcx
+    je .srt_plain
+    ; A subclass: which base does it descend from?  frozenset_type carries
+    ; TYPE_FLAG_SET_SUBCLASS itself, so the flag cannot answer this; the MRO
+    ; can.
+    push rdi
+    mov rdi, rax
+    lea rsi, [rel frozenset_type]
+    extern type_is_subtype
+    call type_is_subtype
+    pop rdi
+    test eax, eax
+    jnz .srt_frozen
+.srt_plain:
+    lea rax, [rel set_type]
+    ret
+.srt_frozen:
+    lea rax, [rel frozenset_type]
+    ret
+END_FUNC set_result_type
+
+;; ============================================================================
+;; set_coerce_operand(rdi = the other operand, a Value)
+;;   -> rax = an OWNED set-like pointer, or 0 with the exception pending
+;;
+;; set.union, .intersection, .difference and .symmetric_difference take any
+;; iterable, where the operators take only a set.  All four read the argument
+;; as a PyDictObject regardless, so `{1,2}.difference([1])` walked a list's
+;; header as a hash table, found nothing occupied, and answered {1,2} -- a
+;; silently wrong answer rather than a crash.  A set argument is handed back
+;; INCREF'd so the caller can release its operand unconditionally.
+;; ============================================================================
+SCO_ARG   equ 8         ; a one-Value args array for set_type_call
+SCO_FRAME equ 16            ; + 0 pushes = 16, 16-aligned
+
+DEF_FUNC set_coerce_operand, SCO_FRAME
+    V_TEST_PTR rdi, rax
+    ja .sco_build
+    test rdi, rdi
+    jz .sco_build
+    mov rax, [rdi + PyObject.ob_type]
+    REQUIRE_SET_TYPE rax, rcx, .sco_build
+    mov rax, rdi
+    INCREF rax
+    leave
+    ret
+
+.sco_build:
+    mov [rbp - SCO_ARG], rdi
+    lea rsi, [rbp - SCO_ARG]
+    lea rdi, [rel set_type]
+    mov edx, 1
+    call set_type_call          ; raises for a non-iterable, NULL if it threw
+    leave
+    ret
+END_FUNC set_coerce_operand
+
+;; ============================================================================
+;; frozenset_hash(rdi = self, edx = tag) -> rax = the hash
+;;
+;; frozenset_type.tp_hash was 0, so a frozenset could not be a dict key or a
+;; set member -- the very things it exists for.  This is CPython's own
+;; frozenset_hash, over the per-entry hashes the table already stores: XOR
+;; makes it order-insensitive, which is what set equality requires of it.
+;; ============================================================================
+global frozenset_hash
+DEF_FUNC frozenset_hash
+    push rbx
+    push r12
+    push r13
+
+    mov rbx, rdi
+    mov r12, [rbx + PyDictObject.entries]
+    mov r13, [rbx + PyDictObject.capacity]
+    xor r8d, r8d                ; the accumulator; nothing here calls out
+    xor ecx, ecx
+
+.fsh_loop:
+    cmp rcx, r13
+    jge .fsh_length
+    imul rax, rcx, SET_ENTRY_SIZE
+    add rax, r12
+    cmp qword [rax + SET_ENTRY_KEY], 0      ; occupied?
+    je .fsh_next
+
+    ; h ^= ((h ^ 89869747) ^ (h << 16)) * 3644798167
+    mov rdx, [rax + SET_ENTRY_HASH]
+    mov rsi, rdx
+    mov rdi, 89869747
+    xor rsi, rdi
+    mov rdi, rdx
+    shl rdi, 16
+    xor rsi, rdi
+    mov rdi, 3644798167
+    imul rsi, rdi
+    xor r8, rsi
+
+.fsh_next:
+    inc rcx
+    jmp .fsh_loop
+
+.fsh_length:
+    ; Fold the size in, so frozensets of different sizes do not collide as
+    ; readily, then scramble once more.
+    mov rax, [rbx + PyDictObject.ob_size]
+    inc rax
+    mov rdi, 1927868237
+    imul rax, rdi
+    xor r8, rax
+
+    mov rax, r8
+    mov rdi, 69069
+    imul rax, rdi
+    mov rdi, 907133923
+    add rax, rdi
+
+    cmp rax, -1                 ; -1 is the error sentinel everywhere else
+    jne .fsh_ret
+    mov rax, 590923713
+
+.fsh_ret:
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC frozenset_hash
 
 ;; ============================================================================
 ;; set_keys_equal(a, b, a_tag, b_tag) -> int (1=equal, 0=not)
@@ -1261,7 +1420,7 @@ frozenset_type:
     dq set_dealloc              ; tp_dealloc (same as set)
     dq set_repr                 ; tp_repr (TODO: frozenset({...}) format)
     dq set_repr                 ; tp_str
-    dq 0                        ; tp_hash (TODO: implement)
+    dq frozenset_hash           ; tp_hash
     dq 0                ; tp_call  (instances are not callable)
     dq 0                        ; tp_getattr
     dq 0                        ; tp_setattr

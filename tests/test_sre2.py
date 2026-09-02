@@ -186,4 +186,29 @@ t = _sre.template("hello", ["world"])
 assert t is not None, "template returned None"
 print("template: OK")
 
+# ============================================================================
+# 7. expand() takes any str, subclasses included
+# ============================================================================
+# The template type check was an exact compare against str_type, so a str
+# subclass -- which is what a program that wraps its own templates hands you
+# -- was refused with "expected str instance".  CPython accepts it and
+# returns a plain str.
+
+class Template(str):
+    pass
+
+m_exp = p_hello_opt.match("helloworld")
+print("expand plain   :", repr(m_exp.expand(r"[\1-\2]")))
+print("expand subclass:", repr(m_exp.expand(Template(r"[\1-\2]"))))
+print("expand result  :", type(m_exp.expand(Template(r"[\1-\2]"))).__name__)
+# Not bytes: CPython's Match.expand defers to re._expand, which accepts a
+# bytes template against a str pattern, and that is the re module's plumbing
+# rather than the engine's type check this covers.
+for bad in (5, None, [1], {}):
+    try:
+        m_exp.expand(bad)
+        print("expand", type(bad).__name__, ": no error")
+    except TypeError:
+        print("expand", type(bad).__name__, ": TypeError")
+
 print("All SRE gap tests passed!")

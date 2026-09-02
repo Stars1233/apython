@@ -17,22 +17,64 @@ extern type_type
 ;; list_iter_new(PyListObject *list) -> PyListIterObject*
 ;; Create a new list iterator
 ;; ============================================================================
+;; ============================================================================
+;; The shared traverse and clear for the simple iterators and views.
+;;
+;; Every one of them -- list, tuple, str, bytes, set and dict iterators, the
+;; three dict views, and the sequence-protocol iterator -- keeps exactly one
+;; owned pointer, at the same offset: the thing it is walking.  None of them
+;; was GC-tracked, so `a = []; a.append(iter(a))` was a cycle the collector
+;; could not see, and neither could `d["k"] = d.keys()`.
+;;
+;; The offset is named for the list iterator because that is the struct these
+;; all agree with; it is 16 in every one of them.
+;; ============================================================================
+global iter_traverse_one
+DEF_FUNC iter_traverse_one
+    mov rdi, [rdi + PyListIterObject.it_seq]
+    VISIT_PTR rdi
+    leave
+    ret
+END_FUNC iter_traverse_one
+
+global iter_clear_one
+DEF_FUNC iter_clear_one
+    push rbx
+    mov rbx, rdi
+    mov rdi, [rbx + PyListIterObject.it_seq]
+    test rdi, rdi
+    jz .ico_done
+    mov qword [rbx + PyListIterObject.it_seq], 0
+    call obj_decref
+.ico_done:
+    pop rbx
+    leave
+    ret
+END_FUNC iter_clear_one
+
 DEF_FUNC list_iter_new
     push rbx
 
     mov rbx, rdi               ; save list
 
+    ; gc_alloc, not ap_malloc: an iterator holds the thing it walks, and a
+    ; container holding its own iterator is a cycle only the collector can
+    ; break.  gc_alloc fills ob_refcnt and ob_type itself.
     mov edi, PyListIterObject_size
-    call ap_malloc
+    lea rsi, [rel list_iter_type]
+    call gc_alloc
 
-    mov qword [rax + PyObject.ob_refcnt], 1
-    lea rcx, [rel list_iter_type]
-    mov [rax + PyObject.ob_type], rcx
     mov [rax + PyListIterObject.it_seq], rbx
     mov qword [rax + PyListIterObject.it_index], 0
 
     ; INCREF the list
     INCREF rbx
+
+    push rax
+    mov rdi, rax
+    extern gc_track
+    call gc_track
+    pop rax
 
     pop rbx
     leave
@@ -91,7 +133,8 @@ DEF_FUNC_LOCAL list_iter_dealloc
 
     ; Free self
     mov rdi, rbx
-    call ap_free
+    extern gc_dealloc
+    call gc_dealloc
 
     pop rbx
     leave
@@ -127,15 +170,18 @@ DEF_FUNC tuple_iter_new
     mov rbx, rdi
 
     mov edi, PyTupleIterObject_size
-    call ap_malloc
+    lea rsi, [rel tuple_iter_type]
+    call gc_alloc
 
-    mov qword [rax + PyObject.ob_refcnt], 1
-    lea rcx, [rel tuple_iter_type]
-    mov [rax + PyObject.ob_type], rcx
     mov [rax + PyTupleIterObject.it_seq], rbx
     mov qword [rax + PyTupleIterObject.it_index], 0
 
     INCREF rbx
+
+    push rax
+    mov rdi, rax
+    call gc_track
+    pop rax
 
     pop rbx
     leave
@@ -176,7 +222,7 @@ DEF_FUNC_LOCAL tuple_iter_dealloc
     call obj_decref
 
     mov rdi, rbx
-    call ap_free
+    call gc_dealloc
 
     pop rbx
     leave
@@ -734,10 +780,10 @@ list_iter_type:
     dq 0                    ; tp_base
     dq 0                    ; tp_dict
     dq 0                    ; tp_mro
-    dq 0                    ; tp_flags
+    dq TYPE_FLAG_HAVE_GC                    ; tp_flags
     dq 0                    ; tp_bases
-    dq 0                        ; tp_traverse
-    dq 0                        ; tp_clear
+    dq iter_traverse_one                        ; tp_traverse
+    dq iter_clear_one                        ; tp_clear
     dq 0 ; tp_dictoffset
 
 ; Tuple iterator type
@@ -766,10 +812,10 @@ tuple_iter_type:
     dq 0                    ; tp_base
     dq 0                    ; tp_dict
     dq 0                    ; tp_mro
-    dq 0                    ; tp_flags
+    dq TYPE_FLAG_HAVE_GC                    ; tp_flags
     dq 0                    ; tp_bases
-    dq 0                        ; tp_traverse
-    dq 0                        ; tp_clear
+    dq iter_traverse_one                        ; tp_traverse
+    dq iter_clear_one                        ; tp_clear
     dq 0 ; tp_dictoffset
 
 ; Range iterator type

@@ -603,7 +603,13 @@ TFP_EXC   equ 64            ; current_exception, to tell a raise from a miss
     mov rbx, rax                    ; rbx = slots sequence
     mov r13, [rbx + PyTupleObject.ob_size]  ; r13 = nslots (works for both)
     test r13, r13
-    jz .bc_no_slots
+    jnz .bc_have_slots
+    ; __slots__ = () is still __slots__.  Skipping it here left the flag
+    ; unset, so a class that declares it took arbitrary attributes -- which is
+    ; the one thing the empty form exists to prevent.
+    or qword [r12 + PyTypeObject.tp_flags], TYPE_FLAG_HAS_SLOTS
+    jmp .bc_no_slots
+.bc_have_slots:
 
     ; Determine base_basicsize
     ; Slots are laid out after the whole instance header, which is what
@@ -1018,6 +1024,14 @@ TFP_EXC   equ 64            ; current_exception, to tell a raise from a miss
     extern gc_track
     mov rdi, r12
     call gc_track
+
+    ; Record it against each of its bases, so type.__subclasses__ can answer.
+    ; Borrowed, and dropped again by user_type_dealloc, so the list only ever
+    ; holds live classes -- which is what CPython's weak-referenced
+    ; tp_subclasses amounts to.
+    extern subclass_register
+    mov rdi, r12
+    call subclass_register
 
     ; Now that the class exists, tell every descriptor in it what it is called.
     mov rdi, r12

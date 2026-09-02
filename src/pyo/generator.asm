@@ -26,6 +26,10 @@ extern raise_exception_obj
 extern exc_new
 extern exc_TypeError_type
 extern exc_StopIteration_type
+extern set_exception
+extern exc_RuntimeError_type
+extern exc_GeneratorExit_type
+extern sys_write
 extern exc_StopAsyncIteration_type
 extern method_new
 extern builtin_func_new
@@ -358,21 +362,26 @@ DEF_FUNC ags_iternext
     mov qword [rel current_exception], 0
     call eval_frame
     pop rcx
-    ; Same as gen_send: an exception the async generator body raised is the
-    ; result, and restoring over it ended the iteration silently.
-    cmp qword [rel current_exception], 0
-    jne .agsend_raised
+    ; An exception the async generator body raised is the result, and
+    ; restoring over it ended the iteration silently.  A RAISE is a NULL
+    ; result, though, not a set current_exception: the comment above is
+    ; explicit that a generator suspended inside an except block leaves that
+    ; global set on purpose, and reading it as "the body raised" made an
+    ; `async for` over such a generator re-raise what it had already caught.
+    test rax, rax
+    jz .agsend_raised
     mov [rel current_exception], rcx
     jmp .agsend_settled
 .agsend_raised:
     test rcx, rcx
-    jz .agsend_settled
+    jz .agsi_body_raised
     push rax
     push rdx
     mov rdi, rcx
     call obj_decref
     pop rdx
     pop rax
+    jmp .agsi_body_raised
 .agsend_settled:
     add rsp, 8
     V_UNPACK rax, rdx           ; eval_frame returns a Value
@@ -411,6 +420,37 @@ DEF_FUNC ags_iternext
     pop rbx
     leave
     ret
+
+;; --- the body raised ---------------------------------------------------
+;; Not a result, and above all not the end of the iteration.  The arm below
+;; decides "exhausted or yielded" from instr_ptr, and a body that raised
+;; leaves the frame finished -- so it read as exhausted and manufactured a
+;; StopAsyncIteration, whose raise_exception_obj then DECREF'd the real
+;; exception away.  `async for x in ag()` over a generator that raises ended
+;; the loop cleanly and lost the exception outright: not caught by an
+;; enclosing except, not reported at exit, the program simply carried on past
+;; a `raise`.
+;;
+;; The exception is pending and already owns its reference.  Do the same
+;; bookkeeping the exhausted arm does -- the generator is finished either way
+;; -- and unwind with it, which is how that arm reaches END_ASYNC_FOR too.
+.agsi_body_raised:
+    extern eval_exception_unwind
+    extern eval_saved_r13
+    add rsp, 8                  ; the scratch pushed before eval_frame
+    mov qword [r12 + PyGenObject.gi_running], 0
+    mov rdi, [r12 + PyGenObject.gi_frame]
+    test rdi, rdi
+    jz .agsi_body_raised_closed
+    call frame_free
+    mov qword [r12 + PyGenObject.gi_frame], 0
+.agsi_body_raised_closed:
+    mov dword [rbx + AsyncGenASend.ags_state], 2
+    pop r12
+    pop rbx
+    leave
+    mov [rel eval_saved_r13], r13
+    jmp eval_exception_unwind
 
 .agsi_yielded:
     pop rdx                    ; result tag
@@ -574,15 +614,129 @@ END_FUNC ags_dealloc
 ;; gen_dealloc(PyObject *self)
 ;; Free generator: free frame if still held, DECREF code.
 ;; ============================================================================
-DEF_FUNC gen_dealloc
+
+;; ============================================================================
+;; gen_dealloc_close(rdi = a generator with a live, suspended frame)
+;;
+;; gen_close, minus the two arms that leave through the unwinder.  A dealloc
+;; is called from arbitrary depth -- including from inside
+;; eval_exception_unwind's own release loop -- and unwinding from there
+;; abandons a C stack that is in the middle of something.  So a cleanup that
+;; raises leaves its exception pending for gen_dealloc to report, the way
+;; instance_dealloc reports one from __del__, and nothing jumps.
+;; ============================================================================
+GDC_GEN   equ 8
+GDC_FRAME equ 16            ; + 1 push = 24, not 16-aligned
+DEF_FUNC_LOCAL gen_dealloc_close, GDC_FRAME
     push rbx
+    mov rbx, rdi
+    mov [rbp - GDC_GEN], rbx
+
+    mov rdi, [rbx + PyGenObject.gi_frame]
+    test rdi, rdi
+    jz .gdc_free
+
+    mov rdi, rbx
+    lea rsi, [rel exc_GeneratorExit_type]
+    call gen_throw
+    test edx, edx
+    jz .gdc_settle
+
+    ; It yielded instead of finishing.  Python reports that; here it is
+    ; recorded rather than raised, because there is nowhere to raise to.
+    SET_EXC exc_RuntimeError_type, "generator ignored GeneratorExit"
+    jmp .gdc_free
+
+.gdc_settle:
+    ; GeneratorExit and StopIteration on the way out are the expected
+    ; outcomes; anything else is left pending for the caller to report.
+    mov rax, [rel current_exception]
+    test rax, rax
+    jz .gdc_free
+    mov rcx, [rax + PyObject.ob_type]
+    lea rdx, [rel exc_GeneratorExit_type]
+    cmp rcx, rdx
+    je .gdc_swallow
+    lea rdx, [rel exc_StopIteration_type]
+    cmp rcx, rdx
+    jne .gdc_free
+.gdc_swallow:
+    mov rdi, [rel current_exception]
+    mov qword [rel current_exception], 0
+    call obj_decref
+
+.gdc_free:
+    mov rbx, [rbp - GDC_GEN]
+    mov rdi, [rbx + PyGenObject.gi_frame]
+    test rdi, rdi
+    jz .gdc_done
+    mov qword [rbx + PyGenObject.gi_frame], 0
+    call frame_free
+.gdc_done:
+    pop rbx
+    leave
+    ret
+END_FUNC gen_dealloc_close
+
+GD_EXC   equ 8
+GD_FRAME equ 16             ; + 2 pushes = 32, 16-aligned
+DEF_FUNC gen_dealloc, GD_FRAME
+    push rbx
+    push r12
 
     mov rbx, rdi
 
-    ; Free frame if still held
+    ; A generator suspended inside a try/finally has cleanup still to run, and
+    ; CPython runs it when the generator is collected.  Doing it here means
+    ; running Python inside a dealloc, which needs three things:
+    ;
+    ;   - a resurrection bump, because the cleanup can take and drop
+    ;     references to the generator and would otherwise re-enter this at
+    ;     refcount 0;
+    ;   - the pending exception saved and put back, because a dealloc runs at
+    ;     arbitrary points -- including in the middle of somebody else's raise
+    ;     -- and the close both reads and clears current_exception;
+    ;   - and nothing that unwinds, which is what gen_dealloc_close is for.
+    ;
+    ; A frame with instr_ptr 0 has either never started or already finished:
+    ; there is nothing suspended in it, and CPython runs no cleanup for one
+    ; either.
     mov rdi, [rbx + PyGenObject.gi_frame]
     test rdi, rdi
     jz .no_frame
+    cmp qword [rdi + PyFrame.instr_ptr], 0
+    je .gd_just_free
+
+    inc qword [rbx + PyObject.ob_refcnt]
+    DUNDER_EXC_SAVE r12
+    mov qword [rel current_exception], 0
+
+    mov rdi, rbx
+    call gen_dealloc_close
+
+    ; Anything the cleanup raised is reported and dropped, as an exception
+    ; from __del__ is: there is no caller left to hand it to.
+    mov rdi, [rel current_exception]
+    test rdi, rdi
+    jz .gd_close_done
+    mov qword [rel current_exception], 0
+    push rdi
+    mov edi, 2
+    lea rsi, [rel gd_ignored_msg]
+    mov edx, gd_ignored_len
+    call sys_write
+    pop rdi
+    call obj_decref
+.gd_close_done:
+    mov [rel current_exception], r12
+    dec qword [rbx + PyObject.ob_refcnt]
+
+.gd_just_free:
+    ; Free the frame if the close did not.
+    mov rdi, [rbx + PyGenObject.gi_frame]
+    test rdi, rdi
+    jz .no_frame
+    mov qword [rbx + PyGenObject.gi_frame], 0
     call frame_free
 .no_frame:
 
@@ -599,6 +753,7 @@ DEF_FUNC gen_dealloc
     mov rdi, rbx
     call gc_dealloc
 
+    pop r12
     pop rbx
     leave
     ret
@@ -1653,7 +1808,7 @@ DEF_FUNC gen_traverse
     mov rax, [rbx + PyGenObject.gi_code]
     mov r13d, [rax + PyCodeObject.co_nlocalsplus]
     test r13d, r13d
-    jz .done
+    jz .visit_stack
 
     lea r12, [r12 + PyFrame.localsplus]  ; start of the Value array
 .frame_loop:
@@ -1662,6 +1817,39 @@ DEF_FUNC gen_traverse
     VISIT_V rdi, rsi
     test r13d, r13d
     jnz .frame_loop
+
+.visit_stack:
+    ; And the frame's VALUE STACK, which this stopped short of: a suspended
+    ; generator's live values are exactly there -- the iterator a `for` was
+    ; walking above all -- so a cycle through one was invisible to the
+    ; collector.  Only a suspended frame has a meaningful stack_ptr; see
+    ; frame_free for why instr_ptr is the test.
+    mov r12, [rbx + PyGenObject.gi_frame]
+    test r12, r12
+    jz .done
+    cmp qword [r12 + PyFrame.instr_ptr], 0
+    je .done
+    ; ...and only while it is SUSPENDED.  stack_ptr is written by
+    ; YIELD_VALUE and by nothing else, so in a running generator it records
+    ; the depth of the previous suspension: slots already popped and
+    ; released.  Visiting those subtracts gc_refs for references that no
+    ; longer exist, which can make a live object look unreachable.  A
+    ; running generator's stack needs no visiting anyway -- it holds owned
+    ; references that no tp_traverse accounts for, which is exactly what
+    ; makes the interpreter stack a root.
+    cmp qword [rbx + PyGenObject.gi_running], 0
+    jne .done
+    mov r13, [r12 + PyFrame.stack_ptr]
+    test r13, r13
+    jz .done
+    mov r12, [r12 + PyFrame.stack_base]
+.stack_visit_loop:
+    cmp r13, r12
+    jbe .done
+    sub r13, 8
+    mov rdi, [r13]
+    VISIT_V rdi, rsi
+    jmp .stack_visit_loop
 
 .done:
     pop r13
@@ -1693,3 +1881,7 @@ DEF_FUNC gen_clear
     leave
     ret
 END_FUNC gen_clear
+
+section .rodata
+gd_ignored_msg: db "Exception ignored in: generator cleanup", 10, 0
+gd_ignored_len  equ $ - gd_ignored_msg - 1

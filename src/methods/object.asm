@@ -15,6 +15,9 @@
 %include "opcodes.inc"
 
 ; External functions
+extern frozenset_type
+extern current_exception
+extern int_is_integer
 extern complex_type
 extern obj_decref
 extern obj_repr
@@ -41,6 +44,7 @@ extern tuple_type
 ; --- moved to a sibling file by the split ---
 
 extern bytes_type
+extern bytearray_type
 
 extern float_type
 
@@ -252,12 +256,15 @@ END_FUNC object_method_sizeof
 
 ;; ============================================================================
 ;; object.__dir__(self) -> the names its type and instance dict carry
-;; Defers to the dir() builtin, which already walks both.
+;;
+;; The default walk, and only that: dir() is what asks for __dir__ in the
+;; first place, so calling it back from here made the pair circular and left
+;; neither of them asking the object anything.
 ;; ============================================================================
 DEF_FUNC object_method_dir
-    extern builtin_dir
-    mov esi, 1
-    call builtin_dir
+    extern dir_default
+    mov rdi, [rdi]              ; args[0] = self, a Value
+    call dir_default
     leave
     ret
 END_FUNC object_method_dir
@@ -397,6 +404,10 @@ DEF_FUNC %1_dunder_%2
     test rsi, rsi
     jz %%bad
     mov rdi, [rdi]
+    lea rsi, [rel %1_type]
+    extern dunder_require_self
+    call dunder_require_self
+    mov rdi, rax
     V_TEST_PTR rdi, rax
     ja %%immediate
     test rdi, rdi
@@ -424,11 +435,20 @@ END_FUNC %1_dunder_%2
 ;; its size without paying for the len() call -- raised AttributeError.  Like
 ;; the str/repr thunks these read the *defining* type's slot, so a subclass
 ;; inherits the base's behaviour rather than re-dispatching into itself.
-%macro DEF_DUNDER_LEN 1
+%macro DEF_DUNDER_LEN 1-2 0
 DEF_FUNC %1_dunder_len
     test rsi, rsi
     jz %%bad
     mov rdi, [rdi]
+    lea rsi, [rel %1_type]
+%ifnum %2
+    xor edx, edx
+%else
+    lea rdx, [rel %2]
+%endif
+    extern dunder_require_self
+    call dunder_require_self
+    mov rdi, rax
     lea rax, [rel %1_type]
     mov rcx, [rax + PyTypeObject.tp_as_mapping]
     test rcx, rcx
@@ -454,11 +474,20 @@ DEF_FUNC %1_dunder_len
 END_FUNC %1_dunder_len
 %endmacro
 
-%macro DEF_DUNDER_ITER 1
+%macro DEF_DUNDER_ITER 1-2 0
 DEF_FUNC %1_dunder_iter
     test rsi, rsi
     jz %%bad
     mov rdi, [rdi]
+    lea rsi, [rel %1_type]
+%ifnum %2
+    xor edx, edx
+%else
+    lea rdx, [rel %2]
+%endif
+    extern dunder_require_self
+    call dunder_require_self
+    mov rdi, rax
     lea rax, [rel %1_type]
     mov rax, [rax + PyTypeObject.tp_iter]
     test rax, rax
@@ -484,14 +513,649 @@ END_FUNC %1_dunder_iter
 ; list and tuple already have hand-written ones.
 DEF_DUNDER_LEN dict
 DEF_DUNDER_LEN str
-DEF_DUNDER_LEN set
+DEF_DUNDER_LEN set, frozenset_type
 DEF_DUNDER_LEN bytes
 DEF_DUNDER_ITER dict
 DEF_DUNDER_ITER list
 DEF_DUNDER_ITER tuple
 DEF_DUNDER_ITER str
-DEF_DUNDER_ITER set
+DEF_DUNDER_ITER set, frozenset_type
 DEF_DUNDER_ITER bytes
+
+
+;; A builtin number's unary dunders, reachable by name.  int and float had
+;; none at all: `(-5).__abs__()` was an AttributeError, and -- worse -- an MRO
+;; name lookup could not prefer int's operator over a later base's, because
+;; int had nothing in its dict to find.  `class I(int, M)` with an M defining
+;; __invert__ therefore installed M's, where CPython answers int's.
+;;
+;; Like the str/repr thunks these call the *defining* type's slot rather than
+;; the argument's, which is what keeps a subclass out of its own recursion.
+%macro DEF_DUNDER_UNARY 3       ; %1 = type prefix, %2 = suffix, %3 = nb_ field
+DEF_FUNC %1_dunder_%2
+    cmp rsi, 1
+    jne %%bad
+    mov rdi, [rdi]              ; args[0] = self, a Value
+    lea rsi, [rel %1_type]
+    extern dunder_require_self
+    call dunder_require_self
+    mov rdi, rax
+    lea rax, [rel %1_type]
+    mov rax, [rax + PyTypeObject.tp_as_number]
+    test rax, rax
+    jz %%bad
+    mov rax, [rax + PyNumberMethods.%3]
+    test rax, rax
+    jz %%bad
+    call rax
+    leave
+    ret
+%%bad:
+    RAISE exc_TypeError_type, "expected exactly one argument"
+END_FUNC %1_dunder_%2
+%endmacro
+
+;; ============================================================================
+;; DEF_SEQ_DUNDER prefix, suffix, implementation
+;;
+;; The sequence operators, by name.  Two things separate these from
+;; DEF_DUNDER_BINARY.
+;;
+;; CPython RAISES for an operand a sequence slot refuses -- [1].__add__(5) is
+;; a TypeError where {}.__or__(5) is NotImplemented -- so the implementation's
+;; own error is the answer, and is left to propagate.
+;;
+;; And every one of these implementations declines a SELF of the wrong type
+;; through BINOP_REQUIRE_LEFT, which answers a NULL Value with nothing
+;; pending.  A builtin's caller reads that as "it raised", finds no exception,
+;; and falls over -- so list.__add__(5, []) has to be turned into the
+;; TypeError CPython gives.  tuple's three hand-written thunks had that hole
+;; and are regenerated from this.
+;;
+;; Arity is not checked here.  It is in the registration, and
+;; builtin_func_call rejects the wrong count before this is entered.
+;; ============================================================================
+%macro DEF_SEQ_DUNDER 3         ; %1 prefix, %2 suffix, %3 implementation
+DEF_FUNC %1_dunder_%2, DB_FRAME
+    cmp rsi, 2
+    jne %%bad
+    mov rsi, [rdi + 8]
+    mov rdi, [rdi]
+    mov [rbp - DB_RHS], rsi
+    lea rsi, [rel %1_type]
+    extern dunder_require_self
+    call dunder_require_self
+    mov rdi, rax
+    mov rsi, [rbp - DB_RHS]
+    DUNDER_EXC_SAVE [rbp - DB_EXC]
+    extern %3
+    call %3
+    test rax, rax
+    jnz %%out
+    EXC_RAISED_SINCE [rbp - DB_EXC], rcx, %%out
+%%bad:
+    RAISE exc_TypeError_type, "unsupported operand type"
+%%out:
+    leave
+    ret
+END_FUNC %1_dunder_%2
+%endmacro
+
+;; The reflected sequence form: self is the RIGHT operand, and the slot is
+;; called with the operands the way it expects them.  `2 * L` reaches
+;; list.__rmul__(L, 2), and sq_repeat wants (L, 2).
+%macro DEF_SEQ_RDUNDER 3        ; %1 prefix, %2 suffix, %3 implementation
+DEF_FUNC %1_dunder_%2, DB_FRAME
+    cmp rsi, 2
+    jne %%bad
+    mov rsi, [rdi + 8]
+    mov rdi, [rdi]
+    mov [rbp - DB_RHS], rsi
+    lea rsi, [rel %1_type]
+    extern dunder_require_self
+    call dunder_require_self
+    mov rdi, rax
+    mov rsi, [rbp - DB_RHS]
+    DUNDER_EXC_SAVE [rbp - DB_EXC]
+    extern %3
+    call %3
+    test rax, rax
+    jnz %%out
+    EXC_RAISED_SINCE [rbp - DB_EXC], rcx, %%out
+%%bad:
+    RAISE exc_TypeError_type, "unsupported operand type"
+%%out:
+    leave
+    ret
+END_FUNC %1_dunder_%2
+%endmacro
+
+;; What str and bytes accept on the other side of their reflected `%`.
+global dunder_operand_is_str
+DEF_FUNC_BARE dunder_operand_is_str
+    V_TEST_PTR rdi, rax
+    ja .dois_no
+    test rdi, rdi
+    jz .dois_no
+    mov rax, [rdi + PyObject.ob_type]
+    lea rcx, [rel str_type]
+    cmp rax, rcx
+    je .dois_yes
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_STR_SUBCLASS
+    jz .dois_no
+.dois_yes:
+    mov eax, 1
+    ret
+.dois_no:
+    xor eax, eax
+    ret
+END_FUNC dunder_operand_is_str
+
+global dunder_operand_is_bytes
+DEF_FUNC_BARE dunder_operand_is_bytes
+    V_TEST_PTR rdi, rax
+    ja .doib_no
+    test rdi, rdi
+    jz .doib_no
+    mov rax, [rdi + PyObject.ob_type]
+    lea rcx, [rel bytes_type]
+    cmp rax, rcx
+    je .doib_yes
+    lea rcx, [rel bytearray_type]
+    cmp rax, rcx
+    je .doib_yes
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_BYTES_SUBCLASS
+    jz .doib_no
+.doib_yes:
+    mov eax, 1
+    ret
+.doib_no:
+    xor eax, eax
+    ret
+END_FUNC dunder_operand_is_bytes
+
+;; Anything at all: the dict and set slots validate both operands themselves
+;; and decline a pair they do not want with a NULL Value, which
+;; DEF_DUNDER_BINARY already turns into NotImplemented.
+global dunder_operand_any
+DEF_FUNC_BARE dunder_operand_any
+    mov eax, 1
+    ret
+END_FUNC dunder_operand_any
+
+;; ============================================================================
+;; DEF_DUNDER_BINARY prefix, suffix, nb_field, reflected
+;;
+;; The binary operator dunders, by name.  int.__add__ did not exist at all --
+;; dir(int) was short by about forty names -- so a class delegating to it found
+;; nothing, and the stdlib's habit of asking `hasattr(x, "__add__")` answered
+;; no for the type it is truest of.
+;;
+;; The slot is the *defining* type's, as in DEF_DUNDER_UNARY: reading it off
+;; the argument would send a subclass back into its own wrapper.  A reflected
+;; form swaps the operands and calls the same slot, which is what nb_ slots
+;; expect -- they take both operands and answer NotImplemented when the pair
+;; is not theirs, so `int.__radd__(1, "x")` comes out right without a second
+;; table.
+;; ============================================================================
+;; dunder_operand_is_int / _is_real -- what each type's binary dunders accept.
+;; The SLOTS here coerce: int_add adds an int to a float quite happily, which
+;; is what makes 1 + 2.5 work without a reflected step.  A dunder called by
+;; name must not: CPython's int.__add__(1, 2.5) is NotImplemented, and code
+;; that dispatches on that answer -- the numeric tower in fractions and
+;; decimal does -- reads a computed 3.5 as "int handled it".
+global dunder_operand_is_int
+DEF_FUNC_BARE dunder_operand_is_int
+    V_UNPACK rdi, rdx
+    jmp int_is_integer
+END_FUNC dunder_operand_is_int
+
+global dunder_operand_is_real
+DEF_FUNC dunder_operand_is_real
+    push rbx
+    mov rbx, rdi
+    V_IS_FLOAT rdi, rax
+    jb .doir_yes
+    V_TEST_PTR rdi, rax
+    ja .doir_int
+    test rdi, rdi
+    jz .doir_int
+    mov rax, [rdi + PyObject.ob_type]
+    lea rcx, [rel float_type]
+    cmp rax, rcx
+    je .doir_yes
+    mov rdi, rax
+    lea rsi, [rel float_type]
+    extern type_is_subtype
+    call type_is_subtype
+    test eax, eax
+    jnz .doir_yes
+.doir_int:
+    mov rdi, rbx
+    V_UNPACK rdi, rdx
+    call int_is_integer
+    pop rbx
+    leave
+    ret
+.doir_yes:
+    mov eax, 1
+    pop rbx
+    leave
+    ret
+END_FUNC dunder_operand_is_real
+
+; The one frame slot these need: the exception pending before the slot ran.
+DB_EXC   equ 8
+DB_RHS   equ 16     ; the right operand, parked across the receiver check
+DB_FRAME equ 32
+
+%macro DEF_DUNDER_BINARY 5-6 0      ; %1 prefix, %2 suffix, %3 nb_ field, %4 reflected, %5 operand check
+DEF_FUNC %1_dunder_%2, DB_FRAME
+    cmp rsi, 2
+    jne %%bad
+%if %4
+    mov rsi, [rdi]              ; self is the right operand
+    mov rdi, [rdi + 8]
+%else
+    mov rsi, [rdi + 8]
+    mov rdi, [rdi]
+%endif
+
+    ; Self has to be one of this type's, whichever side it arrived on:
+    ; int.__radd__("x", 1) reaches the same slot as int.__add__.
+%if %4
+    mov [rbp - DB_RHS], rdi     ; the other operand; self is on the right
+    mov rdi, rsi
+    lea rsi, [rel %1_type]
+%ifnum %6
+    xor edx, edx
+%else
+    lea rdx, [rel %6]
+%endif
+    extern dunder_require_self
+    call dunder_require_self
+    mov rsi, rax
+    mov rdi, [rbp - DB_RHS]
+%else
+    mov [rbp - DB_RHS], rsi
+    lea rsi, [rel %1_type]
+%ifnum %6
+    xor edx, edx
+%else
+    lea rdx, [rel %6]
+%endif
+    extern dunder_require_self
+    call dunder_require_self
+    mov rdi, rax
+    mov rsi, [rbp - DB_RHS]
+%endif
+
+    ; The operand that is not self has to be one this type's dunder accepts.
+    push rdi
+    push rsi                    ; [rsp] = right, [rsp + 8] = left
+%if %4
+    mov rdi, [rsp + 8]
+%else
+    mov rdi, [rsp]
+%endif
+    extern %5
+    call %5
+    pop rsi
+    pop rdi
+    test eax, eax
+    jz %%notimpl
+
+    lea rax, [rel %1_type]
+    mov rax, [rax + PyTypeObject.tp_as_number]
+    test rax, rax
+    jz %%bad
+    mov rax, [rax + PyNumberMethods.%3]
+    test rax, rax
+    jz %%bad
+    DUNDER_EXC_SAVE [rbp - DB_EXC]
+    call rax
+    test rax, rax
+    jnz %%out
+
+    ; A slot declines a pair it does not want by answering NULL, and the
+    ; operator machinery turns that into its TypeError.  A dunder called by
+    ; name has to answer NotImplemented instead, so its caller can try the
+    ; reflected form -- int.__add__(1, "x") is NotImplemented, not an error.
+    EXC_RAISED_SINCE [rbp - DB_EXC], rcx, %%out
+%%notimpl:
+    extern notimpl_singleton
+    lea rax, [rel notimpl_singleton]
+    INCREF rax
+%%out:
+    leave
+    ret
+%%bad:
+    RAISE exc_TypeError_type, "expected exactly one argument"
+END_FUNC %1_dunder_%2
+%endmacro
+
+;; ============================================================================
+;; DEF_DUNDER_DIVMOD prefix, suffix, reflected
+;;
+;; divmod has no nb_ slot filled on either numeric type -- the builtin drives
+;; nb_floor_divide and nb_remainder itself -- so its dunder goes through the
+;; builtin rather than through a slot.  The one thing that has to be kept is
+;; the dunder's own answer for an operand it does not want: NotImplemented,
+;; not a TypeError, so the caller can try the reflected form.
+;; ============================================================================
+%macro DEF_DUNDER_DIVMOD 4      ; %1 prefix, %2 suffix, %3 reflected, %4 operand check
+DEF_FUNC %1_dunder_%2, 16
+    cmp rsi, 2
+    jne %%bad
+    sub rsp, 16
+%if %3
+    mov rax, [rdi + 8]
+    mov [rsp], rax
+    mov rax, [rdi]
+    mov [rsp + 8], rax
+%else
+    mov rax, [rdi]
+    mov [rsp], rax
+    mov rax, [rdi + 8]
+    mov [rsp + 8], rax
+%endif
+    ; Self has to be one of this type's, whichever slot it landed in.
+%if %3
+    mov rdi, [rsp + 8]
+%else
+    mov rdi, [rsp]
+%endif
+    lea rsi, [rel %1_type]
+    extern dunder_require_self
+    call dunder_require_self
+
+    ; The operand that is not self has to be one this type accepts, as for
+    ; the other binary dunders.  The reflected form already put self SECOND.
+%if %3
+    mov rdi, [rsp]
+%else
+    mov rdi, [rsp + 8]
+%endif
+    extern %4
+    call %4
+    test eax, eax
+    jz %%notimpl
+    mov rdi, rsp
+    mov esi, 2
+    extern builtin_divmod
+    call builtin_divmod
+    add rsp, 16
+    leave
+    ret
+%%notimpl:
+    add rsp, 16
+    extern notimpl_singleton
+    lea rax, [rel notimpl_singleton]
+    INCREF rax
+    leave
+    ret
+%%bad:
+    RAISE exc_TypeError_type, "expected exactly one argument"
+END_FUNC %1_dunder_%2
+%endmacro
+
+;; __bool__ is the odd one: nb_bool answers 0 or 1 in eax, not a Value.
+%macro DEF_DUNDER_BOOL 1
+DEF_FUNC %1_dunder_bool
+    cmp rsi, 1
+    jne %%bad
+    mov rdi, [rdi]
+    lea rsi, [rel %1_type]
+    extern dunder_require_self
+    call dunder_require_self
+    mov rdi, rax
+    lea rax, [rel %1_type]
+    mov rax, [rax + PyTypeObject.tp_as_number]
+    test rax, rax
+    jz %%bad
+    mov rax, [rax + PyNumberMethods.nb_bool]
+    test rax, rax
+    jz %%bad
+    call rax
+    test eax, eax
+    jz %%false
+    extern bool_true
+    lea rax, [rel bool_true]
+    INCREF rax
+    leave
+    ret
+%%false:
+    extern bool_false
+    lea rax, [rel bool_false]
+    INCREF rax
+    leave
+    ret
+%%bad:
+    RAISE exc_TypeError_type, "expected exactly one argument"
+END_FUNC %1_dunder_bool
+%endmacro
+
+DEF_DUNDER_UNARY int, neg, nb_negative
+DEF_DUNDER_UNARY int, pos, nb_positive
+DEF_DUNDER_UNARY int, abs, nb_absolute
+DEF_DUNDER_UNARY int, invert, nb_invert
+DEF_DUNDER_UNARY int, int, nb_int
+DEF_DUNDER_UNARY int, float, nb_float
+DEF_DUNDER_UNARY int, index, nb_index
+DEF_DUNDER_UNARY int, trunc, nb_int
+
+DEF_DUNDER_UNARY float, neg, nb_negative
+DEF_DUNDER_UNARY float, pos, nb_positive
+DEF_DUNDER_UNARY float, abs, nb_absolute
+DEF_DUNDER_UNARY float, int, nb_int
+DEF_DUNDER_UNARY float, float, nb_float
+DEF_DUNDER_UNARY float, trunc, nb_int
+DEF_DUNDER_BOOL float
+
+;; int's binary family, forward and reflected.
+DEF_DUNDER_BINARY int, add, nb_add, 0, dunder_operand_is_int
+DEF_DUNDER_BINARY int, sub, nb_subtract, 0, dunder_operand_is_int
+DEF_DUNDER_BINARY int, mul, nb_multiply, 0, dunder_operand_is_int
+DEF_DUNDER_BINARY int, mod, nb_remainder, 0, dunder_operand_is_int
+DEF_DUNDER_DIVMOD int, divmod, 0, dunder_operand_is_int
+DEF_DUNDER_BINARY int, pow, nb_power, 0, dunder_operand_is_int
+DEF_DUNDER_BINARY int, lshift, nb_lshift, 0, dunder_operand_is_int
+DEF_DUNDER_BINARY int, rshift, nb_rshift, 0, dunder_operand_is_int
+DEF_DUNDER_BINARY int, and, nb_and, 0, dunder_operand_is_int
+DEF_DUNDER_BINARY int, xor, nb_xor, 0, dunder_operand_is_int
+DEF_DUNDER_BINARY int, or, nb_or, 0, dunder_operand_is_int
+DEF_DUNDER_BINARY int, floordiv, nb_floor_divide, 0, dunder_operand_is_int
+DEF_DUNDER_BINARY int, truediv, nb_true_divide, 0, dunder_operand_is_int
+DEF_DUNDER_BINARY int, radd, nb_add, 1, dunder_operand_is_int
+DEF_DUNDER_BINARY int, rsub, nb_subtract, 1, dunder_operand_is_int
+DEF_DUNDER_BINARY int, rmul, nb_multiply, 1, dunder_operand_is_int
+DEF_DUNDER_BINARY int, rmod, nb_remainder, 1, dunder_operand_is_int
+DEF_DUNDER_DIVMOD int, rdivmod, 1, dunder_operand_is_int
+DEF_DUNDER_BINARY int, rpow, nb_power, 1, dunder_operand_is_int
+DEF_DUNDER_BINARY int, rlshift, nb_lshift, 1, dunder_operand_is_int
+DEF_DUNDER_BINARY int, rrshift, nb_rshift, 1, dunder_operand_is_int
+DEF_DUNDER_BINARY int, rand, nb_and, 1, dunder_operand_is_int
+DEF_DUNDER_BINARY int, rxor, nb_xor, 1, dunder_operand_is_int
+DEF_DUNDER_BINARY int, ror, nb_or, 1, dunder_operand_is_int
+DEF_DUNDER_BINARY int, rfloordiv, nb_floor_divide, 1, dunder_operand_is_int
+DEF_DUNDER_BINARY int, rtruediv, nb_true_divide, 1, dunder_operand_is_int
+
+;; float's, which is the same list without the bitwise operators.
+DEF_DUNDER_BINARY float, add, nb_add, 0, dunder_operand_is_real
+DEF_DUNDER_BINARY float, sub, nb_subtract, 0, dunder_operand_is_real
+DEF_DUNDER_BINARY float, mul, nb_multiply, 0, dunder_operand_is_real
+DEF_DUNDER_BINARY float, mod, nb_remainder, 0, dunder_operand_is_real
+DEF_DUNDER_DIVMOD float, divmod, 0, dunder_operand_is_real
+DEF_DUNDER_BINARY float, pow, nb_power, 0, dunder_operand_is_real
+DEF_DUNDER_BINARY float, floordiv, nb_floor_divide, 0, dunder_operand_is_real
+DEF_DUNDER_BINARY float, truediv, nb_true_divide, 0, dunder_operand_is_real
+DEF_DUNDER_BINARY float, radd, nb_add, 1, dunder_operand_is_real
+DEF_DUNDER_BINARY float, rsub, nb_subtract, 1, dunder_operand_is_real
+DEF_DUNDER_BINARY float, rmul, nb_multiply, 1, dunder_operand_is_real
+DEF_DUNDER_BINARY float, rmod, nb_remainder, 1, dunder_operand_is_real
+DEF_DUNDER_DIVMOD float, rdivmod, 1, dunder_operand_is_real
+DEF_DUNDER_BINARY float, rpow, nb_power, 1, dunder_operand_is_real
+DEF_DUNDER_BINARY float, rfloordiv, nb_floor_divide, 1, dunder_operand_is_real
+DEF_DUNDER_BINARY float, rtruediv, nb_true_divide, 1, dunder_operand_is_real
+
+;; ============================================================================
+;; object's generic attribute dunders, and the two hooks
+;;
+;; All five were absent from the tree.  They are not protocol hooks here --
+;; slot_table has no row for any of them and nothing looks one up -- so these
+;; are the generic implementations by name and nothing more.  They are named
+;; rather than registered as builtin_setattr directly so that the day
+;; __setattr__ becomes a slot, the owner test in type_install_slots has a
+;; function to recognise.
+;; ============================================================================
+global object_method_setattr
+DEF_FUNC_BARE object_method_setattr
+    extern builtin_setattr
+    jmp builtin_setattr
+END_FUNC object_method_setattr
+
+global object_method_delattr
+DEF_FUNC_BARE object_method_delattr
+    extern builtin_delattr_fn
+    jmp builtin_delattr_fn      ; a NULL value through tp_setattr is a delete
+END_FUNC object_method_delattr
+
+global object_method_getattribute
+DEF_FUNC_BARE object_method_getattribute
+    extern builtin_getattr
+    jmp builtin_getattr         ; with two arguments it raises, as it should
+END_FUNC object_method_getattribute
+
+;; object.__getstate__(self) -> self.__dict__, or None
+;;
+;; CPython 3.11+ also has a pair form for a __slots__ class, (None, {...}).
+;; A __slots__ class here has no instance dict at all, so that form would need
+;; a walk of the slot words instead of a dict; it is recorded in bugs.md
+;; rather than guessed at.  Nothing in lib/ asks -- copy reaches for
+;; __reduce_ex__, which still raises.
+OGS_FRAME equ 16            ; + 0 pushes = 16, 16-aligned
+global object_method_getstate
+DEF_FUNC object_method_getstate, OGS_FRAME
+    cmp rsi, 1
+    jne .ogs_bad
+    mov rdi, [rdi]
+    V_TEST_PTR rdi, rax
+    ja .ogs_none
+    test rdi, rdi
+    jz .ogs_none
+    LOAD_INST_DICT rax, rdi, .ogs_none
+    test rax, rax
+    jz .ogs_none
+    cmp qword [rax + PyDictObject.ob_size], 0
+    je .ogs_none                ; an empty dict is None, as CPython has it
+    INCREF rax
+    mov edx, TAG_PTR
+    leave
+    V_PACK rax, rdx
+    ret
+.ogs_none:
+    lea rax, [rel none_singleton]
+    INCREF rax
+    mov edx, TAG_PTR
+    leave
+    V_PACK rax, rdx
+    ret
+.ogs_bad:
+    RAISE exc_TypeError_type, "__getstate__() takes no arguments"
+END_FUNC object_method_getstate
+
+;; object.__subclasshook__(cls, subclass) -> NotImplemented
+;;
+;; "I have no opinion", which is what the structural ABCs override and what
+;; abc_subclasscheck reads as "fall through to the MRO".  It has been looking
+;; for this name since it was written and silently finding nothing.
+global object_method_subclasshook
+DEF_FUNC object_method_subclasshook
+    lea rax, [rel notimpl_singleton]
+    INCREF rax
+    mov edx, TAG_PTR
+    leave
+    V_PACK rax, rdx
+    ret
+END_FUNC object_method_subclasshook
+
+;; --- the container operators, by name ------------------------------------
+;; hasattr(list, "__add__") was False, and so was every other one of these:
+;; the slot was there and the name was not, so `operator`-style code and
+;; anything that duck-types on a dunder could not see them.
+;;
+;; The split is CPython's own.  A sequence slot RAISES for an operand it
+;; refuses, so those get the thunk; an nb_ slot declines with NULL and has to
+;; answer NotImplemented, so those get the DEF_DUNDER_BINARY shape.
+DEF_SEQ_DUNDER  list, add,   list_concat
+DEF_SEQ_DUNDER  list, mul,   list_repeat
+DEF_SEQ_RDUNDER list, rmul,  list_repeat
+DEF_SEQ_DUNDER  list, imul,  list_inplace_repeat
+
+DEF_SEQ_DUNDER  str, add,      str_concat
+DEF_SEQ_DUNDER  str, mul,      str_repeat
+DEF_SEQ_RDUNDER str, rmul,     str_repeat
+DEF_SEQ_DUNDER  str, mod,      str_mod
+DEF_SEQ_DUNDER  str, getitem,  str_subscript
+
+DEF_SEQ_DUNDER  bytes, add,     bytes_concat
+DEF_SEQ_DUNDER  bytes, mul,     bytes_repeat
+DEF_SEQ_RDUNDER bytes, rmul,    bytes_repeat
+DEF_SEQ_DUNDER  bytes, mod,     bytes_mod
+DEF_SEQ_DUNDER  bytes, getitem, bytes_subscript
+
+DEF_SEQ_DUNDER  bytearray, add,   bytearray_concat
+DEF_SEQ_DUNDER  bytearray, mul,   bytearray_repeat
+DEF_SEQ_RDUNDER bytearray, rmul,  bytearray_repeat
+DEF_SEQ_DUNDER  bytearray, iadd,  bytearray_inplace_concat
+DEF_SEQ_DUNDER  bytearray, imul,  bytearray_inplace_repeat
+DEF_SEQ_DUNDER  bytearray, mod,   bytearray_mod
+
+;; The reflected `%` forms answer NotImplemented for anything that is not a
+;; str (or bytes), rather than reading it as one.
+DEF_DUNDER_BINARY str,       rmod, nb_remainder, 1, dunder_operand_is_str
+DEF_DUNDER_BINARY bytes,     rmod, nb_remainder, 1, dunder_operand_is_bytes
+DEF_DUNDER_BINARY bytearray, rmod, nb_remainder, 1, dunder_operand_is_bytes
+
+;; dict and set decline through their slots, so the operand check has nothing
+;; left to do.
+DEF_DUNDER_BINARY dict, or,  nb_or, 0, dunder_operand_any
+DEF_DUNDER_BINARY dict, ror, nb_or, 1, dunder_operand_any
+DEF_SEQ_DUNDER    dict, ior, dict_nb_ior
+
+DEF_DUNDER_BINARY set, sub,  nb_subtract, 0, dunder_operand_any, frozenset_type
+DEF_DUNDER_BINARY set, rsub, nb_subtract, 1, dunder_operand_any, frozenset_type
+DEF_DUNDER_BINARY set, and,  nb_and,      0, dunder_operand_any, frozenset_type
+DEF_DUNDER_BINARY set, rand, nb_and,      1, dunder_operand_any, frozenset_type
+DEF_DUNDER_BINARY set, xor,  nb_xor,      0, dunder_operand_any, frozenset_type
+DEF_DUNDER_BINARY set, rxor, nb_xor,      1, dunder_operand_any, frozenset_type
+DEF_DUNDER_BINARY set, or,   nb_or,       0, dunder_operand_any, frozenset_type
+DEF_DUNDER_BINARY set, ror,  nb_or,       1, dunder_operand_any, frozenset_type
+
+;; int's nb_bool takes the (payload, tag) pair rather than a Value -- it hands
+;; the pair straight to int_unwrap -- so it cannot go through the macro.
+DEF_FUNC int_dunder_bool
+    REQUIRE_SELF int_type
+    cmp rsi, 1
+    jne .idb_bad
+    mov rdi, [rdi]
+    V_UNPACK rdi, rdx
+    extern int_bool
+    call int_bool
+    test eax, eax
+    jz .idb_false
+    lea rax, [rel bool_true]
+    INCREF rax
+    leave
+    ret
+.idb_false:
+    lea rax, [rel bool_false]
+    INCREF rax
+    leave
+    ret
+.idb_bad:
+    RAISE exc_TypeError_type, "expected exactly one argument"
+END_FUNC int_dunder_bool
 
 DEF_DUNDER_STRREPR str, str
 DEF_DUNDER_STRREPR str, repr
@@ -529,6 +1193,41 @@ DEF_DUNDER_STRREPR complex, repr
 ;; addresses here made `a.__eq__(b)` return NotImplemented for two equal tuples.
 ;; CPython's constant folding shares one empty tuple, which hid it from every
 ;; test that spelled the operands out.
+
+;; ============================================================================
+;; object.__lt__ / __le__ / __gt__ / __ge__ -> NotImplemented, always
+;;
+;; CPython has all four, and they exist so that a class can call up to them
+;; and so that dir(object) is complete.  They were left out here because a
+;; builtin subclass looks __lt__ up in its MRO and would find object's
+;; NotImplemented before reaching the base type's own comparison -- which is
+;; exactly the problem type_install_slots' owner test solves: the dunder was
+;; supplied by a type that is not a heaptype, so no wrapper is installed over
+;; it and the subclass keeps its base's real slot.  That is what makes these
+;; four safe -- `sorted([L([2]), L([1])])` on a list subclass still sorts by
+;; contents.
+;; ============================================================================
+%macro DEF_OBJECT_ORDERING 1
+DEF_FUNC object_method_%1
+    cmp rsi, 2
+    jne %%bad
+    extern notimpl_singleton
+    lea rax, [rel notimpl_singleton]
+    INCREF rax
+    mov edx, TAG_PTR
+    leave
+    V_PACK rax, rdx
+    ret
+%%bad:
+    RAISE exc_TypeError_type, "expected exactly one argument"
+END_FUNC object_method_%1
+%endmacro
+
+DEF_OBJECT_ORDERING lt
+DEF_OBJECT_ORDERING le
+DEF_OBJECT_ORDERING gt
+DEF_OBJECT_ORDERING ge
+
 DEF_FUNC object_method_eq
     cmp rsi, 2
     jne .ome_error

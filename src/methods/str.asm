@@ -56,41 +56,14 @@ section .text
 ;; args[0] = self (PyStrObject*)
 ;; ============================================================================
 DEF_FUNC str_method_upper
-    push rbx
-    push r12
-    push r13
-
-    mov rax, [rdi]          ; self = args[0]
-    mov rbx, rax            ; rbx = self
-    mov r12, [rbx + PyStrObject.ob_size]  ; r12 = length
-
-    ; Create new string: str_new(data, len)
-    lea rdi, [rbx + PyStrObject.data]
-    mov rsi, r12
-    call str_new_heap
-    mov r13, rax            ; r13 = new string
-
-    ; Convert each byte to uppercase in-place
-    xor ecx, ecx
-.upper_loop:
-    cmp rcx, r12
-    jge .upper_done
-    movzx eax, byte [r13 + PyStrObject.data + rcx]
-    cmp al, 'a'
-    jb .upper_next
-    cmp al, 'z'
-    ja .upper_next
-    sub al, 32             ; 'a'-'A' = 32
-    mov [r13 + PyStrObject.data + rcx], al
-.upper_next:
-    inc rcx
-    jmp .upper_loop
-.upper_done:
-    mov rax, r13
+    ; The whole of it is str_case_map in methods/str_case.asm: the six differ
+    ; only in which of the four Unicode mappings each character takes.
+    mov rax, [rdi]
+    mov rdi, rax
+    mov esi, 0
+    extern str_case_map
+    call str_case_map
     mov edx, TAG_PTR
-    pop r13
-    pop r12
-    pop rbx
     leave
     V_PACK rax, rdx             ; builtins return one Value
     ret
@@ -100,39 +73,14 @@ END_FUNC str_method_upper
 ;; str_method_lower(args, nargs) -> new lowercase string
 ;; ============================================================================
 DEF_FUNC str_method_lower
-    push rbx
-    push r12
-    push r13
-
-    mov rax, [rdi]          ; self
-    mov rbx, rax
-    mov r12, [rbx + PyStrObject.ob_size]
-
-    lea rdi, [rbx + PyStrObject.data]
-    mov rsi, r12
-    call str_new_heap
-    mov r13, rax
-
-    xor ecx, ecx
-.lower_loop:
-    cmp rcx, r12
-    jge .lower_done
-    movzx eax, byte [r13 + PyStrObject.data + rcx]
-    cmp al, 'A'
-    jb .lower_next
-    cmp al, 'Z'
-    ja .lower_next
-    add al, 32
-    mov [r13 + PyStrObject.data + rcx], al
-.lower_next:
-    inc rcx
-    jmp .lower_loop
-.lower_done:
-    mov rax, r13
+    ; The whole of it is str_case_map in methods/str_case.asm: the six differ
+    ; only in which of the four Unicode mappings each character takes.
+    mov rax, [rdi]
+    mov rdi, rax
+    mov esi, 1
+    extern str_case_map
+    call str_case_map
     mov edx, TAG_PTR
-    pop r13
-    pop r12
-    pop rbx
     leave
     V_PACK rax, rdx             ; builtins return one Value
     ret
@@ -1707,7 +1655,7 @@ DEF_FUNC str_method_format, SF_FRAME
     mov r8, [rbp - SF_FEND]
     sub r8, [rbp - SF_FSTART]
     lea r9, [rbp - SF_AUTO]
-    call fm_resolve_field
+    call fm_resolve_full
     mov [rbp - SF_VALUE], rax
 
     ; !r and !a render the repr; !s the str.  Anything else is left alone.
@@ -1743,8 +1691,24 @@ DEF_FUNC str_method_format, SF_FRAME
     mov rsi, rcx
     call str_new_heap
     push rax
+    ; A spec can hold fields of its own -- "{:{}}" and "{:>{width}}" -- and
+    ; they are formatted with the same arguments before the spec is applied.
+    ; The scanner already counts braces to find the end of the spec; nothing
+    ; substituted them, so format_apply_spec was handed "{}" and rejected it.
+    mov rdi, rax
+    mov rsi, [rbp - SF_ARGS]
+    mov rdx, [rbp - SF_NPOS]
+    mov rcx, [rbp - SF_KWN]
+    lea r8, [rbp - SF_AUTO]
+    call fm_expand_spec
+    test rax, rax
+    jz .fm_spec_plain
+    mov rdi, [rsp]
+    mov [rsp], rax              ; the expansion is what gets released
+    call obj_decref
+.fm_spec_plain:
     mov rdi, [rbp - SF_VALUE]
-    mov rsi, rax
+    mov rsi, [rsp]
     extern format_apply_spec
     call format_apply_spec
     mov r14, rax
@@ -1895,6 +1859,366 @@ DEF_FUNC_LOCAL fm_resolve_field, RF_FRAME
     RAISE exc_KeyError_type, "format() got no such keyword argument"
 END_FUNC fm_resolve_field
 
+;; ============================================================================
+;; fm_resolve_full(rdi = args, rsi = npos, rdx = kw_names or 0,
+;;                 rcx = field bytes, r8 = field length, r9 = &auto counter)
+;;   -> rax = the object the field names, a new reference
+;;
+;; The field id, then the `.name` and `[key]` suffixes CPython allows after it:
+;; "{0.attr}", "{0[key]}", "{name.a[0].b}".  fm_resolve_field saw the whole
+;; text as one name and raised KeyError for any of them; the scanner above
+;; already counts bracket depth so that a ':' inside [] is not a spec, so the
+;; text arrived here intact and unread.
+;; ============================================================================
+FRF_ARGS  equ 8
+FRF_NPOS  equ 16
+FRF_KWN   equ 24
+FRF_NAME  equ 32
+FRF_LEN   equ 40
+FRF_AUTO  equ 48
+FRF_POS   equ 56
+FRF_START equ 64
+FRF_FRAME equ 80            ; + 2 pushes = 96, 16-aligned
+
+extern exc_AttributeError_type
+DEF_FUNC_LOCAL fm_resolve_full, FRF_FRAME
+    push rbx
+    push r12
+    mov [rbp - FRF_ARGS], rdi
+    mov [rbp - FRF_NPOS], rsi
+    mov [rbp - FRF_KWN], rdx
+    mov [rbp - FRF_NAME], rcx
+    mov [rbp - FRF_LEN], r8
+    mov [rbp - FRF_AUTO], r9
+
+    ; The field id runs to the first '.' or '['.
+    xor ecx, ecx
+.frf_scan:
+    cmp rcx, [rbp - FRF_LEN]
+    jge .frf_base
+    mov rdx, [rbp - FRF_NAME]
+    movzx eax, byte [rdx + rcx]
+    cmp al, '.'
+    je .frf_base
+    cmp al, '['
+    je .frf_base
+    inc rcx
+    jmp .frf_scan
+.frf_base:
+    mov [rbp - FRF_POS], rcx
+    mov rdi, [rbp - FRF_ARGS]
+    mov rsi, [rbp - FRF_NPOS]
+    mov rdx, [rbp - FRF_KWN]
+    mov r8, rcx
+    mov rcx, [rbp - FRF_NAME]
+    mov r9, [rbp - FRF_AUTO]
+    call fm_resolve_field
+
+    ; The suffixes, if any, are the same walk format_map needs.
+    mov rdi, rax
+    mov rsi, [rbp - FRF_NAME]
+    mov rdx, [rbp - FRF_LEN]
+    mov rcx, [rbp - FRF_POS]
+    call fm_apply_suffix
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC fm_resolve_full
+
+;; ============================================================================
+;; fm_apply_suffix(rdi = the object so far (owned), rsi = field bytes,
+;;                 rdx = field length, rcx = where the suffixes start)
+;;   -> rax = the object the chain names, a new reference
+;;
+;; ".name" and "[key]", repeated: "{0.a[1].b}".  Shared by format() and
+;; format_map(), which parse the field id differently and the suffix the same.
+;; ============================================================================
+DEF_FUNC_LOCAL fm_apply_suffix, FRF_FRAME
+    push rbx
+    push r12
+    mov rbx, rdi
+    mov [rbp - FRF_NAME], rsi
+    mov [rbp - FRF_LEN], rdx
+    mov [rbp - FRF_POS], rcx
+
+.frf_suffix:
+    mov rcx, [rbp - FRF_POS]
+    cmp rcx, [rbp - FRF_LEN]
+    jge .frf_done
+    mov rdx, [rbp - FRF_NAME]
+    movzx eax, byte [rdx + rcx]
+    inc rcx
+    mov [rbp - FRF_POS], rcx
+    cmp al, '.'
+    je .frf_attr
+    cmp al, '['
+    je .frf_item
+    jmp .frf_done
+
+.frf_attr:
+    mov rax, [rbp - FRF_POS]
+    mov [rbp - FRF_START], rax
+.frf_attr_scan:
+    mov rcx, [rbp - FRF_POS]
+    cmp rcx, [rbp - FRF_LEN]
+    jge .frf_attr_end
+    mov rdx, [rbp - FRF_NAME]
+    movzx eax, byte [rdx + rcx]
+    cmp al, '.'
+    je .frf_attr_end
+    cmp al, '['
+    je .frf_attr_end
+    inc qword [rbp - FRF_POS]
+    jmp .frf_attr_scan
+.frf_attr_end:
+    mov rdi, [rbp - FRF_NAME]
+    add rdi, [rbp - FRF_START]
+    mov rsi, [rbp - FRF_POS]
+    sub rsi, [rbp - FRF_START]
+    call str_new_heap
+    mov r12, rax
+    mov rdi, rbx
+    mov rsi, r12
+    extern obj_getattr_opt
+    call obj_getattr_opt
+    push rax
+    mov rdi, r12
+    call obj_decref
+    pop rax
+    test rax, rax
+    jz .frf_no_attr
+    DECREF_V rbx, rcx
+    mov rbx, rax
+    jmp .frf_suffix
+
+.frf_item:
+    mov rax, [rbp - FRF_POS]
+    mov [rbp - FRF_START], rax
+.frf_item_scan:
+    mov rcx, [rbp - FRF_POS]
+    cmp rcx, [rbp - FRF_LEN]
+    jge .frf_bad_item
+    mov rdx, [rbp - FRF_NAME]
+    movzx eax, byte [rdx + rcx]
+    cmp al, ']'
+    je .frf_item_end
+    inc qword [rbp - FRF_POS]
+    jmp .frf_item_scan
+.frf_item_end:
+    ; All digits is an integer key, anything else a string one -- CPython's
+    ; rule, which is why "{0[key]}" needs no quotes.
+    mov rcx, [rbp - FRF_START]
+    mov r12, [rbp - FRF_POS]
+    cmp rcx, r12
+    je .frf_key_str
+    xor r8d, r8d                ; the parsed index
+.frf_key_digits:
+    cmp rcx, r12
+    jge .frf_key_int
+    mov rdx, [rbp - FRF_NAME]
+    movzx eax, byte [rdx + rcx]
+    cmp al, '0'
+    jb .frf_key_str
+    cmp al, '9'
+    ja .frf_key_str
+    imul r8, r8, 10
+    sub eax, '0'
+    add r8, rax
+    inc rcx
+    jmp .frf_key_digits
+.frf_key_int:
+    mov rax, r8
+    V_PACK_I64 rax, rcx
+    mov r12, rax
+    jmp .frf_have_key
+.frf_key_str:
+    mov rdi, [rbp - FRF_NAME]
+    add rdi, [rbp - FRF_START]
+    mov rsi, [rbp - FRF_POS]
+    sub rsi, [rbp - FRF_START]
+    call str_new_heap
+    mov r12, rax
+.frf_have_key:
+    inc qword [rbp - FRF_POS]   ; past the ']'
+    mov rdi, rbx
+    mov rsi, r12
+    call fm_subscript
+    push rax
+    DECREF_V r12, rcx
+    pop rax
+    cmp rax, -1
+    je .frf_not_subscriptable
+    test rax, rax
+    jz .frf_bad_item
+    DECREF_V rbx, rcx
+    mov rbx, rax
+    jmp .frf_suffix
+
+.frf_done:
+    mov rax, rbx
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.frf_no_attr:
+    RAISE exc_AttributeError_type, "no such attribute in a format field"
+.frf_not_subscriptable:
+    RAISE exc_TypeError_type, "object is not subscriptable"
+.frf_bad_item:
+    RAISE exc_KeyError_type, "no such item in a format field"
+END_FUNC fm_apply_suffix
+
+;; ============================================================================
+;; fm_subscript(rdi = the object, rsi = the key Value) -> rax = Value, or 0
+;; A "{0[k]}" lookup: the mapping protocol when the object has one, and
+;; nothing otherwise.
+;; ============================================================================
+DEF_FUNC_LOCAL fm_subscript
+    V_TEST_PTR rdi, rax
+    ja .fms_no_protocol
+    mov rax, [rdi + PyObject.ob_type]
+    mov rax, [rax + PyTypeObject.tp_as_mapping]
+    test rax, rax
+    jz .fms_no_protocol
+    mov rax, [rax + PyMappingMethods.mp_subscript]
+    test rax, rax
+    jz .fms_no_protocol
+    call rax
+    leave
+    ret
+.fms_no_protocol:
+    ; -1, not 0: "this object cannot be subscripted at all" is a TypeError in
+    ; CPython and "no such key" is a KeyError.
+    mov rax, -1
+    leave
+    ret
+END_FUNC fm_subscript
+
+;; ============================================================================
+;; fm_expand_spec(rdi = the spec str, rsi = args, rdx = npos, rcx = kw_names,
+;;                r8 = &auto counter) -> rax = a new str, or 0 when the spec
+;; holds no fields at all and can be used as it stands.
+;;
+;; "{:{}}" and "{:>{width}}": the spec is itself a format string, formatted
+;; with the same arguments one level down.
+;; ============================================================================
+FES_SPEC  equ 8
+FES_ARGS  equ 16
+FES_NPOS  equ 24
+FES_KWN   equ 32
+FES_AUTO  equ 40
+FES_POS   equ 48
+FES_START equ 56
+FES_STATE equ 80            ; {buf, used, cap} for fmtbuf_append
+FES_FRAME equ 96            ; + 2 pushes = 112, 16-aligned
+
+DEF_FUNC_LOCAL fm_expand_spec, FES_FRAME
+    push rbx
+    push r12
+    mov [rbp - FES_SPEC], rdi
+    mov [rbp - FES_ARGS], rsi
+    mov [rbp - FES_NPOS], rdx
+    mov [rbp - FES_KWN], rcx
+    mov [rbp - FES_AUTO], r8
+
+    ; Nothing to do unless there is a brace.
+    mov rbx, rdi
+    mov r12, [rbx + PyStrObject.ob_size]
+    xor ecx, ecx
+.fes_look:
+    cmp rcx, r12
+    jge .fes_nothing
+    cmp byte [rbx + PyStrObject.data + rcx], '{'
+    je .fes_build
+    inc rcx
+    jmp .fes_look
+.fes_nothing:
+    xor eax, eax
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.fes_build:
+    mov qword [rbp - FES_STATE], 0
+    mov qword [rbp - FES_STATE + 8], 0
+    mov qword [rbp - FES_STATE + 16], 0
+    mov qword [rbp - FES_POS], 0
+.fes_loop:
+    mov rcx, [rbp - FES_POS]
+    cmp rcx, r12
+    jge .fes_finish
+    movzx eax, byte [rbx + PyStrObject.data + rcx]
+    cmp al, '{'
+    je .fes_field
+    inc qword [rbp - FES_POS]
+    lea rdi, [rbp - FES_STATE]
+    lea rsi, [rbx + PyStrObject.data + rcx]
+    mov rdx, 1
+    call fmtbuf_append
+    jmp .fes_loop
+
+.fes_field:
+    inc rcx
+    mov [rbp - FES_START], rcx
+.fes_field_scan:
+    cmp rcx, r12
+    jge .fes_unterminated
+    cmp byte [rbx + PyStrObject.data + rcx], '}'
+    je .fes_field_end
+    inc rcx
+    jmp .fes_field_scan
+.fes_field_end:
+    mov [rbp - FES_POS], rcx
+    mov rdi, [rbp - FES_ARGS]
+    mov rsi, [rbp - FES_NPOS]
+    mov rdx, [rbp - FES_KWN]
+    lea rcx, [rbx + PyStrObject.data]
+    add rcx, [rbp - FES_START]
+    mov r8, [rbp - FES_POS]
+    sub r8, [rbp - FES_START]
+    mov r9, [rbp - FES_AUTO]
+    call fm_resolve_full
+    push rax
+    mov rdi, rax
+    call obj_str
+    mov r12, rax
+    pop rdi
+    DECREF_V rdi, rcx
+    mov r12, r12
+    lea rdi, [rbp - FES_STATE]
+    lea rsi, [r12 + PyStrObject.data]
+    mov rdx, [r12 + PyStrObject.ob_size]
+    call fmtbuf_append
+    mov rdi, r12
+    call obj_decref
+    mov r12, [rbx + PyStrObject.ob_size]
+    inc qword [rbp - FES_POS]   ; past the '}'
+    jmp .fes_loop
+
+.fes_finish:
+    mov rdi, [rbp - FES_STATE]
+    mov rsi, [rbp - FES_STATE + 8]
+    call str_new_heap
+    push rax
+    mov rdi, [rbp - FES_STATE]
+    test rdi, rdi
+    jz .fes_out
+    extern ap_free
+    call ap_free
+.fes_out:
+    pop rax
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.fes_unterminated:
+    RAISE exc_ValueError_type, "unmatched '{' in format spec"
+END_FUNC fm_expand_spec
+
 ;; fm_name_equals(rdi = NUL-terminated name, rsi = bytes, rdx = length) -> eax
 DEF_FUNC_LOCAL fm_name_equals
     xor ecx, ecx
@@ -2000,17 +2324,40 @@ DEF_FUNC str_method_format_map, FM_FRAME
     inc ecx
     jmp .fmap_key_scan
 
+.fmap_base_scan:
+    ; The key ends at the first '.' or '[': what follows is the suffix chain
+    ; fm_apply_suffix walks, exactly as it does for format().
+    cmp esi, ecx
+    jge .fmap_base_done
+    movzx eax, byte [r12 + rsi]
+    cmp al, '.'
+    je .fmap_base_done
+    cmp al, '['
+    je .fmap_base_done
+    inc esi
+    jmp .fmap_base_scan
+.fmap_base_done:
+    ret
+
+.fmap_key_error:
+    RAISE exc_KeyError_type, "format_map() got no such key"
+
 .fmap_have_key:
-    ; Key is from r14 to ecx (exclusive)
+    ; Key is from r14 to ecx (exclusive); the base key stops at the first
+    ; '.' or '[' within that.
+    push rcx
+    mov esi, r14d
+    call .fmap_base_scan        ; esi = the end of the base key
+    mov r15d, esi               ; where the suffixes start
+    pop rcx
     push rcx
     inc ecx                     ; skip '}'
     push rcx                    ; save next source pos
 
     ; Create key string
     lea rdi, [r12 + r14]
-    mov esi, ecx
-    dec esi
-    sub esi, r14d               ; key length
+    mov esi, r15d
+    sub esi, r14d               ; base key length
     movzx esi, si               ; zero-extend
     call str_new_heap
     push rax                    ; save key str
@@ -2020,6 +2367,10 @@ DEF_FUNC str_method_format_map, FM_FRAME
     mov rsi, rax
     call dict_get
     V_UNPACK rax, rdx           ; dict_get returns a Value
+    ; A miss answers a NULL Value.  Nothing checked, and obj_str below then
+    ; dereferenced it: every missing key was a segfault rather than a KeyError.
+    test edx, edx
+    jz .fmap_key_error
     ; rax = value payload, edx = value tag
     push rax
     push rdx
@@ -2032,7 +2383,29 @@ DEF_FUNC str_method_format_map, FM_FRAME
     pop rsi                     ; value tag
     pop rdi                     ; value payload
     V_PACK rdi, rsi
+    ; The suffixes, when the field had any.  dict_get answered a borrowed
+    ; reference, so it is INCREF'd first and fm_apply_suffix owns it.
+    mov rax, [rsp + 16]         ; the '}' position: key, next, '}' on the stack
+    cmp r15d, eax
+    jge .fmap_no_suffix
+    push rdi
+    INCREF_V rdi, rcx
+    pop rdi
+    mov rsi, r12
+    mov edx, eax
+    mov ecx, r15d
+    push rax
+    call fm_apply_suffix
+    pop rcx
+    push rax
+    mov rdi, rax
     call obj_str
+    pop rdi
+    DECREF_V rdi, rcx
+    jmp .fmap_have_text
+.fmap_no_suffix:
+    call obj_str
+.fmap_have_text:
     ; rax = result payload, edx = tag
     push rax                    ; save str obj for DECREF
 

@@ -226,12 +226,44 @@ DEF_FUNC builtin_divmod
     mov r12, [rdi + 8]          ; args[1] = b
     V_UNPACK r12, r14
 
+    ; nb_divmod first, where the type has one.  Building the pair out of //
+    ; and % is only a stand-in for types that do not define __divmod__, and
+    ; it answered ('floordiv', 'mod') for a class that did -- calling two
+    ; methods the program had written for other operators and never the one
+    ; it had written for this.  No builtin here fills nb_divmod, so this arm
+    ; exists for classes, which reach it through the slot wrapper.
+    mov rdi, rbx
+    mov edx, r13d
+    extern value_number_methods
+    call value_number_methods
+    test rax, rax
+    jz .divmod_type_error
+    mov rax, [rax + PyNumberMethods.nb_divmod]
+    test rax, rax
+    jz .divmod_no_slot
+    mov rdi, rbx
+    mov edx, r13d
+    mov rsi, r12
+    mov ecx, r14d
+    V_PACK rdi, rdx
+    V_PACK rsi, rcx
+    call rax
+    test rax, rax
+    jz .divmod_no_slot          ; declined: fall back to // and %
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.divmod_no_slot:
     ; Dispatch through the left operand's numeric protocol, the way the //
     ; and % operators do.  This used to call int_floordiv unconditionally,
     ; so divmod(1.5, 1.5) handed raw f64 bits to integer code.
     mov rdi, rbx
     mov edx, r13d
-    extern value_number_methods
     call value_number_methods
     test rax, rax
     jz .divmod_type_error
@@ -596,17 +628,16 @@ DEF_FUNC builtin_int_fn, BI_FRAME
 .int_from_inline_float:
     ; A float immediate — delegate to float_int for the NaN/inf checks
     mov rdi, rbx
-    V_TO_F64 rdi
     call float_int
+    V_UNPACK rax, rdx           ; .int_ret hands back the pair, not the Value
     jmp .int_ret
 
 .int_from_float:
-    ; A float subclass instance: the double is inline, at the base's offset.
-    ; Exact float never arrives here -- a float is an immediate, so no pointer
-    ; ever has float_type -- which is why this arm read the pointer as bits
-    ; unnoticed until float had a subclass.
-    mov rdi, [rbx + PyFloatObject.value]
+    ; A float subclass instance.  float_int unboxes one itself now, so the
+    ; Value goes straight in; this arm used to read the double out by hand.
+    mov rdi, rbx
     call float_int
+    V_UNPACK rax, rdx
     jmp .int_ret
 
 .int_from_str:

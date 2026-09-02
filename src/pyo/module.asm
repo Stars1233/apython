@@ -80,6 +80,21 @@ DEF_FUNC module_new
     call obj_decref
     pop rax
 
+    ; __doc__ = None, which is what a module without a docstring has.  It was
+    ; simply absent, so reading __doc__ at module level was a NameError -- and
+    ; the module body's own STORE_NAME overwrites this when there is one.
+    push rax
+    lea rdi, [rel mod_doc_key]
+    call str_from_cstr_heap
+    push rax
+    mov rdi, r12
+    mov rsi, rax
+    lea rdx, [rel none_singleton]
+    call dict_set
+    pop rdi
+    call obj_decref
+    pop rax
+
     push rax
     mov rdi, rax
     call gc_track
@@ -213,6 +228,7 @@ END_FUNC module_repr
 section .rodata
 
 mod_name_key: db "__name__", 0
+mod_doc_key: db "__doc__", 0
 module_repr_str: db "<module>", 0
 module_type_name: db "module", 0
 ma_dunder_dict: db "__dict__", 0

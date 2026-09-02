@@ -81,6 +81,46 @@ extern frozenset_type
 extern int_dunder_repr
 extern list_dunder_iter
 extern set_dunder_iter
+extern frozenset_dunder_hash
+extern list_dunder_add
+extern list_dunder_mul
+extern list_dunder_rmul
+extern list_dunder_imul
+extern str_dunder_add
+extern str_dunder_mul
+extern str_dunder_rmul
+extern str_dunder_mod
+extern str_dunder_rmod
+extern str_dunder_getitem
+extern bytes_dunder_add
+extern bytes_dunder_mul
+extern bytes_dunder_rmul
+extern bytes_dunder_mod
+extern bytes_dunder_rmod
+extern bytes_dunder_getitem
+extern bytearray_dunder_add
+extern bytearray_dunder_mul
+extern bytearray_dunder_rmul
+extern bytearray_dunder_iadd
+extern bytearray_dunder_imul
+extern bytearray_dunder_mod
+extern bytearray_dunder_rmod
+extern dict_dunder_or
+extern dict_dunder_ror
+extern dict_dunder_ior
+extern set_dunder_sub
+extern set_dunder_and
+extern set_dunder_xor
+extern set_dunder_or
+extern set_dunder_rsub
+extern set_dunder_rand
+extern set_dunder_rxor
+extern set_dunder_ror
+extern object_method_setattr
+extern object_method_delattr
+extern object_method_getattribute
+extern object_method_getstate
+extern object_method_subclasshook
 extern set_dunder_len
 extern str_dunder_iter
 extern str_dunder_len
@@ -280,6 +320,56 @@ DEF_FUNC dict_add_builtin_func
 END_FUNC dict_add_builtin_func
 
 ;; ============================================================================
+;; HELPER: dict_add_getset(rdi = dict, rsi = name_cstr, rdx = getter,
+;;                         rcx = setter or 0)
+;;
+;; A named pair of C accessors in a type's dict -- CPython's PyGetSetDef.  This
+;; is what makes `int.real` answer a descriptor instead of raising, and what
+;; puts real/imag/numerator/denominator into dir().  The instance read still
+;; goes through each type's tp_getattr, which is faster and gets there first;
+;; both call the same getter.
+;; ============================================================================
+DEF_FUNC dict_add_getset
+    push rbx
+    push r12
+    push r13
+    push r14
+
+    mov rbx, rdi                ; dict
+    mov r12, rsi                ; name_cstr
+    mov r13, rdx                ; getter
+    mov r14, rcx                ; setter
+
+    mov rdi, r12
+    call str_from_cstr_heap
+    push rax                    ; the key, and the descriptor's own name
+
+    mov rdi, r13
+    mov rsi, r14
+    mov rdx, rax
+    extern getset_descr_new
+    call getset_descr_new
+    push rax
+
+    mov rdi, rbx
+    mov rsi, [rsp + 8]          ; key
+    mov rdx, rax                ; the descriptor
+    call dict_set
+
+    pop rdi
+    call obj_decref             ; dict_set took its own reference
+    pop rdi
+    call obj_decref             ; and getset_descr_new took one on the name
+
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC dict_add_getset
+
+;; ============================================================================
 ;; HELPER: add_method_to_dict_checked(dict, name_cstr, func_ptr, min_args, max_args)
 ;; rdi=dict, rsi=name_cstr, rdx=func_ptr, rcx=min_args, r8=max_args
 ;; Like dict_add_builtin_func but sets arg count bounds.
@@ -328,6 +418,62 @@ DEF_FUNC_LOCAL add_method_to_dict_checked
     leave
     ret
 END_FUNC add_method_to_dict_checked
+
+;; ============================================================================
+;; add_staticmethod(rdi = type dict, rsi = name cstr, rdx = function)
+;;
+;; A staticmethod is what keeps maketrans from being handed a self it does not
+;; want: bytes.maketrans(a, b) and b"".maketrans(a, b) must both see exactly
+;; two arguments.  str's maketrans was the only one of these and did it
+;; inline; three of them is enough to want one place.
+;; ============================================================================
+ASM_FUNC  equ 8
+ASM_SM    equ 16
+ASM_KEY   equ 24
+ASM_FRAME equ 40            ; + 3 pushes = 64
+
+DEF_FUNC_LOCAL add_staticmethod, ASM_FRAME
+    push rbx
+    push r12
+    push r13
+    mov rbx, rdi                ; the type dict
+    mov r12, rsi                ; the name
+    mov r13, rdx                ; the function
+
+    mov rdi, r13
+    mov rsi, r12
+    call builtin_func_new
+    mov [rbp - ASM_FUNC], rax
+
+    mov edi, PyStaticMethodObject_size
+    lea rsi, [rel staticmethod_type]
+    call gc_alloc
+    mov rcx, [rbp - ASM_FUNC]
+    mov [rax + PyStaticMethodObject.sm_callable], rcx
+    mov [rbp - ASM_SM], rax
+    mov rdi, rax
+    call gc_track
+
+    mov rdi, r12
+    call str_from_cstr_heap
+    mov [rbp - ASM_KEY], rax
+
+    mov rdi, rbx
+    mov rsi, rax
+    mov rdx, [rbp - ASM_SM]
+    call dict_set
+
+    mov rdi, [rbp - ASM_KEY]
+    call obj_decref
+    mov rdi, [rbp - ASM_SM]
+    call obj_decref
+
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC add_staticmethod
 
 ;; add_new_staticmethod(rdi = type dict, rsi = function) -- register `function`
 ;; as the type's __new__, wrapped so it is not bound to the instance.
@@ -425,6 +571,127 @@ END_FUNC add_class_getitem
 ;; methods_init()
 ;; Populate tp_dict for str_type, list_type, dict_type
 ;; ============================================================================
+;; ============================================================================
+;; set_add_shared_methods(rdi = a dict)
+;;
+;; The methods set and frozenset genuinely share: the ones that only read.
+;;
+;; The two used to share the whole dict -- one object stored into both types
+;; -- which handed frozenset every mutator as well.  None of those bodies
+;; inspects self, so they did not raise; they WORKED.  frozenset({1}).add(2)
+;; mutated the frozenset in place, and a frozenset is the one type that
+;; exists to be a dict key, so mutating one after it had been used as a key
+;; left the dict unable to find either the old key or the new.
+;; ============================================================================
+SASM_DICT  equ 8
+SASM_FRAME equ 16           ; + 0 pushes = 16, 16-aligned
+DEF_FUNC_LOCAL set_add_shared_methods, SASM_FRAME
+    mov [rbp - SASM_DICT], rdi
+
+    mov rdi, [rbp - SASM_DICT]
+    lea rsi, [rel mn_copy]
+    lea rdx, [rel set_method_copy]
+    call dict_add_builtin_func
+
+    mov rdi, [rbp - SASM_DICT]
+    lea rsi, [rel mn_union]
+    lea rdx, [rel set_method_union]
+    call dict_add_builtin_func
+
+    mov rdi, [rbp - SASM_DICT]
+    lea rsi, [rel mn_intersection]
+    lea rdx, [rel set_method_intersection]
+    call dict_add_builtin_func
+
+    mov rdi, [rbp - SASM_DICT]
+    lea rsi, [rel mn_difference]
+    lea rdx, [rel set_method_difference]
+    call dict_add_builtin_func
+
+    mov rdi, [rbp - SASM_DICT]
+    lea rsi, [rel mn_symmetric_difference]
+    lea rdx, [rel set_method_symmetric_difference]
+    call dict_add_builtin_func
+
+    mov rdi, [rbp - SASM_DICT]
+    lea rsi, [rel mn_issubset]
+    lea rdx, [rel set_method_issubset]
+    call dict_add_builtin_func
+
+    mov rdi, [rbp - SASM_DICT]
+    lea rsi, [rel mn_issuperset]
+    lea rdx, [rel set_method_issuperset]
+    call dict_add_builtin_func
+
+    mov rdi, [rbp - SASM_DICT]
+    lea rsi, [rel mn_isdisjoint]
+    lea rdx, [rel set_method_isdisjoint]
+    call dict_add_builtin_func
+
+    mov rdi, [rbp - SASM_DICT]
+    lea rsi, [rel mn___contains__]
+    lea rdx, [rel generic_method_contains]
+    call dict_add_builtin_func
+
+    mov rdi, [rbp - SASM_DICT]
+    lea rsi, [rel mn___len__]
+    lea rdx, [rel set_dunder_len]
+    call dict_add_builtin_func
+
+    mov rdi, [rbp - SASM_DICT]
+    lea rsi, [rel mn___iter__]
+    lea rdx, [rel set_dunder_iter]
+    call dict_add_builtin_func
+
+    ; __new__ allocates an empty instance of args[0], so it serves both.
+    mov rdi, [rbp - SASM_DICT]
+    lea rsi, [rel container_dunder_new]
+    call add_new_staticmethod
+
+    mov rdi, [rbp - SASM_DICT]
+    call add_class_getitem
+
+    ; The set operators, by name.  Both types hold the same slots, so both
+    ; get the same eight -- and CPython's frozenset really does carry the
+    ; reflected four as well: hasattr(frozenset, '__rsub__') is True there,
+    ; and frozenset({2}).__rsub__({1}) is frozenset({1}).
+    mov rdi, [rbp - SASM_DICT]
+    lea rsi, [rel mn___sub__]
+    lea rdx, [rel set_dunder_sub]
+    call dict_add_builtin_func
+    mov rdi, [rbp - SASM_DICT]
+    lea rsi, [rel mn___and__]
+    lea rdx, [rel set_dunder_and]
+    call dict_add_builtin_func
+    mov rdi, [rbp - SASM_DICT]
+    lea rsi, [rel mn___xor__]
+    lea rdx, [rel set_dunder_xor]
+    call dict_add_builtin_func
+    mov rdi, [rbp - SASM_DICT]
+    lea rsi, [rel mn___or__]
+    lea rdx, [rel set_dunder_or]
+    call dict_add_builtin_func
+    mov rdi, [rbp - SASM_DICT]
+    lea rsi, [rel mn___rsub__]
+    lea rdx, [rel set_dunder_rsub]
+    call dict_add_builtin_func
+    mov rdi, [rbp - SASM_DICT]
+    lea rsi, [rel mn___rand__]
+    lea rdx, [rel set_dunder_rand]
+    call dict_add_builtin_func
+    mov rdi, [rbp - SASM_DICT]
+    lea rsi, [rel mn___rxor__]
+    lea rdx, [rel set_dunder_rxor]
+    call dict_add_builtin_func
+    mov rdi, [rbp - SASM_DICT]
+    lea rsi, [rel mn___ror__]
+    lea rdx, [rel set_dunder_ror]
+    call dict_add_builtin_func
+
+    leave
+    ret
+END_FUNC set_add_shared_methods
+
 DEF_FUNC methods_init
     push rbx
     push r12
@@ -557,7 +824,8 @@ DEF_FUNC methods_init
 
     mov rdi, rbx
     lea rsi, [rel mn_isnumeric]
-    lea rdx, [rel str_method_isdecimal]
+    extern str_method_isnumeric
+    lea rdx, [rel str_method_isnumeric]
     call dict_add_builtin_func
 
     mov rdi, rbx
@@ -680,36 +948,10 @@ DEF_FUNC methods_init
     lea rdx, [rel str_method_format_map]
     call dict_add_builtin_func
 
-    ; Add maketrans as staticmethod
-    lea rdi, [rel str_staticmethod_maketrans]
-    lea rsi, [rel mn_maketrans]
-    call builtin_func_new
-    push rax
-
-    mov edi, PyStaticMethodObject_size
-    lea rsi, [rel staticmethod_type]
-    call gc_alloc
-    pop rcx
-    mov [rax + PyStaticMethodObject.sm_callable], rcx
-    push rax
-    mov rdi, rax
-    call gc_track
-    pop rax
-    push rax
-
-    lea rdi, [rel mn_maketrans]
-    call str_from_cstr_heap
-    push rax
-
     mov rdi, rbx
-    mov rsi, rax
-    mov rdx, [rsp + 8]
-    call dict_set
-
-    pop rdi
-    call obj_decref
-    pop rdi
-    call obj_decref
+    lea rsi, [rel mn_maketrans]
+    lea rdx, [rel str_staticmethod_maketrans]
+    call add_staticmethod
 
     ; Store dict in str_type.tp_dict
 
@@ -726,6 +968,36 @@ DEF_FUNC methods_init
     mov rdi, rbx
     lea rsi, [rel mn___format__]
     lea rdx, [rel builtin_method_format]
+    call dict_add_builtin_func
+
+    ; The operators, by name.
+    mov rdi, rbx
+    lea rsi, [rel mn___add__]
+    lea rdx, [rel str_dunder_add]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___mul__]
+    lea rdx, [rel str_dunder_mul]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___rmul__]
+    lea rdx, [rel str_dunder_rmul]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___mod__]
+    lea rdx, [rel str_dunder_mod]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___rmod__]
+    lea rdx, [rel str_dunder_rmod]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___getitem__]
+    lea rdx, [rel str_dunder_getitem]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___contains__]
+    lea rdx, [rel generic_method_contains]
     call dict_add_builtin_func
 
     lea rax, [rel str_type]
@@ -881,6 +1153,24 @@ DEF_FUNC methods_init
     lea rdx, [rel list_dunder_iter]
     call dict_add_builtin_func
 
+    ; The operators, by name.  The slots were there and the names were not.
+    mov rdi, rbx
+    lea rsi, [rel mn___add__]
+    lea rdx, [rel list_dunder_add]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___mul__]
+    lea rdx, [rel list_dunder_mul]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___rmul__]
+    lea rdx, [rel list_dunder_rmul]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___imul__]
+    lea rdx, [rel list_dunder_imul]
+    call dict_add_builtin_func
+
     lea rax, [rel list_type]
     mov [rax + PyTypeObject.tp_dict], rbx
 
@@ -1022,6 +1312,20 @@ DEF_FUNC methods_init
     lea rdx, [rel dict_dunder_iter]
     call dict_add_builtin_func
 
+    ; The union operators, by name.
+    mov rdi, rbx
+    lea rsi, [rel mn___or__]
+    lea rdx, [rel dict_dunder_or]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___ror__]
+    lea rdx, [rel dict_dunder_ror]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___ior__]
+    lea rdx, [rel dict_dunder_ior]
+    call dict_add_builtin_func
+
     lea rax, [rel dict_type]
     mov [rax + PyTypeObject.tp_dict], rbx
 
@@ -1135,46 +1439,6 @@ DEF_FUNC methods_init
     call dict_add_builtin_func
 
     mov rdi, rbx
-    lea rsi, [rel mn_copy]
-    lea rdx, [rel set_method_copy]
-    call dict_add_builtin_func
-
-    mov rdi, rbx
-    lea rsi, [rel mn_union]
-    lea rdx, [rel set_method_union]
-    call dict_add_builtin_func
-
-    mov rdi, rbx
-    lea rsi, [rel mn_intersection]
-    lea rdx, [rel set_method_intersection]
-    call dict_add_builtin_func
-
-    mov rdi, rbx
-    lea rsi, [rel mn_difference]
-    lea rdx, [rel set_method_difference]
-    call dict_add_builtin_func
-
-    mov rdi, rbx
-    lea rsi, [rel mn_symmetric_difference]
-    lea rdx, [rel set_method_symmetric_difference]
-    call dict_add_builtin_func
-
-    mov rdi, rbx
-    lea rsi, [rel mn_issubset]
-    lea rdx, [rel set_method_issubset]
-    call dict_add_builtin_func
-
-    mov rdi, rbx
-    lea rsi, [rel mn_issuperset]
-    lea rdx, [rel set_method_issuperset]
-    call dict_add_builtin_func
-
-    mov rdi, rbx
-    lea rsi, [rel mn_isdisjoint]
-    lea rdx, [rel set_method_isdisjoint]
-    call dict_add_builtin_func
-
-    mov rdi, rbx
     lea rsi, [rel mn_update]
     lea rdx, [rel set_method_update]
     call dict_add_builtin_func
@@ -1189,36 +1453,45 @@ DEF_FUNC methods_init
     call add_method_to_dict_checked
 
     mov rdi, rbx
-    lea rsi, [rel container_dunder_new]
-    call add_new_staticmethod
+    call set_add_shared_methods
 
-    mov rdi, rbx
-    call add_class_getitem
-
-    mov rdi, rbx
-    lea rsi, [rel mn___contains__]
-    lea rdx, [rel generic_method_contains]
-    call dict_add_builtin_func
-
-    ; Store in set_type.tp_dict, and in frozenset's: the two share every
-    ; method that does not mutate, and frozenset had no dict at all.
-
-    ; frozenset shares this dict, and set's slots, so one pair covers both.
-    mov rdi, rbx
-    lea rsi, [rel mn___len__]
-    lea rdx, [rel set_dunder_len]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___iter__]
-    lea rdx, [rel set_dunder_iter]
-    call dict_add_builtin_func
+    ; The reflected four are registered with the forward four, in the block
+    ; both types share.  __iand__ and __ior__ are deliberately absent -- set
+    ; has no nb_inplace_* slots here, so `s &= t` degrades to the binary
+    ; form, and a by-name __iand__ that did not mutate in place would be a
+    ; wrong answer rather than a missing name.
 
     lea rax, [rel set_type]
     mov [rax + PyTypeObject.tp_dict], rbx
+
+    ;; --- frozenset methods ---
+    ; Its own dict, holding only what reads.  It used to be set's dict, the
+    ; same object stored into both types, so frozenset carried add, remove,
+    ; discard, pop, clear and update -- and those bodies do not inspect self,
+    ; so they did not raise, they worked.  frozenset({1}).add(2) mutated the
+    ; frozenset.
+    ;
+    ; It has no __init__ either: CPython's has none, and a subclass is filled
+    ; by frozenset_type_call through type_call's tp_new path before __init__
+    ; is ever looked up.
+    call dict_new
+    mov rbx, rax
+
+    mov rdi, rbx
+    call set_add_shared_methods
+
+    ; frozenset.__hash__ names frozenset's OWN hash.  With no entry here the
+    ; lookup walked the MRO to object's, which answers the address -- so
+    ; frozenset.__hash__(f) and hash(f) disagreed on the one type that exists
+    ; to be a dict key.  It cannot go through obj_hash either: that reads
+    ; tp_hash, and a subclass defining __hash__ would re-enter itself.
+    mov rdi, rbx
+    lea rsi, [rel mn___hash__]
+    lea rdx, [rel frozenset_dunder_hash]
+    call dict_add_builtin_func
+
     lea rax, [rel frozenset_type]
     mov [rax + PyTypeObject.tp_dict], rbx
-    mov rdi, rbx
-    call obj_incref
 
     ;; --- weakref methods ---
     ; weakref.py binds ref.__hash__ and ref.__eq__ into its subclasses at
@@ -1370,15 +1643,81 @@ DEF_FUNC methods_init
     lea rsi, [rel mn___ne__]
     lea rdx, [rel object_method_ne]
     call dict_add_builtin_func
-    ; Not the ordering four: a builtin subclass looks __lt__ up in its MRO
-    ; and would find object's NotImplemented before reaching the base type's
-    ; own comparison, so `sorted([L([2]), L([1])])` on a list subclass would
-    ; stop working.  CPython reaches those through slot wrappers this does
-    ; not have yet.
     mov rdi, rbx
     lea rsi, [rel mn___hash__]
     lea rdx, [rel object_method_hash]
     call dict_add_builtin_func
+
+    ; The ordering four, which answer NotImplemented.  They are safe for the
+    ; same reason __eq__ is: type_install_slots installs no wrapper over a
+    ; dunder that came from a type which is not a heaptype, and object is
+    ; not, so a builtin subclass keeps its base's comparison rather than
+    ; object's.
+    mov rdi, rbx
+    lea rsi, [rel mn___lt__]
+    extern object_method_lt
+    lea rdx, [rel object_method_lt]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___le__]
+    extern object_method_le
+    lea rdx, [rel object_method_le]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___gt__]
+    extern object_method_gt
+    lea rdx, [rel object_method_gt]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___ge__]
+    extern object_method_ge
+    lea rdx, [rel object_method_ge]
+    call dict_add_builtin_func
+
+    ; The generic attribute dunders, and the two hooks.  All five were
+    ; absent, and every type inherits them -- abcmod has been looking for
+    ; __subclasshook__ since it was written and silently finding nothing.
+    mov rdi, rbx
+    lea rsi, [rel mn___setattr__]
+    lea rdx, [rel object_method_setattr]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___delattr__]
+    lea rdx, [rel object_method_delattr]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___getattribute__]
+    lea rdx, [rel object_method_getattribute]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___getstate__]
+    lea rdx, [rel object_method_getstate]
+    call dict_add_builtin_func
+
+    ; __subclasshook__ is a classmethod: it takes the class explicitly.
+    lea rdi, [rel object_method_subclasshook]
+    lea rsi, [rel mn___subclasshook__]
+    call builtin_func_new
+    push rax
+    mov edi, PyClassMethodObject_size
+    lea rsi, [rel classmethod_type]
+    call gc_alloc
+    pop rcx
+    mov [rax + PyClassMethodObject.cm_callable], rcx
+    mov r12, rax
+    mov rdi, rax
+    call gc_track
+    lea rdi, [rel mn___subclasshook__]
+    call str_from_cstr_heap
+    push rax
+    mov rdi, rbx
+    mov rsi, rax
+    mov rdx, r12
+    call dict_set
+    pop rdi
+    call obj_decref
+    mov rdi, r12
+    call obj_decref
 
     ; Store in object_type.tp_dict
     lea rax, [rel object_type]
@@ -1416,6 +1755,21 @@ DEF_FUNC methods_init
 
     mov rdi, rbx
     call add_class_getitem
+
+    ; bool is a static subclass of int -- the only one in the tree -- so it
+    ; never went through type_from_parts and had nothing to register it.
+    ; CPython lists it in int.__subclasses__(), so it is recorded by hand.
+    extern subclass_register
+    extern bool_type
+    lea rdi, [rel bool_type]
+    call subclass_register
+
+    ; type.__subclasses__ -- the direct subclasses, live ones only.
+    extern type_method_subclasses
+    mov rdi, rbx
+    lea rsi, [rel mn___subclasses__]
+    lea rdx, [rel type_method_subclasses]
+    call dict_add_builtin_func
 
     lea rax, [rel type_type]
     mov [rax + PyTypeObject.tp_dict], rbx
@@ -1595,6 +1949,216 @@ DEF_FUNC methods_init
     pop rdi
     call obj_decref
 
+    ;; The unary operators, by name.  Without these an MRO lookup for
+    ;; __invert__ on `class I(int, M)` could not find int's before M's, since
+    ;; int had nothing in its dict to find, and type_install_slots wrote M's
+    ;; wrapper over the nb_invert the class had already inherited.
+    mov rdi, rbx
+    lea rsi, [rel mn___neg__]
+    extern int_dunder_neg
+    lea rdx, [rel int_dunder_neg]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___pos__]
+    extern int_dunder_pos
+    lea rdx, [rel int_dunder_pos]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___abs__]
+    extern int_dunder_abs
+    lea rdx, [rel int_dunder_abs]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___invert__]
+    extern int_dunder_invert
+    lea rdx, [rel int_dunder_invert]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___int__]
+    extern int_dunder_int
+    lea rdx, [rel int_dunder_int]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___float__]
+    extern int_dunder_float
+    lea rdx, [rel int_dunder_float]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___index__]
+    extern int_dunder_index
+    lea rdx, [rel int_dunder_index]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___trunc__]
+    extern int_dunder_trunc
+    lea rdx, [rel int_dunder_trunc]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___bool__]
+    extern int_dunder_bool
+    lea rdx, [rel int_dunder_bool]
+    call dict_add_builtin_func
+
+    ;; and the binary family, forward and reflected.
+    mov rdi, rbx
+    lea rsi, [rel mn___add__]
+    extern int_dunder_add
+    lea rdx, [rel int_dunder_add]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___sub__]
+    extern int_dunder_sub
+    lea rdx, [rel int_dunder_sub]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___mul__]
+    extern int_dunder_mul
+    lea rdx, [rel int_dunder_mul]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___mod__]
+    extern int_dunder_mod
+    lea rdx, [rel int_dunder_mod]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___divmod__]
+    extern int_dunder_divmod
+    lea rdx, [rel int_dunder_divmod]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___pow__]
+    extern int_dunder_pow
+    lea rdx, [rel int_dunder_pow]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___lshift__]
+    extern int_dunder_lshift
+    lea rdx, [rel int_dunder_lshift]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___rshift__]
+    extern int_dunder_rshift
+    lea rdx, [rel int_dunder_rshift]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___and__]
+    extern int_dunder_and
+    lea rdx, [rel int_dunder_and]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___xor__]
+    extern int_dunder_xor
+    lea rdx, [rel int_dunder_xor]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___or__]
+    extern int_dunder_or
+    lea rdx, [rel int_dunder_or]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___floordiv__]
+    extern int_dunder_floordiv
+    lea rdx, [rel int_dunder_floordiv]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___truediv__]
+    extern int_dunder_truediv
+    lea rdx, [rel int_dunder_truediv]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___radd__]
+    extern int_dunder_radd
+    lea rdx, [rel int_dunder_radd]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___rsub__]
+    extern int_dunder_rsub
+    lea rdx, [rel int_dunder_rsub]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___rmul__]
+    extern int_dunder_rmul
+    lea rdx, [rel int_dunder_rmul]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___rmod__]
+    extern int_dunder_rmod
+    lea rdx, [rel int_dunder_rmod]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___rdivmod__]
+    extern int_dunder_rdivmod
+    lea rdx, [rel int_dunder_rdivmod]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___rpow__]
+    extern int_dunder_rpow
+    lea rdx, [rel int_dunder_rpow]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___rlshift__]
+    extern int_dunder_rlshift
+    lea rdx, [rel int_dunder_rlshift]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___rrshift__]
+    extern int_dunder_rrshift
+    lea rdx, [rel int_dunder_rrshift]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___rand__]
+    extern int_dunder_rand
+    lea rdx, [rel int_dunder_rand]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___rxor__]
+    extern int_dunder_rxor
+    lea rdx, [rel int_dunder_rxor]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___ror__]
+    extern int_dunder_ror
+    lea rdx, [rel int_dunder_ror]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___rfloordiv__]
+    extern int_dunder_rfloordiv
+    lea rdx, [rel int_dunder_rfloordiv]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___rtruediv__]
+    extern int_dunder_rtruediv
+    lea rdx, [rel int_dunder_rtruediv]
+    call dict_add_builtin_func
+
+    ;; real, imag, numerator and denominator, as getset descriptors.  int's
+    ;; tp_getattr answers an instance read before this dict is consulted;
+    ;; these are what make `int.real` an attribute of the type, and what put
+    ;; the four names in dir().
+    mov rdi, rbx
+    lea rsi, [rel gs_real]
+    extern int_get_real
+    lea rdx, [rel int_get_real]
+    xor ecx, ecx
+    call dict_add_getset
+    mov rdi, rbx
+    lea rsi, [rel gs_numerator]
+    lea rdx, [rel int_get_real]
+    xor ecx, ecx
+    call dict_add_getset
+    mov rdi, rbx
+    lea rsi, [rel gs_imag]
+    extern int_get_imag
+    lea rdx, [rel int_get_imag]
+    xor ecx, ecx
+    call dict_add_getset
+    mov rdi, rbx
+    lea rsi, [rel gs_denominator]
+    extern int_get_denominator
+    lea rdx, [rel int_get_denominator]
+    xor ecx, ecx
+    call dict_add_getset
+
     ; Store in int_type.tp_dict
     mov rdi, rbx
     lea rsi, [rel mn___format__]
@@ -1643,6 +2207,19 @@ DEF_FUNC methods_init
     lea rsi, [rel mn___format__]
     lea rdx, [rel builtin_method_format]
     call dict_add_builtin_func
+
+    mov rdi, rbx
+    lea rsi, [rel gs_real]
+    extern complex_get_real
+    lea rdx, [rel complex_get_real]
+    xor ecx, ecx
+    call dict_add_getset
+    mov rdi, rbx
+    lea rsi, [rel gs_imag]
+    extern complex_get_imag
+    lea rdx, [rel complex_get_imag]
+    xor ecx, ecx
+    call dict_add_getset
 
     lea rax, [rel complex_type]
     mov [rax + PyTypeObject.tp_dict], rbx
@@ -1720,6 +2297,138 @@ DEF_FUNC methods_init
     lea rdx, [rel builtin_method_format]
     call dict_add_builtin_func
 
+    mov rdi, rbx
+    lea rsi, [rel mn___neg__]
+    extern float_dunder_neg
+    lea rdx, [rel float_dunder_neg]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___pos__]
+    extern float_dunder_pos
+    lea rdx, [rel float_dunder_pos]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___abs__]
+    extern float_dunder_abs
+    lea rdx, [rel float_dunder_abs]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___int__]
+    extern float_dunder_int
+    lea rdx, [rel float_dunder_int]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___float__]
+    extern float_dunder_float
+    lea rdx, [rel float_dunder_float]
+    call dict_add_builtin_func
+
+    ;; the binary family, forward and reflected.
+    mov rdi, rbx
+    lea rsi, [rel mn___add__]
+    extern float_dunder_add
+    lea rdx, [rel float_dunder_add]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___sub__]
+    extern float_dunder_sub
+    lea rdx, [rel float_dunder_sub]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___mul__]
+    extern float_dunder_mul
+    lea rdx, [rel float_dunder_mul]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___mod__]
+    extern float_dunder_mod
+    lea rdx, [rel float_dunder_mod]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___divmod__]
+    extern float_dunder_divmod
+    lea rdx, [rel float_dunder_divmod]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___pow__]
+    extern float_dunder_pow
+    lea rdx, [rel float_dunder_pow]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___floordiv__]
+    extern float_dunder_floordiv
+    lea rdx, [rel float_dunder_floordiv]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___truediv__]
+    extern float_dunder_truediv
+    lea rdx, [rel float_dunder_truediv]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___radd__]
+    extern float_dunder_radd
+    lea rdx, [rel float_dunder_radd]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___rsub__]
+    extern float_dunder_rsub
+    lea rdx, [rel float_dunder_rsub]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___rmul__]
+    extern float_dunder_rmul
+    lea rdx, [rel float_dunder_rmul]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___rmod__]
+    extern float_dunder_rmod
+    lea rdx, [rel float_dunder_rmod]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___rdivmod__]
+    extern float_dunder_rdivmod
+    lea rdx, [rel float_dunder_rdivmod]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___rpow__]
+    extern float_dunder_rpow
+    lea rdx, [rel float_dunder_rpow]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___rfloordiv__]
+    extern float_dunder_rfloordiv
+    lea rdx, [rel float_dunder_rfloordiv]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___rtruediv__]
+    extern float_dunder_rtruediv
+    lea rdx, [rel float_dunder_rtruediv]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___trunc__]
+    extern float_dunder_trunc
+    lea rdx, [rel float_dunder_trunc]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___bool__]
+    extern float_dunder_bool
+    lea rdx, [rel float_dunder_bool]
+    call dict_add_builtin_func
+
+    ; real and imag; float has no numerator or denominator, as CPython has not
+    mov rdi, rbx
+    lea rsi, [rel gs_real]
+    extern float_get_real
+    lea rdx, [rel float_get_real]
+    xor ecx, ecx
+    call dict_add_getset
+    mov rdi, rbx
+    lea rsi, [rel gs_imag]
+    extern float_get_imag
+    lea rdx, [rel float_get_imag]
+    xor ecx, ecx
+    call dict_add_getset
+
     ; Store in float_type.tp_dict
     lea rax, [rel float_type]
     mov [rax + PyTypeObject.tp_dict], rbx
@@ -1773,6 +2482,163 @@ DEF_FUNC methods_init
     call dict_add_builtin_func
 
     mov rdi, rbx
+    lea rsi, [rel mn_rsplit]
+    extern bytes_method_rsplit
+    lea rdx, [rel bytes_method_rsplit]
+    call dict_add_builtin_func
+
+    mov rdi, rbx
+    lea rsi, [rel mn_rfind]
+    extern bytes_method_rfind
+    lea rdx, [rel bytes_method_rfind]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn_index]
+    extern bytes_method_index
+    lea rdx, [rel bytes_method_index]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn_rindex]
+    extern bytes_method_rindex
+    lea rdx, [rel bytes_method_rindex]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn_strip]
+    extern bytes_method_strip
+    lea rdx, [rel bytes_method_strip]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn_lstrip]
+    extern bytes_method_lstrip
+    lea rdx, [rel bytes_method_lstrip]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn_rstrip]
+    extern bytes_method_rstrip
+    lea rdx, [rel bytes_method_rstrip]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn_partition]
+    extern bytes_method_partition
+    lea rdx, [rel bytes_method_partition]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn_rpartition]
+    extern bytes_method_rpartition
+    lea rdx, [rel bytes_method_rpartition]
+    call dict_add_builtin_func
+
+    mov rdi, rbx
+    lea rsi, [rel mn_upper]
+    extern bytes_method_upper
+    lea rdx, [rel bytes_method_upper]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn_lower]
+    extern bytes_method_lower
+    lea rdx, [rel bytes_method_lower]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn_swapcase]
+    extern bytes_method_swapcase
+    lea rdx, [rel bytes_method_swapcase]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn_capitalize]
+    extern bytes_method_capitalize
+    lea rdx, [rel bytes_method_capitalize]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn_title]
+    extern bytes_method_title
+    lea rdx, [rel bytes_method_title]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn_isalpha]
+    extern bytes_method_isalpha
+    lea rdx, [rel bytes_method_isalpha]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn_isdigit]
+    extern bytes_method_isdigit
+    lea rdx, [rel bytes_method_isdigit]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn_isspace]
+    extern bytes_method_isspace
+    lea rdx, [rel bytes_method_isspace]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn_isalnum]
+    extern bytes_method_isalnum
+    lea rdx, [rel bytes_method_isalnum]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn_isascii]
+    extern bytes_method_isascii
+    lea rdx, [rel bytes_method_isascii]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn_isupper]
+    extern bytes_method_isupper
+    lea rdx, [rel bytes_method_isupper]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn_islower]
+    extern bytes_method_islower
+    lea rdx, [rel bytes_method_islower]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn_istitle]
+    extern bytes_method_istitle
+    lea rdx, [rel bytes_method_istitle]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn_ljust]
+    extern bytes_method_ljust
+    lea rdx, [rel bytes_method_ljust]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn_rjust]
+    extern bytes_method_rjust
+    lea rdx, [rel bytes_method_rjust]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn_center]
+    extern bytes_method_center
+    lea rdx, [rel bytes_method_center]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn_zfill]
+    extern bytes_method_zfill
+    lea rdx, [rel bytes_method_zfill]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn_expandtabs]
+    extern bytes_method_expandtabs
+    lea rdx, [rel bytes_method_expandtabs]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn_translate]
+    extern bytes_method_translate
+    lea rdx, [rel bytes_method_translate]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn_splitlines]
+    extern bytes_method_splitlines
+    lea rdx, [rel bytes_method_splitlines]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn_removeprefix]
+    extern bytes_method_removeprefix
+    lea rdx, [rel bytes_method_removeprefix]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn_removesuffix]
+    extern bytes_method_removesuffix
+    lea rdx, [rel bytes_method_removesuffix]
+    call dict_add_builtin_func
+    mov rdi, rbx
     lea rsi, [rel mn_join]
     lea rdx, [rel bytes_method_join]
     call dict_add_builtin_func
@@ -1787,6 +2653,42 @@ DEF_FUNC methods_init
     mov rdi, rbx
     lea rsi, [rel mn___iter__]
     lea rdx, [rel bytes_dunder_iter]
+    call dict_add_builtin_func
+
+    mov rdi, rbx
+    lea rsi, [rel mn_maketrans]
+    extern bytes_staticmethod_maketrans
+    lea rdx, [rel bytes_staticmethod_maketrans]
+    call add_staticmethod
+
+    ; The operators, by name.
+    mov rdi, rbx
+    lea rsi, [rel mn___add__]
+    lea rdx, [rel bytes_dunder_add]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___mul__]
+    lea rdx, [rel bytes_dunder_mul]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___rmul__]
+    lea rdx, [rel bytes_dunder_rmul]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___mod__]
+    lea rdx, [rel bytes_dunder_mod]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___rmod__]
+    lea rdx, [rel bytes_dunder_rmod]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___contains__]
+    lea rdx, [rel generic_method_contains]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___getitem__]
+    lea rdx, [rel bytes_dunder_getitem]
     call dict_add_builtin_func
 
     lea rax, [rel bytes_type]
@@ -1862,6 +2764,161 @@ DEF_FUNC methods_init
     lea rdx, [rel ba_shared_split]
     call dict_add_builtin_func
     mov rdi, rbx
+    lea rsi, [rel mn_rsplit]
+    extern ba_shared_rsplit
+    lea rdx, [rel ba_shared_rsplit]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn_rfind]
+    extern ba_shared_rfind
+    lea rdx, [rel ba_shared_rfind]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn_index]
+    extern ba_shared_index
+    lea rdx, [rel ba_shared_index]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn_rindex]
+    extern ba_shared_rindex
+    lea rdx, [rel ba_shared_rindex]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn_strip]
+    extern ba_shared_strip
+    lea rdx, [rel ba_shared_strip]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn_lstrip]
+    extern ba_shared_lstrip
+    lea rdx, [rel ba_shared_lstrip]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn_rstrip]
+    extern ba_shared_rstrip
+    lea rdx, [rel ba_shared_rstrip]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn_partition]
+    extern ba_shared_partition
+    lea rdx, [rel ba_shared_partition]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn_rpartition]
+    extern ba_shared_rpartition
+    lea rdx, [rel ba_shared_rpartition]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn_upper]
+    extern ba_shared_upper
+    lea rdx, [rel ba_shared_upper]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn_lower]
+    extern ba_shared_lower
+    lea rdx, [rel ba_shared_lower]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn_swapcase]
+    extern ba_shared_swapcase
+    lea rdx, [rel ba_shared_swapcase]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn_capitalize]
+    extern ba_shared_capitalize
+    lea rdx, [rel ba_shared_capitalize]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn_title]
+    extern ba_shared_title
+    lea rdx, [rel ba_shared_title]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn_isalpha]
+    extern ba_shared_isalpha
+    lea rdx, [rel ba_shared_isalpha]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn_isdigit]
+    extern ba_shared_isdigit
+    lea rdx, [rel ba_shared_isdigit]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn_isspace]
+    extern ba_shared_isspace
+    lea rdx, [rel ba_shared_isspace]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn_isalnum]
+    extern ba_shared_isalnum
+    lea rdx, [rel ba_shared_isalnum]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn_isascii]
+    extern ba_shared_isascii
+    lea rdx, [rel ba_shared_isascii]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn_isupper]
+    extern ba_shared_isupper
+    lea rdx, [rel ba_shared_isupper]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn_islower]
+    extern ba_shared_islower
+    lea rdx, [rel ba_shared_islower]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn_istitle]
+    extern ba_shared_istitle
+    lea rdx, [rel ba_shared_istitle]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn_ljust]
+    extern ba_shared_ljust
+    lea rdx, [rel ba_shared_ljust]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn_rjust]
+    extern ba_shared_rjust
+    lea rdx, [rel ba_shared_rjust]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn_center]
+    extern ba_shared_center
+    lea rdx, [rel ba_shared_center]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn_zfill]
+    extern ba_shared_zfill
+    lea rdx, [rel ba_shared_zfill]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn_expandtabs]
+    extern ba_shared_expandtabs
+    lea rdx, [rel ba_shared_expandtabs]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn_translate]
+    extern ba_shared_translate
+    lea rdx, [rel ba_shared_translate]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn_splitlines]
+    extern ba_shared_splitlines
+    lea rdx, [rel ba_shared_splitlines]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn_removeprefix]
+    extern ba_shared_removeprefix
+    lea rdx, [rel ba_shared_removeprefix]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn_removesuffix]
+    extern ba_shared_removesuffix
+    lea rdx, [rel ba_shared_removesuffix]
+    call dict_add_builtin_func
+    mov rdi, rbx
     lea rsi, [rel mn_join]
     lea rdx, [rel ba_shared_join]
     call dict_add_builtin_func
@@ -1893,6 +2950,41 @@ DEF_FUNC methods_init
     lea rsi, [rel mn___contains__]
     lea rdx, [rel bytearray_dunder_contains]
     call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn_maketrans]
+    lea rdx, [rel bytes_staticmethod_maketrans]
+    call add_staticmethod
+
+    ; The operators, by name.
+    mov rdi, rbx
+    lea rsi, [rel mn___add__]
+    lea rdx, [rel bytearray_dunder_add]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___mul__]
+    lea rdx, [rel bytearray_dunder_mul]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___rmul__]
+    lea rdx, [rel bytearray_dunder_rmul]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___iadd__]
+    lea rdx, [rel bytearray_dunder_iadd]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___imul__]
+    lea rdx, [rel bytearray_dunder_imul]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___mod__]
+    lea rdx, [rel bytearray_dunder_mod]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___rmod__]
+    lea rdx, [rel bytearray_dunder_rmod]
+    call dict_add_builtin_func
+
     lea rax, [rel bytearray_type]
     mov [rax + PyTypeObject.tp_dict], rbx
 
@@ -2072,10 +3164,58 @@ mn___setitem__: db "__setitem__", 0
 mn___delitem__: db "__delitem__", 0
 mn___contains__: db "__contains__", 0
 mn___len__:     db "__len__", 0
+mn___lt__:      db "__lt__", 0
+mn___le__:      db "__le__", 0
+mn___gt__:      db "__gt__", 0
+mn___ge__:      db "__ge__", 0
+mn___neg__:     db "__neg__", 0
+mn___pos__:     db "__pos__", 0
+mn___abs__:     db "__abs__", 0
+mn___invert__:  db "__invert__", 0
+mn___int__:     db "__int__", 0
+mn___float__:   db "__float__", 0
+mn___index__:   db "__index__", 0
+mn___trunc__:   db "__trunc__", 0
+mn___bool__:    db "__bool__", 0
+gs_real:        db "real", 0
+gs_imag:        db "imag", 0
+gs_numerator:   db "numerator", 0
+gs_denominator: db "denominator", 0
 mn___eq__: db "__eq__", 0
 mn___ne__: db "__ne__", 0
 mn___hash__:    db "__hash__", 0
+mn___subclasshook__: db "__subclasshook__", 0
+mn___getstate__: db "__getstate__", 0
+mn___getattribute__: db "__getattribute__", 0
+mn___delattr__: db "__delattr__", 0
+mn___setattr__: db "__setattr__", 0
+mn___ior__: db "__ior__", 0
+mn___imul__: db "__imul__", 0
+mn___subclasses__: db "__subclasses__", 0
 mn___add__:     db "__add__", 0
+mn___radd__: db "__radd__", 0
+mn___sub__: db "__sub__", 0
+mn___rsub__: db "__rsub__", 0
+mn___mod__: db "__mod__", 0
+mn___rmod__: db "__rmod__", 0
+mn___divmod__: db "__divmod__", 0
+mn___rdivmod__: db "__rdivmod__", 0
+mn___pow__: db "__pow__", 0
+mn___rpow__: db "__rpow__", 0
+mn___lshift__: db "__lshift__", 0
+mn___rlshift__: db "__rlshift__", 0
+mn___rshift__: db "__rshift__", 0
+mn___rrshift__: db "__rrshift__", 0
+mn___and__: db "__and__", 0
+mn___rand__: db "__rand__", 0
+mn___xor__: db "__xor__", 0
+mn___rxor__: db "__rxor__", 0
+mn___or__: db "__or__", 0
+mn___ror__: db "__ror__", 0
+mn___floordiv__: db "__floordiv__", 0
+mn___rfloordiv__: db "__rfloordiv__", 0
+mn___truediv__: db "__truediv__", 0
+mn___rtruediv__: db "__rtruediv__", 0
 mn___mul__:     db "__mul__", 0
 mn___rmul__:    db "__rmul__", 0
 mn___iadd__:    db "__iadd__", 0

@@ -7,6 +7,9 @@
 %include "macros.inc"
 %include "object.inc"
 
+extern current_exception
+extern kw_names_pending
+extern ap_strcmp
 extern ap_malloc
 extern gc_alloc
 extern gc_track
@@ -149,25 +152,113 @@ DEF_FUNC property_construct
     mov rbx, rsi                ; args
     mov r12, rdx                ; nargs
 
-    cmp r12, 1
-    jb .pc_error
-    cmp r12, 3
-    ja .pc_error
+    ; The four are positional-or-keyword in CPython, and property(gx,
+    ; doc="D") is the common spelling.  Taken positionally, that string
+    ; became FSET -- and a property whose setter is a str calls a str on
+    ; assignment.  Collect the keywords into the same four slots first, then
+    ; let the positionals fill what is left.
+    push qword 0                ; [rsp + 24] = doc
+    push qword 0                ; [rsp + 16] = fdel
+    push qword 0                ; [rsp +  8] = fset
+    push qword 0                ; [rsp     ] = fget
 
-    ; Extract args
-    mov r13, [rbx]              ; fget = args[0]
-    xor r14d, r14d              ; fset = NULL
-    cmp r12, 2
-    jb .pc_alloc
-    mov r14, [rbx + 8]         ; fset = args[1]
+    mov rax, [rel kw_names_pending]
+    test rax, rax
+    jz .pc_positional
+    mov r13, [rax + PyTupleObject.ob_size]      ; n_kw
+    mov r14, r12
+    sub r14, r13                                ; n_pos
+    xor ecx, ecx
+.pc_kw_loop:
+    cmp rcx, r13
+    jge .pc_kw_done
+    mov rdx, [rax + PyTupleObject.ob_item]
+    mov rdx, [rdx + rcx*8]                      ; the keyword's name
+    mov rsi, r14
+    add rsi, rcx
+    mov rsi, [rbx + rsi*8]                      ; the value given for it
+    lea rdi, [rdx + PyStrObject.data]
+
+    push rax
+    push rcx
+    push rsi
+    push rdi
+    CSTRING rsi, "fget"
+    call ap_strcmp
+    test eax, eax
+    jz .pc_kw_slot0
+    mov rdi, [rsp]
+    CSTRING rsi, "fset"
+    call ap_strcmp
+    test eax, eax
+    jz .pc_kw_slot1
+    mov rdi, [rsp]
+    CSTRING rsi, "fdel"
+    call ap_strcmp
+    test eax, eax
+    jz .pc_kw_slot2
+    mov rdi, [rsp]
+    CSTRING rsi, "doc"
+    call ap_strcmp
+    test eax, eax
+    jnz .pc_kw_bad
+    mov edx, 3
+    jmp .pc_kw_store
+.pc_kw_slot0:
+    xor edx, edx
+    jmp .pc_kw_store
+.pc_kw_slot1:
+    mov edx, 1
+    jmp .pc_kw_store
+.pc_kw_slot2:
+    mov edx, 2
+.pc_kw_store:
+    mov rsi, [rsp + 8]                          ; the value
+    mov [rsp + 32 + rdx*8], rsi                 ; past the four pushes
+    pop rdi
+    pop rsi
+    pop rcx
+    pop rax
+    inc rcx
+    jmp .pc_kw_loop
+.pc_kw_bad:
+    pop rdi
+    pop rsi
+    pop rcx
+    pop rax
+    jmp .pc_kw_error
+.pc_kw_done:
+    mov r12, r14                                ; only the positionals remain
+    mov qword [rel kw_names_pending], 0
+
+.pc_positional:
+    cmp r12, 4
+    ja .pc_error
+    xor ecx, ecx
+.pc_pos_loop:
+    cmp rcx, r12
+    jge .pc_pos_done
+    mov rax, [rbx + rcx*8]
+    cmp qword [rsp + rcx*8], 0
+    jne .pc_dup_error
+    mov [rsp + rcx*8], rax
+    inc rcx
+    jmp .pc_pos_loop
+.pc_pos_done:
+
+    mov r13, [rsp]              ; fget
+    mov r14, [rsp + 8]          ; fset
+    test r13, r13
+    jnz .pc_alloc
+    lea r13, [rel none_singleton]   ; property() with no getter is legal
 
 .pc_alloc:
-    ; Save fdel
-    push qword 0                ; fdel default = NULL
-    cmp r12, 3
-    jb .pc_do_alloc
-    mov rax, [rbx + 16]
-    mov [rsp], rax              ; fdel = args[2]
+    ; doc and fdel, kept on the stack because rbx is about to become the new
+    ; property and the argument array would be lost with it.
+    mov rax, [rsp + 24]
+    push rax                    ; doc
+    mov rax, [rsp + 24]         ; fdel, now one slot deeper
+    push rax
 
 .pc_do_alloc:
     mov edi, PyPropertyObject_size
@@ -178,24 +269,53 @@ DEF_FUNC property_construct
     mov [rbx + PyPropertyObject.prop_set], r14
     pop rax                     ; fdel
     mov [rbx + PyPropertyObject.prop_del], rax
+    pop rax                     ; doc
+    mov [rbx + PyPropertyObject.prop_doc], rax
 
-    ; INCREF fget
+    ; All four are Values, not pointers.  CPython takes any object for each --
+    ; property(f, None, None, 5).__doc__ is 5, and f.__doc__ may be an int --
+    ; so an INCREF that dereferences is a segfault on an immediate.
     mov rdi, r13
-    call obj_incref
+    INCREF_V rdi, rax
 
-    ; INCREF fset if non-NULL
     test r14, r14
     jz .pc_no_fset
     mov rdi, r14
-    call obj_incref
+    INCREF_V rdi, rax
 .pc_no_fset:
 
-    ; INCREF fdel if non-NULL
     mov rdi, [rbx + PyPropertyObject.prop_del]
     test rdi, rdi
     jz .pc_no_fdel
-    call obj_incref
+    INCREF_V rdi, rax
 .pc_no_fdel:
+
+    ; __doc__: the explicit one if given, else fget's own -- which is what
+    ; CPython copies, so that help() on a property says something.
+    mov rdi, [rbx + PyPropertyObject.prop_doc]
+    test rdi, rdi
+    jz .pc_doc_from_fget
+    INCREF_V rdi, rax
+    jmp .pc_doc_done
+
+.pc_doc_from_fget:
+    mov rdi, r13
+    test rdi, rdi
+    jz .pc_doc_done
+    V_TEST_PTR rdi, rax
+    ja .pc_doc_done
+    lea rdi, [rel pc_doc_name]
+    extern dunder_name_obj
+    call dunder_name_obj
+    mov rsi, rax
+    mov rdi, r13
+    extern obj_getattr_opt
+    call obj_getattr_opt
+    test rax, rax
+    jz .pc_doc_done
+    ; obj_getattr_opt hands back a new reference; the property keeps it.
+    mov [rbx + PyPropertyObject.prop_doc], rax
+.pc_doc_done:
 
     mov rdi, rbx
     call gc_track
@@ -203,6 +323,7 @@ DEF_FUNC property_construct
     mov rax, rbx
     mov edx, TAG_PTR
 
+    add rsp, 32                 ; the four collected arguments
     pop r14
     pop r13
     pop r12
@@ -211,7 +332,13 @@ DEF_FUNC property_construct
     ret
 
 .pc_error:
-    RAISE exc_TypeError_type, "property expected 1 to 3 arguments"
+    RAISE exc_TypeError_type, "property expected 1 to 4 arguments"
+
+.pc_dup_error:
+    RAISE exc_TypeError_type, "property() got multiple values for an argument"
+
+.pc_kw_error:
+    RAISE exc_TypeError_type, "property() got an unexpected keyword argument"
 END_FUNC property_construct
 
 ;; ============================================================================
@@ -224,18 +351,23 @@ DEF_FUNC_LOCAL property_dealloc
     mov rdi, [rbx + PyPropertyObject.prop_get]
     test rdi, rdi
     jz .pd_no_get
-    call obj_decref
+    DECREF_V rdi, rcx
 .pd_no_get:
     mov rdi, [rbx + PyPropertyObject.prop_set]
     test rdi, rdi
     jz .pd_no_set
-    call obj_decref
+    DECREF_V rdi, rcx
 .pd_no_set:
     mov rdi, [rbx + PyPropertyObject.prop_del]
     test rdi, rdi
     jz .pd_no_del
-    call obj_decref
+    DECREF_V rdi, rcx
 .pd_no_del:
+    mov rdi, [rbx + PyPropertyObject.prop_doc]
+    test rdi, rdi
+    jz .pd_no_doc
+    DECREF_V rdi, rcx
+.pd_no_doc:
 
     mov rdi, rbx
     call gc_dealloc
@@ -279,6 +411,13 @@ DEF_FUNC property_getattr
     call ap_strcmp
     test eax, eax
     jz .pga_deleter
+
+    ; Check "__doc__"
+    lea rdi, [r12 + PyStrObject.data]
+    CSTRING rsi, "__doc__"
+    call ap_strcmp
+    test eax, eax
+    jz .pga_doc
 
     ; Check "fget"
     lea rdi, [r12 + PyStrObject.data]
@@ -354,10 +493,17 @@ DEF_FUNC property_getattr
     lea rax, [rel none_singleton]
     jmp .pga_incref_ret
 
+.pga_doc:
+    mov rax, [rbx + PyPropertyObject.prop_doc]
+    test rax, rax
+    jnz .pga_incref_ret
+    lea rax, [rel none_singleton]
+    jmp .pga_incref_ret
+
 .pga_incref_ret:
     mov rdi, rax
     push rax
-    call obj_incref
+    INCREF_V rdi, rcx
     pop rax
 
 .pga_done:
@@ -591,6 +737,12 @@ DEF_FUNC property_descr_set
     mov r12, rsi                ; obj
     mov r13, rdx                ; value Value
 
+    ; A NULL value is `del obj.attr`, and that is the DELETER's business.
+    ; Without this arm it reached fset with a NULL Value, so `del d.v` ran the
+    ; setter with nothing and the deleter never ran at all.
+    test r13, r13
+    jz .pds_delete
+
     mov rax, [rbx + PyPropertyObject.prop_set]
     test rax, rax
     jz .pds_no_setter
@@ -623,6 +775,27 @@ DEF_FUNC property_descr_set
     leave
     ret
 
+.pds_delete:
+    mov rax, [rbx + PyPropertyObject.prop_del]
+    test rax, rax
+    jz .pds_no_deleter
+    mov rdi, rax
+    mov rax, [rdi + PyObject.ob_type]
+    mov rax, [rax + PyTypeObject.tp_call]
+    test rax, rax
+    jz .pds_no_deleter
+    sub rsp, 16
+    mov [rsp], r12              ; args[0] = obj
+    mov rsi, rsp
+    mov edx, 1
+    call rax
+    V_UNPACK rax, rdx
+    add rsp, 16
+    DECREF_VAL rax, edx
+    jmp .pds_done
+
+.pds_no_deleter:
+    RAISE exc_AttributeError_type, "can't delete attribute"
 .pds_no_setter:
     RAISE exc_AttributeError_type, "can't set attribute"
 END_FUNC property_descr_set
@@ -874,12 +1047,64 @@ DEF_FUNC getset_descr_new
     mov [rax + PyGetSetDescrObject.gs_get], rbx
     mov [rax + PyGetSetDescrObject.gs_set], r12
     mov [rax + PyGetSetDescrObject.gs_name], r13
+    ; gs_name is owned -- getset_descr_dealloc decrefs it -- and was stored
+    ; without a reference of its own.  Harmless while the one instance ever
+    ; built was immortal; not once every numeric type registers several.
+    push rax
+    mov rdi, r13
+    call obj_incref
+    pop rax
     pop r13
     pop r12
     pop rbx
     leave
     ret
 END_FUNC getset_descr_new
+
+;; ============================================================================
+;; getset_descr_get(rdi = the descriptor, rsi = self Value) -> rax = Value
+;;
+;; Calls the C getter.  Until now nothing anywhere read gs_get: the type was a
+;; stub built once so types.py could name GetSetDescriptorType, and .real and
+;; .imag were four separate tp_getattr strcmp chains instead -- which answered
+;; an instance and left `int.real` an AttributeError, because a chain is not a
+;; thing a type's dict can hold.
+;;
+;; A NULL getter is a set-only attribute, which CPython reports as an
+;; AttributeError naming it.
+;; ============================================================================
+DEF_FUNC getset_descr_get
+    mov rax, [rdi + PyGetSetDescrObject.gs_get]
+    test rax, rax
+    jz .gdg_unreadable
+    mov rdi, rsi
+    call rax
+    leave
+    ret
+.gdg_unreadable:
+    RAISE exc_AttributeError_type, "attribute is not readable"
+END_FUNC getset_descr_get
+
+;; ============================================================================
+;; getset_descr_set(rdi = the descriptor, rsi = self Value, rdx = value Value)
+;;   -> eax = 0, or never returns
+;;
+;; A NULL setter is a read-only attribute.  Every getset the tree registers
+;; today has one, which is what makes `(5).real = 1` an AttributeError rather
+;; than a silent instance attribute on a subclass.
+;; ============================================================================
+DEF_FUNC getset_descr_set
+    mov rax, [rdi + PyGetSetDescrObject.gs_set]
+    test rax, rax
+    jz .gds_readonly
+    mov rdi, rsi
+    mov rsi, rdx
+    call rax
+    leave
+    ret
+.gds_readonly:
+    RAISE exc_AttributeError_type, "readonly attribute"
+END_FUNC getset_descr_set
 
 DEF_FUNC_LOCAL getset_descr_dealloc
     push rbx
@@ -1266,6 +1491,21 @@ DEF_FUNC ga_emit_name
     jmp .gen_out
 
 .gen_not_ellipsis:
+    ; NoneType prints as None, in a union and in a subscript alike:
+    ; `int | None` and `list[None]` are what CPython spells these.
+    lea rax, [rel none_type]
+    cmp r12, rax
+    jne .gen_not_none
+    cmp r13, 240
+    jae .gen_out
+    mov byte [rbx + r13], 'N'
+    mov byte [rbx + r13 + 1], 'o'
+    mov byte [rbx + r13 + 2], 'n'
+    mov byte [rbx + r13 + 3], 'e'
+    add r13, 4
+    jmp .gen_out
+
+.gen_not_none:
     V_TEST_PTR r12, rax
     ja .gen_repr
     test r12, r12
@@ -1344,44 +1584,95 @@ END_FUNC ga_emit_name
 ;; GenericAlias-shaped record whose args are the operand tuple; the repr is
 ;; the pipe form rather than the bracket form.
 ;; ============================================================================
-DEF_FUNC union_type_or
+UTO_LIST  equ 8         ; the member list being accumulated
+UTO_LEFT  equ 16
+UTO_RIGHT equ 24
+UTO_FRAME equ 32            ; + 4 pushes = 64, 16-aligned
+
+DEF_FUNC union_type_or, UTO_FRAME
     ; nb_or(left, right) -> UnionType, for type | type
     push rbx
     push r12
-    mov rbx, rdi
-    mov r12, rsi
-    ; both sides must be types (or an existing union)
-    mov rdi, rbx
-    call union_operand_ok
+    push r13
+    push r14
+    mov [rbp - UTO_LEFT], rdi
+    mov [rbp - UTO_RIGHT], rsi
+
+    ; both sides must be types (or an existing union, or None)
+    call union_operand_ok       ; rdi = left
     test eax, eax
     jz .uto_notimpl
-    mov rdi, r12
+    mov rdi, [rbp - UTO_RIGHT]
     call union_operand_ok
     test eax, eax
     jz .uto_notimpl
 
-    mov edi, 2
+    ; Collect the members.  This used to be a bare tuple_new(2) holding the two
+    ; operands, so int | str | float nested as ((int|str), float): __args__ was
+    ; not flat, and union_richcompare -- which compares the two arg tuples as
+    ; sets -- read the inner union as one opaque member and answered False for
+    ; (int|str|float) == (float|str|int).  The repr hid it, because a member
+    ; that is not a type is printed with obj_repr, which re-enters union_repr.
+    extern list_new
+    xor edi, edi
+    call list_new
+    mov rbx, rax
+    mov [rbp - UTO_LIST], rax
+
+    mov rdi, [rbp - UTO_LEFT]
+    call .uto_add_operand
+    mov rdi, [rbp - UTO_RIGHT]
+    call .uto_add_operand
+
+    ; int | int is int: a union of one member is that member.
+    cmp qword [rbx + PyListObject.ob_size], 1
+    jne .uto_build
+    mov rax, [rbx + PyListObject.ob_item]
+    mov r12, [rax]
+    INCREF_V r12, rcx
+    mov rdi, rbx
+    call obj_decref
+    mov rax, r12
+    mov edx, TAG_PTR
+    jmp .uto_return
+
+.uto_build:
+    mov rdi, [rbx + PyListObject.ob_size]
     extern tuple_new
     call tuple_new
-    mov rcx, [rax + PyTupleObject.ob_item]
-    mov [rcx], rbx
-    mov [rcx + 8], r12
-    push rax
+    mov r12, rax                ; the member tuple
+    mov r13, [rbx + PyListObject.ob_item]
+    mov r14, [r12 + PyTupleObject.ob_item]
+    xor ecx, ecx
+.uto_copy:
+    cmp rcx, [rbx + PyListObject.ob_size]
+    jge .uto_copied
+    mov rax, [r13 + rcx * 8]
+    mov [r14 + rcx * 8], rax
+    push rcx
+    INCREF_V rax, rcx
+    pop rcx
+    inc rcx
+    jmp .uto_copy
+
+.uto_copied:
     mov rdi, rbx
-    call obj_incref
-    mov rdi, r12
-    call obj_incref
-    pop rsi                         ; the operand tuple
-    push rsi
-    xor edi, edi                    ; no origin
+    call obj_decref             ; the accumulator; the tuple owns the members
+
+    xor edi, edi                ; no origin
+    mov rsi, r12
     call generic_alias_new
     lea rcx, [rel union_type]
     mov [rax + PyObject.ob_type], rcx
-    pop rdi
     push rax
-    call obj_decref                 ; generic_alias_new took its own ref
+    mov rdi, r12
+    call obj_decref             ; generic_alias_new took its own ref
     pop rax
     mov edx, TAG_PTR
+
+.uto_return:
+    pop r14
+    pop r13
     pop r12
     pop rbx
     leave
@@ -1391,11 +1682,97 @@ DEF_FUNC union_type_or
 .uto_notimpl:
     xor eax, eax
     xor edx, edx
+    pop r14
+    pop r13
     pop r12
     pop rbx
     leave
     ret
+
+;; .uto_add_operand(rdi = one operand Value) -- add what it contributes to the
+;; list in rbx.  A union contributes its members; anything else contributes
+;; itself.  Uses r13 and r14.
+.uto_add_operand:
+    ; None stands for NoneType inside a union, which is what makes
+    ; (None | int) == (int | type(None)) true, as it is in CPython.
+    lea rcx, [rel none_singleton]
+    cmp rdi, rcx
+    jne .uto_ao_typed
+    extern none_type
+    lea rdi, [rel none_type]
+.uto_ao_typed:
+    V_TEST_PTR rdi, rax
+    ja .uto_ao_one
+    mov rax, [rdi + PyObject.ob_type]
+    lea rcx, [rel union_type]
+    cmp rax, rcx
+    jne .uto_ao_one
+
+    mov r13, [rdi + PyGenericAliasObject.ga_args]
+    xor r14d, r14d
+.uto_ao_loop:
+    cmp r14, [r13 + PyTupleObject.ob_size]
+    jge .uto_ao_spliced
+    mov rax, [r13 + PyTupleObject.ob_item]
+    mov rdi, [rax + r14 * 8]
+    call .uto_ao_one            ; already flat and already normalised
+    inc r14
+    jmp .uto_ao_loop
+.uto_ao_spliced:
+    ret
+
+;; .uto_ao_one(rdi = one member) -- append it unless an equal one is there.
+.uto_ao_one:
+    push rdi
+    mov rsi, rdi
+    mov rdi, rbx
+    extern list_contains
+    call list_contains
+    pop rdi
+    test eax, eax
+    jnz .uto_ao_one_done        ; int | int, and (int|str) | str
+    mov rsi, rdi
+    mov rdi, rbx
+    extern list_append
+    call list_append
+.uto_ao_one_done:
+    ret
 END_FUNC union_type_or
+
+;; ============================================================================
+;; union_getattr(rdi = self, rsi = name) -> (rax = payload, rdx = tag)
+;;
+;; A union is a GenericAlias-shaped record, but it is not one: it has no
+;; origin, so it cannot simply borrow generic_alias_getattr.  __args__ is the
+;; half that matters -- typing and every annotation reader ask for it by name,
+;; and union_type carried neither a tp_getattr nor a tp_dict, so it answered
+;; AttributeError while the tuple sat in ga_args.
+;; ============================================================================
+DEF_FUNC union_getattr
+    push rbx
+    mov rbx, rdi
+    lea rdi, [rsi + PyStrObject.data]
+    CSTRING rsi, "__args__"
+    call ap_strcmp
+    test eax, eax
+    jnz .ug_missing
+
+    mov rax, [rbx + PyGenericAliasObject.ga_args]
+    mov rdi, rax
+    call obj_incref
+    mov rax, [rbx + PyGenericAliasObject.ga_args]
+    mov edx, TAG_PTR
+    pop rbx
+    leave
+    ret
+
+.ug_missing:
+    xor eax, eax
+    xor edx, edx
+    pop rbx
+    leave
+    ret
+END_FUNC union_getattr
 
 DEF_FUNC_BARE union_operand_ok
     V_TEST_PTR rdi, rax
@@ -1651,16 +2028,25 @@ DEF_FUNC property_dunder_get
     ret
 END_FUNC property_dunder_get
 
-DEF_FUNC property_dunder_set
+PDS2_EXC   equ 8
+PDS2_FRAME equ 16
+
+DEF_FUNC property_dunder_set, PDS2_FRAME
     cmp rsi, 3
     jl .pds2_bad
     mov rax, [rdi]
     mov rdx, [rdi + 16]                 ; the value, already a Value
     mov rsi, [rdi + 8]                  ; the instance
     mov rdi, rax
+    DUNDER_EXC_SAVE [rbp - PDS2_EXC]
     call property_descr_set
+    DUNDER_RAISED [rbp - PDS2_EXC], .pds2_raised
     lea rax, [rel none_singleton]
     INCREF rax
+    leave
+    ret
+.pds2_raised:
+    xor eax, eax
     leave
     ret
 .pds2_bad:
@@ -1699,6 +2085,60 @@ DEF_FUNC property_dunder_delete
 .pdd_no_deleter:
     RAISE exc_AttributeError_type, "can't delete attribute"
 END_FUNC property_dunder_delete
+
+section .text
+
+;; ============================================================================
+;; property_setattr(rdi = self, rsi = name, rdx = value Value)
+;;
+;; Only __doc__ is writable, which is the one CPython allows -- fget, fset and
+;; fdel are read-only there too.  dis.py opens with
+;; `_Instruction.opname.__doc__ = "Human readable name for operation"`, and
+;; with no tp_setattr at all that was "AttributeError: cannot set attribute",
+;; which took dis, modulefinder, pathlib, zipapp and mimetypes with it.
+;; ============================================================================
+PSA_SELF  equ 8
+PSA_VAL   equ 16
+PSA_FRAME equ 16            ; + 1 push = 24, not 16-aligned
+DEF_FUNC_LOCAL property_setattr, PSA_FRAME
+    push rbx
+    mov rbx, rdi
+    mov [rbp - PSA_VAL], rdx
+
+    lea rdi, [rsi + PyStrObject.data]
+    CSTRING rsi, "__doc__"
+    call ap_strcmp
+    test eax, eax
+    jnz .psa_readonly
+
+    mov rdi, [rbp - PSA_VAL]
+    test rdi, rdi
+    jz .psa_delete
+    INCREF_V rdi, rax
+    mov rax, [rbx + PyPropertyObject.prop_doc]
+    mov rcx, [rbp - PSA_VAL]
+    mov [rbx + PyPropertyObject.prop_doc], rcx
+    test rax, rax
+    jz .psa_ok
+    mov rdi, rax
+    DECREF_V rdi, rcx
+.psa_ok:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+
+.psa_delete:
+    mov rdi, [rbx + PyPropertyObject.prop_doc]
+    mov qword [rbx + PyPropertyObject.prop_doc], 0
+    test rdi, rdi
+    jz .psa_ok
+    DECREF_V rdi, rcx
+    jmp .psa_ok
+
+.psa_readonly:
+    RAISE exc_AttributeError_type, "readonly attribute"
+END_FUNC property_setattr
 
 section .data
 
@@ -1780,7 +2220,7 @@ property_type:
     dq 0                        ; tp_hash
     dq 0                ; tp_call  (instances are not callable)
     dq property_getattr         ; tp_getattr (.setter/.getter/.deleter)
-    dq 0                        ; tp_setattr
+    dq property_setattr         ; tp_setattr (__doc__, and nothing else)
     dq 0                        ; tp_richcompare
     dq 0                        ; tp_iter
     dq 0                        ; tp_iternext
@@ -1846,7 +2286,7 @@ union_type:
     dq union_repr                   ; tp_str
     dq union_hash                   ; tp_hash
     dq 0                            ; tp_call
-    dq 0                            ; tp_getattr
+    dq union_getattr                ; tp_getattr
     dq 0                            ; tp_setattr
     dq union_richcompare            ; tp_richcompare
     dq 0                            ; tp_iter
@@ -2048,6 +2488,12 @@ DEF_FUNC_LOCAL union_args_subset, UAS_FRAME
     extern obj_richcompare_bool
     call obj_richcompare_bool
     pop rcx
+    ; -1 is "the comparison raised".  There is no way to report that through
+    ; tp_richcompare here -- a NULL Value means NotImplemented, not failure --
+    ; but the scan must at least stop, or the next comparison runs more Python
+    ; over the top of the pending exception.
+    cmp eax, 0
+    jl .uas_no
     cmp eax, 1
     je .uas_found
     inc rcx
@@ -2389,12 +2835,14 @@ END_FUNC classmethod_clear
 DEF_FUNC property_traverse
     push rbx
     mov rbx, rdi
-    mov rdi, [rbx + PyPropertyObject.prop_get]
-    VISIT_PTR rdi
-    mov rdi, [rbx + PyPropertyObject.prop_set]
-    VISIT_PTR rdi
-    mov rdi, [rbx + PyPropertyObject.prop_del]
-    VISIT_PTR rdi
+    mov rax, [rbx + PyPropertyObject.prop_get]
+    VISIT_V rax, rcx
+    mov rax, [rbx + PyPropertyObject.prop_set]
+    VISIT_V rax, rcx
+    mov rax, [rbx + PyPropertyObject.prop_del]
+    VISIT_V rax, rcx
+    mov rax, [rbx + PyPropertyObject.prop_doc]
+    VISIT_V rax, rcx
     pop rbx
     leave
     ret
@@ -2408,21 +2856,30 @@ DEF_FUNC property_clear
     mov qword [rbx + PyPropertyObject.prop_get], 0
     test rdi, rdi
     jz .no_get
-    call obj_decref
+    DECREF_V rdi, rcx
 .no_get:
     mov rdi, [rbx + PyPropertyObject.prop_set]
     mov qword [rbx + PyPropertyObject.prop_set], 0
     test rdi, rdi
     jz .no_set
-    call obj_decref
+    DECREF_V rdi, rcx
 .no_set:
     mov rdi, [rbx + PyPropertyObject.prop_del]
     mov qword [rbx + PyPropertyObject.prop_del], 0
     test rdi, rdi
     jz .no_del
-    call obj_decref
+    DECREF_V rdi, rcx
 .no_del:
+    mov rdi, [rbx + PyPropertyObject.prop_doc]
+    mov qword [rbx + PyPropertyObject.prop_doc], 0
+    test rdi, rdi
+    jz .no_doc
+    DECREF_V rdi, rcx
+.no_doc:
     pop rbx
     leave
     ret
 END_FUNC property_clear
+
+section .rodata
+pc_doc_name: db "__doc__", 0

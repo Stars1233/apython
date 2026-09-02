@@ -102,6 +102,32 @@ DEF_FUNC sym_new, SN_FRAME
     mov rax, [rbp - SN_NODE]
     mov [r12 + Scope.node], eax
 
+    ; The scope's own name, for __qualname__.  A function or a class keeps it
+    ; in its node's `a` field, which is where cg_compile_body reads co_name
+    ; from; every other kind of scope has no name to speak of and keeps the 0
+    ; sym_zero left, which cg_set_qualname reads as "do not guess".
+    mov qword [r12 + Scope.name], 0
+    mov rax, [rbp - SN_KIND]
+    cmp eax, SCOPE_FUNCTION
+    je .sn_named
+    cmp eax, SCOPE_CLASS
+    jne .sn_unnamed
+.sn_named:
+    mov rdi, rbx
+    mov esi, [rbp - SN_NODE]
+    extern ast_at
+    call ast_at
+    mov esi, [rax + AstNode.a]
+    mov rdi, rbx
+    extern ast_obj_at
+    call ast_obj_at
+    ; A borrowed reference, as everything in comp.objs is.  A class body whose
+    ; `a` is not a name reads as 0 here and is simply left unnamed.
+    V_TEST_PTR rax, rcx
+    ja .sn_unnamed
+    mov [r12 + Scope.name], rax
+.sn_unnamed:
+
     call dict_new
     mov [r12 + Scope.symbols], rax
 

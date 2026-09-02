@@ -60,62 +60,13 @@ END_FUNC str_method_rindex
 ;; str_method_istitle(args, nargs) -> bool
 ;; ============================================================================
 DEF_FUNC str_method_istitle
-    push rbx
-    push r12
-
-    mov rbx, [rdi]
-    mov r12, [rbx + PyStrObject.ob_size]
-
-    ; Empty string → False
-    test r12, r12
-    jz .istitle_false
-
-    xor ecx, ecx            ; i = 0
-    mov r8d, 1               ; prev_sep = true
-    xor r9d, r9d             ; seen_cased = false
-.istitle_loop:
-    cmp rcx, r12
-    jge .istitle_check
-    movzx eax, byte [rbx + PyStrObject.data + rcx]
-    cmp al, 'A'
-    jb .istitle_not_alpha
-    cmp al, 'Z'
-    jbe .istitle_upper
-    cmp al, 'a'
-    jb .istitle_not_alpha
-    cmp al, 'z'
-    ja .istitle_not_alpha
-    ; lowercase char
-    test r8d, r8d
-    jnz .istitle_false        ; lowercase after separator → not title
-    xor r8d, r8d
-    mov r9d, 1
-    inc rcx
-    jmp .istitle_loop
-.istitle_upper:
-    test r8d, r8d
-    jz .istitle_false         ; uppercase after alpha → not title
-    xor r8d, r8d
-    mov r9d, 1
-    inc rcx
-    jmp .istitle_loop
-.istitle_not_alpha:
-    mov r8d, 1                ; prev_sep = true
-    inc rcx
-    jmp .istitle_loop
-.istitle_check:
-    test r9d, r9d
-    jz .istitle_false         ; no cased chars → False
-    RET_TRUE
-    pop r12
-    pop rbx
-    leave
-    V_PACK rax, rdx             ; builtins return one Value
-    ret
-.istitle_false:
-    RET_FALSE
-    pop r12
-    pop rbx
+    ; str_pred_impl in methods/str_case.asm, over the same generated flag
+    ; table the case mappings read.
+    mov rdi, [rdi]
+    mov esi, 8
+    extern str_pred_impl
+    call str_pred_impl
+    RET_BOOL_RAX
     leave
     V_PACK rax, rdx             ; builtins return one Value
     ret
@@ -993,8 +944,7 @@ DEF_FUNC str_method_translate, TRN_FRAME
     V_UNPACK rsi, rcx
     extern dunder_getitem
     lea rdx, [rel dunder_getitem]
-    call dunder_call_2
-    V_PACK rax, rdx
+    call dunder_call_2          ; -> a Value, already packed
     test rax, rax
     jz .trn_sub_null
     jmp .trn_have_value
@@ -1446,11 +1396,16 @@ SE_LEN   equ 16
 SE_OUT   equ 24
 SE_POS   equ 32
 SE_ERRS  equ 40
-SE_FRAME equ 48             ; + 2 pushes = 64
+SE_EID   equ 48             ; 0 strict, 1 ignore, 2 replace
+SE_ARGS  equ 56
+SE_NARGS equ 64
+SE_FRAME equ 80             ; + 2 pushes = 96
 DEF_FUNC str_method_encode, SE_FRAME
     push rbx
     push r12
     ; args[0] = self, args[1] = encoding, args[2] = errors
+    mov [rbp - SE_ARGS], rdi
+    mov [rbp - SE_NARGS], rsi
     mov rbx, [rdi]
     mov [rbp - SE_SELF], rbx
     mov r12, [rbx + PyStrObject.ob_size]
@@ -1481,6 +1436,14 @@ DEF_FUNC str_method_encode, SE_FRAME
 .se_default_enc:
     xor eax, eax
 .se_have_enc:
+    ; args[2] = errors.  It was never read at all: SE_ERRS stayed 0, so every
+    ; failure was strict whatever was asked for.
+    cmp qword [rbp - SE_NARGS], 3
+    jl .se_no_errors
+    mov rcx, [rbp - SE_ARGS]
+    mov rcx, [rcx + 16]
+    mov [rbp - SE_ERRS], rcx
+.se_no_errors:
     mov rdi, rax
     extern codec_id
     call codec_id
@@ -1511,16 +1474,96 @@ DEF_FUNC str_method_encode, SE_FRAME
 
 .se_ascii:
     ; Every byte of a valid ASCII string is below 0x80, and a multi-byte
-    ; character is exactly the case that is not encodable.
+    ; character is exactly the case that is not encodable.  The errors=
+    ; argument was parked in SE_ERRS and never looked up, so "ignore" and
+    ; "replace" both raised and an unknown handler name was never reported as
+    ; a LookupError either.
+    mov rbx, [rbp - SE_SELF]
     xor ecx, ecx
 .se_ascii_scan:
     cmp rcx, r12
     jge .se_utf8
     movzx eax, byte [rbx + PyStrObject.data + rcx]
     test al, 0x80
-    jnz .se_not_encodable
+    jnz .se_ascii_needs_handler
     inc rcx
     jmp .se_ascii_scan
+
+.se_ascii_needs_handler:
+    ; The handler is looked up only once something actually fails, which is
+    ; also when CPython reports an unknown name: "ab".encode("ascii", "bogus")
+    ; succeeds there.
+    mov rdi, [rbp - SE_ERRS]
+    extern codec_error_id
+    call codec_error_id         ; 0 strict, 1 ignore, 2 replace, -1 unknown
+    cmp eax, -1
+    je .se_bad_errors
+    mov [rbp - SE_EID], rax
+    test eax, eax
+    jz .se_not_encodable
+
+.se_ascii_handled:
+    ; One byte out per code point at most, so the code point count is an upper
+    ; bound on the result.
+    mov rbx, [rbp - SE_SELF]
+    mov rdi, [rbx + PyStrObject.ob_length]
+    call bytes_new
+    mov [rbp - SE_OUT], rax
+    mov qword [rbp - SE_POS], 0
+    xor ecx, ecx
+.se_ah_loop:
+    cmp rcx, [rbp - SE_LEN]
+    jge .se_ah_done
+    mov rbx, [rbp - SE_SELF]
+    movzx eax, byte [rbx + PyStrObject.data + rcx]
+    test al, 0x80
+    jz .se_ah_emit
+
+    ; A character that does not fit: skip its whole UTF-8 sequence, then
+    ; either drop it or write a '?', which is what CPython's replace does on
+    ; the encode side.
+    inc rcx
+.se_ah_skip:
+    cmp rcx, [rbp - SE_LEN]
+    jge .se_ah_after
+    movzx edx, byte [rbx + PyStrObject.data + rcx]
+    and edx, 0xc0
+    cmp edx, 0x80
+    jne .se_ah_after
+    inc rcx
+    jmp .se_ah_skip
+.se_ah_after:
+    cmp qword [rbp - SE_EID], 2
+    jne .se_ah_loop             ; ignore
+    mov rdx, [rbp - SE_OUT]
+    mov r8, [rbp - SE_POS]
+    mov byte [rdx + PyBytesObject.data + r8], '?'
+    inc qword [rbp - SE_POS]
+    jmp .se_ah_loop
+
+.se_ah_emit:
+    mov rdx, [rbp - SE_OUT]
+    mov r8, [rbp - SE_POS]
+    mov [rdx + PyBytesObject.data + r8], al
+    inc qword [rbp - SE_POS]
+    inc rcx
+    jmp .se_ah_loop
+
+.se_ah_done:
+    mov rax, [rbp - SE_OUT]
+    mov rcx, [rbp - SE_POS]
+    mov [rax + PyBytesObject.ob_size], rcx
+    mov byte [rax + PyBytesObject.data + rcx], 0
+    mov edx, TAG_PTR
+    pop r12
+    pop rbx
+    leave
+    V_PACK rax, rdx
+    ret
+
+.se_bad_errors:
+    extern exc_LookupError_type
+    RAISE exc_LookupError_type, "unknown error handler name"
 
 .se_latin1:
     ; One byte per code point, for the code points that fit in one.

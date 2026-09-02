@@ -215,7 +215,7 @@ DEF_FUNC frame_free
     ; Iterate through localsplus entries
 .loop:
     cmp r13d, r12d
-    jge .free_frame
+    jge .stack_walk
 
     mov rax, r13
     shl rax, 3              ; r13 * 8
@@ -225,6 +225,29 @@ DEF_FUNC frame_free
 .next:
     inc r13d
     jmp .loop
+
+.stack_walk:
+    ; A SUSPENDED frame still owns everything on its VALUE STACK -- the
+    ; iterator a `for` was walking, an operand half-way through an expression
+    ; -- and this walked localsplus and stopped there.  So an abandoned
+    ; generator released its locals and leaked the rest.
+    ;
+    ; instr_ptr is what says the frame is suspended.  For one that ran to
+    ; completion the stack is already empty and stack_ptr holds the LAST
+    ; suspension's value, which would be walked twice.
+    cmp qword [rbx + PyFrame.instr_ptr], 0
+    je .free_frame
+    mov r12, [rbx + PyFrame.stack_ptr]
+    test r12, r12
+    jz .free_frame
+    mov r13, [rbx + PyFrame.stack_base]
+.stack_loop:
+    cmp r12, r13
+    jbe .free_frame
+    sub r12, 8
+    mov rdi, [r12]
+    XDECREF_V rdi, rsi
+    jmp .stack_loop
 
 .free_frame:
     ; Calculate frame size for pool return

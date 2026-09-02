@@ -71,6 +71,11 @@ DEF_FUNC func_new
     ; func_dict = NULL
     mov qword [r13 + PyFuncObject.func_dict], 0
 
+    ; __qualname__ and __doc__ start empty and fall back to the code object;
+    ; an assignment fills them in, and it must not land in func_dict.
+    mov qword [r13 + PyFuncObject.func_qualname], 0
+    mov qword [r13 + PyFuncObject.func_doc], 0
+
     mov rdi, r13
     call gc_track
 
@@ -652,6 +657,16 @@ DEF_FUNC func_dealloc
     jz .no_func_dict
     call obj_decref
 .no_func_dict:
+    mov rdi, [rbx + PyFuncObject.func_qualname]
+    test rdi, rdi
+    jz .no_func_qualname
+    DECREF_V rdi, rcx
+.no_func_qualname:
+    mov rdi, [rbx + PyFuncObject.func_doc]
+    test rdi, rdi
+    jz .no_func_doc
+    DECREF_V rdi, rcx
+.no_func_doc:
 
     ; Free the function object itself (GC-aware)
     mov rdi, rbx
@@ -686,6 +701,32 @@ DEF_FUNC func_setattr
     test eax, eax
     jz .set_kwdefaults
 
+    ; __name__ has a field of its own, and CPython keeps it there rather than
+    ; in __dict__.  Storing it in func_dict like any other attribute was what
+    ; made `f.__name__ = "x"` read back as the old name: func_getattr answered
+    ; from the field without ever looking.
+    lea rdi, [rel fn_attr_name]
+    lea rsi, [r12 + PyStrObject.data]
+    call ap_strcmp
+    test eax, eax
+    jz .set_name
+
+    ; __qualname__ and __doc__ have fields of their own for the same reason.
+    ; They used to land in func_dict, so f.__dict__ was non-empty after
+    ; functools.wraps -- CPython keeps both on the function and leaves the
+    ; dict alone until something else is assigned.
+    lea rdi, [rel fn_attr_qualname]
+    lea rsi, [r12 + PyStrObject.data]
+    call ap_strcmp
+    test eax, eax
+    jz .set_qualname
+
+    lea rdi, [rel fn_attr_doc]
+    lea rsi, [r12 + PyStrObject.data]
+    call ap_strcmp
+    test eax, eax
+    jz .set_doc
+
     ; Check if func_dict exists
     mov rdi, [rbx + PyFuncObject.func_dict]
     test rdi, rdi
@@ -708,6 +749,78 @@ DEF_FUNC func_setattr
     pop rbx
     leave
     ret
+
+.set_qualname:
+    ; A string, as CPython requires -- and it may be deleted, which restores
+    ; the code object's own.
+    test r13, r13
+    jz .sq_store
+    mov rdi, r13
+    V_TEST_PTR rdi, rax
+    ja .sq_type
+    mov rax, [rdi + PyObject.ob_type]
+    REQUIRE_STR_TYPE rax, rcx, .sq_type
+.sq_store:
+    INCREF_V r13, rax
+    mov rax, [rbx + PyFuncObject.func_qualname]
+    mov [rbx + PyFuncObject.func_qualname], r13
+    test rax, rax
+    jz .sq_done
+    mov rdi, rax
+    DECREF_V rdi, rcx
+.sq_done:
+    xor eax, eax
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+.sq_type:
+    RAISE exc_TypeError_type, "__qualname__ must be set to a string object"
+
+.set_doc:
+    ; __doc__ takes anything, including None, as CPython's does.
+    INCREF_V r13, rax
+    mov rax, [rbx + PyFuncObject.func_doc]
+    mov [rbx + PyFuncObject.func_doc], r13
+    test rax, rax
+    jz .sd_done
+    mov rdi, rax
+    DECREF_V rdi, rcx
+.sd_done:
+    xor eax, eax
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.set_name:
+    ; It must be a str; CPython raises for anything else.
+    mov rdi, r13
+    V_TEST_PTR rdi, rax
+    ja .set_name_type_error
+    mov rax, [rdi + PyObject.ob_type]
+    REQUIRE_STR_TYPE rax, rcx, .set_name_type_error
+    mov rdi, [rbx + PyFuncObject.func_name]
+    mov rax, r13
+    INCREF rax
+    mov [rbx + PyFuncObject.func_name], rax
+    test rdi, rdi
+    jz .set_name_done
+    call obj_decref
+.set_name_done:
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.set_name_type_error:
+    RAISE exc_TypeError_type, "__name__ must be set to a string object"
 
 .set_kwdefaults:
     ; XDECREF old kwdefaults
@@ -839,6 +952,13 @@ DEF_FUNC func_getattr
     ret
 
 .return_name:
+    ; An assignment wins, as it does for __doc__: `f.__name__ = "x"` is stored
+    ; in func_dict like any other attribute, and reading func_name past it made
+    ; the assignment look like a no-op.  functools.wraps writes both this and
+    ; __qualname__ that way.
+    call .fg_from_dict
+    test rax, rax
+    jnz .return_ptr_attr
     mov rax, [rbx + PyFuncObject.func_name]
     INCREF rax
     mov edx, TAG_PTR
@@ -849,6 +969,15 @@ DEF_FUNC func_getattr
     ret
 
 .return_qualname:
+    ; The field first, then the dict -- functools.wraps writes __qualname__
+    ; through setattr, which fills the field now, and older code that reached
+    ; into f.__dict__ directly still works.
+    mov rax, [rbx + PyFuncObject.func_qualname]
+    test rax, rax
+    jnz .return_ptr_attr
+    call .fg_from_dict
+    test rax, rax
+    jnz .return_ptr_attr
     ; Get co_qualname from the code object
     mov rax, [rbx + PyFuncObject.func_code]
     mov rax, [rax + PyCodeObject.co_qualname]
@@ -904,11 +1033,41 @@ DEF_FUNC func_getattr
     V_PACK rax, rdx
     ret
 
+;; .fg_from_dict -> rax = the attribute out of func_dict, borrowed, or 0.
+;; rbx = the function, r12 = the name.
+.fg_from_dict:
+    mov rdi, [rbx + PyFuncObject.func_dict]
+    test rdi, rdi
+    jz .fgfd_none
+    mov rsi, r12
+    call dict_get
+    V_UNPACK rax, rdx
+    test edx, edx
+    jz .fgfd_none
+    ret
+.fgfd_none:
+    xor eax, eax
+    ret
+
 .return_doc:
-    ; An assignment wins over the source docstring: `f.__doc__ = ...` is stored
-    ; in func_dict like any other attribute, and reading past it here made the
-    ; assignment look like a no-op.  collections.namedtuple writes docstrings
-    ; this way.
+    ; An assignment wins over the source docstring.  It goes in the field now
+    ; -- CPython keeps __doc__ on the function, so f.__dict__ stays empty --
+    ; and the dict is still consulted after it, for anything that wrote there
+    ; directly.  collections.namedtuple writes docstrings this way.
+    mov rax, [rbx + PyFuncObject.func_doc]
+    test rax, rax
+    jz .doc_try_dict
+    ; __doc__ takes any object, so the field holds a Value: f.__doc__ = 12345
+    ; is legal, and an INCREF that dereferences it is a segfault.
+    INCREF_V rax, rcx
+    V_UNPACK rax, rdx
+    pop r12
+    pop rbx
+    leave
+    V_PACK rax, rdx
+    ret
+
+.doc_try_dict:
     mov rdi, [rbx + PyFuncObject.func_dict]
     test rdi, rdi
     jz .doc_from_code
@@ -1404,6 +1563,10 @@ DEF_FUNC func_traverse
     VISIT_PTR rdi
     mov rdi, [rbx + PyFuncObject.func_dict]
     VISIT_PTR rdi
+    mov rax, [rbx + PyFuncObject.func_qualname]
+    VISIT_V rax, rcx
+    mov rax, [rbx + PyFuncObject.func_doc]
+    VISIT_V rax, rcx
 
     pop rbx
     leave
@@ -1439,6 +1602,18 @@ DEF_FUNC func_clear
     jz .no_fdict
     call obj_decref
 .no_fdict:
+    mov rdi, [rbx + PyFuncObject.func_qualname]
+    mov qword [rbx + PyFuncObject.func_qualname], 0
+    test rdi, rdi
+    jz .no_fqual
+    DECREF_V rdi, rcx
+.no_fqual:
+    mov rdi, [rbx + PyFuncObject.func_doc]
+    mov qword [rbx + PyFuncObject.func_doc], 0
+    test rdi, rdi
+    jz .no_fdoc
+    DECREF_V rdi, rcx
+.no_fdoc:
 
     pop rbx
     leave

@@ -22,6 +22,7 @@ extern none_singleton
 extern raise_exception
 extern exc_TypeError_type
 extern exc_IndexError_type
+extern str_type
 extern type_type
 extern builtin_func_new
 extern sre_utf8_codepoint_to_byte
@@ -890,18 +891,57 @@ END_FUNC sre_match_groupdict_method
 
 ;; ============================================================================
 ;; sre_match_expand_method(self, args, nargs)
-;; expand(template) — stub: returns template as-is.
-;; Real expansion handled by re._expand() in pure Python.
+;; expand(template) -- the template mini-language, in src/pyo/sre_template.asm.
+;; This used to hand the template straight back, so `\1` expanded to `\1`.
 ;; ============================================================================
-DEF_FUNC sre_match_expand_method
+EX_SELF   equ 8
+EX_TMPL   equ 16
+EX_FRAME  equ 32            ; + 0 pushes = 32
+
+DEF_FUNC sre_match_expand_method, EX_FRAME
     ; rdi = args (fat array), rsi = nargs
-    ; args[1] = template
-    mov rax, [rdi + 8]       ; template payload
-    V_UNPACK rax, rdx       ; args[1]
-    INCREF_VAL rax, rdx
+    cmp rsi, 2
+    jne .ex_args
+    mov rax, [rdi]
+    mov [rbp - EX_SELF], rax
+    mov rax, [rdi + 8]
+    mov [rbp - EX_TMPL], rax
+
+    V_TEST_PTR rax, rcx
+    ja .ex_type
+    test rax, rax
+    jz .ex_type                 ; V_TEST_PTR lets a NULL Value through
+    ; A str SUBCLASS is a str.  An exact-type compare here refused
+    ; m.expand(S(template)) for `class S(str)`, where CPython expands it and
+    ; hands back a plain str -- and a template is exactly the sort of thing a
+    ; program keeps in a str subclass of its own.
+    mov rcx, [rax + PyObject.ob_type]
+    REQUIRE_STR_TYPE rcx, rdx, .ex_type
+
+    mov rdi, rax
+    mov rax, [rbp - EX_SELF]
+    mov rsi, [rax + SRE_MatchObject.pattern]
+    extern sre_template_parse
+    call sre_template_parse
+    mov [rbp - EX_TMPL], rax
+
+    mov rdi, rax
+    mov rsi, [rbp - EX_SELF]
+    extern sre_template_expand
+    call sre_template_expand
+    mov [rbp - EX_SELF], rax
+    mov rdi, [rbp - EX_TMPL]
+    call obj_decref
+    mov rax, [rbp - EX_SELF]
+    mov edx, TAG_PTR
     leave
-    V_PACK rax, rdx             ; builtins return one Value
+    V_PACK rax, rdx
     ret
+
+.ex_type:
+    RAISE exc_TypeError_type, "expected str instance"
+.ex_args:
+    RAISE exc_TypeError_type, "expand() takes exactly one argument"
 END_FUNC sre_match_expand_method
 
 ;; ============================================================================

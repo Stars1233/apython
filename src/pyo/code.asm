@@ -41,6 +41,65 @@ CN_FRAME equ 16             ; + 2 pushes = 32
 ;;     of inline cache at [rbx+2..rbx+7] and op_compare_op reads byte [rbx+2];
 ;;     either can sit on the last instruction of the object.
 ;; ============================================================================
+
+;; ============================================================================
+;; code_traverse / code_clear
+;;
+;; A code object holds nine owned objects, and one of them -- co_consts -- can
+;; hold another code object.  With no tp_traverse the collector could not see
+;; through any of them, so a module's code holding a function's code holding
+;; a reference back through func_globals was a cycle it could not break.
+;;
+;; The nine are not contiguous: co_code_len, co_posonlyargcount and
+;; co_firstlineno sit between co_exceptiontable and co_linetable, so this
+;; cannot be a strided loop the way code_spec_clear is.
+;; ============================================================================
+global code_traverse
+DEF_FUNC code_traverse
+    push rbx
+    mov rbx, rdi
+    mov rdi, [rbx + PyCodeObject.co_consts]
+    VISIT_PTR rdi
+    mov rdi, [rbx + PyCodeObject.co_names]
+    VISIT_PTR rdi
+    mov rdi, [rbx + PyCodeObject.co_localsplusnames]
+    VISIT_PTR rdi
+    mov rdi, [rbx + PyCodeObject.co_localspluskinds]
+    VISIT_PTR rdi
+    mov rdi, [rbx + PyCodeObject.co_filename]
+    VISIT_PTR rdi
+    mov rdi, [rbx + PyCodeObject.co_name]
+    VISIT_PTR rdi
+    mov rdi, [rbx + PyCodeObject.co_qualname]
+    VISIT_PTR rdi
+    mov rdi, [rbx + PyCodeObject.co_exceptiontable]
+    VISIT_PTR rdi
+    mov rdi, [rbx + PyCodeObject.co_linetable]
+    VISIT_PTR rdi
+    pop rbx
+    leave
+    ret
+END_FUNC code_traverse
+
+;; Only co_consts, which is the field that can close a cycle.  The rest are
+;; strings and bytes that hold nothing, and the eval loop reads co_names and
+;; the two localsplus tables through r14 and the frame -- clearing those out
+;; from under a frame that is still unwinding would be worse than the cycle.
+global code_clear
+DEF_FUNC code_clear
+    push rbx
+    mov rbx, rdi
+    mov rdi, [rbx + PyCodeObject.co_consts]
+    test rdi, rdi
+    jz .cc_done
+    mov qword [rbx + PyCodeObject.co_consts], 0
+    call obj_decref
+.cc_done:
+    pop rbx
+    leave
+    ret
+END_FUNC code_clear
+
 DEF_FUNC code_new, CN_FRAME
     push rbx
     push r12
@@ -51,7 +110,9 @@ DEF_FUNC code_new, CN_FRAME
     ; ap_malloc(sizeof(header) + code_len + CODE_TAIL_PAD)
     mov rdi, [rbx + CodeSpec.code_len]
     add rdi, PyCodeObject.co_code + CODE_TAIL_PAD
-    call ap_malloc                          ; fatal on OOM, never returns NULL
+    lea rsi, [rel code_type]
+    extern gc_alloc
+    call gc_alloc                           ; fatal on OOM, never returns NULL
     mov r12, rax
     mov [rbp - CN_CODE], rax
 
@@ -126,6 +187,12 @@ DEF_FUNC code_new, CN_FRAME
     xor esi, esi
     mov edx, CODE_TAIL_PAD
     call ap_memset
+
+    ; gc_track only now: it can trigger a collection, and the traverse would
+    ; walk fields that were not yet written.
+    mov rdi, r12
+    extern gc_track
+    call gc_track
 
     mov rax, r12
     pop r12
@@ -238,7 +305,8 @@ DEF_FUNC code_dealloc
 
     ; Free the code object itself
     mov rdi, rbx
-    call ap_free
+    extern gc_dealloc
+    call gc_dealloc
 
     pop r13
     pop r12
@@ -447,8 +515,8 @@ code_type:
     dq 0                ; tp_base
     dq 0                ; tp_dict
     dq 0                ; tp_mro
-    dq 0                ; tp_flags
+    dq TYPE_FLAG_HAVE_GC ; tp_flags
     dq 0                ; tp_bases
-    dq 0                ; tp_traverse
-    dq 0                ; tp_clear
+    dq code_traverse    ; tp_traverse
+    dq code_clear       ; tp_clear
     dq 0 ; tp_dictoffset

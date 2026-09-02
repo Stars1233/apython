@@ -311,7 +311,8 @@ DEF_FUNC import_init
     extern builtin_module_table
     xor r12d, r12d                          ; r12 = the row index
 .ii_mod_loop:
-    cmp r12, BUILTIN_MODULE_COUNT
+    extern builtin_module_count
+    cmp r12, [rel builtin_module_count]
     jge .ii_mods_done
     lea rax, [rel builtin_module_table]
     mov rcx, r12

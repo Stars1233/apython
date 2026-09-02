@@ -920,6 +920,7 @@ section .text
 ;; ============================================================================
 
 DEF_FUNC_BARE dict_dunder_getitem
+    REQUIRE_SELF_BARE dict_type
     ; The same guards its two siblings carry.  builtin_func_call validates
     ; neither the count nor the type for these -- add_method_to_dict registers
     ; them with no min or max -- so dict.__getitem__(5, "a") handed the
@@ -942,6 +943,7 @@ DEF_FUNC_BARE dict_dunder_getitem
 END_FUNC dict_dunder_getitem
 
 DEF_FUNC dict_dunder_setitem
+    REQUIRE_SELF dict_type
     cmp rsi, 3
     jne .dds_error
     mov rax, [rdi]
@@ -966,6 +968,7 @@ DEF_FUNC dict_dunder_setitem
 END_FUNC dict_dunder_setitem
 
 DEF_FUNC dict_dunder_delitem
+    REQUIRE_SELF dict_type
     cmp rsi, 2
     jne .ddd_error
     mov rax, [rdi]

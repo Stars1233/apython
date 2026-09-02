@@ -485,29 +485,28 @@ DEF_FUNC sre_charset, SM_FRAME
     jmp .cs_loop
 
 .cs_bigcharset:
-    ; BIGCHARSET: u32 count, then count * 256 bytes of block data
-    ; then 256 u8 block-index entries
-    ; For simplicity, handle the common case
+    ; BIGCHARSET <count> <256-byte block map> <count * 32-byte bitmaps>
+    ;
+    ; The map comes FIRST.  _optimize_charset builds the operand as
+    ; `[block] + mapping + data`, and this read the two the other way round:
+    ; the block number came out of the middle of a bitmap and the bitmap out
+    ; of the middle of the map.  For [a-z] under IGNORECASE the map is almost
+    ; all 2s, so the "bitmap" it landed on was 0x02020202 and exactly the code
+    ; points congruent to 1 mod 8 matched -- a, i, q, y and nothing else.
     mov eax, [rbx]             ; number of blocks
     add rbx, 4
-    ; block_index is at rbx + eax*32
-    ; For ch: block = block_index[ch >> 8], then check bitmap
     mov ecx, r12d
-    shr ecx, 8                 ; high byte
+    shr ecx, 8                 ; the code point's high byte
     cmp ecx, 256
-    jae .cs_big_skip
-    lea rdx, [rbx]            ; blocks start
-    imul rax, rax, 32         ; total block bytes (eax blocks * 32 bytes each)
-    add rax, rdx              ; rax = blocks_start + total_block_bytes
-    movzx ecx, byte [rax + rcx]  ; block_index[ch>>8]
-    ; Now get bit from block[block_index]: 256-bit bitmap
-    imul ecx, ecx, 32
-    lea rdx, [rbx + rcx]      ; block data
+    jae .cs_big_skip           ; above U+FFFF, which the map does not reach
+    movzx ecx, byte [rbx + rcx]     ; map[ch >> 8] = which bitmap
+    imul ecx, ecx, 32               ; each is 256 bits
+    lea rdx, [rbx + 256]            ; the bitmaps follow the map
+    add rdx, rcx
     mov eax, r12d
-    and eax, 0xff              ; low byte of ch
-    mov ecx, eax
-    shr ecx, 5
-    mov eax, [rdx + rcx*4]
+    and eax, 0xff
+    shr eax, 5
+    mov eax, [rdx + rax*4]
     mov ecx, r12d
     and ecx, 31
     bt eax, ecx
@@ -1249,15 +1248,19 @@ DEF_FUNC sre_state_init, SSI_FRAME
     mov [rbx + SRE_State.original_pos], r14
 
 .init_marks:
-    ; Allocate marks array
+    ; Allocate marks array.  Every reader here already treats -1 as "this
+    ; group never matched" -- and every one of them was reading whatever
+    ; ap_malloc left behind, because nothing ever wrote it.  marks_size is a
+    ; high-water mark, not a count of the marks that were set, so a group
+    ; below it that the match never reached is a hole, and the hole read as
+    ; the allocator's zeros: span (0, 0) and an empty string, where CPython
+    ; answers (-1, -1) and None.
     mov edi, SRE_MARKS_INITIAL * 8
     call ap_malloc
     mov [rbx + SRE_State.marks], rax
     mov qword [rbx + SRE_State.marks_count], SRE_MARKS_INITIAL
-    mov qword [rbx + SRE_State.marks_size], 0
-    mov qword [rbx + SRE_State.lastmark], -1
-    mov qword [rbx + SRE_State.lastindex], -1
-    mov qword [rbx + SRE_State.repeat_ctx], 0
+    mov rdi, rbx
+    call sre_state_reset_marks
 
     pop r14
     pop r13
@@ -1295,6 +1298,34 @@ DEF_FUNC sre_state_fini
 END_FUNC sre_state_fini
 
 ;; ============================================================================
+;; sre_state_reset_marks(SRE_State* state)
+;;
+;; Every attempt at a new starting position begins here, and so does the
+;; state's own construction.  The whole array goes back to -1: clearing only
+;; marks_size would leave the values a failed attempt wrote, and the next
+;; attempt's marks_size can rise back over them.
+;; ============================================================================
+global sre_state_reset_marks
+DEF_FUNC_BARE sre_state_reset_marks
+    mov qword [rdi + SRE_State.marks_size], 0
+    mov qword [rdi + SRE_State.lastmark], -1
+    mov qword [rdi + SRE_State.lastindex], -1
+    mov qword [rdi + SRE_State.repeat_ctx], 0
+    mov rax, [rdi + SRE_State.marks]
+    test rax, rax
+    jz .srm_done
+    mov rcx, [rdi + SRE_State.marks_count]
+.srm_loop:
+    test rcx, rcx
+    jz .srm_done
+    dec rcx
+    mov qword [rax + rcx*8], -1
+    jmp .srm_loop
+.srm_done:
+    ret
+END_FUNC sre_state_reset_marks
+
+;; ============================================================================
 ;; sre_state_set_mark(SRE_State* state, i64 mark_id, i64 pos)
 ;; Set a mark (group boundary) in the state.
 ;; ============================================================================
@@ -1311,16 +1342,29 @@ DEF_FUNC sre_state_set_mark
     ; Grow marks array
     lea rdi, [rsi + 1]
     shl rdi, 1                 ; double requested size
+    mov r8, [rbx + SRE_State.marks_count]   ; the old count, for the fill
     mov [rbx + SRE_State.marks_count], rdi
     shl rdi, 3                 ; * 8 bytes per mark
     push rsi
     push rdx
+    push r8
+    push r8                     ; a pair, so the call stays 16-byte aligned
     mov rsi, rdi               ; new size
     mov rdi, [rbx + SRE_State.marks]
     call ap_realloc
+    pop r8
+    pop r8
     pop rdx
     pop rsi
     mov [rbx + SRE_State.marks], rax
+    ; The new tail is uninitialised, and it has to read as "never matched".
+    mov rcx, [rbx + SRE_State.marks_count]
+.mark_fill:
+    cmp r8, rcx
+    jge .mark_fits
+    mov qword [rax + r8*8], -1
+    inc r8
+    jmp .mark_fill
 
 .mark_fits:
     ; Set mark
@@ -1340,11 +1384,17 @@ DEF_FUNC sre_state_set_mark
     mov [rbx + SRE_State.marks_size], rcx
 .no_update_size:
 
-    ; Update lastindex (group = mark_id / 2, but only for mark_id >= 2)
-    cmp rsi, 2
-    jb .done
+    ; Update lastindex.  CPython sets it on the *closing* mark of a group and
+    ; on no other -- `if (i & 1) state->lastindex = i/2 + 1` -- so mark 1
+    ; closes group 1.  Setting it on every mark from 2 up, at i/2, named the
+    ; wrong group by one and never named group 1 at all; lastgroup, which
+    ; indexes the pattern's indexgroup tuple with it, was therefore always
+    ; None.
+    test rsi, 1
+    jz .done
     mov rax, rsi
-    shr rax, 1                 ; group index
+    shr rax, 1
+    inc rax                     ; group = mark_id / 2 + 1
     mov [rbx + SRE_State.lastindex], rax
 
 .done:
@@ -1391,8 +1441,19 @@ END_FUNC sre_string_len
 ;;
 ;; Frame layout constants
 ;; ============================================================================
+;; sre_match(rdi = state, rsi = pattern, edx = toplevel)
+;;
+;; toplevel says whether a SUCCESS reached from here is the whole pattern's.
+;; It is not: a repeat's body, a lookaround's body and an atomic group's body
+;; are each compiled as their own sub-pattern ending in SUCCESS, so the checks
+;; that belong to the overall match -- fullmatch's "and it reaches the end",
+;; and must_advance -- have to skip them.  Without it re.fullmatch('a*', 'aa')
+;; was None: the body's SUCCESS at position 1 was tested against the end of
+;; the string and failed, so the repeat could never take a step.
 SM_STATE     equ 8
 SM_PATTERN   equ 16
+SM_TOPLEVEL  equ 24
+SM_LASTPOS   equ 32     ; the repeat's last_pos, kept across a body attempt
 SM_MFRAME    equ 96
 
 DEF_FUNC sre_match, SM_MFRAME
@@ -1404,6 +1465,7 @@ DEF_FUNC sre_match, SM_MFRAME
 
     mov [rbp - SM_STATE], rdi
     mov [rbp - SM_PATTERN], rsi
+    mov [rbp - SM_TOPLEVEL], edx
     mov r12, rdi               ; r12 = state
     mov rbx, rsi               ; rbx = pc (pattern pointer)
     mov r13, [rdi + SRE_State.str_pos]  ; r13 = current pos
@@ -1479,13 +1541,29 @@ DEF_FUNC sre_match, SM_MFRAME
     jmp .return
 
 .op_success:
+    ; Only the pattern's own SUCCESS answers to these; a body's does not.
+    cmp dword [rbp - SM_TOPLEVEL], 0
+    jz .op_success_ok
+
     ; Check fullmatch: if match_all, pos must == string_len
     cmp dword [r12 + SRE_State.match_all], 0
-    jz .op_success_ok
+    jz .os_must_advance
     mov rdi, r12
     call sre_string_len
     cmp r13, rax
     jne .op_failure
+
+.os_must_advance:
+    ; The scanning methods set must_advance after an empty match and search
+    ; the same position again.  An empty match AT that position is what they
+    ; already have, so it is refused here -- which makes the engine keep
+    ; backtracking, and is how '.*?' answers 'a' the second time round rather
+    ; than '' for ever.
+    cmp dword [r12 + SRE_State.must_advance], 0
+    jz .op_success_ok
+    cmp r13, [r12 + SRE_State.search_origin]
+    je .op_failure
+
 .op_success_ok:
     ; Save final position in state
     mov [r12 + SRE_State.str_pos], r13
@@ -1805,6 +1883,8 @@ DEF_FUNC sre_match, SM_MFRAME
     mov [r12 + SRE_State.str_pos], r13
     mov rdi, r12
     lea rsi, [r14 + 4]        ; pattern after offset
+    mov edx, [rbp - SM_TOPLEVEL]   ; a continuation of THIS match, so it
+                                   ; inherits whether this one is the top
     call sre_match
 
     test eax, eax
@@ -2028,6 +2108,7 @@ DEF_FUNC sre_match, SM_MFRAME
     push r14
     mov rdi, r12
     mov rsi, rbx               ; body pattern
+    xor edx, edx               ; a sub-pattern: its SUCCESS is not the match
     call sre_match
     pop r14
     pop rcx
@@ -2056,6 +2137,7 @@ DEF_FUNC sre_match, SM_MFRAME
     push r14
     mov rdi, r12
     mov rsi, rbx               ; body pattern
+    xor edx, edx               ; a sub-pattern: its SUCCESS is not the match
     call sre_match
     pop r14
     pop rcx
@@ -2094,6 +2176,8 @@ DEF_FUNC sre_match, SM_MFRAME
     push rcx                   ; twice: rsp must stay 16-byte aligned
     mov rdi, r12
     mov rsi, r14               ; tail pattern
+    mov edx, [rbp - SM_TOPLEVEL]   ; a continuation of THIS match, so it
+                                   ; inherits whether this one is the top
     call sre_match
     pop rcx
     pop rcx
@@ -2147,6 +2231,7 @@ DEF_FUNC sre_match, SM_MFRAME
     push rcx
     mov rdi, r12
     mov rsi, rbx
+    xor edx, edx               ; a sub-pattern: its SUCCESS is not the match
     call sre_match
     pop rcx
     pop r14
@@ -2175,6 +2260,8 @@ DEF_FUNC sre_match, SM_MFRAME
     push r14
     mov rdi, r12
     mov rsi, r14
+    mov edx, [rbp - SM_TOPLEVEL]   ; a continuation of THIS match, so it
+                                   ; inherits whether this one is the top
     call sre_match
     pop r14
     pop r9
@@ -2195,6 +2282,7 @@ DEF_FUNC sre_match, SM_MFRAME
     push r14
     mov rdi, r12
     mov rsi, rbx               ; body pattern
+    xor edx, edx               ; a sub-pattern: its SUCCESS is not the match
     call sre_match
     pop r14
     pop r9
@@ -2279,8 +2367,14 @@ DEF_FUNC sre_match, SM_MFRAME
     cmp rax, r8
     jb .mu_try_body
 
-    ; Save last_pos for zero-width check
-    push qword [r15 + SRE_RepeatContext.last_pos]
+    ; Save last_pos for the zero-width check.  It is a frame slot rather than
+    ; the stack because it has to survive the body attempt and be put BACK
+    ; when that attempt fails -- CPython's save_last_ptr.  Discarding it
+    ; instead left last_pos pointing at a position the engine had already
+    ; backtracked out of, the guard stopped firing, and an empty body could
+    ; be retried at the same place until the recursion limit.
+    mov rdx, [r15 + SRE_RepeatContext.last_pos]     ; rax is the count, live
+    mov [rbp - SM_LASTPOS], rdx
     mov [r15 + SRE_RepeatContext.last_pos], r13
 
     ; If count < max (or max == MAXREPEAT), try the body first (greedy).
@@ -2295,14 +2389,15 @@ DEF_FUNC sre_match, SM_MFRAME
     jb .mu_try_body_greedy
 
     ; count > max — try tail only
-    pop rax                    ; discard saved last_pos
+    mov rdx, [rbp - SM_LASTPOS]
+    mov [r15 + SRE_RepeatContext.last_pos], rdx
     jmp .mu_try_tail
 
 .mu_try_body_greedy:
     ; Zero-width check: if pos == last_pos, body matched empty, don't loop
-    pop rax                    ; saved last_pos
-    cmp r13, rax
-    je .mu_try_tail
+    mov rdx, [rbp - SM_LASTPOS]
+    cmp r13, rdx
+    je .mu_zero_width
 
     ; Save marks for backtracking
     push r13
@@ -2314,11 +2409,14 @@ DEF_FUNC sre_match, SM_MFRAME
     mov [r12 + SRE_State.str_pos], r13
     mov rdi, r12
     mov rsi, [r15 + SRE_RepeatContext.pattern]
+    mov edx, [rbp - SM_TOPLEVEL]   ; the body's continuation IS the tail --
+                                   ; MAX_UNTIL follows it -- so the SUCCESS it
+                                   ; eventually reaches is the pattern's own
     call sre_match
     test eax, eax
     jnz .mu_body_success
 
-    ; Body failed — restore marks, try tail
+    ; Body failed — restore marks, put last_pos back, try tail
     pop rdi
     push rdi
     mov rsi, r12
@@ -2327,8 +2425,16 @@ DEF_FUNC sre_match, SM_MFRAME
     call ap_free
     pop r13
 
+    mov rdx, [rbp - SM_LASTPOS]
+    mov [r15 + SRE_RepeatContext.last_pos], rdx
+
     ; Undo count increment
     dec qword [r15 + SRE_RepeatContext.count]
+    jmp .mu_try_tail
+
+.mu_zero_width:
+    mov rdx, [rbp - SM_LASTPOS]
+    mov [r15 + SRE_RepeatContext.last_pos], rdx
     jmp .mu_try_tail
 
 .mu_body_success:
@@ -2344,6 +2450,9 @@ DEF_FUNC sre_match, SM_MFRAME
     mov [r12 + SRE_State.str_pos], r13
     mov rdi, r12
     mov rsi, [r15 + SRE_RepeatContext.pattern]
+    mov edx, [rbp - SM_TOPLEVEL]   ; the body's continuation IS the tail --
+                                   ; MAX_UNTIL follows it -- so the SUCCESS it
+                                   ; eventually reaches is the pattern's own
     call sre_match
     test eax, eax
     jz .mu_body_required_fail
@@ -2365,6 +2474,8 @@ DEF_FUNC sre_match, SM_MFRAME
     mov [r12 + SRE_State.str_pos], r13
     mov rdi, r12
     mov rsi, rbx               ; tail = code after MAX_UNTIL
+    mov edx, [rbp - SM_TOPLEVEL]   ; a continuation of THIS match, so it
+                                   ; inherits whether this one is the top
     call sre_match
     test eax, eax
     jnz .mu_tail_success
@@ -2410,6 +2521,8 @@ DEF_FUNC sre_match, SM_MFRAME
     mov [r12 + SRE_State.str_pos], r13
     mov rdi, r12
     mov rsi, rbx
+    mov edx, [rbp - SM_TOPLEVEL]   ; a continuation of THIS match, so it
+                                   ; inherits whether this one is the top
     call sre_match
     test eax, eax
     jnz .miu_tail_success
@@ -2439,6 +2552,7 @@ DEF_FUNC sre_match, SM_MFRAME
     mov [r12 + SRE_State.str_pos], r13
     mov rdi, r12
     mov rsi, [r15 + SRE_RepeatContext.pattern]
+    xor edx, edx               ; a sub-pattern: its SUCCESS is not the match
     call sre_match
     test eax, eax
     jnz .miu_body_ok
@@ -2488,6 +2602,7 @@ DEF_FUNC sre_match, SM_MFRAME
     mov [r12 + SRE_State.str_pos], r13
     mov rdi, r12
     mov rsi, rbx               ; assert body pattern
+    xor edx, edx               ; a sub-pattern: its SUCCESS is not the match
     call sre_match
     pop rbx
     pop r13
@@ -2518,6 +2633,7 @@ DEF_FUNC sre_match, SM_MFRAME
     mov [r12 + SRE_State.str_pos], r13
     mov rdi, r12
     mov rsi, rbx
+    xor edx, edx               ; a sub-pattern: its SUCCESS is not the match
     call sre_match
     pop rbx
     pop r13
@@ -2538,6 +2654,7 @@ DEF_FUNC sre_match, SM_MFRAME
     mov [r12 + SRE_State.str_pos], r13
     mov rdi, r12
     mov rsi, rbx               ; body pattern
+    xor edx, edx               ; a sub-pattern: its SUCCESS is not the match
     call sre_match
     pop r14                    ; saved pos (discard on success, restore on failure)
     test eax, eax
@@ -2574,6 +2691,7 @@ DEF_FUNC sre_match, SM_MFRAME
     push rcx
     mov rdi, r12
     mov rsi, rbx
+    xor edx, edx               ; a sub-pattern: its SUCCESS is not the match
     call sre_match
     pop rcx
     pop r14
@@ -2603,6 +2721,7 @@ DEF_FUNC sre_match, SM_MFRAME
     push rcx
     mov rdi, r12
     mov rsi, rbx
+    xor edx, edx               ; a sub-pattern: its SUCCESS is not the match
     call sre_match
     pop rcx
     pop r14
@@ -2650,6 +2769,7 @@ DEF_FUNC sre_match, SM_MFRAME
     push rcx
     mov rdi, r12
     mov rsi, rbx
+    xor edx, edx               ; a sub-pattern: its SUCCESS is not the match
     call sre_match
     pop rcx
     pop r14
@@ -2679,6 +2799,7 @@ DEF_FUNC sre_match, SM_MFRAME
     push rcx
     mov rdi, r12
     mov rsi, rbx
+    xor edx, edx               ; a sub-pattern: its SUCCESS is not the match
     call sre_match
     pop rcx
     pop r14
@@ -2967,9 +3088,28 @@ DEF_FUNC sre_restore_marks
     lea rsi, [r12 + 24]
     mov rdx, rcx
     shl rdx, 3
+    push rcx
+    push rcx                    ; a pair, so the call stays 16-byte aligned
     call ap_memcpy
+    pop rcx
+    pop rcx
 
 .restore_done:
+    ; Above the restored size sit the marks the abandoned branch wrote.  They
+    ; were harmless while marks_size gated every read; now that the array
+    ; itself carries the sentinel, a later mark can raise marks_size back over
+    ; them and they would read as matches.
+    mov rax, [rbx + SRE_State.marks]
+    test rax, rax
+    jz .restore_out
+    mov rdx, [rbx + SRE_State.marks_count]
+.restore_clear:
+    cmp rcx, rdx
+    jge .restore_out
+    mov qword [rax + rcx*8], -1
+    inc rcx
+    jmp .restore_clear
+.restore_out:
     pop r12
     pop rbx
     leave
@@ -2987,6 +3127,7 @@ DEF_FUNC sre_search, 32
 
     mov r12, rdi               ; state
     mov r13, [rdi + SRE_State.str_pos]  ; starting pos
+    mov [r12 + SRE_State.search_origin], r13
 
     ; Get string length
     mov rdi, r12
@@ -2998,10 +3139,8 @@ DEF_FUNC sre_search, 32
     ja .search_fail
 
     ; Reset marks for each attempt
-    mov qword [r12 + SRE_State.marks_size], 0
-    mov qword [r12 + SRE_State.lastmark], -1
-    mov qword [r12 + SRE_State.lastindex], -1
-    mov qword [r12 + SRE_State.repeat_ctx], 0
+    mov rdi, r12
+    call sre_state_reset_marks
     mov [r12 + SRE_State.str_pos], r13
     mov [r12 + SRE_State.str_start], r13
 
@@ -3009,6 +3148,7 @@ DEF_FUNC sre_search, 32
     mov rdi, r12
     mov rsi, [r12 + SRE_State.pattern]
     mov rsi, [rsi + SRE_PatternObject.code]
+    mov edx, 1                 ; toplevel: this SUCCESS ends the pattern
     call sre_match
     test eax, eax
     jnz .search_found

@@ -27,6 +27,7 @@ gc_gen0:
     dq gc_gen0          ; gc_prev -> self
 global gc_gen0_count
 gc_gen0_count:  dq 0
+global gc_gen0_threshold
 gc_gen0_threshold: dq 700
 
 ; Generation 1 sentinel
@@ -34,7 +35,9 @@ align 8
 gc_gen1:
     dq gc_gen1
     dq gc_gen1
+global gc_gen1_count
 gc_gen1_count:  dq 0
+global gc_gen1_threshold
 gc_gen1_threshold: dq 10
 gc_gen1_collections: dq 0
 
@@ -43,7 +46,9 @@ align 8
 gc_gen2:
     dq gc_gen2
     dq gc_gen2
+global gc_gen2_count
 gc_gen2_count:  dq 0
+global gc_gen2_threshold
 gc_gen2_threshold: dq 10
 gc_gen2_collections: dq 0
 
@@ -304,15 +309,17 @@ DEF_FUNC gc_dealloc
 END_FUNC gc_dealloc
 
 ;; ============================================================================
-;; gc_collect_gen(edi=generation)
+;; gc_collect_gen(edi=generation) -> rax = the unreachable objects it cleared
 ;; Core cycle collection algorithm.
 ;; ============================================================================
 ; Local frame layout
 GCG_GEN     equ 8
 GCG_YOUNG   equ 24    ; 16-byte PyGC_Head sentinel on stack (next+prev)
 GCG_UNREACH equ 40    ; 16-byte PyGC_Head sentinel on stack
-GCG_FRAME   equ 48          ; + 5 pushes = 88, not 16-aligned
+GCG_FOUND   equ 56    ; how many unreachable objects this pass cleared
+GCG_FRAME   equ 64          ; + 5 pushes = 104
 
+global gc_collect_gen
 DEF_FUNC gc_collect_gen, GCG_FRAME
     push rbx
     push r12
@@ -321,6 +328,7 @@ DEF_FUNC gc_collect_gen, GCG_FRAME
     push r15
 
     mov [rbp - GCG_GEN], edi    ; save generation
+    mov qword [rbp - GCG_FOUND], 0
 
     ; Set collecting flag
     mov qword [rel gc_collecting], 1
@@ -493,6 +501,7 @@ DEF_FUNC gc_collect_gen, GCG_FRAME
     mov rbx, [r15 + PyGC_Head.gc_next]
     cmp rbx, r15
     je .phase5_done
+    inc qword [rbp - GCG_FOUND]            ; what gc.collect() answers with
 
     lea r13, [rbx + GC_HEAD_SIZE]          ; r13 = obj
     inc qword [r13 + PyObject.ob_refcnt]
@@ -580,6 +589,7 @@ DEF_FUNC gc_collect_gen, GCG_FRAME
 .collect_done:
     ; Clear collecting flag
     mov qword [rel gc_collecting], 0
+    mov rax, [rbp - GCG_FOUND]
 
     pop r15
     pop r14

@@ -10,6 +10,7 @@
 
 
 ; External functions
+extern frozenset_type
 extern obj_decref
 extern tuple_type
 extern none_singleton
@@ -19,6 +20,8 @@ extern raise_exception
 extern exc_TypeError_type
 extern exc_KeyError_type
 extern set_type
+extern frozenset_hash
+extern int_from_i64
 extern tuple_type_call
 extern obj_dealloc
 
@@ -29,6 +32,9 @@ extern set_add
 extern set_contains
 extern set_remove
 extern set_new
+extern set_new_of_type
+extern set_result_type
+extern set_coerce_operand
 
 ; --- moved to a sibling file by the split ---
 
@@ -239,8 +245,30 @@ DEF_FUNC set_method_copy
 
     mov r14, [rdi]          ; self (source set)
 
-    ; Create new empty set
-    call set_new
+    ; An exact frozenset is immutable, so CPython hands the argument straight
+    ; back rather than copying it -- f.copy() is f.
+    mov rax, [r14 + PyObject.ob_type]
+    lea rcx, [rel frozenset_type]
+    cmp rax, rcx
+    jne .smcp_build
+    INCREF r14
+    mov rax, r14
+    mov edx, TAG_PTR
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    V_PACK rax, rdx
+    ret
+
+.smcp_build:
+    ; Create new empty set, of the left operand's kind: a frozenset operator
+    ; or method answers a frozenset, not a set.
+    mov rdi, r14
+    call set_result_type
+    mov rdi, rax
+    call set_new_of_type
     mov rbx, rax            ; rbx = new set
 
     ; Iterate source entries
@@ -299,12 +327,25 @@ DEF_FUNC set_method_union
     jne .smu_error
 
     mov r14, [rdi]          ; self
-    mov r15, [rdi + 8]     ; other set
+    ; The method forms take any iterable where the operators take only a set.
+    ; This read the argument as a PyDictObject whatever it was, so
+    ; s.difference([1]) walked a list's header as a hash table, found nothing
+    ; occupied, and answered s unchanged.
+    mov rdi, [rdi + 8]
+    call set_coerce_operand
+    test rax, rax
+    jz .smu_fail
+    mov r15, rax            ; owned: the set itself, or one built from it
 
     ; Copy self → new set
     mov r12, [r14 + PyDictObject.entries]
     mov r13, [r14 + PyDictObject.capacity]
-    call set_new
+    ; The result takes the left operand's kind: a frozenset operator or method
+    ; answers a frozenset, not a set.
+    mov rdi, r14
+    call set_result_type
+    mov rdi, rax
+    call set_new_of_type
     mov rbx, rax            ; new set
     xor ecx, ecx
 
@@ -355,6 +396,8 @@ DEF_FUNC set_method_union
     jmp .smu_add_loop
 
 .smu_done:
+    mov rdi, r15
+    call obj_decref     ; the coerced operand
     mov rax, rbx
     mov edx, TAG_PTR
     pop r15
@@ -364,6 +407,18 @@ DEF_FUNC set_method_union
     pop rbx
     leave
     V_PACK rax, rdx             ; builtins return one Value
+    ret
+
+.smu_fail:
+    ; not iterable, or iterating it raised
+    RET_NULL
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    V_PACK rax, rdx
     ret
 
 .smu_error:
@@ -497,9 +552,22 @@ DEF_FUNC set_method_intersection
     jne .smi_error
 
     mov r14, [rdi]          ; self
-    mov r15, [rdi + 8]     ; other
+    ; The method forms take any iterable where the operators take only a set.
+    ; This read the argument as a PyDictObject whatever it was, so
+    ; s.difference([1]) walked a list's header as a hash table, found nothing
+    ; occupied, and answered s unchanged.
+    mov rdi, [rdi + 8]
+    call set_coerce_operand
+    test rax, rax
+    jz .smi_fail
+    mov r15, rax            ; owned: the set itself, or one built from it
 
-    call set_new
+    ; The result takes the left operand's kind: a frozenset operator or method
+    ; answers a frozenset, not a set.
+    mov rdi, r14
+    call set_result_type
+    mov rdi, rax
+    call set_new_of_type
     mov rbx, rax            ; new set
 
     ; Iterate self, add if in other
@@ -538,6 +606,8 @@ DEF_FUNC set_method_intersection
     jmp .smi_loop
 
 .smi_done:
+    mov rdi, r15
+    call obj_decref     ; the coerced operand
     mov rax, rbx
     mov edx, TAG_PTR
     pop r15
@@ -547,6 +617,18 @@ DEF_FUNC set_method_intersection
     pop rbx
     leave
     V_PACK rax, rdx             ; builtins return one Value
+    ret
+
+.smi_fail:
+    ; not iterable, or iterating it raised
+    RET_NULL
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    V_PACK rax, rdx
     ret
 
 .smi_error:
@@ -568,9 +650,22 @@ DEF_FUNC set_method_difference
     jne .smdf_error
 
     mov r14, [rdi]          ; self
-    mov r15, [rdi + 8]     ; other
+    ; The method forms take any iterable where the operators take only a set.
+    ; This read the argument as a PyDictObject whatever it was, so
+    ; s.difference([1]) walked a list's header as a hash table, found nothing
+    ; occupied, and answered s unchanged.
+    mov rdi, [rdi + 8]
+    call set_coerce_operand
+    test rax, rax
+    jz .smdf_fail
+    mov r15, rax            ; owned: the set itself, or one built from it
 
-    call set_new
+    ; The result takes the left operand's kind: a frozenset operator or method
+    ; answers a frozenset, not a set.
+    mov rdi, r14
+    call set_result_type
+    mov rdi, rax
+    call set_new_of_type
     mov rbx, rax            ; new set
 
     ; Iterate self, add if NOT in other
@@ -609,6 +704,8 @@ DEF_FUNC set_method_difference
     jmp .smdf_loop
 
 .smdf_done:
+    mov rdi, r15
+    call obj_decref     ; the coerced operand
     mov rax, rbx
     mov edx, TAG_PTR
     pop r15
@@ -618,6 +715,18 @@ DEF_FUNC set_method_difference
     pop rbx
     leave
     V_PACK rax, rdx             ; builtins return one Value
+    ret
+
+.smdf_fail:
+    ; not iterable, or iterating it raised
+    RET_NULL
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    V_PACK rax, rdx
     ret
 
 .smdf_error:
@@ -639,9 +748,22 @@ DEF_FUNC set_method_symmetric_difference
     jne .smsd_error
 
     mov r14, [rdi]          ; self
-    mov r15, [rdi + 8]     ; other
+    ; The method forms take any iterable where the operators take only a set.
+    ; This read the argument as a PyDictObject whatever it was, so
+    ; s.difference([1]) walked a list's header as a hash table, found nothing
+    ; occupied, and answered s unchanged.
+    mov rdi, [rdi + 8]
+    call set_coerce_operand
+    test rax, rax
+    jz .smsd_fail
+    mov r15, rax            ; owned: the set itself, or one built from it
 
-    call set_new
+    ; The result takes the left operand's kind: a frozenset operator or method
+    ; answers a frozenset, not a set.
+    mov rdi, r14
+    call set_result_type
+    mov rdi, rax
+    call set_new_of_type
     mov rbx, rax            ; new set
 
     ; Add elements in self but NOT in other
@@ -712,6 +834,8 @@ DEF_FUNC set_method_symmetric_difference
     jmp .smsd_other_loop
 
 .smsd_done:
+    mov rdi, r15
+    call obj_decref     ; the coerced operand
     mov rax, rbx
     mov edx, TAG_PTR
     pop r15
@@ -721,6 +845,18 @@ DEF_FUNC set_method_symmetric_difference
     pop rbx
     leave
     V_PACK rax, rdx             ; builtins return one Value
+    ret
+
+.smsd_fail:
+    ; not iterable, or iterating it raised
+    RET_NULL
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    V_PACK rax, rdx
     ret
 
 .smsd_error:
@@ -939,3 +1075,72 @@ DEF_FUNC set_method_isdisjoint
 .smdj_error:
     RAISE exc_TypeError_type, "isdisjoint() takes exactly one argument"
 END_FUNC set_method_isdisjoint
+
+;; ============================================================================
+;; frozenset.__hash__(self) -> int
+;;
+;; frozenset's OWN hash, not the argument's.  With no __hash__ in
+;; frozenset's tp_dict the lookup walked the MRO to object's, which answers
+;; the address -- so frozenset.__hash__(f) and hash(f) disagreed on the one
+;; type that exists to be a dict key.
+;;
+;; It cannot go through obj_hash the way generic_method_hash does: that reads
+;; tp_hash, and a frozenset subclass defining __hash__ of its own has
+;; slot_tp_hash there, so the unbound frozenset.__hash__ would re-enter the
+;; subclass's method instead of naming the type it was reached through.
+;; ============================================================================
+global frozenset_dunder_hash
+DEF_FUNC frozenset_dunder_hash
+    REQUIRE_SELF frozenset_type
+    cmp rsi, 1
+    jne .fdh_error
+    mov rdi, [rdi]
+    mov edx, TAG_PTR            ; tp_hash forwards edx to int_unwrap
+    call frozenset_hash
+    ; A hash does not fit an int immediate -- it is a full 64 bits, and
+    ; adding v_int_bias to one lands in the float range.  int_from_i64 boxes
+    ; it when it has to, which is what builtin_hash_fn does.
+    mov rdi, rax
+    call int_from_i64
+    leave
+    V_PACK rax, rdx
+    ret
+.fdh_error:
+    RAISE exc_TypeError_type, "__hash__() takes no arguments"
+END_FUNC frozenset_dunder_hash
+
+;; ============================================================================
+;; set_sub_fill(rdi = the new instance, rsi = the args after cls, rdx = count)
+;;
+;; Fills a frozenset subclass from its constructor argument.  frozenset is
+;; immutable, so -- exactly like tuple, which container_dunder_new already
+;; special-cases for this reason -- its contents have to arrive through
+;; __new__.  It has no __init__ of its own, as CPython's has none; a SET
+;; subclass does, and fills there, which is why only the frozen side needs
+;; this.
+;; ============================================================================
+SSF_ARGS  equ 16            ; a two-slot argument array for set_method_update
+SSF_FRAME equ 32            ; + 0 pushes = 32, 16-aligned
+global set_sub_fill
+DEF_FUNC set_sub_fill, SSF_FRAME
+    test rdx, rdx
+    jz .ssf_done                ; frozenset() -- nothing to fill from
+
+    mov [rbp - SSF_ARGS], rdi
+    mov rax, [rsi]
+    mov [rbp - SSF_ARGS + 8], rax
+    lea rdi, [rbp - SSF_ARGS]
+    mov esi, 2
+    call set_method_update      ; returns None, which is ours to release
+    V_UNPACK rax, rdx
+    test edx, edx
+    jz .ssf_done
+    cmp edx, TAG_PTR
+    jne .ssf_done
+    mov rdi, rax
+    call obj_decref
+
+.ssf_done:
+    leave
+    ret
+END_FUNC set_sub_fill

@@ -236,3 +236,47 @@ print("churn        :", len([[i, i] for i in range(3000)]))
 print("lengths      :", [len(kept[i]) for i in (0, 1, 30, 59)])
 print("tails        :", bytes(kept[7][-4:]), bytes(kept[59][-4:]))
 print("heads        :", bytes(kept[7][:2]))
+
+print()
+print("--- an empty right-hand side deletes an extended slice ---")
+# b[::2] = b'' removes those positions, where a length mismatch would raise.
+# CPython's bytearray_ass_subscript special-cases needed == 0 in the extended
+# branch; here only a NULL value counted as a delete, so every one of these
+# was "attempt to assign bytes of size 0 to extended slice of size 2".  This
+# is bytearray's alone -- L[::2] = [] raises in CPython too, and still does.
+for label, code in (
+        ("b[::2]   = b''", "b[::2] = b''"),
+        ("b[1::2]  = b''", "b[1::2] = b''"),
+        ("b[::3]   = b''", "b[::3] = b''"),
+        ("b[::-1]  = b''", "b[::-1] = b''"),
+        ("b[::-2]  = b''", "b[::-2] = b''"),
+        ("b[1:1:2] = b''", "b[1:1:2] = b''"),
+        ("b[::2]   = bytearray()", "b[::2] = bytearray()"),
+        ("b[::2]   = b'xy'", "b[::2] = b'xy'"),
+        ("b[::2]   = b'x'", "b[::2] = b'x'"),
+        ("del b[::2]", "del b[::2]"),
+):
+    b = bytearray(b"abcd")
+    try:
+        exec(code)
+        print("%-22s -> %r" % (label, bytes(b)))
+    except Exception as e:
+        print("%-22s -> %s: %s" % (label, type(e).__name__, e))
+
+# The memoryview guard still refuses a compaction under an export.
+b = bytearray(b"abcd")
+mv = memoryview(b)
+try:
+    b[::2] = b""
+    print("exported     : no error")
+except BufferError as e:
+    print("exported     : BufferError")
+del mv
+
+# A list is unchanged: it raises for the same assignment in both.
+l = [1, 2, 3, 4]
+try:
+    l[::2] = []
+    print("list         :", l)
+except ValueError as e:
+    print("list         : ValueError:", e)

@@ -160,6 +160,46 @@
     lea %1, [rel %%str]
 %endmacro
 
+; REQUIRE_SELF / REQUIRE_SELF_BARE type_label
+;
+; A dunder registered by name is called with whatever the caller passed, and
+; the slot behind it decodes args[0] without asking -- so str.__getitem__(5, 0)
+; is a wild pointer, not an error.  Both forms read args[0] out of rdi, hand
+; it to dunder_require_self, and leave rdi untouched; the helper raises and
+; does not return when the receiver is of the wrong type.
+;
+; Both preserve rdi AND rsi.  rsi is the argument count, and every one of
+; these checks its arity after the receiver, so clobbering it turns a correct
+; call into "expected exactly one argument".
+;
+; Two spellings only because of the stack: inside DEF_FUNC the frame has
+; already realigned rsp, and inside DEF_FUNC_BARE it has not.
+%macro REQUIRE_SELF 1
+    push rdi
+    push rsi                    ; rsi is the argument COUNT here, not a value
+    mov rdi, [rdi]
+    lea rsi, [rel %1]
+    xor edx, edx
+    extern dunder_require_self
+    call dunder_require_self
+    pop rsi
+    pop rdi
+%endmacro
+
+%macro REQUIRE_SELF_BARE 1
+    push rdi
+    push rsi
+    sub rsp, 8
+    mov rdi, [rdi]
+    lea rsi, [rel %1]
+    xor edx, edx
+    extern dunder_require_self
+    call dunder_require_self
+    add rsp, 8
+    pop rsi
+    pop rdi
+%endmacro
+
 ; Raise an exception with a literal message.  436 sites hand-rolled this triple.
 ; raise_exception does not return, so nothing follows it.
 ;
@@ -168,6 +208,18 @@
 ; The macro declares no externs of its own: eval.asm *defines* raise_exception
 ; and exception.asm defines the exception types, so an extern here would
 ; collide with the definition.  Declare them per file, as before.
+; A Value with the same TYPE as a (payload, tag) pair, for a message that only
+; wants the type name.  An immediate's payload is not a Value, and packing a
+; large int would box it -- on a path that is about to raise, and so about to
+; abandon the stack that would have freed it.  Zero has the same type.
+%macro VALUE_FOR_TYPE 2         ; %1 = payload in / Value out, %2 = tag (clobbered)
+    cmp %2, TAG_PTR
+    je %%done
+    xor %1, %1
+    V_PACK %1, %2
+%%done:
+%endmacro
+
 %macro RAISE 2                  ; %1 = exception type symbol, %2 = message
     lea rdi, [rel %1]
     CSTRING rsi, %2

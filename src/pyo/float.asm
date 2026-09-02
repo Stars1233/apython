@@ -104,14 +104,56 @@ DEF_FUNC_BARE float_to_f64
     cvtsi2sd xmm0, rax
     ret
 
+FTF_RBX equ 8               ; where .from_gmp_int's push of rbx lands
+
 .from_gmp_int:
+    ; mpz_get_d TRUNCATES toward zero, and CPython's PyLong_AsDouble rounds to
+    ; nearest even: float(10**30) was 9.999999999999999e+29 rather than 1e+30,
+    ; and every complex() and comparison of such a value inherited it.
+    ;
+    ; The decimal string and strtod get it right -- strtod is required to
+    ; round to nearest even -- and this path already pays for GMP, so the
+    ; conversion costs nothing that matters.
     push rbp
     mov rbp, rsp
-    and rsp, -16              ; ensure 16-byte alignment for GMP call
+    push rbx
+    sub rsp, 8
+    and rsp, -16
+    mov rax, rdi
+    mov edx, TAG_PTR
+    V_PACK rax, rdx
+    mov rdi, rax
+    mov esi, 10
+    xor edx, edx
+    extern int_base_str
+    call int_base_str
+    test rax, rax
+    jz .ftf_gmp_fallback
+    mov rbx, rax
+    mov rdi, rax
+    xor esi, esi
+    extern strtod
+    call strtod wrt ..plt
+    movq rax, xmm0
+    push rax
+    mov rdi, rbx
+    extern ap_free
+    call ap_free
+    pop rax
+    movq xmm0, rax
+    lea rsp, [rbp - FTF_RBX]    ; rbx sits just below the saved rbp
+    pop rbx
+    leave
+    ret
+
+.ftf_gmp_fallback:
+    ; No string to convert: fall back on the truncating primitive rather than
+    ; answering nothing.
     INT_NEED_MPZ rdi
     lea rdi, [rdi + PyIntObject.mpz]
     call __gmpz_get_d wrt ..plt
-    ; result in xmm0
+    lea rsp, [rbp - FTF_RBX]
+    pop rbx
     leave
     ret
 END_FUNC float_to_f64
@@ -404,27 +446,37 @@ DEF_FUNC float_format_spec, FS_FRAME
     lea rdi, [rbp - FS_BUF]         ; buffer (48 bytes)
     mov esi, 48               ; bufsz
 
+    ; Each of the six letters has its own conversion.  The uppercase ones are
+    ; not cosmetic: C99's %F and %G spell a non-finite result INF and NAN,
+    ; which is the whole difference CPython draws between 'f' and 'F'.  'F'
+    ; used to share fmt_f, so format(float('inf'), 'F') was "inf"; 'G' had no
+    ; case at all and fell to the %g default, so format(1e20, 'G') was
+    ; "1e+20".  'E' was right by accident of already having fmt_E.
     movzx eax, byte [rbp - FS_TYPE]  ; type char
     cmp al, 'f'
     je .ffs_use_f
-    ; 'F' is 'f' with INF and NAN spelled in capitals.  It used to fall through
-    ; to the %g default, so format(1.5, "F") was "1.5" where CPython gives
-    ; "1.500000".  The capitalisation of a non-finite result is still missing;
-    ; bugs.md records it.
     cmp al, 'F'
-    je .ffs_use_f
+    je .ffs_use_F
     cmp al, 'e'
     je .ffs_use_e
     cmp al, 'E'
     je .ffs_use_E
+    cmp al, 'G'
+    je .ffs_use_G
     ; Default: use %.*g
     lea rdx, [rel fmt_g]
     jmp .ffs_do_snprintf
 .ffs_use_f:
     lea rdx, [rel fmt_f]
     jmp .ffs_do_snprintf
+.ffs_use_F:
+    lea rdx, [rel fmt_F]
+    jmp .ffs_do_snprintf
 .ffs_use_e:
     lea rdx, [rel fmt_e]
+    jmp .ffs_do_snprintf
+.ffs_use_G:
+    lea rdx, [rel fmt_G]
     jmp .ffs_do_snprintf
 .ffs_use_E:
     lea rdx, [rel fmt_E]
@@ -619,11 +671,13 @@ DEF_FUNC_BARE float_bool
     movq xmm0, rdi
     xorpd xmm1, xmm1         ; xmm1 = 0.0
     ucomisd xmm0, xmm1
-    je .is_zero
+    jp .fbool_true           ; UNORDERED sets ZF too: bool(nan) is True, and
+    je .is_zero              ; the je alone made it False for a float subclass
+.fbool_true:
     mov eax, 1
     ret
 .is_zero:
-    ; Also check for -0.0 (which is also falsy)
+    ; -0.0 compares equal to 0.0, so it lands here too, which is right.
     xor eax, eax
     ret
 END_FUNC float_bool
@@ -769,11 +823,15 @@ DEF_FUNC float_truediv, FB_FRAME
     V_UNPACK rsi, rcx           ; right Value -> (payload, tag)
     FLOAT_BINOP_SETUP
 
-    ; Check for division by zero
+    ; Check for division by zero.  ucomisd sets ZF for UNORDERED too, so the
+    ; je alone read a NaN divisor as a zero one and 1.0 / float("nan") raised
+    ; instead of answering nan.
     movsd xmm1, [rbp - FB_RIGHT]
     xorpd xmm2, xmm2
     ucomisd xmm1, xmm2
+    jp .div_nonzero
     je .div_zero
+.div_nonzero:
 
     movsd xmm0, [rbp - FB_LEFT]
     divsd xmm0, xmm1
@@ -791,11 +849,13 @@ DEF_FUNC float_floordiv, FB_FRAME
     V_UNPACK rsi, rcx           ; right Value -> (payload, tag)
     FLOAT_BINOP_SETUP
 
-    ; Check for division by zero
+    ; Check for division by zero; jp first, as in float_truediv.
     movsd xmm1, [rbp - FB_RIGHT]
     xorpd xmm2, xmm2
     ucomisd xmm1, xmm2
+    jp .floordiv_nonzero
     je .floordiv_zero
+.floordiv_nonzero:
 
     movsd xmm0, [rbp - FB_LEFT]
     divsd xmm0, xmm1
@@ -815,11 +875,13 @@ DEF_FUNC float_mod, FB_FRAME
     V_UNPACK rsi, rcx           ; right Value -> (payload, tag)
     FLOAT_BINOP_SETUP
 
-    ; Check for division by zero
+    ; Check for division by zero; jp first, as in float_truediv.
     movsd xmm1, [rbp - FB_RIGHT]
     xorpd xmm2, xmm2
     ucomisd xmm1, xmm2
+    jp .mod_nonzero
     je .mod_zero
+.mod_nonzero:
 
     ; a % b = a - floor(a/b) * b
     movsd xmm0, [rbp - FB_LEFT]       ; a
@@ -1025,11 +1087,22 @@ DEF_FUNC float_pow, FB_FRAME
 END_FUNC float_pow
 
 ;; ============================================================================
-;; float_int(rdi = raw double bits) -> SmallInt or GMP int
+;; float_int(rdi = self Value) -> SmallInt or GMP int
 ;; Convert float to int by truncation.
+;;
+;; A Value, as every other nb_ slot takes: an immediate, or a subclass
+;; instance whose double sits inline at the base's offset.  It used to take
+;; raw double bits, which every caller had to know and which made it the one
+;; slot a generic thunk could not call.
 ;; ============================================================================
 DEF_FUNC float_int
-
+    V_TEST_PTR rdi, rax
+    ja .fi_immediate
+    mov rdi, [rdi + PyFloatObject.value]
+    jmp .fi_have_bits
+.fi_immediate:
+    V_TO_F64 rdi
+.fi_have_bits:
     movq xmm0, rdi
 
     ; Check for NaN/inf.  CPython words and TYPES these differently: a NaN is
@@ -1060,6 +1133,7 @@ DEF_FUNC float_int
     cvttsd2si rdi, xmm0
     call int_from_i64
     leave
+    V_PACK rax, rdx             ; one Value out, as the slot's callers expect
     ret
 
 .fi_big:
@@ -1082,6 +1156,7 @@ DEF_FUNC float_int
     add rsp, 24
     pop rbx
     leave
+    V_PACK rax, rdx             ; a pointer is its own Value; symmetry with above
     ret
 
 .not_a_number:
@@ -1135,7 +1210,48 @@ DEF_FUNC float_compare, FC_FRAME
     mov ecx, [rbp - FC_LTAG]
     mov r8d, [rbp - FC_RTAG]
 .fc_right_ok:
+    ; An int too large for a double to hold exactly cannot be compared through
+    ; one: the conversion rounds, and `10**30 == 1e30` would answer True where
+    ; CPython compares the two exactly and says False.  float_to_f64 rounds to
+    ; nearest now rather than truncating, which makes that visible; before, the
+    ; truncation happened to fall the other way.
+    mov rdi, [rbp - FC_LSAVE]
+    mov esi, [rbp - FC_LTAG]
+    call fc_wide_int
+    test eax, eax
+    jnz .fc_exact_left
+    mov rdi, [rbp - FC_RSAVE]
+    mov esi, [rbp - FC_RTAG]
+    call fc_wide_int
+    test eax, eax
+    jnz .fc_exact_right
+    mov rdi, [rbp - FC_LSAVE]
+    mov rsi, [rbp - FC_RSAVE]
+    mov ecx, [rbp - FC_LTAG]
+    mov r8d, [rbp - FC_RTAG]
+    jmp .fc_by_double
 
+.fc_exact_left:
+    ; The wide int is on the left; the other side becomes the double.
+    mov rdi, [rbp - FC_RSAVE]
+    mov esi, [rbp - FC_RTAG]
+    call float_to_f64
+    mov rdi, [rbp - FC_LSAVE]
+    call fc_int_vs_double
+    mov r8d, eax
+    jmp .float_cmp_dispatch
+
+.fc_exact_right:
+    mov rdi, [rbp - FC_LSAVE]
+    mov esi, [rbp - FC_LTAG]
+    call float_to_f64
+    mov rdi, [rbp - FC_RSAVE]
+    call fc_int_vs_double
+    neg eax                     ; the comparison was made the other way round
+    mov r8d, eax
+    jmp .float_cmp_dispatch
+
+.fc_by_double:
     ; Convert both to doubles
     mov [rbp - FC_RSAVE], rsi          ; save right (8 bytes)
     mov dword [rbp - FC_RTAG], r8d    ; save right_tag (4 bytes, no overlap)
@@ -1223,6 +1339,115 @@ DEF_FUNC float_compare, FC_FRAME
 END_FUNC float_compare
 
 ;; ============================================================================
+;; fc_wide_int(rdi = payload, esi = tag) -> eax = 1 when this is an integer a
+;; double cannot hold exactly, so the comparison has to be made in GMP.
+;; ============================================================================
+DEF_FUNC_LOCAL fc_wide_int
+    cmp esi, TAG_PTR
+    jne .fcw_no                 ; an immediate int is inside +-2^50
+    test rdi, rdi
+    jz .fcw_no
+    mov rax, [rdi + PyObject.ob_type]
+    lea rcx, [rel int_type]
+    cmp rax, rcx
+    je .fcw_int
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_INT_SUBCLASS
+    jz .fcw_no
+.fcw_int:
+    cmp qword [rdi + PyIntObject.compact], 0
+    je .fcw_yes                 ; GMP-backed: always wider than a double
+    mov rax, [rdi + PyIntObject.ival]
+    mov rcx, rax
+    sar rcx, 63
+    xor rax, rcx
+    sub rax, rcx                ; |ival|
+    mov rcx, 1 << 53
+    cmp rax, rcx
+    jae .fcw_yes
+.fcw_no:
+    xor eax, eax
+    leave
+    ret
+.fcw_yes:
+    mov eax, 1
+    leave
+    ret
+END_FUNC fc_wide_int
+
+;; ============================================================================
+;; fc_int_vs_double(rdi = the int (a heap int), xmm0 = the double)
+;;   -> eax = -1, 0 or 1 for int < d, int == d, int > d
+;;
+;; Exactly, in GMP: the double's integer part is set into an mpz -- mpz_set_d
+;; truncates toward zero, which is what is wanted -- and the fraction breaks
+;; a tie.  A NaN or an infinity never reaches here; float_compare's ucomisd
+;; arm handles those.
+;; ============================================================================
+FIV_D     equ 8
+FIV_TMP   equ 32            ; an mpz_t
+FIV_FRAME equ 48            ; + 1 push = 56, not 16-aligned
+DEF_FUNC_LOCAL fc_int_vs_double, FIV_FRAME
+    push rbx
+    movsd [rbp - FIV_D], xmm0
+    mov rbx, rdi
+
+    ; An infinity compares by sign alone; NaN never gets here.
+    movsd xmm1, [rel pos_inf]
+    ucomisd xmm0, xmm1
+    je .fiv_minus                ; every finite int is below +inf
+    movsd xmm1, [rel neg_inf]
+    ucomisd xmm0, xmm1
+    je .fiv_plus
+
+    lea rdi, [rbp - FIV_TMP]
+    extern __gmpz_init
+    call __gmpz_init wrt ..plt
+    lea rdi, [rbp - FIV_TMP]
+    movsd xmm0, [rbp - FIV_D]
+    extern __gmpz_set_d
+    call __gmpz_set_d wrt ..plt  ; truncates toward zero
+
+    INT_NEED_MPZ rbx
+    lea rdi, [rbx + PyIntObject.mpz]
+    lea rsi, [rbp - FIV_TMP]
+    extern __gmpz_cmp
+    call __gmpz_cmp wrt ..plt
+    mov r8d, eax
+    push r8
+    lea rdi, [rbp - FIV_TMP]
+    extern __gmpz_clear
+    call __gmpz_clear wrt ..plt
+    pop r8
+    test r8d, r8d
+    jl .fiv_minus
+    jg .fiv_plus
+
+    ; Equal against the truncated part: the fraction decides.
+    movsd xmm0, [rbp - FIV_D]
+    roundsd xmm1, xmm0, 3        ; 3 = truncate toward zero
+    ucomisd xmm0, xmm1
+    je .fiv_zero
+    ja .fiv_minus                ; d has a positive fraction: the int is below
+    jmp .fiv_plus
+
+.fiv_minus:
+    mov eax, -1
+    pop rbx
+    leave
+    ret
+.fiv_plus:
+    mov eax, 1
+    pop rbx
+    leave
+    ret
+.fiv_zero:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+END_FUNC fc_int_vs_double
+
+;; ============================================================================
 ;; float_getattr(rdi = self Value, rsi = name str) -> rax = Value, or NULL
 ;;
 ;; real and imag, the two numbers.py asks for.  float has no numerator or
@@ -1258,25 +1483,48 @@ DEF_FUNC float_getattr, FG_FRAME
     ret
 
 .fg_real:
-    ; A subclass instance answers with a plain float, as CPython does.
-    mov rax, [rbp - FG_SELF]
-    V_TEST_PTR rax, rcx
-    ja .fg_real_out             ; already a float immediate
-    mov rax, [rax + PyFloatObject.value]
-    V_FROM_F64 rax, rcx
-.fg_real_out:
-    mov edx, TAG_FLOAT
+    mov rdi, [rbp - FG_SELF]
+    call float_get_real
     leave
     ret
 
 .fg_imag:
+    mov rdi, [rbp - FG_SELF]
+    call float_get_imag
+    leave
+    ret
+END_FUNC float_getattr
+
+;; ============================================================================
+;; float_get_real(rdi = self Value) -> rax = Value
+;;
+;; Behind float.real, reached from the chain above and from the getset
+;; descriptor in float_type.tp_dict.  A subclass instance answers with a
+;; plain float, as CPython does.
+;; ============================================================================
+DEF_FUNC float_get_real
+    mov rax, rdi
+    V_TEST_PTR rax, rcx
+    ja .fgr_out                 ; already a float immediate
+    mov rax, [rax + PyFloatObject.value]
+    V_FROM_F64 rax, rcx
+.fgr_out:
+    mov edx, TAG_FLOAT
+    leave
+    ret
+END_FUNC float_get_real
+
+;; ============================================================================
+;; float_get_imag(rdi = self Value) -> rax = Value.  Always 0.0.
+;; ============================================================================
+DEF_FUNC float_get_imag
     xorpd xmm0, xmm0
     movq rax, xmm0
     V_FROM_F64 rax, rcx
     mov edx, TAG_FLOAT
     leave
     ret
-END_FUNC float_getattr
+END_FUNC float_get_imag
 
 
 ;; ============================================================================
@@ -1292,6 +1540,8 @@ fmt_g: db "%.*g", 0
 fmt_f: db "%.*f", 0
 fmt_e: db "%.*e", 0
 fmt_E: db "%.*E", 0
+fmt_F: db "%.*F", 0
+fmt_G: db "%.*G", 0
 
 align 8
 fi_two63:     dq 0x43e0000000000000   ; 2.0**63
@@ -1322,7 +1572,7 @@ float_number_methods:
     dq 0                      ; nb_xor          +112
     dq 0                      ; nb_or           +120
     dq float_int              ; nb_int          +128
-    dq 0                      ; nb_float        +136
+    dq float_get_real       ; nb_float        +136 (a float is its own float)
     dq float_floordiv         ; nb_floor_divide +144
     dq float_truediv          ; nb_true_divide  +152
     dq 0                      ; nb_index        +160

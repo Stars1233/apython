@@ -61,7 +61,9 @@ LA_OBJ_TAG   equ 64
 LA_OBJVAL    equ 72   ; the object as a Value, for the generic tail
 LA_WALK      equ 80   ; the MRO cursor while searching the type dicts
 LA_TAGTYPE   equ 88   ; the type an immediate resolved to, the walk's origin
-LA_FRAME     equ 96         ; + 0 pushes = 96
+LA_OWNMRO    equ 96   ; the attribute came from the CLASS's own MRO
+LA_FROMMETA  equ 104  ; type_getattr_meta's out-parameter
+LA_FRAME     equ 112        ; + 0 pushes = 112
 
 ; op_load_super_attr frame layout (DEF_FUNC op_load_super_attr, LSA_FRAME)
 LSA_SELF     equ 8
@@ -214,9 +216,13 @@ DEF_FUNC_BARE op_load_global_module
     movzx eax, word [rbx + 2]  ; CACHE[1] = index
     imul rax, rax, DICT_ENTRY_SIZE
     add rdi, rax               ; rdi = entry ptr
-    test edx, edx
-    jz .lgm_deopt              ; TAG_NULL = deleted entry
+    ; A deleted entry has a NULL value.  This tested edx BEFORE anything had
+    ; loaded it -- a register the dispatcher leaves undefined -- so the guard
+    ; answered at random: usually not taken, and taken for no reason when it
+    ; happened to be zero.
     mov rax, [rdi + DictEntry.value]
+    test rax, rax
+    jz .lgm_deopt
     V_UNPACK rax, rdx
 
     ; Guards passed — now push NULL if needed
@@ -230,10 +236,12 @@ DEF_FUNC_BARE op_load_global_module
     DISPATCH
 
 .lgm_deopt:
-    ; Deopt: rewrite back to LOAD_GLOBAL (116), re-execute cleanly
+    ; Deopt into the generic handler with the argument ecx already
+    ; holds.  Rewinding rbx by two and re-dispatching would drop a
+    ; preceding EXTENDED_ARG, and both of these carry one as soon as
+    ; a module has enough names: the arg is (name index << 1 | flag).
     mov byte [rbx - 2], 116
-    sub rbx, 2
-    DISPATCH
+    jmp op_load_global
 END_FUNC op_load_global_module
 
 ;; ============================================================================
@@ -260,9 +268,13 @@ DEF_FUNC_BARE op_load_global_builtin
     movzx eax, word [rbx + 2]  ; CACHE[1] = index
     imul rax, rax, DICT_ENTRY_SIZE
     add rdi, rax               ; rdi = entry ptr
-    test edx, edx
-    jz .lgb_deopt              ; TAG_NULL = deleted entry
+    ; A deleted entry has a NULL value.  This tested edx BEFORE anything had
+    ; loaded it -- a register the dispatcher leaves undefined -- so the guard
+    ; answered at random: usually not taken, and taken for no reason when it
+    ; happened to be zero.
     mov rax, [rdi + DictEntry.value]
+    test rax, rax
+    jz .lgb_deopt
     V_UNPACK rax, rdx
 
     ; Guards passed — now push NULL if needed
@@ -276,9 +288,12 @@ DEF_FUNC_BARE op_load_global_builtin
     DISPATCH
 
 .lgb_deopt:
+    ; Deopt into the generic handler with the argument ecx already
+    ; holds.  Rewinding rbx by two and re-dispatching would drop a
+    ; preceding EXTENDED_ARG, and both of these carry one as soon as
+    ; a module has enough names: the arg is (name index << 1 | flag).
     mov byte [rbx - 2], 116
-    sub rbx, 2
-    DISPATCH
+    jmp op_load_global
 END_FUNC op_load_global_builtin
 
 ;; ============================================================================
@@ -377,6 +392,10 @@ DEF_FUNC op_load_attr, LA_FRAME
     and eax, 1
     mov [rbp - LA_FLAG], rax
     mov qword [rbp - LA_FROM_TYPE], 0
+    ; Only the tp_getattr path below has an opinion about which MRO answered.
+    ; Every other road to .la_property_run would read this slot as whatever the
+    ; last call left on the stack.
+    mov qword [rbp - LA_OWNMRO], 0
 
     shr ecx, 1              ; name_index
     mov eax, ecx
@@ -493,12 +512,32 @@ DEF_FUNC op_load_attr, LA_FRAME
     ; Call tp_getattr(obj, name)
     ; tp_getattr handles all descriptor/binding logic (staticmethod, classmethod,
     ; property, method binding). Result is fully resolved.
+    mov qword [rbp - LA_OWNMRO], 0
     mov rdi, [rbp - LA_OBJ]
     mov rsi, [rbp - LA_NAME]
+    ; type_getattr can say WHICH MRO answered -- the class's own or its
+    ; metatype's -- and the property arm below needs to know.
+    extern type_getattr
+    extern type_getattr_meta
+    lea rdx, [rel type_getattr]
+    cmp rax, rdx
+    jne .la_call_getattr
+    mov qword [rbp - LA_FROMMETA], 0
+    lea rdx, [rbp - LA_FROMMETA]
+    call type_getattr_meta
+    V_UNPACK rax, rdx
+    test edx, edx
+    jz .la_try_dict
+    cmp qword [rbp - LA_FROMMETA], 0
+    jne .la_getattr_done
+    mov qword [rbp - LA_OWNMRO], 1
+    jmp .la_getattr_done
+.la_call_getattr:
     call rax
     V_UNPACK rax, rdx           ; tp_getattr returns a Value
     test edx, edx
     jz .la_try_dict             ; tp_getattr returned NULL — fallback to tp_dict
+.la_getattr_done:
     mov [rbp - LA_ATTR], rax
     mov [rbp - LA_ATTR_TAG], rdx   ; save tag from tp_getattr
     ; LA_FROM_TYPE stays 0 — tp_getattr already handled binding
@@ -581,6 +620,11 @@ DEF_FUNC op_load_attr, LA_FRAME
     cmp rcx, rdx
     je .la_handle_property
 
+    extern getset_descr_type
+    lea rdx, [rel getset_descr_type]
+    cmp rcx, rdx
+    je .la_handle_getset
+
     ; General descriptor protocol: check for __get__ on attr's type
     ; Only check if attr's type is a heaptype (user-defined descriptor)
     mov rdx, [rcx + PyTypeObject.tp_flags]
@@ -630,6 +674,39 @@ DEF_FUNC op_load_attr, LA_FRAME
     xor ecx, ecx
     VPUSH_NULL
     VPUSH_VAL rax, rdx
+    jmp .la_done
+
+.la_handle_getset:
+    ; A getset descriptor found on the object's TYPE reads through its getter.
+    ; Reached any other way it is itself the answer -- `int.real` comes back
+    ; out of int's own dict through type_getattr, which is exactly what
+    ; CPython's __get__(None, type) hands back.
+    cmp qword [rbp - LA_FROM_TYPE], 0
+    je .la_check_flag
+    mov rdi, [rbp - LA_ATTR]
+    mov rsi, [rbp - LA_OBJVAL]
+    extern getset_descr_get
+    call getset_descr_get       ; -> a Value
+    push rax
+    push rax                    ; twice: rsp stays 16-byte aligned
+    mov rdi, [rbp - LA_ATTR]
+    call obj_decref             ; the descriptor, INCREF'd by the dict walk
+    mov rdi, [rbp - LA_OBJ]
+    mov rsi, [rbp - LA_OBJ_TAG]
+    DECREF_VAL rdi, rsi
+    pop rax
+    pop rax
+    cmp qword [rbp - LA_FLAG], 0
+    jne .la_getset_flag1
+    VPUSH rax
+    jmp .la_done
+.la_getset_flag1:
+    push rax
+    push rax
+    VPUSH_NULL
+    pop rax
+    pop rax
+    VPUSH rax
     jmp .la_done
 
 .la_check_flag:
@@ -859,16 +936,29 @@ DEF_FUNC op_load_attr, LA_FRAME
     jmp .la_done
 
 .la_handle_property:
-    ; Property descriptor: always intercept and call fget(obj)
-    ; (property objects found via instance_getattr still need descriptor
-    ; invocation).
-    ;
-    ; CPython does *not* run the getter when the property was found in the
-    ; class's own MRO rather than on its metatype -- `C.prop` is the property
-    ; object -- but which of the two it was is decided inside type_getattr,
-    ; which has no channel to say so.  Deciding it here instead, from whether
-    ; the object is a class, gets `Enum.__members__` wrong: that property
-    ; lives on the *metatype* and must run.
+    ; A property found in the CLASS's own MRO is the property itself --
+    ; `C.prop` is what `C.prop.__doc__ = ...` is written on, and dis.py opens
+    ; with exactly that -- while one found on the METATYPE runs, which is what
+    ; makes Enum.__members__ work.  type_getattr_meta reports which; deciding
+    ; it here from "is the object a class" gets the second case wrong, which
+    ; is why it went undone for so long.
+    cmp qword [rbp - LA_OWNMRO], 0
+    je .la_property_run
+    mov rdi, [rbp - LA_OBJ]
+    mov rsi, [rbp - LA_OBJ_TAG]
+    DECREF_VAL rdi, rsi
+    mov rax, [rbp - LA_ATTR]
+    mov edx, TAG_PTR
+    cmp qword [rbp - LA_FLAG], 0
+    jne .la_prop_self_flag1
+    VPUSH_VAL rax, rdx
+    jmp .la_done
+.la_prop_self_flag1:
+    VPUSH_NULL
+    VPUSH_VAL rax, rdx
+    jmp .la_done
+
+.la_property_run:
     ; Call property_descr_get(property, obj)
     mov rdi, [rbp - LA_ATTR]   ; property descriptor
     mov rsi, [rbp - LA_OBJ]    ; obj
@@ -1034,10 +1124,12 @@ DEF_FUNC_BARE op_load_attr_method
     DISPATCH
 
 .lam_deopt:
-    ; Deopt: rewrite to LOAD_ATTR (106), re-execute
+    ; Deopt into the generic handler with the argument ecx already
+    ; holds.  Rewinding rbx by two and re-dispatching would drop a
+    ; preceding EXTENDED_ARG, and both of these carry one as soon as
+    ; a module has enough names: the arg is (name index << 1 | flag).
     mov byte [rbx - 2], 106
-    sub rbx, 2
-    DISPATCH
+    jmp op_load_attr
 END_FUNC op_load_attr_method
 
 ;; ============================================================================
@@ -1445,12 +1537,15 @@ GA_TYPE     equ 56
 GA_SAVE     equ 64
 GA_SAVETAG  equ 72
 GA_WALK     equ 80          ; the MRO cursor
-GA_FRAME    equ 88          ; + 1 push = 96
+GA_OWNMRO   equ 88          ; the attribute came from the CLASS's own MRO
+GA_FROMMETA equ 96          ; type_getattr_meta's out-parameter
+GA_FRAME    equ 104         ; + 1 push = 112
 DEF_FUNC obj_getattr_opt, GA_FRAME
     push rbx
     mov [rbp - GA_OBJ], rdi
     mov [rbp - GA_NAME], rsi
     mov qword [rbp - GA_FROMTYPE], 0
+    mov qword [rbp - GA_OWNMRO], 0
 
     ; The type to look in, and whether the object is a real pointer.
     V_TEST_PTR rdi, rax
@@ -1481,12 +1576,34 @@ DEF_FUNC obj_getattr_opt, GA_FRAME
     mov rcx, [rax + PyTypeObject.tp_getattr]
     test rcx, rcx
     jz .ga_type_dict
+    mov qword [rbp - GA_OWNMRO], 0
     mov rdi, [rbp - GA_OBJ]
     mov rsi, [rbp - GA_NAME]
+    ; type_getattr can say WHICH MRO answered -- the class's own or its
+    ; metatype's -- and the descriptor protocol below needs to know: a
+    ; property found on the class is the property, one found on the metatype
+    ; runs.  Nothing else has anything to report.
+    extern type_getattr
+    extern type_getattr_meta
+    lea rdx, [rel type_getattr]
+    cmp rcx, rdx
+    jne .ga_call_getattr
+    mov qword [rbp - GA_FROMMETA], 0
+    lea rdx, [rbp - GA_FROMMETA]
+    call type_getattr_meta
+    V_UNPACK rax, rdx
+    test edx, edx
+    jz .ga_type_dict
+    cmp qword [rbp - GA_FROMMETA], 0
+    jne .ga_getattr_done
+    mov qword [rbp - GA_OWNMRO], 1
+    jmp .ga_getattr_done
+.ga_call_getattr:
     call rcx
     V_UNPACK rax, rdx
     test edx, edx
     jz .ga_type_dict
+.ga_getattr_done:
     mov [rbp - GA_ATTR], rax
     mov [rbp - GA_ATTRTAG], rdx
     jmp .ga_have_attr
@@ -1559,6 +1676,10 @@ DEF_FUNC obj_getattr_opt, GA_FRAME
     cmp rcx, rdx
     je .ga_property
 
+    lea rdx, [rel getset_descr_type]
+    cmp rcx, rdx
+    je .ga_getset
+
     ; A user-defined descriptor: a heaptype whose own type defines __get__.
     test dword [rcx + PyTypeObject.tp_flags], TYPE_FLAG_HEAPTYPE
     jz .ga_plain
@@ -1574,6 +1695,22 @@ DEF_FUNC obj_getattr_opt, GA_FRAME
     lea rcx, [rel dunder_get]
     mov r8d, TAG_PTR
     call dunder_call_3
+    mov [rbp - GA_SAVE], rax
+    mov rdi, [rbp - GA_ATTR]
+    call obj_decref
+    mov rax, [rbp - GA_SAVE]
+    pop rbx
+    leave
+    ret
+
+.ga_getset:
+    ; As in op_load_attr: through the type it is a read, out of the type's own
+    ; dict it is the descriptor itself.
+    cmp qword [rbp - GA_FROMTYPE], 0
+    je .ga_plain
+    mov rdi, [rbp - GA_ATTR]
+    mov rsi, [rbp - GA_OBJ]
+    call getset_descr_get
     mov [rbp - GA_SAVE], rax
     mov rdi, [rbp - GA_ATTR]
     call obj_decref
@@ -1624,8 +1761,20 @@ DEF_FUNC obj_getattr_opt, GA_FRAME
     ret
 
 .ga_property:
-    ; See .la_handle_property in op_load_attr: whether the getter should run
-    ; depends on which MRO the property came from, not on what the object is.
+    ; A property found in the CLASS's own MRO is the property itself --
+    ; `C.prop` is what you write `C.prop.__doc__ = ...` on -- while one found
+    ; on the METATYPE runs, which is what makes Enum.__members__ work.  Which
+    ; it was is type_getattr_meta's answer; deciding it from "is the object a
+    ; class" gets the second case wrong.
+    cmp qword [rbp - GA_OWNMRO], 0
+    je .ga_property_run
+    mov rax, [rbp - GA_ATTR]
+    mov edx, TAG_PTR
+    pop rbx
+    leave
+    V_PACK rax, rdx
+    ret
+.ga_property_run:
     mov rdi, [rbp - GA_ATTR]
     mov rsi, [rbp - GA_OBJ]
     call property_descr_get
@@ -1728,7 +1877,8 @@ SA_FRAME  equ 80            ; + 0 pushes = 80
 ; op_delete_attr: rbp-frame (16 bytes)
 DA_NAME   equ 8
 DA_OBJ    equ 16
-DA_FRAME  equ 16            ; + 0 pushes = 16
+DA_EXC    equ 24            ; the exception pending before the deleter ran
+DA_FRAME  equ 32            ; + 0 pushes = 32
 
 ; op_delete_subscr: rbp-frame (32 bytes)
 DS_OBJ    equ 8
@@ -2151,14 +2301,27 @@ DEF_FUNC op_delete_attr, DA_FRAME
     mov rsi, [rbp - DA_NAME]
     xor edx, edx               ; value = NULL means delete
     xor ecx, ecx               ; value tag = TAG_NULL
+    DUNDER_EXC_SAVE [rbp - DA_EXC]
     call rax
 
     ; DECREF obj
     mov rdi, [rbp - DA_OBJ]
     call obj_decref
 
+    ; A deleter that raised returns normally, leaving the exception pending;
+    ; without this `del c.v` swallowed it and it surfaced somewhere else.
+    ; Compared against entry, because current_exception is already set
+    ; whenever this runs inside an except block.
+    DUNDER_RAISED [rbp - DA_EXC], .da_propagate
     leave
     DISPATCH
+
+.da_propagate:
+    ; Same shape as .sa_propagate: the unwinder reads the current IP from
+    ; eval_saved_rbx, which DISPATCH set, so rbx is not advanced.
+    leave
+    mov [rel eval_saved_r13], r13
+    jmp eval_exception_unwind
 
 .da_error_decref:
     mov rdi, [rbp - DA_OBJ]

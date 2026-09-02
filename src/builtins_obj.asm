@@ -1355,6 +1355,8 @@ END_FUNC builtin_hasattr
 ;; ============================================================================
 ;; 19. builtin_setattr(args, nargs) - setattr(obj, name, value)
 ;; ============================================================================
+SETA_EXC equ 16     ; the exception pending before tp_setattr ran
+
 DEF_FUNC builtin_setattr
     mov rbp, rsp
     push rbx
@@ -1379,13 +1381,29 @@ DEF_FUNC builtin_setattr
     mov rsi, [rbx + 8]               ; args[1] payload (name, 16-byte stride)
     mov rdx, [rbx + 16]               ; args[2] payload (value, 16-byte stride)
     pop rax                            ; restore tp_setattr
+    DUNDER_EXC_SAVE [rbp - SETA_EXC]
     call rax
+
+    ; tp_setattr reports failure by leaving an exception pending, not in a
+    ; register, so a property setter that raised came back here as a success
+    ; and setattr() answered None.  Compared against entry, because
+    ; current_exception is already set inside an except block.
+    EXC_RAISED_SINCE [rbp - SETA_EXC], rcx, .setattr_raised
 
     RET_NONE
     add rsp, 8
     pop rbx
     leave
     V_PACK rax, rdx             ; builtins return one Value
+    ret
+
+.setattr_raised:
+    xor eax, eax
+    xor edx, edx
+    add rsp, 8
+    pop rbx
+    leave
+    V_PACK rax, rdx
     ret
 
 .setattr_no_attr:
@@ -1474,122 +1492,299 @@ DEF_FUNC builtin_locals
 END_FUNC builtin_locals
 
 ;; ============================================================================
-;; builtin_dir(args, nargs) - dir(obj)
-;; Returns list of attribute names from obj's type (and base chain) dicts.
+;; dir_default(rdi = obj Value) -> rax = a list Value of the names obj carries
+;;
+;; What object.__dir__ answers: the tp_dicts along the MRO, plus the instance
+;; __dict__ when the object has one.  A module is the exception CPython also
+;; makes -- its names live in mod_dict and nowhere else, and module.__dir__
+;; answers with those alone rather than adding object's dunders to them.
+;;
+;; The list comes back unsorted; builtin_dir sorts whatever it is handed,
+;; whether that came from here or from a __dir__ of the object's own.
 ;; ============================================================================
-DIR_LIST    equ 8       ; result list
-DIR_OBJ     equ 16      ; the object
-DIR_ORIGIN  equ 24      ; the type whose MRO is being listed
-DIR_FRAME   equ 32          ; + 3 pushes = 56, not 16-aligned
+DD_LIST   equ 8       ; result list
+DD_OBJ    equ 16      ; the object, as a Value
+DD_ORIGIN equ 24      ; the type whose MRO is being listed
+DD_FRAME  equ 40          ; + 3 pushes = 64, 16-aligned
 
-DEF_FUNC builtin_dir, DIR_FRAME
+DEF_FUNC dir_default, DD_FRAME
     push rbx
     push r12
     push r13
 
-    cmp rsi, 1
-    jne .dir_error
+    mov [rbp - DD_OBJ], rdi
 
-    mov rax, [rdi]           ; args[0]
-    V_UNPACK rax, r12        ; r12 = obj tag
-    mov [rbp - DIR_OBJ], rax
-
-    ; Create result list
     xor edi, edi
     call list_new
-    mov [rbp - DIR_LIST], rax
-    mov rbx, rax            ; rbx = result list
+    mov rbx, rax                ; rbx = the result list, live throughout
+    mov [rbp - DD_LIST], rax
 
-    ; Determine which dict to iterate:
-    ; If obj is a type (ob_type == type_type or user_type_metatype), iterate tp_dict
-    ; Otherwise, iterate instance __dict__ (if any), then class dict
-    mov rax, [rbp - DIR_OBJ]
+    mov rax, [rbp - DD_OBJ]
+    V_UNPACK rax, r12           ; r12 = obj tag
+    ; An immediate has no ob_type to read, but it does have a type: naming it
+    ; here is what makes dir(5) int's names rather than the empty list.
     cmp r12d, TAG_SMALLINT
-    je .dir_done            ; SmallInt: no attributes
+    je .dd_int_type
+    cmp r12d, TAG_FLOAT
+    je .dd_float_type
+    test r12d, TAG_RC_BIT
+    jz .dd_done
+    test rax, rax
+    jz .dd_done
+
     mov rcx, [rax + PyObject.ob_type]
-    lea rdx, [rel type_type]
+
+    extern module_type
+    lea rdx, [rel module_type]
     cmp rcx, rdx
-    je .dir_from_type
-    lea rdx, [rel user_type_metatype]
-    cmp rcx, rdx
-    je .dir_from_type
+    je .dd_module
 
-    ; Instance: get its type, iterate its MRO
-    mov r12, [rax + PyObject.ob_type]   ; r12 = type
-    mov [rbp - DIR_ORIGIN], r12
-    jmp .dir_walk_chain
+    ; Is the object itself a class?  Ask the flag rather than compare against
+    ; the metatypes we ship: a class built by a metaclass of its own is still
+    ; a class, and TYPE_FLAG_METATYPE is set on every one of them.
+    mov rdx, [rcx + PyTypeObject.tp_flags]
+    test rdx, TYPE_FLAG_METATYPE
+    jnz .dd_from_type
 
-.dir_from_type:
-    ; obj IS a type: iterate its own MRO
-    mov r12, [rbp - DIR_OBJ]
-    mov [rbp - DIR_ORIGIN], r12
+    ; An ordinary instance: its own __dict__ first, then its type's MRO.  The
+    ; comment here used to claim the instance dict was walked; only the type
+    ; chain ever was, so a class attribute showed up and `self.x = 1` did not.
+    mov r12, rcx                ; the type, for the walk below
+    LOAD_INST_DICT rdx, rax, .dd_have_type
+    test rdx, rdx
+    jz .dd_have_type
+    mov rdi, rdx
+    call .dd_add_keys
+.dd_have_type:
+    mov [rbp - DD_ORIGIN], r12
+    jmp .dd_walk_chain
 
-.dir_walk_chain:
-    ; r12 = current type to get keys from
+.dd_int_type:
+    extern int_type
+    lea r12, [rel int_type]
+    jmp .dd_type_origin
+.dd_float_type:
+    lea r12, [rel float_type]
+.dd_type_origin:
+    mov [rbp - DD_ORIGIN], r12
+    jmp .dd_walk_chain
+
+.dd_module:
+    mov rdi, [rax + PyModuleObject.mod_dict]
+    test rdi, rdi
+    jz .dd_done
+    call .dd_add_keys
+    jmp .dd_done
+
+.dd_from_type:
+    ; obj IS a type: list its own MRO
+    mov r12, rax
+    mov [rbp - DD_ORIGIN], r12
+
+.dd_walk_chain:
     test r12, r12
-    jz .dir_done
-
+    jz .dd_done
     mov rdi, [r12 + PyTypeObject.tp_dict]
     test rdi, rdi
-    jz .dir_next_base
+    jz .dd_next_base
+    call .dd_add_keys
+.dd_next_base:
+    MRO_NEXT r12, [rbp - DD_ORIGIN]
+    jmp .dd_walk_chain
 
-    ; Iterate this dict's keys
+.dd_done:
+    ; __class__ is an attribute of every object and lives in no tp_dict here:
+    ; obj_generic_attr answers it, after the walk above has missed.  CPython
+    ; keeps it as a getset in object's dict, which is where its dir() finds
+    ; it -- doing the same needs the metatype data-descriptor precedence that
+    ; type_getattr does not have, so the name is added here instead.
+    lea rdi, [rel dd_class_name]
+    call str_from_cstr
+    mov r12, rax
+    mov rdi, rbx
+    mov rsi, r12
+    call list_contains
+    test eax, eax
+    jnz .dd_class_present
+    mov rdi, rbx
+    mov rsi, r12
+    call list_append
+.dd_class_present:
+    mov rdi, r12
+    call obj_decref
+
+    mov rax, rbx
+    mov edx, TAG_PTR
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    V_PACK rax, rdx             ; one Value out
+    ret
+
+;; .dd_add_keys(rdi = a dict) -- append each of its keys to rbx, skipping the
+;; ones already there.  Bases repeat names the derived class already gave.
+.dd_add_keys:
     call dict_tp_iter
-    mov r13, rax            ; r13 = iterator
-
-.dir_iter_loop:
+    mov r13, rax                ; r13 = the key iterator
+.dd_key_loop:
     mov rdi, r13
     mov rax, [rdi + PyObject.ob_type]
     mov rax, [rax + PyTypeObject.tp_iternext]
     test rax, rax
-    jz .dir_iter_done
+    jz .dd_keys_done
     mov rdi, r13
-    call rax                ; tp_iternext(iter) -> key or NULL
-    V_UNPACK rax, rdx           ; tp_iternext returns a Value
+    call rax                    ; tp_iternext(iter) -> key or NULL
+    V_UNPACK rax, rdx
     test edx, edx
-    jz .dir_iter_done
+    jz .dd_keys_done
 
-    ; Check if key already in result list (avoid duplicates from base classes)
-    push rax                ; save key
-    mov rdi, rbx            ; list
-    mov rsi, rax            ; key
-    V_PACK rsi, rdx         ; list_contains takes a Value
+    push rax
+    mov rdi, rbx
+    mov rsi, rax
+    V_PACK rsi, rdx             ; list_contains takes a Value
     call list_contains
     test eax, eax
-    pop rax                 ; restore key
-    jnz .dir_iter_loop      ; already present, skip
+    pop rax
+    jnz .dd_key_loop            ; already present
 
-    ; Append key to result
     push rax
     mov rdi, rbx
     mov rsi, rax
     call list_append
     pop rdi
     call obj_decref
-    jmp .dir_iter_loop
+    jmp .dd_key_loop
 
-.dir_iter_done:
-    ; DECREF iterator
+.dd_keys_done:
     mov rdi, r13
     call obj_decref
+    ret
+END_FUNC dir_default
 
-.dir_next_base:
-    MRO_NEXT r12, [rbp - DIR_ORIGIN]
-    jmp .dir_walk_chain
+;; ============================================================================
+;; builtin_dir(args, nargs) - dir(obj)
+;;
+;; CPython's PyObject_Dir: ask the object's own __dir__, then sort what comes
+;; back.  object.__dir__ is registered and calls dir_default, so an object
+;; that defines none still gets the default walk -- and one that does define
+;; a __dir__ is finally asked.  Before this, dir() consulted only the MRO's
+;; tp_dicts and object.__dir__ called dir() straight back, so the pair asked
+;; the object nothing and answered a module with object's own dunders.
+;; ============================================================================
+BD_OBJ    equ 8       ; the object, as a Value
+BD_SORT   equ 24      ; END of the two-Value args buffer for extend and sort
+BD_EXC    equ 32      ; current_exception before __dir__ was called
+BD_FRAME  equ 40          ; + 1 push = 48, 16-aligned
 
-.dir_done:
-    mov rax, rbx            ; return result list
+DEF_FUNC builtin_dir, BD_FRAME
+    DUNDER_EXC_SAVE [rbp - BD_EXC]
+    push rbx
+
+    cmp rsi, 1
+    jne .bd_error
+
+    mov rax, [rdi]              ; args[0]
+    mov [rbp - BD_OBJ], rax
+
+    ; A non-pointer has no object to ask; it goes straight to the default.
+    V_TEST_PTR rax, rcx
+    ja .bd_default
+    test rax, rax
+    jz .bd_default
+
+    mov rdi, rax
+    lea rsi, [rel dunder_dir_name]
+    extern dunder_call_1
+    call dunder_call_1          ; -> the Value __dir__ answered, or a NULL one
+    test rax, rax
+    jnz .bd_have_dunder
+    ; NULL means either "no __dir__ on the MRO" or "__dir__ raised".  A Python
+    ; __dir__ that raises returns through the C stack with the exception
+    ; pending rather than entering the unwinder, so without this test dir()
+    ; answered the default walk and left the exception to surface somewhere
+    ; else entirely.
+    EXC_RAISED_SINCE [rbp - BD_EXC], rcx, .bd_propagate
+    jmp .bd_default
+.bd_have_dunder:
+    mov rbx, rax
+
+    ; __dir__ may answer any iterable; CPython turns it into a list before
+    ; sorting.  An exact list already is one, so it is used as it stands.
+    V_TEST_PTR rbx, rcx
+    ja .bd_from_iterable
+    mov rax, [rbx + PyObject.ob_type]
+    lea rcx, [rel list_type]
+    cmp rax, rcx
+    je .bd_have_list
+
+.bd_from_iterable:
+    xor edi, edi
+    call list_new
+    mov [rbp - BD_SORT], rax    ; args[0] = the new list, for extend and sort
+    mov [rbp - BD_SORT + 8], rbx    ; args[1] = what __dir__ answered
+    lea rdi, [rbp - BD_SORT]
+    mov esi, 2
+    extern list_method_extend
+    call list_method_extend
+    push rax
+    DECREF_V rbx, rcx           ; the iterable __dir__ handed us
+    pop rax
+    mov rbx, [rbp - BD_SORT]
+    test rax, rax
+    jz .bd_list_failed          ; iterating what __dir__ answered raised
+    jmp .bd_sort
+
+.bd_have_list:
+    mov [rbp - BD_SORT], rbx
+    jmp .bd_sort
+
+.bd_default:
+    mov rdi, [rbp - BD_OBJ]
+    call dir_default            ; -> a list Value; a pointer is its own Value
+    mov rbx, rax
+    mov [rbp - BD_SORT], rax
+
+.bd_sort:
+    ; sorted(), which is the other half of CPython's contract here.  dir() used
+    ; to answer in MRO order, which no CPython output ever matches.
+    lea rdi, [rbp - BD_SORT]
+    mov esi, 1
+    extern list_method_sort
+    call list_method_sort
+    test rax, rax
+    jz .bd_sort_raised
+    DECREF_V rax, rdx
+
+    mov rax, rbx
     mov edx, TAG_PTR
-    pop r13
-    pop r12
     pop rbx
     leave
     V_PACK rax, rdx             ; builtins return one Value
     ret
 
-.dir_error:
+.bd_sort_raised:
+    ; A comparison raised: the names were not all strings.  Hand the failure
+    ; on rather than a half-sorted list.
+.bd_list_failed:
+    mov rdi, rbx
+    call obj_decref
+.bd_propagate:
+    RET_NULL
+    pop rbx
+    leave
+    V_PACK rax, rdx
+    ret
+
+.bd_error:
     RAISE exc_TypeError_type, "dir() takes exactly 1 argument"
 END_FUNC builtin_dir
+
+section .rodata
+dunder_dir_name: db "__dir__", 0
+dd_class_name: db "__class__", 0
+
+section .text
 
 section .rodata
 fmt_dunder_name: db "__format__", 0
@@ -1867,7 +2062,9 @@ DEF_FUNC builtin_ascii_fn, AA_FRAME
 
     mov rbx, [rbp - AA_REPR]  ; rbx = repr str
     mov r12, [rbx + PyStrObject.ob_size]  ; r12 = original length
-    lea rdi, [r12*4 + 8]      ; worst case: every char becomes \xNN (4 chars) + 8 NUL pad
+    ; Worst case is \uXXXX -- six characters from a two-byte source, so three
+    ; per input byte; \UXXXXXXXX is ten from four, which is less.
+    lea rdi, [r12*4 + 16]
     call ap_malloc
     mov r13, rax               ; r13 = output buffer
 
@@ -1886,35 +2083,60 @@ DEF_FUNC builtin_ascii_fn, AA_FRAME
     jmp .aa_escape_loop
 
 .aa_do_escape:
-    ; Emit \xHH
+    ; A CODEPOINT, not a byte.  This escaped each UTF-8 byte on its own, so
+    ; ascii("\u4e2d") answered '\xe4\xb8\xad' rather than '\u4e2d' -- three
+    ; escapes for one character, and not something eval() reads back.
+    push rcx
+    push rsi
+    push rdi
+    push r12
+    mov rdi, rsi
+    mov rsi, rcx
+    extern ucase_utf8_get
+    call ucase_utf8_get         ; eax = codepoint, ecx = its width
+    mov r8d, eax
+    mov r9d, ecx
+    pop r12
+    pop rdi
+    pop rsi
+    pop rcx
+
+    lea r11, [rel aa_hexdigits]
     mov byte [rdi], '\'
+    cmp r8d, 0x100
+    jae .aa_esc_u
     mov byte [rdi + 1], 'x'
+    mov r10d, 2
+    jmp .aa_esc_digits
+.aa_esc_u:
+    cmp r8d, 0x10000
+    jae .aa_esc_bigu
+    mov byte [rdi + 1], 'u'
+    mov r10d, 4
+    jmp .aa_esc_digits
+.aa_esc_bigu:
+    mov byte [rdi + 1], 'U'
+    mov r10d, 8
+.aa_esc_digits:
     add rdi, 2
-    ; High nibble
-    mov edx, eax
-    shr edx, 4
-    cmp edx, 10
-    jb .aa_hi_dec
-    add edx, ('a' - 10)
-    jmp .aa_hi_store
-.aa_hi_dec:
-    add edx, '0'
-.aa_hi_store:
-    mov byte [rdi], dl
+    mov eax, r10d
+.aa_esc_digit:
+    test eax, eax
+    jz .aa_esc_done
+    dec eax
+    push rcx
+    mov ecx, eax
+    shl ecx, 2
+    mov edx, r8d
+    shr edx, cl
+    pop rcx
+    and edx, 0x0f
+    movzx edx, byte [r11 + rdx]
+    mov [rdi], dl
     inc rdi
-    ; Low nibble
-    mov edx, eax
-    and edx, 0xf
-    cmp edx, 10
-    jb .aa_lo_dec
-    add edx, ('a' - 10)
-    jmp .aa_lo_store
-.aa_lo_dec:
-    add edx, '0'
-.aa_lo_store:
-    mov byte [rdi], dl
-    inc rdi
-    inc ecx
+    jmp .aa_esc_digit
+.aa_esc_done:
+    add ecx, r9d
     jmp .aa_escape_loop
 
 .aa_escape_done:
@@ -1946,6 +2168,9 @@ DEF_FUNC builtin_ascii_fn, AA_FRAME
 
 .aa_nargs_error:
     RAISE exc_TypeError_type, "ascii() takes exactly one argument"
+section .rodata
+aa_hexdigits: db "0123456789abcdef"
+section .text
 END_FUNC builtin_ascii_fn
 
 ;; ============================================================================
@@ -2089,6 +2314,11 @@ DEF_FUNC builtin_vars_fn, VR_FRAME
     test ecx, TYPE_FLAG_HEAPTYPE
     jz .vars_no_dict
 
+    ; A __slots__ class has no __dict__, so vars() has nothing to answer with:
+    ; CPython's TypeError, rather than the empty dict the arm below invents.
+    test rcx, TYPE_FLAG_HAS_SLOTS
+    jnz .vars_no_dict
+
     ; User instance: get inst_dict
     mov rax, [rdi + PyInstanceObject.inst_dict]
     test rax, rax
@@ -2130,7 +2360,8 @@ END_FUNC builtin_vars_fn
 global builtin_delattr_fn
 DA2_OBJ   equ 8
 DA2_NAME  equ 16
-DA2_FRAME equ 24            ; + 0 pushes = 24, not 16-aligned
+DA2_EXC   equ 24            ; the exception pending before the deleter ran
+DA2_FRAME equ 32            ; + 0 pushes = 32, 16-aligned
 DEF_FUNC builtin_delattr_fn, DA2_FRAME
 
     cmp rsi, 2
@@ -2158,7 +2389,12 @@ DEF_FUNC builtin_delattr_fn, DA2_FRAME
     mov rsi, [rbp - DA2_NAME]
     xor edx, edx              ; value = NULL means delete
     xor ecx, ecx              ; value tag = TAG_NULL
+    DUNDER_EXC_SAVE [rbp - DA2_EXC]
     call rax
+
+    ; A deleter that raised leaves the exception pending and returns
+    ; normally, so delattr() answered None and it surfaced somewhere else.
+    EXC_RAISED_SINCE [rbp - DA2_EXC], rcx, .da2_raised
 
     ; Return None
     lea rax, [rel none_singleton]
@@ -2166,6 +2402,13 @@ DEF_FUNC builtin_delattr_fn, DA2_FRAME
     mov edx, TAG_PTR
     leave
     V_PACK rax, rdx             ; builtins return one Value
+    ret
+
+.da2_raised:
+    xor eax, eax
+    xor edx, edx
+    leave
+    V_PACK rax, rdx
     ret
 
 .da2_type_error:

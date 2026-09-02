@@ -245,6 +245,12 @@ struc PyFuncObject
     .func_closure:  resq 1  ; +48: ptr to closure tuple or NULL
     .func_kwdefaults: resq 1 ; +56: ptr to kwdefaults dict or NULL
     .func_dict:     resq 1  ; +64: ptr to __dict__ or NULL (arbitrary attrs)
+    .func_qualname: resq 1  ; +72: __qualname__, or NULL for co_qualname
+    .func_doc:      resq 1  ; +80: __doc__, or NULL for co_consts[0].  Both are
+                            ;      fields because CPython keeps them ON the
+                            ;      function: f.__dict__ stays empty until
+                            ;      something else is assigned, and
+                            ;      functools.wraps sets exactly these two.
 endstruc
 
 ; Code object
@@ -478,6 +484,10 @@ struc PyPropertyObject
     .prop_get:    resq 1  ; +16: fget function or NULL
     .prop_set:    resq 1  ; +24: fset function or NULL
     .prop_del:    resq 1  ; +32: fdel function or NULL
+    .prop_doc:    resq 1  ; +40: __doc__, a str or NULL.  It is a real field
+                          ;      because it is WRITTEN: dis.py opens with
+                          ;      `_Instruction.opname.__doc__ = "..."`, and a
+                          ;      read-only __doc__ made that an AttributeError.
 endstruc
 
 ; Generator object
@@ -910,7 +920,9 @@ struc BuiltinModule
     .create_fn: resq 1      ; +8: PyObject *(*)(void), or 0 when import_init
 endstruc                    ;     wires that module some other way
 
-BUILTIN_MODULE_COUNT equ 10
+; The number of rows is computed in modtable.asm as builtin_module_count and
+; loaded from there.  It was an equ here, and adding a module without editing
+; it truncated the table.
 
 ; Type flags
 TYPE_FLAG_HEAPTYPE     equ 0x0001

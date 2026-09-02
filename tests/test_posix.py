@@ -234,3 +234,27 @@ print("stop sig   :", posix.WSTOPSIG(0x137F))
 print("core dump  :", posix.WCOREDUMP(0x0089), posix.WCOREDUMP(0x0009))
 print("to exitcode:", posix.waitstatus_to_exitcode(0x2A00),
       posix.waitstatus_to_exitcode(0x0009))
+
+print()
+print("--- the timestamps have two forms, as CPython's do ---")
+# st_atime and friends were whole-second ints, so anything comparing two
+# mtimes within the same second saw them as equal -- shutil.copystat and
+# tarfile both do.  CPython publishes three forms: the NAMES are floats with
+# the fractional part, the _ns fields are exact whole nanoseconds, and the
+# SEQUENCE entries 7..9 are the whole seconds as ints.  os.stat(p)[8] and
+# os.stat(p).st_mtime are different objects for the same field there too.
+_st = posix.stat(".")
+print("named  :", type(_st.st_atime).__name__, type(_st.st_mtime).__name__,
+      type(_st.st_ctime).__name__)
+print("ns     :", type(_st.st_atime_ns).__name__, type(_st.st_mtime_ns).__name__,
+      type(_st.st_ctime_ns).__name__)
+print("seq    :", type(_st[7]).__name__, type(_st[8]).__name__,
+      type(_st[9]).__name__)
+print("seq is the whole second:", _st[7] == int(_st.st_atime),
+      _st[8] == int(_st.st_mtime), _st[9] == int(_st.st_ctime))
+print("float agrees with ns   :",
+      abs(_st.st_atime - _st.st_atime_ns / 1e9) < 1e-6,
+      abs(_st.st_mtime - _st.st_mtime_ns / 1e9) < 1e-6)
+print("length unchanged:", len(_st))
+print("the other fields are ints:", type(_st.st_mode).__name__,
+      type(_st.st_size).__name__, type(_st.st_ino).__name__)

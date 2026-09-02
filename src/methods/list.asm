@@ -1596,6 +1596,7 @@ extern tuple_repeat
 
 
 DEF_FUNC_BARE list_dunder_getitem
+    REQUIRE_SELF_BARE list_type
     mov rax, [rdi]          ; self
     mov rsi, [rdi + 8]     ; key payload
     mov rdi, rax
@@ -1607,6 +1608,7 @@ END_FUNC list_dunder_getitem
 ;; ============================================================================
 extern list_ass_subscript
 DEF_FUNC list_dunder_setitem
+    REQUIRE_SELF list_type
     mov rax, [rdi]          ; self
     mov rsi, [rdi + 8]      ; args[1] = key   (already a Value)
     mov rdx, [rdi + 16]     ; args[2] = value (already a Value)
@@ -1622,6 +1624,7 @@ END_FUNC list_dunder_setitem
 ;; list.__delitem__(self, key) → calls list_ass_subscript with NULL value
 ;; ============================================================================
 DEF_FUNC list_dunder_delitem
+    REQUIRE_SELF list_type
     mov rax, [rdi]          ; self
     mov rsi, [rdi + 8]     ; key payload
     xor edx, edx            ; a NULL value Value means "delete"
@@ -1639,6 +1642,7 @@ END_FUNC list_dunder_delitem
 ;; ============================================================================
 extern list_contains
 DEF_FUNC list_dunder_contains
+    REQUIRE_SELF list_type
     mov rax, [rdi]          ; self
     mov rsi, [rdi + 8]     ; item payload
     mov rdi, rax
@@ -1664,6 +1668,7 @@ END_FUNC list_dunder_contains
 ;; list.__len__(self) → returns SmallInt length
 ;; ============================================================================
 DEF_FUNC list_dunder_len
+    REQUIRE_SELF list_type
     mov rax, [rdi]          ; self
     mov rax, [rax + PyListObject.ob_size]
     mov rdi, rax
@@ -1678,6 +1683,7 @@ END_FUNC list_dunder_len
 ;; ============================================================================
 extern list_inplace_concat
 DEF_FUNC_BARE list_dunder_iadd
+    REQUIRE_SELF_BARE list_type
     mov rax, [rdi]          ; self
     mov rsi, [rdi + 8]     ; other payload
     V_UNPACK rsi, rcx       ; args[1]
@@ -1700,6 +1706,9 @@ END_FUNC list_dunder_iadd
 extern instance_new
 extern builtin_sub_init_base
 extern tuple_sub_fill
+extern set_sub_fill
+extern frozenset_type
+extern type_is_subtype
 DEF_FUNC container_dunder_new
     push rbx
     push r12
@@ -1725,12 +1734,34 @@ DEF_FUNC container_dunder_new
     ; __init__.
     mov rcx, [rbx + PyTypeObject.tp_flags]
     test rcx, TYPE_FLAG_TUPLE_SUBCLASS
-    jz .cdn_done
+    jz .cdn_check_frozen
     push rax
     mov rdi, rax
     lea rsi, [r12 + 8]          ; the arguments after cls
     lea rdx, [r13 - 1]
     call tuple_sub_fill
+    pop rax
+    jmp .cdn_done
+
+.cdn_check_frozen:
+    ; frozenset is immutable for the same reason and has to arrive the same
+    ; way: it has no __init__, as CPython's has none.  A SET subclass does,
+    ; and fills there, so only the frozen side is served here -- the subclass
+    ; flag is on both types and the MRO is what tells them apart.
+    mov rcx, [rbx + PyTypeObject.tp_flags]
+    test rcx, TYPE_FLAG_SET_SUBCLASS
+    jz .cdn_done
+    push rax
+    mov rdi, rbx
+    lea rsi, [rel frozenset_type]
+    call type_is_subtype
+    test eax, eax
+    jz .cdn_not_frozen
+    mov rdi, [rsp]
+    lea rsi, [r12 + 8]          ; the arguments after cls
+    lea rdx, [r13 - 1]
+    call set_sub_fill
+.cdn_not_frozen:
     pop rax
 
 .cdn_done:
@@ -1950,6 +1981,7 @@ DEF_FUNC list_method_extend, LE_FRAME
     ; which: L.extend(G()) for a raising __getitem__ appended a short run and
     ; answered None.
     EXC_RAISED_SINCE [rbp - LE_EXC], rcx, .extend_iter_raised
+    jmp .extend_done            ; nothing pending: an ordinary exhaustion
 
 .extend_iter_raised:
     xor eax, eax                ; a NULL Value, with the exception pending
@@ -2068,18 +2100,27 @@ DEF_FUNC list_method_reversed
 
     mov rbx, [rdi]            ; self (list)
 
-    ; Allocate ReversedIterObject (32 bytes: refcnt, type, it_seq, it_index)
+    ; Allocate ReversedIterObject (32 bytes: refcnt, type, it_seq, it_index).
+    ; gc_alloc, and tracked: this is the same type builtin_reversed makes, it
+    ; holds the sequence it walks, and a list can hold the iterator back.
+    ; Allocating it with ap_malloc while its tp_dealloc frees it with
+    ; gc_dealloc handed free() a pointer sixteen bytes past the block.
     mov edi, 32
-    call ap_malloc
+    lea rsi, [rel reversed_iter_type]
+    extern gc_alloc
+    call gc_alloc
 
-    mov qword [rax + PyObject.ob_refcnt], 1
-    lea rcx, [rel reversed_iter_type]
-    mov [rax + PyObject.ob_type], rcx
     mov [rax + 16], rbx       ; it_seq = self
     INCREF rbx
     mov rcx, [rbx + PyListObject.ob_size]
     dec rcx                   ; it_index = ob_size - 1
     mov [rax + 24], rcx
+
+    push rax
+    mov rdi, rax
+    extern gc_track
+    call gc_track
+    pop rax
 
     mov edx, TAG_PTR
     pop rbx
