@@ -1453,6 +1453,7 @@ END_FUNC sre_string_len
 SM_STATE     equ 8
 SM_PATTERN   equ 16
 SM_TOPLEVEL  equ 24
+SM_LASTPOS   equ 32     ; the repeat's last_pos, kept across a body attempt
 SM_MFRAME    equ 96
 
 DEF_FUNC sre_match, SM_MFRAME
@@ -1882,7 +1883,8 @@ DEF_FUNC sre_match, SM_MFRAME
     mov [r12 + SRE_State.str_pos], r13
     mov rdi, r12
     lea rsi, [r14 + 4]        ; pattern after offset
-    mov edx, 1                 ; toplevel: this SUCCESS ends the pattern
+    mov edx, [rbp - SM_TOPLEVEL]   ; a continuation of THIS match, so it
+                                   ; inherits whether this one is the top
     call sre_match
 
     test eax, eax
@@ -2174,7 +2176,8 @@ DEF_FUNC sre_match, SM_MFRAME
     push rcx                   ; twice: rsp must stay 16-byte aligned
     mov rdi, r12
     mov rsi, r14               ; tail pattern
-    mov edx, 1                 ; toplevel: this SUCCESS ends the pattern
+    mov edx, [rbp - SM_TOPLEVEL]   ; a continuation of THIS match, so it
+                                   ; inherits whether this one is the top
     call sre_match
     pop rcx
     pop rcx
@@ -2257,7 +2260,8 @@ DEF_FUNC sre_match, SM_MFRAME
     push r14
     mov rdi, r12
     mov rsi, r14
-    mov edx, 1                 ; toplevel: this SUCCESS ends the pattern
+    mov edx, [rbp - SM_TOPLEVEL]   ; a continuation of THIS match, so it
+                                   ; inherits whether this one is the top
     call sre_match
     pop r14
     pop r9
@@ -2363,8 +2367,14 @@ DEF_FUNC sre_match, SM_MFRAME
     cmp rax, r8
     jb .mu_try_body
 
-    ; Save last_pos for zero-width check
-    push qword [r15 + SRE_RepeatContext.last_pos]
+    ; Save last_pos for the zero-width check.  It is a frame slot rather than
+    ; the stack because it has to survive the body attempt and be put BACK
+    ; when that attempt fails -- CPython's save_last_ptr.  Discarding it
+    ; instead left last_pos pointing at a position the engine had already
+    ; backtracked out of, the guard stopped firing, and an empty body could
+    ; be retried at the same place until the recursion limit.
+    mov rdx, [r15 + SRE_RepeatContext.last_pos]     ; rax is the count, live
+    mov [rbp - SM_LASTPOS], rdx
     mov [r15 + SRE_RepeatContext.last_pos], r13
 
     ; If count < max (or max == MAXREPEAT), try the body first (greedy).
@@ -2379,14 +2389,15 @@ DEF_FUNC sre_match, SM_MFRAME
     jb .mu_try_body_greedy
 
     ; count > max — try tail only
-    pop rax                    ; discard saved last_pos
+    mov rdx, [rbp - SM_LASTPOS]
+    mov [r15 + SRE_RepeatContext.last_pos], rdx
     jmp .mu_try_tail
 
 .mu_try_body_greedy:
     ; Zero-width check: if pos == last_pos, body matched empty, don't loop
-    pop rax                    ; saved last_pos
-    cmp r13, rax
-    je .mu_try_tail
+    mov rdx, [rbp - SM_LASTPOS]
+    cmp r13, rdx
+    je .mu_zero_width
 
     ; Save marks for backtracking
     push r13
@@ -2398,12 +2409,14 @@ DEF_FUNC sre_match, SM_MFRAME
     mov [r12 + SRE_State.str_pos], r13
     mov rdi, r12
     mov rsi, [r15 + SRE_RepeatContext.pattern]
-    xor edx, edx               ; a sub-pattern: its SUCCESS is not the match
+    mov edx, [rbp - SM_TOPLEVEL]   ; the body's continuation IS the tail --
+                                   ; MAX_UNTIL follows it -- so the SUCCESS it
+                                   ; eventually reaches is the pattern's own
     call sre_match
     test eax, eax
     jnz .mu_body_success
 
-    ; Body failed — restore marks, try tail
+    ; Body failed — restore marks, put last_pos back, try tail
     pop rdi
     push rdi
     mov rsi, r12
@@ -2412,8 +2425,16 @@ DEF_FUNC sre_match, SM_MFRAME
     call ap_free
     pop r13
 
+    mov rdx, [rbp - SM_LASTPOS]
+    mov [r15 + SRE_RepeatContext.last_pos], rdx
+
     ; Undo count increment
     dec qword [r15 + SRE_RepeatContext.count]
+    jmp .mu_try_tail
+
+.mu_zero_width:
+    mov rdx, [rbp - SM_LASTPOS]
+    mov [r15 + SRE_RepeatContext.last_pos], rdx
     jmp .mu_try_tail
 
 .mu_body_success:
@@ -2429,7 +2450,9 @@ DEF_FUNC sre_match, SM_MFRAME
     mov [r12 + SRE_State.str_pos], r13
     mov rdi, r12
     mov rsi, [r15 + SRE_RepeatContext.pattern]
-    xor edx, edx               ; a sub-pattern: its SUCCESS is not the match
+    mov edx, [rbp - SM_TOPLEVEL]   ; the body's continuation IS the tail --
+                                   ; MAX_UNTIL follows it -- so the SUCCESS it
+                                   ; eventually reaches is the pattern's own
     call sre_match
     test eax, eax
     jz .mu_body_required_fail
@@ -2451,7 +2474,8 @@ DEF_FUNC sre_match, SM_MFRAME
     mov [r12 + SRE_State.str_pos], r13
     mov rdi, r12
     mov rsi, rbx               ; tail = code after MAX_UNTIL
-    mov edx, 1                 ; toplevel: this SUCCESS ends the pattern
+    mov edx, [rbp - SM_TOPLEVEL]   ; a continuation of THIS match, so it
+                                   ; inherits whether this one is the top
     call sre_match
     test eax, eax
     jnz .mu_tail_success
@@ -2497,7 +2521,8 @@ DEF_FUNC sre_match, SM_MFRAME
     mov [r12 + SRE_State.str_pos], r13
     mov rdi, r12
     mov rsi, rbx
-    mov edx, 1                 ; toplevel: this SUCCESS ends the pattern
+    mov edx, [rbp - SM_TOPLEVEL]   ; a continuation of THIS match, so it
+                                   ; inherits whether this one is the top
     call sre_match
     test eax, eax
     jnz .miu_tail_success

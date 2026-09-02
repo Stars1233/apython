@@ -178,3 +178,38 @@ print("expand :", m.expand(r"\1-\2-\3"))
 mm = re.match(r"(a)?(b)", "b")
 print("unmatch:", mm.groups(), mm.span(1), mm.group(1))
 print("default:", mm.groups("Z"), mm.groupdict())
+
+# --- sub/subn accepted only the exact str type for a template, so a str
+# SUBCLASS fell through with the template and the literal both NULL and the
+# expander dereferenced one.  Anything that is neither callable nor a str is
+# CPython's TypeError, and the slot holds a PAYLOAD, so an int immediate of 5
+# looks exactly like the address 5 unless the tag is what gets tested.
+
+class S(str):
+    pass
+
+
+print(re.sub("a", S("b"), "aaa"))
+print(re.sub("(a)", S(r"[\1]"), "aaa"))
+print(re.subn("a", S("b"), "aaa"))
+for bad in [5, None, 2.5, [1]]:
+    try:
+        re.sub("a", bad, "aaa")
+        print(type(bad).__name__, "NO ERROR")
+    except TypeError:
+        print(type(bad).__name__, "TypeError")
+print(re.sub("a", "b", "aaa"), re.sub("a", lambda m: "X", "aaa"))
+
+# --- fullmatch reaches its end-of-string test only at the top level, and a
+# continuation of the same match -- a branch, a repeat body, the tail after
+# MAX_UNTIL -- is still that same match.  Hardcoding "toplevel" at those five
+# sites made a lookahead's tail answer for the whole pattern.
+#
+# The repeat's last_pos has to be put BACK when a body attempt fails, as
+# CPython's save_last_ptr is; discarding it left the zero-width guard
+# comparing against a position already backtracked out of.
+for p, s in [(r"(a*)*", "aab"), (r"(\d*)*", "12x"), (r"(?=a*)ab", "ab"),
+             (r"(a*)*", "aaa"), (r"([a-z]*)+", "abc"), (r"a*", "aaa"),
+             (r"(ab)*", "abab")]:
+    m = re.fullmatch(p, s)
+    print(repr(p), repr(s), m.span() if m else None)

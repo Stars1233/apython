@@ -895,12 +895,19 @@ DEF_FUNC sre_pattern_sub_method, SUB_FRAME
     cmp qword [rbp - SUB_CALLABLE], 0
     jnz .sub_have_template
     mov rax, [rbp - SUB_REPL]
-    V_TEST_PTR rax, rcx
-    ja .sub_have_template
+    ; A replacement that is neither callable nor a str is CPython's
+    ; TypeError.  Falling through instead left SUB_TMPL and SUB_LITERAL at 0
+    ; and .sub_expand_repl dereferenced the NULL -- and the exact type
+    ; compare sent a str SUBCLASS down that same road, where the sibling
+    ; Match.expand went out of its way to accept one.
+    ; The slot holds a PAYLOAD, not a Value -- the tag is beside it -- so an
+    ; int immediate of 5 looks exactly like the address 5 to V_TEST_PTR.
+    cmp qword [rbp - SUB_REPL_TAG], TAG_PTR
+    jne .sub_repl_type
+    test rax, rax
+    jz .sub_repl_type
     mov rcx, [rax + PyObject.ob_type]
-    lea rdx, [rel str_type]
-    cmp rcx, rdx
-    jne .sub_have_template
+    REQUIRE_STR_TYPE rcx, rdx, .sub_repl_type
 
     mov rdi, rax
     mov rsi, [rbp - SUB_PAT]
@@ -926,6 +933,16 @@ DEF_FUNC sre_pattern_sub_method, SUB_FRAME
     CSTRING rdi, ""
     call str_from_cstr_heap
     mov [rbp - SUB_LITERAL], rax
+    jmp .sub_have_template
+
+.sub_repl_type:
+    mov rsi, [rbp - SUB_REPL]
+    mov rdx, [rbp - SUB_REPL_TAG]
+    V_PACK rsi, rdx
+    CSTRING rdi, `expected str instance, \x01 found`
+    extern raise_type_error_with_name
+    call raise_type_error_with_name
+
 .sub_have_template:
 
     ; Init state
@@ -1270,12 +1287,17 @@ DEF_FUNC sre_pattern_subn_method, SN_FRAME
     cmp qword [rbp - SN_CALLABLE], 0
     jnz .subn_have_template
     mov rax, [rbp - SN_REPL]
-    V_TEST_PTR rax, rcx
-    ja .subn_have_template
+    ; As in sub: neither callable nor a str is a TypeError, and a str
+    ; subclass is a str.  Falling through left the template and the literal
+    ; both NULL for the expander to dereference.
+    ; The slot holds a PAYLOAD, not a Value -- the tag is beside it -- so an
+    ; int immediate of 5 looks exactly like the address 5 to V_TEST_PTR.
+    cmp qword [rbp - SN_REPL_TAG], TAG_PTR
+    jne .subn_repl_type
+    test rax, rax
+    jz .subn_repl_type
     mov rcx, [rax + PyObject.ob_type]
-    lea rdx, [rel str_type]
-    cmp rcx, rdx
-    jne .subn_have_template
+    REQUIRE_STR_TYPE rcx, rdx, .subn_repl_type
 
     mov rdi, rax
     mov rsi, [rbp - SN_PAT]
@@ -1301,6 +1323,15 @@ DEF_FUNC sre_pattern_subn_method, SN_FRAME
     CSTRING rdi, ""
     call str_from_cstr_heap
     mov [rbp - SN_LITERAL], rax
+    jmp .subn_have_template
+
+.subn_repl_type:
+    mov rsi, [rbp - SN_REPL]
+    mov rdx, [rbp - SN_REPL_TAG]
+    V_PACK rsi, rdx
+    CSTRING rdi, `expected str instance, \x01 found`
+    call raise_type_error_with_name
+
 .subn_have_template:
 
     lea rdi, [rbp - SN_STATE]
