@@ -297,13 +297,21 @@ LS_SAVED_ITEMS equ 144  ; saved fat items buffer
 LS_SAVED_SIZE  equ 152  ; saved ob_size before sort
 LS_SAVED_PAYLOADS equ 176 ; saved payload array ptr
 LS_SAVED_TAGS     equ 184 ; saved tag array ptr
-LS_FRAME   equ 192     ; includes saved payload/tag pointers
+LS_EXC     equ 192    ; current_exception on entry
+LS_FRAME   equ 200     ; includes saved payload/tag pointers; + 5 pushes = 240
 DEF_FUNC list_method_sort, LS_FRAME
     push rbx
     push r12
     push r13
     push r14
     push r15
+
+    ; Both "did the sort raise" tests below used to read current_exception and
+    ; compare it against zero.  That global is also the exception *being
+    ; handled*, so inside any `except` block an ordinary L.sort() reported
+    ; failure -- invisible until sorted() stopped discarding this function's
+    ; return value.
+    DUNDER_EXC_SAVE [rbp - LS_EXC]
 
     ; sort() takes no positional argument beyond self; only the keywords key
     ; and reverse.  nargs was never compared against anything, so
@@ -1090,9 +1098,7 @@ DEF_FUNC list_method_sort, LS_FRAME
     call ap_free
     ; Error path: propagate exception (return TAG_NULL)
     extern current_exception
-    mov rax, [rel current_exception]
-    test rax, rax
-    jnz .sort_error_return
+    EXC_RAISED_SINCE [rbp - LS_EXC], rax, .sort_error_return
 
 .sort_trivial_done:
     ; n < 2, no sort needed, return None
@@ -1152,9 +1158,7 @@ DEF_FUNC list_method_sort, LS_FRAME
     mov [rbx + PyListObject.ob_size], rax
 
     ; Check if an exception was raised during sort
-    mov rax, [rel current_exception]
-    test rax, rax
-    jnz .sort_error_return
+    EXC_RAISED_SINCE [rbp - LS_EXC], rax, .sort_error_return
     RET_NONE
     pop r15
     pop r14
@@ -1794,7 +1798,8 @@ END_FUNC list_method_clear
 ;; ============================================================================
 LE_SELF   equ 8
 LE_ITER   equ 16
-LE_FRAME  equ 16            ; + 3 pushes = 40, not 16-aligned
+LE_EXC    equ 24            ; current_exception before the iteration started
+LE_FRAME  equ 24            ; + 3 pushes = 48, 16-aligned
 DEF_FUNC list_method_extend, LE_FRAME
     push rbx
     push r12
@@ -1865,6 +1870,7 @@ DEF_FUNC list_method_extend, LE_FRAME
     jz .extend_type_error
     mov [rbp - LE_ITER], rax
 
+    DUNDER_EXC_SAVE [rbp - LE_EXC]
 .extend_iter_loop:
     mov rdi, [rbp - LE_ITER]
     mov rax, [rdi + PyObject.ob_type]
@@ -1895,6 +1901,20 @@ DEF_FUNC list_method_extend, LE_FRAME
     ; DECREF iterator
     mov rdi, [rbp - LE_ITER]
     call obj_decref
+
+    ; NULL means exhausted or raised, and only the pending exception says
+    ; which: L.extend(G()) for a raising __getitem__ appended a short run and
+    ; answered None.
+    EXC_RAISED_SINCE [rbp - LE_EXC], rcx, .extend_iter_raised
+
+.extend_iter_raised:
+    xor eax, eax                ; a NULL Value, with the exception pending
+    xor edx, edx
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
 
 .extend_done:
     RET_NONE

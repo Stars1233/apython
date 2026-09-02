@@ -411,6 +411,11 @@ DEF_FUNC set_method_update, SU_FRAME
     lea rdi, [rel tuple_type]
     mov edx, 1
     call tuple_type_call        ; raises for a non-iterable
+    ; It also answers NULL when the iteration itself raised -- a __getitem__
+    ; or __next__ that threw partway through -- and reading ob_size off that
+    ; NULL made `s.update(G())` a segfault rather than G's own exception.
+    test rax, rax
+    jz .supd_fail
     mov [rbp - SU_TMP], rax
     mov r12, rax
     mov r13, [r12 + PyTupleObject.ob_size]
@@ -465,6 +470,15 @@ DEF_FUNC set_method_update, SU_FRAME
     pop rbx
     leave
     V_PACK rax, rdx             ; builtins return one Value
+    ret
+
+.supd_fail:
+    xor eax, eax                ; a NULL Value, with the exception pending
+    xor edx, edx
+    pop r13
+    pop r12
+    pop rbx
+    leave
     ret
 END_FUNC set_method_update
 

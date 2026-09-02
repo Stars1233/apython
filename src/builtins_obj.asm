@@ -302,8 +302,12 @@ END_FUNC builtin_iter_fn
 ;; ============================================================================
 ;; 11. builtin_next_fn(args, nargs) - next(x)
 ;; ============================================================================
-DEF_FUNC builtin_next_fn
+NX_EXC   equ 8              ; current_exception before __next__ ran
+NX_FRAME equ 16
+
+DEF_FUNC builtin_next_fn, NX_FRAME
     push rbx
+    DUNDER_EXC_SAVE [rbp - NX_EXC]
 
     cmp rsi, 1
     je .next_one_arg
@@ -334,11 +338,20 @@ DEF_FUNC builtin_next_fn
     V_PACK rax, rdx             ; builtins return one Value
     ret
 .next_two_default:
-    ; Clear any StopIteration exception
+    ; Only a StopIteration means "use the default".  This cleared whatever was
+    ; pending, so next(it, d) answered d for a __next__ that failed outright
+    ; and the real exception surfaced somewhere unrelated.
     extern current_exception
     mov rax, [rel current_exception]
     test rax, rax
     jz .next_two_ret_default
+    cmp rax, [rbp - NX_EXC]
+    je .next_two_ret_default           ; the one already being handled
+    mov rcx, [rax + PyObject.ob_type]
+    extern exc_StopIteration_type
+    lea rdx, [rel exc_StopIteration_type]
+    cmp rcx, rdx
+    jne .next_two_raised
     push rdi
     mov rdi, rax
     mov qword [rel current_exception], 0
@@ -353,6 +366,10 @@ DEF_FUNC builtin_next_fn
     leave
     V_PACK rax, rdx             ; builtins return one Value
     ret
+.next_two_raised:
+    add rsp, 16                    ; discard saved default
+    jmp .next_got_val_null
+
 .next_two_type_error:
     add rsp, 16                    ; discard saved default
     jmp .next_type_error
@@ -418,6 +435,11 @@ DEF_FUNC builtin_next_fn
     ret
 
 .next_stop:
+    ; A NULL from tp_iternext is a clean exhaustion or a raise, and
+    ; manufacturing a StopIteration here discarded the second: next(it) for a
+    ; __next__ raising ValueError reported StopIteration instead.
+    EXC_RAISED_SINCE [rbp - NX_EXC], rcx, .next_got_val_null
+
     ; Check if iterator is a generator (has gi_return_value)
     lea rax, [rel gen_type]
     cmp [rbx + PyObject.ob_type], rax
@@ -427,7 +449,11 @@ DEF_FUNC builtin_next_fn
     test rsi, rsi
     jnz .next_stop_with_val
 .next_stop_no_val:
-    lea rsi, [rel none_singleton]
+    ; No argument, not None: CPython's next() over an exhausted iterator
+    ; raises a bare StopIteration, whose str() is '' -- passing the None
+    ; singleton made it 'None'.  exc_new documents 0 as "no message", and
+    ; StopIteration.value still reads None off the empty args tuple.
+    xor esi, esi
 .next_stop_with_val:
     lea rdi, [rel exc_StopIteration_type]
     call exc_new
@@ -444,7 +470,10 @@ END_FUNC builtin_next_fn
 ;; ============================================================================
 ;; 12. builtin_any(args, nargs) - any(iterable)
 ;; ============================================================================
-DEF_FUNC builtin_any
+ANY_EXC   equ 8             ; current_exception before the iteration started
+ANY_FRAME equ 16            ; + 4 pushes = 48, 16-aligned
+
+DEF_FUNC builtin_any, ANY_FRAME
     push rbx
     push r12
     push r13
@@ -466,6 +495,7 @@ DEF_FUNC builtin_any
     mov rax, [rbx + PyObject.ob_type]
     mov r12, [rax + PyTypeObject.tp_iternext]
 
+    DUNDER_EXC_SAVE [rbp - ANY_EXC]
 .any_loop:
     mov rdi, rbx
     call r12
@@ -505,6 +535,11 @@ DEF_FUNC builtin_any
 .any_false:
     mov rdi, rbx
     call obj_decref
+    ; The loop ends on a NULL from tp_iternext, which is a clean exhaustion
+    ; and a raise alike.  Answering from it without asking swallowed the
+    ; exception outright: any() over a generator that threw after a run of
+    ; falsy items reported a plain result and stranded it.
+    EXC_RAISED_SINCE [rbp - ANY_EXC], rcx, .any_raised
     RET_FALSE
     pop r14
     pop r13
@@ -512,6 +547,16 @@ DEF_FUNC builtin_any
     pop rbx
     leave
     V_PACK rax, rdx             ; builtins return one Value
+    ret
+
+.any_raised:
+    xor eax, eax                ; a NULL Value, with the exception pending
+    xor edx, edx
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
     ret
 
 .any_type_error:
@@ -524,7 +569,10 @@ END_FUNC builtin_any
 ;; ============================================================================
 ;; 13. builtin_all(args, nargs) - all(iterable)
 ;; ============================================================================
-DEF_FUNC builtin_all
+ALL_EXC   equ 8             ; current_exception before the iteration started
+ALL_FRAME equ 16            ; + 4 pushes = 48, 16-aligned
+
+DEF_FUNC builtin_all, ALL_FRAME
     push rbx
     push r12
     push r13
@@ -545,6 +593,7 @@ DEF_FUNC builtin_all
     mov rax, [rbx + PyObject.ob_type]
     mov r12, [rax + PyTypeObject.tp_iternext]
 
+    DUNDER_EXC_SAVE [rbp - ALL_EXC]
 .all_loop:
     mov rdi, rbx
     call r12
@@ -584,6 +633,11 @@ DEF_FUNC builtin_all
 .all_true:
     mov rdi, rbx
     call obj_decref
+    ; The loop ends on a NULL from tp_iternext, which is a clean exhaustion
+    ; and a raise alike.  Answering from it without asking swallowed the
+    ; exception outright: all() over a generator that threw after a run of
+    ; falsy items reported a plain result and stranded it.
+    EXC_RAISED_SINCE [rbp - ALL_EXC], rcx, .all_raised
     RET_TRUE
     pop r14
     pop r13
@@ -591,6 +645,16 @@ DEF_FUNC builtin_all
     pop rbx
     leave
     V_PACK rax, rdx             ; builtins return one Value
+    ret
+
+.all_raised:
+    xor eax, eax                ; a NULL Value, with the exception pending
+    xor edx, edx
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
     ret
 
 .all_type_error:

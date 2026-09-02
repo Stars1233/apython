@@ -1691,6 +1691,13 @@ DEF_FUNC builtin_sorted, SO_FRAME
     call list_method_sort
 
 .sorted_return:
+    ; list_method_sort answers None on success and a NULL Value with the
+    ; exception pending on failure -- a comparison that raised, or a key=
+    ; that did.  Handing the list back regardless made sorted() answer a
+    ; half-sorted list where L.sort() over the same items correctly raised,
+    ; and left the exception to surface at interpreter exit.
+    test rax, rax
+    jz .sorted_sort_raised
     DECREF_V rax, rdx
 
     mov rax, r12
@@ -1705,6 +1712,17 @@ DEF_FUNC builtin_sorted, SO_FRAME
 
 .sorted_error:
     RAISE exc_TypeError_type, "sorted() requires exactly 1 argument"
+.sorted_sort_raised:
+    mov rdi, r12                ; the list we built and were about to return
+    call obj_decref
+    xor eax, eax                ; a NULL Value, with the exception pending
+    xor edx, edx
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
 .sorted_propagate:
     mov rdi, r12
     call obj_decref             ; the partially built list

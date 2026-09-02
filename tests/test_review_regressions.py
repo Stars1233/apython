@@ -380,3 +380,139 @@ check("bytearray * 3", lambda: bytes(bytearray(b"ab") * 3))
 check("bytearray * 0", lambda: bytes(bytearray(b"ab") * 0))
 check("bytearray * -1", lambda: bytes(bytearray(b"ab") * -1))
 check("bytearray * True", lambda: bytes(bytearray(b"ab") * True))
+
+
+# ---------------------------------------------------------------------------
+# tp_iternext answers NULL for a clean exhaustion and for a __next__ that
+# raised, and the two are told apart only by the pending exception.  eb7cdce
+# enabled the legacy __getitem__ protocol, which put arbitrary Python inside
+# every one of these loops; eleven consumers were reading NULL as the end.
+# ---------------------------------------------------------------------------
+
+class RaisingSeq:
+    """The legacy protocol: iterable through __getitem__, and it throws."""
+
+    def __getitem__(self, i):
+        if i == 2:
+            raise ValueError("late")
+        return i
+
+
+def raising_gen():
+    yield 0
+    yield 0
+    raise ValueError("late")
+
+
+class RaisingIter:
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        raise ValueError("nxt")
+
+
+def do_extend(it):
+    L = [9]
+    L.extend(it)
+    return L
+
+
+def do_iadd(it):
+    L = [9]
+    L += it
+    return L
+
+
+def do_setupdate(it):
+    s = {9}
+    s.update(it)
+    return s
+
+
+def do_unpack_ex(it):
+    a, *b = it
+    return (a, b)
+
+
+def do_slice_assign(it):
+    L = [9]
+    L[0:1] = it
+    return L
+
+
+for _label, _mk in (("getitem", RaisingSeq), ("generator", raising_gen)):
+    check(_label + ": list()", lambda mk=_mk: list(mk()))
+    check(_label + ": tuple()", lambda mk=_mk: tuple(mk()))
+    check(_label + ": [*it]", lambda mk=_mk: [*mk()])
+    check(_label + ": {*it}", lambda mk=_mk: {*mk()})
+    check(_label + ": set()", lambda mk=_mk: set(mk()))
+    check(_label + ": frozenset()", lambda mk=_mk: frozenset(mk()))
+    check(_label + ": L.extend()", lambda mk=_mk: do_extend(mk()))
+    check(_label + ": L += it", lambda mk=_mk: do_iadd(mk()))
+    check(_label + ": L[0:1] = it", lambda mk=_mk: do_slice_assign(mk()))
+    check(_label + ": a, *b = it", lambda mk=_mk: do_unpack_ex(mk()))
+    check(_label + ": s.update()", lambda mk=_mk: do_setupdate(mk()))
+    check(_label + ": dict.fromkeys()", lambda mk=_mk: dict.fromkeys(mk()))
+    check(_label + ": 99 in it", lambda mk=_mk: 99 in mk())
+    check(_label + ": any()", lambda mk=_mk: any(mk()))
+    check(_label + ": all()", lambda mk=_mk: all(x or True for x in mk()))
+    check(_label + ": sum()", lambda mk=_mk: sum(mk()))
+    check(_label + ": sorted()", lambda mk=_mk: sorted(mk()))
+    check(_label + ": for loop", lambda mk=_mk: [x for x in mk()])
+    check(_label + ": zip()", lambda mk=_mk: list(zip(mk(), "abcd")))
+    check(_label + ": map()", lambda mk=_mk: list(map(str, mk())))
+    check(_label + ": filter()", lambda mk=_mk: list(filter(None, mk())))
+    check(_label + ": enumerate()", lambda mk=_mk: list(enumerate(mk())))
+
+class GoodSeq:
+    def __getitem__(self, i):
+        if i > 3:
+            raise IndexError(i)
+        return i
+
+
+# next() with and without a default: the default form cleared whatever was
+# pending, the bare form manufactured a StopIteration over it.
+check("next(it) that raises", lambda: next(RaisingIter()))
+check("next(it, default) that raises", lambda: next(RaisingIter(), "dflt"))
+check("next(it, default) exhausted", lambda: next(iter([]), "dflt"))
+check("next(it) exhausted", lambda: next(iter([])))
+check("next(it) ordinary", lambda: next(iter([7])))
+
+
+# sorted() discarded list.sort()'s return, so a comparison or a key that
+# raised produced a half-sorted list where L.sort() correctly raised.
+class Unorderable:
+    def __lt__(self, other):
+        raise ValueError("cmp")
+
+    def __gt__(self, other):
+        raise ValueError("cmp")
+
+    def __repr__(self):
+        return "<U>"
+
+
+def key_raises(x):
+    raise ValueError("key")
+
+
+def sort_in_place():
+    L = [Unorderable(), Unorderable()]
+    L.sort()
+    return L
+
+
+check("sorted, raising __lt__", lambda: sorted([Unorderable(), Unorderable()]))
+check("list.sort, raising __lt__", sort_in_place)
+check("sorted, raising key", lambda: sorted([1, 2], key=key_raises))
+check("sorted still sorts", lambda: sorted([3, 1, 2]))
+check("sorted with a key", lambda: sorted([3, 1, 2], key=lambda x: -x))
+check("sorted reversed", lambda: sorted([3, 1, 2], reverse=True))
+
+
+# The same iterables, not raising: none of the guards may cost a correct answer.
+check("list of a good getitem", lambda: list(GoodSeq()))
+check("set of a good getitem", lambda: sorted(set(GoodSeq())))
+check("in over a good getitem", lambda: 2 in GoodSeq())

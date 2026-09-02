@@ -737,10 +737,12 @@ END_FUNC set_dealloc
 ;; Constructor: set() or set(iterable)
 ;; self = set_type, args = arg array, nargs = count
 ;; ============================================================================
+extern current_exception
 extern raise_exception
 extern exc_TypeError_type
 
-STC_FRAME equ 8             ; + 2 pushes = 24, not 16-aligned
+STC_EXC   equ 16            ; current_exception before the iteration started
+STC_FRAME equ 16            ; + 2 pushes = 32, 16-aligned
 DEF_FUNC set_type_call, STC_FRAME
     push rbx
     push r12
@@ -771,6 +773,7 @@ DEF_FUNC set_type_call, STC_FRAME
     jz .stc_not_iterable_decref_set
     mov r12, rax            ; r12 = iterator
 
+    DUNDER_EXC_SAVE [rbp - STC_EXC]
 .stc_iter_loop:
     ; Get next: tp_iternext(iterator)
     mov rdi, r12
@@ -801,6 +804,10 @@ DEF_FUNC set_type_call, STC_FRAME
     mov rdi, r12
     call obj_decref
 
+    ; NULL is exhaustion and a raise alike.  Read as exhaustion, a raising
+    ; __getitem__ or __next__ produced a short set and a stranded exception.
+    EXC_RAISED_SINCE [rbp - STC_EXC], rcx, .stc_iter_raised
+
     mov rax, rbx            ; return new set
     mov edx, TAG_PTR
     pop r12
@@ -811,6 +818,16 @@ DEF_FUNC set_type_call, STC_FRAME
 .stc_empty:
     call set_new
     mov edx, TAG_PTR
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.stc_iter_raised:
+    mov rdi, rbx                ; the partly built set
+    call obj_decref
+    xor eax, eax                ; a NULL Value, with the exception pending
+    xor edx, edx
     pop r12
     pop rbx
     leave
@@ -946,7 +963,8 @@ END_FUNC set_iter_self
 ;; rdi = self (frozenset_type), rsi = args (16-byte fat slots), rdx = nargs
 ;; ============================================================================
 global frozenset_type_call
-FTC_FRAME equ 8             ; + 2 pushes = 24, not 16-aligned
+FTC_EXC   equ 16            ; current_exception before the iteration started
+FTC_FRAME equ 16            ; + 2 pushes = 32, 16-aligned
 DEF_FUNC frozenset_type_call, FTC_FRAME
     push rbx
     push r12
@@ -975,6 +993,7 @@ DEF_FUNC frozenset_type_call, FTC_FRAME
     jz .ftc_not_iterable_decref
     mov r12, rax
 
+    DUNDER_EXC_SAVE [rbp - FTC_EXC]
 .ftc_iter_loop:
     mov rdi, r12
     mov rax, [rdi + PyObject.ob_type]
@@ -1001,6 +1020,10 @@ DEF_FUNC frozenset_type_call, FTC_FRAME
     mov rdi, r12
     call obj_decref
 
+    ; NULL is exhaustion and a raise alike.  Read as exhaustion, a raising
+    ; __getitem__ or __next__ produced a short set and a stranded exception.
+    EXC_RAISED_SINCE [rbp - FTC_EXC], rcx, .ftc_iter_raised
+
     ; Set type to frozenset_type
     lea rax, [rel frozenset_type]
     mov [rbx + PyObject.ob_type], rax
@@ -1016,6 +1039,16 @@ DEF_FUNC frozenset_type_call, FTC_FRAME
     lea rcx, [rel frozenset_type]
     mov [rax + PyObject.ob_type], rcx
     mov edx, TAG_PTR
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.ftc_iter_raised:
+    mov rdi, rbx                ; the partly built set
+    call obj_decref
+    xor eax, eax                ; a NULL Value, with the exception pending
+    xor edx, edx
     pop r12
     pop rbx
     leave

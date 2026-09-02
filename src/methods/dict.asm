@@ -14,6 +14,7 @@ extern obj_decref
 extern str_from_cstr_heap
 extern tuple_new
 extern tuple_type
+extern current_exception
 extern dict_new
 extern dict_get
 extern obj_getattr_opt
@@ -724,7 +725,8 @@ DFK_ITER  equ 8
 DFK_DICT  equ 16
 DFK_VAL   equ 24
 DFK_VTAG  equ 32
-DFK_FRAME equ 40            ; + 3 pushes = 64
+DFK_EXC   equ 40            ; current_exception before the iteration started
+DFK_FRAME equ 56            ; + 3 pushes = 80, 16-aligned
 
 DEF_FUNC dict_classmethod_fromkeys, DFK_FRAME
     push rbx
@@ -759,6 +761,7 @@ DEF_FUNC dict_classmethod_fromkeys, DFK_FRAME
     call dict_new
     mov [rbp - DFK_DICT], rax
 
+    DUNDER_EXC_SAVE [rbp - DFK_EXC]
 .dfk_loop:
     ; Get next key from iterator
     mov rdi, [rbp - DFK_ITER]
@@ -788,6 +791,12 @@ DEF_FUNC dict_classmethod_fromkeys, DFK_FRAME
     mov rdi, [rbp - DFK_ITER]
     call obj_decref
 
+    ; call_iternext answers NULL for a clean exhaustion and for a __next__
+    ; that raised anything but StopIteration, which it leaves pending.
+    ; Without the distinction dict.fromkeys(G()) for a raising __getitem__
+    ; answered a short dict and stranded the exception.
+    EXC_RAISED_SINCE [rbp - DFK_EXC], rcx, .dfk_raised
+
     mov rax, [rbp - DFK_DICT]
     mov edx, TAG_PTR
     pop r13
@@ -795,6 +804,17 @@ DEF_FUNC dict_classmethod_fromkeys, DFK_FRAME
     pop rbx
     leave
     V_PACK rax, rdx             ; builtins return one Value
+    ret
+
+.dfk_raised:
+    mov rdi, [rbp - DFK_DICT]
+    call obj_decref
+    xor eax, eax                ; a NULL Value, with the exception pending
+    xor edx, edx
+    pop r13
+    pop r12
+    pop rbx
+    leave
     ret
 END_FUNC dict_classmethod_fromkeys
 

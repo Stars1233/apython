@@ -1594,7 +1594,8 @@ END_FUNC list_repeat
 ;; ============================================================================
 LIC_SELF   equ 8
 LIC_ITER   equ 16
-LIC_FRAME  equ 16           ; + 0 pushes = 16
+LIC_EXC    equ 24           ; current_exception before the iteration started
+LIC_FRAME  equ 24           ; + 3 pushes = 48, 16-aligned
 DEF_FUNC list_inplace_concat, LIC_FRAME
     V_UNPACK rdi, rdx           ; left  Value -> (payload, tag)
     V_UNPACK rsi, rcx           ; right Value -> (payload, tag)
@@ -1664,6 +1665,7 @@ DEF_FUNC list_inplace_concat, LIC_FRAME
     jz .lic_type_error
     mov [rbp - LIC_ITER], rax
 
+    DUNDER_EXC_SAVE [rbp - LIC_EXC]
 .lic_gen_loop:
     mov rdi, [rbp - LIC_ITER]
     mov rax, [rdi + PyObject.ob_type]
@@ -1691,6 +1693,10 @@ DEF_FUNC list_inplace_concat, LIC_FRAME
     mov rdi, [rbp - LIC_ITER]
     call obj_decref
 
+    ; NULL is exhaustion or a raise alike: `L += G()` for a raising
+    ; __getitem__ appended a short run and handed L back as a success.
+    EXC_RAISED_SINCE [rbp - LIC_EXC], rcx, .lic_gen_raised
+
 .lic_done:
     ; Return (self, TAG_PTR) — INCREF self
     INCREF rbx
@@ -1702,6 +1708,20 @@ DEF_FUNC list_inplace_concat, LIC_FRAME
     leave
     V_PACK rax, rdx             ; return one Value
     ret
+
+.lic_gen_raised:
+    ; Not a NULL return: this is an nb_inplace_add slot, and op_binary_op
+    ; reads NULL from a slot as "declined", which it reports as
+    ; "unsupported operand type(s)" -- burying the exception the iterator
+    ; raised.  Unwind directly, exactly as .lic_type_error's RAISE does.
+    ; The operands are back on the value stack once the unwinder restores
+    ; r13, so they are not released here either.
+    extern eval_exception_unwind
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    jmp eval_exception_unwind
 
 .lic_type_error:
     RAISE exc_TypeError_type, "can only concatenate list (not other) to list"

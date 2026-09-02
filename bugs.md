@@ -295,6 +295,19 @@ one-line fix.
 These are absences rather than wrong answers — the interpreter raises rather
 than lying — but they are ordinary Python that does not work:
 
+- **`async for` accepts only an async generator.**  A class implementing the
+  asynchronous iterator protocol itself -- `__aiter__` returning self and an
+  `async def __anext__` raising `StopAsyncIteration` -- is refused with
+  `TypeError: 'async for' requires an object with __aiter__ method`, though it
+  defines exactly that.  `asyncio` streams and every hand-written async
+  iterator are shaped this way.
+
+- **`dir()` does not consult `__dir__`.**  It walks the MRO's `tp_dict`s and
+  nothing else, so a class defining `__dir__` has it ignored -- including a
+  `__dir__` that raises, whose exception is discarded along with its answer.
+  The module entry under Correctness is the same gap seen from the other end:
+  the object is never asked what it contains.
+
 - **`bytes % args` leaks its temporary when the format is malformed.**  The
   work is done by handing a decoded copy of the format and the arguments to
   `str_mod`, and `str_mod` RAISES for a wrong argument count -- a raise
