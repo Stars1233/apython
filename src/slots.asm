@@ -306,10 +306,120 @@ DEF_FUNC slot_tp_richcompare
     ret
 END_FUNC slot_tp_richcompare
 
+
+;; ============================================================================
+;; DEF_BINARY_SLOT wrapper, dunder_name_symbol, nb_field
+;;
+;; The generic dispatcher for a binary operator slot:
+;;   (rdi = left Value, rsi = right Value) -> rax = result Value, or NULL
+;;
+;; A NULL Value means NotImplemented.  That is already what a declining nb_
+;; slot means to op_binary_op and obj_binary_op, so the protocol carries on
+;; to the right operand and then to the reflected dunder.  A dunder that
+;; RAISES cannot be reported that way -- a NULL would read as a decline and
+;; the exception would surface later at an unrelated instruction -- so it goes
+;; to slot_reraise, like every other wrapper here.
+;;
+;; The wrapper speaks for the LEFT operand only.  op_binary_op offers the pair
+;; to the RIGHT type's slot as well, with the operands still in their original
+;; order, and answering there would call the left object's __op__ -- the wrong
+;; object entirely.  The identity test below is CPython's own, from SLOT1BIN:
+;; "am I the slot this operand's type actually holds?"
+;; ============================================================================
+SB_LEFT  equ 8
+SB_RIGHT equ 16
+SB_EXC   equ 24
+SB_FRAME equ 32             ; + 0 pushes = 32, 16-aligned
+
+%macro DEF_BINARY_SLOT 3        ; %1 = wrapper, %2 = name symbol, %3 = nb field
+DEF_FUNC %1, SB_FRAME
+    mov [rbp - SB_LEFT], rdi
+    mov [rbp - SB_RIGHT], rsi
+
+    V_TEST_PTR rdi, rax
+    ja %%decline                ; an immediate holds no slot of its own
+    test rdi, rdi
+    jz %%decline
+    mov rax, [rdi + PyObject.ob_type]
+    mov rax, [rax + PyTypeObject.tp_as_number]
+    test rax, rax
+    jz %%decline
+    mov rax, [rax + PyNumberMethods.%3]
+    lea rcx, [rel %1]
+    cmp rax, rcx
+    jne %%decline               ; we are the RIGHT type's slot here
+
+    DUNDER_EXC_SAVE [rbp - SB_EXC]
+    mov rdi, [rbp - SB_LEFT]
+    mov rsi, [rbp - SB_RIGHT]
+    V_UNPACK rsi, rcx           ; dunder_call_2 wants (payload, tag)
+    lea rdx, [rel %2]
+    call dunder_call_2
+    V_UNPACK rax, rdx
+    test edx, edx
+    jz %%none_or_raised
+
+    lea rcx, [rel notimpl_singleton]
+    cmp rax, rcx
+    je %%drop_notimpl
+    V_PACK rax, rdx
+    leave
+    ret
+
+%%drop_notimpl:
+    mov rdi, rax                ; dunder_call_2 hands back an owned reference
+    call obj_decref
+%%decline:
+    xor eax, eax                ; the NULL Value
+    leave
+    ret
+
+%%none_or_raised:
+    EXC_RAISED_SINCE [rbp - SB_EXC], rcx, %%raised
+    xor eax, eax
+    leave
+    ret
+%%raised:
+    call slot_reraise           ; does not return
+END_FUNC %1
+%endmacro
+
 DEF_UNARY_SLOT slot_nb_negative, sl_neg_name
 DEF_UNARY_SLOT slot_nb_positive, sl_pos_name
 DEF_UNARY_SLOT slot_nb_invert,   sl_invert_name
 DEF_UNARY_SLOT slot_nb_absolute, sl_abs_name
+
+; The binary operators, forward and in-place.  Reflected names get no
+; wrapper: this one is one-directional, unlike CPython's SLOT1BIN, and
+; op_binary_op's reflected-dunder arm already serves that direction.
+
+DEF_BINARY_SLOT slot_nb_add, sl_add_name, nb_add
+DEF_BINARY_SLOT slot_nb_sub, sl_sub_name, nb_subtract
+DEF_BINARY_SLOT slot_nb_mul, sl_mul_name, nb_multiply
+DEF_BINARY_SLOT slot_nb_mod, sl_mod_name, nb_remainder
+DEF_BINARY_SLOT slot_nb_divmod, sl_divmod_name, nb_divmod
+DEF_BINARY_SLOT slot_nb_pow, sl_pow_name, nb_power
+DEF_BINARY_SLOT slot_nb_lshift, sl_lshift_name, nb_lshift
+DEF_BINARY_SLOT slot_nb_rshift, sl_rshift_name, nb_rshift
+DEF_BINARY_SLOT slot_nb_and, sl_and_name, nb_and
+DEF_BINARY_SLOT slot_nb_xor, sl_xor_name, nb_xor
+DEF_BINARY_SLOT slot_nb_or, sl_or_name, nb_or
+DEF_BINARY_SLOT slot_nb_floordiv, sl_floordiv_name, nb_floor_divide
+DEF_BINARY_SLOT slot_nb_truediv, sl_truediv_name, nb_true_divide
+DEF_BINARY_SLOT slot_nb_matmul, sl_matmul_name, nb_matmul
+DEF_BINARY_SLOT slot_nb_iadd, sl_iadd_name, nb_iadd
+DEF_BINARY_SLOT slot_nb_isub, sl_isub_name, nb_isub
+DEF_BINARY_SLOT slot_nb_imul, sl_imul_name, nb_imul
+DEF_BINARY_SLOT slot_nb_imod, sl_imod_name, nb_irem
+DEF_BINARY_SLOT slot_nb_ipow, sl_ipow_name, nb_ipow
+DEF_BINARY_SLOT slot_nb_ilshift, sl_ilshift_name, nb_ilshift
+DEF_BINARY_SLOT slot_nb_irshift, sl_irshift_name, nb_irshift
+DEF_BINARY_SLOT slot_nb_iand, sl_iand_name, nb_iand
+DEF_BINARY_SLOT slot_nb_ixor, sl_ixor_name, nb_ixor
+DEF_BINARY_SLOT slot_nb_ior, sl_ior_name, nb_ior
+DEF_BINARY_SLOT slot_nb_ifloordiv, sl_ifloordiv_name, nb_ifloor_divide
+DEF_BINARY_SLOT slot_nb_itruediv, sl_itruediv_name, nb_itrue_divide
+DEF_BINARY_SLOT slot_nb_imatmul, sl_imatmul_name, nb_imatmul
 
 ;; ============================================================================
 ;; slot_length(rdi = self) -> rax = i64
@@ -573,6 +683,7 @@ DEF_FUNC type_install_slots, TIS_FRAME
     mov rcx, [rbx + SlotEntry.offset]
     mov rdx, [rbx + SlotEntry.wrapper]
     mov [rax + rcx], rdx
+    jmp .skip
 
 .skip:
     add rbx, SlotEntry_size
@@ -591,6 +702,33 @@ sl_iter_name:   db "__iter__", 0
 sl_next_name:   db "__next__", 0
 sl_hash_name:   db "__hash__", 0
 sl_neg_name:    db "__neg__", 0
+sl_add_name: db "__add__", 0
+sl_sub_name: db "__sub__", 0
+sl_mul_name: db "__mul__", 0
+sl_mod_name: db "__mod__", 0
+sl_divmod_name: db "__divmod__", 0
+sl_pow_name: db "__pow__", 0
+sl_lshift_name: db "__lshift__", 0
+sl_rshift_name: db "__rshift__", 0
+sl_and_name: db "__and__", 0
+sl_xor_name: db "__xor__", 0
+sl_or_name: db "__or__", 0
+sl_floordiv_name: db "__floordiv__", 0
+sl_truediv_name: db "__truediv__", 0
+sl_matmul_name: db "__matmul__", 0
+sl_iadd_name: db "__iadd__", 0
+sl_isub_name: db "__isub__", 0
+sl_imul_name: db "__imul__", 0
+sl_imod_name: db "__imod__", 0
+sl_ipow_name: db "__ipow__", 0
+sl_ilshift_name: db "__ilshift__", 0
+sl_irshift_name: db "__irshift__", 0
+sl_iand_name: db "__iand__", 0
+sl_ixor_name: db "__ixor__", 0
+sl_ior_name: db "__ior__", 0
+sl_ifloordiv_name: db "__ifloordiv__", 0
+sl_itruediv_name: db "__itruediv__", 0
+sl_imatmul_name: db "__imatmul__", 0
 sl_pos_name:    db "__pos__", 0
 sl_invert_name: db "__invert__", 0
 sl_abs_name:    db "__abs__", 0
@@ -610,6 +748,42 @@ sl_setitem_name: db "__setitem__", 0
 sl_delitem_name: db "__delitem__", 0
 
 align 8
+;; ============================================================================
+;; slot_binop_wrappers -- the wrapper installed for each NB_* op, indexed
+;; exactly as arith.asm's binary_op_offsets is: 0..12 forward, 13..25
+;; in-place.  op_binary_op reads it to answer one question it cannot get from
+;; the slot alone, now that every heaptype overriding an operator holds the
+;; same function there: is this type's own __op__ what the slot would call?
+;; ============================================================================
+global slot_binop_wrappers
+slot_binop_wrappers:
+    dq slot_nb_add
+    dq slot_nb_and
+    dq slot_nb_floordiv
+    dq slot_nb_lshift
+    dq slot_nb_matmul
+    dq slot_nb_mul
+    dq slot_nb_mod
+    dq slot_nb_or
+    dq slot_nb_pow
+    dq slot_nb_rshift
+    dq slot_nb_sub
+    dq slot_nb_truediv
+    dq slot_nb_xor
+    dq slot_nb_iadd
+    dq slot_nb_iand
+    dq slot_nb_ifloordiv
+    dq slot_nb_ilshift
+    dq slot_nb_imatmul
+    dq slot_nb_imul
+    dq slot_nb_imod
+    dq slot_nb_ior
+    dq slot_nb_ipow
+    dq slot_nb_irshift
+    dq slot_nb_isub
+    dq slot_nb_itruediv
+    dq slot_nb_ixor
+
 slot_table:
     dq sl_iter_name,   SLOT_DIRECT,   PyTypeObject.tp_iter,     slot_tp_iter
     dq sl_next_name,   SLOT_DIRECT,   PyTypeObject.tp_iternext, slot_tp_iternext
@@ -637,5 +811,40 @@ slot_table:
     dq sl_le_name,     SLOT_DIRECT,   PyTypeObject.tp_richcompare, slot_tp_richcompare
     dq sl_gt_name,     SLOT_DIRECT,   PyTypeObject.tp_richcompare, slot_tp_richcompare
     dq sl_ge_name,     SLOT_DIRECT,   PyTypeObject.tp_richcompare, slot_tp_richcompare
+    
+    ; The binary operators.  CPython maps each of these names to a sequence
+    ; slot as well, but only the NUMERIC slotdef carries a generic
+    ; dispatcher -- sq_concat and sq_repeat exist so list.__add__ is findable
+    ; by name, not to be filled in on a subclass.  A row for either would
+    ; answer `2 * L` with L.__mul__ where CPython answers list.__rmul__.
+
+    dq sl_add_name, SLOT_NUMBER, PyNumberMethods.nb_add, slot_nb_add
+    dq sl_sub_name, SLOT_NUMBER, PyNumberMethods.nb_subtract, slot_nb_sub
+    dq sl_mul_name, SLOT_NUMBER, PyNumberMethods.nb_multiply, slot_nb_mul
+    dq sl_mod_name, SLOT_NUMBER, PyNumberMethods.nb_remainder, slot_nb_mod
+    dq sl_divmod_name, SLOT_NUMBER, PyNumberMethods.nb_divmod, slot_nb_divmod
+    dq sl_pow_name, SLOT_NUMBER, PyNumberMethods.nb_power, slot_nb_pow
+    dq sl_lshift_name, SLOT_NUMBER, PyNumberMethods.nb_lshift, slot_nb_lshift
+    dq sl_rshift_name, SLOT_NUMBER, PyNumberMethods.nb_rshift, slot_nb_rshift
+    dq sl_and_name, SLOT_NUMBER, PyNumberMethods.nb_and, slot_nb_and
+    dq sl_xor_name, SLOT_NUMBER, PyNumberMethods.nb_xor, slot_nb_xor
+    dq sl_or_name, SLOT_NUMBER, PyNumberMethods.nb_or, slot_nb_or
+    dq sl_floordiv_name, SLOT_NUMBER, PyNumberMethods.nb_floor_divide, slot_nb_floordiv
+    dq sl_truediv_name, SLOT_NUMBER, PyNumberMethods.nb_true_divide, slot_nb_truediv
+    dq sl_matmul_name, SLOT_NUMBER, PyNumberMethods.nb_matmul, slot_nb_matmul
+    dq sl_iadd_name, SLOT_NUMBER, PyNumberMethods.nb_iadd, slot_nb_iadd
+    dq sl_isub_name, SLOT_NUMBER, PyNumberMethods.nb_isub, slot_nb_isub
+    dq sl_imul_name, SLOT_NUMBER, PyNumberMethods.nb_imul, slot_nb_imul
+    dq sl_imod_name, SLOT_NUMBER, PyNumberMethods.nb_irem, slot_nb_imod
+    dq sl_ipow_name, SLOT_NUMBER, PyNumberMethods.nb_ipow, slot_nb_ipow
+    dq sl_ilshift_name, SLOT_NUMBER, PyNumberMethods.nb_ilshift, slot_nb_ilshift
+    dq sl_irshift_name, SLOT_NUMBER, PyNumberMethods.nb_irshift, slot_nb_irshift
+    dq sl_iand_name, SLOT_NUMBER, PyNumberMethods.nb_iand, slot_nb_iand
+    dq sl_ixor_name, SLOT_NUMBER, PyNumberMethods.nb_ixor, slot_nb_ixor
+    dq sl_ior_name, SLOT_NUMBER, PyNumberMethods.nb_ior, slot_nb_ior
+    dq sl_ifloordiv_name, SLOT_NUMBER, PyNumberMethods.nb_ifloor_divide, slot_nb_ifloordiv
+    dq sl_itruediv_name, SLOT_NUMBER, PyNumberMethods.nb_itrue_divide, slot_nb_itruediv
+    dq sl_imatmul_name, SLOT_NUMBER, PyNumberMethods.nb_imatmul, slot_nb_imatmul
+
     dq 0, 0, 0, 0
 

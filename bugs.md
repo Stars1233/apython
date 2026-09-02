@@ -9,23 +9,18 @@ one-line fix.
 
 ## Correctness
 
-- **An `int` subclass cannot override an operator dunder.**  `class D(int)`
-  with an `__add__` of its own still adds as an int: `D(3) + 4` is 7, not
-  whatever the method returns.  The class gets int's `nb_add` by inheritance
-  and `type_install_slots` does not replace it.  The same holds for the other
-  builtin bases with numeric slots.
-
 - **`(-7.5) ** 2.5` is `nan` where CPython answers a complex.**  A negative
   base with a fractional exponent has no real result, and CPython's `float`
   power promotes to `complex` rather than answering NaN.
 
-- **`binary_op1`'s subclass rule is not implemented.**  CPython tries the right
-  operand's slot *first* when its type is a proper subclass of the left's and
-  overrides the slot.  It cannot fire here: the only builtin static subclass
-  relationship is `bool` ⊂ `int`, and `bool_number_methods` holds the very same
-  function pointers as `int_number_methods`, which CPython's own
-  `if (slotw == slotv)` collapses to nothing.  Revisit if a builtin static type
-  is ever given a slot function that differs from its base's.
+- **`binary_op1`'s subclass-priority rule is not implemented.**  CPython tries
+  the right operand's slot *first* when its type is a proper subclass of the
+  left's and overrides the slot.  The other half of that rule -- skipping the
+  right slot when it resolves to the same function as the left's -- is
+  implemented, and had to be: every heaptype that overrides an operator now
+  holds the same wrapper, so without it the left operand's method ran twice.
+  The priority half remains, and shows as `P() + Q()` calling `P.__add__`
+  where CPython calls `Q.__radd__` first for a Q deriving from P.
 
 - **`str.encode` and `bytes.decode` know only utf-8, ascii and latin-1.**
   Any other name is a LookupError, where CPython would find the codec through

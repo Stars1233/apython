@@ -124,6 +124,45 @@ DEF_FUNC_BARE binop_is_number
     ret
 END_FUNC binop_is_number
 
+
+;; ============================================================================
+;; binop_left_wrapper(rdi = left payload, rsi = left tag, edx = op index 0..25)
+;;   -> rax = the slots.asm binary wrapper the LEFT operand's type holds for
+;;      this op, or 0
+;;
+;; The question the slot alone can no longer answer.  Every heaptype that
+;; overrides an operator now holds the SAME function in its nb_ slot, so
+;; "which function is there" says nothing about which type defined what --
+;; only whether it is one of ours, and for which op.
+;;
+;; Clobbers rax, rcx and rdx only: op_binary_op keeps the slot offset in r8
+;; and the op index in r9 across the call.
+;; ============================================================================
+extern slot_binop_wrappers
+DEF_FUNC_BARE binop_left_wrapper
+    cmp rsi, TAG_PTR
+    jne .blw_no
+    test rdi, rdi
+    jz .blw_no
+    mov rax, [rdi + PyObject.ob_type]
+    mov rax, [rax + PyTypeObject.tp_as_number]
+    test rax, rax
+    jz .blw_no
+    mov ecx, edx
+    lea rdx, [rel binary_op_offsets]
+    mov rdx, [rdx + rcx*8]
+    mov rax, [rax + rdx]        ; the function this type holds for the op
+    test rax, rax
+    jz .blw_no
+    lea rdx, [rel slot_binop_wrappers]
+    cmp rax, [rdx + rcx*8]
+    jne .blw_no
+    ret
+.blw_no:
+    xor eax, eax
+    ret
+END_FUNC binop_left_wrapper
+
 DEF_FUNC_BARE op_binary_op
     ; ecx = NB_* op code
     ; Save the op index before pops (VPOP doesn't clobber ecx)
@@ -177,6 +216,25 @@ DEF_FUNC_BARE op_binary_op
     lea rax, [rel binary_op_offsets]
     mov r8, [rax + rcx*8]      ; r8 = offset into PyNumberMethods
     mov r9d, ecx               ; r9d = save binary op code (survives float check)
+
+    ; A heaptype that overrides this operator carries the slots.asm wrapper
+    ; for it, and for a LEFT operand that wrapper is the whole answer: none of
+    ; the specialisations below may run ahead of it.  `class D(int)` with an
+    ; __add__ took the float-coercion shortcut for D(1) + 2.5 and answered
+    ; 3.5, and `class L(list)` with a __mul__ took sq_repeat for L([1]) * 2
+    ; and repeated the list -- in both cases running int's or list's operator
+    ; over a method the class had written to replace it.
+    mov rdi, [rsp + BO_LEFT]
+    mov rsi, [rsp + BO_LTAG]
+    mov edx, r9d
+    call binop_left_wrapper
+    test rax, rax
+    jz .binop_no_left_wrapper
+    ; .binop_do_call reads the operands out of rdi and rsi, not off the stack.
+    mov rdi, [rsp + BO_LEFT]
+    mov rsi, [rsp + BO_RIGHT]
+    jmp .binop_have_method
+.binop_no_left_wrapper:
 
     ; Float coercion: if either operand is TAG_FLOAT, use float methods
     ; This handles int+float, float+int, float+float
@@ -390,6 +448,27 @@ DEF_FUNC_BARE op_binary_op
     cmp r9d, 13
     jl .binop_try_right_slot    ; not inplace: the left type simply has no
                                 ; such slot, so the right type gets its turn
+
+    ; For a HEAPTYPE that fallback goes through the dunder arm instead of
+    ; through the slots.  The two cases the slot cannot tell apart are "this
+    ; class never defined __iadd__" and "this class set __iadd__ = None to
+    ; block the inherited one" -- the slot is absent either way -- and
+    ; remapping straight to nb_add takes the class's __add__ without ever
+    ; noticing the block.  The dunder arm asks by name and sees the None.
+    ;
+    ; It costs nothing that matters: the arm it goes to does the same
+    ; __i<op>__-then-__op__ sequence, by name, which is where a heaptype's
+    ; answer comes from in the end anyway.
+    cmp qword [rsp + BO_LTAG], TAG_PTR
+    jne .binop_fb_remap
+    mov rcx, [rsp + BO_LEFT]
+    test rcx, rcx
+    jz .binop_fb_remap
+    mov rcx, [rcx + PyObject.ob_type]
+    test qword [rcx + PyTypeObject.tp_flags], TYPE_FLAG_HEAPTYPE
+    jnz .binop_try_dunder
+
+.binop_fb_remap:
     ; Map inplace op to non-inplace offset
     mov ecx, r9d
     sub ecx, 13                 ; inplace → base op
@@ -633,6 +712,38 @@ DEF_FUNC_BARE op_binary_op
     mov rax, [rax + r8]         ; r8 = the effective nb_* slot offset
     test rax, rax
     jz .binop_try_dunder
+
+    ; CPython's binary_op1 drops this half when both types resolve to the same
+    ; slot function.  That used to be unreachable here -- only int and bool
+    ; shared one -- and it stopped being unreachable the moment every heaptype
+    ; overriding an operator started holding the same wrapper.  Calling it
+    ; again would run the LEFT object's __op__ a second time, because the
+    ; wrapper speaks for whichever operand is on the left.
+    ;
+    ; The test is for OUR wrapper on both sides, not merely for two equal
+    ; pointers: two operands of the same builtin type trivially share a slot
+    ; function, and skipping there would be wrong.  It broke `s += t` for two
+    ; plain strs, whose nb_add is str_concat on both sides -- and the left's
+    ; nb_iadd, which is what was actually tried, is absent.
+    push r9
+    push rax
+    mov ecx, r9d
+    cmp ecx, 13
+    jl .brs_have_base
+    sub ecx, 13                 ; the same remap .brs_have_offset made
+.brs_have_base:
+    mov rdi, [rsp + 16 + BO_LEFT]
+    mov rsi, [rsp + 16 + BO_LTAG]
+    mov edx, ecx
+    call binop_left_wrapper
+    test rax, rax
+    jz .brs_not_shared
+    cmp rax, [rsp]
+    je .brs_shared
+.brs_not_shared:
+    pop rax
+    pop r9
+
     mov rdi, [rsp + BO_LEFT]
     mov rsi, [rsp + BO_RIGHT]
     mov rdx, [rsp + BO_LTAG]
@@ -648,6 +759,11 @@ DEF_FUNC_BARE op_binary_op
     test edx, edx
     jz .binop_try_dunder        ; both sides declined
     jmp .binop_have_result
+
+.brs_shared:
+    pop rax
+    pop r9
+    jmp .binop_try_dunder
 
 .binop_try_dunder:
     ; Try dunder method on heaptype objects
@@ -669,6 +785,28 @@ DEF_FUNC_BARE op_binary_op
     test rdx, TYPE_FLAG_HEAPTYPE
     jz .binop_try_right_dunder
 
+    ; The nb_ slot wrapper already called this type's __op__ by name, and it
+    ; declined -- asking again here would run the user's method a SECOND time.
+    ; Invisible while the method is pure, and a real bug the moment it prints,
+    ; counts or mutates anything.
+    ;
+    ; For a binary op that settles the left side entirely.  For an in-place
+    ; one it settles only the in-place probe: the slot asked __iadd__, nobody
+    ; has asked __add__ yet, and the fallback below is the only place that
+    ; will.
+    push r9
+    mov rdi, [rsp + 8 + BO_LEFT]
+    mov rsi, [rsp + 8 + BO_LTAG]
+    mov edx, r9d
+    call binop_left_wrapper
+    pop r9
+    test rax, rax
+    jz .binop_dunder_no_wrapper
+    cmp r9d, 13
+    jl .binop_try_right_dunder  ; binary: the slot has spoken for this side
+    jmp .binop_left_dunder      ; in-place: skip the probe, keep the fallback
+
+.binop_dunder_no_wrapper:
     ; For inplace ops, try inplace dunder first
     cmp r9d, 13
     jl .binop_left_dunder

@@ -19,6 +19,7 @@ test_async_wait_for
 test_async_with
 test_await_raises
 test_binary_dunders
+test_binop_calls_once
 test_binop_matrix
 test_binop_right_slot
 test_bitwise
@@ -309,6 +310,7 @@ test_str_subclass_dict
 test_str_translate_mapping
 test_str_translate
 test_structseq
+test_subclass_binop
 test_subclass_item_slots
 test_sum_protocol
 test_super_descriptors
