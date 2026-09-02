@@ -102,6 +102,7 @@ test_complex_format
 test_complex_literals
 test_complex
 test_container_dunders
+test_container_operator_names
 test_contains_fallback
 test_control_flow
 test_crash_regressions

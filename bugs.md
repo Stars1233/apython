@@ -63,16 +63,15 @@ one-line fix.
   Everything observable through `_weakref` works; a C extension expecting the
   slot would not.
 
-- **The binary operator dunders are still not reachable by name.**  The unary
-  ones are: `int` and `float` register `__neg__`, `__pos__`, `__abs__`,
-  `__invert__`, `__int__`, `__float__`, `__index__`, `__trunc__` and
-  `__bool__`, and the binary family forward and reflected.  What is left of
-  `dir(int)` and `dir(float)`: the in-place forms, `as_integer_ratio`,
-  `is_integer`, `__round__`, `__ceil__`, `__floor__`, `__getnewargs__`, and
-  the five `object` itself is missing -- `__delattr__`, `__setattr__`,
-  `__getattribute__`, `__getstate__` and `__subclasshook__`, which every type
-  inherits and so is short of.  The container types are also short of their
-  operators: `list.__add__`, `dict.__or__`, `set.__and__` and the rest.
+- **A few names are still short of CPython's `dir()`.**  `int` and `float`
+  are missing the in-place forms, `as_integer_ratio`, `is_integer`,
+  `__round__`, `__ceil__`, `__floor__` and `__getnewargs__`; `set` is missing
+  `__iand__` and `__ior__`, deliberately -- it has no `nb_inplace_*` slots, so
+  `s &= t` degrades to the binary form, and a by-name `__iand__` that did not
+  mutate in place would be a wrong answer rather than a missing name.
+  `object.__getstate__` answers `self.__dict__ or None` but not CPython's
+  `(None, {...})` pair form for a `__slots__` class, which here has no
+  instance dict to build it from.
 
 - **`collections.deque` is list-backed, and two itertools functions
   materialise.**  CPython's deque is a block-linked list, so `appendleft` and

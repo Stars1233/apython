@@ -43,6 +43,7 @@ extern tuple_type
 ; --- moved to a sibling file by the split ---
 
 extern bytes_type
+extern bytearray_type
 
 extern float_type
 
@@ -528,6 +529,122 @@ END_FUNC %1_dunder_%2
 %endmacro
 
 ;; ============================================================================
+;; DEF_SEQ_DUNDER prefix, suffix, implementation
+;;
+;; The sequence operators, by name.  Two things separate these from
+;; DEF_DUNDER_BINARY.
+;;
+;; CPython RAISES for an operand a sequence slot refuses -- [1].__add__(5) is
+;; a TypeError where {}.__or__(5) is NotImplemented -- so the implementation's
+;; own error is the answer, and is left to propagate.
+;;
+;; And every one of these implementations declines a SELF of the wrong type
+;; through BINOP_REQUIRE_LEFT, which answers a NULL Value with nothing
+;; pending.  A builtin's caller reads that as "it raised", finds no exception,
+;; and falls over -- so list.__add__(5, []) has to be turned into the
+;; TypeError CPython gives.  tuple's three hand-written thunks had that hole
+;; and are regenerated from this.
+;;
+;; Arity is not checked here.  It is in the registration, and
+;; builtin_func_call rejects the wrong count before this is entered.
+;; ============================================================================
+%macro DEF_SEQ_DUNDER 3         ; %1 prefix, %2 suffix, %3 implementation
+DEF_FUNC %1_dunder_%2, DB_FRAME
+    cmp rsi, 2
+    jne %%bad
+    mov rsi, [rdi + 8]
+    mov rdi, [rdi]
+    DUNDER_EXC_SAVE [rbp - DB_EXC]
+    extern %3
+    call %3
+    test rax, rax
+    jnz %%out
+    EXC_RAISED_SINCE [rbp - DB_EXC], rcx, %%out
+%%bad:
+    RAISE exc_TypeError_type, "unsupported operand type"
+%%out:
+    leave
+    ret
+END_FUNC %1_dunder_%2
+%endmacro
+
+;; The reflected sequence form: self is the RIGHT operand, and the slot is
+;; called with the operands the way it expects them.  `2 * L` reaches
+;; list.__rmul__(L, 2), and sq_repeat wants (L, 2).
+%macro DEF_SEQ_RDUNDER 3        ; %1 prefix, %2 suffix, %3 implementation
+DEF_FUNC %1_dunder_%2, DB_FRAME
+    cmp rsi, 2
+    jne %%bad
+    mov rsi, [rdi + 8]
+    mov rdi, [rdi]
+    DUNDER_EXC_SAVE [rbp - DB_EXC]
+    extern %3
+    call %3
+    test rax, rax
+    jnz %%out
+    EXC_RAISED_SINCE [rbp - DB_EXC], rcx, %%out
+%%bad:
+    RAISE exc_TypeError_type, "unsupported operand type"
+%%out:
+    leave
+    ret
+END_FUNC %1_dunder_%2
+%endmacro
+
+;; What str and bytes accept on the other side of their reflected `%`.
+global dunder_operand_is_str
+DEF_FUNC_BARE dunder_operand_is_str
+    V_TEST_PTR rdi, rax
+    ja .dois_no
+    test rdi, rdi
+    jz .dois_no
+    mov rax, [rdi + PyObject.ob_type]
+    lea rcx, [rel str_type]
+    cmp rax, rcx
+    je .dois_yes
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_STR_SUBCLASS
+    jz .dois_no
+.dois_yes:
+    mov eax, 1
+    ret
+.dois_no:
+    xor eax, eax
+    ret
+END_FUNC dunder_operand_is_str
+
+global dunder_operand_is_bytes
+DEF_FUNC_BARE dunder_operand_is_bytes
+    V_TEST_PTR rdi, rax
+    ja .doib_no
+    test rdi, rdi
+    jz .doib_no
+    mov rax, [rdi + PyObject.ob_type]
+    lea rcx, [rel bytes_type]
+    cmp rax, rcx
+    je .doib_yes
+    lea rcx, [rel bytearray_type]
+    cmp rax, rcx
+    je .doib_yes
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_BYTES_SUBCLASS
+    jz .doib_no
+.doib_yes:
+    mov eax, 1
+    ret
+.doib_no:
+    xor eax, eax
+    ret
+END_FUNC dunder_operand_is_bytes
+
+;; Anything at all: the dict and set slots validate both operands themselves
+;; and decline a pair they do not want with a NULL Value, which
+;; DEF_DUNDER_BINARY already turns into NotImplemented.
+global dunder_operand_any
+DEF_FUNC_BARE dunder_operand_any
+    mov eax, 1
+    ret
+END_FUNC dunder_operand_any
+
+;; ============================================================================
 ;; DEF_DUNDER_BINARY prefix, suffix, nb_field, reflected
 ;;
 ;; The binary operator dunders, by name.  int.__add__ did not exist at all --
@@ -797,6 +914,140 @@ DEF_DUNDER_DIVMOD float, rdivmod, 1, dunder_operand_is_real
 DEF_DUNDER_BINARY float, rpow, nb_power, 1, dunder_operand_is_real
 DEF_DUNDER_BINARY float, rfloordiv, nb_floor_divide, 1, dunder_operand_is_real
 DEF_DUNDER_BINARY float, rtruediv, nb_true_divide, 1, dunder_operand_is_real
+
+;; ============================================================================
+;; object's generic attribute dunders, and the two hooks
+;;
+;; All five were absent from the tree.  They are not protocol hooks here --
+;; slot_table has no row for any of them and nothing looks one up -- so these
+;; are the generic implementations by name and nothing more.  They are named
+;; rather than registered as builtin_setattr directly so that the day
+;; __setattr__ becomes a slot, the owner test in type_install_slots has a
+;; function to recognise.
+;; ============================================================================
+global object_method_setattr
+DEF_FUNC_BARE object_method_setattr
+    extern builtin_setattr
+    jmp builtin_setattr
+END_FUNC object_method_setattr
+
+global object_method_delattr
+DEF_FUNC_BARE object_method_delattr
+    extern builtin_delattr_fn
+    jmp builtin_delattr_fn      ; a NULL value through tp_setattr is a delete
+END_FUNC object_method_delattr
+
+global object_method_getattribute
+DEF_FUNC_BARE object_method_getattribute
+    extern builtin_getattr
+    jmp builtin_getattr         ; with two arguments it raises, as it should
+END_FUNC object_method_getattribute
+
+;; object.__getstate__(self) -> self.__dict__, or None
+;;
+;; CPython 3.11+ also has a pair form for a __slots__ class, (None, {...}).
+;; A __slots__ class here has no instance dict at all, so that form would need
+;; a walk of the slot words instead of a dict; it is recorded in bugs.md
+;; rather than guessed at.  Nothing in lib/ asks -- copy reaches for
+;; __reduce_ex__, which still raises.
+OGS_FRAME equ 16            ; + 0 pushes = 16, 16-aligned
+global object_method_getstate
+DEF_FUNC object_method_getstate, OGS_FRAME
+    cmp rsi, 1
+    jne .ogs_bad
+    mov rdi, [rdi]
+    V_TEST_PTR rdi, rax
+    ja .ogs_none
+    test rdi, rdi
+    jz .ogs_none
+    LOAD_INST_DICT rax, rdi, .ogs_none
+    test rax, rax
+    jz .ogs_none
+    cmp qword [rax + PyDictObject.ob_size], 0
+    je .ogs_none                ; an empty dict is None, as CPython has it
+    INCREF rax
+    mov edx, TAG_PTR
+    leave
+    V_PACK rax, rdx
+    ret
+.ogs_none:
+    lea rax, [rel none_singleton]
+    INCREF rax
+    mov edx, TAG_PTR
+    leave
+    V_PACK rax, rdx
+    ret
+.ogs_bad:
+    RAISE exc_TypeError_type, "__getstate__() takes no arguments"
+END_FUNC object_method_getstate
+
+;; object.__subclasshook__(cls, subclass) -> NotImplemented
+;;
+;; "I have no opinion", which is what the structural ABCs override and what
+;; abc_subclasscheck reads as "fall through to the MRO".  It has been looking
+;; for this name since it was written and silently finding nothing.
+global object_method_subclasshook
+DEF_FUNC object_method_subclasshook
+    lea rax, [rel notimpl_singleton]
+    INCREF rax
+    mov edx, TAG_PTR
+    leave
+    V_PACK rax, rdx
+    ret
+END_FUNC object_method_subclasshook
+
+;; --- the container operators, by name ------------------------------------
+;; hasattr(list, "__add__") was False, and so was every other one of these:
+;; the slot was there and the name was not, so `operator`-style code and
+;; anything that duck-types on a dunder could not see them.
+;;
+;; The split is CPython's own.  A sequence slot RAISES for an operand it
+;; refuses, so those get the thunk; an nb_ slot declines with NULL and has to
+;; answer NotImplemented, so those get the DEF_DUNDER_BINARY shape.
+DEF_SEQ_DUNDER  list, add,   list_concat
+DEF_SEQ_DUNDER  list, mul,   list_repeat
+DEF_SEQ_RDUNDER list, rmul,  list_repeat
+DEF_SEQ_DUNDER  list, imul,  list_inplace_repeat
+
+DEF_SEQ_DUNDER  str, add,      str_concat
+DEF_SEQ_DUNDER  str, mul,      str_repeat
+DEF_SEQ_RDUNDER str, rmul,     str_repeat
+DEF_SEQ_DUNDER  str, mod,      str_mod
+DEF_SEQ_DUNDER  str, getitem,  str_subscript
+
+DEF_SEQ_DUNDER  bytes, add,     bytes_concat
+DEF_SEQ_DUNDER  bytes, mul,     bytes_repeat
+DEF_SEQ_RDUNDER bytes, rmul,    bytes_repeat
+DEF_SEQ_DUNDER  bytes, mod,     bytes_mod
+DEF_SEQ_DUNDER  bytes, getitem, bytes_subscript
+
+DEF_SEQ_DUNDER  bytearray, add,   bytearray_concat
+DEF_SEQ_DUNDER  bytearray, mul,   bytearray_repeat
+DEF_SEQ_RDUNDER bytearray, rmul,  bytearray_repeat
+DEF_SEQ_DUNDER  bytearray, iadd,  bytearray_inplace_concat
+DEF_SEQ_DUNDER  bytearray, imul,  bytearray_inplace_repeat
+DEF_SEQ_DUNDER  bytearray, mod,   bytearray_mod
+
+;; The reflected `%` forms answer NotImplemented for anything that is not a
+;; str (or bytes), rather than reading it as one.
+DEF_DUNDER_BINARY str,       rmod, nb_remainder, 1, dunder_operand_is_str
+DEF_DUNDER_BINARY bytes,     rmod, nb_remainder, 1, dunder_operand_is_bytes
+DEF_DUNDER_BINARY bytearray, rmod, nb_remainder, 1, dunder_operand_is_bytes
+
+;; dict and set decline through their slots, so the operand check has nothing
+;; left to do.
+DEF_DUNDER_BINARY dict, or,  nb_or, 0, dunder_operand_any
+DEF_DUNDER_BINARY dict, ror, nb_or, 1, dunder_operand_any
+DEF_SEQ_DUNDER    dict, ior, dict_nb_ior
+
+DEF_DUNDER_BINARY set, sub,  nb_subtract, 0, dunder_operand_any
+DEF_DUNDER_BINARY set, rsub, nb_subtract, 1, dunder_operand_any
+DEF_DUNDER_BINARY set, and,  nb_and,      0, dunder_operand_any
+DEF_DUNDER_BINARY set, rand, nb_and,      1, dunder_operand_any
+DEF_DUNDER_BINARY set, xor,  nb_xor,      0, dunder_operand_any
+DEF_DUNDER_BINARY set, rxor, nb_xor,      1, dunder_operand_any
+DEF_DUNDER_BINARY set, or,   nb_or,       0, dunder_operand_any
+DEF_DUNDER_BINARY set, ror,  nb_or,       1, dunder_operand_any
 
 ;; int's nb_bool takes the (payload, tag) pair rather than a Value -- it hands
 ;; the pair straight to int_unwrap -- so it cannot go through the macro.

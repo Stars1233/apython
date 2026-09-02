@@ -82,6 +82,45 @@ extern int_dunder_repr
 extern list_dunder_iter
 extern set_dunder_iter
 extern frozenset_dunder_hash
+extern list_dunder_add
+extern list_dunder_mul
+extern list_dunder_rmul
+extern list_dunder_imul
+extern str_dunder_add
+extern str_dunder_mul
+extern str_dunder_rmul
+extern str_dunder_mod
+extern str_dunder_rmod
+extern str_dunder_getitem
+extern bytes_dunder_add
+extern bytes_dunder_mul
+extern bytes_dunder_rmul
+extern bytes_dunder_mod
+extern bytes_dunder_rmod
+extern bytes_dunder_getitem
+extern bytearray_dunder_add
+extern bytearray_dunder_mul
+extern bytearray_dunder_rmul
+extern bytearray_dunder_iadd
+extern bytearray_dunder_imul
+extern bytearray_dunder_mod
+extern bytearray_dunder_rmod
+extern dict_dunder_or
+extern dict_dunder_ror
+extern dict_dunder_ior
+extern set_dunder_sub
+extern set_dunder_and
+extern set_dunder_xor
+extern set_dunder_or
+extern set_dunder_rsub
+extern set_dunder_rand
+extern set_dunder_rxor
+extern set_dunder_ror
+extern object_method_setattr
+extern object_method_delattr
+extern object_method_getattribute
+extern object_method_getstate
+extern object_method_subclasshook
 extern set_dunder_len
 extern str_dunder_iter
 extern str_dunder_len
@@ -612,6 +651,26 @@ DEF_FUNC_LOCAL set_add_shared_methods, SASM_FRAME
     mov rdi, [rbp - SASM_DICT]
     call add_class_getitem
 
+    ; The set operators, by name.  Both types hold the same slots, so both
+    ; get the same eight; CPython's frozenset carries only the forward four,
+    ; and the reflected ones are harmless there -- they answer the same thing.
+    mov rdi, [rbp - SASM_DICT]
+    lea rsi, [rel mn___sub__]
+    lea rdx, [rel set_dunder_sub]
+    call dict_add_builtin_func
+    mov rdi, [rbp - SASM_DICT]
+    lea rsi, [rel mn___and__]
+    lea rdx, [rel set_dunder_and]
+    call dict_add_builtin_func
+    mov rdi, [rbp - SASM_DICT]
+    lea rsi, [rel mn___xor__]
+    lea rdx, [rel set_dunder_xor]
+    call dict_add_builtin_func
+    mov rdi, [rbp - SASM_DICT]
+    lea rsi, [rel mn___or__]
+    lea rdx, [rel set_dunder_or]
+    call dict_add_builtin_func
+
     leave
     ret
 END_FUNC set_add_shared_methods
@@ -894,6 +953,36 @@ DEF_FUNC methods_init
     lea rdx, [rel builtin_method_format]
     call dict_add_builtin_func
 
+    ; The operators, by name.
+    mov rdi, rbx
+    lea rsi, [rel mn___add__]
+    lea rdx, [rel str_dunder_add]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___mul__]
+    lea rdx, [rel str_dunder_mul]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___rmul__]
+    lea rdx, [rel str_dunder_rmul]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___mod__]
+    lea rdx, [rel str_dunder_mod]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___rmod__]
+    lea rdx, [rel str_dunder_rmod]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___getitem__]
+    lea rdx, [rel str_dunder_getitem]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___contains__]
+    lea rdx, [rel generic_method_contains]
+    call dict_add_builtin_func
+
     lea rax, [rel str_type]
     mov [rax + PyTypeObject.tp_dict], rbx
     ; INCREF the dict (type holds ref; dict_new gave us refcnt=1, which we keep)
@@ -1047,6 +1136,24 @@ DEF_FUNC methods_init
     lea rdx, [rel list_dunder_iter]
     call dict_add_builtin_func
 
+    ; The operators, by name.  The slots were there and the names were not.
+    mov rdi, rbx
+    lea rsi, [rel mn___add__]
+    lea rdx, [rel list_dunder_add]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___mul__]
+    lea rdx, [rel list_dunder_mul]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___rmul__]
+    lea rdx, [rel list_dunder_rmul]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___imul__]
+    lea rdx, [rel list_dunder_imul]
+    call dict_add_builtin_func
+
     lea rax, [rel list_type]
     mov [rax + PyTypeObject.tp_dict], rbx
 
@@ -1188,6 +1295,20 @@ DEF_FUNC methods_init
     lea rdx, [rel dict_dunder_iter]
     call dict_add_builtin_func
 
+    ; The union operators, by name.
+    mov rdi, rbx
+    lea rsi, [rel mn___or__]
+    lea rdx, [rel dict_dunder_or]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___ror__]
+    lea rdx, [rel dict_dunder_ror]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___ior__]
+    lea rdx, [rel dict_dunder_ior]
+    call dict_add_builtin_func
+
     lea rax, [rel dict_type]
     mov [rax + PyTypeObject.tp_dict], rbx
 
@@ -1316,6 +1437,28 @@ DEF_FUNC methods_init
 
     mov rdi, rbx
     call set_add_shared_methods
+
+    ; The reflected four are set's alone: CPython's frozenset carries only the
+    ; forward ones.  __iand__ and __ior__ are deliberately absent -- set has no
+    ; nb_inplace_* slots here, so `s &= t` degrades to the binary form, and a
+    ; by-name __iand__ that did not mutate in place would be a wrong answer
+    ; rather than a missing name.
+    mov rdi, rbx
+    lea rsi, [rel mn___rsub__]
+    lea rdx, [rel set_dunder_rsub]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___rand__]
+    lea rdx, [rel set_dunder_rand]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___rxor__]
+    lea rdx, [rel set_dunder_rxor]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___ror__]
+    lea rdx, [rel set_dunder_ror]
+    call dict_add_builtin_func
 
     lea rax, [rel set_type]
     mov [rax + PyTypeObject.tp_dict], rbx
@@ -1529,6 +1672,51 @@ DEF_FUNC methods_init
     extern object_method_ge
     lea rdx, [rel object_method_ge]
     call dict_add_builtin_func
+
+    ; The generic attribute dunders, and the two hooks.  All five were
+    ; absent, and every type inherits them -- abcmod has been looking for
+    ; __subclasshook__ since it was written and silently finding nothing.
+    mov rdi, rbx
+    lea rsi, [rel mn___setattr__]
+    lea rdx, [rel object_method_setattr]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___delattr__]
+    lea rdx, [rel object_method_delattr]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___getattribute__]
+    lea rdx, [rel object_method_getattribute]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___getstate__]
+    lea rdx, [rel object_method_getstate]
+    call dict_add_builtin_func
+
+    ; __subclasshook__ is a classmethod: it takes the class explicitly.
+    lea rdi, [rel object_method_subclasshook]
+    lea rsi, [rel mn___subclasshook__]
+    call builtin_func_new
+    push rax
+    mov edi, PyClassMethodObject_size
+    lea rsi, [rel classmethod_type]
+    call gc_alloc
+    pop rcx
+    mov [rax + PyClassMethodObject.cm_callable], rcx
+    mov r12, rax
+    mov rdi, rax
+    call gc_track
+    lea rdi, [rel mn___subclasshook__]
+    call str_from_cstr_heap
+    push rax
+    mov rdi, rbx
+    mov rsi, rax
+    mov rdx, r12
+    call dict_set
+    pop rdi
+    call obj_decref
+    mov rdi, r12
+    call obj_decref
 
     ; Store in object_type.tp_dict
     lea rax, [rel object_type]
@@ -2472,6 +2660,36 @@ DEF_FUNC methods_init
     lea rdx, [rel bytes_staticmethod_maketrans]
     call add_staticmethod
 
+    ; The operators, by name.
+    mov rdi, rbx
+    lea rsi, [rel mn___add__]
+    lea rdx, [rel bytes_dunder_add]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___mul__]
+    lea rdx, [rel bytes_dunder_mul]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___rmul__]
+    lea rdx, [rel bytes_dunder_rmul]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___mod__]
+    lea rdx, [rel bytes_dunder_mod]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___rmod__]
+    lea rdx, [rel bytes_dunder_rmod]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___contains__]
+    lea rdx, [rel generic_method_contains]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___getitem__]
+    lea rdx, [rel bytes_dunder_getitem]
+    call dict_add_builtin_func
+
     lea rax, [rel bytes_type]
     mov [rax + PyTypeObject.tp_dict], rbx
 
@@ -2736,6 +2954,36 @@ DEF_FUNC methods_init
     lea rdx, [rel bytes_staticmethod_maketrans]
     call add_staticmethod
 
+    ; The operators, by name.
+    mov rdi, rbx
+    lea rsi, [rel mn___add__]
+    lea rdx, [rel bytearray_dunder_add]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___mul__]
+    lea rdx, [rel bytearray_dunder_mul]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___rmul__]
+    lea rdx, [rel bytearray_dunder_rmul]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___iadd__]
+    lea rdx, [rel bytearray_dunder_iadd]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___imul__]
+    lea rdx, [rel bytearray_dunder_imul]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___mod__]
+    lea rdx, [rel bytearray_dunder_mod]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___rmod__]
+    lea rdx, [rel bytearray_dunder_rmod]
+    call dict_add_builtin_func
+
     lea rax, [rel bytearray_type]
     mov [rax + PyTypeObject.tp_dict], rbx
 
@@ -2935,6 +3183,13 @@ gs_denominator: db "denominator", 0
 mn___eq__: db "__eq__", 0
 mn___ne__: db "__ne__", 0
 mn___hash__:    db "__hash__", 0
+mn___subclasshook__: db "__subclasshook__", 0
+mn___getstate__: db "__getstate__", 0
+mn___getattribute__: db "__getattribute__", 0
+mn___delattr__: db "__delattr__", 0
+mn___setattr__: db "__setattr__", 0
+mn___ior__: db "__ior__", 0
+mn___imul__: db "__imul__", 0
 mn___subclasses__: db "__subclasses__", 0
 mn___add__:     db "__add__", 0
 mn___radd__: db "__radd__", 0
