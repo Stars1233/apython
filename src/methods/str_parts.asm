@@ -60,62 +60,13 @@ END_FUNC str_method_rindex
 ;; str_method_istitle(args, nargs) -> bool
 ;; ============================================================================
 DEF_FUNC str_method_istitle
-    push rbx
-    push r12
-
-    mov rbx, [rdi]
-    mov r12, [rbx + PyStrObject.ob_size]
-
-    ; Empty string → False
-    test r12, r12
-    jz .istitle_false
-
-    xor ecx, ecx            ; i = 0
-    mov r8d, 1               ; prev_sep = true
-    xor r9d, r9d             ; seen_cased = false
-.istitle_loop:
-    cmp rcx, r12
-    jge .istitle_check
-    movzx eax, byte [rbx + PyStrObject.data + rcx]
-    cmp al, 'A'
-    jb .istitle_not_alpha
-    cmp al, 'Z'
-    jbe .istitle_upper
-    cmp al, 'a'
-    jb .istitle_not_alpha
-    cmp al, 'z'
-    ja .istitle_not_alpha
-    ; lowercase char
-    test r8d, r8d
-    jnz .istitle_false        ; lowercase after separator → not title
-    xor r8d, r8d
-    mov r9d, 1
-    inc rcx
-    jmp .istitle_loop
-.istitle_upper:
-    test r8d, r8d
-    jz .istitle_false         ; uppercase after alpha → not title
-    xor r8d, r8d
-    mov r9d, 1
-    inc rcx
-    jmp .istitle_loop
-.istitle_not_alpha:
-    mov r8d, 1                ; prev_sep = true
-    inc rcx
-    jmp .istitle_loop
-.istitle_check:
-    test r9d, r9d
-    jz .istitle_false         ; no cased chars → False
-    RET_TRUE
-    pop r12
-    pop rbx
-    leave
-    V_PACK rax, rdx             ; builtins return one Value
-    ret
-.istitle_false:
-    RET_FALSE
-    pop r12
-    pop rbx
+    ; str_pred_impl in methods/str_case.asm, over the same generated flag
+    ; table the case mappings read.
+    mov rdi, [rdi]
+    mov esi, 8
+    extern str_pred_impl
+    call str_pred_impl
+    RET_BOOL_RAX
     leave
     V_PACK rax, rdx             ; builtins return one Value
     ret

@@ -640,3 +640,240 @@ DEF_FUNC str_case_map, SC_FRAME
     pop rbx
     ret
 END_FUNC str_case_map
+
+
+;; ############################################################################
+;;                       THE is* PREDICATES
+;; ############################################################################
+;;
+;; All twelve were ASCII byte loops, for the same reason the case methods
+;; were, and answered False for every character above 127: "é".isalpha() was
+;; False, "١٢٣".isdigit() was False, and "Ⅷ".isnumeric() did not exist.  They
+;; read the same generated flag table the case mappings do.
+
+PRED_ALPHA      equ 0
+PRED_DECIMAL    equ 1
+PRED_DIGIT      equ 2
+PRED_NUMERIC    equ 3
+PRED_ALNUM      equ 4
+PRED_SPACE      equ 5
+PRED_UPPER      equ 6
+PRED_LOWER      equ 7
+PRED_TITLE      equ 8
+PRED_PRINTABLE  equ 9
+PRED_IDENTIFIER equ 10
+PRED_ASCII      equ 11
+
+;; ============================================================================
+;; str_pred_impl(rdi = a str, esi = which) -> eax = 0 or 1
+;;
+;; The all-characters-share-a-flag family is one loop; the three cased ones
+;; and isidentifier each have their own, because their rules are about the
+;; sequence and not about each character alone.
+;; ============================================================================
+SP_DATA   equ 8
+SP_LEN    equ 16
+SP_WHICH  equ 24
+SP_POS    equ 32
+SP_STATE  equ 40
+SP_FRAME  equ 48        ; + 2 pushes = 64
+
+global str_pred_impl
+DEF_FUNC str_pred_impl, SP_FRAME
+    push r12
+    push r13
+    lea rax, [rdi + PyStrObject.data]
+    mov [rbp - SP_DATA], rax
+    mov rax, [rdi + PyStrObject.ob_size]
+    mov [rbp - SP_LEN], rax
+    mov [rbp - SP_WHICH], rsi
+
+    cmp esi, PRED_ASCII
+    je .sp_ascii_only
+    cmp esi, PRED_UPPER
+    je .sp_cased
+    cmp esi, PRED_LOWER
+    je .sp_cased
+    cmp esi, PRED_TITLE
+    je .sp_title
+    cmp esi, PRED_IDENTIFIER
+    je .sp_identifier
+
+    ; The flag families.  Empty is False for all of them except isprintable,
+    ; which is True -- CPython's asymmetry, not an oversight here.
+    test rax, rax
+    jnz .sp_flag_loop
+    xor eax, eax
+    cmp qword [rbp - SP_WHICH], PRED_PRINTABLE
+    jne .sp_out
+    mov eax, 1
+    jmp .sp_out
+
+.sp_flag_loop:
+    mov qword [rbp - SP_POS], 0
+.sp_flag_step:
+    mov rsi, [rbp - SP_POS]
+    cmp rsi, [rbp - SP_LEN]
+    jge .sp_true
+    mov rdi, [rbp - SP_DATA]
+    call ucase_utf8_get
+    movsxd rcx, ecx
+    add [rbp - SP_POS], rcx
+    mov edi, eax
+    call uflags_of
+    mov ecx, [rbp - SP_WHICH]
+    mov edx, UF_ALPHA
+    cmp ecx, PRED_DECIMAL
+    je .sp_flag_decimal
+    cmp ecx, PRED_DIGIT
+    je .sp_flag_digit
+    cmp ecx, PRED_NUMERIC
+    je .sp_flag_numeric
+    cmp ecx, PRED_ALNUM
+    je .sp_flag_alnum
+    cmp ecx, PRED_SPACE
+    je .sp_flag_space
+    cmp ecx, PRED_PRINTABLE
+    je .sp_flag_printable
+    jmp .sp_flag_test
+.sp_flag_decimal:
+    mov edx, UF_DECIMAL
+    jmp .sp_flag_test
+.sp_flag_digit:
+    mov edx, UF_DIGIT
+    jmp .sp_flag_test
+.sp_flag_numeric:
+    mov edx, UF_NUMERIC
+    jmp .sp_flag_test
+.sp_flag_alnum:
+    mov edx, UF_ALPHA | UF_DECIMAL | UF_DIGIT | UF_NUMERIC
+    jmp .sp_flag_test
+.sp_flag_space:
+    mov edx, UF_SPACE
+    jmp .sp_flag_test
+.sp_flag_printable:
+    mov edx, UF_PRINTABLE
+.sp_flag_test:
+    test eax, edx
+    jz .sp_false
+    jmp .sp_flag_step
+
+;; isascii: every byte below 0x80, and an empty string qualifies.
+.sp_ascii_only:
+    mov rdi, [rbp - SP_DATA]
+    xor ecx, ecx
+.sp_ascii_step:
+    cmp rcx, [rbp - SP_LEN]
+    jge .sp_true
+    cmp byte [rdi + rcx], 0x80
+    jae .sp_false
+    inc rcx
+    jmp .sp_ascii_step
+
+;; isupper / islower: no character of the opposite case, and at least one of
+;; the right one.  A titlecase character disqualifies both.
+.sp_cased:
+    mov qword [rbp - SP_POS], 0
+    mov qword [rbp - SP_STATE], 0       ; one of the right case has been seen
+.sp_cased_step:
+    mov rsi, [rbp - SP_POS]
+    cmp rsi, [rbp - SP_LEN]
+    jge .sp_cased_end
+    mov rdi, [rbp - SP_DATA]
+    call ucase_utf8_get
+    movsxd rcx, ecx
+    add [rbp - SP_POS], rcx
+    mov edi, eax
+    call uflags_of
+    mov ecx, UF_UPPER
+    mov edx, UF_LOWER | UF_TITLECASE
+    cmp qword [rbp - SP_WHICH], PRED_UPPER
+    je .sp_cased_have
+    mov ecx, UF_LOWER
+    mov edx, UF_UPPER | UF_TITLECASE
+.sp_cased_have:
+    test eax, edx
+    jnz .sp_false
+    test eax, ecx
+    jz .sp_cased_step
+    mov qword [rbp - SP_STATE], 1
+    jmp .sp_cased_step
+.sp_cased_end:
+    cmp qword [rbp - SP_STATE], 0
+    je .sp_false
+    jmp .sp_true
+
+;; istitle: every uppercase or titlecase character opens a word, every
+;; lowercase one continues one, and at least one of them is there.
+.sp_title:
+    mov qword [rbp - SP_POS], 0
+    xor r12d, r12d                      ; a cased character has been seen
+    xor r13d, r13d                      ; the previous character was cased
+.sp_title_step:
+    mov rsi, [rbp - SP_POS]
+    cmp rsi, [rbp - SP_LEN]
+    jge .sp_title_end
+    mov rdi, [rbp - SP_DATA]
+    call ucase_utf8_get
+    movsxd rcx, ecx
+    add [rbp - SP_POS], rcx
+    mov edi, eax
+    call uflags_of
+    test eax, UF_UPPER | UF_TITLECASE
+    jnz .sp_title_open
+    test eax, UF_LOWER
+    jnz .sp_title_continue
+    xor r13d, r13d
+    jmp .sp_title_step
+.sp_title_open:
+    test r13d, r13d
+    jnz .sp_false
+    mov r13d, 1
+    mov r12d, 1
+    jmp .sp_title_step
+.sp_title_continue:
+    test r13d, r13d
+    jz .sp_false
+    mov r12d, 1
+    jmp .sp_title_step
+.sp_title_end:
+    test r12d, r12d
+    jz .sp_false
+    jmp .sp_true
+
+;; isidentifier: XID_Start then XID_Continue, and never empty.
+.sp_identifier:
+    cmp qword [rbp - SP_LEN], 0
+    je .sp_false
+    mov qword [rbp - SP_POS], 0
+.sp_ident_step:
+    mov rsi, [rbp - SP_POS]
+    cmp rsi, [rbp - SP_LEN]
+    jge .sp_true
+    mov rdi, [rbp - SP_DATA]
+    call ucase_utf8_get
+    movsxd rcx, ecx
+    mov r12, [rbp - SP_POS]
+    add [rbp - SP_POS], rcx
+    mov edi, eax
+    call uflags_of
+    mov edx, UF_XID_CONT
+    test r12, r12
+    jnz .sp_ident_test
+    mov edx, UF_XID_START
+.sp_ident_test:
+    test eax, edx
+    jz .sp_false
+    jmp .sp_ident_step
+
+.sp_true:
+    mov eax, 1
+    jmp .sp_out
+.sp_false:
+    xor eax, eax
+.sp_out:
+    pop r13
+    pop r12
+    leave
+    ret
+END_FUNC str_pred_impl

@@ -169,33 +169,13 @@ END_FUNC str_method_rfind
 ;; Returns True if all chars are digits and len>0, else False
 ;; ============================================================================
 DEF_FUNC str_method_isdigit
-    mov rax, [rdi]          ; self
-    mov rcx, [rax + PyStrObject.ob_size]
-
-    ; Empty string -> False
-    test rcx, rcx
-    jz .isdigit_false
-
-    xor edx, edx            ; index
-.isdigit_loop:
-    cmp rdx, rcx
-    jge .isdigit_true
-    movzx esi, byte [rax + PyStrObject.data + rdx]
-    cmp sil, '0'
-    jb .isdigit_false
-    cmp sil, '9'
-    ja .isdigit_false
-    inc rdx
-    jmp .isdigit_loop
-
-.isdigit_true:
-    RET_TRUE
-    leave
-    V_PACK rax, rdx             ; builtins return one Value
-    ret
-
-.isdigit_false:
-    RET_FALSE
+    ; str_pred_impl in methods/str_case.asm, over the same generated flag
+    ; table the case mappings read.
+    mov rdi, [rdi]
+    mov esi, 2
+    extern str_pred_impl
+    call str_pred_impl
+    RET_BOOL_RAX
     leave
     V_PACK rax, rdx             ; builtins return one Value
     ret
@@ -211,150 +191,72 @@ END_FUNC str_method_isdigit
 ;; reach for; the other four keep the family complete.
 ;; ============================================================================
 DEF_FUNC str_method_isidentifier
-    mov rax, [rdi]
-    mov rcx, [rax + PyStrObject.ob_size]
-    test rcx, rcx
-    jz .false
-    ; First character: a letter or underscore.
-    movzx esi, byte [rax + PyStrObject.data]
-    cmp sil, '_'
-    je .rest
-    call .is_alpha_sil
-    jz .false
-.rest:
-    mov edx, 1
-.loop:
-    cmp rdx, rcx
-    jge .true
-    movzx esi, byte [rax + PyStrObject.data + rdx]
-    cmp sil, '_'
-    je .next
-    cmp sil, '0'
-    jb .not_alnum
-    cmp sil, '9'
-    jbe .next
-.not_alnum:
-    push rax
-    push rcx
-    push rdx
-    call .is_alpha_sil
-    pop rdx
-    pop rcx
-    pop rax
-    jz .false
-.next:
-    inc rdx
-    jmp .loop
-
-; Sets ZF when sil is not an ASCII letter.
-.is_alpha_sil:
-    cmp sil, 'A'
-    jb .not_letter
-    cmp sil, 'Z'
-    jbe .letter
-    cmp sil, 'a'
-    jb .not_letter
-    cmp sil, 'z'
-    ja .not_letter
-.letter:
-    test esp, esp               ; clears ZF (rsp is never zero)
-    ret
-.not_letter:
-    xor r8d, r8d                ; sets ZF
-    ret
-
-.true:
-    RET_TRUE
+    ; str_pred_impl in methods/str_case.asm, over the same generated flag
+    ; table the case mappings read.
+    mov rdi, [rdi]
+    mov esi, 10
+    extern str_pred_impl
+    call str_pred_impl
+    RET_BOOL_RAX
     leave
-    V_PACK rax, rdx
-    ret
-.false:
-    RET_FALSE
-    leave
-    V_PACK rax, rdx
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 END_FUNC str_method_isidentifier
 
 ;; Every byte printable and not a space-only string; the empty string is True.
 DEF_FUNC str_method_isprintable
-    mov rax, [rdi]
-    mov rcx, [rax + PyStrObject.ob_size]
-    xor edx, edx
-.loop:
-    cmp rdx, rcx
-    jge .true
-    movzx esi, byte [rax + PyStrObject.data + rdx]
-    cmp sil, 0x20
-    jb .false
-    cmp sil, 0x7e
-    ja .false
-    inc rdx
-    jmp .loop
-.true:
-    RET_TRUE
+    ; str_pred_impl in methods/str_case.asm, over the same generated flag
+    ; table the case mappings read.
+    mov rdi, [rdi]
+    mov esi, 9
+    extern str_pred_impl
+    call str_pred_impl
+    RET_BOOL_RAX
     leave
-    V_PACK rax, rdx
-    ret
-.false:
-    RET_FALSE
-    leave
-    V_PACK rax, rdx
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 END_FUNC str_method_isprintable
 
 DEF_FUNC str_method_isascii
-    mov rax, [rdi]
-    mov rcx, [rax + PyStrObject.ob_size]
-    xor edx, edx
-.loop:
-    cmp rdx, rcx
-    jge .true
-    movzx esi, byte [rax + PyStrObject.data + rdx]
-    cmp sil, 0x7f
-    ja .false
-    inc rdx
-    jmp .loop
-.true:
-    RET_TRUE
+    ; str_pred_impl in methods/str_case.asm, over the same generated flag
+    ; table the case mappings read.
+    mov rdi, [rdi]
+    mov esi, 11
+    extern str_pred_impl
+    call str_pred_impl
+    RET_BOOL_RAX
     leave
-    V_PACK rax, rdx
-    ret
-.false:
-    RET_FALSE
-    leave
-    V_PACK rax, rdx
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 END_FUNC str_method_isascii
 
 ;; isdecimal and isnumeric agree with isdigit over ASCII, which is all a byte
 ;; string can represent.
 DEF_FUNC str_method_isdecimal
-    mov rax, [rdi]
-    mov rcx, [rax + PyStrObject.ob_size]
-    test rcx, rcx
-    jz .false
-    xor edx, edx
-.loop:
-    cmp rdx, rcx
-    jge .true
-    movzx esi, byte [rax + PyStrObject.data + rdx]
-    cmp sil, '0'
-    jb .false
-    cmp sil, '9'
-    ja .false
-    inc rdx
-    jmp .loop
-.true:
-    RET_TRUE
+    ; str_pred_impl in methods/str_case.asm, over the same generated flag
+    ; table the case mappings read.
+    mov rdi, [rdi]
+    mov esi, 1
+    extern str_pred_impl
+    call str_pred_impl
+    RET_BOOL_RAX
     leave
-    V_PACK rax, rdx
-    ret
-.false:
-    RET_FALSE
-    leave
-    V_PACK rax, rdx
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 END_FUNC str_method_isdecimal
+
+DEF_FUNC str_method_isnumeric
+    ; str_pred_impl in methods/str_case.asm, over the same generated flag
+    ; table the case mappings read.
+    mov rdi, [rdi]
+    mov esi, 3
+    extern str_pred_impl
+    call str_pred_impl
+    RET_BOOL_RAX
+    leave
+    V_PACK rax, rdx             ; builtins return one Value
+    ret
+END_FUNC str_method_isnumeric
 
 ;; ============================================================================
 ;; str_method_isalpha(args, nargs) -> bool_true/bool_false
@@ -362,38 +264,13 @@ END_FUNC str_method_isdecimal
 ;; Returns True if all chars are alphabetic and len>0, else False
 ;; ============================================================================
 DEF_FUNC str_method_isalpha
-    mov rax, [rdi]          ; self
-    mov rcx, [rax + PyStrObject.ob_size]
-
-    ; Empty string -> False
-    test rcx, rcx
-    jz .isalpha_false
-
-    xor edx, edx            ; index
-.isalpha_loop:
-    cmp rdx, rcx
-    jge .isalpha_true
-    movzx esi, byte [rax + PyStrObject.data + rdx]
-    cmp sil, 'A'
-    jb .isalpha_false
-    cmp sil, 'Z'
-    jbe .isalpha_next        ; A-Z is alpha
-    cmp sil, 'a'
-    jb .isalpha_false
-    cmp sil, 'z'
-    ja .isalpha_false
-.isalpha_next:
-    inc rdx
-    jmp .isalpha_loop
-
-.isalpha_true:
-    RET_TRUE
-    leave
-    V_PACK rax, rdx             ; builtins return one Value
-    ret
-
-.isalpha_false:
-    RET_FALSE
+    ; str_pred_impl in methods/str_case.asm, over the same generated flag
+    ; table the case mappings read.
+    mov rdi, [rdi]
+    mov esi, 0
+    extern str_pred_impl
+    call str_pred_impl
+    RET_BOOL_RAX
     leave
     V_PACK rax, rdx             ; builtins return one Value
     ret
@@ -405,42 +282,13 @@ END_FUNC str_method_isalpha
 ;; Returns True if all chars are alphanumeric (0-9, A-Z, a-z) and len>0
 ;; ============================================================================
 DEF_FUNC str_method_isalnum
-    mov rax, [rdi]          ; self
-    mov rcx, [rax + PyStrObject.ob_size]
-
-    ; Empty string -> False
-    test rcx, rcx
-    jz .isalnum_false
-
-    xor edx, edx            ; index
-.isalnum_loop:
-    cmp rdx, rcx
-    jge .isalnum_true
-    movzx esi, byte [rax + PyStrObject.data + rdx]
-    cmp sil, '0'
-    jb .isalnum_false
-    cmp sil, '9'
-    jbe .isalnum_next        ; 0-9
-    cmp sil, 'A'
-    jb .isalnum_false
-    cmp sil, 'Z'
-    jbe .isalnum_next        ; A-Z
-    cmp sil, 'a'
-    jb .isalnum_false
-    cmp sil, 'z'
-    ja .isalnum_false
-.isalnum_next:
-    inc rdx
-    jmp .isalnum_loop
-
-.isalnum_true:
-    RET_TRUE
-    leave
-    V_PACK rax, rdx             ; builtins return one Value
-    ret
-
-.isalnum_false:
-    RET_FALSE
+    ; str_pred_impl in methods/str_case.asm, over the same generated flag
+    ; table the case mappings read.
+    mov rdi, [rdi]
+    mov esi, 4
+    extern str_pred_impl
+    call str_pred_impl
+    RET_BOOL_RAX
     leave
     V_PACK rax, rdx             ; builtins return one Value
     ret
@@ -452,36 +300,13 @@ END_FUNC str_method_isalnum
 ;; Returns True if all chars are whitespace (space/tab/newline/CR/VT/FF) and len>0
 ;; ============================================================================
 DEF_FUNC str_method_isspace
-    mov rax, [rdi]          ; self
-    mov rcx, [rax + PyStrObject.ob_size]
-
-    ; Empty string -> False
-    test rcx, rcx
-    jz .isspace_false
-
-    xor edx, edx            ; index
-.isspace_loop:
-    cmp rdx, rcx
-    jge .isspace_true
-    movzx esi, byte [rax + PyStrObject.data + rdx]
-    cmp sil, 0x20           ; space
-    je .isspace_next
-    cmp sil, 0x09           ; tab
-    jb .isspace_false
-    cmp sil, 0x0d           ; tab(09), newline(0A), VT(0B), FF(0C), CR(0D)
-    ja .isspace_false
-.isspace_next:
-    inc rdx
-    jmp .isspace_loop
-
-.isspace_true:
-    RET_TRUE
-    leave
-    V_PACK rax, rdx             ; builtins return one Value
-    ret
-
-.isspace_false:
-    RET_FALSE
+    ; str_pred_impl in methods/str_case.asm, over the same generated flag
+    ; table the case mappings read.
+    mov rdi, [rdi]
+    mov esi, 5
+    extern str_pred_impl
+    call str_pred_impl
+    RET_BOOL_RAX
     leave
     V_PACK rax, rdx             ; builtins return one Value
     ret
@@ -493,45 +318,13 @@ END_FUNC str_method_isspace
 ;; Returns True if all cased chars are uppercase, and there is at least one cased char
 ;; ============================================================================
 DEF_FUNC str_method_isupper
-    mov rax, [rdi]          ; self
-    mov rcx, [rax + PyStrObject.ob_size]
-
-    ; Empty string -> False
-    test rcx, rcx
-    jz .isupper_false
-
-    xor edx, edx            ; index
-    xor r8d, r8d            ; has_cased flag
-.isupper_loop:
-    cmp rdx, rcx
-    jge .isupper_check_cased
-    movzx esi, byte [rax + PyStrObject.data + rdx]
-    cmp sil, 'A'
-    jb .isupper_next         ; non-alpha, skip
-    cmp sil, 'Z'
-    jbe .isupper_found_upper ; A-Z: uppercase, good
-    cmp sil, 'a'
-    jb .isupper_next         ; non-alpha, skip
-    cmp sil, 'z'
-    jbe .isupper_false       ; a-z: lowercase, fail
-.isupper_next:
-    inc rdx
-    jmp .isupper_loop
-.isupper_found_upper:
-    mov r8d, 1               ; found at least one cased char
-    inc rdx
-    jmp .isupper_loop
-.isupper_check_cased:
-    test r8d, r8d
-    jz .isupper_false        ; no cased chars found
-
-    RET_TRUE
-    leave
-    V_PACK rax, rdx             ; builtins return one Value
-    ret
-
-.isupper_false:
-    RET_FALSE
+    ; str_pred_impl in methods/str_case.asm, over the same generated flag
+    ; table the case mappings read.
+    mov rdi, [rdi]
+    mov esi, 6
+    extern str_pred_impl
+    call str_pred_impl
+    RET_BOOL_RAX
     leave
     V_PACK rax, rdx             ; builtins return one Value
     ret
@@ -543,47 +336,13 @@ END_FUNC str_method_isupper
 ;; Returns True if all cased chars are lowercase, and there is at least one cased char
 ;; ============================================================================
 DEF_FUNC str_method_islower
-    mov rax, [rdi]          ; self
-    mov rcx, [rax + PyStrObject.ob_size]
-
-    ; Empty string -> False
-    test rcx, rcx
-    jz .islower_false
-
-    xor edx, edx            ; index
-    xor r8d, r8d            ; has_cased flag
-.islower_loop:
-    cmp rdx, rcx
-    jge .islower_check_cased
-    movzx esi, byte [rax + PyStrObject.data + rdx]
-    cmp sil, 'a'
-    jb .islower_check_upper
-    cmp sil, 'z'
-    jbe .islower_found_lower ; a-z: lowercase, good
-    jmp .islower_next        ; > 'z', non-alpha, skip
-.islower_check_upper:
-    cmp sil, 'A'
-    jb .islower_next         ; non-alpha, skip
-    cmp sil, 'Z'
-    jbe .islower_false       ; A-Z: uppercase, fail
-.islower_next:
-    inc rdx
-    jmp .islower_loop
-.islower_found_lower:
-    mov r8d, 1               ; found at least one cased char
-    inc rdx
-    jmp .islower_loop
-.islower_check_cased:
-    test r8d, r8d
-    jz .islower_false        ; no cased chars found
-
-    RET_TRUE
-    leave
-    V_PACK rax, rdx             ; builtins return one Value
-    ret
-
-.islower_false:
-    RET_FALSE
+    ; str_pred_impl in methods/str_case.asm, over the same generated flag
+    ; table the case mappings read.
+    mov rdi, [rdi]
+    mov esi, 7
+    extern str_pred_impl
+    call str_pred_impl
+    RET_BOOL_RAX
     leave
     V_PACK rax, rdx             ; builtins return one Value
     ret

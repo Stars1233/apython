@@ -18,6 +18,7 @@ ok difflib
 ok email
 ok encodings
 ok enum
+ok filecmp
 ok fileinput
 ok fnmatch
 ok functools
@@ -25,11 +26,14 @@ ok __future__
 ok graphlib
 ok heapq
 ok __hello__
+ok html
 ok http
 ok idlelib
 ok io
 ok ipaddress
 ok keyword
+ok locale
+ok _markupbase
 ok netrc
 ok ntpath
 ok nturl2path
@@ -49,6 +53,7 @@ ok re
 ok reprlib
 ok _sitebuiltins
 ok stat
+ok textwrap
 ok token
 ok turtledemo
 ok types

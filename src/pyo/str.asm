@@ -847,11 +847,95 @@ DEF_FUNC str_repr
     jb .sr_esc_hex
     cmp al, 0x7f             ; and neither does DEL
     je .sr_esc_hex
+    cmp al, 0x80
+    jae .sr_wide
 
     ; Normal character
     mov [rdi], al
     inc rdi
     inc rcx
+    jmp .sr_loop
+
+.sr_wide:
+    ; Above ASCII, repr escapes exactly what is not printable -- CPython's
+    ; rule, and the reason a non-breaking space comes back as an escape and an
+    ; accented letter does not.  Every non-ASCII byte used to be copied
+    ; through, so repr() of a string with a soft hyphen or a combining mark in
+    ; it put the character itself in the output, invisibly.
+    push rcx
+    push rsi
+    push rdi
+    push r12                    ; four, so the calls stay 16-byte aligned
+    mov rdi, rsi
+    mov rsi, rcx
+    extern ucase_utf8_get
+    call ucase_utf8_get         ; eax = codepoint, ecx = its width
+    push rax
+    push rcx
+    mov edi, eax
+    extern uflags_of
+    call uflags_of              ; clobbers r8 and r9, hence the stack
+    pop r9                      ; the width
+    pop r8                      ; the codepoint
+    mov r10d, eax
+    pop r12
+    pop rdi
+    pop rsi
+    pop rcx
+    test r10d, 256              ; UF_PRINTABLE
+    jz .sr_esc_wide
+
+    ; Printable: its bytes go straight across.
+    xor eax, eax
+.sr_wide_copy:
+    cmp eax, r9d
+    jge .sr_loop
+    mov r10b, [rsi + rcx]
+    mov [rdi], r10b
+    inc rdi
+    inc rcx
+    inc eax
+    jmp .sr_wide_copy
+
+.sr_esc_wide:
+    ; \xNN below 256, \uXXXX below 65536, \UXXXXXXXX above.
+    lea r11, [rel sr_hexdigits]
+    mov byte [rdi], 0x5c
+    cmp r8d, 0x100
+    jae .sr_esc_u
+    mov byte [rdi + 1], 'x'
+    mov r10d, 2
+    jmp .sr_esc_digits
+.sr_esc_u:
+    cmp r8d, 0x10000
+    jae .sr_esc_bigu
+    mov byte [rdi + 1], 'u'
+    mov r10d, 4
+    jmp .sr_esc_digits
+.sr_esc_bigu:
+    mov byte [rdi + 1], 'U'
+    mov r10d, 8
+.sr_esc_digits:
+    add rdi, 2
+    mov eax, r10d               ; nibbles left, high one first
+.sr_esc_digit:
+    test eax, eax
+    jz .sr_esc_wide_done
+    dec eax
+    push rcx
+    mov ecx, eax
+    shl ecx, 2
+    mov edx, r8d
+    shr edx, cl
+    pop rcx
+    and edx, 0x0f
+    movzx edx, byte [r11 + rdx]
+    mov [rdi], dl
+    inc rdi
+    jmp .sr_esc_digit
+.sr_esc_wide_done:
+    movsxd r9, r9d
+    add rcx, r9
     jmp .sr_loop
 
 .sr_esc_n:

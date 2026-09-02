@@ -663,7 +663,8 @@ DEF_FUNC methods_init
 
     mov rdi, rbx
     lea rsi, [rel mn_isnumeric]
-    lea rdx, [rel str_method_isdecimal]
+    extern str_method_isnumeric
+    lea rdx, [rel str_method_isnumeric]
     call dict_add_builtin_func
 
     mov rdi, rbx

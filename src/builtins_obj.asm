@@ -2044,7 +2044,9 @@ DEF_FUNC builtin_ascii_fn, AA_FRAME
 
     mov rbx, [rbp - AA_REPR]  ; rbx = repr str
     mov r12, [rbx + PyStrObject.ob_size]  ; r12 = original length
-    lea rdi, [r12*4 + 8]      ; worst case: every char becomes \xNN (4 chars) + 8 NUL pad
+    ; Worst case is \uXXXX -- six characters from a two-byte source, so three
+    ; per input byte; \UXXXXXXXX is ten from four, which is less.
+    lea rdi, [r12*4 + 16]
     call ap_malloc
     mov r13, rax               ; r13 = output buffer
 
@@ -2063,35 +2065,60 @@ DEF_FUNC builtin_ascii_fn, AA_FRAME
     jmp .aa_escape_loop
 
 .aa_do_escape:
-    ; Emit \xHH
+    ; A CODEPOINT, not a byte.  This escaped each UTF-8 byte on its own, so
+    ; ascii("\u4e2d") answered '\xe4\xb8\xad' rather than '\u4e2d' -- three
+    ; escapes for one character, and not something eval() reads back.
+    push rcx
+    push rsi
+    push rdi
+    push r12
+    mov rdi, rsi
+    mov rsi, rcx
+    extern ucase_utf8_get
+    call ucase_utf8_get         ; eax = codepoint, ecx = its width
+    mov r8d, eax
+    mov r9d, ecx
+    pop r12
+    pop rdi
+    pop rsi
+    pop rcx
+
+    lea r11, [rel aa_hexdigits]
     mov byte [rdi], '\'
+    cmp r8d, 0x100
+    jae .aa_esc_u
     mov byte [rdi + 1], 'x'
+    mov r10d, 2
+    jmp .aa_esc_digits
+.aa_esc_u:
+    cmp r8d, 0x10000
+    jae .aa_esc_bigu
+    mov byte [rdi + 1], 'u'
+    mov r10d, 4
+    jmp .aa_esc_digits
+.aa_esc_bigu:
+    mov byte [rdi + 1], 'U'
+    mov r10d, 8
+.aa_esc_digits:
     add rdi, 2
-    ; High nibble
-    mov edx, eax
-    shr edx, 4
-    cmp edx, 10
-    jb .aa_hi_dec
-    add edx, ('a' - 10)
-    jmp .aa_hi_store
-.aa_hi_dec:
-    add edx, '0'
-.aa_hi_store:
-    mov byte [rdi], dl
+    mov eax, r10d
+.aa_esc_digit:
+    test eax, eax
+    jz .aa_esc_done
+    dec eax
+    push rcx
+    mov ecx, eax
+    shl ecx, 2
+    mov edx, r8d
+    shr edx, cl
+    pop rcx
+    and edx, 0x0f
+    movzx edx, byte [r11 + rdx]
+    mov [rdi], dl
     inc rdi
-    ; Low nibble
-    mov edx, eax
-    and edx, 0xf
-    cmp edx, 10
-    jb .aa_lo_dec
-    add edx, ('a' - 10)
-    jmp .aa_lo_store
-.aa_lo_dec:
-    add edx, '0'
-.aa_lo_store:
-    mov byte [rdi], dl
-    inc rdi
-    inc ecx
+    jmp .aa_esc_digit
+.aa_esc_done:
+    add ecx, r9d
     jmp .aa_escape_loop
 
 .aa_escape_done:
@@ -2123,6 +2150,9 @@ DEF_FUNC builtin_ascii_fn, AA_FRAME
 
 .aa_nargs_error:
     RAISE exc_TypeError_type, "ascii() takes exactly one argument"
+section .rodata
+aa_hexdigits: db "0123456789abcdef"
+section .text
 END_FUNC builtin_ascii_fn
 
 ;; ============================================================================
