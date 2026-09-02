@@ -54,6 +54,29 @@ DEF_FUNC_BARE obj_decref
     ret
 END_FUNC obj_decref
 
+; The trashcan.
+;
+; obj_decref -> obj_dealloc -> tp_dealloc -> obj_decref is one machine frame
+; per level of a nested structure, and nothing bounded it: a list nested 200k
+; deep walked the stack off its guard page the moment it was dropped, and the
+; only symptom was SIGSEGV.  Past a nesting limit the object is set aside
+; instead, on a chain threaded through its own ob_refcnt -- which is zero by
+; definition here, and read by nothing until the object is picked back up --
+; and the outermost dealloc frees the chain iteratively.
+;
+; This is CPython's Py_TRASHCAN, put in the one place every deallocation
+; already funnels through rather than in each type's tp_dealloc.  The limit is
+; CPython's Py_TRASHCAN_HEADROOM, and it has to be well above 1: the drain
+; below runs at nesting 1, so a smaller one would deposit every child of every
+; drained object and make no progress in the ordinary case.
+TRASH_LIMIT equ 50
+
+section .bss
+trash_nesting: resq 1
+trash_later:   resq 1
+
+section .text
+
 ; obj_dealloc(PyObject *obj)
 ; Calls type's tp_dealloc if present, else just frees
 DEF_FUNC_BARE obj_dealloc
@@ -61,7 +84,33 @@ DEF_FUNC_BARE obj_dealloc
     push rbp
     mov rbp, rsp
     push rbx
+    sub rsp, 8                  ; the calls below want a 16-byte rsp
     mov rbx, rdi
+
+    cmp qword [rel trash_nesting], TRASH_LIMIT
+    jl .td_enter
+
+    ; Too deep: set it aside for the outermost dealloc.  It has to leave the
+    ; collector's lists first -- its tp_dealloc has not run, so nothing has
+    ; untracked it, and a collection during the drain would otherwise walk an
+    ; object whose refcount is already zero.  gc_untrack is idempotent, so the
+    ; untrack inside tp_dealloc still runs harmlessly later.
+    mov rax, [rbx + PyObject.ob_type]
+    test rax, rax
+    jz .td_no_gc
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_HAVE_GC
+    jz .td_no_gc
+    extern gc_untrack
+    mov rdi, rbx
+    call gc_untrack
+.td_no_gc:
+    mov rax, [rel trash_later]
+    mov [rbx + PyObject.ob_refcnt], rax
+    mov [rel trash_later], rbx
+    jmp .td_out
+
+.td_enter:
+    inc qword [rel trash_nesting]
 
     ; Weak references to this object have to be emptied, and their callbacks
     ; run, before it is freed.  The links live in a side table rather than in
@@ -73,7 +122,6 @@ DEF_FUNC_BARE obj_dealloc
     extern weakref_clear_for
     mov rdi, rbx
     call weakref_clear_for
-    mov rdi, rbx
 .no_weakrefs:
 
     ; Get type's tp_dealloc
@@ -87,13 +135,39 @@ DEF_FUNC_BARE obj_dealloc
     ; Call tp_dealloc(obj)
     mov rdi, rbx
     call rax
-    pop rbx
-    pop rbp
-    ret
+    jmp .td_leave
 
 .just_free:
     mov rdi, rbx
     call ap_free
+
+.td_leave:
+    dec qword [rel trash_nesting]
+    jnz .td_out
+    cmp qword [rel trash_later], 0
+    je .td_out
+
+    ; The outermost dealloc empties the chain, one object at a time.  The
+    ; nesting stays at 1 for the whole drain, so each object's own children go
+    ; on the chain rather than onto the machine stack once they are deep
+    ; enough -- which is what keeps this loop, and not the stack, bounded.
+.td_drain:
+    inc qword [rel trash_nesting]
+.td_drain_loop:
+    mov rbx, [rel trash_later]
+    test rbx, rbx
+    jz .td_drain_done
+    mov rax, [rbx + PyObject.ob_refcnt]
+    mov [rel trash_later], rax
+    mov qword [rbx + PyObject.ob_refcnt], 0
+    mov rdi, rbx
+    call obj_dealloc
+    jmp .td_drain_loop
+.td_drain_done:
+    dec qword [rel trash_nesting]
+
+.td_out:
+    add rsp, 8
     pop rbx
     pop rbp
 .bail:

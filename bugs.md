@@ -334,9 +334,6 @@ than lying — but they are ordinary Python that does not work:
   give up its stack reference before the concat, so it is recorded rather than
   done.
 
-- **Recursive deallocation overflows the stack**: `a=[]`, then 300k times
-  `a=[a]`, then `del a`.  Needs a trashcan mechanism.
-
 - **Crafted `.pyc` and `_sre` bytecode are trusted.**  Marshal validates
   offsets but not types, so a `co_consts` slot holding an int is
   dereferenced by `eval_frame`; `frame_new` adds two `.pyc` fields in 32
