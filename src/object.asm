@@ -469,6 +469,8 @@ rbt_open:    db ": '", 0
 rbt_and:     db "' and '", 0
 rbt_close:   db "'", 0
 rbt_unknown: db "object", 0
+drs_prefix:  db "descriptor requires a '", 0
+drs_middle:  db "' object but received a '", 0
 mah_digits:  db "0123456789abcdef", 0
 
 section .bss
@@ -533,6 +535,84 @@ rtn_compose:
     call raise_exception
     ud2
 END_FUNC raise_type_error_with_typename
+
+; dunder_require_self(rdi = self Value, rsi = the type whose method this is,
+;                     rdx = a second acceptable type, or 0)
+;   -> rax = the self Value, unchanged; does not return if the type is wrong
+;
+; A dunder reached BY NAME is handed whatever the caller passed, and the slot
+; behind it decodes self without asking: int.__neg__(2.5) gives int's
+; nb_negative a float, str.__getitem__(5, 0) gives str's subscript an
+; integer, and each is a wild pointer rather than an error.  Registering
+; these names is what made the calls reachable at all, so every generator of
+; one has to ask this first.
+;
+; CPython words it "descriptor '__neg__' requires a 'int' object but received
+; a 'float'".  Threading the descriptor's own name through every generator
+; buys one clause, so the two type names carry the message instead.
+;
+; A subclass is accepted: int.__neg__(D(2)) for class D(int) is how a
+; subclass reaches the base's operator, and is the reason this is
+; type_is_subtype rather than a pointer compare.
+;
+; The second type is for the pairs that genuinely share one function.  set
+; and frozenset are registered from one table -- they are siblings, neither a
+; subtype of the other -- so set_dunder_len has to answer for both.
+DRS_SELF  equ 8
+DRS_TYPE  equ 16
+DRS_ALT   equ 24
+DRS_FRAME equ 32
+
+global dunder_require_self
+DEF_FUNC dunder_require_self, DRS_FRAME
+    mov [rbp - DRS_SELF], rdi
+    mov [rbp - DRS_TYPE], rsi
+    mov [rbp - DRS_ALT], rdx
+    call value_type
+    test rax, rax
+    jz .drs_bad
+    mov rdi, rax
+    mov rsi, [rbp - DRS_TYPE]
+    extern type_is_subtype
+    call type_is_subtype
+    test eax, eax
+    jnz .drs_ok
+    mov rdx, [rbp - DRS_ALT]
+    test rdx, rdx
+    jz .drs_bad
+    mov rdi, [rbp - DRS_SELF]
+    call value_type
+    mov rdi, rax
+    mov rsi, [rbp - DRS_ALT]
+    call type_is_subtype
+    test eax, eax
+    jz .drs_bad
+.drs_ok:
+    mov rax, [rbp - DRS_SELF]
+    leave
+    ret
+.drs_bad:
+    lea rdi, [rel rbt_buf]
+    lea rsi, [rel drs_prefix]
+    call rbt_append_cstr
+    mov rdi, rax
+    mov rsi, [rbp - DRS_TYPE]
+    mov rsi, [rsi + PyTypeObject.tp_name]
+    call rbt_append_cstr
+    mov rdi, rax
+    lea rsi, [rel drs_middle]
+    call rbt_append_cstr
+    mov rdi, rax
+    mov rsi, [rbp - DRS_SELF]
+    call rbt_typename
+    mov rdi, rax
+    lea rsi, [rel rbt_close]
+    call rbt_append_cstr
+    lea rdi, [rel exc_TypeError_type]
+    lea rsi, [rel rbt_buf]
+    call raise_exception
+    ud2
+END_FUNC dunder_require_self
 
 ; raise_binop_type_error(rdi = left Value, rsi = right Value,
 ;                        rdx = prefix C string) -> never returns

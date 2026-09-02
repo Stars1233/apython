@@ -15,6 +15,7 @@
 %include "opcodes.inc"
 
 ; External functions
+extern frozenset_type
 extern current_exception
 extern int_is_integer
 extern complex_type
@@ -403,6 +404,10 @@ DEF_FUNC %1_dunder_%2
     test rsi, rsi
     jz %%bad
     mov rdi, [rdi]
+    lea rsi, [rel %1_type]
+    extern dunder_require_self
+    call dunder_require_self
+    mov rdi, rax
     V_TEST_PTR rdi, rax
     ja %%immediate
     test rdi, rdi
@@ -430,11 +435,20 @@ END_FUNC %1_dunder_%2
 ;; its size without paying for the len() call -- raised AttributeError.  Like
 ;; the str/repr thunks these read the *defining* type's slot, so a subclass
 ;; inherits the base's behaviour rather than re-dispatching into itself.
-%macro DEF_DUNDER_LEN 1
+%macro DEF_DUNDER_LEN 1-2 0
 DEF_FUNC %1_dunder_len
     test rsi, rsi
     jz %%bad
     mov rdi, [rdi]
+    lea rsi, [rel %1_type]
+%ifnum %2
+    xor edx, edx
+%else
+    lea rdx, [rel %2]
+%endif
+    extern dunder_require_self
+    call dunder_require_self
+    mov rdi, rax
     lea rax, [rel %1_type]
     mov rcx, [rax + PyTypeObject.tp_as_mapping]
     test rcx, rcx
@@ -460,11 +474,20 @@ DEF_FUNC %1_dunder_len
 END_FUNC %1_dunder_len
 %endmacro
 
-%macro DEF_DUNDER_ITER 1
+%macro DEF_DUNDER_ITER 1-2 0
 DEF_FUNC %1_dunder_iter
     test rsi, rsi
     jz %%bad
     mov rdi, [rdi]
+    lea rsi, [rel %1_type]
+%ifnum %2
+    xor edx, edx
+%else
+    lea rdx, [rel %2]
+%endif
+    extern dunder_require_self
+    call dunder_require_self
+    mov rdi, rax
     lea rax, [rel %1_type]
     mov rax, [rax + PyTypeObject.tp_iter]
     test rax, rax
@@ -490,13 +513,13 @@ END_FUNC %1_dunder_iter
 ; list and tuple already have hand-written ones.
 DEF_DUNDER_LEN dict
 DEF_DUNDER_LEN str
-DEF_DUNDER_LEN set
+DEF_DUNDER_LEN set, frozenset_type
 DEF_DUNDER_LEN bytes
 DEF_DUNDER_ITER dict
 DEF_DUNDER_ITER list
 DEF_DUNDER_ITER tuple
 DEF_DUNDER_ITER str
-DEF_DUNDER_ITER set
+DEF_DUNDER_ITER set, frozenset_type
 DEF_DUNDER_ITER bytes
 
 
@@ -513,6 +536,10 @@ DEF_FUNC %1_dunder_%2
     cmp rsi, 1
     jne %%bad
     mov rdi, [rdi]              ; args[0] = self, a Value
+    lea rsi, [rel %1_type]
+    extern dunder_require_self
+    call dunder_require_self
+    mov rdi, rax
     lea rax, [rel %1_type]
     mov rax, [rax + PyTypeObject.tp_as_number]
     test rax, rax
@@ -554,6 +581,12 @@ DEF_FUNC %1_dunder_%2, DB_FRAME
     jne %%bad
     mov rsi, [rdi + 8]
     mov rdi, [rdi]
+    mov [rbp - DB_RHS], rsi
+    lea rsi, [rel %1_type]
+    extern dunder_require_self
+    call dunder_require_self
+    mov rdi, rax
+    mov rsi, [rbp - DB_RHS]
     DUNDER_EXC_SAVE [rbp - DB_EXC]
     extern %3
     call %3
@@ -577,6 +610,12 @@ DEF_FUNC %1_dunder_%2, DB_FRAME
     jne %%bad
     mov rsi, [rdi + 8]
     mov rdi, [rdi]
+    mov [rbp - DB_RHS], rsi
+    lea rsi, [rel %1_type]
+    extern dunder_require_self
+    call dunder_require_self
+    mov rdi, rax
+    mov rsi, [rbp - DB_RHS]
     DUNDER_EXC_SAVE [rbp - DB_EXC]
     extern %3
     call %3
@@ -707,9 +746,10 @@ END_FUNC dunder_operand_is_real
 
 ; The one frame slot these need: the exception pending before the slot ran.
 DB_EXC   equ 8
-DB_FRAME equ 16
+DB_RHS   equ 16     ; the right operand, parked across the receiver check
+DB_FRAME equ 32
 
-%macro DEF_DUNDER_BINARY 5      ; %1 prefix, %2 suffix, %3 nb_ field, %4 reflected, %5 operand check
+%macro DEF_DUNDER_BINARY 5-6 0      ; %1 prefix, %2 suffix, %3 nb_ field, %4 reflected, %5 operand check
 DEF_FUNC %1_dunder_%2, DB_FRAME
     cmp rsi, 2
     jne %%bad
@@ -719,6 +759,35 @@ DEF_FUNC %1_dunder_%2, DB_FRAME
 %else
     mov rsi, [rdi + 8]
     mov rdi, [rdi]
+%endif
+
+    ; Self has to be one of this type's, whichever side it arrived on:
+    ; int.__radd__("x", 1) reaches the same slot as int.__add__.
+%if %4
+    mov [rbp - DB_RHS], rdi     ; the other operand; self is on the right
+    mov rdi, rsi
+    lea rsi, [rel %1_type]
+%ifnum %6
+    xor edx, edx
+%else
+    lea rdx, [rel %6]
+%endif
+    extern dunder_require_self
+    call dunder_require_self
+    mov rsi, rax
+    mov rdi, [rbp - DB_RHS]
+%else
+    mov [rbp - DB_RHS], rsi
+    lea rsi, [rel %1_type]
+%ifnum %6
+    xor edx, edx
+%else
+    lea rdx, [rel %6]
+%endif
+    extern dunder_require_self
+    call dunder_require_self
+    mov rdi, rax
+    mov rsi, [rbp - DB_RHS]
 %endif
 
     ; The operand that is not self has to be one this type's dunder accepts.
@@ -790,6 +859,16 @@ DEF_FUNC %1_dunder_%2, 16
     mov rax, [rdi + 8]
     mov [rsp + 8], rax
 %endif
+    ; Self has to be one of this type's, whichever slot it landed in.
+%if %3
+    mov rdi, [rsp + 8]
+%else
+    mov rdi, [rsp]
+%endif
+    lea rsi, [rel %1_type]
+    extern dunder_require_self
+    call dunder_require_self
+
     ; The operand that is not self has to be one this type accepts, as for
     ; the other binary dunders.  The reflected form already put self SECOND.
 %if %3
@@ -826,6 +905,10 @@ DEF_FUNC %1_dunder_bool
     cmp rsi, 1
     jne %%bad
     mov rdi, [rdi]
+    lea rsi, [rel %1_type]
+    extern dunder_require_self
+    call dunder_require_self
+    mov rdi, rax
     lea rax, [rel %1_type]
     mov rax, [rax + PyTypeObject.tp_as_number]
     test rax, rax
@@ -1040,18 +1123,19 @@ DEF_DUNDER_BINARY dict, or,  nb_or, 0, dunder_operand_any
 DEF_DUNDER_BINARY dict, ror, nb_or, 1, dunder_operand_any
 DEF_SEQ_DUNDER    dict, ior, dict_nb_ior
 
-DEF_DUNDER_BINARY set, sub,  nb_subtract, 0, dunder_operand_any
-DEF_DUNDER_BINARY set, rsub, nb_subtract, 1, dunder_operand_any
-DEF_DUNDER_BINARY set, and,  nb_and,      0, dunder_operand_any
-DEF_DUNDER_BINARY set, rand, nb_and,      1, dunder_operand_any
-DEF_DUNDER_BINARY set, xor,  nb_xor,      0, dunder_operand_any
-DEF_DUNDER_BINARY set, rxor, nb_xor,      1, dunder_operand_any
-DEF_DUNDER_BINARY set, or,   nb_or,       0, dunder_operand_any
-DEF_DUNDER_BINARY set, ror,  nb_or,       1, dunder_operand_any
+DEF_DUNDER_BINARY set, sub,  nb_subtract, 0, dunder_operand_any, frozenset_type
+DEF_DUNDER_BINARY set, rsub, nb_subtract, 1, dunder_operand_any, frozenset_type
+DEF_DUNDER_BINARY set, and,  nb_and,      0, dunder_operand_any, frozenset_type
+DEF_DUNDER_BINARY set, rand, nb_and,      1, dunder_operand_any, frozenset_type
+DEF_DUNDER_BINARY set, xor,  nb_xor,      0, dunder_operand_any, frozenset_type
+DEF_DUNDER_BINARY set, rxor, nb_xor,      1, dunder_operand_any, frozenset_type
+DEF_DUNDER_BINARY set, or,   nb_or,       0, dunder_operand_any, frozenset_type
+DEF_DUNDER_BINARY set, ror,  nb_or,       1, dunder_operand_any, frozenset_type
 
 ;; int's nb_bool takes the (payload, tag) pair rather than a Value -- it hands
 ;; the pair straight to int_unwrap -- so it cannot go through the macro.
 DEF_FUNC int_dunder_bool
+    REQUIRE_SELF int_type
     cmp rsi, 1
     jne .idb_bad
     mov rdi, [rdi]

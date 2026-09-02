@@ -10,6 +10,7 @@
 
 
 ; External functions
+extern frozenset_type
 extern obj_decref
 extern tuple_type
 extern none_singleton
@@ -1090,6 +1091,7 @@ END_FUNC set_method_isdisjoint
 ;; ============================================================================
 global frozenset_dunder_hash
 DEF_FUNC frozenset_dunder_hash
+    REQUIRE_SELF frozenset_type
     cmp rsi, 1
     jne .fdh_error
     mov rdi, [rdi]
