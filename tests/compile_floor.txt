@@ -89,6 +89,7 @@ test_compile_named_escape
 test_compile_operators
 test_compile_pep695
 test_compile_precedence
+test_compile_qualname
 test_compile_scope_unbound
 test_compile_subscript_except
 test_compile_syntax_gaps
@@ -162,6 +163,7 @@ test_frozenset
 test_fstrings
 test_func_attrs
 test_func_dunder_get
+test_function_attrs
 test_functions
 test_future_import
 test_gc_generations

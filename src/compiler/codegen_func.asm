@@ -804,6 +804,14 @@ DEF_FUNC cg_compile_body, CB_FRAME
     mov rax, [rbp - CB_SCOPE]
     mov [r12 + CompUnit.scope], eax
     mov [r12 + CompUnit.comp], rbx
+
+    ; The qualified name, which needs the ENCLOSING unit and so has to be
+    ; built here rather than in cg_unit_init.
+    mov rdi, rbx
+    mov rsi, r12
+    mov edx, [rbp - CB_SCOPE]
+    extern cg_set_qualname
+    call cg_set_qualname
     mov rax, [rbp - CB_LINE]
     mov [r12 + CompUnit.firstline], eax
     mov [r12 + CompUnit.curline], eax
@@ -1651,12 +1659,22 @@ DEF_FUNC cg_class_prologue, CQ_FRAME
     ; reference, so co_consts needs an owner of its own: the arena, which
     ; comp_free releases.  The bare INCREF that used to stand here gave it a
     ; reference and nobody to drop it.
+    ; The QUALIFIED name, not the bare one: a class's __qualname__ comes from
+    ; this store, not from its code object, so `class B` inside `class A`
+    ; reported "B" where CPython reports "A.B".  cg_set_qualname has already
+    ; put the qualified form on the class body's unit, and it is arena-owned,
+    ; so it needs no keeping of its own; the bare name is the fallback for a
+    ; class directly inside the module, where the two are the same anyway.
+    mov rsi, [r12 + CompUnit.qualname]
+    test rsi, rsi
+    jnz .cq_have_qual
     mov rdi, rbx
     mov rsi, [rbp - CQ_NAME]
     INCREF rsi
     call comp_keep
-    mov rdi, r12
     mov rsi, rax
+.cq_have_qual:
+    mov rdi, r12
     call cg_const
     mov rdx, rax
     mov rdi, r12
