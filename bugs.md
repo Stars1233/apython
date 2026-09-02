@@ -152,12 +152,6 @@ one-line fix.
   those finalizers never run.  `tests/test_del_and_gc_state.py` records this
   divergence in its recorded transcript deliberately -- see the note there.
 
-- **`str` and `tuple` repetition too large to allocate reports OverflowError
-  where CPython says MemoryError.**  `ap_malloc` exits fatally rather than
-  returning NULL, so the two cases cannot be told apart; `list` and `bytes`
-  answer MemoryError already, so only those two types differ.
-
-
 - **Traceback rendering has no caret line.**  CPython underlines the failing
   expression (`^^^^^^^^`, and `~~^~~` for binary operators and subscripts)
   using the column fields of the location table and, for the anchor forms, a
@@ -222,11 +216,6 @@ than lying — but they are ordinary Python that does not work:
   a stride would have to be honoured by every reader: `tobytes`, iteration,
   `bytes()`, comparison, `hex`, `tolist`, and the write path.  Nothing in
   `_pyio` asks for one, so the field is not there yet.
-
-- **`raise_oserror` leaks its message string.**  Every `OSError` raised from
-  `src/posixmod.asm` -- a `mkdir` on an existing directory, an `rmdir` on a
-  missing one -- leaves the string `str_from_cstr_heap` built for it.  A loop
-  that probes the filesystem with try/except leaks once per attempt.
 
 - **A cleanup that raises is reported in one line.**  A `finally` in a dropped
   generator, and a `__del__`, both report an exception they cannot propagate;

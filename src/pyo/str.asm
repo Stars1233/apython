@@ -21,6 +21,7 @@ extern int_type
 extern obj_as_index
 extern int_fits_i64
 extern exc_OverflowError_type
+extern exc_MemoryError_type
 extern slice_type
 extern slice_indices
 extern type_type
@@ -1220,7 +1221,7 @@ DEF_FUNC str_repeat
     ; copy loop 2**60 times into it.
     jo .srep_overflow
     cmp r14, 0x10000000                     ; 256M bytes
-    ja .srep_overflow
+    ja .srep_toobig
 
     ; Allocate new string (+ 8 for NUL padding for 8-byte strcmp)
     lea rdi, [r14 + PyStrObject.data + 8]
@@ -1267,6 +1268,11 @@ DEF_FUNC str_repeat
     leave
     V_PACK rax, rdx             ; return one Value
     ret
+.srep_toobig:
+    ; Too large to allocate is a MemoryError in CPython; only a count that
+    ; does not fit an index is an OverflowError.  list and bytes have said so
+    ; since they were written; str sent both cases to the one label.
+    RAISE exc_MemoryError_type, ""
 .srep_overflow:
     RAISE exc_OverflowError_type, "repeated string is too long"
 END_FUNC str_repeat

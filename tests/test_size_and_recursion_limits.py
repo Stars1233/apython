@@ -11,13 +11,13 @@
 
 def too_big(f):
     # CPython says MemoryError when the size is representable but cannot be
-    # allocated and OverflowError when it is not; apython's allocator exits
-    # fatally on a failed malloc, so it reports OverflowError for both.
+    # allocated, and OverflowError only when the count itself does not fit an
+    # index.  list and bytes split those two cases; str and tuple sent both to
+    # the OverflowError label, so this used to have to accept either.  It
+    # names the type now, which is what makes the split testable.
     try:
         f()
         return "no error"
-    except (OverflowError, MemoryError):
-        return "too big"
     except Exception as e:
         return type(e).__name__
 
