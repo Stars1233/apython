@@ -425,6 +425,34 @@ DEF_FUNC task_step, TS_FRAME
     jmp .ts_ret
 
 .ts_finished:
+    ; A NULL tag from gen_send means the coroutine RETURNED or RAISED, and
+    ; this arm used to assume the first.  Nothing ever wrote
+    ; AsyncTask.exception outside the cancellation path, so `await t` on a
+    ; task that raised saw a done task with no exception, took .ti_done, and
+    ; evaluated to None -- try/except around the await caught nothing, and
+    ; the exception surfaced at interpreter exit instead.  t.result() and
+    ; asyncio.wait_for read the same never-set field.
+    ;
+    ; The exception IS available here: a raise inside a coroutine body does
+    ; not abandon the C stack past the generator frame -- the unwinder's
+    ; no-handler arm returns normally through eval_return -- and gen_send
+    ; deliberately leaves it pending.  The whole re-raise path downstream
+    ; (task_wake_waiters' .tw_set_cancel, task_iternext's .ti_done_exc)
+    ; already exists and was simply unreachable.
+    mov rax, [rel current_exception]
+    test rax, rax
+    jz .ts_finished_value
+
+    ; Move it, owned: raise_exception_obj took over its caller's reference,
+    ; so the global holds exactly one and the task takes it over in turn.
+    mov [rbx + AsyncTask.exception], rax
+    mov qword [rel current_exception], 0
+    mov dword [rbx + AsyncTask.done], 1
+    mov rdi, rbx
+    call task_wake_waiters
+    jmp .ts_ret
+
+.ts_finished_value:
     ; Coroutine returned (StopIteration) — task is done
     ; The return value is in gen.gi_return_value
     mov rdi, [rbx + AsyncTask.coro]
@@ -814,10 +842,20 @@ DEF_FUNC_BARE task_iternext
     ret
 
 .ti_done_exc:
-    ; Task had exception — raise it (non-local jump into eval exception unwind)
+    ; The task carries an exception: re-raise it into the awaiting frame.
+    ;
+    ; This used to store straight into current_exception, which drops
+    ; whatever was already there without releasing it and skips
+    ; __context__ chaining entirely.  Reached from SEND inside an except
+    ; block -- which is exactly where `try: await t` puts it -- that leaks
+    ; the handled exception's reference and loses the chain.  It was
+    ; unreachable until task_step started recording the exception, and is
+    ; live now.  raise_exception_obj does both, and takes over the reference
+    ; INCREF just added.
     INCREF rax
-    mov [rel current_exception], rax
-    jmp eval_exception_unwind
+    mov rdi, rax
+    extern raise_exception_obj
+    call raise_exception_obj    ; does not return
 END_FUNC task_iternext
 
 ;; ============================================================================

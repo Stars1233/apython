@@ -1029,9 +1029,17 @@ DEF_FUNC instance_dealloc, ID_FRAME
     test rdi, rdi
     jz .del_nothing_pending
     ; ...but only when the global's own reference is real.  The unwinder can
-    ; reach here with current_exception pointing at an object whose refcount is
-    ; already zero -- bugs.md carries the case -- and taking and dropping a
-    ; reference on that one frees an exception that is still being carried.
+    ; reach here with current_exception pointing at an object whose refcount
+    ; is already zero, and taking and dropping a reference on that one frees
+    ; an exception that is still being carried.
+    ;
+    ; No path produces that state today: the case bugs.md used to carry does
+    ; not reproduce, valgrind is clean over the async suite, and a watch here
+    ; gets no hits across the corpus.  The check stays anyway.  It is two
+    ; instructions, and the invariant behind it is genuinely fragile --
+    ; raise_exception_obj takes over its caller's reference rather than
+    ; adding one, so the global's is often the only reference there is, and
+    ; this function runs while the unwinder is releasing the value stack.
     cmp qword [rdi + PyObject.ob_refcnt], 0
     jle .del_nothing_pending
     call obj_incref

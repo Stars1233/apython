@@ -708,7 +708,18 @@ DEF_FUNC gen_dealloc, GD_FRAME
     je .gd_just_free
 
     inc qword [rbx + PyObject.ob_refcnt]
+    ; The pending exception is held in a register across the cleanup, and
+    ; DUNDER_EXC_SAVE only borrows.  raise_exception_obj takes over its
+    ; caller's reference rather than adding one, so the global's is often the
+    ; only one there is -- and gen_dealloc_close runs arbitrary Python, which
+    ; can free anything nothing else holds.  Take a reference for the
+    ; register's own copy; .gd_close_done gives it back to the global.
     DUNDER_EXC_SAVE r12
+    test r12, r12
+    jz .gd_no_pending
+    mov rdi, r12
+    call obj_incref
+.gd_no_pending:
     mov qword [rel current_exception], 0
 
     mov rdi, rbx
@@ -728,6 +739,7 @@ DEF_FUNC gen_dealloc, GD_FRAME
     pop rdi
     call obj_decref
 .gd_close_done:
+    ; Hand the reference taken above back to the global.
     mov [rel current_exception], r12
     dec qword [rbx + PyObject.ob_refcnt]
 

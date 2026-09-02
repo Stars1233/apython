@@ -174,17 +174,35 @@ than lying — but they are ordinary Python that does not work:
   it just cannot be created from inside the interpreter, which is why the
   regression test for `follow_symlinks` has to make do with a regular file.
 
-- **The unwinder can carry an exception nothing owns.**  `raise_exception_obj`
-  takes over its caller's reference rather than adding one, so
-  `current_exception` holds exactly one reference -- and somewhere between a
-  coroutine raising and the awaiting frame's unwind, that reference is
-  dropped: by the time `eval_exception_unwind` releases the value stack,
-  `current_exception` points at an object whose `ob_refcnt` is 0.  Nothing
-  notices, because nothing else takes a reference to it.  `instance_dealloc`
-  did, once it started restoring a live exception around `__del__`, and freed
-  it; it now checks the refcount first and says so, which is a guard and not
-  a fix.  Reproduce with an `async for` over a hand-written `__anext__` that
-  raises.
+- **The unwinder's one-reference invariant is real; the drop it caused is
+  not reproducible.**  `raise_exception_obj` takes over its caller's
+  reference rather than adding one, so `current_exception` usually holds
+  exactly one -- and `eval_exception_unwind` runs arbitrary finalizers while
+  that is true, releasing the value stack before it is done with the global.
+  This file used to record a concrete drop: `current_exception` pointing at
+  an object whose `ob_refcnt` was already 0, reproducible with an `async for`
+  over a hand-written `__anext__` that raises.  It no longer happens.  That
+  repro is clean, valgrind is clean over the async suite, and a gdb watch for
+  `current_exception != 0 && ob_refcnt <= 0` at `instance_dealloc`'s entry
+  gets no hits across the corpus.  `gen_dealloc` held the pending exception
+  borrowed in a register across `gen_dealloc_close`, which is the shape that
+  could produce it, and takes a reference now.  `instance_dealloc`'s refcount
+  check stays: it is two instructions, and the invariant it guards is one a
+  future caller can break again.
+
+- **`__context__` is not chained across an `await` into another coroutine.**
+  `gen_send` saves and clears `current_exception` around the awaited frame,
+  so a raise inside it has nothing to chain to -- an exception raised while
+  the awaiting frame is handling another gets `__context__` of None where
+  CPython gives the outer one.  Chaining WITHIN a frame is right, coroutines
+  included.  It is not specific to tasks: a plain `await coro()` loses it
+  too.
+
+- **`asyncio.gather` returns the tasks rather than their results.**  It
+  creates and enqueues one task per argument and hands back the list, so
+  `await asyncio.gather(a(), b())` is None instead of `[1, 2]`.  A real
+  gather needs an awaitable that collects, the shape
+  `wait_for_awaitable_type` has.
 
 - **`bytes % args` leaks its temporary when the format is malformed.**  The
   work is done by handing a decoded copy of the format and the arguments to
@@ -282,11 +300,6 @@ than lying — but they are ordinary Python that does not work:
   root.  Without that, a `Task` collected while it is sleeping or being
   awaited corrupts the heap: `asyncio.run()` after a collected task cycle
   segfaults inside an unrelated allocation.
-
-- **Awaiting a `Task` that raised does not re-raise it in the awaiting
-  coroutine.**  The exception is reported at exit instead, so
-  `try: await t / except ValueError:` does not catch what `t` raised.  This
-  is independent of the tracking above and reproduces without it.
 
 - **`gc` has no `get_objects` and no debug flags.**  The module answers about
   the collector -- `collect`, `enable`/`disable`/`isenabled`, the counts, the
