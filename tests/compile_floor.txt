@@ -216,6 +216,7 @@ test_numeric_subclasses
 test_object_doc
 test_object_dunder_inherit
 test_object_eq_recursion
+test_object_ordering
 test_oop
 test_open_errors
 test_open

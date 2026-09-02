@@ -664,7 +664,16 @@ extern object_method_hash
 extern object_method_str
 extern object_method_repr
 extern object_method_init
+extern object_method_lt
+extern object_method_le
+extern object_method_gt
+extern object_method_ge
 object_default_impls:
     dq object_method_eq, object_method_ne, object_method_hash
     dq object_method_str, object_method_repr, object_method_init
+    ; The four orderings answer NotImplemented and nothing else.  They are
+    ; here for the same reason __eq__ is: a builtin subclass finds them in the
+    ; MRO before its base's own comparison, and installing a wrapper for one
+    ; would make a list subclass sort by identity.
+    dq object_method_lt, object_method_le, object_method_gt, object_method_ge
     dq 0

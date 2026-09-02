@@ -1420,14 +1420,34 @@ DEF_FUNC methods_init
     lea rsi, [rel mn___ne__]
     lea rdx, [rel object_method_ne]
     call dict_add_builtin_func
-    ; Not the ordering four: a builtin subclass looks __lt__ up in its MRO
-    ; and would find object's NotImplemented before reaching the base type's
-    ; own comparison, so `sorted([L([2]), L([1])])` on a list subclass would
-    ; stop working.  CPython reaches those through slot wrappers this does
-    ; not have yet.
     mov rdi, rbx
     lea rsi, [rel mn___hash__]
     lea rdx, [rel object_method_hash]
+    call dict_add_builtin_func
+
+    ; The ordering four, which answer NotImplemented.  They are safe for the
+    ; same reason __eq__ is: slot_is_object_default knows their function
+    ; pointers, so type_install_slots skips them and a builtin subclass keeps
+    ; its base's comparison rather than object's.
+    mov rdi, rbx
+    lea rsi, [rel mn___lt__]
+    extern object_method_lt
+    lea rdx, [rel object_method_lt]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___le__]
+    extern object_method_le
+    lea rdx, [rel object_method_le]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___gt__]
+    extern object_method_gt
+    lea rdx, [rel object_method_gt]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___ge__]
+    extern object_method_ge
+    lea rdx, [rel object_method_ge]
     call dict_add_builtin_func
 
     ; Store in object_type.tp_dict
@@ -2274,6 +2294,10 @@ mn___setitem__: db "__setitem__", 0
 mn___delitem__: db "__delitem__", 0
 mn___contains__: db "__contains__", 0
 mn___len__:     db "__len__", 0
+mn___lt__:      db "__lt__", 0
+mn___le__:      db "__le__", 0
+mn___gt__:      db "__gt__", 0
+mn___ge__:      db "__ge__", 0
 mn___neg__:     db "__neg__", 0
 mn___pos__:     db "__pos__", 0
 mn___abs__:     db "__abs__", 0

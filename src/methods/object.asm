@@ -634,6 +634,41 @@ DEF_DUNDER_STRREPR complex, repr
 ;; addresses here made `a.__eq__(b)` return NotImplemented for two equal tuples.
 ;; CPython's constant folding shares one empty tuple, which hid it from every
 ;; test that spelled the operands out.
+
+;; ============================================================================
+;; object.__lt__ / __le__ / __gt__ / __ge__ -> NotImplemented, always
+;;
+;; CPython has all four, and they exist so that a class can call up to them
+;; and so that dir(object) is complete.  They were left out here because a
+;; builtin subclass looks __lt__ up in its MRO and would find object's
+;; NotImplemented before reaching the base type's own comparison -- which is
+;; exactly what slot_is_object_default and object_default_impls already solve
+;; for __eq__, __ne__ and __hash__.  Adding these four to that table is what
+;; makes them safe: type_install_slots skips a dunder that is one of object's
+;; own, so `sorted([L([2]), L([1])])` on a list subclass still sorts by
+;; contents.
+;; ============================================================================
+%macro DEF_OBJECT_ORDERING 1
+DEF_FUNC object_method_%1
+    cmp rsi, 2
+    jne %%bad
+    extern notimpl_singleton
+    lea rax, [rel notimpl_singleton]
+    INCREF rax
+    mov edx, TAG_PTR
+    leave
+    V_PACK rax, rdx
+    ret
+%%bad:
+    RAISE exc_TypeError_type, "expected exactly one argument"
+END_FUNC object_method_%1
+%endmacro
+
+DEF_OBJECT_ORDERING lt
+DEF_OBJECT_ORDERING le
+DEF_OBJECT_ORDERING gt
+DEF_OBJECT_ORDERING ge
+
 DEF_FUNC object_method_eq
     cmp rsi, 2
     jne .ome_error

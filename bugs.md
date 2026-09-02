@@ -192,14 +192,6 @@ one-line fix.
   malformed string.  ASCII whitespace, brackets, underscores, `inf` and `nan`
   all behave as CPython's do.
 
-- **`object.__lt__`, `__le__`, `__gt__` and `__ge__` are missing.**  They
-  exist in CPython and always return NotImplemented.  Adding them here would
-  shadow a builtin base's own comparison, because a heaptype's slot is
-  installed from whatever the MRO's dunder lookup finds and there are no slot
-  wrappers to tell object's default apart at that point.  `__eq__`, `__ne__`
-  and `__hash__` are present and are skipped explicitly when slots are
-  installed.
-
 - **`_thread` is a single-threaded stand-in.**  `lib/_thread.py` gives
   `get_ident` a constant, makes locks uncontended, and raises from
   `start_new_thread`.  Everything in the stdlib that only takes a lock works;
