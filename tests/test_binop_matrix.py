@@ -179,10 +179,6 @@ for _op in ("%", "%="):
                    ("str", "range"), ("bytes", "list"), ("bytes", "range")):
         SKIP.add((_op, _a, _b))
 
-# PEP 604 unions: `int | int` is not collapsed to int.  `None | int` builds a
-# union now that the dispatcher asks the right operand's slot.
-for _op in ("|", "|="):
-    SKIP.add((_op, "type", "type"))
 
 # 3. dict.__ior__ takes any iterable of key/value pairs in CPython; ours takes
 #    a dict, so a str right operand is a TypeError rather than a ValueError.

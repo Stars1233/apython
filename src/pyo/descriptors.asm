@@ -1266,6 +1266,21 @@ DEF_FUNC ga_emit_name
     jmp .gen_out
 
 .gen_not_ellipsis:
+    ; NoneType prints as None, in a union and in a subscript alike:
+    ; `int | None` and `list[None]` are what CPython spells these.
+    lea rax, [rel none_type]
+    cmp r12, rax
+    jne .gen_not_none
+    cmp r13, 240
+    jae .gen_out
+    mov byte [rbx + r13], 'N'
+    mov byte [rbx + r13 + 1], 'o'
+    mov byte [rbx + r13 + 2], 'n'
+    mov byte [rbx + r13 + 3], 'e'
+    add r13, 4
+    jmp .gen_out
+
+.gen_not_none:
     V_TEST_PTR r12, rax
     ja .gen_repr
     test r12, r12
@@ -1344,44 +1359,95 @@ END_FUNC ga_emit_name
 ;; GenericAlias-shaped record whose args are the operand tuple; the repr is
 ;; the pipe form rather than the bracket form.
 ;; ============================================================================
-DEF_FUNC union_type_or
+UTO_LIST  equ 8         ; the member list being accumulated
+UTO_LEFT  equ 16
+UTO_RIGHT equ 24
+UTO_FRAME equ 32            ; + 4 pushes = 64, 16-aligned
+
+DEF_FUNC union_type_or, UTO_FRAME
     ; nb_or(left, right) -> UnionType, for type | type
     push rbx
     push r12
-    mov rbx, rdi
-    mov r12, rsi
-    ; both sides must be types (or an existing union)
-    mov rdi, rbx
-    call union_operand_ok
+    push r13
+    push r14
+    mov [rbp - UTO_LEFT], rdi
+    mov [rbp - UTO_RIGHT], rsi
+
+    ; both sides must be types (or an existing union, or None)
+    call union_operand_ok       ; rdi = left
     test eax, eax
     jz .uto_notimpl
-    mov rdi, r12
+    mov rdi, [rbp - UTO_RIGHT]
     call union_operand_ok
     test eax, eax
     jz .uto_notimpl
 
-    mov edi, 2
+    ; Collect the members.  This used to be a bare tuple_new(2) holding the two
+    ; operands, so int | str | float nested as ((int|str), float): __args__ was
+    ; not flat, and union_richcompare -- which compares the two arg tuples as
+    ; sets -- read the inner union as one opaque member and answered False for
+    ; (int|str|float) == (float|str|int).  The repr hid it, because a member
+    ; that is not a type is printed with obj_repr, which re-enters union_repr.
+    extern list_new
+    xor edi, edi
+    call list_new
+    mov rbx, rax
+    mov [rbp - UTO_LIST], rax
+
+    mov rdi, [rbp - UTO_LEFT]
+    call .uto_add_operand
+    mov rdi, [rbp - UTO_RIGHT]
+    call .uto_add_operand
+
+    ; int | int is int: a union of one member is that member.
+    cmp qword [rbx + PyListObject.ob_size], 1
+    jne .uto_build
+    mov rax, [rbx + PyListObject.ob_item]
+    mov r12, [rax]
+    INCREF_V r12, rcx
+    mov rdi, rbx
+    call obj_decref
+    mov rax, r12
+    mov edx, TAG_PTR
+    jmp .uto_return
+
+.uto_build:
+    mov rdi, [rbx + PyListObject.ob_size]
     extern tuple_new
     call tuple_new
-    mov rcx, [rax + PyTupleObject.ob_item]
-    mov [rcx], rbx
-    mov [rcx + 8], r12
-    push rax
+    mov r12, rax                ; the member tuple
+    mov r13, [rbx + PyListObject.ob_item]
+    mov r14, [r12 + PyTupleObject.ob_item]
+    xor ecx, ecx
+.uto_copy:
+    cmp rcx, [rbx + PyListObject.ob_size]
+    jge .uto_copied
+    mov rax, [r13 + rcx * 8]
+    mov [r14 + rcx * 8], rax
+    push rcx
+    INCREF_V rax, rcx
+    pop rcx
+    inc rcx
+    jmp .uto_copy
+
+.uto_copied:
     mov rdi, rbx
-    call obj_incref
-    mov rdi, r12
-    call obj_incref
-    pop rsi                         ; the operand tuple
-    push rsi
-    xor edi, edi                    ; no origin
+    call obj_decref             ; the accumulator; the tuple owns the members
+
+    xor edi, edi                ; no origin
+    mov rsi, r12
     call generic_alias_new
     lea rcx, [rel union_type]
     mov [rax + PyObject.ob_type], rcx
-    pop rdi
     push rax
-    call obj_decref                 ; generic_alias_new took its own ref
+    mov rdi, r12
+    call obj_decref             ; generic_alias_new took its own ref
     pop rax
     mov edx, TAG_PTR
+
+.uto_return:
+    pop r14
+    pop r13
     pop r12
     pop rbx
     leave
@@ -1391,11 +1457,97 @@ DEF_FUNC union_type_or
 .uto_notimpl:
     xor eax, eax
     xor edx, edx
+    pop r14
+    pop r13
     pop r12
     pop rbx
     leave
     ret
+
+;; .uto_add_operand(rdi = one operand Value) -- add what it contributes to the
+;; list in rbx.  A union contributes its members; anything else contributes
+;; itself.  Uses r13 and r14.
+.uto_add_operand:
+    ; None stands for NoneType inside a union, which is what makes
+    ; (None | int) == (int | type(None)) true, as it is in CPython.
+    lea rcx, [rel none_singleton]
+    cmp rdi, rcx
+    jne .uto_ao_typed
+    extern none_type
+    lea rdi, [rel none_type]
+.uto_ao_typed:
+    V_TEST_PTR rdi, rax
+    ja .uto_ao_one
+    mov rax, [rdi + PyObject.ob_type]
+    lea rcx, [rel union_type]
+    cmp rax, rcx
+    jne .uto_ao_one
+
+    mov r13, [rdi + PyGenericAliasObject.ga_args]
+    xor r14d, r14d
+.uto_ao_loop:
+    cmp r14, [r13 + PyTupleObject.ob_size]
+    jge .uto_ao_spliced
+    mov rax, [r13 + PyTupleObject.ob_item]
+    mov rdi, [rax + r14 * 8]
+    call .uto_ao_one            ; already flat and already normalised
+    inc r14
+    jmp .uto_ao_loop
+.uto_ao_spliced:
+    ret
+
+;; .uto_ao_one(rdi = one member) -- append it unless an equal one is there.
+.uto_ao_one:
+    push rdi
+    mov rsi, rdi
+    mov rdi, rbx
+    extern list_contains
+    call list_contains
+    pop rdi
+    test eax, eax
+    jnz .uto_ao_one_done        ; int | int, and (int|str) | str
+    mov rsi, rdi
+    mov rdi, rbx
+    extern list_append
+    call list_append
+.uto_ao_one_done:
+    ret
 END_FUNC union_type_or
+
+;; ============================================================================
+;; union_getattr(rdi = self, rsi = name) -> (rax = payload, rdx = tag)
+;;
+;; A union is a GenericAlias-shaped record, but it is not one: it has no
+;; origin, so it cannot simply borrow generic_alias_getattr.  __args__ is the
+;; half that matters -- typing and every annotation reader ask for it by name,
+;; and union_type carried neither a tp_getattr nor a tp_dict, so it answered
+;; AttributeError while the tuple sat in ga_args.
+;; ============================================================================
+DEF_FUNC union_getattr
+    push rbx
+    mov rbx, rdi
+    lea rdi, [rsi + PyStrObject.data]
+    CSTRING rsi, "__args__"
+    call ap_strcmp
+    test eax, eax
+    jnz .ug_missing
+
+    mov rax, [rbx + PyGenericAliasObject.ga_args]
+    mov rdi, rax
+    call obj_incref
+    mov rax, [rbx + PyGenericAliasObject.ga_args]
+    mov edx, TAG_PTR
+    pop rbx
+    leave
+    ret
+
+.ug_missing:
+    xor eax, eax
+    xor edx, edx
+    pop rbx
+    leave
+    ret
+END_FUNC union_getattr
 
 DEF_FUNC_BARE union_operand_ok
     V_TEST_PTR rdi, rax
@@ -1846,7 +1998,7 @@ union_type:
     dq union_repr                   ; tp_str
     dq union_hash                   ; tp_hash
     dq 0                            ; tp_call
-    dq 0                            ; tp_getattr
+    dq union_getattr                ; tp_getattr
     dq 0                            ; tp_setattr
     dq union_richcompare            ; tp_richcompare
     dq 0                            ; tp_iter
@@ -2048,6 +2200,12 @@ DEF_FUNC_LOCAL union_args_subset, UAS_FRAME
     extern obj_richcompare_bool
     call obj_richcompare_bool
     pop rcx
+    ; -1 is "the comparison raised".  There is no way to report that through
+    ; tp_richcompare here -- a NULL Value means NotImplemented, not failure --
+    ; but the scan must at least stop, or the next comparison runs more Python
+    ; over the top of the pending exception.
+    cmp eax, 0
+    jl .uas_no
     cmp eax, 1
     je .uas_found
     inc rcx

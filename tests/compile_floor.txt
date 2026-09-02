@@ -293,6 +293,7 @@ test_type_repr
 test_type_three_arg
 test_unary
 test_unicode
+test_union_flatten
 test_union_hash
 test_unpack_dict
 test_value_typeconfusion

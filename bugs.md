@@ -14,12 +14,6 @@ one-line fix.
   'F')` as `INF`; here it is `inf`.  The same for `NAN`, and for the halves of
   a complex.
 
-- **PEP 604 unions are not flattened.**  `int | str | float` builds
-  `((int | str), float)` rather than a flat three-member union, so
-  `__args__` is nested and `(int|str|float) == (float|str|int)` is False where
-  CPython says True.  The repr is flat, which hides it.  Two-member unions
-  compare correctly.
-
 - **`~x` on an int subclass prefers the subclass's `__invert__` over
   `int.__invert__`.**  For `class I(int, M)` where `M` defines `__invert__`,
   CPython resolves `int.__invert__` first (it comes earlier in the MRO) and
@@ -48,8 +42,6 @@ one-line fix.
 
 - **`dict.__ior__` takes only a dict.**  CPython's takes any iterable of
   key/value pairs.
-
-- **PEP 604 unions are thin.**  `int | int` is not collapsed to `int`.
 
 - **The binary-operator TypeError names neither the operator nor the operand
   types.**  Ours is the fixed string `unsupported operand type(s)`; CPython
