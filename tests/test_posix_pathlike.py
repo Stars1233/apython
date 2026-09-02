@@ -110,7 +110,9 @@ check("rename a missing one", lambda: type_and_path(
 check("open a missing one", lambda: posix.open(P(TMP + "_nope"), 0))
 check("__fspath__ returns an int", lambda: posix.stat(Bad()))
 check("__fspath__ raises", lambda: posix.stat(Raises()))
-check("an embedded NUL", lambda: posix.stat(P("/tmp/a\0b")))
+# The type only: CPython 3.12 changed this message mid-series, and the suite
+# diffs against whichever python3 is installed.
+check("an embedded NUL", lambda: type_name(lambda: posix.stat(P("/tmp/a\0b"))))
 check("not a path at all", lambda: type_name(lambda: posix.stat(5.5)))
 
 # --- the plain kinds still work ---

@@ -17,6 +17,21 @@ def show(label, fn):
         print(label, "->", type(exc).__name__)
 
 
+def show_approx(label, fn):
+    """For a result that goes through libm rather than through arithmetic.
+
+    A complex power with a non-integral exponent is exp/log/atan2 underneath,
+    and those differ in the last ulp between glibc versions -- CI and this
+    machine disagreed about (1+1j) ** 1j by exactly one.  The path is still
+    worth exercising; the sixteenth digit of it is not.
+    """
+    try:
+        z = fn()
+        print(label, "=", "%.12g%+.12gj" % (z.real, z.imag))
+    except BaseException as exc:
+        print(label, "->", type(exc).__name__)
+
+
 print("--- construction ---")
 for expr in ("complex()", "complex(3)", "complex(2.5)", "complex(1, 2)",
              "complex(True)", "complex(1 << 70)", "complex(complex(1, 2))",
@@ -42,9 +57,12 @@ for expr in ("1 + 2j", "2j + 1", "1.5 * (2+3j)", "(2+3j) * 1.5",
 print("--- power ---")
 # The integer fast path runs for a real, integral exponent within +-100.
 for expr in ("(1+2j) ** 0", "(1+2j) ** 1", "(1+2j) ** 2", "(1+2j) ** 3",
-             "(1+2j) ** -1", "(1+2j) ** 100", "(2+0j) ** 0.5",
-             "(1+1j) ** 1j", "(0j) ** 0", "(0j) ** -1", "(1e300+0j) ** 2"):
+             "(1+2j) ** -1", "(1+2j) ** 100", "(0j) ** 0", "(0j) ** -1",
+             "(1e300+0j) ** 2"):
     show(expr, lambda e=expr: eval(e))
+# The general path: a non-integral exponent, which is libm's rather than ours.
+for expr in ("(2+0j) ** 0.5", "(1+1j) ** 1j"):
+    show_approx(expr, lambda e=expr: eval(e))
 
 print("--- what complex does not support ---")
 for expr in ("(1+2j) // 2", "(1+2j) % 2", "divmod(1+2j, 2)", "int(1+0j)",

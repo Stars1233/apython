@@ -203,7 +203,11 @@ try:
     posix.stat("/etc/host\x00name")
     print("accepted?!")
 except ValueError as e:
-    print("ValueError  :", e)
+    # The type and the fact, not the wording: CPython 3.12 changed this
+    # message mid-series, from "embedded null byte" to
+    # "stat: embedded null character in path", and the suite diffs against
+    # whichever python3 is installed.
+    print("ValueError  :", "null" in str(e).lower())
 
 print()
 print("--- and a path of the wrong type ---")
