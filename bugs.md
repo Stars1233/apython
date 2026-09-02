@@ -25,11 +25,11 @@ one-line fix.
   and a TypeError here.
 
 - **`bytes` `%`-formatting converts through `str_mod`**, so its conversions are
-  str's rather than bytes': `b"%s" % b"x"` is `b"b'x'"` where CPython gives
-  `b'x'`, `b"%d" % "x"` answers `b'x'` where CPython raises, `b"%c" % 65` is a
-  TypeError, and a `bytes`-keyed mapping (`b"%(a)d" % {b"a": 1}`) raises
-  KeyError.  The segfault this path used to carry is fixed; the conversion
-  table is still str's.
+  str's rather than bytes'.  `b"%s" % b"x"` is right now, but `b"%d" % "x"`
+  answers `b'x'` where CPython raises, `b"%s" % "x"` answers `b'x'` where
+  CPython raises, `b"%r" % b"x"` is `b"'x'"` rather than `b"b'x'"`, `%c` and
+  `%a` are TypeErrors, and a `bytes`-keyed mapping (`b"%(a)d" % {b"a": 1}`)
+  raises KeyError.
 
 - **`dict.__ior__` takes only a dict.**  CPython's takes any iterable of
   key/value pairs.
@@ -55,12 +55,6 @@ one-line fix.
   `upper`, `lower`, `title`, `capitalize` and `swapcase` all leave a
   non-ASCII byte as it is.  Needs Unicode case tables.
 
-- **`bytes.decode` does not validate UTF-8.**  CPython raises
-  UnicodeDecodeError for a stray continuation byte or a truncated sequence;
-  here the bytes come through as they are.  The resulting string is at least
-  self-consistent -- every walk over it treats such a byte as one code point
-  of one byte, so `len`, indexing, slicing and iteration agree.
-
 - **`str.encode` and `bytes.decode` know only utf-8, ascii and latin-1.**
   Any other name is a LookupError, where CPython would find the codec through
   the registry; reaching it from the interpreter would mean calling Python
@@ -78,9 +72,9 @@ one-line fix.
   where CPython gives `dict_keys(['a'])`; the same for `.values()` and
   `.items()`.
 
-- **`bytearray` is not subscriptable.**  It has `sq_length` but no `sq_item`
-  and no `tp_as_mapping`, so `b[0]`, `b[1:]` and `reversed(bytearray(...))`
-  raise.  It is iterable, and the constructors take every form CPython's do.
+- **`bytearray` is not reversible.**  `b[0]`, `b[1:]` and `b[::-1]` all work
+  now; `reversed(bytearray(...))` is still a TypeError, because the type has
+  no `tp_iter`-side answer for it.
 
 - **The `_abc` registry and caches hold strong references.**  CPython uses
   weak ones, so a class registered against an ABC can be collected and the
@@ -299,17 +293,6 @@ than lying — but they are ordinary Python that does not work:
   argument's `__str__` can run Python, and a raise caught inside it would
   free a buffer `str_mod` is still reading.
 
-- **Every `int` method reads past the end of an `int` subclass instance.**
-  `bit_length`, `bit_count`, `conjugate` and `to_bytes` in
-  `src/methods/num.asm` read `PyIntObject.compact` at +40 of a 32-byte
-  `PyIntSubclassObject` without unwrapping first, so `I(7).bit_length()` is
-  0 and `I(258).to_bytes(2, 'big')` is `b'\x00\x00'`.  Under valgrind it is
-  an invalid read, and the garbage can be a limb pointer handed to GMP.
-
-- **`next(obj)` reports StopIteration for any exception a Python `__next__`
-  raises.**  `it.__next__()` and `for x in it` both propagate the real one;
-  only the `next()` builtin swallows it.
-
 - **A `__del__` that raises and catches internally destroys an exception
   that is already unwinding.**  The finaliser prints "Exception ignored in
   __del__" and execution then continues as though nothing had been raised.
@@ -361,8 +344,6 @@ than lying — but they are ordinary Python that does not work:
   without a shipped `re.py` an `import re` finds CPython's, which needs
   `enum` and `types`.
 - `collections.deque`.
-- Four builtin exceptions: `IOError` / `EnvironmentError`, `FileExistsError`,
-  `UnicodeTranslateError`.
 
 ## Robustness
 

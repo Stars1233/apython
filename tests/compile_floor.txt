@@ -205,6 +205,7 @@ test_multiple_inheritance
 test_nanbox_float
 test_nanbox_int
 test_new
+test_next_propagates
 test_none_bool_singleton
 test_none
 test_number_real_imag

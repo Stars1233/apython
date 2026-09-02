@@ -22,6 +22,18 @@ try:
     b"\xff".decode("ascii")
 except UnicodeDecodeError:
     print("UnicodeDecodeError")
+
+# utf-8 is validated too: a stray continuation byte, a truncated sequence and
+# an over-long lead byte are all errors, not bytes that come through as they
+# are.
+for bad in (b"\xff", b"\xc3", b"\xc3\x28", b"\xe2\x82", b"\x80"):
+    try:
+        bad.decode("utf-8")
+        print("decoded", bad)
+    except UnicodeDecodeError:
+        print("UnicodeDecodeError utf-8", bad)
+for good in (b"abc", b"\xc3\xa9", b"\xf0\x9f\x98\x80"):
+    print("decoded", good.decode("utf-8"), len(good.decode("utf-8")))
 try:
     s.encode("no-such-codec-here")
 except LookupError:
