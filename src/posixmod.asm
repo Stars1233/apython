@@ -711,7 +711,19 @@ DEF_FUNC posix_getcwd_impl, 40
     call raise_oserror
 
 .pcw_have:
+    ; The buffer is ours and raise_oserror does not come back, so a failure
+    ; that is not ERANGE -- the working directory unlinked, say -- leaked it
+    ; on every call.  Release it before letting POSIX_CHECK raise.
+    cmp rax, -4095
+    jb .pcw_ok
+    push rax
+    sub rsp, 8
+    mov rdi, [rbp - PCW_BUF]
+    call ap_free
+    add rsp, 8
+    pop rax
     POSIX_CHECK rax, 0
+.pcw_ok:
     ; getcwd returns the length INCLUDING the NUL.
     dec rax
     mov rdi, [rbp - PCW_BUF]

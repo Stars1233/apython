@@ -805,7 +805,9 @@ TRN_CH    equ 72            ; one character, built on the stack: up to four
                             ; UTF-8 bytes and a NUL
 TRN_LEN   equ 80            ; a bounded table's length, or -1
 TRN_CHLEN equ 88            ; how many bytes the current character occupies
-TRN_FRAME equ 96            ; + 2 pushes = 112, not 16-aligned
+TRN_HEAP  equ 96            ; 1 when the table is a user class: ask __getitem__
+                            ; through dunder_call_2, which comes back
+TRN_FRAME equ 104           ; + 2 pushes = 120, 16-aligned
 
 extern bytearray_type
 extern bytes_type
@@ -814,6 +816,7 @@ extern tuple_type
 extern type_is_subtype
 extern dict_type
 extern current_exception
+extern dunder_call_2
 extern obj_dealloc
 extern raise_type_error_with_name
 
@@ -846,6 +849,7 @@ DEF_FUNC str_method_translate, TRN_FRAME
     ; miss with a NULL and never raises.
     mov qword [rbp - TRN_SUB], 0
     mov qword [rbp - TRN_LEN], -1   ; -1 = no bound to check
+    mov qword [rbp - TRN_HEAP], 0
     V_TEST_PTR rax, rcx
     ja .trn_not_subscriptable       ; an immediate has no subscript
     mov rcx, [rax + PyObject.ob_type]
@@ -853,7 +857,22 @@ DEF_FUNC str_method_translate, TRN_FRAME
     cmp rcx, rdx
     je .trn_have_lookup             ; a dict: TRN_SUB stays 0
     test qword [rcx + PyTypeObject.tp_flags], TYPE_FLAG_DICT_SUBCLASS
-    jnz .trn_have_lookup
+    jz .trn_not_dict
+    ; A subclass takes the dict fast path only if it has not overridden
+    ; __getitem__.  Taking it on the flag alone meant dict_get answered from
+    ; the entries and the subclass's own __getitem__ was never called --
+    ; CPython asks the object, and a LookupError from it is the miss.
+    mov rdx, [rcx + PyTypeObject.tp_as_mapping]
+    test rdx, rdx
+    jz .trn_have_lookup
+    mov rdx, [rdx + PyMappingMethods.mp_subscript]
+    lea r8, [rel dict_type]
+    mov r8, [r8 + PyTypeObject.tp_as_mapping]
+    test r8, r8
+    jz .trn_have_lookup
+    cmp rdx, [r8 + PyMappingMethods.mp_subscript]
+    je .trn_have_lookup             ; dict's own: the fast path is right
+.trn_not_dict:
 
     mov rdx, [rcx + PyTypeObject.tp_as_mapping]
     test rdx, rdx
@@ -862,6 +881,15 @@ DEF_FUNC str_method_translate, TRN_FRAME
     test rdx, rdx
     jz .trn_not_subscriptable
     mov [rbp - TRN_SUB], rdx
+    ; A user class's mp_subscript is a slot wrapper, and a slot wrapper that
+    ; raises does not come back -- it jumps to the unwinder.  CPython's rule
+    ; is that a LookupError from the table means "not in it", which needs a
+    ; call that returns.  dunder_call_2 is that call, so a heaptype table is
+    ; asked through __getitem__ by name instead.
+    test qword [rcx + PyTypeObject.tp_flags], TYPE_FLAG_HEAPTYPE
+    jz .trn_sub_ready
+    mov qword [rbp - TRN_HEAP], 1
+.trn_sub_ready:
 
     ; A builtin sequence: take its length as the bound.  Only these, by name:
     ; a user class with both __len__ and __getitem__ gets an sq_length too,
@@ -949,10 +977,49 @@ DEF_FUNC str_method_translate, TRN_FRAME
     cmp rbx, rdx
     jge .trn_keep
 .trn_do_sub:
+    cmp qword [rbp - TRN_HEAP], 0
+    jne .trn_do_dunder
     call rcx
     test rax, rax
-    jz .trn_keep                    ; a NULL with nothing pending is a miss
+    jz .trn_sub_null
     jmp .trn_have_value
+
+.trn_do_dunder:
+    ; rdi = table, rsi = the ordinal as a Value.  dunder_call_2 wants the
+    ; argument split, and answers (0, TAG_NULL) for a miss or a raise.
+    mov rdi, [rbp - TRN_TAB]
+    mov rsi, rbx
+    V_PACK_I64 rsi, rcx
+    V_UNPACK rsi, rcx
+    extern dunder_getitem
+    lea rdx, [rel dunder_getitem]
+    call dunder_call_2
+    V_PACK rax, rdx
+    test rax, rax
+    jz .trn_sub_null
+    jmp .trn_have_value
+
+.trn_sub_null:
+    ; NULL is a miss, or a raise.  The snapshot at the top of the loop was
+    ; being taken and never compared, so every raise looked like a miss and
+    ; the exception was left to surface somewhere unrelated.  CPython reads a
+    ; LookupError as "not in the table" and leaves the character alone;
+    ; anything else propagates.
+    EXC_RAISED_SINCE [rbp - TRN_EXC], rcx, .trn_sub_raised
+    jmp .trn_keep
+
+.trn_sub_raised:
+    extern exc_LookupError_type
+    extern exc_isinstance
+    mov rdi, [rel current_exception]
+    lea rsi, [rel exc_LookupError_type]
+    call exc_isinstance
+    test eax, eax
+    jz .trn_fail                    ; not a lookup miss: let it out
+    mov rdi, [rel current_exception]
+    mov qword [rel current_exception], 0
+    call obj_decref
+    jmp .trn_keep
 
 .trn_have_value:
     ; rax = the mapped value, owned.  None deletes, an int is an ordinal, a
@@ -1062,6 +1129,13 @@ DEF_FUNC str_method_translate, TRN_FRAME
     ret
 
 .trn_range:
+    ; The mapped value and the list of pieces are both ours, and RAISE
+    ; abandons the C stack -- .trn_bad_value two lines down releases them and
+    ; this one did not.
+    mov rdi, r12
+    DECREF_V rdi, rcx
+    mov rdi, [rbp - TRN_LIST]
+    call obj_decref
     RAISE exc_ValueError_type, "character mapping must be in range(0x110000)"
 .trn_bad_value:
     mov rdi, r12

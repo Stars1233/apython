@@ -1066,6 +1066,15 @@ DEF_FUNC list_ass_subscript, LAS_FRAME
     pop r15
     pop r14
     pop r13
+    ; The materialised iterable is ours, and RAISE abandons the C stack:
+    ; `L[::2] = G()` for any generic iterable leaked the temp list built to
+    ; hold it every time the lengths disagreed.
+    mov rdi, [rbp - LAS_TEMP]
+    test rdi, rdi
+    jz .ext_len_mismatch_raise
+    mov qword [rbp - LAS_TEMP], 0
+    call obj_decref
+.ext_len_mismatch_raise:
     RAISE exc_ValueError_type, "attempt to assign sequence of wrong size to extended slice"
 
 .las_key_type_error:

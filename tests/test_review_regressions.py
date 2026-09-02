@@ -516,3 +516,147 @@ check("sorted reversed", lambda: sorted([3, 1, 2], reverse=True))
 check("list of a good getitem", lambda: list(GoodSeq()))
 check("set of a good getitem", lambda: sorted(set(GoodSeq())))
 check("in over a good getitem", lambda: 2 in GoodSeq())
+
+
+# ---------------------------------------------------------------------------
+# Exceptions that went nowhere, and allocations that went with them.  Each of
+# these raises from a point that holds an owned reference, or swallows a call
+# that failed and answers from what it had.
+# ---------------------------------------------------------------------------
+
+# oserror_str never checked the four repr()/str() calls it makes on the
+# exception's own fields, so a filename with a raising __repr__ produced a
+# truncated message and left the exception to fire somewhere unrelated.
+class ReprRaises:
+    def __repr__(self):
+        raise ValueError("repr")
+
+
+check("OSError str, raising repr",
+      lambda: str(OSError(2, "No such file", ReprRaises())))
+check("OSError str, one name", lambda: str(OSError(2, "No such file", "/x")))
+check("OSError str, two names", lambda: str(OSError(2, "msg", "/a", None, "/b")))
+check("OSError str, no filename", lambda: str(OSError(2, "msg")))
+
+
+# str.translate: a table that is a user class was asked through its
+# mp_subscript slot, and a slot that raises never comes back -- so CPython's
+# rule that a LookupError means "leave the character alone" could not be
+# applied.  A dict subclass was not asked at all.
+class TableLookupError:
+    def __getitem__(self, k):
+        raise LookupError(k)
+
+
+class TableValueError:
+    def __getitem__(self, k):
+        raise ValueError("tbl")
+
+
+class TableGood:
+    def __getitem__(self, k):
+        return "X" if k == 97 else None
+
+
+class DictLookupError(dict):
+    def __getitem__(self, k):
+        raise LookupError(k)
+
+
+class DictSubst(dict):
+    def __getitem__(self, k):
+        if k == 97:
+            return "Z"
+        raise KeyError(k)
+
+
+check("translate, LookupError table", lambda: "abc".translate(TableLookupError()))
+check("translate, ValueError table", lambda: "abc".translate(TableValueError()))
+check("translate, mapping table", lambda: "abc".translate(TableGood()))
+check("translate, dict subclass miss", lambda: "abc".translate(DictLookupError()))
+check("translate, dict subclass hit", lambda: "abc".translate(DictSubst()))
+check("translate, plain dict", lambda: "abc".translate({97: "X", 98: None}))
+check("translate, out of range", lambda: "abc".translate({97: 0x110000}))
+check("translate, bad value", lambda: "abc".translate({97: 1.5}))
+check("translate, str.maketrans", lambda: "abc".translate(str.maketrans("ab", "xy")))
+
+
+# An extended-slice length mismatch raised while still holding the temp list
+# it had materialised the right-hand side into.
+def ext_slice_mismatch():
+    L = [1, 2, 3, 4]
+    L[::2] = (x for x in (9, 9, 9))
+    return L
+
+
+def ext_slice_ok():
+    L = [1, 2, 3, 4]
+    L[::2] = (x for x in (9, 9))
+    return L
+
+
+check_type("extended slice mismatch", ext_slice_mismatch)
+check("extended slice, right size", ext_slice_ok)
+
+
+# FileIO: closefd was read only as a fourth positional, so closefd=False on a
+# path silently cleared the bit and leaked a descriptor where CPython raises,
+# and FileIO(path, closefd=False) read False as the mode.
+def fileio_fd_closefd():
+    fd = posix.open("/etc/hostname", 0)
+    f = _io.FileIO(fd, "r", False)
+    f.close()
+    posix.close(fd)
+    return "reused the fd"
+
+
+check("FileIO path, closefd=False", lambda: _io.FileIO("/etc/hostname", "r", False))
+check("FileIO path, closefd kwarg", lambda: _io.FileIO("/etc/hostname", closefd=False))
+check("FileIO fd, closefd=False", fileio_fd_closefd)
+check("FileIO path reads", lambda: len(_io.FileIO("/etc/hostname", "r").readall()) > 0)
+
+
+# Container subclasses keep their storage out of line, and instance_dealloc
+# never ran the base's dealloc for them -- so every instance leaked its tables
+# AND everything in them.  The leak itself is a valgrind result; what is
+# checkable here is that releasing them still releases the contents exactly
+# once, which is what a double free or an early free would break.
+class DictSub(dict):
+    pass
+
+
+class ListSub(list):
+    pass
+
+
+class SetSub(set):
+    pass
+
+
+class Tracked:
+    live = 0
+
+    def __init__(self):
+        Tracked.live += 1
+
+    def __del__(self):
+        Tracked.live -= 1
+
+
+def container_subclass_roundtrip():
+    out = []
+    for cls, fill in ((DictSub, lambda c: c.update({"a": Tracked(), "b": Tracked()})),
+                      (ListSub, lambda c: c.extend([Tracked(), Tracked()])),
+                      (SetSub, lambda c: c.update({1, 2, 3}))):
+        for _ in range(20):
+            c = cls()
+            fill(c)
+            out.append(len(c))
+        del c
+    return (out[0], out[20], out[40], Tracked.live)
+
+
+check("container subclass lifetime", container_subclass_roundtrip)
+check("dict subclass still maps", lambda: sorted(DictSub({"x": 1, "y": 2}).items()))
+check("list subclass still lists", lambda: list(ListSub([3, 1, 2])))
+check("set subclass still sets", lambda: sorted(SetSub({3, 1, 2})))

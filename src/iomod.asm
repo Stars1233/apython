@@ -438,6 +438,8 @@ extern dict_new
 extern instance_dealloc
 extern bytes_like_ptr_len
 extern obj_is_true
+extern kw_names_pending
+extern ap_strcmp
 extern obj_repr
 extern str_concat
 extern dict_get
@@ -835,16 +837,82 @@ FI_ARGS   equ 48
 FI_NARGS  equ 56
 ; Derived, not guessed: a hand-picked offset for a 144-byte struct overlaps
 ; the scalars above it the first time the struct grows.
-FI_STAT   equ 64 + StatBuf_size
-FI_FRAME  equ FI_STAT       ; 208, + 0 pushes, 16-aligned
+FI_NPOS   equ 64            ; positional count, once the keywords are split off
+FI_CLOSEFD equ 72           ; the closefd argument, defaulting to 1
+FI_STAT   equ 80 + StatBuf_size
+FI_FRAME  equ FI_STAT       ; 224, + 0 pushes, 16-aligned
 
 DEF_FUNC fileio_init_fn, FI_FRAME
     cmp rsi, 2
     jl .fi_argerr
     mov [rbp - FI_ARGS], rdi
     mov [rbp - FI_NARGS], rsi
+    mov [rbp - FI_NPOS], rsi
+    mov qword [rbp - FI_CLOSEFD], 1
     mov rax, [rdi]
     mov [rbp - FI_SELF], rax
+
+    ; Keyword arguments sit after the positional ones, named in order by
+    ; kw_names_pending.  Nothing here consulted it, so `FileIO(path,
+    ; closefd=False)` read False as the MODE, and any keyword at all shifted
+    ; the positional count.  Consume it: a builtin that leaves it set hands
+    ; its caller's keywords to whatever call runs next.
+    mov rax, [rel kw_names_pending]
+    test rax, rax
+    jz .fi_no_kw
+    mov qword [rel kw_names_pending], 0
+    mov rcx, [rax + PyTupleObject.ob_size]
+    mov rdx, [rbp - FI_NPOS]
+    sub rdx, rcx
+    mov [rbp - FI_NPOS], rdx        ; rdx = n_pos
+    mov r9, [rax + PyTupleObject.ob_item]
+    xor r8d, r8d                    ; keyword index
+.fi_kw_loop:
+    cmp r8, rcx
+    jge .fi_no_kw
+    push rcx
+    push r8
+    push r9
+    sub rsp, 8
+    mov r10, [r9 + r8*8]            ; the name
+    lea rdi, [r10 + PyStrObject.data]
+    CSTRING rsi, "closefd"
+    call ap_strcmp
+    add rsp, 8
+    pop r9
+    pop r8
+    pop rcx
+    test eax, eax
+    jnz .fi_kw_next
+    ; Its value is at n_pos + index.
+    mov rdi, [rbp - FI_ARGS]
+    mov r11, [rbp - FI_NPOS]
+    add r11, r8
+    mov rdi, [rdi + r11*8]
+    push rcx
+    push r8
+    push r9
+    sub rsp, 8
+    call obj_is_true
+    add rsp, 8
+    pop r9
+    pop r8
+    pop rcx
+    mov [rbp - FI_CLOSEFD], rax
+.fi_kw_next:
+    inc r8
+    jmp .fi_kw_loop
+.fi_no_kw:
+
+    ; And the fourth positional, which says the same thing.
+    cmp qword [rbp - FI_NPOS], 4
+    jl .fi_closefd_parsed
+    mov rdi, [rbp - FI_ARGS]
+    mov rdi, [rdi + 24]
+    call obj_is_true
+    mov [rbp - FI_CLOSEFD], rax
+.fi_closefd_parsed:
+    mov rax, [rbp - FI_SELF]        ; reload: the parsing above returns in rax
 
     ; __init__ can be called again on a live object -- CPython's FileIO
     ; reopens rather than leaking -- so whatever the last one left has to go
@@ -883,7 +951,7 @@ DEF_FUNC fileio_init_fn, FI_FRAME
     mov rax, [rdi + 8]
     mov [rbp - FI_FILE], rax
     mov qword [rbp - FI_MODE], 0
-    mov rsi, [rbp - FI_NARGS]   ; reload: the releases above went through
+    mov rsi, [rbp - FI_NPOS]    ; reload: the releases above went through
     mov rdi, [rbp - FI_ARGS]    ; obj_decref, which clobbers both
     cmp rsi, 3
     jl .fi_have_mode
@@ -953,6 +1021,12 @@ DEF_FUNC fileio_init_fn, FI_FRAME
     lea rcx, [rel str_type]
     cmp rax, rcx
     jne .fi_file_type
+    ; A path this object opens itself must be closed by it: CPython raises
+    ; rather than accepting closefd=False, and accepting it silently cleared
+    ; the bit and leaked one descriptor per open.  Checked before sys_open,
+    ; so there is no descriptor to leak on the way out either.
+    cmp qword [rbp - FI_CLOSEFD], 0
+    je .fi_closefd_path
     lea rdi, [rdi + PyStrObject.data]
     mov rsi, [rbp - FI_OFLAGS]
     mov edx, 0o666
@@ -967,15 +1041,10 @@ DEF_FUNC fileio_init_fn, FI_FRAME
     mov rax, [rbp - FI_FLAGS]
     mov [rdi + PyFileIOObject.fio_flags], rax
 
-    ; closefd=False, argument four.  It only ever turns the bit off: a path
-    ; this object opened itself must be closed by it.
-    cmp qword [rbp - FI_NARGS], 4
-    jl .fi_closefd_done
-    mov rdi, [rbp - FI_ARGS]
-    mov rdi, [rdi + 24]
-    call obj_is_true
-    test eax, eax
-    jnz .fi_closefd_done
+    ; closefd=False.  It only ever turns the bit off, and only an adopted
+    ; descriptor gets here with it false -- the path case raised above.
+    cmp qword [rbp - FI_CLOSEFD], 0
+    jne .fi_closefd_done
     mov rax, [rbp - FI_SELF]
     and qword [rbp - FI_FLAGS], ~FIO_CLOSEFD
     mov rcx, [rbp - FI_FLAGS]
@@ -1044,6 +1113,17 @@ DEF_FUNC fileio_init_fn, FI_FRAME
     mov rsi, [rbp - FI_FILE]
     call raise_oserror
     ud2
+
+.fi_closefd_path:
+    ; The mode string is ours by here -- either allocated for the default or
+    ; INCREF'd from the argument -- and RAISE abandons the C stack.
+    mov rdi, [rbp - FI_MODE]
+    test rdi, rdi
+    jz .fi_closefd_path_raise
+    mov qword [rbp - FI_MODE], 0
+    call obj_decref
+.fi_closefd_path_raise:
+    RAISE exc_ValueError_type, "Cannot use closefd=False with file name"
 
 .fi_open_failed:
     neg rax

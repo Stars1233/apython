@@ -441,7 +441,9 @@ DEF_FUNC exc_syntax_str
 END_FUNC exc_syntax_str
 
 ;; ============================================================================
-;; oserror_str(rdi = exc) -> rax = PyStrObject*, or 0 to fall through
+;; oserror_str(rdi = exc) -> rax = PyStrObject*, 0 to fall through, or -1 when
+;; a field's repr()/str() raised.  The third answer is not the second: falling
+;; through on a raise rendered the args tuple and left the exception pending.
 ;;
 ;; "[Errno N] strerror: 'file' -> 'file2'", with the tail dropped as the parts
 ;; run out, exactly as CPython's OSError_str does.  Returns 0 when there is not
@@ -484,6 +486,8 @@ DEF_FUNC oserror_str, OSS_FRAME
     add rbx, 7
     mov rdi, r12
     call obj_repr                   ; an int's repr is its digits
+    test rax, rax
+    jz .oss_raised                  ; the repr/str raised
     V_UNPACK rax, rdx
     mov rdi, rbx
     call oserror_append
@@ -496,6 +500,8 @@ DEF_FUNC oserror_str, OSS_FRAME
     call oserror_field
     mov rdi, rax
     call obj_str
+    test rax, rax
+    jz .oss_raised                  ; the repr/str raised
     V_UNPACK rax, rdx
     mov rdi, rbx
     call oserror_append
@@ -511,6 +517,8 @@ DEF_FUNC oserror_str, OSS_FRAME
     add rbx, 2
     mov rdi, r12
     call obj_repr
+    test rax, rax
+    jz .oss_raised                  ; the repr/str raised
     V_UNPACK rax, rdx
     mov rdi, rbx
     call oserror_append
@@ -525,6 +533,8 @@ DEF_FUNC oserror_str, OSS_FRAME
     add rbx, 4
     mov rdi, r12
     call obj_repr
+    test rax, rax
+    jz .oss_raised                  ; the repr/str raised
     V_UNPACK rax, rdx
     mov rdi, rbx
     call oserror_append
@@ -543,6 +553,16 @@ DEF_FUNC oserror_str, OSS_FRAME
 
 .oss_none:
     xor eax, eax
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.oss_raised:
+    ; A field's repr() or str() raised.  Those four returns went unchecked, so
+    ; a filename with a raising __repr__ produced a truncated message and left
+    ; the exception to fire at some later, unrelated point.
+    mov rax, -1
     pop r12
     pop rbx
     leave
@@ -662,9 +682,18 @@ DEF_FUNC exc_str, ES_FRAME
     jz .es_check_syntax
     mov rdi, rbx
     call oserror_str
+    cmp rax, -1
+    je .es_raised
     test rax, rax
     jz .es_check_syntax
     mov edx, TAG_PTR
+    pop rbx
+    leave
+    ret
+
+.es_raised:
+    xor eax, eax                    ; a NULL Value, with the exception pending
+    xor edx, edx
     pop rbx
     leave
     ret

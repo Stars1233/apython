@@ -1064,6 +1064,67 @@ DEF_FUNC instance_dealloc, ID_FRAME
     call ap_free
 .id_no_bytes:
 
+    ; The same shape for the three containers that keep their storage out of
+    ; line.  A dict, list or set subclass instance owns tables the slot walk
+    ; above knows nothing about, and the base's own dealloc never runs for a
+    ; subclass -- so every instance leaked both its contents and its tables:
+    ; `class D(dict): pass` leaked 256 bytes per D(), and a list or set
+    ; subclass the same in its own currency.  The contents go through the
+    ; type's existing tp_clear, which is exactly "release everything held and
+    ; leave the tables empty"; the tables are freed here afterwards.
+    mov rax, [rbx + PyObject.ob_type]
+    mov rcx, [rax + PyTypeObject.tp_flags]
+    test rcx, TYPE_FLAG_DICT_SUBCLASS
+    jnz .id_dict_storage
+    test rcx, TYPE_FLAG_LIST_SUBCLASS
+    jnz .id_list_storage
+    test rcx, TYPE_FLAG_SET_SUBCLASS
+    jnz .id_set_storage
+    jmp .id_no_storage
+
+.id_dict_storage:
+    extern dict_clear_gc
+    mov rdi, rbx
+    call dict_clear_gc
+    mov rdi, [rbx + PyDictObject.entries]
+    test rdi, rdi
+    jz .id_dict_no_entries
+    mov qword [rbx + PyDictObject.entries], 0
+    call ap_free
+.id_dict_no_entries:
+    mov rdi, [rbx + PyDictObject.dk_indices]
+    test rdi, rdi
+    jz .id_no_storage
+    mov qword [rbx + PyDictObject.dk_indices], 0
+    mov qword [rbx + PyDictObject.capacity], 0
+    call ap_free
+    jmp .id_no_storage
+
+.id_list_storage:
+    extern list_clear
+    mov rdi, rbx
+    call list_clear
+    mov rdi, [rbx + PyListObject.ob_item]
+    test rdi, rdi
+    jz .id_no_storage
+    mov qword [rbx + PyListObject.ob_item], 0
+    mov qword [rbx + PyListObject.ob_size], 0
+    call ap_free
+    jmp .id_no_storage
+
+.id_set_storage:
+    extern set_clear_gc
+    mov rdi, rbx
+    call set_clear_gc
+    mov rdi, [rbx + PyDictObject.entries]
+    test rdi, rdi
+    jz .id_no_storage
+    mov qword [rbx + PyDictObject.entries], 0
+    mov qword [rbx + PyDictObject.capacity], 0
+    call ap_free
+
+.id_no_storage:
+
     ; Save ob_type before freeing (gc_dealloc reads ob_type, then frees)
     push qword [rbx + PyObject.ob_type]
 

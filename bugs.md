@@ -302,6 +302,12 @@ than lying — but they are ordinary Python that does not work:
   defines exactly that.  `asyncio` streams and every hand-written async
   iterator are shaped this way.
 
+- **An extended-slice length mismatch does not name the sizes.**  CPython says
+  "attempt to assign sequence of size 3 to extended slice of size 2"; here the
+  message is "of wrong size", because `src/pyo/list.asm` has no int-to-string
+  helper to build the two numbers with -- the one that exists is file-local to
+  `src/opcodes/build.asm`.  The exception type and the condition are right.
+
 - **`dir()` does not consult `__dir__`.**  It walks the MRO's `tp_dict`s and
   nothing else, so a class defining `__dir__` has it ignored -- including a
   `__dir__` that raises, whose exception is discarded along with its answer.
