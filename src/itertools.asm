@@ -8,6 +8,8 @@
 
 extern ap_malloc
 extern gc_alloc
+extern gc_track
+extern gc_dealloc
 extern ap_free
 extern obj_incref
 extern iter_traverse_one
@@ -479,15 +481,19 @@ DEF_FUNC builtin_enumerate, EN_FRAME
 
     ; Allocate EnumerateIterObject
     mov edi, ITER_OBJ_SIZE
-    call ap_malloc
+    lea rsi, [rel enumerate_iter_type]
+    call gc_alloc
 
     ; Fill fields
-    mov qword [rax + PyObject.ob_refcnt], 1
-    lea rcx, [rel enumerate_iter_type]
-    mov [rax + PyObject.ob_type], rcx
     mov [rax + IT_FIELD1], rbx       ; it_iter
     mov r13, [rbp - EN_START]
     mov [rax + IT_FIELD2], r13       ; it_count (raw i64, not SmallInt)
+    ; gc_track only after every field is set: it can trigger a
+    ; collection, and the traverse would walk uninitialised words.
+    push rax
+    mov rdi, rax
+    call gc_track
+    pop rax
     mov edx, TAG_PTR
 
     pop r13
@@ -548,6 +554,190 @@ DEF_FUNC_LOCAL enumerate_iternext
 END_FUNC enumerate_iternext
 
 ;; enumerate_dealloc(self)
+
+;; ============================================================================
+;; The traverse/clear pairs for the wrapper iterators.
+;;
+;; enumerate, zip, map, filter, reversed and chain all came from ap_malloc
+;; with tp_flags 0, so a cycle through one leaked: `a = []; z = zip(a, a);
+;; a.append(z)` collected nothing where CPython collects six objects.  The
+;; simple container iterators were tracked earlier and share one pair, because
+;; each keeps exactly one owned pointer at the same offset.  These do not.
+;;
+;; enumerate and reversed DO fit that shape -- one owned pointer at +16, a raw
+;; integer at +24 -- so they use iter_traverse_one and iter_clear_one
+;; unchanged.  The other four need their own:
+;;
+;;   filter  two owned pointers, and the first is legitimately NULL for
+;;           filter(None, xs), so a clear must not read 0 as "already done"
+;;   zip     an ap_malloc'd array of iterators, walked by a count
+;;   chain   the same shape at the same offsets, so the same pair serves it
+;;   map     an array as well, plus a Value -- not a pointer -- for the
+;;           function, which needs VISIT_V and DECREF_V rather than the
+;;           pointer forms
+;;
+;; A clear has to leave the object safe for the dealloc that follows: every
+;; field it releases is zeroed, and the array pointer with them, which is why
+;; each dealloc's NULL checks matter.  ap_free is NULL-safe.
+;; ============================================================================
+DEF_FUNC_LOCAL filter_traverse
+    push rbx
+    mov rbx, rdi
+    mov rdi, [rbx + IT_FIELD1]  ; the function, or NULL for filter(None, xs)
+    VISIT_PTR rdi
+    mov rdi, [rbx + IT_FIELD2]
+    VISIT_PTR rdi
+    pop rbx
+    leave
+    ret
+END_FUNC filter_traverse
+
+DEF_FUNC_LOCAL filter_clear
+    push rbx
+    mov rbx, rdi
+    mov rdi, [rbx + IT_FIELD1]
+    test rdi, rdi
+    jz .fc_iter
+    mov qword [rbx + IT_FIELD1], 0
+    call obj_decref
+.fc_iter:
+    mov rdi, [rbx + IT_FIELD2]
+    test rdi, rdi
+    jz .fc_done
+    mov qword [rbx + IT_FIELD2], 0
+    call obj_decref
+.fc_done:
+    pop rbx
+    leave
+    ret
+END_FUNC filter_clear
+
+;; zip and chain: an iterator array at +16 walked by a count at +24.
+DEF_FUNC_LOCAL iters_array_traverse
+    push rbx
+    push r12
+    push r13
+    mov rbx, [rdi + IT_FIELD1]
+    mov r12, [rdi + IT_FIELD2]
+    test rbx, rbx
+    jz .iat_done
+    xor r13d, r13d
+.iat_loop:
+    cmp r13, r12
+    jge .iat_done
+    mov rdi, [rbx + r13 * 8]
+    VISIT_PTR rdi
+    inc r13
+    jmp .iat_loop
+.iat_done:
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC iters_array_traverse
+
+DEF_FUNC_LOCAL iters_array_clear
+    push rbx
+    push r12
+    push r13
+    mov rbx, rdi
+    mov r12, [rbx + IT_FIELD1]
+    mov r13, [rbx + IT_FIELD2]
+    test r12, r12
+    jz .iac_done
+    ; Unhook first, so a decref that re-enters cannot walk the array again.
+    mov qword [rbx + IT_FIELD1], 0
+    mov qword [rbx + IT_FIELD2], 0
+    xor ecx, ecx
+.iac_loop:
+    cmp rcx, r13
+    jge .iac_free
+    push rcx
+    mov rdi, [r12 + rcx * 8]
+    call obj_decref
+    pop rcx
+    inc rcx
+    jmp .iac_loop
+.iac_free:
+    mov rdi, r12
+    call ap_free
+.iac_done:
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC iters_array_clear
+
+;; map: a Value function at +16, then the same array shape one slot along.
+DEF_FUNC_LOCAL map_traverse
+    push rbx
+    push r12
+    push r13
+    mov rbx, rdi
+    mov rax, [rbx + MAP_FUNC]
+    VISIT_V rax, rcx
+    mov r12, [rbx + MAP_ITERS]
+    mov r13, [rbx + MAP_COUNT]
+    test r12, r12
+    jz .mt_done
+    xor ecx, ecx
+.mt_loop:
+    cmp rcx, r13
+    jge .mt_done
+    push rcx
+    mov rdi, [r12 + rcx * 8]
+    VISIT_PTR rdi
+    pop rcx
+    inc rcx
+    jmp .mt_loop
+.mt_done:
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC map_traverse
+
+DEF_FUNC_LOCAL map_clear
+    push rbx
+    push r12
+    push r13
+    mov rbx, rdi
+    mov rax, [rbx + MAP_FUNC]
+    test rax, rax
+    jz .mc_iters
+    mov qword [rbx + MAP_FUNC], 0
+    DECREF_V rax, rcx
+.mc_iters:
+    mov r12, [rbx + MAP_ITERS]
+    mov r13, [rbx + MAP_COUNT]
+    test r12, r12
+    jz .mc_done
+    mov qword [rbx + MAP_ITERS], 0
+    mov qword [rbx + MAP_COUNT], 0
+    xor ecx, ecx
+.mc_loop:
+    cmp rcx, r13
+    jge .mc_free
+    push rcx
+    mov rdi, [r12 + rcx * 8]
+    call obj_decref
+    pop rcx
+    inc rcx
+    jmp .mc_loop
+.mc_free:
+    mov rdi, r12
+    call ap_free
+.mc_done:
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC map_clear
+
 DEF_FUNC_LOCAL enumerate_dealloc
     push rbx
     mov rbx, rdi
@@ -558,7 +748,7 @@ DEF_FUNC_LOCAL enumerate_dealloc
 
     ; Free self
     mov rdi, rbx
-    call ap_free
+    call gc_dealloc
 
     pop rbx
     leave
@@ -688,15 +878,19 @@ DEF_FUNC builtin_zip, ZP_FRAME
 .zip_create:
     ; Allocate ZipIterObject (40 bytes for strict flag)
     mov edi, ZIP_OBJ_SIZE
-    call ap_malloc
+    lea rsi, [rel zip_iter_type]
+    call gc_alloc
 
-    mov qword [rax + PyObject.ob_refcnt], 1
-    lea rcx, [rel zip_iter_type]
-    mov [rax + PyObject.ob_type], rcx
     mov [rax + IT_FIELD1], r13       ; it_iters (array ptr)
     mov [rax + IT_FIELD2], r12       ; it_count
     mov rcx, [rbp - ZP_STRICT]
     mov [rax + ZIP_STRICT], rcx      ; strict flag
+    ; gc_track only after every field is set: it can trigger a
+    ; collection, and the traverse would walk uninitialised words.
+    push rax
+    mov rdi, rax
+    call gc_track
+    pop rax
     mov edx, TAG_PTR
 
     pop r14
@@ -710,14 +904,18 @@ DEF_FUNC builtin_zip, ZP_FRAME
 .zip_zero:
     ; Create a zip with 0 iterators (will immediately exhaust)
     mov edi, ZIP_OBJ_SIZE
-    call ap_malloc
+    lea rsi, [rel zip_iter_type]
+    call gc_alloc
 
-    mov qword [rax + PyObject.ob_refcnt], 1
-    lea rcx, [rel zip_iter_type]
-    mov [rax + PyObject.ob_type], rcx
     mov qword [rax + IT_FIELD1], 0   ; NULL iters array
     mov qword [rax + IT_FIELD2], 0   ; 0 iterators
     mov qword [rax + ZIP_STRICT], 0  ; not strict
+    ; gc_track only after every field is set: it can trigger a
+    ; collection, and the traverse would walk uninitialised words.
+    push rax
+    mov rdi, rax
+    call gc_track
+    pop rax
     mov edx, TAG_PTR
 
     pop r14
@@ -898,7 +1096,7 @@ DEF_FUNC_LOCAL zip_dealloc
 
 .zip_dealloc_free:
     mov rdi, rbx
-    call ap_free
+    call gc_dealloc
 
     pop r13
     pop r12
@@ -963,14 +1161,18 @@ DEF_FUNC builtin_map
 
     ; Allocate MapIterObject (40 bytes)
     mov edi, MAP_OBJ_SIZE
-    call ap_malloc
+    lea rsi, [rel map_iter_type]
+    call gc_alloc
 
-    mov qword [rax + PyObject.ob_refcnt], 1
-    lea rcx, [rel map_iter_type]
-    mov [rax + PyObject.ob_type], rcx
     mov [rax + MAP_FUNC], r13        ; it_func
     mov [rax + MAP_ITERS], rbx       ; it_iters (array ptr)
     mov [rax + MAP_COUNT], r14       ; it_count
+    ; gc_track only after every field is set: it can trigger a
+    ; collection, and the traverse would walk uninitialised words.
+    push rax
+    mov rdi, rax
+    call gc_track
+    pop rax
     mov edx, TAG_PTR
 
     pop r14
@@ -1133,7 +1335,7 @@ DEF_FUNC_LOCAL map_dealloc
 
     ; Free self
     mov rdi, rbx
-    call ap_free
+    call gc_dealloc
 
     pop r13
     pop r12
@@ -1181,13 +1383,17 @@ DEF_FUNC builtin_filter
 
     ; Allocate FilterIterObject
     mov edi, ITER_OBJ_SIZE
-    call ap_malloc
+    lea rsi, [rel filter_iter_type]
+    call gc_alloc
 
-    mov qword [rax + PyObject.ob_refcnt], 1
-    lea rcx, [rel filter_iter_type]
-    mov [rax + PyObject.ob_type], rcx
     mov [rax + IT_FIELD1], r13       ; it_func (or NULL)
     mov [rax + IT_FIELD2], rbx       ; it_iter
+    ; gc_track only after every field is set: it can trigger a
+    ; collection, and the traverse would walk uninitialised words.
+    push rax
+    mov rdi, rax
+    call gc_track
+    pop rax
     mov edx, TAG_PTR
 
     pop r13
@@ -1322,7 +1528,7 @@ DEF_FUNC_LOCAL filter_dealloc
 
     ; Free self
     mov rdi, rbx
-    call ap_free
+    call gc_dealloc
 
     pop rbx
     leave
@@ -1486,13 +1692,17 @@ section .text
 
     ; Allocate ReversedIterObject
     mov edi, ITER_OBJ_SIZE
-    call ap_malloc
+    lea rsi, [rel reversed_iter_type]
+    call gc_alloc
 
-    mov qword [rax + PyObject.ob_refcnt], 1
-    lea rcx, [rel reversed_iter_type]
-    mov [rax + PyObject.ob_type], rcx
     mov [rax + IT_FIELD1], r12       ; it_seq
     mov [rax + IT_FIELD2], r13       ; it_index
+    ; gc_track only after every field is set: it can trigger a
+    ; collection, and the traverse would walk uninitialised words.
+    push rax
+    mov rdi, rax
+    call gc_track
+    pop rax
     mov edx, TAG_PTR
 
     pop r13
@@ -1578,7 +1788,7 @@ DEF_FUNC_LOCAL reversed_dealloc
 
     ; Free self
     mov rdi, rbx
-    call ap_free
+    call gc_dealloc
 
     pop rbx
     leave
@@ -1960,14 +2170,18 @@ DEF_FUNC builtin_chain
 .chain_create:
     ; Allocate ChainIterObject (40 bytes)
     mov edi, CHAIN_OBJ_SIZE
-    call ap_malloc
+    lea rsi, [rel chain_iter_type]
+    call gc_alloc
 
-    mov qword [rax + PyObject.ob_refcnt], 1
-    lea rcx, [rel chain_iter_type]
-    mov [rax + PyObject.ob_type], rcx
     mov [rax + CHAIN_ITERS], r13       ; it_iters (array ptr)
     mov [rax + CHAIN_COUNT], r12       ; it_count
     mov qword [rax + CHAIN_IDX], 0     ; start at index 0
+    ; gc_track only after every field is set: it can trigger a
+    ; collection, and the traverse would walk uninitialised words.
+    push rax
+    mov rdi, rax
+    call gc_track
+    pop rax
     mov edx, TAG_PTR
 
     pop r14
@@ -1981,14 +2195,18 @@ DEF_FUNC builtin_chain
 .chain_zero:
     ; Create a chain with 0 iterators (will immediately exhaust)
     mov edi, CHAIN_OBJ_SIZE
-    call ap_malloc
+    lea rsi, [rel chain_iter_type]
+    call gc_alloc
 
-    mov qword [rax + PyObject.ob_refcnt], 1
-    lea rcx, [rel chain_iter_type]
-    mov [rax + PyObject.ob_type], rcx
     mov qword [rax + CHAIN_ITERS], 0   ; NULL iters array
     mov qword [rax + CHAIN_COUNT], 0   ; 0 iterators
     mov qword [rax + CHAIN_IDX], 0
+    ; gc_track only after every field is set: it can trigger a
+    ; collection, and the traverse would walk uninitialised words.
+    push rax
+    mov rdi, rax
+    call gc_track
+    pop rax
     mov edx, TAG_PTR
 
     pop r14
@@ -2079,7 +2297,7 @@ DEF_FUNC_LOCAL chain_dealloc
 
 .chain_dealloc_free:
     mov rdi, rbx
-    call ap_free
+    call gc_dealloc
 
     pop r13
     pop r12
@@ -2127,10 +2345,10 @@ enumerate_iter_type:
     dq 0                        ; tp_base
     dq 0                        ; tp_dict
     dq 0                        ; tp_mro
-    dq 0                        ; tp_flags
+    dq TYPE_FLAG_HAVE_GC        ; tp_flags
     dq 0                        ; tp_bases
-    dq 0                        ; tp_traverse
-    dq 0                        ; tp_clear
+    dq iter_traverse_one                        ; tp_traverse
+    dq iter_clear_one                        ; tp_clear
     dq 0 ; tp_dictoffset
 
 ; Zip iterator type
@@ -2159,10 +2377,10 @@ zip_iter_type:
     dq 0                        ; tp_base
     dq 0                        ; tp_dict
     dq 0                        ; tp_mro
-    dq 0                        ; tp_flags
+    dq TYPE_FLAG_HAVE_GC        ; tp_flags
     dq 0                        ; tp_bases
-    dq 0                        ; tp_traverse
-    dq 0                        ; tp_clear
+    dq iters_array_traverse                        ; tp_traverse
+    dq iters_array_clear                        ; tp_clear
     dq 0 ; tp_dictoffset
 
 ; Map iterator type
@@ -2191,10 +2409,10 @@ map_iter_type:
     dq 0                        ; tp_base
     dq 0                        ; tp_dict
     dq 0                        ; tp_mro
-    dq 0                        ; tp_flags
+    dq TYPE_FLAG_HAVE_GC        ; tp_flags
     dq 0                        ; tp_bases
-    dq 0                        ; tp_traverse
-    dq 0                        ; tp_clear
+    dq map_traverse                        ; tp_traverse
+    dq map_clear                        ; tp_clear
     dq 0 ; tp_dictoffset
 
 ; Filter iterator type
@@ -2223,10 +2441,10 @@ filter_iter_type:
     dq 0                        ; tp_base
     dq 0                        ; tp_dict
     dq 0                        ; tp_mro
-    dq 0                        ; tp_flags
+    dq TYPE_FLAG_HAVE_GC        ; tp_flags
     dq 0                        ; tp_bases
-    dq 0                        ; tp_traverse
-    dq 0                        ; tp_clear
+    dq filter_traverse                        ; tp_traverse
+    dq filter_clear                        ; tp_clear
     dq 0 ; tp_dictoffset
 
 ; Sequence iterator type (__getitem__ protocol)
@@ -2287,10 +2505,10 @@ reversed_iter_type:
     dq 0                        ; tp_base
     dq 0                        ; tp_dict
     dq 0                        ; tp_mro
-    dq 0                        ; tp_flags
+    dq TYPE_FLAG_HAVE_GC        ; tp_flags
     dq 0                        ; tp_bases
-    dq 0                        ; tp_traverse
-    dq 0                        ; tp_clear
+    dq iter_traverse_one                        ; tp_traverse
+    dq iter_clear_one                        ; tp_clear
     dq 0 ; tp_dictoffset
 
 ; Chain iterator type
@@ -2319,8 +2537,8 @@ chain_iter_type:
     dq 0                        ; tp_base
     dq 0                        ; tp_dict
     dq 0                        ; tp_mro
-    dq 0                        ; tp_flags
+    dq TYPE_FLAG_HAVE_GC        ; tp_flags
     dq 0                        ; tp_bases
-    dq 0                        ; tp_traverse
-    dq 0                        ; tp_clear
+    dq iters_array_traverse                        ; tp_traverse
+    dq iters_array_clear                        ; tp_clear
     dq 0 ; tp_dictoffset

@@ -2094,18 +2094,27 @@ DEF_FUNC list_method_reversed
 
     mov rbx, [rdi]            ; self (list)
 
-    ; Allocate ReversedIterObject (32 bytes: refcnt, type, it_seq, it_index)
+    ; Allocate ReversedIterObject (32 bytes: refcnt, type, it_seq, it_index).
+    ; gc_alloc, and tracked: this is the same type builtin_reversed makes, it
+    ; holds the sequence it walks, and a list can hold the iterator back.
+    ; Allocating it with ap_malloc while its tp_dealloc frees it with
+    ; gc_dealloc handed free() a pointer sixteen bytes past the block.
     mov edi, 32
-    call ap_malloc
+    lea rsi, [rel reversed_iter_type]
+    extern gc_alloc
+    call gc_alloc
 
-    mov qword [rax + PyObject.ob_refcnt], 1
-    lea rcx, [rel reversed_iter_type]
-    mov [rax + PyObject.ob_type], rcx
     mov [rax + 16], rbx       ; it_seq = self
     INCREF rbx
     mov rcx, [rbx + PyListObject.ob_size]
     dec rcx                   ; it_index = ob_size - 1
     mov [rax + 24], rcx
+
+    push rax
+    mov rdi, rax
+    extern gc_track
+    call gc_track
+    pop rax
 
     mov edx, TAG_PTR
     pop rbx

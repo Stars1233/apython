@@ -264,16 +264,6 @@ than lying — but they are ordinary Python that does not work:
 
 ## Robustness
 
-- **The itertools wrappers are not GC-tracked**: `enumerate`, `zip`, `map`,
-  `filter`, `reversed` and `chain` still come from `ap_malloc` with `tp_flags`
-  0, so a cycle through one leaks.  The container iterators and the dict views
-  are tracked now and share one traverse/clear pair, because each keeps exactly
-  one owned pointer at the same offset; these do not -- `zip` and `map` hold
-  an ARRAY of iterators, and `map` and `filter` hold a function as well -- so
-  each needs its own pair.  `str` and `bytes` iterators are deliberately left
-  alone: neither can be part of a cycle, because neither container can hold an
-  iterator.
-
 - **Code objects, asyncio `Task`s and `wait_for` wrappers are not GC-tracked
   either**, for the same reason and with the same history: `code_traverse`,
   `task_traverse`/`task_clear` and `wait_for_traverse`/`wait_for_clear` were
