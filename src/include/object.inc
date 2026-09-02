@@ -245,6 +245,12 @@ struc PyFuncObject
     .func_closure:  resq 1  ; +48: ptr to closure tuple or NULL
     .func_kwdefaults: resq 1 ; +56: ptr to kwdefaults dict or NULL
     .func_dict:     resq 1  ; +64: ptr to __dict__ or NULL (arbitrary attrs)
+    .func_qualname: resq 1  ; +72: __qualname__, or NULL for co_qualname
+    .func_doc:      resq 1  ; +80: __doc__, or NULL for co_consts[0].  Both are
+                            ;      fields because CPython keeps them ON the
+                            ;      function: f.__dict__ stays empty until
+                            ;      something else is assigned, and
+                            ;      functools.wraps sets exactly these two.
 endstruc
 
 ; Code object

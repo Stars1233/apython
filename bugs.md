@@ -27,11 +27,6 @@ one-line fix.
   the registry; reaching it from the interpreter would mean calling Python
   from a builtin method.
 
-- **`__qualname__` and `__doc__` set on a function land in its `__dict__`.**
-  CPython keeps both on the function object, so `f.__dict__` stays empty until
-  something else is assigned.  `__name__` has a field of its own here and
-  behaves as CPython's does; the other two do not.
-
 - **The `_abc` registry and caches hold strong references.**  CPython uses
   weak ones, so a class registered against an ABC can be collected and the
   ABC's caches shrink; here a registered class lives as long as the ABC.
