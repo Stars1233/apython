@@ -1032,16 +1032,29 @@ DEF_FUNC float_int
 
     movq xmm0, rdi
 
-    ; Check for NaN/inf
+    ; Check for NaN/inf.  CPython words and TYPES these differently: a NaN is
+    ; a ValueError, an infinity an OverflowError.  Both were the ValueError.
     ucomisd xmm0, xmm0
-    jp .not_finite
+    jp .not_a_number
 
     movsd xmm1, [rel pos_inf]
     ucomisd xmm0, xmm1
-    je .not_finite
+    je .is_infinite
     movsd xmm1, [rel neg_inf]
     ucomisd xmm0, xmm1
-    je .not_finite
+    je .is_infinite
+
+    ; Out of int64's range, cvttsd2si answers INT64_MIN and says nothing about
+    ; it -- int(1e300) and int(2.0**70) were both -9223372036854775808.  A
+    ; double is exactly representable as an integer whenever it has no
+    ; fractional part, so the big ones go through GMP, which converts it
+    ; exactly.
+    movsd xmm1, [rel fi_two63]
+    ucomisd xmm0, xmm1
+    jae .fi_big
+    movsd xmm1, [rel fi_neg_two63]
+    ucomisd xmm0, xmm1
+    jb .fi_big
 
     ; Truncate to int64
     cvttsd2si rdi, xmm0
@@ -1049,8 +1062,33 @@ DEF_FUNC float_int
     leave
     ret
 
-.not_finite:
-    RAISE exc_ValueError_type, "cannot convert float NaN or infinity to integer"
+.fi_big:
+    push rbx
+    sub rsp, 24
+    movsd [rsp], xmm0
+    ; int_new_compact, not int_from_i64: the latter answers an IMMEDIATE for a
+    ; small value, and there is no mpz on an immediate to set.
+    xor edi, edi
+    extern int_new_compact
+    call int_new_compact        ; a compact zero, promoted below
+    mov rbx, rax
+    INT_NEED_MPZ rbx            ; initialises the mpz and clears compact
+    lea rdi, [rbx + PyIntObject.mpz]
+    movsd xmm0, [rsp]
+    extern __gmpz_set_d
+    call __gmpz_set_d wrt ..plt
+    mov rax, rbx
+    mov edx, TAG_PTR
+    add rsp, 24
+    pop rbx
+    leave
+    ret
+
+.not_a_number:
+    RAISE exc_ValueError_type, "cannot convert float NaN to integer"
+.is_infinite:
+    extern exc_OverflowError_type
+    RAISE exc_OverflowError_type, "cannot convert float infinity to integer"
 END_FUNC float_int
 
 ;; ============================================================================
@@ -1256,6 +1294,8 @@ fmt_e: db "%.*e", 0
 fmt_E: db "%.*E", 0
 
 align 8
+fi_two63:     dq 0x43e0000000000000   ; 2.0**63
+fi_neg_two63: dq 0xc3e0000000000000   ; -(2.0**63)
 pos_inf:     dq 0x7ff0000000000000
 neg_inf:     dq 0xfff0000000000000
 const_one_f:  dq 0x3ff0000000000000   ; 1.0 in IEEE 754

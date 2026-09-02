@@ -6,6 +6,7 @@
 
 %include "macros.inc"
 %include "object.inc"
+%include "opcodes.inc"
 
 extern complex_to_parts
 extern obj_incref
@@ -1729,14 +1730,20 @@ DEF_FUNC builtin_round_fn, RND_FRAME
     ; Check if it's a PyFloatObject
     lea rcx, [rel float_type]
     cmp [rax + PyObject.ob_type], rcx
-    jne .rnd_one_check_int_obj
+    je .rnd_one_float_obj
+    ; A float SUBCLASS keeps its double inline at the same offset, and the
+    ; exact-pointer test refused it: round(F(2.5)) was a TypeError.
+    mov rcx, [rax + PyObject.ob_type]
+    test qword [rcx + PyTypeObject.tp_flags], TYPE_FLAG_FLOAT_SUBCLASS
+    jz .rnd_one_check_int_obj
+.rnd_one_float_obj:
     movsd xmm0, [rax + PyFloatObject.value]
     jmp .rnd_one_do_round
 .rnd_one_check_int_obj:
     ; Check if it's a PyIntObject (heap int)
     lea rcx, [rel int_type]
     cmp [rax + PyObject.ob_type], rcx
-    jne .rnd_type_error
+    jne .rnd_one_dunder
     ; It's a heap int — convert to i64 and return as SmallInt.
     ; int_to_i64 dispatches on edx, so the tag must be supplied.
     mov rdi, rax
@@ -1761,6 +1768,21 @@ DEF_FUNC builtin_round_fn, RND_FRAME
 
 .rnd_int_ret:
     RET_TAG_SMALLINT
+    pop rbx
+    leave
+    V_PACK rax, rdx             ; builtins return one Value
+    ret
+
+.rnd_one_dunder:
+    ; Anything else is asked for __round__, which is how round() works on a
+    ; Decimal, a Fraction or any class that defines it.  Nothing consulted it
+    ; at all, so every one of them was "type cannot be rounded".
+    mov rdi, rax
+    CSTRING rsi, "__round__"
+    extern dunder_call_1
+    call dunder_call_1
+    test edx, edx
+    jz .rnd_type_error          ; no __round__, or it raised
     pop rbx
     leave
     V_PACK rax, rdx             ; builtins return one Value
@@ -1794,10 +1816,14 @@ DEF_FUNC builtin_round_fn, RND_FRAME
     je .rnd_two_raw_float
     cmp ecx, TAG_PTR
     jne .rnd_type_error
-    ; Check if PyFloatObject
+    ; Check if PyFloatObject, or a subclass -- the double is inline for both.
     lea rcx, [rel float_type]
     cmp [rax + PyObject.ob_type], rcx
-    jne .rnd_type_error
+    je .rnd_two_float_obj
+    mov rcx, [rax + PyObject.ob_type]
+    test qword [rcx + PyTypeObject.tp_flags], TYPE_FLAG_FLOAT_SUBCLASS
+    jz .rnd_type_error
+.rnd_two_float_obj:
     movsd xmm0, [rax + PyFloatObject.value]
     jmp .rnd_two_got_float
 .rnd_two_raw_float:
@@ -1942,11 +1968,40 @@ DEF_FUNC builtin_pow_fn, POW_FRAME
     mov r8d, [rbp - POW_ETAG]
     jmp .pow_two_int
 .pow_reload_float:
-    mov rax, r12
-    mov rbx, r13
-    mov ecx, [rbp - POW_BTAG]
-    mov r8d, [rbp - POW_ETAG]
-    jmp .pow_two_float
+    ; Not two integers.  Everything else goes through obj_binary_op, the same
+    ; protocol `base ** exp` uses, so pow() answers whatever the operator
+    ; answers -- for float subclasses, for complex, and for any class with
+    ; __pow__.  The hand-rolled float path that used to be here tested
+    ; `ob_type == float_type` exactly and knew nothing of complex, so
+    ; pow(F(2.0), 2) raised where F(2.0) ** 2 worked, and pow(1+2j, 2) raised
+    ; where (1+2j) ** 2 worked.
+    mov rdi, r12
+    mov esi, [rbp - POW_BTAG]
+    V_PACK rdi, rsi
+    mov rsi, r13
+    mov edx, [rbp - POW_ETAG]
+    V_PACK rsi, rdx
+    mov edx, NB_POWER
+    extern obj_binary_op
+    call obj_binary_op
+    test rax, rax
+    jz .pow_propagate
+    V_UNPACK rax, rdx
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    V_PACK rax, rdx             ; builtins return one Value
+    ret
+
+.pow_propagate:
+    xor eax, eax                ; a NULL Value, with the exception pending
+    xor edx, edx
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
 .pow_two_int:
 
     ; int ** int — call int_power(base, exp, base_tag, exp_tag)
@@ -1967,137 +2022,8 @@ DEF_FUNC builtin_pow_fn, POW_FRAME
     V_PACK rax, rdx             ; builtins return one Value
     ret
 
-.pow_two_float:
-    ; At least one is float: convert both to double
-    cmp ecx, TAG_SMALLINT
-    jne .pow_f_base_float
-    cvtsi2sd xmm0, rax
-    jmp .pow_f_got_base
-.pow_f_base_float:
-    cmp ecx, TAG_FLOAT
-    je .pow_f_base_raw
-    ; TAG_PTR: extract from PyFloatObject
-    cmp ecx, TAG_PTR
-    jne .pow_type_error
-    lea rcx, [rel float_type]
-    cmp [rax + PyObject.ob_type], rcx
-    jne .pow_type_error
-    movsd xmm0, [rax + PyFloatObject.value]
-    jmp .pow_f_got_base
-.pow_f_base_raw:
-    movq xmm0, rax
-.pow_f_got_base:
-    cmp r8d, TAG_SMALLINT
-    jne .pow_f_exp_float
-    cvtsi2sd xmm1, rbx
-    jmp .pow_f_got_exp
-.pow_f_exp_float:
-    cmp r8d, TAG_FLOAT
-    je .pow_f_exp_raw
-    ; TAG_PTR: extract from PyFloatObject
-    cmp r8d, TAG_PTR
-    jne .pow_type_error
-    lea rcx, [rel float_type]
-    cmp [rbx + PyObject.ob_type], rcx
-    jne .pow_type_error
-    movsd xmm1, [rbx + PyFloatObject.value]
-    jmp .pow_f_got_exp
-.pow_f_exp_raw:
-    movq xmm1, rbx
-.pow_f_got_exp:
-    ; xmm0 = base, xmm1 = exp
-    ; Use repeated squaring for integer exponents, or fall back to exp*ln
-    ; Simple: convert to C pow() equivalent using exp/ln
-    ; x^y = exp2(y * log2(x)) — but we don't have those instructions easily
-    ; Use a simpler approach: if exp is a small integer, use repeated mult
-    cvtsd2si rcx, xmm1
-    cvtsi2sd xmm2, rcx
-    ucomisd xmm1, xmm2
-    jne .pow_f_general       ; exp is not an integer
-    jp .pow_f_general        ; NaN
-
-    ; Integer exponent: repeated squaring
-    mov r13, rcx
-    test r13, r13
-    js .pow_f_neg
-
-    movq xmm2, [rel const_one] ; result = 1.0
-.pow_f_sq:
-    test r13, r13
-    jz .pow_f_sq_done
-    test r13, 1
-    jz .pow_f_sq_even
-    mulsd xmm2, xmm0
-.pow_f_sq_even:
-    mulsd xmm0, xmm0
-    shr r13, 1
-    jmp .pow_f_sq
-.pow_f_sq_done:
-    movq rax, xmm2
-    mov edx, TAG_FLOAT
-    pop r13
-    pop r12
-    pop rbx
-    leave
-    V_PACK rax, rdx             ; builtins return one Value
-    ret
-
-.pow_f_neg:
-    neg r13
-    movq xmm2, [rel const_one]
-.pow_f_neg_sq:
-    test r13, r13
-    jz .pow_f_neg_done
-    test r13, 1
-    jz .pow_f_neg_even
-    mulsd xmm2, xmm0
-.pow_f_neg_even:
-    mulsd xmm0, xmm0
-    shr r13, 1
-    jmp .pow_f_neg_sq
-.pow_f_neg_done:
-    movq xmm0, [rel const_one]
-    divsd xmm0, xmm2
-    movq rax, xmm0
-    mov edx, TAG_FLOAT
-    pop r13
-    pop r12
-    pop rbx
-    leave
-    V_PACK rax, rdx             ; builtins return one Value
-    ret
-
-.pow_f_general:
-    ; Non-integer float exponent: x^y = 2^(y * log2(x))
-    ; xmm0 = base, xmm1 = exp
-    ; fyl2x computes st(1) * log2(st(0)), so load exp first, then base
-    sub rsp, 16
-    movsd [rsp], xmm1          ; exp on stack
-    fld qword [rsp]             ; st(0) = exp
-    movsd [rsp], xmm0          ; base on stack
-    fld qword [rsp]             ; st(0) = base, st(1) = exp
-    fyl2x                       ; st(0) = exp * log2(base)
-    ; Compute 2^st(0): split into int + frac
-    fld st0                     ; dup
-    frndint                     ; st(0) = int part
-    fsub st1, st0               ; st(1) = frac part
-    fxch st1                    ; st(0) = frac, st(1) = int
-    f2xm1                       ; st(0) = 2^frac - 1
-    fld1
-    faddp st1, st0              ; st(0) = 2^frac
-    fscale                      ; st(0) = 2^frac * 2^int = result
-    fstp st1                    ; pop int part
-    fstp qword [rsp]            ; store result
-    movsd xmm0, [rsp]
-    add rsp, 16
-    movq rax, xmm0
-    mov edx, TAG_FLOAT
-    pop r13
-    pop r12
-    pop rbx
-    leave
-    V_PACK rax, rdx             ; builtins return one Value
-    ret
+; The hand-rolled float path that used to live here is gone with it: one
+; implementation of `**` rather than two that disagreed about what a float is.
 
 .pow_three:
     ; pow(base, exp, mod) — modular exponentiation.

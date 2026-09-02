@@ -46,18 +46,38 @@ section .text
 ;; Clobbers: rcx, rdx
 ;; ============================================================================
 DEF_FUNC int_method_self_to_i64
-    mov rax, [rdi]              ; args[0] = self
-    V_UNPACK rax, rdx
+    ; int_unwrap first.  A bool, a compact heap int and an int SUBCLASS each
+    ; keep their value somewhere the raw Value is not: I(7).bit_length() was
+    ; 0.  And int_to_i64 reads PyIntObject fields off whatever it is handed,
+    ; so int.bit_length(1.5) walked a float object and segfaulted -- the same
+    ; shape float_self_bits was written to fix on the other side.
+    mov rdi, [rdi]              ; args[0] = self, a Value
+    V_UNPACK rdi, rdx
+    extern int_unwrap
+    call int_unwrap
     cmp edx, TAG_SMALLINT
-    jne .imsi_heap
-    leave
-    ret
-.imsi_heap:
-    ; TAG_PTR: heap int (subclass) — use int_to_i64
-    mov rdi, [rdi]              ; heap int ptr
+    je .imsi_done
+    test edx, TAG_RC_BIT
+    jz .imsi_bad
+    test rdi, rdi
+    jz .imsi_bad
+    mov rax, [rdi + PyObject.ob_type]
+    lea rcx, [rel int_type]
+    cmp rax, rcx
+    jne .imsi_bad
     call int_to_i64
     leave
     ret
+.imsi_done:
+    mov rax, rdi
+    leave
+    ret
+.imsi_bad:
+    V_PACK rdi, rdx
+    mov rsi, rdi
+    CSTRING rdi, `descriptor for 'int' objects doesn't apply to a '\x01' object`
+    extern raise_type_error_with_name
+    call raise_type_error_with_name
 END_FUNC int_method_self_to_i64
 
 ;; ============================================================================
@@ -69,14 +89,35 @@ END_FUNC int_method_self_to_i64
 DEF_FUNC int_method_bit_length
     ; A value too large for int64 has to be measured on its mpz: going
     ; through int_to_i64 truncated it, so (2**63).bit_length() was 0.
-    mov rax, [rdi]
-    V_UNPACK rax, rdx
+    ;
+    ; Unwrapped first, for the same reason the helper below unwraps: a
+    ; subclass instance's own compact/mpz fields are not the wrapped int's,
+    ; so I(2**70).bit_length() read compact off the wrapper and answered 0.
+    mov rdi, [rdi]
+    V_UNPACK rdi, rdx
+    extern int_unwrap
+    call int_unwrap
+    mov rax, rdi
     cmp edx, TAG_SMALLINT
     je .ibl_small
-    cmp edx, TAG_PTR
-    jne .ibl_small
+    test edx, TAG_RC_BIT
+    jz .ibl_bad
+    test rax, rax
+    jz .ibl_bad
+    mov rcx, [rax + PyObject.ob_type]
+    lea rdx, [rel int_type]
+    cmp rcx, rdx
+    jne .ibl_bad
     cmp qword [rax + PyIntObject.compact], 0
-    jne .ibl_small
+    je .ibl_use_mpz
+    mov rax, [rax + PyIntObject.ival]
+    jmp .ibl_small
+.ibl_bad:
+    mov rsi, rax
+    CSTRING rdi, `descriptor 'bit_length' for 'int' objects doesn't apply to a '\x01' object`
+    extern raise_type_error_with_name
+    call raise_type_error_with_name
+.ibl_use_mpz:
 
     push rbx
     mov rbx, rax
@@ -104,7 +145,7 @@ DEF_FUNC int_method_bit_length
     ret
 
 .ibl_small:
-    call int_method_self_to_i64
+    ; rax already holds the i64, unwrapped above.
 
     ; abs(self)
     mov rcx, rax

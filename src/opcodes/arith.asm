@@ -48,6 +48,28 @@ BO_LEFT  equ 16
 BO_LTAG  equ 24
 BO_SIZE  equ 32
 
+; A dunder that answers the NotImplemented singleton is DECLINING, exactly as
+; a slot declines with a NULL Value -- the protocol is supposed to move on to
+; the reflected form and then to TypeError.  All three dunder calls below
+; handed it back as the result instead, so `B() + C()` for a B whose __add__
+; returns NotImplemented printed NotImplemented rather than calling C.__radd__.
+; (rax, edx) hold the returned Value; r9 holds the op code and does not
+; survive obj_decref.
+%macro BINOP_DECLINED 1         ; %1 = where to go when it declined
+    extern notimpl_singleton
+    lea rcx, [rel notimpl_singleton]
+    cmp rax, rcx
+    jne %%kept
+    push r9
+    sub rsp, 8
+    mov rdi, rax
+    call obj_decref
+    add rsp, 8
+    pop r9
+    jmp %1
+%%kept:
+%endmacro
+
 ;; Stack layout constants for op_build_string (DEF_FUNC, 16 bytes).
 
 ;; Stack layout constants for op_send (DEF_FUNC, 48 bytes).
@@ -343,12 +365,43 @@ DEF_FUNC_BARE op_binary_op
     sub ecx, 13                 ; inplace → base op
     lea rdx, [rel binary_op_offsets]
     mov rdx, [rdx + rcx*8]     ; non-inplace offset
-    ; Float coercion: if either operand is float, use float_number_methods
-    ; (mirrors the initial float coercion at .use_float_methods)
+    ; Float coercion, on the same terms the primary path uses at
+    ; .use_float_methods: only when the OTHER operand is something float
+    ; arithmetic can actually be coerced with.  This tested the tags alone and
+    ; took the coercion for any partner at all -- and since
+    ; complex_number_methods leaves every nb_inplace_* NULL, EVERY augmented
+    ; assignment between a complex and a float arrived here and left as
+    ; "unsupported operand type(s)", while the same operands written `z + 1.5`
+    ; worked.
     cmp qword [rsp + BO_LTAG], TAG_FLOAT
-    je .binop_fallback_float
+    jne .binop_fb_right_float
+    push rdx                    ; the slot offset, and the op index: both are
+    push r9                     ; caller-saved, and both are needed below
+    mov rdi, [rsp + 16 + BO_RIGHT]
+    mov rsi, [rsp + 16 + BO_RTAG]
+    call binop_is_number
+    pop r9
+    pop rdx
+    mov rdi, [rsp + BO_LEFT]
+    mov rsi, [rsp + BO_RIGHT]
+    test eax, eax
+    jnz .binop_fallback_float
+    jmp .binop_fb_no_float
+.binop_fb_right_float:
     cmp qword [rsp + BO_RTAG], TAG_FLOAT
-    je .binop_fallback_float
+    jne .binop_fb_no_float
+    push rdx
+    push r9
+    mov rdi, [rsp + 16 + BO_LEFT]
+    mov rsi, [rsp + 16 + BO_LTAG]
+    call binop_is_number
+    pop r9
+    pop rdx
+    mov rdi, [rsp + BO_LEFT]
+    mov rsi, [rsp + BO_RIGHT]
+    test eax, eax
+    jnz .binop_fallback_float
+.binop_fb_no_float:
     ; Reload type's tp_as_number
     cmp qword [rsp + BO_LTAG], TAG_SMALLINT
     je .binop_fallback_int
@@ -580,8 +633,9 @@ DEF_FUNC_BARE op_binary_op
     V_UNPACK rax, rdx           ; returns a Value
     pop r9
     test edx, edx
-    jnz .binop_have_result
-    ; Inplace dunder call returned NULL unexpectedly — fall through to regular
+    jz .binop_left_dunder
+    BINOP_DECLINED .binop_left_dunder
+    jmp .binop_have_result
 
 .binop_left_dunder:
     ; Map op code to regular dunder name
@@ -604,7 +658,9 @@ DEF_FUNC_BARE op_binary_op
     V_UNPACK rax, rdx           ; returns a Value
     pop r9
     test edx, edx
-    jnz .binop_have_result
+    jz .binop_try_right_dunder
+    BINOP_DECLINED .binop_try_right_dunder
+    jmp .binop_have_result
 
 .binop_try_right_dunder:
     ; Try reflected dunder on right operand
@@ -636,7 +692,9 @@ DEF_FUNC_BARE op_binary_op
     call dunder_call_2
     V_UNPACK rax, rdx           ; returns a Value
     test edx, edx
-    jnz .binop_have_result
+    jz .binop_no_method
+    BINOP_DECLINED .binop_no_method
+    jmp .binop_have_result
 
 .binop_no_method:
     ; No method found — raise TypeError

@@ -660,3 +660,124 @@ check("container subclass lifetime", container_subclass_roundtrip)
 check("dict subclass still maps", lambda: sorted(DictSub({"x": 1, "y": 2}).items()))
 check("list subclass still lists", lambda: list(ListSub([3, 1, 2])))
 check("set subclass still sets", lambda: sorted(SetSub({3, 1, 2})))
+
+
+# ---------------------------------------------------------------------------
+# Numbers and comparisons: paths that decided what a value was from its tag,
+# or from an exact type-pointer match, and were wrong for everything else.
+# ---------------------------------------------------------------------------
+
+class FloatSub(float):
+    pass
+
+
+class IntSub(int):
+    pass
+
+
+class Declines:
+    def __add__(self, other):
+        return NotImplemented
+
+
+class Reflects:
+    def __radd__(self, other):
+        return "radd"
+
+
+class Roundable:
+    def __round__(self, ndigits=None):
+        return "rounded"
+
+
+# The inplace->non-inplace fallback coerced to float's slots on a bare tag
+# test.  complex_number_methods leaves every nb_inplace_* NULL, so every
+# complex/float augmented assignment landed there and came out a TypeError.
+def complex_iadd():
+    z = 1 + 2j
+    z += 1.5
+    return z
+
+
+def complex_isub():
+    z = 1 + 2j
+    z -= 1.5
+    return z
+
+
+def complex_imul():
+    z = 1 + 2j
+    z *= 2.0
+    return z
+
+
+def complex_item_iadd():
+    L = [1 + 2j]
+    L[0] += 1.5
+    return L[0]
+
+
+check("z += 1.5", complex_iadd)
+check("z -= 1.5", complex_isub)
+check("z *= 2.0", complex_imul)
+check("z + 1.5, for comparison", lambda: (1 + 2j) + 1.5)
+check("L[0] += 1.5", complex_item_iadd)
+
+
+# The sort merge resolved tp_richcompare from the right element only, with no
+# reflected retry, so which way round two comparable values fell decided
+# whether sorting them raised.
+check("sorted([F(3.5), 1])", lambda: sorted([FloatSub(3.5), 1]))
+check("sorted([2.5, F(3.5)])", lambda: sorted([2.5, FloatSub(3.5)]))
+check("sorted([I(3), 1])", lambda: sorted([IntSub(3), 1]))
+check("sorted, four kinds", lambda: sorted([3, FloatSub(1.5), 2, IntSub(0)]))
+check("sorted, reverse", lambda: sorted([FloatSub(3.5), 1], reverse=True))
+
+
+# pow() had a hand-rolled float path testing ob_type == float_type exactly,
+# and knew nothing of complex.  It goes through obj_binary_op now, which is
+# what ** itself uses.
+check("pow(F(2.0), 2)", lambda: pow(FloatSub(2.0), 2))
+check("pow(2.0, 2)", lambda: pow(2.0, 2))
+check("pow(1+2j, 2)", lambda: pow(1 + 2j, 2))
+check("(1+2j) ** 2", lambda: (1 + 2j) ** 2)
+check("pow(2, 10)", lambda: pow(2, 10))
+check("pow(2, -1)", lambda: pow(2, -1))
+check("pow(2, 3, 5)", lambda: pow(2, 3, 5))
+check("pow(2, 100)", lambda: pow(2, 100))
+
+
+# int's methods read their self straight out of the Value: an int subclass
+# was measured as 0, and a float was read as a PyIntObject.
+check("I(7).bit_length()", lambda: IntSub(7).bit_length())
+check("(7).bit_length()", lambda: (7).bit_length())
+check("I(2**70).bit_length()", lambda: IntSub(2 ** 70).bit_length())
+check("(2**70).bit_length()", lambda: (2 ** 70).bit_length())
+check("int.bit_length(1.5)", lambda: int.bit_length(1.5))
+check("I(255).to_bytes", lambda: IntSub(255).to_bytes(2, "big"))
+
+
+# round() tested for float by exact type and never asked for __round__.
+check("round(F(2.5))", lambda: round(FloatSub(2.5)))
+check("round(2.5)", lambda: round(2.5))
+check("round(3.5)", lambda: round(3.5))
+check("round(R())", lambda: round(Roundable()))
+check("round(F(1.234), 2)", lambda: round(FloatSub(1.234), 2))
+check("round(1.234, 2)", lambda: round(1.234, 2))
+check("round(7)", lambda: round(7))
+
+
+# A dunder answering NotImplemented is declining, not answering.
+check("B() + C()", lambda: Declines() + Reflects())
+# The message is the fixed string bugs.md records, not CPython's wording.
+check_type("B() + B()", lambda: Declines() + Declines())
+
+
+# cvttsd2si answers INT64_MIN for anything out of range and says nothing.
+check("int(1e300)", lambda: int(1e300))
+check("int(2.0**70)", lambda: int(2.0 ** 70))
+check("int(-2.0**70)", lambda: int(-(2.0 ** 70)))
+check("int(1e18)", lambda: int(1e18))
+check("int(2.5)", lambda: int(2.5))
+check("int(-2.5)", lambda: int(-2.5))
+check("int(float('inf'))", lambda: int(float("inf")))

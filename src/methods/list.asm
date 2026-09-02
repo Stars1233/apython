@@ -789,7 +789,7 @@ DEF_FUNC list_method_sort, LS_FRAME
     extern notimpl_singleton
     lea rcx, [rel notimpl_singleton]
     cmp rax, rcx
-    je .merge_cmp_type_error       ; NotImplemented → raise TypeError
+    je .merge_cmp_reflected        ; NotImplemented → try the other operand
     push rax                       ; save for DECREF
     lea rcx, [rel bool_true]
     cmp rax, rcx
@@ -809,7 +809,51 @@ DEF_FUNC list_method_sort, LS_FRAME
     mov rax, [rel current_exception]
     test rax, rax
     jnz .sort_free_temp            ; real exception → cleanup and propagate
-    ; No exception → unorderable types, raise TypeError
+    ; No exception → the right operand's slot declined; ask the left one.
+
+.merge_cmp_reflected:
+    ; The merge asks "right < left" and resolves tp_richcompare from the right
+    ; element alone.  A slot that declines ended the sort with a TypeError,
+    ; with no reflected retry -- so once float became subclassable,
+    ; sorted([F(3.5), 1]) raised while sorted([2.5, F(3.5)]) worked, the
+    ; failure depending on which way round the two happened to fall.
+    ;
+    ; obj_richcompare_bool already implements the whole protocol, reflected
+    ; retry and identity fallback included, so the decline hands over to it
+    ; rather than growing a second copy of it here.
+    mov rax, [rbp - LS_KSRC]
+    test rax, rax
+    jnz .merge_refl_arr
+    mov rax, [rbp - LS_SRC]
+.merge_refl_arr:
+    mov rcx, [rbp - LS_MJ]
+    shl rcx, 4
+    mov rdi, [rax + rcx]           ; right payload
+    mov rsi, [rax + rcx + 8]       ; right tag
+    V_PACK rdi, rsi
+    mov rax, [rbp - LS_KSRC]
+    test rax, rax
+    jnz .merge_refl_arr2
+    mov rax, [rbp - LS_SRC]
+.merge_refl_arr2:
+    mov rcx, [rbp - LS_MI]
+    shl rcx, 4
+    mov rsi, [rax + rcx]           ; left payload
+    mov rdx, [rax + rcx + 8]       ; left tag
+    V_PACK rsi, rdx
+    xor edx, edx                   ; PY_LT
+    cmp qword [rbp - LS_REV], 0
+    je .merge_refl_call
+    mov edx, PY_GT
+.merge_refl_call:
+    extern obj_richcompare_bool
+    call obj_richcompare_bool
+    cmp eax, 0
+    jl .sort_free_temp             ; it raised: clean up and propagate
+    test eax, eax
+    jnz .merge_take_right
+    jmp .merge_take_left
+
 .merge_cmp_type_error:
     ; IMPORTANT: raise_exception does not return (non-local jump to eval_exception_unwind)
     ; Must free temp buffer and restore list state BEFORE raising.
