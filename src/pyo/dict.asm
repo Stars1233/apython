@@ -10,6 +10,8 @@ extern bool_true
 extern bool_false
 extern ap_malloc
 extern gc_alloc
+extern iter_traverse_one
+extern iter_clear_one
 extern gc_track
 extern gc_dealloc
 extern ap_free
@@ -796,12 +798,12 @@ DEF_FUNC dict_tp_iter
 
     mov rbx, rdi               ; save dict
 
+    ; gc_alloc, not ap_malloc: the iterator holds the dict, and a dict holding
+    ; its own iterator or its own view is a cycle only the collector can break.
     mov edi, PyDictIterObject_size
-    call ap_malloc
+    lea rsi, [rel dict_iter_type]
+    call gc_alloc
 
-    mov qword [rax + PyObject.ob_refcnt], 1
-    lea rcx, [rel dict_iter_type]
-    mov [rax + PyObject.ob_type], rcx
     mov [rax + PyDictIterObject.it_dict], rbx
     mov qword [rax + PyDictIterObject.it_index], 0
     mov qword [rax + PyDictIterObject.it_kind], 0  ; 0 = keys
@@ -810,8 +812,15 @@ DEF_FUNC dict_tp_iter
     mov [rax + PyDictIterObject.it_version], rcx
 
     ; INCREF the dict
+    push rax
     mov rdi, rbx
     call obj_incref
+    pop rax
+    push rax
+    mov rdi, rax
+    extern gc_track
+    call gc_track
+    pop rax
 
     pop rbx
     leave
@@ -924,7 +933,8 @@ DEF_FUNC_LOCAL dict_iter_dealloc
 
     ; Free self
     mov rdi, rbx
-    call ap_free
+    extern gc_dealloc
+    call gc_dealloc
 
     pop rbx
     leave
@@ -975,16 +985,21 @@ DEF_FUNC dict_view_new
     mov r13, rdx               ; view type
 
     mov edi, PyDictViewObject_size
-    call ap_malloc
+    mov rsi, r13
+    call gc_alloc
 
-    mov qword [rax + PyObject.ob_refcnt], 1
-    mov [rax + PyObject.ob_type], r13
     mov [rax + PyDictViewObject.dv_dict], rbx
     mov [rax + PyDictViewObject.dv_kind], r12
 
     ; INCREF dict
+    push rax
     mov rdi, rbx
     call obj_incref
+    pop rax
+    push rax
+    mov rdi, rax
+    call gc_track
+    pop rax
 
     pop r13
     pop r12
@@ -1006,7 +1021,7 @@ DEF_FUNC_LOCAL dict_view_dealloc
 
     ; Free self
     mov rdi, rbx
-    call ap_free
+    call gc_dealloc
 
     pop rbx
     leave
@@ -1034,11 +1049,9 @@ DEF_FUNC dict_view_iter
     mov rbx, rdi               ; view
 
     mov edi, PyDictIterObject_size
-    call ap_malloc
+    lea rsi, [rel dict_iter_type]
+    call gc_alloc
 
-    mov qword [rax + PyObject.ob_refcnt], 1
-    lea rcx, [rel dict_iter_type]
-    mov [rax + PyObject.ob_type], rcx
     mov rdi, [rbx + PyDictViewObject.dv_dict]
     mov [rax + PyDictIterObject.it_dict], rdi
     mov qword [rax + PyDictIterObject.it_index], 0
@@ -1052,6 +1065,10 @@ DEF_FUNC dict_view_iter
     push rax                    ; save iterator
     call obj_incref
     pop rax                     ; restore iterator
+    push rax
+    mov rdi, rax
+    call gc_track
+    pop rax
 
     pop r12
     pop rbx
@@ -1596,11 +1613,9 @@ DEF_FUNC dict_reversed
     mov rbx, rax               ; rbx = dict
 
     mov edi, PyDictIterObject_size
-    call ap_malloc
+    lea rsi, [rel dict_rev_iter_type]
+    call gc_alloc
 
-    mov qword [rax + PyObject.ob_refcnt], 1
-    lea rcx, [rel dict_rev_iter_type]
-    mov [rax + PyObject.ob_type], rcx
     mov [rax + PyDictIterObject.it_dict], rbx
     ; Set it_index to capacity - 1 (start from end)
     mov rcx, [rbx + PyDictObject.capacity]
@@ -1615,6 +1630,10 @@ DEF_FUNC dict_reversed
     push rax
     mov rdi, rbx
     call obj_incref
+    pop rax
+    push rax
+    mov rdi, rax
+    call gc_track
     pop rax
 
     mov edx, TAG_PTR
@@ -1802,10 +1821,10 @@ dict_iter_type:
     dq 0                        ; tp_base
     dq 0                        ; tp_dict
     dq 0                        ; tp_mro
-    dq 0                        ; tp_flags
+    dq TYPE_FLAG_HAVE_GC                        ; tp_flags
     dq 0                        ; tp_bases
-    dq 0                        ; tp_traverse
-    dq 0                        ; tp_clear
+    dq iter_traverse_one                        ; tp_traverse
+    dq iter_clear_one                        ; tp_clear
     dq 0 ; tp_dictoffset
 
 ; Dict reverse key iterator type
@@ -1834,10 +1853,10 @@ dict_rev_iter_type:
     dq 0                        ; tp_base
     dq 0                        ; tp_dict
     dq 0                        ; tp_mro
-    dq 0                        ; tp_flags
+    dq TYPE_FLAG_HAVE_GC                        ; tp_flags
     dq 0                        ; tp_bases
-    dq 0                        ; tp_traverse
-    dq 0                        ; tp_clear
+    dq iter_traverse_one                        ; tp_traverse
+    dq iter_clear_one                        ; tp_clear
     dq 0 ; tp_dictoffset
 
 ; Dict keys view sequence methods (len + contains)
@@ -1890,10 +1909,10 @@ dict_keys_view_type:
     dq 0                        ; tp_base
     dq 0                        ; tp_dict
     dq 0                        ; tp_mro
-    dq 0                        ; tp_flags
+    dq TYPE_FLAG_HAVE_GC                        ; tp_flags
     dq 0                        ; tp_bases
-    dq 0                        ; tp_traverse
-    dq 0                        ; tp_clear
+    dq iter_traverse_one                        ; tp_traverse
+    dq iter_clear_one                        ; tp_clear
     dq 0 ; tp_dictoffset
 
 ; Dict values view type
@@ -1922,10 +1941,10 @@ dict_values_view_type:
     dq 0                        ; tp_base
     dq 0                        ; tp_dict
     dq 0                        ; tp_mro
-    dq 0                        ; tp_flags
+    dq TYPE_FLAG_HAVE_GC                        ; tp_flags
     dq 0                        ; tp_bases
-    dq 0                        ; tp_traverse
-    dq 0                        ; tp_clear
+    dq iter_traverse_one                        ; tp_traverse
+    dq iter_clear_one                        ; tp_clear
     dq 0 ; tp_dictoffset
 
 ; Dict items view type
@@ -1954,10 +1973,10 @@ dict_items_view_type:
     dq 0                        ; tp_base
     dq 0                        ; tp_dict
     dq 0                        ; tp_mro
-    dq 0                        ; tp_flags
+    dq TYPE_FLAG_HAVE_GC                        ; tp_flags
     dq 0                        ; tp_bases
-    dq 0                        ; tp_traverse
-    dq 0                        ; tp_clear
+    dq iter_traverse_one                        ; tp_traverse
+    dq iter_clear_one                        ; tp_clear
     dq 0 ; tp_dictoffset
 
 section .text

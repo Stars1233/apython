@@ -292,16 +292,15 @@ than lying — but they are ordinary Python that does not work:
 
 ## Robustness
 
-- **Iterators are not GC-tracked, so a cycle through one leaks.**
-  `list_iter_type`, `tuple_iter_type`, `dict_iter_type` and the dict views have
-  `tp_flags` 0 with no `tp_traverse`/`tp_clear`, and their objects come from
-  `ap_malloc` rather than `gc_alloc`.  An iterator holds a strong reference to
-  the container it walks, so `a = []; a.append(iter(a))` is a cycle the
-  collector cannot see.  `src/gc.asm` used to carry eight traverse/clear
-  callbacks for exactly these types; none was ever installed in a slot, so they
-  were deleted rather than left looking like working code.  Wiring them up
-  means switching those four types to `gc_alloc` + `gc_track` and setting
-  `TYPE_FLAG_HAVE_GC`.
+- **The itertools wrappers are not GC-tracked**: `enumerate`, `zip`, `map`,
+  `filter`, `reversed` and `chain` still come from `ap_malloc` with `tp_flags`
+  0, so a cycle through one leaks.  The container iterators and the dict views
+  are tracked now and share one traverse/clear pair, because each keeps exactly
+  one owned pointer at the same offset; these do not -- `zip` and `map` hold
+  an ARRAY of iterators, and `map` and `filter` hold a function as well -- so
+  each needs its own pair.  `str` and `bytes` iterators are deliberately left
+  alone: neither can be part of a cycle, because neither container can hold an
+  iterator.
 
 - **Code objects, asyncio `Task`s and `wait_for` wrappers are not GC-tracked
   either**, for the same reason and with the same history: `code_traverse`,

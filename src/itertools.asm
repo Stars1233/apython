@@ -10,6 +10,8 @@ extern ap_malloc
 extern gc_alloc
 extern ap_free
 extern obj_incref
+extern iter_traverse_one
+extern iter_clear_one
 extern obj_decref
 extern obj_dealloc
 extern obj_is_true
@@ -1788,15 +1790,20 @@ DEF_FUNC seq_iter_new
     push rbx
     mov rbx, rdi                   ; save obj
 
-    ; Allocate seq_iter object
+    ; gc_alloc, not ap_malloc: this iterator holds the object it walks, and an
+    ; object holding its own iterator is a cycle only the collector can break.
     mov rdi, ITER_OBJ_SIZE
-    call ap_malloc
-    mov qword [rax + PyObject.ob_refcnt], 1
-    lea rcx, [rel seq_iter_type]
-    mov [rax + PyObject.ob_type], rcx
+    lea rsi, [rel seq_iter_type]
+    extern gc_alloc
+    call gc_alloc
     INCREF rbx
     mov [rax + IT_FIELD1], rbx     ; it_obj
     mov qword [rax + IT_FIELD2], 0 ; it_index = 0
+    push rax
+    mov rdi, rax
+    extern gc_track
+    call gc_track
+    pop rax
 
     pop rbx
     leave
@@ -1891,7 +1898,8 @@ DEF_FUNC_LOCAL seq_iter_dealloc
 
     ; Free self
     mov rdi, rbx
-    call ap_free
+    extern gc_dealloc
+    call gc_dealloc
 
     pop rbx
     leave
@@ -2247,10 +2255,10 @@ seq_iter_type:
     dq 0                        ; tp_base
     dq 0                        ; tp_dict
     dq 0                        ; tp_mro
-    dq 0                        ; tp_flags
+    dq TYPE_FLAG_HAVE_GC                        ; tp_flags
     dq 0                        ; tp_bases
-    dq 0                        ; tp_traverse
-    dq 0                        ; tp_clear
+    dq iter_traverse_one                        ; tp_traverse
+    dq iter_clear_one                        ; tp_clear
     dq 0 ; tp_dictoffset
 
 ; Reversed iterator type
