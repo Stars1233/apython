@@ -1,5 +1,5 @@
 ; timemod.asm - time module implementation
-; Provides time.process_time() and time.monotonic()
+; Provides time.time(), time.sleep(), time.process_time() and time.monotonic()
 
 %include "macros.inc"
 %include "object.inc"
@@ -18,6 +18,7 @@ extern raise_exception
 extern exc_TypeError_type
 
 ; Clock IDs for clock_gettime
+CLOCK_REALTIME           equ 0
 CLOCK_MONOTONIC          equ 1
 CLOCK_PROCESS_CPUTIME_ID equ 2
 
@@ -85,6 +86,95 @@ DEF_FUNC time_monotonic_func, 16
 END_FUNC time_monotonic_func
 
 ;; ============================================================================
+;; time_time_func(PyObject **args, int64_t nargs) -> rax = Value
+;; Seconds since the epoch, as a float.  The wall clock, where monotonic is
+;; the one that cannot go backwards.
+;; ============================================================================
+DEF_FUNC time_time_func, 16
+    cmp rsi, 0
+    jne .time_error
+
+    mov eax, 228            ; __NR_clock_gettime
+    mov edi, CLOCK_REALTIME
+    lea rsi, [rbp - TS_SEC]
+    syscall
+
+    cvtsi2sd xmm0, qword [rbp - TS_SEC]
+    cvtsi2sd xmm1, qword [rbp - TS_NSEC]
+    movsd xmm2, [rel tm_1e9]
+    divsd xmm1, xmm2
+    addsd xmm0, xmm1
+
+    call float_from_f64
+    leave
+    V_PACK rax, rdx             ; builtins return one Value
+    ret
+
+.time_error:
+    RAISE exc_TypeError_type, "time() takes no arguments"
+END_FUNC time_time_func
+
+;; ============================================================================
+;; time_sleep_func(PyObject **args, int64_t nargs) -> None
+;; nanosleep, with the argument in seconds as an int or a float.
+;; ============================================================================
+TSL_SEC   equ 16
+TSL_NSEC  equ 8
+TSL_FRAME equ 32            ; + 0 pushes = 32
+DEF_FUNC time_sleep_func, TSL_FRAME
+    cmp rsi, 1
+    jne .sleep_error
+
+    mov rdi, [rdi]
+    V_UNPACK rdi, rsi
+    extern float_binop_accepts
+    push rdi
+    push rsi
+    call float_binop_accepts
+    pop rsi
+    pop rdi
+    test eax, eax
+    jz .sleep_type_error
+    extern float_to_f64
+    call float_to_f64           ; seconds, as a double
+
+    xorpd xmm1, xmm1
+    ucomisd xmm0, xmm1
+    jp .sleep_value_error       ; a NaN delay is not a delay
+    jb .sleep_value_error
+
+    ; Split into whole seconds and nanoseconds for struct timespec.
+    roundsd xmm1, xmm0, 1       ; floor
+    subsd xmm0, xmm1
+    cvttsd2si rax, xmm1
+    mov [rbp - TSL_SEC], rax
+    mulsd xmm0, [rel tm_1e9]
+    cvttsd2si rax, xmm0
+    mov [rbp - TSL_NSEC], rax
+
+    mov eax, 35                 ; __NR_nanosleep
+    lea rdi, [rbp - TSL_SEC]
+    xor esi, esi
+    syscall
+
+    extern none_singleton
+    lea rax, [rel none_singleton]
+    INCREF rax
+    mov edx, TAG_PTR
+    leave
+    V_PACK rax, rdx
+    ret
+
+.sleep_type_error:
+    RAISE exc_TypeError_type, "sleep() argument must be a number"
+.sleep_value_error:
+    extern exc_ValueError_type
+    RAISE exc_ValueError_type, "sleep length must be non-negative"
+.sleep_error:
+    RAISE exc_TypeError_type, "sleep() takes exactly one argument"
+END_FUNC time_sleep_func
+
+;; ============================================================================
 ;; time_module_create() -> PyObject*
 ;; Creates and returns the time module
 ;; ============================================================================
@@ -102,6 +192,39 @@ DEF_FUNC time_module_create
     call builtin_func_new
     push rax
     lea rdi, [rel tm_process_time]
+    call str_from_cstr_heap
+    push rax
+    mov rdi, r12
+    mov rsi, rax
+    mov rdx, [rsp + 8]
+    call dict_set
+    pop rdi
+    call obj_decref
+    pop rdi
+    call obj_decref
+
+    ; Add time and sleep
+    lea rdi, [rel time_time_func]
+    lea rsi, [rel tm_time_name]
+    call builtin_func_new
+    push rax
+    lea rdi, [rel tm_time_name]
+    call str_from_cstr_heap
+    push rax
+    mov rdi, r12
+    mov rsi, rax
+    mov rdx, [rsp + 8]
+    call dict_set
+    pop rdi
+    call obj_decref
+    pop rdi
+    call obj_decref
+
+    lea rdi, [rel time_sleep_func]
+    lea rsi, [rel tm_sleep]
+    call builtin_func_new
+    push rax
+    lea rdi, [rel tm_sleep]
     call str_from_cstr_heap
     push rax
     mov rdi, r12
@@ -159,4 +282,6 @@ tm_1e9: dq 0x41cdcd6500000000     ; 1e9 as IEEE 754 double
 
 tm_time:         db "time", 0
 tm_process_time: db "process_time", 0
+tm_time_name: db "time", 0
+tm_sleep: db "sleep", 0
 tm_monotonic:    db "monotonic", 0

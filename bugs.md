@@ -107,6 +107,12 @@ one-line fix.
   `center`/`ljust`/`rjust`, `zfill`, `expandtabs`, `translate`, or the
   `is*` predicates.  `bytearray(str, encoding)` is not accepted either.
 
+- **`collections.deque` is list-backed, and two itertools functions
+  materialise.**  CPython's deque is a block-linked list, so `appendleft` and
+  `popleft` are O(1) there and O(n) here; `itertools.groupby` materialises
+  each group rather than sharing the source iterator, and `tee` materialises
+  the source.  Every observable answer matches for a finite iterable.
+
 - **bytearray's read-only methods copy.**  bytes keeps its data inline and
   bytearray keeps it out of line, so the shared method bodies cannot read a
   bytearray directly; each wrapper builds a temporary bytes, runs the bytes
@@ -293,14 +299,9 @@ than lying — but they are ordinary Python that does not work:
   frame's stack holds, including the iterator it was walking.  CPython closes
   a generator when it is collected; there is no equivalent here.
 
-- `time.time` and `time.sleep`.  The `time` module has only `monotonic` and
-  `process_time`; `asyncio.sleep` exists.
-- `itertools.zip_longest`, `permutations`, `combinations`, `takewhile`,
-  `dropwhile`, `filterfalse`, `groupby`, `tee`, `pairwise`.
 - The `re` wrapper module.  The `_sre` engine underneath is complete, but
   without a shipped `re.py` an `import re` finds CPython's, which needs
   `enum` and `types`.
-- `collections.deque`.
 
 ## Robustness
 
