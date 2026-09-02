@@ -392,6 +392,10 @@ DEF_FUNC op_load_attr, LA_FRAME
     and eax, 1
     mov [rbp - LA_FLAG], rax
     mov qword [rbp - LA_FROM_TYPE], 0
+    ; Only the tp_getattr path below has an opinion about which MRO answered.
+    ; Every other road to .la_property_run would read this slot as whatever the
+    ; last call left on the stack.
+    mov qword [rbp - LA_OWNMRO], 0
 
     shr ecx, 1              ; name_index
     mov eax, ecx

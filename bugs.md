@@ -240,6 +240,29 @@ than lying — but they are ordinary Python that does not work:
 
 ## Robustness
 
+- **A property reachable through a metatype is released once too often.**
+  `op_load_attr`'s property arm decrefs the descriptor it was handed, and on
+  some road into it that reference is borrowed rather than owned, so the entry
+  left in the metatype's `tp_dict` dangles and the next lookup reads freed
+  memory.  A use-after-free, not a leak.
+
+  It does not reproduce at the current layout, which is what makes it worth
+  writing down rather than leaving to be rediscovered: an object's default
+  hash IS its address, so the iteration order of any set or dict keyed by
+  classes moves with the heap, and whether this is reached moves with it.
+  Moving five kilobytes of unrelated code between two object files was enough
+  to turn fifteen importable stdlib modules into crashes.
+
+  Reproduce by applying that move -- `type_abstract_error` from
+  `src/pyo/class.asm` to `src/pyo/abcmod.asm`, making it `global` -- and then
+  running, with `PYTHONPATH=$CPYTHON_LIB` and under valgrind, a file that
+  imports `calendar`; or, smaller, one that imports `sys`, `datetime`,
+  `enum`, `locale`, `itertools` and `warnings` and then defines a
+  `@global_enum class M(IntEnum)`.  valgrind names the free site: it is
+  `.la_property_run`'s `obj_decref` of `LA_ATTR` in `src/opcodes/load.asm`.
+  Disabling the class-property arm added beside it does not change the
+  answer, so the over-release is older than that arm.
+
 - **asyncio `Task`s and `wait_for` wrappers are not GC-tracked.**  A `Task`
   holds its coroutine, which holds a frame, whose locals can hold the task --
   an ordinary cycle that never collects.  Code objects were in the same state
@@ -328,12 +351,15 @@ gives a current one, and a number written here is wrong by the next commit.
   aligned SSE.  This is the debt that keeps `check_alignment` scoped to
   `src/compiler/` plus `src/main.asm` instead of running tree-wide.
 
-- **`src/pyo/bytes.asm` is 178k, against CLAUDE.md's 100k limit for a
-  hand-written file.**  It holds both bytes and bytearray, and the natural
-  seam is exactly that -- bytearray's own methods and its resizable storage
-  are the half that grew.  `src/methods/init.asm` is the next one up at 90k,
-  and its 320 registration sites are four open-coded instructions apiece;
-  one row each would take it to about 45k.
+- **Three files are over or near CLAUDE.md's 100k limit for a hand-written
+  file**: `src/pyo/bytes.asm` at 178k, which holds both bytes and bytearray
+  and has that seam to split on; `src/pyo/class.asm` at 103k; and
+  `src/methods/init.asm` at 90k, whose 320 registration sites are four
+  open-coded instructions apiece and would come to about 45k as one row each.
+
+  Splitting `class.asm` is blocked on the property refcount bug under
+  Robustness.  Moving `type_abstract_error` out of it -- five kilobytes, into
+  `abcmod.asm`, where it belongs -- was tried and reverted for exactly that.
 
 - **Functions with no separator or docblock at all**, and, among those that
   have one, docblocks with no `->` signature line.  The signature is the only
