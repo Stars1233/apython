@@ -215,6 +215,7 @@ test_metaclass_resolution
 test_methods
 test_misc_ops
 test_module_attr_call
+test_module_doc_and_repr_depth
 test_multiple_inheritance
 test_nanbox_float
 test_nanbox_int

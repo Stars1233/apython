@@ -47,10 +47,6 @@ one-line fix.
   something else is assigned.  `__name__` has a field of its own here and
   behaves as CPython's does; the other two do not.
 
-- **A module without a docstring has no `__doc__`.**  CPython binds
-  `__doc__ = None`; here the name is simply absent, so reading it is a
-  NameError.
-
 - **The `_abc` registry and caches hold strong references.**  CPython uses
   weak ones, so a class registered against an ABC can be collected and the
   ABC's caches shrink; here a registered class lives as long as the ABC.
@@ -192,8 +188,6 @@ one-line fix.
   returning NULL, so the two cases cannot be told apart; `list` and `bytes`
   answer MemoryError already, so only those two types differ.
 
-- **The container repr cycle stack is 64 deep**; CPython's limit is far
-  higher, so a legitimately deep nesting reports RecursionError.
 
 - **Traceback rendering has no caret line.**  CPython underlines the failing
   expression (`^^^^^^^^`, and `~~^~~` for binary operators and subscripts)
