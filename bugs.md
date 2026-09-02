@@ -243,12 +243,10 @@ than lying — but they are ordinary Python that does not work:
 
 ## Robustness
 
-- **Code objects, asyncio `Task`s and `wait_for` wrappers are not GC-tracked
-  either**, for the same reason and with the same history: `code_traverse`,
-  `task_traverse`/`task_clear` and `wait_for_traverse`/`wait_for_clear` were
-  written, never installed in a slot, and have now been deleted alongside the
-  iterator ones.  A `Task` holds its coroutine, which holds a frame, whose
-  locals can hold the task -- an ordinary cycle that never collects.
+- **asyncio `Task`s and `wait_for` wrappers are not GC-tracked.**  A `Task`
+  holds its coroutine, which holds a frame, whose locals can hold the task --
+  an ordinary cycle that never collects.  Code objects were in the same state
+  and are tracked now.
 
   Tracking `Task` needs one thing fixed first: the ready queue links tasks
   through `AsyncTask.next` **without taking a reference**
