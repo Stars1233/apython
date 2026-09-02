@@ -51,11 +51,19 @@ one-line fix.
   floats; the `_ns` fields carry the exact value in both.
 
 - **Missing C modules**, in rough order of how many stdlib modules each
-  blocks: `math`, `_struct`, `_socket`, `_imp`, `_collections`, `_ast`,
-  `binascii`, `_string`, then a long tail of one apiece.  (`_io` is not among
-  them: `src/iomod.asm` supplies `_iocore` and `lib/_io.py` assembles both
-  halves under the name `_io`.)
+  blocks: `_struct`, `_socket`, `_random`, `_contextvars`, `_tokenize`,
+  `_ast`, `_imp`, `binascii`, `_string`, then a long tail of one apiece.
+  (`_io` is not among them: `src/iomod.asm` supplies `_iocore` and
+  `lib/_io.py` assembles both halves under the name `_io`.  Neither are
+  `math` and `_collections`, which are there now.)
   `make check-stdlib` gives the current figure.
+
+  `math` itself is short of `dist`, `prod`, `isclose`, `perm`, `ulp` and
+  `nan`/`inf` parsing corners; and `gamma`, `lgamma`, the n-ary `hypot` and
+  `sumprod` round differently from CPython's, which uses its own Lanczos
+  approximation and double-double arithmetic where these use glibc and a
+  Neumaier sum.  `fsum` is exact: it is Shewchuk's algorithm, as CPython's
+  is.  `tests/test_math.py` says which is which.
 
 - **Weak references keep no per-object slot.**  The links live in a side
   table keyed by the referent's address rather than in the object, so

@@ -538,12 +538,13 @@ DEF_FUNC sys_module_init, 32
     ; `asyncio` or `errno` -- so a module sitting in sys.modules was absent
     ; from the list os.py gates its platform import on.
     extern builtin_module_table
-    mov edi, BUILTIN_MODULE_COUNT
+    extern builtin_module_count
+    mov rdi, [rel builtin_module_count]
     call tuple_new
     mov [rbp - SMI_TMP], rax
     xor r13d, r13d
 .sm_bmn_loop:
-    cmp r13, BUILTIN_MODULE_COUNT
+    cmp r13, [rel builtin_module_count]
     jge .sm_bmn_done
     lea rax, [rel builtin_module_table]
     mov rcx, r13

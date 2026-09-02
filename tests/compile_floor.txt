@@ -218,6 +218,7 @@ test_marshal_interned
 test_match_class
 test_match_mapping_types
 test_match
+test_math
 test_membership
 test_metaclass_prepare
 test_metaclass

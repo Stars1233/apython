@@ -910,7 +910,9 @@ struc BuiltinModule
     .create_fn: resq 1      ; +8: PyObject *(*)(void), or 0 when import_init
 endstruc                    ;     wires that module some other way
 
-BUILTIN_MODULE_COUNT equ 11
+; The number of rows is computed in modtable.asm as builtin_module_count and
+; loaded from there.  It was an equ here, and adding a module without editing
+; it truncated the table.
 
 ; Type flags
 TYPE_FLAG_HEAPTYPE     equ 0x0001

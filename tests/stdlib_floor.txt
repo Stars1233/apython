@@ -6,6 +6,7 @@ ok abc
 ok argparse
 ok asyncio
 ok bisect
+ok calendar
 ok codecs
 ok codeop
 ok collections
@@ -18,6 +19,7 @@ ok configparser
 ok contextlib
 ok copy
 ok copyreg
+ok datetime
 ok difflib
 ok email
 ok encodings
@@ -54,6 +56,7 @@ ok __phello__
 ok platform
 ok posixpath
 ok _py_abc
+ok _pydatetime
 ok pydoc_data
 ok _pyio
 ok quopri
