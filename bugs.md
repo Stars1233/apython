@@ -24,8 +24,9 @@ one-line fix.
   process calls `os.py` and `os.path` reach for are there, along with
   `environ`, `stat_result`, `error` and the O_*/W* constants -- enough that
   CPython's own `os.py` imports and works.  What is not: `scandir` and
-  `DirEntry`, `symlink`, `link`, `chdir`, `chown`, `utime`, `truncate`,
-  `dup2`, `fork`, `execv`, and the whole `*at` family.  `_have_functions` is
+  `DirEntry`, `chdir`, `chown`, `utime`, `truncate`,
+  `dup2`, `fork`, `execv`, `link`, and the whole `*at` family.  `chmod` takes
+  no file descriptor, where CPython's does.  `_have_functions` is
   an empty list, which is the honest answer -- no `dir_fd=` support -- and
   os.py reads it to build `supports_dir_fd`.
 
@@ -172,11 +173,6 @@ one-line fix.
 These are absences rather than wrong answers — the interpreter raises rather
 than lying — but they are ordinary Python that does not work:
 
-- **`posix.symlink` does not exist.**  `readlink`, `lstat` and `stat`'s
-  `follow_symlinks=False` are all there, so a link can be inspected and read;
-  it just cannot be created from inside the interpreter, which is why the
-  regression test for `follow_symlinks` has to make do with a regular file.
-
 - **The unwinder's one-reference invariant is real; the drop it caused is
   not reproducible.**  `raise_exception_obj` takes over its caller's
   reference rather than adding one, so `current_exception` usually holds
@@ -214,12 +210,6 @@ than lying — but they are ordinary Python that does not work:
   released.  Putting them somewhere the unwinder frees would be worse: an
   argument's `__str__` can run Python, and a raise caught inside it would
   free a buffer `str_mod` is still reading.
-
-- **Two `posix` messages name fewer paths than CPython's.**  `rename` reports
-  only its source where CPython reports `'src' -> 'dst'`, and the
-  "path should be string, bytes, or os.PathLike" TypeError carries no
-  function-name prefix and no "or integer" variant for the calls that take a
-  descriptor.  The resolved path itself does reach both.
 
 - **`bytes.decode`'s ascii arm raises a fixed message.**  `str()` of a
   Unicode error renders its five fields now, so an exception raised from

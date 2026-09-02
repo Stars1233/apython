@@ -187,14 +187,31 @@ section .text
     POSIX_PATH_DONE %3
 %endmacro
 
+; Which kinds a caller takes, for the refusal's wording.  CPython lists the
+; kinds THAT function accepts, and they differ.
+POSIX_PATH_KIND_PLAIN   equ 0
+POSIX_PATH_KIND_FD      equ 1
+POSIX_PATH_KIND_FD_NONE equ 2
+
 PPA_VAL   equ 8
 PPA_OWNED equ 16
 PPA_PTR   equ 24
 PPA_EXC   equ 32            ; current_exception before __fspath__ ran
 PPA_ORIG  equ 40            ; the argument as given, for the message
-PPA_FRAME equ 48            ; + 0 pushes = 48
+PPA_WHO   equ 48            ; "<func>: <arg>", for the message, or 0
+PPA_KINDS equ 56            ; which kinds this caller accepts
+PPA_FRAME equ 64            ; + 0 pushes = 64
 
+;; posix_path_arg(rdi = the argument Value, rsi = a "<func>: <arg>" prefix or
+;;                0, edx = the accepted kinds)
+;;
+;; CPython names the function and the argument in its refusal -- "stat: path
+;; should be string, bytes, os.PathLike or integer, not float" -- and lists
+;; the kinds THAT function takes.  This said only "path should be string,
+;; bytes, or os.PathLike, not float" for all thirteen callers.
 DEF_FUNC posix_path_arg, PPA_FRAME
+    mov [rbp - PPA_WHO], rsi
+    mov [rbp - PPA_KINDS], rdx
     mov [rbp - PPA_VAL], rdi
     mov [rbp - PPA_ORIG], rdi   ; kept: the message names the class whose
                                 ; __fspath__ answered wrongly, not the answer
@@ -309,14 +326,51 @@ DEF_FUNC posix_path_arg, PPA_FRAME
     ud2
 
 .ppa_bad_plain:
-    mov rsi, [rbp - PPA_VAL]
-    push rsi
-    sub rsp, 8
     POSIX_PATH_DONE [rbp - PPA_OWNED]
-    add rsp, 8
-    pop rsi
-    CSTRING rdi, `path should be string, bytes, or os.PathLike, not \x01`
-    call raise_type_error_with_name
+    lea rdi, [rel pm_msgbuf]
+    mov rsi, [rbp - PPA_WHO]
+    test rsi, rsi
+    jz .ppa_no_who
+    mov rdx, 40                 ; the prefix already reads "<func>: <arg>"
+    call posix_copy_bounded
+    mov rdi, rax
+    jmp .ppa_kinds
+.ppa_no_who:
+    lea rsi, [rel pm_msg_path]
+    mov rdx, 8
+    call posix_copy_bounded
+    mov rdi, rax
+.ppa_kinds:
+    lea rsi, [rel pm_msg_shouldbe]
+    mov rdx, 32
+    call posix_copy_bounded
+    mov rdi, rax
+    mov rcx, [rbp - PPA_KINDS]
+    lea rsi, [rel pm_kind_plain]
+    cmp rcx, POSIX_PATH_KIND_FD
+    je .ppa_kind_fd
+    cmp rcx, POSIX_PATH_KIND_FD_NONE
+    je .ppa_kind_fd_none
+    jmp .ppa_kind_copy
+.ppa_kind_fd:
+    lea rsi, [rel pm_kind_fd]
+    jmp .ppa_kind_copy
+.ppa_kind_fd_none:
+    lea rsi, [rel pm_kind_fd_none]
+.ppa_kind_copy:
+    mov rdx, 48
+    call posix_copy_bounded
+    mov rdi, rax
+    lea rsi, [rel pm_msg_not]
+    mov rdx, 8
+    call posix_copy_bounded
+    mov rdi, rax
+    mov rsi, [rbp - PPA_VAL]
+    call posix_typename_of
+    lea rdi, [rel exc_TypeError_type]
+    lea rsi, [rel pm_msgbuf]
+    call raise_exception
+    ud2
 END_FUNC posix_path_arg
 
 ;; ============================================================================
@@ -532,6 +586,8 @@ DEF_FUNC posix_stat, PST_FRAME
     test eax, eax
     jnz .pst_fd
     mov rdi, [rbp - PST_PATH]
+    CSTRING rsi, "stat: path"
+    mov edx, POSIX_PATH_KIND_FD
     call posix_path_arg
     test rax, rax
     jz .pst_fail
@@ -568,6 +624,8 @@ DEF_FUNC posix_lstat, PST_FRAME
     jz .plst_argerr
     mov rdi, [rdi]
     mov [rbp - PST_PATH], rdi
+    CSTRING rsi, "lstat: path"
+    mov edx, POSIX_PATH_KIND_PLAIN
     call posix_path_arg
     test rax, rax
     jz .plst_fail
@@ -643,6 +701,8 @@ DEF_FUNC posix_listdir, PLD_FRAME
     IS_NONE rdi, rax
     je .pld_dot
     mov [rbp - PLD_PATH], rdi
+    CSTRING rsi, "listdir: path"
+    mov edx, POSIX_PATH_KIND_FD_NONE
     call posix_path_arg
     test rax, rax
     jz .pld_fail
@@ -878,12 +938,15 @@ P1_OWNED  equ 24            ; what posix_path_arg asked us to release
 P1_MODE   equ 32            ; the mode, converted before the path is resolved
 P1_FRAME  equ 48            ; + 0 pushes = 48
 
-%macro POSIX_ONE_PATH 3         ; %1 = name, %2 = the syscall, %3 = "n args"
+%macro POSIX_ONE_PATH 4         ; %1 = name, %2 = the syscall, %3 = "n args",
+                                ; %4 = the "<func>: path" refusal prefix
 DEF_FUNC %1, P1_FRAME
     test rsi, rsi
     jz %%argerr
     mov rdi, [rdi]
     mov [rbp - P1_PATH], rdi
+    CSTRING rsi, %4
+    mov edx, POSIX_PATH_KIND_PLAIN
     call posix_path_arg
     test rax, rax
     jz %%fail
@@ -905,8 +968,8 @@ DEF_FUNC %1, P1_FRAME
 END_FUNC %1
 %endmacro
 
-POSIX_ONE_PATH posix_unlink, sys_unlink, "unlink() takes exactly 1 argument"
-POSIX_ONE_PATH posix_rmdir,  sys_rmdir,  "rmdir() takes exactly 1 argument"
+POSIX_ONE_PATH posix_unlink, sys_unlink, "unlink() takes exactly 1 argument", "unlink: path"
+POSIX_ONE_PATH posix_rmdir,  sys_rmdir,  "rmdir() takes exactly 1 argument", "rmdir: path"
 
 ;; posix.mkdir(path, mode=0o777)
 DEF_FUNC posix_mkdir, P1_FRAME
@@ -929,6 +992,8 @@ DEF_FUNC posix_mkdir, P1_FRAME
     mov [rbp - P1_MODE], rsi
     mov rdi, [rbx]
     mov [rbp - P1_PATH], rdi
+    CSTRING rsi, "mkdir: path"
+    mov edx, POSIX_PATH_KIND_PLAIN
     call posix_path_arg
     test rax, rax
     jz .pmk_fail
@@ -968,6 +1033,8 @@ DEF_FUNC posix_chmod, P1_FRAME
     mov [rbp - P1_MODE], rax
     mov rdi, [rbx]
     mov [rbp - P1_PATH], rdi
+    CSTRING rsi, "chmod: path"
+    mov edx, POSIX_PATH_KIND_PLAIN
     call posix_path_arg
     test rax, rax
     jz .pch_fail
@@ -1016,6 +1083,8 @@ DEF_FUNC posix_rename, PRN_FRAME
     mov [rbp - PRN_SRC], rdi
     mov qword [rbp - PRN_SOWN], 0
     mov qword [rbp - PRN_DOWN], 0
+    CSTRING rsi, "rename: src"
+    mov edx, POSIX_PATH_KIND_PLAIN
     call posix_path_arg
     test rax, rax
     jz .prn_fail
@@ -1023,6 +1092,8 @@ DEF_FUNC posix_rename, PRN_FRAME
     mov [rbp - PRN_SOWN], rdx
     mov rdi, [rbx + 8]
     mov [rbp - PRN_DST], rdi
+    CSTRING rsi, "rename: dst"
+    mov edx, POSIX_PATH_KIND_PLAIN
     call posix_path_arg
     test rax, rax
     jz .prn_fail
@@ -1030,8 +1101,22 @@ DEF_FUNC posix_rename, PRN_FRAME
     mov rsi, rax
     mov rdi, [rbp - PRN_SPTR]
     call sys_rename
+    ; Both paths stay alive across the check: CPython reports
+    ; "... : 'src' -> 'dst'", and this named only the source because the
+    ; destination was released first.
+    cmp rax, -4095
+    jb .prn_ok
+    mov rdi, rax
+    neg rdi
+    mov rsi, [rbp - PRN_SRC]
+    mov rdx, [rbp - PRN_SOWN]
+    mov rcx, [rbp - PRN_DST]
+    mov r8, [rbp - PRN_DOWN]
+    extern raise_oserror_owned2
+    call raise_oserror_owned2   ; does not return
+.prn_ok:
     POSIX_PATH_DONE [rbp - PRN_DOWN]
-    POSIX_PATH_CHECK rax, [rbp - PRN_SRC], [rbp - PRN_SOWN]
+    POSIX_PATH_DONE [rbp - PRN_SOWN]
     LOAD_NONE rax
     mov edx, TAG_PTR
     pop rbx
@@ -1050,6 +1135,82 @@ DEF_FUNC posix_rename, PRN_FRAME
     RAISE exc_TypeError_type, "rename() takes exactly 2 arguments"
 END_FUNC posix_rename
 
+;; posix.symlink(src, dst) -- create dst as a symbolic link to src
+;;
+;; readlink, lstat and stat's follow_symlinks=False were all here, so a link
+;; could be inspected and read but never made -- which is why the regression
+;; test for follow_symlinks had to make do with a regular file.
+;;
+;; Both paths are resolved before either is used, for the reason rename's
+;; are: posix_path_arg can run __fspath__, which is arbitrary Python.
+;; symlink(2) takes (target, linkpath), which is the same order as the
+;; Python signature.
+PSL_SRC   equ 8
+PSL_DST   equ 16
+PSL_SPTR  equ 24
+PSL_SOWN  equ 32
+PSL_DOWN  equ 40
+PSL_FRAME equ 48            ; + 1 push = 56, not 16-aligned
+
+DEF_FUNC posix_symlink, PSL_FRAME
+    push rbx
+    cmp rsi, 2
+    jl .psl_argerr
+    mov rbx, rdi
+    mov rdi, [rbx]
+    mov [rbp - PSL_SRC], rdi
+    mov qword [rbp - PSL_SOWN], 0
+    mov qword [rbp - PSL_DOWN], 0
+    CSTRING rsi, "symlink: src"
+    mov edx, POSIX_PATH_KIND_PLAIN
+    call posix_path_arg
+    test rax, rax
+    jz .psl_fail
+    mov [rbp - PSL_SPTR], rax
+    mov [rbp - PSL_SOWN], rdx
+    mov rdi, [rbx + 8]
+    mov [rbp - PSL_DST], rdi
+    CSTRING rsi, "symlink: dst"
+    mov edx, POSIX_PATH_KIND_PLAIN
+    call posix_path_arg
+    test rax, rax
+    jz .psl_fail
+    mov [rbp - PSL_DOWN], rdx
+    mov rsi, rax
+    mov rdi, [rbp - PSL_SPTR]
+    extern sys_symlink
+    call sys_symlink
+    ; The error names the LINK, which is the path that could not be created;
+    ; CPython's symlink reports both, target first.
+    cmp rax, -4095
+    jb .psl_ok
+    mov rdi, rax
+    neg rdi
+    mov rsi, [rbp - PSL_SRC]
+    mov rdx, [rbp - PSL_SOWN]
+    mov rcx, [rbp - PSL_DST]
+    mov r8, [rbp - PSL_DOWN]
+    call raise_oserror_owned2   ; does not return
+.psl_ok:
+    POSIX_PATH_DONE [rbp - PSL_DOWN]
+    POSIX_PATH_DONE [rbp - PSL_SOWN]
+    LOAD_NONE rax
+    mov edx, TAG_PTR
+    pop rbx
+    leave
+    ret
+.psl_fail:
+    POSIX_PATH_DONE [rbp - PSL_DOWN]
+    POSIX_PATH_DONE [rbp - PSL_SOWN]
+    xor eax, eax
+    xor edx, edx
+    pop rbx
+    leave
+    ret
+.psl_argerr:
+    RAISE exc_TypeError_type, "symlink() takes at least 2 arguments"
+END_FUNC posix_symlink
+
 ;; posix.readlink(path) -> str
 PRL_PATH  equ 8
 PRL_BUF   equ 16
@@ -1064,6 +1225,8 @@ DEF_FUNC posix_readlink, PRL_FRAME
     mov rdi, [rdi]
     mov qword [rbp - PRL_OWNED], 0
     mov [rbp - PRL_PATH], rdi
+    CSTRING rsi, "readlink: path"
+    mov edx, POSIX_PATH_KIND_PLAIN
     call posix_path_arg
     test rax, rax
     jz .prl_fail
@@ -1162,6 +1325,8 @@ DEF_FUNC posix_open, POP_FRAME
 .pop_have_mode:
     mov rdi, [rbx]
     mov [rbp - POP_PATH], rdi
+    CSTRING rsi, "open: path"
+    mov edx, POSIX_PATH_KIND_PLAIN
     call posix_path_arg
     test rax, rax
     jz .pop_fail
@@ -1525,6 +1690,8 @@ DEF_FUNC posix_access, PAC_FRAME
     call posix_int_arg          ; the mode first: see mkdir
     mov [rbp - PAC_MODE], rax
     mov rdi, [rbx]
+    CSTRING rsi, "access: path"
+    mov edx, POSIX_PATH_KIND_PLAIN
     call posix_path_arg
     test rax, rax
     jz .pac_fail
@@ -2385,6 +2552,7 @@ DEF_FUNC posix_module_create, 40
     MODULE_ADD_FUNC posix_mkdir, pm_n_mkdir
     MODULE_ADD_FUNC posix_rmdir, pm_n_rmdir
     MODULE_ADD_FUNC posix_rename, pm_n_rename
+    MODULE_ADD_FUNC posix_symlink, pm_n_symlink
     MODULE_ADD_FUNC posix_rename, pm_n_replace     ; rename(2) already replaces
     MODULE_ADD_FUNC posix_chmod, pm_n_chmod
     MODULE_ADD_FUNC posix_readlink, pm_n_readlink
@@ -2523,6 +2691,7 @@ pm_n_remove:     db "remove", 0
 pm_n_mkdir:      db "mkdir", 0
 pm_n_rmdir:      db "rmdir", 0
 pm_n_rename:     db "rename", 0
+pm_n_symlink:    db "symlink", 0
 pm_n_replace:    db "replace", 0
 pm_n_chmod:      db "chmod", 0
 pm_n_readlink:   db "readlink", 0
@@ -2537,6 +2706,12 @@ section .rodata
 pm_name_int:     db "int", 0
 pm_name_float:   db "float", 0
 pm_msg_expected: db "expected ", 0
+pm_msg_path:     db "path", 0
+pm_msg_shouldbe: db " should be string, bytes", 0
+pm_kind_plain:   db " or os.PathLike", 0
+pm_kind_fd:      db ", os.PathLike or integer", 0
+pm_kind_fd_none: db ", os.PathLike, integer or None", 0
+pm_msg_not:      db ", not ", 0
 pm_msg_fspath:   db ".__fspath__() to return str or bytes, not ", 0
 pm_n_umask:      db "umask", 0
 pm_n_isatty:     db "isatty", 0

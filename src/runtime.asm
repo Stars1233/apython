@@ -50,6 +50,7 @@ SYS_dup             equ 32
 SYS_getpid          equ 39
 SYS_wait4           equ 61
 SYS_rename          equ 82
+SYS_symlink equ 88
 SYS_mkdir           equ 83
 SYS_rmdir           equ 84
 SYS_unlink          equ 87
@@ -185,6 +186,14 @@ DEF_FUNC_BARE sys_rename
     syscall
     ret
 END_FUNC sys_rename
+
+; sys_symlink(const char *target, const char *linkpath) -> int
+global sys_symlink
+DEF_FUNC_BARE sys_symlink
+    mov rax, SYS_symlink
+    syscall
+    ret
+END_FUNC sys_symlink
 
 ; sys_readlink(const char *path, char *buf, size_t size) -> ssize_t
 DEF_FUNC_BARE sys_readlink

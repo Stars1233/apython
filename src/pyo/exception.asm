@@ -1774,8 +1774,9 @@ END_FUNC oserror_new
 ;; The sibling of raise_key_error: a raise that needs richer args than the
 ;; two-argument RAISE macro can build.
 ;; ============================================================================
-RO_ARGS  equ 24             ; three Values
-RO_FRAME equ 32             ; + 0 pushes = 32
+RO_ARGS  equ 40             ; five Values: errno, strerror, filename,
+                            ; winerror, filename2 -- CPython's full form
+RO_FRAME equ 48             ; + 0 pushes = 48
 ;; raise_oserror_owned(rdi = errno, rsi = the caller's path Value,
 ;;                     rdx = a resolved path the caller owns, or 0)
 ;;
@@ -1784,19 +1785,45 @@ RO_FRAME equ 32             ; + 0 pushes = 32
 ;; the message has to name that rather than the object that produced it --
 ;; which means it cannot be released before the exception is built.
 ROO_OWNED equ 8
-ROO_FRAME equ 16            ; + 0 pushes = 16
+ROO_OWNED2 equ 16           ; the second resolved path, for rename
+ROO_FRAME equ 32            ; + 0 pushes = 32
 
 DEF_FUNC raise_oserror_owned, ROO_FRAME
+    xor ecx, ecx                ; no second path
+    xor r8d, r8d
+    leave
+    jmp raise_oserror_owned2
+END_FUNC raise_oserror_owned
+
+;; raise_oserror_owned2(rdi = errno, rsi = the first path Value,
+;;                      rdx = the owned resolved first path or 0,
+;;                      rcx = the second path Value,
+;;                      r8 = the owned resolved second path or 0)
+;;
+;; The two-path form, for rename and symlink: CPython reports
+;; "'src' -> 'dst'".  Each path is named by its RESOLVED form when
+;; posix_path_arg had to build one -- a PathLike argument -- and by the
+;; argument itself otherwise.  Both resolved paths are released after the
+;; exception is built and before the raise, which is the whole reason this
+;; and its sibling exist.
+global raise_oserror_owned2
+DEF_FUNC raise_oserror_owned2, ROO_FRAME
     mov [rbp - ROO_OWNED], rdx
+    mov [rbp - ROO_OWNED2], r8
     test rdx, rdx
-    jz .roo_plain
+    jz .roo_have_second
     mov rsi, rdx                ; name the resolved path, not the PathLike
-.roo_plain:
+.roo_have_second:
+    mov rdx, rcx
+    test r8, r8
+    jz .roo_second_plain
+    mov rdx, r8
+.roo_second_plain:
     ; raise_oserror does not return, so the release has to happen inside the
     ; build: hand it the pieces and let it call back here.  Simplest is to
     ; do the build here too.
     call raise_oserror_build    ; rax = the exception, and it took its own
-                                ; reference to the filename
+                                ; reference to both filenames
     push rax
     sub rsp, 8
     mov rdi, [rbp - ROO_OWNED]
@@ -1804,25 +1831,38 @@ DEF_FUNC raise_oserror_owned, ROO_FRAME
     jz .roo_no_owned
     call obj_decref
 .roo_no_owned:
+    mov rdi, [rbp - ROO_OWNED2]
+    test rdi, rdi
+    jz .roo_no_owned2
+    call obj_decref
+.roo_no_owned2:
     add rsp, 8
     pop rdi
     call raise_exception_obj    ; does not return
-END_FUNC raise_oserror_owned
+END_FUNC raise_oserror_owned2
 
 DEF_FUNC raise_oserror, RO_FRAME
+    xor edx, edx                    ; no second path
     call raise_oserror_build
     mov rdi, rax
     extern raise_exception_obj
     call raise_exception_obj        ; does not return
 END_FUNC raise_oserror
 
-;; raise_oserror_build(rdi = errno, rsi = filename or 0) -> rax = the exception
+;; raise_oserror_build(rdi = errno, rsi = filename or 0, rdx = a second
+;;                     filename or 0) -> rax = the exception
 ;;
 ;; The half of raise_oserror that can return, so a caller with cleanup of its
 ;; own can do it between building and raising: a raise abandons the C stack,
 ;; and posix has a resolved path to release that the message names.
+;;
+;; The second filename is CPython's five-argument form, (errno, strerror,
+;; filename, winerror, filename2); OSError.__str__ already renders it as
+;; "... : 'src' -> 'dst'".  rename reported only its source without it.
 DEF_FUNC raise_oserror_build, RO_FRAME
     mov [rbp - RO_ARGS + 16], rsi   ; args[2] = filename, or NULL for now
+    mov [rbp - RO_ARGS + 24], rdx   ; args[3] = winerror; overwritten below
+    mov [rbp - RO_ARGS + 32], rdx   ; args[4] = filename2, or NULL
     push rdi
     call int_from_i64
     V_PACK rax, rdx
@@ -1838,6 +1878,12 @@ DEF_FUNC raise_oserror_build, RO_FRAME
     cmp qword [rbp - RO_ARGS + 16], 0
     je .ro_call
     mov edx, 3
+    cmp qword [rbp - RO_ARGS + 32], 0
+    je .ro_call
+    ; The five-argument form.  args[3] is Windows-only and is None here.
+    lea rax, [rel none_singleton]
+    mov [rbp - RO_ARGS + 24], rax
+    mov edx, 5
 .ro_call:
     lea rdi, [rel exc_OSError_type]
     lea rsi, [rbp - RO_ARGS]

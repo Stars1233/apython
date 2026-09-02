@@ -258,3 +258,98 @@ print("float agrees with ns   :",
 print("length unchanged:", len(_st))
 print("the other fields are ints:", type(_st.st_mode).__name__,
       type(_st.st_size).__name__, type(_st.st_ino).__name__)
+
+# --- symlink, and the two messages that go with it ---
+#
+# posix.symlink did not exist.  readlink, lstat and stat's
+# follow_symlinks=False were all here, so a link could be inspected and read
+# but never made -- which is why the regression test for follow_symlinks had
+# to make do with a regular file.
+#
+# rename reported only its source where CPython reports "'src' -> 'dst'":
+# oserror_new took CPython's five-argument form and OSError.__str__ already
+# rendered filename2, but the raising side only ever built three arguments.
+#
+# And the path TypeError named neither the function nor which argument, and
+# listed the same three kinds for every caller: CPython says "stat: path
+# should be string, bytes, os.PathLike or integer, not float", with the kinds
+# THAT function accepts.
+
+import posix
+
+_D = "/tmp/apython-symlink-test"
+for _p in (_D + "/link", _D + "/target"):
+    try:
+        posix.unlink(_p)
+    except OSError:
+        pass
+try:
+    posix.rmdir(_D)
+except OSError:
+    pass
+
+posix.mkdir(_D)
+open(_D + "/target", "w").close()
+posix.symlink(_D + "/target", _D + "/link")
+
+_S_IFLNK = 0o120000
+print("is a link  :",
+      posix.stat(_D + "/link", follow_symlinks=False).st_mode & 0o170000
+      == _S_IFLNK)
+print("lstat too  :",
+      posix.lstat(_D + "/link").st_mode & 0o170000 == _S_IFLNK)
+print("readlink   :", posix.readlink(_D + "/link").endswith("/target"))
+print("stat follows:", posix.stat(_D + "/link").st_size == 0)
+print("target is not a link:",
+      posix.lstat(_D + "/target").st_mode & 0o170000 != _S_IFLNK)
+
+# A dangling link: readable, and stat that follows it fails.
+posix.symlink(_D + "/gone", _D + "/dangling")
+print("dangling   :", posix.readlink(_D + "/dangling").endswith("/gone"))
+try:
+    posix.stat(_D + "/dangling")
+except FileNotFoundError:
+    print("dangling stat: FileNotFoundError")
+print("dangling lstat:",
+      posix.lstat(_D + "/dangling").st_mode & 0o170000 == _S_IFLNK)
+
+# Both paths in the message, for both calls that take two.
+for label, fn in (
+        ("symlink exists", lambda: posix.symlink(_D + "/target", _D + "/link")),
+        ("symlink no dir", lambda: posix.symlink(_D + "/target",
+                                                 "/nonexistent-dir-xyz/link")),
+        ("rename missing", lambda: posix.rename(_D + "/nope", _D + "/nope2"))):
+    try:
+        fn()
+    except OSError as e:
+        print(label, "|", e)
+
+posix.unlink(_D + "/dangling")
+posix.unlink(_D + "/link")
+posix.unlink(_D + "/target")
+posix.rmdir(_D)
+print("cleaned    :", not posix.access(_D, posix.F_OK))
+
+# The refusal names the function, the argument, and the kinds it takes.
+for expr, fn in (
+        ("stat", lambda: posix.stat(3.5)),
+        ("lstat", lambda: posix.lstat(3.5)),
+        ("listdir", lambda: posix.listdir(3.5)),
+        ("mkdir", lambda: posix.mkdir(3.5)),
+        ("unlink", lambda: posix.unlink(3.5)),
+        ("rmdir", lambda: posix.rmdir(3.5)),
+        ("readlink", lambda: posix.readlink(3.5)),
+        ("access", lambda: posix.access(3.5, 0)),
+        ("open", lambda: posix.open(3.5, 0)),
+        ("rename src", lambda: posix.rename(3.5, "a")),
+        ("rename dst", lambda: posix.rename("a", 3.5)),
+        ("symlink src", lambda: posix.symlink(3.5, "a")),
+        ("symlink dst", lambda: posix.symlink("a", 3.5))):
+    try:
+        fn()
+    except TypeError as e:
+        print(expr, "|", e)
+
+# The kinds each really does accept.
+print("stat(fd)   :", type(posix.stat(0)).__name__)
+print("listdir(None):", type(posix.listdir(None)).__name__)
