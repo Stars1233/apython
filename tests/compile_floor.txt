@@ -138,6 +138,7 @@ test_float
 test_float_repr
 test_fmtspec
 test_for_loops
+test_format_fields
 test_format_float_spec
 test_format_map
 test_format

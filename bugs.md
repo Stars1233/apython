@@ -44,10 +44,6 @@ one-line fix.
   from a builtin method.  The `errors` argument is accepted and ignored --
   every failure is strict.
 
-- **`str.format` does not accept attribute or index access in a field.**
-  `"{0.attr}"` and `"{0[key]}"` are not resolved; a field is a position, a
-  name, or empty.  A nested spec, `"{:{}}"`, is likewise not substituted.
-
 - **`func.__name__ = "x"` is silently ignored.**  Functions have no settable
   attributes.
 
